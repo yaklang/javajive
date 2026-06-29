@@ -76,7 +76,17 @@ jobs:
         run: go build ./...
 
       - name: Test
+        if: runner.os != 'macOS'
         run: go test ./... -count=1
+
+      # Go 1.22's internal linker omits LC_UUID on darwin/arm64, which modern
+      # macOS dyld rejects ("missing LC_UUID load command" -> abort trap).
+      # Force the external (system) linker so the test binaries carry LC_UUID.
+      - name: Test (macOS, external linker)
+        if: runner.os == 'macOS'
+        env:
+          CGO_ENABLED: '1'
+        run: go test ./... -count=1 -ldflags=-linkmode=external
 
       - name: Test (race detector)
         if: runner.os == 'Linux'
