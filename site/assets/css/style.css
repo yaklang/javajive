@@ -1927,3 +1927,93 @@ mark {
 }
 .codeblock .k { color: var(--accent-text); }
 .codeblock .c { color: var(--fg-3); }
+
+/* -------------------------------------------------------------------------
+   Language toggle (top-right) + benchmark proof (stat grid, comparison table)
+   关键词: i18n switch, stat numbers, head-to-head table
+   ------------------------------------------------------------------------- */
+.lang-toggle {
+  width: auto;
+  padding: 0 11px;
+  gap: 6px;
+}
+.lang-toggle .lang-label {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: .01em;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 14px;
+  margin-bottom: 26px;
+}
+.stat {
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  border-radius: 14px;
+  padding: 22px 18px;
+  text-align: center;
+  transition: border-color var(--t), box-shadow var(--t), transform var(--t);
+}
+.stat:hover {
+  border-color: var(--border-2);
+  box-shadow: var(--shadow-1);
+  transform: translateY(-2px);
+}
+.stat-num {
+  font-family: var(--font-mono);
+  font-size: 34px;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -.02em;
+}
+.stat-label {
+  margin-top: 11px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+
+.cmp-wrap {
+  max-width: 1040px;
+  margin: 0 auto;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-1);
+}
+.cmp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  min-width: 560px;
+}
+.cmp-table th,
+.cmp-table td {
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.cmp-table thead th {
+  background: var(--bg-2);
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.cmp-table tbody tr:last-child td { border-bottom: 0; }
+.cmp-table td:first-child,
+.cmp-table th:first-child { color: var(--fg-2); white-space: normal; }
+.cmp-table .col-jj { color: var(--accent); font-weight: 650; }
+.cmp-table thead .col-jj { color: var(--accent); }
+.bench-note {
+  max-width: 1040px;
+  margin: 16px auto 0;
+  font-size: 12px;
+  line-height: 1.65;
+}
+@media (max-width: 720px) {
+  .stat-num { font-size: 28px; }
+}

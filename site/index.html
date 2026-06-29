@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark" data-theme-pref="system">
+<html lang="en" data-theme="dark" data-theme-pref="system" data-lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -14,7 +14,7 @@
 <link rel="icon" type="image/svg+xml" href="assets/img/favicon.svg" />
 <link rel="stylesheet" href="assets/css/style.css" />
 <script>
-  // 早期主题应用 (避免 FOUC) — 关键词: theme bootstrap, anti-flash
+  // 早期主题 + 语言应用 (避免 FOUC) — 关键词: theme/lang bootstrap, anti-flash
   (function () {
     try {
       var pref = localStorage.getItem("javajive:theme") || "system";
@@ -23,6 +23,11 @@
       document.documentElement.setAttribute("data-theme", effective);
       document.documentElement.setAttribute("data-theme-pref", pref);
     } catch (e) {}
+    try {
+      var lang = localStorage.getItem("javajive:lang") || "en";
+      document.documentElement.setAttribute("data-lang", lang);
+      document.documentElement.setAttribute("lang", lang === "zh" ? "zh-CN" : "en");
+    } catch (e) {}
   })();
 </script>
 </head>
@@ -30,18 +35,18 @@
 
 <canvas id="ambient-canvas" aria-hidden="true"></canvas>
 
-<a class="skip-link" href="#features">skip to features</a>
+<a class="skip-link" href="#features" data-i18n="skip">skip to features</a>
 
 <div class="provenance-bar" role="contentinfo" aria-label="Build metadata">
   <div class="provenance-bar-inner">
     <span class="provenance-bar-tag">JAVAJIVE</span>
-    <span>pure Go</span>
+    <span data-i18n="prov.1">pure Go</span>
     <span class="provenance-bar-sep">.</span>
-    <span>no JDK · no cgo · no ANTLR</span>
+    <span data-i18n="prov.2">no JDK · no cgo · no ANTLR</span>
     <span class="provenance-bar-sep">.</span>
-    <span>decompile · class parse · serialization</span>
+    <span data-i18n="prov.3">decompile · class parse · serialization</span>
     <span class="provenance-bar-sep">.</span>
-    <span>MIT licensed</span>
+    <span data-i18n="prov.4">MIT licensed</span>
   </div>
 </div>
 
@@ -57,16 +62,25 @@
     </a>
 
     <nav class="nav-links" aria-label="Primary">
-      <a href="#install">install</a>
-      <a href="#features">features</a>
-      <a href="#library">library</a>
-      <a href="https://github.com/yaklang/javajive/blob/main/README.md" target="_blank" rel="noopener noreferrer">docs</a>
+      <a href="#install" data-i18n="nav.install">install</a>
+      <a href="#benchmarks" data-i18n="nav.benchmarks">benchmarks</a>
+      <a href="#features" data-i18n="nav.features">features</a>
+      <a href="#library" data-i18n="nav.library">library</a>
+      <a href="https://github.com/yaklang/javajive/blob/main/README.md" target="_blank" rel="noopener noreferrer" data-i18n="nav.docs">docs</a>
       <span class="nav-sep" aria-hidden="true"></span>
-      <a href="https://github.com/yaklang/javajive/blob/main/MIGRATE.md" class="sister-link" target="_blank" rel="noopener">Migrate <span class="sister-arrow" aria-hidden="true">_&gt;</span></a>
-      <a href="https://github.com/yaklang/javajive/blob/main/HARNESS-WORKFLOW.md" class="sister-link" target="_blank" rel="noopener">Harness <span class="sister-arrow" aria-hidden="true">_&gt;</span></a>
+      <a href="https://github.com/yaklang/javajive/blob/main/MIGRATE.md" class="sister-link" target="_blank" rel="noopener"><span data-i18n="nav.migrate">Migrate</span> <span class="sister-arrow" aria-hidden="true">_&gt;</span></a>
+      <a href="https://github.com/yaklang/javajive/blob/main/HARNESS-WORKFLOW.md" class="sister-link" target="_blank" rel="noopener"><span data-i18n="nav.harness">Harness</span> <span class="sister-arrow" aria-hidden="true">_&gt;</span></a>
     </nav>
 
     <div class="nav-actions">
+      <button id="lang-toggle" class="icon-btn lang-toggle" type="button" aria-label="切换到中文" title="Language / 语言">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9.5"/>
+          <path d="M2.5 12h19"/>
+          <path d="M12 2.5c2.6 2.7 4 5.9 4 9.5s-1.4 6.8-4 9.5c-2.6-2.7-4-5.9-4-9.5s1.4-6.8 4-9.5z"/>
+        </svg>
+        <span class="lang-label">中文</span>
+      </button>
       <a class="icon-btn" href="https://github.com/yaklang/javajive" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true">
           <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56v-1.97c-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.75 1.18 1.75 1.18 1.02 1.75 2.69 1.25 3.34.95.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.15 1.18.91-.25 1.89-.38 2.86-.38.97 0 1.95.13 2.86.38 2.18-1.49 3.14-1.18 3.14-1.18.62 1.59.23 2.76.11 3.05.74.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.4-5.27 5.69.41.36.78 1.07.78 2.16v3.2c0 .31.21.68.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/>
@@ -94,19 +108,19 @@
 <section class="hero">
   <div class="hero-inner">
     <div class="badge-row">
-      <span class="badge">pure Go</span>
-      <span class="badge badge-soft">no cgo</span>
-      <span class="badge badge-soft">no JDK</span>
-      <span class="badge badge-ghost">MIT licensed</span>
+      <span class="badge" data-i18n="hero.badge1">pure Go</span>
+      <span class="badge badge-soft" data-i18n="hero.badge2">no cgo</span>
+      <span class="badge badge-soft" data-i18n="hero.badge3">no JDK</span>
+      <span class="badge badge-ghost" data-i18n="hero.badge4">MIT licensed</span>
     </div>
 
-    <img class="hero-logo" src="assets/img/hero.png" alt="JavaJive — Pure-Go Java Toolkit: Decompile, Class Parse, Serialization" decoding="async" fetchpriority="high" loading="eager" />
+    <img id="hero-img" class="hero-logo" src="assets/img/hero.png" alt="JavaJive — Pure-Go Java Toolkit: Decompile, Class Parse, Serialization" data-i18n-alt="hero.alt" decoding="async" fetchpriority="high" loading="eager" />
 
-    <h1 class="hero-title">
+    <h1 class="hero-title" data-i18n="hero.title">
       Java tooling, in pure Go.
       <span class="hero-title-dim">Decompile, parse, (de)serialize.</span>
     </h1>
-    <p class="hero-sub">
+    <p class="hero-sub" data-i18n="hero.sub">
       A portable, single-binary Java toolkit extracted and trimmed from
       <a href="https://github.com/yaklang/yaklang" target="_blank" rel="noopener noreferrer">yaklang</a>.
       Turn <code>.class</code> / <code>.jar</code> / <code>.war</code> / <code>.zip</code> into readable Java source,
@@ -115,70 +129,157 @@
     </p>
 
     <div class="hero-actions">
-      <a class="btn btn-primary" href="#install">Get started</a>
-      <a class="btn" href="https://github.com/yaklang/javajive" target="_blank" rel="noopener noreferrer">View on GitHub</a>
+      <a class="btn btn-primary" href="#install" data-i18n="hero.cta1">Get started</a>
+      <a class="btn" href="https://github.com/yaklang/javajive" target="_blank" rel="noopener noreferrer" data-i18n="hero.cta2">View on GitHub</a>
     </div>
 
     <div class="hero-meta">
-      <span>cross-tested against a real JDK</span>
+      <span data-i18n="hero.meta1">cross-tested against a real JDK</span>
       <span class="dot-sep" aria-hidden="true">·</span>
-      <span>CI on linux / macOS / windows</span>
+      <span data-i18n="hero.meta2">CI on linux / macOS / windows</span>
     </div>
   </div>
 </section>
 
 <section class="install" id="install">
   <div class="section-head">
-    <h2>Install</h2>
-    <p>One static binary for the CLI, or a single import for the library. No toolchain beyond Go.</p>
+    <h2 data-i18n="install.h2">Install</h2>
+    <p data-i18n="install.p">One static binary for the CLI, or a single import for the library. No toolchain beyond Go.</p>
   </div>
 
   <div class="install-card">
     <div class="install-tabs" role="tablist" aria-label="Install method">
-      <button class="install-tab" role="tab" aria-selected="true" data-tab="cli">CLI</button>
-      <button class="install-tab" role="tab" aria-selected="false" data-tab="lib">Library</button>
-      <button class="install-tab" role="tab" aria-selected="false" data-tab="src">From source</button>
+      <button class="install-tab" role="tab" aria-selected="true" data-tab="cli" data-i18n="install.tab.cli">CLI</button>
+      <button class="install-tab" role="tab" aria-selected="false" data-tab="lib" data-i18n="install.tab.lib">Library</button>
+      <button class="install-tab" role="tab" aria-selected="false" data-tab="src" data-i18n="install.tab.src">From source</button>
     </div>
 
     <!-- CLI -->
     <div class="install-panel" role="tabpanel" data-panel="cli" data-active="true">
-      <p class="panel-lead">Install the <code>javajive</code> command — decompile, inspect, and (de)serialize from your shell.</p>
+      <p class="panel-lead" data-i18n="install.cli.lead">Install the <code>javajive</code> command — decompile, inspect, and (de)serialize from your shell.</p>
       <div class="codebox">
         <span class="cmd-prompt" aria-hidden="true">$</span>
         <code id="cmd-cli">go install github.com/yaklang/javajive/cmd/javajive@latest</code>
         <button class="copy-btn" data-copy-target="#cmd-cli" aria-label="Copy">copy</button>
       </div>
-      <p class="panel-foot dim">Then try <code>javajive decompile app.jar</code> or <code>javajive classinfo Foo.class</code>.</p>
+      <p class="panel-foot dim" data-i18n="install.cli.foot">Then try <code>javajive decompile app.jar</code> or <code>javajive classinfo Foo.class</code>.</p>
     </div>
 
     <!-- Library -->
     <div class="install-panel" role="tabpanel" data-panel="lib" hidden>
-      <p class="panel-lead">Add the module and import the unified facade package — one import covers all three capabilities.</p>
+      <p class="panel-lead" data-i18n="install.lib.lead">Add the module and import the unified facade package — one import covers all three capabilities.</p>
       <div class="codebox">
         <span class="cmd-prompt" aria-hidden="true">$</span>
         <code id="cmd-lib">go get github.com/yaklang/javajive@latest</code>
         <button class="copy-btn" data-copy-target="#cmd-lib" aria-label="Copy">copy</button>
       </div>
-      <p class="panel-foot dim">See the <a href="#library">library quickstart</a> below for usage.</p>
+      <p class="panel-foot dim" data-i18n="install.lib.foot">See the <a href="#library">library quickstart</a> below for usage.</p>
     </div>
 
     <!-- From source -->
     <div class="install-panel" role="tabpanel" data-panel="src" hidden>
-      <p class="panel-lead">Clone and build the CLI from source.</p>
+      <p class="panel-lead" data-i18n="install.src.lead">Clone and build the CLI from source.</p>
       <div class="codebox">
         <span class="cmd-prompt" aria-hidden="true">$</span>
         <code id="cmd-src">git clone https://github.com/yaklang/javajive &amp;&amp; cd javajive &amp;&amp; go build -o javajive ./cmd/javajive</code>
         <button class="copy-btn" data-copy-target="#cmd-src" aria-label="Copy">copy</button>
       </div>
-      <p class="panel-foot dim">Requires Go 1.22+. The result is a single self-contained binary.</p>
+      <p class="panel-foot dim" data-i18n="install.src.foot">Requires Go 1.22+. The result is a single self-contained binary.</p>
     </div>
+  </div>
+</section>
+
+<section class="section" id="benchmarks">
+  <div class="section-head">
+    <h2 data-i18n="bench.h2">Proven at scale</h2>
+    <p data-i18n="bench.p">The decompiler core, benchmarked head-to-head against CFR and Vineflower on 11 well-known JARs — 6,506 classes of real, reproducible data.</p>
+  </div>
+  <div class="section-wrap">
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="stat-num">100%</div>
+        <div class="stat-label" data-i18n="bench.s1">classes decompiled — 6,506 / 6,506, zero stubs</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">8.6×</div>
+        <div class="stat-label" data-i18n="bench.s2">faster than CFR, concurrent decompile</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">1,492</div>
+        <div class="stat-label" data-i18n="bench.s3">classes decompiled per second</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">0</div>
+        <div class="stat-label" data-i18n="bench.s4">bytecode verify failures across 11 JARs</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">69</div>
+        <div class="stat-label" data-i18n="bench.s5">algorithm batteries, byte-for-byte round-trip</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">100%</div>
+        <div class="stat-label" data-i18n="bench.s6">JVM opcode parse coverage</div>
+      </div>
+    </div>
+
+    <div class="cmp-wrap">
+      <table class="cmp-table">
+        <thead>
+          <tr>
+            <th data-i18n="cmp.axis">Axis</th>
+            <th class="col-jj">JavaJive</th>
+            <th>CFR 0.152</th>
+            <th>Vineflower 1.10.1</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td data-i18n="cmp.r1">Completeness (no class dropped)</td>
+            <td class="col-jj">100% · 0 stub</td>
+            <td>100%</td>
+            <td>100%</td>
+          </tr>
+          <tr>
+            <td data-i18n="cmp.r2">Concurrent total — 11 JARs</td>
+            <td class="col-jj">4.36s</td>
+            <td>37.67s</td>
+            <td>41.00s</td>
+          </tr>
+          <tr>
+            <td data-i18n="cmp.r3">Throughput</td>
+            <td class="col-jj">1,492 / s</td>
+            <td>173 / s</td>
+            <td>159 / s</td>
+          </tr>
+          <tr>
+            <td data-i18n="cmp.r4">Rebuilt-jar bytecode verify failures</td>
+            <td class="col-jj">0</td>
+            <td>0</td>
+            <td>0</td>
+          </tr>
+          <tr>
+            <td data-i18n="cmp.r5">guava call differential vs original jar</td>
+            <td class="col-jj" data-i18n="cmp.identical">IDENTICAL</td>
+            <td>—</td>
+            <td>—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="bench-note dim" data-i18n="bench.note">
+      Measured 2026-06-27 on darwin/arm64 (10-core), Go 1.22.12, JDK 17, against CFR 0.152 &amp; Vineflower 1.10.1
+      over 11 well-known JARs (6,506 classes). JavaJive ships the same pure-Go decompiler core in raw mode.
+      Full methodology, per-jar tables and the machine-generated report:
+      <a href="https://github.com/yaklang/yaklang/pull/4665" target="_blank" rel="noopener noreferrer">cross-comparison report</a>.
+    </p>
   </div>
 </section>
 
 <section class="section" id="features">
   <div class="section-head">
-    <h2>Features</h2>
-    <p>Three Java building blocks, one portable module — plus the supporting cast trimmed down to a self-contained core.</p>
+    <h2 data-i18n="features.h2">Features</h2>
+    <p data-i18n="features.p">Three Java building blocks, one portable module — plus the supporting cast trimmed down to a self-contained core.</p>
   </div>
   <div class="section-wrap">
     <div class="cards">
@@ -186,48 +287,48 @@
         <span class="feature-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-3 3 3 3"/><path d="m16 9 3 3-3 3"/></svg>
         </span>
-        <h3 class="card-title">Decompiler</h3>
-        <p class="card-desc">Turn <code>.class</code> / <code>.jar</code> / <code>.war</code> / <code>.zip</code> into readable Java source, with whole-archive output that mirrors the original package layout.</p>
+        <h3 class="card-title" data-i18n="feat.1.t">Decompiler</h3>
+        <p class="card-desc" data-i18n="feat.1.d">Turn <code>.class</code> / <code>.jar</code> / <code>.war</code> / <code>.zip</code> into readable Java source, with whole-archive output that mirrors the original package layout.</p>
       </article>
 
       <article class="card feature-card">
         <span class="feature-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
         </span>
-        <h3 class="card-title">Class parser</h3>
-        <p class="card-desc">Inspect the full structure of a <code>.class</code> file — constant pool, fields, methods, version, and access flags.</p>
+        <h3 class="card-title" data-i18n="feat.2.t">Class parser</h3>
+        <p class="card-desc" data-i18n="feat.2.d">Inspect the full structure of a <code>.class</code> file — constant pool, fields, methods, version, and access flags.</p>
       </article>
 
       <article class="card feature-card">
         <span class="feature-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H7a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h1"/><path d="M16 3h1a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2h-1"/></svg>
         </span>
-        <h3 class="card-title">Serialization</h3>
-        <p class="card-desc">Parse and re-marshal the Java ObjectStream wire format with byte fidelity, and convert it losslessly to and from JSON.</p>
+        <h3 class="card-title" data-i18n="feat.3.t">Serialization</h3>
+        <p class="card-desc" data-i18n="feat.3.d">Parse and re-marshal the Java ObjectStream wire format with byte fidelity, and convert it losslessly to and from JSON.</p>
       </article>
 
       <article class="card feature-card">
         <span class="feature-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>
         </span>
-        <h3 class="card-title">Portable &amp; pure Go</h3>
-        <p class="card-desc">No JDK, no cgo, no ANTLR runtime. Cross-compiles to a single static binary for linux / macOS / windows on amd64 and arm64.</p>
+        <h3 class="card-title" data-i18n="feat.4.t">Portable &amp; pure Go</h3>
+        <p class="card-desc" data-i18n="feat.4.d">No JDK, no cgo, no ANTLR runtime. Cross-compiles to a single static binary for linux / macOS / windows on amd64 and arm64.</p>
       </article>
 
       <article class="card feature-card">
         <span class="feature-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m6 9 3 3-3 3"/><path d="M13 15h5"/></svg>
         </span>
-        <h3 class="card-title">First-class CLI</h3>
-        <p class="card-desc"><code>decompile</code>, <code>classinfo</code>, and <code>serial</code> subcommands built on the standard library — small, dependency-light, scriptable.</p>
+        <h3 class="card-title" data-i18n="feat.5.t">First-class CLI</h3>
+        <p class="card-desc" data-i18n="feat.5.d"><code>decompile</code>, <code>classinfo</code>, and <code>serial</code> subcommands built on the standard library — small, dependency-light, scriptable.</p>
       </article>
 
       <article class="card feature-card">
         <span class="feature-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
         </span>
-        <h3 class="card-title">Cross-tested with a real JDK</h3>
-        <p class="card-desc">CI compiles real <code>.class</code> / <code>.jar</code> and JDK-serialized blobs with <code>javac</code>/<code>java</code>, then verifies JavaJive against them.</p>
+        <h3 class="card-title" data-i18n="feat.6.t">Cross-tested with a real JDK</h3>
+        <p class="card-desc" data-i18n="feat.6.d">CI compiles real <code>.class</code> / <code>.jar</code> and JDK-serialized blobs with <code>javac</code>/<code>java</code>, then verifies JavaJive against them.</p>
       </article>
     </div>
   </div>
@@ -235,22 +336,22 @@
 
 <section class="section" id="library">
   <div class="section-head">
-    <h2>Library quickstart</h2>
-    <p>Import the unified <code>javajive</code> package — one import covers decompilation, class parsing and serialization.</p>
+    <h2 data-i18n="lib.h2">Library quickstart</h2>
+    <p data-i18n="lib.p">Import the unified <code>javajive</code> package — one import covers decompilation, class parsing and serialization.</p>
   </div>
   <div class="section-wrap">
 <pre class="codeblock"><code><span class="k">import</span> <span class="c">"github.com/yaklang/javajive"</span>
 
-<span class="c">// Decompile a single class, or a whole archive into a directory.</span>
+<span class="c" data-i18n="lib.c1">// Decompile a single class, or a whole archive into a directory.</span>
 src, err := javajive.<span class="k">Decompile</span>(classBytes)
 err = javajive.<span class="k">DecompileArchive</span>(<span class="c">"app.jar"</span>, <span class="c">"app-src"</span>)
 
-<span class="c">// Inspect class structure.</span>
+<span class="c" data-i18n="lib.c2">// Inspect class structure.</span>
 obj, err := javajive.<span class="k">ParseClass</span>(classBytes)
 _ = obj.<span class="k">GetClassName</span>()
 
-<span class="c">// Java serialization: binary -&gt; JSON -&gt; binary.</span>
-objs, _ := javajive.<span class="k">ParseSerialized</span>(raw)        <span class="c">// or ParseSerializedHex(hexStr)</span>
+<span class="c" data-i18n="lib.c3">// Java serialization: binary -&gt; JSON -&gt; binary.</span>
+objs, _ := javajive.<span class="k">ParseSerialized</span>(raw)        <span class="c" data-i18n="lib.c4">// or ParseSerializedHex(hexStr)</span>
 jsonBytes, _ := javajive.<span class="k">SerializedToJSON</span>(objs...)
 restored, _ := javajive.<span class="k">SerializedFromJSON</span>(jsonBytes)
 out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pre>
@@ -264,18 +365,18 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
     <div class="foot-brand">
       <span class="dim">© <span id="foot-year">2026</span> yaklang/javajive</span>
       <span class="dim sep">·</span>
-      <span class="dim">MIT licensed</span>
+      <span class="dim" data-i18n="foot.mit">MIT licensed</span>
       <span class="dim sep">·</span>
-      <span class="dim">pure Go</span>
+      <span class="dim" data-i18n="foot.purego">pure Go</span>
     </div>
     <div class="foot-links">
       <a href="https://github.com/yaklang/javajive" target="_blank" rel="noopener noreferrer">GitHub</a>
       <a href="https://github.com/yaklang/javajive/blob/main/README.md" target="_blank" rel="noopener noreferrer">README</a>
       <a href="https://github.com/yaklang/javajive/blob/main/README.zh-CN.md" target="_blank" rel="noopener noreferrer">中文</a>
-      <a href="https://github.com/yaklang/javajive/blob/main/MIGRATE.md" target="_blank" rel="noopener noreferrer">Migrate</a>
-      <a href="https://github.com/yaklang/javajive/blob/main/HARNESS-WORKFLOW.md" target="_blank" rel="noopener noreferrer">Harness</a>
+      <a href="https://github.com/yaklang/javajive/blob/main/MIGRATE.md" target="_blank" rel="noopener noreferrer" data-i18n="foot.migrate">Migrate</a>
+      <a href="https://github.com/yaklang/javajive/blob/main/HARNESS-WORKFLOW.md" target="_blank" rel="noopener noreferrer" data-i18n="foot.harness">Harness</a>
       <span class="foot-sep" aria-hidden="true">.</span>
-      <span class="foot-sister-label dim">built from</span>
+      <span class="foot-sister-label dim" data-i18n="foot.builtfrom">built from</span>
       <a class="sister-link" href="https://github.com/yaklang/yaklang" target="_blank" rel="noopener noreferrer">yaklang <span class="sister-arrow" aria-hidden="true">_&gt;</span></a>
     </div>
   </div>
@@ -283,6 +384,177 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<script>
+  // i18n (EN / 中文) — persists preference, swaps hero image + title.
+  // 关键词: language switch, localStorage, innerHTML dictionary
+  (function () {
+    var LANG_KEY = "javajive:lang";
+    var HERO = { en: "assets/img/hero.png", zh: "assets/img/hero-zh.png" };
+    var TITLE = {
+      en: "JavaJive — Pure-Go Java toolkit (decompile · class parse · serialization)",
+      zh: "JavaJive — 纯 Go Java 工具链（反编译 · class 解析 · 序列化）"
+    };
+    var ALT = {
+      en: "JavaJive — Pure-Go Java Toolkit: Decompile, Class Parse, Serialization",
+      zh: "JavaJive — 纯 Go Java 工具链：反编译、class 解析、序列化"
+    };
+    var I18N = {
+      en: {
+        "skip": "skip to features",
+        "prov.1": "pure Go", "prov.2": "no JDK · no cgo · no ANTLR",
+        "prov.3": "decompile · class parse · serialization", "prov.4": "MIT licensed",
+        "nav.install": "install", "nav.benchmarks": "benchmarks", "nav.features": "features",
+        "nav.library": "library", "nav.docs": "docs", "nav.migrate": "Migrate", "nav.harness": "Harness",
+        "hero.badge1": "pure Go", "hero.badge2": "no cgo", "hero.badge3": "no JDK", "hero.badge4": "MIT licensed",
+        "hero.alt": ALT.en,
+        "hero.title": 'Java tooling, in pure Go. <span class="hero-title-dim">Decompile, parse, (de)serialize.</span>',
+        "hero.sub": 'A portable, single-binary Java toolkit extracted and trimmed from <a href="https://github.com/yaklang/yaklang" target="_blank" rel="noopener noreferrer">yaklang</a>. Turn <code>.class</code> / <code>.jar</code> / <code>.war</code> / <code>.zip</code> into readable Java source, inspect class structure, and convert the Java serialization wire format to and from JSON — with no JDK, no cgo, and no ANTLR runtime.',
+        "hero.cta1": "Get started", "hero.cta2": "View on GitHub",
+        "hero.meta1": "cross-tested against a real JDK", "hero.meta2": "CI on linux / macOS / windows",
+        "install.h2": "Install",
+        "install.p": "One static binary for the CLI, or a single import for the library. No toolchain beyond Go.",
+        "install.tab.cli": "CLI", "install.tab.lib": "Library", "install.tab.src": "From source",
+        "install.cli.lead": 'Install the <code>javajive</code> command — decompile, inspect, and (de)serialize from your shell.',
+        "install.cli.foot": 'Then try <code>javajive decompile app.jar</code> or <code>javajive classinfo Foo.class</code>.',
+        "install.lib.lead": "Add the module and import the unified facade package — one import covers all three capabilities.",
+        "install.lib.foot": 'See the <a href="#library">library quickstart</a> below for usage.',
+        "install.src.lead": "Clone and build the CLI from source.",
+        "install.src.foot": "Requires Go 1.22+. The result is a single self-contained binary.",
+        "bench.h2": "Proven at scale",
+        "bench.p": "The decompiler core, benchmarked head-to-head against CFR and Vineflower on 11 well-known JARs — 6,506 classes of real, reproducible data.",
+        "bench.s1": "classes decompiled — 6,506 / 6,506, zero stubs",
+        "bench.s2": "faster than CFR, concurrent decompile",
+        "bench.s3": "classes decompiled per second",
+        "bench.s4": "bytecode verify failures across 11 JARs",
+        "bench.s5": "algorithm batteries, byte-for-byte round-trip",
+        "bench.s6": "JVM opcode parse coverage",
+        "cmp.axis": "Axis", "cmp.r1": "Completeness (no class dropped)",
+        "cmp.r2": "Concurrent total — 11 JARs", "cmp.r3": "Throughput",
+        "cmp.r4": "Rebuilt-jar bytecode verify failures",
+        "cmp.r5": "guava call differential vs original jar", "cmp.identical": "IDENTICAL",
+        "bench.note": 'Measured 2026-06-27 on darwin/arm64 (10-core), Go 1.22.12, JDK 17, against CFR 0.152 &amp; Vineflower 1.10.1 over 11 well-known JARs (6,506 classes). JavaJive ships the same pure-Go decompiler core in raw mode. Full methodology, per-jar tables and the machine-generated report: <a href="https://github.com/yaklang/yaklang/pull/4665" target="_blank" rel="noopener noreferrer">cross-comparison report</a>.',
+        "features.h2": "Features",
+        "features.p": "Three Java building blocks, one portable module — plus the supporting cast trimmed down to a self-contained core.",
+        "feat.1.t": "Decompiler",
+        "feat.1.d": 'Turn <code>.class</code> / <code>.jar</code> / <code>.war</code> / <code>.zip</code> into readable Java source, with whole-archive output that mirrors the original package layout.',
+        "feat.2.t": "Class parser",
+        "feat.2.d": 'Inspect the full structure of a <code>.class</code> file — constant pool, fields, methods, version, and access flags.',
+        "feat.3.t": "Serialization",
+        "feat.3.d": "Parse and re-marshal the Java ObjectStream wire format with byte fidelity, and convert it losslessly to and from JSON.",
+        "feat.4.t": "Portable &amp; pure Go",
+        "feat.4.d": "No JDK, no cgo, no ANTLR runtime. Cross-compiles to a single static binary for linux / macOS / windows on amd64 and arm64.",
+        "feat.5.t": "First-class CLI",
+        "feat.5.d": '<code>decompile</code>, <code>classinfo</code>, and <code>serial</code> subcommands built on the standard library — small, dependency-light, scriptable.',
+        "feat.6.t": "Cross-tested with a real JDK",
+        "feat.6.d": 'CI compiles real <code>.class</code> / <code>.jar</code> and JDK-serialized blobs with <code>javac</code>/<code>java</code>, then verifies JavaJive against them.',
+        "lib.h2": "Library quickstart",
+        "lib.p": 'Import the unified <code>javajive</code> package — one import covers decompilation, class parsing and serialization.',
+        "lib.c1": "// Decompile a single class, or a whole archive into a directory.",
+        "lib.c2": "// Inspect class structure.",
+        "lib.c3": "// Java serialization: binary -&gt; JSON -&gt; binary.",
+        "lib.c4": "// or ParseSerializedHex(hexStr)",
+        "foot.mit": "MIT licensed", "foot.purego": "pure Go",
+        "foot.migrate": "Migrate", "foot.harness": "Harness", "foot.builtfrom": "built from"
+      },
+      zh: {
+        "skip": "跳到特性",
+        "prov.1": "纯 Go", "prov.2": "无 JDK · 无 cgo · 无 ANTLR",
+        "prov.3": "反编译 · class 解析 · 序列化", "prov.4": "MIT 许可",
+        "nav.install": "安装", "nav.benchmarks": "基准", "nav.features": "特性",
+        "nav.library": "库", "nav.docs": "文档", "nav.migrate": "迁移", "nav.harness": "测试体系",
+        "hero.badge1": "纯 Go", "hero.badge2": "无 cgo", "hero.badge3": "无 JDK", "hero.badge4": "MIT 许可",
+        "hero.alt": ALT.zh,
+        "hero.title": '纯 Go 实现的 Java 工具链。<span class="hero-title-dim">反编译、解析、序列化。</span>',
+        "hero.sub": '一个从 <a href="https://github.com/yaklang/yaklang" target="_blank" rel="noopener noreferrer">yaklang</a> 中提取并裁剪出来的便携、单文件 Java 工具链。把 <code>.class</code> / <code>.jar</code> / <code>.war</code> / <code>.zip</code> 还原成可读的 Java 源码，解析 class 结构，并在 Java 序列化二进制与 JSON 之间无损互转——无需 JDK、无 cgo、无 ANTLR 运行时。',
+        "hero.cta1": "开始使用", "hero.cta2": "在 GitHub 查看",
+        "hero.meta1": "对真实 JDK 交叉测试", "hero.meta2": "linux / macOS / windows 全平台 CI",
+        "install.h2": "安装",
+        "install.p": "命令行是一个静态二进制，库则只需一次 import。除 Go 之外不需要任何工具链。",
+        "install.tab.cli": "命令行", "install.tab.lib": "库", "install.tab.src": "源码构建",
+        "install.cli.lead": '安装 <code>javajive</code> 命令——在 shell 里直接反编译、解析、序列化与反序列化。',
+        "install.cli.foot": '然后试试 <code>javajive decompile app.jar</code> 或 <code>javajive classinfo Foo.class</code>。',
+        "install.lib.lead": "添加模块并 import 统一门面包——一次 import 即覆盖三大能力。",
+        "install.lib.foot": '用法见下方<a href="#library">库快速上手</a>。',
+        "install.src.lead": "克隆仓库并从源码构建命令行。",
+        "install.src.foot": "需要 Go 1.22+。产物是一个自包含的单文件二进制。",
+        "bench.h2": "大规模实测",
+        "bench.p": "反编译内核在 11 个知名大型 JAR（6,506 个类）上与 CFR、Vineflower 正面 PK——全部为真实、可复现的数据。",
+        "bench.s1": "类完整反编译 — 6,506 / 6,506，零 stub",
+        "bench.s2": "并发反编译速度，CFR 的 8.6 倍",
+        "bench.s3": "每秒反编译类数",
+        "bench.s4": "11 个 JAR 全部回编译，0 字节码校验失败",
+        "bench.s5": "算法电池，反编译→回编译→运行逐字节一致",
+        "bench.s6": "JVM opcode 解析覆盖",
+        "cmp.axis": "维度", "cmp.r1": "完整性（不漏类）",
+        "cmp.r2": "并发总耗时 — 11 JAR", "cmp.r3": "吞吐",
+        "cmp.r4": "回编译字节码校验失败数",
+        "cmp.r5": "guava 调用差分（对比原始 jar）", "cmp.identical": "完全一致",
+        "bench.note": '测于 2026-06-27，darwin/arm64（10 核），Go 1.22.12，JDK 17，在 11 个知名大型 JAR（6,506 个类）上与 CFR 0.152、Vineflower 1.10.1 正面对比。JavaJive 内置同一套纯 Go 反编译内核（raw 模式）。完整方法学、逐 jar 数据与机器生成报告见<a href="https://github.com/yaklang/yaklang/pull/4665" target="_blank" rel="noopener noreferrer">交叉对比报告</a>。',
+        "features.h2": "特性",
+        "features.p": "三块 Java 基础能力，打包进一个便携模块——其余依赖也被裁剪成自包含的核心。",
+        "feat.1.t": "反编译器",
+        "feat.1.d": '把 <code>.class</code> / <code>.jar</code> / <code>.war</code> / <code>.zip</code> 还原成可读的 Java 源码，整包输出并保持原始包目录结构。',
+        "feat.2.t": "Class 解析器",
+        "feat.2.d": '解析 <code>.class</code> 文件的完整结构——常量池、字段、方法、版本与访问标志。',
+        "feat.3.t": "序列化",
+        "feat.3.d": "以字节级保真解析并重新封送 Java ObjectStream 二进制格式，并在其与 JSON 之间无损互转。",
+        "feat.4.t": "便携 &amp; 纯 Go",
+        "feat.4.d": "无 JDK、无 cgo、无 ANTLR 运行时。交叉编译为 linux / macOS / windows（amd64 与 arm64）的单文件静态二进制。",
+        "feat.5.t": "一流命令行",
+        "feat.5.d": '基于标准库构建的 <code>decompile</code>、<code>classinfo</code>、<code>serial</code> 子命令——小巧、依赖少、易脚本化。',
+        "feat.6.t": "对真实 JDK 交叉测试",
+        "feat.6.d": 'CI 用 <code>javac</code>/<code>java</code> 现场编译真实的 <code>.class</code> / <code>.jar</code> 与 JDK 序列化数据，再用它们校验 JavaJive。',
+        "lib.h2": "库快速上手",
+        "lib.p": '导入统一的 <code>javajive</code> 包——一次 import 即覆盖反编译、class 解析与序列化。',
+        "lib.c1": "// 反编译单个 class，或把整个归档反编译到目录。",
+        "lib.c2": "// 解析 class 结构。",
+        "lib.c3": "// Java 序列化：二进制 -&gt; JSON -&gt; 二进制。",
+        "lib.c4": "// 或 ParseSerializedHex(hexStr)",
+        "foot.mit": "MIT 许可", "foot.purego": "纯 Go",
+        "foot.migrate": "迁移", "foot.harness": "测试体系", "foot.builtfrom": "基于"
+      }
+    };
+
+    function apply(lang) {
+      var dict = I18N[lang] || I18N.en;
+      document.querySelectorAll("[data-i18n]").forEach(function (el) {
+        var k = el.getAttribute("data-i18n");
+        if (dict[k] != null) el.innerHTML = dict[k];
+      });
+      document.querySelectorAll("[data-i18n-alt]").forEach(function (el) {
+        var k = el.getAttribute("data-i18n-alt");
+        if (dict[k] != null) el.setAttribute("alt", dict[k]);
+      });
+      var hero = document.getElementById("hero-img");
+      if (hero && HERO[lang]) hero.setAttribute("src", HERO[lang]);
+      document.documentElement.setAttribute("lang", lang === "zh" ? "zh-CN" : "en");
+      document.documentElement.setAttribute("data-lang", lang);
+      if (TITLE[lang]) document.title = TITLE[lang];
+      var btn = document.getElementById("lang-toggle");
+      if (btn) {
+        var label = btn.querySelector(".lang-label");
+        if (label) label.textContent = lang === "zh" ? "EN" : "中文";
+        btn.setAttribute("aria-label", lang === "zh" ? "Switch to English" : "切换到中文");
+      }
+    }
+
+    function getLang() {
+      try { return localStorage.getItem(LANG_KEY) || "en"; } catch (e) { return "en"; }
+    }
+
+    var current = getLang();
+    apply(current);
+
+    var btn = document.getElementById("lang-toggle");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        current = current === "zh" ? "en" : "zh";
+        try { localStorage.setItem(LANG_KEY, current); } catch (e) {}
+        apply(current);
+      });
+    }
+  })();
+</script>
 <script>
   // Install tab switcher (standalone — no skills catalog app.js needed)
   // 关键词: install tab switch, aria-selected, panel toggle
