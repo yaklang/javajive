@@ -33,6 +33,7 @@ func AutoDecompile(from, to string) error {
 		if err != nil {
 			return utils.Errorf("create archive failed: %v", err)
 		}
+		defer jar.Close()
 		return jar.DumpToLocalFileSystem(to)
 	case strings.HasSuffix(fromLower, ".class"):
 		raw, err := os.ReadFile(from)

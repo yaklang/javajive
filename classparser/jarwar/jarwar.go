@@ -69,6 +69,15 @@ func New(compressedFile string) (*JarWar, error) {
 	return fsIns, nil
 }
 
+// Close releases the underlying archive file handle held by the JarFS/ZipFS.
+// This is important on Windows, where an open file cannot be deleted by callers.
+func (j *JarWar) Close() error {
+	if j.fs != nil {
+		return j.fs.Close()
+	}
+	return nil
+}
+
 func (j *JarWar) GetStructDump() string {
 	return filesys.DumpTreeView(j.fs)
 }
