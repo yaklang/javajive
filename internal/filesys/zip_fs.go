@@ -1,0 +1,396 @@
+package filesys
+
+import (
+	"io"
+	"io/fs"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+
+	"github.com/yaklang/javajive/internal/log"
+	"github.com/yaklang/javajive/internal/utils"
+	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
+	"github.com/yaklang/javajive/internal/memfile"
+	zip "github.com/yaklang/javajive/internal/zipx"
+)
+
+// ZipFSOption 用于 NewZipFS*WithOptions 的可选参数
+// 关键词: ZipFS 选项, ZipFS 密码
+type ZipFSOption func(*zipFSConfig)
+
+// zipFSConfig ZipFS 构造选项
+// 关键词: ZipFS 配置, 加密 zip 读
+type zipFSConfig struct {
+	Password string
+}
+
+// WithZipFSPassword 设置加密 zip 的解密密码
+// 关键词: ZipFS 密码, 加密 zip 文件系统
+func WithZipFSPassword(password string) ZipFSOption {
+	return func(c *zipFSConfig) {
+		c.Password = password
+	}
+}
+
+// newZipFSConfig 应用 ZipFSOption，返回最终配置
+func newZipFSConfig(opts ...ZipFSOption) *zipFSConfig {
+	cfg := &zipFSConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	return cfg
+}
+
+type ZipFS struct {
+	r      *zip.Reader
+	forest *utils.PathForest
+	closer io.Closer // 用于关闭文件句柄（仅在 NewZipFSFromLocal 时设置）
+
+	// 加密 zip 解密密码
+	// 关键词: ZipFS 密码字段
+	password string
+}
+
+// SetPassword 后置设置 ZipFS 解密密码
+// 关键词: ZipFS 密码运行时设置
+func (z *ZipFS) SetPassword(password string) *ZipFS {
+	z.password = password
+	return z
+}
+
+func (z *ZipFS) IsAbs(s string) bool {
+	return false
+}
+
+func (z *ZipFS) Getwd() (string, error) {
+	return ".", nil
+}
+
+func (z *ZipFS) Exists(s string) (bool, error) {
+	info, err := z.Stat(s)
+	if err != nil {
+		return false, nil
+	}
+	return info != nil, nil
+}
+
+func (z *ZipFS) Rename(s string, s2 string) error {
+	return utils.Error("unsupported on readonly zipfs")
+}
+
+// Rel is calc relative path
+func (z *ZipFS) Rel(s string, s2 string) (string, error) {
+	return "", utils.Error("unsupported on readonly zipfs")
+}
+
+func (z *ZipFS) WriteFile(s string, bytes []byte, mode os.FileMode) error {
+	return utils.Error("unsupported on readonly zipfs")
+}
+
+func (z *ZipFS) Delete(s string) error {
+	return utils.Error("unsupported on readonly zipfs")
+}
+
+func (z *ZipFS) MkdirAll(s string, mode os.FileMode) error {
+	return utils.Error("unsupported on readonly zipfs")
+}
+
+// Close 关闭 ZipFS 持有的文件句柄（如果存在）
+// 这对于在 Windows 上释放文件锁定很重要
+func (z *ZipFS) Close() error {
+	if z.closer != nil {
+		return z.closer.Close()
+	}
+	return nil
+}
+
+type zipDir struct {
+	zipfile *zip.File
+}
+
+func (z zipDir) Stat() (fs.FileInfo, error) {
+	return z.zipfile.FileInfo(), nil
+}
+
+func (z zipDir) Read(bytes []byte) (int, error) {
+	return 0, utils.Error("zipDir cannot be read")
+}
+
+func (z zipDir) Close() error {
+	return nil
+}
+
+var _ fs.File = (*zipDir)(nil)
+
+func zipPathClean(p string) string {
+	p = path.Clean(p)
+	p = strings.TrimLeft(p, "/")
+	if p == "." || p == "" {
+		return "./"
+	}
+	if !strings.HasPrefix(p, "./") {
+		p = "./" + p
+	}
+	return p
+}
+
+func (z *ZipFS) Open(name string) (fs.File, error) {
+	raw, err := z.ReadFile(name)
+	if err != nil {
+		name = z.Clean(name)
+		p, err := z.forest.Get(name)
+		if err != nil {
+			return nil, err
+		}
+		if p == nil {
+			return nil, os.ErrNotExist
+		}
+		if p.Value == nil {
+			return nil, os.ErrNotExist
+		}
+		f, ok := p.Value.(*zip.File)
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		return zipDir{zipfile: f}, nil
+	}
+	return memfile.New(raw), nil
+}
+
+func (z *ZipFS) OpenFile(name string, flag int, perm os.FileMode) (fs.File, error) {
+	return z.Open(name)
+}
+
+func (z *ZipFS) Stat(name string) (fs.FileInfo, error) {
+	if name == "." {
+		name = ""
+	}
+	name = z.Clean(name)
+	f, err := z.forest.Get(name)
+	if err != nil {
+		return nil, err
+	}
+	if f == nil {
+		return nil, os.ErrNotExist
+	}
+
+	if f.Value == nil {
+		if len(f.Children) > 0 {
+			return &VirtualFileInfo{
+				name: name,
+				mod:  fs.ModeDir,
+			}, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	v, ok := f.Value.(*zip.File)
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return v.FileInfo(), nil
+}
+
+var _ fi.FileSystem = (*ZipFS)(nil)
+
+func (z *ZipFS) Clean(name string) string {
+	name = strings.ReplaceAll(filepath.ToSlash(name), "\\", "/")
+	return zipPathClean(name)
+}
+
+func (z *ZipFS) Join(name ...string) string {
+	return path.Join(name...)
+}
+
+func (z *ZipFS) GetSeparators() rune {
+	return '/'
+}
+
+func (z *ZipFS) PathSplit(s string) (string, string) {
+	return SplitWithSeparator(s, z.GetSeparators())
+}
+
+func (z *ZipFS) Ext(i string) string {
+	return getExtension(i)
+}
+
+func (z *ZipFS) ReadFile(name string) ([]byte, error) {
+	name = z.Clean(name)
+	node, err := z.forest.Get(name)
+	if err != nil {
+		return nil, utils.Wrapf(err, "get %v failed", name)
+	}
+	if node == nil || utils.IsNil(node.Value) {
+		return nil, os.ErrNotExist
+	}
+	f, ok := node.Value.(*zip.File)
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	if f.FileInfo().IsDir() {
+		return nil, utils.Wrapf(os.ErrNotExist, "%v is dir", name)
+	}
+	// 加密 zip 条目设置密码
+	// 关键词: ZipFS 加密读, SetPassword
+	if f.IsEncrypted() {
+		if z.password == "" {
+			return nil, utils.Errorf("zip entry %s is encrypted but no password supplied", f.Name)
+		}
+		f.SetPassword(z.password)
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
+func (f *ZipFS) String() string {
+	// TODO
+	return ""
+}
+
+type ZipDirEntry struct {
+	name string
+	info fs.FileInfo
+}
+
+func (z *ZipDirEntry) Name() string {
+	return z.name
+}
+
+func (z *ZipDirEntry) IsDir() bool {
+	return z.info.IsDir()
+}
+
+func (z *ZipDirEntry) Type() fs.FileMode {
+	if z.info.IsDir() {
+		return fs.ModeDir
+	}
+	return 0o666
+}
+
+func (z *ZipDirEntry) Info() (fs.FileInfo, error) {
+	return z.info, nil
+}
+
+var _ fs.DirEntry = (*ZipDirEntry)(nil)
+
+func (z *ZipFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	name = z.Clean(name)
+	node, err := z.forest.Get(name)
+	if err != nil {
+		return nil, utils.Wrapf(err, "get %#v failed", name)
+	}
+	if node == nil {
+		return nil, os.ErrNotExist
+	}
+
+	var entries []fs.DirEntry
+	for _, c := range node.Children {
+		f, ok := c.Value.(*zip.File)
+		if ok {
+			entries = append(entries, &ZipDirEntry{
+				name: c.Name,
+				info: f.FileInfo(),
+			})
+		} else {
+			entries = append(entries, &ZipDirEntry{
+				name: c.Name,
+				info: NewVirtualFileInfo(c.Name, 0, true),
+			})
+		}
+	}
+	return entries, nil
+}
+func (f *ZipFS) ExtraInfo(string) map[string]any { return nil }
+func (f *ZipFS) Base(p string) string            { return path.Base(p) }
+
+func NewZipFSRaw(i io.ReaderAt, size int64) (*ZipFS, error) {
+	return NewZipFSRawWithCloser(i, size, nil)
+}
+
+// NewZipFSRawWithCloser 创建一个 ZipFS，并保存一个可选的 closer 用于关闭文件句柄
+func NewZipFSRawWithCloser(i io.ReaderAt, size int64, closer io.Closer) (*ZipFS, error) {
+	return buildZipFS(i, size, closer, nil)
+}
+
+func NewZipFSFromString(i string) (*ZipFS, error) {
+	mf := memfile.New([]byte(i))
+	return NewZipFSRaw(mf, int64(len([]byte(i))))
+}
+
+func NewZipFSFromLocal(i string) (*ZipFS, error) {
+	return NewZipFSFromLocalWithOptions(i)
+}
+
+// NewZipFSRawWithOptions 创建带选项（含密码）的 ZipFS
+// 关键词: ZipFS 密码构造, NewZipFSRawWithOptions
+func NewZipFSRawWithOptions(i io.ReaderAt, size int64, opts ...ZipFSOption) (*ZipFS, error) {
+	return buildZipFS(i, size, nil, newZipFSConfig(opts...))
+}
+
+// NewZipFSRawWithCloserAndOptions 同 NewZipFSRawWithCloser，但接受 ZipFSOption
+// 关键词: ZipFS 密码构造, NewZipFSRawWithCloserAndOptions
+func NewZipFSRawWithCloserAndOptions(i io.ReaderAt, size int64, closer io.Closer, opts ...ZipFSOption) (*ZipFS, error) {
+	return buildZipFS(i, size, closer, newZipFSConfig(opts...))
+}
+
+// NewZipFSFromStringWithOptions 从字符串/字节构造带密码 ZipFS
+// 关键词: ZipFS 密码构造, NewZipFSFromStringWithOptions
+func NewZipFSFromStringWithOptions(i string, opts ...ZipFSOption) (*ZipFS, error) {
+	mf := memfile.New([]byte(i))
+	return NewZipFSRawWithOptions(mf, int64(len([]byte(i))), opts...)
+}
+
+// NewZipFSFromLocalWithOptions 从本地文件构造带密码 ZipFS
+// 关键词: ZipFS 密码构造, NewZipFSFromLocalWithOptions
+func NewZipFSFromLocalWithOptions(i string, opts ...ZipFSOption) (*ZipFS, error) {
+	local := NewLocalFs()
+	f, err := local.Open(i)
+	if err != nil {
+		return nil, err
+	}
+	ra, ok := f.(io.ReaderAt)
+	if !ok {
+		f.Close()
+		return nil, utils.Errorf("local file %s does not support io.ReaderAt", i)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return NewZipFSRawWithCloserAndOptions(ra, info.Size(), f, opts...)
+}
+
+// buildZipFS 是 ZipFS 构造的内部统一入口
+// 关键词: ZipFS 内部构造
+func buildZipFS(i io.ReaderAt, size int64, closer io.Closer, cfg *zipFSConfig) (*ZipFS, error) {
+	reader, err := zip.NewReader(i, size)
+	if err != nil {
+		return nil, err
+	}
+
+	forest, err := utils.GeneratePathTrees()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, f := range reader.File {
+		name := f.Name
+		err := forest.AddPath(zipPathClean(name), f)
+		if err != nil {
+			log.Warnf("BUG: cache zip tree failed: %v", err)
+			continue
+		}
+	}
+	forest.ReadOnly()
+
+	zfs := &ZipFS{r: reader, forest: forest, closer: closer}
+	if cfg != nil {
+		zfs.password = cfg.Password
+	}
+	return zfs, nil
+}

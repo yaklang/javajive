@@ -1,0 +1,381 @@
+package filesys
+
+import (
+	"context"
+	"embed"
+	"io/fs"
+	"os"
+	"strings"
+	"sync/atomic"
+
+	"github.com/gobwas/glob"
+	"github.com/yaklang/javajive/internal/log"
+	"github.com/yaklang/javajive/internal/utils"
+	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
+)
+
+type dirResult struct {
+	dir  string
+	opts []Option
+}
+
+type dirMatch struct {
+	inst glob.Glob
+	opts []Option
+}
+
+type (
+	FileStat func(string, fs.FileInfo) error
+	DirStat  func(string, fs.FileInfo) error
+	Config   struct {
+		onStart      func(base string, isDir bool) error
+		onStat       func(isDir bool, pathname string, info os.FileInfo) error
+		onDirStat    DirStat
+		onFileStat   FileStat
+		onDirWalkEnd func(string) error
+
+		noStopWhenErr bool
+
+		RecursiveDirectory bool
+
+		fileLimit  int64
+		dirLimit   int64
+		totalLimit int64
+
+		fileSystem fi.FileSystem
+
+		dirMatch []*dirMatch
+
+		ctx       context.Context
+		ctxCancel context.CancelFunc
+
+		// File extension filters
+		includeExts []string // Include only files with these extensions (e.g., [".yak", ".fs"])
+		excludeExts []string // Exclude files with these extensions
+	}
+)
+
+func NewConfig() *Config {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Config{
+		noStopWhenErr:      false,
+		RecursiveDirectory: true,
+		fileLimit:          1000000,
+		dirLimit:           100000,
+		totalLimit:         1000000,
+		fileSystem:         NewLocalFs(),
+		ctx:                ctx,
+		ctxCancel:          cancel,
+	}
+}
+
+type Option func(*Config)
+
+func WithStat(f func(isDir bool, pathname string, info os.FileInfo) error) Option {
+	return func(c *Config) {
+		c.onStat = f
+	}
+}
+
+func WithRecursiveDirectory(b bool) Option {
+	return func(c *Config) {
+		c.RecursiveDirectory = b
+	}
+}
+
+func WithDirStat(f DirStat) Option {
+	return func(c *Config) {
+		c.onDirStat = f
+	}
+}
+
+func WithFileStat(f FileStat) Option {
+	return func(c *Config) {
+		c.onFileStat = f
+	}
+}
+
+func WithOnStart(f func(basename string, isDir bool) error) Option {
+	return func(c *Config) {
+		c.onStart = f
+	}
+}
+
+// dir 为匹配指定 glob 目录的子树设置一组单独的遍历选项
+// 参数:
+//   - globDir: 目录匹配的 glob 模式
+//   - opts: 对匹配到的子目录生效的遍历选项
+//
+// 返回值:
+//   - 一个遍历配置选项
+//
+// Example:
+// ```
+// filesys.Recursive("testdata", filesys.dir("cc", filesys.onFileStat((name, info) => {})))~
+// ```
+func WithDir(globDir string, opts ...Option) Option {
+	return func(c *Config) {
+		if c.fileSystem == nil {
+			log.Errorf("file system is nil")
+			return
+		}
+
+		// if the separator is not the same as the file system, replace it
+		for _, separator := range []rune{'/', '\\'} {
+			if c.fileSystem.GetSeparators() == separator {
+				continue
+			}
+			if !strings.Contains(globDir, string(separator)) {
+				strings.ReplaceAll(globDir, string(separator), string(c.fileSystem.GetSeparators()))
+			}
+		}
+
+		ins, err := glob.Compile(globDir, c.fileSystem.GetSeparators())
+		if err != nil {
+			log.Errorf("glob-dir: %v compile failed: %s", globDir, err.Error())
+			return
+		}
+		// log.Infof("dir match: %v: inst: %v", globDir, ins)
+		c.dirMatch = append(c.dirMatch, &dirMatch{
+			// dir:  globDir,
+			inst: ins,
+			opts: opts,
+		})
+	}
+}
+
+func WithFileSystem(f fi.FileSystem) Option {
+	return func(config *Config) {
+		config.fileSystem = f
+	}
+}
+
+func WithFileLimit(limit int) Option {
+	return func(config *Config) {
+		config.fileLimit = int64(limit)
+	}
+}
+
+func WithEmbedFS(f embed.FS) Option {
+	return func(config *Config) {
+		config.fileSystem = NewEmbedFS(f)
+	}
+}
+
+func WithDirWalkEnd(handle func(path string) error) Option {
+	return func(config *Config) {
+		config.onDirWalkEnd = handle
+	}
+}
+
+func WithContext(ctx context.Context) Option {
+	return func(config *Config) {
+		if ctx == nil {
+			return
+		}
+		config.ctx, config.ctxCancel = context.WithCancel(ctx)
+	}
+}
+
+// WithIncludeExts sets file extensions to include (only files with these extensions will be processed)
+// The filtering is handled in Recursive function before calling onFileStat.
+// Example: WithIncludeExts(".yak", ".fs")
+func WithIncludeExts(exts ...string) Option {
+	return func(config *Config) {
+		config.includeExts = exts
+	}
+}
+
+// WithExcludeExts sets file extensions to exclude (files with these extensions will be skipped)
+// The filtering is handled in Recursive function before calling onFileStat.
+// Example: WithExcludeExts(".tmp", ".bak")
+func WithExcludeExts(exts ...string) Option {
+	return func(config *Config) {
+		config.excludeExts = exts
+	}
+}
+
+// onReady 设置遍历开始（准备就绪）时调用的回调
+// 参数:
+//   - h: 回调函数，参数为 (名称, 是否为目录)
+//
+// 返回值:
+//   - 一个遍历配置选项
+//
+// Example:
+// ```
+// filesys.Recursive("testdata", filesys.onReady((name, isDir) => { println(name) }))~
+// ```
+func withYaklangOnStart(h func(name string, isDir bool)) Option {
+	return WithOnStart(func(basename string, isDir bool) (err error) {
+		defer func() {
+			if e := recover(); e != nil {
+				err = utils.Errorf("onStart failed: %v", e)
+			}
+		}()
+		h(basename, isDir)
+		return nil
+	})
+}
+
+// onFS 设置遍历所使用的文件系统对象（如 zip 文件系统、内存文件系统等）
+// 参数:
+//   - f: 待遍历的文件系统对象
+//
+// 返回值:
+//   - 一个遍历配置选项
+//
+// Example:
+// ```
+// zfs = filesys.NewZipFSFromLocal("/tmp/abc.zip")~
+// filesys.Recursive(".", filesys.onFS(zfs), filesys.onFileStat((name, info) => { println(name) }))~
+// ```
+func withYaklangFileSystem(f fi.FileSystem) Option {
+	return WithFileSystem(f)
+}
+
+// onStat 设置遍历到每个条目（文件或目录）时调用的回调
+// 参数:
+//   - h: 回调函数，参数为 (是否为目录, 路径, 文件信息)
+//
+// 返回值:
+//   - 一个遍历配置选项
+//
+// Example:
+// ```
+// filesys.Recursive("testdata", filesys.onStat((isDir, pathname, info) => { println(pathname) }))~
+// ```
+func withYaklangStat(h func(isDir bool, pathname string, info os.FileInfo)) Option {
+	return WithStat(func(isDir bool, pathname string, info os.FileInfo) (err error) {
+		defer func() {
+			if e := recover(); e != nil {
+				err = utils.Errorf("onStat failed: %v", e)
+			}
+		}()
+		h(isDir, pathname, info)
+		return nil
+	})
+}
+
+// onStatEx 设置遍历到每个条目时调用的回调，并提供一个 stop 函数用于提前终止遍历
+// 参数:
+//   - h: 回调函数，参数为 (是否为目录, 路径, 文件信息, stop 终止函数)
+//
+// 返回值:
+//   - 一个遍历配置选项
+//
+// Example:
+// ```
+// filesys.Recursive("testdata", filesys.onStatEx((isDir, pathname, info, stop) => { stop() }))~
+// ```
+func withYaklangStatEx(h func(isDir bool, pathname string, info os.FileInfo, stop func())) Option {
+	return WithStat(func(isDir bool, pathname string, info os.FileInfo) (err error) {
+		defer func() {
+			if e := recover(); e != nil {
+				err = utils.Errorf("onStat failed: %v", e)
+			}
+		}()
+		stop := new(int64)
+		h(isDir, pathname, info, func() {
+			atomic.AddInt64(stop, 1)
+		})
+		if atomic.LoadInt64(stop) > 0 {
+			return SkipAll
+		}
+		return nil
+	})
+}
+
+// onFileStat 设置遍历到每个文件（不含目录）时调用的回调
+// 参数:
+//   - h: 回调函数，参数为 (文件路径, 文件信息)
+//
+// 返回值:
+//   - 一个遍历配置选项
+//
+// Example:
+// ```
+// filesys.Recursive("testdata", filesys.onFileStat((pathname, info) => { println(pathname) }))~
+// ```
+func withYaklangFileStat(h func(pathname string, info os.FileInfo)) Option {
+	return WithFileStat(func(pathname string, info fs.FileInfo) (err error) {
+		defer func() {
+			if e := recover(); e != nil {
+				err = utils.Errorf("onFileStat failed: %v", e)
+			}
+		}()
+		h(pathname, info)
+		return nil
+	})
+}
+
+// onFileStatEx 设置遍历到每个文件时调用的回调，并提供一个 stop 函数用于提前终止遍历
+// 参数:
+//   - h: 回调函数，参数为 (文件路径, 文件信息, stop 终止函数)
+//
+// 返回值:
+//   - 一个遍历配置选项
+//
+// Example:
+// ```
+// filesys.Recursive("testdata", filesys.onFileStatEx((pathname, info, stop) => { stop() }))~
+// ```
+func withYaklangFileStatEx(h func(pathname string, info os.FileInfo, stop func())) Option {
+	return WithFileStat(func(pathname string, info fs.FileInfo) (err error) {
+		defer func() {
+			if e := recover(); e != nil {
+				err = utils.Errorf("onFileStat failed: %v", e)
+			}
+		}()
+		stop := new(int64)
+		h(pathname, info, func() {
+			atomic.AddInt64(stop, 1)
+		})
+		if atomic.LoadInt64(stop) > 0 {
+			return SkipAll
+		}
+		return nil
+	})
+}
+
+// onDirStat 设置遍历到每个目录时调用的回调
+// 参数:
+//   - h: 回调函数，参数为 (目录路径, 文件信息)
+//
+// 返回值:
+//   - 一个遍历配置选项
+//
+// Example:
+// ```
+// filesys.Recursive("testdata", filesys.onDirStat((pathname, info) => { println(pathname) }))~
+// ```
+func withYaklangDirStat(h func(pathname string, info os.FileInfo)) Option {
+	return WithDirStat(func(pathname string, info fs.FileInfo) (err error) {
+		defer func() {
+			if e := recover(); e != nil {
+				err = utils.Errorf("onDirStat failed: %v", e)
+			}
+		}()
+		h(pathname, info)
+		return nil
+	})
+}
+
+func (c *Config) isStop() bool {
+	if c == nil || c.ctx == nil {
+		return false
+	}
+	select {
+	case <-c.ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Config) Stop() {
+	if c == nil || c.ctxCancel == nil {
+		return
+	}
+	c.ctxCancel()
+}

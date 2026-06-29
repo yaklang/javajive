@@ -1,0 +1,148 @@
+package decompiler
+
+import (
+	"os"
+	"slices"
+	"strings"
+
+	"github.com/yaklang/javajive/internal/funk"
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/rewriter"
+	"github.com/yaklang/javajive/internal/log"
+	"github.com/yaklang/javajive/internal/utils"
+)
+
+func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			err = utils.ErrorStack(e)
+		}
+	}()
+	err = decompiler.ParseSourceCode()
+	if err != nil {
+		// The variable-fold nil-key error ("variable-fold: nil ref key in varUserMap")
+		// fires at the END of ParseStatement, after CalcOpcodeStackInfo and statement-node
+		// building have already succeeded. The opcode graph and statement nodes are valid;
+		// only the variable-fold pass failed because a nil ref leaked into varUserMap.
+		// Suppressing this error lets the rest of the pipeline (rewriting, statement collection)
+		// proceed with unfolded variables, producing valid Java instead of a full-method stub.
+		if !strings.Contains(err.Error(), "nil ref key in varUserMap") {
+			return nil, err
+		}
+	}
+	err = rewriter.CheckNodesIsValid(decompiler.RootNode)
+	if err != nil {
+		return nil, err
+	}
+
+	statementManager := rewriter.NewRootStatementManager(decompiler.RootNode)
+	statementManager.SetId(decompiler.CurrentId)
+	statementManager.Aggressive = decompiler.Aggressive
+	statementManager.MergeIf()
+	// Tail-duplicate `return cond ? A : B` whose arm computes its value through intermediate local
+	// stores (ECJ pre-sized StringBuilder, lazy field init, ...). Those stores cannot be inlined into a
+	// ternary arm and would dangle on a fork after the condition collapses ("multiple next"); splitting
+	// the shared return into per-arm returns keeps the condition as a real if. Runs before the callback
+	// collapse so split conditions keep their structure instead of being spliced into the ternary.
+	statementManager.SplitTernaryReturnArms(decompiler.FunctionContext)
+	allNodes := []*core.Node{}
+	core.WalkGraph[*core.Node](decompiler.RootNode, func(node *core.Node) ([]*core.Node, error) {
+		allNodes = append(allNodes, node)
+		return node.Next, nil
+	})
+	slices.Reverse(allNodes)
+	for _, node := range allNodes {
+		if v, ok := node.Statement.(*statements.ConditionStatement); ok {
+			if v.Callback != nil {
+				v.Callback(v.Condition)
+				allNext := slices.Clone(node.Next)
+				for _, nextNode := range allNext {
+					node.RemoveNext(nextNode)
+				}
+				for _, sourceNode := range slices.Clone(node.Source) {
+					// Splice the collapsed condition's successors into the predecessor at the
+					// collapsed node's ORIGINAL position, preserving Next order. A plain
+					// remove-then-append rewiring silently swaps an if-node's two branches
+					// whenever the predecessor is itself a ConditionStatement: a loop header
+					// whose exit edge flows directly into a consumed ternary condition
+					// (`while(...){...} return cond ? A : B`) would have its [exit, body] Next
+					// reordered to [body, exit], inverting the loop polarity (Bug N). Keep-order
+					// is identical to append for the common single-successor predecessor.
+					sourceNode.ReplaceNextSliceKeepOrder(node, allNext)
+				}
+			}
+		}
+	}
+
+	err = statementManager.Rewrite()
+	if err != nil {
+		return nil, err
+	}
+	// Collapse dead-end store nodes left by a value-ternary stored to a single-use local that was
+	// then inlined into its consumer (`local = a||b ? X : Y; use(local)`): the dangling store forks
+	// the entry into {dead store, consumer} and would otherwise abort ToStatements with "multiple next".
+	statementManager.RemoveDeadEndAssigns()
+	nodes, err := statementManager.ToStatements(func(node *core.Node) bool {
+		return true
+	})
+	if os.Getenv("JDEC_TRACE_SUMMARY") != "" {
+		log.Infof("[jdec-trace][summary] %s.%s graph-nodes=%d root=%T root-next=%d to-statements=%d err=%v",
+			decompiler.FunctionContext.ClassName, decompiler.FunctionContext.FunctionName, len(allNodes),
+			statementManager.RootNode.Statement, len(statementManager.RootNode.Next), len(nodes), err)
+		current := statementManager.RootNode
+		for i := 0; i < 12 && current != nil; i++ {
+			log.Infof("[jdec-trace][summary] %s.%s path[%d] node=%d stmt=%T next=%d source=%d",
+				decompiler.FunctionContext.ClassName, decompiler.FunctionContext.FunctionName, i,
+				current.Id, current.Statement, len(current.Next), len(current.Source))
+			if len(current.Next) != 1 {
+				break
+			}
+			current = current.Next[0]
+		}
+	}
+	nodes = funk.Filter(nodes, func(item *core.Node) bool {
+		_, ok := item.Statement.(*statements.StackAssignStatement)
+		return !ok
+	}).([]*core.Node)
+	if err != nil {
+		return nil, err
+	}
+	sts := core.NodesToStatements(nodes)
+	if os.Getenv("JDEC_TRACE_SUMMARY") != "" {
+		log.Infof("[jdec-trace][summary] %s.%s filtered-nodes=%d statements=%d",
+			decompiler.FunctionContext.ClassName, decompiler.FunctionContext.FunctionName, len(nodes), len(sts))
+	}
+	// Reject a structurally-broken (cyclic / pathologically huge) statement tree here, before any of the
+	// recursive tree walkers (RewriteVar, Statement.ReplaceVar/String, ...) descend it. A cyclic tree
+	// would otherwise drive them into Go's unrecoverable `fatal error: stack overflow`, crashing the
+	// whole process; raising an ordinary panic instead lets the recover above degrade the method to a stub.
+	sts = rewriter.PruneCyclicContainerReferences(sts)
+	rewriter.AssertStatementsAcyclic(sts)
+	// Fold the javac `assert` guard corruption: when several asserts share/overlap throw targets,
+	// the value-merge structuring can leave an orphaned `ConditionStatement(mentions
+	// $assertionsDisabled)` immediately followed by its `throw new AssertionError()`, which renders
+	// as the fatal `if (cond);` and stubs the whole method. Fold that pair into a real if-body so the
+	// method survives post-decompile syntax validation. Runs AFTER the acyclic check so its recursive
+	// walk cannot blow the stack on a pathologically deep/cyclic tree. Kill-switch: ASSERT_FOLD_OFF=1.
+	sts = rewriter.FoldAssertionGuards(sts)
+	params := []*values.JavaRef{}
+	for _, v := range decompiler.Params {
+		if ref, ok := v.(*values.JavaRef); ok {
+			params = append(params, ref)
+		}
+	}
+	rewriter.RewriteVar(&sts, decompiler.BodyStartId, params, decompiler.FunctionContext)
+	// Synthesize a bare `T varN;` declaration for any local whose only definition is an embedded
+	// assignment baked into an opaque CustomValue by the dup-collapse (`(n = s.length())` inside a
+	// short-circuit condition). Without it that local renders undeclared and duplicate-named against a
+	// later sibling-scope local sharing its slot-derived name -> cannot find symbol (Bug Y residual C).
+	rewriter.SynthesizeUndeclaredEmbeddedAssignDecls(&sts, decompiler.EmbeddedAssignDeclRefs)
+	// Drop statements javac would reject as unreachable (e.g. a back-edge `continue`
+	// emitted after an inner infinite loop that only exits via return / labelled
+	// continue). The pass is a strict subset of the JLS reachability rules, so it
+	// leaves already-correct methods untouched.
+	sts = rewriter.PruneUnreachableStatements(sts)
+	return sts, nil
+}

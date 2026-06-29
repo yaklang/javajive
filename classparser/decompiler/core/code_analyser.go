@@ -1,0 +1,4519 @@
+package core
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"runtime/debug"
+	"sort"
+	"strings"
+
+	"github.com/samber/lo"
+	"github.com/yaklang/javajive/internal/funk"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	utils2 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/log"
+	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/omap"
+	"golang.org/x/exp/slices"
+)
+
+type BootstrapMethod struct {
+	Ref       values.JavaValue
+	Arguments []values.JavaValue
+}
+type ExceptionTableEntry struct {
+	StartPc   uint16
+	EndPc     uint16
+	HandlerPc uint16
+	CatchType uint16
+}
+
+type Decompiler struct {
+	FunctionType          *types.JavaFuncType
+	opcodeToSimulateStack map[*OpCode]*StackSimulationImpl
+	FunctionContext       *class_context.ClassContext
+	varTable              map[int]*values.JavaRef
+	opcodeIdToRef         map[*OpCode][][2]any
+	// dupConvertedRefValue records, per dup-family opcode and in the SAME order as the
+	// opcodeIdToRef entries appended by checkAndConvertRef, the actual value each synthesized
+	// temp was created from. The dup statement-parse handler must use this instead of
+	// stackConsumed[i]: when checkAndConvertRef converts a value that is NOT on top of the
+	// consume order (e.g. the array reference under the index in `this.f[i] op= v`, whose
+	// dup2 pops index first), stackConsumed[i] points at the wrong operand and would emit a
+	// bogus assignment like `int t = i; t[i] = ...`.
+	dupConvertedRefValue          map[*OpCode][]values.JavaValue
+	bytecodes                     []byte
+	opCodes                       []*OpCode
+	RootOpCode                    *OpCode
+	RootNode                      *Node
+	constantPoolGetter            func(id int) values.JavaValue
+	ConstantPoolLiteralGetter     func(constantPoolGetterid int) values.JavaValue
+	ConstantPoolInvokeDynamicInfo func(id int) (uint16, string, string)
+	offsetToOpcodeIndex           map[uint16]int
+	opcodeIndexToOffset           map[int]uint16
+	ExceptionTable                []*ExceptionTableEntry
+	BootstrapMethods              []*BootstrapMethod
+	DumpClassLambdaMethod         func(name, desc string, id *utils2.VariableId, capturedCount int) (string, error)
+	InvokeDynamicName             string
+	CurrentId                     int
+	BodyStartId                   int
+	BaseVarId                     *utils2.VariableId
+	Params                        []values.JavaValue
+	ifNodeConditionCallback       map[*OpCode]func(value values.JavaValue)
+
+	varUserMap     *omap.OrderedMap[*values.JavaRef, []*VarFoldRule]
+	disFoldRef     []*values.JavaRef
+	delRefUserAttr map[string][3]int // [0] = del times,[1] = assign times, [2] = self assign
+
+	// selfOpFoldedRefs holds the VarUid of dup/dup_x1-created temporaries whose only purpose was
+	// to carry the old value of a field/static post-increment/decrement (the `x++` / `x--`
+	// idiom). When the putfield/putstatic is folded into the post-op expression, the temporary's
+	// assignment statement must not be emitted, otherwise it would leave a side-effect statement
+	// in a ternary/expression branch and break structuring (multiple next).
+	selfOpFoldedRefs map[string]bool
+	slotStoreTrace   map[int]slotStoreTraceInfo
+	// slotStoreValue records, per local-store opcode, the value committed into the slot. It lets the
+	// reaching-definition passes inspect a definition's RHS (e.g. recognize an `iconst_0`/`iconst_1`
+	// default initializer that must be re-typed when its slot is later proven boolean). Used by the
+	// boolean default-init phi merge (Bug AI residual).
+	slotStoreValue map[*OpCode]values.JavaValue
+
+	// EmbeddedAssignDeclRefs collects the LHS local of every dup-collapse that bakes an embedded
+	// assignment `(varN = expr)` into an opaque CustomValue (e.g. `s == null || (n = s.length()) == 0`,
+	// bytecode `... length; dup; istore; ifne`). Such a local has NO DeclareStatement in the tree (its
+	// only definition lives inside the CustomValue closure, which carries no ReplaceFunc and is invisible
+	// to both the structural collision renamer and the textual missing-decl safety net), so when its
+	// slot-derived `varN` name collides with a later sibling-scope local it renders undeclared and
+	// duplicate-named -> `cannot find symbol`. RewriteVar consumes this list to synthesize a bare
+	// `T varN;` declaration at method top for any such local lacking a declaration, which makes the
+	// local visible to the identity-based collision renamer (Bug Y residual C). Kill-switch:
+	// JDEC_EMBED_ASSIGN_DECL_OFF.
+	EmbeddedAssignDeclRefs []*values.JavaRef
+
+	// Aggressive enables higher-risk reconstruction paths (relaxed merge-condition structuring,
+	// bounded node-duplication, synthetic-method rebuilds) that are only used as a SECOND attempt
+	// for a method whose conservative decompilation already failed/degraded. It is never set on the
+	// first pass, so methods that decompile cleanly are completely unaffected (zero regression by
+	// construction). Threaded from ClassObjectDumper.aggressive via the rewriter.
+	Aggressive bool
+}
+
+func resetJavaValueTypeSafe(v values.JavaValue, target types.JavaType) {
+	if v == nil || target == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	if typ := v.Type(); typ != nil {
+		typ.ResetType(target)
+	}
+}
+
+func resetReturnValueTypeSafe(v values.JavaValue, funcCtx *class_context.ClassContext) {
+	if funcCtx == nil {
+		return
+	}
+	funcType, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || funcType == nil {
+		return
+	}
+	resetJavaValueTypeSafe(v, funcType.ReturnType)
+}
+
+type VarFoldRule struct {
+	Replace          func(v values.JavaValue)
+	CurrentOpcode    *OpCode
+	UserIsNextOpcode bool
+}
+
+type slotStoreTraceInfo struct {
+	offset uint16
+	ref    *values.JavaRef
+}
+
+func NewDecompiler(bytecodes []byte, constantPoolGetter func(id int) values.JavaValue) *Decompiler {
+	return &Decompiler{
+		FunctionContext:      &class_context.ClassContext{},
+		bytecodes:            bytecodes,
+		constantPoolGetter:   constantPoolGetter,
+		offsetToOpcodeIndex:  map[uint16]int{},
+		opcodeIndexToOffset:  map[int]uint16{},
+		varTable:             map[int]*values.JavaRef{},
+		opcodeIdToRef:        map[*OpCode][][2]any{},
+		dupConvertedRefValue: map[*OpCode][]values.JavaValue{},
+		varUserMap:           omap.NewEmptyOrderedMap[*values.JavaRef, []*VarFoldRule](),
+		delRefUserAttr:       map[string][3]int{},
+		selfOpFoldedRefs:     map[string]bool{},
+		slotStoreTrace:       map[int]slotStoreTraceInfo{},
+		slotStoreValue:       map[*OpCode]values.JavaValue{},
+	}
+}
+
+func (d *Decompiler) GetValueFromPool(index int) values.JavaValue {
+	return d.constantPoolGetter(index)
+}
+
+func (d *Decompiler) GetMethodFromPool(index int) *values.JavaClassMember {
+	return d.constantPoolGetter(index).(*values.JavaClassMember)
+}
+
+// CountFieldStores parses ONLY the opcode stream of this method and returns, keyed by
+// field name, how many times each field is the target of a putfield/putstatic. It is a
+// read-only structural scan: it does not build statements, simulate the stack, dump
+// lambdas, or touch the FunctionContext, so it has no side effects on the dumper, its
+// imports, or its caches and is safe to call on a throwaway Decompiler during a pre-pass.
+//
+// The caller uses these cross-constructor counts to decide whether a blank-final field is
+// safe to lift into a field initializer: a final field assigned in more than one place
+// (multiple constructors, or multiple branches) must keep its in-body assignments, because
+// emitting a field initializer plus an in-body assignment would compile to an illegal
+// double assignment to a final field.
+func (d *Decompiler) CountFieldStores() (map[string]int, error) {
+	if len(d.opCodes) == 0 {
+		if err := d.ParseOpcode(); err != nil {
+			return nil, err
+		}
+	}
+	counts := map[string]int{}
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil {
+			continue
+		}
+		switch op.Instr.OpCode {
+		case OP_PUTFIELD, OP_PUTSTATIC:
+			if len(op.Data) < 2 {
+				continue
+			}
+			idx := int(Convert2bytesToInt(op.Data))
+			val := d.constantPoolGetter(idx)
+			if m, ok := val.(*values.JavaClassMember); ok && m != nil {
+				counts[m.Member]++
+			}
+		}
+	}
+	return counts, nil
+}
+
+func (d *Decompiler) ParseOpcode() (err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			if os.Getenv("DEC_PANIC_STACK") != "" {
+				err = fmt.Errorf("%v\n%s", e, debug.Stack())
+			} else {
+				err = fmt.Errorf("%v", e)
+			}
+		}
+	}()
+	defer func() {
+		if len(d.opCodes) > 0 {
+			d.RootOpCode = d.opCodes[0]
+		}
+	}()
+	// Capacity hint: every opcode consumes at least one bytecode byte, and the
+	// shortest instructions are 1-2 bytes, so len(bytecodes)/2 closely tracks the
+	// real opcode count for typical code while bounding the worst case. Pre-sizing
+	// the slice and offset maps avoids the repeated grow/rehash garbage that made
+	// ParseOpcode the single largest core allocator.
+	sizeHint := len(d.bytecodes)/2 + 8
+	opcodes := make([]*OpCode, 0, sizeHint)
+	opcodes = append(opcodes, &OpCode{Instr: &Instruction{OpCode: OP_START}})
+	offsetToIndex := make(map[uint16]int, sizeHint)
+	indexToOffset := make(map[int]uint16, sizeHint)
+	reader := NewJavaByteCodeReader(d.bytecodes)
+	id := 1
+	isWide := false
+	var wideOffset uint16
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			break
+		}
+		current := reader.CurrentPos - 1
+		instr, ok := InstrInfos[int(b)]
+		if !ok {
+			return fmt.Errorf("unknow op: %x", b)
+		}
+		if instr.OpCode == OP_WIDE {
+			isWide = true
+			wideOffset = uint16(current)
+			continue
+		}
+		opcode := &OpCode{Instr: instr, Id: id, CurrentOffset: uint16(current)}
+		if isWide {
+			opcode.IsWide = true
+			opcode.CurrentOffset = wideOffset
+			isWide = false
+		}
+		var factory = DefaultFactory
+		if v, ok := OpFactories[instr.HandleName]; ok {
+			factory = v
+		}
+		err = factory(reader, opcode)
+		if err != nil {
+			return err
+		}
+		opcodes = append(opcodes, opcode)
+		offsetToIndex[opcode.CurrentOffset] = len(opcodes) - 1
+		indexToOffset[len(opcodes)-1] = opcode.CurrentOffset
+		id++
+	}
+	d.offsetToOpcodeIndex = offsetToIndex
+	d.opcodeIndexToOffset = indexToOffset
+	d.CurrentId = id
+	d.opCodes = opcodes
+	return nil
+}
+
+func (d *Decompiler) ScanJmp() error {
+	opcodes := d.opCodes
+	// Plain map (single-goroutine walk) avoids the mutex + interface boxing of utils.Set.
+	visitNodeRecord := make(map[*OpCode]struct{})
+	endOp := &OpCode{Instr: InstrInfos[OP_END], Id: d.CurrentId}
+	var walkNode func(start int)
+	walkNode = func(start int) {
+		deferWalkId := []int{}
+		defer func() {
+			for _, id := range deferWalkId {
+				walkNode(id)
+			}
+		}()
+		var pre *OpCode
+		i := start
+		for {
+			if i >= len(opcodes) {
+				break
+			}
+			opcode := opcodes[i]
+			if opcode.Instr.OpCode == OP_START {
+				i++
+				pre = opcode
+				continue
+			}
+			if pre != nil {
+				LinkOpcode(pre, opcode)
+			}
+			for _, entry := range d.ExceptionTable {
+				if opcode.CurrentOffset == entry.StartPc {
+					if entry.StartPc == entry.HandlerPc {
+						continue
+					}
+					gotoOp := d.offsetToOpcodeIndex[entry.HandlerPc]
+					d.opCodes[gotoOp].IsCatch = true
+					d.opCodes[gotoOp].ExceptionTypeIndex = entry.CatchType
+					// Accumulate every catch type that shares this handler PC so multi-catch
+					// (`catch (A | B)`) can be reconstructed. Dedupe because the exception-table
+					// scan may revisit the same start opcode while walking the graph.
+					if !slices.Contains(d.opCodes[gotoOp].ExceptionTypeIndexes, entry.CatchType) {
+						d.opCodes[gotoOp].ExceptionTypeIndexes = append(d.opCodes[gotoOp].ExceptionTypeIndexes, entry.CatchType)
+					}
+					deferWalkId = append(deferWalkId, gotoOp)
+					walkNode(gotoOp)
+					if pre != nil {
+						LinkOpcode(pre, d.opCodes[gotoOp])
+						pre.IsTryCatchParent = true
+						pre.TryNode = opcode
+						pre.CatchNode = append(pre.CatchNode, &CatchNode{
+							ExceptionTypeIndex: entry.CatchType,
+							StartIndex:         entry.StartPc,
+							EndIndex:           entry.EndPc,
+							OpCode:             d.opCodes[gotoOp],
+						})
+					}
+				}
+			}
+
+			if _, ok := visitNodeRecord[opcode]; ok {
+				break
+			}
+			visitNodeRecord[opcode] = struct{}{}
+			pre = opcode
+			switch opcode.Instr.OpCode {
+			case OP_RETURN, OP_IRETURN, OP_ARETURN, OP_LRETURN, OP_DRETURN, OP_FRETURN, OP_ATHROW:
+				LinkOpcode(opcode, endOp)
+				pre = nil
+			case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE, OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE, OP_IFNONNULL, OP_IFNULL:
+				gotoRaw := Convert2bytesToInt(opcode.Data)
+				gotoOp := d.offsetToOpcodeIndex[d.opcodeIndexToOffset[i]+gotoRaw]
+				LinkOpcode(opcode, d.opCodes[gotoOp])
+				walkNode(gotoOp)
+			case OP_GOTO:
+				target := Convert2bytesToInt(opcode.Data)
+				gotoOp := d.offsetToOpcodeIndex[d.opcodeIndexToOffset[i]+target]
+				LinkOpcode(opcode, d.opCodes[gotoOp])
+				walkNode(gotoOp)
+				return
+			case OP_GOTO_W:
+				target := Convert2bytesToInt(opcode.Data)
+				gotoOp := d.offsetToOpcodeIndex[d.opcodeIndexToOffset[i]+target]
+				LinkOpcode(opcode, d.opCodes[gotoOp])
+				walkNode(gotoOp)
+				return
+			case OP_LOOKUPSWITCH, OP_TABLESWITCH:
+				opcode.SwitchJmpCase.ForEach(func(v int, target int32) bool {
+					gotoOp := d.offsetToOpcodeIndex[uint16(target)]
+					// Several case values can share one handler (`case 1: case 2: ...`). When the
+					// target is already linked, map this case to the EXISTING target's index, not
+					// len-1: len-1 is whatever was appended last, so it pointed at an unrelated body
+					// (a correctness bug) and, once later passes shrink node.Next, could exceed it
+					// and panic the switch rewriter with index-out-of-range.
+					if idx := slices.Index(opcode.Target, d.opCodes[gotoOp]); idx >= 0 {
+						opcode.SwitchJmpCase1.Set(v, idx)
+						return true
+					}
+					LinkOpcode(opcode, d.opCodes[gotoOp])
+					opcode.SwitchJmpCase1.Set(v, len(opcode.Target)-1)
+					walkNode(gotoOp)
+					return true
+				})
+
+				return
+			}
+			i++
+		}
+	}
+	walkNode(0)
+	d.anchorJumpEnteredTryCatch()
+	d.opCodes = append(d.opCodes, endOp)
+	return nil
+}
+
+// anchorJumpEnteredTryCatch records try-catch anchors for protected regions whose try body is entered
+// via a jump (a guard `if (x==null) return;` before the try, a try as a loop/branch body, a try right
+// after a return/throw). For those the try-start opcode is the first opcode of a fresh walkNode
+// invocation, so the inline scan in ScanJmp saw pre==nil and skipped the anchor; the handler then had
+// no predecessor edge and was pruned as unreachable in DropUnreachableOpcode, dropping the entire try
+// (a bare call that silently leaks a checked exception, e.g. commons-codec QCodec.encode). The
+// method-entry try is unaffected because a synthetic OP_START supplies a non-nil pre there. This runs
+// as a post-pass (after the full CFG is built) so a try-start that is ALSO reached by fall-through keeps
+// its inline pre-based anchor and is never double-anchored. Kill-switch: JDEC_TRY_JUMP_ANCHOR_OFF=1.
+func (d *Decompiler) anchorJumpEnteredTryCatch() {
+	if os.Getenv("JDEC_TRY_JUMP_ANCHOR_OFF") != "" || os.Getenv("JDEC_POSTPASS_OFF") != "" {
+		return
+	}
+	anchored := map[*OpCode]struct{}{}
+	for _, op := range d.opCodes {
+		if op.IsTryCatchParent && op.TryNode != nil {
+			anchored[op.TryNode] = struct{}{}
+		}
+	}
+	postAnchored := map[*OpCode]*OpCode{}
+	for _, entry := range d.ExceptionTable {
+		if entry.StartPc == entry.HandlerPc {
+			continue
+		}
+		startIdx, ok := d.offsetToOpcodeIndex[entry.StartPc]
+		if !ok {
+			continue
+		}
+		tryStart := d.opCodes[startIdx]
+		if _, ok := anchored[tryStart]; ok {
+			continue
+		}
+		handlerIdx, ok := d.offsetToOpcodeIndex[entry.HandlerPc]
+		if !ok {
+			continue
+		}
+		handler := d.opCodes[handlerIdx]
+		// Only repair handlers that are genuinely orphaned: if the handler already has a predecessor
+		// edge it is reachable and will be structured by the existing logic (try-with-resources,
+		// finally, switch-body try, multi-catch all add their own edges). Re-anchoring those would
+		// double-structure them and corrupt the output. The bug we fix is specifically the
+		// jump-entered try whose only handler edge (the inline LinkOpcode) was skipped on pre==nil,
+		// leaving the handler with zero predecessors so DropUnreachableOpcode prunes it.
+		if len(handler.Source) > 0 {
+			continue
+		}
+		anchor, seen := postAnchored[tryStart]
+		if !seen {
+			// Pick a predecessor of the try body that lies OUTSIDE the protected region
+			// [StartPc, EndPc) and is not the handler. It dominates entry into the try and is the
+			// correct splice point (mirrors the role `pre` plays on the normal fall-through path).
+			// A back-edge predecessor from inside the loop/try body must be skipped.
+			for _, src := range tryStart.Source {
+				if src == nil || src == tryStart || src == handler {
+					continue
+				}
+				if src.CurrentOffset >= entry.StartPc && src.CurrentOffset < entry.EndPc {
+					continue
+				}
+				anchor = src
+				break
+			}
+			if anchor == nil {
+				continue
+			}
+			postAnchored[tryStart] = anchor
+		}
+		LinkOpcode(anchor, handler)
+		anchor.IsTryCatchParent = true
+		anchor.TryNode = tryStart
+		anchor.CatchNode = append(anchor.CatchNode, &CatchNode{
+			ExceptionTypeIndex: entry.CatchType,
+			StartIndex:         entry.StartPc,
+			EndIndex:           entry.EndPc,
+			OpCode:             handler,
+		})
+	}
+}
+func (d *Decompiler) DropUnreachableOpcode() error {
+	// DropUnreachableOpcode and nop
+	// Plain map (single-goroutine walk); WalkGraph copies the returned slice into its own
+	// stack and never mutates/retains it, so code.Target can be returned directly instead of
+	// allocating a per-node copy.
+	visitNodeRecord := make(map[*OpCode]struct{})
+	err := WalkGraph[*OpCode](d.opCodes[0], func(code *OpCode) ([]*OpCode, error) {
+		visitNodeRecord[code] = struct{}{}
+		return code.Target, nil
+	})
+	if err != nil {
+		return err
+	}
+	var newOpcodes []*OpCode
+	for _, code := range d.opCodes {
+		if _, ok := visitNodeRecord[code]; !ok {
+			continue
+		}
+		if code.Instr.OpCode == OP_NOP {
+			for _, source := range code.Source {
+				source.Target = funk.Filter(source.Target, func(opCode *OpCode) bool {
+					return opCode != code
+				}).([]*OpCode)
+				for _, target := range code.Target {
+					if !slices.Contains(source.Target, target) {
+						source.Target = append(source.Target, target)
+					}
+					target.Source = funk.Filter(target.Source, func(opCode *OpCode) bool {
+						return opCode != code
+					}).([]*OpCode)
+					if !slices.Contains(target.Source, source) {
+						target.Source = append(target.Source, source)
+					}
+				}
+			}
+		} else {
+			newOpcodes = append(newOpcodes, code)
+		}
+	}
+	d.opCodes = newOpcodes
+	return nil
+}
+func (d *Decompiler) getPoolValue(index int) values.JavaValue {
+	return d.constantPoolGetter(index)
+}
+
+// isLiteralIntOne reports whether a java literal is the integer constant 1, regardless of the
+// concrete numeric Go type produced by the various *const/push opcodes.
+func isLiteralIntOne(v values.JavaValue) bool {
+	lit, ok := UnpackSoltValue(v).(*values.JavaLiteral)
+	if !ok {
+		return false
+	}
+	switch n := lit.Data.(type) {
+	case int:
+		return n == 1
+	case int8:
+		return n == 1
+	case int16:
+		return n == 1
+	case int32:
+		return n == 1
+	case int64:
+		return n == 1
+	case uint8:
+		return n == 1
+	case uint16:
+		return n == 1
+	case uint32:
+		return n == 1
+	case uint64:
+		return n == 1
+	default:
+		return fmt.Sprint(lit.Data) == "1"
+	}
+}
+
+// tryFoldPostIncDec recognizes the post-increment / post-decrement idiom for a field or static
+// whose stored value is `old (+|-) 1`, where `old` (the loaded field value) was duplicated on the
+// stack via dup/dup_x1 and is reused as the expression result. When the value currently on top of
+// the stack is exactly that same `old` object, the putfield/putstatic is the post-inc/dec of the
+// field, so we return the folded `old++` / `old--` expression. The caller replaces the bare old
+// value on the stack with this expression and drops the standalone assignment, keeping
+// ternary/expression branches side-effect-free so the structuring pass can fold them.
+func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue values.JavaValue) (values.JavaValue, bool) {
+	expr, ok := UnpackSoltValue(storedValue).(*values.JavaExpression)
+	if !ok || len(expr.Values) != 2 {
+		return nil, false
+	}
+	if expr.Op != ADD && expr.Op != SUB {
+		return nil, false
+	}
+	if !isLiteralIntOne(expr.Values[1]) {
+		return nil, false
+	}
+	if stack.Size() == 0 {
+		return nil, false
+	}
+	// The old field value must be exactly the value currently on top of the stack (placed there
+	// by the dup/dup_x1 that captured it for reuse), proving this is the post-op idiom.
+	top := stack.Peek()
+	if UnpackSoltValue(top) != UnpackSoltValue(expr.Values[0]) {
+		return nil, false
+	}
+	// Suppress the temporary that dup/dup_x1 created to carry the old value, if any, so its
+	// assignment statement is not emitted into the (ternary/expression) branch.
+	if ref, ok := UnpackSoltValue(top).(*values.JavaRef); ok {
+		d.selfOpFoldedRefs[ref.VarUid] = true
+	}
+	op := INC
+	if expr.Op == SUB {
+		op = DEC
+	}
+	// Render against the real field reference (this.f / Class.f), not the synthetic temporary.
+	target := GetRealValue(UnpackSoltValue(top))
+	return values.NewBinaryExpression(target, expr.Values[1], op, target.Type()), true
+}
+
+// collectAssignedLocalsInText scans rendered Java text for plain assignments to a generated local
+// (`varN = ` / `varN_M = `, excluding `==`, `<=`, `>=`, `!=`, `+=`, ... compound forms) and returns
+// the set of assigned local names. Used to detect a side effect baked into a folded value (the
+// embedded assignment is rendered through an opaque CustomValue, so only its text is inspectable).
+func collectAssignedLocalsInText(s string) map[string]struct{} {
+	out := map[string]struct{}{}
+	n := len(s)
+	for i := 0; i+3 < n; i++ {
+		if s[i] != 'v' || s[i+1] != 'a' || s[i+2] != 'r' {
+			continue
+		}
+		// must start a token
+		if i > 0 && isIdentByte(s[i-1]) {
+			continue
+		}
+		j := i + 3
+		start := j
+		for j < n && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		if j == start {
+			continue
+		}
+		// optional _<digits> collision suffix
+		if j < n && s[j] == '_' {
+			k := j + 1
+			for k < n && s[k] >= '0' && s[k] <= '9' {
+				k++
+			}
+			if k > j+1 {
+				j = k
+			}
+		}
+		name := s[i:j]
+		// skip spaces
+		p := j
+		for p < n && (s[p] == ' ' || s[p] == '\t') {
+			p++
+		}
+		if p >= n || s[p] != '=' {
+			continue
+		}
+		// exclude operators ending in '=' (==, <=, >=, !=, +=, -=, *=, /=, %=, &=, |=, ^=) and the
+		// arrow-ish ">=" already covered: require the char before '=' (after the name) to be space or
+		// the name itself (handled), and the char after '=' must NOT be '='.
+		if p+1 < n && s[p+1] == '=' {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || b == '$' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// textReferencesLocal reports whether rendered Java text references the given generated local name as
+// a whole token (so var2 does not match var20 or var2_1).
+func textReferencesLocal(s, name string) bool {
+	from := 0
+	for {
+		idx := indexFrom(s, name, from)
+		if idx < 0 {
+			return false
+		}
+		before := idx == 0 || !isIdentByte(s[idx-1])
+		afterPos := idx + len(name)
+		after := afterPos >= len(s) || !isIdentByte(s[afterPos])
+		if before && after {
+			return true
+		}
+		from = idx + 1
+	}
+}
+
+func indexFrom(s, sub string, from int) int {
+	if from >= len(s) {
+		return -1
+	}
+	idx := strings.Index(s[from:], sub)
+	if idx < 0 {
+		return -1
+	}
+	return from + idx
+}
+
+// foldReordersSideEffect reports whether single-use-folding val into the use site at node would
+// reorder an embedded local-assignment side effect relative to a read of that same local already
+// present in the use statement. See the call site (Bug T) for the canonical reorder it prevents.
+// Kill-switch: JDEC_SIDEEFFECT_FOLD_OFF=1.
+func (d *Decompiler) foldReordersSideEffect(val values.JavaValue, node *Node, foldedRef *values.JavaRef) bool {
+	if os.Getenv("JDEC_SIDEEFFECT_FOLD_OFF") == "1" {
+		return false
+	}
+	if val == nil || node == nil || node.Statement == nil {
+		return false
+	}
+	assigned := collectAssignedLocalsInText(val.String(d.FunctionContext))
+	if len(assigned) == 0 {
+		return false
+	}
+	// The folded variable's own name is being replaced by val, so a reference to it is not a hazard.
+	foldedName := ""
+	if foldedRef != nil {
+		foldedName = foldedRef.String(d.FunctionContext)
+	}
+	stmtText := node.Statement.String(d.FunctionContext)
+	for name := range assigned {
+		if name == foldedName {
+			continue
+		}
+		if textReferencesLocal(stmtText, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLocalLoadOpcode reports whether op reads a local variable slot onto the operand stack.
+func isLocalLoadOpcode(op int) bool {
+	switch op {
+	case OP_ALOAD, OP_ILOAD, OP_LLOAD, OP_DLOAD, OP_FLOAD,
+		OP_ALOAD_0, OP_ILOAD_0, OP_LLOAD_0, OP_DLOAD_0, OP_FLOAD_0,
+		OP_ALOAD_1, OP_ILOAD_1, OP_LLOAD_1, OP_DLOAD_1, OP_FLOAD_1,
+		OP_ALOAD_2, OP_ILOAD_2, OP_LLOAD_2, OP_DLOAD_2, OP_FLOAD_2,
+		OP_ALOAD_3, OP_ILOAD_3, OP_LLOAD_3, OP_DLOAD_3, OP_FLOAD_3:
+		return true
+	}
+	return false
+}
+
+// isReferenceLoadOpcode reports whether op is an ALOAD-family load (reads a reference, not a
+// primitive). The JVM uses distinct load opcodes per type category, so the opcode alone tells us
+// whether the slot is expected to hold a reference or a primitive at this read.
+func isReferenceLoadOpcode(op int) bool {
+	switch op {
+	case OP_ALOAD, OP_ALOAD_0, OP_ALOAD_1, OP_ALOAD_2, OP_ALOAD_3:
+		return true
+	}
+	return false
+}
+
+// isLocalStoreOpcode reports whether op defines a new value into a local slot (excludes IINC, which
+// updates an existing slot in place and keeps the same logical variable/ref).
+func isLocalStoreOpcode(op int) bool {
+	switch op {
+	case OP_ASTORE, OP_ISTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE,
+		OP_ASTORE_0, OP_ISTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0,
+		OP_ASTORE_1, OP_ISTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1,
+		OP_ASTORE_2, OP_ISTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2,
+		OP_ASTORE_3, OP_ISTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
+		return true
+	}
+	return false
+}
+
+// refIsPrimitive reports whether ref currently carries a primitive type.
+func refIsPrimitive(ref *values.JavaRef) bool {
+	if ref == nil || ref.Type() == nil {
+		return false
+	}
+	_, isPrim := ref.Type().RawType().(*types.JavaPrimer)
+	return isPrim
+}
+
+// reachingSlotVersionOnMismatch repairs a stale slot read produced by the single global varTable.
+// See the call site in loadVarBySlot for the root cause. We trigger ONLY on the unambiguous
+// corruption signal: the load opcode's category (reference vs primitive) disagrees with the
+// resolved ref's type. In that case the global table holds a later, wrong-path version of the slot,
+// so we recompute the true reaching definition by walking Source edges backward to the nearest
+// version-defining local store of the same slot whose ref category matches the load. Returns nil
+// (caller keeps the original ref) when the categories already agree or no matching definition is
+// found, keeping the blast radius to genuinely corrupted reads only.
+// Kill-switch: JDEC_SLOT_READ_REACHING_OFF=1.
+func (d *Decompiler) reachingSlotVersionOnMismatch(load *OpCode, slot int, current *values.JavaRef) *values.JavaRef {
+	if os.Getenv("JDEC_SLOT_READ_REACHING_OFF") == "1" {
+		return nil
+	}
+	if load == nil || !isLocalLoadOpcode(load.Instr.OpCode) {
+		return nil
+	}
+	if current == nil || current.Type() == nil {
+		return nil
+	}
+	wantRef := isReferenceLoadOpcode(load.Instr.OpCode)
+	if wantRef != refIsPrimitive(current) {
+		// wantRef==true && current primitive  -> mismatch (proceed)
+		// wantRef==false && current reference -> mismatch (proceed)
+		// otherwise the categories already agree, nothing to repair.
+		// Note: the boolean encodes (wantRef) vs (current is primitive); they mismatch exactly when
+		// wantRef == refIsPrimitive(current).
+		return nil
+	}
+	return d.reachingSlotVersionByCategory(load, slot, wantRef)
+}
+
+// reachingSlotVersionByCategory walks Source edges backward from start to the nearest version-
+// defining local store of `slot` whose ref category (reference vs primitive) matches wantRef, and
+// returns that store's ref. The first same-slot store on each path dominates it, so the search does
+// not expand past a same-slot store of the WRONG category (it just stops that path). Returns nil
+// when no matching reaching definition is found. Shared by the load-mismatch repair
+// (reachingSlotVersionOnMismatch) and the iinc repair, both of which fight the same single-global
+// slot-table corruption introduced by DFS traversal order.
+func (d *Decompiler) reachingSlotVersionByCategory(start *OpCode, slot int, wantRef bool) *values.JavaRef {
+	if start == nil {
+		return nil
+	}
+	visited := map[*OpCode]bool{start: true}
+	queue := append([]*OpCode{}, start.Source...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			// A version-defining store for this slot shadows anything earlier on this path. Adopt
+			// its ref when the category matches; otherwise stop expanding past it (its own
+			// definition dominates this path, so an earlier same-slot store is not reachable here)
+			// and keep searching other paths.
+			if refs, ok := d.opcodeIdToRef[cur]; ok && len(refs) > 0 {
+				if ref, ok2 := refs[len(refs)-1][0].(*values.JavaRef); ok2 && ref != nil && ref.Type() != nil {
+					if wantRef != refIsPrimitive(ref) {
+						return ref
+					}
+				}
+			}
+			continue
+		}
+		queue = append(queue, cur.Source...)
+	}
+	return nil
+}
+
+// reachingSlotStoreRefs walks Source edges backward from start and collects, per backward path, the
+// ref of the NEAREST version-defining local store of `slot` (the reaching definition on that path).
+// A same-slot store dominates everything earlier on its path, so the search stops expanding past it.
+// The result is keyed by VarUid so distinct logical variables are de-duplicated. Used by the general
+// reaching-definition read repair (reachingSlotVersionGeneral).
+func (d *Decompiler) reachingSlotStoreRefs(start *OpCode, slot int) map[string]*values.JavaRef {
+	out := map[string]*values.JavaRef{}
+	if start == nil {
+		return out
+	}
+	visited := map[*OpCode]bool{start: true}
+	queue := append([]*OpCode{}, start.Source...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			if refs, ok := d.opcodeIdToRef[cur]; ok && len(refs) > 0 {
+				if ref, ok2 := refs[len(refs)-1][0].(*values.JavaRef); ok2 && ref != nil {
+					out[ref.VarUid] = ref
+				}
+			}
+			// This store dominates its path; an earlier same-slot store is not reachable here.
+			continue
+		}
+		queue = append(queue, cur.Source...)
+	}
+	return out
+}
+
+// reachingSlotVersionGeneral repairs a slot read that the single global slot table resolved to a ref
+// whose defining store does NOT reach the load along the CFG — a later/disjoint-branch version that
+// leaked in through DFS traversal order, EVEN WHEN the category (reference vs primitive) agrees so
+// the narrower reachingSlotVersionOnMismatch cannot see it. The canonical case is the String-switch
+// receiver: `switch(s){case "X": ...}` desugars to `aload <s-slot>; equals; ...` inside each case,
+// but a LATER second switch reuses that slot for a different reference, and the first switch's case
+// reads resolve to the later variable (fastjson2 TypeUtils.loadClass `varN.equals(...)`, Bug AI).
+//
+// It only fires on the unambiguous corruption signal: the resolved ref is NOT among the reaching
+// definitions AND there is exactly ONE distinct reaching same-slot definition. When current is
+// itself a reaching def (correct read) or several distinct defs reach (a genuine merge/phi we must
+// not rewrite), it returns nil and the caller keeps the original ref — keeping the blast radius to
+// genuinely corrupted reads. Kill-switch: JDEC_SLOT_READ_REACHING_OFF=1 (shared).
+func (d *Decompiler) reachingSlotVersionGeneral(load *OpCode, slot int, current *values.JavaRef) *values.JavaRef {
+	if os.Getenv("JDEC_SLOT_READ_REACHING_OFF") == "1" {
+		return nil
+	}
+	if load == nil || !isLocalLoadOpcode(load.Instr.OpCode) || current == nil {
+		return nil
+	}
+	reaching := d.reachingSlotStoreRefs(load, slot)
+	if len(reaching) == 0 {
+		return nil
+	}
+	if _, ok := reaching[current.VarUid]; ok {
+		// current is a genuine reaching definition: the read is already correct.
+		return nil
+	}
+	if len(reaching) != 1 {
+		// Multiple distinct reaching definitions = a real merge point; do not override.
+		return nil
+	}
+	for _, ref := range reaching {
+		if ref != nil && ref.VarUid != current.VarUid {
+			return ref
+		}
+	}
+	return nil
+}
+
+// reachingStoreVersion repairs the SAME single-global-slot-table DFS corruption as
+// reachingSlotVersionGeneral, but on the STORE side. When a store would continue the prior value of
+// its slot (the JVM reused the slot for a value of the SAME declared type, e.g. the String-switch
+// index slot `int idx = -1; ...; idx = N;`), the reuse decision in AssignVarGuarded depends on the
+// global slot version matching the stored value's type. If DFS order left a wrong-typed version in
+// the slot, AssignVar mints a fresh phantom local instead (fastjson2 TypeUtils.loadClass renders the
+// case-body `idx = N` as a brand new `int varK = N`, so the following `switch(idx)` always reads the
+// untouched `-1` initializer and falls through to default — compiles but is semantically dead).
+//
+// It fires ONLY on that exact corruption signature: the current global version's type does NOT match
+// the stored value (so AssignVar would mint), while there is a UNIQUE reaching same-slot definition
+// whose type DOES match (so continuing it is correct). Returns that definition to install before
+// AssignVar; nil in every other case (current already continues, no/multiple reaching defs, type
+// still mismatches). Kill-switch: JDEC_SLOT_STORE_REACHING_OFF=1.
+func (d *Decompiler) reachingStoreVersion(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_SLOT_STORE_REACHING_OFF") == "1" {
+		return nil
+	}
+	if store == nil || val == nil || val.Type() == nil {
+		return nil
+	}
+	typ := slotDeclType(val)
+	if typ == nil {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	typStr := typ.String(ctx)
+	if current != nil && current.Type() != nil && current.Type().String(ctx) == typStr {
+		// The current global version already continues this store correctly; leave it alone.
+		return nil
+	}
+	reaching := d.reachingSlotStoreRefs(store, slot)
+	if len(reaching) != 1 {
+		return nil
+	}
+	for _, ref := range reaching {
+		if ref == nil || ref.Type() == nil {
+			return nil
+		}
+		if current != nil && ref.VarUid == current.VarUid {
+			return nil
+		}
+		if ref.Type().String(ctx) == typStr {
+			return ref
+		}
+	}
+	return nil
+}
+
+// nullInitDefDominates reports whether the slot's current null-initialized store (the unique
+// same-slot store carrying nullRef, call it D) DOMINATES the store opcode N, i.e. every path from
+// method entry to N passes through D. Dominance is decided by the textbook "remove D and check
+// reachability" test run backward: walk Source edges backward from N treating every same-slot
+// store of nullRef as removed (a wall we never traverse). If method entry becomes reachable, some
+// entry->N path bypasses D, so D does not dominate (the slot value at N leaked from a sibling /
+// disjoint branch through the single global slot table by DFS order — e.g. a try-with-resources
+// synthetic `primaryExc = null` in one branch reusing the slot of an else-branch local). When
+// entry is unreachable without crossing D, D dominates and the `T x = null; ...; x = v` adoption is
+// the genuine single-variable idiom. Plain reachability is insufficient because loop back-edges let
+// a sibling-branch null init reach N across iterations. Kill-switch: JDEC_NULLADOPT_REACH_OFF=1
+// (always reports dominated, i.e. the old unconditional adoption behavior).
+func (d *Decompiler) nullInitDefDominates(store *OpCode, slot int, nullRef *values.JavaRef) bool {
+	if os.Getenv("JDEC_NULLADOPT_REACH_OFF") == "1" {
+		return true
+	}
+	if store == nil || nullRef == nil {
+		return true
+	}
+	var entry *OpCode
+	if len(d.opCodes) > 0 {
+		entry = d.opCodes[0]
+	}
+	isNullDefWall := func(op *OpCode) bool {
+		if !isLocalStoreOpcode(op.Instr.OpCode) || GetStoreIdx(op) != slot {
+			return false
+		}
+		if refs, ok := d.opcodeIdToRef[op]; ok && len(refs) > 0 {
+			if ref, ok2 := refs[len(refs)-1][0].(*values.JavaRef); ok2 && ref != nil {
+				return ref.VarUid == nullRef.VarUid
+			}
+		}
+		return false
+	}
+	visited := map[*OpCode]bool{store: true}
+	queue := append([]*OpCode{}, store.Source...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isNullDefWall(cur) {
+			// D is removed from the graph; do not traverse through it.
+			continue
+		}
+		if cur == entry || cur.CurrentOffset == 0 {
+			// Reached the real method entry without crossing D: some entry->N path bypasses D,
+			// so D does not dominate N. Only the genuine entry counts; other source-less nodes
+			// (e.g. exception-handler roots reached via non-Source edges) are dead-ended to avoid
+			// over-splitting legitimate single-variable idioms inside try blocks.
+			return false
+		}
+		queue = append(queue, cur.Source...)
+	}
+	return true
+}
+
+// reachingSlotStoreOps is the opcode-returning sibling of reachingSlotStoreRefs: per backward path it
+// collects the NEAREST version-defining local store of `slot` (the reaching definition), keyed by the
+// VarUid of the ref that store committed. It lets a reaching-definition pass recover not just the ref
+// but the defining opcode, so the store's RHS (recorded in slotStoreValue) can be inspected.
+func (d *Decompiler) reachingSlotStoreOps(start *OpCode, slot int) map[string]*OpCode {
+	out := map[string]*OpCode{}
+	if start == nil {
+		return out
+	}
+	visited := map[*OpCode]bool{start: true}
+	queue := append([]*OpCode{}, start.Source...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			if refs, ok := d.opcodeIdToRef[cur]; ok && len(refs) > 0 {
+				if ref, ok2 := refs[len(refs)-1][0].(*values.JavaRef); ok2 && ref != nil {
+					out[ref.VarUid] = cur
+				}
+			}
+			continue
+		}
+		queue = append(queue, cur.Source...)
+	}
+	return out
+}
+
+// isExactPrimer reports whether t is exactly the named primitive type (e.g. boolean, int).
+func isExactPrimer(t types.JavaType, name string) bool {
+	if t == nil {
+		return false
+	}
+	p, ok := t.RawType().(*types.JavaPrimer)
+	return ok && p.Name == name
+}
+
+// intLiteral01 reports whether v (unwrapped) is an int literal whose value is 0 or 1, i.e. a default
+// initializer that can be losslessly re-typed to a boolean false/true.
+func intLiteral01(v values.JavaValue) (*values.JavaLiteral, bool) {
+	lit, ok := values.UnpackSoltValue(v).(*values.JavaLiteral)
+	if !ok || lit == nil {
+		return nil, false
+	}
+	if !isExactPrimer(lit.JavaType, types.JavaInteger) {
+		return nil, false
+	}
+	iv, ok := lit.Data.(int)
+	if !ok || (iv != 0 && iv != 1) {
+		return nil, false
+	}
+	return lit, true
+}
+
+// slotDefPhiReachesLoad reports whether some load of `slot` is reachable forward from `store` (across
+// the fall-through/branch CFG, stopping at any redefining store of `slot`) AND that same load also has
+// `defUid` among its backward reaching definitions. That is exactly the phi/diamond shape proving the
+// reaching definition `defUid` (a default init) and the value about to be stored at `store` denote ONE
+// source variable: both arms flow into a common downstream read. Used to gate the boolean default-init
+// merge so it fires ONLY on genuinely-shared variables (rejecting `int a=0; use(a); boolean b=...;
+// return b;`, where the int default and the boolean store reach disjoint loads).
+func (d *Decompiler) slotDefPhiReachesLoad(store *OpCode, slot int, defUid string) bool {
+	if store == nil {
+		return false
+	}
+	visited := map[*OpCode]bool{store: true}
+	queue := append([]*OpCode{}, store.Target...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			// A redefinition kills `store`'s value; do not look past it on this path.
+			continue
+		}
+		if isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
+			if _, ok := d.reachingSlotStoreRefs(cur, slot)[defUid]; ok {
+				return true
+			}
+		}
+		queue = append(queue, cur.Target...)
+	}
+	return false
+}
+
+// reachingBoolDefaultMerge handles the boolean default-init slot split (Bug AI residual). javac emits
+// `boolean b = false;` as `iconst_0; istore S` whose pushed constant is an int (the JVM operand stack
+// has no boolean category), so the default initializer is typed int. A later `b = <boolean expr>`
+// (e.g. inside an `if` arm) stores a boolean-typed value into the SAME slot; AssignVarGuarded refuses
+// to merge int with boolean (Java has no int<->boolean conversion) and mints a fresh block-scoped
+// variable, leaving the trailing `return b` reading the inner variable out of scope ("cannot find
+// symbol", commons-codec Metaphone.regionMatch / MatchRatingApproachEncoder).
+//
+// It fires ONLY on that exact, provably-safe signature:
+//   - the value being stored is boolean-typed;
+//   - the slot has a UNIQUE reaching definition, and that definition's RHS is an int 0/1 literal
+//     (a default initializer that can be re-typed to false/true losslessly);
+//   - a phi (shared downstream load reached by both the default and this store) proves the two are
+//     one source variable — this rejects the disjoint-variable counter-example where the int default
+//     is read as int before an unrelated boolean reuse of the slot.
+//
+// On a match it re-types the default's ref AND its 0/1 literal to boolean (so the declaration renders
+// `boolean b = false`) and returns that ref to continue, so the boolean store reuses it instead of
+// minting. Returns nil in every other case. Kill-switch: JDEC_BOOL_DEFAULT_MERGE_OFF=1.
+func (d *Decompiler) reachingBoolDefaultMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_BOOL_DEFAULT_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || val == nil || val.Type() == nil {
+		return nil
+	}
+	if !isExactPrimer(val.Type(), types.JavaBoolean) {
+		return nil
+	}
+	defOps := d.reachingSlotStoreOps(store, slot)
+	if len(defOps) != 1 {
+		return nil
+	}
+	for uid, defOp := range defOps {
+		if current != nil && current.VarUid == uid {
+			// The store already continues this definition; no split would occur.
+		}
+		refs, ok := d.opcodeIdToRef[defOp]
+		if !ok || len(refs) == 0 {
+			return nil
+		}
+		defRef, _ := refs[len(refs)-1][0].(*values.JavaRef)
+		if defRef == nil || !isExactPrimer(defRef.Type(), types.JavaInteger) {
+			return nil
+		}
+		lit, ok := intLiteral01(d.slotStoreValue[defOp])
+		if !ok {
+			return nil
+		}
+		if !d.slotDefPhiReachesLoad(store, slot, uid) {
+			return nil
+		}
+		boolType := types.NewJavaPrimer(types.JavaBoolean)
+		defRef.ResetVarType(boolType)
+		lit.JavaType = boolType
+		return defRef
+	}
+	return nil
+}
+
+// reachingRefSlotPhiMerge handles the lazy-init reference-slot split (Bug AK phi half), the
+// reference-type analogue of reachingBoolDefaultMerge. The ubiquitous idiom
+//
+//	List r = map.get(k); if (r == null) { r = new ArrayList(); map.put(k, r); } r.add(v);
+//
+// stores two values into ONE slot: the first carries the declared type (List, from map.get) and the
+// second, inside the if-arm, carries a SUBTYPE (ArrayList). AssignVarGuarded sees the differing types
+// and -- the slot being neither null-initialized, a parameter, nor int-category -- mints a fresh
+// block-scoped variable for the arm store. The trailing `r.add(v)` then binds (via the single global
+// slot table, DFS order) to that arm variable and renders out of scope ("cannot find symbol"), and
+// the arm store's value, looking single-use, is otherwise dropped by the single-use fold.
+//
+// It fires ONLY on the provably-safe phi signature:
+//   - the value being stored is a reference (non-primitive) type, of a type DIFFERENT from the slot's
+//     reaching definition (a same-type store already reuses via AssignVarGuarded / reachingStoreVersion);
+//   - the slot has a UNIQUE reaching definition D, also a non-null reference type;
+//   - a phi (a downstream load reachable forward from this store AND backward-reached by D) proves the
+//     two denote ONE source variable: the fall-through (D) and the arm (this store) flow into a common
+//     later read. A single source-level read can observe two slot versions only when they are the same
+//     variable, so the phi is sufficient proof, and since the original compiled this store's value is
+//     assignable to D's declared type.
+//
+// On a match it returns D's ref to continue (keeping D's broader declared type), so the arm store
+// becomes a plain reassignment `r = new ArrayList()` and every read binds to the one in-scope variable.
+// Kill-switch: JDEC_REF_SLOT_PHI_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotPhiMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_PHI_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || val == nil {
+		return nil
+	}
+	// Arm value must be a freshly-ALLOCATED object (`new X()`, non-array). A `new X()` has exactly
+	// static type X, and because the original compiled, X is assignable to the variable's declared
+	// type (= the dominating def D's type), so continuing D (keeping D's type) is provably type-safe.
+	// Method-call / field arm values (`= this.readObject()`, `= cl.getParent()`) carry a type that may
+	// be a SIBLING or SUPERtype of D and would break the merge ("List cannot be converted to Map",
+	// "ClassLoader cannot be converted to DynamicClassLoader"); the lazy-init idiom always allocates,
+	// so this gate keeps the merge to the safe, common `if (r == null) r = new ArrayList();` shape.
+	if ne, ok := values.UnpackSoltValue(val).(*values.NewExpression); !ok || ne == nil || ne.IsArray() {
+		return nil
+	}
+	typ := slotDeclType(val)
+	if typ == nil {
+		return nil
+	}
+	if _, isPrim := typ.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	valTypeStr := typ.String(ctx)
+	defOps := d.reachingSlotStoreOps(store, slot)
+	if len(defOps) != 1 {
+		return nil
+	}
+	for uid, defOp := range defOps {
+		refs, ok := d.opcodeIdToRef[defOp]
+		if !ok || len(refs) == 0 {
+			return nil
+		}
+		defRef, _ := refs[len(refs)-1][0].(*values.JavaRef)
+		if defRef == nil || defRef.Type() == nil {
+			return nil
+		}
+		if _, isPrim := defRef.Type().RawType().(*types.JavaPrimer); isPrim {
+			return nil
+		}
+		if defRef.IsNullInitialized() {
+			// The null-initialized idiom is handled by the null-adopt dominator test in the caller.
+			return nil
+		}
+		if defRef.Type().String(ctx) == valTypeStr {
+			// Same declared type: no split occurs (AssignVarGuarded reuses on type match).
+			return nil
+		}
+		// Tight structural gate: the dominating def D must be IMMEDIATELY null-checked on its own slot
+		// (`astore S; aload S; ifnull/ifnonnull`), i.e. the arm store is control-dependent on D being
+		// null. This is the exact lazy-init signature and excludes Object-dispatch slot reuse (where
+		// one slot holds Map/List/Number/String on instanceof-guarded branches): there D carries a
+		// narrow type and is NOT self-null-checked, so merging onto D's type would wrongly narrow the
+		// variable (`List cannot be converted to Map`). Without this gate the merge over-fires and
+		// regresses such reuse (fastjson2 JSONReader / JSONPathSegment*).
+		if !d.defFollowedBySelfNullCheck(defOp, slot) {
+			return nil
+		}
+		if !d.slotDefPhiReachesLoad(store, slot, uid) {
+			return nil
+		}
+		return defRef
+	}
+	return nil
+}
+
+// defFollowedBySelfNullCheck reports whether the defining store `defOp` is immediately followed (in
+// the raw-bytecode CFG, before any redefinition of the slot) by a load of its OWN slot feeding an
+// ifnull/ifnonnull. This is the lazy-init control-dependence signature `T r = expr; if (r == null) {
+// r = ...; }`: the arm store runs only when D was null, so D and the arm store denote one variable.
+// It deliberately rejects Object-dispatch slot reuse, where the slot is repurposed for unrelated
+// (sibling-typed) values under instanceof/type guards rather than a self-null-check.
+func (d *Decompiler) defFollowedBySelfNullCheck(defOp *OpCode, slot int) bool {
+	if defOp == nil {
+		return false
+	}
+	visited := map[*OpCode]bool{defOp: true}
+	queue := append([]*OpCode{}, defOp.Target...)
+	steps := 0
+	for len(queue) > 0 && steps < 8 {
+		cur := queue[0]
+		queue = queue[1:]
+		steps++
+		if cur == nil || cur.Instr == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			// A redefinition ends the lazy-init window on this path.
+			continue
+		}
+		if isReferenceLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
+			for _, t := range cur.Target {
+				if t != nil && t.Instr != nil && (t.Instr.OpCode == OP_IFNULL || t.Instr.OpCode == OP_IFNONNULL) {
+					return true
+				}
+			}
+		}
+		queue = append(queue, cur.Target...)
+	}
+	return false
+}
+
+func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation, opcode *OpCode) error {
+	recordOpcodeHit(opcode.Instr.OpCode)
+	funcCtx := d.FunctionContext
+	checkAndConvertRef := func(value values.JavaValue) func(int) {
+		if _, ok := UnpackSoltValue(runtimeStackSimulation.Peek()).(*values.JavaRef); !ok {
+			val := runtimeStackSimulation.Pop().(values.JavaValue)
+			ref := runtimeStackSimulation.NewVar(val)
+			d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, true})
+			// Record the real source value so the dup statement-parse handler does not rely on
+			// stackConsumed[i] (which is mis-indexed when this is not the top-of-consume operand).
+			d.dupConvertedRefValue[opcode] = append(d.dupConvertedRefValue[opcode], val)
+			attr := d.delRefUserAttr[ref.VarUid]
+			attr[2] = 1
+			d.delRefUserAttr[ref.VarUid] = attr
+			slotVal := values.NewSlotValue(ref, ref.Type())
+			addUser := func(n int) {
+				for i := 0; i < n; i++ {
+					d.varUserMap.Set(ref, append(d.varUserMap.GetMust(ref), &VarFoldRule{
+						Replace: func(v values.JavaValue) {
+							slotVal.ResetValue(v)
+						},
+						CurrentOpcode: opcode,
+					}))
+				}
+			}
+			runtimeStackSimulation.Push(slotVal)
+			addUser(1)
+			return addUser
+			//appendNode(statements.NewAssignStatement(ref, val, true))
+		}
+		return func(n int) {
+		}
+	}
+	loadVarBySlot := func(slot int) values.JavaValue {
+		varRef := runtimeStackSimulation.GetVar(slot)
+		// The forward simulation keeps a single global slot->ref table mutated in DFS traversal
+		// order. When a slot is reused for a different-category value on a branch DFS visits first
+		// (e.g. a String-switch temp slot later reused for an int after the merge), a load on a
+		// not-yet-visited sibling branch can resolve to the wrong (later) version. Repair only the
+		// unambiguous corruption signal (load opcode category disagrees with the resolved ref) by
+		// walking back to the true reaching definition; correct reads are left untouched.
+		if better := d.reachingSlotVersionOnMismatch(opcode, slot, varRef); better != nil {
+			varRef = better
+		} else if better := d.reachingSlotVersionGeneral(opcode, slot, varRef); better != nil {
+			// Same-category (e.g. reference-vs-reference) reused-slot corruption that the
+			// category-mismatch repair cannot detect (String-switch receiver, Bug AI).
+			varRef = better
+		}
+		slotvalue := values.NewSlotValue(varRef, varRef.Type())
+		users := d.varUserMap.GetMust(varRef)
+		d.varUserMap.Set(varRef, append(users, &VarFoldRule{
+			Replace: func(v values.JavaValue) {
+				slotvalue.ResetValue(v)
+			},
+			CurrentOpcode: opcode,
+		}))
+		return slotvalue
+	}
+	switch opcode.Instr.OpCode {
+	case OP_ALOAD, OP_ILOAD, OP_LLOAD, OP_DLOAD, OP_FLOAD, OP_ALOAD_0, OP_ILOAD_0, OP_LLOAD_0, OP_DLOAD_0, OP_FLOAD_0, OP_ALOAD_1, OP_ILOAD_1, OP_LLOAD_1, OP_DLOAD_1, OP_FLOAD_1, OP_ALOAD_2, OP_ILOAD_2, OP_LLOAD_2, OP_DLOAD_2, OP_FLOAD_2, OP_ALOAD_3, OP_ILOAD_3, OP_LLOAD_3, OP_DLOAD_3, OP_FLOAD_3:
+		var slot int = -1
+		switch opcode.Instr.OpCode {
+		case OP_ALOAD_0, OP_ILOAD_0, OP_LLOAD_0, OP_DLOAD_0, OP_FLOAD_0:
+			slot = 0
+		case OP_ALOAD_1, OP_ILOAD_1, OP_LLOAD_1, OP_DLOAD_1, OP_FLOAD_1:
+			slot = 1
+		case OP_ALOAD_2, OP_ILOAD_2, OP_LLOAD_2, OP_DLOAD_2, OP_FLOAD_2:
+			slot = 2
+		case OP_ALOAD_3, OP_ILOAD_3, OP_LLOAD_3, OP_DLOAD_3, OP_FLOAD_3:
+			slot = 3
+		default:
+			slot = GetRetrieveIdx(opcode)
+		}
+
+		runtimeStackSimulation.Push(loadVarBySlot(slot))
+		////return mkRetrieve(variableFactory);
+	case OP_ACONST_NULL:
+		runtimeStackSimulation.Push(values.NewJavaLiteral("null", types.NewJavaClass("java.lang.Object")))
+	case OP_ICONST_M1:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(-1, types.NewJavaPrimer(types.JavaInteger)))
+	case OP_ICONST_0:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger)))
+	case OP_ICONST_1:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(1, types.NewJavaPrimer(types.JavaInteger)))
+	case OP_ICONST_2:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(2, types.NewJavaPrimer(types.JavaInteger)))
+	case OP_ICONST_3:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(3, types.NewJavaPrimer(types.JavaInteger)))
+	case OP_ICONST_4:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(4, types.NewJavaPrimer(types.JavaInteger)))
+	case OP_ICONST_5:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(5, types.NewJavaPrimer(types.JavaInteger)))
+	case OP_LCONST_0:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(int64(0), types.NewJavaPrimer(types.JavaLong)))
+	case OP_LCONST_1:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(int64(1), types.NewJavaPrimer(types.JavaLong)))
+	case OP_FCONST_0:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(float32(0), types.NewJavaPrimer(types.JavaFloat)))
+	case OP_FCONST_1:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(float32(1), types.NewJavaPrimer(types.JavaFloat)))
+	case OP_FCONST_2:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(float32(2), types.NewJavaPrimer(types.JavaFloat)))
+	case OP_DCONST_0:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(float64(0), types.NewJavaPrimer(types.JavaDouble)))
+	case OP_DCONST_1:
+		runtimeStackSimulation.Push(values.NewJavaLiteral(float64(1), types.NewJavaPrimer(types.JavaDouble)))
+	case OP_BIPUSH:
+		// The bipush operand is a SIGNED byte. Reading it unsigned turns -5 (0xFB) into 251 and
+		// silently corrupts every negative byte literal; sign-extend via int8. Using a plain int
+		// (not byte) also lets JavaLiteral.String render boolean 0/1 as false/true.
+		runtimeStackSimulation.Push(values.NewJavaLiteral(int(int8(opcode.Data[0])), types.NewJavaPrimer(types.JavaInteger)))
+	case OP_SIPUSH:
+		// The sipush operand is a SIGNED short. Convert2bytesToInt returns uint16, so -10 (0xFFF6)
+		// would become 65526; sign-extend through int16 before widening to int.
+		runtimeStackSimulation.Push(values.NewJavaLiteral(int(int16(Convert2bytesToInt(opcode.Data))), types.NewJavaPrimer(types.JavaInteger)))
+	case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
+		slot := GetStoreIdx(opcode)
+		value := runtimeStackSimulation.Pop().(values.JavaValue)
+		d.slotStoreValue[opcode] = value
+		oldRef := runtimeStackSimulation.GetVar(slot)
+		// Store-side reaching-definition repair (Bug AI store side): undo DFS-order corruption of
+		// the global slot table so a same-type continuation reuses the right variable instead of
+		// minting a phantom local (String-switch index slot, fastjson2 TypeUtils.loadClass).
+		if repaired := d.reachingStoreVersion(opcode, slot, oldRef, value); repaired != nil {
+			runtimeStackSimulation.SetVar(slot, repaired)
+			oldRef = repaired
+		}
+		// Boolean default-init phi merge (Bug AI residual): a `boolean b = false; if(...){ b = expr; }
+		// return b;` slot whose `iconst_0/iconst_1` default initializer was typed int (the JVM has no
+		// boolean stack category) splits from the later boolean store into two variables, leaving the
+		// `return b` read out of scope. When the unique reaching definition is exactly that int-0/1
+		// default and a phi (shared downstream load) proves they are one variable, re-type the default
+		// to boolean (coercing its 0/1 literal to false/true) and continue it instead of minting.
+		if merged := d.reachingBoolDefaultMerge(opcode, slot, oldRef, value); merged != nil {
+			runtimeStackSimulation.SetVar(slot, merged)
+			oldRef = merged
+		}
+		// Reference-type lazy-init phi merge (Bug AK): when the arm store widens the slot's reaching
+		// definition to a subtype (List <- ArrayList) and a phi proves they are one variable, continue
+		// the dominating definition instead of letting AssignVarGuarded mint a block-scoped split.
+		refPhiMerged := false
+		if merged := d.reachingRefSlotPhiMerge(opcode, slot, oldRef, value); merged != nil {
+			runtimeStackSimulation.SetVar(slot, merged)
+			oldRef = merged
+			refPhiMerged = true
+		}
+		ref, isFirst := oldRef, false
+		reuseNullBranchStore := false
+		if !refPhiMerged && values.IsNullLiteral(value) && oldRef != nil && len(opcode.Target) == 1 && opcode.Target[0].Instr.OpCode == OP_GOTO {
+			if _, isPrim := oldRef.Type().RawType().(*types.JavaPrimer); !isPrim {
+				reuseNullBranchStore = true
+			}
+		}
+		if refPhiMerged {
+			// oldRef is the unified dominating definition; the store is a plain reassignment of it.
+			ref, isFirst = oldRef, false
+		} else if !reuseNullBranchStore {
+			// Gate the null-init type adoption: only let a null-initialized slot adopt this
+			// store's concrete reference type when the null initializer actually reaches here.
+			// A try-with-resources synthetic `primaryExc = null` (one branch) reuses the same JVM
+			// slot as an unrelated-typed local on a sibling branch (e.g. an else-branch String);
+			// the single global slot table makes the sibling store see the null init purely from
+			// DFS order, and adopting it unified two distinct variables onto one mis-typed name
+			// (Throwable used as String -> "cannot find symbol addSuppressed"). When the null init
+			// does not reach this store, mint a fresh variable instead.
+			blockNullAdopt := oldRef != nil && oldRef.IsNullInitialized() &&
+				!d.nullInitDefDominates(opcode, slot, oldRef)
+			// try/catch value-fallback phi merge (Bug AN): a slot whose value is computed in a try
+			// body (`v = readDouble()`) and whose `= null` fallback lives in the catch handler is ONE
+			// variable read after the try. Because the catch store runs only on exception it does NOT
+			// dominate the try store, so the null-adopt dominator gate above blocks adoption and the
+			// try store mints a fresh, differently-typed variable; the post-try read then binds to the
+			// null branch (value silently lost) and javac rejects the type (`Object cannot be converted
+			// to Double/V`). When a phi (a downstream load reached by BOTH this store and the
+			// null-init def) proves they are one source variable, allow the adoption: this is the same
+			// convergence discriminator used by the boolean/ref-slot merges, so the disjoint-reuse
+			// counter-example (twr `Throwable primaryExc = null` later reused as an unrelated loop var,
+			// DaitchMokotoffSoundex) shares no downstream load, fails the phi test, and still splits.
+			// Kill-switch: JDEC_TRY_SLOT_PHI_MERGE_OFF=1.
+			if blockNullAdopt && os.Getenv("JDEC_TRY_SLOT_PHI_MERGE_OFF") == "" &&
+				d.slotDefPhiReachesLoad(opcode, slot, oldRef.VarUid) {
+				blockNullAdopt = false
+			}
+			ref, isFirst = runtimeStackSimulation.AssignVarGuarded(slot, value, blockNullAdopt)
+		}
+		if slot == 0 && oldRef != nil && oldRef.IsThis && ref != nil && oldRef.VarUid == ref.VarUid {
+			ref.IsThis = false
+		}
+		if d.traceEnabled("slot-version") {
+			last := d.slotStoreTrace[slot]
+			oldType, newType := "<nil>", "<nil>"
+			if oldRef != nil && oldRef.Type() != nil {
+				oldType = oldRef.Type().String(d.FunctionContext)
+			}
+			if value != nil && value.Type() != nil {
+				newType = value.Type().String(d.FunctionContext)
+			}
+			reused := oldRef != nil && ref != nil && oldRef.VarUid == ref.VarUid
+			sameType := oldType == newType
+			d.tracef("slot-version", "store offset=%d slot=%d reused=%v sameType=%v isFirst=%v lastOffset=%d old=%s new=%s value=%s",
+				opcode.CurrentOffset, slot, reused, sameType, isFirst, last.offset, traceRef(oldRef, d.FunctionContext),
+				traceRef(ref, d.FunctionContext), traceValue(value, d.FunctionContext))
+			if reused && sameType && last.ref != nil {
+				d.tracef("slot-version", "shadow-split-candidate slot=%d previousOffset=%d currentOffset=%d ref=%s",
+					slot, last.offset, opcode.CurrentOffset, traceRef(ref, d.FunctionContext))
+			}
+		}
+		d.slotStoreTrace[slot] = slotStoreTraceInfo{offset: opcode.CurrentOffset, ref: ref}
+		statements.NewAssignStatement(ref, value, isFirst)
+		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
+		attr := d.delRefUserAttr[ref.VarUid]
+		attr[1]++
+		d.delRefUserAttr[ref.VarUid] = attr
+
+		if v, ok := value.(*values.CustomValue); ok {
+			if v.Flag == "exception" {
+				loadVarBySlot(slot)
+			}
+		}
+		if !isFirst {
+			d.disFoldRef = append(d.disFoldRef, ref)
+		}
+	case OP_NEW:
+		n := Convert2bytesToInt(opcode.Data)
+		javaClass := d.constantPoolGetter(int(n)).(*values.JavaClassValue)
+		//runtimeStackSimulation.Push(javaClass)
+		runtimeStackSimulation.Push(values.NewNewExpression(javaClass.Type()))
+		//appendNode()
+	case OP_NEWARRAY:
+		length := runtimeStackSimulation.Pop().(values.JavaValue)
+		primerTypeName := types.GetPrimerArrayType(int(opcode.Data[0]))
+		runtimeStackSimulation.Push(values.NewNewArrayExpression(types.NewJavaArrayType(primerTypeName), length))
+	case OP_ANEWARRAY:
+		value := d.getPoolValue(int(Convert2bytesToInt(opcode.Data)))
+		length := runtimeStackSimulation.Pop().(values.JavaValue)
+		arrayType := types.NewJavaArrayType(value.(*values.JavaClassValue).Type())
+		exp := values.NewNewArrayExpression(arrayType, length)
+		runtimeStackSimulation.Push(exp)
+	case OP_MULTIANEWARRAY:
+		// The constant-pool entry is ALREADY the full array class type (e.g. "[[I" is
+		// int[][]); the third operand byte is the count of explicitly-sized leading
+		// dimensions whose lengths are on the stack (always <= the array rank). The
+		// type must be used as-is: re-wrapping it once per popped dimension doubled the
+		// rank, turning `new int[3][4]` into a 7-dimensional `new int[3][4][][]`.
+		typ := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data[:2]))).(*values.JavaClassValue).Type()
+		dims := int(opcode.Data[2])
+		lens := make([]values.JavaValue, 0, dims)
+		for _, v := range runtimeStackSimulation.PopN(dims) {
+			lens = append(lens, v.(values.JavaValue))
+		}
+		lens = funk.Reverse(lens).([]values.JavaValue)
+		exp := values.NewNewArrayExpression(typ, lens...)
+		runtimeStackSimulation.Push(exp)
+	case OP_ARRAYLENGTH:
+		ref := runtimeStackSimulation.Pop().(values.JavaValue)
+		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			return fmt.Sprintf("%s.length", ref.String(funcCtx))
+		}, func() types.JavaType {
+			return types.NewJavaPrimer(types.JavaInteger)
+		}))
+	case OP_AALOAD, OP_IALOAD, OP_BALOAD, OP_CALOAD, OP_FALOAD, OP_LALOAD, OP_DALOAD, OP_SALOAD:
+		index := runtimeStackSimulation.Pop().(values.JavaValue)
+		ref := runtimeStackSimulation.Pop().(values.JavaValue)
+		runtimeStackSimulation.Push(values.NewJavaArrayMember(ref, index))
+	case OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
+		value := runtimeStackSimulation.Pop().(values.JavaValue)
+		index := runtimeStackSimulation.Pop().(values.JavaValue)
+		ref := runtimeStackSimulation.Pop().(values.JavaValue)
+		statements.NewArrayMemberAssignStatement(values.NewJavaArrayMember(ref, index), value)
+	case OP_LCMP, OP_DCMPG, OP_DCMPL, OP_FCMPG, OP_FCMPL:
+		var1 := runtimeStackSimulation.Pop().(values.JavaValue)
+		var2 := runtimeStackSimulation.Pop().(values.JavaValue)
+		runtimeStackSimulation.Push(values.NewJavaCompare(var2, var1))
+	case OP_LSUB, OP_ISUB, OP_DSUB, OP_FSUB, OP_LADD, OP_IADD, OP_FADD, OP_DADD, OP_IREM, OP_FREM, OP_LREM, OP_DREM, OP_IDIV, OP_FDIV, OP_DDIV, OP_LDIV, OP_IMUL, OP_DMUL, OP_FMUL, OP_LMUL, OP_LAND, OP_LOR, OP_LXOR, OP_ISHR, OP_ISHL, OP_LSHL, OP_LSHR, OP_IUSHR, OP_LUSHR, OP_IOR, OP_IAND, OP_IXOR:
+		var op string
+		switch opcode.Instr.OpCode {
+		case OP_LSUB, OP_ISUB, OP_DSUB, OP_FSUB:
+			op = SUB
+		case OP_LADD, OP_IADD, OP_FADD, OP_DADD:
+			op = ADD
+		case OP_IREM, OP_FREM, OP_LREM, OP_DREM:
+			op = REM
+		case OP_IDIV, OP_FDIV, OP_DDIV, OP_LDIV:
+			op = DIV
+		case OP_IMUL, OP_DMUL, OP_FMUL, OP_LMUL:
+			op = MUL
+		case OP_LAND, OP_IAND:
+			op = AND
+		case OP_LOR, OP_IOR:
+			op = OR
+		case OP_LXOR, OP_IXOR:
+			op = XOR
+		case OP_ISHR, OP_LSHR:
+			op = SHR
+		case OP_ISHL, OP_LSHL:
+			op = SHL
+		case OP_IUSHR, OP_LUSHR:
+			op = USHR
+		default:
+			// Unknown shift opcode: default to shift-left as a safe fallback.
+			op = SHL
+		}
+		var2 := runtimeStackSimulation.Pop().(values.JavaValue)
+		var1 := runtimeStackSimulation.Pop().(values.JavaValue)
+		// Per JLS, integer arithmetic/bitwise/shift ops ALWAYS promote operands to int (or long for
+		// the L-prefixed ops) and yield int/long regardless of the operands' narrower type
+		// (byte/short/char). Typing the result as var1.Type() left e.g.
+		// `byte x = (arr[i] ^ crc) & 255` typed as byte, which compiled wrong: javac promotes the
+		// expression to int and rejects the assignment ('possible lossy conversion from int to
+		// byte'), as seen in commons-codec PureJavaCrc32C. Now the int result is detected by the
+		// assignment narrowing cast (AssignStatement.String), which wraps the initializer in an
+		// explicit (byte) cast. Float/double ops keep var1.Type() (already correct).
+		resultType := var1.Type()
+		switch opcode.Instr.OpCode {
+		case OP_IADD, OP_ISUB, OP_IMUL, OP_IDIV, OP_IREM, OP_IAND, OP_IOR, OP_IXOR,
+			OP_ISHL, OP_ISHR, OP_IUSHR:
+			resultType = types.NewJavaPrimer(types.JavaInteger)
+		case OP_LADD, OP_LSUB, OP_LMUL, OP_LDIV, OP_LREM, OP_LAND, OP_LOR, OP_LXOR,
+			OP_LSHL, OP_LSHR, OP_LUSHR:
+			resultType = types.NewJavaPrimer(types.JavaLong)
+		}
+		runtimeStackSimulation.Push(values.NewBinaryExpression(var1, var2, op, resultType))
+	case OP_I2B, OP_I2C, OP_I2D, OP_I2F, OP_I2L, OP_I2S, OP_L2D, OP_L2F, OP_L2I, OP_F2D, OP_F2I, OP_F2L, OP_D2F, OP_D2I, OP_D2L:
+		var fname string
+		var typ types.JavaType
+		switch opcode.Instr.OpCode {
+		case OP_I2B:
+			fname = TypeCaseByte
+			typ = types.NewJavaPrimer(types.JavaByte)
+		case OP_I2C:
+			fname = TypeCaseChar
+			typ = types.NewJavaPrimer(types.JavaChar)
+		case OP_I2D:
+			fname = TypeCaseDouble
+			typ = types.NewJavaPrimer(types.JavaDouble)
+		case OP_I2F:
+			fname = TypeCaseFloat
+			typ = types.NewJavaPrimer(types.JavaFloat)
+		case OP_I2L:
+			fname = TypeCaseLong
+			typ = types.NewJavaPrimer(types.JavaLong)
+		case OP_I2S:
+			fname = TypeCaseShort
+			typ = types.NewJavaPrimer(types.JavaShort)
+		case OP_L2D:
+			fname = TypeCaseDouble
+			typ = types.NewJavaPrimer(types.JavaDouble)
+		case OP_L2F:
+			fname = TypeCaseFloat
+			typ = types.NewJavaPrimer(types.JavaFloat)
+		case OP_L2I:
+			fname = TypeCaseInt
+			typ = types.NewJavaPrimer(types.JavaInteger)
+		case OP_F2D:
+			fname = TypeCaseDouble
+			typ = types.NewJavaPrimer(types.JavaDouble)
+		case OP_F2I:
+			fname = TypeCaseInt
+			typ = types.NewJavaPrimer(types.JavaInteger)
+		case OP_F2L:
+			fname = TypeCaseLong
+			typ = types.NewJavaPrimer(types.JavaLong)
+		case OP_D2F:
+			fname = TypeCaseFloat
+			typ = types.NewJavaPrimer(types.JavaFloat)
+		case OP_D2I:
+			fname = TypeCaseInt
+			typ = types.NewJavaPrimer(types.JavaInteger)
+		case OP_D2L:
+			fname = TypeCaseLong
+			typ = types.NewJavaPrimer(types.JavaLong)
+		}
+		arg := runtimeStackSimulation.Pop().(values.JavaValue)
+		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			// Parenthesize the operand so the (unary) cast keeps the right precedence
+			// when the operand is a lower-precedence expression: without it,
+			// `(long)a * b` parses as `((long)a) * b` instead of `(long)(a * b)`,
+			// causing "possible lossy conversion" recompile failures. The extra parens
+			// are always valid Java.
+			return fmt.Sprintf("(%s)(%s)", fname, arg.String(funcCtx))
+		}, func() types.JavaType {
+			return typ
+		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
+			// Propagate variable renames into the cast operand. Without this, a later rewriteVar
+			// rename (e.g. a depth-collision rename of the operand's variable) updates the operand's
+			// other occurrences but not this primitive-cast expression, so a `(int)(varN)` cast keeps
+			// a stale name and references an undeclared variable (guava UnsignedLongs.toString:
+			// `(int) rem` printed the old name `var5` after rem was renamed `var4_1`). CHECKCAST
+			// already does this; the numeric conversions must too.
+			arg.ReplaceVar(oldId, newId)
+		}))
+	case OP_INSTANCEOF:
+		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
+		value := runtimeStackSimulation.Pop().(values.JavaValue)
+		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			return fmt.Sprintf("%s instanceof %s", value.String(funcCtx), classInfo.String(funcCtx))
+		}, func() types.JavaType {
+			return types.NewJavaPrimer(types.JavaBoolean)
+		}))
+	case OP_CHECKCAST:
+		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
+		arg := runtimeStackSimulation.Pop().(values.JavaValue)
+		value := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			// Wrap the whole cast in parentheses so it keeps the correct precedence
+			// when it becomes the receiver of a member access or method call: without
+			// the outer parens, `(T)(x).m()` parses as `(T)(x.m())` instead of
+			// `((T)x).m()`. The extra parens are always valid Java in every context.
+			return fmt.Sprintf("((%s)(%s))", classInfo.String(funcCtx), arg.String(funcCtx))
+		}, func() types.JavaType {
+			return classInfo
+		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
+			arg.ReplaceVar(oldId, newId)
+		})
+		ref := runtimeStackSimulation.NewVar(value)
+		slotvalue := values.NewSlotValue(ref, ref.Type())
+		users := d.varUserMap.GetMust(ref)
+		d.varUserMap.Set(ref, append(users, &VarFoldRule{
+			Replace: func(v values.JavaValue) {
+				slotvalue.ResetValue(v)
+			},
+			CurrentOpcode:    opcode,
+			UserIsNextOpcode: true,
+		}))
+		runtimeStackSimulation.Push(slotvalue)
+	case OP_INVOKESTATIC:
+		classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
+		funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+		//funcCallValue.JavaType = classInfo.JavaType
+		funcCallValue.Object = values.NewJavaClassValue(types.NewJavaClass(classInfo.Name))
+		funcCallValue.IsStatic = true
+		for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
+			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
+		}
+		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
+			runtimeStackSimulation.Push(funcCallValue)
+		}
+	case OP_INVOKEDYNAMIC:
+		index, name, desc := d.ConstantPoolInvokeDynamicInfo(int(Convert2bytesToInt(opcode.Data)))
+		_ = name
+		_ = desc
+		callSiteReturnType, err := types.ParseMethodDescriptor(desc)
+		if err != nil {
+			return err
+		}
+		//callerClassName := callSiteReturnType.String(d.FunctionContext)
+		//values.NewJavaClassMember(callerClassName, name, callSiteReturnType)
+		//var typ types.JavaType
+		args := []values.JavaValue{}
+		paramLen := len(callSiteReturnType.FunctionType().ParamTypes)
+		for i := 0; i < paramLen; i++ {
+			args = append(args, runtimeStackSimulation.Pop())
+		}
+		refMethod := d.BootstrapMethods[index]
+		memberInfo := refMethod.Ref.(*values.JavaClassMember)
+		d.InvokeDynamicName = name
+		var callResult values.JavaValue
+		if f := buildinBootstrapMethods[fmt.Sprintf("%s.%s", memberInfo.Name, memberInfo.Member)]; f != nil {
+			callResult, err = f(refMethod.Arguments...)(d, runtimeStackSimulation, callSiteReturnType.FunctionType().ReturnType, args...)
+			if err != nil {
+				return fmt.Errorf("call bootstrap method error: %v", err)
+			}
+		} else {
+			callResult, err = buildinBootstrapMethods["defaultBootstrapMethod"]()(d, runtimeStackSimulation, callSiteReturnType.FunctionType().ReturnType, args...)
+			if err != nil {
+				return fmt.Errorf("call bootstrap method error: %v", err)
+			}
+		}
+		if callResult.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
+			runtimeStackSimulation.Push(callResult)
+		}
+	case OP_INVOKESPECIAL:
+		classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
+		funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+		funcCallValue.IsSpecialInvoke = true
+		for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
+			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
+		}
+		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+
+		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
+		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
+			runtimeStackSimulation.Push(funcCallValue)
+		}
+	case OP_INVOKEINTERFACE:
+		classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
+		funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+		for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
+			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
+		}
+		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
+		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
+			runtimeStackSimulation.Push(funcCallValue)
+		}
+	case OP_INVOKEVIRTUAL:
+		classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
+		funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+		for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
+			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
+		}
+		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
+		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
+			runtimeStackSimulation.Push(funcCallValue)
+		}
+	case OP_RETURN:
+	case OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE:
+		op := GetNotOp(opcode)
+		rv := runtimeStackSimulation.Pop().(values.JavaValue)
+		lv := runtimeStackSimulation.Pop().(values.JavaValue)
+
+		statements.NewConditionStatement(values.NewJavaCompare(lv, rv), op)
+	case OP_IFNONNULL:
+		statements.NewConditionStatement(values.NewJavaCompare(runtimeStackSimulation.Pop().(values.JavaValue), values.JavaNull), EQ)
+	case OP_IFNULL:
+		statements.NewConditionStatement(values.NewJavaCompare(runtimeStackSimulation.Pop().(values.JavaValue), values.JavaNull), NEQ)
+	case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE:
+		op := ""
+		switch opcode.Instr.OpCode {
+		case OP_IFEQ:
+			op = "=="
+		case OP_IFNE:
+			op = "!="
+		case OP_IFLE:
+			op = "<="
+		case OP_IFLT:
+			op = "<"
+		case OP_IFGT:
+			op = ">"
+		case OP_IFGE:
+			op = ">="
+		}
+		op = GetReverseOp(op)
+		runtimeStackSimulation.Pop()
+	case OP_JSR, OP_JSR_W:
+		// The JSR inliner should have handled these. If it bailed (e.g. switch + jsr
+		// in the same method), treat as no-op rather than failing the entire method.
+		// This produces partial output (missing finally body) instead of a full stub.
+	case OP_RET:
+		// Same as above — no-op if inliner bailed.
+	case OP_GOTO, OP_GOTO_W:
+	case OP_ATHROW:
+		runtimeStackSimulation.Pop()
+	case OP_IRETURN:
+		v := runtimeStackSimulation.Pop().(values.JavaValue)
+		resetReturnValueTypeSafe(v, funcCtx)
+		statements.NewReturnStatement(v)
+	case OP_ARETURN, OP_LRETURN, OP_DRETURN, OP_FRETURN:
+		v := runtimeStackSimulation.Pop().(values.JavaValue)
+		resetReturnValueTypeSafe(v, funcCtx)
+		statements.NewReturnStatement(v)
+	case OP_GETFIELD:
+		index := Convert2bytesToInt(opcode.Data)
+		member := d.constantPoolGetter(int(index)).(*values.JavaClassMember)
+		v := runtimeStackSimulation.Pop().(values.JavaValue)
+		v = castAnonSubclassReceiverForOwnField(v, member, funcCtx)
+		runtimeStackSimulation.Push(values.NewRefMember(v, member.Member, member.JavaType))
+	case OP_GETSTATIC:
+		index := Convert2bytesToInt(opcode.Data)
+		runtimeStackSimulation.Push(d.constantPoolGetter(int(index)))
+	case OP_PUTSTATIC:
+		index := Convert2bytesToInt(opcode.Data)
+		staticVal := d.constantPoolGetter(int(index))
+		value := runtimeStackSimulation.Pop().(values.JavaValue)
+		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value); ok {
+			// static field post-increment/decrement reused as a value: drop the bare old
+			// value left by dup and push `field++` / `field--` instead.
+			runtimeStackSimulation.Pop()
+			runtimeStackSimulation.Push(selfOp)
+			opcode.SelfOpFolded = true
+		} else {
+			statements.NewAssignStatement(staticVal, value, false)
+		}
+	case OP_PUTFIELD:
+		index := Convert2bytesToInt(opcode.Data)
+		staticVal := d.constantPoolGetter(int(index))
+		value := runtimeStackSimulation.Pop().(values.JavaValue)
+		field := values.NewRefMember(runtimeStackSimulation.Pop().(values.JavaValue), staticVal.(*values.JavaClassMember).Member, staticVal.(*values.JavaClassMember).JavaType)
+		if selfOp, ok := d.tryFoldPostIncDec(runtimeStackSimulation, value); ok {
+			// instance field post-increment/decrement reused as a value (dup_x1 idiom): drop
+			// the bare old value and push `field++` / `field--` so the surrounding ternary or
+			// expression branch stays side-effect-free and can be structured.
+			runtimeStackSimulation.Pop()
+			runtimeStackSimulation.Push(selfOp)
+			opcode.SelfOpFolded = true
+		} else {
+			statements.NewAssignStatement(field, value, false)
+		}
+	case OP_SWAP:
+		v1 := runtimeStackSimulation.Pop()
+		v2 := runtimeStackSimulation.Pop()
+		runtimeStackSimulation.Push(v1)
+		runtimeStackSimulation.Push(v2)
+	case OP_DUP:
+		// Do not ref-fold NewExpression values from 'new; dup; invokespecial' patterns:
+		// the invokespecial modifies the NewExpression in-place (ArgumentsGetter), and
+		// ref-folding it into a shared temp variable causes both branches of an if/else
+		// to share the same variable, corrupting the output. Array creation NewExpressions
+		// (which have Length set) DO need ref-folding for array-store patterns.
+		peekVal := UnpackSoltValue(runtimeStackSimulation.Peek().(values.JavaValue))
+		if newExpr, ok := peekVal.(*values.NewExpression); !ok || len(newExpr.Length) > 0 {
+			checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))(1)
+		}
+		runtimeStackSimulation.Push(runtimeStackSimulation.Peek())
+	case OP_DUP_X1:
+		checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))(3)
+		v1 := runtimeStackSimulation.Pop()
+		v2 := runtimeStackSimulation.Pop()
+		runtimeStackSimulation.Push(v1)
+		runtimeStackSimulation.Push(v2)
+		runtimeStackSimulation.Push(v1)
+	case OP_DUP_X2:
+		adduser := checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))
+		v1 := runtimeStackSimulation.Pop()
+		runtimeStackSimulationPopN := func(n int) []values.JavaValue {
+			datas := []values.JavaValue{}
+			current := 0
+			for {
+				if current >= n {
+					break
+				}
+				checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))
+				v := runtimeStackSimulation.Pop()
+				current += GetTypeSize(v.(values.JavaValue).Type())
+				datas = append(datas, v)
+			}
+			return datas
+		}
+		datas := runtimeStackSimulationPopN(2)
+		runtimeStackSimulation.Push(v1)
+		for i := len(datas) - 1; i >= 0; i-- {
+			runtimeStackSimulation.Push(datas[i])
+			adduser(1)
+		}
+		runtimeStackSimulation.Push(v1)
+		adduser(1)
+	case OP_DUP2:
+		// dup2 duplicates the top two category-1 slots (or one category-2 value). Each duplicated
+		// value must carry its OWN ref-fold callback. The previous code kept a single shared addUser
+		// (overwritten to the LAST converted value), so when both pushes reused it, the deeper value's
+		// fold rule fired on the shallower value too. For a compound array store on a field array
+		// (`this.f[i] op= v`, bytecode getfield;iload;dup2;iaload;...;iastore) that folded the index
+		// into the arrayref temp, emitting `int t = i; t[i] = t[i] op v` (an int indexed as an array).
+		// Tracking addUser per element keeps each duplicated value's fold rule bound to that value.
+		type dup2Item struct {
+			val     values.JavaValue
+			addUser func(int)
+		}
+		popItems := func(n int) []dup2Item {
+			items := []dup2Item{}
+			current := 0
+			for current < n {
+				au := checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))
+				v := runtimeStackSimulation.Pop()
+				current += GetTypeSize(v.(values.JavaValue).Type())
+				items = append(items, dup2Item{val: v, addUser: au})
+			}
+			return items
+		}
+		pushReverse := func(items []dup2Item) {
+			for i := len(items) - 1; i >= 0; i-- {
+				runtimeStackSimulation.Push(items[i].val)
+				items[i].addUser(1)
+			}
+		}
+		items := popItems(2)
+		pushReverse(items)
+		pushReverse(items)
+	case OP_DUP2_X1:
+		var addUser func(int)
+		runtimeStackSimulationPopN := func(n int) []values.JavaValue {
+			datas := []values.JavaValue{}
+			current := 0
+			for {
+				if current >= n {
+					break
+				}
+				addUser = checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))
+				v := runtimeStackSimulation.Pop()
+				current += GetTypeSize(v.(values.JavaValue).Type())
+				datas = append(datas, v)
+			}
+			return datas
+		}
+		runtimeStackSimulationPushReverse := func(datas []values.JavaValue) {
+			for i := len(datas) - 1; i >= 0; i-- {
+				runtimeStackSimulation.Push(datas[i])
+				addUser(1)
+			}
+		}
+		datas := runtimeStackSimulationPopN(2)
+		v1 := runtimeStackSimulation.Pop()
+		runtimeStackSimulationPushReverse(datas)
+		runtimeStackSimulation.Push(v1)
+		addUser(1)
+		runtimeStackSimulationPushReverse(datas)
+		//checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))
+		//v1 := runtimeStackSimulation.Pop()
+		//checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))
+		//v2 := runtimeStackSimulation.Pop()
+		//checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))
+		//v3 := runtimeStackSimulation.Pop()
+		//runtimeStackSimulation.Push(v2)
+		//runtimeStackSimulation.Push(v1)
+		//runtimeStackSimulation.Push(v3)
+		//runtimeStackSimulation.Push(v2)
+		//runtimeStackSimulation.Push(v1)
+	case OP_DUP2_X2:
+		// Each duplicated value must carry its OWN ref-fold callback. The previous code kept a single
+		// shared addUser overwritten by every checkAndConvertRef, so by push time it pointed at the
+		// LAST popped operand (the arrayref) instead of the duplicated value. For a consumed long/double
+		// array compound assignment (`long r = (a[i] += v)`, bytecode dup2_x2) the duplicated value's
+		// two real consumers (lastore + lstore) never registered, so the shared temp folded down to a
+		// single use and the consumer re-evaluated the RHS after the store (`(a[i]+v)*k` instead of
+		// `r*k`), double-applying the operator (Bug J). Tracking addUser per item keeps each value's
+		// fold rule bound to that value, matching the OP_DUP2 fix.
+		type dup2x2Item struct {
+			val     values.JavaValue
+			addUser func(int)
+		}
+		popItems := func(n int) []dup2x2Item {
+			items := []dup2x2Item{}
+			current := 0
+			for current < n {
+				au := checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))
+				v := runtimeStackSimulation.Pop()
+				current += GetTypeSize(v.(values.JavaValue).Type())
+				items = append(items, dup2x2Item{val: v, addUser: au})
+			}
+			return items
+		}
+		pushReverse := func(items []dup2x2Item) {
+			for i := len(items) - 1; i >= 0; i-- {
+				runtimeStackSimulation.Push(items[i].val)
+				items[i].addUser(1)
+			}
+		}
+		datas1 := popItems(2)
+		datas2 := popItems(2)
+		pushReverse(datas1)
+		pushReverse(datas2)
+		pushReverse(datas1)
+	case OP_LDC:
+		runtimeStackSimulation.Push(d.ConstantPoolLiteralGetter(int(opcode.Data[0])))
+	case OP_LDC_W:
+		runtimeStackSimulation.Push(d.ConstantPoolLiteralGetter(int(Convert2bytesToInt(opcode.Data))))
+	case OP_LDC2_W:
+		v := d.ConstantPoolLiteralGetter(int(Convert2bytesToInt(opcode.Data)))
+		runtimeStackSimulation.Push(v)
+	case OP_MONITORENTER:
+		runtimeStackSimulation.Pop()
+	case OP_MONITOREXIT:
+		runtimeStackSimulation.Pop()
+	case OP_NOP:
+		return nil
+	case OP_POP:
+		statements.NewExpressionStatement(runtimeStackSimulation.Pop().(values.JavaValue))
+	case OP_POP2:
+		val := runtimeStackSimulation.Peek()
+		if GetTypeSize(val.Type()) == 1 {
+			runtimeStackSimulation.PopN(2)
+		} else {
+			runtimeStackSimulation.Pop()
+		}
+	case OP_TABLESWITCH, OP_LOOKUPSWITCH:
+		statements.NewMiddleStatement(statements.MiddleSwitch, []any{opcode.SwitchJmpCase1, runtimeStackSimulation.Pop().(values.JavaValue)})
+	case OP_IINC:
+		var index int
+		var inc int
+		if opcode.IsWide {
+			index = int(Convert2bytesToInt(opcode.Data))
+			inc = int(int16(Convert2bytesToInt(opcode.Data[2:])))
+		} else {
+			index = int(opcode.Data[0])
+			inc = int(int8(opcode.Data[1]))
+		}
+		ref := runtimeStackSimulation.GetVar(index)
+		// An iinc reads-and-writes a single int-category local (byte/char/short/int); the verifier
+		// guarantees the slot holds an int-category value at this point, so the resolved ref can
+		// never legitimately be a reference NOR a long/float/double. When the global slot table was
+		// polluted by DFS traversal order with a LATER, wrong-category reincarnation of this slot
+		// (the same root cause repaired for loads in reachingSlotVersionOnMismatch — e.g. a loop
+		// counter slot that javac reuses for a byte[] AFTER the loop, commons-codec Base64.decode;
+		// or a `long` hash accumulator that reuses an int loop-counter slot, fastjson2
+		// Fnv.hashCode64LCase rendering the counter `i++` as `longVar++`), GetVar returns that wrong
+		// variable. Walk back to the nearest reaching definition and adopt it only when it is
+		// int-category (the value the iinc provably operates on). Kill-switch:
+		// JDEC_IINC_REACHING_OFF=1.
+		if ref != nil && !isIntCategoryNumeric(ref.Type()) && os.Getenv("JDEC_IINC_REACHING_OFF") == "" {
+			if better := d.reachingSlotVersionByCategory(opcode, index, false); better != nil && isIntCategoryNumeric(better.Type()) {
+				ref = better
+			}
+		}
+		// javac emits iinc ONLY for a genuinely `int` local: byte/char/short compound assignment
+		// (`b += k`) desugars to iadd + i2b/i2c/i2s + store, never iinc. So a slot targeted by iinc
+		// is provably int. When the ref was inferred narrower (e.g. byte from the baload that fed
+		// the slot, commons-codec Base64.encode `b += 256` -> `iinc_w 7,256` over a byte-typed
+		// var7), the non-±1 desugar `var7 = var7 + 256` is a possible-lossy byte/short/char
+		// conversion that will not recompile. Widen the slot's declaration to int (always safe:
+		// the slot is int). Kill-switch: JDEC_IINC_WIDEN_OFF=1.
+		if ref != nil && os.Getenv("JDEC_IINC_WIDEN_OFF") == "" {
+			if p, ok := ref.Type().RawType().(*types.JavaPrimer); ok {
+				switch p.Name {
+				case types.JavaByte, types.JavaShort, types.JavaChar:
+					ref.ResetVarType(types.NewJavaPrimer(types.JavaInteger))
+				}
+			}
+		}
+		opcode.Ref = ref
+		// Post-increment / decrement used inside an expression. javac compiles `a[i++] = v`,
+		// `int j = i++`, `return i++` as `iload X; iinc X; ...`, so the OLD value of slot X is
+		// still live on the operand stack when this iinc runs. Detect that live load (the stack
+		// top is a load of the SAME slot) and fold the iinc into an `i++` / `i--` expression that
+		// REPLACES the live value, suppressing the standalone statement. Without this the
+		// standalone `i++` is emitted BEFORE the consuming statement and the consumer then reads
+		// the incremented value (`i++; a[i] = v` instead of `a[i++] = v`), silently changing
+		// semantics. Pre-increment compiles to `iinc X; iload X` (no live load at iinc time), so it
+		// is intentionally left alone and correctly stays `i = i + 1; ... use i`.
+		if (inc == 1 || inc == -1) && ref != nil && runtimeStackSimulation.Size() > 0 {
+			if topRef, ok := UnpackSoltValue(runtimeStackSimulation.Peek()).(*values.JavaRef); ok && topRef.VarUid == ref.VarUid {
+				runtimeStackSimulation.Pop()
+				op := INC
+				if inc == -1 {
+					op = values.DEC
+				}
+				postOp := values.NewBinaryExpression(ref, values.NewJavaLiteral(1, types.NewJavaPrimer(types.JavaInteger)), op, ref.Type())
+				runtimeStackSimulation.Push(postOp)
+				opcode.IincFoldedToPostOp = true
+			}
+		}
+	case OP_DNEG, OP_FNEG, OP_LNEG, OP_INEG:
+		v := runtimeStackSimulation.Pop().(values.JavaValue)
+		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			return "-" + values.UnaryMinusOperand(v, funcCtx)
+		}, func() types.JavaType {
+			return v.Type()
+		}))
+	case OP_END:
+	case OP_START:
+	default:
+		return fmt.Errorf("not support opcode: %x", opcode.Instr.OpCode)
+	}
+	return nil
+}
+
+// EnableLegacyMergeReconstruction selects the original heuristic if-merge / ternary value
+// reconstruction (the dual structural-probe + chain combiner). When false (default), value merges
+// whose conditions converge on shared leaf values (short-circuit &&/|| predicates) are rebuilt by a
+// principled recursive ternary-tree builder that allows shared leaves, so the operand-stack value
+// at the merge is always reconstructed instead of leaking an "empty slot value" placeholder. The
+// flag exists so the old path can be restored for A/B comparison if a regression surfaces.
+var EnableLegacyMergeReconstruction = false
+
+func (d *Decompiler) CalcOpcodeStackInfo() error {
+	// Pre-sized to the opcode count: this map gets one entry per opcode, so sizing it up
+	// front avoids the incremental rehash-growth garbage (it was a top per-opcode allocator).
+	opcodeToSim := make(map[*OpCode]*StackSimulationImpl, len(d.opCodes))
+	//dominatorMap := GenerateDominatorTree(d.RootOpCode)
+	//codes := GraphToList(d.RootOpCode)
+	//codes = lo.Filter(codes, func(code *OpCode, index int) bool {
+	//	switch code.Instr.OpCode {
+	//	case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE, OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE, OP_IFNONNULL, OP_IFNULL:
+	//		return true
+	//	default:
+	//		return false
+	//	}
+	//})
+	mergeToIfNode := map[*OpCode][]*OpCode{}
+	//for _, ifNode := range codes {
+	//	if len(dominatorMap[ifNode]) == 3 {
+	//		mergeNode := funk.Filter(dominatorMap[ifNode], func(code *OpCode) bool {
+	//			return code != ifNode.Target[0] && code != ifNode.Target[1]
+	//		}).([]*OpCode)[0]
+	//		mergeToIfNode[mergeNode] = append(mergeToIfNode[mergeNode], ifNode)
+	//	}
+	//}
+	//
+	//isIfMergeNode := func(code *OpCode) bool {
+	//	_, ok := mergeToIfNode[code]
+	//	return ok
+	//}
+	//getIfMergeNodeCondition := func(code *OpCode) values.JavaValue {
+	//	ifs := mergeToIfNode[code]
+	//	if len(ifs) > 0 {
+	//		ifNode := ifs[0]
+	//		ifs = ifs[1:]
+	//		return ifNode.stackConsumed[0]
+	//	}
+	//	return nil
+	//}
+	ternaryExpMergeNode := []*OpCode{}
+	ternaryExpMergeNodeSlot := map[*OpCode]*values.SlotValue{}
+	if !d.FunctionContext.IsStatic {
+		d.FunctionType.ParamTypes = append([]types.JavaType{types.NewJavaClass(d.FunctionContext.ClassName)}, d.FunctionType.ParamTypes...)
+	}
+
+	initMethodVar := func(runtimeSim StackSimulation) {
+		params := []values.JavaValue{}
+		slotIndex := 0
+		for _, paramType := range d.FunctionType.ParamTypes {
+			//assignStackVar(values.NewJavaRef(stackVarIndex, paramType))
+			var isDouble bool
+			if v, ok := paramType.RawType().(*types.JavaPrimer); ok {
+				isDouble = v.Name == types.JavaDouble || v.Name == types.JavaLong
+			}
+			paramPlaceholder := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				return ""
+			}, func() types.JavaType {
+				return paramType
+			})
+			// Tag the seed value so GetRealValue stops at the parameter ref (rendered by name)
+			// instead of unwrapping into this empty placeholder. Without the tag, folding a temp
+			// that copies a parameter (`var2 = param; this.f = var2;`) inlined the empty string
+			// and produced `this.f = ;` (invalid Java -> stub).
+			paramPlaceholder.Flag = "param_placeholder"
+			runtimeSim.AssignVar(slotIndex, paramPlaceholder)
+			val := runtimeSim.GetVar(slotIndex)
+			val.IsParam = true
+			params = append(params, val)
+			if isDouble {
+				slotIndex += 2
+			} else {
+				slotIndex += 1
+			}
+		}
+		d.Params = params
+		if !d.FunctionContext.IsStatic {
+			runtimeSim.GetVar(0).IsThis = true
+		}
+		d.BodyStartId = len(params)
+	}
+	isIfNode := func(code *OpCode) bool {
+		switch code.Instr.OpCode {
+		case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE, OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE, OP_IFNONNULL, OP_IFNULL:
+			return true
+		default:
+			return false
+		}
+	}
+	conditionSlotForIfNode := func(ifNode *OpCode) values.JavaValue {
+		var condition values.JavaValue
+		if ifNode != nil {
+			switch ifNode.Instr.OpCode {
+			case OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE:
+				if len(ifNode.stackConsumed) == 2 {
+					rv := ifNode.stackConsumed[0]
+					lv := ifNode.stackConsumed[1]
+					condition = statements.NewConditionStatement(values.NewJavaCompare(lv, rv), GetNotOp(ifNode)).Condition
+				}
+			case OP_IFNONNULL:
+				if len(ifNode.stackConsumed) == 1 {
+					condition = statements.NewConditionStatement(values.NewJavaCompare(ifNode.stackConsumed[0], values.JavaNull), EQ).Condition
+				}
+			case OP_IFNULL:
+				if len(ifNode.stackConsumed) == 1 {
+					condition = statements.NewConditionStatement(values.NewJavaCompare(ifNode.stackConsumed[0], values.JavaNull), NEQ).Condition
+				}
+			case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE:
+				if len(ifNode.stackConsumed) == 1 {
+					op := GetReverseOp(GetOp(ifNode))
+					v := ifNode.stackConsumed[0]
+					if cmp, ok := v.(*values.JavaCompare); ok {
+						condition = statements.NewConditionStatement(cmp, op).Condition
+					} else {
+						condition = statements.NewConditionStatement(values.NewJavaCompare(v, values.NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger))), op).Condition
+					}
+				}
+			}
+		}
+		return values.NewSlotValue(condition, types.NewJavaPrimer(types.JavaBoolean))
+	}
+	opcodes := GraphToList(d.RootOpCode)
+	ifOpcodes := lo.Filter(opcodes, func(code *OpCode, index int) bool {
+		return isIfNode(code)
+	})
+
+	ifNodeToMergeNode := map[*OpCode]*OpCode{}
+	mergeNodeToIfNode := map[*OpCode][]*OpCode{}
+	//DumpOpcodesToDotExp(d.RootOpCode)
+	for _, opcode := range ifOpcodes {
+		mergeNode := CalcMergeOpcode(opcode)
+		if mergeNode != nil {
+			ifNodeToMergeNode[opcode] = mergeNode
+			mergeNodeToIfNode[mergeNode] = append(mergeNodeToIfNode[mergeNode], opcode)
+		}
+	}
+	// One scope entry per opcode; pre-size to avoid rehash-growth garbage (see opcodeToSim).
+	nodeToVarScope := make(map[*OpCode]*Scope, len(d.opCodes))
+	getVarScope := func(code *OpCode) *Scope {
+		if vt, ok := nodeToVarScope[code]; ok {
+			return vt
+		}
+		// Fallback: create a new scope with an empty var table and root var id.
+		// This avoids panicking on complex CFG paths where the scope wasn't set.
+		vt := &Scope{VarTable: map[int]*values.JavaRef{}, VarId: utils2.NewRootVariableId()}
+		nodeToVarScope[code] = vt
+		return vt
+	}
+	setVarScope := func(code *OpCode, scope *Scope) {
+		nodeToVarScope[code] = scope
+	}
+	preferConcreteMergeVars := func(base map[int]*values.JavaRef, sources []*OpCode) map[int]*values.JavaRef {
+		merged := make(map[int]*values.JavaRef, len(base))
+		for slot, ref := range base {
+			merged[slot] = ref
+		}
+		for slot, ref := range merged {
+			if ref == nil || !ref.IsNullInitialized() {
+				continue
+			}
+			for _, source := range sources {
+				candidate := getVarScope(source).VarTable[slot]
+				if candidate == nil || candidate.IsNullInitialized() {
+					continue
+				}
+				if _, isPrim := candidate.Type().RawType().(*types.JavaPrimer); isPrim {
+					continue
+				}
+				merged[slot] = candidate
+				break
+			}
+		}
+		return merged
+	}
+	ifNodeToConditionCallback := map[*OpCode]func(values.JavaValue){}
+	varTable := map[int]*values.JavaRef{}
+	err := WalkGraph[*OpCode](d.RootOpCode, func(code *OpCode) ([]*OpCode, error) {
+		// NOTE: do not sort code.Target for switch opcodes. The previous sort.Slice used an
+		// invalid comparator (always returning true), which scrambled the case successor order
+		// (which must stay aligned with SwitchJmpCase1's case-value -> index mapping). That made
+		// every case map to the wrong body. Target is already in the correct case-index order.
+		var runtimeStackSimulation *StackSimulationImpl
+		if code.Instr.OpCode == OP_START {
+			// OP_START is the synthetic method entry and must seed the local-variable table from
+			// the descriptor. Some irreducible/loop CFGs can leave a backlink to the synthetic
+			// entry; inheriting stack state from that source drops method parameters and creates
+			// nil-id locals (for example ICU4J CollationData.getScriptIndex).
+			emptySim := NewEmptyStackEntry()
+			varId := d.BaseVarId
+			if varId == nil {
+				varId = utils2.NewRootVariableId()
+			}
+			runtimeStackSimulation = NewStackSimulation(emptySim, varTable, varId)
+			initMethodVar(runtimeStackSimulation)
+		} else if len(code.Source) == 0 {
+			return nil, fmt.Errorf("opcode %d has no source", code.Id)
+		} else if len(code.Source) == 1 {
+			if IsSwitchOpcode(code.Source[0].Instr.OpCode) {
+				// A switch's case/default targets must inherit the operand-stack state that held
+				// AFTER the switch instruction consumed its selector. The selector Pop happens in
+				// calcOpcodeStackInfo, so code.Source[0].StackEntry is exactly that post-switch
+				// stack. Rebuilding from it (instead of a shared preRuntimeStackSimulation) is
+				// correct for EVERY branch independently: previously a single shared variable was
+				// clobbered as soon as an earlier branch ended (e.g. an athrow/return that left an
+				// empty stack), so later case bodies started with a stale/empty operand stack and
+				// underflowed (the Groovy selectConstructorAndTransformArguments switch, whose
+				// first case builds args via dup_x1/dup2_x1 on top of [objarr,newexpr], leaked
+				// empty-slot placeholders). Falling back to an empty entry keeps the panic-free
+				// contract if the switch's own stack entry was never set.
+				entry := code.Source[0].StackEntry
+				if entry == nil {
+					entry = NewEmptyStackEntry()
+				}
+				scope := getVarScope(code.Source[0])
+				runtimeStackSimulation = NewStackSimulation(entry, scope.VarTable, scope.VarId)
+			} else {
+				entry := code.Source[0].StackEntry
+				if entry == nil {
+					// The source opcode's stack entry is nil (e.g. from an unvisited
+					// predecessor in a complex CFG). Use an empty stack to continue
+					// rather than failing the entire method.
+					entry = NewEmptyStackEntry()
+				}
+				scope := getVarScope(code.Source[0])
+				runtimeStackSimulation = NewStackSimulation(entry, scope.VarTable, scope.VarId)
+			}
+		} else if len(code.Source) > 0 {
+			//ifNodes := mergeNodeToIfNode[code]
+			//for _, opCode := range code.Source {
+			//	WalkGraph[*OpCode](opCode, func(code *OpCode) ([]*OpCode, error) {
+			//		switch code.Instr.OpCode {
+			//		case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE, OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE, OP_IFNONNULL, OP_IFNULL:
+			//			if !slices.Contains(ifNodes, code) {
+			//				ifNodes = append(ifNodes, code)
+			//			}
+			//			return nil, nil
+			//		default:
+			//		}
+			//		return code.Source, nil
+			//	})
+			//}
+			//ifNodes = lo.Filter(ifNodes, func(item *OpCode, index int) bool {
+			//	return item.StackEntry != nil
+			//})
+			sources := lo.Filter(code.Source, func(item *OpCode, index int) bool {
+				return item.StackEntry != nil
+			})
+			validSources := []*OpCode{}
+			for _, source := range sources {
+				entry := source.StackEntry
+				if entry == nil {
+					entry = NewEmptyStackEntry()
+				}
+				validSources = append(validSources, source)
+			}
+			//sourceIfCodes := []*OpCode{}
+			//for _, opCode := range code.Source {
+			//	WalkGraph[*OpCode](opCode, func(code *OpCode) ([]*OpCode, error) {
+			//		switch code.Instr.OpCode {
+			//		case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE, OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE, OP_IFNONNULL, OP_IFNULL:
+			//			if !slices.Contains(sourceIfCodes, code) {
+			//				sourceIfCodes = append(sourceIfCodes, code)
+			//			}
+			//			return nil, nil
+			//		default:
+			//		}
+			//		return code.Source, nil
+			//	})
+			//}
+			//sourceIfCodes = lo.Filter(sourceIfCodes, func(item *OpCode, index int) bool {
+			//	return slices.Contains(ifNodes, item)
+			//})
+			//ifStackEntries := []*StackItem{}
+			//for _, ifNode := range sourceIfCodes {
+			//	entry := ifNode.StackEntry
+			//	if entry == nil {
+			//		return nil, fmt.Errorf("not found simuation stack for opcode %d", ifNode.Id)
+			//	}
+			//	ifStackEntries = append(stackEntries, entry)
+			//}
+
+			size := -1
+			for _, vs := range validSources {
+				vsScope := getVarScope(vs)
+				vsSize := NewStackSimulation(vs.StackEntry, vsScope.VarTable, vsScope.VarId).Size()
+				if size == -1 {
+					size = vsSize
+				}
+			}
+			if len(validSources) == 0 {
+				runtimeStackSimulation = NewStackSimulation(NewEmptyStackEntry(), varTable, utils2.NewRootVariableId())
+			} else {
+				validSource := validSources[0]
+				vscope := getVarScope(validSource)
+				runtimeStackSimulation = NewStackSimulation(validSource.StackEntry, preferConcreteMergeVars(vscope.VarTable, validSources), vscope.VarId)
+			}
+			ifNodes := []*OpCode{}
+			for _, opCode := range code.Source {
+				WalkGraph[*OpCode](opCode, func(code *OpCode) ([]*OpCode, error) {
+					switch code.Instr.OpCode {
+					case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE, OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE, OP_IFNONNULL, OP_IFNULL:
+						if !slices.Contains(ifNodes, code) {
+							ifNodes = append(ifNodes, code)
+						}
+						return nil, nil
+					default:
+					}
+					return code.Source, nil
+				})
+			}
+			ifNodes = lo.Filter(ifNodes, func(item *OpCode, index int) bool {
+				return slices.Contains(mergeNodeToIfNode[code], item)
+			})
+			var isIfMergeNode bool
+			if len(ifNodes) > 0 {
+				ifSize := -1
+				ifSizeMismatch := false
+				for _, ifNode := range ifNodes {
+					if ifNode.StackEntry == nil {
+						continue
+					}
+					scope := getVarScope(ifNode)
+					stackSize := NewStackSimulation(ifNode.StackEntry, scope.VarTable, scope.VarId).Size()
+					if ifSize == -1 {
+						ifSize = stackSize
+					} else {
+						if ifSize != stackSize {
+							// Mismatched candidate if-stack sizes mean this merge is not a pure value
+							// merge (for example Kotlin null-check code where the throw arm keeps a
+							// duplicated value on a terminal path). Fall back to ordinary merge handling
+							// instead of stubbing the whole method.
+							ifSizeMismatch = true
+							break
+						}
+					}
+				}
+				if ifSize != -1 && !ifSizeMismatch {
+					isIfMergeNode = ifSize < size
+				}
+			}
+			if len(validSources) == 0 {
+				// Keep the conservative empty-stack simulation created above. This path can appear
+				// in hard switch/loop CFGs where all incoming sources were not stack-simulated yet.
+			} else if isIfMergeNode {
+				validSource := validSources[0]
+				scope := getVarScope(validSource)
+				preSim := NewStackSimulation(validSource.StackEntry, scope.VarTable, scope.VarId)
+				preSim.Pop()
+				runtimeStackSimulation = NewStackSimulation(preSim.stackEntry, preferConcreteMergeVars(scope.VarTable, validSources), scope.VarId)
+				// Seed the merge slot with a concrete arm value as a conservative fallback. The
+				// ternary reconstruction below will replace it when it can prove the full value tree;
+				// if reconstruction declines, this avoids leaking the internal empty-slot marker into
+				// terminal consumers such as ireturn.
+				slotVal := values.NewSlotValue(validSource.StackEntry.value, validSource.StackEntry.value.Type())
+				runtimeStackSimulation.Push(slotVal)
+				ternaryExpMergeNodeSlot[code] = slotVal
+				ternaryExpMergeNode = append(ternaryExpMergeNode, code)
+				mergeToIfNode[code] = append(mergeToIfNode[code], ifNodes...)
+			} else {
+				validSource := validSources[0]
+				scope := getVarScope(validSource)
+				runtimeStackSimulation = NewStackSimulation(validSource.StackEntry, preferConcreteMergeVars(scope.VarTable, validSources), scope.VarId)
+			}
+		} else {
+			for _, opCode := range code.Source {
+				if opCode.StackEntry != nil {
+					scope := getVarScope(opCode)
+					runtimeStackSimulation = NewStackSimulation(opCode.StackEntry, scope.VarTable, scope.VarId)
+					break
+				}
+			}
+		}
+		opcodeToSim[code] = runtimeStackSimulation
+
+		sim := NewStackSimulationProxy(runtimeStackSimulation, func(value values.JavaValue) {
+			runtimeStackSimulation.Push(value)
+			code.stackProduced = append(code.stackProduced, value)
+		}, func() values.JavaValue {
+			val := runtimeStackSimulation.Pop()
+			code.stackConsumed = append(code.stackConsumed, val)
+			return val
+		})
+		if code.IsCatch {
+			var typ types.JavaType
+			// Reconstruct a multi-catch clause when several catch types share this handler.
+			multiTypes := make([]types.JavaType, 0, len(code.ExceptionTypeIndexes))
+			for _, idx := range code.ExceptionTypeIndexes {
+				if idx != 0 {
+					multiTypes = append(multiTypes, d.GetValueFromPool(int(idx)).Type())
+				}
+			}
+			switch {
+			case len(multiTypes) > 1:
+				typ = types.NewMultiCatchType(multiTypes)
+			case len(multiTypes) == 1:
+				typ = multiTypes[0]
+			case code.ExceptionTypeIndex != 0:
+				typ = d.GetValueFromPool(int(code.ExceptionTypeIndex)).Type()
+			default:
+				typ = types.NewJavaClass("Throwable")
+			}
+			exceptionValue := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				return "Exception"
+			}, func() types.JavaType {
+				return typ
+			})
+			exceptionValue.Flag = "exception"
+			runtimeStackSimulation.Push(exceptionValue)
+		}
+		if d.traceEnabled("var-table") {
+			d.tracef("var-table", "before offset=%d opcode=%s sources=%d targets=%d stackSize=%d vars=%s",
+				code.CurrentOffset, code.Instr.Name, len(code.Source), len(code.Target), runtimeStackSimulation.Size(),
+				traceVarTable(runtimeStackSimulation.varTable, d.FunctionContext))
+		}
+		runtimeStackSimulation.varTable = varTable
+		err := d.calcOpcodeStackInfo(sim, code)
+		if err != nil {
+			return nil, err
+		}
+		if d.traceEnabled("var-table") {
+			produced := make([]string, 0, len(code.stackProduced))
+			for _, v := range code.stackProduced {
+				produced = append(produced, traceValue(v, d.FunctionContext))
+			}
+			consumed := make([]string, 0, len(code.stackConsumed))
+			for _, v := range code.stackConsumed {
+				consumed = append(consumed, traceValue(v, d.FunctionContext))
+			}
+			d.tracef("var-table", "after offset=%d opcode=%s stackSize=%d produced=[%s] consumed=[%s] vars=%s",
+				code.CurrentOffset, code.Instr.Name, runtimeStackSimulation.Size(), strings.Join(produced, ";"),
+				strings.Join(consumed, ";"), traceVarTable(runtimeStackSimulation.varTable, d.FunctionContext))
+		}
+		code.StackEntry = runtimeStackSimulation.stackEntry
+		scope := NewScope()
+		scope.VarId = runtimeStackSimulation.currentVarId
+		scope.VarTable = varTable
+		setVarScope(code, scope)
+		return code.Target, nil
+	})
+	if err != nil {
+		return err
+	}
+	d.opCodes = GraphToList(d.RootOpCode)
+	d.opcodeToSimulateStack = opcodeToSim
+	ternaryExpMergeNode = utils.NewSet(ternaryExpMergeNode).List()
+	sort.Slice(ternaryExpMergeNode, func(i, j int) bool {
+		return ternaryExpMergeNode[i].Id > ternaryExpMergeNode[j].Id
+	})
+	d.ifNodeConditionCallback = ifNodeToConditionCallback
+	// isTernaryArmStore reports whether an opcode writes a local/field/array element. A store on an
+	// arm path means the "merge" is statement dispatch (e.g. a lexer assigning a token in each branch
+	// then converging), not a value ternary, so the principled builder declines it.
+	isTernaryArmStore := func(op int) bool {
+		switch op {
+		case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE,
+			OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0,
+			OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1,
+			OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2,
+			OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3,
+			OP_IINC, OP_PUTFIELD, OP_PUTSTATIC,
+			OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
+			return true
+		default:
+			return false
+		}
+	}
+	// isInlineArrayInitStore reports whether cur is the javac inline array-literal idiom's element
+	// store (`anewarray; dup; idx; val; Xastore`, repeated per element) building a FRESH array that is
+	// consumed inline as an expression operand (the canonical varargs-call argument). Unlike a store
+	// into an escaping local/field array, this store is part of materializing a single VALUE (the new
+	// array), not statement dispatch, so the ternary arm walk must step over it instead of declining.
+	// Without this, a short-circuit operand whose value is a varargs/array-building call (e.g.
+	// DoubleMetaphone.conditionC0's `... || contains(value, idx, n, "X", "Y")`) forces the principled
+	// shared-leaf builder to bail, dropping into the legacy combiner which mis-wires the leading
+	// condition and emits a missing-return method (Bug AK). Kill-switch: JDEC_ARRAYINIT_TERNARY_OFF=1.
+	isInlineArrayInitStore := func(cur *OpCode) bool {
+		if os.Getenv("JDEC_ARRAYINIT_TERNARY_OFF") != "" {
+			return false
+		}
+		switch cur.Instr.OpCode {
+		case OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
+		default:
+			return false
+		}
+		if len(cur.stackConsumed) < 3 {
+			return false
+		}
+		ref := cur.stackConsumed[2]
+		if ref == nil {
+			return false
+		}
+		if _, ok := UnpackSoltValue(ref).(*values.NewExpression); ok {
+			return true
+		}
+		if _, ok := GetRealValue(ref).(*values.NewExpression); ok {
+			return true
+		}
+		return false
+	}
+	// buildSharedLeafTernary rebuilds the value left on the operand stack at mergeNode as a nested
+	// ternary tree. It is the principled replacement for the legacy chain combiner on short-circuit
+	// shapes: each conditional arm is walked straight-line; an if-node whose BOTH branches converge on
+	// mergeNode becomes a nested ternary condition (discovered dynamically, so chains the bottom-up
+	// merge detection under-reports are still picked up), and a node flowing into mergeNode is a leaf
+	// whose produced stack value is the arm value. Unlike the legacy structural probe it ALLOWS shared
+	// leaves (the canonical short-circuit shape where many conditions converge on the same iconst_0 /
+	// iconst_1) - a ternary only evaluates its chosen arm, so textually reusing the shared leaf object
+	// is semantically exact.
+	//
+	// detectedIfNodes seeds the root search. Returns (root, builtConditions, sharedLeaf, ok). ok=false
+	// means the shape is irreducible (a store on an arm, a non-conditional fork, a cycle, or an
+	// unresolved leaf) and the caller falls back to the legacy path unchanged. sharedLeaf=false means
+	// it is a plain tree the legacy probe already handles, so the caller also defers to avoid churn.
+	buildSharedLeafTernary := func(mergeNode *OpCode, detectedIfNodes []*OpCode) (root *values.TernaryExpression, built map[*OpCode]*values.TernaryExpression, sharedLeaf bool, hasMiddleCond bool, ok bool) {
+		// valueMergeSet is every node the merge detection registered as carrying a value across control
+		// flow (a ternary / short-circuit result on the operand stack). It is the principled signal for
+		// an INNER value computation: if two branches of a condition reconverge on such a node (other
+		// than our own mergeNode), that condition produces a sub-value consumed downstream and is opaque
+		// to this merge. A plain control reconvergence (e.g. the next range check in an ||-chain) is NOT
+		// in this set, so the condition is correctly recognised as a real arm of this ternary.
+		valueMergeSet := map[*OpCode]bool{}
+		for _, m := range ternaryExpMergeNode {
+			valueMergeSet[m] = true
+		}
+		// canReachMerge reports whether EVERY forward path from node (under the straight-line / nested-
+		// condition discipline, no stores) reaches mergeNode. It identifies value-ternary conditions:
+		// a fork qualifies only if both its arms post-converge on mergeNode. Memoized; a node currently
+		// on the DFS stack (a cycle / loop back-edge) is treated as not-reaching, so loops are declined.
+		const (
+			reachUnknown = iota
+			reachTrue
+			reachFalse
+			reachVisiting
+		)
+		reachMemo := map[*OpCode]int{}
+		var canReachMerge func(n *OpCode) bool
+		canReachMerge = func(n *OpCode) bool {
+			cur := n
+			for step := 0; cur != nil && step < (1<<16); step++ {
+				if cur == mergeNode || slices.Contains(cur.Target, mergeNode) ||
+					(cur.Instr.OpCode == OP_PUTFIELD && len(cur.Target) == 1 &&
+						cur.Target[0].Instr.OpCode == OP_GOTO && slices.Contains(cur.Target[0].Target, mergeNode)) {
+					return true
+				}
+				switch reachMemo[cur] {
+				case reachTrue:
+					return true
+				case reachFalse, reachVisiting:
+					return false
+				}
+				if isTernaryArmStore(cur.Instr.OpCode) && !isInlineArrayInitStore(cur) {
+					reachMemo[cur] = reachFalse
+					return false
+				}
+				if isIfNode(cur) && len(cur.Target) >= 2 {
+					reachMemo[cur] = reachVisiting
+					res := canReachMerge(cur.Target[0]) && canReachMerge(cur.Target[1])
+					if res {
+						reachMemo[cur] = reachTrue
+					} else {
+						reachMemo[cur] = reachFalse
+					}
+					return res
+				}
+				if len(cur.Target) != 1 {
+					reachMemo[cur] = reachFalse
+					return false
+				}
+				cur = cur.Target[0]
+			}
+			return false
+		}
+		// bfsDist returns BFS hop distances from start to every forward-reachable node (start excluded
+		// from the result unless it is on a cycle). Used to find the NEAREST common reconvergence of a
+		// condition's two branches by minimising the summed distance, which is robust to target ordering
+		// (a plain reachability probe can return a farther shared node first when a branch forks).
+		bfsDist := func(start *OpCode) map[*OpCode]int {
+			dist := map[*OpCode]int{}
+			queue := []*OpCode{start}
+			d := map[*OpCode]int{start: 0}
+			for i := 0; i < len(queue) && i < (1<<16); i++ {
+				n := queue[i]
+				cd := d[n]
+				if _, ok := dist[n]; !ok {
+					dist[n] = cd
+				}
+				for _, t := range n.Target {
+					if _, seen := d[t]; !seen {
+						d[t] = cd + 1
+						queue = append(queue, t)
+					}
+				}
+			}
+			return dist
+		}
+		// firstReconverge finds the NEAREST node reachable from BOTH of c's branches (the common node
+		// minimising branch0-distance + branch1-distance). It distinguishes two shapes:
+		//   - a real condition of THIS value-merge: its branches stay disjoint until mergeNode, or one
+		//     branch flows into the other (short-circuit &&/|| chain), so the reconvergence is mergeNode,
+		//     one of c's targets, or a plain control node (the next chained condition / range check);
+		//   - an inner value ternary (a diamond): both branches meet at a value-merge node whose result
+		//     is then consumed (e.g. `!x` feeding an ixor). isInnerValueTernary keys off that.
+		firstReconvMemo := map[*OpCode]*OpCode{}
+		firstReconverge := func(c *OpCode) *OpCode {
+			if len(c.Target) < 2 {
+				return nil
+			}
+			if m, found := firstReconvMemo[c]; found {
+				return m
+			}
+			d0 := bfsDist(c.Target[0])
+			d1 := bfsDist(c.Target[1])
+			var res *OpCode
+			best := 1 << 30
+			for n, a := range d0 {
+				if n == c {
+					continue
+				}
+				if b, ok := d1[n]; ok {
+					if a+b < best {
+						best = a + b
+						res = n
+					}
+				}
+			}
+			firstReconvMemo[c] = res
+			return res
+		}
+		// isInnerValueTernary reports a diamond whose merged VALUE is consumed before mergeNode: the two
+		// branches reconverge on a registered value-merge node other than our own mergeNode. A control
+		// reconvergence (next ||-chain condition / range check, not a value merge) is NOT inner, so the
+		// short-circuit condition is kept as a genuine arm of this ternary.
+		isInnerValueTernary := func(n *OpCode) bool {
+			if !isIfNode(n) || len(n.Target) < 2 {
+				return false
+			}
+			fr := firstReconverge(n)
+			if fr == nil || fr == mergeNode {
+				return false
+			}
+			return valueMergeSet[fr]
+		}
+		isTernaryCondition := func(n *OpCode) bool {
+			return isIfNode(n) && len(n.Target) >= 2 && !isInnerValueTernary(n) &&
+				canReachMerge(n.Target[0]) && canReachMerge(n.Target[1])
+		}
+
+		built = map[*OpCode]*values.TernaryExpression{}
+		usedLeaf := map[*OpCode]bool{}
+		failed := false
+		putFieldLeafValue := func(cur *OpCode) values.JavaValue {
+			if cur == nil || cur.Instr.OpCode != OP_PUTFIELD || len(cur.stackConsumed) < 2 || cur.StackEntry == nil {
+				return nil
+			}
+			stackValue := cur.stackConsumed[0]
+			if UnpackSoltValue(cur.StackEntry.value) != UnpackSoltValue(stackValue) {
+				return nil
+			}
+			storedValue := GetRealValue(stackValue)
+			index := Convert2bytesToInt(cur.Data)
+			staticVal, ok := d.constantPoolGetter(int(index)).(*values.JavaClassMember)
+			if !ok {
+				return nil
+			}
+			field := values.NewRefMember(cur.stackConsumed[1], staticVal.Member, staticVal.JavaType)
+			cur.SelfOpFolded = true
+			return values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				return fmt.Sprintf("(%s = %s)", field.String(funcCtx), storedValue.String(funcCtx))
+			}, func() types.JavaType {
+				return storedValue.Type()
+			}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
+				field.ReplaceVar(oldId, newId)
+				storedValue.ReplaceVar(oldId, newId)
+			})
+		}
+		var arm func(entry *OpCode) values.JavaValue
+		var probe func(ifNode *OpCode) *values.TernaryExpression
+		arm = func(entry *OpCode) values.JavaValue {
+			cur := entry
+			for step := 0; cur != nil && step < (1<<16); step++ {
+				if failed {
+					return nil
+				}
+				reachesMerge := slices.Contains(cur.Target, mergeNode)
+				if !reachesMerge && cur.Instr.OpCode == OP_PUTFIELD && len(cur.Target) == 1 &&
+					cur.Target[0].Instr.OpCode == OP_GOTO && slices.Contains(cur.Target[0].Target, mergeNode) {
+					reachesMerge = true
+				}
+				// A node flowing straight into mergeNode is a leaf; its produced stack value is the
+				// arm value. Checked first so a leaf that also happens to be a store target is still
+				// taken as the (already side-effect-accounted) stack value.
+				if reachesMerge {
+					if cur.StackEntry == nil {
+						failed = true
+						return nil
+					}
+					if usedLeaf[cur] {
+						// A ternary only evaluates its chosen arm, so textually reusing a shared leaf is
+						// semantically exact - BUT a ternary tree cannot share nodes, so a shared leaf is
+						// duplicated once per arm that reaches it at render time. That is harmless for the
+						// canonical short-circuit shape (the shared leaf is a single iconst_0 / iconst_1
+						// literal), but a shared leaf that is a large value subtree (e.g. a method-call
+						// fall-through in a giant instanceof type-dispatch) would expand combinatorially
+						// into megabytes of duplicated source. Only adopt literal shared leaves; decline
+						// any non-literal shared leaf so the legacy path (which keeps it as control flow)
+						// handles it unchanged.
+						if _, isLit := UnpackSoltValue(cur.StackEntry.value).(*values.JavaLiteral); !isLit {
+							failed = true
+							return nil
+						}
+						sharedLeaf = true
+					}
+					usedLeaf[cur] = true
+					if putfieldValue := putFieldLeafValue(cur); putfieldValue != nil {
+						return putfieldValue
+					}
+					return cur.StackEntry.value
+				}
+				if isTernaryCondition(cur) {
+					return probe(cur)
+				}
+				// An inner value ternary (diamond) computes a value that is consumed downstream (it is
+				// reconstructed by its OWN merge pass); skip the whole sub-region to its reconvergence
+				// point and keep walking toward this merge's conditions/leaves.
+				if isInnerValueTernary(cur) {
+					cur = firstReconverge(cur)
+					continue
+				}
+				if isTernaryArmStore(cur.Instr.OpCode) && !isInlineArrayInitStore(cur) {
+					failed = true
+					return nil
+				}
+				if len(cur.Target) != 1 {
+					failed = true
+					return nil
+				}
+				cur = cur.Target[0]
+			}
+			failed = true
+			return nil
+		}
+		probe = func(ifNode *OpCode) *values.TernaryExpression {
+			if t, found := built[ifNode]; found {
+				return t // condition reached twice: reuse the same sub-expression (still a correct value)
+			}
+			if len(ifNode.Target) < 2 {
+				failed = true
+				return nil
+			}
+			t := values.NewTernaryExpression(conditionSlotForIfNode(ifNode), nil, nil)
+			built[ifNode] = t
+			t.TrueValue = arm(ifNode.Target[1])
+			t.FalseValue = arm(ifNode.Target[0])
+			// A "middle" condition has BOTH arms leading to further conditions (no direct leaf arm).
+			// The legacy chain combiner only attaches a callback to conditions with a direct leaf route,
+			// so a middle condition that becomes the MergeIf survivor leaks an empty slot. Its presence
+			// is exactly the signal that the legacy path fails and the principled rebuild is needed.
+			if _, t1 := t.TrueValue.(*values.TernaryExpression); t1 {
+				if _, t0 := t.FalseValue.(*values.TernaryExpression); t0 {
+					hasMiddleCond = true
+				}
+			}
+			return t
+		}
+		// nearestIfAncestor walks back through single-source straight-line predecessors to the closest
+		// dominating condition (nil if the chain forks / merges before reaching one).
+		nearestIfAncestor := func(n *OpCode) *OpCode {
+			cur := n
+			for step := 0; cur != nil && step < (1<<16); step++ {
+				if len(cur.Source) != 1 {
+					return nil
+				}
+				p := cur.Source[0]
+				if isIfNode(p) {
+					return p
+				}
+				cur = p
+			}
+			return nil
+		}
+		// Seed the root with the lowest-id detected condition, then climb to the outermost enclosing
+		// ternary condition (both arms still converge on mergeNode). probe(root) then discovers the
+		// entire condition set top-down, including chain links the bottom-up detection missed.
+		var rootNode *OpCode
+		for _, n := range detectedIfNodes {
+			if rootNode == nil || n.Id < rootNode.Id {
+				rootNode = n
+			}
+		}
+		if rootNode == nil {
+			return nil, nil, false, false, false
+		}
+		// nearestMultiSourceReconverge walks back through single-source predecessors from n (n excluded)
+		// to the FIRST node that has more than one predecessor (a control reconvergence), or nil if the
+		// chain reaches a fork-free entry. The single-source walk is only entered after nearestIfAncestor
+		// already returned nil, so it never steps over an if-node.
+		nearestMultiSourceReconverge := func(n *OpCode) *OpCode {
+			cur := n
+			for step := 0; cur != nil && step < (1<<16); step++ {
+				if len(cur.Source) >= 2 {
+					return cur
+				}
+				if len(cur.Source) != 1 {
+					return nil
+				}
+				cur = cur.Source[0]
+			}
+			return nil
+		}
+		// Climb to the outermost enclosing ternary condition. Two shapes are climbed:
+		//   (1) a single-source straight-line dominating condition (nearestIfAncestor); and
+		//   (2) a multi-source reconvergence whose EVERY predecessor is itself a clean ternary condition
+		//       of THIS merge. Shape (2) is the canonical "||-chain whose leading operand is a compound
+		//       `A && B` / range check": both the A-true jump and the B-false fall-through land on the
+		//       NEXT operand's check (more precisely on the block that loads the operand for that check),
+		//       giving that block two predecessors. The straight-line climb stops there, so without this
+		//       the leading operand is peeled into an outer if-statement with an empty arm and the shared
+		//       post-merge continuation (e.g. a loop increment) is dropped -> infinite loop. The "every
+		//       predecessor is a clean ternary condition" guard is essential: a loop back-edge or a
+		//       statement path has non-condition predecessors, so it is NOT climbed (that prevents
+		//       folding a loop body into the value, which would emit an empty do{}while(true)).
+		for {
+			anc := nearestIfAncestor(rootNode)
+			if anc != nil {
+				if !isTernaryCondition(anc) {
+					break
+				}
+				rootNode = anc
+				continue
+			}
+			recon := nearestMultiSourceReconverge(rootNode)
+			if recon == nil {
+				break
+			}
+			allClean := true
+			var lowest *OpCode
+			for _, p := range recon.Source {
+				if !isTernaryCondition(p) {
+					allClean = false
+					break
+				}
+				if lowest == nil || p.Id < lowest.Id {
+					lowest = p
+				}
+			}
+			if !allClean || lowest == nil || lowest.Id >= rootNode.Id {
+				break
+			}
+			rootNode = lowest
+		}
+		if !isTernaryCondition(rootNode) {
+			seenAnc := utils.NewSet[*OpCode]()
+			for _, start := range detectedIfNodes {
+				WalkGraph[*OpCode](start, func(n *OpCode) ([]*OpCode, error) {
+					if seenAnc.Has(n) {
+						return nil, nil
+					}
+					seenAnc.Add(n)
+					if isTernaryCondition(n) {
+						if rootNode == nil || n.Id < rootNode.Id {
+							rootNode = n
+						}
+						return nil, nil
+					}
+					return n.Source, nil
+				})
+			}
+		}
+		if !isTernaryCondition(rootNode) {
+			return nil, nil, false, false, false
+		}
+		root = probe(rootNode)
+		if failed || root == nil {
+			return nil, nil, false, false, false
+		}
+		return root, built, sharedLeaf, hasMiddleCond, true
+	}
+	for _, code := range ternaryExpMergeNode {
+		mergeNode := code
+		ifNodes := mergeToIfNode[code]
+		if len(ifNodes) == 0 {
+			continue
+		}
+		if !EnableLegacyMergeReconstruction {
+			rootTern, built, sharedLeaf, hasMiddleCond, ok := buildSharedLeafTernary(mergeNode, ifNodes)
+			if os.Getenv("DEBUG_TERNARY") != "" {
+				log.Errorf("TERNARY %s.%s %v merge=%d offset=%d ifNodes=%d ok=%v sharedLeaf=%v middle=%v built=%d",
+					d.FunctionContext.ClassName, d.FunctionContext.FunctionName, d.FunctionContext.FunctionType,
+					mergeNode.Id, mergeNode.CurrentOffset, len(ifNodes), ok, sharedLeaf, hasMiddleCond, len(built))
+			}
+			// Intercept every value ternary the principled builder can fully rebuild. The builder already
+			// rejects statement-dispatch paths (stores), cycles, unresolved arms, and non-literal shared
+			// leaves, so an ok result is a self-contained expression tree with callbacks for every adopted
+			// condition. The legacy combiner is kept only for shapes the probe cannot prove.
+			// The legacy chain combiner only attaches a condition callback to if-nodes with a direct leaf
+			// arm; any chain whose detection under-reports an interior condition leaks an empty slot
+			// (CronPattern.match etc.). The rebuilt nested tree wires a callback to EVERY adopted
+			// condition, and TernaryExpression.String folds the shared-leaf shape back into idiomatic
+			// &&/|| at render time, so this is both more complete and equally readable.
+			if ok {
+				// Wire every condition: its statement's Callback fills its own nested ternary's
+				// Condition (post-MergeIf). Marking TernaryChainArm keeps MergeIf from folding the
+				// condition NODES (which would unfire some callbacks and leak), so each condition is
+				// dissolved individually into its ternary arm. The &&/|| rendering is recovered purely
+				// at the value level by TernaryExpression.String's short-circuit fold.
+				for ifNode, t := range built {
+					tt := t
+					t.ConditionFromOp = ifNode.Id
+					ifNode.TernaryChainArm = true
+					ifNodeToConditionCallback[ifNode] = func(value values.JavaValue) {
+						tt.Condition = value
+					}
+				}
+				ternaryExpMergeNodeSlot[code].ResetValue(rootTern)
+				code.conditionOpId = 0
+				continue
+			}
+		}
+		// A conditional (?:) converges all of its arms at a single mergeNode; the if-nodes feeding it
+		// form a binary tree (outer condition = root, a ternary nested in an arm = subtree). The legacy
+		// combiner below walks them as a right-leaning chain and also reconstructs short-circuit &&/||
+		// (which compile to a DAG that shares a boolean value node), and it handles those correctly.
+		// It only breaks when BOTH arms are nested ternaries (a balanced tree c?(a?:):(b?:)): the
+		// bottom-up merge detection records only the if-nodes nearest the leaves, so the outer
+		// condition - which has no direct leaf arm - is missing, and an arm is silently dropped. We
+		// detect exactly that case by trying to adopt missing dominating conditions (the expansion
+		// below); if it grows the if-set we rebuild the tree structurally, otherwise we keep the proven
+		// legacy path so short-circuit and simple/chain ternaries are unaffected.
+		ifSet := map[*OpCode]bool{}
+		for _, n := range ifNodes {
+			ifSet[n] = true
+		}
+		// branchReachesNestedIf reports whether the straight-line path from entry reaches an existing
+		// condition node of THIS merge (a nested ternary) before anything else. We deliberately do NOT
+		// accept a branch that flows directly into mergeNode (a plain leaf value): adopting an ancestor
+		// is only correct for the balanced BOTH-arms shape c?(a?:):(b?:), where each arm is itself a
+		// nested ternary. Accepting a leaf arm would also match ordinary if/else dispatch (e.g. a lexer
+		// nextToken) whose branches merely converge, and committing that as a ternary corrupts the CFG.
+		branchReachesNestedIf := func(entry *OpCode) bool {
+			cur := entry
+			for step := 0; cur != nil && step < 1<<16; step++ {
+				if ifSet[cur] {
+					return true
+				}
+				if slices.Contains(cur.Target, mergeNode) {
+					return false
+				}
+				if len(cur.Target) != 1 {
+					return false
+				}
+				cur = cur.Target[0]
+			}
+			return false
+		}
+		// nearestIfAncestor walks straight back through the single-predecessor chain to the condition
+		// node that branches into n (n's dominating if), or nil if the chain forks first.
+		nearestIfAncestor := func(n *OpCode) *OpCode {
+			cur := n
+			for step := 0; cur != nil && step < 1<<16; step++ {
+				if len(cur.Source) != 1 {
+					return nil
+				}
+				p := cur.Source[0]
+				if isIfNode(p) {
+					return p
+				}
+				cur = p
+			}
+			return nil
+		}
+		// The bottom-up merge detection records only the if-nodes nearest the leaves. An outer
+		// condition whose arms are BOTH nested ternaries (a balanced tree, c?(a?:):(b?:)) has no
+		// direct leaf arm and is therefore absent from ifNodes, leaving two disconnected sub-ternaries
+		// with no common root. Walk up from each known condition to its nearest condition ancestor and
+		// adopt it when both of its branches feed this same merge, repeating until a fixpoint. The
+		// both-branches guard prevents adopting an enclosing if-statement (whose other branch escapes).
+		adopted := []*OpCode{}
+		for changed := true; changed; {
+			changed = false
+			for _, n := range append(append([]*OpCode{}, ifNodes...), adopted...) {
+				p := nearestIfAncestor(n)
+				if p == nil || ifSet[p] || len(p.Target) < 2 {
+					continue
+				}
+				if branchReachesNestedIf(p.Target[0]) && branchReachesNestedIf(p.Target[1]) {
+					ifSet[p] = true
+					adopted = append(adopted, p)
+					changed = true
+				}
+			}
+		}
+		if len(adopted) > 0 {
+			// A dominating condition was missing (its arms are BOTH nested ternaries), so the legacy
+			// combiner would drop an arm. Probe a structural rebuild WITHOUT global side effects and
+			// commit only if it forms a clean ternary TREE. Short-circuit &&/|| compile to a DAG that
+			// shares a boolean value node; the probe detects the shared leaf (dag) and declines, so we
+			// fall through to the proven legacy path rather than regressing those shapes to a stub.
+			treeNodes := append(append([]*OpCode{}, ifNodes...), adopted...)
+			built := map[*OpCode]*values.TernaryExpression{}
+			visited := map[*OpCode]bool{}
+			usedLeaf := map[*OpCode]bool{}
+			var failed, dag bool
+			var probe func(ifNode *OpCode) *values.TernaryExpression
+			// A genuine ?: arm leaves its value on the operand stack and never writes a local/field. A
+			// store on an arm path means the "merge" is really statement dispatch (e.g. a lexer's
+			// if/else chain assigning a token, all branches converging via astore;goto), not a value
+			// ternary. Committing that as a tree steals the branch conditions and orphans the stores
+			// ("multiple next"), so the probe declines and we keep the legacy path.
+			isStoreOp := func(op int) bool {
+				switch op {
+				case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE,
+					OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0,
+					OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1,
+					OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2,
+					OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3,
+					OP_IINC, OP_PUTFIELD, OP_PUTSTATIC,
+					OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
+					return true
+				default:
+					return false
+				}
+			}
+			arm := func(entry *OpCode) values.JavaValue {
+				cur := entry
+				for step := 0; cur != nil && step < 1<<16; step++ {
+					if failed {
+						return nil
+					}
+					if ifSet[cur] {
+						return probe(cur)
+					}
+					if isStoreOp(cur.Instr.OpCode) {
+						failed = true
+						return nil
+					}
+					if slices.Contains(cur.Target, mergeNode) {
+						if cur.StackEntry == nil {
+							failed = true
+							return nil
+						}
+						if usedLeaf[cur] {
+							dag = true // a leaf shared by two branches => not a tree (short-circuit)
+						}
+						usedLeaf[cur] = true
+						return cur.StackEntry.value
+					}
+					if len(cur.Target) != 1 {
+						failed = true
+						return nil
+					}
+					cur = cur.Target[0]
+				}
+				failed = true
+				return nil
+			}
+			probe = func(ifNode *OpCode) *values.TernaryExpression {
+				if t, ok := built[ifNode]; ok {
+					dag = true // a condition reached from two parents => not a tree
+					return t
+				}
+				if len(ifNode.Target) < 2 {
+					failed = true
+					return nil
+				}
+				visited[ifNode] = true
+				tern := values.NewTernaryExpression(conditionSlotForIfNode(ifNode), nil, nil)
+				built[ifNode] = tern
+				tern.TrueValue = arm(ifNode.Target[1])
+				tern.FalseValue = arm(ifNode.Target[0])
+				return tern
+			}
+			root := treeNodes[0]
+			for _, n := range treeNodes {
+				if n.Id < root.Id {
+					root = n
+				}
+			}
+			rootTern := probe(root)
+			allVisited := rootTern != nil
+			for _, n := range treeNodes {
+				if !visited[n] {
+					allVisited = false
+				}
+			}
+			if !failed && !dag && allVisited {
+				// Clean tree: wire each condition callback and publish the tree as the merge value.
+				// Iterate treeNodes (a stable slice), not the built map, so callback wiring is
+				// deterministic; built's keys equal treeNodes for a committed tree.
+				for _, ifNode := range treeNodes {
+					t := built[ifNode]
+					t.ConditionFromOp = ifNode.Id
+					ifNode.TernaryChainArm = true
+					ifNodeToConditionCallback[ifNode] = func(value values.JavaValue) {
+						t.Condition = value
+					}
+				}
+				ternaryExpMergeNodeSlot[code].ResetValue(rootTern)
+				code.conditionOpId = 0
+				continue
+			}
+			// Probe declined (DAG / unresolved arm); fall through to the legacy reconstruction.
+		}
+		// Legacy chain/short-circuit reconstruction. Handles simple, chained, and short-circuit &&/||
+		// shapes, and is the safe fallback when the structural probe above declines.
+		{
+			sort.Slice(ifNodes, func(i, j int) bool {
+				return ifNodes[i].Id > ifNodes[j].Id
+			})
+			var trueFalseValuePair []values.JavaValue
+			ifNode := ifNodes[0]
+			var source []*OpCode
+			falseSource := []*OpCode{}
+			trueSource := []*OpCode{}
+			WalkGraph[*OpCode](ifNode.Target[0], func(code *OpCode) ([]*OpCode, error) {
+				if slices.Contains(code.Target, mergeNode) {
+					falseSource = append(falseSource, code)
+					return nil, nil
+				}
+				return code.Target, nil
+			})
+			WalkGraph[*OpCode](ifNode.Target[1], func(code *OpCode) ([]*OpCode, error) {
+				if slices.Contains(code.Target, mergeNode) {
+					trueSource = append(trueSource, code)
+					return nil, nil
+				}
+				return code.Target, nil
+			})
+			source = utils.NewSet(append(trueSource, falseSource...)).List()
+			if len(source) != 2 {
+				isTernaryExp := false
+				if len(source) == 1 {
+					if _, ok := source[0].StackEntry.value.(*values.TernaryExpression); ok {
+						isTernaryExp = true
+					}
+				}
+				if !isTernaryExp {
+					continue
+				}
+			}
+			var defaultTarnaryValue *values.TernaryExpression
+			for i, opCode := range ifNodes {
+				if i == 0 {
+					var falseRouteEnd, trueRouteEnd *OpCode
+					if slices.Contains(falseSource, source[0]) {
+						falseRouteEnd = source[0]
+						trueRouteEnd = source[1]
+					} else {
+						falseRouteEnd = source[1]
+						trueRouteEnd = source[0]
+					}
+					trueFalseValuePair = []values.JavaValue{falseRouteEnd.StackEntry.value, trueRouteEnd.StackEntry.value}
+					ternaryValue := values.NewTernaryExpression(conditionSlotForIfNode(opCode), trueRouteEnd.StackEntry.value, falseRouteEnd.StackEntry.value)
+					code.conditionOpId = opCode.Id
+					ternaryExpMergeNodeSlot[code].ResetValue(ternaryValue)
+					ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
+						ternaryValue.Condition = value
+					}
+					defaultTarnaryValue = ternaryValue
+				}
+				if i != 0 {
+					var routeToCode bool
+					var target *OpCode
+					WalkGraph[*OpCode](opCode.Target[0], func(code *OpCode) ([]*OpCode, error) {
+						if isIfNode(code) {
+							return nil, nil
+						}
+						for _, t := range code.Target {
+							if t == mergeNode {
+								routeToCode = true
+								target = code
+								return nil, nil
+							}
+						}
+						return code.Target, nil
+					})
+					if routeToCode {
+						if GetRealValue(target.StackEntry.value) == GetRealValue(trueFalseValuePair[0]) {
+							ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
+								defaultTarnaryValue.Condition = value
+							}
+						} else if GetRealValue(target.StackEntry.value) == GetRealValue(trueFalseValuePair[1]) {
+							opCode.Negative = !opCode.Negative
+							ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
+								defaultTarnaryValue.Condition = value
+							}
+						} else {
+							newValue := values.NewTernaryExpression(conditionSlotForIfNode(opCode), ternaryExpMergeNodeSlot[code].GetValue(), target.StackEntry.value)
+							resetJavaValueTypeSafe(newValue, ternaryExpMergeNodeSlot[code].TmpType)
+							newValue.ConditionFromOp = opCode.Id
+							opCode.TernaryChainArm = true
+							ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
+								newValue.Condition = value
+							}
+							ternaryExpMergeNodeSlot[code].ResetValue(newValue)
+							code.conditionOpId = 0
+						}
+					}
+					routeToCode = false
+					WalkGraph[*OpCode](opCode.Target[1], func(code *OpCode) ([]*OpCode, error) {
+						if isIfNode(code) {
+							return nil, nil
+						}
+						for _, t := range code.Target {
+							if t == mergeNode {
+								routeToCode = true
+								target = code
+								return nil, nil
+							}
+						}
+						return code.Target, nil
+					})
+					if routeToCode {
+						if GetRealValue(target.StackEntry.value) == GetRealValue(trueFalseValuePair[1]) {
+							ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
+								defaultTarnaryValue.Condition = value
+							}
+						} else if GetRealValue(target.StackEntry.value) == GetRealValue(trueFalseValuePair[0]) {
+							opCode.Negative = !opCode.Negative
+							ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
+								defaultTarnaryValue.Condition = value
+							}
+						} else {
+							newValue := values.NewTernaryExpression(conditionSlotForIfNode(opCode), target.StackEntry.value, ternaryExpMergeNodeSlot[code].GetValue())
+							resetJavaValueTypeSafe(newValue, ternaryExpMergeNodeSlot[code].TmpType)
+							newValue.ConditionFromOp = opCode.Id
+							opCode.TernaryChainArm = true
+							ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
+								newValue.Condition = value
+							}
+							ternaryExpMergeNodeSlot[code].ResetValue(newValue)
+							code.conditionOpId = 0
+						}
+					}
+				}
+			}
+			continue
+		}
+	}
+	for _, slotVal := range ternaryExpMergeNodeSlot {
+		ternaryExp, ok := slotVal.GetValue().(*values.TernaryExpression)
+		if !ok {
+			continue
+		}
+		types.MergeTypes(ternaryExp.TrueValue.Type(), ternaryExp.FalseValue.Type())
+	}
+	return nil
+}
+func (d *Decompiler) ParseStatement() error {
+	funcCtx := d.FunctionContext
+	err := d.ParseOpcode()
+	if err != nil {
+		return err
+	}
+	// Rewrite pre-Java-6 jsr/ret finally subroutines into the modern inlined-duplicate form so the
+	// CFG/structuring below never sees jsr/ret. No-op when the method has none; conservatively
+	// leaves the bytecode (and thus the existing stub path) untouched for non-canonical shapes.
+	d.inlineJSRSubroutines()
+	err = d.ScanJmp()
+	if err != nil {
+		return err
+	}
+	err = d.DropUnreachableOpcode()
+	if err != nil {
+		return err
+	}
+	err = d.CalcOpcodeStackInfo()
+	if err != nil {
+		return err
+	}
+	// convert opcode to statement
+	var nodes []*Node
+	statementsIndex := 0
+	var tryCatchOpcode *OpCode
+	refToNewExpressionAssignNode := map[*utils2.VariableId]*Node{}
+	conditionOpToAssignNode := map[int]int{}
+	appendNodeWithOpcode := func(statement statements.Statement, opcode *OpCode) *Node {
+		if opcode.conditionOpId != 0 {
+			conditionOpToAssignNode[opcode.conditionOpId] = opcode.Id
+		}
+		if conditionSt, ok := statement.(*statements.ConditionStatement); ok && opcode.Negative {
+			conditionSt.Condition = values.NewUnaryExpression(conditionSt.Condition, values.Not, conditionSt.Condition.Type())
+			conditionSt.Neg = !conditionSt.Neg
+		}
+		if d.ifNodeConditionCallback != nil {
+			if cb, ok := d.ifNodeConditionCallback[opcode]; ok {
+				if conditionSt, ok := statement.(*statements.ConditionStatement); ok {
+					conditionSt.Callback = func(value values.JavaValue) {
+						cb(value)
+					}
+					conditionSt.TernaryChainArm = opcode.TernaryChainArm
+				}
+			}
+		}
+		node := NewNode(statement)
+		if v, ok := statement.(*statements.AssignStatement); ok {
+			if v1, ok := v.LeftValue.(*values.JavaRef); ok {
+				refToNewExpressionAssignNode[v1.Id] = node
+			}
+		}
+		node.Id = statementsIndex
+		nodes = append(nodes, node)
+		if tryCatchOpcode != nil {
+			node.IsTryCatch = true
+			node.TryNodeId = tryCatchOpcode.TryNode.Id
+			for _, code := range tryCatchOpcode.CatchNode {
+				node.CatchNodeInfo = append(node.CatchNodeInfo, code)
+			}
+			tryCatchOpcode = nil
+		}
+		return node
+	}
+	mapCodeToStackVarIndex := map[*OpCode]int{}
+	//DumpOpcodesToDotExp(d.RootOpCode)
+	var runCode func(startNode *OpCode) error
+	var parseOpcode func(opcode *OpCode) error
+	parseOpcode = func(opcode *OpCode) error {
+		appendNode := func(statement statements.Statement) *Node {
+			return appendNodeWithOpcode(statement, opcode)
+		}
+		if opcode.IsTryCatchParent {
+			tryCatchOpcode = opcode
+		}
+		//opcodeIndex := opcode.Id
+		statementsIndex = opcode.Id
+		switch opcode.Instr.OpCode {
+		case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
+			refInfos := d.opcodeIdToRef[opcode]
+			for i, refInfo := range refInfos {
+				value := opcode.stackConsumed[i]
+				ref := refInfo[0].(*values.JavaRef)
+				isFirst := refInfo[1].(bool)
+				assignSt := statements.NewAssignStatement(ref, value, isFirst)
+				appendNode(assignSt)
+			}
+		case OP_CHECKCAST:
+			slotVal := opcode.stackProduced[0]
+			leftRef := UnpackSoltValue(slotVal).(*values.JavaRef)
+			val := GetRealValue(leftRef.Val)
+			// The produced SlotValue is also the target of the checkcast single-use fold. If the
+			// assignment keeps that slot as its left side, folding rewrites the declaration name into
+			// the cast expression itself (`String ((String) x) = ...`). Use the stable ref as LHS.
+			appendNode(statements.NewAssignStatement(leftRef, val, true))
+		case OP_INVOKESTATIC:
+			if len(opcode.stackProduced) == 0 {
+				classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
+				funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+				//funcCallValue.JavaType = classInfo.JavaType
+				funcCallValue.Object = values.NewJavaClassValue(types.NewJavaClass(classInfo.Name))
+				funcCallValue.IsStatic = true
+				n := 0
+				for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
+					funcCallValue.Arguments = append(funcCallValue.Arguments, opcode.stackConsumed[n])
+					n++
+				}
+				funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+				appendNode(statements.NewExpressionStatement(funcCallValue))
+			}
+		case OP_INVOKESPECIAL:
+			if len(opcode.stackProduced) == 0 {
+				classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
+				methodName := classInfo.Member
+				funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+				funcCallValue.IsSpecialInvoke = true
+				n := 0
+				for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
+					funcCallValue.Arguments = append(funcCallValue.Arguments, opcode.stackConsumed[n])
+					n++
+				}
+				funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+				funcCallValue.Object = opcode.stackConsumed[n]
+				var skip bool
+				func() {
+					if methodName != "<init>" {
+						return
+					}
+					if len(funcCallValue.Arguments) != 0 {
+						value := GetRealValue(funcCallValue.Object)
+						if value == nil {
+							return
+						}
+						if v, ok := value.(*values.NewExpression); ok {
+							v.ArgumentsGetter = func() string {
+								return funcCallValue.ArgumentString(funcCtx)
+							}
+							// Keep a back-reference so value-tree traversals (notably RewriteVar's
+							// ReplaceVar rename pass) can reach the constructor arguments hidden in
+							// the ArgumentsGetter closure; see NewExpression.ConstructorCall.
+							v.ConstructorCall = funcCallValue
+							skip = true
+						}
+					} else {
+						skip = true
+					}
+				}()
+				if skip {
+					// for _, argument := range append(funcCallValue.Arguments, funcCallValue.Object) {
+					// 	val := values.UnpackSoltValue(argument)
+					// 	println(val.String(funcCtx))
+					// 	println(funcCallValue.String(funcCtx))
+					// 	if v, ok := val.(*values.JavaRef); ok {
+					// 		attr := d.delRefUserAttr[v.VarUid]
+					// 		attr[0]++
+					// 		d.delRefUserAttr[v.VarUid] = attr
+					// 	}
+					// }
+					val := UnpackSoltValue(funcCallValue.Object)
+					// println(val.String(funcCtx))
+					// println(funcCallValue.String(funcCtx))
+					if v, ok := val.(*values.JavaRef); ok && v != nil {
+						attr := d.delRefUserAttr[v.VarUid]
+						attr[0]++
+						d.delRefUserAttr[v.VarUid] = attr
+					}
+					if val, ok := val.(*values.JavaRef); ok && val != nil {
+						assignNode := refToNewExpressionAssignNode[val.Id]
+						if assignNode != nil {
+							assignSt := assignNode.Statement
+							assignNode.IsDel = true
+
+							users := d.varUserMap.GetMust(val)
+							for _, user := range users {
+								if user == nil {
+									continue
+								}
+								user.CurrentOpcode = opcode
+							}
+							appendNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
+								return assignSt.String(funcCtx)
+							}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
+								assignSt.ReplaceVar(oldId, newId)
+							}))
+						}
+					}
+				} else {
+					appendNode(statements.NewExpressionStatement(funcCallValue))
+				}
+			}
+		case OP_INVOKEINTERFACE:
+			if len(opcode.stackProduced) == 0 {
+				classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
+				funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+				n := 0
+				for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
+					funcCallValue.Arguments = append(funcCallValue.Arguments, opcode.stackConsumed[n])
+					n++
+				}
+				funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+				funcCallValue.Object = opcode.stackConsumed[n]
+				appendNode(statements.NewExpressionStatement(funcCallValue))
+			}
+		case OP_INVOKEVIRTUAL:
+			if len(opcode.stackProduced) == 0 {
+				classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
+				funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+				n := 0
+				for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
+					funcCallValue.Arguments = append(funcCallValue.Arguments, opcode.stackConsumed[n])
+					n++
+				}
+				funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+				funcCallValue.Object = opcode.stackConsumed[n]
+				appendNode(statements.NewExpressionStatement(funcCallValue))
+			}
+		case OP_RETURN:
+			appendNode(statements.NewReturnStatement(nil))
+		case OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE:
+			op := GetNotOp(opcode)
+			rv := opcode.stackConsumed[0]
+			lv := opcode.stackConsumed[1]
+			st := statements.NewConditionStatement(values.NewJavaCompare(lv, rv), op)
+			appendNode(st)
+		case OP_IFNONNULL:
+			st := statements.NewConditionStatement(values.NewJavaCompare(opcode.stackConsumed[0], values.JavaNull), EQ)
+			appendNode(st)
+		case OP_IFNULL:
+			st := statements.NewConditionStatement(values.NewJavaCompare(opcode.stackConsumed[0], values.JavaNull), NEQ)
+			appendNode(st)
+		case OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
+			value := opcode.stackConsumed[0]
+			index := opcode.stackConsumed[1]
+			ref := opcode.stackConsumed[2]
+			st := statements.NewArrayMemberAssignStatement(values.NewJavaArrayMember(ref, index), value)
+			appendNode(st)
+		case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE:
+			op := ""
+			switch opcode.Instr.OpCode {
+			case OP_IFEQ:
+				op = "=="
+			case OP_IFNE:
+				op = "!="
+			case OP_IFLE:
+				op = "<="
+			case OP_IFLT:
+				op = "<"
+			case OP_IFGT:
+				op = ">"
+			case OP_IFGE:
+				op = ">="
+			}
+			op = GetReverseOp(op)
+			v := opcode.stackConsumed[0]
+			if v == nil {
+				// Stack consumed value is nil (incomplete simulation for this path).
+				// Skip this opcode rather than panicking — the method may still produce
+				// partial output for other opcodes.
+				return nil
+			}
+			cmp, ok := v.(*values.JavaCompare)
+			if ok {
+				st := statements.NewConditionStatement(cmp, op)
+				appendNode(st)
+			} else {
+				st := statements.NewConditionStatement(values.NewJavaCompare(v, values.NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger))), op)
+				appendNode(st)
+			}
+		case OP_JSR, OP_JSR_W:
+			// No-op if JSR inliner bailed (see CalcOpcodeStackInfo handler).
+		case OP_RET:
+			// No-op if JSR inliner bailed.
+		case OP_GOTO, OP_GOTO_W:
+			st := statements.NewGOTOStatement()
+			appendNode(st)
+		case OP_ATHROW:
+			val := opcode.stackConsumed[0]
+			appendNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
+				return fmt.Sprintf("throw %v", val.String(funcCtx))
+			}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
+				val.ReplaceVar(oldId, newId)
+			}))
+		case OP_IRETURN:
+			v := opcode.stackConsumed[0]
+			resetReturnValueTypeSafe(v, funcCtx)
+			appendNode(statements.NewReturnStatement(v))
+		case OP_ARETURN, OP_LRETURN, OP_DRETURN, OP_FRETURN:
+			v := opcode.stackConsumed[0]
+			resetReturnValueTypeSafe(v, funcCtx)
+			appendNode(statements.NewReturnStatement(v))
+		case OP_GETFIELD:
+		case OP_GETSTATIC:
+		case OP_PUTSTATIC:
+			if !opcode.SelfOpFolded {
+				index := Convert2bytesToInt(opcode.Data)
+				staticVal := d.constantPoolGetter(int(index))
+				appendNode(statements.NewAssignStatement(staticVal, opcode.stackConsumed[0], false))
+			}
+		case OP_PUTFIELD:
+			if !opcode.SelfOpFolded {
+				index := Convert2bytesToInt(opcode.Data)
+				staticVal := d.constantPoolGetter(int(index))
+				value := opcode.stackConsumed[0]
+				field := values.NewRefMember(opcode.stackConsumed[1], staticVal.(*values.JavaClassMember).Member, staticVal.(*values.JavaClassMember).JavaType)
+				assignSt := statements.NewAssignStatement(field, value, false)
+				appendNode(assignSt)
+			}
+		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
+			refInfos := d.opcodeIdToRef[opcode]
+			convertedVals := d.dupConvertedRefValue[opcode]
+			for i, refInfo := range refInfos {
+				// Prefer the value checkAndConvertRef actually converted; stackConsumed[i] is only
+				// aligned when the converted operand sat on top of the consume order. For a compound
+				// store on a FIELD array (`this.f[i] op= v`) the dup2 pops the index before the
+				// array reference, so stackConsumed[0] is the index and using it would emit
+				// `int t = i; t[i] = ...`. The recorded value is the true array reference.
+				var value values.JavaValue
+				if i < len(convertedVals) {
+					value = convertedVals[i]
+				} else {
+					value = opcode.stackConsumed[i]
+				}
+				ref := refInfo[0].(*values.JavaRef)
+				// This temporary only carried the old value of a folded field/static
+				// post-increment/decrement; its `x++` / `x--` expression already embeds the
+				// field reference, so emitting the assignment would be both redundant and a
+				// branch side-effect that breaks structuring.
+				if d.selfOpFoldedRefs[ref.VarUid] {
+					continue
+				}
+				isFirst := refInfo[1].(bool)
+				assignSt := statements.NewAssignStatement(ref, value, isFirst)
+				appendNode(assignSt)
+			}
+			//for i, value := range opcode.stackConsumed {
+			//	appendNode(statements.NewAssignStatement(opcode.stackProduced[i], value, true))
+			//}
+		case OP_MONITORENTER:
+			v := opcode.stackConsumed[0]
+			st := statements.NewMiddleStatement("monitor_enter", v)
+			appendNode(st)
+		case OP_MONITOREXIT:
+			st := statements.NewMiddleStatement("monitor_exit", nil)
+			appendNode(st)
+		case OP_NOP:
+			return nil
+		case OP_POP:
+			appendNode(statements.NewExpressionStatement(opcode.stackConsumed[0]))
+		case OP_POP2:
+			for _, value := range opcode.stackConsumed {
+				appendNode(statements.NewExpressionStatement(value))
+			}
+		case OP_TABLESWITCH, OP_LOOKUPSWITCH:
+			// SwitchJmpCase maps each case value (and -1 for default) to the ABSOLUTE bytecode
+			// offset of its body. javac lays case bodies out in source order at increasing offsets
+			// and fall-through follows that physical layout, so the switch rewriter needs the offset
+			// (not the value, and not the graph-traversal Node.Id which is unreliable) to emit cases
+			// in their true physical order and preserve descending fall-through (Bug G).
+			switchStatement := statements.NewMiddleStatement(statements.MiddleSwitch, []any{opcode.SwitchJmpCase1, opcode.stackConsumed[0], opcode.SwitchJmpCase})
+			appendNode(switchStatement)
+		case OP_IINC:
+			// Folded into a post-increment/decrement expression left on the operand stack
+			// (`a[i++] = v`, `int j = i++`, `return i++`): the side effect now rides inside the
+			// consuming expression, so emitting the standalone statement here would double-apply
+			// and mis-order the increment (the historical `i++; a[i] = v` semantic bug).
+			if opcode.IincFoldedToPostOp {
+				return nil
+			}
+			// The iinc increment is a SIGNED constant. Reading it unsigned turns `i--`
+			// (iinc i, -1 => byte 0xFF) into `i + 255`, and because the renderer prints any
+			// INC op as `i++` it silently became `i++`, inverting every descending loop.
+			// Sign-extend (int8 / int16) and pick the faithful form: ++ / -- / += k / -= k.
+			var inc int
+			if opcode.IsWide {
+				inc = int(int16(Convert2bytesToInt(opcode.Data[2:])))
+			} else {
+				inc = int(int8(opcode.Data[1]))
+			}
+			ref := opcode.Ref
+			intType := types.NewJavaPrimer(types.JavaInteger)
+			switch {
+			case inc == 1:
+				appendNode(values.NewBinaryExpression(ref, values.NewJavaLiteral(1, intType), INC, ref.Type()))
+			case inc == -1:
+				appendNode(values.NewBinaryExpression(ref, values.NewJavaLiteral(1, intType), values.DEC, ref.Type()))
+			case inc >= 0:
+				appendNode(statements.NewAssignStatement(ref, values.NewBinaryExpression(ref, values.NewJavaLiteral(inc, intType), ADD, ref.Type()), false))
+			default:
+				appendNode(statements.NewAssignStatement(ref, values.NewBinaryExpression(ref, values.NewJavaLiteral(-inc, intType), SUB, ref.Type()), false))
+			}
+		case OP_END:
+			endNode := statements.NewMiddleStatement("end", nil)
+			appendNode(endNode)
+		case OP_START:
+			endNode := statements.NewMiddleStatement("start", nil)
+			appendNode(endNode)
+		default:
+			return nil
+		}
+		return nil
+	}
+
+	err = WalkGraph[*OpCode](d.opCodes[0], func(code *OpCode) ([]*OpCode, error) {
+		var initN int
+		if len(code.Source) == 0 {
+			mapCodeToStackVarIndex[code] = 0
+		} else {
+			source := code.Source[0]
+			initN = mapCodeToStackVarIndex[source]
+			pushL := len(source.Instr.StackPushed)
+			initN = initN + pushL
+			mapCodeToStackVarIndex[code] = initN
+		}
+		return code.Target, nil
+	})
+	if err != nil {
+		return err
+	}
+	runCode = func(startNode *OpCode) error {
+		return WalkGraph[*OpCode](startNode, func(node *OpCode) ([]*OpCode, error) {
+			err := parseOpcode(node)
+			if err != nil {
+				return nil, err
+			}
+			return node.Target, nil
+		})
+	}
+	err = runCode(d.opCodes[0])
+	if err != nil {
+		return err
+	}
+	// generate to statement
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].Id < nodes[j].Id
+	})
+
+	idToNode := map[int]*Node{}
+	for _, node := range nodes {
+		idToNode[node.Id] = node
+	}
+	getStatementNextIdByOpcodeId := func(id int) int {
+		if v, ok := idToNode[id]; ok {
+			return v.Id
+		}
+		idx := sort.Search(len(nodes), func(i int) bool {
+			return nodes[i].Id > id
+		})
+		if idx >= len(nodes) || idx < 0 {
+			return -1
+		}
+		return nodes[idx].Id
+	}
+	idToOpcode := map[int]*OpCode{}
+	for _, opcode := range d.opCodes {
+		idToOpcode[opcode.Id] = opcode
+	}
+	for _, node := range nodes {
+		node := node
+		opcode := idToOpcode[node.Id]
+
+		var getTarget func(code *OpCode) []*OpCode
+		getTarget = func(code *OpCode) []*OpCode {
+			targetList := []*OpCode{}
+			if code == nil {
+				return nil
+			}
+			for _, target := range code.Target {
+				if target.IsCustom {
+					targetList = append(targetList, getTarget(target)...)
+				} else {
+					targetList = append(targetList, target)
+				}
+			}
+			return targetList
+		}
+		for _, code := range getTarget(opcode) {
+			id := getStatementNextIdByOpcodeId(code.Id)
+			if id == -1 {
+				continue
+			}
+			node.Next = append(node.Next, idToNode[id])
+			if opcode.Jmp == code.Id {
+				node.JmpNode = idToNode[id]
+			}
+			idToNode[id].Source = append(idToNode[id].Source, node)
+		}
+		// Pin the condition's true-branch by node identity at build time. A two-way conditional jump
+		// builds node.Next as [falseBranch, trueBranch] (opcode.Target order: the FALSE/jump-or-fall
+		// edge first per the javac branch sense already baked into the condition), so Next[1] is the
+		// true branch here. Later passes rebuild/reorder the node graph; when they swap node.Next the
+		// position-based trueIndex in RemoveGotoStatement would silently pick the wrong branch (the
+		// Md5Crypt "salt ignored" / inverted ifnonnull family). Recording JmpNode lets RemoveGoto
+		// recover the true branch by identity. This is a strict no-op when the order is preserved
+		// (Next[0] != JmpNode keeps trueIndex=1) and degrades to the legacy fallback if the captured
+		// node is later replaced rather than merely reordered, so it cannot regress working cases.
+		switch opcode.Instr.OpCode {
+		case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE,
+			OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE,
+			OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE,
+			OP_IFNONNULL, OP_IFNULL:
+			if os.Getenv("JDEC_IFBRANCH_PIN_OFF") == "" && node.JmpNode == nil && len(node.Next) >= 2 {
+				node.JmpNode = node.Next[1]
+			}
+		}
+	}
+
+	for conditionId, toNodeId := range conditionOpToAssignNode {
+		conditionId = getStatementNextIdByOpcodeId(conditionId)
+		toNodeId = getStatementNextIdByOpcodeId(toNodeId)
+		idToNode[toNodeId].SourceConditionNode = idToNode[conditionId]
+	}
+	d.RootNode = nodes[0]
+	MiscRewriter(d.RootNode, d.delRefUserAttr)
+	uidToPairs := omap.NewEmptyOrderedMap[string, []*VarFoldRule]()
+	uidToRef := map[string]*values.JavaRef{}
+	WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
+		if v, ok := node.Statement.(*statements.ConditionStatement); ok && v.Neg {
+			node.Next[0], node.Next[1] = node.Next[1], node.Next[0]
+		}
+		if node.IsDel {
+			sources := slices.Clone(node.Source)
+			next := slices.Clone(node.Next)
+			node.RemoveAllSource()
+			node.RemoveAllNext()
+			for _, source := range sources {
+				for _, n := range next {
+					n.AddSource(source)
+				}
+			}
+			return next, nil
+		}
+		return node.Next, nil
+	})
+	idToNode = map[int]*Node{}
+	nodes = []*Node{}
+	WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
+		nodes = append(nodes, node)
+		idToNode[node.Id] = node
+		return node.Next, nil
+	})
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].Id < nodes[j].Id
+	})
+	// A typed-nil *JavaRef can end up as a varUserMap key when loadVarBySlot loads an
+	// uninitialized local slot (GetVar returns nil). The variable-fold walker below
+	// dereferences ref.VarUid / ref.Val, which would panic and crash the whole decompile.
+	// This indicates an upstream stack-simulation gap on a malformed/complex CFG; surface it as an
+	// ordinary error so the method degrades to a tagged stub (the same end state as the old panic,
+	// but reached cleanly without a Go panic that the recover net has to catch).
+	if _, hasNil := d.varUserMap.Get(nil); hasNil {
+		return errors.New("variable-fold: nil ref key in varUserMap (uninitialized local slot)")
+	}
+	d.varUserMap.ForEach(func(ref *values.JavaRef, pairs []*VarFoldRule) bool {
+		uidToPairs.Set(ref.VarUid, append(uidToPairs.GetMust(ref.VarUid), pairs...))
+		uidToRef[ref.VarUid] = ref
+		return true
+	})
+	disRefUid := lo.Map(d.disFoldRef, func(item *values.JavaRef, index int) string {
+		return item.VarUid
+	})
+	// dupSharedRefUids collects every temporary that dup/dup_x1/dup_x2/dup2/dup2_x2 materialized to
+	// share ONE computed value between two consumers (the canonical shape is a compound assignment
+	// whose result is also consumed: `int r = (a[i] += 3)` compiles to `...iadd; dup_x2; iastore;
+	// istore`). Such a temp stays its own variable. When a SECOND variable (`r`) copies it, resolving
+	// the fold value THROUGH the temp all the way to its defining expression makes the copy
+	// re-evaluate that expression (Bug J: `return a[i] + 3` instead of `return r`, double-applying
+	// the add). resolveFoldValue below stops at these temps so the copy references the temp instead.
+	// Only refs MATERIALIZED by checkAndConvertRef inside a dup-family handler are genuine shared
+	// temps. opcodeIdToRef is also populated by every normal local store (keyed by the store
+	// opcode), so we must filter by the key opcode being a dup; otherwise ordinary copy chains
+	// (`var2 = var1; var3 = var2`) would be treated as shared and stop legitimate constant folding.
+	dupSharedRefUids := map[string]bool{}
+	for op, infos := range d.opcodeIdToRef {
+		if op == nil || op.Instr == nil {
+			continue
+		}
+		switch op.Instr.OpCode {
+		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
+			for _, info := range infos {
+				if r, ok := info[0].(*values.JavaRef); ok && r != nil {
+					dupSharedRefUids[r.VarUid] = true
+				}
+			}
+		}
+	}
+	// resolveFoldValue mirrors GetRealValue (unwrap ref/slot chains) but halts at a dup-shared temp
+	// other than the starting ref, returning that temp so a copy folds into a reference to it rather
+	// than into a re-evaluation of the shared expression.
+	resolveFoldValue := func(start *values.JavaRef) values.JavaValue {
+		var cur values.JavaValue = start
+		for {
+			if r, ok := cur.(*values.JavaRef); ok {
+				if r != start && dupSharedRefUids[r.VarUid] {
+					return r
+				}
+				if r.Val == nil {
+					return r
+				}
+				if cv, ok := r.Val.(*values.CustomValue); ok && cv.Flag == "param_placeholder" {
+					return r
+				}
+				cur = r.Val
+				continue
+			}
+			if s, ok := cur.(*values.SlotValue); ok {
+				if s.GetValue() == nil {
+					return s
+				}
+				cur = s.GetValue()
+				continue
+			}
+			return cur
+		}
+	}
+	uidToPairs.ForEach(func(uid string, pairs []*VarFoldRule) bool {
+		ref := uidToRef[uid]
+		val := resolveFoldValue(ref)
+		attr := d.delRefUserAttr[ref.VarUid]
+		if slices.Contains(disRefUid, ref.VarUid) {
+			d.tracef("var-fold", "skip disabled ref=%s pairs=%d", traceRef(ref, d.FunctionContext), len(pairs))
+			return true
+		}
+		if d.traceEnabled("var-fold") {
+			pairOffsets := make([]string, 0, len(pairs))
+			for _, pair := range pairs {
+				offset := -1
+				opName := "<nil>"
+				userNext := false
+				if pair != nil && pair.CurrentOpcode != nil {
+					offset = int(pair.CurrentOpcode.CurrentOffset)
+					opName = pair.CurrentOpcode.Instr.Name
+					userNext = pair.UserIsNextOpcode
+				}
+				pairOffsets = append(pairOffsets, fmt.Sprintf("%d:%s:next=%v", offset, opName, userNext))
+			}
+			d.tracef("var-fold", "candidate ref=%s val=%s pairs=%d attr=%v pairOffsets=[%s]",
+				traceRef(ref, d.FunctionContext), traceValue(val, d.FunctionContext), len(pairs), attr, strings.Join(pairOffsets, ","))
+		}
+
+		func() {
+			if len(pairs) != 2 {
+				return
+			}
+			// A newly created array (new T[...]) assigned through javac's dup idiom must not go through
+			// the chained-assignment dup-collapse: that path assumes the duplicated value feeds two
+			// plain assignment statements (a = b = expr) and, for an array whose element stores are
+			// later folded into an initializer, it drops the array's own declaration, leaving the
+			// local undefined. Let it fall through to the normal single-use fold instead.
+			if ne, ok := val.(*values.NewExpression); ok && ne.IsArray() {
+				return
+			}
+			isDup := pairs[0].CurrentOpcode.Instr.OpCode == OP_DUP && pairs[1].CurrentOpcode.Instr.OpCode == OP_DUP
+			isSameCode := pairs[0].CurrentOpcode.Id == pairs[1].CurrentOpcode.Id
+			if !isDup || !isSameCode {
+				return
+			}
+			nodeId := getStatementNextIdByOpcodeId(pairs[0].CurrentOpcode.Id)
+			currentNode := idToNode[nodeId]
+			v, ok := currentNode.Statement.(*statements.AssignStatement)
+			if !ok {
+				return
+			}
+			dupRef, ok := v.LeftValue.(*values.JavaRef)
+			if !ok {
+				return
+			}
+
+			if len(currentNode.Next) != 1 {
+				return
+			}
+			nextNode := currentNode.Next[0]
+			nextAssign, ok := nextNode.Statement.(*statements.AssignStatement)
+			if !ok {
+				return
+			}
+			rightRef, ok := UnpackSoltValue(nextAssign.JavaValue).(*values.JavaRef)
+			if !ok {
+				return
+			}
+			if dupRef.VarUid != ref.VarUid || rightRef.VarUid != ref.VarUid {
+				return
+			}
+			if len(nextNode.Next) != 1 {
+				return
+			}
+			if len(currentNode.Source) != 1 {
+				return
+			}
+			currentNodeSource := currentNode.Source[0]
+			nnext := nextNode.Next[0]
+			// Chained-assignment dup-collapse (`tmp; a = tmp; b = tmp` -> `b = (a = expr)`) is only
+			// safe when the inlined target slot is not read again. It is the correct rendering for a
+			// terminal chain such as `int b = a = 1;` (ContinuousAssign) and for the assignment-in-
+			// ternary idiom `(cond ? (x = a) : (x = b)).foo()`. But for a plain sequential chain whose
+			// values ARE consumed (`a = b = 7; return a*10 + b;`, or any `a = b = c = expr` whose
+			// locals are read), the later single-use fold re-injects the `a = expr` CustomValue into
+			// the use site and the local loses its real declaration, so the dumper synthesizes a bogus
+			// `Object a = null` and emits non-recompilable `(Object a = 7) * 10` (and, for deeper
+			// chains, a phantom loop). Distinguish the buggy case with two signals:
+			//   1. naLeft (nextAssign.LeftValue) appears in uidToRef, i.e. it has fold-eligible
+			//      downstream reads -- this separates `two/three` (reads) from `ContinuousAssign`
+			//      (no reads, naLeft absent).
+			//   2. currentNodeSource is a linear value producer, not a branch. The ternary idiom's
+			//      stores sit under a ConditionStatement; a real sequential chain flows from a plain
+			//      MiddleStatement -- this separates `two/three` from the ternary.
+			// When both hold, skip the collapse and let the normal single-use folds reduce the chain
+			// to the natural, compilable `T t = expr; ... t ... t ...` shape (every chained local
+			// equals the same value, so folding their single-use reads into the shared temp is
+			// value-faithful). Kill-switch: JDEC_CHAINED_ASSIGN_NCHAIN_OFF=1.
+			if os.Getenv("JDEC_CHAINED_ASSIGN_NCHAIN_OFF") == "" {
+				if naLeft, ok := nextAssign.LeftValue.(*values.JavaRef); ok {
+					_, naReadDownstream := uidToRef[naLeft.VarUid]
+					_, srcIsCondition := currentNodeSource.Statement.(*statements.ConditionStatement)
+					if naReadDownstream && !srcIsCondition {
+						d.tracef("var-fold", "skip dup-collapse (sequential chained slot read downstream) ref=%s naLeft=%s",
+							traceRef(ref, d.FunctionContext), naLeft.VarUid)
+						return
+					}
+				}
+			}
+			currentNode.RemoveNext(nextNode)
+			nextNode.RemoveNext(nnext)
+			currentNode.AddNext(nnext)
+			currentNodeSource.RemoveNext(currentNode)
+			currentNodeSource.AddNext(nnext)
+
+			d.tracef("var-fold", "dup-collapse ref=%s currentNode=%d nextNode=%d", traceRef(ref, d.FunctionContext), currentNode.Id, nextNode.Id)
+			// The embedded assignment `(nextAssign.LeftValue = val)` is baked into the opaque
+			// CustomValue below: its LHS local is thereby consumed into the value stream and its
+			// standalone AssignStatement is dropped, so the local keeps no DeclareStatement. Record it
+			// so RewriteVar can synthesize a bare declaration if nothing else declares it (Bug Y res C).
+			if lref, okl := nextAssign.LeftValue.(*values.JavaRef); okl && lref != nil {
+				d.EmbeddedAssignDeclRefs = append(d.EmbeddedAssignDeclRefs, lref)
+			}
+			pairs[1].Replace(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				return statements.NewAssignStatement(nextAssign.LeftValue, val, false).String(funcCtx)
+			}, func() types.JavaType {
+				return val.Type()
+			}))
+
+		}()
+		if len(pairs)-attr[0] == 1 {
+			// A bare array allocation (new T[n], no inline initializer) whose elements are populated
+			// by separate a[i]=... stores must NOT be folded into its single load. Folding splices
+			// only the `new T[n]` expression into the use (e.g. a foreach's `arr$ = dpairs` copy,
+			// bytecode aload;astore), dropping every element store and yielding an empty array - a
+			// silent NPE at run time. An array WITH an inline initializer (new T[]{...}) carries its
+			// elements in the expression itself, so folding it stays correct and is left enabled.
+			if ne, ok := val.(*values.NewExpression); ok && ne.IsArray() && len(ne.Initializer) == 0 {
+				d.tracef("var-fold", "skip bare-array-alloc ref=%s val=%s", traceRef(ref, d.FunctionContext), traceValue(val, d.FunctionContext))
+				return true
+			}
+			pair := pairs[0]
+			var sourceNode, node *Node
+			if pair.UserIsNextOpcode {
+				if len(pair.CurrentOpcode.Target) != 1 {
+					return true
+				}
+				opCodeId := pair.CurrentOpcode.Target[0].Id
+				nodeId := getStatementNextIdByOpcodeId(opCodeId)
+				node = idToNode[nodeId]
+				sourceNode = idToNode[getStatementNextIdByOpcodeId(pair.CurrentOpcode.Id)]
+			} else {
+				opCodeId := pair.CurrentOpcode.Id
+				node = idToNode[getStatementNextIdByOpcodeId(opCodeId)]
+				if len(node.Source) == 1 && len(node.Source[0].Next) == 1 {
+					if v, ok := node.Source[0].Statement.(*statements.AssignStatement); ok && UnpackSoltValue(v.LeftValue) == ref {
+						sourceNode = node.Source[0]
+					}
+				}
+			}
+			// Bug T (side-effect reorder): val may carry an embedded assignment to a local, e.g. a
+			// ternary whose arms store to a slot (`(cond) ? (x = a) : (x = b)`), baked into a
+			// CustomValue by the dup-collapse above. Folding such a value into a use site that ALSO
+			// references the assigned local reorders the store relative to that read: the canonical
+			// `int y = (cond)?(x=a):(x=b); return x + y;` becomes `return x + ((cond)?(x=a):(x=b))`,
+			// which evaluates the left `x` BEFORE the store and yields the pre-store value. Keep y as
+			// an explicit local in that case so the store still happens first. Conservative (may keep
+			// a temp where the read is actually after the use, which is harmless) and rare (only fires
+			// when a folded value embeds a local assignment). Kill-switch: JDEC_SIDEEFFECT_FOLD_OFF=1.
+			if node != nil && d.foldReordersSideEffect(val, node, ref) {
+				d.tracef("var-fold", "skip single-use-fold (side-effect reorder) ref=%s val=%s",
+					traceRef(ref, d.FunctionContext), traceValue(val, d.FunctionContext))
+				return true
+			}
+			rewriteIsOk := false
+			if sourceNode != nil && node != nil {
+				assignNode := sourceNode
+				beforeNodes := slices.Clone(assignNode.Source)
+				assignNode.RemoveAllNext()
+				for _, beforeNode := range beforeNodes {
+					if beforeNode == nil {
+						continue
+					}
+					// Bug M (early-return guard branch swap): when the folded local store sits on one
+					// branch of an if-guard whose OTHER branch is a terminal `return`, the old
+					// RemoveNext + AddNext(append) pushed the rewired successor to the end of the
+					// condition's Next, reversing its [falseBranch, trueBranch] order. Because
+					// if-opcodes never populate JmpNode (opcode.Jmp stays 0), the TrueNode/FalseNode
+					// wiring depends purely on that order, so the then/else bodies got swapped
+					// (`if (extIndex == -1) { ...folder logic... } else { return path; }`). We replace
+					// the slot in place to preserve the order. This is scoped to the early-return-guard
+					// shape (sibling branch is a bare `return`) so loop back-edge rewiring, which relies
+					// on the historical append order for do-while normalization, is left untouched.
+					if isEarlyReturnGuardFold(beforeNode, assignNode, node) {
+						beforeNode.ReplaceNextSliceKeepOrder(assignNode, []*Node{node})
+					} else {
+						beforeNode.RemoveNext(assignNode)
+						beforeNode.AddNext(node)
+					}
+				}
+				ref.Id.Delete()
+				pair.Replace(val)
+				node.SourceConditionNode = assignNode.SourceConditionNode
+				rewriteIsOk = true
+				d.tracef("var-fold", "single-use-fold ref=%s useOffset=%d sourceNode=%d targetNode=%d val=%s",
+					traceRef(ref, d.FunctionContext), pair.CurrentOpcode.CurrentOffset, assignNode.Id, node.Id, traceValue(val, d.FunctionContext))
+			}
+			if !rewriteIsOk && node != nil && attr[2] == 1 {
+				source := slices.Clone(node.Source)
+				next := slices.Clone(node.Next)
+				// Bug M family (early-return-guard branch swap): splicing `node` out by removing it
+				// from each source and re-APPENDING node's successors reverses a ConditionStatement
+				// source's [falseBranch, trueBranch] Next order. if-opcodes leave JmpNode nil, so
+				// TrueNode/FalseNode are purely index-based, and the reversal silently swaps the
+				// then/else bodies -- e.g. `if (s.length()==0) return s; <loop>` decompiled with the
+				// loop body and the early-return exchanged (commons-codec Soundex: a no-op encoder
+				// that returns its input, plus a StackOverflow/IOOBE on empty input). For the
+				// early-return-guard shape, replace the edge IN PLACE before the generic splice so the
+				// guard keeps its branch polarity (same remedy as the single-use-fold path above).
+				orderPreserved := map[*Node]bool{}
+				if len(next) == 1 {
+					for _, src := range source {
+						if src != nil && isEarlyReturnGuardFold(src, node, next[0]) {
+							src.ReplaceNextSliceKeepOrder(node, next)
+							orderPreserved[src] = true
+						}
+					}
+				}
+				node.RemoveAllSource()
+				node.RemoveAllNext()
+				for _, source := range source {
+					if orderPreserved[source] {
+						continue
+					}
+					for _, n := range next {
+						source.AddNext(n)
+					}
+				}
+				ref.Id.Delete()
+				pair.Replace(val)
+				rewriteIsOk = true
+				d.tracef("var-fold", "self-op-fold ref=%s useOffset=%d node=%d val=%s",
+					traceRef(ref, d.FunctionContext), pair.CurrentOpcode.CurrentOffset, node.Id, traceValue(val, d.FunctionContext))
+			}
+			// if !rewriteIsOk {
+			// 	DumpNodesToDotExp(d.RootNode)
+			// 	(pair[0]).(func(value values.JavaValue))(val)
+			// 	sources := slices.Clone(node.Source)
+			// 	nexts := slices.Clone(node.Next)
+			// 	for _, s := range sources {
+			// 		s.RemoveNext(node)
+			// 		for _, n := range nexts {
+			// 			s.AddNext(n)
+			// 			node.RemoveNext(n)
+			// 		}
+			// 	}
+			// 	DumpNodesToDotExp(d.RootNode)
+			// 	// for _, source := range slices.Clone(node.Source) {
+			// 	// 	for i, n := range source.Next {
+			// 	// 		if n == node {
+			// 	// 			source.Next[i] = next
+			// 	// 			next.Source = append(next.Source, source)
+			// 	// 			next.RemoveSource(node)
+			// 	// 			node.RemoveSource(source)
+			// 	// 		}
+			// 	// 	}
+			// 	// }
+			// }
+		} else if len(pairs)-attr[0] == 0 {
+
+		}
+		return true
+	})
+
+	idToNode = map[int]*Node{}
+	nodes = []*Node{}
+	WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
+		nodes = append(nodes, node)
+		idToNode[node.Id] = node
+		return node.Next, nil
+	})
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].Id < nodes[j].Id
+	})
+	err = WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
+		if node.IsTryCatch {
+			tryNodeId := getStatementNextIdByOpcodeId(node.TryNodeId)
+			tryNodes := NodeFilter(node.Next, func(n *Node) bool {
+				return n.Id == tryNodeId
+			})
+			if len(tryNodes) == 0 {
+				return nil, errors.New("not found try body")
+			}
+			tryStartNode := tryNodes[0]
+			catchInfos := slices.Clone(node.CatchNodeInfo)
+			// group by endIndex
+			catchNodeMap := map[int][]*Node{}
+			for _, catchInfo := range catchInfos {
+				// Multiple catch handlers can protect the same try region (same end index): a real
+				// catch (e.g. ArrayIndexOutOfBoundsException) plus the synthetic catch-all `any`
+				// handler that javac emits for a `finally`. These must be APPENDED into one group so
+				// they all become successors of a single tryStart node; the previous code overwrote
+				// the slot, dropping the earlier handler and leaving it dangling on the pre-try
+				// statement node with two successors ("multiple next"). The raw NodeFilter result is
+				// appended without deduping on purpose: a multi-catch (`A | B`) shares one handler PC
+				// and therefore appears as two identical edges in node.Next, and the construction
+				// below removes one edge per group entry, so preserving the multiplicity is required
+				// to clear both edges. AddNext on the try node dedupes the successor side, and any
+				// surplus RemoveNext calls are safe no-ops.
+				found := NodeFilter(node.Next, func(n *Node) bool {
+					return n.Id == getStatementNextIdByOpcodeId(catchInfo.OpCode.Id)
+				})
+				endIndex := int(catchInfo.EndIndex)
+				catchNodeMap[endIndex] = append(catchNodeMap[endIndex], found...)
+			}
+			endIndexes := []int{}
+			for endIndex := range catchNodeMap {
+				endIndexes = append(endIndexes, endIndex)
+			}
+			sort.Slice(endIndexes, func(i, j int) bool {
+				return endIndexes[i] < endIndexes[j]
+			})
+			// build try node
+			// When the try region is entered via a jump (guard-return / loop / branch body), the
+			// try-catch is anchored on the *condition* that jumps to the try body (see the pre==nil
+			// fallback in ScanJmp). Splicing the MiddleTryStart in must preserve that condition's
+			// branch order and jump-target identity: a condition's true/false branch is index-based
+			// (node.Next[trueIndex]) and RemoveGotoStatement picks the index by matching node.JmpNode.
+			// The legacy steal (remove + append) moved the try body to the end of the predecessor's
+			// successor list and left JmpNode dangling on the now-detached body, inverting the if.
+			// Replace the edge in place and re-point JmpNode/HideNext instead. Equivalent to the old
+			// behavior for single-successor anchors (OP_START / plain statement). Kill-switch:
+			// JDEC_TRY_JUMP_ANCHOR_OFF=1 restores the legacy steal.
+			preserveBranchOrder := os.Getenv("JDEC_TRY_JUMP_ANCHOR_OFF") == ""
+			currentTryNode := tryStartNode
+			for _, endIndex := range endIndexes {
+				catchNodes := catchNodeMap[endIndex]
+				tryNode := NewNode(statements.NewMiddleStatement(statements.MiddleTryStart, nil))
+				tryNode.Id = statementsIndex
+				if preserveBranchOrder {
+					for _, n := range slices.Clone(currentTryNode.Source) {
+						n.ReplaceNext(currentTryNode, tryNode)
+						if n.JmpNode == currentTryNode {
+							n.JmpNode = tryNode
+						}
+						if n.HideNext == currentTryNode {
+							n.HideNext = tryNode
+						}
+						tryNode.Source = append(tryNode.Source, n)
+					}
+					currentTryNode.Source = nil
+				} else {
+					for _, n := range currentTryNode.Source {
+						currentTryNode.RemoveSource(n)
+						tryNode.AddSource(n)
+					}
+				}
+				tryNode.AddNext(currentTryNode)
+				statementsIndex++
+				for _, catchNode := range catchNodes {
+					// Mark the handler entry so TryRewriter can identify it structurally even when the
+					// handler body has no leading exception-store (e.g. an empty `catch` that discards
+					// the unused exception with `pop`).
+					catchNode.IsCatchStart = true
+					tryNode.AddNext(catchNode)
+					node.RemoveNext(catchNode)
+				}
+				node.AddNext(tryNode)
+				currentTryNode = tryNode
+			}
+			// tryNode := NewNode(statements.NewMiddleStatement(statements.MiddleTryStart, nil))
+			// tryNode.Id = statementsIndex
+			// statementsIndex++
+			// node.RemoveNext(tryNode)
+			// node.AddNext(tryNode)
+			// tryNode.AddNext(tryStartNode)
+			// for _, catchNode := range catchNodes {
+			// 	tryNode.AddNext(catchNode)
+			// 	node.RemoveNext(catchNode)
+			// }
+			// source := funk.Filter(tryStartNode.Source, func(item *Node) bool {
+			// 	return item != tryNode
+			// }).([]*Node)
+			// for _, n := range source {
+			// 	tryStartNode.RemoveSource(n)
+			// }
+			// for _, n := range source {
+			// 	tryNode.AddSource(n)
+			// }
+		}
+		return node.Next, nil
+	})
+	if err != nil {
+		return err
+	}
+	err = d.RemoveGotoStatement()
+	if err != nil {
+		return err
+	}
+	err = d.ReGenerateNodeId()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *Decompiler) ReGenerateNodeId() error {
+	id := 0
+	return WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
+		node.Id = id
+		id++
+		return node.Next, nil
+	})
+}
+func (d *Decompiler) RemoveGotoStatement() error {
+	return WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
+		if _, ok := node.Statement.(*statements.GOTOStatement); ok {
+			for _, source := range node.Source {
+				source.ReplaceNext(node, node.Next[0])
+			}
+			source := node.Next[0].Source
+			for i, n := range node.Next[0].Source {
+				if n == node {
+					source = append(source[:i], source[i+1:]...)
+					break
+				}
+			}
+			node.Next[0].Source = source
+			for _, n := range node.Source {
+				node.Next[0].Source = append(node.Next[0].Source, n)
+			}
+		}
+		if _, ok := node.Statement.(*statements.ConditionStatement); ok {
+			var trueIndex, falseIndex int
+			if node.Next[0] == node.JmpNode {
+				trueIndex = 0
+				falseIndex = 1
+			} else {
+				trueIndex = 1
+				falseIndex = 0
+			}
+			node.TrueNode = func() *Node {
+				if trueIndex >= len(node.Next) {
+					return nil
+				}
+				return node.Next[trueIndex]
+			}
+			node.FalseNode = func() *Node {
+				if falseIndex >= len(node.Next) {
+					return nil
+				}
+				return node.Next[falseIndex]
+			}
+		}
+		return node.Next, nil
+	})
+}
+
+func (d *Decompiler) ParseSourceCode() error {
+	err := d.ParseStatement()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+func DumpOpcodesToDotExp(code *OpCode) string {
+	var visitor func(node *OpCode, visited map[*OpCode]bool, sb *strings.Builder)
+	visitor = func(node *OpCode, visited map[*OpCode]bool, sb *strings.Builder) {
+		if node == nil {
+			return
+		}
+		if visited[node] {
+			return
+		}
+		visited[node] = true
+		for _, nextNode := range node.Target {
+			sb.WriteString(fmt.Sprintf("  \"%d%s\" -> \"%d%s\";\n", node.Id, node.Instr.Name, nextNode.Id, nextNode.Instr.Name))
+			visitor(nextNode, visited, sb)
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString("digraph G {\n")
+	visited := make(map[*OpCode]bool)
+	visitor(code, visited, &sb)
+	sb.WriteString("}\n")
+	println(sb.String())
+	return sb.String()
+}
+
+// castAnonSubclassReceiverForOwnField 在 getfield 读取「本类自身字段」、但接收者的静态类型是本类的
+// 合成匿名/局部子类 (形如 `Self$2`) 时, 给接收者套一层到声明类 (本类) 的显式上行 cast。
+//
+// 原因: 源码 `Self s = new Self(){..}` 里 s 的声明类型是父类 `Self`, 字节码却把局部定型成合成子类
+// `Self$N`。若该字段在 `Self` 是 private, 它不会被子类继承 (JLS 8.2), 故经 `Self$N` 引用 `s.field`
+// 不是可见成员, javac 报 `field has private access in Self`。`((Self)s).field` 永远合法 (子类 IS-A
+// Self), 正是 javac 对匿名子类的还原形态。
+//
+// 该判定极窄: 仅当 owner==本类 且接收者静态类型是 `本类$...` 时触发, 故只会给「本就无法重编译」的输出
+// 加 cast, 不影响任何已能编译的代码。kill-switch: JDEC_NO_PRIV_FIELD_CAST。
+func castAnonSubclassReceiverForOwnField(recv values.JavaValue, member *values.JavaClassMember, funcCtx *class_context.ClassContext) values.JavaValue {
+	if os.Getenv("JDEC_NO_PRIV_FIELD_CAST") != "" {
+		return recv
+	}
+	if recv == nil || member == nil || funcCtx == nil {
+		return recv
+	}
+	// 仅本类自身字段才可能对本类 private。
+	if member.Name == "" || member.Name != funcCtx.ClassName {
+		return recv
+	}
+	rt := recv.Type()
+	if rt == nil {
+		return recv
+	}
+	jc, ok := rt.RawType().(*types.JavaClass)
+	if !ok || jc == nil {
+		return recv
+	}
+	// 接收者静态类型须为本类的合成嵌套/匿名子类: `<Self>$<...>`。
+	if !strings.HasPrefix(jc.Name, funcCtx.ClassName+"$") {
+		return recv
+	}
+	owner := member.Name
+	inner := recv
+	return values.NewCustomValue(
+		func(fc *class_context.ClassContext) string {
+			return fmt.Sprintf("((%s)%s)", fc.ShortTypeName(owner), inner.String(fc))
+		},
+		func() types.JavaType { return types.NewJavaClass(owner) },
+		func(oldId *utils2.VariableId, newId *utils2.VariableId) { inner.ReplaceVar(oldId, newId) },
+	)
+}
