@@ -11,9 +11,9 @@ import (
 	"sync"
 
 	"github.com/yaklang/javajive/classparser"
+	"github.com/yaklang/javajive/internal/filesys"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/utils"
-	"github.com/yaklang/javajive/internal/filesys"
 )
 
 var archiveExtensions = []string{".jar", ".war", ".ear", ".zip", ".par"}

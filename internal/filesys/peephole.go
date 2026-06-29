@@ -4,9 +4,9 @@ import (
 	"context"
 	"io/fs"
 
+	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/utils"
-	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
 )
 
 type PeepholeConfig struct {

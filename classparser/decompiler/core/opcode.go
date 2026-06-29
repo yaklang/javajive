@@ -2,8 +2,8 @@ package core
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
-	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/omap"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 type OpCode struct {
@@ -19,14 +19,14 @@ type OpCode struct {
 	TryNode          *OpCode
 	CatchNode        []*CatchNode
 	//StackSimulation                *StackSimulationImpl
-	StackEntry                     *StackItem
-	Ref                            *values.JavaRef
-	ExceptionTypeIndex             uint16
+	StackEntry         *StackItem
+	Ref                *values.JavaRef
+	ExceptionTypeIndex uint16
 	// ExceptionTypeIndexes holds every catch type that targets this handler opcode. A
 	// multi-catch clause (`catch (A | B)`) compiles to several exception-table entries that
 	// share one handler PC but carry different catch types; collecting them here lets the
 	// decompiler reconstruct the full `A | B` clause instead of keeping only the last type.
-	ExceptionTypeIndexes []uint16
+	ExceptionTypeIndexes           []uint16
 	SwitchJmpCase                  *omap.OrderedMap[int, int32]
 	SwitchJmpCase1                 *omap.OrderedMap[int, int]
 	stackProduced                  []values.JavaValue
@@ -67,5 +67,5 @@ type CatchNode struct {
 	ExceptionTypeIndex uint16
 	StartIndex         uint16
 	EndIndex           uint16
-	OpCode            *OpCode
+	OpCode             *OpCode
 }

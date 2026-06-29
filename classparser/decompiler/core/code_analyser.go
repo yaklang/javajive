@@ -9,15 +9,15 @@ import (
 	"strings"
 
 	"github.com/samber/lo"
-	"github.com/yaklang/javajive/internal/funk"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	utils2 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/funk"
 	"github.com/yaklang/javajive/internal/log"
-	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/omap"
+	"github.com/yaklang/javajive/internal/utils"
 	"golang.org/x/exp/slices"
 )
 

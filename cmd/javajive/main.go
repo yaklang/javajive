@@ -4,7 +4,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -12,12 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	classparser "github.com/yaklang/javajive/classparser"
-	"github.com/yaklang/javajive/classparser/jarwar"
-	yserx "github.com/yaklang/javajive/serialization"
+	jj "github.com/yaklang/javajive"
 )
 
-const version = "0.1.0"
+const version = jj.Version
 
 func main() {
 	if len(os.Args) < 2 {
@@ -97,7 +94,7 @@ func cmdDecompile(args []string) error {
 		if dst == "" {
 			dst = input + ".src"
 		}
-		if err := jarwar.AutoDecompile(input, dst); err != nil {
+		if err := jj.DecompileArchive(input, dst); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "decompiled archive %q -> %q\n", input, dst)
@@ -107,7 +104,7 @@ func cmdDecompile(args []string) error {
 		if err != nil {
 			return err
 		}
-		src, err := classparser.Decompile(data)
+		src, err := jj.Decompile(data)
 		if err != nil {
 			return err
 		}
@@ -137,7 +134,7 @@ func decompileDir(dir, out string) error {
 		if err != nil {
 			return err
 		}
-		src, decErr := classparser.Decompile(data)
+		src, decErr := jj.Decompile(data)
 		if decErr != nil {
 			fmt.Fprintf(os.Stderr, "skip %q: %v\n", path, decErr)
 			return nil
@@ -167,7 +164,7 @@ func cmdClassInfo(args []string) error {
 	if err != nil {
 		return err
 	}
-	obj, err := classparser.Parse(data)
+	obj, err := jj.ParseClass(data)
 	if err != nil {
 		return err
 	}
@@ -234,16 +231,16 @@ func cmdSerialToJSON(args []string) error {
 		return err
 	}
 
-	var objs []yserx.JavaSerializable
+	var objs []jj.JavaSerializable
 	if *asHex {
-		objs, err = yserx.ParseHexJavaSerialized(strings.TrimSpace(string(raw)))
+		objs, err = jj.ParseSerializedHex(string(raw))
 	} else {
-		objs, err = yserx.ParseJavaSerialized(raw)
+		objs, err = jj.ParseSerialized(raw)
 	}
 	if err != nil {
 		return err
 	}
-	jsonBytes, err := yserx.ToJson(objs)
+	jsonBytes, err := jj.SerializedToJSON(objs...)
 	if err != nil {
 		return err
 	}
@@ -261,18 +258,17 @@ func cmdSerialFromJSON(args []string) error {
 	if err != nil {
 		return err
 	}
-	objs, err := yserx.FromJson(raw)
+	objs, err := jj.SerializedFromJSON(raw)
 	if err != nil {
 		return err
 	}
-	marshaled := yserx.MarshalJavaObjects(objs...)
 
 	// When writing to a terminal/stdout without -o, default to hex for safety.
 	emitHex := *asHex || (*out == "")
 	if emitHex {
-		return writeOutput(*out, []byte(hex.EncodeToString(marshaled)+"\n"), false)
+		return writeOutput(*out, []byte(jj.MarshalSerializedHex(objs...)+"\n"), false)
 	}
-	return writeOutput(*out, marshaled, false)
+	return writeOutput(*out, jj.MarshalSerialized(objs...), false)
 }
 
 // ---------------------------------------------------------------------------

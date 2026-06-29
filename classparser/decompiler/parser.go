@@ -5,11 +5,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/yaklang/javajive/internal/funk"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/rewriter"
+	"github.com/yaklang/javajive/internal/funk"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/utils"
 )

@@ -10,8 +10,8 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
-	regexp_utils "github.com/yaklang/javajive/internal/regexp-utils"
 	"github.com/yaklang/javajive/internal/codec"
+	regexp_utils "github.com/yaklang/javajive/internal/regexp-utils"
 )
 
 type JavaRef struct {

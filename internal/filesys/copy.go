@@ -1,9 +1,9 @@
 package filesys
 
 import (
+	"github.com/yaklang/javajive/internal/filesys/filesys_interface"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/utils"
-	"github.com/yaklang/javajive/internal/filesys/filesys_interface"
 	"io/fs"
 	"os"
 	"path/filepath"

@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yaklang/javajive/internal/utils"
-	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
 	"github.com/yaklang/javajive/internal/codec"
+	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 // PreprocessingEmbed is a simple tools to read file from embed.FS and gzip compress file

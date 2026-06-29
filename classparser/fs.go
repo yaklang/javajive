@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/filesys"
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
 	"github.com/yaklang/javajive/internal/memfile"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 type JarFS struct {
@@ -148,7 +148,7 @@ func (z *JarFS) Stat(name string) (fs.FileInfo, error) {
 }
 
 var (
-	archiveFileSuffixes   = []string{".jar", ".war", ".ear", ".par", ".zip"}
+	archiveFileSuffixes    = []string{".jar", ".war", ".ear", ".par", ".zip"}
 	jarLikeArchiveSuffixes = []string{".jar", ".war", ".ear", ".par"}
 )
 
@@ -348,11 +348,11 @@ func (z *JarFS) ReadDir(name string) ([]fs.DirEntry, error) {
 }
 
 type ExpandedZipFS struct {
-	underlying       fi.FileSystem
-	zipFS            *filesys.ZipFS // optional container (zip root); nil for local directories
-	recursiveParse   bool
-	jarCache         *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
-	zipCache         *utils.SafeMapWithKey[string, *filesys.ZipFS]
+	underlying     fi.FileSystem
+	zipFS          *filesys.ZipFS // optional container (zip root); nil for local directories
+	recursiveParse bool
+	jarCache       *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
+	zipCache       *utils.SafeMapWithKey[string, *filesys.ZipFS]
 }
 
 var _ fi.FileSystem = (*ExpandedZipFS)(nil)
@@ -363,11 +363,11 @@ func NewExpandedZipFS(underlying fi.FileSystem, zipFS *filesys.ZipFS) *ExpandedZ
 
 func NewExpandedZipFSWithOptions(underlying fi.FileSystem, zipFS *filesys.ZipFS, recursiveParse bool) *ExpandedZipFS {
 	return &ExpandedZipFS{
-		underlying:       underlying,
-		zipFS:            zipFS,
-		recursiveParse:   recursiveParse,
-		jarCache:         utils.NewSafeMapWithKey[string, *filesys.UnifiedFS](),
-		zipCache:         utils.NewSafeMapWithKey[string, *filesys.ZipFS](),
+		underlying:     underlying,
+		zipFS:          zipFS,
+		recursiveParse: recursiveParse,
+		jarCache:       utils.NewSafeMapWithKey[string, *filesys.UnifiedFS](),
+		zipCache:       utils.NewSafeMapWithKey[string, *filesys.ZipFS](),
 	}
 }
 

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yaklang/javajive/internal/utils"
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 type gzipSerializeConfig struct {

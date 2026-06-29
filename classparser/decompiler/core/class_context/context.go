@@ -7,8 +7,8 @@ import (
 
 	"github.com/yaklang/javajive/internal/funk"
 	"github.com/yaklang/javajive/internal/log"
-	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/omap"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 type ClassContext struct {
@@ -167,6 +167,7 @@ func (f *ClassContext) Import(name string) {
 	f.BuildInLibsMap.Set(pkg, append(f.BuildInLibsMap.GetMust(pkg), className))
 	f.KeySet.Add(className)
 }
+
 // stdlibNestedDottedPackages enumerates the package prefixes whose nested types are guaranteed to be
 // JDK / standard-library types (never a Yak-emitted flat unit, and always present on the compile
 // classpath as genuinely nested Outer.Inner). For these a nested-type REFERENCE must use the dotted

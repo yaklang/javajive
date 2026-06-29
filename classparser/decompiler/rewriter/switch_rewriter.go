@@ -14,8 +14,8 @@ import (
 	utils3 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/utils"
-	utils2 "github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/omap"
+	utils2 "github.com/yaklang/javajive/internal/utils"
 )
 
 // renderHead returns the first rendered token of a statement (best effort, no context), used to

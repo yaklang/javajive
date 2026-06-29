@@ -89,29 +89,31 @@ javajive serial fromjson dump.json          # 打印 hex
 
 ## 作为库使用 / Library
 
+推荐使用统一门面包 `github.com/yaklang/javajive`，一个 import 即可覆盖三类能力：
+
 ```go
-import (
-    classparser "github.com/yaklang/javajive/classparser"
-    "github.com/yaklang/javajive/classparser/jarwar"
-    yserx "github.com/yaklang/javajive/serialization"
-)
+import "github.com/yaklang/javajive"
 
 // 反编译单个 class
-src, err := classparser.Decompile(classBytes)
+src, err := javajive.Decompile(classBytes)
 
 // 反编译归档（jar/war/zip）到目录
-err := jarwar.AutoDecompile("app.jar", "app-src")
+err := javajive.DecompileArchive("app.jar", "app-src")
 
 // 解析 class 结构
-obj, err := classparser.Parse(classBytes)
+obj, err := javajive.ParseClass(classBytes)
 _ = obj.GetClassName()
 
 // 序列化：二进制 → JSON → 二进制
-objs, _ := yserx.ParseJavaSerialized(raw)        // 或 ParseHexJavaSerialized(hex)
-jsonBytes, _ := yserx.ToJson(objs)
-restored, _ := yserx.FromJson(jsonBytes)
-out := yserx.MarshalJavaObjects(restored...)
+objs, _ := javajive.ParseSerialized(raw)          // 或 ParseSerializedHex(hexStr)
+jsonBytes, _ := javajive.SerializedToJSON(objs...)
+restored, _ := javajive.SerializedFromJSON(jsonBytes)
+out := javajive.MarshalSerialized(restored...)
 ```
+
+也可直接使用子包（高级用法）：`classparser`、`classparser/jarwar`、`serialization`。
+
+> 从 yaklang 内置 Java 工具迁移到 javajive，请参阅 [MIGRATE.md](./MIGRATE.md)。
 
 ## 包结构 / Layout
 

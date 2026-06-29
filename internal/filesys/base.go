@@ -15,8 +15,8 @@ import (
 
 	"github.com/yaklang/javajive/internal/codec"
 
-	"github.com/yaklang/javajive/internal/utils"
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 // ErrNoFileFound is returned when CreateEmbedFSHash finds no files to process

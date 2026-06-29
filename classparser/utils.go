@@ -7,8 +7,8 @@ import (
 	"io/ioutil"
 	"strings"
 
-	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/codec"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 var ValueTypeError = utils.Error("error value type")

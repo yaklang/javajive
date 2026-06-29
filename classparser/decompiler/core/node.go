@@ -146,6 +146,7 @@ func (n *Node) AddNext(node *Node) {
 		node.Source = append(node.Source, n)
 	}
 }
+
 // ReplaceNextSliceKeepOrder replaces oldNode in n.Next with the given successors, spliced in
 // place at oldNode's original position, preserving successor ordering. This is required for
 // ConditionStatement nodes: if-opcodes never populate JmpNode (opcode.Jmp stays 0), so the

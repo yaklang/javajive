@@ -30,6 +30,7 @@ func NewDoWhileStatement(condition values.JavaValue, body []Statement) *DoWhileS
 		Body:           body,
 	}
 }
+
 // normalizeDoWhileDecrementGuard detects the bytecode pattern where javac compiles a
 // `while (i-- > 0) { body }` loop (or a for-loop with the decrement folded into the test) as a
 // back-edge whose head is: `iinc i,-1; if (old_i > 0) body else break`. The structuring builds a

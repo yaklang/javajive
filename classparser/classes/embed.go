@@ -2,8 +2,8 @@ package classes
 
 import (
 	"embed"
-	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/gzip_embed"
+	"github.com/yaklang/javajive/internal/log"
 )
 
 //go:embed static.tar.gz

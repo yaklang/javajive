@@ -4,8 +4,8 @@ import (
 	"io/ioutil"
 	"strings"
 
-	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/codec"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 type ClassObject struct {
@@ -144,7 +144,6 @@ func (this *ClassObject) SetClassName(name string) error {
 	oldName.Value = name
 	return nil
 }
-
 
 // SetSourceFileName 设置文件名
 func (this *ClassObject) SetSourceFileName(name string) error {
