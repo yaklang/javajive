@@ -1,0 +1,80 @@
+name: Deploy GitHub Pages
+
+# =============================================================================
+# Build & deploy the static landing site under site/ to GitHub Pages.
+# Keyword: github pages, deploy-pages, static site, java red theme
+# =============================================================================
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'site/**'
+      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:
+
+# Pages deployment needs these permissions for the deploy-pages OIDC token.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# At most one concurrent deployment; do not cancel an in-progress one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site artifact
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Sanity check site directory
+        run: |
+          set -euo pipefail
+          test -f site/index.html
+          test -f site/assets/css/style.css
+          test -f site/assets/js/matrix.js
+          test -f site/assets/js/effects.js
+          test -f site/assets/img/hero.png
+          test -f site/assets/img/favicon.svg
+          echo "=== site directory listing ==="
+          find site -type f | sort
+          echo "=== file sizes ==="
+          du -ah site | sort -h | tail -20
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          name: github-pages
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Job summary
+        if: success()
+        run: |
+          PAGE_URL="${{ steps.deployment.outputs.page_url }}"
+          {
+            echo "## JavaJive Pages Deployed"
+            echo ""
+            echo "- URL: ${PAGE_URL}"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Actor: @${{ github.actor }}"
+          } >> "${GITHUB_STEP_SUMMARY}"

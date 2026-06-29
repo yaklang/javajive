@@ -1,23 +1,51 @@
-# javajive
+<p align="center">
+  <img src="assets/hero-en.png" alt="JavaJive — Pure-Go Java Toolkit: Decompile, Class Parse, Serialization" width="880">
+</p>
 
-便携、纯 Go 的 Java 工具链。从 [yaklang](https://github.com/yaklang/yaklang) 抽取并裁剪而来，聚焦三件事：
+# JavaJive
 
-- **Java 反编译**：`.class` / `.jar` / `.war` / `.zip` → 可读的 Java 源码。
-- **Class 解析**：解析 class 文件结构（常量池、字段、方法、版本、访问标志）。
-- **Java 序列化**：解析与重组 Java 序列化（ObjectStream）二进制 ↔ JSON。
+[![CI](https://github.com/yaklang/javajive/actions/workflows/ci.yml/badge.svg)](https://github.com/yaklang/javajive/actions/workflows/ci.yml)
+[![Pages](https://github.com/yaklang/javajive/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/yaklang/javajive/actions/workflows/deploy-pages.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/yaklang/javajive.svg)](https://pkg.go.dev/github.com/yaklang/javajive)
+[![License: MIT](https://img.shields.io/badge/license-MIT-E23B2E.svg)](LICENSE)
 
-设计目标：**便携、纯 Go、依赖尽量少、自我包含**。无需 JDK、无 cgo、无 ANTLR 运行时。
+**English** | [简体中文](README.zh-CN.md) | [Website](https://yaklang.io/javajive/)
 
-> A portable, pure-Go Java toolkit: decompile classes/JARs, inspect `.class`
-> structure, and convert the Java serialization wire format to/from JSON.
+A portable, **pure-Go** Java toolkit — extracted and trimmed from
+[yaklang](https://github.com/yaklang/yaklang) — that does three things and
+nothing else:
 
-## 安装 / Install
+- **Decompile** — `.class` / `.jar` / `.war` / `.zip` → readable Java source.
+- **Parse classes** — inspect the structure of a `.class` file (constant pool,
+  fields, methods, version, access flags).
+- **(De)serialize** — parse and re-marshal the Java serialization (ObjectStream)
+  wire format with byte fidelity, and convert it to/from JSON.
+
+Built for portability and embedding:
+
+- **Pure Go, single binary** — **no JDK, no cgo, no ANTLR runtime**, no native
+  libraries. Cross-compiles to linux / macOS / windows on amd64 and arm64.
+- **One import** — a unified `javajive` facade package wraps all three
+  capabilities; the sub-packages remain available for advanced use.
+- **First-class CLI** — `decompile`, `classinfo`, and `serial` subcommands,
+  built on the standard library.
+- **Cross-tested against a real JDK** — CI compiles real `.class` / `.jar` and
+  JDK-serialized blobs with `javac`/`java`, then verifies JavaJive against them
+  (see [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)).
+- **Trimmed dependency graph** — `utils` / `codec` / `log` / `go-funk` are
+  reimplemented as a minimal, self-contained `internal/` core.
+
+## Install
 
 ```bash
+# CLI
 go install github.com/yaklang/javajive/cmd/javajive@latest
+
+# Library
+go get github.com/yaklang/javajive@latest
 ```
 
-或从源码构建 / build from source:
+Or build from source:
 
 ```bash
 git clone https://github.com/yaklang/javajive
@@ -25,31 +53,33 @@ cd javajive
 go build -o javajive ./cmd/javajive
 ```
 
-## 命令行用法 / CLI
+Requires Go 1.22+.
+
+## CLI
 
 ```text
 javajive <command> [arguments]
 
 Commands:
-  decompile   反编译 .class/.jar/.war/.zip 或目录为 Java 源码
-  classinfo   打印 .class 文件结构（版本、字段、方法）
-  serial      Java 序列化工具（子命令：tojson、fromjson）
-  version     打印版本
-  help        显示帮助
+  decompile   decompile .class/.jar/.war/.zip or a directory into Java source
+  classinfo   print the structure of a .class file (version, fields, methods)
+  serial      Java serialization tools (subcommands: tojson, fromjson)
+  version     print the version
+  help        show help
 ```
 
 ### decompile
 
 ```bash
-# 单个 class：默认输出到 stdout，可用 -o 写文件
+# Single class: prints to stdout by default, or -o to write a file.
 javajive decompile Foo.class
 javajive decompile Foo.class -o Foo.java
 
-# 归档：默认输出到 "<输入>.src" 目录，可用 -o 指定
+# Archive: defaults to a "<input>.src" directory, or -o to choose one.
 javajive decompile app.jar
 javajive decompile app.war -o ./app-src
 
-# 目录：递归反编译其中的 .class（必须用 -o 指定输出目录）
+# Directory: recursively decompile .class files (requires -o output dir).
 javajive decompile ./classes -o ./src
 ```
 
@@ -58,8 +88,6 @@ javajive decompile ./classes -o ./src
 ```bash
 javajive classinfo Foo.class
 ```
-
-输出示例：
 
 ```text
 class:      InvisibleAnnoSeed
@@ -78,63 +106,98 @@ methods (2):
 ### serial
 
 ```bash
-# 序列化二进制 → JSON（-hex 表示输入是十六进制字符串，- 表示从 stdin 读取）
+# Serialized binary -> JSON. (-hex: input is a hex string, -: read from stdin)
 javajive serial tojson dump.bin
 printf 'aced000574000568656c6c6f' | javajive serial tojson -hex -
 
-# JSON → 序列化二进制（默认输出 hex；-o 写文件时输出原始字节，可用 -hex 强制 hex）
+# JSON -> serialized binary. (default prints hex; with -o writes raw bytes)
 javajive serial fromjson dump.json -o out.bin
-javajive serial fromjson dump.json          # 打印 hex
+javajive serial fromjson dump.json          # prints hex
 ```
 
-## 作为库使用 / Library
+## Library
 
-推荐使用统一门面包 `github.com/yaklang/javajive`，一个 import 即可覆盖三类能力：
+Use the unified facade package — one import covers all three capabilities:
 
 ```go
 import "github.com/yaklang/javajive"
 
-// 反编译单个 class
+// Decompile a single class, or a whole archive into a directory.
 src, err := javajive.Decompile(classBytes)
+err = javajive.DecompileArchive("app.jar", "app-src")
 
-// 反编译归档（jar/war/zip）到目录
-err := javajive.DecompileArchive("app.jar", "app-src")
-
-// 解析 class 结构
+// Inspect class structure.
 obj, err := javajive.ParseClass(classBytes)
 _ = obj.GetClassName()
 
-// 序列化：二进制 → JSON → 二进制
-objs, _ := javajive.ParseSerialized(raw)          // 或 ParseSerializedHex(hexStr)
+// Java serialization: binary -> JSON -> binary.
+objs, _ := javajive.ParseSerialized(raw)          // or ParseSerializedHex(hexStr)
 jsonBytes, _ := javajive.SerializedToJSON(objs...)
 restored, _ := javajive.SerializedFromJSON(jsonBytes)
 out := javajive.MarshalSerialized(restored...)
 ```
 
-也可直接使用子包（高级用法）：`classparser`、`classparser/jarwar`、`serialization`。
+### Unified API
 
-> 从 yaklang 内置 Java 工具迁移到 javajive，请参阅 [MIGRATE.md](./MIGRATE.md)。
+| Function | Purpose |
+|---|---|
+| `Decompile(classBytes) (string, error)` | Decompile one `.class`'s bytes |
+| `DecompileFile(path) (string, error)` | Decompile one `.class` from disk |
+| `DecompileWithResolver(classBytes, resolve)` | Decompile with a class-bytes resolver |
+| `DecompileArchive(src, dst) error` | Decompile a `.jar`/`.war`/`.zip` into a directory |
+| `ParseClass(classBytes) (*ClassObject, error)` | Parse one `.class`'s bytes |
+| `ParseClassFile(path) (*ClassObject, error)` | Parse one `.class` from disk |
+| `ParseSerialized(raw) ([]JavaSerializable, error)` | Parse a serialization stream |
+| `ParseSerializedHex(hexStr) ([]JavaSerializable, error)` | Parse a hex-encoded stream |
+| `MarshalSerialized(objs...) []byte` | Re-encode objects to the wire format |
+| `MarshalSerializedHex(objs...) string` | Re-encode to hex |
+| `SerializedToJSON(objs...) ([]byte, error)` | Convert objects to JSON |
+| `SerializedFromJSON(raw) ([]JavaSerializable, error)` | Rebuild objects from JSON |
 
-## 包结构 / Layout
+The sub-packages are also exported for advanced use:
+`classparser`, `classparser/jarwar`, `serialization`.
 
-```text
-serialization/   Java 序列化/反序列化（源自 yaklang common/yserx）
-classparser/     Class 解析与反编译器（源自 yaklang common/javaclassparser）
-cmd/javajive/    命令行入口
-internal/        裁剪后的自包含支撑层（log / codec / funk / utils / filesys / ...）
+## Differences from upstream yaklang
+
+To stay portable and small, JavaJive makes a few deliberate trade-offs versus
+yaklang. See [MIGRATE.md](MIGRATE.md) for the full mapping and migration guide.
+
+| Area | yaklang (upstream) | JavaJive |
+|---|---|---|
+| Decompiler ANTLR safety net | re-validates dumped source via an ANTLR Java grammar; degrades members to stubs on failure | removed (heavy dependency); validation is a no-op, output is emitted directly |
+| Support layer (`utils` / `codec` / `log` / `go-funk`) | shared monorepo packages | minimal self-contained re-implementations under `internal/` |
+| `yso` gadget generator | included | not included |
+| String literal charset recovery (`MatchMIMEType`) | optional GBK/GB18030 recovery | stubbed (no-op); behaviour unchanged for the vast majority of cases |
+
+Third-party dependencies are confined to a small set of pure-Go libraries
+(`gobwas/glob`, `go-viper/mapstructure`, `samber/lo`, `tidwall/gjson`,
+`segmentio/ksuid`, `yeka/zip`, and a few `golang.org/x/*`).
+
+## Testing
+
+```bash
+go test ./...                 # unit tests + JDK cross-tests (skipped if no JDK)
+go test ./... -race           # data-race free (linux)
+go test ./test/cross/ -v      # Java cross-tests only (needs javac/java on PATH)
 ```
 
-## 与上游的差异 / Notes
+The JDK cross-tests compile real Java artifacts at test time and verify them
+against JavaJive; they `t.Skip` automatically when no JDK is present. See
+[HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md) for how the harness and CI work.
 
-为保持便携与精简，相对 yaklang 上游做了以下取舍：
+## Project layout
 
-- **移除 ANTLR 语法安全网**：反编译器原本会用 ANTLR Java 语法解析器对生成的源码做一次语法校验，校验失败则把成员降级为桩。javajive 去掉了这条重量级依赖（数万行生成代码 + ANTLR 运行时），校验改为始终通过——直接输出反编译结果，不再降级。
-- **裁剪支撑层**：`utils` / `codec` / `log` / `go-funk` 被裁剪为 `internal/` 下的最小自包含实现，避免引入大量无关依赖。
-- **不含 yso**：不纳入 Java 反序列化 gadget 生成器。
-- **MIME/字符集恢复降级**：反编译字符串字面量时的可选「中文字符集恢复」被降级为 no-op（绝大多数场景行为不变）。
+```text
+javajive.go      unified facade package (import "github.com/yaklang/javajive")
+serialization/   Java serialization/deserialization (from yaklang common/yserx)
+classparser/     class parser + decompiler (from yaklang common/javaclassparser)
+cmd/javajive/    CLI entry point
+internal/        trimmed self-contained support layer (log / codec / funk / utils / filesys / ...)
+test/cross/      JDK-backed cross-tests (javac/java)
+site/            static landing page deployed to GitHub Pages
+```
 
-第三方依赖被收敛到一小组纯 Go 库（`gobwas/glob`、`go-viper/mapstructure`、`samber/lo`、`tidwall/gjson`、`segmentio/ksuid`、`yeka/zip` 及若干 `golang.org/x/*`）。
+## License
 
-## 许可 / License
-
-开源。沿用 yaklang 上游许可。
+[MIT](LICENSE) © 2026 VillanCh. JavaJive is derived from
+[yaklang](https://github.com/yaklang/yaklang).
