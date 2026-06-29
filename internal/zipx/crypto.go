@@ -15,8 +15,6 @@ import (
 	"errors"
 	"hash"
 	"io"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 type EncryptionMethod int
@@ -272,9 +270,48 @@ func checkPasswordVerification(pwvv, pwv []byte) bool {
 	return b
 }
 
+// pbkdf2Key derives a key from the given password, salt and iteration count
+// using HMAC with the provided hash. It is a self-contained reimplementation of
+// golang.org/x/crypto/pbkdf2.Key (RFC 2898 / PKCS #5 v2.0), kept here so the
+// module pulls no external crypto dependency.
+func pbkdf2Key(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte {
+	prf := hmac.New(h, password)
+	hashLen := prf.Size()
+	numBlocks := (keyLen + hashLen - 1) / hashLen
+
+	var buf [4]byte
+	dk := make([]byte, 0, numBlocks*hashLen)
+	U := make([]byte, hashLen)
+	for block := 1; block <= numBlocks; block++ {
+		// T_i = U_1 ^ U_2 ^ ... ^ U_iter, with U_1 = PRF(password, salt || i).
+		prf.Reset()
+		prf.Write(salt)
+		buf[0] = byte(block >> 24)
+		buf[1] = byte(block >> 16)
+		buf[2] = byte(block >> 8)
+		buf[3] = byte(block)
+		prf.Write(buf[:4])
+		dk = prf.Sum(dk)
+		T := dk[len(dk)-hashLen:]
+		copy(U, T)
+
+		// U_n = PRF(password, U_(n-1)).
+		for n := 2; n <= iter; n++ {
+			prf.Reset()
+			prf.Write(U)
+			U = U[:0]
+			U = prf.Sum(U)
+			for x := range U {
+				T[x] ^= U[x]
+			}
+		}
+	}
+	return dk[:keyLen]
+}
+
 func generateKeys(password, salt []byte, keySize int) (encKey, authKey, pwv []byte) {
 	totalSize := (keySize * 2) + 2 // enc + auth + pv sizes
-	key := pbkdf2.Key(password, salt, 1000, totalSize, sha1.New)
+	key := pbkdf2Key(password, salt, 1000, totalSize, sha1.New)
 	encKey = key[:keySize]
 	authKey = key[keySize : keySize*2]
 	pwv = key[keySize*2:]
