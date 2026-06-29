@@ -278,7 +278,7 @@ kbd {
 .hero {
   position: relative;
   z-index: 1;
-  padding: 48px 24px 0;
+  padding: 72px 24px 28px;
   overflow: hidden;
   isolation: isolate;
 }
@@ -287,7 +287,7 @@ kbd {
   z-index: 2;
   max-width: 920px;
   margin: 0 auto;
-  padding-bottom: 32px;
+  padding-bottom: 24px;
   text-align: center;
 }
 
@@ -386,11 +386,11 @@ kbd {
 }
 
 .hero-title {
-  margin: 0 0 12px;
-  font-size: clamp(28px, 4.4vw, 42px);
-  line-height: 1.10;
-  letter-spacing: -.022em;
-  font-weight: 600;
+  margin: 0 0 14px;
+  font-size: clamp(32px, 5vw, 52px);
+  line-height: 1.08;
+  letter-spacing: -.024em;
+  font-weight: 650;
 }
 .hero-title-dim { color: var(--fg-3); }
 
@@ -1353,8 +1353,8 @@ mark {
 
 @media (max-width: 640px) {
   .nav-inner { padding: 0 16px; gap: 12px; }
-  .hero { padding: 56px 16px 0; }
-  .hero-inner { padding-bottom: 32px; }
+  .hero { padding: 56px 16px 20px; }
+  .hero-inner { padding-bottom: 28px; }
   .hero-title { font-size: clamp(28px, 7vw, 38px); }
   .hero-sub { font-size: 15px; }
   /* 移动端蒙层加重, 因为图被裁到只剩中段, 否则容易喧宾夺主 */
@@ -1875,15 +1875,6 @@ mark {
    JavaJive landing-page additions (single-page, no skills catalog)
    关键词: hero banner image, action buttons, generic section, code block
    ------------------------------------------------------------------------- */
-.hero-logo {
-  display: block;
-  width: 100%;
-  max-width: 720px;
-  margin: 4px auto 20px;
-  border-radius: 14px;
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-2);
-}
 .hero-actions {
   display: flex;
   flex-wrap: wrap;

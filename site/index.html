@@ -106,6 +106,12 @@
 <main>
 
 <section class="hero">
+  <div class="hero-bg" aria-hidden="true">
+    <img id="hero-img" class="hero-bg-img" src="assets/img/hero.png" alt="" decoding="async" fetchpriority="high" loading="eager" />
+    <div class="hero-bg-veil"></div>
+    <div class="hero-bg-noise"></div>
+  </div>
+
   <div class="hero-inner">
     <div class="badge-row">
       <span class="badge" data-i18n="hero.badge1">pure Go</span>
@@ -113,8 +119,6 @@
       <span class="badge badge-soft" data-i18n="hero.badge3">no JDK</span>
       <span class="badge badge-ghost" data-i18n="hero.badge4">MIT licensed</span>
     </div>
-
-    <img id="hero-img" class="hero-logo" src="assets/img/hero.png" alt="JavaJive — Pure-Go Java Toolkit: Decompile, Class Parse, Serialization" data-i18n-alt="hero.alt" decoding="async" fetchpriority="high" loading="eager" />
 
     <h1 class="hero-title" data-i18n="hero.title">
       Java tooling, in pure Go.
