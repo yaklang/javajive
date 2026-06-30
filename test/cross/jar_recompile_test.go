@@ -84,6 +84,19 @@ var jarSpecs = map[string]jarSpec{
 			"org/springframework/spring-jcl/5.3.27/spring-jcl-5.3.27.jar",
 		},
 	},
+	// 以下四个与 benchmark_test.go 的 benchmarkJars 对齐, 使 tree/iso inventory 也能对它们分桶选靶。
+	"gson": {
+		relPath: "com/google/code/gson/gson/2.8.9/gson-2.8.9.jar",
+	},
+	"commons-lang3": {
+		relPath: "org/apache/commons/commons-lang3/3.12.0/commons-lang3-3.12.0.jar",
+	},
+	"jsoup": {
+		relPath: "org/jsoup/jsoup/1.10.2/jsoup-1.10.2.jar",
+	},
+	"snakeyaml": {
+		relPath: "org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar",
+	},
 }
 
 func m2Repo() string {

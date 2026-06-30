@@ -150,10 +150,12 @@ var benchmarkJars = []benchJar{
 
 // threeWayScore is one decompiler's result on one jar under the tree-compile metric.
 type threeWayScore struct {
-	files    int // .java units the decompiler emitted
-	failed   int // units that contain at least one javac error when compiled together
-	errLines int // total javac error lines (context)
-	decErr   string
+	files       int // .java units the decompiler emitted
+	failed      int // units that contain at least one javac error when compiled together
+	errLines    int // total javac error lines (context)
+	outers      int // distinct OUTER (top-level) classes among emitted files (packaging-independent)
+	failedOuter int // distinct OUTER classes with at least one failing unit (primary by-class metric)
+	decErr      string
 }
 
 func (s threeWayScore) passPct() float64 {
@@ -161,6 +163,16 @@ func (s threeWayScore) passPct() float64 {
 		return 0
 	}
 	return float64(s.files-s.failed) / float64(s.files) * 100
+}
+
+// classPassPct is the clean-compile rate by OUTER class. Because JavaJive flattens nested classes to
+// their own files while CFR/Vineflower inline them, the per-file rate (passPct) is NOT comparable
+// across tools; collapsing to the outer class makes this rate packaging-independent and comparable.
+func (s threeWayScore) classPassPct() float64 {
+	if s.outers == 0 {
+		return 0
+	}
+	return float64(s.outers-s.failedOuter) / float64(s.outers) * 100
 }
 
 // TestBenchmarkThreeWayRecompile compares JavaJive vs CFR vs Vineflower on real jars under the same
@@ -218,27 +230,46 @@ func TestBenchmarkThreeWayRecompile(t *testing.T) {
 			r.vine = scoreExternal(t, java, vine, jarPath, classpath, "vineflower")
 		}
 		rows = append(rows, r)
-		t.Logf("[%s] classes=%d | JavaJive %d/%d ok (%.1f%%) %derr | CFR %d/%d ok (%.1f%%) %derr | Vineflower %d/%d ok (%.1f%%) %derr",
+		t.Logf("[%s] classes=%d | JavaJive %d/%d bad-class (%.1f%% ok) %dunit-fail %derr | CFR %d/%d bad-class (%.1f%% ok) %derr | Vineflower %d/%d bad-class (%.1f%% ok) %derr",
 			r.jar, r.classes,
-			r.jj.files-r.jj.failed, r.jj.files, r.jj.passPct(), r.jj.errLines,
-			r.cfr.files-r.cfr.failed, r.cfr.files, r.cfr.passPct(), r.cfr.errLines,
-			r.vine.files-r.vine.failed, r.vine.files, r.vine.passPct(), r.vine.errLines)
+			r.jj.failedOuter, r.jj.outers, r.jj.classPassPct(), r.jj.failed, r.jj.errLines,
+			r.cfr.failedOuter, r.cfr.outers, r.cfr.classPassPct(), r.cfr.errLines,
+			r.vine.failedOuter, r.vine.outers, r.vine.classPassPct(), r.vine.errLines)
 	}
 
-	// Emit markdown tables for the evaluation doc / website. Two lenses are reported because the three
-	// decompilers emit DIFFERENT numbers of files (JavaJive flattens each nested class to its own
-	// top-level unit, so its file count ~= class count; CFR/Vineflower inline nested classes, emitting
-	// one file per OUTER class). (1) per-unit clean-compile rate; (2) total javac error lines, which is
-	// finer-grained and packaging-independent, so it is the more directly comparable number.
+	// Emit markdown tables for the evaluation doc / website. The three decompilers emit DIFFERENT
+	// numbers of files (JavaJive flattens each nested class to its own top-level unit, so its file
+	// count ~= class count; CFR/Vineflower inline nested classes, emitting one file per OUTER class).
+	// Therefore the PRIMARY, objective metric is Table A: the number of distinct OUTER (top-level)
+	// classes that fail to recompile, which is packaging-independent and directly comparable. Table 1
+	// (per-emitted-file rate) and Table 2 (raw error lines) are kept as finer-grained context.
 	var b strings.Builder
-	b.WriteString("\n#### Table 1 - recompilable-unit pass rate (cleanly-compiling files / emitted files)\n\n")
+	b.WriteString("\n#### Table A - defective classes (top-level/outer classes failing to recompile; lower is better; PRIMARY metric)\n\n")
+	b.WriteString("Cell = defective / total outer classes (clean-class rate).\n\n")
+	b.WriteString("| jar | classes | JavaJive | CFR | Vineflower |\n")
+	b.WriteString("|---|---:|---:|---:|---:|\n")
+	var jjBad, jjTot, cfrBad, cfrTot, vineBad, vineTot int
+	for _, r := range rows {
+		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s |\n",
+			r.jar, r.classes, classCell(r.jj), classCell(r.cfr), classCell(r.vine))
+		jjBad += r.jj.failedOuter
+		jjTot += r.jj.outers
+		cfrBad += r.cfr.failedOuter
+		cfrTot += r.cfr.outers
+		vineBad += r.vine.failedOuter
+		vineTot += r.vine.outers
+	}
+	fmt.Fprintf(&b, "| **total** | | **%d/%d** | **%d/%d** | **%d/%d** |\n",
+		jjBad, jjTot, cfrBad, cfrTot, vineBad, vineTot)
+
+	b.WriteString("\n#### Table 1 - recompilable-unit pass rate (cleanly-compiling files / emitted files; NOT cross-tool comparable)\n\n")
 	b.WriteString("| jar | classes | JavaJive | CFR | Vineflower |\n")
 	b.WriteString("|---|---:|---:|---:|---:|\n")
 	for _, r := range rows {
 		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s |\n",
 			r.jar, r.classes, scoreCell(r.jj), scoreCell(r.cfr), scoreCell(r.vine))
 	}
-	b.WriteString("\n#### Table 2 - total javac error lines (lower is better; packaging-independent)\n\n")
+	b.WriteString("\n#### Table 2 - total javac error lines (lower is better; context only)\n\n")
 	b.WriteString("| jar | classes | JavaJive | CFR | Vineflower |\n")
 	b.WriteString("|---|---:|---:|---:|---:|\n")
 	for _, r := range rows {
@@ -263,13 +294,23 @@ func scoreCell(s threeWayScore) string {
 	return fmt.Sprintf("%d/%d (%.1f%%)", s.files-s.failed, s.files, s.passPct())
 }
 
+// classCell renders the primary by-class metric: defective outer classes / total outer classes, plus
+// the clean-class rate. Lower defective count is better.
+func classCell(s threeWayScore) string {
+	if s.files == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%d/%d (%.1f%%)", s.failedOuter, s.outers, s.classPassPct())
+}
+
 // scoreJavaJive decompiles the jar via the production JarFS path and tree-compiles all units together.
 func scoreJavaJive(t *testing.T, jarPath, classpath string) threeWayScore {
 	t.Helper()
 	root := t.TempDir()
 	files, _, _ := decompileAll(t, jarPath, root, 0)
-	failed, errLines := treeCompileFiles(t, files, classpath)
-	return threeWayScore{files: len(files), failed: failed, errLines: errLines}
+	failed, errLines, bad := treeCompileFiles(t, files, classpath)
+	outers, failedOuter := outerStats(root, files, bad)
+	return threeWayScore{files: len(files), failed: failed, errLines: errLines, outers: outers, failedOuter: failedOuter}
 }
 
 // scoreExternal runs an external decompiler (CFR/Vineflower) on the whole jar, then tree-compiles its
@@ -293,16 +334,19 @@ func scoreExternal(t *testing.T, java, tool, jarPath, classpath, name string) th
 	if len(files) == 0 {
 		return threeWayScore{decErr: name + " produced no .java"}
 	}
-	failed, errLines := treeCompileFiles(t, files, classpath)
-	return threeWayScore{files: len(files), failed: failed, errLines: errLines}
+	failed, errLines, bad := treeCompileFiles(t, files, classpath)
+	outers, failedOuter := outerStats(outDir, files, bad)
+	return threeWayScore{files: len(files), failed: failed, errLines: errLines, outers: outers, failedOuter: failedOuter}
 }
 
 // treeCompileFiles compiles all files in one javac invocation (deps on classpath) and returns the
-// number of DISTINCT files that contain at least one error, plus the total error-line count.
-func treeCompileFiles(t *testing.T, files []string, classpath string) (failedFiles, errLines int) {
+// number of DISTINCT files that contain at least one error, the total error-line count, and the set
+// of failing file paths (so callers can collapse them to outer classes).
+func treeCompileFiles(t *testing.T, files []string, classpath string) (failedFiles, errLines int, badPaths map[string]struct{}) {
 	t.Helper()
+	badPaths = map[string]struct{}{}
 	if len(files) == 0 {
-		return 0, 0
+		return 0, 0, badPaths
 	}
 	javac := lookJavac(t)
 	outDir := t.TempDir()
@@ -317,11 +361,42 @@ func treeCompileFiles(t *testing.T, files []string, classpath string) (failedFil
 	out, _ := cmd.CombinedOutput()
 	text := string(out)
 	errLines = strings.Count(text, ": error:")
-	bad := map[string]struct{}{}
 	for _, m := range javacErrorFileRe.FindAllStringSubmatch(text, -1) {
-		bad[m[1]] = struct{}{}
+		badPaths[m[1]] = struct{}{}
 	}
-	return len(bad), errLines
+	return len(badPaths), errLines, badPaths
+}
+
+// outerKey maps an emitted .java file to its OUTER (top-level) class key relative to root: the
+// package-qualified path with the `.java` suffix and any `$Inner` flattening removed. JavaJive emits
+// one file per nested class (Outer$Inner.java); CFR/Vineflower inline nested classes into Outer.java.
+// Collapsing to this key makes the defective-class count packaging-independent and cross-tool comparable.
+func outerKey(root, file string) string {
+	rel, err := filepath.Rel(root, file)
+	if err != nil {
+		rel = file
+	}
+	rel = strings.TrimSuffix(rel, ".java")
+	dir, base := filepath.Split(rel)
+	if i := strings.IndexByte(base, '$'); i >= 0 {
+		base = base[:i]
+	}
+	return dir + base
+}
+
+// outerStats collapses emitted files (and the failing subset) to distinct outer classes, returning
+// the total outer-class count and how many of them have at least one failing unit.
+func outerStats(root string, files []string, badPaths map[string]struct{}) (outers, failedOuter int) {
+	all := map[string]struct{}{}
+	bad := map[string]struct{}{}
+	for _, f := range files {
+		k := outerKey(root, f)
+		all[k] = struct{}{}
+		if _, ok := badPaths[f]; ok {
+			bad[k] = struct{}{}
+		}
+	}
+	return len(all), len(bad)
 }
 
 // compileFile compiles a single .java into outDir (classpath optional).
