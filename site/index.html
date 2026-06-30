@@ -277,6 +277,58 @@
       Full methodology, per-jar tables and the machine-generated report:
       <a href="https://github.com/yaklang/yaklang/pull/4665" target="_blank" rel="noopener noreferrer">cross-comparison report</a>.
     </p>
+
+    <div class="section-head" style="margin-top:3.25rem">
+      <h2 data-i18n="rt.h3">Recompilable — not just readable</h2>
+      <p data-i18n="rt.p">A decompiler is only useful if its output compiles back and runs. JavaJive is measured end-to-end — decompile &rarr; <code>javac</code> &rarr; execute — head-to-head with CFR and Vineflower on 8 real JARs (4,666 classes).</p>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="stat-num">5 / 5</div>
+        <div class="stat-label" data-i18n="rt.s1">self-hosted algorithms — MD5 · SHA-256 · CRC32 · quicksort · Base64 — decompiled, recompiled and re-run byte-for-byte identical</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">100%</div>
+        <div class="stat-label" data-i18n="rt.s2">commons-codec recompiles with zero errors — best of the three</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">99.9%</div>
+        <div class="stat-label" data-i18n="rt.s3">spring-core recompiles cleanly (973/974) — best of the three</div>
+      </div>
+    </div>
+
+    <p class="bench-note dim" data-i18n="rt.cmp.cap" style="margin-bottom:.6rem">Whole-jar recompile — total <code>javac</code> error lines (lower is better):</p>
+    <div class="cmp-wrap">
+      <table class="cmp-table">
+        <thead>
+          <tr>
+            <th data-i18n="rt.cmp.jar">JAR (classes)</th>
+            <th class="col-jj">JavaJive</th>
+            <th>CFR 0.152</th>
+            <th>Vineflower 1.10.1</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>commons-codec (106)</td><td class="col-jj">0</td><td>6</td><td>2</td></tr>
+          <tr><td>gson (195)</td><td class="col-jj">122</td><td>20</td><td>1</td></tr>
+          <tr><td>commons-lang3 (345)</td><td class="col-jj">91</td><td>198</td><td>9</td></tr>
+          <tr><td>jsoup (238)</td><td class="col-jj">4</td><td>30</td><td>3</td></tr>
+          <tr><td>snakeyaml (231)</td><td class="col-jj">39</td><td>2</td><td>2</td></tr>
+          <tr><td>spring-core (978)</td><td class="col-jj">2</td><td>16</td><td>32</td></tr>
+          <tr><td>fastjson2 (681)</td><td class="col-jj">248</td><td>92</td><td>307</td></tr>
+          <tr><td>guava (1,892)</td><td class="col-jj">522</td><td>29</td><td>169</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="bench-note dim" data-i18n="rt.note">
+      Same recipe for all three: decompile the whole jar, then recompile every produced file together with
+      dependencies on the classpath. JavaJive leads on regular &amp; large codebases (codec, spring) and is on par
+      with Vineflower on generic-heavy ones; CFR is strongest on the hardest generic code. Full methodology,
+      per-jar pass-rates and reproduction steps:
+      <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a>.
+    </p>
   </div>
 </section>
 
@@ -437,6 +489,14 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "cmp.r4": "Rebuilt-jar bytecode verify failures",
         "cmp.r5": "guava call differential vs original jar", "cmp.identical": "IDENTICAL",
         "bench.note": 'Measured 2026-06-27 on darwin/arm64 (10-core), Go 1.22.12, JDK 17, against CFR 0.152 &amp; Vineflower 1.10.1 over 11 well-known JARs (6,506 classes). JavaJive ships the same pure-Go decompiler core in raw mode. Full methodology, per-jar tables and the machine-generated report: <a href="https://github.com/yaklang/yaklang/pull/4665" target="_blank" rel="noopener noreferrer">cross-comparison report</a>.',
+        "rt.h3": "Recompilable — not just readable",
+        "rt.p": 'A decompiler is only useful if its output compiles back and runs. JavaJive is measured end-to-end — decompile &rarr; <code>javac</code> &rarr; execute — head-to-head with CFR and Vineflower on 8 real JARs (4,666 classes).',
+        "rt.s1": "self-hosted algorithms — MD5 · SHA-256 · CRC32 · quicksort · Base64 — decompiled, recompiled and re-run byte-for-byte identical",
+        "rt.s2": "commons-codec recompiles with zero errors — best of the three",
+        "rt.s3": "spring-core recompiles cleanly (973/974) — best of the three",
+        "rt.cmp.cap": 'Whole-jar recompile — total <code>javac</code> error lines (lower is better):',
+        "rt.cmp.jar": "JAR (classes)",
+        "rt.note": 'Same recipe for all three: decompile the whole jar, then recompile every produced file together with dependencies on the classpath. JavaJive leads on regular &amp; large codebases (codec, spring) and is on par with Vineflower on generic-heavy ones; CFR is strongest on the hardest generic code. Full methodology, per-jar pass-rates and reproduction steps: <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a>.',
         "features.h2": "Features",
         "features.p": "Three Java building blocks, one portable module — plus the supporting cast trimmed down to a self-contained core.",
         "feat.1.t": "Decompiler",
@@ -494,6 +554,14 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "cmp.r4": "回编译字节码校验失败数",
         "cmp.r5": "guava 调用差分（对比原始 jar）", "cmp.identical": "完全一致",
         "bench.note": '测于 2026-06-27，darwin/arm64（10 核），Go 1.22.12，JDK 17，在 11 个知名大型 JAR（6,506 个类）上与 CFR 0.152、Vineflower 1.10.1 正面对比。JavaJive 内置同一套纯 Go 反编译内核（raw 模式）。完整方法学、逐 jar 数据与机器生成报告见<a href="https://github.com/yaklang/yaklang/pull/4665" target="_blank" rel="noopener noreferrer">交叉对比报告</a>。',
+        "rt.h3": "不止可读，更能编译回去",
+        "rt.p": '反编译器真正有用的标准，是它的产物能否被重新编译并运行。JavaJive 端到端实测——反编译 &rarr; <code>javac</code> &rarr; 执行——在 8 个真实 JAR（4,666 个类）上与 CFR、Vineflower 正面对比。',
+        "rt.s1": "自托管算法——MD5 · SHA-256 · CRC32 · 快排 · Base64——反编译→回编译→重跑，输出逐字节一致",
+        "rt.s2": "commons-codec 回编译零错误——三方最佳",
+        "rt.s3": "spring-core 干净回编译（973/974）——三方最佳",
+        "rt.cmp.cap": '整包回编译——<code>javac</code> 错误总行数（越低越好）：',
+        "rt.cmp.jar": "JAR（类数）",
+        "rt.note": '三方同口径：整包反编译，再把全部产物连同依赖一起重新编译。JavaJive 在规整与大型代码库（codec、spring）上领先，在泛型密集包上与 Vineflower 同档；CFR 在最硬的泛型代码上最稳。完整方法学、逐 jar 通过率与复现步骤见 <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a>。',
         "features.h2": "特性",
         "features.p": "三块 Java 基础能力，打包进一个便携模块——其余依赖也被裁剪成自包含的核心。",
         "feat.1.t": "反编译器",

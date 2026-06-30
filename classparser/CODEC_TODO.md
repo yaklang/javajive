@@ -26,7 +26,7 @@
 | **codec** (commons-codec 1.15) | 106 | **0** | **0** | 38 | ✅ **全链路达标** |
 | **spring** (spring-core 5.3.27) | 974 | **2** | **1** | 384 | ⚠ 仅 1 个合成内部类阻断 |
 | **fastjson2** (2.0.43) | 681 | 248 | 56 | 342 | ⚠ 泛型擦除为主 |
-| **guava** (28.2-android) | 1825 | **529** | 206 | 1149 | ⚠ 泛型擦除/边界为主 |
+| **guava** (28.2-android) | 1825 | **522** | 202 | 1149 | ⚠ 泛型擦除/边界为主 |
 
 **codec 已完整证明北极星**(承重于 `test/cross/jar_roundtrip_test.go` 的 `TestJarRoundTripRepackage/codec`):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验 107/107 通过 → 调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致`。
@@ -39,6 +39,7 @@
 
 | 缺陷 | 根因 / 治法 | kill-switch | 实测 |
 |---|---|---|---|
+| **继承超类型泛型方法实参造型 · this 接收者** | `this.get(objVal)` —— 被调方法**声明在直接超类型**(接口/父类)而非本类(guava `AbstractLoadingCache` 抽象类 `this.get(k)`, get 来自接口 `LoadingCache<K,V>`)。本类 `MethodSignatures` 只含自有方法, 故同类方法造型未命中, javac 报 `Object cannot be converted to K`。治法: 反编译本类时用 `foldSiblingResolver`(jar 路径已具备的跨类字节加载)加载**直接超类型**字节, 在**恒等类型实参映射**(`Sub<K,V> implements Super<K,V>`, 每个实参都是与超类型形参同名、且本类自有的类型变量)下, 把超类型方法的泛型 Signature **原样并入**本类 `MethodSignatures`(同 (name,arity) 本类优先, 多超类型冲突丢弃), 复用 `sameClassMethodParamType`。安全: 仅恒等映射(换序/具体实参的非恒等保守跳过, 避免造错类型变量); JDK/外部超类型不在 jar(resolver miss), 由 `InstantiateJDKMethodParam` 路径覆盖, 二者互补; 仅上溯**一层**直接超类型(深链留残余) | `JDEC_GENERIC_SUPER_METHOD_OFF` | **guava 529→522(delta +7)**, codec/fastjson2/spring 零回归。承重 `TestInheritedThisMethodArgCastIsLoadBearing`(必须 `DecompileWithResolver` 双类), 种子 `InheritedThisSeed.class`+`SuperSeed.class`(`--release 8`) |
 | **私有同类自有泛型方法实参造型** | `this.updateInverseMap(k, b, objVal, v)` —— 被调方法是当前类**私有**泛型方法(`private void updateInverseMap(K,boolean,V,V)`)。私有方法在 Java 8 字节码里走 `invokespecial`(与 `super.m()` **同一指令**), 上一行的同类方法造型为避免把 `super.m()` 误判成同类调用而**一刀切跳过所有 invokespecial**, 连私有同类方法一并漏掉 → `Object cannot be converted to V`(guava `AbstractBiMap.updateInverseMap`/`removeFromBothMaps` 等家族)。治法: invokespecial 仍按**目标类**区分 —— 目标类==当前类(`f.isCurrentClass`)即私有同类调用, 其签名就在 `funcCtx.MethodSignatures`, 照常补造型; 目标类!=当前类才是 `super.m()`, 跳过 | `JDEC_GENERIC_SELFMETHOD_PARAM_OFF`(总) / `JDEC_GENERIC_SELFMETHOD_PRIVATE_OFF`(仅私有扩展) | **guava 550→529(delta +21)**, codec/fastjson2/spring 零回归。承重 `TestPrivateSelfMethodArgCastIsLoadBearing`, 种子 `PrivateSelfMethodArgCast.class/.golden`(`--release 8` 编译以走 invokespecial) |
 | **返回-嵌入赋值局部的声明合成** | 唯一定义是嵌入在条件里的赋值 (`if ((var2 = parse(...)) == null){}else{return var2;}`) 的局部, 被发成**无声明** → `cannot find symbol`(fastjson2 `JSONReaderJSONB` 的 `readLocalDateTime12/14/16` 等日期解析家族)。两处耦合根因: (1) `generatedLocalDeclRe` 把 `return varN` 误当声明(关键字 `return` 命中其类型标识符分支), 使补声明网误以为已声明而跳过; (2) 即便补声明, 因 RHS 是跨类调用(`DateUtils.parseLocalDateTime12`)无符号表可推断返回类型而退化成 `Object`(再触发 return 类型不符)。治法: 收集已声明集时跳过关键字开头的伪声明; 对被 `return` 的未声明局部, 以**所在方法的返回类型**声明(JLS 14.17 返回值必可赋给返回类型, 初值 null + 条件内赋值在 return 前必达) | `JDEC_RETURN_DECL_FIX_OFF` | **fastjson2 285→248(delta +37)**, codec/guava/spring 零回归。承重 `TestReturnLocalDeclSynthesisIsLoadBearing`, 种子 `ReturnLocalDeclSynthesis.class/.golden` |
 | **同类自有泛型方法实参造型** | `this.tailSet(var1)` —— 被调方法是**当前类自己声明**的泛型方法(`SortedSet<E> tailSet(E)`), 描述符把形参擦除为 bound(Object), 且其泛型签名位于**同类的另一个方法**上, 故 §字段/JDK 实参造型都未命中, javac 报 `Object cannot be converted to E`。这是泛型擦除阻断**当前最大剩余块**(guava `Forwarding*`/集合家族 `tailSet/headSet/subSet(E)` 等极其普遍)。治法: `ClassContext.MethodSignatures` 按 `(name, arity)` 一次性登记同类方法的原始泛型 Signature(同名同元重载丢弃以防误判); `FunctionCallExpression.sameClassMethodParamType` 在调用点 `ParseMethodSignatureFull` 还原形参类型, **仅对类作用域类型变量**(`funcCtx.IsTypeParam`)造型 —— 绝不碰方法作用域 `<T>`(调用点不在其作用域, `(T)` 不可编译)或具体类型, 喂给既有实参造型基建 | `JDEC_GENERIC_SELFMETHOD_PARAM_OFF` | **fastjson2 307→285(delta +22) + guava 634→550(delta +84)**, codec/spring 零回归。承重 `TestGenericSelfMethodArgCastIsLoadBearing`, 种子 `GenericSelfMethodArgCast.class/.golden` |
@@ -61,9 +62,9 @@
 
 > 这些是真正阻碍重打包的缺陷。每项给「计数(error lines)·代表类·样例·初判根因」。可执行工单(复现命令 + 优先级)在根 [`TODO.md`](../TODO.md)。
 
-1. **泛型擦除缺造型 `Object cannot be converted to T/K/CAP#1`** — **最大杠杆。当前 `incompatible types (assignment/return)` 桶: fastjson2 110 + guava 249**(含装箱等非擦除项)
-   - **已治本五块**: 返回点 Object 向下造型(fastjson2 -21); JDK 泛型方法实参 · 值接收者(fastjson2 -2 / guava -4); JDK 泛型方法实参 · 字段接收者(fastjson2 -25 / guava -13); 同类自有泛型方法实参 · 公有(fastjson2 -22 / guava -84); **同类自有泛型方法实参 · 私有 invokespecial(本轮, guava -21)**。**剩余三类**(按当前 `cannot be converted to` 直方图):
-     - **(a) 继承/非 this 接收者(guava 残余 E/N/K/V, 下一步首选)**: 同类(public+private)receiver 已全部覆盖; 残余是 `this.get(objVal)` 中 `get` 来自接口/父类(`super.m()` 或继承未重写, 目标类!=本类), 或接收者是本类型的局部变量/字段引用而非 `this`。需把 §2 的 `MethodSignatures` 沿 jar 内父类型链上溯(跨类签名查表), 或对非-this 同类型接收者放宽 receiver 判定。
+1. **泛型擦除缺造型 `Object cannot be converted to T/K/CAP#1`** — **最大杠杆。当前 `incompatible types (assignment/return)` 桶: fastjson2 110 + guava 242**(含装箱等非擦除项)
+   - **已治本六块**: 返回点 Object 向下造型(fastjson2 -21); JDK 泛型方法实参 · 值接收者(fastjson2 -2 / guava -4); JDK 泛型方法实参 · 字段接收者(fastjson2 -25 / guava -13); 同类自有泛型方法实参 · 公有(fastjson2 -22 / guava -84); 同类自有泛型方法实参 · 私有 invokespecial(guava -21); **继承超类型泛型方法实参 · this 接收者(本轮, guava -7, 恒等映射一层)**。**剩余类别**(按当前 `cannot be converted to` 直方图):
+     - **(a) 非-this 接收者 / 非恒等映射 / 深链(下一步首选)**: 同类(public+private)+ 直接超类型(this, 恒等一层)已覆盖; 残余是 (i) 接收者是本类型的**局部变量/字段**而非 `this`(`var0.setCount(objVal)`, var0 是 `Multiset<E>`); (ii) 超类型**非恒等**实参映射(`Sub<X> implements Super<X,String>` 换序/具体化); (iii) 超类型**深链**(方法在父类的父类/祖接口)。方向: 对非-this 同类型接收者放宽 receiver 判定 + 跨类签名做真正的类型实参替换(非仅恒等) + BFS 多层上溯。
      - **(b) 通配符捕获 `CAP#1`(guava 40)** —— **oracle 实证为内在难 case, 优先级下调**: `this.equivalence.equivalent(a,b)`, 字段类型 `Equivalence<? super T>` 捕获成 `CAP#1`, 实参 Object 不可造 `(CAP#1)`(不可命名)。`TestThirdPartyOracle/guava/Equivalence$Wrapper` **三方(JavaJive/CFR/Vineflower)全部重编译失败**: CFR 发 `Equivalence<? super T> e = this.equivalence;` 仍不可编译; 真源码用 `(Equivalence<Object>) this.equivalence` + `@SuppressWarnings`。方向(若做): 通配符接收者**整体** `<Object>` 参数化造型, 非对实参造型。
      - **(c) 装箱/数值**: `int cannot be converted to Integer` 等(**非擦除, 不可盲目造型**), 按 `Integer.valueOf` 修。
 
@@ -109,6 +110,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_GENERIC_PARAM_FIELD_OFF` | 仅关字段接收者旁路(从字段 Signature 还原类型参数) |
 | `JDEC_GENERIC_SELFMETHOD_PARAM_OFF` | 同类自有泛型方法实参造型(从方法 Signature 还原类作用域类型变量, 公有+私有) |
 | `JDEC_GENERIC_SELFMETHOD_PRIVATE_OFF` | 仅关私有同类方法(invokespecial 且目标类==当前类)的扩展, 恢复旧的 invokespecial 一刀切 |
+| `JDEC_GENERIC_SUPER_METHOD_OFF` | 继承超类型泛型方法签名并入(this 接收者, 恒等映射一层, 跨类 resolver 加载) |
 | `JDEC_RETURN_DECL_FIX_OFF` | 返回-嵌入赋值局部的声明合成(跳过 `return varN` 伪声明 + 以方法返回类型声明) |
 | `JDEC_OBJECT_RET_DOWNCAST_OFF` | 返回点 Object→具体引用类型 向下造型 |
 | `JDEC_POP_ELIDE_OFF` | pop/pop2 裸值语句 elide |

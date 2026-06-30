@@ -539,6 +539,13 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				methodSignatures[key] = sigStr
 			}
 		}
+		// Augment with DIRECT-supertype (inherited) generic method signatures so a `this.m(objVal)`
+		// call to an inherited generic method recovers its erased `(K)` argument cast too. Same-class
+		// signatures (already in methodSignatures/methodSigSeen) always win. Kill-switch
+		// JDEC_GENERIC_SUPER_METHOD_OFF.
+		if os.Getenv("JDEC_GENERIC_SUPER_METHOD_OFF") == "" {
+			c.collectInheritedThisMethodSignatures(classSigStr, classTypeParamNames, methodSignatures, methodSigSeen)
+		}
 		if len(methodSignatures) > 0 {
 			c.FuncCtx.MethodSignatures = methodSignatures
 		}
@@ -871,6 +878,134 @@ func genericSupertypeRawName(t types.JavaType) string {
 		return r.Name
 	}
 	return ""
+}
+
+// collectInheritedThisMethodSignatures augments the same-class MethodSignatures table with the generic
+// method signatures of a class's DIRECT supertypes (its superclass + directly-implemented interfaces),
+// so a `this.get(objVal)` call to a method DECLARED on a supertype (not the current class) can still
+// recover the source's `(K)` argument cast that the descriptor erased away (guava AbstractLoadingCache
+// `this.get(k)` from interface LoadingCache<K,V>; the `Object cannot be converted to K` family).
+//
+// SAFETY (identity-mapping only): a supertype's method signature is copied VERBATIM into the current
+// class's table only when the current class instantiates that supertype with the IDENTITY type-argument
+// mapping -- i.e. `Sub<K,V> implements Super<K,V>` where each argument is a bare type variable whose
+// name equals the supertype's corresponding formal parameter name AND is itself a current-class type
+// variable. Under identity the supertype method's `(TK;)` uses the very same name K that is in scope on
+// the current class, so the verbatim copy is sound and sameClassMethodParamType's `IsTypeParam` check
+// remains the cast gate. A renamed/reordered/concrete instantiation (`Sub<X> implements Super<X,String>`)
+// is NOT identity and is skipped -- copying verbatim there could cast to the wrong type variable. JDK /
+// external supertypes are not in the jar (foldSiblingResolver misses) and are handled by the
+// InstantiateJDKMethodParam path instead, so this only ever augments jar-internal supertypes. Only
+// DIRECT supertypes are walked (one level); deeper chains are a documented residual. Collisions on
+// (name, arity) across supertypes are dropped (set unresolvable) so no call binds the wrong signature.
+// Kill-switch JDEC_GENERIC_SUPER_METHOD_OFF.
+func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr string, classTypeParamNames []string, out map[string]string, seen map[string]bool) {
+	if c.foldSiblingResolver == nil || classSigStr == "" || len(classTypeParamNames) == 0 {
+		return
+	}
+	isCurrentTypeVar := func(name string) bool {
+		for _, p := range classTypeParamNames {
+			if p == name {
+				return true
+			}
+		}
+		return false
+	}
+	sup, ifaces := types.ParseClassSignatureSupers(classSigStr)
+	supertypes := make([]types.JavaType, 0, len(ifaces)+1)
+	if sup != nil {
+		supertypes = append(supertypes, sup)
+	}
+	supertypes = append(supertypes, ifaces...)
+	// Collect inherited signatures into a local map first so the same-class entries in `out`/`seen`
+	// are never clobbered (same-class always wins). Keys colliding across multiple supertypes are
+	// dropped as ambiguous.
+	inherited := map[string]string{}
+	dropped := map[string]bool{}
+	for _, st := range supertypes {
+		// Only a parameterized supertype carries the type arguments needed for the identity check; a
+		// raw supertype (no `<...>`) provides no mapping and is skipped.
+		pt, ok := st.RawType().(*types.JavaParameterizedType)
+		if !ok || len(pt.TypeArgs) == 0 {
+			continue
+		}
+		rawName := pt.RawClassName
+		if rawName == "" {
+			continue
+		}
+		data, ok := c.foldSiblingResolver(strings.ReplaceAll(rawName, ".", "/"))
+		if !ok || len(data) == 0 {
+			continue // JDK / external supertype not in this jar (covered by InstantiateJDKMethodParam)
+		}
+		sObj, err := Parse(data)
+		if err != nil {
+			continue
+		}
+		supSig := ""
+		for _, attr := range sObj.Attributes {
+			if sa, ok := attr.(*SignatureAttribute); ok {
+				if s, err := sObj.getUtf8(sa.SignatureIndex); err == nil {
+					supSig = s
+				}
+				break
+			}
+		}
+		formalParams := types.ClassFormalTypeParamNames(supSig)
+		if len(formalParams) == 0 || len(formalParams) != len(pt.TypeArgs) {
+			continue
+		}
+		// Identity check: every type argument must be a bare type variable whose name equals the
+		// supertype's corresponding formal parameter AND is a current-class type variable.
+		identity := true
+		for i, ta := range pt.TypeArgs {
+			jc, ok := ta.RawType().(*types.JavaClass)
+			if !ok || jc.Name != formalParams[i] || !isCurrentTypeVar(jc.Name) {
+				identity = false
+				break
+			}
+		}
+		if !identity {
+			continue
+		}
+		for _, m := range sObj.Methods {
+			name, err := sObj.getUtf8(m.NameIndex)
+			if err != nil || name == "" || name == "<init>" || name == "<clinit>" {
+				continue
+			}
+			descriptor, err := sObj.getUtf8(m.DescriptorIndex)
+			if err != nil || descriptor == "" {
+				continue
+			}
+			for _, attr := range m.Attributes {
+				sigAttr, ok := attr.(*SignatureAttribute)
+				if !ok {
+					continue
+				}
+				sigStr, err := sObj.getUtf8(sigAttr.SignatureIndex)
+				if err != nil || sigStr == "" || (!strings.HasPrefix(sigStr, "(") && !strings.HasPrefix(sigStr, "<")) {
+					continue
+				}
+				key := class_context.MethodSigKey(name, len(methodParamFieldDescriptors(descriptor)))
+				if seen[key] {
+					continue // declared on the current class: same-class signature wins
+				}
+				if dropped[key] {
+					continue
+				}
+				if _, exists := inherited[key]; exists {
+					// Same (name, arity) on two supertypes: ambiguous, drop so no call binds it.
+					delete(inherited, key)
+					dropped[key] = true
+					continue
+				}
+				inherited[key] = sigStr
+			}
+		}
+	}
+	for k, v := range inherited {
+		out[k] = v
+		seen[k] = true
+	}
 }
 
 // javaCharLiteralFromCode renders a char annotation value (stored as an int code point) as a valid

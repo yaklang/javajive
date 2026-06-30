@@ -35,7 +35,7 @@
 | **tree(整树)** | 所有扁平单元一起 `javac`(依赖在 classpath) | **重打包真口径**。兄弟 `$` 引用互相解析, 产物可打回 jar。**治本与验收只认它。** |
 | **iso(逐文件)** | 每个单元单独 `javac`(原始 jar + 依赖在 classpath) | 侧写。但 `Outer$Inner` 扁平引用对原始 jar 解析不到(jar 内是源名 `Outer.Inner`), 产生海量 `cannot find symbol`/`private access` **假阳性**。 |
 
-实测对照(同一批 jar): codec **iso 38 / tree 0**, spring **iso 384 / tree 2**(fastjson2 tree 248, guava tree 529)。iso 的绝大多数失败是扁平 `$` 假阳性, **不是缺陷、不阻碍重打包**。所以:
+实测对照(同一批 jar): codec **iso 38 / tree 0**, spring **iso 384 / tree 2**(fastjson2 tree 248, guava tree 522)。iso 的绝大多数失败是扁平 `$` 假阳性, **不是缺陷、不阻碍重打包**。所以:
 
 > **选靶、验收、A/B delta 一律用 tree。iso 只用于侧写"哪些类涉及跨类引用"。**
 
