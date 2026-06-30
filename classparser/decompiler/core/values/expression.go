@@ -603,21 +603,77 @@ func suppressTypeVarArgCast(funcCtx *class_context.ClassContext, argRaw, expectR
 	return true
 }
 
+// calleeParamIsErasedTypeVar reports whether the called method's i-th formal parameter is a TYPE
+// VARIABLE in the callee's own generic Signature (so the JVM descriptor erased it to merely that
+// variable's bound). Synthesizing a cast to that erased bound is a no-op UPCAST (the argument flowed
+// into the parameter in bytecode, so it is already assignable to the bound) that DESTROYS javac's
+// call-site type inference: e.g. for `<C extends Comparable> Range<C> closed(C, C)` the decompiler
+// would emit `Range.closed((Comparable)Integer.valueOf(x), ...)`, javac then infers C=Comparable and
+// `ContiguousSet.create(Range<C>, DiscreteDomain<Integer>)` no longer applies ("method create cannot
+// be applied"). Returning true lets ArgumentStrings DROP the cast so the precise argument type
+// (Integer) drives inference. Only consulted when no generic resolver recovered a concrete/denotable
+// instantiated parameter type (those casts are wanted). Restricted to JAR-INTERNAL callees whose
+// Signature is available via SiblingClassSig (JDK callees stay on the descriptor). Kill-switch:
+// JDEC_NO_ERASED_TYPEVAR_NOCAST=1.
+func (f *FunctionCallExpression) calleeParamIsErasedTypeVar(i int, funcCtx *class_context.ClassContext) bool {
+	if os.Getenv("JDEC_NO_ERASED_TYPEVAR_NOCAST") != "" || funcCtx == nil || funcCtx.SiblingClassSig == nil {
+		return false
+	}
+	internal := strings.ReplaceAll(f.ClassName, ".", "/")
+	classSig, methodSigs, ok := funcCtx.SiblingClassSig(internal)
+	if !ok || methodSigs == nil {
+		return false
+	}
+	sig := methodSigs[class_context.MethodSigKey(f.FunctionName, len(f.Arguments))]
+	if sig == "" {
+		return false
+	}
+	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+	if i < 0 || i >= len(params) || params[i] == nil {
+		return false
+	}
+	raw, ok := params[i].RawType().(*types.JavaClass)
+	if !ok {
+		return false
+	}
+	// parseSigType emits a `TC;` type-variable reference as JavaClass{Name:"C"}. It is a real type
+	// variable (not a concrete class that merely shares the name) iff it is declared as a formal type
+	// parameter of the callee method itself or of its declaring class.
+	name := raw.Name
+	for _, n := range types.MethodFormalTypeParamNames(sig) {
+		if n == name {
+			return true
+		}
+	}
+	for _, n := range types.ClassFormalTypeParamNames(classSig) {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *FunctionCallExpression) ArgumentStrings(funcCtx *class_context.ClassContext) []string {
 	paramStrs := []string{}
 	for i, arg := range f.Arguments {
 		argType := f.FuncType.ParamTypes[i]
 		// Recover the generic parameter type the descriptor erased (e.g. BiConsumer<T,V>.accept's
 		// param erases to Object): the source carried a `(V)` cast on the argument, so feed the
-		// instantiated type back into the mismatch check below to re-emit it.
+		// instantiated type back into the mismatch check below to re-emit it. resolvedGeneric records
+		// that one of the resolvers recovered a concrete/denotable type, so the erased-type-var cast
+		// SUPPRESSION below (calleeParamIsErasedTypeVar) is skipped -- a recovered cast is wanted.
+		resolvedGeneric := false
 		if inst := f.instantiatedParamType(i, funcCtx); inst != nil {
 			argType = inst
+			resolvedGeneric = true
 		} else if inst := f.sameClassMethodParamType(i, funcCtx); inst != nil {
 			argType = inst
+			resolvedGeneric = true
 		} else if inst := f.resolvedParamType(i, funcCtx); inst != nil {
 			// Additive cross-class generic resolver: fires only when the JDK-table and same-class paths
 			// declined, covering non-this / non-identity / deep-chain jar-internal receivers.
 			argType = inst
+			resolvedGeneric = true
 		}
 		// Incomplete stack simulation can leave an argument with a nil Type(); a parameter type
 		// can likewise be nil for a malformed descriptor. Guard each RawType() behind a nil check
@@ -633,7 +689,8 @@ func (f *FunctionCallExpression) ArgumentStrings(funcCtx *class_context.ClassCon
 			atcClassType, ok2 = at.RawType().(*types.JavaClass)
 		}
 		if ok1 && ok2 && expectClassType.Name != atcClassType.Name {
-			if expectClassType.Name != "java.lang.Object" && !suppressTypeVarArgCast(funcCtx, atcClassType, expectClassType) {
+			if expectClassType.Name != "java.lang.Object" && !suppressTypeVarArgCast(funcCtx, atcClassType, expectClassType) &&
+				!(!resolvedGeneric && f.calleeParamIsErasedTypeVar(i, funcCtx)) {
 				argStr := arg.String(funcCtx)
 				argTypeStr := argType.String(funcCtx)
 				arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {

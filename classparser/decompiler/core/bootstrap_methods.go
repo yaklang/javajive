@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -151,7 +152,14 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			refVal := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 				refMember := member
 				if member == "<init>" {
-					// constructor method reference: ClassName::new
+					// Constructor method reference renders as `ClassName::new`. `new` is a Java KEYWORD,
+					// not an identifier, so it must bypass SafeIdentifier -- which mangles `new` -> `new_`
+					// and produced `ClassName::new_`, an "invalid method reference" (javac then resolves a
+					// method literally named `new_`, which does not exist). Kill-switch
+					// JDEC_CTOR_METHODREF_FIX_OFF restores the legacy (broken) sanitized form.
+					if os.Getenv("JDEC_CTOR_METHODREF_FIX_OFF") == "" {
+						return funcCtx.ShortTypeName(implClassName) + "::new"
+					}
 					refMember = "new"
 				} else if len(capturedArgs) > 0 {
 					// bound instance method reference: receiver::method

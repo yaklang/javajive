@@ -1,0 +1,4 @@
+# Constructor method references must render as `Type::new` (keyword), never `Type::new_`.
++ArrayList::new
++AtomicInteger::new
+-::new_
