@@ -149,6 +149,24 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 
 			// Method reference: constructor / static / (bound|unbound) instance method.
 			capturedArgs := append([]values.JavaValue{}, args2...)
+			// Upgrade the raw functional-interface type to its instantiated parameterization (3rd
+			// bootstrap arg), exactly as the inlined-lambda branch above does. A method reference has
+			// no type of its own; without this its value type stays the RAW functional interface (e.g.
+			// `Function`), so when it is stored into a local the slot is declared raw `Function` and
+			// the assignment `var = Collections::synchronizedList` targets a SAM of `apply(Object)`,
+			// against which the reference cannot bind ("incompatible types: invalid method reference").
+			// Carrying the instantiated type `Function<List, List>` instead lets the slot adopt the
+			// parameterized declaration (`Function<List, List> var = Collections::synchronizedList`),
+			// restoring the source target type so the reference binds. This is the method-reference
+			// companion of the inlined-lambda upgrade and clears fastjson2 ObjectReaderImpl{List,
+			// ListStr,Map,MapMultiValueType} `var = Collections::synchronized*/unmodifiable*` (25
+			// "invalid method reference" sites). Kill-switch: JDEC_METHODREF_INSTANTIATED_TYPE_OFF=1.
+			refType := typ
+			if os.Getenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(args1) >= 3 {
+				if up := inferLambdaTypeFromInstantiated(typ, args1[2]); up != nil {
+					refType = up
+				}
+			}
 			refVal := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 				refMember := member
 				if member == "<init>" {
@@ -167,7 +185,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				}
 				return funcCtx.ShortTypeName(implClassName) + "::" + class_context.SafeIdentifier(refMember)
 			}, func() types.JavaType {
-				return typ
+				return refType
 			})
 			// A method reference, like a lambda, has no target type when used directly as a call
 			// receiver (`(C::m).apply(x)` does not compile); flag it so the call site adds the cast.

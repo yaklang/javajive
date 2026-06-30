@@ -29,6 +29,14 @@ type ClassContext struct {
 	// from an ordinary bare-named class so they can, for instance, emit an unchecked cast when
 	// a value erased to a bound is returned from a now-type-variable-typed method.
 	TypeParams []string
+	// ClassTypeParams holds ONLY the class-scope type variables (the class's formal type parameters
+	// plus any free variables injected on a flattened inner class) -- it is the CLASS-only subset of
+	// TypeParams and, unlike TypeParams, is NEVER extended with a method's own `<T>` parameters while
+	// that method is rendered. It lets a renderer recover `this`'s actual parameterization
+	// (`C<ClassTypeParams>`) so it can tell the `cast()` reparameterization idiom
+	// (`<N1 extends N> C<N1> cast() { return this; }`, where `this` is `C<N>` not `C<N1>`) apart from
+	// an identity `return this` (`C<K,V> in class C<K,V>`).
+	ClassTypeParams []string
 	// FieldTypeVars maps a (same-class) field's safe identifier to the bare class-scope type
 	// variable it is declared as (e.g. `key` -> `K` for `private final K key;`). It is recovered
 	// from each field's generic Signature (`TK;`) once per class. A store into such a field whose
@@ -55,12 +63,35 @@ type ClassContext struct {
 	// (name, arity) are dropped to avoid resolving to the wrong signature. Stored as a string because
 	// class_context must not import the types package (cycle). Empty when the class has no such method.
 	MethodSignatures map[string]string
+	// ConstructorSignatures maps a same-class constructor's argument count to its raw generic Signature
+	// string (e.g. 1 -> `(Ljava/util/Comparator<-TK;>;)V`). A `this(...)` self-call loses the source's
+	// unchecked wildcard cast on an argument whose parameter is a wildcard parameterization mentioning a
+	// class type variable (gson LinkedTreeMap `this((Comparator<? super K>) NATURAL_ORDER)`): the bytecode
+	// erases both to raw `Comparator`, emits no checkcast, and javac then rejects
+	// "Comparator<Comparable> cannot be converted to Comparator<? super K>". It is keyed by ARGUMENT COUNT
+	// (not name) and is recorded ONLY when the Signature's parameter count equals the descriptor's -- a
+	// non-static inner class's constructor Signature OMITS the synthetic leading this$0/outer-capture
+	// parameters, so a count mismatch (the offset case) is skipped to avoid mis-indexing. Overloads
+	// colliding on arity are dropped. Stored as a string (class_context must not import the types package).
+	// Empty when the class has no such constructor.
+	ConstructorSignatures map[int]string
 	// ClassSig is the raw generic class Signature string of the class currently being rendered (e.g.
 	// `<K:Ljava/lang/Object;V:Ljava/lang/Object;>Lcom/foo/Base<TK;TV;>;`). It seeds the unified
 	// cross-class generic resolver (types.ResolveInstantiatedParamType) for a `this` receiver: the walk
 	// reads this class's parameterized supertypes from it. Empty when the class is non-generic / has no
 	// signature. Stored as a string (class_context must not import the types package).
 	ClassSig string
+	// RawEraseTypeVars is the set of bare type-variable names that this class REFERENCES but does NOT
+	// declare, and which CANNOT be injected onto its declaration. It is populated only for a flattened
+	// NON-STATIC inner class that has its OWN formal type parameters (e.g. `Iterator<T>`): such a class
+	// also references the enclosing class's variables (`Node<K,V>` fields) but cannot re-declare them
+	// without breaking the arity of its `<ownParam>` reference sites (`Iterator<ElementType>`). Rendering
+	// `Node<K,V>` verbatim would emit undeclared `K`/`V` (javac "cannot find symbol: class K"); instead
+	// any parameterization whose DIRECT argument is one of these names is rendered RAW (`Node<K,V>` ->
+	// `Node`) -- legal, runtime-identical, and matching the local already emitted raw. Nil/empty for every
+	// ordinary class, so it is a strict no-op there. See dumper (JDEC_INNER_RAW_ERASE_OFF) and
+	// types.JavaParameterizedType.String.
+	RawEraseTypeVars map[string]bool
 	// SiblingClassSig resolves a jar-internal class's generic signature info by binary internal name
 	// (slash-separated). It returns the class's raw class Signature and a (name,arity)->method Signature
 	// map, or ok=false for JDK/external classes whose bytes are not in the jar. The dumper builds this
@@ -92,6 +123,16 @@ func (f *ClassContext) MethodSignature(name string, argc int) string {
 	return f.MethodSignatures[methodSigKey(name, argc)]
 }
 
+// ConstructorSignature returns the raw generic Signature string of a same-class constructor with the
+// given argument count, or "" when there is no unique offset-safe such constructor (see
+// ConstructorSignatures).
+func (f *ClassContext) ConstructorSignature(argc int) string {
+	if f == nil || f.ConstructorSignatures == nil {
+		return ""
+	}
+	return f.ConstructorSignatures[argc]
+}
+
 // methodSigKey builds the (name, arity) key used by MethodSignatures.
 func methodSigKey(name string, argc int) string {
 	return name + "/" + strconv.Itoa(argc)
@@ -110,6 +151,21 @@ func (f *ClassContext) FieldTypeVar(name string) string {
 		return ""
 	}
 	return f.FieldTypeVars[name]
+}
+
+// HasRawEraseTypeVars reports whether any undeclared-enclosing type variable must be raw-erased from
+// parameterized type-argument render sites in the class currently being rendered (see RawEraseTypeVars).
+func (f *ClassContext) HasRawEraseTypeVars() bool {
+	return f != nil && len(f.RawEraseTypeVars) > 0
+}
+
+// RawEraseTypeVar reports whether the bare type-variable name is one this class references but cannot
+// declare, so a parameterization using it as a direct argument must be rendered raw (see RawEraseTypeVars).
+func (f *ClassContext) RawEraseTypeVar(name string) bool {
+	if f == nil || name == "" || f.RawEraseTypeVars == nil {
+		return false
+	}
+	return f.RawEraseTypeVars[name]
 }
 
 // IsTypeParam reports whether name is one of the class-scope type variables (see TypeParams).
@@ -182,19 +238,33 @@ func (f *ClassContext) GetAllImported() []string {
 			//     JSONReader$Feature / JSONWriter$Feature). Kill-switch: JDEC_NESTED_FLAT_IMPORT_OFF=1.
 			// Anonymous/local segments ($1) are never importable, so drop them in either branch.
 			if strings.Contains(className, "$") {
-				if _, ok := binaryNestedNameToSource(className); !ok {
+				// Only a digit-leading '$'-segment (Outer$1 / Outer$1Helper) marks an anonymous/local
+				// class, which has no source name and can never be imported. A name that merely STARTS
+				// WITH '$' or contains '$$' (an empty split segment) is NOT anonymous: '$' is a legal Java
+				// identifier char, so it is a real, importable flat unit. The old gate used
+				// binaryNestedNameToSource's ok-flag, which also rejects empty segments, so it wrongly
+				// DROPPED the import for gson's top-level `$Gson$Preconditions` / `$Gson$Types` family at
+				// every cross-package use site (`cannot find symbol`, gson's largest cluster). Kill-switch
+				// JDEC_DOLLAR_FLAT_IMPORT_OFF restores the legacy drop-on-empty-segment behaviour.
+				if isAnonymousOrLocalBinaryName(className) {
+					continue
+				}
+				src, dotOK := binaryNestedNameToSource(className)
+				if !dotOK && os.Getenv("JDEC_DOLLAR_FLAT_IMPORT_OFF") != "" {
 					continue
 				}
 				stdlibOrLegacy := isStdlibNestedDottedPackage(pkg) || os.Getenv("JDEC_NESTED_FLAT_IMPORT_OFF") != ""
-				if stdlibOrLegacy {
-					src, _ := binaryNestedNameToSource(className)
+				// stdlib nested types import the OUTER class (the reference uses the dotted Outer.Inner
+				// spelling); this only applies when the name is dot-splittable (dotOK). A '$'-leading flat
+				// unit (dotOK==false) keeps its flat name so the import matches the flat reference.
+				if stdlibOrLegacy && dotOK {
 					outer := src
 					if i := strings.IndexByte(src, '.'); i >= 0 {
 						outer = src[:i]
 					}
 					className = outer
 				}
-				// else: keep the flat `Outer$Inner` name so the import matches the flat reference.
+				// else: keep the flat `Outer$Inner` / `$Gson$Preconditions` name verbatim.
 			}
 			imp := pkg + "." + className
 			if _, dup := seen[imp]; dup {
@@ -311,6 +381,22 @@ func (f *ClassContext) ShortTypeName(name string) string {
 // consistent and recompiles when the whole decompiled source set is compiled together (the standard
 // decompiler round-trip). This helper is therefore only used to keep import statements legal (an
 // import line cannot contain '$'); type references stay flat to match the flat declarations.
+// isAnonymousOrLocalBinaryName reports whether a binary nested class simple name (assumed to contain
+// '$') denotes an anonymous (Outer$1) or local (Outer$1Helper) class -- i.e. some '$'-separated segment
+// BEGINS WITH A DIGIT. Such classes have no usable source name and can never appear in an import. A
+// merely empty segment (the name starts with '$', ends with '$', or contains '$$', e.g. gson's
+// top-level `$Gson$Preconditions`) is NOT anonymous: '$' is a legal Java identifier char, so the class
+// is a real importable flat unit. This is intentionally narrower than binaryNestedNameToSource's
+// ok-flag (which also rejects empty segments) because importability and dot-splittability differ.
+func isAnonymousOrLocalBinaryName(className string) bool {
+	for _, p := range strings.Split(className, "$") {
+		if p != "" && p[0] >= '0' && p[0] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
 func binaryNestedNameToSource(className string) (string, bool) {
 	if !strings.Contains(className, "$") {
 		return className, false

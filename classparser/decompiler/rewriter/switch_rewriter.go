@@ -297,6 +297,18 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 			if source == node {
 				continue
 			}
+			// The merge point of a switch can ALSO be the target of forward gotos that originate
+			// OUTSIDE the switch region - e.g. an `if/else-if` chain that precedes the switch and
+			// jumps to the same post-switch continuation (fastjson2 ObjectReaderImplMap.of: a chain
+			// of `var = X.class; goto merge` before a `switch(idx)` that also breaks to merge). Those
+			// external predecessors are not inside any switch, so rewriting their edge into a `break`
+			// leaf emits `break` with no enclosing switch ("break outside switch or loop"). Only the
+			// switch's OWN case bodies (transitively dominated by the switch node) may break to the
+			// merge; leave external edges intact so control flows naturally into the merge.
+			// Kill-switch: JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF=1 restores the legacy (buggy) behavior.
+			if os.Getenv("JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF") == "" && !utils.IsDominate(manager.DominatorMap, node, source) {
+				continue
+			}
 			breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
 				return "break"
 			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {

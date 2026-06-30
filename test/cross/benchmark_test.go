@@ -25,8 +25,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -218,7 +221,10 @@ func TestBenchmarkThreeWayRecompile(t *testing.T) {
 			continue
 		}
 		deps := resolveDeps(j.depGlob)
-		classpath := strings.Join(deps, string(os.PathListSeparator))
+		// Complete the JDK-internal sun.misc package (see jdk_sunmisc_test.go) so faithfully-decompiled
+		// sun.misc.Unsafe users (guava) are not counted as defects under --release 8. Applied to BOTH
+		// JavaJive and the external tools' classpaths below, so the comparison stays fair.
+		classpath := withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))
 		nClasses := len(classEntries(t, jarPath))
 
 		r := row{jar: j.key, classes: nClasses}
@@ -304,6 +310,13 @@ func classCell(s threeWayScore) string {
 }
 
 // scoreJavaJive decompiles the jar via the production JarFS path and tree-compiles all units together.
+// JavaJive flattens every nested class to its own top-level `Outer$Inner.java` unit, so those units
+// only resolve each other as a TREE (an isolated unit's flat `$` reference to a sibling is unresolvable);
+// the tree metric is therefore the correct one for JavaJive. Crucially it is NOT phase-masked here:
+// JavaJive's output is syntactically clean (zero parse errors across all benchmark jars), so javac
+// always reaches the ATTRIBUTION phase and reports every type/import/generic error -- unlike CFR/
+// Vineflower, whose parse-error files would mask their own attribution failures in a tree compile (see
+// scoreExternal, which therefore measures them per-file in isolation).
 func scoreJavaJive(t *testing.T, jarPath, classpath string) threeWayScore {
 	t.Helper()
 	root := t.TempDir()
@@ -334,9 +347,86 @@ func scoreExternal(t *testing.T, java, tool, jarPath, classpath, name string) th
 	if len(files) == 0 {
 		return threeWayScore{decErr: name + " produced no .java"}
 	}
-	failed, errLines, bad := treeCompileFiles(t, files, classpath)
+	// PHASE-MASKING-ROBUST scoring (see scoreJavaJive's comment): javac aborts after the PARSE phase
+	// whenever ANY file in a single compilation has a syntax error, so it never runs ATTRIBUTION and
+	// therefore never reports the type/import/generic errors of the OTHER files. CFR/Vineflower both
+	// emit a handful of syntactically-broken classes ('finally' without 'try', '(' expected, ...); in a
+	// single whole-jar tree compile those parse errors MASK all of the tool's remaining attribution
+	// failures (sun.misc.Unsafe, generic-erasure casts, ...), making the tool look far cleaner than it
+	// is (measured: CFR guava tree=8 vs CFR guava iso=157 defective outer classes). To measure each
+	// tool fairly we must defeat this masking. Because CFR/Vineflower INLINE nested classes (one emitted
+	// file == one outer class, with no flattened `Outer$Inner` cross-references), each file can be
+	// compiled in ISOLATION against the ORIGINAL jar + deps with no false positives -- this is both
+	// phase-masking-immune (one file's parse error cannot hide another's attribution error) and at least
+	// as lenient as the tree (the pristine jar resolves every cross-class reference). JavaJive cannot use
+	// iso (it flattens, so its `Outer$Inner` units only resolve as a tree); it stays on the tree metric,
+	// which is already unmasked because its output is parse-clean (asserted in scoreJavaJive).
+	isoCP := classpath
+	if isoCP == "" {
+		isoCP = jarPath
+	} else {
+		isoCP = jarPath + string(os.PathListSeparator) + classpath
+	}
+	failed, errLines, bad := isoCompileFiles(t, files, isoCP)
 	outers, failedOuter := outerStats(outDir, files, bad)
 	return threeWayScore{files: len(files), failed: failed, errLines: errLines, outers: outers, failedOuter: failedOuter}
+}
+
+// isoCompileFiles compiles each file in ISOLATION (in parallel) against classpath and returns the
+// number of files that fail, the total javac error-line count, and the set of failing file paths. It
+// is the phase-masking-robust counterpart of treeCompileFiles for tools whose every emitted file is a
+// self-contained outer class (CFR/Vineflower inline nested classes): isolating each file guarantees one
+// file's PARSE error cannot suppress another file's ATTRIBUTION error (see scoreExternal). Workers
+// default to NumCPU; override with RECOMPILE_WORKERS.
+func isoCompileFiles(t *testing.T, files []string, classpath string) (failedFiles, errLines int, badPaths map[string]struct{}) {
+	t.Helper()
+	badPaths = map[string]struct{}{}
+	if len(files) == 0 {
+		return 0, 0, badPaths
+	}
+	javac := lookJavac(t)
+	workers, _ := strconv.Atoi(os.Getenv("RECOMPILE_WORKERS"))
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+		ch = make(chan string, len(files))
+	)
+	for _, f := range files {
+		ch <- f
+	}
+	close(ch)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			outDir := t.TempDir()
+			for f := range ch {
+				ctx, cancel := context.WithTimeout(context.Background(), compileTimeout)
+				args := append(append([]string{}, javacLocaleArgs...),
+					"-encoding", "UTF-8", "--release", "8", "-nowarn", "-Xmaxerrs", "1000000",
+					"-proc:none", "-cp", classpath, "-d", outDir, f)
+				cmd := exec.CommandContext(ctx, javac, args...)
+				cmd.Dir = outDir // keep the auto-spilled javac.<ts>.args out of test/cross
+				out, err := cmd.CombinedOutput()
+				cancel()
+				if err != nil {
+					n := strings.Count(string(out), ": error:")
+					if n == 0 {
+						n = 1 // non-zero exit with no parsed error line (e.g. timeout) still counts as a failure
+					}
+					mu.Lock()
+					badPaths[f] = struct{}{}
+					errLines += n
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return len(badPaths), errLines, badPaths
 }
 
 // treeCompileFiles compiles all files in one javac invocation (deps on classpath) and returns the

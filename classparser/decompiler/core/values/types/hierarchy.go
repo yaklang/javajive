@@ -68,6 +68,22 @@ var jdkSuperEdges = map[string][]string{
 	"java.util.Dictionary":    {"java.lang.Object"},
 	"java.util.Map":           {"java.lang.Object"},
 
+	// Reflection family. Method/Field/Constructor share TWO common ancestors: the class
+	// java.lang.reflect.AccessibleObject and the interface java.lang.reflect.Member. We deliberately
+	// map them to Member ONLY (omitting AccessibleObject) so the LUB of a `cond ? method : field` merge
+	// is `Member`, not `AccessibleObject`: the operations actually invoked on such a merged value in
+	// real code are getName()/getDeclaringClass()/getModifiers() -- all declared on Member, NONE on
+	// AccessibleObject (which only carries setAccessible/getAnnotation). Picking the class
+	// AccessibleObject (which the concrete-class tie-break would otherwise prefer) would merely trade
+	// "bad type in conditional" for "cannot find symbol: method getName()". The intersection type
+	// `AccessibleObject & Member` that javac actually computes is not denotable in a declaration, so
+	// Member is the single use-correct choice (fastjson2 FieldReader.toString / compareTo
+	// `Member m = method != null ? method : field; m.getName()`).
+	"java.lang.reflect.Method":      {"java.lang.reflect.Member"},
+	"java.lang.reflect.Field":       {"java.lang.reflect.Member"},
+	"java.lang.reflect.Constructor": {"java.lang.reflect.Member"},
+	"java.lang.reflect.Member":      {"java.lang.Object"},
+
 	// Interfaces that bottom out at Object.
 	"java.lang.Comparable": {"java.lang.Object"},
 }
@@ -75,18 +91,19 @@ var jdkSuperEdges = map[string][]string{
 // jdkInterfaceSet marks which table entries are interfaces, so the LUB tie-break can prefer a concrete
 // superclass (Number) over an equally-near interface (Comparable) when both are common ancestors.
 var jdkInterfaceSet = map[string]bool{
-	"java.lang.Comparable":   true,
-	"java.lang.CharSequence": true,
-	"java.lang.Iterable":     true,
-	"java.util.Collection":   true,
-	"java.util.List":         true,
-	"java.util.Set":          true,
-	"java.util.SortedSet":    true,
-	"java.util.Queue":        true,
-	"java.util.Deque":        true,
-	"java.util.Map":          true,
-	"java.util.SortedMap":    true,
-	"java.util.RandomAccess": true,
+	"java.lang.Comparable":     true,
+	"java.lang.CharSequence":   true,
+	"java.lang.Iterable":       true,
+	"java.util.Collection":     true,
+	"java.util.List":           true,
+	"java.util.Set":            true,
+	"java.util.SortedSet":      true,
+	"java.util.Queue":          true,
+	"java.util.Deque":          true,
+	"java.util.Map":            true,
+	"java.util.SortedMap":      true,
+	"java.util.RandomAccess":   true,
+	"java.lang.reflect.Member": true,
 }
 
 // ancestorDepths returns the BFS distance from `name` to each of its (reflexive) ancestors, or nil if

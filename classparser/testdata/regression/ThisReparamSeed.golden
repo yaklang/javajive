@@ -1,0 +1,16 @@
+# Bug: the `cast()` reparameterization idiom. A non-static generic method whose declared return type is
+# the SAME class but parameterized with the method's OWN type variable (`<N1 extends N> C<N1>`), with a
+# body `return this;`. `this` is `C<N>` (the class's own parameterization), NOT `C<N1>`, so the real
+# source carries an unchecked `(C<N1>) this` cast that erases to no bytecode. Historically the decompiler
+# dropped it and emitted a bare `return this;`, which javac rejects: "C<N> cannot be converted to C<N1>".
+# This was guava's GraphBuilder / NetworkBuilder / ValueGraphBuilder / ElementOrder.cast() family
+# (4 whole outer classes; guava tree 365->360 err / 171->167 blocker units).
+#
+# Fix: typeVarReturnCast now casts a same-erasure `return this` when the return type's type arguments
+# differ from the class's own type parameters (returnArgsAreClassParams). Kill-switch
+# JDEC_THIS_REPARAM_CAST_OFF restores the bare emission (see TestThisReparamReturnCastIsLoadBearing).
+#
+# cast(): MUST get the recovered `(ThisReparamSeed<N1>)` cast.
++/return \(ThisReparamSeed<N1>\) \(this\)/
+# self(): identity `return this` with the class's OWN parameterization MUST stay uncast (no over-cast).
++/ThisReparamSeed<N> self\(\) \{\s*return this;/

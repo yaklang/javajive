@@ -301,11 +301,11 @@ func runProfile(t *testing.T, name string, maxFiles int) recompileResult {
 	var decErr int
 	switch mode {
 	case "tree":
-		cp := strings.Join(deps, string(os.PathListSeparator))
+		cp := withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))
 		decErr = recompileTree(t, files, cp)
 	default: // iso
 		cpParts := append([]string{jarPath}, deps...)
-		cp := strings.Join(cpParts, string(os.PathListSeparator))
+		cp := withSunMisc(t, strings.Join(cpParts, string(os.PathListSeparator)))
 		decErr = recompileISO(t, files, cp, workers)
 	}
 	return recompileResult{units: units, decErr: decErr, decompFail: decompFail}

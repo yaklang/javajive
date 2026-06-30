@@ -1151,6 +1151,128 @@ func (d *Decompiler) reachingBoolDefaultMerge(store *OpCode, slot int, current *
 	return nil
 }
 
+// reachingBoolSiblingArmMerge handles the sibling-arm boolean phi that reachingBoolDefaultMerge cannot
+// (gson SqlTypesSupport.<clinit>): `boolean b; try { ...; b = true; } catch (...) { b = false; }
+// USE(b);`. javac compiles both `b = true/false` as `iconst_1/iconst_0; istore S` (int category), and
+// the two stores live on DISJOINT arms (try body vs catch handler) so NEITHER reaches the other --
+// there is no dominating default initializer for reachingBoolDefaultMerge to anchor on. The DFS visits
+// one arm first, mints an int ref; the post-arm merge load binds it; a later boolean USE (here the
+// `putstatic SUPPORTS_SQL_TYPES:Z`) re-types that ref to boolean. Then the SECOND arm's int-0/1 store
+// sees current=<boolean ref> but val=int, and AssignVarGuarded (no int<->boolean conversion) splits off
+// a fresh int variable. The first arm's boolean ref is read at the merge but is undefined on the second
+// arm's path, so a safety-net pass synthesizes `Object b = null;` and the boolean field assignment
+// fails javac ("Object cannot be converted to boolean").
+//
+// It fires ONLY on the provably-safe signature, mirroring reachingBoolDefaultMerge with the operand
+// roles swapped:
+//   - the value being stored is an int 0/1 literal (a boolean true/false the JVM widened to int);
+//   - the slot's CURRENT version (the global slot ref committed by the DFS-earlier sibling arm) is
+//     already boolean-typed;
+//   - a phi (a downstream load reached by BOTH this store and current's def) proves the two arms denote
+//     ONE source variable -- disjoint slot reuse shares no such load and is left to split.
+//
+// On a match it coerces the 0/1 literal to boolean (so it renders false/true) and returns current to
+// continue, so the second arm becomes a plain `b = true` reassignment and the merge read stays in
+// scope and definitely assigned. Kill-switch: JDEC_BOOL_SIBLING_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingBoolSiblingArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_BOOL_SIBLING_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if !isExactPrimer(current.Type(), types.JavaBoolean) {
+		return nil
+	}
+	lit, ok := intLiteral01(val)
+	if !ok {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
+	return current
+}
+
+// reachingBoolParamReassignMerge handles the boolean-PARAMETER reassignment phi that
+// reachingBoolSiblingArmMerge cannot (fastjson2 ObjectWriterProvider.getObjectWriterInternal:
+// `boolean fieldBased` reassigned `fieldBased = false;` inside an `if`, then read in a later
+// `fieldBased ? cacheFieldBased.get : cache.get`). javac compiles `fieldBased = false` as
+// `iconst_0; istore S` (int category). The slot's reaching definition is the method-entry PARAMETER,
+// which is not a store opcode, so reachingBoolSiblingArmMerge's store-only phi gate
+// (slotDefPhiReachesLoad -> reachingSlotStoreRefs) can never match it: the int-0/1 store therefore
+// splits off a fresh int variable, and the post-merge read renders that int with the slot's
+// depth-derived `varN` name, colliding with an unrelated same-depth reference local ("bad operand
+// types for '!=': String, int" x7 in this one method).
+//
+// It fires ONLY on the provably-safe parameter-phi signature, mirroring reachingBoolSiblingArmMerge
+// with the reaching def being the parameter rather than a sibling store:
+//   - the slot's current version is a boolean-typed PARAMETER (the live-in def);
+//   - the value being stored is an int 0/1 literal (a boolean false/true the JVM widened to int);
+//   - a downstream load of the slot is reachable forward from this store AND, via reachingStoresOf,
+//     also reaches method entry on a store-free path -- i.e. the parameter arm and the store arm flow
+//     into one common read. A read can observe both the original parameter and this store only when
+//     they are one source variable; a genuine disjoint slot reuse (the parameter dead, the slot
+//     re-purposed for a fresh int) has every read dominated by its own store, so no load reaches
+//     entry and this declines.
+//
+// On a match it coerces the 0/1 literal to boolean (rendering false/true) and returns the parameter
+// ref to continue, so the store becomes a plain `fieldBased = false` reassignment and every read
+// binds to the single in-scope boolean parameter. Kill-switch: JDEC_BOOL_PARAM_REASSIGN_MERGE_OFF=1.
+func (d *Decompiler) reachingBoolParamReassignMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_BOOL_PARAM_REASSIGN_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if !current.IsParam || !isExactPrimer(current.Type(), types.JavaBoolean) {
+		return nil
+	}
+	lit, ok := intLiteral01(val)
+	if !ok {
+		return nil
+	}
+	if !d.slotStoreReachesParamPhiLoad(store, slot) {
+		return nil
+	}
+	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
+	return current
+}
+
+// slotStoreReachesParamPhiLoad reports whether some load of `slot` is reachable forward from `store`
+// (stopping at any redefining store of the slot) that ALSO reaches method entry on a store-free path
+// (reachingStoresOf .reachesEntry). That is the parameter-phi shape: the store arm and the original
+// parameter arm flow into one common read. The store-free entry path provably does not pass through
+// `store`, so it is a genuine merge of two distinct arms, not a trivial store->load chain.
+func (d *Decompiler) slotStoreReachesParamPhiLoad(store *OpCode, slot int) bool {
+	if store == nil {
+		return false
+	}
+	visited := map[*OpCode]bool{store: true}
+	queue := append([]*OpCode{}, store.Target...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || cur.Instr == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			// A redefinition kills `store`'s value; do not look past it on this path.
+			continue
+		}
+		if isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
+			if _, reachesEntry := reachingStoresOf(cur, slot); reachesEntry {
+				return true
+			}
+		}
+		queue = append(queue, cur.Target...)
+	}
+	return false
+}
+
 // reachingRefSlotPhiMerge handles the lazy-init reference-slot split (Bug AK phi half), the
 // reference-type analogue of reachingBoolDefaultMerge. The ubiquitous idiom
 //
@@ -1285,6 +1407,19 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	recordOpcodeHit(opcode.Instr.OpCode)
 	funcCtx := d.FunctionContext
 	checkAndConvertRef := func(value values.JavaValue) func(int) {
+		// A bare `null` literal is a free, side-effect-free, immutable constant: folding it into a shared
+		// `Object varN = null` temp so several dup/dup_x1 consumers can reuse it is both unnecessary AND
+		// harmful. The temp takes null's static type `java.lang.Object`, so storing it into a more specific
+		// reference slot -- the chained field assignment `node.left = node.right = node.parent = null`
+		// (bytecode `aconst_null; dup_x1; putfield...`) -- fails javac "Object cannot be converted to Node"
+		// (gson LinkedHashTreeMap$AvlBuilder.add / clear / removeInternal). Leave the literal on the stack so
+		// the dup handler duplicates it directly and each consumer re-materializes `null`, which is assignable
+		// to every reference type without a cast. Kill-switch JDEC_NULL_DUP_FOLD_OFF restores the temp fold.
+		if os.Getenv("JDEC_NULL_DUP_FOLD_OFF") == "" {
+			if lit, ok := UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+				return func(int) {}
+			}
+		}
 		if _, ok := UnpackSoltValue(runtimeStackSimulation.Peek()).(*values.JavaRef); !ok {
 			val := runtimeStackSimulation.Pop().(values.JavaValue)
 			ref := runtimeStackSimulation.NewVar(val)
@@ -1430,6 +1565,27 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// default and a phi (shared downstream load) proves they are one variable, re-type the default
 		// to boolean (coercing its 0/1 literal to false/true) and continue it instead of minting.
 		if merged := d.reachingBoolDefaultMerge(opcode, slot, oldRef, value); merged != nil {
+			runtimeStackSimulation.SetVar(slot, merged)
+			oldRef = merged
+		}
+		// Sibling-arm boolean phi (gson SqlTypesSupport.<clinit>): the second try/catch (or if/else) arm
+		// stores an int 0/1 literal onto a reaching def that an earlier sibling arm already made boolean.
+		// Continue that boolean def (coercing the literal to false/true) instead of splitting off an int
+		// variable, which would leave the merge read undefined on this arm's path. Kill-switch:
+		// JDEC_BOOL_SIBLING_ARM_MERGE_OFF=1.
+		if merged := d.reachingBoolSiblingArmMerge(opcode, slot, oldRef, value); merged != nil {
+			runtimeStackSimulation.SetVar(slot, merged)
+			oldRef = merged
+		}
+		// Boolean parameter reassignment phi (fastjson2 ObjectWriterProvider.getObjectWriterInternal):
+		// a boolean PARAMETER reassigned with an int 0/1 literal in a branch (`fieldBased = false;`)
+		// then read after the merge. The reaching definition is the method-entry parameter, NOT a
+		// store, so reachingBoolSiblingArmMerge's store-only phi gate cannot anchor on it and the
+		// int-0/1 store splits off a fresh int variable; the post-merge read then renders that int
+		// variable with the slot's depth-derived name, colliding with an unrelated same-depth local
+		// ("bad operand types: String != int"). Continue the boolean parameter instead. Kill-switch:
+		// JDEC_BOOL_PARAM_REASSIGN_MERGE_OFF=1.
+		if merged := d.reachingBoolParamReassignMerge(opcode, slot, oldRef, value); merged != nil {
 			runtimeStackSimulation.SetVar(slot, merged)
 			oldRef = merged
 		}
@@ -3431,6 +3587,15 @@ func ternaryDeclLUB(ref *values.JavaRef, value values.JavaValue) types.JavaType 
 	// Only WIDEN: the merged type must be a proper supertype of the minted type.
 	lub := types.CommonSuperType(rt, vt)
 	if lub != nil && lub.String(ctx) == vt.String(ctx) {
+		// Refresh the ternary's cached type to the fresh LUB. The DECLARATION renders its type from
+		// the RHS value's Type() (this ternary), whose cachedType can be the STALE narrow type minted
+		// during assembly (before the false arm resolved). Resetting the left ref alone is not enough:
+		// without this, `Member var1 = cond ? method : field` would still print the stale `Method var1`
+		// (fastjson2 FieldReader). Setting the cache makes value.Type() agree with the widened ref.
+		// Kill-switch JDEC_TERNARY_DECL_LUB_CACHE_OFF restores the legacy (ref-only) reset.
+		if os.Getenv("JDEC_TERNARY_DECL_LUB_CACHE_OFF") == "" {
+			tv.SetCachedType(vt)
+		}
 		return vt
 	}
 	return nil
@@ -3962,6 +4127,87 @@ func (d *Decompiler) ParseStatement() error {
 			OP_IFNONNULL, OP_IFNULL:
 			if os.Getenv("JDEC_IFBRANCH_PIN_OFF") == "" && node.JmpNode == nil && len(node.Next) >= 2 {
 				node.JmpNode = node.Next[1]
+			}
+		}
+	}
+
+	// dup-family multi-temp splice: a single dup/dup2 opcode that materialized MORE THAN ONE temp
+	// (checkAndConvertRef ran for BOTH the array reference AND the index of a compound array store
+	// `this.f[expr]++`) emits several AssignStatement nodes that ALL share node.Id == opcode.Id
+	// (statementsIndex is fixed to opcode.Id for the whole opcode). idToNode keeps only the LAST one,
+	// and the wiring above reaches only that primary node via predecessor -> idToNode[opcode.Id]; the
+	// earlier temp-assignment node(s) stay unreachable and get dropped. Their JavaRef is then never
+	// renamed by RewriteVar and collides with the primary temp -- the gson JsonReader
+	// `int[] var1 = this.pathIndices; var1[var1] = var1[var1] + 1` bug. Splice the orphaned same-id
+	// nodes back in, in emission order, ahead of the primary: preds -> orphan... -> primary -> succ.
+	// Strictly gated to dup-family opcodes whose extra nodes are plain temp assignments, so the common
+	// single-materialization dup (group size 1) and every non-dup opcode are untouched.
+	// Kill-switch: JDEC_DUP_MULTI_TEMP_SPLICE_OFF=1 restores the legacy drop.
+	if os.Getenv("JDEC_DUP_MULTI_TEMP_SPLICE_OFF") == "" {
+		idGroups := map[int][]*Node{}
+		groupOrder := []int{}
+		for _, n := range nodes {
+			if _, seen := idGroups[n.Id]; !seen {
+				groupOrder = append(groupOrder, n.Id)
+			}
+			idGroups[n.Id] = append(idGroups[n.Id], n)
+		}
+		for _, id := range groupOrder {
+			group := idGroups[id]
+			if len(group) < 2 {
+				continue
+			}
+			op := idToOpcode[id]
+			if op == nil || op.Instr == nil {
+				continue
+			}
+			switch op.Instr.OpCode {
+			case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
+			default:
+				continue
+			}
+			primary := idToNode[id]
+			if primary == nil {
+				continue
+			}
+			// Chain = every emitted node except the primary, in emission order, then the primary last.
+			chain := make([]*Node, 0, len(group))
+			for _, n := range group {
+				if n != primary {
+					chain = append(chain, n)
+				}
+			}
+			chain = append(chain, primary)
+			// Only splice plain temp assignments; bail on anything else to avoid reshaping
+			// control-flow nodes.
+			allAssign := true
+			for _, n := range chain {
+				if _, ok := n.Statement.(*statements.AssignStatement); !ok {
+					allAssign = false
+					break
+				}
+			}
+			if !allAssign {
+				continue
+			}
+			// Detach the orphan nodes from whatever the wiring loop hooked them to.
+			for _, n := range chain[:len(chain)-1] {
+				n.RemoveAllNext()
+				n.RemoveAllSource()
+			}
+			// Redirect the primary's predecessors to the head of the chain, preserving edge order.
+			head := chain[0]
+			for _, pred := range slices.Clone(primary.Source) {
+				pred.ReplaceNext(primary, head)
+				if pred.JmpNode == primary {
+					pred.JmpNode = head
+				}
+				primary.RemoveSource(pred)
+				head.AddSource(pred)
+			}
+			// Link the chain head -> ... -> primary (primary keeps its existing successors).
+			for i := 0; i+1 < len(chain); i++ {
+				chain[i].AddNext(chain[i+1])
 			}
 		}
 	}

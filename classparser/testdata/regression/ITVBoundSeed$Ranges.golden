@@ -1,0 +1,15 @@
+# Bug: a non-static inner class inherits its enclosing class's type variables; when the decompiler
+# flattens it to a top-level `Outer$Inner` unit it re-declares those variables, but historically with a
+# bare `Object` bound. That drops the real bound, so a use like `ITVBox<C>` (ITVBox requires
+# `C extends Comparable`) fails javac with "type argument C is not within bounds of type-variable C".
+# This was guava's `not within bounds` blocker family (TreeRangeSet / TreeRangeMap / ImmutableRange*,
+# ~90 tree error lines). Fix: enclosingTypeParamBounds walks the `$` chain via the cross-class resolver
+# and recovers each injected variable's real bound (`<C extends Comparable<?>>`). Kill-switch
+# JDEC_INNER_TYPEVAR_BOUND_OFF restores the bare-name behavior.
+#
+# This single-class seed is decompiled WITHOUT a resolver, so the bound recovery cannot fire and the
+# canonical fallback (bare `<C>`) must be produced. The resolver-driven ON/OFF bound difference is
+# asserted by TestInnerTypeVarBoundIsLoadBearing.
++class ITVBoundSeed$Ranges<C> {
++ Collection<ITVBox<C>> delegate;
+-<C extends

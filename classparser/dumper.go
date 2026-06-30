@@ -218,18 +218,30 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Recover ACC_PUBLIC from InnerClasses (this is exactly what javap consults) and keep `public` for a
 	// genuinely public nested type. Kill-switch: JDEC_NESTED_PUBLIC_OFF=1 restores legacy stripping.
 	if strings.Contains(rawClassName, "$") {
+		// `protected` is illegal at top level (a flattened nested unit is emitted as a top-level class),
+		// so always drop it.
 		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "protected", ""))
-		innerPublic := false
-		if os.Getenv("JDEC_NESTED_PUBLIC_OFF") == "" {
-			if flags, ok := c.selfInnerClassAccessFlags(); ok && flags&0x0001 == 0x0001 {
-				innerPublic = true
-			}
-		}
-		if innerPublic {
+		innerFlags, isNested := c.selfInnerClassAccessFlags()
+		switch {
+		case os.Getenv("JDEC_NESTED_PUBLIC_OFF") != "":
+			// Legacy: strip `public` from every '$'-named class (kept for A/B comparison).
+			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
+		case !isNested:
+			// A GENUINE top-level class whose name merely contains '$' (gson's `$Gson$Preconditions` /
+			// `$Gson$Types`, deliberately '$'-named to avoid collisions): it appears in NO InnerClasses
+			// attribute, so its top-level ClassFile access_flags already carry the correct visibility
+			// (ACC_PUBLIC for a public class). Keep them verbatim. The old code assumed every '$' name was
+			// nested, failed the InnerClasses lookup, and wrongly stripped `public`, making the class
+			// inaccessible across packages ("$Gson$Preconditions is not public in com.google.gson.internal").
+		case innerFlags&0x0001 == 0x0001:
+			// Genuinely nested AND public per InnerClasses: a public nested type's top-level access_flags
+			// omit ACC_PUBLIC (real visibility lives in InnerClasses, which is what javap consults), so
+			// add `public` (fastjson2 JSONReader$Feature / JSONWriter$Feature family).
 			if !strings.Contains(accessFlags, "public") {
 				accessFlags = strings.TrimSpace("public " + accessFlags)
 			}
-		} else {
+		default:
+			// Genuinely nested, non-public: strip any spurious `public`.
 			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
 		}
 	}
@@ -442,13 +454,93 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// enclosing type with no Signature, and InnerClasses carries only names), so a sibling override
 		// chain can occasionally bind a variable to a swapped position; that residual is left to the
 		// future cross-class integral rebuild.
+		//
+		// ENCLOSING-ARITY RECONCILIATION: a flattened NON-STATIC inner class's reference sites always
+		// carry the FULL enclosing formal-parameter set (javac encodes it as `LOuter<TK;TV;>.Inner;`,
+		// which parseSigClassType carries onto the flattened name), but the usage scan above only recovers
+		// the SUBSET the inner body actually mentions. So a class that uses K but not V is declared
+		// `Inner<K>` yet referenced `Inner<K, V>` (gson LinkedTreeMap$KeySet -> javac "wrong number of
+		// type arguments; required 1"), and one that uses NEITHER is declared bare yet referenced
+		// `Inner<T>` (gson TreeTypeAdapter$GsonContextImpl -> "type Inner does not take parameters").
+		// When the used set is a SUBSET of the NEAREST generic enclosing class's formal parameters (which
+		// is exactly what a singly-nested reference carries), adopt that full ordered set so declaration
+		// and reference arities AND order agree. The `free ⊆ encl` guard keeps deeper-nesting and
+		// method-level residuals on the existing usage-based path. Kill-switch JDEC_INNER_ENCLOSING_ARITY_OFF.
+		if encl := c.enclosingFormalTypeParamsForArity(); len(encl) > 0 && typeNamesSubset(free, encl) {
+			free = encl
+		}
 		if len(free) > 0 {
-			classTypeParams = "<" + strings.Join(free, ", ") + ">"
+			// Recover each injected variable's BOUND from its enclosing class so a flattened inner class
+			// renders `<C extends Comparable<?>>` instead of the bare `<C>` -- otherwise a `Range<C>` use
+			// (Range requires `C extends Comparable`) fails javac with "type argument C is not within
+			// bounds of type-variable C". Bounds default to bare names when no enclosing bound is found
+			// (single-class decompile, Object bound, or a bound referencing an out-of-scope variable).
+			// Kill-switch JDEC_INNER_TYPEVAR_BOUND_OFF restores the bare-name behavior.
+			bounds := c.enclosingTypeParamBounds(free)
+			decls := make([]string, len(free))
+			for i, n := range free {
+				if clause, ok := bounds[n]; ok && clause != "" {
+					decls[i] = n + " extends " + clause
+				} else {
+					decls[i] = n
+				}
+			}
+			classTypeParams = "<" + strings.Join(decls, ", ") + ">"
 			classTypeParamNames = free
+		}
+	}
+	// RAW-ERASE SET (mirror image of the enclosing-arity injection above, for the case it explicitly
+	// leaves out): a flattened NON-STATIC inner class that has its OWN formal type parameters (e.g.
+	// `LinkedTreeMap$LinkedTreeMapIterator<T>`) cannot ALSO declare the enclosing class's variables --
+	// that would change the arity of its `<ownParam>` reference sites ("wrong number of type arguments").
+	// Yet its field/return signatures still mention those enclosing variables (`Node<K,V>`), which would
+	// render as undeclared `K`/`V` (javac "cannot find symbol: class K"). Collect exactly those
+	// referenced-but-undeclarable variables (every type-variable ref in the class's own supertype + field
+	// signatures that is NOT one of its own formal parameters) and mark them for raw-erasure at
+	// parameterized type-argument render sites (`Node<K,V>` -> `Node`): legal, runtime-identical, and
+	// matching the local var already emitted raw. Derived from THIS class's own bytecode only (no sibling
+	// resolver), so it works under single-class decompile too. Kill-switch: JDEC_INNER_RAW_ERASE_OFF.
+	var rawEraseTypeVars map[string]bool
+	if ownFormal := types.ClassFormalTypeParamNames(classSigStr); os.Getenv("JDEC_INNER_RAW_ERASE_OFF") == "" && len(ownFormal) > 0 {
+		if flags, ok := c.selfInnerClassAccessFlags(); ok && flags&StaticFlag == 0 {
+			own := make(map[string]bool, len(ownFormal))
+			for _, n := range ownFormal {
+				own[n] = true
+			}
+			erase := map[string]bool{}
+			addErase := func(n string) {
+				if n != "" && !own[n] {
+					erase[n] = true
+				}
+			}
+			if classSigStr != "" {
+				for _, n := range types.FreeTypeVarRefsInClassSig(classSigStr) {
+					addErase(n)
+				}
+			}
+			for _, field := range c.obj.Fields {
+				for _, fattr := range field.Attributes {
+					if sa, ok := fattr.(*SignatureAttribute); ok {
+						if fs, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && fs != "" {
+							for _, n := range types.TypeVarRefsInFieldSig(fs) {
+								addErase(n)
+							}
+						}
+						break
+					}
+				}
+			}
+			if len(erase) > 0 {
+				rawEraseTypeVars = erase
+			}
 		}
 	}
 	if c.FuncCtx != nil {
 		c.FuncCtx.TypeParams = classTypeParamNames
+		c.FuncCtx.RawEraseTypeVars = rawEraseTypeVars
+		// ClassTypeParams is the CLASS-only snapshot (never extended with a method's own `<T>` while
+		// that method renders); it lets typeVarReturnCast recover `this`'s real parameterization.
+		c.FuncCtx.ClassTypeParams = classTypeParamNames
 		// Record which same-class fields are declared as a bare class-scope type variable (e.g.
 		// `private final K key;`). A store into such a field whose RHS erased to Object/the bound
 		// needs an unchecked `(K)` cast to recompile (see AssignStatement.typeVarFieldStoreCast).
@@ -513,6 +605,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		methodSigSeen := map[string]bool{}
 		for _, m := range c.obj.Methods {
 			name, err := c.obj.getUtf8(m.NameIndex)
+			// <init>/<clinit> are NOT recorded: a non-static inner class's constructor Signature OMITS the
+			// synthetic leading `this$0` (and outer-capture) parameters, so signature-param indices are
+			// OFFSET from the descriptor/argument indices -- recovering a `this(...)` self-call's param type
+			// by raw index would mis-cast the synthetic enclosing argument (guava TreeBasedTable$TreeRow
+			// `this((R) this$0, ...)`). <clinit> has no call site. Both stay skipped.
 			if err != nil || name == "" || name == "<init>" || name == "<clinit>" {
 				continue
 			}
@@ -548,6 +645,53 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 		if len(methodSignatures) > 0 {
 			c.FuncCtx.MethodSignatures = methodSignatures
+		}
+		// Record same-class CONSTRUCTOR generic signatures keyed by argument count, for the `this(...)`
+		// self-call wildcard argument cast (FunctionCallExpression.ctorWildcardArgCast). Kept SEPARATE
+		// from methodSignatures (which deliberately skips <init>) so the general same-class method path is
+		// untouched. OFFSET GUARD: a non-static inner class's constructor Signature omits the synthetic
+		// leading this$0/outer-capture parameters, so its signature-param count is LESS than the descriptor
+		// (= call argument) count; recording it would mis-index arguments (guava TreeBasedTable$TreeRow).
+		// Only record when the two counts MATCH (top-level / static-nested constructors). Overloads
+		// colliding on arity are dropped. Kill-switch JDEC_CTOR_WILDCARD_CAST_OFF.
+		if os.Getenv("JDEC_CTOR_WILDCARD_CAST_OFF") == "" {
+			ctorSignatures := map[int]string{}
+			ctorSeen := map[int]bool{}
+			for _, m := range c.obj.Methods {
+				name, err := c.obj.getUtf8(m.NameIndex)
+				if err != nil || name != "<init>" {
+					continue
+				}
+				descriptor, err := c.obj.getUtf8(m.DescriptorIndex)
+				if err != nil || descriptor == "" {
+					continue
+				}
+				descArgc := len(methodParamFieldDescriptors(descriptor))
+				for _, attr := range m.Attributes {
+					sigAttr, ok := attr.(*SignatureAttribute)
+					if !ok {
+						continue
+					}
+					sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex)
+					if err != nil || sigStr == "" || (!strings.HasPrefix(sigStr, "(") && !strings.HasPrefix(sigStr, "<")) {
+						continue
+					}
+					_, sigParams, _ := types.ParseMethodSignatureFull(sigStr, c.FuncCtx)
+					if len(sigParams) != descArgc {
+						// Synthetic-parameter offset (non-static inner class) -> cannot align by index.
+						continue
+					}
+					if ctorSeen[descArgc] {
+						delete(ctorSignatures, descArgc)
+						continue
+					}
+					ctorSeen[descArgc] = true
+					ctorSignatures[descArgc] = sigStr
+				}
+			}
+			if len(ctorSignatures) > 0 {
+				c.FuncCtx.ConstructorSignatures = ctorSignatures
+			}
 		}
 		// Seed the unified cross-class generic resolver (types.ResolveInstantiatedParamType): record this
 		// class's own class Signature and install a lazy sibling-signature provider so a call on ANY
@@ -872,6 +1016,159 @@ func defaultInitializerForFieldType(typeName string) string {
 	}
 }
 
+// enclosingTypeParamBounds recovers, for each requested injected free type-variable name, the bound
+// declared on the NEAREST enclosing class. A non-static inner class inherits its enclosing scope's type
+// variables; when Yak flattens it to a top-level `Outer$Inner` unit those variables are re-declared on
+// the flat class (see the JDEC_INNER_TYPEVAR injection) but, until now, with a bare `Object` bound. That
+// drops the real bound, so a use like `Range<C>` (Range requires `C extends Comparable`) fails javac
+// with "type argument C is not within bounds of type-variable C". This walks the binary-name `$` chain
+// (Outer$Mid$Inner -> Outer$Mid -> Outer) via foldSiblingResolver, parses each enclosing class's formal
+// type-parameter bounds, and returns name -> rendered bound clause.
+//
+// SAFETY: a bound is returned ONLY when (a) the enclosing declaration has a real (non-Object) bound and
+// (b) every type variable the bound references is itself in the injected free set, so the reconstructed
+// `<C extends Comparable<?>>` can never reference an undeclared variable. The nearest enclosing scope
+// wins (Java type-variable shadowing). Returns an empty map when no cross-class resolver is available
+// (single-class decompile) or under kill-switch JDEC_INNER_TYPEVAR_BOUND_OFF, so the bare-name behavior
+// is unchanged there. The arity at reference sites is untouched (only the declaration gains `extends`),
+// so this never introduces "wrong number of type arguments".
+func (c *ClassObjectDumper) enclosingTypeParamBounds(free []string) map[string]string {
+	res := map[string]string{}
+	if c.foldSiblingResolver == nil || os.Getenv("JDEC_INNER_TYPEVAR_BOUND_OFF") != "" {
+		return res
+	}
+	freeSet := map[string]bool{}
+	for _, n := range free {
+		freeSet[n] = true
+	}
+	binName := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
+	for {
+		idx := strings.LastIndexByte(binName, '$')
+		if idx < 0 {
+			break
+		}
+		binName = binName[:idx]
+		data, ok := c.foldSiblingResolver(binName)
+		if !ok || len(data) == 0 {
+			continue
+		}
+		sObj, err := Parse(data)
+		if err != nil {
+			continue
+		}
+		sig := ""
+		for _, attr := range sObj.Attributes {
+			if sa, ok := attr.(*SignatureAttribute); ok {
+				if s, err := sObj.getUtf8(sa.SignatureIndex); err == nil {
+					sig = s
+				}
+				break
+			}
+		}
+		if sig == "" {
+			continue
+		}
+		for name, b := range types.ClassFormalTypeParamBounds(sig, c.FuncCtx) {
+			if !freeSet[name] {
+				continue
+			}
+			if _, done := res[name]; done {
+				continue // a nearer enclosing scope already bound it (shadowing)
+			}
+			if b.Clause == "" {
+				continue
+			}
+			inScope := true
+			for _, r := range b.Refs {
+				if !freeSet[r] {
+					inScope = false
+					break
+				}
+			}
+			if inScope {
+				res[name] = b.Clause
+			}
+		}
+	}
+	return res
+}
+
+// enclosingFormalTypeParamsForArity recovers the formal type-parameter NAMES of the NEAREST generic
+// enclosing class, for a flattened NON-STATIC inner class that itself declares and uses NO type
+// variables. Such a class injects nothing via the usage scan, so its flattened declaration has zero
+// parameters; yet its reference sites carry the enclosing class's type arguments (a non-static inner's
+// generic signatures encode `LOuter<TT;>.Inner;`, which parseSigClassType keeps on the flattened name).
+// Re-declaring the enclosing formal parameters makes declaration and reference arities agree (gson
+// TreeTypeAdapter$GsonContextImpl: declared `class ...GsonContextImpl`, referenced `...GsonContextImpl<T>`).
+//
+// SAFETY: returns nil unless (a) a cross-class resolver is available, (b) this class is a NON-STATIC
+// inner per its own InnerClasses access flags (only those capture enclosing type variables at reference
+// sites; static nested classes do not), and (c) some enclosing class on the binary-name `$` chain
+// declares at least one formal type parameter. The NEAREST such enclosing class wins, matching
+// parseSigClassType (which keeps the innermost non-empty argument list of `LOuter<..>.Mid<..>.Inner;`).
+// The injected names may be unused, which is legal; raw reference sites stay valid; an injected arity
+// always equals what reference signatures carry, so this cannot create "wrong number of type arguments".
+// Kill-switch: JDEC_INNER_ENCLOSING_ARITY_OFF. No-op under single-class decompile (no resolver).
+// typeNamesSubset reports whether every name in sub appears in super_ (set containment). Used to gate
+// the enclosing-arity reconciliation: only when the inner class's used type-variable set is a subset of
+// the nearest enclosing class's formal parameters is it safe to adopt that full ordered set (a used
+// variable from a deeper enclosing scope or a method would NOT be covered, so those stay on the
+// usage-based path). An empty sub is trivially a subset.
+func typeNamesSubset(sub, super_ []string) bool {
+	set := make(map[string]bool, len(super_))
+	for _, n := range super_ {
+		set[n] = true
+	}
+	for _, n := range sub {
+		if !set[n] {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *ClassObjectDumper) enclosingFormalTypeParamsForArity() []string {
+	if c.foldSiblingResolver == nil || os.Getenv("JDEC_INNER_ENCLOSING_ARITY_OFF") != "" {
+		return nil
+	}
+	flags, ok := c.selfInnerClassAccessFlags()
+	if !ok || flags&StaticFlag != 0 {
+		return nil
+	}
+	binName := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
+	for {
+		idx := strings.LastIndexByte(binName, '$')
+		if idx < 0 {
+			break
+		}
+		binName = binName[:idx]
+		data, ok := c.foldSiblingResolver(binName)
+		if !ok || len(data) == 0 {
+			continue
+		}
+		sObj, err := Parse(data)
+		if err != nil {
+			continue
+		}
+		sig := ""
+		for _, attr := range sObj.Attributes {
+			if sa, ok := attr.(*SignatureAttribute); ok {
+				if s, err := sObj.getUtf8(sa.SignatureIndex); err == nil {
+					sig = s
+				}
+				break
+			}
+		}
+		if sig == "" {
+			continue
+		}
+		if names := types.ClassFormalTypeParamNames(sig); len(names) > 0 {
+			return names
+		}
+	}
+	return nil
+}
+
 // genericSupertypeRawName returns the raw dotted class name of a (possibly generic) supertype type
 // recovered from a class Signature, so it can be matched against the erased super_class / Interfaces
 // names. Returns "" for type variables or anything that is not a class/parameterized type.
@@ -1116,6 +1413,44 @@ func javaCharLiteralFromCode(code int) string {
 	return fmt.Sprintf("'\\u%04x'", code&0xffff)
 }
 
+// externalNestedEnumSourceName converts an enum-constant annotation value's binary type name
+// `pkg/Outer$Inner` to its Java SOURCE spelling when the enum type is a NESTED type that is NOT a
+// decompiled sibling unit -- i.e. an external dependency / JDK nested enum. It returns the dotted
+// simple reference (`Outer.Inner`), the outer-class import (`pkg.Outer`), and ok=true.
+//
+// Rationale: Yak emits its OWN nested classes as standalone flat `Outer$Inner.java` units and refers to
+// them by that same flat name, so a decompiled sibling stays flat. But an EXTERNAL nested enum (guava's
+// `@ReflectionSupport(value=ReflectionSupport$Level.FULL)`, j2objc's `ReflectionSupport.Level`) is only
+// on the compile classpath as a genuinely nested `Outer.Inner`; the flat `Outer$Inner` is unresolvable
+// in source and javac rejects the annotation value ("an enum annotation value must be an enum
+// constant"). foldSiblingResolver positively resolving the binary name proves it IS a decompiled
+// sibling (keep flat, ok=false); a miss proves it is external (rewrite to dotted). With no resolver
+// (single-class mode) we keep the legacy flat behavior. Kill-switch: JDEC_ANNO_ENUM_NESTED_DOT_OFF=1.
+func (c *ClassObjectDumper) externalNestedEnumSourceName(internal string) (dottedSimple, outerImport string, ok bool) {
+	if os.Getenv("JDEC_ANNO_ENUM_NESTED_DOT_OFF") != "" {
+		return "", "", false
+	}
+	if !strings.Contains(internal, "$") || c.foldSiblingResolver == nil {
+		return "", "", false
+	}
+	if _, isSibling := c.foldSiblingResolver(internal); isSibling {
+		return "", "", false // decompiled sibling -> keep the flat `Outer$Inner` name
+	}
+	fqcn := strings.ReplaceAll(internal, "/", ".") // pkg.Outer$Inner
+	pkg, simple := class_context.SplitPackageClassName(fqcn)
+	// Guard anonymous/local segments (Outer$1); never an enum, but stay safe.
+	for _, seg := range strings.Split(simple, "$") {
+		if seg == "" || (seg[0] >= '0' && seg[0] <= '9') {
+			return "", "", false
+		}
+	}
+	dottedSimple = strings.ReplaceAll(simple, "$", ".") // Outer.Inner
+	if pkg != "" {
+		outerImport = pkg + "." + strings.SplitN(simple, "$", 2)[0] // pkg.Outer
+	}
+	return dottedSimple, outerImport, true
+}
+
 // formatAnnotationElementValue renders a single annotation element_value (the right-hand side of an
 // element-value pair, or an AnnotationDefault's default value) into its Java source form. Extracted
 // from DumpAnnotation so the annotation-default renderer (`@interface` element `default <value>`)
@@ -1193,8 +1528,16 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 			if len(ret.TypeName) <= 2 {
 				return "", fmt.Errorf("parse annotation error, invalid enum type name: %s", ret.TypeName)
 			}
-			fullqualifiedName := ret.TypeName[1 : len(ret.TypeName)-1]
-			fullqualifiedName = strings.Replace(fullqualifiedName, "/", ".", -1)
+			internal := ret.TypeName[1 : len(ret.TypeName)-1]
+			// An EXTERNAL nested enum referenced by its flat binary name (Outer$Inner) is unresolvable
+			// in source; rewrite to the dotted `Outer.Inner` and import the outer class instead.
+			if dotted, outerImport, ok := c.externalNestedEnumSourceName(internal); ok {
+				if outerImport != "" {
+					c.FuncCtx.Import(outerImport)
+				}
+				return dotted + "." + ret.ConstName, nil
+			}
+			fullqualifiedName := strings.Replace(internal, "/", ".", -1)
 			c.FuncCtx.Import(fullqualifiedName)
 			last := strings.LastIndex(fullqualifiedName, ".")
 			if last == -1 {
@@ -1335,8 +1678,16 @@ func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, e
 				if len(ret.TypeName) <= 2 {
 					return "", fmt.Errorf("parse annotation error, invalid enum type name: %s", ret.TypeName)
 				}
-				fullqualifiedName := ret.TypeName[1 : len(ret.TypeName)-1]
-				fullqualifiedName = strings.Replace(fullqualifiedName, "/", ".", -1)
+				internal := ret.TypeName[1 : len(ret.TypeName)-1]
+				// An EXTERNAL nested enum referenced by its flat binary name (Outer$Inner) is
+				// unresolvable in source; rewrite to dotted `Outer.Inner` and import the outer class.
+				if dotted, outerImport, ok := c.externalNestedEnumSourceName(internal); ok {
+					if outerImport != "" {
+						c.FuncCtx.Import(outerImport)
+					}
+					return dotted + "." + ret.ConstName, nil
+				}
+				fullqualifiedName := strings.Replace(internal, "/", ".", -1)
 				c.FuncCtx.Import(fullqualifiedName)
 				last := strings.LastIndex(fullqualifiedName, ".")
 				if last == -1 {
@@ -1736,6 +2087,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	annoStrs := []string{}
 	funcCtx.FunctionType = c.MethodType
 	var paramsNewStr string
+	var lambdaParamNames []string
 	var exceptions string
 	for _, attribute := range method.Attributes {
 		if exceptionAttr, ok := attribute.(*ExceptionsAttribute); ok {
@@ -1823,7 +2175,9 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			if isLambda {
 				for i, val := range samParams {
 					if ref, ok := val.(*values.JavaRef); ok && ref.Id != nil && !ref.IsThis {
-						ref.Id.SetName(fmt.Sprintf("l%d", i))
+						name := fmt.Sprintf("l%d", i)
+						ref.Id.SetName(name)
+						lambdaParamNames = append(lambdaParamNames, name)
 					}
 				}
 			}
@@ -2231,6 +2585,19 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 		// only matches `varN`) leaves them untouched.
 		c.lambdaLocalSeq++
 		code = renameLambdaBodyLocals(code, c.lambdaLocalSeq)
+		// When EVERY lambda parameter is unused in the body, render them WITHOUT explicit types
+		// (implicit `(l0, l1) -> ...`). An explicit parameter type recovered from the impl-method
+		// descriptor clashes with a RAW functional-interface target (fastjson2
+		// `rawMap.computeIfAbsent(k, (Integer l0) -> new ArrayList())`: the raw `Function` SAM is
+		// `apply(Object)`, so `(Integer l0)` is rejected as "incompatible parameter types in lambda
+		// expression"). Letting javac infer the parameter types from the target is both more faithful
+		// (this is the idiomatic source form) and lets the lambda bind. Restricted to the
+		// ALL-UNUSED case so a body that references a parameter as a specific type keeps its explicit
+		// declaration (no behavioral change, no overload-disambiguation risk).
+		// Kill-switch: JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF=1.
+		if len(lambdaParamNames) > 0 && os.Getenv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF") == "" && !lambdaParamsUsed(code, lambdaParamNames) {
+			paramsNewStr = strings.Join(lambdaParamNames, ", ")
+		}
 		res := fmt.Sprintf("(%s) -> {%s", paramsNewStr, code)
 		res += strings.Repeat("\t", c.TabNumber()) + "}"
 		dumped.methodName = name
@@ -2266,12 +2633,29 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	writeArguments := func(buffer io.Writer) {
 		methodSourceBuffer.Write([]byte(fmt.Sprintf("(%s)%s", paramsNewStr, exceptions)))
 	}
+	// A synthetic access-bridge constructor `C(C$N marker)` whose body decompiled to empty bridges the
+	// PRIVATE no-arg ctor `C()` via `this()` (the trailing anonymous marker only disambiguates the
+	// signature from `C()`); the decompiler strips that no-arg `this()` delegation. Leaving the body
+	// empty makes javac insert an implicit `super()` instead -- which, when the SUPERCLASS's no-arg ctor
+	// is private/absent, fails "constructor ... has private access" (guava AbstractFuture$UnsafeAtomicHelper
+	// / $SynchronizedHelper / AggregateFutureState$SynchronizedAtomicHelper all extend a private-no-arg
+	// AtomicHelper). The base class survives only because it extends Object (implicit super() == Object()).
+	// Emitting the faithful `this()` delegation is correct for BOTH (it re-routes through the same-class
+	// no-arg ctor the bridge actually targets). Restricted to MARKER-ONLY bridges (single param) so an
+	// arg-forwarding bridge `C(int,C$N){ this(x); }` is never mis-rendered as no-arg `this()`. Kill-switch:
+	// JDEC_SYN_BRIDGE_THIS_OFF=1.
+	emitBridgeThisCall := name == "<init>" && strings.TrimSpace(code) == "" && os.Getenv("JDEC_SYN_BRIDGE_THIS_OFF") == "" &&
+		c.isSyntheticAccessBridgeCtor(descriptor, method.AccessFlags) &&
+		len(methodParamFieldDescriptors(descriptor)) == 1
 	writeBlock := func(buffer io.Writer) {
 		if abstractMethod {
 			// An abstract method of an @interface is an annotation element; if it carries an
 			// AnnotationDefault attribute we must re-emit its `default <value>` clause, otherwise
 			// any use site that omits the element fails javac ("missing a default value").
 			methodSourceBuffer.Write([]byte(c.annotationElementDefaultClause(method) + ";"))
+		} else if emitBridgeThisCall {
+			methodSourceBuffer.Write([]byte(fmt.Sprintf(" {\n%sthis();\n%s}",
+				strings.Repeat("\t", c.TabNumber()+1), strings.Repeat("\t", c.TabNumber()))))
 		} else if code == "" {
 			methodSourceBuffer.Write([]byte(" {}"))
 		} else {
@@ -2592,6 +2976,20 @@ func renameLambdaBodyLocals(body string, seq int) string {
 	}
 	prefix := fmt.Sprintf("lv%d_", seq)
 	return lambdaLocalRe.ReplaceAllString(body, prefix+"$1")
+}
+
+// lambdaParamsUsed reports whether any of the given lambda parameter names (l0,l1,...) appears as a
+// word-bounded token in the rendered lambda body. The `lN` names are assigned exclusively to lambda
+// parameters (DumpMethodWithInitialId) and the body's own locals were renamed to `lv<seq>_N`, so a
+// word-boundary match is unambiguous. Used to decide whether the parameters can be rendered implicitly.
+func lambdaParamsUsed(body string, names []string) bool {
+	for _, n := range names {
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(n) + `\b`)
+		if re.MatchString(body) {
+			return true
+		}
+	}
+	return false
 }
 
 // The optional `(?:\s*\.\.\.)?` after the type recognizes a varargs parameter declaration

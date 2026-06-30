@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -27,11 +28,49 @@ func (j *JavaParameterizedType) String(funcCtx *class_context.ClassContext) stri
 	if len(j.TypeArgs) == 0 {
 		return base
 	}
+	// Raw-erase: a flattened non-static inner class that has its OWN formal type parameters cannot also
+	// declare the enclosing class's variables (that would break the arity of its `<ownParam>` reference
+	// sites), so a parameterization whose DIRECT argument is one of those undeclared enclosing variables
+	// is rendered RAW (`Node<K,V>` -> `Node`) -- legal, runtime-identical, and matching the local already
+	// emitted raw. Only the THIS-level args are checked: a nested `List<Node<K,V>>` keeps its outer `List`
+	// and raw-erases just the inner `Node` (Java permits a raw type as a type argument). The set is empty
+	// for every ordinary class, so this is a strict no-op there. See ClassContext.RawEraseTypeVars.
+	if funcCtx.HasRawEraseTypeVars() {
+		for _, ta := range j.TypeArgs {
+			if argRefsRawEraseVar(ta, funcCtx) {
+				return base
+			}
+		}
+	}
 	parts := make([]string, len(j.TypeArgs))
 	for i, ta := range j.TypeArgs {
 		parts[i] = ta.String(funcCtx)
 	}
 	return fmt.Sprintf("%s<%s>", base, strings.Join(parts, ", "))
+}
+
+// argRefsRawEraseVar reports whether a parameterized type's direct argument ta is (or, for a bounded
+// wildcard, has a bound that is) a bare type-variable name marked for raw-erasure (see
+// ClassContext.RawEraseTypeVars). Wildcards are asserted before RawType to avoid the nil-embed panic
+// documented on isWildcardType.
+func argRefsRawEraseVar(ta JavaType, funcCtx *class_context.ClassContext) bool {
+	if ta == nil {
+		return false
+	}
+	if w, ok := ta.(*JavaWildcardType); ok {
+		return w.Bound != nil && argRefsRawEraseVar(w.Bound, funcCtx)
+	}
+	raw := ta.RawType()
+	if raw == nil {
+		return false
+	}
+	if w, ok := raw.(*JavaWildcardType); ok {
+		return w.Bound != nil && argRefsRawEraseVar(w.Bound, funcCtx)
+	}
+	if jc, ok := raw.(*JavaClass); ok {
+		return funcCtx.RawEraseTypeVar(jc.Name)
+	}
+	return false
 }
 
 func (j *JavaParameterizedType) IsJavaType() {}
@@ -101,6 +140,30 @@ func isWildcardType(t JavaType) bool {
 	}
 	_, ok := raw.(*JavaWildcardType)
 	return ok
+}
+
+// lowerBoundedWildcard unwraps t to its *JavaWildcardType iff t is a lower-bounded `? super X` wildcard
+// (bare or RawType-wrapped) with a non-nil bound, returning (nil,false) otherwise. A `? super X` is a
+// CONSUMER position: a value flowing into a parameter that maps to it is source-cast to X (the lower
+// bound), so X is the denotable cast target the resolver re-emits. Unbounded `?` and upper-bounded
+// `? extends X` capture to an unnameable CAP# with no such target. The bare form is asserted before
+// RawType to avoid the nil-embed panic documented on isWildcardType.
+func lowerBoundedWildcard(t JavaType) (*JavaWildcardType, bool) {
+	if t == nil {
+		return nil, false
+	}
+	if w, ok := t.(*JavaWildcardType); ok {
+		if w.Variant == "super" && w.Bound != nil {
+			return w, true
+		}
+		return nil, false
+	}
+	if raw := t.RawType(); raw != nil {
+		if w, ok := raw.(*JavaWildcardType); ok && w.Variant == "super" && w.Bound != nil {
+			return w, true
+		}
+	}
+	return nil, false
 }
 
 // InstantiateJDKMethodReturn returns the generic return type for a small, provably-correct set of JDK
@@ -552,6 +615,70 @@ func ClassFormalTypeParamNames(sig string) []string {
 	return names
 }
 
+// TypeParamBound is the recovered bound of a single class formal type parameter: the rendered Java
+// bound clause (without the parameter name, e.g. "Comparable<?>" or "Foo & Bar"; empty when the only
+// bound is Object) together with the type-variable names the bound references (used as a safety gate
+// when reconstructing a flattened inner class's enclosing type variables: a bound may only be re-emitted
+// when every variable it references is itself in scope).
+type TypeParamBound struct {
+	Clause string
+	Refs   []string
+}
+
+// ClassFormalTypeParamBounds parses a class signature's leading formal type-parameter section and maps
+// each type-variable NAME to its recovered bound (see TypeParamBound). It is the bound-carrying analogue
+// of ClassFormalTypeParamNames: a flattened non-static inner class loses its enclosing type variables'
+// DECLARATIONS, so injecting them as bare `<C>` drops the bound and a `Range<C>` use (where Range needs
+// `C extends Comparable`) fails javac with "type argument C is not within bounds of type-variable C".
+// Recovering the enclosing class's `<C extends Comparable<?>>` clause fixes it. A sole Object bound
+// produces no entry (the canonical bare `<C>`). Bounds render with funcCtx so other-package bound
+// classes register an import. Returns nil for a signature without a leading "<...>" section.
+func ClassFormalTypeParamBounds(sig string, funcCtx *class_context.ClassContext) map[string]TypeParamBound {
+	if len(sig) == 0 || sig[0] != '<' {
+		return nil
+	}
+	if funcCtx == nil {
+		funcCtx = &class_context.ClassContext{}
+	}
+	out := map[string]TypeParamBound{}
+	rest := sig[1:]
+	for len(rest) > 0 && rest[0] != '>' {
+		colonIdx := strings.IndexByte(rest, ':')
+		if colonIdx < 0 {
+			return out
+		}
+		name := rest[:colonIdx]
+		rest = rest[colonIdx:]
+		var bounds []string
+		var refs []string
+		for len(rest) > 0 && rest[0] == ':' {
+			rest = rest[1:]
+			if len(rest) > 0 && (rest[0] == ':' || rest[0] == '>') {
+				continue
+			}
+			before := rest
+			boundType, remaining, ok := parseSigType(rest)
+			if !ok {
+				return out
+			}
+			// Record the type variables referenced inside this bound's signature slice so the caller can
+			// gate re-emission on all of them being in scope.
+			consumed := before[:len(before)-len(remaining)]
+			scanTypeVarRefs(consumed, &refs)
+			rest = remaining
+			rendered := boundType.String(funcCtx)
+			if rendered == "Object" || rendered == "java.lang.Object" {
+				continue
+			}
+			bounds = append(bounds, rendered)
+		}
+		if len(bounds) > 0 {
+			out[name] = TypeParamBound{Clause: strings.Join(bounds, " & "), Refs: refs}
+		}
+	}
+	return out
+}
+
 // scanTypeVarRefs consumes exactly one type signature at sig and appends every TypeVariableSignature
 // name (the `T<name>;` form, including those nested inside type arguments and array element types) to
 // *out. It mirrors parseSigType's grammar so a `T` is only treated as a type-variable tag when it
@@ -863,11 +990,20 @@ func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider 
 	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" || paramIndex < 0 {
 		return nil
 	}
-	// A wildcard receiver type arg captures to an unnameable CAP#... ; never cast against it.
+	// A lower-bounded `? super X` receiver type arg is a CONSUMER position: a callee param that maps to it
+	// accepts an X, so the erased `Object` argument the source cast to X (the wildcard's lower bound) can be
+	// re-cast (`(E)`). It is therefore allowed through here and resolved to its bound by substituteAndGateParam.
+	// An unbounded `?` or upper-bounded `? extends X` arg captures to an unnameable CAP# with NO denotable
+	// cast target, so those still bail. Kill-switch JDEC_GENERIC_SUPERWILDCARD_OFF restores the blanket bail.
+	superWildcardOff := os.Getenv("JDEC_GENERIC_SUPERWILDCARD_OFF") != ""
 	for _, a := range recvArgs {
-		if isWildcardType(a) {
-			return nil
+		if !isWildcardType(a) {
+			continue
 		}
+		if _, ok := lowerBoundedWildcard(a); ok && !superWildcardOff {
+			continue
+		}
+		return nil
 	}
 	visited := map[string]bool{}
 	return resolveParamWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, argc, paramIndex, visited)
@@ -944,6 +1080,22 @@ func substituteAndGateParam(funcCtx *class_context.ClassContext, param JavaType,
 		}
 	}
 	res := SubstituteTypeVars(param, sigma)
+	// A formal that substitutes to a lower-bounded wildcard `? super X` (consumer position) accepts an X:
+	// the source cast the erased `Object` argument to X. Recover X (the lower bound) as the cast target,
+	// restricted to an in-scope class type variable -- the guava Predicate<? super E>.apply(E) /
+	// Function<? super F,...>.apply(F) / Collections2$FilteredCollection family. A concrete or out-of-scope
+	// bound is rarer and riskier, so it stays nil.
+	if w, isW := lowerBoundedWildcard(res); isW {
+		if bjc, okb := w.Bound.RawType().(*JavaClass); okb && funcCtx.IsTypeParam(bjc.Name) {
+			return w.Bound
+		}
+		return nil
+	}
+	// Any other wildcard (unbounded `?` or upper-bounded `? extends X`) is not a denotable cast target;
+	// asserting it before RawType also avoids the nil-embed panic documented on isWildcardType.
+	if isWildcardType(res) {
+		return nil
+	}
 	jc, ok := res.RawType().(*JavaClass)
 	if !ok {
 		// Parameterized / array / primitive: the erasure cast bucket is scalar `(K)`/`(Foo)` only, and

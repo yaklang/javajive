@@ -549,6 +549,17 @@ func (j *TernaryExpression) Type() (typ types.JavaType) {
 	return typ
 }
 
+// SetCachedType overrides the ternary's memoized type. Used by the declaration-LUB pass
+// (code_analyser.ternaryDeclLUB) to install the freshly-recomputed arm LUB when the originally
+// memoized type was the stale narrow type minted during ternary-chain assembly (before an arm resolved
+// to its final type). A no-op for nil receiver/type so callers need no guard.
+func (j *TernaryExpression) SetCachedType(t types.JavaType) {
+	if j == nil || t == nil {
+		return
+	}
+	j.cachedType = t
+}
+
 // boolLiteralValue reports a boolean literal's value (unwrapping SlotValue). Java bytecode also uses
 // integer 0/1 constants for boolean leaves; boolReduce only consumes those in a proven boolean arm
 // pair, so ordinary value ternaries like `c ? 1 : 0` are left alone.

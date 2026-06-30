@@ -269,17 +269,125 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 			if !uv.IsThis {
 				return ""
 			}
-			// `return this`: cast only when returning as a DIFFERENT raw type than this's own class
-			// (a supertype/interface), i.e. the erasures differ. Same-erasure (the class's own type)
-			// converts by unchecked conversion and must not be cast.
+			// `return this`: `this` has the class's OWN parameterization `C<ClassTypeParams>`. A cast
+			// is needed when the declared return type is a type `this` is NOT assignable to:
+			//   - a DIFFERENT erasure (a supertype/interface `C2<..>`): erasures differ -> fall through
+			//     and cast (e.g. enum `ObjectPredicate implements Predicate<Object>` returning
+			//     `Predicate<T>`).
+			//   - the SAME class `C` but parameterized with DIFFERENT type arguments than the class's
+			//     own parameters: the `cast()` reparameterization idiom
+			//     `<N1 extends N> C<N1> cast() { return (C<N1>) this; }`. `this` is `C<N>`, NOT `C<N1>`,
+			//     so guava itself writes the unchecked cast; the decompiler dropped it (the erased cast
+			//     emits no bytecode). javac otherwise rejects "C<N> cannot be converted to C<N1>"
+			//     (guava GraphBuilder/NetworkBuilder/ValueGraphBuilder/ElementOrder.cast()).
+			// Same erasure AND the return type's args ARE exactly the class's own params (identity
+			// `return this`, e.g. `InnerNode<K,V>` in class `InnerNode<K,V>`) converts by identity and
+			// must NOT be cast (the InnerNode over-cast regression). Kill-switch
+			// JDEC_THIS_REPARAM_CAST_OFF restores the legacy "no cast on any same-erasure return this".
 			if erasureName(retStr) == erasureName(raw.String(funcCtx)) {
+				if os.Getenv("JDEC_THIS_REPARAM_CAST_OFF") != "" {
+					return ""
+				}
+				if returnArgsAreClassParams(retStr, funcCtx.ClassTypeParams) {
+					return ""
+				}
+			}
+		case *values.JavaClassValue:
+			// A class literal `X.class` has static type `Class<X>` (X concrete), so returning it where the
+			// declared return type is `Class<...T...>` (mentions a type variable) ALWAYS conflicts:
+			// `Class<Integer>` is never `Class<T>`, so the source carried an unchecked `(Class<T>)` cast
+			// (gson Primitives.wrap `<T> Class<T> wrap(...) { ... return Integer.class; }`). The sibling
+			// `Integer.TYPE` (a field) already gets the cast via the JavaClassMember case; the class-literal
+			// value-kind was simply missing here. Reaching this branch already guarantees the return type
+			// mentions a type variable, and a literal can never be `T.class`, so this never over-casts.
+			// Kill-switch JDEC_CLASSLIT_RET_CAST_OFF.
+			if os.Getenv("JDEC_CLASSLIT_RET_CAST_OFF") != "" {
 				return ""
 			}
+		case *values.NewExpression, *values.TernaryExpression:
+			// A concrete NON-GENERIC subtype constructed (`new ObjectTypeAdapter(...)`) or selected by a
+			// ternary (`cond ? this.val$adapter : null`, val$adapter a NumberTypeAdapter) and returned as
+			// a generic supertype R<T> (`TypeAdapter<T>`): the subclass FIXES R's type argument, so
+			// unchecked conversion does NOT apply and the source carried an `(R<T>)` cast (gson's
+			// TypeAdapterFactory.create family). genericReturnSubtypeCastNeeded gates it tightly (erasure
+			// must differ AND the value's class must be non-generic), so raw-generic subtypes
+			// (`new ArrayList()` -> List<T>) and identity returns are NOT over-cast.
+			jc, okjc := raw.(*types.JavaClass)
+			if !okjc || !genericReturnSubtypeCastNeeded(funcCtx, jc, retStr) {
+				return ""
+			}
+		case *values.FunctionCallExpression:
+			// A same-class instance call `this.getTypeAdapter(...)` whose recovered generic RETURN type
+			// is a WILDCARD parameterization of the SAME erasure as the declared return type R<T> --
+			// gson `<T> TypeAdapter<T> create(...) { ... return this.getTypeAdapter(...); }` where
+			// `getTypeAdapter` returns `TypeAdapter<?>`. The call site's FuncType.ReturnType is only the
+			// ERASED descriptor (raw `TypeAdapter`), so the real generic return is recovered from the
+			// sibling method's Signature (funcCtx.MethodSignature). javac captures the wildcard to a
+			// fresh CAP#1 and rejects `TypeAdapter<CAP#1>` -> `TypeAdapter<T>`, so the source carried an
+			// unchecked `(TypeAdapter<T>)` cast. Tightly gated (this-receiver, same-class method, return
+			// is a wildcard parameterization of the SAME erasure) so an ordinary call recovering its OWN
+			// concrete generic signature is never over-cast. Kill-switch JDEC_WILDCARD_RET_CAST_OFF.
+			if os.Getenv("JDEC_WILDCARD_RET_CAST_OFF") != "" {
+				return ""
+			}
+			if uv.IsStatic {
+				return ""
+			}
+			rcv, okr := values.UnpackSoltValue(uv.Object).(*values.JavaRef)
+			if !okr || !rcv.IsThis {
+				return ""
+			}
+			sig := funcCtx.MethodSignature(uv.FunctionName, len(uv.Arguments))
+			if sig == "" {
+				return ""
+			}
+			_, _, ret := types.ParseMethodSignatureFull(sig, funcCtx)
+			if ret == nil {
+				return ""
+			}
+			retSig := ret.String(funcCtx)
+			if !strings.Contains(retSig, "?") || erasureName(retSig) != erasureName(retStr) {
+				return ""
+			}
+			// wildcard same-erasure return -> fall through to the `(R<T>)` cast below.
 		default:
 			return ""
 		}
 	}
 	return retStr
+}
+
+// genericReturnSubtypeCastNeeded reports whether a `new X(...)` or ternary value, whose static type is
+// the non-generic class jc, returned where the declared return type is a generic type parameterized by
+// a type variable (R<T>), requires an explicit `(R<T>)` unchecked cast. It fires only when (a) jc's
+// erasure DIFFERS from R's erasure (jc is a SUBTYPE, not the same raw type -- so the InnerNode
+// `new InnerNode()` -> InnerNode<K,V> identity case is excluded) AND (b) jc is NON-GENERIC per its own
+// class Signature (SiblingClassSig). A non-generic subclass FIXES the supertype's type argument
+// (gson `ObjectTypeAdapter extends TypeAdapter<Object>` returned as `TypeAdapter<T>`), so unchecked
+// conversion does NOT apply and javac rejects it without the cast; a RAW generic subtype
+// (`new ArrayList()` -> List<T>) converts by unchecked conversion and must NOT be over-cast. The
+// bytecode's areturn guarantees jc is assignable to R's erasure, so the cast is always legal (never
+// inconvertible). Requires the cross-class resolver (jar-internal class); JDK / unknown classes are
+// skipped conservatively. Kill-switch JDEC_GENERIC_RET_SUBTYPE_CAST_OFF.
+func genericReturnSubtypeCastNeeded(funcCtx *class_context.ClassContext, jc *types.JavaClass, retStr string) bool {
+	if os.Getenv("JDEC_GENERIC_RET_SUBTYPE_CAST_OFF") != "" {
+		return false
+	}
+	if funcCtx == nil || funcCtx.SiblingClassSig == nil || jc == nil {
+		return false
+	}
+	// (a) jc's erasure must differ from R's erasure: jc is a proper subtype, not the same raw type.
+	if erasureName(retStr) == erasureName(jc.String(funcCtx)) {
+		return false
+	}
+	// (b) jc must be NON-GENERIC (declares no formal type parameters): only then does returning it as
+	// R<T> bypass unchecked conversion and require the cast. A jar-internal generic class used raw is
+	// left to unchecked conversion (no over-cast); a JDK / unknown class (resolver miss) is skipped.
+	classSig, _, ok := funcCtx.SiblingClassSig(strings.ReplaceAll(jc.Name, ".", "/"))
+	if !ok {
+		return false
+	}
+	return len(types.ClassFormalTypeParamNames(classSig)) == 0
 }
 
 // objectReturnDowncast returns the concrete reference return type to downcast a returned value to,
@@ -413,6 +521,97 @@ func typeVarFieldStoreCast(funcCtx *class_context.ClassContext, left values.Java
 	return tv
 }
 
+// wildcardFieldStoreCast returns the parameterized declared type (e.g. "Class<? super T>") to cast a
+// value stored into a SAME-CLASS field whose generic Signature is a parameterization that MENTIONS a
+// class type variable AND carries a wildcard (e.g. `Class<? super T> rawType`), when the stored value
+// erases to the SAME raw type but is NOT already that exact parameterization -- gson TypeToken
+// `this.rawType = $Gson$Types.getRawType(this.type)` where getRawType returns `Class<?>`. The call site
+// carries only the erased descriptor (raw `Class`), so JavaJive cannot see the conflict, but javac uses
+// getRawType's real signature `Class<?>` -> captures to `Class<CAP#1>`, not assignable to
+// `Class<? super T>`; the source carried an unchecked `(Class<? super T>)` cast. The cast is unchecked
+// but behavior-preserving (the field erases to its raw bound at runtime) and always legal because the
+// value erases to the field's own raw type. Tightly gated to a wildcard-bearing, type-var-mentioning
+// same-class field so a fully-concrete or non-type-var generic field is never over-cast. Kill-switch
+// JDEC_WILDCARD_FIELD_CAST_OFF.
+func wildcardFieldStoreCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_WILDCARD_FIELD_CAST_OFF") != "" {
+		return ""
+	}
+	var fieldName string
+	switch lv := left.(type) {
+	case *values.RefMember:
+		ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef)
+		if !ok || !ref.IsThis {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	case *values.JavaClassMember:
+		if lv.Name != funcCtx.ClassName {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	default:
+		return ""
+	}
+	sig := funcCtx.FieldSignature(fieldName)
+	if sig == "" {
+		return ""
+	}
+	ft := types.ParseSignature(sig)
+	if ft == nil {
+		return ""
+	}
+	fieldTypeStr := ft.String(funcCtx)
+	// Must be a parameterized type that mentions a class-scope type variable AND carries a wildcard
+	// (the assignment-incompatible `X<?>` -> `X<? super T>` shape). A bare type-var field is handled by
+	// typeVarFieldStoreCast; a fully-concrete generic field needs no unchecked cast.
+	if !strings.Contains(fieldTypeStr, "<") || !strings.Contains(fieldTypeStr, "?") {
+		return ""
+	}
+	if !mentionsTypeParam(fieldTypeStr, funcCtx.ClassTypeParams) {
+		return ""
+	}
+	if lit, ok := values.UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+		return ""
+	}
+	vt := value.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	// The value must erase to the field's own raw type so the cast is legal (never inconvertible).
+	vtStr := vt.String(funcCtx)
+	if erasureName(vtStr) != erasureName(fieldTypeStr) {
+		return ""
+	}
+	// Normally an already-exact parameterization (vtStr == fieldTypeStr) needs no cast. The ONE
+	// exception is a ternary (conditional) value: it is a poly expression whose type is computed as the
+	// merge/LUB of its two arms (TernaryExpression.Type -> MergeTypes), and an unresolved merge silently
+	// keeps the FIRST arm's type. So `this.comparator = cond ? var1 : NATURAL_ORDER` reports var1's exact
+	// `Comparator<? super K>` type, hiding that the other arm (`NATURAL_ORDER`, a `Comparator<Comparable>`)
+	// is NOT assignment-compatible -> javac "bad type in conditional expression". An explicit
+	// `(Comparator<? super K>)(...)` re-targets the whole conditional as a poly expression so BOTH arms are
+	// checked against (and unchecked-converted to) the field type, which recompiles (gson LinkedTreeMap /
+	// LinkedHashTreeMap NATURAL_ORDER). Casting a ternary to its own already-reported type is harmless when
+	// both arms truly match, so this stays gated to ternary values only. Kill-switch is the parent's
+	// JDEC_WILDCARD_FIELD_CAST_OFF.
+	if vtStr == fieldTypeStr {
+		if _, isTernary := values.UnpackSoltValue(value).(*values.TernaryExpression); !isTernary {
+			return ""
+		}
+	}
+	return fieldTypeStr
+}
+
 // erasureName strips a generic type string down to its raw/erased name: "Predicate<T>" -> "Predicate",
 // "Map<K, V>" -> "Map", "CopyOnWriteHashMap$InnerNode<K, V>" -> "CopyOnWriteHashMap$InnerNode".
 func erasureName(s string) string {
@@ -440,6 +639,53 @@ func isArrayOfTypeParam(s string, typeParams []string) bool {
 		}
 	}
 	return false
+}
+
+// returnArgsAreClassParams reports whether retStr is the class's OWN parameterization, i.e. its
+// top-level type-argument list equals classParams EXACTLY and in order. It is the guard that tells an
+// identity `return this` (`InnerNode<K, V>` in class `InnerNode<K, V>`, args==[K,V]==classParams ->
+// true, no cast) apart from the `cast()` reparameterization idiom (`C<N1>` in class `C<N>`,
+// args==[N1]!=[N] -> false, needs the unchecked `(C<N1>) this` cast). retStr must already share its
+// erasure with `this`'s class (checked by the caller). A raw retStr (no `<...>`) has no args and
+// returns false (but the caller never reaches here for a raw return type, which can't reparameterize).
+func returnArgsAreClassParams(retStr string, classParams []string) bool {
+	open := strings.IndexByte(retStr, '<')
+	if open < 0 || !strings.HasSuffix(retStr, ">") {
+		return false
+	}
+	inner := retStr[open+1 : len(retStr)-1]
+	args := splitTopLevelTypeArgs(inner)
+	if len(args) != len(classParams) {
+		return false
+	}
+	for i := range args {
+		if strings.TrimSpace(args[i]) != classParams[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// splitTopLevelTypeArgs splits a type-argument list on commas that are NOT nested inside angle
+// brackets, so "N1" -> ["N1"], "N, E" -> ["N", "E"], "Map<K, V>, T" -> ["Map<K, V>", "T"].
+func splitTopLevelTypeArgs(s string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	out = append(out, s[start:])
+	return out
 }
 
 // mentionsTypeParam reports whether retStr contains any of the in-scope type-variable names as a
@@ -651,7 +897,11 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		}
 		return fmt.Sprintf("%s = %s", left, right)
 	}
-	assign := fmt.Sprintf("%s = %s", a.LeftValue.String(funcCtx), a.JavaValue.String(funcCtx))
+	// Re-insert the `? 1 : 0` coercion when an intrinsically-boolean value (a `&`/`|`/`^` boolean
+	// connective or a boolean ternary, NOT a bare ref) is assigned to an int target: javac elided it
+	// because the boolean is already 0/1 on the stack (guava DoubleMath/LongMath, ImmutableSortedMap).
+	rhsVal := values.CoerceIntAssignRHS(a.LeftValue.Type(), a.JavaValue)
+	assign := fmt.Sprintf("%s = %s", a.LeftValue.String(funcCtx), rhsVal.String(funcCtx))
 	if a.IsFirst {
 		// For `T x = null`, the initializer's static type is java.lang.Object, but the
 		// variable's declared type is its (possibly refined) ref type — using the initializer
@@ -735,6 +985,12 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// explicit unchecked `(K)` cast (the field erases to its bound in bytecode). See
 		// typeVarFieldStoreCast.
 		if cast := typeVarFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+		}
+		// Wildcard-parameterized same-class field store: `this.rawType = call()` where rawType is
+		// `Class<? super T>` and the call returns `Class<?>` needs an explicit unchecked
+		// `(Class<? super T>)` cast (gson TypeToken). See wildcardFieldStoreCast.
+		if cast := wildcardFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
 			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
 		}
 		return assign
