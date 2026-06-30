@@ -202,6 +202,8 @@ kbd {
   height: 22px;
   color: var(--accent);
   flex-shrink: 0;
+  border-radius: 5px;
+  object-fit: contain;
 }
 .brand-text { font-size: 15px; }
 .brand-dot { color: var(--accent); }
