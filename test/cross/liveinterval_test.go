@@ -81,8 +81,8 @@ func TestLiveIntervalSplitIsLoadBearing(t *testing.T) {
 	}
 	const prefix = "com/alibaba/fastjson2/util/JdbcSupport"
 
-	on := groupRecompileErrors(t, jarPath, prefix, false)  // fix ON
-	off := groupRecompileErrors(t, jarPath, prefix, true)  // fix OFF (kill-switch)
+	on := groupRecompileErrors(t, jarPath, prefix, false) // fix ON
+	off := groupRecompileErrors(t, jarPath, prefix, true) // fix OFF (kill-switch)
 	t.Logf("JdbcSupport group recompile errors: ON=%d OFF=%d", on, off)
 
 	if off <= on {

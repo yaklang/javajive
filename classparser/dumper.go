@@ -3326,7 +3326,7 @@ func returnedLocalDeclType(body, name, methodReturnType string, enabled bool) st
 	if castEscapeScalarPrimitives[methodReturnType] {
 		return ""
 	}
-	if !regexp.MustCompile(`\breturn\s+`+regexp.QuoteMeta(name)+`\b`).MatchString(body) {
+	if !regexp.MustCompile(`\breturn\s+` + regexp.QuoteMeta(name) + `\b`).MatchString(body) {
 		return ""
 	}
 	return methodReturnType
