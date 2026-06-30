@@ -454,42 +454,93 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// needs an unchecked `(K)` cast to recompile (see AssignStatement.typeVarFieldStoreCast).
 		// A type-variable field signature is exactly `T<name>;` (JVMS 4.7.9.1) - matched textually
 		// so this never renders a type or touches the import set (no import-order side effects).
-		if len(classTypeParamNames) > 0 {
-			fieldTypeVars := map[string]string{}
-			for _, field := range c.obj.Fields {
-				name, err := c.obj.getUtf8(field.NameIndex)
-				if err != nil || name == "" {
+		// In the same pass, record PARAMETERIZED field signatures (`Ljava/util/...<...>;`) so a JDK
+		// generic method call on a field receiver can recover the receiver's type args
+		// (FunctionCallExpression.instantiatedParamType; see FieldSignatures). The signature string
+		// is stored verbatim and parsed on demand, so this never renders a type here.
+		fieldTypeVars := map[string]string{}
+		fieldSignatures := map[string]string{}
+		for _, field := range c.obj.Fields {
+			name, err := c.obj.getUtf8(field.NameIndex)
+			if err != nil || name == "" {
+				continue
+			}
+			for _, attr := range field.Attributes {
+				sigAttr, ok := attr.(*SignatureAttribute)
+				if !ok {
 					continue
 				}
-				for _, attr := range field.Attributes {
-					sigAttr, ok := attr.(*SignatureAttribute)
-					if !ok {
-						continue
-					}
-					sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex)
-					if err != nil || len(sigStr) < 3 {
-						continue
-					}
-					// Accept `TK;` (bare type var) and `[TK;`/`[[TK;` (array of type var). The stored
-					// value is the rendered field type (`K` / `K[]` / `K[][]`) used as the cast target.
-					sig := sigStr
-					arrayDepth := 0
-					for len(sig) > 0 && sig[0] == '[' {
-						arrayDepth++
-						sig = sig[1:]
-					}
-					if len(sig) < 3 || sig[0] != 'T' || sig[len(sig)-1] != ';' || strings.ContainsAny(sig, "<>[/") {
-						continue
-					}
-					tv := sig[1 : len(sig)-1]
-					if c.FuncCtx.IsTypeParam(tv) {
-						fieldTypeVars[class_context.SafeIdentifier(name)] = tv + strings.Repeat("[]", arrayDepth)
-					}
+				sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex)
+				if err != nil || len(sigStr) < 3 {
+					continue
+				}
+				// Parameterized object field signature (`L...<...>;`): keep verbatim for type-arg
+				// recovery at JDK-generic-method call sites on this field receiver.
+				if sigStr[0] == 'L' && strings.ContainsRune(sigStr, '<') {
+					fieldSignatures[class_context.SafeIdentifier(name)] = sigStr
+				}
+				if len(classTypeParamNames) == 0 {
+					continue
+				}
+				// Accept `TK;` (bare type var) and `[TK;`/`[[TK;` (array of type var). The stored
+				// value is the rendered field type (`K` / `K[]` / `K[][]`) used as the cast target.
+				sig := sigStr
+				arrayDepth := 0
+				for len(sig) > 0 && sig[0] == '[' {
+					arrayDepth++
+					sig = sig[1:]
+				}
+				if len(sig) < 3 || sig[0] != 'T' || sig[len(sig)-1] != ';' || strings.ContainsAny(sig, "<>[/") {
+					continue
+				}
+				tv := sig[1 : len(sig)-1]
+				if c.FuncCtx.IsTypeParam(tv) {
+					fieldTypeVars[class_context.SafeIdentifier(name)] = tv + strings.Repeat("[]", arrayDepth)
 				}
 			}
-			if len(fieldTypeVars) > 0 {
-				c.FuncCtx.FieldTypeVars = fieldTypeVars
+		}
+		if len(fieldTypeVars) > 0 {
+			c.FuncCtx.FieldTypeVars = fieldTypeVars
+		}
+		if len(fieldSignatures) > 0 {
+			c.FuncCtx.FieldSignatures = fieldSignatures
+		}
+		// Record same-class methods carrying a generic Signature, keyed by (name, arity). A call
+		// `this.tailSet(objVal)` on such a method must re-emit the source's `(E)` argument cast that
+		// the descriptor erased away (FunctionCallExpression.sameClassMethodParamType). Overloads that
+		// collide on (name, arity) are dropped (set to "") so a call never picks the wrong signature.
+		methodSignatures := map[string]string{}
+		methodSigSeen := map[string]bool{}
+		for _, m := range c.obj.Methods {
+			name, err := c.obj.getUtf8(m.NameIndex)
+			if err != nil || name == "" || name == "<init>" || name == "<clinit>" {
+				continue
 			}
+			descriptor, err := c.obj.getUtf8(m.DescriptorIndex)
+			if err != nil || descriptor == "" {
+				continue
+			}
+			for _, attr := range m.Attributes {
+				sigAttr, ok := attr.(*SignatureAttribute)
+				if !ok {
+					continue
+				}
+				sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex)
+				if err != nil || sigStr == "" || !strings.HasPrefix(sigStr, "(") && !strings.HasPrefix(sigStr, "<") {
+					continue
+				}
+				key := class_context.MethodSigKey(name, len(methodParamFieldDescriptors(descriptor)))
+				if methodSigSeen[key] {
+					// (name, arity) collision: ambiguous, drop so no call resolves it.
+					delete(methodSignatures, key)
+					continue
+				}
+				methodSigSeen[key] = true
+				methodSignatures[key] = sigStr
+			}
+		}
+		if len(methodSignatures) > 0 {
+			c.FuncCtx.MethodSignatures = methodSignatures
 		}
 	}
 	packageSource := fmt.Sprintf("package %s;\n\n", packageName)
@@ -629,6 +680,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 		}
 	}
+	// Enum-switch ($SwitchMap) cross-class fold (Bug V): rewrite `switch(Outer$N.$SwitchMap$E[sel.
+	// ordinal()])` back to the idiomatic `switch(sel){ case CONST: ... }`. No-op without a resolver
+	// or when JDEC_NO_ENUM_SWITCH_FOLD is set; produces valid Java, so it runs after assembly.
+	full = c.foldEnumSwitchMaps(full)
 	return full, nil
 }
 
@@ -1916,7 +1971,11 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			}
 			sourceCode = hoistSameTypeEscapedLocals(sourceCode)
 			sourceCode = hoistCastGuardedEscapedLocals(sourceCode)
-			sourceCode = addMissingGeneratedLocalDecls(sourceCode, paramsNewStr, receiverType, c.methodReturnTypeByName())
+			methodReturnTypeStr := ""
+			if mt := methodType.FunctionType(); mt != nil && mt.ReturnType != nil {
+				methodReturnTypeStr = mt.ReturnType.String(funcCtx)
+			}
+			sourceCode = addMissingGeneratedLocalDecls(sourceCode, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr)
 			code = sourceCode
 		}
 	}
@@ -2366,11 +2425,22 @@ func (c *ClassObjectDumper) methodReturnTypeByName() map[string]string {
 	return m
 }
 
-func addMissingGeneratedLocalDecls(body, params, receiverType string, methodReturnTypes map[string]string) string {
+func addMissingGeneratedLocalDecls(body, params, receiverType string, methodReturnTypes map[string]string, methodReturnType string) string {
 	body = repairMismatchedDoWhileIndexDecls(body)
+	returnDeclFix := os.Getenv("JDEC_RETURN_DECL_FIX_OFF") == ""
 	declared := map[string]bool{}
 	for _, match := range generatedLocalDeclRe.FindAllStringSubmatch(params+"\n"+body, -1) {
 		if len(match) > 1 {
+			// `return varN;` / `throw varN;` match generatedLocalDeclRe's type-identifier alternative
+			// (the keyword `return` looks like a type token) but are USES, not declarations. Counting
+			// them as declarations masked a genuinely-undeclared local whose ONLY definition is an
+			// embedded `(varN = expr)` baked into a condition (fastjson2 JSONReaderJSONB
+			// readLocalDateTime12/14/16 family: `if ((var2 = DateUtils.parse...) == null){}else{return
+			// var2;}` -> var2 never declared -> `cannot find symbol`). Skip keyword-led matches so such
+			// a local is recognized as missing and gets a synthesized declaration below.
+			if returnDeclFix && castEscapeTypeKeywords[castEscapeFirstToken(match[0])] {
+				continue
+			}
 			declared[match[1]] = true
 		}
 	}
@@ -2411,6 +2481,13 @@ func addMissingGeneratedLocalDecls(body, params, receiverType string, methodRetu
 			// A REFERENCE-typed local whose value only arrives through an embedded
 			// assignment in a condition ((s = next(...)) != null); without a recovered type the
 			// default `Object` makes every member access (s.length()) fail to recompile.
+			typ, zero = rt, "null"
+		} else if rt := returnedLocalDeclType(body, name, methodReturnType, returnDeclFix); rt != "" {
+			// The local is RETURNED (`return varN;`) and the embedded-assign RHS type was not
+			// recoverable textually (a cross-class call like DateUtils.parseLocalDateTime12 whose
+			// return type no symbol-free scan can resolve). A returned value must be assignable to the
+			// method return type, so declaring the local AS that type (initialized null) is always
+			// legal and lets the condition's `(varN = expr)` still set it before the return.
 			typ, zero = rt, "null"
 		}
 		lines = append(lines, fmt.Sprintf("\t%s %s = %s;\n", typ, name, zero))
@@ -3012,6 +3089,28 @@ func declaredMethodReturnType(body, method string) string {
 // contained. Anything it cannot resolve confidently returns "" so the caller keeps the safe `Object`
 // default - so this can only turn a non-compiling unit into a compiling one, never the reverse.
 // Kill-switch: JDEC_NO_EMBED_ASSIGN_REF=1 restores the pre-fix (Object-defaulting) behavior.
+// returnedLocalDeclType returns the enclosing method's return type to declare an undeclared local
+// `name` with, but ONLY when that local is RETURNED bare (`return name;`) and the return type is a
+// usable reference type. Rationale: a returned value must be assignable to the method's declared
+// return type (JLS 14.17), so an undeclared local whose value is computed in an embedded condition
+// assignment and then returned (fastjson2 readLocalDateTime12 family) can always be declared as the
+// return type initialized to null - the condition's `(name = expr)` assigns it before the return on
+// every path that reaches the return. This is the textual last resort after the RHS-type scan
+// (inferGeneratedLocalRefType) fails because the value comes from a cross-class call. Returns "" when
+// the local is not returned, the return type is void/primitive, or the fix is disabled.
+func returnedLocalDeclType(body, name, methodReturnType string, enabled bool) string {
+	if !enabled || methodReturnType == "" || methodReturnType == "void" {
+		return ""
+	}
+	if castEscapeScalarPrimitives[methodReturnType] {
+		return ""
+	}
+	if !regexp.MustCompile(`\breturn\s+`+regexp.QuoteMeta(name)+`\b`).MatchString(body) {
+		return ""
+	}
+	return methodReturnType
+}
+
 func inferGeneratedLocalRefType(body, params, name string, methodReturnTypes map[string]string) string {
 	if os.Getenv("JDEC_NO_EMBED_ASSIGN_REF") != "" {
 		return ""

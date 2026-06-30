@@ -196,7 +196,9 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 		return !slices.Contains(startNodes, node)
 	})
 	//node.RemoveAllNext()
-	endNodes = utils2.NewSet[*core.Node](endNodes).List()
+	// Set.List() iterates a Go map; the next block picks endNodes[:1] as the switch merge point, so an
+	// unsorted order makes merge-node selection (and the whole post-switch structuring) non-deterministic.
+	endNodes = sortNodesByID(utils2.NewSet[*core.Node](endNodes).List())
 	if len(endNodes) > 1 {
 		// A switch with multiple merge targets is a known structuring limitation.
 		// Instead of failing, pick the first end node as the merge point. Extra end

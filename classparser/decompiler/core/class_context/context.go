@@ -3,6 +3,7 @@ package class_context
 import (
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/yaklang/javajive/internal/funk"
@@ -35,6 +36,56 @@ type ClassContext struct {
 	// recompile (bytecode erases the field type to its bound, so `this.key = objExpr` otherwise
 	// fails "Object cannot be converted to K"). Empty when the class has no type variables.
 	FieldTypeVars map[string]string
+	// FieldSignatures maps a (same-class) field's safe identifier to the RAW generic Signature
+	// string of a PARAMETERIZED field type (e.g. `function` ->
+	// `Ljava/util/function/BiConsumer<TT;TV;>;`). A field access value (getfield) only carries the
+	// ERASED descriptor type (raw `BiConsumer`), so an argument flowing into a JDK generic method on
+	// that receiver (`this.function.accept(x, y)`) loses the source's `(T)`/`(V)` cast and javac
+	// rejects it. Renderers parse this on demand (types.ParseSignature) to recover the receiver's
+	// type args. Stored as a string because class_context must not import the types package (cycle).
+	// Only parameterized signatures (containing `<`) are recorded; empty when none.
+	FieldSignatures map[string]string
+	// MethodSignatures maps a same-class method's (name, arity) key (see MethodSigKey) to its raw
+	// generic method Signature string (e.g. `tailSet` -> `(TE;)Ljava/util/SortedSet<TE;>;`). A call
+	// `this.tailSet(objVal)` on a same-class generic method loses the source's `(E)` argument cast
+	// because the descriptor erases the parameter to its bound (Object); javac then rejects
+	// "Object cannot be converted to E". Renderers parse this on demand (types.ParseMethodSignatureFull)
+	// to recover the formal parameter type and re-emit the cast -- but only for CLASS-scope type
+	// variables, never a method-scope `<T>` (not in scope at the call site). Overloads that collide on
+	// (name, arity) are dropped to avoid resolving to the wrong signature. Stored as a string because
+	// class_context must not import the types package (cycle). Empty when the class has no such method.
+	MethodSignatures map[string]string
+}
+
+// FieldSignature returns the raw generic Signature string of a same-class parameterized field, or ""
+// when name is not a recorded parameterized field (see FieldSignatures).
+func (f *ClassContext) FieldSignature(name string) string {
+	if f == nil || name == "" || f.FieldSignatures == nil {
+		return ""
+	}
+	return f.FieldSignatures[name]
+}
+
+// MethodSignature returns the raw generic Signature string of a same-class method identified by name
+// and arity (number of descriptor parameters == number of call-site arguments), or "" when there is
+// no unique such method (see MethodSignatures). Overloads colliding on (name, arity) are deliberately
+// dropped at population time so a call site never resolves to the wrong generic signature.
+func (f *ClassContext) MethodSignature(name string, argc int) string {
+	if f == nil || name == "" || f.MethodSignatures == nil {
+		return ""
+	}
+	return f.MethodSignatures[methodSigKey(name, argc)]
+}
+
+// methodSigKey builds the (name, arity) key used by MethodSignatures.
+func methodSigKey(name string, argc int) string {
+	return name + "/" + strconv.Itoa(argc)
+}
+
+// MethodSigKey is the exported builder for the MethodSignatures key, so the dumper populates the map
+// with exactly the key MethodSignature looks up.
+func MethodSigKey(name string, argc int) string {
+	return methodSigKey(name, argc)
 }
 
 // FieldTypeVar reports the bare class-scope type variable a same-class field is declared as, or ""
@@ -139,6 +190,11 @@ func (f *ClassContext) GetAllImported() []string {
 		}
 		return true
 	})
+	// Sort imports for determinism: they are registered during dumping in traversal order, and some
+	// paths (e.g. the enum DumpWithResolver) register types via Go-map iteration, so the registration
+	// order varies run to run. Import order is semantically irrelevant to javac, so a stable lexical
+	// sort removes that nondeterminism (and yields tidy alphabetical imports) without any delta impact.
+	slices.Sort(imports)
 	return imports
 }
 func (f *ClassContext) Import(name string) {

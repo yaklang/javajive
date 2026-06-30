@@ -100,6 +100,11 @@ type Decompiler struct {
 	// first pass, so methods that decompile cleanly are completely unaffected (zero regression by
 	// construction). Threaded from ClassObjectDumper.aggressive via the rewriter.
 	Aggressive bool
+
+	// cachedSlotWebs memoizes the reaching-definition web partition (dataflow.go) for this method.
+	// Computed lazily on first query and reused across the simulation. nil until first slotWebs()
+	// call; the kill-switch JDEC_LIVEINTERVAL_OFF makes slotWebs() return nil without caching.
+	cachedSlotWebs *slotWeb
 }
 
 func resetJavaValueTypeSafe(v values.JavaValue, target types.JavaType) {
@@ -1323,6 +1328,12 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			// Same-category (e.g. reference-vs-reference) reused-slot corruption that the
 			// category-mismatch repair cannot detect (String-switch receiver, Bug AI).
 			varRef = better
+		} else if better := d.reachingSlotVersionByWeb(opcode, slot, varRef); better != nil {
+			// Reaching-definition web generalization (Phase 1, dataflow.go): several reaching
+			// definitions that the dataflow proves to be ONE variable but DFS order resolved to a
+			// later disjoint version. reachingSlotVersionGeneral bails on >1 reaching def; the web
+			// accepts it when those defs share one VarUid. Kill-switch JDEC_LIVEINTERVAL_OFF.
+			varRef = better
 		}
 		slotvalue := values.NewSlotValue(varRef, varRef.Type())
 		users := d.varUserMap.GetMust(varRef)
@@ -1400,6 +1411,15 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// the global slot table so a same-type continuation reuses the right variable instead of
 		// minting a phantom local (String-switch index slot, fastjson2 TypeUtils.loadClass).
 		if repaired := d.reachingStoreVersion(opcode, slot, oldRef, value); repaired != nil {
+			runtimeStackSimulation.SetVar(slot, repaired)
+			oldRef = repaired
+		}
+		// Reaching-definition web continuation (Phase 1, dataflow.go): when the dataflow proves this
+		// store and a unique prior same-slot definition are ONE variable, continue that definition's
+		// ref so AssignVarGuarded reuses it instead of minting a phantom split (fastjson2
+		// JdbcSupport$TimeReader `var5 = var5 * 1000`). Disjoint slot-reuse falls in a different web
+		// and is left untouched. Kill-switch JDEC_LIVEINTERVAL_OFF.
+		if repaired := d.reachingSlotStoreContinuationByWeb(opcode, slot, oldRef); repaired != nil {
 			runtimeStackSimulation.SetVar(slot, repaired)
 			oldRef = repaired
 		}
@@ -3374,6 +3394,48 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	}
 	return nil
 }
+
+// ternaryDeclLUB returns the least-upper-bound type to RE-DECLARE a slot ref with when its declaring
+// store is a control-flow-merged ternary whose true type (the LUB of both arms) is broader than the
+// type the ref was minted with during the DFS. It returns nil (no change) unless ALL hold:
+//   - value resolves to a TernaryExpression (only control-flow merges need this; a plain rvalue store
+//     already typed the ref correctly);
+//   - both the ref's minted type and the ternary's type are present and DIFFER;
+//   - the ternary's type is a PROPER SUPERTYPE of the minted type (CommonSuperType(minted, ternary)
+//     renders identically to the ternary type) — i.e. we only ever WIDEN, never narrow or cross to a
+//     sibling. Gated by JDEC_TERNARY_DECL_LUB_OFF.
+func ternaryDeclLUB(ref *values.JavaRef, value values.JavaValue) types.JavaType {
+	if os.Getenv("JDEC_TERNARY_DECL_LUB_OFF") != "" || ref == nil || value == nil {
+		return nil
+	}
+	tv, isTern := values.UnpackSoltValue(value).(*values.TernaryExpression)
+	if !isTern || tv.TrueValue == nil || tv.FalseValue == nil {
+		return nil
+	}
+	rt := ref.Type()
+	// Recompute the arm LUB FRESH rather than trusting TernaryExpression.Type(): that cached type can
+	// be stale (computed during ternary-chain assembly before the false arm resolved to its final
+	// type), e.g. arms (ArrayList, List) but a cached ArrayList. The fresh merge gives the true LUB.
+	at, bt := tv.TrueValue.Type(), tv.FalseValue.Type()
+	if rt == nil || at == nil || bt == nil {
+		return nil
+	}
+	vt := types.MergeTypes(at, bt)
+	if vt == nil {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	if rt.String(ctx) == vt.String(ctx) {
+		return nil
+	}
+	// Only WIDEN: the merged type must be a proper supertype of the minted type.
+	lub := types.CommonSuperType(rt, vt)
+	if lub != nil && lub.String(ctx) == vt.String(ctx) {
+		return vt
+	}
+	return nil
+}
+
 func (d *Decompiler) ParseStatement() error {
 	funcCtx := d.FunctionContext
 	err := d.ParseOpcode()
@@ -3458,6 +3520,22 @@ func (d *Decompiler) ParseStatement() error {
 				value := opcode.stackConsumed[i]
 				ref := refInfo[0].(*values.JavaRef)
 				isFirst := refInfo[1].(bool)
+				// Phase 2 (hierarchy.go) declaration LUB: a value materialized at a control-flow merge
+				// (rebuilt into a ternary by CalcOpcodeStackInfo above) had its slot ref minted during
+				// the DFS from the FIRST branch's type (e.g. ArrayList), but the verifier-merged type is
+				// the least upper bound of both arms (List). The narrow declaration then rejects the
+				// LUB-typed ternary rvalue ("incompatible types: bad type in conditional expression",
+				// commons-codec DaitchMokotoffSoundex `ArrayList x = b ? new ArrayList() : emptyList()`).
+				// Widen the DECLARATION to the ternary's LUB. This is verifier-safe: a slot fed by a
+				// control-flow merge can never have an arm-specific member invoked on it (the bytecode
+				// would not verify), so the broader type accepts every later use. Only widens (the LUB
+				// must be a proper supertype of the minted type); never narrows. Kill-switch:
+				// JDEC_TERNARY_DECL_LUB_OFF=1.
+				if isFirst {
+					if lub := ternaryDeclLUB(ref, value); lub != nil {
+						ref.ResetVarType(lub)
+					}
+				}
 				assignSt := statements.NewAssignStatement(ref, value, isFirst)
 				appendNode(assignSt)
 			}
@@ -3721,10 +3799,18 @@ func (d *Decompiler) ParseStatement() error {
 		case OP_NOP:
 			return nil
 		case OP_POP:
-			appendNode(statements.NewExpressionStatement(opcode.stackConsumed[0]))
+			// Only emit a discarded value that is a real statement-expression (a side-effecting
+			// call/assign/inc-dec). A discarded bare local/constant/class ref is non-statement and
+			// side-effect-free, so emitting `x;` would be invalid Java; drop it. See
+			// keepDiscardedStackValue (JLS 14.8) and the spring cglib EmitUtils regression seed.
+			if keepDiscardedStackValue(opcode.stackConsumed[0]) {
+				appendNode(statements.NewExpressionStatement(opcode.stackConsumed[0]))
+			}
 		case OP_POP2:
 			for _, value := range opcode.stackConsumed {
-				appendNode(statements.NewExpressionStatement(value))
+				if keepDiscardedStackValue(value) {
+					appendNode(statements.NewExpressionStatement(value))
+				}
 			}
 		case OP_TABLESWITCH, OP_LOOKUPSWITCH:
 			// SwitchJmpCase maps each case value (and -1 for default) to the ABSOLUTE bytecode

@@ -71,15 +71,12 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 				strings.ReplaceAll(cf.GetClassName(), "/", "."),
 				strings.ReplaceAll(cf.GetSupperClassName(), "/", ".")))
 		}
-		if isGenuineEnum(cf) {
-			source, err := cf.DumpWithResolver(z.enumSiblingResolver())
-			if err != nil {
-				return []byte(fmt.Sprintf("// decompile dump failed for %s: %v\n", name, err))
-			}
-			return []byte(source)
-		}
 	}
-	source, err := cf.Dump()
+	// Always supply the sibling resolver so cross-class folds can reach sibling bytes: enum
+	// constant-body folding (gated inside DumpClass by isEnum + JDEC_NO_ENUM_FOLD) and enum-switch
+	// $SwitchMap folding (gated by a `$SwitchMap$` presence check + JDEC_NO_ENUM_SWITCH_FOLD). A
+	// non-enum, non-switch class is rendered byte-for-byte identically to the bare Dump().
+	source, err := cf.DumpWithResolver(z.enumSiblingResolver())
 	if err != nil {
 		return []byte(fmt.Sprintf("// decompile dump failed for %s: %v\n", name, err))
 	}

@@ -1,0 +1,11 @@
+# Bug: pop/pop2 of a side-effect-free, non-statement value rendered as a bare expression statement.
+# Seed: org.springframework.cglib.core.EmitUtils (spring-core 5.3.27). javac left dead `aload x; pop`
+# pairs in process_array/string_switch/etc.; the decompiler used to emit them as `var0;`, which javac
+# rejects as "not a statement" (14 errors, the spring-core tree-recompile blocker). Per JLS 14.8 such
+# discarded bare locals/constants/class refs are dropped (keepDiscardedStackValue). Kill-switch
+# JDEC_POP_ELIDE_OFF restores the legacy bare-statement emission (see TestPopElideIsLoadBearing).
+#
+# No bare local-variable-only statement line may appear in the output.
+-/(?m)^\s*var\d+;\s*$/
+# The method that contained the dead pop still decompiles (the call that followed the dropped pop).
++if_icmp(155,

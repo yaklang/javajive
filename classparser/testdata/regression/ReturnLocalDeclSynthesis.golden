@@ -1,0 +1,17 @@
+# Bug: a local whose ONLY definition is an embedded assignment inside a condition
+# (`if ((var2 = expr) == null) {} else { return var2; }`) was emitted with NO declaration, so it
+# rendered undeclared -> `cannot find symbol` at both the assignment and the `return var2`
+# (fastjson2 JSONReaderJSONB.readLocalDateTime12/14/16 family, +37 tree errors). Two coupled causes:
+#   (1) generatedLocalDeclRe counted `return varN` as a declaration (the keyword `return` matches its
+#       type-identifier alternative), so addMissingGeneratedLocalDecls thought varN was declared and
+#       skipped it; and
+#   (2) even when synthesized, the type defaulted to Object because the RHS is a cross-class call
+#       (Helper.parse / DateUtils.parse) whose return type no symbol-free scan can resolve.
+# Fix (kill-switch JDEC_RETURN_DECL_FIX_OFF): skip keyword-led matches when collecting declarations,
+# and declare a returned-but-undeclared local AS the enclosing method's return type (a returned value
+# is assignable to it by JLS 14.17). See TestReturnLocalDeclSynthesisIsLoadBearing.
+#
+# Seed: synthetic `ReturnDeclSeed.readIt()` returning LocalDateTime via `(v = Helper.parse(...)) == null`.
+#
+# The returned-but-undeclared local is given a declaration of the method's reference return type.
++/LocalDateTime var\d+ = null;/

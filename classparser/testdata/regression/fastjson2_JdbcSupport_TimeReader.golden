@@ -1,0 +1,6 @@
+# Phase 1 (Bug AL) seed: fastjson2 JdbcSupport$TimeReader.readObject reuses JVM slot 5 (a long) for
+# two disjoint live ranges. The second range's variable (var5_1) was declared inside a nested
+# `if (this.formatUnixTime)` block but read across both top-level branches, so every use rendered
+# out of scope -> "cannot find symbol: variable var5_1". The live-interval declaration placement
+# (JDEC_LIVEINTERVAL_OFF) hoists its bare declaration to the method top, dominating all uses.
++long var5_1;

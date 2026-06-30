@@ -40,3 +40,9 @@ go.work.sum
 # Decompiler output directories produced by `javajive decompile -o <dir>` /
 # the default "<archive>.src" location.
 *.src/
+
+# Safety net: the JDK launcher spills a `javac.<timestamp>.args` argfile into the
+# CWD when a recompile command line is too long. The cross harness already runs
+# javac from a throwaway dir (cmd.Dir = outDir), but ignore them in case a manual
+# run from the repo root leaves one behind.
+javac.*.args

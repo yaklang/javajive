@@ -141,14 +141,21 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// IsFirst decisions above are final and this pass's demotions are not subsequently undone.
 	hoistSwitchDeclarations(sts)
 	dropEmptySlotAssignments(sts)
-	// General LCA declaration placement: hoist any generated local whose single (minted-id-reused)
-	// variable is referenced across more than one sibling scope to the block that dominates all of
-	// its uses. Runs last so it sees the final IsFirst/IsDeclare flags and any bare declarations the
-	// if/switch hoisters already inserted (which it treats as authoritative and never duplicates).
-	// Restricted to ids the minted path merged across scopes: only those can now have a declaration
-	// that fails to dominate every use. Everything the decompiler already scoped correctly is left
-	// byte-for-byte as the baseline produced it.
-	placeCrossScopeDeclarations(sts, scope.reused)
+	// General LCA declaration placement: hoist any generated local whose variable is referenced
+	// across more than one sibling scope to the block that dominates all of its uses. Runs last so it
+	// sees the final IsFirst/IsDeclare flags and any bare declarations the if/switch hoisters already
+	// inserted (which it treats as authoritative and never duplicates).
+	//
+	// Phase 1 (live-interval declaration placement): when JDEC_LIVEINTERVAL_OFF is unset the candidate
+	// set widens from the minted-merged ids (`scope.reused`) to EVERY generated local, so a disjoint
+	// slot-reuse split whose declaration was minted inside a nested block - and so is invisible to the
+	// reused-only path - is also hoisted to the block dominating all its uses (the dominant fastjson2
+	// "cannot find symbol: variable varN" residual, e.g. JdbcSupport$TimeReader's slot-5 `long`).
+	// The topLevelDeclDominatesAllUses gate still relocates ONLY declarations that fail to dominate a
+	// use, so correctly-scoped locals are untouched. Setting the switch restores the reused-only pass
+	// (byte-for-byte baseline).
+	liveIntervalAll := os.Getenv("JDEC_LIVEINTERVAL_OFF") == ""
+	placeCrossScopeDeclarations(sts, scope.reused, liveIntervalAll)
 	// switchHoistDeclarations (keyed by VarUid) and placeCrossScopeDeclarations (keyed by
 	// *VariableId) can independently emit a bare `T x;` for the SAME logical local when both
 	// hoisters fire on it (nested switches whose shared slot is also read after the switch). Both
@@ -1740,11 +1747,14 @@ func parallelArmDeclHoist(ifst *statements.IfStatement, beforeSts, afterSts []st
 		// are left untouched - widening them to Object would break type-specific uses inside the arms.
 		ifTok := renderedArmDeclType(ifAs, name)
 		elseTok := renderedArmDeclType(elseAs, name)
-		if ifTok == "" || ifTok != elseTok {
+		if ifTok == "" || elseTok == "" {
 			continue
 		}
 		// Build the bare declaration from the arm ref that natively carries the agreed type, so the
 		// emitted `T varN;` renders exactly T (a ref whose stale Type() is Object would render `Object varN;`).
+		if ifTok != elseTok {
+			continue
+		}
 		var declRef values.JavaValue
 		if ifRef.Type().String(hoistProbeCtx) == ifTok {
 			declRef = ifAs.LeftValue
@@ -2004,7 +2014,14 @@ func varUidLess(a, b string) bool {
 	return a < b
 }
 
-func collectGeneratedLocalDeclIDs(list []statements.Statement, reused map[*utils.VariableId]struct{}) ([]*utils.VariableId, map[*utils.VariableId]values.JavaValue) {
+// collectGeneratedLocalDeclIDs gathers the declaration refs of generated locals in `list`. With
+// all==false it is restricted to ids the minted path merged across scopes (`reused`), the historical
+// behaviour. With all==true (Phase 1 live-interval placement, kill-switch JDEC_LIVEINTERVAL_OFF) it
+// considers EVERY generated local, so a disjoint slot-reuse split whose declaration was minted inside
+// a nested block (and is therefore NOT in `reused`) is also a placement candidate. Widening is safe
+// because placeCrossScopeDeclarations only relocates a candidate whose current declaration fails to
+// dominate all uses (topLevelDeclDominatesAllUses gate); correctly-scoped locals are left untouched.
+func collectGeneratedLocalDeclIDs(list []statements.Statement, reused map[*utils.VariableId]struct{}, all bool) ([]*utils.VariableId, map[*utils.VariableId]values.JavaValue) {
 	order := []*utils.VariableId{}
 	refByID := map[*utils.VariableId]values.JavaValue{}
 	var walk func([]statements.Statement)
@@ -2012,7 +2029,8 @@ func collectGeneratedLocalDeclIDs(list []statements.Statement, reused map[*utils
 		for _, st := range sts {
 			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis {
-					if _, isReused := reused[ref.Id]; isReused {
+					_, isReused := reused[ref.Id]
+					if all || isReused {
 						if _, seen := refByID[ref.Id]; !seen {
 							name := ref.String(hoistProbeCtx)
 							if generatedLocalNameRe.MatchString(name) {
@@ -2158,12 +2176,15 @@ func relocateDeclarations(block *[]statements.Statement, id *utils.VariableId) {
 // lowest-common-ancestor declaration placement: for each block it hoists locals referenced across
 // more than one of the block's child scopes, emitting a single `T x;` at the block top and demoting
 // the in-place declarations to plain assignments. Hoisting only widens scope and is always valid Java.
-func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*utils.VariableId]struct{}) {
-	if block == nil || len(*block) == 0 || len(reused) == 0 {
+func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*utils.VariableId]struct{}, all bool) {
+	if block == nil || len(*block) == 0 {
+		return
+	}
+	if !all && len(reused) == 0 {
 		return
 	}
 	list := *block
-	ids, refByID := collectGeneratedLocalDeclIDs(list, reused)
+	ids, refByID := collectGeneratedLocalDeclIDs(list, reused, all)
 	if len(ids) > 0 {
 		texts := make([]string, len(list))
 		allMatch := make([]bool, len(list))
@@ -2241,7 +2262,7 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 	}
 	for _, st := range *block {
 		for _, cl := range childStatementLists(st) {
-			placeCrossScopeDeclarations(cl, reused)
+			placeCrossScopeDeclarations(cl, reused, all)
 		}
 	}
 }

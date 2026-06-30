@@ -414,9 +414,11 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 			}
 		}
 	}
-	// Step 2: find back-edge sources — nodes whose Next includes circleNode.
+	// Step 2: find back-edge sources — nodes whose Next includes circleNode. Iterate in stable id order
+	// (Set.List() is map-ordered) so allSources, and the reverse-BFS latch set derived from it, are
+	// deterministic.
 	var allSources []*core.Node
-	for _, n := range allNodes.List() {
+	for _, n := range sortNodesByID(allNodes.List()) {
 		if slices.Contains(n.Next, circleNode) {
 			allSources = append(allSources, n)
 		}

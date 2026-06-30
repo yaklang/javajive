@@ -143,6 +143,11 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 			}
 			return fmt.Sprintf("return (%s) (%s)", cast, expr)
 		}
+		// Concrete reference return type with an Object-typed value (erased generic / null-only slot):
+		// emit an explicit downcast so the source recompiles. See objectReturnDowncast.
+		if cast := objectReturnDowncast(funcCtx, r.JavaValue); cast != "" {
+			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+		}
 	}
 	return fmt.Sprintf("return %s", expr)
 }
@@ -273,6 +278,65 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 		default:
 			return ""
 		}
+	}
+	return retStr
+}
+
+// objectReturnDowncast returns the concrete reference return type to downcast a returned value to,
+// when the enclosing method's declared return type is a concrete reference type (NOT a bare type
+// variable -- that path is typeVarReturnCast) but the returned value's static type is the erased top
+// type java.lang.Object. Bytecode erases many generic / null-only locals to Object: e.g. fastjson2
+// `public static JSONObject parseObject(String)` has a null-branch slot `Object var3 = null; return
+// var3;`, which javac rejects as "incompatible types: Object cannot be converted to JSONObject". An
+// explicit downcast `(JSONObject) var3` is ALWAYS legal (Object is the supertype of every reference
+// type) and behavior-preserving: the method contract (recovered return type) guarantees the runtime
+// value is that type or null, exactly what an implicit checkcast would assert; this is what
+// CFR/Fernflower emit. Conservative guards: fires only when the value is statically Object and the
+// return type is a different, non-primitive, non-bare-type-variable reference type. Parameterized
+// targets (`List<T>`) are allowed -- `(List<T>) obj` is a legal unchecked cast. Kill-switch
+// JDEC_OBJECT_RET_DOWNCAST_OFF restores the legacy uncast emission.
+func objectReturnDowncast(funcCtx *class_context.ClassContext, v values.JavaValue) string {
+	if funcCtx == nil || v == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_OBJECT_RET_DOWNCAST_OFF") != "" {
+		return ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	if retStr == "" || retStr == "Object" || retStr == "java.lang.Object" {
+		return ""
+	}
+	// Bare type-variable returns (T) are handled by typeVarReturnCast; skip to avoid double-casting.
+	if funcCtx.IsTypeParam(retStr) {
+		return ""
+	}
+	// A primitive return type cannot take a reference value (and is handled by narrowingReturnCast).
+	if rt := ft.ReturnType.RawType(); rt != nil {
+		if _, isPrim := rt.(*types.JavaPrimer); isPrim {
+			return ""
+		}
+	}
+	vt := v.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	// Only the erased top type Object qualifies. Any other concrete source type that fails to convert
+	// is a different root cause (a genuine mis-typing such as `String cannot be converted to X`) and
+	// must NOT be blanket-cast here.
+	rawStr := raw.String(funcCtx)
+	if rawStr != "Object" && rawStr != "java.lang.Object" {
+		return ""
 	}
 	return retStr
 }

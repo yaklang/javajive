@@ -38,6 +38,198 @@ func (j *JavaParameterizedType) IsJavaType() {}
 
 var _ javaType = &JavaParameterizedType{}
 
+// AsParameterizedType unwraps t to its *JavaParameterizedType, or (nil,false) if t is not a
+// parameterized (generic) class type.
+func AsParameterizedType(t JavaType) (*JavaParameterizedType, bool) {
+	if t == nil || t.IsArray() {
+		return nil, false
+	}
+	pt, ok := t.RawType().(*JavaParameterizedType)
+	return pt, ok
+}
+
+// jdkIterableFamily are the JDK single-type-parameter Iterable<E> subtypes whose iterator() returns
+// Iterator<E> (the element type threaded unchanged). Concrete impls are included because their slot
+// declarations also carry the parameterized type.
+var jdkIterableFamily = map[string]bool{
+	"java.lang.Iterable":           true,
+	"java.util.Collection":         true,
+	"java.util.List":               true,
+	"java.util.Set":                true,
+	"java.util.SortedSet":          true,
+	"java.util.NavigableSet":       true,
+	"java.util.Queue":              true,
+	"java.util.Deque":              true,
+	"java.util.ArrayList":          true,
+	"java.util.LinkedList":         true,
+	"java.util.Vector":             true,
+	"java.util.Stack":              true,
+	"java.util.HashSet":            true,
+	"java.util.LinkedHashSet":      true,
+	"java.util.TreeSet":            true,
+	"java.util.ArrayDeque":         true,
+	"java.util.PriorityQueue":      true,
+	"java.util.AbstractList":       true,
+	"java.util.AbstractSet":        true,
+	"java.util.AbstractCollection": true,
+}
+
+// jdkIteratorFamily are the JDK Iterator<E> types whose next() returns E.
+var jdkIteratorFamily = map[string]bool{
+	"java.util.Iterator":     true,
+	"java.util.ListIterator": true,
+}
+
+// isWildcardType reports whether t is a wildcard type argument (`?`, `? extends X`, `? super X`).
+// Instantiation skips wildcard receivers: capture-of semantics make the substituted return type
+// (e.g. Iterator<? extends X>.next() yields a capture, not a nameable type) unsafe to render.
+//
+// MUST assert the wildcard DIRECTLY before touching RawType: JavaWildcardType embeds a (nil) JavaType
+// interface and does not define RawType itself, so the promoted RawType() dereferences that nil embed
+// and panics. A wildcard type arg is stored either bare (*JavaWildcardType, e.g. Recognizer<?,?>) or
+// wrapped; check the bare form first, then unwrap the wrapped form via RawType (safe for non-wildcards).
+func isWildcardType(t JavaType) bool {
+	if t == nil {
+		return false
+	}
+	if _, ok := t.(*JavaWildcardType); ok {
+		return true
+	}
+	raw := t.RawType()
+	if raw == nil {
+		return false
+	}
+	_, ok := raw.(*JavaWildcardType)
+	return ok
+}
+
+// InstantiateJDKMethodReturn returns the generic return type for a small, provably-correct set of JDK
+// container methods, instantiated with the receiver's actual type arguments. It is the conservative
+// core of Phase 3 generic inference (Bug AH): the JDK signatures are stable API, so substituting the
+// receiver's type args is sound, e.g. Iterable<T>.iterator() -> Iterator<T>, Iterator<T>.next() -> T.
+// Returns nil (caller keeps the erased descriptor return) for anything not in the table, for raw
+// (no-type-arg) receivers, or for wildcard type args. Gated by the caller's JDEC_GENERIC_INFER_OFF.
+func InstantiateJDKMethodReturn(rawClass, method string, argc int, typeArgs []JavaType) JavaType {
+	if len(typeArgs) == 0 {
+		return nil
+	}
+	for _, ta := range typeArgs {
+		if isWildcardType(ta) {
+			return nil
+		}
+	}
+	switch {
+	case method == "iterator" && argc == 0 && len(typeArgs) == 1 && jdkIterableFamily[rawClass]:
+		return NewParameterizedType("java.util.Iterator", []JavaType{typeArgs[0]})
+	case method == "next" && argc == 0 && len(typeArgs) == 1 && jdkIteratorFamily[rawClass]:
+		return typeArgs[0]
+	}
+	return nil
+}
+
+// jdkMapFamily are the JDK Map<K,V> types whose put/putIfAbsent/replace(K,V) parameters are the
+// receiver's type args (param0=K, param1=V). Concrete impls included: their slot/field declarations
+// carry the parameterized type too.
+var jdkMapFamily = map[string]bool{
+	"java.util.Map":                          true,
+	"java.util.AbstractMap":                  true,
+	"java.util.SortedMap":                    true,
+	"java.util.NavigableMap":                 true,
+	"java.util.HashMap":                      true,
+	"java.util.LinkedHashMap":                true,
+	"java.util.TreeMap":                      true,
+	"java.util.IdentityHashMap":              true,
+	"java.util.WeakHashMap":                  true,
+	"java.util.Hashtable":                    true,
+	"java.util.concurrent.ConcurrentMap":     true,
+	"java.util.concurrent.ConcurrentHashMap": true,
+}
+
+// jdkMethodParamTypeArgIndex returns, for a small provably-correct set of JDK generic methods, the
+// receiver type-argument index that the parameter at paramIndex resolves to, or -1 when that
+// parameter is NOT a receiver type variable (a fixed Object/int position such as Map.get(Object),
+// or a method outside the set). The JDK signatures are stable API, so substituting the receiver's
+// type args is sound -- this is the parameter analogue of InstantiateJDKMethodReturn. ntype is the
+// number of receiver type args, used to disambiguate arities.
+func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype int) int {
+	switch rawClass {
+	case "java.util.function.Consumer":
+		if method == "accept" && argc == 1 && ntype == 1 && paramIndex == 0 {
+			return 0
+		}
+	case "java.util.function.BiConsumer":
+		if method == "accept" && argc == 2 && ntype == 2 && (paramIndex == 0 || paramIndex == 1) {
+			return paramIndex
+		}
+	case "java.util.function.Function":
+		// Function<T,R>.apply(T): only the leading type arg is a parameter (R is the return).
+		if method == "apply" && argc == 1 && ntype == 2 && paramIndex == 0 {
+			return 0
+		}
+	case "java.util.function.BiFunction":
+		// BiFunction<T,U,R>.apply(T,U): the trailing type arg is the return.
+		if method == "apply" && argc == 2 && ntype == 3 && (paramIndex == 0 || paramIndex == 1) {
+			return paramIndex
+		}
+	case "java.util.function.UnaryOperator":
+		// UnaryOperator<T> extends Function<T,T>: a single type arg.
+		if method == "apply" && argc == 1 && ntype == 1 && paramIndex == 0 {
+			return 0
+		}
+	case "java.util.function.BinaryOperator":
+		// BinaryOperator<T> extends BiFunction<T,T,T>: both params are the single type arg T.
+		if method == "apply" && argc == 2 && ntype == 1 && (paramIndex == 0 || paramIndex == 1) {
+			return 0
+		}
+	case "java.util.function.Predicate":
+		if method == "test" && argc == 1 && ntype == 1 && paramIndex == 0 {
+			return 0
+		}
+	case "java.util.function.BiPredicate":
+		if method == "test" && argc == 2 && ntype == 2 && (paramIndex == 0 || paramIndex == 1) {
+			return paramIndex
+		}
+	}
+	// Map<K,V> mutators whose params are exactly (K, V).
+	if jdkMapFamily[rawClass] && ntype == 2 && argc == 2 && (paramIndex == 0 || paramIndex == 1) {
+		switch method {
+		case "put", "putIfAbsent", "replace":
+			return paramIndex
+		}
+	}
+	// Collection<E>.add/offer(E): a single type-arg element parameter.
+	if (method == "add" || method == "offer") && argc == 1 && ntype == 1 && paramIndex == 0 && jdkIterableFamily[rawClass] {
+		return 0
+	}
+	return -1
+}
+
+// InstantiateJDKMethodParam returns the generic type of the parameter at paramIndex for a small,
+// provably-correct set of JDK generic methods, instantiated with the receiver's actual type args.
+// Bytecode erases such parameters to their bound (e.g. BiConsumer<T,V>.accept(T,V) erases to
+// accept(Object,Object)), so an argument whose static type is a concrete value (BigDecimal, or the
+// erased Object) is passed without the cast the source carried, and javac -- re-resolving the call
+// against the generic signature -- rejects it ("BigDecimal/Object cannot be converted to V"). Feeding
+// the instantiated parameter type back lets the existing ArgumentStrings cast logic re-emit the
+// original `(V)` / `(T)` cast (unchecked but behavior-preserving, matching CFR/Fernflower). Returns
+// nil (caller keeps the erased descriptor param) for raw receivers, wildcard type args, or anything
+// outside the table.
+func InstantiateJDKMethodParam(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) JavaType {
+	if len(typeArgs) == 0 {
+		return nil
+	}
+	for _, ta := range typeArgs {
+		if isWildcardType(ta) {
+			return nil
+		}
+	}
+	idx := jdkMethodParamTypeArgIndex(rawClass, method, argc, paramIndex, len(typeArgs))
+	if idx < 0 || idx >= len(typeArgs) {
+		return nil
+	}
+	return typeArgs[idx]
+}
+
 // ParseSignature parses a JVM Signature attribute string and returns the
 // parameterized JavaType. Returns nil if parsing fails.
 func ParseSignature(sig string) JavaType {

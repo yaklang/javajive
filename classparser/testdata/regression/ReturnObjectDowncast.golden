@@ -1,0 +1,15 @@
+# Bug: a method with a concrete reference return type but an Object-typed value at the return site
+# (erased generic / try-with-resources null-only slot) rendered `return objVar;`, which javac rejects
+# as "incompatible types: Object cannot be converted to <T>" -- a real tree-recompile / repackage
+# blocker (the fastjson2 JSON.parseObject/parseArray family: 21 errors).
+#
+# Seed: synthetic `static String first(String)` whose try-with-resources `return null` desugars to a
+# slot the decompiler reconstructs as `Object varN = null; return varN`. Fix: objectReturnDowncast
+# emits the legal, behavior-preserving `(String)` downcast (Object is the supertype of every ref
+# type, so the cast always compiles; matches CFR/Fernflower). Kill-switch JDEC_OBJECT_RET_DOWNCAST_OFF
+# restores the legacy uncast emission (see TestReturnObjectDowncastIsLoadBearing).
+#
+# The Object-typed null slot is returned with an explicit downcast to the declared return type.
++/return \(String\) \(var\d+\);/
+# The already-correctly-typed (String) slot must NOT be over-cast.
++/return var\d+_\d+;/

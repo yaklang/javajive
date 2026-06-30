@@ -1,0 +1,14 @@
+# Bug: an argument to a JDK generic method called on a same-class FIELD receiver lost the source's
+# `(V)` cast, because the field-access value (getfield) carries only the erased descriptor type
+# (raw `BiConsumer`), not the field's generic Signature. javac then rejects "BigDecimal cannot be
+# converted to V". The largest remaining slice of the generic-erasure blocker (fastjson2
+# FieldReaderBigDecimalFunc/BigIntegerFunc family + guava). Fix: ClassContext.FieldSignatures records
+# each same-class parameterized field's raw Signature; FunctionCallExpression.receiverParamTypeArgs
+# parses it on demand to recover the receiver's type args, feeding InstantiateJDKMethodParam so the
+# existing arg-cast logic re-emits `(V)`. Kill-switch JDEC_GENERIC_PARAM_FIELD_OFF (field-receiver
+# part) / JDEC_GENERIC_PARAM_INFER_OFF (all param inference). See TestGenericFieldArgCastIsLoadBearing.
+#
+# Seed: synthetic `GenFieldArgSeed<T,V>` with field `BiConsumer<T,V> fn`, calling fn.accept(t,(V)d).
+#
+# The argument flowing into the field receiver's BiConsumer.accept is cast to the field's V type arg.
++/\.accept\(var\d+,\(V\)\(/

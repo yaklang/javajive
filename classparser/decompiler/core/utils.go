@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -384,6 +385,40 @@ func GetRealValue(value values.JavaValue) values.JavaValue {
 	}
 	return value
 }
+
+// keepDiscardedStackValue reports whether a value discarded by pop / pop2 must still be emitted as an
+// expression statement. javac (and library emitters like cglib) routinely leave a dead "load then
+// discard" pair in the bytecode (e.g. `aload x; pop`, `aload x; getfield f; pop`); rendering the bare
+// operand as a statement produces `x;` / `42;` / `this.f;`, which javac rejects as "not a statement" —
+// invalid Java that breaks recompilation (the spring-core cglib EmitUtils blocker). Per JLS 14.8 only
+// method/constructor invocations, assignments and pre/post inc-dec are valid statement-expressions; a
+// discarded value that is side-effect-free (and therefore also a non-statement) is dropped. Anything
+// that could carry a side effect (method calls, object creation, folded self-ops, or a field read
+// whose receiver is itself side-effecting like `foo().f`) is kept so the side effect is preserved.
+// Kill-switch: JDEC_POP_ELIDE_OFF=1 restores the legacy unconditional emission.
+func keepDiscardedStackValue(v values.JavaValue) bool {
+	if os.Getenv("JDEC_POP_ELIDE_OFF") != "" {
+		return true
+	}
+	return !isSideEffectFreeDiscard(v)
+}
+
+// isSideEffectFreeDiscard reports whether evaluating v purely for its value has no observable side
+// effect, so discarding it (a pop artifact) can be elided without changing program behavior. Covers
+// bare local refs, constants, class/type refs, null, and field reads whose receiver chain is itself
+// side-effect-free (`this.f`, `a.b.c`). Conservative: unknown shapes return false (kept).
+func isSideEffectFreeDiscard(v values.JavaValue) bool {
+	u := UnpackSoltValue(v)
+	if u == values.JavaNull {
+		return true
+	}
+	switch u.(type) {
+	case *values.JavaRef, *values.JavaLiteral, *values.JavaClassValue:
+		return true
+	}
+	return false
+}
+
 func IsSwitchOpcode(opcode int) bool {
 	return opcode == OP_TABLESWITCH || opcode == OP_LOOKUPSWITCH
 }

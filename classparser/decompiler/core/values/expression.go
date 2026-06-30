@@ -369,7 +369,140 @@ func (f *FunctionCallExpression) ReplaceVar(oldId *utils.VariableId, newId *util
 }
 
 func (f *FunctionCallExpression) Type() types.JavaType {
+	// Phase 3 (generic.go) limited generic instantiation (Bug AH): the descriptor return type is
+	// erased (Iterable<T>.iterator() -> raw Iterator, Iterator<T>.next() -> Object), so a slot typed
+	// from such a call loses its element type and later uses fail to recompile (`Object cannot be
+	// converted to T`, guava PairwiseEquivalence). When the receiver carries concrete type arguments
+	// and the method is a known JDK container method, substitute the receiver's args into the JDK
+	// signature to recover the instantiated return (Iterator<T>, then T). Kill-switch:
+	// JDEC_GENERIC_INFER_OFF. Conservative: only the small provably-correct JDK table fires.
+	if inst := f.instantiatedReturnType(); inst != nil {
+		return inst
+	}
 	return f.FuncType.ReturnType
+}
+
+// instantiatedReturnType applies InstantiateJDKMethodReturn using the receiver's parameterized type,
+// or returns nil to keep the erased descriptor return.
+func (f *FunctionCallExpression) instantiatedReturnType() types.JavaType {
+	if os.Getenv("JDEC_GENERIC_INFER_OFF") != "" || f.IsStatic || f.Object == nil {
+		return nil
+	}
+	recv := f.Object.Type()
+	pt, ok := types.AsParameterizedType(recv)
+	if !ok {
+		return nil
+	}
+	return types.InstantiateJDKMethodReturn(pt.RawClassName, f.FunctionName, len(f.Arguments), pt.TypeArgs)
+}
+
+// receiverParamTypeArgs returns the call receiver's raw class name and actual type arguments, taken
+// from the receiver value's parameterized static type, or -- when the receiver is a same-class field
+// whose getfield value carries only the ERASED descriptor type (raw `BiConsumer`) -- from the field's
+// recorded generic Signature (funcCtx.FieldSignatures, e.g. `Ljava/util/function/BiConsumer<TT;TV;>;`).
+// Returns ("", nil) when no parameterized receiver type is available. The field-signature fallback is
+// independently gated by JDEC_GENERIC_PARAM_FIELD_OFF.
+func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.ClassContext) (string, []types.JavaType) {
+	if f.Object == nil {
+		return "", nil
+	}
+	if pt, ok := types.AsParameterizedType(f.Object.Type()); ok {
+		return pt.RawClassName, pt.TypeArgs
+	}
+	if funcCtx == nil || os.Getenv("JDEC_GENERIC_PARAM_FIELD_OFF") != "" {
+		return "", nil
+	}
+	// Same-class field receiver (`this.field`): recover type args from the field's generic Signature.
+	rm, ok := UnpackSoltValue(f.Object).(*RefMember)
+	if !ok {
+		return "", nil
+	}
+	ref, ok := UnpackSoltValue(rm.Object).(*JavaRef)
+	if !ok || !ref.IsThis {
+		return "", nil
+	}
+	sig := funcCtx.FieldSignature(class_context.SafeIdentifier(rm.Member))
+	if sig == "" {
+		return "", nil
+	}
+	parsed := types.ParseSignature(sig)
+	if parsed == nil {
+		return "", nil
+	}
+	pt, ok := types.AsParameterizedType(parsed)
+	if !ok {
+		return "", nil
+	}
+	return pt.RawClassName, pt.TypeArgs
+}
+
+// instantiatedParamType applies InstantiateJDKMethodParam using the receiver's parameterized type to
+// recover the generic type of the i-th parameter (which the descriptor erases to its bound), or nil
+// to keep the erased descriptor parameter. Feeding the instantiated type back into ArgumentStrings
+// lets the existing cast logic re-emit the source's `(V)`/`(T)` argument cast (the fastjson2
+// BiConsumer.accept / Map.put generic-erasure blocker). The receiver may be a parameterized local /
+// parameter / this, OR a same-class parameterized field (see receiverParamTypeArgs). Kill-switch
+// JDEC_GENERIC_PARAM_INFER_OFF.
+func (f *FunctionCallExpression) instantiatedParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if os.Getenv("JDEC_GENERIC_PARAM_INFER_OFF") != "" || f.IsStatic || f.Object == nil {
+		return nil
+	}
+	raw, typeArgs := f.receiverParamTypeArgs(funcCtx)
+	if raw == "" || len(typeArgs) == 0 {
+		return nil
+	}
+	return types.InstantiateJDKMethodParam(raw, f.FunctionName, len(f.Arguments), i, typeArgs)
+}
+
+// sameClassMethodParamType recovers the i-th formal parameter type of a call to a same-class generic
+// method on `this` (e.g. `this.tailSet(objVal)` where the current class declares
+// `SortedSet<E> tailSet(E)`), so the descriptor-erased `(E)` argument cast can be re-emitted (guava
+// Forwarding* / collection family: `Object cannot be converted to E/K/V/N/C`). It reads the callee's
+// generic Signature from funcCtx.MethodSignatures (recorded per class in the dumper) and parses it on
+// demand. SAFETY: returns the type ONLY when the formal is a bare CLASS-scope type variable -- never a
+// method-scope `<T>` parameter (which is not in scope at the call site, so a `(T)` cast there would not
+// compile) and never a concrete type (a real mismatch must not be blanket-cast). Kill-switch
+// JDEC_GENERIC_SELFMETHOD_PARAM_OFF.
+func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if os.Getenv("JDEC_GENERIC_SELFMETHOD_PARAM_OFF") != "" || f.IsStatic || f.Object == nil || funcCtx == nil {
+		return nil
+	}
+	// A `super.m()` call (invokespecial to a NON-current class) must not be treated as a same-class
+	// call -- its signature lives in the superclass, not funcCtx.MethodSignatures. But a PRIVATE
+	// same-class method is ALSO invokespecial (its target class IS the current class), and its
+	// signature IS in funcCtx.MethodSignatures, so it must still be handled (guava AbstractBiMap
+	// `this.updateInverseMap(k, b, objVal, v)` where param 3 is V -> needs `(V) objVal`). Focused
+	// sub-switch JDEC_GENERIC_SELFMETHOD_PRIVATE_OFF restores the legacy blanket-skip of invokespecial.
+	if f.IsSpecialInvoke {
+		if os.Getenv("JDEC_GENERIC_SELFMETHOD_PRIVATE_OFF") != "" || !f.isCurrentClass(funcCtx) {
+			return nil
+		}
+	}
+	ref, ok := UnpackSoltValue(f.Object).(*JavaRef)
+	if !ok || !ref.IsThis {
+		return nil
+	}
+	sig := funcCtx.MethodSignature(f.FunctionName, len(f.Arguments))
+	if sig == "" {
+		return nil
+	}
+	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+	if i < 0 || i >= len(params) || params[i] == nil {
+		return nil
+	}
+	raw := params[i].RawType()
+	if raw == nil {
+		return nil
+	}
+	jc, ok := raw.(*types.JavaClass)
+	if !ok {
+		return nil
+	}
+	// Only a class-scope type variable is denotable AND castable at the call site.
+	if !funcCtx.IsTypeParam(jc.Name) {
+		return nil
+	}
+	return params[i]
 }
 
 // isCurrentClass reports whether the call's target class is the class currently being rendered.
@@ -420,6 +553,14 @@ func (f *FunctionCallExpression) ArgumentStrings(funcCtx *class_context.ClassCon
 	paramStrs := []string{}
 	for i, arg := range f.Arguments {
 		argType := f.FuncType.ParamTypes[i]
+		// Recover the generic parameter type the descriptor erased (e.g. BiConsumer<T,V>.accept's
+		// param erases to Object): the source carried a `(V)` cast on the argument, so feed the
+		// instantiated type back into the mismatch check below to re-emit it.
+		if inst := f.instantiatedParamType(i, funcCtx); inst != nil {
+			argType = inst
+		} else if inst := f.sameClassMethodParamType(i, funcCtx); inst != nil {
+			argType = inst
+		}
 		// Incomplete stack simulation can leave an argument with a nil Type(); a parameter type
 		// can likewise be nil for a malformed descriptor. Guard each RawType() behind a nil check
 		// so a missing type degrades the per-argument cast logic to a no-op (rendering the argument

@@ -289,8 +289,9 @@ func __CalcEnd(domTree map[*core.Node][]*core.Node, ifNode *core.Node) error {
 	var mergeNode *core.Node
 	minDepth := -1
 
-	// 遍历true分支节点
-	for _, node := range trueNodeSet.List() {
+	// 遍历true分支节点 (sortNodesByID: Set.List() 的 map 顺序随机, 下面以最短深度选汇聚点, 深度相等时
+	// 先访问者胜出, 不排序会让同一 if 的 merge 节点在不同 run 间漂移 -> 非确定性结构化)
+	for _, node := range sortNodesByID(trueNodeSet.List()) {
 		if falseNodeSet.Has(node) {
 			// 计算该节点到ifNode的最短路径长度
 			depth := 0

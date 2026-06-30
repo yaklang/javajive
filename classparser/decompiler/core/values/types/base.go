@@ -136,6 +136,17 @@ func MergeTypes(types ...JavaType) JavaType {
 			}
 		}
 	}
+	// Phase 2 (hierarchy.go): two or more DISTINCT reference types reach this merge (a conditional or
+	// a phi). The legacy fallback below silently keeps the first arm's type, which javac rejects when
+	// the arms are siblings (Integer|Long -> Number, ArrayList|List -> List). Compute the least upper
+	// bound from the JDK hierarchy table instead; commonSuperType returns nil (keeping the legacy
+	// behavior) unless every arm is a known JDK class and the LUB is more specific than Object.
+	// Kill-switch: JDEC_TYPELUB_OFF.
+	if len(typesMap) > 1 {
+		if lub := commonSuperType(types); lub != nil {
+			return lub
+		}
+	}
 	if len(types) > 0 {
 		return types[0]
 	}

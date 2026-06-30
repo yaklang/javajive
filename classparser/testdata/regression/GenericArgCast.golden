@@ -1,0 +1,14 @@
+# Bug: an argument passed to a JDK generic method (Map.put(K,V), BiConsumer.accept(T,V),
+# Function.apply, Collection.add, ...) whose parameter the bytecode descriptor erases to Object was
+# rendered WITHOUT the source's `(K)`/`(V)` cast, so javac -- re-resolving the call against the generic
+# signature -- rejects it ("incompatible types: Object cannot be converted to K"). A real tree-recompile
+# / repackage blocker (fastjson2 FieldReaderBigDecimalFunc + guava Map.put / Collection.add).
+#
+# Seed: synthetic `GenArgCastSeed<K,V>.copy(Map<K,V> dst, Iterator src)` doing `dst.put((K)e,(V)e)` with
+# `e` from a RAW iterator (Object). The (K)/(V) casts erase to nothing in bytecode, so the decompiler
+# must re-synthesize them. Fix: InstantiateJDKMethodParam recovers the parameter's generic type from the
+# receiver's parameterized type, feeding the existing arg-cast logic. Kill-switch
+# JDEC_GENERIC_PARAM_INFER_OFF restores the legacy uncast emission (see TestGenericArgCastIsLoadBearing).
+#
+# The Object-typed arguments are cast to the receiver's K / V type args.
++/\.put\(\(K\)\(var\d+\),\(V\)\(var\d+\)\);/

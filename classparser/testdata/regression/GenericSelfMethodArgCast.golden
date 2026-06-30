@@ -1,0 +1,16 @@
+# Bug: an argument to a same-class generic method called on `this` (e.g. `this.has(objVal)` where the
+# class declares `boolean has(E)`) lost the source's `(E)` cast, because the descriptor erases the
+# parameter to its bound (Object) and the callee's generic Signature lives in a DIFFERENT method of
+# the same class than the call site. javac then rejects "Object cannot be converted to E". This was the
+# largest remaining slice of the generic-erasure blocker (guava Forwarding*/collection family:
+# tailSet(E)/headSet(E)/... ; fastjson2). Fix: ClassContext.MethodSignatures records each same-class
+# method's generic Signature keyed by (name, arity); FunctionCallExpression.sameClassMethodParamType
+# parses it on demand and, ONLY for a CLASS-scope type variable (never a method-scope <T>, never a
+# concrete type), feeds the formal type into the existing arg-cast logic so it re-emits `(E)`.
+# Kill-switch JDEC_GENERIC_SELFMETHOD_PARAM_OFF. See TestGenericSelfMethodArgCastIsLoadBearing.
+#
+# Seed: synthetic `SelfMethodArgSeed<E>` declaring `boolean has(E)`, with `check(Object o)` doing
+# `this.has((E) o)`.
+#
+# The argument flowing into the same-class generic method `has(E)` is cast to the class type var E.
++/this\.has\(\(E\)\(/

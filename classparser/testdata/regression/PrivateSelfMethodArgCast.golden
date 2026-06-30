@@ -1,0 +1,6 @@
+# Private same-class generic method (invokespecial) arg cast: the (V) cast on the Object argument to
+# `this.sink(...)` must be re-synthesized. invokespecial whose target IS the current class is a
+# private same-class call, not a super.m() call. Fix: sameClassMethodParamType +
+# JDEC_GENERIC_SELFMETHOD_PRIVATE_OFF sub-switch (guava AbstractBiMap.updateInverseMap family).
++/this\.sink\(var1,\(V\)\(/
+-this.sink(var1,var2)
