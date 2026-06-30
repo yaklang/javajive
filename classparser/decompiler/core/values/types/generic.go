@@ -777,3 +777,184 @@ func ParseMethodSignatureFull(sig string, funcCtx *class_context.ClassContext) (
 func MethodFormalTypeParamNames(sig string) []string {
 	return ClassFormalTypeParamNames(sig)
 }
+
+// SubstituteTypeVars returns a copy of t with every type-variable reference replaced per the
+// substitution sigma (e.g. {K: String, V: Integer}). It is the generic-substitution primitive that
+// lets a callee's parsed signature -- written in terms of the DECLARING class's type variables -- be
+// instantiated at a call site with the receiver's actual type arguments (the root-cause analogue of
+// the hard-coded JDK table). A type variable is modeled as a bare-named *JavaClass (parseSigType emits
+// `TK;` as JavaClass{Name:"K"}); a name absent from sigma is left untouched (so concrete class names,
+// which never appear as sigma keys, pass through unchanged). Parameterized type args and array element
+// types are rewritten recursively. Wildcards are returned as-is (the resolver skips wildcard receivers
+// upstream). Pure and allocation-light; nil-safe.
+func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
+	if t == nil || len(sigma) == 0 {
+		return t
+	}
+	// A bare wildcard does not implement RawType safely (see isWildcardType); leave it untouched.
+	if _, ok := t.(*JavaWildcardType); ok {
+		return t
+	}
+	raw := t.RawType()
+	switch rt := raw.(type) {
+	case *JavaClass:
+		if repl, ok := sigma[rt.Name]; ok && repl != nil {
+			return repl
+		}
+		return t
+	case *JavaParameterizedType:
+		if len(rt.TypeArgs) == 0 {
+			return t
+		}
+		newArgs := make([]JavaType, len(rt.TypeArgs))
+		changed := false
+		for i, ta := range rt.TypeArgs {
+			sub := SubstituteTypeVars(ta, sigma)
+			newArgs[i] = sub
+			if sub != ta {
+				changed = true
+			}
+		}
+		if !changed {
+			return t
+		}
+		return NewParameterizedType(rt.RawClassName, newArgs)
+	case *JavaArrayType:
+		elem := rt.JavaType
+		sub := SubstituteTypeVars(elem, sigma)
+		if sub == elem {
+			return t
+		}
+		return newJavaTypeWrap(&JavaArrayType{JavaType: sub, Dimension: rt.Dimension})
+	default:
+		return t
+	}
+}
+
+// ClassSigProvider yields a jar-internal class's raw generic signature info by binary internal name
+// (slash-separated, e.g. "com/google/common/collect/Multiset"). It returns ok=false for JDK/external
+// classes whose bytes are not in the jar (those are covered by the InstantiateJDKMethodParam table).
+// The dumper builds the concrete closure (it owns the byte resolver + class parser); the resolver walk
+// below consumes only strings, so the lower type/class_context packages never import the parser.
+type ClassSigProvider func(internalName string) (classSig string, methodSigs map[string]string, ok bool)
+
+func dotToInternal(name string) string {
+	return strings.ReplaceAll(name, ".", "/")
+}
+
+// ResolveInstantiatedParamType recovers the generic type of a callee method's paramIndex-th formal
+// parameter at a call site, by walking the receiver class's generic supertype hierarchy and composing
+// the type-argument substitution along each `extends/implements Super<...>` edge. It is the unified
+// cross-class generic resolver (the root-cause replacement for the same-class / identity-one-level
+// special cases): given a receiver static type `recvRaw<recvArgs...>` it finds the most-derived
+// declaration of (method, argc) that carries a generic Signature, applies the composed substitution to
+// its paramIndex-th formal, and returns the instantiated type -- which the caller's existing argument
+// cast logic then re-emits as the source's erased `(K)`/`(Foo)` cast.
+//
+// SAFETY: returns nil (caller keeps the erased descriptor parameter) unless the instantiated formal is
+// DENOTABLE and CASTABLE at the call site -- i.e. a CLASS-scope type variable of the current class
+// (funcCtx.IsTypeParam) or a concrete (dotted) class name. A method-scope `<T>` formal, a leftover
+// FOREIGN bare type variable (un-substituted because the receiver was raw, or a supertype formal not
+// in scope), a wildcard/capture, or a parameterized/array result all yield nil -- emitting `(T)` for a
+// non-in-scope variable would not compile, and the erasure blocker bucket is scalar casts only. JDK /
+// external supertypes (provider miss) yield nil and are left to the JDK table. provider==nil disables
+// the walk. Gated upstream by JDEC_GENERIC_RESOLVE_OFF.
+func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method string, argc, paramIndex int) JavaType {
+	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" || paramIndex < 0 {
+		return nil
+	}
+	// A wildcard receiver type arg captures to an unnameable CAP#... ; never cast against it.
+	for _, a := range recvArgs {
+		if isWildcardType(a) {
+			return nil
+		}
+	}
+	visited := map[string]bool{}
+	return resolveParamWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, argc, paramIndex, visited)
+}
+
+// resolveParamWalk performs the depth-first hierarchy walk for ResolveInstantiatedParamType. sigma maps
+// the CURRENT node's formal type-parameter names to their actual arguments (in terms of the original
+// call site's denotable types). It is rebuilt for each supertype edge by substituting the supertype's
+// type arguments through the current sigma.
+func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method string, argc, paramIndex int, visited map[string]bool) JavaType {
+	if internal == "" || visited[internal] {
+		return nil
+	}
+	visited[internal] = true
+	classSig, methodSigs, ok := provider(internal)
+	if !ok {
+		return nil // JDK / external: not in jar, covered by the InstantiateJDKMethodParam table
+	}
+	// sigma: this node's formal type params -> actual args (positional; raw receiver -> empty sigma).
+	formals := ClassFormalTypeParamNames(classSig)
+	sigma := map[string]JavaType{}
+	for i := 0; i < len(formals) && i < len(args); i++ {
+		if args[i] != nil {
+			sigma[formals[i]] = args[i]
+		}
+	}
+	// Most-derived declaration with a generic Signature wins: if THIS class declares (method, argc)
+	// generically, it is the binding declaration -- resolve here and stop (do not let an ancestor's
+	// signature shadow an override).
+	if methodSigs != nil {
+		if msig := methodSigs[class_context.MethodSigKey(method, argc)]; msig != "" {
+			_, params, _ := ParseMethodSignatureFull(msig, funcCtx)
+			if paramIndex < len(params) && params[paramIndex] != nil {
+				if t := substituteAndGateParam(funcCtx, params[paramIndex], sigma, MethodFormalTypeParamNames(msig)); t != nil {
+					return t
+				}
+			}
+			return nil
+		}
+	}
+	// Otherwise walk the (parameterized) supertypes, composing sigma along each edge.
+	sup, ifaces := ParseClassSignatureSupers(classSig)
+	supers := make([]JavaType, 0, len(ifaces)+1)
+	if sup != nil {
+		supers = append(supers, sup)
+	}
+	supers = append(supers, ifaces...)
+	for _, st := range supers {
+		pt, isPT := st.RawType().(*JavaParameterizedType)
+		if !isPT || pt.RawClassName == "" {
+			continue // raw supertype carries no mapping -> cannot substitute, skip this subtree
+		}
+		childArgs := make([]JavaType, len(pt.TypeArgs))
+		for i, ta := range pt.TypeArgs {
+			childArgs[i] = SubstituteTypeVars(ta, sigma)
+		}
+		if t := resolveParamWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, paramIndex, visited); t != nil {
+			return t
+		}
+	}
+	return nil
+}
+
+// substituteAndGateParam applies sigma to a callee formal parameter type and returns it ONLY when the
+// result is denotable and castable at the call site (see ResolveInstantiatedParamType SAFETY). param is
+// the pre-substitution formal; methodFormals are the callee's own method-scope type variable names.
+func substituteAndGateParam(funcCtx *class_context.ClassContext, param JavaType, sigma map[string]JavaType, methodFormals []string) JavaType {
+	// A method-scope `<T>` formal is not in scope at the call site: a `(T)` cast there would not compile.
+	if jc, ok := param.RawType().(*JavaClass); ok {
+		for _, mf := range methodFormals {
+			if mf == jc.Name {
+				return nil
+			}
+		}
+	}
+	res := SubstituteTypeVars(param, sigma)
+	jc, ok := res.RawType().(*JavaClass)
+	if !ok {
+		// Parameterized / array / primitive: the erasure cast bucket is scalar `(K)`/`(Foo)` only, and
+		// the downstream cast logic ignores non-*JavaClass expect types anyway. Stay focused.
+		return nil
+	}
+	if funcCtx.IsTypeParam(jc.Name) {
+		return res // current-class type variable -> `(K)`
+	}
+	if strings.Contains(jc.Name, ".") {
+		return res // concrete (dotted) class -> `(com.foo.Bar)`
+	}
+	return nil // leftover foreign bare type variable -> not denotable
+}

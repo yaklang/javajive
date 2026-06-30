@@ -505,6 +505,60 @@ func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_
 	return params[i]
 }
 
+// resolvedParamType is the unified cross-class generic resolver entry point (the root-cause
+// generalization of instantiatedParamType's JDK table and sameClassMethodParamType's same-class /
+// identity-one-level paths). It recovers the i-th formal parameter type of a call on a JAR-INTERNAL
+// receiver by walking the receiver's generic supertype hierarchy with proper type-argument
+// substitution (types.ResolveInstantiatedParamType), so it covers what the special cases miss: a
+// non-`this` parameterized receiver (`var0.setCount(objVal)`, var0=`Multiset<E>`), a NON-identity
+// supertype mapping (`Sub<X> implements Super<X,String>`), and a DEEP chain (method declared in an
+// ancestor class/interface). It runs ADDITIVELY -- only when the JDK-table and same-class paths both
+// declined -- so the output is a strict superset of the old behavior. Kill-switch
+// JDEC_GENERIC_RESOLVE_OFF restores the special-case-only behavior. Returns nil to keep the erased
+// descriptor parameter.
+func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if os.Getenv("JDEC_GENERIC_RESOLVE_OFF") != "" || f.IsStatic || f.Object == nil || funcCtx == nil || funcCtx.SiblingClassSig == nil {
+		return nil
+	}
+	// A `super.m()` invokespecial to a NON-current class binds to the supertype's declaration via a
+	// different receiver type; leave it to the existing paths (mirrors sameClassMethodParamType).
+	if f.IsSpecialInvoke && !f.isCurrentClass(funcCtx) {
+		return nil
+	}
+	var recvRaw string
+	var recvArgs []types.JavaType
+	if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref.IsThis {
+		// `this` receiver: start at the current class with an IDENTITY type-argument mapping (each class
+		// formal mapped to itself), built from the authoritative class Signature so the count always
+		// matches the walk's formals. The walk then ascends this class's generic supertypes (covering
+		// non-identity edges and deep chains).
+		if funcCtx.ClassSig == "" {
+			return nil
+		}
+		formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
+		if len(formals) == 0 {
+			return nil
+		}
+		recvRaw = funcCtx.ClassName
+		recvArgs = make([]types.JavaType, len(formals))
+		for idx, n := range formals {
+			recvArgs[idx] = types.NewJavaClass(n)
+		}
+	} else {
+		// Non-`this` receiver: recover its raw class + actual type args from the receiver value's
+		// parameterized static type, or -- when the receiver is a same-class parameterized field whose
+		// getfield value carries only the erased descriptor -- from the field's generic Signature. This
+		// reuses the exact receiver-type recovery the JDK-table path uses (receiverParamTypeArgs), so a
+		// parameterized local (`var0` of `Multiset<E>`) and a same-class field (`this.box` of `Box<E>`)
+		// are both handled.
+		recvRaw, recvArgs = f.receiverParamTypeArgs(funcCtx)
+	}
+	if recvRaw == "" || len(recvArgs) == 0 {
+		return nil
+	}
+	return types.ResolveInstantiatedParamType(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, f.FunctionName, len(f.Arguments), i)
+}
+
 // isCurrentClass reports whether the call's target class is the class currently being rendered.
 // Used to tell a private same-class invokespecial (`this.m()`) from a super call (`super.m()`).
 func (f *FunctionCallExpression) isCurrentClass(funcCtx *class_context.ClassContext) bool {
@@ -559,6 +613,10 @@ func (f *FunctionCallExpression) ArgumentStrings(funcCtx *class_context.ClassCon
 		if inst := f.instantiatedParamType(i, funcCtx); inst != nil {
 			argType = inst
 		} else if inst := f.sameClassMethodParamType(i, funcCtx); inst != nil {
+			argType = inst
+		} else if inst := f.resolvedParamType(i, funcCtx); inst != nil {
+			// Additive cross-class generic resolver: fires only when the JDK-table and same-class paths
+			// declined, covering non-this / non-identity / deep-chain jar-internal receivers.
 			argType = inst
 		}
 		// Incomplete stack simulation can leave an argument with a nil Type(); a parameter type

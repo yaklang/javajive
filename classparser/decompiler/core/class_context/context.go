@@ -55,6 +55,21 @@ type ClassContext struct {
 	// (name, arity) are dropped to avoid resolving to the wrong signature. Stored as a string because
 	// class_context must not import the types package (cycle). Empty when the class has no such method.
 	MethodSignatures map[string]string
+	// ClassSig is the raw generic class Signature string of the class currently being rendered (e.g.
+	// `<K:Ljava/lang/Object;V:Ljava/lang/Object;>Lcom/foo/Base<TK;TV;>;`). It seeds the unified
+	// cross-class generic resolver (types.ResolveInstantiatedParamType) for a `this` receiver: the walk
+	// reads this class's parameterized supertypes from it. Empty when the class is non-generic / has no
+	// signature. Stored as a string (class_context must not import the types package).
+	ClassSig string
+	// SiblingClassSig resolves a jar-internal class's generic signature info by binary internal name
+	// (slash-separated). It returns the class's raw class Signature and a (name,arity)->method Signature
+	// map, or ok=false for JDK/external classes whose bytes are not in the jar. The dumper builds this
+	// closure (it owns the byte resolver + parser); the renderer/types packages consume only strings, so
+	// the type/class_context packages never import the parser. The field type is intentionally an unnamed
+	// func type so its value is directly assignable to types.ClassSigProvider (identical signature)
+	// without class_context importing types. Nil when no cross-class resolver is available (single-class
+	// decompile); set only on the jar / DecompileWithResolver path.
+	SiblingClassSig func(internalName string) (classSig string, methodSigs map[string]string, ok bool)
 }
 
 // FieldSignature returns the raw generic Signature string of a same-class parameterized field, or ""

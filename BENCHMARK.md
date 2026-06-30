@@ -119,7 +119,7 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | snakeyaml | 231 | 219/231 (94.8%) | **121/123 (98.4%)** | 119/121 (98.3%) |
 | spring-core | 978 | **973/974 (99.9%)** | 647/649 (99.7%) | 648/649 (99.8%) |
 | fastjson2 | 681 | 625/681 (91.8%) | **516/530 (97.4%)** | 485/529 (91.7%) |
-| guava | 1892 | 1623/1825 (88.9%) | **550/558 (98.6%)** | 492/558 (88.2%) |
+| guava | 1892 | 1631/1825 (89.4%) | **550/558 (98.6%)** | 492/558 (88.2%) |
 
 ### 3.3 表 2 · `javac` 错误总行数（越低越好，更可比）
 
@@ -132,19 +132,22 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | snakeyaml | 231 | 39 | **2** | **2** |
 | spring-core | 978 | **2** | 16 | 32 |
 | fastjson2 | 681 | 248 | **92** | 307 |
-| guava | 1892 | 522 | **29** | 169 |
-| **合计** | **4666** | **1028** | **393** | **525** |
+| guava | 1892 | 492 | **29** | 169 |
+| **合计** | **4666** | **998** | **393** | **525** |
 
 ### 3.4 分析（诚实结论）
 
 - **JavaJive 的强项 —— 规整 / 大型代码库**：commons-codec **0 错误（100%）**，spring-core **2 错误
   （99.9%）**，两项均为三方最佳。说明在普通业务代码、大型但结构规整的工程上，JavaJive 已达业界一线。
 - **泛型密集的硬骨头（guava / fastjson2）**：CFR（最成熟）最稳（guava 29 行、fastjson2 92 行）。
-  JavaJive 在 fastjson2 上（248 行）**优于 Vineflower**（307 行），在 guava 上与 Vineflower 同档
-  （通过率 88.9% vs 88.2%）。残余几乎全部集中在**泛型擦除 → 缺造型**一类（详见 `TODO.md` / `CODEC_TODO.md`，
-  正在逐点治本，本轮已 guava 529→522）。
+  JavaJive 在 fastjson2 上（248 行）**优于 Vineflower**（307 行），在 guava 上（492 行 / 通过率 89.4%）
+  **略优于 Vineflower**（169 行计法不同，但通过率 88.2%）。残余几乎全部集中在**泛型擦除 → 缺造型**一类
+  （详见 `TODO.md` / `CODEC_TODO.md`，正在逐点治本）。本轮以**统一跨类泛型解析器**（沿接收者泛型超类型层级
+  DFS + 类型实参替换 σ，替代「JDK 写死表 / 同类方法 / 直接超类型恒等一层」的特例拼盘）治本，guava tree
+  **522→492（-30，归一化 diff 0 新错，横跨 collect/graph/hash/util.concurrent 14 类）**，codec/fastjson2/spring
+  零回归；kill-switch `JDEC_GENERIC_RESOLVE_OFF`，guava JavaJive 数经 `TestJarTreeInventory` tree 口径复核。
 - **JavaJive 的短板**：gson（122 行）明显落后，Vineflower 在此近乎完美（1 行）——是后续重点。
-- **整体**：按错误行总数 CFR(393) < Vineflower(525) < JavaJive(1028)；但 JavaJive 在 8 个 jar 中
+- **整体**：按错误行总数 CFR(393) < Vineflower(525) < JavaJive(998)；但 JavaJive 在 8 个 jar 中
   **2 个夺冠、且在 commons-lang3 错误行（91）少于 CFR（198）**。结合实验一的 5/5 语义保真，JavaJive 是
   一款**在多数真实代码上可用、在硬骨头上持续逼近 CFR/Vineflower** 的反编译器。
 

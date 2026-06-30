@@ -549,6 +549,14 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		if len(methodSignatures) > 0 {
 			c.FuncCtx.MethodSignatures = methodSignatures
 		}
+		// Seed the unified cross-class generic resolver (types.ResolveInstantiatedParamType): record this
+		// class's own class Signature and install a lazy sibling-signature provider so a call on ANY
+		// jar-internal receiver (this / local / field of a parameterized type) can recover its erased
+		// argument cast by walking the receiver's generic supertype hierarchy with proper type-argument
+		// substitution -- the root-cause generalization of the same-class / identity-one-level special
+		// cases. Only wired on the jar / DecompileWithResolver path (foldSiblingResolver != nil).
+		c.FuncCtx.ClassSig = classSigStr
+		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
 	}
 	packageSource := fmt.Sprintf("package %s;\n\n", packageName)
 	if className == "" {
@@ -1005,6 +1013,84 @@ func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr str
 	for k, v := range inherited {
 		out[k] = v
 		seen[k] = true
+	}
+}
+
+// buildSiblingClassSig returns a lazy, cached provider of a jar-internal class's generic signature info
+// (class Signature + (name,arity)->method Signature map) keyed by binary internal name, for the unified
+// cross-class generic resolver (types.ResolveInstantiatedParamType, consumed in
+// FunctionCallExpression.resolvedParamType). It reuses the same byte resolver + parse + Signature
+// extraction that collectInheritedThisMethodSignatures uses, but exposes ARBITRARY classes (not just
+// identity-mapped direct supertypes), so the resolver can walk a full hierarchy with real type-argument
+// substitution. Returns nil when no cross-class resolver is available (single-class decompile), which
+// disables the resolver walk (callers fall back to the JDK table / same-class paths). Caching keeps the
+// per-class-dump cost bounded and the result deterministic (a nil cache entry records a confirmed miss).
+func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (string, map[string]string, bool) {
+	if c.foldSiblingResolver == nil {
+		return nil
+	}
+	type entry struct {
+		classSig   string
+		methodSigs map[string]string
+		ok         bool
+	}
+	cache := map[string]*entry{}
+	resolver := c.foldSiblingResolver
+	return func(internal string) (string, map[string]string, bool) {
+		if e, hit := cache[internal]; hit {
+			return e.classSig, e.methodSigs, e.ok
+		}
+		e := &entry{}
+		cache[internal] = e
+		data, ok := resolver(internal)
+		if !ok || len(data) == 0 {
+			return "", nil, false // JDK / external: not in jar
+		}
+		sObj, err := Parse(data)
+		if err != nil {
+			return "", nil, false
+		}
+		for _, attr := range sObj.Attributes {
+			if sa, ok := attr.(*SignatureAttribute); ok {
+				if s, err := sObj.getUtf8(sa.SignatureIndex); err == nil {
+					e.classSig = s
+				}
+				break
+			}
+		}
+		methodSigs := map[string]string{}
+		methodSeen := map[string]bool{}
+		for _, m := range sObj.Methods {
+			name, err := sObj.getUtf8(m.NameIndex)
+			if err != nil || name == "" || name == "<init>" || name == "<clinit>" {
+				continue
+			}
+			descriptor, err := sObj.getUtf8(m.DescriptorIndex)
+			if err != nil || descriptor == "" {
+				continue
+			}
+			for _, attr := range m.Attributes {
+				sigAttr, ok := attr.(*SignatureAttribute)
+				if !ok {
+					continue
+				}
+				sigStr, err := sObj.getUtf8(sigAttr.SignatureIndex)
+				if err != nil || sigStr == "" || (!strings.HasPrefix(sigStr, "(") && !strings.HasPrefix(sigStr, "<")) {
+					continue
+				}
+				key := class_context.MethodSigKey(name, len(methodParamFieldDescriptors(descriptor)))
+				if methodSeen[key] {
+					// (name, arity) collision (overload): ambiguous, drop so no call binds it.
+					delete(methodSigs, key)
+					continue
+				}
+				methodSeen[key] = true
+				methodSigs[key] = sigStr
+			}
+		}
+		e.methodSigs = methodSigs
+		e.ok = true
+		return e.classSig, e.methodSigs, true
 	}
 }
 
