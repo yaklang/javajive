@@ -77,8 +77,8 @@ func TestSwitchNonDomMergeBreakIsLoadBearing(t *testing.T) {
 	}
 	entries := []string{"com/alibaba/fastjson2/reader/ObjectReaderImplMap.class"}
 
-	on := classBreakOutsideErrors(t, jarPath, entries, false)  // fix ON
-	off := classBreakOutsideErrors(t, jarPath, entries, true)  // fix OFF (kill-switch)
+	on := classBreakOutsideErrors(t, jarPath, entries, false) // fix ON
+	off := classBreakOutsideErrors(t, jarPath, entries, true) // fix OFF (kill-switch)
 	t.Logf("ObjectReaderImplMap break-outside-loop errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {

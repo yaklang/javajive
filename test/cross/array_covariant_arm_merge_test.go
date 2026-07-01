@@ -42,8 +42,8 @@ func TestArrayCovariantArmMergeIsLoadBearing(t *testing.T) {
 	// fileSubstr "" so both CSVReader units are counted; the substring already isolates the
 	// covariant-array assignment error (the residual `Object[] cannot be converted to T` is a distinct
 	// generic-return defect that does not match this substring).
-	on := classConvErrCount(t, sw, jarPath, entries, "", substrs, false)  // fix ON
-	off := classConvErrCount(t, sw, jarPath, entries, "", substrs, true)  // fix OFF (kill-switch)
+	on := classConvErrCount(t, sw, jarPath, entries, "", substrs, false) // fix ON
+	off := classConvErrCount(t, sw, jarPath, entries, "", substrs, true) // fix OFF (kill-switch)
 	t.Logf("CSVReaderUTF8/UTF16 covariant-array slot errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {

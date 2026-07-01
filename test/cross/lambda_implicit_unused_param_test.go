@@ -79,7 +79,7 @@ func TestLambdaImplicitUnusedParamIsLoadBearing(t *testing.T) {
 	entries := []string{"com/alibaba/fastjson2/reader/ObjectReaderCreatorASM.class"}
 
 	on := classLambdaParamErrors(t, jarPath, entries, false) // fix ON
-	off := classLambdaParamErrors(t, jarPath, entries, true)  // fix OFF (kill-switch)
+	off := classLambdaParamErrors(t, jarPath, entries, true) // fix OFF (kill-switch)
 	t.Logf("ObjectReaderCreatorASM lambda-param errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {

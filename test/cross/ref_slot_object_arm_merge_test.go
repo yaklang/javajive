@@ -111,8 +111,8 @@ func TestRefSlotObjectArmMergeIsLoadBearing(t *testing.T) {
 	}
 	entries := []string{entry}
 
-	on := classConvErrCount(t, sw, jarPath, entries, fileSubstr, substrs, false)  // fix ON
-	off := classConvErrCount(t, sw, jarPath, entries, fileSubstr, substrs, true)  // fix OFF (kill-switch)
+	on := classConvErrCount(t, sw, jarPath, entries, fileSubstr, substrs, false) // fix ON
+	off := classConvErrCount(t, sw, jarPath, entries, fileSubstr, substrs, true) // fix OFF (kill-switch)
 	t.Logf("ObjectWriterAdapter String->Map/Collection errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {

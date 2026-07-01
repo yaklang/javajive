@@ -83,7 +83,7 @@ func TestBoolReturnSlotSplitIsLoadBearing(t *testing.T) {
 	entries := []string{"com/google/common/cache/LocalCache$Segment.class"}
 
 	on := classIntBoolErrors(t, jarPath, entries, false) // fix ON
-	off := classIntBoolErrors(t, jarPath, entries, true)  // fix OFF (kill-switch)
+	off := classIntBoolErrors(t, jarPath, entries, true) // fix OFF (kill-switch)
 	t.Logf("LocalCache$Segment int<->boolean errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {

@@ -13,7 +13,8 @@ import (
 )
 
 // zztmp: decompile the whole jar twice (two independent JarFS) and assert every entry is byte-identical.
-//   DET_JAR=fastjson2
+//
+//	DET_JAR=fastjson2
 func TestZZDeterminism(t *testing.T) {
 	jarKey := os.Getenv("DET_JAR")
 	if jarKey == "" {
@@ -58,7 +59,8 @@ func TestZZDeterminism(t *testing.T) {
 
 // zztmp: decompile the whole jar to a tmp dir, javac the tree, and print raw javac output (with carets)
 // for lines whose path contains DUMP_FILTER.
-//   DUMP_JAR=fastjson2 DUMP_FILTER=schema/JSONSchema.java
+//
+//	DUMP_JAR=fastjson2 DUMP_FILTER=schema/JSONSchema.java
 func TestZZDumpTreeErrors(t *testing.T) {
 	jarKey := os.Getenv("DUMP_JAR")
 	if jarKey == "" {
@@ -105,7 +107,8 @@ func TestZZDumpTreeErrors(t *testing.T) {
 
 // zztmp: decompile the whole jar, compile every file in ISO mode (against the original jar), and print
 // the sorted list of files that FAIL. Used to diff the failing-file set across kill-switch settings.
-//   ISOFAIL_JAR=fastjson2
+//
+//	ISOFAIL_JAR=fastjson2
 func TestZZDumpIsoFails(t *testing.T) {
 	jarKey := os.Getenv("ISOFAIL_JAR")
 	if jarKey == "" {
@@ -168,8 +171,9 @@ func sortStrings(s []string) {
 }
 
 // zztmp: decompile a single class entry and print a line window. Driven by env:
-//   PROBE_JAR=fastjson2 PROBE_ENTRY=com/alibaba/fastjson2/writer/FieldWriter.class
-//   PROBE_FROM=350 PROBE_TO=440
+//
+//	PROBE_JAR=fastjson2 PROBE_ENTRY=com/alibaba/fastjson2/writer/FieldWriter.class
+//	PROBE_FROM=350 PROBE_TO=440
 func TestZZProbeDecompile(t *testing.T) {
 	jarKey := os.Getenv("PROBE_JAR")
 	entry := os.Getenv("PROBE_ENTRY")

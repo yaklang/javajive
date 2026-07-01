@@ -97,7 +97,7 @@ func TestCoverUndeclaredLocalIsLoadBearing(t *testing.T) {
 	}
 
 	on := classUndeclaredVarErrors(t, jarPath, entries, false) // fix ON
-	off := classUndeclaredVarErrors(t, jarPath, entries, true)  // fix OFF (kill-switch)
+	off := classUndeclaredVarErrors(t, jarPath, entries, true) // fix OFF (kill-switch)
 	t.Logf("undeclared variable varN errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {

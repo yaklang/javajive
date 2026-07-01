@@ -80,7 +80,7 @@ func TestBoolParamReassignMergeIsLoadBearing(t *testing.T) {
 	entries := []string{"com/alibaba/fastjson2/writer/ObjectWriterProvider.class"}
 
 	on := classBadOperandErrors(t, jarPath, entries, false) // fix ON
-	off := classBadOperandErrors(t, jarPath, entries, true)  // fix OFF (kill-switch)
+	off := classBadOperandErrors(t, jarPath, entries, true) // fix OFF (kill-switch)
 	t.Logf("ObjectWriterProvider bad-operand errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {

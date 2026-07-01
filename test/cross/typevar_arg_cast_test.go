@@ -35,8 +35,8 @@ func TestComparatorCompareTypeVarCastIsLoadBearing(t *testing.T) {
 	entries := []string{"com/google/common/collect/Comparators.class"}
 	substrs := []string{"Object cannot be converted to T"}
 
-	on := classConvErrCount(t, sw, jarPath, entries, "", substrs, false)  // resolver ON
-	off := classConvErrCount(t, sw, jarPath, entries, "", substrs, true)  // resolver OFF (kill-switch)
+	on := classConvErrCount(t, sw, jarPath, entries, "", substrs, false) // resolver ON
+	off := classConvErrCount(t, sw, jarPath, entries, "", substrs, true) // resolver OFF (kill-switch)
 	t.Logf("Comparators compare typevar errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {
@@ -69,8 +69,8 @@ func TestTypeVarArrayArgCastIsLoadBearing(t *testing.T) {
 	}
 	substrs := []string{"Object[] cannot be converted to T"}
 
-	on := classConvErrCount(t, sw, jarPath, entries, "", substrs, false)  // fix ON
-	off := classConvErrCount(t, sw, jarPath, entries, "", substrs, true)  // fix OFF (kill-switch)
+	on := classConvErrCount(t, sw, jarPath, entries, "", substrs, false) // fix ON
+	off := classConvErrCount(t, sw, jarPath, entries, "", substrs, true) // fix OFF (kill-switch)
 	t.Logf("CSVReader accept(Object[]) typevar errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {
@@ -111,8 +111,8 @@ func TestTypeVarArrayElementStoreCastIsLoadBearing(t *testing.T) {
 		"Object cannot be converted to E",
 	}
 
-	on := classConvErrCount(t, sw, jarPath, entries, "", substrs, false)  // fix ON
-	off := classConvErrCount(t, sw, jarPath, entries, "", substrs, true)  // fix OFF (kill-switch)
+	on := classConvErrCount(t, sw, jarPath, entries, "", substrs, false) // fix ON
+	off := classConvErrCount(t, sw, jarPath, entries, "", substrs, true) // fix OFF (kill-switch)
 	t.Logf("type-var-array element-store errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {

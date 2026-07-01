@@ -85,7 +85,7 @@ func TestLambdaCtxRestoreIsLoadBearing(t *testing.T) {
 	entries := []string{"com/alibaba/fastjson2/util/BeanUtils.class"}
 
 	on := classLambdaCtxIntBoolErrors(t, jarPath, entries, false) // fix ON
-	off := classLambdaCtxIntBoolErrors(t, jarPath, entries, true)  // fix OFF (kill-switch)
+	off := classLambdaCtxIntBoolErrors(t, jarPath, entries, true) // fix OFF (kill-switch)
 	t.Logf("BeanUtils int->boolean errors: ON=%d OFF=%d", on, off)
 
 	if off == 0 {
