@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -8,6 +9,18 @@ import (
 	"github.com/yaklang/javajive/internal/filesys"
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
 )
+
+// EntryOriginalName returns the on-disk/archive name of a directory entry
+// before any UnifiedFS extension rewriting (e.g. ".class" -> ".java") was
+// applied. For non-unified entries it returns entry.Name() unchanged. This
+// lets external callers (e.g. yaklang's java_decompiler) recover the ".class"
+// name for navigation while still reading the decompiled ".java" content.
+func EntryOriginalName(entry fs.DirEntry) string {
+	if ude, ok := entry.(*filesys.UnifiedDirEntry); ok {
+		return ude.DirEntry.Name()
+	}
+	return entry.Name()
+}
 
 // JarRecursiveParseEnabled reports whether jar recursive parse is enabled.
 // nil defaults to true, matching SSA jar_recursive_parse semantics.
