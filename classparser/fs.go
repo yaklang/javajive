@@ -34,6 +34,16 @@ func NewJarFSFromLocal(path string) (*JarFS, error) {
 	return NewJarFS(zipFS), nil
 }
 
+// NewJarFSFromLocalWithOptions is like NewJarFSFromLocal but lets the caller
+// control nested-jar recursion (matching SSA jar_recursive_parse semantics).
+func NewJarFSFromLocalWithOptions(path string, recursiveParse bool) (*JarFS, error) {
+	zipFS, err := filesys.NewZipFSFromLocal(path)
+	if err != nil {
+		return nil, err
+	}
+	return NewJarFSWithOptions(zipFS, recursiveParse), nil
+}
+
 func NewJarFS(zipFs *filesys.ZipFS) *JarFS {
 	return NewJarFSWithOptions(zipFs, true) // 默认启用递归解析
 }
