@@ -1,6 +1,15 @@
-# Phase 1 (Bug AL) seed: fastjson2 JdbcSupport$TimeReader.readObject reuses JVM slot 5 (a long) for
-# two disjoint live ranges. The second range's variable (var5_1) was declared inside a nested
-# `if (this.formatUnixTime)` block but read across both top-level branches, so every use rendered
-# out of scope -> "cannot find symbol: variable var5_1". The live-interval declaration placement
-# (JDEC_LIVEINTERVAL_OFF) hoists its bare declaration to the method top, dominating all uses.
-+long var5_1;
+# Phase 1 (Bug AL) seed: fastjson2 JdbcSupport$TimeReader.readObject reuses JVM slot 5 for THREE
+# disjoint live ranges (a long unix-time, a DateTimeFormatter, a String). Each range's bare
+# declaration must be hoisted to the method top with its CORRECT type so every use is in scope and
+# type-checks (the original bug rendered the second range out of scope -> "cannot find symbol:
+# variable var5_1"). The live-interval declaration placement (JDEC_LIVEINTERVAL_OFF) hoists the bare
+# declarations to the method top, dominating all uses.
+#
+# Note: this golden originally pinned only `+long var5_1;`. A later disjoint-range numbering change
+# renamed the long range to var5 and assigned var5_1/var5_2 to the DateTimeFormatter/String ranges.
+# The real JdbcSupport$TimeReader compiles CLEAN in the authoritative whole-jar (tree) recompile, so
+# the output is correct -- the golden is updated to assert all three typed hoisted declarations, a
+# strictly stronger invariant than the single original rule.
++long var5;
++DateTimeFormatter var5_1;
++String var5_2;

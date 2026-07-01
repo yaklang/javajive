@@ -22,6 +22,34 @@ import (
 // compare fix-ON vs fix-OFF on the identical inputs.
 func groupRecompileErrors(t *testing.T, jarPath, classPrefix string, killOff bool) int {
 	t.Helper()
+	// Isolate the live-interval fix from a LATER, more general fix that also clears part of the
+	// JdbcSupport defect: prebindEscapingIfElseSlots' minted-reuse guard (gson LinkedTreeMap.find
+	// shared-disjoint-ref fix) independently repairs 8 of these errors (OFF 15->7), which would mask
+	// the live-interval kill-switch's effect (ON=7 OFF=7) and make this test read as non-load-bearing.
+	// Hold that overlapping fix OFF for BOTH measurements so the toggle below isolates live-interval
+	// alone (ON=7 OFF=15). Remove once a JdbcSupport residual exclusive to live-interval is pinned.
+	prevReuse, hadReuse := os.LookupEnv("JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF")
+	os.Setenv("JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF", "1")
+	defer func() {
+		if hadReuse {
+			os.Setenv("JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF", prevReuse)
+		} else {
+			os.Unsetenv("JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF")
+		}
+	}()
+	// Same masking story for the even-later cross-scope orphan-read replay (JSONPathParser fix):
+	// replayUnambiguousRebindings independently rebinds the same JdbcSupport orphan reads the
+	// live-interval placement targets, dropping OFF 15->7 and flattening this test to ON=7 OFF=7.
+	// Hold it OFF for BOTH measurements so the live-interval toggle stays isolated (ON=7 OFF=15).
+	prevOrphan, hadOrphan := os.LookupEnv("JDEC_ORPHAN_GLOBAL_REBIND_OFF")
+	os.Setenv("JDEC_ORPHAN_GLOBAL_REBIND_OFF", "1")
+	defer func() {
+		if hadOrphan {
+			os.Setenv("JDEC_ORPHAN_GLOBAL_REBIND_OFF", prevOrphan)
+		} else {
+			os.Unsetenv("JDEC_ORPHAN_GLOBAL_REBIND_OFF")
+		}
+	}()
 	prev, had := os.LookupEnv("JDEC_LIVEINTERVAL_OFF")
 	if killOff {
 		os.Setenv("JDEC_LIVEINTERVAL_OFF", "1")

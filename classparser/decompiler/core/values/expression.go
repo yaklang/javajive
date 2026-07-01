@@ -759,6 +759,37 @@ func suppressTypeVarArgCast(funcCtx *class_context.ClassContext, argRaw, expectR
 	return true
 }
 
+// typeVarArrayArgCast reports whether the i-th argument needs a synthesized `(T)` cast because a
+// generic resolver recovered the formal as a denotable, in-scope type VARIABLE while the argument is a
+// reference ARRAY. The normal class-vs-class arg-cast branch cannot reach this case: an array type's
+// RawType() is *JavaArrayType, not *JavaClass, so the (ok1 && ok2) gate is false and the array argument
+// renders bare. A reference array is never directly assignable to a bare type variable in source (it is
+// a widening to the variable's Object bound, which javac re-checks against the variable), so the source
+// carried an unchecked `(T)` cast; re-emitting it is behaviour-preserving (the bytecode already stored
+// the array into the erased-to-Object parameter). Tightly gated:
+//   - ok1: the formal was recovered as a *JavaClass (a bare type-variable reference like `T`/`E`), not
+//     an array/parameterized/concrete type (an array-typed formal would mean T was instantiated to an
+//     array and the bare argument is already correct);
+//   - resolvedGeneric: only when one of the generic resolvers recovered the instantiated parameter
+//     (never on a raw descriptor Object param, which would over-cast plain Object[] args);
+//   - the recovered name is a type parameter in the CURRENT scope (so `(T)` is denotable and compiles);
+//   - the argument's static type is an array.
+//
+// Kill-switch: JDEC_TYPEVAR_ARRAY_ARG_CAST_OFF=1.
+func (f *FunctionCallExpression) typeVarArrayArgCast(ok1, resolvedGeneric bool, expect *types.JavaClass, arg JavaValue, funcCtx *class_context.ClassContext) bool {
+	if os.Getenv("JDEC_TYPEVAR_ARRAY_ARG_CAST_OFF") != "" {
+		return false
+	}
+	if !ok1 || !resolvedGeneric || expect == nil || funcCtx == nil || arg == nil {
+		return false
+	}
+	if expect.Name == "java.lang.Object" || !funcCtx.IsTypeParam(expect.Name) {
+		return false
+	}
+	at := arg.Type()
+	return at != nil && at.IsArray()
+}
+
 // calleeParamIsErasedTypeVar reports whether the called method's i-th formal parameter is a TYPE
 // VARIABLE in the callee's own generic Signature (so the JVM descriptor erased it to merely that
 // variable's bound). Synthesizing a cast to that erased bound is a no-op UPCAST (the argument flowed
@@ -934,6 +965,21 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 				return argType
 			})
 		}
+	} else if f.typeVarArrayArgCast(ok1, resolvedGeneric, expectClassType, arg, funcCtx) {
+		// The resolver recovered the formal as a denotable type variable T (in scope here) but the
+		// ARGUMENT is a reference ARRAY -- the (ok1 && ok2) class-vs-class branch above never fires
+		// because JavaArrayType.RawType() is not a *JavaClass. A reference array is never directly
+		// assignable to a bare type variable, so the source carried an unchecked `(T)` cast that
+		// erased to a no-op (the array already satisfied T's Object bound in bytecode); re-emit it.
+		// fastjson2 CSVReader.readLineObjectAll: `consumer.accept((T) values)` where `values` is the
+		// `Object[]` returned by readLineValues and `consumer` is `Consumer<T>`.
+		argStr := arg.String(funcCtx)
+		argTypeStr := argType.String(funcCtx)
+		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			return fmt.Sprintf("(%s)(%s)", argTypeStr, argStr)
+		}, func() types.JavaType {
+			return argType
+		})
 	} else if expectPrim, okp := primerRawType(argType); okp {
 		if expectPrim.Name == types.JavaBoolean {
 			// The JVM has no boolean opcodes: a boolean argument is pushed as an int

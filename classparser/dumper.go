@@ -701,6 +701,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// cases. Only wired on the jar / DecompileWithResolver path (foldSiblingResolver != nil).
 		c.FuncCtx.ClassSig = classSigStr
 		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
+		c.FuncCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
 	}
 	packageSource := fmt.Sprintf("package %s;\n\n", packageName)
 	if className == "" {
@@ -1388,6 +1389,53 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 		e.methodSigs = methodSigs
 		e.ok = true
 		return e.classSig, e.methodSigs, true
+	}
+}
+
+// buildSiblingSuperTypes returns a lazy, cached provider of a jar-internal class's RAW direct supertype
+// internal names (slash-form): its super_class followed by its direct interfaces. Unlike
+// buildSiblingClassSig (which reads the generic Signature attribute and is empty for non-generic
+// classes), it reads the always-present super_class / Interfaces constant-pool entries, so it resolves
+// plain class hierarchies too (e.g. fastjson2 `Any extends JSONSchema`). It powers the cross-class
+// subtype/LUB widening (types.CrossClassDirectLUB). Returns nil when no cross-class resolver is
+// available (single-class decompile), which disables the widening. A nil/empty cache entry records a
+// confirmed miss (JDK/external class not in the jar) so the result is deterministic and bounded.
+func (c *ClassObjectDumper) buildSiblingSuperTypes() func(internalName string) ([]string, bool) {
+	if c.foldSiblingResolver == nil {
+		return nil
+	}
+	type entry struct {
+		supers []string
+		ok     bool
+	}
+	cache := map[string]*entry{}
+	resolver := c.foldSiblingResolver
+	return func(internal string) ([]string, bool) {
+		if e, hit := cache[internal]; hit {
+			return e.supers, e.ok
+		}
+		e := &entry{}
+		cache[internal] = e
+		data, ok := resolver(internal)
+		if !ok || len(data) == 0 {
+			return nil, false // JDK / external: not in jar
+		}
+		sObj, err := Parse(data)
+		if err != nil {
+			return nil, false
+		}
+		var supers []string
+		if sup := sObj.GetSupperClassName(); sup != "" {
+			supers = append(supers, sup)
+		}
+		for _, iface := range sObj.GetInterfacesName() {
+			if iface != "" {
+				supers = append(supers, iface)
+			}
+		}
+		e.supers = supers
+		e.ok = true
+		return e.supers, true
 	}
 }
 

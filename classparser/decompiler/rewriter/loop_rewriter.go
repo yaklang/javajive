@@ -83,7 +83,105 @@ func outermostEnclosingLoopWithExit(manager *RewriteManager, preWhileNodes []*co
 	return best
 }
 
+// asLatchIncExpr reports whether a node is a bare loop-increment latch statement of the form `i++`
+// or `i--` (a single int local incremented/decremented by ±1, the iinc javac emits for a for-loop
+// step), returning the underlying JavaExpression. Compound steps (`i += k`, AssignStatement) and any
+// other statement shape are rejected so only the clean for-step latch is eligible for split-continue
+// reconstruction.
+func asLatchIncExpr(n *core.Node) (*values.JavaExpression, bool) {
+	if n == nil {
+		return nil, false
+	}
+	e, ok := n.Statement.(*values.JavaExpression)
+	if !ok {
+		return nil, false
+	}
+	if e.Op != values.INC && e.Op != values.DEC {
+		return nil, false
+	}
+	if len(e.Values) < 2 {
+		return nil, false
+	}
+	return e, true
+}
+
+// convertSplitContinueToLatch repairs for-loop `continue` statements that javac compiled as a `goto`
+// to the loop's increment/step node (the latch `i++`) instead of to the loop header. When a loop body
+// has TWO OR MORE early-continue branches that jump to the single bottom-of-body increment (e.g. gson
+// JsonWriter.string / the Repro fixture: `if(c<128){r=arr[c]; if(r==null) continue;} else if(...) ...
+// else continue; <write r>; i++;`), the increment node is the if/else region's post-dominator. Those
+// `goto increment` edges are NOT back-edges to the header, so RebuildLoopNode never redirected them and
+// LoopJmpRewriter's `next == circleNode` continue rule never fires; the edges survive as ordinary
+// fall-through into the increment. IfRewriter then structures the branches as EMPTY (the continue body
+// was just the dropped goto) and the post-if write runs unconditionally over a local that the
+// continue paths never assigned ("variable r might not have been initialized"). The single trailing
+// increment cannot serve every continue path, and a bare `continue` would skip the step and spin.
+//
+// Fix: for each early-continue predecessor P of the latch, splice a PRIVATE copy of the increment plus
+// an explicit `continue` (P -> i++' -> continue -> header), so each path steps then re-tests exactly
+// like the source for-loop, while the latch's own fall-through path is left untouched. circleNode here
+// is the RebuildLoopNode do-while wrapper, so wiring the new continue to it matches the existing
+// `next == circleNode` continue mechanism. Gated to: a single ±1 latch whose ONLY successor is the
+// loop header, with >=2 conditional/jump predecessors AND >=1 fall-through predecessor — so the clean
+// single-continue loop (handled by IfRewriter branch inversion) and loops without a separable step
+// latch are byte-for-byte unchanged. Kill-switch: JDEC_SPLIT_CONTINUE_LATCH_OFF=1.
+func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node) {
+	if os.Getenv("JDEC_SPLIT_CONTINUE_LATCH_OFF") != "" {
+		return
+	}
+	for _, latch := range slices.Clone(circleNode.Source) {
+		if latch == circleNode {
+			continue
+		}
+		incExpr, ok := asLatchIncExpr(latch)
+		if !ok {
+			continue
+		}
+		// The latch must be a genuine bottom-of-body step: its sole successor is the loop header and it
+		// lives inside the loop body.
+		if len(latch.Next) != 1 || latch.Next[0] != circleNode {
+			continue
+		}
+		if !utils.IsDominate(manager.DominatorMap, circleNode, latch) {
+			continue
+		}
+		var jumpPreds, fallPreds []*core.Node
+		for _, p := range slices.Clone(latch.Source) {
+			if p == circleNode {
+				continue
+			}
+			// A predecessor outside the loop body cannot be a body-level continue; keep it intact.
+			if !utils.IsDominate(manager.DominatorMap, circleNode, p) {
+				fallPreds = append(fallPreds, p)
+				continue
+			}
+			if p.IsJmp || len(p.Next) >= 2 {
+				jumpPreds = append(jumpPreds, p)
+			} else {
+				fallPreds = append(fallPreds, p)
+			}
+		}
+		if len(jumpPreds) < 2 || len(fallPreds) < 1 {
+			continue
+		}
+		for _, p := range jumpPreds {
+			// Build a FRESH increment expression reusing the latch's variable ref (so RewriteVar renames
+			// it consistently) but not the latch node itself, then an explicit continue to the header.
+			incrNode := manager.NewNode(values.NewBinaryExpression(incExpr.Values[0], incExpr.Values[1], incExpr.Op, incExpr.Typ))
+			contNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
+				return "continue"
+			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
+			}))
+			contNode.IsJmp = true
+			replaceNextInPlace(p, latch, incrNode)
+			incrNode.AddNext(contNode)
+			contNode.AddNext(circleNode)
+		}
+	}
+}
+
 func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
+	convertSplitContinueToLatch(manager, circleNode)
 	loopEnd := searchCircleEndNode(circleNode, circleNode.Next[0], manager.DominatorMap, manager.LoopRegionReducible)
 	preWhileNodes := utils.NodeFilter(manager.WhileNode, func(node *core.Node) bool {
 		return utils.IsDominate(manager.DominatorMap, node, circleNode)

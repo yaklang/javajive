@@ -1273,6 +1273,247 @@ func (d *Decompiler) slotStoreReachesParamPhiLoad(store *OpCode, slot int) bool 
 	return false
 }
 
+// reachingBoolReturnSlotSplit fixes the disjoint slot-reuse where a boolean method's `return
+// false/true` reuses a JVM slot that a DISJOINT earlier live range used as an `int` local (guava
+// LocalCache$Segment.replace / MapMakerInternalMap$Segment.replace:
+// `int newCount = this.count - 1; ...; this.count = newCount;` inside `if (valueRef.isActive())`,
+// then `return false;`). javac compiles `return false` as `iconst_0; istore S`, so the boolean
+// false/true is an int-0/1 literal on the stack; AssignVarGuarded sees it as int-compatible with the
+// slot's current int ref and REUSES that ref, merging the two disjoint ranges into one variable. The
+// IRETURN then retypes the shared ref to boolean (resetReturnValueTypeSafe), so the earlier int uses
+// (`newCount = count - 1`, `this.count = newCount`) render as `boolean = int` / `int = boolean` and
+// javac rejects them ("int cannot be converted to boolean" x2 + "boolean cannot be converted to int").
+//
+// The two ranges are PROVABLY distinct source variables, witnessed by the reaching-definition web: the
+// int store's value is consumed by a putfield BEFORE this store (its own web); this store's value is
+// consumed only by the boolean IRETURN AFTER it (a separate web). On a match it coerces the 0/1 literal
+// to boolean so AssignVarGuarded mints a FRESH boolean variable for the return range, leaving the int
+// range on its own ref. This is the inverse of the reachingBool*Merge family (which CONTINUES a boolean
+// def for an int-0/1 store); it fires only when the slot's current version is an `int` local, so the two
+// never overlap. Kill-switch: JDEC_BOOL_RETURN_SLOT_SPLIT_OFF=1.
+func (d *Decompiler) reachingBoolReturnSlotSplit(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) {
+	if os.Getenv("JDEC_BOOL_RETURN_SLOT_SPLIT_OFF") == "1" {
+		return
+	}
+	if store == nil || current == nil || val == nil {
+		return
+	}
+	// The slot's current version must be a plain int local (the one AssignVarGuarded would reuse for
+	// an int-0/1 store). Parameters and non-int types are handled elsewhere / are not this shape.
+	if current.IsParam || !isExactPrimer(current.Type(), types.JavaInteger) {
+		return
+	}
+	lit, ok := intLiteral01(val)
+	if !ok {
+		return
+	}
+	if !d.functionReturnsBoolean() {
+		return
+	}
+	// This store's value must be the boolean result: a forward path reaches a load of the slot that
+	// is returned (ireturn), with no intervening redefinition. This excludes a dead int store whose
+	// value feeds a putfield rather than the return.
+	if !d.slotStoreFeedsReturn(store, slot) {
+		return
+	}
+	// And the slot's current int range must be a DIFFERENT reaching-definition web (a genuine disjoint
+	// reuse), so reusing its ref would merge two distinct variables. A same-web continuation declines.
+	if !d.slotStoreDisjointFromCurrentWeb(store, slot, current) {
+		return
+	}
+	// Coerce false/true so AssignVarGuarded sees a boolean value (not int-category) and mints a fresh
+	// boolean variable, splitting the return range off the int range.
+	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
+}
+
+// reachingBoolFieldSlotSplit is the boolean-FIELD-sink sibling of reachingBoolReturnSlotSplit. It fixes
+// the disjoint slot-reuse where a boolean local stored into a `boolean` field reuses a JVM slot that a
+// DISJOINT earlier live range used as an `int` local. fastjson2 JSONPathTypedMultiIndexes.<init>:
+//
+//	int[] indexes = new int[paths.length];
+//	for (int i = 0; i < indexPaths.length; i++) indexes[i] = ((JSONPathSingleIndex) indexPaths[i]).index; // slot 11 = i (int)
+//	this.indexes = indexes;
+//	boolean duplicate = false;                          // slot 11 REUSED (iconst_0; istore 11)
+//	int maxIndex = -1;
+//	for (int j = 0; ...) { ...; if (...) { duplicate = true; break; } }
+//	this.duplicate = duplicate;                          // putfield duplicate:Z
+//
+// `duplicate = false` is `iconst_0; istore 11`, an int-0/1 literal on the stack; AssignVarGuarded sees
+// it as int-compatible with the (now-dead) int loop counter `i` still parked in slot 11's global table
+// entry and REUSES that ref, merging the two disjoint ranges. The slot's type later resolves to boolean
+// (from `putfield duplicate:Z` / the `!duplicate` test), so the earlier loop uses render as
+// `boolean < int` / `array[boolean]` / `boolean++` and javac rejects them ("bad operand types",
+// "boolean cannot be converted to int", "bad operand type boolean for unary operator '++'").
+//
+// The two ranges are PROVABLY distinct source variables (the reaching-definition web partitions the int
+// loop counter from the boolean flag). The boolean-ness here is witnessed not by an IRETURN (the method
+// is a void <init>) but by the value flowing into a `boolean` field via putfield/putstatic. On a match
+// it coerces the 0/1 literal to boolean so AssignVarGuarded mints a FRESH boolean variable for the flag,
+// leaving the int loop counter on its own ref. Same gates as reachingBoolReturnSlotSplit (int current +
+// int-0/1 value + disjoint web), only the sink differs. Kill-switch: JDEC_BOOL_FIELD_SLOT_SPLIT_OFF=1.
+func (d *Decompiler) reachingBoolFieldSlotSplit(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) {
+	if os.Getenv("JDEC_BOOL_FIELD_SLOT_SPLIT_OFF") == "1" {
+		return
+	}
+	if store == nil || current == nil || val == nil {
+		return
+	}
+	if current.IsParam || !isExactPrimer(current.Type(), types.JavaInteger) {
+		return
+	}
+	lit, ok := intLiteral01(val)
+	if !ok {
+		return
+	}
+	// This store's value must flow forward (no intervening redefinition) into a boolean field, proving
+	// it is a boolean flag rather than an int reused by some other consumer.
+	if !d.slotStoreFeedsBooleanField(store, slot) {
+		return
+	}
+	// If this store phi-merges with current's def at a common downstream load, the two are ONE source
+	// variable, not a disjoint reuse -- e.g. a boolean flag assigned in BOTH a try arm and a catch arm
+	// (iconst_1/iconst_0; istore) that both flow into the same `putstatic ...:Z` via a shared post-merge
+	// load (gson SqlTypesSupport.<clinit>). The Z-field sink alone cannot tell that legitimate
+	// sibling-arm merge apart from a genuine int-counter/boolean-flag reuse; the phi proves sameness, so
+	// decline and let reachingBoolSiblingArmMerge keep them as one boolean. The genuine split target
+	// (int loop counter `i` then boolean `duplicate`) shares NO load, so the phi is absent and it fires.
+	if d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return
+	}
+	// And the slot's current int range must be a DIFFERENT reaching-definition web (genuine disjoint
+	// reuse), so reusing its ref would merge two distinct variables.
+	if !d.slotStoreDisjointFromCurrentWeb(store, slot, current) {
+		return
+	}
+	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
+}
+
+// slotStoreFeedsBooleanField reports whether `store`'s value flows forward (no intervening redefinition
+// of the slot) to a load of the slot that is immediately stored into a `boolean` field (putfield /
+// putstatic of a Z-descriptor field). This proves the stored value is a boolean flag.
+func (d *Decompiler) slotStoreFeedsBooleanField(store *OpCode, slot int) bool {
+	if store == nil {
+		return false
+	}
+	visited := map[*OpCode]bool{store: true}
+	queue := append([]*OpCode{}, store.Target...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || cur.Instr == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			continue // a redefinition kills this value; do not look past it on this path
+		}
+		if isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
+			for _, t := range cur.Target {
+				if t != nil && t.Instr != nil &&
+					(t.Instr.OpCode == OP_PUTFIELD || t.Instr.OpCode == OP_PUTSTATIC) &&
+					d.opcodeStoresBooleanField(t) {
+					return true
+				}
+			}
+		}
+		queue = append(queue, cur.Target...)
+	}
+	return false
+}
+
+// opcodeStoresBooleanField reports whether a putfield/putstatic opcode targets a field whose declared
+// type is exactly boolean (descriptor `Z`).
+func (d *Decompiler) opcodeStoresBooleanField(op *OpCode) bool {
+	if op == nil || len(op.Data) < 2 || d.constantPoolGetter == nil {
+		return false
+	}
+	idx := int(Convert2bytesToInt(op.Data))
+	m, ok := d.constantPoolGetter(idx).(*values.JavaClassMember)
+	if !ok || m == nil {
+		return false
+	}
+	return isExactPrimer(m.JavaType, types.JavaBoolean)
+}
+
+// functionReturnsBoolean reports whether the method currently being decompiled has return type
+// exactly boolean.
+func (d *Decompiler) functionReturnsBoolean() bool {
+	if d.FunctionContext == nil {
+		return false
+	}
+	ft, ok := d.FunctionContext.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return false
+	}
+	return isExactPrimer(ft.ReturnType, types.JavaBoolean)
+}
+
+// slotStoreFeedsReturn reports whether `store`'s value flows forward (no intervening redefinition of
+// the slot) to a load of the slot that is immediately returned (ireturn). This proves the stored value
+// is the method's boolean result rather than an int used by some other consumer.
+func (d *Decompiler) slotStoreFeedsReturn(store *OpCode, slot int) bool {
+	if store == nil {
+		return false
+	}
+	visited := map[*OpCode]bool{store: true}
+	queue := append([]*OpCode{}, store.Target...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || cur.Instr == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			continue // a redefinition kills this value; do not look past it on this path
+		}
+		if isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
+			for _, t := range cur.Target {
+				if t != nil && t.Instr != nil && t.Instr.OpCode == OP_IRETURN {
+					return true
+				}
+			}
+		}
+		queue = append(queue, cur.Target...)
+	}
+	return false
+}
+
+// slotStoreDisjointFromCurrentWeb reports whether `current` (the slot's current ref) is defined in a
+// DIFFERENT reaching-definition web than `store`, i.e. `store` does not continue `current`'s variable.
+// It checks whether any prior same-slot definition reaching `store` that lies in store's OWN web
+// resolves to current's VarUid; if one does, store continues current (same variable, not disjoint) and
+// this returns false. Returns false when the web partition is unavailable (JDEC_LIVEINTERVAL_OFF), so
+// the split declines rather than guessing.
+func (d *Decompiler) slotStoreDisjointFromCurrentWeb(store *OpCode, slot int, current *values.JavaRef) bool {
+	webs := d.slotWebs()
+	if webs == nil || store == nil || current == nil {
+		return false
+	}
+	storeWeb, ok := webs.webOf[store]
+	if !ok {
+		return false
+	}
+	stores, _ := reachingStoresOf(store, slot)
+	for _, st := range stores {
+		if w, ok := webs.webOf[st]; !ok || w != storeWeb {
+			continue
+		}
+		refs, ok := d.opcodeIdToRef[st]
+		if !ok || len(refs) == 0 {
+			continue
+		}
+		ref, ok := refs[len(refs)-1][0].(*values.JavaRef)
+		if !ok || ref == nil {
+			continue
+		}
+		if ref.VarUid == current.VarUid {
+			return false // store continues current in the same web: not a disjoint reuse
+		}
+	}
+	return true
+}
+
 // reachingRefSlotPhiMerge handles the lazy-init reference-slot split (Bug AK phi half), the
 // reference-type analogue of reachingBoolDefaultMerge. The ubiquitous idiom
 //
@@ -1362,6 +1603,348 @@ func (d *Decompiler) reachingRefSlotPhiMerge(store *OpCode, slot int, current *v
 			return nil
 		}
 		return defRef
+	}
+	return nil
+}
+
+// reachingRefSlotSiblingArmMerge handles the SIBLING-ARM reference phi that neither AssignVarGuarded
+// nor reachingRefSlotPhiMerge covers: two DISJOINT arms store SIBLING reference types (neither a
+// subtype of the other, but sharing a non-Object JDK supertype) into one slot, and both flow into a
+// common downstream use. fastjson2 FieldWriter.compareTo:
+//
+//	Member m1;                       // source declares the LUB
+//	if (cond) { m1 = this.method; }  // arm 1: Method
+//	else      { m1 = this.field;  }  // arm 2: Field
+//	... if (m1 instanceof Method) ((Method) m1).getReturnType() ...   // polymorphic post-merge uses
+//
+// In bytecode order arm1 stores first (the DFS mints a Method ref R1); arm2 then stores a Field with
+// current=R1. AssignVarGuarded sees the differing type strings and -- the slot being neither null-init,
+// param, nor int-category -- mints a fresh Field-typed variable. The post-merge polymorphic uses then
+// bind to a Field-typed name and javac rejects them ("inconvertible types: Field cannot be converted to
+// Method", x16 in this one method) since a Field can never be a Method.
+//
+// The source variable's true type is the LUB of the arms (Member). This is the reference-type analogue
+// of reachingBoolSiblingArmMerge (boolean sibling arms) and the sibling counterpart of
+// reachingRefSlotPhiMerge (which handles only SUBTYPE arms via a self-null-check). It fires ONLY on the
+// provably-safe sibling-phi signature:
+//   - current (the DFS-earlier arm's ref) and val are BOTH non-null, non-param, non-primitive refs of
+//     DIFFERENT declared types;
+//   - they have a JDK-table common supertype L that is neither Object nor either arm itself (a strict
+//     sibling). CommonSuperType already returns nil for unknown types and for an Object-only LUB, so
+//     Object-dispatch slot reuse (one slot holding Map/List/Number/String on instanceof branches, whose
+//     only shared ancestor is Object) is excluded -- those are genuinely distinct variables;
+//   - a phi (a downstream load reached by BOTH this store and current's def) proves the two arms denote
+//     ONE source variable; a disjoint slot reuse shares no such load.
+//
+// On a match it widens current's declared type to L and returns current to continue, so both arms store
+// into one L-typed variable and every (cast-guarded) polymorphic use compiles. Because the original
+// compiled, every arm value is assignable to L, and every type-specific use is already a checkcast the
+// dumper renders as an explicit `((Method) m1)` cast, so widening to L is type-safe. Kill-switch:
+// JDEC_REF_SLOT_SIBLING_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotSiblingArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_SIBLING_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if current.IsParam {
+		return nil
+	}
+	ct := current.Type()
+	vt := slotDeclType(val)
+	if ct == nil || vt == nil {
+		return nil
+	}
+	if _, isPrim := ct.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	if current.IsNullInitialized() {
+		// The null-initialized idiom is handled by the null-adopt path in the caller.
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	ctName := ct.String(ctx)
+	vtName := vt.String(ctx)
+	if ctName == vtName {
+		return nil
+	}
+	lub := types.CommonSuperType(ct, vt)
+	if lub == nil {
+		return nil
+	}
+	lubName := lub.String(ctx)
+	// Strict sibling only: a subtype relation (LUB == one of the arms) is handled by AssignVarGuarded /
+	// reachingRefSlotPhiMerge, not here.
+	if lubName == ctName || lubName == vtName {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	current.ResetVarType(lub)
+	return current
+}
+
+// reachingRefSlotSubtypeArmMerge handles the SUBTYPE-arm reference phi for instanceof-dispatch slot
+// reuse across JAR-INTERNAL types that neither reachingRefSlotPhiMerge nor reachingRefSlotSiblingArmMerge
+// covers. gson JsonAdapterAnnotationTypeAdapterFactory.getTypeAdapter:
+//
+//	TypeAdapter ta;                                     // source declares the supertype
+//	if (o instanceof TypeAdapter)             ta = (TypeAdapter) o;            // arm: supertype
+//	else if (o instanceof TypeAdapterFactory) ta = ((TypeAdapterFactory) o).create(...); // supertype
+//	else if (o instanceof JsonSerializer||..) ta = new TreeTypeAdapter(...);  // arm: SUBTYPE
+//	else                                      throw new IllegalArgumentException(...);
+//	if (ta != null && annotation.nullSafe()) ta = ta.nullSafe();             // post-merge use
+//	return ta;
+//
+// The arms are DISJOINT (each `astore S; goto MERGE`), so no arm's def reaches another: the
+// backward-reaching-def anchor of reachingRefSlotPhiMerge (len(defOps)==1) is EMPTY and its lazy-init
+// self-null-check signature is absent. In DFS order the first arms mint a supertype ref (TypeAdapter);
+// the TreeTypeAdapter arm then stores a SUBTYPE onto current=that ref. AssignVarGuarded sees the
+// differing type strings and -- the slot being neither null-init, param, nor int-category -- mints a
+// fresh TreeTypeAdapter variable, so the post-merge `ta` read is never assigned on that path (javac:
+// "variable ta might not have been initialized"). reachingRefSlotSiblingArmMerge cannot help either:
+// its CommonSuperType is JDK-only, so a JAR-internal subtype relation reads as nil, and even with a LUB
+// it bails the moment the LUB equals one arm (the explicit "strict sibling only" gate).
+//
+// Fix: when val's type is a (transitive, jar-internal) STRICT SUBTYPE of current's declared type
+// (resolved via funcCtx.SiblingSuperTypes / CrossClassDirectLUB, so the relation must be proven from
+// the jar's own class bytes, never guessed) AND a phi proves they denote one source variable, return
+// current keeping its BROADER declared type. Widening the subtype arm to the supertype is always
+// type-safe (the subtype is assignable to it) and the original compiled. Gates:
+//   - current and val both non-null, non-param, non-primitive refs of DIFFERENT declared types;
+//   - CrossClassDirectLUB(ct, vt) == ct (val strictly subtypes current; the primitive never Object);
+//   - a downstream load reached by BOTH this store and current's def (slotDefPhiReachesLoad), the same
+//     convergence discriminator the sibling/bool merges use, so genuine disjoint slot reuse (no shared
+//     load) still splits.
+//
+// Kill-switch: JDEC_REF_SLOT_SUBTYPE_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotSubtypeArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_SUBTYPE_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if current.IsParam || current.IsNullInitialized() {
+		return nil
+	}
+	funcCtx := d.FunctionContext
+	if funcCtx == nil || funcCtx.SiblingSuperTypes == nil {
+		return nil
+	}
+	ct := current.Type()
+	vt := slotDeclType(val)
+	if ct == nil || vt == nil {
+		return nil
+	}
+	if _, isPrim := ct.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	ctName := ct.String(ctx)
+	if ctName == vt.String(ctx) {
+		return nil
+	}
+	// val must be a strict jar-internal subtype of current (the direct-LUB resolves to current's own
+	// type). CrossClassDirectLUB returns the supertype arm, walks only the jar's RAW super_class /
+	// interface chain, and never returns java.lang.Object, so an unknown or sibling relation yields nil.
+	lub := types.CrossClassDirectLUB(ct, vt, funcCtx.SiblingSuperTypes)
+	if lub == nil || lub.String(ctx) != ctName {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	return current
+}
+
+// reachingRefSlotObjectArmMerge handles the SUPERTYPE-arm reference phi where the slot's current
+// variable is declared exactly java.lang.Object (the universal supertype) and a disjoint arm reassigns
+// it with a more specific reference value, all arms flowing into a common post-merge use. It is the
+// Object-edge complement of the sibling/subtype merges: CrossClassDirectLUB (subtype-arm) deliberately
+// never returns java.lang.Object, and CommonSuperType (sibling-arm) computes Object but then BAILS on
+// its "strict sibling only" gate the moment the LUB equals one arm -- which is exactly when current IS
+// Object. So neither covers the Object-current edge, and the specific arm splits off, breaking the use.
+//
+// fastjson2 ObjectWriterAdapter.toJSONObject (slot 8, LVT confirms one `Object fieldValue`):
+//
+//	Object fieldValue = fieldWriter.getFieldValue(object);                       // current = Object
+//	if (fieldClass == Date.class) fieldValue = DateUtils.format((Date) fieldValue, format);  // store String
+//	...
+//	if (fieldValue instanceof Map) jsonObject.putAll((Map) fieldValue);         // post-merge: (Map) on String -> error
+//	else if (Collection.class.isAssignableFrom(fieldClass) ...) c = (Collection) fieldValue;
+//
+// In DFS order the Object init mints the Object var; the String reformat arms then split off a String
+// var, and the post-merge instanceof/cast reads bind to it, so `(Map) stringVar` / `(Collection)
+// stringVar` fail javac ("String cannot be converted to Map").
+//
+// Fix: when current is exactly java.lang.Object and val is any non-primitive reference type OTHER than
+// Object, and a phi proves the Object def and this store reach a common load, continue current (keep
+// Object) -- the specific store becomes a plain reassignment. This NEVER changes any variable's declared
+// type (current is already Object); it only stops the split, so it cannot widen a specific local into
+// Object behind a type-specific uncast use. The phi gate is the disjointness discriminator: a genuinely
+// disjoint slot reuse (an Object var dead before an unrelated specific var) shares no load reached by
+// both defs and still splits. The symmetric "current == specific, store == Object" shape is deliberately
+// NOT handled here: widening a specific local to Object (ResetVarType) regressed unrelated reads that the
+// dumper had bound to the specific type without a cast ("Object cannot be converted to String", new cfs).
+// Kill-switch: JDEC_REF_SLOT_OBJECT_SUPERTYPE_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotObjectArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_OBJECT_SUPERTYPE_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if current.IsParam || current.IsNullInitialized() {
+		return nil
+	}
+	ct := current.Type()
+	vt := slotDeclType(val)
+	if ct == nil || vt == nil {
+		return nil
+	}
+	if _, isPrim := ct.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	isObjectName := func(n string) bool { return n == "java.lang.Object" || n == "Object" }
+	// current must be exactly java.lang.Object; val must be a more specific reference type.
+	if !isObjectName(ct.String(ctx)) || isObjectName(vt.String(ctx)) {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	return current
+}
+
+// reachingRefSlotArrayCovariantArmMerge handles the COVARIANT-ARRAY arm phi where two disjoint arms
+// store reference ARRAY values of covariantly-related element types into one slot, and both flow into a
+// common downstream use. It is the array-element analogue of the sibling/subtype/object ref merges,
+// which all bail on arrays (classNameOf -- the basis of CommonSuperType and CrossClassDirectLUB --
+// returns false for array types, and the Object-arm gate compares the slot's type string to
+// "java.lang.Object", never "...[]"). fastjson2 CSVReaderUTF8/UTF16.readLineValues (slot 2, LVT
+// confirms ONE `Object[] values`):
+//
+//	Object[] values = null;                          // null-init; slot 2
+//	if (strings) values = new String[size];          // arm: String[] (subtype array)
+//	else         values = new Object[size];          // arm: Object[] (supertype array)
+//	...
+//	if (values != null) { if (i < values.length) values[i] = value; }  // post-merge uses
+//	return values;
+//
+// In DFS order the null init adopts String[] from the first arm (null-adopt-once), so the slot's ref
+// is typed String[]; the Object[] arm then stores onto current=that ref. AssignVarGuarded has no
+// array-covariance rule (the int-category and raw-generic merges don't apply, and null-adopt is spent),
+// so it mints a FRESH Object[] variable; the post-merge uses bind to the String[] ref and
+// `values[i] = (Object) value` fails javac ("Object cannot be converted to String"), the same for the
+// `return` and `.length` reads on the other CSV branch.
+//
+// The two arms denote ONE source variable whose true type is the element LUB array (Object[] here): a
+// String[] is assignable to Object[] (array covariance), so the original compiled, and every narrow
+// element read in the source carried an explicit cast (rendered by the dumper). On a match it widens
+// current's declared type to the element-LUB array and returns current, so both arms become plain
+// reassignments of one Object[] variable and every use compiles. Unlike reachingRefSlotObjectArmMerge
+// this DOES widen current (the mis-narrowed subtype array) -- safe here because (a) the gate requires
+// current to already be a committed ARRAY type, so this never widens a scalar Object local, and (b) the
+// element LUB is proven from the JDK table / jar supertype chain / the Object universal supertype, never
+// guessed. It deliberately does NOT gate on IsNullInitialized (unlike the scalar ref merges): the CSV
+// current is a null-adopted ref whose Val stays the null literal for life, yet it has a committed array
+// type and the phi proves convergence, so adoption-once spending is irrelevant. Gates:
+//   - current and val both ARRAY types of equal dimension with non-primitive (reference) elements
+//     (primitive arrays int[]/byte[] are invariant, no covariance) and DIFFERENT element type strings;
+//   - the elements have a proven supertype/LUB (arrayElemLUB): Object, a jar-internal direct subtype,
+//     or a JDK family LUB more specific than Object; an unrelated pair yields nil and still splits;
+//   - a downstream load reached by BOTH this store and current's def (slotDefPhiReachesLoad), the same
+//     convergence discriminator the other arm merges use, so genuine disjoint slot reuse still splits.
+//
+// Kill-switch: JDEC_REF_SLOT_ARRAY_COVARIANT_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotArrayCovariantArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_ARRAY_COVARIANT_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if current.IsParam {
+		return nil
+	}
+	ct := current.Type()
+	vt := slotDeclType(val)
+	if ct == nil || vt == nil {
+		return nil
+	}
+	// Both sides must be single-dimension reference arrays of equal dimension. The committed array type
+	// on `current` is what makes dropping the IsNullInitialized gate safe (a scalar Object null-init has
+	// no array type and never reaches here).
+	if !ct.IsArray() || !vt.IsArray() || ct.ArrayDim() != 1 || vt.ArrayDim() != 1 {
+		return nil
+	}
+	ce := ct.ElementType()
+	ve := vt.ElementType()
+	if ce == nil || ve == nil {
+		return nil
+	}
+	if _, isPrim := ce.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	if _, isPrim := ve.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	if ce.String(ctx) == ve.String(ctx) {
+		return nil
+	}
+	elemLUB := d.arrayElemLUB(ce, ve)
+	if elemLUB == nil {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	lubArr := types.NewJavaArrayType(elemLUB)
+	if lubArr != nil && lubArr.String(ctx) != ct.String(ctx) {
+		current.ResetVarType(lubArr)
+	}
+	return current
+}
+
+// arrayElemLUB returns the least-upper-bound element type of two reference array element types, or nil
+// when no supertype is provable. java.lang.Object is the universal reference supertype; otherwise it
+// consults the jar's own raw supertype chain (CrossClassDirectLUB, direct-subtype only, never a guess)
+// and finally the static JDK family table (CommonSuperType, which itself returns nil for an Object-only
+// LUB so unrelated JDK pairs are not merged). It is the element-type companion of
+// reachingRefSlotArrayCovariantArmMerge.
+func (d *Decompiler) arrayElemLUB(a, b types.JavaType) types.JavaType {
+	if a == nil || b == nil {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	isObject := func(n string) bool { return n == "java.lang.Object" || n == "Object" }
+	if isObject(a.String(ctx)) {
+		return a
+	}
+	if isObject(b.String(ctx)) {
+		return b
+	}
+	if d.FunctionContext != nil && d.FunctionContext.SiblingSuperTypes != nil {
+		if lub := types.CrossClassDirectLUB(a, b, d.FunctionContext.SiblingSuperTypes); lub != nil {
+			return lub
+		}
+	}
+	if lub := types.CommonSuperType(a, b); lub != nil {
+		return lub
 	}
 	return nil
 }
@@ -1597,6 +2180,84 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			runtimeStackSimulation.SetVar(slot, merged)
 			oldRef = merged
 			refPhiMerged = true
+		}
+		// Sibling-arm reference phi (fastjson2 FieldWriter.compareTo): two disjoint arms store sibling
+		// reference types (Method / Field) into one slot that flow into a common polymorphic use. Widen
+		// the shared ref to the arms' JDK LUB (Member) and continue it, so both arms become plain
+		// reassignments of one Member variable instead of splitting into Method/Field names that break
+		// the instanceof/cast uses ("inconvertible types: Field cannot be converted to Method"). Strict
+		// sibling + non-Object JDK LUB + phi gates; Kill-switch: JDEC_REF_SLOT_SIBLING_ARM_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotSiblingArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
+		// Subtype-arm reference phi (gson JsonAdapterAnnotationTypeAdapterFactory.getTypeAdapter): one
+		// disjoint instanceof-dispatch arm stores a JAR-INTERNAL SUBTYPE (`new TreeTypeAdapter()`) onto a
+		// slot whose other arms hold the supertype (TypeAdapter), and all arms flow into a common
+		// post-merge use. CommonSuperType is JDK-only so the sibling merge cannot see the relation; here
+		// CrossClassDirectLUB proves val <: current from the jar's own supertype chain and, gated by a
+		// phi, continues current (keeping its broader declared type) so the subtype arm becomes a plain
+		// reassignment instead of a fresh variable that leaves the merge read uninitialized. Kill-switch:
+		// JDEC_REF_SLOT_SUBTYPE_ARM_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotSubtypeArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
+		// Object-supertype-arm reference phi (fastjson2 ObjectWriterAdapter.toJSONObject): a slot whose
+		// current variable is declared java.lang.Object is reassigned in a disjoint arm with a more
+		// specific reference value (`fieldValue = DateUtils.format(...)`, String), all arms flowing into a
+		// common post-merge use (`fieldValue instanceof Map`, `(Map) fieldValue`). The subtype/sibling
+		// merges above exclude java.lang.Object, so the String arm splits off a String variable and the
+		// post-merge `(Map)`/`(Collection)` casts on it fail ("String cannot be converted to Map"). Keep
+		// the Object variable (every reference value is assignable to Object; type-specific uses carry an
+		// explicit cast). Phi-gated so genuine disjoint reuse still splits. Kill-switch:
+		// JDEC_REF_SLOT_OBJECT_SUPERTYPE_ARM_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotObjectArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
+		// Covariant-array arm phi (fastjson2 CSVReaderUTF8/UTF16.readLineValues): two disjoint arms store
+		// reference ARRAY values whose element types are covariantly related (`new String[]` / `new
+		// Object[]`) into one slot the LVT confirms is a single `Object[] values`, both flowing into a
+		// common `values[i] = value` / `return values` use. The scalar sibling/subtype/object merges all
+		// bail on arrays (classNameOf nils out for array types), so the subtype array splits off and the
+		// post-merge store fails ("Object cannot be converted to String"). Widen the shared ref to the
+		// element-LUB array (Object[]) and continue it, so both arms become plain reassignments of one
+		// Object[] variable. Phi-gated; Kill-switch: JDEC_REF_SLOT_ARRAY_COVARIANT_ARM_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotArrayCovariantArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
+		// Disjoint boolean-return slot split (guava LocalCache$Segment.replace): a boolean method's
+		// `return false/true` (iconst_0/1; istore S) reuses a slot a disjoint earlier range used as an
+		// int local. Coerce the 0/1 literal to boolean so AssignVarGuarded below mints a FRESH boolean
+		// variable instead of reusing the int ref (which IRETURN would later retype to boolean, breaking
+		// the int range's `count - 1` / `this.count = ...` uses). Inverse of the reachingBool*Merge
+		// family; fires only when the slot's current version is int. Kill-switch:
+		// JDEC_BOOL_RETURN_SLOT_SPLIT_OFF=1.
+		if !refPhiMerged {
+			d.reachingBoolReturnSlotSplit(opcode, slot, oldRef, value)
+		}
+		// Disjoint boolean-FIELD slot split (fastjson2 JSONPathTypedMultiIndexes.<init>): a `boolean`
+		// flag stored into a Z field (`this.duplicate = duplicate`) reuses a slot a disjoint earlier
+		// range used as an int loop counter. Same shape as reachingBoolReturnSlotSplit but the boolean
+		// sink is a putfield/putstatic Z rather than an ireturn (the method is a void <init>). Coerce the
+		// 0/1 literal to boolean so AssignVarGuarded mints a FRESH boolean variable, leaving the int loop
+		// counter intact. Kill-switch: JDEC_BOOL_FIELD_SLOT_SPLIT_OFF=1.
+		if !refPhiMerged {
+			d.reachingBoolFieldSlotSplit(opcode, slot, oldRef, value)
 		}
 		ref, isFirst := oldRef, false
 		reuseNullBranchStore := false
@@ -1850,6 +2511,20 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			return fmt.Sprintf("%s instanceof %s", value.String(funcCtx), classInfo.String(funcCtx))
 		}, func() types.JavaType {
 			return types.NewJavaPrimer(types.JavaBoolean)
+		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
+			// The instanceof operand is captured in this CustomValue's String closure. Like
+			// OP_CHECKCAST and the numeric-conversion CustomValues, it MUST forward ReplaceVar to the
+			// captured operand: otherwise a later identity rebind of the operand's variable (e.g.
+			// rewriteVar minting a fresh id for a slot's disjoint reuse and ReplaceVar-ing every use)
+			// never reaches the operand, so the rendered `varN instanceof T` keeps a stale id that
+			// collides with a DIFFERENT same-slot variable. fastjson2 JSONSchema.of:
+			// `exclusiveMaximum instanceof Integer` rendered against the unrelated int-typed `var6`
+			// ("unexpected type, required: reference, found: int"). Kill-switch:
+			// JDEC_INSTANCEOF_REPLACEVAR_OFF=1.
+			if os.Getenv("JDEC_INSTANCEOF_REPLACEVAR_OFF") == "1" {
+				return
+			}
+			value.ReplaceVar(oldId, newId)
 		}))
 	case OP_CHECKCAST:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
@@ -3601,6 +4276,63 @@ func ternaryDeclLUB(ref *values.JavaRef, value values.JavaValue) types.JavaType 
 	return nil
 }
 
+// ternaryDeclLUBCrossClass is the CROSS-CLASS (jar-internal) companion of ternaryDeclLUB. The JDK table
+// (types.MergeTypes/CommonSuperType, used by ternaryDeclLUB) only knows JDK families, so a ternary whose
+// two arms are jar-internal types sharing a jar-internal supertype is invisible to it and the slot keeps
+// its narrow first-arm type. fastjson2 schema family:
+//
+//	Any var6 = cond ? Any.INSTANCE /*Any*/ : Any.NOT_ANY /*JSONSchema*/;   // javac: bad conditional
+//	if (var6 instanceof UnresolvedReference) ((UnresolvedReference) var6).x // javac: inconvertible types
+//
+// where `Any` and `UnresolvedReference` are siblings under `JSONSchema`. Widening the declaration to the
+// arms' LUB `JSONSchema` (via the raw super_class/Interfaces provider funcCtx.SiblingSuperTypes) makes the
+// conditional well-typed AND turns the sibling instanceof/cast into a legal downcast.
+//
+// It returns the LUB type to re-declare the ref with, or nil. Unlike ternaryDeclLUB it is NOT gated on
+// the declaring store being `isFirst`: the declaring store may be a null-init (`Any var6 = null`) while
+// the ternary is a later store, so it must run on every ternary store. Widen-only: the ref's current
+// type must be a (reflexive) subtype of the LUB (guaranteed since the LUB is one of the arms and the ref
+// was minted from an arm), so it never narrows or crosses to a sibling. Gated by
+// JDEC_TERNARY_DECL_LUB_CROSS_OFF.
+func ternaryDeclLUBCrossClass(ref *values.JavaRef, value values.JavaValue, funcCtx *class_context.ClassContext) types.JavaType {
+	if os.Getenv("JDEC_TERNARY_DECL_LUB_CROSS_OFF") != "" || ref == nil || value == nil || funcCtx == nil || funcCtx.SiblingSuperTypes == nil {
+		return nil
+	}
+	tv, isTern := values.UnpackSoltValue(value).(*values.TernaryExpression)
+	if !isTern || tv.TrueValue == nil || tv.FalseValue == nil {
+		return nil
+	}
+	rt := ref.Type()
+	at, bt := tv.TrueValue.Type(), tv.FalseValue.Type()
+	if rt == nil || at == nil || bt == nil {
+		return nil
+	}
+	lub := types.CrossClassDirectLUB(at, bt, funcCtx.SiblingSuperTypes)
+	if lub == nil {
+		return nil
+	}
+	rtName, rok := types.ClassFQNOf(rt)
+	lubName, lok := types.ClassFQNOf(lub)
+	if !rok || !lok || rtName == lubName {
+		return nil
+	}
+	// WIDEN-ONLY guard: the ref's current type must be a subtype of the LUB. Bails (no change) otherwise,
+	// so we never narrow or cross to a sibling on a stale/unexpected ref type.
+	if !types.IsSubtypeVia(rtName, lubName, funcCtx.SiblingSuperTypes) {
+		return nil
+	}
+	// Deliberately do NOT call tv.SetCachedType(lub) here (unlike the JDK ternaryDeclLUB). The cross-class
+	// targets are SEPARATE-declaration locals (`Any var6 = null; ...; var6 = cond ? Any.INSTANCE :
+	// Any.NOT_ANY`), whose declaration type renders from the ref alone (the caller's ResetVarType), so the
+	// cached type is unnecessary. It is also HARMFUL: a `?:` whose arm is a parameter/`this` ref (the
+	// argument-materialized `(var2 == null) ? this : var2` passed to JSONSchema.of) shares that arm ref;
+	// mutating the ternary's cached type ripples back into the param's declared type rendering and NARROWS
+	// the `ObjectSchema(JSONObject, JSONSchema)` parameter to `ObjectSchema` -- breaking every
+	// `new ObjectSchema(.., (JSONSchema) x)` call site (net +1 regression observed). Ref-only widening
+	// stays local to the variable being declared.
+	return lub
+}
+
 func (d *Decompiler) ParseStatement() error {
 	funcCtx := d.FunctionContext
 	err := d.ParseOpcode()
@@ -3700,6 +4432,14 @@ func (d *Decompiler) ParseStatement() error {
 					if lub := ternaryDeclLUB(ref, value); lub != nil {
 						ref.ResetVarType(lub)
 					}
+				}
+				// Cross-class (jar-internal) ternary LUB widening. NOT gated on isFirst: the declaring
+				// store may be a null-init (`Any var6 = null`) while the ternary is a later store, so the
+				// JDK-table ternaryDeclLUB above (isFirst-only) never sees it. Widen-only + provider-gated,
+				// so a no-op outside the jar / DecompileWithResolver path. Kill-switch:
+				// JDEC_TERNARY_DECL_LUB_CROSS_OFF.
+				if lub := ternaryDeclLUBCrossClass(ref, value, funcCtx); lub != nil {
+					ref.ResetVarType(lub)
 				}
 				assignSt := statements.NewAssignStatement(ref, value, isFirst)
 				appendNode(assignSt)

@@ -2,6 +2,8 @@ package javaclassparser
 
 import (
 	"fmt"
+	"os"
+
 	"github.com/samber/lo"
 	"github.com/yaklang/javajive/classparser/decompiler"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -162,7 +164,37 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 	parser.DumpClassLambdaMethod = func(name, desc string, id *utils.VariableId, capturedCount int) (string, error) {
 		dumper.lambdaMethods[name] = append(dumper.lambdaMethods[name], desc)
 		dumper.lambdaCaptureCount[name+desc] = capturedCount
+		// A lambda body is dumped LAZILY, mid-parse of the ENCLOSING method: the bootstrap closure
+		// runs while the enclosing method's invokedynamic value is built during its stack
+		// simulation. The recursive DumpMethodWithInitialId overwrites the SHARED dumper.FuncCtx
+		// (FunctionName / FunctionType / IsStatic) and dumper.MethodType / CurrentMethod with the
+		// lambda's own (e.g. a `void lambda$...`). Because parser.FunctionContext IS this same
+		// dumper.FuncCtx pointer, the enclosing method's REMAINING opcodes — notably a trailing
+		// `return false/true` that sits AFTER the invokedynamic (javac: `iconst_0/1; ireturn`) —
+		// would then reset their return type against the lambda's `void` context instead of the
+		// enclosing method's `boolean`, so resetReturnValueTypeSafe no-ops and the literal renders
+		// as `return 1`/`return 0` instead of `return true`/`return false` (fastjson2
+		// BeanUtils.isWriteEnumAsJavaBean, JSONPathTypedMultiIndexes, etc.). Save the enclosing
+		// method's per-method identity and restore it after the re-entrant dump so the enclosing
+		// parse resumes with its own context. (TypeParams is also restored by DumpMethod's own
+		// defer; we save/restore it defensively in case that path is skipped.)
+		// Kill-switch JDEC_LAMBDA_CTX_RESTORE_OFF=1 disables the restore to reproduce the defect.
+		restore := os.Getenv("JDEC_LAMBDA_CTX_RESTORE_OFF") != "1"
+		savedFunctionName := dumper.FuncCtx.FunctionName
+		savedFunctionType := dumper.FuncCtx.FunctionType
+		savedIsStatic := dumper.FuncCtx.IsStatic
+		savedTypeParams := dumper.FuncCtx.TypeParams
+		savedMethodType := dumper.MethodType
+		savedCurrentMethod := dumper.CurrentMethod
 		dumped, err := dumper.DumpMethodWithInitialId(name, desc, id)
+		if restore {
+			dumper.FuncCtx.FunctionName = savedFunctionName
+			dumper.FuncCtx.FunctionType = savedFunctionType
+			dumper.FuncCtx.IsStatic = savedIsStatic
+			dumper.FuncCtx.TypeParams = savedTypeParams
+			dumper.MethodType = savedMethodType
+			dumper.CurrentMethod = savedCurrentMethod
+		}
 		if err != nil {
 			return "", err
 		}

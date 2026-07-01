@@ -252,6 +252,15 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 		if method == "test" && argc == 2 && ntype == 2 && (paramIndex == 0 || paramIndex == 1) {
 			return paramIndex
 		}
+	case "java.util.Comparator":
+		// Comparator<T>.compare(T, T): a single type arg shared by BOTH parameters. The descriptor
+		// erases both to Object, so an Object-typed argument (e.g. a raw `Iterator.next()` value) is
+		// passed without the source's `(T)` cast and javac -- re-resolving against compare(T,T) --
+		// rejects it ("Object cannot be converted to T"; guava Comparators.isInOrder/isInStrictOrder,
+		// TopKSelector). Both params resolve to the same single type arg.
+		if method == "compare" && argc == 2 && ntype == 1 && (paramIndex == 0 || paramIndex == 1) {
+			return 0
+		}
 	}
 	// Map<K,V> mutators whose params are exactly (K, V).
 	if jdkMapFamily[rawClass] && ntype == 2 && argc == 2 && (paramIndex == 0 || paramIndex == 1) {

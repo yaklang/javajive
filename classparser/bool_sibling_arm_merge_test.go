@@ -34,6 +34,14 @@ func TestBoolSiblingArmMergeIsLoadBearing(t *testing.T) {
 		t.Fatalf("read BoolSiblingArmSeed seed: %v", err)
 	}
 
+	// Isolate the overlapping cross-scope orphan-rebind defense throughout BOTH measurements. The
+	// later-added replayUnambiguousRebindings (JDEC_ORPHAN_GLOBAL_REBIND) provides defense-in-depth
+	// over this exact try/catch slot, so with it ON the kill-switch OFF case no longer reproduces the
+	// canonical `Object var1 = null;` phantom (the defect MORPHS into a different int/boolean split).
+	// Holding it OFF here pins the sibling-arm merge in isolation, exactly as it was authored. (With
+	// everything default ON the real decompile is correct -- both fixes cover this shape.)
+	t.Setenv("JDEC_ORPHAN_GLOBAL_REBIND_OFF", "1")
+
 	// Fix ON (default): the two try/catch arms continue ONE boolean slot, so the merge read is in scope.
 	os.Unsetenv("JDEC_BOOL_SIBLING_ARM_MERGE_OFF")
 	on, err := Decompile(seed)

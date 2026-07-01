@@ -845,6 +845,106 @@ func (a *AssignStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.Varia
 // array's element type is boolean and the value is an int literal, render it as true/false. bastore is
 // shared with byte[] and the remaining primitive array stores all accept a fitting int constant, so
 // boolean is the only element type that needs this coercion.
+// typeVarArrayElementStoreCast returns the bare class-scope type variable to cast the RHS of a
+// SAME-CLASS type-variable-array ELEMENT store -- `this.buffer[i] = objExpr` / `this.values[r][c] =
+// objExpr` where the field is declared `T[]` / `V[][]`. The array's component type is the type
+// variable (T / V), but the value flowing in is the erased `Object` (a raw `Iterator.next()`,
+// `Map.Entry.getValue()`, or another erased field/array read), so the source carried an unchecked
+// `(T)` cast that the `aastore` opcode erased to a no-op (T erases to its Object bound). Without it
+// javac -- re-checking against the declared `T[]` -- rejects `Object cannot be converted to T` (guava
+// TopKSelector `buffer[i]`, HashBiMap `keys[i]`/`values[i]`, DenseImmutableTable `values[r][c]`,
+// ImmutableSortedMultiset$SerializedForm `elements[i]`). This is the array-element analogue of
+// typeVarFieldStoreCast (whole-field store) and the LHS counterpart of expression.go's
+// typeVarArrayArgCast (call argument).
+//
+// The element type variable is read from the field's recorded generic Signature (FieldTypeVar, e.g.
+// `keys` -> `K[]`) rather than the value's possibly-erased Type(), so it matches EXACTLY the array
+// field declaration the dumper emits. Tightly gated:
+//   - the LHS is a (possibly nested) array-element access whose base is a same-class field (`this.f`
+//     or `CurrentClass.f`); a non-field array base (a local) is out of scope;
+//   - the index dimension count equals the field's array depth (a PARTIAL index leaves an array type
+//     variable `V[]`, not a bare `V` -- storing a whole sub-array is a different, array-typed
+//     assignment and must not take a scalar `(V)` cast);
+//   - the resulting component is a denotable class-scope type variable (FieldTypeVar already gates on
+//     IsTypeParam at recording time);
+//   - the value is a non-null reference whose rendered type is not already that type variable (a null
+//     literal and an already-T value need no cast; a primitive cannot reach an aastore).
+//
+// Kill-switch: JDEC_TYPEVAR_ARRAY_ELEM_STORE_CAST_OFF=1.
+func typeVarArrayElementStoreCast(funcCtx *class_context.ClassContext, member *values.JavaArrayMember, value values.JavaValue) string {
+	if os.Getenv("JDEC_TYPEVAR_ARRAY_ELEM_STORE_CAST_OFF") != "" {
+		return ""
+	}
+	if funcCtx == nil || member == nil || value == nil || len(funcCtx.FieldTypeVars) == 0 {
+		return ""
+	}
+	// Unwrap nested array-element accesses, counting index depth, to reach the array base.
+	depth := 0
+	var base values.JavaValue = member
+	for {
+		am, ok := values.UnpackSoltValue(base).(*values.JavaArrayMember)
+		if !ok {
+			break
+		}
+		depth++
+		base = am.Object
+	}
+	if depth == 0 {
+		return ""
+	}
+	// Base must be a same-class field: `this.field` or `CurrentClass.field`.
+	var fieldName string
+	switch lv := values.UnpackSoltValue(base).(type) {
+	case *values.RefMember:
+		ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef)
+		if !ok || !ref.IsThis {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	case *values.JavaClassMember:
+		if lv.Name != funcCtx.ClassName {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	default:
+		return ""
+	}
+	tv := funcCtx.FieldTypeVar(fieldName) // e.g. "K[]", "V[][]"
+	if tv == "" {
+		return ""
+	}
+	tvDepth := strings.Count(tv, "[]")
+	if tvDepth == 0 || depth != tvDepth {
+		// scalar type-var field (no element store) or partial index (still an array) -- skip.
+		return ""
+	}
+	elem := strings.TrimSuffix(tv, strings.Repeat("[]", tvDepth))
+	if elem == "" || !funcCtx.IsTypeParam(elem) {
+		return ""
+	}
+	// null is assignable to any type variable without a cast.
+	if lit, ok := values.UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+		return ""
+	}
+	vt := value.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	// A type variable is a reference type; a primitive value never needs (and cannot take) the cast.
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	// Already rendered as the type variable: no cast needed.
+	if raw.String(funcCtx) == elem {
+		return ""
+	}
+	return elem
+}
+
 func arrayStoreRHS(member *values.JavaArrayMember, value values.JavaValue, funcCtx *class_context.ClassContext) string {
 	if member != nil && value != nil {
 		if elem := member.Type(); elem != nil && elem.String(funcCtx) == "boolean" {
@@ -868,6 +968,12 @@ func arrayStoreRHS(member *values.JavaArrayMember, value values.JavaValue, funcC
 			if cast := narrowingInitCast(member.Type(), value.Type()); cast != "" {
 				return fmt.Sprintf("(%s) (%s)", cast, value.String(funcCtx))
 			}
+		}
+		// Type-variable-array element store (`this.keys[i] = objExpr` where keys is `K[]`) needs an
+		// unchecked `(K)` cast: the aastore erased the source cast to a no-op. See
+		// typeVarArrayElementStoreCast.
+		if cast := typeVarArrayElementStoreCast(funcCtx, member, value); cast != "" {
+			return fmt.Sprintf("(%s) (%s)", cast, value.String(funcCtx))
 		}
 	}
 	return value.String(funcCtx)

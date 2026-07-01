@@ -15,6 +15,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
 func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.JavaRef, traceCtx ...*class_context.ClassContext) {
@@ -33,6 +34,13 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 		core.TraceRewriteVar(className, methodName, "param uid=%s id=%s", v.VarUid, v.Id.String())
 	}
 	rewriteVar(scope, className, methodName)
+	// Replay unambiguous cross-scope rebindings over the WHOLE method to rescue same-VarUid READS that
+	// live in a sibling scope of their minting store (see Scope.allReplace). Runs before the
+	// declaration-placement passes so they see the unified ids and place the single declaration to
+	// dominate the rescued reads too. Kill-switch: JDEC_ORPHAN_GLOBAL_REBIND_OFF=1.
+	if os.Getenv("JDEC_ORPHAN_GLOBAL_REBIND_OFF") != "1" {
+		replayUnambiguousRebindings(sts, scope.allReplace, className, methodName)
+	}
 	var checkUndefinedVar func(scope *Scope, parentAssigned map[*utils.VariableId]struct{})
 	undefined := make(map[values.JavaValue]int)
 	varAssignMap := map[*utils.VariableId][]*statements.AssignStatement{}
@@ -164,6 +172,25 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// the final step: two bare declarations of the identical *VariableId in one block are never valid
 	// Java, and matching on the id pointer leaves genuinely distinct same-named locals untouched.
 	dropDuplicateDeclarations(sts)
+	// Name-based safety net: rewriteVar can split one JVM slot into two *VariableIds that render the
+	// same varN spelling, leaving one of them with NO declaration of its own (its uses then fail to
+	// compile as "cannot find symbol: variable varN"). placeCrossScopeDeclarations is keyed by id and
+	// so never sees the declaration-less id; coverUndeclaredGeneratedLocals widens the existing
+	// same-name declaration's scope to lexically cover those uncovered occurrences. It only acts when a
+	// name genuinely has an out-of-scope occurrence, so it cannot disturb already-valid output.
+	if os.Getenv("JDEC_COVER_UNDECLARED_OFF") != "1" {
+		coverUndeclaredGeneratedLocals(sts)
+		dropDuplicateDeclarations(sts)
+	}
+	// Narrow a generated local declared `Object varN = null` to the single concrete reference type
+	// that ALL of its non-null reassignments store, when varN is used only as a receiver or
+	// assignment target. The slot renamer can fuse a null-initialized Object slot with a
+	// concrete-typed slot under one varN spelling and keep the Object declaration, so a later
+	// `varN.method(...)` fails ("cannot find symbol: method ..., location: variable varN of type
+	// Object"). See narrowNullInitObjectDecl. Kill-switch: JDEC_NULLINIT_NARROW_OFF=1.
+	if os.Getenv("JDEC_NULLINIT_NARROW_OFF") != "1" {
+		narrowNullInitObjectDecl(sts)
+	}
 }
 
 // dropDuplicateDeclarations removes redundant bare `T x;` declarations that name a *VariableId
@@ -324,6 +351,19 @@ type Scope struct {
 	// scoped correctly (catch parameters, switch locals, ordinary locals) are never in this set and
 	// are therefore left exactly as the baseline produced them. Shared method-wide like minted.
 	reused map[*utils.VariableId]struct{}
+	// allReplace accumulates EVERY (oldId -> newId) rebinding any scope's deferred ReplaceVar applied,
+	// so the top-level RewriteVar can replay the unambiguous (single-target) ones over the WHOLE method
+	// after recursion finishes. Each rewriteVar call only rewrites its OWN scope.sts, so a slot store
+	// minted in a nested scope never rebinds same-VarUid READS that live in a SIBLING scope (not a
+	// descendant of the minting scope): those reads keep the pre-mint id, which has no declaration and
+	// renders the bare varN spelling, colliding with an unrelated same-spelled local (fastjson2
+	// JSONPathParser.parseFilter: the `(String)null` field-name arg of the filter-segment constructors
+	// keeps the orphan `var11` and binds to a later `JSONPathFunction$SizeFunction var11` -> 16x
+	// `incompatible types: ... cannot be converted to String`). Replaying only the oldIds that map to a
+	// UNIQUE newId leaves genuine disjoint-slot splits (one oldId rebound to MANY newIds across
+	// branches) untouched, and is a no-op for oldIds already fully rebound in-scope. Shared method-wide
+	// like minted/reused. Kill-switch: JDEC_ORPHAN_GLOBAL_REBIND_OFF=1.
+	allReplace map[*utils.VariableId][]*utils.VariableId
 }
 
 func NewScope(startId int, sts *[]statements.Statement) *Scope {
@@ -333,11 +373,47 @@ func NewScope(startId int, sts *[]statements.Statement) *Scope {
 		assignedMap: map[string]*utils.VariableId{},
 		minted:      map[*utils.VariableId]int{},
 		reused:      map[*utils.VariableId]struct{}{},
+		allReplace:  map[*utils.VariableId][]*utils.VariableId{},
 	}
 }
 func (s *Scope) NextId() int {
 	s.nowId++
 	return s.nowId
+}
+
+// replayUnambiguousRebindings re-applies, over the whole method, every (oldId -> newId) rebinding that
+// maps to a SINGLE newId. Each rewriteVar scope only rewrites its own statement slice, so when a slot
+// store is minted in a nested scope its same-VarUid reads in a SIBLING scope (not a descendant) keep
+// the pre-mint oldId; that id has no declaration and renders the bare varN spelling, colliding with an
+// unrelated same-spelled local. Replaying the unique mappings rebinds those orphaned reads onto the
+// store's id. An oldId rebound to MULTIPLE distinct newIds is a genuine disjoint-slot split (one shared
+// ref object rebound per branch); replaying it would collapse the split, so it is skipped. For oldIds
+// already fully rebound in-scope the replay matches nothing and is a no-op, so correctly-scoped output
+// is byte-for-byte unchanged.
+func replayUnambiguousRebindings(sts *[]statements.Statement, allReplace map[*utils.VariableId][]*utils.VariableId, className, methodName string) {
+	if sts == nil || len(allReplace) == 0 {
+		return
+	}
+	for oldId, targets := range allReplace {
+		if oldId == nil || len(targets) == 0 {
+			continue
+		}
+		newId := targets[0]
+		unique := true
+		for _, t := range targets[1:] {
+			if t != newId {
+				unique = false
+				break
+			}
+		}
+		if !unique || newId == nil || newId == oldId {
+			continue
+		}
+		for _, st := range *sts {
+			st.ReplaceVar(oldId, newId)
+		}
+		core.TraceRewriteVar(className, methodName, "orphan-rebind replay old=%s new=%s", oldId.String(), newId.String())
+	}
 }
 func (s *Scope) SubScope(sts *[]statements.Statement) *Scope {
 	assignedMap := map[string]*utils.VariableId{}
@@ -349,6 +425,7 @@ func (s *Scope) SubScope(sts *[]statements.Statement) *Scope {
 		assignedMap: assignedMap,
 		minted:      s.minted,
 		reused:      s.reused,
+		allReplace:  s.allReplace,
 	}
 	s.varMap = append(s.varMap, newScope)
 	return newScope
@@ -560,6 +637,9 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 		for oldId, newId := range idReplaceMap {
 			for _, statement := range *scope.sts {
 				statement.ReplaceVar(oldId, newId)
+			}
+			if scope.allReplace != nil {
+				scope.allReplace[oldId] = append(scope.allReplace[oldId], newId)
 			}
 		}
 	}()
@@ -870,6 +950,26 @@ func prebindEscapingIfElseSlots(scope *Scope, ifst *statements.IfStatement, afte
 			continue
 		}
 		origId := ifRef.Id
+		// If the slot's current id was already MINTED for this same logical variable by a sibling or
+		// ancestor scope (the JavaRef object is shared across disjoint branches and was rebound in
+		// place by that scope's deferred ReplaceVar), DO NOT mint a fresh parent id here. Minting one
+		// would record idReplaceMap[origId]->newId, and this scope's deferred ReplaceVar then mutates
+		// the SHARED ref object in place, flipping the sibling scope's reads onto the new split id and
+		// leaving them uninitialized (gson LinkedTreeMap.find: the loop's `child = left/right` reads
+		// share this Node-typed slot with the post-loop insertion's `created = new Node(...)`; the
+		// insertion if/else otherwise split them so the loop read `if (var7_1 == null)` referenced the
+		// insertion's never-on-this-path id -> "variable var7_1 might not have been initialized"). Skip
+		// instead: the ordinary AssignStatement reuse-minted path already reuses this id, marks it
+		// reused, and hoists its single declaration to the common ancestor (identical to the output
+		// with this whole pass disabled). Kill-switch: JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF=1.
+		if os.Getenv("JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF") == "" {
+			_, ifMinted := scope.minted[origId]
+			_, elseMinted := scope.minted[elseRef.Id]
+			if ifMinted || elseMinted {
+				core.TraceRewriteVar(className, methodName, "prebind if/else skip already-minted uid=%s id=%s", uid, origId.String())
+				continue
+			}
+		}
 		// Must actually be read after the if (escapes the branches). Probe by IDENTITY: temporarily
 		// rename origId to a sentinel and render afterSts; only a genuine reference to this id renders
 		// the sentinel, so an unrelated later local sharing the same varN is excluded.
@@ -2264,5 +2364,432 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 		for _, cl := range childStatementLists(st) {
 			placeCrossScopeDeclarations(cl, reused, all)
 		}
+	}
+}
+
+// genLocalDeclByName scans `list` and its whole subtree for declarations (`T x;` or `T x = ...`) of
+// decompiler-generated locals, returning for each rendered name a representative LeftValue (used to
+// rebuild a `T x;` declaration) and the set of DISTINCT rendered types seen for that name. A name with
+// more than one distinct type denotes genuinely different disjoint-slot locals that merely share the
+// slot-derived varN spelling; widening one type's scope over the other would mis-type it, so such
+// names are excluded from the name-based coverage repair.
+func genLocalDeclByName(list []statements.Statement) (map[string]values.JavaValue, map[string]map[string]struct{}) {
+	refByName := map[string]values.JavaValue{}
+	typesByName := map[string]map[string]struct{}{}
+	var walk func([]statements.Statement)
+	walk = func(sts []statements.Statement) {
+		for _, st := range sts {
+			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
+				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis {
+					name := ref.String(hoistProbeCtx)
+					if generatedLocalNameRe.MatchString(name) && ref.Type() != nil {
+						if _, seen := refByName[name]; !seen {
+							refByName[name] = as.LeftValue
+						}
+						if typesByName[name] == nil {
+							typesByName[name] = map[string]struct{}{}
+						}
+						typesByName[name][ref.Type().String(hoistProbeCtx)] = struct{}{}
+					}
+				}
+			}
+			for _, cl := range childStatementLists(st) {
+				walk(*cl)
+			}
+		}
+	}
+	walk(list)
+	return refByName, typesByName
+}
+
+// topLevelDeclByName reports whether `list` directly contains a declaration of a generated local
+// rendered as `name` (so a declaration in THIS block already dominates the whole block).
+func topLevelDeclByName(list []statements.Statement, name string) bool {
+	for _, st := range list {
+		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
+			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(hoistProbeCtx) == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// statementHeadReferencesName reports whether a compound statement references `name` in its OWN head
+// (an if/while condition, a for/switch selector, a try resource) rather than only inside its nested
+// statement bodies. It is computed as "occurrences in the full render" minus "occurrences across the
+// direct child bodies": the children's renders appear verbatim inside the full render, so the residual
+// is exactly the head. A head reference is evaluated in the ENCLOSING block's scope, so a local read or
+// embedded-assigned in a head (javac `(var7 = a[i]) != ' '`) must be declared in the block that
+// CONTAINS the statement, never merely in one of its bodies. Unrenderable nodes return false so the
+// repair stays conservative (it will simply not treat this as a head reference).
+func statementHeadReferencesName(st statements.Statement, name string) bool {
+	children := childStatementLists(st)
+	if len(children) == 0 {
+		return false
+	}
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	full, ok := safeRenderStatement(st)
+	if !ok {
+		return false
+	}
+	fullN := len(re.FindAllString(full, -1))
+	childN := 0
+	for _, cl := range children {
+		for _, c := range *cl {
+			t, ok := safeRenderStatement(c)
+			if !ok {
+				return false
+			}
+			childN += len(re.FindAllString(t, -1))
+		}
+	}
+	return fullN > childN
+}
+
+// blockHasUncoveredRefByName reports whether `list` (and its subtree) contains a textual reference to
+// `name` that is not preceded by a declaration of `name` in its lexical scope chain (`declaredOut`
+// says an enclosing block already declares it). It mirrors blockHasUncoveredRef but matches BOTH
+// declarations and references by NAME -- which is exactly what javac's lexical resolution uses -- so it
+// detects the split-id residual where the ONLY `T varN` declaration lives deep in a nested arm while a
+// sibling/ancestor statement assigns or reads the same varN with no declaration of its own ("cannot
+// find symbol: variable varN"). A compound statement whose HEAD references the name (an embedded assign
+// or read inside an if/loop condition, javac `(var7 = a[i]) != ' '`) counts as an uncovered reference
+// at this block when the name is not yet declared here, because the head is evaluated in this block's
+// scope -- not the body's -- so a body-only declaration cannot cover it.
+func blockHasUncoveredRefByName(list []statements.Statement, name string, declaredOut bool) bool {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	declared := declaredOut
+	for _, st := range list {
+		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
+			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(hoistProbeCtx) == name {
+				declared = true
+				continue
+			}
+		}
+		children := childStatementLists(st)
+		if len(children) == 0 {
+			if !declared && statementTextMatches(st, re) {
+				return true
+			}
+			continue
+		}
+		if !declared && statementHeadReferencesName(st, name) {
+			return true
+		}
+		for _, cl := range children {
+			if blockHasUncoveredRefByName(*cl, name, declared) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// relocateDeclarationsByName demotes every in-place declaration (`T x = ...`) of a generated local
+// rendered as `name` to a plain assignment and drops any bare `T x;` declaration, so that after the
+// caller prepends a single dominating `T x;` exactly one declaration survives. Matches by NAME (not id)
+// because the residual it repairs is precisely two distinct *VariableIds sharing one varN spelling.
+func relocateDeclarationsByName(block *[]statements.Statement, name string) {
+	if block == nil {
+		return
+	}
+	list := *block
+	out := list[:0]
+	for _, st := range list {
+		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(hoistProbeCtx) == name {
+				if as.IsDeclare && as.JavaValue == nil {
+					continue
+				}
+				if as.IsFirst || as.IsDeclare {
+					as.IsFirst = false
+					as.IsDeclare = false
+				}
+			}
+		}
+		for _, cl := range childStatementLists(st) {
+			relocateDeclarationsByName(cl, name)
+		}
+		out = append(out, st)
+	}
+	*block = out
+}
+
+// coverUndeclaredGeneratedLocals is a NAME-based safety net for the residual where rewriteVar splits
+// one JVM slot into two *VariableIds that render the SAME varN spelling: one carries the in-place
+// `T varN` declaration (deep in a nested arm) while the OTHER is only ever assigned/read with no
+// declaration of its own, so its uses fail to compile ("cannot find symbol: variable varN", e.g.
+// fastjson2 ObjectWriterAdapter.writeWithFilter's field-writer loop). Because both ids share the
+// slot-derived name and javac resolves locals by NAME, the fix is to widen the EXISTING declaration's
+// scope to the lowest block that lexically covers every textual occurrence of the name (the same
+// lowest-common-ancestor placement placeCrossScopeDeclarations does, but keyed by name so the
+// declaration-less id is also covered). It fires ONLY when a name actually has an out-of-scope
+// occurrence (blockHasUncoveredRefByName) and only for names with a single rendered type, so
+// correctly-scoped or genuinely-disjoint same-name locals are never touched. Hoisting only widens
+// scope and is always valid Java. Kill-switch: JDEC_COVER_UNDECLARED_OFF=1.
+func coverUndeclaredGeneratedLocals(block *[]statements.Statement) {
+	if block == nil || len(*block) == 0 {
+		return
+	}
+	list := *block
+	refByName, typesByName := genLocalDeclByName(list)
+	if len(refByName) > 0 {
+		names := make([]string, 0, len(refByName))
+		for n := range refByName {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		texts := make([]string, len(list))
+		allMatch := make([]bool, len(list))
+		for i, st := range list {
+			t, ok := safeRenderStatement(st)
+			texts[i] = t
+			allMatch[i] = !ok
+		}
+		var hoisted []statements.Statement
+		for _, name := range names {
+			if len(typesByName[name]) != 1 {
+				continue
+			}
+			if topLevelDeclByName(list, name) {
+				continue
+			}
+			if !blockHasUncoveredRefByName(list, name, false) {
+				continue
+			}
+			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+			cnt := 0
+			singleIdx := -1
+			for i := range list {
+				if allMatch[i] || re.MatchString(texts[i]) {
+					cnt++
+					singleIdx = i
+				}
+			}
+			belongs := false
+			if cnt >= 2 {
+				belongs = true
+			} else if cnt == 1 {
+				// A single referencing child statement: its true home is deeper UNLESS the name is read
+				// in that statement's own head (evaluated in THIS block's scope, so it must be declared
+				// here) or it is used across >=2 of the statement's own child scopes.
+				if statementHeadReferencesName(list[singleIdx], name) {
+					belongs = true
+				} else {
+					refChildren := 0
+					for _, cl := range childStatementLists(list[singleIdx]) {
+						if statementsReferenceName(*cl, name) {
+							refChildren++
+						}
+					}
+					belongs = refChildren >= 2
+				}
+			}
+			if !belongs {
+				continue
+			}
+			relocateDeclarationsByName(block, name)
+			hoisted = append(hoisted, statements.NewDeclareStatement(refByName[name]))
+		}
+		if len(hoisted) > 0 {
+			*block = append(hoisted, (*block)...)
+		}
+	}
+	for _, st := range *block {
+		for _, cl := range childStatementLists(st) {
+			coverUndeclaredGeneratedLocals(cl)
+		}
+	}
+}
+
+// isJavaLangObject reports whether t is exactly java.lang.Object (the supertype that the null-literal
+// declaration shortcut pins onto a slot that has not yet adopted a concrete reference type).
+func isJavaLangObject(t types.JavaType) bool {
+	if t == nil {
+		return false
+	}
+	if jc, ok := t.RawType().(*types.JavaClass); ok {
+		return jc.Name == "java.lang.Object" || jc.Name == "Object"
+	}
+	return false
+}
+
+// nullInitNarrowDot matches a receiver use of the just-matched name (`name.member`). nullInitNarrowAssign
+// matches an assignment-target use (`name =`, but NOT `name ==`). Both anchor at the start of the text
+// that immediately follows the name occurrence.
+var nullInitNarrowDot = regexp.MustCompile(`^\s*\.`)
+var nullInitNarrowAssign = regexp.MustCompile(`^\s*=([^=]|$)`)
+
+// nameUsedOnlyAsReceiverOrLHS reports whether every textual occurrence of `name` in `text` is either a
+// method/field receiver (`name.x`) or an assignment target (`name = ...`). This is the safety predicate
+// for narrowing a null-init Object declaration: narrowing the static type of a variable that is passed
+// as a bare argument could change overload resolution at that call, but a receiver-only/LHS-only
+// variable's narrower type only re-resolves the member access ON it (the bytecode already targets the
+// concrete type's member) and still accepts every store, so the narrowing is behavior-preserving. Any
+// other occurrence (argument, return, operand, array index, equality) makes the function return false,
+// so the caller conservatively leaves the declaration untouched.
+func nameUsedOnlyAsReceiverOrLHS(text, name string) bool {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	locs := re.FindAllStringIndex(text, -1)
+	if len(locs) == 0 {
+		return false
+	}
+	for _, loc := range locs {
+		after := text[loc[1]:]
+		if nullInitNarrowDot.MatchString(after) || nullInitNarrowAssign.MatchString(after) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// narrowNullInitObjectDecl recovers the declared type of a generated local whose ONLY consistent
+// concrete reference type comes from its reassignments, for the residual where the slot is otherwise
+// rendered (or defaulted) as java.lang.Object. It handles two shapes of the SAME residual, keyed by
+// the single concrete type S that every non-null reassignment `varN = expr` stores:
+//
+//   - RETYPE: an `Object varN;` / `Object varN = null` declaration exists. The slot was pinned to
+//     Object only because it never adopted a concrete reference type; narrow the declaration (and every
+//     read bound to it) to S.
+//   - SYNTHESIZE: varN has NO declaration at all (an orphan whose declaration the cross-scope hoisters
+//     dropped). The dumper's textual safety net (addMissingGeneratedLocalDecls) would then inject
+//     `Object varN = null` because inferGeneratedLocalRefType cannot resolve a cross-class call's
+//     return type from text alone. Synthesize a correctly-typed `S varN;` at method top from the
+//     AST-resolved reassignment type so the dumper sees varN declared and skips its Object fallback.
+//
+// The driving case is fastjson2 ObjectWriterAdapter.writeWithFilter:
+// `var30 = fieldWriter.getObjectWriter(...); var30.write(...)`, where var30 is an undeclared orphan and
+// `getObjectWriter` returns ObjectWriter (resolved in the AST, not textually) — so javac resolved
+// `var30.write` against Object and failed ("cannot find symbol: method write, location: variable
+// var30 of type Object").
+//
+// Why it is sound: (a) the declared type only governs member resolution and assignment compatibility;
+// every store is S (or the null literal, assignable to any reference type S), so the declaration still
+// accepts every assignment; (b) restricting varN to receiver/LHS positions (nameUsedOnlyAsReceiverOrLHS)
+// guarantees no call passes varN as a bare argument, so the concrete static type cannot alter overload
+// selection anywhere — the only thing it changes is that `varN.member` now resolves against S, which is
+// exactly the member the bytecode's invoke targets. It fires only when the reassignments agree on a
+// SINGLE non-Object reference type, so a genuinely multi-typed or Object-typed slot is left untouched. A
+// method-top bare `S varN;` is definite-assignment-safe because the JVM verifier already guarantees a
+// store dominates every read (the same invariant placeCrossScopeDeclarations relies on). Kill-switch:
+// JDEC_NULLINIT_NARROW_OFF=1.
+func narrowNullInitObjectDecl(sts *[]statements.Statement) {
+	if sts == nil || len(*sts) == 0 {
+		return
+	}
+	type nullInitInfo struct {
+		objDeclRefs []*values.JavaRef // Object-typed `Object varN;`/`= null` declaration refs (retype)
+		hasAnyDecl  bool              // any declaration (IsFirst/IsDeclare) for this name exists
+		reassignLV  values.JavaValue  // a representative reassignment LeftValue (synthesize a decl from)
+		reassignRef *values.JavaRef   // its unpacked ref (ResetVarType target)
+		rhsTokens   map[string]struct{}
+		rhsType     types.JavaType
+	}
+	infos := map[string]*nullInitInfo{}
+	var collect func([]statements.Statement)
+	collect = func(list []statements.Statement) {
+		for _, st := range list {
+			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam {
+					name := ref.String(hoistProbeCtx)
+					if generatedLocalNameRe.MatchString(name) {
+						in := infos[name]
+						if in == nil {
+							in = &nullInitInfo{rhsTokens: map[string]struct{}{}}
+							infos[name] = in
+						}
+						switch {
+						case as.IsFirst || as.IsDeclare:
+							in.hasAnyDecl = true
+							// A bare `Object varN;` (JavaValue nil) or `Object varN = null` pins the slot
+							// to Object only because it never adopted a concrete reference type.
+							if (as.JavaValue == nil || values.IsNullLiteral(as.JavaValue)) && isJavaLangObject(ref.Type()) {
+								in.objDeclRefs = append(in.objDeclRefs, ref)
+							}
+						case as.JavaValue != nil && !values.IsNullLiteral(as.JavaValue):
+							if t := as.JavaValue.Type(); t != nil {
+								in.rhsTokens[t.String(hoistProbeCtx)] = struct{}{}
+								in.rhsType = t
+								if in.reassignLV == nil {
+									in.reassignLV = as.LeftValue
+									in.reassignRef = ref
+								}
+							}
+						}
+					}
+				}
+			}
+			for _, cl := range childStatementLists(st) {
+				collect(*cl)
+			}
+		}
+	}
+	collect(*sts)
+	// A candidate is a name whose non-null reassignments agree on ONE concrete (non-Object,
+	// non-primitive) reference type S, AND that is either an Object-typed declaration (retype to S) or
+	// has no declaration at all (synthesize `S varN;`). Bail early when nothing qualifies so the common
+	// path renders nothing.
+	candidate := func(in *nullInitInfo) bool {
+		if len(in.rhsTokens) != 1 || in.rhsType == nil || isJavaLangObject(in.rhsType) {
+			return false
+		}
+		if _, isPrim := in.rhsType.RawType().(*types.JavaPrimer); isPrim {
+			return false
+		}
+		return len(in.objDeclRefs) > 0 || (!in.hasAnyDecl && in.reassignLV != nil)
+	}
+	any := false
+	for _, in := range infos {
+		if candidate(in) {
+			any = true
+			break
+		}
+	}
+	if !any {
+		return
+	}
+	var sb strings.Builder
+	for _, st := range *sts {
+		t, ok := safeRenderStatement(st)
+		if !ok {
+			return // unrenderable method: stay conservative and change nothing
+		}
+		sb.WriteString(t)
+		sb.WriteByte('\n')
+	}
+	methodText := sb.String()
+	names := make([]string, 0, len(infos))
+	for n := range infos {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var prepend []statements.Statement
+	for _, name := range names {
+		in := infos[name]
+		if !candidate(in) {
+			continue
+		}
+		if !nameUsedOnlyAsReceiverOrLHS(methodText, name) {
+			continue
+		}
+		if len(in.objDeclRefs) > 0 {
+			// An Object-typed declaration exists: narrow it (and every read bound to it) to S.
+			for _, ref := range in.objDeclRefs {
+				ref.ResetVarType(in.rhsType)
+			}
+			continue
+		}
+		// No declaration at all (an orphan whose declaration the hoisters dropped). The dumper's
+		// textual safety net would inject `Object varN = null` because it cannot resolve the
+		// cross-class call's return type; synthesize a correctly-typed `S varN;` at method top from
+		// the resolved reassignment type instead, so the dumper sees it declared and skips its Object
+		// fallback. Reusing the reassignment ref (retyped to S) keeps one identity for the slot.
+		in.reassignRef.ResetVarType(in.rhsType)
+		prepend = append(prepend, statements.NewDeclareStatement(in.reassignLV))
+	}
+	if len(prepend) > 0 {
+		*sts = append(prepend, *sts...)
 	}
 }

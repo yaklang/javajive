@@ -2,6 +2,7 @@ package core
 
 import (
 	"os"
+	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -146,6 +147,26 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		if ref.Type().String(ctx) == typ.String(ctx) {
 			return ref, false
 		}
+		// Same erased class, differing ONLY in parameterized-vs-raw (e.g. a loop induction local
+		// declared `Node<K,V>` reassigned from a RAW field read `node.parent` whose static type is the
+		// erased field type `Node`). The string compare above sees `Node<K,V>` != `Node` and would mint
+		// a SECOND variable for the back-edge store, splitting one loop variable into two ids whose
+		// disjoint reads leave the back-edge name uninitialized on the first iteration (gson
+		// LinkedTreeMap.rebalance: `node`/var9_1 read at 231/251/.. but only assigned by the bottom
+		// `node = node.parent`). A raw value is assignment-compatible with the parameterized local (an
+		// unchecked conversion javac accepts), so this is ONE variable: reuse the slot's ref and keep
+		// the PARAMETERIZED type as the declaration (adopt it if the slot currently holds the raw side).
+		// Strictly gated to "exactly one side raw, identical erasure": two genuinely different
+		// parameterizations (`List<String>` vs `List<Integer>`) are BOTH parameterized, fail this gate,
+		// and still split. Kill-switch: JDEC_RAW_GENERIC_SLOT_MERGE_OFF=1.
+		if os.Getenv("JDEC_RAW_GENERIC_SLOT_MERGE_OFF") == "" {
+			if refParam, valParam, erasedEqual := classifyRawGenericPair(ref.Type(), typ, ctx); erasedEqual && refParam != valParam {
+				if !refParam && valParam {
+					ref.ResetVarType(typ)
+				}
+				return ref, false
+			}
+		}
 		// The slot already holds a variable of a different type. If that variable was only
 		// null-initialized (an Object-typed `x = null` with no committed concrete type), reuse
 		// it and adopt the new concrete reference type instead of splitting the slot into a
@@ -217,6 +238,32 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 	newRef := s.NewVar(val)
 	s.varTable[slot] = newRef
 	return newRef, true
+}
+
+// classifyRawGenericPair compares two reference types by their rendered form and reports, for each,
+// whether it is PARAMETERIZED (carries a `<...>` type-argument list), plus whether their ERASURES
+// (the class name before the first `<`) are identical. It is the discriminator for the raw-vs-generic
+// slot-reuse merge in AssignVarGuarded: a true erasedEqual with differing param flags means the two
+// denote the same class differing only in raw-vs-parameterized form (assignment-compatible by an
+// unchecked conversion), so the slot store is a reassignment of one variable rather than a new local.
+// Implemented on the rendered string (the same surface AssignVarGuarded already compares) so it tracks
+// exactly what the declaration will print; a primitive/array/nil type has no `<` and a distinct
+// erasure, so it never spuriously matches a parameterized class.
+func classifyRawGenericPair(a, b types.JavaType, ctx *class_context.ClassContext) (aParam, bParam, erasedEqual bool) {
+	if a == nil || b == nil {
+		return false, false, false
+	}
+	as, bs := a.String(ctx), b.String(ctx)
+	ai := strings.IndexByte(as, '<')
+	bi := strings.IndexByte(bs, '<')
+	aErase, bErase := as, bs
+	if ai >= 0 {
+		aErase = as[:ai]
+	}
+	if bi >= 0 {
+		bErase = bs[:bi]
+	}
+	return ai >= 0, bi >= 0, aErase != "" && aErase == bErase
 }
 
 // isIntCategoryNumeric reports whether t is one of the numeric primitive types that share the JVM int
