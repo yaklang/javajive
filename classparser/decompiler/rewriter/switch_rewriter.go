@@ -361,7 +361,19 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	//delete(caseMap, -1)
 	//_ = defaultCase
 	caseMapKeys := caseMap.Keys()
-	caseMap.Set(math.MaxInt, caseMap.GetMust(-1))
+	// Re-key the default case (stored under -1) to the math.MaxInt sentinel that the rest of this pass
+	// uses for "the default" (IsDefault, default body offset). Guard it on the default ACTUALLY
+	// existing: a switch with NO default has no -1 entry, and the old unconditional
+	// `Set(math.MaxInt, GetMust(-1))` then stored `math.MaxInt -> nil`, injecting a spurious empty
+	// `case 9223372036854775807:` (that value = math.MaxInt on 64-bit; the startNode==nil branch below
+	// appends it before IsDefault is set, so it renders as a real case). javac rejects the literal as a
+	// lexer error ("integer number too large") which -- being pre-attribution -- phase-masks EVERY
+	// downstream type error in the whole tree compile (commons-lang3 DateUtils' inner range-style switch
+	// has cases 1..4 and no default). Kill-switch JDEC_SWITCH_SPURIOUS_DEFAULT_OFF restores the legacy
+	// unconditional injection.
+	if dv, ok := caseMap.Get(-1); (ok && dv != nil) || os.Getenv("JDEC_SWITCH_SPURIOUS_DEFAULT_OFF") != "" {
+		caseMap.Set(math.MaxInt, caseMap.GetMust(-1))
+	}
 	caseMap.Delete(-1)
 	// Map each case value to the ABSOLUTE bytecode offset of its body (Bug G fix). javac lays case
 	// bodies out in SOURCE order at increasing offsets and the fall-through edges follow that

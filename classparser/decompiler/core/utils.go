@@ -412,9 +412,18 @@ func isSideEffectFreeDiscard(v values.JavaValue) bool {
 	if u == values.JavaNull {
 		return true
 	}
-	switch u.(type) {
+	switch t := u.(type) {
 	case *values.JavaRef, *values.JavaLiteral, *values.JavaClassValue:
 		return true
+	case *values.RefMember:
+		// A discarded field read `this.f` is side-effect-free: `this` is never null (no NPE) and an
+		// instance-field read triggers no class initialization. Emitting it bare yields `this.f;`, which
+		// javac rejects as "not a statement" (spring cglib EmitUtils$6 left dead `aload this; getfield
+		// val$e; pop` -> `this.val$e;`, a spring-core tree-recompile blocker missed by the local-only
+		// rule). Restricted to a DIRECT this-rooted receiver: a deeper chain (`this.a.b`, `local.f`) can
+		// NPE at an inner getfield, and a static-field read can trigger <clinit>, so those stay kept.
+		ref, ok := UnpackSoltValue(t.Object).(*values.JavaRef)
+		return ok && ref.IsThis
 	}
 	return false
 }
