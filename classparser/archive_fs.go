@@ -47,6 +47,17 @@ func NewExpandedArchiveFileSystemFromLocal(path string) (fi.FileSystem, error) {
 	return NewExpandedZipFS(zipFS, zipFS), nil
 }
 
+// NewExpandedArchiveFileSystemFromLocalWithOptions is like
+// NewExpandedArchiveFileSystemFromLocal but lets the caller control nested-jar
+// recursion.
+func NewExpandedArchiveFileSystemFromLocalWithOptions(path string, recursiveParse bool) (fi.FileSystem, error) {
+	zipFS, err := filesys.NewZipFSFromLocal(path)
+	if err != nil {
+		return nil, err
+	}
+	return NewExpandedZipFSWithOptions(zipFS, zipFS, recursiveParse), nil
+}
+
 // NewExpandedLocalFileSystem wraps the OS local filesystem so archive files
 // (.jar/.war/.ear/.par/.zip) behave as directories and .class entries are
 // served as decompiled Java source.
