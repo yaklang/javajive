@@ -194,7 +194,7 @@
 <section class="section" id="benchmarks">
   <div class="section-head">
     <h2 data-i18n="bench.h2">Industrial-grade, self-proven</h2>
-    <p data-i18n="bench.p">This batch reports JavaJive measured against itself — honest, reproducible numbers on 8 real JARs (2,252 outer classes). Head-to-head data against CFR &amp; Vineflower is refreshed in a follow-up batch.</p>
+    <p data-i18n="bench.p">Honest, reproducible numbers on 8 real JARs (2,252 outer classes): JavaJive measured against itself, plus a fair head-to-head against CFR 0.152 and Vineflower 1.10.1 below.</p>
   </div>
   <div class="section-wrap">
     <div class="stat-grid">
@@ -286,7 +286,60 @@
       We report class-clean rate + full round-trip + a <code>syntax = 0</code> hard assertion instead of raw error-line counts,
       because a single syntax error phase-masks every downstream type error in a whole-jar compile. A recent hotspot fix
       (fastjson2 <code>ObjectReaderBaseModule</code> 73s &rarr; 2.8s) lifted aggregate throughput 4.6× with byte-identical output.
-      Head-to-head data against CFR 0.152 and Vineflower is being re-measured and lands in the next batch.
+      The head-to-head comparison against CFR 0.152 and Vineflower 1.10.1 is shown below.
+    </p>
+
+    <div class="section-head" style="margin-top:3.25rem">
+      <h2 data-i18n="cmp2.h2">Head-to-head vs CFR &amp; Vineflower</h2>
+      <p data-i18n="cmp2.p">Same machine, same 8 JARs, same <code>javac --release 8</code>. The primary metric is defective outer classes / total (lower is better), collapsed to outer classes so it is comparable across tools. JavaJive is syntax-clean so its whole-tree compile is never phase-masked; CFR &amp; Vineflower are compiled per outer class in isolation so their own syntax errors can't mask their defects — a fair, un-masked comparison.</p>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="stat-num">−54%</div>
+        <div class="stat-label" data-i18n="cmp2.s1">fewer defective classes than CFR (209 vs 457) — JavaJive wins all 8 JARs</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">90.7%</div>
+        <div class="stat-label" data-i18n="cmp2.s2">clean-class rate — tied #1 with Vineflower (90.7%), 11 points ahead of CFR (79.7%)</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num">1 of 3</div>
+        <div class="stat-label" data-i18n="cmp2.s3">the only pure-Go decompiler in the top tier — CFR and Vineflower are JVM apps</div>
+      </div>
+    </div>
+
+    <p class="bench-note dim" data-i18n="cmp2.cap" style="margin-bottom:.6rem">Defective outer classes / total (clean-class rate). Bold = best for that JAR. Lower defect count is better:</p>
+    <div class="cmp-wrap">
+      <table class="cmp-table">
+        <thead>
+          <tr>
+            <th data-i18n="rt.cmp.jar">JAR (classes)</th>
+            <th class="col-jj">JavaJive</th>
+            <th>CFR 0.152</th>
+            <th>Vineflower 1.10.1</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>commons-codec (106)</td><td class="col-jj"><strong>0/72 (100.0%)</strong></td><td>10/72 (86.1%)</td><td>2/72 (97.2%)</td></tr>
+          <tr><td>gson (195)</td><td class="col-jj"><strong>0/73 (100.0%)</strong></td><td>24/73 (67.1%)</td><td>16/74 (78.4%)</td></tr>
+          <tr><td>commons-lang3 (345)</td><td class="col-jj">24/198 (87.9%)</td><td>46/198 (76.8%)</td><td><strong>6/198 (97.0%)</strong></td></tr>
+          <tr><td>jsoup (238)</td><td class="col-jj"><strong>1/51 (98.0%)</strong></td><td>5/51 (90.2%)</td><td>2/51 (96.1%)</td></tr>
+          <tr><td>snakeyaml (231)</td><td class="col-jj">4/122 (96.7%)</td><td>11/123 (91.1%)</td><td><strong>2/121 (98.3%)</strong></td></tr>
+          <tr><td>spring-core (978)</td><td class="col-jj">90/649 (86.1%)</td><td>117/649 (82.0%)</td><td><strong>74/649 (88.6%)</strong></td></tr>
+          <tr><td>fastjson2 (681)</td><td class="col-jj"><strong>22/529 (95.8%)</strong></td><td>90/530 (83.0%)</td><td>41/529 (92.2%)</td></tr>
+          <tr><td>guava (1,892)</td><td class="col-jj">68/558 (87.8%)</td><td>154/558 (72.4%)</td><td><strong>66/558 (88.2%)</strong></td></tr>
+          <tr><td data-i18n="acc.total"><strong>total</strong></td><td class="col-jj"><strong>209/2,252 (90.7%)</strong></td><td>457/2,254 (79.7%)</td><td><strong>209/2,252 (90.7%)</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="bench-note dim" data-i18n="cmp2.note">
+      JavaJive beats CFR on every JAR and cuts total defective classes by 54% (209 vs 457); it is tied #1 with Vineflower
+      overall (209 = 209, both 90.7%), leading on serialization/JSON/codec libraries (gson 0 vs 16, fastjson2 22 vs 41,
+      commons-codec 0 vs 2) while Vineflower is steadier on generics-heavy ones (commons-lang3, guava). Measured 2026-07-01 on
+      darwin/arm64, JDK 21 (<code>--release 8</code>), CFR 0.152 &amp; Vineflower 1.10.1. Full methodology &amp; reproduction:
+      <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7.
     </p>
   </div>
 </section>
@@ -436,7 +489,7 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "install.src.lead": "Clone and build the CLI from source.",
         "install.src.foot": "Requires Go 1.22+. The result is a single self-contained binary.",
         "bench.h2": "Industrial-grade, self-proven",
-        "bench.p": "This batch reports JavaJive measured against itself — honest, reproducible numbers on 8 real JARs (2,252 outer classes). Head-to-head data against CFR &amp; Vineflower is refreshed in a follow-up batch.",
+        "bench.p": "Honest, reproducible numbers on 8 real JARs (2,252 outer classes): JavaJive measured against itself, plus a fair head-to-head against CFR 0.152 and Vineflower 1.10.1 below.",
         "bench.s1": 'class-clean rate — 2,043 / 2,252 outer classes recompile with zero <code>javac</code> errors',
         "bench.s2": "syntax errors across all 8 JARs — a CI-enforced hard assertion, so the numbers can't be phase-masked",
         "bench.s3": "self-hosted algorithms — MD5 · SHA-256 · CRC32 · quicksort · Base64 — round-trip byte-for-byte",
@@ -452,7 +505,14 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "tp.cap": "Single-thread decompile throughput — end-to-end (unzip + decompile + dump), the production archive path. darwin/arm64, 20 logical cores, Go 1.22.12:",
         "tp.sec": "seconds", "tp.cps": "classes / s",
         "rt.cmp.jar": "JAR (classes)",
-        "self.note": 'This batch shows only JavaJive numbers — all reproducible via <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a>. We report class-clean rate + full round-trip + a <code>syntax = 0</code> hard assertion instead of raw error-line counts, because a single syntax error phase-masks every downstream type error in a whole-jar compile. A recent hotspot fix (fastjson2 <code>ObjectReaderBaseModule</code> 73s &rarr; 2.8s) lifted aggregate throughput 4.6× with byte-identical output. Head-to-head data against CFR 0.152 and Vineflower is being re-measured and lands in the next batch.',
+        "self.note": 'This batch shows only JavaJive numbers — all reproducible via <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a>. We report class-clean rate + full round-trip + a <code>syntax = 0</code> hard assertion instead of raw error-line counts, because a single syntax error phase-masks every downstream type error in a whole-jar compile. A recent hotspot fix (fastjson2 <code>ObjectReaderBaseModule</code> 73s &rarr; 2.8s) lifted aggregate throughput 4.6× with byte-identical output. The head-to-head comparison against CFR 0.152 and Vineflower 1.10.1 is shown below.',
+        "cmp2.h2": "Head-to-head vs CFR &amp; Vineflower",
+        "cmp2.p": 'Same machine, same 8 JARs, same <code>javac --release 8</code>. The primary metric is defective outer classes / total (lower is better), collapsed to outer classes so it is comparable across tools. JavaJive is syntax-clean so its whole-tree compile is never phase-masked; CFR &amp; Vineflower are compiled per outer class in isolation so their own syntax errors can&#39;t mask their defects — a fair, un-masked comparison.',
+        "cmp2.s1": "fewer defective classes than CFR (209 vs 457) — JavaJive wins all 8 JARs",
+        "cmp2.s2": "clean-class rate — tied #1 with Vineflower (90.7%), 11 points ahead of CFR (79.7%)",
+        "cmp2.s3": "the only pure-Go decompiler in the top tier — CFR and Vineflower are JVM apps",
+        "cmp2.cap": "Defective outer classes / total (clean-class rate). Bold = best for that JAR. Lower defect count is better:",
+        "cmp2.note": 'JavaJive beats CFR on every JAR and cuts total defective classes by 54% (209 vs 457); it is tied #1 with Vineflower overall (209 = 209, both 90.7%), leading on serialization/JSON/codec libraries (gson 0 vs 16, fastjson2 22 vs 41, commons-codec 0 vs 2) while Vineflower is steadier on generics-heavy ones (commons-lang3, guava). Measured 2026-07-01 on darwin/arm64, JDK 21 (<code>--release 8</code>), CFR 0.152 &amp; Vineflower 1.10.1. Full methodology &amp; reproduction: <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7.',
         "features.h2": "Features",
         "features.p": "Three Java building blocks, one portable module — plus the supporting cast trimmed down to a self-contained core.",
         "feat.1.t": "Decompiler",
@@ -498,7 +558,7 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "install.src.lead": "克隆仓库并从源码构建命令行。",
         "install.src.foot": "需要 Go 1.22+。产物是一个自包含的单文件二进制。",
         "bench.h2": "工业可用，用事实自证",
-        "bench.p": "本批次只报告 JavaJive 与自身的纵向对比——在 8 个真实 JAR（2,252 个顶层类）上的诚实、可复现数据。与 CFR、Vineflower 的正面对比数据将在下一批次刷新给出。",
+        "bench.p": "8 个真实 JAR（2,252 个顶层类）上的诚实、可复现数据：既有 JavaJive 与自身的纵向对比，也有下方与 CFR 0.152、Vineflower 1.10.1 的同口径正面横评。",
         "bench.s1": '类级干净率 — 2,043 / 2,252 个顶层类零 <code>javac</code> 错误可重编译',
         "bench.s2": "8 个 JAR 全集语法错为 0 — CI 硬断言把关，数字无法被阶段遮蔽",
         "bench.s3": "自托管算法 — MD5 · SHA-256 · CRC32 · 快排 · Base64 — 往返逐字节一致",
@@ -514,7 +574,14 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "tp.cap": "单线程反编译吞吐 —— 端到端（解包 + 反编译 + 落盘），即生产归档路径。darwin/arm64，20 逻辑核，Go 1.22.12：",
         "tp.sec": "秒", "tp.cps": "类 / 秒",
         "rt.cmp.jar": "JAR（类数）",
-        "self.note": '本批次仅展示 JavaJive 自身数据——全部可通过 <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> 复现。我们以类级干净率 + 完整往返 + <code>syntax = 0</code> 硬断言为口径，而非原始错误行数——因为整包编译时一个语法错会阶段遮蔽其下游全部类型错。近期一处热点修复（fastjson2 <code>ObjectReaderBaseModule</code> 73s &rarr; 2.8s）在输出字节级不变的前提下把聚合吞吐提升 4.6×。与 CFR 0.152、Vineflower 的正面对比数据正在重新测量，将在下一批次给出。',
+        "self.note": '本批次仅展示 JavaJive 自身数据——全部可通过 <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> 复现。我们以类级干净率 + 完整往返 + <code>syntax = 0</code> 硬断言为口径，而非原始错误行数——因为整包编译时一个语法错会阶段遮蔽其下游全部类型错。近期一处热点修复（fastjson2 <code>ObjectReaderBaseModule</code> 73s &rarr; 2.8s）在输出字节级不变的前提下把聚合吞吐提升 4.6×。与 CFR 0.152、Vineflower 1.10.1 的同口径正面对比见下方。',
+        "cmp2.h2": "与 CFR、Vineflower 正面对比",
+        "cmp2.p": '同一台机器、同一套 8 个 JAR、同一 <code>javac --release 8</code>。主口径为「缺陷外层类 / 总数」（越低越好），归一到外层类以便跨工具比较。JavaJive 产物零语法错，整树编译不被阶段遮蔽；CFR 与 Vineflower 按外层类逐个隔离编译，使其自身语法错无法遮蔽自身缺陷——这是一次公平、无遮蔽的对比。',
+        "cmp2.s1": "缺陷类比 CFR 少（209 vs 457）——JavaJive 8 个 JAR 全胜",
+        "cmp2.s2": "类级干净率——与 Vineflower 并列第一（90.7%），领先 CFR（79.7%）11 个百分点",
+        "cmp2.s3": "第一梯队里唯一的纯 Go 反编译器——CFR 与 Vineflower 均为 JVM 程序",
+        "cmp2.cap": "缺陷外层类 / 总数（干净率）。粗体为该 JAR 最优。缺陷数越低越好：",
+        "cmp2.note": 'JavaJive 在每个 JAR 上都胜过 CFR，缺陷类总数减少 54%（209 vs 457）；总体与 Vineflower 并列第一（209 = 209，均 90.7%），在序列化/JSON/编码库上领先（gson 0 vs 16、fastjson2 22 vs 41、commons-codec 0 vs 2），Vineflower 在泛型密集库（commons-lang3、guava）上更稳。测于 2026-07-01，darwin/arm64，JDK 21（<code>--release 8</code>），CFR 0.152、Vineflower 1.10.1。完整方法学与复现见 <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7。',
         "features.h2": "特性",
         "features.p": "三块 Java 基础能力，打包进一个便携模块——其余依赖也被裁剪成自包含的核心。",
         "feat.1.t": "反编译器",
