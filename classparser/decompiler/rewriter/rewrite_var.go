@@ -2075,6 +2075,92 @@ func safeRenderStatement(st statements.Statement) (text string, ok bool) {
 	return st.String(hoistProbeCtx), true
 }
 
+// isWordByteASCII reports whether b is an ASCII word char ([0-9A-Za-z_]) -- exactly the class Go's
+// regexp uses for `\w`/`\b` (see regexp/syntax.IsWordChar), so the hand-rolled whole-token scans below
+// are byte-for-byte equivalent to a `\bname\b` regex for the ASCII identifiers rendered by the dumper.
+func isWordByteASCII(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// countWholeWord counts non-overlapping whole-token occurrences of name in s with the SAME ASCII word
+// boundaries as regexp `\bname\b`, but via strings.Index rather than the backtracking regex engine --
+// the fastjson2 reader.ObjectReaderBaseModule decompile hotspot. Equivalent to
+// len(regexp.MustCompile(`\b`+QuoteMeta(name)+`\b`).FindAllString(s, -1)).
+func countWholeWord(s, name string) int {
+	if name == "" {
+		return 0
+	}
+	n := 0
+	for i := 0; i+len(name) <= len(s); {
+		j := strings.Index(s[i:], name)
+		if j < 0 {
+			break
+		}
+		pos := i + j
+		beforeOK := pos == 0 || !isWordByteASCII(s[pos-1])
+		after := pos + len(name)
+		afterOK := after >= len(s) || !isWordByteASCII(s[after])
+		if beforeOK && afterOK {
+			n++
+		}
+		i = pos + 1
+	}
+	return n
+}
+
+// containsWholeWord reports whether name occurs as a whole ASCII token in s (regexp `\bname\b`
+// MatchString equivalent) with an early return on the first hit.
+func containsWholeWord(s, name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i+len(name) <= len(s); {
+		j := strings.Index(s[i:], name)
+		if j < 0 {
+			return false
+		}
+		pos := i + j
+		beforeOK := pos == 0 || !isWordByteASCII(s[pos-1])
+		after := pos + len(name)
+		afterOK := after >= len(s) || !isWordByteASCII(s[after])
+		if beforeOK && afterOK {
+			return true
+		}
+		i = pos + 1
+	}
+	return false
+}
+
+// stmtRenderMemo caches statement renders WITHIN a single coverUndeclaredGeneratedLocals pass so a deep
+// subtree is rendered ONCE rather than re-rendered for every generated-local name and again at every
+// recursion level -- the O(names x depth) render blow-up that made fastjson2 ObjectReaderBaseModule
+// take ~73s to decompile. A render is deterministic for a fixed tree (always hoistProbeCtx), so a cache
+// hit is byte-identical to a fresh render; the map is fully invalidated whenever the pass MUTATES the
+// tree (relocate/hoist) so no stale render can ever survive an edit. Keyed by statement identity.
+type stmtRenderMemo map[statements.Statement]string
+
+// render returns st's cached render, computing (and caching) it on a miss. It mirrors
+// safeRenderStatement's contract: ok==false means the render panicked and callers must stay conservative.
+func (m stmtRenderMemo) render(st statements.Statement) (string, bool) {
+	if m != nil {
+		if s, hit := m[st]; hit {
+			return s, true
+		}
+	}
+	s, ok := safeRenderStatement(st)
+	if ok && m != nil {
+		m[st] = s
+	}
+	return s, ok
+}
+
+// invalidate drops every cached render (called after any tree mutation so no stale text survives).
+func (m stmtRenderMemo) invalidate() {
+	for k := range m {
+		delete(m, k)
+	}
+}
+
 // collectGeneratedLocalDeclIDs returns, in deterministic discovery order, the ids of every generated
 // local declared (IsFirst/IsDeclare) anywhere in the subtree whose id is in the `reused` set, plus a
 // representative LeftValue per id (used to synthesize the bare `T x;` declaration with the right
@@ -2423,25 +2509,27 @@ func topLevelDeclByName(list []statements.Statement, name string) bool {
 // embedded-assigned in a head (javac `(var7 = a[i]) != ' '`) must be declared in the block that
 // CONTAINS the statement, never merely in one of its bodies. Unrenderable nodes return false so the
 // repair stays conservative (it will simply not treat this as a head reference).
-func statementHeadReferencesName(st statements.Statement, name string) bool {
+func statementHeadReferencesName(st statements.Statement, name string, memo stmtRenderMemo) bool {
 	children := childStatementLists(st)
 	if len(children) == 0 {
 		return false
 	}
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	full, ok := safeRenderStatement(st)
+	full, ok := memo.render(st)
 	if !ok {
 		return false
 	}
-	fullN := len(re.FindAllString(full, -1))
+	fullN := countWholeWord(full, name)
+	if fullN == 0 {
+		return false
+	}
 	childN := 0
 	for _, cl := range children {
 		for _, c := range *cl {
-			t, ok := safeRenderStatement(c)
+			t, ok := memo.render(c)
 			if !ok {
 				return false
 			}
-			childN += len(re.FindAllString(t, -1))
+			childN += countWholeWord(t, name)
 		}
 	}
 	return fullN > childN
@@ -2457,8 +2545,7 @@ func statementHeadReferencesName(st statements.Statement, name string) bool {
 // or read inside an if/loop condition, javac `(var7 = a[i]) != ' '`) counts as an uncovered reference
 // at this block when the name is not yet declared here, because the head is evaluated in this block's
 // scope -- not the body's -- so a body-only declaration cannot cover it.
-func blockHasUncoveredRefByName(list []statements.Statement, name string, declaredOut bool) bool {
-	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+func blockHasUncoveredRefByName(list []statements.Statement, name string, declaredOut bool, memo stmtRenderMemo) bool {
 	declared := declaredOut
 	for _, st := range list {
 		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
@@ -2469,16 +2556,26 @@ func blockHasUncoveredRefByName(list []statements.Statement, name string, declar
 		}
 		children := childStatementLists(st)
 		if len(children) == 0 {
-			if !declared && statementTextMatches(st, re) {
-				return true
+			// A render panic is conservatively treated as a match (mirrors statementTextMatches), so an
+			// unrenderable leaf never lets an out-of-scope use slip through the repair.
+			if !declared {
+				if t, ok := memo.render(st); !ok || containsWholeWord(t, name) {
+					return true
+				}
 			}
 			continue
 		}
-		if !declared && statementHeadReferencesName(st, name) {
+		// Prune a whole subtree that does not even mention the name: with no textual occurrence there is
+		// neither a reference nor a declaration of it below, so the head check and recursion would both
+		// find nothing. (A render failure disables the prune so behaviour stays conservative.)
+		if full, ok := memo.render(st); ok && !strings.Contains(full, name) {
+			continue
+		}
+		if !declared && statementHeadReferencesName(st, name, memo) {
 			return true
 		}
 		for _, cl := range children {
-			if blockHasUncoveredRefByName(*cl, name, declared) {
+			if blockHasUncoveredRefByName(*cl, name, declared, memo) {
 				return true
 			}
 		}
@@ -2529,6 +2626,14 @@ func relocateDeclarationsByName(block *[]statements.Statement, name string) {
 // correctly-scoped or genuinely-disjoint same-name locals are never touched. Hoisting only widens
 // scope and is always valid Java. Kill-switch: JDEC_COVER_UNDECLARED_OFF=1.
 func coverUndeclaredGeneratedLocals(block *[]statements.Statement) {
+	// One render memo is shared across the whole recursive pass: a subtree rendered while checking the
+	// root block is reused when the recursion descends into it. It is invalidated on every mutation, so
+	// the result is byte-identical to the previous (uncached) code -- just without the O(names x depth)
+	// re-rendering that dominated large methods (fastjson2 ObjectReaderBaseModule: ~73s -> sub-second).
+	coverUndeclaredGeneratedLocalsPass(block, stmtRenderMemo{})
+}
+
+func coverUndeclaredGeneratedLocalsPass(block *[]statements.Statement, memo stmtRenderMemo) {
 	if block == nil || len(*block) == 0 {
 		return
 	}
@@ -2546,6 +2651,9 @@ func coverUndeclaredGeneratedLocals(block *[]statements.Statement) {
 			t, ok := safeRenderStatement(st)
 			texts[i] = t
 			allMatch[i] = !ok
+			if ok {
+				memo[st] = t // seed the memo with the top-level renders we just computed
+			}
 		}
 		var hoisted []statements.Statement
 		for _, name := range names {
@@ -2555,14 +2663,13 @@ func coverUndeclaredGeneratedLocals(block *[]statements.Statement) {
 			if topLevelDeclByName(list, name) {
 				continue
 			}
-			if !blockHasUncoveredRefByName(list, name, false) {
+			if !blockHasUncoveredRefByName(list, name, false, memo) {
 				continue
 			}
-			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
 			cnt := 0
 			singleIdx := -1
 			for i := range list {
-				if allMatch[i] || re.MatchString(texts[i]) {
+				if allMatch[i] || containsWholeWord(texts[i], name) {
 					cnt++
 					singleIdx = i
 				}
@@ -2574,7 +2681,7 @@ func coverUndeclaredGeneratedLocals(block *[]statements.Statement) {
 				// A single referencing child statement: its true home is deeper UNLESS the name is read
 				// in that statement's own head (evaluated in THIS block's scope, so it must be declared
 				// here) or it is used across >=2 of the statement's own child scopes.
-				if statementHeadReferencesName(list[singleIdx], name) {
+				if statementHeadReferencesName(list[singleIdx], name, memo) {
 					belongs = true
 				} else {
 					refChildren := 0
@@ -2591,14 +2698,16 @@ func coverUndeclaredGeneratedLocals(block *[]statements.Statement) {
 			}
 			relocateDeclarationsByName(block, name)
 			hoisted = append(hoisted, statements.NewDeclareStatement(refByName[name]))
+			memo.invalidate() // the tree just changed; drop stale renders so later names re-render fresh
 		}
 		if len(hoisted) > 0 {
 			*block = append(hoisted, (*block)...)
+			memo.invalidate()
 		}
 	}
 	for _, st := range *block {
 		for _, cl := range childStatementLists(st) {
-			coverUndeclaredGeneratedLocals(cl)
+			coverUndeclaredGeneratedLocalsPass(cl, memo)
 		}
 	}
 }

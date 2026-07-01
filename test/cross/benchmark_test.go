@@ -129,6 +129,173 @@ type benchJar struct {
 	depGlob []string
 }
 
+// selfScore is JavaJive's SELF-evaluation on one jar (no cross-tool comparison). It measures the two
+// things a decompiler is actually for: how much of the jar recompiles, and whether the recompiled
+// output round-trips (repackages into a jar whose classes all load+verify). The primary metric is the
+// CLEAN-CLASS RATE (compilable outer classes / total outer classes), NOT the raw javac error-line
+// count -- an error-line count is masked by javac phase-abort (a single parse error suppresses every
+// downstream attribution error) and conflates "one class with many errors" with "many broken classes".
+// A class is the unit that either recompiles or does not, so the class-level rate is the honest metric.
+type selfScore struct {
+	units       int // flat .java units JavaJive emitted (it flattens each nested class to its own file)
+	outers      int // distinct OUTER (top-level) classes among the emitted units
+	failedOuter int // OUTER classes with >=1 javac error when tree-compiled (the defective classes)
+	errLines    int // total javac error lines (context only; see the doc note on why this is secondary)
+	syntaxErr   int // javac PARSE/lexer error lines (syntax errors). MUST be 0: any syntax error aborts
+	// javac before attribution and phase-masks every other file's type errors, making the class metric a
+	// dishonest overcount. A nonzero value invalidates this jar's failedOuter count.
+	verifyOK   int    // classes in the repackaged jar that load+link under -Xverify:all
+	verifyFail int    // classes in the repackaged jar that fail the bytecode verifier
+	decErr     string // non-empty if decompilation itself errored (jar unreadable, etc.)
+}
+
+// cleanClassPct is the fraction of outer classes that recompile with zero javac errors.
+func (s selfScore) cleanClassPct() float64 {
+	if s.outers == 0 {
+		return 0
+	}
+	return float64(s.outers-s.failedOuter) / float64(s.outers) * 100
+}
+
+// fullRoundTrip reports whether the jar round-trips completely: every class recompiled (no tree
+// errors) AND every class in the repackaged jar loads+verifies.
+func (s selfScore) fullRoundTrip() bool {
+	return s.decErr == "" && s.failedOuter == 0 && s.errLines == 0 && s.verifyFail == 0
+}
+
+// TestBenchmarkSelfRecompile is JavaJive's self-evaluation benchmark (opt-in BENCHMARK=1, needs ~/.m2).
+// For each target jar it decompiles the whole jar, tree-compiles the produced sources together (deps on
+// the classpath), collapses failures to distinct OUTER classes, then repackages the recompiled classes
+// into a jar and load+verifies every class. It prints two markdown tables for BENCHMARK.md / the site:
+//
+//	Table A - clean-class rate: compilable outer classes / total (the PRIMARY metric, error-ratio form).
+//	Table B - round-trip: recompile errors + repackaged-jar verify (ok/fail) + a full-round-trip flag.
+//
+// This is a JavaJive-ONLY report; it does not run or compare against any other decompiler.
+func TestBenchmarkSelfRecompile(t *testing.T) {
+	if os.Getenv("BENCHMARK") == "" {
+		t.Skip("set BENCHMARK=1 to run the JavaJive self-recompile benchmark")
+	}
+	lookJavac(t)
+	lookJava(t)
+	verifierDir := buildVerifier(t)
+
+	jars := benchmarkJars
+	if sel := os.Getenv("BENCHMARK_JARS"); sel != "" {
+		want := map[string]bool{}
+		for _, k := range strings.Split(sel, ",") {
+			want[strings.TrimSpace(k)] = true
+		}
+		var filtered []benchJar
+		for _, j := range benchmarkJars {
+			if want[j.key] {
+				filtered = append(filtered, j)
+			}
+		}
+		jars = filtered
+	}
+
+	type row struct {
+		jar     string
+		classes int
+		s       selfScore
+	}
+	var rows []row
+
+	for _, j := range jars {
+		jarPath := resolveJar(j.relPath)
+		if jarPath == "" {
+			t.Logf("[skip] %s not found under %s", j.key, m2Repo())
+			continue
+		}
+		deps := resolveDeps(j.depGlob)
+		// Complete sun.misc so faithfully-decompiled sun.misc.Unsafe users are not counted as defects
+		// under --release 8 (the same shim the round-trip and inventory harnesses use).
+		classpath := withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))
+		nClasses := len(classEntries(t, jarPath))
+
+		root := t.TempDir()
+		files, units, decompFail := decompileAll(t, jarPath, root, 0)
+
+		clsRoot := t.TempDir()
+		errLines, raw := treeCompileToDir(t, files, classpath, clsRoot)
+		bad := map[string]struct{}{}
+		for _, m := range javacErrorFileRe.FindAllStringSubmatch(raw, -1) {
+			bad[m[1]] = struct{}{}
+		}
+		outers, failedOuter := outerStats(root, files, bad)
+		// Count syntax (parse/lexer) errors: any of them phase-masks this jar's attribution errors, so a
+		// nonzero count means failedOuter is an unreliable overcount (see selfScore.syntaxErr).
+		syntaxErr := 0
+		for _, tr := range parseTreeErrors(raw, root) {
+			if tr.reason == "syntax error (malformed output)" {
+				syntaxErr++
+			}
+		}
+
+		// Repackage whatever recompiled and load+verify every class in the resulting jar.
+		repackaged := filepath.Join(t.TempDir(), j.key+"-recompiled.jar")
+		zipClassesToJar(t, clsRoot, repackaged)
+		vok, vfail, _ := verifyJarLoads(t, verifierDir, repackaged)
+
+		s := selfScore{
+			units: len(files), outers: outers, failedOuter: failedOuter,
+			errLines: errLines, syntaxErr: syntaxErr, verifyOK: vok, verifyFail: vfail,
+		}
+		if decompFail > 0 {
+			s.decErr = fmt.Sprintf("%d units failed to decompile", decompFail)
+		}
+		_ = units
+		rows = append(rows, row{jar: j.key, classes: nClasses, s: s})
+		t.Logf("[%s] classes=%d units=%d | clean-class %d/%d (%.1f%% ok) | recompileErrLines=%d syntaxErr=%d | repackagedVerify ok=%d fail=%d | fullRoundTrip=%v",
+			j.key, nClasses, len(files),
+			outers-failedOuter, outers, s.cleanClassPct(),
+			errLines, syntaxErr, vok, vfail, s.fullRoundTrip())
+	}
+
+	var b strings.Builder
+	b.WriteString("\n#### Table A - clean-class rate (compilable outer classes / total; higher is better; PRIMARY metric)\n\n")
+	b.WriteString("Cell = clean / total outer classes (clean-class rate). A class is \"clean\" iff every unit it flattens into recompiles with zero javac errors.\n\n")
+	b.WriteString("| jar | classes | clean classes | clean-class rate | defective classes |\n")
+	b.WriteString("|---|---:|---:|---:|---:|\n")
+	var totOuter, totClean int
+	for _, r := range rows {
+		clean := r.s.outers - r.s.failedOuter
+		totOuter += r.s.outers
+		totClean += clean
+		fmt.Fprintf(&b, "| %s | %d | %d/%d | %.1f%% | %d |\n",
+			r.jar, r.classes, clean, r.s.outers, r.s.cleanClassPct(), r.s.failedOuter)
+	}
+	pct := 0.0
+	if totOuter > 0 {
+		pct = float64(totClean) / float64(totOuter) * 100
+	}
+	fmt.Fprintf(&b, "| **total** | | **%d/%d** | **%.1f%%** | **%d** |\n", totClean, totOuter, pct, totOuter-totClean)
+
+	b.WriteString("\n#### Table B - round-trip (decompile -> recompile -> repackage -> load+verify)\n\n")
+	b.WriteString("| jar | recompile error lines | syntax errors | repackaged-jar verify (ok/fail) | full round-trip |\n")
+	b.WriteString("|---|---:|---:|---:|:--:|\n")
+	totalSyntax := 0
+	for _, r := range rows {
+		totalSyntax += r.s.syntaxErr
+		flag := "no"
+		if r.s.fullRoundTrip() {
+			flag = "YES"
+		}
+		fmt.Fprintf(&b, "| %s | %d | %d | %d/%d | %s |\n",
+			r.jar, r.s.errLines, r.s.syntaxErr, r.s.verifyOK, r.s.verifyOK+r.s.verifyFail, flag)
+	}
+	// The whole class metric is only honest when there are ZERO syntax errors: a single parse/lexer
+	// error aborts javac before attribution and masks every other file's type errors. Assert it so a
+	// future malformed-output regression fails the benchmark loudly instead of silently deflating counts.
+	if totalSyntax != 0 {
+		t.Errorf("benchmark integrity: %d syntax (parse/lexer) errors across the set phase-mask attribution; "+
+			"clean-class counts are an unreliable overcount until fixed", totalSyntax)
+	}
+	t.Logf("JavaJive self-recompile benchmark (class-compile + round-trip metric); total syntax errors=%d:\n%s",
+		totalSyntax, b.String())
+}
+
 // benchmarkJars is the large-scale 3-way benchmark set: the four authoritative round-trip jars plus
 // four additional widely-used libraries, spanning small utilities to large generic-heavy codebases.
 var benchmarkJars = []benchJar{
