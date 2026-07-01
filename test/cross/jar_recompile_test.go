@@ -176,6 +176,10 @@ func decompileAll(t *testing.T, jarPath, root string, maxFiles int) (files []str
 	if err != nil {
 		t.Fatalf("NewJarFSFromLocal %s: %v", jarPath, err)
 	}
+	// Release the jar's file handle on return. On Windows an open handle blocks the caller's
+	// t.TempDir() RemoveAll cleanup ("file is being used by another process"), which fails the test
+	// even after a successful round-trip (observed on TestSyntheticJarRoundTrip, windows-latest).
+	defer jfs.Close()
 	entries := classEntries(t, jarPath)
 	if maxFiles > 0 && len(entries) > maxFiles {
 		entries = entries[:maxFiles]
