@@ -1826,6 +1826,35 @@ func (d *Decompiler) reachingRefSlotObjectArmMerge(store *OpCode, slot int, curr
 	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
 		return nil
 	}
+	// PROVISIONAL-Object narrowing: current's java.lang.Object type is SPURIOUS when current was
+	// minted by copying a null-initialized ref that has not yet committed a concrete type. This is the
+	// cache-writer idiom (fastjson2 ObjectWriterImplList/ObjectWriterArray/... writeArrayMappingJSONB):
+	//
+	//	ObjectWriter prev = null;                 // slot P: null-init, type provisionally Object
+	//	...loop...
+	//	ObjectWriter cur;                          // slot C
+	//	if (cls == prevCls) cur = prev;            // DFS-first arm: mints cur by COPYING prev (Object)
+	//	else { cur = jw.getObjectWriter(cls); prev = cur; }  // arm computing prev/cur's real type
+	//	cur.writeXxx(...);                          // uncast use -> needs ObjectWriter, not Object
+	//
+	// DFS visits the fall-through `cur = prev` arm first, so cur is minted Object (a copy of the
+	// not-yet-adopted null-init prev); this Object-arm merge would then FREEZE cur at Object when the
+	// else arm stores the concrete ObjectWriter, and prev later adopts Object from `prev = cur`. The
+	// whole cycle collapses to Object and the uncast `cur.writeXxx()` / `this.field = cur` fail
+	// ("cannot find symbol" / "Object cannot be converted to ObjectWriter"). Unlike the genuine
+	// polymorphic Object variable (ObjectWriterAdapter.toJSONObject `var7`, used ONLY through
+	// `instanceof`/`(Map)`/`(Collection)` casts, whose real defs' LUB truly is Object), here every real
+	// definition is the concrete arm type, so narrowing current to it is behaviourally identical and
+	// makes the uncast uses compile; the null-init source then adopts the same type from its own
+	// `prev = cur` store. Gate: current's minting value is an un-adopted null-init ref.
+	// Kill-switch: JDEC_OBJECT_ARM_PROVISIONAL_NARROW_OFF=1.
+	if os.Getenv("JDEC_OBJECT_ARM_PROVISIONAL_NARROW_OFF") == "" {
+		if src, ok := UnpackSoltValue(current.Val).(*values.JavaRef); ok &&
+			src.IsNullInitialized() && !src.NullTypeAdopted() {
+			current.ResetVarType(vt)
+			return current
+		}
+	}
 	return current
 }
 
