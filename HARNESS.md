@@ -35,7 +35,7 @@
 | **tree(整树)** | 所有扁平单元一起 `javac`(依赖在 classpath) | **重打包真口径**。兄弟 `$` 引用互相解析, 产物可打回 jar。**治本与验收只认它。** |
 | **iso(逐文件)** | 每个单元单独 `javac`(原始 jar + 依赖在 classpath) | 侧写。但 `Outer$Inner` 扁平引用对原始 jar 解析不到(jar 内是源名 `Outer.Inner`), 产生海量 `cannot find symbol`/`private access` **假阳性**。 |
 
-实测对照(同一批 jar): codec **iso 38 / tree 0**, spring **iso 384 / tree 2**(fastjson2 tree 248, guava tree 522)。iso 的绝大多数失败是扁平 `$` 假阳性, **不是缺陷、不阻碍重打包**。所以:
+实测对照(tree errLines, 当前): codec **0**, gson **0**, jsoup **1**, snakeyaml **12**, fastjson2 **33**, guava **34**, commons-lang3 **75**, spring **739**; 而 iso 口径下每个 jar 都有几十到上千的失败, 绝大多数是扁平 `$` 假阳性, **不是缺陷、不阻碍重打包**。所以:
 
 > **选靶、验收、A/B delta 一律用 tree。iso 只用于侧写"哪些类涉及跨类引用"。**
 
@@ -132,7 +132,7 @@ javap -p -c -v -classpath <dir> <fqcn>   # 字节码真相(控制流 / 局部变
 8. **收尾闸门**(全满足才算完成): 新增承重 + 种子通过; 确定性测试不红; 全量 `go test ./...` ≤30s 全绿; 在 `CODEC_TODO.md` 登记本轮根因/修复点/before-after 真实数字。
 9. **复扫**: 回 §2.3 重跑 tree inventory, 确认目标桶下降、其它桶没反弹, 进入下一轮。
 
-> 实战范例(本轮): `EmitUtils` 的 `var0;` → tree inventory 定位(spring 全部 14 错都在 cglib EmitUtils)→ `javap` 看到死的 `aload_0; aload_0; pop` → 根因是 pop 把无副作用裸值渲染成非语句 → `keepDiscardedStackValue` 按 JLS 14.8 elide(kill-switch `JDEC_POP_ELIDE_OFF`)→ A/B delta spring +12 / 它 jar +0 → 承重 `TestPopElideIsLoadBearing` + 种子 `SpringCglibEmitUtils.class` → spring tree **14→2**。
+> 实战范例(流程示意): 某类的裸 `var0;` → tree inventory 定位到具体类 → `javap` 看到死的 `aload_0; aload_0; pop` → 根因是 pop 把无副作用裸值渲染成非语句 → `keepDiscardedStackValue` 按 JLS 14.8 elide(kill-switch `JDEC_POP_ELIDE_OFF`)→ A/B delta 本 jar 下降 / 它 jar +0 → 承重 `TestPopElideIsLoadBearing` + 回归种子 → 复扫确认该 reason 桶清零。
 
 ---
 
