@@ -306,7 +306,12 @@ var benchmarkJars = []benchJar{
 	{key: "snakeyaml", relPath: "org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar"},
 	{key: "spring", relPath: "org/springframework/spring-core/5.3.27/spring-core-5.3.27.jar",
 		depGlob: []string{"org/springframework/spring-jcl/5.3.27/spring-jcl-5.3.27.jar"}},
-	{key: "fastjson2", relPath: "com/alibaba/fastjson2/fastjson2/2.0.43/fastjson2-2.0.43.jar"},
+	{key: "fastjson2", relPath: "com/alibaba/fastjson2/fastjson2/2.0.43/fastjson2-2.0.43.jar",
+		// KotlinUtils 引用 kotlin.reflect / kotlin.jvm.internal (可选集成); 编译期接口全在
+		// kotlin-stdlib 内。缺失会误报 "package kotlin.* does not exist", 属 classpath 补全而非缺陷。
+		depGlob: []string{
+			"org/jetbrains/kotlin/kotlin-stdlib/*/kotlin-stdlib-*.jar",
+		}},
 	{key: "guava", relPath: "com/google/guava/guava/28.2-android/guava-28.2-android.jar",
 		depGlob: []string{
 			"com/google/code/findbugs/jsr305/*/jsr305-*.jar",

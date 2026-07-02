@@ -1,0 +1,6 @@
+# AccessController.doPrivileged is OVERLOADED on PrivilegedAction<T> / PrivilegedExceptionAction<T>; a
+# bare lambda/method-ref argument is applicable to both, so javac rejects it as "reference to
+# doPrivileged is ambiguous". The fix re-emits the source's (PrivilegedAction) cast recovered from the
+# invokedynamic result type. Real hits: fastjson2 DynamicClassLoader / JSONFactory.
++doPrivileged((PrivilegedAction)
++::getProtectionDomain

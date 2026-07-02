@@ -37,6 +37,15 @@ type ClassContext struct {
 	// (`<N1 extends N> C<N1> cast() { return this; }`, where `this` is `C<N>` not `C<N1>`) apart from
 	// an identity `return this` (`C<K,V> in class C<K,V>`).
 	ClassTypeParams []string
+	// InjectedTypeParamBounds maps an INJECTED (flattened inner-class) type variable name to its
+	// recovered non-Object bound CLAUSE (e.g. `C` -> `Comparable<?>`), exactly the map the dumper uses to
+	// render `<C extends Comparable<?>>` on the flat class header. A variable absent from this map (or a
+	// nil map) has the canonical bare `<C>` (Object) bound AS RENDERED. Unlike a class's OWN formal type
+	// parameters (whose bounds are parseable from ClassSig), an injected variable is NOT declared in
+	// ClassSig, so its boundedness is otherwise unknowable to renderers. Consumed by parameterizedReturnCast
+	// (which may only emit an unchecked `X<Object>` -> `X<E>` cast for an UNBOUNDED E, since a bounded one
+	// makes that cast inconvertible). Nil for an ordinary (non-inner / own-formal) class.
+	InjectedTypeParamBounds map[string]string
 	// FieldTypeVars maps a (same-class) field's safe identifier to the bare class-scope type
 	// variable it is declared as (e.g. `key` -> `K` for `private final K key;`). It is recovered
 	// from each field's generic Signature (`TK;`) once per class. A store into such a field whose
@@ -63,6 +72,15 @@ type ClassContext struct {
 	// (name, arity) are dropped to avoid resolving to the wrong signature. Stored as a string because
 	// class_context must not import the types package (cycle). Empty when the class has no such method.
 	MethodSignatures map[string]string
+	// MethodSignaturesByDesc maps a same-class method's (name, EXACT JVM descriptor) key (see
+	// MethodDescKey) to its raw generic method Signature string. It is the descriptor-keyed companion of
+	// MethodSignatures (arity-keyed): because (name, descriptor) is unique in the JVM, it retains
+	// overloaded methods that MethodSignatures had to drop as (name, arity)-ambiguous, so a same-class
+	// call whose exact descriptor is known (FunctionCallExpression.Descriptor) can still recover its
+	// erased `(K)`/`(E)` argument cast (guava Builder `putAll(K, Iterable)` vs varargs `putAll(K, V...)`;
+	// `add(E)` vs `add(E...)`). Consumed by sameClassMethodParamType as a fallback after the arity path
+	// declines. Kill-switch consumer: JDEC_SAMECLASS_DESC_SIG_OFF. Empty when the class has no such method.
+	MethodSignaturesByDesc map[string]string
 	// ConstructorSignatures maps a same-class constructor's argument count to its raw generic Signature
 	// string (e.g. 1 -> `(Ljava/util/Comparator<-TK;>;)V`). A `this(...)` self-call loses the source's
 	// unchecked wildcard cast on an argument whose parameter is a wildcard parameterization mentioning a
@@ -81,6 +99,17 @@ type ClassContext struct {
 	// reads this class's parameterized supertypes from it. Empty when the class is non-generic / has no
 	// signature. Stored as a string (class_context must not import the types package).
 	ClassSig string
+	// CurrentMethodSig is the raw generic method Signature string of the method CURRENTLY being rendered
+	// (e.g. `<C:Ljava/util/Collection<-TE;>;>(TC;)TC;` for `<C extends Collection<? super E>> C copyInto
+	// (C)`). Unlike MethodSignatures (which maps OTHER same-class methods for call-site resolution), this
+	// is the enclosing method whose body is being emitted, set on entry and restored on exit. It lets a
+	// renderer recover the PARAMETERIZED BOUND of a receiver whose static type is a bare method-scope type
+	// variable (`C var1`): the value type is just `C`, but the bound `Collection<? super E>` carries the
+	// element type args downstream receiver/param resolution needs (guava FluentIterable.copyInto
+	// `var1.add(...)`, Multimaps.invertFrom `var1.put(...)`). Empty for a non-generic method. Stored as a
+	// string (class_context must not import the types package; renderers parse it via
+	// types.FormalTypeParamBounds). Kill-switch consumers: JDEC_TYPEVAR_BOUND_RECV_OFF.
+	CurrentMethodSig string
 	// RawEraseTypeVars is the set of bare type-variable names that this class REFERENCES but does NOT
 	// declare, and which CANNOT be injected onto its declaration. It is populated only for a flattened
 	// NON-STATIC inner class that has its OWN formal type parameters (e.g. `Iterator<T>`): such a class
@@ -114,6 +143,46 @@ type ClassContext struct {
 	// Nil when no cross-class resolver is available (single-class decompile); set only on the jar /
 	// DecompileWithResolver path.
 	SiblingSuperTypes func(internalName string) (supers []string, ok bool)
+	// SiblingCtorSig resolves a jar-internal class's CONSTRUCTOR generic Signature by binary internal name
+	// (slash-form) and DESCRIPTOR argument count. It returns the raw `<init>` Signature string (e.g.
+	// `(Lcom/google/common/graph/BaseGraph<TN;>;TN;)V` for IncidentEdgeSet) or ok=false for JDK/external
+	// classes, ambiguous overloads (same arity), or offset-mismatched inner-class ctors (a non-static
+	// inner's ctor Signature omits the synthetic leading this$0, so its param count differs from the
+	// descriptor -- skipped to avoid mis-indexing). SiblingClassSig deliberately SKIPS <init>; this fills
+	// that gap so a `super(...)` call can recover which arguments feed a bare type-variable ctor parameter
+	// and re-emit the erased `(N)`/`(C)` cast (guava graph IncidentEdgeSet subclasses' `super(g, node)`,
+	// RegularContiguousSet anonymous iterators' `super(first)`). The dumper builds this closure (it owns the
+	// byte resolver + parser); the type/class_context packages consume only strings. Nil on the single-class
+	// path; set only on the jar / DecompileWithResolver path. Kill-switch consumer:
+	// JDEC_SUPER_CTOR_TYPEVAR_ARG_OFF.
+	SiblingCtorSig func(internalName string, argc int) (sig string, ok bool)
+	// SiblingFieldSig resolves a jar-internal class's FIELD generic Signature by binary internal name
+	// (slash-form) and field name, or ok=false for JDK/external classes (bytes not in jar) or a field with
+	// no generic Signature attribute. SiblingClassSig carries only the class + method Signatures; this fills
+	// the field gap so an INHERITED parameterized field (whose Signature lives in a superclass, absent from
+	// the current class's FieldSignatures) can be recovered by walking the hierarchy with type-argument
+	// substitution (types.ResolveInstantiatedFieldType, consumed in receiverParamTypeArgs): guava
+	// RegularContiguousSet<C>'s `this.domain` is declared `DiscreteDomain<C>` in ContiguousSet, so
+	// `this.domain.distance(first(), var1)` recovers the erased `(C)` cast on var1. The dumper builds this
+	// closure (it owns the byte resolver + parser); the type/class_context packages consume only strings.
+	// The field type is intentionally an unnamed func type so its value is directly assignable to
+	// types.FieldSigProvider (identical signature) without class_context importing types. Nil on the
+	// single-class path; set only on the jar / DecompileWithResolver path. Kill-switch consumer:
+	// JDEC_INHERITED_FIELD_SIG_OFF.
+	SiblingFieldSig func(internalName, fieldName string) (sig string, ok bool)
+	// SamePkgFQNames is the set of SafeIdentifier'd simple type names that live in THIS class's own
+	// package but must nonetheless be rendered fully-qualified, because the class ALSO references a
+	// DIFFERENT type with the same simple name from another package. A single-type-import of that
+	// other type (`import a.b.FieldWriter;`) shadows the same-package one (JLS 6.4.1 / 7.5.1), so the
+	// bare simple name would resolve to the WRONG type -- the canonical hit is fastjson2
+	// ObjectWriterCreatorASM, which uses both `com.alibaba.fastjson2.writer.FieldWriter<T>` (same
+	// package, generic) and `com.alibaba.fastjson2.internal.asm.FieldWriter` (imported, non-generic):
+	// the import made `FieldWriter<T>` resolve to the non-generic ASM class -> "type FieldWriter does
+	// not take parameters". The dumper computes this from the constant pool BEFORE rendering (so it is
+	// render-order independent) and ShortTypeName consults it for the same-package branch. Nil/empty
+	// for the overwhelming majority of classes (no cross-package simple-name clash), so a strict no-op
+	// there. Kill-switch: JDEC_SAMEPKG_FQ_OFF=1 (dumper leaves this nil).
+	SamePkgFQNames map[string]bool
 }
 
 // FieldSignature returns the raw generic Signature string of a same-class parameterized field, or ""
@@ -146,6 +215,19 @@ func (f *ClassContext) ConstructorSignature(argc int) string {
 	return f.ConstructorSignatures[argc]
 }
 
+// MethodSignatureByDesc returns the raw generic Signature string of a same-class method identified by
+// name and its EXACT JVM descriptor, or "" when none. Unlike MethodSignature (arity-keyed, which drops
+// same-arity overloads as ambiguous), a (name, descriptor) pair is UNIQUE in the JVM, so this resolves an
+// overloaded same-class method precisely from the call's descriptor -- recovering the erased `(K)`/`(E)`
+// argument cast for calls the arity path had to abandon (guava Builder `putAll(K, Iterable)` vs
+// `putAll(K, V...)`; `add(E)` vs `add(E...)`). See MethodSignaturesByDesc.
+func (f *ClassContext) MethodSignatureByDesc(name, descriptor string) string {
+	if f == nil || name == "" || descriptor == "" || f.MethodSignaturesByDesc == nil {
+		return ""
+	}
+	return f.MethodSignaturesByDesc[methodDescKey(name, descriptor)]
+}
+
 // methodSigKey builds the (name, arity) key used by MethodSignatures.
 func methodSigKey(name string, argc int) string {
 	return name + "/" + strconv.Itoa(argc)
@@ -155,6 +237,17 @@ func methodSigKey(name string, argc int) string {
 // with exactly the key MethodSignature looks up.
 func MethodSigKey(name string, argc int) string {
 	return methodSigKey(name, argc)
+}
+
+// methodDescKey builds the (name, descriptor) key used by MethodSignaturesByDesc.
+func methodDescKey(name, descriptor string) string {
+	return name + descriptor
+}
+
+// MethodDescKey is the exported builder for the MethodSignaturesByDesc key, so the dumper populates the
+// map with exactly the key MethodSignatureByDesc looks up.
+func MethodDescKey(name, descriptor string) string {
+	return methodDescKey(name, descriptor)
 }
 
 // FieldTypeVar reports the bare class-scope type variable a same-class field is declared as, or ""
@@ -372,6 +465,14 @@ func (f *ClassContext) ShortTypeName(name string) string {
 		}
 	}
 	if pkg == f.PackageName || pkg == "java.lang" {
+		// A same-package (or java.lang) type is normally reachable by its bare simple name with no
+		// import. But when this class ALSO references a DIFFERENT-package type of the same simple name,
+		// that type gets a single-type-import which SHADOWS the same-package/java.lang one, so the bare
+		// name would bind to the wrong type. In that case emit the fully-qualified name instead. The
+		// clashing set is precomputed from the constant pool by the dumper (render-order independent).
+		if pkg == f.PackageName && f.SamePkgFQNames != nil && f.SamePkgFQNames[className] {
+			return pkg + "." + dotted
+		}
 		return dotted
 	}
 	f.Import(name)

@@ -1,0 +1,4 @@
+# 同类字段 X<C> (类型变量参数化) 与同 raw 擦除的泛型静态工厂调用做 != 比较时, 对调用侧补一处被字节码
+# 擦除的 raw (CmpBound) 造型, 恢复可比性 (raw 与参数化同擦除永远互相可比)。JDEC_CMP_GENERIC_FIELD_RAW_CAST_OFF。
+# 镜像 guava TreeRangeSet$ComplementRangesByLowerBound$1/$2 的 nextComplementRangeLowerBound != Cut.aboveAll()。
++(CmpBound)(CmpBound.top())

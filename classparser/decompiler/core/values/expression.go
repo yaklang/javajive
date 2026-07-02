@@ -239,8 +239,136 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 	case GT, SUB:
 		return fmt.Sprintf("(%s) %s (%s)", vs[0], j.Op, vs[1])
 	default:
+		// `field != genericCall()` incomparable-generics repair: when one operand is a same-class field
+		// whose declared generic type is `X<typevar>` and the other is a same-raw method call that javac
+		// infers standalone (a generic method with a free return type var, e.g. Cut.aboveAll() inferring
+		// `Cut<Comparable>`), the == / != operands are mutually incomparable (`Cut<C>` vs `Cut<Comparable>`).
+		// A raw cast on the call operand restores comparability and is always safe on ==. See
+		// incomparableGenericFieldVsCallCast. Kill-switch JDEC_CMP_GENERIC_FIELD_RAW_CAST_OFF.
+		if j.Op == EQ || j.Op == NEQ {
+			if raw, idx := j.incomparableGenericFieldVsCallCast(funcCtx); raw != "" {
+				vs[idx] = fmt.Sprintf("(%s)(%s)", raw, vs[idx])
+			}
+		}
 		return fmt.Sprintf("(%s) %s (%s)", vs[0], j.Op, vs[1])
 	}
+}
+
+// incomparableGenericFieldVsCallCast detects the `field <op> genericCall()` (op ∈ {==, !=}) shape where
+// one operand is a SAME-CLASS field whose declared generic type is `X<..typevar..>` and the OTHER is a
+// method call of the SAME raw erasure. In source such a call is a poly expression, but in a bare
+// == / != there is NO target type, so javac infers the method's free return type variable to its bound
+// (guava's `<C extends Comparable<?>> Cut<C> aboveAll()` -> `Cut<Comparable>`), which is incomparable
+// with the field's `Cut<C>` ("incomparable types: Cut<C> and Cut<Comparable>"). The original source used
+// an explicit type witness (`Cut.<C>aboveAll()`) that bytecode erases. A raw cast to the shared erasure
+// on the call operand restores comparability and is ALWAYS safe on == / != (raw and parameterized of the
+// same type are mutually comparable), so it can only fix, never break, a comparison. Returns the raw
+// erasure name to cast to and the index (0 or 1) of the operand to wrap, or ("", -1). Kill-switch
+// JDEC_CMP_GENERIC_FIELD_RAW_CAST_OFF.
+func (j *JavaExpression) incomparableGenericFieldVsCallCast(funcCtx *class_context.ClassContext) (string, int) {
+	if os.Getenv("JDEC_CMP_GENERIC_FIELD_RAW_CAST_OFF") != "" {
+		return "", -1
+	}
+	if funcCtx == nil || len(j.Values) != 2 {
+		return "", -1
+	}
+	a := UnpackSoltValue(j.Values[0])
+	b := UnpackSoltValue(j.Values[1])
+	if raw := genericFieldVsCallRaw(funcCtx, a, b); raw != "" {
+		return raw, 1
+	}
+	if raw := genericFieldVsCallRaw(funcCtx, b, a); raw != "" {
+		return raw, 0
+	}
+	return "", -1
+}
+
+// genericFieldVsCallRaw returns the shared raw erasure name when fieldCand is a same-class field with a
+// `X<typevar>` declared generic signature and callCand is a method call of that same raw erasure X, else
+// "". See incomparableGenericFieldVsCallCast.
+func genericFieldVsCallRaw(funcCtx *class_context.ClassContext, fieldCand, callCand JavaValue) string {
+	call, ok := callCand.(*FunctionCallExpression)
+	if !ok {
+		return ""
+	}
+	var fieldName string
+	switch lv := fieldCand.(type) {
+	case *RefMember:
+		ref, ok := UnpackSoltValue(lv.Object).(*JavaRef)
+		if !ok || !ref.IsThis {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	case *JavaClassMember:
+		if lv.Name != funcCtx.ClassName {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	default:
+		return ""
+	}
+	sig := funcCtx.FieldSignature(fieldName)
+	if sig == "" {
+		return ""
+	}
+	ft := types.ParseSignature(sig)
+	if ft == nil {
+		return ""
+	}
+	fieldTypeStr := ft.String(funcCtx)
+	// Field must be a parameterization carrying an IN-SCOPE type variable (`X<C>` / `Map<K, V>`); a
+	// fully-concrete `X<String>` or wildcard `X<?>` is not the free-inference mismatch this repairs.
+	if !hasTopLevelTypeParamArg(funcCtx, fieldTypeStr) {
+		return ""
+	}
+	fieldRaw := erasureNameLocal(fieldTypeStr)
+	// The call operand's static type must share that raw erasure (same class, comparable at all).
+	callRaw := ""
+	if ct := call.Type(); ct != nil {
+		callRaw = erasureNameLocal(ct.String(funcCtx))
+	}
+	if callRaw == "" || callRaw != fieldRaw {
+		return ""
+	}
+	return fieldRaw
+}
+
+// hasTopLevelTypeParamArg reports whether the outermost type-argument list of a rendered generic type
+// string (e.g. "Cut<C>", "Map<K, V>", "Entry<Range<K>, V>") contains at least one bare argument that is
+// an in-scope type variable. Nested arguments are split at depth 0 only.
+func hasTopLevelTypeParamArg(funcCtx *class_context.ClassContext, s string) bool {
+	open := strings.IndexByte(s, '<')
+	if open < 0 || !strings.HasSuffix(s, ">") {
+		return false
+	}
+	inner := s[open+1 : len(s)-1]
+	depth := 0
+	start := 0
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case ',':
+			if depth == 0 {
+				if funcCtx.IsTypeParam(strings.TrimSpace(inner[start:i])) {
+					return true
+				}
+				start = i + 1
+			}
+		}
+	}
+	return funcCtx.IsTypeParam(strings.TrimSpace(inner[start:]))
+}
+
+// erasureNameLocal strips a rendered generic type string to its raw name ("Cut<C>" -> "Cut"). It is the
+// values-package twin of the statements-package erasureName helper.
+func erasureNameLocal(s string) string {
+	if i := strings.IndexByte(s, '<'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
 
 // UnaryMinusOperand renders v as the operand of a leading unary minus, wrapping it in parentheses
@@ -399,6 +527,13 @@ type FunctionCallExpression struct {
 	// render as `super.m()`, never `this.m()` -- the latter re-dispatches virtually to the overriding
 	// method and recurses infinitely (e.g. guava CaseFormat constant-body `convert` -> StackOverflow).
 	IsSpecialInvoke bool
+	// Descriptor is the raw JVM method descriptor of the call target (e.g.
+	// `(Ljava/lang/Object;Ljava/lang/Iterable;)Lcom/google/common/collect/ImmutableMultimap$Builder;`),
+	// copied from the resolved constant-pool member. It DISAMBIGUATES same-arity overloads that the
+	// arity-keyed MethodSignatures table drops as ambiguous (guava Builder `putAll(K, Iterable)` vs the
+	// varargs `putAll(K, V...)`; `add(E)` vs `add(E...)`), enabling a precise descriptor-keyed same-class
+	// signature lookup (sameClassMethodParamType). Empty for synthesized calls with no pool member.
+	Descriptor string
 }
 
 // ReplaceVar implements JavaValue.
@@ -452,31 +587,111 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 	if pt, ok := types.AsParameterizedType(f.Object.Type()); ok {
 		return pt.RawClassName, pt.TypeArgs
 	}
-	if funcCtx == nil || os.Getenv("JDEC_GENERIC_PARAM_FIELD_OFF") != "" {
+	if funcCtx == nil {
 		return "", nil
 	}
-	// Same-class field receiver (`this.field`): recover type args from the field's generic Signature.
-	rm, ok := UnpackSoltValue(f.Object).(*RefMember)
-	if !ok {
+	// Receiver whose static type is a bare type variable with a PARAMETERIZED bound (`C var1` where the
+	// enclosing method / class declares `<C extends Collection<? super E>>`): the value type is only `C`,
+	// but the bound `Collection<? super E>` carries the receiver type args downstream receiver/param
+	// resolution needs (guava FluentIterable.copyInto `var1.add(objVal)`, Multimaps.invertFrom
+	// `var1.put(objV, objK)`). Recover the bound's raw class + type args. Method-scope bounds take
+	// precedence over class-scope (an inner `<C>` shadows a class `C`). Kill-switch
+	// JDEC_TYPEVAR_BOUND_RECV_OFF.
+	if os.Getenv("JDEC_TYPEVAR_BOUND_RECV_OFF") == "" {
+		if ot := f.Object.Type(); ot != nil {
+			if jc, ok := ot.RawType().(*types.JavaClass); ok && jc != nil && funcCtx.IsTypeParam(jc.Name) {
+				for _, sig := range []string{funcCtx.CurrentMethodSig, funcCtx.ClassSig} {
+					if sig == "" {
+						continue
+					}
+					bounds := types.FormalTypeParamBounds(sig)
+					if bounds == nil {
+						continue
+					}
+					if b, ok := bounds[jc.Name]; ok {
+						if pt, ok := types.AsParameterizedType(b); ok {
+							return pt.RawClassName, pt.TypeArgs
+						}
+					}
+				}
+			}
+		}
+	}
+	// Same-class `this.method()` receiver: recover type args from the callee method's generic RETURN
+	// signature. The receiver VALUE is the inner call's descriptor return, erased to the raw class
+	// (jar-internal returns are not instantiated), so its Type() carries no type args -- but the
+	// method's Signature does (e.g. `Multiset<E> multiset()` -> the value is raw `Multiset`, the
+	// signature says `Multiset<E>`). Recovering it lets a downstream param resolver re-emit the erased
+	// `(E)` argument cast (guava Multisets$EntrySet `this.multiset().setCount(objVal, cnt, 0)` ->
+	// `Object cannot be converted to E`). Only a same-class `this.m()` call qualifies: its signature is
+	// in funcCtx.MethodSignatures, and its return type args are class-scope variables denotable at the
+	// call site. A super.m()/overloaded miss yields "" and is skipped. Kill-switch:
+	// JDEC_GENERIC_PARAM_RECV_METHOD_OFF.
+	if os.Getenv("JDEC_GENERIC_PARAM_RECV_METHOD_OFF") == "" {
+		if inner, ok := UnpackSoltValue(f.Object).(*FunctionCallExpression); ok && !inner.IsStatic && inner.Object != nil {
+			if iref, ok := UnpackSoltValue(inner.Object).(*JavaRef); ok && iref.IsThis {
+				if sig := funcCtx.MethodSignature(inner.FunctionName, len(inner.Arguments)); sig != "" {
+					if _, _, ret := types.ParseMethodSignatureFull(sig, funcCtx); ret != nil {
+						if pt, ok := types.AsParameterizedType(ret); ok {
+							return pt.RawClassName, pt.TypeArgs
+						}
+					}
+				}
+			}
+		}
+	}
+	if os.Getenv("JDEC_GENERIC_PARAM_FIELD_OFF") != "" {
 		return "", nil
+	}
+	// Same-class field receiver (`this.field`): recover type args from the field's generic Signature;
+	// an INHERITED field (declared in a superclass) is recovered via the cross-class hierarchy walk.
+	if pt, ok := types.AsParameterizedType(RecoverThisFieldInstantiatedType(funcCtx, f.Object)); ok {
+		return pt.RawClassName, pt.TypeArgs
+	}
+	return "", nil
+}
+
+// RecoverThisFieldInstantiatedType recovers the real, instantiated generic type of a `this.field` read
+// (fieldRead is the field-access value, a RefMember whose object is `this`). It returns the field's
+// same-class generic Signature when present (`funcCtx.FieldSignature`), else -- for an INHERITED field
+// whose Signature lives in a superclass and is therefore absent from the current class's
+// FieldSignatures -- it walks the class hierarchy with type-argument substitution
+// (types.ResolveInstantiatedFieldType). `this` starts at the current class with an IDENTITY
+// type-argument mapping (each class formal -> itself, built from the authoritative class Signature), so
+// the recovered field type's args are the current class's own in-scope variables (denotable at the use
+// site). Canonical cases: guava RegularContiguousSet<C> `this.domain` -> `DiscreteDomain<C>` (feeds
+// receiverParamTypeArgs) and RegularImmutableSortedSet<E> `this.comparator` -> `Comparator<? super E>`
+// (feeds the inherited-field return cast). Returns nil when fieldRead is not a `this.field` read, the
+// field has no recoverable generic Signature, or the hierarchy leaves the jar. Kill-switch
+// JDEC_INHERITED_FIELD_SIG_OFF gates the inherited (cross-class) leg only; the same-class leg is always on.
+func RecoverThisFieldInstantiatedType(funcCtx *class_context.ClassContext, fieldRead JavaValue) types.JavaType {
+	if funcCtx == nil || fieldRead == nil {
+		return nil
+	}
+	rm, ok := UnpackSoltValue(fieldRead).(*RefMember)
+	if !ok {
+		return nil
 	}
 	ref, ok := UnpackSoltValue(rm.Object).(*JavaRef)
 	if !ok || !ref.IsThis {
-		return "", nil
+		return nil
 	}
-	sig := funcCtx.FieldSignature(class_context.SafeIdentifier(rm.Member))
-	if sig == "" {
-		return "", nil
+	fieldName := class_context.SafeIdentifier(rm.Member)
+	if sig := funcCtx.FieldSignature(fieldName); sig != "" {
+		return types.ParseSignature(sig)
 	}
-	parsed := types.ParseSignature(sig)
-	if parsed == nil {
-		return "", nil
+	if os.Getenv("JDEC_INHERITED_FIELD_SIG_OFF") == "" && funcCtx.SiblingClassSig != nil &&
+		funcCtx.SiblingFieldSig != nil && funcCtx.ClassSig != "" && funcCtx.ClassName != "" {
+		formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
+		if len(formals) > 0 {
+			recvArgs := make([]types.JavaType, len(formals))
+			for i, n := range formals {
+				recvArgs[i] = types.NewJavaClass(n)
+			}
+			return types.ResolveInstantiatedFieldType(funcCtx, funcCtx.SiblingClassSig, funcCtx.SiblingFieldSig, funcCtx.ClassName, recvArgs, fieldName)
+		}
 	}
-	pt, ok := types.AsParameterizedType(parsed)
-	if !ok {
-		return "", nil
-	}
-	return pt.RawClassName, pt.TypeArgs
+	return nil
 }
 
 // instantiatedParamType applies InstantiateJDKMethodParam using the receiver's parameterized type to
@@ -526,6 +741,14 @@ func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_
 		return nil
 	}
 	sig := funcCtx.MethodSignature(f.FunctionName, len(f.Arguments))
+	if sig == "" {
+		// The arity path abandons same-arity overloads as ambiguous; fall back to the call's EXACT
+		// descriptor, which is unique in the JVM, to still recover the erased argument cast (guava
+		// Builder `putAll(K, Iterable)` vs varargs `putAll(K, V...)`; `add(E)` vs `add(E...)`). Empty
+		// when the descriptor-keyed table is disabled (JDEC_SAMECLASS_DESC_SIG_OFF) or the call has no
+		// pool descriptor, so this stays a pure additive fallback.
+		sig = funcCtx.MethodSignatureByDesc(f.FunctionName, f.Descriptor)
+	}
 	if sig == "" {
 		return nil
 	}
@@ -619,6 +842,257 @@ func (f *FunctionCallExpression) ctorWildcardArgCast(i int, funcCtx *class_conte
 	return paramTypeStr
 }
 
+// comparatorRawArgCast returns the raw `Comparator` cast string for the i-th argument when the call is a
+// JDK sort/search static (Arrays.sort / Arrays.binarySearch / Collections.sort / Collections.binarySearch)
+// and the i-th DESCRIPTOR parameter is java.util.Comparator. The array/list companion argument's element
+// type is frequently erased to Object (the source's `(K[])` array cast erases to `(Object[])`), so a
+// `Comparator<? super K>` argument no longer satisfies the method's `Comparator<? super T>` capture and
+// javac rejects the call ("no suitable method for sort(Object[], Comparator<CAP#1>)"; guava
+// ImmutableSortedMap$Builder.build / ImmutableSortedMultiset$Builder / ImmutableList.sortedCopyOf). A raw
+// `Comparator` cast turns the call into an unchecked (behaviour-preserving) invocation that resolves; it
+// is always compilation-safe even when the companion array was NOT erased (a redundant raw cast still
+// binds to sort(T[], Comparator<? super T>) with an unchecked warning, never an error), so it never
+// regresses a currently-compiling call. Identifying the Comparator position by the stable descriptor
+// parameter type (not the argument's own possibly-erased static type) makes detection robust. Kill-switch
+// JDEC_COMPARATOR_RAW_ARG_OFF.
+func (f *FunctionCallExpression) comparatorRawArgCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_COMPARATOR_RAW_ARG_OFF") != "" || !f.IsStatic {
+		return ""
+	}
+	if f.ClassName != "java.util.Arrays" && f.ClassName != "java.util.Collections" {
+		return ""
+	}
+	if f.FunctionName != "sort" && f.FunctionName != "binarySearch" {
+		return ""
+	}
+	if f.FuncType == nil || i < 0 || i >= len(f.FuncType.ParamTypes) {
+		return ""
+	}
+	pt := f.FuncType.ParamTypes[i]
+	if pt == nil {
+		return ""
+	}
+	jc, ok := pt.RawType().(*types.JavaClass)
+	if !ok || jc.Name != "java.util.Comparator" {
+		return ""
+	}
+	// NEVER raw-cast a lambda / method-reference argument: a raw `(Comparator)` target erases the SAM to
+	// compare(Object, Object), so the lambda's parameters are inferred as Object and a body that uses them
+	// at a more specific type fails ("cannot find symbol" / "incompatible types"). Only a plain value
+	// (a field / variable Comparator, e.g. `this.comparator`) is safe to widen to raw. fastjson2 passes
+	// lambdas to Arrays.sort, so this exclusion is load-bearing for zero cross-jar regression.
+	if cv, ok := UnpackSoltValue(f.Arguments[i]).(*CustomValue); ok && cv.Flag == "lambda" {
+		return ""
+	}
+	return types.NewJavaClass("java.util.Comparator").String(funcCtx)
+}
+
+// comparatorRawReceiverCast reports whether a `recv.compare(a, b)` call must render its RECEIVER as a raw
+// `((Comparator)(recv))` cast. The receiver is a `Comparator<?>` / `Comparator<? super X>` /
+// `Comparator<? extends X>` (a wildcard parameterization), so `compare` binds to `compare(CAP, CAP)`; the
+// arguments -- read from a raw container or an Object[] -- are Object, which the capture rejects
+// ("Object cannot be converted to CAP#1"; guava ImmutableSortedSet.unsafeCompare `var0.compare(v1, v2)`
+// with `var0: Comparator<?>`, TreeMultiset `this.comparator().compare(...)`, ImmutableSortedMap$Builder
+// `this.comparator.compare(...)`). Widening the receiver to raw `Comparator` makes it an unchecked,
+// behaviour-preserving `compare(Object, Object)` that accepts the Object arguments. The three receiver
+// shapes (parameterized local/param value, `this.field`, `this.method()`) are exactly what
+// receiverParamTypeArgs already recovers. A lambda receiver is excluded (it is rendered with its own
+// functional-interface cast in renderCall, and raw would erase its inferred parameter types). The
+// existing non-wildcard `Comparator<E>.compare` path (InstantiateJDKMethodParam) already casts the
+// ARGUMENTS to `(E)`, so this fires ONLY for the wildcard receiver it declines. Kill-switch
+// JDEC_COMPARATOR_RAW_RECV_OFF.
+func (f *FunctionCallExpression) comparatorRawReceiverCast(funcCtx *class_context.ClassContext) bool {
+	if os.Getenv("JDEC_COMPARATOR_RAW_RECV_OFF") != "" || f.IsStatic || f.Object == nil {
+		return false
+	}
+	if f.FunctionName != "compare" || len(f.Arguments) != 2 {
+		return false
+	}
+	// A lambda / method-reference receiver is handled by the dedicated CustomValue branch in renderCall.
+	if cv, ok := UnpackSoltValue(f.Object).(*CustomValue); ok && cv.Flag == "lambda" {
+		return false
+	}
+	raw, typeArgs := f.receiverParamTypeArgs(funcCtx)
+	if raw != "java.util.Comparator" || len(typeArgs) != 1 {
+		return false
+	}
+	return types.IsWildcardType(typeArgs[0])
+}
+
+// collectionAddWildcardReceiverRawCast reports whether a `recv.add(x)` / `recv.offer(x)` call must render
+// its RECEIVER as a raw `((Collection)(recv))` cast (rendered to the receiver's own raw class). The
+// receiver is a wildcard `Collection<? super E>` (the JDK "consumer" collection shape), so add/offer bind
+// to `add(CAP)` and reject an Object argument read from a raw container / Object[] ("Object cannot be
+// converted to CAP#1"; guava Queues.drainUninterruptibly `var1.add(var7)`, FluentIterable.copyInto
+// `var1.add(var3.next())`, both with `var1: Collection<? super E>`). Widening the receiver to its raw
+// class makes it an unchecked, behaviour-preserving `add(Object)`. This mirrors comparatorRawReceiverCast
+// (a wildcard receiver whose SOLE value parameter is the captured element type variable). It fires only
+// for the JDK Iterable family, for a wildcard-parameterized receiver, and never for a lambda receiver.
+// Returns the raw class name to cast to, or "". Kill-switch JDEC_COLLECTION_ADD_RAW_RECV_OFF.
+func (f *FunctionCallExpression) collectionAddWildcardReceiverRawCast(funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_COLLECTION_ADD_RAW_RECV_OFF") != "" || f.IsStatic || f.Object == nil {
+		return ""
+	}
+	if f.FunctionName != "add" && f.FunctionName != "offer" {
+		return ""
+	}
+	if len(f.Arguments) != 1 {
+		return ""
+	}
+	if cv, ok := UnpackSoltValue(f.Object).(*CustomValue); ok && cv.Flag == "lambda" {
+		return ""
+	}
+	raw, typeArgs := f.receiverParamTypeArgs(funcCtx)
+	if !types.IsJDKIterableFamily(raw) || len(typeArgs) != 1 {
+		return ""
+	}
+	if !types.IsWildcardType(typeArgs[0]) {
+		return ""
+	}
+	return raw
+}
+
+// wildcardConsumerReceiverMethods maps a SINGLE-type-parameter "consumer" interface (a value is fed IN to
+// the sole type-parameter position) to the method(s) that consume it and their argument count. A wildcard-
+// parameterized receiver `X<? super Y>` binds such a method to a capture and rejects the (erased) argument
+// ("Y cannot be converted to CAP#N"); a raw `((X)(recv))` cast makes it an unchecked, behaviour-preserving
+// call. Only single-type-parameter interfaces qualify so the raw cast erases exactly the one captured
+// parameter (Comparator/Collection have dedicated helpers with different semantics). Covers the guava/JDK
+// predicate/consumer family (guava Maps$FilteredEntryMap / $FilteredMapValues `predicate.apply(entry)` on
+// `Predicate<? super Entry<K,V>>`).
+var wildcardConsumerReceiverMethods = map[string]map[string]int{
+	"com.google.common.base.Predicate": {"apply": 1},
+	"java.util.function.Predicate":     {"test": 1},
+	"java.util.function.Consumer":      {"accept": 1},
+}
+
+// wildcardConsumerReceiverRawCast reports whether a `recv.m(x)` call on a wildcard-parameterized
+// single-type-parameter consumer interface (see wildcardConsumerReceiverMethods) must render its RECEIVER
+// as a raw `((X)(recv))` cast. The receiver is e.g. `Predicate<? super Entry<K,V>>`, so `apply` binds to
+// `apply(CAP)` and rejects an argument read at the erased type ("Entry cannot be converted to CAP#N"; guava
+// Maps$FilteredEntryMap:29 `var1.apply(var5)`, $FilteredMapValues `this.predicate.apply(var3)`). Widening
+// the receiver to its raw class makes it an unchecked, behaviour-preserving call. Mirrors
+// collectionAddWildcardReceiverRawCast / comparatorRawReceiverCast. Never fires for a lambda receiver.
+// Returns the raw class name to cast to, or "". Kill-switch JDEC_WILDCARD_CONSUMER_RECV_OFF.
+func (f *FunctionCallExpression) wildcardConsumerReceiverRawCast(funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_WILDCARD_CONSUMER_RECV_OFF") != "" || f.IsStatic || f.Object == nil {
+		return ""
+	}
+	if cv, ok := UnpackSoltValue(f.Object).(*CustomValue); ok && cv.Flag == "lambda" {
+		return ""
+	}
+	raw, typeArgs := f.receiverParamTypeArgs(funcCtx)
+	methods, ok := wildcardConsumerReceiverMethods[raw]
+	if !ok {
+		return ""
+	}
+	argc, ok := methods[f.FunctionName]
+	if !ok || len(f.Arguments) != argc {
+		return ""
+	}
+	if len(typeArgs) != 1 || !types.IsWildcardType(typeArgs[0]) {
+		return ""
+	}
+	return raw
+}
+
+// superCtorTypeVarArgCast returns the type-variable name to cast the i-th argument of a `super(...)` call
+// to, or "" when no cast is needed. It fires when the SUPERCLASS constructor's i-th parameter is a bare
+// type variable (recovered from the super ctor's generic Signature via SiblingCtorSig) that the subclass
+// binds to one of its OWN in-scope type variables (via the `extends Super<...>` clause), and the argument's
+// static type is the erased bound rather than that type variable. The source passed a type-variable-typed
+// value with no cast (`super(graph, node)` where node is N); the bytecode erased the value to Object/the
+// bound and emitted no checkcast, so the decompiler renders a bare `super(..., objVal)` that javac rejects
+// against the super ctor's `(..., N)` signature ("Object cannot be converted to N/CAP#1"; guava graph
+// IncidentEdgeSet subclasses, RegularContiguousSet anonymous iterators). Re-emitting the erased `(N)` cast
+// makes it recompile (unchecked, behaviour-preserving). Kill-switch JDEC_SUPER_CTOR_TYPEVAR_ARG_OFF.
+func (f *FunctionCallExpression) superCtorTypeVarArgCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_SUPER_CTOR_TYPEVAR_ARG_OFF") != "" {
+		return ""
+	}
+	if funcCtx == nil || funcCtx.SiblingCtorSig == nil || funcCtx.ClassSig == "" {
+		return ""
+	}
+	// Only a super(...) constructor call: invokespecial <init> on the direct superclass.
+	if f.FunctionName != "<init>" || !f.IsSpecialInvoke || f.ClassName == "" || f.ClassName != funcCtx.SupperClassName {
+		return ""
+	}
+	if i < 0 || i >= len(f.Arguments) {
+		return ""
+	}
+	superInternal := strings.ReplaceAll(f.ClassName, ".", "/")
+	ctorSig, ok := funcCtx.SiblingCtorSig(superInternal, len(f.Arguments))
+	if !ok || ctorSig == "" {
+		return ""
+	}
+	_, params, _ := types.ParseMethodSignatureFull(ctorSig, funcCtx)
+	if i >= len(params) || params[i] == nil {
+		return ""
+	}
+	pjc, ok := params[i].RawType().(*types.JavaClass)
+	if !ok || pjc == nil {
+		return ""
+	}
+	// Map the super ctor param's type-variable name (super's formal name) to the subclass's own type var.
+	mapped := f.mapSuperFormalToSubclassTypeVar(pjc.Name, funcCtx)
+	if mapped == "" || !funcCtx.IsTypeParam(mapped) {
+		return ""
+	}
+	// Skip when the argument is already the target type variable (no erasure happened).
+	if at := UnpackSoltValue(f.Arguments[i]).Type(); at != nil {
+		if ajc, ok := at.RawType().(*types.JavaClass); ok && ajc != nil && ajc.Name == mapped {
+			return ""
+		}
+	}
+	return mapped
+}
+
+// mapSuperFormalToSubclassTypeVar maps a superclass formal type-variable NAME (as it appears in the super
+// ctor Signature, e.g. IncidentEdgeSet's `N`) to the subclass's OWN in-scope type variable that the
+// subclass binds it to through its `extends Super<...>` clause (e.g. subclass `Sub<N> extends
+// IncidentEdgeSet<N>` binds super-N to sub-N). Returns "" when the name is not a super formal, the super
+// signature is unavailable, or the bound argument is not a bare subclass type variable.
+func (f *FunctionCallExpression) mapSuperFormalToSubclassTypeVar(superFormalName string, funcCtx *class_context.ClassContext) string {
+	superInternal := strings.ReplaceAll(f.ClassName, ".", "/")
+	if funcCtx.SiblingClassSig == nil {
+		return ""
+	}
+	superSig, _, ok := funcCtx.SiblingClassSig(superInternal)
+	if !ok || superSig == "" {
+		return ""
+	}
+	superFormalNames := types.ClassFormalTypeParamNames(superSig)
+	idx := -1
+	for k, n := range superFormalNames {
+		if n == superFormalName {
+			idx = k
+			break
+		}
+	}
+	if idx < 0 {
+		return ""
+	}
+	sup, ifaces := types.ParseClassSignatureSupers(funcCtx.ClassSig)
+	cands := append([]types.JavaType{sup}, ifaces...)
+	for _, c := range cands {
+		if c == nil {
+			continue
+		}
+		pt, ok := types.AsParameterizedType(c)
+		if !ok || pt.RawClassName != f.ClassName {
+			continue
+		}
+		if idx >= len(pt.TypeArgs) || pt.TypeArgs[idx] == nil {
+			return ""
+		}
+		if ajc, ok := pt.TypeArgs[idx].RawType().(*types.JavaClass); ok && ajc != nil {
+			return ajc.Name
+		}
+		return ""
+	}
+	return ""
+}
+
 // erasureNameOf strips a generic type string down to its raw/erased name: "Comparator<? super K>" ->
 // "Comparator". Mirrors statements.erasureName (kept local so the values package stays self-contained).
 func erasureNameOf(s string) string {
@@ -676,10 +1150,28 @@ func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context
 	if os.Getenv("JDEC_GENERIC_RESOLVE_OFF") != "" || f.IsStatic || f.Object == nil || funcCtx == nil || funcCtx.SiblingClassSig == nil {
 		return nil
 	}
-	// A `super.m()` invokespecial to a NON-current class binds to the supertype's declaration via a
-	// different receiver type; leave it to the existing paths (mirrors sameClassMethodParamType).
+	// A `super.m()` invokespecial to a NON-current class binds to the SUPERTYPE's declaration. Recover
+	// the superclass's PARAMETERIZED type from the current class Signature's extends clause (e.g. guava
+	// MutableClassToInstanceMap$1<B> extends ForwardingMapEntry<Class<? extends B>, B>) and resolve the
+	// param there: setValue(V) -> V maps to B, so `super.setValue(objArg)` re-emits the source's `(B)`
+	// cast (`Object cannot be converted to B`). The receiver is `this`; starting the hierarchy walk at
+	// the DIRECT super with its actual args correctly binds to the super declaration (skipping the
+	// current class's override) and, via ResolveInstantiatedParamType, follows deeper chains too.
+	// Kill-switch JDEC_SUPER_PARAM_RESOLVE_OFF restores the legacy skip.
 	if f.IsSpecialInvoke && !f.isCurrentClass(funcCtx) {
-		return nil
+		if os.Getenv("JDEC_SUPER_PARAM_RESOLVE_OFF") != "" || funcCtx.ClassSig == "" {
+			return nil
+		}
+		ref, ok := UnpackSoltValue(f.Object).(*JavaRef)
+		if !ok || !ref.IsThis {
+			return nil
+		}
+		sup, _ := types.ParseClassSignatureSupers(funcCtx.ClassSig)
+		pt, ok := types.AsParameterizedType(sup)
+		if !ok {
+			return nil
+		}
+		return types.ResolveInstantiatedParamType(funcCtx, funcCtx.SiblingClassSig, pt.RawClassName, pt.TypeArgs, f.FunctionName, len(f.Arguments), i)
 	}
 	var recvRaw string
 	var recvArgs []types.JavaType
@@ -713,6 +1205,295 @@ func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context
 		return nil
 	}
 	return types.ResolveInstantiatedParamType(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, f.FunctionName, len(f.Arguments), i)
+}
+
+// genericMethodWitnessArgParamType recovers the instantiated type of the i-th argument of a SAME-CLASS
+// call to a GENERIC method whose i-th formal is a bare METHOD-scope type variable (e.g. the `N` in
+// `<N> ... connectionsOf(Graph<N> graph, N node)`), by INFERRING that type variable from a "witness"
+// argument -- another formal `SomeClass<...N...>` whose actual argument carries a concrete type argument
+// at N's position. The witness pins N to a caller-scope type (guava ImmutableGraph.getNodeConnections
+// `connectionsOf(var0, var3)` / Graphs `reachableNodes(var0, var3)`: `var0` is `Graph<N>` so N binds to
+// the caller's N, but `var3` was read as `Object` from a raw `nodes().iterator()` -> "Object cannot be
+// converted to N"). Neither sameClassMethodParamType (class-scope vars only, skips static) nor
+// resolvedParamType (instance receivers only) covers this method-scope, witness-inferred case.
+//
+// The recovered type is only returned when it is a type variable IN SCOPE at the call site
+// (funcCtx.IsTypeParam), so the emitted `(N)` cast is always denotable, and only for a SAME-CLASS callee
+// whose generic Signature is available (arity- or descriptor-keyed). Kill-switch
+// JDEC_GENERIC_METHOD_WITNESS_OFF.
+func (f *FunctionCallExpression) genericMethodWitnessArgParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if os.Getenv("JDEC_GENERIC_METHOD_WITNESS_OFF") != "" || funcCtx == nil {
+		return nil
+	}
+	if f.ClassName == "" || i < 0 || i >= len(f.Arguments) {
+		return nil
+	}
+	if f.IsSpecialInvoke && !f.isCurrentClass(funcCtx) {
+		return nil // super.m() binds to a supertype declaration -- leave it to other paths.
+	}
+	// Resolve the callee's generic Signature: same-class from funcCtx's tables (arity- or descriptor-keyed),
+	// cross-class from the sibling resolver's (name, arity)-keyed method signatures (guava EndpointPair
+	// `<N> ordered(N, N)` called `EndpointPair.ordered(var1, capturedObj)`).
+	sig := ""
+	if f.ClassName == funcCtx.ClassName {
+		if sig = funcCtx.MethodSignature(f.FunctionName, len(f.Arguments)); sig == "" {
+			sig = funcCtx.MethodSignatureByDesc(f.FunctionName, f.Descriptor)
+		}
+	} else if funcCtx.SiblingClassSig != nil {
+		if _, methodSigs, ok := funcCtx.SiblingClassSig(strings.ReplaceAll(f.ClassName, ".", "/")); ok && methodSigs != nil {
+			sig = methodSigs[class_context.MethodSigKey(f.FunctionName, len(f.Arguments))]
+		}
+	}
+	if sig == "" {
+		return nil
+	}
+	methodTypeParams := types.ClassFormalTypeParamNames(sig) // reuses the leading `<...>` name parser
+	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+	if len(methodTypeParams) == 0 || i >= len(params) || params[i] == nil {
+		return nil
+	}
+	// Formal i must be a bare type variable declared by the METHOD (not the class -- a class-scope var is
+	// already handled by sameClassMethodParamType).
+	pjc, ok := params[i].RawType().(*types.JavaClass)
+	if !ok || pjc == nil {
+		return nil
+	}
+	tvName := pjc.Name
+	isMethodTypeParam := false
+	for _, tp := range methodTypeParams {
+		if tp == tvName {
+			isMethodTypeParam = true
+			break
+		}
+	}
+	if !isMethodTypeParam {
+		return nil
+	}
+	// Find a WITNESS formal j (j != i) that pins tvName from its actual argument, in either shape:
+	//   (a) `SomeClass<...tvName...>` -> binding = arg j's type argument at tvName's position;
+	//   (b) a BARE `tvName` -> binding = arg j's whole static type (guava `ordered(N nodeU, N nodeV)`:
+	//       nodeU=var1 is typed N, so N binds to the caller's N and nodeV's Object arg gets `(N)`).
+	// The binding is only accepted when it is itself a type variable IN SCOPE at the call site
+	// (funcCtx.IsTypeParam), so the emitted cast is denotable; a concrete-class witness is skipped
+	// (casting to it could be wrong -- the real inferred type may be a supertype/LUB).
+	for j := 0; j < len(params) && j < len(f.Arguments); j++ {
+		if j == i || params[j] == nil {
+			continue
+		}
+		var bound types.JavaType
+		if wjc, ok := params[j].RawType().(*types.JavaClass); ok && wjc != nil && wjc.Name == tvName && !params[j].IsArray() {
+			// A bare type-variable witness (`N nodeU`): the argument's whole static type binds tvName.
+			bound = UnpackSoltValue(f.Arguments[j]).Type()
+		} else if wp, ok := types.AsParameterizedType(params[j]); ok {
+			pos := -1
+			for k, ta := range wp.TypeArgs {
+				if ta == nil {
+					continue
+				}
+				// A wildcard type arg (`? extends X` / `? super X` / `?`) is not a bare type
+				// variable and its embedded JavaType is nil, so RawType() would panic. Skip it:
+				// this witness shape only pins tvName when the type arg IS the bare variable.
+				if _, isWild := ta.(*types.JavaWildcardType); isWild {
+					continue
+				}
+				if jc, ok := ta.RawType().(*types.JavaClass); ok && jc != nil && jc.Name == tvName {
+					pos = k
+					break
+				}
+			}
+			if pos < 0 {
+				continue
+			}
+			at := UnpackSoltValue(f.Arguments[j]).Type()
+			if at == nil {
+				continue
+			}
+			ap, ok := types.AsParameterizedType(at)
+			if !ok || ap.RawClassName != wp.RawClassName || pos >= len(ap.TypeArgs) || ap.TypeArgs[pos] == nil {
+				continue
+			}
+			bound = ap.TypeArgs[pos]
+		}
+		if bound == nil {
+			continue
+		}
+		bjc, ok := bound.RawType().(*types.JavaClass)
+		if !ok || bjc == nil || !funcCtx.IsTypeParam(bjc.Name) {
+			continue
+		}
+		return bound
+	}
+	return nil
+}
+
+// typeArgVar extracts the referenced TYPE VARIABLE from a type argument, unwrapping a `? super X` /
+// `? extends X` wildcard down to its bound: it returns the bound's JavaType, the variable name, and ok.
+// A bare type variable argument returns itself. Anything else (concrete class, unbounded `?`, nested
+// parameterization) returns ok=false. The bare *JavaWildcardType is asserted BEFORE RawType because a
+// wildcard embeds a nil JavaType whose RawType panics (see isWildcardType).
+func typeArgVar(ta types.JavaType) (types.JavaType, string, bool) {
+	if ta == nil {
+		return nil, "", false
+	}
+	if w, ok := ta.(*types.JavaWildcardType); ok {
+		if w.Bound == nil {
+			return nil, "", false
+		}
+		if jc, ok := w.Bound.RawType().(*types.JavaClass); ok && jc != nil {
+			return w.Bound, jc.Name, true
+		}
+		return nil, "", false
+	}
+	raw := ta.RawType()
+	if raw == nil {
+		return nil, "", false
+	}
+	if w, ok := raw.(*types.JavaWildcardType); ok {
+		if w.Bound == nil {
+			return nil, "", false
+		}
+		if jc, ok := w.Bound.RawType().(*types.JavaClass); ok && jc != nil {
+			return w.Bound, jc.Name, true
+		}
+		return nil, "", false
+	}
+	if jc, ok := raw.(*types.JavaClass); ok && jc != nil {
+		return ta, jc.Name, true
+	}
+	return nil, "", false
+}
+
+// varargsTypeVarArrayArgParamType recovers the instantiated type of the trailing argument of a call to a
+// GENERIC method whose last formal is a VARARGS array of a METHOD-scope type variable (`E... == E[]`),
+// when that slot receives a single reference array of a DIFFERENT element type (e.g. an `Object[]`). The
+// method type variable E is INFERRED from a "witness" formal `SomeClass<...E...>` -- including a
+// `? super E` / `? extends E` wildcard bound -- whose actual argument pins E to a caller-scope type
+// variable (guava ImmutableSortedSet.construct `(Comparator<? super E>, int, E...)` called with an
+// `Object[]`: without the `(E[])` cast javac over-constrains E to both Object (from the array) and the
+// caller's E (from the comparator) -> "method construct cannot be applied to given types"). The recovered
+// `Ecaller[]` is returned so ArgumentStrings re-emits the erased `(E[])` cast. Only fires when the
+// binding is itself an IN-SCOPE type variable (denotable). Neither genericMethodWitnessArgParamType (bare
+// type-var formal only, skips arrays) nor the other resolvers cover a varargs type-var array formal.
+// Kill-switch JDEC_VARARGS_TYPEVAR_ARRAY_OFF.
+func (f *FunctionCallExpression) varargsTypeVarArrayArgParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if os.Getenv("JDEC_VARARGS_TYPEVAR_ARRAY_OFF") != "" || funcCtx == nil {
+		return nil
+	}
+	if f.ClassName == "" || i < 0 || i >= len(f.Arguments) || i != len(f.Arguments)-1 {
+		return nil // varargs is always the trailing formal.
+	}
+	if f.IsSpecialInvoke && !f.isCurrentClass(funcCtx) {
+		return nil
+	}
+	// The argument must itself be a reference array (the un-cast Object[] javac rejects).
+	at := UnpackSoltValue(f.Arguments[i]).Type()
+	if at == nil || !at.IsArray() {
+		return nil
+	}
+	sig := ""
+	if f.ClassName == funcCtx.ClassName {
+		if sig = funcCtx.MethodSignature(f.FunctionName, len(f.Arguments)); sig == "" {
+			sig = funcCtx.MethodSignatureByDesc(f.FunctionName, f.Descriptor)
+		}
+	} else if funcCtx.SiblingClassSig != nil {
+		if _, methodSigs, ok := funcCtx.SiblingClassSig(strings.ReplaceAll(f.ClassName, ".", "/")); ok && methodSigs != nil {
+			sig = methodSigs[class_context.MethodSigKey(f.FunctionName, len(f.Arguments))]
+		}
+	}
+	if sig == "" {
+		return nil
+	}
+	methodTypeParams := types.ClassFormalTypeParamNames(sig)
+	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+	if len(methodTypeParams) == 0 || i >= len(params) || params[i] == nil || !params[i].IsArray() {
+		return nil
+	}
+	arr, ok := params[i].RawType().(*types.JavaArrayType)
+	if !ok || arr == nil || arr.JavaType == nil {
+		return nil
+	}
+	elemJc, ok := arr.JavaType.RawType().(*types.JavaClass)
+	if !ok || elemJc == nil {
+		return nil
+	}
+	tvName := elemJc.Name
+	isMethodTypeParam := false
+	for _, tp := range methodTypeParams {
+		if tp == tvName {
+			isMethodTypeParam = true
+			break
+		}
+	}
+	if !isMethodTypeParam {
+		return nil
+	}
+	// Infer tvName from a witness formal j (parameterized, its type arg is tvName -- bare or wildcard
+	// bounded) whose actual argument pins tvName to an in-scope type variable.
+	for j := 0; j < len(params) && j < len(f.Arguments); j++ {
+		if j == i || params[j] == nil {
+			continue
+		}
+		wp, ok := types.AsParameterizedType(params[j])
+		if !ok {
+			continue
+		}
+		pos := -1
+		for k, ta := range wp.TypeArgs {
+			if _, nm, ok := typeArgVar(ta); ok && nm == tvName {
+				pos = k
+				break
+			}
+		}
+		if pos < 0 {
+			continue
+		}
+		aj := UnpackSoltValue(f.Arguments[j]).Type()
+		if _, okp := types.AsParameterizedType(aj); !okp {
+			// A raw field read (guava ImmutableSortedSet$Builder `this.comparator` renders as raw
+			// Comparator): recover its instantiated generic type `Comparator<? super E>` so the witness
+			// pins E to the builder's class-scope E.
+			if rec := RecoverThisFieldInstantiatedType(funcCtx, f.Arguments[j]); rec != nil {
+				aj = rec
+			}
+		}
+		if aj == nil {
+			continue
+		}
+		ap, ok := types.AsParameterizedType(aj)
+		if !ok || ap.RawClassName != wp.RawClassName || pos >= len(ap.TypeArgs) {
+			continue
+		}
+		boundType, boundName, ok := typeArgVar(ap.TypeArgs[pos])
+		if !ok || boundType == nil || !funcCtx.IsTypeParam(boundName) {
+			continue
+		}
+		return types.NewJavaArrayType(boundType) // Ecaller[]
+	}
+	return nil
+}
+
+// typeVarElemArrayArgCast reports whether the synthesized `(E[])(arg)` cast should be emitted for an
+// argument whose recovered formal type is a reference ARRAY of an IN-SCOPE type variable (`E[]`) while the
+// ARGUMENT is itself a reference array of a different element type (e.g. Object[]). The (ok1 && ok2)
+// class-vs-class branch never fires here because JavaArrayType.RawType() is not a *JavaClass. Companion to
+// varargsTypeVarArrayArgParamType. Kill-switch JDEC_VARARGS_TYPEVAR_ARRAY_OFF.
+func (f *FunctionCallExpression) typeVarElemArrayArgCast(argType types.JavaType, resolvedGeneric bool, arg JavaValue, funcCtx *class_context.ClassContext) bool {
+	if os.Getenv("JDEC_VARARGS_TYPEVAR_ARRAY_OFF") != "" {
+		return false
+	}
+	if !resolvedGeneric || argType == nil || arg == nil || funcCtx == nil || !argType.IsArray() {
+		return false
+	}
+	arr, ok := argType.RawType().(*types.JavaArrayType)
+	if !ok || arr == nil || arr.JavaType == nil {
+		return false
+	}
+	elem, ok := arr.JavaType.RawType().(*types.JavaClass)
+	if !ok || elem == nil || !funcCtx.IsTypeParam(elem.Name) {
+		return false
+	}
+	at := arg.Type()
+	return at != nil && at.IsArray()
 }
 
 // isCurrentClass reports whether the call's target class is the class currently being rendered.
@@ -790,6 +1571,47 @@ func (f *FunctionCallExpression) typeVarArrayArgCast(ok1, resolvedGeneric bool, 
 	return at != nil && at.IsArray()
 }
 
+// resolvedParameterizedArgCast reports whether the i-th argument needs a synthesized `(X<...>)` cast
+// because a generic resolver recovered the formal as a PARAMETERIZED type (e.g.
+// NavigableMap<Cut<C>,Range<C>>.tailMap's key formal resolves to `Cut<C>`) whose RAW class differs from
+// the argument's erased static type. The normal (ok1 && ok2) class-vs-class arg-cast branch can never
+// reach this case: a parameterized type's RawType() is not a *JavaClass (ok1 is false). The descriptor
+// erases the formal to its bound, so a differently-erased argument (an Object read from a raw entry)
+// flows in without the source's `(Cut<C>)` cast and javac -- re-resolving against the field's real
+// generic type -- rejects it ("Object cannot be converted to Cut<C>"). Only fires for a RECOVERED
+// (resolvedGeneric) parameterized formal whose raw class both differs from the argument's raw class and
+// is not itself Object, and never when the argument is a bare in-scope type variable (casting `C` to a
+// concrete `Cut<C>` would be a spurious over-cast, cf. suppressTypeVarArgCast). guava
+// TreeRangeSet$RangesByUpperBound / $SubRangeSetRangesByLowerBound `rangesByLowerBound.tailMap/headMap`.
+// Kill-switch JDEC_PARAM_ARG_CAST_OFF.
+func resolvedParameterizedArgCast(funcCtx *class_context.ClassContext, argType types.JavaType, resolvedGeneric bool, arg JavaValue) bool {
+	if os.Getenv("JDEC_PARAM_ARG_CAST_OFF") != "" {
+		return false
+	}
+	if !resolvedGeneric || argType == nil || arg == nil || funcCtx == nil {
+		return false
+	}
+	pt, ok := types.AsParameterizedType(argType)
+	if !ok || pt.RawClassName == "" || pt.RawClassName == "java.lang.Object" {
+		return false
+	}
+	at := arg.Type()
+	if at == nil {
+		return false
+	}
+	ajc, ok := at.RawType().(*types.JavaClass)
+	if !ok || ajc == nil {
+		return false // array / primitive / parameterized argument: not this case.
+	}
+	if ajc.Name == pt.RawClassName {
+		return false // same erasure -- no cast needed (already a Cut / raw Cut).
+	}
+	if funcCtx.IsTypeParam(ajc.Name) {
+		return false // bare in-scope type variable argument: casting to a concrete parameterization is a spurious over-cast.
+	}
+	return true
+}
+
 // calleeParamIsErasedTypeVar reports whether the called method's i-th formal parameter is a TYPE
 // VARIABLE in the callee's own generic Signature (so the JVM descriptor erased it to merely that
 // variable's bound). Synthesizing a cast to that erased bound is a no-op UPCAST (the argument flowed
@@ -811,7 +1633,17 @@ func (f *FunctionCallExpression) calleeParamIsErasedTypeVar(i int, funcCtx *clas
 	if !ok || methodSigs == nil {
 		return false
 	}
-	sig := methodSigs[class_context.MethodSigKey(f.FunctionName, len(f.Arguments))]
+	// Prefer the DESCRIPTOR-keyed Signature (exact overload) over the arity-keyed one, which is
+	// dropped when overloads collide on arity (e.g. SortedLists.binarySearch's two 5-arg overloads) --
+	// without it this method could not tell that the erased formal is a type variable. Kill-switch
+	// JDEC_SIBLING_DESC_SIG_OFF restores the arity-only lookup for A/B isolation.
+	sig := ""
+	if os.Getenv("JDEC_SIBLING_DESC_SIG_OFF") == "" {
+		sig = methodSigs[class_context.MethodDescKey(f.FunctionName, f.Descriptor)]
+	}
+	if sig == "" {
+		sig = methodSigs[class_context.MethodSigKey(f.FunctionName, len(f.Arguments))]
+	}
 	if sig == "" {
 		return false
 	}
@@ -908,16 +1740,256 @@ func (f *FunctionCallExpression) ArgumentStrings(funcCtx *class_context.ClassCon
 	return paramStrs
 }
 
+// lambdaArgFunctionalCast returns the functional-interface cast that a lambda / method-reference
+// argument needs when the call's RECEIVER is a generic type used RAW. Calling any method through a
+// raw-typed reference erases the ENTIRE method signature (JLS 4.8), even parts that never mention the
+// class type variable, so a functional-interface parameter `Consumer<FieldReader>` collapses to raw
+// `Consumer` (SAM `accept(Object)`). An explicitly-typed lambda `(FieldReader l0) -> ...` then fails
+// ("incompatible parameter types in lambda expression"), and a body dereferencing the parameter fails
+// even with an implicit parameter (it would be typed Object). The original source guards this with an
+// explicit `(Consumer<FieldReader>) e -> {...}` cast; the decompiler drops it because the descriptor
+// parameter type is already erased. Re-emit it, casting to the lambda VALUE's own instantiated
+// functional-interface type (recovered from the invokedynamic instantiatedMethodType by
+// inferLambdaTypeFromInstantiated, e.g. Consumer<FieldReader>). Canonical case: fastjson2
+// JSONSchema.of `((ObjectReaderAdapter) reader).apply((Consumer<FieldReader>) e -> ...)`.
+//
+// This is the method-call companion of genericCtorDiamond (which fixes the same raw-erasure defect for
+// `new Generic(lambda)` via the diamond). Gated to (a) a lambda / method-ref argument, (b) a receiver
+// whose static type is a jar-internal GENERIC class used raw (SiblingClassSig confirms formal type
+// params AND the receiver carries no type arguments -- a parameterized receiver keeps the SAM param
+// intact and needs no cast), and (c) a lambda value whose upgraded type is a denotable parameterized
+// functional interface. Kill-switch: JDEC_LAMBDA_RAWRECV_CAST_OFF=1.
+func (f *FunctionCallExpression) lambdaArgFunctionalCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_LAMBDA_RAWRECV_CAST_OFF") != "" || f.IsStatic || f.Object == nil ||
+		funcCtx == nil || funcCtx.SiblingClassSig == nil {
+		return ""
+	}
+	// Constructor calls (`new Generic<>(lambda)`) are handled by genericCtorDiamond, which restores the
+	// diamond so javac infers the class type arguments from the constructor arguments. Casting the
+	// lambda argument here would OVER-constrain that inference (e.g. `new FieldReaderListFuncImpl<>(
+	// (Supplier<List>) ArrayList::new, ...)` -> "cannot infer type arguments"), so leave `<init>` alone.
+	if f.FunctionName == "<init>" {
+		return ""
+	}
+	// (a) argument is a lambda / method reference (both carry Flag "lambda").
+	cv, ok := UnpackSoltValue(f.Arguments[i]).(*CustomValue)
+	if !ok || cv.Flag != "lambda" {
+		return ""
+	}
+	// (c) the lambda value carries a denotable parameterized functional-interface type.
+	lamType := cv.Type()
+	if lamType == nil {
+		return ""
+	}
+	if _, ok := types.AsParameterizedType(lamType); !ok {
+		return ""
+	}
+	// (b) receiver is a jar-internal generic class used RAW. A parameterized receiver keeps the
+	// method's functional-interface parameter intact, so no cast is needed there.
+	recv := f.Object.Type()
+	if recv == nil {
+		return ""
+	}
+	if _, ok := types.AsParameterizedType(recv); ok {
+		return ""
+	}
+	jc, ok := recv.RawType().(*types.JavaClass)
+	if !ok || jc == nil {
+		return ""
+	}
+	classSig, _, ok := funcCtx.SiblingClassSig(strings.ReplaceAll(jc.Name, ".", "/"))
+	if !ok || len(types.ClassFormalTypeParamNames(classSig)) == 0 {
+		return ""
+	}
+	return lamType.String(funcCtx)
+}
+
+// jdkGenericLambdaReceivers is the small set of JDK generic types whose fluent methods take a
+// functional-interface parameter, so calling them through a RAW receiver erases that parameter's SAM.
+// A raw java.util.stream.Stream (produced by `.stream()` on a raw Collection) or a raw java.util.Optional
+// makes map(Function)/filter(Predicate)/forEach(Consumer)/... collapse to raw SAMs (apply(Object) etc.),
+// which an explicitly-typed lambda can no longer bind to. Kept intentionally tiny and unambiguous.
+var jdkGenericLambdaReceivers = map[string]bool{
+	"java.util.stream.Stream": true,
+	"java.util.Optional":      true,
+}
+
+// lambdaArgRawJDKReceiverCast is the JDK-receiver companion of lambdaArgFunctionalCast. It re-adds the
+// functional-interface cast a lambda / method-reference argument needs when the call's RECEIVER is a
+// KNOWN JDK GENERIC type used RAW (java.util.stream.Stream / java.util.Optional). Such a receiver arises
+// when its source was raw -- e.g. `rawList.stream().filter(...).map((FieldWriter l0) -> ...)` where
+// rawList is a raw java.util.List (a cross-class getFieldWriters() whose List<FieldWriter> return the
+// descriptor erased). Calling through the raw Stream erases Stream.map's `Function<? super T,? extends R>`
+// to raw Function (SAM apply(Object)), so the explicit `(FieldWriter l0)` fails ("incompatible parameter
+// types in lambda expression"). The original source's Stream WAS parameterized, so the invokedynamic
+// recorded the lambda's instantiated functional type (Function<FieldWriter, Object>) -- re-emit that cast,
+// which binds the explicit parameter and stays assignable to the raw Function parameter (unchecked,
+// legal). Canonical: fastjson2 JSONPathSegment$CycleNameSegment$MapRecursive. This is a pure re-add of a
+// cast the source had; it cannot introduce a type the descriptor did not already permit. Kill-switch:
+// JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF=1.
+func (f *FunctionCallExpression) lambdaArgRawJDKReceiverCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF") != "" || f.IsStatic || f.Object == nil {
+		return ""
+	}
+	// (a) argument is a lambda / method reference (both carry Flag "lambda").
+	cv, ok := UnpackSoltValue(f.Arguments[i]).(*CustomValue)
+	if !ok || cv.Flag != "lambda" {
+		return ""
+	}
+	// (b) the lambda value carries a denotable parameterized functional-interface type.
+	lamType := cv.Type()
+	if lamType == nil {
+		return ""
+	}
+	if _, ok := types.AsParameterizedType(lamType); !ok {
+		return ""
+	}
+	// (c) receiver is a KNOWN JDK generic type used RAW. A parameterized receiver keeps the method's
+	// functional-interface parameter intact, so no cast is needed (and must not be added) there.
+	recv := f.Object.Type()
+	if recv == nil {
+		return ""
+	}
+	if _, ok := types.AsParameterizedType(recv); ok {
+		return ""
+	}
+	jc, ok := recv.RawType().(*types.JavaClass)
+	if !ok || jc == nil || !jdkGenericLambdaReceivers[jc.Name] {
+		return ""
+	}
+	return lamType.String(funcCtx)
+}
+
+// doPrivilegedFunctionalCast returns the functional-interface cast a lambda / method-reference argument
+// needs when passed to java.security.AccessController.doPrivileged. That JDK method is OVERLOADED on two
+// SAM parameter types -- PrivilegedAction<T> and PrivilegedExceptionAction<T> -- and a bare lambda /
+// method reference (a poly expression) is applicable to BOTH, so javac rejects the bare form as
+// "reference to doPrivileged is ambiguous". The bytecode's invokedynamic result type records EXACTLY
+// which functional interface the source targeted (recovered onto the argument's CustomValue.Type()), so
+// re-emit the source's `(PrivilegedAction) ...` cast to select that same overload. The doPrivileged
+// result is always outer-cast at the call site (e.g. `(ProtectionDomain)(AccessController.doPrivileged(
+// ...))`), so even a raw functional-interface cast is faithful. Canonical: fastjson2 DynamicClassLoader
+// / JSONFactory static initializers. Kill-switch: JDEC_DOPRIVILEGED_LAMBDA_CAST_OFF=1.
+func (f *FunctionCallExpression) doPrivilegedFunctionalCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_DOPRIVILEGED_LAMBDA_CAST_OFF") != "" {
+		return ""
+	}
+	if f.FunctionName != "doPrivileged" || f.ClassName != "java.security.AccessController" {
+		return ""
+	}
+	// Argument is a lambda / method reference (both carry Flag "lambda"); a plain value is unambiguous.
+	cv, ok := UnpackSoltValue(f.Arguments[i]).(*CustomValue)
+	if !ok || cv.Flag != "lambda" {
+		return ""
+	}
+	// Cast to the exact functional interface recovered from the invokedynamic result type.
+	lamType := cv.Type()
+	if lamType == nil {
+		return ""
+	}
+	if s := lamType.String(funcCtx); s != "" {
+		return s
+	}
+	return ""
+}
+
+// LambdaAssignFunctionalCast returns the parameterized functional-interface cast an explicitly-typed
+// lambda or a method-reference right-hand side needs when REASSIGNED into a slot that is declared with
+// the RAW form of that functional interface. A raw target's SAM erases to `apply(Object)` (etc.), so an
+// explicitly-typed lambda `(Collection l0) -> ...` or a method reference `Collections::unmodifiable*`
+// cannot bind ("incompatible parameter types in lambda expression" / "invalid method reference"). This
+// arises when the slot was FIRST declared from a RAW-typed source -- a getfield of a raw generic field
+// such as `Function builder = this.builder;` -- and only LATER reassigned the lambda; bootstrap_methods
+// upgrades the lambda VALUE's type and a slot whose FIRST store is the lambda adopts it, but not this
+// field-first shape. The javac-visible source ALWAYS spells these casts out (verified against fastjson2
+// 2.0.43 ObjectReaderImplList: `builder = (Function<Collection, Collection>) Collections::unmodifiable*`
+// and `builder = (Function<Collection, Collection>) ((Collection list) -> Collections.singleton(...))`).
+//
+// The cast target is the lambda's OWN recovered instantiated type (from the invokedynamic
+// instantiatedMethodType), which is exactly the type the original source cast to, so the explicit
+// parameters / method reference bind and the value stays assignable to the raw slot (unchecked, legal).
+// inferLambdaTypeFromInstantiated only ever parameterizes standard JDK functional interfaces, so the
+// recovered type is denotable. Fires only when at least one recovered type argument is more specific
+// than java.lang.Object (a `Function<Object,Object>`-shaped lambda already binds to the raw SAM and must
+// be left untouched to avoid pointless casts). Applied by AssignStatement only on REASSIGNMENT, never on
+// the first declaration (which adopts the parameterized type directly). Kill-switch:
+// JDEC_LAMBDA_ASSIGN_CAST_OFF=1.
+func LambdaAssignFunctionalCast(left, right JavaValue, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_LAMBDA_ASSIGN_CAST_OFF") != "" || right == nil {
+		return ""
+	}
+	cv, ok := UnpackSoltValue(right).(*CustomValue)
+	if !ok || cv.Flag != "lambda" {
+		return ""
+	}
+	lamType := cv.Type()
+	if lamType == nil {
+		return ""
+	}
+	lamParam, ok := types.AsParameterizedType(lamType)
+	if !ok {
+		return ""
+	}
+	// Require at least one type argument more specific than java.lang.Object: an all-Object
+	// parameterization erases to the raw SAM and needs no cast.
+	hasSpecificArg := false
+	for _, ta := range lamParam.TypeArgs {
+		if ta == nil {
+			continue
+		}
+		if jc, ok := ta.RawType().(*types.JavaClass); ok && jc != nil && jc.Name == "java.lang.Object" {
+			continue
+		}
+		hasSpecificArg = true
+		break
+	}
+	if !hasSpecificArg {
+		return ""
+	}
+	return lamType.String(funcCtx)
+}
+
 // renderArgAt renders the i-th call argument, applying the generic-erasure parameter-type recovery and
 // the synthesized argument cast (`(V)`/`(T)`/primitive) that reproduce the original source. Factored
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
+	// A lambda / method-ref passed to a method on a RAW generic receiver lost the source's
+	// `(Consumer<FieldReader>) e -> ...` functional-interface cast (raw receiver erases the SAM). Re-add it.
+	if cast := f.lambdaArgFunctionalCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	// A lambda / method-ref passed to a fluent method on a RAW JDK generic receiver (Stream/Optional)
+	// lost the source's functional-interface cast (the raw receiver erased the SAM). Re-add it.
+	if cast := f.lambdaArgRawJDKReceiverCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	// A lambda / method-ref passed to the OVERLOADED java.security.AccessController.doPrivileged is
+	// ambiguous (PrivilegedAction vs PrivilegedExceptionAction). Re-add the source's FI cast.
+	if cast := f.doPrivilegedFunctionalCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
 	// A same-class `this(...)` constructor self-call whose i-th formal is a wildcard parameterization
 	// mentioning a class type variable, fed an argument that erases to the same raw type but a different
 	// parameterization, lost the source's unchecked cast to generic erasure -- re-add it (gson
 	// LinkedTreeMap / LinkedHashTreeMap `this((Comparator<? super K>) NATURAL_ORDER)`).
 	if cast := f.ctorWildcardArgCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	// A `Comparator<? super K>`-typed argument passed to a JDK sort/search static (Arrays.sort /
+	// Arrays.binarySearch / Collections.sort / Collections.binarySearch) alongside a companion array/
+	// list argument whose element type erased to Object (the source's `(K[])` cast became `(Object[])`)
+	// no longer satisfies the method's `Comparator<? super T>` capture -- javac rejects it
+	// ("no suitable method for sort(Object[], Comparator<CAP#1>)"; guava ImmutableSortedMap$Builder /
+	// ImmutableSortedMultiset$Builder / ImmutableList). A raw `(Comparator)` cast makes the call an
+	// unchecked (behaviour-preserving) invocation that resolves cleanly. Re-add it.
+	if cast := f.comparatorRawArgCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	// A `super(...)` argument feeding a bare type-variable parameter of the superclass constructor lost
+	// the source's implicit type-variable typing (the value erased to Object/the bound); re-emit the
+	// erased `(N)` cast recovered from the super ctor Signature + the subclass's extends clause.
+	if cast := f.superCtorTypeVarArgCast(i, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	argType := f.FuncType.ParamTypes[i]
@@ -936,6 +2008,17 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	} else if inst := f.resolvedParamType(i, funcCtx); inst != nil {
 		// Additive cross-class generic resolver: fires only when the JDK-table and same-class paths
 		// declined, covering non-this / non-identity / deep-chain jar-internal receivers.
+		argType = inst
+		resolvedGeneric = true
+	} else if inst := f.genericMethodWitnessArgParamType(i, funcCtx); inst != nil {
+		// Same-class generic method whose formal is a METHOD-scope type variable inferred from a witness
+		// argument (guava connectionsOf/reachableNodes `(Graph<N>, N)` fed an Object read from a raw
+		// iterator): re-emit the `(N)` cast the erasure dropped.
+		argType = inst
+		resolvedGeneric = true
+	} else if inst := f.varargsTypeVarArrayArgParamType(i, funcCtx); inst != nil {
+		// Generic method whose trailing formal is a varargs type-var array `E...` fed a bare Object[]
+		// (guava ImmutableSortedSet.construct `(Comparator<? super E>, int, E...)`): re-emit `(E[])`.
 		argType = inst
 		resolvedGeneric = true
 	}
@@ -965,6 +2048,19 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 				return argType
 			})
 		}
+	} else if resolvedParameterizedArgCast(funcCtx, argType, resolvedGeneric, arg) {
+		// A generic resolver recovered the formal as a PARAMETERIZED type (e.g.
+		// NavigableMap<Cut<C>,Range<C>>.tailMap's key formal -> `Cut<C>`) whose raw class differs from
+		// the argument's erased static type. The (ok1 && ok2) class-vs-class branch never fires because a
+		// parameterized type's RawType() is not a *JavaClass. Re-emit the erased `(Cut<C>)` cast (guava
+		// TreeRangeSet$RangesByUpperBound `this.rangesByLowerBound.tailMap((Cut<C>) var2.getKey(), true)`).
+		argStr := arg.String(funcCtx)
+		argTypeStr := argType.String(funcCtx)
+		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			return fmt.Sprintf("(%s)(%s)", argTypeStr, argStr)
+		}, func() types.JavaType {
+			return argType
+		})
 	} else if f.typeVarArrayArgCast(ok1, resolvedGeneric, expectClassType, arg, funcCtx) {
 		// The resolver recovered the formal as a denotable type variable T (in scope here) but the
 		// ARGUMENT is a reference ARRAY -- the (ok1 && ok2) class-vs-class branch above never fires
@@ -973,6 +2069,17 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		// erased to a no-op (the array already satisfied T's Object bound in bytecode); re-emit it.
 		// fastjson2 CSVReader.readLineObjectAll: `consumer.accept((T) values)` where `values` is the
 		// `Object[]` returned by readLineValues and `consumer` is `Consumer<T>`.
+		argStr := arg.String(funcCtx)
+		argTypeStr := argType.String(funcCtx)
+		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			return fmt.Sprintf("(%s)(%s)", argTypeStr, argStr)
+		}, func() types.JavaType {
+			return argType
+		})
+	} else if f.typeVarElemArrayArgCast(argType, resolvedGeneric, arg, funcCtx) {
+		// The resolver recovered the varargs formal as a denotable type-var array `E[]` but the ARGUMENT
+		// is a reference array of a different element type (Object[]); JavaArrayType.RawType() is not a
+		// *JavaClass so the class-vs-class branch above never fires. Re-emit the erased `(E[])` cast.
 		argStr := arg.String(funcCtx)
 		argTypeStr := argType.String(funcCtx)
 		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
@@ -1132,7 +2239,18 @@ func (f *FunctionCallExpression) polymorphicSignatureCastType(funcCtx *class_con
 
 func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) string {
 	if castType, ok := f.polymorphicSignatureCastType(funcCtx); ok {
-		return fmt.Sprintf("(%s)(%s)", castType, f.renderCall(funcCtx))
+		// Self-parenthesize the polymorphic-signature return cast, exactly like OP_CHECKCAST does, so it
+		// keeps correct precedence when it becomes the receiver of a member access / method call. Without
+		// the outer parens `(T)(x).m()` parses as `(T)((x).m())` -- a cast binds LOOSER than a call -- so
+		// `(Boolean)(mh.invoke(...)).booleanValue()` tries to call booleanValue() on the (Object) invoke
+		// result ("cannot find symbol: method booleanValue()"; fastjson2 JSONReader:3130
+		// `METHOD_HANDLE_HAS_NEGATIVE.invoke(...)` unboxed to boolean). Extra parens are valid Java in
+		// every position, so this never harms assignment/argument uses. Kill-switch:
+		// JDEC_POLYSIG_CAST_PARENS_OFF restores the single-paren form.
+		if os.Getenv("JDEC_POLYSIG_CAST_PARENS_OFF") != "" {
+			return fmt.Sprintf("(%s)(%s)", castType, f.renderCall(funcCtx))
+		}
+		return fmt.Sprintf("((%s)(%s))", castType, f.renderCall(funcCtx))
 	}
 	return f.renderCall(funcCtx)
 }
@@ -1156,6 +2274,24 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 		if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref != nil && ref.IsThis {
 			return fmt.Sprintf("super.%s(%s)", functionName, strings.Join(paramStrs, ","))
 		}
+	}
+
+	// A `recv.compare(a, b)` call whose receiver is a wildcard `Comparator<?>`/`Comparator<? super X>`
+	// binds to `compare(CAP, CAP)` and rejects the Object arguments; render a raw `((Comparator)(recv))`
+	// receiver cast so it becomes an unchecked, behaviour-preserving `compare(Object, Object)`.
+	if f.comparatorRawReceiverCast(funcCtx) {
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass("java.util.Comparator").String(funcCtx), f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+	}
+	// A `recv.add(x)`/`recv.offer(x)` on a wildcard `Collection<? super E>` receiver rejects the Object
+	// argument; render a raw `((Collection)(recv))` receiver cast so it becomes an unchecked add(Object).
+	if rawCls := f.collectionAddWildcardReceiverRawCast(funcCtx); rawCls != "" {
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass(rawCls).String(funcCtx), f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+	}
+	// A `recv.apply(x)`/`test(x)`/`accept(x)` on a wildcard single-type-param consumer (e.g.
+	// `Predicate<? super Entry<K,V>>`) rejects the erased argument; render a raw `((Predicate)(recv))`
+	// receiver cast so it becomes an unchecked, behaviour-preserving call.
+	if rawCls := f.wildcardConsumerReceiverRawCast(funcCtx); rawCls != "" {
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass(rawCls).String(funcCtx), f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
 	}
 
 	if v, ok := f.Object.(*JavaClassValue); ok {
@@ -1242,6 +2378,38 @@ func IntrinsicBooleanValue(v JavaValue) bool {
 	return false
 }
 
+// structurallyBooleanForIntCoerce reports whether v produces a boolean 0/1 BY CONSTRUCTION -- a
+// comparison (`a == b`), a boolean-typed connective/unary expression (`a || b`, `a && b`, `!a`, folded
+// from a short-circuit materialization), or a call to a method whose descriptor return type is boolean
+// (`Z`) -- as opposed to a bare variable/slot reference. The distinction is critical: a bare boolean-
+// typed ref may be a slot MISTYPED boolean while actually holding an arbitrary int (LocalCache$Segment
+// `this.count = var13`), where wrapping `? 1 : 0` would corrupt any non-0/1 value; but a comparison /
+// boolean expression / Z-returning method GENUINELY yields 0/1, so `int x = <it>` was necessarily
+// `x = <it> ? 1 : 0` in source (or x should be boolean) and re-inserting `? 1 : 0` is behaviourally
+// identical. The stored value at `istore` is minted int during the linear pass; the boolean structure
+// (short-circuit `||`, comparison) is reconstructed by later CFG structuring, leaving `int x = <bool>`
+// which javac rejects (fastjson2 FieldWriterObject.getObjectWriter: `int typeMatch = a==b || ...` and
+// `typeMatch = TypeUtils.typeMatch(..)` returning Z).
+func structurallyBooleanForIntCoerce(v JavaValue, funcCtx *class_context.ClassContext) bool {
+	u := UnpackSoltValue(v)
+	if u == nil {
+		return false
+	}
+	switch t := u.(type) {
+	case *JavaCompare:
+		return true
+	case *JavaExpression, *FunctionCallExpression:
+		return isBooleanTyped(u)
+	case *TernaryExpression:
+		// A short-circuit `||`/`&&` materialization is carried as a `(cond) ? 1 : 0` ternary tree whose
+		// int-0/1 leaves are recursively foldable to a boolean connective (boolReduce). When it folds to
+		// a boolean value it is boolean by construction (not a bare ref), so `? 1 : 0` is safe. A genuine
+		// value ternary (`cond ? a : b` over non-bool values) does NOT fold and is left alone.
+		return isBooleanTyped(boolReduce(t, funcCtx))
+	}
+	return false
+}
+
 // CoerceIntAssignRHS wraps rhs as `(rhs) ? (1) : (0)` when an INTRINSICALLY-boolean value is assigned to
 // an int-typed target. javac compiles `int x = c1 & c2;` (and other non-short-circuit boolean
 // connectives / boolean ternaries originally written `cond ? 1 : 0`) by leaving the boolean -- already
@@ -1251,7 +2419,12 @@ func IntrinsicBooleanValue(v JavaValue) bool {
 // form. It fires ONLY on IntrinsicBooleanValue (never a bare boolean-typed ref/slot), so a slot mistyped
 // boolean but holding an int (LocalCache$Segment `this.count = var13`) is left untouched -- avoiding a
 // silent miscompilation. Kill-switch: JDEC_BOOL_TO_INT_COERCE_OFF=1.
-func CoerceIntAssignRHS(leftType types.JavaType, rhs JavaValue) JavaValue {
+//
+// The structural extension (short-circuit `||`/`&&` / comparison / Z-returning method call, gated by
+// JDEC_BOOL_TO_INT_COERCE_EXPR_OFF) covers the same defect on values whose boolean-ness is by
+// CONSTRUCTION rather than a bare typed ref -- see structurallyBooleanForIntCoerce. Both exclude bare
+// refs, so the mistyped-boolean-int-slot miscompilation risk is avoided.
+func CoerceIntAssignRHS(leftType types.JavaType, rhs JavaValue, funcCtx *class_context.ClassContext) JavaValue {
 	if rhs == nil || leftType == nil {
 		return rhs
 	}
@@ -1262,7 +2435,11 @@ func CoerceIntAssignRHS(leftType types.JavaType, rhs JavaValue) JavaValue {
 	if !ok || prim.Name != types.JavaInteger {
 		return rhs
 	}
-	if !IntrinsicBooleanValue(rhs) {
+	eligible := IntrinsicBooleanValue(rhs)
+	if !eligible && os.Getenv("JDEC_BOOL_TO_INT_COERCE_EXPR_OFF") == "" {
+		eligible = structurallyBooleanForIntCoerce(rhs, funcCtx)
+	}
+	if !eligible {
 		return rhs
 	}
 	inner := rhs
@@ -1279,5 +2456,6 @@ func NewFunctionCallExpression(object JavaValue, methodMember *JavaClassMember, 
 		Object:       object,
 		FunctionName: methodMember.Member,
 		ClassName:    methodMember.Name,
+		Descriptor:   methodMember.Description,
 	}
 }

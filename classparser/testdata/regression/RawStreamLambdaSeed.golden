@@ -1,0 +1,9 @@
+# Raw-JDK-Stream-receiver lambda cast (JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF): the local is declared RAW
+# `List var2 = var1.getItems();` (descriptor-erased raw List), so `var2.stream()` is a RAW Stream and the
+# explicitly-typed `.map((RawStreamItem l0) -> ...)` / `.filter(Objects::nonNull)` lambdas must be cast to
+# their recovered parameterized functional types to bind against the erased SAMs. Bare forms are rejected
+# by javac ("incompatible parameter types in lambda expression"). Real hit: fastjson2
+# JSONPathSegment$CycleNameSegment$MapRecursive.
++(Function<RawStreamItem, Object>)((RawStreamItem l0) ->
++(Predicate<RawStreamItem>)(Objects::nonNull)
+-.map((RawStreamItem l0) ->

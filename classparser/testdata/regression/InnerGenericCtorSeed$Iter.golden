@@ -1,0 +1,5 @@
+# 非静态内部类构造器泛型 Signature 省略合成 this$0 -> 尾部对齐, 真实形参还原为 T (非擦除 Object),
+# 使 Collections.singletonList(var2) 推成 List<T> 可存入 List<List<T>> 字段。JDEC_INNER_CTOR_SIG_ALIGN_OFF。
++, T var2)
++Collections.singletonList(var2)
+-, Object var2)

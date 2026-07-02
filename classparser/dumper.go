@@ -157,6 +157,125 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 	return 0, false
 }
 
+// computeSamePkgFQNames scans the constant pool for CONSTANT_Class entries and returns the set of
+// SafeIdentifier'd simple type names that (a) occur in THIS class's own package AND (b) also occur in
+// some OTHER package. Such a same-package type is shadowed by the single-type-import the other-package
+// type gets (JLS 7.5.1), so its bare simple name must be rendered fully-qualified. Being constant-pool
+// based, the result is independent of body render order (the streaming importer could otherwise decide
+// too late). Returns nil (strict no-op) when the kill-switch is set, the pool is unavailable, or no
+// cross-package simple-name clash exists -- the common case. Kill-switch: JDEC_SAMEPKG_FQ_OFF=1.
+// extractDescriptorClassNames pulls every reference-type internal name out of a JVM descriptor or
+// generic Signature string. A reference type is spelled `L<binary/name>;` in a descriptor and
+// `L<binary/name>...` (terminated by `;`, `<`, or `.`) inside a generic Signature. Type variables
+// (`T...;`), primitives, and array markers are naturally skipped because they do not start with `L`.
+// The returned names are slash-separated with no leading `L` / trailing terminator. Over-matching a
+// non-descriptor Utf8 (e.g. a string constant that happens to contain `Lfoo/Bar;`) at worst adds a
+// harmless extra type to the clash scan.
+func extractDescriptorClassNames(s string) []string {
+	var out []string
+	for i := 0; i < len(s); i++ {
+		if s[i] != 'L' {
+			continue
+		}
+		j := i + 1
+		for j < len(s) {
+			ch := s[j]
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+				ch == '_' || ch == '/' || ch == '$' {
+				j++
+				continue
+			}
+			break
+		}
+		// A valid reference type must be terminated by ';', '<' (generic args), or '.' (inner type in
+		// a signature) and must contain a package separator to matter for a cross-package clash.
+		if j < len(s) && (s[j] == ';' || s[j] == '<' || s[j] == '.') {
+			name := s[i+1 : j]
+			if strings.Contains(name, "/") {
+				out = append(out, name)
+			}
+		}
+		i = j
+	}
+	return out
+}
+
+func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
+	if os.Getenv("JDEC_SAMEPKG_FQ_OFF") != "" {
+		return nil
+	}
+	if c.obj == nil || c.obj.ConstantPoolManager == nil {
+		return nil
+	}
+	pkgsBySimple := map[string]map[string]struct{}{}
+	record := func(binary string) {
+		// binary is a slash-separated internal name (no leading L / trailing ;), possibly nested
+		// (Outer$Inner). It must carry a package ('/') for a cross-package clash to be possible.
+		if binary == "" || !strings.Contains(binary, "/") {
+			return
+		}
+		dotted := strings.ReplaceAll(binary, "/", ".")
+		pkg, simple := class_context.SplitPackageClassName(dotted)
+		if simple == "" {
+			return
+		}
+		simple = class_context.SafeIdentifier(simple)
+		m := pkgsBySimple[simple]
+		if m == nil {
+			m = map[string]struct{}{}
+			pkgsBySimple[simple] = m
+		}
+		m[pkg] = struct{}{}
+	}
+	// (1) CONSTANT_Class entries (new/checkcast/instanceof/method+field owners), stripping any array
+	// descriptor prefix. (2) EVERY Utf8 entry: method/field descriptors and generic Signatures embed
+	// referenced types as `L<binary-name>;` (or `L<binary-name><...>` in a signature), and a
+	// same-package type used ONLY as a method return/parameter (e.g. the return type of an inherited
+	// or cross-class method) appears there but NOT as a CONSTANT_Class -- the fastjson2 FieldWriter
+	// clash is exactly this shape. Scanning both is a superset; over-inclusion only ever FQ-qualifies a
+	// same-package name that also genuinely occurs in another package, which is always legal Java.
+	for _, ci := range c.obj.ConstantPool {
+		switch e := ci.(type) {
+		case *ConstantClassInfo:
+			u := c.obj.ConstantPoolManager.GetUtf8(int(e.NameIndex))
+			if u == nil {
+				continue
+			}
+			bin := u.Value
+			for strings.HasPrefix(bin, "[") {
+				bin = bin[1:]
+			}
+			if strings.HasPrefix(bin, "L") && strings.HasSuffix(bin, ";") {
+				bin = bin[1 : len(bin)-1]
+			}
+			if strings.ContainsAny(bin, "[;<") {
+				continue
+			}
+			record(bin)
+		case *ConstantUtf8Info:
+			for _, name := range extractDescriptorClassNames(e.Value) {
+				record(name)
+			}
+		}
+	}
+	out := map[string]bool{}
+	for simple, pkgs := range pkgsBySimple {
+		if _, hasOwn := pkgs[c.PackageName]; !hasOwn {
+			continue
+		}
+		for p := range pkgs {
+			if p != c.PackageName && p != "" {
+				out[simple] = true
+				break
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// accessFlagsVerbose := c.obj.AccessFlagsVerbose
 	accessFlagsToCode := c.obj.AccessFlagsToCode
@@ -271,6 +390,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		PackageName:     c.PackageName,
 	}
 	c.FuncCtx = funcCtx
+	// Precompute the same-package simple names that must be rendered fully-qualified because the class
+	// also references a different-package type of the same simple name (whose import would shadow the
+	// same-package one). Constant-pool based, so it is independent of body render order. See
+	// ClassContext.SamePkgFQNames. Kill-switch: JDEC_SAMEPKG_FQ_OFF=1.
+	funcCtx.SamePkgFQNames = c.computeSamePkgFQNames()
 	buildInLib := []string{
 		//c.PackageName + ".*",
 		c.ClassName,
@@ -487,6 +611,20 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 			classTypeParams = "<" + strings.Join(decls, ", ") + ">"
 			classTypeParamNames = free
+			// Expose the injected vars' recovered bounds so renderers can tell an unbounded injected `<E>`
+			// (safe for an unchecked `X<Object>` -> `X<E>` return cast) from a bounded `<C extends Comparable>`
+			// (for which that cast is inconvertible). Only non-Object bounds are present, mirroring the header.
+			if c.FuncCtx != nil {
+				injected := map[string]string{}
+				for _, n := range free {
+					if clause, ok := bounds[n]; ok && clause != "" {
+						injected[n] = clause
+					}
+				}
+				if len(injected) > 0 {
+					c.FuncCtx.InjectedTypeParamBounds = injected
+				}
+			}
 		}
 	}
 	// RAW-ERASE SET (mirror image of the enclosing-arity injection above, for the case it explicitly
@@ -603,6 +741,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// collide on (name, arity) are dropped (set to "") so a call never picks the wrong signature.
 		methodSignatures := map[string]string{}
 		methodSigSeen := map[string]bool{}
+		// Descriptor-keyed companion: (name, EXACT descriptor) is unique in the JVM, so unlike the
+		// arity-keyed map it keeps same-arity overloads that the arity path must drop as ambiguous, letting
+		// a same-class call recover its erased argument cast via its exact descriptor. Kill-switch
+		// JDEC_SAMECLASS_DESC_SIG_OFF disables population (so the consumer degrades to the arity path).
+		methodSignaturesByDesc := map[string]string{}
+		recordByDesc := os.Getenv("JDEC_SAMECLASS_DESC_SIG_OFF") == ""
 		for _, m := range c.obj.Methods {
 			name, err := c.obj.getUtf8(m.NameIndex)
 			// <init>/<clinit> are NOT recorded: a non-static inner class's constructor Signature OMITS the
@@ -626,6 +770,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				if err != nil || sigStr == "" || !strings.HasPrefix(sigStr, "(") && !strings.HasPrefix(sigStr, "<") {
 					continue
 				}
+				if recordByDesc {
+					// (name, descriptor) is unique -- no collision handling needed.
+					methodSignaturesByDesc[class_context.MethodDescKey(name, descriptor)] = sigStr
+				}
 				key := class_context.MethodSigKey(name, len(methodParamFieldDescriptors(descriptor)))
 				if methodSigSeen[key] {
 					// (name, arity) collision: ambiguous, drop so no call resolves it.
@@ -635,6 +783,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				methodSigSeen[key] = true
 				methodSignatures[key] = sigStr
 			}
+		}
+		if len(methodSignaturesByDesc) > 0 {
+			c.FuncCtx.MethodSignaturesByDesc = methodSignaturesByDesc
 		}
 		// Augment with DIRECT-supertype (inherited) generic method signatures so a `this.m(objVal)`
 		// call to an inherited generic method recovers its erased `(K)` argument cast too. Same-class
@@ -702,6 +853,8 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		c.FuncCtx.ClassSig = classSigStr
 		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
 		c.FuncCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
+		c.FuncCtx.SiblingCtorSig = c.buildSiblingCtorSig()
+		c.FuncCtx.SiblingFieldSig = c.buildSiblingFieldSig()
 	}
 	packageSource := fmt.Sprintf("package %s;\n\n", packageName)
 	if className == "" {
@@ -1376,9 +1529,17 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 				if err != nil || sigStr == "" || (!strings.HasPrefix(sigStr, "(") && !strings.HasPrefix(sigStr, "<")) {
 					continue
 				}
+				// Descriptor-keyed entry: UNIQUE per overload, so it survives the arity-key
+				// collision drop below and lets an exact-overload lookup (by the call's descriptor)
+				// recover the right Signature. Canonical need: SortedLists.binarySearch has two
+				// 5-arg overloads (`(List,E,KPB,KAB)` erasure-collides with `(List,Function,K,KPB,KAB)`)
+				// whose shared arity key is dropped, leaving calleeParamIsErasedTypeVar unable to see
+				// that the 3rd formal is the type variable K -> the spurious `(Comparable)` cast that
+				// breaks binarySearch's K inference (guava ImmutableRangeMap/ImmutableRangeSet).
+				methodSigs[class_context.MethodDescKey(name, descriptor)] = sigStr
 				key := class_context.MethodSigKey(name, len(methodParamFieldDescriptors(descriptor)))
 				if methodSeen[key] {
-					// (name, arity) collision (overload): ambiguous, drop so no call binds it.
+					// (name, arity) collision (overload): ambiguous, drop so no arity-keyed call binds it.
 					delete(methodSigs, key)
 					continue
 				}
@@ -1389,6 +1550,141 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 		e.methodSigs = methodSigs
 		e.ok = true
 		return e.classSig, e.methodSigs, true
+	}
+}
+
+// buildSiblingCtorSig returns a lazy, cached provider of a jar-internal class's CONSTRUCTOR generic
+// Signature keyed by DESCRIPTOR argument count. It complements buildSiblingClassSig (which deliberately
+// skips <init>): a `super(...)` call needs the superclass ctor's parameter types WITH type variables
+// (e.g. `(BaseGraph<TN;>;TN;)V`) to know which arguments feed a bare type-variable parameter, so the
+// erased `(N)` cast can be re-emitted. Only ctors whose Signature parameter count EQUALS the descriptor
+// parameter count are recorded (a non-static inner class's ctor Signature omits the synthetic leading
+// this$0, so a count mismatch would mis-index; skip it). Overloads colliding on argument count are
+// dropped. Returns nil when no cross-class resolver is available (single-class decompile).
+func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc int) (string, bool) {
+	if c.foldSiblingResolver == nil {
+		return nil
+	}
+	type entry struct {
+		ctorSigs map[int]string
+		ok       bool
+	}
+	cache := map[string]*entry{}
+	resolver := c.foldSiblingResolver
+	return func(internal string, argc int) (string, bool) {
+		e, hit := cache[internal]
+		if !hit {
+			e = &entry{}
+			cache[internal] = e
+			data, ok := resolver(internal)
+			if ok && len(data) > 0 {
+				if sObj, err := Parse(data); err == nil {
+					ctorSigs := map[int]string{}
+					seen := map[int]bool{}
+					for _, m := range sObj.Methods {
+						name, err := sObj.getUtf8(m.NameIndex)
+						if err != nil || name != "<init>" {
+							continue
+						}
+						descriptor, err := sObj.getUtf8(m.DescriptorIndex)
+						if err != nil || descriptor == "" {
+							continue
+						}
+						descArgc := len(methodParamFieldDescriptors(descriptor))
+						for _, attr := range m.Attributes {
+							sigAttr, ok := attr.(*SignatureAttribute)
+							if !ok {
+								continue
+							}
+							sigStr, err := sObj.getUtf8(sigAttr.SignatureIndex)
+							if err != nil || sigStr == "" || !strings.HasPrefix(sigStr, "(") {
+								continue
+							}
+							// Offset safety: a non-static inner class's ctor Signature omits the synthetic
+							// leading this$0/outer-capture params, so its param count is smaller than the
+							// descriptor's. Only record when they match, so the index used by the caller
+							// (which indexes descriptor arguments) lines up with the Signature params.
+							sigParams, _ := types.ParseMethodSignature(sigStr)
+							if len(sigParams) != descArgc {
+								continue
+							}
+							if seen[descArgc] {
+								delete(ctorSigs, descArgc)
+								continue
+							}
+							seen[descArgc] = true
+							ctorSigs[descArgc] = sigStr
+						}
+					}
+					e.ctorSigs = ctorSigs
+					e.ok = true
+				}
+			}
+		}
+		if !e.ok || e.ctorSigs == nil {
+			return "", false
+		}
+		sig, ok := e.ctorSigs[argc]
+		return sig, ok
+	}
+}
+
+// buildSiblingFieldSig returns a lazy, cached provider of a jar-internal class's FIELD generic Signature
+// keyed by field name. It complements buildSiblingClassSig (which carries only class + method
+// Signatures): an INHERITED parameterized field's Signature lives in a superclass, absent from the
+// current class's FieldSignatures, so `this.<inheritedField>.m(...)` loses the receiver's type
+// arguments. Exposing per-class field Signatures lets types.ResolveInstantiatedFieldType walk the
+// hierarchy and recover the instantiated field type (guava RegularContiguousSet `this.domain` ->
+// `DiscreteDomain<C>`). Only fields carrying a Signature attribute (generic fields) are recorded; a
+// plain-descriptor field yields ok=false (nothing to recover). Returns nil when no cross-class resolver
+// is available (single-class decompile). A nil/empty cache entry records a confirmed miss.
+func (c *ClassObjectDumper) buildSiblingFieldSig() func(internalName, fieldName string) (string, bool) {
+	if c.foldSiblingResolver == nil {
+		return nil
+	}
+	type entry struct {
+		fieldSigs map[string]string
+		ok        bool
+	}
+	cache := map[string]*entry{}
+	resolver := c.foldSiblingResolver
+	return func(internal, fieldName string) (string, bool) {
+		e, hit := cache[internal]
+		if !hit {
+			e = &entry{}
+			cache[internal] = e
+			data, ok := resolver(internal)
+			if ok && len(data) > 0 {
+				if sObj, err := Parse(data); err == nil {
+					fieldSigs := map[string]string{}
+					for _, fld := range sObj.Fields {
+						name, err := sObj.getUtf8(fld.NameIndex)
+						if err != nil || name == "" {
+							continue
+						}
+						for _, attr := range fld.Attributes {
+							sigAttr, ok := attr.(*SignatureAttribute)
+							if !ok {
+								continue
+							}
+							sigStr, err := sObj.getUtf8(sigAttr.SignatureIndex)
+							if err != nil || sigStr == "" {
+								continue
+							}
+							fieldSigs[name] = sigStr
+							break
+						}
+					}
+					e.fieldSigs = fieldSigs
+					e.ok = true
+				}
+			}
+		}
+		if !e.ok || e.fieldSigs == nil {
+			return "", false
+		}
+		sig, ok := e.fieldSigs[fieldName]
+		return sig, ok
 	}
 }
 
@@ -1546,7 +1842,15 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 			valStr = strings.Replace(fallback, "/", ".", -1) + ".class"
 		} else {
 			typeStr := classTyp.String(c.FuncCtx)
-			if !classTyp.IsArray() {
+			// A PRIMITIVE class literal (void.class / int.class / boolean.class ...) must render the
+			// raw keyword: it is never imported and must NOT pass through ShortTypeName -> SafeIdentifier,
+			// which appends '_' to every Java keyword ("void" -> "void_"), emitting the uncompilable
+			// `void_.class` (real: fastjson2 @JSONType `builder() default void.class`). Only reference
+			// (class) types get imported/short-named. Array types already bypass this branch below.
+			// Kill-switch: JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF restores the old (broken) path.
+			_, isPrimitive := classTyp.RawType().(*types.JavaPrimer)
+			primitiveClassLit := isPrimitive && os.Getenv("JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF") == ""
+			if !classTyp.IsArray() && !primitiveClassLit {
 				c.FuncCtx.Import(typeStr)
 				typeStr = c.FuncCtx.ShortTypeName(typeStr)
 			}
@@ -1687,7 +1991,13 @@ func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, e
 				valStr = strings.Replace(fallback, "/", ".", -1) + ".class"
 			} else {
 				typeStr := classTyp.String(c.FuncCtx)
-				if !classTyp.IsArray() {
+				// A PRIMITIVE class literal (void.class / int.class ...) must render the raw keyword:
+				// it is never imported and must NOT go through ShortTypeName -> SafeIdentifier, which
+				// mangles keywords ("void" -> "void_") into the uncompilable `void_.class`. See the
+				// twin branch in formatAnnotationElementValue. Kill-switch: JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF.
+				_, isPrimitive := classTyp.RawType().(*types.JavaPrimer)
+				primitiveClassLit := isPrimitive && os.Getenv("JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF") == ""
+				if !classTyp.IsArray() && !primitiveClassLit {
 					c.FuncCtx.Import(typeStr)
 					typeStr = c.FuncCtx.ShortTypeName(typeStr)
 				}
@@ -2055,9 +2365,11 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	// then emits the `<T>` declaration before the return type. Kill-switch: JDEC_METHOD_TYPEPARAMS_OFF.
 	methodTypeParams := ""
 	var methodTypeParamNames []string
+	var methodSigStr string
 	for _, attr := range method.Attributes {
 		if sigAttr, ok := attr.(*SignatureAttribute); ok {
 			if sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex); err == nil && sigStr != "" {
+				methodSigStr = sigStr
 				tps, sigParams, sigRet := types.ParseMethodSignatureFull(sigStr, c.FuncCtx)
 				// Gate on sigRet (not sigParams): a zero-arg generic method like
 				// `()TK;` (Map.Entry.getKey) parses to (nil params, K return). The old
@@ -2078,6 +2390,21 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						if sigParams != nil {
 							mt.ParamTypes = sigParams
 						}
+						mt.ReturnType = sigRet
+					} else if name == "<init>" && os.Getenv("JDEC_INNER_CTOR_SIG_ALIGN_OFF") == "" &&
+						len(sigParams) == len(mt.ParamTypes)-1 && len(mt.ParamTypes) >= 1 &&
+						c.hasOuterThisField() {
+						// Non-static inner class constructor: javac OMITS the synthetic leading this$0
+						// parameter from the ctor Signature, so its param count is exactly one less than
+						// the descriptor's. Align the Signature params to the TRAILING descriptor params,
+						// keeping the erased outer-instance param[0], and lift the generic types onto
+						// params[1:]. Recovers e.g. guava TreeTraverser$PreOrderIterator(TreeTraverser, T)
+						// whose real param was erased to Object, so `singletonIterator(checkNotNull(v))`
+						// now infers `Iterator<T>` for the `Deque<Iterator<T>>` field. Behaviour-preserving
+						// (descriptor unchanged). Kill-switch JDEC_INNER_CTOR_SIG_ALIGN_OFF.
+						aligned := slices.Clone(mt.ParamTypes)
+						copy(aligned[1:], sigParams)
+						mt.ParamTypes = aligned
 						mt.ReturnType = sigRet
 					}
 				}
@@ -2109,6 +2436,15 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 		savedTypeParams := c.FuncCtx.TypeParams
 		c.FuncCtx.TypeParams = append(slices.Clone(savedTypeParams), methodTypeParamNames...)
 		defer func() { c.FuncCtx.TypeParams = savedTypeParams }()
+	}
+	// Record the current method's raw generic Signature so renderers can recover a receiver whose static
+	// type is a bare method-scope type variable with a parameterized bound (`C var1` where
+	// `<C extends Collection<? super E>>`). Set on entry, restored on exit so it never leaks into sibling
+	// members. Kill-switch JDEC_TYPEVAR_BOUND_RECV_OFF (the consumer that reads it).
+	if c.FuncCtx != nil && os.Getenv("JDEC_TYPEVAR_BOUND_RECV_OFF") == "" {
+		savedMethodSig := c.FuncCtx.CurrentMethodSig
+		c.FuncCtx.CurrentMethodSig = methodSigStr
+		defer func() { c.FuncCtx.CurrentMethodSig = savedMethodSig }()
 	}
 	c.MethodType = methodType.FunctionType()
 	returnTypeStr := methodType.FunctionType().ReturnType.String(c.FuncCtx)
@@ -3121,6 +3457,30 @@ func addMissingGeneratedLocalDecls(body, params, receiverType string, methodRetu
 	// parameter slot names declared directly so wildcard-typed parameters are never re-declared.
 	for _, name := range generatedLocalRefRe.FindAllString(params, -1) {
 		declared[name] = true
+	}
+	// generatedLocalDeclRe's type token forbids spaces, so a declaration whose type is a
+	// multi-argument / wildcard generic (`Foo<K, V, ? extends Bar<K, V, ?>> var4 = ...`) is NOT
+	// recognized: the run immediately before `var4` is `?>>`, which does not start with an identifier
+	// char, and no earlier start can bridge the internal spaces. The local then looks undeclared and a
+	// bogus `Object var4 = null;` is injected that duplicates the real declaration (javac "variable
+	// var4 is already defined"; guava MapMakerInternalMap$StrongKeyWeakValueSegment /
+	// $WeakKeyWeakValueSegment.setWeakValueReferenceForTesting, whose second parameter type is
+	// `WeakValueReference<K, V, ? extends InternalEntry<K, V, ?>>`). castEscapeDeclLineRe is the
+	// space-tolerant, line-anchored declaration matcher already used by the escaped-local hoisters;
+	// scan each rendered line with it (skipping keyword-led pseudo-types like `return varN;`) so such
+	// generic declarations are recognized. This is purely additive to `declared`: it can only SUPPRESS
+	// a bogus phantom, never inject one. Kill-switch: JDEC_GENERIC_DECL_DETECT_OFF=1.
+	if os.Getenv("JDEC_GENERIC_DECL_DETECT_OFF") == "" {
+		for _, ln := range strings.Split(body, "\n") {
+			m := castEscapeDeclLineRe.FindStringSubmatch(ln)
+			if m == nil {
+				continue
+			}
+			if castEscapeTypeKeywords[castEscapeFirstToken(m[2])] {
+				continue
+			}
+			declared[m[3]] = true
+		}
 	}
 	missing := []string{}
 	seen := map[string]bool{}
@@ -4166,9 +4526,43 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 	isAbstract := slices.Contains(accessFlagsVerbose, "abstract") || slices.Contains(accessFlagsVerbose, "native")
 	isInterface := slices.Contains(c.obj.AccessFlagsVerbose, "interface")
 
+	// Prefer the generic Signature attribute's parameter/return types over the erased descriptor: a stub
+	// built from the raw descriptor loses `<...>`, which can break OVERLOAD SPECIFICITY at the stub's call
+	// sites (guava Joiner `appendTo(StringBuilder, Iterator)` erased vs `appendTo(A, Iterator<?>)` ->
+	// "reference to appendTo is ambiguous"). Gated: only when the method declares NO formal type parameters
+	// of its own (sig starts with '(' -- a leading `<...>` would reference method-scope vars this stub does
+	// not declare) and the sig parameter count matches the descriptor (offset-safe). Class-scope type vars
+	// referenced by the generic types are always in scope for the stub. Kill-switch JDEC_STUB_GENERIC_SIG_OFF.
+	paramTypesForRender := ft.ParamTypes
+	returnTypeForRender := ft.ReturnType
+	if os.Getenv("JDEC_STUB_GENERIC_SIG_OFF") == "" {
+		for _, attr := range method.Attributes {
+			sigAttr, ok := attr.(*SignatureAttribute)
+			if !ok {
+				continue
+			}
+			if sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex); err == nil && strings.HasPrefix(sigStr, "(") {
+				if _, sigParams, sigRet := types.ParseMethodSignatureFull(sigStr, funcCtx); sigRet != nil && len(sigParams) == len(ft.ParamTypes) {
+					allNonNil := true
+					for _, sp := range sigParams {
+						if sp == nil {
+							allNonNil = false
+							break
+						}
+					}
+					if allNonNil {
+						paramTypesForRender = sigParams
+						returnTypeForRender = sigRet
+					}
+				}
+			}
+			break
+		}
+	}
+
 	paramList := []string{}
-	for idx, pt := range ft.ParamTypes {
-		if isVarArgs && idx == len(ft.ParamTypes)-1 && pt.IsArray() {
+	for idx, pt := range paramTypesForRender {
+		if isVarArgs && idx == len(paramTypesForRender)-1 && pt.IsArray() {
 			paramList = append(paramList, fmt.Sprintf("%s... var%d", pt.ElementType().String(funcCtx), idx))
 		} else {
 			paramList = append(paramList, fmt.Sprintf("%s var%d", pt.String(funcCtx), idx))
@@ -4202,9 +4596,9 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 		src = fmt.Sprintf("%s%s(%s)%s", prefix, c.GetConstructorMethodName(), paramsStr, throwBody)
 	default:
 		if isAbstract {
-			src = fmt.Sprintf("%s%s %s(%s);", prefix, ft.ReturnType.String(funcCtx), name, paramsStr)
+			src = fmt.Sprintf("%s%s %s(%s);", prefix, returnTypeForRender.String(funcCtx), name, paramsStr)
 		} else {
-			src = fmt.Sprintf("%s%s %s(%s)%s", prefix, ft.ReturnType.String(funcCtx), name, paramsStr, throwBody)
+			src = fmt.Sprintf("%s%s %s(%s)%s", prefix, returnTypeForRender.String(funcCtx), name, paramsStr, throwBody)
 		}
 	}
 	return &dumpedMethods{methodName: name, code: src, bodyCode: "stub"}
@@ -4405,6 +4799,20 @@ func (c *ClassObjectDumper) isSyntheticAccessBridgeCtor(descriptor string, acces
 		}
 	}
 	return true
+}
+
+// hasOuterThisField reports whether the class carries a synthetic enclosing-instance field `this$0`,
+// which javac emits for every non-static inner (member/local/anonymous) class. Its presence identifies
+// a class whose constructor's synthetic FIRST parameter is the outer instance -- and whose generic
+// Signature attribute OMITS that leading parameter, so the Signature param list aligns to the TRAILING
+// descriptor parameters. Used to safely lift generic constructor param types onto the erased descriptor.
+func (c *ClassObjectDumper) hasOuterThisField() bool {
+	for _, f := range c.obj.Fields {
+		if n, err := c.obj.getUtf8(f.NameIndex); err == nil && n == "this$0" {
+			return true
+		}
+	}
+	return false
 }
 
 // reTypeSyntheticBridgeCtorParams replaces a synthetic access-bridge constructor's erased parameter

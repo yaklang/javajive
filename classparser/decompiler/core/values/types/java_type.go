@@ -146,3 +146,22 @@ func (j *JavaWildcardType) String(funcCtx *class_context.ClassContext) string {
 	}
 	return fmt.Sprintf("? %s %s", j.Variant, j.Bound.String(funcCtx))
 }
+
+// A wildcard type argument is frequently stored RAW (unwrapped) in JavaParameterizedType.TypeArgs
+// (see parseSigType). Because JavaWildcardType embeds a nil JavaType, every JavaType-interface method
+// would otherwise be promoted from that nil interface and panic (nil pointer dereference) the moment a
+// caller treats a type arg uniformly -- e.g. AsParameterizedType's `t.IsArray()` or a generic
+// resolver's `t.RawType()`. Implement the interface directly with wildcard-appropriate semantics so no
+// call site (current or future) can panic; the dynamic type stays *JavaWildcardType so existing
+// `x.(*JavaWildcardType)` assertions keep matching.
+func (j *JavaWildcardType) IsArray() bool               { return false }
+func (j *JavaWildcardType) ElementType() JavaType       { return nil }
+func (j *JavaWildcardType) ArrayDim() int               { return 0 }
+func (j *JavaWildcardType) FunctionType() *JavaFuncType { return nil }
+func (j *JavaWildcardType) RawType() javaType           { return j }
+func (j *JavaWildcardType) Copy() JavaType {
+	return &JavaWildcardType{Variant: j.Variant, Bound: j.Bound}
+}
+func (j *JavaWildcardType) GetJavaTypeRef() *javaTypeRef { return nil }
+func (j *JavaWildcardType) ResetType(t JavaType)         {}
+func (j *JavaWildcardType) ResetTypeRef(t JavaType)      {}

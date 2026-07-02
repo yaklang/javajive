@@ -1,0 +1,10 @@
+# Primitive class literals in annotation defaults must render the raw keyword (void.class / int.class /
+# boolean.class), never the SafeIdentifier-mangled void_.class / int_.class. Reference types
+# (String.class) are unaffected either way. Real hit: fastjson2 @JSONType `builder() default void.class`.
++default void.class
++default int.class
++default boolean.class
++default String.class
+-void_.class
+-int_.class
+-boolean_.class

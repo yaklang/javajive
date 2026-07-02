@@ -2368,11 +2368,27 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(exp)
 	case OP_ARRAYLENGTH:
 		ref := runtimeStackSimulation.Pop().(values.JavaValue)
+		arrayLenReplace := func(oldId *utils2.VariableId, newId *utils2.VariableId) {
+			// The `.length` operand is captured in this CustomValue's String closure, so -- exactly
+			// like OP_CHECKCAST / OP_INSTANCEOF / the numeric-conversion CustomValues -- it MUST forward
+			// ReplaceVar to the captured operand. Without this, a later identity rebind of the operand's
+			// variable (rewriteVar minting a fresh id for a slot's disjoint reuse and ReplaceVar-ing
+			// every use, or the whole-method orphan rebind) never reaches the operand, so the rendered
+			// `varN.length` keeps a STALE id that collides with a DIFFERENT same-slot variable. fastjson2
+			// ObjectReaderProvider.getObjectReaderInternal: `getActualTypeArguments()` (slot 6, Type[])
+			// and `getRawType()` (slot 5, Type) both trace-named the same id; the array's read inside the
+			// `.length` closure kept the pre-split id and rendered `var6.length` (a Type) -> "cannot find
+			// symbol: variable length". Kill-switch JDEC_ARRAYLENGTH_REPLACE_FWD_OFF.
+			if os.Getenv("JDEC_ARRAYLENGTH_REPLACE_FWD_OFF") != "" {
+				return
+			}
+			ref.ReplaceVar(oldId, newId)
+		}
 		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 			return fmt.Sprintf("%s.length", ref.String(funcCtx))
 		}, func() types.JavaType {
 			return types.NewJavaPrimer(types.JavaInteger)
-		}))
+		}, arrayLenReplace))
 	case OP_AALOAD, OP_IALOAD, OP_BALOAD, OP_CALOAD, OP_FALOAD, OP_LALOAD, OP_DALOAD, OP_SALOAD:
 		index := runtimeStackSimulation.Pop().(values.JavaValue)
 		ref := runtimeStackSimulation.Pop().(values.JavaValue)

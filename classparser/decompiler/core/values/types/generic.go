@@ -119,6 +119,31 @@ var jdkIteratorFamily = map[string]bool{
 	"java.util.ListIterator": true,
 }
 
+// jdkListFamily are the JDK List<E> types that declare the index-addressed 2-arg mutators
+// set(int, E) / add(int, E). Restricted to List (and its concrete impls): Set/Queue/Deque never
+// declare a 2-arg set/add, so this gate keeps the element-type-arg resolution provably List-scoped.
+var jdkListFamily = map[string]bool{
+	"java.util.List":                            true,
+	"java.util.AbstractList":                    true,
+	"java.util.AbstractSequentialList":          true,
+	"java.util.ArrayList":                       true,
+	"java.util.LinkedList":                      true,
+	"java.util.Vector":                          true,
+	"java.util.Stack":                           true,
+	"java.util.concurrent.CopyOnWriteArrayList": true,
+}
+
+// jdkDequeFamily are the JDK Deque<E> types that declare the head/tail single-element insertion methods
+// addFirst/addLast/offerFirst/offerLast/push(E) -- each taking the receiver's E (type arg 0). Queue's
+// add/offer(E) are handled by the jdkIterableFamily gate.
+var jdkDequeFamily = map[string]bool{
+	"java.util.Deque":                            true,
+	"java.util.ArrayDeque":                       true,
+	"java.util.LinkedList":                       true,
+	"java.util.concurrent.ConcurrentLinkedDeque": true,
+	"java.util.concurrent.LinkedBlockingDeque":   true,
+}
+
 // isWildcardType reports whether t is a wildcard type argument (`?`, `? extends X`, `? super X`).
 // Instantiation skips wildcard receivers: capture-of semantics make the substituted return type
 // (e.g. Iterator<? extends X>.next() yields a capture, not a nameable type) unsafe to render.
@@ -140,6 +165,21 @@ func isWildcardType(t JavaType) bool {
 	}
 	_, ok := raw.(*JavaWildcardType)
 	return ok
+}
+
+// IsJDKIterableFamily reports whether name is a JDK single-type-parameter Iterable<E> subtype (the
+// exported view of jdkIterableFamily), used by the wildcard-receiver raw-cast heuristic to restrict the
+// Collection<E>.add/offer(E) case to genuine JDK collections.
+func IsJDKIterableFamily(name string) bool {
+	return jdkIterableFamily[name]
+}
+
+// IsWildcardType is the exported form of isWildcardType: it reports whether t is a wildcard type
+// argument (`?`, `? extends X`, `? super X`) using the panic-safe assertion order documented on
+// isWildcardType. Callers outside this package (e.g. the comparator raw-cast heuristics) use it to
+// detect a capture-inducing wildcard receiver.
+func IsWildcardType(t JavaType) bool {
+	return isWildcardType(t)
 }
 
 // lowerBoundedWildcard unwraps t to its *JavaWildcardType iff t is a lower-bounded `? super X` wildcard
@@ -208,6 +248,18 @@ var jdkMapFamily = map[string]bool{
 	"java.util.concurrent.ConcurrentHashMap": true,
 }
 
+// jdkSortedMapFamily are the JDK sorted/navigable Map<K,V> types that additionally declare KEY-typed
+// navigation methods (headMap/tailMap/subMap(K...), floorKey/ceilingKey/higherKey/lowerKey(K),
+// floor/ceiling/higher/lowerEntry(K)). Their key parameters are the receiver's K (type arg 0); the
+// value-returning `get`/`remove`/`containsKey` take Object BY DESIGN and are deliberately excluded.
+var jdkSortedMapFamily = map[string]bool{
+	"java.util.SortedMap":                         true,
+	"java.util.NavigableMap":                      true,
+	"java.util.TreeMap":                           true,
+	"java.util.concurrent.ConcurrentNavigableMap": true,
+	"java.util.concurrent.ConcurrentSkipListMap":  true,
+}
+
 // jdkMethodParamTypeArgIndex returns, for a small provably-correct set of JDK generic methods, the
 // receiver type-argument index that the parameter at paramIndex resolves to, or -1 when that
 // parameter is NOT a receiver type variable (a fixed Object/int position such as Map.get(Object),
@@ -269,8 +321,57 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 			return paramIndex
 		}
 	}
+	// SortedMap/NavigableMap<K,V> navigation methods whose KEY parameter positions are the receiver's K
+	// (type arg 0). The descriptor erases K to Object, so an Object-typed key argument is passed without
+	// the source's `(K)` cast and javac -- re-resolving against e.g. headMap(K) -- rejects it ("Object
+	// cannot be converted to K"; guava Maps$FilteredEntrySortedMap.lastKey `sortedMap().headMap(objKey)`).
+	// Only KEY positions resolve to K; NavigableMap's boolean inclusivity flags and the value-typed
+	// get/remove/containsKey(Object) are left as fixed (fall through to -1). Kill-switch
+	// JDEC_SORTED_MAP_KEY_PARAM_OFF.
+	if jdkSortedMapFamily[rawClass] && ntype == 2 && os.Getenv("JDEC_SORTED_MAP_KEY_PARAM_OFF") == "" {
+		switch method {
+		case "headMap", "tailMap":
+			// SortedMap.headMap(K) [argc 1]; NavigableMap.headMap(K, boolean) [argc 2, only param0=K].
+			if paramIndex == 0 && (argc == 1 || argc == 2) {
+				return 0
+			}
+		case "subMap":
+			// SortedMap.subMap(K, K) [argc 2: both K]; NavigableMap.subMap(K, boolean, K, boolean)
+			// [argc 4: params 0 and 2 = K].
+			if argc == 2 && (paramIndex == 0 || paramIndex == 1) {
+				return 0
+			}
+			if argc == 4 && (paramIndex == 0 || paramIndex == 2) {
+				return 0
+			}
+		case "floorKey", "ceilingKey", "higherKey", "lowerKey",
+			"floorEntry", "ceilingEntry", "higherEntry", "lowerEntry":
+			// NavigableMap key-lookup methods: single K argument.
+			if argc == 1 && paramIndex == 0 {
+				return 0
+			}
+		}
+	}
 	// Collection<E>.add/offer(E): a single type-arg element parameter.
 	if (method == "add" || method == "offer") && argc == 1 && ntype == 1 && paramIndex == 0 && jdkIterableFamily[rawClass] {
+		return 0
+	}
+	// Deque<E>.addFirst/addLast/offerFirst/offerLast/push(E): a single type-arg element parameter (the
+	// descriptor erases E to its bound, so an Object-typed value flows in without the source's `(E)` cast;
+	// guava Iterators$ConcatenatedIterator `this.metaIterators.addFirst(rawDeque.removeLast())`).
+	if (method == "addFirst" || method == "addLast" || method == "offerFirst" || method == "offerLast" || method == "push") &&
+		argc == 1 && ntype == 1 && paramIndex == 0 && jdkDequeFamily[rawClass] && os.Getenv("JDEC_DEQUE_PARAM_OFF") == "" {
+		return 0
+	}
+	// List<E>.set(int, E) / add(int, E): the SECOND parameter is the element type arg (the first is the
+	// int index). The descriptor erases the element to Object, so an Object-typed value (e.g. a
+	// `List<T>.get(i)` result the decompiler declared as Object) is passed without the source's `(E)`
+	// cast and javac -- re-resolving against set(int, E) -- rejects it ("Object cannot be converted to
+	// T"; guava Iterables.removeIfFromRandomAccessList `var0.set(var3, var4)`, var0=`List<T>`). Gated to
+	// the List sub-family: only List declares 2-arg set/add(int, E); Set/Queue/Deque never do, so a
+	// same-named 2-arg call on them cannot exist in verified bytecode, but the family gate keeps it
+	// provably scoped.
+	if (method == "set" || method == "add") && argc == 2 && ntype == 1 && paramIndex == 1 && jdkListFamily[rawClass] && os.Getenv("JDEC_LIST_SET_PARAM_OFF") == "" {
 		return 0
 	}
 	return -1
@@ -906,6 +1007,61 @@ func ParseMethodSignatureFull(sig string, funcCtx *class_context.ClassContext) (
 	return typeParams, params, ret
 }
 
+// FormalTypeParamBounds parses the leading formal type-parameter section of a class or method Signature
+// ("<C::Ljava/util/Collection<-TE;>;M::L.../Multimap<TK;TV;>;>...") and returns, for each type variable,
+// the FIRST bound that is a PARAMETERIZED type (has type arguments). Type variables whose bounds are all
+// bare classes / Object are omitted (a bare bound carries no receiver type args to recover). Used to
+// recover a receiver whose static type is a bare type variable (`C var1`) but whose bound is a
+// parameterized container (`Collection<? super E>`), so downstream receiver/param resolution can see the
+// element type (guava FluentIterable.copyInto, Multimaps.invertFrom). Returns nil when there is no
+// leading section, on any parse failure, or when no type variable has a parameterized bound.
+func FormalTypeParamBounds(sig string) map[string]JavaType {
+	if len(sig) == 0 || sig[0] != '<' {
+		return nil
+	}
+	rest := sig[1:]
+	out := map[string]JavaType{}
+	for len(rest) > 0 && rest[0] != '>' {
+		colonIdx := strings.IndexByte(rest, ':')
+		if colonIdx < 0 {
+			return nil
+		}
+		name := rest[:colonIdx]
+		rest = rest[colonIdx:]
+		var firstParam JavaType
+		for len(rest) > 0 && rest[0] == ':' {
+			rest = rest[1:]
+			// An empty class-bound (`::`, or `:` immediately before `>`) means the class bound is Object;
+			// skip it and keep reading the interface bounds.
+			if len(rest) > 0 && (rest[0] == ':' || rest[0] == '>') {
+				continue
+			}
+			boundType, remaining, ok := parseSigType(rest)
+			if !ok {
+				return nil
+			}
+			rest = remaining
+			// Keep parsing every bound (to advance `rest` correctly) but capture only the FIRST that is
+			// parameterized -- that is the container whose type args we can substitute at the call site.
+			if firstParam == nil {
+				if _, isPt := AsParameterizedType(boundType); isPt {
+					firstParam = boundType
+				}
+			}
+		}
+		if firstParam != nil {
+			out[name] = firstParam
+		}
+	}
+	if len(rest) == 0 || rest[0] != '>' {
+		return nil
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // MethodFormalTypeParamNames returns the bare names declared in a method signature's leading formal
 // type-parameter section, e.g. "<T:Ljava/lang/Object;>(TT;)TT;" -> ["T"]. Returns nil when there is
 // no leading "<...>" section. The grammar of a method's formal type-parameter section is identical to
@@ -1070,6 +1226,222 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 			childArgs[i] = SubstituteTypeVars(ta, sigma)
 		}
 		if t := resolveParamWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, paramIndex, visited); t != nil {
+			return t
+		}
+	}
+	return nil
+}
+
+// ResolveInstantiatedReturnType resolves the generic RETURN type of a call `recv.method(...)` where the
+// receiver's static type is `recvRaw<recvArgs>`, by walking the receiver's supertype hierarchy (via
+// provider) to the most-derived declaration of (method, argc) and substituting the receiver's actual
+// type arguments through the composed type-parameter map. Returns nil when the callee is JDK/external
+// (not in jar), declares no generic Signature for (method, argc) anywhere in the hierarchy, or the
+// receiver args are unresolvable. Companion of ResolveInstantiatedParamType; used to recover a
+// covariant/erased return whose descriptor is raw (e.g. `ListMultimap<K,V>.asMap()` -> `Map<K,
+// Collection<V>>`, which inherits Multimap's declaration). Unlike the param resolver it applies NO
+// denotability gate: callers compare the recovered erasure/args and decide the cast themselves.
+func ResolveInstantiatedReturnType(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method string, argc int) JavaType {
+	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" {
+		return nil
+	}
+	visited := map[string]bool{}
+	return resolveReturnWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, argc, visited)
+}
+
+// resolveReturnWalk performs the depth-first hierarchy walk for ResolveInstantiatedReturnType, mirroring
+// resolveParamWalk but binding the callee's RETURN type. sigma maps the current node's formal
+// type-parameter names to their actual arguments (in call-site-denotable terms), recomposed per edge.
+func resolveReturnWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method string, argc int, visited map[string]bool) JavaType {
+	if internal == "" || visited[internal] {
+		return nil
+	}
+	visited[internal] = true
+	classSig, methodSigs, ok := provider(internal)
+	if !ok {
+		return nil // JDK / external: not in jar
+	}
+	formals := ClassFormalTypeParamNames(classSig)
+	sigma := map[string]JavaType{}
+	for i := 0; i < len(formals) && i < len(args); i++ {
+		if args[i] != nil {
+			sigma[formals[i]] = args[i]
+		}
+	}
+	// Most-derived declaration with a generic Signature wins (an override binds here; do not let an
+	// ancestor's signature shadow it).
+	if methodSigs != nil {
+		if msig := methodSigs[class_context.MethodSigKey(method, argc)]; msig != "" {
+			if _, _, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
+				return SubstituteTypeVars(ret, sigma)
+			}
+			return nil
+		}
+	}
+	// Otherwise walk the (parameterized) supertypes, composing sigma along each edge.
+	sup, ifaces := ParseClassSignatureSupers(classSig)
+	supers := make([]JavaType, 0, len(ifaces)+1)
+	if sup != nil {
+		supers = append(supers, sup)
+	}
+	supers = append(supers, ifaces...)
+	for _, st := range supers {
+		pt, isPT := st.RawType().(*JavaParameterizedType)
+		if !isPT || pt.RawClassName == "" {
+			continue // raw supertype carries no mapping -> cannot substitute, skip this subtree
+		}
+		childArgs := make([]JavaType, len(pt.TypeArgs))
+		for i, ta := range pt.TypeArgs {
+			childArgs[i] = SubstituteTypeVars(ta, sigma)
+		}
+		if t := resolveReturnWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, visited); t != nil {
+			return t
+		}
+	}
+	return nil
+}
+
+// ResolveInstantiatedSignature resolves BOTH the parameter types and the RETURN type of a call
+// `recv.method(...)` at receiver `recvRaw<recvArgs>`, walking the receiver's supertype hierarchy to the
+// most-derived declaration of (method, argc) and substituting the receiver's actual type arguments. It
+// mirrors ResolveInstantiatedReturnType (no denotability gate) but also returns the formal parameter
+// types (substituted), so a caller can detect an UNCHECKED invocation -- a parameterized formal fed a
+// raw argument, whose return javac erases to its erasure (JLS 15.12.2.6). Returns (nil, nil) when the
+// callee is JDK/external or declares no generic Signature for (method, argc) anywhere in the hierarchy.
+func ResolveInstantiatedSignature(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method string, argc int) ([]JavaType, JavaType) {
+	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" {
+		return nil, nil
+	}
+	visited := map[string]bool{}
+	return resolveSignatureWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, argc, visited)
+}
+
+// resolveSignatureWalk performs the depth-first hierarchy walk for ResolveInstantiatedSignature, binding
+// both the callee's PARAMETER types and RETURN type. sigma maps the current node's formal
+// type-parameter names to their actual arguments (in call-site-denotable terms), recomposed per edge.
+func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method string, argc int, visited map[string]bool) ([]JavaType, JavaType) {
+	if internal == "" || visited[internal] {
+		return nil, nil
+	}
+	visited[internal] = true
+	classSig, methodSigs, ok := provider(internal)
+	if !ok {
+		return nil, nil // JDK / external: not in jar
+	}
+	formals := ClassFormalTypeParamNames(classSig)
+	sigma := map[string]JavaType{}
+	for i := 0; i < len(formals) && i < len(args); i++ {
+		if args[i] != nil {
+			sigma[formals[i]] = args[i]
+		}
+	}
+	if methodSigs != nil {
+		if msig := methodSigs[class_context.MethodSigKey(method, argc)]; msig != "" {
+			if _, params, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
+				subParams := make([]JavaType, len(params))
+				for i, p := range params {
+					subParams[i] = SubstituteTypeVars(p, sigma)
+				}
+				return subParams, SubstituteTypeVars(ret, sigma)
+			}
+			return nil, nil
+		}
+	}
+	sup, ifaces := ParseClassSignatureSupers(classSig)
+	supers := make([]JavaType, 0, len(ifaces)+1)
+	if sup != nil {
+		supers = append(supers, sup)
+	}
+	supers = append(supers, ifaces...)
+	for _, st := range supers {
+		pt, isPT := st.RawType().(*JavaParameterizedType)
+		if !isPT || pt.RawClassName == "" {
+			continue
+		}
+		childArgs := make([]JavaType, len(pt.TypeArgs))
+		for i, ta := range pt.TypeArgs {
+			childArgs[i] = SubstituteTypeVars(ta, sigma)
+		}
+		if params, ret := resolveSignatureWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, visited); ret != nil {
+			return params, ret
+		}
+	}
+	return nil, nil
+}
+
+// FieldSigProvider yields a jar-internal class's FIELD generic Signature by binary internal name and
+// field name, or ok=false when the class is JDK/external (bytes not in jar) or the field has no generic
+// Signature attribute. The dumper builds the concrete closure (it owns the byte resolver + class
+// parser); the walk below consumes only strings, so the lower type/class_context packages never import
+// the parser (mirrors ClassSigProvider).
+type FieldSigProvider func(internalName, fieldName string) (fieldSig string, ok bool)
+
+// ResolveInstantiatedFieldType recovers the generic type of a field accessed on a receiver whose static
+// type is `recvRaw<recvArgs>`, by walking the receiver's generic supertype hierarchy (via classProvider)
+// and composing the type-argument substitution along each `extends/implements Super<...>` edge until the
+// field's declaring class is reached (via fieldProvider). It is the field analogue of
+// ResolveInstantiatedParamType, added to recover an INHERITED parameterized field whose Signature lives
+// in a superclass -- funcCtx.FieldSignature is CURRENT-class only, so an inherited field degrades to its
+// raw descriptor and every downstream receiver/param resolver loses the type arguments. Canonical case:
+// guava RegularContiguousSet<C>'s `this.domain` is declared `DiscreteDomain<C>` in the superclass
+// ContiguousSet, so `this.domain.distance(this.first(), var1)` could not recover the erased `(C)` cast on
+// var1 ("Comparable cannot be converted to C"). Returns nil when the field is not found in any
+// generic-signature ancestor, the chain leaves the jar (provider miss), or the parse fails. Applies NO
+// denotability gate: the sole caller (receiverParamTypeArgs) only consumes a parameterized result, whose
+// type args are the current class's own (in-scope) variables. See resolveFieldWalk.
+func ResolveInstantiatedFieldType(funcCtx *class_context.ClassContext, classProvider ClassSigProvider, fieldProvider FieldSigProvider, recvRaw string, recvArgs []JavaType, fieldName string) JavaType {
+	if funcCtx == nil || classProvider == nil || fieldProvider == nil || recvRaw == "" || fieldName == "" {
+		return nil
+	}
+	visited := map[string]bool{}
+	return resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(recvRaw), recvArgs, fieldName, visited)
+}
+
+// resolveFieldWalk performs the depth-first hierarchy walk for ResolveInstantiatedFieldType. sigma maps
+// the CURRENT node's formal type-parameter names to their actual arguments (in call-site-denotable
+// terms), recomposed per supertype edge. The field, if declared at THIS node with a generic Signature,
+// binds and is returned substituted; otherwise the parameterized supertypes are ascended.
+func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSigProvider, fieldProvider FieldSigProvider, internal string, args []JavaType, fieldName string, visited map[string]bool) JavaType {
+	if internal == "" || visited[internal] {
+		return nil
+	}
+	visited[internal] = true
+	classSig, _, ok := classProvider(internal)
+	if !ok {
+		return nil // JDK / external: not in jar
+	}
+	formals := ClassFormalTypeParamNames(classSig)
+	sigma := map[string]JavaType{}
+	for i := 0; i < len(formals) && i < len(args); i++ {
+		if args[i] != nil {
+			sigma[formals[i]] = args[i]
+		}
+	}
+	// The field, if declared HERE with a generic Signature, is the binding declaration -- substitute the
+	// composed type-argument map through it and return (a subclass never re-declares an inherited field's
+	// generic type, so the most-derived declaration on the walk is authoritative).
+	if fsig, ok := fieldProvider(internal, fieldName); ok && fsig != "" {
+		if ft := ParseSignature(fsig); ft != nil {
+			return SubstituteTypeVars(ft, sigma)
+		}
+	}
+	// Otherwise ascend the (parameterized) supertypes, composing sigma along each edge.
+	sup, ifaces := ParseClassSignatureSupers(classSig)
+	supers := make([]JavaType, 0, len(ifaces)+1)
+	if sup != nil {
+		supers = append(supers, sup)
+	}
+	supers = append(supers, ifaces...)
+	for _, st := range supers {
+		pt, isPT := st.RawType().(*JavaParameterizedType)
+		if !isPT || pt.RawClassName == "" {
+			continue // raw supertype carries no mapping -> cannot substitute, skip this subtree
+		}
+		childArgs := make([]JavaType, len(pt.TypeArgs))
+		for i, ta := range pt.TypeArgs {
+			childArgs[i] = SubstituteTypeVars(ta, sigma)
+		}
+		if t := resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(pt.RawClassName), childArgs, fieldName, visited); t != nil {
 			return t
 		}
 	}

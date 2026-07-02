@@ -108,6 +108,34 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				for i := range args2 {
 					captured[i] = args2[len(args2)-1-i]
 				}
+				// A captured value is a live snapshot of an enclosing local (a JavaRef into some JVM
+				// slot). It renders LAZILY (below), so its name must track the SAME variable-id
+				// rewrites that RewriteVar applies to every other tree reference AFTER stack
+				// simulation -- most importantly disjoint-slot SPLITTING: when a slot is reused for
+				// two different types across disjoint ranges (e.g. `char c` early, `Class k` later),
+				// the rewriter mints a fresh id for the later range (var9 -> var9_1) and redirects
+				// every reference to it via ReplaceVar. FunctionCallExpression.ReplaceVar already
+				// forwards to each argument, so `declaredFields(x, LAMBDA).ReplaceVar` reaches the
+				// lambda CustomValue -- but the base CustomValue has a nil ReplaceFunc, so the
+				// captured refs (stored only inside this closure, invisible to the tree walk) never
+				// get redirected and keep the STALE base-slot name. Canonical breakage: fastjson2
+				// BeanUtils.getField captures the `Class` split of a slot reused for a `char`, so the
+				// lambda body renders it as the char `var9` -> "char cannot be dereferenced" +
+				// "bad operand types for !=". Forward ReplaceVar to every captured value so they
+				// participate in id-rewriting exactly like any other tree ref. ReplaceVar is a
+				// no-op unless a ref's id equals oldId, so only redirects for THIS logical variable
+				// apply -- structurally inert for lambdas whose captures are never rewritten.
+				// Kill-switch: JDEC_LAMBDA_CAPTURE_REBIND_OFF=1 restores the (broken) nil ReplaceFunc.
+				var lambdaReplace func(oldId *utils.VariableId, newId *utils.VariableId)
+				if os.Getenv("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
+					lambdaReplace = func(oldId *utils.VariableId, newId *utils.VariableId) {
+						for _, ca := range captured {
+							if ca != nil {
+								ca.ReplaceVar(oldId, newId)
+							}
+						}
+					}
+				}
 				// Each lambda body gets its own fresh variable-id namespace so its formal
 				// parameters (var0, var1, ...) never collide with the enclosing method's locals.
 				// Captured values are resolved via LCAP placeholders, which are independent of
@@ -124,7 +152,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					return s
 				}, func() types.JavaType {
 					return typ
-				})
+				}, lambdaReplace)
 				// Mark as a lambda so a call on the lambda itself (the inlined `s.get()` shape) renders
 				// with the functional-interface cast it needs to compile, e.g. ((Supplier)(() -> ...)).get().
 				cv.Flag = "lambda"
@@ -139,7 +167,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 						lambdaType := upgradedType
 						cv = values.NewCustomValue(cv.StringFunc, func() types.JavaType {
 							return lambdaType
-						})
+						}, lambdaReplace)
 						cv.Flag = "lambda"
 						cv.NoOuterCapture = len(captured) == 0
 					}
@@ -167,6 +195,21 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					refType = up
 				}
 			}
+			// Forward ReplaceVar to captured values for the SAME reason as the inlined-lambda branch:
+			// a bound instance method reference `receiver::method` renders its captured receiver
+			// lazily (capturedArgs[0].String below), so it must track post-simulation id-rewrites
+			// (disjoint-slot splitting etc.) or it renders a stale slot name. Kill-switch shared
+			// with the lambda branch: JDEC_LAMBDA_CAPTURE_REBIND_OFF=1.
+			var refReplace func(oldId *utils.VariableId, newId *utils.VariableId)
+			if os.Getenv("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
+				refReplace = func(oldId *utils.VariableId, newId *utils.VariableId) {
+					for _, ca := range capturedArgs {
+						if ca != nil {
+							ca.ReplaceVar(oldId, newId)
+						}
+					}
+				}
+			}
 			refVal := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 				refMember := member
 				if member == "<init>" {
@@ -186,7 +229,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				return funcCtx.ShortTypeName(implClassName) + "::" + class_context.SafeIdentifier(refMember)
 			}, func() types.JavaType {
 				return refType
-			})
+			}, refReplace)
 			// A method reference, like a lambda, has no target type when used directly as a call
 			// receiver (`(C::m).apply(x)` does not compile); flag it so the call site adds the cast.
 			refVal.Flag = "lambda"

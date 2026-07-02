@@ -1,0 +1,4 @@
+# 内部类构造器形参还原为具体参数化 Iterable<Sub<T>> 后, 存入同类具体参数化 Iterable<Base<T>> 字段
+# (同 raw 擦除异型实参, 泛型不变性冲突) 时补一处被字节码擦除的 raw (Iterable) 造型。JDEC_PARAM_FIELD_RAW_CAST_OFF。
++Iterable<InnerFieldRawCastSub<T>> var2
++this.items = (Iterable) (var2)

@@ -1,0 +1,8 @@
+# Same-package simple-name shadowing: fqseed.Widget<String> (this class's OWN package, generic) must
+# be rendered FULLY-QUALIFIED because fqseed.other.Widget is imported and a single-type-import shadows
+# the same-package simple name (JLS 7.5.1). A bare `Widget<String>` would bind to the non-generic
+# fqseed.other.Widget -> "type Widget does not take parameters". Real hit: fastjson2
+# ObjectWriterCreatorASM (com.alibaba.fastjson2.writer.FieldWriter<T> vs internal.asm.FieldWriter).
++import fqseed.other.Widget;
++fqseed.Widget<String>
+-/[^.]Widget<String>/

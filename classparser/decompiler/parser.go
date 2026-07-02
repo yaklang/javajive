@@ -134,6 +134,12 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 		}
 	}
 	rewriter.RewriteVar(&sts, decompiler.BodyStartId, params, decompiler.FunctionContext)
+	// Retype a split-slot foreach/copy temp that lost its ARRAY type to java.lang.Object because the
+	// copy source's concrete type was adopted only AFTER this copy in DFS order (frozen-Object stale
+	// snapshot). Runs after RewriteVar unifies ids and all adoptions commit, so the source reports its
+	// true array type. See PropagateCopyArrayDeclType (fastjson2 ObjectReaderException.readObject:
+	// `Object var18_1 = var8` where var8 is StackTraceElement[]). Kill-switch: JDEC_COPY_ARRAY_DECL_TYPE_OFF=1.
+	rewriter.PropagateCopyArrayDeclType(&sts)
 	// Synthesize a bare `T varN;` declaration for any local whose only definition is an embedded
 	// assignment baked into an opaque CustomValue by the dup-collapse (`(n = s.length())` inside a
 	// short-circuit condition). Without it that local renders undeclared and duplicate-named against a

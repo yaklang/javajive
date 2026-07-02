@@ -148,8 +148,281 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		if cast := objectReturnDowncast(funcCtx, r.JavaValue); cast != "" {
 			return fmt.Sprintf("return (%s) (%s)", cast, expr)
 		}
+		// Parameterized return type (`Entry<E>`) whose value erases to the same raw class with an
+		// erased/Object type argument: wrap in an unchecked parameterization cast. See parameterizedReturnCast.
+		if cast := parameterizedReturnCast(funcCtx, r.JavaValue); cast != "" {
+			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+		}
+		// A returned `this.field` read whose RECOVERED real generic type is a same-erasure but
+		// WILDCARD-parameterized type (`Comparator<? super E>`), pinned by the declared return type to a
+		// concrete parameterization (`Comparator<Object>`): the field read renders raw so no cast is
+		// emitted, but javac types it from the field's true declaration and rejects
+		// "Comparator<CAP#1> cannot be converted to Comparator<Object>". A wildcard-source same-erasure
+		// cast is an unchecked conversion (legal). See inheritedFieldReturnCast.
+		if cast := inheritedFieldReturnCast(funcCtx, r.JavaValue); cast != "" {
+			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+		}
+		// A method-call value (a synthetic singleton accessor `Cut$AboveAll.access$100()`) whose static
+		// type is a NON-GENERIC jar-internal SUBTYPE returned where the declared return type is a
+		// type-variable-parameterized type of a DIFFERENT erasure (`Cut<C>`): the subtype fixes the
+		// supertype's type argument AND (being final) cannot take a direct `(Cut<C>)` cast, so the
+		// raw-erasure bridge `(Cut<C>) (Cut) value` is the only legal form. See
+		// genericSubtypeReturnRawBridge.
+		if bridge, target := genericSubtypeReturnRawBridge(funcCtx, r.JavaValue); target != "" {
+			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
+		}
+		// A `recv.m(...)` value whose recovered GENERIC return shares the declared return's raw erasure
+		// but carries DIFFERENT (invariant-incompatible) type arguments -- e.g. guava
+		// `Map<K,List<V>> asMap(ListMultimap<K,V> var0) { return var0.asMap(); }` where
+		// `ListMultimap<K,V>.asMap()` truly returns `Map<K,Collection<V>>`. A direct `(Map<K,List<V>>)`
+		// cast is inconvertible (both fully parameterized, distinct); only the raw-erasure bridge
+		// `(Map<K,List<V>>) (Map) value` compiles. See parameterizedReturnRawBridge.
+		if bridge, target := parameterizedReturnRawBridge(funcCtx, r.JavaValue); target != "" {
+			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
+		}
 	}
 	return fmt.Sprintf("return %s", expr)
+}
+
+// parameterizedReturnRawBridge handles a `recv.m(...)` return value whose recovered GENERIC return type
+// shares the enclosing method's declared return-type erasure but carries DIFFERENT type arguments, an
+// invariant mismatch a DIRECT cast cannot bridge. The decompiler sees the call's type as the raw
+// descriptor erasure (jar-internal returns are not instantiated), so it would emit a bare
+// `return recv.m()` that javac rejects once it resolves the callee's TRUE generic return (guava
+// Multimaps.asMap(ListMultimap/SetMultimap/SortedSetMultimap): declared `Map<K,{List,Set,SortedSet}<V>>`
+// but `Multimap.asMap()` returns `Map<K,Collection<V>>`; the source's erased `(Map<K,X<V>>) (Map<K,?>)`
+// double cast is dropped). We recover the callee's instantiated return via the sibling hierarchy walk,
+// and when it shares the declared erasure but differs in args, emit the raw-erasure bridge
+// `(RetType) (RawErasure) value`. The areturn verifier guarantees `value <: RawErasure`, so the bridge
+// cast is always legal. Returns (rawErasure, retStr) or ("",""). Kill-switch
+// JDEC_PARAM_RETURN_RAW_BRIDGE_OFF.
+func parameterizedReturnRawBridge(funcCtx *class_context.ClassContext, v values.JavaValue) (string, string) {
+	if funcCtx == nil || v == nil {
+		return "", ""
+	}
+	if os.Getenv("JDEC_PARAM_RETURN_RAW_BRIDGE_OFF") != "" {
+		return "", ""
+	}
+	if funcCtx.SiblingClassSig == nil {
+		return "", ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return "", ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	// Declared return must be a parameterization mentioning a type variable (`Map<K, List<V>>`) but not
+	// itself a bare type variable (that path is typeVarReturnCast).
+	if !strings.Contains(retStr, "<") || funcCtx.IsTypeParam(retStr) {
+		return "", ""
+	}
+	if !mentionsTypeParam(retStr, funcCtx.TypeParams) {
+		return "", ""
+	}
+	// Only an instance-method call on a parameterized receiver can carry a hidden covariant/erased return.
+	call, ok := values.UnpackSoltValue(v).(*values.FunctionCallExpression)
+	if !ok || call.IsStatic || call.Object == nil {
+		return "", ""
+	}
+	pt, ok := types.AsParameterizedType(call.Object.Type())
+	if !ok || pt.RawClassName == "" {
+		return "", ""
+	}
+	ret := types.ResolveInstantiatedReturnType(funcCtx, funcCtx.SiblingClassSig, pt.RawClassName, pt.TypeArgs, call.FunctionName, len(call.Arguments))
+	if ret == nil {
+		return "", ""
+	}
+	valRetStr := ret.String(funcCtx)
+	// Same raw erasure but DIFFERENT type args -> a direct cast is inconvertible; bridge is required.
+	// Identical strings (no mismatch) or different erasure (handled by other helpers) do not qualify.
+	if valRetStr == retStr || erasureName(valRetStr) != erasureName(retStr) {
+		return "", ""
+	}
+	return erasureName(retStr), retStr
+}
+
+// typeVarLocalDeclName recovers the type-variable name a FIRST-declared local should be typed as when
+// its initializer is a `recv.m(...)` call whose TRUE generic return type is a bare in-scope type
+// variable T, but whose descriptor erasure (the value's static type) is T's erased bound. The store
+// keeps only the erased value, so the decompiler declares `Comparable var3 = domain.next(...)`; javac,
+// resolving `DiscreteDomain<C>.next(C) -> C`, then rejects later uses of var3 in a `C`-typed context
+// (guava Cut$AboveValue.withLowerBoundType: `belowValue(var3)` flows into a `Cut<C>` return, so the
+// conditional `next == null ? Cut.belowAll() : belowValue(var3)` is "bad type in conditional
+// expression"). Declaring the local at T matches the original source (`C next = domain.next(...)`);
+// javac itself re-derives the RHS as T (it performs real generic inference on the call), so NO RHS cast
+// is needed and no semantics change -- T's erasure is exactly the bound the value already carries.
+// Returns "" unless the initializer is an instance call on a jar-internal parameterized receiver (so
+// the sibling hierarchy walk can recover the instantiated return) and the recovered return is a bare
+// in-scope type variable distinct from the current (erased) declaration type. Kill-switch
+// JDEC_TYPEVAR_LOCAL_DECL_OFF.
+func typeVarLocalDeclName(funcCtx *class_context.ClassContext, left values.JavaValue, value values.JavaValue, declType types.JavaType) string {
+	if funcCtx == nil || value == nil || declType == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_TYPEVAR_LOCAL_DECL_OFF") != "" {
+		return ""
+	}
+	if funcCtx.SiblingClassSig == nil {
+		return ""
+	}
+	// Only a genuine local (JavaRef, non-`this`) declaration -- never a field or synthetic slot.
+	ref, ok := values.UnpackSoltValue(left).(*values.JavaRef)
+	if !ok || ref.IsThis {
+		return ""
+	}
+	// The current declared type must be a reference type that is NOT already a type variable.
+	declStr := declType.String(funcCtx)
+	if funcCtx.IsTypeParam(declStr) {
+		return ""
+	}
+	if raw := declType.RawType(); raw != nil {
+		if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+			return ""
+		}
+	}
+	// The initializer must be an instance call on a jar-internal receiver; a wrapping cast (which would
+	// change the static type) unpacks to a non-call and bails.
+	call, ok := values.UnpackSoltValue(value).(*values.FunctionCallExpression)
+	if !ok || call.IsStatic || call.Object == nil {
+		return ""
+	}
+	var recvRaw string
+	var recvArgs []types.JavaType
+	if pt, ok := types.AsParameterizedType(call.Object.Type()); ok && pt.RawClassName != "" {
+		recvRaw = pt.RawClassName
+		recvArgs = pt.TypeArgs
+	} else if r, ok := values.UnpackSoltValue(call.Object).(*values.JavaRef); ok && r.IsThis && len(funcCtx.ClassTypeParams) > 0 {
+		// A `this.m(...)` call reads `this` as the RAW current class (its value type carries no type
+		// arguments), so reconstruct the class's OWN parameterization (`CurrentClass<ClassTypeParams>`).
+		// The sibling walk resolves the current class from the jar, letting a same-class generic method
+		// whose declared return is a class type variable (guava Cut$AboveValue.leastValueAbove -> `C`)
+		// be recovered (guava Cut$AboveValue.canonical: `C var2 = this.leastValueAbove(...)`).
+		recvRaw = funcCtx.ClassName
+		recvArgs = make([]types.JavaType, len(funcCtx.ClassTypeParams))
+		for i, p := range funcCtx.ClassTypeParams {
+			recvArgs[i] = types.NewJavaClass(p)
+		}
+	} else {
+		return ""
+	}
+	params, ret := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, call.FunctionName, len(call.Arguments))
+	if ret == nil {
+		return ""
+	}
+	// A raw argument fed to a PARAMETERIZED formal (a bare `ReferenceEntry`/`Map` into a
+	// `ReferenceEntry<K,V>`/`Map<K,V>` parameter) makes the call an UNCHECKED invocation (JLS
+	// 15.12.2.6), which erases the method's return type to its erasure -- so javac types the result as
+	// the bound (Object), NOT the type variable, and a `V var = call()` declaration is uncompilable
+	// (`Object cannot be converted to V`, guava LocalCache$Segment.getLiveValue,
+	// fastjson2 ObjectReaderNoneDefaultConstructor.createInstanceNoneDefaultConstructor). Bail so the
+	// erased declaration is kept in that case.
+	if uncheckedInvocation(funcCtx, params, call) {
+		return ""
+	}
+	retStr := ret.String(funcCtx)
+	// The recovered return must be a bare in-scope type variable, and it must differ from the current
+	// (erased) declaration type. Its erasure being that bound is guaranteed by the descriptor store.
+	if !funcCtx.IsTypeParam(retStr) || retStr == declStr {
+		return ""
+	}
+	return retStr
+}
+
+// uncheckedInvocation reports whether any argument fed to a PARAMETERIZED formal parameter is a RAW
+// (bare, non-parameterized) reference type -- the exact condition under which javac applies unchecked
+// conversion and erases the invocation's return type to its erasure (JLS 15.12.2.6). params are the
+// callee's instantiated formal parameter types (from ResolveInstantiatedSignature); a formal that is
+// not itself parameterized never triggers this, and a parameterized / type-variable / primitive / null
+// argument is a checked conversion. Handles both jar-internal and JDK raw generics uniformly because the
+// signal is the formal being parameterized, not the argument class being known-generic.
+func uncheckedInvocation(funcCtx *class_context.ClassContext, params []types.JavaType, call *values.FunctionCallExpression) bool {
+	for i, p := range params {
+		if p == nil || i >= len(call.Arguments) {
+			continue
+		}
+		pt, ok := types.AsParameterizedType(p)
+		if !ok || len(pt.TypeArgs) == 0 {
+			continue // formal not parameterized -> this argument cannot force unchecked
+		}
+		arg := call.Arguments[i]
+		if arg == nil {
+			continue
+		}
+		if lit, ok := values.UnpackSoltValue(arg).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+			continue // null is assignable to any parameterized type -> checked
+		}
+		at := arg.Type()
+		if at == nil {
+			continue
+		}
+		if _, isParam := types.AsParameterizedType(at); isParam {
+			continue // parameterized argument -> checked conversion
+		}
+		jc, ok := at.RawType().(*types.JavaClass)
+		if !ok {
+			continue // primitive / array -> not a raw generic
+		}
+		if funcCtx.IsTypeParam(jc.Name) {
+			continue // a bare type variable argument (e.g. `(C) x`) -> checked
+		}
+		return true // raw reference argument into a parameterized formal -> unchecked invocation
+	}
+	return false
+}
+
+// genericSubtypeReturnRawBridge handles a METHOD-CALL value (typically a synthetic singleton accessor
+// like `Cut$AboveAll.access$100()`) whose static type is a NON-GENERIC jar-internal SUBTYPE, returned
+// where the declared return type is a parameterized type of a DIFFERENT erasure that mentions a type
+// variable (`Cut<C>`). typeVarReturnCast deliberately bails on static calls (its FunctionCallExpression
+// branch is for this-receiver wildcard returns), and genericReturnSubtypeCastNeeded is only wired for
+// `new X(...)` / ternary values. Such a subtype FIXES the supertype's type argument
+// (`AboveAll extends Cut<Comparable<?>>`) and, being final, cannot even take a direct `(Cut<C>)` cast
+// (inconvertible: its only Cut-supertype is Cut<Comparable<?>>); unchecked conversion likewise does not
+// apply. The raw-erasure bridge `(Cut<C>) (Cut) value` is the only legal form, and the areturn verifier
+// guarantees `value <: Cut`, so `(Cut) value` can never be inconvertible. Returns (rawErasure,
+// targetRetStr) or ("",""). Kill-switch JDEC_GENERIC_SUBTYPE_RET_BRIDGE_OFF.
+func genericSubtypeReturnRawBridge(funcCtx *class_context.ClassContext, v values.JavaValue) (string, string) {
+	if funcCtx == nil || v == nil {
+		return "", ""
+	}
+	if os.Getenv("JDEC_GENERIC_SUBTYPE_RET_BRIDGE_OFF") != "" {
+		return "", ""
+	}
+	// Only method-call values reach this helper unhandled (New/ternary go through typeVarReturnCast's
+	// genericReturnSubtypeCastNeeded wiring; field singletons go through its JavaClassMember/RefMember
+	// case). Restricting to calls prevents any double-cast with the earlier chain.
+	if _, ok := values.UnpackSoltValue(v).(*values.FunctionCallExpression); !ok {
+		return "", ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return "", ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	// Return type must be a parameterization that MENTIONS a type variable (`Cut<C>` / `Map<K, V>`) but
+	// is not itself a bare type variable (that path is typeVarReturnCast).
+	if !strings.Contains(retStr, "<") || funcCtx.IsTypeParam(retStr) {
+		return "", ""
+	}
+	if !mentionsTypeParam(retStr, funcCtx.TypeParams) {
+		return "", ""
+	}
+	vt := v.Type()
+	if vt == nil {
+		return "", ""
+	}
+	jc, ok := vt.RawType().(*types.JavaClass)
+	if !ok || jc == nil {
+		return "", ""
+	}
+	// Reuse the non-generic-subtype-of-parameterized-return check (jc non-generic, different erasure,
+	// resolver-confirmed jar-internal, areturn-legal).
+	if !genericReturnSubtypeCastNeeded(funcCtx, jc, retStr) {
+		return "", ""
+	}
+	// Returns (bridge=raw erasure, target=parameterized return type) to match the call-site's
+	// `(target) (bridge) (expr)` rendering.
+	return erasureName(retStr), retStr
 }
 
 // nestedGenericRawBridge returns the raw-erasure type name to interpose as an intermediate cast
@@ -159,9 +432,6 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 // value's erased type differs from retStr's erasure (the value is a different class being cast to a
 // parameterized supertype). Otherwise it returns "" and the single direct cast is used.
 func nestedGenericRawBridge(funcCtx *class_context.ClassContext, v values.JavaValue, retStr string) string {
-	if strings.Count(retStr, "<") <= 1 {
-		return ""
-	}
 	if v == nil {
 		return ""
 	}
@@ -177,10 +447,139 @@ func nestedGenericRawBridge(funcCtx *class_context.ClassContext, v values.JavaVa
 		return ""
 	}
 	targetErasure := erasureName(retStr)
-	if targetErasure == "" || erasureName(raw.String(funcCtx)) == targetErasure {
+	if targetErasure == "" {
 		return ""
 	}
+	valErasure := erasureName(raw.String(funcCtx))
+	// Case A (original): the value is a DIFFERENT class being cast to a NESTED parameterized supertype
+	// (`Function<Supplier<T>, T>`). A direct cast is inconvertible; bridge via the target's raw erasure.
+	if valErasure != targetErasure {
+		if strings.Count(retStr, "<") <= 1 {
+			return ""
+		}
+		return targetErasure
+	}
+	// Case B: SAME erasure, but the value is a FIELD SINGLETON whose declared parameterization is
+	// provably distinct from the target's -- e.g. guava Range.ALL (declared `Range<Comparable>`) returned
+	// as `Range<C>`, or the CROSS-CLASS `Range$RangeLexOrdering.INSTANCE` (declared `Ordering<Range<?>>`)
+	// returned as `Ordering<Range<C>>`. javac rejects the DIRECT cast (invariant, distinct args), and guava
+	// bridges via the raw type `(Range<C>) (Range) ALL` / `(Ordering<Range<C>>) (Ordering) INSTANCE`. The
+	// decompiler's VALUE type for the field read is the erased raw class, so the mismatch is invisible from
+	// the value type -- it is recovered from the field's own generic Signature. Restricted to field-access
+	// values so the this-reparam / new / ternary cases typeVarReturnCast handles with a legal direct cast
+	// are never touched, and to fields whose declared type carries NON-bare-wildcard top-level args (a bare
+	// `X<?>` converts to `X<C>` by the unchecked conversion the direct cast already allows -- no bridge).
+	// Kill-switch JDEC_SAME_ERASURE_FIELD_RET_BRIDGE_OFF.
+	if os.Getenv("JDEC_SAME_ERASURE_FIELD_RET_BRIDGE_OFF") != "" {
+		return ""
+	}
+	var sig string
+	if fieldName := sameClassFieldName(funcCtx, v); fieldName != "" {
+		sig = funcCtx.FieldSignature(fieldName)
+	} else if os.Getenv("JDEC_XCLASS_FIELD_RET_BRIDGE_OFF") == "" {
+		// A CROSS-CLASS static field singleton (`OtherClass.INSTANCE`): its generic Signature lives in the
+		// declaring class, recovered via SiblingFieldSig (the same cross-class field resolver that powers
+		// inherited-field receiver typing). guava Range.rangeLexOrdering `Range$RangeLexOrdering.INSTANCE`.
+		sig = crossClassStaticFieldSig(funcCtx, v)
+	}
+	if sig == "" {
+		return ""
+	}
+	parsed := types.ParseSignature(sig)
+	if parsed == nil {
+		return ""
+	}
+	declStr := parsed.String(funcCtx)
+	if erasureName(declStr) != targetErasure || declStr == retStr {
+		return ""
+	}
+	// The declared field type must carry CONCRETE top-level type arguments (a top-level bare wildcard
+	// `X<?>` converts to `X<C>` by an unchecked conversion the DIRECT cast already allows -- no bridge).
+	args, ok := topLevelTypeArgs(declStr)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	for _, a := range args {
+		if a == "?" || strings.HasPrefix(a, "? ") {
+			return ""
+		}
+	}
 	return targetErasure
+}
+
+// sameClassFieldName returns the field name when v is a read of a field DECLARED in the current class
+// (a static `ThisClass.FIELD` access or an instance `this.field` access), or "" otherwise. Used to
+// recover the field's declared generic Signature for cast decisions the erased value type hides.
+func sameClassFieldName(funcCtx *class_context.ClassContext, v values.JavaValue) string {
+	switch lv := values.UnpackSoltValue(v).(type) {
+	case *values.JavaClassMember:
+		if lv.Name != funcCtx.ClassName {
+			return ""
+		}
+		return class_context.SafeIdentifier(lv.Member)
+	case *values.RefMember:
+		ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef)
+		if !ok || !ref.IsThis {
+			return ""
+		}
+		return class_context.SafeIdentifier(lv.Member)
+	}
+	return ""
+}
+
+// crossClassStaticFieldSig returns the raw generic Signature of a CROSS-CLASS static field read
+// (`OtherClass.FIELD`, OtherClass != the class being rendered), recovered from the declaring class's
+// bytes via SiblingFieldSig, or "" when v is not such a read, the class is JDK/external (no bytes in the
+// jar), or the field carries no generic Signature. It complements sameClassFieldName (current-class
+// FieldSignatures) so a same-erasure return raw-bridge can be decided for a foreign field singleton
+// whose declared parameterization the erased value type hides (guava Range.rangeLexOrdering's
+// `Range$RangeLexOrdering.INSTANCE`, declared `Ordering<Range<?>>`). The lookup uses the RAW JVM field
+// name (JavaClassMember.Member, matching buildSiblingFieldSig's name key) and the owner's binary
+// internal name (dotted Name -> slash form; the inner-class `$` is part of the binary name and kept).
+func crossClassStaticFieldSig(funcCtx *class_context.ClassContext, v values.JavaValue) string {
+	if funcCtx == nil || funcCtx.SiblingFieldSig == nil {
+		return ""
+	}
+	jcm, ok := values.UnpackSoltValue(v).(*values.JavaClassMember)
+	if !ok || jcm.Name == "" || jcm.Name == funcCtx.ClassName {
+		return "" // same-class field is handled by sameClassFieldName; only cross-class here
+	}
+	sig, ok := funcCtx.SiblingFieldSig(strings.ReplaceAll(jcm.Name, ".", "/"), jcm.Member)
+	if !ok {
+		return ""
+	}
+	return sig
+}
+
+// ternaryArmNeedsTypeVarCast reports whether a conditional expression returned into a bare type-variable
+// target needs a wrapping `(T)` cast: true when at least one non-null arm's static type is NOT the type
+// variable T (so javac's poly-typing of that arm against T fails), and every arm type is known. A null
+// literal arm is skipped (null is assignable to any type variable). When BOTH arms are already T (or
+// null) the conditional types cleanly at T and needs no cast, so this returns false. Any arm with an
+// unknown (nil) type returns false, so an ambiguous shape never gets a speculative cast. See the
+// ternary branch in typeVarReturnCast.
+func ternaryArmNeedsTypeVarCast(t *values.TernaryExpression, typeVar string, funcCtx *class_context.ClassContext) bool {
+	if t == nil {
+		return false
+	}
+	needCast := false
+	for _, arm := range []values.JavaValue{t.TrueValue, t.FalseValue} {
+		a := values.UnpackSoltValue(arm)
+		if a == nil {
+			return false
+		}
+		if lit, ok := a.(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+			continue // null is assignable to any type variable -> no constraint
+		}
+		at := a.Type()
+		if at == nil {
+			return false // unknown arm type -> do not risk an added cast
+		}
+		if at.String(funcCtx) != typeVar {
+			needCast = true
+		}
+	}
+	return needCast
 }
 
 // typeVarReturnCast returns the type-variable name to cast the returned value to when the
@@ -217,6 +616,24 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 	//     the raw class) converts to the parameterized return type by UNCHECKED conversion and needs no
 	//     cast; adding one there is gratuitous and was over-casting plain raw-subtype returns.
 	bareTypeVar := funcCtx.IsTypeParam(retStr)
+	// A conditional expression returned into a BARE type-variable target is a POLY expression: javac
+	// types each arm against T, so an arm whose static type is a non-T reference (typically Object, from
+	// a value whose generic type the decompiler lost) fails "bad type in conditional expression" /
+	// "Object cannot be converted to T". The ternary's OWN Type() is the arm LUB, which MergeTypes can
+	// collapse to T (the other arm being genuinely T), masking the mismatch -- so the `rawStr == retStr`
+	// guard below would skip the cast. Wrapping the whole ternary `(T)(cond ? a : b)` makes it a
+	// STANDALONE (non-poly) expression typed at the arm LUB, then an unchecked `(T)` cast: legal and
+	// behavior-preserving (the bytecode already areturns the erased value, no checkcast). guava
+	// ConfigurableValueGraph.edgeValueOrDefault_internal `return (val == null) ? dflt : val;` where
+	// `val` was read Object off a raw GraphConnections.get(). Only fires when at least one non-null arm
+	// is NOT already the type variable (both-arms-T identity is left alone). Kill-switch
+	// JDEC_TERNARY_TYPEVAR_RET_CAST_OFF.
+	if bareTypeVar && os.Getenv("JDEC_TERNARY_TYPEVAR_RET_CAST_OFF") == "" {
+		if tern, ok := values.UnpackSoltValue(v).(*values.TernaryExpression); ok &&
+			ternaryArmNeedsTypeVarCast(tern, retStr, funcCtx) {
+			return retStr
+		}
+	}
 	// arrayTypeVar: the return type is an array whose element is a bare type variable (`E[]`, `T[][]`).
 	// Bytecode erases it to its bound array (Object[]), so a value returning Object[] (typically
 	// `Collection.toArray(E[])` in a `<E> E[] toArray(E[])` override) needs an unchecked `(E[])` cast.
@@ -449,6 +866,262 @@ func objectReturnDowncast(funcCtx *class_context.ClassContext, v values.JavaValu
 	return retStr
 }
 
+// topLevelTypeArgs splits a rendered generic type string's OUTERMOST `<...>` into its top-level type
+// arguments (nesting-aware, so `Map<K, List<V>>` yields ["K", "List<V>"]). ok=false when s is not a
+// parameterized type (no balanced trailing `<...>`).
+func topLevelTypeArgs(s string) ([]string, bool) {
+	lt := strings.IndexByte(s, '<')
+	if lt < 0 || !strings.HasSuffix(s, ">") {
+		return nil, false
+	}
+	inner := s[lt+1 : len(s)-1]
+	var args []string
+	depth, start := 0, 0
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case ',':
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(inner[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	args = append(args, strings.TrimSpace(inner[start:]))
+	return args, true
+}
+
+// typeVarIsUnbounded reports whether name is a type variable in scope whose SOLE bound is Object (the
+// canonical bare `<E>`). It looks in the enclosing method's formal type parameters first (which shadow
+// the class's), then the class's. ClassFormalTypeParamBounds omits any variable whose only bound is
+// Object, so "declared here AND absent from the bounds map" == unbounded. A bounded variable
+// (`C extends Comparable`), or one not declared in either scope, returns false -- used to gate an
+// unchecked `X<Object>` -> `X<E>` parameterization cast, which is only legal for unbounded E.
+func typeVarIsUnbounded(name string, funcCtx *class_context.ClassContext) bool {
+	if funcCtx == nil || name == "" {
+		return false
+	}
+	for _, n := range types.MethodFormalTypeParamNames(funcCtx.CurrentMethodSig) {
+		if n == name {
+			_, bounded := types.ClassFormalTypeParamBounds(funcCtx.CurrentMethodSig, funcCtx)[name]
+			return !bounded
+		}
+	}
+	for _, n := range types.ClassFormalTypeParamNames(funcCtx.ClassSig) {
+		if n == name {
+			_, bounded := types.ClassFormalTypeParamBounds(funcCtx.ClassSig, funcCtx)[name]
+			return !bounded
+		}
+	}
+	// Injected (flattened inner-class) type variable: not declared in ClassSig, but in scope via
+	// TypeParams. Its boundedness lives in InjectedTypeParamBounds (only non-Object bounds are recorded,
+	// mirroring the rendered header), so "in scope AND absent from that map" == the rendered bare `<E>`.
+	if funcCtx.IsTypeParam(name) {
+		if _, bounded := funcCtx.InjectedTypeParamBounds[name]; bounded {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// parameterizedReturnCastValueEligible reports whether a returned value has a shape for which an
+// unchecked `X<Object>` -> `X<E>` wrapper is safe to add. It EXCLUDES exactly the poly expressions that
+// javac would type from the return target on their own (so wrapping them is at best redundant and at
+// worst breaks inference / injects a reference to an unresolved dependency type -- spring
+// `return (Mono<T>)(x.map(l -> ...))`):
+//   - a bare lambda / method-reference return (the return type itself is the lambda's target);
+//   - a zero-argument generic factory call (`of()` / `emptyIterator()`);
+//   - a call with a lambda / method-reference argument (`x.map(l -> ...)`);
+//   - a bare `this` return: `this` is ALWAYS the class's own self-parameterization `C<N>`, which either
+//     equals the return type (identity `C<N> self() { return this; }` -- no cast) or is a reparameterization
+//     `<N1 extends N> C<N1> cast() { return this; }` already handled by typeVarReturnCast. `this`'s value
+//     type renders raw (`C`) so the same-erasure guard would otherwise mis-fire an unwanted `(C<N>)(this)`.
+//
+// Everything else -- a plain variable / field / cast (`return (Multiset<E>) var0`), a ternary (arms are
+// LUB'd to `X<Object>`, which the return target cannot re-drive per-arm), and an ordinary call whose type
+// variable is pinned by its value arguments (`Iterables.filter(it, Predicates.instanceOf(cls))`) -- is a
+// case where the erasure+unbounded guards in parameterizedReturnCast already make the cast both legal and
+// needed. See parameterizedReturnCast.
+func parameterizedReturnCastValueEligible(v values.JavaValue) bool {
+	v = values.UnpackSoltValue(v)
+	if ref, ok := v.(*values.JavaRef); ok && ref != nil && ref.IsThis {
+		return false
+	}
+	if cv, ok := v.(*values.CustomValue); ok && cv.Flag == "lambda" {
+		return false
+	}
+	if call, ok := v.(*values.FunctionCallExpression); ok {
+		if len(call.Arguments) == 0 {
+			return false
+		}
+		for _, a := range call.Arguments {
+			if cv, ok := values.UnpackSoltValue(a).(*values.CustomValue); ok && cv.Flag == "lambda" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// parameterizedReturnCast returns the enclosing method's declared return type string to wrap the
+// returned value in an explicit unchecked cast, when that return type is a PARAMETERIZED type whose
+// EVERY top-level type argument is an in-scope type variable (or a wildcard) -- e.g. `Multiset$Entry<E>`
+// -- but the returned value's static type erases to the SAME raw class carrying a DIFFERENT (erased /
+// Object) type argument. This is the "return target-type inference" gap: guava iterators do
+// `return Multisets.immutableEntry(var2, n)` where the callee `<E> Entry<E> immutableEntry(E, int)`
+// would have inferred E from the enclosing `Entry<E>` return type, but var2 was read as Object off a
+// raw iterator, so javac reports "inference variable E has incompatible bounds: E, Object". Wrapping
+// the whole call `(Entry<E>) (Multisets.immutableEntry(var2, n))` removes the return-target inference
+// constraint (the call now infers E=Object standalone) and the same-erasure `Entry<Object>` -> `Entry<E>`
+// unchecked cast is legal (a concrete type argument would be provably distinct = inconvertible, so those
+// are excluded). Behavior-preserving, matches CFR/Fernflower. Ordered AFTER objectReturnDowncast (whose
+// Object-erased value it never overlaps, since Object's erasure differs from the parameterized target).
+// Kill-switch JDEC_PARAM_RETURN_CAST_OFF.
+func parameterizedReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) string {
+	if funcCtx == nil || v == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_PARAM_RETURN_CAST_OFF") != "" {
+		return ""
+	}
+	// Only wrap a returned value whose type variable CANNOT be recovered by javac's own return-target
+	// inference (otherwise the cast is at best redundant and at worst BREAKS a working poly expression --
+	// wrapping strips target typing, and if the return-type erasure is an unresolved dependency type the
+	// added reference becomes a fresh "cannot find symbol", e.g. spring `return (Mono<T>)(x.map(l -> ...))`
+	// where reactor Mono is off the classpath). Eligible shapes:
+	//   - a ternary: its arms are LUB'd to `X<Object>`, which the return target cannot re-drive per-arm;
+	//   - a method call PINNED to Object by a concrete argument (guava `immutableEntry(objVal, n)`): the
+	//     argument forces the type var to Object, so target inference genuinely fails without the cast.
+	// A zero-argument factory (`of()` / `emptyIterator()`) or a call with a lambda/method-ref argument is a
+	// poly expression that infers correctly from the return target on its own -- excluded.
+	if !parameterizedReturnCastValueEligible(v) {
+		return ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	args, ok := topLevelTypeArgs(retStr)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	vt := v.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	vStr := vt.String(funcCtx)
+	if vStr == retStr {
+		return "" // value already renders exactly as the return type; no cast needed.
+	}
+	// Same raw erasure guarantees the parameterization cast targets the value's own raw class (a prereq
+	// for it not being an unrelated-class inconvertible cast).
+	if erasureName(vStr) != erasureName(retStr) {
+		return ""
+	}
+	// Per-position cast-legality gate. A same-erasure `X<va...>` -> `X<ta...>` cast is only emitted when
+	// EVERY target arg ta is legal from the value's corresponding arg va, per javac's cast-conversion
+	// rules (getting this wrong turns a recompile error into a different inconvertible-types error):
+	//   - ta is an UNBOUNDED bare type variable (sole Object bound): always legal (`X<anything>` -> `X<E>`
+	//     is an unchecked widening). A BOUNDED var (`C extends Comparable`) is inconvertible from Object
+	//     and is EXCLUDED (leaves `ContiguousSet<C>` etc. to their own working target-type inference).
+	//   - ta is a WILDCARD (`?` / `? extends X` / `? super X`): legal only when va is itself the unbounded
+	//     wildcard `?` OR the value is raw (both admit an unchecked cast to any same-erasure wildcard --
+	//     guava `TypeToken<? super T> boundAsSuperclass(){ return of(bound); }` where `of` returns
+	//     `TypeToken<?>`). A CONCRETE va (`Object` / `String`) -> `? extends X` would be provably distinct
+	//     = inconvertible, so that combination bails.
+	//   - any other ta (a concrete `List<V>`, `Comparator<Object>`): bail.
+	valArgs, valParam := topLevelTypeArgs(vStr)
+	for i, ta := range args {
+		if typeVarIsUnbounded(ta, funcCtx) {
+			continue
+		}
+		if strings.HasPrefix(ta, "?") {
+			if !valParam { // value is raw -> cast to any wildcard parameterization is unchecked-legal.
+				continue
+			}
+			if i < len(valArgs) && valArgs[i] == "?" {
+				continue
+			}
+		}
+		return ""
+	}
+	return retStr
+}
+
+// inheritedFieldReturnCast returns the enclosing method's declared parameterized return type string to
+// wrap a returned `this.field` read in an unchecked cast, when the field's RECOVERED real generic type
+// shares the return type's raw erasure but carries a top-level WILDCARD argument that the return type
+// pins to a concrete parameterization. The decompiler renders a plain / inherited field read as its raw
+// erasure (it is not instantiated at the read site), so it emits a bare `return this.field` that javac
+// rejects once it resolves the field's TRUE declared generic type: guava RegularImmutableSortedSet<E>
+// `Comparator<Object> unsafeComparator() { return this.comparator; }` where `comparator` is inherited
+// from ImmutableSortedSet as `Comparator<? super E>` -- javac reports "Comparator<CAP#1> cannot be
+// converted to Comparator<Object>". The field's real type is recovered by the same cross-class hierarchy
+// walk that powers inherited-field receiver typing (values.RecoverThisFieldInstantiatedType). Restricted
+// to a WILDCARD-parameterized source: a `X<? ...>` -> same-erasure `X<concrete>` cast is an unchecked
+// conversion (always legal), whereas a fully-CONCRETE source (`List<Integer>` -> `List<String>`) would
+// be inconvertible and is excluded. Complements parameterizedReturnCast (which handles a type-variable /
+// wildcard RETURN target and bails on a concrete one like `Comparator<Object>`). Kill-switch
+// JDEC_INHERITED_FIELD_RET_CAST_OFF.
+func inheritedFieldReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) string {
+	if funcCtx == nil || v == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_INHERITED_FIELD_RET_CAST_OFF") != "" {
+		return ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	if retArgs, ok := topLevelTypeArgs(retStr); !ok || len(retArgs) == 0 {
+		return ""
+	}
+	fieldType := values.RecoverThisFieldInstantiatedType(funcCtx, v)
+	if fieldType == nil {
+		return ""
+	}
+	realStr := fieldType.String(funcCtx)
+	if realStr == retStr {
+		return "" // field already renders exactly as the return type; no cast needed.
+	}
+	// Same raw erasure is required, else the cast would target an unrelated class (inconvertible).
+	if erasureName(realStr) != erasureName(retStr) {
+		return ""
+	}
+	// The field's real type must carry a top-level WILDCARD argument (`?` / `? super X` / `? extends X`).
+	// A wildcard-parameterized source casts to any same-erasure parameterization by an unchecked
+	// conversion; a fully concrete source would be provably distinct = inconvertible.
+	realArgs, ok := topLevelTypeArgs(realStr)
+	if !ok {
+		return ""
+	}
+	hasWildcard := false
+	for _, a := range realArgs {
+		if strings.HasPrefix(a, "?") {
+			hasWildcard = true
+			break
+		}
+	}
+	if !hasWildcard {
+		return ""
+	}
+	return retStr
+}
+
 // typeVarFieldStoreCast returns the bare class-scope type variable (e.g. "K") to cast the stored
 // value to when assigning into a SAME-CLASS field that is declared as that type variable but the
 // stored value's static type is a DIFFERENT reference type (Object or the erased bound). Bytecode
@@ -608,6 +1281,290 @@ func wildcardFieldStoreCast(funcCtx *class_context.ClassContext, left, value val
 		if _, isTernary := values.UnpackSoltValue(value).(*values.TernaryExpression); !isTernary {
 			return ""
 		}
+	}
+	return fieldTypeStr
+}
+
+// parameterizedFieldStoreRawCast returns the RAW erased name of a SAME-CLASS field's declared type
+// (e.g. "Iterable") to wrap the stored value in an unchecked raw cast, when the field's generic
+// Signature is a FULLY-CONCRETE parameterization (no wildcard) `X<A>` and the stored value's static type
+// is `X<B>` -- SAME raw erasure, DIFFERENT type arguments. That is an invariant mismatch javac rejects
+// ("Iterable<RangeMapEntry<K,V>> cannot be converted to Iterable<Entry<Range<K>,V>>"); the source
+// carried an explicit raw cast (guava TreeRangeMap$AsMapOfRanges `this.entryIterable = (Iterable)
+// entryIterable`, needed once the ctor param is recovered as `Iterable<RangeMapEntry<K,V>>` rather than
+// erased). A raw cast to the value's OWN erasure is ALWAYS legal and the raw -> parameterized field
+// assignment is an unchecked conversion, so this can only ever FIX a mismatch, never introduce one. A
+// wildcard-bearing field is left to wildcardFieldStoreCast; a bare type-var field to
+// typeVarFieldStoreCast; a raw or already-identical value needs no cast. Kill-switch
+// JDEC_PARAM_FIELD_RAW_CAST_OFF.
+func parameterizedFieldStoreRawCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_PARAM_FIELD_RAW_CAST_OFF") != "" {
+		return ""
+	}
+	var fieldName string
+	switch lv := left.(type) {
+	case *values.RefMember:
+		ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef)
+		if !ok || !ref.IsThis {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	case *values.JavaClassMember:
+		if lv.Name != funcCtx.ClassName {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	default:
+		return ""
+	}
+	sig := funcCtx.FieldSignature(fieldName)
+	if sig == "" {
+		return ""
+	}
+	ft := types.ParseSignature(sig)
+	if ft == nil {
+		return ""
+	}
+	fieldTypeStr := ft.String(funcCtx)
+	// Field must be a FULLY-CONCRETE parameterization: has `<...>` but NO wildcard (wildcard fields are
+	// wildcardFieldStoreCast's job; a bare type-var field is typeVarFieldStoreCast's).
+	if !strings.Contains(fieldTypeStr, "<") || strings.Contains(fieldTypeStr, "?") {
+		return ""
+	}
+	if lit, ok := values.UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+		return ""
+	}
+	vt := value.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	vtStr := vt.String(funcCtx)
+	// `this` reads as the RAW enclosing class (its value type carries no type arguments), but javac types
+	// it as the class's OWN parameterization `ThisClass<ownParams>`. A `this.field = this` where the field
+	// is `ThisClass<swappedOrOtherArgs>` (e.g. guava RegularImmutableBiMap's `inverse` field declared
+	// `RegularImmutableBiMap<V, K>` assigned `this` of type `RegularImmutableBiMap<K, V>`) is the same
+	// invariant mismatch, just hidden behind the raw `this` value type. Reconstruct `this`'s own
+	// parameterization so the same-raw-different-args logic below fires. Kill-switch is the parent's
+	// JDEC_PARAM_FIELD_RAW_CAST_OFF.
+	if ref, ok := values.UnpackSoltValue(value).(*values.JavaRef); ok && ref.IsThis {
+		if !strings.Contains(vtStr, "<") && len(funcCtx.ClassTypeParams) > 0 {
+			vtStr = vtStr + "<" + strings.Join(funcCtx.ClassTypeParams, ", ") + ">"
+		}
+	}
+	// Value must be a PARAMETERIZED type of the SAME raw erasure (a raw value assigns fine unchecked; a
+	// different erasure is an unrelated type handled elsewhere) but with a DIFFERENT parameterization
+	// (identical needs no cast) -- exactly the invariant `X<B>` -> `X<A>` mismatch.
+	if !strings.Contains(vtStr, "<") {
+		return ""
+	}
+	if erasureName(vtStr) != erasureName(fieldTypeStr) {
+		return ""
+	}
+	if vtStr == fieldTypeStr {
+		return ""
+	}
+	return erasureName(fieldTypeStr)
+}
+
+// wildcardReturnFieldStoreCast returns a SAME-CLASS field's declared parameterized type string to wrap a
+// stored instance-call value in an unchecked cast, when the call's RECOVERED instantiated return type
+// shares the field's raw erasure but carries a top-level WILDCARD argument that the field pins to a
+// concrete parameterization. The call's return renders as its raw descriptor erasure (a jar-internal
+// generic return is not instantiated at the call site), so `this.field = recv.m()` emits no cast, but
+// javac types the call from the callee's TRUE generic return and rejects the invariant mismatch: guava
+// ImmutableSortedMap$SerializedForm ctor `this.comparator = var1.comparator()` where `var1` is
+// `ImmutableSortedMap<?,?>` and `ImmutableSortedMap.comparator()` returns `Comparator<? super K>`
+// (captured `Comparator<CAP#1>`), assigned into the field `Comparator<Object>` -- javac reports
+// "Comparator<CAP#1> cannot be converted to Comparator<Object>". The call's instantiated return is
+// recovered via the sibling hierarchy walk (types.ResolveInstantiatedReturnType), the same machinery
+// parameterizedReturnRawBridge uses. A wildcard-source same-erasure cast is an unchecked conversion
+// (always legal); a fully-concrete source (`List<Integer>` -> `List<String>`) would be inconvertible and
+// is excluded by the wildcard gate. Complements the two existing field-store casts, which never see this
+// shape: wildcardFieldStoreCast needs a WILDCARD-bearing field (this one is concrete),
+// parameterizedFieldStoreRawCast needs the VALUE to already RENDER parameterized (this call renders raw).
+// Kill-switch JDEC_WILDCARD_RETURN_FIELD_CAST_OFF.
+func wildcardReturnFieldStoreCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_WILDCARD_RETURN_FIELD_CAST_OFF") != "" {
+		return ""
+	}
+	if funcCtx.SiblingClassSig == nil {
+		return ""
+	}
+	var fieldName string
+	switch lv := left.(type) {
+	case *values.RefMember:
+		ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef)
+		if !ok || !ref.IsThis {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	case *values.JavaClassMember:
+		if lv.Name != funcCtx.ClassName {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	default:
+		return ""
+	}
+	sig := funcCtx.FieldSignature(fieldName)
+	if sig == "" {
+		return ""
+	}
+	ft := types.ParseSignature(sig)
+	if ft == nil {
+		return ""
+	}
+	fieldTypeStr := ft.String(funcCtx)
+	// Field must be a FULLY-CONCRETE parameterization: has `<...>` but NO wildcard (a wildcard field is
+	// wildcardFieldStoreCast's job, which already handles a raw-rendered value into a wildcard field).
+	if !strings.Contains(fieldTypeStr, "<") || strings.Contains(fieldTypeStr, "?") {
+		return ""
+	}
+	// Value must be an instance call on a jar-internal parameterized receiver, whose true instantiated
+	// return the sibling hierarchy walk can recover.
+	call, ok := values.UnpackSoltValue(value).(*values.FunctionCallExpression)
+	if !ok || call.IsStatic || call.Object == nil {
+		return ""
+	}
+	pt, ok := types.AsParameterizedType(call.Object.Type())
+	if !ok || pt.RawClassName == "" {
+		return ""
+	}
+	ret := types.ResolveInstantiatedReturnType(funcCtx, funcCtx.SiblingClassSig, pt.RawClassName, pt.TypeArgs, call.FunctionName, len(call.Arguments))
+	if ret == nil {
+		return ""
+	}
+	valRetStr := ret.String(funcCtx)
+	if valRetStr == fieldTypeStr || erasureName(valRetStr) != erasureName(fieldTypeStr) {
+		return ""
+	}
+	// The recovered return must carry a top-level WILDCARD (unchecked-castable to any same-erasure
+	// concrete parameterization); a fully-concrete source would be provably distinct = inconvertible.
+	retArgs, ok := topLevelTypeArgs(valRetStr)
+	if !ok {
+		return ""
+	}
+	for _, a := range retArgs {
+		if strings.HasPrefix(a, "?") {
+			return fieldTypeStr
+		}
+	}
+	return ""
+}
+
+// subtypeValueFieldStoreCast returns a SAME-CLASS field's declared parameterized type string to wrap a
+// stored value in an unchecked cast, when the value's ERASURE is a PROPER (jar-internal) SUBTYPE of the
+// field's erasure and the field's top-level type arguments are all TYPE VARIABLES / wildcards. guava
+// EndpointPairIterator<N> ctor `this.successorIterator = ImmutableSet.of().iterator()`: the field is
+// `Iterator<N>`, but `ImmutableSet.of().iterator()` returns `UnmodifiableIterator<Object>` (the
+// zero-arg factory `of()` infers `<Object>` with no target-typing across the `.iterator()` chain), so
+// javac reports "UnmodifiableIterator<Object> cannot be converted to Iterator<N>". The decompiler
+// renders the value's receiver raw, so no cast is emitted. Casting ANY subtype of `Iterator` to
+// `Iterator<N>` (N a type variable) is UNCONDITIONALLY legal -- an unchecked widening to the supertype
+// interface whose type argument is a variable is never "provably distinct", regardless of the value's
+// real inferred argument -- which is exactly why this stays safe where a same-erasure nested cast would
+// not. Restricted to a PROPER subtype (same-erasure is parameterizedFieldStoreRawCast's job) proven via
+// the jar-internal supertype walk (funcCtx.SiblingSuperTypes / IsSubtypeVia; a JDK-only relation is not
+// provable and declines), and to a field whose args are all type-variables/wildcards (a concrete arg
+// could be provably distinct from the subtype value's inferred arg). Kill-switch
+// JDEC_SUBTYPE_FIELD_STORE_CAST_OFF.
+func subtypeValueFieldStoreCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_SUBTYPE_FIELD_STORE_CAST_OFF") != "" || funcCtx.SiblingSuperTypes == nil {
+		return ""
+	}
+	var fieldName string
+	switch lv := left.(type) {
+	case *values.RefMember:
+		ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef)
+		if !ok || !ref.IsThis {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	case *values.JavaClassMember:
+		if lv.Name != funcCtx.ClassName {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	default:
+		return ""
+	}
+	sig := funcCtx.FieldSignature(fieldName)
+	if sig == "" {
+		return ""
+	}
+	ft := types.ParseSignature(sig)
+	if ft == nil {
+		return ""
+	}
+	fieldTypeStr := ft.String(funcCtx)
+	if !strings.Contains(fieldTypeStr, "<") {
+		return ""
+	}
+	// Every top-level field type argument must be an UNBOUNDED type variable or a wildcard, so the cast
+	// `(X<..>)(subtypeValue)` is never provably distinct from the value's real (unknown) inferred args.
+	// A BOUNDED variable (`C extends Comparable`) must be EXCLUDED: `Iterator<Object>` -> `Iterator<C>`
+	// is then provably distinct (C can never be Object) = inconvertible, AND the assignment-context
+	// target-typing that made the original compile (`this.elemItr = Iterators.emptyIterator()` infers
+	// T=C) would be DESTROYED by wrapping the value in a cast (a cast is not an inference target). Only
+	// an unbounded variable both keeps the cast legal and is a case where the chained/broken-inference
+	// value genuinely needs it (guava EndpointPairIterator `N extends Object`).
+	fargs, ok := topLevelTypeArgs(fieldTypeStr)
+	if !ok || len(fargs) == 0 {
+		return ""
+	}
+	for _, fa := range fargs {
+		if strings.HasPrefix(fa, "?") || typeVarIsUnbounded(fa, funcCtx) {
+			continue
+		}
+		return ""
+	}
+	if lit, ok := values.UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+		return ""
+	}
+	vt := value.Type()
+	if vt == nil {
+		return ""
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	// Field raw FQN: the field is parameterized, so take the parameterized type's raw class name.
+	fpt, ok := types.AsParameterizedType(ft)
+	if !ok || fpt.RawClassName == "" {
+		return ""
+	}
+	fieldFQN := fpt.RawClassName
+	// Value raw FQN: a raw class value yields it directly; a parameterized value via its raw class name.
+	valFQN, ok := types.ClassFQNOf(vt)
+	if !ok {
+		if vpt, okp := types.AsParameterizedType(vt); okp {
+			valFQN = vpt.RawClassName
+		}
+	}
+	if valFQN == "" {
+		return ""
+	}
+	if valFQN == fieldFQN { // same erasure -> parameterizedFieldStoreRawCast / wildcardReturnFieldStoreCast
+		return ""
+	}
+	if !types.IsSubtypeVia(valFQN, fieldFQN, funcCtx.SiblingSuperTypes) {
+		return ""
 	}
 	return fieldTypeStr
 }
@@ -1006,8 +1963,20 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 	// Re-insert the `? 1 : 0` coercion when an intrinsically-boolean value (a `&`/`|`/`^` boolean
 	// connective or a boolean ternary, NOT a bare ref) is assigned to an int target: javac elided it
 	// because the boolean is already 0/1 on the stack (guava DoubleMath/LongMath, ImmutableSortedMap).
-	rhsVal := values.CoerceIntAssignRHS(a.LeftValue.Type(), a.JavaValue)
-	assign := fmt.Sprintf("%s = %s", a.LeftValue.String(funcCtx), rhsVal.String(funcCtx))
+	rhsVal := values.CoerceIntAssignRHS(a.LeftValue.Type(), a.JavaValue, funcCtx)
+	rhsStr := rhsVal.String(funcCtx)
+	// A lambda / method-reference REASSIGNED into a slot whose declared type is the RAW form of the
+	// target functional interface (the slot was first declared from a raw getfield, so it never adopted
+	// the lambda's parameterized type) needs an explicit cast to its own instantiated type, else the
+	// explicitly-typed lambda parameters / method reference cannot bind to the raw SAM. Applied only on
+	// reassignment: on a first declaration the slot adopts the lambda's parameterized type directly. No-op
+	// for the common (correctly parameterized) target. See values.LambdaAssignFunctionalCast.
+	if !a.IsFirst {
+		if cast := values.LambdaAssignFunctionalCast(a.LeftValue, a.JavaValue, funcCtx); cast != "" {
+			rhsStr = fmt.Sprintf("(%s)(%s)", cast, rhsStr)
+		}
+	}
+	assign := fmt.Sprintf("%s = %s", a.LeftValue.String(funcCtx), rhsStr)
 	if a.IsFirst {
 		// For `T x = null`, the initializer's static type is java.lang.Object, but the
 		// variable's declared type is its (possibly refined) ref type — using the initializer
@@ -1067,6 +2036,13 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 			assign = fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
 			declType = a.LeftValue.Type()
 		}
+		// A local whose initializer is a jar-internal generic call returning a bare type variable T (but
+		// erased to T's bound in the descriptor) must be declared at T, not the erased bound, or later
+		// T-typed uses fail to compile. javac re-derives the RHS as T, so no RHS cast is needed. See
+		// typeVarLocalDeclName (guava Cut$AboveValue: `C var3 = domain.next(...)`).
+		if tv := typeVarLocalDeclName(funcCtx, a.LeftValue, a.JavaValue, declType); tv != "" {
+			return tv + " " + assign
+		}
 		return declType.String(funcCtx) + " " + assign
 	} else {
 		// Narrowing REASSIGNMENT to a byte/char/short target (field/local) whose RHS is int-typed:
@@ -1097,6 +2073,23 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// `Class<? super T>` and the call returns `Class<?>` needs an explicit unchecked
 		// `(Class<? super T>)` cast (gson TypeToken). See wildcardFieldStoreCast.
 		if cast := wildcardFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+		}
+		// Same-erasure invariant field-store mismatch (`X<B>` value into concrete `X<A>` field): the
+		// source carried a raw `(X)` cast that bytecode erased. See parameterizedFieldStoreRawCast.
+		if cast := parameterizedFieldStoreRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+		}
+		// Concrete `X<A>` field assigned a raw-rendered call whose RECOVERED instantiated return is a
+		// same-erasure WILDCARD parameterization (`this.comparator = var1.comparator()` -> the callee
+		// truly returns `Comparator<? super K>`): wrap in `(X<A>)`. See wildcardReturnFieldStoreCast.
+		if cast := wildcardReturnFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+		}
+		// Proper-subtype value into a type-variable-parameterized field (`this.successorIterator =
+		// ImmutableSet.of().iterator()` -> field `Iterator<N>`, value a subtype `UnmodifiableIterator`):
+		// wrap in `(X<typevars>)`. See subtypeValueFieldStoreCast.
+		if cast := subtypeValueFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
 			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
 		}
 		return assign

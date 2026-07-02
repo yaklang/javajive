@@ -74,6 +74,12 @@ var jarSpecs = map[string]jarSpec{
 	},
 	"fastjson2": {
 		relPath: "com/alibaba/fastjson2/fastjson2/2.0.43/fastjson2-2.0.43.jar",
+		// fastjson2 的 KotlinUtils 是 kotlin 可选集成, 引用 kotlin.reflect / kotlin.jvm.internal
+		// (编译期接口全在 kotlin-stdlib 内)。缺失该依赖会误报 "package kotlin.* does not exist",
+		// 与 spring-jcl / failureaccess 同属 classpath 补全, 不是反编译缺陷。
+		depGlob: []string{
+			"org/jetbrains/kotlin/kotlin-stdlib/*/kotlin-stdlib-*.jar",
+		},
 	},
 	"codec": {
 		relPath: "commons-codec/commons-codec/1.15/commons-codec-1.15.jar",

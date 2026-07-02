@@ -327,6 +327,93 @@ func SynthesizeUndeclaredEmbeddedAssignDecls(sts *[]statements.Statement, target
 	}
 }
 
+// PropagateCopyArrayDeclType repairs a split-slot foreach/copy temp that lost its ARRAY type to
+// java.lang.Object because of DFS-order type-snapshot staleness in the single global var table.
+//
+// javac desugars `for (T x : arr) ...` into a synthetic `T[] arr$ = arr; int len$ = arr$.length;
+// ...`. That copy `arr$ = arr` reuses (disjointly) a JVM slot an EARLIER range used for an unrelated
+// array; the decompiler correctly SPLITS them into two locals, but the second local is minted from an
+// `aload` whose SlotValue captured the SOURCE slot's type BEFORE the source's own `= null` init
+// adopted its concrete array type -- the source's checkcast store is visited AFTER this copy in DFS
+// order, so at mint time the source still reads java.lang.Object. NewVar freezes that stale Object
+// into the copy target, whose hoisted declaration then renders `Object arr$;` and every `arr$.length`
+// ("cannot find symbol: variable length") / `arr$[i]` ("array required, but Object found") fails to
+// recompile. Real case: fastjson2 ObjectReaderException.readObject `Object var18_1 = var8;` where
+// var8 is StackTraceElement[] (bytecode slot 19, disjoint with an earlier String[] range).
+//
+// By the time this pass runs (after RewriteVar unifies ids and every stack-sim type adoption is
+// committed) the copy SOURCE reports its true array type. When a local's SINGLE value definition is a
+// direct local-to-local copy (`dst = src`), dst is declared EXACTLY java.lang.Object, and src's live
+// type is an array, dst is retyped to that array (a copy is assignment-identical, and an array is
+// assignable to every prior Object-context use, so no use site regresses). Strictly gated: exactly
+// one copy def + all-Object declaration + array source -> a genuinely multi-type Object slot (2+
+// defs), a non-array copy, or an already-typed local is left untouched. Kill-switch:
+// JDEC_COPY_ARRAY_DECL_TYPE_OFF=1.
+func PropagateCopyArrayDeclType(sts *[]statements.Statement) {
+	if sts == nil || os.Getenv("JDEC_COPY_ARRAY_DECL_TYPE_OFF") == "1" {
+		return
+	}
+	// Per unified variable id: every left-hand JavaRef (declarations + stores) and its value-defining
+	// assignments (JavaValue present, not a bare `T x;` declaration).
+	refsByID := map[*utils.VariableId][]*values.JavaRef{}
+	realDefsByID := map[*utils.VariableId][]*statements.AssignStatement{}
+	var walk func(list []statements.Statement)
+	walk = func(list []statements.Statement) {
+		for _, st := range list {
+			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil {
+					refsByID[ref.Id] = append(refsByID[ref.Id], ref)
+					if as.JavaValue != nil && !as.IsDeclare {
+						realDefsByID[ref.Id] = append(realDefsByID[ref.Id], as)
+					}
+				}
+			}
+			for _, cl := range childStatementLists(st) {
+				walk(*cl)
+			}
+		}
+	}
+	walk(*sts)
+
+	for id, defs := range realDefsByID {
+		if len(defs) != 1 {
+			continue // a genuinely multi-type Object slot must not be narrowed
+		}
+		// The single definition must be a DIRECT copy of ANOTHER local (`dst = src`).
+		src, ok := core.UnpackSoltValue(defs[0].JavaValue).(*values.JavaRef)
+		if !ok || src == nil || src.Id == id {
+			continue
+		}
+		srcType := src.Type()
+		if srcType == nil {
+			continue
+		}
+		if _, isArr := srcType.RawType().(*types.JavaArrayType); !isArr {
+			continue // only the array-loss defect; reference/scalar copies are out of scope
+		}
+		// Every declaration/store of the target must currently read EXACTLY java.lang.Object (the
+		// stale null default). Anything already typed means the slot is not the frozen-Object defect.
+		refs := refsByID[id]
+		if len(refs) == 0 {
+			continue
+		}
+		allObject := true
+		for _, r := range refs {
+			jc, ok := r.Type().RawType().(*types.JavaClass)
+			if !ok || jc.Name != "java.lang.Object" {
+				allObject = false
+				break
+			}
+		}
+		if !allObject {
+			continue
+		}
+		for _, r := range refs {
+			r.ResetVarType(srcType)
+		}
+	}
+}
+
 type Scope struct {
 	nowId       int
 	deep        int
