@@ -10,8 +10,9 @@ import (
 )
 
 // TestScratchDump 反编译指定 jar 里的若干 class 到持久目录, 供人工排错。
-// 用法: SCRATCH_JAR=guava SCRATCH_CLASSES=com/google/common/collect/Maps,... SCRATCH_DIR=/tmp/jdec-scratch \
-//        go test -run TestScratchDump ./test/cross/
+//
+//	用法: SCRATCH_JAR=guava SCRATCH_CLASSES=com/google/common/collect/Maps,... SCRATCH_DIR=/tmp/jdec-scratch \
+//	       go test -run TestScratchDump ./test/cross/
 func TestScratchDump(t *testing.T) {
 	jarName := os.Getenv("SCRATCH_JAR")
 	classes := os.Getenv("SCRATCH_CLASSES")
