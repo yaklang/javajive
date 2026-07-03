@@ -51,6 +51,19 @@ type ClassObjectDumper struct {
 	// carry their own `lv<innerseq>` names, so the outer rename (matching only `varN`) never touches
 	// them. See renameLambdaBodyLocals.
 	lambdaLocalSeq    int
+	// lambdaDepth is the current lexical nesting depth of lambda bodies being dumped. A nested lambda
+	// body is rendered EAGERLY while its enclosing lambda's bytecode is still being parsed (the
+	// invokedynamic that materialises the inner arrow runs inside the outer's ParseBytesCode), so the
+	// enclosing lambda's own parameters are not yet named when the inner picks its parameter names.
+	// javac forbids a lambda parameter from shadowing an enclosing lambda parameter ("variable l0 is
+	// already defined"), so a flat `l0,l1,...` scheme collides for nested lambdas (spring-core
+	// MergedAnnotationPredicates.typeIn, DataBufferUtils.readAsynchronousFileChannel). We namespace
+	// the parameters of a lambda at depth>=2 by depth (`l<depth>_<i>`), which is collision-free:
+	// nesting strictly increases depth, and two lambdas at the SAME depth are always siblings in
+	// DISJOINT scopes (safe to share names). Top-level lambdas (depth 1) keep `l<i>`, so the common
+	// case is byte-for-byte unchanged. See DumpMethodWithInitialId. Kill-switch:
+	// JDEC_LAMBDA_PARAM_SCOPE_OFF=1 restores the flat `l<i>` naming.
+	lambdaDepth       int
 	fieldDefaultValue map[string]string
 	dumpedMethodsSet  map[string]*dumpedMethods
 	// aggressive marks that the CURRENT method dump is a second attempt for a method whose
@@ -2382,6 +2395,13 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	if v := c.lambdaMethods[name]; slices.Contains(v, descriptor) {
 		isLambda = true
 	}
+	// Track lexical lambda nesting so nested-lambda parameters get collision-free names (see
+	// c.lambdaDepth). The increment must bracket ParseBytesCode below, because an inner lambda's arrow
+	// is materialised eagerly during the outer lambda's bytecode parse.
+	if isLambda {
+		c.lambdaDepth++
+		defer func() { c.lambdaDepth-- }()
+	}
 
 	c.FuncCtx.IsStatic = method.AccessFlags&StaticFlag == StaticFlag
 	accessFlagsVerbose, accessFlagCode := getMethodAccessFlagsVerbose(method.AccessFlags)
@@ -2614,9 +2634,18 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			// slot-based scheme never generates, eliminating the collision while keeping the body
 			// consistent (every body reference shares the same JavaRef/Id).
 			if isLambda {
+				// A nested lambda (depth>=2) namespaces its parameters by nesting depth so they cannot
+				// shadow an enclosing lambda parameter; a top-level lambda keeps the flat `l<i>` name so
+				// the overwhelmingly common single-lambda case stays byte-for-byte unchanged.
+				nestScope := c.lambdaDepth >= 2 && os.Getenv("JDEC_LAMBDA_PARAM_SCOPE_OFF") == ""
 				for i, val := range samParams {
 					if ref, ok := val.(*values.JavaRef); ok && ref.Id != nil && !ref.IsThis {
-						name := fmt.Sprintf("l%d", i)
+						var name string
+						if nestScope {
+							name = fmt.Sprintf("l%d_%d", c.lambdaDepth, i)
+						} else {
+							name = fmt.Sprintf("l%d", i)
+						}
 						ref.Id.SetName(name)
 						lambdaParamNames = append(lambdaParamNames, name)
 					}

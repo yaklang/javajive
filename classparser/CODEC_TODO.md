@@ -154,6 +154,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_INSTANCEOF_REPLACEVAR_OFF` | `OP_INSTANCEOF` 的 CustomValue 转发 ReplaceVar 给操作数 |
 | `JDEC_LAMBDA_CTX_RESTORE_OFF` | 内联 lambda 体懒解析后还原外围方法 FuncCtx |
 | `JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF` | 未使用的 lambda 形参隐式渲染(`(Integer l0)`→`(l0)`) |
+| `JDEC_LAMBDA_PARAM_SCOPE_OFF` | 嵌套 lambda 形参按嵌套深度命名(`l<depth>_<i>`), 避免内层 `l0` 遮蔽外层 `l0`(javac「variable l0 is already defined」); 顶层 lambda 仍 `l<i>` 保持字节一致。修 spring MergedAnnotationPredicates/DataBufferUtils 等 |
 | `JDEC_LAMBDA_RAWRECV_CAST_OFF` | raw 接收者擦除 SAM 的方法调用侧实参造型(`(Consumer<FieldReader>)`) |
 | `JDEC_CTOR_METHODREF_FIX_OFF` | 构造器方法引用 `::new` 渲染(修 `::new_`) |
 | `JDEC_CTOR_DIAMOND_OFF` | 泛型类 `new` 带方法引用/lambda 实参时补菱形 `<>` |

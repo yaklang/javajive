@@ -1,0 +1,9 @@
+# Nested-lambda parameter scoping (JDEC_LAMBDA_PARAM_SCOPE_OFF): a lambda nested inside another
+# lambda must not reuse the enclosing lambda's `l0` parameter name (javac: "variable l0 is already
+# defined"). A depth>=2 lambda namespaces its parameters as `l<depth>_<i>`; the top-level lambda keeps
+# `l0`. The inner body still references the OUTER `l0`, proving the two coexist. Real hits: spring-core
+# MergedAnnotationPredicates.typeIn and DataBufferUtils.readAsynchronousFileChannel.
++(l0) -> {
++((Predicate<String>)((l2_0) -> {
++(l0.equals(l2_0)) && (l2_0.startsWith(var1))
++})).test(l0);
