@@ -395,7 +395,7 @@ func (f *ClassContext) GetAllImported() []string {
 				if !dotOK && os.Getenv("JDEC_DOLLAR_FLAT_IMPORT_OFF") != "" {
 					continue
 				}
-				stdlibOrLegacy := isStdlibNestedDottedPackage(pkg) || os.Getenv("JDEC_NESTED_FLAT_IMPORT_OFF") != ""
+				stdlibOrLegacy := f.nestedTypeShouldDot(pkg, className) || os.Getenv("JDEC_NESTED_FLAT_IMPORT_OFF") != ""
 				// stdlib nested types import the OUTER class (the reference uses the dotted Outer.Inner
 				// spelling); this only applies when the name is dot-splittable (dotOK). A '$'-leading flat
 				// unit (dotOK==false) keeps its flat name so the import matches the flat reference.
@@ -455,6 +455,43 @@ func (f *ClassContext) Import(name string) {
 // JDK / standard-library types (never a Yak-emitted flat unit, and always present on the compile
 // classpath as genuinely nested Outer.Inner). For these a nested-type REFERENCE must use the dotted
 // Java source spelling (Map.Entry), not the binary flat name (Map$Entry) Yak uses for its own units.
+// nestedTypeShouldDot reports whether a `$`-nested binary type name (in package pkg) must be rendered
+// with the DOTTED source spelling (Outer.Inner) rather than Yak's flat `Outer$Inner`. Two cases:
+//
+//   - stdlib packages (java.*/javax.*/kotlin.*/...): always dotted (isStdlibNestedDottedPackage).
+//   - EXTERNAL third-party nested types whose OUTER class is NOT one of the jar's own decompiled units
+//     (reactor.blockhound.BlockHound$Builder in spring-core): they only exist on the compile classpath
+//     as a genuinely nested `Outer.Inner`, so the flat `Outer$Inner` is unresolvable ("cannot find
+//     symbol: class BlockHound$Builder"). Yak NEVER emits a unit for a class outside the jar, so
+//     dotting these is safe. The jar-membership test is SiblingSuperTypes (reads the always-present
+//     super_class entry, so it resolves for EVERY jar-internal class, generic or not; ok=false means
+//     the class is external). When no cross-class resolver is wired (single-class decompile,
+//     SiblingSuperTypes==nil) the answer is "keep flat" -- unchanged legacy behavior.
+//
+// Kill-switch JDEC_EXTERNAL_NESTED_DOT_OFF disables ONLY the external-class extension (stdlib dotting
+// is unaffected).
+func (f *ClassContext) nestedTypeShouldDot(pkg, className string) bool {
+	if isStdlibNestedDottedPackage(pkg) {
+		return true
+	}
+	if f == nil || f.SiblingSuperTypes == nil || os.Getenv("JDEC_EXTERNAL_NESTED_DOT_OFF") != "" {
+		return false
+	}
+	// Same-package nested types are (almost always) Yak's own flat units; never dot them.
+	if pkg == f.PackageName {
+		return false
+	}
+	outerBin := pkg + "." + className
+	if i := strings.IndexByte(className, '$'); i >= 0 {
+		outerBin = pkg + "." + className[:i]
+	}
+	outerBin = strings.ReplaceAll(outerBin, ".", "/")
+	if _, ok := f.SiblingSuperTypes(outerBin); ok {
+		return false // outer class IS in the jar -> Yak emits it flat -> keep flat
+	}
+	return true // outer class is external -> genuinely nested -> dot it
+}
+
 func isStdlibNestedDottedPackage(pkg string) bool {
 	switch {
 	case pkg == "java" || strings.HasPrefix(pkg, "java."):
@@ -504,7 +541,7 @@ func (f *ClassContext) ShortTypeName(name string) string {
 	// safe. The import statement still carries the OUTER class (see GetAllImported). Kill-switch:
 	// JDEC_STDLIB_NESTED_DOT_OFF=1 restores the legacy flat spelling.
 	dotted := className
-	if strings.Contains(className, "$") && os.Getenv("JDEC_STDLIB_NESTED_DOT_OFF") == "" && isStdlibNestedDottedPackage(pkg) {
+	if strings.Contains(className, "$") && os.Getenv("JDEC_STDLIB_NESTED_DOT_OFF") == "" && f.nestedTypeShouldDot(pkg, className) {
 		if src, ok := binaryNestedNameToSource(className); ok {
 			dotted = src
 		}

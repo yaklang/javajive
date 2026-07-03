@@ -8,8 +8,9 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 32/15 · guava 28/20 · commons-lang3 18/11 · spring 65/29。
-> (本轮: RAW `new HashMap(typedMap)` 作 lambda 调用接收者时补菱形 `new HashMap<>(...)`(`JDEC_NEW_RECV_DIAMOND_OFF`), 治 spring SimpleAliasRegistry `new HashMap(this.aliasMap).forEach((l0,l1)->...)` 的 raw 接收者擦除 SAM; spring 错误行 68→65、缺陷类 30→29; 另: harness 对 Multi-Release jar 的 META-INF/versions/N 单元改用 `--release N` 独立编译(snakeyaml versions/9 Logger 用 JDK9 API, 在 --release 8 下任何反编译器都必挂, 属 harness 口径缺陷), snakeyaml 错误行 8→1、缺陷类 2→1; 合计缺陷类 79→77、干净率 96.5%→96.6%。)
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 32/15 · guava 28/20 · commons-lang3 18/11 · spring 63/29。
+> (本轮: 第三方(非 JDK)嵌套类引用点号化(`JDEC_EXTERNAL_NESTED_DOT_OFF`), 以 SiblingSuperTypes 判外层类是否在本 jar; 不在则该嵌套类只在 classpath 上以真正嵌套的 `Outer.Inner` 存在, 扁平 `Outer$Inner` 不可解析, 治 spring `reactor.blockhound.BlockHound$Builder`; spring 错误行 65→63; 合计 145→143。)
+> (上一轮: 扁平内部类外层类型变量独立位置擦除(`JDEC_INNER_STANDALONE_ERASE_OFF`), 治 guava HashIterator/Itr; guava 31→28。RAW `new HashMap(typedMap)` 作 lambda 调用接收者补菱形(`JDEC_NEW_RECV_DIAMOND_OFF`); Multi-Release jar 的 versions/N 单元按 `--release N` 独立编译; 合计缺陷类 79→77、干净率 96.5%→96.6%。)
 > (本轮两修: ① 类头类型参数 bound 改用真实 funcCtx 渲染以注册 import(`JDEC_TYPEPARAM_BOUND_IMPORT_OFF`), 治 spring MergedAnnotationSelector / FirstRunOfPredicate 的 `<A extends Annotation>` 缺 import; ② invokespecial 目标为直接实现接口的 default 方法时渲染 `Iface.super.m()`(`JDEC_IFACE_DEFAULT_SUPER_OFF`), 治 StandardAnnotationMetadata / StandardMethodMetadata / SimpleAnnotationMetadata 的 `super.getAnnotationTypes()` 族; spring 错误行 77→68、缺陷类 36→30, 合计缺陷类 85→79、干净率 96.2%→96.5%。)
 
 ## 重新生成本清单(诚实数据)
