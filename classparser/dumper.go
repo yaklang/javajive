@@ -2624,18 +2624,29 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			}
 			ensureUniqueParameterNames(samParams, funcCtx)
 			paramsNewStrList := []string{}
-			// A lambda arrow's parameters are best rendered WITHOUT explicit types: Java infers each
-			// parameter's type from the target functional interface at the use site, whereas an EXPLICIT
-			// type must match the SAM's parameter type EXACTLY. The bytecode only preserves the ERASED
-			// impl-method descriptor (e.g. `Predicate` for a SAM `matches(Predicate<String>)`), so
-			// emitting `(Predicate l0) -> ...` yields "incompatible parameter types in lambda expression"
-			// against the parameterized SAM (spring-core ProfilesParser.or/and/not/equals, SimpleAliasRegistry,
-			// the ReactiveAdapterRegistry registrars, codec encoders -- 21 sites). Implicit parameters
-			// `(l0) -> ...` always bind to the inferred SAM type and never carry a stale erasure.
-			// Kill-switch: JDEC_LAMBDA_IMPLICIT_PARAMS_OFF=1 restores explicit-typed lambda parameters.
-			if isLambda && os.Getenv("JDEC_LAMBDA_IMPLICIT_PARAMS_OFF") == "" {
+			// A lambda arrow parameter whose type is a GENERIC class rendered RAW is best emitted WITHOUT
+			// an explicit type: the bytecode only preserves the ERASED impl-method descriptor (e.g.
+			// `Predicate` for a SAM `matches(Predicate<String>)`), so `(Predicate l0) -> ...` fails to bind
+			// against the parameterized SAM ("incompatible parameter types in lambda expression" --
+			// spring-core ProfilesParser.or/and/not/equals, SimpleAliasRegistry, the ReactiveAdapterRegistry
+			// registrars, codec encoders). An IMPLICIT `(l0) -> ...` binds to the inferred SAM type instead.
+			//
+			// But dropping the type is NOT free: when the lambda flows into a RAW-cast generic call (e.g.
+			// `Collections.sort((List)(var1), (Integer x, Integer y) -> ...)`), the EXPLICIT concrete param
+			// type is what DRIVES the method's type-variable inference (T=Integer); made implicit, T infers
+			// to Object and the body's `x.intValue()` no longer resolves (the synthetic round-trip guard).
+			// So go implicit only when the erasure would actually mismatch -- i.e. at least one param is a
+			// generic-capable class rendered raw -- and keep the explicit type otherwise (concrete types
+			// like Integer/String help inference and match exactly).
+			// Kill-switch: JDEC_LAMBDA_IMPLICIT_PARAMS_OFF=1 forces explicit-typed lambda parameters.
+			if isLambda && os.Getenv("JDEC_LAMBDA_IMPLICIT_PARAMS_OFF") == "" && c.lambdaParamsShouldBeImplicit(samParams) {
+				// Implicit: emit only the (unique) parameter names, letting Java infer their types.
 				for _, val := range samParams {
-					paramsNewStrList = append(paramsNewStrList, val.String(c.FuncCtx))
+					nm := ""
+					if val != nil {
+						nm = val.String(c.FuncCtx)
+					}
+					paramsNewStrList = append(paramsNewStrList, nm)
 				}
 			} else if !isLambda && name != "<init>" && name != "<clinit>" && len(samParams) != descriptorParamCount {
 				paramSlotOffset := 0
@@ -3327,6 +3338,55 @@ func paramDescriptorNarrowType(descTypes []types.JavaType, idx int, inferred typ
 		return nil
 	}
 	return descTypes[idx]
+}
+
+// boxedPrimitiveLambdaParamTypes are the java.lang wrapper classes that appear as lambda parameters
+// with NO lost type arguments -- rendering them explicitly always matches the SAM and, crucially, an
+// explicit `(Integer l0)` DRIVES a generic call's type-variable inference (Collections.sort's T) that a
+// bare `(l0)` would leave as Object. They must therefore stay explicit (see lambdaParamsShouldBeImplicit).
+var boxedPrimitiveLambdaParamTypes = map[string]bool{
+	"java.lang.Integer":   true,
+	"java.lang.Long":      true,
+	"java.lang.Short":     true,
+	"java.lang.Byte":      true,
+	"java.lang.Character": true,
+	"java.lang.Boolean":   true,
+	"java.lang.Float":     true,
+	"java.lang.Double":    true,
+}
+
+// lambdaParamsShouldBeImplicit decides whether a lambda arrow renders its parameters WITHOUT explicit
+// types. The bytecode only preserves the ERASED impl-method descriptor, so a GENERIC parameter surfaces
+// raw (`Predicate` for `Predicate<String>`) and an explicit `(Predicate l0) -> ...` fails to bind
+// against the parameterized SAM -- those must go implicit. But a PRIMITIVE or BOXED-primitive parameter
+// (`int`, `Integer`) carries no lost type argument: explicit is always assignable AND is what lets a
+// generic call infer its type variable (e.g. `Collections.sort((List)(v), (Integer x, Integer y) ->
+// ...)` infers T=Integer; made implicit x/y infer Object and `x.intValue()` stops resolving -- the
+// synthetic round-trip guard). So go implicit only when at least one parameter is a "real" (generic-
+// capable) reference type; keep everything explicit when every parameter is primitive/boxed.
+func (c *ClassObjectDumper) lambdaParamsShouldBeImplicit(samParams []values.JavaValue) bool {
+	sawGenericCapable := false
+	for _, val := range samParams {
+		if val == nil {
+			continue
+		}
+		t := val.Type()
+		if t == nil {
+			continue
+		}
+		if p, ok := t.RawType().(*types.JavaPrimer); ok {
+			switch p.Name {
+			case types.JavaByte, types.JavaChar, types.JavaShort, types.JavaInteger,
+				types.JavaLong, types.JavaFloat, types.JavaDouble, types.JavaBoolean:
+				continue // a genuine primitive lambda param (IntPredicate etc.): explicit is exact
+			}
+		}
+		if fqn, ok := types.ClassFQNOf(t); ok && boxedPrimitiveLambdaParamTypes[fqn] {
+			continue // boxed primitive: explicit matches and drives generic inference
+		}
+		sawGenericCapable = true
+	}
+	return sawGenericCapable
 }
 
 func ensureUniqueParameterNames(params []values.JavaValue, funcCtx *class_context.ClassContext) {
