@@ -8,7 +8,8 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 8/2 · fastjson2 32/15 · guava 31/20 · commons-lang3 19/12 · spring 80/38。
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 8/2 · fastjson2 32/15 · guava 31/20 · commons-lang3 18/11 · spring 77/36。
+> (本轮: bool-vs-int 三元比较折叠 `(boolVar) != ((cond)?1:0)` → `boolVar != cond`, 治 spring ASM MethodVisitor/MethodWriter + commons-lang3 各若干类; spring 缺陷类 38→36、错误行 80→77, 合计缺陷类 88→85。)
 
 ## 重新生成本清单(诚实数据)
 
@@ -28,6 +29,7 @@ cat /tmp/jdec-inv/guava.tree.fails.txt
 - 已治本多块(返回点向下造型 / JDK·同类·继承·私有方法实参造型 / 统一跨类泛型解析器 / 擦除型类型变量多余 upcast 抑制 / 参数化实参·数组实参造型等, 见 CODEC_TODO §4)。**剩余按根因分**:
   - **(a) 接收者自身泛型未被传播复原成参数化类型**: 接收者是本类型局部变量/字段而非 `this`(`this.box.put(o)`, box=`Box<E>`)时, 其泛型未沿声明传播复原, 取值点仍是 Object。业界 CFR/Vineflower 亦有此长尾。
   - **(b) 通配符捕获 `CAP#1`(guava)** —— **oracle 实证内在难, 优先级下调**: `this.equivalence.equivalent(a,b)`, 字段 `Equivalence<? super T>` 捕获 `CAP#1`, 实参 Object 不可造 `(CAP#1)`。`ORACLE_JAR=guava ORACLE_CLASS='base/Equivalence$Wrapper'` 三方全败(真源码用 `(Equivalence<Object>)` + `@SuppressWarnings`)。方向(若做): 通配符接收者**整体** `<Object>` 造型。
+  - **(d) 返回点「inference variable X has incompatible bounds」(guava 头号桶, ~13 行: ImmutableEnumMap/Range/Maps/Ordering/Striped/Sets$DescendingSet/MinMaxPriorityQueue$Builder/Tables$TransposeTable 等)** —— **有界类型变量同擦除强转 javac 实测拒绝, 不可用 `parameterizedReturnCast` 治**: 形如 `return ImmutableMap.of(k.getKey(), k.getValue());`(目标 `ImmutableMap<K,V>`、K/V 或 `C extends Comparable` 有界), javac 对 `of()` 独立推断出 `<Object,Object>` 后再与目标合流报「incompatible bounds」。实测 `(ImmutableMap<K,V>)(ImmutableMap<Object,Object>)` **当目标实参有界(K extends Enum / C extends Comparable)时 javac 直接报「不兼容的类型…无法转换」**(见 `parameterizedReturnCast` 注释里「BOUNDED var 被排除」的原因)。真源码用 `@SuppressWarnings` + 不同结构强转, 从擦除字节码无法忠实复原。**根因仍是 (a): 局部变量/字段(如 raw `Map.Entry var1`)的泛型未沿声明传播复原**——只要把 `var1` 复原为 `Map.Entry<K,V>`, `getKey()/getValue()` 即回到 K/V, 无需强转。故此桶归 (a) 的局部/字段泛型传播, 不要再尝试返回点强转。
   - **(c) 装箱/数值**: `int cannot be converted to Integer` 等(**非擦除, 不可盲目造型**), 按 `Integer.valueOf` 修。
 - 复现:
   ```bash

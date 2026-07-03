@@ -246,12 +246,76 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 		// A raw cast on the call operand restores comparability and is always safe on ==. See
 		// incomparableGenericFieldVsCallCast. Kill-switch JDEC_CMP_GENERIC_FIELD_RAW_CAST_OFF.
 		if j.Op == EQ || j.Op == NEQ {
+			// Boolean-vs-int-ternary comparison collapse (spring-core ASM MethodVisitor.visitMethodInsn,
+			// MethodWriter.putAttributes): javac materializes a boolean sub-expression that feeds an int
+			// comparison as `cond ? 1 : 0`, and a boolean local/param compared against it renders
+			// `(boolVar) != ((cond) ? (1) : (0))`, which javac rejects ("incomparable types: boolean and
+			// int"). Since the `? 1 : 0` (resp. `? 0 : 1`) ternary IS the int form of the boolean `cond`
+			// (resp. `!cond`), the comparison is exactly `boolVar <op> cond`. Collapse it. Only fires when
+			// one operand is boolean-typed and the other is a literal-0/1 boolean-materialization ternary,
+			// so it can only fix, never alter, semantics. Kill-switch: JDEC_BOOL_INT_TERNARY_CMP_OFF=1.
+			if collapsed, ok := boolVsIntTernaryCollapse(j.Values[0], j.Values[1], j.Op, funcCtx); ok {
+				return collapsed
+			}
 			if raw, idx := j.incomparableGenericFieldVsCallCast(funcCtx); raw != "" {
 				vs[idx] = fmt.Sprintf("(%s)(%s)", raw, vs[idx])
 			}
 		}
 		return fmt.Sprintf("(%s) %s (%s)", vs[0], j.Op, vs[1])
 	}
+}
+
+// boolVsIntTernaryCollapse handles a `==`/`!=` comparison where one operand is boolean-typed and the
+// other is a boolean-materialization ternary `cond ? 1 : 0` (or the inverse `cond ? 0 : 1`). javac
+// emits that ternary when a boolean sub-expression is forced into an int comparison, and the resulting
+// `(boolVar) != ((cond) ? (1) : (0))` is rejected as "incomparable types: boolean and int". The ternary
+// is precisely the int encoding of the boolean `cond` (resp. `!cond`), so the comparison equals
+// `boolVar <op> cond` (resp. `boolVar <op> !cond`). On a match it returns the collapsed, compilable
+// rendering. Kill-switch: JDEC_BOOL_INT_TERNARY_CMP_OFF=1.
+func boolVsIntTernaryCollapse(a, b JavaValue, op string, funcCtx *class_context.ClassContext) (string, bool) {
+	if os.Getenv("JDEC_BOOL_INT_TERNARY_CMP_OFF") != "" {
+		return "", false
+	}
+	tryOrder := func(boolCand, ternCand JavaValue) (string, bool) {
+		if !isBooleanTyped(boolCand) {
+			return "", false
+		}
+		cond, ok := boolMaterializationCondition(ternCand, funcCtx)
+		if !ok {
+			return "", false
+		}
+		return fmt.Sprintf("(%s) %s (%s)", boolCand.String(funcCtx), op, cond.String(funcCtx)), true
+	}
+	if s, ok := tryOrder(a, b); ok {
+		return s, true
+	}
+	if s, ok := tryOrder(b, a); ok {
+		return s, true
+	}
+	return "", false
+}
+
+// boolMaterializationCondition returns the underlying boolean condition of a boolean-materialization
+// ternary, else (nil,false). The simple shapes are `cond ? 1 : 0` (=> cond) and `cond ? 0 : 1`
+// (=> !cond); the nested short-circuit shapes (`cond1 ? (cond2 ? 1 : 0) : 0` == `cond1 && cond2`, etc.)
+// are handled generically by boolReduce, which folds a literal-0/1-leaf ternary tree back into the
+// original &&/|| boolean connective. Only ternaries that reduce to a genuinely boolean-typed value
+// qualify (a value ternary over non-0/1 arms does not reduce and is rejected).
+func boolMaterializationCondition(v JavaValue, funcCtx *class_context.ClassContext) (JavaValue, bool) {
+	t, ok := UnpackSoltValue(v).(*TernaryExpression)
+	if !ok || t == nil || t.Condition == nil || t.TrueValue == nil || t.FalseValue == nil {
+		return nil, false
+	}
+	// The materialization leaves are int literals 0/1 (the JVM has no boolean stack category), so
+	// boolReduce -- which only folds boolean-typed leaves -- leaves them untouched. coerceBooleanArgument
+	// retypes each 0/1 literal leaf to boolean (recursing into nested ternary arms) without touching the
+	// conditions, after which boolReduce collapses the tree into the original &&/||/! connective. A
+	// genuine value ternary (non-0/1 arms) is not coerced and does not reduce, so it is rejected.
+	reduced := boolReduce(coerceBooleanArgument(t), funcCtx)
+	if isBooleanTyped(reduced) {
+		return reduced, true
+	}
+	return nil, false
 }
 
 // incomparableGenericFieldVsCallCast detects the `field <op> genericCall()` (op ∈ {==, !=}) shape where
