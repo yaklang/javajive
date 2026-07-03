@@ -540,7 +540,16 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		if sigAttr, ok := attr.(*SignatureAttribute); ok {
 			if sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex); err == nil && sigStr != "" {
 				classSigStr = sigStr
-				if tp := types.ParseClassSignature(sigStr); tp != "" {
+				// Render the type-variable bounds against the REAL funcCtx so a bound type in a
+				// non-java.lang package (java.lang.annotation.Annotation, java.lang.reflect.Type) gets
+				// its import registered; a throwaway context loses it and the class header recompiles as
+				// "cannot find symbol" (spring MergedAnnotationSelector / FirstRunOfPredicate). Kill-switch
+				// JDEC_TYPEPARAM_BOUND_IMPORT_OFF restores the (import-less) throwaway rendering.
+				boundCtx := funcCtx
+				if os.Getenv("JDEC_TYPEPARAM_BOUND_IMPORT_OFF") != "" {
+					boundCtx = nil
+				}
+				if tp := types.ParseClassSignature(sigStr, boundCtx); tp != "" {
 					classTypeParams = tp
 				}
 			}

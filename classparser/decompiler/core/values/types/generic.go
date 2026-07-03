@@ -601,9 +601,22 @@ func ParseMethodSignature(sig string) ([]JavaType, JavaType) {
 // signature, e.g. from "<T:Ljava/lang/Object;>Ljava/lang/Object;" returns
 // "<T>". Also handles bounds like "<T::Ljava/lang/Comparable<TT;>;>" -> "<T extends Comparable<T>>".
 // Returns "" if the class has no type parameters or parsing fails.
-func ParseClassSignature(sig string) string {
+//
+// funcCtx (when non-nil) is the REAL render context of the class being emitted; the type-variable
+// BOUND types (`A extends Annotation` -> java.lang.annotation.Annotation) are rendered against it so
+// their imports are REGISTERED. Rendering a bound against a throwaway `&ClassContext{}` (the historical
+// behaviour, preserved for a nil funcCtx) yields the correct SHORT spelling but registers the import on
+// the discarded context, so a bound in a non-java.lang package (`java.lang.annotation.Annotation`,
+// `java.lang.reflect.Type`) recompiles as "cannot find symbol" (spring MergedAnnotationSelector /
+// MergedAnnotationPredicates$FirstRunOfPredicate class headers). Passing the real context fixes the
+// missing import while keeping the identical short spelling.
+func ParseClassSignature(sig string, funcCtx *class_context.ClassContext) string {
 	if len(sig) == 0 || sig[0] != '<' {
 		return ""
+	}
+	boundCtx := funcCtx
+	if boundCtx == nil {
+		boundCtx = &class_context.ClassContext{}
 	}
 	rest := sig[1:]
 	var params []string
@@ -627,7 +640,7 @@ func ParseClassSignature(sig string) string {
 				return ""
 			}
 			rest = remaining
-			bounds = append(bounds, boundType.String(&class_context.ClassContext{}))
+			bounds = append(bounds, boundType.String(boundCtx))
 		}
 		if len(bounds) > 0 {
 			params = append(params, fmt.Sprintf("%s extends %s", typeParamName, strings.Join(bounds, " & ")))

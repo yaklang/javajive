@@ -8,8 +8,8 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 8/2 · fastjson2 32/15 · guava 31/20 · commons-lang3 18/11 · spring 77/36。
-> (本轮: bool-vs-int 三元比较折叠 `(boolVar) != ((cond)?1:0)` → `boolVar != cond`, 治 spring ASM MethodVisitor/MethodWriter + commons-lang3 各若干类; spring 缺陷类 38→36、错误行 80→77, 合计缺陷类 88→85。)
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 8/2 · fastjson2 32/15 · guava 31/20 · commons-lang3 18/11 · spring 68/30。
+> (本轮两修: ① 类头类型参数 bound 改用真实 funcCtx 渲染以注册 import(`JDEC_TYPEPARAM_BOUND_IMPORT_OFF`), 治 spring MergedAnnotationSelector / FirstRunOfPredicate 的 `<A extends Annotation>` 缺 import; ② invokespecial 目标为直接实现接口的 default 方法时渲染 `Iface.super.m()`(`JDEC_IFACE_DEFAULT_SUPER_OFF`), 治 StandardAnnotationMetadata / StandardMethodMetadata / SimpleAnnotationMetadata 的 `super.getAnnotationTypes()` 族; spring 错误行 77→68、缺陷类 36→30, 合计缺陷类 85→79、干净率 96.2%→96.5%。)
 
 ## 重新生成本清单(诚实数据)
 

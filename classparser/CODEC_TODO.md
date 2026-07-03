@@ -32,10 +32,10 @@
 | **commons-lang3** 3.12.0 | 345 | 11 | 18 | 0 | 泛型擦除长尾 |
 | **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
 | **snakeyaml** 2.2 | 231 | 2 | 8 | 0 | 泛型/槽位长尾 |
-| **spring-core** 5.3.27 | 978 | 36 | 77 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
+| **spring-core** 5.3.27 | 978 | 30 | 68 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
 | **fastjson2** 2.0.43 | 681 | 15 | 32 | 0 | 泛型擦除 + 槽位复用长尾 |
 | **guava** 28.2-android | 1892 | 20 | 31 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **85** | **167** | **0** | 类级干净率 **96.2%**(2167/2252) |
+| **合计** | | **79** | **158** | **0** | 类级干净率 **96.5%**(2173/2252) |
 
 **codec 与 gson 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go`):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。
@@ -165,6 +165,8 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_BOOL_TO_INT_COERCE_OFF` | 内在布尔值赋 int 缺 `? 1 : 0` 造型 |
 | `JDEC_BOOL_TO_INT_COERCE_EXPR_OFF` | 上一项结构性扩展支(比较/布尔调用/短路三元) |
 | `JDEC_BOOL_INT_TERNARY_CMP_OFF` | `==`/`!=` 一侧为 boolean、另一侧为布尔物化三元 `cond ? 1 : 0`(含嵌套短路 `c1?(c2?1:0):0`)时折叠为 `boolVar op cond`: 之前渲染 `(boolVar) != ((cond)?(1):(0))` 被 javac 拒「incomparable types: boolean and int」。三元先经 `coerceBooleanArgument` 把 0/1 叶重定型为布尔、再 `boolReduce` 折回 `&&/\|\|/!` 连接式; 仅在物化(叶恒为 0/1)时触发, 只能修复不改语义。修 spring-core ASM MethodVisitor.visitMethodInsn / MethodWriter.canCopyMethodAttributes + commons-lang3 若干类(spring tree 缺陷类 38→36、错误行 80→77) |
+| `JDEC_TYPEPARAM_BOUND_IMPORT_OFF` | 类头类型参数 BOUND(`<A extends Annotation>`)改用真实 funcCtx 渲染以注册 import: 之前用一次性空 ClassContext 渲染, 短名正确但 import 丢失, `java.lang.annotation.Annotation` 等非 java.lang 包 bound 重编译报「cannot find symbol」。修 spring MergedAnnotationSelector / MergedAnnotationPredicates$FirstRunOfPredicate(spring tree 错误行 77→75) |
+| `JDEC_IFACE_DEFAULT_SUPER_OFF` | invokespecial 目标为「当前类直接实现的接口」的 default 方法时渲染 `Iface.super.m()` 而非裸 `super.m()`(裸 super 解析到超类, 报「cannot find symbol」)。经 SiblingSuperTypes 严格确认目标在直接接口列表内才触发。修 spring StandardAnnotationMetadata / StandardMethodMetadata / SimpleAnnotationMetadata 的 `super.getAnnotationTypes()` 族(spring tree 错误行 75→68、缺陷类 36→30) |
 
 ### 结构化 / pop / switch / 枚举 / 注解
 | 开关 | 作用域 |

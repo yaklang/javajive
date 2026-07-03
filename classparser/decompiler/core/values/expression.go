@@ -1566,6 +1566,40 @@ func (f *FunctionCallExpression) isCurrentClass(funcCtx *class_context.ClassCont
 	return funcCtx != nil && f.ClassName == funcCtx.ClassName
 }
 
+// interfaceDefaultSuperQualifier returns the denotable qualifier `Iface` to render an interface-default
+// super call as `Iface.super.m()`, or "" when the call is an ordinary superclass `super.m()`. A
+// `super.m()` invokespecial (receiver `this`, target class != current class, not <init>) targets EITHER
+// the direct superclass OR a directly-implemented interface's default method; javac spells the latter
+// `Iface.super.m()`, and a bare `super.m()` there resolves against the superclass (which does not
+// declare the method) -> "cannot find symbol". The target is confirmed to be a DIRECT interface of the
+// current class (never the superclass) via SiblingSuperTypes, whose first entry is the super_class and
+// the rest are the direct interfaces. Returns "" (ordinary super) when the resolver is unavailable, the
+// current class is not found, or the target is the superclass / not among the direct interfaces, so the
+// legacy `super.m()` rendering is preserved for every non-interface-default case. Kill-switch:
+// JDEC_IFACE_DEFAULT_SUPER_OFF=1.
+func (f *FunctionCallExpression) interfaceDefaultSuperQualifier(funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_IFACE_DEFAULT_SUPER_OFF") != "" || funcCtx == nil || funcCtx.SiblingSuperTypes == nil {
+		return ""
+	}
+	// An ordinary superclass super-call: the target class IS the superclass. Leave as bare `super.`.
+	if f.ClassName == funcCtx.SupperClassName {
+		return ""
+	}
+	supers, ok := funcCtx.SiblingSuperTypes(strings.ReplaceAll(funcCtx.ClassName, ".", "/"))
+	if !ok || len(supers) < 2 {
+		return ""
+	}
+	target := strings.ReplaceAll(f.ClassName, ".", "/")
+	// supers[0] is the super_class; supers[1:] are the direct interfaces. Only a direct interface target
+	// is an interface-default super call.
+	for _, iface := range supers[1:] {
+		if iface == target {
+			return funcCtx.ShortTypeName(f.ClassName)
+		}
+	}
+	return ""
+}
+
 func (f *FunctionCallExpression) IsSupperConstructorInvoke(funcCtx *class_context.ClassContext) bool {
 	if f.FunctionName == "<init>" && f.ClassName == funcCtx.SupperClassName {
 		return true
@@ -2336,6 +2370,15 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	// overriding method and recurses forever (guava CaseFormat constant bodies' `super.convert(...)`).
 	if f.IsSpecialInvoke && f.FunctionName != "<init>" && f.ClassName != "" && !f.isCurrentClass(funcCtx) {
 		if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref != nil && ref.IsThis {
+			// A `super.m()` invokespecial whose target is a directly-implemented INTERFACE (not the
+			// superclass) is an interface-default super call, which Java spells `Iface.super.m()`. A bare
+			// `super.m()` dispatches to the SUPERCLASS, which does not declare the interface's default
+			// method -> "cannot find symbol" (spring StandardAnnotationMetadata/StandardMethodMetadata/
+			// SimpleAnnotationMetadata `super.getAnnotationTypes()` etc., where getAnnotationTypes is an
+			// AnnotationMetadata default and the superclass is StandardClassMetadata).
+			if q := f.interfaceDefaultSuperQualifier(funcCtx); q != "" {
+				return fmt.Sprintf("%s.super.%s(%s)", q, functionName, strings.Join(paramStrs, ","))
+			}
 			return fmt.Sprintf("super.%s(%s)", functionName, strings.Join(paramStrs, ","))
 		}
 	}
