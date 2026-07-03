@@ -1936,6 +1936,23 @@ func arrayStoreRHS(member *values.JavaArrayMember, value values.JavaValue, funcC
 	return value.String(funcCtx)
 }
 
+// ternaryHasClassLiteralArm reports whether either arm of the ternary is a class literal (`Foo.class`,
+// a JavaClassValue). Such an arm's Type() reports the referenced class rather than java.lang.Class, so
+// the ternary's arm-merge can under-type to the arms' LUB; the declaration path uses this to prefer the
+// slot ref's (correct) resolved type. See AssignStatement.String.
+func ternaryHasClassLiteralArm(tern *values.TernaryExpression) bool {
+	if tern == nil {
+		return false
+	}
+	if _, ok := values.UnpackSoltValue(tern.TrueValue).(*values.JavaClassValue); ok {
+		return true
+	}
+	if _, ok := values.UnpackSoltValue(tern.FalseValue).(*values.JavaClassValue); ok {
+		return true
+	}
+	return false
+}
+
 func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 	if a.IsDeclare {
 		if a.LeftValue == nil {
@@ -1986,6 +2003,26 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		declType := a.JavaValue.Type()
 		if lit, ok := a.JavaValue.(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
 			declType = a.LeftValue.Type()
+		}
+		// A ternary with a class-literal arm (`cond ? Foo.class : classField`) is a java.lang.Class
+		// value, but the arm's JavaValue.Type() reports the *referenced* class (Foo) to drive bare
+		// `Foo.class` rendering, so the arm-merge collapses to the arms' LUB (Object for a
+		// Class-object-vs-Object.class pair) and the RHS ternary reports `Object`. The slot ref, by
+		// contrast, was minted from the fresh arm-merge and already resolved to the correct `Class`.
+		// Prefer the (narrower, authoritative) ref type here so `var.getModifiers()/getName()` recompile
+		// (spring-core cglib Enhancer.generateClass). Guarded to only NARROW toward the ref when the ref
+		// is a subtype of the RHS type, so it never widens away from a precise RHS. Shares the
+		// class-literal kill-switch JDEC_NO_CLASSLIT_SLOT_TYPE.
+		if os.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
+			if tern, ok := values.UnpackSoltValue(a.JavaValue).(*values.TernaryExpression); ok && ternaryHasClassLiteralArm(tern) {
+				// The slot ref (LeftValue) is minted from the FRESH arm-merge (class-literal arm counted
+				// as java.lang.Class) and is the authoritative resolved slot type, whereas the ternary's
+				// cached Type() can be the stale over-wide arms-LUB (Object). Prefer the ref type; it is
+				// always assignment-compatible with the RHS java.lang.Class value.
+				if lt := a.LeftValue.Type(); lt != nil {
+					declType = lt
+				}
+			}
 		}
 		// A class literal initializer (`Foo.class`) is a java.lang.Class object, but its
 		// JavaValue.Type() reports the *referenced* class (Foo) to drive bare-name rendering and

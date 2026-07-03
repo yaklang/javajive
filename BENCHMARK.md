@@ -189,7 +189,7 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | commons-lang3 | 18 | 0 | 28/28 | no |
 | jsoup | 1 | 0 | 17/17 | no |
 | snakeyaml | 1 | 0 | 28/28 | no |
-| spring-core | 63 | 0 | 5/5 | no |
+| spring-core | 57 | 0 | 5/5 | no |
 | fastjson2 | 32 | 0 | 0/0 | no |
 | guava | 28 | 0 | 0/0 | no |
 
@@ -207,10 +207,10 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | commons-lang3 | 345 | 18 |
 | jsoup | 238 | 1 |
 | snakeyaml | 231 | 1 |
-| spring-core | 978 | 63 |
+| spring-core | 978 | 57 |
 | fastjson2 | 681 | 32 |
 | guava | 1892 | 28 |
-| **合计** | | **143** |
+| **合计** | | **137** |
 
 > **错误行数会误导**：它既被语法错遮蔽、又随内联/摊平的文件规模波动，且集中在少数类里。**行数散在多少个类里才决定
 > 可用性**，这正是以「缺陷 class 数」为主口径的原因。此表仅供上下文，且**只有在语法错为 0（无遮蔽）时才有意义**。
@@ -300,6 +300,12 @@ BENCHMARK=1 BENCHMARK_JARS=codec,gson,guava go test -run TestBenchmarkSelfRecomp
 - **影响面**：fastjson2 + guava 若干行。
 - **根因**：`cond ? a : b` 两臂的最小公共上界（LUB）算窄，或三元臂里的泛型擦除。已有 `CommonSuperType` 设施，需扩表 +
   在更多合流点接入。已治本反射家族与跨类直接子类型两支；残余归入 D1 泛型擦除长尾。
+- **已治本 · 三元 class 字面量臂**（spring-core cglib `Enhancer.generateClass`，63→57 行）：`cond ? Foo.class : classField`
+  是 `java.lang.Class` 值，但 class 字面量臂的 `Type()` 报的是**被引类** `Foo`（为驱动裸 `Foo.class` 渲染），故朴素臂合并
+  塌成两臂 LUB（`Object.class` vs `Class` 取 `Object`），捕获局部被声明成 `Object c`，后续 `c.getModifiers()/getName()`
+  重编译失败。修法：三元臂合并把 class 字面量臂计为 `java.lang.Class`（`TernaryArmRValueType`），并在声明处优先取槽位
+  ref 的已定型（`Class`），因 ref 是从新鲜臂合并铸出的权威槽位类型。Kill-switch `JDEC_NO_CLASSLIT_SLOT_TYPE`（与直接
+  存储 class 字面量定型共用）。
 
 ### D5 · 循环-continue 结构化（gson `JsonWriter.string` 等）
 
@@ -412,9 +418,9 @@ snakeyaml / commons-lang3 / spring-core 在**高准确度**下适用于类级逆
 | commons-lang3 | 18 | 287 | 10 |
 | jsoup | 1 | 35 | 3 |
 | snakeyaml | 1 | 47 | 2 |
-| spring-core | 65 | 764 | 614 |
+| spring-core | 57 | 764 | 614 |
 | fastjson2 | 32 | 614 | 286 |
-| guava | 31 | 865 | 132 |
+| guava | 28 | 865 | 132 |
 
 > 行数口径同样**不作主口径**：它既被语法错遮蔽、又随内联/摊平的文件规模波动。此处仅示三方量级——JavaJive 的错误行数在
 > JSON/序列化族显著低于二者（fastjson2 32 vs 614 vs 286；guava 31 vs 865 vs 132）。

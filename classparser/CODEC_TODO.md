@@ -32,10 +32,10 @@
 | **commons-lang3** 3.12.0 | 345 | 11 | 18 | 0 | 泛型擦除长尾 |
 | **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
 | **snakeyaml** 2.2 | 231 | 1 | 1 | 0 | definite-assignment 单点 |
-| **spring-core** 5.3.27 | 978 | 29 | 63 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
+| **spring-core** 5.3.27 | 978 | 29 | 57 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
 | **fastjson2** 2.0.43 | 681 | 15 | 32 | 0 | 泛型擦除 + 槽位复用长尾 |
 | **guava** 28.2-android | 1892 | 20 | 28 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **77** | **143** | **0** | 类级干净率 **96.6%**(2175/2252) |
+| **合计** | | **77** | **137** | **0** | 类级干净率 **96.6%**(2175/2252) |
 
 **codec 与 gson 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go`):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。
@@ -170,6 +170,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_NEW_RECV_DIAMOND_OFF` | RAW `new HashMap(typedMap)` 等 JDK 泛型集合类直接作 lambda 调用接收者时补菱形 `new HashMap<>(...)`: raw 接收者按 JLS 4.8 擦除方法的 functional-interface 形参, lambda 形参退化为 Object, 体内解引用报「Object cannot be converted to String」。菱形让 javac 从构造实参重新推断类型参数、重新绑定 lambda; 白名单限 HashMap/LinkedHashMap/TreeMap/ArrayList/LinkedList/HashSet/LinkedHashSet/TreeSet 且仅当本次调用带 lambda/方法引用实参。修 spring SimpleAliasRegistry `new HashMap(this.aliasMap).forEach(...)`(spring tree 错误行 68→65、缺陷类 30→29) |
 | `JDEC_INNER_STANDALONE_ERASE_OFF` | 自带形参的扁平内部类, 外层类型变量作**独立类型**(字段 `K key`/`E nextEntry`、具体方法 `advanceTo(E)`)时渲染其 JVM 擦除(有界取首 bound 原始类经 resolver 沿 `$` 链回溯如 `InternalEntry`, 无界取 Object): 裸独立变量无 `<...>` 可去, 原样即未声明 K/E 报「cannot find symbol: class K」。例外: 抽象方法参数保留裸变量(擦成 Object 会与自带 K,V 的无形参兄弟子类重写 name-clash)。修 guava MapMakerInternalMap$HashIterator 整类 + AbstractMapBasedMultimap$Itr 字段(guava tree 错误行 31→28) |
 | `JDEC_EXTERNAL_NESTED_DOT_OFF` | 第三方(非 JDK)嵌套类引用点号化 `Outer.Inner`: 以 SiblingSuperTypes(读恒存在的 super_class 项)判外层类是否在本 jar, 不在则该类只在 classpath 上以真正嵌套形态存在, 扁平 `Outer$Inner` 不可解析(「cannot find symbol」); 本 jar 内类仍保持扁平(Yak 摊平单元)。引用与 import 同步点号化。修 spring `reactor.blockhound.BlockHound$Builder`(spring tree 错误行 65→63) |
+| `JDEC_NO_CLASSLIT_SLOT_TYPE` | class 字面量(`Foo.class`)作 rvalue 时定型为 `java.lang.Class`(而非被引类 `Foo`): 直接存储与**三元臂**两条路径共用。三元 `cond ? Foo.class : classField` 里 class 字面量臂的 `Type()` 报被引类(为驱动裸 `Foo.class` 渲染), 致朴素臂合并塌成两臂 LUB(`Object.class` vs `Class` 取 `Object`), 局部误声明 `Object c`, 后续 `c.getModifiers()/getName()` 报「cannot find symbol」。修法: 臂合并把 class 字面量臂计为 `java.lang.Class`(`TernaryArmRValueType`), 且声明处对含 class 字面量臂的三元优先取槽位 ref 已定型(`Class`, 从新鲜臂合并铸出的权威类型)。修 spring cglib `Enhancer.generateClass`(spring tree 错误行 63→57) |
 
 ### 结构化 / pop / switch / 枚举 / 注解
 | 开关 | 作用域 |

@@ -4292,7 +4292,7 @@ func ternaryDeclLUB(ref *values.JavaRef, value values.JavaValue) types.JavaType 
 	// Recompute the arm LUB FRESH rather than trusting TernaryExpression.Type(): that cached type can
 	// be stale (computed during ternary-chain assembly before the false arm resolved to its final
 	// type), e.g. arms (ArrayList, List) but a cached ArrayList. The fresh merge gives the true LUB.
-	at, bt := tv.TrueValue.Type(), tv.FalseValue.Type()
+	at, bt := values.TernaryArmRValueType(tv.TrueValue), values.TernaryArmRValueType(tv.FalseValue)
 	if rt == nil || at == nil || bt == nil {
 		return nil
 	}
@@ -4348,7 +4348,7 @@ func ternaryDeclLUBCrossClass(ref *values.JavaRef, value values.JavaValue, funcC
 		return nil
 	}
 	rt := ref.Type()
-	at, bt := tv.TrueValue.Type(), tv.FalseValue.Type()
+	at, bt := values.TernaryArmRValueType(tv.TrueValue), values.TernaryArmRValueType(tv.FalseValue)
 	if rt == nil || at == nil || bt == nil {
 		return nil
 	}

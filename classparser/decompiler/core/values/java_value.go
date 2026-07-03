@@ -3,6 +3,7 @@ package values
 import (
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -545,8 +546,28 @@ func (j *TernaryExpression) Type() (typ types.JavaType) {
 			j.cachedType = typ
 		}
 	}()
-	typ = types.MergeTypes(j.TrueValue.Type(), j.FalseValue.Type())
+	typ = types.MergeTypes(TernaryArmRValueType(j.TrueValue), TernaryArmRValueType(j.FalseValue))
 	return typ
+}
+
+// TernaryArmRValueType returns the STATIC type a ternary arm contributes to the conditional's merged
+// type. It differs from v.Type() ONLY for a class literal (JavaClassValue), whose Type() reports the
+// REFERENCED class (Foo, to drive `Foo.class` bare rendering) even though, as a value in a `? :`, the
+// arm is a java.lang.Class INSTANCE. Without this, `cond ? Object.class : classField` merges (Object,
+// Class) -> Object, so the capturing local is declared `Object` and a later `var.getModifiers()` fails
+// to recompile ("cannot find symbol"; spring-core cglib Enhancer.generateClass). Mirrors
+// core.slotDeclType (same kill-switch JDEC_NO_CLASSLIT_SLOT_TYPE) so the direct-store and ternary-arm
+// paths agree.
+func TernaryArmRValueType(v JavaValue) types.JavaType {
+	if v == nil {
+		return nil
+	}
+	if os.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
+		if _, ok := UnpackSoltValue(v).(*JavaClassValue); ok {
+			return types.NewJavaClass("java.lang.Class")
+		}
+	}
+	return v.Type()
 }
 
 // SetCachedType overrides the ternary's memoized type. Used by the declaration-LUB pass
