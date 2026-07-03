@@ -7,9 +7,8 @@
 > **口径**: 全部以 **tree(整树重编译)** 为准 —— 这是「反编译→重编译→重打包→可调用」的真口径。
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
-> 数字快照(javac 21, 本机 `~/.m2`; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 12/3 · fastjson2 33/15 · guava 34/22 · commons-lang3 75/22 · spring 739/82。
-> 注: guava 里约 **45** 行是 `sun.misc.Unsafe` 在 `javac --release 8` 下的环境假阳性(非缺陷, 见 CODEC_TODO §2 第 7 项), 任何忠实反编译器同样过不了。
+> 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 8/2 · fastjson2 32/15 · guava 31/20 · commons-lang3 19/12 · spring 81/39。
 
 ## 重新生成本清单(诚实数据)
 

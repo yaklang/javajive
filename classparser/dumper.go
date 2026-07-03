@@ -50,7 +50,7 @@ type ClassObjectDumper struct {
 	// Renaming them per-lambda eliminates the collision; nested lambdas are dumped first and already
 	// carry their own `lv<innerseq>` names, so the outer rename (matching only `varN`) never touches
 	// them. See renameLambdaBodyLocals.
-	lambdaLocalSeq    int
+	lambdaLocalSeq int
 	// lambdaDepth is the current lexical nesting depth of lambda bodies being dumped. A nested lambda
 	// body is rendered EAGERLY while its enclosing lambda's bytecode is still being parsed (the
 	// invokedynamic that materialises the inner arrow runs inside the outer's ParseBytesCode), so the
@@ -4641,6 +4641,10 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 	clean := err == nil && res != nil &&
 		!strings.Contains(res.code, values.EmptySlotValuePlaceholder) &&
 		!strings.Contains(res.code, malformedTryNoCatchMarker) &&
+		// A leaked `varN = Exception;` caught-throwable sentinel is broken Java ("cannot find symbol");
+		// reject it so the method keeps its honest stub instead of adopting silently-broken output.
+		(os.Getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") != "" ||
+			(!strings.Contains(res.code, "= Exception;") && !strings.Contains(res.code, "= Exception\n"))) &&
 		// Reject results that are syntactically valid but reference a local before its declaration
 		// (a slot-reuse renaming bug). Adopting such a result would replace an honest stub with
 		// silently-wrong code; keeping the stub upholds the never-emit-broken-code contract until the
@@ -5086,6 +5090,21 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 				log.Errorf("DEBUG_TRYNOCATCH method %s%s:\n%s", name, descriptor, res.code)
 			}
 			err = utils.Errorf("try-region structuring failed: try without catch handler")
+		}
+		if err == nil && res != nil && os.Getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") == "" &&
+			(strings.Contains(res.code, "= Exception;") || strings.Contains(res.code, "= Exception\n")) {
+			// A bare `varN = Exception;` is the fingerprint of a try/finally (or synchronized-region)
+			// structuring failure: the handler's caught-throwable stack value could not be bound to a
+			// real local, so it rendered as the bare type name `Exception` -- valid to the ANTLR syntax
+			// net but "cannot find symbol" to javac (guava Monitor.enterWhen/enterWhenUninterruptibly,
+			// InetAddresses). The same signal already blocks no-catch-try flattening (canFlattenNoCatchTry);
+			// promote it to a full degradation trigger so the method is retried aggressively and, failing
+			// that, degraded to an honest compiling stub instead of leaking broken code. Kill-switch:
+			// JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF.
+			if os.Getenv("DEBUG_EXCEPTION_SENTINEL") != "" {
+				log.Errorf("DEBUG_EXCEPTION_SENTINEL method %s%s:\n%s", name, descriptor, res.code)
+			}
+			err = utils.Errorf("exception-handler structuring failed: caught-throwable sentinel leaked into method body")
 		}
 		if err != nil {
 			// Gated aggressive retry: this method failed conservative decompilation (error, leaked
