@@ -34,8 +34,8 @@
 | **snakeyaml** 2.2 | 231 | 1 | 1 | 0 | definite-assignment 单点 |
 | **spring-core** 5.3.27 | 978 | 29 | 65 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
 | **fastjson2** 2.0.43 | 681 | 15 | 32 | 0 | 泛型擦除 + 槽位复用长尾 |
-| **guava** 28.2-android | 1892 | 20 | 31 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **77** | **148** | **0** | 类级干净率 **96.6%**(2175/2252) |
+| **guava** 28.2-android | 1892 | 20 | 28 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
+| **合计** | | **77** | **145** | **0** | 类级干净率 **96.6%**(2175/2252) |
 
 **codec 与 gson 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go`):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。

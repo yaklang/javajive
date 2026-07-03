@@ -802,6 +802,71 @@ func ClassFormalTypeParamBounds(sig string, funcCtx *class_context.ClassContext)
 	return out
 }
 
+// ClassFormalTypeParamErasures parses a class signature's leading formal type-parameter section and maps
+// each type-variable NAME to the ERASURE of its FIRST class/interface bound: the raw, generic-stripped
+// DOTTED class name (e.g. `<E::Lcom/foo/InternalEntry<TK;>;>` -> {"E":"com.foo.InternalEntry"}). A
+// parameter whose only bound is Object -- or whose first bound is itself a type variable or an array --
+// produces NO entry, so the caller defaults it to java.lang.Object. This is the standalone-position
+// analogue of ClassFormalTypeParamBounds (which renders the source bound CLAUSE for a re-declared inner
+// type parameter); here only the erasure head is needed, to render a flattened inner class's undeclarable
+// enclosing type variable used as a STANDALONE type (`E nextEntry;`). Returns nil for a signature without
+// a leading "<...>" section.
+func ClassFormalTypeParamErasures(sig string) map[string]string {
+	if len(sig) == 0 || sig[0] != '<' {
+		return nil
+	}
+	out := map[string]string{}
+	rest := sig[1:]
+	for len(rest) > 0 && rest[0] != '>' {
+		colonIdx := strings.IndexByte(rest, ':')
+		if colonIdx < 0 {
+			return out
+		}
+		name := rest[:colonIdx]
+		rest = rest[colonIdx:]
+		for len(rest) > 0 && rest[0] == ':' {
+			rest = rest[1:]
+			// An empty class-bound slot (`E::LIface;` has no class bound before the interface bound):
+			// skip it and keep scanning for the first concrete bound.
+			if len(rest) > 0 && (rest[0] == ':' || rest[0] == '>') {
+				continue
+			}
+			before := rest
+			_, remaining, ok := parseSigType(rest)
+			if !ok {
+				return out
+			}
+			if _, done := out[name]; !done {
+				if cls, ok := erasureClassName(before[:len(before)-len(remaining)]); ok {
+					out[name] = cls
+				}
+			}
+			rest = remaining
+		}
+	}
+	return out
+}
+
+// erasureClassName returns the DOTTED raw class name at the head of a single field-type signature slice
+// (`Lpkg/Name<args>;` -> "pkg.Name"), or ok=false when the slice is not a plain class type (a type
+// variable `T..;`, primitive, or array), whose erasure the caller defaults to java.lang.Object.
+func erasureClassName(sig string) (string, bool) {
+	if len(sig) == 0 || sig[0] != 'L' {
+		return "", false
+	}
+	end := len(sig)
+	for i := 1; i < len(sig); i++ {
+		if sig[i] == '<' || sig[i] == ';' {
+			end = i
+			break
+		}
+	}
+	if end <= 1 {
+		return "", false
+	}
+	return strings.ReplaceAll(sig[1:end], "/", "."), true
+}
+
 // scanTypeVarRefs consumes exactly one type signature at sig and appends every TypeVariableSignature
 // name (the `T<name>;` form, including those nested inside type arguments and array element types) to
 // *out. It mirrors parseSigType's grammar so a `T` is only treated as a type-variable tag when it

@@ -145,11 +145,18 @@ func (c *ClassObjectDumper) UnTab() {
 // visibility (a public nested type's own access_flags lack ACC_PUBLIC); the authoritative visibility
 // is in the InnerClasses attribute. javap reads exactly this to print `public` for a nested type.
 func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
-	self := c.obj.GetClassName()
+	return innerSelfAccessFlags(c.obj)
+}
+
+// innerSelfAccessFlags returns the inner_class_access_flags obj carries in the InnerClasses entry that
+// refers to obj itself, with ok=false when none exists. Free-function form of selfInnerClassAccessFlags
+// so it can also be applied to a sibling class parsed on the fly.
+func innerSelfAccessFlags(obj *ClassObject) (uint16, bool) {
+	self := obj.GetClassName()
 	if self == "" {
 		return 0, false
 	}
-	for _, attr := range c.obj.Attributes {
+	for _, attr := range obj.Attributes {
 		ic, ok := attr.(*InnerClassesAttribute)
 		if !ok {
 			continue
@@ -158,7 +165,7 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 			if e == nil || e.InnerClassInfoIndex == 0 {
 				continue
 			}
-			name, err := c.obj.getUtf8(e.InnerClassInfoIndex)
+			name, err := obj.getUtf8(e.InnerClassInfoIndex)
 			if err != nil {
 				continue
 			}
@@ -752,9 +759,31 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 		}
 	}
+	// STANDALONE-ERASE companion of the raw-erase set: the same undeclarable enclosing variables, used
+	// as a STANDALONE type (`E nextEntry;`, `T output(K var0, V var1)`, `advanceTo(E var1)`), have no
+	// `<...>` to strip, so raw-erase cannot help and they render as undeclared bare names (javac
+	// "cannot find symbol: class K"; guava AbstractMapBasedMultimap$Itr, MapMakerInternalMap$HashIterator).
+	// Render the variable's JVM ERASURE instead: the raw class of its first bound recovered from the
+	// enclosing chain (`E extends InternalEntry<..>` -> InternalEntry, so `nextEntry.getNext()` still
+	// resolves), defaulting to java.lang.Object for an unbounded variable (or with no resolver, where a
+	// bare undeclared name failed anyway). Runtime-identical, and sibling overrides erase to the same
+	// signature so the override relation is preserved. Kill-switch: JDEC_INNER_STANDALONE_ERASE_OFF.
+	var standaloneEraseTypeVars map[string]string
+	if len(rawEraseTypeVars) > 0 && os.Getenv("JDEC_INNER_STANDALONE_ERASE_OFF") == "" {
+		bounds := c.enclosingTypeParamErasures(rawEraseTypeVars)
+		standaloneEraseTypeVars = make(map[string]string, len(rawEraseTypeVars))
+		for name := range rawEraseTypeVars {
+			if e, ok := bounds[name]; ok && e != "" {
+				standaloneEraseTypeVars[name] = e
+			} else {
+				standaloneEraseTypeVars[name] = "java.lang.Object"
+			}
+		}
+	}
 	if c.FuncCtx != nil {
 		c.FuncCtx.TypeParams = classTypeParamNames
 		c.FuncCtx.RawEraseTypeVars = rawEraseTypeVars
+		c.FuncCtx.StandaloneEraseTypeVars = standaloneEraseTypeVars
 		// ClassTypeParams is the CLASS-only snapshot (never extended with a method's own `<T>` while
 		// that method renders); it lets typeVarReturnCast recover `this`'s real parameterization.
 		c.FuncCtx.ClassTypeParams = classTypeParamNames
@@ -1320,6 +1349,65 @@ func (c *ClassObjectDumper) enclosingTypeParamBounds(free []string) map[string]s
 			}
 			if inScope {
 				res[name] = b.Clause
+			}
+		}
+	}
+	return res
+}
+
+// enclosingTypeParamErasures recovers, for each requested undeclarable enclosing type-variable name, the
+// ERASURE of its bound declared on the NEAREST enclosing class that declares it: the raw dotted class of
+// its first class/interface bound (`E extends InternalEntry<..>` -> "com.google.common.collect...
+// InternalEntry"). It is the standalone-position companion of enclosingTypeParamBounds (which recovers
+// the source bound CLAUSE for a re-DECLARED inner parameter); here the erasure head is what a flattened
+// inner class must render for the variable used as a STANDALONE type (`E nextEntry;`, `advanceTo(E)`),
+// since it cannot declare the variable. Walks the binary-name `$` chain via foldSiblingResolver; the
+// nearest enclosing scope that binds a name wins (type-variable shadowing). Returns an empty map with no
+// resolver (single-class decompile), so the caller defaults every requested name to java.lang.Object.
+func (c *ClassObjectDumper) enclosingTypeParamErasures(vars map[string]bool) map[string]string {
+	res := map[string]string{}
+	if c.foldSiblingResolver == nil || len(vars) == 0 {
+		return res
+	}
+	seen := map[string]bool{}
+	binName := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
+	for {
+		idx := strings.LastIndexByte(binName, '$')
+		if idx < 0 {
+			break
+		}
+		binName = binName[:idx]
+		data, ok := c.foldSiblingResolver(binName)
+		if !ok || len(data) == 0 {
+			continue
+		}
+		sObj, err := Parse(data)
+		if err != nil {
+			continue
+		}
+		sig := ""
+		for _, attr := range sObj.Attributes {
+			if sa, ok := attr.(*SignatureAttribute); ok {
+				if s, err := sObj.getUtf8(sa.SignatureIndex); err == nil {
+					sig = s
+				}
+				break
+			}
+		}
+		if sig == "" {
+			continue
+		}
+		// Shadowing: the NEAREST enclosing scope that DECLARES a name binds it, even when that
+		// declaration is unbounded (erasure Object, i.e. no res entry) -- a farther scope's bound
+		// must not leak through. Track declared-and-resolved names separately from res.
+		erasures := types.ClassFormalTypeParamErasures(sig)
+		for _, name := range types.ClassFormalTypeParamNames(sig) {
+			if !vars[name] || seen[name] {
+				continue
+			}
+			seen[name] = true
+			if e, ok := erasures[name]; ok {
+				res[name] = e
 			}
 		}
 	}
@@ -3063,6 +3151,12 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 		paramList := []string{}
 		// fetch from method type
 		paramTypes := methodType.FunctionType().ParamTypes
+		// An ABSTRACT method's parameters must NOT standalone-erase an enclosing type variable to Object:
+		// a no-own-formal sibling override (guava AbstractMapBasedMultimap$1.output(K,V), K/V its own
+		// injected params) would then clash with the erased `output(Object,Object)`. Keeping the bare
+		// (undeclared) variable is no worse than before the erasure existed. Restored right after.
+		prevSuppress := funcCtx.SuppressStandaloneErase
+		funcCtx.SuppressStandaloneErase = true
 		for idx, t := range paramTypes {
 			typeName := t.String(funcCtx)
 			// 末参为 varargs 时必须渲染成「元素类型 + ...」(如 Feature...), 不能是「数组类型 + ...」
@@ -3078,6 +3172,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				paramList = append(paramList, fmt.Sprintf("%s var%d", typeName, idx))
 			}
 		}
+		funcCtx.SuppressStandaloneErase = prevSuppress
 		paramsNewStr = strings.Join(paramList, ", ")
 	}
 	if isLambda {

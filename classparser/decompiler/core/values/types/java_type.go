@@ -79,6 +79,14 @@ func (j *JavaClass) Type() JavaType {
 }
 
 func (j *JavaClass) String(funcCtx *class_context.ClassContext) string {
+	// A STANDALONE use of an undeclarable enclosing type variable (a flattened own-formal inner class's
+	// `E nextEntry;` / `advanceTo(E)`) must render as the variable's JVM erasure -- the bare name is
+	// undeclared on the flat unit (javac "cannot find symbol: class E"). Type-ARGUMENT uses never reach
+	// here (JavaParameterizedType raw-erases the whole `<...>` first). Empty for every ordinary class.
+	// See ClassContext.StandaloneEraseTypeVars; kill-switch JDEC_INNER_STANDALONE_ERASE_OFF.
+	if repl, ok := funcCtx.StandaloneEraseTypeVar(j.Name); ok {
+		return funcCtx.ShortTypeName(repl)
+	}
 	name := funcCtx.ShortTypeName(j.Name)
 	return fmt.Sprintf("%s", name)
 }

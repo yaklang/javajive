@@ -121,6 +121,30 @@ type ClassContext struct {
 	// ordinary class, so it is a strict no-op there. See dumper (JDEC_INNER_RAW_ERASE_OFF) and
 	// types.JavaParameterizedType.String.
 	RawEraseTypeVars map[string]bool
+	// StandaloneEraseTypeVars maps each undeclarable enclosing type-variable name (the same set as
+	// RawEraseTypeVars) to the ERASURE it must render as when used as a STANDALONE type -- a field type,
+	// method parameter/return, cast, or local declaration (`E nextEntry;`, `T output(K var0, V var1)`).
+	// RawEraseTypeVars only strips a variable used as a type ARGUMENT (`Node<K,V>` -> `Node`); a variable
+	// used as a standalone type has no `<...>` to strip, so it would render as a bare undeclared `K`/`E`
+	// (javac "cannot find symbol: class K"; guava AbstractMapBasedMultimap$Itr `K key`, output(K,V) and
+	// MapMakerInternalMap$HashIterator `E nextEntry`, advanceTo(E)). Rendering the JVM erasure instead --
+	// the variable's first bound's raw class (`E extends InternalEntry<..>` -> InternalEntry), or
+	// java.lang.Object for an unbounded variable -- is runtime-identical and compiles: member accesses on
+	// the erased value resolve against the bound (`nextEntry.getNext()`), and every own-formal-declared
+	// sibling override (`$1.output(K,V)` where K,V are its own injected params) erases to the same
+	// signature, so the override relation is preserved. Nil/empty for every ordinary class. Populated only
+	// for a flattened NON-STATIC inner class that has its OWN formal type parameters. See dumper
+	// (JDEC_INNER_STANDALONE_ERASE_OFF) and types.JavaClass.String.
+	StandaloneEraseTypeVars map[string]string
+	// SuppressStandaloneErase temporarily disables StandaloneEraseTypeVars while rendering a position
+	// where erasing to Object would HURT: an ABSTRACT method's parameter types. Erasing an abstract
+	// method's `output(K,V)` to `output(Object,Object)` makes a no-own-formal sibling override that
+	// declares its own K,V (`AbstractMapBasedMultimap$1.output(K,V)`) no longer override it ("same
+	// erasure, yet neither overrides the other" + "abstract method not overridden"), turning one
+	// undeclared-symbol error into two clash errors. Keeping the abstract parameter as the bare
+	// (undeclared) variable is no worse than before this fix, while fields/locals/concrete-method
+	// positions still benefit from the erasure. Set/cleared by the dumper around abstract param rendering.
+	SuppressStandaloneErase bool
 	// SiblingClassSig resolves a jar-internal class's generic signature info by binary internal name
 	// (slash-separated). It returns the class's raw class Signature and a (name,arity)->method Signature
 	// map, or ok=false for JDK/external classes whose bytes are not in the jar. The dumper builds this
@@ -263,6 +287,18 @@ func (f *ClassContext) FieldTypeVar(name string) string {
 // parameterized type-argument render sites in the class currently being rendered (see RawEraseTypeVars).
 func (f *ClassContext) HasRawEraseTypeVars() bool {
 	return f != nil && len(f.RawEraseTypeVars) > 0
+}
+
+// StandaloneEraseTypeVar returns the erasure spelling this class must render for a STANDALONE use of the
+// bare enclosing type-variable `name` (a field/param/return/cast/local type), and ok=false when `name` is
+// not an undeclarable enclosing variable (so the normal type-variable name is kept). See
+// StandaloneEraseTypeVars.
+func (f *ClassContext) StandaloneEraseTypeVar(name string) (string, bool) {
+	if f == nil || name == "" || f.StandaloneEraseTypeVars == nil || f.SuppressStandaloneErase {
+		return "", false
+	}
+	repl, ok := f.StandaloneEraseTypeVars[name]
+	return repl, ok
 }
 
 // RawEraseTypeVar reports whether the bare type-variable name is one this class references but cannot

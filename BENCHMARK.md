@@ -191,7 +191,7 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | snakeyaml | 1 | 0 | 28/28 | no |
 | spring-core | 65 | 0 | 0/0 | no |
 | fastjson2 | 32 | 0 | 0/0 | no |
-| guava | 31 | 0 | 0/0 | no |
+| guava | 28 | 0 | 0/0 | no |
 
 > **全 8 jar 语法错 = 0**，故表 A 的类级数字无阶段遮蔽。**commons-codec 与 gson 完整往返**：
 > 整树零错、重打包后外部 JVM 在 `-Xverify:all` 下逐类加载校验全部通过（codec 107/107、gson 199/199）；
@@ -209,8 +209,8 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | snakeyaml | 231 | 1 |
 | spring-core | 978 | 65 |
 | fastjson2 | 681 | 32 |
-| guava | 1892 | 31 |
-| **合计** | | **148** |
+| guava | 1892 | 28 |
+| **合计** | | **145** |
 
 > **错误行数会误导**：它既被语法错遮蔽、又随内联/摊平的文件规模波动，且集中在少数类里。**行数散在多少个类里才决定
 > 可用性**，这正是以「缺陷 class 数」为主口径的原因。此表仅供上下文，且**只有在语法错为 0（无遮蔽）时才有意义**。
@@ -287,8 +287,13 @@ BENCHMARK=1 BENCHMARK_JARS=codec,gson,guava go test -run TestBenchmarkSelfRecomp
 - **影响面**：guava 一族（`HashIterator` / `Segment` / `Itr` 引用外层 `K,V,E`）。
 - **根因**：非静态内部类引用外层类的类型参数；被摊平成独立顶层单元后，外层类型变量在该单元里**无处声明**（或
   引用点元数与摊平声明不一致）。
-- **现状**：已治本「自身无形参」的纯继承内部类（注入自由类型变量 + 外层形参元数对齐 + 外层 bound 重建）。**残余**：
-  「自身又有形参」的 `Iterator<T>` 一类需跨类协同重写所有引用点，深且高风险，留专项。
+- **现状**：已治本「自身无形参」的纯继承内部类（注入自由类型变量 + 外层形参元数对齐 + 外层 bound 重建）；
+  「自身又有形参」的 `Iterator<T>` 一类，外层变量作**类型实参**（`Node<K,V>`）已 raw-erase 去参，作**独立类型**
+  （字段 `K key`、`E nextEntry`、具体方法 `advanceTo(E)`）现渲染其 JVM 擦除（有界取首 bound 原始类如
+  `InternalEntry`，无界取 `Object`），修好 `HashIterator` 整类与 `Itr` 字段（guava 28 行）。**残余**：`Itr` 的
+  **抽象方法参数** `out(K,V)` 若擦成 Object 会与自带 K,V 的无形参兄弟子类重写产生 name-clash，故保留裸变量
+  （2 行），需 `Iterator<K,V,T>` 跨类协同重写引用点方能根除，深且高风险，留专项。kill-switch
+  `JDEC_INNER_STANDALONE_ERASE_OFF`。
 
 ### D4 · 三元 LUB（`bad type in conditional expression`）
 
