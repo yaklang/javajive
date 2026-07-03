@@ -4271,6 +4271,47 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	return nil
 }
 
+// lazyInitSelfTernaryNarrow recognizes the lazy-init self-guard idiom `x = (x != null) ? x : concrete`
+// (or the symmetric `? concrete : x`) stored into slot `ref`, and returns the concrete (non-self) arm's
+// type when it strictly refines the ref's current (control-flow-merged, typically Object) type. One arm
+// must be a JavaRef to the SAME variable id as `ref`; the other a concrete, non-Object reference value.
+// Returns nil otherwise (all-Object / self-only / primitive arm), so it never narrows a genuinely
+// polymorphic slot. Gated by JDEC_LAZY_INIT_SELF_TERNARY_OFF.
+func lazyInitSelfTernaryNarrow(ref *values.JavaRef, value values.JavaValue) types.JavaType {
+	if os.Getenv("JDEC_LAZY_INIT_SELF_TERNARY_OFF") != "" || ref == nil || ref.Id == nil {
+		return nil
+	}
+	tern, ok := values.UnpackSoltValue(value).(*values.TernaryExpression)
+	if !ok || tern == nil || tern.TrueValue == nil || tern.FalseValue == nil {
+		return nil
+	}
+	isSelf := func(v values.JavaValue) bool {
+		r, ok := values.UnpackSoltValue(v).(*values.JavaRef)
+		return ok && r != nil && r.Id == ref.Id
+	}
+	var other values.JavaValue
+	switch {
+	case isSelf(tern.TrueValue) && !isSelf(tern.FalseValue):
+		other = tern.FalseValue
+	case isSelf(tern.FalseValue) && !isSelf(tern.TrueValue):
+		other = tern.TrueValue
+	default:
+		return nil
+	}
+	ot := other.Type()
+	if ot == nil {
+		return nil
+	}
+	if _, isPrim := ot.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	if ot.String(ctx) == "Object" || ref.Type() == nil || ot.String(ctx) == ref.Type().String(ctx) {
+		return nil
+	}
+	return ot
+}
+
 // ternaryDeclLUB returns the least-upper-bound type to RE-DECLARE a slot ref with when its declaring
 // store is a control-flow-merged ternary whose true type (the LUB of both arms) is broader than the
 // type the ref was minted with during the DFS. It returns nil (no change) unless ALL hold:
@@ -4485,6 +4526,18 @@ func (d *Decompiler) ParseStatement() error {
 				// JDEC_TERNARY_DECL_LUB_CROSS_OFF.
 				if lub := ternaryDeclLUBCrossClass(ref, value, funcCtx); lub != nil {
 					ref.ResetVarType(lub)
+				}
+				// Lazy-init self-guard narrowing: `x = (x != null) ? x : new Concrete()` compiles to a
+				// conditional store whose control-flow merge types slot x as the LUB of its null-init
+				// (Object) arm and the concrete `new` arm — i.e. Object. The reconstructed ternary rvalue
+				// then reads `x` back at Object and a later `x.add(..)` fails ("cannot find symbol";
+				// spring-core StringDecoder). Because the ONLY concrete value the slot ever holds is the
+				// `new` arm (the other arm is the null-guarded self), narrowing the declaration to that
+				// arm's type is safe (null is assignable to it, and no arm-specific member is invoked on
+				// the merge). Narrow-only and shape-gated (one arm is the slot itself, the other a
+				// concrete non-Object reference). Kill-switch: JDEC_LAZY_INIT_SELF_TERNARY_OFF.
+				if narrow := lazyInitSelfTernaryNarrow(ref, value); narrow != nil {
+					ref.ResetVarType(narrow)
 				}
 				assignSt := statements.NewAssignStatement(ref, value, isFirst)
 				appendNode(assignSt)

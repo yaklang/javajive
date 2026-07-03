@@ -189,7 +189,7 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | commons-lang3 | 18 | 0 | 28/28 | no |
 | jsoup | 1 | 0 | 17/17 | no |
 | snakeyaml | 1 | 0 | 28/28 | no |
-| spring-core | 57 | 0 | 5/5 | no |
+| spring-core | 55 | 0 | 5/5 | no |
 | fastjson2 | 32 | 0 | 0/0 | no |
 | guava | 28 | 0 | 0/0 | no |
 
@@ -207,10 +207,10 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | commons-lang3 | 345 | 18 |
 | jsoup | 238 | 1 |
 | snakeyaml | 231 | 1 |
-| spring-core | 978 | 57 |
+| spring-core | 978 | 55 |
 | fastjson2 | 681 | 32 |
 | guava | 1892 | 28 |
-| **合计** | | **137** |
+| **合计** | | **135** |
 
 > **错误行数会误导**：它既被语法错遮蔽、又随内联/摊平的文件规模波动，且集中在少数类里。**行数散在多少个类里才决定
 > 可用性**，这正是以「缺陷 class 数」为主口径的原因。此表仅供上下文，且**只有在语法错为 0（无遮蔽）时才有意义**。
@@ -306,6 +306,11 @@ BENCHMARK=1 BENCHMARK_JARS=codec,gson,guava go test -run TestBenchmarkSelfRecomp
   重编译失败。修法：三元臂合并把 class 字面量臂计为 `java.lang.Class`（`TernaryArmRValueType`），并在声明处优先取槽位
   ref 的已定型（`Class`），因 ref 是从新鲜臂合并铸出的权威槽位类型。Kill-switch `JDEC_NO_CLASSLIT_SLOT_TYPE`（与直接
   存储 class 字面量定型共用）。
+- **已治本 · 懒初始化自守卫三元**（spring-core `StringDecoder`，57→55 行）：`x = (x != null) ? x : new Concrete()` 经
+  javac 编成条件存储，控制流合流把槽位 x 定型为 null-init 臂（`Object`）与 `new` 臂的 LUB（即 `Object`），重建的三元把 x
+  读回 `Object`，后续 `x.add(..)` 报「cannot find symbol」。因该槽位**唯一**持有的具体值就是 `new` 臂（另一臂是 null 守卫
+  的自身），把声明**收窄**到该臂类型是安全的（null 可赋给它、合流上不会调任何臂特有成员）。仅在「一臂为槽位自身、另一臂
+  为具体非 Object 引用」形状触发, 只收窄不放宽。Kill-switch `JDEC_LAZY_INIT_SELF_TERNARY_OFF`。
 
 ### D5 · 循环-continue 结构化（gson `JsonWriter.string` 等）
 
@@ -418,7 +423,7 @@ snakeyaml / commons-lang3 / spring-core 在**高准确度**下适用于类级逆
 | commons-lang3 | 18 | 287 | 10 |
 | jsoup | 1 | 35 | 3 |
 | snakeyaml | 1 | 47 | 2 |
-| spring-core | 57 | 764 | 614 |
+| spring-core | 55 | 764 | 614 |
 | fastjson2 | 32 | 614 | 286 |
 | guava | 28 | 865 | 132 |
 
