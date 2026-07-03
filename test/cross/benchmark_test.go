@@ -602,8 +602,9 @@ func isoCompileFiles(t *testing.T, files []string, classpath string) (failedFile
 			outDir := t.TempDir()
 			for f := range ch {
 				ctx, cancel := context.WithTimeout(context.Background(), compileTimeout)
+				// Multi-Release versioned units compile under their own --release N (see mrFileRelease).
 				args := append(append([]string{}, javacLocaleArgs...),
-					"-encoding", "UTF-8", "--release", "8", "-nowarn", "-Xmaxerrs", "1000000",
+					"-encoding", "UTF-8", "--release", strconv.Itoa(mrFileRelease(f, 8)), "-nowarn", "-Xmaxerrs", "1000000",
 					"-proc:none", "-cp", classpath, "-d", outDir, f)
 				cmd := exec.CommandContext(ctx, javac, args...)
 				cmd.Dir = outDir // keep the auto-spilled javac.<ts>.args out of test/cross
@@ -628,26 +629,16 @@ func isoCompileFiles(t *testing.T, files []string, classpath string) (failedFile
 
 // treeCompileFiles compiles all files in one javac invocation (deps on classpath) and returns the
 // number of DISTINCT files that contain at least one error, the total error-line count, and the set
-// of failing file paths (so callers can collapse them to outer classes).
+// of failing file paths (so callers can collapse them to outer classes). Multi-Release
+// `META-INF/versions/N/` units get their own `--release N` pass via treeCompileToDir (see splitMRFiles).
 func treeCompileFiles(t *testing.T, files []string, classpath string) (failedFiles, errLines int, badPaths map[string]struct{}) {
 	t.Helper()
 	badPaths = map[string]struct{}{}
 	if len(files) == 0 {
 		return 0, 0, badPaths
 	}
-	javac := lookJavac(t)
 	outDir := t.TempDir()
-	args := append(append([]string{}, javacLocaleArgs...),
-		"-encoding", "UTF-8", "--release", "8", "-nowarn", "-Xmaxerrs", "1000000",
-		"-proc:none", "-cp", classpath, "-d", outDir)
-	args = append(args, files...)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, javac, args...)
-	cmd.Dir = outDir
-	out, _ := cmd.CombinedOutput()
-	text := string(out)
-	errLines = strings.Count(text, ": error:")
+	errLines, text := treeCompileToDir(t, files, classpath, outDir)
 	for _, m := range javacErrorFileRe.FindAllStringSubmatch(text, -1) {
 		badPaths[m[1]] = struct{}{}
 	}

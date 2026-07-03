@@ -146,8 +146,9 @@ func recompileISOInventory(t *testing.T, files []string, root, classpath string,
 			outDir := t.TempDir()
 			for f := range ch {
 				ctx, cancel := context.WithTimeout(context.Background(), compileTimeout)
+				// Multi-Release versioned units compile under their own --release N (see mrFileRelease).
 				args := append(append([]string{}, javacLocaleArgs...),
-					"-encoding", "UTF-8", "--release", "8", "-nowarn",
+					"-encoding", "UTF-8", "--release", strconv.Itoa(mrFileRelease(f, 8)), "-nowarn",
 					"-cp", classpath, "-d", outDir, f)
 				cmd := exec.CommandContext(ctx, javac, args...)
 				cmd.Dir = outDir // 同 recompileISO: 防 javac.<ts>.args 落进 test/cross
@@ -211,7 +212,7 @@ func TestJarTreeInventory(t *testing.T) {
 	if target == "" {
 		t.Skip("set PROFILE_JAR=<guava|fastjson2|codec|spring|all> to run the tree (repackage) inventory")
 	}
-	javac := lookJavac(t)
+	lookJavac(t)
 	maxFiles, _ := strconv.Atoi(os.Getenv("MAXFILES"))
 	reportDir := os.Getenv("ISO_REPORT_DIR")
 	if reportDir == "" {
@@ -242,17 +243,10 @@ func TestJarTreeInventory(t *testing.T) {
 			files, units, _ := decompileAll(t, jarPath, root, maxFiles)
 
 			outDir := t.TempDir()
-			args := append(append([]string{}, javacLocaleArgs...),
-				"-encoding", "UTF-8", "--release", "8", "-nowarn", "-Xmaxerrs", "100000")
-			if cp != "" {
-				args = append(args, "-cp", cp)
-			}
-			args = append(args, "-d", outDir)
-			args = append(args, files...)
-			cmd := exec.Command(javac, args...)
-			cmd.Dir = outDir
-			out, _ := cmd.CombinedOutput()
-			errs := parseTreeErrors(string(out), root)
+			// treeCompileToDir gives Multi-Release `META-INF/versions/N/` units their own
+			// `--release N` pass (see splitMRFiles), so they are not false-failed under --release 8.
+			_, out := treeCompileToDir(t, files, cp, outDir)
+			errs := parseTreeErrors(out, root)
 
 			// reason 直方图 + 失败单元集合 (整树口径下, 一个单元可能贡献多条 error)。
 			hist := map[string]int{}

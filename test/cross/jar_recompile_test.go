@@ -270,8 +270,9 @@ func recompileISO(t *testing.T, files []string, classpath string, workers int) i
 			outDir := t.TempDir()
 			for f := range ch {
 				ctx, cancel := context.WithTimeout(context.Background(), compileTimeout)
+				// Multi-Release versioned units compile under their own --release N (see mrFileRelease).
 				args := append(append([]string{}, javacLocaleArgs...),
-					"-encoding", "UTF-8", "--release", "8", "-nowarn",
+					"-encoding", "UTF-8", "--release", strconv.Itoa(mrFileRelease(f, 8)), "-nowarn",
 					"-cp", classpath, "-d", outDir, f)
 				cmd := exec.CommandContext(ctx, javac, args...)
 				// Run javac from the throwaway out dir: with a long deps+jar classpath the JDK
@@ -294,21 +295,11 @@ func recompileISO(t *testing.T, files []string, classpath string, workers int) i
 
 // recompileTree compiles all files in one javac invocation (deps on classpath) and returns the
 // number of error lines javac reports. This is fast but masked; use only to find the biggest levers.
+// Multi-Release `META-INF/versions/N/` units get their own `--release N` pass via treeCompileToDir.
 func recompileTree(t *testing.T, files []string, classpath string) int {
 	t.Helper()
-	javac := lookJavac(t)
-	outDir := t.TempDir()
-	args := append(append([]string{}, javacLocaleArgs...),
-		"-encoding", "UTF-8", "--release", "8", "-nowarn", "-Xmaxerrs", "100000",
-		"-cp", classpath, "-d", outDir)
-	args = append(args, files...)
-	cmd := exec.Command(javac, args...)
-	// Run javac from the throwaway out dir: the JDK launcher auto-spills a `javac.<ts>.args`
-	// argfile into the CWD when the (huge, whole-jar) command line exceeds the OS arg limit, which
-	// would otherwise litter the repo's test/cross directory. The temp dir is removed by t.Cleanup.
-	cmd.Dir = outDir
-	out, _ := cmd.CombinedOutput()
-	return strings.Count(string(out), ": error:")
+	errc, _ := treeCompileToDir(t, files, classpath, t.TempDir())
+	return errc
 }
 
 // runProfile decompiles+recompiles one jar under the current environment and returns the result.

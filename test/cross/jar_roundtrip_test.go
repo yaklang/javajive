@@ -38,6 +38,8 @@ public class Verifier {
       for (Enumeration<JarEntry> e=jf.entries(); e.hasMoreElements();) {
         JarEntry je=e.nextElement(); String n=je.getName();
         if(!n.endsWith(".class")||n.endsWith("module-info.class")) continue;
+        if(n.startsWith("META-INF/")) continue; // MR versioned alternates: path does not map to a loadable class name
+
         String cn=n.substring(0,n.length()-6).replace('/','.');
         try { Class.forName(cn,false,cl); ok++; }
         catch(Throwable t){ fail++; if(fails.size()<20) fails.add(cn+" -> "+t); }
@@ -92,20 +94,41 @@ func verifyJarLoads(t *testing.T, verifierDir, jarPath string) (ok, fail int, ra
 
 // treeCompileToDir compiles every file together (deps on classpath) into outDir and returns the javac
 // error-line count plus raw output. Unlike recompileTree it keeps the produced .class files for repackage.
+// A Multi-Release jar's `META-INF/versions/N/` units are compiled in a SEPARATE second pass with
+// `--release N` (they target that JDK's APIs and duplicate base-tree class names; see splitMRFiles),
+// with the base output on the classpath and their classes emitted under outDir/META-INF/versions/N so
+// the repackaged jar preserves the MR layout.
 func treeCompileToDir(t *testing.T, files []string, classpath, outDir string) (errCount int, raw string) {
 	t.Helper()
 	javac := lookJavac(t)
-	args := append(append([]string{}, javacLocaleArgs...),
-		"-encoding", "UTF-8", "--release", "8", "-nowarn", "-Xmaxerrs", "100000")
-	if classpath != "" {
-		args = append(args, "-cp", classpath)
+	base, versioned, releases := splitMRFiles(files)
+	run := func(fs []string, release int, dst, cp string) string {
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dst, err)
+		}
+		args := append(append([]string{}, javacLocaleArgs...),
+			"-encoding", "UTF-8", "--release", strconv.Itoa(release), "-nowarn", "-Xmaxerrs", "100000")
+		if cp != "" {
+			args = append(args, "-cp", cp)
+		}
+		args = append(args, "-d", dst)
+		args = append(args, fs...)
+		cmd := exec.Command(javac, args...)
+		cmd.Dir = dst // keep javac.<ts>.args argfile out of test/cross on huge command lines
+		out, _ := cmd.CombinedOutput()
+		return string(out)
 	}
-	args = append(args, "-d", outDir)
-	args = append(args, files...)
-	cmd := exec.Command(javac, args...)
-	cmd.Dir = outDir // keep javac.<ts>.args argfile out of test/cross on huge command lines
-	out, _ := cmd.CombinedOutput()
-	return strings.Count(string(out), ": error:"), string(out)
+	if len(base) > 0 {
+		raw = run(base, 8, outDir, classpath)
+	}
+	for _, n := range releases {
+		cp := outDir
+		if classpath != "" {
+			cp = outDir + string(os.PathListSeparator) + classpath
+		}
+		raw += run(versioned[n], n, filepath.Join(outDir, "META-INF", "versions", strconv.Itoa(n)), cp)
+	}
+	return strings.Count(raw, ": error:"), raw
 }
 
 // TestJarRoundTripRepackage drives the full north-star chain on a real ~/.m2 jar and reports how far

@@ -7,9 +7,51 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// mrVersionsRe matches a Multi-Release jar's versioned entry path (META-INF/versions/<N>/...)
+// and captures the release number N.
+var mrVersionsRe = regexp.MustCompile(`(?:^|/)META-INF/versions/(\d+)/`)
+
+// mrFileRelease returns the javac --release value for one decompiled source file: the Multi-Release
+// version N for a `META-INF/versions/N/` unit, or def for a base-tree unit. An MR jar's versioned
+// classes are BY DEFINITION built for a later JDK (snakeyaml's versions/9 Logger uses
+// java.lang.System.Logger, a JDK9 API); compiling them with the base tree's --release 8 fails
+// unconditionally for ANY decompiler, so it is a harness artifact rather than a decompiler defect.
+func mrFileRelease(f string, def int) int {
+	if m := mrVersionsRe.FindStringSubmatch(filepath.ToSlash(f)); m != nil {
+		if n, err := strconv.Atoi(m[1]); err == nil && n > def {
+			return n
+		}
+	}
+	return def
+}
+
+// splitMRFiles partitions decompiled .java files into the base tree and the per-release
+// META-INF/versions/N groups of a Multi-Release jar (JEP 238). Versioned units must be compiled in a
+// SEPARATE javac pass: (a) with `--release N`, because they target that JDK's APIs, and (b) apart from
+// the base tree, because a versioned class declares the same package+name as its base counterpart
+// ("duplicate class" in a single pass). Returns the sorted release numbers for deterministic iteration.
+func splitMRFiles(files []string) (base []string, versioned map[int][]string, releases []int) {
+	versioned = map[int][]string{}
+	for _, f := range files {
+		if n := mrFileRelease(f, 8); n > 8 {
+			versioned[n] = append(versioned[n], f)
+			continue
+		}
+		base = append(base, f)
+	}
+	for n := range versioned {
+		releases = append(releases, n)
+	}
+	sort.Ints(releases)
+	return base, versioned, releases
+}
 
 // lookJavac returns the path to javac, skipping the test when no JDK is present.
 func lookJavac(t *testing.T) string {
