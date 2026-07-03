@@ -1912,6 +1912,62 @@ var jdkGenericLambdaReceivers = map[string]bool{
 	"java.util.Optional":      true,
 }
 
+// jdkGenericCtorDiamondClasses is the small set of JDK generic collection classes whose RAW `new X(...)`
+// in call-receiver position gets the diamond restored by newRecvJDKGenericDiamond. Kept tiny and
+// unambiguous (concrete, non-anonymous, diamond-inferable under --release 8).
+var jdkGenericCtorDiamondClasses = map[string]bool{
+	"java.util.HashMap":       true,
+	"java.util.LinkedHashMap": true,
+	"java.util.TreeMap":       true,
+	"java.util.ArrayList":     true,
+	"java.util.LinkedList":    true,
+	"java.util.HashSet":       true,
+	"java.util.LinkedHashSet": true,
+	"java.util.TreeSet":       true,
+}
+
+// newRecvJDKGenericDiamond renders a RAW JDK-generic `new X(args)` receiver with the diamond restored
+// (`new X<>(args)`) when THIS call passes a lambda / method reference. Calling a lambda-taking method
+// (forEach/removeIf/compute...) through a raw-typed receiver erases the functional-interface parameter's
+// SAM to Object (JLS 4.8), so the lambda's parameters degrade to Object and a body dereferencing them
+// fails ("Object cannot be converted to String"; spring SimpleAliasRegistry
+// `new HashMap(this.aliasMap).forEach((l0, l1) -> {... var1.resolveStringValue(l0) ...})`). The source
+// necessarily had a parameterized `new HashMap<>(...)` (or explicit args) for the lambda body to
+// compile; the diamond lets javac re-infer the type arguments from the constructor argument (a typed
+// map -> HashMap<String,String>), rebinding the lambda parameters. Verified against javac: the diamond
+// also compiles with a RAW/empty constructor argument (inference falls back to Object), so this cannot
+// introduce a new error. Tightly gated: (a) receiver is a non-array `new` of a whitelisted concrete JDK
+// generic collection rendered RAW, (b) at least one argument of THIS call is a lambda/method reference.
+// Returns the rendered receiver string, or "" to keep the legacy raw rendering. Kill-switch:
+// JDEC_NEW_RECV_DIAMOND_OFF=1.
+func (f *FunctionCallExpression) newRecvJDKGenericDiamond(ne *NewExpression, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_NEW_RECV_DIAMOND_OFF") != "" || ne == nil || ne.IsArray() {
+		return ""
+	}
+	hasLambdaArg := false
+	for _, a := range f.Arguments {
+		if cv, ok := UnpackSoltValue(a).(*CustomValue); ok && cv.Flag == "lambda" {
+			hasLambdaArg = true
+			break
+		}
+	}
+	if !hasLambdaArg {
+		return ""
+	}
+	jc, ok := ne.JavaType.RawType().(*types.JavaClass)
+	if !ok || jc == nil || !jdkGenericCtorDiamondClasses[jc.Name] {
+		return ""
+	}
+	s := ne.String(funcCtx)
+	// Only a RAW rendering (no explicit type arguments) gets the diamond; find the argument-list
+	// paren and inject `<>` before it.
+	idx := strings.IndexByte(s, '(')
+	if idx <= 0 || strings.Contains(s[:idx], "<") {
+		return ""
+	}
+	return s[:idx] + "<>" + s[idx:]
+}
+
 // lambdaArgRawJDKReceiverCast is the JDK-receiver companion of lambdaArgFunctionalCast. It re-adds the
 // functional-interface cast a lambda / method-reference argument needs when the call's RECEIVER is a
 // KNOWN JDK GENERIC type used RAW (java.util.stream.Stream / java.util.Optional). Such a receiver arises
@@ -2422,6 +2478,16 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 		// its own - `(() -> x).get()` does not compile. Supply one by casting to the functional
 		// interface the value carries: `((Supplier)(() -> x)).get()`.
 		return fmt.Sprintf("((%s)(%s)).%s(%s)", cv.Type().String(funcCtx), cv.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+	}
+	// A RAW `new HashMap(typedMap)` used directly as the receiver of a lambda-taking call erases the
+	// method's functional-interface parameter (raw receiver, JLS 4.8), so the lambda's parameters
+	// degrade to Object and a body dereferencing them fails ("Object cannot be converted to String",
+	// spring SimpleAliasRegistry `new HashMap(this.aliasMap).forEach((l0, l1) -> ...)`). Restore the
+	// source's diamond so javac re-infers the type arguments from the constructor argument.
+	if ne, ok := obj.(*NewExpression); ok {
+		if s := f.newRecvJDKGenericDiamond(ne, funcCtx); s != "" {
+			return fmt.Sprintf("%s.%s(%s)", s, functionName, strings.Join(paramStrs, ","))
+		}
 	}
 	switch obj.(type) {
 	case *JavaExpression, *TernaryExpression, *SlotValue:

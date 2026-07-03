@@ -200,7 +200,7 @@
     <div class="stat-grid">
       <div class="stat">
         <div class="stat-num">96.5%</div>
-        <div class="stat-label" data-i18n="bench.s1">class-clean rate — 2,173 / 2,252 outer classes recompile with zero <code>javac</code> errors</div>
+        <div class="stat-label" data-i18n="bench.s1">class-clean rate — 2,174 / 2,252 outer classes recompile with zero <code>javac</code> errors</div>
       </div>
       <div class="stat">
         <div class="stat-num">0</div>
@@ -226,7 +226,7 @@
 
     <div class="section-head" style="margin-top:3.25rem">
       <h2 data-i18n="ga.h2">Professional self-assessment — is it GA?</h2>
-      <p data-i18n="ga.p">JavaJive is a pure-Go Java decompiler core — zero JVM, zero external process — embeddable straight into a Go security toolchain. On 8 real JARs it recompiles 96.5% of outer classes with zero <code>javac</code> errors and, critically, <strong>zero syntax errors</strong> (a CI-enforced hard assertion, so no type error can hide behind a lexer failure). <strong>commons-codec and gson are GA-ready</strong>: their output recompiles, repackages and passes per-class JVM bytecode verification (<code>-Xverify:all</code>) end-to-end — commons-codec is byte-identical to the original jar under a call differential. fastjson2 (97.2%), guava (96.4%), jsoup (98.0%), snakeyaml (98.4%) and spring-core (95.4%) are high-accuracy and production-usable for class-level reverse engineering, vulnerability auditing and patch re-compilation. Combined with 5/5 byte-identical algorithm round-trips, this is an <strong>industrially usable build for Go × Java security cross-analysis</strong>.</p>
+      <p data-i18n="ga.p">JavaJive is a pure-Go Java decompiler core — zero JVM, zero external process — embeddable straight into a Go security toolchain. On 8 real JARs it recompiles 96.5% of outer classes with zero <code>javac</code> errors and, critically, <strong>zero syntax errors</strong> (a CI-enforced hard assertion, so no type error can hide behind a lexer failure). <strong>commons-codec and gson are GA-ready</strong>: their output recompiles, repackages and passes per-class JVM bytecode verification (<code>-Xverify:all</code>) end-to-end — commons-codec is byte-identical to the original jar under a call differential. fastjson2 (97.2%), guava (96.4%), jsoup (98.0%), snakeyaml (98.4%) and spring-core (95.5%) are high-accuracy and production-usable for class-level reverse engineering, vulnerability auditing and patch re-compilation. Combined with 5/5 byte-identical algorithm round-trips, this is an <strong>industrially usable build for Go × Java security cross-analysis</strong>.</p>
     </div>
 
     <p class="bench-note dim" data-i18n="acc.cap" style="margin-bottom:.6rem">Per-JAR class-clean rate — compilable outer classes / total. The primary, phase-masking-proof accuracy metric (higher is better):</p>
@@ -248,10 +248,10 @@
           <tr><td>commons-lang3 (345)</td><td class="col-jj">187 / 198</td><td>94.4%</td><td>11</td><td>0</td><td>—</td></tr>
           <tr><td>jsoup (238)</td><td class="col-jj">50 / 51</td><td>98.0%</td><td>1</td><td>0</td><td>—</td></tr>
           <tr><td>snakeyaml (231)</td><td class="col-jj">120 / 122</td><td>98.4%</td><td>2</td><td>0</td><td>—</td></tr>
-          <tr><td>spring-core (978)</td><td class="col-jj">619 / 649</td><td>95.4%</td><td>30</td><td>0</td><td>—</td></tr>
+          <tr><td>spring-core (978)</td><td class="col-jj">620 / 649</td><td>95.5%</td><td>29</td><td>0</td><td>—</td></tr>
           <tr><td>fastjson2 (681)</td><td class="col-jj">514 / 529</td><td>97.2%</td><td>15</td><td>0</td><td>—</td></tr>
           <tr><td>guava (1,892)</td><td class="col-jj">538 / 558</td><td>96.4%</td><td>20</td><td>0</td><td>—</td></tr>
-          <tr><td data-i18n="acc.total"><strong>total</strong></td><td class="col-jj"><strong>2,173 / 2,252</strong></td><td><strong>96.5%</strong></td><td><strong>79</strong></td><td><strong>0</strong></td><td class="col-jj"><strong data-i18n="acc.two">2 libs</strong></td></tr>
+          <tr><td data-i18n="acc.total"><strong>total</strong></td><td class="col-jj"><strong>2,174 / 2,252</strong></td><td><strong>96.5%</strong></td><td><strong>78</strong></td><td><strong>0</strong></td><td class="col-jj"><strong data-i18n="acc.two">2 libs</strong></td></tr>
         </tbody>
       </table>
     </div>
@@ -326,18 +326,18 @@
           <tr><td>commons-lang3 (345)</td><td class="col-jj">11/198 (94.4%)</td><td>46/198 (76.8%)</td><td><strong>6/198 (97.0%)</strong></td></tr>
           <tr><td>jsoup (238)</td><td class="col-jj"><strong>1/51 (98.0%)</strong></td><td>5/51 (90.2%)</td><td>2/51 (96.1%)</td></tr>
           <tr><td>snakeyaml (231)</td><td class="col-jj"><strong>2/122 (98.4%)</strong></td><td>11/123 (91.1%)</td><td>2/121 (98.3%)</td></tr>
-          <tr><td>spring-core (978)</td><td class="col-jj"><strong>30/649 (95.4%)</strong></td><td>117/649 (82.0%)</td><td>74/649 (88.6%)</td></tr>
+          <tr><td>spring-core (978)</td><td class="col-jj"><strong>29/649 (95.5%)</strong></td><td>117/649 (82.0%)</td><td>74/649 (88.6%)</td></tr>
           <tr><td>fastjson2 (681)</td><td class="col-jj"><strong>15/529 (97.2%)</strong></td><td>90/530 (83.0%)</td><td>40/529 (92.4%)</td></tr>
           <tr><td>guava (1,892)</td><td class="col-jj"><strong>20/558 (96.4%)</strong></td><td>154/558 (72.4%)</td><td>66/558 (88.2%)</td></tr>
-          <tr><td data-i18n="acc.total"><strong>total</strong></td><td class="col-jj"><strong>79/2,252 (96.5%)</strong></td><td>457/2,254 (79.7%)</td><td>208/2,252 (90.8%)</td></tr>
+          <tr><td data-i18n="acc.total"><strong>total</strong></td><td class="col-jj"><strong>78/2,252 (96.5%)</strong></td><td>457/2,254 (79.7%)</td><td>208/2,252 (90.8%)</td></tr>
         </tbody>
       </table>
     </div>
 
     <p class="bench-note dim" data-i18n="cmp2.note">
-      JavaJive beats CFR on every JAR and cuts total defective classes by 83% (79 vs 457); it ranks #1 overall, ahead of
-      Vineflower (79 vs 208, 62% fewer), leading on serialization/JSON/codec, large generic libraries and spring-core (gson 0 vs 16,
-      fastjson2 15 vs 40, guava 20 vs 66, commons-codec 0 vs 2, spring-core 30 vs 74) while Vineflower is steadier on commons-lang3
+      JavaJive beats CFR on every JAR and cuts total defective classes by 83% (78 vs 457); it ranks #1 overall, ahead of
+      Vineflower (78 vs 208, 62% fewer), leading on serialization/JSON/codec, large generic libraries and spring-core (gson 0 vs 16,
+      fastjson2 15 vs 40, guava 20 vs 66, commons-codec 0 vs 2, spring-core 29 vs 74) while Vineflower is steadier on commons-lang3
       (6 vs 11). Measured 2026-07-02 on darwin/arm64, JDK 21 (<code>--release 8</code>), CFR 0.152 &amp;
       Vineflower 1.10.1. Full methodology &amp; reproduction:
       <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7.
@@ -491,14 +491,14 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "install.src.foot": "Requires Go 1.22+. The result is a single self-contained binary.",
         "bench.h2": "Industrial-grade, self-proven",
         "bench.p": "Honest, reproducible numbers on 8 real JARs (2,252 outer classes): JavaJive measured against itself, plus a fair head-to-head against CFR 0.152 and Vineflower 1.10.1 below.",
-        "bench.s1": 'class-clean rate — 2,173 / 2,252 outer classes recompile with zero <code>javac</code> errors',
+        "bench.s1": 'class-clean rate — 2,174 / 2,252 outer classes recompile with zero <code>javac</code> errors',
         "bench.s2": "syntax errors across all 8 JARs — a CI-enforced hard assertion, so the numbers can't be phase-masked",
         "bench.s3": "self-hosted algorithms — MD5 · SHA-256 · CRC32 · quicksort · Base64 — round-trip byte-for-byte",
         "bench.s4": 'libraries with full round-trip (commons-codec, gson): recompile &rarr; repackage &rarr; JVM <code>-Xverify:all</code>',
         "bench.s5": "classes per second, single-thread end-to-end decompile (per-class concurrency scales near-linearly)",
         "bench.s6": "JVM opcode parse coverage",
         "ga.h2": "Professional self-assessment — is it GA?",
-        "ga.p": 'JavaJive is a pure-Go Java decompiler core — zero JVM, zero external process — embeddable straight into a Go security toolchain. On 8 real JARs it recompiles 96.5% of outer classes with zero <code>javac</code> errors and, critically, <strong>zero syntax errors</strong> (a CI-enforced hard assertion, so no type error can hide behind a lexer failure). <strong>commons-codec and gson are GA-ready</strong>: their output recompiles, repackages and passes per-class JVM bytecode verification (<code>-Xverify:all</code>) end-to-end — commons-codec is byte-identical to the original jar under a call differential. fastjson2 (97.2%), guava (96.4%), jsoup (98.0%), snakeyaml (98.4%) and spring-core (95.4%) are high-accuracy and production-usable for class-level reverse engineering, vulnerability auditing and patch re-compilation. Combined with 5/5 byte-identical algorithm round-trips, this is an <strong>industrially usable build for Go × Java security cross-analysis</strong>.',
+        "ga.p": 'JavaJive is a pure-Go Java decompiler core — zero JVM, zero external process — embeddable straight into a Go security toolchain. On 8 real JARs it recompiles 96.5% of outer classes with zero <code>javac</code> errors and, critically, <strong>zero syntax errors</strong> (a CI-enforced hard assertion, so no type error can hide behind a lexer failure). <strong>commons-codec and gson are GA-ready</strong>: their output recompiles, repackages and passes per-class JVM bytecode verification (<code>-Xverify:all</code>) end-to-end — commons-codec is byte-identical to the original jar under a call differential. fastjson2 (97.2%), guava (96.4%), jsoup (98.0%), snakeyaml (98.4%) and spring-core (95.5%) are high-accuracy and production-usable for class-level reverse engineering, vulnerability auditing and patch re-compilation. Combined with 5/5 byte-identical algorithm round-trips, this is an <strong>industrially usable build for Go × Java security cross-analysis</strong>.',
         "acc.cap": "Per-JAR class-clean rate — compilable outer classes / total. The primary, phase-masking-proof accuracy metric (higher is better):",
         "acc.clean": "clean / total", "acc.pct": "clean %", "acc.def": "defect classes",
         "acc.syn": "syntax err", "acc.rt": "full round-trip", "acc.yes": "YES",
@@ -513,7 +513,7 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "cmp2.s2": "clean-class rate — #1, ahead of Vineflower (90.8%) and CFR (79.7%)",
         "cmp2.s3": "the only pure-Go decompiler in the top tier — CFR and Vineflower are JVM apps",
         "cmp2.cap": "Defective outer classes / total (clean-class rate). Bold = best for that JAR. Lower defect count is better:",
-        "cmp2.note": 'JavaJive beats CFR on every JAR and cuts total defective classes by 83% (79 vs 457); it ranks #1 overall, ahead of Vineflower (79 vs 208, 62% fewer), leading on serialization/JSON/codec, large generic libraries and spring-core (gson 0 vs 16, fastjson2 15 vs 40, guava 20 vs 66, commons-codec 0 vs 2, spring-core 30 vs 74) while Vineflower is steadier on commons-lang3 (6 vs 11). Measured 2026-07-02 on darwin/arm64, JDK 21 (<code>--release 8</code>), CFR 0.152 &amp; Vineflower 1.10.1. Full methodology &amp; reproduction: <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7.',
+        "cmp2.note": 'JavaJive beats CFR on every JAR and cuts total defective classes by 83% (78 vs 457); it ranks #1 overall, ahead of Vineflower (78 vs 208, 62% fewer), leading on serialization/JSON/codec, large generic libraries and spring-core (gson 0 vs 16, fastjson2 15 vs 40, guava 20 vs 66, commons-codec 0 vs 2, spring-core 29 vs 74) while Vineflower is steadier on commons-lang3 (6 vs 11). Measured 2026-07-02 on darwin/arm64, JDK 21 (<code>--release 8</code>), CFR 0.152 &amp; Vineflower 1.10.1. Full methodology &amp; reproduction: <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7.',
         "features.h2": "Features",
         "features.p": "Three Java building blocks, one portable module — plus the supporting cast trimmed down to a self-contained core.",
         "feat.1.t": "Decompiler",
@@ -560,14 +560,14 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "install.src.foot": "需要 Go 1.22+。产物是一个自包含的单文件二进制。",
         "bench.h2": "工业可用，用事实自证",
         "bench.p": "8 个真实 JAR（2,252 个顶层类）上的诚实、可复现数据：既有 JavaJive 与自身的纵向对比，也有下方与 CFR 0.152、Vineflower 1.10.1 的同口径正面横评。",
-        "bench.s1": '类级干净率 — 2,173 / 2,252 个顶层类零 <code>javac</code> 错误可重编译',
+        "bench.s1": '类级干净率 — 2,174 / 2,252 个顶层类零 <code>javac</code> 错误可重编译',
         "bench.s2": "8 个 JAR 全集语法错为 0 — CI 硬断言把关，数字无法被阶段遮蔽",
         "bench.s3": "自托管算法 — MD5 · SHA-256 · CRC32 · 快排 · Base64 — 往返逐字节一致",
         "bench.s4": '完整往返的库（commons-codec、gson）：重编译 &rarr; 重打包 &rarr; JVM <code>-Xverify:all</code> 逐类校验',
         "bench.s5": "单线程端到端反编译每秒类数（逐类可并发，随核数近线性放大）",
         "bench.s6": "JVM opcode 解析覆盖",
         "ga.h2": "专业自评 —— 能不能 GA？",
-        "ga.p": 'JavaJive 是纯 Go 的 Java 反编译内核——零 JVM、零外部进程——可直接嵌入 Go 安全工具链。在 8 个真实 JAR 上，96.5% 的顶层类零 <code>javac</code> 错误可重编译，且关键的<strong>语法错为 0</strong>（CI 硬断言把关，任何类型错都无法被词法错遮蔽）。<strong>commons-codec 与 gson 已达 GA</strong>：产物可重编译、可重打包，并端到端通过逐类 JVM 字节码校验（<code>-Xverify:all</code>）——commons-codec 经调用差分与原始 jar 逐字节一致。fastjson2（97.2%）、guava（96.4%）、jsoup（98.0%）、snakeyaml（98.4%）与 spring-core（95.4%）为高准确度、可投产，适用于类级逆向分析、漏洞审计与补丁回编验证。结合 5/5 逐字节一致的算法往返，这是一个<strong>可用于 Go × Java 安全交叉分析的工业可用版本</strong>。',
+        "ga.p": 'JavaJive 是纯 Go 的 Java 反编译内核——零 JVM、零外部进程——可直接嵌入 Go 安全工具链。在 8 个真实 JAR 上，96.5% 的顶层类零 <code>javac</code> 错误可重编译，且关键的<strong>语法错为 0</strong>（CI 硬断言把关，任何类型错都无法被词法错遮蔽）。<strong>commons-codec 与 gson 已达 GA</strong>：产物可重编译、可重打包，并端到端通过逐类 JVM 字节码校验（<code>-Xverify:all</code>）——commons-codec 经调用差分与原始 jar 逐字节一致。fastjson2（97.2%）、guava（96.4%）、jsoup（98.0%）、snakeyaml（98.4%）与 spring-core（95.5%）为高准确度、可投产，适用于类级逆向分析、漏洞审计与补丁回编验证。结合 5/5 逐字节一致的算法往返，这是一个<strong>可用于 Go × Java 安全交叉分析的工业可用版本</strong>。',
         "acc.cap": "逐 JAR 类级干净率 —— 可编译顶层类 / 总数。抗阶段遮蔽的主准确度口径（越高越好）：",
         "acc.clean": "干净 / 总数", "acc.pct": "干净率", "acc.def": "缺陷类",
         "acc.syn": "语法错", "acc.rt": "完整往返", "acc.yes": "达成",
@@ -582,7 +582,7 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "cmp2.s2": "类级干净率——第一（96.5%），领先 Vineflower（90.8%）与 CFR（79.7%）",
         "cmp2.s3": "第一梯队里唯一的纯 Go 反编译器——CFR 与 Vineflower 均为 JVM 程序",
         "cmp2.cap": "缺陷外层类 / 总数（干净率）。粗体为该 JAR 最优。缺陷数越低越好：",
-        "cmp2.note": 'JavaJive 在每个 JAR 上都胜过 CFR，缺陷类总数减少 83%（79 vs 457）；总体排名第一，领先 Vineflower（79 vs 208，少 62%），在序列化/JSON/编码、大型泛型库与 spring-core 上领先（gson 0 vs 16、fastjson2 15 vs 40、guava 20 vs 66、commons-codec 0 vs 2、spring-core 30 vs 74），Vineflower 仅在 commons-lang3（6 vs 11）上更稳。测于 2026-07-02，darwin/arm64，JDK 21（<code>--release 8</code>），CFR 0.152、Vineflower 1.10.1。完整方法学与复现见 <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7。',
+        "cmp2.note": 'JavaJive 在每个 JAR 上都胜过 CFR，缺陷类总数减少 83%（78 vs 457）；总体排名第一，领先 Vineflower（78 vs 208，少 62%），在序列化/JSON/编码、大型泛型库与 spring-core 上领先（gson 0 vs 16、fastjson2 15 vs 40、guava 20 vs 66、commons-codec 0 vs 2、spring-core 29 vs 74），Vineflower 仅在 commons-lang3（6 vs 11）上更稳。测于 2026-07-02，darwin/arm64，JDK 21（<code>--release 8</code>），CFR 0.152、Vineflower 1.10.1。完整方法学与复现见 <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7。',
         "features.h2": "特性",
         "features.p": "三块 Java 基础能力，打包进一个便携模块——其余依赖也被裁剪成自包含的核心。",
         "feat.1.t": "反编译器",
