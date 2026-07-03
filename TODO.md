@@ -8,7 +8,7 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 8/2 · fastjson2 32/15 · guava 31/20 · commons-lang3 19/12 · spring 81/39。
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 8/2 · fastjson2 32/15 · guava 31/20 · commons-lang3 19/12 · spring 80/38。
 
 ## 重新生成本清单(诚实数据)
 

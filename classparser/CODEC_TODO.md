@@ -32,10 +32,10 @@
 | **commons-lang3** 3.12.0 | 345 | 12 | 19 | 0 | 泛型擦除长尾 |
 | **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
 | **snakeyaml** 2.2 | 231 | 2 | 8 | 0 | 泛型/槽位长尾 |
-| **spring-core** 5.3.27 | 978 | 39 | 81 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
+| **spring-core** 5.3.27 | 978 | 38 | 80 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
 | **fastjson2** 2.0.43 | 681 | 15 | 32 | 0 | 泛型擦除 + 槽位复用长尾 |
 | **guava** 28.2-android | 1892 | 20 | 31 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **89** | **173** | **0** | 类级干净率 **96.1%**(2163/2252) |
+| **合计** | | **88** | **172** | **0** | 类级干净率 **96.1%**(2164/2252) |
 
 **codec 与 gson 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go`):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。
@@ -156,6 +156,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF` | 未使用的 lambda 形参隐式渲染(`(Integer l0)`→`(l0)`) |
 | `JDEC_LAMBDA_PARAM_SCOPE_OFF` | 嵌套 lambda 形参按嵌套深度命名(`l<depth>_<i>`), 避免内层 `l0` 遮蔽外层 `l0`(javac「variable l0 is already defined」); 顶层 lambda 仍 `l<i>` 保持字节一致。修 spring MergedAnnotationPredicates/DataBufferUtils 等 |
 | `JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF` | try/finally(或 synchronized)处理器栈值无法绑定到真实局部时渲染出的裸 `varN = Exception;`(ANTLR 语法网放行、javac 报「cannot find symbol」)提升为完整降级触发器: 该方法先激进重试, 失败则降级为诚实可编译 stub, 不再泄漏坏代码。修 guava Monitor.enterWhen/enterWhenUninterruptibly、InetAddresses(guava tree -3 行, 缺陷类 22→20) |
+| `JDEC_NO_EMBED_ASSIGN_INT` | 缺声明安全网识别「条件内嵌赋值」目标为 int 的正则放宽到容忍一层 `()`, 使 `while ((c = this.read()) != -1)` / `(c = in.read()) < n` 这类 InputStream 抽水循环的 RHS(方法调用)被认出: 之前跨不过 `read()` 的括号, 回退成 `Object c = null` 导致 `bad operand types for '!='/'<'`。int 判定安全性不变(关系运算恒为数值; 相等式仍要求数值字面量右操作数)。修 spring-core UpdateMessageDigestInputStream(spring tree -1 行, 缺陷类 39→38) |
 | `JDEC_LAMBDA_RAWRECV_CAST_OFF` | raw 接收者擦除 SAM 的方法调用侧实参造型(`(Consumer<FieldReader>)`) |
 | `JDEC_CTOR_METHODREF_FIX_OFF` | 构造器方法引用 `::new` 渲染(修 `::new_`) |
 | `JDEC_CTOR_DIAMOND_OFF` | 泛型类 `new` 带方法引用/lambda 实参时补菱形 `<>` |

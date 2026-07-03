@@ -4185,9 +4185,19 @@ func generatedLocalLooksInt(body, name string) bool {
 	//     `(o = foo()) != null`, which legitimately compiles with the `Object o = null` default.
 	// Kill-switch: JDEC_NO_EMBED_ASSIGN_INT=1 restores the pre-fix (Object-defaulting) behavior.
 	if os.Getenv("JDEC_NO_EMBED_ASSIGN_INT") == "" {
+		// The embedded-assign RHS must tolerate ONE level of parentheses so the ubiquitous
+		// `while ((c = this.read()) != -1)` / `(c = in.read()) < n` idiom is recognised: the RHS is a
+		// method call (`this.read()`), whose `()` a bare `[^()]*` cannot span, so it previously fell
+		// through to `Object c = null` and then failed to recompile ("bad operand types for binary
+		// operator '!='/'<'" -- spring-core UpdateMessageDigestInputStream, and any InputStream-drain
+		// loop). `[^()]*(?:\([^()]*\)[^()]*)*` matches a RHS with a single (possibly-nested-arg-free)
+		// call. The int-category guarantees are unchanged: a relational operator is numeric-only in
+		// Java regardless of the RHS, and the equality form still requires a NUMERIC-LITERAL right
+		// operand (`\(?-?\d`), so a reference null-check `(o = foo()) != null` is still NOT matched.
+		rhs := `[^()]*(?:\([^()]*\)[^()]*)*`
 		patterns = append(patterns,
-			`\(`+quoted+` = [^()]*\)\s*(?:<|>|<=|>=)`,
-			`\(`+quoted+` = [^()]*\)\s*(?:==|!=)\s*\(?-?\d`,
+			`\(`+quoted+` = `+rhs+`\)\s*(?:<|>|<=|>=)`,
+			`\(`+quoted+` = `+rhs+`\)\s*(?:==|!=)\s*\(?-?\d`,
 		)
 	}
 	for _, pattern := range patterns {
