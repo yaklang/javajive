@@ -5,5 +5,5 @@
 # "invalid method reference" and a bare `var2 = (Collection l0) -> ...` has "incompatible parameter
 # types in lambda expression". Real hit: fastjson2 ObjectReaderImplList.
 +(Function<Collection, Collection>)(Collections::unmodifiableCollection)
-+(Function<Collection, Collection>)((Collection l0) ->
++(Function<Collection, Collection>)((l0) ->
 -/=\s*Collections::unmodifiableCollection;/

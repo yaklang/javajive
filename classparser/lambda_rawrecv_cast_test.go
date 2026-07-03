@@ -54,7 +54,11 @@ func TestLambdaRawReceiverCastIsLoadBearing(t *testing.T) {
 	if strings.Contains(off, "(Consumer<Elem>)") {
 		t.Errorf("fix OFF: expected NO `(Consumer<Elem>)` cast, got:\n%s", off)
 	}
-	if !strings.Contains(off, ".apply((Elem") {
-		t.Errorf("fix OFF: expected the bare `.apply((Elem ...) -> ` lambda, got:\n%s", off)
+	// Lambda parameters are now rendered implicitly (JDEC_LAMBDA_IMPLICIT_PARAMS default), so the bare
+	// (uncast) lambda reads `.apply((l0) -> ...)`. Against the RAW receiver its SAM is accept(Object),
+	// so `l0` is inferred Object and the body's `l0.flag`/`l0.name` no longer resolve -- the same
+	// recompile blocker the functional-interface cast (fix ON) removes.
+	if !strings.Contains(off, ".apply((l0) ->") {
+		t.Errorf("fix OFF: expected the bare `.apply((l0) -> ` lambda, got:\n%s", off)
 	}
 }

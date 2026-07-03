@@ -439,6 +439,15 @@ func isStdlibNestedDottedPackage(pkg string) bool {
 		return true
 	case strings.HasPrefix(pkg, "org.omg."):
 		return true
+	// Kotlin runtime/reflect packages are never Yak-decompiled units (they ship as an external optional
+	// dependency), so their nested types (e.g. kotlin.reflect.KParameter.Kind) are only resolvable on
+	// the classpath under the dotted source name. Left flat, `KParameter$Kind.VALUE` makes javac read
+	// `KParameter$Kind` as a package ("package KParameter$Kind does not exist"): spring-core's
+	// KotlinReflectionParameterNameDiscoverer / MethodParameter$KotlinDelegate.
+	case pkg == "kotlin" || strings.HasPrefix(pkg, "kotlin."):
+		return true
+	case pkg == "kotlinx" || strings.HasPrefix(pkg, "kotlinx."):
+		return true
 	}
 	return false
 }

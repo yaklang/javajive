@@ -40,7 +40,7 @@ Built for portability and embedding:
 Measured on 8 real-world jars (2,252 outer classes) via decompile → `javac --release 8`
 recompile → repackage → JVM verify:
 
-- **93.6% class-clean rate** — 2,107 / 2,252 outer classes recompile with **zero `javac`
+- **96.0% class-clean rate** — 2,161 / 2,252 outer classes recompile with **zero `javac`
   errors**, and **0 syntax errors** across all 8 jars (a CI-enforced hard assertion, so no
   type error can hide behind a lexer failure).
 - **commons-codec & gson fully round-trip** — decompile → recompile → repackage → external
@@ -48,9 +48,9 @@ recompile → repackage → JVM verify:
   original jar under a call differential).
 - **5 / 5 self-hosted algorithms** (MD5 · SHA-256 · CRC32 · quicksort · Base64) round-trip
   **byte-for-byte**.
-- **#1 in a fair 3-way comparison** — clean-class rate 93.6% vs Vineflower 1.10.1 (90.8%) and
-  CFR 0.152 (79.7%); 145 defective classes vs CFR's 457 (**68% fewer**) and Vineflower's 208
-  (**30% fewer**), winning all 8 jars against CFR.
+- **#1 in a fair 3-way comparison** — clean-class rate 96.0% vs Vineflower 1.10.1 (90.8%) and
+  CFR 0.152 (79.7%); 91 defective classes vs CFR's 457 (**80% fewer**) and Vineflower's 208
+  (**56% fewer**), winning all 8 jars against CFR.
 
 See [BENCHMARK.md](BENCHMARK.md) for the full methodology, per-jar tables and reproduction commands.
 

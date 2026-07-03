@@ -359,6 +359,20 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			if !strings.Contains(accessFlags, "public") {
 				accessFlags = strings.TrimSpace("public " + accessFlags)
 			}
+		case innerFlags&0x0004 == 0x0004 && os.Getenv("JDEC_NESTED_PROTECTED_PUBLIC_OFF") == "":
+			// Genuinely nested AND `protected` per InnerClasses. A protected nested type is reachable
+			// from subclasses in OTHER packages via inheritance (e.g. cglib's
+			// AbstractClassGenerator.Source / .ClassLoaderData, used by subclasses in the beans/proxy/
+			// reflect/util packages). Once flattened to a standalone top-level unit that inheritance
+			// relationship is gone, so leaving it package-private makes it unreachable cross-package
+			// ("AbstractClassGenerator$Source is not public in ...; cannot be accessed from outside
+			// package" -- the single biggest spring-core cglib blocker, 44 error lines across ~15
+			// classes). `protected` is illegal at top level, so the only faithful-enough, recompile-safe
+			// top-level encoding is to WIDEN it to `public` (widening visibility never breaks a compile).
+			// Kill-switch: JDEC_NESTED_PROTECTED_PUBLIC_OFF=1 restores the legacy package-private stripping.
+			if !strings.Contains(accessFlags, "public") {
+				accessFlags = strings.TrimSpace("public " + accessFlags)
+			}
 		default:
 			// Genuinely nested, non-public: strip any spurious `public`.
 			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
@@ -639,10 +653,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// matching the local var already emitted raw. Derived from THIS class's own bytecode only (no sibling
 	// resolver), so it works under single-class decompile too. Kill-switch: JDEC_INNER_RAW_ERASE_OFF.
 	var rawEraseTypeVars map[string]bool
-	if ownFormal := types.ClassFormalTypeParamNames(classSigStr); os.Getenv("JDEC_INNER_RAW_ERASE_OFF") == "" && len(ownFormal) > 0 {
+	if ownFormalNames := types.ClassFormalTypeParamNames(classSigStr); os.Getenv("JDEC_INNER_RAW_ERASE_OFF") == "" {
 		if flags, ok := c.selfInnerClassAccessFlags(); ok && flags&StaticFlag == 0 {
-			own := make(map[string]bool, len(ownFormal))
-			for _, n := range ownFormal {
+			own := make(map[string]bool, len(ownFormalNames))
+			for _, n := range ownFormalNames {
 				own[n] = true
 			}
 			erase := map[string]bool{}
@@ -651,20 +665,63 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 					erase[n] = true
 				}
 			}
-			if classSigStr != "" {
-				for _, n := range types.FreeTypeVarRefsInClassSig(classSigStr) {
-					addErase(n)
+			// A flattened non-static inner class that has its OWN formal type parameters cannot ALSO
+			// declare the enclosing class's variables (arity of its `<ownParam>` reference sites), so
+			// enclosing variables in its supertype + field signatures are raw-erased at render
+			// (`Node<K,V>` -> `Node`). Restricted to own-formal classes: a no-own-formal inner class
+			// instead gets those variables DECLARED via the enclosing-arity injection above, so erasing
+			// them here would clobber legitimate generics.
+			if len(ownFormalNames) > 0 {
+				if classSigStr != "" {
+					for _, n := range types.FreeTypeVarRefsInClassSig(classSigStr) {
+						addErase(n)
+					}
+				}
+				for _, field := range c.obj.Fields {
+					for _, fattr := range field.Attributes {
+						if sa, ok := fattr.(*SignatureAttribute); ok {
+							if fs, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && fs != "" {
+								for _, n := range types.TypeVarRefsInFieldSig(fs) {
+									addErase(n)
+								}
+							}
+							break
+						}
+					}
 				}
 			}
-			for _, field := range c.obj.Fields {
-				for _, fattr := range field.Attributes {
-					if sa, ok := fattr.(*SignatureAttribute); ok {
-						if fs, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && fs != "" {
-							for _, n := range types.TypeVarRefsInFieldSig(fs) {
-								addErase(n)
+			// A flattened inner class can reference enclosing type variables in its METHOD PARAMETER
+			// positions -- e.g. spring-core ConcurrentReferenceHashMap$Task<T>.execute(Reference<K,V>,
+			// Entry<K,V>, Entries<V>): K/V come from the enclosing map, not from Task's own `<T>`, so they
+			// render undeclared ("cannot find symbol: class K"). Raw-erase the PARAMETER positions (return
+			// type kept: it does not participate in erasure).
+			//
+			// Applies to two shapes:
+			//   (a) OWN-FORMAL inner classes (Task<T>): K/V are genuinely undeclarable (arity of its
+			//       `<T>` reference sites), so erasing fixes "cannot find symbol".
+			//   (b) NO-own-formal inner classes whose SUPERCLASS is a flattened `$`-named SIBLING that
+			//       itself erased those params (Task's anonymous subclasses $1..$5, extends
+			//       ConcurrentReferenceHashMap$Task): they DECLARE K/V via enclosing-arity injection, but
+			//       their execute OVERRIDES Task's now-erased execute, so they must erase the same
+			//       parameter positions or javac reports "name clash ... same erasure, yet neither
+			//       overrides the other".
+			// A no-own-formal inner class extending a JDK/library class (e.g.
+			// LinkedCaseInsensitiveMap$EntrySet extends AbstractSet, overriding Iterable.forEach(
+			// Consumer<? super Entry>)) is EXCLUDED (its super has no `$`), so a genuine JDK-generic
+			// override keeps its parameterized parameter and is not broken. Kill-switch
+			// JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF.
+			eraseMethodParams := len(ownFormalNames) > 0
+			if eraseMethodParams && os.Getenv("JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF") == "" {
+				for _, method := range c.obj.Methods {
+					for _, mattr := range method.Attributes {
+						if sa, ok := mattr.(*SignatureAttribute); ok {
+							if ms, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && ms != "" {
+								for _, n := range types.TypeVarRefsInMethodParams(ms) {
+									addErase(n)
+								}
 							}
+							break
 						}
-						break
 					}
 				}
 			}
@@ -2567,7 +2624,20 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			}
 			ensureUniqueParameterNames(samParams, funcCtx)
 			paramsNewStrList := []string{}
-			if !isLambda && name != "<init>" && name != "<clinit>" && len(samParams) != descriptorParamCount {
+			// A lambda arrow's parameters are best rendered WITHOUT explicit types: Java infers each
+			// parameter's type from the target functional interface at the use site, whereas an EXPLICIT
+			// type must match the SAM's parameter type EXACTLY. The bytecode only preserves the ERASED
+			// impl-method descriptor (e.g. `Predicate` for a SAM `matches(Predicate<String>)`), so
+			// emitting `(Predicate l0) -> ...` yields "incompatible parameter types in lambda expression"
+			// against the parameterized SAM (spring-core ProfilesParser.or/and/not/equals, SimpleAliasRegistry,
+			// the ReactiveAdapterRegistry registrars, codec encoders -- 21 sites). Implicit parameters
+			// `(l0) -> ...` always bind to the inferred SAM type and never carry a stale erasure.
+			// Kill-switch: JDEC_LAMBDA_IMPLICIT_PARAMS_OFF=1 restores explicit-typed lambda parameters.
+			if isLambda && os.Getenv("JDEC_LAMBDA_IMPLICIT_PARAMS_OFF") == "" {
+				for _, val := range samParams {
+					paramsNewStrList = append(paramsNewStrList, val.String(c.FuncCtx))
+				}
+			} else if !isLambda && name != "<init>" && name != "<clinit>" && len(samParams) != descriptorParamCount {
 				paramSlotOffset := 0
 				if !funcCtx.IsStatic {
 					paramSlotOffset = 1

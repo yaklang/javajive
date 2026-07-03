@@ -893,6 +893,105 @@ func TypeVarRefsInFieldSig(sig string) []string {
 	return out
 }
 
+// TypeVarRefsInMethodSig returns the type-variable names referenced in a METHOD signature's parameter
+// types, return type and throws clause, EXCLUDING the method's own leading formal type parameters
+// (`<E:...>`). E.g. "(LRef<TK;TV;>;)TT;" -> ["K","V","T"]; "<E:Ljava/lang/Object;>(TE;)V" -> [] (E is
+// the method's own formal, filtered out). Used to recover enclosing type variables a flattened inner
+// class references ONLY in its method signatures (not fields/supertype), e.g. spring-core
+// ConcurrentReferenceHashMap$Task<T>.execute(...Reference<K,V>...), so they can be raw-erased at render.
+func TypeVarRefsInMethodSig(sig string) []string {
+	rest := sig
+	own := map[string]bool{}
+	if len(rest) > 0 && rest[0] == '<' {
+		// Collect the method's own formal type-parameter names so we can exclude them, then skip the
+		// whole `<...>` formal section.
+		for _, n := range ClassFormalTypeParamNames(sig) {
+			own[n] = true
+		}
+		r, ok := skipAngleSection(rest)
+		if !ok {
+			return nil
+		}
+		rest = r
+	}
+	if len(rest) == 0 || rest[0] != '(' {
+		return nil
+	}
+	rest = rest[1:] // skip '('
+	var raw []string
+	// Parameter types until ')'.
+	for len(rest) > 0 && rest[0] != ')' {
+		remaining, ok := scanTypeVarRefs(rest, &raw)
+		if !ok {
+			return dedupExcluding(raw, own)
+		}
+		rest = remaining
+	}
+	if len(rest) > 0 && rest[0] == ')' {
+		rest = rest[1:] // skip ')'
+	}
+	// Return type, then any throws (each introduced by '^').
+	for len(rest) > 0 {
+		if rest[0] == '^' {
+			rest = rest[1:]
+			continue
+		}
+		remaining, ok := scanTypeVarRefs(rest, &raw)
+		if !ok {
+			break
+		}
+		rest = remaining
+	}
+	return dedupExcluding(raw, own)
+}
+
+// TypeVarRefsInMethodParams is TypeVarRefsInMethodSig restricted to the PARAMETER types (it ignores
+// the return type and throws clause), excluding the method's own leading formal type parameters. It is
+// used to raw-erase enclosing type variables that a flattened inner class references only in its method
+// PARAMETER positions, which must match the (also-erased) overridden/parent method's parameter erasure
+// (e.g. the ConcurrentReferenceHashMap$Task subclass family $1..$5 overriding execute(Reference<K,V>...)).
+func TypeVarRefsInMethodParams(sig string) []string {
+	rest := sig
+	own := map[string]bool{}
+	if len(rest) > 0 && rest[0] == '<' {
+		for _, n := range ClassFormalTypeParamNames(sig) {
+			own[n] = true
+		}
+		r, ok := skipAngleSection(rest)
+		if !ok {
+			return nil
+		}
+		rest = r
+	}
+	if len(rest) == 0 || rest[0] != '(' {
+		return nil
+	}
+	rest = rest[1:] // skip '('
+	var raw []string
+	for len(rest) > 0 && rest[0] != ')' {
+		remaining, ok := scanTypeVarRefs(rest, &raw)
+		if !ok {
+			break
+		}
+		rest = remaining
+	}
+	return dedupExcluding(raw, own)
+}
+
+// dedupExcluding returns the first-seen-ordered unique names of raw that are not in exclude.
+func dedupExcluding(raw []string, exclude map[string]bool) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range raw {
+		if n == "" || exclude[n] || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out
+}
+
 // FreeTypeVarRefsInClassSig returns the type-variable names referenced in the SUPERTYPE portion of a
 // class signature (the superclass + interfaces that follow the formal type parameter section), in
 // first-seen order. Subtracting ClassFormalTypeParamNames from these yields the "free" variables a

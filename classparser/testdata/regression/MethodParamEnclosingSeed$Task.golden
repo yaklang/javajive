@@ -1,0 +1,7 @@
+# 摊平后的 own-formal 非静态内部类 Task<T> 在方法形参里引用外围类型变量 K/V (Ref<K,V>): 摊平为
+# 顶层后 K/V 失去声明, Task 自身有 <T> 无法再声明 K/V (会改变 Task<X> 引用点元数), 故对方法形参
+# 位置做 raw-erase (Ref<K,V> -> Ref)。返回类型不参与擦除故保留。真实命中: spring-core
+# ConcurrentReferenceHashMap$Task.execute(Reference<K,V>,...) 一族。kill-switch:
+# JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF。
++execute(MethodParamEnclosingSeed$Ref var0)
+-execute(MethodParamEnclosingSeed$Ref<K, V> var0)

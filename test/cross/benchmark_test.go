@@ -211,7 +211,7 @@ func TestBenchmarkSelfRecompile(t *testing.T) {
 		deps := resolveDeps(j.depGlob)
 		// Complete sun.misc so faithfully-decompiled sun.misc.Unsafe users are not counted as defects
 		// under --release 8 (the same shim the round-trip and inventory harnesses use).
-		classpath := withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))
+		classpath := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
 		nClasses := len(classEntries(t, jarPath))
 
 		root := t.TempDir()
@@ -305,7 +305,32 @@ var benchmarkJars = []benchJar{
 	{key: "jsoup", relPath: "org/jsoup/jsoup/1.10.2/jsoup-1.10.2.jar"},
 	{key: "snakeyaml", relPath: "org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar"},
 	{key: "spring", relPath: "org/springframework/spring-core/5.3.27/spring-core-5.3.27.jar",
-		depGlob: []string{"org/springframework/spring-jcl/5.3.27/spring-jcl-5.3.27.jar"}},
+		// spring-core 的 reactor / kotlin / rxjava / mutiny / netty / aspectj / jopt-simple / ant 全为
+		// optional 依赖; 忠实反编译后必须 import 这些包, 缺失属 classpath 补全 (同 guava sun.misc /
+		// fastjson2 kotlin), 非反编译缺陷。jdk.jfr 由 withJfr shim 补 (--release 8 不可见)。
+		depGlob: []string{
+			"org/springframework/spring-jcl/5.3.27/spring-jcl-5.3.27.jar",
+			"io/projectreactor/reactor-core/*/reactor-core-*.jar",
+			"org/reactivestreams/reactive-streams/*/reactive-streams-*.jar",
+			"io/netty/netty-buffer/*/netty-buffer-*.jar",
+			"io/netty/netty-common/*/netty-common-*.jar",
+			"org/jetbrains/kotlin/kotlin-stdlib/*/kotlin-stdlib-*.jar",
+			"org/jetbrains/kotlin/kotlin-reflect/*/kotlin-reflect-*.jar",
+			"org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/*/kotlinx-coroutines-core-jvm-*.jar",
+			"org/jetbrains/kotlinx/kotlinx-coroutines-reactor/*/kotlinx-coroutines-reactor-*.jar",
+			"io/reactivex/rxjava/*/rxjava-*.jar",
+			"io/reactivex/rxjava2/rxjava/*/rxjava-*.jar",
+			"io/reactivex/rxjava3/rxjava/*/rxjava-*.jar",
+			"io/smallrye/reactive/mutiny/*/mutiny-*.jar",
+			"net/sf/jopt-simple/jopt-simple/*/jopt-simple-*.jar",
+			"org/apache/ant/ant/*/ant-*.jar",
+			"org/aspectj/aspectjweaver/*/aspectjweaver-*.jar",
+			"org/jetbrains/kotlinx/kotlinx-coroutines-reactive/*/kotlinx-coroutines-reactive-*.jar",
+			"io/reactivex/rxjava-reactive-streams/*/rxjava-reactive-streams-*.jar",
+			"org/jetbrains/annotations/*/annotations-*.jar",
+			"io/projectreactor/tools/blockhound/*/blockhound-*.jar",
+			"com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar",
+		}},
 	{key: "fastjson2", relPath: "com/alibaba/fastjson2/fastjson2/2.0.43/fastjson2-2.0.43.jar",
 		// KotlinUtils 引用 kotlin.reflect / kotlin.jvm.internal (可选集成); 编译期接口全在
 		// kotlin-stdlib 内。缺失会误报 "package kotlin.* does not exist", 属 classpath 补全而非缺陷。
@@ -396,7 +421,7 @@ func TestBenchmarkThreeWayRecompile(t *testing.T) {
 		// Complete the JDK-internal sun.misc package (see jdk_sunmisc_test.go) so faithfully-decompiled
 		// sun.misc.Unsafe users (guava) are not counted as defects under --release 8. Applied to BOTH
 		// JavaJive and the external tools' classpaths below, so the comparison stays fair.
-		classpath := withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))
+		classpath := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
 		nClasses := len(classEntries(t, jarPath))
 
 		r := row{jar: j.key, classes: nClasses}

@@ -137,7 +137,10 @@ func TestJarRoundTripRepackage(t *testing.T) {
 				t.Skipf("jar %s not found under %s; skipping", spec.relPath, m2Repo())
 			}
 			deps := resolveDeps(spec.depGlob)
-			cp := strings.Join(deps, string(os.PathListSeparator))
+			// Complete JDK-internal packages (sun.misc for guava, jdk.jfr for spring-core) that
+			// --release 8 hides but a faithful decompilation legitimately imports (see jdk_sunmisc_test.go
+			// / jdk_jfr_test.go). Harmless for jars that do not import them.
+			cp := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
 
 			srcRoot := t.TempDir()
 			files, units, decompFail := decompileAll(t, jarPath, srcRoot, maxFiles)

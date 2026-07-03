@@ -4,6 +4,6 @@
 # their recovered parameterized functional types to bind against the erased SAMs. Bare forms are rejected
 # by javac ("incompatible parameter types in lambda expression"). Real hit: fastjson2
 # JSONPathSegment$CycleNameSegment$MapRecursive.
-+(Function<RawStreamItem, Object>)((RawStreamItem l0) ->
++(Function<RawStreamItem, Object>)((l0) ->
 +(Predicate<RawStreamItem>)(Objects::nonNull)
 -.map((RawStreamItem l0) ->

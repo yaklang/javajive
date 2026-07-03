@@ -1,0 +1,6 @@
+# protected 静态嵌套类被摊平为顶层单元后, 必须放宽为 public: protected 嵌套类可被其它包的
+# 子类经继承访问, 而摊平后继承关系消失, 保持 package-private 会导致跨包不可达
+# ("AbstractClassGenerator$Source is not public in ...; cannot be accessed from outside package",
+# spring-core cglib 一族的头号 blocker, 44 行 / ~15 个类)。顶层类不能是 protected, 放宽可视性
+# 对重编译永远安全。kill-switch: JDEC_NESTED_PROTECTED_PUBLIC_OFF。
++public class NestedProtectedSeed$Source

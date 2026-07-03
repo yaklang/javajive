@@ -237,7 +237,7 @@ func TestJarTreeInventory(t *testing.T) {
 				t.Skipf("jar %s not found under %s; skipping", spec.relPath, m2Repo())
 			}
 			deps := resolveDeps(spec.depGlob)
-			cp := withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))
+			cp := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
 			root := t.TempDir()
 			files, units, _ := decompileAll(t, jarPath, root, maxFiles)
 
@@ -358,7 +358,7 @@ func TestJarIsoInventory(t *testing.T) {
 			files, units, _ := decompileAll(t, jarPath, root, maxFiles)
 
 			cpParts := append([]string{jarPath}, deps...)
-			cp := withSunMisc(t, strings.Join(cpParts, string(os.PathListSeparator)))
+			cp := withJfr(t, withSunMisc(t, strings.Join(cpParts, string(os.PathListSeparator))))
 			fails := recompileISOInventory(t, files, root, cp, workers)
 
 			// reason 直方图 (按计数降序, 同计数按字母序, 确定性)。

@@ -1,0 +1,7 @@
+# lambda 箭头形参必须隐式(无显式类型): 字节码只保留擦除后的 impl 方法描述符(Predicate),
+# 显式 `(Predicate l0)` 会与参数化 SAM `matches(Predicate<String>)` 不匹配 ->
+# "incompatible parameter types in lambda expression"。隐式 `(l0) -> ...` 由目标类型推断,
+# 恒可编译。spring-core ProfilesParser / SimpleAliasRegistry / ReactiveAdapterRegistry 一族 21 处。
+# kill-switch: JDEC_LAMBDA_IMPLICIT_PARAMS_OFF。
++(l0) -> {
+-(Predicate l0)

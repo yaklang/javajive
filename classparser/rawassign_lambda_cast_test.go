@@ -29,7 +29,9 @@ func TestRawAssignLambdaCastIsLoadBearing(t *testing.T) {
 	if !strings.Contains(on, "(Function<Collection, Collection>)(Collections::unmodifiableCollection)") {
 		t.Errorf("fix ON: expected the method reference to be cast to Function<Collection, Collection>, got:\n%s", on)
 	}
-	if !strings.Contains(on, "(Function<Collection, Collection>)((Collection l0) ->") {
+	// The lambda's parameters are now implicit (JDEC_LAMBDA_IMPLICIT_PARAMS default), so the cast
+	// wraps `(l0) -> ...` rather than the old explicit `(Collection l0) -> ...` form.
+	if !strings.Contains(on, "(Function<Collection, Collection>)((l0) ->") {
 		t.Errorf("fix ON: expected the lambda to be cast to Function<Collection, Collection>, got:\n%s", on)
 	}
 

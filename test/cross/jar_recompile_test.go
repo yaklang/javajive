@@ -86,8 +86,33 @@ var jarSpecs = map[string]jarSpec{
 	},
 	"spring": {
 		relPath: "org/springframework/spring-core/5.3.27/spring-core-5.3.27.jar",
+		// spring-core 的 gradle 元数据把 reactor / kotlin / rxjava / mutiny / netty / aspectj /
+		// jopt-simple / ant 全部标为 optional 依赖 (只有用到对应特性时才需要)。这些类被忠实反编译
+		// 后必须 import 这些包, 缺失会误报 "package ... does not exist" / "cannot find symbol",
+		// 与 guava 的 sun.misc.Unsafe、fastjson2 的 kotlin 同属 classpath 补全而非反编译缺陷。
+		// jdk.jfr 是 JDK 内部模块, 在 --release 8 下不可见, 由 withJfr shim 补 (见 jdk_jfr_test.go)。
 		depGlob: []string{
 			"org/springframework/spring-jcl/5.3.27/spring-jcl-5.3.27.jar",
+			"io/projectreactor/reactor-core/*/reactor-core-*.jar",
+			"org/reactivestreams/reactive-streams/*/reactive-streams-*.jar",
+			"io/netty/netty-buffer/*/netty-buffer-*.jar",
+			"io/netty/netty-common/*/netty-common-*.jar",
+			"org/jetbrains/kotlin/kotlin-stdlib/*/kotlin-stdlib-*.jar",
+			"org/jetbrains/kotlin/kotlin-reflect/*/kotlin-reflect-*.jar",
+			"org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/*/kotlinx-coroutines-core-jvm-*.jar",
+			"org/jetbrains/kotlinx/kotlinx-coroutines-reactor/*/kotlinx-coroutines-reactor-*.jar",
+			"io/reactivex/rxjava/*/rxjava-*.jar",
+			"io/reactivex/rxjava2/rxjava/*/rxjava-*.jar",
+			"io/reactivex/rxjava3/rxjava/*/rxjava-*.jar",
+			"io/smallrye/reactive/mutiny/*/mutiny-*.jar",
+			"net/sf/jopt-simple/jopt-simple/*/jopt-simple-*.jar",
+			"org/apache/ant/ant/*/ant-*.jar",
+			"org/aspectj/aspectjweaver/*/aspectjweaver-*.jar",
+			"org/jetbrains/kotlinx/kotlinx-coroutines-reactive/*/kotlinx-coroutines-reactive-*.jar",
+			"io/reactivex/rxjava-reactive-streams/*/rxjava-reactive-streams-*.jar",
+			"org/jetbrains/annotations/*/annotations-*.jar",
+			"io/projectreactor/tools/blockhound/*/blockhound-*.jar",
+			"com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar",
 		},
 	},
 	// 以下四个与 benchmark_test.go 的 benchmarkJars 对齐, 使 tree/iso inventory 也能对它们分桶选靶。
@@ -311,11 +336,11 @@ func runProfile(t *testing.T, name string, maxFiles int) recompileResult {
 	var decErr int
 	switch mode {
 	case "tree":
-		cp := withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))
+		cp := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
 		decErr = recompileTree(t, files, cp)
 	default: // iso
 		cpParts := append([]string{jarPath}, deps...)
-		cp := withSunMisc(t, strings.Join(cpParts, string(os.PathListSeparator)))
+		cp := withJfr(t, withSunMisc(t, strings.Join(cpParts, string(os.PathListSeparator))))
 		decErr = recompileISO(t, files, cp, workers)
 	}
 	return recompileResult{units: units, decErr: decErr, decompFail: decompFail}
