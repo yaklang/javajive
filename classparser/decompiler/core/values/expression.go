@@ -1669,6 +1669,34 @@ func (f *FunctionCallExpression) typeVarArrayArgCast(ok1, resolvedGeneric bool, 
 	return at != nil && at.IsArray()
 }
 
+// arrayParamRefArgCast reports whether the argument needs a synthesized cast to an ARRAY parameter type
+// because the parameter is an array (`byte[]`) while the argument's static type is a NON-array reference
+// class (typically `java.lang.Object`, from a null-initialized local). The class-vs-class arg-cast
+// branch never reaches this case: an array parameter's RawType() is *JavaArrayType, not *JavaClass, so
+// ok1 is false. A non-array reference is not assignable to an array parameter in Java source ("Object
+// cannot be converted to byte[]"; spring ASM Attribute.computeAttributesSize/putAttributes pass an
+// `Object cattrs = null` into a `byte[]` overload). The value already occupies the array slot in bytecode
+// (a null or a checkcast), so the `(byte[])` cast is behaviour-preserving. Tightly gated: array parameter
+// + non-array reference argument whose erasure is Object (a concrete-class argument to an array parameter
+// would be a genuine type error we must not paper over). Kill-switch: JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF=1.
+func arrayParamRefArgCast(argType types.JavaType, arg JavaValue) bool {
+	if os.Getenv("JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF") != "" {
+		return false
+	}
+	if argType == nil || arg == nil || !argType.IsArray() {
+		return false
+	}
+	at := arg.Type()
+	if at == nil || at.IsArray() {
+		return false
+	}
+	ajc, ok := at.RawType().(*types.JavaClass)
+	if !ok || ajc == nil {
+		return false // primitive / parameterized / other: not this null-Object shape.
+	}
+	return ajc.Name == "java.lang.Object"
+}
+
 // resolvedParameterizedArgCast reports whether the i-th argument needs a synthesized `(X<...>)` cast
 // because a generic resolver recovered the formal as a PARAMETERIZED type (e.g.
 // NavigableMap<Cut<C>,Range<C>>.tailMap's key formal resolves to `Cut<C>`) whose RAW class differs from
@@ -2208,6 +2236,24 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		// the argument's erased static type. The (ok1 && ok2) class-vs-class branch never fires because a
 		// parameterized type's RawType() is not a *JavaClass. Re-emit the erased `(Cut<C>)` cast (guava
 		// TreeRangeSet$RangesByUpperBound `this.rangesByLowerBound.tailMap((Cut<C>) var2.getKey(), true)`).
+		argStr := arg.String(funcCtx)
+		argTypeStr := argType.String(funcCtx)
+		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			return fmt.Sprintf("(%s)(%s)", argTypeStr, argStr)
+		}, func() types.JavaType {
+			return argType
+		})
+	} else if arrayParamRefArgCast(argType, arg) {
+		// The parameter is an ARRAY type (`byte[]`) but the argument's static type is a non-array
+		// reference class (`Object`) -- the (ok1 && ok2) class-vs-class branch never fires because an
+		// array type's RawType() is *JavaArrayType, not *JavaClass. A non-array reference is not
+		// assignable to an array parameter in source, so javac rejects `foo(objVar)` ("Object cannot be
+		// converted to byte[]"). This is the shape of a null-initialized local typed Object that is only
+		// ever passed to a typed array parameter (spring ASM Attribute.computeAttributesSize/putAttributes
+		// `Object cattrs = null; ...computeAttributesSize(..., cattrs, ...)` where the overload takes
+		// `byte[]`). The value already flowed into the array parameter in bytecode (a checkcast or a
+		// null), so an explicit `(byte[])` cast is behaviour-preserving. Kill-switch:
+		// JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF=1.
 		argStr := arg.String(funcCtx)
 		argTypeStr := argType.String(funcCtx)
 		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
