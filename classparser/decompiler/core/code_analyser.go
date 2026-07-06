@@ -2281,6 +2281,60 @@ func (d *Decompiler) reachingRefSlotArrayCovariantArmMerge(store *OpCode, slot i
 	return current
 }
 
+// reachingRefSlotNullReassignMerge handles the CONDITIONAL null-reassignment phi that the arm merges
+// (all of which bail on a null value) leave uncovered. snakeyaml Resolver.addImplicitResolver:
+//
+//	Character c = Character.valueOf(chars[i]);   // def@95: slot minted as a typed ref (Character)
+//	if (c.charValue() == 0) c = null;            // def@106: `c = null` on ONE branch
+//	List v = yamlImplicitResolvers.get(c);       // load@112: reached by BOTH defs
+//
+// The typed def and the `= null` def both reach the post-branch load, so it is ONE variable whose type
+// is the typed def's (null is assignable to any reference). But AssignVarGuarded, seeing the null value
+// carry no concrete type to match the current Character ref, mints a FRESH Object variable for the null
+// store. The typed def is then left with only its in-branch use (`c.charValue()`), so the single-use
+// variable fold splices `Character.valueOf(chars[i]).charValue()` into the condition and DROPS the typed
+// store entirely -- and the post-branch load now reads the fresh Object var that is assigned only on the
+// null branch, so javac rejects "variable c might not have been initialized" on the other branch.
+//
+// Fix: when the value is the null literal and `current` is an already-committed, non-param, non-null-init
+// reference ref, and a phi proves the null store and current's def both reach a common downstream load,
+// KEEP current (the null store becomes a plain `c = null` reassignment of the one typed variable). This
+// never widens or narrows a type -- current keeps its concrete type, which legally accepts null -- so it
+// cannot regress a type-specific use; the phi gate keeps genuine disjoint slot reuse (a typed range then
+// an unrelated `x = null` range sharing no downstream load) splitting as before. Kill-switch:
+// JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotNullReassignMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if !values.IsNullLiteral(val) {
+		return nil
+	}
+	if current.IsParam || current.IsNullInitialized() {
+		return nil
+	}
+	ct := current.Type()
+	if ct == nil {
+		return nil
+	}
+	// current must be a committed reference type; a primitive slot can never legally take null, and an
+	// Object-typed current is the null-init idiom's own provisional type (handled by the null-adopt path).
+	if _, isPrim := ct.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	if n := ct.String(ctx); n == "java.lang.Object" || n == "Object" {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	return current
+}
+
 // arrayElemLUB returns the least-upper-bound element type of two reference array element types, or nil
 // when no supertype is provable. java.lang.Object is the universal reference supertype; otherwise it
 // consults the jar's own raw supertype chain (CrossClassDirectLUB, direct-subtype only, never a guess)
@@ -2639,6 +2693,20 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// Object[] variable. Phi-gated; Kill-switch: JDEC_REF_SLOT_ARRAY_COVARIANT_ARM_MERGE_OFF=1.
 		if !refPhiMerged {
 			if merged := d.reachingRefSlotArrayCovariantArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
+		// Conditional null-reassignment phi (snakeyaml Resolver.addImplicitResolver): a `c = null` store
+		// on one branch of a typed local (`Character c = Character.valueOf(...)`) reaches, together with
+		// the typed def, a common post-branch load. The arm merges above all bail on a null value, so
+		// AssignVarGuarded mints a fresh Object var for the null store, the typed def is left single-use
+		// and folded away, and the post-branch read is uninitialized on the non-null branch. Keep the one
+		// typed variable (null is assignable to it) so the null store is a plain reassignment. Phi-gated;
+		// kill-switch: JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotNullReassignMerge(opcode, slot, oldRef, value); merged != nil {
 				runtimeStackSimulation.SetVar(slot, merged)
 				oldRef = merged
 				refPhiMerged = true
