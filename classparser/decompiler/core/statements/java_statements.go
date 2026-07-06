@@ -1071,7 +1071,9 @@ var jdkNonGenericParamSubtypes = map[string]bool{
 // distinct. Two provably-safe value shapes qualify:
 //   - a jar-internal non-generic subtype (`new AbstractEnvironment$1(this)`), confirmed by the
 //     cross-class resolver via genericReturnSubtypeCastNeeded (0 formal params, different erasure); or
-//   - a whitelisted non-generic JDK subtype (`System.getProperties()` -> `Properties`).
+//   - a whitelisted non-generic JDK subtype (`System.getProperties()` -> `Properties`); or
+//   - the exact 0-arg JDK static `System.getenv()`, whose JDK return is the FIXED `Map<String,String>`
+//     (same erasure as the declared return, different args -- inconvertible without the raw cast).
 //
 // The bytecode areturn guarantees the value is assignable to the return's erasure, so the raw `(Map)`
 // cast is always legal (never inconvertible), and raw `Map` -> `Map<String,Object>` is an unchecked
@@ -1128,6 +1130,39 @@ func concreteParamReturnSubtypeRawCast(funcCtx *class_context.ClassContext, v va
 	}
 	jc, ok := raw.(*types.JavaClass)
 	if !ok || jc == nil {
+		return ""
+	}
+	// Shape 3: a whitelisted 0-arg JDK STATIC call whose declared return is a FIXED concrete
+	// parameterization of the SAME erasure as the declared return but with DIFFERENT type args
+	// (`System.getenv()` is `Map<String,String>`, returned into `Map<String,Object>`). The decompiler
+	// renders the value raw (descriptor), but javac re-derives the call's type from the JDK signature and
+	// rejects the bare return; the direct parameterized cast is inconvertible (invariant, distinct args),
+	// so the source carried the raw `(Map)` cast. Identified by the exact callee, never by the value type,
+	// so no poly / inferred factory can match.
+	if call, okc := values.UnpackSoltValue(v).(*values.FunctionCallExpression); okc && call != nil &&
+		call.IsStatic && len(call.Arguments) == 0 && call.FunctionName == "getenv" &&
+		(call.ClassName == "java/lang/System" || call.ClassName == "java.lang.System") {
+		simple := func(s string) string {
+			if i := strings.LastIndexByte(s, '.'); i >= 0 {
+				return s[i+1:]
+			}
+			return s
+		}
+		if simple(erasureR) == "Map" {
+			fixed := []string{"String", "String"}
+			same := len(retArgs) == len(fixed)
+			if same {
+				for k := range fixed {
+					if simple(strings.TrimSpace(retArgs[k])) != fixed[k] {
+						same = false
+						break
+					}
+				}
+			}
+			if !same {
+				return erasureR
+			}
+		}
 		return ""
 	}
 	// The value's erasure must be a PROPER subtype (different raw class) of the return's erasure: a
