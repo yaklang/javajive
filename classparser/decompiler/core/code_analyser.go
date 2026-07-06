@@ -2335,6 +2335,128 @@ func (d *Decompiler) reachingRefSlotNullReassignMerge(store *OpCode, slot int, c
 	return current
 }
 
+// reachingRefSlotObjectSiblingArmMerge is the last-resort sibling-arm reference phi: two disjoint arms
+// ALLOCATE reference types that the narrower merges (cross-class jar-internal LUB, JDK-table LUB) could
+// not relate, yet both flow into a common post-merge use. It widens the shared ref to the BRIDGED least
+// upper bound -- jar supertypes stitched into the JDK table -- which the narrower merges cannot compute.
+// Two fastjson2 shapes it resolves:
+//
+//	// JSON.parse: LUB is java.lang.Object (a Map arm and a List arm share nothing else)
+//	Object obj;
+//	if (ch=='{') { JSONObject o = new JSONObject(); reader.read(o,0); obj = o; }
+//	else         { JSONArray  a = new JSONArray();  reader.read(a);   obj = a; }
+//	reader.handleResolveTasks(obj);   // Object arg -- post-merge read, uninitialized on one arm before
+//
+//	// JSONReaderJSONB.readObject: LUB is java.util.HashMap (JSONObject extends LinkedHashMap extends
+//	// HashMap, invisible to the jar provider which only carries the direct JDK super name)
+//	HashMap map = useNative ? new HashMap() : new JSONObject();
+//	map.put(k, v);                    // needs a Map type, NOT Object
+//
+// The bridged LUB is exactly right for both: Object where the arms truly share only Object, HashMap where
+// a JDK ancestor is common but hidden behind the jar->JDK boundary. Widening to Object only when that is
+// the genuine LUB avoids the `map.put` "cannot find symbol" that a blind Object widening caused. Safety:
+// every arm value is assignable to the LUB (it is their common ancestor), and any downstream use needing
+// a narrower type carries a bytecode checkcast the dumper renders as a cast. Tightly gated to the
+// allocation-dispatch shape and a phi-proven single variable, so genuine disjoint slot reuse still
+// splits. Kill-switch: JDEC_REF_SLOT_OBJECT_SIBLING_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotObjectSiblingArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_OBJECT_SIBLING_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if current.IsParam || current.IsNullInitialized() {
+		return nil
+	}
+	// Both arms must resolve to a bare object ALLOCATION (`new JSONObject()` / `new JSONArray()`), the
+	// lazy-dispatch shape this targets. The store value is often a COPY of the allocation temp (`aload S;
+	// astore obj`), so the arm reaches here as a JavaRef whose Val is the NewExpression;
+	// resolveIsNonArrayAllocation unwraps the ref/slot chain. A method-return or cast arm (whose true type
+	// may be broader than its static type) resolves to a non-NewExpression and is excluded.
+	if !resolveIsNonArrayAllocation(val) {
+		return nil
+	}
+	if current.Val == nil || !resolveIsNonArrayAllocation(current.Val) {
+		return nil
+	}
+	ct := current.Type()
+	vt := slotDeclType(val)
+	if ct == nil || vt == nil {
+		return nil
+	}
+	if _, isPrim := ct.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	ctName, vtName := ct.String(ctx), vt.String(ctx)
+	if ctName == vtName {
+		return nil
+	}
+	isObject := func(n string) bool { return n == "java.lang.Object" || n == "Object" }
+	if isObject(ctName) || isObject(vtName) || ct.IsArray() || vt.IsArray() {
+		return nil
+	}
+	// The narrower merges (cross-class jar-internal LUB, JDK-table LUB) run first; only proceed when they
+	// declined, so this never overrides a more specific home.
+	var provider types.SuperTypeProvider
+	if funcCtx := d.FunctionContext; funcCtx != nil && funcCtx.SiblingSuperTypes != nil {
+		provider = funcCtx.SiblingSuperTypes
+		if lub := types.CrossClassDirectLUB(ct, vt, provider); lub != nil {
+			return nil
+		}
+		if lub := types.CrossClassCommonSuperType(ct, vt, provider); lub != nil {
+			return nil
+		}
+	}
+	if lub := types.CommonSuperType(ct, vt); lub != nil && !isObject(lub.String(ctx)) {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	// Widen to the bridged LUB (jar supertypes stitched into the JDK table). Falls back to Object when the
+	// bridge finds nothing closer, which is the correct answer for genuine Map-vs-List siblings.
+	target := types.BridgedCommonSuperType(ct, vt, provider)
+	if target == nil {
+		target = types.NewJavaClass("java.lang.Object")
+	}
+	current.ResetVarType(target)
+	return current
+}
+
+// resolveIsNonArrayAllocation reports whether v — after unwrapping SlotValue and JavaRef copy chains —
+// is a bare object allocation (`new T(...)`, not `new T[...]`). A store arm is frequently a copy of the
+// allocation temp (`aload S; astore obj`), so the value arrives as a JavaRef whose Val is the
+// NewExpression; this bounded unwrap follows that chain. Used to gate reachingRefSlotObjectSiblingArmMerge
+// to the allocation-dispatch shape.
+func resolveIsNonArrayAllocation(v values.JavaValue) bool {
+	cur := v
+	for i := 0; i < 64 && cur != nil; i++ {
+		switch t := cur.(type) {
+		case *values.NewExpression:
+			return t != nil && !t.IsArray()
+		case *values.JavaRef:
+			if t == nil || t.Val == nil {
+				return false
+			}
+			cur = t.Val
+		case *values.SlotValue:
+			nv := values.UnpackSoltValue(cur)
+			if nv == cur {
+				return false
+			}
+			cur = nv
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 // arrayElemLUB returns the least-upper-bound element type of two reference array element types, or nil
 // when no supertype is provable. java.lang.Object is the universal reference supertype; otherwise it
 // consults the jar's own raw supertype chain (CrossClassDirectLUB, direct-subtype only, never a guess)
@@ -2647,6 +2769,20 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// JDEC_REF_SLOT_CROSSCLASS_SIBLING_ARM_MERGE_OFF=1.
 		if !refPhiMerged {
 			if merged := d.reachingRefSlotCrossClassSiblingArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
+		// Object-ceiling sibling-arm reference phi (fastjson2 JSON.parse): two disjoint arms ALLOCATE
+		// unrelated reference types (`new JSONObject()` / `new JSONArray()`) whose only common supertype is
+		// java.lang.Object, both flowing into a common post-merge use. The cross-class and JDK sibling
+		// merges both decline (no jar-internal / non-Object JDK ancestor), so the later arm splits and the
+		// merge read is left unassigned. Widen the shared ref to java.lang.Object (both allocation arms +
+		// phi-gated, so type-specific uses carry their own checkcast). Kill-switch:
+		// JDEC_REF_SLOT_OBJECT_SIBLING_ARM_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotObjectSiblingArmMerge(opcode, slot, oldRef, value); merged != nil {
 				runtimeStackSimulation.SetVar(slot, merged)
 				oldRef = merged
 				refPhiMerged = true

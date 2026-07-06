@@ -127,6 +127,105 @@ func jarSuperClosure(startI string, provider SuperTypeProvider) map[string]bool 
 	return out
 }
 
+// bridgedAncestorDepths returns the BFS distance from dot-FQN `start` to each of its (reflexive)
+// ancestors, walking JAR supertypes via the provider AND crossing into the JDK table (jdkSuperEdges)
+// the moment the chain reaches a JDK class. This is what CrossClassDirectLUB/CommonSuperType cannot do
+// individually: a jar type such as `com.alibaba.fastjson2.JSONObject extends java.util.LinkedHashMap`
+// has its Map-ness hidden behind a JDK superclass the jar provider does not carry, and the JDK table
+// does not know the jar leaf. Bridging both yields JSONObject's true ancestor set (LinkedHashMap ->
+// HashMap -> AbstractMap/Map -> Object). java.lang.Object is always injected as a universal ancestor so
+// any two reference types share at least it. External classes the provider misses and the JDK table does
+// not know terminate their branch (recorded, not expanded) but still gain Object.
+func bridgedAncestorDepths(start string, provider SuperTypeProvider) map[string]int {
+	depth := map[string]int{}
+	if start == "" {
+		return depth
+	}
+	depth[start] = 0
+	depth["java.lang.Object"] = 1 << 20 // universal fallback; real depth overwrites if reached closer
+	queue := []string{start}
+	for len(queue) > 0 && len(depth) < crossClassSubtypeWalkCap {
+		cur := queue[0]
+		queue = queue[1:]
+		d := depth[cur]
+		var supers []string
+		if edges, ok := jdkSuperEdges[cur]; ok {
+			supers = edges // JDK class: authoritative JDK edges
+		} else if provider != nil {
+			if raw, ok := provider(dotToInternal(cur)); ok {
+				supers = make([]string, 0, len(raw))
+				for _, s := range raw {
+					if s != "" {
+						supers = append(supers, internalToDot(s))
+					}
+				}
+			}
+		}
+		for _, sup := range supers {
+			if sup == "" {
+				continue
+			}
+			if old, seen := depth[sup]; !seen || d+1 < old {
+				depth[sup] = d + 1
+				queue = append(queue, sup)
+			}
+		}
+	}
+	return depth
+}
+
+// BridgedCommonSuperType returns the NEAREST common ancestor (least upper bound) of jar/JDK reference
+// types a and b, bridging jar supertypes (provider) into the JDK table so a jar type's JDK ancestry is
+// visible. Ties prefer a concrete class over an interface. Returns java.lang.Object (never nil for two
+// valid reference types) when nothing closer is shared. Callers gate their own behaviour on whether the
+// result is Object. Gated by JDEC_TERNARY_DECL_LUB_CROSS_OFF (shared cross-class kill-switch).
+func BridgedCommonSuperType(a, b JavaType, provider SuperTypeProvider) JavaType {
+	if os.Getenv("JDEC_TERNARY_DECL_LUB_CROSS_OFF") != "" {
+		return nil
+	}
+	an, aok := classNameOf(a)
+	bn, bok := classNameOf(b)
+	if !aok || !bok {
+		return nil
+	}
+	if an == bn {
+		return a
+	}
+	da := bridgedAncestorDepths(an, provider)
+	db := bridgedAncestorDepths(bn, provider)
+	best := ""
+	bestScore := 1 << 30
+	bestIsClass := false
+	for anc, d1 := range da {
+		d2, ok := db[anc]
+		if !ok {
+			continue
+		}
+		score := d1 + d2
+		isClass := !jdkInterfaceSet[anc]
+		better := false
+		switch {
+		case best == "":
+			better = true
+		case score < bestScore:
+			better = true
+		case score == bestScore:
+			if isClass != bestIsClass {
+				better = isClass
+			} else {
+				better = anc < best
+			}
+		}
+		if better {
+			best, bestScore, bestIsClass = anc, score, isClass
+		}
+	}
+	if best == "" {
+		return nil
+	}
+	return NewJavaClass(best)
+}
+
 // CrossClassCommonSuperType returns the NEAREST-to-b jar-internal common ancestor of a and b when
 // NEITHER is a subtype of the other (the SIBLING case CrossClassDirectLUB leaves as a residual, e.g.
 // jsoup `TextNode` and `DataNode` both extending `LeafNode`). It BFS-walks b's raw supertype chain and
