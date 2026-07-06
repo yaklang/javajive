@@ -2232,8 +2232,82 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if cast := subtypeValueFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
 			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
 		}
+		// A LOCAL variable declared as an invariant parameterization mentioning a type variable
+		// (`Class<T> var1`) REASSIGNED from a method call of the SAME erasure whose true generic return
+		// is assignment-incompatible (`var1 = var1.getSuperclass()`, where getSuperclass() returns
+		// `Class<? super T>` -> capture, NOT assignable to `Class<T>`): the source carried a raw
+		// `(Class)` cast that bytecode erased. See parameterizedLocalReassignRawCast (objenesis
+		// SerializationInstantiatorHelper / PercSerializationInstantiator).
+		if cast := parameterizedLocalReassignRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+		}
 		return assign
 	}
+}
+
+// parameterizedLocalReassignRawCast returns the raw erasure (`Class`) to cast the RHS of a LOCAL-variable
+// REASSIGNMENT when the local is declared as an INVARIANT parameterization mentioning an in-scope type
+// variable (`Class<T> var1`, no wildcard) and the reassigned value is a METHOD CALL of the SAME erasure
+// but a DIFFERENT rendering -- the exact shape javac rejects once it resolves the callee's true generic
+// return. The canonical hit is objenesis's `Class<? super T> result = type; result = result.getSuperclass();`
+// which the decompiler types the local at `Class<T>` (from the initial `= type` store) while
+// `Class.getSuperclass()` truly returns `Class<? super T>` (captured to `Class<CAP super T>`), giving
+// "Class<CAP#1> cannot be converted to Class<T>". The source's raw `(Class)` cast erases the value to the
+// raw type, which then unchecked-converts to `Class<T>` -- legal and behavior-identical (the slot erases
+// to the raw type at runtime). Restricted to a JavaRef local (never `this`, never a field -- those have
+// their own field-store helpers), an invariant (`<...>` without `?`) type-variable-mentioning declared
+// type, and a method-call value of the same erasure whose rendering differs; a same-string (already
+// matching) reassignment is skipped. A raw or same-erasure value returned bare into this shape never
+// compiles cleanly, so a match is always a genuine repair. Kill-switch JDEC_PARAM_LOCAL_REASSIGN_RAW_CAST_OFF.
+func parameterizedLocalReassignRawCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_PARAM_LOCAL_REASSIGN_RAW_CAST_OFF") != "" {
+		return ""
+	}
+	// LHS must be a genuine local (JavaRef, non-`this`), not a field or synthetic slot.
+	ref, ok := values.UnpackSoltValue(left).(*values.JavaRef)
+	if !ok || ref.IsThis {
+		return ""
+	}
+	lt := left.Type()
+	if lt == nil {
+		return ""
+	}
+	ltStr := lt.String(funcCtx)
+	// Declared type must be an INVARIANT parameterization (`<...>` without a wildcard) that mentions an
+	// in-scope type variable -- the `Class<T>` shape whose invariance rejects a `Class<? super T>` value.
+	if !strings.Contains(ltStr, "<") || strings.Contains(ltStr, "?") {
+		return ""
+	}
+	if !mentionsTypeParam(ltStr, funcCtx.TypeParams) {
+		return ""
+	}
+	// The reassigned value must be a method CALL (a plain copy `var1 = var2` shares the declared type and
+	// needs no cast; a call is where a hidden covariant/wildcard return hides).
+	call, ok := values.UnpackSoltValue(value).(*values.FunctionCallExpression)
+	if !ok || call == nil || call.Object == nil {
+		return ""
+	}
+	vt := value.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	vtStr := vt.String(funcCtx)
+	// Same erasure (a genuine same-raw-type reassignment, not an unrelated type) but a different
+	// rendering (an already-matching value needs no cast).
+	if erasureName(vtStr) != erasureName(ltStr) || vtStr == ltStr {
+		return ""
+	}
+	return erasureName(ltStr)
 }
 
 type ForStatement struct {
