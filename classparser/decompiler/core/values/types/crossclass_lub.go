@@ -72,6 +72,23 @@ func ClassFQNOf(t JavaType) (string, bool) {
 	return classNameOf(t)
 }
 
+// IsReferenceSubtypeBridged reports whether dot-FQN `sub` is a (reflexive) subtype of dot-FQN `sup`,
+// bridging the jar's own raw supertype chain (via the provider) INTO the JDK table the moment the chain
+// reaches a JDK class. Unlike IsSubtypeVia (jar-only, stops at the first JDK hop), this reaches JDK
+// ancestors such as java.util.Map for a jar-internal class whose superclass is a JDK collection
+// (`AbstractEnvironment$1 extends ReadOnlySystemAttributesMap extends AbstractMap`), and for pure JDK
+// types (`java.util.Properties` -> Hashtable -> Map). Returns false when the ancestry cannot be proven.
+func IsReferenceSubtypeBridged(sub, sup string, provider SuperTypeProvider) bool {
+	if sub == "" || sup == "" {
+		return false
+	}
+	if sub == sup {
+		return true
+	}
+	_, ok := bridgedAncestorDepths(sub, provider)[sup]
+	return ok
+}
+
 // CrossClassDirectLUB returns the supertype arm when one of a,b is a (transitive) subtype of the other
 // via the provider (a<:b -> b, b<:a -> a), else nil. Only the direct-subtype case is handled; the LUB is
 // never java.lang.Object (a widening to Object would defeat any later member access and is left to the

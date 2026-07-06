@@ -189,6 +189,16 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		if bridge, target := erasedGenericChainReturnRawBridge(funcCtx, r.JavaValue); target != "" {
 			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
 		}
+		// A value whose static type is a NON-GENERIC subtype of a CONCRETE parameterized return type
+		// (`Map<String,Object>`) that fixes the supertype's type arguments to a DIFFERENT parameterization
+		// (`Properties`/`AbstractEnvironment$1` are `Map<Object,Object>`/`Map<String,String>`): the bare
+		// return fails ("Properties cannot be converted to Map<String,Object>"), and a DIRECT
+		// `(Map<String,Object>)` cast is inconvertible (invariant, distinct args). The source carried a raw
+		// `(Map)` cast (the erased checkcast is a no-op the bytecode drops). See
+		// concreteParamReturnSubtypeRawCast (spring AbstractEnvironment getSystemProperties/getSystemEnvironment).
+		if raw := concreteParamReturnSubtypeRawCast(funcCtx, r.JavaValue); raw != "" {
+			return fmt.Sprintf("return (%s) (%s)", raw, expr)
+		}
 	}
 	return fmt.Sprintf("return %s", expr)
 }
@@ -901,6 +911,105 @@ func genericReturnSubtypeCastNeeded(funcCtx *class_context.ClassContext, jc *typ
 		return false
 	}
 	return len(types.ClassFormalTypeParamNames(classSig)) == 0
+}
+
+// jdkNonGenericParamSubtypes are JDK reference types that are NON-generic yet a proper subtype of a
+// generic collection interface, so returning one where the declared return type is a CONCRETE
+// parameterization of that interface (`Map<String,Object>`) never converts implicitly: their supertype
+// instantiation is fixed and differs (`Properties` is `Map<Object,Object>`). Such a return needs the raw
+// `(Map)` cast the source carried. Kept to the tiny provably-correct set; a generic JDK subtype
+// (`ArrayList` -> `List<E>`) converts by unchecked conversion and MUST NOT appear here.
+var jdkNonGenericParamSubtypes = map[string]bool{
+	"java.util.Properties": true,
+}
+
+// concreteParamReturnSubtypeRawCast returns the RAW erasure name (`Map`) to interpose as
+// `return (Map) (value)` when the enclosing method's declared return type is a CONCRETE parameterized
+// type (`Map<String,Object>`, mentions no in-scope type variable) and the returned value's static type
+// is a NON-GENERIC subtype of that return's erasure whose supertype instantiation is therefore fixed and
+// distinct. Two provably-safe value shapes qualify:
+//   - a jar-internal non-generic subtype (`new AbstractEnvironment$1(this)`), confirmed by the
+//     cross-class resolver via genericReturnSubtypeCastNeeded (0 formal params, different erasure); or
+//   - a whitelisted non-generic JDK subtype (`System.getProperties()` -> `Properties`).
+//
+// The bytecode areturn guarantees the value is assignable to the return's erasure, so the raw `(Map)`
+// cast is always legal (never inconvertible), and raw `Map` -> `Map<String,Object>` is an unchecked
+// conversion javac accepts. A generic subtype (`ArrayList` -> `List<E>`, or a jar-internal generic
+// class) converts implicitly and is deliberately excluded so no covariant return is over-cast.
+// Kill-switch JDEC_CONCRETE_PARAM_RET_SUBTYPE_RAW_CAST_OFF.
+func concreteParamReturnSubtypeRawCast(funcCtx *class_context.ClassContext, v values.JavaValue) string {
+	if funcCtx == nil || v == nil || os.Getenv("JDEC_CONCRETE_PARAM_RET_SUBTYPE_RAW_CAST_OFF") != "" {
+		return ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	// Declared return must be a CONCRETE parameterization: contains `<`, is not itself a type variable,
+	// and mentions NO in-scope type variable (a type-variable-parameterized return is typeVarReturnCast's
+	// domain and its cast form differs). It must carry at least one concrete top-level arg.
+	if !strings.Contains(retStr, "<") || funcCtx.IsTypeParam(retStr) {
+		return ""
+	}
+	if mentionsTypeParam(retStr, funcCtx.TypeParams) {
+		return ""
+	}
+	retArgs, ok := topLevelTypeArgs(retStr)
+	if !ok || len(retArgs) == 0 {
+		return ""
+	}
+	hasConcrete := false
+	for _, ta := range retArgs {
+		if ta == "Object" || ta == "java.lang.Object" || strings.HasPrefix(ta, "?") {
+			continue
+		}
+		hasConcrete = true
+		break
+	}
+	if !hasConcrete {
+		return ""
+	}
+	erasureR := erasureName(retStr)
+	if erasureR == "" || erasureR == "Object" || erasureR == "java.lang.Object" {
+		return ""
+	}
+	vt := v.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	jc, ok := raw.(*types.JavaClass)
+	if !ok || jc == nil {
+		return ""
+	}
+	// The value's erasure must be a PROPER subtype (different raw class) of the return's erasure: a
+	// same-erasure value is a different (arg-mismatch) root cause handled elsewhere.
+	if erasureName(jc.String(funcCtx)) == erasureR {
+		return ""
+	}
+	// Shape 1: jar-internal non-generic subtype (fixed supertype args). genericReturnSubtypeCastNeeded
+	// confirms erasure differs, the resolver sees the class, and it declares no formal type params.
+	if genericReturnSubtypeCastNeeded(funcCtx, jc, retStr) {
+		return erasureR
+	}
+	// Shape 2: a whitelisted non-generic JDK subtype. Must be a proven (bridged) subtype of the return's
+	// erasure so the raw cast is a legal downcast/identity.
+	vFQN := jc.Name
+	if jdkNonGenericParamSubtypes[vFQN] {
+		if pt, okp := types.AsParameterizedType(ft.ReturnType); okp && pt != nil {
+			if types.IsReferenceSubtypeBridged(vFQN, pt.RawClassName, funcCtx.SiblingSuperTypes) {
+				return erasureR
+			}
+		}
+	}
+	return ""
 }
 
 // objectReturnDowncast returns the concrete reference return type to downcast a returned value to,

@@ -207,10 +207,10 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | commons-lang3 | 345 | 12 |
 | jsoup | 238 | 1 |
 | snakeyaml | 231 | 1 |
-| spring-core | 978 | 39 |
+| spring-core | 978 | 36 |
 | fastjson2 | 681 | 25 |
 | guava | 1892 | 28 |
-| **合计** | | **106** |
+| **合计** | | **103** |
 
 > **错误行数会误导**：它既被语法错遮蔽、又随内联/摊平的文件规模波动，且集中在少数类里。**行数散在多少个类里才决定
 > 可用性**，这正是以「缺陷 class 数」为主口径的原因。此表仅供上下文，且**只有在语法错为 0（无遮蔽）时才有意义**。
