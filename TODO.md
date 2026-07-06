@@ -8,8 +8,17 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 25/14 · guava 28/24 · commons-lang3 12/9 · spring 31/19。（合计 98）
-> (本轮四修: `EnumSet.of(...)` 实参禁 `(Enum)` 上转(`jdkCalleeParamIsErasedTypeVar` 增 EnumSet.of 分支,
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 25/14 · guava 27/23 · commons-lang3 12/9 · spring 31/19。（合计 97）
+> (本轮修: 方法形参自由类型变量注入(dumper.go 扁平内部类 enclosing-arity 注入块增方法形参扫描,
+> `JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF`)—— 静态泛型方法内的匿名类捕获方法的类型变量, javac 发出的
+> 该匿名类 Signature **不带** `<...>` 形参段(只列自由变量引用: guava `Futures$2` 的类签名是
+> `Ljava/lang/Object;LFuture<TO;>;`, 无 `<O:...>` 前缀), 于是 O 从父类 `Future<O>` 被识别为自由变量并声明,
+> 但只在**私有方法形参**里出现的自由 `I`(`private O applyTransformation(I var1)`)不在父类/字段里, 保持未声明
+> ("cannot find symbol: class I")。修法: 在注入块补扫方法形参签名(`TypeVarRefsInMethodParams`), 把这类只在
+> 方法形参出现的自由变量也声明成形参(`Futures$2<O, I>`), 与 O 的复原对称; raw `new Futures$2(...)` 站点是
+> 原始实例化不受影响。承重测试 `method_param_typevar_inject_test.go`(MethodParamTypeVarSeed$1)。
+> 治 guava Futures$2 1 条, guava 28→27, 合计 98→97, 零回归。)
+> (上一轮四修: `EnumSet.of(...)` 实参禁 `(Enum)` 上转(`jdkCalleeParamIsErasedTypeVar` 增 EnumSet.of 分支,
 > `JDEC_ENUMSET_OF_NOCAST_OFF`)—— `EnumSet.of(E first, E... rest)` 的方法作用域 `E extends Enum<E>` 在描述符里
 > 擦成 `java.lang.Enum`, 实参造型逻辑把具体枚举常量上转成 raw `(Enum)`, 反而塌掉 javac 对 E 的推断、破坏重载决议
 > ("no suitable method found for of(Enum,TaskOption[])")。修法: 与 Enum.compareTo 同根(JDK 被调方形参是擦成

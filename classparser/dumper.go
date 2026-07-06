@@ -667,6 +667,29 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				}
 			}
 		}
+		// A flattened class can capture an enclosing type variable it references ONLY in a METHOD
+		// PARAMETER -- never in its supertype or a field. This happens for an anonymous class created
+		// inside a GENERIC METHOD: javac emits the class Signature WITHOUT a formal `<...>` section (it
+		// carries only the free-var refs, e.g. guava `Futures$2` has `Ljava/lang/Object;LFuture<TO;>;` --
+		// no `<O:...>` prefix), so O is recovered above as free from the supertype, but the free `I` in
+		// `private O applyTransformation(I var1)` appears in no supertype/field and stays undeclared
+		// ("cannot find symbol: class I"). Scan method-parameter signatures too so such a var is DECLARED
+		// as a formal (`Futures$2<O, I>`), symmetric with how O is recovered. The raw `new Futures$2(...)`
+		// call site is a raw instantiation and unaffected. Kill-switch JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF.
+		if os.Getenv("JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF") == "" {
+			for _, method := range c.obj.Methods {
+				for _, mattr := range method.Attributes {
+					if sa, ok := mattr.(*SignatureAttribute); ok {
+						if ms, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && ms != "" {
+							for _, n := range types.TypeVarRefsInMethodParams(ms) {
+								addRef(n)
+							}
+						}
+						break
+					}
+				}
+			}
+		}
 		// Variables are emitted in first-seen (supertype-then-field) order. The canonical enclosing order
 		// is NOT recoverable from single-class bytecode (the synthetic this$0 field is erased to the raw
 		// enclosing type with no Signature, and InnerClasses carries only names), so a sibling override
