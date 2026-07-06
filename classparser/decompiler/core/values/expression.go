@@ -906,6 +906,68 @@ func (f *FunctionCallExpression) ctorWildcardArgCast(i int, funcCtx *class_conte
 	return paramTypeStr
 }
 
+// thisCtorTypeVarArgCast returns the class-scope type-variable NAME to cast the i-th argument of a
+// SAME-CLASS `this(...)` constructor self-call to, or "" when no cast is needed. It is the bare-type-variable
+// analogue of ctorWildcardArgCast: it fires when the target constructor's i-th formal is a BARE class type
+// variable (`T`, recovered from the recorded constructor Signature) and the argument's static type is the
+// erased bound (typically Object, e.g. a synthesized `new Object()`) rather than that type variable. The
+// source passed a `(T)`-cast value (`this(name, (T) new Object())`); the bytecode erased it to Object and
+// emitted no checkcast, so the decompiler renders a bare `this(name, new Object())` that javac rejects
+// against the ctor's `(String, T)` signature ("Object cannot be converted to T"; spring PropertySource).
+// Re-emitting the `(T)` unchecked cast makes it recompile. A `this(...)` self-call only runs inside an
+// instance constructor, where the class type parameters are always in scope, so the cast is denotable.
+// Kill-switch JDEC_THIS_CTOR_TYPEVAR_ARG_OFF.
+func (f *FunctionCallExpression) thisCtorTypeVarArgCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_THIS_CTOR_TYPEVAR_ARG_OFF") != "" || funcCtx == nil || f.FunctionName != "<init>" {
+		return ""
+	}
+	// Only a `this(...)` self-call: constructor is in the CURRENT class (signature recorded), receiver is
+	// `this` (never a `new CurrentClass(...)` in a static factory where the class type vars are out of scope).
+	if f.ClassName != funcCtx.ClassName {
+		return ""
+	}
+	if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); !ok || !ref.IsThis {
+		return ""
+	}
+	if i < 0 || i >= len(f.Arguments) {
+		return ""
+	}
+	sig := funcCtx.ConstructorSignature(len(f.Arguments))
+	if sig == "" {
+		return ""
+	}
+	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+	if i >= len(params) || params[i] == nil {
+		return ""
+	}
+	paramTypeStr := params[i].String(funcCtx)
+	// The formal must be a BARE class-scope type variable (`T`), not a parameterization (wildcard
+	// parameterizations are ctorWildcardArgCast's domain) and not a concrete type.
+	if strings.Contains(paramTypeStr, "<") || !funcCtx.IsTypeParam(paramTypeStr) {
+		return ""
+	}
+	arg := f.Arguments[i]
+	if lit, ok := UnpackSoltValue(arg).(*JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+		return "" // null is assignable to any type variable without a cast
+	}
+	vt := arg.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	// Skip when the argument is already the target type variable (no erasure happened, no cast needed).
+	if jc, ok := raw.(*types.JavaClass); ok && jc != nil && jc.Name == paramTypeStr {
+		return ""
+	}
+	return paramTypeStr
+}
+
 // comparatorRawArgCast returns the raw `Comparator` cast string for the i-th argument when the call is a
 // JDK sort/search static (Arrays.sort / Arrays.binarySearch / Collections.sort / Collections.binarySearch)
 // and the i-th DESCRIPTOR parameter is java.util.Comparator. The array/list companion argument's element
@@ -2156,6 +2218,12 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	// parameterization, lost the source's unchecked cast to generic erasure -- re-add it (gson
 	// LinkedTreeMap / LinkedHashTreeMap `this((Comparator<? super K>) NATURAL_ORDER)`).
 	if cast := f.ctorWildcardArgCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	// A same-class `this(...)` constructor self-call whose i-th formal is a BARE class type variable
+	// (`T`), fed a value erased to the bound (`new Object()`), lost the source's unchecked `(T)` cast --
+	// re-add it (spring PropertySource `this(name, (T) new Object())`).
+	if cast := f.thisCtorTypeVarArgCast(i, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	// A `Comparator<? super K>`-typed argument passed to a JDK sort/search static (Arrays.sort /
