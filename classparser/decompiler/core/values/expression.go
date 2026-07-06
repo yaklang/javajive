@@ -2623,6 +2623,38 @@ func CoerceIntAssignRHS(leftType types.JavaType, rhs JavaValue, funcCtx *class_c
 	})
 }
 
+// CoerceBooleanAssignRHS is the INVERSE of CoerceIntAssignRHS: when a boolean-typed target receives an
+// int-materialized RHS (the JVM has no boolean storage, so javac emits a boolean value as iconst_0/1 or
+// a `cond ? 1 : 0` diamond), Java forbids the implicit int->boolean conversion, so `boolArr[i] = <int>`
+// / `boolField = cond ? 1 : 0` fail to recompile ("int cannot be converted to boolean"). This retypes
+// the 0/1 leaves to boolean (coerceBooleanArgument: literal 0/1 -> false/true, ternary arms recursively,
+// any other int expr -> `(expr) != (0)`) and then folds the resulting boolean diamond into an idiomatic
+// connective (boolReduce: `cond ? true : false` -> `cond`). Values already typed boolean (comparisons,
+// predicate calls, boolean refs) are returned untouched. Only fires for a boolean leftType and an
+// int-typed rhs. Kill-switch shared with the other bool<->int coercion: JDEC_BOOL_TO_INT_COERCE_OFF.
+func CoerceBooleanAssignRHS(leftType types.JavaType, rhs JavaValue, funcCtx *class_context.ClassContext) JavaValue {
+	if rhs == nil || leftType == nil {
+		return rhs
+	}
+	if os.Getenv("JDEC_BOOL_TO_INT_COERCE_OFF") == "1" {
+		return rhs
+	}
+	prim, ok := leftType.RawType().(*types.JavaPrimer)
+	if !ok || prim.Name != types.JavaBoolean {
+		return rhs
+	}
+	// Only an int-typed rhs is a mistyped boolean; a value already boolean needs nothing.
+	rt := rhs.Type()
+	if rt == nil {
+		return rhs
+	}
+	rprim, ok := rt.RawType().(*types.JavaPrimer)
+	if !ok || rprim.Name != types.JavaInteger {
+		return rhs
+	}
+	return boolReduce(coerceBooleanArgument(rhs), funcCtx)
+}
+
 func NewFunctionCallExpression(object JavaValue, methodMember *JavaClassMember, funcType *types.JavaFuncType) *FunctionCallExpression {
 	return &FunctionCallExpression{
 		FuncType:     funcType,

@@ -186,10 +186,10 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 |---|---:|---:|---:|:--:|
 | commons-codec | 0 | 0 | 107/107 | ✅ **YES** |
 | gson | 0 | 0 | 199/199 | ✅ **YES** |
-| commons-lang3 | 18 | 0 | 28/28 | no |
+| commons-lang3 | 16 | 0 | 28/28 | no |
 | jsoup | 1 | 0 | 17/17 | no |
 | snakeyaml | 1 | 0 | 28/28 | no |
-| spring-core | 54 | 0 | 5/5 | no |
+| spring-core | 52 | 0 | 5/5 | no |
 | fastjson2 | 31 | 0 | 0/0 | no |
 | guava | 28 | 0 | 0/0 | no |
 
@@ -204,13 +204,13 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 |---|---:|---:|
 | commons-codec | 106 | 0 |
 | gson | 195 | 0 |
-| commons-lang3 | 345 | 18 |
+| commons-lang3 | 345 | 16 |
 | jsoup | 238 | 1 |
 | snakeyaml | 231 | 1 |
-| spring-core | 978 | 54 |
+| spring-core | 978 | 52 |
 | fastjson2 | 681 | 31 |
 | guava | 1892 | 28 |
-| **合计** | | **133** |
+| **合计** | | **129** |
 
 > **错误行数会误导**：它既被语法错遮蔽、又随内联/摊平的文件规模波动，且集中在少数类里。**行数散在多少个类里才决定
 > 可用性**，这正是以「缺陷 class 数」为主口径的原因。此表仅供上下文，且**只有在语法错为 0（无遮蔽）时才有意义**。

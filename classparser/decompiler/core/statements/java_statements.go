@@ -1995,6 +1995,13 @@ func arrayStoreRHS(member *values.JavaArrayMember, value values.JavaValue, funcC
 					return "true"
 				}
 			}
+			// A non-literal int RHS into a boolean[] element (`boolArr[i] = cond ? 1 : 0`, spring ASM
+			// ClassReader.readTypeAnnotationTarget / AttributeMethods.<init>) is a boolean materialized as
+			// an int; Java rejects the implicit int->boolean store. Retype the 0/1 diamond to boolean and
+			// fold it (`cond ? 1 : 0` -> `cond`). CoerceBooleanAssignRHS no-ops on already-boolean values.
+			if coerced := values.CoerceBooleanAssignRHS(elem, value, funcCtx); coerced != value {
+				return coerced.String(funcCtx)
+			}
 		}
 		// Narrowing cast for byte[]/char[]/short[] element stores. bastore/castore/sastore implicitly
 		// truncate the int on the stack to the element width, but Java source assignment context (JLS
