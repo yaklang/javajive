@@ -1766,6 +1766,139 @@ func (d *Decompiler) reachingRefSlotSubtypeArmMerge(store *OpCode, slot int, cur
 	return current
 }
 
+// reachingRefSlotCrossClassSiblingArmMerge is the jar-internal SIBLING-arm reference phi: two disjoint
+// arms store SIBLING jar-internal types (neither a subtype of the other, sharing a jar-internal
+// ancestor) into one slot, both flowing into a common post-merge use. jsoup HtmlTreeBuilder.insert:
+//
+//	Node node;
+//	if (isScriptOrStyle) node = new DataNode(...);   // arm: DataNode
+//	else                 node = new TextNode(...);   // arm: TextNode  (sibling: both extend LeafNode)
+//	this.currentElement().appendChild((Node) node);  // post-merge read
+//
+// The JDK sibling merge (reachingRefSlotSiblingArmMerge) can't see the relation (CommonSuperType is
+// JDK-table-only), and the jar-internal subtype merge (reachingRefSlotSubtypeArmMerge) needs one arm to
+// subtype the other. So the DFS-later arm splits off a fresh variable and the post-merge read is left
+// unassigned on that path ("variable var3 might not have been initialized"). Widen the shared ref to the
+// arms' nearest jar-internal common ancestor (LeafNode), proven from the jar's own class bytes via
+// CrossClassCommonSuperType, so both arms become plain reassignments of one variable. Phi-gated
+// (slotDefPhiReachesLoad) exactly like the sibling merges, so genuine disjoint slot reuse still splits.
+// Every arm value is assignable to the ancestor and type-specific uses carry their own checkcast, so the
+// widening is behavior-safe. Kill-switch: JDEC_REF_SLOT_CROSSCLASS_SIBLING_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotCrossClassSiblingArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_CROSSCLASS_SIBLING_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if current.IsParam || current.IsNullInitialized() {
+		return nil
+	}
+	funcCtx := d.FunctionContext
+	if funcCtx == nil || funcCtx.SiblingSuperTypes == nil {
+		return nil
+	}
+	// Restrict to a bare object ALLOCATION arm (`new TextNode(...)`), the lazy-dispatch shape this
+	// targets. This deliberately EXCLUDES enum-constant / static-field arms (`cond ? UNSAFE_LITTLE_ENDIAN
+	// : UNSAFE_BIG_ENDIAN`, guava LittleEndianByteArray), where the arms are anonymous enum subclasses
+	// whose reconstructed ternary javac types against the enum itself -- widening the slot to their raw
+	// common ancestor there produced "bad type in conditional expression".
+	if ne, ok := values.UnpackSoltValue(val).(*values.NewExpression); !ok || ne == nil || ne.IsArray() {
+		return nil
+	}
+	ct := current.Type()
+	vt := slotDeclType(val)
+	if ct == nil || vt == nil {
+		return nil
+	}
+	if _, isPrim := ct.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	if ct.String(ctx) == vt.String(ctx) {
+		return nil
+	}
+	lub := types.CrossClassCommonSuperType(ct, vt, funcCtx.SiblingSuperTypes)
+	if lub == nil {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	current.ResetVarType(lub)
+	return current
+}
+
+// reachingRefSlotJDKSubtypeArmMerge is the JDK-hierarchy counterpart of reachingRefSlotSubtypeArmMerge:
+// one disjoint arm stores a JDK SUBTYPE value (`new HashMap()`) onto a slot whose DFS-earlier arm holds
+// a JDK supertype (`Map`, from a checkcast get), and both arms flow into a common post-merge use. The
+// jar-internal subtype merge cannot see the relation (CrossClassDirectLUB only walks the jar's own class
+// bytes), and the sibling merge computes CommonSuperType but bails the moment the LUB equals one arm
+// (its explicit "strict sibling only" gate). So the subtype arm splits off a fresh variable and the
+// post-merge read is left unassigned on that path -- javac "variable var6 might not have been
+// initialized" (jsoup Whitelist.addProtocols/addAttributes:
+//
+//	Map v; if (m.containsKey(k)) v = (Map) m.get(k); else { v = new HashMap(); m.put(k, v); }
+//	v.containsKey(..)                                    // post-merge read needs BOTH arms to assign v
+//
+// Fires only on the provably-safe signature: current and val are non-param, non-primitive JDK classes of
+// DIFFERENT names whose CommonSuperType equals current's own type (val strictly subtypes current; the
+// helper never returns an Object LUB so Object-dispatch slot reuse stays split), plus the same phi gate
+// (a downstream load reached by both defs) all the arm merges use. On a match it continues current
+// UNCHANGED -- no type is widened (val is assignable to current by construction), the subtype arm merely
+// becomes a plain reassignment -- so it can never regress a type-specific use. Kill-switch:
+// JDEC_REF_SLOT_JDK_SUBTYPE_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotJDKSubtypeArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_JDK_SUBTYPE_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if current.IsParam || current.IsNullInitialized() {
+		return nil
+	}
+	// Narrow to the lazy-initialization idiom: the subtype arm must be a bare object ALLOCATION
+	// (`new HashMap()`), not a method-return or cast value. This is the only shape where a JDK subtype
+	// is stored as one arm of a diamond whose other arm is a supertype read, and it keeps the merge from
+	// touching fastjson2 slots whose disjoint reuse must stay split (a broader gate regressed those).
+	if ne, ok := values.UnpackSoltValue(val).(*values.NewExpression); !ok || ne == nil || ne.IsArray() {
+		return nil
+	}
+	ct := current.Type()
+	vt := slotDeclType(val)
+	if ct == nil || vt == nil {
+		return nil
+	}
+	if _, isPrim := ct.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	ctx := &class_context.ClassContext{}
+	ctName := ct.String(ctx)
+	if ctName == vt.String(ctx) {
+		return nil
+	}
+	// val must be a strict JDK subtype of current: the symmetric LUB collapsing to current's own type
+	// proves it. CommonSuperType returns nil for unknown classes and for an Object-only LUB, so this
+	// never fires on unrelated types or Object-dispatch reuse. The supertype-val direction (LUB == vt)
+	// is deliberately NOT handled: it would require widening current's declared type, which can regress
+	// reads the dumper already bound to the narrower type without a cast.
+	lub := types.CommonSuperType(ct, vt)
+	if lub == nil || lub.String(ctx) != ctName {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	return current
+}
+
 // reachingRefSlotObjectArmMerge handles the SUPERTYPE-arm reference phi where the slot's current
 // variable is declared exactly java.lang.Object (the universal supertype) and a disjoint arm reassigns
 // it with a more specific reference value, all arms flowing into a common post-merge use. It is the
@@ -2233,6 +2366,34 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// JDEC_REF_SLOT_SUBTYPE_ARM_MERGE_OFF=1.
 		if !refPhiMerged {
 			if merged := d.reachingRefSlotSubtypeArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
+		// JDK-subtype-arm reference phi (jsoup Whitelist.addProtocols): one disjoint arm stores a JDK
+		// subtype (`new HashMap()`) onto a slot whose other arm holds the JDK supertype (Map from a
+		// checkcast get), both flowing into a common post-merge use. The jar-internal subtype merge above
+		// cannot see JDK relations and the sibling merge bails when the LUB equals one arm, so the subtype
+		// arm splits and the post-merge read is unassigned on that path ("variable might not have been
+		// initialized"). Continue current unchanged (val is assignable to it). Phi-gated; kill-switch:
+		// JDEC_REF_SLOT_JDK_SUBTYPE_ARM_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotJDKSubtypeArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
+		// Cross-class sibling-arm reference phi (jsoup HtmlTreeBuilder.insert): two disjoint arms store
+		// SIBLING jar-internal types (TextNode / DataNode, both extending LeafNode) into one slot, both
+		// flowing into a common post-merge use. Neither the JDK sibling merge (JDK-table LUB) nor the
+		// jar-internal subtype merge (needs one arm to subtype the other) covers a jar-internal sibling
+		// pair, so the later arm splits and the merge read is left unassigned. Widen the shared ref to the
+		// arms' nearest jar-internal common ancestor. Phi-gated; kill-switch:
+		// JDEC_REF_SLOT_CROSSCLASS_SIBLING_ARM_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotCrossClassSiblingArmMerge(opcode, slot, oldRef, value); merged != nil {
 				runtimeStackSimulation.SetVar(slot, merged)
 				oldRef = merged
 				refPhiMerged = true

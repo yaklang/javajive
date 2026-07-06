@@ -96,3 +96,84 @@ func CrossClassDirectLUB(a, b JavaType, provider SuperTypeProvider) JavaType {
 	}
 	return nil
 }
+
+// jarSuperClosure returns every (reflexive, transitive) jar-internal supertype internal-name of `startI`
+// reachable through the provider, bounded by crossClassSubtypeWalkCap. Chains that leave the jar
+// (provider miss) simply stop; JDK ancestors are therefore NOT included (they are not in the jar bytes),
+// which is fine because a jar-internal sibling LUB must itself be a jar-internal class.
+func jarSuperClosure(startI string, provider SuperTypeProvider) map[string]bool {
+	out := map[string]bool{}
+	if provider == nil || startI == "" {
+		return out
+	}
+	queue := []string{startI}
+	for len(queue) > 0 && len(out) < crossClassSubtypeWalkCap {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == "" || out[cur] {
+			continue
+		}
+		out[cur] = true
+		supers, ok := provider(cur)
+		if !ok {
+			continue
+		}
+		for _, s := range supers {
+			if s != "" && !out[s] {
+				queue = append(queue, s)
+			}
+		}
+	}
+	return out
+}
+
+// CrossClassCommonSuperType returns the NEAREST-to-b jar-internal common ancestor of a and b when
+// NEITHER is a subtype of the other (the SIBLING case CrossClassDirectLUB leaves as a residual, e.g.
+// jsoup `TextNode` and `DataNode` both extending `LeafNode`). It BFS-walks b's raw supertype chain and
+// returns the first ancestor also present in a's supertype closure, excluding java.lang.Object (never a
+// useful widening target). Returns nil when the arms share no jar-internal ancestor, when either is
+// unknown, or when one subtypes the other (that case belongs to CrossClassDirectLUB). Gated by
+// JDEC_TERNARY_DECL_LUB_CROSS_OFF.
+func CrossClassCommonSuperType(a, b JavaType, provider SuperTypeProvider) JavaType {
+	if os.Getenv("JDEC_TERNARY_DECL_LUB_CROSS_OFF") != "" || provider == nil {
+		return nil
+	}
+	an, aok := classNameOf(a)
+	bn, bok := classNameOf(b)
+	if !aok || !bok || an == bn {
+		return nil
+	}
+	if an == "java.lang.Object" || bn == "java.lang.Object" {
+		return nil
+	}
+	// A subtype relation is CrossClassDirectLUB's job; here we handle only true siblings.
+	if IsSubtypeVia(an, bn, provider) || IsSubtypeVia(bn, an, provider) {
+		return nil
+	}
+	aClosure := jarSuperClosure(dotToInternal(an), provider)
+	// BFS b's ancestors level-by-level so the FIRST common hit is the nearest common ancestor to b.
+	startI := dotToInternal(bn)
+	visited := map[string]bool{}
+	queue := []string{startI}
+	for len(queue) > 0 && len(visited) < crossClassSubtypeWalkCap {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == "" || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if cur != startI && cur != "java/lang/Object" && aClosure[cur] {
+			return NewJavaClass(internalToDot(cur))
+		}
+		supers, ok := provider(cur)
+		if !ok {
+			continue
+		}
+		for _, s := range supers {
+			if s != "" && !visited[s] {
+				queue = append(queue, s)
+			}
+		}
+	}
+	return nil
+}

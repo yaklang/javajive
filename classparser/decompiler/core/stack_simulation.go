@@ -199,6 +199,31 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 				return ref, false
 			}
 		}
+		// A null-initialized slot that has ALREADY adopted a concrete reference type T may still be
+		// reassigned with a SUBTYPE of T on one arm -- the same variable being narrowed, not a disjoint
+		// slot reuse. jsoup HttpConnection$Response.execute: `InputStream in = null; in = errorStream !=
+		// null ? errorStream : getInputStream(); if (gzip) in = new GZIPInputStream(in);` stores a
+		// GZIPInputStream (subtype of the adopted InputStream) into the same slot. The null-adopt-once
+		// guard above (which exists to keep the try-with-resources Throwable/Map.Entry disjoint reuse
+		// split) treats this as a fresh variable, so the GZIP arm minted a block-scoped local and the
+		// post-merge `readToByteBuffer(in, ..)` read it unassigned on the non-gzip path ("variable
+		// var11_2 might not have been initialized"). A subtype store is provably the same variable (it is
+		// assignable to T and, here, wraps the slot's own value), so reuse the ref keeping its broader
+		// declared type T. Restricted to a strict JDK/known subtype relation (CommonSuperType(T, val) ==
+		// T), so an unrelated-type reuse still splits. Kill-switch: JDEC_NULL_ADOPTED_SUBTYPE_REASSIGN_OFF=1.
+		if ref.IsNullInitialized() && ref.NullTypeAdopted() && !blockNullAdopt &&
+			os.Getenv("JDEC_NULL_ADOPTED_SUBTYPE_REASSIGN_OFF") == "" {
+			if _, isPrim := typ.RawType().(*types.JavaPrimer); !isPrim {
+				if ct := ref.Type(); ct != nil {
+					cx := &class_context.ClassContext{}
+					if ct.String(cx) != typ.String(cx) {
+						if lub := types.CommonSuperType(ct, typ); lub != nil && lub.String(cx) == ct.String(cx) {
+							return ref, false
+						}
+					}
+				}
+			}
+		}
 		// A method parameter reassigned with a reference-typed value (`seq = str` where seq is a
 		// CharSequence param and str is a String subtype) is the SAME variable being reassigned, not
 		// a slot reused for a new local. Splitting it minted a fresh block-scoped ref whose

@@ -1311,6 +1311,10 @@ func dotToInternal(name string) string {
 	return strings.ReplaceAll(name, ".", "/")
 }
 
+func internalToDot(name string) string {
+	return strings.ReplaceAll(name, "/", ".")
+}
+
 // ResolveInstantiatedParamType recovers the generic type of a callee method's paramIndex-th formal
 // parameter at a call site, by walking the receiver class's generic supertype hierarchy and composing
 // the type-argument substitution along each `extends/implements Super<...>` edge. It is the unified

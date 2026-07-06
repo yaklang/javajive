@@ -189,8 +189,8 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | commons-lang3 | 18 | 0 | 28/28 | no |
 | jsoup | 1 | 0 | 17/17 | no |
 | snakeyaml | 1 | 0 | 28/28 | no |
-| spring-core | 55 | 0 | 5/5 | no |
-| fastjson2 | 32 | 0 | 0/0 | no |
+| spring-core | 54 | 0 | 5/5 | no |
+| fastjson2 | 31 | 0 | 0/0 | no |
 | guava | 28 | 0 | 0/0 | no |
 
 > **全 8 jar 语法错 = 0**，故表 A 的类级数字无阶段遮蔽。**commons-codec 与 gson 完整往返**：
@@ -207,10 +207,10 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | commons-lang3 | 345 | 18 |
 | jsoup | 238 | 1 |
 | snakeyaml | 231 | 1 |
-| spring-core | 978 | 55 |
-| fastjson2 | 681 | 32 |
+| spring-core | 978 | 54 |
+| fastjson2 | 681 | 31 |
 | guava | 1892 | 28 |
-| **合计** | | **135** |
+| **合计** | | **133** |
 
 > **错误行数会误导**：它既被语法错遮蔽、又随内联/摊平的文件规模波动，且集中在少数类里。**行数散在多少个类里才决定
 > 可用性**，这正是以「缺陷 class 数」为主口径的原因。此表仅供上下文，且**只有在语法错为 0（无遮蔽）时才有意义**。

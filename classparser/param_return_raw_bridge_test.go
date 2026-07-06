@@ -39,7 +39,13 @@ func TestParameterizedReturnRawBridgeIsLoadBearing(t *testing.T) {
 		t.Errorf("bridge ON: expected raw bridge `(Map<K, List<V>>) (Map) (var0.asMap())`, got:\n%s", on)
 	}
 
+	// The general chained-return raw bridge (erasedGenericChainReturnRawBridge) independently covers this
+	// exact shape once parameterizedReturnRawBridge stops recovering the inner type: with the specific
+	// bridge off the receiver's asMap() reads as RAW Map and a concrete-arg return target
+	// (Map<K,List<V>>) matches the general helper. Disable BOTH so the OFF branch proves no bridge path
+	// remains (a bare `return var0.asMap()`), keeping this a true load-bearing assertion.
 	t.Setenv("JDEC_PARAM_RETURN_RAW_BRIDGE_OFF", "1")
+	t.Setenv("JDEC_ERASED_GENERIC_CHAIN_RET_BRIDGE_OFF", "1")
 	off, err := DecompileWithResolver(seed, resolver)
 	if err != nil {
 		t.Fatalf("decompile (bridge OFF) failed: %v", err)

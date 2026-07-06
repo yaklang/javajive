@@ -180,8 +180,90 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		if bridge, target := parameterizedReturnRawBridge(funcCtx, r.JavaValue); target != "" {
 			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
 		}
+		// A CHAINED instance call whose value erases to `X<Object>` (a generic factory receiver that
+		// defaulted its type variable to Object because target typing cannot flow through the outer call,
+		// e.g. `Collections.emptyList().iterator()` -> Iterator<Object>) returned where the declared type
+		// is a same-erasure `X<Concrete>` (`Iterator<Attribute>`, jsoup Attributes.iterator): a DIRECT
+		// `(X<Concrete>)` cast is inconvertible (both parameterized, distinct), only the raw-erasure bridge
+		// `(X<Concrete>) (X) value` compiles. See erasedGenericChainReturnRawBridge.
+		if bridge, target := erasedGenericChainReturnRawBridge(funcCtx, r.JavaValue); target != "" {
+			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
+		}
 	}
 	return fmt.Sprintf("return %s", expr)
+}
+
+// erasedGenericChainReturnRawBridge handles a returned CHAINED instance call whose static type erases to
+// `X<Object>` returned where the declared return type is a same-erasure `X<...>` carrying at least one
+// CONCRETE (non-Object) type argument. The canonical case is a generic factory used as a call receiver:
+// `return Collections.emptyList().iterator();` types as `Iterator<Object>` (emptyList's type variable
+// defaults to Object because Java target typing does not flow through the outer `.iterator()` call),
+// while the method returns `Iterator<Attribute>` (jsoup Attributes.iterator). A direct
+// `(Iterator<Attribute>)` cast of an `Iterator<Object>` is inconvertible; the raw-erasure bridge
+// `(Iterator<Attribute>) (Iterator) value` is the only legal form (downcast to the raw supertype, then an
+// unchecked widen), and is behavior-identical for the erased value. Returns (rawErasure, retStr) or
+// ("",""). Tightly gated so it never fires on a bare poly factory (which infers from the return target on
+// its own) or a value that is not fully erased to X<Object>: since an `X<Object>`-from-chained-call value
+// returned into `X<Concrete>` never compiles as-is, a match is always a genuine, safe repair. Kill-switch
+// JDEC_ERASED_GENERIC_CHAIN_RET_BRIDGE_OFF.
+func erasedGenericChainReturnRawBridge(funcCtx *class_context.ClassContext, v values.JavaValue) (string, string) {
+	if funcCtx == nil || v == nil || os.Getenv("JDEC_ERASED_GENERIC_CHAIN_RET_BRIDGE_OFF") != "" {
+		return "", ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return "", ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	retArgs, ok := topLevelTypeArgs(retStr)
+	if !ok || len(retArgs) == 0 {
+		return "", ""
+	}
+	// The return target must carry at least one CONCRETE (non-Object, non-type-variable, non-wildcard)
+	// argument — the only shape the other return-cast helpers deliberately skip. A pure `X<E>` / `X<?>` /
+	// `X<Object>` target is handled by parameterizedReturnCast or needs no cast.
+	hasConcrete := false
+	for _, ta := range retArgs {
+		if ta == "Object" || ta == "java.lang.Object" || strings.HasPrefix(ta, "?") || funcCtx.IsTypeParam(ta) {
+			continue
+		}
+		hasConcrete = true
+		break
+	}
+	if !hasConcrete {
+		return "", ""
+	}
+	// Value must be a CHAINED instance call: a FunctionCallExpression whose receiver is itself a value
+	// expression (not a static/class-qualified factory that would infer from the return target).
+	call, ok := values.UnpackSoltValue(v).(*values.FunctionCallExpression)
+	if !ok || call == nil || call.IsStatic || call.Object == nil {
+		return "", ""
+	}
+	if _, recvIsClass := values.UnpackSoltValue(call.Object).(*values.JavaClassValue); recvIsClass {
+		return "", ""
+	}
+	vt := v.Type()
+	if vt == nil {
+		return "", ""
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return "", ""
+	}
+	vStr := vt.String(funcCtx)
+	if vStr == retStr || erasureName(vStr) != erasureName(retStr) {
+		return "", ""
+	}
+	// The value must be RAW (no type args) or fully erased to `X<Object>` — i.e. it carries no concrete
+	// parameterization of its own. A partially-concrete value (`X<String>`) is a different (real) mismatch
+	// that must not be blanket-bridged here.
+	if valArgs, okv := topLevelTypeArgs(vStr); okv {
+		for _, va := range valArgs {
+			if va != "Object" && va != "java.lang.Object" {
+				return "", ""
+			}
+		}
+	}
+	return erasureName(retStr), retStr
 }
 
 // parameterizedReturnRawBridge handles a `recv.m(...)` return value whose recovered GENERIC return type
