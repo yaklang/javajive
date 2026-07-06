@@ -143,6 +143,16 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 			}
 			return fmt.Sprintf("return (%s) (%s)", cast, expr)
 		}
+		// An instance call on a NON-`this` receiver (a field/local of a jar-internal class) whose recovered
+		// generic return is a WILDCARD parameterization of the SAME erasure as a type-variable-mentioning
+		// declared return (`Class<A> getType() { return this.mapping.getAnnotationType(); }`, where
+		// getAnnotationType() returns `Class<? extends Annotation>`): javac captures the wildcard to CAP#1
+		// and rejects `Class<CAP#1>` -> `Class<A>`, so the source carried an unchecked `(Class<A>)` cast.
+		// typeVarReturnCast's own wildcard branch only covers this-receiver same-class calls; this handles
+		// the cross-receiver case via the sibling resolver. See crossRecvWildcardReturnCast.
+		if cast := crossRecvWildcardReturnCast(funcCtx, r.JavaValue); cast != "" {
+			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+		}
 		// Concrete reference return type with an Object-typed value (erased generic / null-only slot):
 		// emit an explicit downcast so the source recompiles. See objectReturnDowncast.
 		if cast := objectReturnDowncast(funcCtx, r.JavaValue); cast != "" {
@@ -331,6 +341,77 @@ func parameterizedReturnRawBridge(funcCtx *class_context.ClassContext, v values.
 		return "", ""
 	}
 	return erasureName(retStr), retStr
+}
+
+// crossRecvWildcardReturnCast returns the declared return type to interpose as `return (Class<A>) value`
+// when the returned value is an instance call on a NON-`this` receiver (a field/local of a jar-internal
+// class) whose recovered generic return type is a WILDCARD parameterization of the SAME erasure as a
+// type-variable-mentioning declared return. The canonical case is spring
+// `TypeMappedAnnotation.getType(): Class<A> { return this.mapping.getAnnotationType(); }`, where
+// AnnotationTypeMapping.getAnnotationType() returns `Class<? extends Annotation>`: javac captures the
+// wildcard to a fresh CAP#1 and rejects `Class<CAP#1>` -> `Class<A>`, so the source carried an unchecked
+// `(Class<A>)` cast (the erased checkcast is a no-op the bytecode drops). typeVarReturnCast's own
+// wildcard branch is deliberately restricted to this-receiver same-class calls (funcCtx.MethodSignature);
+// this recovers the callee's return through the cross-class sibling resolver
+// (ResolveInstantiatedReturnType), so a call on a field/local receiver of a different class is covered.
+// The wildcard-source same-erasure cast is an unchecked conversion javac accepts. Returns the cast target
+// or "". Kill-switch JDEC_CROSS_RECV_WILDCARD_RET_CAST_OFF.
+func crossRecvWildcardReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) string {
+	if funcCtx == nil || v == nil || os.Getenv("JDEC_CROSS_RECV_WILDCARD_RET_CAST_OFF") != "" {
+		return ""
+	}
+	if funcCtx.SiblingClassSig == nil {
+		return ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	// Return must be a parameterization that MENTIONS an in-scope type variable (`Class<A>`) but is not
+	// itself a bare type variable (that is typeVarReturnCast's own bare path).
+	if !strings.Contains(retStr, "<") || funcCtx.IsTypeParam(retStr) {
+		return ""
+	}
+	if !mentionsTypeParam(retStr, funcCtx.TypeParams) {
+		return ""
+	}
+	call, ok := values.UnpackSoltValue(v).(*values.FunctionCallExpression)
+	if !ok || call == nil || call.IsStatic || call.Object == nil {
+		return ""
+	}
+	// The this-receiver same-class case is handled by typeVarReturnCast; skip a bare `this` receiver to
+	// avoid a double cast. A `this.field` receiver (RefMember) or a local/param receiver is handled here.
+	if rcv, okr := values.UnpackSoltValue(call.Object).(*values.JavaRef); okr && rcv.IsThis {
+		return ""
+	}
+	// Recover the receiver's raw class and (possibly empty) type arguments.
+	var recvRaw string
+	var recvArgs []types.JavaType
+	recvType := call.Object.Type()
+	if recvType == nil {
+		return ""
+	}
+	if pt, okp := types.AsParameterizedType(recvType); okp && pt.RawClassName != "" {
+		recvRaw = pt.RawClassName
+		recvArgs = pt.TypeArgs
+	} else if jc, okc := recvType.RawType().(*types.JavaClass); okc && jc != nil {
+		recvRaw = jc.Name
+	} else {
+		return ""
+	}
+	ret := types.ResolveInstantiatedReturnType(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, call.FunctionName, len(call.Arguments))
+	if ret == nil {
+		return ""
+	}
+	retSig := ret.String(funcCtx)
+	// The recovered return must be a WILDCARD parameterization of the SAME erasure as the declared return
+	// (`Class<? extends Annotation>` vs `Class<A>`): only then is the bare return uncompilable and the
+	// unchecked same-erasure cast both needed and legal.
+	if !strings.Contains(retSig, "?") || erasureName(retSig) != erasureName(retStr) {
+		return ""
+	}
+	return retStr
 }
 
 // typeVarLocalDeclName recovers the type-variable name a FIRST-declared local should be typed as when
