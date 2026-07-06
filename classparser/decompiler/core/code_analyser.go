@@ -2029,6 +2029,75 @@ func (d *Decompiler) reachingRefSlotJDKSubtypeArmMerge(store *OpCode, slot int, 
 	return current
 }
 
+// reachingRefSlotThrowableArmMerge is the try/catch counterpart of the arm merges, restricted to the
+// java.lang.Throwable family. A try/catch (or multi-catch) with several handlers writes each caught
+// exception into ONE JVM slot; the post-catch read is a single logical `Throwable`/superclass variable
+// whose type is the LUB of the caught types. spring core codec Decoder.decode / Encoder.encode:
+//
+//	Throwable cause;
+//	try { return future.get(); }
+//	catch (ExecutionException e) { cause = e.getCause(); }   // arm: Throwable (getCause)
+//	catch (InterruptedException e) { cause = e; }            // arm: InterruptedException (SUBTYPE)
+//	throw cause instanceof CodecException ? (CodecException) cause : new DecodingException(...);
+//
+// The two handlers are DISJOINT arms storing DIFFERENT-typed values (Throwable, InterruptedException)
+// into one slot. In DFS order the InterruptedException arm mints the slot's var; the getCause() arm then
+// stores the SUPERTYPE Throwable onto it. AssignVarGuarded splits off a fresh Throwable var, so the read
+// binds to the InterruptedException var and `cause instanceof CodecException` / `(CodecException) cause`
+// fail javac ("InterruptedException cannot be converted to CodecException"). The existing subtype merge
+// keeps `current` only when val SUBTYPES current; here val is the SUPERTYPE, which the strict-sibling
+// merge also declines (LUB == one arm). Widening the caught-exception slot to its LUB is provably safe:
+// a merged catch variable's only uses are Throwable-level (instanceof / cast / getMessage / getCause /
+// rethrow), so this never regresses a narrower uncast use the way widening an ordinary local to Object
+// did. Gated to BOTH arms being hierarchy-known Throwable subtypes, val the strict supertype (LUB == vt),
+// and the shared-load phi. Kill-switch: JDEC_REF_SLOT_THROWABLE_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotThrowableArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_THROWABLE_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if current.IsParam || current.IsNullInitialized() {
+		return nil
+	}
+	ct := current.Type()
+	vt := slotDeclType(val)
+	if ct == nil || vt == nil {
+		return nil
+	}
+	// Extract the FQN class names (jdkSuperEdges / IsThrowableRooted are keyed by dot-form FQN, which
+	// ct.String on a bare ClassContext does not necessarily produce).
+	ctc, ok1 := ct.RawType().(*types.JavaClass)
+	vtc, ok2 := vt.RawType().(*types.JavaClass)
+	if !ok1 || !ok2 || ctc == nil || vtc == nil {
+		return nil
+	}
+	ctName, vtName := ctc.Name, vtc.Name
+	if ctName == vtName {
+		return nil
+	}
+	// Both arms must be hierarchy-known Throwable subtypes: this is what makes widening safe (a merged
+	// catch variable's uses are all Throwable-level) and keeps the merge off non-exception slots.
+	if !types.IsThrowableRooted(ctName) || !types.IsThrowableRooted(vtName) {
+		return nil
+	}
+	// val must be a strict SUPERTYPE of current (the LUB collapses to val's own type). This is the
+	// widening direction the subtype/sibling merges deliberately leave alone.
+	lub := types.CommonSuperType(ct, vt)
+	if lub == nil {
+		return nil
+	}
+	if lc, ok := lub.RawType().(*types.JavaClass); !ok || lc == nil || lc.Name != vtName {
+		return nil
+	}
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	current.ResetVarType(vt)
+	return current
+}
+
 // reachingRefSlotObjectArmMerge handles the SUPERTYPE-arm reference phi where the slot's current
 // variable is declared exactly java.lang.Object (the universal supertype) and a disjoint arm reassigns
 // it with a more specific reference value, all arms flowing into a common post-merge use. It is the
@@ -2524,6 +2593,21 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// JDEC_REF_SLOT_CROSSCLASS_SIBLING_ARM_MERGE_OFF=1.
 		if !refPhiMerged {
 			if merged := d.reachingRefSlotCrossClassSiblingArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
+		// Throwable-family supertype-arm reference phi (spring core codec Decoder/Encoder): a try/catch
+		// with several handlers writes each caught exception into one slot; the post-catch read is a single
+		// logical Throwable/superclass variable whose type is the arms' LUB. In DFS order a subtype arm
+		// (InterruptedException) mints the slot's var and the supertype arm (getCause() -> Throwable) then
+		// splits off, so `cause instanceof CodecException` / `(CodecException) cause` bind to the narrow
+		// type and fail. Widen the shared ref to the LUB (safe: a merged catch variable's uses are all
+		// Throwable-level). Restricted to hierarchy-known Throwable subtypes; phi-gated. Kill-switch:
+		// JDEC_REF_SLOT_THROWABLE_ARM_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotThrowableArmMerge(opcode, slot, oldRef, value); merged != nil {
 				runtimeStackSimulation.SetVar(slot, merged)
 				oldRef = merged
 				refPhiMerged = true

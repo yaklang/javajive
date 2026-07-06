@@ -88,49 +88,109 @@ var jdkSuperEdges = map[string][]string{
 	// BufferedOutputStream(out)`) reassign a slot with a SUBTYPE of the abstract stream it wraps, so the
 	// LUB of the wrapped and wrapping value is the abstract base (InputStream/OutputStream/Reader/Writer).
 	// Needed for the null-adopted subtype-reassign merge (jsoup HttpConnection$Response.execute).
-	"java.io.FilterInputStream":        {"java.io.InputStream"},
-	"java.io.BufferedInputStream":      {"java.io.FilterInputStream"},
-	"java.io.DataInputStream":          {"java.io.FilterInputStream"},
-	"java.io.PushbackInputStream":      {"java.io.FilterInputStream"},
-	"java.io.InflaterInputStream":      {"java.io.FilterInputStream"},
-	"java.util.zip.InflaterInputStream": {"java.io.FilterInputStream"},
-	"java.util.zip.GZIPInputStream":    {"java.util.zip.InflaterInputStream"},
-	"java.util.zip.ZipInputStream":     {"java.util.zip.InflaterInputStream"},
-	"java.util.zip.CheckedInputStream": {"java.io.FilterInputStream"},
-	"java.io.ByteArrayInputStream":     {"java.io.InputStream"},
-	"java.io.FileInputStream":          {"java.io.InputStream"},
-	"java.io.SequenceInputStream":      {"java.io.InputStream"},
-	"java.io.ObjectInputStream":        {"java.io.InputStream"},
-	"java.io.InputStream":              {"java.lang.Object"},
-	"java.io.FilterOutputStream":       {"java.io.OutputStream"},
-	"java.io.BufferedOutputStream":     {"java.io.FilterOutputStream"},
-	"java.io.DataOutputStream":         {"java.io.FilterOutputStream"},
-	"java.io.PrintStream":              {"java.io.FilterOutputStream"},
+	"java.io.FilterInputStream":          {"java.io.InputStream"},
+	"java.io.BufferedInputStream":        {"java.io.FilterInputStream"},
+	"java.io.DataInputStream":            {"java.io.FilterInputStream"},
+	"java.io.PushbackInputStream":        {"java.io.FilterInputStream"},
+	"java.io.InflaterInputStream":        {"java.io.FilterInputStream"},
+	"java.util.zip.InflaterInputStream":  {"java.io.FilterInputStream"},
+	"java.util.zip.GZIPInputStream":      {"java.util.zip.InflaterInputStream"},
+	"java.util.zip.ZipInputStream":       {"java.util.zip.InflaterInputStream"},
+	"java.util.zip.CheckedInputStream":   {"java.io.FilterInputStream"},
+	"java.io.ByteArrayInputStream":       {"java.io.InputStream"},
+	"java.io.FileInputStream":            {"java.io.InputStream"},
+	"java.io.SequenceInputStream":        {"java.io.InputStream"},
+	"java.io.ObjectInputStream":          {"java.io.InputStream"},
+	"java.io.InputStream":                {"java.lang.Object"},
+	"java.io.FilterOutputStream":         {"java.io.OutputStream"},
+	"java.io.BufferedOutputStream":       {"java.io.FilterOutputStream"},
+	"java.io.DataOutputStream":           {"java.io.FilterOutputStream"},
+	"java.io.PrintStream":                {"java.io.FilterOutputStream"},
 	"java.util.zip.DeflaterOutputStream": {"java.io.FilterOutputStream"},
-	"java.util.zip.GZIPOutputStream":   {"java.util.zip.DeflaterOutputStream"},
-	"java.io.ByteArrayOutputStream":    {"java.io.OutputStream"},
-	"java.io.FileOutputStream":         {"java.io.OutputStream"},
-	"java.io.ObjectOutputStream":       {"java.io.OutputStream"},
-	"java.io.OutputStream":             {"java.lang.Object"},
-	"java.io.BufferedReader":           {"java.io.Reader"},
-	"java.io.InputStreamReader":        {"java.io.Reader"},
-	"java.io.FileReader":               {"java.io.InputStreamReader"},
-	"java.io.CharArrayReader":          {"java.io.Reader"},
-	"java.io.StringReader":             {"java.io.Reader"},
-	"java.io.FilterReader":             {"java.io.Reader"},
-	"java.io.PushbackReader":           {"java.io.FilterReader"},
-	"java.io.Reader":                   {"java.lang.Object"},
-	"java.io.BufferedWriter":           {"java.io.Writer"},
-	"java.io.OutputStreamWriter":       {"java.io.Writer"},
-	"java.io.FileWriter":               {"java.io.OutputStreamWriter"},
-	"java.io.PrintWriter":              {"java.io.Writer"},
-	"java.io.CharArrayWriter":          {"java.io.Writer"},
-	"java.io.StringWriter":             {"java.io.Writer"},
-	"java.io.FilterWriter":             {"java.io.Writer"},
-	"java.io.Writer":                   {"java.lang.Object"},
+	"java.util.zip.GZIPOutputStream":     {"java.util.zip.DeflaterOutputStream"},
+	"java.io.ByteArrayOutputStream":      {"java.io.OutputStream"},
+	"java.io.FileOutputStream":           {"java.io.OutputStream"},
+	"java.io.ObjectOutputStream":         {"java.io.OutputStream"},
+	"java.io.OutputStream":               {"java.lang.Object"},
+	"java.io.BufferedReader":             {"java.io.Reader"},
+	"java.io.InputStreamReader":          {"java.io.Reader"},
+	"java.io.FileReader":                 {"java.io.InputStreamReader"},
+	"java.io.CharArrayReader":            {"java.io.Reader"},
+	"java.io.StringReader":               {"java.io.Reader"},
+	"java.io.FilterReader":               {"java.io.Reader"},
+	"java.io.PushbackReader":             {"java.io.FilterReader"},
+	"java.io.Reader":                     {"java.lang.Object"},
+	"java.io.BufferedWriter":             {"java.io.Writer"},
+	"java.io.OutputStreamWriter":         {"java.io.Writer"},
+	"java.io.FileWriter":                 {"java.io.OutputStreamWriter"},
+	"java.io.PrintWriter":                {"java.io.Writer"},
+	"java.io.CharArrayWriter":            {"java.io.Writer"},
+	"java.io.StringWriter":               {"java.io.Writer"},
+	"java.io.FilterWriter":               {"java.io.Writer"},
+	"java.io.Writer":                     {"java.lang.Object"},
+
+	// Throwable family: try/catch (and multi-catch) handlers store their caught exception into ONE JVM
+	// slot; the post-catch read is a single logical `Throwable`/superclass variable whose type is the
+	// LUB of the caught types. Enough of the common exception hierarchy to compute those LUBs (every
+	// chain terminates at java.lang.Throwable, then Object).
+	"java.lang.Throwable":                     {"java.lang.Object"},
+	"java.lang.Exception":                     {"java.lang.Throwable"},
+	"java.lang.Error":                         {"java.lang.Throwable"},
+	"java.lang.RuntimeException":              {"java.lang.Exception"},
+	"java.lang.IllegalArgumentException":      {"java.lang.RuntimeException"},
+	"java.lang.IllegalStateException":         {"java.lang.RuntimeException"},
+	"java.lang.NullPointerException":          {"java.lang.RuntimeException"},
+	"java.lang.IndexOutOfBoundsException":     {"java.lang.RuntimeException"},
+	"java.lang.ClassCastException":            {"java.lang.RuntimeException"},
+	"java.lang.NumberFormatException":         {"java.lang.IllegalArgumentException"},
+	"java.lang.ArithmeticException":           {"java.lang.RuntimeException"},
+	"java.lang.UnsupportedOperationException": {"java.lang.RuntimeException"},
+	"java.lang.InterruptedException":          {"java.lang.Exception"},
+	"java.lang.ClassNotFoundException":        {"java.lang.Exception"},
+	"java.lang.CloneNotSupportedException":    {"java.lang.Exception"},
+	"java.lang.ReflectiveOperationException":  {"java.lang.Exception"},
+	"java.lang.NoSuchMethodException":         {"java.lang.ReflectiveOperationException"},
+	"java.lang.NoSuchFieldException":          {"java.lang.ReflectiveOperationException"},
+	"java.io.IOException":                     {"java.lang.Exception"},
+	"java.io.FileNotFoundException":           {"java.io.IOException"},
+	"java.io.UncheckedIOException":            {"java.lang.RuntimeException"},
+	"java.util.concurrent.ExecutionException": {"java.lang.Exception"},
+	"java.util.concurrent.TimeoutException":   {"java.lang.Exception"},
 
 	// Interfaces that bottom out at Object.
 	"java.lang.Comparable": {"java.lang.Object"},
+}
+
+// throwableRootedTypes is the set of hierarchy-table entries whose chain terminates at
+// java.lang.Throwable (below Object). isThrowableRooted uses it to gate the Throwable-family
+// supertype-arm merge, so widening a caught-exception slot to its LUB never touches a non-exception type.
+var throwableRootedTypes = func() map[string]bool {
+	roots := map[string]bool{"java.lang.Throwable": true}
+	// Fixed-point closure over jdkSuperEdges: a type is Throwable-rooted if any of its supertypes is.
+	for changed := true; changed; {
+		changed = false
+		for name, sups := range jdkSuperEdges {
+			if roots[name] {
+				continue
+			}
+			for _, s := range sups {
+				if roots[s] {
+					roots[name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return roots
+}()
+
+// IsThrowableRooted reports whether the dot-form FQN is a known java.lang.Throwable subtype (per the
+// hierarchy table). Used to restrict the exception-catch-slot supertype-arm merge to genuine Throwable
+// types, where widening a merged catch variable to its LUB is always safe (its uses are Throwable-level:
+// instanceof / cast / getMessage / getCause / rethrow).
+func IsThrowableRooted(fqn string) bool {
+	return throwableRootedTypes[fqn]
 }
 
 // jdkInterfaceSet marks which table entries are interfaces, so the LUB tie-break can prefer a concrete
