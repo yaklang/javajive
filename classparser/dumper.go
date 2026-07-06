@@ -148,6 +148,57 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 	return innerSelfAccessFlags(c.obj)
 }
 
+// superIsOwnFormalFlattenedSibling reports whether this class's direct superclass is a flattened
+// `$`-named SIBLING (same top-level nest) that declares its OWN formal type parameters. That is exactly
+// the shape of ConcurrentReferenceHashMap$1..$5 extends ConcurrentReferenceHashMap$Task<T>: the super
+// (Task<T>) went through the own-formal raw-erase path (case a) and rendered its method params raw
+// (`execute(Reference, Entry)`), so a subclass override rendered with the injected `<K,V>` generics
+// (`execute(Reference<K,V>, Entry<K,V>)`) would clash ("same erasure, yet neither overrides"). Erasing
+// the subclass's override params to match restores the override. Requires foldSiblingResolver (a
+// single-class decompile cannot see the sibling, and there the injection+clash do not both arise the
+// same way). A super whose formal-param set is EMPTY (no-own-formal, or a raw JDK class) is rejected:
+// it declares+renders those vars generically, so erasing here would instead CREATE a clash.
+func (c *ClassObjectDumper) superIsOwnFormalFlattenedSibling() bool {
+	if c.foldSiblingResolver == nil {
+		return false
+	}
+	super := c.obj.GetSupperClassName()
+	if super == "" || !strings.Contains(super, "$") {
+		return false
+	}
+	self := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
+	// Same top-level nest: both share the substring up to the first '$'.
+	topOf := func(n string) string {
+		if i := strings.IndexByte(n, '$'); i >= 0 {
+			return n[:i]
+		}
+		return n
+	}
+	if topOf(self) != topOf(super) {
+		return false
+	}
+	data, ok := c.foldSiblingResolver(super)
+	if !ok || len(data) == 0 {
+		return false
+	}
+	sObj, err := Parse(data)
+	if err != nil {
+		return false
+	}
+	if flags, ok := innerSelfAccessFlags(sObj); ok && flags&StaticFlag != 0 {
+		return false
+	}
+	for _, attr := range sObj.Attributes {
+		if sa, ok := attr.(*SignatureAttribute); ok {
+			if sig, err := sObj.getUtf8(sa.SignatureIndex); err == nil && sig != "" {
+				return len(types.ClassFormalTypeParamNames(sig)) > 0
+			}
+			break
+		}
+	}
+	return false
+}
+
 // innerSelfAccessFlags returns the inner_class_access_flags obj carries in the InnerClasses entry that
 // refers to obj itself, with ok=false when none exists. Free-function form of selfInnerClassAccessFlags
 // so it can also be applied to a sibling class parsed on the fly.
@@ -740,6 +791,19 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// override keeps its parameterized parameter and is not broken. Kill-switch
 			// JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF.
 			eraseMethodParams := len(ownFormalNames) > 0
+			// Case (b): a NO-own-formal flattened class whose SUPERCLASS is an own-formal `$`-named
+			// SIBLING (same top-level nest) that itself raw-erased its method params via case (a). The
+			// subclass DECLARES the enclosing vars (K/V) via enclosing-arity injection and renders its
+			// override with parameterized params (`Reference<K,V>`), while the erased base renders raw
+			// (`Reference`) -- same erasure, neither overrides -> javac "name clash". Erasing the
+			// subclass's override params to match the base restores the override relation. Gated on the
+			// super ACTUALLY being own-formal (so it went through case (a)); a no-own-formal `$` super
+			// declares+renders those vars generically, so erasing here would instead CREATE a clash.
+			if !eraseMethodParams && os.Getenv("JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF") == "" {
+				if c.superIsOwnFormalFlattenedSibling() {
+					eraseMethodParams = true
+				}
+			}
 			if eraseMethodParams && os.Getenv("JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF") == "" {
 				for _, method := range c.obj.Methods {
 					for _, mattr := range method.Attributes {
@@ -770,9 +834,22 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// signature so the override relation is preserved. Kill-switch: JDEC_INNER_STANDALONE_ERASE_OFF.
 	var standaloneEraseTypeVars map[string]string
 	if len(rawEraseTypeVars) > 0 && os.Getenv("JDEC_INNER_STANDALONE_ERASE_OFF") == "" {
+		// A variable this class actually DECLARES (own formal params, or enclosing vars injected onto a
+		// flattened no-own-formal inner class) is in scope and must NOT be standalone-erased: doing so
+		// turns a legitimate `V execute(...)` return into `Object`, breaking the override against the
+		// base's `T`(=V) return ("cannot override"). Only genuinely undeclarable enclosing vars (case a,
+		// own-formal Task) need standalone erasure. Matters for the case-(b) override-param erasure,
+		// whose vars ARE declared here (they are only erased in the override PARAMETER positions).
+		declared := map[string]bool{}
+		for _, n := range classTypeParamNames {
+			declared[n] = true
+		}
 		bounds := c.enclosingTypeParamErasures(rawEraseTypeVars)
 		standaloneEraseTypeVars = make(map[string]string, len(rawEraseTypeVars))
 		for name := range rawEraseTypeVars {
+			if declared[name] {
+				continue
+			}
 			if e, ok := bounds[name]; ok && e != "" {
 				standaloneEraseTypeVars[name] = e
 			} else {

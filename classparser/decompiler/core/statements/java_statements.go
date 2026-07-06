@@ -387,6 +387,20 @@ func typeVarLocalDeclName(funcCtx *class_context.ClassContext, left values.JavaV
 	} else {
 		return ""
 	}
+	// If any recovered receiver type argument is a type variable this class RAW-ERASES at render
+	// (a flattened inner class whose enclosing K/V are stripped from its override-method parameters,
+	// so the receiver `Entry<K,V> var2` prints as raw `Entry var2`), then the call is an UNCHECKED
+	// invocation on a raw receiver: javac erases its return type to the bound (Object), so a bare
+	// `V var4 = var2.getValue()` is uncompilable ("Object cannot be converted to V"). Bail here so the
+	// erased `Object` declaration is kept; the downstream `return (V)(var4)` supplies the unchecked cast.
+	for _, a := range recvArgs {
+		if a == nil {
+			continue
+		}
+		if jc, ok := a.RawType().(*types.JavaClass); ok && funcCtx.RawEraseTypeVar(jc.Name) {
+			return ""
+		}
+	}
 	params, ret := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, call.FunctionName, len(call.Arguments))
 	if ret == nil {
 		return ""
