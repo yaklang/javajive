@@ -153,6 +153,14 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		if cast := crossRecvWildcardReturnCast(funcCtx, r.JavaValue); cast != "" {
 			return fmt.Sprintf("return (%s) (%s)", cast, expr)
 		}
+		// A `Class.forName(...)` return into a type-variable-mentioning `Class<...>` declared return: the
+		// JDK signature is `Class<?> forName(String)`, so javac captures the wildcard to CAP#1 and rejects
+		// `Class<CAP#1>` -> `Class<ObjectInstantiator<T>>`; the source carried an unchecked
+		// `(Class<ObjectInstantiator<T>>)` cast. See classForNameReturnCast (spring objenesis
+		// DelegatingToExoticInstantiator.instantiatorClass).
+		if cast := classForNameReturnCast(funcCtx, r.JavaValue); cast != "" {
+			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+		}
 		// Concrete reference return type with an Object-typed value (erased generic / null-only slot):
 		// emit an explicit downcast so the source recompiles. See objectReturnDowncast.
 		if cast := objectReturnDowncast(funcCtx, r.JavaValue); cast != "" {
@@ -341,6 +349,58 @@ func parameterizedReturnRawBridge(funcCtx *class_context.ClassContext, v values.
 		return "", ""
 	}
 	return erasureName(retStr), retStr
+}
+
+// classForNameReturnCast returns the declared return type to interpose as
+// `return (Class<ObjectInstantiator<T>>) value` when the returned value is a `Class.forName(...)` static
+// call and the enclosing method's declared return is a `Class<...>` parameterization that MENTIONS an
+// in-scope type variable. The JDK signature is `Class<?> forName(String)` (and its 3-arg overload), so
+// javac captures the wildcard to a fresh CAP#1 and rejects `Class<CAP#1>` -> `Class<ObjectInstantiator<T>>`;
+// the source carried an unchecked `(Class<...>)` cast (the erased checkcast is a no-op the bytecode drops).
+// A `Class<?>` -> `Class<X>` cast is ALWAYS a legal unchecked conversion (capture), never inconvertible, so
+// this is safe. Restricted to the exact `Class.forName` shape (a wildcard-returning JDK method that the
+// decompiler renders raw) so it never touches a poly factory whose return javac independently infers to a
+// concrete parameterization (the guava `ImmutableMap.of()` / "incompatible bounds" family). Kill-switch
+// JDEC_CLASS_FORNAME_RET_CAST_OFF.
+func classForNameReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) string {
+	if funcCtx == nil || v == nil || os.Getenv("JDEC_CLASS_FORNAME_RET_CAST_OFF") != "" {
+		return ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	// Declared return must be a `Class<...>` parameterization mentioning a type variable (`Class<A>`,
+	// `Class<ObjectInstantiator<T>>`), not a bare type variable.
+	if !strings.Contains(retStr, "<") || funcCtx.IsTypeParam(retStr) {
+		return ""
+	}
+	if erasureName(retStr) != "Class" && erasureName(retStr) != "java.lang.Class" {
+		return ""
+	}
+	if !mentionsTypeParam(retStr, funcCtx.TypeParams) {
+		return ""
+	}
+	call, ok := values.UnpackSoltValue(v).(*values.FunctionCallExpression)
+	if !ok || call == nil || !call.IsStatic || call.FunctionName != "forName" {
+		return ""
+	}
+	// The receiver must be java.lang.Class (the static `Class.forName`), not some other `forName`.
+	recvIsClass := false
+	if call.ClassName == "java/lang/Class" || call.ClassName == "java.lang.Class" {
+		recvIsClass = true
+	} else if call.Object != nil {
+		if ot := call.Object.Type(); ot != nil {
+			if jc, okc := ot.RawType().(*types.JavaClass); okc && jc != nil && jc.Name == "java.lang.Class" {
+				recvIsClass = true
+			}
+		}
+	}
+	if !recvIsClass {
+		return ""
+	}
+	return retStr
 }
 
 // crossRecvWildcardReturnCast returns the declared return type to interpose as `return (Class<A>) value`
