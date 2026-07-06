@@ -63,6 +63,12 @@ cat /tmp/jdec-inv/guava.tree.fails.txt
 - 已有 `CommonSuperType`(`decompiler/core/values/types/hierarchy.go`), 已治本反射家族与跨类直接子类型两支(`JDEC_TYPELUB_OFF` / `JDEC_TERNARY_DECL_LUB_*`)。
 - 残余: 渲染期造型未反馈到三元类型 + 三元臂泛型擦除(归 T1)。方向: 扩 JDK 层级表 + 在更多 phi/合流点接入。
 
+### T4b. 折叠首赋值在分支后仍活跃 → definite-assignment(snakeyaml createNumber / commons-lang3 LocaleUtils)
+- 根因(已实证): 手写 computeIfAbsent 惯用式 `V x = expr; if(x==null){...; x=...;} return x;`(字节码 `astore V; aload V; ifXX; ...; astore V; L: aload V; areturn`)。def@首 store 到 slot 的值被单用折叠**吃进条件**(`if(expr==null)`)并丢掉首 store, 但该 slot 在分支后 `return x` 仍被读(分支未取的那条路径 def@首仍到达)。可达定义分析把合流 load 只归给分支体内的 def, 首 def 遂被判"单用"折走 → 合流读绑到只在分支体赋值的变量 → `variable might not have been initialized`。
+- 关键: 两 def 同 slot 同类型(List/Number), 是**同一变量**, 应在合流 load 处做 phi 统一(load 侧), 而非 store 侧臂合并——本轮试过 store 侧 supertype-arm 合并, 因 try/catch 两 store 互不为对方 current 而不触发, 且放开会 +10 回归(已回退)。
+- 方向(高风险, 留专项): 单用折叠前, 若被折 ref 的 slot 在紧邻使用点之外还有下游 load(经 `slotDefPhiReachesLoad` 可判), 则不折、保留首 store; 或在合流 load 建 phi 统一同槽同型 def。核心 dataflow, 需 kill-switch + 全量 A/B。
+- 复现: `go run` JarFS ReadFile(注意 tree 用 snakeyaml-2.2 / commons-lang3-3.12.0, 与 `find` 默认版本不同), 看 createNumber(slot6 Integer/Number) 与 languagesByCountry/countriesByLanguage(slot1 List)。
+
 ### T5. `for` 循环 `continue`-到-自增被丢弃(gson `JsonWriter.string`)
 - 根因: `for` 渲染成 `do-while(true)` + 自增作显式体语句, 内层 `continue` 会跳过自增故被丢弃, 致 `variable might not have been initialized`。
 - 方向: `for` 循环恢复(自增放进 for-update 槽)或 continue-到-latch 结构化, 改动循环结构化核心、影响所有 jar, 风险高, 留专项(历史上循环重建易回归, 必须 opt-in 开关 + 全量 A/B)。
