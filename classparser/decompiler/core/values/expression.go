@@ -1870,15 +1870,31 @@ func (f *FunctionCallExpression) calleeParamIsErasedTypeVar(i int, funcCtx *clas
 // enum that flowed into the parameter in bytecode, so it is already assignable; dropping the cast is
 // behaviour-preserving and lets javac infer E. JDK callees are invisible to SiblingClassSig, hence this
 // descriptor-keyed companion. Kill-switch: JDEC_ENUM_COMPARETO_NOCAST_OFF=1.
-func jdkCalleeParamIsErasedTypeVar(method string, paramIndex, argc int, paramType types.JavaType) bool {
-	if os.Getenv("JDEC_ENUM_COMPARETO_NOCAST_OFF") != "" {
-		return false
-	}
-	if method != "compareTo" || argc != 1 || paramIndex != 0 || paramType == nil {
+//
+// The second case is java.util.EnumSet.of(E first, ...): every overload's formals are the method-scope
+// `E extends Enum<E>` erased to `java.lang.Enum` in the descriptor, so the arg-cast logic upcasts the
+// concrete enum constant to raw `(Enum)` -- collapsing javac's inference of E and breaking overload
+// resolution ("no suitable method found for of(Enum,TaskOption[])"; spring ConcurrentReferenceHashMap$Task
+// `EnumSet.of(options[0], options)`). Same reasoning: the argument already flowed into E in bytecode, so
+// dropping the cast is behaviour-preserving and lets javac infer E. Keyed on the exact callee class
+// (java.util.EnumSet) + method (of) + the Enum-erased formal. Kill-switch: JDEC_ENUMSET_OF_NOCAST_OFF=1.
+func jdkCalleeParamIsErasedTypeVar(className, method string, paramIndex, argc int, paramType types.JavaType) bool {
+	if paramType == nil {
 		return false
 	}
 	raw, ok := paramType.RawType().(*types.JavaClass)
-	return ok && raw.Name == "java.lang.Enum"
+	if !ok || raw == nil || raw.Name != "java.lang.Enum" {
+		return false
+	}
+	if method == "compareTo" && argc == 1 && paramIndex == 0 &&
+		os.Getenv("JDEC_ENUM_COMPARETO_NOCAST_OFF") == "" {
+		return true
+	}
+	if method == "of" && (className == "java/util/EnumSet" || className == "java.util.EnumSet") &&
+		os.Getenv("JDEC_ENUMSET_OF_NOCAST_OFF") == "" {
+		return true
+	}
+	return false
 }
 
 // classLiteralArgToClassParam reports whether arg is a class literal `X.class` being passed to a
@@ -2288,7 +2304,7 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	if ok1 && ok2 && expectClassType.Name != atcClassType.Name {
 		if expectClassType.Name != "java.lang.Object" && !suppressTypeVarArgCast(funcCtx, atcClassType, expectClassType) &&
 			!(!resolvedGeneric && f.calleeParamIsErasedTypeVar(i, funcCtx)) &&
-			!(!resolvedGeneric && jdkCalleeParamIsErasedTypeVar(f.FunctionName, i, len(f.Arguments), argType)) &&
+			!(!resolvedGeneric && jdkCalleeParamIsErasedTypeVar(f.ClassName, f.FunctionName, i, len(f.Arguments), argType)) &&
 			!classLiteralArgToClassParam(arg, expectClassType) {
 			argStr := arg.String(funcCtx)
 			argTypeStr := argType.String(funcCtx)

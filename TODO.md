@@ -8,7 +8,14 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 25/14 · guava 28/24 · commons-lang3 12/9 · spring 32/20。（合计 99, 跌破 100）
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 25/14 · guava 28/24 · commons-lang3 12/9 · spring 31/19。（合计 98）
+> (本轮四修: `EnumSet.of(...)` 实参禁 `(Enum)` 上转(`jdkCalleeParamIsErasedTypeVar` 增 EnumSet.of 分支,
+> `JDEC_ENUMSET_OF_NOCAST_OFF`)—— `EnumSet.of(E first, E... rest)` 的方法作用域 `E extends Enum<E>` 在描述符里
+> 擦成 `java.lang.Enum`, 实参造型逻辑把具体枚举常量上转成 raw `(Enum)`, 反而塌掉 javac 对 E 的推断、破坏重载决议
+> ("no suitable method found for of(Enum,TaskOption[])")。修法: 与 Enum.compareTo 同根(JDK 被调方形参是擦成
+> 非 Object 边界的自身类型变量), 按精确被调方(java.util.EnumSet + of + Enum 擦除形参)键控禁造型, 让 javac 从实参
+> 推断 E; 字节码中实参本就流入 E, 去造型保行为。承重测试 `enumset_of_nocast_test.go`(EnumSetOfSeed)。
+> 治 spring ConcurrentReferenceHashMap$Task 构造器 1 条, spring 32→31, 合计 99→98, 零回归。)
 > (本轮三修: `System.getenv()` 返回补 raw 造型(`concreteParamReturnSubtypeRawCast` Shape 3, 同开关)——
 > 声明返回 `Map<String,Object>`, 返回值是 0 参 JDK 静态 `System.getenv()`, 其 JDK 签名是**固定的**
 > `Map<String,String>`(同擦除、不同实参, 裸返回永不隐转、直接参数化造型 inconvertible), 源码原带 raw `(Map)` 造型。
