@@ -1388,6 +1388,136 @@ func (d *Decompiler) reachingBoolFieldSlotSplit(store *OpCode, slot int, current
 	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
 }
 
+// reachingBoolAccumulatorSlotSplit is the boolean-ACCUMULATOR-sink sibling of reachingBoolFieldSlotSplit.
+// It fixes the disjoint slot-reuse where a `boolean flag = false; flag |= boolCall()` accumulator reuses
+// a JVM slot a DISJOINT earlier live range used as an `int` loop counter. spring ASM ClassWriter.toByteArray:
+//
+//	for (int i = 0; i < interfaceCount; i++) out.putShort(interfaces[i]);   // slot 12 = i (int)
+//	...
+//	boolean hasFrames = false;                                              // slot 12 REUSED (iconst_0; istore 12)
+//	for (MethodWriter mw = firstMethod; mw != null; ...) hasFrames |= mw.hasFrames();  // iload 12; invoke ...:Z; ior; istore 12
+//
+// `hasFrames = false` is `iconst_0; istore 12`, an int-0 literal AssignVarGuarded sees as int-compatible
+// with the (now-dead) int loop counter `i` still parked in slot 12's table entry, so it REUSES that ref
+// and merges the two disjoint ranges. The slot's type later resolves to boolean (from the `flag |= Zcall`
+// accumulate), so the earlier loop uses render as `boolean < int` / `array[boolean]` / `boolean++` and
+// javac rejects them ("bad operand types", "boolean cannot be converted to int", "bad operand type
+// boolean for unary operator '++'"). The boolean-ness is witnessed by the value flowing into a self
+// `ior/iand/ixor` accumulate (`slot = slot OP Zexpr; istore slot`) whose sibling operand is a boolean
+// (Z-returning) invoke. Same disjoint-web / phi gates as the field sibling; on a match it coerces the 0
+// literal to boolean so AssignVarGuarded mints a FRESH boolean flag, leaving the int loop counter on its
+// own ref. Kill-switch: JDEC_BOOL_ACCUM_SLOT_SPLIT_OFF=1.
+func (d *Decompiler) reachingBoolAccumulatorSlotSplit(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) {
+	if os.Getenv("JDEC_BOOL_ACCUM_SLOT_SPLIT_OFF") == "1" {
+		return
+	}
+	if store == nil || current == nil || val == nil {
+		return
+	}
+	if current.IsParam || !isExactPrimer(current.Type(), types.JavaInteger) {
+		return
+	}
+	lit, ok := intLiteral01(val)
+	if !ok {
+		return
+	}
+	if !d.slotStoreFeedsBooleanAccumulate(store, slot) {
+		return
+	}
+	if d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return
+	}
+	if !d.slotStoreDisjointFromCurrentWeb(store, slot, current) {
+		return
+	}
+	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
+}
+
+// slotStoreFeedsBooleanAccumulate reports whether `store`'s value flows forward (no intervening
+// redefinition of the slot) to a load of the slot that feeds a self `ior`/`iand`/`ixor` accumulate back
+// into the same slot, with a boolean (Z-returning) invoke supplying the sibling operand -- i.e. the
+// stored 0 initializes a `boolean flag` that is later `flag |= someZcall()`. This proves the value is a
+// boolean flag rather than an int reused by an arithmetic consumer.
+func (d *Decompiler) slotStoreFeedsBooleanAccumulate(store *OpCode, slot int) bool {
+	if store == nil {
+		return false
+	}
+	visited := map[*OpCode]bool{store: true}
+	queue := append([]*OpCode{}, store.Target...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || cur.Instr == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+			continue // a redefinition kills this value; do not look past it on this path
+		}
+		if isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
+			if d.loadFeedsBooleanAccumulate(cur, slot) {
+				return true
+			}
+		}
+		queue = append(queue, cur.Target...)
+	}
+	return false
+}
+
+// loadFeedsBooleanAccumulate walks the linear successor chain from an `iload slot` and reports whether it
+// reaches an `ior`/`iand`/`ixor` whose result is stored straight back into `slot` (a self-accumulate),
+// with a Z-returning invoke seen in between (the boolean sibling operand). Bounded and single-successor:
+// the accumulate lives entirely inside one basic block (`iload slot; <sibling>; ior; istore slot`).
+func (d *Decompiler) loadFeedsBooleanAccumulate(load *OpCode, slot int) bool {
+	cur := load
+	sawBoolInvoke := false
+	for i := 0; i < 32 && cur != nil; i++ {
+		if len(cur.Target) != 1 {
+			return false // a branch/return: not the straight-line accumulate shape
+		}
+		cur = cur.Target[0]
+		if cur == nil || cur.Instr == nil {
+			return false
+		}
+		switch cur.Instr.OpCode {
+		case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE, OP_INVOKESTATIC, OP_INVOKESPECIAL:
+			if d.opcodeInvokeReturnsBoolean(cur) {
+				sawBoolInvoke = true
+			}
+		case OP_IOR, OP_IAND, OP_IXOR:
+			t := cur.Target
+			if len(t) == 1 && t[0] != nil && t[0].Instr != nil &&
+				isLocalStoreOpcode(t[0].Instr.OpCode) && GetStoreIdx(t[0]) == slot {
+				return sawBoolInvoke
+			}
+			return false
+		default:
+			if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
+				return false // stored back before an accumulate op: not this shape
+			}
+		}
+	}
+	return false
+}
+
+// opcodeInvokeReturnsBoolean reports whether an invoke opcode targets a method whose descriptor return
+// type is exactly boolean (`()Z`).
+func (d *Decompiler) opcodeInvokeReturnsBoolean(op *OpCode) bool {
+	if op == nil || len(op.Data) < 2 || d.constantPoolGetter == nil {
+		return false
+	}
+	idx := int(Convert2bytesToInt(op.Data[:2]))
+	m, ok := d.constantPoolGetter(idx).(*values.JavaClassMember)
+	if !ok || m == nil {
+		return false
+	}
+	rp := strings.LastIndex(m.Description, ")")
+	if rp < 0 || rp+1 >= len(m.Description) {
+		return false
+	}
+	return m.Description[rp+1] == 'Z'
+}
+
 // slotStoreFeedsBooleanField reports whether `store`'s value flows forward (no intervening redefinition
 // of the slot) to a load of the slot that is immediately stored into a `boolean` field (putfield /
 // putstatic of a Z-descriptor field). This proves the stored value is a boolean flag.
@@ -2448,6 +2578,14 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// counter intact. Kill-switch: JDEC_BOOL_FIELD_SLOT_SPLIT_OFF=1.
 		if !refPhiMerged {
 			d.reachingBoolFieldSlotSplit(opcode, slot, oldRef, value)
+		}
+		// Disjoint boolean-ACCUMULATOR slot split (spring ASM ClassWriter.toByteArray): a `boolean
+		// flag = false` initializer reuses a slot a disjoint earlier range used as an int loop counter,
+		// and the flag is later `flag |= someZcall()`. Same shape/gates as the field sibling but the
+		// boolean sink is a self ior/iand/ixor accumulate rather than a putfield. Kill-switch:
+		// JDEC_BOOL_ACCUM_SLOT_SPLIT_OFF=1.
+		if !refPhiMerged {
+			d.reachingBoolAccumulatorSlotSplit(opcode, slot, oldRef, value)
 		}
 		ref, isFirst := oldRef, false
 		reuseNullBranchStore := false
