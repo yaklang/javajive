@@ -234,6 +234,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// receiver (`(C::m).apply(x)` does not compile); flag it so the call site adds the cast.
 			refVal.Flag = "lambda"
 			refVal.NoOuterCapture = len(capturedArgs) == 0
+			refVal.IsMethodRef = true
 			return refVal, nil
 		}
 	},

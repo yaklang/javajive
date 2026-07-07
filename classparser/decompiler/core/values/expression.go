@@ -1980,7 +1980,13 @@ func (f *FunctionCallExpression) lambdaArgFunctionalCast(i int, funcCtx *class_c
 	if !ok || cv.Flag != "lambda" {
 		return ""
 	}
-	// (c) the lambda value carries a denotable parameterized functional-interface type.
+	// A method reference binds NATIVELY to the raw SAM (no explicit parameter types to mismatch), so
+	// the parameterized-FI cast is unnecessary for it and, for SAMs with nested wildcards, can defeat
+	// javac poly inference at the call site (same reasoning as lambdaArgRawJDKReceiverCast). Only an
+	// explicitly-typed lambda body needs the cast. Skip method references.
+	if cv.IsMethodRef {
+		return ""
+	}
 	lamType := cv.Type()
 	if lamType == nil {
 		return ""
@@ -2094,6 +2100,15 @@ func (f *FunctionCallExpression) lambdaArgRawJDKReceiverCast(i int, funcCtx *cla
 	// (a) argument is a lambda / method reference (both carry Flag "lambda").
 	cv, ok := UnpackSoltValue(f.Arguments[i]).(*CustomValue)
 	if !ok || cv.Flag != "lambda" {
+		return ""
+	}
+	// A method reference binds NATURALLY to the raw SAM (it has no explicit parameter types), so
+	// the parameterized-FI cast is unnecessary for it AND, for SAMs with nested wildcards (Stream.
+	// flatMap's `Function<? super T, ? extends Stream<? extends R>>`), the cast pins a concrete
+	// parameterization that defeats javac poly inference ("method flatMap cannot be applied").
+	// Only an explicitly-typed lambda body needs the cast to bind. Skip method references.
+	// (fastjson2 ObjectReaderCreator.toFieldReaderArray `flatMap(Collection::stream)`.)
+	if cv.IsMethodRef {
 		return ""
 	}
 	// (b) the lambda value carries a denotable parameterized functional-interface type.

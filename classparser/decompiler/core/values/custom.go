@@ -9,9 +9,20 @@ import (
 type CustomValue struct {
 	Flag           string
 	NoOuterCapture bool
-	StringFunc     func(funcCtx *class_context.ClassContext) string
-	TypeFunc       func() types.JavaType
-	ReplaceFunc    func(oldId *utils.VariableId, newId *utils.VariableId)
+	// IsMethodRef distinguishes a method reference (`Type::method`, `receiver::method`, `Type::new`)
+	// from an inlined lambda body (`(x) -> ...`). Both carry Flag=="lambda" (so receiver/call-site
+	// functional-interface cast logic fires for both), but a method reference binds NATURALLY to a
+	// raw SAM (it has no explicit parameter types to mismatch), whereas an explicitly-typed lambda
+	// needs the cast to bind. A parameterized FI cast on a method reference is therefore unnecessary
+	// and, when the target FI's SAM mentions nested wildcards (e.g. Stream.flatMap's
+	// `Function<? super T, ? extends Stream<? extends R>>`), the cast pins a concrete parameterization
+	// that defeats javac's poly inference ("method flatMap cannot be applied"). The cast helpers use
+	// this flag to skip method references (fastjson2 ObjectReaderCreator.toFieldReaderArray
+	// `flatMap(Collection::stream)`).
+	IsMethodRef bool
+	StringFunc  func(funcCtx *class_context.ClassContext) string
+	TypeFunc    func() types.JavaType
+	ReplaceFunc func(oldId *utils.VariableId, newId *utils.VariableId)
 }
 
 // ReplaceVar implements JavaValue.
