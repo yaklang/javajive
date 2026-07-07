@@ -928,7 +928,49 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 		// regression), so they are excluded.
 		switch uv := values.UnpackSoltValue(v).(type) {
 		case *values.JavaClassMember, *values.RefMember:
-			// field access (static `Class.INSTANCE` or instance `this.field`) - may need the cast
+			// field access (static `Class.INSTANCE` or instance `this.field`) - may need the cast, but
+			// FIRST narrow on the field's RECOVERED real generic type (same logic as inheritedFieldReturnCast):
+			// when the field carries a top-level WILDCARD whose BOUND ERASURE differs from the corresponding
+			// declared-return type argument erasure, the cast is INCONVERTIBLE after capture (e.g. guava
+			// ImmutableMultimap.asMap `return this.map` where map is `ImmutableMap<K, ? extends ImmutableCollection<V>>`
+			// and the declared return is `ImmutableMap<K, Collection<V>>`: javac captures to
+			// ImmutableMap<K, CAP#1> and the (ImmutableMap<K,Collection<V>>) cast is inconvertible). The
+			// bare field read converts by unchecked conversion (legal, warning-only), mirroring the source's
+			// @SuppressWarnings -- so suppress the cast. Kill-switch JDEC_TYPEVAR_FIELD_WILDCARD_NOCAST_OFF
+			// restores the legacy always-cast behavior for A/B.
+			if os.Getenv("JDEC_TYPEVAR_FIELD_WILDCARD_NOCAST_OFF") == "" {
+				if fieldType := values.RecoverThisFieldInstantiatedType(funcCtx, v); fieldType != nil {
+					realStr := fieldType.String(funcCtx)
+					if realArgs, okRA := topLevelTypeArgs(realStr); okRA {
+						hasWild := false
+						for _, a := range realArgs {
+							if strings.HasPrefix(a, "?") {
+								hasWild = true
+								break
+							}
+						}
+						if hasWild && erasureName(realStr) == erasureName(retStr) {
+							if retArgs, okRT := topLevelTypeArgs(retStr); okRT && len(retArgs) == len(realArgs) {
+								blockCast := false
+								for i, ra := range realArgs {
+									if !strings.HasPrefix(ra, "?") {
+										continue
+									}
+									boundErasure := wildcardExtendsBoundErasure(ra)
+									targetErasure := erasureName(retArgs[i])
+									if boundErasure != "" && targetErasure != "" && boundErasure != targetErasure {
+										blockCast = true
+										break
+									}
+								}
+								if blockCast {
+									return ""
+								}
+							}
+						}
+					}
+				}
+			}
 		case *values.JavaRef:
 			if !uv.IsThis {
 				return ""
@@ -1500,7 +1542,56 @@ func inheritedFieldReturnCast(funcCtx *class_context.ClassContext, v values.Java
 	if !hasWildcard {
 		return ""
 	}
+	// T1(b) regression guard: a wildcard source casts to a same-erasure target by unchecked conversion
+	// ONLY when each wildcard's bound ERASURE matches the corresponding target argument's erasure (or
+	// the wildcard is unbounded). When the wildcard bound is a DIFFERENT class (e.g. field
+	// `ImmutableMap<K, ? extends ImmutableCollection<V>>` returned as `ImmutableMap<K, Collection<V>>`),
+	// javac captures the wildcard to CAP#1 and the cast `ImmutableMap<K,CAP#1> -> ImmutableMap<K,Collection<V>>`
+	// is INCONVERTIBLE (Collection<V> is neither ImmutableCollection<V> nor its supertype in the captured
+	// type). In that case the field read must render BARE (`return this.field`) -- javac accepts it as an
+	// unchecked conversion with only a warning, mirroring the original source's @SuppressWarnings. Only
+	// block the cast when a wildcard bound erasure disagrees with its target peer; the working cases
+	// (`Comparator<? super E>` -> `Comparator<Object>`, bound Object == target Object) keep the cast.
+	retArgs, _ := topLevelTypeArgs(retStr)
+	if len(retArgs) == len(realArgs) {
+		for i, ra := range realArgs {
+			if !strings.HasPrefix(ra, "?") {
+				continue // non-wildcard arg: unchecked-cast legality covered by the same-erasure gate
+			}
+			boundErasure := wildcardExtendsBoundErasure(ra)
+			targetErasure := erasureName(retArgs[i])
+			if boundErasure != "" && targetErasure != "" && boundErasure != targetErasure {
+				return "" // wildcard bound class differs from target arg class -> cast inconvertible
+			}
+		}
+	}
 	return retStr
+}
+
+// wildcardExtendsBoundErasure returns the dotted raw class name of an `? extends` wildcard argument's
+// UPPER bound, or "" for any other form (unbounded `?`, `? super X`, or non-wildcard). Used by the
+// return-cast guards to detect the specific inconvertible-after-capture case: a `? extends ConcreteClass`
+// source whose bound ERASURE differs from the cast target's corresponding argument erasure (e.g.
+// `ImmutableMap<K, ? extends ImmutableCollection<V>>` cast to `ImmutableMap<K, Collection<V>>`:
+// javac captures to ImmutableMap<K,CAP#1> and rejects the cast, whereas the bare read is an unchecked
+// conversion). The `? super X` case is deliberately NOT covered: its lower bound X is unrelated to the
+// cast legality (a `Comparator<? super E>` -> `Comparator<Object>` cast is a LEGAL unchecked conversion
+// that the bare read needs), so reporting it would make the guard over-block and regress those sites.
+func wildcardExtendsBoundErasure(wildcardArg string) string {
+	s := strings.TrimSpace(wildcardArg)
+	if !strings.HasPrefix(s, "?") {
+		return ""
+	}
+	rest := strings.TrimSpace(s[1:])
+	if rest == "" {
+		return "" // unbounded `?`
+	}
+	if strings.HasPrefix(rest, "extends ") {
+		rest = strings.TrimSpace(rest[len("extends "):])
+	} else {
+		return "" // `? super X` or malformed: not an extends bound
+	}
+	return erasureName(rest)
 }
 
 // typeVarFieldStoreCast returns the bare class-scope type variable (e.g. "K") to cast the stored

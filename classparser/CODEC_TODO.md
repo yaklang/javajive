@@ -51,11 +51,14 @@
 1. **泛型擦除缺造型 `Object cannot be converted to T/K/CAP#1`** — **最大杠杆, 跨 jar**。
    - 表象: `incompatible types (assignment/return)` 桶(commons-lang3 / fastjson2 / guava 的主桶)。代表: `Object cannot be converted to LinkedHashTreeMap$Node<K,V>` 一族。
    - 根因: 字节码泛型擦除后取值点静态类型是 `Object`, 未补回源码原有的 `(T)` / `(Node<K,V>)` 向下造型。需沿「接收者参数化类型 + 方法/字段 Signature + 跨类型层级替换」复原精确类型。
-   - 现状: 已治本多块(返回点向下造型、JDK/同类/继承/私有方法实参造型、统一跨类泛型解析器 `ResolveInstantiatedParamType`、擦除型类型变量多余 upcast 抑制、参数化实参/数组实参造型等, 见 §4)。**残余**: 接收者自身泛型未被传播复原成参数化类型、通配符捕获 `CAP#1`(不可命名, 三方均败, 属内在难 case)、装箱数值(非擦除, 不可盲目造型)。
+   - 现状: 已治本多块(返回点向下造型、JDK/同类/继承/私有方法实参造型、统一跨类泛型解析器 `ResolveInstantiatedParamType`、擦除型类型变量多余 upcast 抑制、参数化实参/数组实参造型等, 见 §4)。**残余**:
+     - **接收者自身泛型传播(T1a/d)**: 实验验证与 T1(b) 通配符捕获**深度耦合**, 单点局部泛型传播会因参数化不变型严格性引入回归(guava A/B delta=-1~-2, `Iterator<Entry<CAP#1,CAP#2>> cannot be converted to Iterator<Entry<? extends K,? extends V>>` 一族)。须作为 T1(a)+T1(b) **协同专项**, 不能单点突破。已回退, 留协同专项。
+     - **通配符捕获 `CAP#1`(T1b)**: 三方 oracle 均败, 属内在难。本轮新增**通配符上界擦除窄化**(`wildcardExtendsBoundErasure`): 当字段/返回值的通配符是 `? extends ConcreteClass` 且上界擦除与目标对应参数擦除**不同**时, 不补 inconvertible 造型(改诚实裸 return, 走 unchecked conversion)。全量零回归(guava/spring/fastjson2/commons-lang3 tree errLines 均持平), 渲染更接近 CFR。`? super X` 场景(下界)不 block, 保留原 unchecked 造型。kill-switch `JDEC_TYPEVAR_FIELD_WILDCARD_NOCAST_OFF`。CAP#1 本身仍内在难。
+     - **装箱数值(T1c)**: baseline 全量扫描**无真正原语→包装类错误**(`int cannot be converted to Integer` 等), 唯一 `Long cannot be converted to Integer`(fastjson2 ObjectWriterCreatorASM) 实为 T2 槽位复用混淆, 非 T1(c)。T1(c) 无选靶, 跳过。
 
 2. **活跃区间分裂 / 槽位复用类型混淆 `bad operand type` / `unexpected type` / `int cannot be converted to boolean`** — fastjson2 主要长尾。
    - 表象: 一个字节码 local 槽在**互不相交的活跃区间**里先后承载**不兼容类型**的值, 反编译却合成单一变量名 + 单一声明类型。例: `JSONPathFilter$GroupFilter` 的 `var9` 既作 `Iterator` 又被当 int 比较。
-   - 现状: 已治本多族 disjoint 槽(兄弟臂 LUB 合并、Object 超类臂合并、数组协变父臂合并、布尔字段/返回槽拆分、跨作用域孤儿读全方法重放等, 见 §4)。**残余**: 非布尔子形态的「区间+类型」拆分须动变量定型/分裂核(`JDEC_LIVEINTERVAL_*`), 高风险, 留专项。
+   - 现状: 已治本多族 disjoint 槽(兄弟臂 LUB 合并、Object 超类臂合并、数组协变父臂合并、布尔字段/返回槽拆分、跨作用域孤儿读全方法重放等, 见 §4)。**残余**: 非布尔子形态的「区间+类型」拆分须动变量定型/分裂核(`JDEC_LIVEINTERVAL_*`), 高风险, 留专项。本轮评估: baseline 非布尔槽位混淆仅 ~3 错误(guava `LocalCache$Segment`/`MapMakerInternalMap$Segment` + fastjson2 `ObjectWriterCreatorASM` Long→Integer), 占总 ~95 错误 3%, 而非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
 
 3. **三元 LUB `bad type in conditional expression`** — fastjson2 + guava 若干行。
    - 根因: `cond ? a : b` 两臂最小公共上界算窄, 或三元臂里的泛型擦除(`Optional.of(next())` 缺 `(E)` 等)。
@@ -116,6 +119,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_WILDCARD_FIELD_CAST_OFF` | 通配符参数化字段存储造型(`Class<?>`→`Class<? super T>`) |
 | `JDEC_GENERIC_SUPERWILDCARD_OFF` | `? super E` 消费者实参造型(取下界类型变量作 `(E)`) |
 | `JDEC_SIBLING_DESC_SIG_OFF` | 兄弟类方法签名额外按 descriptor 收键做重载消歧(识出擦除型变形参、抑制有害 `(Comparable)` 造型) |
+| `JDEC_TYPEVAR_FIELD_WILDCARD_NOCAST_OFF` | 类型变量返回 + 字段读: 通配符 `? extends ConcreteClass` 上界擦除与目标对应参数擦除不同时不补 inconvertible 造型(诚实裸 return)。亦作用于 `inheritedFieldReturnCast`。全量零回归, 渲染更接近 CFR |
 
 ### 扁平内部类 / 泛型声明(第 4 类)
 | 开关 | 作用域 |
