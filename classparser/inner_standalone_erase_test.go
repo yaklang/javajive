@@ -25,10 +25,10 @@ import (
 
 var (
 	// 字段/具体返回的独立 K 被擦成 Object。
-	standaloneEraseFieldOnRe   = regexp.MustCompile(`Object key;`)
-	standaloneEraseFieldOffRe  = regexp.MustCompile(`\bK key;`)
-	standaloneErasePeekOnRe    = regexp.MustCompile(`Object peek\(`)
-	standaloneErasePeekOffRe   = regexp.MustCompile(`\bK peek\(`)
+	standaloneEraseFieldOnRe  = regexp.MustCompile(`Object key;`)
+	standaloneEraseFieldOffRe = regexp.MustCompile(`\bK key;`)
+	standaloneErasePeekOnRe   = regexp.MustCompile(`Object peek\(`)
+	standaloneErasePeekOffRe  = regexp.MustCompile(`\bK peek\(`)
 	// 抽象方法参数在两种状态下都保持裸 K, V (SuppressStandaloneErase)。
 	standaloneEraseAbstractRe = regexp.MustCompile(`abstract T out\(K var0, V var1\)`)
 )

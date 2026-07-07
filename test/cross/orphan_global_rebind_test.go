@@ -63,8 +63,8 @@ func TestOrphanGlobalRebindIsLoadBearing(t *testing.T) {
 		return len(parseTreeErrors(out, root))
 	}
 
-	on := treeErrs(false)  // fix ON
-	off := treeErrs(true)  // fix OFF (kill-switch)
+	on := treeErrs(false) // fix ON
+	off := treeErrs(true) // fix OFF (kill-switch)
 	t.Logf("fastjson2 tree error lines: ON=%d OFF=%d", on, off)
 
 	if off <= on {
