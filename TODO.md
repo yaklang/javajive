@@ -66,9 +66,12 @@ cat /tmp/jdec-inv/guava.tree.fails.txt
 ### T1. 泛型擦除缺造型 `Object cannot be converted to T/K/CAP#1`(`incompatible types` 桶, 跨 jar 头号来源)
 - 已治本多块(返回点向下造型 / JDK·同类·继承·私有方法实参造型 / 统一跨类泛型解析器 / 擦除型类型变量多余 upcast 抑制 / 参数化实参·数组实参造型等, 见 CODEC_TODO §4)。**剩余按根因分**:
   - **(a) 接收者自身泛型未被传播复原成参数化类型**: 接收者是本类型局部变量/字段而非 `this`(`this.box.put(o)`, box=`Box<E>`)时, 其泛型未沿声明传播复原, 取值点仍是 Object。业界 CFR/Vineflower 亦有此长尾。
+    - **本轮实验**: 尝试在 `astore` 点对首声明局部(`Iterator it = map.entrySet().iterator()`)用 `ResolveInstantiatedReturnType` 复原参数化返回定型(`upgradeLocalParamType`), 并扩 `InstantiateJDKMethodReturn` 覆盖 `Map.entrySet/keySet/values`。**回归**: guava A/B delta=-1~-2(ON=28~41 vs OFF=27), 新增 `Iterator<Entry<CAP#1,CAP#2>> cannot be converted to Iterator<Entry<? extends K,? extends V>>` 一族——参数化后不变型严格性反比 raw 更严。**结论**: T1(a) 与 T1(b) 通配符捕获**深度耦合**, 单点局部泛型传播不可行, 须 T1(a)+T1(b) **协同专项**(通配符接收者整体 raw 造型 + 局部泛型传播联动)。已回退, 留协同专项。
   - **(b) 通配符捕获 `CAP#1`(guava)** —— **oracle 实证内在难, 优先级下调**: `this.equivalence.equivalent(a,b)`, 字段 `Equivalence<? super T>` 捕获 `CAP#1`, 实参 Object 不可造 `(CAP#1)`。`ORACLE_JAR=guava ORACLE_CLASS='base/Equivalence$Wrapper'` 三方全败(真源码用 `(Equivalence<Object>)` + `@SuppressWarnings`)。方向(若做): 通配符接收者**整体** `<Object>` 造型。
+    - **本轮增量**: 新增**通配符上界擦除窄化**(`wildcardExtendsBoundErasure`, kill-switch `JDEC_TYPEVAR_FIELD_WILDCARD_NOCAST_OFF`)——当字段/返回值的通配符是 `? extends ConcreteClass` 且上界擦除与目标对应参数擦除**不同**时(guava `ImmutableMultimap.asMap`: 字段 `ImmutableMap<K, ? extends ImmutableCollection<V>>` → 返回 `ImmutableMap<K, Collection<V>>`), 不补 inconvertible 造型, 改诚实裸 `return this.map`(走 unchecked conversion)。全量零回归(guava/spring/fastjson2/commons-lang3 tree errLines 均持平 27/31/25/12), 渲染更接近 CFR。`? super X` 场景(如 `Comparator<? super E>`→`Comparator<Object>`)不 block, 保留原 unchecked 造型。CAP#1 本身仍内在难(三方 oracle 均败)。
   - **(d) 返回点「inference variable X has incompatible bounds」(guava 头号桶, ~13 行: ImmutableEnumMap/Range/Maps/Ordering/Striped/Sets$DescendingSet/MinMaxPriorityQueue$Builder/Tables$TransposeTable 等)** —— **有界类型变量同擦除强转 javac 实测拒绝, 不可用 `parameterizedReturnCast` 治**: 形如 `return ImmutableMap.of(k.getKey(), k.getValue());`(目标 `ImmutableMap<K,V>`、K/V 或 `C extends Comparable` 有界), javac 对 `of()` 独立推断出 `<Object,Object>` 后再与目标合流报「incompatible bounds」。实测 `(ImmutableMap<K,V>)(ImmutableMap<Object,Object>)` **当目标实参有界(K extends Enum / C extends Comparable)时 javac 直接报「不兼容的类型…无法转换」**(见 `parameterizedReturnCast` 注释里「BOUNDED var 被排除」的原因)。真源码用 `@SuppressWarnings` + 不同结构强转, 从擦除字节码无法忠实复原。**根因仍是 (a): 局部变量/字段(如 raw `Map.Entry var1`)的泛型未沿声明传播复原**——只要把 `var1` 复原为 `Map.Entry<K,V>`, `getKey()/getValue()` 即回到 K/V, 无需强转。故此桶归 (a) 的局部/字段泛型传播, 不要再尝试返回点强转。
   - **(c) 装箱/数值**: `int cannot be converted to Integer` 等(**非擦除, 不可盲目造型**), 按 `Integer.valueOf` 修。
+    - **本轮评估**: baseline 全量扫描(guava/spring/fastjson2/commons-lang3)**无真正原语→包装类错误**(`int cannot be converted to Integer` 等均不存在)。唯一 `Long cannot be converted to Integer`(fastjson2 ObjectWriterCreatorASM:2381) 实为 T2 槽位复用混淆(var11 槽位先存 Integer 后存 Long), 非 T1(c)。**T1(c) 当前无选靶, 跳过**。
 - 复现:
   ```bash
   go build -o /tmp/jj ./cmd/javajive
@@ -79,6 +82,7 @@ cat /tmp/jdec-inv/guava.tree.fails.txt
 ### T2. 活跃区间分裂 / 槽位复用类型混淆(fastjson2 `bad operand type` / `unexpected type` 一族)
 - 表象: 一个字节码 local 槽在**互不相交的活跃区间**里先后承载**不兼容类型**的值(如 `JSONPathFilter$GroupFilter` 的 `var9` 既作 `Iterator` 又当 int 比较), 反编译却合成单一变量名 + 单一声明类型。
 - 已治本多族 disjoint 槽(兄弟臂 LUB 合并 / Object 超类臂 / 数组协变父臂 / 布尔字段·返回槽拆分 / 跨作用域孤儿读重放, 见 CODEC_TODO §4)。**残余**: 非布尔子形态须在变量定型/分裂核(`JDEC_LIVEINTERVAL_*`)上按「区间+类型」更激进拆分同槽, 风险高、改动核心, 留专项。
+  - **本轮评估**: baseline 非布尔槽位混淆仅 ~3 错误(guava `LocalCache$Segment:72` Object→V、`MapMakerInternalMap$Segment:315` InternalEntry→E、fastjson2 `ObjectWriterCreatorASM:2381` Long→Integer), 占总 ~95 错误 ~3%。非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
 - 复现: `ORACLE_JAR=fastjson2 ORACLE_CLASS=JSONPathFilter go test -run TestThirdPartyOracle -v ./test/cross/`
 
 ## P1
