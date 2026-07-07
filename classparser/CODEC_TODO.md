@@ -32,10 +32,10 @@
 | **commons-lang3** 3.12.0 | 345 | 8 | 11 | 0 | 泛型擦除长尾 |
 | **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
 | **snakeyaml** 2.2 | 231 | 1 | 1 | 0 | definite-assignment 单点 |
-| **spring-core** 5.3.27 | 978 | 29 | 55 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
-| **fastjson2** 2.0.43 | 681 | 15 | 32 | 0 | 泛型擦除 + 槽位复用长尾 |
-| **guava** 28.2-android | 1892 | 20 | 28 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **76** | **134** | **0** | 类级干净率 **96.6%**(2176/2252) |
+| **spring-core** 5.3.27 | 978 | 16 | 25 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
+| **fastjson2** 2.0.43 | 681 | 14 | 22 | 0 | 泛型擦除 + 槽位复用长尾 |
+| **guava** 28.2-android | 1892 | 23 | 27 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
+| **合计** | | **63** | **87** | **0** | 类级干净率 **98.6%**(4424/4487 摊平单元) |
 
 **codec 与 gson 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go`):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。
@@ -58,7 +58,7 @@
 
 2. **活跃区间分裂 / 槽位复用类型混淆 `bad operand type` / `unexpected type` / `int cannot be converted to boolean`** — fastjson2 主要长尾。
    - 表象: 一个字节码 local 槽在**互不相交的活跃区间**里先后承载**不兼容类型**的值, 反编译却合成单一变量名 + 单一声明类型。例: `JSONPathFilter$GroupFilter` 的 `var9` 既作 `Iterator` 又被当 int 比较。
-   - 现状: 已治本多族 disjoint 槽(兄弟臂 LUB 合并、Object 超类臂合并、数组协变父臂合并、布尔字段/返回槽拆分、跨作用域孤儿读全方法重放等, 见 §4)。**残余**: 非布尔子形态的「区间+类型」拆分须动变量定型/分裂核(`JDEC_LIVEINTERVAL_*`), 高风险, 留专项。本轮评估: baseline 非布尔槽位混淆仅 ~3 错误(guava `LocalCache$Segment`/`MapMakerInternalMap$Segment` + fastjson2 `ObjectWriterCreatorASM` Long→Integer), 占总 ~95 错误 3%, 而非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
+   - 现状: 已治本多族 disjoint 槽(兄弟臂 LUB 合并、Object 超类臂合并、数组协变父臂合并、布尔字段/返回槽拆分、跨作用域孤儿读全方法重放等, 见 §4)。**本轮新增**: 活跃区间 web 读/写重定向修复翻成默认开(`JDEC_LIVEINTERVAL_WEB_OFF`, 见 §4)——重测当前 8-jar tree 口径是严格改进, fastjson2 tree 24→22(`ObjectReaderCreator` 3→2、`JSONPathParser` 2→1), 其余 jar 全持平, delta≥0。**残余**: 非布尔子形态的「区间+类型」拆分仍须动变量定型/分裂核, 高风险, 留专项。baseline 非布尔槽位混淆仅 ~3 错误(guava `LocalCache$Segment`/`MapMakerInternalMap$Segment` + fastjson2 `ObjectWriterCreatorASM` Long→Integer), 占总 ~87 错误 3%, 而非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
 
 3. **三元 LUB `bad type in conditional expression`** — fastjson2 + guava 若干行。
    - 根因: `cond ? a : b` 两臂最小公共上界算窄, 或三元臂里的泛型擦除(`Optional.of(next())` 缺 `(E)` 等)。
@@ -142,7 +142,8 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_ORPHAN_GLOBAL_REBIND_OFF` | 跨作用域孤儿读全方法唯一重放(补绑落在兄弟作用域的孤儿读) |
 | `JDEC_NULLINIT_NARROW_OFF` | 孤儿/Object 生成局部按 AST reassignment 类型恢复声明类型 |
 | `JDEC_COVER_UNDECLARED_OFF` | 同槽拆出的同名 `varN` 无声明时的名字作用域覆盖安全网 |
-| `JDEC_LIVEINTERVAL_OFF` / `JDEC_LIVEINTERVAL_WEB` | 活跃区间声明摆放 / web 复用 |
+| `JDEC_LIVEINTERVAL_OFF` | 活跃区间声明摆放总闸(置位即同时关闭 web 分析与所有 web 驱动修复, 不可与下方 WEB_OFF 混用) |
+| `JDEC_LIVEINTERVAL_WEB_OFF` | web 读/写重定向修复(`reachingSlotVersionByWeb` / `reachingSlotStoreContinuationByWeb`): 用到达定义 web 把「经 web 证明属同一源变量(同 VarUid)」的 load/store 重定向到该 web 规范 ref, 修正 DFS 序把后到/不相交分支版本漏进槽位表导致的读错变量。历史上 opt-in(默认关)注释称 iso delta +0、tree 略负; 重测当前 8-jar tree 口径是严格改进(fastjson2 24→22 ObjectReaderCreator/JSONPathParser, 其余 jar 全持平, delta≥0), 翻成默认开。仅合流 web 内的同变量定义; 不相交活跃区间(try-with-resources `primaryExc`)落不同 web 不动 |
 
 ### 三元 / 类型 LUB(第 3 类)
 | 开关 | 作用域 |
@@ -161,7 +162,8 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_LAMBDA_PARAM_SCOPE_OFF` | 嵌套 lambda 形参按嵌套深度命名(`l<depth>_<i>`), 避免内层 `l0` 遮蔽外层 `l0`(javac「variable l0 is already defined」); 顶层 lambda 仍 `l<i>` 保持字节一致。修 spring MergedAnnotationPredicates/DataBufferUtils 等 |
 | `JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF` | try/finally(或 synchronized)处理器栈值无法绑定到真实局部时渲染出的裸 `varN = Exception;`(ANTLR 语法网放行、javac 报「cannot find symbol」)提升为完整降级触发器: 该方法先激进重试, 失败则降级为诚实可编译 stub, 不再泄漏坏代码。修 guava Monitor.enterWhen/enterWhenUninterruptibly、InetAddresses(guava tree -3 行, 缺陷类 22→20) |
 | `JDEC_NO_EMBED_ASSIGN_INT` | 缺声明安全网识别「条件内嵌赋值」目标为 int 的正则放宽到容忍一层 `()`, 使 `while ((c = this.read()) != -1)` / `(c = in.read()) < n` 这类 InputStream 抽水循环的 RHS(方法调用)被认出: 之前跨不过 `read()` 的括号, 回退成 `Object c = null` 导致 `bad operand types for '!='/'<'`。int 判定安全性不变(关系运算恒为数值; 相等式仍要求数值字面量右操作数)。修 spring-core UpdateMessageDigestInputStream(spring tree -1 行, 缺陷类 39→38) |
-| `JDEC_LAMBDA_RAWRECV_CAST_OFF` | raw 接收者擦除 SAM 的方法调用侧实参造型(`(Consumer<FieldReader>)`) |
+| `JDEC_LAMBDA_RAWRECV_CAST_OFF` | jar 内 RAW 泛型接收者擦除 SAM 的方法调用侧**lambda 体**实参造型(`(Consumer<FieldReader>)`)。**方法引用(`Type::m`/`receiver::m`/`Type::new`)跳过**: 它原生可绑到 raw SAM(无显式形参可冲突), 造型反而在 SAM 嵌套通配符处(`Stream.flatMap` 的 `Function<? super T,? extends Stream<? extends R>>`)钉死具体参数化、挫败 javac 多态推断。判定靠 `CustomValue.IsMethodRef`(bootstrap 方法引用分支置位) |
+| `JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF` | 同上 JDK 接收者伴生(`Stream`/`Optional` 的 RAW 接收者): `.map((l0) -> ...)` 显式类型 lambda 须补 `(Function<X,Object>)` 才绑到擦除 SAM; 方法引用同样跳过。修 fastjson2 `JSONPathSegment$CycleNameSegment$MapRecursive`。本轮方法引用跳过分支清掉 fastjson2 `ObjectReaderCreator.toFieldReaderArray` `flatMap(Collection::stream)`(fastjson2 tree -1) 与 spring `AnnotatedTypeMetadata` `collect(Collector<...>)`(spring tree -3) |
 | `JDEC_CTOR_METHODREF_FIX_OFF` | 构造器方法引用 `::new` 渲染(修 `::new_`) |
 | `JDEC_CTOR_DIAMOND_OFF` | 泛型类 `new` 带方法引用/lambda 实参时补菱形 `<>` |
 | `JDEC_METHODREF_INSTANTIATED_TYPE_OFF` | 方法引用值类型从 invokedynamic instantiatedMethodType 上行为参数化 functional interface |

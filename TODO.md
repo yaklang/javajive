@@ -7,18 +7,17 @@
 > **口径**: 全部以 **tree(整树重编译)** 为准 —— 这是「反编译→重编译→重打包→可调用」的真口径。
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
-> 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 25/14 · guava 27/23 · commons-lang3 11/8 · spring 31/19。（合计 96）
-> (本轮修: `AtomicReference<V>` 的 V 形参方法实参补造型(`jdkMethodParamTypeArgIndex` 增 AtomicReference 分支, `JDEC_ATOMIC_REF_PARAM_OFF`)—— 字段 `AtomicReference<T> reference` 的 `get()` 被读进 Object 局部,
-> 再回传给 `compareAndSet(V,V)`/`getAndSet(V)`/`set(V)`(descriptor 擦成 `compareAndSet/set(Object,Object)`)时,
-> 裸 Object 实参被 javac 按 `AtomicReference<V>.compareAndSet(V,V)` 定型判「Object cannot be converted to T」。
-> 修法: 仿 `jdkMapFamily`/`jdkListFamily` 形参映射族, 在 JDK 形参类型实参索引表补 `AtomicReference` 分支(V 是唯一类型实参,
-> 全部 V 形参位映射到 0): `compareAndSet/weakCompareAndSet(V,V)` argc==2 两形参、`getAndSet/set/lazySet(V)` argc==1 形参 0、
-> `getAndAccumulate/accumulateAndGet(V, BinaryOperator<V>)` argc==2 仅形参 0(V), 形参 1 是 operator 不动。
-> `instantiatedParamType` 把 V 形参解析成接收者 T 后, 既有 arg-cast 路径重下 `(T)` unchecked 造型(字节码里该值已流入 V 槽, 保义)。
-> 限 `ntype==1`(裸/非通配参数化 `AtomicReference<V>`), 既有通配符早退(`AtomicReference<?>`)不受影响。承重测试
-> `atomic_ref_vparam_test.go`(AtomicRefVParamSeed) + A/B 交叉 `atomic_ref_vparam_cast_test.go`(commons-lang3 AtomicInitializer)。
-> 治 commons-lang3 AtomicInitializer 1 条, commons-lang3 12→11、缺陷类 9→8, 合计 97→96, 零回归。)
+> 数字快照(javac 17 Corretto, 本机 `~/.m2`; tree errLines / 缺陷类, 复跑见下方命令):
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 22/14 · guava 27/23 · commons-lang3 11/8 · spring 25/16。（合计 87）
+> (本轮修两块, 均零回归、A/B delta≥0:
+> ① 方法引用不补函数式接口造型——`Type::m`/`receiver::m`/`Type::new` 原生可绑到 raw SAM(无显式形参可冲突),
+> 造型反而在 SAM 嵌套通配符处(`Stream.flatMap` 的 `Function<? super T,? extends Stream<? extends R>>`)钉死具体参数化、
+> 挫败 javac 多态推断。靠 `CustomValue.IsMethodRef`(bootstrap 方法引用分支置位)在
+> `lambdaArgFunctionalCast`/`lambdaArgRawJDKReceiverCast` 跳过方法引用。修 fastjson2 `ObjectReaderCreator.toFieldReaderArray`
+> `flatMap(Collection::stream)`(fastjson2 tree -1)、spring `AnnotatedTypeMetadata` `collect(Collector<...>)`(spring tree -3)。
+> ② 活跃区间 web 读/写重定向修复翻成默认开(`JDEC_LIVEINTERVAL_WEB_OFF`)——重测 8-jar tree 口径是严格改进,
+> fastjson2 24→22(`ObjectReaderCreator` 3→2、`JSONPathParser` 2→1), 其余 jar 全持平。
+> 合计本轮 25→22 / 缺陷类持平。)
 > (本轮调查 jsoup/snakeyaml 清零未果, 记录潜伏链供后续: ① jsoup `XmlTreeBuilder.insert(Token$Comment)` 的「`Comment var3 = var2; ...;
 > var3 = new XmlDeclaration();` 首声明窄化致兄弟再赋失败(`XmlDeclaration cannot be converted to Comment`)」**单点可修**——
 > 跨类兄弟臂合并已把 slot ref 扩宽到 LUB(Node), 但首声明 RHS 仍是窄臂类型 Comment; 修法: 在 AssignStatement 首声明处见 ref 被合并 helper
@@ -99,8 +98,8 @@ cat /tmp/jdec-inv/guava.tree.fails.txt
 
 ### T2. 活跃区间分裂 / 槽位复用类型混淆(fastjson2 `bad operand type` / `unexpected type` 一族)
 - 表象: 一个字节码 local 槽在**互不相交的活跃区间**里先后承载**不兼容类型**的值(如 `JSONPathFilter$GroupFilter` 的 `var9` 既作 `Iterator` 又当 int 比较), 反编译却合成单一变量名 + 单一声明类型。
-- 已治本多族 disjoint 槽(兄弟臂 LUB 合并 / Object 超类臂 / 数组协变父臂 / 布尔字段·返回槽拆分 / 跨作用域孤儿读重放, 见 CODEC_TODO §4)。**残余**: 非布尔子形态须在变量定型/分裂核(`JDEC_LIVEINTERVAL_*`)上按「区间+类型」更激进拆分同槽, 风险高、改动核心, 留专项。
-  - **本轮评估**: baseline 非布尔槽位混淆仅 ~3 错误(guava `LocalCache$Segment:72` Object→V、`MapMakerInternalMap$Segment:315` InternalEntry→E、fastjson2 `ObjectWriterCreatorASM:2381` Long→Integer), 占总 ~95 错误 ~3%。非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
+- 已治本多族 disjoint 槽(兄弟臂 LUB 合并 / Object 超类臂 / 数组协变父臂 / 布尔字段·返回槽拆分 / 跨作用域孤儿读重放, 见 CODEC_TODO §4)。**本轮新增**: 活跃区间 web 读/写重定向(`reachingSlotVersionByWeb`/`reachingSlotStoreContinuationByWeb`)翻成默认开(`JDEC_LIVEINTERVAL_WEB_OFF`), 把 DFS 序漏进槽位表的「同源变量(同 VarUid)」load/store 重定向到该 web 规范 ref。A/B 全 8-jar delta≥0, fastjson2 tree 24→22(`ObjectReaderCreator` 3→2、`JSONPathParser` 2→1), 其余 jar 持平。**残余**: 非布尔子形态须在变量定型/分裂核上按「区间+类型」更激进拆分同槽, 风险高、改动核心, 留专项。
+  - **本轮评估**: baseline 非布尔槽位混淆仅 ~3 错误(guava `LocalCache$Segment:72` Object→V、`MapMakerInternalMap$Segment:315` InternalEntry→E、fastjson2 `ObjectWriterCreatorASM:2381` Long→Integer), 占总 ~87 错误 ~3%。非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
 - 复现: `ORACLE_JAR=fastjson2 ORACLE_CLASS=JSONPathFilter go test -run TestThirdPartyOracle -v ./test/cross/`
 
 ## P1
