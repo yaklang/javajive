@@ -80,9 +80,31 @@
 
 8. **其余小桶**: `method invocation cannot be applied`(重载消歧 + 通配符)、`invalid method reference`(构造器实参位 SAM 目标)、`abstract method not overridden`(桥接可见性)、`incompatible parameter types in lambda`(形参被用作具体类型 + raw 接收者)等, 逐类按 [`HARNESS.md`](../HARNESS.md) 流程清零。
 
+### 8a. fastjson2 剩余 19 条 tree errLines 的逐条根因(整体治本用, 非单点护栏)
+
+> 下列每条均已用 `javap -p -c -v` + 上游源码取到字节码真相 + 源码对照, 定位到反编译器核心的具体缺陷点。**这 19 条同属一个紧耦合核心族(slot-typing/split/merge/phi/LUB/reaching-def/receiver-binding), 须整体重构同时重新平衡既有 bool-handler 族 + AssignVarGuarded + ternaryDeclLUB + reachingSlotVersionGeneral, 不能单点护栏**(本轮 6 次单点尝试实测回归 56/74/8 或不触发, 已回退)。
+
+| # | 类:行 | 错误 | 字节码真相 + 根因 | 治本方向(整体) |
+|---|---|---|---|---|
+| 1-5 | JDKUtils:304,318,318,324,333 | cannot find symbol + MethodHandle/Throwable/Boolean/Predicate 多型混淆 | `<clinit>` 大量 `try{X=init();}catch(Throwable t){err=t;}` 块; catch 参数槽位与值变量槽位复用(var20_1 Boolean/var21_1 Throwable/var22_1 MethodHandle 合流); 另有 `dup;astore` 合成临时渲染成裸 `var31=Class.class` 未声明 | 活跃区间按「区间+类型」更激进拆同槽(catch 槽 vs 值槽); `dup;astore` 临时 elide 或声明 |
+| 6-8 | CycleNameSegment:172,195,196 | 三元 LUB + Boolean→Collection | slot 6/8 跨 switch-case 多类型(JSONObject/JSONArray/ObjectReader/List/Map/Boolean); 172 三元两臂 List+Map<String,Object> LUB=Object 但 commonSuperType 返回 nil(不 widen-to-Object); 195/196 var6(Boolean)误用于 Collection 上下文(同槽拆分定型错) | 三元 widen-to-Object(仅两臂引用且无更具体公共祖先); switch-case 跨 case 槽位定型统一 |
+| 9-10 | JSONPathSegmentName:294,301 | cannot find symbol | `aload 5`(接收者 JSONArray)渲染成 `var8`(slot 8 的值); 接收者解析绑错——FunctionCallExpression 构建期接收者(栈顶下)绑到了参数变量 | 接收者解析修复(invokeinterface 接收者 = 栈顶下, 须与参数区分) |
+| 11 | FieldWriterList:325 | boolean→int | slot 11 `var11`(应 boolean)定型 int; 根因 iload 把 boolean 局部当 int 读, 且同槽有 `isRefDetect()` Z-返回存储(boolean)——拆分时定型核把 var6(=previousItemRefDetect, 源 boolean, 编成 iconst_1/0)定型 int | LVT 原始类型定型(整体启用 + rebalance bool 族) 或 boolean 槽位定型识别 iconst_1/0 来自比较分支 |
+| 12 | ObjectWriterImplList:341 | boolean→int | 同 #11, 完全同形 | 同 #11 |
+| 13 | JSON:82 | Object→JSONObject | slot 6 持 JSONObject/JSONArray/ObjectReader/Object(兄弟分裂); `var6=var5`(Object→JSONObject)失败; AssignVarGuarded 应 widen 到 Object 但返回 nil(兄弟 LUB=Object, commonSuperType 不 widen-to-Object) | 返回槽位 sibling-LUB 合并到 Object(仅同槽多兄弟类型 + 返回 Object 上下文) |
+| 14 | JSONFactory:325 | Throwable→Function | catch 槽 Throwable 与值变量 Function 复用(同 JDKUtils 族) | 同 #1-5(catch 槽 vs 值槽拆分) |
+| 15 | JSONPathParser:664 | Long→Integer | slot 10 拆 Long+BigInteger(兄弟)而非保 LUB Number; `var10 instanceof Integer` 对 Long 型变量报错(inconvertible) | sibling-arm LUB 合并(hierarchy.go Number 族已在 jdkSuperEdges, 但 switch-case 拆分不接入) |
+| 16 | ObjectReaderImplList:782 | Collection→ArrayList | slot 14 拆 ArrayList+Object; `var14=var9_1`(Collection→ArrayList)失败 | 同 #13(返回/合并槽位 LUB 合并) |
+| 17 | TypeUtils:4951 | Class[]→Field | catch 槽 Throwable 与值变量 Field/Class[] 复用 | 同 #1-5 |
+| 18 | ObjectReaderBaseModule:793 | cannot find symbol | `getFieldInfo(Constructor)`: slot 7 持 null-init Annotation[](var7)被 Constructor 存储(var8_1, offset 48)覆盖; aload 7(offset 60, `getParameters()`)绑到 var7(Annotation[])而非覆盖的 var8_1(Constructor)——try/catch DFS 槽位表损坏, reaching-def 修复未覆盖 try/catch 形 | try/catch 路径 reaching-def: aload 的槽位 ref 被后到/不相交分支版本污染时, 重绑到唯一到达的具体存储(read-side, 区别于 store-side widen) |
+| 19 | ObjectWriterCreatorASM:2380 | Long→Integer | slot 拆 Long+Integer(同槽复用混淆, 非 T1c 装箱) | 同 #1-5/活跃区间分裂 |
+
+> **整体治本前提**: 上述 19 条的治本相互耦合——例如 LVT 定型(治 #11/#12)会冲击既有 bool-handler 族(reachingBoolDefaultMerge 等依赖 iconst_1/0 当 int 的契约); 三元 widen-to-Object(治 #6/#13/#15/#16)会冲击 AssignVarGuarded 的 mint-vs-reuse 决策; catch 槽拆分(治 #1-5/#14/#17/#19)会冲击 reachingSlotVersionGeneral 的 reaching-def 计算。**必须整体重构 + 全量 A/B delta≥0 + 承重种子 + syntax=0 硬断言**, 单点护栏已被 6 次实测证明不可行(回归 56/74/8 或不触发)。本轮已落地 4 项**零回归**造型族修复(fastjson2 25→19, 见 §4 的 JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF/JDEC_LIVEINTERVAL_WEB_OFF/JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF/JDEC_CTOR_RAWFI_METHODREF_CAST_OFF), 是单点安全上限; 剩余 19 条留给整体核心重构专项。
+
 ---
 
 ## 3. iso 口径的已知假阳性(**不是缺陷**, 不要去"修")
+
 
 iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(重打包)口径下不存在:
 
