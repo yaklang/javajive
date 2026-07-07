@@ -1,0 +1,8 @@
+# Lambda-body return type-variable cast (JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF): a generic method
+# returning Supplier<T> / Function<T,R> whose lambda body returns an erased Object (raw-receiver or
+# Object-returning call) lost the source's unchecked `return (T)/(R) expr;` cast. javac rejects the
+# bare body ("bad return type in lambda expression: Object cannot be converted to T"). The cast target
+# is the type variable recovered from the enclosing method's Signature return type. Real hit: fastjson2
+# ObjectReaderProvider.createObjectCreator + ObjectReaderCreator.createBuildFunctionLambda.
++return (T) (
++return (R) (
