@@ -8,8 +8,8 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 17 Corretto, 本机 `~/.m2`; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 22/14 · guava 27/23 · commons-lang3 11/8 · spring 25/16。（合计 87）
-> (本轮修两块, 均零回归、A/B delta≥0:
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 20/13 · guava 27/23 · commons-lang3 11/8 · spring 25/16。（合计 85）
+> (本轮修三块, 均零回归、A/B delta≥0:
 > ① 方法引用不补函数式接口造型——`Type::m`/`receiver::m`/`Type::new` 原生可绑到 raw SAM(无显式形参可冲突),
 > 造型反而在 SAM 嵌套通配符处(`Stream.flatMap` 的 `Function<? super T,? extends Stream<? extends R>>`)钉死具体参数化、
 > 挫败 javac 多态推断。靠 `CustomValue.IsMethodRef`(bootstrap 方法引用分支置位)在
@@ -17,7 +17,11 @@
 > `flatMap(Collection::stream)`(fastjson2 tree -1)、spring `AnnotatedTypeMetadata` `collect(Collector<...>)`(spring tree -3)。
 > ② 活跃区间 web 读/写重定向修复翻成默认开(`JDEC_LIVEINTERVAL_WEB_OFF`)——重测 8-jar tree 口径是严格改进,
 > fastjson2 24→22(`ObjectReaderCreator` 3→2、`JSONPathParser` 2→1), 其余 jar 全持平。
-> 合计本轮 25→22 / 缺陷类持平。)
+> ③ 泛型方法返回 `Supplier<T>`/`Function<T,R>` 的 lambda 体返回擦除 Object, 丢源码 unchecked `return (T)/(R) expr;` 造型,
+> javac 拒「bad return type in lambda expression」。从 enclosing 方法 Signature 返回类型取该 FI 返回位类型变量,
+> 注入 lambda 体值返回处(`JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF`)。修 fastjson2 `ObjectReaderProvider.createObjectCreator`
+> `() -> (T) objectReader.createInstance(0)` + `ObjectReaderCreator.createBuildFunctionLambda` `(l0) -> (R) m.invoke(...)`(fastjson2 tree -2)。
+> 合计本轮 25→20 / 缺陷类 14→13。)
 > (本轮调查 jsoup/snakeyaml 清零未果, 记录潜伏链供后续: ① jsoup `XmlTreeBuilder.insert(Token$Comment)` 的「`Comment var3 = var2; ...;
 > var3 = new XmlDeclaration();` 首声明窄化致兄弟再赋失败(`XmlDeclaration cannot be converted to Comment`)」**单点可修**——
 > 跨类兄弟臂合并已把 slot ref 扩宽到 LUB(Node), 但首声明 RHS 仍是窄臂类型 Comment; 修法: 在 AssignStatement 首声明处见 ref 被合并 helper

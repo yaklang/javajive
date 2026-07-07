@@ -33,9 +33,9 @@
 | **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
 | **snakeyaml** 2.2 | 231 | 1 | 1 | 0 | definite-assignment 单点 |
 | **spring-core** 5.3.27 | 978 | 16 | 25 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
-| **fastjson2** 2.0.43 | 681 | 14 | 22 | 0 | 泛型擦除 + 槽位复用长尾 |
+| **fastjson2** 2.0.43 | 681 | 13 | 20 | 0 | 泛型擦除 + 槽位复用长尾 |
 | **guava** 28.2-android | 1892 | 23 | 27 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **63** | **87** | **0** | 类级干净率 **98.6%**(4424/4487 摊平单元) |
+| **合计** | | **62** | **85** | **0** | 类级干净率 **98.6%**(4425/4487 摊平单元) |
 
 **codec 与 gson 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go`):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。
@@ -166,6 +166,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF` | 同上 JDK 接收者伴生(`Stream`/`Optional` 的 RAW 接收者): `.map((l0) -> ...)` 显式类型 lambda 须补 `(Function<X,Object>)` 才绑到擦除 SAM; 方法引用同样跳过。修 fastjson2 `JSONPathSegment$CycleNameSegment$MapRecursive`。本轮方法引用跳过分支清掉 fastjson2 `ObjectReaderCreator.toFieldReaderArray` `flatMap(Collection::stream)`(fastjson2 tree -1) 与 spring `AnnotatedTypeMetadata` `collect(Collector<...>)`(spring tree -3) |
 | `JDEC_CTOR_METHODREF_FIX_OFF` | 构造器方法引用 `::new` 渲染(修 `::new_`) |
 | `JDEC_CTOR_DIAMOND_OFF` | 泛型类 `new` 带方法引用/lambda 实参时补菱形 `<>` |
+| `JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF` | 泛型方法返回 `Supplier<T>`/`Function<T,R>`/`BiFunction<..>` 的 lambda 体, 经 raw 接收者或 Object 返回调用取到擦除 Object 值, 丢源码的 unchecked `return (T)/(R) expr;` 造型, javac 拒「bad return type in lambda expression: Object cannot be converted to T」。修法: 从 enclosing 方法 Signature 的返回类型取该 FI 返回位类型变量, 注入 lambda 体值返回处。仅 instantiatedMethodType 返回为 Object 且 enclosing 方法返回位确为类型变量时触发。修 fastjson2 `ObjectReaderProvider.createObjectCreator` `() -> (T) objectReader.createInstance(0)` + `ObjectReaderCreator.createBuildFunctionLambda` `(l0) -> (R) m.invoke(...)`(fastjson2 tree -2)。CFR 亦丢此造型, 三方同败 |
 | `JDEC_METHODREF_INSTANTIATED_TYPE_OFF` | 方法引用值类型从 invokedynamic instantiatedMethodType 上行为参数化 functional interface |
 | `JDEC_DOPRIVILEGED_LAMBDA_CAST_OFF` | 传给 `AccessController.doPrivileged` 的 lambda 补 `(PrivilegedAction)` 造型消歧 |
 | `JDEC_BOOL_TO_INT_COERCE_OFF` | 内在布尔值赋 int 缺 `? 1 : 0` 造型 |
