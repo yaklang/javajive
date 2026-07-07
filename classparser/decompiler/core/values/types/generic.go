@@ -374,6 +374,36 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	if (method == "set" || method == "add") && argc == 2 && ntype == 1 && paramIndex == 1 && jdkListFamily[rawClass] && os.Getenv("JDEC_LIST_SET_PARAM_OFF") == "" {
 		return 0
 	}
+	// AtomicReference<V>: the V-typed value-parameter methods whose descriptor erases V to Object. The
+	// canonical case is `compareAndSet(V, V)` / `weakCompareAndSet(V, V)` (argc 2, both params V) and
+	// `getAndSet(V)` / `set(V)` / `lazySet(V)` (argc 1, param 0 V); the accumulator pair
+	// `getAndAccumulate(V, BinaryOperator<V>)` / `accumulateAndGet(V, BinaryOperator<V>)` carry V only at
+	// param 0 (param 1 is the operator). An Object-typed argument (a `reference.get()` read typed Object)
+	// flows in without the source's `(V)` cast and javac -- re-resolving against the generic signature --
+	// rejects it ("Object cannot be converted to T"; commons-lang3 AtomicInitializer<T>
+	// `this.reference.compareAndSet(null, var1)` where reference is `AtomicReference<T>`). V is the sole
+	// type arg, so all qualifying params map to 0. Restricted to ntype==1 (a bare or
+	// non-wildcard-parameterized AtomicReference<V>); the existing wildcard gate in
+	// InstantiateJDKMethodParam already returns nil for `AtomicReference<?>`. Kill-switch
+	// JDEC_ATOMIC_REF_PARAM_OFF.
+	if rawClass == "java.util.concurrent.atomic.AtomicReference" && ntype == 1 &&
+		os.Getenv("JDEC_ATOMIC_REF_PARAM_OFF") == "" {
+		switch method {
+		case "compareAndSet", "weakCompareAndSet", "weakCompareAndSetPlain":
+			if argc == 2 && (paramIndex == 0 || paramIndex == 1) {
+				return 0
+			}
+		case "getAndSet", "set", "lazySet":
+			if argc == 1 && paramIndex == 0 {
+				return 0
+			}
+		case "getAndAccumulate", "accumulateAndGet":
+			// (V, BinaryOperator<V>): only the leading V param is the receiver's type arg.
+			if argc == 2 && paramIndex == 0 {
+				return 0
+			}
+		}
+	}
 	return -1
 }
 

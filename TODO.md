@@ -8,8 +8,26 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 25/14 · guava 27/23 · commons-lang3 12/9 · spring 31/19。（合计 97）
-> (本轮修: 方法形参自由类型变量注入(dumper.go 扁平内部类 enclosing-arity 注入块增方法形参扫描,
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 25/14 · guava 27/23 · commons-lang3 11/8 · spring 31/19。（合计 96）
+> (本轮修: `AtomicReference<V>` 的 V 形参方法实参补造型(`jdkMethodParamTypeArgIndex` 增 AtomicReference 分支, `JDEC_ATOMIC_REF_PARAM_OFF`)—— 字段 `AtomicReference<T> reference` 的 `get()` 被读进 Object 局部,
+> 再回传给 `compareAndSet(V,V)`/`getAndSet(V)`/`set(V)`(descriptor 擦成 `compareAndSet/set(Object,Object)`)时,
+> 裸 Object 实参被 javac 按 `AtomicReference<V>.compareAndSet(V,V)` 定型判「Object cannot be converted to T」。
+> 修法: 仿 `jdkMapFamily`/`jdkListFamily` 形参映射族, 在 JDK 形参类型实参索引表补 `AtomicReference` 分支(V 是唯一类型实参,
+> 全部 V 形参位映射到 0): `compareAndSet/weakCompareAndSet(V,V)` argc==2 两形参、`getAndSet/set/lazySet(V)` argc==1 形参 0、
+> `getAndAccumulate/accumulateAndGet(V, BinaryOperator<V>)` argc==2 仅形参 0(V), 形参 1 是 operator 不动。
+> `instantiatedParamType` 把 V 形参解析成接收者 T 后, 既有 arg-cast 路径重下 `(T)` unchecked 造型(字节码里该值已流入 V 槽, 保义)。
+> 限 `ntype==1`(裸/非通配参数化 `AtomicReference<V>`), 既有通配符早退(`AtomicReference<?>`)不受影响。承重测试
+> `atomic_ref_vparam_test.go`(AtomicRefVParamSeed) + A/B 交叉 `atomic_ref_vparam_cast_test.go`(commons-lang3 AtomicInitializer)。
+> 治 commons-lang3 AtomicInitializer 1 条, commons-lang3 12→11、缺陷类 9→8, 合计 97→96, 零回归。)
+> (本轮调查 jsoup/snakeyaml 清零未果, 记录潜伏链供后续: ① jsoup `XmlTreeBuilder.insert(Token$Comment)` 的「`Comment var3 = var2; ...;
+> var3 = new XmlDeclaration();` 首声明窄化致兄弟再赋失败(`XmlDeclaration cannot be converted to Comment`)」**单点可修**——
+> 跨类兄弟臂合并已把 slot ref 扩宽到 LUB(Node), 但首声明 RHS 仍是窄臂类型 Comment; 修法: 在 AssignStatement 首声明处见 ref 被合并 helper
+> 扩宽(经 `PhiWidened` 标记证)时采纳 slot 类型。**但**: 该修解锁 jsoup `QueryParser.combinator` **潜伏 7 条** definite-assignment
+> (var5_1/var5_2 单分支赋值后无条件用, 属 T4b computeIfAbsent 惯用式, 之前被 XmlTreeBuilder 类型错遮蔽)——原 1 错变 7 错, 净 -6。
+> ② snakeyaml `SafeConstructor.createNumber` 即 **T4b 文档化的 special-project**(try/catch 合流 `var6` 只在 catch 赋值,
+> `return var6` 未初始化)—— 核心数据流 + 全量 A/B, 留专项。结论: 两单点清零均被 T4b 遮蔽依赖阻塞, 须先解 T4b(单用折叠前判 slot 下游 load
+> 或合流 load 建 phi)才能净清零; 本轮先回退 jsoup 修保 96 合计、零回归, AtomicReference 修复保留。)
+> (上一轮修: 方法形参自由类型变量注入(dumper.go 扁平内部类 enclosing-arity 注入块增方法形参扫描,
 > `JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF`)—— 静态泛型方法内的匿名类捕获方法的类型变量, javac 发出的
 > 该匿名类 Signature **不带** `<...>` 形参段(只列自由变量引用: guava `Futures$2` 的类签名是
 > `Ljava/lang/Object;LFuture<TO;>;`, 无 `<O:...>` 前缀), 于是 O 从父类 `Future<O>` 被识别为自由变量并声明,

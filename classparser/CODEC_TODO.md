@@ -29,13 +29,13 @@
 |---|---:|---:|---:|---:|---|
 | **commons-codec** 1.15 | 106 | **0** | **0** | 0 | ✅ **完整往返**(107/107 verify + 调用差分逐字节一致) |
 | **gson** 2.8.9 | 195 | **0** | **0** | 0 | ✅ **完整往返**(199/199 verify) |
-| **commons-lang3** 3.12.0 | 345 | 11 | 18 | 0 | 泛型擦除长尾 |
+| **commons-lang3** 3.12.0 | 345 | 8 | 11 | 0 | 泛型擦除长尾 |
 | **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
 | **snakeyaml** 2.2 | 231 | 1 | 1 | 0 | definite-assignment 单点 |
 | **spring-core** 5.3.27 | 978 | 29 | 55 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
 | **fastjson2** 2.0.43 | 681 | 15 | 32 | 0 | 泛型擦除 + 槽位复用长尾 |
 | **guava** 28.2-android | 1892 | 20 | 28 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **77** | **135** | **0** | 类级干净率 **96.6%**(2175/2252) |
+| **合计** | | **76** | **134** | **0** | 类级干净率 **96.6%**(2176/2252) |
 
 **codec 与 gson 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go`):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。
@@ -183,6 +183,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_BOOL_ACCUM_SLOT_SPLIT_OFF` | 布尔累加器复用不相交 int 循环计数器槽位拆分(`reachingBoolAccumulatorSlotSplit`, 与 `reachingBoolReturnSlotSplit`/`reachingBoolFieldSlotSplit` 同族): `boolean flag=false; flag|=someZcall()` 的 `iconst_0` 初值被 AssignVarGuarded 见作 int 类别、续用了停在同槽表项里的(已死)int 循环计数器 ref, 合并两不相交活跃区; 该槽随后经 `flag|=Zcall` 自累加(`ior/iand/ixor` 回存同槽, 兄弟操作数为 Z 返回调用)定型 boolean, 早循环渲染成 `boolean<int`/`array[boolean]`/`boolean++`, javac 报「bad operand types / boolean cannot be converted to int / bad '++' operand」。见证: 前向从 `iconst_0` store 找 slot 的 load 喂入自 `ior/iand/ixor` 回存同槽且兄弟操作数为 Z 返回 invoke(`slotStoreFeedsBooleanAccumulate`/`loadFeedsBooleanAccumulate`/`opcodeInvokeReturnsBoolean`); 同 disjoint-web + phi 门控; 命中把 0 转布尔 false 令 AssignVarGuarded 铸新布尔 flag, int 计数器保留自身 ref。修 spring ASM `ClassWriter.toByteArray`(spring 52→51) |
 | `JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF` | 数组形参收 null-Object 实参造型(`arrayParamRefArgCast`, 在 `renderArgAt`): 形参是数组类型(`byte[]`/`Object[]`)而实参静态类型是非数组引用类(通常 `java.lang.Object`, 来自 null 初始化局部)时, 类-类造型分支不触发(数组类型 `RawType()` 是 `*JavaArrayType` 非 `*JavaClass`, ok1 为假), 裸 Object 实参不可赋给数组形参, javac 报「Object cannot be converted to byte[]」。字节码里该值(null 或 checkcast)已占数组槽, 补 `(byte[])` 造型保义。紧门控: 形参为数组 + 实参为非数组引用且擦除为 Object(具体类实参传数组形参是真类型错, 不遮蔽)。修 spring ASM `Attribute.computeAttributesSize`/`putAttributes`(Object→byte[]) + cglib `Enhancer`(Object→Object[]), spring 51→48 |
 | `JDEC_REF_SLOT_THROWABLE_ARM_MERGE_OFF` | try/catch 异常槽 Throwable 族上型臂合并(`reachingRefSlotThrowableArmMerge`, 与 sibling/subtype/object 臂合并同族但限 java.lang.Throwable 族): 多 catch handler 把各自捕获的异常写入同一 JVM 槽, 捕获后的读是一个逻辑 `Throwable cause` 变量(类型为各臂 LUB)。DFS 序里子型臂(InterruptedException)先铸槽变量, getCause()→Throwable 上型臂被 AssignVarGuarded 拆成独立变量, 于是 `cause instanceof X`/`(X)cause` 绑到窄型 InterruptedException 变量, javac 报「InterruptedException cannot be converted to X」。既有 subtype 合并只在 val⊂current 时保留 current, sibling 合并在 LUB==某臂时退出, 都不覆盖「val 为严格上型」的加宽方向。为 hierarchy.go 补 java.lang.Throwable 族常见异常层级边 + `IsThrowableRooted`(对 jdkSuperEdges 做 Throwable 闭包); 两臂皆 Throwable 子类、val 严格上型(CommonSuperType==val)且 phi 共载时 `ResetVarType(vt)` 把共享 ref 加宽到 LUB —— 合并后 catch 变量的用法都是 Throwable 级(instanceof/cast/getMessage/getCause/rethrow), 加宽绝不回归窄型无造型读。修 spring core codec `Decoder.decode`/`Encoder.encode`(spring 48→46) |
+| `JDEC_ATOMIC_REF_PARAM_OFF` | `java.util.concurrent.atomic.AtomicReference<V>` 的 V 形参方法实参造型(`jdkMethodParamTypeArgIndex` 增 AtomicReference 分支): 字段/局部 `AtomicReference<T>` 的 `get()` 读进 Object 局部后回传给 `compareAndSet(V,V)`/`weakCompareAngeSet(V,V)`/`getAndSet(V)`/`set(V)`/`lazySet(V)`/`getAndAccumulate(V,BinaryOperator)`/`accumulateAndGet(V,BinaryOperator)`(descriptor 擦成 Object), 裸 Object 实参被 javac 按 `AtomicReference<V>.m(V)` 定型判「Object cannot be converted to T」。V 是唯一类型实参, 全部 V 形参位映射到 0(compareAndSet 两形参、单参方法的形参 0、accumulator 的形参 0; operator 形参不动)。`instantiatedParamType` 把 V 形参解析成接收者 T 后, 既有 arg-cast 路径重下 `(T)` unchecked 造型。限 `ntype==1`(裸/非通配参数化), 既有通配符早退(`AtomicReference<?>`)不受影响。修 commons-lang3 `AtomicInitializer.get`(commons-lang3 12→11、缺陷类 9→8) |
 
 ### 结构化 / pop / switch / 枚举 / 注解
 | 开关 | 作用域 |
