@@ -8,7 +8,7 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 17 Corretto, 本机 `~/.m2`; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 20/13 · guava 27/23 · commons-lang3 11/8 · spring 25/16。（合计 85）
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 19/12 · guava 27/23 · commons-lang3 11/8 · spring 25/16。（合计 84）
 > (本轮修三块, 均零回归、A/B delta≥0:
 > ① 方法引用不补函数式接口造型——`Type::m`/`receiver::m`/`Type::new` 原生可绑到 raw SAM(无显式形参可冲突),
 > 造型反而在 SAM 嵌套通配符处(`Stream.flatMap` 的 `Function<? super T,? extends Stream<? extends R>>`)钉死具体参数化、
@@ -21,7 +21,11 @@
 > javac 拒「bad return type in lambda expression」。从 enclosing 方法 Signature 返回类型取该 FI 返回位类型变量,
 > 注入 lambda 体值返回处(`JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF`)。修 fastjson2 `ObjectReaderProvider.createObjectCreator`
 > `() -> (T) objectReader.createInstance(0)` + `ObjectReaderCreator.createBuildFunctionLambda` `(l0) -> (R) m.invoke(...)`(fastjson2 tree -2)。
-> 合计本轮 25→20 / 缺陷类 14→13。)
+> ④ 构造器 RAW 函数式接口形参位收 UNBOUND 实例方法引用(如 `Throwable::setStackTrace`, 实现元数 (Throwable,StackTraceElement[]))
+> 绑不到 raw (Object,Object) SAM, javac 报「invalid method reference」。从 invokedynamic instantiatedMethodType 取实参类型,
+> 重发 `(<FIRawClass><<具体类型>>) Type::method` 造型(`JDEC_CTOR_RAWFI_METHODREF_CAST_OFF`)。修 fastjson2
+> `ObjectReaderCreator` `new FieldReaderStackTrace(..., Throwable::setStackTrace)`(fastjson2 tree -1、缺陷类 13→12)。CFR/Vineflower 亦丢此造型。
+> 合计本轮 25→19 / 缺陷类 14→12。)
 > (本轮调查 jsoup/snakeyaml 清零未果, 记录潜伏链供后续: ① jsoup `XmlTreeBuilder.insert(Token$Comment)` 的「`Comment var3 = var2; ...;
 > var3 = new XmlDeclaration();` 首声明窄化致兄弟再赋失败(`XmlDeclaration cannot be converted to Comment`)」**单点可修**——
 > 跨类兄弟臂合并已把 slot ref 扩宽到 LUB(Node), 但首声明 RHS 仍是窄臂类型 Comment; 修法: 在 AssignStatement 首声明处见 ref 被合并 helper
