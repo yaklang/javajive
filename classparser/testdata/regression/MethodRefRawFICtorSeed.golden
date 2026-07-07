@@ -1,0 +1,8 @@
+# Constructor RAW-functional-interface formal + unbound instance method reference
+# (JDEC_CTOR_RAWFI_METHODREF_CAST_OFF): a constructor (or static method) whose i-th formal is a RAW
+# functional interface (raw BiConsumer.accept(Object,Object)) rejects an unbound instance method
+# reference `Throwable::setStackTrace` (impl arity (Throwable, StackTraceElement[])) as "invalid method
+# reference". The source carried `(BiConsumer<Throwable,StackTraceElement[]>) Throwable::setStackTrace`;
+# recover it from the invokedynamic instantiatedMethodType. Real hit: fastjson2 ObjectReaderCreator
+# `new FieldReaderStackTrace(..., Throwable::setStackTrace)`.
++(BiConsumer<Throwable, StackTraceElement[]>)(Throwable::setStackTrace)

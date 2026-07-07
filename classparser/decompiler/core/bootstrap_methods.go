@@ -257,6 +257,17 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			refVal.Flag = "lambda"
 			refVal.NoOuterCapture = len(capturedArgs) == 0
 			refVal.IsMethodRef = true
+			// Carry the instantiatedMethodType descriptor so a constructor argument whose formal is a
+			// RAW functional interface can recover the source's `(FI<...>) Type::method` cast (the raw
+			// SAM erases the impl method's arity, so the bare method ref is "invalid"). fastjson2
+			// ObjectReaderCreator `new FieldReaderStackTrace(..., Throwable::setStackTrace)`.
+			if len(args1) >= 3 {
+				if cv, ok := args1[2].(*values.CustomValue); ok {
+					if s := cv.String(&class_context.ClassContext{}); strings.HasPrefix(s, "(") {
+						refVal.InstantiatedMtdDesc = s
+					}
+				}
+			}
 			return refVal, nil
 		}
 	},

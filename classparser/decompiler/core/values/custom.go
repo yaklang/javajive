@@ -20,9 +20,18 @@ type CustomValue struct {
 	// this flag to skip method references (fastjson2 ObjectReaderCreator.toFieldReaderArray
 	// `flatMap(Collection::stream)`).
 	IsMethodRef bool
-	StringFunc  func(funcCtx *class_context.ClassContext) string
-	TypeFunc    func() types.JavaType
-	ReplaceFunc func(oldId *utils.VariableId, newId *utils.VariableId)
+	// InstantiatedMtdDesc carries a lambda/method-reference's invokedynamic instantiatedMethodType
+	// descriptor (3rd LambdaMetafactory bootstrap arg), e.g. "(Ljava/lang/Throwable;[Ljava/lang/StackTraceElement;)V".
+	// For a method reference passed to a constructor whose formal is a RAW functional interface (raw
+	// BiConsumer.accept(Object,Object)), the bare method ref fails to bind ("invalid method reference")
+	// because the SAM arity erases to (Object,Object) while the impl method is (Throwable,StackTraceElement[]).
+	// The source's `(BiConsumer<Throwable,StackTraceElement[]>) Type::method` cast -- recoverable from
+	// this descriptor -- re-targets the SAM so the method ref binds. Set only on the bootstrap method-ref
+	// branch; consumed by ctorRawFISAMMethodRefCast (renderArgAt). Empty/unused for lambdas and non-FI uses.
+	InstantiatedMtdDesc string
+	StringFunc         func(funcCtx *class_context.ClassContext) string
+	TypeFunc           func() types.JavaType
+	ReplaceFunc        func(oldId *utils.VariableId, newId *utils.VariableId)
 }
 
 // ReplaceVar implements JavaValue.

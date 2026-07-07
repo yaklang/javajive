@@ -2224,11 +2224,108 @@ func LambdaAssignFunctionalCast(left, right JavaValue, funcCtx *class_context.Cl
 	return lamType.String(funcCtx)
 }
 
+// ctorRawFISAMMethodRefCast re-adds the parameterized functional-interface cast a METHOD REFERENCE
+// argument needs when passed to a constructor (or static method) whose i-th formal is a RAW functional
+// interface. A raw `BiConsumer`'s SAM is `accept(Object,Object)`, so an unbound instance method
+// reference `Throwable::setStackTrace` (impl arity `(Throwable, StackTraceElement[])`) fails to bind --
+// "invalid method reference" -- because javac matches against the raw (Object,Object) SAM. The source
+// carried `(BiConsumer<Throwable,StackTraceElement[]>) Throwable::setStackTrace`; recover it from the
+// method reference's carried instantiatedMethodType descriptor (3rd LambdaMetafactory bootstrap arg).
+// The cast target is `<FIRawClass><<instantiated param types>>`.
+//
+// Tightly gated: (a) constructor OR static-method call (no instance receiver erasure involved),
+// (b) argument is a method reference carrying an instantiatedMethodType descriptor,
+// (c) the i-th formal is one of the known raw JDK functional interfaces whose SAM takes >=2 params
+//     (the >=2-param SAMs are where a raw form breaks an unbound instance-method ref's arity),
+// (d) the recovered concrete param types differ from the raw `Object` SAM params (else the bare ref
+//     already binds and the cast is noise). Kill-switch: JDEC_CTOR_RAWFI_METHODREF_CAST_OFF=1.
+// Canonical: fastjson2 ObjectReaderCreator `new FieldReaderStackTrace(..., Throwable::setStackTrace)`.
+func (f *FunctionCallExpression) ctorRawFISAMMethodRefCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_CTOR_RAWFI_METHODREF_CAST_OFF") != "" || i >= len(f.FuncType.ParamTypes) {
+		return ""
+	}
+	// (a) only a constructor or static call: an instance-method receiver erasure is already covered by
+	// the raw-receiver cast helpers, and mixing both would double-cast.
+	if !f.IsStatic && f.FunctionName != "<init>" {
+		return ""
+	}
+	// (b) argument is a method reference carrying an instantiatedMethodType descriptor.
+	cv, ok := UnpackSoltValue(f.Arguments[i]).(*CustomValue)
+	if !ok || !cv.IsMethodRef || cv.InstantiatedMtdDesc == "" {
+		return ""
+	}
+	// (c) the i-th formal is a known raw JDK functional interface whose SAM arity is >= 2 (the case
+	// where the raw form breaks an unbound instance-method reference). Single-param SAMs (Supplier /
+	// Function / Predicate / Consumer) bind their one parameter from the impl method directly and do
+	// not need this cast.
+	paramType := f.FuncType.ParamTypes[i]
+	if paramType == nil {
+		return ""
+	}
+	pj, ok := paramType.RawType().(*types.JavaClass)
+	if !ok || pj == nil {
+		return ""
+	}
+	if !rawFIMethodRefCastFamily[pj.Name] {
+		return ""
+	}
+	// Recover the concrete parameter types from the instantiatedMethodType descriptor and render the
+	// cast target `<FIRawClass><<type1, type2, ...>>`. Require at least one param more specific than
+	// java.lang.Object (else the bare ref binds and the cast is noise).
+	mt, err := types.ParseMethodDescriptor(cv.InstantiatedMtdDesc)
+	if err != nil || mt == nil {
+		return ""
+	}
+	ft := mt.FunctionType()
+	if ft == nil || len(ft.ParamTypes) < 2 {
+		return ""
+	}
+	hasSpecific := false
+	parts := make([]string, 0, len(ft.ParamTypes))
+	for _, pt := range ft.ParamTypes {
+		if pt == nil {
+			return ""
+		}
+		s := pt.String(funcCtx)
+		if s == "" {
+			return ""
+		}
+		parts = append(parts, s)
+		if jc, ok := pt.RawType().(*types.JavaClass); !ok || jc == nil || jc.Name != "java.lang.Object" {
+			hasSpecific = true
+		}
+	}
+	if !hasSpecific {
+		return ""
+	}
+	return funcCtx.ShortTypeName(pj.Name) + "<" + strings.Join(parts, ", ") + ">"
+}
+
+// rawFIMethodRefCastFamily lists the JDK functional interfaces whose raw SAM arity is >= 2, so a raw
+// form breaks an unbound instance-method reference (whose impl arity includes the receiver). Single-
+// param SAMs bind directly and are excluded. BiConsumer / BiFunction / BiPredicate.
+var rawFIMethodRefCastFamily = map[string]bool{
+	"java.util.function.BiConsumer":  true,
+	"java.util.function.BiFunction":  true,
+	"java.util.function.BiPredicate": true,
+}
+
 // renderArgAt renders the i-th call argument, applying the generic-erasure parameter-type recovery and
 // the synthesized argument cast (`(V)`/`(T)`/primitive) that reproduce the original source. Factored
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
+	// A METHOD REFERENCE passed to a constructor whose i-th formal is a RAW functional interface
+	// (raw BiConsumer.accept(Object,Object) etc.) fails to bind ("invalid method reference"): the
+	// impl method's arity (e.g. Throwable.setStackTrace(StackTraceElement[]) is 1-arg as an UNBOUND
+	// instance ref -> (Throwable, StackTraceElement[])) does not match the raw SAM's (Object,Object).
+	// The source carried `(FI<ConcreteTypes>) Type::method`; recover it from the method ref's carried
+	// instantiatedMethodType. Must precede the lambda/raw-receiver cast helpers (which all no-op on a
+	// method reference anyway, but ordering keeps the method-ref path explicit). fastjson2
+	// ObjectReaderCreator `new FieldReaderStackTrace(..., Throwable::setStackTrace)`.
+	if cast := f.ctorRawFISAMMethodRefCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
 	// A lambda / method-ref passed to a method on a RAW generic receiver lost the source's
 	// `(Consumer<FieldReader>) e -> ...` functional-interface cast (raw receiver erases the SAM). Re-add it.
 	if cast := f.lambdaArgFunctionalCast(i, funcCtx); cast != "" {
