@@ -757,6 +757,116 @@ func refIsPrimitive(ref *values.JavaRef) bool {
 	return isPrim
 }
 
+// rebindIncompatibleLoadForSink is the two-pass load rebinding for the catch-slot / switch-case
+// slot-reuse family (fastjson2 JDKUtils.<clinit>: one JVM slot carries Boolean + Predicate +
+// MethodHandle across disjoint live ranges, linked through shared putstatic reads). By pass 2 the
+// forward simulation is complete, so opcodeIdToRef holds every store's committed ref. When a sink
+// (putfield/putstatic/areturn) consumes a local-load value (SlotValue wrapping a JavaRef) whose
+// resolved type is INCOMPATIBLE with the sink's declared type, the load bound the wrong branch ref
+// (the single global slot table parked a DFS-stale ref in `current`). The load's TRUE reaching
+// definition -- found by the structural reachingStoresOf walk (Source edges, no simulation order) --
+// carries a type-compatible ref; rebind the sink to that ref via a fresh SlotValue so the assignment
+// reads the branch-correct variable.
+//
+// Safety: it fires ONLY when (1) the value is a local-load SlotValue wrapping a JavaRef; (2) the
+// resolved ref type and the sink type are BOTH non-primitive reference classes (not Object, not type
+// variables) of DIFFERENT names; (3) neither is a bridged subtype of the other (a genuine
+// incompatible pair); (4) a reaching store exists whose committed ref type IS the sink type (exact
+// name match) -- proving the compatible branch was actually minted. This never widens or casts; it
+// merely re-points the read at the already-minted compatible ref. Kill-switch:
+// JDEC_REBIND_INCOMPATIBLE_LOAD_OFF=1.
+func (d *Decompiler) rebindIncompatibleLoadForSink(sink *OpCode, value values.JavaValue, sinkType types.JavaType) values.JavaValue {
+	if os.Getenv("JDEC_REBIND_INCOMPATIBLE_LOAD_OFF") == "1" {
+		return value
+	}
+	if value == nil || sinkType == nil || sink == nil {
+		return value
+	}
+	// The value must be a local-load SlotValue wrapping a JavaRef.
+	ref, ok := slotValueJavaRef(value)
+	if !ok || ref == nil {
+		return value
+	}
+	vt := ref.Type()
+	if vt == nil {
+		return value
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return value
+	}
+	if _, isPrim := sinkType.RawType().(*types.JavaPrimer); isPrim {
+		return value
+	}
+	vtFQN, vtOK := types.ClassFQNOf(vt)
+	ttFQN, ttOK := types.ClassFQNOf(sinkType)
+	if !vtOK || !ttOK {
+		return value
+	}
+	if vtFQN == ttFQN {
+		return value
+	}
+	isObject := func(n string) bool { return n == "java.lang.Object" }
+	if isObject(vtFQN) || isObject(ttFQN) {
+		return value
+	}
+	provider := func() types.SuperTypeProvider {
+		if fc := d.FunctionContext; fc != nil {
+			return fc.SiblingSuperTypes
+		}
+		return nil
+	}()
+	// Genuine incompatible pair (Boolean vs Predicate, etc.): neither assignable to the other.
+	if types.IsReferenceSubtypeBridged(vtFQN, ttFQN, provider) {
+		return value
+	}
+	if types.IsReferenceSubtypeBridged(ttFQN, vtFQN, provider) {
+		return value
+	}
+	// Find the load that produced this value: it is the Source opcode of the sink whose value was
+	// pushed by an aload. Walk back one Source hop to the load, then use reachingStoresOf (structural,
+	// simulation-order-independent) to find the TRUE reaching store on this path.
+	if len(sink.Source) == 0 {
+		return value
+	}
+	load := sink.Source[0]
+	if load == nil || !isLocalLoadOpcode(load.Instr.OpCode) {
+		return value
+	}
+	slot := GetRetrieveIdx(load)
+	if slot < 0 {
+		return value
+	}
+	stores, _ := reachingStoresOf(load, slot)
+	for _, st := range stores {
+		refs, ok := d.opcodeIdToRef[st]
+		if !ok || len(refs) == 0 {
+			continue
+		}
+		last := refs[len(refs)-1]
+		if len(last) == 0 {
+			continue
+		}
+		stRef, ok := last[0].(*values.JavaRef)
+		if !ok || stRef == nil {
+			continue
+		}
+		stType := stRef.Type()
+		if stType == nil {
+			continue
+		}
+		stFQN, stOK := types.ClassFQNOf(stType)
+		if !stOK {
+			continue
+		}
+		// Exact name match to the sink type: this is the branch-correct ref.
+		if stFQN == ttFQN && stRef.VarUid != ref.VarUid {
+			// Rebind: a fresh SlotValue wrapping the compatible ref, so the sink reads the correct branch.
+			return values.NewSlotValue(stRef, stType)
+		}
+	}
+	return value
+}
+
 // reachingSlotVersionOnMismatch repairs a stale slot read produced by the single global varTable.
 // See the call site in loadVarBySlot for the root cause. We trigger ONLY on the unambiguous
 // corruption signal: the load opcode's category (reference vs primitive) disagrees with the
@@ -5484,7 +5594,11 @@ func (d *Decompiler) ParseStatement() error {
 			if !opcode.SelfOpFolded {
 				index := Convert2bytesToInt(opcode.Data)
 				staticVal := d.constantPoolGetter(int(index))
-				appendNode(statements.NewAssignStatement(staticVal, opcode.stackConsumed[0], false))
+				value := opcode.stackConsumed[0]
+				if cm, ok := staticVal.(*values.JavaClassMember); ok && cm != nil {
+					value = d.rebindIncompatibleLoadForSink(opcode, value, cm.JavaType)
+				}
+				appendNode(statements.NewAssignStatement(staticVal, value, false))
 			}
 		case OP_PUTFIELD:
 			if !opcode.SelfOpFolded {
@@ -5492,6 +5606,9 @@ func (d *Decompiler) ParseStatement() error {
 				staticVal := d.constantPoolGetter(int(index))
 				value := opcode.stackConsumed[0]
 				field := values.NewRefMember(opcode.stackConsumed[1], staticVal.(*values.JavaClassMember).Member, staticVal.(*values.JavaClassMember).JavaType)
+				if cm, ok := staticVal.(*values.JavaClassMember); ok && cm != nil {
+					value = d.rebindIncompatibleLoadForSink(opcode, value, cm.JavaType)
+				}
 				assignSt := statements.NewAssignStatement(field, value, false)
 				appendNode(assignSt)
 			}
