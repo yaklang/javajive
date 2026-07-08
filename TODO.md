@@ -8,7 +8,8 @@
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
 > 数字快照(javac 17 Corretto, 本机 `~/.m2`; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 19/12 · guava 27/23 · commons-lang3 11/8 · spring 25/16。（合计 84）
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 17/11 · guava 27/23 · commons-lang3 11/8 · spring 25/16。（合计 82）
+> (本轮一修: if/else 兄弟臂 boolean phi 合并(`reachingBoolVarCopyMerge`, `JDEC_BOOL_VAR_COPY_MERGE_OFF`)—— 一臂复制/三元生成 boolean-default(`previous = (features & mask) != 0` 编成 `iconst_1/0`, 或直接三元 `(c && cond) ? 1 : 0`), 另一兄弟臂存真 boolean 值(Z-返回调用 `isRefDetect()`)。复制臂的 int-typed ref 与 boolean 臂的新 boolean ref 分裂同一变量, 合流读 `if (itemRefDetect)` / `previous = itemRefDetect` 渲染成 `int = boolean` / `boolean != int`, javac 报「boolean cannot be converted to int」。`reachingBoolDefaultMerge` 用 `reachingSlotStoreOps` 走 Source 回溯看不到兄弟臂定义(无路径), 故不触发; 本修复锚点在 boolean 臂 store, 直接从全局 slot 表的 `current` ref 找其 creator store(新增 `refToCreatingStore` 索引, 绕开 opcodeIdToRef 的 map 无序迭代), 见 RHS 是 int-0/1 字面量(shape a) 或复制另一槽而该槽源是 int-0/1 字面量(shape b), phi 证同变量即重定型为 boolean(连同源 default 的 0/1 字面量)。修 fastjson2 `FieldWriterList.writeList`(复制臂) + `ObjectWriterImplList.write`(三元臂, fastjson2 tree 19→17、缺陷类 12→11)。承重 `bool_var_copy_merge_test.go`(BoolVarCopyMergeSeed)。零回归(A/B delta 全 8-jar ≥0)。证明了 CODEC_TODO §8a 所述「19 条铁板一块须整体重构」可逐条甄别单点突破。)
 > (本轮修三块, 均零回归、A/B delta≥0:
 > ① 方法引用不补函数式接口造型——`Type::m`/`receiver::m`/`Type::new` 原生可绑到 raw SAM(无显式形参可冲突),
 > 造型反而在 SAM 嵌套通配符处(`Stream.flatMap` 的 `Function<? super T,? extends Stream<? extends R>>`)钉死具体参数化、

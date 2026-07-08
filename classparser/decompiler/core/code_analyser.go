@@ -38,6 +38,13 @@ type Decompiler struct {
 	FunctionContext       *class_context.ClassContext
 	varTable              map[int]*values.JavaRef
 	opcodeIdToRef         map[*OpCode][][2]any
+	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
+	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
+	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
+	// order is non-deterministic, and where several stores can share a reused ref pointer). Only stores
+	// where the ref was freshly minted are recorded, so a later same-type store reusing an existing ref
+	// never overwrites the creator. Populated alongside opcodeIdToRef in the OP_*STORE handler.
+	refToCreatingStore map[*values.JavaRef]*OpCode
 	// dupConvertedRefValue records, per dup-family opcode and in the SAME order as the
 	// opcodeIdToRef entries appended by checkAndConvertRef, the actual value each synthesized
 	// temp was created from. The dup statement-parse handler must use this instead of
@@ -150,6 +157,7 @@ func NewDecompiler(bytecodes []byte, constantPoolGetter func(id int) values.Java
 		opcodeIndexToOffset:  map[int]uint16{},
 		varTable:             map[int]*values.JavaRef{},
 		opcodeIdToRef:        map[*OpCode][][2]any{},
+		refToCreatingStore:   map[*values.JavaRef]*OpCode{},
 		dupConvertedRefValue: map[*OpCode][]values.JavaValue{},
 		varUserMap:           omap.NewEmptyOrderedMap[*values.JavaRef, []*VarFoldRule](),
 		delRefUserAttr:       map[string][3]int{},
@@ -1149,6 +1157,126 @@ func (d *Decompiler) reachingBoolDefaultMerge(store *OpCode, slot int, current *
 		return defRef
 	}
 	return nil
+}
+
+// reachingBoolVarCopyMerge repairs the if/else (or switch-case) sibling-arm split where one arm copies
+// an earlier `boolean previous = (expr) != 0` (compiled to `iconst_1/0; istore`, typed int) into the
+// slot (`itemRefDetect = previous`) and a SIBLING arm stores a genuinely boolean-typed value
+// (`itemRefDetect = jsonWriter.isRefDetect()`, a Z-returning call or a boolean comparison). javac emits
+// the copy as `iload previous; istore S`, so the copied value carries the source's int-typed ref; the
+// sibling boolean store then sees int-vs-boolean and AssignVarGuarded (no int<->boolean conversion)
+// mints a FRESH boolean variable, splitting one source variable into `int varN` (the copy arm) and
+// `boolean varN_1` (the boolean arm). The post-merge use (`if (itemRefDetect)`, `previous = itemRefDetect`)
+// then renders as `int = boolean` / `boolean != int` and javac rejects it ("boolean cannot be converted
+// to int"). fastjson2 FieldWriterList.writeList / ObjectWriterImplList.writeList.
+//
+// reachingBoolDefaultMerge cannot anchor here: the copy arm's reaching definition is NOT an int-0/1
+// literal RHS but an `iload` of ANOTHER slot, and the two arms are siblings (neither reaches the other
+// through Source edges), so neither the single-reaching-def gate nor the literal-RHS check matches.
+// reachingBoolSiblingArmMerge is the role-inverse (value int-literal, current boolean) and likewise
+// does not fire.
+//
+// This handler anchors on the boolean store: when the value being stored is boolean-typed and the slot's
+// CURRENT ref (the copy arm's, still parked in the global slot table) was itself defined by copying a
+// slot whose OWN definition is an int-0/1 literal default initializer (the canonical bool-default shape
+// reachingBoolDefaultMerge would re-type), it re-types the copy arm's ref to boolean. The two arms then
+// denote one boolean variable and the merge read stays consistently typed. Gated by a phi (the copy
+// def and this store share a downstream load), which rejects genuine disjoint slot reuse. Kill-switch:
+// JDEC_BOOL_VAR_COPY_MERGE_OFF=1.
+func (d *Decompiler) reachingBoolVarCopyMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_BOOL_VAR_COPY_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil || val.Type() == nil {
+		return nil
+	}
+	// The value being stored must be genuinely boolean-typed (a Z-returning call / boolean comparison),
+	// not an int-0/1 literal (that is reachingBoolSiblingArmMerge's domain).
+	if !isExactPrimer(val.Type(), types.JavaBoolean) {
+		return nil
+	}
+	// The slot's current version must be a plain int local (the copy arm's ref AssignVarGuarded would
+	// refuse to merge with a boolean value).
+	if current.IsParam || !isExactPrimer(current.Type(), types.JavaInteger) {
+		return nil
+	}
+	// Find the store that defined `current` (the sibling arm's ref parked in the global slot table by
+	// DFS order). The reaching-definition analysis walks Source edges backward and CANNOT see a sibling
+	// branch's definition (no path), so reachingBoolDefaultMerge (which uses reachingSlotStoreOps) bails
+	// here even though the bool-default shape matches; `current` carries the sibling ref directly.
+	copyStore := d.findStoreDefiningRef(current)
+	if copyStore == nil {
+		return nil
+	}
+	// The sibling arm's RHS must prove the value is really a boolean the JVM widened to int. Two shapes:
+	//   (a) an int-0/1 literal default initializer — the canonical bool-default `(expr) != 0` compiled to
+	//       iconst_1/0 (fastjson2 ObjectWriterImplList.write: `(itemClassRefDetect && isRefDetect()) ? 1 : 0`);
+	//   (b) a copy of ANOTHER slot whose OWN definition is such an int-0/1 literal default (fastjson2
+	//       FieldWriterList.writeList: `itemRefDetect = previous`, where previous defaulted to iconst_1/0).
+	// A genuine int (non-0/1 literal, or a copy of a real int) is left untouched so it is not mis-typed.
+	copyVal := d.slotStoreValue[copyStore]
+	boolType := types.NewJavaPrimer(types.JavaBoolean)
+	var litToRetype *values.JavaLiteral
+	// Shape (a): the sibling arm's own RHS is an int-0/1 literal.
+	if lit, ok := intLiteral01(copyVal); ok {
+		litToRetype = lit
+	} else {
+		// Shape (b): the sibling arm's RHS is a copy of another slot; that source must itself be an
+		// int-0/1 literal default initializer.
+		srcRef, ok := slotValueJavaRef(copyVal)
+		if !ok || srcRef == nil {
+			return nil
+		}
+		srcStore := d.findStoreDefiningRef(srcRef)
+		if srcStore == nil {
+			return nil
+		}
+		srcLit, ok := intLiteral01(d.slotStoreValue[srcStore])
+		if !ok {
+			return nil
+		}
+		litToRetype = srcLit
+	}
+	// A phi must prove the copy arm and this boolean store are ONE source variable: both reach a common
+	// downstream load of `slot`. Genuine disjoint reuse (the copy arm's value is consumed before this
+	// store, no shared load) shares no load and is left to split.
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	// Re-type the copy arm's ref (and the proven-boolean default's int-0/1 literal) to boolean, so both
+	// arms denote one boolean variable. This mirrors reachingBoolDefaultMerge's lossless re-typing of an
+	// int-0/1 default to false/true.
+	current.ResetVarType(boolType)
+	litToRetype.JavaType = boolType
+	return current
+}
+
+// findStoreDefiningRef recovers the store opcode that FIRST created `ref` (pointer identity), using the
+// refToCreatingStore index populated alongside opcodeIdToRef. The global slot table parks a sibling arm's
+// ref in the slot; this recovers the store that produced it so its RHS can be inspected. Returns nil when
+// no such store is recorded yet (e.g. the ref is a parameter or was minted outside a store).
+func (d *Decompiler) findStoreDefiningRef(ref *values.JavaRef) *OpCode {
+	if ref == nil {
+		return nil
+	}
+	return d.refToCreatingStore[ref]
+}
+
+// slotValueJavaRef unwraps a SlotValue whose underlying value is a *JavaRef (the `iload srcSlot` copy
+// pattern `dst = src`). Returns the source ref and ok=false for any other shape. It does NOT use
+// UnpackSoltValue (which recurses past the SlotValue to the inner ref); it needs the SlotValue layer
+// itself to confirm the value was a slot-load copy rather than an inline ref.
+func slotValueJavaRef(v values.JavaValue) (*values.JavaRef, bool) {
+	sv, ok := v.(*values.SlotValue)
+	if !ok || sv == nil {
+		return nil, false
+	}
+	inner := sv.GetValue()
+	if inner == nil {
+		return nil, false
+	}
+	ref, ok := inner.(*values.JavaRef)
+	return ref, ok
 }
 
 // reachingBoolSiblingArmMerge handles the sibling-arm boolean phi that reachingBoolDefaultMerge cannot
@@ -2688,6 +2816,17 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			runtimeStackSimulation.SetVar(slot, merged)
 			oldRef = merged
 		}
+		// Boolean variable-copy sibling-arm phi (fastjson2 FieldWriterList.writeList /
+		// ObjectWriterImplList.writeList): one if/else arm copies an earlier boolean-default variable
+		// (`itemRefDetect = previous`, previous compiled to iconst_1/0) into the slot, and a SIBLING arm
+		// stores a genuinely boolean-typed value (`itemRefDetect = jsonWriter.isRefDetect()`). The copy
+		// arm's int-typed ref and the boolean arm's fresh boolean ref split one variable, and the
+		// post-merge use renders `int = boolean`. Re-type the copy arm (and its source default) to
+		// boolean when a phi proves they are one variable. Kill-switch: JDEC_BOOL_VAR_COPY_MERGE_OFF=1.
+		if merged := d.reachingBoolVarCopyMerge(opcode, slot, oldRef, value); merged != nil {
+			runtimeStackSimulation.SetVar(slot, merged)
+			oldRef = merged
+		}
 		// Sibling-arm boolean phi (gson SqlTypesSupport.<clinit>): the second try/catch (or if/else) arm
 		// stores an int 0/1 literal onto a reaching def that an earlier sibling arm already made boolean.
 		// Continue that boolean def (coercing the literal to false/true) instead of splitting off an int
@@ -2939,6 +3078,13 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		d.slotStoreTrace[slot] = slotStoreTraceInfo{offset: opcode.CurrentOffset, ref: ref}
 		statements.NewAssignStatement(ref, value, isFirst)
 		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
+		// Record the creator of each freshly-minted ref so the boolean-copy merge can recover it
+		// deterministically (opcodeIdToRef iteration is unordered and several stores can reuse a ref).
+		if isFirst && ref != nil {
+			if _, exists := d.refToCreatingStore[ref]; !exists {
+				d.refToCreatingStore[ref] = opcode
+			}
+		}
 		attr := d.delRefUserAttr[ref.VarUid]
 		attr[1]++
 		d.delRefUserAttr[ref.VarUid] = attr
