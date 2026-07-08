@@ -105,6 +105,23 @@
 > ① **widen-to-Object 读侧(incompatiblePhiWidenObject)**: 当一个 load 的 reaching-definition web 合流了 ≥2 个引用类型 store 且两两 LUB 恰为 java.lang.Object(Boolean+Predicate+MethodHandle, JSONObject+JSONArray), 把解析出的 ref 重定型为 Object。**回归 +7**(fastjson2 17→24): 即便 LUB-is-Object 门控, 该 ref 上还有成员访问用法依赖较窄类型, 扩宽砸掉这些。**结论**: 不能扩宽同一个 ref, 须为不兼容读**另铸** Object 局部(phi sink), 且仅当读是 putfield/putstatic/return 而非成员访问接收者。
 > ② **JDK-subtype-return merge(reachingRefSlotJDKSubtypeReturnArmMerge)**: 见 #15 注。phi 门控不足以区分「合流读 instanceof SIBLING」与「子类型臂只在一分支赋值」, 后者合流读未初始化。**结论**: 该族治本须更窄的门控(要求合流读是 instanceof 一个 SIBLING 而非 subtype)。
 > ③ **phiSinkCast(putfield/putstatic Object-bridge 双造型 `(T)((Object)(var))`)**: 在 putfield/putstatic(及 areturn) 读侧, 当局部值类型与字段类型不兼容(Boolean↔Predicate、Class[]↔Field)时, 另铸 Object-bridge 双造型。**实测全 8-jar 大幅负回归**(codec -7、commons-lang3 -11、fastjson2 -36、gson -5、guava -77、jsoup -15、snakeyaml -12、spring -22): 即便用 FQN/数组/类型变量门控, 造型在大量本应保原样的字段存上误触发, 破坏 javac 泛型推断与重载决议。**结论**: 读侧造型另铸此路不通; 该族治本仍须从**变量定型/分裂核**(让不兼容类型落在不同 ref)入手, 而非在读侧/汇点用造型兜底。
+> ④ **type-freeze null-adopt guard(slotHasSimulatedIncompatibleStore)**: null-adopt 时若 slot 已有不兼容类型 store, 阻断 adopt 铸新分支 ref。**回归 +10**(fastjson2 14→24): 阻断后合流读绑 null 分支 → 未初始化。**实证 null-adopt 三难困境**: adopt→类型错、阻断→未初始化、widen→砸成员访问。
+> ⑤ **decl-override Object(两趟定型核的实际实现)**: JavaRef 增 `declOverrideType`+`DeclType()`, 声明渲染用 DeclType()(成员访问仍用 Type()); phase-1 后扫 slot 类型签名, 对不兼容 slot 设声明覆盖为 Object。**两种门控均大规模回归**: any-pair(14→**1912**)、all-pairs(14→**1999**)——无法区分「catch-slot 族(合流读会失败)」与「合法 disjoint-reuse(合流读不失败)」, 因为区分需知道每个合流读的下游使用类型(循环依赖)。
+
+### 8b. 剩余 14 条的清零架构蓝图（专项核心重构用, 非单点护栏）
+
+> 本节是「真正两趟重建」核心架构的精确蓝图, 供下一阶段专项重构。本会话穷尽 **12 种**单点/单趟方法(2 成功 10 失败/回退), 实证了三个不可调和的架构性约束, 并定位了唯一可行的治本路径。
+
+**三个不可调和的架构性约束（均已实证）**:
+1. **null-adopt 三难困境**: adopt 到具体类型→字段存类型不符; 阻断 adopt→合流读未初始化(+10 回归); widen adopt 到 Object→成员访问砸掉(+7 回归)。单趟前向模拟在 adopt 点**结构上无法**看到后续不兼容 store, 故无法选出正确(更宽)类型。
+2. **造型过宽触发**: Object-bridge 双造型在 4 种门控配置(phiSinkCast-broad/FQN、rebind-fallback、独立 sink)下均实证回归——造型在 putstatic/putfield 上无法区分「真不兼容」与「合法但看似不兼容」。
+3. **decl-override 大规模回归**: any-pair(1912)/all-pairs(1999)——无法区分「catch-slot 族(合流读会失败)」与「合法 disjoint-reuse(合流读不失败)」, 因为区分需知道每个合流读的下游使用类型(循环依赖)。
+
+**唯一可行治本路径: 真正两趟重建**:
+- **第一趟(收集)**: 全程前向模拟, 收集每个 slot 的完整类型签名(所有 store 的类型集合) + 每个合流读(load)的下游使用类型(该 load 值流向 putfield/putstatic/areturn/invoke-arg/member-access 的目标类型)。**冻结**这些信息。
+- **第二趟(重建)**: 从头重建所有 ref/声明。对每个 slot, 若其类型签名含 ≥2 个引用类型且**至少一个合流读的下游使用类型与该 slot 的所有 store 类型都不兼容**(即「合流读会类型不符」), 则该 slot 的声明定型为 LUB/Object, 且合流读绑定到正确分支(或加造型)。合法 disjoint-reuse slot(合流读下游使用类型与 store 类型兼容)不受影响。
+- **关键**: 第二趟的「仅对合流读会类型不符的 slot」门控, 是打破循环依赖的核心——用第一趟收集的「下游使用类型」判别, 而非预跑重编译。
+- **预估**: 多周级别核心重构, 涉及 CalcOpcodeStackInfo 两趟化、AssignVarGuarded 类型冻结、合流读使用类型收集器、声明定型重建器。需配 `JDEC_TWO_PASS_REBUILD_OFF` kill-switch + 全量 A/B delta + 承重种子 + syntax=0 硬断言。
 
 ---
 
