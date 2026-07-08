@@ -104,6 +104,7 @@
 > **本轮对核心族的两次实证调查(均回退, 记录供后续)**:
 > ① **widen-to-Object 读侧(incompatiblePhiWidenObject)**: 当一个 load 的 reaching-definition web 合流了 ≥2 个引用类型 store 且两两 LUB 恰为 java.lang.Object(Boolean+Predicate+MethodHandle, JSONObject+JSONArray), 把解析出的 ref 重定型为 Object。**回归 +7**(fastjson2 17→24): 即便 LUB-is-Object 门控, 该 ref 上还有成员访问用法依赖较窄类型, 扩宽砸掉这些。**结论**: 不能扩宽同一个 ref, 须为不兼容读**另铸** Object 局部(phi sink), 且仅当读是 putfield/putstatic/return 而非成员访问接收者。
 > ② **JDK-subtype-return merge(reachingRefSlotJDKSubtypeReturnArmMerge)**: 见 #15 注。phi 门控不足以区分「合流读 instanceof SIBLING」与「子类型臂只在一分支赋值」, 后者合流读未初始化。**结论**: 该族治本须更窄的门控(要求合流读是 instanceof 一个 SIBLING 而非 subtype)。
+> ③ **phiSinkCast(putfield/putstatic Object-bridge 双造型 `(T)((Object)(var))`)**: 在 putfield/putstatic(及 areturn) 读侧, 当局部值类型与字段类型不兼容(Boolean↔Predicate、Class[]↔Field)时, 另铸 Object-bridge 双造型。**实测全 8-jar 大幅负回归**(codec -7、commons-lang3 -11、fastjson2 -36、gson -5、guava -77、jsoup -15、snakeyaml -12、spring -22): 即便用 FQN/数组/类型变量门控, 造型在大量本应保原样的字段存上误触发, 破坏 javac 泛型推断与重载决议。**结论**: 读侧造型另铸此路不通; 该族治本仍须从**变量定型/分裂核**(让不兼容类型落在不同 ref)入手, 而非在读侧/汇点用造型兜底。
 
 ---
 
