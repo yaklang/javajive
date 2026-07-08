@@ -100,6 +100,10 @@
 | 19 | ObjectWriterCreatorASM:2380 | Long→Integer | slot 拆 Long+Integer(同槽复用混淆, 非 T1c 装箱) | 同 #1-5/活跃区间分裂 |
 
 > **整体治本前提**: 上述条目的治本相互耦合——例如 LVT 定型会冲击既有 bool-handler 族(reachingBoolDefaultMerge 等依赖 iconst_1/0 当 int 的契约); 三元 widen-to-Object(治 #6/#13/#15/#16)会冲击 AssignVarGuarded 的 mint-vs-reuse 决策; catch 槽拆分(治 #1-5/#14/#17/#19)会冲击 reachingSlotVersionGeneral 的 reaching-def 计算。**必须整体重构 + 全量 A/B delta≥0 + 承重种子 + syntax=0 硬断言**。但 #11/#12 的零回归清零证明该族并非铁板一块: 当 sibling-arm 的 int 版本根因是「复制了一个 bool-default」或「直接三元 iconst」且 phi 证同变量时, 可单点重定型。本轮已落地 5 项**零回归**造型族修复(fastjson2 25→17, 见 §4 的 JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF/JDEC_LIVEINTERVAL_WEB_OFF/JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF/JDEC_CTOR_RAWFI_METHODREF_CAST_OFF/JDEC_BOOL_VAR_COPY_MERGE_OFF)。
+>
+> **本轮对核心族的两次实证调查(均回退, 记录供后续)**:
+> ① **widen-to-Object 读侧(incompatiblePhiWidenObject)**: 当一个 load 的 reaching-definition web 合流了 ≥2 个引用类型 store 且两两 LUB 恰为 java.lang.Object(Boolean+Predicate+MethodHandle, JSONObject+JSONArray), 把解析出的 ref 重定型为 Object。**回归 +7**(fastjson2 17→24): 即便 LUB-is-Object 门控, 该 ref 上还有成员访问用法依赖较窄类型, 扩宽砸掉这些。**结论**: 不能扩宽同一个 ref, 须为不兼容读**另铸** Object 局部(phi sink), 且仅当读是 putfield/putstatic/return 而非成员访问接收者。
+> ② **JDK-subtype-return merge(reachingRefSlotJDKSubtypeReturnArmMerge)**: 见 #15 注。phi 门控不足以区分「合流读 instanceof SIBLING」与「子类型臂只在一分支赋值」, 后者合流读未初始化。**结论**: 该族治本须更窄的门控(要求合流读是 instanceof 一个 SIBLING 而非 subtype)。
 
 ---
 
