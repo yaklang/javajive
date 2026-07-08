@@ -53,6 +53,11 @@ type Decompiler struct {
 	// dup2 pops index first), stackConsumed[i] points at the wrong operand and would emit a
 	// bogus assignment like `int t = i; t[i] = ...`.
 	dupConvertedRefValue          map[*OpCode][]values.JavaValue
+	// checkcastInnerArg records, per OP_CHECKCAST opcode, the inner value (the aload SlotValue)
+	// BEFORE it was wrapped in the cast CustomValue. This lets phase-2 invoke-arg rebinding reach
+	// the original local-load without unpacking the CustomValue's closures (which are opaque).
+	// Populated in the phase-1 OP_CHECKCAST handler.
+	checkcastInnerArg map[*OpCode]values.JavaValue
 	bytecodes                     []byte
 	opCodes                       []*OpCode
 	RootOpCode                    *OpCode
@@ -159,6 +164,7 @@ func NewDecompiler(bytecodes []byte, constantPoolGetter func(id int) values.Java
 		opcodeIdToRef:        map[*OpCode][][2]any{},
 		refToCreatingStore:   map[*values.JavaRef]*OpCode{},
 		dupConvertedRefValue: map[*OpCode][]values.JavaValue{},
+		checkcastInnerArg:    map[*OpCode]values.JavaValue{},
 		varUserMap:           omap.NewEmptyOrderedMap[*values.JavaRef, []*VarFoldRule](),
 		delRefUserAttr:       map[string][3]int{},
 		selfOpFoldedRefs:     map[string]bool{},
@@ -874,6 +880,119 @@ func (d *Decompiler) rebindIncompatibleLoadForSink(sink *OpCode, value values.Ja
 		}
 	}
 	return value
+}
+
+// rebindCheckcastInnerArgs is the phase-2 post-pass for checkcast-wrapped local-loads whose resolved
+// type is incompatible with the cast target. fastjson2 JDKUtils:318: `metafactory(trustedLookup((Class)
+// (var22_1)), ..., (MethodHandle)(var21_1), ...)` where var22_1 is MethodHandle (cast to Class fails)
+// and var21_1 is Throwable (cast to MethodHandle fails). Each cast wraps an aload SlotValue; the cast's
+// ref type (the checkcast target) differs from the slot's parked DFS-stale ref. By phase 2 the
+// simulation is complete, so use the structural reachingStoresOf walk (Source edges) on the checkcast's
+// source aload to find the TRUE reaching store whose committed ref type matches the cast target, and
+// rebind the inner SlotValue to that ref. This makes the cast wrap the branch-correct variable. Kill-
+// switch: JDEC_REBIND_CHECKCAST_INNER_OFF=1 (shared with JDEC_REBIND_INCOMPATIBLE_LOAD_OFF).
+func (d *Decompiler) rebindCheckcastInnerArgs() {
+	if os.Getenv("JDEC_REBIND_CHECKCAST_INNER_OFF") == "1" {
+		return
+	}
+	if os.Getenv("JDEC_REBIND_INCOMPATIBLE_LOAD_OFF") == "1" {
+		return
+	}
+	for checkcastOp, innerArg := range d.checkcastInnerArg {
+		if checkcastOp == nil || innerArg == nil {
+			continue
+		}
+		cv, ok := d.constantPoolGetter(int(Convert2bytesToInt(checkcastOp.Data))).(*values.JavaClassValue)
+		if !ok || cv == nil {
+			continue
+		}
+		castType := cv.Type()
+		if castType == nil {
+			continue
+		}
+		ctFQN, ctOK := types.ClassFQNOf(castType)
+		if !ctOK || ctFQN == "java.lang.Object" {
+			continue
+		}
+		innerRef, ok := slotValueJavaRef(innerArg)
+		if !ok || innerRef == nil {
+			continue
+		}
+		vt := innerRef.Type()
+		if vt == nil {
+			continue
+		}
+		if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+			continue
+		}
+		vtFQN, vtOK := types.ClassFQNOf(vt)
+		if !vtOK {
+			continue
+		}
+		if vtFQN == ctFQN {
+			continue
+		}
+		provider := func() types.SuperTypeProvider {
+			if fc := d.FunctionContext; fc != nil {
+				return fc.SiblingSuperTypes
+			}
+			return nil
+		}()
+		if types.IsReferenceSubtypeBridged(vtFQN, ctFQN, provider) {
+			continue
+		}
+		if types.IsReferenceSubtypeBridged(ctFQN, vtFQN, provider) {
+			continue
+		}
+		// Find the source aload of the checkcast (the load that fed the cast).
+		if len(checkcastOp.Source) == 0 {
+			continue
+		}
+		load := checkcastOp.Source[0]
+		if load == nil || !isLocalLoadOpcode(load.Instr.OpCode) {
+			continue
+		}
+		slot := GetRetrieveIdx(load)
+		if slot < 0 {
+			continue
+		}
+		stores, _ := reachingStoresOf(load, slot)
+		var matchRef *values.JavaRef
+		for _, st := range stores {
+			refs, ok := d.opcodeIdToRef[st]
+			if !ok || len(refs) == 0 {
+				continue
+			}
+			last := refs[len(refs)-1]
+			if len(last) == 0 {
+				continue
+			}
+			stRef, ok := last[0].(*values.JavaRef)
+			if !ok || stRef == nil {
+				continue
+			}
+			stType := stRef.Type()
+			if stType == nil {
+				continue
+			}
+			stFQN, stOK := types.ClassFQNOf(stType)
+			if !stOK {
+				continue
+			}
+			if stFQN == ctFQN && stRef.VarUid != innerRef.VarUid {
+				matchRef = stRef
+				break
+			}
+		}
+		if matchRef == nil {
+			continue
+		}
+		// Rebind the inner SlotValue to the matched branch ref. ResetValue replaces the SlotValue's
+		// inner value, so the cast now wraps the branch-correct variable.
+		if sv, ok := innerArg.(*values.SlotValue); ok && sv != nil {
+			sv.ResetValue(matchRef)
+		}
+	}
 }
 
 // reachingSlotVersionOnMismatch repairs a stale slot read produced by the single global varTable.
@@ -3426,6 +3545,9 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_CHECKCAST:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
 		arg := runtimeStackSimulation.Pop().(values.JavaValue)
+		// Record the inner arg so phase-2 invoke-arg rebinding can reach the original local-load
+		// without unpacking the cast CustomValue's closures (fastjson2 JDKUtils:318).
+		d.checkcastInnerArg[opcode] = arg
 		value := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 			// Wrap the whole cast in parentheses so it keeps the correct precedence
 			// when it becomes the receiver of a member access or method call: without
@@ -5337,6 +5459,11 @@ func (d *Decompiler) ParseStatement() error {
 	}
 	mapCodeToStackVarIndex := map[*OpCode]int{}
 	//DumpOpcodesToDotExp(d.RootOpCode)
+	// Two-pass load rebinding for checkcast-wrapped local-loads (phase-1 simulation is complete here,
+	// opcodeIdToRef fully populated, checkcastInnerArg populated by the phase-1 OP_CHECKCAST handler).
+	// Rebind the inner SlotValue of each incompatible cast to the branch ref whose type matches the
+	// cast target, BEFORE phase-2 statement building consumes the cast value. fastjson2 JDKUtils:318.
+	d.rebindCheckcastInnerArgs()
 	var runCode func(startNode *OpCode) error
 	var parseOpcode func(opcode *OpCode) error
 	parseOpcode = func(opcode *OpCode) error {
