@@ -806,7 +806,12 @@ func (d *Decompiler) rebindIncompatibleLoadForSink(sink *OpCode, value values.Ja
 		return value
 	}
 	isObject := func(n string) bool { return n == "java.lang.Object" }
-	if isObject(vtFQN) || isObject(ttFQN) {
+	// Allow an Object-typed value (a null-adopted or merge-widened slot) flowing into a specific
+	// reference sink: the slot may carry a branch whose type matches the sink (fastjson2 JSON:82
+	// `var6 = var5` where var5 is Object but the true branch is JSONObject). The exact-match reaching
+	// store gate below proves the compatible branch exists. Reject only when the SINK is Object (no
+	// specific target to match).
+	if isObject(ttFQN) {
 		return value
 	}
 	provider := func() types.SuperTypeProvider {
@@ -815,12 +820,16 @@ func (d *Decompiler) rebindIncompatibleLoadForSink(sink *OpCode, value values.Ja
 		}
 		return nil
 	}()
-	// Genuine incompatible pair (Boolean vs Predicate, etc.): neither assignable to the other.
-	if types.IsReferenceSubtypeBridged(vtFQN, ttFQN, provider) {
-		return value
-	}
-	if types.IsReferenceSubtypeBridged(ttFQN, vtFQN, provider) {
-		return value
+	// Genuine incompatible pair (Boolean vs Predicate, etc.): neither assignable to the other. For an
+	// Object-typed value the downcast direction (target <: value) is allowed through -- the exact-match
+	// reaching store gate below is the safety net.
+	if !isObject(vtFQN) {
+		if types.IsReferenceSubtypeBridged(vtFQN, ttFQN, provider) {
+			return value
+		}
+		if types.IsReferenceSubtypeBridged(ttFQN, vtFQN, provider) {
+			return value
+		}
 	}
 	// Find the load that produced this value: it is the Source opcode of the sink whose value was
 	// pushed by an aload. Walk back one Source hop to the load, then use reachingStoresOf (structural,
@@ -5381,6 +5390,12 @@ func (d *Decompiler) ParseStatement() error {
 				// concrete non-Object reference). Kill-switch: JDEC_LAZY_INIT_SELF_TERNARY_OFF.
 				if narrow := lazyInitSelfTernaryNarrow(ref, value); narrow != nil {
 					ref.ResetVarType(narrow)
+				}
+				// Two-pass load rebinding for local-assign sinks: when the stored value is a local-load
+				// whose resolved type is incompatible with the LHS ref's declared type (var6 = var5 where
+				// var6 is JSONObject and var5 is Object carrying a JSONObject branch), rebind to the
+				// branch ref whose type matches the LHS (fastjson2 JSON:82, ObjectReaderImplList:782).
+				if value = d.rebindIncompatibleLoadForSink(opcode, value, ref.Type()); false {
 				}
 				assignSt := statements.NewAssignStatement(ref, value, isFirst)
 				appendNode(assignSt)
