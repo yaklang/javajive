@@ -806,6 +806,24 @@ func (d *Decompiler) rebindIncompatibleLoadForSink(sink *OpCode, value values.Ja
 	vtFQN, vtOK := types.ClassFQNOf(vt)
 	ttFQN, ttOK := types.ClassFQNOf(sinkType)
 	if !vtOK || !ttOK {
+		// An ARRAY-typed value flowing into a non-array reference sink (or vice versa) is an obvious
+		// incompatible pair (e.g. Class[] value into a Field sink). ClassFQNOf returns false for arrays,
+		// so this branch lets the array-vs-class case through to the reaching-store lookup below instead
+		// of bailing. fastjson2 TypeUtils.<clinit>: slot 0 null-initialized as Class[] (DFS-corruption
+		// from a later array reuse) but the true reaching store is getDeclaredField → Field.
+		vtIsArray := vt.IsArray()
+		ttIsArray := sinkType.IsArray()
+		if vtIsArray == ttIsArray {
+			return value
+		}
+		// One is array, the other isn't: genuine incompatibility. Synthesize FQNs so the store lookup
+		// below can match against the non-array side (the sink type).
+		if !ttOK {
+			return value
+		}
+		vtFQN = "" // mark as unknown-array so the subtype checks below skip
+	}
+	if vtFQN == ttFQN {
 		return value
 	}
 	if vtFQN == ttFQN {
@@ -876,7 +894,21 @@ func (d *Decompiler) rebindIncompatibleLoadForSink(sink *OpCode, value values.Ja
 		// Exact name match to the sink type: this is the branch-correct ref.
 		if stFQN == ttFQN && stRef.VarUid != ref.VarUid {
 			// Rebind: a fresh SlotValue wrapping the compatible ref, so the sink reads the correct branch.
-			return values.NewSlotValue(stRef, stType)
+			sv := values.NewSlotValue(stRef, stType)
+			// Register a var-user for the rebound ref so the var-fold user-count reflects this read.
+			// Without this, the rebound ref may look single-use (its phase-1 user count excludes this
+			// phase-2 sink), and var-fold would single-use-fold it away — dropping its declaration and
+			// leaving the sink reading an undeclared variable (fastjson2 TypeUtils.<clinit>
+			// FIELD_JSON_OBJECT_1x_map: the getDeclaredField store is folded into setAccessible, and the
+			// putstatic sink that was rebound to read it then sees no declaration).
+			users := d.varUserMap.GetMust(stRef)
+			d.varUserMap.Set(stRef, append(users, &VarFoldRule{
+				Replace: func(v values.JavaValue) {
+					sv.ResetValue(v)
+				},
+				CurrentOpcode: sink,
+			}))
+			return sv
 		}
 	}
 	return value
