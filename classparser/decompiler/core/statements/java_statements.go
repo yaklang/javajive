@@ -2220,6 +2220,34 @@ func narrowingInitCast(slotType types.JavaType, valueType types.JavaType) string
 	return ""
 }
 
+// concreteNumericDeclFQNs is the set of boxed primitive types (Integer/Long/Double/Float/Short/Byte)
+// that extend java.lang.Number. A slot first seen storing one of these may be widened to Number when
+// a later reassignment stores an incompatible sub-type (fastjson2 ObjectWriterCreatorASM.gwFieldName).
+var concreteNumericDeclFQNs = map[string]bool{
+	"java.lang.Integer": true, "java.lang.Long": true, "java.lang.Double": true,
+	"java.lang.Float": true, "java.lang.Short": true, "java.lang.Byte": true,
+}
+
+// numericSlotWiderThan reports whether the slot type (`a`) is a wider boxed-numeric type than the
+// initializer type (`b`): specifically a == java.lang.Number AND b is a concrete numeric sub-type.
+// This drives `Number varN = Integer.valueOf(...)` declaration rendering when the slot resolved to
+// Number (because it is reused for multiple incompatible numeric stores) but the initializer is
+// concrete. Mirrors intCategoryWiderThan for the int-category primitive hierarchy.
+func numericSlotWiderThan(a types.JavaType, b types.JavaType) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	af, aok := types.ClassFQNOf(a)
+	bf, bok := types.ClassFQNOf(b)
+	if !aok || !bok {
+		return false
+	}
+	if af != "java.lang.Number" {
+		return false
+	}
+	return concreteNumericDeclFQNs[bf]
+}
+
 func NewReturnStatement(value values.JavaValue) *ReturnStatement {
 	return &ReturnStatement{
 		JavaValue: value,
@@ -2542,6 +2570,19 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// SEMANTICALLY WRONG (it truncates 255 back to -1), so the correct fix is the wider int decl.
 		if lt := a.LeftValue.Type(); intCategoryWiderThan(lt, declType) {
 			declType = lt
+		}
+		// When the slot's resolved type is java.lang.Number (or another boxed-numeric supertype) but
+		// the initializer is a concrete numeric sub-type (Integer/Long/...), declare at the slot type
+		// so a later incompatible numeric reassignment compiles (fastjson2 ObjectWriterCreatorASM.
+		// gwFieldName: slot resolved to Number, initializer `Integer.valueOf(0)` → `Integer var11`,
+		// but a switch-case stores `Long.valueOf(...)` → "Long cannot be converted to Integer").
+		// Declaring `Number var11 = Integer.valueOf(0)` is valid: Integer is-a Number. This mirrors
+		// the int-category widening above but for the boxed-numeric hierarchy. Kill-switch:
+		// JDEC_NUMERIC_DECL_SLOT_TYPE_OFF=1.
+		if os.Getenv("JDEC_NUMERIC_DECL_SLOT_TYPE_OFF") == "" {
+			if lt := a.LeftValue.Type(); numericSlotWiderThan(lt, declType) {
+				declType = lt
+			}
 		}
 		// Narrowing cast for byte/char/short locals: JLS promotes these types to int in any
 		// arithmetic/bitwise/shift expression, so `byte x = (arr[i] ^ crc) & 255` is int-valued at
