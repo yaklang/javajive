@@ -1209,6 +1209,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// This overcomes the chunked-sourceCode limitation where the per-method init couldn't see
 	// assignments in other method blocks. Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
 	full = initProximateSplitSlotDecl(full)
+	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
+	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
+	full = fixTryCatchExceptionPlacement(full)
 	return full, nil
 }
 
@@ -4050,6 +4053,152 @@ func hasReadInBody(body, name string) bool {
 func isWordByteDump(b byte) bool {
 	return b == '_' || b == '$' || (b >= '0' && b <= '9') ||
 		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// fixTryCatchExceptionPlacement detects the pattern where exception-throwing calls (getDeclaredConstructor,
+// newInstance, etc.) are rendered OUTSIDE a try block, while the catch clause lists those exception types.
+// It moves the calls into the inner try body so javac sees them as caught.
+//
+// Pattern detected:
+//   if (cond){
+//       <exception-throwing call 1>
+//       <exception-throwing call 2>
+//   }
+//   try{
+//       try{
+//           <non-throwing statement>
+//       }catch(ExceptionType1 | ExceptionType2 ...){
+//           throw new JSONException(...);
+//       }
+//   }catch(Throwable){ }
+//
+// Fix: move the exception-throwing calls from the if-body into the inner try-body.
+// Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
+func fixTryCatchExceptionPlacement(body string) string {
+	if os.Getenv("JDEC_FIX_TRYCATCH_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// Scan for the pattern: an if-block whose body contains calls to methods that throw
+	// checked exceptions (getDeclaredConstructor, newInstance, getMethod, etc.), immediately
+	// followed by a try block whose catch lists those exception types.
+	throwingCallRe := regexp.MustCompile(`\.(getDeclaredConstructor|newInstance|getMethod|getConstructor)\(`)
+	for i := 0; i < len(lines); i++ {
+		// Check if this line starts an if block.
+		lnClean := strings.TrimRight(lines[i], "\r")
+		if !strings.Contains(lnClean, "if (") || !strings.HasSuffix(strings.TrimSpace(lnClean), "{") {
+			continue
+		}
+		ifIndent := ""
+		for _, c := range lnClean {
+			if c == '\t' {
+				ifIndent += "\t"
+			} else {
+				break
+			}
+		}
+		// Collect the if-body lines (at ifIndent + 1 tab).
+		bodyIndent := ifIndent + "\t"
+		var ifBodyLines []int
+		closingBrace := -1
+		for j := i + 1; j < len(lines) && j < i+20; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "}" && strings.HasPrefix(jl, ifIndent) && !strings.HasPrefix(jl, bodyIndent) {
+				closingBrace = j
+				break
+			}
+			ifBodyLines = append(ifBodyLines, j)
+		}
+		if closingBrace < 0 || len(ifBodyLines) == 0 {
+			continue
+		}
+		// Check if any if-body line has a throwing call.
+		hasThrowingCall := false
+		for _, idx := range ifBodyLines {
+			if throwingCallRe.MatchString(lines[idx]) {
+				hasThrowingCall = true
+				break
+			}
+		}
+		if !hasThrowingCall {
+			continue
+		}
+		// Check if the NEXT non-empty line after closingBrace is a try block.
+		tryLine := -1
+		for j := closingBrace + 1; j < len(lines) && j < closingBrace + 3; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "" {
+				continue
+			}
+			if strings.Contains(jl, "try{") {
+				tryLine = j
+			}
+			break
+		}
+		if tryLine < 0 {
+			continue
+		}
+		// Find the inner try body: the line after `try{` at tryIndent+1.
+		innerTryIndent := ifIndent + "\t"
+		innerTryStart := -1
+		for j := tryLine + 1; j < len(lines) && j < tryLine + 5; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.Contains(jl, "try{") && strings.HasPrefix(jl, innerTryIndent) {
+				innerTryStart = j + 1
+				break
+			}
+		}
+		if innerTryStart < 0 {
+			continue
+		}
+		// Move the throwing-call lines from the if-body to before the inner try's first statement.
+		// Build the new lines: remove throwing calls from if-body, insert them at innerTryStart.
+		var throwingLines []string
+		var newIfBody []string
+		for _, idx := range ifBodyLines {
+			jl := strings.TrimRight(lines[idx], "\r")
+			if throwingCallRe.MatchString(jl) {
+				// Re-indent to innerTryIndent + 1 tab.
+				trimmed := strings.TrimLeft(jl, "\t")
+				throwingLines = append(throwingLines, innerTryIndent+"\t"+trimmed)
+			} else {
+				newIfBody = append(newIfBody, jl)
+			}
+		}
+		if len(throwingLines) == 0 {
+			continue
+		}
+		// Replace the if-body: keep non-throwing lines only.
+		// The if-body lines span from i+1 to closingBrace-1.
+		// First, blank out all original if-body lines.
+		for _, idx := range ifBodyLines {
+			lines[idx] = ""
+		}
+		// Re-fill with non-throwing lines.
+		bodyOffset := i + 1
+		for _, l := range newIfBody {
+			lines[bodyOffset] = l
+			bodyOffset++
+		}
+		// If the if-body is now empty (all lines were throwing), make the if body just `{}`.
+		if len(newIfBody) == 0 {
+			// Merge the if line and closing brace into `{` on same line.
+			lines[i] = strings.TrimRight(lines[i], "\r")
+			lines[closingBrace] = ""
+			// Move closing brace to if line.
+			// Actually keep as is — an empty if body `{ }` is fine.
+			// Put an empty line where the body was.
+			lines[i+1] = ifIndent + "\t"
+		}
+		// Insert throwing lines before the inner try's first statement.
+		// We need to shift all subsequent lines down.
+		insertAt := innerTryStart
+		for _, tl := range throwingLines {
+			lines = append(lines[:insertAt], append([]string{tl}, lines[insertAt:]...)...)
+			insertAt++
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // countAssignTargets counts how many times name appears as an assignment target (`name =` but not
