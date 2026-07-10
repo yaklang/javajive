@@ -3242,6 +3242,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				methodReturnTypeStr = mt.ReturnType.String(funcCtx)
 			}
 			sourceCode = addMissingGeneratedLocalDecls(sourceCode, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr)
+			sourceCode = initProximateSplitSlotDecl(sourceCode)
 			code = sourceCode
 		}
 	}
@@ -3883,6 +3884,187 @@ func addMissingGeneratedLocalDecls(body, params, receiverType string, methodRetu
 		lines = append(lines, fmt.Sprintf("\t%s %s = %s;\n", typ, name, zero))
 	}
 	return "\n" + strings.Join(lines, "") + strings.TrimPrefix(body, "\n")
+}
+
+// initProximateSplitSlotDecl initializes bare `Type varN;` declarations (no initializer) to
+// `Type varN = null;` when a dead-store `Object varM;` sibling exists within a small line window
+// (proximity gate). This repairs the definite-assignment error from a split slot (String in the
+// if-branch, Object in the else-branch) WITHOUT attempting a structural variable merge.
+//
+// The proximity gate (≤ maxLines apart) is the key safety mechanism: it ensures the Object
+// dead-store is in the SAME if/else block as the bare declaration, not in an unrelated part of the
+// method. Canonical case: fastjson2 JSON.copyTo — `String var16;` (line 4351) + `Object var17;`
+// (line 4358, 7 lines apart). Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
+func initProximateSplitSlotDecl(body string) string {
+	if os.Getenv("JDEC_INIT_PROX_SPLIT_OFF") == "1" {
+		return body
+	}
+	dbg := false
+	const maxLines = 10 // max line distance between bare decl and Object dead-store sibling
+	lines := strings.Split(body, "\n")
+	// Pre-collect all Object dead-store declaration line numbers.
+	type objDecl struct {
+		name string
+		line int
+	}
+	var objDecls []objDecl
+	for i, ln := range lines {
+		// Match `Object varM;` at any indentation.
+		m := objDeclLineRe.FindStringSubmatch(strings.TrimRight(ln, "\r"))
+		if m != nil {
+			varM := m[1]
+			// Check if varM is a dead store (never read in the full body).
+			if !hasReadInBody(body, varM) {
+				objDecls = append(objDecls, objDecl{name: varM, line: i})
+			}
+		}
+	}
+	if len(objDecls) == 0 {
+		if dbg {
+			fmt.Fprintf(os.Stderr, "[PROX] no Object dead stores found\n")
+		}
+		return body
+	}
+	if dbg {
+		fmt.Fprintf(os.Stderr, "[PROX] found %d Object dead stores\n", len(objDecls))
+	}
+	// For each bare `Type varN;` declaration, check if an Object dead-store exists within maxLines.
+	bareDeclRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+(var\d+(?:_\d+)?)\s*;(\s*)$`)
+	for i, ln := range lines {
+		lnClean := strings.TrimRight(ln, "\r")
+		m := bareDeclRe.FindStringSubmatch(lnClean)
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		declType := strings.TrimSpace(m[2])
+		varN := m[3]
+		trailing := m[4]
+		// Skip Java keywords that look like type tokens (throw, return, new, etc.).
+		switch declType {
+		case "throw", "return", "new", "if", "else", "for", "while", "do", "switch", "case",
+			"break", "continue", "try", "catch", "finally", "synchronized", "assert":
+			continue
+		}
+		// Determine the initializer value based on type.
+		initVal := "null"
+		switch declType {
+		case "int", "long", "short", "byte":
+			initVal = "0"
+		case "double":
+			initVal = "0.0"
+		case "float":
+			initVal = "0.0F"
+		case "char":
+			initVal = "'\\0'"
+		case "boolean":
+			initVal = "false"
+		}
+		// varN must be read somewhere (has a non-assignment use).
+		if !hasReadInBody(body, varN) {
+			if dbg && varN == "var16" {
+				fmt.Fprintf(os.Stderr, "[PROX] var16 not read\n")
+			}
+			continue
+		}
+		// Gate: either (a) an Object dead-store sibling is nearby (the split-slot signature), or
+		// (b) varN is assigned ≥2 times in the body (a multi-branch if/else chain where one branch
+		// may not cover all paths). Both signals indicate a definite-assignment risk from the
+		// decompiler's branch structuring.
+		// Check proximity: is there an Object dead-store within maxLines?
+		found := false
+		for _, od := range objDecls {
+			if abs(i-od.line) <= maxLines {
+				found = true
+				break
+			}
+		}
+		// Fallback gate: multi-branch assignment chain (≥2 assignment targets).
+		if !found && countAssignTargets(body, varN) >= 2 {
+			found = true
+		}
+		if !found {
+			if dbg && varN == "var16" {
+				fmt.Fprintf(os.Stderr, "[PROX] var16 no proximate dead store (line=%d)\n", i)
+			}
+			continue
+		}
+		// Initialize: `Type varN;` → `Type varN = <initVal>;`
+		if dbg {
+			fmt.Fprintf(os.Stderr, "[PROX] INITIALIZING %s %s = %s; (line=%d)\n", declType, varN, initVal, i)
+		}
+		lines[i] = indent + declType + " " + varN + " = " + initVal + ";" + trailing
+	}
+	return strings.Join(lines, "\n")
+}
+
+var objDeclLineRe = regexp.MustCompile(`^\t+Object\s+(var\d+(?:_\d+)?)\s*;`)
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// hasReadInBody reports whether name appears as a READ (not declaration, not assignment target)
+// anywhere in body.
+func hasReadInBody(body, name string) bool {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	locs := re.FindAllStringIndex(body, -1)
+	for _, loc := range locs {
+		before := body[:loc[0]]
+		after := body[loc[1]:]
+		// Skip declarations: preceded by a type token on the same line.
+		lineStart := strings.LastIndex(before, "\n") + 1
+		lineBefore := strings.TrimSpace(before[lineStart:])
+		if lineBefore != "" {
+			c := lineBefore[len(lineBefore)-1]
+			// A declaration is preceded by a type token ending in an identifier char, ], >, or ?.
+			// NOT ')' — that would match casts like `(Type) (varN)`.
+			if isWordByteDump(c) || c == ']' || c == '>' || c == '?' {
+				continue
+			}
+		}
+		// Skip assignment targets: followed by `=` but not `==`.
+		afterTrim := strings.TrimLeft(after, " \t")
+		if strings.HasPrefix(afterTrim, "=") && !strings.HasPrefix(afterTrim, "==") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isWordByteDump(b byte) bool {
+	return b == '_' || b == '$' || (b >= '0' && b <= '9') ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// countAssignTargets counts how many times name appears as an assignment target (`name =` but not
+// `name ==`) in body. Used to detect multi-branch if/else chains.
+func countAssignTargets(body, name string) int {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	locs := re.FindAllStringIndex(body, -1)
+	count := 0
+	for _, loc := range locs {
+		after := body[loc[1]:]
+		afterTrim := strings.TrimLeft(after, " \t")
+		if strings.HasPrefix(afterTrim, "=") && !strings.HasPrefix(afterTrim, "==") {
+			// Skip declarations (preceded by type token).
+			before := body[:loc[0]]
+			lineStart := strings.LastIndex(before, "\n") + 1
+			lineBefore := strings.TrimSpace(before[lineStart:])
+			if lineBefore != "" {
+				c := lineBefore[len(lineBefore)-1]
+				if isWordByteDump(c) || c == ']' || c == '>' || c == '?' {
+					continue
+				}
+			}
+			count++
+		}
+	}
+	return count
 }
 
 // castEscapeDeclLineRe matches a single rendered line that DECLARES a generated local
