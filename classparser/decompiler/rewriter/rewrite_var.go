@@ -249,6 +249,24 @@ func collectEmbeddedDeclInfos(sts []statements.Statement, byID map[*utils.Variab
 				byName[name] = append(byName[name], embeddedDeclInfo{id: ref.Id, typeStr: ts})
 			}
 		}
+		// A catch parameter (`catch(T varN)`) is also a declaration: it scopes a name to the catch
+		// body. Without collecting it, an embedded assignment to a same-named slot-derived local in a
+		// DIFFERENT try (fastjson2 JDKUtils <clinit>: `var31 = Class.class` in the try, `catch(Throwable
+		// var31)` in a sibling try) would not see the catch param as an incompatible collider, so
+		// SynthesizeUndeclaredEmbeddedAssignDecls would skip synthesizing its declaration.
+		if tc, ok := st.(*statements.TryCatchStatement); ok && tc != nil {
+			for _, exc := range tc.Exception {
+				if exc != nil && exc.Id != nil {
+					byID[exc.Id] = struct{}{}
+					name := exc.String(hoistProbeCtx)
+					ts := ""
+					if t := exc.Type(); t != nil {
+						ts = t.String(hoistProbeCtx)
+					}
+					byName[name] = append(byName[name], embeddedDeclInfo{id: exc.Id, typeStr: ts})
+				}
+			}
+		}
 		for _, cl := range childStatementLists(st) {
 			collectEmbeddedDeclInfos(*cl, byID, byName)
 		}
