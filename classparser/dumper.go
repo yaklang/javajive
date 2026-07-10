@@ -3968,9 +3968,8 @@ func initProximateSplitSlotDecl(body string) string {
 			continue
 		}
 		// Gate: either (a) an Object dead-store sibling is nearby (the split-slot signature), or
-		// (b) varN is assigned ≥2 times in the body (a multi-branch if/else chain where one branch
-		// may not cover all paths). Both signals indicate a definite-assignment risk from the
-		// decompiler's branch structuring.
+		// (b) varN is assigned ≥1 time and is a primitive type (multi-branch if/else chain where one
+		// branch may not cover all paths — primitives are safe to default-init to 0/false/'\0').
 		// Check proximity: is there an Object dead-store within maxLines?
 		found := false
 		for _, od := range objDecls {
@@ -3979,8 +3978,17 @@ func initProximateSplitSlotDecl(body string) string {
 				break
 			}
 		}
-		// Fallback gate: multi-branch assignment chain (≥2 assignment targets).
-		if !found && countAssignTargets(body, varN) >= 2 {
+		// Fallback gate for primitives: assigned ≥1 time (the variable is used in a branch chain).
+		isPrimitive := false
+		switch declType {
+		case "int", "long", "short", "byte", "double", "float", "char", "boolean":
+			isPrimitive = true
+		}
+		if !found && isPrimitive && countAssignTargets(body, varN) >= 1 {
+			found = true
+		}
+		// Fallback gate for reference types: assigned ≥2 times (multi-branch chain).
+		if !found && !isPrimitive && countAssignTargets(body, varN) >= 2 {
 			found = true
 		}
 		if !found {
