@@ -108,6 +108,22 @@
 > ④ **type-freeze null-adopt guard(slotHasSimulatedIncompatibleStore)**: null-adopt 时若 slot 已有不兼容类型 store, 阻断 adopt 铸新分支 ref。**回归 +10**(fastjson2 14→24): 阻断后合流读绑 null 分支 → 未初始化。**实证 null-adopt 三难困境**: adopt→类型错、阻断→未初始化、widen→砸成员访问。
 > ⑤ **decl-override Object(两趟定型核的实际实现)**: JavaRef 增 `declOverrideType`+`DeclType()`, 声明渲染用 DeclType()(成员访问仍用 Type()); phase-1 后扫 slot 类型签名, 对不兼容 slot 设声明覆盖为 Object。**两种门控均大规模回归**: any-pair(14→**1912**)、all-pairs(14→**1999**)——无法区分「catch-slot 族(合流读会失败)」与「合法 disjoint-reuse(合流读不失败)」, 因为区分需知道每个合流读的下游使用类型(循环依赖)。
 
+> ⑥ **TypeReference.canonicalize `int var10;` 级联(本轮深度调查, 记录供后续)**:
+> 唯一剩余的 fastjson2 tree errLine 是 `TypeReference.java:149: variable var10 might not have been initialized`。根因: `canonicalize` 方法的 slot 10 是裸声明 `int var10;`, 后接 8 层嵌套 if/else-if 链检查 `Class.TYPE`(Integer/Long/Float/Double/Boolean/Character/Byte/Short), 每层 `var10 = <ascii>`, 但**最深层的 else 缺少 final-else**(Short.TYPE 的 if 没有 else), 故 javac 判定 var10 在某路径未赋值。读取点 `var11[var8] = (char)(var10)` 在链之后。
+>
+> **级联性质(纠正之前"28+ 跨 8 类不可治本"的判断)**: 修 TypeReference:149 会通过 javac tree-compile 错误掩盖机制揭示下游潜伏错误, 但级联**逐层可治**:
+> - **L1 TypeReference var10**(裸 int + 缺 final-else 链): 治本是 `initProximateSplitSlotDecl` 的「缺 final-else 链」门控 + lambda-capture 安全跳过 + hasRead 控制关键字修正 + lv 前缀正则。
+> - **L2 ObjectWriterCreator**(8 潜伏错误): var9_3(use-before-def 重排)、lv4_11_3(条件赋值+无条件读)、var5/var9/var11(varN 被 lambda 捕获+被赋值→非 effectively-final)。治本: 移除 initProximateSplitSlotDecl 的「无 Object dead-store 即 early-return」+ ref 门控放宽 + **method-scoped depth-aware lambda-capture 跳过**(nameCapturedByLambdaMethod: 仅当读在比声明更深的 lambda 体内才判为 capture; 同 lambda 内声明并使用的不算 capture)。
+> - **L3 JSONWriter**(4 潜伏错误): `JSONWriterUTF16 var1;` + `JSONWriter var1_1;` slot-split(同槽存 JDK8 分支的 UTF16 子类与其他分支的 JSONWriter 接口), return 读 var1(只在 JDK8 分支赋值)。治本: hasRead 把 `return varN` 正确判为读(控制关键字 `return` 不应被当类型 token)。
+> - **L4 ObjectReaderCreator**(2 硬错): `var14_3`(Class)/`var13_2`(String) 在 `do/while` 循环内每次迭代重赋值, 被外层 lambda `(l0)->{...}` 捕获 → 非 effectively-final。**这是结构性 capture 错误, 不是 DA 错误**, 须用 **final-copy 技法**(在 lambda 前插入 `final Type varN_f = varN;` 并重写 lambda 体内引用)治本。
+>
+> **本轮实证的关键约束(均回退)**:
+> - **initProximateSplitSlotDecl 的 primitive/ref 宽门控(countAssign≥1/≥2)与承重测试冲突**: `TestBoolVarCopyMerge`/`TestObjectSiblingArmMerge`/`TestNullReassignMerge`/`fastjson2_JdbcSupport_TimeReader.golden` 等承重测试**断言裸声明保留**(boolean var5;、Object var2;、long var5; 等), 任何把这些裸声明初始化的门控都破坏测试。primitive/ref 宽门控在移除 early-return 后触达这些承重种子, 必须用更窄的「缺 final-else 链」门控替代。
+> - **chainLacksFinalElse 文本检测脆弱**: 检测「裸声明后接缺 final-else 的 if/else 链」须处理嵌套结构(反编译器把 else-if 渲染成嵌套 `}else{ if(){}}`)。逐层 brace-depth 下探 + else 体内「varN 在内层 if 前是否无条件赋值」判别, 但仍误报(如 BoolVarCopy 的 else 体内 `var5=isRefDetect()` 后接 `if(var5)`, 该内层 if 与 var5 的 DA 无关)。**结论**: 纯文本的 DA 分析(无结构化 CFG)对本族不可靠。
+> - **Object 类型排除**: `chainLacksFinalElse` 须排除纯 `Object` 声明(null-reassign split 的 widened 产物, JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF 时裸形是有意承重)。
+>
+> **结论**: TypeReference→OWC→JSONWriter 三层 DA 级联**可治**(机制已实证: 移除 early-return + method-scoped capture 跳过 + hasRead 控制关键字 + chainLacksFinalElse 门控), 但需同时更新承重测试断言(从裸声明改为带初始化声明), 且**L4 ORC capture 是硬阻碍**(2 条结构性 effectively-final 错误, 须 final-copy 技法)。**净效果(已回退)**: fastjson2 1→2(ORC capture 回归), commons-lang3 -1, snakeyaml -1。要达 fastjson2=0 须先实现 final-copy lambda-capture 修复(高风险结构改写)并更新承重测试。
+
 ### 8b. 剩余 14 条的清零架构蓝图（专项核心重构用, 非单点护栏）
 
 > 本节是「真正两趟重建」核心架构的精确蓝图, 供下一阶段专项重构。本会话穷尽 **12 种**单点/单趟方法(2 成功 10 失败/回退), 实证了三个不可调和的架构性约束, 并定位了唯一可行的治本路径。
