@@ -1205,6 +1205,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// ordinal()])` back to the idiomatic `switch(sel){ case CONST: ... }`. No-op without a resolver
 	// or when JDEC_NO_ENUM_SWITCH_FOLD is set; produces valid Java, so it runs after assembly.
 	full = c.foldEnumSwitchMaps(full)
+	// Run the split-slot definite-assignment init on the FULL class text (all methods merged).
+	// This overcomes the chunked-sourceCode limitation where the per-method init couldn't see
+	// assignments in other method blocks. Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
+	full = initProximateSplitSlotDecl(full)
 	return full, nil
 }
 
@@ -3242,7 +3246,6 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				methodReturnTypeStr = mt.ReturnType.String(funcCtx)
 			}
 			sourceCode = addMissingGeneratedLocalDecls(sourceCode, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr)
-			sourceCode = initProximateSplitSlotDecl(sourceCode)
 			code = sourceCode
 		}
 	}
