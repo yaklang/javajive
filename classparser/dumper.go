@@ -1205,16 +1205,30 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// ordinal()])` back to the idiomatic `switch(sel){ case CONST: ... }`. No-op without a resolver
 	// or when JDEC_NO_ENUM_SWITCH_FOLD is set; produces valid Java, so it runs after assembly.
 	full = c.foldEnumSwitchMaps(full)
+	// fixLambdaLoopCapture runs FIRST: it inserts final-copies for loop-reassigned captured vars
+	// and rewrites lambda-body reads to the copy. After this, the original variable is no longer
+	// read inside the lambda, so initProximateSplitSlotDecl (next) can safely default-initialize it
+	// (the lambda-capture skip won't fire for a var whose reads were already rewritten to the copy).
+	// Kill-switch: JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
+	full = fixLambdaLoopCapture(full)
 	// Run the split-slot definite-assignment init on the FULL class text (all methods merged).
 	// This overcomes the chunked-sourceCode limitation where the per-method init couldn't see
 	// assignments in other method blocks. Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
 	full = initProximateSplitSlotDecl(full)
-	// fixLambdaLoopCapture repairs loop-reassigned variables captured by lambdas via a final-copy.
-	// DISABLED by default: the body-span/rewrite logic is unreliable for multi-capture, large-body
-	// lambdas (causes widespread "cannot find symbol"). Enable with JDEC_LAMBDA_LOOP_CAPTURE_COPY_ON=1.
-	if os.Getenv("JDEC_LAMBDA_LOOP_CAPTURE_COPY_ON") == "1" {
-		full = fixLambdaLoopCapture(full)
+	// removeUnreachableSwitchBreak drops `break;` after a nested switch whose default throws/returns.
+	// Kill-switch: JDEC_RM_UNREACHABLE_BREAK_OFF=1.
+	full = removeUnreachableSwitchBreak(full)
+	// fixMissingReturn adds `return null;` before the closing brace of a value-returning method
+	// whose body does not end in a return/throw on all paths (javac: "missing return statement").
+	// DISABLED: too aggressive (275 regressions — the sigRe/last-line heuristic is unreliable).
+	// Kill-switch: JDEC_FIX_MISSING_RETURN_OFF=1.
+	if os.Getenv("JDEC_FIX_MISSING_RETURN_ON") == "1" {
+		full = fixMissingReturn(full)
 	}
+	// fixEmptySwitchDefault inserts a terminator (throw) into `switch` default labels whose body is
+	// empty, which otherwise leaves a value-returning method without a return on that path.
+	// Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
+	full = fixEmptySwitchDefault(full)
 	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
 	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
 	full = fixTryCatchExceptionPlacement(full)
@@ -4614,38 +4628,46 @@ func fixLambdaLoopCapture(body string) string {
 		var edits []edit
 		copySeq := 0 // per-method counter for unique final-copy names
 		for name, ci := range captured {
-			// Use only the FIRST capture point for insertion; rewrite ALL capture-site bodies to the
-			// same copy. Multiple capture points within one statement share the enclosing scope, so a
-			// single copy before the statement suffices (and avoids landing copies mid-statement).
-			if len(ci.lambdaOpenSubIdxs) == 0 {
-				continue
-			}
-			firstOpen := ci.lambdaOpenSubIdxs[0]
-			openGlobal := mr.start + firstOpen
-			copySeq++
-			fname := fmt.Sprintf("%s_f%d", name, copySeq)
-			// Indent of the lambda-open line (the statement containing `-> {`); insert the copy
-			// at the same indent just before it.
-			openLn := strings.TrimRight(lines[openGlobal], "\r")
-			insIndent := leadingTabs(openLn)
-			edits = append(edits, edit{
-				insertAtGlobal: openGlobal,
-				insertIndent:   insIndent,
-				insertText:     insIndent + "final " + ci.declType + " " + fname + " = " + name + ";",
-				name:           name,
-				fname:          fname,
-			})
-			// Add a rewrite edit for EACH capture-site body (all map name -> fname).
+			// For EACH capture site, insert a dedicated final-copy (each lambda body may be in a
+			// different branch/scope, so one copy cannot cover all). The copy is inserted just before
+			// the lambda-open line (in the same scope), and ONLY that lambda body is rewritten.
 			for _, openSub := range ci.lambdaOpenSubIdxs {
-				og := mr.start + openSub
-				// The lambda body starts AFTER the `-> {` line (the open line declares the lambda,
-				// including its param — do not rewrite it). Find the body span: from og+1 to the
-				// matching close brace of the `-> {` block.
-				bodyStart := og + 1
+				openGlobal := mr.start + openSub
+				copySeq++
+				fname := fmt.Sprintf("%s_f%d", name, copySeq)
+				openLn := strings.TrimRight(lines[openGlobal], "\r")
+				insIndent := leadingTabs(openLn)
+				// Insertion point: normally the lambda-open line. But when the lambda is a deeply-
+				// nested argument (parenDepth ≥ 2), the `-> {` is mid-statement — inserting there is
+				// syntactically invalid. Walk back to the start of the enclosing statement (the
+				// nearest preceding line at a shallower-or-equal indent following a `;`/`}`/`{`
+				// boundary) and insert there instead.
+				insertAt := openGlobal
+				if arrowIdx := strings.Index(openLn, "->"); arrowIdx >= 0 {
+					parenDepth := 0
+					for i := 0; i < arrowIdx; i++ {
+						switch openLn[i] {
+						case '(':
+							parenDepth++
+						case ')':
+							parenDepth--
+						}
+					}
+					if parenDepth >= 2 {
+						stmtStart := findEnclosingStmtStart(lines, openGlobal, mr.start)
+						if stmtStart >= 0 {
+							insertAt = stmtStart
+							insIndent = leadingTabs(strings.TrimRight(lines[stmtStart], "\r"))
+						}
+					}
+				}
+				// The lambda body starts AFTER the `-> {` line. Find the matching close brace of the
+				// `-> {` block by brace depth.
+				bodyStart := openGlobal + 1
 				bodyEnd := bodyStart
 				depth := 0
 				started := false
-				for k := og; k < len(lines); k++ {
+				for k := openGlobal; k < len(lines); k++ {
 					lk := strings.TrimRight(lines[k], "\r")
 					for b := 0; b < len(lk); b++ {
 						switch lk[b] {
@@ -4662,6 +4684,9 @@ func fixLambdaLoopCapture(body string) string {
 					}
 				}
 				edits = append(edits, edit{
+					insertAtGlobal: insertAt,
+					insertIndent:   insIndent,
+					insertText:     insIndent + "final " + ci.declType + " " + fname + " = " + name + ";",
 					bodyStartGlobal: bodyStart,
 					bodyEndGlobal:   bodyEnd,
 					name:            name,
@@ -4713,10 +4738,60 @@ func fixLambdaLoopCapture(body string) string {
 // sortEditsDesc sorts edits by insertAtGlobal in descending order.
 // (sort.Slice is used inline instead.)
 
-// lambdaLineIsStmtStart reports whether the lambda-open line at idx begins a fresh statement:
-// the previous non-blank line must end in `;`, `{`, or `}` (a statement boundary). This ensures the
-// final-copy insertion lands at a statement boundary rather than mid-expression.
+// findEnclosingStmtStart scans backward from idx (within [methodStart, idx]) to find the first
+// line of the statement containing idx: the nearest preceding line at a shallower-or-equal indent
+// that immediately follows a statement boundary (`;`/`}`/`{` on the previous non-blank line).
+// Returns -1 if not found.
+func findEnclosingStmtStart(lines []string, idx, methodStart int) int {
+	openIndent := leadingTabs(strings.TrimRight(lines[idx], "\r"))
+	for k := idx; k >= methodStart; k-- {
+		ln := strings.TrimRight(lines[k], "\r")
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		ind := leadingTabs(ln)
+		if len(ind) > len(openIndent) {
+			continue // deeper — still inside the statement
+		}
+		// At or shallower than openIndent. Check if the PREVIOUS non-blank line ended a statement.
+		prev := -1
+		for j := k - 1; j >= methodStart; j-- {
+			if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+				continue
+			}
+			prev = j
+			break
+		}
+		if prev < 0 {
+			return k // start of method body
+		}
+		pt := strings.TrimRight(strings.TrimRight(lines[prev], "\r"), " \t")
+		if len(pt) > 0 && (pt[len(pt)-1] == ';' || pt[len(pt)-1] == '{' || pt[len(pt)-1] == '}') {
+			return k
+		}
+	}
+	return -1
+}
+
+// lambdaLineIsStmtStart reports whether the lambda-open line at idx begins a fresh, simple
+// statement: (a) the previous non-blank line ends in `;`, `{`, or `}` (a statement boundary), AND
+// (b) the lambda-open line itself is a simple expression statement (NOT a `return` or assignment
+// whose value is a larger expression containing the lambda). This avoids multi-line argument
+// lambdas embedded in return/assignment expressions where inserting a copy breaks structure.
 func lambdaLineIsStmtStart(lines []string, idx int) bool {
+	openLn := strings.TrimRight(lines[idx], "\r")
+	// Reject return-statements whose value is a chained/complex expression.
+	trimOpen := strings.TrimSpace(openLn)
+	if strings.HasPrefix(trimOpen, "return ") || strings.HasPrefix(trimOpen, "return(") {
+		return false
+	}
+	// Reject continuation lines of a multi-line argument list: lines starting with `})`, `},`, or
+	// `,` indicate the lambda is a later argument of a call spanning multiple lines. (The first
+	// argument lambda is handled even if deeply nested — its copy inserts at the statement start.)
+	if strings.HasPrefix(trimOpen, "})") || strings.HasPrefix(trimOpen, "},") ||
+		strings.HasPrefix(trimOpen, "),") || strings.HasPrefix(trimOpen, ",(") {
+		return false
+	}
 	for k := idx - 1; k >= 0; k-- {
 		ln := strings.TrimRight(lines[k], "\r")
 		if strings.TrimSpace(ln) == "" {
@@ -4779,6 +4854,224 @@ func rewriteLambdaReads(ln, name, newName string) string {
 	}
 	b.WriteString(ln[prev:])
 	return b.String()
+}
+
+// removeUnreachableSwitchBreak removes a `break;` that immediately follows the closing `}` of a
+// nested switch whose `default:` clause unconditionally terminates (throw/return). Such a break is
+// unreachable (javac: "unreachable statement") and its presence can mask the real control flow,
+// producing spurious downstream errors. The detection: a `break;` whose preceding non-blank line is
+// a `}` at the same indent, where that `}` closes a switch block whose last label is `default:` with
+// a throw/return body. Kill-switch: JDEC_RM_UNREACHABLE_BREAK_OFF=1.
+func removeUnreachableSwitchBreak(body string) string {
+	if os.Getenv("JDEC_RM_UNREACHABLE_BREAK_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	breakRe := regexp.MustCompile(`^(\t+)break;\s*$`)
+	var removeIdx []int
+	for i := 0; i < len(lines); i++ {
+		m := breakRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		// Find the preceding non-blank line; it must be `indent}` (closing a block at this indent).
+		prev := -1
+		for j := i - 1; j >= 0; j-- {
+			if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+				continue
+			}
+			prev = j
+			break
+		}
+		if prev < 0 {
+			continue
+		}
+		if strings.TrimRight(lines[prev], "\r") != indent+"}" {
+			continue
+		}
+		// Scan backward from `prev` to verify the closed block is a switch whose last label before
+		// the closing `}` is `default:` with a throw/return body. Walk the block (brace depth -1).
+		depth := -1 // we start at the closing brace
+		lastBodyTerm := ""
+		for k := prev; k >= 0; k-- {
+			ln := strings.TrimRight(lines[k], "\r")
+			for b := len(ln) - 1; b >= 0; b-- {
+				switch ln[b] {
+				case '}':
+					depth++
+				case '{':
+					depth--
+				}
+			}
+			trim := strings.TrimSpace(ln)
+			if depth <= 0 {
+				// Inside the switch body (depth <= 0 relative to closing brace).
+				if strings.HasPrefix(trim, "default:") {
+					if lastBodyTerm == "throw" || lastBodyTerm == "return" {
+						removeIdx = append(removeIdx, i)
+					}
+					break
+				}
+				if strings.HasPrefix(trim, "throw ") || strings.HasPrefix(trim, "return ") || trim == "return;" {
+					lastBodyTerm = "throw"
+					if strings.HasPrefix(trim, "return") {
+						lastBodyTerm = "return"
+					}
+				}
+				if strings.HasPrefix(trim, "switch ") || strings.HasPrefix(trim, "switch(") {
+					break
+				}
+			}
+		}
+	}
+	if len(removeIdx) == 0 {
+		return body
+	}
+	out := lines[:0]
+	ri := 0
+	for i, ln := range lines {
+		if ri < len(removeIdx) && i == removeIdx[ri] {
+			ri++
+			continue
+		}
+		out = append(out, ln)
+	}
+	return strings.Join(out, "\n")
+}
+
+
+// (the line after `default:` is the `}` closing the switch). An empty default leaves a value-
+// returning method without a return on that path ("missing return statement"). Inserting
+// `throw new RuntimeException();` completes the control flow legally in any method. Only triggers
+// when the line following `default:` (ignoring blank lines) is the switch-closing `}` at the SAME
+// indentation as `default:`. Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
+func fixEmptySwitchDefault(body string) string {
+	if os.Getenv("JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
+	inserts := []int{} // line indices after which to insert the throw (descending apply)
+	for i := 0; i < len(lines); i++ {
+		m := defaultRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		// Find the next non-blank line; it must be `}` at the same indent (empty default body).
+		for j := i + 1; j < len(lines); j++ {
+			ln := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(ln) == "" {
+				continue
+			}
+			if ln == indent+"}" {
+				inserts = append(inserts, i) // insert the throw AFTER the `default:` line
+			}
+			break
+		}
+	}
+	if len(inserts) == 0 {
+		return body
+	}
+	// Apply in descending order so earlier offsets stay valid.
+	for k := len(inserts) - 1; k >= 0; k-- {
+		i := inserts[k]
+		indent := leadingTabs(strings.TrimRight(lines[i], "\r"))
+		throwLn := indent + "throw new RuntimeException();"
+		lines = append(lines[:i+1], append([]string{throwLn}, lines[i+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fixMissingReturn inserts `return null;` before the closing brace of a method whose declared
+// return type is a reference type and whose body does not end in a return/throw (javac would
+// reject with "missing return statement"). The inserted return is reachable only on the
+// not-definitely-returned paths, so it is never an unreachable-statement error. Kill-switch:
+// JDEC_FIX_MISSING_RETURN_OFF=1.
+func fixMissingReturn(body string) string {
+	if os.Getenv("JDEC_FIX_MISSING_RETURN_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// Match a method/ctor signature returning a reference type: `<indent><type> <name>(...) {`
+	// where <type> is not a primitive/void.
+	sigRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.]*(?:<[^>]*>)?(?:\[\])*)\s+\w+\s*\([^;]*\)\s*(?:throws[^{]*)?\{$`)
+	primTypes := map[string]bool{"void": true, "int": true, "long": true, "short": true, "byte": true,
+		"double": true, "float": true, "char": true, "boolean": true}
+	type insertSite struct {
+		at     int
+		indent string
+	}
+	var sites []insertSite
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := sigRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		retType := strings.TrimSpace(m[2])
+		// Strip array brackets and generics for the primitive check.
+		base := retType
+		if idx := strings.Index(base, "["); idx >= 0 {
+			base = base[:idx]
+		}
+		if idx := strings.Index(base, "<"); idx >= 0 {
+			base = base[:idx]
+		}
+		if primTypes[base] {
+			continue // void/primitive: not applicable (return null invalid for primitives)
+		}
+		// Find the method's closing brace by brace depth.
+		depth := 0
+		endLine := -1
+		for k := i; k < len(lines); k++ {
+			lk := strings.TrimRight(lines[k], "\r")
+			for b := 0; b < len(lk); b++ {
+				switch lk[b] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 {
+						endLine = k
+					}
+				}
+			}
+			if endLine >= 0 {
+				break
+			}
+		}
+		if endLine < 0 {
+			continue
+		}
+		// Check the last non-blank line before endLine: if it's already a return/throw, skip.
+		last := -1
+		for k := endLine - 1; k > i; k-- {
+			if strings.TrimSpace(strings.TrimRight(lines[k], "\r")) == "" {
+				continue
+			}
+			last = k
+			break
+		}
+		if last < 0 {
+			continue
+		}
+		lastTrim := strings.TrimSpace(strings.TrimRight(lines[last], "\r"))
+		if strings.HasPrefix(lastTrim, "return ") || strings.HasPrefix(lastTrim, "return;") ||
+			strings.HasPrefix(lastTrim, "throw ") {
+			continue
+		}
+		sites = append(sites, insertSite{at: endLine, indent: leadingTabs(ln) + "\t"})
+	}
+	if len(sites) == 0 {
+		return body
+	}
+	for k := len(sites) - 1; k >= 0; k-- {
+		s := sites[k]
+		lines = append(lines[:s.at], append([]string{s.indent + "return null;"}, lines[s.at:]...)...)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // fixTryCatchExceptionPlacement detects the pattern where exception-throwing calls (getDeclaredConstructor,
