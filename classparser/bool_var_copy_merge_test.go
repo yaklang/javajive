@@ -23,10 +23,11 @@ import (
 
 var (
 	// Fix ON: the itemRefDetect slot is ONE boolean variable, no int declaration leaks.
-	boolVarCopyOnRe = regexp.MustCompile(`boolean var5;`)
+	// Tolerate the default-initializer form (`boolean var5 = false;`) added by initProximateSplitSlotDecl.
+	boolVarCopyOnRe = regexp.MustCompile(`boolean var5(?:\s*=\s*false)?;`)
 	// Fix OFF: the copy arm splits off an `int var5;` that the merge read cannot accept -- the
 	// recompile blocker (`var5 = var2` renders int = boolean).
-	boolVarCopyOffRe = regexp.MustCompile(`int var5;`)
+	boolVarCopyOffRe = regexp.MustCompile(`int var5(?:\s*=\s*0)?;`)
 )
 
 func TestBoolVarCopyMergeIsLoadBearing(t *testing.T) {

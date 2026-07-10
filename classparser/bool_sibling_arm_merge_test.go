@@ -23,7 +23,8 @@ import (
 
 var (
 	// Fix ON: both arms assign ONE boolean variable, read in scope and definitely assigned.
-	boolSiblingArmOnRe = regexp.MustCompile(`boolean var1;`)
+	// Tolerate the default-initializer form (`boolean var1 = false;`) added by initProximateSplitSlotDecl.
+	boolSiblingArmOnRe = regexp.MustCompile(`boolean var1(?:\s*=\s*false)?;`)
 	// Fix OFF: the merge read splits to a phantom `Object var1 = null` -- the recompile blocker.
 	boolSiblingArmOffRe = regexp.MustCompile(`Object var1 = null;`)
 )

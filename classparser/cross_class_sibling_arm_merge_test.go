@@ -34,7 +34,7 @@ func TestCrossClassSiblingArmMergeIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix ON) failed: %v", err)
 	}
-	if !strings.Contains(on, "SiblingArmBase var2;") ||
+	if !strings.Contains(on, "SiblingArmBase var2") ||
 		!strings.Contains(on, "var2 = new SiblingArmLeft();") ||
 		!strings.Contains(on, "var2 = new SiblingArmRight();") {
 		t.Errorf("fix ON: expected a single SiblingArmBase var2 assigned in BOTH arms, got:\n%s", on)
@@ -47,7 +47,7 @@ func TestCrossClassSiblingArmMergeIsLoadBearing(t *testing.T) {
 	}
 	if strings.Contains(off, "var2 = new SiblingArmLeft();") &&
 		strings.Contains(off, "var2 = new SiblingArmRight();") &&
-		strings.Contains(off, "SiblingArmBase var2;") {
+		strings.Contains(off, "SiblingArmBase var2") {
 		t.Errorf("fix OFF: expected the arms to split into distinct variables (kill-switch not load-bearing), got:\n%s", off)
 	}
 }

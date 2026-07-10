@@ -1,15 +1,11 @@
 # Phase 1 (Bug AL) seed: fastjson2 JdbcSupport$TimeReader.readObject reuses JVM slot 5 for THREE
-# disjoint live ranges (a long unix-time, a DateTimeFormatter, a String). Each range's bare
+# disjoint live ranges (a long unix-time, a DateTimeFormatter, a String). Each range's
 # declaration must be hoisted to the method top with its CORRECT type so every use is in scope and
 # type-checks (the original bug rendered the second range out of scope -> "cannot find symbol:
-# variable var5_1"). The live-interval declaration placement (JDEC_LIVEINTERVAL_OFF) hoists the bare
-# declarations to the method top, dominating all uses.
-#
-# Note: this golden originally pinned only `+long var5_1;`. A later disjoint-range numbering change
-# renamed the long range to var5 and assigned var5_1/var5_2 to the DateTimeFormatter/String ranges.
-# The real JdbcSupport$TimeReader compiles CLEAN in the authoritative whole-jar (tree) recompile, so
-# the output is correct -- the golden is updated to assert all three typed hoisted declarations, a
-# strictly stronger invariant than the single original rule.
-+long var5;
-+DateTimeFormatter var5_1;
-+String var5_2;
+# variable var5_1"). The live-interval declaration placement (JDEC_LIVEINTERVAL_OFF) hoists the
+# declarations to the method top, dominating all uses. initProximateSplitSlotDecl now adds a
+# default initializer to these hoisted declarations (the real class compiles clean either way);
+# the golden asserts the typed declarations, tolerating the `= <default>` initializer.
++long var5 = 0;
++DateTimeFormatter var5_1 = null;
++String var5_2 = null;

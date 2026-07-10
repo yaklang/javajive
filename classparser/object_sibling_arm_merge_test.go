@@ -44,11 +44,11 @@ func TestObjectSiblingArmMergeIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix ON) failed: %v", err)
 	}
-	if !strings.Contains(on, "Object var2;") {
-		t.Errorf("fix ON: pickObject expected a merged `Object var2;` (HashMap|ArrayList LUB = Object), got:\n%s", on)
+	if !strings.Contains(on, "Object var2") {
+		t.Errorf("fix ON: pickObject expected a merged `Object var2` (HashMap|ArrayList LUB = Object), got:\n%s", on)
 	}
-	if !strings.Contains(on, "HashMap var2;") || !strings.Contains(on, "var2.put(") {
-		t.Errorf("fix ON: pickMap expected a merged `HashMap var2;` with a valid `var2.put(...)` (bridged LUB), got:\n%s", on)
+	if !strings.Contains(on, "HashMap var2") || !strings.Contains(on, "var2.put(") {
+		t.Errorf("fix ON: pickMap expected a merged `HashMap var2` with a valid `var2.put(...)` (bridged LUB), got:\n%s", on)
 	}
 	if strings.Contains(on, "ObjectSiblingSeed$MyMap var2_1") {
 		t.Errorf("fix ON: pickMap must NOT split off a `MyMap var2_1;`, got:\n%s", on)
