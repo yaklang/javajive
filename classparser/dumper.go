@@ -1239,17 +1239,14 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// by a nested try/catch in the try body (javac: "exception X is never thrown in body of
 	// corresponding try statement"). Kill-switch: JDEC_DEDUP_NESTED_CATCH_OFF=1.
 	full = dedupNestedCatchException(full)
-	// wrapUncaughtThrowingCall wraps a `UNSAFE.allocateInstance(...)` call (throws
-	// InstantiationException) in a try/catch when it appears in a switch case without an enclosing
-	// try/catch. OPT-IN (JDEC_WRAP_ALLOCATE_ON=1): fixes ObjectReaderImplMap:386 but unmasks the
-	// StringSchema fall-through-switch layer.
+	// wrapUncaughtThrowingCall wraps `UNSAFE.allocateInstance()` in try/catch. OPT-IN
+	// (JDEC_WRAP_ALLOCATE_ON=1): fixes ObjectReaderImplMap:386 but unmasks StringSchema/LambdaMiscCodec.
 	if os.Getenv("JDEC_WRAP_ALLOCATE_ON") == "1" {
 		full = wrapUncaughtThrowingCall(full)
 	}
-	// addBreakToSwitchCases inserts `break;` at the end of switch case bodies that lack a terminator.
-	// DISABLED (JDEC_ADD_SWITCH_BREAK_ON=1): the pre-lambda-text terminator check (needed to detect
-	// case-level returns on lines that also open a lambda body) interacts with addMissingCatchException
-	// to cause LambdaMiscCodec regressions. Needs a unified structured-flow pass.
+	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. OPT-IN
+	// (JDEC_ADD_SWITCH_BREAK_ON=1): fixes StringSchema but unmasks LambdaMiscCodec (switch-case
+	// getMethod calls need their own catch — a different structure type).
 	if os.Getenv("JDEC_ADD_SWITCH_BREAK_ON") == "1" {
 		full = addBreakToSwitchCases(full)
 	}
