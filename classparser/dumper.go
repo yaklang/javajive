@@ -3969,7 +3969,7 @@ func initProximateSplitSlotDecl(body string) string {
 	}
 	// For each bare `Type varN;` declaration (var and lv scoped locals), decide whether to default-
 	// initialize it to repair a definite-assignment error.
-	bareDeclRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*;(\s*)$`)
+	bareDeclRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(=\s*null\s*)?;(\s*)$`)
 	for i, ln := range lines {
 		lnClean := strings.TrimRight(ln, "\r")
 		m := bareDeclRe.FindStringSubmatch(lnClean)
@@ -3979,7 +3979,8 @@ func initProximateSplitSlotDecl(body string) string {
 		indent := m[1]
 		declType := strings.TrimSpace(m[2])
 		varN := m[3]
-		trailing := m[4]
+		// m[4] is the optional `= null` group, m[5] is the trailing whitespace.
+		trailing := m[5]
 		// Skip Java keywords that look like type tokens (throw, return, new, etc.).
 		switch declType {
 		case "throw", "return", "new", "if", "else", "for", "while", "do", "switch", "case",
@@ -4017,6 +4018,17 @@ func initProximateSplitSlotDecl(body string) string {
 		// final-copy pass (fixLambdaLoopCapture) handles loop-reassigned captures separately.
 		// Method-local to avoid cross-method false captures from varN name reuse.
 		if countAssignTargetsMethod(lines, varN, i) >= 1 && nameCapturedByLambdaMethod(lines, varN, i) {
+			// The variable is captured by a lambda and assigned ≥1 time. If the declaration has an
+			// `= null` initializer, removing it makes the variable effectively-final (only the later
+			// reassignment remains), which allows the lambda capture to compile. This is safe when
+			// countAssignTargetsMethod == 1 (single reassignment after the null init).
+			if trailing == "" && strings.Contains(lnClean, "= null;") && countAssignTargetsMethod(lines, varN, i) == 1 {
+				if dbg {
+					fmt.Fprintf(os.Stderr, "[PROX] STRIP null-init %s %s: captured + single reassign → effectively-final\n", declType, varN)
+				}
+				lines[i] = indent + declType + " " + varN + ";"
+				continue
+			}
 			if dbg {
 				fmt.Fprintf(os.Stderr, "[PROX] SKIP %s %s: captured by deeper lambda + assigned\n", declType, varN)
 			}
@@ -4497,6 +4509,9 @@ func fixLambdaLoopCapture(body string) string {
 		for i < len(lines) {
 			ln := strings.TrimRight(lines[i], "\r")
 			if isMethodOrInitBlockStart(ln) {
+				if os.Getenv("JDEC_FLC_DBG") == "1" && strings.Contains(ln, "isExtendedMap") {
+					fmt.Fprintf(os.Stderr, "[FLC] found method at L%d: %q\n", i+1, strings.TrimSpace(ln))
+				}
 				depth := 0
 				end := len(lines)
 				for k := i; k < len(lines); k++ {
@@ -4621,6 +4636,9 @@ func fixLambdaLoopCapture(body string) string {
 			}
 			if len(openIdxs) > 0 {
 				captured[name] = &captureInfo{declType: declType, lambdaOpenSubIdxs: openIdxs}
+				if os.Getenv("JDEC_FLC_DBG") == "1" {
+					fmt.Fprintf(os.Stderr, "[FLC] captured %s declType=%q openIdxs=%v\n", name, declType, openIdxs)
+				}
 			}
 		}
 		if len(captured) == 0 {
