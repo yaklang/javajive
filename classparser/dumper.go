@@ -5950,20 +5950,12 @@ func defaultAssignsIndependently(lines []string, start, end int, name string) bo
 	assignRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*=\s*([^;]*)`)
 	for k := start; k < end && k < len(lines); k++ {
 		ln := strings.TrimRight(lines[k], "\r")
-		// Skip field accesses (preceded by `.`).
-		idx := strings.Index(ln, name+" =")
-		if idx < 0 {
-			idx = strings.Index(ln, name+"  =")
-		}
-		if idx > 0 && ln[idx-1] == '.' {
-			continue
-		}
 		m := assignRe.FindStringSubmatch(ln)
 		if m == nil {
 			continue
 		}
 		rhs := m[1]
-		// Check if name appears in the RHS.
+		// Check if name appears in the RHS (self-read / compound assignment).
 		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
 		if !re.MatchString(rhs) {
 			return true // independent assignment (no self-read)
@@ -6243,13 +6235,22 @@ func addBreakToSwitchCases(body string) string {
 					}
 				}
 				if !eligible {
+					if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NOT eligible (stmtCount=%d)\n", cs+1, stmtCount)
+					}
 					continue
 				}
-				// Dependency analysis for fall-through to default: when the next case is `default:`,
-				// decide whether to add break based on whether the case and default bodies CONFLICT
-				// (both assign the same variable with an INDEPENDENT assignment → break needed) or the
-				// default DEPENDS on the case's assignment (default's assignment READS the variable the
-				// case assigns, e.g. `var5 = var5 ^ x` → fall-through needed, no break).
+				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+					fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: eligible (stmtCount=%d nextCase=%d)\n", cs+1, stmtCount, nextCase+1)
+				}
+				// Dependency analysis for fall-through to default.
+				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+					nl := ""
+					if ci+1 < len(caseStarts) {
+						nl = strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
+					}
+					fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: ci=%d ci+1=%d len(caseStarts)=%d nextLabel=%q\n", cs+1, ci, ci+1, len(caseStarts), nl)
+				}
 				if ci+1 < len(caseStarts) {
 					nextLabel := strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
 					if nextLabel == "default:" {
@@ -6265,6 +6266,9 @@ func addBreakToSwitchCases(body string) string {
 						// DEPENDENCY: the variable is read in the default's own assignment (compound
 						// assignment like `var5 = var5 ^ x`) → default depends on case's value.
 						conflict := false
+						if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+							fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d dep-analysis: caseAssigned=%v defaultSelfReads=%v\n", cs+1, caseAssigned, defaultSelfReads)
+						}
 						for v := range caseAssigned {
 							if defaultSelfReads[v] {
 								// Default reads v in its own assignment → dependency, not conflict.
@@ -6277,11 +6281,48 @@ func addBreakToSwitchCases(body string) string {
 							}
 						}
 						if !conflict {
+							if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+								fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NO conflict (skip break)\n", cs+1)
+							}
 							continue // skip break — no independent-overwrite conflict
+						}
+						if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+							fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: CONFLICT detected\n", cs+1)
 						}
 					}
 				}
-				// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
+				// Conflict-based break: add break when this case and the NEXT case (or default) both
+				// independently assign the same variable (conflict pattern). If the next case reads
+				// the variable in a compound assignment (dependency), skip break.
+				if ci+1 >= len(caseStarts) {
+					continue
+				}
+				{
+					nextCaseBodyStart := caseStarts[ci+1] + 1
+					nextCaseBodyEnd := switchEnd
+					if ci+2 < len(caseStarts) {
+						nextCaseBodyEnd = caseStarts[ci+2]
+					}
+					nextCaseAssigned := collectSwitchAssignedVars(lines, nextCaseBodyStart, nextCaseBodyEnd)
+					nextCaseSelfReads := collectSwitchDefaultSelfReads(lines, nextCaseBodyStart, nextCaseBodyEnd)
+					caseAssignedLocal := collectSwitchAssignedVars(lines, cs+1, nextCase)
+					conflictFound := false
+					for v := range caseAssignedLocal {
+						if nextCaseSelfReads[v] {
+							continue // next case reads v in compound assignment → dependency
+						}
+						if _, ok := nextCaseAssigned[v]; ok {
+							if defaultAssignsIndependently(lines, nextCaseBodyStart, nextCaseBodyEnd, v) {
+								conflictFound = true
+								break
+							}
+						}
+					}
+					if !conflictFound {
+						continue // no conflict — skip break (fall-through is safe or dependency)
+					}
+				}
+					// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
 				breakIndent := caseIndent + "\t"
 				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 					fmt.Fprintf(os.Stderr, "[ADDBREAK] ADD break before L%d (case at L%d, conflict=%v)\n", nextCase+1, cs+1, true)
@@ -6292,9 +6333,18 @@ func addBreakToSwitchCases(body string) string {
 	if len(inserts) == 0 {
 		return body
 	}
+	if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+		fmt.Fprintf(os.Stderr, "[ADDBREAK] applying %d breaks\n", len(inserts))
+		for _, ins := range inserts {
+			fmt.Fprintf(os.Stderr, "[ADDBREAK]   at L%d indent=%d\n", ins.at+1, len(ins.indent))
+		}
+	}
 	for k := len(inserts) - 1; k >= 0; k-- {
 		ins := inserts[k]
 		breakLn := ins.indent + "break;"
+		if ins.at > len(lines) {
+			continue
+		}
 		lines = append(lines[:ins.at], append([]string{breakLn}, lines[ins.at:]...)...)
 	}
 	return strings.Join(lines, "\n")
