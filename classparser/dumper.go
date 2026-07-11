@@ -1247,10 +1247,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		full = wrapUncaughtThrowingCall(full)
 	}
 	// addBreakToSwitchCases inserts `break;` at the end of switch case bodies that lack a terminator.
-	// DISABLED (JDEC_ADD_SWITCH_BREAK_ON=1): the dumper renders lambda bodies at the case-body
-	// indent, so return statements inside lambdas are mis-detected as case terminators. Needs
-	// lambda-aware control-flow analysis. Causes StringSchema lambda-case misses and, when broader,
-	// widespread "unreachable statement" regressions.
+	// DISABLED (JDEC_ADD_SWITCH_BREAK_ON=1): the pre-lambda-text terminator check (needed to detect
+	// case-level returns on lines that also open a lambda body) interacts with addMissingCatchException
+	// to cause LambdaMiscCodec regressions. Needs a unified structured-flow pass.
 	if os.Getenv("JDEC_ADD_SWITCH_BREAK_ON") == "1" {
 		full = addBreakToSwitchCases(full)
 	}
@@ -5971,21 +5970,54 @@ func addBreakToSwitchCases(body string) string {
 				nextCase = switchEnd
 			}
 			// Scan body [cs+1, nextCase) for a terminator AND count non-empty statements.
-			// Only count terminators at the case-body indent (not inside deeper nested blocks like
-			// lambda bodies, which have their own returns that don't terminate the case).
+			// Lambda-aware: track `-> {` scope depth so return/break/continue inside a lambda body
+			// (which terminate the lambda, not the case) are NOT counted as case terminators. Only
+			// a terminator at the case-body level (outside any lambda) counts.
 			bodyIndent := caseIndent + "\t"
 			hasTerminator := false
 			stmtCount := 0
+			lambdaDepth := 0 // >0 means inside a lambda body
+			braceDepth := 0  // brace depth relative to case body start
 			for k := cs + 1; k < nextCase; k++ {
 				kl := strings.TrimRight(lines[k], "\r")
 				if strings.TrimSpace(kl) == "" {
 					continue
 				}
 				stmtCount++
-				klIndent := leadingTabs(kl)
-				if len(klIndent) <= len(bodyIndent) && terminatorRe.MatchString(kl) {
-					hasTerminator = true
-					break
+				// Check for a case-level terminator on this line BEFORE any `-> {` lambda opening.
+				// A line like `return X.method(..., (l0) -> {` has a case-level `return` followed by a
+				// lambda body open — the return terminates the case, the lambda does not.
+				preLambdaText := kl
+				if arrowIdx := strings.Index(kl, "->"); arrowIdx >= 0 {
+					// Check if `->` is followed by `{` (lambda body). If so, the text before `->` is
+					// the case-level portion.
+					rest := kl[arrowIdx:]
+					if strings.Contains(rest, "{") {
+						preLambdaText = kl[:arrowIdx]
+					}
+				}
+				if lambdaDepth == 0 {
+					klIndent := leadingTabs(kl)
+					if len(klIndent) <= len(bodyIndent) && terminatorRe.MatchString(preLambdaText) {
+						hasTerminator = true
+						break
+					}
+				}
+				// Track lambda scope: a `-> {` opens a lambda body. Process braces char-by-char.
+				for b := 0; b < len(kl); b++ {
+					if kl[b] == '{' {
+						before := strings.TrimRight(kl[:b], " \t")
+						isLambdaOpen := strings.HasSuffix(before, "->")
+						braceDepth++
+						if isLambdaOpen {
+							lambdaDepth++
+						}
+					} else if kl[b] == '}' {
+						braceDepth--
+						if lambdaDepth > 0 && braceDepth == 0 {
+							lambdaDepth = 0
+						}
+					}
 				}
 			}
 				if hasTerminator {
