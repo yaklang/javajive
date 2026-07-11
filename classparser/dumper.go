@@ -1239,17 +1239,15 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// by a nested try/catch in the try body (javac: "exception X is never thrown in body of
 	// corresponding try statement"). Kill-switch: JDEC_DEDUP_NESTED_CATCH_OFF=1.
 	full = dedupNestedCatchException(full)
-	// wrapUncaughtThrowingCall wraps `UNSAFE.allocateInstance()` in try/catch. OPT-IN
-	// (JDEC_WRAP_ALLOCATE_ON=1): fixes ObjectReaderImplMap:386 but unmasks StringSchema/LambdaMiscCodec.
-	if os.Getenv("JDEC_WRAP_ALLOCATE_ON") == "1" {
-		full = wrapUncaughtThrowingCall(full)
-	}
-	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. OPT-IN
-	// (JDEC_ADD_SWITCH_BREAK_ON=1): fixes StringSchema but unmasks LambdaMiscCodec (switch-case
-	// getMethod calls need their own catch — a different structure type).
-	if os.Getenv("JDEC_ADD_SWITCH_BREAK_ON") == "1" {
-		full = addBreakToSwitchCases(full)
-	}
+	// wrapUncaughtThrowingCall wraps `UNSAFE.allocateInstance()` in try/catch. Kill-switch:
+	// JDEC_WRAP_ALLOCATE_OFF=1.
+	full = wrapUncaughtThrowingCall(full)
+	// wrapReflectionCallInSwitchCase wraps switch-case reflection calls in try/catch. Kill-switch:
+	// JDEC_WRAP_REFLECTION_CASE_OFF=1.
+	full = wrapReflectionCallInSwitchCase(full)
+	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. Kill-switch:
+	// JDEC_ADD_SWITCH_BREAK_OFF=1.
+	full = addBreakToSwitchCases(full)
 	return full, nil
 }
 
@@ -5752,6 +5750,10 @@ func dedupNestedCatchException(body string) string {
 			if inner.catchLine < 0 {
 				continue
 			}
+			if os.Getenv("JDEC_DEDUP_DBG") == "1" {
+				fmt.Fprintf(os.Stderr, "[DEDUP-NESTED] outer try L%d (catch L%d types=%q) → inner try L%d (catch L%d types=%q)\n",
+					outer.tryStart+1, outer.catchLine+1, outer.caughtTypes, inner.tryStart+1, inner.catchLine+1, inner.caughtTypes)
+			}
 			innerFields := strings.Fields(inner.caughtTypes)
 			if len(innerFields) == 0 {
 				continue
@@ -5816,9 +5818,13 @@ func dedupNestedCatchException(body string) string {
 			}
 			kept = append(kept, tf)
 		}
-		if len(kept) == 0 {
-			continue // can't remove all types
-		}
+			if len(kept) == 0 {
+				// All caught types are handled by inner catches — the outer catch is dead code for
+				// those specific types. Replace with `Exception` (a valid catch-all supertype) to keep
+				// the catch clause structurally valid without claiming a specific type that's never
+				// thrown. This avoids "exception X is never thrown" for ALL listed types.
+				kept = []string{"Exception"}
+			}
 		newTypes := strings.Join(kept, " | ") + " " + varName
 		newLine := strings.Replace(catchLn, "("+types+")", "("+newTypes+")", 1)
 		lines[cl] = newLine
@@ -5884,6 +5890,91 @@ func wrapUncaughtThrowingCall(body string) string {
 		closeLine := ins.indent + "}"
 		newLines := []string{tryLine, retLine, catchLine, throwLine, closeLine}
 		// Replace the single line at ins.at with newLines.
+		lines = append(lines[:ins.at], append(newLines, lines[ins.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func min2(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// wrapReflectionCallInSwitchCase wraps a single-statement switch case body that calls a reflection
+// method (getMethod/getDeclaredMethod/getConstructor/getDeclaredConstructor) in a try/catch, when
+// the case body has NO enclosing try/catch. The catch converts NoSuchMethodException into a
+// RuntimeException. Kill-switch: JDEC_WRAP_REFLECTION_CASE_OFF=1.
+func wrapReflectionCallInSwitchCase(body string) string {
+	if os.Getenv("JDEC_WRAP_REFLECTION_CASE_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	reflRe := regexp.MustCompile(`^(\t+)return .*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\([^;]*\);\s*$`)
+	caseRe := regexp.MustCompile(`^(\t+)case [^:]+:\s*$`)
+	counter := 0
+	type insert struct {
+		at       int
+		indent   string
+		stmt     string
+		catchVar string
+	}
+	var inserts []insert
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := reflRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		// Verify inside a switch case (scan backward for case label at shallower indent).
+		// Skip over try{/}catch{/if{ etc. nested blocks — only stop at a case label or a
+		// method/class boundary (a `}` at much shallower indent).
+		inSwitchCase := false
+		for k := i - 1; k >= 0; k-- {
+			kl := strings.TrimRight(lines[k], "\r")
+			if strings.TrimSpace(kl) == "" {
+				continue
+			}
+			kInd := leadingTabs(kl)
+			kTrim := strings.TrimSpace(kl)
+			if caseRe.MatchString(kl) || kTrim == "default:" {
+				inSwitchCase = true
+				break
+			}
+			// Stop at method boundary: a `}` at very shallow indent (≤2 tabs) that isn't a
+			// try-catch close.
+			if len(kInd) <= 2 && kTrim == "}" {
+				break
+			}
+		}
+		if !inSwitchCase {
+			continue
+		}
+		insideTC := isInsideTryCatch(lines, i, indent)
+		if os.Getenv("JDEC_WRAP_REFLECTION_DBG") == "1" {
+			fmt.Fprintf(os.Stderr, "[WRAPREFL] L%d inSwitchCase=%v insideTryCatch=%v stmt=%q\n", i+1, true, insideTC, strings.TrimSpace(ln)[:min2(50,len(ln))])
+		}
+		if insideTC {
+			continue
+		}
+		counter++
+		catchVar := fmt.Sprintf("varNSME_%d", counter)
+		inserts = append(inserts, insert{at: i, indent: indent, stmt: strings.TrimSpace(ln), catchVar: catchVar})
+	}
+	if len(inserts) == 0 {
+		return body
+	}
+	for k := len(inserts) - 1; k >= 0; k-- {
+		ins := inserts[k]
+		newLines := []string{
+			ins.indent + "try{",
+			ins.indent + "\t" + ins.stmt,
+			ins.indent + "}catch(NoSuchMethodException " + ins.catchVar + "){",
+			ins.indent + "\tthrow new RuntimeException(" + ins.catchVar + ");",
+			ins.indent + "}",
+		}
 		lines = append(lines[:ins.at], append(newLines, lines[ins.at+1:]...)...)
 	}
 	return strings.Join(lines, "\n")
@@ -6060,13 +6151,15 @@ func addBreakToSwitchCases(body string) string {
 					}
 				}
 				if !eligible {
-					if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: not eligible (stmtCount=%d)\n", cs+1, stmtCount)
-					}
 					continue
 				}
-				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-					fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: eligible — add break before L%d\n", cs+1, nextCase+1)
+				// Do NOT add break if the next case is `default:` — fall-through to default is
+				// often intentional (the default's body depends on the prior case's assignment).
+				if ci+1 < len(caseStarts) {
+					nextLabel := strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
+					if nextLabel == "default:" {
+						continue
+					}
 				}
 				// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
 				breakIndent := caseIndent + "\t"
