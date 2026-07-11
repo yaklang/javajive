@@ -1230,13 +1230,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
 	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
 	full = fixTryCatchExceptionPlacement(full)
-	// addMissingCatchException: DISABLED (JDEC_ADD_MISSING_CATCH_ON=1 to enable). Augmenting catch
-	// clauses with NoSuchMethodException fixes ORCASM but cascades — each reflection call site that
-	// throws NoSuchMethodException needs its own catch, and adding it in one place unmasks the next
-	// (snakeyaml, spring regressions). Needs per-call-site scope analysis.
-	if os.Getenv("JDEC_ADD_MISSING_CATCH_ON") == "1" {
-		full = addMissingCatchException(full)
-	}
+	// addMissingCatchException performs per-call-site exception-flow analysis: for each reflection
+	// call site (getConstructor etc.) it walks the enclosing try/catch chain and only augments the
+	// nearest catch with NoSuchMethodException if no enclosing catch already handles it (or a
+	// supertype). Kill-switch: JDEC_ADD_MISSING_CATCH_OFF=1.
+	full = addMissingCatchException(full)
 	return full, nil
 }
 
@@ -5292,169 +5290,339 @@ var methodThrows = map[string]string{
 	"newInstance":           "", // throws multiple (InvocationTargetException etc.) — handled by callers already
 }
 
-// excSupertypes lists the direct supertypes of an exception, used to avoid adding an exception
-// whose supertype is already caught (javac rejects "alternatives related by subclass").
-var excSupertypes = map[string]string{
-	"NoSuchMethodException": "ReflectiveOperationException",
-	"ClassNotFoundException": "ReflectiveOperationException",
+// catchBodyAccessesCatchVar reports whether the catch body at catchLineIdx accesses a member
+// (method or field) of the caught variable (e.g. `var7_2.getTargetException()`). Such a catch
+// relies on the specific type of the variable; widening the multi-catch with an unrelated type
+// breaks the member access.
+func catchBodyAccessesCatchVar(lines []string, catchLineIdx int) bool {
+	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	cl := strings.TrimRight(lines[catchLineIdx], "\r")
+	cm := catchRe.FindStringSubmatch(cl)
+	if cm == nil {
+		return false
+	}
+	fields := strings.Fields(cm[1])
+	if len(fields) == 0 {
+		return false
+	}
+	varName := fields[len(fields)-1]
+	// Scan the catch body for `varName.` (member access on the catch variable).
+	braceOpen := strings.Index(cl, "{")
+	depth := 1
+	for k := catchLineIdx; k < len(lines); k++ {
+		lk := strings.TrimRight(lines[k], "\r")
+		startByte := 0
+		if k == catchLineIdx && braceOpen >= 0 {
+			startByte = braceOpen + 1
+		}
+		// Check for member access on varName in the body portion of this line.
+		if k > catchLineIdx {
+			bodyPart := lk
+			if k == catchLineIdx {
+				bodyPart = lk[startByte:]
+			}
+			if strings.Contains(bodyPart, varName+".") {
+				return true
+			}
+		}
+		for b := startByte; b < len(lk); b++ {
+			switch lk[b] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+		}
+		if depth <= 0 && k > catchLineIdx {
+			return false
+		}
+	}
+	return false
 }
 
-// addMissingCatchException scans for `try{ ... }catch(TypeA | TypeB ... var){ ... }` blocks whose
-// body contains a call to a method that throws a checked exception NOT among the caught types, and
-// adds the missing exception type to the catch list. This repairs "unreported checked exception
-// ... must be caught or declared to be thrown". Kill-switch: JDEC_ADD_MISSING_CATCH_OFF=1.
+// catchRethrowsVariable reports whether the catch clause at catchLineIdx directly rethrows the
+// caught variable (e.g. `catch(E var){ throw var; }`). Such a catch propagates the checked
+// exception; augmenting its type list would require a throws declaration on the enclosing method.
+func catchRethrowsVariable(lines []string, catchLineIdx int) bool {
+	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	cl := strings.TrimRight(lines[catchLineIdx], "\r")
+	cm := catchRe.FindStringSubmatch(cl)
+	if cm == nil {
+		return false
+	}
+	// The catch variable is the last whitespace-separated token inside the parens.
+	fields := strings.Fields(cm[1])
+	if len(fields) == 0 {
+		return false
+	}
+	varName := fields[len(fields)-1]
+	// Scan the catch body (from catchLineIdx+1 to its closing brace) for `throw varName;`.
+	// Start depth tracking from AFTER the catch clause's opening `{`. Depth starts at 1 (we are
+	// inside the catch body). The leading `}` of `}catch(...) {` is not counted.
+	braceOpen := strings.Index(cl, "{")
+	depth := 1
+	started := braceOpen >= 0
+	for k := catchLineIdx; k < len(lines); k++ {
+		lk := strings.TrimRight(lines[k], "\r")
+		startByte := 0
+		if k == catchLineIdx && braceOpen >= 0 {
+			startByte = braceOpen + 1
+		}
+		for b := startByte; b < len(lk); b++ {
+			switch lk[b] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+		}
+		if started && depth <= 0 && k > catchLineIdx {
+			return false
+		}
+		if k > catchLineIdx {
+			trim := strings.TrimSpace(lk)
+			if strings.HasPrefix(trim, "throw "+varName+";") || trim == "throw "+varName+";" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasLambdaBoundaryBetween reports whether any line in (startLine, endLine] contains a `-> {`
+// lambda opening — a lambda body is a separate scope, so a try/catch outside the lambda cannot
+// catch exceptions thrown inside it.
+func hasLambdaBoundaryBetween(lines []string, startLine, endLine int) bool {
+	for k := startLine + 1; k <= endLine && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		if idx := strings.Index(ln, "->"); idx >= 0 {
+			rest := ln[idx:]
+			if strings.Contains(rest, "{") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// addMissingCatchException performs per-call-site exception-flow analysis. For each reflection
+// call site (getConstructor/getDeclaredConstructor/getMethod/getDeclaredMethod) that throws
+// NoSuchMethodException, it walks the enclosing try/catch chain and determines whether
+// NoSuchMethodException (or a supertype: ReflectiveOperationException, Exception, Throwable) is
+// caught by ANY enclosing catch. If not, it augments the NEAREST enclosing catch with the missing
+// exception type. This avoids the cascade of the prior global approach (which augmented a catch
+// even when an inner try/catch already handled the call site). Kill-switch:
+// JDEC_ADD_MISSING_CATCH_OFF=1.
 func addMissingCatchException(body string) string {
 	if os.Getenv("JDEC_ADD_MISSING_CATCH_OFF") == "1" {
 		return body
 	}
+	dbg := os.Getenv("JDEC_ADD_MISSING_CATCH_DBG") == "1"
 	lines := strings.Split(body, "\n")
-	tryRe := regexp.MustCompile(`^(\t+)try\{\s*$`)
-	catchRe := regexp.MustCompile(`^(\t+)\}catch\(([^)]*)\)\{\s*$`)
-	type edit struct {
-		catchLine int
-		catchIndent string
-		addType   string
+	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	callRe := regexp.MustCompile(`\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\(`)
+
+	// Pre-compute all try/catch blocks: for each `try{`, find its body range [tryStart, tryBodyEnd)
+	// and the catch clause line + caught types. A try's catch is relevant for call sites INSIDE the
+	// try body (the catch handles exceptions thrown from the try body).
+	type tryBlock struct {
+		tryStart    int
+		tryBodyEnd  int   // line index of the `}` closing the try body (exclusive: tryBodyEnd is that line)
+		catchLine   int   // line index of the `}catch(...) {` line, -1 if no catch
+		caughtTypes string // the types listed in the catch clause
 	}
-	var edits []edit
+	tryRe := regexp.MustCompile(`^(\t+)try\{\s*$`)
+	var tryBlocks []tryBlock
 	for i := 0; i < len(lines); i++ {
 		ln := strings.TrimRight(lines[i], "\r")
 		if !tryRe.MatchString(ln) {
 			continue
 		}
-		tryIndent := leadingTabs(ln)
-		dbg := os.Getenv("JDEC_ADD_MISSING_CATCH_DBG") == "1"
-		if dbg {
-			fmt.Fprintf(os.Stderr, "[ADDCATCH] try at L%d indent=%d\n", i+1, len(tryIndent))
-		}
-		// Find the matching catch line for this try. The try body ends at the FIRST `}` that brings
-		// brace depth back to 0 — which on a `}catch(...){` line is the leading `}` (before the
-		// catch's own `{`). Track depth char-by-char and detect the close mid-line.
+		// Find the try body end: the first `}` (char-by-char) that brings depth back to 0.
 		depth := 0
-		catchLine := -1
 		tryBodyEnd := -1
+		catchLine := -1
+		var caughtTypes string
 		for j := i; j < len(lines); j++ {
 			jl := strings.TrimRight(lines[j], "\r")
-			closedMidLine := false
 			for b := 0; b < len(jl); b++ {
 				switch jl[b] {
 				case '{':
 					depth++
 				case '}':
 					depth--
-					if depth == 0 && j > i && !closedMidLine {
-						// This `}` closes the try body. If the rest of the line starts a catch
-						// (e.g. `}catch(...){`), this is the catch line.
+					if depth == 0 && j > i && tryBodyEnd < 0 {
 						tryBodyEnd = j
-						closedMidLine = true
+						// Check if the rest of the line (after this `}`) starts a catch.
 						rest := strings.TrimSpace(jl[b+1:])
-						if strings.HasPrefix(rest, "catch(") && leadingTabs(jl) == tryIndent {
+						if strings.HasPrefix(rest, "catch(") {
 							catchLine = j
+							cm := catchRe.FindStringSubmatch(jl)
+							if cm != nil {
+								caughtTypes = cm[1]
+							}
 						}
 					}
 				}
 			}
-			if closedMidLine {
-				break
-			}
-			if depth == 0 && j > i {
-				tryBodyEnd = j
-				// Look for a catch on a subsequent line.
-				for k := j + 1; k < len(lines) && k < j+3; k++ {
-					cl := strings.TrimRight(lines[k], "\r")
-					if strings.TrimSpace(cl) == "" {
-						continue
-					}
-					cm := catchRe.FindStringSubmatch(cl)
-					if cm != nil && leadingTabs(cl) == tryIndent {
-						catchLine = k
-					}
-					break
+		}
+		if tryBodyEnd < 0 {
+			continue
+		}
+		// If catch wasn't on the same line as the close, look on the next non-blank line.
+		if catchLine < 0 {
+			for k := tryBodyEnd + 1; k < len(lines) && k < tryBodyEnd+3; k++ {
+				cl := strings.TrimRight(lines[k], "\r")
+				if strings.TrimSpace(cl) == "" {
+					continue
+				}
+				cm := catchRe.FindStringSubmatch(cl)
+				if cm != nil {
+					catchLine = k
+					caughtTypes = cm[1]
 				}
 				break
 			}
 		}
-		if catchLine < 0 {
-			if dbg {
-				fmt.Fprintf(os.Stderr, "[ADDCATCH] try L%d: NO catch found (tryBodyEnd=%d)\n", i+1, tryBodyEnd)
-			}
+		tryBlocks = append(tryBlocks, tryBlock{
+			tryStart:    i,
+			tryBodyEnd:  tryBodyEnd,
+			catchLine:   catchLine,
+			caughtTypes: caughtTypes,
+		})
+	}
+
+	// For each call site, find all enclosing try blocks (tryStart < callLine < tryBodyEnd), ordered
+	// from innermost to outermost. Check if any enclosing catch handles NoSuchMethodException or a
+	// supertype. If none, augment the INNERMOST enclosing catch that has a catch clause.
+	const exc = "NoSuchMethodException"
+	excOrSup := []string{"NoSuchMethodException", "ReflectiveOperationException", "Exception", "Throwable"}
+	caughtWord := func(typesStr, name string) bool {
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+		return re.MatchString(typesStr)
+	}
+	augment := map[int]bool{}
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		if !callRe.MatchString(ln) {
 			continue
+		}
+		// Find enclosing try blocks for this call site (innermost first). A try block encloses the
+		// call ONLY if there is no lambda boundary (`-> {`) between the try start and the call — a
+		// lambda body is a separate scope; an outer try/catch cannot catch exceptions thrown inside it.
+		var enclosing []tryBlock
+		for _, tb := range tryBlocks {
+			if i > tb.tryStart && i < tb.tryBodyEnd {
+				if hasLambdaBoundaryBetween(lines, tb.tryStart, i) {
+					continue // a lambda separates this try from the call — not enclosing
+				}
+				enclosing = append(enclosing, tb)
+			}
 		}
 		if dbg {
-			fmt.Fprintf(os.Stderr, "[ADDCATCH] try L%d catch L%d tryBodyEnd=%d\n", i+1, catchLine+1, tryBodyEnd)
+			fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: %d enclosing try blocks\n", i+1, len(enclosing))
 		}
-		catchLn := strings.TrimRight(lines[catchLine], "\r")
-		cm := catchRe.FindStringSubmatch(catchLn)
-		if cm == nil {
-			continue
-		}
-		caughtTypes := cm[2] // e.g. "InstantiationException | IllegalAccessException | ..."
-		// Scan the try body (i+1 .. tryBodyEnd-1) for calls to methods that throw checked exceptions.
-		missing := ""
-		for j := i + 1; j < tryBodyEnd; j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			for methodName, exc := range methodThrows {
-				if exc == "" {
-					continue
-				}
-				if !strings.Contains(jl, "."+methodName+"(") {
-					continue
-				}
-				// Skip if the exact exception, its direct supertype, or a catch-all is already caught.
-				// Use word-boundary checks to avoid substring false-matches (e.g. "Exception" inside
-				// "InstantiationException").
-				caughtWord := func(name string) bool {
-					re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-					return re.MatchString(caughtTypes)
-				}
-				if caughtWord(exc) {
-					continue
-				}
-				if sup, ok := excSupertypes[exc]; ok && caughtWord(sup) {
-					continue
-				}
-				// `Throwable` or `Exception` (as exact caught types) catches everything — skip.
-				if caughtWord("Throwable") || caughtWord("Exception") {
-					continue
-				}
-				missing = exc
-				break
+		// Check if any enclosing catch already handles the exception.
+		alreadyCaught := false
+		for _, tb := range enclosing {
+			if tb.catchLine < 0 {
+				continue
 			}
-			if missing != "" {
+			for _, sup := range excOrSup {
+				if caughtWord(tb.caughtTypes, sup) {
+					alreadyCaught = true
+					break
+				}
+			}
+			if alreadyCaught {
 				break
 			}
 		}
-		if missing == "" {
+		if alreadyCaught {
+			if dbg {
+				fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: already caught\n", i+1)
+			}
 			continue
 		}
-		if os.Getenv("JDEC_ADD_MISSING_CATCH_DBG") == "1" {
-			fmt.Fprintf(os.Stderr, "[ADDCATCH] try L%d catch L%d missing=%s caughtTypes=%q\n", i+1, catchLine+1, missing, caughtTypes)
+		// Not caught — augment the innermost enclosing catch that HAS a catch clause.
+		// Find the innermost enclosing catch with a clause that does NOT simply rethrow the caught
+		// variable (a rethrow catch like `catch(E var){ throw var; }` would propagate the checked
+		// exception, requiring a throws declaration we cannot add — skip those).
+		var target *tryBlock
+		for k := range enclosing {
+			tb := enclosing[k]
+			if tb.catchLine < 0 {
+				continue
+			}
+			if catchRethrowsVariable(lines, tb.catchLine) {
+				if dbg {
+					fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: catch L%d rethrows variable (skip)\n", i+1, tb.catchLine+1)
+				}
+				continue
+			}
+			// Skip catches whose body accesses members of the catch variable (e.g.
+			// `var.getTargetException()`). Adding a type to the multi-catch narrows the inferred type
+			// and breaks member access that only exists on one of the original types.
+			if catchBodyAccessesCatchVar(lines, tb.catchLine) {
+				if dbg {
+					fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: catch L%d accesses catch-var members (skip)\n", i+1, tb.catchLine+1)
+				}
+				continue
+			}
+			target = &enclosing[k]
+			break
 		}
-		edits = append(edits, edit{catchLine: catchLine, catchIndent: tryIndent, addType: missing})
+		if target == nil {
+			if dbg {
+				fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: NO enclosing catch with clause (skip)\n", i+1)
+			}
+			continue
+		}
+		if caughtWord(target.caughtTypes, exc) {
+			continue
+		}
+		augment[target.catchLine] = true
+		if dbg {
+			fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: AUGMENT catch L%d with %s\n", i+1, target.catchLine+1, exc)
+		}
 	}
-	if len(edits) == 0 {
+	if len(augment) == 0 {
 		return body
 	}
-	// Apply: insert ` | <missing>` into the catch clause's type list, BEFORE the catch variable
-	// name. The catch clause form is `}catch(TypeA | TypeB ... | TypeN varName){` — the LAST
-	// whitespace-separated token is the variable name; insert before it.
-	for k := len(edits) - 1; k >= 0; k-- {
-		e := edits[k]
-		cl := strings.TrimRight(lines[e.catchLine], "\r")
+	// Apply augmentations in descending line order.
+	var augLines []int
+	for ln := range augment {
+		augLines = append(augLines, ln)
+	}
+	sort.Ints(augLines)
+	for k := len(augLines) - 1; k >= 0; k-- {
+		catchLineIdx := augLines[k]
+		cl := strings.TrimRight(lines[catchLineIdx], "\r")
 		cm := catchRe.FindStringSubmatch(cl)
 		if cm == nil {
 			continue
 		}
-		types := cm[2] // e.g. "InstantiationException | ... | InvocationTargetException lv7_2"
+		types := cm[1]
 		fields := strings.Fields(types)
-		if len(fields) < 2 {
+		if len(fields) < 1 {
 			continue
 		}
-		// The last field is the variable name; everything before it is the type list.
-		varName := fields[len(fields)-1]
-		typeList := strings.TrimSpace(strings.TrimSuffix(types, varName))
-		newTypes := typeList + " | " + e.addType + " " + varName
+		var varName, typeList string
+		if len(fields) >= 2 {
+			varName = fields[len(fields)-1]
+			typeList = strings.TrimSpace(strings.TrimSuffix(types, varName))
+		} else {
+			varName = fields[0]
+			typeList = ""
+		}
+		var newTypes string
+		if typeList == "" {
+			newTypes = exc + " " + varName
+		} else {
+			newTypes = typeList + " | " + exc + " " + varName
+		}
 		newLine := strings.Replace(cl, "("+types+")", "("+newTypes+")", 1)
-		lines[e.catchLine] = newLine
+		lines[catchLineIdx] = newLine
 	}
 	return strings.Join(lines, "\n")
 }
