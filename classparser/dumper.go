@@ -1242,9 +1242,16 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// wrapUncaughtThrowingCall wraps a `UNSAFE.allocateInstance(...)` call (throws
 	// InstantiationException) in a try/catch when it appears in a switch case without an enclosing
 	// try/catch. OPT-IN (JDEC_WRAP_ALLOCATE_ON=1): fixes ObjectReaderImplMap:386 but unmasks the
-	// StringSchema fall-through-switch layer (needs addBreakToSwitchCases).
+	// StringSchema fall-through-switch layer.
 	if os.Getenv("JDEC_WRAP_ALLOCATE_ON") == "1" {
 		full = wrapUncaughtThrowingCall(full)
+	}
+	// addBreakToSwitchCases inserts `break;` at the end of switch case bodies that lack a terminator.
+	// DISABLED (JDEC_ADD_SWITCH_BREAK_ON=1 to enable): causes widespread "unreachable statement"
+	// regressions (codec +2, gson +13, snakeyaml +7, spring +3) — the if/else vs lambda terminator
+	// distinction needs full CFA. Kept for future structured-flow work.
+	if os.Getenv("JDEC_ADD_SWITCH_BREAK_ON") == "1" {
+		full = addBreakToSwitchCases(full)
 	}
 	return full, nil
 }
@@ -5881,6 +5888,123 @@ func wrapUncaughtThrowingCall(body string) string {
 		newLines := []string{tryLine, retLine, catchLine, throwLine, closeLine}
 		// Replace the single line at ins.at with newLines.
 		lines = append(lines[:ins.at], append(newLines, lines[ins.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// addBreakToSwitchCases inserts `break;` at the end of each switch case body that lacks a
+// terminator (break/return/throw/continue) and falls through to the next case. This repairs
+// "variable X might already have been assigned" when multiple cases assign the same field without
+// breaks (a decompiler artifact — the original source had breaks). Detection: within a switch body,
+// for each `case N:` label, if the lines up to the next `case`/`default:` lack a break/return/throw/
+// continue, insert `break;` at the case's body indent before the next label. Kill-switch:
+// JDEC_ADD_SWITCH_BREAK_OFF=1.
+func addBreakToSwitchCases(body string) string {
+	if os.Getenv("JDEC_ADD_SWITCH_BREAK_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	caseRe := regexp.MustCompile(`^(\t+)case [^:]+:\s*$`)
+	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
+	switchRe := regexp.MustCompile(`^(\t+)switch \([^)]*\)\{\s*$`)
+	type insert struct {
+		at     int
+		indent string
+	}
+	var inserts []insert
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		if !switchRe.MatchString(ln) {
+			continue
+		}
+		switchIndent := leadingTabs(ln)
+		// Find the switch body end.
+		depth := 0
+		switchEnd := -1
+		for j := i; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			for b := 0; b < len(jl); b++ {
+				switch jl[b] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 {
+						switchEnd = j
+					}
+				}
+			}
+			if switchEnd >= 0 {
+				break
+			}
+		}
+		if switchEnd < 0 {
+			continue
+		}
+		// Walk the cases within [i+1, switchEnd). Cases may be at the switch's indent OR one deeper
+		// (the dumper renders cases at the switch-body indent).
+		var caseStarts []int
+		var caseIndent string
+		for j := i + 1; j < switchEnd; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if caseRe.MatchString(jl) || defaultRe.MatchString(jl) {
+				ind := leadingTabs(jl)
+				if len(ind) == len(switchIndent) || len(ind) == len(switchIndent)+1 {
+					if caseIndent == "" {
+						caseIndent = ind
+					}
+					if ind == caseIndent {
+						caseStarts = append(caseStarts, j)
+					}
+				}
+			}
+		}
+		// For each case (except the last which may be default), check if its body lacks a terminator
+		// AND has at least one non-empty statement (skip empty fall-through cases).
+		terminatorRe := regexp.MustCompile(`\b(break|return|throw|continue)\b`)
+		for ci, cs := range caseStarts {
+			var nextCase int
+			if ci+1 < len(caseStarts) {
+				nextCase = caseStarts[ci+1]
+			} else {
+				nextCase = switchEnd
+			}
+			// Scan body [cs+1, nextCase) for a terminator AND count non-empty statements.
+			// Only count terminators at the case-body indent (not inside deeper nested blocks like
+			// lambda bodies, which have their own returns that don't terminate the case).
+			bodyIndent := caseIndent + "\t"
+			hasTerminator := false
+			stmtCount := 0
+			for k := cs + 1; k < nextCase; k++ {
+				kl := strings.TrimRight(lines[k], "\r")
+				if strings.TrimSpace(kl) == "" {
+					continue
+				}
+				stmtCount++
+				klIndent := leadingTabs(kl)
+				if len(klIndent) <= len(bodyIndent) && terminatorRe.MatchString(kl) {
+					hasTerminator = true
+					break
+				}
+			}
+			if hasTerminator {
+				continue
+			}
+			if stmtCount == 0 {
+				continue // empty case body — intentional fall-through, do not add break
+			}
+			// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
+			breakIndent := caseIndent + "\t"
+			inserts = append(inserts, insert{at: nextCase, indent: breakIndent})
+		}
+	}
+	if len(inserts) == 0 {
+		return body
+	}
+	for k := len(inserts) - 1; k >= 0; k-- {
+		ins := inserts[k]
+		breakLn := ins.indent + "break;"
+		lines = append(lines[:ins.at], append([]string{breakLn}, lines[ins.at:]...)...)
 	}
 	return strings.Join(lines, "\n")
 }
