@@ -1218,13 +1218,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// removeUnreachableSwitchBreak drops `break;` after a nested switch whose default throws/returns.
 	// Kill-switch: JDEC_RM_UNREACHABLE_BREAK_OFF=1.
 	full = removeUnreachableSwitchBreak(full)
-	// fixMissingReturn adds `return null;` before the closing brace of a value-returning method
-	// whose body does not end in a return/throw on all paths (javac: "missing return statement").
-	// DISABLED: too aggressive (275 regressions — the sigRe/last-line heuristic is unreliable).
-	// Kill-switch: JDEC_FIX_MISSING_RETURN_OFF=1.
-	if os.Getenv("JDEC_FIX_MISSING_RETURN_ON") == "1" {
-		full = fixMissingReturn(full)
-	}
+	// fixMissingReturn inserts `return null;` after a no-op empty-if (`if(cond){};`) that follows a
+	// switch-closing `}`, when the enclosing block does not otherwise terminate (the CFA-targeted
+	// pattern that produces "missing return statement" in deep switch/if chains). Kill-switch:
+	// JDEC_FIX_MISSING_RETURN_OFF=1.
+	full = fixMissingReturn(full)
 	// fixEmptySwitchDefault inserts a terminator (throw) into `switch` default labels whose body is
 	// empty, which otherwise leaves a value-returning method without a return on that path.
 	// Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
@@ -1232,6 +1230,13 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
 	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
 	full = fixTryCatchExceptionPlacement(full)
+	// addMissingCatchException: DISABLED (JDEC_ADD_MISSING_CATCH_ON=1 to enable). Augmenting catch
+	// clauses with NoSuchMethodException fixes ORCASM but cascades — each reflection call site that
+	// throws NoSuchMethodException needs its own catch, and adding it in one place unmasks the next
+	// (snakeyaml, spring regressions). Needs per-call-site scope analysis.
+	if os.Getenv("JDEC_ADD_MISSING_CATCH_ON") == "1" {
+		full = addMissingCatchException(full)
+	}
 	return full, nil
 }
 
@@ -4984,92 +4989,147 @@ func fixEmptySwitchDefault(body string) string {
 	return strings.Join(lines, "\n")
 }
 
-// fixMissingReturn inserts `return null;` before the closing brace of a method whose declared
-// return type is a reference type and whose body does not end in a return/throw (javac would
-// reject with "missing return statement"). The inserted return is reachable only on the
-// not-definitely-returned paths, so it is never an unreachable-statement error. Kill-switch:
-// JDEC_FIX_MISSING_RETURN_OFF=1.
+// fixMissingReturn inserts `return null;` after a no-op empty-if statement (`if (cond){};`) that
+// immediately follows a switch-closing `}` whose switch had a `default:` clause. This is the
+// control-flow pattern that produces "missing return statement" in deep switch/if chains: javac
+// does not treat a non-constant String-switch (hashCode-based) as definitely-terminating even with
+// a `default: return`, so execution can fall through to the post-switch `if(cond){};` and then to
+// the end of the enclosing block without a return. Inserting `return null;` after that empty-if
+// completes the path. The insertion is reachable only on the not-definitely-returned path, so it
+// never creates an unreachable-statement error. Kill-switch: JDEC_FIX_MISSING_RETURN_OFF=1.
+//
+// enclosingReturnsReference reports whether the method/ctor/init-block containing line idx has a
+// declared return type that is a reference type (not primitive, not void, not a constructor). Used
+// to gate `return null;` insertions. Scans backward for a method/init-block signature line.
+func enclosingReturnsReference(lines []string, idx int) bool {
+	for k := idx; k >= 0; k-- {
+		ln := strings.TrimRight(lines[k], "\r")
+		if !isMethodOrInitBlockStart(ln) {
+			continue
+		}
+		trim := strings.TrimSpace(ln)
+		// Static/instance init block: no return type (void-equivalent for our purposes).
+		compact := strings.Join(strings.Fields(trim), "")
+		if compact == "static{" {
+			return false
+		}
+		// Method signature `<type> <name>(...) {` or `<mods> <type> <name>(...) {`. Extract the
+		// token before the method name (the return type).
+	paren := strings.Index(trim, "(")
+		if paren < 0 {
+			return true // can't tell — allow (constructor treated as reference-safe, harmless)
+		}
+		head := strings.TrimSpace(trim[:paren])
+		// Drop leading modifier keywords.
+		fields := strings.Fields(head)
+		if len(fields) == 0 {
+			return true
+		}
+		// Constructor: single token (class name) with no return type — treat as not-reference.
+		if len(fields) == 1 {
+			return false
+		}
+		// The return type is the token BEFORE the method name (the last field is the method name).
+		retType := fields[len(fields)-2]
+		// Strip generics/array for the primitive check.
+		base := retType
+		if p := strings.IndexAny(base, "[<"); p >= 0 {
+			base = base[:p]
+		}
+		switch base {
+		case "void", "int", "long", "short", "byte", "double", "float", "char", "boolean":
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// fixMissingReturn inserts `return null;` after a no-op empty-if statement (`if (cond){};`) when
+// the enclosing block (which the empty-if is the last statement of, evidenced by the next non-blank
+// line being a `}` at the same-or-shallower indent) contains a `switch` with a `default:` clause.
+// This is the control-flow pattern that produces "missing return statement" in deep switch/if
+// chains: javac does not treat a non-constant String-switch (hashCode-based) as definitely-
+// terminating even with a `default: return`, so execution can fall through to the end of the
+// enclosing block without a return. Inserting `return null;` after the empty-if completes the
+// path. The insertion is reachable only on the not-definitely-returned path, so it never creates
+// an unreachable-statement error. Kill-switch: JDEC_FIX_MISSING_RETURN_OFF=1.
 func fixMissingReturn(body string) string {
 	if os.Getenv("JDEC_FIX_MISSING_RETURN_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
-	// Match a method/ctor signature returning a reference type: `<indent><type> <name>(...) {`
-	// where <type> is not a primitive/void.
-	sigRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.]*(?:<[^>]*>)?(?:\[\])*)\s+\w+\s*\([^;]*\)\s*(?:throws[^{]*)?\{$`)
-	primTypes := map[string]bool{"void": true, "int": true, "long": true, "short": true, "byte": true,
-		"double": true, "float": true, "char": true, "boolean": true}
+	emptyIfRe := regexp.MustCompile(`^(\t+)if \([^;]*\)\{\};\s*$`)
 	type insertSite struct {
-		at     int
+		at     int // insert AFTER this line index
 		indent string
 	}
 	var sites []insertSite
 	for i := 0; i < len(lines); i++ {
 		ln := strings.TrimRight(lines[i], "\r")
-		m := sigRe.FindStringSubmatch(ln)
+		m := emptyIfRe.FindStringSubmatch(ln)
 		if m == nil {
 			continue
 		}
-		retType := strings.TrimSpace(m[2])
-		// Strip array brackets and generics for the primitive check.
-		base := retType
-		if idx := strings.Index(base, "["); idx >= 0 {
-			base = base[:idx]
-		}
-		if idx := strings.Index(base, "<"); idx >= 0 {
-			base = base[:idx]
-		}
-		if primTypes[base] {
-			continue // void/primitive: not applicable (return null invalid for primitives)
-		}
-		// Find the method's closing brace by brace depth.
-		depth := 0
-		endLine := -1
-		for k := i; k < len(lines); k++ {
-			lk := strings.TrimRight(lines[k], "\r")
-			for b := 0; b < len(lk); b++ {
-				switch lk[b] {
-				case '{':
-					depth++
-				case '}':
-					depth--
-					if depth == 0 {
-						endLine = k
-					}
-				}
+		indent := m[1]
+		// The next non-blank line must be a `}` at a shallower indent (the block ends right after
+		// the empty-if), confirming the empty-if is the last statement of its block.
+		next := -1
+		for j := i + 1; j < len(lines); j++ {
+			if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+				continue
 			}
-			if endLine >= 0 {
+			next = j
+			break
+		}
+		if next < 0 {
+			continue
+		}
+		nextLn := strings.TrimRight(lines[next], "\r")
+		nextTrim := strings.TrimSpace(nextLn)
+		if nextTrim != "}" {
+			continue
+		}
+		nextIndent := leadingTabs(nextLn)
+		if len(nextIndent) >= len(indent) {
+			continue // the `}` is not shallower — not a block-end
+		}
+		// Scan backward within the enclosing block (same indent or deeper) for a `default:` label,
+		// which indicates a switch with a default lives in this block. Stop at a shallower indent
+		// (block boundary).
+		sawDefault := false
+		for k := i - 1; k >= 0; k-- {
+			lk := strings.TrimRight(lines[k], "\r")
+			if strings.TrimSpace(lk) == "" {
+				continue
+			}
+			kind := leadingTabs(lk)
+			if len(kind) < len(indent) {
+				break // left the enclosing block
+			}
+			tk := strings.TrimSpace(lk)
+			if tk == "default:" || strings.HasPrefix(tk, "default:") {
+				sawDefault = true
 				break
 			}
 		}
-		if endLine < 0 {
+		if !sawDefault {
 			continue
 		}
-		// Check the last non-blank line before endLine: if it's already a return/throw, skip.
-		last := -1
-		for k := endLine - 1; k > i; k-- {
-			if strings.TrimSpace(strings.TrimRight(lines[k], "\r")) == "" {
-				continue
-			}
-			last = k
-			break
-		}
-		if last < 0 {
+		// Only apply when the enclosing method returns a reference type — `return null;` is invalid
+		// for primitive/void returns. Scan backward for the method/init-block signature.
+		if !enclosingReturnsReference(lines, i) {
 			continue
 		}
-		lastTrim := strings.TrimSpace(strings.TrimRight(lines[last], "\r"))
-		if strings.HasPrefix(lastTrim, "return ") || strings.HasPrefix(lastTrim, "return;") ||
-			strings.HasPrefix(lastTrim, "throw ") {
-			continue
-		}
-		sites = append(sites, insertSite{at: endLine, indent: leadingTabs(ln) + "\t"})
+		sites = append(sites, insertSite{at: i, indent: indent})
 	}
 	if len(sites) == 0 {
 		return body
 	}
 	for k := len(sites) - 1; k >= 0; k-- {
 		s := sites[k]
-		lines = append(lines[:s.at], append([]string{s.indent + "return null;"}, lines[s.at:]...)...)
+		retLn := s.indent + "return null;"
+		lines = append(lines[:s.at+1], append([]string{retLn}, lines[s.at+1:]...)...)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -5220,7 +5280,186 @@ func fixTryCatchExceptionPlacement(body string) string {
 	return strings.Join(lines, "\n")
 }
 
-// countAssignTargets counts how many times name appears as an assignment target (`name =` but not
+// methodThrows maps a reflection-method name to the checked exception it declares. Used by
+// addMissingCatchException to detect a try-body call whose checked exception is absent from the
+// catch clause. NOTE: `forName` is excluded — its ClassNotFoundException is often already handled
+// by an enclosing catch or a different overload, and augmenting it caused jsoup/snakeyaml regressions.
+var methodThrows = map[string]string{
+	"getConstructor":        "NoSuchMethodException",
+	"getDeclaredConstructor": "NoSuchMethodException",
+	"getMethod":             "NoSuchMethodException",
+	"getDeclaredMethod":     "NoSuchMethodException",
+	"newInstance":           "", // throws multiple (InvocationTargetException etc.) — handled by callers already
+}
+
+// excSupertypes lists the direct supertypes of an exception, used to avoid adding an exception
+// whose supertype is already caught (javac rejects "alternatives related by subclass").
+var excSupertypes = map[string]string{
+	"NoSuchMethodException": "ReflectiveOperationException",
+	"ClassNotFoundException": "ReflectiveOperationException",
+}
+
+// addMissingCatchException scans for `try{ ... }catch(TypeA | TypeB ... var){ ... }` blocks whose
+// body contains a call to a method that throws a checked exception NOT among the caught types, and
+// adds the missing exception type to the catch list. This repairs "unreported checked exception
+// ... must be caught or declared to be thrown". Kill-switch: JDEC_ADD_MISSING_CATCH_OFF=1.
+func addMissingCatchException(body string) string {
+	if os.Getenv("JDEC_ADD_MISSING_CATCH_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	tryRe := regexp.MustCompile(`^(\t+)try\{\s*$`)
+	catchRe := regexp.MustCompile(`^(\t+)\}catch\(([^)]*)\)\{\s*$`)
+	type edit struct {
+		catchLine int
+		catchIndent string
+		addType   string
+	}
+	var edits []edit
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		if !tryRe.MatchString(ln) {
+			continue
+		}
+		tryIndent := leadingTabs(ln)
+		dbg := os.Getenv("JDEC_ADD_MISSING_CATCH_DBG") == "1"
+		if dbg {
+			fmt.Fprintf(os.Stderr, "[ADDCATCH] try at L%d indent=%d\n", i+1, len(tryIndent))
+		}
+		// Find the matching catch line for this try. The try body ends at the FIRST `}` that brings
+		// brace depth back to 0 — which on a `}catch(...){` line is the leading `}` (before the
+		// catch's own `{`). Track depth char-by-char and detect the close mid-line.
+		depth := 0
+		catchLine := -1
+		tryBodyEnd := -1
+		for j := i; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			closedMidLine := false
+			for b := 0; b < len(jl); b++ {
+				switch jl[b] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 && j > i && !closedMidLine {
+						// This `}` closes the try body. If the rest of the line starts a catch
+						// (e.g. `}catch(...){`), this is the catch line.
+						tryBodyEnd = j
+						closedMidLine = true
+						rest := strings.TrimSpace(jl[b+1:])
+						if strings.HasPrefix(rest, "catch(") && leadingTabs(jl) == tryIndent {
+							catchLine = j
+						}
+					}
+				}
+			}
+			if closedMidLine {
+				break
+			}
+			if depth == 0 && j > i {
+				tryBodyEnd = j
+				// Look for a catch on a subsequent line.
+				for k := j + 1; k < len(lines) && k < j+3; k++ {
+					cl := strings.TrimRight(lines[k], "\r")
+					if strings.TrimSpace(cl) == "" {
+						continue
+					}
+					cm := catchRe.FindStringSubmatch(cl)
+					if cm != nil && leadingTabs(cl) == tryIndent {
+						catchLine = k
+					}
+					break
+				}
+				break
+			}
+		}
+		if catchLine < 0 {
+			if dbg {
+				fmt.Fprintf(os.Stderr, "[ADDCATCH] try L%d: NO catch found (tryBodyEnd=%d)\n", i+1, tryBodyEnd)
+			}
+			continue
+		}
+		if dbg {
+			fmt.Fprintf(os.Stderr, "[ADDCATCH] try L%d catch L%d tryBodyEnd=%d\n", i+1, catchLine+1, tryBodyEnd)
+		}
+		catchLn := strings.TrimRight(lines[catchLine], "\r")
+		cm := catchRe.FindStringSubmatch(catchLn)
+		if cm == nil {
+			continue
+		}
+		caughtTypes := cm[2] // e.g. "InstantiationException | IllegalAccessException | ..."
+		// Scan the try body (i+1 .. tryBodyEnd-1) for calls to methods that throw checked exceptions.
+		missing := ""
+		for j := i + 1; j < tryBodyEnd; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			for methodName, exc := range methodThrows {
+				if exc == "" {
+					continue
+				}
+				if !strings.Contains(jl, "."+methodName+"(") {
+					continue
+				}
+				// Skip if the exact exception, its direct supertype, or a catch-all is already caught.
+				// Use word-boundary checks to avoid substring false-matches (e.g. "Exception" inside
+				// "InstantiationException").
+				caughtWord := func(name string) bool {
+					re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+					return re.MatchString(caughtTypes)
+				}
+				if caughtWord(exc) {
+					continue
+				}
+				if sup, ok := excSupertypes[exc]; ok && caughtWord(sup) {
+					continue
+				}
+				// `Throwable` or `Exception` (as exact caught types) catches everything — skip.
+				if caughtWord("Throwable") || caughtWord("Exception") {
+					continue
+				}
+				missing = exc
+				break
+			}
+			if missing != "" {
+				break
+			}
+		}
+		if missing == "" {
+			continue
+		}
+		if os.Getenv("JDEC_ADD_MISSING_CATCH_DBG") == "1" {
+			fmt.Fprintf(os.Stderr, "[ADDCATCH] try L%d catch L%d missing=%s caughtTypes=%q\n", i+1, catchLine+1, missing, caughtTypes)
+		}
+		edits = append(edits, edit{catchLine: catchLine, catchIndent: tryIndent, addType: missing})
+	}
+	if len(edits) == 0 {
+		return body
+	}
+	// Apply: insert ` | <missing>` into the catch clause's type list, BEFORE the catch variable
+	// name. The catch clause form is `}catch(TypeA | TypeB ... | TypeN varName){` — the LAST
+	// whitespace-separated token is the variable name; insert before it.
+	for k := len(edits) - 1; k >= 0; k-- {
+		e := edits[k]
+		cl := strings.TrimRight(lines[e.catchLine], "\r")
+		cm := catchRe.FindStringSubmatch(cl)
+		if cm == nil {
+			continue
+		}
+		types := cm[2] // e.g. "InstantiationException | ... | InvocationTargetException lv7_2"
+		fields := strings.Fields(types)
+		if len(fields) < 2 {
+			continue
+		}
+		// The last field is the variable name; everything before it is the type list.
+		varName := fields[len(fields)-1]
+		typeList := strings.TrimSpace(strings.TrimSuffix(types, varName))
+		newTypes := typeList + " | " + e.addType + " " + varName
+		newLine := strings.Replace(cl, "("+types+")", "("+newTypes+")", 1)
+		lines[e.catchLine] = newLine
+	}
+	return strings.Join(lines, "\n")
+}
+
+
 // `name ==`) in body. Used to detect multi-branch if/else chains.
 func countAssignTargets(body, name string) int {
 	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
