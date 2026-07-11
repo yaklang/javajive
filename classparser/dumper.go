@@ -5895,6 +5895,32 @@ func wrapUncaughtThrowingCall(body string) string {
 	return strings.Join(lines, "\n")
 }
 
+// isInsideLambdaBody reports whether line idx is inside a lambda body (between a `-> {` and
+// its matching `}`). Used to detect reflection calls that are in lambda scope (not covered by
+// an enclosing try/catch outside the lambda).
+func isInsideLambdaBody(lines []string, idx int) bool {
+	lambdaDepth := 0
+	braceDepth := 0
+	for k := 0; k <= idx && k < len(lines); k++ {
+		lk := strings.TrimRight(lines[k], "\r")
+		for b := 0; b < len(lk); b++ {
+			if lk[b] == '{' {
+				before := strings.TrimRight(lk[:b], " \t")
+				braceDepth++
+				if strings.HasSuffix(before, "->") {
+					lambdaDepth++
+				}
+			} else if lk[b] == '}' {
+				braceDepth--
+				if lambdaDepth > 0 && braceDepth == 0 {
+					lambdaDepth = 0
+				}
+			}
+		}
+	}
+	return lambdaDepth > 0
+}
+
 func min2(a, b int) int {
 	if a < b {
 		return a
@@ -5996,6 +6022,9 @@ func wrapReflectionCallInSwitchCase(body string) string {
 	}
 	lines := strings.Split(body, "\n")
 	reflRe := regexp.MustCompile(`^(\t+)return .*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\([^;]*\);\s*$`)
+	// Also match LambdaMetafactory chains (invokeExact/metafactory/findStatic) that throw checked
+	// exceptions (LambdaConversionException, NoSuchMethodException, Throwable).
+	lambdaChainRe := regexp.MustCompile(`^(\t+)return .*\.(invokeExact|metafactory|findStatic|findVirtual)\(.*;\s*$`)
 	caseRe := regexp.MustCompile(`^(\t+)case [^:]+:\s*$`)
 	counter := 0
 	type insert struct {
@@ -6003,15 +6032,25 @@ func wrapReflectionCallInSwitchCase(body string) string {
 		indent   string
 		stmt     string
 		catchVar string
+		catchType string
 	}
 	var inserts []insert
 	for i := 0; i < len(lines); i++ {
 		ln := strings.TrimRight(lines[i], "\r")
 		m := reflRe.FindStringSubmatch(ln)
-		if m == nil {
+		lm := lambdaChainRe.FindStringSubmatch(ln)
+		if m == nil && lm == nil {
 			continue
 		}
-		indent := m[1]
+		var indent string
+		var catchTypeVal string
+		if m != nil {
+			indent = m[1]
+			catchTypeVal = "NoSuchMethodException"
+		} else {
+			indent = lm[1]
+			catchTypeVal = "Throwable" // LambdaMetafactory chains throw multiple exception types
+		}
 		// Verify inside a switch case (scan backward for case label at shallower indent).
 		// Skip over try{/}catch{/if{ etc. nested blocks — only stop at a case label or a
 		// method/class boundary (a `}` at much shallower indent).
@@ -6034,18 +6073,29 @@ func wrapReflectionCallInSwitchCase(body string) string {
 			}
 		}
 		if !inSwitchCase {
-			continue
-		}
-		insideTC := isInsideTryCatch(lines, i, indent)
-		if os.Getenv("JDEC_WRAP_REFLECTION_DBG") == "1" {
-			fmt.Fprintf(os.Stderr, "[WRAPREFL] L%d inSwitchCase=%v insideTryCatch=%v stmt=%q\n", i+1, true, insideTC, strings.TrimSpace(ln)[:min2(50,len(ln))])
-		}
-		if insideTC {
-			continue
+			// Also handle reflection calls inside lambda bodies that are NOT directly inside a
+			// try/catch (the enclosing try/catch is outside the lambda boundary). This catches
+			// the MoneySupport pattern: `try{ FUNC = (l0) -> { return ...getMethod(...)... }; }
+			// catch(Throwable){...}` — the getMethod inside the lambda is NOT caught by the outer
+			// try/catch because of the lambda scope boundary.
+			if !isInsideLambdaBody(lines, i) {
+				continue
+			}
+			if isInsideTryCatch(lines, i, indent) {
+				continue // directly inside a try/catch within the lambda — already handled
+			}
+		} else {
+			insideTC := isInsideTryCatch(lines, i, indent)
+			if os.Getenv("JDEC_WRAP_REFLECTION_DBG") == "1" {
+				fmt.Fprintf(os.Stderr, "[WRAPREFL] L%d inSwitchCase=%v insideTryCatch=%v stmt=%q\n", i+1, true, insideTC, strings.TrimSpace(ln)[:min2(50,len(ln))])
+			}
+			if insideTC {
+				continue
+			}
 		}
 		counter++
 		catchVar := fmt.Sprintf("varNSME_%d", counter)
-		inserts = append(inserts, insert{at: i, indent: indent, stmt: strings.TrimSpace(ln), catchVar: catchVar})
+		inserts = append(inserts, insert{at: i, indent: indent, stmt: strings.TrimSpace(ln), catchVar: catchVar, catchType: catchTypeVal})
 	}
 	if len(inserts) == 0 {
 		return body
@@ -6055,7 +6105,7 @@ func wrapReflectionCallInSwitchCase(body string) string {
 		newLines := []string{
 			ins.indent + "try{",
 			ins.indent + "\t" + ins.stmt,
-			ins.indent + "}catch(NoSuchMethodException " + ins.catchVar + "){",
+			ins.indent + "}catch(" + ins.catchType + " " + ins.catchVar + "){",
 			ins.indent + "\tthrow new RuntimeException(" + ins.catchVar + ");",
 			ins.indent + "}",
 		}
