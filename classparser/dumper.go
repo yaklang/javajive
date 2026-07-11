@@ -1247,9 +1247,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		full = wrapUncaughtThrowingCall(full)
 	}
 	// addBreakToSwitchCases inserts `break;` at the end of switch case bodies that lack a terminator.
-	// DISABLED (JDEC_ADD_SWITCH_BREAK_ON=1 to enable): causes widespread "unreachable statement"
-	// regressions (codec +2, gson +13, snakeyaml +7, spring +3) — the if/else vs lambda terminator
-	// distinction needs full CFA. Kept for future structured-flow work.
+	// DISABLED (JDEC_ADD_SWITCH_BREAK_ON=1): the dumper renders lambda bodies at the case-body
+	// indent, so return statements inside lambdas are mis-detected as case terminators. Needs
+	// lambda-aware control-flow analysis. Causes StringSchema lambda-case misses and, when broader,
+	// widespread "unreachable statement" regressions.
 	if os.Getenv("JDEC_ADD_SWITCH_BREAK_ON") == "1" {
 		full = addBreakToSwitchCases(full)
 	}
@@ -5987,15 +5988,60 @@ func addBreakToSwitchCases(body string) string {
 					break
 				}
 			}
-			if hasTerminator {
-				continue
-			}
-			if stmtCount == 0 {
-				continue // empty case body — intentional fall-through, do not add break
-			}
-			// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
-			breakIndent := caseIndent + "\t"
-			inserts = append(inserts, insert{at: nextCase, indent: breakIndent})
+				if hasTerminator {
+					continue
+				}
+				if stmtCount == 0 {
+					continue // empty case body — intentional fall-through, do not add break
+				}
+				// SAFETY: only add break if the case body is a SINGLE statement at bodyIndent with no
+				// nested control-flow blocks (if/else/try/switch/for/while). This avoids the
+				// widespread "unreachable statement" regressions from mis-detecting terminators in
+				// complex case bodies (JSONWriter$Path, gson, snakeyaml, spring).
+				eligible := false
+				if stmtCount > 1 {
+					// Multi-statement body — only handle if it's a single lambda-assignment
+					// (multi-line `field = ...(args) -> {...});`).
+					firstStmt := ""
+					lastStmt := ""
+					for k := cs + 1; k < nextCase; k++ {
+						kl := strings.TrimRight(lines[k], "\r")
+						if strings.TrimSpace(kl) == "" {
+							continue
+						}
+						if firstStmt == "" {
+							firstStmt = kl
+						}
+						lastStmt = kl
+					}
+					if strings.Contains(firstStmt, "-> {") && strings.HasPrefix(strings.TrimSpace(lastStmt), "});") {
+						eligible = true
+					}
+				} else if stmtCount == 1 {
+					// Single statement — must be an assignment (contains `=`).
+					for k := cs + 1; k < nextCase; k++ {
+						kl := strings.TrimRight(lines[k], "\r")
+						if strings.TrimSpace(kl) == "" {
+							continue
+						}
+						if strings.Contains(kl, "=") {
+							eligible = true
+						}
+						break
+					}
+				}
+				if !eligible {
+					if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: not eligible (stmtCount=%d)\n", cs+1, stmtCount)
+					}
+					continue
+				}
+				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+					fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: eligible — add break before L%d\n", cs+1, nextCase+1)
+				}
+				// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
+				breakIndent := caseIndent + "\t"
+				inserts = append(inserts, insert{at: nextCase, indent: breakIndent})
 		}
 	}
 	if len(inserts) == 0 {
