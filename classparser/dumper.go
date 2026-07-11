@@ -1248,6 +1248,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. Kill-switch:
 	// JDEC_ADD_SWITCH_BREAK_OFF=1.
 	full = addBreakToSwitchCases(full)
+	// wrapFieldInitializerReflection converts a field initializer containing a reflection call
+	// (getMethod etc.) that throws a checked exception into a static-block init with try/catch.
+	// Kill-switch: JDEC_WRAP_FIELD_INIT_OFF=1.
+	full = wrapFieldInitializerReflection(full)
 	return full, nil
 }
 
@@ -6031,6 +6035,90 @@ func collectSwitchReadVars(lines []string, start, end int) map[string]bool {
 }
 
 // wrapReflectionCallInSwitchCase wraps a single-statement switch case body that calls a reflection
+// wrapFieldInitializerReflection converts a field initializer containing a reflection call
+// (getMethod/getDeclaredMethod/getConstructor/getDeclaredConstructor) that throws a checked
+// exception into a bare field declaration + static-block initialization with try/catch. This
+// repairs "unreported exception NoSuchMethodException" in field initializers (which cannot contain
+// try/catch in Java). Kill-switch: JDEC_WRAP_FIELD_INIT_OFF=1.
+//
+// Pattern: `\t<modifiers> <Type> <name> = <expr>.reflectionMethod(...)...;`
+//   → `\t<modifiers> <Type> <name>;`
+//   + `\tstatic{`
+//   + `\t\ttry{`
+//   + `\t\t\t<name> = <expr>.reflectionMethod(...)...;`
+//   + `\t\t}catch(NoSuchMethodException varX){`
+//   + `\t\t\tthrow new RuntimeException(varX);`
+//   + `\t\t}`
+//   + `\t}`
+func wrapFieldInitializerReflection(body string) string {
+	if os.Getenv("JDEC_WRAP_FIELD_INIT_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// Match a field initializer at class-body indent (1 tab) with a reflection call.
+	// Capture: indent, modifiers+type+name, init expression.
+	fieldRe := regexp.MustCompile(`^(\t+)((?:(?:final|static|public|private|protected)\s+)*[\w$.<>\[\]?, ]+?\s+(\w+))\s*=\s*(.*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\([^;]*);\s*$`)
+	counter := 0
+	type edit struct {
+		at           int
+		indent       string
+		decl         string
+		fieldName    string
+		initExpr     string
+		catchVar     string
+		isStatic     bool
+	}
+	var edits []edit
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := fieldRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		if len(indent) != 1 {
+			continue
+		}
+		declText := m[2]
+		fieldName := m[3]
+		initExpr := m[4]
+		isStatic := strings.Contains(declText, "static")
+		counter++
+		catchVar := fmt.Sprintf("varFIE_%d", counter)
+		edits = append(edits, edit{
+			at:        i,
+			indent:    indent,
+			decl:      indent + declText + ";",
+			fieldName: fieldName,
+			initExpr:  initExpr,
+			catchVar:  catchVar,
+			isStatic:  isStatic,
+		})
+	}
+	if len(edits) == 0 {
+		return body
+	}
+	for k := len(edits) - 1; k >= 0; k-- {
+		e := edits[k]
+		blockOpen := e.indent + "{"
+		if e.isStatic {
+			blockOpen = e.indent + "static{"
+		}
+		newLines := []string{
+			e.decl,
+			blockOpen,
+			e.indent + "\ttry{",
+			e.indent + "\t\t" + e.fieldName + " = " + e.initExpr + ";",
+			e.indent + "\t}catch(NoSuchMethodException " + e.catchVar + "){",
+			e.indent + "\t\tthrow new RuntimeException(" + e.catchVar + ");",
+			e.indent + "\t}",
+			e.indent + "}",
+		}
+		lines = append(lines[:e.at], append(newLines, lines[e.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // method (getMethod/getDeclaredMethod/getConstructor/getDeclaredConstructor) in a try/catch, when
 // the case body has NO enclosing try/catch. The catch converts NoSuchMethodException into a
 // RuntimeException. Kill-switch: JDEC_WRAP_REFLECTION_CASE_OFF=1.
