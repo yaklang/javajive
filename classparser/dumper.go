@@ -1235,6 +1235,17 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// nearest catch with NoSuchMethodException if no enclosing catch already handles it (or a
 	// supertype). Kill-switch: JDEC_ADD_MISSING_CATCH_OFF=1.
 	full = addMissingCatchException(full)
+	// dedupNestedCatchException removes exception types from an outer catch that are already caught
+	// by a nested try/catch in the try body (javac: "exception X is never thrown in body of
+	// corresponding try statement"). Kill-switch: JDEC_DEDUP_NESTED_CATCH_OFF=1.
+	full = dedupNestedCatchException(full)
+	// wrapUncaughtThrowingCall wraps a `UNSAFE.allocateInstance(...)` call (throws
+	// InstantiationException) in a try/catch when it appears in a switch case without an enclosing
+	// try/catch. OPT-IN (JDEC_WRAP_ALLOCATE_ON=1): fixes ObjectReaderImplMap:386 but unmasks the
+	// StringSchema fall-through-switch layer (needs addBreakToSwitchCases).
+	if os.Getenv("JDEC_WRAP_ALLOCATE_ON") == "1" {
+		full = wrapUncaughtThrowingCall(full)
+	}
 	return full, nil
 }
 
@@ -5627,7 +5638,282 @@ func addMissingCatchException(body string) string {
 	return strings.Join(lines, "\n")
 }
 
+// dedupNestedCatchException removes exception types from an outer catch clause when a nested
+// try/catch within the try body already catches that exact type. This repairs javac's "exception X
+// is never thrown in body of corresponding try statement" — when an inner catch handles the
+// exception, it never propagates to the outer catch, so listing it there is an error.
+//
+// Detection: for each try/catch block, scan the try body for nested try/catch blocks whose catch
+// lists an exception type T that also appears in the outer catch. Remove T from the outer catch
+// (only if the outer catch has ≥2 types, so it still catches something). Kill-switch:
+// JDEC_DEDUP_NESTED_CATCH_OFF=1.
+func dedupNestedCatchException(body string) string {
+	if os.Getenv("JDEC_DEDUP_NESTED_CATCH_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	tryRe := regexp.MustCompile(`^(\t+)try\{\s*$`)
+	// Collect all try blocks with their catch info (reuse the model from addMissingCatchException).
+	type tryBlock struct {
+		tryStart    int
+		tryBodyEnd  int
+		catchLine   int
+		caughtTypes string
+	}
+	var tryBlocks []tryBlock
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		if !tryRe.MatchString(ln) {
+			continue
+		}
+		depth := 0
+		tryBodyEnd := -1
+		catchLine := -1
+		var caughtTypes string
+		for j := i; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			for b := 0; b < len(jl); b++ {
+				switch jl[b] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 && j > i && tryBodyEnd < 0 {
+						tryBodyEnd = j
+						rest := strings.TrimSpace(jl[b+1:])
+						if strings.HasPrefix(rest, "catch(") {
+							catchLine = j
+							cm := catchRe.FindStringSubmatch(jl)
+							if cm != nil {
+								caughtTypes = cm[1]
+							}
+						}
+					}
+				}
+			}
+		}
+		if tryBodyEnd < 0 {
+			continue
+		}
+		if catchLine < 0 {
+			for k := tryBodyEnd + 1; k < len(lines) && k < tryBodyEnd+3; k++ {
+				cl := strings.TrimRight(lines[k], "\r")
+				if strings.TrimSpace(cl) == "" {
+					continue
+				}
+				cm := catchRe.FindStringSubmatch(cl)
+				if cm != nil {
+					catchLine = k
+					caughtTypes = cm[1]
+				}
+				break
+			}
+		}
+		tryBlocks = append(tryBlocks, tryBlock{tryStart: i, tryBodyEnd: tryBodyEnd, catchLine: catchLine, caughtTypes: caughtTypes})
+	}
+	// For each outer try with a catch, find nested try/catch blocks within its body and collect
+	// exception types caught by inner catches. Remove those from the outer catch.
+	type edit struct {
+		catchLine int
+		removeType string
+	}
+	var edits []edit
+	for _, outer := range tryBlocks {
+		if outer.catchLine < 0 {
+			continue
+		}
+		// Parse outer catch types (word list, excluding the catch variable).
+		outerFields := strings.Fields(outer.caughtTypes)
+		if len(outerFields) < 2 {
+			continue // need ≥2 types to remove one (the last field is the variable)
+		}
+		outerVarName := outerFields[len(outerFields)-1]
+		outerTypes := outerFields[:len(outerFields)-1] // type tokens (may include `|`)
+		// Collect actual type names (strip `|`).
+		outerTypeNames := map[string]bool{}
+		for _, tf := range outerTypes {
+			if tf != "|" {
+				outerTypeNames[tf] = true
+			}
+		}
+		if len(outerTypeNames) < 2 {
+			continue // need ≥2 actual types to remove one
+		}
+		// Find nested try/catch blocks whose try is within [outer.tryStart+1, outer.tryBodyEnd).
+		for _, inner := range tryBlocks {
+			if inner.tryStart <= outer.tryStart || inner.tryStart >= outer.tryBodyEnd {
+				continue
+			}
+			if inner.catchLine < 0 {
+				continue
+			}
+			innerFields := strings.Fields(inner.caughtTypes)
+			if len(innerFields) == 0 {
+				continue
+			}
+			for _, tf := range innerFields {
+				if tf == "|" {
+					continue
+				}
+				// Skip if it's the catch variable (last field). Heuristic: a type name starts with
+				// uppercase; a variable starts with lowercase. This is imperfect but covers the common
+				// case (InstantiationException vs var4).
+				if len(tf) > 0 && tf[0] >= 'a' && tf[0] <= 'z' {
+					continue // likely a variable name
+				}
+				if outerTypeNames[tf] {
+					// This type is caught by both inner and outer — remove from outer.
+					edits = append(edits, edit{catchLine: outer.catchLine, removeType: tf})
+					_ = outerVarName
+				}
+			}
+		}
+	}
+	if len(edits) == 0 {
+		return body
+	}
+	// Apply: for each edit, remove the type from the catch clause. Handle multiple removals per
+	// catch line by deduping and applying once.
+	byLine := map[int]map[string]bool{}
+	for _, e := range edits {
+		if byLine[e.catchLine] == nil {
+			byLine[e.catchLine] = map[string]bool{}
+		}
+		byLine[e.catchLine][e.removeType] = true
+	}
+	catchLines := []int{}
+	for cl := range byLine {
+		catchLines = append(catchLines, cl)
+	}
+	sort.Ints(catchLines)
+	for k := len(catchLines) - 1; k >= 0; k-- {
+		cl := catchLines[k]
+		removeTypes := byLine[cl]
+		catchLn := strings.TrimRight(lines[cl], "\r")
+		cm := catchRe.FindStringSubmatch(catchLn)
+		if cm == nil {
+			continue
+		}
+		types := cm[1]
+		fields := strings.Fields(types)
+		if len(fields) < 2 {
+			continue
+		}
+		varName := fields[len(fields)-1]
+		// Rebuild the type list, excluding removed types.
+		var kept []string
+		for _, tf := range fields[:len(fields)-1] {
+			if tf == "|" {
+				continue
+			}
+			if removeTypes[tf] {
+				continue
+			}
+			kept = append(kept, tf)
+		}
+		if len(kept) == 0 {
+			continue // can't remove all types
+		}
+		newTypes := strings.Join(kept, " | ") + " " + varName
+		newLine := strings.Replace(catchLn, "("+types+")", "("+newTypes+")", 1)
+		lines[cl] = newLine
+	}
+	return strings.Join(lines, "\n")
+}
 
+// wrapUncaughtThrowingCall wraps a `UNSAFE.allocateInstance(...)` call (which throws
+// InstantiationException) in a try/catch when it appears in a switch case body WITHOUT any
+// enclosing try/catch. The catch converts the checked InstantiationException into a
+// JSONException (matching the surrounding method's error-handling idiom). This repairs
+// "unreported exception InstantiationException; must be caught or declared to be thrown".
+// Only wraps `return <expr>.allocateInstance(...);` statements (the common case). Kill-switch:
+// JDEC_WRAP_ALLOCATE_OFF=1.
+func wrapUncaughtThrowingCall(body string) string {
+	if os.Getenv("JDEC_WRAP_ALLOCATE_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	allocRe := regexp.MustCompile(`^(\t+)(return .*\bUNSAFE\.allocateInstance\([^;]*\));\s*$`)
+	type insert struct {
+		at      int
+		indent  string
+		stmt    string
+		catchVar string
+	}
+	var inserts []insert
+	counter := 0
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := allocRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		// Check the statement is NOT already inside a try/catch: scan backward for an enclosing
+		// try{ at a shallower indent, with no catch boundary in between.
+		indent := m[1]
+		stmt := m[2]
+		if isInsideTryCatch(lines, i, indent) {
+			continue
+		}
+		counter++
+		catchVar := fmt.Sprintf("varIE_%d", counter)
+		inserts = append(inserts, insert{at: i, indent: indent, stmt: stmt, catchVar: catchVar})
+	}
+	if len(inserts) == 0 {
+		return body
+	}
+	// Apply in descending order. Replace the single `return ...allocateInstance...;` line with:
+	//   try{
+	//       return ...allocateInstance...;
+	//   }catch(InstantiationException varIE_N){
+	//       throw new RuntimeException(varIE_N);
+	//   }
+	for k := len(inserts) - 1; k >= 0; k-- {
+		ins := inserts[k]
+		// Determine the catch body: throw a RuntimeException wrapping the exception (safe for any
+		// method return type, since it never returns normally).
+		tryLine := ins.indent + "try{"
+		retLine := ins.indent + "\t" + ins.stmt + ";"
+		catchLine := ins.indent + "}catch(InstantiationException " + ins.catchVar + "){"
+		throwLine := ins.indent + "\tthrow new RuntimeException(" + ins.catchVar + ");"
+		closeLine := ins.indent + "}"
+		newLines := []string{tryLine, retLine, catchLine, throwLine, closeLine}
+		// Replace the single line at ins.at with newLines.
+		lines = append(lines[:ins.at], append(newLines, lines[ins.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// isInsideTryCatch reports whether line idx is inside a try body that has a catch clause, by
+// scanning backward for a `try{` at a shallower indent than `indent` with no intervening catch
+// boundary. This is a conservative check.
+func isInsideTryCatch(lines []string, idx int, indent string) bool {
+	for k := idx - 1; k >= 0; k-- {
+		lk := strings.TrimRight(lines[k], "\r")
+		if strings.TrimSpace(lk) == "" {
+			continue
+		}
+		kInd := leadingTabs(lk)
+		// A catch boundary at this or shallower indent means we exited a try body.
+		if catchReLiteral.MatchString(lk) && len(kInd) <= len(indent) {
+			return false
+		}
+		if tryReLiteral.MatchString(lk) && len(kInd) < len(indent) {
+			return true
+		}
+		// A `}` at shallower indent closes the enclosing block — stop.
+		if len(kInd) < len(indent) && strings.TrimSpace(lk) == "}" {
+			return false
+		}
+	}
+	return false
+}
+
+var catchReLiteral = regexp.MustCompile(`catch\(`)
+var tryReLiteral = regexp.MustCompile(`try\{`)
+
+// countAssignTargets counts how many times name appears as an assignment target (`name =` but not
 // `name ==`) in body. Used to detect multi-branch if/else chains.
 func countAssignTargets(body, name string) int {
 	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
