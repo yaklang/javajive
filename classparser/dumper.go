@@ -5902,6 +5902,98 @@ func min2(a, b int) int {
 	return b
 }
 
+// collectSwitchAssignedVars returns the set of variables/fields assigned (`X =` but not `==`) in
+// the given line range. Includes field assignments (e.g. `this.formatValidator =`).
+func collectSwitchAssignedVars(lines []string, start, end int) map[string]bool {
+	result := map[string]bool{}
+	assignRe := regexp.MustCompile(`\.?(\w+)\s*=[^=]`)
+	for k := start; k < end && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		for _, m := range assignRe.FindAllStringSubmatch(ln, -1) {
+			name := m[1]
+			switch name {
+			case "if", "else", "while", "for", "return", "throw", "switch", "case", "break",
+				"continue", "try", "catch", "finally", "new", "this", "super":
+				continue
+			}
+			result[name] = true
+		}
+	}
+	return result
+}
+
+// collectSwitchDefaultSelfReads returns the set of variables that appear on BOTH sides of an
+// assignment in the default body (e.g. `var5 = var5 ^ x` reads var5 while assigning it). These
+// represent compound assignments where the default DEPENDS on the case's prior value.
+func collectSwitchDefaultSelfReads(lines []string, start, end int) map[string]bool {
+	result := map[string]bool{}
+	// Match `var = ... var ...` patterns: the LHS variable also appears on the RHS.
+	assignRe := regexp.MustCompile(`\b(\w+)\s*=\s*([^;]*)`)
+	for k := start; k < end && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		for _, m := range assignRe.FindAllStringSubmatch(ln, -1) {
+			varName := m[1]
+			rhs := m[2]
+			// Check if varName appears in the RHS (self-read / compound assignment).
+			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(varName) + `\b`)
+			if re.MatchString(rhs) {
+				result[varName] = true
+			}
+		}
+	}
+	return result
+}
+
+// defaultAssignsIndependently reports whether the variable `name` is assigned in the given range
+// WITHOUT being read in the same assignment (an independent overwrite, not a compound assignment).
+func defaultAssignsIndependently(lines []string, start, end int, name string) bool {
+	assignRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*=\s*([^;]*)`)
+	for k := start; k < end && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		// Skip field accesses (preceded by `.`).
+		idx := strings.Index(ln, name+" =")
+		if idx < 0 {
+			idx = strings.Index(ln, name+"  =")
+		}
+		if idx > 0 && ln[idx-1] == '.' {
+			continue
+		}
+		m := assignRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		rhs := m[1]
+		// Check if name appears in the RHS.
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+		if !re.MatchString(rhs) {
+			return true // independent assignment (no self-read)
+		}
+	}
+	return false
+}
+
+// collectSwitchReadVars returns the set of variables READ (used but not as assignment target) in
+// the given line range.
+func collectSwitchReadVars(lines []string, start, end int) map[string]bool {
+	result := map[string]bool{}
+	wordRe := regexp.MustCompile(`\b(\w+)\b`)
+	for k := start; k < end && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		for _, m := range wordRe.FindAllStringSubmatch(ln, -1) {
+			name := m[1]
+			switch name {
+			case "if", "else", "while", "for", "return", "throw", "switch", "case", "break",
+				"continue", "try", "catch", "finally", "new", "this", "super", "null", "true",
+				"false", "int", "long", "boolean", "char", "byte", "short", "double", "float",
+				"void", "String", "Class", "Object", "var", "final":
+				continue
+			}
+			result[name] = true
+		}
+	}
+	return result
+}
+
 // wrapReflectionCallInSwitchCase wraps a single-statement switch case body that calls a reflection
 // method (getMethod/getDeclaredMethod/getConstructor/getDeclaredConstructor) in a try/catch, when
 // the case body has NO enclosing try/catch. The catch converts NoSuchMethodException into a
@@ -6153,16 +6245,47 @@ func addBreakToSwitchCases(body string) string {
 				if !eligible {
 					continue
 				}
-				// Do NOT add break if the next case is `default:` — fall-through to default is
-				// often intentional (the default's body depends on the prior case's assignment).
+				// Dependency analysis for fall-through to default: when the next case is `default:`,
+				// decide whether to add break based on whether the case and default bodies CONFLICT
+				// (both assign the same variable with an INDEPENDENT assignment → break needed) or the
+				// default DEPENDS on the case's assignment (default's assignment READS the variable the
+				// case assigns, e.g. `var5 = var5 ^ x` → fall-through needed, no break).
 				if ci+1 < len(caseStarts) {
 					nextLabel := strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
 					if nextLabel == "default:" {
-						continue
+						caseAssigned := collectSwitchAssignedVars(lines, cs+1, nextCase)
+						defaultStart := caseStarts[ci+1] + 1
+						defaultEnd := switchEnd
+						if ci+2 < len(caseStarts) {
+							defaultEnd = caseStarts[ci+2]
+						}
+						defaultSelfReads := collectSwitchDefaultSelfReads(lines, defaultStart, defaultEnd)
+						// CONFLICT: a variable assigned in the case is ALSO assigned in the default
+						// WITHOUT being read in the same assignment (independent overwrite).
+						// DEPENDENCY: the variable is read in the default's own assignment (compound
+						// assignment like `var5 = var5 ^ x`) → default depends on case's value.
+						conflict := false
+						for v := range caseAssigned {
+							if defaultSelfReads[v] {
+								// Default reads v in its own assignment → dependency, not conflict.
+								continue
+							}
+							// Check if default assigns v independently (without reading it).
+							if defaultAssignsIndependently(lines, defaultStart, defaultEnd, v) {
+								conflict = true
+								break
+							}
+						}
+						if !conflict {
+							continue // skip break — no independent-overwrite conflict
+						}
 					}
 				}
 				// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
 				breakIndent := caseIndent + "\t"
+				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+					fmt.Fprintf(os.Stderr, "[ADDBREAK] ADD break before L%d (case at L%d, conflict=%v)\n", nextCase+1, cs+1, true)
+				}
 				inserts = append(inserts, insert{at: nextCase, indent: breakIndent})
 		}
 	}
