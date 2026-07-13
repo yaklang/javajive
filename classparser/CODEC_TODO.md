@@ -29,13 +29,13 @@
 |---|---:|---:|---:|---:|---|
 | **commons-codec** 1.15 | 106 | **0** | **0** | 0 | ✅ **完整往返**(107/107 verify + 调用差分逐字节一致) |
 | **gson** 2.8.9 | 195 | **0** | **0** | 0 | ✅ **完整往返**(199/199 verify) |
-| **commons-lang3** 3.12.0 | 345 | 5 | 5 | 0 | 泛型擦除长尾 |
+| **commons-lang3** 3.12.0 | 345 | 4 | 4 | 0 | 泛型擦除长尾 |
 | **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
 | **snakeyaml** 2.2 | 231 | **0** | **0** | 0 | ✅ **完整往返**(233/233 verify) |
 | **spring-core** 5.3.27 | 978 | 18 | 30 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
 | **fastjson2** 2.0.43 | 681 | **0** | **0** | 0 | ✅ **完整往返**(689/689 verify) |
 | **guava** 28.2-android | 1892 | 23 | 27 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **47** | **63** | **0** | 类级干净率 **99.0%**(4440/4487 摊平单元) |
+| **合计** | | **46** | **62** | **0** | 类级干净率 **99.0%**(4441/4487 摊平单元) |
 
 **codec / gson / fastjson2 / snakeyaml 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go` 的 `provenClean` 硬断言):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。fastjson2(689/689)与 snakeyaml(233/233)本轮随 TypeReference DA 级联(final-copy lambda-capture + method-scoped init)与 createNumber(T4b 折叠首赋值)治本一并清零, 4 个 jar 的 tree 错误与 verify 失败数均锁为 0, 任一回归 CI 直接红。
@@ -211,6 +211,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_NUMERIC_DECL_SLOT_TYPE_OFF` | 装箱数值槽声明渲染拓宽到 Number: 当槽位解析为 java.lang.Number(JVM 复用同一槽存不兼容的 boxed numeric 子类型: Integer/Long/...)但 `IsFirst` 声明渲染取的是初始化值类型(具体子类型如 Integer), 后续重赋不兼容子类型(如 Long)时 javac 拒。修法: 槽位类型是 Number 且初始化值是具体 numeric 子类型时, 用槽位类型渲染声明 `Number varN = Integer.valueOf(...)`(Integer is-a Number 合法)。治 fastjson2 `ObjectWriterCreatorASM.gwFieldName`(slot 11 Integer 初始化 + Long case-store, 读端 .intValue()/.longValue() 是 Number 方法)(tree errLines 8→7, 承重 `numeric_slot_widen_test.go`)。全量 8-jar A/B delta≥0 |
 | `JDEC_TERNARY_ARM_CAST_OFF` | 三元不兼容臂造型: `T var = cond ? A : B` 当 A 或 B 恰有一个不是 T 的引用子类型(sibling, 如 List vs Map)时, JVM 两个臂都 astore 同槽(无 checkcast), 但 javac 要求每个臂可赋值到 T。修法: 恰好一个臂不可赋值时给该臂补 `(T)` 造型使条件在 T 处合流。治 fastjson2 `JSONPathSegment$CycleNameSegment.eval`(`List var8 = cond ? readArray() : readObject()`, readObject 返 Map 是 List 的 sibling)(tree errLines 7→6, 承重 `ternary_arm_cast_test.go`)。全量 8-jar A/B delta≥0 |
 | `JDEC_NULL_ARG_CAST_OFF` | `null` 字面量实参补造型消除重载歧义: 一个 `null` 实参喂给**重载**方法、另一同元数重载在该位取不同引用类型时, javac 判二义(`m(Field,null,boolean)` 同时匹配 `m(Field,Object,boolean)` 与 `m(Object,String,boolean)`, 互不更具体)。字节码 descriptor 钉死所选形参类型, 把 `null` 造型成该形参(`(Object) null` 不再可赋给 String)迫使 javac 选字节码所选重载。**紧门控** `HasOverloadedSameArity`(callee 确有另一同元数不同 descriptor 重载), 非**重载**方法的 `null` 实参保持裸形——不加门控的 `(Object) null` 会砸 javac 类型变量推断、改重载选择(fastjson2 JSONReader.readBytes 实证回归 0→33)。治 commons-lang3 `FieldUtils.readStaticField→readField(field,(Object)null,forceAccess)` + `writeStaticField/writeDeclaredStaticField→writeField(...,(Object)null,...)`(tree errLines 8→5, 3 条 ambiguous reference 清零)。全量 8-jar A/B delta≥0 |
+| `JDEC_OBJECT_RECV_INVOKE_CAST_OFF` | `Object` 类型局部作 invoke 接收者、字节码 invoke 目标类是另一具体引用类时, 给接收者补 `((TargetClass)(recv)).m(...)` 造型。修槽位以 `Object varN = null;` 裸声明(null-init 未采纳具体 store, 因槽位被不相交变量复用)但下游成员访问需具体类型的族: javac 按 Object 解析成员报「cannot find symbol」, 而字节码 invoke 的目标类是真实接收者类型。**紧门控**: 接收者须是 plain Object-typed JavaRef(非 this/param/表达式); 目标类须具体非 Object 非数组非 `<init>`。治 commons-lang3 `StrSubstitutor.substitute` `var24_1.length()`(槽位 24 复用 var24 char[]/var24 String/var24_1 Object, null-init var24_1 因槽位复用未采纳 String, 字节码 `aload 24; invokevirtual String.length`)(tree errLines 5→4)。全量 8-jar A/B delta≥0 |
 | `JDEC_WIDEN_NUMERIC_MIXED_OFF` | 兜底: 当槽位未被预解析为 Number 时, WidenNumericMixedSlotDecl 按 VarUid 收集具体 numeric 声明 + 不兼容子类型重赋, 通过 isNumberSafeWiden 门控后 widen 到 Number(与 JDEC_NUMERIC_DECL_SLOT_TYPE_OFF 配合的 defense-in-depth) |
 | `JDEC_LIVEINTERVAL_OFF` | 活跃区间声明摆放总闸(置位即同时关闭 web 分析与所有 web 驱动修复, 不可与下方 WEB_OFF 混用) |
 | `JDEC_LIVEINTERVAL_WEB_OFF` | web 读/写重定向修复(`reachingSlotVersionByWeb` / `reachingSlotStoreContinuationByWeb`): 用到达定义 web 把「经 web 证明属同一源变量(同 VarUid)」的 load/store 重定向到该 web 规范 ref, 修正 DFS 序把后到/不相交分支版本漏进槽位表导致的读错变量。历史上 opt-in(默认关)注释称 iso delta +0、tree 略负; 重测当前 8-jar tree 口径是严格改进(fastjson2 24→22 ObjectReaderCreator/JSONPathParser, 其余 jar 全持平, delta≥0), 翻成默认开。仅合流 web 内的同变量定义; 不相交活跃区间(try-with-resources `primaryExc`)落不同 web 不动 |

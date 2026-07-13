@@ -2789,8 +2789,58 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	case *JavaExpression, *TernaryExpression, *SlotValue:
 		return fmt.Sprintf("(%s).%s(%s)", f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
 	default:
+		// A member access on a java.lang.Object-typed local whose bytecode invoke target is a
+		// DIFFERENT concrete reference type (the slot was null-initialized as Object but the JVM store
+		// path feeds a String/typed value; the null-init's Object declaration never adopted the concrete
+		// type because the slot is reused across disjoint variables). javac resolves the member against
+		// Object and rejects it ("cannot find symbol: method length(), location: variable var24_1 of type
+		// Object"); the bytecode invoke's target class is the REAL receiver type. Cast the receiver to the
+		// invoke target class so the member resolves (commons-lang3 StrSubstitutor.substitute
+		// `var24_1.length()` where the bytecode is `aload 24; invokevirtual String.length`). The cast
+		// mirrors what javac would have synthesized for a checkcast the source carried (or the declared
+		// String type the slot should have had). Gated: receiver must be a plain Object-typed local ref,
+		// target class a concrete non-Object/non-array reference, and the method non-<init>. Kill-switch:
+		// JDEC_OBJECT_RECV_INVOKE_CAST_OFF=1.
+		if os.Getenv("JDEC_OBJECT_RECV_INVOKE_CAST_OFF") == "" {
+			if castCls := f.objectReceiverInvokeCast(funcCtx); castCls != "" {
+				return fmt.Sprintf("((%s)(%s)).%s(%s)", castCls, f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+			}
+		}
 		return fmt.Sprintf("%s.%s(%s)", f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
 	}
+}
+
+// objectReceiverInvokeCast reports the cast class to wrap an Object-typed invoke receiver in, when the
+// bytecode invoke target (f.ClassName) is a concrete reference type distinct from java.lang.Object. This
+// repairs member-access sites where the receiver local was null-initialized as Object (and never adopted
+// a concrete type due to slot reuse), but the bytecode invoke proves the real value is the target class.
+// Returns "" when no cast is wanted. See renderCall.
+func (f *FunctionCallExpression) objectReceiverInvokeCast(funcCtx *class_context.ClassContext) string {
+	if f.FunctionName == "<init>" || f.ClassName == "" {
+		return ""
+	}
+	// The receiver must be a plain local variable read (a JavaRef), not an expression/ternary/call.
+	ref, ok := UnpackSoltValue(f.Object).(*JavaRef)
+	if !ok || ref == nil || ref.IsThis || ref.IsParam {
+		return ""
+	}
+	// Only when the receiver's STATIC type is exactly java.lang.Object.
+	rt := ref.Type()
+	if rt == nil {
+		return ""
+	}
+	if jc, ok := rt.RawType().(*types.JavaClass); !ok || jc == nil || jc.Name != "java.lang.Object" {
+		return ""
+	}
+	// The invoke target class must be a concrete reference type distinct from Object (and not an array,
+	// whose member is .length which is field-access not invoke).
+	if f.ClassName == "java.lang.Object" {
+		return ""
+	}
+	if strings.HasPrefix(f.ClassName, "[") {
+		return ""
+	}
+	return f.ClassName
 }
 
 func coerceBooleanArgument(arg JavaValue) JavaValue {
