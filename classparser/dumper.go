@@ -954,6 +954,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// a same-class call recover its erased argument cast via its exact descriptor. Kill-switch
 		// JDEC_SAMECLASS_DESC_SIG_OFF disables population (so the consumer degrades to the arity path).
 		methodSignaturesByDesc := map[string]string{}
+		// All-method (name, descriptor) presence set (regardless of Signature), so a renderer can detect
+		// genuine overload ambiguity (a second same-arity overload with a different descriptor). Populated
+		// for every non-<init>/non-<clinit> method. Kill-switch consumer: JDEC_NULL_ARG_CAST_OFF.
+		methodDescriptors := map[string]bool{}
 		recordByDesc := os.Getenv("JDEC_SAMECLASS_DESC_SIG_OFF") == ""
 		for _, m := range c.obj.Methods {
 			name, err := c.obj.getUtf8(m.NameIndex)
@@ -969,6 +973,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			if err != nil || descriptor == "" {
 				continue
 			}
+			methodDescriptors[class_context.MethodDescKey(name, descriptor)] = true
 			for _, attr := range m.Attributes {
 				sigAttr, ok := attr.(*SignatureAttribute)
 				if !ok {
@@ -994,6 +999,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 		if len(methodSignaturesByDesc) > 0 {
 			c.FuncCtx.MethodSignaturesByDesc = methodSignaturesByDesc
+		}
+		if len(methodDescriptors) > 0 {
+			c.FuncCtx.MethodDescriptors = methodDescriptors
 		}
 		// Augment with DIRECT-supertype (inherited) generic method signatures so a `this.m(objVal)`
 		// call to an inherited generic method recovers its erased `(K)` argument cast too. Same-class

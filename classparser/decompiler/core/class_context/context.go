@@ -81,6 +81,17 @@ type ClassContext struct {
 	// `add(E)` vs `add(E...)`). Consumed by sameClassMethodParamType as a fallback after the arity path
 	// declines. Kill-switch consumer: JDEC_SAMECLASS_DESC_SIG_OFF. Empty when the class has no such method.
 	MethodSignaturesByDesc map[string]string
+	// MethodDescriptors records every (name, EXACT JVM descriptor) key present on same-class methods,
+	// REGARDLESS of whether the method has a generic Signature attribute (unlike MethodSignaturesByDesc,
+	// which only carries methods that have a Signature). This lets a renderer detect OVERLOAD
+	// AMBIGUITY at a call site: a `null` argument fed to an overloaded method whose other same-arity
+	// overload takes a different reference type at the same slot is ambiguous to javac (null is
+	// assignable to both Object and String); casting `null` to the descriptor-pinned formal forces
+	// javac to pick the bytecode-selected overload. The table is populated for ALL non-<init>/non-<clinit>
+	// methods so plain (non-generic) overloads like commons-lang3 FieldUtils.readField(Field,Object,boolean)
+	// vs readField(Object,String,boolean) are visible. Empty on the single-class path. Kill-switch consumer:
+	// JDEC_NULL_ARG_CAST_OFF.
+	MethodDescriptors map[string]bool
 	// ConstructorSignatures maps a same-class constructor's argument count to its raw generic Signature
 	// string (e.g. 1 -> `(Ljava/util/Comparator<-TK;>;)V`). A `this(...)` self-call loses the source's
 	// unchecked wildcard cast on an argument whose parameter is a wildcard parameterization mentioning a
@@ -255,6 +266,64 @@ func (f *ClassContext) MethodSignatureByDesc(name, descriptor string) string {
 // methodSigKey builds the (name, arity) key used by MethodSignatures.
 func methodSigKey(name string, argc int) string {
 	return name + "/" + strconv.Itoa(argc)
+}
+
+// HasOverloadedSameArity reports whether the same-class method `name` has another method with a
+// DIFFERENT descriptor at the same arity as `descriptor`. Used to decide whether a `null` argument at
+// this slot is genuinely ambiguous (a second overload takes a different reference type there) and thus
+// needs an explicit `(FormalType) null` cast to force javac to pick the bytecode-selected overload.
+// Returns false when only one same-arity overload exists (no ambiguity) or when MethodDescriptors is
+// unset (single-class path, no sibling info).
+func (f *ClassContext) HasOverloadedSameArity(name, descriptor string) bool {
+	if f == nil || name == "" || descriptor == "" || f.MethodDescriptors == nil {
+		return false
+	}
+	argc := descriptorArgc(descriptor)
+	for k := range f.MethodDescriptors {
+		if len(k) <= len(name) || k[:len(name)] != name {
+			continue
+		}
+		otherDesc := k[len(name):]
+		if otherDesc == descriptor {
+			continue // same method
+		}
+		if descriptorArgc(otherDesc) == argc {
+			return true
+		}
+	}
+	return false
+}
+
+// descriptorArgc counts the number of parameter field descriptors in a JVM method descriptor string
+// (e.g. "(Ljava/lang/Object;I)V" -> 2). A pure-string counterpart of dumper.methodParamFieldDescriptors
+// so class_context (which must not import the parser) can compute arity without a cycle.
+func descriptorArgc(descriptor string) int {
+	open := strings.IndexByte(descriptor, '(')
+	closeIdx := strings.IndexByte(descriptor, ')')
+	if open < 0 || closeIdx < 0 || closeIdx < open {
+		return 0
+	}
+	params := descriptor[open+1 : closeIdx]
+	argc := 0
+	for i := 0; i < len(params); {
+		for i < len(params) && params[i] == '[' {
+			i++
+		}
+		if i >= len(params) {
+			break
+		}
+		if params[i] == 'L' {
+			semi := strings.IndexByte(params[i:], ';')
+			if semi < 0 {
+				break
+			}
+			i += semi + 1
+		} else {
+			i++
+		}
+		argc++
+	}
+	return argc
 }
 
 // MethodSigKey is the exported builder for the MethodSignatures key, so the dumper populates the map

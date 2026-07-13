@@ -2512,8 +2512,30 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 				return argType
 			})
 		}
-	}
-	return renderPlainArg(arg, funcCtx)
+		}
+		// A `null` literal argument fed to an OVERLOADED same-arity method whose other overload takes a
+		// different reference type at this slot is ambiguous to javac (null is assignable to both Object and
+		// String, so `m(Field,null,boolean)` resolves to both `m(Field,Object,boolean)` and
+		// `m(Object,String,boolean)` — neither is more specific). The bytecode descriptor pins the EXACT
+		// chosen formal type; casting `null` to that formal forces javac to pick the bytecode-selected
+		// overload (the cast type is no longer assignable to the OTHER overload's formal). Re-emit the
+		// source's `(FormalType) null` (commons-lang3 FieldUtils.readStaticField → readField(field,(Object)
+		// null,forceAccess); writeStaticField/writeDeclaredStaticField → writeField(...,(Object) null,...)).
+		// GATED on genuine overload ambiguity (HasOverloadedSameArity) so a NON-overloaded method's `null`
+		// argument is NOT cast — an ungated `(Object) null` smashes javac's type-variable inference on
+		// generic calls and changes overload selection (fastjson2 JSONReader.readBytes regression). The
+		// formal is the bytecode-pinned type so behaviour is preserved. Kill-switch: JDEC_NULL_ARG_CAST_OFF=1.
+		if os.Getenv("JDEC_NULL_ARG_CAST_OFF") == "" {
+			if castType := f.nullArgDisambiguationCast(i, argType, arg, funcCtx); castType != "" {
+				argStr := arg.String(funcCtx)
+				arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+					return fmt.Sprintf("(%s)(%s)", castType, argStr)
+				}, func() types.JavaType {
+					return argType
+				})
+			}
+		}
+		return renderPlainArg(arg, funcCtx)
 }
 
 // renderPlainArg renders a value as a call argument with no synthesized cast, falling back to the raw
@@ -2526,6 +2548,38 @@ func renderPlainArg(arg JavaValue, funcCtx *class_context.ClassContext) string {
 		}
 	}
 	return argStr
+}
+
+// nullArgDisambiguationCast reports the cast type to apply to a `null` literal argument at position i so
+// javac's overload resolution picks the bytecode-selected method. Returns "" when no cast is wanted.
+// `argType` is the already-resolved i-th formal parameter type (FuncType.ParamTypes[i], possibly refined
+// by the generic resolvers above). The cast is emitted ONLY when ALL of:
+//   - the argument is a bare `null` literal;
+//   - the formal is a reference type (class/array; primitives never receive null in valid bytecode);
+//   - the callee genuinely has another same-arity overload with a DIFFERENT descriptor (real ambiguity).
+// The last gate (HasOverloadedSameArity) is what makes this safe: a non-overloaded method's `null` arg is
+// left bare so javac's type-variable inference is untouched (ungated `(Object) null` smashes generic
+// calls — fastjson2 JSONReader.readBytes regressed). For Object the cast is `(Object) null`, which
+// re-selects the Object-formal overload over a String/sibling overload since `(Object) null` is not
+// assignable to String. The formal is the bytecode-pinned type so behaviour is preserved.
+func (f *FunctionCallExpression) nullArgDisambiguationCast(i int, argType types.JavaType, arg JavaValue, funcCtx *class_context.ClassContext) string {
+	if argType == nil {
+		return ""
+	}
+	if !IsNullLiteral(UnpackSoltValue(arg)) {
+		return ""
+	}
+	// Only reference formals (class/array) — primitives never receive null in valid bytecode.
+	if _, isPrim := argType.RawType().(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	// Gate on genuine overload ambiguity: only cast when the callee has another same-arity overload with a
+	// different descriptor. This keeps non-overloaded (and generic-inference-sensitive) calls' null args
+	// bare, so javac's type-variable inference is never smashed.
+	if funcCtx == nil || !funcCtx.HasOverloadedSameArity(f.FunctionName, f.Descriptor) {
+		return ""
+	}
+	return argType.String(&class_context.ClassContext{})
 }
 
 // varargsTypeVarSpread detects the javac varargs-call idiom on a generic method whose varargs COMPONENT
