@@ -2248,6 +2248,52 @@ func numericSlotWiderThan(a types.JavaType, b types.JavaType) bool {
 	return concreteNumericDeclFQNs[bf]
 }
 
+// refSlotWiderThanLUB reports whether the slot type (`a`) was widened by a sibling-arm merge to a
+// LUB that strictly contains the initializer's type (`b`) — i.e. b is-a a but a != b and neither is
+// java.lang.Object. This drives `Node varN = commentRef;` declaration rendering when a slot first
+// seen storing a concrete type (Comment) is later widened to a cross-class LUB (Node) by an arm
+// merge (jsoup XmlTreeBuilder.insert: `Comment var3 = var2; ... var3 = new XmlDeclaration();` — the
+// sibling arm stores XmlDeclaration, the slot ref widens to Node, but the first-decl RHS is still
+// the Comment-typed var2, so the declaration would render `Comment var3` and the XmlDeclaration
+// reassign fails). Object is excluded: an Object widening smashes member-access uses (the §8a
+// widen-to-Object read-side regressions), so only genuine non-Object LUB supertypes are adopted.
+//
+// The widening is gated to a JavaRef RHS (a cross-arm copy of another variable): a method-call /
+// new-expression initializer carries the source's declared return type, which a non-Object LUB
+// supertype (e.g. Member vs the correct Executable) can widen AWAY from and smash downstream
+// member-access receivers (spring ObjectToObjectConverter.getValidatedExecutable regressed when
+// widened to the wrong LUB Member). A variable-to-variable copy has no such dependency.
+func refSlotWiderThanLUB(funcCtx *class_context.ClassContext, rhs values.JavaValue, a types.JavaType, b types.JavaType) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if _, isPrim := a.RawType().(*types.JavaPrimer); isPrim {
+		return false
+	}
+	if _, isPrim := b.RawType().(*types.JavaPrimer); isPrim {
+		return false
+	}
+	af, aok := types.ClassFQNOf(a)
+	bf, bok := types.ClassFQNOf(b)
+	if !aok || !bok {
+		return false
+	}
+	if af == bf {
+		return false // not strictly wider
+	}
+	// Object widening smashes member-access receivers (§8a widen-to-Object regressions); exclude.
+	if af == "java.lang.Object" || bf == "java.lang.Object" {
+		return false
+	}
+	// Only widen when the initializer is a variable read (a cross-arm copy), never a method call /
+	// new expression, whose declared return type downstream member access depends on.
+	if _, isRef := values.UnpackSoltValue(rhs).(*values.JavaRef); !isRef {
+		return false
+	}
+	// b must be a strict reference subtype of a (the initializer is the narrow arm, a is the LUB).
+	return isReferenceAssignable(funcCtx, b, a)
+}
+
 func NewReturnStatement(value values.JavaValue) *ReturnStatement {
 	return &ReturnStatement{
 		JavaValue: value,
@@ -2581,6 +2627,18 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// JDEC_NUMERIC_DECL_SLOT_TYPE_OFF=1.
 		if os.Getenv("JDEC_NUMERIC_DECL_SLOT_TYPE_OFF") == "" {
 			if lt := a.LeftValue.Type(); numericSlotWiderThan(lt, declType) {
+				declType = lt
+			}
+		}
+		// When the slot's resolved type is a cross-class LUB widened by a sibling-arm merge (Comment +
+		// XmlDeclaration → Node) but the initializer is the narrow arm type (Comment), declare at the
+		// slot type so the later sibling-typed reassign (var3 = new XmlDeclaration()) compiles: declaring
+		// `Comment var3 = var2` would make the XmlDeclaration reassign fail. Object is excluded (member-
+		// access receivers); the widening is gated to a variable-copy RHS so a method-call initializer's
+		// declared return type (which downstream member access depends on) is never widened away. Kill-
+		// switch: JDEC_REF_SLOT_LUB_DECL_OFF=1.
+		if os.Getenv("JDEC_REF_SLOT_LUB_DECL_OFF") == "" {
+			if lt := a.LeftValue.Type(); refSlotWiderThanLUB(funcCtx, a.JavaValue, lt, declType) {
 				declType = lt
 			}
 		}

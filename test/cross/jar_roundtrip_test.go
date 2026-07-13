@@ -186,6 +186,7 @@ func TestJarRoundTripRepackage(t *testing.T) {
 				"gson":      true, // gson 2.8.9
 				"fastjson2": true, // fastjson2 2.0.43
 				"snakeyaml": true, // snakeyaml 2.2
+				"jsoup":     true, // jsoup 1.10.2
 			}
 			if provenClean[name] {
 				if treeErr != 0 {
