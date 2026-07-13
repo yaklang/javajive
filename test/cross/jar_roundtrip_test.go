@@ -178,14 +178,21 @@ func TestJarRoundTripRepackage(t *testing.T) {
 			t.Logf("[%s] units=%d decompileFail=%d treeErr=%d repackagedVerify(ok=%d fail=%d)",
 				name, units, decompFail, treeErr, vok, vfail)
 
-			if name == "codec" {
-				// Proven clean on commons-codec 1.15: lock it so any regression in the round-trip
-				// capability fails CI loudly. (Other jars are reported, not asserted, until cleared.)
+			// provenClean jars have demonstrated the full north-star chain (decompile → 0 tree errors →
+			// repackage → external JVM -Xverify:all on every class). Lock each so any regression in the
+			// round-trip capability fails CI loudly. Other jars are reported, not asserted, until cleared.
+			provenClean := map[string]bool{
+				"codec":     true, // commons-codec 1.15
+				"gson":      true, // gson 2.8.9
+				"fastjson2": true, // fastjson2 2.0.43
+				"snakeyaml": true, // snakeyaml 2.2
+			}
+			if provenClean[name] {
 				if treeErr != 0 {
-					t.Errorf("codec must tree-recompile with 0 errors, got %d:\n%s", treeErr, firstNLines(raw, 40))
+					t.Errorf("%s must tree-recompile with 0 errors, got %d:\n%s", name, treeErr, firstNLines(raw, 40))
 				}
 				if vfail != 0 {
-					t.Errorf("codec repackaged jar must verify all classes, got %d failures:\n%s", vfail, firstNLines(vraw, 40))
+					t.Errorf("%s repackaged jar must verify all classes, got %d failures:\n%s", name, vfail, firstNLines(vraw, 40))
 				}
 			}
 		})

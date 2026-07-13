@@ -29,16 +29,16 @@
 |---|---:|---:|---:|---:|---|
 | **commons-codec** 1.15 | 106 | **0** | **0** | 0 | ✅ **完整往返**(107/107 verify + 调用差分逐字节一致) |
 | **gson** 2.8.9 | 195 | **0** | **0** | 0 | ✅ **完整往返**(199/199 verify) |
-| **commons-lang3** 3.12.0 | 345 | 8 | 11 | 0 | 泛型擦除长尾 |
+| **commons-lang3** 3.12.0 | 345 | 8 | 10 | 0 | 泛型擦除长尾 |
 | **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
-| **snakeyaml** 2.2 | 231 | 1 | 1 | 0 | definite-assignment 单点 |
-| **spring-core** 5.3.27 | 978 | 16 | 25 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
-| **fastjson2** 2.0.43 | 681 | 1 | 1 | 0 | 泛型擦除 + 槽位复用长尾 |
+| **snakeyaml** 2.2 | 231 | **0** | **0** | 0 | ✅ **完整往返**(233/233 verify) |
+| **spring-core** 5.3.27 | 978 | 18 | 30 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
+| **fastjson2** 2.0.43 | 681 | **0** | **0** | 0 | ✅ **完整往返**(689/689 verify) |
 | **guava** 28.2-android | 1892 | 23 | 27 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **57** | **77** | **0** | 类级干净率 **98.6%**(4430/4487 摊平单元) |
+| **合计** | | **50** | **68** | **0** | 类级干净率 **98.9%**(4437/4487 摊平单元) |
 
-**codec 与 gson 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go`):
-`decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。
+**codec / gson / fastjson2 / snakeyaml 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go` 的 `provenClean` 硬断言):
+`decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。fastjson2(689/689)与 snakeyaml(233/233)本轮随 TypeReference DA 级联(final-copy lambda-capture + method-scoped init)与 createNumber(T4b 折叠首赋值)治本一并清零, 4 个 jar 的 tree 错误与 verify 失败数均锁为 0, 任一回归 CI 直接红。
 
 > CI 常驻承重: `TestSyntheticJarRoundTrip`(无需 `~/.m2`)对一个含枚举+switch / 泛型 / lambda / varargs / try-catch 的多类程序跑完整往返, 断言运行输出逐字节一致 + 全类 verify, 守住往返能力永不回归。
 
@@ -56,11 +56,11 @@
      - **通配符捕获 `CAP#1`(T1b)**: 三方 oracle 均败, 属内在难。本轮新增**通配符上界擦除窄化**(`wildcardExtendsBoundErasure`): 当字段/返回值的通配符是 `? extends ConcreteClass` 且上界擦除与目标对应参数擦除**不同**时, 不补 inconvertible 造型(改诚实裸 return, 走 unchecked conversion)。全量零回归(guava/spring/fastjson2/commons-lang3 tree errLines 均持平), 渲染更接近 CFR。`? super X` 场景(下界)不 block, 保留原 unchecked 造型。kill-switch `JDEC_TYPEVAR_FIELD_WILDCARD_NOCAST_OFF`。CAP#1 本身仍内在难。
      - **装箱数值(T1c)**: baseline 全量扫描**无真正原语→包装类错误**(`int cannot be converted to Integer` 等), 唯一 `Long cannot be converted to Integer`(fastjson2 ObjectWriterCreatorASM) 实为 T2 槽位复用混淆, 非 T1(c)。T1(c) 无选靶, 跳过。
 
-2. **活跃区间分裂 / 槽位复用类型混淆 `bad operand type` / `unexpected type` / `int cannot be converted to boolean`** — fastjson2 主要长尾。
+2. **活跃区间分裂 / 槽位复用类型混淆 `bad operand type` / `unexpected type` / `int cannot be converted to boolean`** — ~~fastjson2 主要长尾~~ (fastjson2 已清零, 见 §8a) 现 guava/spring 长尾。
    - 表象: 一个字节码 local 槽在**互不相交的活跃区间**里先后承载**不兼容类型**的值, 反编译却合成单一变量名 + 单一声明类型。例: `JSONPathFilter$GroupFilter` 的 `var9` 既作 `Iterator` 又被当 int 比较。
-   - 现状: 已治本多族 disjoint 槽(兄弟臂 LUB 合并、Object 超类臂合并、数组协变父臂合并、布尔字段/返回槽拆分、跨作用域孤儿读全方法重放等, 见 §4)。**本轮新增**: 活跃区间 web 读/写重定向修复翻成默认开(`JDEC_LIVEINTERVAL_WEB_OFF`, 见 §4)——重测当前 8-jar tree 口径是严格改进, fastjson2 tree 24→22(`ObjectReaderCreator` 3→2、`JSONPathParser` 2→1), 其余 jar 全持平, delta≥0。**残余**: 非布尔子形态的「区间+类型」拆分仍须动变量定型/分裂核, 高风险, 留专项。baseline 非布尔槽位混淆仅 ~3 错误(guava `LocalCache$Segment`/`MapMakerInternalMap$Segment` + fastjson2 `ObjectWriterCreatorASM` Long→Integer), 占总 ~87 错误 3%, 而非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
+   - 现状: 已治本多族 disjoint 槽(兄弟臂 LUB 合并、Object 超类臂合并、数组协变父臂合并、布尔字段/返回槽拆分、跨作用域孤儿读全方法重放等, 见 §4)。活跃区间 web 读/写重定向修复已默认开(`JDEC_LIVEINTERVAL_WEB_OFF`, 见 §4)。**残余**: 非布尔子形态的「区间+类型」拆分仍须动变量定型/分裂核, 高风险, 留专项。baseline 非布尔槽位混淆仅 ~2 错误(guava `LocalCache$Segment`/`MapMakerInternalMap$Segment`), 占总 ~68 错误 ~3%, 而非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
 
-3. **三元 LUB `bad type in conditional expression`** — fastjson2 + guava 若干行。
+3. **三元 LUB `bad type in conditional expression`** — ~~fastjson2~~ (已清零) + guava + spring 若干行。
    - 根因: `cond ? a : b` 两臂最小公共上界算窄, 或三元臂里的泛型擦除(`Optional.of(next())` 缺 `(E)` 等)。
    - 现状: 已治本反射家族(Method/Field/Constructor→Member)与跨类直接子类型两支(见 §4)。**残余**: 渲染期造型未反馈到三元类型的形态、以及三元臂泛型擦除, 归入第 1 类长尾。
 
@@ -81,6 +81,8 @@
 8. **其余小桶**: `method invocation cannot be applied`(重载消歧 + 通配符)、`invalid method reference`(构造器实参位 SAM 目标)、`abstract method not overridden`(桥接可见性)、`incompatible parameter types in lambda`(形参被用作具体类型 + raw 接收者)等, 逐类按 [`HARNESS.md`](../HARNESS.md) 流程清零。
 
 ### 8a. fastjson2 剩余 17 条 tree errLines 的逐条根因(整体治本用, 非单点护栏)
+
+> ✅ **fastjson2 已全量清零**(tree errLines 0 / 681 单元, 重打包后 `java -Xverify:all` **689/689** 通过, 已锁进 `jar_roundtrip_test.go` 的 `provenClean` 硬断言)。下列 #1-19 逐条根因表与 ⑥ TypeReference→OWC→JSONWriter→ORC 四层 DA 级联调查均**已治本**: TypeReference 缺 final-else 链的 `int var10` 由 `initProximateSplitSlotDecl` 的 method-scoped init(ff8e753「unmask DA cascade via method-scoped init」)治本; L4 ObjectReaderCreator 的 effectively-final capture 由 **final-copy lambda-capture 技法**(1e812bd「final-copy lambda-capture + switch-default/unreachable-break fixes」)治本——在 lambda 前插入 `final T varN_f = varN;` 并重写 lambda 体内引用。本节保留全部历史根因供架构参照(其它 jar 的同族缺陷仍可沿用)。
 
 > 下列每条均已用 `javap -p -c -v` + 上游源码取到字节码真相 + 源码对照, 定位到反编译器核心的具体缺陷点。**这些条目同属一个紧耦合核心族(slot-typing/split/merge/phi/LUB/reaching-def/receiver-binding)**, 多数须整体重构同时重新平衡既有 bool-handler 族 + AssignVarGuarded + ternaryDeclLUB + reachingSlotVersionGeneral, 不能单点护栏(历次单点尝试实测回归 56/74/8 或不触发, 已回退)。**但有可单点清零的条目被逐条剥离**——#11/#12(FieldWriterList/ObjectWriterImplList boolean→int)已由 `reachingBoolVarCopyMerge`(见 §4)零回归清零, 证明该族并非铁板一块, 可逐条甄别单点突破。
 
@@ -122,7 +124,7 @@
 > - **chainLacksFinalElse 文本检测脆弱**: 检测「裸声明后接缺 final-else 的 if/else 链」须处理嵌套结构(反编译器把 else-if 渲染成嵌套 `}else{ if(){}}`)。逐层 brace-depth 下探 + else 体内「varN 在内层 if 前是否无条件赋值」判别, 但仍误报(如 BoolVarCopy 的 else 体内 `var5=isRefDetect()` 后接 `if(var5)`, 该内层 if 与 var5 的 DA 无关)。**结论**: 纯文本的 DA 分析(无结构化 CFG)对本族不可靠。
 > - **Object 类型排除**: `chainLacksFinalElse` 须排除纯 `Object` 声明(null-reassign split 的 widened 产物, JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF 时裸形是有意承重)。
 >
-> **结论**: TypeReference→OWC→JSONWriter 三层 DA 级联**可治**(机制已实证: 移除 early-return + method-scoped capture 跳过 + hasRead 控制关键字 + chainLacksFinalElse 门控), 但需同时更新承重测试断言(从裸声明改为带初始化声明), 且**L4 ORC capture 是硬阻碍**(2 条结构性 effectively-final 错误, 须 final-copy 技法)。**净效果(已回退)**: fastjson2 1→2(ORC capture 回归), commons-lang3 -1, snakeyaml -1。要达 fastjson2=0 须先实现 final-copy lambda-capture 修复(高风险结构改写)并更新承重测试。
+> **结论(已达成)**: TypeReference→OWC→JSONWriter→ORC 四层 DA 级联**已治本清零**(fastjson2 tree 1→0, 689/689 verify)。机制落地: method-scoped init(ff8e753, 治 L1 var10 + L2/L3 潜伏) + **final-copy lambda-capture**(1e812bd, 治 L4 ORC 2 条结构性 effectively-final 错误) + 承重测试断言同步更新。此前记的「净效果已回退 fastjson2 1→2」已被后续 commit 翻正; 早期判断「final-copy 是高风险结构改写」经实证可控, 已默认开。
 
 ### 8b. 剩余 14 条的清零架构蓝图（专项核心重构用, 非单点护栏）
 
