@@ -29,13 +29,13 @@
 |---|---:|---:|---:|---:|---|
 | **commons-codec** 1.15 | 106 | **0** | **0** | 0 | ✅ **完整往返**(107/107 verify + 调用差分逐字节一致) |
 | **gson** 2.8.9 | 195 | **0** | **0** | 0 | ✅ **完整往返**(199/199 verify) |
-| **commons-lang3** 3.12.0 | 345 | 8 | 10 | 0 | 泛型擦除长尾 |
+| **commons-lang3** 3.12.0 | 345 | 6 | 8 | 0 | 泛型擦除长尾 |
 | **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
 | **snakeyaml** 2.2 | 231 | **0** | **0** | 0 | ✅ **完整往返**(233/233 verify) |
 | **spring-core** 5.3.27 | 978 | 18 | 30 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
 | **fastjson2** 2.0.43 | 681 | **0** | **0** | 0 | ✅ **完整往返**(689/689 verify) |
 | **guava** 28.2-android | 1892 | 23 | 27 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **50** | **68** | **0** | 类级干净率 **98.9%**(4437/4487 摊平单元) |
+| **合计** | | **48** | **66** | **0** | 类级干净率 **98.9%**(4439/4487 摊平单元) |
 
 **codec / gson / fastjson2 / snakeyaml 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go` 的 `provenClean` 硬断言):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。fastjson2(689/689)与 snakeyaml(233/233)本轮随 TypeReference DA 级联(final-copy lambda-capture + method-scoped init)与 createNumber(T4b 折叠首赋值)治本一并清零, 4 个 jar 的 tree 错误与 verify 失败数均锁为 0, 任一回归 CI 直接红。
@@ -235,7 +235,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF` | 同上 JDK 接收者伴生(`Stream`/`Optional` 的 RAW 接收者): `.map((l0) -> ...)` 显式类型 lambda 须补 `(Function<X,Object>)` 才绑到擦除 SAM; 方法引用同样跳过。修 fastjson2 `JSONPathSegment$CycleNameSegment$MapRecursive`。本轮方法引用跳过分支清掉 fastjson2 `ObjectReaderCreator.toFieldReaderArray` `flatMap(Collection::stream)`(fastjson2 tree -1) 与 spring `AnnotatedTypeMetadata` `collect(Collector<...>)`(spring tree -3) |
 | `JDEC_CTOR_METHODREF_FIX_OFF` | 构造器方法引用 `::new` 渲染(修 `::new_`) |
 | `JDEC_CTOR_DIAMOND_OFF` | 泛型类 `new` 带方法引用/lambda 实参时补菱形 `<>` |
-| `JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF` | 泛型方法返回 `Supplier<T>`/`Function<T,R>`/`BiFunction<..>` 的 lambda 体, 经 raw 接收者或 Object 返回调用取到擦除 Object 值, 丢源码的 unchecked `return (T)/(R) expr;` 造型, javac 拒「bad return type in lambda expression: Object cannot be converted to T」。修法: 从 enclosing 方法 Signature 的返回类型取该 FI 返回位类型变量, 注入 lambda 体值返回处。仅 instantiatedMethodType 返回为 Object 且 enclosing 方法返回位确为类型变量时触发。修 fastjson2 `ObjectReaderProvider.createObjectCreator` `() -> (T) objectReader.createInstance(0)` + `ObjectReaderCreator.createBuildFunctionLambda` `(l0) -> (R) m.invoke(...)`(fastjson2 tree -2)。CFR 亦丢此造型, 三方同败 |
+| `JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF` | 泛型方法返回 `Supplier<T>`/`Function<T,R>`/`BiFunction<..>` 的 lambda 体, 经 raw 接收者或 Object 返回调用取到擦除 Object 值, 丢源码的 unchecked `return (T)/(R) expr;` 造型, javac 拒「bad return type in lambda expression: Object cannot be converted to T」。修法: 从 enclosing 方法 Signature 的返回类型取该 FI 返回位类型变量, 注入 lambda 体值返回处。仅 instantiatedMethodType 返回为 Object 且 enclosing 方法返回位确为类型变量时触发。修 fastjson2 `ObjectReaderProvider.createObjectCreator` `() -> (T) objectReader.createInstance(0)` + `ObjectReaderCreator.createBuildFunctionLambda` `(l0) -> (R) m.invoke(...)`(fastjson2 tree -2)。**数组类型变量扩展**: instantiatedMethodType 返回擦除 `Object[]`(而非 Object)且 enclosing 方法返回位是数组类型变量 `O[]` 时, 注入 `return (O[]) expr;`(commons-lang3 `Streams$ArrayCollector.finisher` 的 `Function<List<O>,O[]>` lambda 体返回 `list.toArray((Object[])Array.newInstance(...))`, 源码带 `(O[])` 造型; tree errLines -2)。CFR 亦丢此造型, 三方同败 |
 | `JDEC_METHODREF_INSTANTIATED_TYPE_OFF` | 方法引用值类型从 invokedynamic instantiatedMethodType 上行为参数化 functional interface |
 | `JDEC_CTOR_RAWFI_METHODREF_CAST_OFF` | 构造器/静态方法的 RAW 函数式接口形参位(如 raw `BiConsumer`, SAM accept(Object,Object))收 UNBOUND 实例方法引用(如 `Throwable::setStackTrace`, 实现元数 (Throwable,StackTraceElement[]))时, 绑不到 raw SAM, javac 报「invalid method reference」。修法: 从方法引用携带的 invokedynamic instantiatedMethodType 取实参类型, 重发 `(<FIRawClass><<具体类型>>) Type::method` 造型。限 ctor/static 调用、>=2 元数 SAM 族(BiConsumer/BiFunction/BiPredicate)、且至少一形参比 Object 更具体。修 fastjson2 `ObjectReaderCreator` `new FieldReaderStackTrace(..., Throwable::setStackTrace)`(fastjson2 tree -1、缺陷类 13→12)。CFR/Vineflower 亦丢此造型, 三方同败 |
 | `JDEC_DOPRIVILEGED_LAMBDA_CAST_OFF` | 传给 `AccessController.doPrivileged` 的 lambda 补 `(PrivilegedAction)` 造型消歧 |

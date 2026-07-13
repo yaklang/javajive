@@ -532,11 +532,22 @@ func lambdaReturnPositionTypevar(rawType types.JavaType, instantiatedMethodType 
 	if ft == nil || ft.ReturnType == nil {
 		return ""
 	}
-	retClass, ok := ft.ReturnType.RawType().(*types.JavaClass)
-	if !ok || retClass == nil || retClass.Name != "java.lang.Object" {
-		return ""
+	// The instantiatedMethodType's return type must be the erased Object — only then did the body lose a
+	// type-variable cast. A concrete instantiated return binds directly and must not be cast. The erased
+	// SAM return is `Object` for a scalar type variable (Supplier<T>/Function<T,R>) OR `Object[]` for an
+	// ARRAY type variable (Function<List<O>,O[]> — apply erases to `Object[]`, not Object; the lambda
+	// impl `lambda$finisher$1` returns `Object[]`). Accept both.
+	if retClass, ok := ft.ReturnType.RawType().(*types.JavaClass); ok && retClass != nil && retClass.Name == "java.lang.Object" {
+		return jc.Name
 	}
-	return jc.Name
+	if ft.ReturnType.IsArray() {
+		if elem := ft.ReturnType.ElementType(); elem != nil {
+			if retClass, ok := elem.RawType().(*types.JavaClass); ok && retClass != nil && retClass.Name == "java.lang.Object" {
+				return jc.Name
+			}
+		}
+	}
+	return ""
 }
 
 // resolveLambdaReturnTypevar recovers the type-variable NAME the return cast should target, from
@@ -584,11 +595,22 @@ func resolveLambdaReturnTypevar(funcCtx *class_context.ClassContext, fiRawName s
 	}
 	// A bare type variable parses as a *JavaClass whose Name is a single identifier (no dot), e.g. "T".
 	// A concrete class arg (Object/String/...) has a dotted FQN and binds directly, so no cast.
-	jc, ok := ta.RawType().(*types.JavaClass)
-	if !ok || jc == nil || strings.Contains(jc.Name, ".") {
-		return ""
+	if jc, ok := ta.RawType().(*types.JavaClass); ok && jc != nil && !strings.Contains(jc.Name, ".") {
+		return jc.Name
 	}
-	return jc.Name
+	// An ARRAY type-variable arg (`O[]` — Function<List<O>, O[]>.apply returns O[] but the lambda impl
+	// returns the erased Object[]) parses as a *JavaArrayType whose element is a bare type variable.
+	// The source carried `return (O[]) expr;` (commons-lang3 Streams$ArrayCollector.finisher: the
+	// `Function<List<O>,O[]>` lambda body returns `list.toArray((Object[]) Array.newInstance(...))`,
+	// an erased Object[] the source cast back to O[]). Recover `O[]` from the element type variable.
+	if ta.IsArray() {
+		if elem := ta.ElementType(); elem != nil {
+			if jc, ok := elem.RawType().(*types.JavaClass); ok && jc != nil && !strings.Contains(jc.Name, ".") {
+				return jc.Name + strings.Repeat("[]", ta.ArrayDim())
+			}
+		}
+	}
+	return ""
 }
 
 // injectLambdaReturnCast rewrites a statement-lambda body `(...) -> { ... return EXPR; ... }` so the
