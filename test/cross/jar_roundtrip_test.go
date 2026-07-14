@@ -163,7 +163,7 @@ func TestJarRoundTripRepackage(t *testing.T) {
 			// Complete JDK-internal packages (sun.misc for guava, jdk.jfr for spring-core) that
 			// --release 8 hides but a faithful decompilation legitimately imports (see jdk_sunmisc_test.go
 			// / jdk_jfr_test.go). Harmless for jars that do not import them.
-			cp := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
+			cp := withFlow(t, withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))))
 
 			srcRoot := t.TempDir()
 			files, units, decompFail := decompileAll(t, jarPath, srcRoot, maxFiles)
