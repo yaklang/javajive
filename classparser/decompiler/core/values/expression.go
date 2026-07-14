@@ -968,6 +968,75 @@ func (f *FunctionCallExpression) thisCtorTypeVarArgCast(i int, funcCtx *class_co
 	return paramTypeStr
 }
 
+// sameClassStaticMethodTypeVarArgCast returns the class-scope type-variable NAME to cast the i-th
+// argument of a SAME-CLASS STATIC generic method call to, or "" when no cast is needed. It is the
+// static-method analogue of thisCtorTypeVarArgCast: it fires when the callee is a static method
+// declared in the CURRENT class (e.g. commons-lang3 `Range.<T>between(T, T, Comparator<T>)` called
+// from the instance method `intersectionWith`), the i-th formal is a BARE class-scope type variable
+// (`T`, recovered from the recorded method Signature), and the argument's static type is the erased
+// bound (typically Object -- a field read at its erased type, or a ternary whose arms are such field
+// reads) rather than that type variable. The source passed a `(T)`-cast value (or a value javac
+// attributed to T); the bytecode erased T to Object and emitted no checkcast, so the decompiler
+// renders a bare argument that javac feeds as Object to the generic `between`, breaking inference
+// ("incompatible bounds: T#3 has equal constraint T#1, lower bounds T#1, Object"; Range.intersectionWith
+// `between(var2, ..., this.getComparator())` where var2 is a ternary of `this.minimum`/`var1.minimum`
+// read at the erased Object field type). Re-emitting the `(T)` unchecked cast makes the argument bind
+// to T and inference resolve. The cast is denotable because a same-class static method's class type
+// variables are in scope at any instance-method call site of the same class. Kill-switch
+// JDEC_SAMECLASS_STATIC_TYPEVAR_ARG_OFF.
+func (f *FunctionCallExpression) sameClassStaticMethodTypeVarArgCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_SAMECLASS_STATIC_TYPEVAR_ARG_OFF") != "" || funcCtx == nil || !f.IsStatic {
+		return ""
+	}
+	if f.ClassName != funcCtx.ClassName {
+		return ""
+	}
+	// The CALL SITE must be an INSTANCE method: the class-scope type variable T is only denotable there.
+	// A static enclosing method has no `this`, so its class type variables are out of scope and a `(T)`
+	// cast fails ("non-static type variable T cannot be referenced from a static context"; guava
+	// ImmutableSortedMap.access$000 `of((K)(var1),(V)(var2))` -- a synthetic static bridge).
+	if funcCtx.IsStatic {
+		return ""
+	}
+	if i < 0 || i >= len(f.Arguments) {
+		return ""
+	}
+	sig := funcCtx.MethodSignature(f.FunctionName, len(f.Arguments))
+	if sig == "" {
+		sig = funcCtx.MethodSignatureByDesc(f.FunctionName, f.Descriptor)
+	}
+	if sig == "" {
+		return ""
+	}
+	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+	if i >= len(params) || params[i] == nil {
+		return ""
+	}
+	paramTypeStr := params[i].String(funcCtx)
+	if strings.Contains(paramTypeStr, "<") || !funcCtx.IsTypeParam(paramTypeStr) {
+		return ""
+	}
+	arg := f.Arguments[i]
+	if lit, ok := UnpackSoltValue(arg).(*JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+		return ""
+	}
+	vt := arg.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	if jc, ok := raw.(*types.JavaClass); !ok || jc.Name != "java.lang.Object" {
+		return ""
+	}
+	return paramTypeStr
+}
+
 // comparatorRawArgCast returns the raw `Comparator` cast string for the i-th argument when the call is a
 // JDK sort/search static (Arrays.sort / Arrays.binarySearch / Collections.sort / Collections.binarySearch)
 // and the i-th DESCRIPTOR parameter is java.util.Comparator. The array/list companion argument's element
@@ -1818,6 +1887,16 @@ func (f *FunctionCallExpression) calleeParamIsErasedTypeVar(i int, funcCtx *clas
 	}
 	internal := strings.ReplaceAll(f.ClassName, ".", "/")
 	classSig, methodSigs, ok := funcCtx.SiblingClassSig(internal)
+	// For a constructor call (<init>), MethodSignatures deliberately skips <init>, so SiblingClassSig's
+	// methodSigs will never contain it. Recover the ctor Signature from SiblingCtorSig instead (keyed by
+	// arity), which reads the <init> Signature attribute directly. This runs even when SiblingClassSig
+	// returns ok=false (a non-generic class still has generic ctors, e.g. guava Invokable's
+	// `<M extends AccessibleObject & Member> Invokable(M)`), so do not bail early on ok=false for <init>.
+	if f.FunctionName == "<init>" && funcCtx.SiblingCtorSig != nil {
+		if ctorSig, ctorOk := funcCtx.SiblingCtorSig(internal, len(f.Arguments)); ctorOk && ctorSig != "" {
+			return f.methodParamIsTypeVar(ctorSig, classSig, i, funcCtx)
+		}
+	}
 	if !ok || methodSigs == nil {
 		return false
 	}
@@ -1835,6 +1914,18 @@ func (f *FunctionCallExpression) calleeParamIsErasedTypeVar(i int, funcCtx *clas
 	if sig == "" {
 		return false
 	}
+	return f.methodParamIsTypeVar(sig, classSig, i, funcCtx)
+}
+
+// methodParamIsTypeVar parses a method Signature and reports whether the i-th formal parameter is a
+// type variable (a method-scope formal type parameter or a class-scope type parameter of the
+// declaring class). A type-variable formal is erased to its bound in the descriptor, so the arg-cast
+// logic would synthesize a spurious upcast to the bound that breaks the type variable's inference (e.g.
+// an intersection type `<M extends AccessibleObject & Member>` erased to AccessibleObject: casting the
+// argument to AccessibleObject loses the Member bound, and javac rejects "constructor X cannot be
+// applied"; guava Invokable$MethodInvokable `super((AccessibleObject)(var1))`). Returning true lets the
+// caller DROP the cast so the argument's real type drives inference.
+func (f *FunctionCallExpression) methodParamIsTypeVar(sig, classSig string, i int, funcCtx *class_context.ClassContext) bool {
 	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
 	if i < 0 || i >= len(params) || params[i] == nil {
 		return false
@@ -1843,9 +1934,6 @@ func (f *FunctionCallExpression) calleeParamIsErasedTypeVar(i int, funcCtx *clas
 	if !ok {
 		return false
 	}
-	// parseSigType emits a `TC;` type-variable reference as JavaClass{Name:"C"}. It is a real type
-	// variable (not a concrete class that merely shares the name) iff it is declared as a formal type
-	// parameter of the callee method itself or of its declaring class.
 	name := raw.Name
 	for _, n := range types.MethodFormalTypeParamNames(sig) {
 		if n == name {
@@ -2236,9 +2324,13 @@ func LambdaAssignFunctionalCast(left, right JavaValue, funcCtx *class_context.Cl
 // Tightly gated: (a) constructor OR static-method call (no instance receiver erasure involved),
 // (b) argument is a method reference carrying an instantiatedMethodType descriptor,
 // (c) the i-th formal is one of the known raw JDK functional interfaces whose SAM takes >=2 params
-//     (the >=2-param SAMs are where a raw form breaks an unbound instance-method ref's arity),
+//
+//	(the >=2-param SAMs are where a raw form breaks an unbound instance-method ref's arity),
+//
 // (d) the recovered concrete param types differ from the raw `Object` SAM params (else the bare ref
-//     already binds and the cast is noise). Kill-switch: JDEC_CTOR_RAWFI_METHODREF_CAST_OFF=1.
+//
+//	already binds and the cast is noise). Kill-switch: JDEC_CTOR_RAWFI_METHODREF_CAST_OFF=1.
+//
 // Canonical: fastjson2 ObjectReaderCreator `new FieldReaderStackTrace(..., Throwable::setStackTrace)`.
 func (f *FunctionCallExpression) ctorRawFISAMMethodRefCast(i int, funcCtx *class_context.ClassContext) string {
 	if os.Getenv("JDEC_CTOR_RAWFI_METHODREF_CAST_OFF") != "" || i >= len(f.FuncType.ParamTypes) {
@@ -2368,6 +2460,14 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	// the source's implicit type-variable typing (the value erased to Object/the bound); re-emit the
 	// erased `(N)` cast recovered from the super ctor Signature + the subclass's extends clause.
 	if cast := f.superCtorTypeVarArgCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	// A same-class STATIC generic method's argument feeding a bare class-scope type-variable formal
+	// (`T`) lost the source's `(T)` cast to erasure (the value was read at the erased Object field type,
+	// e.g. a ternary of `this.minimum`/`other.minimum`); re-emit it so javac binds the argument to T
+	// instead of Object and the method's type inference resolves (commons-lang3 Range.intersectionWith
+	// `between((T) var2, (T) ..., this.getComparator())`).
+	if cast := f.sameClassStaticMethodTypeVarArgCast(i, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	argType := f.FuncType.ParamTypes[i]
@@ -2512,30 +2612,30 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 				return argType
 			})
 		}
+	}
+	// A `null` literal argument fed to an OVERLOADED same-arity method whose other overload takes a
+	// different reference type at this slot is ambiguous to javac (null is assignable to both Object and
+	// String, so `m(Field,null,boolean)` resolves to both `m(Field,Object,boolean)` and
+	// `m(Object,String,boolean)` — neither is more specific). The bytecode descriptor pins the EXACT
+	// chosen formal type; casting `null` to that formal forces javac to pick the bytecode-selected
+	// overload (the cast type is no longer assignable to the OTHER overload's formal). Re-emit the
+	// source's `(FormalType) null` (commons-lang3 FieldUtils.readStaticField → readField(field,(Object)
+	// null,forceAccess); writeStaticField/writeDeclaredStaticField → writeField(...,(Object) null,...)).
+	// GATED on genuine overload ambiguity (HasOverloadedSameArity) so a NON-overloaded method's `null`
+	// argument is NOT cast — an ungated `(Object) null` smashes javac's type-variable inference on
+	// generic calls and changes overload selection (fastjson2 JSONReader.readBytes regression). The
+	// formal is the bytecode-pinned type so behaviour is preserved. Kill-switch: JDEC_NULL_ARG_CAST_OFF=1.
+	if os.Getenv("JDEC_NULL_ARG_CAST_OFF") == "" {
+		if castType := f.nullArgDisambiguationCast(i, argType, arg, funcCtx); castType != "" {
+			argStr := arg.String(funcCtx)
+			arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				return fmt.Sprintf("(%s)(%s)", castType, argStr)
+			}, func() types.JavaType {
+				return argType
+			})
 		}
-		// A `null` literal argument fed to an OVERLOADED same-arity method whose other overload takes a
-		// different reference type at this slot is ambiguous to javac (null is assignable to both Object and
-		// String, so `m(Field,null,boolean)` resolves to both `m(Field,Object,boolean)` and
-		// `m(Object,String,boolean)` — neither is more specific). The bytecode descriptor pins the EXACT
-		// chosen formal type; casting `null` to that formal forces javac to pick the bytecode-selected
-		// overload (the cast type is no longer assignable to the OTHER overload's formal). Re-emit the
-		// source's `(FormalType) null` (commons-lang3 FieldUtils.readStaticField → readField(field,(Object)
-		// null,forceAccess); writeStaticField/writeDeclaredStaticField → writeField(...,(Object) null,...)).
-		// GATED on genuine overload ambiguity (HasOverloadedSameArity) so a NON-overloaded method's `null`
-		// argument is NOT cast — an ungated `(Object) null` smashes javac's type-variable inference on
-		// generic calls and changes overload selection (fastjson2 JSONReader.readBytes regression). The
-		// formal is the bytecode-pinned type so behaviour is preserved. Kill-switch: JDEC_NULL_ARG_CAST_OFF=1.
-		if os.Getenv("JDEC_NULL_ARG_CAST_OFF") == "" {
-			if castType := f.nullArgDisambiguationCast(i, argType, arg, funcCtx); castType != "" {
-				argStr := arg.String(funcCtx)
-				arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-					return fmt.Sprintf("(%s)(%s)", castType, argStr)
-				}, func() types.JavaType {
-					return argType
-				})
-			}
-		}
-		return renderPlainArg(arg, funcCtx)
+	}
+	return renderPlainArg(arg, funcCtx)
 }
 
 // renderPlainArg renders a value as a call argument with no synthesized cast, falling back to the raw
@@ -2557,6 +2657,7 @@ func renderPlainArg(arg JavaValue, funcCtx *class_context.ClassContext) string {
 //   - the argument is a bare `null` literal;
 //   - the formal is a reference type (class/array; primitives never receive null in valid bytecode);
 //   - the callee genuinely has another same-arity overload with a DIFFERENT descriptor (real ambiguity).
+//
 // The last gate (HasOverloadedSameArity) is what makes this safe: a non-overloaded method's `null` arg is
 // left bare so javac's type-variable inference is untouched (ungated `(Object) null` smashes generic
 // calls — fastjson2 JSONReader.readBytes regressed). For Object the cast is `(Object) null`, which

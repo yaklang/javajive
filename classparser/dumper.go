@@ -1919,14 +1919,26 @@ func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc
 								continue
 							}
 							sigStr, err := sObj.getUtf8(sigAttr.SignatureIndex)
-							if err != nil || sigStr == "" || !strings.HasPrefix(sigStr, "(") {
+							if err != nil || sigStr == "" {
+								continue
+							}
+							// A method Signature may start with `<T:...>` (method-scope type parameters)
+							// before the `(...)` parameter list, or directly with `(`. Accept both: a
+							// super-constructor whose formal is a METHOD-scope type variable (e.g. guava
+							// Invokable's `<M extends AccessibleObject & Member> Invokable(M)`) has a
+							// Signature starting with `<M:`, which the old `HasPrefix("(")` check silently
+							// dropped, making the ctor invisible to calleeParamIsErasedTypeVar and causing
+							// a spurious arg cast to the erased first bound.
+							if !strings.HasPrefix(sigStr, "(") && !strings.HasPrefix(sigStr, "<") {
 								continue
 							}
 							// Offset safety: a non-static inner class's ctor Signature omits the synthetic
 							// leading this$0/outer-capture params, so its param count is smaller than the
 							// descriptor's. Only record when they match, so the index used by the caller
-							// (which indexes descriptor arguments) lines up with the Signature params.
-							sigParams, _ := types.ParseMethodSignature(sigStr)
+							// (which indexes descriptor arguments) lines up with the Signature params. Use
+							// ParseMethodSignatureFull (not ParseMethodSignature) so a `<T:...>` prefix is
+							// stripped before counting params.
+							_, sigParams, _ := types.ParseMethodSignatureFull(sigStr, nil)
 							if len(sigParams) != descArgc {
 								continue
 							}

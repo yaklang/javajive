@@ -29,16 +29,16 @@
 |---|---:|---:|---:|---:|---|
 | **commons-codec** 1.15 | 106 | **0** | **0** | 0 | ✅ **完整往返**(107/107 verify + 调用差分逐字节一致) |
 | **gson** 2.8.9 | 195 | **0** | **0** | 0 | ✅ **完整往返**(199/199 verify) |
-| **commons-lang3** 3.12.0 | 345 | 4 | 4 | 0 | 泛型擦除长尾 |
-| **jsoup** 1.10.2 | 238 | 1 | 1 | 0 | 单类长尾 |
+| **commons-lang3** 3.12.0 | 345 | 3 | 3 | 0 | 泛型擦除长尾 |
+| **jsoup** 1.10.2 | 238 | **0** | **0** | 0 | ✅ **完整往返**(241/241 verify) |
 | **snakeyaml** 2.2 | 231 | **0** | **0** | 0 | ✅ **完整往返**(233/233 verify) |
 | **spring-core** 5.3.27 | 978 | 18 | 30 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
 | **fastjson2** 2.0.43 | 681 | **0** | **0** | 0 | ✅ **完整往返**(689/689 verify) |
-| **guava** 28.2-android | 1892 | 23 | 27 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **46** | **62** | **0** | 类级干净率 **99.0%**(4441/4487 摊平单元) |
+| **guava** 28.2-android | 1892 | 22 | 26 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
+| **合计** | | **43** | **59** | **0** | 类级干净率 **99.0%**(4444/4487 摊平单元) |
 
-**codec / gson / fastjson2 / snakeyaml 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go` 的 `provenClean` 硬断言):
-`decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。fastjson2(689/689)与 snakeyaml(233/233)本轮随 TypeReference DA 级联(final-copy lambda-capture + method-scoped init)与 createNumber(T4b 折叠首赋值)治本一并清零, 4 个 jar 的 tree 错误与 verify 失败数均锁为 0, 任一回归 CI 直接红。
+**codec / gson / fastjson2 / snakeyaml / jsoup 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go` 的 `provenClean` 硬断言):
+`decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。fastjson2(689/689)、snakeyaml(233/233)与 jsoup(241/241)本轮随 TypeReference DA 级联(final-copy lambda-capture + method-scoped init)与 createNumber(T4b 折叠首赋值)治本一并清零, 5 个 jar 的 tree 错误与 verify 失败数均锁为 0, 任一回归 CI 直接红。
 
 > CI 常驻承重: `TestSyntheticJarRoundTrip`(无需 `~/.m2`)对一个含枚举+switch / 泛型 / lambda / varargs / try-catch 的多类程序跑完整往返, 断言运行输出逐字节一致 + 全类 verify, 守住往返能力永不回归。
 
