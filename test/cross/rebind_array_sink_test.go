@@ -69,8 +69,8 @@ func rebindArraySinkErrCount(t *testing.T, killOff bool) int {
 // the kill-switch must reintroduce it.
 func TestRebindArraySinkIsLoadBearing(t *testing.T) {
 	lookJavac(t)
-	on := rebindArraySinkErrCount(t, false)  // fix ON
-	off := rebindArraySinkErrCount(t, true)  // fix OFF (kill-switch)
+	on := rebindArraySinkErrCount(t, false) // fix ON
+	off := rebindArraySinkErrCount(t, true) // fix OFF (kill-switch)
 	t.Logf("fastjson2 tree TypeUtils 'cannot be converted to Field': ON=%d OFF=%d", on, off)
 	if off <= on {
 		t.Fatalf("rebindIncompatibleLoadForSink array relaxation is NOT load-bearing: ON=%d OFF=%d (OFF must be strictly greater)", on, off)

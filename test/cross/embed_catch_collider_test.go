@@ -68,8 +68,8 @@ func embedCatchColliderErrCount(t *testing.T, killOff bool) int {
 // var31" is gone from the tree compile; disabling via the kill-switch must reintroduce it.
 func TestEmbedCatchColliderIsLoadBearing(t *testing.T) {
 	lookJavac(t)
-	on := embedCatchColliderErrCount(t, false)  // fix ON
-	off := embedCatchColliderErrCount(t, true)  // fix OFF (kill-switch)
+	on := embedCatchColliderErrCount(t, false) // fix ON
+	off := embedCatchColliderErrCount(t, true) // fix OFF (kill-switch)
 	t.Logf("fastjson2 tree JDKUtils 'cannot find symbol var31': ON=%d OFF=%d", on, off)
 	if off <= on {
 		t.Fatalf("catch-param collider collection is NOT load-bearing: ON=%d OFF=%d (OFF must be strictly greater)", on, off)

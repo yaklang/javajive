@@ -69,8 +69,8 @@ func ternaryArmCastErrCount(t *testing.T, killOff bool) int {
 // signature is gone from the tree compile; disabling the cast via the kill-switch must reintroduce it.
 func TestTernaryArmCastIsLoadBearing(t *testing.T) {
 	lookJavac(t)
-	on := ternaryArmCastErrCount(t, false)  // fix ON
-	off := ternaryArmCastErrCount(t, true)  // fix OFF (kill-switch)
+	on := ternaryArmCastErrCount(t, false) // fix ON
+	off := ternaryArmCastErrCount(t, true) // fix OFF (kill-switch)
 	t.Logf("fastjson2 tree 'bad type in conditional expression' (CycleNameSegment): ON=%d OFF=%d", on, off)
 	if off <= on {
 		t.Fatalf("ternaryArmIncompatibleCast is NOT load-bearing: ON=%d OFF=%d (OFF must be strictly greater)", on, off)

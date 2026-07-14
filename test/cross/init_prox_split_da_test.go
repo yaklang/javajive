@@ -63,8 +63,8 @@ func initProxSplitDAErrCount(t *testing.T, killOff bool) int {
 // from the tree compile; disabling via the kill-switch must reintroduce it.
 func TestInitProxSplitDAIsLoadBearing(t *testing.T) {
 	lookJavac(t)
-	on := initProxSplitDAErrCount(t, false)  // fix ON
-	off := initProxSplitDAErrCount(t, true)  // fix OFF (kill-switch)
+	on := initProxSplitDAErrCount(t, false) // fix ON
+	off := initProxSplitDAErrCount(t, true) // fix OFF (kill-switch)
 	t.Logf("fastjson2 tree JSON.java 'var16 might not have been initialized': ON=%d OFF=%d", on, off)
 	if off <= on {
 		t.Fatalf("initProximateSplitSlotDecl is NOT load-bearing: ON=%d OFF=%d (OFF must be strictly greater)", on, off)

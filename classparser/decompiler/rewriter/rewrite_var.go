@@ -3133,10 +3133,10 @@ func nameOccurrencesAreObjectSafe(text, name string, objectNames map[string]stru
 		if nullInitNarrowAssign.MatchString(after) {
 			continue
 		}
-			at := strings.TrimLeft(after, " \t")
-			if (strings.HasPrefix(at, ";") || strings.HasPrefix(at, "\n") || strings.HasPrefix(at, "=")) && typeTokenPrecedes(before) {
-				continue
-			}
+		at := strings.TrimLeft(after, " \t")
+		if (strings.HasPrefix(at, ";") || strings.HasPrefix(at, "\n") || strings.HasPrefix(at, "=")) && typeTokenPrecedes(before) {
+			continue
+		}
 		if leadingWordIs(after, "instanceof") {
 			continue
 		}

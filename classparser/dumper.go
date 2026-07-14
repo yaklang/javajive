@@ -4286,7 +4286,6 @@ func isMethodOrInitBlockStart(ln string) bool {
 	return false
 }
 
-
 // body DEEPER than the declaration's lambda depth, within the enclosing method body only.
 func nameCapturedByLambdaMethod(lines []string, name string, declLineIdx int) bool {
 	ms, me := methodBodyRange(lines, declLineIdx)
@@ -4505,7 +4504,9 @@ func assignTargetIs(ln, name string) bool {
 // genuinely not effectively-final, so default-initialization cannot fix it.
 //
 // Fix: for each capturing `-> {` lambda, immediately before the lambda insert a final copy
-//   <indent>final <Type> <name>_f = <name>;
+//
+//	<indent>final <Type> <name>_f = <name>;
+//
 // and rewrite READS of <name> inside that lambda body to <name>_f. The copy is effectively-final
 // (single assignment), so the capture is legal; each loop iteration captures a fresh value.
 //
@@ -4627,21 +4628,21 @@ func fixLambdaLoopCapture(body string) string {
 					openIdx := -1
 					for k := li; k >= 0; k-- {
 						kl := strings.TrimRight(mlines[k], "\r")
-							if idx := strings.Index(kl, "->"); idx >= 0 {
-								rest := kl[idx:]
-								if strings.Contains(rest, "{") && depths[k] > declDepth {
-									// Only handle lambdas that begin a fresh statement: the previous
-									// non-blank line must end in `;`, `{`, or `}` (a statement boundary).
-									// This avoids multi-line argument lambdas (e.g.
-									// `x.register(a, () -> {\n ... \n}, ...)`) where inserting a copy
-									// before the `-> {` line lands inside the enclosing call's argument
-									// list and breaks structure.
-									if lambdaLineIsStmtStart(mlines, k) {
-										openIdx = k
-									}
-									break
+						if idx := strings.Index(kl, "->"); idx >= 0 {
+							rest := kl[idx:]
+							if strings.Contains(rest, "{") && depths[k] > declDepth {
+								// Only handle lambdas that begin a fresh statement: the previous
+								// non-blank line must end in `;`, `{`, or `}` (a statement boundary).
+								// This avoids multi-line argument lambdas (e.g.
+								// `x.register(a, () -> {\n ... \n}, ...)`) where inserting a copy
+								// before the `-> {` line lands inside the enclosing call's argument
+								// list and breaks structure.
+								if lambdaLineIsStmtStart(mlines, k) {
+									openIdx = k
 								}
+								break
 							}
+						}
 					}
 					if openIdx >= 0 {
 						// dedupe
@@ -4742,9 +4743,9 @@ func fixLambdaLoopCapture(body string) string {
 					}
 				}
 				edits = append(edits, edit{
-					insertAtGlobal: insertAt,
-					insertIndent:   insIndent,
-					insertText:     insIndent + "final " + ci.declType + " " + fname + " = " + name + ";",
+					insertAtGlobal:  insertAt,
+					insertIndent:    insIndent,
+					insertText:      insIndent + "final " + ci.declType + " " + fname + " = " + name + ";",
 					bodyStartGlobal: bodyStart,
 					bodyEndGlobal:   bodyEnd,
 					name:            name,
@@ -4998,7 +4999,6 @@ func removeUnreachableSwitchBreak(body string) string {
 	return strings.Join(out, "\n")
 }
 
-
 // (the line after `default:` is the `}` closing the switch). An empty default leaves a value-
 // returning method without a return on that path ("missing return statement"). Inserting
 // `throw new RuntimeException();` completes the control flow legally in any method. Only triggers
@@ -5068,7 +5068,7 @@ func enclosingReturnsReference(lines []string, idx int) bool {
 		}
 		// Method signature `<type> <name>(...) {` or `<mods> <type> <name>(...) {`. Extract the
 		// token before the method name (the return type).
-	paren := strings.Index(trim, "(")
+		paren := strings.Index(trim, "(")
 		if paren < 0 {
 			return true // can't tell — allow (constructor treated as reference-safe, harmless)
 		}
@@ -5323,17 +5323,18 @@ func fixMissingReturn(body string) string {
 // It moves the calls into the inner try body so javac sees them as caught.
 //
 // Pattern detected:
-//   if (cond){
-//       <exception-throwing call 1>
-//       <exception-throwing call 2>
-//   }
-//   try{
-//       try{
-//           <non-throwing statement>
-//       }catch(ExceptionType1 | ExceptionType2 ...){
-//           throw new JSONException(...);
-//       }
-//   }catch(Throwable){ }
+//
+//	if (cond){
+//	    <exception-throwing call 1>
+//	    <exception-throwing call 2>
+//	}
+//	try{
+//	    try{
+//	        <non-throwing statement>
+//	    }catch(ExceptionType1 | ExceptionType2 ...){
+//	        throw new JSONException(...);
+//	    }
+//	}catch(Throwable){ }
 //
 // Fix: move the exception-throwing calls from the if-body into the inner try-body.
 // Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
@@ -5388,7 +5389,7 @@ func fixTryCatchExceptionPlacement(body string) string {
 		}
 		// Check if the NEXT non-empty line after closingBrace is a try block.
 		tryLine := -1
-		for j := closingBrace + 1; j < len(lines) && j < closingBrace + 3; j++ {
+		for j := closingBrace + 1; j < len(lines) && j < closingBrace+3; j++ {
 			jl := strings.TrimRight(lines[j], "\r")
 			if strings.TrimSpace(jl) == "" {
 				continue
@@ -5404,7 +5405,7 @@ func fixTryCatchExceptionPlacement(body string) string {
 		// Find the inner try body: the line after `try{` at tryIndent+1.
 		innerTryIndent := ifIndent + "\t"
 		innerTryStart := -1
-		for j := tryLine + 1; j < len(lines) && j < tryLine + 5; j++ {
+		for j := tryLine + 1; j < len(lines) && j < tryLine+5; j++ {
 			jl := strings.TrimRight(lines[j], "\r")
 			if strings.Contains(jl, "try{") && strings.HasPrefix(jl, innerTryIndent) {
 				innerTryStart = j + 1
@@ -5469,11 +5470,11 @@ func fixTryCatchExceptionPlacement(body string) string {
 // catch clause. NOTE: `forName` is excluded — its ClassNotFoundException is often already handled
 // by an enclosing catch or a different overload, and augmenting it caused jsoup/snakeyaml regressions.
 var methodThrows = map[string]string{
-	"getConstructor":        "NoSuchMethodException",
+	"getConstructor":         "NoSuchMethodException",
 	"getDeclaredConstructor": "NoSuchMethodException",
-	"getMethod":             "NoSuchMethodException",
-	"getDeclaredMethod":     "NoSuchMethodException",
-	"newInstance":           "", // throws multiple (InvocationTargetException etc.) — handled by callers already
+	"getMethod":              "NoSuchMethodException",
+	"getDeclaredMethod":      "NoSuchMethodException",
+	"newInstance":            "", // throws multiple (InvocationTargetException etc.) — handled by callers already
 }
 
 // catchBodyAccessesCatchVar reports whether the catch body at catchLineIdx accesses a member
@@ -5613,8 +5614,8 @@ func addMissingCatchException(body string) string {
 	// try body (the catch handles exceptions thrown from the try body).
 	type tryBlock struct {
 		tryStart    int
-		tryBodyEnd  int   // line index of the `}` closing the try body (exclusive: tryBodyEnd is that line)
-		catchLine   int   // line index of the `}catch(...) {` line, -1 if no catch
+		tryBodyEnd  int    // line index of the `}` closing the try body (exclusive: tryBodyEnd is that line)
+		catchLine   int    // line index of the `}catch(...) {` line, -1 if no catch
 		caughtTypes string // the types listed in the catch clause
 	}
 	tryRe := regexp.MustCompile(`^(\t+)try\{\s*$`)
@@ -5890,7 +5891,7 @@ func dedupNestedCatchException(body string) string {
 	// For each outer try with a catch, find nested try/catch blocks within its body and collect
 	// exception types caught by inner catches. Remove those from the outer catch.
 	type edit struct {
-		catchLine int
+		catchLine  int
 		removeType string
 	}
 	var edits []edit
@@ -5991,13 +5992,13 @@ func dedupNestedCatchException(body string) string {
 			}
 			kept = append(kept, tf)
 		}
-			if len(kept) == 0 {
-				// All caught types are handled by inner catches — the outer catch is dead code for
-				// those specific types. Replace with `Exception` (a valid catch-all supertype) to keep
-				// the catch clause structurally valid without claiming a specific type that's never
-				// thrown. This avoids "exception X is never thrown" for ALL listed types.
-				kept = []string{"Exception"}
-			}
+		if len(kept) == 0 {
+			// All caught types are handled by inner catches — the outer catch is dead code for
+			// those specific types. Replace with `Exception` (a valid catch-all supertype) to keep
+			// the catch clause structurally valid without claiming a specific type that's never
+			// thrown. This avoids "exception X is never thrown" for ALL listed types.
+			kept = []string{"Exception"}
+		}
 		newTypes := strings.Join(kept, " | ") + " " + varName
 		newLine := strings.Replace(catchLn, "("+types+")", "("+newTypes+")", 1)
 		lines[cl] = newLine
@@ -6019,9 +6020,9 @@ func wrapUncaughtThrowingCall(body string) string {
 	lines := strings.Split(body, "\n")
 	allocRe := regexp.MustCompile(`^(\t+)(return .*\bUNSAFE\.allocateInstance\([^;]*\));\s*$`)
 	type insert struct {
-		at      int
-		indent  string
-		stmt    string
+		at       int
+		indent   string
+		stmt     string
 		catchVar string
 	}
 	var inserts []insert
@@ -6193,14 +6194,15 @@ func collectSwitchReadVars(lines []string, start, end int) map[string]bool {
 // try/catch in Java). Kill-switch: JDEC_WRAP_FIELD_INIT_OFF=1.
 //
 // Pattern: `\t<modifiers> <Type> <name> = <expr>.reflectionMethod(...)...;`
-//   → `\t<modifiers> <Type> <name>;`
-//   + `\tstatic{`
-//   + `\t\ttry{`
-//   + `\t\t\t<name> = <expr>.reflectionMethod(...)...;`
-//   + `\t\t}catch(NoSuchMethodException varX){`
-//   + `\t\t\tthrow new RuntimeException(varX);`
-//   + `\t\t}`
-//   + `\t}`
+//
+//	→ `\t<modifiers> <Type> <name>;`
+//	+ `\tstatic{`
+//	+ `\t\ttry{`
+//	+ `\t\t\t<name> = <expr>.reflectionMethod(...)...;`
+//	+ `\t\t}catch(NoSuchMethodException varX){`
+//	+ `\t\t\tthrow new RuntimeException(varX);`
+//	+ `\t\t}`
+//	+ `\t}`
 func wrapFieldInitializerReflection(body string) string {
 	if os.Getenv("JDEC_WRAP_FIELD_INIT_OFF") == "1" {
 		return body
@@ -6211,13 +6213,13 @@ func wrapFieldInitializerReflection(body string) string {
 	fieldRe := regexp.MustCompile(`^(\t+)((?:(?:final|static|public|private|protected)\s+)*[\w$.<>\[\]?, ]+?\s+(\w+))\s*=\s*(.*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\([^;]*);\s*$`)
 	counter := 0
 	type edit struct {
-		at           int
-		indent       string
-		decl         string
-		fieldName    string
-		initExpr     string
-		catchVar     string
-		isStatic     bool
+		at        int
+		indent    string
+		decl      string
+		fieldName string
+		initExpr  string
+		catchVar  string
+		isStatic  bool
 	}
 	var edits []edit
 	for i := 0; i < len(lines); i++ {
@@ -6285,10 +6287,10 @@ func wrapReflectionCallInSwitchCase(body string) string {
 	caseRe := regexp.MustCompile(`^(\t+)case [^:]+:\s*$`)
 	counter := 0
 	type insert struct {
-		at       int
-		indent   string
-		stmt     string
-		catchVar string
+		at        int
+		indent    string
+		stmt      string
+		catchVar  string
 		catchType string
 	}
 	var inserts []insert
@@ -6344,7 +6346,7 @@ func wrapReflectionCallInSwitchCase(body string) string {
 		} else {
 			insideTC := isInsideTryCatch(lines, i, indent)
 			if os.Getenv("JDEC_WRAP_REFLECTION_DBG") == "1" {
-				fmt.Fprintf(os.Stderr, "[WRAPREFL] L%d inSwitchCase=%v insideTryCatch=%v stmt=%q\n", i+1, true, insideTC, strings.TrimSpace(ln)[:min2(50,len(ln))])
+				fmt.Fprintf(os.Stderr, "[WRAPREFL] L%d inSwitchCase=%v insideTryCatch=%v stmt=%q\n", i+1, true, insideTC, strings.TrimSpace(ln)[:min2(50, len(ln))])
 			}
 			if insideTC {
 				continue
@@ -6499,142 +6501,142 @@ func addBreakToSwitchCases(body string) string {
 					}
 				}
 			}
-				if hasTerminator {
-					continue
-				}
-				if stmtCount == 0 {
-					continue // empty case body — intentional fall-through, do not add break
-				}
-				// SAFETY: only add break if the case body is a SINGLE statement at bodyIndent with no
-				// nested control-flow blocks (if/else/try/switch/for/while). This avoids the
-				// widespread "unreachable statement" regressions from mis-detecting terminators in
-				// complex case bodies (JSONWriter$Path, gson, snakeyaml, spring).
-				eligible := false
-				if stmtCount > 1 {
-					// Multi-statement body — only handle if it's a single lambda-assignment
-					// (multi-line `field = ...(args) -> {...});`).
-					firstStmt := ""
-					lastStmt := ""
-					for k := cs + 1; k < nextCase; k++ {
-						kl := strings.TrimRight(lines[k], "\r")
-						if strings.TrimSpace(kl) == "" {
-							continue
-						}
-						if firstStmt == "" {
-							firstStmt = kl
-						}
-						lastStmt = kl
+			if hasTerminator {
+				continue
+			}
+			if stmtCount == 0 {
+				continue // empty case body — intentional fall-through, do not add break
+			}
+			// SAFETY: only add break if the case body is a SINGLE statement at bodyIndent with no
+			// nested control-flow blocks (if/else/try/switch/for/while). This avoids the
+			// widespread "unreachable statement" regressions from mis-detecting terminators in
+			// complex case bodies (JSONWriter$Path, gson, snakeyaml, spring).
+			eligible := false
+			if stmtCount > 1 {
+				// Multi-statement body — only handle if it's a single lambda-assignment
+				// (multi-line `field = ...(args) -> {...});`).
+				firstStmt := ""
+				lastStmt := ""
+				for k := cs + 1; k < nextCase; k++ {
+					kl := strings.TrimRight(lines[k], "\r")
+					if strings.TrimSpace(kl) == "" {
+						continue
 					}
-					if strings.Contains(firstStmt, "-> {") && strings.HasPrefix(strings.TrimSpace(lastStmt), "});") {
+					if firstStmt == "" {
+						firstStmt = kl
+					}
+					lastStmt = kl
+				}
+				if strings.Contains(firstStmt, "-> {") && strings.HasPrefix(strings.TrimSpace(lastStmt), "});") {
+					eligible = true
+				}
+			} else if stmtCount == 1 {
+				// Single statement — must be an assignment (contains `=`).
+				for k := cs + 1; k < nextCase; k++ {
+					kl := strings.TrimRight(lines[k], "\r")
+					if strings.TrimSpace(kl) == "" {
+						continue
+					}
+					if strings.Contains(kl, "=") {
 						eligible = true
 					}
-				} else if stmtCount == 1 {
-					// Single statement — must be an assignment (contains `=`).
-					for k := cs + 1; k < nextCase; k++ {
-						kl := strings.TrimRight(lines[k], "\r")
-						if strings.TrimSpace(kl) == "" {
+					break
+				}
+			}
+			if !eligible {
+				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+					fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NOT eligible (stmtCount=%d)\n", cs+1, stmtCount)
+				}
+				continue
+			}
+			if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+				fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: eligible (stmtCount=%d nextCase=%d)\n", cs+1, stmtCount, nextCase+1)
+			}
+			// Dependency analysis for fall-through to default.
+			if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+				nl := ""
+				if ci+1 < len(caseStarts) {
+					nl = strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
+				}
+				fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: ci=%d ci+1=%d len(caseStarts)=%d nextLabel=%q\n", cs+1, ci, ci+1, len(caseStarts), nl)
+			}
+			if ci+1 < len(caseStarts) {
+				nextLabel := strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
+				if nextLabel == "default:" {
+					caseAssigned := collectSwitchAssignedVars(lines, cs+1, nextCase)
+					defaultStart := caseStarts[ci+1] + 1
+					defaultEnd := switchEnd
+					if ci+2 < len(caseStarts) {
+						defaultEnd = caseStarts[ci+2]
+					}
+					defaultSelfReads := collectSwitchDefaultSelfReads(lines, defaultStart, defaultEnd)
+					// CONFLICT: a variable assigned in the case is ALSO assigned in the default
+					// WITHOUT being read in the same assignment (independent overwrite).
+					// DEPENDENCY: the variable is read in the default's own assignment (compound
+					// assignment like `var5 = var5 ^ x`) → default depends on case's value.
+					conflict := false
+					if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d dep-analysis: caseAssigned=%v defaultSelfReads=%v\n", cs+1, caseAssigned, defaultSelfReads)
+					}
+					for v := range caseAssigned {
+						if defaultSelfReads[v] {
+							// Default reads v in its own assignment → dependency, not conflict.
 							continue
 						}
-						if strings.Contains(kl, "=") {
-							eligible = true
+						// Check if default assigns v independently (without reading it).
+						if defaultAssignsIndependently(lines, defaultStart, defaultEnd, v) {
+							conflict = true
+							break
 						}
-						break
 					}
-				}
-				if !eligible {
+					if !conflict {
+						if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+							fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NO conflict (skip break)\n", cs+1)
+						}
+						continue // skip break — no independent-overwrite conflict
+					}
 					if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NOT eligible (stmtCount=%d)\n", cs+1, stmtCount)
+						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: CONFLICT detected\n", cs+1)
 					}
-					continue
 				}
-				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-					fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: eligible (stmtCount=%d nextCase=%d)\n", cs+1, stmtCount, nextCase+1)
+			}
+			// Conflict-based break: add break when this case and the NEXT case (or default) both
+			// independently assign the same variable (conflict pattern). If the next case reads
+			// the variable in a compound assignment (dependency), skip break.
+			if ci+1 >= len(caseStarts) {
+				continue
+			}
+			{
+				nextCaseBodyStart := caseStarts[ci+1] + 1
+				nextCaseBodyEnd := switchEnd
+				if ci+2 < len(caseStarts) {
+					nextCaseBodyEnd = caseStarts[ci+2]
 				}
-				// Dependency analysis for fall-through to default.
-				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-					nl := ""
-					if ci+1 < len(caseStarts) {
-						nl = strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
+				nextCaseAssigned := collectSwitchAssignedVars(lines, nextCaseBodyStart, nextCaseBodyEnd)
+				nextCaseSelfReads := collectSwitchDefaultSelfReads(lines, nextCaseBodyStart, nextCaseBodyEnd)
+				caseAssignedLocal := collectSwitchAssignedVars(lines, cs+1, nextCase)
+				conflictFound := false
+				for v := range caseAssignedLocal {
+					if nextCaseSelfReads[v] {
+						continue // next case reads v in compound assignment → dependency
 					}
-					fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: ci=%d ci+1=%d len(caseStarts)=%d nextLabel=%q\n", cs+1, ci, ci+1, len(caseStarts), nl)
-				}
-				if ci+1 < len(caseStarts) {
-					nextLabel := strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
-					if nextLabel == "default:" {
-						caseAssigned := collectSwitchAssignedVars(lines, cs+1, nextCase)
-						defaultStart := caseStarts[ci+1] + 1
-						defaultEnd := switchEnd
-						if ci+2 < len(caseStarts) {
-							defaultEnd = caseStarts[ci+2]
-						}
-						defaultSelfReads := collectSwitchDefaultSelfReads(lines, defaultStart, defaultEnd)
-						// CONFLICT: a variable assigned in the case is ALSO assigned in the default
-						// WITHOUT being read in the same assignment (independent overwrite).
-						// DEPENDENCY: the variable is read in the default's own assignment (compound
-						// assignment like `var5 = var5 ^ x`) → default depends on case's value.
-						conflict := false
-						if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-							fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d dep-analysis: caseAssigned=%v defaultSelfReads=%v\n", cs+1, caseAssigned, defaultSelfReads)
-						}
-						for v := range caseAssigned {
-							if defaultSelfReads[v] {
-								// Default reads v in its own assignment → dependency, not conflict.
-								continue
-							}
-							// Check if default assigns v independently (without reading it).
-							if defaultAssignsIndependently(lines, defaultStart, defaultEnd, v) {
-								conflict = true
-								break
-							}
-						}
-						if !conflict {
-							if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-								fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NO conflict (skip break)\n", cs+1)
-							}
-							continue // skip break — no independent-overwrite conflict
-						}
-						if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-							fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: CONFLICT detected\n", cs+1)
+					if _, ok := nextCaseAssigned[v]; ok {
+						if defaultAssignsIndependently(lines, nextCaseBodyStart, nextCaseBodyEnd, v) {
+							conflictFound = true
+							break
 						}
 					}
 				}
-				// Conflict-based break: add break when this case and the NEXT case (or default) both
-				// independently assign the same variable (conflict pattern). If the next case reads
-				// the variable in a compound assignment (dependency), skip break.
-				if ci+1 >= len(caseStarts) {
-					continue
+				if !conflictFound {
+					continue // no conflict — skip break (fall-through is safe or dependency)
 				}
-				{
-					nextCaseBodyStart := caseStarts[ci+1] + 1
-					nextCaseBodyEnd := switchEnd
-					if ci+2 < len(caseStarts) {
-						nextCaseBodyEnd = caseStarts[ci+2]
-					}
-					nextCaseAssigned := collectSwitchAssignedVars(lines, nextCaseBodyStart, nextCaseBodyEnd)
-					nextCaseSelfReads := collectSwitchDefaultSelfReads(lines, nextCaseBodyStart, nextCaseBodyEnd)
-					caseAssignedLocal := collectSwitchAssignedVars(lines, cs+1, nextCase)
-					conflictFound := false
-					for v := range caseAssignedLocal {
-						if nextCaseSelfReads[v] {
-							continue // next case reads v in compound assignment → dependency
-						}
-						if _, ok := nextCaseAssigned[v]; ok {
-							if defaultAssignsIndependently(lines, nextCaseBodyStart, nextCaseBodyEnd, v) {
-								conflictFound = true
-								break
-							}
-						}
-					}
-					if !conflictFound {
-						continue // no conflict — skip break (fall-through is safe or dependency)
-					}
-				}
-					// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
-				breakIndent := caseIndent + "\t"
-				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-					fmt.Fprintf(os.Stderr, "[ADDBREAK] ADD break before L%d (case at L%d, conflict=%v)\n", nextCase+1, cs+1, true)
-				}
-				inserts = append(inserts, insert{at: nextCase, indent: breakIndent})
+			}
+			// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
+			breakIndent := caseIndent + "\t"
+			if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+				fmt.Fprintf(os.Stderr, "[ADDBREAK] ADD break before L%d (case at L%d, conflict=%v)\n", nextCase+1, cs+1, true)
+			}
+			inserts = append(inserts, insert{at: nextCase, indent: breakIndent})
 		}
 	}
 	if len(inserts) == 0 {

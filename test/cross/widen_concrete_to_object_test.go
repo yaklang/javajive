@@ -76,8 +76,8 @@ func widenConcreteJSONObjectErrCount(t *testing.T, killOff bool) int {
 // JSON.java's iso compile; disabling the widen via the kill-switch must reintroduce it.
 func TestWidenConcreteToObjectIsLoadBearing(t *testing.T) {
 	lookJavac(t)
-	on := widenConcreteJSONObjectErrCount(t, false)  // fix ON
-	off := widenConcreteJSONObjectErrCount(t, true)  // fix OFF (kill-switch)
+	on := widenConcreteJSONObjectErrCount(t, false) // fix ON
+	off := widenConcreteJSONObjectErrCount(t, true) // fix OFF (kill-switch)
 	t.Logf("JSON.java iso 'Object cannot be converted to JSONObject': ON=%d OFF=%d", on, off)
 	if off <= on {
 		t.Fatalf("widenConcreteDeclToObject is NOT load-bearing: ON=%d OFF=%d (OFF must be strictly greater)", on, off)

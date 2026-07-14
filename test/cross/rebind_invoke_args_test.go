@@ -73,8 +73,8 @@ func rebindInvokeArgsErrCount(t *testing.T, killOff bool) int {
 // from the tree compile; disabling via the kill-switch must reintroduce them.
 func TestRebindInvokeArgsIsLoadBearing(t *testing.T) {
 	lookJavac(t)
-	on := rebindInvokeArgsErrCount(t, false)  // fix ON
-	off := rebindInvokeArgsErrCount(t, true)  // fix OFF (kill-switch)
+	on := rebindInvokeArgsErrCount(t, false) // fix ON
+	off := rebindInvokeArgsErrCount(t, true) // fix OFF (kill-switch)
 	t.Logf("fastjson2 tree invoke-arg slot-swap errors: ON=%d OFF=%d", on, off)
 	if off <= on {
 		t.Fatalf("rebindIncompatibleInvokeArgs is NOT load-bearing: ON=%d OFF=%d (OFF must be strictly greater)", on, off)

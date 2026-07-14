@@ -29,9 +29,9 @@ type CustomValue struct {
 	// this descriptor -- re-targets the SAM so the method ref binds. Set only on the bootstrap method-ref
 	// branch; consumed by ctorRawFISAMMethodRefCast (renderArgAt). Empty/unused for lambdas and non-FI uses.
 	InstantiatedMtdDesc string
-	StringFunc         func(funcCtx *class_context.ClassContext) string
-	TypeFunc           func() types.JavaType
-	ReplaceFunc        func(oldId *utils.VariableId, newId *utils.VariableId)
+	StringFunc          func(funcCtx *class_context.ClassContext) string
+	TypeFunc            func() types.JavaType
+	ReplaceFunc         func(oldId *utils.VariableId, newId *utils.VariableId)
 }
 
 // ReplaceVar implements JavaValue.

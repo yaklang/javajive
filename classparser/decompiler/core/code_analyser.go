@@ -52,7 +52,7 @@ type Decompiler struct {
 	// consume order (e.g. the array reference under the index in `this.f[i] op= v`, whose
 	// dup2 pops index first), stackConsumed[i] points at the wrong operand and would emit a
 	// bogus assignment like `int t = i; t[i] = ...`.
-	dupConvertedRefValue          map[*OpCode][]values.JavaValue
+	dupConvertedRefValue map[*OpCode][]values.JavaValue
 	// checkcastInnerArg records, per OP_CHECKCAST opcode, the inner value (the aload SlotValue)
 	// BEFORE it was wrapped in the cast CustomValue. This lets phase-2 invoke-arg rebinding reach
 	// the original local-load without unpacking the CustomValue's closures (which are opaque).
@@ -63,7 +63,7 @@ type Decompiler struct {
 	// receiver and arguments were bound at phase-1 time when opcodeIdToRef was incomplete). The
 	// phase-1-post pass rebindIncompatibleInvokeArgs walks this map to rebind incompatible
 	// receivers/arguments using the now-complete opcodeIdToRef. Populated in the phase-1 invoke handler.
-	invokeFuncCall map[*OpCode]*values.FunctionCallExpression
+	invokeFuncCall                map[*OpCode]*values.FunctionCallExpression
 	bytecodes                     []byte
 	opCodes                       []*OpCode
 	RootOpCode                    *OpCode

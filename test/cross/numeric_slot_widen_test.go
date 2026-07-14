@@ -79,8 +79,8 @@ func numericSlotWidenErrCount(t *testing.T, killOff bool) int {
 // reintroduce it.
 func TestNumericSlotWidenIsLoadBearing(t *testing.T) {
 	lookJavac(t)
-	on := numericSlotWidenErrCount(t, false)  // fix ON
-	off := numericSlotWidenErrCount(t, true)  // fix OFF (kill-switch)
+	on := numericSlotWidenErrCount(t, false) // fix ON
+	off := numericSlotWidenErrCount(t, true) // fix OFF (kill-switch)
 	t.Logf("ObjectWriterCreatorASM.java iso 'Long cannot be converted to Integer': ON=%d OFF=%d", on, off)
 	if off <= on {
 		t.Fatalf("numericSlotWiderThan is NOT load-bearing: ON=%d OFF=%d (OFF must be strictly greater)", on, off)
