@@ -786,6 +786,8 @@ func (f *FunctionCallExpression) instantiatedParamType(i int, funcCtx *class_con
 // compile) and never a concrete type (a real mismatch must not be blanket-cast). Kill-switch
 // JDEC_GENERIC_SELFMETHOD_PARAM_OFF.
 func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if f.FunctionName == "initializeTransientFields" {
+	}
 	if os.Getenv("JDEC_GENERIC_SELFMETHOD_PARAM_OFF") != "" || f.IsStatic || f.Object == nil || funcCtx == nil {
 		return nil
 	}
@@ -796,43 +798,86 @@ func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_
 	// `this.updateInverseMap(k, b, objVal, v)` where param 3 is V -> needs `(V) objVal`). Focused
 	// sub-switch JDEC_GENERIC_SELFMETHOD_PRIVATE_OFF restores the legacy blanket-skip of invokespecial.
 	if f.IsSpecialInvoke {
-		if os.Getenv("JDEC_GENERIC_SELFMETHOD_PRIVATE_OFF") != "" || !f.isCurrentClass(funcCtx) {
+		// funcCtx.ClassName may be empty in some method rendering contexts; fall back to checking
+		// whether the call's target class matches the class whose type params are in funcCtx
+		// (ClassTypeParams), which is authoritative for the current class's type variables.
+		isCurrent := f.isCurrentClass(funcCtx)
+		if !isCurrent && funcCtx.ClassName == "" && len(funcCtx.ClassTypeParams) > 0 {
+			// Heuristic: if funcCtx has class type params but no ClassName, the call's target class
+			// IS the current class (ClassName wasn't set in this rendering context). Trust it.
+			isCurrent = true
+		}
+		if os.Getenv("JDEC_GENERIC_SELFMETHOD_PRIVATE_OFF") != "" || !isCurrent {
 			return nil
 		}
 	}
 	ref, ok := UnpackSoltValue(f.Object).(*JavaRef)
+	if f.FunctionName == "initializeTransientFields" {
+	}
 	if !ok || !ref.IsThis {
 		return nil
 	}
 	sig := funcCtx.MethodSignature(f.FunctionName, len(f.Arguments))
-	if sig == "" {
-		// The arity path abandons same-arity overloads as ambiguous; fall back to the call's EXACT
-		// descriptor, which is unique in the JVM, to still recover the erased argument cast (guava
-		// Builder `putAll(K, Iterable)` vs varargs `putAll(K, V...)`; `add(E)` vs `add(E...)`). Empty
-		// when the descriptor-keyed table is disabled (JDEC_SAMECLASS_DESC_SIG_OFF) or the call has no
-		// pool descriptor, so this stays a pure additive fallback.
-		sig = funcCtx.MethodSignatureByDesc(f.FunctionName, f.Descriptor)
+	if f.FunctionName == "initializeTransientFields" {
 	}
 	if sig == "" {
+		sig = funcCtx.MethodSignatureByDesc(f.FunctionName, f.Descriptor)
+		if f.FunctionName == "initializeTransientFields" {
+		}
+	}
+	if sig == "" {
+		// Fallback: the method has no Signature attribute (non-generic method), but its descriptor
+		// formal is raw `java.lang.Class` and the declaring class has exactly one type variable.
+		// The decompiler renders the formal as `Class<L>` (from the class Signature), so a raw `Class`
+		// argument (e.g. from getComponentType()'s erased descriptor return) cannot convert to
+		// `Class<L>` without an unchecked cast ("Class<CAP#1> cannot be converted to Class<L>";
+		// commons-lang3 EventListenerSupport.readObject `this.initializeTransientFields(
+		// var2.getClass().getComponentType(), ...)` where the formal is `Class<L>`). Construct
+		// `Class<L>` from the class Signature's single type variable so the arg-cast logic re-emits
+		// the source's `(Class<L>)` cast. Kill-switch: JDEC_CLASS_TYPEVAR_PARAM_OFF.
+		if os.Getenv("JDEC_CLASS_TYPEVAR_PARAM_OFF") == "" && f.FuncType != nil && i >= 0 && i < len(f.FuncType.ParamTypes) {
+			pt := f.FuncType.ParamTypes[i]
+			if pt != nil {
+				ptStr := pt.String(funcCtx)
+				if f.FunctionName == "initializeTransientFields" {
+				}
+				if strings.HasSuffix(ptStr, "Class") && !strings.Contains(ptStr, "[") && !strings.Contains(ptStr, "<") {
+					formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
+					if len(formals) != 1 && len(funcCtx.ClassTypeParams) == 1 {
+						formals = funcCtx.ClassTypeParams
+					}
+					if len(formals) == 1 {
+						return types.NewParameterizedType("java.lang.Class", []types.JavaType{
+							types.NewJavaClass(formals[0]),
+						})
+					}
+				}
+			}
+		}
 		return nil
 	}
 	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
 	if i < 0 || i >= len(params) || params[i] == nil {
 		return nil
 	}
+	// A bare class-scope type variable formal (e.g. `T`) is denotable AND castable.
 	raw := params[i].RawType()
 	if raw == nil {
 		return nil
 	}
-	jc, ok := raw.(*types.JavaClass)
-	if !ok {
-		return nil
+	if jc, ok := raw.(*types.JavaClass); ok && funcCtx.IsTypeParam(jc.Name) {
+		return params[i]
 	}
-	// Only a class-scope type variable is denotable AND castable at the call site.
-	if !funcCtx.IsTypeParam(jc.Name) {
-		return nil
+	// A parameterized formal whose raw class is java.lang.Class and whose single type argument is a
+	// class-scope type variable (e.g. `Class<L>`) is also denotable — a raw `Class` argument needs an
+	// unchecked `(Class<L>)` cast (commons-lang3 EventListenerSupport.readObject). Return it so
+	// resolvedParameterizedArgCast handles the same-erasure cast.
+	if pt, ok := raw.(*types.JavaParameterizedType); ok && pt.RawClassName == "java.lang.Class" && len(pt.TypeArgs) == 1 {
+		if tvJC, isJC := pt.TypeArgs[0].RawType().(*types.JavaClass); isJC && funcCtx.IsTypeParam(tvJC.Name) {
+			return params[i]
+		}
 	}
-	return params[i]
+	return nil
 }
 
 // ctorWildcardArgCast returns the parameterized formal type to cast the i-th argument of a SAME-CLASS
@@ -1861,6 +1906,18 @@ func resolvedParameterizedArgCast(funcCtx *class_context.ClassContext, argType t
 		return false // array / primitive / parameterized argument: not this case.
 	}
 	if ajc.Name == pt.RawClassName {
+		// Same erasure, but a raw `Class` argument fed to a `Class<L>` formal (L a class-scope type
+		// variable) cannot convert without an unchecked cast ("Class<CAP#1> cannot be converted to
+		// Class<L>"; commons-lang3 EventListenerSupport.readObject). The source carried an unchecked
+		// `(Class<L>)` cast (erased to a no-op checkcast on raw Class); re-emit it. `Class` ->
+		// `Class<L>` is always a legal unchecked conversion. Gated on the formal being a single
+		// type-variable parameterization of java.lang.Class whose type argument is an in-scope CLASS
+		// type variable, and the argument being raw java.lang.Class (not already parameterized).
+		if pt.RawClassName == "java.lang.Class" && len(pt.TypeArgs) == 1 {
+			if tvJC, isJC := pt.TypeArgs[0].RawType().(*types.JavaClass); isJC && funcCtx.IsTypeParam(tvJC.Name) {
+				return true
+			}
+		}
 		return false // same erasure -- no cast needed (already a Cut / raw Cut).
 	}
 	if funcCtx.IsTypeParam(ajc.Name) {
@@ -2407,6 +2464,10 @@ var rawFIMethodRefCastFamily = map[string]bool{
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
+	if f.FunctionName == "initializeTransientFields" {
+	}
+	if f.FunctionName == "initializeTransientFields" && i == 0 {
+	}
 	// A METHOD REFERENCE passed to a constructor whose i-th formal is a RAW functional interface
 	// (raw BiConsumer.accept(Object,Object) etc.) fails to bind ("invalid method reference"): the
 	// impl method's arity (e.g. Throwable.setStackTrace(StackTraceElement[]) is 1-arg as an UNBOUND
