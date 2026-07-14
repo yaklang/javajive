@@ -5084,9 +5084,13 @@ func enclosingReturnsReference(lines []string, idx int) bool {
 		}
 		// The return type is the token BEFORE the method name (the last field is the method name).
 		retType := fields[len(fields)-2]
-		// Strip generics/array for the primitive check.
+		// An array type (`byte[]`, `Object[]`) is always a reference type — `return null;` is legal.
+		if strings.Contains(retType, "[") {
+			return true
+		}
+		// Strip generics for the primitive check.
 		base := retType
-		if p := strings.IndexAny(base, "[<"); p >= 0 {
+		if p := strings.IndexAny(base, "<"); p >= 0 {
 			base = base[:p]
 		}
 		switch base {
@@ -5113,6 +5117,12 @@ func fixMissingReturn(body string) string {
 	}
 	lines := strings.Split(body, "\n")
 	emptyIfRe := regexp.MustCompile(`^(\t+)if \([^;]*\)\{\};\s*$`)
+	// emptyThenElseRe matches an if-else whose THEN branch is empty (just `{` on its own line) and
+	// whose ELSE branch follows immediately. This is the control-flow pattern where the bytecode's
+	// `if(cond) goto L` has no statements in the taken branch, but the else branch ends with `return`,
+	// leaving the method without a return on the empty-then path → "missing return statement"
+	// (spring ASM ClassReader.readStream `if (var6 == 1) { } else { ... return var7_1; }`).
+	emptyThenElseRe := regexp.MustCompile(`^(\t+)if \([^;]*\)\{\s*$`)
 	type insertSite struct {
 		at     int // insert AFTER this line index
 		indent string
@@ -5120,61 +5130,182 @@ func fixMissingReturn(body string) string {
 	var sites []insertSite
 	for i := 0; i < len(lines); i++ {
 		ln := strings.TrimRight(lines[i], "\r")
+		// Pattern 1: `if (cond){};` (no-op empty-if, switch-based).
 		m := emptyIfRe.FindStringSubmatch(ln)
-		if m == nil {
-			continue
-		}
-		indent := m[1]
-		// The next non-blank line must be a `}` at a shallower indent (the block ends right after
-		// the empty-if), confirming the empty-if is the last statement of its block.
-		next := -1
-		for j := i + 1; j < len(lines); j++ {
-			if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
-				continue
-			}
-			next = j
-			break
-		}
-		if next < 0 {
-			continue
-		}
-		nextLn := strings.TrimRight(lines[next], "\r")
-		nextTrim := strings.TrimSpace(nextLn)
-		if nextTrim != "}" {
-			continue
-		}
-		nextIndent := leadingTabs(nextLn)
-		if len(nextIndent) >= len(indent) {
-			continue // the `}` is not shallower — not a block-end
-		}
-		// Scan backward within the enclosing block (same indent or deeper) for a `default:` label,
-		// which indicates a switch with a default lives in this block. Stop at a shallower indent
-		// (block boundary).
-		sawDefault := false
-		for k := i - 1; k >= 0; k-- {
-			lk := strings.TrimRight(lines[k], "\r")
-			if strings.TrimSpace(lk) == "" {
-				continue
-			}
-			kind := leadingTabs(lk)
-			if len(kind) < len(indent) {
-				break // left the enclosing block
-			}
-			tk := strings.TrimSpace(lk)
-			if tk == "default:" || strings.HasPrefix(tk, "default:") {
-				sawDefault = true
+		if m != nil {
+			indent := m[1]
+			// The next non-blank line must be a `}` at a shallower indent (the block ends right after
+			// the empty-if), confirming the empty-if is the last statement of its block.
+			next := -1
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+					continue
+				}
+				next = j
 				break
 			}
-		}
-		if !sawDefault {
+			if next < 0 {
+				continue
+			}
+			nextLn := strings.TrimRight(lines[next], "\r")
+			nextTrim := strings.TrimSpace(nextLn)
+			if nextTrim != "}" {
+				continue
+			}
+			nextIndent := leadingTabs(nextLn)
+			if len(nextIndent) >= len(indent) {
+				continue // the `}` is not shallower — not a block-end
+			}
+			// Scan backward within the enclosing block (same indent or deeper) for a `default:` label,
+			// which indicates a switch with a default lives in this block. Stop at a shallower indent
+			// (block boundary).
+			sawDefault := false
+			for k := i - 1; k >= 0; k-- {
+				lk := strings.TrimRight(lines[k], "\r")
+				if strings.TrimSpace(lk) == "" {
+					continue
+				}
+				kind := leadingTabs(lk)
+				if len(kind) < len(indent) {
+					break // left the enclosing block
+				}
+				tk := strings.TrimSpace(lk)
+				if tk == "default:" || strings.HasPrefix(tk, "default:") {
+					sawDefault = true
+					break
+				}
+			}
+			if !sawDefault {
+				continue
+			}
+			// Only apply when the enclosing method returns a reference type — `return null;` is invalid
+			// for primitive/void returns. Scan backward for the method/init-block signature.
+			if !enclosingReturnsReference(lines, i) {
+				continue
+			}
+			sites = append(sites, insertSite{at: i, indent: indent})
 			continue
 		}
-		// Only apply when the enclosing method returns a reference type — `return null;` is invalid
-		// for primitive/void returns. Scan backward for the method/init-block signature.
-		if !enclosingReturnsReference(lines, i) {
-			continue
+		// Pattern 2: `if (cond) {` with empty then + `else { ... return ...; }` — the else branch
+		// ends with a return but the then branch has none, leaving the method without a return on
+		// the then path. Insert `return null;` inside the empty then branch.
+		m2 := emptyThenElseRe.FindStringSubmatch(ln)
+		if m2 != nil {
+			indent := m2[1]
+			// The next non-blank line must be `}` (closing the empty then), possibly combined with `else`.
+			next := -1
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+					continue
+				}
+				next = j
+				break
+			}
+			if next < 0 {
+				continue
+			}
+			nextLn := strings.TrimRight(lines[next], "\r")
+			nextTrim := strings.TrimSpace(nextLn)
+			// The then-closing `}` may be on its own line OR combined with `else` as `}else{`.
+			if nextTrim != "}" && !strings.HasPrefix(nextTrim, "}else") && !strings.HasPrefix(nextTrim, "} else") {
+				continue
+			}
+			// If the `}` is combined with else, the else starts on the same line; otherwise find the
+			// else on the next non-blank line.
+			elseIdx := -1
+			if strings.HasPrefix(nextTrim, "}else") || strings.HasPrefix(nextTrim, "} else") {
+				elseIdx = next
+			} else {
+				for j := next + 1; j < len(lines); j++ {
+					tej := strings.TrimRight(lines[j], "\r")
+					if strings.TrimSpace(tej) == "" {
+						continue
+					}
+					elseIdx = j
+					break
+				}
+			}
+			if elseIdx < 0 {
+				continue
+			}
+			elseLn := strings.TrimSpace(strings.TrimRight(lines[elseIdx], "\r"))
+			if !strings.HasPrefix(elseLn, "}") || !strings.Contains(elseLn, "else") {
+				continue
+			}
+			// The else branch must end with a `return` statement (scan forward for the matching `}`).
+			// Start with depth=1 (the else's `{` opens the block) and scan from the line AFTER elseIdx
+			// so the `}` that closes the then-branch (in `}else{`) does not corrupt the count.
+			depth := 1
+			hasReturn := false
+			elseEnd := -1
+			for j := elseIdx + 1; j < len(lines); j++ {
+				lj := strings.TrimRight(lines[j], "\r")
+				for b := 0; b < len(lj); b++ {
+					switch lj[b] {
+					case '{':
+						depth++
+					case '}':
+						depth--
+						if depth == 0 {
+							elseEnd = j
+							break
+						}
+					}
+				}
+				if depth == 0 {
+					break
+				}
+			}
+			if elseEnd >= 0 {
+				for k := elseIdx; k <= elseEnd; k++ {
+					lk := strings.TrimRight(lines[k], "\r")
+					if strings.Contains(lk, "return ") || strings.Contains(lk, "return;") {
+						hasReturn = true
+						break
+					}
+				}
+			}
+			if !hasReturn {
+				continue
+			}
+			// Only apply when the if-else is the LAST statement of its enclosing block: the next
+			// non-blank line after the else's closing `}` must be a block-end marker — `}` (block end)
+			// or `}catch`/`}finally` (try block end, the if-else is the last statement in a try body,
+			// as in spring ASM ClassReader.readStream). If there are more statements after the if-else,
+			// inserting `return null;` would make them unreachable (fastjson2 ValueFilter.of has
+			// `return l2;` after the if-else).
+			if elseEnd < 0 || elseEnd+1 >= len(lines) {
+				continue
+			}
+			afterElse := -1
+			for j := elseEnd + 1; j < len(lines); j++ {
+				if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+					continue
+				}
+				afterElse = j
+				break
+			}
+			if afterElse < 0 {
+				continue
+			}
+			afterLn := strings.TrimRight(lines[afterElse], "\r")
+			afterTrim := strings.TrimSpace(afterLn)
+			if afterTrim != "}" &&
+				!strings.HasPrefix(afterTrim, "}catch") && !strings.HasPrefix(afterTrim, "} catch") &&
+				!strings.HasPrefix(afterTrim, "}finally") && !strings.HasPrefix(afterTrim, "} finally") {
+				continue // more statements follow the if-else — inserting return would be unreachable
+			}
+			afterIndent := leadingTabs(afterLn)
+			if len(afterIndent) > len(indent) {
+				continue // the `}` is deeper — not the enclosing block end
+			}
+			// Only apply when the enclosing method returns a reference type.
+			if !enclosingReturnsReference(lines, i) {
+				continue
+			}
+			// Insert `return null;` inside the empty then branch (after the `if (cond) {` line).
+			sites = append(sites, insertSite{at: i, indent: indent + "\t"})
 		}
-		sites = append(sites, insertSite{at: i, indent: indent})
 	}
 	if len(sites) == 0 {
 		return body
