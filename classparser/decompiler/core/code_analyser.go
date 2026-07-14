@@ -38,6 +38,13 @@ type Decompiler struct {
 	FunctionContext       *class_context.ClassContext
 	varTable              map[int]*values.JavaRef
 	opcodeIdToRef         map[*OpCode][][2]any
+	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
+	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
+	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
+	// order is non-deterministic, and where several stores can share a reused ref pointer). Only stores
+	// where the ref was freshly minted are recorded, so a later same-type store reusing an existing ref
+	// never overwrites the creator. Populated alongside opcodeIdToRef in the OP_*STORE handler.
+	refToCreatingStore map[*values.JavaRef]*OpCode
 	// dupConvertedRefValue records, per dup-family opcode and in the SAME order as the
 	// opcodeIdToRef entries appended by checkAndConvertRef, the actual value each synthesized
 	// temp was created from. The dup statement-parse handler must use this instead of
@@ -45,7 +52,18 @@ type Decompiler struct {
 	// consume order (e.g. the array reference under the index in `this.f[i] op= v`, whose
 	// dup2 pops index first), stackConsumed[i] points at the wrong operand and would emit a
 	// bogus assignment like `int t = i; t[i] = ...`.
-	dupConvertedRefValue          map[*OpCode][]values.JavaValue
+	dupConvertedRefValue map[*OpCode][]values.JavaValue
+	// checkcastInnerArg records, per OP_CHECKCAST opcode, the inner value (the aload SlotValue)
+	// BEFORE it was wrapped in the cast CustomValue. This lets phase-2 invoke-arg rebinding reach
+	// the original local-load without unpacking the CustomValue's closures (which are opaque).
+	// Populated in the phase-1 OP_CHECKCAST handler.
+	checkcastInnerArg map[*OpCode]values.JavaValue
+	// invokeFuncCall records, per invoke-family opcode, the FunctionCallExpression it produced (for
+	// value-returning invokes, the FCE is pushed on the phase-1 stack and consumed later; the FCE's
+	// receiver and arguments were bound at phase-1 time when opcodeIdToRef was incomplete). The
+	// phase-1-post pass rebindIncompatibleInvokeArgs walks this map to rebind incompatible
+	// receivers/arguments using the now-complete opcodeIdToRef. Populated in the phase-1 invoke handler.
+	invokeFuncCall                map[*OpCode]*values.FunctionCallExpression
 	bytecodes                     []byte
 	opCodes                       []*OpCode
 	RootOpCode                    *OpCode
@@ -150,7 +168,10 @@ func NewDecompiler(bytecodes []byte, constantPoolGetter func(id int) values.Java
 		opcodeIndexToOffset:  map[int]uint16{},
 		varTable:             map[int]*values.JavaRef{},
 		opcodeIdToRef:        map[*OpCode][][2]any{},
+		refToCreatingStore:   map[*values.JavaRef]*OpCode{},
 		dupConvertedRefValue: map[*OpCode][]values.JavaValue{},
+		checkcastInnerArg:    map[*OpCode]values.JavaValue{},
+		invokeFuncCall:       map[*OpCode]*values.FunctionCallExpression{},
 		varUserMap:           omap.NewEmptyOrderedMap[*values.JavaRef, []*VarFoldRule](),
 		delRefUserAttr:       map[string][3]int{},
 		selfOpFoldedRefs:     map[string]bool{},
@@ -749,6 +770,531 @@ func refIsPrimitive(ref *values.JavaRef) bool {
 	return isPrim
 }
 
+// rebindIncompatibleLoadForSink is the two-pass load rebinding for the catch-slot / switch-case
+// slot-reuse family (fastjson2 JDKUtils.<clinit>: one JVM slot carries Boolean + Predicate +
+// MethodHandle across disjoint live ranges, linked through shared putstatic reads). By pass 2 the
+// forward simulation is complete, so opcodeIdToRef holds every store's committed ref. When a sink
+// (putfield/putstatic/areturn) consumes a local-load value (SlotValue wrapping a JavaRef) whose
+// resolved type is INCOMPATIBLE with the sink's declared type, the load bound the wrong branch ref
+// (the single global slot table parked a DFS-stale ref in `current`). The load's TRUE reaching
+// definition -- found by the structural reachingStoresOf walk (Source edges, no simulation order) --
+// carries a type-compatible ref; rebind the sink to that ref via a fresh SlotValue so the assignment
+// reads the branch-correct variable.
+//
+// Safety: it fires ONLY when (1) the value is a local-load SlotValue wrapping a JavaRef; (2) the
+// resolved ref type and the sink type are BOTH non-primitive reference classes (not Object, not type
+// variables) of DIFFERENT names; (3) neither is a bridged subtype of the other (a genuine
+// incompatible pair); (4) a reaching store exists whose committed ref type IS the sink type (exact
+// name match) -- proving the compatible branch was actually minted. This never widens or casts; it
+// merely re-points the read at the already-minted compatible ref. Kill-switch:
+// JDEC_REBIND_INCOMPATIBLE_LOAD_OFF=1.
+func (d *Decompiler) rebindIncompatibleLoadForSink(sink *OpCode, value values.JavaValue, sinkType types.JavaType) values.JavaValue {
+	if os.Getenv("JDEC_REBIND_INCOMPATIBLE_LOAD_OFF") == "1" {
+		return value
+	}
+	if value == nil || sinkType == nil || sink == nil {
+		return value
+	}
+	// The value must be a local-load SlotValue wrapping a JavaRef.
+	ref, ok := slotValueJavaRef(value)
+	if !ok || ref == nil {
+		return value
+	}
+	vt := ref.Type()
+	if vt == nil {
+		return value
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return value
+	}
+	if _, isPrim := sinkType.RawType().(*types.JavaPrimer); isPrim {
+		return value
+	}
+	vtFQN, vtOK := types.ClassFQNOf(vt)
+	ttFQN, ttOK := types.ClassFQNOf(sinkType)
+	if !vtOK || !ttOK {
+		// An ARRAY-typed value flowing into a non-array reference sink (or vice versa) is an obvious
+		// incompatible pair (e.g. Class[] value into a Field sink). ClassFQNOf returns false for arrays,
+		// so this branch lets the array-vs-class case through to the reaching-store lookup below instead
+		// of bailing. fastjson2 TypeUtils.<clinit>: slot 0 null-initialized as Class[] (DFS-corruption
+		// from a later array reuse) but the true reaching store is getDeclaredField → Field.
+		vtIsArray := vt.IsArray()
+		ttIsArray := sinkType.IsArray()
+		if vtIsArray == ttIsArray {
+			return value
+		}
+		// One is array, the other isn't: genuine incompatibility. Synthesize FQNs so the store lookup
+		// below can match against the non-array side (the sink type).
+		if !ttOK {
+			return value
+		}
+		vtFQN = "" // mark as unknown-array so the subtype checks below skip
+	}
+	if vtFQN == ttFQN {
+		return value
+	}
+	if vtFQN == ttFQN {
+		return value
+	}
+	isObject := func(n string) bool { return n == "java.lang.Object" }
+	// Allow an Object-typed value (a null-adopted or merge-widened slot) flowing into a specific
+	// reference sink: the slot may carry a branch whose type matches the sink (fastjson2 JSON:82
+	// `var6 = var5` where var5 is Object but the true branch is JSONObject). The exact-match reaching
+	// store gate below proves the compatible branch exists. Reject only when the SINK is Object (no
+	// specific target to match).
+	if isObject(ttFQN) {
+		return value
+	}
+	provider := func() types.SuperTypeProvider {
+		if fc := d.FunctionContext; fc != nil {
+			return fc.SiblingSuperTypes
+		}
+		return nil
+	}()
+	// Genuine incompatible pair (Boolean vs Predicate, etc.): neither assignable to the other. For an
+	// Object-typed value the downcast direction (target <: value) is allowed through -- the exact-match
+	// reaching store gate below is the safety net.
+	if !isObject(vtFQN) {
+		if types.IsReferenceSubtypeBridged(vtFQN, ttFQN, provider) {
+			return value
+		}
+		if types.IsReferenceSubtypeBridged(ttFQN, vtFQN, provider) {
+			return value
+		}
+	}
+	// Find the load that produced this value: it is the Source opcode of the sink whose value was
+	// pushed by an aload. Walk back one Source hop to the load, then use reachingStoresOf (structural,
+	// simulation-order-independent) to find the TRUE reaching store on this path.
+	if len(sink.Source) == 0 {
+		return value
+	}
+	load := sink.Source[0]
+	if load == nil || !isLocalLoadOpcode(load.Instr.OpCode) {
+		return value
+	}
+	slot := GetRetrieveIdx(load)
+	if slot < 0 {
+		return value
+	}
+	stores, _ := reachingStoresOf(load, slot)
+	for _, st := range stores {
+		refs, ok := d.opcodeIdToRef[st]
+		if !ok || len(refs) == 0 {
+			continue
+		}
+		last := refs[len(refs)-1]
+		if len(last) == 0 {
+			continue
+		}
+		stRef, ok := last[0].(*values.JavaRef)
+		if !ok || stRef == nil {
+			continue
+		}
+		stType := stRef.Type()
+		if stType == nil {
+			continue
+		}
+		stFQN, stOK := types.ClassFQNOf(stType)
+		if !stOK {
+			continue
+		}
+		// Exact name match to the sink type: this is the branch-correct ref.
+		if stFQN == ttFQN && stRef.VarUid != ref.VarUid {
+			// Rebind: a fresh SlotValue wrapping the compatible ref, so the sink reads the correct branch.
+			sv := values.NewSlotValue(stRef, stType)
+			// Register a var-user for the rebound ref so the var-fold user-count reflects this read.
+			// Without this, the rebound ref may look single-use (its phase-1 user count excludes this
+			// phase-2 sink), and var-fold would single-use-fold it away — dropping its declaration and
+			// leaving the sink reading an undeclared variable (fastjson2 TypeUtils.<clinit>
+			// FIELD_JSON_OBJECT_1x_map: the getDeclaredField store is folded into setAccessible, and the
+			// putstatic sink that was rebound to read it then sees no declaration).
+			users := d.varUserMap.GetMust(stRef)
+			d.varUserMap.Set(stRef, append(users, &VarFoldRule{
+				Replace: func(v values.JavaValue) {
+					sv.ResetValue(v)
+				},
+				CurrentOpcode: sink,
+			}))
+			return sv
+		}
+	}
+	return value
+}
+
+// rebindCheckcastInnerArgs is the phase-2 post-pass for checkcast-wrapped local-loads whose resolved
+// type is incompatible with the cast target. fastjson2 JDKUtils:318: `metafactory(trustedLookup((Class)
+// (var22_1)), ..., (MethodHandle)(var21_1), ...)` where var22_1 is MethodHandle (cast to Class fails)
+// and var21_1 is Throwable (cast to MethodHandle fails). Each cast wraps an aload SlotValue; the cast's
+// ref type (the checkcast target) differs from the slot's parked DFS-stale ref. By phase 2 the
+// simulation is complete, so use the structural reachingStoresOf walk (Source edges) on the checkcast's
+// source aload to find the TRUE reaching store whose committed ref type matches the cast target, and
+// rebind the inner SlotValue to that ref. This makes the cast wrap the branch-correct variable. Kill-
+// switch: JDEC_REBIND_CHECKCAST_INNER_OFF=1 (shared with JDEC_REBIND_INCOMPATIBLE_LOAD_OFF).
+func (d *Decompiler) rebindCheckcastInnerArgs() {
+	if os.Getenv("JDEC_REBIND_CHECKCAST_INNER_OFF") == "1" {
+		return
+	}
+	if os.Getenv("JDEC_REBIND_INCOMPATIBLE_LOAD_OFF") == "1" {
+		return
+	}
+	for checkcastOp, innerArg := range d.checkcastInnerArg {
+		if checkcastOp == nil || innerArg == nil {
+			continue
+		}
+		cv, ok := d.constantPoolGetter(int(Convert2bytesToInt(checkcastOp.Data))).(*values.JavaClassValue)
+		if !ok || cv == nil {
+			continue
+		}
+		castType := cv.Type()
+		if castType == nil {
+			continue
+		}
+		ctFQN, ctOK := types.ClassFQNOf(castType)
+		if !ctOK || ctFQN == "java.lang.Object" {
+			continue
+		}
+		innerRef, ok := slotValueJavaRef(innerArg)
+		if !ok || innerRef == nil {
+			continue
+		}
+		vt := innerRef.Type()
+		if vt == nil {
+			continue
+		}
+		if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+			continue
+		}
+		vtFQN, vtOK := types.ClassFQNOf(vt)
+		if !vtOK {
+			continue
+		}
+		if vtFQN == ctFQN {
+			continue
+		}
+		provider := func() types.SuperTypeProvider {
+			if fc := d.FunctionContext; fc != nil {
+				return fc.SiblingSuperTypes
+			}
+			return nil
+		}()
+		if types.IsReferenceSubtypeBridged(vtFQN, ctFQN, provider) {
+			continue
+		}
+		if types.IsReferenceSubtypeBridged(ctFQN, vtFQN, provider) {
+			continue
+		}
+		// Find the source aload of the checkcast (the load that fed the cast).
+		if len(checkcastOp.Source) == 0 {
+			continue
+		}
+		load := checkcastOp.Source[0]
+		if load == nil || !isLocalLoadOpcode(load.Instr.OpCode) {
+			continue
+		}
+		slot := GetRetrieveIdx(load)
+		if slot < 0 {
+			continue
+		}
+		stores, _ := reachingStoresOf(load, slot)
+		var matchRef *values.JavaRef
+		for _, st := range stores {
+			refs, ok := d.opcodeIdToRef[st]
+			if !ok || len(refs) == 0 {
+				continue
+			}
+			last := refs[len(refs)-1]
+			if len(last) == 0 {
+				continue
+			}
+			stRef, ok := last[0].(*values.JavaRef)
+			if !ok || stRef == nil {
+				continue
+			}
+			stType := stRef.Type()
+			if stType == nil {
+				continue
+			}
+			stFQN, stOK := types.ClassFQNOf(stType)
+			if !stOK {
+				continue
+			}
+			if stFQN == ctFQN && stRef.VarUid != innerRef.VarUid {
+				matchRef = stRef
+				break
+			}
+		}
+		if matchRef == nil {
+			continue
+		}
+		// Rebind the inner SlotValue to the matched branch ref. ResetValue replaces the SlotValue's
+		// inner value, so the cast now wraps the branch-correct variable.
+		if sv, ok := innerArg.(*values.SlotValue); ok && sv != nil {
+			sv.ResetValue(matchRef)
+		}
+	}
+}
+
+// rebindIncompatibleInvokeArgs is the phase-1-post pass for value-returning invokes whose receiver or
+// argument is a local-load bound (at phase-1 time, when opcodeIdToRef was incomplete) to a DFS-stale
+// wrong-type ref. By phase 1's end opcodeIdToRef is fully populated, so the structural reachingStoresOf
+// walk can find the TRUE reaching store whose ref type matches the callee's declaring class (receiver)
+// or the declared parameter type (argument), and the FCE's SlotValue is reset to that ref.
+//
+// Canonical case: fastjson2 ObjectReaderBaseModule:793 `var7.getParameters()` where var7 resolved as
+// Annotation[] (DFS corruption from a null-init sharing slot 7 with a later Constructor store); the
+// true reaching store is a Constructor, and rebindIncompatibleLoadForSink cannot fire because the
+// value-returning invokevirtual pushes its FCE on the phase-1 stack and the receiver is embedded in it,
+// never reaching a phase-2 putstatic/putfield sink. Kill-switch: JDEC_REBIND_INCOMPATIBLE_LOAD_OFF=1
+// (shared with rebindIncompatibleLoadForSink / rebindCheckcastInnerArgs).
+func (d *Decompiler) rebindIncompatibleInvokeArgs() {
+	if os.Getenv("JDEC_REBIND_INCOMPATIBLE_LOAD_OFF") == "1" {
+		return
+	}
+	provider := func() types.SuperTypeProvider {
+		if fc := d.FunctionContext; fc != nil {
+			return fc.SiblingSuperTypes
+		}
+		return nil
+	}()
+	for invokeOp, fce := range d.invokeFuncCall {
+		if invokeOp == nil || fce == nil {
+			continue
+		}
+		// Rebind the receiver (non-static invokes only).
+		if !fce.IsStatic && fce.Object != nil {
+			if fce.ClassName != "" {
+				if recvType := types.NewJavaClass(fce.ClassName); recvType != nil {
+					if better := d.rebindInvokeOperand(invokeOp, fce.Object, recvType, provider); better != nil {
+						fce.Object = better
+					}
+				}
+			}
+		}
+		// Rebind arguments against the declared parameter types.
+		if fce.FuncType != nil {
+			for i, arg := range fce.Arguments {
+				if i >= len(fce.FuncType.ParamTypes) {
+					break
+				}
+				pt := fce.FuncType.ParamTypes[i]
+				if pt == nil {
+					continue
+				}
+				if better := d.rebindInvokeOperand(invokeOp, arg, pt, provider); better != nil {
+					fce.Arguments[i] = better
+				}
+			}
+		}
+	}
+}
+
+// rebindInvokeOperand checks whether a single invoke operand (receiver or argument) is a local-load
+// SlotValue whose resolved type is incompatible with `sinkType` (the declaring class or declared
+// parameter type), and if so rebinds it to a reaching-store ref whose type matches sinkType. Returns
+// the rebound value (a fresh SlotValue) or nil to keep the original. Mirrors
+// rebindIncompatibleLoadForSink's gate logic but operates on the FCE operand directly.
+func (d *Decompiler) rebindInvokeOperand(invokeOp *OpCode, operand values.JavaValue, sinkType types.JavaType, provider types.SuperTypeProvider) values.JavaValue {
+	if operand == nil || sinkType == nil {
+		return nil
+	}
+	sv, ok := operand.(*values.SlotValue)
+	if !ok || sv == nil {
+		return nil
+	}
+	ref, ok := slotValueJavaRef(sv)
+	if !ok || ref == nil {
+		return nil
+	}
+	vt := ref.Type()
+	if vt == nil {
+		return nil
+	}
+	if _, isPrim := vt.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	if _, isPrim := sinkType.RawType().(*types.JavaPrimer); isPrim {
+		return nil
+	}
+	vtFQN, vtOK := types.ClassFQNOf(vt)
+	ttFQN, ttOK := types.ClassFQNOf(sinkType)
+	if !vtOK || !ttOK {
+		vtIsArray := vt.IsArray()
+		ttIsArray := sinkType.IsArray()
+		if vtIsArray == ttIsArray {
+			return nil
+		}
+		if !ttOK {
+			return nil
+		}
+		vtFQN = ""
+	}
+	if vtFQN == ttFQN {
+		return nil
+	}
+	if ttFQN == "java.lang.Object" {
+		return nil
+	}
+	if vtFQN != "" {
+		if types.IsReferenceSubtypeBridged(vtFQN, ttFQN, provider) {
+			return nil
+		}
+		if types.IsReferenceSubtypeBridged(ttFQN, vtFQN, provider) {
+			return nil
+		}
+	}
+	// Find the load that fed this operand. For a value-returning invokevirtual, the receiver load is
+	// NOT a direct Source of the invoke (the FCE was pushed on the phase-1 stack and consumed later).
+	// Instead, scan all opcodes for the local-load whose opcodeIdToRef entry matches this ref's VarUid.
+	load := d.findLoadByRef(ref)
+	if load == nil {
+		// Fallback: walk the invoke's Source chain.
+		load = d.findLocalLoadInSource(invokeOp, ref)
+	}
+	if load == nil {
+		return nil
+	}
+	// The found opcode may be a STORE (opcodeIdToRef is keyed by stores) or a LOAD (from the Source
+	// chain fallback). Extract the slot accordingly.
+	slot := -1
+	if isLocalStoreOpcode(load.Instr.OpCode) {
+		slot = GetStoreIdx(load)
+	} else if isLocalLoadOpcode(load.Instr.OpCode) {
+		slot = GetRetrieveIdx(load)
+	}
+	if slot < 0 {
+		return nil
+	}
+	stores, _ := reachingStoresOf(load, slot)
+	if os.Getenv("JDEC_REBIND_INVOKE_DEBUG") == "1" {
+		storeOffs := []string{}
+		for _, st := range stores {
+			off := -1
+			if st != nil {
+				off = int(st.CurrentOffset)
+			}
+			storeOffs = append(storeOffs, fmt.Sprintf("%d", off))
+		}
+		fmt.Fprintf(os.Stderr, "[REBIND-OP] loadOff=%d slot=%d stores=[%s]\n", int(load.CurrentOffset), slot, strings.Join(storeOffs, ","))
+	}
+	for _, st := range stores {
+		refs, ok := d.opcodeIdToRef[st]
+		if !ok || len(refs) == 0 {
+			continue
+		}
+		last := refs[len(refs)-1]
+		if len(last) == 0 {
+			continue
+		}
+		stRef, ok := last[0].(*values.JavaRef)
+		if !ok || stRef == nil {
+			continue
+		}
+		stType := stRef.Type()
+		if stType == nil {
+			continue
+		}
+		stFQN, stOK := types.ClassFQNOf(stType)
+		if !stOK {
+			continue
+		}
+		if stFQN == ttFQN && stRef.VarUid != ref.VarUid {
+			newSV := values.NewSlotValue(stRef, stType)
+			// Register a var-user so var-fold doesn't single-use-fold the rebound ref away.
+			users := d.varUserMap.GetMust(stRef)
+			d.varUserMap.Set(stRef, append(users, &VarFoldRule{
+				Replace: func(v values.JavaValue) {
+					newSV.ResetValue(v)
+				},
+				CurrentOpcode: invokeOp,
+			}))
+			return newSV
+		}
+	}
+	return nil
+}
+
+// findLoadByRef scans all opcodes for the local-LOAD opcode (aload/iload/etc.) whose opcodeIdToRef
+// entry matches the given ref's VarUid. This is used to locate the load that fed a value-returning
+// invoke's receiver or argument (whose load is not a direct Source of the invoke because the FCE was
+// pushed on the phase-1 stack and consumed later). Returns the matching load opcode or nil.
+func (d *Decompiler) findLoadByRef(ref *values.JavaRef) *OpCode {
+	if ref == nil {
+		return nil
+	}
+	// Scan for local-load opcodes only (not stores or invokes). opcodeIdToRef is also keyed by
+	// stores and dup-converted opcodes, so we must filter to loads to get the right slot via
+	// GetRetrieveIdx.
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil {
+			continue
+		}
+		if !isLocalLoadOpcode(op.Instr.OpCode) {
+			continue
+		}
+		// Loads are NOT in opcodeIdToRef by default. But the load's produced ref is tracked via the
+		// SlotValue pushed on the stack. Instead, match by slot: check if the load's slot produces a
+		// ref whose opcodeIdToRef entry (from a store) matches. But we don't have a load->ref map.
+		// Alternative: scan by offset — find the load nearest to but before the invoke that shares
+		// the same slot as a store whose ref matches.
+	}
+	// No direct load->ref mapping available. Fall through to return nil; the Source-chain fallback
+	// (findLocalLoadInSource) handles it.
+	return nil
+}
+
+// findLocalLoadInSource walks the invoke opcode's Source chain (transitively) to find the local-load
+// opcode whose slot matches the ref's slot. For a value-returning invokevirtual, the receiver load is
+// an ancestor Source of the invoke (the load was consumed by the invokevirtual in phase 1). Loads are
+// NOT registered in opcodeIdToRef (only stores are), so we match by slot number: the first local-load
+// in the Source chain whose GetRetrieveIdx matches the slot of any store whose ref matches the given
+// ref. Returns nil if no matching local-load is found.
+func (d *Decompiler) findLocalLoadInSource(invoke *OpCode, ref *values.JavaRef) *OpCode {
+	if invoke == nil || ref == nil {
+		return nil
+	}
+	// Find the slot of the ref: scan stores in opcodeIdToRef for one whose ref matches.
+	refSlot := -1
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil || !isLocalStoreOpcode(op.Instr.OpCode) {
+			continue
+		}
+		if refs, ok := d.opcodeIdToRef[op]; ok && len(refs) > 0 {
+			last := refs[len(refs)-1]
+			if len(last) > 0 {
+				if lr, ok := last[0].(*values.JavaRef); ok && lr != nil && lr.VarUid == ref.VarUid {
+					if s := GetStoreIdx(op); s >= 0 {
+						refSlot = s
+						break
+					}
+				}
+			}
+		}
+	}
+	if refSlot < 0 {
+		return nil
+	}
+	// BFS the invoke's Source chain for the first local-load of that slot.
+	visited := map[*OpCode]bool{invoke: true}
+	queue := append([]*OpCode{}, invoke.Source...)
+	for depth := 0; depth < 8 && len(queue) > 0; depth++ {
+		nextQueue := []*OpCode{}
+		for _, cur := range queue {
+			if cur == nil || visited[cur] {
+				continue
+			}
+			visited[cur] = true
+			if isLocalLoadOpcode(cur.Instr.OpCode) {
+				if GetRetrieveIdx(cur) == refSlot {
+					return cur
+				}
+			}
+			nextQueue = append(nextQueue, cur.Source...)
+		}
+		queue = nextQueue
+	}
+	return nil
+}
+
 // reachingSlotVersionOnMismatch repairs a stale slot read produced by the single global varTable.
 // See the call site in loadVarBySlot for the root cause. We trigger ONLY on the unambiguous
 // corruption signal: the load opcode's category (reference vs primitive) disagrees with the
@@ -1149,6 +1695,126 @@ func (d *Decompiler) reachingBoolDefaultMerge(store *OpCode, slot int, current *
 		return defRef
 	}
 	return nil
+}
+
+// reachingBoolVarCopyMerge repairs the if/else (or switch-case) sibling-arm split where one arm copies
+// an earlier `boolean previous = (expr) != 0` (compiled to `iconst_1/0; istore`, typed int) into the
+// slot (`itemRefDetect = previous`) and a SIBLING arm stores a genuinely boolean-typed value
+// (`itemRefDetect = jsonWriter.isRefDetect()`, a Z-returning call or a boolean comparison). javac emits
+// the copy as `iload previous; istore S`, so the copied value carries the source's int-typed ref; the
+// sibling boolean store then sees int-vs-boolean and AssignVarGuarded (no int<->boolean conversion)
+// mints a FRESH boolean variable, splitting one source variable into `int varN` (the copy arm) and
+// `boolean varN_1` (the boolean arm). The post-merge use (`if (itemRefDetect)`, `previous = itemRefDetect`)
+// then renders as `int = boolean` / `boolean != int` and javac rejects it ("boolean cannot be converted
+// to int"). fastjson2 FieldWriterList.writeList / ObjectWriterImplList.writeList.
+//
+// reachingBoolDefaultMerge cannot anchor here: the copy arm's reaching definition is NOT an int-0/1
+// literal RHS but an `iload` of ANOTHER slot, and the two arms are siblings (neither reaches the other
+// through Source edges), so neither the single-reaching-def gate nor the literal-RHS check matches.
+// reachingBoolSiblingArmMerge is the role-inverse (value int-literal, current boolean) and likewise
+// does not fire.
+//
+// This handler anchors on the boolean store: when the value being stored is boolean-typed and the slot's
+// CURRENT ref (the copy arm's, still parked in the global slot table) was itself defined by copying a
+// slot whose OWN definition is an int-0/1 literal default initializer (the canonical bool-default shape
+// reachingBoolDefaultMerge would re-type), it re-types the copy arm's ref to boolean. The two arms then
+// denote one boolean variable and the merge read stays consistently typed. Gated by a phi (the copy
+// def and this store share a downstream load), which rejects genuine disjoint slot reuse. Kill-switch:
+// JDEC_BOOL_VAR_COPY_MERGE_OFF=1.
+func (d *Decompiler) reachingBoolVarCopyMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_BOOL_VAR_COPY_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil || val.Type() == nil {
+		return nil
+	}
+	// The value being stored must be genuinely boolean-typed (a Z-returning call / boolean comparison),
+	// not an int-0/1 literal (that is reachingBoolSiblingArmMerge's domain).
+	if !isExactPrimer(val.Type(), types.JavaBoolean) {
+		return nil
+	}
+	// The slot's current version must be a plain int local (the copy arm's ref AssignVarGuarded would
+	// refuse to merge with a boolean value).
+	if current.IsParam || !isExactPrimer(current.Type(), types.JavaInteger) {
+		return nil
+	}
+	// Find the store that defined `current` (the sibling arm's ref parked in the global slot table by
+	// DFS order). The reaching-definition analysis walks Source edges backward and CANNOT see a sibling
+	// branch's definition (no path), so reachingBoolDefaultMerge (which uses reachingSlotStoreOps) bails
+	// here even though the bool-default shape matches; `current` carries the sibling ref directly.
+	copyStore := d.findStoreDefiningRef(current)
+	if copyStore == nil {
+		return nil
+	}
+	// The sibling arm's RHS must prove the value is really a boolean the JVM widened to int. Two shapes:
+	//   (a) an int-0/1 literal default initializer — the canonical bool-default `(expr) != 0` compiled to
+	//       iconst_1/0 (fastjson2 ObjectWriterImplList.write: `(itemClassRefDetect && isRefDetect()) ? 1 : 0`);
+	//   (b) a copy of ANOTHER slot whose OWN definition is such an int-0/1 literal default (fastjson2
+	//       FieldWriterList.writeList: `itemRefDetect = previous`, where previous defaulted to iconst_1/0).
+	// A genuine int (non-0/1 literal, or a copy of a real int) is left untouched so it is not mis-typed.
+	copyVal := d.slotStoreValue[copyStore]
+	boolType := types.NewJavaPrimer(types.JavaBoolean)
+	var litToRetype *values.JavaLiteral
+	// Shape (a): the sibling arm's own RHS is an int-0/1 literal.
+	if lit, ok := intLiteral01(copyVal); ok {
+		litToRetype = lit
+	} else {
+		// Shape (b): the sibling arm's RHS is a copy of another slot; that source must itself be an
+		// int-0/1 literal default initializer.
+		srcRef, ok := slotValueJavaRef(copyVal)
+		if !ok || srcRef == nil {
+			return nil
+		}
+		srcStore := d.findStoreDefiningRef(srcRef)
+		if srcStore == nil {
+			return nil
+		}
+		srcLit, ok := intLiteral01(d.slotStoreValue[srcStore])
+		if !ok {
+			return nil
+		}
+		litToRetype = srcLit
+	}
+	// A phi must prove the copy arm and this boolean store are ONE source variable: both reach a common
+	// downstream load of `slot`. Genuine disjoint reuse (the copy arm's value is consumed before this
+	// store, no shared load) shares no load and is left to split.
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	// Re-type the copy arm's ref (and the proven-boolean default's int-0/1 literal) to boolean, so both
+	// arms denote one boolean variable. This mirrors reachingBoolDefaultMerge's lossless re-typing of an
+	// int-0/1 default to false/true.
+	current.ResetVarType(boolType)
+	litToRetype.JavaType = boolType
+	return current
+}
+
+// findStoreDefiningRef recovers the store opcode that FIRST created `ref` (pointer identity), using the
+// refToCreatingStore index populated alongside opcodeIdToRef. The global slot table parks a sibling arm's
+// ref in the slot; this recovers the store that produced it so its RHS can be inspected. Returns nil when
+// no such store is recorded yet (e.g. the ref is a parameter or was minted outside a store).
+func (d *Decompiler) findStoreDefiningRef(ref *values.JavaRef) *OpCode {
+	if ref == nil {
+		return nil
+	}
+	return d.refToCreatingStore[ref]
+}
+
+// slotValueJavaRef unwraps a SlotValue whose underlying value is a *JavaRef (the `iload srcSlot` copy
+// pattern `dst = src`). Returns the source ref and ok=false for any other shape. It does NOT use
+// UnpackSoltValue (which recurses past the SlotValue to the inner ref); it needs the SlotValue layer
+// itself to confirm the value was a slot-load copy rather than an inline ref.
+func slotValueJavaRef(v values.JavaValue) (*values.JavaRef, bool) {
+	sv, ok := v.(*values.SlotValue)
+	if !ok || sv == nil {
+		return nil, false
+	}
+	inner := sv.GetValue()
+	if inner == nil {
+		return nil, false
+	}
+	ref, ok := inner.(*values.JavaRef)
+	return ref, ok
 }
 
 // reachingBoolSiblingArmMerge handles the sibling-arm boolean phi that reachingBoolDefaultMerge cannot
@@ -2688,6 +3354,17 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			runtimeStackSimulation.SetVar(slot, merged)
 			oldRef = merged
 		}
+		// Boolean variable-copy sibling-arm phi (fastjson2 FieldWriterList.writeList /
+		// ObjectWriterImplList.writeList): one if/else arm copies an earlier boolean-default variable
+		// (`itemRefDetect = previous`, previous compiled to iconst_1/0) into the slot, and a SIBLING arm
+		// stores a genuinely boolean-typed value (`itemRefDetect = jsonWriter.isRefDetect()`). The copy
+		// arm's int-typed ref and the boolean arm's fresh boolean ref split one variable, and the
+		// post-merge use renders `int = boolean`. Re-type the copy arm (and its source default) to
+		// boolean when a phi proves they are one variable. Kill-switch: JDEC_BOOL_VAR_COPY_MERGE_OFF=1.
+		if merged := d.reachingBoolVarCopyMerge(opcode, slot, oldRef, value); merged != nil {
+			runtimeStackSimulation.SetVar(slot, merged)
+			oldRef = merged
+		}
 		// Sibling-arm boolean phi (gson SqlTypesSupport.<clinit>): the second try/catch (or if/else) arm
 		// stores an int 0/1 literal onto a reaching def that an earlier sibling arm already made boolean.
 		// Continue that boolean def (coercing the literal to false/true) instead of splitting off an int
@@ -2939,6 +3616,13 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		d.slotStoreTrace[slot] = slotStoreTraceInfo{offset: opcode.CurrentOffset, ref: ref}
 		statements.NewAssignStatement(ref, value, isFirst)
 		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
+		// Record the creator of each freshly-minted ref so the boolean-copy merge can recover it
+		// deterministically (opcodeIdToRef iteration is unordered and several stores can reuse a ref).
+		if isFirst && ref != nil {
+			if _, exists := d.refToCreatingStore[ref]; !exists {
+				d.refToCreatingStore[ref] = opcode
+			}
+		}
 		attr := d.delRefUserAttr[ref.VarUid]
 		attr[1]++
 		d.delRefUserAttr[ref.VarUid] = attr
@@ -3161,6 +3845,9 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_CHECKCAST:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
 		arg := runtimeStackSimulation.Pop().(values.JavaValue)
+		// Record the inner arg so phase-2 invoke-arg rebinding can reach the original local-load
+		// without unpacking the cast CustomValue's closures (fastjson2 JDKUtils:318).
+		d.checkcastInnerArg[opcode] = arg
 		value := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 			// Wrap the whole cast in parentheses so it keeps the correct precedence
 			// when it becomes the receiver of a member access or method call: without
@@ -3193,6 +3880,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
 		}
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(funcCallValue)
 		}
@@ -3240,6 +3928,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
 
 		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
+		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(funcCallValue)
 		}
@@ -3251,6 +3940,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
 		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
+		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(funcCallValue)
 		}
@@ -3262,6 +3952,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
 		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
+		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(funcCallValue)
 		}
@@ -5072,6 +5763,15 @@ func (d *Decompiler) ParseStatement() error {
 	}
 	mapCodeToStackVarIndex := map[*OpCode]int{}
 	//DumpOpcodesToDotExp(d.RootOpCode)
+	// Two-pass load rebinding for checkcast-wrapped local-loads (phase-1 simulation is complete here,
+	// opcodeIdToRef fully populated, checkcastInnerArg populated by the phase-1 OP_CHECKCAST handler).
+	// Rebind the inner SlotValue of each incompatible cast to the branch ref whose type matches the
+	// cast target, BEFORE phase-2 statement building consumes the cast value. fastjson2 JDKUtils:318.
+	d.rebindCheckcastInnerArgs()
+	// Two-pass load rebinding for value-returning invoke receivers/arguments whose local-load bound a
+	// DFS-stale wrong-type ref at phase-1 time. Runs here (opcodeIdToRef complete) BEFORE phase-2
+	// statement building. fastjson2 ObjectReaderBaseModule:793 (var7.getParameters receiver).
+	d.rebindIncompatibleInvokeArgs()
 	var runCode func(startNode *OpCode) error
 	var parseOpcode func(opcode *OpCode) error
 	parseOpcode = func(opcode *OpCode) error {
@@ -5125,6 +5825,12 @@ func (d *Decompiler) ParseStatement() error {
 				// concrete non-Object reference). Kill-switch: JDEC_LAZY_INIT_SELF_TERNARY_OFF.
 				if narrow := lazyInitSelfTernaryNarrow(ref, value); narrow != nil {
 					ref.ResetVarType(narrow)
+				}
+				// Two-pass load rebinding for local-assign sinks: when the stored value is a local-load
+				// whose resolved type is incompatible with the LHS ref's declared type (var6 = var5 where
+				// var6 is JSONObject and var5 is Object carrying a JSONObject branch), rebind to the
+				// branch ref whose type matches the LHS (fastjson2 JSON:82, ObjectReaderImplList:782).
+				if value = d.rebindIncompatibleLoadForSink(opcode, value, ref.Type()); false {
 				}
 				assignSt := statements.NewAssignStatement(ref, value, isFirst)
 				appendNode(assignSt)
@@ -5338,7 +6044,11 @@ func (d *Decompiler) ParseStatement() error {
 			if !opcode.SelfOpFolded {
 				index := Convert2bytesToInt(opcode.Data)
 				staticVal := d.constantPoolGetter(int(index))
-				appendNode(statements.NewAssignStatement(staticVal, opcode.stackConsumed[0], false))
+				value := opcode.stackConsumed[0]
+				if cm, ok := staticVal.(*values.JavaClassMember); ok && cm != nil {
+					value = d.rebindIncompatibleLoadForSink(opcode, value, cm.JavaType)
+				}
+				appendNode(statements.NewAssignStatement(staticVal, value, false))
 			}
 		case OP_PUTFIELD:
 			if !opcode.SelfOpFolded {
@@ -5346,6 +6056,9 @@ func (d *Decompiler) ParseStatement() error {
 				staticVal := d.constantPoolGetter(int(index))
 				value := opcode.stackConsumed[0]
 				field := values.NewRefMember(opcode.stackConsumed[1], staticVal.(*values.JavaClassMember).Member, staticVal.(*values.JavaClassMember).JavaType)
+				if cm, ok := staticVal.(*values.JavaClassMember); ok && cm != nil {
+					value = d.rebindIncompatibleLoadForSink(opcode, value, cm.JavaType)
+				}
 				assignSt := statements.NewAssignStatement(field, value, false)
 				appendNode(assignSt)
 			}

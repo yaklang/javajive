@@ -27,7 +27,7 @@ func TestThrowableCatchMergeIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix ON) failed: %v", err)
 	}
-	if !strings.Contains(on, "Throwable var3;") {
+	if !strings.Contains(on, "Throwable var3") {
 		t.Errorf("fix ON: expected a single `Throwable var3` catch variable, got:\n%s", on)
 	}
 	if strings.Contains(on, "\t\tInterruptedException var") {

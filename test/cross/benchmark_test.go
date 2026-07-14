@@ -211,7 +211,7 @@ func TestBenchmarkSelfRecompile(t *testing.T) {
 		deps := resolveDeps(j.depGlob)
 		// Complete sun.misc so faithfully-decompiled sun.misc.Unsafe users are not counted as defects
 		// under --release 8 (the same shim the round-trip and inventory harnesses use).
-		classpath := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
+		classpath := withFlow(t, withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))))
 		nClasses := len(classEntries(t, jarPath))
 
 		root := t.TempDir()
@@ -421,7 +421,7 @@ func TestBenchmarkThreeWayRecompile(t *testing.T) {
 		// Complete the JDK-internal sun.misc package (see jdk_sunmisc_test.go) so faithfully-decompiled
 		// sun.misc.Unsafe users (guava) are not counted as defects under --release 8. Applied to BOTH
 		// JavaJive and the external tools' classpaths below, so the comparison stays fair.
-		classpath := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
+		classpath := withFlow(t, withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))))
 		nClasses := len(classEntries(t, jarPath))
 
 		r := row{jar: j.key, classes: nClasses}

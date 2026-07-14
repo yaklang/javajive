@@ -954,6 +954,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// a same-class call recover its erased argument cast via its exact descriptor. Kill-switch
 		// JDEC_SAMECLASS_DESC_SIG_OFF disables population (so the consumer degrades to the arity path).
 		methodSignaturesByDesc := map[string]string{}
+		// All-method (name, descriptor) presence set (regardless of Signature), so a renderer can detect
+		// genuine overload ambiguity (a second same-arity overload with a different descriptor). Populated
+		// for every non-<init>/non-<clinit> method. Kill-switch consumer: JDEC_NULL_ARG_CAST_OFF.
+		methodDescriptors := map[string]bool{}
 		recordByDesc := os.Getenv("JDEC_SAMECLASS_DESC_SIG_OFF") == ""
 		for _, m := range c.obj.Methods {
 			name, err := c.obj.getUtf8(m.NameIndex)
@@ -969,6 +973,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			if err != nil || descriptor == "" {
 				continue
 			}
+			methodDescriptors[class_context.MethodDescKey(name, descriptor)] = true
 			for _, attr := range m.Attributes {
 				sigAttr, ok := attr.(*SignatureAttribute)
 				if !ok {
@@ -994,6 +999,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 		if len(methodSignaturesByDesc) > 0 {
 			c.FuncCtx.MethodSignaturesByDesc = methodSignaturesByDesc
+		}
+		if len(methodDescriptors) > 0 {
+			c.FuncCtx.MethodDescriptors = methodDescriptors
 		}
 		// Augment with DIRECT-supertype (inherited) generic method signatures so a `this.m(objVal)`
 		// call to an inherited generic method recovers its erased `(K)` argument cast too. Same-class
@@ -1205,6 +1213,53 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// ordinal()])` back to the idiomatic `switch(sel){ case CONST: ... }`. No-op without a resolver
 	// or when JDEC_NO_ENUM_SWITCH_FOLD is set; produces valid Java, so it runs after assembly.
 	full = c.foldEnumSwitchMaps(full)
+	// fixLambdaLoopCapture runs FIRST: it inserts final-copies for loop-reassigned captured vars
+	// and rewrites lambda-body reads to the copy. After this, the original variable is no longer
+	// read inside the lambda, so initProximateSplitSlotDecl (next) can safely default-initialize it
+	// (the lambda-capture skip won't fire for a var whose reads were already rewritten to the copy).
+	// Kill-switch: JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
+	full = fixLambdaLoopCapture(full)
+	// Run the split-slot definite-assignment init on the FULL class text (all methods merged).
+	// This overcomes the chunked-sourceCode limitation where the per-method init couldn't see
+	// assignments in other method blocks. Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
+	full = initProximateSplitSlotDecl(full)
+	// removeUnreachableSwitchBreak drops `break;` after a nested switch whose default throws/returns.
+	// Kill-switch: JDEC_RM_UNREACHABLE_BREAK_OFF=1.
+	full = removeUnreachableSwitchBreak(full)
+	// fixMissingReturn inserts `return null;` after a no-op empty-if (`if(cond){};`) that follows a
+	// switch-closing `}`, when the enclosing block does not otherwise terminate (the CFA-targeted
+	// pattern that produces "missing return statement" in deep switch/if chains). Kill-switch:
+	// JDEC_FIX_MISSING_RETURN_OFF=1.
+	full = fixMissingReturn(full)
+	// fixEmptySwitchDefault inserts a terminator (throw) into `switch` default labels whose body is
+	// empty, which otherwise leaves a value-returning method without a return on that path.
+	// Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
+	full = fixEmptySwitchDefault(full)
+	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
+	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
+	full = fixTryCatchExceptionPlacement(full)
+	// addMissingCatchException performs per-call-site exception-flow analysis: for each reflection
+	// call site (getConstructor etc.) it walks the enclosing try/catch chain and only augments the
+	// nearest catch with NoSuchMethodException if no enclosing catch already handles it (or a
+	// supertype). Kill-switch: JDEC_ADD_MISSING_CATCH_OFF=1.
+	full = addMissingCatchException(full)
+	// dedupNestedCatchException removes exception types from an outer catch that are already caught
+	// by a nested try/catch in the try body (javac: "exception X is never thrown in body of
+	// corresponding try statement"). Kill-switch: JDEC_DEDUP_NESTED_CATCH_OFF=1.
+	full = dedupNestedCatchException(full)
+	// wrapUncaughtThrowingCall wraps `UNSAFE.allocateInstance()` in try/catch. Kill-switch:
+	// JDEC_WRAP_ALLOCATE_OFF=1.
+	full = wrapUncaughtThrowingCall(full)
+	// wrapReflectionCallInSwitchCase wraps switch-case reflection calls in try/catch. Kill-switch:
+	// JDEC_WRAP_REFLECTION_CASE_OFF=1.
+	full = wrapReflectionCallInSwitchCase(full)
+	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. Kill-switch:
+	// JDEC_ADD_SWITCH_BREAK_OFF=1.
+	full = addBreakToSwitchCases(full)
+	// wrapFieldInitializerReflection converts a field initializer containing a reflection call
+	// (getMethod etc.) that throws a checked exception into a static-block init with try/catch.
+	// Kill-switch: JDEC_WRAP_FIELD_INIT_OFF=1.
+	full = wrapFieldInitializerReflection(full)
 	return full, nil
 }
 
@@ -1864,14 +1919,26 @@ func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc
 								continue
 							}
 							sigStr, err := sObj.getUtf8(sigAttr.SignatureIndex)
-							if err != nil || sigStr == "" || !strings.HasPrefix(sigStr, "(") {
+							if err != nil || sigStr == "" {
+								continue
+							}
+							// A method Signature may start with `<T:...>` (method-scope type parameters)
+							// before the `(...)` parameter list, or directly with `(`. Accept both: a
+							// super-constructor whose formal is a METHOD-scope type variable (e.g. guava
+							// Invokable's `<M extends AccessibleObject & Member> Invokable(M)`) has a
+							// Signature starting with `<M:`, which the old `HasPrefix("(")` check silently
+							// dropped, making the ctor invisible to calleeParamIsErasedTypeVar and causing
+							// a spurious arg cast to the erased first bound.
+							if !strings.HasPrefix(sigStr, "(") && !strings.HasPrefix(sigStr, "<") {
 								continue
 							}
 							// Offset safety: a non-static inner class's ctor Signature omits the synthetic
 							// leading this$0/outer-capture params, so its param count is smaller than the
 							// descriptor's. Only record when they match, so the index used by the caller
-							// (which indexes descriptor arguments) lines up with the Signature params.
-							sigParams, _ := types.ParseMethodSignature(sigStr)
+							// (which indexes descriptor arguments) lines up with the Signature params. Use
+							// ParseMethodSignatureFull (not ParseMethodSignature) so a `<T:...>` prefix is
+							// stripped before counting params.
+							_, sigParams, _ := types.ParseMethodSignatureFull(sigStr, nil)
 							if len(sigParams) != descArgc {
 								continue
 							}
@@ -3883,6 +3950,2767 @@ func addMissingGeneratedLocalDecls(body, params, receiverType string, methodRetu
 		lines = append(lines, fmt.Sprintf("\t%s %s = %s;\n", typ, name, zero))
 	}
 	return "\n" + strings.Join(lines, "") + strings.TrimPrefix(body, "\n")
+}
+
+// initProximateSplitSlotDecl initializes bare `Type varN;` declarations (no initializer) to
+// `Type varN = null;` when a dead-store `Object varM;` sibling exists within a small line window
+// (proximity gate). This repairs the definite-assignment error from a split slot (String in the
+// if-branch, Object in the else-branch) WITHOUT attempting a structural variable merge.
+//
+// The proximity gate (≤ maxLines apart) is the key safety mechanism: it ensures the Object
+// dead-store is in the SAME if/else block as the bare declaration, not in an unrelated part of the
+// method. Canonical case: fastjson2 JSON.copyTo — `String var16;` (line 4351) + `Object var17;`
+// (line 4358, 7 lines apart). Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
+func initProximateSplitSlotDecl(body string) string {
+	if os.Getenv("JDEC_INIT_PROX_SPLIT_OFF") == "1" {
+		return body
+	}
+	dbg := os.Getenv("JDEC_INIT_PROX_SPLIT_DBG") == "1"
+	const maxLines = 10 // max line distance between bare decl and Object dead-store sibling
+	lines := strings.Split(body, "\n")
+	// Pre-collect all Object dead-store declaration line numbers.
+	type objDecl struct {
+		name string
+		line int
+	}
+	var objDecls []objDecl
+	for i, ln := range lines {
+		// Match `Object varM;` at any indentation.
+		m := objDeclLineRe.FindStringSubmatch(strings.TrimRight(ln, "\r"))
+		if m != nil {
+			varM := m[1]
+			// Check if varM is a dead store (never read in the full body).
+			if !hasReadInBody(body, varM) {
+				objDecls = append(objDecls, objDecl{name: varM, line: i})
+			}
+		}
+	}
+	// Do NOT early-return when there are no Object dead stores: the primitive/reference gates
+	// below (and the method-scoped capture check) handle bare slot-split declarations with no
+	// Object sibling. Returning here would leave them uninitialized.
+	if dbg {
+		fmt.Fprintf(os.Stderr, "[PROX] %d Object dead stores\n", len(objDecls))
+	}
+	// For each bare `Type varN;` declaration (var and lv scoped locals), decide whether to default-
+	// initialize it to repair a definite-assignment error.
+	bareDeclRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(=\s*null\s*)?;(\s*)$`)
+	for i, ln := range lines {
+		lnClean := strings.TrimRight(ln, "\r")
+		m := bareDeclRe.FindStringSubmatch(lnClean)
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		declType := strings.TrimSpace(m[2])
+		varN := m[3]
+		// m[4] is the optional `= null` group, m[5] is the trailing whitespace.
+		trailing := m[5]
+		// Skip Java keywords that look like type tokens (throw, return, new, etc.).
+		switch declType {
+		case "throw", "return", "new", "if", "else", "for", "while", "do", "switch", "case",
+			"break", "continue", "try", "catch", "finally", "synchronized", "assert":
+			continue
+		}
+		// Determine the initializer value based on type.
+		initVal := "null"
+		isPrimitive := false
+		switch declType {
+		case "int", "long", "short", "byte":
+			initVal = "0"
+			isPrimitive = true
+		case "double":
+			initVal = "0.0"
+			isPrimitive = true
+		case "float":
+			initVal = "0.0F"
+			isPrimitive = true
+		case "char":
+			initVal = "'\\0'"
+			isPrimitive = true
+		case "boolean":
+			initVal = "false"
+			isPrimitive = true
+		}
+		// varN must be read somewhere (has a non-assignment use), within the same method.
+		if !hasReadInBodyMethod(lines, varN, i) {
+			continue
+		}
+		// Lambda-capture safety: if varN is READ inside a lambda body that is DEEPER than this
+		// declaration's scope AND it is assigned ≥1 time elsewhere, initializing it would create a
+		// second assignment (the init + the reassignment), breaking the capture ("local variables
+		// referenced from a lambda expression must be final or effectively final"). Skip — the
+		// final-copy pass (fixLambdaLoopCapture) handles loop-reassigned captures separately.
+		// Method-local to avoid cross-method false captures from varN name reuse.
+		if countAssignTargetsMethod(lines, varN, i) >= 1 && nameCapturedByLambdaMethod(lines, varN, i) {
+			// The variable is captured by a lambda and assigned ≥1 time. If the declaration has an
+			// `= null` initializer, removing it makes the variable effectively-final (only the later
+			// reassignment remains), which allows the lambda capture to compile. This is safe when
+			// countAssignTargetsMethod == 1 (single reassignment after the null init).
+			if trailing == "" && strings.Contains(lnClean, "= null;") && countAssignTargetsMethod(lines, varN, i) == 1 {
+				if dbg {
+					fmt.Fprintf(os.Stderr, "[PROX] STRIP null-init %s %s: captured + single reassign → effectively-final\n", declType, varN)
+				}
+				lines[i] = indent + declType + " " + varN + ";"
+				continue
+			}
+			if dbg {
+				fmt.Fprintf(os.Stderr, "[PROX] SKIP %s %s: captured by deeper lambda + assigned\n", declType, varN)
+			}
+			continue
+		}
+		// Gate: the declaration should be initialized only when it is NOT definitely assigned on all
+		// paths before its first read.
+		// (a) Proximity: an Object dead-store sibling is nearby (the split-slot signature), OR
+		// (b) the bare decl is immediately followed by an if/else chain that LACKS a final else
+		//     (one branch may not assign → not definitely assigned — exclude the bare `Object`
+		//     widened-split form whose bare shape is intentional under JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF), OR
+		// (c) a primitive assigned ≥1 time and read (multi-branch chain, primitives are safe), OR
+		// (d) a reference type assigned ≥2 times (multi-branch chain).
+		found := false
+		for _, od := range objDecls {
+			if abs(i-od.line) <= maxLines {
+				found = true
+				break
+			}
+		}
+		// `Object` bare declarations: when JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF is set, the
+		// null-reassign split intentionally leaves a widened-split `Object varN;` whose bare shape is
+		// load-bearing (the merge is proven load-bearing by that bare form). Do not initialize Object
+		// decls in that mode. Otherwise (default), Object bare decls that are conditionally assigned
+		// and read are real DA errors and must be initialized.
+		skipObject := declType == "Object" && os.Getenv("JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF") == "1"
+		if !found && !skipObject && chainLacksFinalElse(lines, i, varN) {
+			found = true
+		}
+		if !found && isPrimitive && countAssignTargetsMethod(lines, varN, i) >= 1 {
+			found = true
+		}
+		// Reference types: a single conditional assignment (inside an `if`/`try`) read later, or a
+		// use-before-def reorder artifact, both leave the variable possibly-uninitialized. The
+		// lambda-capture skip above prevents breaking finality.
+		if !found && !isPrimitive && !skipObject && countAssignTargetsMethod(lines, varN, i) >= 1 {
+			found = true
+		}
+		if !found {
+			continue
+		}
+		// Initialize: `Type varN;` → `Type varN = <initVal>;`
+		if dbg {
+			fmt.Fprintf(os.Stderr, "[PROX] INIT %s %s = %s; (line=%d)\n", declType, varN, initVal, i)
+		}
+		lines[i] = indent + declType + " " + varN + " = " + initVal + ";" + trailing
+	}
+	return strings.Join(lines, "\n")
+}
+
+var objDeclLineRe = regexp.MustCompile(`^\t+Object\s+(var\d+(?:_\d+)?)\s*;`)
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// hasReadInBody reports whether name appears as a READ (not declaration, not assignment target)
+// anywhere in body.
+func hasReadInBody(body, name string) bool {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	locs := re.FindAllStringIndex(body, -1)
+	for _, loc := range locs {
+		before := body[:loc[0]]
+		after := body[loc[1]:]
+		// Skip declarations: preceded by a type token on the same line.
+		lineStart := strings.LastIndex(before, "\n") + 1
+		lineBefore := strings.TrimSpace(before[lineStart:])
+		if lineBefore != "" {
+			c := lineBefore[len(lineBefore)-1]
+			// A declaration is preceded by a type token ending in an identifier char, ], >, or ?.
+			// NOT ')' — that would match casts like `(Type) (varN)`.
+			// But a control keyword (return/throw/if/...) ending in a word char is NOT a type —
+			// `return varN`, `throw varN`, `if (varN` are READS.
+			if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
+				continue
+			}
+		}
+		// Skip assignment targets: followed by `=` but not `==`.
+		afterTrim := strings.TrimLeft(after, " \t")
+		if strings.HasPrefix(afterTrim, "=") && !strings.HasPrefix(afterTrim, "==") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isWordByteDump(b byte) bool {
+	return b == '_' || b == '$' || (b >= '0' && b <= '9') ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// prevTokenIsControlKeyword reports whether the last whitespace-stripped token before a name use
+// is a Java keyword that takes an EXPRESSION (not a type). Such uses (return x, throw x, if (x),
+// while (x), switch (x), assert x, synchronized (x)) are READS of x, not declarations — even though
+// the keyword ends in a word char that would otherwise be mistaken for a type token.
+func prevTokenIsControlKeyword(lineBefore string) bool {
+	tok := ""
+	for i := len(lineBefore) - 1; i >= 0; i-- {
+		c := lineBefore[i]
+		if isWordByteDump(c) {
+			tok = string(c) + tok
+		} else {
+			break
+		}
+	}
+	switch tok {
+	case "return", "throw", "if", "else", "while", "for", "do", "switch", "case",
+		"break", "continue", "try", "catch", "finally", "synchronized", "assert", "new":
+		return true
+	}
+	return false
+}
+
+// lambdaDepthPerLine computes, for each line, the number of LAMBDA bodies (blocks introduced by
+// `-> {`) currently open. This is NOT general brace depth — only `-> {` lambda blocks count.
+func lambdaDepthPerLine(lines []string) []int {
+	depths := make([]int, len(lines))
+	depth := 0
+	var lambdaStarts []int
+	for i, raw := range lines {
+		ln := strings.TrimRight(raw, "\r")
+		arrowBraceIdxs := map[int]bool{}
+		for k := 0; k+1 < len(ln); k++ {
+			if ln[k] == '-' && ln[k+1] == '>' {
+				for m := k + 2; m < len(ln); m++ {
+					if ln[m] == '{' {
+						arrowBraceIdxs[m] = true
+						break
+					}
+					if ln[m] != ' ' && ln[m] != '\t' {
+						break
+					}
+				}
+			}
+		}
+		for j := 0; j < len(ln); j++ {
+			switch ln[j] {
+			case '{':
+				depth++
+				if arrowBraceIdxs[j] {
+					lambdaStarts = append(lambdaStarts, depth)
+				}
+			case '}':
+				depth--
+				if depth < 0 {
+					depth = 0
+				}
+				for len(lambdaStarts) > 0 && depth < lambdaStarts[len(lambdaStarts)-1] {
+					lambdaStarts = lambdaStarts[:len(lambdaStarts)-1]
+				}
+			}
+		}
+		depths[i] = len(lambdaStarts)
+	}
+	return depths
+}
+
+// methodOrInitBlockStart reports whether ln opens a method/ctor body OR a static/instance
+// initializer block (`static {` or a bare `{` at class-member indent). These are the brace-scoped
+// regions that contain local variable declarations.
+var methodOrInitBlockRe = regexp.MustCompile(`^\t+(?:public|protected|private|static|final|synchronized|abstract|native|default|[\w$<>\[\].,? ]+)\s+\w+\s*\([^;]*\)\s*(?:throws[^{]*)?\{`)
+
+// methodBodyRange returns the [startLineIdx, endLineIdx) range of the method/ctor/init-block body
+// containing lineIdx, by scanning backward for an opening line and forward for its closing brace.
+func methodBodyRange(lines []string, lineIdx int) (int, int) {
+	if lineIdx < 0 || lineIdx >= len(lines) {
+		return -1, -1
+	}
+	start := -1
+	for i := lineIdx; i >= 0; i-- {
+		ln := strings.TrimRight(lines[i], "\r")
+		if isMethodOrInitBlockStart(ln) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return -1, -1
+	}
+	depth := 0
+	for i := start; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		for j := 0; j < len(ln); j++ {
+			switch ln[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					return start, i + 1
+				}
+			}
+		}
+	}
+	return start, len(lines)
+}
+
+// ctorOrMethodRe matches a constructor or method signature (ClassName/void + params + `{`, with
+// optional modifiers), used when methodOrInitBlockRe (which requires a return-type token) misses
+// constructors (which have no separate return type).
+var ctorOrMethodRe = regexp.MustCompile(`^\t+(?:(?:public|protected|private)\s+)?\w[\w$]*(?:<[^>]*>)?\s*\([^;]*\)\s*(?:throws[^{]*)?\{`)
+
+// isMethodOrInitBlockStart reports whether ln opens a method/ctor body OR a static/instance
+// initializer block.
+func isMethodOrInitBlockStart(ln string) bool {
+	if methodOrInitBlockRe.MatchString(ln) {
+		return true
+	}
+	trim := strings.TrimSpace(ln)
+	// static initializer: `static {` (with any spacing).
+	compact := strings.Join(strings.Fields(trim), "")
+	if compact == "static{" {
+		return true
+	}
+	// Constructor or void method without a separate return-type token: `<name>(...){`.
+	if ctorOrMethodRe.MatchString(ln) {
+		first := trim
+		if sp := strings.IndexAny(first, " \t("); sp > 0 {
+			first = first[:sp]
+		}
+		switch first {
+		case "if", "while", "for", "switch", "catch", "synchronized", "try", "do", "else", "return":
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// body DEEPER than the declaration's lambda depth, within the enclosing method body only.
+func nameCapturedByLambdaMethod(lines []string, name string, declLineIdx int) bool {
+	ms, me := methodBodyRange(lines, declLineIdx)
+	if ms < 0 {
+		return false
+	}
+	sub := lines[ms:me]
+	depths := lambdaDepthPerLine(sub)
+	subDeclIdx := declLineIdx - ms
+	if subDeclIdx < 0 || subDeclIdx >= len(depths) {
+		return false
+	}
+	declDepth := depths[subDeclIdx]
+	nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	for i, raw := range sub {
+		ln := strings.TrimRight(raw, "\r")
+		if depths[i] <= declDepth {
+			continue
+		}
+		for _, loc := range nameRe.FindAllStringIndex(ln, -1) {
+			before := ln[:loc[0]]
+			after := ln[loc[1]:]
+			bTrim := strings.TrimRight(before, " \t")
+			aTrim := strings.TrimLeft(after, " \t")
+			if strings.Contains(after, "->") &&
+				len(bTrim) > 0 && (bTrim[len(bTrim)-1] == '(' || bTrim[len(bTrim)-1] == ',') &&
+				(len(aTrim) > 0 && (aTrim[0] == ')' || aTrim[0] == ',')) {
+				continue
+			}
+			lineBefore := strings.TrimSpace(before)
+			if lineBefore != "" {
+				c := lineBefore[len(lineBefore)-1]
+				if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
+					continue
+				}
+			}
+			if strings.HasPrefix(aTrim, "=") && !strings.HasPrefix(aTrim, "==") {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// countAssignTargetsMethod counts assignment targets for name within the enclosing method body.
+func countAssignTargetsMethod(lines []string, name string, declLineIdx int) int {
+	ms, me := methodBodyRange(lines, declLineIdx)
+	if ms < 0 {
+		return countAssignTargets(strings.Join(lines, "\n"), name)
+	}
+	return countAssignTargets(strings.Join(lines[ms:me], "\n"), name)
+}
+
+// hasReadInBodyMethod reports whether name appears as a READ within the enclosing method body.
+func hasReadInBodyMethod(lines []string, name string, declLineIdx int) bool {
+	ms, me := methodBodyRange(lines, declLineIdx)
+	if ms < 0 {
+		return hasReadInBody(strings.Join(lines, "\n"), name)
+	}
+	return hasReadInBody(strings.Join(lines[ms:me], "\n"), name)
+}
+
+// chainLacksFinalElse reports whether the bare declaration at declIdx is immediately followed by an
+// if/else chain whose deepest else has NO final-else block — a path on which varN is never assigned
+// (would trigger "might not have been initialized"). Handles the dumper's nested `}else{ if(){} }`
+// rendering. While descending, if the else body assigns varN unconditionally before any inner if,
+// the chain has full coverage (returns false).
+func chainLacksFinalElse(lines []string, declIdx int, varN string) bool {
+	if declIdx < 0 || declIdx+1 >= len(lines) {
+		return false
+	}
+	declIndent := leadingTabs(strings.TrimRight(lines[declIdx], "\r"))
+	if declIndent == "" {
+		return false
+	}
+	ifLine := -1
+	for j := declIdx + 1; j < len(lines); j++ {
+		ln := strings.TrimRight(lines[j], "\r")
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		trim := strings.TrimSpace(ln)
+		if strings.HasPrefix(trim, "if ") || strings.HasPrefix(trim, "if(") {
+			ifLine = j
+			break
+		}
+		ind := leadingTabs(ln)
+		if len(ind) <= len(declIndent) {
+			return false
+		}
+	}
+	if ifLine < 0 {
+		return false
+	}
+	cur := ifLine
+	for cur < len(lines) {
+		ifIndent := leadingTabs(strings.TrimRight(lines[cur], "\r"))
+		depth := 0
+		blockEnd := -1
+		for k := cur; k < len(lines); k++ {
+			ln := strings.TrimRight(lines[k], "\r")
+			for b := 0; b < len(ln); b++ {
+				switch ln[b] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+				}
+			}
+			if depth <= 0 && k > cur {
+				blockEnd = k
+				break
+			}
+		}
+		if blockEnd < 0 {
+			return false
+		}
+		elseLine := -1
+		for k := blockEnd + 1; k < len(lines); k++ {
+			ln := strings.TrimRight(lines[k], "\r")
+			if strings.TrimSpace(ln) == "" {
+				continue
+			}
+			elseLine = k
+			break
+		}
+		if elseLine < 0 {
+			return true
+		}
+		elseLn := strings.TrimRight(lines[elseLine], "\r")
+		elseTrim := strings.TrimSpace(elseLn)
+		elseInd := leadingTabs(elseLn)
+		if !(strings.HasPrefix(elseTrim, "}else{") || strings.HasPrefix(elseTrim, "} else {") ||
+			strings.HasPrefix(elseTrim, "}else ") || strings.HasPrefix(elseTrim, "} else")) {
+			if len(elseInd) <= len(ifIndent) {
+				return true
+			}
+			return false
+		}
+		hasInnerIf := false
+		varNAssignedBeforeInnerIf := false
+		elseDepth := 0
+		started := false
+		for k := elseLine; k < len(lines); k++ {
+			ln := strings.TrimRight(lines[k], "\r")
+			depthBeforeLine := elseDepth
+			for b := 0; b < len(ln); b++ {
+				switch ln[b] {
+				case '{':
+					elseDepth++
+					started = true
+				case '}':
+					elseDepth--
+				}
+			}
+			trim := strings.TrimSpace(ln)
+			if started && depthBeforeLine > 0 && (strings.HasPrefix(trim, "if ") || strings.HasPrefix(trim, "if(")) {
+				hasInnerIf = true
+				cur = k
+				break
+			}
+			if started && depthBeforeLine > 0 && assignTargetIs(ln, varN) {
+				varNAssignedBeforeInnerIf = true
+			}
+			if started && elseDepth <= 0 && k > elseLine {
+				break
+			}
+		}
+		if varNAssignedBeforeInnerIf {
+			return false
+		}
+		if !hasInnerIf {
+			return false
+		}
+	}
+	return false
+}
+
+// leadingTabs returns the leading tab run of ln (the indentation).
+func leadingTabs(ln string) string {
+	i := 0
+	for i < len(ln) && ln[i] == '\t' {
+		i++
+	}
+	return ln[:i]
+}
+
+// assignTargetIs reports whether ln assigns to name as a target (`name =` but not `==`), where name
+// is a standalone word not preceded by a type/declaration token.
+func assignTargetIs(ln, name string) bool {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	locs := re.FindAllStringIndex(ln, -1)
+	for _, loc := range locs {
+		after := ln[loc[1]:]
+		aTrim := strings.TrimLeft(after, " \t")
+		if !strings.HasPrefix(aTrim, "=") || strings.HasPrefix(aTrim, "==") {
+			continue
+		}
+		before := ln[:loc[0]]
+		lineBefore := strings.TrimSpace(before)
+		if lineBefore != "" {
+			c := lineBefore[len(lineBefore)-1]
+			if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
+				continue
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// fixLambdaLoopCapture repairs the "local variables referenced from a lambda expression must be final
+// or effectively final" error that arises when a method-level variable is reassigned each loop
+// iteration (e.g. inside a do/while) AND read inside an enclosing lambda body. Such a variable is
+// genuinely not effectively-final, so default-initialization cannot fix it.
+//
+// Fix: for each capturing `-> {` lambda, immediately before the lambda insert a final copy
+//
+//	<indent>final <Type> <name>_f = <name>;
+//
+// and rewrite READS of <name> inside that lambda body to <name>_f. The copy is effectively-final
+// (single assignment), so the capture is legal; each loop iteration captures a fresh value.
+//
+// Detection is method-local (varN name reuse across methods) and depth-aware (only names read at a
+// STRICTLY DEEPER lambda depth than the declaration are captures). Kill-switch:
+// JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
+//
+// NOTE: chained-call lambdas (e.g. `flux.concatMap(x -> {...}).doOnTerminate(...)`) have the
+// `-> {` mid-statement, so inserting a copy before that line would land inside the statement body.
+// Such lambdas are skipped (only non-chained `receiver(args, x -> {...})` forms are handled).
+// Kill-switch: JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
+func fixLambdaLoopCapture(body string) string {
+	if os.Getenv("JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// declRe matches a local variable declaration (with or without initializer) to recover the
+	// declared type for the final copy. Captures both bare `Type varN;` and `Type varN = init;`.
+	declRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(?:=[^;]*)?;(\s*)$`)
+	// We process per-method so varN reuse across methods does not conflate. Collect method ranges.
+	type methodRange struct{ start, end int }
+	var methods []methodRange
+	{
+		i := 0
+		for i < len(lines) {
+			ln := strings.TrimRight(lines[i], "\r")
+			if isMethodOrInitBlockStart(ln) {
+				if os.Getenv("JDEC_FLC_DBG") == "1" && strings.Contains(ln, "isExtendedMap") {
+					fmt.Fprintf(os.Stderr, "[FLC] found method at L%d: %q\n", i+1, strings.TrimSpace(ln))
+				}
+				depth := 0
+				end := len(lines)
+				for k := i; k < len(lines); k++ {
+					lk := strings.TrimRight(lines[k], "\r")
+					for b := 0; b < len(lk); b++ {
+						switch lk[b] {
+						case '{':
+							depth++
+						case '}':
+							depth--
+							if depth == 0 {
+								end = k + 1
+							}
+						}
+					}
+					if depth == 0 && k > i {
+						break
+					}
+				}
+				methods = append(methods, methodRange{i, end})
+				i = end
+				continue
+			}
+			i++
+		}
+	}
+	changed := false
+	for _, mr := range methods {
+		mlines := lines[mr.start:mr.end]
+		depths := lambdaDepthPerLine(mlines)
+		// Collect captured names + their declared type + the lambda-opening line indices that read them.
+		type captureInfo struct {
+			declType string
+			// lambdaOpenSubIdxs: sub-line indices where a `-> {` lambda body begins that reads the name
+			// at a deeper depth than the declaration.
+			lambdaOpenSubIdxs []int
+		}
+		captured := map[string]*captureInfo{}
+		// First pass: for each bare decl, determine if it's captured and record capture sites.
+		for di, ln := range mlines {
+			lnClean := strings.TrimRight(ln, "\r")
+			m := declRe.FindStringSubmatch(lnClean)
+			if m == nil {
+				continue
+			}
+			declType := strings.TrimSpace(m[2])
+			name := m[3]
+			switch declType {
+			case "throw", "return", "new", "if", "else", "for", "while", "do", "switch", "case",
+				"break", "continue", "try", "catch", "finally", "synchronized", "assert":
+				continue
+			}
+			declDepth := depths[di]
+			// Find lambda bodies (-> {) in this method and check whether `name` is read at a deeper depth.
+			nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+			var openIdxs []int
+			for li, lraw := range mlines {
+				lln := strings.TrimRight(lraw, "\r")
+				if depths[li] <= declDepth {
+					continue
+				}
+				// Is there a read of name on this line?
+				readHere := false
+				for _, loc := range nameRe.FindAllStringIndex(lln, -1) {
+					before := lln[:loc[0]]
+					after := lln[loc[1]:]
+					bTrim := strings.TrimRight(before, " \t")
+					aTrim := strings.TrimLeft(after, " \t")
+					if strings.Contains(after, "->") &&
+						len(bTrim) > 0 && (bTrim[len(bTrim)-1] == '(' || bTrim[len(bTrim)-1] == ',') &&
+						(len(aTrim) > 0 && (aTrim[0] == ')' || aTrim[0] == ',')) {
+						continue
+					}
+					lineBefore := strings.TrimSpace(before)
+					if lineBefore != "" {
+						c := lineBefore[len(lineBefore)-1]
+						if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
+							continue
+						}
+					}
+					if strings.HasPrefix(aTrim, "=") && !strings.HasPrefix(aTrim, "==") {
+						continue
+					}
+					readHere = true
+					break
+				}
+				if readHere {
+					// Find the lambda-open line for this depth: the nearest preceding `-> {`.
+					openIdx := -1
+					for k := li; k >= 0; k-- {
+						kl := strings.TrimRight(mlines[k], "\r")
+						if idx := strings.Index(kl, "->"); idx >= 0 {
+							rest := kl[idx:]
+							if strings.Contains(rest, "{") && depths[k] > declDepth {
+								// Only handle lambdas that begin a fresh statement: the previous
+								// non-blank line must end in `;`, `{`, or `}` (a statement boundary).
+								// This avoids multi-line argument lambdas (e.g.
+								// `x.register(a, () -> {\n ... \n}, ...)`) where inserting a copy
+								// before the `-> {` line lands inside the enclosing call's argument
+								// list and breaks structure.
+								if lambdaLineIsStmtStart(mlines, k) {
+									openIdx = k
+								}
+								break
+							}
+						}
+					}
+					if openIdx >= 0 {
+						// dedupe
+						found := false
+						for _, e := range openIdxs {
+							if e == openIdx {
+								found = true
+								break
+							}
+						}
+						if !found {
+							openIdxs = append(openIdxs, openIdx)
+						}
+					}
+				}
+			}
+			if len(openIdxs) > 0 {
+				captured[name] = &captureInfo{declType: declType, lambdaOpenSubIdxs: openIdxs}
+				if os.Getenv("JDEC_FLC_DBG") == "1" {
+					fmt.Fprintf(os.Stderr, "[FLC] captured %s declType=%q openIdxs=%v\n", name, declType, openIdxs)
+				}
+			}
+		}
+		if len(captured) == 0 {
+			continue
+		}
+		// For each capture site, we need to:
+		//  1. insert a final copy line before the lambda-open line, and
+		//  2. rewrite reads of the name inside that lambda body to <name>_f.
+		// We collect insertions and rewrites, then apply them on the GLOBAL lines slice via offsets.
+		// Process capture sites in REVERSE order so earlier insert offsets remain valid.
+		type edit struct {
+			insertAtGlobal int
+			insertIndent   string
+			insertText     string
+			// rewrite within [bodyStartGlobal, bodyEndGlobal): replace word reads name -> fname
+			bodyStartGlobal int
+			bodyEndGlobal   int
+			name            string
+			fname           string
+		}
+		var edits []edit
+		copySeq := 0 // per-method counter for unique final-copy names
+		for name, ci := range captured {
+			// For EACH capture site, insert a dedicated final-copy (each lambda body may be in a
+			// different branch/scope, so one copy cannot cover all). The copy is inserted just before
+			// the lambda-open line (in the same scope), and ONLY that lambda body is rewritten.
+			for _, openSub := range ci.lambdaOpenSubIdxs {
+				openGlobal := mr.start + openSub
+				copySeq++
+				fname := fmt.Sprintf("%s_f%d", name, copySeq)
+				openLn := strings.TrimRight(lines[openGlobal], "\r")
+				insIndent := leadingTabs(openLn)
+				// Insertion point: normally the lambda-open line. But when the lambda is a deeply-
+				// nested argument (parenDepth ≥ 2), the `-> {` is mid-statement — inserting there is
+				// syntactically invalid. Walk back to the start of the enclosing statement (the
+				// nearest preceding line at a shallower-or-equal indent following a `;`/`}`/`{`
+				// boundary) and insert there instead.
+				insertAt := openGlobal
+				if arrowIdx := strings.Index(openLn, "->"); arrowIdx >= 0 {
+					parenDepth := 0
+					for i := 0; i < arrowIdx; i++ {
+						switch openLn[i] {
+						case '(':
+							parenDepth++
+						case ')':
+							parenDepth--
+						}
+					}
+					if parenDepth >= 2 {
+						stmtStart := findEnclosingStmtStart(lines, openGlobal, mr.start)
+						if stmtStart >= 0 {
+							insertAt = stmtStart
+							insIndent = leadingTabs(strings.TrimRight(lines[stmtStart], "\r"))
+						}
+					}
+				}
+				// The lambda body starts AFTER the `-> {` line. Find the matching close brace of the
+				// `-> {` block by brace depth.
+				bodyStart := openGlobal + 1
+				bodyEnd := bodyStart
+				depth := 0
+				started := false
+				for k := openGlobal; k < len(lines); k++ {
+					lk := strings.TrimRight(lines[k], "\r")
+					for b := 0; b < len(lk); b++ {
+						switch lk[b] {
+						case '{':
+							depth++
+							started = true
+						case '}':
+							depth--
+						}
+					}
+					if started && depth <= 0 {
+						bodyEnd = k + 1
+						break
+					}
+				}
+				edits = append(edits, edit{
+					insertAtGlobal:  insertAt,
+					insertIndent:    insIndent,
+					insertText:      insIndent + "final " + ci.declType + " " + fname + " = " + name + ";",
+					bodyStartGlobal: bodyStart,
+					bodyEndGlobal:   bodyEnd,
+					name:            name,
+					fname:           fname,
+				})
+			}
+		}
+		// Phase A: apply ALL body rewrites first (these do not change line count).
+		for _, e := range edits {
+			if e.bodyEndGlobal == 0 {
+				continue // this is an insert-only edit
+			}
+			nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(e.name) + `\b`)
+			for k := e.bodyStartGlobal; k < e.bodyEndGlobal && k < len(lines); k++ {
+				ln := strings.TrimRight(lines[k], "\r")
+				if !nameRe.MatchString(ln) {
+					continue
+				}
+				newLn := rewriteLambdaReads(ln, e.name, e.fname)
+				if newLn != ln {
+					lines[k] = newLn
+					changed = true
+				}
+			}
+		}
+		// Phase B: collect insert-only edits, sort by insertAtGlobal DESC, apply (shifts offsets).
+		var inserts []edit
+		for _, e := range edits {
+			if e.insertText != "" {
+				inserts = append(inserts, e)
+			}
+		}
+		sort.Slice(inserts, func(a, b int) bool { return inserts[a].insertAtGlobal > inserts[b].insertAtGlobal })
+		for _, e := range inserts {
+			at := e.insertAtGlobal
+			if at > len(lines) {
+				at = len(lines)
+			}
+			lines = append(lines[:at], append([]string{e.insertText}, lines[at:]...)...)
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	return strings.Join(lines, "\n")
+}
+
+// sortEditsDesc sorts edits by insertAtGlobal in descending order.
+// (sort.Slice is used inline instead.)
+
+// findEnclosingStmtStart scans backward from idx (within [methodStart, idx]) to find the first
+// line of the statement containing idx: the nearest preceding line at a shallower-or-equal indent
+// that immediately follows a statement boundary (`;`/`}`/`{` on the previous non-blank line).
+// Returns -1 if not found.
+func findEnclosingStmtStart(lines []string, idx, methodStart int) int {
+	openIndent := leadingTabs(strings.TrimRight(lines[idx], "\r"))
+	for k := idx; k >= methodStart; k-- {
+		ln := strings.TrimRight(lines[k], "\r")
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		ind := leadingTabs(ln)
+		if len(ind) > len(openIndent) {
+			continue // deeper — still inside the statement
+		}
+		// At or shallower than openIndent. Check if the PREVIOUS non-blank line ended a statement.
+		prev := -1
+		for j := k - 1; j >= methodStart; j-- {
+			if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+				continue
+			}
+			prev = j
+			break
+		}
+		if prev < 0 {
+			return k // start of method body
+		}
+		pt := strings.TrimRight(strings.TrimRight(lines[prev], "\r"), " \t")
+		if len(pt) > 0 && (pt[len(pt)-1] == ';' || pt[len(pt)-1] == '{' || pt[len(pt)-1] == '}') {
+			return k
+		}
+	}
+	return -1
+}
+
+// lambdaLineIsStmtStart reports whether the lambda-open line at idx begins a fresh, simple
+// statement: (a) the previous non-blank line ends in `;`, `{`, or `}` (a statement boundary), AND
+// (b) the lambda-open line itself is a simple expression statement (NOT a `return` or assignment
+// whose value is a larger expression containing the lambda). This avoids multi-line argument
+// lambdas embedded in return/assignment expressions where inserting a copy breaks structure.
+func lambdaLineIsStmtStart(lines []string, idx int) bool {
+	openLn := strings.TrimRight(lines[idx], "\r")
+	// Reject return-statements whose value is a chained/complex expression.
+	trimOpen := strings.TrimSpace(openLn)
+	if strings.HasPrefix(trimOpen, "return ") || strings.HasPrefix(trimOpen, "return(") {
+		return false
+	}
+	// Reject continuation lines of a multi-line argument list: lines starting with `})`, `},`, or
+	// `,` indicate the lambda is a later argument of a call spanning multiple lines. (The first
+	// argument lambda is handled even if deeply nested — its copy inserts at the statement start.)
+	if strings.HasPrefix(trimOpen, "})") || strings.HasPrefix(trimOpen, "},") ||
+		strings.HasPrefix(trimOpen, "),") || strings.HasPrefix(trimOpen, ",(") {
+		return false
+	}
+	for k := idx - 1; k >= 0; k-- {
+		ln := strings.TrimRight(lines[k], "\r")
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		t := strings.TrimRight(ln, " \t")
+		if len(t) == 0 {
+			return true
+		}
+		c := t[len(t)-1]
+		return c == ';' || c == '{' || c == '}'
+	}
+	return true // start of block
+}
+
+// rewriteLambdaReads replaces READ occurrences of name with newName on a single line, leaving
+// assignment targets (`name =`) and declarations untouched. This mirrors the read-detection logic
+// used elsewhere (control-keyword aware).
+func rewriteLambdaReads(ln, name, newName string) string {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	locs := re.FindAllStringIndex(ln, -1)
+	if len(locs) == 0 {
+		return ln
+	}
+	var b strings.Builder
+	prev := 0
+	for _, loc := range locs {
+		b.WriteString(ln[prev:loc[0]])
+		before := ln[:loc[0]]
+		after := ln[loc[1]:]
+		bTrim := strings.TrimRight(before, " \t")
+		aTrim := strings.TrimLeft(after, " \t")
+		// Skip lambda parameter declarations.
+		if strings.Contains(after, "->") &&
+			len(bTrim) > 0 && (bTrim[len(bTrim)-1] == '(' || bTrim[len(bTrim)-1] == ',') &&
+			(len(aTrim) > 0 && (aTrim[0] == ')' || aTrim[0] == ',')) {
+			b.WriteString(name)
+			prev = loc[1]
+			continue
+		}
+		// Skip declarations (preceded by a type token).
+		lineBefore := strings.TrimSpace(before[strings.LastIndex(before, "\n")+1:])
+		if lineBefore != "" {
+			c := lineBefore[len(lineBefore)-1]
+			if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
+				b.WriteString(name)
+				prev = loc[1]
+				continue
+			}
+		}
+		// Skip assignment targets.
+		if strings.HasPrefix(aTrim, "=") && !strings.HasPrefix(aTrim, "==") {
+			b.WriteString(name)
+			prev = loc[1]
+			continue
+		}
+		// It's a read → rewrite.
+		b.WriteString(newName)
+		prev = loc[1]
+	}
+	b.WriteString(ln[prev:])
+	return b.String()
+}
+
+// removeUnreachableSwitchBreak removes a `break;` that immediately follows the closing `}` of a
+// nested switch whose `default:` clause unconditionally terminates (throw/return). Such a break is
+// unreachable (javac: "unreachable statement") and its presence can mask the real control flow,
+// producing spurious downstream errors. The detection: a `break;` whose preceding non-blank line is
+// a `}` at the same indent, where that `}` closes a switch block whose last label is `default:` with
+// a throw/return body. Kill-switch: JDEC_RM_UNREACHABLE_BREAK_OFF=1.
+func removeUnreachableSwitchBreak(body string) string {
+	if os.Getenv("JDEC_RM_UNREACHABLE_BREAK_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	breakRe := regexp.MustCompile(`^(\t+)break;\s*$`)
+	var removeIdx []int
+	for i := 0; i < len(lines); i++ {
+		m := breakRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		// Find the preceding non-blank line; it must be `indent}` (closing a block at this indent).
+		prev := -1
+		for j := i - 1; j >= 0; j-- {
+			if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+				continue
+			}
+			prev = j
+			break
+		}
+		if prev < 0 {
+			continue
+		}
+		if strings.TrimRight(lines[prev], "\r") != indent+"}" {
+			continue
+		}
+		// Scan backward from `prev` to verify the closed block is a switch whose last label before
+		// the closing `}` is `default:` with a throw/return body. Walk the block (brace depth -1).
+		depth := -1 // we start at the closing brace
+		lastBodyTerm := ""
+		for k := prev; k >= 0; k-- {
+			ln := strings.TrimRight(lines[k], "\r")
+			for b := len(ln) - 1; b >= 0; b-- {
+				switch ln[b] {
+				case '}':
+					depth++
+				case '{':
+					depth--
+				}
+			}
+			trim := strings.TrimSpace(ln)
+			if depth <= 0 {
+				// Inside the switch body (depth <= 0 relative to closing brace).
+				if strings.HasPrefix(trim, "default:") {
+					if lastBodyTerm == "throw" || lastBodyTerm == "return" {
+						removeIdx = append(removeIdx, i)
+					}
+					break
+				}
+				if strings.HasPrefix(trim, "throw ") || strings.HasPrefix(trim, "return ") || trim == "return;" {
+					lastBodyTerm = "throw"
+					if strings.HasPrefix(trim, "return") {
+						lastBodyTerm = "return"
+					}
+				}
+				if strings.HasPrefix(trim, "switch ") || strings.HasPrefix(trim, "switch(") {
+					break
+				}
+			}
+		}
+	}
+	if len(removeIdx) == 0 {
+		return body
+	}
+	out := lines[:0]
+	ri := 0
+	for i, ln := range lines {
+		if ri < len(removeIdx) && i == removeIdx[ri] {
+			ri++
+			continue
+		}
+		out = append(out, ln)
+	}
+	return strings.Join(out, "\n")
+}
+
+// (the line after `default:` is the `}` closing the switch). An empty default leaves a value-
+// returning method without a return on that path ("missing return statement"). Inserting
+// `throw new RuntimeException();` completes the control flow legally in any method. Only triggers
+// when the line following `default:` (ignoring blank lines) is the switch-closing `}` at the SAME
+// indentation as `default:`. Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
+func fixEmptySwitchDefault(body string) string {
+	if os.Getenv("JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
+	inserts := []int{} // line indices after which to insert the throw (descending apply)
+	for i := 0; i < len(lines); i++ {
+		m := defaultRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		// Find the next non-blank line; it must be `}` at the same indent (empty default body).
+		for j := i + 1; j < len(lines); j++ {
+			ln := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(ln) == "" {
+				continue
+			}
+			if ln == indent+"}" {
+				inserts = append(inserts, i) // insert the throw AFTER the `default:` line
+			}
+			break
+		}
+	}
+	if len(inserts) == 0 {
+		return body
+	}
+	// Apply in descending order so earlier offsets stay valid.
+	for k := len(inserts) - 1; k >= 0; k-- {
+		i := inserts[k]
+		indent := leadingTabs(strings.TrimRight(lines[i], "\r"))
+		throwLn := indent + "throw new RuntimeException();"
+		lines = append(lines[:i+1], append([]string{throwLn}, lines[i+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fixMissingReturn inserts `return null;` after a no-op empty-if statement (`if (cond){};`) that
+// immediately follows a switch-closing `}` whose switch had a `default:` clause. This is the
+// control-flow pattern that produces "missing return statement" in deep switch/if chains: javac
+// does not treat a non-constant String-switch (hashCode-based) as definitely-terminating even with
+// a `default: return`, so execution can fall through to the post-switch `if(cond){};` and then to
+// the end of the enclosing block without a return. Inserting `return null;` after that empty-if
+// completes the path. The insertion is reachable only on the not-definitely-returned path, so it
+// never creates an unreachable-statement error. Kill-switch: JDEC_FIX_MISSING_RETURN_OFF=1.
+//
+// enclosingReturnsReference reports whether the method/ctor/init-block containing line idx has a
+// declared return type that is a reference type (not primitive, not void, not a constructor). Used
+// to gate `return null;` insertions. Scans backward for a method/init-block signature line.
+func enclosingReturnsReference(lines []string, idx int) bool {
+	for k := idx; k >= 0; k-- {
+		ln := strings.TrimRight(lines[k], "\r")
+		if !isMethodOrInitBlockStart(ln) {
+			continue
+		}
+		trim := strings.TrimSpace(ln)
+		// Static/instance init block: no return type (void-equivalent for our purposes).
+		compact := strings.Join(strings.Fields(trim), "")
+		if compact == "static{" {
+			return false
+		}
+		// Method signature `<type> <name>(...) {` or `<mods> <type> <name>(...) {`. Extract the
+		// token before the method name (the return type).
+		paren := strings.Index(trim, "(")
+		if paren < 0 {
+			return true // can't tell — allow (constructor treated as reference-safe, harmless)
+		}
+		head := strings.TrimSpace(trim[:paren])
+		// Drop leading modifier keywords.
+		fields := strings.Fields(head)
+		if len(fields) == 0 {
+			return true
+		}
+		// Constructor: single token (class name) with no return type — treat as not-reference.
+		if len(fields) == 1 {
+			return false
+		}
+		// The return type is the token BEFORE the method name (the last field is the method name).
+		retType := fields[len(fields)-2]
+		// An array type (`byte[]`, `Object[]`) is always a reference type — `return null;` is legal.
+		if strings.Contains(retType, "[") {
+			return true
+		}
+		// Strip generics for the primitive check.
+		base := retType
+		if p := strings.IndexAny(base, "<"); p >= 0 {
+			base = base[:p]
+		}
+		switch base {
+		case "void", "int", "long", "short", "byte", "double", "float", "char", "boolean":
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// fixMissingReturn inserts `return null;` after a no-op empty-if statement (`if (cond){};`) when
+// the enclosing block (which the empty-if is the last statement of, evidenced by the next non-blank
+// line being a `}` at the same-or-shallower indent) contains a `switch` with a `default:` clause.
+// This is the control-flow pattern that produces "missing return statement" in deep switch/if
+// chains: javac does not treat a non-constant String-switch (hashCode-based) as definitely-
+// terminating even with a `default: return`, so execution can fall through to the end of the
+// enclosing block without a return. Inserting `return null;` after the empty-if completes the
+// path. The insertion is reachable only on the not-definitely-returned path, so it never creates
+// an unreachable-statement error. Kill-switch: JDEC_FIX_MISSING_RETURN_OFF=1.
+func fixMissingReturn(body string) string {
+	if os.Getenv("JDEC_FIX_MISSING_RETURN_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	emptyIfRe := regexp.MustCompile(`^(\t+)if \([^;]*\)\{\};\s*$`)
+	// emptyThenElseRe matches an if-else whose THEN branch is empty (just `{` on its own line) and
+	// whose ELSE branch follows immediately. This is the control-flow pattern where the bytecode's
+	// `if(cond) goto L` has no statements in the taken branch, but the else branch ends with `return`,
+	// leaving the method without a return on the empty-then path → "missing return statement"
+	// (spring ASM ClassReader.readStream `if (var6 == 1) { } else { ... return var7_1; }`).
+	emptyThenElseRe := regexp.MustCompile(`^(\t+)if \([^;]*\)\{\s*$`)
+	type insertSite struct {
+		at     int // insert AFTER this line index
+		indent string
+	}
+	var sites []insertSite
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		// Pattern 1: `if (cond){};` (no-op empty-if, switch-based).
+		m := emptyIfRe.FindStringSubmatch(ln)
+		if m != nil {
+			indent := m[1]
+			// The next non-blank line must be a `}` at a shallower indent (the block ends right after
+			// the empty-if), confirming the empty-if is the last statement of its block.
+			next := -1
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+					continue
+				}
+				next = j
+				break
+			}
+			if next < 0 {
+				continue
+			}
+			nextLn := strings.TrimRight(lines[next], "\r")
+			nextTrim := strings.TrimSpace(nextLn)
+			if nextTrim != "}" {
+				continue
+			}
+			nextIndent := leadingTabs(nextLn)
+			if len(nextIndent) >= len(indent) {
+				continue // the `}` is not shallower — not a block-end
+			}
+			// Scan backward within the enclosing block (same indent or deeper) for a `default:` label,
+			// which indicates a switch with a default lives in this block. Stop at a shallower indent
+			// (block boundary).
+			sawDefault := false
+			for k := i - 1; k >= 0; k-- {
+				lk := strings.TrimRight(lines[k], "\r")
+				if strings.TrimSpace(lk) == "" {
+					continue
+				}
+				kind := leadingTabs(lk)
+				if len(kind) < len(indent) {
+					break // left the enclosing block
+				}
+				tk := strings.TrimSpace(lk)
+				if tk == "default:" || strings.HasPrefix(tk, "default:") {
+					sawDefault = true
+					break
+				}
+			}
+			if !sawDefault {
+				continue
+			}
+			// Only apply when the enclosing method returns a reference type — `return null;` is invalid
+			// for primitive/void returns. Scan backward for the method/init-block signature.
+			if !enclosingReturnsReference(lines, i) {
+				continue
+			}
+			sites = append(sites, insertSite{at: i, indent: indent})
+			continue
+		}
+		// Pattern 2: `if (cond) {` with empty then + `else { ... return ...; }` — the else branch
+		// ends with a return but the then branch has none, leaving the method without a return on
+		// the then path. Insert `return null;` inside the empty then branch.
+		m2 := emptyThenElseRe.FindStringSubmatch(ln)
+		if m2 != nil {
+			indent := m2[1]
+			// The next non-blank line must be `}` (closing the empty then), possibly combined with `else`.
+			next := -1
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+					continue
+				}
+				next = j
+				break
+			}
+			if next < 0 {
+				continue
+			}
+			nextLn := strings.TrimRight(lines[next], "\r")
+			nextTrim := strings.TrimSpace(nextLn)
+			// The then-closing `}` may be on its own line OR combined with `else` as `}else{`.
+			if nextTrim != "}" && !strings.HasPrefix(nextTrim, "}else") && !strings.HasPrefix(nextTrim, "} else") {
+				continue
+			}
+			// If the `}` is combined with else, the else starts on the same line; otherwise find the
+			// else on the next non-blank line.
+			elseIdx := -1
+			if strings.HasPrefix(nextTrim, "}else") || strings.HasPrefix(nextTrim, "} else") {
+				elseIdx = next
+			} else {
+				for j := next + 1; j < len(lines); j++ {
+					tej := strings.TrimRight(lines[j], "\r")
+					if strings.TrimSpace(tej) == "" {
+						continue
+					}
+					elseIdx = j
+					break
+				}
+			}
+			if elseIdx < 0 {
+				continue
+			}
+			elseLn := strings.TrimSpace(strings.TrimRight(lines[elseIdx], "\r"))
+			if !strings.HasPrefix(elseLn, "}") || !strings.Contains(elseLn, "else") {
+				continue
+			}
+			// The else branch must end with a `return` statement (scan forward for the matching `}`).
+			// Start with depth=1 (the else's `{` opens the block) and scan from the line AFTER elseIdx
+			// so the `}` that closes the then-branch (in `}else{`) does not corrupt the count.
+			depth := 1
+			hasReturn := false
+			elseEnd := -1
+			for j := elseIdx + 1; j < len(lines); j++ {
+				lj := strings.TrimRight(lines[j], "\r")
+				for b := 0; b < len(lj); b++ {
+					switch lj[b] {
+					case '{':
+						depth++
+					case '}':
+						depth--
+						if depth == 0 {
+							elseEnd = j
+							break
+						}
+					}
+				}
+				if depth == 0 {
+					break
+				}
+			}
+			if elseEnd >= 0 {
+				for k := elseIdx; k <= elseEnd; k++ {
+					lk := strings.TrimRight(lines[k], "\r")
+					if strings.Contains(lk, "return ") || strings.Contains(lk, "return;") {
+						hasReturn = true
+						break
+					}
+				}
+			}
+			if !hasReturn {
+				continue
+			}
+			// Only apply when the if-else is the LAST statement of its enclosing block: the next
+			// non-blank line after the else's closing `}` must be a block-end marker — `}` (block end)
+			// or `}catch`/`}finally` (try block end, the if-else is the last statement in a try body,
+			// as in spring ASM ClassReader.readStream). If there are more statements after the if-else,
+			// inserting `return null;` would make them unreachable (fastjson2 ValueFilter.of has
+			// `return l2;` after the if-else).
+			if elseEnd < 0 || elseEnd+1 >= len(lines) {
+				continue
+			}
+			afterElse := -1
+			for j := elseEnd + 1; j < len(lines); j++ {
+				if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+					continue
+				}
+				afterElse = j
+				break
+			}
+			if afterElse < 0 {
+				continue
+			}
+			afterLn := strings.TrimRight(lines[afterElse], "\r")
+			afterTrim := strings.TrimSpace(afterLn)
+			if afterTrim != "}" &&
+				!strings.HasPrefix(afterTrim, "}catch") && !strings.HasPrefix(afterTrim, "} catch") &&
+				!strings.HasPrefix(afterTrim, "}finally") && !strings.HasPrefix(afterTrim, "} finally") {
+				continue // more statements follow the if-else — inserting return would be unreachable
+			}
+			afterIndent := leadingTabs(afterLn)
+			if len(afterIndent) > len(indent) {
+				continue // the `}` is deeper — not the enclosing block end
+			}
+			// Only apply when the enclosing method returns a reference type.
+			if !enclosingReturnsReference(lines, i) {
+				continue
+			}
+			// Insert `return null;` inside the empty then branch (after the `if (cond) {` line).
+			sites = append(sites, insertSite{at: i, indent: indent + "\t"})
+		}
+	}
+	if len(sites) == 0 {
+		return body
+	}
+	for k := len(sites) - 1; k >= 0; k-- {
+		s := sites[k]
+		retLn := s.indent + "return null;"
+		lines = append(lines[:s.at+1], append([]string{retLn}, lines[s.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fixTryCatchExceptionPlacement detects the pattern where exception-throwing calls (getDeclaredConstructor,
+// newInstance, etc.) are rendered OUTSIDE a try block, while the catch clause lists those exception types.
+// It moves the calls into the inner try body so javac sees them as caught.
+//
+// Pattern detected:
+//
+//	if (cond){
+//	    <exception-throwing call 1>
+//	    <exception-throwing call 2>
+//	}
+//	try{
+//	    try{
+//	        <non-throwing statement>
+//	    }catch(ExceptionType1 | ExceptionType2 ...){
+//	        throw new JSONException(...);
+//	    }
+//	}catch(Throwable){ }
+//
+// Fix: move the exception-throwing calls from the if-body into the inner try-body.
+// Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
+func fixTryCatchExceptionPlacement(body string) string {
+	if os.Getenv("JDEC_FIX_TRYCATCH_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// Scan for the pattern: an if-block whose body contains calls to methods that throw
+	// checked exceptions (getDeclaredConstructor, newInstance, getMethod, etc.), immediately
+	// followed by a try block whose catch lists those exception types.
+	throwingCallRe := regexp.MustCompile(`\.(getDeclaredConstructor|newInstance|getMethod|getConstructor)\(`)
+	for i := 0; i < len(lines); i++ {
+		// Check if this line starts an if block.
+		lnClean := strings.TrimRight(lines[i], "\r")
+		if !strings.Contains(lnClean, "if (") || !strings.HasSuffix(strings.TrimSpace(lnClean), "{") {
+			continue
+		}
+		ifIndent := ""
+		for _, c := range lnClean {
+			if c == '\t' {
+				ifIndent += "\t"
+			} else {
+				break
+			}
+		}
+		// Collect the if-body lines (at ifIndent + 1 tab).
+		bodyIndent := ifIndent + "\t"
+		var ifBodyLines []int
+		closingBrace := -1
+		for j := i + 1; j < len(lines) && j < i+20; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "}" && strings.HasPrefix(jl, ifIndent) && !strings.HasPrefix(jl, bodyIndent) {
+				closingBrace = j
+				break
+			}
+			ifBodyLines = append(ifBodyLines, j)
+		}
+		if closingBrace < 0 || len(ifBodyLines) == 0 {
+			continue
+		}
+		// Check if any if-body line has a throwing call.
+		hasThrowingCall := false
+		for _, idx := range ifBodyLines {
+			if throwingCallRe.MatchString(lines[idx]) {
+				hasThrowingCall = true
+				break
+			}
+		}
+		if !hasThrowingCall {
+			continue
+		}
+		// Check if the NEXT non-empty line after closingBrace is a try block.
+		tryLine := -1
+		for j := closingBrace + 1; j < len(lines) && j < closingBrace+3; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "" {
+				continue
+			}
+			if strings.Contains(jl, "try{") {
+				tryLine = j
+			}
+			break
+		}
+		if tryLine < 0 {
+			continue
+		}
+		// Find the inner try body: the line after `try{` at tryIndent+1.
+		innerTryIndent := ifIndent + "\t"
+		innerTryStart := -1
+		for j := tryLine + 1; j < len(lines) && j < tryLine+5; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.Contains(jl, "try{") && strings.HasPrefix(jl, innerTryIndent) {
+				innerTryStart = j + 1
+				break
+			}
+		}
+		if innerTryStart < 0 {
+			continue
+		}
+		// Move the throwing-call lines from the if-body to before the inner try's first statement.
+		// Build the new lines: remove throwing calls from if-body, insert them at innerTryStart.
+		var throwingLines []string
+		var newIfBody []string
+		for _, idx := range ifBodyLines {
+			jl := strings.TrimRight(lines[idx], "\r")
+			if throwingCallRe.MatchString(jl) {
+				// Re-indent to innerTryIndent + 1 tab.
+				trimmed := strings.TrimLeft(jl, "\t")
+				throwingLines = append(throwingLines, innerTryIndent+"\t"+trimmed)
+			} else {
+				newIfBody = append(newIfBody, jl)
+			}
+		}
+		if len(throwingLines) == 0 {
+			continue
+		}
+		// Replace the if-body: keep non-throwing lines only.
+		// The if-body lines span from i+1 to closingBrace-1.
+		// First, blank out all original if-body lines.
+		for _, idx := range ifBodyLines {
+			lines[idx] = ""
+		}
+		// Re-fill with non-throwing lines.
+		bodyOffset := i + 1
+		for _, l := range newIfBody {
+			lines[bodyOffset] = l
+			bodyOffset++
+		}
+		// If the if-body is now empty (all lines were throwing), make the if body just `{}`.
+		if len(newIfBody) == 0 {
+			// Merge the if line and closing brace into `{` on same line.
+			lines[i] = strings.TrimRight(lines[i], "\r")
+			lines[closingBrace] = ""
+			// Move closing brace to if line.
+			// Actually keep as is — an empty if body `{ }` is fine.
+			// Put an empty line where the body was.
+			lines[i+1] = ifIndent + "\t"
+		}
+		// Insert throwing lines before the inner try's first statement.
+		// We need to shift all subsequent lines down.
+		insertAt := innerTryStart
+		for _, tl := range throwingLines {
+			lines = append(lines[:insertAt], append([]string{tl}, lines[insertAt:]...)...)
+			insertAt++
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// methodThrows maps a reflection-method name to the checked exception it declares. Used by
+// addMissingCatchException to detect a try-body call whose checked exception is absent from the
+// catch clause. NOTE: `forName` is excluded — its ClassNotFoundException is often already handled
+// by an enclosing catch or a different overload, and augmenting it caused jsoup/snakeyaml regressions.
+var methodThrows = map[string]string{
+	"getConstructor":         "NoSuchMethodException",
+	"getDeclaredConstructor": "NoSuchMethodException",
+	"getMethod":              "NoSuchMethodException",
+	"getDeclaredMethod":      "NoSuchMethodException",
+	"newInstance":            "", // throws multiple (InvocationTargetException etc.) — handled by callers already
+}
+
+// catchBodyAccessesCatchVar reports whether the catch body at catchLineIdx accesses a member
+// (method or field) of the caught variable (e.g. `var7_2.getTargetException()`). Such a catch
+// relies on the specific type of the variable; widening the multi-catch with an unrelated type
+// breaks the member access.
+func catchBodyAccessesCatchVar(lines []string, catchLineIdx int) bool {
+	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	cl := strings.TrimRight(lines[catchLineIdx], "\r")
+	cm := catchRe.FindStringSubmatch(cl)
+	if cm == nil {
+		return false
+	}
+	fields := strings.Fields(cm[1])
+	if len(fields) == 0 {
+		return false
+	}
+	varName := fields[len(fields)-1]
+	// Scan the catch body for `varName.` (member access on the catch variable).
+	braceOpen := strings.Index(cl, "{")
+	depth := 1
+	for k := catchLineIdx; k < len(lines); k++ {
+		lk := strings.TrimRight(lines[k], "\r")
+		startByte := 0
+		if k == catchLineIdx && braceOpen >= 0 {
+			startByte = braceOpen + 1
+		}
+		// Check for member access on varName in the body portion of this line.
+		if k > catchLineIdx {
+			bodyPart := lk
+			if k == catchLineIdx {
+				bodyPart = lk[startByte:]
+			}
+			if strings.Contains(bodyPart, varName+".") {
+				return true
+			}
+		}
+		for b := startByte; b < len(lk); b++ {
+			switch lk[b] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+		}
+		if depth <= 0 && k > catchLineIdx {
+			return false
+		}
+	}
+	return false
+}
+
+// catchRethrowsVariable reports whether the catch clause at catchLineIdx directly rethrows the
+// caught variable (e.g. `catch(E var){ throw var; }`). Such a catch propagates the checked
+// exception; augmenting its type list would require a throws declaration on the enclosing method.
+func catchRethrowsVariable(lines []string, catchLineIdx int) bool {
+	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	cl := strings.TrimRight(lines[catchLineIdx], "\r")
+	cm := catchRe.FindStringSubmatch(cl)
+	if cm == nil {
+		return false
+	}
+	// The catch variable is the last whitespace-separated token inside the parens.
+	fields := strings.Fields(cm[1])
+	if len(fields) == 0 {
+		return false
+	}
+	varName := fields[len(fields)-1]
+	// Scan the catch body (from catchLineIdx+1 to its closing brace) for `throw varName;`.
+	// Start depth tracking from AFTER the catch clause's opening `{`. Depth starts at 1 (we are
+	// inside the catch body). The leading `}` of `}catch(...) {` is not counted.
+	braceOpen := strings.Index(cl, "{")
+	depth := 1
+	started := braceOpen >= 0
+	for k := catchLineIdx; k < len(lines); k++ {
+		lk := strings.TrimRight(lines[k], "\r")
+		startByte := 0
+		if k == catchLineIdx && braceOpen >= 0 {
+			startByte = braceOpen + 1
+		}
+		for b := startByte; b < len(lk); b++ {
+			switch lk[b] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+		}
+		if started && depth <= 0 && k > catchLineIdx {
+			return false
+		}
+		if k > catchLineIdx {
+			trim := strings.TrimSpace(lk)
+			if strings.HasPrefix(trim, "throw "+varName+";") || trim == "throw "+varName+";" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasLambdaBoundaryBetween reports whether any line in (startLine, endLine] contains a `-> {`
+// lambda opening — a lambda body is a separate scope, so a try/catch outside the lambda cannot
+// catch exceptions thrown inside it.
+func hasLambdaBoundaryBetween(lines []string, startLine, endLine int) bool {
+	for k := startLine + 1; k <= endLine && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		if idx := strings.Index(ln, "->"); idx >= 0 {
+			rest := ln[idx:]
+			if strings.Contains(rest, "{") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// addMissingCatchException performs per-call-site exception-flow analysis. For each reflection
+// call site (getConstructor/getDeclaredConstructor/getMethod/getDeclaredMethod) that throws
+// NoSuchMethodException, it walks the enclosing try/catch chain and determines whether
+// NoSuchMethodException (or a supertype: ReflectiveOperationException, Exception, Throwable) is
+// caught by ANY enclosing catch. If not, it augments the NEAREST enclosing catch with the missing
+// exception type. This avoids the cascade of the prior global approach (which augmented a catch
+// even when an inner try/catch already handled the call site). Kill-switch:
+// JDEC_ADD_MISSING_CATCH_OFF=1.
+func addMissingCatchException(body string) string {
+	if os.Getenv("JDEC_ADD_MISSING_CATCH_OFF") == "1" {
+		return body
+	}
+	dbg := os.Getenv("JDEC_ADD_MISSING_CATCH_DBG") == "1"
+	lines := strings.Split(body, "\n")
+	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	callRe := regexp.MustCompile(`\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\(`)
+
+	// Pre-compute all try/catch blocks: for each `try{`, find its body range [tryStart, tryBodyEnd)
+	// and the catch clause line + caught types. A try's catch is relevant for call sites INSIDE the
+	// try body (the catch handles exceptions thrown from the try body).
+	type tryBlock struct {
+		tryStart    int
+		tryBodyEnd  int    // line index of the `}` closing the try body (exclusive: tryBodyEnd is that line)
+		catchLine   int    // line index of the `}catch(...) {` line, -1 if no catch
+		caughtTypes string // the types listed in the catch clause
+	}
+	tryRe := regexp.MustCompile(`^(\t+)try\{\s*$`)
+	var tryBlocks []tryBlock
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		if !tryRe.MatchString(ln) {
+			continue
+		}
+		// Find the try body end: the first `}` (char-by-char) that brings depth back to 0.
+		depth := 0
+		tryBodyEnd := -1
+		catchLine := -1
+		var caughtTypes string
+		for j := i; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			for b := 0; b < len(jl); b++ {
+				switch jl[b] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 && j > i && tryBodyEnd < 0 {
+						tryBodyEnd = j
+						// Check if the rest of the line (after this `}`) starts a catch.
+						rest := strings.TrimSpace(jl[b+1:])
+						if strings.HasPrefix(rest, "catch(") {
+							catchLine = j
+							cm := catchRe.FindStringSubmatch(jl)
+							if cm != nil {
+								caughtTypes = cm[1]
+							}
+						}
+					}
+				}
+			}
+		}
+		if tryBodyEnd < 0 {
+			continue
+		}
+		// If catch wasn't on the same line as the close, look on the next non-blank line.
+		if catchLine < 0 {
+			for k := tryBodyEnd + 1; k < len(lines) && k < tryBodyEnd+3; k++ {
+				cl := strings.TrimRight(lines[k], "\r")
+				if strings.TrimSpace(cl) == "" {
+					continue
+				}
+				cm := catchRe.FindStringSubmatch(cl)
+				if cm != nil {
+					catchLine = k
+					caughtTypes = cm[1]
+				}
+				break
+			}
+		}
+		tryBlocks = append(tryBlocks, tryBlock{
+			tryStart:    i,
+			tryBodyEnd:  tryBodyEnd,
+			catchLine:   catchLine,
+			caughtTypes: caughtTypes,
+		})
+	}
+
+	// For each call site, find all enclosing try blocks (tryStart < callLine < tryBodyEnd), ordered
+	// from innermost to outermost. Check if any enclosing catch handles NoSuchMethodException or a
+	// supertype. If none, augment the INNERMOST enclosing catch that has a catch clause.
+	const exc = "NoSuchMethodException"
+	excOrSup := []string{"NoSuchMethodException", "ReflectiveOperationException", "Exception", "Throwable"}
+	caughtWord := func(typesStr, name string) bool {
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+		return re.MatchString(typesStr)
+	}
+	augment := map[int]bool{}
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		if !callRe.MatchString(ln) {
+			continue
+		}
+		// Find enclosing try blocks for this call site (innermost first). A try block encloses the
+		// call ONLY if there is no lambda boundary (`-> {`) between the try start and the call — a
+		// lambda body is a separate scope; an outer try/catch cannot catch exceptions thrown inside it.
+		var enclosing []tryBlock
+		for _, tb := range tryBlocks {
+			if i > tb.tryStart && i < tb.tryBodyEnd {
+				if hasLambdaBoundaryBetween(lines, tb.tryStart, i) {
+					continue // a lambda separates this try from the call — not enclosing
+				}
+				enclosing = append(enclosing, tb)
+			}
+		}
+		if dbg {
+			fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: %d enclosing try blocks\n", i+1, len(enclosing))
+		}
+		// Check if any enclosing catch already handles the exception.
+		alreadyCaught := false
+		for _, tb := range enclosing {
+			if tb.catchLine < 0 {
+				continue
+			}
+			for _, sup := range excOrSup {
+				if caughtWord(tb.caughtTypes, sup) {
+					alreadyCaught = true
+					break
+				}
+			}
+			if alreadyCaught {
+				break
+			}
+		}
+		if alreadyCaught {
+			if dbg {
+				fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: already caught\n", i+1)
+			}
+			continue
+		}
+		// Not caught — augment the innermost enclosing catch that HAS a catch clause.
+		// Find the innermost enclosing catch with a clause that does NOT simply rethrow the caught
+		// variable (a rethrow catch like `catch(E var){ throw var; }` would propagate the checked
+		// exception, requiring a throws declaration we cannot add — skip those).
+		var target *tryBlock
+		for k := range enclosing {
+			tb := enclosing[k]
+			if tb.catchLine < 0 {
+				continue
+			}
+			if catchRethrowsVariable(lines, tb.catchLine) {
+				if dbg {
+					fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: catch L%d rethrows variable (skip)\n", i+1, tb.catchLine+1)
+				}
+				continue
+			}
+			// Skip catches whose body accesses members of the catch variable (e.g.
+			// `var.getTargetException()`). Adding a type to the multi-catch narrows the inferred type
+			// and breaks member access that only exists on one of the original types.
+			if catchBodyAccessesCatchVar(lines, tb.catchLine) {
+				if dbg {
+					fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: catch L%d accesses catch-var members (skip)\n", i+1, tb.catchLine+1)
+				}
+				continue
+			}
+			target = &enclosing[k]
+			break
+		}
+		if target == nil {
+			if dbg {
+				fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: NO enclosing catch with clause (skip)\n", i+1)
+			}
+			continue
+		}
+		if caughtWord(target.caughtTypes, exc) {
+			continue
+		}
+		augment[target.catchLine] = true
+		if dbg {
+			fmt.Fprintf(os.Stderr, "[ADDCATCH] call L%d: AUGMENT catch L%d with %s\n", i+1, target.catchLine+1, exc)
+		}
+	}
+	if len(augment) == 0 {
+		return body
+	}
+	// Apply augmentations in descending line order.
+	var augLines []int
+	for ln := range augment {
+		augLines = append(augLines, ln)
+	}
+	sort.Ints(augLines)
+	for k := len(augLines) - 1; k >= 0; k-- {
+		catchLineIdx := augLines[k]
+		cl := strings.TrimRight(lines[catchLineIdx], "\r")
+		cm := catchRe.FindStringSubmatch(cl)
+		if cm == nil {
+			continue
+		}
+		types := cm[1]
+		fields := strings.Fields(types)
+		if len(fields) < 1 {
+			continue
+		}
+		var varName, typeList string
+		if len(fields) >= 2 {
+			varName = fields[len(fields)-1]
+			typeList = strings.TrimSpace(strings.TrimSuffix(types, varName))
+		} else {
+			varName = fields[0]
+			typeList = ""
+		}
+		var newTypes string
+		if typeList == "" {
+			newTypes = exc + " " + varName
+		} else {
+			newTypes = typeList + " | " + exc + " " + varName
+		}
+		newLine := strings.Replace(cl, "("+types+")", "("+newTypes+")", 1)
+		lines[catchLineIdx] = newLine
+	}
+	return strings.Join(lines, "\n")
+}
+
+// dedupNestedCatchException removes exception types from an outer catch clause when a nested
+// try/catch within the try body already catches that exact type. This repairs javac's "exception X
+// is never thrown in body of corresponding try statement" — when an inner catch handles the
+// exception, it never propagates to the outer catch, so listing it there is an error.
+//
+// Detection: for each try/catch block, scan the try body for nested try/catch blocks whose catch
+// lists an exception type T that also appears in the outer catch. Remove T from the outer catch
+// (only if the outer catch has ≥2 types, so it still catches something). Kill-switch:
+// JDEC_DEDUP_NESTED_CATCH_OFF=1.
+func dedupNestedCatchException(body string) string {
+	if os.Getenv("JDEC_DEDUP_NESTED_CATCH_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
+	tryRe := regexp.MustCompile(`^(\t+)try\{\s*$`)
+	// Collect all try blocks with their catch info (reuse the model from addMissingCatchException).
+	type tryBlock struct {
+		tryStart    int
+		tryBodyEnd  int
+		catchLine   int
+		caughtTypes string
+	}
+	var tryBlocks []tryBlock
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		if !tryRe.MatchString(ln) {
+			continue
+		}
+		depth := 0
+		tryBodyEnd := -1
+		catchLine := -1
+		var caughtTypes string
+		for j := i; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			for b := 0; b < len(jl); b++ {
+				switch jl[b] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 && j > i && tryBodyEnd < 0 {
+						tryBodyEnd = j
+						rest := strings.TrimSpace(jl[b+1:])
+						if strings.HasPrefix(rest, "catch(") {
+							catchLine = j
+							cm := catchRe.FindStringSubmatch(jl)
+							if cm != nil {
+								caughtTypes = cm[1]
+							}
+						}
+					}
+				}
+			}
+		}
+		if tryBodyEnd < 0 {
+			continue
+		}
+		if catchLine < 0 {
+			for k := tryBodyEnd + 1; k < len(lines) && k < tryBodyEnd+3; k++ {
+				cl := strings.TrimRight(lines[k], "\r")
+				if strings.TrimSpace(cl) == "" {
+					continue
+				}
+				cm := catchRe.FindStringSubmatch(cl)
+				if cm != nil {
+					catchLine = k
+					caughtTypes = cm[1]
+				}
+				break
+			}
+		}
+		tryBlocks = append(tryBlocks, tryBlock{tryStart: i, tryBodyEnd: tryBodyEnd, catchLine: catchLine, caughtTypes: caughtTypes})
+	}
+	// For each outer try with a catch, find nested try/catch blocks within its body and collect
+	// exception types caught by inner catches. Remove those from the outer catch.
+	type edit struct {
+		catchLine  int
+		removeType string
+	}
+	var edits []edit
+	for _, outer := range tryBlocks {
+		if outer.catchLine < 0 {
+			continue
+		}
+		// Parse outer catch types (word list, excluding the catch variable).
+		outerFields := strings.Fields(outer.caughtTypes)
+		if len(outerFields) < 2 {
+			continue // need ≥2 types to remove one (the last field is the variable)
+		}
+		outerVarName := outerFields[len(outerFields)-1]
+		outerTypes := outerFields[:len(outerFields)-1] // type tokens (may include `|`)
+		// Collect actual type names (strip `|`).
+		outerTypeNames := map[string]bool{}
+		for _, tf := range outerTypes {
+			if tf != "|" {
+				outerTypeNames[tf] = true
+			}
+		}
+		if len(outerTypeNames) < 2 {
+			continue // need ≥2 actual types to remove one
+		}
+		// Find nested try/catch blocks whose try is within [outer.tryStart+1, outer.tryBodyEnd).
+		for _, inner := range tryBlocks {
+			if inner.tryStart <= outer.tryStart || inner.tryStart >= outer.tryBodyEnd {
+				continue
+			}
+			if inner.catchLine < 0 {
+				continue
+			}
+			if os.Getenv("JDEC_DEDUP_DBG") == "1" {
+				fmt.Fprintf(os.Stderr, "[DEDUP-NESTED] outer try L%d (catch L%d types=%q) → inner try L%d (catch L%d types=%q)\n",
+					outer.tryStart+1, outer.catchLine+1, outer.caughtTypes, inner.tryStart+1, inner.catchLine+1, inner.caughtTypes)
+			}
+			innerFields := strings.Fields(inner.caughtTypes)
+			if len(innerFields) == 0 {
+				continue
+			}
+			for _, tf := range innerFields {
+				if tf == "|" {
+					continue
+				}
+				// Skip if it's the catch variable (last field). Heuristic: a type name starts with
+				// uppercase; a variable starts with lowercase. This is imperfect but covers the common
+				// case (InstantiationException vs var4).
+				if len(tf) > 0 && tf[0] >= 'a' && tf[0] <= 'z' {
+					continue // likely a variable name
+				}
+				if outerTypeNames[tf] {
+					// This type is caught by both inner and outer — remove from outer.
+					edits = append(edits, edit{catchLine: outer.catchLine, removeType: tf})
+					_ = outerVarName
+				}
+			}
+		}
+	}
+	if len(edits) == 0 {
+		return body
+	}
+	// Apply: for each edit, remove the type from the catch clause. Handle multiple removals per
+	// catch line by deduping and applying once.
+	byLine := map[int]map[string]bool{}
+	for _, e := range edits {
+		if byLine[e.catchLine] == nil {
+			byLine[e.catchLine] = map[string]bool{}
+		}
+		byLine[e.catchLine][e.removeType] = true
+	}
+	catchLines := []int{}
+	for cl := range byLine {
+		catchLines = append(catchLines, cl)
+	}
+	sort.Ints(catchLines)
+	for k := len(catchLines) - 1; k >= 0; k-- {
+		cl := catchLines[k]
+		removeTypes := byLine[cl]
+		catchLn := strings.TrimRight(lines[cl], "\r")
+		cm := catchRe.FindStringSubmatch(catchLn)
+		if cm == nil {
+			continue
+		}
+		types := cm[1]
+		fields := strings.Fields(types)
+		if len(fields) < 2 {
+			continue
+		}
+		varName := fields[len(fields)-1]
+		// Rebuild the type list, excluding removed types.
+		var kept []string
+		for _, tf := range fields[:len(fields)-1] {
+			if tf == "|" {
+				continue
+			}
+			if removeTypes[tf] {
+				continue
+			}
+			kept = append(kept, tf)
+		}
+		if len(kept) == 0 {
+			// All caught types are handled by inner catches — the outer catch is dead code for
+			// those specific types. Replace with `Exception` (a valid catch-all supertype) to keep
+			// the catch clause structurally valid without claiming a specific type that's never
+			// thrown. This avoids "exception X is never thrown" for ALL listed types.
+			kept = []string{"Exception"}
+		}
+		newTypes := strings.Join(kept, " | ") + " " + varName
+		newLine := strings.Replace(catchLn, "("+types+")", "("+newTypes+")", 1)
+		lines[cl] = newLine
+	}
+	return strings.Join(lines, "\n")
+}
+
+// wrapUncaughtThrowingCall wraps a `UNSAFE.allocateInstance(...)` call (which throws
+// InstantiationException) in a try/catch when it appears in a switch case body WITHOUT any
+// enclosing try/catch. The catch converts the checked InstantiationException into a
+// JSONException (matching the surrounding method's error-handling idiom). This repairs
+// "unreported exception InstantiationException; must be caught or declared to be thrown".
+// Only wraps `return <expr>.allocateInstance(...);` statements (the common case). Kill-switch:
+// JDEC_WRAP_ALLOCATE_OFF=1.
+func wrapUncaughtThrowingCall(body string) string {
+	if os.Getenv("JDEC_WRAP_ALLOCATE_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	allocRe := regexp.MustCompile(`^(\t+)(return .*\bUNSAFE\.allocateInstance\([^;]*\));\s*$`)
+	type insert struct {
+		at       int
+		indent   string
+		stmt     string
+		catchVar string
+	}
+	var inserts []insert
+	counter := 0
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := allocRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		// Check the statement is NOT already inside a try/catch: scan backward for an enclosing
+		// try{ at a shallower indent, with no catch boundary in between.
+		indent := m[1]
+		stmt := m[2]
+		if isInsideTryCatch(lines, i, indent) {
+			continue
+		}
+		counter++
+		catchVar := fmt.Sprintf("varIE_%d", counter)
+		inserts = append(inserts, insert{at: i, indent: indent, stmt: stmt, catchVar: catchVar})
+	}
+	if len(inserts) == 0 {
+		return body
+	}
+	// Apply in descending order. Replace the single `return ...allocateInstance...;` line with:
+	//   try{
+	//       return ...allocateInstance...;
+	//   }catch(InstantiationException varIE_N){
+	//       throw new RuntimeException(varIE_N);
+	//   }
+	for k := len(inserts) - 1; k >= 0; k-- {
+		ins := inserts[k]
+		// Determine the catch body: throw a RuntimeException wrapping the exception (safe for any
+		// method return type, since it never returns normally).
+		tryLine := ins.indent + "try{"
+		retLine := ins.indent + "\t" + ins.stmt + ";"
+		catchLine := ins.indent + "}catch(InstantiationException " + ins.catchVar + "){"
+		throwLine := ins.indent + "\tthrow new RuntimeException(" + ins.catchVar + ");"
+		closeLine := ins.indent + "}"
+		newLines := []string{tryLine, retLine, catchLine, throwLine, closeLine}
+		// Replace the single line at ins.at with newLines.
+		lines = append(lines[:ins.at], append(newLines, lines[ins.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// isInsideLambdaBody reports whether line idx is inside a lambda body (between a `-> {` and
+// its matching `}`). Used to detect reflection calls that are in lambda scope (not covered by
+// an enclosing try/catch outside the lambda).
+func isInsideLambdaBody(lines []string, idx int) bool {
+	lambdaDepth := 0
+	braceDepth := 0
+	for k := 0; k <= idx && k < len(lines); k++ {
+		lk := strings.TrimRight(lines[k], "\r")
+		for b := 0; b < len(lk); b++ {
+			if lk[b] == '{' {
+				before := strings.TrimRight(lk[:b], " \t")
+				braceDepth++
+				if strings.HasSuffix(before, "->") {
+					lambdaDepth++
+				}
+			} else if lk[b] == '}' {
+				braceDepth--
+				if lambdaDepth > 0 && braceDepth == 0 {
+					lambdaDepth = 0
+				}
+			}
+		}
+	}
+	return lambdaDepth > 0
+}
+
+func min2(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// collectSwitchAssignedVars returns the set of variables/fields assigned (`X =` but not `==`) in
+// the given line range. Includes field assignments (e.g. `this.formatValidator =`).
+func collectSwitchAssignedVars(lines []string, start, end int) map[string]bool {
+	result := map[string]bool{}
+	assignRe := regexp.MustCompile(`\.?(\w+)\s*=[^=]`)
+	for k := start; k < end && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		for _, m := range assignRe.FindAllStringSubmatch(ln, -1) {
+			name := m[1]
+			switch name {
+			case "if", "else", "while", "for", "return", "throw", "switch", "case", "break",
+				"continue", "try", "catch", "finally", "new", "this", "super":
+				continue
+			}
+			result[name] = true
+		}
+	}
+	return result
+}
+
+// collectSwitchDefaultSelfReads returns the set of variables that appear on BOTH sides of an
+// assignment in the default body (e.g. `var5 = var5 ^ x` reads var5 while assigning it). These
+// represent compound assignments where the default DEPENDS on the case's prior value.
+func collectSwitchDefaultSelfReads(lines []string, start, end int) map[string]bool {
+	result := map[string]bool{}
+	// Match `var = ... var ...` patterns: the LHS variable also appears on the RHS.
+	assignRe := regexp.MustCompile(`\b(\w+)\s*=\s*([^;]*)`)
+	for k := start; k < end && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		for _, m := range assignRe.FindAllStringSubmatch(ln, -1) {
+			varName := m[1]
+			rhs := m[2]
+			// Check if varName appears in the RHS (self-read / compound assignment).
+			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(varName) + `\b`)
+			if re.MatchString(rhs) {
+				result[varName] = true
+			}
+		}
+	}
+	return result
+}
+
+// defaultAssignsIndependently reports whether the variable `name` is assigned in the given range
+// WITHOUT being read in the same assignment (an independent overwrite, not a compound assignment).
+func defaultAssignsIndependently(lines []string, start, end int, name string) bool {
+	assignRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*=\s*([^;]*)`)
+	for k := start; k < end && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		m := assignRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		rhs := m[1]
+		// Check if name appears in the RHS (self-read / compound assignment).
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+		if !re.MatchString(rhs) {
+			return true // independent assignment (no self-read)
+		}
+	}
+	return false
+}
+
+// collectSwitchReadVars returns the set of variables READ (used but not as assignment target) in
+// the given line range.
+func collectSwitchReadVars(lines []string, start, end int) map[string]bool {
+	result := map[string]bool{}
+	wordRe := regexp.MustCompile(`\b(\w+)\b`)
+	for k := start; k < end && k < len(lines); k++ {
+		ln := strings.TrimRight(lines[k], "\r")
+		for _, m := range wordRe.FindAllStringSubmatch(ln, -1) {
+			name := m[1]
+			switch name {
+			case "if", "else", "while", "for", "return", "throw", "switch", "case", "break",
+				"continue", "try", "catch", "finally", "new", "this", "super", "null", "true",
+				"false", "int", "long", "boolean", "char", "byte", "short", "double", "float",
+				"void", "String", "Class", "Object", "var", "final":
+				continue
+			}
+			result[name] = true
+		}
+	}
+	return result
+}
+
+// wrapReflectionCallInSwitchCase wraps a single-statement switch case body that calls a reflection
+// wrapFieldInitializerReflection converts a field initializer containing a reflection call
+// (getMethod/getDeclaredMethod/getConstructor/getDeclaredConstructor) that throws a checked
+// exception into a bare field declaration + static-block initialization with try/catch. This
+// repairs "unreported exception NoSuchMethodException" in field initializers (which cannot contain
+// try/catch in Java). Kill-switch: JDEC_WRAP_FIELD_INIT_OFF=1.
+//
+// Pattern: `\t<modifiers> <Type> <name> = <expr>.reflectionMethod(...)...;`
+//
+//	→ `\t<modifiers> <Type> <name>;`
+//	+ `\tstatic{`
+//	+ `\t\ttry{`
+//	+ `\t\t\t<name> = <expr>.reflectionMethod(...)...;`
+//	+ `\t\t}catch(NoSuchMethodException varX){`
+//	+ `\t\t\tthrow new RuntimeException(varX);`
+//	+ `\t\t}`
+//	+ `\t}`
+func wrapFieldInitializerReflection(body string) string {
+	if os.Getenv("JDEC_WRAP_FIELD_INIT_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// Match a field initializer at class-body indent (1 tab) with a reflection call.
+	// Capture: indent, modifiers+type+name, init expression.
+	fieldRe := regexp.MustCompile(`^(\t+)((?:(?:final|static|public|private|protected)\s+)*[\w$.<>\[\]?, ]+?\s+(\w+))\s*=\s*(.*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\([^;]*);\s*$`)
+	counter := 0
+	type edit struct {
+		at        int
+		indent    string
+		decl      string
+		fieldName string
+		initExpr  string
+		catchVar  string
+		isStatic  bool
+	}
+	var edits []edit
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := fieldRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		if len(indent) != 1 {
+			continue
+		}
+		declText := m[2]
+		fieldName := m[3]
+		initExpr := m[4]
+		isStatic := strings.Contains(declText, "static")
+		counter++
+		catchVar := fmt.Sprintf("varFIE_%d", counter)
+		edits = append(edits, edit{
+			at:        i,
+			indent:    indent,
+			decl:      indent + declText + ";",
+			fieldName: fieldName,
+			initExpr:  initExpr,
+			catchVar:  catchVar,
+			isStatic:  isStatic,
+		})
+	}
+	if len(edits) == 0 {
+		return body
+	}
+	for k := len(edits) - 1; k >= 0; k-- {
+		e := edits[k]
+		blockOpen := e.indent + "{"
+		if e.isStatic {
+			blockOpen = e.indent + "static{"
+		}
+		newLines := []string{
+			e.decl,
+			blockOpen,
+			e.indent + "\ttry{",
+			e.indent + "\t\t" + e.fieldName + " = " + e.initExpr + ";",
+			e.indent + "\t}catch(NoSuchMethodException " + e.catchVar + "){",
+			e.indent + "\t\tthrow new RuntimeException(" + e.catchVar + ");",
+			e.indent + "\t}",
+			e.indent + "}",
+		}
+		lines = append(lines[:e.at], append(newLines, lines[e.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// method (getMethod/getDeclaredMethod/getConstructor/getDeclaredConstructor) in a try/catch, when
+// the case body has NO enclosing try/catch. The catch converts NoSuchMethodException into a
+// RuntimeException. Kill-switch: JDEC_WRAP_REFLECTION_CASE_OFF=1.
+func wrapReflectionCallInSwitchCase(body string) string {
+	if os.Getenv("JDEC_WRAP_REFLECTION_CASE_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	reflRe := regexp.MustCompile(`^(\t+)return .*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\([^;]*\);\s*$`)
+	// Also match LambdaMetafactory chains (invokeExact/metafactory/findStatic) that throw checked
+	// exceptions (LambdaConversionException, NoSuchMethodException, Throwable).
+	lambdaChainRe := regexp.MustCompile(`^(\t+)return .*\.(invokeExact|metafactory|findStatic|findVirtual)\(.*;\s*$`)
+	caseRe := regexp.MustCompile(`^(\t+)case [^:]+:\s*$`)
+	counter := 0
+	type insert struct {
+		at        int
+		indent    string
+		stmt      string
+		catchVar  string
+		catchType string
+	}
+	var inserts []insert
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := reflRe.FindStringSubmatch(ln)
+		lm := lambdaChainRe.FindStringSubmatch(ln)
+		if m == nil && lm == nil {
+			continue
+		}
+		var indent string
+		var catchTypeVal string
+		if m != nil {
+			indent = m[1]
+			catchTypeVal = "NoSuchMethodException"
+		} else {
+			indent = lm[1]
+			catchTypeVal = "Throwable" // LambdaMetafactory chains throw multiple exception types
+		}
+		// Verify inside a switch case (scan backward for case label at shallower indent).
+		// Skip over try{/}catch{/if{ etc. nested blocks — only stop at a case label or a
+		// method/class boundary (a `}` at much shallower indent).
+		inSwitchCase := false
+		for k := i - 1; k >= 0; k-- {
+			kl := strings.TrimRight(lines[k], "\r")
+			if strings.TrimSpace(kl) == "" {
+				continue
+			}
+			kInd := leadingTabs(kl)
+			kTrim := strings.TrimSpace(kl)
+			if caseRe.MatchString(kl) || kTrim == "default:" {
+				inSwitchCase = true
+				break
+			}
+			// Stop at method boundary: a `}` at very shallow indent (≤2 tabs) that isn't a
+			// try-catch close.
+			if len(kInd) <= 2 && kTrim == "}" {
+				break
+			}
+		}
+		if !inSwitchCase {
+			// Also handle reflection calls inside lambda bodies that are NOT directly inside a
+			// try/catch (the enclosing try/catch is outside the lambda boundary). This catches
+			// the MoneySupport pattern: `try{ FUNC = (l0) -> { return ...getMethod(...)... }; }
+			// catch(Throwable){...}` — the getMethod inside the lambda is NOT caught by the outer
+			// try/catch because of the lambda scope boundary.
+			if !isInsideLambdaBody(lines, i) {
+				continue
+			}
+			if isInsideTryCatch(lines, i, indent) {
+				continue // directly inside a try/catch within the lambda — already handled
+			}
+		} else {
+			insideTC := isInsideTryCatch(lines, i, indent)
+			if os.Getenv("JDEC_WRAP_REFLECTION_DBG") == "1" {
+				fmt.Fprintf(os.Stderr, "[WRAPREFL] L%d inSwitchCase=%v insideTryCatch=%v stmt=%q\n", i+1, true, insideTC, strings.TrimSpace(ln)[:min2(50, len(ln))])
+			}
+			if insideTC {
+				continue
+			}
+		}
+		counter++
+		catchVar := fmt.Sprintf("varNSME_%d", counter)
+		inserts = append(inserts, insert{at: i, indent: indent, stmt: strings.TrimSpace(ln), catchVar: catchVar, catchType: catchTypeVal})
+	}
+	if len(inserts) == 0 {
+		return body
+	}
+	for k := len(inserts) - 1; k >= 0; k-- {
+		ins := inserts[k]
+		newLines := []string{
+			ins.indent + "try{",
+			ins.indent + "\t" + ins.stmt,
+			ins.indent + "}catch(" + ins.catchType + " " + ins.catchVar + "){",
+			ins.indent + "\tthrow new RuntimeException(" + ins.catchVar + ");",
+			ins.indent + "}",
+		}
+		lines = append(lines[:ins.at], append(newLines, lines[ins.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// addBreakToSwitchCases inserts `break;` at the end of each switch case body that lacks a
+// terminator (break/return/throw/continue) and falls through to the next case. This repairs
+// "variable X might already have been assigned" when multiple cases assign the same field without
+// breaks (a decompiler artifact — the original source had breaks). Detection: within a switch body,
+// for each `case N:` label, if the lines up to the next `case`/`default:` lack a break/return/throw/
+// continue, insert `break;` at the case's body indent before the next label. Kill-switch:
+// JDEC_ADD_SWITCH_BREAK_OFF=1.
+func addBreakToSwitchCases(body string) string {
+	if os.Getenv("JDEC_ADD_SWITCH_BREAK_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	caseRe := regexp.MustCompile(`^(\t+)case [^:]+:\s*$`)
+	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
+	switchRe := regexp.MustCompile(`^(\t+)switch \([^)]*\)\{\s*$`)
+	type insert struct {
+		at     int
+		indent string
+	}
+	var inserts []insert
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		if !switchRe.MatchString(ln) {
+			continue
+		}
+		switchIndent := leadingTabs(ln)
+		// Find the switch body end.
+		depth := 0
+		switchEnd := -1
+		for j := i; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			for b := 0; b < len(jl); b++ {
+				switch jl[b] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 {
+						switchEnd = j
+					}
+				}
+			}
+			if switchEnd >= 0 {
+				break
+			}
+		}
+		if switchEnd < 0 {
+			continue
+		}
+		// Walk the cases within [i+1, switchEnd). Cases may be at the switch's indent OR one deeper
+		// (the dumper renders cases at the switch-body indent).
+		var caseStarts []int
+		var caseIndent string
+		for j := i + 1; j < switchEnd; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if caseRe.MatchString(jl) || defaultRe.MatchString(jl) {
+				ind := leadingTabs(jl)
+				if len(ind) == len(switchIndent) || len(ind) == len(switchIndent)+1 {
+					if caseIndent == "" {
+						caseIndent = ind
+					}
+					if ind == caseIndent {
+						caseStarts = append(caseStarts, j)
+					}
+				}
+			}
+		}
+		// For each case (except the last which may be default), check if its body lacks a terminator
+		// AND has at least one non-empty statement (skip empty fall-through cases).
+		terminatorRe := regexp.MustCompile(`\b(break|return|throw|continue)\b`)
+		for ci, cs := range caseStarts {
+			var nextCase int
+			if ci+1 < len(caseStarts) {
+				nextCase = caseStarts[ci+1]
+			} else {
+				nextCase = switchEnd
+			}
+			// Scan body [cs+1, nextCase) for a terminator AND count non-empty statements.
+			// Lambda-aware: track `-> {` scope depth so return/break/continue inside a lambda body
+			// (which terminate the lambda, not the case) are NOT counted as case terminators. Only
+			// a terminator at the case-body level (outside any lambda) counts.
+			bodyIndent := caseIndent + "\t"
+			hasTerminator := false
+			stmtCount := 0
+			lambdaDepth := 0 // >0 means inside a lambda body
+			braceDepth := 0  // brace depth relative to case body start
+			for k := cs + 1; k < nextCase; k++ {
+				kl := strings.TrimRight(lines[k], "\r")
+				if strings.TrimSpace(kl) == "" {
+					continue
+				}
+				stmtCount++
+				// Check for a case-level terminator on this line BEFORE any `-> {` lambda opening.
+				// A line like `return X.method(..., (l0) -> {` has a case-level `return` followed by a
+				// lambda body open — the return terminates the case, the lambda does not.
+				preLambdaText := kl
+				if arrowIdx := strings.Index(kl, "->"); arrowIdx >= 0 {
+					// Check if `->` is followed by `{` (lambda body). If so, the text before `->` is
+					// the case-level portion.
+					rest := kl[arrowIdx:]
+					if strings.Contains(rest, "{") {
+						preLambdaText = kl[:arrowIdx]
+					}
+				}
+				if lambdaDepth == 0 {
+					klIndent := leadingTabs(kl)
+					if len(klIndent) <= len(bodyIndent) && terminatorRe.MatchString(preLambdaText) {
+						hasTerminator = true
+						break
+					}
+				}
+				// Track lambda scope: a `-> {` opens a lambda body. Process braces char-by-char.
+				for b := 0; b < len(kl); b++ {
+					if kl[b] == '{' {
+						before := strings.TrimRight(kl[:b], " \t")
+						isLambdaOpen := strings.HasSuffix(before, "->")
+						braceDepth++
+						if isLambdaOpen {
+							lambdaDepth++
+						}
+					} else if kl[b] == '}' {
+						braceDepth--
+						if lambdaDepth > 0 && braceDepth == 0 {
+							lambdaDepth = 0
+						}
+					}
+				}
+			}
+			if hasTerminator {
+				continue
+			}
+			if stmtCount == 0 {
+				continue // empty case body — intentional fall-through, do not add break
+			}
+			// SAFETY: only add break if the case body is a SINGLE statement at bodyIndent with no
+			// nested control-flow blocks (if/else/try/switch/for/while). This avoids the
+			// widespread "unreachable statement" regressions from mis-detecting terminators in
+			// complex case bodies (JSONWriter$Path, gson, snakeyaml, spring).
+			eligible := false
+			if stmtCount > 1 {
+				// Multi-statement body — only handle if it's a single lambda-assignment
+				// (multi-line `field = ...(args) -> {...});`).
+				firstStmt := ""
+				lastStmt := ""
+				for k := cs + 1; k < nextCase; k++ {
+					kl := strings.TrimRight(lines[k], "\r")
+					if strings.TrimSpace(kl) == "" {
+						continue
+					}
+					if firstStmt == "" {
+						firstStmt = kl
+					}
+					lastStmt = kl
+				}
+				if strings.Contains(firstStmt, "-> {") && strings.HasPrefix(strings.TrimSpace(lastStmt), "});") {
+					eligible = true
+				}
+			} else if stmtCount == 1 {
+				// Single statement — must be an assignment (contains `=`).
+				for k := cs + 1; k < nextCase; k++ {
+					kl := strings.TrimRight(lines[k], "\r")
+					if strings.TrimSpace(kl) == "" {
+						continue
+					}
+					if strings.Contains(kl, "=") {
+						eligible = true
+					}
+					break
+				}
+			}
+			if !eligible {
+				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+					fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NOT eligible (stmtCount=%d)\n", cs+1, stmtCount)
+				}
+				continue
+			}
+			if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+				fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: eligible (stmtCount=%d nextCase=%d)\n", cs+1, stmtCount, nextCase+1)
+			}
+			// Dependency analysis for fall-through to default.
+			if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+				nl := ""
+				if ci+1 < len(caseStarts) {
+					nl = strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
+				}
+				fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: ci=%d ci+1=%d len(caseStarts)=%d nextLabel=%q\n", cs+1, ci, ci+1, len(caseStarts), nl)
+			}
+			if ci+1 < len(caseStarts) {
+				nextLabel := strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
+				if nextLabel == "default:" {
+					caseAssigned := collectSwitchAssignedVars(lines, cs+1, nextCase)
+					defaultStart := caseStarts[ci+1] + 1
+					defaultEnd := switchEnd
+					if ci+2 < len(caseStarts) {
+						defaultEnd = caseStarts[ci+2]
+					}
+					defaultSelfReads := collectSwitchDefaultSelfReads(lines, defaultStart, defaultEnd)
+					// CONFLICT: a variable assigned in the case is ALSO assigned in the default
+					// WITHOUT being read in the same assignment (independent overwrite).
+					// DEPENDENCY: the variable is read in the default's own assignment (compound
+					// assignment like `var5 = var5 ^ x`) → default depends on case's value.
+					conflict := false
+					if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d dep-analysis: caseAssigned=%v defaultSelfReads=%v\n", cs+1, caseAssigned, defaultSelfReads)
+					}
+					for v := range caseAssigned {
+						if defaultSelfReads[v] {
+							// Default reads v in its own assignment → dependency, not conflict.
+							continue
+						}
+						// Check if default assigns v independently (without reading it).
+						if defaultAssignsIndependently(lines, defaultStart, defaultEnd, v) {
+							conflict = true
+							break
+						}
+					}
+					if !conflict {
+						if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+							fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NO conflict (skip break)\n", cs+1)
+						}
+						continue // skip break — no independent-overwrite conflict
+					}
+					if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: CONFLICT detected\n", cs+1)
+					}
+				}
+			}
+			// Conflict-based break: add break when this case and the NEXT case (or default) both
+			// independently assign the same variable (conflict pattern). If the next case reads
+			// the variable in a compound assignment (dependency), skip break.
+			if ci+1 >= len(caseStarts) {
+				continue
+			}
+			{
+				nextCaseBodyStart := caseStarts[ci+1] + 1
+				nextCaseBodyEnd := switchEnd
+				if ci+2 < len(caseStarts) {
+					nextCaseBodyEnd = caseStarts[ci+2]
+				}
+				nextCaseAssigned := collectSwitchAssignedVars(lines, nextCaseBodyStart, nextCaseBodyEnd)
+				nextCaseSelfReads := collectSwitchDefaultSelfReads(lines, nextCaseBodyStart, nextCaseBodyEnd)
+				caseAssignedLocal := collectSwitchAssignedVars(lines, cs+1, nextCase)
+				conflictFound := false
+				for v := range caseAssignedLocal {
+					if nextCaseSelfReads[v] {
+						continue // next case reads v in compound assignment → dependency
+					}
+					if _, ok := nextCaseAssigned[v]; ok {
+						if defaultAssignsIndependently(lines, nextCaseBodyStart, nextCaseBodyEnd, v) {
+							conflictFound = true
+							break
+						}
+					}
+				}
+				if !conflictFound {
+					continue // no conflict — skip break (fall-through is safe or dependency)
+				}
+			}
+			// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
+			breakIndent := caseIndent + "\t"
+			if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+				fmt.Fprintf(os.Stderr, "[ADDBREAK] ADD break before L%d (case at L%d, conflict=%v)\n", nextCase+1, cs+1, true)
+			}
+			inserts = append(inserts, insert{at: nextCase, indent: breakIndent})
+		}
+	}
+	if len(inserts) == 0 {
+		return body
+	}
+	if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+		fmt.Fprintf(os.Stderr, "[ADDBREAK] applying %d breaks\n", len(inserts))
+		for _, ins := range inserts {
+			fmt.Fprintf(os.Stderr, "[ADDBREAK]   at L%d indent=%d\n", ins.at+1, len(ins.indent))
+		}
+	}
+	for k := len(inserts) - 1; k >= 0; k-- {
+		ins := inserts[k]
+		breakLn := ins.indent + "break;"
+		if ins.at > len(lines) {
+			continue
+		}
+		lines = append(lines[:ins.at], append([]string{breakLn}, lines[ins.at:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// isInsideTryCatch reports whether line idx is inside a try body that has a catch clause, by
+// scanning backward for a `try{` at a shallower indent than `indent` with no intervening catch
+// boundary. This is a conservative check.
+func isInsideTryCatch(lines []string, idx int, indent string) bool {
+	for k := idx - 1; k >= 0; k-- {
+		lk := strings.TrimRight(lines[k], "\r")
+		if strings.TrimSpace(lk) == "" {
+			continue
+		}
+		kInd := leadingTabs(lk)
+		// A catch boundary at this or shallower indent means we exited a try body.
+		if catchReLiteral.MatchString(lk) && len(kInd) <= len(indent) {
+			return false
+		}
+		if tryReLiteral.MatchString(lk) && len(kInd) < len(indent) {
+			return true
+		}
+		// A `}` at shallower indent closes the enclosing block — stop.
+		if len(kInd) < len(indent) && strings.TrimSpace(lk) == "}" {
+			return false
+		}
+	}
+	return false
+}
+
+var catchReLiteral = regexp.MustCompile(`catch\(`)
+var tryReLiteral = regexp.MustCompile(`try\{`)
+
+// countAssignTargets counts how many times name appears as an assignment target (`name =` but not
+// `name ==`) in body. Used to detect multi-branch if/else chains.
+func countAssignTargets(body, name string) int {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	locs := re.FindAllStringIndex(body, -1)
+	count := 0
+	for _, loc := range locs {
+		after := body[loc[1]:]
+		afterTrim := strings.TrimLeft(after, " \t")
+		if strings.HasPrefix(afterTrim, "=") && !strings.HasPrefix(afterTrim, "==") {
+			// Skip declarations (preceded by type token).
+			before := body[:loc[0]]
+			lineStart := strings.LastIndex(before, "\n") + 1
+			lineBefore := strings.TrimSpace(before[lineStart:])
+			if lineBefore != "" {
+				c := lineBefore[len(lineBefore)-1]
+				if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
+					continue
+				}
+			}
+			count++
+		}
+	}
+	return count
 }
 
 // castEscapeDeclLineRe matches a single rendered line that DECLARES a generated local

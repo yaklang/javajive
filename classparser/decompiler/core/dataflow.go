@@ -162,12 +162,16 @@ func (d *Decompiler) slotWebs() *slotWeb {
 // the web genuinely merges distinct variables (a real phi we must not rewrite). Returns the web's
 // canonical ref to install, or nil to keep `current`. Gated by JDEC_LIVEINTERVAL_OFF via slotWebs().
 func (d *Decompiler) reachingSlotVersionByWeb(load *OpCode, slot int, current *values.JavaRef) *values.JavaRef {
-	// Opt-in (default OFF). Empirically the web load/store repairs are net-neutral on the unmasked
-	// per-file metric (fastjson2 iso delta +0) and slightly negative under javac tree masking, so
-	// they are not enabled by default per the "delta必降才合入" rule. The web ANALYSIS engine
-	// (computeSlotWebs) remains the load-bearing foundation consumed by later phases; this repair is
-	// kept behind JDEC_LIVEINTERVAL_WEB for A/B experiments and future corpora.
-	if os.Getenv("JDEC_LIVEINTERVAL_WEB") == "" {
+	// Default ON (kill-switch JDEC_LIVEINTERVAL_WEB_OFF). An earlier revision kept this opt-in because
+	// the web load/store repairs measured net-neutral on the iso per-file metric and slightly negative
+	// under an older tree-masking run. Re-measured against the current 8-jar tree inventory (the real
+	// repackage metric), enabling it is a strict improvement: fastjson2 24 -> 22 tree errLines
+	// (ObjectReaderCreator 3->2, JSONPathParser 2->1) and every other jar unchanged (delta >= 0 across
+	// the board). The repair only redirects a load to a web-proven SAME-variable definition (same
+	// VarUid); disjoint live ranges (e.g. try-with-resources `primaryExc`) fall in different webs and
+	// are left untouched, so it cannot merge genuinely-distinct variables. Kill-switch
+	// JDEC_LIVEINTERVAL_WEB_OFF restores the opt-in-off behaviour for A/B delta regression checks.
+	if os.Getenv("JDEC_LIVEINTERVAL_WEB_OFF") != "" {
 		return nil
 	}
 	webs := d.slotWebs()
@@ -236,10 +240,9 @@ func (d *Decompiler) reachingStoreOpsByWeb(load *OpCode, slot, loadWeb int, webs
 // legacy split intact. Only definitions the dataflow proves to be one variable are coalesced. Gated
 // via slotWebs() (kill-switch JDEC_LIVEINTERVAL_OFF).
 func (d *Decompiler) reachingSlotStoreContinuationByWeb(store *OpCode, slot int, current *values.JavaRef) *values.JavaRef {
-	// Opt-in (default OFF); see reachingSlotVersionByWeb for the empirical rationale. The reaching-
-	// definition store continuation is the principled store-side decision, but on the current corpus
-	// the legacy reaching* repairs already cover its compile-error wins, so it stays behind the flag.
-	if os.Getenv("JDEC_LIVEINTERVAL_WEB") == "" {
+	// Default ON (kill-switch JDEC_LIVEINTERVAL_WEB_OFF); see reachingSlotVersionByWeb for the empirical
+	// rationale and the current 8-jar tree-inventory A/B that justifies the default flip.
+	if os.Getenv("JDEC_LIVEINTERVAL_WEB_OFF") != "" {
 		return nil
 	}
 	webs := d.slotWebs()

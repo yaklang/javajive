@@ -2220,6 +2220,80 @@ func narrowingInitCast(slotType types.JavaType, valueType types.JavaType) string
 	return ""
 }
 
+// concreteNumericDeclFQNs is the set of boxed primitive types (Integer/Long/Double/Float/Short/Byte)
+// that extend java.lang.Number. A slot first seen storing one of these may be widened to Number when
+// a later reassignment stores an incompatible sub-type (fastjson2 ObjectWriterCreatorASM.gwFieldName).
+var concreteNumericDeclFQNs = map[string]bool{
+	"java.lang.Integer": true, "java.lang.Long": true, "java.lang.Double": true,
+	"java.lang.Float": true, "java.lang.Short": true, "java.lang.Byte": true,
+}
+
+// numericSlotWiderThan reports whether the slot type (`a`) is a wider boxed-numeric type than the
+// initializer type (`b`): specifically a == java.lang.Number AND b is a concrete numeric sub-type.
+// This drives `Number varN = Integer.valueOf(...)` declaration rendering when the slot resolved to
+// Number (because it is reused for multiple incompatible numeric stores) but the initializer is
+// concrete. Mirrors intCategoryWiderThan for the int-category primitive hierarchy.
+func numericSlotWiderThan(a types.JavaType, b types.JavaType) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	af, aok := types.ClassFQNOf(a)
+	bf, bok := types.ClassFQNOf(b)
+	if !aok || !bok {
+		return false
+	}
+	if af != "java.lang.Number" {
+		return false
+	}
+	return concreteNumericDeclFQNs[bf]
+}
+
+// refSlotWiderThanLUB reports whether the slot type (`a`) was widened by a sibling-arm merge to a
+// LUB that strictly contains the initializer's type (`b`) — i.e. b is-a a but a != b and neither is
+// java.lang.Object. This drives `Node varN = commentRef;` declaration rendering when a slot first
+// seen storing a concrete type (Comment) is later widened to a cross-class LUB (Node) by an arm
+// merge (jsoup XmlTreeBuilder.insert: `Comment var3 = var2; ... var3 = new XmlDeclaration();` — the
+// sibling arm stores XmlDeclaration, the slot ref widens to Node, but the first-decl RHS is still
+// the Comment-typed var2, so the declaration would render `Comment var3` and the XmlDeclaration
+// reassign fails). Object is excluded: an Object widening smashes member-access uses (the §8a
+// widen-to-Object read-side regressions), so only genuine non-Object LUB supertypes are adopted.
+//
+// The widening is gated to a JavaRef RHS (a cross-arm copy of another variable): a method-call /
+// new-expression initializer carries the source's declared return type, which a non-Object LUB
+// supertype (e.g. Member vs the correct Executable) can widen AWAY from and smash downstream
+// member-access receivers (spring ObjectToObjectConverter.getValidatedExecutable regressed when
+// widened to the wrong LUB Member). A variable-to-variable copy has no such dependency.
+func refSlotWiderThanLUB(funcCtx *class_context.ClassContext, rhs values.JavaValue, a types.JavaType, b types.JavaType) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if _, isPrim := a.RawType().(*types.JavaPrimer); isPrim {
+		return false
+	}
+	if _, isPrim := b.RawType().(*types.JavaPrimer); isPrim {
+		return false
+	}
+	af, aok := types.ClassFQNOf(a)
+	bf, bok := types.ClassFQNOf(b)
+	if !aok || !bok {
+		return false
+	}
+	if af == bf {
+		return false // not strictly wider
+	}
+	// Object widening smashes member-access receivers (§8a widen-to-Object regressions); exclude.
+	if af == "java.lang.Object" || bf == "java.lang.Object" {
+		return false
+	}
+	// Only widen when the initializer is a variable read (a cross-arm copy), never a method call /
+	// new expression, whose declared return type downstream member access depends on.
+	if _, isRef := values.UnpackSoltValue(rhs).(*values.JavaRef); !isRef {
+		return false
+	}
+	// b must be a strict reference subtype of a (the initializer is the narrow arm, a is the LUB).
+	return isReferenceAssignable(funcCtx, b, a)
+}
+
 func NewReturnStatement(value values.JavaValue) *ReturnStatement {
 	return &ReturnStatement{
 		JavaValue: value,
@@ -2543,6 +2617,31 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if lt := a.LeftValue.Type(); intCategoryWiderThan(lt, declType) {
 			declType = lt
 		}
+		// When the slot's resolved type is java.lang.Number (or another boxed-numeric supertype) but
+		// the initializer is a concrete numeric sub-type (Integer/Long/...), declare at the slot type
+		// so a later incompatible numeric reassignment compiles (fastjson2 ObjectWriterCreatorASM.
+		// gwFieldName: slot resolved to Number, initializer `Integer.valueOf(0)` → `Integer var11`,
+		// but a switch-case stores `Long.valueOf(...)` → "Long cannot be converted to Integer").
+		// Declaring `Number var11 = Integer.valueOf(0)` is valid: Integer is-a Number. This mirrors
+		// the int-category widening above but for the boxed-numeric hierarchy. Kill-switch:
+		// JDEC_NUMERIC_DECL_SLOT_TYPE_OFF=1.
+		if os.Getenv("JDEC_NUMERIC_DECL_SLOT_TYPE_OFF") == "" {
+			if lt := a.LeftValue.Type(); numericSlotWiderThan(lt, declType) {
+				declType = lt
+			}
+		}
+		// When the slot's resolved type is a cross-class LUB widened by a sibling-arm merge (Comment +
+		// XmlDeclaration → Node) but the initializer is the narrow arm type (Comment), declare at the
+		// slot type so the later sibling-typed reassign (var3 = new XmlDeclaration()) compiles: declaring
+		// `Comment var3 = var2` would make the XmlDeclaration reassign fail. Object is excluded (member-
+		// access receivers); the widening is gated to a variable-copy RHS so a method-call initializer's
+		// declared return type (which downstream member access depends on) is never widened away. Kill-
+		// switch: JDEC_REF_SLOT_LUB_DECL_OFF=1.
+		if os.Getenv("JDEC_REF_SLOT_LUB_DECL_OFF") == "" {
+			if lt := a.LeftValue.Type(); refSlotWiderThanLUB(funcCtx, a.JavaValue, lt, declType) {
+				declType = lt
+			}
+		}
 		// Narrowing cast for byte/char/short locals: JLS promotes these types to int in any
 		// arithmetic/bitwise/shift expression, so `byte x = (arr[i] ^ crc) & 255` is int-valued at
 		// the source level even though the slot is byte (commons-codec PureJavaCrc32C). When the
@@ -2617,6 +2716,17 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if cast := parameterizedLocalReassignRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
 			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
 		}
+		// Ternary with sibling-typed arms assigned to a concrete-typed local: the JVM stored both arms
+		// into the same slot (no checkcast), but javac requires every arm to be assignable to the
+		// declared type. When one arm is NOT assignable (e.g. `List var8 = cond ? readArray() :
+		// readObject()` where readObject returns Map, a sibling of List), wrap that arm in an explicit
+		// `(TargetType)` cast so the conditional merges at the target type (fastjson2
+		// JSONPathSegment$CycleNameSegment.eval). Kill-switch: JDEC_TERNARY_ARM_CAST_OFF=1.
+		if os.Getenv("JDEC_TERNARY_ARM_CAST_OFF") == "" {
+			if rendered := ternaryArmIncompatibleCast(funcCtx, a.LeftValue, a.JavaValue); rendered != "" {
+				return fmt.Sprintf("%s = %s", a.LeftValue.String(funcCtx), rendered)
+			}
+		}
 		return assign
 	}
 }
@@ -2684,6 +2794,89 @@ func parameterizedLocalReassignRawCast(funcCtx *class_context.ClassContext, left
 		return ""
 	}
 	return erasureName(ltStr)
+}
+
+// ternaryArmIncompatibleCast re-renders a ternary RHS when one of its arms is NOT assignable to the
+// LHS declared type — the JVM stored both arms into the same slot without a checkcast, but javac
+// requires every arm of `cond ? A : B` assigned to `T var` to be assignable to T. When an arm is a
+// sibling type (e.g. Map when the target is List), wrapping it in `(T)` makes the conditional merge
+// at T (fastjson2 JSONPathSegment$CycleNameSegment.eval: `List var8 = cond ? readArray() :
+// readObject()` where readObject() returns Map). Returns the re-rendered ternary string (with the
+// cast inserted on the incompatible arm), or "" if no cast is needed. Only fires when exactly ONE arm
+// is incompatible (both incompatible = a genuine type clash we must not silently paper over).
+func ternaryArmIncompatibleCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil {
+		return ""
+	}
+	tern, ok := values.UnpackSoltValue(value).(*values.TernaryExpression)
+	if !ok || tern == nil || tern.Condition == nil || tern.TrueValue == nil || tern.FalseValue == nil {
+		return ""
+	}
+	lt := left.Type()
+	if lt == nil {
+		return ""
+	}
+	if _, isPrim := lt.RawType().(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	ltFQN, ltOK := types.ClassFQNOf(lt)
+	if !ltOK || ltFQN == "java.lang.Object" {
+		return ""
+	}
+	trueT := values.TernaryArmRValueType(tern.TrueValue)
+	falseT := values.TernaryArmRValueType(tern.FalseValue)
+	trueCompat := isReferenceAssignable(funcCtx, trueT, lt)
+	falseCompat := isReferenceAssignable(funcCtx, falseT, lt)
+	// Both compatible → no cast needed. Both incompatible → genuine clash, leave alone.
+	if trueCompat && falseCompat {
+		return ""
+	}
+	if !trueCompat && !falseCompat {
+		return ""
+	}
+	condStr := values.SimplifyConditionValue(tern.Condition).String(funcCtx)
+	trueStr := tern.TrueValue.String(funcCtx)
+	falseStr := tern.FalseValue.String(funcCtx)
+	ltStr := lt.String(funcCtx)
+	if !trueCompat {
+		trueStr = fmt.Sprintf("(%s)(%s)", ltStr, trueStr)
+	} else {
+		falseStr = fmt.Sprintf("(%s)(%s)", ltStr, falseStr)
+	}
+	return fmt.Sprintf("(%s) ? (%s) : (%s)", condStr, trueStr, falseStr)
+}
+
+// isReferenceAssignable reports whether `from` is assignable to `to` in the reference-type hierarchy
+// (same type or subtype). Used by ternaryArmIncompatibleCast to decide whether a ternary arm needs a
+// cast to the declared target type. Falls back to false on nil/unknown types so unknown arms are left
+// untouched (conservative).
+func isReferenceAssignable(funcCtx *class_context.ClassContext, from, to types.JavaType) bool {
+	if from == nil || to == nil {
+		return false
+	}
+	if _, isPrim := from.RawType().(*types.JavaPrimer); isPrim {
+		return false
+	}
+	if _, isPrim := to.RawType().(*types.JavaPrimer); isPrim {
+		return false
+	}
+	fromF, fok := types.ClassFQNOf(from)
+	toF, tok := types.ClassFQNOf(to)
+	if !fok || !tok {
+		return false
+	}
+	if fromF == toF {
+		return true
+	}
+	if fromF == "java.lang.Object" {
+		// Object is assignable to any reference type only via unchecked cast; treat as NOT assignable.
+		return false
+	}
+	var provider types.SuperTypeProvider
+	if funcCtx != nil {
+		provider = funcCtx.SiblingSuperTypes
+	}
+	return types.IsReferenceSubtypeBridged(fromF, toF, provider)
 }
 
 type ForStatement struct {

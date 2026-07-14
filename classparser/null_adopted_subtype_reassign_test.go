@@ -34,7 +34,7 @@ func TestNullAdoptedSubtypeReassignIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
-	if !strings.Contains(off, "GZIPInputStream var5;") {
+	if !strings.Contains(off, "GZIPInputStream var5") {
 		t.Errorf("fix OFF: expected a fresh split `GZIPInputStream var5` (kill-switch not load-bearing), got:\n%s", off)
 	}
 }

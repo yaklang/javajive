@@ -163,7 +163,7 @@ func TestJarRoundTripRepackage(t *testing.T) {
 			// Complete JDK-internal packages (sun.misc for guava, jdk.jfr for spring-core) that
 			// --release 8 hides but a faithful decompilation legitimately imports (see jdk_sunmisc_test.go
 			// / jdk_jfr_test.go). Harmless for jars that do not import them.
-			cp := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
+			cp := withFlow(t, withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))))
 
 			srcRoot := t.TempDir()
 			files, units, decompFail := decompileAll(t, jarPath, srcRoot, maxFiles)
@@ -178,14 +178,22 @@ func TestJarRoundTripRepackage(t *testing.T) {
 			t.Logf("[%s] units=%d decompileFail=%d treeErr=%d repackagedVerify(ok=%d fail=%d)",
 				name, units, decompFail, treeErr, vok, vfail)
 
-			if name == "codec" {
-				// Proven clean on commons-codec 1.15: lock it so any regression in the round-trip
-				// capability fails CI loudly. (Other jars are reported, not asserted, until cleared.)
+			// provenClean jars have demonstrated the full north-star chain (decompile → 0 tree errors →
+			// repackage → external JVM -Xverify:all on every class). Lock each so any regression in the
+			// round-trip capability fails CI loudly. Other jars are reported, not asserted, until cleared.
+			provenClean := map[string]bool{
+				"codec":     true, // commons-codec 1.15
+				"gson":      true, // gson 2.8.9
+				"fastjson2": true, // fastjson2 2.0.43
+				"snakeyaml": true, // snakeyaml 2.2
+				"jsoup":     true, // jsoup 1.10.2
+			}
+			if provenClean[name] {
 				if treeErr != 0 {
-					t.Errorf("codec must tree-recompile with 0 errors, got %d:\n%s", treeErr, firstNLines(raw, 40))
+					t.Errorf("%s must tree-recompile with 0 errors, got %d:\n%s", name, treeErr, firstNLines(raw, 40))
 				}
 				if vfail != 0 {
-					t.Errorf("codec repackaged jar must verify all classes, got %d failures:\n%s", vfail, firstNLines(vraw, 40))
+					t.Errorf("%s repackaged jar must verify all classes, got %d failures:\n%s", name, vfail, firstNLines(vraw, 40))
 				}
 			}
 		})

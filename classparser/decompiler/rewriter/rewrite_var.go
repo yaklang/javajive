@@ -191,6 +191,9 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	if os.Getenv("JDEC_NULLINIT_NARROW_OFF") != "1" {
 		narrowNullInitObjectDecl(sts)
 	}
+	if os.Getenv("JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF") != "1" {
+		widenConcreteDeclToObject(sts)
+	}
 }
 
 // dropDuplicateDeclarations removes redundant bare `T x;` declarations that name a *VariableId
@@ -244,6 +247,24 @@ func collectEmbeddedDeclInfos(sts []statements.Statement, byID map[*utils.Variab
 					ts = t.String(hoistProbeCtx)
 				}
 				byName[name] = append(byName[name], embeddedDeclInfo{id: ref.Id, typeStr: ts})
+			}
+		}
+		// A catch parameter (`catch(T varN)`) is also a declaration: it scopes a name to the catch
+		// body. Without collecting it, an embedded assignment to a same-named slot-derived local in a
+		// DIFFERENT try (fastjson2 JDKUtils <clinit>: `var31 = Class.class` in the try, `catch(Throwable
+		// var31)` in a sibling try) would not see the catch param as an incompatible collider, so
+		// SynthesizeUndeclaredEmbeddedAssignDecls would skip synthesizing its declaration.
+		if tc, ok := st.(*statements.TryCatchStatement); ok && tc != nil {
+			for _, exc := range tc.Exception {
+				if exc != nil && exc.Id != nil {
+					byID[exc.Id] = struct{}{}
+					name := exc.String(hoistProbeCtx)
+					ts := ""
+					if t := exc.Type(); t != nil {
+						ts = t.String(hoistProbeCtx)
+					}
+					byName[name] = append(byName[name], embeddedDeclInfo{id: exc.Id, typeStr: ts})
+				}
 			}
 		}
 		for _, cl := range childStatementLists(st) {
@@ -493,7 +514,26 @@ func replayUnambiguousRebindings(sts *[]statements.Statement, allReplace map[*ut
 				break
 			}
 		}
-		if !unique || newId == nil || newId == oldId {
+		if !unique {
+			if os.Getenv("JDEC_ORPHAN_REBIND_NAMEEQ_OFF") == "" {
+				newName := newId.String()
+				nameEq := newId != nil
+				for _, t := range targets[1:] {
+					if t == nil || t.String() != newName {
+						nameEq = false
+						break
+					}
+				}
+				if nameEq && newId != oldId {
+					for _, st := range *sts {
+						st.ReplaceVar(oldId, newId)
+					}
+					core.TraceRewriteVar(className, methodName, "orphan-rebind replay (name-equivalent) old=%s new=%s", oldId.String(), newId.String())
+				}
+			}
+			continue
+		}
+		if newId == nil || newId == oldId {
 			continue
 		}
 		for _, st := range *sts {
@@ -2988,4 +3028,247 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 	if len(prepend) > 0 {
 		*sts = append(prepend, *sts...)
 	}
+}
+
+// widenConcreteDeclToObject is the inverse of narrowNullInitObjectDecl. Kill-switch:
+// JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF=1.
+func widenConcreteDeclToObject(sts *[]statements.Statement) {
+	if sts == nil || len(*sts) == 0 {
+		return
+	}
+	type concreteInfo struct {
+		declRefs    []*values.JavaRef
+		hasObjectRe bool
+	}
+	infos := map[string]*concreteInfo{}
+	objectNames := map[string]struct{}{}
+	var collect func([]statements.Statement)
+	collect = func(list []statements.Statement) {
+		for _, st := range list {
+			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam {
+					name := ref.String(hoistProbeCtx)
+					if generatedLocalNameRe.MatchString(name) {
+						in := infos[name]
+						if in == nil {
+							in = &concreteInfo{}
+							infos[name] = in
+						}
+						switch {
+						case as.IsFirst || as.IsDeclare:
+							rt := ref.Type()
+							if rt != nil {
+								if isJavaLangObject(rt) {
+									objectNames[name] = struct{}{}
+								} else if _, isPrim := rt.RawType().(*types.JavaPrimer); !isPrim {
+									in.declRefs = append(in.declRefs, ref)
+								}
+							}
+						default:
+							if as.JavaValue != nil && !values.IsNullLiteral(as.JavaValue) {
+								if rt := as.JavaValue.Type(); rt != nil && isJavaLangObject(rt) {
+									in.hasObjectRe = true
+								}
+							}
+						}
+					}
+				}
+			}
+			for _, cl := range childStatementLists(st) {
+				collect(*cl)
+			}
+		}
+	}
+	collect(*sts)
+	anyCandidate := false
+	for _, in := range infos {
+		if in.hasObjectRe && len(in.declRefs) > 0 {
+			anyCandidate = true
+			break
+		}
+	}
+	if !anyCandidate {
+		return
+	}
+	var sb strings.Builder
+	for _, st := range *sts {
+		t, ok := safeRenderStatement(st)
+		if !ok {
+			return
+		}
+		sb.WriteString(t)
+		sb.WriteByte('\n')
+	}
+	methodText := sb.String()
+	names := make([]string, 0, len(infos))
+	for n := range infos {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		in := infos[name]
+		if !in.hasObjectRe || len(in.declRefs) == 0 {
+			continue
+		}
+		if !nameOccurrencesAreObjectSafe(methodText, name, objectNames) {
+			continue
+		}
+		objT := types.NewJavaClass("java.lang.Object")
+		for _, ref := range in.declRefs {
+			ref.ResetVarType(objT)
+		}
+	}
+}
+
+func nameOccurrencesAreObjectSafe(text, name string, objectNames map[string]struct{}) bool {
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	locs := re.FindAllStringIndex(text, -1)
+	if len(locs) == 0 {
+		return false
+	}
+	lhsNameRe := regexp.MustCompile(`\b([A-Za-z_$][\w$]*)\s*=\s*$`)
+	for _, loc := range locs {
+		before := text[:loc[0]]
+		after := text[loc[1]:]
+		if nullInitNarrowAssign.MatchString(after) {
+			continue
+		}
+		at := strings.TrimLeft(after, " \t")
+		if (strings.HasPrefix(at, ";") || strings.HasPrefix(at, "\n") || strings.HasPrefix(at, "=")) && typeTokenPrecedes(before) {
+			continue
+		}
+		if leadingWordIs(after, "instanceof") {
+			continue
+		}
+		if trailingWordIs(before, "return") || trailingWordIs(before, "throw") {
+			continue
+		}
+		rt := strings.TrimRight(before, " \t")
+		if strings.HasSuffix(rt, "(") {
+			inner := strings.TrimRight(rt[:len(rt)-1], " \t")
+			if strings.HasSuffix(inner, ")") {
+				continue
+			}
+		}
+		if strings.HasSuffix(rt, ")") {
+			continue
+		}
+		if m := lhsNameRe.FindStringSubmatch(before); m != nil {
+			if _, ok := objectNames[m[1]]; ok {
+				continue
+			}
+		}
+		// Accept `name` as a bare argument to an Object-accepting method (`.add(name)`,
+		// `.addAll(name)`, `.put(key,name)`, `.set(idx,name)`, `.offer(name)`, `.push(name)`).
+		// These methods accept Object, so widening the variable's type is safe.
+		if isObjectArgToWhitelistMethod(before, after) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// objectArgMethodWhitelist lists method names whose parameter accepts java.lang.Object, so passing a
+// widened-to-Object variable as an argument is behavior-preserving. Used by the instanceof-widen
+// Object-safe gate to accept `receiver.add(name)`, `receiver.addAll(name)`, etc.
+var objectArgMethodWhitelist = map[string]bool{
+	"add": true, "addAll": true, "put": true, "set": true,
+	"offer": true, "push": true, "addElement": true, "addFirst": true,
+	"addLast": true,
+}
+
+// isObjectArgToWhitelistMethod reports whether `name` (at the boundary of before/after) is passed
+// as an argument to a whitelisted Object-accepting method: the text before name ends with
+// `.methodName(` and the text after name starts with `)` or `,`.
+func isObjectArgToWhitelistMethod(before, after string) bool {
+	afterTrim := strings.TrimLeft(after, " \t")
+	if !strings.HasPrefix(afterTrim, ")") && !strings.HasPrefix(afterTrim, ",") {
+		return false
+	}
+	beforeTrim := strings.TrimRight(before, " \t")
+	if !strings.HasSuffix(beforeTrim, "(") {
+		return false
+	}
+	// Extract the method name: the identifier immediately before the `(`.
+	inner := strings.TrimRight(beforeTrim[:len(beforeTrim)-1], " \t")
+	methodName := ""
+	for i := len(inner) - 1; i >= 0; i-- {
+		c := inner[i]
+		if isJavaIdentByte(c) {
+			methodName = string(c) + methodName
+		} else {
+			break
+		}
+	}
+	return objectArgMethodWhitelist[methodName]
+}
+
+func leadingWordIs(s, w string) bool {
+	trimmed := strings.TrimLeft(s, " \t")
+	if !strings.HasPrefix(trimmed, w) {
+		return false
+	}
+	rest := trimmed[len(w):]
+	return rest == "" || !isJavaIdentByte(rest[0])
+}
+
+func trailingWordIs(s, w string) bool {
+	trimmed := strings.TrimRight(s, " \t")
+	if !strings.HasSuffix(trimmed, w) {
+		return false
+	}
+	prefix := trimmed[:len(trimmed)-len(w)]
+	return prefix == "" || !isJavaIdentByte(prefix[len(prefix)-1])
+}
+
+func isJavaIdentByte(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '$'
+}
+
+func typeTokenPrecedes(before string) bool {
+	trimmed := strings.TrimRight(before, " \t")
+	if trimmed == "" {
+		return false
+	}
+	last := ""
+	for i := len(trimmed) - 1; i >= 0; i-- {
+		c := trimmed[i]
+		if isJavaIdentByte(c) || c == '.' || c == '<' || c == '>' {
+			last = string(c) + last
+			continue
+		}
+		break
+	}
+	if last == "" {
+		return false
+	}
+	simple := last
+	if i := strings.LastIndexByte(simple, '>'); i >= 0 {
+		if j := strings.LastIndexByte(simple[:i], '<'); j >= 0 {
+			simple = simple[:j]
+		}
+	}
+	for strings.HasSuffix(simple, "[]") {
+		simple = simple[:len(simple)-2]
+	}
+	if simple == "" {
+		return false
+	}
+	if i := strings.LastIndexByte(simple, '.'); i >= 0 {
+		simple = simple[i+1:]
+	}
+	if simple == "" {
+		return false
+	}
+	c := simple[0]
+	if !(c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+		return false
+	}
+	for i := 0; i < len(simple); i++ {
+		if !isJavaIdentByte(simple[i]) {
+			return false
+		}
+	}
+	return true
 }

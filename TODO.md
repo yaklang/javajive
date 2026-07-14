@@ -7,18 +7,31 @@
 > **口径**: 全部以 **tree(整树重编译)** 为准 —— 这是「反编译→重编译→重打包→可调用」的真口径。
 > iso 口径的 `cannot find symbol`/`private access` 大多是扁平 `$` 假阳性, 不在此列(见 CODEC_TODO §3)。
 >
-> 数字快照(javac 21, 本机 `~/.m2` 含可选依赖; tree errLines / 缺陷类, 复跑见下方命令):
-> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 1/1 · snakeyaml 1/1 · fastjson2 25/14 · guava 27/23 · commons-lang3 11/8 · spring 31/19。（合计 96）
-> (本轮修: `AtomicReference<V>` 的 V 形参方法实参补造型(`jdkMethodParamTypeArgIndex` 增 AtomicReference 分支, `JDEC_ATOMIC_REF_PARAM_OFF`)—— 字段 `AtomicReference<T> reference` 的 `get()` 被读进 Object 局部,
-> 再回传给 `compareAndSet(V,V)`/`getAndSet(V)`/`set(V)`(descriptor 擦成 `compareAndSet/set(Object,Object)`)时,
-> 裸 Object 实参被 javac 按 `AtomicReference<V>.compareAndSet(V,V)` 定型判「Object cannot be converted to T」。
-> 修法: 仿 `jdkMapFamily`/`jdkListFamily` 形参映射族, 在 JDK 形参类型实参索引表补 `AtomicReference` 分支(V 是唯一类型实参,
-> 全部 V 形参位映射到 0): `compareAndSet/weakCompareAndSet(V,V)` argc==2 两形参、`getAndSet/set/lazySet(V)` argc==1 形参 0、
-> `getAndAccumulate/accumulateAndGet(V, BinaryOperator<V>)` argc==2 仅形参 0(V), 形参 1 是 operator 不动。
-> `instantiatedParamType` 把 V 形参解析成接收者 T 后, 既有 arg-cast 路径重下 `(T)` unchecked 造型(字节码里该值已流入 V 槽, 保义)。
-> 限 `ntype==1`(裸/非通配参数化 `AtomicReference<V>`), 既有通配符早退(`AtomicReference<?>`)不受影响。承重测试
-> `atomic_ref_vparam_test.go`(AtomicRefVParamSeed) + A/B 交叉 `atomic_ref_vparam_cast_test.go`(commons-lang3 AtomicInitializer)。
-> 治 commons-lang3 AtomicInitializer 1 条, commons-lang3 12→11、缺陷类 9→8, 合计 97→96, 零回归。)
+> 数字快照(javac 17 Corretto, 本机 `~/.m2`; tree errLines / 缺陷类, 复跑见下方命令):
+> codec 0/0 ✅ · gson 0/0 ✅ · jsoup 0/0 ✅ · snakeyaml 0/0 ✅ · fastjson2 0/0 ✅ · guava 26/22 · commons-lang3 3/3 · spring 30/18。（合计 59）
+> (本轮二修, 均零回归、A/B delta 全 8-jar ≥0:
+> ① 同类静态泛型方法类型变量实参造型(`sameClassStaticMethodTypeVarArgCast`, `JDEC_SAMECLASS_STATIC_TYPEVAR_ARG_OFF`)—— 实例方法读取类作用域类型变量 `T` 的字段(擦除为 Object, 如三元 `this.minimum`/`var1.minimum`), 传给同类**静态**泛型方法(如 `Range.<T>between(T,T,Comparator<T>)`)的形参 `T`。源码的 `(T)` 造型被字节码擦除, 裸渲染令 javac 把实参当 Object 喂给泛型方法, 推断破裂(`incompatible bounds`)。修法: 静态同类方法、形参是类作用域类型变量名、实参擦除为 Object、调用点在实例方法(`funcCtx.IsStatic` 门控)时补 `(T)` unchecked 造型。治 commons-lang3 `Range.intersectionWith`(commons-lang3 tree 4→3)。承重 `sameclass_static_typevar_arg_test.go`(SameClassStaticTypeVarArgSeed)。
+> ② 构造器交叉类型变量实参 cast 抑制(`calleeParamIsErasedTypeVar` 对 `<init>` 用 `SiblingCtorSig` + `buildSiblingCtorSig` 接受 `<` 前缀签名)—— `Invokable` 的构造器签名 `<M extends AccessibleObject & Member> Invokable(M)` 以 `<` 开头, `buildSiblingCtorSig` 的 `HasPrefix("(")` 检查静默跳过它, 使 `calleeParamIsErasedTypeVar` 看不到该方法作用域类型变量 `M`, 遂给实参补多余 `(AccessibleObject)` 上转, 丢失交叉类型的 `Member` 约束, javac 报「constructor Invokable cannot be applied」。修法: `buildSiblingCtorSig` 接受 `<` 前缀并用 `ParseMethodSignatureFull` 计数参数; `calleeParamIsErasedTypeVar` 对 `<init>` 优先走 `SiblingCtorSig`。治 guava `Invokable$MethodInvokable`(guava tree 27→26)。零回归。CFR/Vineflower 均输出裸 `super(method)`, 证明去 cast 是正确方向。)
+> (commons-lang3 剩余 3 条 tree errLines 经 oracle 甄别: ObjectUtils.wait `FailableBiConsumer` throws 类型参数无法从字节码恢复——CFR/Vineflower 均输出裸 `accept(obj::wait,...)`, 三方均败, 内在难; MethodUtils `Method::toString` raw Stream——CFR/Vineflower 同样输出裸 `map(Method::toString)`, 属 T1(a) 局部泛型传播, 三方均败; EventListenerSupport `Class<?>→Class<L>` 需从类 Signature 推导形参参数化, 待专项。)
+> (本轮一修: replayUnambiguousRebindings 渲染名等价放宽(`JDEC_ORPHAN_REBIND_NAMEEQ_OFF`)——同一 JVM 槽的逻辑变量在多个兄弟/嵌套作用域各自被 rewriteVar bind 铸出新 `*VariableId`, 这些 id 渲染相同 varN 拼写时, 原「指针严格唯一」判别把该 oldId 判为多目标(ambiguous)跳过, 遂令跨作用域读使用点(如 invokeinterface receiver)保留 pre-mint 撞名 id → 与另一槽位的同名 varN 撞名 → javac「cannot find symbol」。修法把多目标判别从「指针唯一」放宽到「渲染名唯一」: 同名目标等价、任取其一重绑(渲染名相同即同一变量); 渲染名仍不同的目标保持真 ambiguous 跳过。治 fastjson2 `JSONPathSegmentName.eval` offset-345 `Collection.addAll`(slot5 receiver 读渲染 `var8` 撞 slot8 → `var8.addAll((Collection)var8)`「找不到符号」; 修后 `var9_1.addAll((Collection)var8)`)(fastjson2 tree 14→12、缺陷类 9→8)。承重 `orphan_rebind_nameeq_test.go`。零回归(A/B delta 全 8-jar ≥0)。**根因订正**: CODEC_TODO §8a 原记 #9-10 为「接收者解析绑错栈位置」, 实证**错误**——栈 pop 顺序正确, 真根因是 scope 命名阶段的同名多目标被误判 ambiguous。这是继 #11/#12 后第三例证明 §8a「铁板一块须整体重构」可逐条甄别单点突破。)
+> (本轮一修: if/else 兄弟臂 boolean phi 合并(`reachingBoolVarCopyMerge`, `JDEC_BOOL_VAR_COPY_MERGE_OFF`)—— 一臂复制/三元生成 boolean-default(`previous = (features & mask) != 0` 编成 `iconst_1/0`, 或直接三元 `(c && cond) ? 1 : 0`), 另一兄弟臂存真 boolean 值(Z-返回调用 `isRefDetect()`)。复制臂的 int-typed ref 与 boolean 臂的新 boolean ref 分裂同一变量, 合流读 `if (itemRefDetect)` / `previous = itemRefDetect` 渲染成 `int = boolean` / `boolean != int`, javac 报「boolean cannot be converted to int」。`reachingBoolDefaultMerge` 用 `reachingSlotStoreOps` 走 Source 回溯看不到兄弟臂定义(无路径), 故不触发; 本修复锚点在 boolean 臂 store, 直接从全局 slot 表的 `current` ref 找其 creator store(新增 `refToCreatingStore` 索引, 绕开 opcodeIdToRef 的 map 无序迭代), 见 RHS 是 int-0/1 字面量(shape a) 或复制另一槽而该槽源是 int-0/1 字面量(shape b), phi 证同变量即重定型为 boolean(连同源 default 的 0/1 字面量)。修 fastjson2 `FieldWriterList.writeList`(复制臂) + `ObjectWriterImplList.write`(三元臂, fastjson2 tree 19→17、缺陷类 12→11)。承重 `bool_var_copy_merge_test.go`(BoolVarCopyMergeSeed)。零回归(A/B delta 全 8-jar ≥0)。证明了 CODEC_TODO §8a 所述「19 条铁板一块须整体重构」可逐条甄别单点突破。)
+> (本轮修三块, 均零回归、A/B delta≥0:
+> ① 方法引用不补函数式接口造型——`Type::m`/`receiver::m`/`Type::new` 原生可绑到 raw SAM(无显式形参可冲突),
+> 造型反而在 SAM 嵌套通配符处(`Stream.flatMap` 的 `Function<? super T,? extends Stream<? extends R>>`)钉死具体参数化、
+> 挫败 javac 多态推断。靠 `CustomValue.IsMethodRef`(bootstrap 方法引用分支置位)在
+> `lambdaArgFunctionalCast`/`lambdaArgRawJDKReceiverCast` 跳过方法引用。修 fastjson2 `ObjectReaderCreator.toFieldReaderArray`
+> `flatMap(Collection::stream)`(fastjson2 tree -1)、spring `AnnotatedTypeMetadata` `collect(Collector<...>)`(spring tree -3)。
+> ② 活跃区间 web 读/写重定向修复翻成默认开(`JDEC_LIVEINTERVAL_WEB_OFF`)——重测 8-jar tree 口径是严格改进,
+> fastjson2 24→22(`ObjectReaderCreator` 3→2、`JSONPathParser` 2→1), 其余 jar 全持平。
+> ③ 泛型方法返回 `Supplier<T>`/`Function<T,R>` 的 lambda 体返回擦除 Object, 丢源码 unchecked `return (T)/(R) expr;` 造型,
+> javac 拒「bad return type in lambda expression」。从 enclosing 方法 Signature 返回类型取该 FI 返回位类型变量,
+> 注入 lambda 体值返回处(`JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF`)。修 fastjson2 `ObjectReaderProvider.createObjectCreator`
+> `() -> (T) objectReader.createInstance(0)` + `ObjectReaderCreator.createBuildFunctionLambda` `(l0) -> (R) m.invoke(...)`(fastjson2 tree -2)。
+> ④ 构造器 RAW 函数式接口形参位收 UNBOUND 实例方法引用(如 `Throwable::setStackTrace`, 实现元数 (Throwable,StackTraceElement[]))
+> 绑不到 raw (Object,Object) SAM, javac 报「invalid method reference」。从 invokedynamic instantiatedMethodType 取实参类型,
+> 重发 `(<FIRawClass><<具体类型>>) Type::method` 造型(`JDEC_CTOR_RAWFI_METHODREF_CAST_OFF`)。修 fastjson2
+> `ObjectReaderCreator` `new FieldReaderStackTrace(..., Throwable::setStackTrace)`(fastjson2 tree -1、缺陷类 13→12)。CFR/Vineflower 亦丢此造型。
+> 合计本轮 25→19 / 缺陷类 14→12。)
 > (本轮调查 jsoup/snakeyaml 清零未果, 记录潜伏链供后续: ① jsoup `XmlTreeBuilder.insert(Token$Comment)` 的「`Comment var3 = var2; ...;
 > var3 = new XmlDeclaration();` 首声明窄化致兄弟再赋失败(`XmlDeclaration cannot be converted to Comment`)」**单点可修**——
 > 跨类兄弟臂合并已把 slot ref 扩宽到 LUB(Node), 但首声明 RHS 仍是窄臂类型 Comment; 修法: 在 AssignStatement 首声明处见 ref 被合并 helper
@@ -99,8 +112,8 @@ cat /tmp/jdec-inv/guava.tree.fails.txt
 
 ### T2. 活跃区间分裂 / 槽位复用类型混淆(fastjson2 `bad operand type` / `unexpected type` 一族)
 - 表象: 一个字节码 local 槽在**互不相交的活跃区间**里先后承载**不兼容类型**的值(如 `JSONPathFilter$GroupFilter` 的 `var9` 既作 `Iterator` 又当 int 比较), 反编译却合成单一变量名 + 单一声明类型。
-- 已治本多族 disjoint 槽(兄弟臂 LUB 合并 / Object 超类臂 / 数组协变父臂 / 布尔字段·返回槽拆分 / 跨作用域孤儿读重放, 见 CODEC_TODO §4)。**残余**: 非布尔子形态须在变量定型/分裂核(`JDEC_LIVEINTERVAL_*`)上按「区间+类型」更激进拆分同槽, 风险高、改动核心, 留专项。
-  - **本轮评估**: baseline 非布尔槽位混淆仅 ~3 错误(guava `LocalCache$Segment:72` Object→V、`MapMakerInternalMap$Segment:315` InternalEntry→E、fastjson2 `ObjectWriterCreatorASM:2381` Long→Integer), 占总 ~95 错误 ~3%。非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
+- 已治本多族 disjoint 槽(兄弟臂 LUB 合并 / Object 超类臂 / 数组协变父臂 / 布尔字段·返回槽拆分 / 跨作用域孤儿读重放, 见 CODEC_TODO §4)。**本轮新增**: 活跃区间 web 读/写重定向(`reachingSlotVersionByWeb`/`reachingSlotStoreContinuationByWeb`)翻成默认开(`JDEC_LIVEINTERVAL_WEB_OFF`), 把 DFS 序漏进槽位表的「同源变量(同 VarUid)」load/store 重定向到该 web 规范 ref。A/B 全 8-jar delta≥0, fastjson2 tree 24→22(`ObjectReaderCreator` 3→2、`JSONPathParser` 2→1), 其余 jar 持平。**残余**: 非布尔子形态须在变量定型/分裂核上按「区间+类型」更激进拆分同槽, 风险高、改动核心, 留专项。
+  - **本轮评估**: baseline 非布尔槽位混淆仅 ~3 错误(guava `LocalCache$Segment:72` Object→V、`MapMakerInternalMap$Segment:315` InternalEntry→E、fastjson2 `ObjectWriterCreatorASM:2381` Long→Integer), 占总 ~87 错误 ~3%。非 bool 分裂逻辑复杂度与 bool 版本相当(数百行)且回归风险高, **性价比不足**, 暂不投入, 保留现有 bool 分裂。
 - 复现: `ORACLE_JAR=fastjson2 ORACLE_CLASS=JSONPathFilter go test -run TestThirdPartyOracle -v ./test/cross/`
 
 ## P1

@@ -144,10 +144,32 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				if err != nil {
 					return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", classMember.Name, member, err)
 				}
+				// A lambda body that returns a generic-erased Object while its functional-interface SAM
+				// returns a method type variable lost the source's unchecked `return (T) expr;` cast. The
+				// erased lambda impl method returns Object (its instantiatedMethodType return is Object),
+				// but the FI target -- recovered from the ENCLOSING method's Signature return type, since
+				// the lambda is the direct return value and the method declares `Supplier<T>` etc. -- has a
+				// type variable in the return position. javac rejects the bare body
+				// ("bad return type in lambda expression: Object cannot be converted to T"). Re-emit the cast.
+				// Kill-switch: JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF=1.
+				var retTypevarCast string
+				if os.Getenv("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") == "" {
+					var instantiatedMT values.JavaValue
+					if len(args1) >= 3 {
+						instantiatedMT = args1[2]
+					}
+					retTypevarCast = lambdaReturnPositionTypevar(typ, instantiatedMT)
+				}
 				cv := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 					s := methodStr
 					for i, ca := range captured {
 						s = strings.ReplaceAll(s, fmt.Sprintf("\x00LCAP%d\x00", i), ca.String(funcCtx))
+					}
+					if retTypevarCast != "" {
+						castTarget := resolveLambdaReturnTypevar(funcCtx, retTypevarCast)
+						if castTarget != "" {
+							s = injectLambdaReturnCast(s, castTarget)
+						}
 					}
 					return s
 				}, func() types.JavaType {
@@ -234,6 +256,18 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// receiver (`(C::m).apply(x)` does not compile); flag it so the call site adds the cast.
 			refVal.Flag = "lambda"
 			refVal.NoOuterCapture = len(capturedArgs) == 0
+			refVal.IsMethodRef = true
+			// Carry the instantiatedMethodType descriptor so a constructor argument whose formal is a
+			// RAW functional interface can recover the source's `(FI<...>) Type::method` cast (the raw
+			// SAM erases the impl method's arity, so the bare method ref is "invalid"). fastjson2
+			// ObjectReaderCreator `new FieldReaderStackTrace(..., Throwable::setStackTrace)`.
+			if len(args1) >= 3 {
+				if cv, ok := args1[2].(*values.CustomValue); ok {
+					if s := cv.String(&class_context.ClassContext{}); strings.HasPrefix(s, "(") {
+						refVal.InstantiatedMtdDesc = s
+					}
+				}
+			}
 			return refVal, nil
 		}
 	},
@@ -442,4 +476,170 @@ func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodT
 		return nil
 	}
 	return types.NewParameterizedType(rawName, typeArgs)
+}
+
+// lambdaFIReturnPosition is the type-argument index that supplies the SAM's RETURN type for each
+// standard JDK functional interface whose SAM returns a (possibly type-variable) value. -1 means
+// the FI's SAM returns void (Consumer/BiConsumer) and no return cast ever applies.
+var lambdaFIReturnPosition = map[string]int{
+	"java.util.function.Supplier":    0,
+	"java.util.function.Function":    1,
+	"java.util.function.BiFunction":  2,
+	"java.util.function.Predicate":   -1,
+	"java.util.function.Consumer":    -1,
+	"java.util.function.BiConsumer":  -1,
+	"java.util.function.BiPredicate": -1,
+}
+
+// lambdaReturnPositionTypevar returns the FI's raw class name when the lambda is a JDK
+// Supplier/Function/BiFunction whose instantiatedMethodType return type is Object (erased) -- the
+// necessary precondition for a return-position type-variable cast. The actual type variable name
+// is resolved later from the enclosing method's Signature (see resolveLambdaReturnTypevar), since
+// the lambda value carries only the erased/instantiated type, not the enclosing method's type vars.
+// Returns "" when no cast applies (non-Object return, or an FI whose SAM returns void).
+func lambdaReturnPositionTypevar(rawType types.JavaType, instantiatedMethodType values.JavaValue) string {
+	if rawType == nil {
+		return ""
+	}
+	jc, ok := rawType.RawType().(*types.JavaClass)
+	if !ok || jc == nil {
+		return ""
+	}
+	pos, known := lambdaFIReturnPosition[jc.Name]
+	if !known || pos < 0 {
+		return ""
+	}
+	// The instantiatedMethodType's return type must be the erased Object: only then did the body lose
+	// a type-variable cast. A concrete instantiated return (e.g. `()Ljava/lang/String;`) binds directly
+	// and must not be cast.
+	if instantiatedMethodType == nil {
+		return ""
+	}
+	desc := ""
+	if cv, ok := instantiatedMethodType.(*values.CustomValue); ok {
+		if s := cv.String(&class_context.ClassContext{}); strings.HasPrefix(s, "(") {
+			desc = s
+		}
+	}
+	if desc == "" {
+		return ""
+	}
+	mt, err := types.ParseMethodDescriptor(desc)
+	if err != nil {
+		return ""
+	}
+	ft := mt.FunctionType()
+	if ft == nil || ft.ReturnType == nil {
+		return ""
+	}
+	// The instantiatedMethodType's return type must be the erased Object — only then did the body lose a
+	// type-variable cast. A concrete instantiated return binds directly and must not be cast. The erased
+	// SAM return is `Object` for a scalar type variable (Supplier<T>/Function<T,R>) OR `Object[]` for an
+	// ARRAY type variable (Function<List<O>,O[]> — apply erases to `Object[]`, not Object; the lambda
+	// impl `lambda$finisher$1` returns `Object[]`). Accept both.
+	if retClass, ok := ft.ReturnType.RawType().(*types.JavaClass); ok && retClass != nil && retClass.Name == "java.lang.Object" {
+		return jc.Name
+	}
+	if ft.ReturnType.IsArray() {
+		if elem := ft.ReturnType.ElementType(); elem != nil {
+			if retClass, ok := elem.RawType().(*types.JavaClass); ok && retClass != nil && retClass.Name == "java.lang.Object" {
+				return jc.Name
+			}
+		}
+	}
+	return ""
+}
+
+// resolveLambdaReturnTypevar recovers the type-variable NAME the return cast should target, from
+// the ENCLOSING method's generic Signature. The lambda is the method's direct return value (the
+// fastjson2 `public <T> Supplier<T> m() { ...; return () -> ...createInstance(); }` shape), so the
+// method Signature's return type is the FI with its real type-variable argument. Returns "" when the
+// enclosing method has no Signature, the return type is not a matching parameterized FI, or the
+// return-position type argument is not a bare type variable.
+func resolveLambdaReturnTypevar(funcCtx *class_context.ClassContext, fiRawName string) string {
+	if funcCtx == nil || funcCtx.CurrentMethodSig == "" {
+		return ""
+	}
+	sig := funcCtx.CurrentMethodSig
+	// Strip a leading `<TypeParam:Bound;...>` formal-type-parameter declaration so ParseMethodSignature
+	// (which expects a leading `(`) sees the parameter/return body.
+	if strings.HasPrefix(sig, "<") {
+		depth := 0
+		for i, c := range sig {
+			if c == '<' {
+				depth++
+			} else if c == '>' {
+				depth--
+				if depth == 0 {
+					sig = sig[i+1:]
+					break
+				}
+			}
+		}
+	}
+	_, ret := types.ParseMethodSignature(sig)
+	if ret == nil {
+		return ""
+	}
+	pt, ok := types.AsParameterizedType(ret)
+	if !ok || pt.RawClassName != fiRawName {
+		return ""
+	}
+	pos, _ := lambdaFIReturnPosition[fiRawName]
+	if pos >= len(pt.TypeArgs) {
+		return ""
+	}
+	ta := pt.TypeArgs[pos]
+	if ta == nil {
+		return ""
+	}
+	// A bare type variable parses as a *JavaClass whose Name is a single identifier (no dot), e.g. "T".
+	// A concrete class arg (Object/String/...) has a dotted FQN and binds directly, so no cast.
+	if jc, ok := ta.RawType().(*types.JavaClass); ok && jc != nil && !strings.Contains(jc.Name, ".") {
+		return jc.Name
+	}
+	// An ARRAY type-variable arg (`O[]` — Function<List<O>, O[]>.apply returns O[] but the lambda impl
+	// returns the erased Object[]) parses as a *JavaArrayType whose element is a bare type variable.
+	// The source carried `return (O[]) expr;` (commons-lang3 Streams$ArrayCollector.finisher: the
+	// `Function<List<O>,O[]>` lambda body returns `list.toArray((Object[]) Array.newInstance(...))`,
+	// an erased Object[] the source cast back to O[]). Recover `O[]` from the element type variable.
+	if ta.IsArray() {
+		if elem := ta.ElementType(); elem != nil {
+			if jc, ok := elem.RawType().(*types.JavaClass); ok && jc != nil && !strings.Contains(jc.Name, ".") {
+				return jc.Name + strings.Repeat("[]", ta.ArrayDim())
+			}
+		}
+	}
+	return ""
+}
+
+// injectLambdaReturnCast rewrites a statement-lambda body `(...) -> { ... return EXPR; ... }` so the
+// body's value `return EXPR;` becomes `return (TYPEVAR) (EXPR);`, re-emitting the source's unchecked
+// cast on the erased Object return. The value return is the LAST `return ` token in the rendered arrow
+// body (javac's lambda body shape), and its expression is the run of non-`;`/non-`}` characters up to
+// the terminating `;`. A bare `return;` (void) is left untouched. Returns the body unchanged if no
+// return site matches. Kill-switch: JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF.
+func injectLambdaReturnCast(body, typevar string) string {
+	idx := strings.LastIndex(body, "return ")
+	if idx < 0 {
+		return body
+	}
+	exprStart := idx + len("return ")
+	// Skip leading whitespace of the return expression; remember how many bytes we trimmed so the
+	// tail splice stays byte-aligned.
+	skipped := 0
+	for exprStart+skipped < len(body) && (body[exprStart+skipped] == ' ' || body[exprStart+skipped] == '\t') {
+		skipped++
+	}
+	rest := body[exprStart+skipped:]
+	if strings.HasPrefix(rest, ";") {
+		return body // void return; nothing to cast
+	}
+	end := strings.IndexByte(rest, ';')
+	if end < 0 {
+		return body
+	}
+	expr := strings.TrimSpace(rest[:end])
+	castStmt := "(" + typevar + ") (" + expr + ");"
+	return body[:exprStart] + castStmt + body[exprStart+skipped+end+1:]
 }
