@@ -1250,6 +1250,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// `throw (T) throwable;` but the bytecode erased the cast. Kill-switch:
 	// JDEC_FIX_THROW_TYPEVAR_CAST_OFF=1. Canonical: commons-lang3 ExceptionUtils.typeErasure.
 	full = fixThrowTypeVarCast(full)
+	// fixLoopCatchThrow removes a `throw new RuntimeException(<var>);` that was added to an empty
+	// catch by the catch-rendering fix when the catch is inside a loop (followed by
+	// continue/break). Empty catches inside loops are intentional (swallow and continue), so the
+	// throw would make the continue/break unreachable. Kill-switch: JDEC_FIX_LOOP_CATCH_THROW_OFF=1.
+	full = fixLoopCatchThrow(full)
 	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
 	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
 	full = fixTryCatchExceptionPlacement(full)
@@ -3343,9 +3348,25 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 					}
 					for i, body := range catchBodies {
 						excType := normalizeCatchClauseType(catchExc[i].Type().String(funcCtx))
+						bodyStr := statementListToString(body)
+						// An empty catch body in a non-void method can cause "missing return
+						// statement" when the catch handler originally had a throw that the
+						// TryRewriter dropped. Add `throw new RuntimeException(<var>)` to make
+						// the catch terminate. A post-processing pass (fixLoopCatchThrow) later
+						// removes throws from empty catches inside loops (where the catch was
+						// intentionally empty to swallow and continue). Kill-switch:
+						// JDEC_FIX_EMPTY_CATCH_THROW_OFF=1.
+						// Canonical: commons-lang3 NumberUtils.createNumber catch(NumberFormatException).
+						if strings.TrimSpace(bodyStr) == "" &&
+							os.Getenv("JDEC_FIX_EMPTY_CATCH_THROW_OFF") == "" &&
+							methodType.FunctionType().ReturnType != nil &&
+							methodType.FunctionType().ReturnType.String(funcCtx) != "void" {
+							catchVar := catchExc[i].String(funcCtx)
+							bodyStr = fmt.Sprintf("%sthrow new RuntimeException(%s);\n", c.GetTabString(), catchVar)
+						}
 						statementStr += fmt.Sprintf("catch(%s %s){\n"+
 							"%s\n"+
-							c.GetTabString()+"}", excType, catchExc[i].String(funcCtx), statementListToString(body))
+							c.GetTabString()+"}", excType, catchExc[i].String(funcCtx), bodyStr)
 					}
 					haveCatch := len(catchBodies) > 0
 					if !haveCatch {
@@ -5429,6 +5450,84 @@ func enclosingReturnsReference(lines []string, idx int) bool {
 // `throw (T) throwable;` but the bytecode erased the cast to a no-op checkcast. Without the cast,
 // javac rejects "unreported exception Throwable" because `throw varX` (varX: Throwable) is wider
 // than the declared `throws T`. Kill-switch: JDEC_FIX_THROW_TYPEVAR_CAST_OFF=1.
+// fixLoopCatchThrow removes a `throw new RuntimeException(<var>);` that was added to an empty
+// catch by the catch-rendering fix when the catch is inside a loop (followed by continue/break).
+// Empty catches inside loops are intentional (swallow and continue), so the throw would make the
+// continue/break unreachable. Kill-switch: JDEC_FIX_LOOP_CATCH_THROW_OFF=1.
+// Canonical keep: commons-lang3 NumberUtils.createNumber (catch not followed by continue/break).
+// Canonical remove: gson DateTypeAdapter catch(ParseException) followed by `continue;` in loop.
+func fixLoopCatchThrow(body string) string {
+	if os.Getenv("JDEC_FIX_LOOP_CATCH_THROW_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// Pattern:
+	//   <indent>catch(<type> <var>){
+	//   <indent+1>throw new RuntimeException(<var>);
+	//   <indent>}
+	//   <indent><continue|break>
+	catchRe := regexp.MustCompile(`^(\t+)}?catch\([^)]+\)\s*\{$`)
+	throwRe := regexp.MustCompile(`^\t+throw new RuntimeException\([^)]*\);\s*$`)
+	removes := []int{}
+	for i := 0; i < len(lines)-3; i++ {
+		cm := catchRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
+		if cm == nil {
+			continue
+		}
+		indent := cm[1]
+		throwIdx := -1
+		// Next non-blank line must be the throw
+		for j := i + 1; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "" {
+				continue
+			}
+			if throwRe.MatchString(jl) {
+				throwIdx = j
+			}
+			break
+		}
+		if throwIdx < 0 {
+			continue
+		}
+		// Next non-blank after throw must be `}` at catch's indent
+		closeIdx := -1
+		for j := throwIdx + 1; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "" {
+				continue
+			}
+			if jl == indent+"}" {
+				closeIdx = j
+			}
+			break
+		}
+		if closeIdx < 0 {
+			continue
+		}
+		// Next non-blank after `}` — if it's `continue;` or `break;`, the catch is in a loop
+		for j := closeIdx + 1; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "" {
+				continue
+			}
+			trimmed := strings.TrimSpace(jl)
+			if trimmed == "continue;" || strings.HasPrefix(trimmed, "continue ") ||
+				trimmed == "break;" || strings.HasPrefix(trimmed, "break ") {
+				removes = append(removes, throwIdx)
+			}
+			break
+		}
+	}
+	if len(removes) == 0 {
+		return body
+	}
+	for k := len(removes) - 1; k >= 0; k-- {
+		lines[removes[k]] = ""
+	}
+	return strings.Join(lines, "\n")
+}
+
 // Canonical: commons-lang3 ExceptionUtils.typeErasure `<R, T extends Throwable> R typeErasure(
 // Throwable throwable) throws T { throw (T) throwable; }`.
 func fixThrowTypeVarCast(body string) string {
