@@ -1235,6 +1235,16 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// empty, which otherwise leaves a value-returning method without a return on that path.
 	// Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
 	full = fixEmptySwitchDefault(full)
+	// fixTryBreakReturn moves a hoisted `return <expr>;` back into a `try { break; }` block
+	// inside a do-while(true) loop, where the try's catch clauses require the return's
+	// checked-exception to be throwable. Kill-switch: JDEC_FIX_TRY_BREAK_RETURN_OFF=1.
+	full = fixTryBreakReturn(full)
+	// fixThrowTypeVarCast adds the `(T)` cast to `throw <var>;` inside a method whose `throws`
+	// clause declares a type variable (e.g. `throws T` where `T extends Throwable`), when the
+	// thrown variable's type is `Throwable` (too broad for `throws T`). The original source had
+	// `throw (T) throwable;` but the bytecode erased the cast. Kill-switch:
+	// JDEC_FIX_THROW_TYPEVAR_CAST_OFF=1. Canonical: commons-lang3 ExceptionUtils.typeErasure.
+	full = fixThrowTypeVarCast(full)
 	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
 	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
 	full = fixTryCatchExceptionPlacement(full)
@@ -2469,18 +2479,57 @@ func mergeNestedSameTypeCatches(funcCtx *class_context.ClassContext, exceptions 
 		sameType := catchTypeKey(exc[i]) != "" && catchTypeKey(exc[i]) == catchTypeKey(exc[i+1])
 		rethrows := false
 		var throwIdx int
+		varName := ""
 		if sameType && exc[i] != nil {
-			varName := strings.TrimSpace(exc[i].String(funcCtx))
+			varName = strings.TrimSpace(exc[i].String(funcCtx))
 			lastStr, lastIdx := lastMeaningfulStmt(bod[i])
 			if lastIdx >= 0 && varName != "" && lastStr == "throw "+varName {
 				rethrows = true
 				throwIdx = lastIdx
 			}
+			// Also handle a wrapping rethrow: the catch body's last statement is
+			// `throw SomeWrapper.rethrow(varName)` (or any `throw` mentioning varName),
+			// which is semantically a rethrow — the finally block (the second same-type
+			// handler) must still run. Match any throw statement that mentions the caught
+			// variable name. Canonical: commons-lang3 LockingVisitors `throw Failable.rethrow(t)`.
+			if !rethrows && lastIdx >= 0 && varName != "" &&
+				strings.HasPrefix(lastStr, "throw ") && strings.Contains(lastStr, varName) {
+				rethrows = true
+				throwIdx = lastIdx
+			}
 		}
 		if sameType && rethrows {
-			merged := append([]statements.Statement{}, bod[i][:throwIdx]...)
-			merged = append(merged, bod[i+1]...)
-			bod[i] = merged
+			// For a wrapping rethrow (`throw Failable.rethrow(t)`), the first catch's throw
+			// statement must be PRESERVED — it declares `throws Throwable` (via the wrapper
+			// method's signature), which covers wildcard-capture checked exceptions (CAP#1)
+			// that a bare `throw t` does not. Insert the second catch body (the finally
+			// cleanup code, minus its own trailing throw) BEFORE the first catch's throw.
+			// For a plain `throw t`, the original behavior (drop the throw, append the second
+			// body) is correct.
+			lastStr, _ := lastMeaningfulStmt(bod[i])
+			if strings.HasPrefix(lastStr, "throw ") && strings.Contains(lastStr, varName) &&
+				lastStr != "throw "+varName {
+				// Wrapping rethrow: keep the first catch's throw, insert second body before it.
+				// Strip the second catch body's trailing throw (it's the finally's rethrow,
+				// redundant since the first catch already rethrows).
+				secondBody := bod[i+1]
+				_, secondLastIdx := lastMeaningfulStmt(secondBody)
+				if secondLastIdx >= 0 {
+					secondThrowStr, _ := lastMeaningfulStmt(secondBody)
+					if strings.HasPrefix(secondThrowStr, "throw ") {
+						secondBody = append([]statements.Statement{}, secondBody[:secondLastIdx]...)
+					}
+				}
+				merged := append([]statements.Statement{}, bod[i][:throwIdx]...)
+				merged = append(merged, secondBody...)
+				merged = append(merged, bod[i][throwIdx:]...) // keep the wrapping throw
+				bod[i] = merged
+			} else {
+				// Plain rethrow: drop the throw, append the second body.
+				merged := append([]statements.Statement{}, bod[i][:throwIdx]...)
+				merged = append(merged, bod[i+1]...)
+				bod[i] = merged
+			}
 			exc = append(exc[:i+1], exc[i+2:]...)
 			bod = append(bod[:i+1], bod[i+2:]...)
 			// Do not advance: the merged handler may chain into a further same-type handler.
@@ -2545,9 +2594,101 @@ func needsTrailingIncompleteControlFlowThrow(statementList []statements.Statemen
 		case *statements.WhileStatement:
 			return loopConditionIsConstTrue(s.ConditionValue, funcCtx) &&
 				loopBodyHasEscapingBreak(s.Body, "", true, funcCtx)
+		case *statements.IfStatement:
+			// Disabled: the ifElseAllArmsTerminate check is too fragile for deeply nested
+			// if/else chains with switch fall-through, causing regressions on gson/spring/fastjson2.
+			// The "missing return statement" on such methods is handled by other post-processing fixes.
+			return false
 		default:
 			return false
 		}
+	}
+	return false
+}
+
+// ifElseAllArmsTerminate reports whether both the if-body and else-body of an IfStatement
+// unconditionally terminate (return/throw/break/continue on every path). When true, the
+// if/else is a complete terminator and no trailing throw is needed. When false (at least one
+// arm can fall through), a trailing throw is needed to avoid "missing return statement".
+func ifElseAllArmsTerminate(s *statements.IfStatement, funcCtx *class_context.ClassContext) bool {
+	if s == nil {
+		return false
+	}
+	ifTerminates := blockTerminates(s.IfBody, funcCtx)
+	elseTerminates := len(s.ElseBody) > 0 && blockTerminates(s.ElseBody, funcCtx)
+	return ifTerminates && elseTerminates
+}
+
+// blockTerminates reports whether a statement list unconditionally transfers control away
+// (every path through the block ends in return/throw/break/continue or a terminating if/else).
+func blockTerminates(body []statements.Statement, funcCtx *class_context.ClassContext) bool {
+	for i := len(body) - 1; i >= 0; i-- {
+		st := body[i]
+		switch st.(type) {
+		case *statements.MiddleStatement, *statements.StackAssignStatement:
+			continue
+		}
+		return stmtTerminates(st, funcCtx)
+	}
+	return false
+}
+
+// stmtTerminates reports whether a single statement unconditionally transfers control away.
+func stmtTerminates(st statements.Statement, funcCtx *class_context.ClassContext) bool {
+	if st == nil {
+		return false
+	}
+	switch s := st.(type) {
+	case *statements.ReturnStatement:
+		return true
+	case *statements.IfStatement:
+		return ifElseAllArmsTerminate(s, funcCtx)
+	case *statements.TryCatchStatement:
+		// A try/catch terminates iff the try body terminates and all catch bodies terminate.
+		if !blockTerminates(s.TryBody, funcCtx) {
+			return false
+		}
+		for _, cb := range s.CatchBodies {
+			if !blockTerminates(cb, funcCtx) {
+				return false
+			}
+		}
+		return true
+	case *statements.DoWhileStatement:
+		// do-while(true) with no escaping break terminates.
+		return loopConditionIsConstTrue(s.ConditionValue, funcCtx) &&
+			!loopBodyHasEscapingBreak(s.Body, s.Label, true, funcCtx)
+	case *statements.WhileStatement:
+		return loopConditionIsConstTrue(s.ConditionValue, funcCtx) &&
+			!loopBodyHasEscapingBreak(s.Body, "", true, funcCtx)
+	case *statements.SwitchStatement:
+		// A switch terminates iff it has a `default` and every fall-through chain terminates.
+		// A fall-through chain starts at a case and continues through empty cases until a
+		// case with a body. The chain terminates iff that body's last statement terminates
+		// (return/throw/break). A `break` terminates the chain (exits the switch). We check
+		// conservatively: the switch must have a default, and the LAST non-empty case body
+		// must terminate (all earlier fall-through chains reach it or their own terminator).
+		hasDefault := false
+		lastNonEmptyTerminates := false
+		foundNonEmpty := false
+		for _, c := range s.Cases {
+			if c.IsDefault {
+				hasDefault = true
+			}
+			if len(c.Body) > 0 {
+				foundNonEmpty = true
+				lastNonEmptyTerminates = blockTerminates(c.Body, funcCtx)
+			}
+		}
+		if !hasDefault || !foundNonEmpty {
+			return false // no default or all-empty → control can fall through past the switch
+		}
+		return lastNonEmptyTerminates
+	}
+	// Check for throw/break/continue via rendered text.
+	if cs, ok := st.(*statements.CustomStatement); ok {
+		t := strings.TrimSpace(cs.String(funcCtx))
+		return strings.HasPrefix(t, "throw ") || strings.HasPrefix(t, "break") || strings.HasPrefix(t, "continue")
 	}
 	return false
 }
@@ -2707,11 +2848,13 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	methodTypeParams := ""
 	var methodTypeParamNames []string
 	var methodSigStr string
+	var sigThrowsTypes []types.JavaType
 	for _, attr := range method.Attributes {
 		if sigAttr, ok := attr.(*SignatureAttribute); ok {
 			if sigStr, err := c.obj.getUtf8(sigAttr.SignatureIndex); err == nil && sigStr != "" {
 				methodSigStr = sigStr
-				tps, sigParams, sigRet := types.ParseMethodSignatureFull(sigStr, c.FuncCtx)
+				tps, sigParams, sigRet, sigThrows := types.ParseMethodSignatureFullWithThrows(sigStr, c.FuncCtx)
+				sigThrowsTypes = sigThrows
 				// Gate on sigRet (not sigParams): a zero-arg generic method like
 				// `()TK;` (Map.Entry.getKey) parses to (nil params, K return). The old
 				// `sigParams != nil` guard skipped exactly these, leaving the return type
@@ -2836,6 +2979,47 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				}
 			}
 			exceptions += strings.Join(expList, ", ")
+		}
+		// When the method has a generic Signature attribute with a `^`-prefixed throws clause that
+		// mentions a TYPE VARIABLE (e.g. `<T extends Throwable> void accept(...) throws T`), the
+		// ExceptionsAttribute carries only the ERASURE (e.g. `java.lang.Throwable`), which is too
+		// broad — the source declared `throws T` so javac could infer `T = InterruptedException`
+		// at the call site. Re-emit the Signature-derived throws types, rendered through funcCtx
+		// so type variables are denotable and class-typed throws register imports. This only
+		// overrides when a throws type IS a type variable; if all Signature throws are concrete
+		// classes, they match the ExceptionsAttribute and no override is needed.
+		// Kill-switch: JDEC_THROWS_SIG_RECOVERY_OFF. Canonical: commons-lang3 DurationUtils.accept
+		// (`throws Throwable` from Exceptions vs `throws T` from Signature `^TT;`).
+		if os.Getenv("JDEC_THROWS_SIG_RECOVERY_OFF") == "" && len(sigThrowsTypes) > 0 {
+			hasTypeVar := false
+			for _, th := range sigThrowsTypes {
+				if th == nil {
+					continue
+				}
+				if jc, ok := th.RawType().(*types.JavaClass); ok && funcCtx.IsTypeParam(jc.Name) {
+					hasTypeVar = true
+					break
+				}
+			}
+			if hasTypeVar {
+				expList := []string{}
+				for _, th := range sigThrowsTypes {
+					if th == nil {
+						continue
+					}
+					s := th.String(funcCtx)
+					if s != "" {
+						// Register imports for class-typed throws (type variables are in-scope, no import needed).
+						if jc, ok := th.RawType().(*types.JavaClass); ok && !funcCtx.IsTypeParam(jc.Name) {
+							funcCtx.Import(jc.Name)
+						}
+						expList = append(expList, s)
+					}
+				}
+				if len(expList) > 0 {
+					exceptions = " throws " + strings.Join(expList, ", ")
+				}
+			}
 		}
 		if anno, ok := attribute.(*RuntimeVisibleAnnotationsAttribute); ok {
 			for _, annotation := range anno.Annotations {
@@ -5042,6 +5226,141 @@ func fixEmptySwitchDefault(body string) string {
 	return strings.Join(lines, "\n")
 }
 
+// fixTryBreakReturn moves a `return <expr>;` that was incorrectly hoisted OUTSIDE a `do { ... } while`
+// loop back INTO a `try { break; }` block inside the loop. The do-while structuring converts a
+// `try { return expr; } catch(...)` inside a loop into `try { break; } catch(...)` + `return expr;`
+// after the loop. But the `try` body's `break` throws no checked exception, so a catch clause for
+// e.g. `ExecutionException` fails ("exception is never thrown in body of corresponding try
+// statement"), and the hoisted return makes the loop exit ambiguous. This fix detects the exact
+// pattern: `try{\n break;\n}catch(...)` inside a `} while (true);` followed by `return <expr>;`,
+// and replaces `break;` with `return <expr>;` inside the try, then removes the post-loop return.
+// Kill-switch: JDEC_FIX_TRY_BREAK_RETURN_OFF=1. Canonical: commons-lang3 Memoizer.compute.
+func fixTryBreakReturn(body string) string {
+	if os.Getenv("JDEC_FIX_TRY_BREAK_RETURN_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// Find `} while (true);` lines followed by a `return <expr>;` at a LESSER indent.
+	type fix struct {
+		whileIdx     int
+		returnIdx    int
+		tryBreakIdx  int // index of `break;` inside `try{`
+		returnIndent string
+		returnExpr   string
+		breakIndent  string
+	}
+	var fixes []fix
+	for i := 0; i < len(lines)-1; i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		if strings.TrimSpace(ln) != "} while (true);" {
+			continue
+		}
+		whileIndent := leadingTabs(ln)
+		// Next non-blank line must be `return <expr>;` at lesser or equal indent.
+		var retLine string
+		retIdx := -1
+		for j := i + 1; j < len(lines); j++ {
+			rl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(rl) == "" {
+				continue
+			}
+			retLine = rl
+			retIdx = j
+			break
+		}
+		if retIdx < 0 || !strings.HasPrefix(strings.TrimSpace(retLine), "return ") {
+			continue
+		}
+		retIndent := leadingTabs(retLine)
+		if len(retIndent) > len(whileIndent) {
+			continue // return is more indented — inside a nested block, not the loop post-exit
+		}
+		// Scan backward from `} while (true);` to find the innermost `try{` ... `break;` ...
+		// `}catch(` pattern. We scan backward looking for a `break;` line, then verify it's
+		// inside a try block followed by a catch. The backward scan allows any lines in between
+		// (catch body statements, nested blocks) — it only stops at a line that clearly belongs
+		// to a different control structure (e.g. a `do{`, `while(`, `for(`, or method-level `}`).
+		breakIdx := -1
+		breakIndent := ""
+		tryIndent := ""
+		for j := i - 1; j >= 0; j-- {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "" {
+				continue
+			}
+			if strings.TrimSpace(jl) == "break;" {
+				breakIdx = j
+				breakIndent = leadingTabs(jl)
+				// Check that the nearest preceding non-blank line is `try{`.
+				for k := j - 1; k >= 0; k-- {
+					kl := strings.TrimRight(lines[k], "\r")
+					if strings.TrimSpace(kl) == "" {
+						continue
+					}
+					if strings.TrimSpace(kl) == "try{" {
+						tryIndent = leadingTabs(kl)
+					}
+					break
+				}
+				break
+			}
+			// Stop at lines that clearly belong to an outer structure.
+			trimmed := strings.TrimSpace(jl)
+			if strings.HasPrefix(trimmed, "do{") || strings.HasPrefix(trimmed, "do {") ||
+				strings.HasPrefix(trimmed, "while(") || strings.HasPrefix(trimmed, "while (") ||
+				strings.HasPrefix(trimmed, "for(") || strings.HasPrefix(trimmed, "for (") ||
+				strings.HasPrefix(trimmed, "switch(") || strings.HasPrefix(trimmed, "switch (") {
+				break
+			}
+		}
+		if breakIdx < 0 || tryIndent == "" {
+			continue
+		}
+		// `break;` should be one indent level deeper than `try{`.
+		if len(breakIndent) != len(tryIndent)+1 {
+			continue
+		}
+		// Check that the line after `break;` (skipping blanks) is `}catch(` at the same indent.
+		hasCatchAfter := false
+		for j := breakIdx + 1; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "" {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(jl), "}catch(") && leadingTabs(jl) == tryIndent {
+				hasCatchAfter = true
+			}
+			break
+		}
+		if !hasCatchAfter {
+			continue
+		}
+		// Extract the return expression (without `return ` prefix and trailing `;`).
+		returnExpr := strings.TrimSpace(retLine)
+		returnExpr = strings.TrimPrefix(returnExpr, "return ")
+		returnExpr = strings.TrimSuffix(returnExpr, ";")
+		fixes = append(fixes, fix{
+			whileIdx:     i,
+			returnIdx:    retIdx,
+			tryBreakIdx:  breakIdx,
+			returnIndent: retIndent,
+			returnExpr:   returnExpr,
+			breakIndent:  breakIndent,
+		})
+	}
+	if len(fixes) == 0 {
+		return body
+	}
+	// Apply in descending order: replace `break;` with `return <expr>;`, blank out the post-loop return.
+	for k := len(fixes) - 1; k >= 0; k-- {
+		f := fixes[k]
+		lines[f.tryBreakIdx] = f.breakIndent + "return " + f.returnExpr + ";"
+		// Remove the post-loop return line (blank it out).
+		lines[f.returnIdx] = ""
+	}
+	return strings.Join(lines, "\n")
+}
+
 // fixMissingReturn inserts `return null;` after a no-op empty-if statement (`if (cond){};`) that
 // immediately follows a switch-closing `}` whose switch had a `default:` clause. This is the
 // control-flow pattern that produces "missing return statement" in deep switch/if chains: javac
@@ -5100,6 +5419,181 @@ func enclosingReturnsReference(lines []string, idx int) bool {
 		return true
 	}
 	return false
+}
+
+// fixThrowTypeVarCast adds the `(T)` cast to `throw <var>;` inside a method whose `throws` clause
+// declares a single type variable (e.g. `throws T` where `T extends Throwable`), when the thrown
+// variable's type is `Throwable` (too broad for `throws T`). The original source had
+// `throw (T) throwable;` but the bytecode erased the cast to a no-op checkcast. Without the cast,
+// javac rejects "unreported exception Throwable" because `throw varX` (varX: Throwable) is wider
+// than the declared `throws T`. Kill-switch: JDEC_FIX_THROW_TYPEVAR_CAST_OFF=1.
+// Canonical: commons-lang3 ExceptionUtils.typeErasure `<R, T extends Throwable> R typeErasure(
+// Throwable throwable) throws T { throw (T) throwable; }`.
+func fixThrowTypeVarCast(body string) string {
+	if os.Getenv("JDEC_FIX_THROW_TYPEVAR_CAST_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// Pattern: a method signature line containing `throws <TypeVar>` (a single bare identifier,
+	// not a class name), followed by a body containing `throw <var>;` where <var> is a variable
+	// of type Throwable (not already cast). We detect the method signature by the `throws T` clause
+	// and scan the method body for `throw <var>;`.
+	throwsTypeVarRe := regexp.MustCompile(`\)\s*throws\s+([A-Z]\w*)\s*\{`)
+	type edits struct {
+		lineIdx int
+		oldText string
+		newText string
+	}
+	var pending []edits
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := throwsTypeVarRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		typeVar := m[1]
+		// Scan the method body for `throw <var>;` (not already cast).
+		// The method body starts after the signature line and ends at the matching closing brace.
+		depth := 1 // we're inside the method body (the `{` on the signature line opened it)
+		for j := i + 1; j < len(lines) && depth > 0; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			trimmed := strings.TrimSpace(jl)
+			if trimmed == "" {
+				continue
+			}
+			// Track brace depth.
+			for _, ch := range trimmed {
+				if ch == '{' {
+					depth++
+				} else if ch == '}' {
+					depth--
+				}
+			}
+			if depth <= 0 {
+				break
+			}
+			// Match `throw <var>;` where <var> is a simple identifier (not already cast).
+			throwRe := regexp.MustCompile(`^(\s*)throw\s+(\w+)\s*;\s*$`)
+			tm := throwRe.FindStringSubmatch(jl)
+			if tm == nil {
+				continue
+			}
+			throwIndent := tm[1]
+			varName := tm[2]
+			// Only cast if the variable is not the type variable itself (throwing T is fine)
+			// and the variable is likely a Throwable-typed parameter/local.
+			if varName == typeVar {
+				continue
+			}
+			// Check the variable's type: scan backward for its declaration or parameter.
+			// If declared as `Throwable`, the cast is needed. For safety, only apply when the
+			// method has a `Throwable` parameter (the typical typeErasure pattern).
+			hasThrowableParam := strings.Contains(ln, "Throwable")
+			if !hasThrowableParam {
+				continue
+			}
+			pending = append(pending, edits{
+				lineIdx: j,
+				oldText: jl,
+				newText: throwIndent + "throw (" + typeVar + ") " + varName + ";",
+			})
+		}
+	}
+	if len(pending) == 0 {
+		return body
+	}
+	for k := len(pending) - 1; k >= 0; k-- {
+		e := pending[k]
+		lines[e.lineIdx] = e.newText
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fixUnreachableSwitchDefaultThrow removes a `throw new RuntimeException();` inserted by
+// fixEmptySwitchDefault into an empty `default:` when the switch is followed by more code
+// at the same or lesser indent — the empty default falls through to that code, and the
+// throw makes it unreachable ("unreachable statement"). The throw is only removed when the
+// line after the switch-closing `}` is NOT a `}` at the same or lesser indent (i.e. there IS
+// post-switch code that the default should fall through to). Kill-switch:
+// JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF=1. Canonical: commons-lang3 RandomStringUtils.
+func fixUnreachableSwitchDefaultThrow(body string) string {
+	if os.Getenv("JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	// Pattern:
+	//   <indent>default:
+	//   <indent+1>throw new RuntimeException();
+	//   <indent>}
+	//   <indent or less><code that is NOT just `}`>
+	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
+	throwRe := regexp.MustCompile(`^\t+throw new RuntimeException\(\);\s*$`)
+	removes := []int{} // line indices to blank out (descending apply)
+	for i := 0; i < len(lines)-2; i++ {
+		dm := defaultRe.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
+		if dm == nil {
+			continue
+		}
+		indent := dm[1]
+		// Next non-blank line must be `throw new RuntimeException();`
+		throwIdx := -1
+		for j := i + 1; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "" {
+				continue
+			}
+			if throwRe.MatchString(jl) {
+				throwIdx = j
+			}
+			break
+		}
+		if throwIdx < 0 {
+			continue
+		}
+		// Next non-blank line after throw must be `}` at the default's indent (switch close).
+		switchCloseIdx := -1
+		for j := throwIdx + 1; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if strings.TrimSpace(jl) == "" {
+				continue
+			}
+			if jl == indent+"}" {
+				switchCloseIdx = j
+			}
+			break
+		}
+		if switchCloseIdx < 0 {
+			continue
+		}
+		// Check the line after the switch-closing `}`: if it's NOT `}` at the same or lesser
+		// indent, there is post-switch code → the throw is unreachable → remove it.
+		for k := switchCloseIdx + 1; k < len(lines); k++ {
+			kl := strings.TrimRight(lines[k], "\r")
+			if strings.TrimSpace(kl) == "" {
+				continue
+			}
+			postIndent := leadingTabs(kl)
+			trimmed := strings.TrimSpace(kl)
+			if len(postIndent) <= len(indent) && trimmed == "}" {
+				break // block exit — throw is needed (no post-switch code)
+			}
+			if len(postIndent) <= len(indent) {
+				// Post-switch code exists at the same or lesser indent.
+				// But only remove the throw if the post-switch code is reachable (not itself
+				// unreachable). A `return`/`throw`/`continue`/`break` as post-switch code means
+				// the default falls through to a reachable terminator — the throw is unreachable.
+				removes = append(removes, throwIdx)
+			}
+			break
+		}
+	}
+	if len(removes) == 0 {
+		return body
+	}
+	for k := len(removes) - 1; k >= 0; k-- {
+		lines[removes[k]] = ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 // fixMissingReturn inserts `return null;` after a no-op empty-if statement (`if (cond){};`) when
