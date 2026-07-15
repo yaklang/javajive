@@ -2169,6 +2169,23 @@ var jdkGenericLambdaReceivers = map[string]bool{
 	"java.util.Optional":      true,
 }
 
+// objectInheritedMethodNames lists the public no-arg instance methods declared on java.lang.Object.
+// When a method reference targets one of these (e.g. `Method::toString`), javac may try to bind it
+// to `Object.toString()` (0 args) instead of the unbound instance form (1 arg = receiver), causing
+// "invalid method reference" on a raw receiver whose SAM supplies an Object parameter. The cast
+// `(Function<Method, String>) Method::toString` re-targets the SAM so javac uses the unbound form.
+// For methods NOT on Object (e.g. `MergedAnnotation::withNonMergedAttributes`), javac resolves the
+// unbound form correctly (Object has no such method), and a cast would break downstream type
+// inference. So the cast is gated to Object-inherited method names only.
+var objectInheritedMethodNames = map[string]bool{
+	"toString": true,
+	"hashCode": true,
+	"equals":   true,
+	"getClass": true,
+	"clone":    true,
+	"finalize": true,
+}
+
 // jdkGenericCtorDiamondClasses is the small set of JDK generic collection classes whose RAW `new X(...)`
 // in call-receiver position gets the diamond restored by newRecvJDKGenericDiamond. Kept tiny and
 // unambiguous (concrete, non-anonymous, diamond-inferable under --release 8).
@@ -2247,14 +2264,60 @@ func (f *FunctionCallExpression) lambdaArgRawJDKReceiverCast(i int, funcCtx *cla
 	if !ok || cv.Flag != "lambda" {
 		return ""
 	}
-	// A method reference binds NATURALLY to the raw SAM (it has no explicit parameter types), so
-	// the parameterized-FI cast is unnecessary for it AND, for SAMs with nested wildcards (Stream.
-	// flatMap's `Function<? super T,? extends Stream<? extends R>>`), the cast pins a concrete
-	// parameterization that defeats javac poly inference ("method flatMap cannot be applied").
-	// Only an explicitly-typed lambda body needs the cast to bind. Skip method references.
-	// (fastjson2 ObjectReaderCreator.toFieldReaderArray `flatMap(Collection::stream)`.)
+	// A method reference binds NATURALLY to the raw SAM when its impl-method arity matches the
+	// raw SAM arity (bound instance refs `obj::method`, static refs `Type::method`). But an
+	// UNBOUND instance method reference (`Type::method` where method is an instance method)
+	// takes the receiver as its first parameter — its arity is ONE MORE than the raw SAM's,
+	// so the bare method ref is "invalid method reference" ("actual and formal argument lists
+	// differ in length"). The source's `(Function<Method, String>) Method::toString` cast
+	// re-targets the SAM to the correct parameterized FI whose first type arg matches the
+	// receiver type. So: allow the cast for unbound instance method references (detected by
+	// the InstantiatedMtdDesc's first param being a concrete class, not Object — a static
+	// method ref's first param already matches the raw SAM's Object). Skip all other method
+	// references (bound refs, static refs) AND skip refs whose FI return type is a raw
+	// `java.util.stream.Stream` (the nested wildcard SAM `Function<? super T, ? extends
+	// Stream<? extends R>>` cannot accept a pinned concrete parameterization).
+	// (fastjson2 ObjectReaderCreator.toFieldReaderArray `flatMap(Collection::stream)` skips;
+	// commons-lang3 MethodUtils `map(Method::toString)` fires.)
 	if cv.IsMethodRef {
-		return ""
+		// Only fire for unbound instance method references whose instantiated method descriptor
+		// has a first parameter that is NOT java.lang.Object (the receiver type is concrete).
+		// A static method ref (e.g. `Arrays::stream`, `String::valueOf`) has its first param
+		// matching the SAM's erased Object parameter, so the bare ref binds naturally.
+		if cv.InstantiatedMtdDesc == "" || !strings.HasPrefix(cv.InstantiatedMtdDesc, "(") {
+			return ""
+		}
+		// Extract the first parameter type from the instantiatedMethodType descriptor.
+		desc := cv.InstantiatedMtdDesc[1:] // skip '('
+		firstParamEnd := strings.IndexByte(desc, ';')
+		if firstParamEnd < 0 {
+			return ""
+		}
+		firstParam := desc[:firstParamEnd+1]
+		// An unbound instance ref's first param is the receiver class (e.g. `Ljava/lang/reflect/Method;`).
+		// A static ref's first param is the SAM's erased param (e.g. `Ljava/lang/Object;` or a primitive).
+		// Only fire when the first param is a non-Object class type.
+		if !strings.HasPrefix(firstParam, "L") || strings.HasPrefix(firstParam, "Ljava/lang/Object;") {
+			return ""
+		}
+		// Only fire when the method name is one inherited from java.lang.Object (toString,
+		// hashCode, equals, getClass, clone, finalize). These are the methods where javac
+		// tries to bind the reference to Object's version (0 args) instead of the unbound
+		// instance form (1 arg = receiver), causing "invalid method reference" on a raw
+		// Stream whose SAM provides an Object parameter. For other methods (e.g.
+		// `MergedAnnotation::withNonMergedAttributes`), javac resolves the unbound form
+		// correctly (Object has no such method), and adding a cast breaks downstream type
+		// inference (spring AnnotatedElementUtils). Canonical: commons-lang3
+		// MethodUtils `map(Method::toString)`.
+		refStr := cv.String(&class_context.ClassContext{})
+		methodName := ""
+		if idx := strings.LastIndex(refStr, "::"); idx >= 0 {
+			methodName = refStr[idx+2:]
+		}
+		if !objectInheritedMethodNames[methodName] {
+			return ""
+		}
+		// Fall through to the cast logic below.
 	}
 	// (b) the lambda value carries a denotable parameterized functional-interface type.
 	lamType := cv.Type()

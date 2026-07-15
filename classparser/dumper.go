@@ -1235,6 +1235,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// empty, which otherwise leaves a value-returning method without a return on that path.
 	// Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
 	full = fixEmptySwitchDefault(full)
+	// fixUnreachableDefaultThrow removes a `throw new RuntimeException();` that fixEmptySwitchDefault
+	// inserted into an empty `default:` when the switch is followed by an ACTUAL statement (not a
+	// block-closing `}`). In that case the empty default FALLS THROUGH to the post-switch code, and
+	// the throw makes it unreachable. Kill-switch: JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF=1.
+	full = fixUnreachableDefaultThrow(full)
 	// fixTryBreakReturn moves a hoisted `return <expr>;` back into a `try { break; }` block
 	// inside a do-while(true) loop, where the try's catch clauses require the return's
 	// checked-exception to be throwable. Kill-switch: JDEC_FIX_TRY_BREAK_RETURN_OFF=1.
@@ -2595,9 +2600,6 @@ func needsTrailingIncompleteControlFlowThrow(statementList []statements.Statemen
 			return loopConditionIsConstTrue(s.ConditionValue, funcCtx) &&
 				loopBodyHasEscapingBreak(s.Body, "", true, funcCtx)
 		case *statements.IfStatement:
-			// Disabled: the ifElseAllArmsTerminate check is too fragile for deeply nested
-			// if/else chains with switch fall-through, causing regressions on gson/spring/fastjson2.
-			// The "missing return statement" on such methods is handled by other post-processing fixes.
 			return false
 		default:
 			return false
@@ -5509,14 +5511,16 @@ func fixThrowTypeVarCast(body string) string {
 	return strings.Join(lines, "\n")
 }
 
-// fixUnreachableSwitchDefaultThrow removes a `throw new RuntimeException();` inserted by
-// fixEmptySwitchDefault into an empty `default:` when the switch is followed by more code
-// at the same or lesser indent — the empty default falls through to that code, and the
-// throw makes it unreachable ("unreachable statement"). The throw is only removed when the
-// line after the switch-closing `}` is NOT a `}` at the same or lesser indent (i.e. there IS
-// post-switch code that the default should fall through to). Kill-switch:
-// JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF=1. Canonical: commons-lang3 RandomStringUtils.
-func fixUnreachableSwitchDefaultThrow(body string) string {
+// fixUnreachableDefaultThrow removes a `throw new RuntimeException();` that fixEmptySwitchDefault
+// inserted into an empty `default:` when the switch is followed by an ACTUAL statement (not a
+// block-closing `}`). In that case the empty default FALLS THROUGH to the post-switch code, and
+// the throw makes it unreachable ("unreachable statement"). The throw is only removed when the
+// first non-blank line after the switch-closing `}` does NOT start with `}` (i.e. it is a real
+// statement like `continue;`, not a block close like `}else{` or a method-ending `}`).
+// Kill-switch: JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF=1.
+// Keep case: fastjson2 ToBoolean (switch close followed by `}else{` → starts with `}`, keep throw).
+// Remove case: commons-lang3 RandomStringUtils (switch close followed by `continue;` → real stmt).
+func fixUnreachableDefaultThrow(body string) string {
 	if os.Getenv("JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF") == "1" {
 		return body
 	}
@@ -5525,7 +5529,7 @@ func fixUnreachableSwitchDefaultThrow(body string) string {
 	//   <indent>default:
 	//   <indent+1>throw new RuntimeException();
 	//   <indent>}
-	//   <indent or less><code that is NOT just `}`>
+	//   <indent><NOT starting with }>
 	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
 	throwRe := regexp.MustCompile(`^\t+throw new RuntimeException\(\);\s*$`)
 	removes := []int{} // line indices to blank out (descending apply)
@@ -5565,25 +5569,22 @@ func fixUnreachableSwitchDefaultThrow(body string) string {
 		if switchCloseIdx < 0 {
 			continue
 		}
-		// Check the line after the switch-closing `}`: if it's NOT `}` at the same or lesser
-		// indent, there is post-switch code → the throw is unreachable → remove it.
+		// Check the first non-blank line after the switch-closing `}`.
+		// If it starts with `}` (block close / `}else{` / `}catch(` etc.) at the same or lesser
+		// indent, the throw IS needed (the switch is the last statement in its block).
+		// If it does NOT start with `}`, it is a real post-switch statement → the throw makes it
+		// unreachable → remove the throw.
 		for k := switchCloseIdx + 1; k < len(lines); k++ {
 			kl := strings.TrimRight(lines[k], "\r")
 			if strings.TrimSpace(kl) == "" {
 				continue
 			}
-			postIndent := leadingTabs(kl)
 			trimmed := strings.TrimSpace(kl)
-			if len(postIndent) <= len(indent) && trimmed == "}" {
-				break // block exit — throw is needed (no post-switch code)
-			}
-			if len(postIndent) <= len(indent) {
-				// Post-switch code exists at the same or lesser indent.
-				// But only remove the throw if the post-switch code is reachable (not itself
-				// unreachable). A `return`/`throw`/`continue`/`break` as post-switch code means
-				// the default falls through to a reachable terminator — the throw is unreachable.
+			if !strings.HasPrefix(trimmed, "}") {
+				// Real post-switch statement → the default falls through to it → throw is unreachable.
 				removes = append(removes, throwIdx)
 			}
+			// Else: starts with `}` → throw is needed (block exit).
 			break
 		}
 	}
