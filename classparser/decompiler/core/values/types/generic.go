@@ -603,28 +603,52 @@ func primerForSig(c byte) string {
 }
 
 func ParseMethodSignature(sig string) ([]JavaType, JavaType) {
+	params, ret, _ := ParseMethodSignatureWithThrows(sig)
+	return params, ret
+}
+
+// ParseMethodSignatureWithThrows is the same as ParseMethodSignature but also parses any
+// `^`-prefixed throws types that follow the return type in a method Signature attribute
+// (JVM Signature grammar: `(ParamsType*)ReturnType ^ThrowsType*`). Each throws type is a
+// TypeVariableSignature (e.g. `TT;` for `throws T`) or a ClassTypeSignature (e.g.
+// `Ljava/io/IOException;`). The throws types are returned as the 3rd return value; nil when
+// the signature has no throws clause or parsing fails. ParseMethodSignature delegates here
+// and discards the throws types, so existing callers are unaffected.
+func ParseMethodSignatureWithThrows(sig string) ([]JavaType, JavaType, []JavaType) {
 	if len(sig) == 0 || sig[0] != '(' {
-		return nil, nil
+		return nil, nil, nil
 	}
 	rest := sig[1:]
 	var params []JavaType
 	for len(rest) > 0 && rest[0] != ')' {
 		t, remaining, ok := parseSigType(rest)
 		if !ok {
-			return nil, nil
+			return nil, nil, nil
 		}
 		params = append(params, t)
 		rest = remaining
 	}
 	if len(rest) == 0 || rest[0] != ')' {
-		return nil, nil
+		return nil, nil, nil
 	}
 	rest = rest[1:]
-	retType, _, ok := parseSigType(rest)
+	retType, afterRet, ok := parseSigType(rest)
 	if !ok {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return params, retType
+	// Parse throws types: each is introduced by '^' in the Signature grammar.
+	rest = afterRet
+	var throws []JavaType
+	for len(rest) > 0 && rest[0] == '^' {
+		rest = rest[1:]
+		t, remaining, ok := parseSigType(rest)
+		if !ok {
+			break
+		}
+		throws = append(throws, t)
+		rest = remaining
+	}
+	return params, retType, throws
 }
 
 // ParseClassSignature extracts the type parameters declaration from a class
@@ -1197,21 +1221,30 @@ func parseFormalTypeParams(sig string, funcCtx *class_context.ClassContext) stri
 // exactly ParseMethodSignature, so non-generic methods are unaffected. Bound types in the type-param
 // string are rendered with funcCtx so other-package bounds register an import.
 func ParseMethodSignatureFull(sig string, funcCtx *class_context.ClassContext) (string, []JavaType, JavaType) {
+	tps, params, ret, _ := ParseMethodSignatureFullWithThrows(sig, funcCtx)
+	return tps, params, ret
+}
+
+// ParseMethodSignatureFullWithThrows is the same as ParseMethodSignatureFull but also returns
+// the throws types from the Signature attribute's `^`-prefixed throws clause. See
+// ParseMethodSignatureWithThrows for the throws grammar. ParseMethodSignatureFull delegates
+// here and discards the throws types.
+func ParseMethodSignatureFullWithThrows(sig string, funcCtx *class_context.ClassContext) (string, []JavaType, JavaType, []JavaType) {
 	typeParams := ""
 	rest := sig
 	if len(rest) > 0 && rest[0] == '<' {
 		typeParams = parseFormalTypeParams(rest, funcCtx)
 		r, ok := skipAngleSection(rest)
 		if !ok {
-			return "", nil, nil
+			return "", nil, nil, nil
 		}
 		rest = r
 	}
-	params, ret := ParseMethodSignature(rest)
+	params, ret, throws := ParseMethodSignatureWithThrows(rest)
 	if ret == nil {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
-	return typeParams, params, ret
+	return typeParams, params, ret, throws
 }
 
 // FormalTypeParamBounds parses the leading formal type-parameter section of a class or method Signature

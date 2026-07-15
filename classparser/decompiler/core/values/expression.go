@@ -2249,7 +2249,7 @@ func (f *FunctionCallExpression) lambdaArgRawJDKReceiverCast(i int, funcCtx *cla
 	}
 	// A method reference binds NATURALLY to the raw SAM (it has no explicit parameter types), so
 	// the parameterized-FI cast is unnecessary for it AND, for SAMs with nested wildcards (Stream.
-	// flatMap's `Function<? super T, ? extends Stream<? extends R>>`), the cast pins a concrete
+	// flatMap's `Function<? super T,? extends Stream<? extends R>>`), the cast pins a concrete
 	// parameterization that defeats javac poly inference ("method flatMap cannot be applied").
 	// Only an explicitly-typed lambda body needs the cast to bind. Skip method references.
 	// (fastjson2 ObjectReaderCreator.toFieldReaderArray `flatMap(Collection::stream)`.)
