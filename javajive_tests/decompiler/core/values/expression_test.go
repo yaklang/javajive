@@ -5,8 +5,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
-	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	values "github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
 func TestNewExpressionMultidimensionalArrayString(t *testing.T) {

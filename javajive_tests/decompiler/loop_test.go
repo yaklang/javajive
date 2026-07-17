@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/yaklang/javajive/internal/funk"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
@@ -14,6 +13,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/classparser/decompiler/rewriter"
 	"github.com/yaklang/javajive/classparser/decompiler/utils"
+	"github.com/yaklang/javajive/internal/funk"
 	utils2 "github.com/yaklang/javajive/internal/utils"
 )
 

@@ -575,7 +575,6 @@ func TestNestedJarPathHandling(t *testing.T) {
 	}
 }
 
-
 // TestMultiLevelJarListDirectory tests that ListDirectory works with multiple nested JARs
 func TestMultiLevelJarListDirectory(t *testing.T) {
 	// Create a temporary JAR file with nested JARs for testing

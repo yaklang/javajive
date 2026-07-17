@@ -17,6 +17,7 @@ import (
 //   - string switch (compiled as a hashCode tableswitch + equals guard + second switch)
 //   - char switch, negative-label switch (signed lookupswitch/tableswitch keys)
 //   - nested switch and switch inside a loop
+//
 // Every method folds a value into the deterministic fingerprint, so the original and the
 // decompiled+recompiled class are compared by execution; a dropped/merged case arm or a corrupted
 // fallthrough silently changes behaviour and is caught here.
@@ -79,6 +80,7 @@ const switchBatterySource = `public class SwitchBattery {
 //     to the post-switch statement and then continue the loop (currently "invalid if merge node").
 //   - loopSwitchContinue: a `continue` issued from inside a case targets the loop increment edge,
 //     interleaving the switch arm with the loop back-edge ("not found simulation stack for opcode 13").
+//
 // These degrade to a safe stub; the guard only requires that javac accepts the decompiled output, so a
 // stub passes while a corrupted body is caught. Promote to switchBatterySource once fixed.
 const hardSwitchSource = `public class HardSwitch {

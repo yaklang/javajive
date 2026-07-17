@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
-	"github.com/yaklang/javajive/internal/utils"
 	rewriter "github.com/yaklang/javajive/classparser/decompiler/rewriter"
+	"github.com/yaklang/javajive/internal/utils"
 )
 
 // referenceDominatorTree is a verbatim copy of the previous map/utils.Set based
@@ -129,8 +129,8 @@ func TestGenerateDominatorTreeEquivalence(t *testing.T) {
 	rng := rand.New(rand.NewSource(0xC0FFEE))
 	const iterations = 4000
 	for it := 0; it < iterations; it++ {
-		n := 1 + rng.Intn(40)      // 1..40 nodes
-		maxOut := 1 + rng.Intn(4)  // up to 1..4 successors
+		n := 1 + rng.Intn(40)     // 1..40 nodes
+		maxOut := 1 + rng.Intn(4) // up to 1..4 successors
 		root := buildRandomCFG(rng, n, maxOut)
 
 		got := rewriter.GenerateDominatorTree(root)

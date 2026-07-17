@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yaklang/javajive/classparser"
 	"github.com/yaklang/javajive/classparser/classes"
-	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/filesys"
+	"github.com/yaklang/javajive/internal/log"
 )
 
 func TestDecompiler(t *testing.T) {
