@@ -88,8 +88,10 @@ func TestCov_Loops(t *testing.T) {
 	assert.Contains(t, out, "while (true)")
 	assert.Contains(t, out, "continue")
 	assert.Contains(t, out, "break")
+	// Loops.class exercises labeled *break* (breakWithLabel uses `break LOOP_1`).
+	// The fixture has no labeled-continue construct, so we only assert labeled-break.
 	assert.Contains(t, out, "LOOP_1:")
-	assert.Contains(t, out, "continue LOOP_1")
+	assert.Contains(t, out, "break LOOP_1")
 }
 
 func TestCov_ComplexSwitch(t *testing.T) {

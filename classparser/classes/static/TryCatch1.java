@@ -5,9 +5,10 @@ import java.io.FileInputStream;
 
 public class TryCatch1 {
 	public static void main(String[] var0) {
+		FileInputStream var1 = null;
 		System.out.println(2);
 		try{
-			FileInputStream var1 = new FileInputStream(new File(""));
+			var1 = new FileInputStream(new File(""));
 			try{
 				System.out.println(1);
 				var1.close();
@@ -19,8 +20,8 @@ public class TryCatch1 {
 				}
 				throw var2;
 			}
-		}catch(Exception var1){
-			var1.printStackTrace();
+		}catch(Exception var1_1){
+			var1_1.printStackTrace();
 		}
 	}
 }
