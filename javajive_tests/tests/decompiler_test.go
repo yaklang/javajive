@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -140,7 +139,9 @@ func TestSyntax(t *testing.T) {
 	for _, testItem := range testCase {
 		t.Run(testItem.name, func(t *testing.T) {
 			t.Parallel()
-			fileName := filepath.Join("syntax_test", testItem.name)
+			// embed FS paths always use forward slashes; filepath.Join would emit
+			// a backslash on Windows and ReadFile would fail with "file does not exist".
+			fileName := "syntax_test/" + testItem.name
 			classRaw, err := classes.FS.ReadFile(fileName + ".class")
 			if err != nil {
 				t.Fatal(err)
