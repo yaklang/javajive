@@ -171,6 +171,14 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		if cast := parameterizedReturnCast(funcCtx, r.JavaValue); cast != "" {
 			return fmt.Sprintf("return (%s) (%s)", cast, expr)
 		}
+		// Bounded / concrete parameterized return vs a generic factory that infers Object
+		// (`ImmutableMap.of()`, `ImmutableMap.of(k,v)` with erased keys): a direct
+		// `(ImmutableMap<K,V>)` is inconvertible when K is bounded; the raw-erasure bridge
+		// `(ImmutableMap<K,V>) (ImmutableMap) of()` is an unchecked conversion. See
+		// factoryReturnRawBridge. Kill-switch: JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF.
+		if bridge, target := factoryReturnRawBridge(funcCtx, r.JavaValue); target != "" {
+			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
+		}
 		// A returned `this.field` read whose RECOVERED real generic type is a same-erasure but
 		// WILDCARD-parameterized type (`Comparator<? super E>`), pinned by the declared return type to a
 		// concrete parameterization (`Comparator<Object>`): the field read renders raw so no cast is
@@ -187,6 +195,15 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		// raw-erasure bridge `(Cut<C>) (Cut) value` is the only legal form. See
 		// genericSubtypeReturnRawBridge.
 		if bridge, target := genericSubtypeReturnRawBridge(funcCtx, r.JavaValue); target != "" {
+			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
+		}
+		// A returned `this.field` whose recovered generic type shares the declared return's raw
+		// erasure but carries DIFFERENT type arguments (guava ImmutableMultimap.asMap:
+		// `ImmutableMap<K, ? extends ImmutableCollection<V>>` field vs
+		// `ImmutableMap<K, Collection<V>>` return). A direct parameterization cast is
+		// inconvertible after wildcard capture (CAP#1); the raw-erasure bridge is unchecked.
+		// See parameterizedFieldReturnRawBridge.
+		if bridge, target := parameterizedFieldReturnRawBridge(funcCtx, r.JavaValue); target != "" {
 			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
 		}
 		// A `recv.m(...)` value whose recovered GENERIC return shares the declared return's raw erasure
@@ -346,6 +363,173 @@ func parameterizedReturnRawBridge(funcCtx *class_context.ClassContext, v values.
 	// Same raw erasure but DIFFERENT type args -> a direct cast is inconvertible; bridge is required.
 	// Identical strings (no mismatch) or different erasure (handled by other helpers) do not qualify.
 	if valRetStr == retStr || erasureName(valRetStr) != erasureName(retStr) {
+		return "", ""
+	}
+	return erasureName(retStr), retStr
+}
+
+// factoryReturnRawBridge wraps a generic factory call (`of` / `copyOf` / `build` / …) whose
+// inferred type is the same raw class as the declared return but with Object / missing type
+// arguments — so javac reports "inference variable X has incompatible bounds" or
+// `ImmutableMap<Object,Object> cannot be converted to ImmutableMap<K,V>` (K bounded or
+// concrete). Direct `(ImmutableMap<K,V>)` is inconvertible for bounded K; `(Ret)(Raw) call`
+// is an unchecked conversion. Includes 0-arg `of()` which parameterizedReturnCast excludes
+// as a poly expression (poly inference fails once a type arg is bounded). Kill-switch:
+// JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF.
+func factoryReturnRawBridge(funcCtx *class_context.ClassContext, v values.JavaValue) (string, string) {
+	if funcCtx == nil || v == nil {
+		return "", ""
+	}
+	if os.Getenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF") != "" {
+		return "", ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return "", ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	if !strings.Contains(retStr, "<") || funcCtx.IsTypeParam(retStr) {
+		return "", ""
+	}
+	if !factoryReturnRawBridgeTarget(erasureName(retStr)) {
+		return "", ""
+	}
+	call, ok := values.UnpackSoltValue(v).(*values.FunctionCallExpression)
+	if !ok || call == nil {
+		return "", ""
+	}
+	if !isGenericFactoryCall(call) {
+		return "", ""
+	}
+	vt := v.Type()
+	if vt == nil {
+		return "", ""
+	}
+	vStr := vt.String(funcCtx)
+	raw := erasureName(retStr)
+	vRaw := erasureName(vStr)
+	if vRaw != raw {
+		// Ordering.natural()/from() returned as Comparator<? super E>: different erasure
+		// (Ordering vs Comparator) but Ordering implements Comparator. A direct
+		// `(Comparator<? super E>) Ordering.natural()` is often inconvertible after
+		// natural() infers C=Comparable; the raw Comparator bridge is unchecked.
+		if (call.FunctionName == "natural" || call.FunctionName == "from" || call.FunctionName == "reverse") &&
+			(raw == "Comparator" || strings.HasSuffix(raw, ".Comparator")) &&
+			(vRaw == "Ordering" || strings.Contains(vRaw, "Ordering")) {
+			return "Comparator", retStr
+		}
+		// Collections.unmodifiableList returns List; the enclosing method may declare
+		// Iterable<L> (guava Striped.bulkGet). List <: Iterable, so the raw Iterable
+		// bridge is an unchecked conversion. A direct (Iterable<L>) List<Object> is
+		// inconvertible once asList(Object[]) pins T=Object.
+		if call.FunctionName == "unmodifiableList" &&
+			(raw == "Iterable" || strings.HasSuffix(raw, ".Iterable")) &&
+			(vRaw == "List" || strings.HasSuffix(vRaw, ".List")) {
+			return "Iterable", retStr
+		}
+		return "", ""
+	}
+	if vStr == retStr {
+		// 0-arg of() is a poly expression: the decompiler may already type it as the
+		// declared return, but javac re-infers Object when a type argument is bounded
+		// (K extends Enum). Still emit the raw bridge in that case.
+		if !(call.FunctionName == "of" && len(call.Arguments) == 0 && factoryReturnHasBoundOrConcreteArg(retStr, funcCtx)) {
+			return "", ""
+		}
+	}
+	// Same raw erasure, different args (Object, another type var, Comparable vs C, ...):
+	// a direct parameterization cast is often inconvertible when an arg is bounded; the
+	// raw-erasure bridge is an unchecked conversion. Includes Ordering.from(Comparator<B>)
+	// returning Ordering<T extends B> (equality T#2,B) and Range.closed inferring Comparable
+	// vs C. Previously restricted to Object/? value args, which missed those sites.
+	return raw, retStr
+}
+
+func factoryReturnHasBoundOrConcreteArg(retStr string, funcCtx *class_context.ClassContext) bool {
+	args, ok := topLevelTypeArgs(retStr)
+	if !ok {
+		return false
+	}
+	for _, ta := range args {
+		if !typeVarIsUnbounded(ta, funcCtx) {
+			return true
+		}
+	}
+	return false
+}
+
+func isGenericFactoryCall(call *values.FunctionCallExpression) bool {
+	if call == nil {
+		return false
+	}
+	cn := call.ClassName
+	if strings.Contains(cn, "Collector") || strings.Contains(cn, "java.util.stream") ||
+		strings.Contains(cn, "reactor.core") || strings.Contains(cn, "Flux") ||
+		strings.Contains(cn, "Mono") {
+		return false
+	}
+	switch call.FunctionName {
+	case "build":
+		return strings.Contains(cn, "Immutable") || strings.Contains(cn, "Builder") ||
+			strings.Contains(cn, "Imm")
+	case "reverse":
+		// Instance method: Ordering.natural().reverse() returned as Comparator<? super E>
+		// (guava Sets$DescendingSet.comparator). Not static.
+		return strings.Contains(cn, "Ordering")
+	case "of", "copyOf", "ofEntries", "emptySet", "emptyList", "emptyMap",
+		"natural", "allOf", "noneOf", "fromEntries", "from",
+		"closed", "open", "create", "openClosed", "closedOpen",
+		"atLeast", "atMost", "greaterThan", "lessThan", "all",
+		"singleton", "encloseAll", "unmodifiableList":
+		return call.IsStatic
+	}
+	return false
+}
+
+func factoryReturnRawBridgeTarget(raw string) bool {
+	if raw == "List" || strings.HasSuffix(raw, ".List") ||
+		raw == "Iterable" || strings.HasSuffix(raw, ".Iterable") {
+		return true
+	}
+	return strings.Contains(raw, "Immutable") ||
+		strings.Contains(raw, "Ordering") ||
+		strings.Contains(raw, "ContiguousSet") ||
+		strings.Contains(raw, "Range") ||
+		strings.Contains(raw, "Imm") ||
+		strings.Contains(raw, "MinMaxPriorityQueue") ||
+		strings.Contains(raw, "Striped") ||
+		strings.Contains(raw, "Comparator")
+}
+
+// parameterizedFieldReturnRawBridge wraps a returned `this.field` whose recovered generic type
+// shares the declared return's raw erasure but carries DIFFERENT type arguments. Canonical:
+// guava ImmutableMultimap.asMap `return this.map` where the field is
+// `ImmutableMap<K, ? extends ImmutableCollection<V>>` and the method returns
+// `ImmutableMap<K, Collection<V>>` -- javac captures the wildcard to CAP#1 and rejects the
+// assignment; inheritedFieldReturnCast deliberately bails (a direct parameterization cast is
+// inconvertible). `(Ret) (Raw) this.field` is an unchecked conversion. Kill-switch:
+// JDEC_PARAM_FIELD_RET_RAW_BRIDGE_OFF.
+func parameterizedFieldReturnRawBridge(funcCtx *class_context.ClassContext, v values.JavaValue) (string, string) {
+	if funcCtx == nil || v == nil {
+		return "", ""
+	}
+	if os.Getenv("JDEC_PARAM_FIELD_RET_RAW_BRIDGE_OFF") != "" {
+		return "", ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return "", ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	if !strings.Contains(retStr, "<") || funcCtx.IsTypeParam(retStr) {
+		return "", ""
+	}
+	fieldType := values.RecoverThisFieldInstantiatedType(funcCtx, v)
+	if fieldType == nil {
+		return "", ""
+	}
+	realStr := fieldType.String(funcCtx)
+	if realStr == retStr || erasureName(realStr) != erasureName(retStr) {
 		return "", ""
 	}
 	return erasureName(retStr), retStr
@@ -2556,6 +2740,17 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		declType := a.JavaValue.Type()
 		if lit, ok := a.JavaValue.(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
 			declType = a.LeftValue.Type()
+		}
+		// Method|Constructor slot later widened to Executable: IsFirst dump otherwise keeps the
+		// RHS type (Method), so `var2 = determineFactoryConstructor()` assigns Constructor to a
+		// Method local. Prefer the widened ref type. Kill-switch:
+		// JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF=1.
+		if os.Getenv("JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF") == "" && a.LeftValue != nil {
+			if lt := a.LeftValue.Type(); lt != nil {
+				if rf, ok := types.RawClassFQN(lt); ok && rf == "java.lang.reflect.Executable" {
+					declType = lt
+				}
+			}
 		}
 		// A ternary with a class-literal arm (`cond ? Foo.class : classField`) is a java.lang.Class
 		// value, but the arm's JavaValue.Type() reports the *referenced* class (Foo) to drive bare

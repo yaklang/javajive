@@ -1,6 +1,9 @@
 package types
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 // hierarchy.go 是 Phase 2 的类型层级/LUB 设施。反编译器此前完全没有类层级查询: 条件表达式/相位合并
 // 求公共类型时, MergeTypes 对「两个不同引用类型」只能退回第一臂类型 (types[0]), 于是
@@ -82,6 +85,7 @@ var jdkSuperEdges = map[string][]string{
 	"java.lang.reflect.Method":      {"java.lang.reflect.Member"},
 	"java.lang.reflect.Field":       {"java.lang.reflect.Member"},
 	"java.lang.reflect.Constructor": {"java.lang.reflect.Member"},
+	"java.lang.reflect.Executable":  {"java.lang.reflect.Member"},
 	"java.lang.reflect.Member":      {"java.lang.Object"},
 
 	// I/O stream family. Decorator streams (`in = new GZIPInputStream(in)`, `out = new
@@ -286,6 +290,44 @@ func classNameOf(t JavaType) (string, bool) {
 		return jc.Name, true
 	}
 	return "", false
+}
+
+// RawClassFQN returns the erasure FQN of a class or parameterized type
+// (`Constructor<?>` → `java.lang.reflect.Constructor`). Sibling LUB via classNameOf
+// still ignores parameterized types (Constructor<?> vs Method used to miss Member);
+// the Method|Constructor → Executable merge peels through this helper instead.
+func RawClassFQN(t JavaType) (string, bool) {
+	if n, ok := classNameOf(t); ok {
+		return n, true
+	}
+	if t == nil || t.IsArray() {
+		return "", false
+	}
+	if p, ok := t.RawType().(*JavaParameterizedType); ok && p.RawClassName != "" {
+		return p.RawClassName, true
+	}
+	return "", false
+}
+
+// ReflectExecKind classifies a type as the Method / Constructor / Executable family
+// (raw or parameterized, FQN or short name). Empty if none of those.
+func ReflectExecKind(t JavaType) string {
+	n, ok := RawClassFQN(t)
+	if !ok {
+		return ""
+	}
+	if i := strings.IndexByte(n, '<'); i >= 0 {
+		n = n[:i]
+	}
+	switch n {
+	case "java.lang.reflect.Executable", "Executable":
+		return "Executable"
+	case "java.lang.reflect.Constructor", "Constructor":
+		return "Constructor"
+	case "java.lang.reflect.Method", "Method":
+		return "Method"
+	}
+	return ""
 }
 
 // commonSuperType computes a declared type that accepts every arm: the least upper bound across all

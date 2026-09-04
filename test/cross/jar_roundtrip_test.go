@@ -14,8 +14,8 @@ package cross
 //     (顶层类 + 静态嵌套类 + 独立顶层类 + enum+switch + 泛型 + lambda), 走完整链路并断言重打包
 //     jar 的运行输出与原始字节码 jar 逐字节一致, 且每个类都能 load+verify。这是往返能力的回归闸门。
 //   - TestJarRoundTripRepackage: opt-in (ROUNDTRIP_JAR=<jar|all>), 需 ~/.m2 真实 jar。对真实
-//     jar 跑整链路并报告 tree 错误数 / verify 通过数 / 多出的合成类。codec 已实测全链路达标
-//     (tree=0, 107/107 verify, 调用差分一致), 故对 codec 硬断言 0 错误 + 0 verify 失败锁死成果。
+//     jar 跑整链路并报告 tree 错误数 / verify 通过数。provenClean 集合 (codec/gson/fastjson2/
+//     snakeyaml/jsoup/commons-lang3/guava/spring) 硬断言 tree=0 且 -Xverify:all fail=0。
 
 import (
 	"os"
@@ -31,10 +31,11 @@ import (
 const verifierSource = `import java.io.*; import java.util.*; import java.util.jar.*; import java.net.*;
 public class Verifier {
   public static void main(String[] a) throws Exception {
-    String jar = a[0];
-    URLClassLoader cl = new URLClassLoader(new URL[]{ new File(jar).toURI().toURL() }, ClassLoader.getSystemClassLoader());
+    URL[] urls = new URL[a.length];
+    for (int i = 0; i < a.length; i++) urls[i] = new File(a[i]).toURI().toURL();
+    URLClassLoader cl = new URLClassLoader(urls, ClassLoader.getSystemClassLoader());
     int ok=0, fail=0; List<String> fails=new ArrayList<>();
-    try (JarFile jf = new JarFile(jar)) {
+    try (JarFile jf = new JarFile(a[0])) {
       for (Enumeration<JarEntry> e=jf.entries(); e.hasMoreElements();) {
         JarEntry je=e.nextElement(); String n=je.getName();
         if(!n.endsWith(".class")||n.endsWith("module-info.class")) continue;
@@ -42,7 +43,7 @@ public class Verifier {
 
         String cn=n.substring(0,n.length()-6).replace('/','.');
         try { Class.forName(cn,false,cl); ok++; }
-        catch(Throwable t){ fail++; if(fails.size()<20) fails.add(cn+" -> "+t); }
+        catch(Throwable t){ fail++; if(fails.size()<40) fails.add(cn+" -> "+t); }
       }
     }
     System.out.println("VERIFY ok="+ok+" fail="+fail);
@@ -68,10 +69,22 @@ func buildVerifier(t *testing.T) string {
 }
 
 // verifyJarLoads runs the verifier over jarPath under -Xverify:all and returns (ok, fail, rawOutput).
-func verifyJarLoads(t *testing.T, verifierDir, jarPath string) (ok, fail int, raw string) {
+// extraCP is the same compile-time dependency path used to javac the decompiled tree (jars and
+// shim dirs). Guava AbstractFuture extends failureaccess's InternalFutureFailureAccess; spring
+// cglib tasks extend ant Task — those types are not inside the repackaged jar, just as they are
+// not inside the original. Measuring load+verify without them is an environment false-positive.
+func verifyJarLoads(t *testing.T, verifierDir, jarPath string, extraCP string) (ok, fail int, raw string) {
 	t.Helper()
 	java := lookJava(t)
-	cmd := exec.Command(java, "-Xverify:all", "-cp", verifierDir, "Verifier", jarPath)
+	args := []string{"-Xverify:all", "-cp", verifierDir, "Verifier", jarPath}
+	if extraCP != "" {
+		for _, p := range strings.Split(extraCP, string(os.PathListSeparator)) {
+			if p != "" {
+				args = append(args, p)
+			}
+		}
+	}
+	cmd := exec.Command(java, args...)
 	out, err := cmd.CombinedOutput()
 	raw = string(out)
 	if err != nil {
@@ -173,20 +186,26 @@ func TestJarRoundTripRepackage(t *testing.T) {
 
 			repackaged := filepath.Join(t.TempDir(), name+"-recompiled.jar")
 			zipClassesToJar(t, clsRoot, repackaged)
-			vok, vfail, vraw := verifyJarLoads(t, verifierDir, repackaged)
+			vok, vfail, vraw := verifyJarLoads(t, verifierDir, repackaged, cp)
 
 			t.Logf("[%s] units=%d decompileFail=%d treeErr=%d repackagedVerify(ok=%d fail=%d)",
 				name, units, decompFail, treeErr, vok, vfail)
+			if vfail != 0 {
+				t.Logf("[%s] verify fails:\n%s", name, firstNLines(vraw, 40))
+			}
 
 			// provenClean jars have demonstrated the full north-star chain (decompile → 0 tree errors →
 			// repackage → external JVM -Xverify:all on every class). Lock each so any regression in the
 			// round-trip capability fails CI loudly. Other jars are reported, not asserted, until cleared.
 			provenClean := map[string]bool{
-				"codec":     true, // commons-codec 1.15
-				"gson":      true, // gson 2.8.9
-				"fastjson2": true, // fastjson2 2.0.43
-				"snakeyaml": true, // snakeyaml 2.2
-				"jsoup":     true, // jsoup 1.10.2
+				"codec":         true, // commons-codec 1.15
+				"gson":          true, // gson 2.8.9
+				"fastjson2":     true, // fastjson2 2.0.43
+				"snakeyaml":     true, // snakeyaml 2.2
+				"jsoup":         true, // jsoup 1.10.2
+				"commons-lang3": true, // commons-lang3 3.12.0
+				"guava":         true, // guava 28.2-android (tree 0, 1892/1892 verify with failureaccess on CP)
+				"spring":        true, // spring-core 5.3.27 (tree 0, 952/952 verify with optional deps on CP)
 			}
 			if provenClean[name] {
 				if treeErr != 0 {
@@ -271,7 +290,7 @@ public class Helper {
 
 	// Every class in the rebuilt jar must load+verify.
 	verifierDir := buildVerifier(t)
-	if vok, vfail, vraw := verifyJarLoads(t, verifierDir, rebuiltJar); vfail != 0 {
+	if vok, vfail, vraw := verifyJarLoads(t, verifierDir, rebuiltJar, ""); vfail != 0 {
 		t.Fatalf("rebuilt jar failed verification: ok=%d fail=%d\n%s", vok, vfail, vraw)
 	}
 

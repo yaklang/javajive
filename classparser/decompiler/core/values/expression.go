@@ -786,8 +786,6 @@ func (f *FunctionCallExpression) instantiatedParamType(i int, funcCtx *class_con
 // compile) and never a concrete type (a real mismatch must not be blanket-cast). Kill-switch
 // JDEC_GENERIC_SELFMETHOD_PARAM_OFF.
 func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
-	if f.FunctionName == "initializeTransientFields" {
-	}
 	if os.Getenv("JDEC_GENERIC_SELFMETHOD_PARAM_OFF") != "" || f.IsStatic || f.Object == nil || funcCtx == nil {
 		return nil
 	}
@@ -812,18 +810,12 @@ func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_
 		}
 	}
 	ref, ok := UnpackSoltValue(f.Object).(*JavaRef)
-	if f.FunctionName == "initializeTransientFields" {
-	}
 	if !ok || !ref.IsThis {
 		return nil
 	}
 	sig := funcCtx.MethodSignature(f.FunctionName, len(f.Arguments))
-	if f.FunctionName == "initializeTransientFields" {
-	}
 	if sig == "" {
 		sig = funcCtx.MethodSignatureByDesc(f.FunctionName, f.Descriptor)
-		if f.FunctionName == "initializeTransientFields" {
-		}
 	}
 	if sig == "" {
 		// Fallback: the method has no Signature attribute (non-generic method), but its descriptor
@@ -839,8 +831,6 @@ func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_
 			pt := f.FuncType.ParamTypes[i]
 			if pt != nil {
 				ptStr := pt.String(funcCtx)
-				if f.FunctionName == "initializeTransientFields" {
-				}
 				if strings.HasSuffix(ptStr, "Class") && !strings.Contains(ptStr, "[") && !strings.Contains(ptStr, "<") {
 					formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
 					if len(formals) != 1 && len(funcCtx.ClassTypeParams) == 1 {
@@ -1082,6 +1072,108 @@ func (f *FunctionCallExpression) sameClassStaticMethodTypeVarArgCast(i int, func
 	return paramTypeStr
 }
 
+// enclosingTypeVarArgCast returns the in-scope type-variable name to wrap argument i in when the
+// callee's i-th formal is a type variable of that same name and the argument erased to Object.
+// Canonical: guava AbstractMapBasedMultimap$AsMap.wrapEntry
+// `Maps.immutableEntry(objKey, wrapCollection(objKey, col))` where both formals are K and K is
+// AsMap's class type parameter. Without `(K)` javac infers immutableEntry's K from Object
+// ("inference variable K#1 has incompatible bounds"). SiblingClassSig recovers the callee
+// Signature (jar path); a single-class decompile without resolver does not fire.
+// Kill-switch: JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF.
+func (f *FunctionCallExpression) enclosingTypeVarArgCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF") != "" || funcCtx == nil ||
+		funcCtx.SiblingClassSig == nil {
+		return ""
+	}
+	if i < 0 || i >= len(f.Arguments) {
+		return ""
+	}
+	// Tightly gated so this does not subsume genericMethodWitnessArgParamType
+	// (CrossWitnessSeed pick(N, Object) must stay on JDEC_GENERIC_METHOD_WITNESS_OFF).
+	// immediateFuture: guava LocalCache$LoadingValueReference ternary
+	// `set(v) ? futureValue : Futures.immediateFuture(obj)` infers ListenableFuture<Object>
+	// vs ListenableFuture<V> ("bad type in conditional expression").
+	if f.FunctionName != "immutableEntry" && f.FunctionName != "wrapCollection" &&
+		f.FunctionName != "immediateFuture" && f.FunctionName != "newEntry" &&
+		f.FunctionName != "closed" {
+		return ""
+	}
+	internal := strings.ReplaceAll(f.ClassName, ".", "/")
+	classSig, methodSigs, ok := funcCtx.SiblingClassSig(internal)
+	if !ok || methodSigs == nil {
+		return ""
+	}
+	sig := ""
+	if os.Getenv("JDEC_SIBLING_DESC_SIG_OFF") == "" {
+		sig = methodSigs[class_context.MethodDescKey(f.FunctionName, f.Descriptor)]
+	}
+	if sig == "" {
+		sig = methodSigs[class_context.MethodSigKey(f.FunctionName, len(f.Arguments))]
+	}
+	if sig == "" {
+		return ""
+	}
+	if !f.methodParamIsTypeVar(sig, classSig, i, funcCtx) {
+		return ""
+	}
+	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+	if i >= len(params) || params[i] == nil {
+		return ""
+	}
+	paramStr := params[i].String(funcCtx)
+	if strings.Contains(paramStr, "<") || !funcCtx.IsTypeParam(paramStr) {
+		return ""
+	}
+	// Class type variables are not in scope inside static methods
+	// (`non-static type variable C cannot be referenced from a static context`).
+	// ContiguousSet.closed(int,int) is static and was wrapping Integer args as
+	// (C) after Range.closed was added to this helper. Method-owned type vars
+	// (create's own <C>) stay eligible.
+	if funcCtx.IsStatic {
+		owned := false
+		for _, n := range types.MethodFormalTypeParamNames(funcCtx.CurrentMethodSig) {
+			if n == paramStr {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			return ""
+		}
+	}
+	arg := f.Arguments[i]
+	if lit, ok := UnpackSoltValue(arg).(*JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+		return ""
+	}
+	vt := arg.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	jc, ok := raw.(*types.JavaClass)
+	if !ok {
+		return ""
+	}
+	if funcCtx.IsTypeParam(jc.Name) || jc.Name == paramStr {
+		return ""
+	}
+	// immutableEntry/wrapCollection/immediateFuture: Object-erased keys/values.
+	// newEntry: the next-entry formal is E (in scope) but the arg is the erased bound
+	// InternalEntry (guava MapMakerInternalMap$Segment.put).
+	// closed: Range.closed(C,C) fed Comparable (erased bound of C extends Comparable)
+	// after Ordering.natural().max/min (guava RegularContiguousSet.intersection).
+	if f.FunctionName != "newEntry" && f.FunctionName != "closed" && jc.Name != "java.lang.Object" {
+		return ""
+	}
+	return paramStr
+}
+
 // comparatorRawArgCast returns the raw `Comparator` cast string for the i-th argument when the call is a
 // JDK sort/search static (Arrays.sort / Arrays.binarySearch / Collections.sort / Collections.binarySearch)
 // and the i-th DESCRIPTOR parameter is java.util.Comparator. The array/list companion argument's element
@@ -1190,6 +1282,56 @@ func (f *FunctionCallExpression) collectionAddWildcardReceiverRawCast(funcCtx *c
 		return ""
 	}
 	return raw
+}
+
+// wildcardArgInvariantAddCast returns the raw element class to wrap argument i in when `recv.add(x)`
+// has an INVARIANT parameterized element type (`List<Cell<R,C,V>>`) and the argument is a
+// WILDCARD parameterization of the same raw class (`Cell<? extends R, ? extends C, ? extends V>`).
+// javac captures the wildcard to CAP#1 and rejects the add; a raw `(Cell)` cast is an unchecked
+// conversion. Real hit: guava ImmutableTable$Builder.put(Cell) `this.cells.add(var1)`.
+// Kill-switch: JDEC_WILDCARD_ARG_ADD_CAST_OFF.
+func (f *FunctionCallExpression) wildcardArgInvariantAddCast(i int, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_WILDCARD_ARG_ADD_CAST_OFF") != "" || f.IsStatic || f.Object == nil {
+		return ""
+	}
+	if i != 0 || (f.FunctionName != "add" && f.FunctionName != "offer") || len(f.Arguments) != 1 {
+		return ""
+	}
+	_, typeArgs := f.receiverParamTypeArgs(funcCtx)
+	if len(typeArgs) != 1 || typeArgs[0] == nil {
+		return ""
+	}
+	elemPT, ok := types.AsParameterizedType(typeArgs[0])
+	if !ok || elemPT.RawClassName == "" {
+		return ""
+	}
+	for _, ta := range elemPT.TypeArgs {
+		if types.IsWildcardType(ta) {
+			return "" // receiver element itself is wildcard: the existing raw-receiver helper
+		}
+	}
+	arg := f.Arguments[0]
+	if arg == nil || arg.Type() == nil {
+		return ""
+	}
+	argPT, ok := types.AsParameterizedType(arg.Type())
+	if !ok || argPT.RawClassName != elemPT.RawClassName {
+		return ""
+	}
+	hasWild := false
+	for _, ta := range argPT.TypeArgs {
+		if types.IsWildcardType(ta) {
+			hasWild = true
+			break
+		}
+	}
+	if !hasWild {
+		return ""
+	}
+	if funcCtx != nil {
+		return funcCtx.ShortTypeName(elemPT.RawClassName)
+	}
+	return elemPT.RawClassName
 }
 
 // wildcardConsumerReceiverMethods maps a SINGLE-type-parameter "consumer" interface (a value is fed IN to
@@ -2042,6 +2184,24 @@ func jdkCalleeParamIsErasedTypeVar(className, method string, paramIndex, argc in
 	return false
 }
 
+// enumValueOfClassArgCast returns the raw `Class` cast that Enum.valueOf's first argument needs
+// when the static type is Class<?> / Class<X> rather than Class<T extends Enum<T>>. A raw Class
+// argument makes the invocation unchecked (legal); Class<?> does not satisfy the bound.
+// Kill-switch: JDEC_ENUM_VALUEOF_CLASS_CAST_OFF.
+func (f *FunctionCallExpression) enumValueOfClassArgCast() string {
+	if f == nil || os.Getenv("JDEC_ENUM_VALUEOF_CLASS_CAST_OFF") != "" {
+		return ""
+	}
+	if f.FunctionName != "valueOf" || len(f.Arguments) != 2 {
+		return ""
+	}
+	cn := f.ClassName
+	if cn != "java.lang.Enum" && cn != "java/lang/Enum" && cn != "Enum" {
+		return ""
+	}
+	return "Class"
+}
+
 // classLiteralArgToClassParam reports whether arg is a class literal `X.class` being passed to a
 // `java.lang.Class` parameter. A class literal is a `Class<X>` value, but JavaClassValue.Type() reports
 // the REPRESENTED class X (so a static call on the literal renders `X.method()` rather than
@@ -2527,9 +2687,15 @@ var rawFIMethodRefCastFamily = map[string]bool{
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
-	if f.FunctionName == "initializeTransientFields" {
-	}
-	if f.FunctionName == "initializeTransientFields" && i == 0 {
+	// Enum.valueOf(Class<T extends Enum<T>>, String) rejects a Class<?> / raw Class argument
+	// ("method valueOf in class Enum<E> cannot be applied"). The source carried an unchecked
+	// `(Class)` cast that bytecode drops as a no-op checkcast on Class. Re-emit it. Real hit:
+	// spring MergedAnnotationReadingVisitor.visitEnum(ClassUtils.resolveClassName(...), name).
+	// Kill-switch: JDEC_ENUM_VALUEOF_CLASS_CAST_OFF.
+	if i == 0 {
+		if cast := f.enumValueOfClassArgCast(); cast != "" {
+			return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+		}
 	}
 	// A METHOD REFERENCE passed to a constructor whose i-th formal is a RAW functional interface
 	// (raw BiConsumer.accept(Object,Object) etc.) fails to bind ("invalid method reference"): the
@@ -2592,6 +2758,17 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	// instead of Object and the method's type inference resolves (commons-lang3 Range.intersectionWith
 	// `between((T) var2, (T) ..., this.getComparator())`).
 	if cast := f.sameClassStaticMethodTypeVarArgCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	// An Object-typed argument feeding a callee formal that is a type variable whose NAME is
+	// in scope at the call site (AsMap's K passed to Maps.immutableEntry(K,V) / wrapCollection(K,...)):
+	// the source's `(K)` cast erased to a no-op. Re-emit it so javac infers the factory from K
+	// rather than Object ("inference variable K#1 has incompatible bounds").
+	// Kill-switch: JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF.
+	if cast := f.enclosingTypeVarArgCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	if cast := f.wildcardArgInvariantAddCast(i, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	argType := f.FuncType.ParamTypes[i]

@@ -147,6 +147,19 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		if ref.Type().String(ctx) == typ.String(ctx) {
 			return ref, false
 		}
+		// After reachingRefSlotExecutableArmMerge widens the slot to Executable, the Constructor
+		// (or Method) store must reuse that ref: Executable vs Constructor<?> still disagree as
+		// strings, so the raw-generic / equal-type gates above miss. Tight FQN gate: current is
+		// Executable and val is Method or Constructor. Kill-switch:
+		// JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF=1.
+		if os.Getenv("JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF") == "" {
+			if types.ReflectExecKind(ref.Type()) == "Executable" {
+				switch types.ReflectExecKind(typ) {
+				case "Method", "Constructor":
+					return ref, false
+				}
+			}
+		}
 		// Same erased class, differing ONLY in parameterized-vs-raw (e.g. a loop induction local
 		// declared `Node<K,V>` reassigned from a RAW field read `node.parent` whose static type is the
 		// erased field type `Node`). The string compare above sees `Node<K,V>` != `Node` and would mint

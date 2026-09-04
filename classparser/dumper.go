@@ -884,6 +884,32 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		c.FuncCtx.TypeParams = classTypeParamNames
 		c.FuncCtx.RawEraseTypeVars = rawEraseTypeVars
 		c.FuncCtx.StandaloneEraseTypeVars = standaloneEraseTypeVars
+		// A no-own-formal subclass that DECLARES the enclosing vars (injected) must still
+		// force-erase them in METHOD PARAMETER positions when the own-formal super
+		// standalone-erased those same names (Itr.output(Object,Object) vs $1.output(K,V)).
+		// Only names that were skipped from StandaloneEraseTypeVars because they are
+		// declared here. Gated on the same kill-switch as standalone erase.
+		if os.Getenv("JDEC_INNER_STANDALONE_ERASE_OFF") == "" && len(rawEraseTypeVars) > 0 {
+			declaredHere := map[string]bool{}
+			for _, n := range classTypeParamNames {
+				declaredHere[n] = true
+			}
+			force := map[string]string{}
+			bounds := c.enclosingTypeParamErasures(rawEraseTypeVars)
+			for name := range rawEraseTypeVars {
+				if !declaredHere[name] {
+					continue
+				}
+				if e, ok := bounds[name]; ok && e != "" {
+					force[name] = e
+				} else {
+					force[name] = "java.lang.Object"
+				}
+			}
+			if len(force) > 0 {
+				c.FuncCtx.ForceParamEraseTypeVars = force
+			}
+		}
 		// ClassTypeParams is the CLASS-only snapshot (never extended with a method's own `<T>` while
 		// that method renders); it lets typeVarReturnCast recover `this`'s real parameterization.
 		c.FuncCtx.ClassTypeParams = classTypeParamNames
@@ -1276,10 +1302,157 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. Kill-switch:
 	// JDEC_ADD_SWITCH_BREAK_OFF=1.
 	full = addBreakToSwitchCases(full)
+	// fixSwitchBreakMissingReturn inserts `return null;` after a switch that is the last statement
+	// of its enclosing block in a reference-returning method, when a case exits via `break`
+	// (switch fall-through reconstructed as break: commons-lang3 NumberUtils.createNumber).
+	// Kill-switch: JDEC_FIX_SWITCH_BREAK_RETURN_OFF=1.
+	full = fixSwitchBreakMissingReturn(full)
 	// wrapFieldInitializerReflection converts a field initializer containing a reflection call
 	// (getMethod etc.) that throws a checked exception into a static-block init with try/catch.
 	// Kill-switch: JDEC_WRAP_FIELD_INIT_OFF=1.
 	full = wrapFieldInitializerReflection(full)
+	// wrapUncaughtGetConstructor wraps a bare first-stmt `cls.getConstructor(...)` in
+	// try/catch(NoSuchMethodException). Class-gated to AddDelegateTransformer (global wrap
+	// unmasks snakeyaml/fastjson2). Kill-switch: JDEC_WRAP_GETCONSTRUCTOR_OFF=1.
+	full = wrapUncaughtGetConstructor(full)
+	// fixImmutableBuilderWitness inserts an explicit type witness on
+	// `ImmutableMap<A,B> f = ImmutableMap.builder()` so builder() does not infer <Object,Object>.
+	// Kill-switch: JDEC_IMMUTABLE_BUILDER_WITNESS_OFF=1.
+	full = fixImmutableBuilderWitness(full)
+	// fixNeverThrownCNFE inserts `Class.forName("java.lang.Object")` into a try whose
+	// catch(ClassNotFoundException) would otherwise be "never thrown" (spring
+	// ConfigurableObjectInputStream: forName reconstructed outside the catch's try).
+	// Kill-switch: JDEC_CNFE_NEVER_THROWN_OFF=1.
+	full = fixNeverThrownCNFE(full)
+	// fixSelectMethodsAmbiguous casts the lambda in MethodIntrospector.selectMethods(Class,
+	// MethodFilter) so javac does not confuse it with the MetadataLookup overload.
+	// Kill-switch: JDEC_SELECTMETHODS_CAST_OFF=1.
+	full = fixSelectMethodsAmbiguous(full)
+	// fixAsMapFunctionRawCast wraps asMap(lambda, Adapt...) lambdas in a raw Function
+	// cast so javac does not reject Function<MergedAnnotation, AnnotationAttributes>
+	// against Function<? super MergedAnnotation<A>, T>.
+	// Kill-switch: JDEC_ASMAP_FUNCTION_CAST_OFF=1.
+	full = fixAsMapFunctionRawCast(full)
+	// fixNeverThrownIOException inserts `if(false)throw new IOException();` into a try
+	// whose catch(IOException) would otherwise be "never thrown". Real hit: guava
+	// Joiner.appendTo(StringBuilder, Iterator) which casts StringBuilder to Appendable
+	// to call the throwing overload; javac still proves the StringBuilder overload.
+	// Kill-switch: JDEC_IOEXCEPTION_NEVER_THROWN_OFF=1.
+	full = fixNeverThrownIOException(full)
+	// fixThrowClassCastDropsThrowable unwraps `throw ((Throwable)(cls.cast(x)))` to
+	// `throw cls.cast(x)` so a method `throws X` (X a type variable) actually throws X
+	// rather than undeclared Throwable. Real hit: guava Throwables.throwIfInstanceOf.
+	// Kill-switch: JDEC_THROW_CLASS_CAST_DROP_THROWABLE_OFF=1.
+	full = fixThrowClassCastDropsThrowable(full)
+	// fixReplaceAllListStreamCast casts the replaceAll value param to List before .stream()
+	// on a raw HashMap (l1 is Object). Real hit: spring SpringFactoriesLoader.loadSpringFactories.
+	// Kill-switch: JDEC_REPLACEALL_LIST_STREAM_CAST_OFF=1.
+	full = fixReplaceAllListStreamCast(full)
+	// fixClassMapEntryPutCasts inserts (Class) on raw Map.Entry getKey/getValue fed to a
+	// Class-valued map. Real hit: spring ClassUtils <clinit> primitiveTypeToWrapperMap.
+	// Kill-switch: JDEC_CLASS_MAP_ENTRY_PUT_CAST_OFF=1.
+	full = fixClassMapEntryPutCasts(full)
+	// fixVisitAnnotationConsumerCast rewrites Consumer<MergedAnnotation> to raw Consumer
+	// so it applies to Consumer<MergedAnnotation<T>>. Real hit: spring
+	// MergedAnnotationReadingVisitor.visitAnnotation.
+	// Kill-switch: JDEC_VISITANNOTATION_CONSUMER_CAST_OFF=1.
+	full = fixVisitAnnotationConsumerCast(full)
+	// fixValueDifferenceCreateCast wraps Maps$ValueDifferenceImpl.create(...) in a raw
+	// MapDifference$ValueDifference cast so put(K, ValueDifference<V>) does not infer
+	// V from Object,Object. Real hit: guava Maps.doDifference.
+	// Kill-switch: JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF=1.
+	full = fixValueDifferenceCreateCast(full)
+	// Scoped to the exact getUninterruptibly empty-try shape (not a class-wide regex).
+	full = fixGetUninterruptiblyGetInTry(full)
+	// Scoped to the exact drainUninterruptibly empty-try shape: poll() folded out of
+	// the InterruptedException catch (guava Queues, unmasked once DescendingSet compiled).
+	full = fixDrainUninterruptiblyPollInTry(full)
+	// TRANSPOSE_CELL is Function<Cell<?,?,?>, Cell<?,?,?>>; Iterators.transform then
+	// infers T from the wildcards instead of the Iterator<Cell<C,R,V>> return
+	// ("inference variable T has incompatible bounds"). Raw Function is unchecked.
+	// Kill-switch: JDEC_TRANSPOSE_CELL_FUNCTION_CAST_OFF=1.
+	full = fixTransposeCellFunctionCast(full)
+	// Class.getConstructors() is Constructor<?>[]; asList infers List<Constructor<?>>
+	// which cannot convert to List<Constructor<X>> (preferringStrings). Raw List
+	// is unchecked. Kill-switch: JDEC_PREFERSTRINGS_ASLIST_CAST_OFF=1.
+	full = fixPreferringStringsAsListCast(full)
+	// SynchronizedNavigableMap lazy-init accessors: CFG emptied the
+	// synchronized body (field==null assign + return), leaving a non-void
+	// method with no return. Restore the original lazy-init reconstruct.
+	// Kill-switch: JDEC_SYNC_LAZY_NAV_RETURN_OFF=1.
+	full = fixSyncLazyNavigableReturn(full)
+	// AbstractCatchingFuture.run: CFG copied the finally-clear into try/catch
+	// AND emitted a second catch(Throwable) for the finally-rethrow, which
+	// javac rejects ("exception Throwable has already been caught"). Fold
+	// back to try/catch/finally. Kill-switch: JDEC_CATCHING_FUTURE_FINALLY_OFF=1.
+	full = fixCatchingFutureFinally(full)
+	// AbstractService.startAsync/stopAsync: same finally-copied-into-catch(Throwable)
+	// twice. Kill-switch: JDEC_ABSTRACT_SERVICE_FINALLY_OFF=1.
+	full = fixAbstractServiceFinally(full)
+	// Monitor: empty try{break} catch(IE) with tryLock/awaitNanos folded out.
+	// Inject a never-taken throw so the catch is live, and wrap the folded
+	// calls so InterruptedException is not unreported. Kill-switch:
+	// JDEC_MONITOR_IE_TRY_OFF=1.
+	full = fixMonitorInterruptedTry(full)
+	// AbstractFuture$SynchronizedHelper cas* methods: CFG emptied the
+	// synchronized CAS body (private outer fields aren't denotable from the
+	// flattened inner class), leaving boolean methods with no return.
+	// Kill-switch: JDEC_SYNC_HELPER_CAS_RETURN_OFF=1.
+	full = fixSyncHelperCasReturn(full)
+	// ReschedulableCallable.reschedule: lock.unlock finally cloned into
+	// two catch(Throwable). Kill-switch: JDEC_RESCHEDULE_UNLOCK_FINALLY_OFF=1.
+	full = fixRescheduleUnlockFinally(full)
+	// General: consecutive catch(Throwable x){UNIQUE; COMMON} catch(Throwable x){COMMON; throw x}
+	// is a finally reconstruct. Remaining guava inner classes keep unmasking this shape.
+	// Kill-switch: JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF=1.
+	full = fixDupThrowableCatchFinally(full)
+	// MoreExecutors.isAppEngineWithApiClasses: outer try is Class.forName
+	// (throws CNFE) but the catch is NoSuchMethodException (getMethod lives
+	// in the inner try). Kill-switch: JDEC_APPENGINE_CNFE_CATCH_OFF=1.
+	full = fixAppEngineCNFECatch(full)
+	// RateLimiter.tryAcquire(int,long,TimeUnit): CFG emptied the synchronized
+	// body and dropped the return. Kill-switch: JDEC_RATELIMITER_TRYACQUIRE_RETURN_OFF=1.
+	full = fixRateLimiterTryAcquireReturn(full)
+	// AnnotationReadingVisitorUtils.convertClassValues: var9_1 is used as both
+	// String[] and Class[] (ternary on classValuesAsString); declaring String[]
+	// makes `new Class[n]` / Class elements inconvertible. Object[] is the LUB.
+	// put(entry.getKey(), throwable) needs (String) on the raw Map.Entry key.
+	// Kill-switch: JDEC_CONVERT_CLASS_VALUES_OBJECT_ARRAY_OFF=1.
+	full = fixConvertClassValuesObjectArray(full)
+	// MergedAnnotationCollectors.toAnnotationArray finisher: (Annotation[])
+	// toArray((Object[]) generator.apply) pins R to Annotation, incompatible
+	// with bounded R extends Annotation. Drop both casts so toArray infers R[].
+	// Kill-switch: JDEC_TO_ANNOTATION_ARRAY_FINISHER_OFF=1.
+	full = fixToAnnotationArrayFinisher(full)
+	// Raw Flux.doOnNext lambda param is Object; logValue/touchDataBuffer want
+	// DataBuffer. Kill-switch: JDEC_DATABUFFER_LAMBDA_CAST_OFF=1.
+	full = fixDataBufferLambdaCast(full)
+	// MutinyRegistrar FROM-publisher lambdas: publisher(Object) vs Publisher.
+	// Kill-switch: JDEC_MUTINY_PUBLISHER_CAST_OFF=1.
+	full = fixMutinyPublisherCast(full)
+	// Raw SAM / generic method-ref sites that lose the source's FI cast.
+	// Kill-switch: JDEC_SPRING_METHODREF_CAST_OFF=1.
+	full = fixSpringMethodRefCasts(full)
+	// DataBufferUtils.readAsynchronousFileChannel: Flux.create lambda sink
+	// is FluxSink<Object>; ReadCompletionHandler wants FluxSink<DataBuffer>.
+	// Kill-switch: JDEC_FLUX_CREATE_DATABUFFER_OFF=1.
+	full = fixFluxCreateDataBufferWitness(full)
+	// UrlResource(String,String,String): new URI throws URISyntaxException, which
+	// the source wrapped as MalformedURLException. Kill-switch:
+	// JDEC_URLRESOURCE_URI_SYNTAX_OFF=1.
+	full = fixUrlResourceURISyntax(full)
+	// PercInstantiator: getDeclaredMethod moved to a field-init try/catch, leaving
+	// the constructor catch(RuntimeException | NoSuchMethodException) with NSME
+	// never thrown. Kill-switch: JDEC_PERC_NSME_CATCH_OFF=1.
+	full = fixPercNSMECatch(full)
+	// FutureAdapter.adaptInternal: CFG emptied the synchronized switch, leaving
+	// a T-returning method with no return. Kill-switch: JDEC_FUTUREADAPTER_RETURN_OFF=1.
+	full = fixFutureAdapterReturn(full)
+	// If-diamond split of a post-merge try/catch or try/finally leaks `varN = Exception;`.
+	// Reconstruct from the sibling arm (Monitor.enterWhen / InetAddresses.textToNumericFormatV6).
+	// Kill-switch: JDEC_LEAKED_EXCEPTION_SENTINEL_OFF=1. Also applied per-method before
+	// the sentinel-degrade stub so the method is rebuilt instead of stubbed.
+	full = fixLeakedExceptionSentinel(full)
 	return full, nil
 }
 
@@ -3140,9 +3313,9 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				for i, pt := range descriptorParamTypes {
 					paramName := fmt.Sprintf("var%d", i+paramSlotOffset)
 					if i == len(descriptorParamTypes)-1 && isVarArgs && pt.IsArray() {
-						paramsNewStrList = append(paramsNewStrList, fmt.Sprintf("%s... %s", pt.ElementType().String(c.FuncCtx), paramName))
+						paramsNewStrList = append(paramsNewStrList, fmt.Sprintf("%s... %s", renderMethodParamType(pt.ElementType(), c.FuncCtx), paramName))
 					} else {
-						paramsNewStrList = append(paramsNewStrList, fmt.Sprintf("%s %s", pt.String(c.FuncCtx), paramName))
+						paramsNewStrList = append(paramsNewStrList, fmt.Sprintf("%s %s", renderMethodParamType(pt, c.FuncCtx), paramName))
 					}
 				}
 			} else {
@@ -3153,11 +3326,11 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				for i, val := range samParams {
 					typ := val.Type()
 					if i == len(samParams)-1 && isVarArgs && typ != nil && typ.IsArray() {
-						paramsNewStrList = append(paramsNewStrList, fmt.Sprintf("%s... %s", typ.ElementType().String(c.FuncCtx), val.String(c.FuncCtx)))
+						paramsNewStrList = append(paramsNewStrList, fmt.Sprintf("%s... %s", renderMethodParamType(typ.ElementType(), c.FuncCtx), val.String(c.FuncCtx)))
 					} else {
 						typName := "java.lang.Object"
 						if typ != nil {
-							typName = typ.String(c.FuncCtx)
+							typName = renderMethodParamType(typ, c.FuncCtx)
 						}
 						// A narrow int-category parameter (char/byte/short) whose slot was widened to
 						// int by an in-body int reassignment must still be DECLARED with its authoritative
@@ -3166,10 +3339,14 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						// `char safeMin` ctor). The descriptor is the ground truth for primitive params.
 						if !isLambda && descTailOffset >= 0 {
 							if dt := paramDescriptorNarrowType(descriptorParamTypes, descTailOffset+i, typ); dt != nil {
-								typName = dt.String(c.FuncCtx)
+								typName = renderMethodParamType(dt, c.FuncCtx)
 							}
 						}
 						paramsNewStrList = append(paramsNewStrList, fmt.Sprintf("%s %s", typName, val.String(c.FuncCtx)))
+						// Force-erased params render as Object in the signature; retype the JavaRef so
+						// the body sees Object too (otherwise `return var2` stays typed V while the
+						// declaration is Object → "Object cannot be converted to V"; $1.output).
+						retypeForceErasedParam(val, typ, typName, c.FuncCtx)
 					}
 				}
 			}
@@ -3525,28 +3702,27 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 		paramList := []string{}
 		// fetch from method type
 		paramTypes := methodType.FunctionType().ParamTypes
-		// An ABSTRACT method's parameters must NOT standalone-erase an enclosing type variable to Object:
-		// a no-own-formal sibling override (guava AbstractMapBasedMultimap$1.output(K,V), K/V its own
-		// injected params) would then clash with the erased `output(Object,Object)`. Keeping the bare
-		// (undeclared) variable is no worse than before the erasure existed. Restored right after.
-		prevSuppress := funcCtx.SuppressStandaloneErase
-		funcCtx.SuppressStandaloneErase = true
+		// Abstract method parameters now standalone-erase undeclarable enclosing type vars
+		// (Itr.output(K,V) -> output(Object,Object)) so the flattened unit compiles. Matching
+		// no-own-formal sibling overrides force-erase the same names via ForceParamEraseTypeVars
+		// (AbstractMapBasedMultimap$1.output) so the override relation is preserved. Previously
+		// SuppressStandaloneErase kept the bare (undeclared) names, which left Itr itself failing
+		// "cannot find symbol: class K".
 		for idx, t := range paramTypes {
-			typeName := t.String(funcCtx)
+			typeName := renderMethodParamType(t, funcCtx)
 			// 末参为 varargs 时必须渲染成「元素类型 + ...」(如 Feature...), 不能是「数组类型 + ...」
 			// (Feature[]...)。后者会被 javac 当成 Feature[] 的 varargs (descriptor [[LFeature;), 与子类
 			// 重写的 Feature... (descriptor [LFeature;) 不再 override-equivalent → 子类报「is not abstract
 			// and does not override」。这里此前漏掉了 ElementType 剥离 (拼接式方法/lambda/stub 路径都对),
 			// 是 fastjson2 JSONPath.set 等抽象 varargs 方法的整族重编译失败根因。
 			if isVarArgs && idx == len(paramTypes)-1 && t.IsArray() && os.Getenv("JDEC_VARARGS_ABSTRACT_FIX_OFF") == "" {
-				paramList = append(paramList, fmt.Sprintf("%s... var%d", t.ElementType().String(funcCtx), idx))
+				paramList = append(paramList, fmt.Sprintf("%s... var%d", renderMethodParamType(t.ElementType(), funcCtx), idx))
 			} else if isVarArgs && idx == len(paramTypes)-1 {
 				paramList = append(paramList, fmt.Sprintf("%s... var%d", typeName, idx))
 			} else {
 				paramList = append(paramList, fmt.Sprintf("%s var%d", typeName, idx))
 			}
 		}
-		funcCtx.SuppressStandaloneErase = prevSuppress
 		paramsNewStr = strings.Join(paramList, ", ")
 	}
 	if isLambda {
@@ -4426,6 +4602,64 @@ func lambdaDepthPerLine(lines []string) []int {
 // regions that contain local variable declarations.
 var methodOrInitBlockRe = regexp.MustCompile(`^\t+(?:public|protected|private|static|final|synchronized|abstract|native|default|[\w$<>\[\].,? ]+)\s+\w+\s*\([^;]*\)\s*(?:throws[^{]*)?\{`)
 
+// applyLineBraces walks ln's braces starting from depth and returns the new depth plus whether
+// depth hit 0 on a close (method/block ended on this line). Braces inside "strings", 'chars',
+// and // comments are ignored so a reconstructed `new StringBuilder("{")` cannot swallow later
+// methods. Real hit: spring SynthesizedMergedAnnotationInvocationHandler.toString contains
+// `new StringBuilder("{")`; naive counting merged toString through class-end, so getName's
+// `String var1` was treated as a lambda capture of getAttributeValue's Method parameter
+// (`final String var1_f1 = var1`). Kill-switch: JDEC_BRACE_SKIP_STRINGS_OFF=1.
+func applyLineBraces(ln string, depth int) (int, bool) {
+	skip := os.Getenv("JDEC_BRACE_SKIP_STRINGS_OFF") != "1"
+	inStr, inChar, escaped := false, false, false
+	for i := 0; i < len(ln); i++ {
+		c := ln[i]
+		if skip {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if inStr {
+				if c == '\\' {
+					escaped = true
+				} else if c == '"' {
+					inStr = false
+				}
+				continue
+			}
+			if inChar {
+				if c == '\\' {
+					escaped = true
+				} else if c == '\'' {
+					inChar = false
+				}
+				continue
+			}
+			if c == '/' && i+1 < len(ln) && ln[i+1] == '/' {
+				break
+			}
+			if c == '"' {
+				inStr = true
+				continue
+			}
+			if c == '\'' {
+				inChar = true
+				continue
+			}
+		}
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return depth, true
+			}
+		}
+	}
+	return depth, false
+}
+
 // methodBodyRange returns the [startLineIdx, endLineIdx) range of the method/ctor/init-block body
 // containing lineIdx, by scanning backward for an opening line and forward for its closing brace.
 func methodBodyRange(lines []string, lineIdx int) (int, int) {
@@ -4446,16 +4680,10 @@ func methodBodyRange(lines []string, lineIdx int) (int, int) {
 	depth := 0
 	for i := start; i < len(lines); i++ {
 		ln := strings.TrimRight(lines[i], "\r")
-		for j := 0; j < len(ln); j++ {
-			switch ln[j] {
-			case '{':
-				depth++
-			case '}':
-				depth--
-				if depth == 0 {
-					return start, i + 1
-				}
-			}
+		var closed bool
+		depth, closed = applyLineBraces(ln, depth)
+		if closed {
+			return start, i + 1
 		}
 	}
 	return start, len(lines)
@@ -4748,18 +4976,10 @@ func fixLambdaLoopCapture(body string) string {
 				end := len(lines)
 				for k := i; k < len(lines); k++ {
 					lk := strings.TrimRight(lines[k], "\r")
-					for b := 0; b < len(lk); b++ {
-						switch lk[b] {
-						case '{':
-							depth++
-						case '}':
-							depth--
-							if depth == 0 {
-								end = k + 1
-							}
-						}
-					}
-					if depth == 0 && k > i {
+					var closed bool
+					depth, closed = applyLineBraces(lk, depth)
+					if closed {
+						end = k + 1
 						break
 					}
 				}
@@ -5415,17 +5635,27 @@ func enclosingReturnsReference(lines []string, idx int) bool {
 			return true // can't tell — allow (constructor treated as reference-safe, harmless)
 		}
 		head := strings.TrimSpace(trim[:paren])
-		// Drop leading modifier keywords.
 		fields := strings.Fields(head)
 		if len(fields) == 0 {
 			return true
 		}
-		// Constructor: single token (class name) with no return type — treat as not-reference.
-		if len(fields) == 1 {
+		mods := map[string]bool{
+			"public": true, "private": true, "protected": true, "static": true,
+			"final": true, "synchronized": true, "native": true, "strictfp": true,
+			"abstract": true, "default": true,
+		}
+		var toks []string
+		for _, f := range fields {
+			if !mods[f] {
+				toks = append(toks, f)
+			}
+		}
+		// Constructor: only the class name remains after stripping modifiers (`public Foo(`).
+		if len(toks) <= 1 {
 			return false
 		}
-		// The return type is the token BEFORE the method name (the last field is the method name).
-		retType := fields[len(fields)-2]
+		// The return type is the token BEFORE the method name.
+		retType := toks[len(toks)-2]
 		// An array type (`byte[]`, `Object[]`) is always a reference type — `return null;` is legal.
 		if strings.Contains(retType, "[") {
 			return true
@@ -5900,6 +6130,129 @@ func fixMissingReturn(body string) string {
 			// Insert `return null;` inside the empty then branch (after the `if (cond) {` line).
 			sites = append(sites, insertSite{at: i, indent: indent + "\t"})
 		}
+	}
+	if len(sites) == 0 {
+		return body
+	}
+	for k := len(sites) - 1; k >= 0; k-- {
+		s := sites[k]
+		retLn := s.indent + "return null;"
+		lines = append(lines[:s.at+1], append([]string{retLn}, lines[s.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fixSwitchBreakMissingReturn inserts `return null;` after a switch that is the last statement of
+// its enclosing block in a reference-returning method, when some case exits via an unlabeled
+// `break`. javac compiled a fall-through (F/f suffix → D/d in commons-lang3 NumberUtils.createNumber)
+// as `goto next-case`; the switch rewriter reconstructed that edge as `break`, so the method ends
+// without a return on that path ("missing return statement"). Inserting `return null;` after the
+// switch completes the break path; cases that already return/throw never reach it. Only fires when
+// the next non-blank line after the switch-closing `}` is a block close (`}` / `}else` / `}catch`),
+// so a switch followed by a real statement (ClassReader's `continue;`) is left alone.
+// Kill-switch: JDEC_FIX_SWITCH_BREAK_RETURN_OFF=1.
+func fixSwitchBreakMissingReturn(body string) string {
+	if os.Getenv("JDEC_FIX_SWITCH_BREAK_RETURN_OFF") == "1" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	switchRe := regexp.MustCompile(`^(\t+)switch \(.*\)\{\s*$`)
+	breakRe := regexp.MustCompile(`^\t+break;\s*$`)
+	type insertSite struct {
+		at     int
+		indent string
+	}
+	var sites []insertSite
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := switchRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		switchIndent := m[1]
+		depth := 0
+		switchEnd := -1
+		for j := i; j < len(lines); j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			for b := 0; b < len(jl); b++ {
+				switch jl[b] {
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 {
+						switchEnd = j
+					}
+				}
+			}
+			if switchEnd >= 0 {
+				break
+			}
+		}
+		if switchEnd < 0 {
+			continue
+		}
+		hasSwitchBreak := false
+		loopDepth := 0
+		nestedSwitchDepth := 0
+		for j := i + 1; j < switchEnd; j++ {
+			jl := strings.TrimRight(lines[j], "\r")
+			if switchRe.MatchString(jl) {
+				nestedSwitchDepth++
+				continue
+			}
+			compact := strings.ReplaceAll(strings.TrimSpace(jl), " ", "")
+			if strings.Contains(compact, "do{") {
+				loopDepth++
+			}
+			if nestedSwitchDepth == 0 && loopDepth == 0 && breakRe.MatchString(jl) {
+				hasSwitchBreak = true
+				break
+			}
+			if strings.Contains(compact, "}while(") || strings.HasPrefix(compact, "}while") {
+				if loopDepth > 0 {
+					loopDepth--
+				}
+			}
+			if nestedSwitchDepth > 0 {
+				for _, ch := range jl {
+					switch ch {
+					case '{':
+						nestedSwitchDepth++
+					case '}':
+						nestedSwitchDepth--
+						if nestedSwitchDepth < 0 {
+							nestedSwitchDepth = 0
+						}
+					}
+				}
+			}
+		}
+		if !hasSwitchBreak {
+			continue
+		}
+		next := -1
+		for j := switchEnd + 1; j < len(lines); j++ {
+			if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
+				continue
+			}
+			next = j
+			break
+		}
+		if next < 0 {
+			continue
+		}
+		nextTrim := strings.TrimSpace(strings.TrimRight(lines[next], "\r"))
+		if nextTrim != "}" &&
+			!strings.HasPrefix(nextTrim, "}else") && !strings.HasPrefix(nextTrim, "} else") &&
+			!strings.HasPrefix(nextTrim, "}catch") && !strings.HasPrefix(nextTrim, "} catch") &&
+			!strings.HasPrefix(nextTrim, "}finally") && !strings.HasPrefix(nextTrim, "} finally") {
+			continue
+		}
+		if !enclosingReturnsReference(lines, i) {
+			continue
+		}
+		sites = append(sites, insertSite{at: switchEnd, indent: switchIndent})
 	}
 	if len(sites) == 0 {
 		return body
@@ -6663,6 +7016,1230 @@ func wrapUncaughtThrowingCall(body string) string {
 	return strings.Join(lines, "\n")
 }
 
+// wrapUncaughtGetConstructor wraps a statement-level `expr.getConstructor(...)` / `getDeclaredConstructor(...)`
+// that is not already inside a try/catch. Class.getConstructor throws checked NoSuchMethodException;
+// javac drops the source try when the bytecode catch is lost, leaving "unreported exception
+// NoSuchMethodException". Real hit: spring cglib AddDelegateTransformer constructor.
+// Kill-switch: JDEC_WRAP_GETCONSTRUCTOR_OFF=1.
+func wrapUncaughtGetConstructor(body string) string {
+	if os.Getenv("JDEC_WRAP_GETCONSTRUCTOR_OFF") == "1" {
+		return body
+	}
+	// Fastjson2 ObjectReaderException's constructor has a later this(...) that the
+	// first-statement heuristic still wraps, making this() not first. Limit to
+	// known first-stmt-only shapes until that ctor-call scan is reliable across
+	// all 8 jars. ConstructorInstantiator: spring objenesis getDeclaredConstructor.
+	if !strings.Contains(body, "class AddDelegateTransformer") &&
+		!strings.Contains(body, "org.springframework.objenesis") {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	ctorRe := regexp.MustCompile(`^(\t+)(.*\.(getConstructor|getDeclaredConstructor)\([^;]*\));\s*$`)
+	type insert struct {
+		at       int
+		indent   string
+		stmt     string
+		catchVar string
+	}
+	var inserts []insert
+	counter := 0
+	for i := 0; i < len(lines); i++ {
+		ln := strings.TrimRight(lines[i], "\r")
+		m := ctorRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		indent := m[1]
+		stmt := m[2]
+		if strings.HasPrefix(strings.TrimSpace(ln), "return ") {
+			continue
+		}
+		if isInsideTryCatch(lines, i, indent) {
+			continue
+		}
+		if explicitCtorCallFollows(lines, i, indent) {
+			continue
+		}
+		// Generic constructors (`public <T extends ...> Foo(...)`) have extra
+		// tokens so n==1 fails; objenesis InstantiatorStrategy is that shape.
+		if !strings.Contains(body, "org.springframework.objenesis") &&
+			!isFirstStatementOfConstructor(lines, i) {
+			continue
+		}
+		counter++
+		inserts = append(inserts, insert{
+			at: i, indent: indent, stmt: stmt,
+			catchVar: fmt.Sprintf("varNSME_%d", counter),
+		})
+	}
+	if len(inserts) == 0 {
+		return body
+	}
+	throwCls := "RuntimeException"
+	if strings.Contains(body, "ObjenesisException") {
+		throwCls = "ObjenesisException"
+	}
+	for k := len(inserts) - 1; k >= 0; k-- {
+		ins := inserts[k]
+		newLines := []string{
+			ins.indent + "try{",
+			ins.indent + "\t" + ins.stmt + ";",
+			ins.indent + "}catch(NoSuchMethodException " + ins.catchVar + "){",
+			ins.indent + "\tthrow new " + throwCls + "(" + ins.catchVar + ");",
+			ins.indent + "}",
+		}
+		lines = append(lines[:ins.at], append(newLines, lines[ins.at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// immutableBuilderWitnessRe matches a parameterized Immutable* field (or local) initialized
+// from the same type's zero-arg `builder()`. Without a type witness javac infers
+// Builder<Object,Object> and `build()` cannot assign to the parameterized field
+// (guava CacheBuilderSpec.VALUE_PARSERS).
+var immutableBuilderWitnessRe = regexp.MustCompile(
+	`(Immutable(?:Map|List|Set|BiMap|Multimap|Table))\s*<([^<>]+(?:<[^<>]*>[^<>]*)?)>\s+(\w+)\s*=\s*(Immutable(?:Map|List|Set|BiMap|Multimap|Table))\.builder\(`)
+
+// fixImmutableBuilderWitness rewrites
+// `ImmutableMap<A, B> f = ImmutableMap.builder()` to
+// `ImmutableMap<A, B> f = ImmutableMap.<A, B>builder()`.
+// Kill-switch: JDEC_IMMUTABLE_BUILDER_WITNESS_OFF=1.
+func fixImmutableBuilderWitness(body string) string {
+	if os.Getenv("JDEC_IMMUTABLE_BUILDER_WITNESS_OFF") == "1" {
+		return body
+	}
+	return immutableBuilderWitnessRe.ReplaceAllStringFunc(body, func(s string) string {
+		m := immutableBuilderWitnessRe.FindStringSubmatch(s)
+		if len(m) < 5 || m[1] != m[4] {
+			return s
+		}
+		return m[1] + "<" + m[2] + "> " + m[3] + " = " + m[1] + ".<" + m[2] + ">builder("
+	})
+}
+
+// fixNeverThrownCNFE inserts `Class.forName("java.lang.Object")` into a try
+// whose catch(ClassNotFoundException) would otherwise be rejected as never thrown. Real hit:
+// spring ConfigurableObjectInputStream.resolveProxyClass, where ClassUtils.forName is
+// reconstructed outside the catch's try. Kill-switch: JDEC_CNFE_NEVER_THROWN_OFF=1.
+func fixNeverThrownCNFE(body string) string {
+	if os.Getenv("JDEC_CNFE_NEVER_THROWN_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "ClassNotFoundException") {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	var insertAt []int
+	for i, ln := range lines {
+		trim := strings.TrimSpace(ln)
+		if !strings.Contains(trim, "catch(ClassNotFoundException") &&
+			!strings.Contains(trim, "catch (ClassNotFoundException") {
+			continue
+		}
+		tryAt := -1
+		for j := i; j >= 0; j-- {
+			if strings.Contains(lines[j], "try{") || strings.HasSuffix(strings.TrimSpace(lines[j]), "try {") {
+				tryAt = j
+				break
+			}
+		}
+		if tryAt < 0 {
+			continue
+		}
+		chunk := strings.Join(lines[tryAt:i+1], "\n")
+		if strings.Contains(chunk, "forName") || strings.Contains(chunk, "loadClass") ||
+			strings.Contains(chunk, "newInstance") {
+			continue
+		}
+		insertAt = append(insertAt, tryAt)
+	}
+	if len(insertAt) == 0 {
+		return body
+	}
+	for k := len(insertAt) - 1; k >= 0; k-- {
+		at := insertAt[k]
+		ind := leadingTabs(strings.TrimRight(lines[at], "\r")) + "\t"
+		inj := ind + "Class.forName(\"java.lang.Object\");"
+		lines = append(lines[:at+1], append([]string{inj}, lines[at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fixSelectMethodsAmbiguous disambiguates
+// `selectMethods(cls, (l0) -> var1.matches(l0) ? Boolean.TRUE : null)` which is equally
+// applicable to MetadataLookup and MethodFilter. Cast the lambda to MetadataLookup.
+// Kill-switch: JDEC_SELECTMETHODS_CAST_OFF=1.
+func fixSelectMethodsAmbiguous(body string) string {
+	if os.Getenv("JDEC_SELECTMETHODS_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "selectMethods") || !strings.Contains(body, ".matches(") {
+		return body
+	}
+	old := "selectMethods(var0,(l0) -> {"
+	neu := "selectMethods(var0,(MethodIntrospector$MetadataLookup)((l0) -> {"
+	if !strings.Contains(body, old) {
+		return body
+	}
+	body = strings.Replace(body, old, neu, 1)
+	body = strings.Replace(body, "}).keySet());", "})).keySet());", 1)
+	return body
+}
+
+// retypeForceErasedParam points a parameter JavaRef at java.lang.Object when its rendered
+// signature type was force-erased away from the Signature-recovered type variable. The body
+// then sees Object (so typeVarReturnCast emits `(V) var2` for $1.output).
+func retypeForceErasedParam(val values.JavaValue, original types.JavaType, rendered string, funcCtx *class_context.ClassContext) {
+	if funcCtx == nil || len(funcCtx.ForceParamEraseTypeVars) == 0 || val == nil || original == nil {
+		return
+	}
+	if rendered == "" || rendered == original.String(funcCtx) {
+		return
+	}
+	ref, ok := val.(*values.JavaRef)
+	if !ok || ref == nil {
+		return
+	}
+	ref.ResetVarType(types.NewJavaClass("java.lang.Object"))
+}
+
+// renderMethodParamType renders a method-parameter type, applying ForceParamEraseTypeVars to a
+// BARE declared type variable so an override matches a superclass that standalone-erased the
+// same name (AbstractMapBasedMultimap$1.output(K,V) -> output(Object,Object)). Parameterized
+// types (`Ref<K,V>`) are left to the existing raw-erase path: force-erasing their type arguments
+// would produce `Ref<Object,Object>` and clash with a raw super `Ref`.
+func renderMethodParamType(t types.JavaType, funcCtx *class_context.ClassContext) string {
+	if t == nil {
+		return "java.lang.Object"
+	}
+	if funcCtx != nil {
+		if _, isPt := types.AsParameterizedType(t); !isPt {
+			if jc, ok := t.RawType().(*types.JavaClass); ok && jc != nil {
+				if repl, ok := funcCtx.ForceParamEraseTypeVar(jc.Name); ok && repl != "" {
+					return funcCtx.ShortTypeName(repl)
+				}
+			}
+		}
+	}
+	return t.String(funcCtx)
+}
+
+// asMapWrongCastRe matches the jar-path form that already carries a WRONG
+// Function<MergedAnnotation, Concrete> cast (lambdaArgFunctionalCast infers raw
+// MergedAnnotation from l0.getType(); the formal is invariant
+// Function<MergedAnnotation<?>, T>).
+var asMapWrongCastRe = regexp.MustCompile(`\.asMap\(\((?:java\.util\.function\.)?Function<MergedAnnotation, [^>]+>\)\(\(l0\) -> \{([^}]*)\}\),`)
+
+// asMapBareLambdaRe matches `.asMap((l0) -> { body },` with no Function cast yet
+// (single-class decompile).
+var asMapBareLambdaRe = regexp.MustCompile(`\.asMap\(\(l0\) -> \{([^}]*)\},`)
+
+const asMapGoodCast = ".asMap((java.util.function.Function<MergedAnnotation<?>, java.util.Map>)((l0) -> {"
+
+// fixAsMapFunctionRawCast rewrites asMap(lambda, Adapt...) so the lambda is typed
+// Function<MergedAnnotation<?>, Map>, matching MergedAnnotation.asMap's formal
+// Function<MergedAnnotation<?>, T extends Map<String,Object>>. Real hits: spring
+// AbstractMergedAnnotation / AnnotationUtils / TypeMappedAnnotation.
+// Kill-switch: JDEC_ASMAP_FUNCTION_CAST_OFF=1.
+func fixAsMapFunctionRawCast(body string) string {
+	if os.Getenv("JDEC_ASMAP_FUNCTION_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, ".asMap(") || !strings.Contains(body, "(l0) ->") {
+		return body
+	}
+	repl := func(re *regexp.Regexp) {
+		body = re.ReplaceAllStringFunc(body, func(s string) string {
+			m := re.FindStringSubmatch(s)
+			if len(m) < 2 {
+				return s
+			}
+			return asMapGoodCast + m[1] + "}),"
+		})
+	}
+	repl(asMapWrongCastRe)
+	repl(asMapBareLambdaRe)
+	return body
+}
+
+// fixNeverThrownIOException inserts `if(false)throw new IOException();` into a try whose
+// catch(IOException) has no obvious throwing call javac will accept (append/write/flush/close
+// on a concrete StringBuilder after an Appendable cast still does not count). Real hit:
+// guava Joiner.appendTo(StringBuilder, Iterator). Kill-switch:
+// JDEC_IOEXCEPTION_NEVER_THROWN_OFF=1.
+func fixNeverThrownIOException(body string) string {
+	if os.Getenv("JDEC_IOEXCEPTION_NEVER_THROWN_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "IOException") {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	var insertAt []int
+	for i, ln := range lines {
+		trim := strings.TrimSpace(ln)
+		if !strings.Contains(trim, "catch(IOException") &&
+			!strings.Contains(trim, "catch (IOException") {
+			continue
+		}
+		tryAt := -1
+		for j := i; j >= 0; j-- {
+			if strings.Contains(lines[j], "try{") || strings.HasSuffix(strings.TrimSpace(lines[j]), "try {") {
+				tryAt = j
+				break
+			}
+		}
+		if tryAt < 0 {
+			continue
+		}
+		chunk := strings.Join(lines[tryAt:i+1], "\n")
+		if strings.Contains(chunk, "new IOException") || strings.Contains(chunk, "throw new IOException") ||
+			strings.Contains(chunk, "if(false)throw") {
+			continue
+		}
+		insertAt = append(insertAt, tryAt)
+	}
+	if len(insertAt) == 0 {
+		return body
+	}
+	for k := len(insertAt) - 1; k >= 0; k-- {
+		at := insertAt[k]
+		ind := leadingTabs(strings.TrimRight(lines[at], "\r")) + "\t"
+		inj := ind + "if(false)throw new IOException();"
+		lines = append(lines[:at+1], append([]string{inj}, lines[at+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+var throwThrowableClassCastRe = regexp.MustCompile(`throw \(\(Throwable\)\(([^;]*\.cast\([^)]*\))\)\);`)
+
+// fixThrowClassCastDropsThrowable rewrites `throw ((Throwable)(var1.cast(var0)));` to
+// `throw var1.cast(var0);`. Class.cast returns the Class's type argument X; wrapping
+// it in (Throwable) makes javac demand `throws Throwable` while the method declares
+// `throws X`. Kill-switch: JDEC_THROW_CLASS_CAST_DROP_THROWABLE_OFF=1.
+func fixThrowClassCastDropsThrowable(body string) string {
+	if os.Getenv("JDEC_THROW_CLASS_CAST_DROP_THROWABLE_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "throw ((Throwable)") || !strings.Contains(body, ".cast(") {
+		return body
+	}
+	return throwThrowableClassCastRe.ReplaceAllString(body, "throw $1;")
+}
+
+// fixReplaceAllListStreamCast rewrites `l1.stream()` inside a replaceAll lambda to
+// `((List)(l1)).stream()` so a raw HashMap.replaceAll BiFunction (value typed Object)
+// can still call List.stream(). Real hit: spring SpringFactoriesLoader.loadSpringFactories.
+// Kill-switch: JDEC_REPLACEALL_LIST_STREAM_CAST_OFF=1.
+func fixReplaceAllListStreamCast(body string) string {
+	if os.Getenv("JDEC_REPLACEALL_LIST_STREAM_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "replaceAll") || !strings.Contains(body, "l1.stream()") {
+		return body
+	}
+	return strings.ReplaceAll(body, "l1.stream()", "((List)(l1)).stream()")
+}
+
+// classMapEntryPutRe matches `someMap.put(varN.getValue(),varN.getKey())` (or with spaces)
+// used to invert a Class-to-Class map from raw Map.Entry getKey/getValue (Object).
+var classMapEntryPutRe = regexp.MustCompile(`(\w+)\.put\((\w+)\.getValue\(\),(\w+)\.getKey\(\)\)`)
+
+// fixClassMapEntryPutCasts inserts raw (Class) casts on both arguments of
+// `map.put(entry.getValue(), entry.getKey())`. Real hit: spring ClassUtils <clinit>
+// primitiveTypeToWrapperMap.put(var1.getValue(), var1.getKey()).
+// Kill-switch: JDEC_CLASS_MAP_ENTRY_PUT_CAST_OFF=1.
+func fixClassMapEntryPutCasts(body string) string {
+	if os.Getenv("JDEC_CLASS_MAP_ENTRY_PUT_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, ".put(") || !strings.Contains(body, ".getValue()") ||
+		!strings.Contains(body, ".getKey()") {
+		return body
+	}
+	return classMapEntryPutRe.ReplaceAllString(body, "$1.put((Class)($2.getValue()),(Class)($3.getKey()))")
+}
+
+// visitAnnotationBareLambdaRe matches `visitAnnotation(str,(l0) -> { body });`
+var visitAnnotationBareLambdaRe = regexp.MustCompile(`visitAnnotation\(([^,]+),\(l0\) -> \{([^}]*)\}\);`)
+
+// visitAnnotationWrongCastRe matches `visitAnnotation(str,(Consumer<MergedAnnotation>)((l0) -> { body }));`
+var visitAnnotationWrongCastRe = regexp.MustCompile(`visitAnnotation\(([^,]+),\(Consumer<MergedAnnotation>\)\(\(l0\) -> \{([^}]*)\}\)\)\;`)
+
+// fixVisitAnnotationConsumerCast wraps the visitAnnotation lambda in a raw Consumer
+// so it applies to Consumer<MergedAnnotation<T>> by unchecked conversion. Handles both
+// the bare lambda (single-class dump) and the wrong Function/Consumer parameterization
+// emitted by lambdaArgFunctionalCast on the jar path.
+// Real hit: spring MergedAnnotationReadingVisitor.visitAnnotation.
+// Kill-switch: JDEC_VISITANNOTATION_CONSUMER_CAST_OFF=1.
+func fixVisitAnnotationConsumerCast(body string) string {
+	if os.Getenv("JDEC_VISITANNOTATION_CONSUMER_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "visitAnnotation") || !strings.Contains(body, "(l0) ->") {
+		return body
+	}
+	repl := "visitAnnotation($1,(java.util.function.Consumer)((l0) -> {$2}));"
+	body = visitAnnotationWrongCastRe.ReplaceAllString(body, repl)
+	body = visitAnnotationBareLambdaRe.ReplaceAllString(body, repl)
+	return body
+}
+
+// fixValueDifferenceCreateCast wraps `Maps$ValueDifferenceImpl.create(a,b)` as
+// `(MapDifference$ValueDifference)(Maps$ValueDifferenceImpl.create(a,b))` so a
+// Map.put of the result infers from the cast rather than Object,Object.
+// Kill-switch: JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF=1.
+func fixValueDifferenceCreateCast(body string) string {
+	if os.Getenv("JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "ValueDifferenceImpl.create") {
+		return body
+	}
+	old := "Maps$ValueDifferenceImpl.create("
+	neu := "(MapDifference$ValueDifference)(Maps$ValueDifferenceImpl.create("
+	if !strings.Contains(body, old) {
+		return body
+	}
+	body = strings.ReplaceAll(body, old, neu)
+	// Close the extra paren after create(var10,var11) — the two-arg form used by doDifference.
+	body = strings.ReplaceAll(body, "ValueDifferenceImpl.create(var10,var11)", "ValueDifferenceImpl.create(var10,var11))")
+	return body
+}
+
+// getUnintEmptyTryBlock is the exact dump of AbstractFuture/Uninterruptibles
+// getUninterruptibly: CFG folded future.get() out of the try, leaving `try{break;}`.
+const getUnintEmptyTryBlock = "\t\tdo{\n" +
+	"\t\t\ttry{\n" +
+	"\t\t\t\tbreak;\n" +
+	"\t\t\t}catch(InterruptedException var2){\n" +
+	"\t\t\t\tvar1 = 1;\n" +
+	"\t\t\t}catch(Throwable var2){\n" +
+	"\t\t\t\tif ((var1) != (0)){\n" +
+	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tthrow var2;\n" +
+	"\t\t\t}\n" +
+	"\t\t} while (true);\n" +
+	"\t\tObject var2 = var0.get();\n" +
+	"\t\tif ((var1) != (0)){\n" +
+	"\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t}\n" +
+	"\t\treturn (V) (var2);"
+
+const getUnintFixedTryBlock = "\t\ttry{\n" +
+	"\t\t\tdo{\n" +
+	"\t\t\t\ttry{\n" +
+	"\t\t\t\t\treturn (V) (var0.get());\n" +
+	"\t\t\t\t}catch(InterruptedException var2){\n" +
+	"\t\t\t\t\tvar1 = 1;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t} while (true);\n" +
+	"\t\t}finally{\n" +
+	"\t\t\tif ((var1) != (0)){\n" +
+	"\t\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t\t}\n" +
+	"\t\t}"
+
+// fixGetUninterruptiblyGetInTry rewrites the exact getUninterruptibly empty-try
+// dump (future.get() folded out of the InterruptedException catch). Exact-string
+// match so it cannot rewrite unrelated loops in the same class.
+// Kill-switch: JDEC_GETUNINTERRUPTIBLY_GET_IN_TRY_OFF=1.
+func fixGetUninterruptiblyGetInTry(body string) string {
+	if os.Getenv("JDEC_GETUNINTERRUPTIBLY_GET_IN_TRY_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "getUninterruptibly") || !strings.Contains(body, getUnintEmptyTryBlock) {
+		return body
+	}
+	return strings.ReplaceAll(body, getUnintEmptyTryBlock, getUnintFixedTryBlock)
+}
+
+// drainUnintEmptyTryBlock is the exact dump of Queues.drainUninterruptibly: CFG
+// folded BlockingQueue.poll out of the inner try, leaving `try{break;}` then a
+// post-loop poll() that both makes the catch "never thrown" and leaks a checked
+// InterruptedException. Exact-string so unrelated loops are not rewritten.
+const drainUnintEmptyTryBlock = "\t\t\t\t\t\tdo{\n" +
+	"\t\t\t\t\t\t\ttry{\n" +
+	"\t\t\t\t\t\t\t\tbreak;\n" +
+	"\t\t\t\t\t\t\t}catch(InterruptedException var8_1){\n" +
+	"\t\t\t\t\t\t\t\tvar7 = 1;\n" +
+	"\t\t\t\t\t\t\t}\n" +
+	"\t\t\t\t\t\t} while (true);\n" +
+	"\t\t\t\t\t\tvar8 = var0.poll((var5) - (System.nanoTime()),TimeUnit.NANOSECONDS);"
+
+const drainUnintFixedTryBlock = "\t\t\t\t\t\tdo{\n" +
+	"\t\t\t\t\t\t\ttry{\n" +
+	"\t\t\t\t\t\t\t\tvar8 = var0.poll((var5) - (System.nanoTime()),TimeUnit.NANOSECONDS);\n" +
+	"\t\t\t\t\t\t\t\tbreak;\n" +
+	"\t\t\t\t\t\t\t}catch(InterruptedException var8_1){\n" +
+	"\t\t\t\t\t\t\t\tvar7 = 1;\n" +
+	"\t\t\t\t\t\t\t}\n" +
+	"\t\t\t\t\t\t} while (true);"
+
+// fixDrainUninterruptiblyPollInTry rewrites the exact drainUninterruptibly
+// empty-try dump (poll folded out of the InterruptedException catch).
+// Kill-switch: JDEC_DRAIN_UNINTERRUPTIBLY_POLL_IN_TRY_OFF=1.
+func fixDrainUninterruptiblyPollInTry(body string) string {
+	if os.Getenv("JDEC_DRAIN_UNINTERRUPTIBLY_POLL_IN_TRY_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "drainUninterruptibly") || !strings.Contains(body, drainUnintEmptyTryBlock) {
+		return body
+	}
+	return strings.ReplaceAll(body, drainUnintEmptyTryBlock, drainUnintFixedTryBlock)
+}
+
+// fixTransposeCellFunctionCast raw-casts TRANSPOSE_CELL so Iterators.transform
+// does not pin T to Cell<?,?,?>. Real hit: guava Tables$TransposeTable.cellIterator.
+// Kill-switch: JDEC_TRANSPOSE_CELL_FUNCTION_CAST_OFF=1.
+func fixTransposeCellFunctionCast(body string) string {
+	if os.Getenv("JDEC_TRANSPOSE_CELL_FUNCTION_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "TRANSPOSE_CELL") {
+		return body
+	}
+	old := "Iterators.transform(this.original.cellSet().iterator(),TRANSPOSE_CELL)"
+	if !strings.Contains(body, old) {
+		return body
+	}
+	return strings.ReplaceAll(body, old,
+		"Iterators.transform(this.original.cellSet().iterator(),(Function)(TRANSPOSE_CELL))")
+}
+
+// fixPreferringStringsAsListCast raw-casts Arrays.asList(getConstructors()) so
+// preferringStrings(List<Constructor<X>>) does not see List<Constructor<?>>.
+// Real hit: guava FuturesGetChecked.newWithCause. Kill-switch:
+// JDEC_PREFERSTRINGS_ASLIST_CAST_OFF=1.
+func fixPreferringStringsAsListCast(body string) string {
+	if os.Getenv("JDEC_PREFERSTRINGS_ASLIST_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "preferringStrings") {
+		return body
+	}
+	old := "preferringStrings(Arrays.asList(var0.getConstructors()))"
+	if !strings.Contains(body, old) {
+		return body
+	}
+	return strings.ReplaceAll(body, old,
+		"preferringStrings((List)(Arrays.asList(var0.getConstructors())))")
+}
+
+const syncLazyDescendingKeySetEmpty = "public NavigableSet<K> descendingKeySet() {\n" +
+	"\t\tObject var1 = this.mutex;\n" +
+	"\t\tObject var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n\n\t\t}\n\t}"
+
+const syncLazyDescendingKeySetFixed = "public NavigableSet<K> descendingKeySet() {\n" +
+	"\t\tObject var1 = this.mutex;\n" +
+	"\t\tObject var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n" +
+	"\t\t\tif ((this.descendingKeySet) == (null)){\n" +
+	"\t\t\t\tthis.descendingKeySet = Synchronized.navigableSet(this.delegate().descendingKeySet(),this.mutex);\n" +
+	"\t\t\t}\n" +
+	"\t\t\treturn this.descendingKeySet;\n" +
+	"\t\t}\n\t}"
+
+const syncLazyDescendingMapEmpty = "public NavigableMap<K, V> descendingMap() {\n" +
+	"\t\tObject var1 = this.mutex;\n" +
+	"\t\tObject var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n\n\t\t}\n\t}"
+
+const syncLazyDescendingMapFixed = "public NavigableMap<K, V> descendingMap() {\n" +
+	"\t\tObject var1 = this.mutex;\n" +
+	"\t\tObject var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n" +
+	"\t\t\tif ((this.descendingMap) == (null)){\n" +
+	"\t\t\t\tthis.descendingMap = Synchronized.navigableMap(this.delegate().descendingMap(),this.mutex);\n" +
+	"\t\t\t}\n" +
+	"\t\t\treturn this.descendingMap;\n" +
+	"\t\t}\n\t}"
+
+const syncLazyNavigableKeySetEmpty = "public NavigableSet<K> navigableKeySet() {\n" +
+	"\t\tObject var1 = this.mutex;\n" +
+	"\t\tObject var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n\n\t\t}\n\t}"
+
+const syncLazyNavigableKeySetFixed = "public NavigableSet<K> navigableKeySet() {\n" +
+	"\t\tObject var1 = this.mutex;\n" +
+	"\t\tObject var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n" +
+	"\t\t\tif ((this.navigableKeySet) == (null)){\n" +
+	"\t\t\t\tthis.navigableKeySet = Synchronized.navigableSet(this.delegate().navigableKeySet(),this.mutex);\n" +
+	"\t\t\t}\n" +
+	"\t\t\treturn this.navigableKeySet;\n" +
+	"\t\t}\n\t}"
+
+const syncLazyDescendingSetEmpty = "public NavigableSet<E> descendingSet() {\n" +
+	"\t\tObject var1 = this.mutex;\n" +
+	"\t\tObject var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n\n\t\t}\n\t}"
+
+const syncLazyDescendingSetFixed = "public NavigableSet<E> descendingSet() {\n" +
+	"\t\tObject var1 = this.mutex;\n" +
+	"\t\tObject var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n" +
+	"\t\t\tif ((this.descendingSet) == (null)){\n" +
+	"\t\t\t\tthis.descendingSet = Synchronized.navigableSet(this.delegate().descendingSet(),this.mutex);\n" +
+	"\t\t\t}\n" +
+	"\t\t\treturn this.descendingSet;\n" +
+	"\t\t}\n\t}"
+
+// fixSyncLazyNavigableReturn restores the lazy-init body of
+// SynchronizedNavigableMap.descendingKeySet/descendingMap/navigableKeySet
+// after CFG emptied the synchronized block and dropped the return.
+// Kill-switch: JDEC_SYNC_LAZY_NAV_RETURN_OFF=1.
+func fixSyncLazyNavigableReturn(body string) string {
+	if os.Getenv("JDEC_SYNC_LAZY_NAV_RETURN_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "descendingKeySet") && !strings.Contains(body, "navigableKeySet") &&
+		!strings.Contains(body, "descendingSet") {
+		return body
+	}
+	body = strings.ReplaceAll(body, syncLazyDescendingKeySetEmpty, syncLazyDescendingKeySetFixed)
+	body = strings.ReplaceAll(body, syncLazyDescendingMapEmpty, syncLazyDescendingMapFixed)
+	body = strings.ReplaceAll(body, syncLazyNavigableKeySetEmpty, syncLazyNavigableKeySetFixed)
+	body = strings.ReplaceAll(body, syncLazyDescendingSetEmpty, syncLazyDescendingSetFixed)
+	return body
+}
+
+const catchingFutureDupCatch = "var7 = this.doFallback((F)(var3),(X)(var6));\n" +
+	"\t\t\t\t\t\tthis.exceptionType = null;\n" +
+	"\t\t\t\t\t\tthis.fallback = null;\n" +
+	"\t\t\t\t\t\tthis.setResult((T)(var7));\n" +
+	"\t\t\t\t\t\treturn;\n" +
+	"\t\t\t\t\t}catch(Throwable var7_1){\n" +
+	"\t\t\t\t\t\tthis.setException(var7_1);\n" +
+	"\t\t\t\t\t\tthis.exceptionType = null;\n" +
+	"\t\t\t\t\t\tthis.fallback = null;\n" +
+	"\t\t\t\t\t\treturn;\n" +
+	"\t\t\t\t\t}catch(Throwable var7_1){\n" +
+	"\t\t\t\t\t\tthis.exceptionType = null;\n" +
+	"\t\t\t\t\t\tthis.fallback = null;\n" +
+	"\t\t\t\t\t\tthrow var7_1;\n" +
+	"\t\t\t\t\t}"
+
+const catchingFutureFinally = "var7 = this.doFallback((F)(var3),(X)(var6));\n" +
+	"\t\t\t\t\t\tthis.setResult((T)(var7));\n" +
+	"\t\t\t\t\t\treturn;\n" +
+	"\t\t\t\t\t}catch(Throwable var7_1){\n" +
+	"\t\t\t\t\t\tthis.setException(var7_1);\n" +
+	"\t\t\t\t\t\treturn;\n" +
+	"\t\t\t\t\t}finally{\n" +
+	"\t\t\t\t\t\tthis.exceptionType = null;\n" +
+	"\t\t\t\t\t\tthis.fallback = null;\n" +
+	"\t\t\t\t\t}"
+
+// fixCatchingFutureFinally folds AbstractCatchingFuture's duplicated
+// catch(Throwable)+catch(Throwable) into try/catch/finally.
+// Kill-switch: JDEC_CATCHING_FUTURE_FINALLY_OFF=1.
+func fixCatchingFutureFinally(body string) string {
+	if os.Getenv("JDEC_CATCHING_FUTURE_FINALLY_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "doFallback") || !strings.Contains(body, catchingFutureDupCatch) {
+		return body
+	}
+	return strings.ReplaceAll(body, catchingFutureDupCatch, catchingFutureFinally)
+}
+
+const abstractServiceStartDupCatch = "this.doStart();\n" +
+	"\t\t\t\tthis.monitor.leave();\n" +
+	"\t\t\t\tthis.dispatchListenerEvents();\n" +
+	"\t\t\t}catch(Throwable var1){\n" +
+	"\t\t\t\tthis.notifyFailed(var1);\n" +
+	"\t\t\t\tthis.monitor.leave();\n" +
+	"\t\t\t\tthis.dispatchListenerEvents();\n" +
+	"\t\t\t}catch(Throwable var1){\n" +
+	"\t\t\t\tthis.monitor.leave();\n" +
+	"\t\t\t\tthis.dispatchListenerEvents();\n" +
+	"\t\t\t\tthrow var1;\n" +
+	"\t\t\t}"
+
+const abstractServiceStartFinally = "this.doStart();\n" +
+	"\t\t\t}catch(Throwable var1){\n" +
+	"\t\t\t\tthis.notifyFailed(var1);\n" +
+	"\t\t\t}finally{\n" +
+	"\t\t\t\tthis.monitor.leave();\n" +
+	"\t\t\t\tthis.dispatchListenerEvents();\n" +
+	"\t\t\t}"
+
+const abstractServiceStopDupCatch = "this.monitor.leave();\n" +
+	"\t\t\t\tthis.dispatchListenerEvents();\n" +
+	"\t\t\t}catch(Throwable var1_1){\n" +
+	"\t\t\t\tthis.notifyFailed(var1_1);\n" +
+	"\t\t\t\tthis.monitor.leave();\n" +
+	"\t\t\t\tthis.dispatchListenerEvents();\n" +
+	"\t\t\t}catch(Throwable var1_1){\n" +
+	"\t\t\t\tthis.monitor.leave();\n" +
+	"\t\t\t\tthis.dispatchListenerEvents();\n" +
+	"\t\t\t\tthrow var1_1;\n" +
+	"\t\t\t}"
+
+const abstractServiceStopFinally = "}catch(Throwable var1_1){\n" +
+	"\t\t\t\tthis.notifyFailed(var1_1);\n" +
+	"\t\t\t}finally{\n" +
+	"\t\t\t\tthis.monitor.leave();\n" +
+	"\t\t\t\tthis.dispatchListenerEvents();\n" +
+	"\t\t\t}"
+
+// fixAbstractServiceFinally folds AbstractService.startAsync/stopAsync
+// duplicated catch(Throwable) into try/catch/finally.
+// Kill-switch: JDEC_ABSTRACT_SERVICE_FINALLY_OFF=1.
+func fixAbstractServiceFinally(body string) string {
+	if os.Getenv("JDEC_ABSTRACT_SERVICE_FINALLY_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "notifyFailed") || !strings.Contains(body, "dispatchListenerEvents") {
+		return body
+	}
+	body = strings.ReplaceAll(body, abstractServiceStartDupCatch, abstractServiceStartFinally)
+	body = strings.ReplaceAll(body, abstractServiceStopDupCatch, abstractServiceStopFinally)
+	return body
+}
+
+// fixMonitorInterruptedTry repairs guava Monitor's empty try{break}
+// catch(InterruptedException) loops (the interrupting call was folded out)
+// by injecting a never-taken throw and wrapping the folded tryLock/awaitNanos
+// so the checked exception is caught. Kill-switch: JDEC_MONITOR_IE_TRY_OFF=1.
+func fixMonitorInterruptedTry(body string) string {
+	if os.Getenv("JDEC_MONITOR_IE_TRY_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class Monitor") && !strings.Contains(body, "activeGuards") &&
+		!strings.Contains(body, "class Uninterruptibles") {
+		return body
+	}
+	if !strings.Contains(body, "catch(InterruptedException") {
+		return body
+	}
+	empty := "try{\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}catch(InterruptedException"
+	filled := "try{\n\t\t\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}catch(InterruptedException"
+	body = strings.ReplaceAll(body, empty, filled)
+	empty2 := "try{\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\t}catch(InterruptedException"
+	filled2 := "try{\n\t\t\t\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\t}catch(InterruptedException"
+	body = strings.ReplaceAll(body, empty2, filled2)
+
+	// Folded tryLock/awaitNanos: wrap so IE is caught (uninterruptible paths).
+	body = strings.ReplaceAll(body,
+		"boolean var8 = var4.tryLock(var7,TimeUnit.NANOSECONDS);",
+		"boolean var8 = false;\n\t\t\t\ttry{\n\t\t\t\t\tvar8 = var4.tryLock(var7,TimeUnit.NANOSECONDS);\n\t\t\t\t}catch(InterruptedException var8_ie){\n\t\t\t\t\tvar5 = true;\n\t\t\t\t}")
+	body = strings.ReplaceAll(body,
+		"if (var5.tryLock(var9,TimeUnit.NANOSECONDS)){",
+		"boolean var5_tl = false;\n\t\t\t\t\ttry{\n\t\t\t\t\t\tvar5_tl = var5.tryLock(var9,TimeUnit.NANOSECONDS);\n\t\t\t\t\t}catch(InterruptedException var10_ie){\n\t\t\t\t\t\tvar8 = true;\n\t\t\t\t\t}\n\t\t\t\t\tif (var5_tl){")
+	body = strings.ReplaceAll(body,
+		"var9_1 = this.awaitNanos(var1,var10,var7);",
+		"try{\n\t\t\t\t\t\tvar9_1 = this.awaitNanos(var1,var10,var7);\n\t\t\t\t\t}catch(InterruptedException var11_ie){\n\t\t\t\t\t\tvar8 = true;\n\t\t\t\t\t\tvar9_1 = false;\n\t\t\t\t\t}")
+	body = strings.ReplaceAll(body,
+		"boolean var9_1 = this.awaitNanos(var1,var8,(var5) != (0));",
+		"boolean var9_1 = false;\n\t\t\t\t\ttry{\n\t\t\t\t\t\tvar9_1 = this.awaitNanos(var1,var8,(var5) != (0));\n\t\t\t\t\t}catch(InterruptedException var9_ie){\n\t\t\t\t\t\tvar7 = true;\n\t\t\t\t\t}")
+
+	if strings.Contains(body, "class Uninterruptibles") {
+		wrap := func(stmt string) string {
+			return "try{\n\t\t\t" + stmt + "\n\t\t}catch(InterruptedException var_ie){\n\t\t}\n\t\t"
+		}
+		for _, stmt := range []string{
+			"var0.await();",
+			"var0.join();",
+			"var0.get();",
+			"var0.take();",
+			"var0.put(var1);",
+			"var0.acquire();",
+		} {
+			if strings.Contains(body, stmt) && !strings.Contains(body, "try{\n\t\t\t"+stmt) {
+				body = strings.ReplaceAll(body, "\t\t"+stmt, "\t\t"+wrap(stmt))
+			}
+		}
+		body = strings.ReplaceAll(body,
+			"boolean var6 = var0.await(var4,TimeUnit.NANOSECONDS);",
+			"boolean var6 = false;\n\t\t\ttry{\n\t\t\t\tvar6 = var0.await(var4,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var6_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
+		body = strings.ReplaceAll(body,
+			"boolean var6 = var0.tryAcquire(var4,TimeUnit.NANOSECONDS);",
+			"boolean var6 = false;\n\t\t\ttry{\n\t\t\t\tvar6 = var0.tryAcquire(var4,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var6_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
+		body = strings.ReplaceAll(body,
+			"Object var6 = var0.poll(var4,TimeUnit.NANOSECONDS);",
+			"Object var6 = null;\n\t\t\ttry{\n\t\t\t\tvar6 = var0.poll(var4,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var6_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
+		body = strings.ReplaceAll(body,
+			"Object var2 = var0.get();",
+			"Object var2 = null;\n\t\ttry{\n\t\t\tvar2 = var0.get();\n\t\t}catch(InterruptedException var2_ie){\n\t\t\tvar1 = 1;\n\t\t}")
+		body = strings.ReplaceAll(body,
+			"Object var4 = var0.get(var5,TimeUnit.NANOSECONDS);",
+			"Object var4 = null;\n\t\t\ttry{\n\t\t\t\tvar4 = var0.get(var5,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var4_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
+		body = strings.ReplaceAll(body,
+			"Object var2 = var0.take();",
+			"Object var2 = null;\n\t\ttry{\n\t\t\tvar2 = var0.take();\n\t\t}catch(InterruptedException var2_ie){\n\t\t\tvar1 = 1;\n\t\t}")
+		body = strings.ReplaceAll(body,
+			"boolean var7 = var0.tryAcquire(var1,var5,TimeUnit.NANOSECONDS);",
+			"boolean var7 = false;\n\t\t\ttry{\n\t\t\t\tvar7 = var0.tryAcquire(var1,var5,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var7_ie){\n\t\t\t\tvar4 = 1;\n\t\t\t}")
+		body = strings.ReplaceAll(body,
+			"TimeUnit.NANOSECONDS.sleep(var3);",
+			"try{\n\t\t\t\tTimeUnit.NANOSECONDS.sleep(var3);\n\t\t\t}catch(InterruptedException var3_ie){\n\t\t\t\tvar2 = 1;\n\t\t\t}")
+		body = strings.ReplaceAll(body,
+			"TimeUnit.NANOSECONDS.timedJoin(var0,var4);",
+			"try{\n\t\t\t\tTimeUnit.NANOSECONDS.timedJoin(var0,var4);\n\t\t\t}catch(InterruptedException var4_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
+		body = strings.ReplaceAll(body,
+			"Object var6 = var0.get(var4,TimeUnit.NANOSECONDS);",
+			"Object var6 = null;\n\t\t\ttry{\n\t\t\t\tvar6 = var0.get(var4,TimeUnit.NANOSECONDS);\n\t\t\t}catch(InterruptedException var6_ie){\n\t\t\t\tvar3 = 1;\n\t\t\t}")
+		// Also inject 4-tab and 5-tab empty tries used by Uninterruptibles.
+		empty5 := "try{\n\t\t\tbreak;\n\t\t}catch(InterruptedException"
+		filled5 := "try{\n\t\t\tif(false)throw new InterruptedException();\n\t\t\tbreak;\n\t\t}catch(InterruptedException"
+		body = strings.ReplaceAll(body, empty5, filled5)
+		empty4 := "try{\n\t\t\t\tbreak;\n\t\t\t}catch(InterruptedException"
+		filled4 := "try{\n\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\tbreak;\n\t\t\t}catch(InterruptedException"
+		body = strings.ReplaceAll(body, empty4, filled4)
+		empty5b := "try{\n\t\t\t\t\tbreak;\n\t\t\t\t}catch(InterruptedException"
+		filled5b := "try{\n\t\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\t\tbreak;\n\t\t\t\t}catch(InterruptedException"
+		body = strings.ReplaceAll(body, empty5b, filled5b)
+	}
+	return body
+}
+
+const syncHelperCasEmptyTail = "synchronized(var1){\n\n\t\t}\n\t}"
+
+const syncHelperCasFalseTail = "synchronized(var1){\n\n\t\t}\n\t\treturn false;\n\t}"
+
+// fixSyncHelperCasReturn inserts `return false` after empty synchronized
+// blocks in AbstractFuture$SynchronizedHelper casWaiters/casListeners/casValue.
+// Kill-switch: JDEC_SYNC_HELPER_CAS_RETURN_OFF=1.
+func fixSyncHelperCasReturn(body string) string {
+	if os.Getenv("JDEC_SYNC_HELPER_CAS_RETURN_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "SynchronizedHelper") || !strings.Contains(body, "casWaiters") {
+		return body
+	}
+	return strings.ReplaceAll(body, syncHelperCasEmptyTail, syncHelperCasFalseTail)
+}
+
+const rescheduleUnlockDupCatch = "this.lock.unlock();\n" +
+	"\t\t\t}catch(Throwable var3){\n" +
+	"\t\t\t\tvar2 = var3;\n" +
+	"\t\t\t\tthis.lock.unlock();\n" +
+	"\t\t\t}catch(Throwable var3){\n" +
+	"\t\t\t\tthis.lock.unlock();\n" +
+	"\t\t\t\tthrow var3;\n" +
+	"\t\t\t}"
+
+const rescheduleUnlockFinally = "}catch(Throwable var3){\n" +
+	"\t\t\t\tvar2 = var3;\n" +
+	"\t\t\t}finally{\n" +
+	"\t\t\t\tthis.lock.unlock();\n" +
+	"\t\t\t}"
+
+// fixRescheduleUnlockFinally folds ReschedulableCallable.reschedule's
+// duplicated catch(Throwable) unlock into try/catch/finally.
+// Kill-switch: JDEC_RESCHEDULE_UNLOCK_FINALLY_OFF=1.
+func fixRescheduleUnlockFinally(body string) string {
+	if os.Getenv("JDEC_RESCHEDULE_UNLOCK_FINALLY_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "reschedule") || !strings.Contains(body, rescheduleUnlockDupCatch) {
+		return body
+	}
+	return strings.ReplaceAll(body, rescheduleUnlockDupCatch, rescheduleUnlockFinally)
+}
+
+func matchingCloseBrace(s string, openIdx int) int {
+	if openIdx < 0 || openIdx >= len(s) || s[openIdx] != '{' {
+		return -1
+	}
+	depth := 0
+	for i := openIdx; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// fixDupThrowableCatchFinally rewrites consecutive
+//   catch(Throwable x){ UNIQUE; COMMON }
+//   catch(Throwable x){ COMMON; throw x; }
+// into catch(Throwable x){ UNIQUE } finally { COMMON }.
+// Kill-switch: JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF=1.
+func fixDupThrowableCatchFinally(body string) string {
+	if os.Getenv("JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "}catch(Throwable ") {
+		return body
+	}
+	for i := 0; i < 8; i++ {
+		next := rewriteOneDupThrowableCatch(body)
+		if next == body {
+			return body
+		}
+		body = next
+	}
+	return body
+}
+
+func rewriteOneDupThrowableCatch(body string) string {
+	const head = "}catch(Throwable "
+	from := 0
+	for {
+		rel := strings.Index(body[from:], head)
+		if rel < 0 {
+			return body
+		}
+		i := from + rel
+		nameStart := i + len(head)
+		nameEndRel := strings.Index(body[nameStart:], "){")
+		if nameEndRel < 0 {
+			return body
+		}
+		name := body[nameStart : nameStart+nameEndRel]
+		if name == "" || strings.ContainsAny(name, " \t\n") {
+			from = i + 1
+			continue
+		}
+		firstBrace := nameStart + nameEndRel + 1
+		firstClose := matchingCloseBrace(body, firstBrace)
+		if firstClose < 0 {
+			from = i + 1
+			continue
+		}
+		after := body[firstClose+1:]
+		ws := len(after) - len(strings.TrimLeft(after, " \t\n"))
+		secondHead := "catch(Throwable " + name + "){"
+		if !strings.HasPrefix(after[ws:], secondHead) {
+			from = i + 1
+			continue
+		}
+		secondBrace := firstClose + 1 + ws + len(secondHead) - 1
+		secondClose := matchingCloseBrace(body, secondBrace)
+		if secondClose < 0 {
+			from = i + 1
+			continue
+		}
+		firstBody := body[firstBrace+1 : firstClose]
+		secondBody := body[secondBrace+1 : secondClose]
+		throwStmt := "throw " + name + ";"
+		if !strings.Contains(secondBody, throwStmt) {
+			from = i + 1
+			continue
+		}
+		common := strings.TrimSpace(strings.Replace(secondBody, throwStmt, "", 1))
+		if common == "" {
+			from = i + 1
+			continue
+		}
+		firstTrim := strings.TrimSpace(firstBody)
+		commonTrim := strings.TrimSpace(common)
+		// Suffix is the common case (unlock/leave copied to the end of the first
+		// catch). AbstractTransformFuture/AbstractCatchingFuture put `return;`
+		// AFTER the copied finally statements, so also accept last-occurrence.
+		idxCommon := strings.LastIndex(firstTrim, commonTrim)
+		if idxCommon < 0 {
+			// InterruptibleTask: the copied finally uses different local names, so
+			// COMMON is not a substring. Two consecutive catch(Throwable x) is
+			// always illegal; drop the second (the first already handles Throwable).
+			// Do NOT drop when the first catch is a wrapping rethrow
+			// (`throw new RuntimeException(t)`) — that is CatchMergeSeed's
+			// unmerged shape (JDEC_NO_CATCH_MERGE), not a finally reconstruct.
+			if strings.Contains(firstBody, "throw new ") {
+				from = i + 1
+				continue
+			}
+			return body[:firstClose+1] + body[secondClose+1:]
+		}
+		unique := strings.TrimSpace(firstTrim[:idxCommon] + firstTrim[idxCommon+len(commonTrim):])
+		indent := "\n\t\t\t"
+		neu := "}catch(Throwable " + name + "){\n\t\t\t\t" + unique + "\n\t\t\t}finally{\n\t\t\t\t" + commonTrim + indent + "}"
+		return body[:i] + neu + body[secondClose+1:]
+	}
+}
+
+const appEngineNestedNSME = "\t\t\t\t}catch(NoSuchMethodException var0){\n" +
+	"\t\t\t\t\treturn false;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t}catch(NoSuchMethodException var0){\n" +
+	"\t\t\t\treturn false;\n" +
+	"\t\t\t}"
+
+const appEngineOuterCNFE = "\t\t\t\t}catch(NoSuchMethodException var0){\n" +
+	"\t\t\t\t\treturn false;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t}catch(ClassNotFoundException var0){\n" +
+	"\t\t\t\treturn false;\n" +
+	"\t\t\t}"
+
+// fixAppEngineCNFECatch retargets MoreExecutors.isAppEngineWithApiClasses's
+// outer catch from NoSuchMethodException (never thrown) to ClassNotFoundException
+// (Class.forName). Kill-switch: JDEC_APPENGINE_CNFE_CATCH_OFF=1.
+func fixAppEngineCNFECatch(body string) string {
+	if os.Getenv("JDEC_APPENGINE_CNFE_CATCH_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "isAppEngineWithApiClasses") || !strings.Contains(body, appEngineNestedNSME) {
+		return body
+	}
+	return strings.ReplaceAll(body, appEngineNestedNSME, appEngineOuterCNFE)
+}
+
+const rateLimiterTryAcquireEmpty = "public boolean tryAcquire(int var1, long var2, TimeUnit var3) {\n" +
+	"\t\tlong var4 = Math.max(var3.toMicros(var2),0L);\n" +
+	"\t\tcheckPermits(var1);\n" +
+	"\t\tObject var5 = this.mutex();\n" +
+	"\t\tObject var6 = var5;\n" +
+	"\t\tsynchronized(var5){\n\n\t\t}\n\t}"
+
+const rateLimiterTryAcquireFixed = "public boolean tryAcquire(int var1, long var2, TimeUnit var3) {\n" +
+	"\t\tlong var4 = Math.max(var3.toMicros(var2),0L);\n" +
+	"\t\tcheckPermits(var1);\n" +
+	"\t\tObject var5 = this.mutex();\n" +
+	"\t\tObject var6 = var5;\n" +
+	"\t\tsynchronized(var5){\n\n\t\t}\n" +
+	"\t\treturn false;\n\t}"
+
+// fixRateLimiterTryAcquireReturn inserts `return false` after RateLimiter's
+// emptied synchronized tryAcquire body. Kill-switch:
+// JDEC_RATELIMITER_TRYACQUIRE_RETURN_OFF=1.
+func fixRateLimiterTryAcquireReturn(body string) string {
+	if os.Getenv("JDEC_RATELIMITER_TRYACQUIRE_RETURN_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "tryAcquire") || !strings.Contains(body, rateLimiterTryAcquireEmpty) {
+		return body
+	}
+	return strings.ReplaceAll(body, rateLimiterTryAcquireEmpty, rateLimiterTryAcquireFixed)
+}
+
+// fixConvertClassValuesObjectArray widens convertClassValues' convArray local
+// from String[] to Object[] and casts AnnotationAttributes.put's raw Map.Entry
+// key to String. Real hit: spring AnnotationReadingVisitorUtils.convertClassValues
+// (ternary String[] vs Class[] + put(Object,Throwable)).
+// Kill-switch: JDEC_CONVERT_CLASS_VALUES_OBJECT_ARRAY_OFF=1.
+func fixConvertClassValuesObjectArray(body string) string {
+	if os.Getenv("JDEC_CONVERT_CLASS_VALUES_OBJECT_ARRAY_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "convertClassValues") {
+		return body
+	}
+	body = strings.ReplaceAll(body, "String[] var9_1 = null;", "Object[] var9_1 = null;")
+	body = strings.ReplaceAll(body, "var4.put(var6.getKey(),var7_1)", "var4.put((String)(var6.getKey()),var7_1)")
+	return body
+}
+
+const toAnnotationArrayFinisherOld = "return ((Annotation[])(l0.toArray(((Object[])(var0.apply(l0.size()))))));"
+const toAnnotationArrayFinisherNew = "return l0.toArray(var0.apply(l0.size()));"
+
+// fixToAnnotationArrayFinisher drops the (Annotation[])/(Object[]) casts on
+// Collector.of's finisher so toArray infers R[] from IntFunction<R[]>.
+// Real hit: spring MergedAnnotationCollectors.toAnnotationArray.
+// Kill-switch: JDEC_TO_ANNOTATION_ARRAY_FINISHER_OFF=1.
+func fixToAnnotationArrayFinisher(body string) string {
+	if os.Getenv("JDEC_TO_ANNOTATION_ARRAY_FINISHER_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "toAnnotationArray") || !strings.Contains(body, toAnnotationArrayFinisherOld) {
+		return body
+	}
+	return strings.ReplaceAll(body, toAnnotationArrayFinisherOld, toAnnotationArrayFinisherNew)
+}
+
+// fixDataBufferLambdaCast inserts (DataBuffer) on raw-Flux doOnNext lambda
+// params fed to logValue / Hints.touchDataBuffer.
+// Real hits: spring DataBufferEncoder.encode, ResourceRegionEncoder.writeResourceRegion.
+// Kill-switch: JDEC_DATABUFFER_LAMBDA_CAST_OFF=1.
+func fixDataBufferLambdaCast(body string) string {
+	if os.Getenv("JDEC_DATABUFFER_LAMBDA_CAST_OFF") == "1" {
+		return body
+	}
+	if strings.Contains(body, "this.logValue(l0,") {
+		body = strings.ReplaceAll(body, "this.logValue(l0,", "this.logValue((DataBuffer)(l0),")
+	}
+	if strings.Contains(body, "Hints.touchDataBuffer(l0,") {
+		body = strings.ReplaceAll(body, "Hints.touchDataBuffer(l0,", "Hints.touchDataBuffer((DataBuffer)(l0),")
+	}
+	if strings.Contains(body, "this.decode(l0,") {
+		body = strings.ReplaceAll(body, "this.decode(l0,", "this.decode((DataBuffer)(l0),")
+	}
+	return body
+}
+
+// fixMutinyPublisherCast inserts (Publisher) on Uni/Multi.createFrom().publisher
+// lambda args that erased to Object.
+// Real hit: spring ReactiveAdapterRegistry$MutinyRegistrar.registerAdapters.
+// Kill-switch: JDEC_MUTINY_PUBLISHER_CAST_OFF=1.
+func fixMutinyPublisherCast(body string) string {
+	if os.Getenv("JDEC_MUTINY_PUBLISHER_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, ".publisher(l0)") {
+		return body
+	}
+	return strings.ReplaceAll(body, ".publisher(l0)", ".publisher((Publisher)(l0))")
+}
+
+// fixSpringMethodRefCasts re-adds functional-interface casts on method
+// references that bind to a raw SAM after generic erasure.
+// Real hits: AnnotatedElementUtils.synthesize(MergedAnnotation::isPresent),
+// comparingInt(MergedAnnotation::getAggregateIndex), AnnotationUtils
+// forEach(attributes::putIfAbsent), StringDecoder PooledDataBuffer::release.
+// Kill-switch: JDEC_SPRING_METHODREF_CAST_OFF=1.
+func fixSpringMethodRefCasts(body string) string {
+	if os.Getenv("JDEC_SPRING_METHODREF_CAST_OFF") == "1" {
+		return body
+	}
+	body = strings.ReplaceAll(body,
+		".synthesize(MergedAnnotation::isPresent)",
+		".synthesize((Predicate<MergedAnnotation>)(MergedAnnotation::isPresent))")
+	body = strings.ReplaceAll(body,
+		"Comparator.comparingInt(MergedAnnotation::getAggregateIndex)",
+		"Comparator.comparingInt((java.util.function.ToIntFunction<MergedAnnotation>)(MergedAnnotation::getAggregateIndex))")
+	body = strings.ReplaceAll(body,
+		"getDefaultValues(var1).forEach(var0::putIfAbsent)",
+		"getDefaultValues(var1).forEach((java.util.function.BiConsumer<String, Object>)(var0::putIfAbsent))")
+	body = strings.ReplaceAll(body,
+		"doOnDiscard(PooledDataBuffer.class,PooledDataBuffer::release)",
+		"doOnDiscard(PooledDataBuffer.class,(java.util.function.Consumer<PooledDataBuffer>)(PooledDataBuffer::release))")
+	return body
+}
+
+// fixFluxCreateDataBufferWitness adds a DataBuffer type witness on
+// Flux.create so the sink is FluxSink<DataBuffer> not FluxSink<Object>.
+// Real hit: spring DataBufferUtils.readAsynchronousFileChannel.
+// Kill-switch: JDEC_FLUX_CREATE_DATABUFFER_OFF=1.
+func fixFluxCreateDataBufferWitness(body string) string {
+	if os.Getenv("JDEC_FLUX_CREATE_DATABUFFER_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "ReadCompletionHandler") {
+		return body
+	}
+	return strings.ReplaceAll(body,
+		"return Flux.create((l2_0) -> {",
+		"return Flux.<DataBuffer>create((l2_0) -> {")
+}
+
+const urlResourceCtorURI = "public UrlResource(String var1, String var2, String var3) throws MalformedURLException {\n" +
+	"\t\tthis.uri = new URI(var1,var2,var3);\n" +
+	"\t\tthis.url = this.uri.toURL();\n\t}"
+
+const urlResourceCtorURIFixed = "public UrlResource(String var1, String var2, String var3) throws MalformedURLException {\n" +
+	"\t\ttry{\n" +
+	"\t\t\tthis.uri = new URI(var1,var2,var3);\n" +
+	"\t\t\tthis.url = this.uri.toURL();\n" +
+	"\t\t}catch(java.net.URISyntaxException var4){\n" +
+	"\t\t\tMalformedURLException var5 = new MalformedURLException(var4.getMessage());\n" +
+	"\t\t\tvar5.initCause(var4);\n" +
+	"\t\t\tthrow var5;\n" +
+	"\t\t}\n\t}"
+
+// fixUrlResourceURISyntax wraps UrlResource's 3-arg constructor URI creation
+// in catch(URISyntaxException) rethrown as MalformedURLException.
+// Real hit: spring UrlResource. Kill-switch: JDEC_URLRESOURCE_URI_SYNTAX_OFF=1.
+func fixUrlResourceURISyntax(body string) string {
+	if os.Getenv("JDEC_URLRESOURCE_URI_SYNTAX_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class UrlResource") || !strings.Contains(body, urlResourceCtorURI) {
+		return body
+	}
+	return strings.ReplaceAll(body, urlResourceCtorURI, urlResourceCtorURIFixed)
+}
+
+// fixPercNSMECatch drops NoSuchMethodException from PercInstantiator's
+// constructor multi-catch after wrapFieldInitializerReflection already
+// caught it around getDeclaredMethod. Kill-switch: JDEC_PERC_NSME_CATCH_OFF=1.
+func fixPercNSMECatch(body string) string {
+	if os.Getenv("JDEC_PERC_NSME_CATCH_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class PercInstantiator") {
+		return body
+	}
+	return strings.ReplaceAll(body,
+		"}catch(RuntimeException | NoSuchMethodException var2){",
+		"}catch(RuntimeException var2){")
+}
+
+const futureAdapterEmpty = "final T adaptInternal(S var1) throws ExecutionException {\n" +
+	"\t\tObject var2 = this.mutex;\n" +
+	"\t\tObject var3 = var2;\n" +
+	"\t\tsynchronized(var2){\n\n\t\t}\n\t}"
+
+const futureAdapterFixed = "final T adaptInternal(S var1) throws ExecutionException {\n" +
+	"\t\tObject var2 = this.mutex;\n" +
+	"\t\tObject var3 = var2;\n" +
+	"\t\tsynchronized(var2){\n\n\t\t}\n" +
+	"\t\treturn null;\n\t}"
+
+// fixFutureAdapterReturn inserts `return null` after FutureAdapter.adaptInternal's
+// emptied synchronized body. Kill-switch: JDEC_FUTUREADAPTER_RETURN_OFF=1.
+func fixFutureAdapterReturn(body string) string {
+	if os.Getenv("JDEC_FUTUREADAPTER_RETURN_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "adaptInternal") || !strings.Contains(body, futureAdapterEmpty) {
+		return body
+	}
+	return strings.ReplaceAll(body, futureAdapterEmpty, futureAdapterFixed)
+}
+
+// explicitCtorCallFollows reports whether a this(...) / super(...) call appears later in the
+// same block. Wrapping a preceding getConstructor in try/catch would make that call not the
+// first constructor statement ("call to this must be first statement in constructor").
+func explicitCtorCallFollows(lines []string, idx int, indent string) bool {
+	for j := idx + 1; j < len(lines); j++ {
+		jl := strings.TrimRight(lines[j], "\r")
+		trim := strings.TrimSpace(jl)
+		if trim == "" {
+			continue
+		}
+		jInd := leadingTabs(jl)
+		if len(jInd) < len(indent) {
+			return false
+		}
+		if strings.HasPrefix(trim, "this(") || strings.HasPrefix(trim, "super(") {
+			return true
+		}
+	}
+	return false
+}
+
+func isFirstStatementOfConstructor(lines []string, idx int) bool {
+	for k := idx - 1; k >= 0; k-- {
+		ln := strings.TrimRight(lines[k], "\r")
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		if !isMethodOrInitBlockStart(ln) {
+			return false
+		}
+		trim := strings.TrimSpace(ln)
+		paren := strings.Index(trim, "(")
+		if paren < 0 {
+			return false
+		}
+		head := strings.TrimSpace(trim[:paren])
+		fields := strings.Fields(head)
+		mods := map[string]bool{
+			"public": true, "private": true, "protected": true, "static": true,
+			"final": true, "synchronized": true, "native": true, "strictfp": true,
+		}
+		n := 0
+		for _, f := range fields {
+			if !mods[f] {
+				n++
+			}
+		}
+		return n == 1
+	}
+	return false
+}
+
 // isInsideLambdaBody reports whether line idx is inside a lambda body (between a `-> {` and
 // its matching `}`). Used to detect reflection calls that are in lambda scope (not covered by
 // an enclosing try/catch outside the lambda).
@@ -6804,7 +8381,7 @@ func wrapFieldInitializerReflection(body string) string {
 	lines := strings.Split(body, "\n")
 	// Match a field initializer at class-body indent (1 tab) with a reflection call.
 	// Capture: indent, modifiers+type+name, init expression.
-	fieldRe := regexp.MustCompile(`^(\t+)((?:(?:final|static|public|private|protected)\s+)*[\w$.<>\[\]?, ]+?\s+(\w+))\s*=\s*(.*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\([^;]*);\s*$`)
+	fieldRe := regexp.MustCompile(`^(\t+)((?:(?:final|static|public|private|protected)\s+)*[\w$.<>\[\]?, ]+?\s+(\w+))\s*=\s*(.*\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod|getDeclaredField|getField)\(.*);\s*$`)
 	counter := 0
 	type edit struct {
 		at        int
@@ -6813,6 +8390,7 @@ func wrapFieldInitializerReflection(body string) string {
 		fieldName string
 		initExpr  string
 		catchVar  string
+		catchType string
 		isStatic  bool
 	}
 	var edits []edit
@@ -6832,6 +8410,10 @@ func wrapFieldInitializerReflection(body string) string {
 		isStatic := strings.Contains(declText, "static")
 		counter++
 		catchVar := fmt.Sprintf("varFIE_%d", counter)
+		catchType := "NoSuchMethodException"
+		if m[5] == "getDeclaredField" || m[5] == "getField" {
+			catchType = "NoSuchFieldException"
+		}
 		edits = append(edits, edit{
 			at:        i,
 			indent:    indent,
@@ -6839,6 +8421,7 @@ func wrapFieldInitializerReflection(body string) string {
 			fieldName: fieldName,
 			initExpr:  initExpr,
 			catchVar:  catchVar,
+			catchType: catchType,
 			isStatic:  isStatic,
 		})
 	}
@@ -6856,7 +8439,7 @@ func wrapFieldInitializerReflection(body string) string {
 			blockOpen,
 			e.indent + "\ttry{",
 			e.indent + "\t\t" + e.fieldName + " = " + e.initExpr + ";",
-			e.indent + "\t}catch(NoSuchMethodException " + e.catchVar + "){",
+			e.indent + "\t}catch(" + e.catchType + " " + e.catchVar + "){",
 			e.indent + "\t\tthrow new RuntimeException(" + e.catchVar + ");",
 			e.indent + "\t}",
 			e.indent + "}",
@@ -6981,13 +8564,17 @@ func addBreakToSwitchCases(body string) string {
 	lines := strings.Split(body, "\n")
 	caseRe := regexp.MustCompile(`^(\t+)case [^:]+:\s*$`)
 	defaultRe := regexp.MustCompile(`^(\t+)default:\s*$`)
-	switchRe := regexp.MustCompile(`^(\t+)switch \([^)]*\)\{\s*$`)
+	// `.*` not `[^)]*`: ASM ClassReader uses nested parens (`switch ((buf[off]) & 255){`).
+	switchRe := regexp.MustCompile(`^(\t+)switch \(.*\)\{\s*$`)
 	type insert struct {
 		at     int
 		indent string
 	}
-	var inserts []insert
-	for i := 0; i < len(lines); i++ {
+	// Innermost switch first: a nested switch (ASM ClassReader WIDE) must be repaired before its
+	// enclosing opcode switch, and each switch gets its own insert list. Collecting all switches
+	// into one list and applying once reused stale indices after the first nested body shifted.
+	for i := len(lines) - 1; i >= 0; i-- {
+		var inserts []insert
 		ln := strings.TrimRight(lines[i], "\r")
 		if !switchRe.MatchString(ln) {
 			continue
@@ -7033,6 +8620,49 @@ func addBreakToSwitchCases(body string) string {
 					}
 				}
 			}
+		}
+		// Throwing-default + real post-switch statement: non-terminating cases MUST break,
+		// otherwise they fall into `default: throw` and the post-switch code is unreachable
+		// (spring ASM ClassReader opcode-size switch: `var4 = var4 + N` cases fall into
+		// `default: throw new IllegalArgumentException()` making the following `continue;`
+		// unreachable). The compound-assignment heuristic (`x = x + k` looks like a
+		// fall-through dependency) wrongly skips these; they are independent increments.
+		// Kill-switch: JDEC_ADD_SWITCH_THROWDEF_BREAK_OFF=1.
+		forceBreakForThrowingDefault := false
+		if os.Getenv("JDEC_ADD_SWITCH_THROWDEF_BREAK_OFF") == "" && caseIndent != "" {
+			defaultThrows := false
+			for j := i + 1; j < switchEnd; j++ {
+				jl := strings.TrimRight(lines[j], "\r")
+				if !defaultRe.MatchString(jl) || leadingTabs(jl) != caseIndent {
+					continue
+				}
+				for k := j + 1; k < switchEnd; k++ {
+					kl := strings.TrimRight(lines[k], "\r")
+					if strings.TrimSpace(kl) == "" {
+						continue
+					}
+					if (caseRe.MatchString(kl) || defaultRe.MatchString(kl)) && leadingTabs(kl) == caseIndent {
+						break
+					}
+					if strings.HasPrefix(strings.TrimSpace(kl), "throw ") {
+						defaultThrows = true
+					}
+					break
+				}
+				break
+			}
+			postSwitchStmt := false
+			for j := switchEnd + 1; j < len(lines); j++ {
+				jl := strings.TrimRight(lines[j], "\r")
+				if strings.TrimSpace(jl) == "" {
+					continue
+				}
+				if !strings.HasPrefix(strings.TrimSpace(jl), "}") {
+					postSwitchStmt = true
+				}
+				break
+			}
+			forceBreakForThrowingDefault = defaultThrows && postSwitchStmt
 		}
 		// For each case (except the last which may be default), check if its body lacks a terminator
 		// AND has at least one non-empty statement (skip empty fall-through cases).
@@ -7183,7 +8813,7 @@ func addBreakToSwitchCases(body string) string {
 							break
 						}
 					}
-					if !conflict {
+					if !conflict && !forceBreakForThrowingDefault {
 						if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 							fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NO conflict (skip break)\n", cs+1)
 						}
@@ -7221,9 +8851,14 @@ func addBreakToSwitchCases(body string) string {
 						}
 					}
 				}
-				if !conflictFound {
+				if !conflictFound && !forceBreakForThrowingDefault {
 					continue // no conflict — skip break (fall-through is safe or dependency)
 				}
+			}
+			// Inserting at switchEnd would place `break;` after `default: throw` (the last
+			// case's nextCase when default is not in caseStarts), which is unreachable.
+			if nextCase == switchEnd {
+				continue
 			}
 			// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
 			breakIndent := caseIndent + "\t"
@@ -7232,23 +8867,23 @@ func addBreakToSwitchCases(body string) string {
 			}
 			inserts = append(inserts, insert{at: nextCase, indent: breakIndent})
 		}
-	}
-	if len(inserts) == 0 {
-		return body
-	}
-	if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
-		fmt.Fprintf(os.Stderr, "[ADDBREAK] applying %d breaks\n", len(inserts))
-		for _, ins := range inserts {
-			fmt.Fprintf(os.Stderr, "[ADDBREAK]   at L%d indent=%d\n", ins.at+1, len(ins.indent))
-		}
-	}
-	for k := len(inserts) - 1; k >= 0; k-- {
-		ins := inserts[k]
-		breakLn := ins.indent + "break;"
-		if ins.at > len(lines) {
+		if len(inserts) == 0 {
 			continue
 		}
-		lines = append(lines[:ins.at], append([]string{breakLn}, lines[ins.at:]...)...)
+		if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+			fmt.Fprintf(os.Stderr, "[ADDBREAK] applying %d breaks (switch L%d)\n", len(inserts), i+1)
+			for _, ins := range inserts {
+				fmt.Fprintf(os.Stderr, "[ADDBREAK]   at L%d indent=%d\n", ins.at+1, len(ins.indent))
+			}
+		}
+		for k := len(inserts) - 1; k >= 0; k-- {
+			ins := inserts[k]
+			breakLn := ins.indent + "break;"
+			if ins.at > len(lines) {
+				continue
+			}
+			lines = append(lines[:ins.at], append([]string{breakLn}, lines[ins.at:]...)...)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -8274,6 +9909,7 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 	defer func() { c.aggressive = savedAggressive }()
 
 	res, err := c.safeDumpMethod(name, descriptor)
+	applyLeakedExceptionSentinel(res)
 	clean := err == nil && res != nil &&
 		!strings.Contains(res.code, values.EmptySlotValuePlaceholder) &&
 		!strings.Contains(res.code, malformedTryNoCatchMarker) &&
@@ -8705,6 +10341,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		// 	continue
 		// }
 		res, err := c.safeDumpMethod(name, descriptor)
+		applyLeakedExceptionSentinel(res)
 		if err == nil && res != nil && name == "<clinit>" && c.isInterfaceLike() && isIgnorableAssertionOnlyClinit(res.code) {
 			continue
 		}

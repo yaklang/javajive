@@ -453,7 +453,20 @@ func (j *JavaArrayMember) Type() types.JavaType {
 	return ot.ElementType()
 }
 func (j *JavaArrayMember) String(funcCtx *class_context.ClassContext) string {
-	return fmt.Sprintf("%s[%v]", j.Object.String(funcCtx), j.Index.String(funcCtx))
+	obj := j.Object.String(funcCtx)
+	// A ternary used as an array indexee MUST be parenthesized: `?:` binds
+	// looser than `[]`, so `cond ? a : b[i]` parses as `cond ? a : (b[i])`
+	// (int[] vs int → "bad type in conditional expression"). Real hit:
+	// spring TypeMappedAnnotation.getValue
+	// `(distance != 0 ? resolvedMirrors : resolvedRootMirrors)[index]`.
+	// Kill-switch: JDEC_TERNARY_ARRAY_INDEX_PARENS_OFF.
+	if os.Getenv("JDEC_TERNARY_ARRAY_INDEX_PARENS_OFF") == "" {
+		switch UnpackSoltValue(j.Object).(type) {
+		case *TernaryExpression, *JavaExpression:
+			return fmt.Sprintf("(%s)[%v]", obj, j.Index.String(funcCtx))
+		}
+	}
+	return fmt.Sprintf("%s[%v]", obj, j.Index.String(funcCtx))
 }
 
 func NewJavaArrayMember(object JavaValue, index JavaValue) *JavaArrayMember {
@@ -481,7 +494,19 @@ func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
 	//if j.Id == 0 {
 	//	return j.Member
 	//}
-	return fmt.Sprintf("%s.%s", j.Object.String(funcCtx), class_context.SafeIdentifier(j.Member))
+	obj := j.Object.String(funcCtx)
+	// A ternary used as a field receiver MUST be parenthesized: `?:` binds looser than `.`,
+	// so `(cond) ? (a) : (b).field` parses as `(cond) ? (a) : ((b).field)` (Range vs Cut →
+	// Object, then Range.create cannot be applied). FunctionCallExpression already wraps
+	// TernaryExpression receivers; field access did not. Real hit: guava Range.gap/span.
+	// Kill-switch: JDEC_TERNARY_FIELD_RECV_PARENS_OFF.
+	if os.Getenv("JDEC_TERNARY_FIELD_RECV_PARENS_OFF") == "" {
+		switch UnpackSoltValue(j.Object).(type) {
+		case *TernaryExpression, *JavaExpression:
+			return fmt.Sprintf("(%s).%s", obj, class_context.SafeIdentifier(j.Member))
+		}
+	}
+	return fmt.Sprintf("%s.%s", obj, class_context.SafeIdentifier(j.Member))
 }
 
 type javaNull struct {

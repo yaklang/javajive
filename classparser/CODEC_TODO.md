@@ -29,16 +29,16 @@
 |---|---:|---:|---:|---:|---|
 | **commons-codec** 1.15 | 106 | **0** | **0** | 0 | ✅ **完整往返**(107/107 verify + 调用差分逐字节一致) |
 | **gson** 2.8.9 | 195 | **0** | **0** | 0 | ✅ **完整往返**(199/199 verify) |
-| **commons-lang3** 3.12.0 | 345 | 3 | 3 | 0 | 泛型擦除长尾 |
+| **commons-lang3** 3.12.0 | 345 | **0** | **0** | 0 | ✅ **完整往返**(346/346 verify) |
 | **jsoup** 1.10.2 | 238 | **0** | **0** | 0 | ✅ **完整往返**(241/241 verify) |
 | **snakeyaml** 2.2 | 231 | **0** | **0** | 0 | ✅ **完整往返**(233/233 verify) |
-| **spring-core** 5.3.27 | 978 | 18 | 30 | 0 | 泛型擦除造型 + 三元 LUB + bool/int 槽位长尾 |
+| **spring-core** 5.3.27 | 978 | **0** | **0** | 0 | ✅ **完整往返**(974 tree / 952 verify; optional reactor/ant/jcl 在 verifier CP) |
 | **fastjson2** 2.0.43 | 681 | **0** | **0** | 0 | ✅ **完整往返**(689/689 verify) |
-| **guava** 28.2-android | 1892 | 22 | 26 | 0 | 泛型擦除/边界 + 扁平内部类长尾 |
-| **合计** | | **43** | **59** | **0** | 类级干净率 **99.0%**(4444/4487 摊平单元) |
+| **guava** 28.2-android | 1892 | **0** | **0** | 0 | ✅ **完整往返**(1825 tree / 1892 verify; failureaccess 在 verifier CP) |
+| **合计** | | **0** | **0** | **0** | 8-jar tree 全 0, 均锁 provenClean |
 
-**codec / gson / fastjson2 / snakeyaml / jsoup 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go` 的 `provenClean` 硬断言):
-`decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。fastjson2(689/689)、snakeyaml(233/233)与 jsoup(241/241)本轮随 TypeReference DA 级联(final-copy lambda-capture + method-scoped init)与 createNumber(T4b 折叠首赋值)治本一并清零, 5 个 jar 的 tree 错误与 verify 失败数均锁为 0, 任一回归 CI 直接红。
+**8 个基准 jar 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go` 的 `provenClean` 硬断言, v0.2.0):
+`decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。tree 错误与 verify 失败数均锁为 0, 任一回归 CI 直接红。
 
 > CI 常驻承重: `TestSyntheticJarRoundTrip`(无需 `~/.m2`)对一个含枚举+switch / 泛型 / lambda / varargs / try-catch 的多类程序跑完整往返, 断言运行输出逐字节一致 + 全类 verify, 守住往返能力永不回归。
 
@@ -195,6 +195,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 ### disjoint 槽 / 活跃区间(第 2 类)
 | 开关 | 作用域 |
 |---|---|
+| `JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF` | Method\|Constructor 同槽加宽到 `java.lang.reflect.Executable`(`reachingRefSlotExecutableArmMerge` + AssignVarGuarded 复用 + IsFirst 声明取加宽类型)。参数化 `Constructor<?>` 对 `classNameOf` 不可见, 兄弟臂 LUB 算不成 Member/Executable, 槽被定成 Method 后 Constructor 赋值失败。治 spring `ObjectToObjectConverter.getValidatedExecutable`(spring tree 26→25)。承重 `executable_lub_test.go`。A/B spring delta +1, 其余 8-jar ≥0 |
 | `JDEC_REF_SLOT_SIBLING_ARM_MERGE_OFF` | 兄弟臂引用 phi 合并到 LUB(`Method`/`Field`→`Member`) |
 | `JDEC_REF_SLOT_OBJECT_SUPERTYPE_ARM_MERGE_OFF` | Object 超类臂合并(current 为 Object 时续用 Object) |
 | `JDEC_OBJECT_ARM_PROVISIONAL_NARROW_OFF` | 上一项的 provisional-Object 收窄(current 是未 adopt 的 null-init ref 时收窄到具体臂类型) |
@@ -232,6 +233,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF` | 未使用的 lambda 形参隐式渲染(`(Integer l0)`→`(l0)`) |
 | `JDEC_LAMBDA_PARAM_SCOPE_OFF` | 嵌套 lambda 形参按嵌套深度命名(`l<depth>_<i>`), 避免内层 `l0` 遮蔽外层 `l0`(javac「variable l0 is already defined」); 顶层 lambda 仍 `l<i>` 保持字节一致。修 spring MergedAnnotationPredicates/DataBufferUtils 等 |
 | `JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF` | try/finally(或 synchronized)处理器栈值无法绑定到真实局部时渲染出的裸 `varN = Exception;`(ANTLR 语法网放行、javac 报「cannot find symbol」)提升为完整降级触发器: 该方法先激进重试, 失败则降级为诚实可编译 stub, 不再泄漏坏代码。修 guava Monitor.enterWhen/enterWhenUninterruptibly、InetAddresses(guava tree -3 行, 缺陷类 22→20) |
+| `JDEC_LEAKED_EXCEPTION_SENTINEL_OFF` | 在降级为 stub **之前**重建泄漏的 `varN = Exception;`: (1) if-菱形合流后的 try/catch 被拆到两臂时, 把兄弟臂的 `try{...}catch(T){return X}` 拷到泄漏臂(InetAddresses.textToNumericFormatV6); (2) 0 参 tryLock() 成功臂内联了 finally 的 any-handler 时, 用后合流的 timed-tryLock else 体替换(Monitor.enterWhen); (3) `catch(T varN_1){ throw varN; }` 改 `throw varN_1`(含嵌套 catch)。承重 `leaked_exception_sentinel_test.go`。两方法不再 stub, 保留真实 awaitNanos / parseHextet 体 |
 | `JDEC_NO_EMBED_ASSIGN_INT` | 缺声明安全网识别「条件内嵌赋值」目标为 int 的正则放宽到容忍一层 `()`, 使 `while ((c = this.read()) != -1)` / `(c = in.read()) < n` 这类 InputStream 抽水循环的 RHS(方法调用)被认出: 之前跨不过 `read()` 的括号, 回退成 `Object c = null` 导致 `bad operand types for '!='/'<'`。int 判定安全性不变(关系运算恒为数值; 相等式仍要求数值字面量右操作数)。修 spring-core UpdateMessageDigestInputStream(spring tree -1 行, 缺陷类 39→38) |
 | `JDEC_LAMBDA_RAWRECV_CAST_OFF` | jar 内 RAW 泛型接收者擦除 SAM 的方法调用侧**lambda 体**实参造型(`(Consumer<FieldReader>)`)。**方法引用(`Type::m`/`receiver::m`/`Type::new`)跳过**: 它原生可绑到 raw SAM(无显式形参可冲突), 造型反而在 SAM 嵌套通配符处(`Stream.flatMap` 的 `Function<? super T,? extends Stream<? extends R>>`)钉死具体参数化、挫败 javac 多态推断。判定靠 `CustomValue.IsMethodRef`(bootstrap 方法引用分支置位) |
 | `JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF` | 同上 JDK 接收者伴生(`Stream`/`Optional` 的 RAW 接收者): `.map((l0) -> ...)` 显式类型 lambda 须补 `(Function<X,Object>)` 才绑到擦除 SAM; 方法引用同样跳过。修 fastjson2 `JSONPathSegment$CycleNameSegment$MapRecursive`。本轮方法引用跳过分支清掉 fastjson2 `ObjectReaderCreator.toFieldReaderArray` `flatMap(Collection::stream)`(fastjson2 tree -1) 与 spring `AnnotatedTypeMetadata` `collect(Collector<...>)`(spring tree -3) |
@@ -265,6 +267,7 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 ### 结构化 / pop / switch / 枚举 / 注解
 | 开关 | 作用域 |
 |---|---|
+| `JDEC_BRACE_SKIP_STRINGS_OFF` | 方法体大括号计数跳过 `"..."` / `'...'` / `//` 内的 `{}`(`applyLineBraces`)。否则 `new StringBuilder("{")` 把后继方法吞进同一 method range, lambda-capture final-copy 用错类型(spring `SynthesizedMergedAnnotationInvocationHandler`: `final String var1_f1 = var1` 把 Method 拷成 String)。承重 `method_range_string_brace_test.go`。spring tree 28→26 |
 | `JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF` | switch 合并点的非支配前驱不插 break(修 `break outside switch or loop`) |
 | `JDEC_SWITCH_SPURIOUS_DEFAULT_OFF` | 无 default 的 switch 不注入伪 `case math.MaxInt:`(修 `integer number too large`) |
 | `JDEC_POP_ELIDE_OFF` | pop/pop2 裸值语句 elide(裸 local/常量/类引用 + `this.f` 单层实例字段读; 修 `not a statement`) |

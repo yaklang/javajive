@@ -236,7 +236,7 @@ func TestBenchmarkSelfRecompile(t *testing.T) {
 		// Repackage whatever recompiled and load+verify every class in the resulting jar.
 		repackaged := filepath.Join(t.TempDir(), j.key+"-recompiled.jar")
 		zipClassesToJar(t, clsRoot, repackaged)
-		vok, vfail, _ := verifyJarLoads(t, verifierDir, repackaged)
+		vok, vfail, _ := verifyJarLoads(t, verifierDir, repackaged, classpath)
 
 		s := selfScore{
 			units: len(files), outers: outers, failedOuter: failedOuter,
@@ -321,7 +321,10 @@ var benchmarkJars = []benchJar{
 			"io/reactivex/rxjava/*/rxjava-*.jar",
 			"io/reactivex/rxjava2/rxjava/*/rxjava-*.jar",
 			"io/reactivex/rxjava3/rxjava/*/rxjava-*.jar",
-			"io/smallrye/reactive/mutiny/*/mutiny-*.jar",
+			// Mutiny 2.x uses Flow.Publisher; spring-core 5.3.27 targets Mutiny 1.x
+			// (org.reactivestreams.Publisher). Pin 1.x so tree-recompile is not an
+			// environment false-positive.
+			"io/smallrye/reactive/mutiny/1.*/mutiny-*.jar",
 			"net/sf/jopt-simple/jopt-simple/*/jopt-simple-*.jar",
 			"org/apache/ant/ant/*/ant-*.jar",
 			"org/aspectj/aspectjweaver/*/aspectjweaver-*.jar",

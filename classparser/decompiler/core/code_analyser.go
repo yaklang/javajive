@@ -2485,6 +2485,37 @@ func (d *Decompiler) reachingRefSlotSiblingArmMerge(store *OpCode, slot int, cur
 	return current
 }
 
+// reachingRefSlotExecutableArmMerge handles sequential Method|Constructor stores into one slot.
+// spring ObjectToObjectConverter.getValidatedExecutable types the local from determineToMethod's
+// Method return, then reassigns determineFactoryConstructor's Constructor<?>. Parameterized
+// Constructor is invisible to classNameOf, so sibling merge cannot compute a LUB and javac
+// rejects "Constructor<CAP#1> cannot be converted to Method". The denotable LUB is
+// java.lang.reflect.Executable (Method and Constructor both extend it; Field does not, so
+// Method|Field ternaries stay Member). Phi-gated. Kill-switch:
+// JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF=1.
+func (d *Decompiler) reachingRefSlotExecutableArmMerge(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) *values.JavaRef {
+	if os.Getenv("JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF") == "1" {
+		return nil
+	}
+	if store == nil || current == nil || val == nil {
+		return nil
+	}
+	if current.IsParam || current.IsNullInitialized() {
+		return nil
+	}
+	ck := types.ReflectExecKind(current.Type())
+	vk := types.ReflectExecKind(slotDeclType(val))
+	if ck == "" || vk == "" || ck == vk {
+		return nil
+	}
+	// Any pair in {Method, Constructor, Executable} that isn't already the same kind.
+	if !d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return nil
+	}
+	current.ResetVarType(types.NewJavaClass("java.lang.reflect.Executable"))
+	return current
+}
+
 // reachingRefSlotSubtypeArmMerge handles the SUBTYPE-arm reference phi for instanceof-dispatch slot
 // reuse across JAR-INTERNAL types that neither reachingRefSlotPhiMerge nor reachingRefSlotSiblingArmMerge
 // covers. gson JsonAdapterAnnotationTypeAdapterFactory.getTypeAdapter:
@@ -3401,6 +3432,17 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// reassignments of one Member variable instead of splitting into Method/Field names that break
 		// the instanceof/cast uses ("inconvertible types: Field cannot be converted to Method"). Strict
 		// sibling + non-Object JDK LUB + phi gates; Kill-switch: JDEC_REF_SLOT_SIBLING_ARM_MERGE_OFF=1.
+		// Method|Constructor sequential reassignment runs BEFORE the generic sibling merge: sibling
+		// LUB of raw Method|Constructor is Member, which steals the pair and leaves the first
+		// declaration as Method (IsFirst dump uses the RHS type). Executable is the denotable LUB
+		// (Field stays on Member). Kill-switch: JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF=1.
+		if !refPhiMerged {
+			if merged := d.reachingRefSlotExecutableArmMerge(opcode, slot, oldRef, value); merged != nil {
+				runtimeStackSimulation.SetVar(slot, merged)
+				oldRef = merged
+				refPhiMerged = true
+			}
+		}
 		if !refPhiMerged {
 			if merged := d.reachingRefSlotSiblingArmMerge(opcode, slot, oldRef, value); merged != nil {
 				runtimeStackSimulation.SetVar(slot, merged)

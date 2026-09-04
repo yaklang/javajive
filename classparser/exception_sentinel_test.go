@@ -21,6 +21,7 @@ func TestExceptionSentinelDegradeIsLoadBearing(t *testing.T) {
 	}
 
 	os.Unsetenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF")
+	os.Unsetenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF")
 	on, err := Decompile(data)
 	if err != nil {
 		t.Fatalf("decompile (fix ON) failed: %v", err)
@@ -30,6 +31,7 @@ func TestExceptionSentinelDegradeIsLoadBearing(t *testing.T) {
 	}
 
 	t.Setenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF", "1")
+	t.Setenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF", "1")
 	off, err := Decompile(data)
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)

@@ -148,14 +148,20 @@ type ClassContext struct {
 	// (JDEC_INNER_STANDALONE_ERASE_OFF) and types.JavaClass.String.
 	StandaloneEraseTypeVars map[string]string
 	// SuppressStandaloneErase temporarily disables StandaloneEraseTypeVars while rendering a position
-	// where erasing to Object would HURT: an ABSTRACT method's parameter types. Erasing an abstract
-	// method's `output(K,V)` to `output(Object,Object)` makes a no-own-formal sibling override that
-	// declares its own K,V (`AbstractMapBasedMultimap$1.output(K,V)`) no longer override it ("same
-	// erasure, yet neither overrides the other" + "abstract method not overridden"), turning one
-	// undeclared-symbol error into two clash errors. Keeping the abstract parameter as the bare
-	// (undeclared) variable is no worse than before this fix, while fields/locals/concrete-method
-	// positions still benefit from the erasure. Set/cleared by the dumper around abstract param rendering.
+	// where erasing to Object would HURT. Historically used for ABSTRACT method parameters so a
+	// no-own-formal sibling override that declares its own K,V still overrode `output(K,V)`. That
+	// exception is gone: abstract params now standalone-erase (so Itr itself compiles) and the
+	// matching override params are force-erased via ForceParamEraseTypeVars (so $1 still overrides).
+	// Kept as a general escape hatch for any remaining render site that must emit the bare name.
 	SuppressStandaloneErase bool
+	// ForceParamEraseTypeVars maps a DECLARED type-variable name to the JVM erasure that must be
+	// rendered in METHOD PARAMETER positions only. Used by a flattened no-own-formal inner class
+	// whose superclass standalone-erased those same names in its abstract/overridden params
+	// (guava AbstractMapBasedMultimap$1.output(K,V) matching $Itr.output(Object,Object)). Applying
+	// this to returns/fields would turn a legitimate `V output(...)` into `Object` and break the
+	// override; applying it to parameterized type arguments (`Ref<K,V>`) would produce
+	// `Ref<Object,Object>` and clash with a raw-erased super `Ref`. Bare param types only.
+	ForceParamEraseTypeVars map[string]string
 	// SiblingClassSig resolves a jar-internal class's generic signature info by binary internal name
 	// (slash-separated). It returns the class's raw class Signature and a (name,arity)->method Signature
 	// map, or ok=false for JDK/external classes whose bytes are not in the jar. The dumper builds this
@@ -367,6 +373,16 @@ func (f *ClassContext) StandaloneEraseTypeVar(name string) (string, bool) {
 		return "", false
 	}
 	repl, ok := f.StandaloneEraseTypeVars[name]
+	return repl, ok
+}
+
+// ForceParamEraseTypeVar returns the erasure spelling a METHOD PARAMETER that is a BARE declared
+// type variable must render, so it matches a superclass that standalone-erased the same name.
+func (f *ClassContext) ForceParamEraseTypeVar(name string) (string, bool) {
+	if f == nil || name == "" || f.ForceParamEraseTypeVars == nil {
+		return "", false
+	}
+	repl, ok := f.ForceParamEraseTypeVars[name]
 	return repl, ok
 }
 

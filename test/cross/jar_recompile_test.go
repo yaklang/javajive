@@ -104,7 +104,10 @@ var jarSpecs = map[string]jarSpec{
 			"io/reactivex/rxjava/*/rxjava-*.jar",
 			"io/reactivex/rxjava2/rxjava/*/rxjava-*.jar",
 			"io/reactivex/rxjava3/rxjava/*/rxjava-*.jar",
-			"io/smallrye/reactive/mutiny/*/mutiny-*.jar",
+			// Mutiny 2.x switched publisher()/toPublisher() to java.util.concurrent.Flow.Publisher;
+			// spring-core 5.3.27 was compiled against Mutiny 1.x (org.reactivestreams.Publisher).
+			// A wildcard that picks 2.x is an ENVIRONMENT false-positive, same class as sun.misc.
+			"io/smallrye/reactive/mutiny/1.*/mutiny-*.jar",
 			"net/sf/jopt-simple/jopt-simple/*/jopt-simple-*.jar",
 			"org/apache/ant/ant/*/ant-*.jar",
 			"org/aspectj/aspectjweaver/*/aspectjweaver-*.jar",

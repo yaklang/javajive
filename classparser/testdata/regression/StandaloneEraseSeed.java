@@ -9,11 +9,10 @@
 // standalone `K` has no `<...>` to strip, so it renders as an undeclared `K` -> javac "cannot find
 // symbol: class K".
 //
-// The fix renders the JVM erasure of the variable instead (java.lang.Object for these unbounded ones).
-// EXCEPTION: an ABSTRACT method's parameters are left as the bare variable, because erasing them to
-// Object would make a no-own-formal sibling override that declares its own K, V no longer override it
-// ("same erasure, yet neither overrides"; guava AbstractMapBasedMultimap$1). This mirrors guava's
-// AbstractMapBasedMultimap$Itr (`K key`) and MapMakerInternalMap$HashIterator (`E nextEntry`, advanceTo).
+// The fix renders the JVM erasure of the variable instead (java.lang.Object for these unbounded ones),
+// including ABSTRACT method parameters. A no-own-formal sibling subclass (`Sub`) that declares K, V
+// via enclosing-arity injection force-erases the same names in override parameter positions so it
+// still overrides `out(Object, Object)` (guava AbstractMapBasedMultimap$1).
 import java.util.Iterator;
 
 public class StandaloneEraseSeed<K, V> {
@@ -24,6 +23,12 @@ public class StandaloneEraseSeed<K, V> {
 
         K peek() {
             return this.key;
+        }
+    }
+
+    abstract class Sub extends Itr<V> {
+        V out(K k, V v) {
+            return v;
         }
     }
 }

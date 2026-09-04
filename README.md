@@ -40,16 +40,17 @@ Built for portability and embedding:
 Measured on 8 real-world jars (4,487 flattened units) via decompile → `javac --release 8`
 recompile → repackage → JVM verify:
 
-- **98.6% unit-clean rate** — 4,424 / 4,487 flattened units (`Outer$Inner.java`)
+- **100% unit-clean rate** — **4,487 / 4,487** flattened units (`Outer$Inner.java`)
   recompile with **zero `javac` errors**, and **0 syntax errors** across all 8 jars (a CI-enforced
   hard assertion, so no type error can hide behind a lexer failure).
-- **commons-codec & gson fully round-trip** — decompile → recompile → repackage → external
+- **All 8 libraries fully round-trip** — decompile → recompile → repackage → external
   JVM `-Xverify:all` per-class verification passes end-to-end (codec is byte-identical to the
-  original jar under a call differential).
-- **5 / 5 self-hosted algorithms** (MD5 · SHA-256 · CRC32 · quicksort · Base64) round-trip
-  **byte-for-byte**.
-- **#1 in a fair 3-way comparison** — clean-unit rate 98.6% vs Vineflower 1.10.1 (90.8%) and
-  CFR 0.152 (79.8%); winning all 8 jars against CFR.
+  original jar under a call differential). Locked in `provenClean`.
+- **14 / 14 self-hosted algorithms** (MD5 · SHA-256 · CRC32 · quicksort · Base64 · HeapSort ·
+  KMP · SwitchFSM · TryFinally · UnionFind · DiamondTryCatch · DiamondTryFinally · ForContinue ·
+  ComputeIfAbsent) round-trip **byte-for-byte**.
+- **#1 in a fair 3-way comparison** — clean-unit rate **100%** vs Vineflower 1.10.1 (90.8%) and
+  CFR 0.152 (79.8%); winning all 8 jars against both.
 
 See [BENCHMARK.md](BENCHMARK.md) for the full methodology, per-jar tables and reproduction commands.
 
