@@ -7862,8 +7862,10 @@ func matchingCloseBrace(s string, openIdx int) int {
 }
 
 // fixDupThrowableCatchFinally rewrites consecutive
-//   catch(Throwable x){ UNIQUE; COMMON }
-//   catch(Throwable x){ COMMON; throw x; }
+//
+//	catch(Throwable x){ UNIQUE; COMMON }
+//	catch(Throwable x){ COMMON; throw x; }
+//
 // into catch(Throwable x){ UNIQUE } finally { COMMON }.
 // Kill-switch: JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF=1.
 func fixDupThrowableCatchFinally(body string) string {

@@ -569,5 +569,3 @@ func TestSpringVisitAnnotationConsumerDecompileIsLoadBearing(t *testing.T) {
 		t.Errorf("fix OFF: expected no raw Consumer rewrite, got:\n%s", off)
 	}
 }
-
-
