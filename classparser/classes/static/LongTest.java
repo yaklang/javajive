@@ -1,6 +1,7 @@
 package org.benf.cfr.reader;
 
 import java.util.HashMap;
+import java.util.function.BiFunction;
 
 public class LongTest {
 	void main() {

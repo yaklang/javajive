@@ -1,6 +1,7 @@
 package org.benf.cfr.reader;
 
 import java.util.ArrayList;
+import java.util.function.Consumer;
 
 public class LambdaTest {
 	// Fields

@@ -257,7 +257,13 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 			if collapsed, ok := boolVsIntTernaryCollapse(j.Values[0], j.Values[1], j.Op, funcCtx); ok {
 				return collapsed
 			}
+			if collapsed, ok := boolVsIntOperandCollapse(j.Values[0], j.Values[1], j.Op, funcCtx); ok {
+				return collapsed
+			}
 			if raw, idx := j.incomparableGenericFieldVsCallCast(funcCtx); raw != "" {
+				vs[idx] = fmt.Sprintf("(%s)(%s)", raw, vs[idx])
+			}
+			if raw, idx := j.incomparableClassCmpRawCast(funcCtx); raw != "" {
 				vs[idx] = fmt.Sprintf("(%s)(%s)", raw, vs[idx])
 			}
 		}
@@ -293,6 +299,50 @@ func boolVsIntTernaryCollapse(a, b JavaValue, op string, funcCtx *class_context.
 		return s, true
 	}
 	return "", false
+}
+
+// boolVsIntOperandCollapse handles `==`/`!=` between a boolean-typed operand and an int-typed
+// operand (jackson UntypedObjectDeserializer `int var3 != this._nonMerging`). The int is the
+// JVM 0/1 materialization of a boolean; comparing it with `(intVal) != 0` restores a boolean
+// vs boolean comparison. Kill-switch: JDEC_BOOL_INT_OPERAND_CMP_OFF.
+func boolVsIntOperandCollapse(a, b JavaValue, op string, funcCtx *class_context.ClassContext) (string, bool) {
+	if os.Getenv("JDEC_BOOL_INT_OPERAND_CMP_OFF") != "" {
+		return "", false
+	}
+	try := func(boolCand, intCand JavaValue) (string, bool) {
+		if !isBooleanTyped(boolCand) || !isIntTyped(intCand) {
+			return "", false
+		}
+		// A `cond ? 1 : 0` int ternary is boolVsIntTernaryCollapse's domain; wrapping
+		// it as `(tern != 0)` would steal that kill-switch's OFF path.
+		if _, isTern := UnpackSoltValue(intCand).(*TernaryExpression); isTern {
+			return "", false
+		}
+		return fmt.Sprintf("(%s) %s ((%s) != (0))", boolCand.String(funcCtx), op, intCand.String(funcCtx)), true
+	}
+	if s, ok := try(a, b); ok {
+		return s, true
+	}
+	if s, ok := try(b, a); ok {
+		return s, true
+	}
+	return "", false
+}
+
+func isIntTyped(v JavaValue) bool {
+	if v == nil {
+		return false
+	}
+	uv := UnpackSoltValue(v)
+	if uv == nil {
+		return false
+	}
+	t := uv.Type()
+	if t == nil {
+		return false
+	}
+	prim, ok := t.RawType().(*types.JavaPrimer)
+	return ok && prim.Name == types.JavaInteger
 }
 
 // boolMaterializationCondition returns the underlying boolean condition of a boolean-materialization
@@ -343,6 +393,60 @@ func (j *JavaExpression) incomparableGenericFieldVsCallCast(funcCtx *class_conte
 	}
 	if raw := genericFieldVsCallRaw(funcCtx, b, a); raw != "" {
 		return raw, 0
+	}
+	return "", -1
+}
+
+// incomparableClassCmpRawCast detects `Class<A> == Class<B>` / `!=` where A and B differ
+// (jackson NumberSerializer `this.handledType() == BigDecimal.class`: Class<Number> vs
+// Class<BigDecimal>). A raw `(Class)` on the non-literal operand restores comparability.
+// Kill-switch: JDEC_CLASS_CMP_RAW_CAST_OFF.
+func (j *JavaExpression) incomparableClassCmpRawCast(funcCtx *class_context.ClassContext) (string, int) {
+	if os.Getenv("JDEC_CLASS_CMP_RAW_CAST_OFF") != "" || funcCtx == nil || len(j.Values) != 2 {
+		return "", -1
+	}
+	classy := func(v JavaValue) (isClass bool, isLit bool, rendered string) {
+		if v == nil {
+			return false, false, ""
+		}
+		if _, ok := UnpackSoltValue(v).(*JavaClassValue); ok {
+			return true, true, ""
+		}
+		if v.Type() == nil {
+			return false, false, ""
+		}
+		s := v.Type().String(funcCtx)
+		er := erasureNameOf(s)
+		if er == "Class" || strings.HasSuffix(er, ".Class") {
+			return true, false, s
+		}
+		return false, false, s
+	}
+	aClass, aLit, aStr := classy(j.Values[0])
+	bClass, bLit, bStr := classy(j.Values[1])
+	if !aClass || !bClass {
+		return "", -1
+	}
+	if aLit && bLit {
+		return "", -1
+	}
+	// Class<?> / Class<? extends X> is a supertype of every Class<Concrete>, so
+	// `Class<?> c; c == Foo.class` is comparable. Skip wildcards.
+	if strings.Contains(aStr, "?") || strings.Contains(bStr, "?") {
+		return "", -1
+	}
+	// Same parameterization (both Class<T> or both Class<Number>) is comparable.
+	if !aLit && !bLit && aStr == bStr {
+		return "", -1
+	}
+	if aLit {
+		return "Class", 1
+	}
+	if bLit {
+		return "Class", 0
+	}
+	if strings.Contains(aStr, "<") && strings.Contains(bStr, "<") && aStr != bStr {
+		return "Class", 0
 	}
 	return "", -1
 }
@@ -701,6 +805,20 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 						}
 					}
 				}
+				// Inherited `this.m()` (commons-collections4 ListOrderedSet /
+				// LazyList `this.decorated().add/set`): MethodSignatures only records
+				// same-class + identity-mapped DIRECT supers, so decorated() living
+				// two levels up is missed. Walk the full sibling hierarchy.
+				if funcCtx.SiblingClassSig != nil && funcCtx.ClassName != "" && len(funcCtx.ClassTypeParams) > 0 {
+					recvArgs := make([]types.JavaType, len(funcCtx.ClassTypeParams))
+					for i, p := range funcCtx.ClassTypeParams {
+						recvArgs[i] = types.NewJavaClass(p)
+					}
+					_, ret := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, funcCtx.ClassName, recvArgs, inner.FunctionName, len(inner.Arguments))
+					if pt, ok := types.AsParameterizedType(ret); ok {
+						return pt.RawClassName, pt.TypeArgs
+					}
+				}
 			}
 		}
 	}
@@ -967,15 +1085,11 @@ func (f *FunctionCallExpression) thisCtorTypeVarArgCast(i int, funcCtx *class_co
 	if i < 0 || i >= len(f.Arguments) {
 		return ""
 	}
-	sig := funcCtx.ConstructorSignature(len(f.Arguments))
-	if sig == "" {
+	pt := ctorFormalAt(funcCtx, f.Descriptor, len(f.Arguments), i)
+	if pt == nil {
 		return ""
 	}
-	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
-	if i >= len(params) || params[i] == nil {
-		return ""
-	}
-	paramTypeStr := params[i].String(funcCtx)
+	paramTypeStr := pt.String(funcCtx)
 	// The formal must be a BARE class-scope type variable (`T`), not a parameterization (wildcard
 	// parameterizations are ctorWildcardArgCast's domain) and not a concrete type.
 	if strings.Contains(paramTypeStr, "<") || !funcCtx.IsTypeParam(paramTypeStr) {
@@ -1364,6 +1478,14 @@ func (f *FunctionCallExpression) wildcardConsumerReceiverRawCast(funcCtx *class_
 		return ""
 	}
 	raw, typeArgs := f.receiverParamTypeArgs(funcCtx)
+	// commons-collections4 Transformer<I,O>.transform: two type args, the INPUT is
+	// `? super E` (capture). Raw `((Transformer)(recv)).transform(x)` is unchecked
+	// transform(Object). Kill-switch is the parent JDEC_WILDCARD_CONSUMER_RECV_OFF.
+	if f.FunctionName == "transform" && len(f.Arguments) == 1 && len(typeArgs) >= 1 &&
+		types.IsWildcardType(typeArgs[0]) &&
+		(raw == "org.apache.commons.collections4.Transformer" || strings.HasSuffix(raw, ".Transformer") || raw == "Transformer") {
+		return raw
+	}
 	methods, ok := wildcardConsumerReceiverMethods[raw]
 	if !ok {
 		return ""
@@ -1482,6 +1604,30 @@ func erasureNameOf(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
+}
+
+// isObjectParameterized reports whether a rendered type is a parameterization whose type
+// arguments are ALL java.lang.Object. Mirrors statements.isObjectParameterized.
+func isObjectParameterized(s string) bool {
+	i := strings.IndexByte(s, '<')
+	if i < 0 {
+		return false
+	}
+	j := strings.LastIndexByte(s, '>')
+	if j <= i {
+		return false
+	}
+	inner := s[i+1 : j]
+	if inner == "" || strings.Contains(inner, "<") || strings.Contains(inner, "?") {
+		return false
+	}
+	for _, part := range strings.Split(inner, ",") {
+		a := strings.TrimSpace(part)
+		if a != "Object" && a != "java.lang.Object" {
+			return false
+		}
+	}
+	return true
 }
 
 // mentionsAnyTypeParamToken reports whether s contains any of typeParams as a whole identifier token
@@ -1859,6 +2005,80 @@ func (f *FunctionCallExpression) varargsTypeVarArrayArgParamType(i int, funcCtx 
 // ARGUMENT is itself a reference array of a different element type (e.g. Object[]). The (ok1 && ok2)
 // class-vs-class branch never fires here because JavaArrayType.RawType() is not a *JavaClass. Companion to
 // varargsTypeVarArrayArgParamType. Kill-switch JDEC_VARARGS_TYPEVAR_ARRAY_OFF.
+// thisCtorTypeVarArrayParamType recovers the i-th formal of a same-class this(...) call when that
+// formal is a class type-variable array (`K[]`) so typeVarElemArrayArgCast can re-emit `(K[])`.
+// Arity-keyed ConstructorSignature drops MultiKey(K,K) vs MultiKey(K[],boolean); the descriptor
+// is unique. Kill-switch: JDEC_THIS_CTOR_TYPEVAR_ARRAY_OFF.
+func (f *FunctionCallExpression) thisCtorTypeVarArrayParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if os.Getenv("JDEC_THIS_CTOR_TYPEVAR_ARRAY_OFF") != "" || funcCtx == nil {
+		return nil
+	}
+	if f.FunctionName != "<init>" || f.ClassName != funcCtx.ClassName || f.Descriptor == "" {
+		return nil
+	}
+	// Only a `this(...)` self-call: `new CurrentClass((T[]) ...)` in a STATIC field /
+	// factory cannot mention T (guava Iterators$ArrayItr.EMPTY).
+	if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); !ok || !ref.IsThis {
+		return nil
+	}
+	if i < 0 || i >= len(f.Arguments) {
+		return nil
+	}
+	at := UnpackSoltValue(f.Arguments[i]).Type()
+	if at == nil || !at.IsArray() {
+		return nil
+	}
+	pt := ctorFormalAt(funcCtx, f.Descriptor, len(f.Arguments), i)
+	if pt == nil || !pt.IsArray() {
+		return nil
+	}
+	arr, ok := pt.RawType().(*types.JavaArrayType)
+	if !ok || arr == nil || arr.JavaType == nil {
+		return nil
+	}
+	elem, ok := arr.JavaType.RawType().(*types.JavaClass)
+	if !ok || elem == nil || !funcCtx.IsTypeParam(elem.Name) {
+		return nil
+	}
+	return pt
+}
+
+// ctorFormalAt recovers the i-th formal of a same-class <init> call, aligning a non-static
+// inner class's Signature (which omits synthetic this$0) onto the descriptor argument list
+// by a leading offset. Argument 0 of an inner ctor is the enclosing instance and is never
+// returned. Kill-switch is the caller's (thisCtorTypeVarArgCast / thisCtorTypeVarArrayParamType).
+func ctorFormalAt(funcCtx *class_context.ClassContext, descriptor string, argc, i int) types.JavaType {
+	if funcCtx == nil || i < 0 || argc <= 0 {
+		return nil
+	}
+	sig := ""
+	if descriptor != "" {
+		sig = funcCtx.ConstructorSignatureByDesc(descriptor)
+	}
+	if sig == "" {
+		sig = funcCtx.ConstructorSignature(argc)
+	}
+	if sig == "" {
+		return nil
+	}
+	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+	if len(params) == 0 {
+		return nil
+	}
+	offset := 0
+	if argc > len(params) {
+		offset = argc - len(params)
+	}
+	if i < offset {
+		return nil
+	}
+	j := i - offset
+	if j >= len(params) || params[j] == nil {
+		return nil
+	}
+	return params[j]
+}
+
 func (f *FunctionCallExpression) typeVarElemArrayArgCast(argType types.JavaType, resolvedGeneric bool, arg JavaValue, funcCtx *class_context.ClassContext) bool {
 	if os.Getenv("JDEC_VARARGS_TYPEVAR_ARRAY_OFF") != "" {
 		return false
@@ -1997,6 +2217,49 @@ func (f *FunctionCallExpression) typeVarArrayArgCast(ok1, resolvedGeneric bool, 
 // (a null or a checkcast), so the `(byte[])` cast is behaviour-preserving. Tightly gated: array parameter
 // + non-array reference argument whose erasure is Object (a concrete-class argument to an array parameter
 // would be a genuine type error we must not paper over). Kill-switch: JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF=1.
+// identityArrayThroughCallCast returns the array type to wrap an argument in when a generic
+// identity call (`<T> T checkNotNull(T)`) erased to Object is passed to a varargs / Object[]
+// formal. Casting to Object[] makes Arrays.asList infer List<Object> and reject the
+// List<IpSubnetFilterRule> this(...) overload (netty IpSubnetFilter). The operand's own
+// array type (`IpSubnetFilterRule[]`) keeps inference. Kill-switch
+// JDEC_IDENTITY_ARRAY_CALL_CAST_OFF.
+func identityArrayThroughCallCast(argType types.JavaType, arg JavaValue, funcCtx *class_context.ClassContext) string {
+	if os.Getenv("JDEC_IDENTITY_ARRAY_CALL_CAST_OFF") != "" {
+		return ""
+	}
+	if argType == nil || arg == nil || !argType.IsArray() {
+		return ""
+	}
+	erased := argType.String(funcCtx)
+	if erased != "Object[]" && erased != "java.lang.Object[]" {
+		return ""
+	}
+	call, ok := UnpackSoltValue(arg).(*FunctionCallExpression)
+	if !ok || call == nil || len(call.Arguments) == 0 || call.Arguments[0] == nil {
+		return ""
+	}
+	a0t := call.Arguments[0].Type()
+	s := ""
+	if a0t != nil && a0t.IsArray() {
+		s = a0t.String(funcCtx)
+	} else if funcCtx != nil && funcCtx.IsVarArgs {
+		// A varargs formal `T... var1` may type the slot as T (the element) even
+		// though the JVM slot is T[]. Use the enclosing method's last parameter.
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && len(ft.ParamTypes) > 0 {
+			last := ft.ParamTypes[len(ft.ParamTypes)-1]
+			if last != nil && last.IsArray() {
+				if _, isRef := UnpackSoltValue(call.Arguments[0]).(*JavaRef); isRef {
+					s = last.String(funcCtx)
+				}
+			}
+		}
+	}
+	if s == "" || s == erased {
+		return ""
+	}
+	return s
+}
+
 func arrayParamRefArgCast(argType types.JavaType, arg JavaValue) bool {
 	if os.Getenv("JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF") != "" {
 		return false
@@ -2200,6 +2463,215 @@ func (f *FunctionCallExpression) enumValueOfClassArgCast() string {
 		return ""
 	}
 	return "Class"
+}
+
+// enumSetNoneOfClassArgCast returns the raw `Class` cast EnumSet.noneOf needs when the
+// argument is Class<?> / Class<X> rather than Class<E extends Enum<E>>. javac rejects
+// `noneOf(Class<?>)` ("cannot be applied"). A raw Class argument is an unchecked
+// invocation. Real hit: jackson EnumSetDeserializer.constructSet.
+// Kill-switch: JDEC_ENUMSET_NONEOF_CLASS_CAST_OFF.
+func (f *FunctionCallExpression) enumSetNoneOfClassArgCast() string {
+	if f == nil || os.Getenv("JDEC_ENUMSET_NONEOF_CLASS_CAST_OFF") != "" {
+		return ""
+	}
+	if f.FunctionName != "noneOf" || len(f.Arguments) != 1 {
+		return ""
+	}
+	cn := f.ClassName
+	if cn != "java.util.EnumSet" && cn != "java/util/EnumSet" && cn != "EnumSet" {
+		return ""
+	}
+	return "Class"
+}
+
+// thisCtorOverloadArgCast wraps a `this(...)` argument whose static type would bind to
+// the ENCLOSING constructor (more specific overload) rather than the bytecode target.
+// jackson TypeFactory: LRUMap ctor does `this(var1)` intending LookupCache, but LRUMap
+// is a subtype so javac picks the same ctor ("recursive constructor invocation").
+// Kill-switch: JDEC_THIS_CTOR_OVERLOAD_CAST_OFF.
+func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_context.ClassContext) string {
+	if f == nil || funcCtx == nil || os.Getenv("JDEC_THIS_CTOR_OVERLOAD_CAST_OFF") != "" {
+		return ""
+	}
+	if f.FunctionName != "<init>" || f.ClassName != funcCtx.ClassName || !f.IsSpecialInvoke {
+		return ""
+	}
+	if f.Descriptor == "" || funcCtx.CurrentMethodDesc == "" || f.Descriptor == funcCtx.CurrentMethodDesc {
+		return ""
+	}
+	if i < 0 || i >= len(f.Arguments) || f.Arguments[i] == nil {
+		return ""
+	}
+	tgt, err := types.ParseMethodDescriptor(f.Descriptor)
+	if err != nil || tgt == nil || tgt.FunctionType() == nil || i >= len(tgt.FunctionType().ParamTypes) {
+		return ""
+	}
+	cur, err := types.ParseMethodDescriptor(funcCtx.CurrentMethodDesc)
+	if err != nil || cur == nil || cur.FunctionType() == nil || i >= len(cur.FunctionType().ParamTypes) {
+		return ""
+	}
+	tp := tgt.FunctionType().ParamTypes[i]
+	cp := cur.FunctionType().ParamTypes[i]
+	if tp == nil || cp == nil {
+		return ""
+	}
+	tStr, cStr := tp.String(funcCtx), cp.String(funcCtx)
+	if tStr == "" || tStr == cStr {
+		return ""
+	}
+	arg := f.Arguments[i]
+	if arg.Type() == nil {
+		return ""
+	}
+	aStr := arg.Type().String(funcCtx)
+	// Only when the argument looks like the ENCLOSING ctor's param (or its erasure),
+	// so javac would pick that more-specific overload without a cast.
+	if erasureNameOf(aStr) != erasureNameOf(cStr) && aStr != cStr {
+		return ""
+	}
+	raw := erasureNameOf(tStr)
+	if raw == "" || raw == "int" || raw == "boolean" || raw == "long" || raw == "double" || raw == "float" || raw == "short" || raw == "byte" || raw == "char" {
+		return ""
+	}
+	return raw
+}
+
+// wildcardObjectParamRawCast wraps an argument whose static type is a WILDCARD or RAW
+// parameterization (`JsonDeserializer<?>`) passed to a same-erasure concrete parameterization
+// (`JsonDeserializer<Object>`). javac captures the wildcard to CAP#1. A raw `(JsonDeserializer)`
+// cast is an unchecked conversion. Kill-switch: JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF.
+func (f *FunctionCallExpression) wildcardObjectParamRawCast(i int, funcCtx *class_context.ClassContext) string {
+	if f == nil || i < 0 || i >= len(f.Arguments) {
+		return ""
+	}
+	if os.Getenv("JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF") != "" {
+		return ""
+	}
+	var pt types.JavaType
+	if f.FuncType != nil && i < len(f.FuncType.ParamTypes) {
+		pt = f.FuncType.ParamTypes[i]
+	}
+	// Same-class `new CurrentClass(...)`: descriptor params are erased; recover the generic
+	// constructor Signature so JsonDeserializer<Object> formals are visible (jackson
+	// CollectionDeserializer.withResolved).
+	if funcCtx != nil && f.FunctionName == "<init>" && f.ClassName == funcCtx.ClassName {
+		if sig := funcCtx.ConstructorSignature(len(f.Arguments)); sig != "" {
+			_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+			if i < len(params) && params[i] != nil {
+				pt = params[i]
+			}
+		}
+	}
+	// `super(...)` into a jar-internal superclass ctor (jackson StdScalarSerializer
+	// `super(Class<?>)` -> StdSerializer(Class<T>)). SiblingCtorSig recovers the generic formals.
+	if funcCtx != nil && f.FunctionName == "<init>" && f.ClassName == funcCtx.SupperClassName && funcCtx.SiblingCtorSig != nil {
+		internal := strings.ReplaceAll(f.ClassName, ".", "/")
+		if sig, ok := funcCtx.SiblingCtorSig(internal, len(f.Arguments)); ok && sig != "" {
+			_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+			if i < len(params) && params[i] != nil {
+				pt = params[i]
+			}
+		}
+	}
+	// Recover the generic formal the descriptor erased: same-class methods (static or
+	// instance), then the cross-class sibling walk, then a static call on another
+	// jar-internal class (jackson EnumValues.constructFromName).
+	if funcCtx != nil && f.FunctionName != "<init>" {
+		if f.IsStatic {
+			if sig := funcCtx.MethodSignature(f.FunctionName, len(f.Arguments)); sig != "" {
+				_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+				if i < len(params) && params[i] != nil {
+					pt = params[i]
+				}
+			}
+		} else if inst := f.sameClassMethodParamType(i, funcCtx); inst != nil {
+			pt = inst
+		} else if inst := f.resolvedParamType(i, funcCtx); inst != nil {
+			pt = inst
+		}
+		if pt == nil || !strings.Contains(pt.String(funcCtx), "<") {
+			if f.IsStatic && f.ClassName != "" && funcCtx.SiblingClassSig != nil {
+				internal := strings.ReplaceAll(f.ClassName, ".", "/")
+				_, methodSigs, ok := funcCtx.SiblingClassSig(internal)
+				if ok && methodSigs != nil {
+					if msig := methodSigs[class_context.MethodSigKey(f.FunctionName, len(f.Arguments))]; msig != "" {
+						_, params, _ := types.ParseMethodSignatureFull(msig, funcCtx)
+						if i < len(params) && params[i] != nil {
+							pt = params[i]
+						}
+					}
+				}
+			}
+		}
+	}
+	arg := f.Arguments[i]
+	if pt == nil || arg == nil || arg.Type() == nil {
+		return ""
+	}
+	// A raw/parameterized cast on a method reference or lambda pins the SAM and
+	// defeats poly inference ("invalid method reference") -- commons-lang3
+	// ObjectUtils/StringUtils/ThreadUtils and spring AnnotatedElementUtils.
+	if cv, ok := UnpackSoltValue(arg).(*CustomValue); ok && cv != nil && (cv.IsMethodRef || cv.Flag == "lambda") {
+		return ""
+	}
+	if _, ok := UnpackSoltValue(arg).(*JavaClassValue); ok {
+		return ""
+	}
+	pStr := pt.String(funcCtx)
+	aStr := arg.Type().String(funcCtx)
+	argHasWildEarly := strings.Contains(aStr, "?")
+	pErasure := erasureNameOf(pStr)
+	aErasure := erasureNameOf(aStr)
+	if pErasure != aErasure || pStr == aStr {
+		// UnmodifiableBoundedCollection: BoundedCollection<? extends E> passed to
+		// AbstractCollectionDecorator(Collection<E>). Erasures differ; a raw
+		// `(Collection)` is still an unchecked conversion.
+		if !(f.FunctionName == "<init>" && argHasWildEarly &&
+			(pErasure == "Collection" || strings.HasSuffix(pErasure, ".Collection"))) {
+			return ""
+		}
+	}
+	raw := pErasure
+	if raw == "" || strings.Contains(raw, "Flux") || strings.Contains(raw, "Mono") {
+		return ""
+	}
+	if !strings.Contains(pStr, "<") {
+		return ""
+	}
+	argHasWild := strings.Contains(aStr, "?")
+	paramWild := strings.Contains(pStr, "?")
+	// Type-variable formals (`Comparator<? super K>`, `Class<T>`) belong to other reconstructs,
+	// EXCEPT:
+	//   - Class<T> vs Class<?> / raw Class: a raw `(Class)` is the only legal super/ctor
+	//     argument (jackson StdScalarSerializer `super(Class<?>)` -> StdSerializer(Class<T>)).
+	//   - <init> Collection<E> vs Collection<? extends E> / Map<K,V> vs Map<? extends K,? extends V>
+	//     / AbstractHashedMap<K,Object> vs AbstractHashedMap<K,?>: javac captures the wildcard to
+	//     CAP#1 ("Collection<CAP#1> cannot be converted to Collection<E>"; commons-collections4
+	//     UnmodifiableCollection / UnmodifiableMap / KeySetIterator). A raw `(Collection)` is an
+	//     unchecked conversion.
+	if funcCtx != nil && (mentionsAnyTypeParamToken(pStr, funcCtx.ClassTypeParams) || mentionsAnyTypeParamToken(pStr, funcCtx.TypeParams)) {
+		if f.FunctionName == "<init>" && (raw == "Class" || strings.HasSuffix(raw, ".Class")) &&
+			(argHasWild || !strings.Contains(aStr, "<")) {
+			return "Class"
+		}
+		if f.FunctionName == "<init>" && argHasWild {
+			return raw
+		}
+		return ""
+	}
+	// Foo<Object> / Foo<Enum<?>> param vs Foo<?> arg (jackson EnumValues.constructFromName).
+	// javac captures `Class<?>` to CAP#1. A RAW `Class` argument is already an unchecked
+	// conversion (warning, not error) -- wrapping it with `(Class)` breaks dump reconstructs
+	// (spring AnnotationUtils `getDefaultValues(var1).forEach(var0::putIfAbsent)`) and
+	// erases Flux/Mono inference. Do NOT fire on merely-raw args.
+	if argHasWild {
+		return raw
+	}
+	// Foo<?> (captured to CAP#1) param vs Foo<Concrete> arg (jackson Linked.withNext).
+	if paramWild && strings.Contains(aStr, "<") {
+		return raw
+	}
+	return ""
 }
 
 // classLiteralArgToClassParam reports whether arg is a class literal `X.class` being passed to a
@@ -2696,6 +3168,15 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		if cast := f.enumValueOfClassArgCast(); cast != "" {
 			return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 		}
+		if cast := f.enumSetNoneOfClassArgCast(); cast != "" {
+			return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+		}
+	}
+	if cast := f.thisCtorOverloadArgCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	if cast := f.wildcardObjectParamRawCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	// A METHOD REFERENCE passed to a constructor whose i-th formal is a RAW functional interface
 	// (raw BiConsumer.accept(Object,Object) etc.) fails to bind ("invalid method reference"): the
@@ -2800,6 +3281,11 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		// (guava ImmutableSortedSet.construct `(Comparator<? super E>, int, E...)`): re-emit `(E[])`.
 		argType = inst
 		resolvedGeneric = true
+	} else if inst := f.thisCtorTypeVarArrayParamType(i, funcCtx); inst != nil {
+		// Same-class this(...) whose i-th formal is a class type-var array `K[]` fed Object[]
+		// (commons-collections4 MultiKey `this((K[]) new Object[]{k1,k2}, false)`).
+		argType = inst
+		resolvedGeneric = true
 	}
 	// Incomplete stack simulation can leave an argument with a nil Type(); a parameter type
 	// can likewise be nil for a malformed descriptor. Guard each RawType() behind a nil check
@@ -2837,6 +3323,17 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		argTypeStr := argType.String(funcCtx)
 		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 			return fmt.Sprintf("(%s)(%s)", argTypeStr, argStr)
+		}, func() types.JavaType {
+			return argType
+		})
+	} else if cast := identityArrayThroughCallCast(argType, arg, funcCtx); cast != "" {
+		// `<T> T id(T)` returning Object (erased) into a varargs `Object[]` formal:
+		// wrapping as `(Object[])` makes Arrays.asList infer List<Object> (netty
+		// IpSubnetFilter `this(true, Arrays.asList(checkNotNull(rules)))`). Cast to
+		// the operand's array type instead. Kill-switch JDEC_IDENTITY_ARRAY_CALL_CAST_OFF.
+		argStr := arg.String(funcCtx)
+		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+			return fmt.Sprintf("(%s)(%s)", cast, argStr)
 		}, func() types.JavaType {
 			return argType
 		})

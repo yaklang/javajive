@@ -421,13 +421,15 @@ func InstantiateJDKMethodParam(rawClass, method string, argc, paramIndex int, ty
 	if len(typeArgs) == 0 {
 		return nil
 	}
-	for _, ta := range typeArgs {
-		if isWildcardType(ta) {
-			return nil
-		}
-	}
 	idx := jdkMethodParamTypeArgIndex(rawClass, method, argc, paramIndex, len(typeArgs))
 	if idx < 0 || idx >= len(typeArgs) {
+		return nil
+	}
+	// Only the SELECTED type argument must be a denotable (non-wildcard) target. A sibling
+	// wildcard (`Map<E, ? super V>.put`) used to abort the whole method, dropping the
+	// perfectly-denotable `E` key cast (commons-collections4 MapBackedSet.addAll). A wildcard
+	// at idx itself still bails: `(? super V)` is not legal Java.
+	if isWildcardType(typeArgs[idx]) {
 		return nil
 	}
 	return typeArgs[idx]

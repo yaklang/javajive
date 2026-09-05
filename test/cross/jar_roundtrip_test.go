@@ -76,7 +76,15 @@ func buildVerifier(t *testing.T) string {
 func verifyJarLoads(t *testing.T, verifierDir, jarPath string, extraCP string) (ok, fail int, raw string) {
 	t.Helper()
 	java := lookJava(t)
-	args := []string{"-Xverify:all", "-cp", verifierDir, "Verifier", jarPath}
+	args := []string{
+		// JDK-internal Xalan types (freemarker SunInternalXalanXPathSupport$1) live in
+		// java.xml but are not exported; the original jar fails the same load without
+		// these exports. Harmless for jars that do not implement those interfaces.
+		"--add-exports", "java.xml/com.sun.org.apache.xml.internal.utils=ALL-UNNAMED",
+		"--add-exports", "java.xml/com.sun.org.apache.xpath.internal=ALL-UNNAMED",
+		"--add-exports", "java.xml/com.sun.org.apache.xpath.internal.objects=ALL-UNNAMED",
+		"-Xverify:all", "-cp", verifierDir, "Verifier", jarPath,
+	}
 	if extraCP != "" {
 		for _, p := range strings.Split(extraCP, string(os.PathListSeparator)) {
 			if p != "" {
@@ -112,17 +120,46 @@ func verifyJarLoads(t *testing.T, verifierDir, jarPath string, extraCP string) (
 // with the base output on the classpath and their classes emitted under outDir/META-INF/versions/N so
 // the repackaged jar preserves the MR layout.
 func treeCompileToDir(t *testing.T, files []string, classpath, outDir string) (errCount int, raw string) {
+	return treeCompileToDirAt(t, files, classpath, outDir, 8)
+}
+
+// treeCompileToDirAt is treeCompileToDir with an explicit minimum --release for
+// the base tree. Java 11+ jars (logback 1.4, HikariCP 5) must not be forced to
+// --release 8; the ALPN bump to 9 still applies when minRelease < 9.
+func treeCompileToDirAt(t *testing.T, files []string, classpath, outDir string, minRelease int) (errCount int, raw string) {
 	t.Helper()
 	javac := lookJavac(t)
+	if minRelease < 8 {
+		minRelease = 8
+	}
 	base, versioned, releases := splitMRFiles(files)
-	run := func(fs []string, release int, dst, cp string) string {
+	var base8, j9 []string
+	for _, f := range base {
+		if isJava9SslAlpnFile(f) {
+			j9 = append(j9, f)
+		} else {
+			base8 = append(base8, f)
+		}
+	}
+	run := func(fs []string, release int, dst, cp, sourcepath string) string {
+		if len(fs) == 0 {
+			return ""
+		}
 		if err := os.MkdirAll(dst, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dst, err)
 		}
 		args := append(append([]string{}, javacLocaleArgs...),
-			"-encoding", "UTF-8", "--release", strconv.Itoa(release), "-nowarn", "-Xmaxerrs", "100000")
+			"-encoding", "UTF-8", "--release", strconv.Itoa(release), "-nowarn", "-proc:none", "-Xmaxerrs", "100000")
 		if cp != "" {
 			args = append(args, "-cp", cp)
+		}
+		if sourcepath != "" {
+			// Versioned Multi-Release units live under META-INF/versions/N/. javac infers
+			// a sourcepath from that tree, then reports missing sibling packages that
+			// only exist in the BASE tree (log4j-core versions/9 importing
+			// org.apache.logging.log4j.core.pattern / .time). Point sourcepath at a
+			// view of the base `org/` tree (no module-info.java) so those resolve.
+			args = append(args, "-sourcepath", sourcepath)
 		}
 		args = append(args, "-d", dst)
 		args = append(args, fs...)
@@ -131,15 +168,53 @@ func treeCompileToDir(t *testing.T, files []string, classpath, outDir string) (e
 		out, _ := cmd.CombinedOutput()
 		return string(out)
 	}
-	if len(base) > 0 {
-		raw = run(base, 8, outDir, classpath)
+	// okhttp Android10Platform calls Java 9 SSL ALPN methods directly (Android SDK 29 /
+	// @IgnoreJRERequirement). It is referenced by Platform.findAndroidPlatform in the BASE
+	// tree, so it cannot be a second pass (Platform.java would then fail with "cannot find
+	// symbol: class Android10Platform"). Compile the whole base tree at --release 9 instead.
+	baseRelease := minRelease
+	if len(j9) > 0 {
+		if baseRelease < 9 {
+			baseRelease = 9
+		}
+		base8 = append(base8, j9...)
+	}
+	if len(base8) > 0 {
+		raw = run(base8, baseRelease, outDir, classpath, "")
+	}
+	mrSrc := ""
+	if len(releases) > 0 {
+		srcRoot := ""
+		for _, f := range base8 {
+			slash := filepath.ToSlash(f)
+			if strings.Contains(slash, "/META-INF/") {
+				continue
+			}
+			if i := strings.Index(slash, "/org/"); i >= 0 {
+				srcRoot = filepath.FromSlash(slash[:i])
+				break
+			}
+		}
+		mrSrc = filepath.Join(outDir, ".jdec-empty-src")
+		if err := os.MkdirAll(mrSrc, 0o755); err != nil {
+			t.Fatalf("mkdir empty sourcepath: %v", err)
+		}
+		if srcRoot != "" {
+			baseSrc := filepath.Join(outDir, ".jdec-base-src")
+			if err := os.MkdirAll(baseSrc, 0o755); err == nil {
+				orgLink := filepath.Join(baseSrc, "org")
+				if err := os.Symlink(filepath.Join(srcRoot, "org"), orgLink); err == nil {
+					mrSrc = baseSrc
+				}
+			}
+		}
 	}
 	for _, n := range releases {
 		cp := outDir
 		if classpath != "" {
 			cp = outDir + string(os.PathListSeparator) + classpath
 		}
-		raw += run(versioned[n], n, filepath.Join(outDir, "META-INF", "versions", strconv.Itoa(n)), cp)
+		raw += run(versioned[n], n, filepath.Join(outDir, "META-INF", "versions", strconv.Itoa(n)), cp, mrSrc)
 	}
 	return strings.Count(raw, ": error:"), raw
 }
@@ -176,13 +251,13 @@ func TestJarRoundTripRepackage(t *testing.T) {
 			// Complete JDK-internal packages (sun.misc for guava, jdk.jfr for spring-core) that
 			// --release 8 hides but a faithful decompilation legitimately imports (see jdk_sunmisc_test.go
 			// / jdk_jfr_test.go). Harmless for jars that do not import them.
-			cp := withFlow(t, withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))))
+			cp := withEnvShims(t, strings.Join(deps, string(os.PathListSeparator)))
 
 			srcRoot := t.TempDir()
 			files, units, decompFail := decompileAll(t, jarPath, srcRoot, maxFiles)
 
 			clsRoot := t.TempDir()
-			treeErr, raw := treeCompileToDir(t, files, cp, clsRoot)
+			treeErr, raw := treeCompileToDirAt(t, files, cp, clsRoot, compileRelease(spec, jarPath))
 
 			repackaged := filepath.Join(t.TempDir(), name+"-recompiled.jar")
 			zipClassesToJar(t, clsRoot, repackaged)
@@ -206,6 +281,32 @@ func TestJarRoundTripRepackage(t *testing.T) {
 				"commons-lang3": true, // commons-lang3 3.12.0
 				"guava":         true, // guava 28.2-android (tree 0, 1892/1892 verify with failureaccess on CP)
 				"spring":        true, // spring-core 5.3.27 (tree 0, 952/952 verify with optional deps on CP)
+				"jackson":       true, // jackson-databind 2.15.4 (tree 0/773, verify 785/785)
+				"okhttp":        true, // okhttp 3.14.9 (tree 0/200, verify 199/199)
+				"collections4":  true, // commons-collections4 4.4 (tree 0/524, verify 528/528)
+				"netty":         true, // netty-handler 4.1.108.Final (tree 0/356, verify 366/366)
+				"log4j":         true, // log4j-core 2.23.1 (tree 0/1184, verify 1165/1165)
+				"protobuf":      true, // protobuf-java 3.21.9 (tree 0/672, verify 703/703)
+				"asm":           true, // asm 9.7 (tree 0/38, verify 38/38)
+				"slf4j":         true, // slf4j-api 2.0.13 (tree 0/54, verify 55/55)
+				"joda-time":     true, // joda-time 2.10.13 (tree 0/247, verify 247/247)
+				"jedis":         true, // jedis 3.8.0 (tree 0/748, verify 748/748)
+				"hikaricp":      true, // HikariCP 5.0.1 (tree 0/75, verify 75/75)
+				"logback":       true, // logback-core 1.4.14 (tree 0/453, verify 462/462)
+				"pool2":         true, // commons-pool2 2.11.1 (tree 0/80, verify 81/81)
+				"picocli":       true, // picocli 4.3.2 (tree 0/216, verify 217/217)
+				"httpclient":    true, // httpclient 4.5.14 (tree 0/470, verify 478/478)
+				"junit":         true, // junit 4.13.2 (tree 0/346, verify 351/351)
+				"javassist":     true, // javassist 3.30.2-GA (tree 0/426, verify 426/426)
+				"xstream":       true, // xstream 1.4.20 (tree 0/498, verify 498/498)
+				"commons-io":    true, // commons-io 2.16.0 (tree 0/346, verify 332/332)
+				"compress":      true, // commons-compress 1.26.2 (tree 0/566, verify 542/542)
+				"caffeine":      true, // caffeine 2.9.3 (tree 0/687, verify 692/692)
+				"rxjava":        true, // rxjava 2.2.21 (tree 0/1653, verify 1663/1663)
+				"math3":         true, // commons-math3 3.6.1 (tree 0/1280, verify 1324/1324)
+				"assertj":       true, // assertj-core 3.24.2 (tree 0/812, verify 816/816)
+				"zxing":         true, // zxing-core 3.3.3 (tree 0/260, verify 275/275)
+				"freemarker":    true, // freemarker 2.3.33 (tree 0/1308, verify 1308/1308)
 			}
 			if provenClean[name] {
 				if treeErr != 0 {

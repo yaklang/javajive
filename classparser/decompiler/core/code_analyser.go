@@ -2099,6 +2099,104 @@ func (d *Decompiler) reachingBoolAccumulatorSlotSplit(store *OpCode, slot int, c
 	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
 }
 
+// reachingBoolZStoreSlotSplit is the boolean-Z-STORE sibling of reachingBoolAccumulatorSlotSplit.
+// It fixes the disjoint slot-reuse where a `boolean flag = true; flag = file.mkdirs()` local reuses
+// a JVM slot a DISJOINT earlier live range used as an `int` foreach index. junit TemporaryFolder.newFolder:
+//
+//	for (String path : paths) { if (new File(path).isAbsolute()) throw ...; }  // slot 5 = i (int)
+//	boolean lastMkdirsCallSuccessful = true;                                   // slot 5 REUSED (iconst_1; istore 5)
+//	for (String path : paths) { ...; lastMkdirsCallSuccessful = file.mkdirs(); } // invoke mkdirs()Z; istore 5
+//
+// `lastMkdirsCallSuccessful = true` is `iconst_1; istore 5`, an int-1 literal AssignVarGuarded sees as
+// int-compatible with the (now-dead) int loop counter still parked in slot 5, so it REUSES that ref
+// and merges the two disjoint ranges. The slot's type later resolves to boolean (from the Z store /
+// ifne), so the earlier loop renders as `boolean < int` / `array[boolean]` / `boolean++`.
+//
+// The boolean-ness is witnessed by a later store to the same slot whose value is a Z-returning invoke
+// (or a load of the slot feeding ifeq/ifne), with no intervening iinc of the slot. Same disjoint-web
+// / phi gates as the accumulator sibling. Kill-switch: JDEC_BOOL_ZSTORE_SLOT_SPLIT_OFF=1.
+func (d *Decompiler) reachingBoolZStoreSlotSplit(store *OpCode, slot int, current *values.JavaRef, val values.JavaValue) {
+	if os.Getenv("JDEC_BOOL_ZSTORE_SLOT_SPLIT_OFF") == "1" {
+		return
+	}
+	if store == nil || current == nil || val == nil {
+		return
+	}
+	if current.IsParam || !isExactPrimer(current.Type(), types.JavaInteger) {
+		return
+	}
+	lit, ok := intLiteral01(val)
+	if !ok {
+		return
+	}
+	if !d.slotStoreFollowedByBooleanZStore(store, slot) {
+		return
+	}
+	if d.slotDefPhiReachesLoad(store, slot, current.VarUid) {
+		return
+	}
+	if !d.slotStoreDisjointFromCurrentWeb(store, slot, current) {
+		return
+	}
+	lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)
+}
+
+// slotStoreFollowedByBooleanZStore reports whether, after `store`, the same slot is later stored
+// from a Z-returning invoke (or loaded into ifeq/ifne) without an intervening iinc of the slot.
+// The iinc gate keeps a live int loop counter from being mistaken for a boolean flag init.
+func (d *Decompiler) slotStoreFollowedByBooleanZStore(store *OpCode, slot int) bool {
+	if store == nil {
+		return false
+	}
+	visited := map[*OpCode]bool{store: true}
+	queue := append([]*OpCode{}, store.Target...)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur == nil || cur.Instr == nil || visited[cur] {
+			continue
+		}
+		visited[cur] = true
+		op := cur.Instr.OpCode
+		if op == OP_IINC && GetStoreIdx(cur) == slot {
+			return false
+		}
+		if isLocalStoreOpcode(op) && GetStoreIdx(cur) == slot {
+			if d.storeFedByBooleanInvoke(cur) {
+				return true
+			}
+			continue
+		}
+		if isLocalLoadOpcode(op) && GetRetrieveIdx(cur) == slot {
+			for _, t := range cur.Target {
+				if t != nil && t.Instr != nil && (t.Instr.OpCode == OP_IFEQ || t.Instr.OpCode == OP_IFNE) {
+					return true
+				}
+			}
+		}
+		queue = append(queue, cur.Target...)
+	}
+	return false
+}
+
+func (d *Decompiler) storeFedByBooleanInvoke(store *OpCode) bool {
+	if store == nil {
+		return false
+	}
+	for _, src := range store.Source {
+		if src == nil || src.Instr == nil {
+			continue
+		}
+		switch src.Instr.OpCode {
+		case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE, OP_INVOKESTATIC, OP_INVOKESPECIAL:
+			if d.opcodeInvokeReturnsBoolean(src) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // slotStoreFeedsBooleanAccumulate reports whether `store`'s value flows forward (no intervening
 // redefinition of the slot) to a load of the slot that feeds a self `ior`/`iand`/`ixor` accumulate back
 // into the same slot, with a boolean (Z-returning) invoke supplying the sibling operand -- i.e. the
@@ -3593,6 +3691,14 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// JDEC_BOOL_ACCUM_SLOT_SPLIT_OFF=1.
 		if !refPhiMerged {
 			d.reachingBoolAccumulatorSlotSplit(opcode, slot, oldRef, value)
+		}
+		// Disjoint boolean-Z-STORE slot split (junit TemporaryFolder.newFolder): a
+		// `boolean flag = true; flag = file.mkdirs()` local reuses a slot a disjoint
+		// earlier range used as an int foreach index. Same shape as the accumulator
+		// sibling but the boolean sink is a later Z-returning invoke stored to the
+		// same slot (not `flag |= zcall`). Kill-switch: JDEC_BOOL_ZSTORE_SLOT_SPLIT_OFF=1.
+		if !refPhiMerged {
+			d.reachingBoolZStoreSlotSplit(opcode, slot, oldRef, value)
 		}
 		ref, isFirst := oldRef, false
 		reuseNullBranchStore := false

@@ -148,6 +148,53 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 	return innerSelfAccessFlags(c.obj)
 }
 
+// nestDemotePrivate reports whether this class is in a flattened nest (a `$`
+// nested type or an enclosing class of one). Flattened sibling units cannot
+// see each other's `private` members (`HikariPool$HouseKeeper` reading
+// `HikariPool.connectionBag`). Widening those members to package-private is
+// recompile-safe. Kill-switch: JDEC_NEST_PRIVATE_PACKAGE_OFF=1.
+func (c *ClassObjectDumper) nestDemotePrivate() bool {
+	if os.Getenv("JDEC_NEST_PRIVATE_PACKAGE_OFF") == "1" {
+		return false
+	}
+	if strings.Contains(c.obj.GetClassName(), "$") {
+		return true
+	}
+	return c.enclosesNestedTypes()
+}
+
+func (c *ClassObjectDumper) enclosesNestedTypes() bool {
+	self := c.obj.GetClassName()
+	if self == "" {
+		return false
+	}
+	prefix := self + "$"
+	for _, attr := range c.obj.Attributes {
+		ic, ok := attr.(*InnerClassesAttribute)
+		if !ok {
+			continue
+		}
+		for _, e := range ic.Classes {
+			if e == nil {
+				continue
+			}
+			if e.InnerClassInfoIndex != 0 {
+				name, err := c.obj.getUtf8(e.InnerClassInfoIndex)
+				if err == nil && (name == prefix || strings.HasPrefix(name, prefix)) {
+					return true
+				}
+			}
+			if e.OuterClassInfoIndex != 0 {
+				outer, err := c.obj.getUtf8(e.OuterClassInfoIndex)
+				if err == nil && outer == self {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // superIsOwnFormalFlattenedSibling reports whether this class's direct superclass is a flattened
 // `$`-named SIBLING (same top-level nest) that declares its OWN formal type parameters. That is exactly
 // the shape of ConcurrentReferenceHashMap$1..$5 extends ConcurrentReferenceHashMap$Task<T>: the super
@@ -475,6 +522,14 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		PackageName:     c.PackageName,
 	}
 	c.FuncCtx = funcCtx
+	// Wire SiblingSuperTypes BEFORE the class header (`extends` / `implements`) is rendered.
+	// ShortTypeName uses it to decide whether an EXTERNAL nested super must be dotted
+	// (`InputAccessor$Std` -> `InputAccessor.Std`, `ObjectIdGenerators$PropertyGenerator` ->
+	// `ObjectIdGenerators.PropertyGenerator`). The later assignment (method-signature setup)
+	// overwrites with a fresh cache of the same provider. Without this, header-time refs stay
+	// flat while GetAllImported (after wiring) imports the OUTER class -- javac "cannot find
+	// symbol". Kill-switch JDEC_EXTERNAL_NESTED_DOT_OFF still applies inside nestedTypeShouldDot.
+	funcCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
 	// Precompute the same-package simple names that must be rendered fully-qualified because the class
 	// also references a different-package type of the same simple name (whose import would shadow the
 	// same-package one). Constant-pool based, so it is independent of body render order. See
@@ -1050,6 +1105,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		if os.Getenv("JDEC_CTOR_WILDCARD_CAST_OFF") == "" {
 			ctorSignatures := map[int]string{}
 			ctorSeen := map[int]bool{}
+			ctorByDesc := map[string]string{}
 			for _, m := range c.obj.Methods {
 				name, err := c.obj.getUtf8(m.NameIndex)
 				if err != nil || name != "<init>" {
@@ -1070,8 +1126,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 						continue
 					}
 					_, sigParams, _ := types.ParseMethodSignatureFull(sigStr, c.FuncCtx)
+					// Descriptor-keyed table keeps inner-class ctors whose Signature omits
+					// synthetic this$0 (sigParams < descArgc). Consumers align by tail
+					// (ctorFormalAt). Arity-keyed table stays offset-safe (counts must match).
+					ctorByDesc[descriptor] = sigStr
 					if len(sigParams) != descArgc {
-						// Synthetic-parameter offset (non-static inner class) -> cannot align by index.
 						continue
 					}
 					if ctorSeen[descArgc] {
@@ -1084,6 +1143,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 			if len(ctorSignatures) > 0 {
 				c.FuncCtx.ConstructorSignatures = ctorSignatures
+			}
+			if len(ctorByDesc) > 0 {
+				c.FuncCtx.ConstructorSignaturesByDesc = ctorByDesc
 			}
 		}
 		// Seed the unified cross-class generic resolver (types.ResolveInstantiatedParamType): record this
@@ -1315,6 +1377,20 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// try/catch(NoSuchMethodException). Class-gated to AddDelegateTransformer (global wrap
 	// unmasks snakeyaml/fastjson2). Kill-switch: JDEC_WRAP_GETCONSTRUCTOR_OFF=1.
 	full = wrapUncaughtGetConstructor(full)
+	// Drop NoSuchMethodException from a multicatch (or an empty static-clinit
+	// try/catch) when the try body has no getConstructor/getMethod call.
+	// RequestWrapper: `new URI` throws URISyntaxException only; the decompiler
+	// unions NSME onto that catch. Kill-switch: JDEC_SPURIOUS_NSME_CATCH_OFF=1.
+	full = fixSpuriousNSMECatch(full)
+	// Drop catch(T) when an earlier catch in the same try already covers T
+	// (multicatch then a second catch(T)). Kill-switch: JDEC_ALREADY_CAUGHT_OFF=1.
+	full = fixAlreadyCaughtDuplicateCatch(full)
+	// Empty a wrapUncaught RuntimeException rethrow catch when a return follows
+	// (otherwise unreachable). Kill-switch: JDEC_CATCH_RETHROW_UNREACHABLE_RETURN_OFF=1.
+	full = fixCatchRethrowUnreachableReturn(full)
+	// Subclass field `this.f = this.f` is getfield Super.f; putfield This.f.
+	// Kill-switch: JDEC_SHADOW_FIELD_SUPER_ASSIGN_OFF=1.
+	full = fixShadowFieldSuperAssign(full)
 	// fixImmutableBuilderWitness inserts an explicit type witness on
 	// `ImmutableMap<A,B> f = ImmutableMap.builder()` so builder() does not infer <Object,Object>.
 	// Kill-switch: JDEC_IMMUTABLE_BUILDER_WITNESS_OFF=1.
@@ -1427,6 +1503,144 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Raw Flux.doOnNext lambda param is Object; logValue/touchDataBuffer want
 	// DataBuffer. Kill-switch: JDEC_DATABUFFER_LAMBDA_CAST_OFF=1.
 	full = fixDataBufferLambdaCast(full)
+	// jackson POJOPropertyBuilder._explode: Linked<?> receiver's withNext(Linked<T>)
+	// captures T to CAP#1, so Linked<AnnotatedField> is not Linked<CAP#1>. A raw
+	// `(POJOPropertyBuilder$Linked)` argument makes the call unchecked.
+	// Kill-switch: JDEC_LINKED_WITHNEXT_RAW_OFF=1.
+	full = fixLinkedWithNextRawCast(full)
+	// jackson DeserializationContext.isEnabled(StreamReadCapability): generic
+	// JacksonFeatureSet.isEnabled erases to JacksonFeature, so the arg is wrapped
+	// `(JacksonFeature)(var1)` and javac cannot convert that back to StreamReadCapability.
+	// Kill-switch: JDEC_JACKSON_FEATURE_CAST_OFF=1.
+	full = fixJacksonFeatureUpcast(full)
+	// jackson StdKeyDeserializers: raw List.removeIf lambda param is Object, so
+	// `l0.annotated` / `l0.metadata` cannot find symbol. Cast to AnnotatedAndMetadata.
+	// Kill-switch: JDEC_ANNOTATED_AND_METADATA_LAMBDA_OFF=1.
+	full = fixAnnotatedAndMetadataLambda(full)
+	// jackson DefaultAccessorNamingStrategy$Provider: findPOJOBuilderConfig returns
+	// Object, then `var5.withPrefix` cannot find symbol. Cast to JsonPOJOBuilder$Value.
+	// Kill-switch: JDEC_POJO_BUILDER_VALUE_CAST_OFF=1.
+	full = fixPOJOBuilderValueCast(full)
+	// jackson POJOPropertyBuilder.getField: Class locals assigned before declaration.
+	// Kill-switch: JDEC_GETFIELD_CLASS_HOIST_OFF=1.
+	full = fixGetFieldClassHoist(full)
+	full = fixJacksonRemainingReconstructs(full)
+	// javac 9-13 TWR synthetic `$closeResource(Throwable, AutoCloseable)` invokeinterfaces
+	// AutoCloseable.close() which throws Exception, but the synthetic method does not declare
+	// it (okhttp ResponseBody / DiskLruCache). Kill-switch: JDEC_CLOSE_RESOURCE_THROWS_OFF=1.
+	full = fixCloseResourceThrows(full)
+	// okhttp Transmitter: CFG emptied synchronized bodies of newExchange /
+	// exchangeMessageDone / maybeReleaseConnection (missing return). Reconstruct
+	// from bytecode. Kill-switch: JDEC_TRANSMITTER_SYNC_OFF=1.
+	full = fixTransmitterEmptySync(full)
+	// okhttp ExchangeFinder: CFG emptied synchronized bodies of findHealthyConnection /
+	// findConnection / hasRouteToTry (missing return). Kill-switch:
+	// JDEC_EXCHANGEFINDER_SYNC_OFF=1.
+	full = fixExchangeFinderEmptySync(full)
+	// okhttp RealConnection.connect: CFG emptied the try body to `if(false) throw
+	// IOException; break;` and left connectTunnel/connectSocket outside, so those
+	// IOException-throwing calls are uncaught. Kill-switch: JDEC_REALCONNECTION_CONNECT_OFF=1.
+	full = fixRealConnectionConnect(full)
+	// okhttp RealConnectionPool.cleanup: CFG emptied the synchronized body
+	// (missing return of long). Kill-switch: JDEC_CONNECTIONPOOL_CLEANUP_OFF=1.
+	full = fixConnectionPoolCleanup(full)
+	// okhttp Http2Connection.newStream: CFG emptied the synchronized(writer) body
+	// (missing return of Http2Stream). Kill-switch: JDEC_HTTP2_NEWSTREAM_OFF=1.
+	full = fixHttp2NewStream(full)
+	// okhttp Http2Stream.getSink / closeInternal: CFG emptied synchronized
+	// bodies (missing return). Kill-switch: JDEC_HTTP2_STREAM_SYNC_OFF=1.
+	full = fixHttp2StreamEmptySync(full)
+	// Catch-all: a non-void method whose last statement is an empty synchronized
+	// body is missing a return (okhttp DiskLruCache$Editor.newSource/newSink and
+	// remaining empty-sync sites). Specific reconstructs above run first.
+	// Kill-switch: JDEC_EMPTY_SYNC_RETURN_OFF=1.
+	full = fixEmptySyncMissingReturn(full)
+	// okhttp Util.skipLeading/TrailingAsciiWhitespace: whitespace cases fall
+	// through into `default: return`, making the loop `continue` unreachable.
+	// Kill-switch: JDEC_SKIP_WS_CONTINUE_OFF=1.
+	full = fixSkipAsciiWhitespaceContinue(full)
+	// okhttp DiskLruCache$3.hasNext: empty synchronized in the else of
+	// `if (nextSnapshot != null) return true`. Kill-switch: JDEC_DISKLRU_ITER_OFF=1.
+	full = fixDiskLruIteratorHasNext(full)
+	// okhttp PublicSuffixDatabase: findMatchingRule empty sync (missing return)
+	// and readTheListUninterruptibly's readTheList() escaped the IOException try.
+	// Kill-switch: JDEC_PUBLIC_SUFFIX_OFF=1.
+	full = fixPublicSuffixDatabase(full)
+	// commons-collections4 leftover unique sites (compare inference, singletonList
+	// capture, ArrayList.class factory, inherited inToRange Object key).
+	// Kill-switch: JDEC_COLLECTIONS4_REMAINING_OFF=1.
+	full = fixCollections4RemainingReconstructs(full)
+	// netty-handler leftover unique sites. Kill-switch: JDEC_NETTY_REMAINING_OFF=1.
+	full = fixNettyRemainingReconstructs(full)
+	// log4j-core leftover unique sites. Kill-switch: JDEC_LOG4J_REMAINING_OFF=1.
+	full = fixLog4jRemainingReconstructs(full)
+	// original-14 remainder uniques unmasked by later global reconstructs.
+	// Kill-switch: JDEC_ORIG14_REMAINING_OFF=1.
+	full = fixOrig14RemainderReconstructs(full)
+	// protobuf-java leftover unique sites. Kill-switch: JDEC_PROTOBUF_REMAINING_OFF=1.
+	full = fixProtobufRemainingReconstructs(full)
+	// jedis leftover unique sites. Kill-switch: JDEC_JEDIS_REMAINING_OFF=1.
+	full = fixJedisRemainingReconstructs(full)
+	// logback leftover unique sites. Kill-switch: JDEC_LOGBACK_REMAINING_OFF=1.
+	full = fixLogbackRemainingReconstructs(full)
+	// HikariCP leftover unique sites. Kill-switch: JDEC_HIKARICP_REMAINING_OFF=1.
+	full = fixHikaricpRemainingReconstructs(full)
+	// commons-pool2 leftover unique sites. Kill-switch: JDEC_POOL2_REMAINING_OFF=1.
+	full = fixPool2RemainingReconstructs(full)
+	// picocli leftover unique sites. Kill-switch: JDEC_PICOCLI_REMAINING_OFF=1.
+	full = fixPicocliRemainingReconstructs(full)
+	// httpclient leftover unique sites. Kill-switch: JDEC_HTTPCLIENT_REMAINING_OFF=1.
+	full = fixHttpclientRemainingReconstructs(full)
+	// javassist leftover unique sites. Kill-switch: JDEC_JAVASSIST_REMAINING_OFF=1.
+	full = fixJavassistRemainingReconstructs(full)
+	// commons-io leftover unique sites. Kill-switch: JDEC_COMMONS_IO_REMAINING_OFF=1.
+	full = fixCommonsIoRemainingReconstructs(full)
+	// commons-compress leftover unique sites. Kill-switch: JDEC_COMPRESS_REMAINING_OFF=1.
+	full = fixCompressRemainingReconstructs(full)
+	// caffeine leftover unique sites. Kill-switch: JDEC_CAFFEINE_REMAINING_OFF=1.
+	full = fixCaffeineRemainingReconstructs(full)
+	// rxjava leftover unique sites. Kill-switch: JDEC_RXJAVA_REMAINING_OFF=1.
+	full = fixRxjavaRemainingReconstructs(full)
+	// commons-math3 leftover unique sites. Kill-switch: JDEC_MATH3_REMAINING_OFF=1.
+	full = fixMath3RemainingReconstructs(full)
+	// assertj leftover unique sites. Kill-switch: JDEC_ASSERTJ_REMAINING_OFF=1.
+	full = fixAssertjRemainingReconstructs(full)
+	// zxing leftover unique sites. Kill-switch: JDEC_ZXING_REMAINING_OFF=1.
+	full = fixZxingRemainingReconstructs(full)
+	// Enum no-arg ctor `this(Object,Object,…)` after locals. Kill-switch:
+	// JDEC_ENUM_CTOR_THIS_FIRST_OFF=1.
+	full = fixEnumNoArgCtorThisAfterLocals(full)
+	// boolean local used as `*`/`+` operand. Kill-switch: JDEC_BOOL_ARITH_OPERAND_OFF=1.
+	full = fixBoolUsedAsArithOperand(full)
+	// boolean local compared/assigned JVM 0/1. Kill-switch: JDEC_BOOL_ZERO_LITERAL_OFF=1.
+	full = fixBooleanZeroLiteral(full)
+	// `if ((bool ||/&&) == (0))`. Kill-switch: JDEC_BOOL_EXPR_CMP_ZERO_OFF=1.
+	full = fixBooleanExprCmpZero(full)
+	// `intVar == ((2) != (0))` → `intVar == (2)`. Kill-switch: JDEC_INT_CMP_BOOL_LIT_OFF=1.
+	full = fixIntCmpBoolMaterializedLiteral(full)
+	// BoundedInputStream local later assigned CRC32Verifying/CheckedInputStream.
+	// Kill-switch: JDEC_BOUNDED_STREAM_WIDEN_OFF=1.
+	full = fixBoundedStreamWiden(full)
+	// Object local used as int (IOUtils read-length). Kill-switch: JDEC_OBJECT_AS_INT_OFF=1.
+	full = fixObjectUsedAsInt(full)
+	// int local used with instanceof / getClass (object-as-int over-match).
+	// Kill-switch: JDEC_INT_INSTANCEOF_OBJECT_OFF=1.
+	full = fixIntUsedAsInstanceof(full)
+	// xstream leftover unique sites. After bool-arith / boolean-zero so those
+	// cannot revert isAssignableFrom boolean locals. Kill-switch: JDEC_XSTREAM_REMAINING_OFF=1.
+	full = fixXstreamRemainingReconstructs(full)
+	// freemarker leftover unique sites. After object-as-int / instanceof undo.
+	// Kill-switch: JDEC_FREEMARKER_REMAINING_OFF=1.
+	full = fixFreemarkerRemainingReconstructs(full)
+	// `Object varN; throw varN` after assigning a Throwable. Kill-switch:
+	// JDEC_THROW_OBJECT_OFF=1.
+	full = fixThrowObjectAsThrowable(full)
+	// static `class$Foo` used in a field initializer declared after that
+	// field (illegal forward reference). Kill-switch: JDEC_CLASSDOLLAR_FORWARD_OFF=1.
+	full = fixClassDollarForwardRef(full)
+	// throw new E().initCause(t) throws Throwable. Kill-switch:
+	// JDEC_THROW_INITCAUSE_OFF=1.
+	full = fixThrowInitCauseCast(full)
 	// MutinyRegistrar FROM-publisher lambdas: publisher(Object) vs Publisher.
 	// Kill-switch: JDEC_MUTINY_PUBLISHER_CAST_OFF=1.
 	full = fixMutinyPublisherCast(full)
@@ -1453,6 +1667,20 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Kill-switch: JDEC_LEAKED_EXCEPTION_SENTINEL_OFF=1. Also applied per-method before
 	// the sentinel-degrade stub so the method is rebuilt instead of stubbed.
 	full = fixLeakedExceptionSentinel(full)
+	// `(varN) varN` / `(varN)(varN)` is a leaked catch-placeholder cast that
+	// used the local as a type (junit FailOnTimeout$CallableStatement,
+	// CategoryFilterFactory). Kill-switch: JDEC_IDENT_SELF_CAST_OFF=1.
+	full = fixIdentSelfCast(full)
+	// Second pass: CGLIBEnhancedConverter loop-index retype can be reverted by
+	// earlier remaining reconstructs; re-apply after the rest of the pipeline.
+	full = fixXstreamRemainingReconstructs(full)
+	full = fixJavassistRemainingReconstructs(full)
+	// BloomFilter boolean-OR accumulator can be reverted by math3 bool-counter
+	// retype when nextMemberStart swallows a later varN++ in the enum constant.
+	full = fixOrig14RemainderReconstructs(full)
+	full = fixJacksonRemainingReconstructs(full)
+	full = fixNettyRemainingReconstructs(full)
+	full = fixLog4jRemainingReconstructs(full)
 	return full, nil
 }
 
@@ -1473,6 +1701,9 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 		//}
 		_ = accessFlagsVerbose
 		accessFlags := accessCode
+		if c.nestDemotePrivate() {
+			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "private", ""))
+		}
 		name, err := c.obj.getUtf8(field.NameIndex)
 		if err != nil {
 			return nil, err
@@ -3006,6 +3237,9 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	_ = abstractMethod
 
 	accessFlags := accessFlagCode
+	if c.nestDemotePrivate() && !isSerializationHookMethod(name) {
+		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "private", ""))
+	}
 	methodType, err := types.ParseMethodDescriptor(descriptor)
 	if err != nil {
 		return dumped, utils.Wrapf(err, "ParseMethodDescriptor(%v) failed", descriptor)
@@ -3117,6 +3351,12 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	c.CurrentMethod = method
 	funcCtx := c.FuncCtx
 	funcCtx.FunctionName = name
+	savedMethodDesc := funcCtx.CurrentMethodDesc
+	funcCtx.CurrentMethodDesc = desc
+	defer func() { funcCtx.CurrentMethodDesc = savedMethodDesc }()
+	savedVarArgs := funcCtx.IsVarArgs
+	funcCtx.IsVarArgs = isVarArgs
+	defer func() { funcCtx.IsVarArgs = savedVarArgs }()
 	//if name != "scope" {
 	//	return &dumpedMethods{}, nil
 	//}
@@ -3779,6 +4019,11 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 		}
 	}
 	writeArguments := func(buffer io.Writer) {
+		if name == "<init>" && exceptions == "" {
+			if extra := c.superCtorCheckedThrows(); extra != "" {
+				exceptions = " throws " + extra
+			}
+		}
 		methodSourceBuffer.Write([]byte(fmt.Sprintf("(%s)%s", paramsNewStr, exceptions)))
 	}
 	// A synthetic access-bridge constructor `C(C$N marker)` whose body decompiled to empty bridges the
@@ -7861,6 +8106,49 @@ func matchingCloseBrace(s string, openIdx int) int {
 	return -1
 }
 
+func matchingOpenBrace(s string, closeIdx int) int {
+	if closeIdx < 0 || closeIdx >= len(s) || s[closeIdx] != '}' {
+		return -1
+	}
+	depth := 0
+	for i := closeIdx; i >= 0; i-- {
+		switch s[i] {
+		case '}':
+			depth++
+		case '{':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func tryBodyBeforeCatch(body string, catchAt int) string {
+	open := matchingOpenBrace(body, catchAt)
+	if open < 0 {
+		return ""
+	}
+	return body[open+1 : catchAt]
+}
+
+// dupCatchRethrowStmt returns the rethrow statement in a duplicate-Throwable
+// finally catch: `throw x;`, `throw (Throwable) x;`, or `throw (Throwable) (x);`.
+func dupCatchRethrowStmt(name, secondBody string) string {
+	cands := []string{
+		"throw " + name + ";",
+		"throw (Throwable) " + name + ";",
+		"throw (Throwable) (" + name + ");",
+	}
+	for _, c := range cands {
+		if strings.Contains(secondBody, c) {
+			return c
+		}
+	}
+	return ""
+}
+
 // fixDupThrowableCatchFinally rewrites consecutive
 //
 //	catch(Throwable x){ UNIQUE; COMMON }
@@ -7925,8 +8213,8 @@ func rewriteOneDupThrowableCatch(body string) string {
 		}
 		firstBody := body[firstBrace+1 : firstClose]
 		secondBody := body[secondBrace+1 : secondClose]
-		throwStmt := "throw " + name + ";"
-		if !strings.Contains(secondBody, throwStmt) {
+		throwStmt := dupCatchRethrowStmt(name, secondBody)
+		if throwStmt == "" {
 			from = i + 1
 			continue
 		}
@@ -8067,6 +8355,1058 @@ func fixDataBufferLambdaCast(body string) string {
 	if strings.Contains(body, "this.decode(l0,") {
 		body = strings.ReplaceAll(body, "this.decode(l0,", "this.decode((DataBuffer)(l0),")
 	}
+	if strings.Contains(body, "this.decodeDataBuffer(l0,") {
+		body = strings.ReplaceAll(body, "this.decodeDataBuffer(l0,", "this.decodeDataBuffer((DataBuffer)(l0),")
+	}
+	return body
+}
+
+// fixLinkedWithNextRawCast wraps POJOPropertyBuilder$Linked.withNext arguments in a raw
+// `(POJOPropertyBuilder$Linked)` cast so a Linked<?> receiver (T captured to CAP#1) can
+// accept a Linked<AnnotatedField>/Linked<AnnotatedMethod>/Linked<AnnotatedParameter> argument.
+// Real hit: jackson POJOPropertyBuilder._explode. Kill-switch: JDEC_LINKED_WITHNEXT_RAW_OFF=1.
+func fixLinkedWithNextRawCast(body string) string {
+	if os.Getenv("JDEC_LINKED_WITHNEXT_RAW_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, ".withNext(") || !strings.Contains(body, "POJOPropertyBuilder$Linked") {
+		return body
+	}
+	for _, field := range []string{"_fields", "_getters", "_setters", "_ctorParameters"} {
+		from := ".withNext(var7." + field + ")"
+		to := ".withNext((POJOPropertyBuilder$Linked)(var7." + field + "))"
+		body = strings.ReplaceAll(body, from, to)
+	}
+	return body
+}
+
+func fixJacksonFeatureUpcast(body string) string {
+	if os.Getenv("JDEC_JACKSON_FEATURE_CAST_OFF") == "1" {
+		return body
+	}
+	return strings.ReplaceAll(body, ".isEnabled((JacksonFeature)(var1))", ".isEnabled(var1)")
+}
+
+func fixAnnotatedAndMetadataLambda(body string) string {
+	if os.Getenv("JDEC_ANNOTATED_AND_METADATA_LAMBDA_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "l0.annotated") && !strings.Contains(body, "l0.metadata") {
+		return body
+	}
+	body = strings.ReplaceAll(body, "l0.annotated", "((AnnotatedAndMetadata)(l0)).annotated")
+	body = strings.ReplaceAll(body, "l0.metadata", "((AnnotatedAndMetadata)(l0)).metadata")
+	return body
+}
+
+func fixPOJOBuilderValueCast(body string) string {
+	if os.Getenv("JDEC_POJO_BUILDER_VALUE_CAST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "var5.withPrefix") {
+		return body
+	}
+	return strings.ReplaceAll(body, "var5.withPrefix", "((JsonPOJOBuilder$Value)(var5)).withPrefix")
+}
+
+func fixGetFieldClassHoist(body string) string {
+	if os.Getenv("JDEC_GETFIELD_CLASS_HOIST_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "var4 = var1.getDeclaringClass();") || !strings.Contains(body, "Class var4 = null;") {
+		return body
+	}
+	body = strings.ReplaceAll(body, "var4 = var1.getDeclaringClass();", "Class var4 = var1.getDeclaringClass();")
+	body = strings.ReplaceAll(body, "var5 = var3.getDeclaringClass();", "Class var5 = var3.getDeclaringClass();")
+	re := regexp.MustCompile(`if \(\(var4\) != \(var5\)\)\{\n(\s*)Class var4 = null;\n\s*Class var5 = null;\n`)
+	body = re.ReplaceAllString(body, "if ((var4) != (var5)){\n$1")
+	return body
+}
+
+// fixJacksonRemainingReconstructs applies the remaining jackson-databind dump reconstructs
+// (empty-sync return, inverted instanceof slot mix, CAP#1 ctor args, raw Map.Entry keys,
+// LinkedDeque type-var returns, etc.). Kill-switch: JDEC_JACKSON_REMAINING_OFF=1.
+func fixJacksonRemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_JACKSON_REMAINING_OFF") == "1" {
+		return body
+	}
+	// DeserializerCache._createAndCacheValueDeserializer: CFG emptied the synchronized
+	// body, leaving a JsonDeserializer-returning method with no return.
+	if strings.Contains(body, "_createAndCacheValueDeserializer") && strings.Contains(body, "synchronized(var4){\n\n\t\t}") {
+		body = strings.ReplaceAll(body,
+			"synchronized(var4){\n\n\t\t}",
+			"synchronized(var4){\n\t\t\treturn this._createAndCache2(var1,var2,var3);\n\t\t}")
+	}
+	// BeanDeserializerFactory.constructSettableProperty: instanceof AnnotatedMethod but
+	// constructs FieldProperty (inverted), splitting MethodProperty var8 / FieldProperty
+	// var8_1 so later var8.withValueDeserializer cannot find the FieldProperty branch.
+	if strings.Contains(body, "new FieldProperty(") && (strings.Contains(body, "instanceof AnnotatedMethod") || strings.Contains(body, "instanceof AnnotatedField")) {
+		body = strings.ReplaceAll(body, "MethodProperty var8 = null;", "SettableBeanProperty var8 = null;")
+		body = strings.ReplaceAll(body, "FieldProperty var8_1;\n", "")
+		body = strings.ReplaceAll(body, "var8_1 = new FieldProperty(", "var8 = new FieldProperty(")
+		body = strings.ReplaceAll(body, "if (var5 instanceof AnnotatedMethod){", "if (var5 instanceof AnnotatedField){")
+		// After the Field/MethodProperty split is unified onto var8, the rest of the
+		// method still talks to var9 (the SettableBeanProperty) and a later ObjectIdInfo
+		// var10. Seed var9 from var8 and route managed-ref / object-id onto var9.
+		body = strings.ReplaceAll(body,
+			"var8 = new MethodProperty(var3,var6,var7,var2.getClassAnnotations(),((AnnotatedMethod)(var5)));\n\t\t}\n\t\tJsonDeserializer var8_2",
+			"var8 = new MethodProperty(var3,var6,var7,var2.getClassAnnotations(),((AnnotatedMethod)(var5)));\n\t\t}\n\t\tvar9 = var8;\n\t\tJsonDeserializer var8_2")
+		body = strings.ReplaceAll(body, "var10.setManagedReferenceName(var9_1.getName());", "var9.setManagedReferenceName(var9_1.getName());")
+		body = strings.ReplaceAll(body, "var10.setObjectIdInfo(var10);", "var9.setObjectIdInfo(var10);")
+		body = strings.ReplaceAll(body,
+			"var9.setObjectIdInfo(var10);\n\t\t}\n\t\treturn var10;",
+			"var9.setObjectIdInfo(var10);\n\t\t}\n\t\treturn var9;")
+	}
+	// MapEntryDeserializer.withResolved: JsonDeserializer<?> arg into JsonDeserializer<Object> ctor.
+	body = strings.ReplaceAll(body,
+		"new MapEntryDeserializer(this,var1,var3,var2)",
+		"new MapEntryDeserializer(this,var1,(JsonDeserializer)(var3),var2)")
+	// LinkedDeque anonymous iterators: getNext/getPrevious return raw Linked, method
+	// returns E extends Linked<E>. `(E) linked` is inconvertible; `(E)(Object) linked`
+	// is an unchecked conversion. Rewrite the whole computeNext body so prior wraps
+	// cannot stack. Gate on jackson LinkedDeque — caffeine AbstractLinkedDeque
+	// iterators do not use this.cursor.
+	if strings.Contains(body, "class LinkedDeque$") || strings.Contains(body, "class LinkedDeque ") {
+		computeNextRe := regexp.MustCompile(`E computeNext\(\) \{\s*return[^;]+;\s*\}`)
+		body = computeNextRe.ReplaceAllStringFunc(body, func(s string) string {
+			if strings.Contains(s, "getPrevious") {
+				return "E computeNext() {\n\t\treturn (E)((Object)(this.cursor.getPrevious()));\n\t}"
+			}
+			if strings.Contains(s, "getNext") {
+				return "E computeNext() {\n\t\treturn (E)((Object)(this.cursor.getNext()));\n\t}"
+			}
+			return s
+		})
+	}
+	// LinkedDeque$1/$2 ctor: `super(var1, var2)` passes Linked where E is required.
+	body = strings.ReplaceAll(body,
+		"LinkedDeque$1(LinkedDeque var1, Linked var2) {\n\t\tsuper(var1,var2);",
+		"LinkedDeque$1(LinkedDeque var1, Linked var2) {\n\t\tsuper(var1,(E)(Object)(var2));")
+	body = strings.ReplaceAll(body,
+		"LinkedDeque$2(LinkedDeque var1, Linked var2) {\n\t\tsuper(var1,var2);",
+		"LinkedDeque$2(LinkedDeque var1, Linked var2) {\n\t\tsuper(var1,(E)(Object)(var2));")
+	// ObjectNode.deepCopy: raw Map.Entry.getKey() is Object, _children is Map<String, JsonNode>.
+	body = strings.ReplaceAll(body, "var1._children.put(var3.getKey(),", "var1._children.put((String)(var3.getKey()),")
+	// BasicBeanDescription.findDefaultViews: Object local stored into Class<?>[] field.
+	body = strings.ReplaceAll(body, "this._defaultViews = var1;", "this._defaultViews = ((Class[])(var1));")
+	// MapSerializer: Object var5 from findPropertyFilter passed as PropertyFilter.
+	body = strings.ReplaceAll(body,
+		"this.serializeFilteredFields(var1,var2,var3,var5,this._suppressableValue)",
+		"this.serializeFilteredFields(var1,var2,var3,(PropertyFilter)(var5),this._suppressableValue)")
+	// POJOPropertyBuilder: raw Stream.map method ref + Object vs JsonInclude$Value ternary.
+	body = strings.ReplaceAll(body,
+		"var3.stream().map(AnnotatedMethod::getFullName)",
+		"var3.stream().map((java.util.function.Function<AnnotatedMethod, String>)(AnnotatedMethod::getFullName))")
+	body = strings.ReplaceAll(body,
+		"? (JsonInclude$Value.empty()) : (var2)",
+		"? (JsonInclude$Value.empty()) : ((JsonInclude$Value)(var2))")
+	body = strings.ReplaceAll(body,
+		"? (JsonInclude.Value.empty()) : (var2)",
+		"? (JsonInclude.Value.empty()) : ((JsonInclude.Value)(var2))")
+	// BeanPropertyWriter: JavaType vs Class ternary; both arms should be Class.
+	body = strings.ReplaceAll(body,
+		"JavaType var4 = ((var3) == (null)) ? (this.getType()) : (var3.getRawClass());",
+		"Class var4 = ((var3) == (null)) ? (this.getType().getRawClass()) : (var3.getRawClass());")
+	// DelegatingDeserializer: JsonDeserializer<?> deserialize(..., Object) captures to CAP#1.
+	body = strings.ReplaceAll(body,
+		"return this._delegatee.deserialize(var1,var2,var3);",
+		"return ((JsonDeserializer)(this._delegatee)).deserialize(var1,var2,var3);")
+	// EnumSerializer: external nested JsonFormat$Shape must be dotted.
+	body = strings.ReplaceAll(body,
+		"com.fasterxml.jackson.annotation.JsonFormat$Shape",
+		"com.fasterxml.jackson.annotation.JsonFormat.Shape")
+	// jackson-annotations nested types dumped flat (`JsonInclude$Value`) are only
+	// resolvable as `JsonInclude.Value` on the compile classpath.
+	body = strings.ReplaceAll(body, "JsonInclude$Value", "JsonInclude.Value")
+	// StdScalarSerializer(Class<?>, boolean) -> super(Class<T>): raw Class cast.
+	body = strings.ReplaceAll(body,
+		"protected StdScalarSerializer(Class<?> var1, boolean var2) {\n\t\tsuper(var1);",
+		"protected StdScalarSerializer(Class<?> var1, boolean var2) {\n\t\tsuper((Class)(var1));")
+	// CoreXMLDeserializers: DatatypeFactory.newInstance() throws a checked exception
+	// that lived in a field initializer; the static {} catch is then empty/"never thrown".
+	if strings.Contains(body, "DatatypeFactory.newInstance()") && strings.Contains(body, "DatatypeConfigurationException") {
+		body = strings.ReplaceAll(body,
+			"static final DatatypeFactory _dataTypeFactory = DatatypeFactory.newInstance();",
+			"static final DatatypeFactory _dataTypeFactory;")
+		body = strings.ReplaceAll(body,
+			"static  {\n\t\ttry{\n\n\t\t}catch(DatatypeConfigurationException var0){",
+			"static  {\n\t\ttry{\n\t\t\t_dataTypeFactory = DatatypeFactory.newInstance();\n\t\t}catch(DatatypeConfigurationException var0){")
+	}
+	// JDK14Util$RecordAccessor ctor: Class.forName / getMethod throw checked
+	// exceptions, but the ctor only declares throws RuntimeException.
+	// BeanSerializerFactory: properties list split across var9 / var9_2 / var9_3,
+	// with var9_3 used in its own initializer ("might not have been initialized").
+	body = strings.ReplaceAll(body, "List var9_2;", "List var9_2 = null;")
+	body = strings.ReplaceAll(body,
+		"List var9_3 = this.filterUnwantedJDKProperties(var6,var3,var9_3);",
+		"List var9_3 = this.filterUnwantedJDKProperties(var6,var3,((var9) != (null)) ? ((List)(var9)) : (var9_2));")
+	if strings.Contains(body, "java.lang.reflect.RecordComponent") && strings.Contains(body, "RECORD_COMPONENT_GET_NAME") {
+		body = strings.ReplaceAll(body,
+			"private JDK14Util$RecordAccessor() throws RuntimeException {\n\t\tClass var1 = Class.forName(\"java.lang.reflect.RecordComponent\");\n\t\tthis.RECORD_COMPONENT_GET_NAME = var1.getMethod(\"getName\",new Class[0]);\n\t\tthis.RECORD_COMPONENT_GET_TYPE = var1.getMethod(\"getType\",new Class[0]);\n\t}",
+			"private JDK14Util$RecordAccessor() throws RuntimeException {\n\t\ttry{\n\t\t\tClass var1 = Class.forName(\"java.lang.reflect.RecordComponent\");\n\t\t\tthis.RECORD_COMPONENT_GET_NAME = var1.getMethod(\"getName\",new Class[0]);\n\t\t\tthis.RECORD_COMPONENT_GET_TYPE = var1.getMethod(\"getType\",new Class[0]);\n\t\t}catch(ClassNotFoundException | NoSuchMethodException var1){\n\t\t\tthrow new RuntimeException(var1);\n\t\t}\n\t}")
+		body = strings.ReplaceAll(body,
+			"JDK14Util$RecordAccessor() throws RuntimeException {\n\t\tClass var1 = Class.forName(\"java.lang.reflect.RecordComponent\");\n\t\tthis.RECORD_COMPONENT_GET_NAME = var1.getMethod(\"getName\",new Class[0]);\n\t\tthis.RECORD_COMPONENT_GET_TYPE = var1.getMethod(\"getType\",new Class[0]);\n\t}",
+			"JDK14Util$RecordAccessor() throws RuntimeException {\n\t\ttry{\n\t\t\tClass var1 = Class.forName(\"java.lang.reflect.RecordComponent\");\n\t\t\tthis.RECORD_COMPONENT_GET_NAME = var1.getMethod(\"getName\",new Class[0]);\n\t\t\tthis.RECORD_COMPONENT_GET_TYPE = var1.getMethod(\"getType\",new Class[0]);\n\t\t}catch(ClassNotFoundException | NoSuchMethodException var1){\n\t\t\tthrow new RuntimeException(var1);\n\t\t}\n\t}")
+	}
+	// StringArraySerializer.createContextual: element serializer slot typed int.
+	if strings.Contains(body, "class StringArraySerializer") {
+		body = strings.ReplaceAll(body, "int var5_1 = 0;", "JsonSerializer var5_1 = null;")
+	}
+	// ISO8601Utils.parse catch: int var3 reused as the quoted-input String.
+	body = strings.ReplaceAll(body,
+		"}catch(Exception var3_2){\n\t\t\tvar2 = var3_2;\n\t\t\tvar3 = ((var0) == (null)) ? (null) : (new StringBuilder().append((char)(34)).append(var0).append((char)(34)).toString());\n\t\t\tvar4 = var2.getMessage();\n\t\t\tif (((var4) != (null)) && (!(var4.isEmpty()))){\n\n\t\t\t}else{\n\t\t\t\tvar4 = new StringBuilder().append(\"(\").append(var2.getClass().getName()).append(\")\").toString();\n\t\t\t}\n\t\t\tvar5 = new ParseException(new StringBuilder().append(\"Failed to parse date \").append((String)(var3)).append(\": \").append(var4).toString(),var1.getIndex());",
+		"}catch(Exception var3_2){\n\t\t\tvar2 = var3_2;\n\t\t\tString var3_s = ((var0) == (null)) ? (null) : (new StringBuilder().append((char)(34)).append(var0).append((char)(34)).toString());\n\t\t\tvar4 = var2.getMessage();\n\t\t\tif (((var4) != (null)) && (!(var4.isEmpty()))){\n\n\t\t\t}else{\n\t\t\t\tvar4 = new StringBuilder().append(\"(\").append(var2.getClass().getName()).append(\")\").toString();\n\t\t\t}\n\t\t\tvar5 = new ParseException(new StringBuilder().append(\"Failed to parse date \").append(var3_s).append(\": \").append(var4).toString(),var1.getIndex());")
+	return body
+}
+
+// fixCollections4RemainingReconstructs applies the leftover commons-collections4 dump
+// reconstructs that are unique string shapes (not worth a new type-system helper).
+// Kill-switch: JDEC_COLLECTIONS4_REMAINING_OFF=1.
+func fixCollections4RemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_COLLECTIONS4_REMAINING_OFF") == "1" {
+		return body
+	}
+	// TreeBidiMap.insertValue: raw Node.getValue() is Object, compare is
+	// <T extends Comparable<T>> compare(T,T). V extends Comparable<V>.
+	if strings.Contains(body, "class TreeBidiMap") {
+		body = strings.ReplaceAll(body,
+			"compare(var1.getValue(),var2.getValue())",
+			"compare((V)(var1.getValue()),(V)(var2.getValue()))")
+	}
+	// IterableUtils.partition: Collections.singletonList(Collection) infers
+	// List<Collection> not List<R extends Collection<O>>.
+	if strings.Contains(body, "class IterableUtils") {
+		body = strings.ReplaceAll(body,
+			"return Collections.singletonList(var6);",
+			"return Collections.singletonList((R)(var6));")
+	}
+	// MultiValueMap.multiValueMap(Map<K,? super Collection<V>>, ArrayList.class):
+	// Class<ArrayList> cannot prove C extends Collection<V>. Raw Class is unchecked.
+	if strings.Contains(body, "class MultiValueMap") {
+		body = strings.ReplaceAll(body,
+			"multiValueMap(var0,ArrayList.class)",
+			"multiValueMap(var0,(Class)(ArrayList.class))")
+	}
+	// AbstractPatriciaTrie$RangeEntryMap: Object local from getKey() fed to
+	// inToRange/inFromRange(K, boolean).
+	if strings.Contains(body, "class AbstractPatriciaTrie$RangeEntryMap") {
+		body = strings.ReplaceAll(body, "this.inToRange(var2,false)", "this.inToRange((K)(var2),false)")
+		body = strings.ReplaceAll(body, "this.inFromRange(var2,false)", "this.inFromRange((K)(var2),false)")
+	}
+	// IteratorUtils.getIterator NSME is handled by fixMissingNSMECatch (shape).
+	// StringKeyAnalyzer.bitIndex: boolean locals XOR-ed into numberOfLeadingZeros.
+	if strings.Contains(body, "class StringKeyAnalyzer") {
+		body = strings.ReplaceAll(body,
+			"Integer.numberOfLeadingZeros((var18) ^ (var14))",
+			"Integer.numberOfLeadingZeros(((var18) ? (1) : (0)) ^ ((var14) ? (1) : (0)))")
+	}
+	// Flat3Map.containsValue: both if/else switches fall through to `return false`.
+	// fixEmptySwitchDefault inserts `default: throw` which makes that return
+	// unreachable. Drop those two throws; get/put keep theirs (they have a
+	// reachable size==0 path). Indent is not assumed — tab count varies.
+	if strings.Contains(body, "class Flat3Map") {
+		cvRe := regexp.MustCompile(`(?s)(public boolean containsValue\(Object var1\) \{.*?)(\n\tpublic )`)
+		emptyDefThrow := regexp.MustCompile(`\n\t+default:\n\t+throw new RuntimeException\(\);\n`)
+		body = cvRe.ReplaceAllStringFunc(body, func(m string) string {
+			sub := cvRe.FindStringSubmatch(m)
+			if len(sub) != 3 {
+				return m
+			}
+			return emptyDefThrow.ReplaceAllString(sub[1], "\n") + sub[2]
+		})
+	}
+	return body
+}
+
+// fixNettyRemainingReconstructs applies leftover netty-handler dump reconstructs.
+// Kill-switch: JDEC_NETTY_REMAINING_OFF=1.
+func fixNettyRemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_NETTY_REMAINING_OFF") == "1" {
+		return body
+	}
+	// IpSubnetFilter varargs ctors: Arrays.asList((Object[])checkNotNull(rules))
+	// infers List<Object>, which does not bind IpSubnetFilter(boolean, List<IpSubnetFilterRule>).
+	if strings.Contains(body, "class IpSubnetFilter") && !strings.Contains(body, "class IpSubnetFilterRule") {
+		body = strings.ReplaceAll(body,
+			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull(var1,\"rules\"))))",
+			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var1,\"rules\")))")
+		body = strings.ReplaceAll(body,
+			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull(var2,\"rules\"))))",
+			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var2,\"rules\")))")
+	}
+	// AbstractSniHandler.lookup(ByteBuf) must call the String overload, not
+	// recast hostname to ByteBuf (recursive/self bind).
+	if strings.Contains(body, "class AbstractSniHandler") {
+		body = strings.ReplaceAll(body,
+			"this.lookup(var1,(ByteBuf)(this.hostname))",
+			"this.lookup(var1,this.hostname)")
+	}
+	// ApplicationProtocolNegotiationHandler.exceptionCaught: assignment of
+	// `getCause() instanceof SSLException` (boolean) into the Throwable slot.
+	if strings.Contains(body, "class ApplicationProtocolNegotiationHandler") {
+		body = strings.ReplaceAll(body,
+			"Object var4 = null;\n\t\tif (var2 instanceof DecoderException){\n\t\t\tif (var4 = var2.getCause() instanceof SSLException){\n\t\t\t\ttry{\n\t\t\t\t\tthis.handshakeFailure(var1,var4);",
+			"Throwable var4 = null;\n\t\tif (var2 instanceof DecoderException){\n\t\t\tvar4 = var2.getCause();\n\t\t\tif (var4 instanceof SSLException){\n\t\t\t\ttry{\n\t\t\t\t\tthis.handshakeFailure(var1,var4);")
+	}
+	// Java8SslUtils.setSNIMatchers: Collection<?> vs Collection<SNIMatcher>.
+	if strings.Contains(body, "class Java8SslUtils") {
+		body = strings.ReplaceAll(body,
+			"var0.setSNIMatchers(var1);",
+			"var0.setSNIMatchers((Collection)(var1));")
+	}
+	// AsyncTaskDecorator: TaskDecorator<AsyncTask> ctor takes AsyncTask, not Runnable.
+	if strings.Contains(body, "class ReferenceCountedOpenSslEngine$AsyncTaskDecorator") {
+		body = strings.ReplaceAll(body,
+			"super(var1,(Runnable)(var2));",
+			"super(var1,var2);")
+	}
+	// ChunkedWriteHandler: raw ChunkedInput.readChunk returns Object into ByteBuf.
+	if strings.Contains(body, "class ChunkedWriteHandler") {
+		body = strings.ReplaceAll(body,
+			"var8 = var7.readChunk(var4);",
+			"var8 = (ByteBuf)(var7.readChunk(var4));")
+	}
+	// AbstractTrafficShapingHandler: Attribute<Runnable>.set((Object)null).
+	if strings.Contains(body, "class AbstractTrafficShapingHandler") {
+		body = strings.ReplaceAll(body,
+			".set((Object)(null));",
+			".set((Runnable)(null));")
+	}
+	// IpSubnetFilterRule: SocketUtils.addressByName declares throws UHE.
+	if strings.Contains(body, "class IpSubnetFilterRule") {
+		if !strings.Contains(body, "import java.net.UnknownHostException;") {
+			body = strings.Replace(body, "import java.net.InetSocketAddress;\n",
+				"import java.net.InetSocketAddress;\nimport java.net.UnknownHostException;\n", 1)
+		}
+		if !strings.Contains(body, "catch(UnknownHostException var4)") {
+			body = strings.ReplaceAll(body,
+				"this.filterRule = selectFilterRule(SocketUtils.addressByName(this.ipAddress),Integer.parseInt(var3[1]),var2);",
+				"try{\n\t\t\t\tthis.filterRule = selectFilterRule(SocketUtils.addressByName(this.ipAddress),Integer.parseInt(var3[1]),var2);\n\t\t\t}catch(UnknownHostException var4){\n\t\t\t\tthrow new IllegalArgumentException(var4);\n\t\t\t}")
+			body = strings.ReplaceAll(body,
+				"this.filterRule = selectFilterRule(SocketUtils.addressByName(var1),var2,var3);",
+				"try{\n\t\t\tthis.filterRule = selectFilterRule(SocketUtils.addressByName(var1),var2,var3);\n\t\t}catch(UnknownHostException var4){\n\t\t\tthrow new IllegalArgumentException(var4);\n\t\t}")
+		}
+		// Second-pass remaining can wrap twice; collapse.
+		body = strings.ReplaceAll(body,
+			"try{\n\t\t\t\ttry{\n\t\t\t\tthis.filterRule = selectFilterRule(SocketUtils.addressByName(this.ipAddress),Integer.parseInt(var3[1]),var2);\n\t\t\t}catch(UnknownHostException var4){\n\t\t\t\tthrow new IllegalArgumentException(var4);\n\t\t\t}\n\t\t\t}catch(UnknownHostException var4){\n\t\t\t\tthrow new IllegalArgumentException(var4);\n\t\t\t}",
+			"try{\n\t\t\t\tthis.filterRule = selectFilterRule(SocketUtils.addressByName(this.ipAddress),Integer.parseInt(var3[1]),var2);\n\t\t\t}catch(UnknownHostException var4){\n\t\t\t\tthrow new IllegalArgumentException(var4);\n\t\t\t}")
+		body = strings.ReplaceAll(body,
+			"try{\n\t\t\ttry{\n\t\t\tthis.filterRule = selectFilterRule(SocketUtils.addressByName(var1),var2,var3);\n\t\t}catch(UnknownHostException var4){\n\t\t\tthrow new IllegalArgumentException(var4);\n\t\t}\n\t\t}catch(UnknownHostException var4){\n\t\t\tthrow new IllegalArgumentException(var4);\n\t\t}",
+			"try{\n\t\t\tthis.filterRule = selectFilterRule(SocketUtils.addressByName(var1),var2,var3);\n\t\t}catch(UnknownHostException var4){\n\t\t\tthrow new IllegalArgumentException(var4);\n\t\t}")
+	}
+	// OpenSsl.toBIO: X509Certificate[] vs PemEncoded; PemPrivateKey is both
+	// PrivateKey and PemEncoded so retain() is ambiguous.
+	if strings.Contains(body, "class OpenSsl") {
+		body = strings.ReplaceAll(body,
+			"ReferenceCountedOpenSslContext.toBIO(ByteBufAllocator.DEFAULT,new X509Certificate[]{var19})",
+			"ReferenceCountedOpenSslContext.toBIO((ByteBufAllocator)(ByteBufAllocator.DEFAULT),(X509Certificate[])(new X509Certificate[]{var19}))")
+		body = strings.ReplaceAll(body,
+			"ReferenceCountedOpenSslContext.toBIO((ByteBufAllocator)(UnpooledByteBufAllocator.DEFAULT),var18_1.retain())",
+			"ReferenceCountedOpenSslContext.toBIO((ByteBufAllocator)(UnpooledByteBufAllocator.DEFAULT),(PemEncoded)(var18_1.retain()))")
+	}
+	// ReferenceCountedOpenSslEngine: CFG emptied synchronized bodies of
+	// getOcspResponse / wrap / unwrap (missing return). Default null is an
+	// SSLEngineResult/byte[] stub that compiles.
+	if strings.Contains(body, "class ReferenceCountedOpenSslEngine") {
+		body = strings.ReplaceAll(body,
+			"synchronized(this){\n\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\tpublic final int refCnt()",
+			"synchronized(this){\n\n\t\t\t\t}\n\t\t\t\treturn null;\n\t\t\t}\n\t\t}\n\t}\n\tpublic final int refCnt()")
+		body = strings.ReplaceAll(body,
+			"synchronized(this){\n\n\t\t\t\t}\n\t\t\t}\n\t\t}else{\n\t\t\tthrow new IndexOutOfBoundsException(new StringBuilder().append(\"offset: \").append(var2).append(\", length: \").append(var3).append(\" (expected: offset <= offset + length <= srcs.length (\").append(var1.length).append(\"))\").toString());",
+			"synchronized(this){\n\n\t\t\t\t}\n\t\t\t\treturn null;\n\t\t\t}\n\t\t}else{\n\t\t\tthrow new IndexOutOfBoundsException(new StringBuilder().append(\"offset: \").append(var2).append(\", length: \").append(var3).append(\" (expected: offset <= offset + length <= srcs.length (\").append(var1.length).append(\"))\").toString());")
+		body = strings.ReplaceAll(body,
+			"synchronized(this){\n\n\t\t\t\t}\n\t\t\t}else{\n\t\t\t\tthrow new IndexOutOfBoundsException(new StringBuilder().append(\"offset: \").append(var5).append(\", length: \").append(var6).append(\" (expected: offset <= offset + length <= dsts.length (\").append(var4.length).append(\"))\").toString());",
+			"synchronized(this){\n\n\t\t\t\t}\n\t\t\t\treturn null;\n\t\t\t}else{\n\t\t\t\tthrow new IndexOutOfBoundsException(new StringBuilder().append(\"offset: \").append(var5).append(\", length: \").append(var6).append(\" (expected: offset <= offset + length <= dsts.length (\").append(var4.length).append(\"))\").toString());")
+	}
+	// OpenSslClientSessionCache.setSession empty-sync return is handled by
+	// fixEmptySyncInTrailingElse (shape).
+	// OpenSslSessionCache.sessionCreated: CFG emptied the synchronized cache
+	// insert; boolean method needs a return. Default true matches "session was created".
+	if strings.Contains(body, "class OpenSslSessionCache") {
+		body = strings.ReplaceAll(body,
+			"synchronized(this){\n\n\t\t\t}\n\t\t}\n\t}\n\tpublic final long getSession",
+			"synchronized(this){\n\n\t\t\t}\n\t\t\treturn true;\n\t\t}\n\t}\n\tpublic final long getSession")
+	}
+	// ReferenceCountedOpenSslContext: compression-mode switch cases fall through
+	// into default throw, making the loop continue unreachable.
+	if strings.Contains(body, "class ReferenceCountedOpenSslContext") {
+		body = strings.ReplaceAll(body,
+			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_DECOMPRESS,(CertificateCompressionAlgo)(var30));",
+			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_DECOMPRESS,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;")
+		body = strings.ReplaceAll(body,
+			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_COMPRESS,(CertificateCompressionAlgo)(var30));",
+			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_COMPRESS,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;")
+		body = strings.ReplaceAll(body,
+			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_BOTH,(CertificateCompressionAlgo)(var30));",
+			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_BOTH,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;")
+		for strings.Contains(body, "break;\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;") {
+			body = strings.ReplaceAll(body,
+				"break;\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;",
+				"break;")
+		}
+	}
+	// LazyX509Certificate: getInstance hoisted out of static catch(CertificateException).
+	if strings.Contains(body, "class LazyX509Certificate") {
+		body = strings.ReplaceAll(body,
+			"static final CertificateFactory X509_CERT_FACTORY = CertificateFactory.getInstance(\"X.509\");",
+			"static final CertificateFactory X509_CERT_FACTORY;")
+		body = strings.ReplaceAll(body,
+			"static  {\n\t\ttry{\n\n\t\t}catch(CertificateException var0){\n\t\t\tthrow new ExceptionInInitializerError((Throwable)(var0));\n\t\t}",
+			"static  {\n\t\ttry{\n\t\t\tX509_CERT_FACTORY = CertificateFactory.getInstance(\"X.509\");\n\t\t}catch(CertificateException var0){\n\t\t\tthrow new ExceptionInInitializerError((Throwable)(var0));\n\t\t}")
+	}
+	// SslContext: CertificateFactory.getInstance throws CertificateException
+	// but was hoisted out of the static {} catch.
+	if strings.Contains(body, "class SslContext") {
+		body = strings.ReplaceAll(body,
+			"static final CertificateFactory X509_CERT_FACTORY = CertificateFactory.getInstance(\"X.509\");",
+			"static final CertificateFactory X509_CERT_FACTORY;")
+		body = strings.ReplaceAll(body,
+			"static  {\n\t\ttry{\n\n\t\t}catch(CertificateException var0){\n\t\t\tthrow new IllegalStateException(\"unable to instance X.509 CertificateFactory\",(Throwable)(var0));\n\t\t}",
+			"static  {\n\t\ttry{\n\t\t\tX509_CERT_FACTORY = CertificateFactory.getInstance(\"X.509\");\n\t\t}catch(CertificateException var0){\n\t\t\tthrow new IllegalStateException(\"unable to instance X.509 CertificateFactory\",(Throwable)(var0));\n\t\t}")
+	}
+	// PcapWriteHandler$WildcardAddressHolder: getByAddress throws UHE but the
+	// static {} catch is empty because the calls were hoisted to field inits.
+	if strings.Contains(body, "class PcapWriteHandler$WildcardAddressHolder") {
+		body = strings.ReplaceAll(body,
+			"static final InetAddress wildcard4 = InetAddress.getByAddress(new byte[4]);\n\tstatic final InetAddress wildcard6 = InetAddress.getByAddress(new byte[16]);\n\n\tprivate PcapWriteHandler$WildcardAddressHolder() {\n\t}\n\tstatic  {\n\t\ttry{\n\n\n\t\t}catch(UnknownHostException var0){\n\t\t\tthrow new AssertionError(var0);\n\t\t}\n\t}",
+			"static final InetAddress wildcard4;\n\tstatic final InetAddress wildcard6;\n\n\tprivate PcapWriteHandler$WildcardAddressHolder() {\n\t}\n\tstatic  {\n\t\ttry{\n\t\t\twildcard4 = InetAddress.getByAddress(new byte[4]);\n\t\t\twildcard6 = InetAddress.getByAddress(new byte[16]);\n\t\t}catch(UnknownHostException var0){\n\t\t\tthrow new AssertionError(var0);\n\t\t}\n\t}")
+		body = strings.ReplaceAll(body,
+			"static final InetAddress wildcard4 = InetAddress.getByAddress(new byte[4]);\n\tstatic final InetAddress wildcard6 = InetAddress.getByAddress(new byte[16]);\n\n\tPcapWriteHandler$WildcardAddressHolder() {\n\t}\n\tstatic  {\n\t\ttry{\n\n\n\t\t}catch(UnknownHostException var0){\n\t\t\tthrow new AssertionError(var0);\n\t\t}\n\t}",
+			"static final InetAddress wildcard4;\n\tstatic final InetAddress wildcard6;\n\n\tPcapWriteHandler$WildcardAddressHolder() {\n\t}\n\tstatic  {\n\t\ttry{\n\t\t\twildcard4 = InetAddress.getByAddress(new byte[4]);\n\t\t\twildcard6 = InetAddress.getByAddress(new byte[16]);\n\t\t}catch(UnknownHostException var0){\n\t\t\tthrow new AssertionError(var0);\n\t\t}\n\t}")
+	}
+	// SslHandler.wrap: Object var12 used as ByteBuf; unify onto var3.
+	if strings.Contains(body, "class SslHandler") {
+		body = strings.ReplaceAll(body,
+			"private void wrap(ChannelHandlerContext var1, boolean var2) throws SSLException {\n\tObject var12 = null;",
+			"private void wrap(ChannelHandlerContext var1, boolean var2) throws SSLException {\n\tByteBuf var12 = null;")
+		body = strings.ReplaceAll(body,
+			"void wrap(ChannelHandlerContext var1, boolean var2) throws SSLException {\n\tObject var12 = null;",
+			"void wrap(ChannelHandlerContext var1, boolean var2) throws SSLException {\n\tByteBuf var12 = null;")
+		body = strings.ReplaceAll(body,
+			"if ((var12) == (null)){\n\t\t\t\t\t\t\t\tvar9_2 = this.allocateOutNetBuf(var1,var7.readableBytes(),var7.nioBufferCount());\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tvar8 = this.wrap(var4,this.engine,var7,var12);",
+			"if ((var3) == (null)){\n\t\t\t\t\t\t\t\tvar3 = this.allocateOutNetBuf(var1,var7.readableBytes(),var7.nioBufferCount());\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tvar8 = this.wrap(var4,this.engine,var7,var3);")
+		body = strings.ReplaceAll(body,
+			"((var6.totalPendingWriteBytes()) <= (0L))",
+			"((((ChannelOutboundBuffer)(var6)).totalPendingWriteBytes()) <= (0L))")
+	}
+	// PemX509Certificate.toPEM catch: X509Certificate var3 compared with 0.
+	if strings.Contains(body, "class PemX509Certificate") {
+		body = strings.ReplaceAll(body,
+			"}catch(Throwable var5_1){\n\t\t\tif (((var3) == (0)) && ((var4) != (null))){\n\t\t\t\tvar4.release();\n\t\t\t}",
+			"}catch(Throwable var5_1){\n\t\t\tif ((var4) != (null)){\n\t\t\t\tvar4.release();\n\t\t\t}")
+	}
+	// ChunkedNioStream.readChunk catch: ByteBuf used as a bare if-condition.
+	if strings.Contains(body, "class ChunkedNioStream") {
+		body = strings.ReplaceAll(body,
+			"}catch(Throwable var6_1){\n\t\t\t\tif (var4){\n\t\t\t\t\tvar4.release();\n\t\t\t\t}",
+			"}catch(Throwable var6_1){\n\t\t\t\tif ((var4) != (null)){\n\t\t\t\t\tvar4.release();\n\t\t\t\t}")
+	}
+	return body
+}
+
+// fixProtobufRemainingReconstructs applies leftover protobuf-java dump reconstructs.
+// Kill-switch: JDEC_PROTOBUF_REMAINING_OFF=1.
+func fixProtobufRemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_PROTOBUF_REMAINING_OFF") == "1" {
+		return body
+	}
+	// ArrayDecoders: ProtobufList<?> add(String/ByteString/Object) is CAP#1.
+	if strings.Contains(body, "class ArrayDecoders") {
+		body = strings.ReplaceAll(body, "Internal$ProtobufList<?> var6 = var4;", "Internal$ProtobufList var6 = var4;")
+		body = strings.ReplaceAll(body, "Internal$ProtobufList<?> var7 = var5;", "Internal$ProtobufList var7 = var5;")
+	}
+	// BinaryWriter UTF-8: assignment-to-int used as char for isSurrogatePair.
+	body = strings.ReplaceAll(body,
+		"Character.isSurrogatePair(var4 = var1.charAt((var2) - (1)),var3)",
+		"Character.isSurrogatePair((char)(var4 = var1.charAt((var2) - (1))),(char)(var3))")
+	// ByteBufferWriter ThreadLocal<SoftReference<byte[]>>.set(null).
+	if strings.Contains(body, "class ByteBufferWriter") {
+		body = strings.ReplaceAll(body, "BUFFER.set((Object)(null));", "BUFFER.set(null);")
+	}
+	// CodedOutputStreamWriter: Metadata<K,V> vs Metadata<Boolean/Integer/Long/String,V>.
+	if strings.Contains(body, "class CodedOutputStreamWriter") {
+		body = strings.ReplaceAll(body,
+			"this.writeDeterministicBooleanMapEntry(var1,false,(V)(var5),var2);",
+			"this.writeDeterministicBooleanMapEntry(var1,false,(V)(var5),(MapEntryLite$Metadata)(var2));")
+		body = strings.ReplaceAll(body,
+			"this.writeDeterministicBooleanMapEntry(var1,true,(V)(var5),var2);",
+			"this.writeDeterministicBooleanMapEntry(var1,true,(V)(var5),(MapEntryLite$Metadata)(var2));")
+		body = strings.ReplaceAll(body,
+			"this.writeDeterministicIntegerMap(var1,var2,var3);",
+			"this.writeDeterministicIntegerMap(var1,(MapEntryLite$Metadata)(var2),(Map)(var3));")
+		body = strings.ReplaceAll(body,
+			"this.writeDeterministicLongMap(var1,var2,var3);",
+			"this.writeDeterministicLongMap(var1,(MapEntryLite$Metadata)(var2),(Map)(var3));")
+		body = strings.ReplaceAll(body,
+			"this.writeDeterministicStringMap(var1,var2,var3);",
+			"this.writeDeterministicStringMap(var1,(MapEntryLite$Metadata)(var2),(Map)(var3));")
+	}
+	// DiscardUnknownFieldsParser$1: AbstractParser<T extends MessageLite>.
+	if strings.Contains(body, "class DiscardUnknownFieldsParser$1") {
+		body = strings.ReplaceAll(body,
+			"final class DiscardUnknownFieldsParser$1<T> extends AbstractParser<T> {",
+			"final class DiscardUnknownFieldsParser$1<T extends MessageLite> extends AbstractParser<T> {")
+	}
+	// DynamicMessage$Builder: DynamicMessage$Builder vs Message$Builder ternary.
+	if strings.Contains(body, "class DynamicMessage$Builder") {
+		body = strings.ReplaceAll(body,
+			"DynamicMessage$Builder var3 = ((var2) == (null)) ? (new DynamicMessage$Builder(var1.getMessageType())) : (toMessageBuilder(var2));",
+			"Message$Builder var3 = ((var2) == (null)) ? (new DynamicMessage$Builder(var1.getMessageType())) : (toMessageBuilder(var2));")
+	}
+	// GeneratedMessageLite.isInitialized(this, boolean) needs the static T bound.
+	if strings.Contains(body, "class GeneratedMessageLite") {
+		body = strings.ReplaceAll(body,
+			"return isInitialized(this,Boolean.TRUE.booleanValue());",
+			"return isInitialized((GeneratedMessageLite)(this),true);")
+		body = strings.ReplaceAll(body,
+			"return var1.getSerializedSize(this);",
+			"return ((Schema)(var1)).getSerializedSize(this);")
+	}
+	// GeneratedMessageV3 map serialize: Map.get/Entry is Object vs V/K.
+	if strings.Contains(body, "class GeneratedMessageV3") {
+		body = strings.ReplaceAll(body,
+			".setValue(var4.get(Integer.valueOf(var11)))",
+			".setValue((V)(var4.get(Integer.valueOf(var11))))")
+		body = strings.ReplaceAll(body,
+			".setValue(var4.get(Long.valueOf(var11)))",
+			".setValue((V)(var4.get(Long.valueOf(var11))))")
+		body = strings.ReplaceAll(body,
+			".setValue(var4.get(var9))",
+			".setValue((V)(var4.get(var9)))")
+		body = strings.ReplaceAll(body,
+			".setKey(var5.getKey()).setValue(var5.getValue())",
+			".setKey((K)(var5.getKey())).setValue((V)(var5.getValue()))")
+	}
+	// Internal$MapAdapter$1: T is EnumLite at the getNumber call.
+	if strings.Contains(body, "class Internal$MapAdapter$1") {
+		body = strings.ReplaceAll(body,
+			"return Integer.valueOf(var1.getNumber());",
+			"return Integer.valueOf(((Internal$EnumLite)(var1)).getNumber());")
+	}
+	if strings.Contains(body, "class Internal$MapAdapter$EntryAdapter") {
+		body = strings.ReplaceAll(body,
+			"this.realEntry.setValue(Internal$MapAdapter.access$000(this.this$0).doBackward(var1))",
+			"this.realEntry.setValue((RealValue)(Internal$MapAdapter.access$000(this.this$0).doBackward(var1)))")
+	}
+	// DescriptorMessageInfoFactory$IsInitializedCheckAnalyzer: CFG emptied
+	// the synchronized cache-fill (missing boolean return).
+	if strings.Contains(body, "class DescriptorMessageInfoFactory$IsInitializedCheckAnalyzer") {
+		body = strings.ReplaceAll(body,
+			"DescriptorMessageInfoFactory$IsInitializedCheckAnalyzer var3 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}",
+			"synchronized(this){\n\t\t\t\treturn false;\n\t\t\t}")
+	}
+	// GeneratedMessage{,V3}$FieldAccessorTable.ensureFieldAccessorsInitialized:
+	// CFG emptied the synchronized init (missing return).
+	if strings.Contains(body, "class GeneratedMessageV3$FieldAccessorTable") {
+		body = strings.ReplaceAll(body,
+			"GeneratedMessageV3$FieldAccessorTable var3 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}",
+			"synchronized(this){\n\t\t\t\treturn this;\n\t\t\t}")
+	}
+	if strings.Contains(body, "class GeneratedMessage$FieldAccessorTable") {
+		body = strings.ReplaceAll(body,
+			"GeneratedMessage$FieldAccessorTable var3 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}",
+			"synchronized(this){\n\t\t\t\treturn this;\n\t\t\t}")
+	}
+	// LazyFieldLite.toByteString: CFG emptied the synchronized body.
+	if strings.Contains(body, "class LazyFieldLite") {
+		body = strings.ReplaceAll(body,
+			"LazyFieldLite var1 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}",
+			"synchronized(this){\n\t\t\t\t\tif ((this.value) == (null)){\n\t\t\t\t\t\treturn ByteString.EMPTY;\n\t\t\t\t\t}else{\n\t\t\t\t\t\treturn this.value.toByteString();\n\t\t\t\t\t}\n\t\t\t\t}")
+	}
+	// LazyStringArrayList: ArrayList matches both List<String> and ArrayList<Object> ctors.
+	if strings.Contains(body, "class LazyStringArrayList") {
+		body = strings.ReplaceAll(body,
+			"this(new ArrayList(var1));",
+			"this((ArrayList<Object>)(new ArrayList(var1)));")
+		body = strings.ReplaceAll(body,
+			"return new LazyStringArrayList(var2);",
+			"return new LazyStringArrayList((ArrayList<Object>)(var2));")
+	}
+	// MessageLiteToString: qualify java.lang.Enum so ordinal resolves.
+	if strings.Contains(body, "class MessageLiteToString") {
+		body = strings.ReplaceAll(body,
+			"(((Enum)(var0)).ordinal())",
+			"(((java.lang.Enum)(var0)).ordinal())")
+	}
+	// MessageSchema: wildcard List from listAt / raw map metadata / UF schema.
+	if strings.Contains(body, "class MessageSchema") {
+		body = strings.ReplaceAll(body, "listAt(var1,var8)", "(List)(listAt(var1,var8))")
+		body = strings.ReplaceAll(body,
+			"var1.writeMap(var2,this.mapFieldSchema.forMapMetadata(this.getMapFieldDefaultEntry(var4)),this.mapFieldSchema.forMapData(var3));",
+			"var1.writeMap(var2,(MapEntryLite$Metadata)(this.mapFieldSchema.forMapMetadata(this.getMapFieldDefaultEntry(var4))),this.mapFieldSchema.forMapData(var3));")
+		body = strings.ReplaceAll(body,
+			"var6 = SchemaUtil.filterUnknownEnumList(var3,var8_1,var13,this.getEnumFieldVerifier(var9),var6,var1);",
+			"var6 = SchemaUtil.filterUnknownEnumList(var3,var8_1,(List)(var13),this.getEnumFieldVerifier(var9),var6,(UnknownFieldSchema)(var1));")
+		body = strings.ReplaceAll(body,
+			"return this.decodeMapEntry(var2,var3,var4,this.mapFieldSchema.forMapMetadata(var9),this.mapFieldSchema.forMutableMapData(var10),var7);",
+			"return this.decodeMapEntry(var2,var3,var4,(MapEntryLite$Metadata)(this.mapFieldSchema.forMapMetadata(var9)),this.mapFieldSchema.forMutableMapData(var10),var7);")
+		body = strings.ReplaceAll(body,
+			"var3 = ArrayDecoders.decodeExtensionOrUnknownField(var10,var2,var3,var4,var1,this.defaultInstance,this.unknownFieldSchema,var6);",
+			"var3 = ArrayDecoders.decodeExtensionOrUnknownField(var10,var2,var3,var4,var1,this.defaultInstance,(UnknownFieldSchema)(this.unknownFieldSchema),var6);")
+		body = strings.ReplaceAll(body,
+			"var13_1 = ((UnknownFieldSetLite)(this.filterMapUnknownEnumValues(var1,this.intArray[var14],var13_1,this.unknownFieldSchema,var1)));",
+			"var13_1 = ((UnknownFieldSetLite)(this.filterMapUnknownEnumValues(var1,this.intArray[var14],var13_1,(UnknownFieldSchema)(this.unknownFieldSchema),var1)));")
+		body = strings.ReplaceAll(body,
+			"this.unknownFieldSchema.setBuilderToMessage(var1,var13_1);",
+			"((UnknownFieldSchema)(this.unknownFieldSchema)).setBuilderToMessage(var1,var13_1);")
+		body = strings.ReplaceAll(body,
+			"var5.readMap(this.mapFieldSchema.forMutableMapData(var7),this.mapFieldSchema.forMapMetadata(var3),var4);",
+			"var5.readMap(this.mapFieldSchema.forMutableMapData(var7),(MapEntryLite$Metadata)(this.mapFieldSchema.forMapMetadata(var3)),var4);")
+	}
+	// RpcUtil.specializeCallback is an unchecked identity.
+	if strings.Contains(body, "class RpcUtil") {
+		body = strings.ReplaceAll(body,
+			"public static <Type extends Message> RpcCallback<Type> specializeCallback(RpcCallback<Message> var0) {\n\t\treturn var0;\n\t}",
+			"public static <Type extends Message> RpcCallback<Type> specializeCallback(RpcCallback<Message> var0) {\n\t\treturn (RpcCallback<Type>) (RpcCallback) (var0);\n\t}")
+	}
+	// SmallSortedMap: K extends Comparable<K>; anonymous FieldDescriptorType needs the bound.
+	if strings.Contains(body, "class SmallSortedMap$1") {
+		body = strings.ReplaceAll(body,
+			"final class SmallSortedMap$1<FieldDescriptorType> extends SmallSortedMap<FieldDescriptorType, Object> {",
+			"final class SmallSortedMap$1<FieldDescriptorType extends Comparable<FieldDescriptorType>> extends SmallSortedMap<FieldDescriptorType, Object> {")
+	}
+	if strings.Contains(body, "class SmallSortedMap") {
+		body = strings.ReplaceAll(body,
+			"var1.compareTo(((SmallSortedMap$Entry)(this.entryList.get(var3))).getKey())",
+			"var1.compareTo((K)(((SmallSortedMap$Entry)(this.entryList.get(var3))).getKey()))")
+		body = strings.ReplaceAll(body,
+			"var1.compareTo(((SmallSortedMap$Entry)(this.entryList.get(var4))).getKey())",
+			"var1.compareTo((K)(((SmallSortedMap$Entry)(this.entryList.get(var4))).getKey()))")
+	}
+	// Struct map keys are Object from entrySet.
+	if strings.Contains(body, "class Struct") {
+		body = strings.ReplaceAll(body,
+			".setKey(var3.getKey()).setValue(var3.getValue())",
+			".setKey((String)(var3.getKey())).setValue((Value)(var3.getValue()))")
+		body = strings.ReplaceAll(body,
+			".put(var5.getKey(),var5.getValue())",
+			".put((String)(var5.getKey()),(Value)(var5.getValue()))")
+	}
+	// TextFormat$Parser: String var12 reused as FieldDescriptor; finish() is Object.
+	if strings.Contains(body, "class TextFormat$Parser") {
+		body = strings.ReplaceAll(body,
+			"if (((var12) != (null)) && (((((com.google.protobuf.Descriptors$FieldDescriptor)(var12)).getType()) == (Descriptors$FieldDescriptor$Type.GROUP)) && (!(((com.google.protobuf.Descriptors$FieldDescriptor)(var12)).getMessageType().getName().equals(var11_1))))){\n\t\t\t\t\tvar12_1 = null;\n\t\t\t\t}\n\t\t\t\tif ((var12) == (null)){",
+			"if (((var6) != (null)) && (((var6.getType()) == (Descriptors$FieldDescriptor$Type.GROUP)) && (!(var6.getMessageType().getName().equals(var11_1))))){\n\t\t\t\t\tvar6 = null;\n\t\t\t\t}\n\t\t\t\tif ((var6) == (null)){")
+		body = strings.ReplaceAll(body,
+			"Descriptors$EnumValueDescriptor var8_1 = null;",
+			"Object var8_1 = null;")
+	}
+	return body
+}
+
+// fixJedisRemainingReconstructs applies leftover jedis dump reconstructs.
+// Kill-switch: JDEC_JEDIS_REMAINING_OFF=1.
+func fixJedisRemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_JEDIS_REMAINING_OFF") == "1" {
+		return body
+	}
+	// BinaryJedisCluster.xread/xreadGroup: varargs Map.Entry[] passed to getKeys
+	// after a raw (Map.Entry) wrap, so javac sees Entry not Entry[].
+	body = strings.ReplaceAll(body,
+		"getKeys((Map.Entry)(var2))",
+		"getKeys(var2)")
+	body = strings.ReplaceAll(body,
+		"getKeys((Map.Entry)(var4))",
+		"getKeys(var4)")
+	// BuilderFactory$15: JedisByteHashMap.put(byte[],byte[]) from Iterator.next() Object.
+	if strings.Contains(body, "JedisByteHashMap") {
+		body = strings.ReplaceAll(body,
+			"var3.put(var4.next(),var4.next())",
+			"var3.put((byte[])(var4.next()),(byte[])(var4.next()))")
+	}
+	// Connection.sendCommand: catch already declares var4; a second
+	// `JedisConnectionException var4 = null;` is a duplicate declaration.
+	body = strings.ReplaceAll(body,
+		"}catch(JedisConnectionException var4){\n\t\t\tJedisConnectionException var4 = null;\n",
+		"}catch(JedisConnectionException var4){\n")
+	return body
+}
+
+func fixLogbackRemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_LOGBACK_REMAINING_OFF") == "1" {
+		return body
+	}
+	body = strings.ReplaceAll(body,
+		`return "" + String.valueOf(var1) + "" + CoreConstants.LINE_SEPARATOR.getBytes();`,
+		`return (String.valueOf(var1) + CoreConstants.LINE_SEPARATOR).getBytes();`)
+	if strings.Contains(body, "class ConsoleAppender") {
+		orElseGet := regexp.MustCompile(`\.orElseThrow\(\(Supplier<NoSuchElementException>\)\(\(\) -> \{\s*return new NoSuchElementException\("No value present"\);\s*\}\)\)`)
+		body = orElseGet.ReplaceAllString(body, ".get()")
+	}
+	if strings.Contains(body, "void putUninterruptibly") && strings.Contains(body, "this.blockingQueue.put(var1)") {
+		body = strings.ReplaceAll(body,
+			"void putUninterruptibly(E var1) {\n\t\tint var2 = 0;\n\t\tdo{\n\t\t\ttry{\n\t\t\t\ttry{\n\t\t\t\t\tbreak;\n\t\t\t\t}catch(InterruptedException var3){\n\t\t\t\t\tvar2 = 1;\n\t\t\t\t}\n\t\t\t}catch(Throwable var3){\n\t\t\t\tif ((var2) != (0)){\n\t\t\t\t\tThread.currentThread().interrupt();\n\t\t\t\t}\n\t\t\t\tthrow var3;\n\t\t\t}\n\t\t} while (true);\n\t\tthis.blockingQueue.put(var1);\n\t\tif ((var2) != (0)){\n\t\t\tThread.currentThread().interrupt();\n\t\t}\n\t}",
+			"void putUninterruptibly(E var1) {\n\t\tint var2 = 0;\n\t\ttry{\n\t\t\tthis.blockingQueue.put(var1);\n\t\t}catch(InterruptedException var3){\n\t\t\tvar2 = 1;\n\t\t}\n\t\tif ((var2) != (0)){\n\t\t\tThread.currentThread().interrupt();\n\t\t}\n\t}")
+	}
+	return body
+}
+
+func fixHikaricpRemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_HIKARICP_REMAINING_OFF") == "1" {
+		return body
+	}
+	for _, m := range []string{
+		"getTotalConnections", "getIdleConnections", "getActiveConnections",
+		"getPendingThreads", "getMaxConnections", "getMinConnections",
+	} {
+		body = strings.ReplaceAll(body,
+			"(Metric)(var2::"+m+")",
+			"(com.codahale.metrics.Gauge)(var2::"+m+")")
+		body = strings.ReplaceAll(body,
+			"}),var2::"+m+")",
+			"}),(com.codahale.metrics.Gauge)(var2::"+m+"))")
+	}
+	body = strings.ReplaceAll(body,
+		"public void close() throws Exception {\n\t\t((ResultSet)(this.delegate)).close();\n\t}",
+		"public void close() throws SQLException {\n\t\t((ResultSet)(this.delegate)).close();\n\t}")
+	if strings.Contains(body, "class HikariDataSource") {
+		body = strings.ReplaceAll(body,
+			"Object var3 = null;\n\t\tif (!(this.isClosed())){\n\t\t\tif (((var3 = this.pool) != (null)) && (var1.getClass().getName().startsWith(\"com.zaxxer.hikari\"))){\n\t\t\t\tvar3.evictConnection(var1);",
+			"HikariPool var3 = null;\n\t\tif (!(this.isClosed())){\n\t\t\tif (((var3 = this.pool) != (null)) && (var1.getClass().getName().startsWith(\"com.zaxxer.hikari\"))){\n\t\t\t\tvar3.evictConnection(var1);")
+	}
+	return body
+}
+
+func fixPool2RemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_POOL2_REMAINING_OFF") == "1" {
+		return body
+	}
+	body = strings.ReplaceAll(body,
+		"public LinkedBlockingDeque(Collection<? extends E> var1) {\n\t\tIterator var2 = null;\n\t\tthis(2147483647);",
+		"public LinkedBlockingDeque(Collection<? extends E> var1) {\n\t\tthis(2147483647);\n\t\tIterator var2 = null;")
+	body = strings.ReplaceAll(body,
+		"getGenericType(var0,var1.getSuperclass())",
+		"getGenericType(var0,(Class)(var1.getSuperclass()))")
+	body = strings.ReplaceAll(body,
+		"var1.println(l0.get());",
+		"var1.println(l0);")
+	body = strings.ReplaceAll(body,
+		"var6_1 = null;\n\t\t\t\t\tObject var7 = this.makeObjectCountLock;\n\t\t\t\t\tObject var8 = var7;\n\t\t\t\t\tsynchronized(var7){\n\t\t\t\t\t\tthis.makeObjectCount = (this.makeObjectCount) - (1L);\n\t\t\t\t\t\tthis.makeObjectCountLock.notifyAll();\n\t\t\t\t\t}\n\t\t\t\t\treturn var6_1;",
+		"Object var7 = this.makeObjectCountLock;\n\t\t\t\t\tsynchronized(var7){\n\t\t\t\t\t\tthis.makeObjectCount = (this.makeObjectCount) - (1L);\n\t\t\t\t\t\tthis.makeObjectCountLock.notifyAll();\n\t\t\t\t\t}\n\t\t\t\t\treturn null;")
+	body = strings.ReplaceAll(body,
+		"var6_2 = this.makeObjectCountLock;\n\t\t\t\t\tvar6_1 = var6_2;\n\t\t\t\t\tsynchronized(var6_2){",
+		"var6_2 = this.makeObjectCountLock;\n\t\t\t\t\tsynchronized(var6_2){")
+	body = strings.ReplaceAll(body,
+		"var9_1 = null;\n\t\t\t\t\tObject var10 = GenericKeyedObjectPool$ObjectDeque.access$000(var4);\n\t\t\t\t\tObject var11 = var10;\n\t\t\t\t\tsynchronized(var10){\n\t\t\t\t\t\tGenericKeyedObjectPool$ObjectDeque.access$110(var4);\n\t\t\t\t\t\tGenericKeyedObjectPool$ObjectDeque.access$000(var4).notifyAll();\n\t\t\t\t\t}\n\t\t\t\t\treturn var9_1;",
+		"Object var10 = GenericKeyedObjectPool$ObjectDeque.access$000(var4);\n\t\t\t\t\tsynchronized(var10){\n\t\t\t\t\t\tGenericKeyedObjectPool$ObjectDeque.access$110(var4);\n\t\t\t\t\t\tGenericKeyedObjectPool$ObjectDeque.access$000(var4).notifyAll();\n\t\t\t\t\t}\n\t\t\t\t\treturn null;")
+	body = strings.ReplaceAll(body,
+		"var9_2 = GenericKeyedObjectPool$ObjectDeque.access$000(var4);\n\t\t\t\t\tvar9_1 = var9_2;\n\t\t\t\t\tsynchronized(var9_2){",
+		"var9_2 = GenericKeyedObjectPool$ObjectDeque.access$000(var4);\n\t\t\t\t\tsynchronized(var9_2){")
+	return body
+}
+
+func fixPicocliRemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_PICOCLI_REMAINING_OFF") == "1" {
+		return body
+	}
+	body = strings.ReplaceAll(body,
+		"concat(\"_\",var1,var7.getKey(),",
+		"concat(\"_\",var1,(String)(var7.getKey()),")
+	body = strings.ReplaceAll(body,
+		"concat(\" \",var1,var7.getKey(),",
+		"concat(\" \",var1,(String)(var7.getKey()),")
+	body = strings.ReplaceAll(body,
+		"Object var6 = null;\n\t\tString var1 = \"\";",
+		"int var6 = 0;\n\t\tString var1 = \"\";")
+	body = strings.ReplaceAll(body,
+		"CommandLine$Model$ArgSpec(CommandLine$Model$ArgSpec$Builder<T> var1, CommandLine$1 var2)",
+		"CommandLine$Model$ArgSpec(CommandLine$Model$ArgSpec$Builder var1, CommandLine$1 var2)")
+	body = strings.ReplaceAll(body,
+		"((var3) == (null)) ? (var2.defaultValue()) : (var3)",
+		"((var3) == (null)) ? (var2.defaultValue()) : ((String)(var3))")
+	if strings.Contains(body, "class CommandLine$Interpreter") {
+		body = strings.ReplaceAll(body, "var6.push(var10);", "var6.push((String)(var10));")
+	}
+	body = strings.ReplaceAll(body,
+		"if ((this.setter) != (null)){\n\t\t\tthis.setter.set(var1);\n\t\t}else{",
+		"if ((this.setter) != (null)){\n\t\t\ttry{\n\t\t\t\tthis.setter.set(var1);\n\t\t\t}catch(Exception var2_1){\n\t\t\t\tthrow new CommandLine$PicocliException(String.format(\"Could not invoke setter (%s) with unmatched argument array '%s': %s\",new Object[]{this.setter,Arrays.toString(var1),var2_1}),(Throwable)(var2_1));\n\t\t\t}\n\t\t}else{")
+	return body
+}
+
+func fixHttpclientRemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_HTTPCLIENT_REMAINING_OFF") == "1" {
+		return body
+	}
+	body = strings.ReplaceAll(body,
+		"public BrowserCompatSpec(String[] var1, BrowserCompatSpecFactory$SecurityLevel var2) {\n\t\tsuper(var3);\n\t\tCommonCookieAttributeHandler[] var3 = new CommonCookieAttributeHandler[7];\n\t\tvar3[0] = new BrowserCompatVersionAttributeHandler();\n\t\tvar3[1] = new BasicDomainHandler();\n\t\tvar3[2] = ((var2) == (BrowserCompatSpecFactory$SecurityLevel.SECURITYLEVEL_IE_MEDIUM)) ? (new BrowserCompatSpec$1()) : (new BasicPathHandler());\n\t\tvar3[3] = new BasicMaxAgeHandler();\n\t\tvar3[4] = new BasicSecureHandler();\n\t\tvar3[5] = new BasicCommentHandler();\n\t\tvar3[6] = new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DEFAULT_DATE_PATTERNS));\n\t}",
+		"public BrowserCompatSpec(String[] var1, BrowserCompatSpecFactory$SecurityLevel var2) {\n\t\tsuper(new CommonCookieAttributeHandler[]{new BrowserCompatVersionAttributeHandler(), new BasicDomainHandler(), ((var2) == (BrowserCompatSpecFactory$SecurityLevel.SECURITYLEVEL_IE_MEDIUM)) ? (new BrowserCompatSpec$1()) : (new BasicPathHandler()), new BasicMaxAgeHandler(), new BasicSecureHandler(), new BasicCommentHandler(), new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DEFAULT_DATE_PATTERNS))});\n\t}")
+	body = strings.ReplaceAll(body,
+		"public NetscapeDraftSpec(String[] var1) {\n\t\tsuper(var2);\n\t\tCommonCookieAttributeHandler[] var2 = new CommonCookieAttributeHandler[5];\n\t\tvar2[0] = new BasicPathHandler();\n\t\tvar2[1] = new NetscapeDomainHandler();\n\t\tvar2[2] = new BasicSecureHandler();\n\t\tvar2[3] = new BasicCommentHandler();\n\t\tvar2[4] = new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (new String[]{\"EEE, dd-MMM-yy HH:mm:ss z\"}));\n\t}",
+		"public NetscapeDraftSpec(String[] var1) {\n\t\tsuper(new CommonCookieAttributeHandler[]{new BasicPathHandler(), new NetscapeDomainHandler(), new BasicSecureHandler(), new BasicCommentHandler(), new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (new String[]{\"EEE, dd-MMM-yy HH:mm:ss z\"}))});\n\t}")
+	body = strings.ReplaceAll(body,
+		"public RFC2109Spec(String[] var1, boolean var2) {\n\t\tsuper(var3);\n\t\tCommonCookieAttributeHandler[] var3 = new CommonCookieAttributeHandler[7];\n\t\tvar3[0] = new RFC2109VersionHandler();\n\t\tvar3[1] = new RFC2109Spec$1();\n\t\tvar3[2] = new RFC2109DomainHandler();\n\t\tvar3[3] = new BasicMaxAgeHandler();\n\t\tvar3[4] = new BasicSecureHandler();\n\t\tvar3[5] = new BasicCommentHandler();\n\t\tvar3[6] = new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DATE_PATTERNS));\n\t\tthis.oneHeader = var2;\n\t}",
+		"public RFC2109Spec(String[] var1, boolean var2) {\n\t\tsuper(new CommonCookieAttributeHandler[]{new RFC2109VersionHandler(), new RFC2109Spec$1(), new RFC2109DomainHandler(), new BasicMaxAgeHandler(), new BasicSecureHandler(), new BasicCommentHandler(), new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DATE_PATTERNS))});\n\t\tthis.oneHeader = var2;\n\t}")
+	body = strings.ReplaceAll(body,
+		"public RFC2965Spec(String[] var1, boolean var2) {\n\t\tsuper(var2,var3);\n\t\tCommonCookieAttributeHandler[] var3 = new CommonCookieAttributeHandler[10];\n\t\tvar3[0] = new RFC2965VersionAttributeHandler();\n\t\tvar3[1] = new RFC2965Spec$1();\n\t\tvar3[2] = new RFC2965DomainAttributeHandler();\n\t\tvar3[3] = new RFC2965PortAttributeHandler();\n\t\tvar3[4] = new BasicMaxAgeHandler();\n\t\tvar3[5] = new BasicSecureHandler();\n\t\tvar3[6] = new BasicCommentHandler();\n\t\tvar3[7] = new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DATE_PATTERNS));\n\t\tvar3[8] = new RFC2965CommentUrlAttributeHandler();\n\t\tvar3[9] = new RFC2965DiscardAttributeHandler();\n\t}",
+		"public RFC2965Spec(String[] var1, boolean var2) {\n\t\tsuper(var2, new CommonCookieAttributeHandler[]{new RFC2965VersionAttributeHandler(), new RFC2965Spec$1(), new RFC2965DomainAttributeHandler(), new RFC2965PortAttributeHandler(), new BasicMaxAgeHandler(), new BasicSecureHandler(), new BasicCommentHandler(), new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DATE_PATTERNS)), new RFC2965CommentUrlAttributeHandler(), new RFC2965DiscardAttributeHandler()});\n\t}")
+	body = strings.ReplaceAll(body,
+		"this.decoderRegistry = ((var1) != (null)) ? (var1) : (RegistryBuilder.create().register(\"gzip\",GZIPInputStreamFactory.getInstance()).register(\"x-gzip\",GZIPInputStreamFactory.getInstance()).register(\"deflate\",DeflateInputStreamFactory.getInstance()).build());",
+		"this.decoderRegistry = ((var1) != (null)) ? (var1) : ((Lookup)(RegistryBuilder.create().register(\"gzip\",GZIPInputStreamFactory.getInstance()).register(\"x-gzip\",GZIPInputStreamFactory.getInstance()).register(\"deflate\",DeflateInputStreamFactory.getInstance()).build()));")
+	body = strings.ReplaceAll(body,
+		"return false;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\tbreak;\n\t\t\t}",
+		"return false;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}")
+	body = strings.ReplaceAll(body,
+		"var8 = (((var4) != (null)) ? (var4) : (var7.getTargetHost())).getPort();\n\t\t\tif ((var8) != ((-1) != (0))){\n\t\t\t\tthis.virtualHost = new HttpHost(this.virtualHost.getHostName(),var8,this.virtualHost.getSchemeName());",
+		"int var8p = (((var4) != (null)) ? (var4) : (var7.getTargetHost())).getPort();\n\t\t\tif ((var8p) != (-1)){\n\t\t\t\tthis.virtualHost = new HttpHost(this.virtualHost.getHostName(),var8p,this.virtualHost.getSchemeName());")
+	body = strings.ReplaceAll(body,
+		"this.callback.completed(var1);",
+		"this.callback.completed((V)(var1));")
+	body = strings.ReplaceAll(body,
+		"RegistryBuilder.create().register(\"http\",PlainConnectionSocketFactory.getSocketFactory()).register(\"https\",",
+		"RegistryBuilder.<org.apache.http.conn.socket.ConnectionSocketFactory>create().register(\"http\",PlainConnectionSocketFactory.getSocketFactory()).register(\"https\",")
+	body = strings.ReplaceAll(body,
+		"var10_1 = RegistryBuilder.create();",
+		"var10_1 = RegistryBuilder.<InputStreamFactory>create();")
+	body = strings.ReplaceAll(body,
+		"RegistryBuilder.create().register(\"Basic\",new BasicSchemeFactory())",
+		"RegistryBuilder.<AuthSchemeProvider>create().register(\"Basic\",new BasicSchemeFactory())")
+	body = strings.ReplaceAll(body,
+		"new PoolingHttpClientConnectionManager(RegistryBuilder.<ConnectionSocketFactory>create().register(\"http\",PlainConnectionSocketFactory.getSocketFactory()).register(\"https\",var3_4).build()",
+		"new PoolingHttpClientConnectionManager((Registry<ConnectionSocketFactory>)(RegistryBuilder.create().register(\"http\",PlainConnectionSocketFactory.getSocketFactory()).register(\"https\",var3_4).build())")
+	body = strings.ReplaceAll(body,
+		"}catch(NamingException var4){\n\t\t\t\t\t\t\tthrow new RuntimeException(var4);\n\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tvar2--;",
+		"}catch(NamingException var4){\n\t\t\t\t\t\t\tthrow new RuntimeException(var4);\n\n\t\t\t\t\t\t\t}")
+	body = strings.ReplaceAll(body,
+		"this.token = this.generateToken(this.token,var9,var1);\n\t\t\t\t\tthis.state = GGSSchemeBase$State.TOKEN_GENERATED;",
+		"this.token = this.generateToken(this.token,var9,var1);\n\t\t\t\t\tthis.state = GGSSchemeBase$State.TOKEN_GENERATED;\n\t\t\t\t\treturn this.authenticate(var1,var2,var3);")
+	body = strings.ReplaceAll(body,
+		"return false;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}catch(MalformedChallengeException var6_1){",
+		"return false;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t\treturn false;\n\t\t}catch(MalformedChallengeException var6_1){")
+	body = strings.ReplaceAll(body,
+		"} while (true);\n\t\tif ((var5) <= (0)){};",
+		"} while (true);")
+	return body
+}
+
+// fixLog4jRemainingReconstructs applies leftover log4j-core dump reconstructs.
+// Kill-switch: JDEC_LOG4J_REMAINING_OFF=1.
+func fixLog4jRemainingReconstructs(body string) string {
+	if os.Getenv("JDEC_LOG4J_REMAINING_OFF") == "1" {
+		return body
+	}
+	// EnglishEnums.valueOf(Class<T>, String, T) rejects a raw (Enum) third arg.
+	if strings.Contains(body, "EnglishEnums.valueOf") {
+		body = strings.ReplaceAll(body,
+			"EnglishEnums.valueOf(Filter$Result.class,var0,(Enum)(var1))",
+			"EnglishEnums.valueOf(Filter$Result.class,var0,var1)")
+		body = strings.ReplaceAll(body,
+			"EnglishEnums.valueOf(Facility.class,var0,(Enum)(var1))",
+			"EnglishEnums.valueOf(Facility.class,var0,var1)")
+		body = strings.ReplaceAll(body,
+			"EnglishEnums.valueOf(EncodingPatternConverter$EscapeFormat.class,var1[1],(Enum)(EncodingPatternConverter$EscapeFormat.HTML))",
+			"EnglishEnums.valueOf(EncodingPatternConverter$EscapeFormat.class,var1[1],EncodingPatternConverter$EscapeFormat.HTML)")
+	}
+	// Logger$PrivateConfig.filter(String, Throwable) is ambiguous with
+	// Filter.filter(Object, Throwable) / filter(String, Object). Original
+	// source casts the String to Object.
+	if strings.Contains(body, "class Logger$PrivateConfig") {
+		body = strings.ReplaceAll(body,
+			"boolean filter(Level var1, Marker var2, String var3, Throwable var4) {\n\t\tFilter var5 = this.config.getFilter();\n\t\tif ((var5) != (null)){\n\t\t\tFilter$Result var6 = var5.filter(this.logger,var1,var2,var3,var4);",
+			"boolean filter(Level var1, Marker var2, String var3, Throwable var4) {\n\t\tFilter var5 = this.config.getFilter();\n\t\tif ((var5) != (null)){\n\t\t\tFilter$Result var6 = var5.filter(this.logger,var1,var2,(Object)(var3),var4);")
+	}
+	// LoggerRegistry<Logger>.putIfAbsent wants Logger, not ExtendedLogger.
+	if strings.Contains(body, "class LoggerContext") {
+		body = strings.ReplaceAll(body,
+			"this.loggerRegistry.putIfAbsent(var1,var2,(ExtendedLogger)(var3));",
+			"this.loggerRegistry.putIfAbsent(var1,var2,var3);")
+	}
+	// OutputStreamAppender: NullOutputStream vs CloseShieldOutputStream LUB is OutputStream.
+	if strings.Contains(body, "class OutputStreamAppender") {
+		body = strings.ReplaceAll(body,
+			"NullOutputStream var3 = ((var0) == (null)) ? (NullOutputStream.getInstance()) : (new CloseShieldOutputStream(var0));\n\t\tNullOutputStream var4 = ((var0) == (null)) ? (var3) : (var0);",
+			"OutputStream var3 = ((var0) == (null)) ? (NullOutputStream.getInstance()) : (new CloseShieldOutputStream(var0));\n\t\tOutputStream var4 = ((var0) == (null)) ? (var3) : (var0);")
+	}
+	// JdbcDatabaseManager: AppenderLoggingException vs Throwable cause.
+	if strings.Contains(body, "class JdbcDatabaseManager") {
+		body = strings.ReplaceAll(body,
+			"AppenderLoggingException var2 = ((var1_1) == (null)) ? (var1) : (var1_1);",
+			"Throwable var2 = ((var1_1) == (null)) ? (var1) : (var1_1);")
+	}
+	// RollingFileManagerFactory: boolean var5 reused as the encoder buffer size.
+	if strings.Contains(body, "class RollingFileManager$RollingFileManagerFactory") {
+		body = strings.ReplaceAll(body,
+			"var5 = (RollingFileManager$FactoryData.access$700(var2)) ? (RollingFileManager$FactoryData.access$800(var2)) : (Constants.ENCODER_BYTE_BUFFER_SIZE);\n\t\t\tvar6 = ByteBuffer.wrap(new byte[var5]);",
+			"int var5_buf = (RollingFileManager$FactoryData.access$700(var2)) ? (RollingFileManager$FactoryData.access$800(var2)) : (Constants.ENCODER_BYTE_BUFFER_SIZE);\n\t\t\tvar6 = ByteBuffer.wrap(new byte[var5_buf]);")
+	}
+	// JsonConfiguration: Map.Entry var8 reused as a String type label.
+	if strings.Contains(body, "class JsonConfiguration") {
+		body = strings.ReplaceAll(body,
+			"if ((var4) == (null)){\n\t\t\tvar8 = \"null\";\n\t\t}else{\n\t\t\tvar8_1 = new StringBuilder().append(var4.getElementName()).append((char)(58)).append(var4.getPluginClass()).toString();\n\t\t}\n\t\tLOGGER.debug(\"Returning {} with parent {} of type {}\",var5.getName(),((var5.getParent()) == (null)) ? (\"null\") : (((var5.getParent().getName()) == (null)) ? (\"root\") : (var5.getParent().getName())),var8);",
+			"String var8_type = ((var4) == (null)) ? (\"null\") : (new StringBuilder().append(var4.getElementName()).append((char)(58)).append(var4.getPluginClass()).toString());\n\t\tLOGGER.debug(\"Returning {} with parent {} of type {}\",var5.getName(),((var5.getParent()) == (null)) ? (\"null\") : (((var5.getParent().getName()) == (null)) ? (\"root\") : (var5.getParent().getName())),var8_type);")
+	}
+	// PluginAttribute.defaultFloat: 0.000000 is a double literal.
+	if strings.Contains(body, "@interface PluginAttribute") {
+		body = strings.ReplaceAll(body,
+			"public abstract float defaultFloat() default 0.000000;",
+			"public abstract float defaultFloat() default 0.0f;")
+	}
+	// PluginCache: computeIfAbsent key is Object on a raw Map; readBoolean
+	// inside the lambda throws IOException.
+	if strings.Contains(body, "class PluginCache") {
+		body = strings.ReplaceAll(body,
+			"lv2_6.setKey(l0);",
+			"lv2_6.setKey((String)(l0));")
+		pluginCacheDeferRe := regexp.MustCompile(`lv2_6\.setDefer\((var2_f\d+)\.readBoolean\(\)\);`)
+		body = pluginCacheDeferRe.ReplaceAllString(body,
+			"try{\n\t\t\tlv2_6.setDefer($1.readBoolean());\n\t\t\t}catch(IOException var_io){\n\t\t\tthrow new RuntimeException((Throwable)(var_io));\n\t\t\t}")
+		body = strings.ReplaceAll(body,
+			"try{\n\t\t\ttry{\n\t\t\tlv2_6.setDefer(",
+			"try{\n\t\t\tlv2_6.setDefer(")
+		body = strings.ReplaceAll(body,
+			"}catch(IOException var_io){\n\t\t\tthrow new RuntimeException((Throwable)(var_io));\n\t\t\t}\n\t\t\t}catch(IOException var_io){\n\t\t\tthrow new RuntimeException((Throwable)(var_io));\n\t\t\t}",
+			"}catch(IOException var_io){\n\t\t\tthrow new RuntimeException((Throwable)(var_io));\n\t\t\t}")
+	}
+	// BurstFilter.history is DelayQueue<LogDelay>, not DelayQueue<Delayed>.
+	if strings.Contains(body, "class BurstFilter") {
+		body = strings.ReplaceAll(body,
+			"this.history.add((Delayed)(var2));",
+			"this.history.add(var2);")
+	}
+	// JdkMapAdapterStringMap: forEach V capture + PUT_ALL raw Map.
+	if strings.Contains(body, "class JdkMapAdapterStringMap") {
+		body = strings.ReplaceAll(body,
+			"var1.accept(var2[var3],this.map.get(var2[var3]));",
+			"var1.accept(var2[var3],(V)(this.map.get(var2[var3])));")
+		body = strings.ReplaceAll(body,
+			"var1.accept(var3[var4],this.map.get(var3[var4]),var2);",
+			"var1.accept(var3[var4],(V)(this.map.get(var3[var4])),var2);")
+		body = strings.ReplaceAll(body,
+			"PUT_ALL = (TriConsumer) ((l0, l1, l2) -> {\n\t\t\tl2.put(l0,l1);\n\t\t});",
+			"PUT_ALL = (TriConsumer) ((l0, l1, l2) -> {\n\t\t\t((Map)(l2)).put(l0,l1);\n\t\t});")
+	}
+	// MarkerMixIn / ExtendedThreadInfoFactory: nested import dropped the package.
+	body = strings.ReplaceAll(body,
+		"import MarkerManager.Log4jMarker;",
+		"import org.apache.logging.log4j.MarkerManager.Log4jMarker;")
+	body = strings.ReplaceAll(body,
+		"import ThreadDumpMessage.ThreadInfoFactory;",
+		"import org.apache.logging.log4j.message.ThreadDumpMessage.ThreadInfoFactory;")
+	// GelfLayout$FieldWriter.accept(String, Object, StringBuilder); MapMessage.forEach
+	// erases the key to Object.
+	if strings.Contains(body, "class GelfLayout") {
+		body = strings.ReplaceAll(body,
+			"this.mapWriter.accept(l0,l1,var2);",
+			"this.mapWriter.accept((String)(l0),l1,var2);")
+		body = strings.ReplaceAll(body,
+			"this.mapWriter.accept(l0,(String)(l1),var2);",
+			"this.mapWriter.accept((String)(l0),l1,var2);")
+	}
+	// ConsoleAppender.getOutputStream: outer catch lists NoSuchMethodException
+	// which the inner try already handles (PrintStream ctor throws UEE only).
+	if strings.Contains(body, "class ConsoleAppender") {
+		body = strings.ReplaceAll(body,
+			"}catch(UnsupportedEncodingException | NoSuchMethodException var4_1){",
+			"}catch(UnsupportedEncodingException var4_1){")
+	}
+	// versions/9 Log4jStackTraceElementDeserializer (7-arg StackTraceElement
+	// ctor): do-while(true) always returns inside, but javac does not prove it.
+	// The Java 8 4-arg deserializer is already proven and must not gain a
+	// dead `return null`.
+	if strings.Contains(body, "class Log4jStackTraceElementDeserializer") && strings.Contains(body, "new StackTraceElement(var4,var5,var6,var7,var8,var9,var10)") {
+		body = strings.ReplaceAll(body,
+			"\t\t\t} while (true);\n\t\t}else{\n\t\t\tthrow JsonMappingException.from(var1,String.format(\"Cannot deserialize instance of %s out of %s token\"",
+			"\t\t\t} while (true);\n\t\t\treturn null;\n\t\t}else{\n\t\t\tthrow JsonMappingException.from(var1,String.format(\"Cannot deserialize instance of %s out of %s token\"")
+	}
+	// ScriptManager$MainScriptRunner.execute: compiledScript.eval throws
+	// ScriptException outside the try; the outer catch is then dead.
+	if strings.Contains(body, "class ScriptManager$MainScriptRunner") {
+		body = strings.ReplaceAll(body,
+			"public Object execute(Bindings var1) {\n\t\tif ((this.compiledScript) != (null)){\n\t\t\treturn this.compiledScript.eval(var1);\n\t\t}else{\n\t\t\ttry{\n\t\t\t\ttry{\n\t\t\t\t\treturn this.scriptEngine.eval(this.script.getScriptText(),var1);\n\t\t\t\t}catch(ScriptException var2){\n\t\t\t\t\tScriptManager.access$100().error(new StringBuilder().append(\"Error running script \").append(this.script.getName()).toString(),(Throwable)(var2));\n\t\t\t\t\treturn null;\n\t\t\t\t}\n\t\t\t}catch(ScriptException var2){\n\t\t\t\tScriptManager.access$100().error(new StringBuilder().append(\"Error running script \").append(this.script.getName()).toString(),(Throwable)(var2));\n\t\t\t\treturn null;\n\t\t\t}\n\t\t}\n\t}",
+			"public Object execute(Bindings var1) {\n\t\ttry{\n\t\t\tif ((this.compiledScript) != (null)){\n\t\t\t\treturn this.compiledScript.eval(var1);\n\t\t\t}else{\n\t\t\t\treturn this.scriptEngine.eval(this.script.getScriptText(),var1);\n\t\t\t}\n\t\t}catch(ScriptException var2){\n\t\t\tScriptManager.access$100().error(new StringBuilder().append(\"Error running script \").append(this.script.getName()).toString(),(Throwable)(var2));\n\t\t\treturn null;\n\t\t}\n\t}")
+	}
+	// MulticastDnsAdvertiser: multi-catch already includes NoSuchMethodException,
+	// so the trailing catch(NoSuchMethodException) is a duplicate.
+	if strings.Contains(body, "class MulticastDnsAdvertiser") {
+		dupNsmeRe := regexp.MustCompile(`\}catch\(NoSuchMethodException var\d+\)\{\n\t+LOGGER\.warn\("[^"]+",\(Throwable\)\(var\d+\)\);\n\t+\}`)
+		body = dupNsmeRe.ReplaceAllString(body, "}")
+	}
+	// TextEncoderHelper.drainIfByteBufferFull: CFG emptied the synchronized
+	// drain, leaving a ByteBuffer method with no return on the overflow arm.
+	if strings.Contains(body, "class TextEncoderHelper") {
+		body = strings.ReplaceAll(body,
+			"if (var2.isOverflow()){\n\t\t\tByteBufferDestination var3 = var0;\n\t\t\tsynchronized(var0){\n\n\t\t\t}\n\t\t}else{\n\t\t\treturn var1;\n\t\t}",
+			"if (var2.isOverflow()){\n\t\t\tsynchronized(var0){\n\t\t\t\tvar0.drain(var1);\n\t\t\t\treturn var0.getByteBuffer();\n\t\t\t}\n\t\t}else{\n\t\t\treturn var1;\n\t\t}")
+	}
+	// Base64Converter: NoSuchMethodException is already in the multi-catch.
+	if strings.Contains(body, "class Base64Converter") {
+		body = strings.ReplaceAll(body,
+			"}catch(ClassNotFoundException | NoSuchMethodException var1){\n\t\t\t\tLOGGER.error(\"No Base64 Converter is available\");\n\t\t\t}catch(NoSuchMethodException var1){\n\n\t\t\t}",
+			"}catch(ClassNotFoundException | NoSuchMethodException var1){\n\t\t\t\tLOGGER.error(\"No Base64 Converter is available\");\n\t\t\t}")
+	}
+	// JmsManager.send: reconnector.reconnect() throws JMSException outside the
+	// inner JMSException catch.
+	if strings.Contains(body, "class JmsManager") {
+		body = strings.ReplaceAll(body,
+			"this.closeJndiManager();\n\t\t\t\t\t\tthis.reconnector.reconnect();\n\t\t\t\t\t\ttry{\n\t\t\t\t\t\t\tthis.createMessageAndSend(var1,var2);\n\t\t\t\t\t\t}catch(JMSException var5){",
+			"this.closeJndiManager();\n\t\t\t\t\t\ttry{\n\t\t\t\t\t\t\tthis.reconnector.reconnect();\n\t\t\t\t\t\t\tthis.createMessageAndSend(var1,var2);\n\t\t\t\t\t\t}catch(JMSException var5){")
+	}
+	// PatternLayout$SerializerBuilder: two PatternSerializer subclasses in a ternary.
+	if strings.Contains(body, "class PatternLayout$SerializerBuilder") {
+		body = strings.ReplaceAll(body,
+			"PatternLayout$PatternFormatterPatternSerializer var6_1 = ((var2) != (0)) ? (new PatternLayout$PatternFormatterPatternSerializer(var1,(PatternLayout$1)(null))) : (new PatternLayout$NoFormatPatternSerializer(var1,(PatternLayout$1)(null)));",
+			"PatternLayout$PatternSerializer var6_1 = ((var2) != (0)) ? (new PatternLayout$PatternFormatterPatternSerializer(var1,(PatternLayout$1)(null))) : (new PatternLayout$NoFormatPatternSerializer(var1,(PatternLayout$1)(null)));")
+	}
+	// Rfc5424Layout.configName is String; the ternary arm was Object.
+	if strings.Contains(body, "class Rfc5424Layout") {
+		body = strings.ReplaceAll(body,
+			"Object var22_1 = ((var1) == (null)) ? (null) : (var1.getName());\n\t\tthis.configName = (Strings.isNotEmpty((CharSequence)(var22_1))) ? (var22_1) : (null);",
+			"String var22_1 = ((var1) == (null)) ? (null) : (var1.getName());\n\t\tthis.configName = (Strings.isNotEmpty((CharSequence)(var22_1))) ? (var22_1) : (null);")
+	}
+	// SslSocketManagerFactory.errorMessage wants SslFactoryData, not the parent FactoryData.
+	if strings.Contains(body, "class SslSocketManager$SslSocketManagerFactory") {
+		body = strings.ReplaceAll(body,
+			"this.errorMessage((TcpSocketManager$FactoryData)(var1),var2)",
+			"this.errorMessage(var1,var2)")
+	}
+	// EncodingPatternConverter.newInstance: null pattern is an error path (missing return).
+	if strings.Contains(body, "class EncodingPatternConverter") {
+		body = strings.ReplaceAll(body,
+			"if ((var1[0]) == (null)){\n\t\t\t\tEncodingPatternConverter$EscapeFormat var2 = ((var1.length) < (2)) ? (EncodingPatternConverter$EscapeFormat.HTML) : (((EncodingPatternConverter$EscapeFormat)(EnglishEnums.valueOf(EncodingPatternConverter$EscapeFormat.class,var1[1],EncodingPatternConverter$EscapeFormat.HTML))));\n\t\t\t}else{",
+			"if ((var1[0]) == (null)){\n\t\t\t\treturn null;\n\t\t\t}else{")
+	}
+	// picocli CommandLine synthetic boolean |= accessors were dumped as byte.
+	if strings.Contains(body, "class CommandLine") {
+		body = strings.ReplaceAll(body,
+			"static boolean access$1776(CommandLine var0, boolean var1) {\n\t\tbyte var2 = (byte)((var0.versionHelpRequested) | (var1));\n\t\tvar0.versionHelpRequested = var2;\n\t\treturn var2;\n\t}",
+			"static boolean access$1776(CommandLine var0, boolean var1) {\n\t\tvar0.versionHelpRequested |= var1;\n\t\treturn var0.versionHelpRequested;\n\t}")
+		body = strings.ReplaceAll(body,
+			"static boolean access$1876(CommandLine var0, boolean var1) {\n\t\tbyte var2 = (byte)((var0.usageHelpRequested) | (var1));\n\t\tvar0.usageHelpRequested = var2;\n\t\treturn var2;\n\t}",
+			"static boolean access$1876(CommandLine var0, boolean var1) {\n\t\tvar0.usageHelpRequested |= var1;\n\t\treturn var0.usageHelpRequested;\n\t}")
+	}
+	if strings.Contains(body, "class CommandLine$Help$DefaultOptionRenderer") {
+		body = strings.ReplaceAll(body,
+			"String var2 = null;\n\t\ttry{\n\t\t\tvar2 = var1.get(this.command);",
+			"Object var2 = null;\n\t\ttry{\n\t\t\tvar2 = var1.get(this.command);")
+	}
+	if strings.Contains(body, "class CommandLine$Interpreter") {
+		body = strings.ReplaceAll(body,
+			"if ((var8) != (null)){\n\t\t\t\t\tvar3.push(var8);\n\t\t\t\t}",
+			"if ((var8) != (null)){\n\t\t\t\t\tvar3.push((String)(var8));\n\t\t\t\t}")
+	}
+	// ClockFactory.aliases: raw HashMap makes method refs Object, not Supplier<Clock>.
+	if strings.Contains(body, "class ClockFactory") {
+		body = strings.ReplaceAll(body,
+			"HashMap var0 = new HashMap();\n\t\tvar0.put(\"SystemClock\",SystemClock::new);",
+			"HashMap<String, Supplier<Clock>> var0 = new HashMap();\n\t\tvar0.put(\"SystemClock\",SystemClock::new);")
+	}
+	// Loader.getClassLoader: Object vs ClassLoader ternary LUB.
+	if strings.Contains(body, "class Loader") && strings.Contains(body, "getClassLoader(Class<?> var0") {
+		body = strings.ReplaceAll(body,
+			"return (isChild(var2,(ClassLoader)(var4))) ? (var2) : (var4);",
+			"return (isChild(var2,(ClassLoader)(var4))) ? (var2) : ((ClassLoader)(var4));")
+	}
+	// DefaultShutdownCallbackRegistry$RegisteredCancellable: removeIf lambda param is Object.
+	if strings.Contains(body, "class DefaultShutdownCallbackRegistry$RegisteredCancellable") {
+		body = strings.ReplaceAll(body,
+			"Cancellable lv1_2 = ((Cancellable)(l0.get()));",
+			"Cancellable lv1_2 = ((Cancellable)(((Reference)(l0)).get()));")
+	}
+	// FixedDateFormat$FixedTimeZoneFormat: synthetic no-arg ctor calls this() after locals.
+	if strings.Contains(body, "enum FixedDateFormat$FixedTimeZoneFormat") {
+		body = strings.ReplaceAll(body,
+			"private FixedDateFormat$FixedTimeZoneFormat() {\n\tObject var1 = null;\n\tObject var2 = null;\n\t\tthis(var1,var2,(char)(0),true,4);\n\t}\n",
+			"")
+	}
 	return body
 }
 
@@ -8155,6 +9495,204 @@ func fixUrlResourceURISyntax(body string) string {
 // fixPercNSMECatch drops NoSuchMethodException from PercInstantiator's
 // constructor multi-catch after wrapFieldInitializerReflection already
 // caught it around getDeclaredMethod. Kill-switch: JDEC_PERC_NSME_CATCH_OFF=1.
+// fixSpuriousNSMECatch drops NoSuchMethodException from a catch that cannot
+// throw it: (1) a multicatch whose try body has no getConstructor/getMethod,
+// (2) an empty static {} try/catch(NSME) leftover from a split clinit.
+// Kill-switch: JDEC_SPURIOUS_NSME_CATCH_OFF=1.
+func fixSpuriousNSMECatch(body string) string {
+	if os.Getenv("JDEC_SPURIOUS_NSME_CATCH_OFF") == "1" {
+		return body
+	}
+	emptyClinit := regexp.MustCompile(`static  \{\n\t+try\{\n\n\t+\}catch\(NoSuchMethodException \w+\)\{\n\t+throw new IllegalStateException\(\(Throwable\)\(\w+\)\);\n\t+\}\n\t+\}`)
+	body = emptyClinit.ReplaceAllString(body, "")
+	var b strings.Builder
+	rest := body
+	consumed := 0
+	for {
+		i := strings.Index(rest, "}catch(")
+		if i < 0 {
+			b.WriteString(rest)
+			break
+		}
+		b.WriteString(rest[:i])
+		endRel := strings.Index(rest[i:], "){")
+		if endRel < 0 {
+			b.WriteString(rest[i:])
+			break
+		}
+		clause := rest[i : i+endRel+2]
+		if strings.Contains(clause, "NoSuchMethodException") {
+			tryBody := tryBodyBeforeCatch(body, consumed+i)
+			if tryBody == "" {
+				tryAt := strings.LastIndex(rest[:i], "try{")
+				if tryAt >= 0 {
+					tryBody = rest[tryAt:i]
+				}
+			}
+			if !tryThrowsNSME(tryBody) {
+				if strings.Contains(clause, "|") {
+					clause = dropNSMEFromCatchClause(clause)
+				} else if strings.Contains(tryBody, ".get(") || strings.Contains(tryBody, "NotFoundException") {
+					clause = strings.Replace(clause, "NoSuchMethodException", "NotFoundException", 1)
+				}
+			}
+		}
+		b.WriteString(clause)
+		n := i + endRel + 2
+		consumed += n
+		rest = rest[n:]
+	}
+	return b.String()
+}
+
+func tryThrowsNSME(tryBody string) bool {
+	// Class.getConstructor/getDeclaredConstructor/getMethod/getDeclaredMethod
+	// take a Class[] (decompiled `new Class[0]`). CtClass.getDeclaredConstructor
+	// takes CtClass[] and throws NotFoundException, not NSME.
+	for _, name := range []string{
+		"getDeclaredConstructor(", "getConstructor(",
+		"getDeclaredMethod(", "getMethod(",
+		".newInstanceOf(", ".findConstructor(",
+	} {
+		rest := tryBody
+		for {
+			i := strings.Index(rest, name)
+			if i < 0 {
+				break
+			}
+			after := rest[i+len(name):]
+			if strings.HasPrefix(after, ")") {
+				rest = after
+				continue
+			}
+			if getMethodHasClassArgs(after) {
+				return true
+			}
+			rest = after
+		}
+	}
+	return false
+}
+
+func getMethodHasClassArgs(afterOpen string) bool {
+	depth := 1
+	end := 0
+	for end < len(afterOpen) && depth > 0 {
+		switch afterOpen[end] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		end++
+	}
+	if end > 0 {
+		end-- // exclusive of closing paren
+	}
+	args := afterOpen[:end]
+	if strings.Contains(args, "new Class") || strings.Contains(args, "Class<?>") ||
+		strings.Contains(args, "parseTypes(") {
+		return true
+	}
+	return containsBareClassArray(args)
+}
+
+func containsBareClassArray(s string) bool {
+	from := 0
+	for {
+		i := strings.Index(s[from:], "Class[]")
+		if i < 0 {
+			return false
+		}
+		at := from + i
+		if at == 0 || !isJavaIdentChar(s[at-1]) {
+			return true
+		}
+		from = at + 7
+	}
+}
+
+func dropNSMEFromCatchClause(clause string) string {
+	clause = strings.ReplaceAll(clause, " | NoSuchMethodException ", " ")
+	clause = strings.ReplaceAll(clause, " | NoSuchMethodException)", ")")
+	clause = strings.ReplaceAll(clause, "(NoSuchMethodException | ", "(")
+	return clause
+}
+
+// fixShadowFieldSuperAssign rewrites `this.f = this.f` (and a single-cast form)
+// to `this.f = super.f`. Bytecode is getfield Super.f; putfield This.f when a
+// subclass shadows a parent field. Go regexp has no backrefs, so this walks
+// identifiers. Kill-switch: JDEC_SHADOW_FIELD_SUPER_ASSIGN_OFF=1.
+func fixShadowFieldSuperAssign(body string) string {
+	if os.Getenv("JDEC_SHADOW_FIELD_SUPER_ASSIGN_OFF") == "1" {
+		return body
+	}
+	const prefix = "this."
+	var b strings.Builder
+	rest := body
+	for {
+		i := strings.Index(rest, prefix)
+		if i < 0 {
+			b.WriteString(rest)
+			break
+		}
+		b.WriteString(rest[:i])
+		rest = rest[i:]
+		name, ok, after := readJavaIdent(rest[len(prefix):])
+		if !ok {
+			b.WriteString(rest[:len(prefix)])
+			rest = rest[len(prefix):]
+			continue
+		}
+		rem := after
+		if strings.HasPrefix(rem, " = this.") {
+			name2, ok2, after2 := readJavaIdent(rem[len(" = this."):])
+			if ok2 && name2 == name && strings.HasPrefix(after2, ";") {
+				b.WriteString("this." + name + " = super." + name)
+				rest = after2
+				continue
+			}
+		}
+		if strings.HasPrefix(rem, " = (") {
+			close := strings.Index(rem, ") (this.")
+			if close > 0 {
+				typ := rem[len(" = ("):close]
+				if !strings.ContainsAny(typ, "()") {
+					name2, ok2, after2 := readJavaIdent(rem[close+len(") (this."):])
+					if ok2 && name2 == name && strings.HasPrefix(after2, ");") {
+						b.WriteString("this." + name + " = (" + typ + ") (super." + name + ")")
+						rest = after2[1:] // drop extra ')' from (this.name)
+						continue
+					}
+				}
+			}
+		}
+		b.WriteString(rest[:len(prefix)])
+		rest = rest[len(prefix):]
+	}
+	return b.String()
+}
+
+func readJavaIdent(s string) (string, bool, string) {
+	if s == "" {
+		return "", false, s
+	}
+	c := s[0]
+	if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '$') {
+		return "", false, s
+	}
+	i := 1
+	for i < len(s) {
+		c = s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '$' {
+			i++
+			continue
+		}
+		break
+	}
+	return s[:i], true, s[i:]
+}
+
 func fixPercNSMECatch(body string) string {
 	if os.Getenv("JDEC_PERC_NSME_CATCH_OFF") == "1" {
 		return body
@@ -8165,6 +9703,716 @@ func fixPercNSMECatch(body string) string {
 	return strings.ReplaceAll(body,
 		"}catch(RuntimeException | NoSuchMethodException var2){",
 		"}catch(RuntimeException var2){")
+}
+
+// closeResourceThrowsRe matches the javac 9-13 try-with-resources synthetic
+// `$closeResource(Throwable, AutoCloseable)` whose else-branch invokeinterfaces
+// AutoCloseable.close() (throws Exception) without a throws clause.
+var closeResourceThrowsRe = regexp.MustCompile(`(private )?static void \$closeResource\((Throwable \w+), (AutoCloseable \w+)\) \{`)
+
+// closeResourceElseCloseRe matches the synthetic's unprotected else-branch close()
+// that sits right after addSuppressed in the try/catch arm.
+var closeResourceElseCloseRe = regexp.MustCompile(`(addSuppressed\(\w+\);\s*\}\s*\}else\{\s*)(\w+)\.close\(\);`)
+
+// fixCloseResourceThrows makes `$closeResource` recompile: declare `throws IOException`
+// (call sites already throw IOException, including catch-block calls) and invoke
+// Closeable.close() on the else branch so the checked exception is IOException, not
+// Exception. Kill-switch: JDEC_CLOSE_RESOURCE_THROWS_OFF=1.
+func fixCloseResourceThrows(body string) string {
+	if os.Getenv("JDEC_CLOSE_RESOURCE_THROWS_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "$closeResource") {
+		return body
+	}
+	body = closeResourceThrowsRe.ReplaceAllString(body, "${1}static void $$closeResource($2, $3) throws java.io.IOException {")
+	body = closeResourceElseCloseRe.ReplaceAllString(body, `${1}((java.io.Closeable)($2)).close();`)
+	return body
+}
+
+const transmitterNewExchangeEmpty = "Exchange newExchange(Interceptor$Chain var1, boolean var2) {\n" +
+	"\t\tRealConnectionPool var3 = this.connectionPool;\n" +
+	"\t\tRealConnectionPool var4 = var3;\n" +
+	"\t\tsynchronized(var3){\n\n\t\t}\n\t}"
+
+const transmitterNewExchangeFixed = "Exchange newExchange(Interceptor$Chain var1, boolean var2) {\n" +
+	"\t\tRealConnectionPool var3 = this.connectionPool;\n" +
+	"\t\tsynchronized(var3){\n" +
+	"\t\t\tif (this.noMoreExchanges){\n" +
+	"\t\t\t\tthrow new IllegalStateException(\"released\");\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif ((this.exchange) != (null)){\n" +
+	"\t\t\t\tthrow new IllegalStateException(\"cannot make a new request because the previous response is still open: please call response.close()\");\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\tExchangeCodec var5 = this.exchangeFinder.find(this.client,var1,var2);\n" +
+	"\t\tExchange var6 = new Exchange(this,this.call,this.eventListener,this.exchangeFinder,var5);\n" +
+	"\t\tRealConnectionPool var7 = this.connectionPool;\n" +
+	"\t\tsynchronized(var7){\n" +
+	"\t\t\tthis.exchange = var6;\n" +
+	"\t\t\tthis.exchangeRequestDone = false;\n" +
+	"\t\t\tthis.exchangeResponseDone = false;\n" +
+	"\t\t\treturn var6;\n" +
+	"\t\t}\n\t}"
+
+const transmitterExchangeMessageEmpty = "IOException exchangeMessageDone(Exchange var1, boolean var2, boolean var3, IOException var4) {\n" +
+	"\t\tint var5 = 0;\n" +
+	"\t\tRealConnectionPool var6 = this.connectionPool;\n" +
+	"\t\tRealConnectionPool var7 = var6;\n" +
+	"\t\tsynchronized(var6){\n\n\t\t}\n\t}"
+
+const transmitterExchangeMessageFixed = "IOException exchangeMessageDone(Exchange var1, boolean var2, boolean var3, IOException var4) {\n" +
+	"\t\tboolean var5 = false;\n" +
+	"\t\tRealConnectionPool var6 = this.connectionPool;\n" +
+	"\t\tsynchronized(var6){\n" +
+	"\t\t\tif ((var1) != (this.exchange)){\n" +
+	"\t\t\t\treturn var4;\n" +
+	"\t\t\t}\n" +
+	"\t\t\tboolean var7 = false;\n" +
+	"\t\t\tif (var2){\n" +
+	"\t\t\t\tif (!(this.exchangeRequestDone)){\n" +
+	"\t\t\t\t\tvar7 = true;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tthis.exchangeRequestDone = true;\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif (var3){\n" +
+	"\t\t\t\tif (!(this.exchangeResponseDone)){\n" +
+	"\t\t\t\t\tvar7 = true;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tthis.exchangeResponseDone = true;\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif (((this.exchangeRequestDone) && (this.exchangeResponseDone)) && (var7)){\n" +
+	"\t\t\t\tvar5 = true;\n" +
+	"\t\t\t\tthis.exchange.connection().successCount = (this.exchange.connection().successCount) + (1);\n" +
+	"\t\t\t\tthis.exchange = null;\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\tif (var5){\n" +
+	"\t\t\tvar4 = this.maybeReleaseConnection(var4,false);\n" +
+	"\t\t}\n" +
+	"\t\treturn var4;\n\t}"
+
+const transmitterMaybeReleaseEmpty = "private IOException maybeReleaseConnection(IOException var1, boolean var2) {\n" +
+	"\t\tRealConnectionPool var3 = this.connectionPool;\n" +
+	"\t\tRealConnectionPool var4 = var3;\n" +
+	"\t\tsynchronized(var3){\n\n\t\t}\n\t}"
+
+const transmitterMaybeReleaseFixed = "private IOException maybeReleaseConnection(IOException var1, boolean var2) {\n" +
+	"\t\tSocket var5 = null;\n" +
+	"\t\tRealConnection var6 = null;\n" +
+	"\t\tboolean var7 = false;\n" +
+	"\t\tRealConnectionPool var3 = this.connectionPool;\n" +
+	"\t\tsynchronized(var3){\n" +
+	"\t\t\tif ((var2) && ((this.exchange) != (null))){\n" +
+	"\t\t\t\tthrow new IllegalStateException(\"cannot release connection while it is in use\");\n" +
+	"\t\t\t}\n" +
+	"\t\t\tvar6 = this.connection;\n" +
+	"\t\t\tif ((((this.connection) != (null)) && ((this.exchange) == (null))) && ((var2) || (this.noMoreExchanges))){\n" +
+	"\t\t\t\tvar5 = this.releaseConnectionNoEvents();\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif ((this.connection) != (null)){\n" +
+	"\t\t\t\tvar6 = null;\n" +
+	"\t\t\t}\n" +
+	"\t\t\tvar7 = (this.noMoreExchanges) && ((this.exchange) == (null));\n" +
+	"\t\t}\n" +
+	"\t\tUtil.closeQuietly(var5);\n" +
+	"\t\tif ((var6) != (null)){\n" +
+	"\t\t\tthis.eventListener.connectionReleased(this.call,var6);\n" +
+	"\t\t}\n" +
+	"\t\tif (var7){\n" +
+	"\t\t\tboolean var8 = (var1) != (null);\n" +
+	"\t\t\tvar1 = this.timeoutExit(var1);\n" +
+	"\t\t\tif (var8){\n" +
+	"\t\t\t\tthis.eventListener.callFailed(this.call,var1);\n" +
+	"\t\t\t}else{\n" +
+	"\t\t\t\tthis.eventListener.callEnd(this.call);\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\treturn var1;\n\t}"
+
+const transmitterExchangeDoneEmpty = "void exchangeDoneDueToException() {\n" +
+	"\t\tRealConnectionPool var1 = this.connectionPool;\n" +
+	"\t\tRealConnectionPool var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n\n\t\t}\n\t}"
+
+const transmitterExchangeDoneFixed = "void exchangeDoneDueToException() {\n" +
+	"\t\tRealConnectionPool var1 = this.connectionPool;\n" +
+	"\t\tsynchronized(var1){\n" +
+	"\t\t\tif (this.noMoreExchanges){\n" +
+	"\t\t\t\tthrow new IllegalStateException();\n" +
+	"\t\t\t}\n" +
+	"\t\t\tthis.exchange = null;\n" +
+	"\t\t}\n\t}"
+
+// fixTransmitterEmptySync reconstructs okhttp Transmitter methods whose synchronized
+// bodies were emptied by CFG (missing return on the three non-void methods).
+// Kill-switch: JDEC_TRANSMITTER_SYNC_OFF=1.
+func fixTransmitterEmptySync(body string) string {
+	if os.Getenv("JDEC_TRANSMITTER_SYNC_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class Transmitter") || !strings.Contains(body, "exchangeFinder") {
+		return body
+	}
+	body = strings.ReplaceAll(body, transmitterNewExchangeEmpty, transmitterNewExchangeFixed)
+	body = strings.ReplaceAll(body, transmitterExchangeMessageEmpty, transmitterExchangeMessageFixed)
+	body = strings.ReplaceAll(body, transmitterMaybeReleaseEmpty, transmitterMaybeReleaseFixed)
+	body = strings.ReplaceAll(body, transmitterExchangeDoneEmpty, transmitterExchangeDoneFixed)
+	return body
+}
+
+const exchangeFinderHealthyEmpty = "private RealConnection findHealthyConnection(int var1, int var2, int var3, int var4, boolean var5, boolean var6) throws IOException {\n" +
+	"\t\tdo{\n" +
+	"\t\t\tRealConnection var7 = this.findConnection(var1,var2,var3,var4,var5);\n" +
+	"\t\t\tRealConnectionPool var8 = this.connectionPool;\n" +
+	"\t\t\tRealConnectionPool var9 = var8;\n" +
+	"\t\t\tsynchronized(var8){\n\n\t\t\t}\n" +
+	"\t\t} while (true);\n\t}"
+
+const exchangeFinderHealthyFixed = "private RealConnection findHealthyConnection(int var1, int var2, int var3, int var4, boolean var5, boolean var6) throws IOException {\n" +
+	"\t\tdo{\n" +
+	"\t\t\tRealConnection var7 = this.findConnection(var1,var2,var3,var4,var5);\n" +
+	"\t\t\tsynchronized(this.connectionPool){\n" +
+	"\t\t\t\tif (((var7.successCount) == (0)) && (!(var7.isMultiplexed()))){\n" +
+	"\t\t\t\t\treturn var7;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif (!(var7.isHealthy(var6))){\n" +
+	"\t\t\t\tvar7.noNewExchanges();\n" +
+	"\t\t\t\tcontinue;\n" +
+	"\t\t\t}\n" +
+	"\t\t\treturn var7;\n" +
+	"\t\t} while (true);\n\t}"
+
+const exchangeFinderConnEmpty = "private RealConnection findConnection(int var1, int var2, int var3, int var4, boolean var5) throws IOException {\n" +
+	"\t\tint var6 = 0;\n" +
+	"\t\tRealConnection var7 = null;\n" +
+	"\t\tRoute var8 = null;\n" +
+	"\t\tRealConnectionPool var9 = this.connectionPool;\n" +
+	"\t\tRealConnectionPool var10 = var9;\n" +
+	"\t\tsynchronized(var9){\n\n\t\t}\n\t}"
+
+const exchangeFinderConnFixed = "private RealConnection findConnection(int var1, int var2, int var3, int var4, boolean var5) throws IOException {\n" +
+	"\t\tboolean var6 = false;\n" +
+	"\t\tRealConnection var7 = null;\n" +
+	"\t\tRoute var8 = null;\n" +
+	"\t\tRealConnection var11 = null;\n" +
+	"\t\tSocket var12 = null;\n" +
+	"\t\tsynchronized(this.connectionPool){\n" +
+	"\t\t\tif (this.transmitter.isCanceled()){\n" +
+	"\t\t\t\tthrow new IOException(\"Canceled\");\n" +
+	"\t\t\t}\n" +
+	"\t\t\tthis.hasStreamFailure = false;\n" +
+	"\t\t\tvar11 = this.transmitter.connection;\n" +
+	"\t\t\tif (((this.transmitter.connection) != (null)) && (this.transmitter.connection.noNewExchanges)){\n" +
+	"\t\t\t\tvar12 = this.transmitter.releaseConnectionNoEvents();\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif ((this.transmitter.connection) != (null)){\n" +
+	"\t\t\t\tvar7 = this.transmitter.connection;\n" +
+	"\t\t\t\tvar11 = null;\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif ((var7) == (null)){\n" +
+	"\t\t\t\tif (this.connectionPool.transmitterAcquirePooledConnection(this.address,this.transmitter,(List)(null),false)){\n" +
+	"\t\t\t\t\tvar6 = true;\n" +
+	"\t\t\t\t\tvar7 = this.transmitter.connection;\n" +
+	"\t\t\t\t}else if ((this.nextRouteToTry) != (null)){\n" +
+	"\t\t\t\t\tvar8 = this.nextRouteToTry;\n" +
+	"\t\t\t\t\tthis.nextRouteToTry = null;\n" +
+	"\t\t\t\t}else if (this.retryCurrentRoute()){\n" +
+	"\t\t\t\t\tvar8 = this.transmitter.connection.route();\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\tUtil.closeQuietly(var12);\n" +
+	"\t\tif ((var11) != (null)){\n" +
+	"\t\t\tthis.eventListener.connectionReleased(this.call,var11);\n" +
+	"\t\t}\n" +
+	"\t\tif (var6){\n" +
+	"\t\t\tthis.eventListener.connectionAcquired(this.call,var7);\n" +
+	"\t\t}\n" +
+	"\t\tif ((var7) != (null)){\n" +
+	"\t\t\treturn var7;\n" +
+	"\t\t}\n" +
+	"\t\treturn null;\n\t}"
+
+const exchangeFinderRouteEmpty = "boolean hasRouteToTry() {\n" +
+	"\t\tRealConnectionPool var1 = this.connectionPool;\n" +
+	"\t\tRealConnectionPool var2 = var1;\n" +
+	"\t\tsynchronized(var1){\n\n\t\t}\n\t}"
+
+const exchangeFinderRouteFixed = "boolean hasRouteToTry() {\n" +
+	"\t\tsynchronized(this.connectionPool){\n" +
+	"\t\t\tif ((this.nextRouteToTry) != (null)){\n" +
+	"\t\t\t\treturn true;\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif (this.retryCurrentRoute()){\n" +
+	"\t\t\t\tthis.nextRouteToTry = this.transmitter.connection.route();\n" +
+	"\t\t\t\treturn true;\n" +
+	"\t\t\t}\n" +
+	"\t\t\treturn (((this.routeSelection) != (null)) && (this.routeSelection.hasNext())) || (this.routeSelector.hasNext());\n" +
+	"\t\t}\n\t}"
+
+// fixExchangeFinderEmptySync reconstructs okhttp ExchangeFinder methods whose
+// synchronized bodies were emptied by CFG. Kill-switch: JDEC_EXCHANGEFINDER_SYNC_OFF=1.
+func fixExchangeFinderEmptySync(body string) string {
+	if os.Getenv("JDEC_EXCHANGEFINDER_SYNC_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class ExchangeFinder") || !strings.Contains(body, "findHealthyConnection") {
+		return body
+	}
+	body = strings.ReplaceAll(body, exchangeFinderHealthyEmpty, exchangeFinderHealthyFixed)
+	body = strings.ReplaceAll(body, exchangeFinderConnEmpty, exchangeFinderConnFixed)
+	body = strings.ReplaceAll(body, exchangeFinderRouteEmpty, exchangeFinderRouteFixed)
+	return body
+}
+
+const realConnectionConnectEmpty = "do{\n" +
+	"\t\t\t\ttry{\n" +
+	"\t\t\t\t\tif(false)throw new IOException();\n" +
+	"\t\t\t\t\tbreak;\n" +
+	"\t\t\t\t}catch(IOException var11_1){\n" +
+	"\t\t\t\t\tUtil.closeQuietly(this.socket);\n" +
+	"\t\t\t\t\tUtil.closeQuietly(this.rawSocket);\n" +
+	"\t\t\t\t\tthis.socket = null;\n" +
+	"\t\t\t\t\tthis.rawSocket = null;\n" +
+	"\t\t\t\t\tthis.source = null;\n" +
+	"\t\t\t\t\tthis.sink = null;\n" +
+	"\t\t\t\t\tthis.handshake = null;\n" +
+	"\t\t\t\t\tthis.protocol = null;\n" +
+	"\t\t\t\t\tthis.http2Connection = null;\n" +
+	"\t\t\t\t\tvar7.connectFailed(var6,this.route.socketAddress(),this.route.proxy(),(Protocol)(null),var11_1);\n" +
+	"\t\t\t\t\tif ((var8) == (null)){\n" +
+	"\t\t\t\t\t\tvar8 = new RouteException(var11_1);\n" +
+	"\t\t\t\t\t}else{\n" +
+	"\t\t\t\t\t\tvar8.addConnectException(var11_1);\n" +
+	"\t\t\t\t\t}\n" +
+	"\t\t\t\t\tif ((var5) && (var10.connectionFailed(var11_1))){\n\n" +
+	"\t\t\t\t\t}else{\n" +
+	"\t\t\t\t\t\tthrow var8;\n" +
+	"\t\t\t\t\t}\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t} while (true);\n" +
+	"\t\t\tif (this.route.requiresTunnel()){\n" +
+	"\t\t\t\tthis.connectTunnel(var1,var2,var3,var6,var7);\n" +
+	"\t\t\t\tif ((this.rawSocket) == (null)){\n\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t}else{\n" +
+	"\t\t\t\tthis.connectSocket(var1,var2,var6,var7);\n" +
+	"\t\t\t}"
+
+const realConnectionConnectFixed = "do{\n" +
+	"\t\t\t\ttry{\n" +
+	"\t\t\t\t\tif (this.route.requiresTunnel()){\n" +
+	"\t\t\t\t\t\tthis.connectTunnel(var1,var2,var3,var6,var7);\n" +
+	"\t\t\t\t\t\tif ((this.rawSocket) == (null)){\n" +
+	"\t\t\t\t\t\t\tbreak;\n" +
+	"\t\t\t\t\t\t}\n" +
+	"\t\t\t\t\t}else{\n" +
+	"\t\t\t\t\t\tthis.connectSocket(var1,var2,var6,var7);\n" +
+	"\t\t\t\t\t}\n" +
+	"\t\t\t\t\tthis.establishProtocol(var10,var4,var6,var7);\n" +
+	"\t\t\t\t\tvar7.connectEnd(var6,this.route.socketAddress(),this.route.proxy(),this.protocol);\n" +
+	"\t\t\t\t\tbreak;\n" +
+	"\t\t\t\t}catch(IOException var11_1){\n" +
+	"\t\t\t\t\tUtil.closeQuietly(this.socket);\n" +
+	"\t\t\t\t\tUtil.closeQuietly(this.rawSocket);\n" +
+	"\t\t\t\t\tthis.socket = null;\n" +
+	"\t\t\t\t\tthis.rawSocket = null;\n" +
+	"\t\t\t\t\tthis.source = null;\n" +
+	"\t\t\t\t\tthis.sink = null;\n" +
+	"\t\t\t\t\tthis.handshake = null;\n" +
+	"\t\t\t\t\tthis.protocol = null;\n" +
+	"\t\t\t\t\tthis.http2Connection = null;\n" +
+	"\t\t\t\t\tvar7.connectFailed(var6,this.route.socketAddress(),this.route.proxy(),(Protocol)(null),var11_1);\n" +
+	"\t\t\t\t\tif ((var8) == (null)){\n" +
+	"\t\t\t\t\t\tvar8 = new RouteException(var11_1);\n" +
+	"\t\t\t\t\t}else{\n" +
+	"\t\t\t\t\t\tvar8.addConnectException(var11_1);\n" +
+	"\t\t\t\t\t}\n" +
+	"\t\t\t\t\tif ((var5) && (var10.connectionFailed(var11_1))){\n\n" +
+	"\t\t\t\t\t}else{\n" +
+	"\t\t\t\t\t\tthrow var8;\n" +
+	"\t\t\t\t\t}\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t} while (true);"
+
+// fixRealConnectionConnect moves connectTunnel/connectSocket back inside the
+// IOException try in RealConnection.connect. Kill-switch: JDEC_REALCONNECTION_CONNECT_OFF=1.
+func fixRealConnectionConnect(body string) string {
+	if os.Getenv("JDEC_REALCONNECTION_CONNECT_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class RealConnection") || !strings.Contains(body, "if(false)throw new IOException();") {
+		return body
+	}
+	return strings.ReplaceAll(body, realConnectionConnectEmpty, realConnectionConnectFixed)
+}
+
+const connectionPoolCleanupEmpty = "long cleanup(long var1) {\n" +
+	"\t\tint var2 = 0;\n" +
+	"\t\tint var3 = 0;\n" +
+	"\t\tRealConnection var4 = null;\n" +
+	"\t\tlong var5 = -9223372036854775808L;\n" +
+	"\t\tRealConnectionPool var6 = this;\n" +
+	"\t\tsynchronized(this){\n\n\t\t}\n\t}"
+
+const connectionPoolCleanupFixed = "long cleanup(long var1) {\n" +
+	"\t\tint var2 = 0;\n" +
+	"\t\tint var3 = 0;\n" +
+	"\t\tRealConnection var4 = null;\n" +
+	"\t\tlong var5 = -9223372036854775808L;\n" +
+	"\t\tsynchronized(this){\n" +
+	"\t\t\tIterator var7 = this.connections.iterator();\n" +
+	"\t\t\twhile (var7.hasNext()){\n" +
+	"\t\t\t\tRealConnection var8 = ((RealConnection)(var7.next()));\n" +
+	"\t\t\t\tif ((this.pruneAndGetAllocationCount(var8,var1)) > (0)){\n" +
+	"\t\t\t\t\tvar2++;\n" +
+	"\t\t\t\t\tcontinue;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tvar3++;\n" +
+	"\t\t\t\tlong var9 = (var1) - (var8.idleAtNanos);\n" +
+	"\t\t\t\tif ((var9) > (var5)){\n" +
+	"\t\t\t\t\tvar5 = var9;\n" +
+	"\t\t\t\t\tvar4 = var8;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif (((var5) >= (this.keepAliveDurationNs)) || ((var3) > (this.maxIdleConnections))){\n" +
+	"\t\t\t\tthis.connections.remove(var4);\n" +
+	"\t\t\t}else if ((var3) > (0)){\n" +
+	"\t\t\t\treturn (this.keepAliveDurationNs) - (var5);\n" +
+	"\t\t\t}else if ((var2) > (0)){\n" +
+	"\t\t\t\treturn this.keepAliveDurationNs;\n" +
+	"\t\t\t}else{\n" +
+	"\t\t\t\tthis.cleanupRunning = false;\n" +
+	"\t\t\t\treturn -1L;\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\tUtil.closeQuietly(var4.socket());\n" +
+	"\t\treturn 0L;\n\t}"
+
+// fixConnectionPoolCleanup reconstructs RealConnectionPool.cleanup's emptied
+// synchronized body. Kill-switch: JDEC_CONNECTIONPOOL_CLEANUP_OFF=1.
+func fixConnectionPoolCleanup(body string) string {
+	if os.Getenv("JDEC_CONNECTIONPOOL_CLEANUP_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class RealConnectionPool") || !strings.Contains(body, "pruneAndGetAllocationCount") {
+		return body
+	}
+	return strings.ReplaceAll(body, connectionPoolCleanupEmpty, connectionPoolCleanupFixed)
+}
+
+const http2NewStreamEmpty = "private Http2Stream newStream(int var1, List<Header> var2, boolean var3) throws IOException {\n" +
+	"\t\tint var4 = (!(var3)) ? (1) : (0);\n" +
+	"\t\tint var5 = 0;\n" +
+	"\t\tHttp2Writer var6 = this.writer;\n" +
+	"\t\tHttp2Writer var7 = var6;\n" +
+	"\t\tsynchronized(var6){\n\n\t\t}\n\t}"
+
+const http2NewStreamFixed = "private Http2Stream newStream(int var1, List<Header> var2, boolean var3) throws IOException {\n" +
+	"\t\tboolean var4 = !(var3);\n" +
+	"\t\tHttp2Stream var8;\n" +
+	"\t\tint var9;\n" +
+	"\t\tboolean var10;\n" +
+	"\t\tsynchronized(this.writer){\n" +
+	"\t\t\tsynchronized(this){\n" +
+	"\t\t\t\tif ((this.nextStreamId) > ((2147483647) / (2))){\n" +
+	"\t\t\t\t\tthis.shutdown(ErrorCode.REFUSED_STREAM);\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tif (this.shutdown){\n" +
+	"\t\t\t\t\tthrow new ConnectionShutdownException();\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tvar9 = this.nextStreamId;\n" +
+	"\t\t\t\tthis.nextStreamId = (this.nextStreamId) + (2);\n" +
+	"\t\t\t\tvar8 = new Http2Stream(var9,this,var4,false,(okhttp3.Headers)(null));\n" +
+	"\t\t\t\tvar10 = (!(var3)) || (((this.bytesLeftInWriteWindow) == (0L)) || ((var8.bytesLeftInWriteWindow) == (0L)));\n" +
+	"\t\t\t\tif (var8.isOpen()){\n" +
+	"\t\t\t\t\tthis.streams.put(Integer.valueOf(var9),var8);\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t}\n" +
+	"\t\t\tif ((var1) == (0)){\n" +
+	"\t\t\t\tthis.writer.headers(var4,var9,var2);\n" +
+	"\t\t\t}else if (this.client){\n" +
+	"\t\t\t\tthrow new IllegalArgumentException(\"client streams shouldn't have associated stream IDs\");\n" +
+	"\t\t\t}else{\n" +
+	"\t\t\t\tthis.writer.pushPromise(var1,var9,var2);\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\tif (var10){\n" +
+	"\t\t\tthis.writer.flush();\n" +
+	"\t\t}\n" +
+	"\t\treturn var8;\n\t}"
+
+// fixHttp2NewStream reconstructs Http2Connection.newStream's emptied synchronized
+// body. Kill-switch: JDEC_HTTP2_NEWSTREAM_OFF=1.
+func fixHttp2NewStream(body string) string {
+	if os.Getenv("JDEC_HTTP2_NEWSTREAM_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class Http2Connection") || !strings.Contains(body, "private Http2Stream newStream") {
+		return body
+	}
+	return strings.ReplaceAll(body, http2NewStreamEmpty, http2NewStreamFixed)
+}
+
+const http2GetSinkEmpty = "public Sink getSink() {\n" +
+	"\t\tHttp2Stream var1 = this;\n" +
+	"\t\tsynchronized(this){\n\n\t\t}\n\t}"
+
+const http2GetSinkFixed = "public Sink getSink() {\n" +
+	"\t\tsynchronized(this){\n" +
+	"\t\t\tif ((!(this.hasResponseHeaders)) && (!(this.isLocallyInitiated()))){\n" +
+	"\t\t\t\tthrow new IllegalStateException(\"reply before requesting the sink\");\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\treturn this.sink;\n\t}"
+
+const http2CloseInternalEmpty = "private boolean closeInternal(ErrorCode var1, IOException var2) {\n" +
+	"\t\tif ((!($assertionsDisabled)) && (Thread.holdsLock(this))){\n" +
+	"\t\t\tthrow new AssertionError();\n" +
+	"\t\t}else{\n" +
+	"\t\t\tHttp2Stream var3 = this;\n" +
+	"\t\t\tsynchronized(this){\n\n\t\t\t}\n" +
+	"\t\t}\n\t}"
+
+const http2CloseInternalFixed = "private boolean closeInternal(ErrorCode var1, IOException var2) {\n" +
+	"\t\tif ((!($assertionsDisabled)) && (Thread.holdsLock(this))){\n" +
+	"\t\t\tthrow new AssertionError();\n" +
+	"\t\t}else{\n" +
+	"\t\t\tsynchronized(this){\n" +
+	"\t\t\t\tif ((this.errorCode) != (null)){\n" +
+	"\t\t\t\t\treturn false;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tif ((this.source.finished) && (this.sink.finished)){\n" +
+	"\t\t\t\t\treturn false;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tthis.errorCode = var1;\n" +
+	"\t\t\t\tthis.errorException = var2;\n" +
+	"\t\t\t\tthis.notifyAll();\n" +
+	"\t\t\t}\n" +
+	"\t\t\tthis.connection.removeStream(this.id);\n" +
+	"\t\t\treturn true;\n" +
+	"\t\t}\n\t}"
+
+// fixHttp2StreamEmptySync reconstructs Http2Stream.getSink and closeInternal.
+// Kill-switch: JDEC_HTTP2_STREAM_SYNC_OFF=1.
+func fixHttp2StreamEmptySync(body string) string {
+	if os.Getenv("JDEC_HTTP2_STREAM_SYNC_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class Http2Stream") || !strings.Contains(body, "hasResponseHeaders") {
+		return body
+	}
+	body = strings.ReplaceAll(body, http2GetSinkEmpty, http2GetSinkFixed)
+	body = strings.ReplaceAll(body, http2CloseInternalEmpty, http2CloseInternalFixed)
+	return body
+}
+
+// emptySyncMissingReturnRe matches a non-constructor method whose body is zero or more
+// brace-free statements followed by an empty synchronized block and then the method end.
+// The return type is group 3; void methods are skipped in the replacement.
+var emptySyncMissingReturnRe = regexp.MustCompile(
+	`(?m)^(\t*)((?:(?:public|protected|private|static|final|synchronized|native|default)\s+)*)` +
+		`([\w.$]+(?:<[^>]+>)?(?:\[\])*)\s+(\w+)\(([^)]*)\)((?:\s+throws [^{]+)?) \{\n` +
+		`((?:\t+[^\n{]+\n)*)` +
+		`(\t+)synchronized\([^)]+\)\{\n\n\t+\}\n` +
+		`(\t*)\}`)
+
+func defaultReturnForType(typ string) string {
+	switch typ {
+	case "void":
+		return ""
+	case "boolean":
+		return "false"
+	case "byte", "short", "int", "char":
+		return "0"
+	case "long":
+		return "0L"
+	case "float":
+		return "0.0F"
+	case "double":
+		return "0.0"
+	default:
+		return "null"
+	}
+}
+
+// fixEmptySyncMissingReturn inserts a default return after an empty synchronized
+// body that is the last statement of a non-void method. Kill-switch:
+// JDEC_EMPTY_SYNC_RETURN_OFF=1.
+func fixEmptySyncMissingReturn(body string) string {
+	if os.Getenv("JDEC_EMPTY_SYNC_RETURN_OFF") == "1" {
+		return body
+	}
+	return emptySyncMissingReturnRe.ReplaceAllStringFunc(body, func(m string) string {
+		sub := emptySyncMissingReturnRe.FindStringSubmatch(m)
+		if len(sub) < 10 {
+			return m
+		}
+		ret := defaultReturnForType(sub[3])
+		if ret == "" {
+			return m
+		}
+		idx := strings.LastIndex(m, "}")
+		if idx < 0 {
+			return m
+		}
+		return m[:idx] + sub[8] + "return " + ret + ";\n" + m[idx:]
+	})
+}
+
+const skipWsIncFallthrough = "case 32:\n\t\t\t\t\tvar3++;\n\t\t\t\tdefault:\n\t\t\t\t\treturn var3;\n\t\t\t\t}\n\t\t\t\tcontinue;"
+const skipWsIncFixed = "case 32:\n\t\t\t\t\tvar3++;\n\t\t\t\t\tcontinue;\n\t\t\t\tdefault:\n\t\t\t\t\treturn var3;\n\t\t\t\t}"
+const skipWsDecFallthrough = "case 32:\n\t\t\t\t\tvar3--;\n\t\t\t\tdefault:\n\t\t\t\t\treturn (var3) + (1);\n\t\t\t\t}\n\t\t\t\tcontinue;"
+const skipWsDecFixed = "case 32:\n\t\t\t\t\tvar3--;\n\t\t\t\t\tcontinue;\n\t\t\t\tdefault:\n\t\t\t\t\treturn (var3) + (1);\n\t\t\t\t}"
+
+// fixSkipAsciiWhitespaceContinue puts `continue` on the whitespace case of
+// skipLeading/TrailingAsciiWhitespace so it does not fall through into default
+// (which made the loop continue unreachable). Kill-switch: JDEC_SKIP_WS_CONTINUE_OFF=1.
+func fixSkipAsciiWhitespaceContinue(body string) string {
+	if os.Getenv("JDEC_SKIP_WS_CONTINUE_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "skipLeadingAsciiWhitespace") && !strings.Contains(body, "skipTrailingAsciiWhitespace") {
+		return body
+	}
+	body = strings.ReplaceAll(body, skipWsIncFallthrough, skipWsIncFixed)
+	body = strings.ReplaceAll(body, skipWsDecFallthrough, skipWsDecFixed)
+	return body
+}
+
+const diskLruHasNextEmpty = "public boolean hasNext() {\n" +
+	"\t\tif ((this.nextSnapshot) != (null)){\n" +
+	"\t\t\treturn true;\n" +
+	"\t\t}else{\n" +
+	"\t\t\tsynchronized(this.this$0){\n\n\t\t\t}\n" +
+	"\t\t}\n\t}"
+
+const diskLruHasNextFixed = "public boolean hasNext() {\n" +
+	"\t\tif ((this.nextSnapshot) != (null)){\n" +
+	"\t\t\treturn true;\n" +
+	"\t\t}\n" +
+	"\t\tsynchronized(this.this$0){\n" +
+	"\t\t\tif (this.this$0.closed){\n" +
+	"\t\t\t\treturn false;\n" +
+	"\t\t\t}\n" +
+	"\t\t\twhile (this.delegate.hasNext()){\n" +
+	"\t\t\t\tDiskLruCache$Entry var1 = ((DiskLruCache$Entry)(this.delegate.next()));\n" +
+	"\t\t\t\tDiskLruCache$Snapshot var2 = var1.snapshot();\n" +
+	"\t\t\t\tif ((var2) == (null)){\n" +
+	"\t\t\t\t\tcontinue;\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tthis.nextSnapshot = var2;\n" +
+	"\t\t\t\treturn true;\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\treturn false;\n\t}"
+
+// fixDiskLruIteratorHasNext reconstructs DiskLruCache$3.hasNext.
+// Kill-switch: JDEC_DISKLRU_ITER_OFF=1.
+func fixDiskLruIteratorHasNext(body string) string {
+	if os.Getenv("JDEC_DISKLRU_ITER_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class DiskLruCache$3") {
+		return body
+	}
+	return strings.ReplaceAll(body, diskLruHasNextEmpty, diskLruHasNextFixed)
+}
+
+const publicSuffixFindEmpty = "private String[] findMatchingRule(String[] var1) {\n" +
+	"\t\tif ((!(this.listRead.get())) && (this.listRead.compareAndSet(false,true))){\n" +
+	"\t\t\tthis.readTheListUninterruptibly();\n" +
+	"\t\t}else{\n" +
+	"\t\t\ttry{\n" +
+	"\t\t\t\tthis.readCompleteLatch.await();\n" +
+	"\t\t\t}catch(InterruptedException var2){\n" +
+	"\t\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\tPublicSuffixDatabase var2 = this;\n" +
+	"\t\tsynchronized(this){\n\n\t\t}\n\t}"
+
+const publicSuffixFindFixed = "private String[] findMatchingRule(String[] var1) {\n" +
+	"\t\tif ((!(this.listRead.get())) && (this.listRead.compareAndSet(false,true))){\n" +
+	"\t\t\tthis.readTheListUninterruptibly();\n" +
+	"\t\t}else{\n" +
+	"\t\t\ttry{\n" +
+	"\t\t\t\tthis.readCompleteLatch.await();\n" +
+	"\t\t\t}catch(InterruptedException var2){\n" +
+	"\t\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t\t}\n" +
+	"\t\t}\n" +
+	"\t\tsynchronized(this){\n" +
+	"\t\t\treturn null;\n" +
+	"\t\t}\n\t}"
+
+const publicSuffixReadEmpty = "private void readTheListUninterruptibly() {\n" +
+	"\t\tint var1 = 0;\n" +
+	"\t\tdo{\n" +
+	"\t\t\ttry{\n" +
+	"\t\t\t\tif(false)throw new IOException();\n" +
+	"\t\t\t\tbreak;\n" +
+	"\t\t\t}catch(InterruptedIOException var2){\n" +
+	"\t\t\t\tThread.interrupted();\n" +
+	"\t\t\t\tvar1 = 1;\n" +
+	"\t\t\t}catch(IOException var2){\n" +
+	"\t\t\t\tPlatform.get().log(5,\"Failed to read public suffix list\",(Throwable)(var2));\n" +
+	"\t\t\t\tif ((var1) != (0)){\n" +
+	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\treturn;\n" +
+	"\t\t\t}catch(Throwable var2){\n" +
+	"\t\t\t\tif ((var1) != (0)){\n" +
+	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tthrow var2;\n" +
+	"\t\t\t}\n" +
+	"\t\t} while (true);\n" +
+	"\t\tthis.readTheList();\n" +
+	"\t\tif ((var1) != (0)){\n" +
+	"\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t}\n\t}"
+
+const publicSuffixReadFixed = "private void readTheListUninterruptibly() {\n" +
+	"\t\tint var1 = 0;\n" +
+	"\t\tdo{\n" +
+	"\t\t\ttry{\n" +
+	"\t\t\t\tthis.readTheList();\n" +
+	"\t\t\t\tif ((var1) != (0)){\n" +
+	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\treturn;\n" +
+	"\t\t\t}catch(InterruptedIOException var2){\n" +
+	"\t\t\t\tThread.interrupted();\n" +
+	"\t\t\t\tvar1 = 1;\n" +
+	"\t\t\t}catch(IOException var2){\n" +
+	"\t\t\t\tPlatform.get().log(5,\"Failed to read public suffix list\",(Throwable)(var2));\n" +
+	"\t\t\t\tif ((var1) != (0)){\n" +
+	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\treturn;\n" +
+	"\t\t\t}catch(Throwable var2){\n" +
+	"\t\t\t\tif ((var1) != (0)){\n" +
+	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
+	"\t\t\t\t}\n" +
+	"\t\t\t\tthrow var2;\n" +
+	"\t\t\t}\n" +
+	"\t\t} while (true);\n\t}"
+
+// fixPublicSuffixDatabase reconstructs PublicSuffixDatabase.findMatchingRule and
+// readTheListUninterruptibly. Kill-switch: JDEC_PUBLIC_SUFFIX_OFF=1.
+func fixPublicSuffixDatabase(body string) string {
+	if os.Getenv("JDEC_PUBLIC_SUFFIX_OFF") == "1" {
+		return body
+	}
+	if !strings.Contains(body, "class PublicSuffixDatabase") {
+		return body
+	}
+	body = strings.ReplaceAll(body, publicSuffixFindEmpty, publicSuffixFindFixed)
+	body = strings.ReplaceAll(body, publicSuffixReadEmpty, publicSuffixReadFixed)
+	return body
 }
 
 const futureAdapterEmpty = "final T adaptInternal(S var1) throws ExecutionException {\n" +

@@ -9,19 +9,18 @@ Java 源码后，能否被 `javac` 重新编译回去、重新打包、并且**�
    Base64 以及 HeapSort / KMP / SwitchFSM / TryFinally / UnionFind / DiamondTryCatch /
    DiamondTryFinally / ForContinue / ComputeIfAbsent 等算法，走「源码 → 编译 → 运行（基准） → JavaJive 反编译 → 重新编译 → 运行（往返）」，断言
    两次运行输出**逐字节一致**。这证明反编译产物不仅“能编过”，而且**语义保真、可执行、结果正确**。
-2. **实验二 · 大规模自评可重编译**：在 8 个真实流行 jar（commons-codec / gson / commons-lang3 /
-   jsoup / snakeyaml / spring-core / fastjson2 / guava）上反编译整包后重编译、重打包、逐类校验，
+2. **实验二 · 大规模自评可重编译**：在 34 个真实流行 jar（原 8 + jackson/okhttp/collections4/netty/log4j/protobuf + 二十典型库）上反编译整包后重编译、重打包、逐类校验，
    以「有多少个 class 能干净编回去（**类级干净率**）」+「能否完整往返」为主口径。
 3. **§7 · 三方同口径横向对照**：把 JavaJive 放到与 CFR 0.152、Vineflower 1.10.1 的同机、同 jar、
    同 `javac --release 8` 对照下，用「缺陷外层类数 / 总数」这一可跨工具比较的口径直接 PK。
 
 > ## 一句话结论（抗阶段遮蔽的类级口径）
 >
-> 8 个真实 jar、合计 **4,487** 个摊平单元：**单元干净率 100%（4487/4487，0 个缺陷单元）**，
-> **全集 0 语法错**（证明无 javac 阶段遮蔽、数字诚实）。**8 个库全部达成完整往返**
+> 34 个真实 jar、合计 **18,759** 个摊平单元：**单元干净率 100%（18759/18759，0 个缺陷单元）**，
+> **全集 0 语法错**（证明无 javac 阶段遮蔽、数字诚实）。**34 个库全部达成完整往返**
 > （反编译 → 重编译 0 错 → 重打包 → 外部 JVM `-Xverify:all` 全类通过，锁进 `provenClean`）。
-> 自托管算法往返 **14/14 逐字节一致**。三方横评（§7）里 JavaJive 的
-> **类级干净率 位列第一**（100% vs Vineflower 90.8%、CFR 79.8%）。JavaJive 数字测于 2026-09-04（v0.2.0）；CFR / Vineflower 列仍为 2026-07-02 同机对照。
+> 自托管算法往返 **14/14 逐字节一致**。三方横评（§7，原 8 jar 对照集）里 JavaJive 的
+> **类级干净率 位列第一**（100% vs Vineflower 90.8%、CFR 79.8%）。JavaJive 数字测于 2026-09-05（v0.3.0）；CFR / Vineflower 列仍为 2026-07-02 同机对照。
 
 > **度量口径说明：以「类级干净率 / 往返能力 / syntax=0 自证」为主口径，而非「错误行数」。**
 > `javac` 是分阶段编译器——只要编译集合里**任一文件**有语法/词法错（parse 阶段），它就在 attribution（类型检查）
@@ -40,10 +39,10 @@ Java 源码后，能否被 `javac` 重新编译回去、重新打包、并且**�
 | 维度 | 指标 | 实测值 | 证据 / 复现 | GA 判定 |
 |---|---|---|---|:--:|
 | **部署形态** | 运行依赖 | **纯 Go 单二进制**，零 JVM、零外部进程、零 `javac` fork | `classparser` 纯 Go 实现 | ✅ 可直接嵌入 |
-| **反编译正确性** | 类级干净率（主口径） | **100%**（4487/4487 摊平单元，8 个真实 jar） | 表 A | ✅ |
+| **反编译正确性** | 类级干净率（主口径） | **100%**（18759/18759 摊平单元，34 个真实 jar） | 表 A | ✅ |
 | **口径诚实性** | 全集语法/词法错 | **0**（`TestBenchmarkSelfRecompile` 硬断言 syntax≠0 即失败） | 表 B | ✅ 无阶段遮蔽 |
 | **语义保真** | 自托管算法往返逐字节一致 | **14/14**（MD5 / SHA-256 / CRC32 / QuickSort / Base64 + 9 个控制流压力种子） | 实验一 | ✅ |
-| **完整往返** | decompile→recompile→repackage→外部 JVM `-Xverify:all` 逐类校验 | **8/8 库全通过**（codec 107、gson 199、lang3 346、jsoup 241、snakeyaml 233、fastjson2 689、guava 1892、spring 952） | 表 B | ✅ 8 库达成 |
+| **完整往返** | decompile→recompile→repackage→外部 JVM `-Xverify:all` 逐类校验 | **34/34 库全通过**（锁 provenClean） | 表 B | ✅ 34 库达成 |
 | **核心目标库** | gson / fastjson2 / guava / spring-core 干净率 | **100% / 100% / 100% / 100%** | 表 A | 全部 GA |
 | **横向对比** | 类级干净率三方排名 | **第一**（JavaJive 100% > Vineflower 90.8% > CFR 79.8%） | 表 E | ✅ |
 | **吞吐（单线程）** | 端到端（解包+反编译+落盘） | **115 类/秒**（4666 类 / 40.5s；剔除 fastjson2 尾类约 **268 类/秒**） | 表 D | ✅ |
@@ -51,8 +50,7 @@ Java 源码后，能否被 `javac` 重新编译回去、重新打包、并且**�
 
 ### 0.2 GA 结论（诚实分层）
 
-- **已达 GA、可直接投产**：**全部 8 个基准库**（commons-codec、gson、commons-lang3、jsoup、snakeyaml、
-  fastjson2、guava、spring-core）——整树零错、重打包后外部 JVM 逐类字节码校验全通过，
+- **已达 GA、可直接投产**：**全部 34 个基准库**（原 8 + jackson/okhttp/collections4/netty/log4j/protobuf + 二十典型库）——整树零错、重打包后外部 JVM 逐类字节码校验全通过，
   且 codec 经调用差分与原 jar 逐字节一致。反编译产物**可重编译、可重打包、可加载、可执行、语义正确**，
   达到“拿去就能用”的工业标准，锁进 `provenClean`。
 - **诚实边界**：tree 清零不等于每个方法都已结构化还原（个别方法仍可能走 dump 重建或诚实 stub 后再重建）；
@@ -80,7 +78,7 @@ JavaJive 是**纯 Go 的 Java 反编译内核**，天然适配 Go 语言安全�
 | JDK（javac / java） | OpenJDK 21.0.2（重编译统一 `--release 8`） |
 | Go（构建 JavaJive 与 harness） | go1.22+ |
 | 对照反编译器 | CFR 0.152 · Vineflower 1.10.1 |
-| JavaJive | **v0.2.0**（生产 `JarFS` 路径） |
+| JavaJive | **v0.3.0**（生产 `JarFS` 路径） |
 
 对照 jar 取自本机 Maven 仓库 `~/.m2/repository`。所有 `javac` 调用统一 `-encoding UTF-8 --release 8 -nowarn`，
 并锁定英文 locale 以保证诊断稳定。绝对值随 JDK / jar 版本小幅浮动，以趋势为准。
@@ -182,9 +180,35 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | spring-core | 974 | 974/974 | **100.0%** | 0 | 0 |
 | fastjson2 | 681 | 681/681 | **100.0%** | 0 | 0 |
 | guava | 1825 | 1825/1825 | **100.0%** | 0 | 0 |
-| **合计** | **4487** | **4487/4487** | **100.0%** | **0** | **0** |
+| jackson-databind | 773 | 773/773 | **100.0%** | 0 | 0 |
+| okhttp | 200 | 200/200 | **100.0%** | 0 | 0 |
+| commons-collections4 | 524 | 524/524 | **100.0%** | 0 | 0 |
+| netty-handler | 356 | 356/356 | **100.0%** | 0 | 0 |
+| log4j-core | 1184 | 1184/1184 | **100.0%** | 0 | 0 |
+| protobuf-java | 672 | 672/672 | **100.0%** | 0 | 0 |
+| asm | 38 | 38/38 | **100.0%** | 0 | 0 |
+| joda-time | 247 | 247/247 | **100.0%** | 0 | 0 |
+| commons-io | 346 | 346/346 | **100.0%** | 0 | 0 |
+| commons-compress | 566 | 566/566 | **100.0%** | 0 | 0 |
+| httpclient | 470 | 470/470 | **100.0%** | 0 | 0 |
+| slf4j-api | 54 | 54/54 | **100.0%** | 0 | 0 |
+| logback-core | 453 | 453/453 | **100.0%** | 0 | 0 |
+| caffeine | 687 | 687/687 | **100.0%** | 0 | 0 |
+| rxjava | 1653 | 1653/1653 | **100.0%** | 0 | 0 |
+| javassist | 426 | 426/426 | **100.0%** | 0 | 0 |
+| xstream | 498 | 498/498 | **100.0%** | 0 | 0 |
+| commons-math3 | 1280 | 1280/1280 | **100.0%** | 0 | 0 |
+| HikariCP | 75 | 75/75 | **100.0%** | 0 | 0 |
+| jedis | 748 | 748/748 | **100.0%** | 0 | 0 |
+| junit | 346 | 346/346 | **100.0%** | 0 | 0 |
+| assertj-core | 812 | 812/812 | **100.0%** | 0 | 0 |
+| picocli | 216 | 216/216 | **100.0%** | 0 | 0 |
+| commons-pool2 | 80 | 80/80 | **100.0%** | 0 | 0 |
+| zxing-core | 260 | 260/260 | **100.0%** | 0 | 0 |
+| freemarker | 1308 | 1308/1308 | **100.0%** | 0 | 0 |
+| **合计** | **18759** | **18759/18759** | **100.0%** | **0** | **0** |
 
-> **核心目标库全部 100% 完整往返**（v0.2.0，测于 2026-09-04）。质量长尾（个别方法 dump 重建、T1 通配符捕获等）见 §4，不计入 tree 缺陷。
+> **34 个库全部 100% 完整往返**（v0.3.0，测于 2026-09-05）。质量长尾（个别方法 dump 重建、T1 通配符捕获等）见 §4，不计入 tree 缺陷。
 
 ### 3.3 表 B · 往返能力（decompile → recompile → repackage → load+verify）
 
@@ -198,8 +222,34 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | spring-core | 0 | 0 | 952/952 | ✅ **YES** |
 | fastjson2 | 0 | 0 | 689/689 | ✅ **YES** |
 | guava | 0 | 0 | 1892/1892 | ✅ **YES** |
+| jackson-databind | 0 | 0 | 785/785 | ✅ **YES** |
+| okhttp | 0 | 0 | 199/199 | ✅ **YES** |
+| commons-collections4 | 0 | 0 | 528/528 | ✅ **YES** |
+| netty-handler | 0 | 0 | 366/366 | ✅ **YES** |
+| log4j-core | 0 | 0 | 1165/1165 | ✅ **YES** |
+| protobuf-java | 0 | 0 | 703/703 | ✅ **YES** |
+| asm | 0 | 0 | 38/38 | ✅ **YES** |
+| joda-time | 0 | 0 | 247/247 | ✅ **YES** |
+| commons-io | 0 | 0 | 332/332 | ✅ **YES** |
+| commons-compress | 0 | 0 | 542/542 | ✅ **YES** |
+| httpclient | 0 | 0 | 478/478 | ✅ **YES** |
+| slf4j-api | 0 | 0 | 55/55 | ✅ **YES** |
+| logback-core | 0 | 0 | 462/462 | ✅ **YES** |
+| caffeine | 0 | 0 | 692/692 | ✅ **YES** |
+| rxjava | 0 | 0 | 1663/1663 | ✅ **YES** |
+| javassist | 0 | 0 | 426/426 | ✅ **YES** |
+| xstream | 0 | 0 | 498/498 | ✅ **YES** |
+| commons-math3 | 0 | 0 | 1324/1324 | ✅ **YES** |
+| HikariCP | 0 | 0 | 75/75 | ✅ **YES** |
+| jedis | 0 | 0 | 748/748 | ✅ **YES** |
+| junit | 0 | 0 | 351/351 | ✅ **YES** |
+| assertj-core | 0 | 0 | 816/816 | ✅ **YES** |
+| picocli | 0 | 0 | 217/217 | ✅ **YES** |
+| commons-pool2 | 0 | 0 | 81/81 | ✅ **YES** |
+| zxing-core | 0 | 0 | 275/275 | ✅ **YES** |
+| freemarker | 0 | 0 | 1308/1308 | ✅ **YES** |
 
-> **全 8 jar 语法错 = 0**，故表 A 的类级数字无阶段遮蔽。**8 个库全部完整往返**（v0.2.0）：
+> **全 34 jar 语法错 = 0**，故表 A 的类级数字无阶段遮蔽。**34 个库全部完整往返**（v0.3.0）：
 > 整树零错、重打包后外部 JVM 在 `-Xverify:all` 下逐类加载校验全部通过；
 > commons-codec 更经调用差分（Base64 / Hex / MD5 / SHA-256）证实与原 jar 逐字节一致。
 > spring 的 verifier classpath 含 optional reactor/ant/jcl；guava 含 failureaccess。锁进 `provenClean`。
@@ -216,7 +266,8 @@ go test -run TestBenchmarkRoundTripAlgorithms -v ./test/cross/
 | spring-core | 974 | 0 |
 | fastjson2 | 681 | 0 |
 | guava | 1825 | 0 |
-| **合计** | **4487** | **0** |
+| **原 8 jar 合计** | **4487** | **0** |
+| **34 jar 合计** | **18759** | **0** |
 
 > **错误行数会误导**：它既被语法错遮蔽、又随内联/摊平的文件规模波动，且集中在少数类里。**行数散在多少个类里才决定
 > 可用性**，这正是以「缺陷 class 数」为主口径的原因。此表仅供上下文，且**只有在语法错为 0（无遮蔽）时才有意义**。
@@ -357,14 +408,14 @@ PROFILE_JAR=guava go test -run TestJarTreeInventory -v ./test/cross/
 
 ## 6. 结论
 
-按**抗阶段遮蔽的「单元级干净率」口径**：JavaJive 在 8 个真实 jar、4487 个摊平单元上的**单元级干净率为 100%
-（4487/4487，0 缺陷单元），全集 0 语法错**——数字诚实、无遮蔽。**8 个库全部达成完整往返**
+按**抗阶段遮蔽的「单元级干净率」口径**：JavaJive 在 34 个真实 jar、18759 个摊平单元上的**单元级干净率为 100%
+（18759/18759，0 缺陷单元），全集 0 语法错**——数字诚实、无遮蔽。**34 个库全部达成完整往返**
 （反编译 → 重编译 0 错 → 重打包 → 外部 JVM 逐类校验全通过），结合实验一的 **14/14 语义保真**，证明 JavaJive 的产物
-**可重编译、可重打包、可执行、语义正确**。性能上，纯 Go 内核单线程 **115 类/秒**（剔除 fastjson2 尾类约 268 类/秒），
+**可重编译、可重打包、可执行、语义正确**。性能上，纯 Go 内核单线程 **115 类/秒**（原 8 jar；剔除 fastjson2 尾类约 268 类/秒），
 逐类可并发放大，具备规模化批量反编译能力（§3.5）。
 
-**GA 判定**（§0）：**8 个基准库全部已达 GA、可直接投产**（完整往返全通过，锁进 `provenClean`）。
-整体为**工业可用版本**（v0.2.0）。
+**GA 判定**（§0）：**34 个基准库全部已达 GA、可直接投产**（完整往返全通过，锁进 `provenClean`）。
+整体为**工业可用版本**（v0.3.0）。
 
 ---
 
@@ -401,13 +452,13 @@ PROFILE_JAR=guava go test -run TestJarTreeInventory -v ./test/cross/
 | guava | 1892 | **0/558 (100.0%)** | 154/558 (72.4%) | 66/558 (88.2%) |
 | **合计** | | **0/2252（100%）** | 456/2254（79.8%） | 208/2252（90.8%） |
 
-> **JavaJive 列复测于 2026-09-04（v0.2.0）**：全量摊平单元（表 A）干净率 **100%**（0 缺陷单元 / 4487 单元）。CFR / Vineflower 列沿用 2026-07-02 同机、同 jar、同采样口径，未随 JavaJive 同步重测，故保留原值仅供方向性参照。
+> **JavaJive 列复测于 2026-09-05（v0.3.0）**：全量摊平单元（表 A）干净率 **100%**（0 缺陷单元 / 18759 单元；§7 对照集仍为原 8 jar）。CFR / Vineflower 列沿用 2026-07-02 同机、同 jar、同采样口径，未随 JavaJive 同步重测，故保留原值仅供方向性参照。
 > 注：三方外层类总数略有出入（CFR 2254 / 另两方 2252），系各反编译器对合成/匿名类的切分口径不同；**干净率百分比**
 > 才是公平对齐点。错误行数见 §7.3，仅作上下文（会被少数语法错扭曲，不作口径）。
 
 ### 7.3 结论：比 CFR 强多少，比 Vineflower 强多少
 
-- **类级干净率第一**：JavaJive **100%**（v0.2.0 全量摊平单元，表 A）> Vineflower **90.8%** > CFR **79.8%**。
+- **类级干净率第一**：JavaJive **100%**（v0.3.0 全量摊平单元，表 A）> Vineflower **90.8%** > CFR **79.8%**。
 - **对 CFR：全面领先。** **8/8 个 jar** 上 JavaJive 缺陷类**均少于** CFR；合计缺陷类 **0 vs 456**。
 - **对 Vineflower：全面领先。** 合计缺陷类 **0 vs 208**；8/8 jar 全胜（含此前 Vineflower 领先的 commons-lang3）。
 - **定位**：JavaJive 是当前反编译器**第一梯队**、且**总体正确率位列第一**，全面优于 CFR、总量领先 Vineflower；而 JavaJive 是三者中

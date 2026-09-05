@@ -13,16 +13,21 @@ import (
 )
 
 type ClassContext struct {
-	ClassName       string
-	FunctionName    string
-	SupperClassName string
-	FunctionType    any
-	PackageName     string
-	BuildInLibsMap  *omap.OrderedMap[string, []string]
-	KeySet          *utils.Set[string]
-	Arguments       []string
-	IsStatic        bool
-	IsVarArgs       bool
+	ClassName    string
+	FunctionName string
+	// CurrentMethodDesc is the raw JVM descriptor of the method currently being
+	// rendered (e.g. `(Lcom/foo/LRUMap;)V`). A `this(...)` self-call whose
+	// Descriptor differs needs an explicit cast so javac does not bind the more
+	// specific overload (jackson TypeFactory LRUMap ctor -> LookupCache ctor).
+	CurrentMethodDesc string
+	SupperClassName   string
+	FunctionType      any
+	PackageName       string
+	BuildInLibsMap    *omap.OrderedMap[string, []string]
+	KeySet            *utils.Set[string]
+	Arguments         []string
+	IsStatic          bool
+	IsVarArgs         bool
 	// TypeParams holds the bare names of the type variables in scope for the class being
 	// rendered (its formal type parameters, plus any free variables injected on a flattened
 	// inner class). It lets renderers tell a type-variable reference (e.g. `T`/`K`/`V`) apart
@@ -104,6 +109,11 @@ type ClassContext struct {
 	// colliding on arity are dropped. Stored as a string (class_context must not import the types package).
 	// Empty when the class has no such constructor.
 	ConstructorSignatures map[int]string
+	// ConstructorSignaturesByDesc maps a same-class constructor's EXACT JVM descriptor to its generic
+	// Signature. Arity-keyed ConstructorSignatures drops colliding overloads (MultiKey(K,K) vs
+	// MultiKey(K[], boolean) are both arity 2); the descriptor is unique so this(...) can recover
+	// `K[]` and re-emit `(K[]) new Object[]{...}`.
+	ConstructorSignaturesByDesc map[string]string
 	// ClassSig is the raw generic class Signature string of the class currently being rendered (e.g.
 	// `<K:Ljava/lang/Object;V:Ljava/lang/Object;>Lcom/foo/Base<TK;TV;>;`). It seeds the unified
 	// cross-class generic resolver (types.ResolveInstantiatedParamType) for a `this` receiver: the walk
@@ -254,6 +264,15 @@ func (f *ClassContext) ConstructorSignature(argc int) string {
 		return ""
 	}
 	return f.ConstructorSignatures[argc]
+}
+
+// ConstructorSignatureByDesc returns the generic Signature of a same-class constructor identified
+// by its EXACT JVM descriptor, or "".
+func (f *ClassContext) ConstructorSignatureByDesc(descriptor string) string {
+	if f == nil || descriptor == "" || f.ConstructorSignaturesByDesc == nil {
+		return ""
+	}
+	return f.ConstructorSignaturesByDesc[descriptor]
 }
 
 // MethodSignatureByDesc returns the raw generic Signature string of a same-class method identified by

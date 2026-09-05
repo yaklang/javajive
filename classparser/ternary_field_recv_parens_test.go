@@ -115,18 +115,249 @@ func TestFixToAnnotationArrayFinisherIsLoadBearing(t *testing.T) {
 }
 
 func TestFixDataBufferLambdaCastIsLoadBearing(t *testing.T) {
-	in := "this.logValue(l0,var5);\nHints.touchDataBuffer(l0,var3,this.logger);\nthis.decode(l0,var2,var3,var4);\n"
+	in := "this.logValue(l0,var5);\nHints.touchDataBuffer(l0,var3,this.logger);\nthis.decode(l0,var2,var3,var4);\nthis.decodeDataBuffer(l0,var2,var3,var4);\n"
 	os.Unsetenv("JDEC_DATABUFFER_LAMBDA_CAST_OFF")
 	on := fixDataBufferLambdaCast(in)
 	if !strings.Contains(on, "this.logValue((DataBuffer)(l0),") ||
 		!strings.Contains(on, "Hints.touchDataBuffer((DataBuffer)(l0),") ||
-		!strings.Contains(on, "this.decode((DataBuffer)(l0),") {
+		!strings.Contains(on, "this.decode((DataBuffer)(l0),") ||
+		!strings.Contains(on, "this.decodeDataBuffer((DataBuffer)(l0),") {
 		t.Errorf("fix ON: expected (DataBuffer) casts, got:\n%s", on)
 	}
 	t.Setenv("JDEC_DATABUFFER_LAMBDA_CAST_OFF", "1")
 	off := fixDataBufferLambdaCast(in)
 	if strings.Contains(off, "(DataBuffer)(l0)") {
 		t.Errorf("fix OFF: expected no cast, got:\n%s", off)
+	}
+}
+
+func TestFixLinkedWithNextRawCastIsLoadBearing(t *testing.T) {
+	in := "POJOPropertyBuilder$Linked<?> var8 = var5;\nvar7._fields = var8.withNext(var7._fields);\nvar7._getters = var8.withNext(var7._getters);\n"
+	os.Unsetenv("JDEC_LINKED_WITHNEXT_RAW_OFF")
+	on := fixLinkedWithNextRawCast(in)
+	if !strings.Contains(on, ".withNext((POJOPropertyBuilder$Linked)(var7._fields))") ||
+		!strings.Contains(on, ".withNext((POJOPropertyBuilder$Linked)(var7._getters))") {
+		t.Errorf("fix ON: expected raw withNext casts, got:\n%s", on)
+	}
+	t.Setenv("JDEC_LINKED_WITHNEXT_RAW_OFF", "1")
+	off := fixLinkedWithNextRawCast(in)
+	if strings.Contains(off, "(POJOPropertyBuilder$Linked)(var7._fields)") {
+		t.Errorf("fix OFF: expected no cast, got:\n%s", off)
+	}
+}
+
+func TestFixJacksonFeatureUpcastIsLoadBearing(t *testing.T) {
+	in := "return this._readCapabilities.isEnabled((JacksonFeature)(var1));\n"
+	os.Unsetenv("JDEC_JACKSON_FEATURE_CAST_OFF")
+	on := fixJacksonFeatureUpcast(in)
+	if !strings.Contains(on, ".isEnabled(var1)") || strings.Contains(on, "(JacksonFeature)") {
+		t.Errorf("fix ON: expected unwrapped isEnabled(var1), got:\n%s", on)
+	}
+	t.Setenv("JDEC_JACKSON_FEATURE_CAST_OFF", "1")
+	off := fixJacksonFeatureUpcast(in)
+	if !strings.Contains(off, "(JacksonFeature)(var1)") {
+		t.Errorf("fix OFF: expected JacksonFeature wrap, got:\n%s", off)
+	}
+}
+
+func TestFixAnnotatedAndMetadataLambdaIsLoadBearing(t *testing.T) {
+	in := "return ((((AnnotatedMethod)(l0.annotated)).getParameterCount()) != (1)) || ((l0.metadata) == (null));\n"
+	os.Unsetenv("JDEC_ANNOTATED_AND_METADATA_LAMBDA_OFF")
+	on := fixAnnotatedAndMetadataLambda(in)
+	if !strings.Contains(on, "((AnnotatedAndMetadata)(l0)).annotated") ||
+		!strings.Contains(on, "((AnnotatedAndMetadata)(l0)).metadata") {
+		t.Errorf("fix ON: expected AnnotatedAndMetadata casts, got:\n%s", on)
+	}
+	t.Setenv("JDEC_ANNOTATED_AND_METADATA_LAMBDA_OFF", "1")
+	off := fixAnnotatedAndMetadataLambda(in)
+	if strings.Contains(off, "AnnotatedAndMetadata") {
+		t.Errorf("fix OFF: expected no cast, got:\n%s", off)
+	}
+}
+
+func TestFixPOJOBuilderValueCastIsLoadBearing(t *testing.T) {
+	in := "return new DefaultAccessorNamingStrategy(var1,var2,((var5) == (null)) ? (this._withPrefix) : (var5.withPrefix),this._getterPrefix,this._isGetterPrefix,this._baseNameValidator);\n"
+	os.Unsetenv("JDEC_POJO_BUILDER_VALUE_CAST_OFF")
+	on := fixPOJOBuilderValueCast(in)
+	if !strings.Contains(on, "((JsonPOJOBuilder$Value)(var5)).withPrefix") {
+		t.Errorf("fix ON: expected JsonPOJOBuilder$Value cast, got:\n%s", on)
+	}
+	t.Setenv("JDEC_POJO_BUILDER_VALUE_CAST_OFF", "1")
+	off := fixPOJOBuilderValueCast(in)
+	if strings.Contains(off, "JsonPOJOBuilder$Value") {
+		t.Errorf("fix OFF: expected no cast, got:\n%s", off)
+	}
+}
+
+func TestFixGetFieldClassHoistIsLoadBearing(t *testing.T) {
+	in := "var4 = var1.getDeclaringClass();\nvar5 = var3.getDeclaringClass();\nif ((var4) != (var5)){\n\t\t\t\t\tClass var4 = null;\n\t\t\t\t\tClass var5 = null;\n\t\t\t\t\tif (var4.isAssignableFrom(var5)){\n"
+	os.Unsetenv("JDEC_GETFIELD_CLASS_HOIST_OFF")
+	on := fixGetFieldClassHoist(in)
+	if !strings.Contains(on, "Class var4 = var1.getDeclaringClass();") ||
+		strings.Contains(on, "Class var4 = null;") {
+		t.Errorf("fix ON: expected hoisted Class decls, got:\n%s", on)
+	}
+	t.Setenv("JDEC_GETFIELD_CLASS_HOIST_OFF", "1")
+	off := fixGetFieldClassHoist(in)
+	if strings.Contains(off, "Class var4 = var1.getDeclaringClass();") {
+		t.Errorf("fix OFF: expected original, got:\n%s", off)
+	}
+}
+
+func TestFixJacksonRemainingReconstructsIsLoadBearing(t *testing.T) {
+	in := "" +
+		"protected JsonDeserializer<Object> _createAndCacheValueDeserializer(DeserializationContext var1, DeserializerFactory var2, JavaType var3) throws JsonMappingException {\n" +
+		"\t\tHashMap var4 = this._incompleteDeserializers;\n" +
+		"\t\tsynchronized(var4){\n\n\t\t}\n" +
+		"\t}\n" +
+		"\t\tMethodProperty var8 = null;\n\t\tFieldProperty var8_1;\n" +
+		"\t\tif (var5 instanceof AnnotatedMethod){\n\t\t\tvar8_1 = new FieldProperty(var3,var6,var7,var2.getClassAnnotations(),((AnnotatedField)(var5)));\n" +
+		"\t\treturn new MapEntryDeserializer(this,var1,var3,var2);\n" +
+		"\tE computeNext() {\n\t\treturn this.cursor.getNext();\n\t}\n" +
+		"\t\tvar1._children.put(var3.getKey(),node);\n" +
+		"\t\tthis._defaultViews = var1;\n" +
+		"\t\tthis.serializeFilteredFields(var1,var2,var3,var5,this._suppressableValue);\n" +
+		"\t\tvar3.stream().map(AnnotatedMethod::getFullName);\n" +
+		"\t\treturn ((var2) == (null)) ? (JsonInclude$Value.empty()) : (var2);\n" +
+		"\t\tJavaType var4 = ((var3) == (null)) ? (this.getType()) : (var3.getRawClass());\n" +
+		"\t\treturn this._delegatee.deserialize(var1,var2,var3);\n" +
+		"\t\t((com.fasterxml.jackson.annotation.JsonFormat$Shape)(var4)).isNumeric();\n" +
+		"\t\treturn ((var2) == (null)) ? (JsonInclude$Value.empty()) : (var2);\n" +
+		"protected StdScalarSerializer(Class<?> var1, boolean var2) {\n\t\tsuper(var1);\n" +
+		"\tstatic final DatatypeFactory _dataTypeFactory = DatatypeFactory.newInstance();\n" +
+		"\tstatic  {\n\t\ttry{\n\n\t\t}catch(DatatypeConfigurationException var0){\n" +
+		"\tLinkedDeque$1(LinkedDeque var1, Linked var2) {\n\t\tsuper(var1,var2);\n" +
+		"\t\tList var9_2;\n" +
+		"\t\tList var9_3 = this.filterUnwantedJDKProperties(var6,var3,var9_3);\n"
+	os.Unsetenv("JDEC_JACKSON_REMAINING_OFF")
+	on := fixJacksonRemainingReconstructs(in)
+	checks := []string{
+		"return this._createAndCache2(var1,var2,var3);",
+		"SettableBeanProperty var8 = null;",
+		"instanceof AnnotatedField",
+		"(JsonDeserializer)(var3)",
+		"(String)(var3.getKey())",
+		"((Class[])(var1))",
+		"(PropertyFilter)(var5)",
+		"Function<AnnotatedMethod, String>",
+		"(JsonInclude.Value)(var2)",
+		"this.getType().getRawClass()",
+		"((JsonDeserializer)(this._delegatee))",
+		"JsonFormat.Shape",
+		"JsonInclude.Value",
+		"super((Class)(var1))",
+		"_dataTypeFactory = DatatypeFactory.newInstance();",
+		"super(var1,(E)(Object)(var2))",
+		"((var9) != (null)) ? ((List)(var9)) : (var9_2)",
+	}
+	for _, c := range checks {
+		if !strings.Contains(on, c) {
+			t.Errorf("fix ON: missing %q in:\n%s", c, on)
+		}
+	}
+	t.Setenv("JDEC_JACKSON_REMAINING_OFF", "1")
+	off := fixJacksonRemainingReconstructs(in)
+	if strings.Contains(off, "SettableBeanProperty var8 = null;") || strings.Contains(off, "JsonFormat.Shape") {
+		t.Errorf("fix OFF: reconstruct still applied, got:\n%s", off)
+	}
+}
+
+func TestJacksonRemainingLinkedDequeCtorIsLoadBearing(t *testing.T) {
+	data, err := os.ReadFile("testdata/regression/LinkedDeque$1.class")
+	if err != nil {
+		t.Fatalf("read LinkedDeque$1: %v", err)
+	}
+	os.Unsetenv("JDEC_JACKSON_REMAINING_OFF")
+	on, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile ON: %v", err)
+	}
+	if !strings.Contains(on, "super(var1,(E)(Object)(var2))") {
+		t.Errorf("ON: expected unchecked E ctor cast, got:\n%s", on)
+	}
+
+	t.Setenv("JDEC_JACKSON_REMAINING_OFF", "1")
+	off, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile OFF: %v", err)
+	}
+	if strings.Contains(off, "super(var1,(E)(Object)(var2))") {
+		t.Errorf("OFF: expected no E ctor cast, got:\n%s", off)
+	}
+	if !strings.Contains(off, "super(var1,var2)") {
+		t.Errorf("OFF: expected raw super(var1,var2), got:\n%s", off)
+	}
+}
+
+func TestJacksonRemainingDeserializerCacheSyncReturnIsLoadBearing(t *testing.T) {
+	data, err := os.ReadFile("testdata/regression/DeserializerCache.class")
+	if err != nil {
+		t.Fatalf("read DeserializerCache: %v", err)
+	}
+	os.Unsetenv("JDEC_JACKSON_REMAINING_OFF")
+	on, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile ON: %v", err)
+	}
+	if !strings.Contains(on, "return this._createAndCache2") {
+		t.Errorf("ON: expected emptied-sync return of _createAndCache2, got:\n%s", on)
+	}
+
+	t.Setenv("JDEC_JACKSON_REMAINING_OFF", "1")
+	off, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile OFF: %v", err)
+	}
+	if strings.Contains(off, "return this._createAndCache2") {
+		t.Errorf("OFF: expected no _createAndCache2 reconstruct, got:\n%s", off)
+	}
+}
+
+func TestJacksonRemainingMapEntryDeserializerCastIsLoadBearing(t *testing.T) {
+	data, err := os.ReadFile("testdata/regression/MapEntryDeserializer.class")
+	if err != nil {
+		t.Fatalf("read MapEntryDeserializer: %v", err)
+	}
+	os.Unsetenv("JDEC_JACKSON_REMAINING_OFF")
+	on, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile ON: %v", err)
+	}
+	if !strings.Contains(on, "new MapEntryDeserializer(this,var1,(JsonDeserializer)(var3),var2)") {
+		t.Errorf("ON: expected JsonDeserializer CAP#1 ctor cast, got:\n%s", on)
+	}
+
+	t.Setenv("JDEC_JACKSON_REMAINING_OFF", "1")
+	off, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile OFF: %v", err)
+	}
+	if strings.Contains(off, "(JsonDeserializer)(var3)") {
+		t.Errorf("OFF: expected no JsonDeserializer reconstruct, got:\n%s", off)
+	}
+}
+
+func TestJacksonRemainingBeanDeserializerFactoryPropertyIsLoadBearing(t *testing.T) {
+	data, err := os.ReadFile("testdata/regression/BeanDeserializerFactory.class")
+	if err != nil {
+		t.Fatalf("read BeanDeserializerFactory: %v", err)
+	}
+	os.Unsetenv("JDEC_JACKSON_REMAINING_OFF")
+	on, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile ON: %v", err)
+	}
+	if !strings.Contains(on, "SettableBeanProperty var8 = null;") {
+		t.Errorf("ON: expected unified SettableBeanProperty slot, got:\n%s", on)
+	}
+
+	t.Setenv("JDEC_JACKSON_REMAINING_OFF", "1")
+	off, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile OFF: %v", err)
+	}
+	if !strings.Contains(off, "MethodProperty var8 = null;") {
+		t.Errorf("OFF: expected split MethodProperty var8, got:\n%s", off)
 	}
 }
 
@@ -329,6 +560,19 @@ func TestFixDupThrowableCatchFinallyIsLoadBearing(t *testing.T) {
 	on3 := fixDupThrowableCatchFinally(in3)
 	if strings.Count(on3, "catch(Throwable") != 1 {
 		t.Errorf("fix ON drop-second: expected one catch, got:\n%s", on3)
+	}
+
+	// junit TestCase.runBare: finally-rethrow is `throw (Throwable) var2;`.
+	in4 := "" +
+		"try{\n\t\t\trunTest();\n" +
+		"\t\t}catch(Throwable var2){\n" +
+		"\t\t\tvar1 = var2;\n\t\t\tthis.tearDown();\n" +
+		"\t\t}catch(Throwable var2){\n" +
+		"\t\t\tthis.tearDown();\n\t\t\tthrow (Throwable) var2;\n" +
+		"\t\t}\n"
+	on4 := fixDupThrowableCatchFinally(in4)
+	if strings.Count(on4, "catch(Throwable") != 1 {
+		t.Errorf("fix ON throwable-cast rethrow: expected one catch, got:\n%s", on4)
 	}
 }
 

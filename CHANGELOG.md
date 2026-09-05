@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.3.0 — 2026-09-05
+
+34-jar tree-zero: the original 8 benchmark jars plus 6 expansion jars and 20
+typical libraries all decompile, tree-recompile with 0 `javac` errors,
+repackage, and pass external JVM `-Xverify:all`.
+
+- **Tree-clean 18,759 / 18,759** flattened units across 34 libraries. Syntax
+  errors remain 0.
+- **Full round-trip on 34/34** (locked in `provenClean`):
+  original 8 (codec / gson / lang3 / jsoup / snakeyaml / fastjson2 / guava /
+  spring-core), expansion 6 (jackson-databind / okhttp / collections4 / netty-handler /
+  log4j-core / protobuf-java), and twenty typical libraries (asm, joda-time,
+  commons-io, commons-compress, httpclient, slf4j-api, logback-core, caffeine,
+  rxjava, javassist, xstream, commons-math3, HikariCP, jedis, junit, assertj-core,
+  picocli, commons-pool2, zxing-core, freemarker).
+- Self-hosted algorithm round-trip still **14/14** byte-identical.
+- Dump reconstructs for the 20-jar remainder (boolean-zero, int-as-boolean,
+  empty-synchronized missing return, checked-exception catch unions, `$closeResource`
+  throws, and per-library remaining families), all kill-switched.
+
 ## v0.2.0 — 2026-09-04
 
 8-jar tree-zero: every benchmark jar decompiles, tree-recompiles with 0 `javac` errors,

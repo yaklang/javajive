@@ -21,12 +21,15 @@ func fixLeakedExceptionSentinel(body string) string {
 	if os.Getenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF") == "1" {
 		return body
 	}
-	if !strings.Contains(body, "= Exception;") && !strings.Contains(body, "= Exception\n") {
+	if !strings.Contains(body, "= Exception;") && !strings.Contains(body, "= Exception\n") &&
+		!strings.Contains(body, "(Exception)") && !strings.Contains(body, "return Exception;") &&
+		!strings.Contains(body, "throw Exception;") {
 		return body
 	}
 	body = rewriteLeakedTryLockFinally(body)
 	body = rewriteLeakedCatchFromSibling(body)
 	body = rewriteCatchThrowSplitId(body)
+	body = rewriteCatchReturnExceptionSentinel(body)
 	return body
 }
 
@@ -283,4 +286,81 @@ func rewriteCatchThrowSplitId(body string) string {
 		}
 		from = close
 	}
+}
+
+// rewriteCatchReturnExceptionSentinel rewrites a leaked catch-placeholder used as a
+// value (`return (T) (Exception);` / `throw Exception;`) to the enclosing catch
+// parameter. junit Assert.assertThrows copies the caught throwable into a slot that
+// a later String reuses; the copy-return dumps the placeholder type name instead of
+// the catch local. Kill-switch is the parent JDEC_LEAKED_EXCEPTION_SENTINEL_OFF.
+func rewriteCatchReturnExceptionSentinel(body string) string {
+	from := 0
+	const head = "catch("
+	for {
+		rel := strings.Index(body[from:], head)
+		if rel < 0 {
+			return body
+		}
+		i := from + rel
+		rest := body[i+len(head):]
+		closeParen := strings.Index(rest, ")")
+		if closeParen < 0 {
+			from = i + 1
+			continue
+		}
+		decl := strings.TrimSpace(rest[:closeParen])
+		fields := strings.Fields(decl)
+		if len(fields) < 2 {
+			from = i + 1
+			continue
+		}
+		name := fields[len(fields)-1]
+		if ident, ok, _ := readJavaIdent(name); !ok || ident != name {
+			from = i + 1
+			continue
+		}
+		openRel := strings.Index(rest, "{")
+		if openRel < 0 {
+			from = i + 1
+			continue
+		}
+		open := i + len(head) + openRel
+		close := matchingCloseBrace(body, open)
+		if close < 0 {
+			from = i + 1
+			continue
+		}
+		inner := rewriteCatchReturnExceptionSentinel(body[open+1 : close])
+		inner = rewriteExceptionSentinelExpr(inner, name)
+		if inner != body[open+1:close] {
+			body = body[:open+1] + inner + body[close:]
+			from = open + 1 + len(inner)
+			continue
+		}
+		from = close
+	}
+}
+
+func rewriteExceptionSentinelExpr(inner, name string) string {
+	const needle = "(Exception)"
+	from := 0
+	for {
+		rel := strings.Index(inner[from:], needle)
+		if rel < 0 {
+			break
+		}
+		i := from + rel
+		lineStart := strings.LastIndex(inner[:i], "\n") + 1
+		prefix := strings.TrimSpace(inner[lineStart:i])
+		if !strings.HasPrefix(prefix, "return") && !strings.HasPrefix(prefix, "throw") {
+			from = i + 1
+			continue
+		}
+		repl := "(" + name + ")"
+		inner = inner[:i] + repl + inner[i+len(needle):]
+		from = i + len(repl)
+	}
+	inner = strings.ReplaceAll(inner, "return Exception;", "return "+name+";")
+	inner = strings.ReplaceAll(inner, "throw Exception;", "throw "+name+";")
+	return inner
 }

@@ -99,6 +99,64 @@ func TestLeakedTryLockFinallyIsLoadBearing(t *testing.T) {
 	}
 }
 
+func TestCatchReturnExceptionSentinelIsLoadBearing(t *testing.T) {
+	in := "" +
+		"\t\t}catch(Throwable var3){\n" +
+		"\t\t\tString var3_1 = null;\n" +
+		"\t\t\tif (var1.isInstance(var3)){\n" +
+		"\t\t\t\treturn (T) (Exception);\n" +
+		"\t\t\t}else{\n" +
+		"\t\t\t\tvar3_1 = formatClass((Class)(var1));\n" +
+		"\t\t\t}\n" +
+		"\t\t}\n"
+
+	os.Unsetenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF")
+	on := fixLeakedExceptionSentinel(in)
+	if strings.Contains(on, "(Exception)") {
+		t.Errorf("fix ON: leaked (Exception) survived:\n%s", on)
+	}
+	if !strings.Contains(on, "return (T) (var3);") {
+		t.Errorf("fix ON: expected return (T) (var3), got:\n%s", on)
+	}
+
+	t.Setenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF", "1")
+	off := fixLeakedExceptionSentinel(in)
+	if !strings.Contains(off, "return (T) (Exception);") {
+		t.Errorf("fix OFF: expected leaked sentinel to remain, got:\n%s", off)
+	}
+}
+
+func TestAssertThrowsExceptionSentinelIsLoadBearing(t *testing.T) {
+	data, err := os.ReadFile("testdata/regression/Assert.class")
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+
+	os.Unsetenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF")
+	on, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile ON: %v", err)
+	}
+	if strings.Contains(on, "(Exception)") {
+		t.Errorf("fix ON: assertThrows leaked (Exception):\n%s", on)
+	}
+	if !strings.Contains(on, "return (T) (var3)") && !strings.Contains(on, "return (T) var3") {
+		t.Errorf("fix ON: expected return of catch param, got:\n%s", on)
+	}
+
+	t.Setenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF", "1")
+	off, err := Decompile(data)
+	if err != nil {
+		t.Fatalf("decompile OFF: %v", err)
+	}
+	if !strings.Contains(off, "(Exception)") {
+		t.Errorf("fix OFF: expected leaked (Exception) to reappear, got:\n%s", off)
+	}
+	if on == off {
+		t.Fatal("ON/OFF identical")
+	}
+}
+
 func TestLeakedExceptionSentinelDecompileIsLoadBearing(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/ExceptionSentinelSeed.class")
 	if err != nil {

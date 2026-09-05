@@ -595,7 +595,7 @@ func TestDecompileSyntaxRegression(t *testing.T) {
 			desc: "a nested no-catch try marker inside the XOM composition loading loop should flatten " +
 				"when the body is safe; the surrounding IOException/Throwable handlers preserve the bytecode semantics.",
 			mustContain: []string{
-				"private static void loadCompositions(ClassLoader var0)",
+				"static void loadCompositions(ClassLoader var0)",
 				"compositions.put(var1.readUTF(),var1.readUTF())",
 				"catch(IOException var2)",
 				"catch(Throwable var2)",

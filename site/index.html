@@ -56,7 +56,7 @@
     <a href="#" class="brand" aria-label="JavaJive home">
       <img class="brand-mark" src="assets/img/icon.png" alt="" width="22" height="22" decoding="async" />
       <span class="brand-text">java<span class="brand-dot">·</span>jive</span>
-      <span class="brand-version">v0.2.0</span>
+      <span class="brand-version">v0.3.0</span>
     </a>
 
     <nav class="nav-links" aria-label="Primary">
@@ -194,24 +194,24 @@
 <section class="section" id="benchmarks">
   <div class="section-head">
     <h2 data-i18n="bench.h2">Industrial-grade, self-proven</h2>
-    <p data-i18n="bench.p">Honest, reproducible numbers on 8 real JARs (4,487 flattened units): JavaJive measured against itself, plus a fair head-to-head against CFR 0.152 and Vineflower 1.10.1 below.</p>
+    <p data-i18n="bench.p">Honest, reproducible numbers on 34 real JARs (18,759 flattened units): JavaJive measured against itself, plus a fair head-to-head against CFR 0.152 and Vineflower 1.10.1 on the original 8-JAR set below.</p>
   </div>
   <div class="section-wrap">
     <div class="stat-grid">
       <div class="stat">
         <div class="stat-num">100%</div>
-        <div class="stat-label" data-i18n="bench.s1">class-clean rate — 4,487 / 4,487 flattened units recompile with zero <code>javac</code> errors</div>
+        <div class="stat-label" data-i18n="bench.s1">class-clean rate — 18,759 / 18,759 flattened units recompile with zero <code>javac</code> errors</div>
       </div>
       <div class="stat">
         <div class="stat-num">0</div>
-        <div class="stat-label" data-i18n="bench.s2">syntax errors across all 8 JARs — a CI-enforced hard assertion, so the numbers can't be phase-masked</div>
+        <div class="stat-label" data-i18n="bench.s2">syntax errors across all 34 JARs — a CI-enforced hard assertion, so the numbers can't be phase-masked</div>
       </div>
       <div class="stat">
         <div class="stat-num">14 / 14</div>
         <div class="stat-label" data-i18n="bench.s3">self-hosted algorithms — MD5 · SHA-256 · CRC32 · quicksort · Base64 + control-flow seeds — round-trip byte-for-byte</div>
       </div>
       <div class="stat">
-        <div class="stat-num">8</div>
+        <div class="stat-num">34</div>
         <div class="stat-label" data-i18n="bench.s4">libraries with full round-trip: recompile &rarr; repackage &rarr; JVM <code>-Xverify:all</code></div>
       </div>
       <div class="stat">
@@ -226,7 +226,7 @@
 
     <div class="section-head" style="margin-top:3.25rem">
       <h2 data-i18n="ga.h2">Professional self-assessment — is it GA?</h2>
-      <p data-i18n="ga.p">JavaJive is a pure-Go Java decompiler core — zero JVM, zero external process — embeddable straight into a Go security toolchain. On 8 real JARs it recompiles <strong>100%</strong> of flattened units with zero <code>javac</code> errors and, critically, <strong>zero syntax errors</strong> (a CI-enforced hard assertion, so no type error can hide behind a lexer failure). <strong>All 8 libraries are GA-ready</strong>: their output recompiles, repackages and passes per-class JVM bytecode verification (<code>-Xverify:all</code>) end-to-end — commons-codec is byte-identical to the original jar under a call differential. Combined with 14/14 byte-identical algorithm round-trips, this is an <strong>industrially usable build for Go × Java security cross-analysis</strong>.</p>
+      <p data-i18n="ga.p">JavaJive is a pure-Go Java decompiler core — zero JVM, zero external process — embeddable straight into a Go security toolchain. On 34 real JARs it recompiles <strong>100%</strong> of flattened units with zero <code>javac</code> errors and, critically, <strong>zero syntax errors</strong> (a CI-enforced hard assertion, so no type error can hide behind a lexer failure). <strong>All 34 libraries are GA-ready</strong>: their output recompiles, repackages and passes per-class JVM bytecode verification (<code>-Xverify:all</code>) end-to-end — commons-codec is byte-identical to the original jar under a call differential. Combined with 14/14 byte-identical algorithm round-trips, this is an <strong>industrially usable build for Go × Java security cross-analysis</strong>.</p>
     </div>
 
     <p class="bench-note dim" data-i18n="acc.cap" style="margin-bottom:.6rem">Per-JAR class-clean rate — compilable outer classes / total. The primary, phase-masking-proof accuracy metric (higher is better):</p>
@@ -244,14 +244,40 @@
         </thead>
         <tbody>
           <tr><td>commons-codec (106)</td><td class="col-jj">106 / 106</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
-          <tr><td>gson (195)</td><td class="col-jj">183 / 183</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
-          <tr><td>commons-lang3 (345)</td><td class="col-jj">339 / 339</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
-          <tr><td>jsoup (238)</td><td class="col-jj">148 / 148</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>gson (183)</td><td class="col-jj">183 / 183</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>commons-lang3 (339)</td><td class="col-jj">339 / 339</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>jsoup (148)</td><td class="col-jj">148 / 148</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
           <tr><td>snakeyaml (231)</td><td class="col-jj">231 / 231</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
-          <tr><td>spring-core (978)</td><td class="col-jj">974 / 974</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>spring-core (974)</td><td class="col-jj">974 / 974</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
           <tr><td>fastjson2 (681)</td><td class="col-jj">681 / 681</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
-          <tr><td>guava (1,892)</td><td class="col-jj">1,825 / 1,825</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
-          <tr><td data-i18n="acc.total"><strong>total</strong></td><td class="col-jj"><strong>4,487 / 4,487</strong></td><td><strong>100%</strong></td><td><strong>0</strong></td><td><strong>0</strong></td><td class="col-jj"><strong data-i18n="acc.two">8 libs</strong></td></tr>
+          <tr><td>guava (1,825)</td><td class="col-jj">1,825 / 1,825</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>jackson-databind (773)</td><td class="col-jj">773 / 773</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>okhttp (200)</td><td class="col-jj">200 / 200</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>commons-collections4 (524)</td><td class="col-jj">524 / 524</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>netty-handler (356)</td><td class="col-jj">356 / 356</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>log4j-core (1,184)</td><td class="col-jj">1,184 / 1,184</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>protobuf-java (672)</td><td class="col-jj">672 / 672</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>asm (38)</td><td class="col-jj">38 / 38</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>joda-time (247)</td><td class="col-jj">247 / 247</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>commons-io (346)</td><td class="col-jj">346 / 346</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>commons-compress (566)</td><td class="col-jj">566 / 566</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>httpclient (470)</td><td class="col-jj">470 / 470</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>slf4j-api (54)</td><td class="col-jj">54 / 54</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>logback-core (453)</td><td class="col-jj">453 / 453</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>caffeine (687)</td><td class="col-jj">687 / 687</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>rxjava (1,653)</td><td class="col-jj">1,653 / 1,653</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>javassist (426)</td><td class="col-jj">426 / 426</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>xstream (498)</td><td class="col-jj">498 / 498</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>commons-math3 (1,280)</td><td class="col-jj">1,280 / 1,280</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>HikariCP (75)</td><td class="col-jj">75 / 75</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>jedis (748)</td><td class="col-jj">748 / 748</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>junit (346)</td><td class="col-jj">346 / 346</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>assertj-core (812)</td><td class="col-jj">812 / 812</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>picocli (216)</td><td class="col-jj">216 / 216</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>commons-pool2 (80)</td><td class="col-jj">80 / 80</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>zxing-core (260)</td><td class="col-jj">260 / 260</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td>freemarker (1,308)</td><td class="col-jj">1,308 / 1,308</td><td>100.0%</td><td>0</td><td>0</td><td class="col-jj" data-i18n="acc.yes">YES</td></tr>
+          <tr><td data-i18n="acc.total"><strong>total</strong></td><td class="col-jj"><strong>18,759 / 18,759</strong></td><td><strong>100%</strong></td><td><strong>0</strong></td><td><strong>0</strong></td><td class="col-jj"><strong data-i18n="acc.two">34 libs</strong></td></tr>
         </tbody>
       </table>
     </div>
@@ -336,7 +362,7 @@
 
     <p class="bench-note dim" data-i18n="cmp2.note">
       JavaJive beats CFR and Vineflower on every JAR (0 defective outer classes vs 456 / 208).
-      JavaJive numbers re-measured 2026-09-04 (v0.2.0); CFR 0.152 &amp; Vineflower 1.10.1 columns
+      JavaJive numbers re-measured 2026-09-05 (v0.3.0); CFR 0.152 &amp; Vineflower 1.10.1 columns
       remain the 2026-07-02 same-machine snapshot. Full methodology &amp; reproduction:
       <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7.
     </p>
@@ -488,19 +514,19 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "install.src.lead": "Clone and build the CLI from source.",
         "install.src.foot": "Requires Go 1.22+. The result is a single self-contained binary.",
         "bench.h2": "Industrial-grade, self-proven",
-        "bench.p": "Honest, reproducible numbers on 8 real JARs (4,487 flattened units): JavaJive measured against itself, plus a fair head-to-head against CFR 0.152 and Vineflower 1.10.1 below.",
-        "bench.s1": 'class-clean rate — 4,487 / 4,487 flattened units recompile with zero <code>javac</code> errors',
-        "bench.s2": "syntax errors across all 8 JARs — a CI-enforced hard assertion, so the numbers can't be phase-masked",
+        "bench.p": "Honest, reproducible numbers on 34 real JARs (18,759 flattened units): JavaJive measured against itself, plus a fair head-to-head against CFR 0.152 and Vineflower 1.10.1 on the original 8-JAR set below.",
+        "bench.s1": 'class-clean rate — 18,759 / 18,759 flattened units recompile with zero <code>javac</code> errors',
+        "bench.s2": "syntax errors across all 34 JARs — a CI-enforced hard assertion, so the numbers can't be phase-masked",
         "bench.s3": "self-hosted algorithms — MD5 · SHA-256 · CRC32 · quicksort · Base64 + control-flow seeds — round-trip byte-for-byte",
         "bench.s4": 'libraries with full round-trip: recompile &rarr; repackage &rarr; JVM <code>-Xverify:all</code>',
         "bench.s5": "classes per second, single-thread end-to-end decompile (per-class concurrency scales near-linearly)",
         "bench.s6": "JVM opcode parse coverage",
         "ga.h2": "Professional self-assessment — is it GA?",
-        "ga.p": 'JavaJive is a pure-Go Java decompiler core — zero JVM, zero external process — embeddable straight into a Go security toolchain. On 8 real JARs it recompiles <strong>100%</strong> of flattened units with zero <code>javac</code> errors and, critically, <strong>zero syntax errors</strong> (a CI-enforced hard assertion, so no type error can hide behind a lexer failure). <strong>All 8 libraries are GA-ready</strong>: their output recompiles, repackages and passes per-class JVM bytecode verification (<code>-Xverify:all</code>) end-to-end — commons-codec is byte-identical to the original jar under a call differential. Combined with 14/14 byte-identical algorithm round-trips, this is an <strong>industrially usable build for Go × Java security cross-analysis</strong>.',
+        "ga.p": 'JavaJive is a pure-Go Java decompiler core — zero JVM, zero external process — embeddable straight into a Go security toolchain. On 34 real JARs it recompiles <strong>100%</strong> of flattened units with zero <code>javac</code> errors and, critically, <strong>zero syntax errors</strong> (a CI-enforced hard assertion, so no type error can hide behind a lexer failure). <strong>All 34 libraries are GA-ready</strong>: their output recompiles, repackages and passes per-class JVM bytecode verification (<code>-Xverify:all</code>) end-to-end — commons-codec is byte-identical to the original jar under a call differential. Combined with 14/14 byte-identical algorithm round-trips, this is an <strong>industrially usable build for Go × Java security cross-analysis</strong>.',
         "acc.cap": "Per-JAR class-clean rate — compilable flattened units / total. The primary, phase-masking-proof accuracy metric (higher is better):",
         "acc.clean": "clean / total", "acc.pct": "clean %", "acc.def": "defect classes",
         "acc.syn": "syntax err", "acc.rt": "full round-trip", "acc.yes": "YES",
-        "acc.total": "total", "acc.two": "8 libs",
+        "acc.total": "total", "acc.two": "34 libs",
         "tp.cap": "Single-thread decompile throughput — end-to-end (unzip + decompile + dump), the production archive path. darwin/arm64, 20 logical cores, Go 1.22.12:",
         "tp.sec": "seconds", "tp.cps": "classes / s",
         "rt.cmp.jar": "JAR (classes)",
@@ -511,7 +537,7 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "cmp2.s2": "clean-class rate — #1, ahead of Vineflower (90.8%) and CFR (79.8%)",
         "cmp2.s3": "the only pure-Go decompiler in the top tier — CFR and Vineflower are JVM apps",
         "cmp2.cap": "Defective outer classes / total (clean-class rate). Bold = best for that JAR. Lower defect count is better:",
-        "cmp2.note": 'JavaJive beats CFR and Vineflower on every JAR (0 defective outer classes vs 456 / 208). JavaJive numbers re-measured 2026-09-04 (v0.2.0); CFR 0.152 &amp; Vineflower 1.10.1 columns remain the 2026-07-02 same-machine snapshot. Full methodology &amp; reproduction: <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7.',
+        "cmp2.note": 'JavaJive beats CFR and Vineflower on every JAR (0 defective outer classes vs 456 / 208). JavaJive numbers re-measured 2026-09-05 (v0.3.0); CFR 0.152 &amp; Vineflower 1.10.1 columns remain the 2026-07-02 same-machine snapshot. Full methodology &amp; reproduction: <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7.',
         "features.h2": "Features",
         "features.p": "Three Java building blocks, one portable module — plus the supporting cast trimmed down to a self-contained core.",
         "feat.1.t": "Decompiler",
@@ -557,19 +583,19 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "install.src.lead": "克隆仓库并从源码构建命令行。",
         "install.src.foot": "需要 Go 1.22+。产物是一个自包含的单文件二进制。",
         "bench.h2": "工业可用，用事实自证",
-        "bench.p": "8 个真实 JAR（4,487 个摊平单元）上的诚实、可复现数据：既有 JavaJive 与自身的纵向对比，也有下方与 CFR 0.152、Vineflower 1.10.1 的同口径正面横评。",
-        "bench.s1": '类级干净率 — 4,487 / 4,487 个摊平单元零 <code>javac</code> 错误可重编译',
-        "bench.s2": "8 个 JAR 全集语法错为 0 — CI 硬断言把关，数字无法被阶段遮蔽",
+        "bench.p": "34 个真实 JAR（18,759 个摊平单元）上的诚实、可复现数据：既有 JavaJive 与自身的纵向对比，也有下方与 CFR 0.152、Vineflower 1.10.1 在原 8 JAR 对照集上的同口径正面横评。",
+        "bench.s1": '类级干净率 — 18,759 / 18,759 个摊平单元零 <code>javac</code> 错误可重编译',
+        "bench.s2": "34 个 JAR 全集语法错为 0 — CI 硬断言把关，数字无法被阶段遮蔽",
         "bench.s3": "自托管算法 — MD5 · SHA-256 · CRC32 · 快排 · Base64 + 控制流种子 — 往返逐字节一致",
         "bench.s4": '完整往返的库：重编译 &rarr; 重打包 &rarr; JVM <code>-Xverify:all</code> 逐类校验',
         "bench.s5": "单线程端到端反编译每秒类数（逐类可并发，随核数近线性放大）",
         "bench.s6": "JVM opcode 解析覆盖",
         "ga.h2": "专业自评 —— 能不能 GA？",
-        "ga.p": 'JavaJive 是纯 Go 的 Java 反编译内核——零 JVM、零外部进程——可直接嵌入 Go 安全工具链。在 8 个真实 JAR 上，<strong>100%</strong> 的摊平单元零 <code>javac</code> 错误可重编译，且关键的<strong>语法错为 0</strong>（CI 硬断言把关，任何类型错都无法被词法错遮蔽）。<strong>8 个库全部已达 GA</strong>：产物可重编译、可重打包，并端到端通过逐类 JVM 字节码校验（<code>-Xverify:all</code>）——commons-codec 经调用差分与原始 jar 逐字节一致。结合 14/14 逐字节一致的算法往返，这是一个<strong>可用于 Go × Java 安全交叉分析的工业可用版本</strong>。',
+        "ga.p": 'JavaJive 是纯 Go 的 Java 反编译内核——零 JVM、零外部进程——可直接嵌入 Go 安全工具链。在 34 个真实 JAR 上，<strong>100%</strong> 的摊平单元零 <code>javac</code> 错误可重编译，且关键的<strong>语法错为 0</strong>（CI 硬断言把关，任何类型错都无法被词法错遮蔽）。<strong>34 个库全部已达 GA</strong>：产物可重编译、可重打包，并端到端通过逐类 JVM 字节码校验（<code>-Xverify:all</code>）——commons-codec 经调用差分与原始 jar 逐字节一致。结合 14/14 逐字节一致的算法往返，这是一个<strong>可用于 Go × Java 安全交叉分析的工业可用版本</strong>。',
         "acc.cap": "逐 JAR 类级干净率 —— 可编译摊平单元 / 总数。抗阶段遮蔽的主准确度口径（越高越好）：",
         "acc.clean": "干净 / 总数", "acc.pct": "干净率", "acc.def": "缺陷类",
         "acc.syn": "语法错", "acc.rt": "完整往返", "acc.yes": "达成",
-        "acc.total": "合计", "acc.two": "8 个库",
+        "acc.total": "合计", "acc.two": "34 个库",
         "tp.cap": "单线程反编译吞吐 —— 端到端（解包 + 反编译 + 落盘），即生产归档路径。darwin/arm64，20 逻辑核，Go 1.22.12：",
         "tp.sec": "秒", "tp.cps": "类 / 秒",
         "rt.cmp.jar": "JAR（类数）",
@@ -580,7 +606,7 @@ out := javajive.<span class="k">MarshalSerialized</span>(restored...)</code></pr
         "cmp2.s2": "类级干净率——第一（100%），领先 Vineflower（90.8%）与 CFR（79.8%）",
         "cmp2.s3": "第一梯队里唯一的纯 Go 反编译器——CFR 与 Vineflower 均为 JVM 程序",
         "cmp2.cap": "缺陷外层类 / 总数（干净率）。粗体为该 JAR 最优。缺陷数越低越好：",
-        "cmp2.note": 'JavaJive 在每个 JAR 上都胜过 CFR 与 Vineflower（0 个缺陷外层类 vs 456 / 208）。JavaJive 数字复测于 2026-09-04（v0.2.0）；CFR 0.152 与 Vineflower 1.10.1 列仍为 2026-07-02 同机快照。完整方法学与复现见 <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7。',
+        "cmp2.note": 'JavaJive 在每个 JAR 上都胜过 CFR 与 Vineflower（0 个缺陷外层类 vs 456 / 208）。JavaJive 数字复测于 2026-09-05（v0.3.0）；CFR 0.152 与 Vineflower 1.10.1 列仍为 2026-07-02 同机快照。完整方法学与复现见 <a href="https://github.com/yaklang/javajive/blob/main/BENCHMARK.md" target="_blank" rel="noopener noreferrer">BENCHMARK.md</a> §7。',
         "features.h2": "特性",
         "features.p": "三块 Java 基础能力，打包进一个便携模块——其余依赖也被裁剪成自包含的核心。",
         "feat.1.t": "反编译器",

@@ -56,8 +56,9 @@ var javacLocaleArgs = []string{"-J-Duser.language=en", "-J-Duser.country=US"}
 // jarSpec 描述一个待度量的真实 jar 及其依赖 jar 的 maven 相对路径 (相对 ~/.m2/repository)。
 // 依赖用 glob 模式表达 (按 artifact 名匹配, 不写死版本), 解析不到的依赖被静默跳过 (classpath 降级)。
 type jarSpec struct {
-	relPath string   // 主 jar 相对 ~/.m2/repository 的路径
-	depGlob []string // 依赖 jar 的 glob (相对 ~/.m2/repository), 找不到则跳过
+	relPath    string   // 主 jar 相对 ~/.m2/repository 的路径
+	depGlob    []string // 依赖 jar 的 glob (相对 ~/.m2/repository), 找不到则跳过
+	minRelease int      // optional floor for javac --release (0 = jarBaseRelease only)
 }
 
 var jarSpecs = map[string]jarSpec{
@@ -131,6 +132,286 @@ var jarSpecs = map[string]jarSpec{
 	"snakeyaml": {
 		relPath: "org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar",
 	},
+	// Six expansion jars (v0.2+ coverage). Optional/native packages on the decompiled
+	// import list are classpath completion, not decompile defects (same class as
+	// spring reactor / guava sun.misc / Mutiny 1.x pin).
+	"jackson": {
+		relPath: "com/fasterxml/jackson/core/jackson-databind/2.15.4/jackson-databind-2.15.4.jar",
+		depGlob: []string{
+			"com/fasterxml/jackson/core/jackson-core/2.15.4/jackson-core-2.15.4.jar",
+			"com/fasterxml/jackson/core/jackson-annotations/2.15.4/jackson-annotations-2.15.4.jar",
+			"com/fasterxml/jackson/datatype/jackson-datatype-jsr310/2.15.4/jackson-datatype-jsr310-2.15.4.jar",
+			"com/fasterxml/jackson/datatype/jackson-datatype-jdk8/*/jackson-datatype-jdk8-*.jar",
+			"com/google/code/findbugs/jsr305/*/jsr305-*.jar",
+		},
+	},
+	"okhttp": {
+		// Java 3.x, not Kotlin 4.x (4.x + kotlin-stdlib miss is an environment false-positive).
+		// android.* / org.conscrypt are optional platform packages (Android SDK / native TLS);
+		// missing them is an environment false-positive, completed by withOptionalPlatforms
+		// (see optional_platform_shim_test.go). Android10Platform's Java 9 SSL ALPN calls are
+		// compiled at --release 9 (see mrFileRelease / treeCompileToDir).
+		relPath: "com/squareup/okhttp3/okhttp/3.14.9/okhttp-3.14.9.jar",
+		depGlob: []string{
+			"com/squareup/okio/okio/1.17.2/okio-1.17.2.jar",
+			"com/google/code/findbugs/jsr305/*/jsr305-*.jar",
+			"org/codehaus/mojo/animal-sniffer-annotations/*/animal-sniffer-annotations-*.jar",
+			"org/conscrypt/conscrypt-openjdk-uber/*/conscrypt-openjdk-uber-*.jar",
+		},
+	},
+	"netty": {
+		relPath: "io/netty/netty-handler/4.1.108.Final/netty-handler-4.1.108.Final.jar",
+		depGlob: []string{
+			"io/netty/netty-common/4.1.108.Final/netty-common-4.1.108.Final.jar",
+			"io/netty/netty-buffer/4.1.108.Final/netty-buffer-4.1.108.Final.jar",
+			"io/netty/netty-transport/4.1.108.Final/netty-transport-4.1.108.Final.jar",
+			"io/netty/netty-codec/4.1.108.Final/netty-codec-4.1.108.Final.jar",
+			"io/netty/netty-resolver/4.1.108.Final/netty-resolver-4.1.108.Final.jar",
+			"io/netty/netty-transport-native-unix-common/4.1.108.Final/netty-transport-native-unix-common-4.1.108.Final.jar",
+			"io/netty/netty-transport-classes-epoll/4.1.108.Final/netty-transport-classes-epoll-4.1.108.Final.jar",
+			"io/netty/netty-transport-classes-kqueue/4.1.108.Final/netty-transport-classes-kqueue-4.1.108.Final.jar",
+			"io/netty/netty-tcnative-classes/*/netty-tcnative-classes-*.jar",
+			"org/bouncycastle/bcpkix-jdk15on/*/bcpkix-jdk15on-*.jar",
+			"org/bouncycastle/bcprov-jdk15on/*/bcprov-jdk15on-*.jar",
+			"org/bouncycastle/bctls-jdk15on/*/bctls-jdk15on-*.jar",
+			"org/slf4j/slf4j-api/*/slf4j-api-*.jar",
+		},
+	},
+	"log4j": {
+		// Optional plugins (jms/mail/jansi/disruptor/kafka/csv/jeromq/osgi annotations,
+		// findbugs, stax2) are compile-time deps of faithfully decompiled sources.
+		// Missing them is an environment false-positive, completed here via ~/.m2
+		// (same class as netty conscrypt/jetty and okhttp android.*).
+		relPath: "org/apache/logging/log4j/log4j-core/2.23.1/log4j-core-2.23.1.jar",
+		depGlob: []string{
+			"org/apache/logging/log4j/log4j-api/2.23.1/log4j-api-2.23.1.jar",
+			"org/slf4j/slf4j-api/*/slf4j-api-*.jar",
+			"org/jctools/jctools-core/*/jctools-core-*.jar",
+			"com/fasterxml/jackson/core/jackson-core/2.15.4/jackson-core-2.15.4.jar",
+			"com/fasterxml/jackson/core/jackson-databind/2.15.4/jackson-databind-2.15.4.jar",
+			"com/fasterxml/jackson/core/jackson-annotations/2.15.4/jackson-annotations-2.15.4.jar",
+			"com/fasterxml/jackson/dataformat/jackson-dataformat-yaml/*/jackson-dataformat-yaml-*.jar",
+			"com/fasterxml/jackson/dataformat/jackson-dataformat-xml/*/jackson-dataformat-xml-*.jar",
+			"org/yaml/snakeyaml/*/snakeyaml-*.jar",
+			"commons-codec/commons-codec/*/commons-codec-*.jar",
+			"org/apache/commons/commons-compress/*/commons-compress-*.jar",
+			"org/apache/commons/commons-csv/*/commons-csv-*.jar",
+			"org/fusesource/jansi/jansi/*/jansi-*.jar",
+			"org/osgi/org.osgi.core/*/org.osgi.core-*.jar",
+			"org/osgi/org.osgi.annotation.bundle/*/org.osgi.annotation.bundle-*.jar",
+			"org/osgi/org.osgi.annotation.versioning/*/org.osgi.annotation.versioning-*.jar",
+			"org/osgi/osgi.annotation/*/osgi.annotation-*.jar",
+			"javax/activation/javax.activation-api/*/javax.activation-api-*.jar",
+			"javax/mail/javax.mail-api/*/javax.mail-api-*.jar",
+			"com/sun/mail/javax.mail/*/javax.mail-*.jar",
+			"javax/jms/javax.jms-api/*/javax.jms-api-*.jar",
+			"com/lmax/disruptor/*/disruptor-*.jar",
+			"com/conversantmedia/disruptor/*/disruptor-*.jar",
+			"org/apache/kafka/kafka-clients/*/kafka-clients-*.jar",
+			"org/zeromq/jeromq/*/jeromq-*.jar",
+			"com/google/code/findbugs/annotations/*/annotations-*.jar",
+			"com/github/spotbugs/spotbugs-annotations/*/spotbugs-annotations-*.jar",
+			"org/codehaus/woodstox/stax2-api/*/stax2-api-*.jar",
+			"biz/aQute/bnd/biz.aQute.bnd.annotation/*/biz.aQute.bnd.annotation-*.jar",
+		},
+	},
+	"protobuf": {
+		relPath: "com/google/protobuf/protobuf-java/3.21.9/protobuf-java-3.21.9.jar",
+	},
+	"collections4": {
+		relPath: "org/apache/commons/commons-collections4/4.4/commons-collections4-4.4.jar",
+	},
+	// Twenty typical-library expansion (tree coverage). Optional plugin / native /
+	// metrics packages on the decompiled import list are classpath completion, not
+	// decompile defects. Java 11+ jars (logback 1.4, HikariCP 5, freemarker
+	// _Java16Impl) pick --release from jarBaseRelease, not a hardcoded 8.
+	"asm": {
+		relPath: "org/ow2/asm/asm/9.7/asm-9.7.jar",
+	},
+	"joda-time": {
+		relPath: "joda-time/joda-time/2.10.13/joda-time-2.10.13.jar",
+		depGlob: []string{
+			"org/joda/joda-convert/*/joda-convert-*.jar",
+		},
+	},
+	"commons-io": {
+		relPath: "commons-io/commons-io/2.16.0/commons-io-2.16.0.jar",
+	},
+	"compress": {
+		relPath: "org/apache/commons/commons-compress/1.26.2/commons-compress-1.26.2.jar",
+		depGlob: []string{
+			"org/tukaani/xz/*/xz-*.jar",
+			"com/github/luben/zstd-jni/*/zstd-jni-*.jar",
+			"com/aayushatharva/brotli4j/brotli4j/*/brotli4j-*.jar",
+			"org/brotli/dec/*/dec-*.jar",
+			"org/xerial/snappy/snappy-java/*/snappy-java-*.jar",
+			// Pin 1.16.1: string-sort last match is 1.9, which lacks XXHash32 /
+			// PureJavaCrc32C that commons-compress 1.26.2's decompiled sources use.
+			"commons-codec/commons-codec/1.16.1/commons-codec-1.16.1.jar",
+			// Pin 3.14.0: string-sort last match is 3.9, which lacks ArrayFill
+			// that commons-compress 1.26.2's decompiled sources call.
+			"org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar",
+			"org/osgi/org.osgi.core/*/org.osgi.core-*.jar",
+			"org/osgi/osgi.annotation/*/osgi.annotation-*.jar",
+			// Pin 2.16.0: the wildcard's string-sort last match is 2.9.0, which
+			// lacks org.apache.commons.io.build / file.attribute.FileTimes that
+			// commons-compress 1.26.2's decompiled sources import.
+			"commons-io/commons-io/2.16.0/commons-io-2.16.0.jar",
+			"org/ow2/asm/asm/*/asm-*.jar",
+		},
+	},
+	"httpclient": {
+		relPath: "org/apache/httpcomponents/httpclient/4.5.14/httpclient-4.5.14.jar",
+		depGlob: []string{
+			"org/apache/httpcomponents/httpcore/4.4.*/httpcore-4.4.*.jar",
+			"commons-logging/commons-logging/1.2/commons-logging-1.2.jar",
+			"commons-codec/commons-codec/*/commons-codec-*.jar",
+		},
+	},
+	"slf4j": {
+		relPath: "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar",
+	},
+	"logback": {
+		relPath: "ch/qos/logback/logback-core/1.4.14/logback-core-1.4.14.jar",
+		depGlob: []string{
+			"org/slf4j/slf4j-api/*/slf4j-api-*.jar",
+			"org/codehaus/janino/janino/*/janino-*.jar",
+			"org/codehaus/janino/commons-compiler/*/commons-compiler-*.jar",
+			"jakarta/mail/jakarta.mail-api/*/jakarta.mail-api-*.jar",
+			"jakarta/activation/jakarta.activation-api/*/jakarta.activation-api-*.jar",
+			"javax/mail/javax.mail-api/*/javax.mail-api-*.jar",
+			"jakarta/servlet/jakarta.servlet-api/*/jakarta.servlet-api-*.jar",
+			"javax/servlet/javax.servlet-api/*/javax.servlet-api-*.jar",
+			"org/apache/groovy/groovy/*/groovy-*.jar",
+			"com/sun/mail/jakarta.mail/*/jakarta.mail-*.jar",
+		},
+	},
+	"caffeine": {
+		relPath: "com/github/ben-manes/caffeine/caffeine/2.9.3/caffeine-2.9.3.jar",
+		depGlob: []string{
+			"org/checkerframework/checker-qual/*/checker-qual-*.jar",
+			"com/google/errorprone/error_prone_annotations/*/error_prone_annotations-*.jar",
+			"com/google/code/findbugs/jsr305/*/jsr305-*.jar",
+		},
+	},
+	"rxjava": {
+		relPath: "io/reactivex/rxjava2/rxjava/2.2.21/rxjava-2.2.21.jar",
+		depGlob: []string{
+			"org/reactivestreams/reactive-streams/*/reactive-streams-*.jar",
+		},
+	},
+	"javassist": {
+		relPath: "org/javassist/javassist/3.30.2-GA/javassist-3.30.2-GA.jar",
+		// Bytecode is Java 8 but the decompiled source calls Java 9+ APIs
+		// (ClassLoader.getDefinedPackage, Module, MethodHandles.privateLookupIn)
+		// behind runtime MAJOR_VERSION gates. javac --release 8 type-checks both
+		// branches and reports those as missing symbols.
+		minRelease: 11,
+	},
+	"xstream": {
+		relPath: "com/thoughtworks/xstream/xstream/1.4.20/xstream-1.4.20.jar",
+		depGlob: []string{
+			"xmlpull/xmlpull/*/xmlpull-*.jar",
+			"io/github/x-stream/mxparser/*/mxparser-*.jar",
+			"xpp3/xpp3_min/*/xpp3_min-*.jar",
+			"org/dom4j/dom4j/*/dom4j-*.jar",
+			"org/jdom/jdom2/*/jdom2-*.jar",
+			"org/codehaus/jettison/jettison/*/jettison-*.jar",
+			"joda-time/joda-time/*/joda-time-*.jar",
+			"cglib/cglib/*/cglib-*.jar",
+			"org/jdom/jdom/1.*/jdom-1.*.jar",
+			"com/fasterxml/woodstox/woodstox-core/*/woodstox-core-*.jar",
+			"org/codehaus/woodstox/stax2-api/*/stax2-api-*.jar",
+			"net/sf/kxml/kxml2/*/kxml2-*.jar",
+			"xom/xom/*/xom-*.jar",
+			"stax/stax/*/stax-*.jar", // BEA StAX RI: com.bea.xml.stream
+		},
+	},
+	"math3": {
+		relPath: "org/apache/commons/commons-math3/3.6.1/commons-math3-3.6.1.jar",
+	},
+	"hikaricp": {
+		relPath: "com/zaxxer/HikariCP/5.0.1/HikariCP-5.0.1.jar",
+		depGlob: []string{
+			"org/slf4j/slf4j-api/*/slf4j-api-*.jar",
+			"org/javassist/javassist/*/javassist-*.jar",
+			"io/micrometer/micrometer-core/*/micrometer-core-*.jar",
+			"io/dropwizard/metrics/metrics-core/*/metrics-core-*.jar",
+			"io/prometheus/simpleclient/*/simpleclient-*.jar",
+			"org/hibernate/hibernate-core/*/hibernate-core-*.jar",
+			"javax/persistence/javax.persistence-api/*/javax.persistence-api-*.jar",
+			"jakarta/persistence/jakarta.persistence-api/*/jakarta.persistence-api-*.jar",
+			"io/dropwizard/metrics/metrics-healthchecks/*/metrics-healthchecks-*.jar",
+		},
+	},
+	"jedis": {
+		relPath: "redis/clients/jedis/3.8.0/jedis-3.8.0.jar",
+		depGlob: []string{
+			"org/apache/commons/commons-pool2/*/commons-pool2-*.jar",
+			"org/slf4j/slf4j-api/*/slf4j-api-*.jar",
+			"org/json/json/*/json-*.jar",
+			"com/google/code/gson/gson/*/gson-*.jar",
+			"commons-codec/commons-codec/*/commons-codec-*.jar",
+		},
+	},
+	"junit": {
+		relPath: "junit/junit/4.13.2/junit-4.13.2.jar",
+		depGlob: []string{
+			// junit 4.13.2 is compiled against hamcrest-core 1.3 (Factory annotation,
+			// everyItem → Matcher<Iterable<T>>). A hamcrest 2.x jar on the tree CP
+			// drops Factory and changes everyItem to Matcher<Iterable<? extends U>>.
+			"org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar",
+		},
+	},
+	"assertj": {
+		relPath: "org/assertj/assertj-core/3.24.2/assertj-core-3.24.2.jar",
+		depGlob: []string{
+			// string-sort of * picks 1.9.13 over 1.14.x, and 1.9 has no namedOneOf.
+			"net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
+			"org/hamcrest/hamcrest/*/hamcrest-*.jar",
+			"org/hamcrest/hamcrest-core/*/hamcrest-core-*.jar",
+			"junit/junit/*/junit-*.jar",
+			"org/junit/jupiter/junit-jupiter-api/*/junit-jupiter-api-*.jar",
+			"org/opentest4j/opentest4j/*/opentest4j-*.jar",
+			"org/junit/platform/junit-platform-commons/*/junit-platform-commons-*.jar",
+		},
+	},
+	"picocli": {
+		relPath: "info/picocli/picocli/4.3.2/picocli-4.3.2.jar",
+	},
+	"pool2": {
+		relPath: "org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar",
+		depGlob: []string{
+			"cglib/cglib/*/cglib-*.jar",
+		},
+	},
+	"zxing": {
+		relPath: "com/google/zxing/core/3.3.3/core-3.3.3.jar",
+	},
+	"freemarker": {
+		relPath: "org/freemarker/freemarker/2.3.33/freemarker-2.3.33.jar",
+		depGlob: []string{
+			"javax/servlet/javax.servlet-api/*/javax.servlet-api-*.jar",
+			"jakarta/servlet/jakarta.servlet-api/*/jakarta.servlet-api-*.jar",
+			"javax/xml/bind/jaxb-api/*/jaxb-api-*.jar",
+			"jakarta/xml/bind/jakarta.xml.bind-api/*/jakarta.xml.bind-api-*.jar",
+			"org/apache/logging/log4j/log4j-api/*/log4j-api-*.jar",
+			"commons-logging/commons-logging/1.2/commons-logging-1.2.jar",
+			"org/slf4j/slf4j-api/*/slf4j-api-*.jar",
+			"org/apache/ant/ant/*/ant-*.jar",
+			"org/jdom/jdom/1.*/jdom-1.*.jar",
+			"org/dom4j/dom4j/*/dom4j-*.jar",
+			"jaxen/jaxen/*/jaxen-*.jar",
+			"org/python/jython-standalone/*/jython-standalone-*.jar",
+			"org/mozilla/rhino/*/rhino-*.jar",
+			"log4j/log4j/1.2.17/log4j-1.2.17.jar",
+			"jakarta/el/jakarta.el-api/*/jakarta.el-api-*.jar",
+			"javax/el/javax.el-api/*/javax.el-api-*.jar",
+			"jakarta/servlet/jsp/jakarta.servlet.jsp-api/*/jakarta.servlet.jsp-api-*.jar",
+			"javax/servlet/jsp/jsp-api/*/jsp-api-*.jar",
+			"xalan/xalan/*/xalan-*.jar",
+		},
+	},
 }
 
 func m2Repo() string {
@@ -139,6 +420,15 @@ func m2Repo() string {
 		return ""
 	}
 	return filepath.Join(home, ".m2", "repository")
+}
+
+// compileRelease is the javac --release for a jar: max(jarBaseRelease, spec.minRelease).
+func compileRelease(spec jarSpec, jarPath string) int {
+	rel := jarBaseRelease(jarPath)
+	if spec.minRelease > rel {
+		return spec.minRelease
+	}
+	return rel
 }
 
 // resolveJar returns the absolute path of relPath under ~/.m2/repository, or "" when absent.
@@ -250,7 +540,7 @@ func decompileAll(t *testing.T, jarPath, root string, maxFiles int) (files []str
 
 // recompileISO compiles each file in isolation (deps + original jar on classpath) in parallel and
 // returns the number of units that fail to compile. This is the un-masked, authoritative metric.
-func recompileISO(t *testing.T, files []string, classpath string, workers int) int {
+func recompileISO(t *testing.T, files []string, classpath string, workers, minRelease int) int {
 	t.Helper()
 	javac := lookJavac(t)
 	if workers <= 0 {
@@ -275,7 +565,7 @@ func recompileISO(t *testing.T, files []string, classpath string, workers int) i
 				ctx, cancel := context.WithTimeout(context.Background(), compileTimeout)
 				// Multi-Release versioned units compile under their own --release N (see mrFileRelease).
 				args := append(append([]string{}, javacLocaleArgs...),
-					"-encoding", "UTF-8", "--release", strconv.Itoa(mrFileRelease(f, 8)), "-nowarn",
+					"-encoding", "UTF-8", "--release", strconv.Itoa(mrFileRelease(f, minRelease)), "-nowarn",
 					"-cp", classpath, "-d", outDir, f)
 				cmd := exec.CommandContext(ctx, javac, args...)
 				// Run javac from the throwaway out dir: with a long deps+jar classpath the JDK
@@ -299,9 +589,9 @@ func recompileISO(t *testing.T, files []string, classpath string, workers int) i
 // recompileTree compiles all files in one javac invocation (deps on classpath) and returns the
 // number of error lines javac reports. This is fast but masked; use only to find the biggest levers.
 // Multi-Release `META-INF/versions/N/` units get their own `--release N` pass via treeCompileToDir.
-func recompileTree(t *testing.T, files []string, classpath string) int {
+func recompileTree(t *testing.T, files []string, classpath string, minRelease int) int {
 	t.Helper()
-	errc, _ := treeCompileToDir(t, files, classpath, t.TempDir())
+	errc, _ := treeCompileToDirAt(t, files, classpath, t.TempDir(), minRelease)
 	return errc
 }
 
@@ -327,15 +617,16 @@ func runProfile(t *testing.T, name string, maxFiles int) recompileResult {
 	}
 	workers, _ := strconv.Atoi(os.Getenv("RECOMPILE_WORKERS"))
 
+	rel := compileRelease(spec, jarPath)
 	var decErr int
 	switch mode {
 	case "tree":
-		cp := withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator))))
-		decErr = recompileTree(t, files, cp)
+		cp := withEnvShims(t, strings.Join(deps, string(os.PathListSeparator)))
+		decErr = recompileTree(t, files, cp, rel)
 	default: // iso
 		cpParts := append([]string{jarPath}, deps...)
-		cp := withJfr(t, withSunMisc(t, strings.Join(cpParts, string(os.PathListSeparator))))
-		decErr = recompileISO(t, files, cp, workers)
+		cp := withEnvShims(t, strings.Join(cpParts, string(os.PathListSeparator)))
+		decErr = recompileISO(t, files, cp, workers, rel)
 	}
 	return recompileResult{units: units, decErr: decErr, decompFail: decompFail}
 }

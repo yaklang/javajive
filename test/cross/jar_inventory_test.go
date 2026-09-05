@@ -123,7 +123,7 @@ func firstJavacError(out string) string {
 
 // recompileISOInventory 与 recompileISO 同口径逐文件隔离编译, 但对失败单元额外捕获首条
 // javac error 并归类。返回的失败列表按 unit 字典序排序, 保证报告确定性。
-func recompileISOInventory(t *testing.T, files []string, root, classpath string, workers int) []isoFailure {
+func recompileISOInventory(t *testing.T, files []string, root, classpath string, workers, minRelease int) []isoFailure {
 	t.Helper()
 	javac := lookJavac(t)
 	if workers <= 0 {
@@ -148,7 +148,7 @@ func recompileISOInventory(t *testing.T, files []string, root, classpath string,
 				ctx, cancel := context.WithTimeout(context.Background(), compileTimeout)
 				// Multi-Release versioned units compile under their own --release N (see mrFileRelease).
 				args := append(append([]string{}, javacLocaleArgs...),
-					"-encoding", "UTF-8", "--release", strconv.Itoa(mrFileRelease(f, 8)), "-nowarn",
+					"-encoding", "UTF-8", "--release", strconv.Itoa(mrFileRelease(f, minRelease)), "-nowarn",
 					"-cp", classpath, "-d", outDir, f)
 				cmd := exec.CommandContext(ctx, javac, args...)
 				cmd.Dir = outDir // 同 recompileISO: 防 javac.<ts>.args 落进 test/cross
@@ -238,14 +238,15 @@ func TestJarTreeInventory(t *testing.T) {
 				t.Skipf("jar %s not found under %s; skipping", spec.relPath, m2Repo())
 			}
 			deps := resolveDeps(spec.depGlob)
-			cp := withFlow(t, withJfr(t, withSunMisc(t, strings.Join(deps, string(os.PathListSeparator)))))
+			cp := withEnvShims(t, strings.Join(deps, string(os.PathListSeparator)))
 			root := t.TempDir()
 			files, units, _ := decompileAll(t, jarPath, root, maxFiles)
 
 			outDir := t.TempDir()
-			// treeCompileToDir gives Multi-Release `META-INF/versions/N/` units their own
-			// `--release N` pass (see splitMRFiles), so they are not false-failed under --release 8.
-			_, out := treeCompileToDir(t, files, cp, outDir)
+			// treeCompileToDirAt gives Multi-Release `META-INF/versions/N/` units their own
+			// `--release N` pass (see splitMRFiles) and raises the base --release to the
+			// jar's class-file major (logback/HikariCP 11, freemarker 16).
+			_, out := treeCompileToDirAt(t, files, cp, outDir, compileRelease(spec, jarPath))
 			errs := parseTreeErrors(out, root)
 
 			// reason 直方图 + 失败单元集合 (整树口径下, 一个单元可能贡献多条 error)。
@@ -352,8 +353,8 @@ func TestJarIsoInventory(t *testing.T) {
 			files, units, _ := decompileAll(t, jarPath, root, maxFiles)
 
 			cpParts := append([]string{jarPath}, deps...)
-			cp := withFlow(t, withJfr(t, withSunMisc(t, strings.Join(cpParts, string(os.PathListSeparator)))))
-			fails := recompileISOInventory(t, files, root, cp, workers)
+			cp := withEnvShims(t, strings.Join(cpParts, string(os.PathListSeparator)))
+			fails := recompileISOInventory(t, files, root, cp, workers, compileRelease(spec, jarPath))
 
 			// reason 直方图 (按计数降序, 同计数按字母序, 确定性)。
 			hist := map[string]int{}

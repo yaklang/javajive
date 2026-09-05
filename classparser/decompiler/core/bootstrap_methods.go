@@ -468,6 +468,14 @@ func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodT
 		if len(mtParams) >= 2 {
 			typeArgs = append(typeArgs, mtParams[0], mtParams[1])
 		}
+	case "java.util.Comparator":
+		// SAM int compare(T, T). instantiatedMethodType is `(T,T)I`; both params are T.
+		// Without this the method-ref stays RAW Comparator, and a store into Comparator<String>
+		// (okhttp Util.NATURAL_ORDER = String::compareTo) gets a raw `(Comparator)` wrap that
+		// javac rejects as "invalid method reference".
+		if len(mtParams) >= 1 {
+			typeArgs = append(typeArgs, mtParams[0])
+		}
 	default:
 		return nil
 	}

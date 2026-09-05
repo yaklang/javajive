@@ -179,6 +179,14 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		if bridge, target := factoryReturnRawBridge(funcCtx, r.JavaValue); target != "" {
 			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
 		}
+		// Declared `Foo<Object>` (or other concrete parameterization) vs a value typed `Foo<?>` /
+		// raw `Foo`: javac captures the wildcard to CAP#1 and rejects the conversion. A raw-erasure
+		// bridge `(Foo<Object>)(Foo) expr` is an unchecked conversion. Real hit: jackson
+		// SerializerProvider.handleSecondaryContextualization → JsonSerializer<Object>.
+		// Kill-switch: JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF.
+		if bridge, target := wildcardObjectReturnRawBridge(funcCtx, r.JavaValue); target != "" {
+			return fmt.Sprintf("return (%s) (%s) (%s)", target, bridge, expr)
+		}
 		// A returned `this.field` read whose RECOVERED real generic type is a same-erasure but
 		// WILDCARD-parameterized type (`Comparator<? super E>`), pinned by the declared return type to a
 		// concrete parameterization (`Comparator<Object>`): the field read renders raw so no cast is
@@ -484,6 +492,56 @@ func isGenericFactoryCall(call *values.FunctionCallExpression) bool {
 		return call.IsStatic
 	}
 	return false
+}
+
+// wildcardObjectReturnRawBridge wraps a returned value whose static type is a WILDCARD or RAW
+// parameterization of the same raw class as a concrete declared return (`JsonSerializer<Object>`
+// vs `JsonSerializer<?>` / raw `JsonSerializer`). Direct conversion is rejected as CAP#1;
+// `(Ret)(Raw) expr` is unchecked. Kill-switch: JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF.
+func wildcardObjectReturnRawBridge(funcCtx *class_context.ClassContext, v values.JavaValue) (string, string) {
+	if funcCtx == nil || v == nil || os.Getenv("JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF") != "" {
+		return "", ""
+	}
+	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil || ft.ReturnType == nil {
+		return "", ""
+	}
+	retStr := ft.ReturnType.String(funcCtx)
+	if !strings.Contains(retStr, "<") || funcCtx.IsTypeParam(retStr) {
+		return "", ""
+	}
+	// Foo<Object> or Foo<Enum<?>> (no in-scope type var). Class<T> stays with
+	// typeVar / field-store reconstructs.
+	if !isObjectParameterized(retStr) &&
+		(mentionsTypeParam(retStr, funcCtx.ClassTypeParams) || mentionsTypeParam(retStr, funcCtx.TypeParams)) {
+		return "", ""
+	}
+	raw := erasureName(retStr)
+	if raw == "" || strings.Contains(raw, "Flux") || strings.Contains(raw, "Mono") {
+		return "", ""
+	}
+	vt := v.Type()
+	if vt == nil {
+		return "", ""
+	}
+	vStr := vt.String(funcCtx)
+	vRaw := erasureName(vStr)
+	if vRaw != raw || vStr == retStr {
+		return "", ""
+	}
+	// Value is raw or wildcard-parameterized (javac captures `Foo<?>` to CAP#1).
+	// Non-Object parameterizations (`Class<Enum<?>>`) only fire on a WILDCARD value
+	// (not a merely-raw Map, which getenv's other reconstruct owns).
+	if isObjectParameterized(retStr) {
+		if strings.Contains(vStr, "?") || !strings.Contains(vStr, "<") {
+			return raw, retStr
+		}
+		return "", ""
+	}
+	if strings.Contains(vStr, "?") {
+		return raw, retStr
+	}
+	return "", ""
 }
 
 func factoryReturnRawBridgeTarget(raw string) bool {
@@ -2234,6 +2292,33 @@ func erasureName(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// isObjectParameterized reports whether a rendered type is a parameterization whose type
+// arguments are ALL java.lang.Object (`JsonDeserializer<Object>`, `Foo<Object, Object>`).
+// Mixed args (`Map<String, Object>`), type variables (`List<T>`), wildcards, and nested
+// generics return false. Gates wildcardObject*RawBridge so it cannot steal List<T> /
+// Imm<K,V> / ThisReparamSeed<N> reconstructs.
+func isObjectParameterized(s string) bool {
+	i := strings.IndexByte(s, '<')
+	if i < 0 {
+		return false
+	}
+	j := strings.LastIndexByte(s, '>')
+	if j <= i {
+		return false
+	}
+	inner := s[i+1 : j]
+	if inner == "" || strings.Contains(inner, "<") || strings.Contains(inner, "?") {
+		return false
+	}
+	for _, part := range strings.Split(inner, ",") {
+		a := strings.TrimSpace(part)
+		if a != "Object" && a != "java.lang.Object" {
+			return false
+		}
+	}
+	return true
+}
+
 // isArrayOfTypeParam reports whether s is an array (one or more `[]`) whose element type is a bare
 // in-scope type variable (e.g. "E[]", "T[][]"). Used to extend the type-variable cast to array-typed
 // returns and field stores, where bytecode erases the element to its bound (`E[]` -> `Object[]`).
@@ -2546,14 +2631,15 @@ func (a *AssignStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.Varia
 //
 // The element type variable is read from the field's recorded generic Signature (FieldTypeVar, e.g.
 // `keys` -> `K[]`) rather than the value's possibly-erased Type(), so it matches EXACTLY the array
-// field declaration the dumper emits. Tightly gated:
+// field declaration the dumper emits. A LOCAL / parameter whose declared type is a type-var array
+// (`T[] var1` in `<T> T[] toArray(T[])`) is recovered from the slot's Type() instead -- FieldTypeVar
+// does not see method-scope formals (commons-collections4 AbstractLinkedList.toArray). Tightly gated:
 //   - the LHS is a (possibly nested) array-element access whose base is a same-class field (`this.f`
-//     or `CurrentClass.f`); a non-field array base (a local) is out of scope;
-//   - the index dimension count equals the field's array depth (a PARTIAL index leaves an array type
+//     or `CurrentClass.f`) OR a JavaRef local declared as a type-var array;
+//   - the index dimension count equals the array depth (a PARTIAL index leaves an array type
 //     variable `V[]`, not a bare `V` -- storing a whole sub-array is a different, array-typed
 //     assignment and must not take a scalar `(V)` cast);
-//   - the resulting component is a denotable class-scope type variable (FieldTypeVar already gates on
-//     IsTypeParam at recording time);
+//   - the resulting component is a denotable in-scope type variable;
 //   - the value is a non-null reference whose rendered type is not already that type variable (a null
 //     literal and an already-T value need no cast; a primitive cannot reach an aastore).
 //
@@ -2562,7 +2648,7 @@ func typeVarArrayElementStoreCast(funcCtx *class_context.ClassContext, member *v
 	if os.Getenv("JDEC_TYPEVAR_ARRAY_ELEM_STORE_CAST_OFF") != "" {
 		return ""
 	}
-	if funcCtx == nil || member == nil || value == nil || len(funcCtx.FieldTypeVars) == 0 {
+	if funcCtx == nil || member == nil || value == nil {
 		return ""
 	}
 	// Unwrap nested array-element accesses, counting index depth, to reach the array base.
@@ -2579,21 +2665,59 @@ func typeVarArrayElementStoreCast(funcCtx *class_context.ClassContext, member *v
 	if depth == 0 {
 		return ""
 	}
-	// Base must be a same-class field: `this.field` or `CurrentClass.field`.
-	var fieldName string
+	elem := typeVarArrayBaseElem(funcCtx, base, depth)
+	if elem == "" || !valueNeedsTypeVarCast(funcCtx, value, elem) {
+		return ""
+	}
+	return elem
+}
+
+// typeVarArrayBaseElem recovers the bare type-variable element name of an array store whose base
+// is either a same-class T[]/V[][] field (FieldTypeVar) or a local/parameter declared as T[].
+func typeVarArrayBaseElem(funcCtx *class_context.ClassContext, base values.JavaValue, depth int) string {
 	switch lv := values.UnpackSoltValue(base).(type) {
 	case *values.RefMember:
 		ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef)
 		if !ok || !ref.IsThis {
 			return ""
 		}
-		fieldName = class_context.SafeIdentifier(lv.Member)
+		return typeVarArrayFieldElem(funcCtx, class_context.SafeIdentifier(lv.Member), depth)
 	case *values.JavaClassMember:
 		if lv.Name != funcCtx.ClassName {
 			return ""
 		}
-		fieldName = class_context.SafeIdentifier(lv.Member)
+		return typeVarArrayFieldElem(funcCtx, class_context.SafeIdentifier(lv.Member), depth)
 	default:
+		// Local / parameter whose declared type is a type-var array (`T[] var1` in
+		// `<T> T[] toArray(T[])`). FieldTypeVar does not see this slot.
+		ref, ok := values.UnpackSoltValue(base).(*values.JavaRef)
+		if !ok || ref.IsThis {
+			return ""
+		}
+		bt := base.Type()
+		tv := ""
+		if bt != nil {
+			tv = bt.String(funcCtx)
+		}
+		if !isArrayOfTypeParam(tv, funcCtx.TypeParams) {
+			if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && ft.ReturnType != nil {
+				tv = ft.ReturnType.String(funcCtx)
+			}
+		}
+		tvDepth := strings.Count(tv, "[]")
+		if tvDepth == 0 || depth != tvDepth {
+			return ""
+		}
+		elem := strings.TrimSuffix(tv, strings.Repeat("[]", tvDepth))
+		if elem == "" || !funcCtx.IsTypeParam(elem) {
+			return ""
+		}
+		return elem
+	}
+}
+
+func typeVarArrayFieldElem(funcCtx *class_context.ClassContext, fieldName string, depth int) string {
+	if len(funcCtx.FieldTypeVars) == 0 || fieldName == "" {
 		return ""
 	}
 	tv := funcCtx.FieldTypeVar(fieldName) // e.g. "K[]", "V[][]"
@@ -2602,31 +2726,10 @@ func typeVarArrayElementStoreCast(funcCtx *class_context.ClassContext, member *v
 	}
 	tvDepth := strings.Count(tv, "[]")
 	if tvDepth == 0 || depth != tvDepth {
-		// scalar type-var field (no element store) or partial index (still an array) -- skip.
 		return ""
 	}
 	elem := strings.TrimSuffix(tv, strings.Repeat("[]", tvDepth))
 	if elem == "" || !funcCtx.IsTypeParam(elem) {
-		return ""
-	}
-	// null is assignable to any type variable without a cast.
-	if lit, ok := values.UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
-		return ""
-	}
-	vt := value.Type()
-	if vt == nil {
-		return ""
-	}
-	raw := vt.RawType()
-	if raw == nil {
-		return ""
-	}
-	// A type variable is a reference type; a primitive value never needs (and cannot take) the cast.
-	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
-		return ""
-	}
-	// Already rendered as the type variable: no cast needed.
-	if raw.String(funcCtx) == elem {
 		return ""
 	}
 	return elem
@@ -2690,12 +2793,30 @@ func ternaryHasClassLiteralArm(tern *values.TernaryExpression) bool {
 	return false
 }
 
+// localDeclType is the type rendered for an ordinary local declaration. Multi-catch union
+// types (`A | B`) are legal only in `catch (A | B e)`; hoisting that slot to a bare
+// `A | B varN;` is invalid Java (jackson FromStringDeserializer). Collapse to Exception
+// so the later `varN = e` from the catch still type-checks. Kill-switch:
+// JDEC_MULTICATCH_LOCAL_DECL_OFF=1.
+func localDeclType(t types.JavaType) types.JavaType {
+	if t == nil {
+		return t
+	}
+	if os.Getenv("JDEC_MULTICATCH_LOCAL_DECL_OFF") != "" {
+		return t
+	}
+	if _, ok := t.RawType().(*types.JavaMultiCatchType); ok {
+		return types.NewJavaClass("java.lang.Exception")
+	}
+	return t
+}
+
 func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 	if a.IsDeclare {
 		if a.LeftValue == nil {
 			return values.EmptySlotValuePlaceholder
 		}
-		return fmt.Sprintf("%s %s", a.LeftValue.Type().String(funcCtx), a.LeftValue.String(funcCtx))
+		return fmt.Sprintf("%s %s", localDeclType(a.LeftValue.Type()).String(funcCtx), a.LeftValue.String(funcCtx))
 	}
 	if a.ArrayMember != nil {
 		if a.JavaValue == nil {
@@ -2799,7 +2920,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 			// A multi-catch union type is legal only inside `catch (A | B e)`. If the exception
 			// value is hoisted into an ordinary local (`cause = e` after the catch), render it as
 			// a common Throwable subtype so the declaration remains valid Java.
-			declType = types.NewJavaClass("java.lang.Exception")
+			declType = localDeclType(declType)
 		}
 		// When the slot's resolved type is a WIDER int-category primitive than the initializer's
 		// type, declare with the slot type so the initializer widens implicitly. The slot gets
@@ -2885,6 +3006,9 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if cast := wildcardFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
 			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
 		}
+		if cast := classTypeVarFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+		}
 		// Same-erasure invariant field-store mismatch (`X<B>` value into concrete `X<A>` field): the
 		// source carried a raw `(X)` cast that bytecode erased. See parameterizedFieldStoreRawCast.
 		if cast := parameterizedFieldStoreRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
@@ -2911,6 +3035,20 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if cast := parameterizedLocalReassignRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
 			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
 		}
+		// A LOCAL / parameter declared as a bare type variable (`T var1`) REASSIGNED from an
+		// erased Object call (`var1 = rawTransformer.transform(var1)`): bytecode dropped the
+		// source's unchecked `(T)` cast. See typeVarLocalReassignCast (commons-collections4
+		// ChainedTransformer / TransformedList$TransformedListIterator).
+		if cast := typeVarLocalReassignCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+		}
+		// A LOCAL / parameter declared as a type-variable array (`T[] var1`) REASSIGNED from
+		// `Array.newInstance` (typed Object / Object[]): bytecode dropped the source's
+		// unchecked `(T[])` cast. See typeVarArrayReassignCast (commons-collections4
+		// AbstractLinkedList.toArray / AbstractMapBag.toArray).
+		if cast := typeVarArrayReassignCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+		}
 		// Ternary with sibling-typed arms assigned to a concrete-typed local: the JVM stored both arms
 		// into the same slot (no checkcast), but javac requires every arm to be assignable to the
 		// declared type. When one arm is NOT assignable (e.g. `List var8 = cond ? readArray() :
@@ -2922,8 +3060,209 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 				return fmt.Sprintf("%s = %s", a.LeftValue.String(funcCtx), rendered)
 			}
 		}
+		if raw := wildcardObjectAssignRawBridge(funcCtx, a.LeftValue, a.JavaValue); raw != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), raw, a.JavaValue.String(funcCtx))
+		}
 		return assign
 	}
+}
+
+// wildcardObjectAssignRawBridge wraps an assignment whose LHS is a concrete parameterization
+// (`JsonDeserializer<Object>` / `Linked<AnnotatedField>`) and whose RHS is a same-erasure
+// wildcard or raw type (`JsonDeserializer<?>`). Two sources for the LHS type:
+//
+//   - left.Type() when it already renders as Foo<Object>
+//   - a same-class field Signature (this.field / otherInstance.field), which keeps the
+//     generic form the getfield/putfield descriptor erases. javac then types the RHS from
+//     the callee's true generic return (`handleSecondaryContextualization` -> `JsonDeserializer<?>`,
+//     `Linked.withNext` -> `Linked<CAP#1>`) and rejects the store; a raw `(Foo)` cast is an
+//     unchecked conversion.
+//
+// Kill-switch: JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF.
+func wildcardObjectAssignRawBridge(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil || os.Getenv("JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF") != "" {
+		return ""
+	}
+	// Path A: LHS static type is already Foo<Object> vs a wildcard/raw RHS of the same
+	// erasure. Uses only value.Type() so it cannot steal type-variable local reassigns
+	// (Class<T> = getSuperclass()) whose kill-switch is JDEC_PARAM_LOCAL_REASSIGN_RAW_CAST_OFF.
+	if lt, vt := left.Type(), value.Type(); lt != nil && vt != nil {
+		lStr, vStr := lt.String(funcCtx), vt.String(funcCtx)
+		if isObjectParameterized(lStr) {
+			raw := erasureName(lStr)
+			if raw != "" && !strings.Contains(raw, "Flux") && !strings.Contains(raw, "Mono") &&
+				erasureName(vStr) == raw && vStr != lStr &&
+				(strings.Contains(vStr, "?") || !strings.Contains(vStr, "<")) {
+				return raw
+			}
+		}
+	}
+	// Path B: same-class field store whose Signature is a concrete parameterization
+	// (JsonDeserializer<Object>, Linked<AnnotatedField>). The putfield descriptor is
+	// erased, so left.Type() is raw; javac types the RHS from the callee's generic
+	// return (handleSecondaryContextualization -> JsonDeserializer<?>, Linked.withNext
+	// -> Linked<CAP#1>). Skip type-variable fields (other reconstructs).
+	fs := sameClassFieldGeneric(funcCtx, left)
+	if fs == "" || !strings.Contains(fs, "<") {
+		return ""
+	}
+	if mentionsTypeParam(fs, funcCtx.ClassTypeParams) || mentionsTypeParam(fs, funcCtx.TypeParams) {
+		return ""
+	}
+	raw := erasureName(fs)
+	if raw == "" || strings.Contains(raw, "Flux") || strings.Contains(raw, "Mono") {
+		return ""
+	}
+	vStr := callGenericReturnStr(funcCtx, value)
+	if vStr == "" {
+		if vt := value.Type(); vt != nil {
+			vStr = vt.String(funcCtx)
+		}
+	}
+	if vStr == "" || erasureName(vStr) != raw || vStr == fs {
+		return ""
+	}
+	if strings.Contains(vStr, "?") || !strings.Contains(vStr, "<") {
+		return raw
+	}
+	return ""
+}
+
+// sameClassFieldGeneric returns the rendered generic type of a same-class field store
+// (`this._mapDeserializer` / `var7._fields`) from FieldSignatures, or "".
+func sameClassFieldGeneric(funcCtx *class_context.ClassContext, left values.JavaValue) string {
+	if funcCtx == nil || left == nil {
+		return ""
+	}
+	fieldName := ""
+	switch lv := left.(type) {
+	case *values.RefMember:
+		if lv == nil || lv.Object == nil {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+		if ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef); ok && ref.IsThis {
+			break
+		}
+		ot := lv.Object.Type()
+		if ot == nil {
+			return ""
+		}
+		fqn, ok := types.ClassFQNOf(ot)
+		if !ok || !sameDottedClass(fqn, funcCtx.ClassName) {
+			return ""
+		}
+	case *values.JavaClassMember:
+		if lv.Name != funcCtx.ClassName {
+			return ""
+		}
+		fieldName = class_context.SafeIdentifier(lv.Member)
+	default:
+		return ""
+	}
+	if fieldName == "" {
+		return ""
+	}
+	sig := funcCtx.FieldSignature(fieldName)
+	if sig == "" {
+		return ""
+	}
+	ft := types.ParseSignature(sig)
+	if ft == nil {
+		return ""
+	}
+	return ft.String(funcCtx)
+}
+
+// classTypeVarFieldStoreCast wraps a store into `Class<T>` (T a class type variable) when
+// the RHS is Class<?> / raw Class / Class<CAP> (jackson StdSerializer._handledType =
+// var1.getRawClass() / var1._handledType). A raw `(Class)` is an unchecked conversion.
+// Kill-switch: JDEC_CLASS_TV_FIELD_CAST_OFF.
+func classTypeVarFieldStoreCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil || os.Getenv("JDEC_CLASS_TV_FIELD_CAST_OFF") != "" {
+		return ""
+	}
+	fs := sameClassFieldGeneric(funcCtx, left)
+	if fs == "" {
+		return ""
+	}
+	er := erasureName(fs)
+	if er != "Class" && !strings.HasSuffix(er, ".Class") {
+		return ""
+	}
+	if !mentionsTypeParam(fs, funcCtx.ClassTypeParams) {
+		return ""
+	}
+	// Wildcard fields (`Class<? super T>`) belong to wildcardFieldStoreCast.
+	if strings.Contains(fs, "?") {
+		return ""
+	}
+	vStr := callGenericReturnStr(funcCtx, value)
+	if vStr == "" && value.Type() != nil {
+		vStr = value.Type().String(funcCtx)
+	}
+	if vStr == "" || vStr == fs {
+		return ""
+	}
+	return "Class"
+}
+
+func sameDottedClass(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return strings.ReplaceAll(a, "/", ".") == strings.ReplaceAll(b, "/", ".")
+}
+
+// callGenericReturnStr recovers a method-call value's TRUE generic return type: same-class
+// MethodSignature first, then the cross-class sibling walk. Empty when the value is not a
+// call or no generic Signature is available.
+func callGenericReturnStr(funcCtx *class_context.ClassContext, value values.JavaValue) string {
+	if funcCtx == nil || value == nil {
+		return ""
+	}
+	call, ok := values.UnpackSoltValue(value).(*values.FunctionCallExpression)
+	if !ok || call == nil || call.FunctionName == "" {
+		return ""
+	}
+	sameClass := false
+	if call.IsStatic {
+		sameClass = call.ClassName == funcCtx.ClassName || call.ClassName == ""
+	} else if call.Object != nil {
+		if r, okr := values.UnpackSoltValue(call.Object).(*values.JavaRef); okr && r.IsThis {
+			sameClass = true
+		}
+	}
+	if sameClass {
+		if sig := funcCtx.MethodSignature(call.FunctionName, len(call.Arguments)); sig != "" {
+			_, _, ret := types.ParseMethodSignatureFull(sig, funcCtx)
+			if ret != nil {
+				return ret.String(funcCtx)
+			}
+		}
+	}
+	if funcCtx.SiblingClassSig == nil || call.IsStatic || call.Object == nil {
+		return ""
+	}
+	recvType := call.Object.Type()
+	if recvType == nil {
+		return ""
+	}
+	var recvRaw string
+	var recvArgs []types.JavaType
+	if pt, okp := types.AsParameterizedType(recvType); okp && pt.RawClassName != "" {
+		recvRaw = pt.RawClassName
+		recvArgs = pt.TypeArgs
+	} else if jc, okc := recvType.RawType().(*types.JavaClass); okc && jc != nil {
+		recvRaw = jc.Name
+	} else {
+		return ""
+	}
+	ret := types.ResolveInstantiatedReturnType(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, call.FunctionName, len(call.Arguments))
+	if ret == nil {
+		return ""
+	}
+	return ret.String(funcCtx)
 }
 
 // parameterizedLocalReassignRawCast returns the raw erasure (`Class`) to cast the RHS of a LOCAL-variable
@@ -2989,6 +3328,129 @@ func parameterizedLocalReassignRawCast(funcCtx *class_context.ClassContext, left
 		return ""
 	}
 	return erasureName(ltStr)
+}
+
+// typeVarLocalReassignCast returns the bare in-scope type variable (e.g. "T") to wrap the RHS of a
+// LOCAL / parameter REASSIGNMENT when the slot is declared as that type variable and the stored
+// value's static type is a different reference (typically Object from a raw call). Bytecode erases
+// T to its bound, so `var1 = rawArr[i].transform(var1)` (ChainedTransformer.transform) and
+// `var1 = TransformedList.access$000(this.this$0, var1)` (TransformedListIterator.add/set) fail
+// "Object cannot be converted to T/E". The source carried an unchecked `(T)` that aastore/astore
+// dropped. Restricted to a JavaRef local (never `this`, never a field -- those have
+// typeVarFieldStoreCast), a BARE type variable (not T[], not a parameterization), and a non-null
+// non-primitive value that is not already that type variable. Kill-switch
+// JDEC_TYPEVAR_LOCAL_REASSIGN_OFF.
+func typeVarLocalReassignCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_TYPEVAR_LOCAL_REASSIGN_OFF") != "" {
+		return ""
+	}
+	ref, ok := values.UnpackSoltValue(left).(*values.JavaRef)
+	if !ok || ref.IsThis {
+		return ""
+	}
+	lt := left.Type()
+	if lt == nil {
+		return ""
+	}
+	ltStr := lt.String(funcCtx)
+	if strings.Contains(ltStr, "<") || strings.Contains(ltStr, "[") || !funcCtx.IsTypeParam(ltStr) {
+		return ""
+	}
+	if !valueNeedsTypeVarCast(funcCtx, value, ltStr) {
+		return ""
+	}
+	return ltStr
+}
+
+// typeVarArrayReassignCast returns the type-variable array type (e.g. "T[]") to wrap the RHS of a
+// LOCAL / parameter REASSIGNMENT when the slot is declared `T[]` (or `T[][]`) and the stored value
+// is Object or a different-element array -- typically `Array.newInstance(component, n)` whose
+// descriptor returns Object, then checkcast to Object[]. javac re-checks against `T[]` and rejects
+// "Object[] cannot be converted to T[]" (commons-collections4 AbstractLinkedList.toArray /
+// AbstractMapBag.toArray / UnmodifiableEntrySet.toArray). The source carried an unchecked `(T[])`.
+// Restricted to a JavaRef local whose declared type is an array of an in-scope type variable, and
+// an array-or-Object RHS that is not already that exact type. Kill-switch
+// JDEC_TYPEVAR_ARRAY_REASSIGN_OFF.
+func typeVarArrayReassignCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
+	if funcCtx == nil || left == nil || value == nil {
+		return ""
+	}
+	if os.Getenv("JDEC_TYPEVAR_ARRAY_REASSIGN_OFF") != "" {
+		return ""
+	}
+	ref, ok := values.UnpackSoltValue(left).(*values.JavaRef)
+	if !ok || ref.IsThis {
+		return ""
+	}
+	lt := left.Type()
+	if lt == nil {
+		return ""
+	}
+	ltStr := lt.String(funcCtx)
+	if !isArrayOfTypeParam(ltStr, funcCtx.TypeParams) {
+		// Slot merge of `T[] var2 = var1; var2 = Array.newInstance(...)` can widen the
+		// local to Object[], hiding the declared T[]. The enclosing `<T> T[] toArray(T[])`
+		// return is the denotable target (commons-collections4 EntrySet / UnmodifiableEntrySet).
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && ft.ReturnType != nil {
+			retStr := ft.ReturnType.String(funcCtx)
+			if isArrayOfTypeParam(retStr, funcCtx.TypeParams) {
+				ltStr = retStr
+			} else {
+				return ""
+			}
+		} else {
+			return ""
+		}
+	}
+	if lit, ok := values.UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+		return ""
+	}
+	vt := value.Type()
+	if vt == nil {
+		return ""
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return ""
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return ""
+	}
+	rawStr := raw.String(funcCtx)
+	if rawStr == ltStr {
+		return ""
+	}
+	if !strings.HasSuffix(rawStr, "[]") && rawStr != "Object" && rawStr != "java.lang.Object" {
+		return ""
+	}
+	return ltStr
+}
+
+// valueNeedsTypeVarCast reports whether value should be wrapped in an unchecked `(elem)` cast
+// (elem is a bare type-variable name). Shared by typeVarLocalReassignCast and the local-array
+// path of typeVarArrayElementStoreCast.
+func valueNeedsTypeVarCast(funcCtx *class_context.ClassContext, value values.JavaValue, elem string) bool {
+	if value == nil || elem == "" {
+		return false
+	}
+	if lit, ok := values.UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
+		return false
+	}
+	vt := value.Type()
+	if vt == nil {
+		return false
+	}
+	raw := vt.RawType()
+	if raw == nil {
+		return false
+	}
+	if _, isPrim := raw.(*types.JavaPrimer); isPrim {
+		return false
+	}
+	return raw.String(funcCtx) != elem
 }
 
 // ternaryArmIncompatibleCast re-renders a ternary RHS when one of its arms is NOT assignable to the

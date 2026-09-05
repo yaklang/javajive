@@ -30,15 +30,15 @@
 
 ## 评测（Benchmark）
 
-在 8 个真实流行 jar（4,487 个摊平单元）上，走「反编译 → `javac --release 8` 重编译 → 重打包 → JVM 校验」：
+在 34 个真实流行 jar（18,759 个摊平单元）上，走「反编译 → `javac --release 8` 重编译 → 重打包 → JVM 校验」：
 
-- **单元级干净率 100%** —— **4,487 / 4,487** 个摊平单元（`Outer$Inner.java`）**零 `javac` 错误**可重编译，且全 8 jar **语法错为 0**
+- **单元级干净率 100%** —— **18,759 / 18,759** 个摊平单元（`Outer$Inner.java`）**零 `javac` 错误**可重编译，且全 34 jar **语法错为 0**
   （CI 硬断言把关，任何类型错都无法被词法错遮蔽）。
-- **8 个库全部完整往返** —— 反编译 → 重编译 → 重打包 → 外部 JVM `-Xverify:all` 逐类校验全通过
+- **34 个库全部完整往返** —— 反编译 → 重编译 → 重打包 → 外部 JVM `-Xverify:all` 逐类校验全通过
   （codec 经调用差分与原始 jar 逐字节一致），锁进 `provenClean`。
 - **14 / 14 自托管算法**（MD5 · SHA-256 · CRC32 · 快排 · Base64 · HeapSort · KMP · SwitchFSM ·
   TryFinally · UnionFind · DiamondTryCatch · DiamondTryFinally · ForContinue · ComputeIfAbsent）往返**逐字节一致**。
-- **三方横评第一** —— 单元级干净率 **100%**，高于 Vineflower 1.10.1（90.8%）与 CFR 0.152（79.8%），8 个 jar 对两方全胜。
+- **三方横评第一**（原 8 jar 对照集）—— 单元级干净率 **100%**，高于 Vineflower 1.10.1（90.8%）与 CFR 0.152（79.8%），8 个 jar 对两方全胜。
 
 完整方法学、逐 jar 表格与复现命令见 [BENCHMARK.md](BENCHMARK.md)。
 

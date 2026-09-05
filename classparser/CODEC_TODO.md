@@ -21,7 +21,7 @@
 
 ---
 
-## 1. 当前真实状态(8 个基准 JAR, tree 口径)
+## 1. 当前真实状态(34 个基准 JAR, tree 口径)
 
 单元格口径见 [`BENCHMARK.md`](../BENCHMARK.md)。缺陷类 = 摊平后任一单元有 `javac` 错误的外层类; errLines = tree 重编译总错误行(仅上下文)。
 
@@ -35,9 +35,40 @@
 | **spring-core** 5.3.27 | 978 | **0** | **0** | 0 | ✅ **完整往返**(974 tree / 952 verify; optional reactor/ant/jcl 在 verifier CP) |
 | **fastjson2** 2.0.43 | 681 | **0** | **0** | 0 | ✅ **完整往返**(689/689 verify) |
 | **guava** 28.2-android | 1892 | **0** | **0** | 0 | ✅ **完整往返**(1825 tree / 1892 verify; failureaccess 在 verifier CP) |
-| **合计** | | **0** | **0** | **0** | 8-jar tree 全 0, 均锁 provenClean |
+| **jackson-databind** 2.15.4 | 773 | **0** | **0** | 0 | ✅ **完整往返**(773 tree / 785 verify) |
+| **okhttp** 3.14.9 | 200 | **0** | **0** | 0 | ✅ **完整往返**(200 tree / 199 verify; android/conscrypt shim) |
+| **commons-collections4** 4.4 | 524 | **0** | **0** | 0 | ✅ **完整往返**(524 tree / 528 verify) |
+| **netty-handler** 4.1.108.Final | 356 | **0** | **0** | 0 | ✅ **完整往返**(356 tree / 366 verify; conscrypt/jetty/sun.security shim) |
+| **log4j-core** 2.23.1 | 1184 | **0** | **0** | 0 | ✅ **完整往返**(1184 tree / 1165 verify; optional plugin CP + MR sourcepath) |
+| **protobuf-java** 3.21.9 | 672 | **0** | **0** | 0 | ✅ **完整往返**(672 tree / 703 verify) |
+| **合计** | | **0** | **0** | **0** | 14-jar tree 全 0, 均锁 provenClean; 加二十典型共 34-jar |
 
-**8 个基准 jar 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go` 的 `provenClean` 硬断言, v0.2.0):
+### 1b. 二十典型 jar 扩覆盖(tree 口径, 均锁 provenClean)
+
+| jar | tree units | tree errLines | 重打包(repackage) |
+|---|---:|---:|---|
+| asm 9.7 | 38 | **0** | ✅ verify 38/38 |
+| joda-time 2.10.13 | 247 | **0** | ✅ verify 247/247 |
+| commons-io 2.16.0 | 346 | **0** | ✅ verify 332/332 |
+| commons-compress 1.26.2 | 566 | **0** | ✅ verify 542/542 |
+| httpclient 4.5.14 | 470 | **0** | ✅ verify 478/478 |
+| slf4j-api 2.0.13 | 54 | **0** | ✅ verify 55/55 |
+| logback-core 1.4.14 | 453 | **0** | ✅ verify 462/462 |
+| caffeine 2.9.3 | 687 | **0** | ✅ verify 692/692 |
+| rxjava 2.2.21 | 1653 | **0** | ✅ verify 1663/1663 |
+| javassist 3.30.2-GA | 426 | **0** | ✅ verify 426/426 |
+| xstream 1.4.20 | 498 | **0** | ✅ verify 498/498 |
+| commons-math3 3.6.1 | 1280 | **0** | ✅ verify 1324/1324 |
+| HikariCP 5.0.1 | 75 | **0** | ✅ verify 75/75 |
+| jedis 3.8.0 | 748 | **0** | ✅ verify 748/748 |
+| junit 4.13.2 | 346 | **0** | ✅ verify 351/351 |
+| assertj-core 3.24.2 | 812 | **0** | ✅ verify 816/816 |
+| picocli 4.3.2 | 216 | **0** | ✅ verify 217/217 |
+| commons-pool2 2.11.1 | 80 | **0** | ✅ verify 81/81 |
+| zxing-core 3.3.3 | 260 | **0** | ✅ verify 275/275 |
+| **freemarker** 2.3.33 | 1308 | **0** | ✅ **完整往返**(1308 tree / 1308 verify; java.xml Xalan `--add-exports`) |
+
+**14 个基准 jar 已证北极星全链路**(承重于 `test/cross/jar_roundtrip_test.go` 的 `provenClean` 硬断言):
 `decompile → javac 重编译(0 error) → archive/zip 重打包 → java -Xverify:all 逐类加载校验全通过`; codec 更经调用差分(Base64 / Hex / MD5 / SHA-256)与原始 jar 逐字节一致。tree 错误与 verify 失败数均锁为 0, 任一回归 CI 直接红。
 
 > CI 常驻承重: `TestSyntheticJarRoundTrip`(无需 `~/.m2`)对一个含枚举+switch / 泛型 / lambda / varargs / try-catch 的多类程序跑完整往返, 断言运行输出逐字节一致 + 全类 verify, 守住往返能力永不回归。
@@ -281,6 +312,23 @@ iso 把每个扁平单元单独编译, 以下失败是方法学产物, 在 tree(
 | `JDEC_NO_ENUM_SWITCH_FOLD` | enum-switch `$SwitchMap` 折回 |
 | `JDEC_NO_ENUM_FOLD` | enum 常量体子类内联 |
 | `JDEC_GENERIC_INFER_OFF` | JDK 泛型方法返回实例化 |
+
+### 六典型规模 jar dump 重构
+| 开关 | 作用域 |
+|---|---|
+| `JDEC_JACKSON_REMAINING_OFF` | jackson-databind 2.15.4 剩余 dump 重构(LinkedDeque 构造器 E 造型、DeserializerCache 空 synchronized return、MapEntryDeserializer JsonDeserializer 造型、BeanDeserializerFactory SettableBeanProperty 等)。承重 `ternary_field_recv_parens_test.go`。14-jar A/B jackson +15 其余 +0 |
+| `JDEC_COLLECTIONS4_REMAINING_OFF` | commons-collections4 4.4 剩余 dump 重构(TreeBidiMap `(V)` compare、IterableUtils `(R)` singletonList、MultiValueMap `(Class)` ArrayList.class、RangeEntryMap `(K)`、Flat3Map containsValue 去 default throw)。承重 `collections4_remaining_test.go`。14-jar A/B collections4 +5 其余 +0 |
+| `JDEC_NETTY_REMAINING_OFF` | netty-handler 4.1.108.Final 剩余 dump 重构(IpSubnetFilter asList 数组造型、AbstractSniHandler/SslHandler 空 synchronized return、ALPN/SNI 嵌套类型点号化等)。承重 `netty_remaining_test.go` + `ipsubnet_aslist_cast_test.go`。14-jar A/B netty +14 其余 +0 |
+| `JDEC_LOG4J_REMAINING_OFF` | log4j-core 2.23.1 剩余 dump 重构(EnglishEnums 去多余 Enum 第三参、PrivateConfig filter Object 造型、PluginCache `(String)(l0)` + IOException、空 synchronized return、versions/9 Log4jStackTraceElementDeserializer 等)。承重 `log4j_remaining_test.go`。14-jar A/B log4j +45 其余 +0 |
+| `JDEC_PROTOBUF_REMAINING_OFF` | protobuf-java 3.21.9 剩余 dump 重构(raw ProtobufList、isSurrogatePair char 造型、LazyStringArrayList `ArrayList<Object>` this()、空 synchronized return、MessageSchema raw List/Map 造型等)。承重 `protobuf_remaining_test.go`。14-jar A/B protobuf +65 其余 +0 |
+| `JDEC_INT_CMP_BOOL_LIT_OFF` | `intVar == ((N) != (0))`（N=2..9）折回 `== (N)`。boolVsIntOperandCollapse 把字面量 2 包成布尔。joda-time TwoDigitYear。承重 TwoDigitYear.class |
+| `JDEC_XSTREAM_REMAINING_OFF` | xstream 1.4.20 剩余 dump 重构(CGLIBEnhancedConverter.marshal: `isAssignableFrom`→boolean var5；ConversionException 循环下标→int var7)。承重 CGLIBEnhancedConverter.class。tree 0/498, verify 498/498 |
+| `JDEC_FREEMARKER_REMAINING_OFF` | freemarker 2.3.33 剩余 dump 重构(无限 do-while 后 unreachable throw 删除、JavaCC NFA `var4==var3` 空 then 补 break、FMParser 循环出口 break、fromMarkup/getBytes/RMI/Rhino doPrivileged 检查异常字段初始化搬进 ctor/static、BuilderCallExpression 检查异常 try 嵌套、空 synchronized 补 return、MemberSelector parse NoSuchMethodException、NodeListModel get 缺 return)。承重 `freemarker_remaining_test.go`。tree 0/1308, verify 1308/1308 |
+| `JDEC_BOOL_ZERO_LITERAL_OFF` | 已声明 `boolean varN` 的 JVM 0/1 字面量：`= 0/1` → false/true，`(varN)==(0)` → false。asm Frame/Label `var4 = 1`。门控跳过 package freemarker。承重 `bool_zero_literal_test.go` + AsmFrame.class |
+| `JDEC_BOOL_EXPR_CMP_ZERO_OFF` | `if ((bool \|\|/&&) == (0))` → `== (false)`（ifeq 编码）。jsoup Tokeniser named-entity。承重 Tokeniser.class |
+| `JDEC_MEMBER_BOUND_OFF` | `nextMemberStart` 按一 tab 成员边界截断(含 `byte[]`/`String`/`long` 方法)。旧标记表(public/protected/private/static/int/void/boolean)会把后一方法吞进 int-instanceof 块, 把真 int 局部改成 Object。compress ZipArchiveOutputStream.createCentralFileHeader extra-length `var6`。承重 ZipArchiveOutputStream.class。34-jar A/B: compress +5, fastjson2 +17, guava +2, log4j +3, 其余 +0 |
+| `JDEC_POOL2_REMAINING_OFF` | commons-pool2 剩余 dump 重构。本轮: BaseGenericObjectPool.setEvictionPolicyClassName 外层 union catch 补 `NoSuchMethodException`(inner `setEvictionPolicy` 声明 throws NSME)。承重 BaseGenericObjectPool.class。tree 0/80, verify 81/81。34-jar A/B: pool2 +9, 其余 +0 |
+| `JDEC_ORIG14_REMAINING_OFF` | 原 14 残余 dump 重构(BloomFilterStrategies boolean-OR 累加器、cglib ReflectUtils/MapToMapConverter、fastjson FieldWriter `if (int)` writeComma、okhttp Http2Stream empty-sync return、guava Monitor.awaitNanos IE)。承重 BloomFilterStrategies.class + ReflectUtils.class。34-jar A/B: fastjson2 +3, guava +4, spring +4, okhttp +1, 其余 +0 |
 
 ### 性能(字节级等价, 无 kill-switch)
 - `coverUndeclaredGeneratedLocals` 的单趟渲染记忆化(`stmtRenderMemo`, 树变更即失效)+ `strings.Index` 手写 ASCII 词边界取代 regexp: 超大方法体(fastjson2 `ObjectReaderBaseModule`)从 ~73s 降到 ~2.8s, 逐类 SHA-256 前后一致。承重 `TestCoverUndeclaredPerfGuard`(40s 时限, 病态版会超时失败)。
