@@ -61,6 +61,7 @@ func TestProtobufRemainingReconstructsAreLoadBearing(t *testing.T) {
 		"			synchronized(this){",
 		"",
 		"			}",
+		"			return false;",
 		"}",
 	}, "\n")
 

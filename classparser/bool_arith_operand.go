@@ -23,7 +23,7 @@ func fixBoolUsedAsArithOperand(body string) string {
 	for {
 		rel := strings.Index(body[from:], "boolean var")
 		if rel < 0 {
-			return body
+			return wrapBooleanFieldArith(body)
 		}
 		i := from + rel
 		ident, ok, rest := readJavaIdent(body[i+len("boolean "):])
@@ -49,6 +49,71 @@ func fixBoolUsedAsArithOperand(body string) string {
 			body = body[:i] + newChunk + body[methodEnd:]
 		}
 		from = i + len("boolean var")
+	}
+}
+
+// wrapBooleanFieldArith wraps `+ (this.field)` when field is a boolean
+// instance field. HashCodeAndEqualsPlugin emits `hash * 31 + this.flag`
+// with the boolean on the int stack (bytebuddy BooleanMatcher / Transformation).
+func wrapBooleanFieldArith(body string) string {
+	fields := booleanInstanceFields(body)
+	if len(fields) == 0 {
+		return body
+	}
+	for _, name := range fields {
+		for _, op := range []string{"* (", "+ (", "- ("} {
+			needle := op + "this." + name + ")"
+			if !strings.Contains(body, needle) {
+				continue
+			}
+			repl := op + "(this." + name + ") ? (1) : (0))"
+			body = strings.ReplaceAll(body, needle, repl)
+		}
+	}
+	return body
+}
+
+func booleanInstanceFields(body string) []string {
+	var out []string
+	seen := map[string]bool{}
+	from := 0
+	for {
+		rel := strings.Index(body[from:], "boolean ")
+		if rel < 0 {
+			return out
+		}
+		i := from + rel
+		if i > 0 {
+			prev := body[i-1]
+			if prev != ' ' && prev != '\t' && prev != '\n' {
+				from = i + 1
+				continue
+			}
+		}
+		ident, ok, rest := readJavaIdent(body[i+len("boolean "):])
+		if !ok || ident == "" {
+			from = i + 1
+			continue
+		}
+		trim := strings.TrimLeft(rest, " \t")
+		if trim == "" || (trim[0] != ';' && trim[0] != '=') {
+			from = i + 1
+			continue
+		}
+		if isDecompilerLocal(ident) {
+			from = i + 1
+			continue
+		}
+		head := body[prevMemberStart(body, i):i]
+		if strings.Contains(head, "(") {
+			from = i + 1
+			continue
+		}
+		if !seen[ident] {
+			seen[ident] = true
+			out = append(out, ident)
+		}
+		from = i + len("boolean ")
 	}
 }
 

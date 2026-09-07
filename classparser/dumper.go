@@ -492,8 +492,16 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				accessFlags = strings.TrimSpace("public " + accessFlags)
 			}
 		default:
-			// Genuinely nested, non-public: strip any spurious `public`.
-			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
+			// Package-private nested only (neither ACC_PUBLIC nor ACC_PROTECTED).
+			// Protected with JDEC_NESTED_PROTECTED_PUBLIC_OFF set falls here and
+			// must stay non-public. Kill-switch: JDEC_NESTED_PACKAGE_PUBLIC_OFF=1.
+			if innerFlags&0x0004 == 0 && os.Getenv("JDEC_NESTED_PACKAGE_PUBLIC_OFF") == "" {
+				if !strings.Contains(accessFlags, "public") {
+					accessFlags = strings.TrimSpace("public " + accessFlags)
+				}
+			} else {
+				accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
+			}
 		}
 	}
 	// module-info / package-info are synthetic descriptor pseudo-classes; their internal
@@ -1409,11 +1417,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// against Function<? super MergedAnnotation<A>, T>.
 	// Kill-switch: JDEC_ASMAP_FUNCTION_CAST_OFF=1.
 	full = fixAsMapFunctionRawCast(full)
-	// fixNeverThrownIOException inserts `if(false)throw new IOException();` into a try
-	// whose catch(IOException) would otherwise be "never thrown". Real hit: guava
-	// Joiner.appendTo(StringBuilder, Iterator) which casts StringBuilder to Appendable
-	// to call the throwing overload; javac still proves the StringBuilder overload.
-	// Kill-switch: JDEC_IOEXCEPTION_NEVER_THROWN_OFF=1.
+	// fixNeverThrownIOException inserts `if(false)throw new TYPE();` as the first
+	// statement of the try that catch(TYPE) pairs with via matching braces. TYPE is
+	// IOException or FileAlreadyExistsException. Kill-switch:
+	// JDEC_IOEXCEPTION_NEVER_THROWN_OFF=1.
 	full = fixNeverThrownIOException(full)
 	// fixThrowClassCastDropsThrowable unwraps `throw ((Throwable)(cls.cast(x)))` to
 	// `throw cls.cast(x)` so a method `throws X` (X a type variable) actually throws X
@@ -1610,6 +1617,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Enum no-arg ctor `this(Object,Object,…)` after locals. Kill-switch:
 	// JDEC_ENUM_CTOR_THIS_FIRST_OFF=1.
 	full = fixEnumNoArgCtorThisAfterLocals(full)
+	full = fixCtorNPECheckBeforeThis(full)
+	full = fixEnumClinitIllegalNew(full)
+	full = fixBareNestedImports(full)
+	full = fixHardjarShapes(full)
 	// boolean local used as `*`/`+` operand. Kill-switch: JDEC_BOOL_ARITH_OPERAND_OFF=1.
 	full = fixBoolUsedAsArithOperand(full)
 	// boolean local compared/assigned JVM 0/1. Kill-switch: JDEC_BOOL_ZERO_LITERAL_OFF=1.
@@ -1671,6 +1682,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// used the local as a type (junit FailOnTimeout$CallableStatement,
 	// CategoryFilterFactory). Kill-switch: JDEC_IDENT_SELF_CAST_OFF=1.
 	full = fixIdentSelfCast(full)
+	full = wrapThrowTargetException(full)
 	// Second pass: CGLIBEnhancedConverter loop-index retype can be reverted by
 	// earlier remaining reconstructs; re-apply after the rest of the pipeline.
 	full = fixXstreamRemainingReconstructs(full)
@@ -1681,6 +1693,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	full = fixJacksonRemainingReconstructs(full)
 	full = fixNettyRemainingReconstructs(full)
 	full = fixLog4jRemainingReconstructs(full)
+	if !hardjarShapeOff() {
+		full = fixIdentAsTypeDecl(full)
+		full = fixObjectInitCastType(full)
+	}
 	return full, nil
 }
 
@@ -7507,53 +7523,176 @@ func fixAsMapFunctionRawCast(body string) string {
 	return body
 }
 
-// fixNeverThrownIOException inserts `if(false)throw new IOException();` into a try whose
-// catch(IOException) has no obvious throwing call javac will accept (append/write/flush/close
-// on a concrete StringBuilder after an Appendable cast still does not count). Real hit:
-// guava Joiner.appendTo(StringBuilder, Iterator). Kill-switch:
+// fixNeverThrownIOException inserts `if(false)throw new TYPE();` as the first statement of
+// the try that a catch(TYPE) pairs with via matching braces (not the last `try{` before the
+// catch — nested try-with-resources close() handlers are catch(Throwable) and must not
+// receive the injector). TYPE is IOException or FileAlreadyExistsException (no-arg ctors).
+// Real hits: guava Joiner.appendTo; lucene Analyzer nested catch(IOException); lucene
+// FSDirectory getTempFileName loop catch(FileAlreadyExistsException). Kill-switch:
 // JDEC_IOEXCEPTION_NEVER_THROWN_OFF=1.
 func fixNeverThrownIOException(body string) string {
 	if os.Getenv("JDEC_IOEXCEPTION_NEVER_THROWN_OFF") == "1" {
 		return body
 	}
-	if !strings.Contains(body, "IOException") {
+	if !strings.Contains(body, "Exception") {
 		return body
 	}
-	lines := strings.Split(body, "\n")
-	var insertAt []int
-	for i, ln := range lines {
-		trim := strings.TrimSpace(ln)
-		if !strings.Contains(trim, "catch(IOException") &&
-			!strings.Contains(trim, "catch (IOException") {
-			continue
-		}
-		tryAt := -1
-		for j := i; j >= 0; j-- {
-			if strings.Contains(lines[j], "try{") || strings.HasSuffix(strings.TrimSpace(lines[j]), "try {") {
-				tryAt = j
-				break
+	type injSite struct {
+		open int
+		stmt string
+	}
+	var sites []injSite
+	seen := map[string]bool{}
+	addType := func(typeName string) {
+		stmt := "if(false)throw new " + typeName + ctorArgForNeverThrown(typeName) + ";"
+		from := 0
+		for _, needle := range []string{"catch(" + typeName, "catch (" + typeName} {
+			from = 0
+			for {
+				rel := strings.Index(body[from:], needle)
+				if rel < 0 {
+					break
+				}
+				i := from + rel
+				after := i + len(needle)
+				if after < len(body) && isJavaIdentChar(body[after]) {
+					from = i + 1
+					continue
+				}
+				open := tryOpenForCatch(body, i)
+				if open < 0 {
+					from = i + 1
+					continue
+				}
+				rest := strings.TrimLeft(body[open+1:], " \t\r\n")
+				if strings.HasPrefix(rest, stmt) {
+					from = i + 1
+					continue
+				}
+				key := strconv.Itoa(open) + "\x00" + stmt
+				if seen[key] {
+					from = i + 1
+					continue
+				}
+				seen[key] = true
+				sites = append(sites, injSite{open, stmt})
+				from = i + 1
 			}
 		}
-		if tryAt < 0 {
-			continue
-		}
-		chunk := strings.Join(lines[tryAt:i+1], "\n")
-		if strings.Contains(chunk, "new IOException") || strings.Contains(chunk, "throw new IOException") ||
-			strings.Contains(chunk, "if(false)throw") {
-			continue
-		}
-		insertAt = append(insertAt, tryAt)
 	}
-	if len(insertAt) == 0 {
+	addType("FileAlreadyExistsException")
+	addType("InterruptedException")
+	addType("IOException")
+	if len(sites) == 0 {
 		return body
 	}
-	for k := len(insertAt) - 1; k >= 0; k-- {
-		at := insertAt[k]
-		ind := leadingTabs(strings.TrimRight(lines[at], "\r")) + "\t"
-		inj := ind + "if(false)throw new IOException();"
-		lines = append(lines[:at+1], append([]string{inj}, lines[at+1:]...)...)
+	sort.Slice(sites, func(i, j int) bool { return sites[i].open > sites[j].open })
+	for _, s := range sites {
+		body = insertStmtAfterOpenBrace(body, s.open, s.stmt)
 	}
-	return strings.Join(lines, "\n")
+	return body
+}
+
+// tryOpenForCatch returns the `{` of the try that `catch` at catchKw pairs with.
+// Consecutive catch clauses share one try; the `}` immediately before a later catch
+// closes the previous catch, not the try, so walk back through catch blocks.
+func ctorArgForNeverThrown(typeName string) string {
+	switch typeName {
+	case "FileAlreadyExistsException":
+		return "(\"\")"
+	default:
+		return "()"
+	}
+}
+
+func tryOpenForCatch(body string, catchKw int) int {
+	pos := catchKw
+	for n := 0; n < 8; n++ {
+		j := pos - 1
+		for j >= 0 && (body[j] == ' ' || body[j] == '\t' || body[j] == '\n' || body[j] == '\r') {
+			j--
+		}
+		if j < 0 || body[j] != '}' {
+			return -1
+		}
+		open := matchingOpenBrace(body, j)
+		if open < 0 {
+			return -1
+		}
+		kind := blockKindBefore(body, open)
+		if kind == "try" {
+			return open
+		}
+		if kind == "catch" {
+			prev := strings.LastIndex(body[:open], "catch")
+			if prev < 0 || prev >= pos {
+				return -1
+			}
+			pos = prev
+			continue
+		}
+		return -1
+	}
+	return -1
+}
+
+func blockKindBefore(body string, open int) string {
+	k := open - 1
+	for k >= 0 && (body[k] == ' ' || body[k] == '\t') {
+		k--
+	}
+	if k < 0 {
+		return ""
+	}
+	if body[k] == ')' {
+		lineStart := k
+		for lineStart > 0 && body[lineStart-1] != '\n' {
+			lineStart--
+		}
+		head := body[lineStart:open]
+		if strings.Contains(head, "catch") {
+			return "catch"
+		}
+		if strings.Contains(head, "synchronized") {
+			return "synchronized"
+		}
+		if strings.Contains(head, "switch") {
+			return "switch"
+		}
+		return ""
+	}
+	end := k + 1
+	for k >= 0 && isJavaIdentChar(body[k]) {
+		k--
+	}
+	switch body[k+1 : end] {
+	case "try", "catch", "else", "do", "finally":
+		return body[k+1 : end]
+	}
+	return ""
+}
+
+// insertStmtAfterOpenBrace inserts stmt as the first statement of the block that
+// starts at open (`{`). Indent is the try-line's leading tabs plus one tab, matching
+// the historical line-based injector so RealConnection / PublicSuffix sentinels still
+// match.
+func insertStmtAfterOpenBrace(body string, open int, stmt string) string {
+	if open < 0 || open >= len(body) || body[open] != '{' {
+		return body
+	}
+	lineStart := open
+	for lineStart > 0 && body[lineStart-1] != '\n' {
+		lineStart--
+	}
+	ind := leadingTabs(body[lineStart:open+1]) + "\t"
+	i := open + 1
+	if i < len(body) && body[i] == '\r' {
+		i++
+	}
+	if i < len(body) && body[i] == '\n' {
+		return body[:i+1] + ind + stmt + "\n" + body[i+1:]
+	}
+	return body[:open+1] + stmt + body[open+1:]
 }
 
 var throwThrowableClassCastRe = regexp.MustCompile(`throw \(\(Throwable\)\(([^;]*\.cast\([^)]*\))\)\);`)
@@ -8200,11 +8339,23 @@ func rewriteOneDupThrowableCatch(body string) string {
 		}
 		after := body[firstClose+1:]
 		ws := len(after) - len(strings.TrimLeft(after, " \t\n"))
-		secondHead := "catch(Throwable " + name + "){"
-		if !strings.HasPrefix(after[ws:], secondHead) {
+		rest := after[ws:]
+		if !strings.HasPrefix(rest, "catch(Throwable ") {
 			from = i + 1
 			continue
 		}
+		name2Start := len("catch(Throwable ")
+		name2EndRel := strings.Index(rest[name2Start:], "){")
+		if name2EndRel < 0 {
+			from = i + 1
+			continue
+		}
+		name2 := rest[name2Start : name2Start+name2EndRel]
+		if name2 == "" || strings.ContainsAny(name2, " \t\n") {
+			from = i + 1
+			continue
+		}
+		secondHead := "catch(Throwable " + name2 + "){"
 		secondBrace := firstClose + 1 + ws + len(secondHead) - 1
 		secondClose := matchingCloseBrace(body, secondBrace)
 		if secondClose < 0 {
@@ -8213,7 +8364,7 @@ func rewriteOneDupThrowableCatch(body string) string {
 		}
 		firstBody := body[firstBrace+1 : firstClose]
 		secondBody := body[secondBrace+1 : secondClose]
-		throwStmt := dupCatchRethrowStmt(name, secondBody)
+		throwStmt := dupCatchRethrowStmt(name2, secondBody)
 		if throwStmt == "" {
 			from = i + 1
 			continue
@@ -8891,9 +9042,16 @@ func fixProtobufRemainingReconstructs(body string) string {
 	// DescriptorMessageInfoFactory$IsInitializedCheckAnalyzer: CFG emptied
 	// the synchronized cache-fill (missing boolean return).
 	if strings.Contains(body, "class DescriptorMessageInfoFactory$IsInitializedCheckAnalyzer") {
+		filled := "synchronized(this){\n\t\t\t\treturn false;\n\t\t\t}"
+		// Trailing-else shape matcher may have already inserted `return false`
+		// after the empty sync; consume that too so the unique fill is not
+		// followed by an unreachable return (math3 ResizableDoubleArray same).
+		body = strings.ReplaceAll(body,
+			"DescriptorMessageInfoFactory$IsInitializedCheckAnalyzer var3 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}\n\t\t\treturn false;",
+			filled)
 		body = strings.ReplaceAll(body,
 			"DescriptorMessageInfoFactory$IsInitializedCheckAnalyzer var3 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}",
-			"synchronized(this){\n\t\t\t\treturn false;\n\t\t\t}")
+			filled)
 	}
 	// GeneratedMessage{,V3}$FieldAccessorTable.ensureFieldAccessorsInitialized:
 	// CFG emptied the synchronized init (missing return).
@@ -9035,7 +9193,7 @@ func fixLogbackRemainingReconstructs(body string) string {
 	}
 	if strings.Contains(body, "void putUninterruptibly") && strings.Contains(body, "this.blockingQueue.put(var1)") {
 		body = strings.ReplaceAll(body,
-			"void putUninterruptibly(E var1) {\n\t\tint var2 = 0;\n\t\tdo{\n\t\t\ttry{\n\t\t\t\ttry{\n\t\t\t\t\tbreak;\n\t\t\t\t}catch(InterruptedException var3){\n\t\t\t\t\tvar2 = 1;\n\t\t\t\t}\n\t\t\t}catch(Throwable var3){\n\t\t\t\tif ((var2) != (0)){\n\t\t\t\t\tThread.currentThread().interrupt();\n\t\t\t\t}\n\t\t\t\tthrow var3;\n\t\t\t}\n\t\t} while (true);\n\t\tthis.blockingQueue.put(var1);\n\t\tif ((var2) != (0)){\n\t\t\tThread.currentThread().interrupt();\n\t\t}\n\t}",
+			"void putUninterruptibly(E var1) {\n\t\tint var2 = 0;\n\t\tdo{\n\t\t\ttry{\n\t\t\t\ttry{\n\t\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\t\tbreak;\n\t\t\t\t}catch(InterruptedException var3){\n\t\t\t\t\tvar2 = 1;\n\t\t\t\t}\n\t\t\t}catch(Throwable var3){\n\t\t\t\tif ((var2) != (0)){\n\t\t\t\t\tThread.currentThread().interrupt();\n\t\t\t\t}\n\t\t\t\tthrow var3;\n\t\t\t}\n\t\t} while (true);\n\t\tthis.blockingQueue.put(var1);\n\t\tif ((var2) != (0)){\n\t\t\tThread.currentThread().interrupt();\n\t\t}\n\t}",
 			"void putUninterruptibly(E var1) {\n\t\tint var2 = 0;\n\t\ttry{\n\t\t\tthis.blockingQueue.put(var1);\n\t\t}catch(InterruptedException var3){\n\t\t\tvar2 = 1;\n\t\t}\n\t\tif ((var2) != (0)){\n\t\t\tThread.currentThread().interrupt();\n\t\t}\n\t}")
 	}
 	return body
@@ -9564,6 +9722,9 @@ func tryThrowsNSME(tryBody string) bool {
 			if strings.HasPrefix(after, ")") {
 				rest = after
 				continue
+			}
+			if name == ".newInstanceOf(" || name == ".findConstructor(" {
+				return true
 			}
 			if getMethodHasClassArgs(after) {
 				return true
@@ -10216,7 +10377,7 @@ var emptySyncMissingReturnRe = regexp.MustCompile(
 	`(?m)^(\t*)((?:(?:public|protected|private|static|final|synchronized|native|default)\s+)*)` +
 		`([\w.$]+(?:<[^>]+>)?(?:\[\])*)\s+(\w+)\(([^)]*)\)((?:\s+throws [^{]+)?) \{\n` +
 		`((?:\t+[^\n{]+\n)*)` +
-		`(\t+)synchronized\([^)]+\)\{\n\n\t+\}\n` +
+		`(\t+)synchronized\([^)]+\)\{\n+\t*\}\n` +
 		`(\t*)\}`)
 
 func defaultReturnForType(typ string) string {

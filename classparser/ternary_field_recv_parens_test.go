@@ -574,6 +574,18 @@ func TestFixDupThrowableCatchFinallyIsLoadBearing(t *testing.T) {
 	if strings.Count(on4, "catch(Throwable") != 1 {
 		t.Errorf("fix ON throwable-cast rethrow: expected one catch, got:\n%s", on4)
 	}
+
+	in5 := "" +
+		"try{\n\t\t\twork();\n" +
+		"\t\t}catch(Throwable var9_2){\n" +
+		"\t\t\tvar10 = var9_2;\n\t\t\tCodecUtil.checkFooter(var6,var10);\n" +
+		"\t\t}catch(Throwable var12){\n" +
+		"\t\t\tCodecUtil.checkFooter(var6,var10);\n\t\t\tthrow var12;\n" +
+		"\t\t}\n"
+	on5 := fixDupThrowableCatchFinally(in5)
+	if strings.Count(on5, "catch(Throwable") != 1 {
+		t.Errorf("fix ON different-ident dup Throwable: expected one catch, got:\n%s", on5)
+	}
 }
 
 func TestFixRescheduleUnlockFinallyIsLoadBearing(t *testing.T) {

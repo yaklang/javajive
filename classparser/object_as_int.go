@@ -64,10 +64,22 @@ func fixIntUsedAsInstanceof(body string) string {
 }
 
 func objectUsedAsInt(chunk, ident string) bool {
+	// A local used as a monitor, assigned `new`, or compared to null is a
+	// reference slot. Those coinciding with `) > (` elsewhere in the member
+	// must not flip it back to int (ConstructorResolver lock object).
+	if strings.Contains(chunk, "synchronized("+ident) ||
+		strings.Contains(chunk, ident+" = new ") ||
+		strings.Contains(chunk, ident+") == (null)") ||
+		strings.Contains(chunk, ident+") != (null)") {
+		return false
+	}
 	return strings.Contains(chunk, "(-1) != ("+ident) ||
 		strings.Contains(chunk, ident+") != (-1)") ||
 		strings.Contains(chunk, ") + ("+ident+")") ||
 		strings.Contains(chunk, ident+") + (") ||
+		strings.Contains(chunk, "Character.charCount("+ident+")") ||
+		strings.Contains(chunk, "Character.charCount(("+ident) ||
+		strings.Contains(chunk, "] = "+ident+" = ") ||
 		strings.Contains(chunk, ".write(") && strings.Contains(chunk, ","+ident+")") ||
 		strings.Contains(chunk, ident+" = "+ident) && strings.Contains(chunk, ".read(") ||
 		strings.Contains(chunk, ident+") > (") ||

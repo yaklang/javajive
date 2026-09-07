@@ -307,6 +307,9 @@ func TestJarRoundTripRepackage(t *testing.T) {
 				"assertj":       true, // assertj-core 3.24.2 (tree 0/812, verify 816/816)
 				"zxing":         true, // zxing-core 3.3.3 (tree 0/260, verify 275/275)
 				"freemarker":    true, // freemarker 2.3.33 (tree 0/1308, verify 1308/1308)
+				"mockito":       true, // mockito-core 4.5.1 (tree 0/567, verify 570/570)
+				"spring-beans":  true, // spring-beans 5.3.27 (tree 0/391, verify 379/379)
+				"lucene":        true, // lucene-core 8.11.1 (tree 0/2166, verify 2146/2146)
 			}
 			if provenClean[name] {
 				if treeErr != 0 {

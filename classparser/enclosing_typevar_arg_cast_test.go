@@ -112,6 +112,7 @@ func TestImmediateFutureCastIsLoadBearing(t *testing.T) {
 	}
 
 	t.Setenv("JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF", "1")
+	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
 	off, err := DecompileWithResolver(data, resolver)
 	if err != nil {
 		t.Fatalf("decompile OFF: %v", err)

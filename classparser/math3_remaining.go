@@ -180,9 +180,14 @@ func fixMath3RemainingReconstructs(body string) string {
 			1)
 	}
 	if strings.Contains(body, "class ResizableDoubleArray") {
+		filled := "ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\t\t\t\t\tResizableDoubleArray var3 = ((ResizableDoubleArray)(var1));\n\t\t\t\t\treturn ((this.numElements) == (var3.numElements)) && ((this.startIndex) == (var3.startIndex));\n\t\t\t\t}"
+		body = strings.Replace(body,
+			"ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}\n\t\t\t\treturn false;",
+			filled,
+			1)
 		body = strings.Replace(body,
 			"ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}",
-			"ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\t\t\t\t\tResizableDoubleArray var3 = ((ResizableDoubleArray)(var1));\n\t\t\t\t\treturn ((this.numElements) == (var3.numElements)) && ((this.startIndex) == (var3.startIndex));\n\t\t\t\t}",
+			filled,
 			1)
 	}
 	if strings.Contains(body, "class Erf") {

@@ -28,10 +28,24 @@ func fixIdentSelfCast(body string) string {
 		rest = rest[1:]
 		if strings.HasPrefix(rest, "(") {
 			ident2, ok2, rest2 := readJavaIdent(rest[1:])
-			if ok2 && ident2 == ident && strings.HasPrefix(rest2, ")") {
-				body = body[:i] + ident + rest2[1:]
-				from = i + len(ident)
-				continue
+			if ok2 && ident2 == ident {
+				if strings.HasPrefix(rest2, ")") {
+					body = body[:i] + ident + rest2[1:]
+					from = i + len(ident)
+					continue
+				}
+				// `(varN)(varN.getTargetException())` — ident used as a type
+				// around a call on the same local (MethodInvokingBean).
+				if rest2 != "" && (rest2[0] == '.' || rest2[0] == '[') {
+					innerOpen := i + 1 + len(ident) + 1
+					innerClose := matchingCloseParen(body, innerOpen)
+					if innerClose > innerOpen {
+						expr := body[innerOpen+1 : innerClose]
+						body = body[:i] + expr + body[innerClose+1:]
+						from = i + len(expr)
+						continue
+					}
+				}
 			}
 		}
 		trimmed := strings.TrimLeft(rest, " \t")

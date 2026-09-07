@@ -30,6 +30,7 @@ package cross
 import (
 	"archive/zip"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -388,6 +389,55 @@ var jarSpecs = map[string]jarSpec{
 	"zxing": {
 		relPath: "com/google/zxing/core/3.3.3/core-3.3.3.jar",
 	},
+	// Typical-hard expansion (control-flow / generics / bytecode-enhancement).
+	// Not in the original 34. Optional plugin packages on the decompiled import
+	// list are classpath completion, same class as spring reactor / okhttp android.
+	"bytebuddy": {
+		relPath: "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
+		depGlob: []string{
+			"com/google/code/findbugs/annotations/*/annotations-*.jar",
+			"com/github/spotbugs/spotbugs-annotations/*/spotbugs-annotations-*.jar",
+			"com/google/code/findbugs/jsr305/*/jsr305-*.jar",
+			"net/java/dev/jna/jna/*/jna-*.jar",
+			"net/bytebuddy/byte-buddy-agent/1.12.23/byte-buddy-agent-1.12.23.jar",
+		},
+	},
+	"mockito": {
+		relPath: "org/mockito/mockito-core/4.5.1/mockito-core-4.5.1.jar",
+		depGlob: []string{
+			// string-sort of 1.* would pick 1.9.13; pin the 1.12 line mockito 4.5 was built with.
+			"net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
+			"net/bytebuddy/byte-buddy-agent/1.12.23/byte-buddy-agent-1.12.23.jar",
+			"org/objenesis/objenesis/3.2/objenesis-3.2.jar",
+			"org/opentest4j/opentest4j/*/opentest4j-*.jar",
+			"junit/junit/*/junit-*.jar",
+			"org/hamcrest/hamcrest-core/*/hamcrest-core-*.jar",
+			"org/hamcrest/hamcrest/*/hamcrest-*.jar",
+		},
+	},
+	"spring-beans": {
+		relPath: "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar",
+		depGlob: []string{
+			"org/springframework/spring-core/5.3.27/spring-core-5.3.27.jar",
+			"org/springframework/spring-jcl/5.3.27/spring-jcl-5.3.27.jar",
+			"org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar",
+			"javax/inject/javax.inject/*/javax.inject-*.jar",
+			"jakarta/inject/jakarta.inject-api/*/jakarta.inject-api-*.jar",
+			// Spring 5.3 GroovyBeanDefinitionReader is Groovy 2.x; 4.x is an
+			// environment false-positive (same class as Mutiny 2.x vs 1.x).
+			"org/codehaus/groovy/groovy/2.5.14/groovy-2.5.14.jar",
+			// StreamingMarkupBuilder lives in groovy-xml, not groovy-core.
+			"org/codehaus/groovy/groovy-xml/2.5.14/groovy-xml-2.5.14.jar",
+			"org/jetbrains/kotlin/kotlin-stdlib/*/kotlin-stdlib-*.jar",
+			"org/jetbrains/kotlin/kotlin-reflect/*/kotlin-reflect-*.jar",
+			"javax/validation/validation-api/*/validation-api-*.jar",
+			"jakarta/validation/jakarta.validation-api/*/jakarta.validation-api-*.jar",
+			"com/google/code/findbugs/jsr305/*/jsr305-*.jar",
+		},
+	},
+	"lucene": {
+		relPath: "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
+	},
 	"freemarker": {
 		relPath: "org/freemarker/freemarker/2.3.33/freemarker-2.3.33.jar",
 		depGlob: []string{
@@ -465,6 +515,20 @@ func classEntries(t *testing.T, jarPath string) []string {
 	for _, f := range zr.File {
 		if strings.HasSuffix(f.Name, ".class") && !strings.HasSuffix(f.Name, "module-info.class") {
 			names = append(names, f.Name)
+			continue
+		}
+		// Mockito stores bootstrap-injected classes as CAFEBABE `.raw` (MockMethodDispatcher).
+		if strings.HasSuffix(f.Name, ".raw") {
+			rc, err := f.Open()
+			if err != nil {
+				continue
+			}
+			hdr := make([]byte, 4)
+			_, err = io.ReadFull(rc, hdr)
+			rc.Close()
+			if err == nil && hdr[0] == 0xca && hdr[1] == 0xfe && hdr[2] == 0xba && hdr[3] == 0xbe {
+				names = append(names, f.Name)
+			}
 		}
 	}
 	sort.Strings(names)
@@ -524,8 +588,8 @@ func decompileAll(t *testing.T, jarPath, root string, maxFiles int) (files []str
 			decompFail++
 			// 仍写出 (会编译失败), 让 iso 计数把它算进 decErr
 		}
-		// entry 形如 com/google/common/math/LongMath$1.class
-		rel := strings.TrimSuffix(entry, ".class") + ".java" // 保留扁平 $ 名
+		// entry 形如 com/google/common/math/LongMath$1.class (or mockito .raw class bytes)
+		rel := strings.TrimSuffix(strings.TrimSuffix(entry, ".class"), ".raw") + ".java" // 保留扁平 $ 名
 		dst := filepath.Join(root, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)

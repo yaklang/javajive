@@ -72,6 +72,8 @@ func TestRegressionSeedsAreDeterministic(t *testing.T) {
 		"MultiFormatReader.class":     true,
 		"PDF417ScanningDecoder.class": true,
 		"QRDecoder.class":             true,
+		"TypeDefinition$Sort.class":   true, // nested enum dump map-order leftover
+		"GraalImageCode.class":        true, // enum clinit extra-arg dump map-order leftover
 	}
 	for _, classPath := range classes {
 		name := filepath.Base(classPath)

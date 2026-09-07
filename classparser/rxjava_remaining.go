@@ -132,22 +132,6 @@ func fixRxjavaRemainingReconstructs(body string) string {
 			1)
 		body = replaceDuplicateEmptyLoopLabel(body)
 	}
-	if strings.Contains(body, "class CompositeDisposable") {
-		body = strings.Replace(body,
-			"public boolean delete(Disposable var1) {\n\t\tObjectHelper.requireNonNull(var1,\"disposables is null\");\n\t\tif (this.disposed){\n\t\t\treturn false;\n\t\t}else{\n\t\t\tCompositeDisposable var2 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}\n\t\t}\n\t}",
-			"public boolean delete(Disposable var1) {\n\t\tObjectHelper.requireNonNull(var1,\"disposables is null\");\n\t\tif (this.disposed){\n\t\t\treturn false;\n\t\t}else{\n\t\t\tCompositeDisposable var2 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}\n\t\t\treturn false;\n\t\t}\n\t}",
-			1)
-		body = strings.Replace(body,
-			"public int size() {\n\t\tif (this.disposed){\n\t\t\treturn 0;\n\t\t}else{\n\t\t\tCompositeDisposable var1 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}\n\t\t}\n\t}",
-			"public int size() {\n\t\tif (this.disposed){\n\t\t\treturn 0;\n\t\t}else{\n\t\t\tCompositeDisposable var1 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}\n\t\t\treturn 0;\n\t\t}\n\t}",
-			1)
-	}
-	if strings.Contains(body, "class ListCompositeDisposable") {
-		body = strings.Replace(body,
-			"public boolean delete(Disposable var1) {\n\t\tObjectHelper.requireNonNull(var1,\"Disposable item is null\");\n\t\tif (this.disposed){\n\t\t\treturn false;\n\t\t}else{\n\t\t\tListCompositeDisposable var2 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}\n\t\t}\n\t}",
-			"public boolean delete(Disposable var1) {\n\t\tObjectHelper.requireNonNull(var1,\"Disposable item is null\");\n\t\tif (this.disposed){\n\t\t\treturn false;\n\t\t}else{\n\t\t\tListCompositeDisposable var2 = this;\n\t\t\tsynchronized(this){\n\n\t\t\t}\n\t\t\treturn false;\n\t\t}\n\t}",
-			1)
-	}
 	if rxClassHasTypeVar(body, "TRight") {
 		body = strings.ReplaceAll(body, ".onNext(var15.next())", ".onNext((TRight)(var15.next()))")
 	}

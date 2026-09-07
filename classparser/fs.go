@@ -67,7 +67,11 @@ func NewJarFSWithOptions(zipFs *filesys.ZipFS, recursiveParse bool) *JarFS {
 // `Outer$N.class` from the folded enum source on recompile. Gated by JDEC_NO_ENUM_FOLD so it can be
 // disabled for load-bearing regression and to fall back to the exact per-class behavior.
 func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
-	if !strings.HasSuffix(strings.ToLower(name), ".class") {
+	lower := strings.ToLower(name)
+	if !strings.HasSuffix(lower, ".class") && !strings.HasSuffix(lower, ".raw") {
+		return data
+	}
+	if strings.HasSuffix(lower, ".raw") && (len(data) < 4 || data[0] != 0xca || data[1] != 0xfe || data[2] != 0xba || data[3] != 0xbe) {
 		return data
 	}
 	cf, err := Parse(data)

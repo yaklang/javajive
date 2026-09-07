@@ -103,9 +103,9 @@ func TestJacksonRecordAccessorNSMEIsLoadBearing(t *testing.T) {
 }
 
 func TestLog4jCompositeMergeStrategyNSMEIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/CompositeConfiguration.class", "JDEC_ORIG14_REMAINING_OFF",
-		"InstantiationException | NoSuchMethodException var3",
-		"InstantiationException var3){")
+	assertOrig14Decompile(t, "testdata/regression/NsmeCatchAdv.class",
+		"ClassNotFoundException | NoSuchMethodException var2",
+		"catch(ClassNotFoundException var2){")
 }
 
 func TestNettyWildcardAddressHolderIsLoadBearing(t *testing.T) {

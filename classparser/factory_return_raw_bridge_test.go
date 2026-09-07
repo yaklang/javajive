@@ -144,6 +144,88 @@ func TestFixNeverThrownIOExceptionIsLoadBearing(t *testing.T) {
 	}
 }
 
+func TestFixNeverThrownIOExceptionPairsMatchingTry(t *testing.T) {
+	in := "" +
+		"\ttry{\n" +
+		"\t\ttry{\n" +
+		"\t\t\ttry{\n" +
+		"\t\t\t\tvar3.close();\n" +
+		"\t\t\t}catch(Throwable var6_1){\n" +
+		"\t\t\t\tvar4.addSuppressed(var6_1);\n" +
+		"\t\t\t}\n" +
+		"\t\t}catch(IOException var3_1){\n" +
+		"\t\t\tthrow new IllegalStateException(\"Normalization threw an unexpected exception\",(Throwable)(var3_1));\n" +
+		"\t\t}\n" +
+		"\t}catch(IOException var3_1){\n" +
+		"\t\tthrow new IllegalStateException(\"Normalization threw an unexpected exception\",(Throwable)(var3_1));\n" +
+		"\t}\n"
+	os.Unsetenv("JDEC_IOEXCEPTION_NEVER_THROWN_OFF")
+	on := fixNeverThrownIOException(in)
+	if strings.Count(on, "if(false)throw new IOException();") != 2 {
+		t.Fatalf("expected injector in each IOException try, got %d:\n%s", strings.Count(on, "if(false)throw new IOException();"), on)
+	}
+	closeTry := strings.Index(on, "var3.close();")
+	if closeTry < 0 {
+		t.Fatal("missing close()")
+	}
+	before := on[:closeTry]
+	lastTry := strings.LastIndex(before, "try{")
+	chunk := on[lastTry:closeTry]
+	if strings.Contains(chunk, "if(false)throw new IOException()") {
+		t.Fatalf("injector landed in innermost Throwable close() try:\n%s", chunk)
+	}
+	t.Setenv("JDEC_IOEXCEPTION_NEVER_THROWN_OFF", "1")
+	off := fixNeverThrownIOException(in)
+	if strings.Contains(off, "if(false)throw new IOException()") {
+		t.Fatalf("fix OFF: expected no inject, got:\n%s", off)
+	}
+}
+
+func TestFixNeverThrownIOExceptionSkipsPriorCatch(t *testing.T) {
+	in := "" +
+		"\ttry{\n" +
+		"\t\tbreak;\n" +
+		"\t}catch(InterruptedIOException var2){\n" +
+		"\t\tThread.interrupted();\n" +
+		"\t}catch(IOException var2){\n" +
+		"\t\treturn;\n" +
+		"\t}\n"
+	os.Unsetenv("JDEC_IOEXCEPTION_NEVER_THROWN_OFF")
+	on := fixNeverThrownIOException(in)
+	if !strings.Contains(on, "try{\n\t\tif(false)throw new IOException();\n\t\tbreak;") {
+		t.Fatalf("injector must be first stmt of try, got:\n%s", on)
+	}
+	if strings.Contains(on, "InterruptedIOException var2){\n\t\tif(false)throw") {
+		t.Fatalf("injector landed in prior catch:\n%s", on)
+	}
+}
+
+func TestFixNeverThrownFileAlreadyExistsExceptionIsLoadBearing(t *testing.T) {
+	in := "" +
+		"\tdo{\n" +
+		"\t\ttry{\n" +
+		"\t\t\tvar4 = getTempFileName(var1,var2,this.nextTempFileCounter.getAndIncrement());\n" +
+		"\t\t\tif (this.pendingDeletes.contains(var4)){\n" +
+		"\t\t\t\tcontinue;\n" +
+		"\t\t\t}else{\n" +
+		"\t\t\t\tbreak;\n" +
+		"\t\t\t}\n" +
+		"\t\t}catch(FileAlreadyExistsException var4_1){\n" +
+		"\t\t\tthrow new RuntimeException(var4_1);\n" +
+		"\t\t}\n" +
+		"\t} while (true);\n"
+	os.Unsetenv("JDEC_IOEXCEPTION_NEVER_THROWN_OFF")
+	on := fixNeverThrownIOException(in)
+	if !strings.Contains(on, "if(false)throw new FileAlreadyExistsException(\"\");") {
+		t.Fatalf("fix ON: expected FAE injector, got:\n%s", on)
+	}
+	t.Setenv("JDEC_IOEXCEPTION_NEVER_THROWN_OFF", "1")
+	off := fixNeverThrownIOException(in)
+	if strings.Contains(off, "if(false)throw new FileAlreadyExistsException") {
+		t.Fatalf("fix OFF: expected no inject, got:\n%s", off)
+	}
+}
+
 func TestFixAsMapFunctionRawCastRewritesWrongCast(t *testing.T) {
 	in := "this.asMap((Function<MergedAnnotation, AnnotationAttributes>)((l0) -> {\nreturn new AnnotationAttributes(l0.getType());\n}),var1)"
 	os.Unsetenv("JDEC_ASMAP_FUNCTION_CAST_OFF")

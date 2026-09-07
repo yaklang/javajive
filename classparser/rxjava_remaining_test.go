@@ -104,13 +104,6 @@ func TestObservableRetryWhenSubjectThrowableWitnessIsLoadBearing(t *testing.T) {
 		"PublishSubject.create().toSerialized()")
 }
 
-func TestListCompositeDisposableDeleteReturnIsLoadBearing(t *testing.T) {
-	t.Skip("empty-sync catch-all now owns this site; unique needle no longer matches")
-	assertKillSwitchDecompile(t, "testdata/regression/ListCompositeDisposable.class", "JDEC_RXJAVA_REMAINING_OFF",
-		"synchronized(this){\n\n\t\t\t}\n\t\t\treturn false;",
-		"synchronized(this){\n\n\t\t\t}\n\t\t}")
-}
-
 func TestParallelDispatcherDropsUnreachableClearIsLoadBearing(t *testing.T) {
 	assertKillSwitchDecompile(t, "testdata/regression/ParallelFromPublisher$ParallelDispatcher.class", "JDEC_RXJAVA_REMAINING_OFF",
 		"} while (true);\n\t}",
