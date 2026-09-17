@@ -90,7 +90,74 @@ jobs:
 
       - name: Test (race detector)
         if: runner.os == 'Linux'
-        run: go test ./... -race -count=1 -timeout=30m
+        # The large classparser corpus is covered in full by the shards below.
+        run: |
+          mapfile -t packages < <(go list ./... | awk '$0 != "github.com/yaklang/javajive/classparser"')
+          go test "${packages[@]}" -race -count=1 -timeout=30m
+
+  classparser-race:
+    name: Classparser race / Go ${{ matrix.go }} / shard ${{ matrix.shard }}
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.22', '1.23']
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Partition every top-level test and seed
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: |
+          mkdir -p artifacts
+          go test -race ./classparser -list . > artifacts/test-list.txt
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          names = sorted(line for line in Path('artifacts/test-list.txt').read_text().splitlines()
+                         if line.startswith(('Test', 'Fuzz', 'Example')))
+          assert names and len(names) == len(set(names)), 'missing or duplicate test names'
+          seed_suites = ['TestDecompileSyntaxRegression', 'TestRegressionSeedsAreDeterministic']
+          assert all(name in names for name in seed_suites)
+          regular = [name for name in names if name not in seed_suites]
+          shards = [regular[index::8] for index in range(8)]
+          assert sorted(name for shard in shards for name in shard) == regular
+          index = int(os.environ['SHARD_INDEX'])
+          selected = shards[index]
+          assert selected, 'empty shard'
+          Path('artifacts/selected-tests.txt').write_text('\n'.join(selected) + '\n')
+          Path('artifacts/test-pattern.txt').write_text('^(' + '|'.join(selected) + ')$')
+          seeds = sorted(p.stem for p in Path('classparser/testdata/regression').glob('*.class'))
+          seed_shards = [seeds[index::8] for index in range(8)]
+          assert seeds and sorted(seed for shard in seed_shards for seed in shard) == seeds
+          selected_seeds = seed_shards[index]
+          assert selected_seeds, 'empty seed shard'
+          Path('artifacts/selected-seeds.txt').write_text('\n'.join(selected_seeds) + '\n')
+          # The syntax suite uses the stem; the determinism suite retains .class.
+          subtests = '|'.join(re.escape(seed) + r'(\.class)?' for seed in selected_seeds)
+          Path('artifacts/seed-pattern.txt').write_text('^(' + '|'.join(seed_suites) + ')$/^(' + subtests + ')$')
+          print(f'Running {len(selected)} regular tests and {len(selected_seeds)} regression seeds; every determinism repetition retained')
+          PY
+      - name: Test corpus with race detector
+        run: go test ./classparser -race -count=1 -timeout=30m -run "$(cat artifacts/test-pattern.txt)"
+      - name: Test regression seeds with race detector
+        run: go test ./classparser -race -count=1 -timeout=60m -run "$(cat artifacts/seed-pattern.txt)"
+      - name: Upload shard manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: race-go-${{ matrix.go }}-shard-${{ matrix.shard }}
+          path: artifacts/
+          if-no-files-found: error
 
   cross-build:
     name: Cross build CLI (${{ matrix.goos }}/${{ matrix.goarch }})
