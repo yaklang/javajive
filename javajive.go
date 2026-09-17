@@ -52,6 +52,20 @@ func Decompile(classBytes []byte) (string, error) {
 	return classparser.Decompile(classBytes)
 }
 
+// DecompileOptions selects the source-recovery policy and optional class resolver.
+type DecompileOptions = classparser.DecompileOptions
+type DecompileResult = classparser.DecompileResult
+type DecompileMode = classparser.DecompileMode
+
+const (
+	Precision     = classparser.Precision
+	Compatibility = classparser.Compatibility
+)
+
+func DecompileWithOptions(classBytes []byte, options DecompileOptions) (DecompileResult, error) {
+	return classparser.DecompileWithOptions(classBytes, options)
+}
+
 // DecompileFile reads a single .class file from disk and decompiles it.
 func DecompileFile(path string) (string, error) {
 	data, err := os.ReadFile(path)

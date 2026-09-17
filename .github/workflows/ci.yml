@@ -132,3 +132,37 @@ jobs:
           name: javajive-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
           if-no-files-found: error
+
+  semantic-audit:
+    name: Semantic audit / JDK ${{ matrix.java }}
+    needs: lint
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['17', '21']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - name: Verify isolated semantic families
+        env:
+          JDEC_SEMANTIC_REPORT_DIR: ${{ github.workspace }}/artifacts/semantic
+        run: |
+          mkdir -p artifacts
+          go test ./test/cross -run '^TestAudit' -count=1 -timeout=10m -json > artifacts/semantic-tests.json
+      - name: Fuzz instruction decoder
+        run: go test ./classparser/decompiler/core -run '^$' -fuzz '^FuzzAuditDecoder$' -fuzztime=30s -parallel=2
+      - name: Upload independent observations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semantic-jdk-${{ matrix.java }}
+          path: artifacts/
+          if-no-files-found: error

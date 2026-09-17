@@ -22,7 +22,7 @@ import (
 // `assign = new T[N]` + sequential element-store shape here, so a single post-pass covers them. The
 // fold must run as a post-pass rather than during emission because suppressing the element-store
 // opcodes inline corrupts jump targets that land on them; the relinking here preserves the CFG.
-func RewriteNewArrayList(node *Node, delMap map[string][3]int) {
+func RewriteNewArrayList(node *Node, delMap map[string][3]int, allowEffects ...func(*Node, *Node) bool) {
 	if len(node.Next) != 1 {
 		return
 	}
@@ -53,7 +53,7 @@ func RewriteNewArrayList(node *Node, delMap map[string][3]int) {
 	next := node.Next[0]
 	vs := []values.JavaValue{}
 	for i := 0; i < lvar1; i++ {
-		if len(next.Next) != 1 {
+		if len(next.Next) != 1 || hasDistinctPredecessors(next) {
 			return
 		}
 		asEleSt, ok := next.Statement.(*statements.AssignStatement)
@@ -77,6 +77,18 @@ func RewriteNewArrayList(node *Node, delMap map[string][3]int) {
 		if lvar1 != i {
 			return
 		}
+		effect, uses := values.InspectValue(asEleSt.JavaValue)
+		// Publishing the array local after all RHS evaluation changes self/alias reads
+		// and exception-handler observations. Effectful RHS values are allowed only
+		// when the caller proves no local exception handler can observe partial fills.
+		if effect != 0 && (len(allowEffects) == 0 || !allowEffects[0](node, next) || effect&values.EffectOpaque != 0) {
+			return
+		}
+		for use := range uses {
+			if use == refVal || use.VarUid == refVal.VarUid {
+				return
+			}
+		}
 		vs = append(vs, asEleSt.JavaValue)
 		next = next.Next[0]
 	}
@@ -88,10 +100,23 @@ func RewriteNewArrayList(node *Node, delMap map[string][3]int) {
 	node.AddNext(next)
 }
 
-func MiscRewriter(rootNode *Node, delMap map[string][3]int) error {
+func MiscRewriter(rootNode *Node, delMap map[string][3]int, allowEffects ...func(*Node, *Node) bool) error {
 	WalkGraph[*Node](rootNode, func(n *Node) ([]*Node, error) {
-		RewriteNewArrayList(n, delMap)
+		RewriteNewArrayList(n, delMap, allowEffects...)
 		return n.Next, nil
 	})
 	return nil
+}
+
+// Repeated edges from dup lowering do not create an external entry.
+func hasDistinctPredecessors(n *Node) bool {
+	var first *Node
+	for _, src := range n.Source {
+		if first == nil {
+			first = src
+		} else if src != first {
+			return true
+		}
+	}
+	return false
 }

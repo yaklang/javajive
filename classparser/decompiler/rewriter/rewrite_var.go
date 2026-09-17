@@ -241,10 +241,10 @@ func collectEmbeddedDeclInfos(sts []statements.Statement, byID map[*utils.Variab
 		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
 			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil {
 				byID[ref.Id] = struct{}{}
-				name := ref.String(hoistProbeCtx)
+				name := ref.String(&class_context.ClassContext{})
 				ts := ""
 				if t := ref.Type(); t != nil {
-					ts = t.String(hoistProbeCtx)
+					ts = t.String(&class_context.ClassContext{})
 				}
 				byName[name] = append(byName[name], embeddedDeclInfo{id: ref.Id, typeStr: ts})
 			}
@@ -258,10 +258,10 @@ func collectEmbeddedDeclInfos(sts []statements.Statement, byID map[*utils.Variab
 			for _, exc := range tc.Exception {
 				if exc != nil && exc.Id != nil {
 					byID[exc.Id] = struct{}{}
-					name := exc.String(hoistProbeCtx)
+					name := exc.String(&class_context.ClassContext{})
 					ts := ""
 					if t := exc.Type(); t != nil {
-						ts = t.String(hoistProbeCtx)
+						ts = t.String(&class_context.ClassContext{})
 					}
 					byName[name] = append(byName[name], embeddedDeclInfo{id: exc.Id, typeStr: ts})
 				}
@@ -320,11 +320,11 @@ func SynthesizeUndeclaredEmbeddedAssignDecls(sts *[]statements.Statement, target
 		}
 		// Only synthetic var<slot> locals are hoist candidates; a value carrying no static type
 		// cannot render a `T x;` declaration, so leave it to the textual safety net.
-		name := ref.String(hoistProbeCtx)
+		name := ref.String(&class_context.ClassContext{})
 		if !generatedLocalNameRe.MatchString(name) || ref.Type() == nil {
 			continue
 		}
-		targetType := ref.Type().String(hoistProbeCtx)
+		targetType := ref.Type().String(&class_context.ClassContext{})
 		hasIncompatibleCollider := false
 		hasCompatibleSameName := false
 		for _, d := range declByName[name] {
@@ -1073,7 +1073,7 @@ func prebindEscapingIfElseSlots(scope *Scope, ifst *statements.IfStatement, afte
 		// be merged into one declaration (that would be an uncompilable type clash); guarding on the
 		// rendered type keeps such genuine slot reuses split.
 		it, et := ifRef.Type(), elseRef.Type()
-		if it == nil || et == nil || it.String(hoistProbeCtx) != et.String(hoistProbeCtx) {
+		if it == nil || et == nil || it.String(&class_context.ClassContext{}) != et.String(&class_context.ClassContext{}) {
 			continue
 		}
 		origId := ifRef.Id
@@ -1178,7 +1178,7 @@ func prebindParallelTypedIfElseDefs(scope *Scope, ifst *statements.IfStatement, 
 				continue
 			}
 			seen[ref.VarUid] = struct{}{}
-			t := ref.Type().String(hoistProbeCtx)
+			t := ref.Type().String(&class_context.ClassContext{})
 			res[t] = append(res[t], ref)
 		}
 		return res
@@ -1419,7 +1419,7 @@ func hoistSwitchDeclarations(sts *[]statements.Statement) {
 	*sts = out
 }
 
-var hoistProbeCtx = &class_context.ClassContext{}
+// Each render probe owns its import state; sharing it races across requests.
 
 // switchHoistDeclarations demotes the in-case declaration of any local that is declared inside a
 // switch case yet read after the switch to a plain assignment, and returns the bare declarations
@@ -1493,7 +1493,7 @@ func switchHoistDeclarations(sw *statements.SwitchStatement, afterSts []statemen
 			continue
 		}
 		targetRef := refByUid[uid]
-		name := targetRef.String(hoistProbeCtx)
+		name := targetRef.String(&class_context.ClassContext{})
 		// Decide "read after the switch" by VARIABLE IDENTITY, not by rendered name. JVM slot reuse
 		// and rewriteVar's per-scope name counter (a switch-case sub-scope consumes a varN that the
 		// parent counter never advances past) can give an UNRELATED later local the same varN. A
@@ -1607,7 +1607,7 @@ func syncHoistDeclarations(sync *statements.SynchronizedStatement, afterSts []st
 			continue
 		}
 		targetRef := refByUid[uid]
-		name := targetRef.String(hoistProbeCtx)
+		name := targetRef.String(&class_context.ClassContext{})
 		if name == "" {
 			continue
 		}
@@ -1752,7 +1752,7 @@ func assignmentValueIsEmptySlot(value values.JavaValue) (ok bool) {
 			ok = true
 		}
 	}()
-	return strings.Contains(value.String(hoistProbeCtx), values.EmptySlotValuePlaceholder)
+	return strings.Contains(value.String(&class_context.ClassContext{}), values.EmptySlotValuePlaceholder)
 }
 
 // ifHoistDeclarations demotes declarations inside an if/else tree when the local is read after the
@@ -1833,13 +1833,13 @@ func ifHoistDeclarations(ifst *statements.IfStatement, afterSts []statements.Sta
 			continue
 		}
 		targetRef := refByUid[uid]
-		name := targetRef.String(hoistProbeCtx)
+		name := targetRef.String(&class_context.ClassContext{})
 		for _, as := range assignsByUid[uid] {
 			ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
 			if !ok || ref == nil || ref.Id == nil {
 				continue
 			}
-			candidateName := ref.String(hoistProbeCtx)
+			candidateName := ref.String(&class_context.ClassContext{})
 			if candidateName != "" && statementsReadName(afterSts, candidateName) {
 				targetRef = as.LeftValue
 				name = candidateName
@@ -1915,7 +1915,7 @@ func parallelArmDeclHoist(ifst *statements.IfStatement, beforeSts, afterSts []st
 			if !ok || ref == nil || ref.Id == nil || ref.IsThis || ref.IsParam {
 				continue
 			}
-			name := ref.String(hoistProbeCtx)
+			name := ref.String(&class_context.ClassContext{})
 			if !generatedLocalNameRe.MatchString(name) {
 				continue
 			}
@@ -1983,9 +1983,9 @@ func parallelArmDeclHoist(ifst *statements.IfStatement, beforeSts, afterSts []st
 			continue
 		}
 		var declRef values.JavaValue
-		if ifRef.Type().String(hoistProbeCtx) == ifTok {
+		if ifRef.Type().String(&class_context.ClassContext{}) == ifTok {
 			declRef = ifAs.LeftValue
-		} else if elseRef.Type().String(hoistProbeCtx) == elseTok {
+		} else if elseRef.Type().String(&class_context.ClassContext{}) == elseTok {
 			declRef = elseAs.LeftValue
 		} else {
 			continue
@@ -2009,7 +2009,7 @@ func renderedArmDeclType(as *statements.AssignStatement, name string) (tok strin
 			tok = ""
 		}
 	}()
-	s := as.String(hoistProbeCtx)
+	s := as.String(&class_context.ClassContext{})
 	idx := strings.Index(s, " "+name)
 	if idx <= 0 {
 		return ""
@@ -2030,7 +2030,7 @@ func statementsDeclareNameTopLevel(sts []statements.Statement, name string) bool
 		if !ok || ref == nil {
 			continue
 		}
-		if ref.String(hoistProbeCtx) == name {
+		if ref.String(&class_context.ClassContext{}) == name {
 			return true
 		}
 	}
@@ -2049,7 +2049,7 @@ func assignRendersAsPlain(as *statements.AssignStatement) (ok bool) {
 		}
 	}()
 	as.IsFirst, as.IsDeclare = false, false
-	_ = as.String(hoistProbeCtx)
+	_ = as.String(&class_context.ClassContext{})
 	return true
 }
 
@@ -2068,7 +2068,7 @@ func assignsReadAfterByIdentity(afterSts []statements.Statement, assigns []*stat
 	if os.Getenv("JDEC_SWITCH_HOIST_IDENTITY_OFF") == "1" {
 		for _, as := range assigns {
 			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
-				if statementsReadName(afterSts, ref.String(hoistProbeCtx)) {
+				if statementsReadName(afterSts, ref.String(&class_context.ClassContext{})) {
 					return true
 				}
 			}
@@ -2104,13 +2104,13 @@ func statementsReadName(sts []statements.Statement, name string) (res bool) {
 	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
 	for _, st := range sts {
 		if as, ok := st.(*statements.AssignStatement); ok {
-			if as.JavaValue != nil && re.MatchString(as.JavaValue.String(hoistProbeCtx)) {
+			if as.JavaValue != nil && re.MatchString(as.JavaValue.String(&class_context.ClassContext{})) {
 				return true
 			}
-			if as.ArrayMember != nil && re.MatchString(as.ArrayMember.String(hoistProbeCtx)) {
+			if as.ArrayMember != nil && re.MatchString(as.ArrayMember.String(&class_context.ClassContext{})) {
 				return true
 			}
-			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref.String(hoistProbeCtx) == name && (as.IsFirst || as.IsDeclare) {
+			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref.String(&class_context.ClassContext{}) == name && (as.IsFirst || as.IsDeclare) {
 				return false
 			}
 			continue
@@ -2128,17 +2128,26 @@ func statementReadTextMatches(st statements.Statement, re *regexp.Regexp) (res b
 			res = true
 		}
 	}()
-	return re.MatchString(st.String(hoistProbeCtx))
+	return re.MatchString(st.String(&class_context.ClassContext{}))
 }
 
 // statementsReferenceName reports whether any of the statements textually reference the variable
 // name as a whole token (so "var2" does not match "var20"). Rendering uses an empty class context;
 // a render that panics is treated as a reference (conservative: hoisting is always valid Java, so
 // an unnecessary hoist never breaks compilation while a missed one would).
-func statementsReferenceName(sts []statements.Statement, name string) bool {
+func statementsReferenceName(sts []statements.Statement, name string, memos ...stmtRenderMemo) bool {
+	var memo stmtRenderMemo
+	if len(memos) > 0 {
+		memo = memos[0]
+	}
 	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
 	for _, st := range sts {
-		if statementTextMatches(st, re) {
+		if memo != nil {
+			text, ok := memo.render(st)
+			if !ok || re.MatchString(text) {
+				return true
+			}
+		} else if statementTextMatches(st, re) {
 			return true
 		}
 	}
@@ -2151,7 +2160,7 @@ func statementTextMatches(st statements.Statement, re *regexp.Regexp) (res bool)
 			res = true
 		}
 	}()
-	return re.MatchString(st.String(hoistProbeCtx))
+	return re.MatchString(st.String(&class_context.ClassContext{}))
 }
 
 // generatedLocalNameRe matches a decompiler-generated local name (var0, var1, var2_1, ...). Only
@@ -2199,7 +2208,7 @@ func safeRenderStatement(st statements.Statement) (text string, ok bool) {
 			ok = false
 		}
 	}()
-	return st.String(hoistProbeCtx), true
+	return st.String(&class_context.ClassContext{}), true
 }
 
 // isWordByteASCII reports whether b is an ASCII word char ([0-9A-Za-z_]) -- exactly the class Go's
@@ -2261,7 +2270,7 @@ func containsWholeWord(s, name string) bool {
 // stmtRenderMemo caches statement renders WITHIN a single coverUndeclaredGeneratedLocals pass so a deep
 // subtree is rendered ONCE rather than re-rendered for every generated-local name and again at every
 // recursion level -- the O(names x depth) render blow-up that made fastjson2 ObjectReaderBaseModule
-// take ~73s to decompile. A render is deterministic for a fixed tree (always hoistProbeCtx), so a cache
+// take ~73s to decompile. A render is deterministic for a fixed tree (always &class_context.ClassContext{}), so a cache
 // hit is byte-identical to a fresh render; the map is fully invalidated whenever the pass MUTATES the
 // tree (relocate/hoist) so no stale render can ever survive an edit. Keyed by statement identity.
 type stmtRenderMemo map[statements.Statement]string
@@ -2345,7 +2354,7 @@ func collectGeneratedLocalDeclIDs(list []statements.Statement, reused map[*utils
 					_, isReused := reused[ref.Id]
 					if all || isReused {
 						if _, seen := refByID[ref.Id]; !seen {
-							name := ref.String(hoistProbeCtx)
+							name := ref.String(&class_context.ClassContext{})
 							if generatedLocalNameRe.MatchString(name) {
 								refByID[ref.Id] = as.LeftValue
 								order = append(order, ref.Id)
@@ -2489,7 +2498,11 @@ func relocateDeclarations(block *[]statements.Statement, id *utils.VariableId) {
 // lowest-common-ancestor declaration placement: for each block it hoists locals referenced across
 // more than one of the block's child scopes, emitting a single `T x;` at the block top and demoting
 // the in-place declarations to plain assignments. Hoisting only widens scope and is always valid Java.
-func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*utils.VariableId]struct{}, all bool) {
+func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*utils.VariableId]struct{}, all bool, memos ...stmtRenderMemo) {
+	memo := stmtRenderMemo{}
+	if len(memos) > 0 {
+		memo = memos[0]
+	}
 	if block == nil || len(*block) == 0 {
 		return
 	}
@@ -2502,13 +2515,13 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 		texts := make([]string, len(list))
 		allMatch := make([]bool, len(list))
 		for i, st := range list {
-			t, ok := safeRenderStatement(st)
+			t, ok := memo.render(st)
 			texts[i] = t
 			allMatch[i] = !ok
 		}
 		sort.SliceStable(ids, func(i, j int) bool {
-			ni := refByID[ids[i]].String(hoistProbeCtx)
-			nj := refByID[ids[j]].String(hoistProbeCtx)
+			ni := refByID[ids[i]].String(&class_context.ClassContext{})
+			nj := refByID[ids[j]].String(&class_context.ClassContext{})
 			if ni != nj {
 				return ni < nj
 			}
@@ -2525,7 +2538,7 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 		var hoisted []statements.Statement
 		for _, id := range ids {
 			ref := refByID[id]
-			name := ref.String(hoistProbeCtx)
+			name := ref.String(&class_context.ClassContext{})
 			if name == "" || !generatedLocalNameRe.MatchString(name) {
 				continue
 			}
@@ -2557,7 +2570,7 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 				// try+catch); otherwise the true home is deeper and recursion will place it.
 				refChildren := 0
 				for _, cl := range childStatementLists(list[singleIdx]) {
-					if statementsReferenceName(*cl, name) {
+					if statementsReferenceName(*cl, name, memo) {
 						refChildren++
 					}
 				}
@@ -2567,6 +2580,7 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 				continue
 			}
 			relocateDeclarations(block, id)
+			memo.invalidate()
 			hoisted = append(hoisted, statements.NewDeclareStatement(ref))
 		}
 		if len(hoisted) > 0 {
@@ -2575,7 +2589,7 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 	}
 	for _, st := range *block {
 		for _, cl := range childStatementLists(st) {
-			placeCrossScopeDeclarations(cl, reused, all)
+			placeCrossScopeDeclarations(cl, reused, all, memo)
 		}
 	}
 }
@@ -2594,7 +2608,7 @@ func genLocalDeclByName(list []statements.Statement) (map[string]values.JavaValu
 		for _, st := range sts {
 			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis {
-					name := ref.String(hoistProbeCtx)
+					name := ref.String(&class_context.ClassContext{})
 					if generatedLocalNameRe.MatchString(name) && ref.Type() != nil {
 						if _, seen := refByName[name]; !seen {
 							refByName[name] = as.LeftValue
@@ -2602,7 +2616,7 @@ func genLocalDeclByName(list []statements.Statement) (map[string]values.JavaValu
 						if typesByName[name] == nil {
 							typesByName[name] = map[string]struct{}{}
 						}
-						typesByName[name][ref.Type().String(hoistProbeCtx)] = struct{}{}
+						typesByName[name][ref.Type().String(&class_context.ClassContext{})] = struct{}{}
 					}
 				}
 			}
@@ -2620,7 +2634,7 @@ func genLocalDeclByName(list []statements.Statement) (map[string]values.JavaValu
 func topLevelDeclByName(list []statements.Statement, name string) bool {
 	for _, st := range list {
 		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(hoistProbeCtx) == name {
+			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(&class_context.ClassContext{}) == name {
 				return true
 			}
 		}
@@ -2676,7 +2690,7 @@ func blockHasUncoveredRefByName(list []statements.Statement, name string, declar
 	declared := declaredOut
 	for _, st := range list {
 		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(hoistProbeCtx) == name {
+			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(&class_context.ClassContext{}) == name {
 				declared = true
 				continue
 			}
@@ -2722,7 +2736,7 @@ func relocateDeclarationsByName(block *[]statements.Statement, name string) {
 	out := list[:0]
 	for _, st := range list {
 		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(hoistProbeCtx) == name {
+			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(&class_context.ClassContext{}) == name {
 				if as.IsDeclare && as.JavaValue == nil {
 					continue
 				}
@@ -2929,7 +2943,7 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 		for _, st := range list {
 			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam {
-					name := ref.String(hoistProbeCtx)
+					name := ref.String(&class_context.ClassContext{})
 					if generatedLocalNameRe.MatchString(name) {
 						in := infos[name]
 						if in == nil {
@@ -2946,7 +2960,7 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 							}
 						case as.JavaValue != nil && !values.IsNullLiteral(as.JavaValue):
 							if t := as.JavaValue.Type(); t != nil {
-								in.rhsTokens[t.String(hoistProbeCtx)] = struct{}{}
+								in.rhsTokens[t.String(&class_context.ClassContext{})] = struct{}{}
 								in.rhsType = t
 								if in.reassignLV == nil {
 									in.reassignLV = as.LeftValue
@@ -3047,7 +3061,7 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 		for _, st := range list {
 			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam {
-					name := ref.String(hoistProbeCtx)
+					name := ref.String(&class_context.ClassContext{})
 					if generatedLocalNameRe.MatchString(name) {
 						in := infos[name]
 						if in == nil {

@@ -11,6 +11,7 @@ import (
 )
 
 type StackItem struct {
+	depth  int
 	parent *StackItem
 	value  values.JavaValue
 }
@@ -20,7 +21,12 @@ func (s *StackItem) GetParent() *StackItem {
 }
 
 func newStackItem(parent *StackItem, value values.JavaValue) *StackItem {
+	depth := 0
+	if parent != nil {
+		depth = parent.depth + 1
+	}
 	return &StackItem{
+		depth:  depth,
 		parent: parent,
 		value:  value,
 	}
@@ -337,12 +343,12 @@ func NewStackSimulation(entry *StackItem, varTable map[int]*values.JavaRef, gene
 }
 
 func (s *StackSimulationImpl) Size() int {
-	size := 0
-	for entry := s.stackEntry; entry.parent != nil; entry = entry.GetParent() {
-		size++
+	if s.stackEntry == nil {
+		return 0
 	}
-	return size
+	return s.stackEntry.depth
 }
+
 func (s *StackSimulationImpl) Push(value values.JavaValue) {
 	s.stackEntry = newStackItem(s.stackEntry, value)
 }

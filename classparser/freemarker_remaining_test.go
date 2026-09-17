@@ -123,9 +123,9 @@ func TestFreemarkerParserLoopExitSnippet(t *testing.T) {
 }
 
 func TestFreemarkerParserLoopExitIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FMParser.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"\t\t\t}\n\t\t\tbreak;\n\t\t} while (true);\n\t\tthis.jj_la1[",
-		"\t\t\tdefault:\n\t\t\t\tbreak;\n\t\t\t}\n\t\t} while (true);\n\t\tthis.jj_la1[")
+	assertDecompileBothPreserve(t, "testdata/regression/FMParser.class", "JDEC_FREEMARKER_REMAINING_OFF",
+		"LOOP_1:", "break LOOP_1;", "this.jj_la1[0] = this.jj_gen;", "return (Expression) (var1);",
+		"case 153:\n\t\t\t\tswitch (")
 }
 
 func TestFreemarkerTruncateStaticInitSnippet(t *testing.T) {
@@ -185,9 +185,8 @@ func TestFreemarkerDefaultMemberAccessPolicyCheckedIsLoadBearing(t *testing.T) {
 }
 
 func TestFreemarkerNodeListModelGetReturnIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/NodeListModel.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"if (((var2) == (null)) && ((var3) == (null))){\n\t\t\t\t\tthrow new TemplateModelException",
-		"if (((var2) == (null)) && ((var3) == (null))){};")
+	assertDecompileBothPreserve(t, "testdata/regression/NodeListModel.class", "JDEC_FREEMARKER_REMAINING_OFF",
+		"var3 = NAMED_CHILDREN_OP;", "evaluateElementOperation(var2,this.nodes)", "return createNodeListModel(var5_1,this.namespaces);")
 }
 
 func TestFreemarkerRhinoWrapperStaticInitIsLoadBearing(t *testing.T) {

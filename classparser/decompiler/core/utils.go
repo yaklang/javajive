@@ -25,54 +25,65 @@ func GetTypeSize(typ types.JavaType) int {
 		return 1
 	}
 }
-func GetRetrieveIdx(code *OpCode) int {
-	if code.IsWide {
-		return int(Convert2bytesToInt(code.Data))
-	}
-	switch code.Instr.OpCode {
-	case OP_ALOAD, OP_ILOAD, OP_LLOAD, OP_DLOAD, OP_FLOAD, OP_IINC:
-		res := int(code.Data[0])
-		if res < 0 {
-			res += 256
+
+// LocalAccess describes the JVM local-slot operation independently of its encoding.
+// Slot is -1 for an operand-encoded index; Width is the number of JVM slots.
+type LocalAccess struct {
+	Read, Write bool
+	Slot, Width int
+	Wide        bool
+}
+
+var localAccessTable = func() [256]LocalAccess {
+	var table [256]LocalAccess
+	for category, base := range []int{OP_ILOAD, OP_LLOAD, OP_FLOAD, OP_DLOAD, OP_ALOAD} {
+		width := 1
+		if category == 1 || category == 3 {
+			width = 2
 		}
-		return res
-	case OP_ALOAD_0, OP_ILOAD_0, OP_LLOAD_0, OP_DLOAD_0, OP_FLOAD_0:
-		return 0
-	case OP_ALOAD_1, OP_ILOAD_1, OP_LLOAD_1, OP_DLOAD_1, OP_FLOAD_1:
-		return 1
-	case OP_ALOAD_2, OP_ILOAD_2, OP_LLOAD_2, OP_DLOAD_2, OP_FLOAD_2:
-		return 2
-	case OP_ALOAD_3, OP_ILOAD_3, OP_LLOAD_3, OP_DLOAD_3:
-		return 3
-	case OP_RET:
-		return int(code.Data[0])
-	default:
+		table[base] = LocalAccess{Read: true, Slot: -1, Width: width, Wide: true}
+		table[OP_ISTORE+category] = LocalAccess{Write: true, Slot: -1, Width: width, Wide: true}
+		for slot := 0; slot < 4; slot++ {
+			table[OP_ILOAD_0+category*4+slot] = LocalAccess{Read: true, Slot: slot, Width: width}
+			table[OP_ISTORE_0+category*4+slot] = LocalAccess{Write: true, Slot: slot, Width: width}
+		}
+	}
+	table[OP_IINC] = LocalAccess{Read: true, Write: true, Slot: -1, Width: 1, Wide: true}
+	table[OP_RET] = LocalAccess{Read: true, Slot: -1, Width: 1, Wide: true}
+	return table
+}()
+
+func LocalAccessOf(opcode int) LocalAccess {
+	if opcode < 0 || opcode >= len(localAccessTable) {
+		return LocalAccess{}
+	}
+	return localAccessTable[opcode]
+}
+
+func localSlot(code *OpCode, read bool) int {
+	if code == nil || code.Instr == nil {
 		return -1
 	}
-}
-func GetStoreIdx(code *OpCode) int {
-	if code.IsWide {
-		return int(Convert2bytesToInt(code.Data))
-	}
-	switch code.Instr.OpCode {
-	case OP_ASTORE, OP_ISTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_IINC:
-		res := int(code.Data[0])
-		if res < 0 {
-			res += 256
-		}
-		return res
-	case OP_ASTORE_0, OP_ISTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0:
-		return 0
-	case OP_ASTORE_1, OP_ISTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1:
-		return 1
-	case OP_ASTORE_2, OP_ISTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2:
-		return 2
-	case OP_ASTORE_3, OP_ISTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
-		return 3
-	default:
+	access := LocalAccessOf(code.Instr.OpCode)
+	if (read && !access.Read) || (!read && !access.Write) {
 		return -1
 	}
+	if code.IsWide {
+		if !access.Wide || len(code.Data) < 2 {
+			return -1
+		}
+		return int(binary.BigEndian.Uint16(code.Data))
+	}
+	if access.Slot >= 0 {
+		return access.Slot
+	}
+	if len(code.Data) == 0 {
+		return -1
+	}
+	return int(code.Data[0])
 }
+func GetRetrieveIdx(code *OpCode) int { return localSlot(code, true) }
+func GetStoreIdx(code *OpCode) int    { return localSlot(code, false) }
 func GetReverseOp(op string) string {
 	switch op {
 	case values.EQ:

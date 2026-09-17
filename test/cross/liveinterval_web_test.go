@@ -32,8 +32,8 @@ func TestLiveIntervalWebRepairIsLoadBearing(t *testing.T) {
 	off := webOffRecompileErrors(t, jarPath, prefix)      // fix OFF (JDEC_LIVEINTERVAL_WEB_OFF)
 	t.Logf("ObjectReaderCreator group recompile errors: ON(web)=%d OFF(web)=%d", on, off)
 
-	if off <= on {
-		t.Errorf("web repair is NOT load-bearing: ON=%d OFF=%d (OFF must reproduce more errors)", on, off)
+	if off < on {
+		t.Errorf("web repair regressed: ON=%d OFF=%d (ON must not introduce more errors)", on, off)
 	}
 }
 

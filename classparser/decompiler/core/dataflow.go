@@ -125,7 +125,7 @@ func (d *Decompiler) computeSlotWebs() *slotWeb {
 		if slot < 0 {
 			continue
 		}
-		stores, reachesEntry := reachingStoresOf(op, slot)
+		stores, reachesEntry := d.reachingStores(op, slot)
 		li := idx[op]
 		for _, st := range stores {
 			uf.union(li, idx[st])
@@ -215,7 +215,7 @@ func (d *Decompiler) reachingSlotVersionByWeb(load *OpCode, slot int, current *v
 
 // reachingStoreOpsByWeb returns the load's reaching-definition store opcodes that belong to loadWeb.
 func (d *Decompiler) reachingStoreOpsByWeb(load *OpCode, slot, loadWeb int, webs *slotWeb) []*OpCode {
-	stores, _ := reachingStoresOf(load, slot)
+	stores, _ := d.reachingStores(load, slot)
 	out := stores[:0]
 	for _, st := range stores {
 		if w, ok := webs.webOf[st]; ok && w == loadWeb {
@@ -253,7 +253,7 @@ func (d *Decompiler) reachingSlotStoreContinuationByWeb(store *OpCode, slot int,
 	if !ok {
 		return nil
 	}
-	stores, _ := reachingStoresOf(store, slot) // prior same-slot definitions reaching this store
+	stores, _ := d.reachingStores(store, slot) // prior same-slot definitions reaching this store
 	var canon *values.JavaRef
 	for _, st := range stores {
 		if w, ok := webs.webOf[st]; !ok || w != storeWeb {

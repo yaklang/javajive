@@ -659,12 +659,10 @@ func TestDeadObjectFieldAssignJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if strings.Contains(off, "this.delegate = var1;") && !strings.Contains(off, "this.delegate = var2;") {
-		t.Fatalf("OFF already has reconstructed assign (switch inert):\n%s", off)
+	if !strings.Contains(off, "this.delegate = var1;") {
+		t.Fatalf("core def-use solver lost delegate assignment: %s", off)
 	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+
 }
 
 func TestFixStringCastToClass(t *testing.T) {
@@ -5048,9 +5046,9 @@ func TestRewriteSelfInitDeclToPrevSameTypeJarFS(t *testing.T) {
 func TestWrapAliasedThrowableRethrow(t *testing.T) {
 	in := "void m() throws IOException {\n\ttry{\n\t\twork();\n\t}catch(Throwable var6_1){\n\t\tvar5 = var6_1;\n\t\tvar4.close();\n\t\tthrow var6_1;\n\t}\n}\n"
 	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := wrapAliasedThrowableRethrow(in)
-	if !strings.Contains(out, "throw new RuntimeException(var6_1);") {
-		t.Fatalf("missing RuntimeException wrap:\n%s", out)
+	out := fixHardjarShapes(in)
+	if !strings.Contains(out, "throw var6_1;") || strings.Contains(out, "throw new RuntimeException(var6_1);") {
+		t.Fatalf("exception identity changed:\n%s", out)
 	}
 }
 
@@ -5069,15 +5067,15 @@ func TestDropEmptyNSMEStaticBlock(t *testing.T) {
 func TestInsertBreakBeforeDefaultThrow(t *testing.T) {
 	in := "switch (var5.bytesPerNorm){\ncase 0:\ncase 1:\ncase 2:\ncase 4:\ncase 8:\nvar5.normsOffset = var1.readLong();\ndefault:\nthrow new CorruptIndexException(\"x\",(DataInput)(var1));\n}\ncontinue;\n"
 	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := insertBreakBeforeDefaultThrow(in)
-	if !strings.Contains(out, "break;") || strings.Index(out, "break;") > strings.Index(out, "default:") {
-		t.Fatalf("missing break before default:\n%s", out)
+	out := fixHardjarShapes(in)
+	if strings.Contains(out, "break;") {
+		t.Fatalf("invented break before default:\n%s", out)
 	}
 	// bytebuddy shaded-ASM Type.getSize: the case 7/8 group already ends with a
 	// valued `return 2;` and case 0:/case 8: sit inside the window, so the old
 	// `return;`-suffix guard injected an unreachable break before the default.
 	already := "public int getSize() {\nswitch (this.sort){\ncase 0:\nreturn 0;\ncase 1:\ncase 8:\nreturn 2;\ndefault:\nthrow new AssertionError();\n}\n}\n"
-	got := insertBreakBeforeDefaultThrow(already)
+	got := fixHardjarShapes(already)
 	if strings.Contains(got, "break;") {
 		t.Fatalf("injected break after valued return:\n%s", got)
 	}

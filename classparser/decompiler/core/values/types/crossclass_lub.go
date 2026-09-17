@@ -31,12 +31,15 @@ const crossClassSubtypeWalkCap = 4096
 // reaching sup (provider miss) -- conservative: an unknown relationship is treated as "not a subtype",
 // so callers never widen on a guess.
 func IsSubtypeVia(sub, sup string, provider SuperTypeProvider) bool {
-	if provider == nil || sub == "" || sup == "" {
+	if sub == "" || sup == "" {
 		return false
 	}
 	subI, supI := dotToInternal(sub), dotToInternal(sup)
 	if subI == supI {
 		return true
+	}
+	if provider == nil {
+		return false
 	}
 	visited := map[string]bool{}
 	queue := []string{subI}

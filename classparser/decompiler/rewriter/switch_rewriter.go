@@ -1,7 +1,7 @@
 package rewriter
 
 import (
-	"math"
+	"fmt"
 	"os"
 	"slices"
 	"sort"
@@ -136,59 +136,18 @@ func countOtherCasesExitingTo(manager *RewriteManager, switchNode, cand *core.No
 }
 
 func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
+	if node.SwitchPrepared {
+		return nil
+	}
 	// manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
 	// manager.DumpDominatorTree()
 	middleStatement := node.Statement.(*statements.MiddleStatement)
 	switchData := middleStatement.Data.([]any)
-	caseToIndexMap := switchData[0].(*omap.OrderedMap[int, int])
-	caseMap := omap.NewEmptyOrderedMap[int, *core.Node]()
-	// node.Next is already in case-index order: caseToIndexMap maps each case value to
-	// an index into node.Next as captured at parse time. The previous sort.Slice used an
-	// invalid comparator (always returning true), which scrambled this slice into an
-	// arbitrary permutation and made every case map to the wrong body (and broke the
-	// dominator-based merge detection, producing "multiple next"). Keep the original order.
-	nexts := slices.Clone(node.Next)
-	caseToIndexMap.ForEach(func(k int, v int) bool {
-		// Defensive bounds check: the case-to-index map is captured at parse time; if an
-		// earlier pass shrank node.Next the index could be stale. Skip the unmappable case
-		// instead of panicking the whole method into a stub.
-		if v < 0 || v >= len(nexts) {
-			return true
-		}
-		caseMap.Set(k, nexts[v])
-		return true
-	})
-	keyMap := caseMap.Keys()
-	sort.Ints(keyMap)
-	keyMap = append(keyMap[1:], -1)
+	caseMap, err := switchCaseNodes(switchData, node)
+	if err != nil {
+		return err
+	}
 	startNodes := caseMap.Values()
-	// var mergeNodes []*core.Node
-	// for _, startNode := range startNodes {
-	// 	core.WalkGraph[*core.Node](startNode, func(n *core.Node) ([]*core.Node, error) {
-	// 		// 检查是否所有前驱节点都在当前路径上
-	// 		allSourcesInPath := true
-	// 		for _, source := range n.Source {
-	// 			inPath := false
-	// 			core.WalkGraph[*core.Node](startNode, func(pathNode *core.Node) ([]*core.Node, error) {
-	// 				if pathNode == source {
-	// 					inPath = true
-	// 					return nil, nil
-	// 				}
-	// 				return pathNode.Next, nil
-	// 			})
-	// 			if !inPath {
-	// 				allSourcesInPath = false
-	// 				break
-	// 			}
-	// 		}
-
-	// 		if allSourcesInPath && len(n.Source) > 1 {
-	// 			mergeNodes = append(mergeNodes, n)
-	// 			return nil, nil
-	// 		}
-	// 		return n.Next, nil
-	// 	})
-	// }
 	endNodes := utils.NodeFilter(manager.DominatorMap[node], func(node *core.Node) bool {
 		if v, ok := node.Statement.(*statements.MiddleStatement); ok && (v.Flag == "end" || v.Flag == "start") {
 			return false
@@ -224,9 +183,15 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	// is equivalent to no default, so we promote that convergence node to the real merge - the unified
 	// break-insertion below then gives every case an explicit `break` and the post-switch code is
 	// emitted after the switch.
+	// A shared default continuation is stronger evidence than an arbitrary
+	// idom child. Other candidates can be interior fall-through conditions.
+	if def := caseMap.GetMust(switchLabel{Default: true}); def != nil && countOtherCasesExitingTo(manager, node, def, startNodes) >= 2 {
+		mergeNode = def
+		node.SwitchEmptyDefaultMerge = true
+	}
 	if mergeNode == nil {
 		// Bug K (default form): an EMPTY `default` whose target is the switch's natural exit/merge.
-		if defNode := caseMap.GetMust(-1); defNode != nil {
+		if defNode := caseMap.GetMust(switchLabel{Default: true}); defNode != nil {
 			breakingPreds := 0
 			for _, src := range defNode.Source {
 				if src == node || !slices.Contains(manager.DominatorMap[node], src) {
@@ -245,7 +210,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	if mergeNode == nil && node.SwitchEmptyCaseMerge && node.SwitchEmptyCaseMergeNode != nil {
 		// Re-entrant call: the empty-case merge was resolved on a prior pass and the case `break`s were
 		// already inserted, so the structure no longer re-derives it (unlike an empty default, whose
-		// merge equals caseMap[-1] and is restored by the generic fallback below). Reuse the saved node
+		// merge equals the explicit default target and is restored by the generic fallback below). Reuse the saved node
 		// before that fallback wrongly promotes the default/throw node to the merge.
 		mergeNode = node.SwitchEmptyCaseMergeNode
 	}
@@ -263,7 +228,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 		caseStarts := caseMap.Values()
 		var best *core.Node
 		bestCnt := 0
-		caseMap.ForEach(func(k int, cand *core.Node) bool {
+		caseMap.ForEach(func(k switchLabel, cand *core.Node) bool {
 			if cand == nil {
 				return true
 			}
@@ -275,7 +240,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 		})
 		if best != nil {
 			mergeNode = best
-			if best == caseMap.GetMust(-1) {
+			if best == caseMap.GetMust(switchLabel{Default: true}) {
 				node.SwitchEmptyDefaultMerge = true
 			} else {
 				node.SwitchEmptyCaseMerge = true
@@ -327,88 +292,40 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 		}
 	}
 	if mergeNode == nil {
-		mergeNode = caseMap.GetMust(-1)
+		mergeNode = caseMap.GetMust(switchLabel{Default: true})
 	}
 	node.MergeNode = mergeNode
+	node.SwitchPrepared = true
 	return nil
 }
 func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	startSwitchNode := node
-	SwitchRewriter1(manager, node)
+	if err := SwitchRewriter1(manager, node); err != nil {
+		return err
+	}
 	//switchNode := node
 	middleStatement := node.Statement.(*statements.MiddleStatement)
 	switchData := middleStatement.Data.([]any)
-	caseToIndexMap := switchData[0].(*omap.OrderedMap[int, int])
-	caseMap := omap.NewEmptyOrderedMap[int, *core.Node]()
-	// node.Next is already in case-index order: caseToIndexMap maps each case value to
-	// an index into node.Next as captured at parse time. The previous sort.Slice used an
-	// invalid comparator (always returning true), which scrambled this slice into an
-	// arbitrary permutation and made every case map to the wrong body (and broke the
-	// dominator-based merge detection, producing "multiple next"). Keep the original order.
-	nexts := slices.Clone(node.Next)
-	caseToIndexMap.ForEach(func(k int, v int) bool {
-		// Defensive bounds check: the case-to-index map is captured at parse time; if an
-		// earlier pass shrank node.Next the index could be stale. Skip the unmappable case
-		// instead of panicking the whole method into a stub.
-		if v < 0 || v >= len(nexts) {
-			return true
-		}
-		caseMap.Set(k, nexts[v])
-		return true
-	})
+	caseMap, err := switchCaseNodes(switchData, node)
+	if err != nil {
+		return err
+	}
 	data := switchData[1].(values.JavaValue)
-	//defaultCase := caseMap[-1]
-	//delete(caseMap, -1)
-	//_ = defaultCase
-	caseMapKeys := caseMap.Keys()
-	// Re-key the default case (stored under -1) to the math.MaxInt sentinel that the rest of this pass
-	// uses for "the default" (IsDefault, default body offset). Guard it on the default ACTUALLY
-	// existing: a switch with NO default has no -1 entry, and the old unconditional
-	// `Set(math.MaxInt, GetMust(-1))` then stored `math.MaxInt -> nil`, injecting a spurious empty
-	// `case 9223372036854775807:` (that value = math.MaxInt on 64-bit; the startNode==nil branch below
-	// appends it before IsDefault is set, so it renders as a real case). javac rejects the literal as a
-	// lexer error ("integer number too large") which -- being pre-attribution -- phase-masks EVERY
-	// downstream type error in the whole tree compile (commons-lang3 DateUtils' inner range-style switch
-	// has cases 1..4 and no default). Kill-switch JDEC_SWITCH_SPURIOUS_DEFAULT_OFF restores the legacy
-	// unconditional injection.
-	if dv, ok := caseMap.Get(-1); (ok && dv != nil) || os.Getenv("JDEC_SWITCH_SPURIOUS_DEFAULT_OFF") != "" {
-		caseMap.Set(math.MaxInt, caseMap.GetMust(-1))
-	}
-	caseMap.Delete(-1)
-	// Map each case value to the ABSOLUTE bytecode offset of its body (Bug G fix). javac lays case
-	// bodies out in SOURCE order at increasing offsets and the fall-through edges follow that
-	// physical layout, so a switch written with cases in descending value order
-	// (case 3: ...; case 2: ...; case 1: ...) has bodies at INCREASING offsets while their VALUES
-	// descend. Emitting cases sorted by VALUE (the old behaviour) re-ordered them 1,2,3 and silently
-	// inverted the fall-through direction (Murmur3 tail -> array out of bounds / wrong digest).
-	// switchData[2] carries SwitchJmpCase (value -> offset, plus -1 for default); fall back to value
-	// order when it is absent (e.g. legacy two-element switch data).
-	valueToBodyOffset := map[int]int{}
+	// Offsets belong to labels, not integer sentinels. Preserve physical order including default.
+	valueToBodyOffset := map[switchLabel]int{}
 	if len(switchData) >= 3 {
-		if offMap, ok := switchData[2].(*omap.OrderedMap[int, int32]); ok && offMap != nil {
-			offMap.ForEach(func(v int, off int32) bool {
-				if v == -1 {
-					// default's offset is keyed under math.MaxInt downstream (caseMap remaps -1).
-					valueToBodyOffset[math.MaxInt] = int(off)
-				} else {
-					valueToBodyOffset[v] = int(off)
-				}
-				return true
-			})
+		if offsets, ok := switchData[2].(*omap.OrderedMap[int, int32]); ok && offsets != nil {
+			offsets.ForEach(func(v int, off int32) bool { valueToBodyOffset[switchLabel{Value: int32(v)}] = int(off); return true })
 		}
 	}
-	sort.Ints(caseMapKeys)
+	if len(switchData) >= 4 {
+		def := switchData[3].(statements.SwitchDefault)
+		valueToBodyOffset[switchLabel{Default: true}] = int(def.Offset)
+	}
 	caseItems := []*statements.CaseItem{}
-	// case start node source must content switch node
-	//breakNode := map[int]*core.Node{}
-	//replaceBreakCB := []func(){}
-	//statementPatternCheck := []func() bool{}
-	//if len(caseMap[-1].Next) == 1 && caseMap[-1].Next[0] == switchNode.SwitchMergeNode {
-	//	switchNode.SwitchMergeNode = nil
-	//}
 	switchStatement := statements.NewSwitchStatement(data, caseItems)
 	caseStartNodesMap := map[*core.Node]struct{}{}
-	caseMap.ForEach(func(i int, v *core.Node) bool {
+	caseMap.ForEach(func(i switchLabel, v *core.Node) bool {
 		caseStartNodesMap[v] = struct{}{}
 		return true
 	})
@@ -420,15 +337,15 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		node.RemoveNext(node.MergeNode)
 		switchNode.AddNext(node.MergeNode)
 	}
-	nodeToVals := omap.NewEmptyOrderedMap[*core.Node, []int]()
-	caseMap.ForEach(func(i int, v *core.Node) bool {
+	nodeToVals := omap.NewEmptyOrderedMap[*core.Node, []switchLabel]()
+	caseMap.ForEach(func(i switchLabel, v *core.Node) bool {
 		idList := nodeToVals.GetMust(v)
 		nodeToVals.Set(v, append(idList, i))
 		return true
 	})
-	newNodeToVals := omap.NewEmptyOrderedMap[*core.Node, []int]()
-	nodeToVals.ForEach(func(k *core.Node, v []int) bool {
-		sort.Ints(v)
+	newNodeToVals := omap.NewEmptyOrderedMap[*core.Node, []switchLabel]()
+	nodeToVals.ForEach(func(k *core.Node, v []switchLabel) bool {
+		sortSwitchLabels(v)
 		newNodeToVals.Set(k, v)
 		for i, val := range v {
 			if i == len(v)-1 {
@@ -439,7 +356,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		return true
 	})
 	nodeToVals = newNodeToVals
-	sort.Ints(keyMap)
+	sortSwitchLabels(keyMap)
 	var endNodes []*core.Node
 	var bodyNodes []*core.Node
 	// caseExitsMap records, per case, the CFG nodes its body exits to (the non-dominated successors).
@@ -448,12 +365,12 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	caseExitsMap := map[*statements.CaseItem][]*core.Node{}
 	for _, v := range keyMap {
 		startNode := caseMap.GetMust(v)
-		caseItem := statements.NewCaseItem(v, nil)
+		caseItem := statements.NewCaseItem(int(v.Value), nil)
+		caseItem.IsDefault = v.Default
 		if startNode == nil {
 			caseItems = append(caseItems, caseItem)
 			continue
 		}
-		caseItem.IsDefault = v == math.MaxInt
 		// Bug K: an empty default promoted to the switch merge (SwitchRewriter1). Its start node IS
 		// the post-switch merge, already wired as the switch's successor above. Drop the default case
 		// entirely (`default: break;` is equivalent to no default) so the merge code is emitted AFTER
@@ -509,37 +426,21 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		caseItems = append(caseItems, caseItem)
 	}
 	switchStatement.Cases = caseItems
-	// Order cases by physical body offset to preserve fall-through (Bug G); fall back to value order
-	// for any case whose offset is unknown, and use value as a stable tiebreaker so grouped labels
-	// sharing one body (same offset) stay value-ascending and adjacent. Keep `default` last as the
-	// legacy structuring did: its body is normally the switch merge/exit point, so reordering it by
-	// raw offset is unnecessary and risks hoisting it above real cases. Set JDEC_SWITCH_VALUE_ORDER=1
-	// to restore the legacy value-only ordering as a kill-switch.
-	if os.Getenv("JDEC_SWITCH_VALUE_ORDER") != "" {
-		sort.SliceStable(caseItems, func(i, j int) bool {
-			return caseItems[i].IntValue < caseItems[j].IntValue
-		})
-	} else {
-		sort.SliceStable(caseItems, func(i, j int) bool {
-			di, dj := caseItems[i].IsDefault, caseItems[j].IsDefault
-			if di != dj {
-				return dj
-			}
-			if di && dj {
-				return false
-			}
-			pi, oki := valueToBodyOffset[caseItems[i].IntValue]
-			pj, okj := valueToBodyOffset[caseItems[j].IntValue]
-			if oki && okj && pi != pj {
-				return pi < pj
-			}
-			if oki != okj {
-				// A case with a known offset sorts before one without (defensive).
-				return oki
-			}
-			return caseItems[i].IntValue < caseItems[j].IntValue
-		})
-	}
+	// Grouped labels share an offset; put default last within its group so the single
+	// body is emitted once. Across groups physical order is essential for fall-through.
+	sort.SliceStable(caseItems, func(i, j int) bool {
+		a, b := caseItems[i], caseItems[j]
+		la, lb := switchLabel{Value: int32(a.IntValue), Default: a.IsDefault}, switchLabel{Value: int32(b.IntValue), Default: b.IsDefault}
+		pi, oki := valueToBodyOffset[la]
+		pj, okj := valueToBodyOffset[lb]
+		if oki && okj && pi != pj {
+			return pi < pj
+		}
+		if oki != okj {
+			return oki
+		}
+		return lessSwitchLabel(la, lb)
+	})
 	// Insert an explicit `break` for any non-last case that ends in a NESTED switch yet EXITS the
 	// outer switch instead of falling through to the next case. javac collapses the inner switch's
 	// break and the immediately-following outer break into one set of edges to the SHARED exit (there
@@ -592,4 +493,51 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 
 	return nil
+}
+
+// switchLabel's discriminator is outside the int32 value domain. No legal case
+// value can collide with default, on either 32-bit or 64-bit hosts.
+type switchLabel struct {
+	Value   int32
+	Default bool
+}
+
+func lessSwitchLabel(a, b switchLabel) bool {
+	if a.Default != b.Default {
+		return !a.Default
+	}
+	return a.Value < b.Value
+}
+func sortSwitchLabels(labels []switchLabel) {
+	sort.Slice(labels, func(i, j int) bool { return lessSwitchLabel(labels[i], labels[j]) })
+}
+func switchCaseNodes(data []any, node *core.Node) (*omap.OrderedMap[switchLabel, *core.Node], error) {
+	cases := omap.NewEmptyOrderedMap[switchLabel, *core.Node]()
+	if node.SwitchCases != nil {
+		node.SwitchCases.ForEach(func(v int, target *core.Node) bool { cases.Set(switchLabel{Value: int32(v)}, target); return true })
+		if node.SwitchDefault != nil {
+			cases.Set(switchLabel{Default: true}, node.SwitchDefault)
+		}
+		return cases, nil
+	}
+	next := node.Next
+	indices := data[0].(*omap.OrderedMap[int, int])
+	var invalid error
+	add := func(label switchLabel, index int) bool {
+		if index < 0 || index >= len(next) {
+			invalid = fmt.Errorf("switch label %+v has stale successor index %d", label, index)
+			return false
+		}
+		cases.Set(label, next[index])
+		return true
+	}
+	indices.ForEach(func(v, index int) bool { return add(switchLabel{Value: int32(v)}, index) })
+	if invalid != nil {
+		return nil, invalid
+	}
+	if len(data) >= 4 {
+		def := data[3].(statements.SwitchDefault)
+		add(switchLabel{Default: true}, def.Index)
+	}
+	return cases, invalid
 }

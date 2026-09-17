@@ -61,7 +61,10 @@ func TestObjectSiblingArmMergeIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
-	if !strings.Contains(off, "ObjectSiblingSeed$MyMap var2_1;") {
-		t.Errorf("fix OFF: expected pickMap to split into `MyMap var2_1;` (kill-switch load-bearing), got:\n%s", off)
+	if strings.Contains(off, "ObjectSiblingSeed$MyMap var2_1;") {
+		t.Fatal("retired patch split a joined variable")
+	}
+	if !strings.Contains(off, "var2 = new ObjectSiblingSeed$MyMap();") || !strings.Contains(off, "return (HashMap) (var2);") && !strings.Contains(off, "return var2;") {
+		t.Fatalf("joined definition or return lost: %s", off)
 	}
 }

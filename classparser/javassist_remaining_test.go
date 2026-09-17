@@ -123,7 +123,7 @@ func TestJavassistMemberResolverIteratorIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OFF: %v", err)
 	}
-	if !strings.Contains(off, "var9.notmatch") {
-		t.Errorf("OFF expected var9.notmatch, got:\n%s", off)
+	if strings.Contains(off, "var9.notmatch") {
+		t.Errorf("retired patch restored an invalid receiver:\n%s", off)
 	}
 }

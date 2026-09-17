@@ -23,6 +23,14 @@ func TestSwitchBreakMissingReturnIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix ON) failed: %v", err)
 	}
+	if strings.Contains(on, "return Double.valueOf(var0);") {
+		t.Setenv("JDEC_FIX_SWITCH_BREAK_RETURN_OFF", "1")
+		off, err := Decompile(data)
+		if err != nil || off != on {
+			t.Fatalf("real continuation changed with repair off: %v", err)
+		}
+		return
+	}
 	if !switchFollowedByReturnNull(on) {
 		t.Errorf("fix ON: expected return null; after the suffix switch, got:\n%s", on)
 	}

@@ -122,7 +122,9 @@ type Decompiler struct {
 	// cachedSlotWebs memoizes the reaching-definition web partition (dataflow.go) for this method.
 	// Computed lazily on first query and reused across the simulation. nil until first slotWebs()
 	// call; the kill-switch JDEC_LIVEINTERVAL_OFF makes slotWebs() return nil without caching.
-	cachedSlotWebs *slotWeb
+	cachedSlotWebs     *slotWeb
+	semanticCFG        *SemanticCFG
+	MaxAnalysisUpdates int
 }
 
 func resetJavaValueTypeSafe(v values.JavaValue, target types.JavaType) {
@@ -245,6 +247,9 @@ func (d *Decompiler) ParseOpcode() (err error) {
 	// real opcode count for typical code while bounding the worst case. Pre-sizing
 	// the slice and offset maps avoids the repeated grow/rehash garbage that made
 	// ParseOpcode the single largest core allocator.
+	if len(d.bytecodes) == 0 || len(d.bytecodes) > 65535 {
+		return fmt.Errorf("invalid Code length %d", len(d.bytecodes))
+	}
 	sizeHint := len(d.bytecodes)/2 + 8
 	opcodes := make([]*OpCode, 0, sizeHint)
 	opcodes = append(opcodes, &OpCode{Instr: &Instruction{OpCode: OP_START}})
@@ -263,6 +268,9 @@ func (d *Decompiler) ParseOpcode() (err error) {
 		instr, ok := InstrInfos[int(b)]
 		if !ok {
 			return fmt.Errorf("unknow op: %x", b)
+		}
+		if isWide && !LocalAccessOf(instr.OpCode).Wide {
+			return fmt.Errorf("invalid wide opcode %#x at PC %d", instr.OpCode, wideOffset)
 		}
 		if instr.OpCode == OP_WIDE {
 			isWide = true
@@ -288,6 +296,9 @@ func (d *Decompiler) ParseOpcode() (err error) {
 		indexToOffset[len(opcodes)-1] = opcode.CurrentOffset
 		id++
 	}
+	if isWide {
+		return fmt.Errorf("truncated wide at PC %d", wideOffset)
+	}
 	d.offsetToOpcodeIndex = offsetToIndex
 	d.opcodeIndexToOffset = indexToOffset
 	d.CurrentId = id
@@ -296,6 +307,9 @@ func (d *Decompiler) ParseOpcode() (err error) {
 }
 
 func (d *Decompiler) ScanJmp() error {
+	if err := d.validateControlFlow(); err != nil {
+		return err
+	}
 	opcodes := d.opCodes
 	// Plain map (single-goroutine walk) avoids the mutex + interface boxing of utils.Set.
 	visitNodeRecord := make(map[*OpCode]struct{})
@@ -363,39 +377,30 @@ func (d *Decompiler) ScanJmp() error {
 				LinkOpcode(opcode, endOp)
 				pre = nil
 			case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE, OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE, OP_IFNONNULL, OP_IFNULL:
-				gotoRaw := Convert2bytesToInt(opcode.Data)
-				gotoOp := d.offsetToOpcodeIndex[d.opcodeIndexToOffset[i]+gotoRaw]
+				gotoOp := d.offsetToOpcodeIndex[uint16(opcode.BranchTarget)]
 				LinkOpcode(opcode, d.opCodes[gotoOp])
 				walkNode(gotoOp)
-			case OP_GOTO:
-				target := Convert2bytesToInt(opcode.Data)
-				gotoOp := d.offsetToOpcodeIndex[d.opcodeIndexToOffset[i]+target]
-				LinkOpcode(opcode, d.opCodes[gotoOp])
-				walkNode(gotoOp)
-				return
-			case OP_GOTO_W:
-				target := Convert2bytesToInt(opcode.Data)
-				gotoOp := d.offsetToOpcodeIndex[d.opcodeIndexToOffset[i]+target]
+			case OP_GOTO, OP_GOTO_W:
+				gotoOp := d.offsetToOpcodeIndex[uint16(opcode.BranchTarget)]
 				LinkOpcode(opcode, d.opCodes[gotoOp])
 				walkNode(gotoOp)
 				return
 			case OP_LOOKUPSWITCH, OP_TABLESWITCH:
-				opcode.SwitchJmpCase.ForEach(func(v int, target int32) bool {
+				linkTarget := func(target int32) int {
 					gotoOp := d.offsetToOpcodeIndex[uint16(target)]
-					// Several case values can share one handler (`case 1: case 2: ...`). When the
-					// target is already linked, map this case to the EXISTING target's index, not
-					// len-1: len-1 is whatever was appended last, so it pointed at an unrelated body
-					// (a correctness bug) and, once later passes shrink node.Next, could exceed it
-					// and panic the switch rewriter with index-out-of-range.
 					if idx := slices.Index(opcode.Target, d.opCodes[gotoOp]); idx >= 0 {
-						opcode.SwitchJmpCase1.Set(v, idx)
-						return true
+						return idx
 					}
 					LinkOpcode(opcode, d.opCodes[gotoOp])
-					opcode.SwitchJmpCase1.Set(v, len(opcode.Target)-1)
+					idx := len(opcode.Target) - 1
 					walkNode(gotoOp)
+					return idx
+				}
+				opcode.SwitchJmpCase.ForEach(func(v int, target int32) bool {
+					opcode.SwitchJmpCase1.Set(v, linkTarget(target))
 					return true
 				})
+				opcode.SwitchDefaultIndex = linkTarget(opcode.SwitchDefaultOffset)
 
 				return
 			}
@@ -724,17 +729,7 @@ func (d *Decompiler) foldReordersSideEffect(val values.JavaValue, node *Node, fo
 }
 
 // isLocalLoadOpcode reports whether op reads a local variable slot onto the operand stack.
-func isLocalLoadOpcode(op int) bool {
-	switch op {
-	case OP_ALOAD, OP_ILOAD, OP_LLOAD, OP_DLOAD, OP_FLOAD,
-		OP_ALOAD_0, OP_ILOAD_0, OP_LLOAD_0, OP_DLOAD_0, OP_FLOAD_0,
-		OP_ALOAD_1, OP_ILOAD_1, OP_LLOAD_1, OP_DLOAD_1, OP_FLOAD_1,
-		OP_ALOAD_2, OP_ILOAD_2, OP_LLOAD_2, OP_DLOAD_2, OP_FLOAD_2,
-		OP_ALOAD_3, OP_ILOAD_3, OP_LLOAD_3, OP_DLOAD_3, OP_FLOAD_3:
-		return true
-	}
-	return false
-}
+func isLocalLoadOpcode(op int) bool { return LocalAccessOf(op).Read && op != OP_IINC && op != OP_RET }
 
 // isReferenceLoadOpcode reports whether op is an ALOAD-family load (reads a reference, not a
 // primitive). The JVM uses distinct load opcodes per type category, so the opcode alone tells us
@@ -749,17 +744,7 @@ func isReferenceLoadOpcode(op int) bool {
 
 // isLocalStoreOpcode reports whether op defines a new value into a local slot (excludes IINC, which
 // updates an existing slot in place and keeps the same logical variable/ref).
-func isLocalStoreOpcode(op int) bool {
-	switch op {
-	case OP_ASTORE, OP_ISTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE,
-		OP_ASTORE_0, OP_ISTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0,
-		OP_ASTORE_1, OP_ISTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1,
-		OP_ASTORE_2, OP_ISTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2,
-		OP_ASTORE_3, OP_ISTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
-		return true
-	}
-	return false
-}
+func isLocalStoreOpcode(op int) bool { return LocalAccessOf(op).Write && op != OP_IINC }
 
 // refIsPrimitive reports whether ref currently carries a primitive type.
 func refIsPrimitive(ref *values.JavaRef) bool {
@@ -876,7 +861,7 @@ func (d *Decompiler) rebindIncompatibleLoadForSink(sink *OpCode, value values.Ja
 	if slot < 0 {
 		return value
 	}
-	stores, _ := reachingStoresOf(load, slot)
+	stores, _ := d.reachingStores(load, slot)
 	for _, st := range stores {
 		refs, ok := d.opcodeIdToRef[st]
 		if !ok || len(refs) == 0 {
@@ -995,7 +980,7 @@ func (d *Decompiler) rebindCheckcastInnerArgs() {
 		if slot < 0 {
 			continue
 		}
-		stores, _ := reachingStoresOf(load, slot)
+		stores, _ := d.reachingStores(load, slot)
 		var matchRef *values.JavaRef
 		for _, st := range stores {
 			refs, ok := d.opcodeIdToRef[st]
@@ -1164,7 +1149,7 @@ func (d *Decompiler) rebindInvokeOperand(invokeOp *OpCode, operand values.JavaVa
 	if slot < 0 {
 		return nil
 	}
-	stores, _ := reachingStoresOf(load, slot)
+	stores, _ := d.reachingStores(load, slot)
 	if os.Getenv("JDEC_REBIND_INVOKE_DEBUG") == "1" {
 		storeOffs := []string{}
 		for _, st := range stores {
@@ -1555,24 +1540,13 @@ func (d *Decompiler) reachingSlotStoreOps(start *OpCode, slot int) map[string]*O
 	if start == nil {
 		return out
 	}
-	visited := map[*OpCode]bool{start: true}
-	queue := append([]*OpCode{}, start.Source...)
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		if cur == nil || visited[cur] {
-			continue
-		}
-		visited[cur] = true
-		if isLocalStoreOpcode(cur.Instr.OpCode) && GetStoreIdx(cur) == slot {
-			if refs, ok := d.opcodeIdToRef[cur]; ok && len(refs) > 0 {
-				if ref, ok2 := refs[len(refs)-1][0].(*values.JavaRef); ok2 && ref != nil {
-					out[ref.VarUid] = cur
-				}
+	stores, _ := d.reachingStores(start, slot)
+	for _, cur := range stores {
+		if refs := d.opcodeIdToRef[cur]; len(refs) > 0 {
+			if ref, ok := refs[len(refs)-1][0].(*values.JavaRef); ok && ref != nil {
+				out[ref.VarUid] = cur
 			}
-			continue
 		}
-		queue = append(queue, cur.Source...)
 	}
 	return out
 }
@@ -1930,7 +1904,7 @@ func (d *Decompiler) slotStoreReachesParamPhiLoad(store *OpCode, slot int) bool 
 			continue
 		}
 		if isLocalLoadOpcode(cur.Instr.OpCode) && GetRetrieveIdx(cur) == slot {
-			if _, reachesEntry := reachingStoresOf(cur, slot); reachesEntry {
+			if _, reachesEntry := d.reachingStores(cur, slot); reachesEntry {
 				return true
 			}
 		}
@@ -2388,7 +2362,7 @@ func (d *Decompiler) slotStoreDisjointFromCurrentWeb(store *OpCode, slot int, cu
 	if !ok {
 		return false
 	}
-	stores, _ := reachingStoresOf(store, slot)
+	stores, _ := d.reachingStores(store, slot)
 	for _, st := range stores {
 		if w, ok := webs.webOf[st]; !ok || w != storeWeb {
 			continue
@@ -3777,6 +3751,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 
 		if v, ok := value.(*values.CustomValue); ok {
 			if v.Flag == "exception" {
+				d.disFoldRef = append(d.disFoldRef, ref)
 				loadVarBySlot(slot)
 			}
 		}
@@ -3996,17 +3971,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// Record the inner arg so phase-2 invoke-arg rebinding can reach the original local-load
 		// without unpacking the cast CustomValue's closures (fastjson2 JDKUtils:318).
 		d.checkcastInnerArg[opcode] = arg
-		value := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			// Wrap the whole cast in parentheses so it keeps the correct precedence
-			// when it becomes the receiver of a member access or method call: without
-			// the outer parens, `(T)(x).m()` parses as `(T)(x.m())` instead of
-			// `((T)x).m()`. The extra parens are always valid Java in every context.
-			return fmt.Sprintf("((%s)(%s))", classInfo.String(funcCtx), arg.String(funcCtx))
-		}, func() types.JavaType {
-			return classInfo
-		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-			arg.ReplaceVar(oldId, newId)
-		})
+		value := &values.CastExpression{Value: arg, TargetType: classInfo, OriginPC: int(opcode.CurrentOffset)}
 		ref := runtimeStackSimulation.NewVar(value)
 		slotvalue := values.NewSlotValue(ref, ref.Type())
 		users := d.varUserMap.GetMust(ref)
@@ -4364,7 +4329,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			runtimeStackSimulation.Pop()
 		}
 	case OP_TABLESWITCH, OP_LOOKUPSWITCH:
-		statements.NewMiddleStatement(statements.MiddleSwitch, []any{opcode.SwitchJmpCase1, runtimeStackSimulation.Pop().(values.JavaValue)})
+		statements.NewMiddleStatement(statements.MiddleSwitch, []any{opcode.SwitchJmpCase1, runtimeStackSimulation.Pop().(values.JavaValue), opcode.SwitchJmpCase, statements.SwitchDefault{Index: opcode.SwitchDefaultIndex, Offset: opcode.SwitchDefaultOffset}})
 	case OP_IINC:
 		var index int
 		var inc int
@@ -4408,6 +4373,11 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			}
 		}
 		opcode.Ref = ref
+		// iinc is a use AND a definition. A copied local cannot be replaced by its
+		// initializer after the update (wide and ordinary forms have identical semantics).
+		if ref != nil {
+			d.disFoldRef = append(d.disFoldRef, ref)
+		}
 		// Post-increment / decrement used inside an expression. javac compiles `a[i++] = v`,
 		// `int j = i++`, `return i++` as `iload X; iinc X; ...`, so the OLD value of slot X is
 		// still live on the operand stack when this iinc runs. Detect that live load (the stack
@@ -5855,6 +5825,11 @@ func (d *Decompiler) ParseStatement() error {
 	// CFG/structuring below never sees jsr/ret. No-op when the method has none; conservatively
 	// leaves the bytecode (and thus the existing stub path) untouched for non-canonical shapes.
 	d.inlineJSRSubroutines()
+	d.semanticCFG, err = d.buildSemanticCFG()
+	if err != nil {
+		return err
+	}
+	d.cachedSlotWebs = nil
 	err = d.ScanJmp()
 	if err != nil {
 		return err
@@ -5920,6 +5895,10 @@ func (d *Decompiler) ParseStatement() error {
 	// DFS-stale wrong-type ref at phase-1 time. Runs here (opcodeIdToRef complete) BEFORE phase-2
 	// statement building. fastjson2 ObjectReaderBaseModule:793 (var7.getParameters receiver).
 	d.rebindIncompatibleInvokeArgs()
+	d.unifyReferenceWebs()
+	if d.semanticCFG != nil && d.semanticCFG.Err != nil {
+		return d.semanticCFG.Err
+	}
 	var runCode func(startNode *OpCode) error
 	var parseOpcode func(opcode *OpCode) error
 	parseOpcode = func(opcode *OpCode) error {
@@ -6264,12 +6243,12 @@ func (d *Decompiler) ParseStatement() error {
 				}
 			}
 		case OP_TABLESWITCH, OP_LOOKUPSWITCH:
-			// SwitchJmpCase maps each case value (and -1 for default) to the ABSOLUTE bytecode
+			// SwitchJmpCase maps each real case value to the ABSOLUTE bytecode
 			// offset of its body. javac lays case bodies out in source order at increasing offsets
 			// and fall-through follows that physical layout, so the switch rewriter needs the offset
 			// (not the value, and not the graph-traversal Node.Id which is unreliable) to emit cases
 			// in their true physical order and preserve descending fall-through (Bug G).
-			switchStatement := statements.NewMiddleStatement(statements.MiddleSwitch, []any{opcode.SwitchJmpCase1, opcode.stackConsumed[0], opcode.SwitchJmpCase})
+			switchStatement := statements.NewMiddleStatement(statements.MiddleSwitch, []any{opcode.SwitchJmpCase1, opcode.stackConsumed[0], opcode.SwitchJmpCase, statements.SwitchDefault{Index: opcode.SwitchDefaultIndex, Offset: opcode.SwitchDefaultOffset}})
 			appendNode(switchStatement)
 		case OP_IINC:
 			// Folded into a post-increment/decrement expression left on the operand stack
@@ -6397,6 +6376,19 @@ func (d *Decompiler) ParseStatement() error {
 			}
 			idToNode[id].Source = append(idToNode[id].Source, node)
 		}
+		if opcode.Instr.OpCode == OP_TABLESWITCH || opcode.Instr.OpCode == OP_LOOKUPSWITCH {
+			node.SwitchCases = omap.NewEmptyOrderedMap[int, *Node]()
+			opcode.SwitchJmpCase1.ForEach(func(key, index int) bool {
+				if index >= 0 && index < len(node.Next) {
+					node.SwitchCases.Set(key, node.Next[index])
+				}
+				return true
+			})
+			if opcode.SwitchDefaultIndex >= 0 && opcode.SwitchDefaultIndex < len(node.Next) {
+				node.SwitchDefault = node.Next[opcode.SwitchDefaultIndex]
+			}
+		}
+
 		// Pin the condition's true-branch by node identity at build time. A two-way conditional jump
 		// builds node.Next as [falseBranch, trueBranch] (opcode.Target order: the FALSE/jump-or-fall
 		// edge first per the javac branch sense already baked into the condition), so Next[1] is the
@@ -6504,7 +6496,18 @@ func (d *Decompiler) ParseStatement() error {
 		idToNode[toNodeId].SourceConditionNode = idToNode[conditionId]
 	}
 	d.RootNode = nodes[0]
-	MiscRewriter(d.RootNode, d.delRefUserAttr)
+	MiscRewriter(d.RootNode, d.delRefUserAttr, func(first, last *Node) bool {
+		a, b := idToOpcode[first.Id], idToOpcode[last.Id]
+		if a == nil || b == nil || a.CurrentOffset > b.CurrentOffset {
+			return false
+		}
+		for _, h := range d.ExceptionTable {
+			if a.CurrentOffset < h.EndPc && b.CurrentOffset >= h.StartPc {
+				return false
+			}
+		}
+		return true
+	})
 	uidToPairs := omap.NewEmptyOrderedMap[string, []*VarFoldRule]()
 	uidToRef := map[string]*values.JavaRef{}
 	WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
@@ -6514,6 +6517,11 @@ func (d *Decompiler) ParseStatement() error {
 		if node.IsDel {
 			sources := slices.Clone(node.Source)
 			next := slices.Clone(node.Next)
+			if len(next) == 1 {
+				for _, source := range sources {
+					source.ReplaceSwitchTarget(node, next[0])
+				}
+			}
 			node.RemoveAllSource()
 			node.RemoveAllNext()
 			for _, source := range sources {
@@ -6584,6 +6592,11 @@ func (d *Decompiler) ParseStatement() error {
 		var cur values.JavaValue = start
 		for {
 			if r, ok := cur.(*values.JavaRef); ok {
+				// A transitive alias must not inline a catch parameter or another
+				// definition explicitly protected from folding.
+				if r != start && slices.Contains(disRefUid, r.VarUid) {
+					return r
+				}
 				if r != start && dupSharedRefUids[r.VarUid] {
 					return r
 				}
@@ -6719,18 +6732,18 @@ func (d *Decompiler) ParseStatement() error {
 			currentNodeSource.AddNext(nnext)
 
 			d.tracef("var-fold", "dup-collapse ref=%s currentNode=%d nextNode=%d", traceRef(ref, d.FunctionContext), currentNode.Id, nextNode.Id)
-			// The embedded assignment `(nextAssign.LeftValue = val)` is baked into the opaque
-			// CustomValue below: its LHS local is thereby consumed into the value stream and its
+			// The embedded assignment retains explicit value dependencies below: its LHS local is thereby consumed into the value stream and its
 			// standalone AssignStatement is dropped, so the local keeps no DeclareStatement. Record it
 			// so RewriteVar can synthesize a bare declaration if nothing else declares it (Bug Y res C).
 			if lref, okl := nextAssign.LeftValue.(*values.JavaRef); okl && lref != nil {
 				d.EmbeddedAssignDeclRefs = append(d.EmbeddedAssignDeclRefs, lref)
 			}
-			pairs[1].Replace(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-				return statements.NewAssignStatement(nextAssign.LeftValue, val, false).String(funcCtx)
-			}, func() types.JavaType {
-				return val.Type()
-			}))
+			pairs[1].Replace(&values.AssignmentExpression{
+				Target: nextAssign.LeftValue, Value: val,
+				Render: func(ctx *class_context.ClassContext) string {
+					return statements.NewAssignStatement(nextAssign.LeftValue, val, false).String(ctx)
+				},
+			})
 
 		}()
 		if len(pairs)-attr[0] == 1 {
@@ -6799,6 +6812,7 @@ func (d *Decompiler) ParseStatement() error {
 					if isEarlyReturnGuardFold(beforeNode, assignNode, node) {
 						beforeNode.ReplaceNextSliceKeepOrder(assignNode, []*Node{node})
 					} else {
+						beforeNode.ReplaceSwitchTarget(assignNode, node)
 						beforeNode.RemoveNext(assignNode)
 						beforeNode.AddNext(node)
 					}
@@ -6889,109 +6903,132 @@ func (d *Decompiler) ParseStatement() error {
 	})
 	err = WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
 		if node.IsTryCatch {
-			tryNodeId := getStatementNextIdByOpcodeId(node.TryNodeId)
-			tryNodes := NodeFilter(node.Next, func(n *Node) bool {
-				return n.Id == tryNodeId
-			})
-			if len(tryNodes) == 0 {
-				return nil, errors.New("not found try body")
+			// A switch predecessor can enter several distinct protected regions.
+			// Keep their start identities separate instead of attaching every
+			// handler to the last TryNode written onto that predecessor.
+			groups := map[uint16][]*CatchNode{}
+			starts := []uint16{}
+			for _, info := range node.CatchNodeInfo {
+				if _, ok := groups[info.StartIndex]; !ok {
+					starts = append(starts, info.StartIndex)
+				}
+				groups[info.StartIndex] = append(groups[info.StartIndex], info)
 			}
-			tryStartNode := tryNodes[0]
-			catchInfos := slices.Clone(node.CatchNodeInfo)
-			// group by endIndex
-			catchNodeMap := map[int][]*Node{}
-			for _, catchInfo := range catchInfos {
-				// Multiple catch handlers can protect the same try region (same end index): a real
-				// catch (e.g. ArrayIndexOutOfBoundsException) plus the synthetic catch-all `any`
-				// handler that javac emits for a `finally`. These must be APPENDED into one group so
-				// they all become successors of a single tryStart node; the previous code overwrote
-				// the slot, dropping the earlier handler and leaving it dangling on the pre-try
-				// statement node with two successors ("multiple next"). The raw NodeFilter result is
-				// appended without deduping on purpose: a multi-catch (`A | B`) shares one handler PC
-				// and therefore appears as two identical edges in node.Next, and the construction
-				// below removes one edge per group entry, so preserving the multiplicity is required
-				// to clear both edges. AddNext on the try node dedupes the successor side, and any
-				// surplus RemoveNext calls are safe no-ops.
-				found := NodeFilter(node.Next, func(n *Node) bool {
-					return n.Id == getStatementNextIdByOpcodeId(catchInfo.OpCode.Id)
+			slices.Sort(starts)
+			for _, start := range starts {
+				startID := node.TryNodeId
+				if len(starts) > 1 {
+					for _, op := range d.opCodes {
+						if op.CurrentOffset == start && op.Instr.OpCode != OP_START {
+							startID = op.Id
+							break
+						}
+					}
+				}
+				tryNodeId := getStatementNextIdByOpcodeId(startID)
+				tryNodes := NodeFilter(node.Next, func(n *Node) bool {
+					return n.Id == tryNodeId
 				})
-				endIndex := int(catchInfo.EndIndex)
-				catchNodeMap[endIndex] = append(catchNodeMap[endIndex], found...)
-			}
-			endIndexes := []int{}
-			for endIndex := range catchNodeMap {
-				endIndexes = append(endIndexes, endIndex)
-			}
-			sort.Slice(endIndexes, func(i, j int) bool {
-				return endIndexes[i] < endIndexes[j]
-			})
-			// build try node
-			// When the try region is entered via a jump (guard-return / loop / branch body), the
-			// try-catch is anchored on the *condition* that jumps to the try body (see the pre==nil
-			// fallback in ScanJmp). Splicing the MiddleTryStart in must preserve that condition's
-			// branch order and jump-target identity: a condition's true/false branch is index-based
-			// (node.Next[trueIndex]) and RemoveGotoStatement picks the index by matching node.JmpNode.
-			// The legacy steal (remove + append) moved the try body to the end of the predecessor's
-			// successor list and left JmpNode dangling on the now-detached body, inverting the if.
-			// Replace the edge in place and re-point JmpNode/HideNext instead. Equivalent to the old
-			// behavior for single-successor anchors (OP_START / plain statement). Kill-switch:
-			// JDEC_TRY_JUMP_ANCHOR_OFF=1 restores the legacy steal.
-			preserveBranchOrder := os.Getenv("JDEC_TRY_JUMP_ANCHOR_OFF") == ""
-			currentTryNode := tryStartNode
-			for _, endIndex := range endIndexes {
-				catchNodes := catchNodeMap[endIndex]
-				tryNode := NewNode(statements.NewMiddleStatement(statements.MiddleTryStart, nil))
-				tryNode.Id = statementsIndex
-				if preserveBranchOrder {
-					for _, n := range slices.Clone(currentTryNode.Source) {
-						n.ReplaceNext(currentTryNode, tryNode)
-						if n.JmpNode == currentTryNode {
-							n.JmpNode = tryNode
-						}
-						if n.HideNext == currentTryNode {
-							n.HideNext = tryNode
-						}
-						tryNode.Source = append(tryNode.Source, n)
-					}
-					currentTryNode.Source = nil
-				} else {
-					for _, n := range currentTryNode.Source {
-						currentTryNode.RemoveSource(n)
-						tryNode.AddSource(n)
-					}
+				if len(tryNodes) == 0 {
+					return nil, errors.New("not found try body")
 				}
-				tryNode.AddNext(currentTryNode)
-				statementsIndex++
-				for _, catchNode := range catchNodes {
-					// Mark the handler entry so TryRewriter can identify it structurally even when the
-					// handler body has no leading exception-store (e.g. an empty `catch` that discards
-					// the unused exception with `pop`).
-					catchNode.IsCatchStart = true
-					tryNode.AddNext(catchNode)
-					node.RemoveNext(catchNode)
+				tryStartNode := tryNodes[0]
+				catchInfos := slices.Clone(groups[start])
+				// group by endIndex
+				catchNodeMap := map[int][]*Node{}
+				for _, catchInfo := range catchInfos {
+					// Multiple catch handlers can protect the same try region (same end index): a real
+					// catch (e.g. ArrayIndexOutOfBoundsException) plus the synthetic catch-all `any`
+					// handler that javac emits for a `finally`. These must be APPENDED into one group so
+					// they all become successors of a single tryStart node; the previous code overwrote
+					// the slot, dropping the earlier handler and leaving it dangling on the pre-try
+					// statement node with two successors ("multiple next"). The raw NodeFilter result is
+					// appended without deduping on purpose: a multi-catch (`A | B`) shares one handler PC
+					// and therefore appears as two identical edges in node.Next, and the construction
+					// below removes one edge per group entry, so preserving the multiplicity is required
+					// to clear both edges. AddNext on the try node dedupes the successor side, and any
+					// surplus RemoveNext calls are safe no-ops.
+					found := NodeFilter(node.Next, func(n *Node) bool {
+						return n.Id == getStatementNextIdByOpcodeId(catchInfo.OpCode.Id)
+					})
+					endIndex := int(catchInfo.EndIndex)
+					catchNodeMap[endIndex] = append(catchNodeMap[endIndex], found...)
 				}
-				node.AddNext(tryNode)
-				currentTryNode = tryNode
+				endIndexes := []int{}
+				for endIndex := range catchNodeMap {
+					endIndexes = append(endIndexes, endIndex)
+				}
+				sort.Slice(endIndexes, func(i, j int) bool {
+					return endIndexes[i] < endIndexes[j]
+				})
+				// build try node
+				// When the try region is entered via a jump (guard-return / loop / branch body), the
+				// try-catch is anchored on the *condition* that jumps to the try body (see the pre==nil
+				// fallback in ScanJmp). Splicing the MiddleTryStart in must preserve that condition's
+				// branch order and jump-target identity: a condition's true/false branch is index-based
+				// (node.Next[trueIndex]) and RemoveGotoStatement picks the index by matching node.JmpNode.
+				// The legacy steal (remove + append) moved the try body to the end of the predecessor's
+				// successor list and left JmpNode dangling on the now-detached body, inverting the if.
+				// Replace the edge in place and re-point JmpNode/HideNext instead. Equivalent to the old
+				// behavior for single-successor anchors (OP_START / plain statement). Kill-switch:
+				// JDEC_TRY_JUMP_ANCHOR_OFF=1 restores the legacy steal.
+				preserveBranchOrder := os.Getenv("JDEC_TRY_JUMP_ANCHOR_OFF") == ""
+				currentTryNode := tryStartNode
+				for _, endIndex := range endIndexes {
+					catchNodes := catchNodeMap[endIndex]
+					tryNode := NewNode(statements.NewMiddleStatement(statements.MiddleTryStart, nil))
+					tryNode.Id = statementsIndex
+					if preserveBranchOrder {
+						for _, n := range slices.Clone(currentTryNode.Source) {
+							n.ReplaceNext(currentTryNode, tryNode)
+							if n.JmpNode == currentTryNode {
+								n.JmpNode = tryNode
+							}
+							if n.HideNext == currentTryNode {
+								n.HideNext = tryNode
+							}
+							tryNode.Source = append(tryNode.Source, n)
+						}
+						currentTryNode.Source = nil
+					} else {
+						for _, n := range currentTryNode.Source {
+							currentTryNode.RemoveSource(n)
+							tryNode.AddSource(n)
+						}
+					}
+					tryNode.AddNext(currentTryNode)
+					statementsIndex++
+					for _, catchNode := range catchNodes {
+						// Mark the handler entry so TryRewriter can identify it structurally even when the
+						// handler body has no leading exception-store (e.g. an empty `catch` that discards
+						// the unused exception with `pop`).
+						catchNode.IsCatchStart = true
+						tryNode.AddNext(catchNode)
+						node.RemoveNext(catchNode)
+					}
+					node.AddNext(tryNode)
+					currentTryNode = tryNode
+				}
+				// tryNode := NewNode(statements.NewMiddleStatement(statements.MiddleTryStart, nil))
+				// tryNode.Id = statementsIndex
+				// statementsIndex++
+				// node.RemoveNext(tryNode)
+				// node.AddNext(tryNode)
+				// tryNode.AddNext(tryStartNode)
+				// for _, catchNode := range catchNodes {
+				// 	tryNode.AddNext(catchNode)
+				// 	node.RemoveNext(catchNode)
+				// }
+				// source := funk.Filter(tryStartNode.Source, func(item *Node) bool {
+				// 	return item != tryNode
+				// }).([]*Node)
+				// for _, n := range source {
+				// 	tryStartNode.RemoveSource(n)
+				// }
+				// for _, n := range source {
+				// 	tryNode.AddSource(n)
+				// }
 			}
-			// tryNode := NewNode(statements.NewMiddleStatement(statements.MiddleTryStart, nil))
-			// tryNode.Id = statementsIndex
-			// statementsIndex++
-			// node.RemoveNext(tryNode)
-			// node.AddNext(tryNode)
-			// tryNode.AddNext(tryStartNode)
-			// for _, catchNode := range catchNodes {
-			// 	tryNode.AddNext(catchNode)
-			// 	node.RemoveNext(catchNode)
-			// }
-			// source := funk.Filter(tryStartNode.Source, func(item *Node) bool {
-			// 	return item != tryNode
-			// }).([]*Node)
-			// for _, n := range source {
-			// 	tryStartNode.RemoveSource(n)
-			// }
-			// for _, n := range source {
-			// 	tryNode.AddSource(n)
-			// }
 		}
 		return node.Next, nil
 	})
@@ -7092,16 +7129,9 @@ func DumpOpcodesToDotExp(code *OpCode) string {
 	return sb.String()
 }
 
-// castAnonSubclassReceiverForOwnField 在 getfield 读取「本类自身字段」、但接收者的静态类型是本类的
-// 合成匿名/局部子类 (形如 `Self$2`) 时, 给接收者套一层到声明类 (本类) 的显式上行 cast。
-//
-// 原因: 源码 `Self s = new Self(){..}` 里 s 的声明类型是父类 `Self`, 字节码却把局部定型成合成子类
-// `Self$N`。若该字段在 `Self` 是 private, 它不会被子类继承 (JLS 8.2), 故经 `Self$N` 引用 `s.field`
-// 不是可见成员, javac 报 `field has private access in Self`。`((Self)s).field` 永远合法 (子类 IS-A
-// Self), 正是 javac 对匿名子类的还原形态。
-//
-// 该判定极窄: 仅当 owner==本类 且接收者静态类型是 `本类$...` 时触发, 故只会给「本就无法重编译」的输出
-// 加 cast, 不影响任何已能编译的代码。kill-switch: JDEC_NO_PRIV_FIELD_CAST。
+// castAnonSubclassReceiverForOwnField uses resolved JVM ancestry before adding
+// a cast to the field owner. A '$' naming prefix is nesting syntax, not evidence
+// of inheritance; unrelated nested classes must never be treated as subtypes.
 func castAnonSubclassReceiverForOwnField(recv values.JavaValue, member *values.JavaClassMember, funcCtx *class_context.ClassContext) values.JavaValue {
 	if os.Getenv("JDEC_NO_PRIV_FIELD_CAST") != "" {
 		return recv
@@ -7121,8 +7151,8 @@ func castAnonSubclassReceiverForOwnField(recv values.JavaValue, member *values.J
 	if !ok || jc == nil {
 		return recv
 	}
-	// 接收者静态类型须为本类的合成嵌套/匿名子类: `<Self>$<...>`。
-	if !strings.HasPrefix(jc.Name, funcCtx.ClassName+"$") {
+	// Require a proven receiver subtype, independently of its binary spelling.
+	if jc.Name == member.Name || !types.IsReferenceSubtypeBridged(jc.Name, member.Name, funcCtx.SiblingSuperTypes) {
 		return recv
 	}
 	owner := member.Name

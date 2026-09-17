@@ -15,6 +15,10 @@ func hardjarShapeOff() bool {
 }
 
 func fixHardjarShapes(body string) string {
+	return rewriteJavaCode(body, fixHardjarCodeShapes)
+}
+
+func fixHardjarCodeShapes(body string) string {
 	if hardjarShapeOff() {
 		return body
 	}
@@ -129,17 +133,21 @@ func fixHardjarShapes(body string) string {
 	body = fillMissingReturnAfterLabeledBreak(body)
 	body = fillEmptySynchronizedBlock(body)
 	body = wrapReflectiveCatchBody(body)
-	body = wrapAliasedThrowableRethrow(body)
 	body = rewriteSelfInitDeclToPrevSameType(body)
 	body = dropEmptyNSMEStaticBlock(body)
-	body = insertBreakBeforeDefaultThrow(body)
-	if strings.Contains(body, "package org.mockito") {
+	if mockitoPackageRE.MatchString(body) {
 		body = applyMockitoShapes(body)
 	}
 	return body
 }
 
+var mockitoPackageRE = regexp.MustCompile(`(?m)^\s*package\s+org\.mockito(?:\.|\s*;)`)
+
 func applyMockitoShapes(body string) string {
+	return rewriteJavaCode(body, applyMockitoCodeShapes)
+}
+
+func applyMockitoCodeShapes(body string) string {
 	if !strings.Contains(body, "(List)(this.getMatchers())") {
 		body = strings.ReplaceAll(body, "this.getMatchers()", "(List)(this.getMatchers())")
 	}
@@ -9509,56 +9517,6 @@ func wrapReflectiveCatchBody(body string) string {
 	}
 }
 
-func wrapAliasedThrowableRethrow(body string) string {
-	needle := "}catch(Throwable "
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		nameStart := i + len(needle)
-		nameEndRel := strings.Index(body[nameStart:], "){")
-		if nameEndRel < 0 || nameEndRel > 40 {
-			from = i + 1
-			continue
-		}
-		ident := body[nameStart : nameStart+nameEndRel]
-		if ident == "" || strings.ContainsAny(ident, " \t\n") {
-			from = i + 1
-			continue
-		}
-		open := nameStart + nameEndRel + 1
-		close := matchingCloseBrace(body, open)
-		if close < 0 {
-			from = i + 1
-			continue
-		}
-		inner := body[open+1 : close]
-		if !strings.Contains(inner, "throw "+ident+";") {
-			from = close
-			continue
-		}
-		if !strings.Contains(inner, " = "+ident+";") {
-			from = close
-			continue
-		}
-		if strings.Contains(inner, "new RuntimeException("+ident) {
-			from = close
-			continue
-		}
-		after := strings.TrimLeft(body[close+1:], " \t\r\n")
-		if strings.HasPrefix(after, "finally") || strings.HasPrefix(after, "}finally") {
-			from = close
-			continue
-		}
-		neu := strings.Replace(inner, "throw "+ident+";", "throw new RuntimeException("+ident+");", 1)
-		body = body[:open+1] + neu + body[close:]
-		from = close
-	}
-}
-
 var emptyNSMEStaticRe = regexp.MustCompile(`static\s*\{\s*try\{\s*\}catch\(NoSuchMethodException [^)]+\)\{\s*throw new [^;]+;\s*\}\s*\}`)
 
 func dropEmptyNSMEStaticBlock(body string) string {
@@ -9566,69 +9524,6 @@ func dropEmptyNSMEStaticBlock(body string) string {
 		return body
 	}
 	return emptyNSMEStaticRe.ReplaceAllString(body, "")
-}
-
-var defaultThrowLineRe = regexp.MustCompile(`\n[ \t]*default:`)
-
-func insertBreakBeforeDefaultThrow(body string) string {
-	from := 0
-	for {
-		loc := defaultThrowLineRe.FindStringIndex(body[from:])
-		if loc == nil {
-			return body
-		}
-		i := from + loc[0]
-		rest := strings.TrimSpace(body[i+len(body[i:i+loc[1]-loc[0]]):])
-		// rest after "default:"
-		afterDef := body[from+loc[1]:]
-		rest = strings.TrimSpace(afterDef)
-		if !strings.HasPrefix(rest, "throw new ") && !strings.HasPrefix(rest, "throw ") {
-			from = i + 1
-			continue
-		}
-		before := strings.TrimRight(body[:i], " \t")
-		nl := strings.LastIndex(before, "\n")
-		last := ""
-		if nl >= 0 {
-			last = strings.TrimSpace(before[nl+1:])
-		}
-		if strings.HasPrefix(last, "case ") {
-			from = i + 1
-			continue
-		}
-		// A group already terminated by return/break/continue/throw (with or
-		// without a value: bytebuddy shaded-ASM Type.getSize ends `return 2;`)
-		// needs no injected break; adding one is an unreachable statement.
-		j := 0
-		for j < len(last) && (last[j] == '_' || last[j] == '$' || ('a' <= last[j] && last[j] <= 'z') || ('A' <= last[j] && last[j] <= 'Z')) {
-			j++
-		}
-		switch last[:j] {
-		case "return", "break", "continue", "throw":
-			from = i + 1
-			continue
-		}
-		wstart := i - 250
-		if wstart < 0 {
-			wstart = 0
-		}
-		window := body[wstart:i]
-		if !strings.Contains(window, "case 0:") || !strings.Contains(window, "case 8:") {
-			from = i + 1
-			continue
-		}
-		defLine := body[i+1:]
-		if k := strings.IndexByte(defLine, '\n'); k >= 0 {
-			defLine = defLine[:k]
-		}
-		ind := leadingTabs(defLine)
-		if ind == "" {
-			ind = "\t\t"
-		}
-		inj := "\n" + ind + "break;"
-		body = body[:i] + inj + body[i:]
-		from = i + len(inj) + 1
-	}
 }
 
 func dropDupOuterIOExceptionCatch(body string) string {

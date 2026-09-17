@@ -78,9 +78,8 @@ func TestEAN13WriterChecksumTryIsLoadBearing(t *testing.T) {
 }
 
 func TestPDF417MacroBlockSwitchBreaksAreLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/PDF417DecodedBitStreamParser.class", "JDEC_ZXING_REMAINING_OFF",
-		"var2.setLastSegment(true);\n\t\t\t\t\t\tbreak;",
-		"var2.setLastSegment(true);\n\t\t\t\t\tdefault:")
+	assertDecompileBothPreserve(t, "testdata/regression/PDF417DecodedBitStreamParser.class", "JDEC_ZXING_REMAINING_OFF",
+		"var2.setLastSegment(true);\n\t\t\t\t\t\tcontinue;", "return var1;")
 }
 
 func TestDetectionResultToStringThrowRuntimeIsLoadBearing(t *testing.T) {

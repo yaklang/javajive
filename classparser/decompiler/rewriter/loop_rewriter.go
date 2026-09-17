@@ -47,6 +47,7 @@ func RebuildLoopNode(manager *RewriteManager) error {
 // "if (i < n) break; else { body }" instead of "if (i < n) { body } else break;". Replacing in
 // place preserves the branch polarity so the reconstructed loop keeps its original semantics.
 func replaceNextInPlace(node, oldNext, newNext *core.Node) {
+	node.ReplaceSwitchTarget(oldNext, newNext)
 	idx := slices.Index(node.Next, oldNext)
 	node.RemoveNext(oldNext)
 	if idx < 0 || idx > len(node.Next) {
@@ -328,8 +329,22 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 					enclosing.AddNext(next)
 					continue
 				}
+				// A switch captures an unlabeled break. Preserve the actual loop target
+				// when the exiting edge belongs to a switch nested in this loop.
+				breakText := "break"
+				for _, sw := range manager.SwitchNode {
+					if utils.IsDominate(manager.DominatorMap, circleNode, sw) &&
+						(sw == node || utils.IsDominate(manager.DominatorMap, sw, node)) {
+						loop := circleNode.Statement.(*statements.DoWhileStatement)
+						if loop.Label == "" {
+							loop.Label = manager.NewLoopLabel()
+						}
+						breakText += " " + loop.Label
+						break
+					}
+				}
 				breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-					return "break"
+					return breakText
 				}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
 				}))
 				replaceNextInPlace(node, next, breakNode)

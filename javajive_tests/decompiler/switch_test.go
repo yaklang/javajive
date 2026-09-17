@@ -24,12 +24,11 @@ func TestSwitch(t *testing.T) {
 		m := omap.NewEmptyOrderedMap[int, int]()
 		for i, _ := range startNodes {
 			if i == len(startNodes)-1 {
-				m.Set(-1, i)
 				continue
 			}
 			m.Set(i, i)
 		}
-		node := core.NewNode(statements.NewMiddleStatement(statements.MiddleSwitch, []any{m, values.NewJavaLiteral("switch", types.NewJavaPrimer(types.JavaString))}))
+		node := core.NewNode(statements.NewMiddleStatement(statements.MiddleSwitch, []any{m, values.NewJavaLiteral("switch", types.NewJavaPrimer(types.JavaString)), switchFixtureOffsets(), statements.SwitchDefault{Index: len(startNodes) - 1, Offset: int32(len(startNodes) - 1)}}))
 		node.Id = id
 		id++
 		for _, n := range startNodes {
@@ -125,12 +124,11 @@ func TestSwitch2(t *testing.T) {
 		m := omap.NewEmptyOrderedMap[int, int]()
 		for i, _ := range startNodes {
 			if i == len(startNodes)-1 {
-				m.Set(-1, i)
 				continue
 			}
 			m.Set(i, i)
 		}
-		node := core.NewNode(statements.NewMiddleStatement(statements.MiddleSwitch, []any{m, values.NewJavaLiteral("switch", types.NewJavaPrimer(types.JavaString))}))
+		node := core.NewNode(statements.NewMiddleStatement(statements.MiddleSwitch, []any{m, values.NewJavaLiteral("switch", types.NewJavaPrimer(types.JavaString)), switchFixtureOffsets(), statements.SwitchDefault{Index: len(startNodes) - 1, Offset: int32(len(startNodes) - 1)}}))
 		node.Id = id
 		id++
 		for _, n := range startNodes {
@@ -220,4 +218,12 @@ default:
 default bodybreak
 }
 end`, strings.Join(statementsStrs, "\n"))
+}
+
+func switchFixtureOffsets() *omap.OrderedMap[int, int32] {
+	m := omap.NewEmptyOrderedMap[int, int32]()
+	for i := 0; i < 3; i++ {
+		m.Set(i, int32(i))
+	}
+	return m
 }

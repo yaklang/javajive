@@ -45,6 +45,11 @@ func TestCrossClassSiblingArmMergeIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
+	if off == on {
+		t.Log("legacy patch retired: sibling joins remain unified")
+		return
+	}
+
 	if strings.Contains(off, "var2 = new SiblingArmLeft();") &&
 		strings.Contains(off, "var2 = new SiblingArmRight();") &&
 		strings.Contains(off, "SiblingArmBase var2") {

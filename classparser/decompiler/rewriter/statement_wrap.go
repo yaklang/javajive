@@ -657,7 +657,7 @@ func isMethodExitTerminator(node *core.Node) bool {
 	case *statements.ReturnStatement:
 		return true
 	case *statements.CustomStatement:
-		txt := strings.TrimSpace(s.String(pruneCtx))
+		txt := strings.TrimSpace(s.String(&class_context.ClassContext{}))
 		return strings.HasPrefix(txt, "throw ")
 	}
 	return false
@@ -1087,7 +1087,8 @@ func (s *RewriteManager) Rewrite() error {
 			s.DominatorMap = GenerateDominatorTree(s.RootNode)
 		}
 
-		if slices.Contains(s.IfNodes, node) {
+		// Switch-only loops also need back edges materialized before their bodies are consumed.
+		if slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
 			for j := i; j < len(order); j++ {
 				n := order[j]
 				if slices.Contains(s.WhileNode, n) && utils2.IsDominate(s.DominatorMap, n, node) {
