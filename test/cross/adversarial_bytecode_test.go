@@ -133,7 +133,7 @@ func TestAuditIrreducibleDiagnostic(t *testing.T) {
 	}
 	writeSources(t, original, map[string]string{"Driver.java": "public class Driver {public static void main(String[] x){System.out.println(Fixture.f(0));System.out.println(Fixture.f(1));}}"})
 	auditCommand(t, original, auditTool(t, "javac"), "-cp", original, "-d", original, "Driver.java")
-	if got := auditCommand(t, original, auditTool(t, "java"), "-Xverify:all", "-cp", original, "Driver"); strings.TrimSpace(got) != "5\n6" {
+	if got := auditCommand(t, original, auditTool(t, "java"), "-Xverify:all", "-cp", original, "Driver"); strings.TrimSpace(strings.ReplaceAll(got, "\r\n", "\n")) != "5\n6" {
 		t.Fatal(got)
 	}
 	r, err := javajive.DecompileWithOptions(raw, javajive.DecompileOptions{Mode: javajive.Precision})
