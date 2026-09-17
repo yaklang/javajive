@@ -1,6 +1,8 @@
 package cross
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"github.com/yaklang/javajive"
 	"os"
 	"path/filepath"
@@ -14,9 +16,10 @@ import (
 func auditSourceSet(t *testing.T, sources map[string]string, driver string, mode javajive.DecompileMode) {
 	t.Helper()
 	original, rebuilt := t.TempDir(), t.TempDir()
+	record := newAuditObservation(t, mode, "source-set-g:none")
 	writeSources(t, original, sources)
-	writeSources(t, original, map[string]string{"Driver.java": driver})
-	names := []string{"Driver.java"}
+	writeSources(t, original, map[string]string{"Driver.java": driver, "AuditVerifier.java": auditVerifierSource})
+	names := []string{"Driver.java", "AuditVerifier.java"}
 	for n := range sources {
 		names = append(names, n)
 	}
@@ -24,7 +27,7 @@ func auditSourceSet(t *testing.T, sources map[string]string, driver string, mode
 	args := append([]string{"--release", "8", "-g:none", "-d", original}, names...)
 	javac, java := auditTool(t, "javac"), auditTool(t, "java")
 	auditCommand(t, original, javac, args...)
-	want := auditCommand(t, original, java, "-Xverify:all", "-cp", original, "Driver")
+	record.Compiler = strings.TrimSpace(auditCommand(t, original, javac, "-version"))
 	raws := map[string][]byte{}
 	err := filepath.WalkDir(original, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -37,7 +40,7 @@ func auditSourceSet(t *testing.T, sources map[string]string, driver string, mode
 		if err != nil {
 			return err
 		}
-		if rel == "Driver.class" {
+		if rel == "Driver.class" || rel == "AuditVerifier.class" {
 			return nil
 		}
 		raw, err := os.ReadFile(path)
@@ -48,27 +51,53 @@ func auditSourceSet(t *testing.T, sources map[string]string, driver string, mode
 		t.Fatal(err)
 	}
 	resolver := func(name string) ([]byte, bool) { b, ok := raws[name]; return b, ok }
-	names = []string{"Driver.java"}
+	names = []string{"Driver.java", "AuditVerifier.java"}
 	keys := []string{}
 	for key := range raws {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	classNames := []string{}
+	hash := sha256.New()
+	for _, key := range keys {
+		classNames = append(classNames, strings.ReplaceAll(key, "/", "."))
+		fmt.Fprintf(hash, "%s:%d:", key, len(raws[key]))
+		hash.Write(raws[key])
+	}
+	record.InputHash = fmt.Sprintf("%x", hash.Sum(nil))
+	verifyArgs := append([]string{"-Xverify:all", "-cp", original, "AuditVerifier"}, classNames...)
+	auditCommand(t, original, java, verifyArgs...)
+	record.OriginalVerified = true
+	want := auditCommand(t, original, java, "-Xverify:all", "-cp", original, "Driver")
+	record.Original = want
 	for _, key := range keys {
 		result, err := javajive.DecompileWithOptions(raws[key], javajive.DecompileOptions{Mode: mode, Resolve: resolver})
-		if err != nil || result.Status != "complete" {
+		if result.Status != "complete" || len(result.StubMethods) > 0 {
+			record.Stub = true
+		}
+		if err != nil || record.Stub {
 			t.Fatalf("%s: status=%s diagnostics=%+v err=%v", key, result.Status, result.Diagnostics, err)
+		}
+		for _, rule := range result.RulesApplied {
+			record.Rules = append(record.Rules, rule.Rule)
 		}
 		t.Logf("%s hash=%s rules=%+v", key, result.InputHash, result.RulesApplied)
 		name := key + ".java"
 		writeSources(t, rebuilt, map[string]string{name: result.Source})
 		names = append(names, name)
 	}
-	writeSources(t, rebuilt, map[string]string{"Driver.java": driver})
+	record.Decompiled = true
+	writeSources(t, rebuilt, map[string]string{"Driver.java": driver, "AuditVerifier.java": auditVerifierSource})
 	args = append([]string{"--release", "8", "-cp", rebuilt, "-d", rebuilt}, names...)
 	auditCommand(t, rebuilt, javac, args...)
+	record.Recompiled = true
+	verifyArgs = append([]string{"-Xverify:all", "-cp", rebuilt, "AuditVerifier"}, classNames...)
+	auditCommand(t, rebuilt, java, verifyArgs...)
+	record.RebuiltVerified = true
 	got := auditCommand(t, rebuilt, java, "-Xverify:all", "-cp", rebuilt, "Driver")
-	if got != want {
+	record.Rebuilt = got
+	record.Equal = got == want
+	if !record.Equal {
 		t.Fatalf("original=%q rebuilt=%q", want, got)
 	}
 }

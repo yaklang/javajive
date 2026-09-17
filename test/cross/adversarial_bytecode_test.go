@@ -2,7 +2,9 @@ package cross
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,26 +58,39 @@ func auditClass(code []byte, descriptor string, locals int) []byte {
 func auditBytecodeRoundTrip(t *testing.T, raw []byte, driver string) {
 	t.Helper()
 	original, rebuilt := t.TempDir(), t.TempDir()
+	record := newAuditObservation(t, javajive.Precision, "generated-v49")
+	record.InputHash = fmt.Sprintf("%x", sha256.Sum256(raw))
 	if err := os.WriteFile(filepath.Join(original, "Fixture.class"), raw, 0644); err != nil {
 		t.Fatal(err)
 	}
 	runner := "public class Driver {public static void main(String[] args){" + driver + "}}"
-	writeSources(t, original, map[string]string{"Driver.java": runner})
+	writeSources(t, original, map[string]string{"Driver.java": runner, "AuditVerifier.java": auditVerifierSource})
 	javac, java := auditTool(t, "javac"), auditTool(t, "java")
-	auditCommand(t, original, javac, "-cp", original, "-d", original, "Driver.java")
+	auditCommand(t, original, javac, "-cp", original, "-d", original, "Driver.java", "AuditVerifier.java")
+	record.Compiler = strings.TrimSpace(auditCommand(t, original, javac, "-version"))
+	auditCommand(t, original, java, "-Xverify:all", "-cp", original, "AuditVerifier", "Fixture")
+	record.OriginalVerified = true
 	want := auditCommand(t, original, java, "-Xverify:all", "-cp", original, "Driver")
+	record.Original = want
 	result, err := javajive.DecompileWithOptions(raw, javajive.DecompileOptions{Mode: javajive.Precision})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "complete" {
+	record.Decompiled = true
+	record.Stub = result.Status != "complete" || len(result.StubMethods) > 0
+	if record.Stub {
 		t.Fatalf("non-complete result: %+v", result)
 	}
-	writeSources(t, rebuilt, map[string]string{"Fixture.java": result.Source, "Driver.java": runner})
+	writeSources(t, rebuilt, map[string]string{"Fixture.java": result.Source, "Driver.java": runner, "AuditVerifier.java": auditVerifierSource})
 	t.Logf("decompiled:\n%s", result.Source)
-	auditCommand(t, rebuilt, javac, "-cp", rebuilt, "-d", rebuilt, "Fixture.java", "Driver.java")
+	auditCommand(t, rebuilt, javac, "-cp", rebuilt, "-d", rebuilt, "Fixture.java", "Driver.java", "AuditVerifier.java")
+	record.Recompiled = true
+	auditCommand(t, rebuilt, java, "-Xverify:all", "-cp", rebuilt, "AuditVerifier", "Fixture")
+	record.RebuiltVerified = true
 	got := auditCommand(t, rebuilt, java, "-Xverify:all", "-cp", rebuilt, "Driver")
-	if got != want {
+	record.Rebuilt = got
+	record.Equal = got == want
+	if !record.Equal {
 		t.Fatalf("behavior changed: original=%q rebuilt=%q", want, got)
 	}
 }

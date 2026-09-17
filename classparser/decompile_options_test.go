@@ -94,3 +94,25 @@ func assertDecompileBothPreserve(t *testing.T, path, flag string, needles ...str
 		}
 	}
 }
+
+func TestSyntheticCatchNamesAreRequestLocal(t *testing.T) {
+	for _, file := range []string{"BuilderCallExpression.class", "EAN13Writer.class"} {
+		raw, err := os.ReadFile("testdata/regression/" + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected, err := DecompileWithOptions(raw, DecompileOptions{Mode: Precision})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 4; i++ {
+			t.Run(file, func(t *testing.T) {
+				t.Parallel()
+				next, err := DecompileWithOptions(raw, DecompileOptions{Mode: Precision})
+				if err != nil || next.Source != expected.Source {
+					t.Errorf("synthetic name depends on request order: %v", err)
+				}
+			})
+		}
+	}
+}

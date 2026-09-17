@@ -33,17 +33,19 @@ func sortNodesByID(nodes []*core.Node) []*core.Node {
 }
 
 type RewriteManager struct {
-	currentNodeId    int
-	startVarId       int
-	RootNode         *core.Node
-	PreNode          *core.Node
-	CircleEntryPoint []*core.Node
-	WhileNode        []*core.Node
-	IfNodes          []*core.Node
-	SwitchNode       []*core.Node
-	TryNodes         []*core.Node
-	DominatorMap     map[*core.Node][]*core.Node
-	LabelId          int
+	// Method-local allocation keeps synthetic names deterministic across concurrent requests.
+	syntheticCatchVarCounter int
+	currentNodeId            int
+	startVarId               int
+	RootNode                 *core.Node
+	PreNode                  *core.Node
+	CircleEntryPoint         []*core.Node
+	WhileNode                []*core.Node
+	IfNodes                  []*core.Node
+	SwitchNode               []*core.Node
+	TryNodes                 []*core.Node
+	DominatorMap             map[*core.Node][]*core.Node
+	LabelId                  int
 	// LoopRegionReducible records whether the ORIGINAL method CFG (before any loop wrapping) is a
 	// reducible flow graph. It is computed once in Rewrite() because mid-pipeline the graph gains
 	// do-while wrapper nodes and rewrite-inserted break/continue edges that corrupt dominance, making a

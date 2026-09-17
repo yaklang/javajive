@@ -59,6 +59,27 @@ func auditCommand(t *testing.T, dir, tool string, args ...string) string {
 	return string(out)
 }
 
+func newAuditObservation(t *testing.T, mode javajive.DecompileMode, debug string) *auditObservation {
+	t.Helper()
+	record := &auditObservation{Debug: debug, Mode: mode}
+	t.Cleanup(func() {
+		b, _ := json.Marshal(record)
+		t.Logf("semantic observation: %s", b)
+		// Optional durable evidence for CI/local audit without changing the default workspace.
+		if dir := os.Getenv("JDEC_SEMANTIC_REPORT_DIR"); dir != "" {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			name := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_").Replace(t.Name()) + ".json"
+			data, _ := json.MarshalIndent(record, "", "  ")
+			if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	return record
+}
+
 func auditRoundTrip(t *testing.T, pkg, body, driver, debug string, mode javajive.DecompileMode) {
 	t.Helper()
 	javac, java := auditTool(t, "javac"), auditTool(t, "java")
@@ -70,22 +91,7 @@ func auditRoundTrip(t *testing.T, pkg, body, driver, debug string, mode javajive
 	source := prefix + "public class Fixture {\n" + body + "\n}\n"
 	runner := prefix + "public class Driver {public static void main(String[] args) throws Throwable {" + driver + "}}"
 	writeSources(t, original, map[string]string{"Fixture.java": source, "Driver.java": runner, "AuditVerifier.java": auditVerifierSource})
-	record := auditObservation{Debug: debug, Mode: mode}
-	defer func() {
-		b, _ := json.Marshal(record)
-		t.Logf("semantic observation: %s", b)
-		// Optional durable evidence for CI/local audit without changing the default workspace.
-		if dir := os.Getenv("JDEC_SEMANTIC_REPORT_DIR"); dir != "" {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				t.Fatal(err)
-			}
-			name := strings.NewReplacer("/", "_", "\\", "_").Replace(t.Name()) + ".json"
-			data, _ := json.MarshalIndent(record, "", "  ")
-			if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}()
+	record := newAuditObservation(t, mode, debug)
 	record.Compiler = strings.TrimSpace(auditCommand(t, original, javac, "-version"))
 	auditCommand(t, original, javac, "--release", "8", debug, "-d", original, "Fixture.java", "Driver.java", "AuditVerifier.java")
 	fqn := "Fixture"

@@ -3,7 +3,6 @@ package rewriter
 import (
 	"fmt"
 	"slices"
-	"sync/atomic"
 
 	"github.com/samber/lo"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -13,10 +12,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/utils"
 )
-
-// syntheticCatchVarCounter backs unique names for synthesized catch variables (empty/pop catches
-// have no named exception in the bytecode). The name only has to be a unique valid identifier.
-var syntheticCatchVarCounter atomic.Int64
 
 // extractCatchException pulls the caught-exception variable out of a structured catch handler body
 // and returns the remaining handler statements. Three handler shapes occur in real bytecode:
@@ -28,7 +23,7 @@ var syntheticCatchVarCounter atomic.Int64
 //     and drop the discard.
 //  3. fully elided: neither of the above. Synthesize a catch variable and keep the whole body so no
 //     code is lost.
-func extractCatchException(body []statements.Statement) (*values.JavaRef, []statements.Statement) {
+func (manager *RewriteManager) extractCatchException(body []statements.Statement) (*values.JavaRef, []statements.Statement) {
 	if len(body) > 0 {
 		if assign, ok := body[0].(*statements.AssignStatement); ok {
 			if ref, ok := assign.LeftValue.(*values.JavaRef); ok {
@@ -50,7 +45,8 @@ func extractCatchException(body []statements.Statement) (*values.JavaRef, []stat
 			}
 		}
 	}
-	name := fmt.Sprintf("ex%d", syntheticCatchVarCounter.Add(1))
+	manager.syntheticCatchVarCounter++
+	name := fmt.Sprintf("ex%d", manager.syntheticCatchVarCounter)
 	ref := values.NewJavaRef(nil, nil, excType)
 	ref.CustomValue = values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 		return name
@@ -172,7 +168,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 		// variable (synthesizing one for empty/pop handlers). This is what eliminates the
 		// "try without catch handler" malformed-try stub.
 		for i, body := range catchBodies {
-			ref, rest := extractCatchException(body)
+			ref, rest := manager.extractCatchException(body)
 			tryCatchSt.Exception = append(tryCatchSt.Exception, ref)
 			catchBodies[i] = rest
 		}
