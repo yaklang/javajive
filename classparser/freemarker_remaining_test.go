@@ -147,9 +147,8 @@ func TestFreemarkerTruncateStaticInitIsLoadBearing(t *testing.T) {
 }
 
 func TestFreemarkerBuilderCallCheckedExceptionsIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/BuilderCallExpression.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"return ClassUtil.forName(this.className).newInstance();\n\t\t\t\t\t}catch(InstantiationException var1_3){",
-		"return ClassUtil.forName(this.className).newInstance();\n\t\t\t}else{")
+	assertDecompileBothPreserve(t, "testdata/regression/BuilderCallExpression.class", "JDEC_FREEMARKER_REMAINING_OFF",
+		"return ClassUtil.forName(this.className).newInstance();", "catch(InstantiationException var1_4)", "catch(IllegalAccessException var1_4)")
 }
 
 func TestFreemarkerClassIntrospectorGetReturnIsLoadBearing(t *testing.T) {
