@@ -1,0 +1,544 @@
+{
+  "schema": 1,
+  "artifacts": {
+    "biz/aQute/bnd/biz.aQute.bnd.annotation/6.4.0/biz.aQute.bnd.annotation-6.4.0.jar": "91414126bb430aa5448a177540e4f1e513f27ba7cac43b8f23ce6f99f4e9da3d",
+    "cglib/cglib/2.2.2/cglib-2.2.2.jar": "a93e4485d274277177480c4afe6ddd8355cda1cacfe356c134e25d65193935fd",
+    "ch/qos/logback/logback-core/1.4.14/logback-core-1.4.14.jar": "f8c2f05f42530b1852739507c1792f0080167850ed8f396444c6913d6617a293",
+    "com/aayushatharva/brotli4j/brotli4j/1.16.0/brotli4j-1.16.0.jar": "285a0b96150649db6fd9d8a0a22ea98fc2b8a558fc924b21836a59550975485e",
+    "com/alibaba/fastjson2/fastjson2/2.0.43/fastjson2-2.0.43.jar": "5970b135b56f165d1b18c8a27c2a09f5ea624b11717298d40f148fdb08268801",
+    "com/conversantmedia/disruptor/1.2.21/disruptor-1.2.21.jar": "ce5305ebb5acc23094392007538df63ded8e6b0fdc2bbe981bf746480a8a51f7",
+    "com/fasterxml/jackson/core/jackson-annotations/2.15.4/jackson-annotations-2.15.4.jar": "f204ebbd552614a22b8531ffe350d47f8fd42c45bb60517c07974dc27a5a1dd3",
+    "com/fasterxml/jackson/core/jackson-core/2.15.4/jackson-core-2.15.4.jar": "8dc9210dd285db366f45f518dd1e6a9ccfeb0f1a8e184a899fe96d29edf1fd94",
+    "com/fasterxml/jackson/core/jackson-databind/2.15.4/jackson-databind-2.15.4.jar": "0f99ff7719eef3ee85608b3dee6ecf3c698003fe9d6e34eabbfabccdc9b5ac2c",
+    "com/fasterxml/jackson/dataformat/jackson-dataformat-xml/2.15.4/jackson-dataformat-xml-2.15.4.jar": "90d8109cda7b90c494a7bfde44e96e2fa25021191b67a5924dfa5cbd698025c3",
+    "com/fasterxml/jackson/dataformat/jackson-dataformat-yaml/2.15.4/jackson-dataformat-yaml-2.15.4.jar": "9a463ac8ce75fa20c4c16365f6a71ea8808bbc4eca3736e315667cd31e1b549c",
+    "com/fasterxml/jackson/datatype/jackson-datatype-jdk8/2.9.6/jackson-datatype-jdk8-2.9.6.jar": "fa0f855e408a50690213e03ab711c294d920a218a379c5a9304de17abd51d514",
+    "com/fasterxml/jackson/datatype/jackson-datatype-jsr310/2.15.4/jackson-datatype-jsr310-2.15.4.jar": "472498cbba2726012ff82f86fc8feef9593663bda1a695a17db804a63fa733ff",
+    "com/fasterxml/woodstox/woodstox-core/6.5.1/woodstox-core-6.5.1.jar": "c928d60665c6415fb1c39775cf95cfc44f7f4580cf5ab01b1c380ebffd76887f",
+    "com/github/ben-manes/caffeine/caffeine/2.9.3/caffeine-2.9.3.jar": "1e0a7bbef1dd791653143f3f05d0e489934bf5481e58a87c9e619cd46b68729b",
+    "com/github/luben/zstd-jni/1.5.6-3/zstd-jni-1.5.6-3.jar": "f72ede1b39258faf81277dc58de30c71cbae4253732558d2ce10b53d8b5763d5",
+    "com/github/spotbugs/spotbugs-annotations/4.8.3/spotbugs-annotations-4.8.3.jar": "e5d4f60be8e57595766ba7f1d4535dc46aebf98dae05e16372a4d4120d3ebb6b",
+    "com/google/code/findbugs/annotations/3.0.1/annotations-3.0.1.jar": "6b47ff0a6de0ce17cbedc3abb0828ca5bce3009d53ea47b3723ff023c4742f79",
+    "com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar": "766ad2a0783f2687962c8ad74ceecc38a28b9f72a2d085ee438b7813e928d0c7",
+    "com/google/code/gson/gson/2.8.9/gson-2.8.9.jar": "d3999291855de495c94c743761b8ab5176cfeabe281a5ab0d8e8d45326fd703e",
+    "com/google/errorprone/error_prone_annotations/2.3.4/error_prone_annotations-2.3.4.jar": "baf7d6ea97ce606c53e11b6854ba5f2ce7ef5c24dddf0afa18d1260bd25b002c",
+    "com/google/guava/failureaccess/1.0.1/failureaccess-1.0.1.jar": "a171ee4c734dd2da837e4b16be9df4661afab72a41adaf31eb84dfdaf936ca26",
+    "com/google/guava/guava/28.2-android/guava-28.2-android.jar": "1faf214c94723ab9fbadfedd9af88ddc325faf669e68eab04688c3afcf59c037",
+    "com/google/j2objc/j2objc-annotations/1.3/j2objc-annotations-1.3.jar": "21af30c92267bd6122c0e0b4d20cccb6641a37eaf956c6540ec471d584e64a7b",
+    "com/google/protobuf/protobuf-java/3.21.9/protobuf-java-3.21.9.jar": "1b78b4a76a71512debfdff8f8fc5aef6bfd459f65758fecf7aff245e6e6301e4",
+    "com/google/zxing/core/3.3.3/core-3.3.3.jar": "5820f81e943e4bce0329306621e2d6255d2930b0a6ce934c5c23c0d6d3f20599",
+    "com/lmax/disruptor/3.4.4/disruptor-3.4.4.jar": "1524ed31f13bcabee1b6146e67be30c6317cb94fcd0c7c2f7c7a1f3e82087c51",
+    "com/squareup/okhttp3/okhttp/3.14.9/okhttp-3.14.9.jar": "2570fab55515cbf881d7a4ceef49fc515490bc027057e666776a2832465aeca0",
+    "com/squareup/okio/okio/1.17.2/okio-1.17.2.jar": "f80ce42d2ffac47ad4c47e1d6f980d604d247ceb1a886705cf4581ab0c9fe2b8",
+    "com/sun/mail/jakarta.mail/2.0.1/jakarta.mail-2.0.1.jar": "8988bdbde922ee173db7179e23393dd2258f3b64f708f41082e03f0e0494cc23",
+    "com/sun/mail/javax.mail/1.6.2/javax.mail-1.6.2.jar": "45b515e7104944c09e45b9c7bb1ce5dff640486374852dd2b2e80cc3752dfa11",
+    "com/thoughtworks/xstream/xstream/1.4.20/xstream-1.4.20.jar": "87df0f0be57c92037d0110fbb225a30b651702dc275653d285afcfef31bc2e81",
+    "com/zaxxer/HikariCP/5.0.1/HikariCP-5.0.1.jar": "26d492397e6775b4296737a8919bf04047afe5827fdd2c08b4557595436b3a2b",
+    "commons-codec/commons-codec/1.15/commons-codec-1.15.jar": "b3e9f6d63a790109bf0d056611fbed1cf69055826defeb9894a71369d246ed63",
+    "commons-codec/commons-codec/1.16.1/commons-codec-1.16.1.jar": "ec87bfb55f22cbd1b21e2190eeda28b2b312ed2a431ee49fbdcc01812d04a5e4",
+    "commons-codec/commons-codec/1.6/commons-codec-1.6.jar": "54b34e941b8e1414bd3e40d736efd3481772dc26db3296f6aa45cec9f6203d86",
+    "commons-io/commons-io/2.16.0/commons-io-2.16.0.jar": "d1e417901235fae3aa0cb9736baeaf5b74de7349817d1c72390d82e3d83d3a97",
+    "commons-logging/commons-logging/1.2/commons-logging-1.2.jar": "daddea1ea0be0f56978ab3006b8ac92834afeefbd9b7e4e6316fca57df0fa636",
+    "info/picocli/picocli/4.3.2/picocli-4.3.2.jar": "43c9cf516012aad1ac5ce6b54642e9cb1271e66d827b06a879fd314144d57550",
+    "io/dropwizard/metrics/metrics-core/4.2.25/metrics-core-4.2.25.jar": "8bc7de609a2816b78a7a5009bddf11be560ba527d44db74a0a31a6f44fdb5b5f",
+    "io/dropwizard/metrics/metrics-healthchecks/4.2.25/metrics-healthchecks-4.2.25.jar": "2201ccb65964d53054b97755ec462181010014d5839b0526fd2707b9d6f86766",
+    "io/github/x-stream/mxparser/1.2.2/mxparser-1.2.2.jar": "aeeee23a3303d811bca8790ea7f25b534314861c03cff36dafdcc2180969eb97",
+    "io/micrometer/micrometer-core/1.10.13/micrometer-core-1.10.13.jar": "15804f4267ece8abe8a59cfbcbff482c8f9d7676adaf3926b2c8a33cec365797",
+    "io/netty/netty-buffer/4.1.108.Final/netty-buffer-4.1.108.Final.jar": "348e3ff64c7129ca661bc09d4bdda09c824474cfd1f5918368bdc56f5ee17f79",
+    "io/netty/netty-buffer/4.1.92.Final/netty-buffer-4.1.92.Final.jar": "5cebefe2195fa4531834363454c79c7675551518ca236b64089c403da7967770",
+    "io/netty/netty-codec/4.1.108.Final/netty-codec-4.1.108.Final.jar": "32c220dea93756fba28f9302481bc657738cc40d07440daa985a2ba21df226f1",
+    "io/netty/netty-common/4.1.108.Final/netty-common-4.1.108.Final.jar": "8e3649fc6bab84a88ad47af82e38f9c36ab3725de478632c8a59e4bd74d16e08",
+    "io/netty/netty-common/4.1.92.Final/netty-common-4.1.92.Final.jar": "af8c57741fb54606de9090b133b5c0f82f2a5a9408c1ae3c2d8fadb9aca1540e",
+    "io/netty/netty-handler/4.1.108.Final/netty-handler-4.1.108.Final.jar": "55b2458011527d94abc868086afd039cd00cc3a547e7322569e0fb4f906d9d80",
+    "io/netty/netty-resolver/4.1.108.Final/netty-resolver-4.1.108.Final.jar": "55279fdcf6c0e1819b6561cc70b0eb2de1b1cf1ef5635fc46334d7e06faa9dd9",
+    "io/netty/netty-tcnative-classes/2.0.65.Final/netty-tcnative-classes-2.0.65.Final.jar": "84ef0241ada1b4ed92785e10c16edbeb063348959a3b0ef740712badd09fa128",
+    "io/netty/netty-transport-classes-epoll/4.1.108.Final/netty-transport-classes-epoll-4.1.108.Final.jar": "5959715036c1dfc1b5a41a6b8518762f43b99c9f6f45e5c80543550cb4773c88",
+    "io/netty/netty-transport-classes-kqueue/4.1.108.Final/netty-transport-classes-kqueue-4.1.108.Final.jar": "85a4e4ec4091c941f9736eb8986443ec2dde3e096a6723fd895289d28b7c3811",
+    "io/netty/netty-transport-native-unix-common/4.1.108.Final/netty-transport-native-unix-common-4.1.108.Final.jar": "c3f324a6f526313e432235bf1a3a12e3db283e3b8669e02f26f569c421036bcb",
+    "io/netty/netty-transport/4.1.108.Final/netty-transport-4.1.108.Final.jar": "fef2ec66fe01aa89734db40f292676719da3985786512fc31a9efe1ca4d2e0ff",
+    "io/projectreactor/reactor-core/3.4.29/reactor-core-3.4.29.jar": "0d07d8e3725150d15edbc60d9b4ac4bcf3969a3f8466f034936b1cc74a851099",
+    "io/projectreactor/tools/blockhound/1.0.6.RELEASE/blockhound-1.0.6.RELEASE.jar": "23188085dd321acdcf5ee801c636c8e92950f42dee8840452ad7c9216876d0c1",
+    "io/prometheus/simpleclient/0.16.0/simpleclient-0.16.0.jar": "22c374f237f7bc4fdb1f0ec2da379c0ba00e69ad2ffe8b6ade543d73062d377f",
+    "io/reactivex/rxjava-reactive-streams/1.2.1/rxjava-reactive-streams-1.2.1.jar": "955f92ce17f6d1ff5efa1bdfb2d292c5397d95b6e2a3de53b2345d0835ee0cd2",
+    "io/reactivex/rxjava/1.3.8/rxjava-1.3.8.jar": "387df880f226b01cea4b1026d96d34e1da27d5801562742cfce0413c21ef7690",
+    "io/reactivex/rxjava2/rxjava/2.2.21/rxjava-2.2.21.jar": "59df6541a840018f0f4c899aae4f4c1f4383f4c16feb5268615fbe384d28501c",
+    "io/reactivex/rxjava3/rxjava/3.1.5/rxjava-3.1.5.jar": "cb4caa9b13fb3e33cbfa47e5e20d15891f8b8ab7ef0b49d527f6511f216ce72e",
+    "io/smallrye/reactive/mutiny/1.7.0/mutiny-1.7.0.jar": "0b0731ce29ee520cb62214ee5ed96cb143b221dcd0e57077c6f4f93d30b84398",
+    "jakarta/activation/jakarta.activation-api/2.1.3/jakarta.activation-api-2.1.3.jar": "01b176d718a169263e78290691fc479977186bcc6b333487325084d6586f4627",
+    "jakarta/el/jakarta.el-api/5.0.1/jakarta.el-api-5.0.1.jar": "90432d18281717b363b819978c6a172433a2654b77eb87c863c22fc19c20eced",
+    "jakarta/inject/jakarta.inject-api/2.0.1/jakarta.inject-api-2.0.1.jar": "f7dc98062fccf14126abb751b64fab12c312566e8cbdc8483598bffcea93af7c",
+    "jakarta/mail/jakarta.mail-api/2.1.3/jakarta.mail-api-2.1.3.jar": "8051b58d75f982f9a5b963b3765426e824b2a64865ef0af17205e455b98db05c",
+    "jakarta/persistence/jakarta.persistence-api/3.1.0/jakarta.persistence-api-3.1.0.jar": "475389446d35c6f46c565728b756dc508c284644ea2690644e0d8e7e339d42fd",
+    "jakarta/servlet/jakarta.servlet-api/6.0.0/jakarta.servlet-api-6.0.0.jar": "c034eb1afb158987dbb53a5fea0cadf611c8dae8daadd59c44d9d5ab70129cef",
+    "jakarta/servlet/jsp/jakarta.servlet.jsp-api/3.1.1/jakarta.servlet.jsp-api-3.1.1.jar": "429b24f0049baaad272f4e719fec564739ff33798741f4c94bcb3510944cc5e5",
+    "jakarta/validation/jakarta.validation-api/2.0.2/jakarta.validation-api-2.0.2.jar": "b42d42428f3d922c892a909fa043287d577c0c5b165ad9b7d568cebf87fc9ea4",
+    "jakarta/xml/bind/jakarta.xml.bind-api/4.0.2/jakarta.xml.bind-api-4.0.2.jar": "0d6bcfe47763e85047acf7c398336dc84ff85ebcad0a7cb6f3b9d3e981245406",
+    "javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar": "43fdef0b5b6ceb31b0424b208b930c74ab58fac2ceeb7b3f6fd3aeb8b5ca4393",
+    "javax/el/javax.el-api/3.0.0/javax.el-api-3.0.0.jar": "8d21ac8c3a38027be27ff4c4fe24806ae2fc188559123253ddc7425066d78fa1",
+    "javax/inject/javax.inject/1/javax.inject-1.jar": "91c77044a50c481636c32d916fd89c9118a72195390452c81065080f957de7ff",
+    "javax/jms/javax.jms-api/2.0.1/javax.jms-api-2.0.1.jar": "aa4a16fac46d949b17b32091036e4d1e3c812ef3b4bd184ec838efffb53ba4f8",
+    "javax/mail/javax.mail-api/1.6.2/javax.mail-api-1.6.2.jar": "17489addfc8d7b43afc7775072a56bbaadf32cfb1e9d39fb4b7ece890d6698f1",
+    "javax/persistence/javax.persistence-api/2.2/javax.persistence-api-2.2.jar": "5578b71b37999a5eaed3fea0d14aa61c60c6ec6328256f2b63472f336318baf4",
+    "javax/servlet/javax.servlet-api/4.0.1/javax.servlet-api-4.0.1.jar": "83a03dd877d3674576f0da7b90755c8524af099ccf0607fc61aa971535ad7c60",
+    "javax/servlet/jsp/jsp-api/2.2/jsp-api-2.2.jar": "cfbb2169429dbfef99f3c419622b7d6b385909aa7816adfa44501e2767a72e89",
+    "javax/validation/validation-api/2.0.1.Final/validation-api-2.0.1.Final.jar": "9873b46df1833c9ee8f5bc1ff6853375115dadd8897bcb5a0dffb5848835ee6c",
+    "javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.jar": "88b955a0df57880a26a74708bc34f74dcaf8ebf4e78843a28b50eae945732b06",
+    "jaxen/jaxen/1.2.0/jaxen-1.2.0.jar": "70feef9dd75ad064def05a3ce8975aeba515ee7d1be146d12199c8828a64174c",
+    "joda-time/joda-time/2.10.13/joda-time-2.10.13.jar": "669f73ff76cb50e11c9eaffb170f8a2d1665fe56c3ecaae8e32085b0470bd7f3",
+    "junit/junit/4.12/junit-4.12.jar": "59721f0805e223d84b90677887d9ff567dc534d7c502ca903c0c2b17f05c116a",
+    "junit/junit/4.13.2/junit-4.13.2.jar": "8e495b634469d64fb8acfa3495a065cbacc8a0fff55ce1e31007be4c16dc57d3",
+    "log4j/log4j/1.2.17/log4j-1.2.17.jar": "1d31696445697720527091754369082a6651bd49781b6005deb94e56753406f9",
+    "net/bytebuddy/byte-buddy-agent/1.12.23/byte-buddy-agent-1.12.23.jar": "5817228bb0ed87129e9e36fb38c8cba9c2a2d5ecccce30b7606440bccf6f79e0",
+    "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar": "0433a8e4efcc5e137ceb6e7e1d83c2f1f95057c13b66fb92a901f883cb4df4b4",
+    "net/java/dev/jna/jna/5.7.0/jna-5.7.0.jar": "c34e3e002cca6e197379c105b554255cc0638101ed7a09ef00334dade0013621",
+    "net/sf/jopt-simple/jopt-simple/5.0.4/jopt-simple-5.0.4.jar": "df26cc58f235f477db07f753ba5a3ab243ebe5789d9f89ecf68dd62ea9a66c28",
+    "net/sf/kxml/kxml2/2.3.0/kxml2-2.3.0.jar": "f264dd9f79a1fde10ce5ecc53221eff24be4c9331c830b7d52f2f08a7b633de2",
+    "org/apache/ant/ant/1.10.13/ant-1.10.13.jar": "befbfc79e744e9892cfa7db96df3b6e82dc17d2571af42aa427976fc22299838",
+    "org/apache/commons/commons-collections4/4.4/commons-collections4-4.4.jar": "1df8b9430b5c8ed143d7815e403e33ef5371b2400aadbe9bda0883762e0846d1",
+    "org/apache/commons/commons-compress/1.21/commons-compress-1.21.jar": "6aecfd5459728a595601cfa07258d131972ffc39b492eb48bdd596577a2f244a",
+    "org/apache/commons/commons-compress/1.26.2/commons-compress-1.26.2.jar": "9168a03141d8fc7eda21a2360d83cc0412bcbb1d6204d992bd48c2573cb3c6b8",
+    "org/apache/commons/commons-csv/1.10.0/commons-csv-1.10.0.jar": "2d06e6a07a636baf777ad8e659256f2119109dde23551c9b80c5422d424b808c",
+    "org/apache/commons/commons-lang3/3.12.0/commons-lang3-3.12.0.jar": "d919d904486c037f8d193412da0c92e22a9fa24230b9d67a57855c5c31c7e94e",
+    "org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar": "7b96bf3ee68949abb5bc465559ac270e0551596fa34523fddf890ec418dde13c",
+    "org/apache/commons/commons-math3/3.6.1/commons-math3-3.6.1.jar": "1e56d7b058d28b65abd256b8458e3885b674c1d588fa43cd7d1cbb9c7ef2b308",
+    "org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar": "ea0505ee7515e58b1ac0e686e4d1a5d9f7d808e251a61bc371aa0595b9963f83",
+    "org/apache/commons/commons-pool2/2.9.0/commons-pool2-2.9.0.jar": "bc919b426bfafb31ecc45d6652a9f137462465d849fb3873d78d90c3f8d35b01",
+    "org/apache/groovy/groovy/4.0.21/groovy-4.0.21.jar": "6743c1fef504a404945821e33cf746a6456caf686c6c6e72931716ec81c6516c",
+    "org/apache/httpcomponents/httpclient/4.5.14/httpclient-4.5.14.jar": "c8bc7e1c51a6d4ce72f40d2ebbabf1c4b68bfe76e732104b04381b493478e9d6",
+    "org/apache/httpcomponents/httpcore/4.4.16/httpcore-4.4.16.jar": "6c9b3dd142a09dc468e23ad39aad6f75a0f2b85125104469f026e52a474e464f",
+    "org/apache/kafka/kafka-clients/3.6.1/kafka-clients-3.6.1.jar": "62668fd9840f6d84fbf345bdbf245b1c160f51ccb42fc89211ecac789640b197",
+    "org/apache/logging/log4j/log4j-api/2.21.1/log4j-api-2.21.1.jar": "1db48e180881bef1deb502022006a025a248d8f6a26186789b0c7ce487c602d6",
+    "org/apache/logging/log4j/log4j-api/2.23.1/log4j-api-2.23.1.jar": "92ec1fd36ab3bc09de6198d2d7c0914685c0f7127ea931acc32fd2ecdd82ea89",
+    "org/apache/logging/log4j/log4j-core/2.23.1/log4j-core-2.23.1.jar": "7079368005fc34f56248f57f8a8a53361c3a53e9007d556dbc66fc669df081b5",
+    "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar": "78a61d0b843c1cf1fe5be380a4d3a4c1602d3fbba4ca1185da8797c9bb115483",
+    "org/aspectj/aspectjweaver/1.9.7/aspectjweaver-1.9.7.jar": "1b448d82bd0f8a8c1842506e6c7edb95ff1a1275ce39f766e7884122b866fe5d",
+    "org/assertj/assertj-core/3.24.2/assertj-core-3.24.2.jar": "df3d0b348f1fe806bdddcb10fa4ae63c6679e9888d4bc7055f09848517976aa3",
+    "org/bouncycastle/bcpkix-jdk15on/1.70/bcpkix-jdk15on-1.70.jar": "e5b9cb821df57f70b0593358e89c0e8d7266515da9d088af6c646f63d433c07c",
+    "org/bouncycastle/bcprov-jdk15on/1.70/bcprov-jdk15on-1.70.jar": "8f3c20e3e2d565d26f33e8d4857a37d0d7f8ac39b62a7026496fcab1bdac30d4",
+    "org/bouncycastle/bctls-jdk15on/1.70/bctls-jdk15on-1.70.jar": "17d0209f6363920d024092acdca249c5b3c55b006e689d13f25df782a6f2e27b",
+    "org/brotli/dec/0.1.2/dec-0.1.2.jar": "615c0c3efef990d77831104475fba6a1f7971388691d4bad1471ad84101f6d52",
+    "org/checkerframework/checker-compat-qual/2.5.5/checker-compat-qual-2.5.5.jar": "11d134b245e9cacc474514d2d66b5b8618f8039a1465cdc55bbc0b34e0008b7a",
+    "org/checkerframework/checker-qual/3.42.0/checker-qual-3.42.0.jar": "ccaedd33af0b7894d9f2f3b644f4d19e43928e32902e61ac4d10777830f5aac7",
+    "org/codehaus/groovy/groovy-xml/2.5.14/groovy-xml-2.5.14.jar": "3c61112f4a97323ed5bdc5cf752cae9d37114129fe433bb3f71fb92c2341594d",
+    "org/codehaus/groovy/groovy/2.5.14/groovy-2.5.14.jar": "e0dc0d5b68b6f27244a30c98d9b8b950e7d3948dc6a048f113d4fcc18481d855",
+    "org/codehaus/janino/commons-compiler/3.1.12/commons-compiler-3.1.12.jar": "17ea25d860225f4b59d0a512b4995f2e4711bdae5e15736cbcd5f6ce4dda8f7c",
+    "org/codehaus/janino/janino/3.1.12/janino-3.1.12.jar": "5699878c31e71c9a94cf472f95a2dad52ca7b0449c099276b8bd7e992a43595b",
+    "org/codehaus/jettison/jettison/1.5.4/jettison-1.5.4.jar": "fc3a68a7c17688ee50817340fef265d8d3f6c192c92bbee00d17f18a6d3dfeda",
+    "org/codehaus/mojo/animal-sniffer-annotations/1.23/animal-sniffer-annotations-1.23.jar": "9ffe526bf43a6348e9d8b33b9cd6f580a7f5eed0cf055913007eda263de974d0",
+    "org/codehaus/woodstox/stax2-api/4.2.1/stax2-api-4.2.1.jar": "678567e48b51a42c65c699f266539ad3d676d4b1a5b0ad7d89ece8b9d5772579",
+    "org/conscrypt/conscrypt-openjdk-uber/2.5.2/conscrypt-openjdk-uber-2.5.2.jar": "eaf537d98e033d0f0451cd1b8cc74e02d7b55ec882da63c88060d806ba89c348",
+    "org/dom4j/dom4j/2.1.4/dom4j-2.1.4.jar": "235a9167a8a199be04b5326d92927ca0adeb90d11f69fe2e821b34ce8433b591",
+    "org/freemarker/freemarker/2.3.33/freemarker-2.3.33.jar": "ab829182363e747a1530a368436242f4cca7ff309dd29bfca638a1fdc7b6771d",
+    "org/fusesource/jansi/jansi/2.4.1/jansi-2.4.1.jar": "2e5e775a9dc58ffa6bbd6aa6f099d62f8b62dcdeb4c3c3bbbe5cf2301bc2dcc1",
+    "org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar": "66fdef91e9739348df7a096aa384a5685f4e875584cce89386a7a47251c4d8e9",
+    "org/hamcrest/hamcrest/2.2/hamcrest-2.2.jar": "5e62846a89f05cd78cd9c1a553f340d002458380c320455dd1f8fc5497a8a1c1",
+    "org/hibernate/hibernate-core/5.6.15.Final/hibernate-core-5.6.15.Final.jar": "9b5a7e1faf094d98c9e33b6a27c4cae42e52f65b139091c08b9a0b4a9858b207",
+    "org/javassist/javassist/3.20.0-GA/javassist-3.20.0-GA.jar": "d7691062fb779c2381640c8f72acba2c23873b01c243866d41c15dc4c8848ea2",
+    "org/javassist/javassist/3.30.2-GA/javassist-3.30.2-GA.jar": "eba37290994b5e4868f3af98ff113f6244a6b099385d9ad46881307d3cb01aaf",
+    "org/jctools/jctools-core/4.0.3/jctools-core-4.0.3.jar": "1c658f5107e3a8a2ba61260ca25b85f47b0c323fd14f0b25a8d7ebe0519e017a",
+    "org/jdom/jdom/1.1.3/jdom-1.1.3.jar": "02bd61a725e8af9b0176b43bf29816d0c748b8ab951385bd127be37489325a0a",
+    "org/jdom/jdom2/2.0.6/jdom2-2.0.6.jar": "1345f11ba606d15603d6740551a8c21947c0215640770ec67271fe78bea97cf5",
+    "org/jetbrains/annotations/13.0/annotations-13.0.jar": "ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478",
+    "org/jetbrains/kotlin/kotlin-reflect/1.5.32/kotlin-reflect-1.5.32.jar": "13237fb82d6e49122d897a1de2b17ac9d5c77137d99070760e6d4191ba9cac31",
+    "org/jetbrains/kotlin/kotlin-stdlib/1.5.32/kotlin-stdlib-1.5.32.jar": "452d205f54a1f08673de273cb3d0148fbf9cd95275e5b0068fa1b001f48aee0a",
+    "org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.5.2/kotlinx-coroutines-core-jvm-1.5.2.jar": "2314c48aa1a39c05c11f3b385cdf3c56b1745f064314e4feabecebc1572b3ac1",
+    "org/jetbrains/kotlinx/kotlinx-coroutines-reactive/1.5.2/kotlinx-coroutines-reactive-1.5.2.jar": "6cbb3c97fca612695f863ea9f93c1ee6e67cf3e0fd7a356fded38089551a62d0",
+    "org/jetbrains/kotlinx/kotlinx-coroutines-reactor/1.5.2/kotlinx-coroutines-reactor-1.5.2.jar": "6da65bb2520c4644a24e9b8e3f78c45357ec884948b87ae5b56ebabf37086b17",
+    "org/joda/joda-convert/2.2.3/joda-convert-2.2.3.jar": "b490286aecdb3f63a850c1f26f63c6e30a91f2447baf8acc30d9c3ff6574eba5",
+    "org/json/json/20240303/json-20240303.jar": "3cf6cd6892e32e2b4c1c39e0f52f5248a2f5b37646fdfbb79a66b46b618414ed",
+    "org/jsoup/jsoup/1.10.2/jsoup-1.10.2.jar": "6ebe6abd7775c10a49407ae22db45c840cd2cdaf715866a5b0b5af70941c3f4a",
+    "org/junit/jupiter/junit-jupiter-api/5.9.2/junit-jupiter-api-5.9.2.jar": "f767a170f97127b0ad3582bf3358eabbbbe981d9f96411853e629d9276926fd5",
+    "org/junit/platform/junit-platform-commons/1.9.2/junit-platform-commons-1.9.2.jar": "624a3d745ef1d28e955a6a67af8edba0fdfc5c9bad680a73f67a70bb950a683d",
+    "org/mockito/mockito-core/4.5.1/mockito-core-4.5.1.jar": "0b66f11abbb39eaffb05989109892a50fd344d633a3b3587726ef1fe5fc8ab78",
+    "org/mozilla/rhino/1.7.15/rhino-1.7.15.jar": "2427fdcbc149ca0a25ccfbb7c71b01f39ad42708773a47816cd2342861766b63",
+    "org/objenesis/objenesis/3.2/objenesis-3.2.jar": "03d960bd5aef03c653eb000413ada15eb77cdd2b8e4448886edf5692805e35f3",
+    "org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar": "48e2df636cab6563ced64dcdff8abb2355627cb236ef0bf37598682ddf742f1b",
+    "org/osgi/org.osgi.annotation.bundle/2.0.0/org.osgi.annotation.bundle-2.0.0.jar": "b9c9546ec5be3ebc2e85ba4919150ad76d64594805282fc895133a47d264a7ae",
+    "org/osgi/org.osgi.annotation.versioning/1.1.2/org.osgi.annotation.versioning-1.1.2.jar": "f51f235e80df8ffbc30ef1b557b6ea38a696632d675404ec117e952978b8b863",
+    "org/osgi/org.osgi.core/6.0.0/org.osgi.core-6.0.0.jar": "1c1bb435eb34cbf1f743653da38f604d45d53fbc95979053768cd3fc293cb931",
+    "org/osgi/osgi.annotation/8.1.0/osgi.annotation-8.1.0.jar": "68afeb86a5322675d4dfe3df5863c7d8a37b34c18e3a8e41553f1ab3ac15d78f",
+    "org/ow2/asm/asm/9.6/asm-9.6.jar": "3c6fac2424db3d4a853b669f4e3d1d9c3c552235e19a319673f887083c2303a1",
+    "org/ow2/asm/asm/9.7/asm-9.7.jar": "adf46d5e34940bdf148ecdd26a9ee8eea94496a72034ff7141066b3eea5c4e9d",
+    "org/python/jython-standalone/2.7.3/jython-standalone-2.7.3.jar": "da7f3d829b148bcfa86b059dc964e3a8556fedb021096c8db07e30c66faab9b4",
+    "org/reactivestreams/reactive-streams/1.0.4/reactive-streams-1.0.4.jar": "f75ca597789b3dac58f61857b9ac2e1034a68fa672db35055a8fb4509e325f28",
+    "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar": "e7c2a48e8515ba1f49fa637d57b4e2f590b3f5bd97407ac699c3aa5efb1204a9",
+    "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar": "c9a4c967c231addfcbb1cbc098899c5628c5d01c469664f45bea40eeed7d7278",
+    "org/springframework/spring-core/5.3.27/spring-core-5.3.27.jar": "cb12aaf2d17d1d78af1b8d2aa5224d92cda96cd726a7ae321ffb6990fe772a0e",
+    "org/springframework/spring-jcl/5.3.27/spring-jcl-5.3.27.jar": "c688bfcf2391b7aff3cf235d5c51f06675f0f7d386c8e645a6594079eef3f745",
+    "org/tukaani/xz/1.9/xz-1.9.jar": "211b306cfc44f8f96df3a0a3ddaf75ba8c5289eed77d60d72f889bb855f535e5",
+    "org/xerial/snappy/snappy-java/1.1.10.5/snappy-java-1.1.10.5.jar": "0f3f1857ed33116583f480b4df5c0218836c47bfbc9c6221c0d73f356decf37b",
+    "org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar": "1467931448a0817696ae2805b7b8b20bfb082652bf9c4efaed528930dc49389b",
+    "org/zeromq/jeromq/0.5.3/jeromq-0.5.3.jar": "a0973309aa2c3c6e1ea0d102acd4a5ba61c8e38bae0ba88c5ac5391ab88a8206",
+    "redis/clients/jedis/3.8.0/jedis-3.8.0.jar": "7ae7c0fdd34ba732f0a05e1a84c67c3e1bcdeceb7a915dbd1dfdea5232f4e592",
+    "stax/stax/1.2.0/stax-1.2.0.jar": "df6905a047b05e23bc91f03ba57ac2f87c1ddf83e048aa0e5bd13169d5ebf0d9",
+    "xalan/xalan/2.7.3/xalan-2.7.3.jar": "febd48bb133a96c447282213951a6b74ea7fb45c0d896121296c014316bda6b0",
+    "xmlpull/xmlpull/1.1.3.1/xmlpull-1.1.3.1.jar": "34e08ee62116071cbb69c0ed70d15a7a5b208d62798c59f2120bb8929324cb63",
+    "xom/xom/1.3.9/xom-1.3.9.jar": "2b45f6d5b882ec3c13de86cf23512d01377c1943e8f8ad767298f67e03e561c5",
+    "xpp3/xpp3_min/1.1.4c/xpp3_min-1.1.4c.jar": "bfc90e9e32d0eab1f397fb974b5f150a815188382ac41f372a7149d5bc178008"
+  },
+  "jars": {
+    "asm": {
+      "path": "org/ow2/asm/asm/9.7/asm-9.7.jar",
+      "deps": []
+    },
+    "assertj": {
+      "path": "org/assertj/assertj-core/3.24.2/assertj-core-3.24.2.jar",
+      "deps": [
+        "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
+        "org/hamcrest/hamcrest/2.2/hamcrest-2.2.jar",
+        "org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar",
+        "junit/junit/4.12/junit-4.12.jar",
+        "org/junit/jupiter/junit-jupiter-api/5.9.2/junit-jupiter-api-5.9.2.jar",
+        "org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar",
+        "org/junit/platform/junit-platform-commons/1.9.2/junit-platform-commons-1.9.2.jar"
+      ]
+    },
+    "bytebuddy": {
+      "path": "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
+      "deps": [
+        "com/google/code/findbugs/annotations/3.0.1/annotations-3.0.1.jar",
+        "com/github/spotbugs/spotbugs-annotations/4.8.3/spotbugs-annotations-4.8.3.jar",
+        "com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar",
+        "net/java/dev/jna/jna/5.7.0/jna-5.7.0.jar",
+        "net/bytebuddy/byte-buddy-agent/1.12.23/byte-buddy-agent-1.12.23.jar"
+      ]
+    },
+    "caffeine": {
+      "path": "com/github/ben-manes/caffeine/caffeine/2.9.3/caffeine-2.9.3.jar",
+      "deps": [
+        "org/checkerframework/checker-qual/3.42.0/checker-qual-3.42.0.jar",
+        "com/google/errorprone/error_prone_annotations/2.3.4/error_prone_annotations-2.3.4.jar",
+        "com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar"
+      ]
+    },
+    "codec": {
+      "path": "commons-codec/commons-codec/1.15/commons-codec-1.15.jar",
+      "deps": []
+    },
+    "collections4": {
+      "path": "org/apache/commons/commons-collections4/4.4/commons-collections4-4.4.jar",
+      "deps": []
+    },
+    "commons-io": {
+      "path": "commons-io/commons-io/2.16.0/commons-io-2.16.0.jar",
+      "deps": []
+    },
+    "commons-lang3": {
+      "path": "org/apache/commons/commons-lang3/3.12.0/commons-lang3-3.12.0.jar",
+      "deps": []
+    },
+    "compress": {
+      "path": "org/apache/commons/commons-compress/1.26.2/commons-compress-1.26.2.jar",
+      "deps": [
+        "org/tukaani/xz/1.9/xz-1.9.jar",
+        "com/github/luben/zstd-jni/1.5.6-3/zstd-jni-1.5.6-3.jar",
+        "com/aayushatharva/brotli4j/brotli4j/1.16.0/brotli4j-1.16.0.jar",
+        "org/brotli/dec/0.1.2/dec-0.1.2.jar",
+        "org/xerial/snappy/snappy-java/1.1.10.5/snappy-java-1.1.10.5.jar",
+        "commons-codec/commons-codec/1.16.1/commons-codec-1.16.1.jar",
+        "org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar",
+        "org/osgi/org.osgi.core/6.0.0/org.osgi.core-6.0.0.jar",
+        "org/osgi/osgi.annotation/8.1.0/osgi.annotation-8.1.0.jar",
+        "commons-io/commons-io/2.16.0/commons-io-2.16.0.jar",
+        "org/ow2/asm/asm/9.6/asm-9.6.jar"
+      ]
+    },
+    "fastjson2": {
+      "path": "com/alibaba/fastjson2/fastjson2/2.0.43/fastjson2-2.0.43.jar",
+      "deps": [
+        "org/jetbrains/kotlin/kotlin-stdlib/1.5.32/kotlin-stdlib-1.5.32.jar"
+      ]
+    },
+    "freemarker": {
+      "path": "org/freemarker/freemarker/2.3.33/freemarker-2.3.33.jar",
+      "deps": [
+        "javax/servlet/javax.servlet-api/4.0.1/javax.servlet-api-4.0.1.jar",
+        "jakarta/servlet/jakarta.servlet-api/6.0.0/jakarta.servlet-api-6.0.0.jar",
+        "javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.jar",
+        "jakarta/xml/bind/jakarta.xml.bind-api/4.0.2/jakarta.xml.bind-api-4.0.2.jar",
+        "org/apache/logging/log4j/log4j-api/2.21.1/log4j-api-2.21.1.jar",
+        "commons-logging/commons-logging/1.2/commons-logging-1.2.jar",
+        "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar",
+        "org/apache/ant/ant/1.10.13/ant-1.10.13.jar",
+        "org/jdom/jdom/1.1.3/jdom-1.1.3.jar",
+        "org/dom4j/dom4j/2.1.4/dom4j-2.1.4.jar",
+        "jaxen/jaxen/1.2.0/jaxen-1.2.0.jar",
+        "org/python/jython-standalone/2.7.3/jython-standalone-2.7.3.jar",
+        "org/mozilla/rhino/1.7.15/rhino-1.7.15.jar",
+        "log4j/log4j/1.2.17/log4j-1.2.17.jar",
+        "jakarta/el/jakarta.el-api/5.0.1/jakarta.el-api-5.0.1.jar",
+        "javax/el/javax.el-api/3.0.0/javax.el-api-3.0.0.jar",
+        "jakarta/servlet/jsp/jakarta.servlet.jsp-api/3.1.1/jakarta.servlet.jsp-api-3.1.1.jar",
+        "javax/servlet/jsp/jsp-api/2.2/jsp-api-2.2.jar",
+        "xalan/xalan/2.7.3/xalan-2.7.3.jar"
+      ]
+    },
+    "gson": {
+      "path": "com/google/code/gson/gson/2.8.9/gson-2.8.9.jar",
+      "deps": []
+    },
+    "guava": {
+      "path": "com/google/guava/guava/28.2-android/guava-28.2-android.jar",
+      "deps": [
+        "com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar",
+        "com/google/errorprone/error_prone_annotations/2.3.4/error_prone_annotations-2.3.4.jar",
+        "com/google/j2objc/j2objc-annotations/1.3/j2objc-annotations-1.3.jar",
+        "com/google/guava/failureaccess/1.0.1/failureaccess-1.0.1.jar",
+        "org/checkerframework/checker-compat-qual/2.5.5/checker-compat-qual-2.5.5.jar",
+        "org/checkerframework/checker-qual/3.42.0/checker-qual-3.42.0.jar"
+      ]
+    },
+    "hikaricp": {
+      "path": "com/zaxxer/HikariCP/5.0.1/HikariCP-5.0.1.jar",
+      "deps": [
+        "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar",
+        "org/javassist/javassist/3.20.0-GA/javassist-3.20.0-GA.jar",
+        "io/micrometer/micrometer-core/1.10.13/micrometer-core-1.10.13.jar",
+        "io/dropwizard/metrics/metrics-core/4.2.25/metrics-core-4.2.25.jar",
+        "io/prometheus/simpleclient/0.16.0/simpleclient-0.16.0.jar",
+        "org/hibernate/hibernate-core/5.6.15.Final/hibernate-core-5.6.15.Final.jar",
+        "javax/persistence/javax.persistence-api/2.2/javax.persistence-api-2.2.jar",
+        "jakarta/persistence/jakarta.persistence-api/3.1.0/jakarta.persistence-api-3.1.0.jar",
+        "io/dropwizard/metrics/metrics-healthchecks/4.2.25/metrics-healthchecks-4.2.25.jar"
+      ]
+    },
+    "httpclient": {
+      "path": "org/apache/httpcomponents/httpclient/4.5.14/httpclient-4.5.14.jar",
+      "deps": [
+        "org/apache/httpcomponents/httpcore/4.4.16/httpcore-4.4.16.jar",
+        "commons-logging/commons-logging/1.2/commons-logging-1.2.jar",
+        "commons-codec/commons-codec/1.6/commons-codec-1.6.jar"
+      ]
+    },
+    "jackson": {
+      "path": "com/fasterxml/jackson/core/jackson-databind/2.15.4/jackson-databind-2.15.4.jar",
+      "deps": [
+        "com/fasterxml/jackson/core/jackson-core/2.15.4/jackson-core-2.15.4.jar",
+        "com/fasterxml/jackson/core/jackson-annotations/2.15.4/jackson-annotations-2.15.4.jar",
+        "com/fasterxml/jackson/datatype/jackson-datatype-jsr310/2.15.4/jackson-datatype-jsr310-2.15.4.jar",
+        "com/fasterxml/jackson/datatype/jackson-datatype-jdk8/2.9.6/jackson-datatype-jdk8-2.9.6.jar",
+        "com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar"
+      ]
+    },
+    "javassist": {
+      "path": "org/javassist/javassist/3.30.2-GA/javassist-3.30.2-GA.jar",
+      "deps": []
+    },
+    "jedis": {
+      "path": "redis/clients/jedis/3.8.0/jedis-3.8.0.jar",
+      "deps": [
+        "org/apache/commons/commons-pool2/2.9.0/commons-pool2-2.9.0.jar",
+        "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar",
+        "org/json/json/20240303/json-20240303.jar",
+        "com/google/code/gson/gson/2.8.9/gson-2.8.9.jar",
+        "commons-codec/commons-codec/1.6/commons-codec-1.6.jar"
+      ]
+    },
+    "joda-time": {
+      "path": "joda-time/joda-time/2.10.13/joda-time-2.10.13.jar",
+      "deps": [
+        "org/joda/joda-convert/2.2.3/joda-convert-2.2.3.jar"
+      ]
+    },
+    "jsoup": {
+      "path": "org/jsoup/jsoup/1.10.2/jsoup-1.10.2.jar",
+      "deps": []
+    },
+    "junit": {
+      "path": "junit/junit/4.13.2/junit-4.13.2.jar",
+      "deps": [
+        "org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar"
+      ]
+    },
+    "log4j": {
+      "path": "org/apache/logging/log4j/log4j-core/2.23.1/log4j-core-2.23.1.jar",
+      "deps": [
+        "org/apache/logging/log4j/log4j-api/2.23.1/log4j-api-2.23.1.jar",
+        "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar",
+        "org/jctools/jctools-core/4.0.3/jctools-core-4.0.3.jar",
+        "com/fasterxml/jackson/core/jackson-core/2.15.4/jackson-core-2.15.4.jar",
+        "com/fasterxml/jackson/core/jackson-databind/2.15.4/jackson-databind-2.15.4.jar",
+        "com/fasterxml/jackson/core/jackson-annotations/2.15.4/jackson-annotations-2.15.4.jar",
+        "com/fasterxml/jackson/dataformat/jackson-dataformat-yaml/2.15.4/jackson-dataformat-yaml-2.15.4.jar",
+        "com/fasterxml/jackson/dataformat/jackson-dataformat-xml/2.15.4/jackson-dataformat-xml-2.15.4.jar",
+        "org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar",
+        "commons-codec/commons-codec/1.6/commons-codec-1.6.jar",
+        "org/apache/commons/commons-compress/1.21/commons-compress-1.21.jar",
+        "org/apache/commons/commons-csv/1.10.0/commons-csv-1.10.0.jar",
+        "org/fusesource/jansi/jansi/2.4.1/jansi-2.4.1.jar",
+        "org/osgi/org.osgi.core/6.0.0/org.osgi.core-6.0.0.jar",
+        "org/osgi/org.osgi.annotation.bundle/2.0.0/org.osgi.annotation.bundle-2.0.0.jar",
+        "org/osgi/org.osgi.annotation.versioning/1.1.2/org.osgi.annotation.versioning-1.1.2.jar",
+        "org/osgi/osgi.annotation/8.1.0/osgi.annotation-8.1.0.jar",
+        "javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar",
+        "javax/mail/javax.mail-api/1.6.2/javax.mail-api-1.6.2.jar",
+        "com/sun/mail/javax.mail/1.6.2/javax.mail-1.6.2.jar",
+        "javax/jms/javax.jms-api/2.0.1/javax.jms-api-2.0.1.jar",
+        "com/lmax/disruptor/3.4.4/disruptor-3.4.4.jar",
+        "com/conversantmedia/disruptor/1.2.21/disruptor-1.2.21.jar",
+        "org/apache/kafka/kafka-clients/3.6.1/kafka-clients-3.6.1.jar",
+        "org/zeromq/jeromq/0.5.3/jeromq-0.5.3.jar",
+        "com/google/code/findbugs/annotations/3.0.1/annotations-3.0.1.jar",
+        "com/github/spotbugs/spotbugs-annotations/4.8.3/spotbugs-annotations-4.8.3.jar",
+        "org/codehaus/woodstox/stax2-api/4.2.1/stax2-api-4.2.1.jar",
+        "biz/aQute/bnd/biz.aQute.bnd.annotation/6.4.0/biz.aQute.bnd.annotation-6.4.0.jar"
+      ]
+    },
+    "logback": {
+      "path": "ch/qos/logback/logback-core/1.4.14/logback-core-1.4.14.jar",
+      "deps": [
+        "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar",
+        "org/codehaus/janino/janino/3.1.12/janino-3.1.12.jar",
+        "org/codehaus/janino/commons-compiler/3.1.12/commons-compiler-3.1.12.jar",
+        "jakarta/mail/jakarta.mail-api/2.1.3/jakarta.mail-api-2.1.3.jar",
+        "jakarta/activation/jakarta.activation-api/2.1.3/jakarta.activation-api-2.1.3.jar",
+        "javax/mail/javax.mail-api/1.6.2/javax.mail-api-1.6.2.jar",
+        "jakarta/servlet/jakarta.servlet-api/6.0.0/jakarta.servlet-api-6.0.0.jar",
+        "javax/servlet/javax.servlet-api/4.0.1/javax.servlet-api-4.0.1.jar",
+        "org/apache/groovy/groovy/4.0.21/groovy-4.0.21.jar",
+        "com/sun/mail/jakarta.mail/2.0.1/jakarta.mail-2.0.1.jar"
+      ]
+    },
+    "lucene": {
+      "path": "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
+      "deps": []
+    },
+    "math3": {
+      "path": "org/apache/commons/commons-math3/3.6.1/commons-math3-3.6.1.jar",
+      "deps": []
+    },
+    "mockito": {
+      "path": "org/mockito/mockito-core/4.5.1/mockito-core-4.5.1.jar",
+      "deps": [
+        "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
+        "net/bytebuddy/byte-buddy-agent/1.12.23/byte-buddy-agent-1.12.23.jar",
+        "org/objenesis/objenesis/3.2/objenesis-3.2.jar",
+        "org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar",
+        "junit/junit/4.12/junit-4.12.jar",
+        "org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar",
+        "org/hamcrest/hamcrest/2.2/hamcrest-2.2.jar"
+      ]
+    },
+    "netty": {
+      "path": "io/netty/netty-handler/4.1.108.Final/netty-handler-4.1.108.Final.jar",
+      "deps": [
+        "io/netty/netty-common/4.1.108.Final/netty-common-4.1.108.Final.jar",
+        "io/netty/netty-buffer/4.1.108.Final/netty-buffer-4.1.108.Final.jar",
+        "io/netty/netty-transport/4.1.108.Final/netty-transport-4.1.108.Final.jar",
+        "io/netty/netty-codec/4.1.108.Final/netty-codec-4.1.108.Final.jar",
+        "io/netty/netty-resolver/4.1.108.Final/netty-resolver-4.1.108.Final.jar",
+        "io/netty/netty-transport-native-unix-common/4.1.108.Final/netty-transport-native-unix-common-4.1.108.Final.jar",
+        "io/netty/netty-transport-classes-epoll/4.1.108.Final/netty-transport-classes-epoll-4.1.108.Final.jar",
+        "io/netty/netty-transport-classes-kqueue/4.1.108.Final/netty-transport-classes-kqueue-4.1.108.Final.jar",
+        "io/netty/netty-tcnative-classes/2.0.65.Final/netty-tcnative-classes-2.0.65.Final.jar",
+        "org/bouncycastle/bcpkix-jdk15on/1.70/bcpkix-jdk15on-1.70.jar",
+        "org/bouncycastle/bcprov-jdk15on/1.70/bcprov-jdk15on-1.70.jar",
+        "org/bouncycastle/bctls-jdk15on/1.70/bctls-jdk15on-1.70.jar",
+        "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar"
+      ]
+    },
+    "okhttp": {
+      "path": "com/squareup/okhttp3/okhttp/3.14.9/okhttp-3.14.9.jar",
+      "deps": [
+        "com/squareup/okio/okio/1.17.2/okio-1.17.2.jar",
+        "com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar",
+        "org/codehaus/mojo/animal-sniffer-annotations/1.23/animal-sniffer-annotations-1.23.jar",
+        "org/conscrypt/conscrypt-openjdk-uber/2.5.2/conscrypt-openjdk-uber-2.5.2.jar"
+      ]
+    },
+    "picocli": {
+      "path": "info/picocli/picocli/4.3.2/picocli-4.3.2.jar",
+      "deps": []
+    },
+    "pool2": {
+      "path": "org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar",
+      "deps": [
+        "cglib/cglib/2.2.2/cglib-2.2.2.jar"
+      ]
+    },
+    "protobuf": {
+      "path": "com/google/protobuf/protobuf-java/3.21.9/protobuf-java-3.21.9.jar",
+      "deps": []
+    },
+    "rxjava": {
+      "path": "io/reactivex/rxjava2/rxjava/2.2.21/rxjava-2.2.21.jar",
+      "deps": [
+        "org/reactivestreams/reactive-streams/1.0.4/reactive-streams-1.0.4.jar"
+      ]
+    },
+    "slf4j": {
+      "path": "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar",
+      "deps": []
+    },
+    "snakeyaml": {
+      "path": "org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar",
+      "deps": []
+    },
+    "spring": {
+      "path": "org/springframework/spring-core/5.3.27/spring-core-5.3.27.jar",
+      "deps": [
+        "org/springframework/spring-jcl/5.3.27/spring-jcl-5.3.27.jar",
+        "io/projectreactor/reactor-core/3.4.29/reactor-core-3.4.29.jar",
+        "org/reactivestreams/reactive-streams/1.0.4/reactive-streams-1.0.4.jar",
+        "io/netty/netty-buffer/4.1.92.Final/netty-buffer-4.1.92.Final.jar",
+        "io/netty/netty-common/4.1.92.Final/netty-common-4.1.92.Final.jar",
+        "org/jetbrains/kotlin/kotlin-stdlib/1.5.32/kotlin-stdlib-1.5.32.jar",
+        "org/jetbrains/kotlin/kotlin-reflect/1.5.32/kotlin-reflect-1.5.32.jar",
+        "org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.5.2/kotlinx-coroutines-core-jvm-1.5.2.jar",
+        "org/jetbrains/kotlinx/kotlinx-coroutines-reactor/1.5.2/kotlinx-coroutines-reactor-1.5.2.jar",
+        "io/reactivex/rxjava/1.3.8/rxjava-1.3.8.jar",
+        "io/reactivex/rxjava2/rxjava/2.2.21/rxjava-2.2.21.jar",
+        "io/reactivex/rxjava3/rxjava/3.1.5/rxjava-3.1.5.jar",
+        "io/smallrye/reactive/mutiny/1.7.0/mutiny-1.7.0.jar",
+        "net/sf/jopt-simple/jopt-simple/5.0.4/jopt-simple-5.0.4.jar",
+        "org/apache/ant/ant/1.10.13/ant-1.10.13.jar",
+        "org/aspectj/aspectjweaver/1.9.7/aspectjweaver-1.9.7.jar",
+        "org/jetbrains/kotlinx/kotlinx-coroutines-reactive/1.5.2/kotlinx-coroutines-reactive-1.5.2.jar",
+        "io/reactivex/rxjava-reactive-streams/1.2.1/rxjava-reactive-streams-1.2.1.jar",
+        "org/jetbrains/annotations/13.0/annotations-13.0.jar",
+        "io/projectreactor/tools/blockhound/1.0.6.RELEASE/blockhound-1.0.6.RELEASE.jar",
+        "com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar"
+      ]
+    },
+    "spring-beans": {
+      "path": "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar",
+      "deps": [
+        "org/springframework/spring-core/5.3.27/spring-core-5.3.27.jar",
+        "org/springframework/spring-jcl/5.3.27/spring-jcl-5.3.27.jar",
+        "org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar",
+        "javax/inject/javax.inject/1/javax.inject-1.jar",
+        "jakarta/inject/jakarta.inject-api/2.0.1/jakarta.inject-api-2.0.1.jar",
+        "org/codehaus/groovy/groovy/2.5.14/groovy-2.5.14.jar",
+        "org/codehaus/groovy/groovy-xml/2.5.14/groovy-xml-2.5.14.jar",
+        "org/jetbrains/kotlin/kotlin-stdlib/1.5.32/kotlin-stdlib-1.5.32.jar",
+        "org/jetbrains/kotlin/kotlin-reflect/1.5.32/kotlin-reflect-1.5.32.jar",
+        "javax/validation/validation-api/2.0.1.Final/validation-api-2.0.1.Final.jar",
+        "jakarta/validation/jakarta.validation-api/2.0.2/jakarta.validation-api-2.0.2.jar",
+        "com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar"
+      ]
+    },
+    "xstream": {
+      "path": "com/thoughtworks/xstream/xstream/1.4.20/xstream-1.4.20.jar",
+      "deps": [
+        "xmlpull/xmlpull/1.1.3.1/xmlpull-1.1.3.1.jar",
+        "io/github/x-stream/mxparser/1.2.2/mxparser-1.2.2.jar",
+        "xpp3/xpp3_min/1.1.4c/xpp3_min-1.1.4c.jar",
+        "org/dom4j/dom4j/2.1.4/dom4j-2.1.4.jar",
+        "org/jdom/jdom2/2.0.6/jdom2-2.0.6.jar",
+        "org/codehaus/jettison/jettison/1.5.4/jettison-1.5.4.jar",
+        "joda-time/joda-time/2.10.13/joda-time-2.10.13.jar",
+        "cglib/cglib/2.2.2/cglib-2.2.2.jar",
+        "org/jdom/jdom/1.1.3/jdom-1.1.3.jar",
+        "com/fasterxml/woodstox/woodstox-core/6.5.1/woodstox-core-6.5.1.jar",
+        "org/codehaus/woodstox/stax2-api/4.2.1/stax2-api-4.2.1.jar",
+        "net/sf/kxml/kxml2/2.3.0/kxml2-2.3.0.jar",
+        "xom/xom/1.3.9/xom-1.3.9.jar",
+        "stax/stax/1.2.0/stax-1.2.0.jar"
+      ]
+    },
+    "zxing": {
+      "path": "com/google/zxing/core/3.3.3/core-3.3.3.jar",
+      "deps": []
+    }
+  }
+}

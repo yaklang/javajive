@@ -35,7 +35,22 @@ Built for portability and embedding:
 - **Trimmed dependency graph** — `utils` / `codec` / `log` / `go-funk` are
   reimplemented as a minimal, self-contained `internal/` core.
 
-## Benchmarks
+## Validation of the unreleased changes
+
+The initial PR revision passed 167 isolated round trips on each of JDK 17 and 21,
+recording compilation, JVM verification, stubs, and runtime equality separately.
+Original application classes never appear on rebuilt classpaths. See the
+[audit and remaining boundaries](docs/decompiler-semantic-audit.md), including
+historical jar compilation residuals and unfinished architecture migrations.
+
+**Release is blocked:** the complete 38-JAR comparison found regressions that
+the opt-in historical tests had not exercised in normal CI. See the
+[historical corpus audit](docs/historical-jar-audit.md).
+
+## Historical benchmarks (v0.3.0)
+
+The following figures were reported for v0.3.0 on 2026-09-05. They are not
+current-version acceptance results or proof of behavioral equivalence.
 
 Measured on 34 real-world jars (18,759 flattened units) via decompile → `javac --release 8`
 recompile → repackage → JVM verify:

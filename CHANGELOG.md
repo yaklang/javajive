@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+Preserve bytecode semantics and separate decompilation results from independent
+compilation, JVM verification, and runtime observations.
+
+- Fix signed switch/default identity, wide branches and local accesses,
+  exception-handler ownership, loop exits, reference joins, and array side effects.
+- Add `DecompileWithOptions` with precision/compatibility modes, method-local
+  analysis budgets, type resolution, rewrite provenance, and degradation diagnostics.
+  Existing APIs retain compatibility behavior.
+- Add immutable instruction-flow/reaching-definition analysis; remove selected
+  guessed source repairs and isolate concurrent request and synthetic-catch state.
+- Validate 167 isolated semantic round trips on each of JDK 17 and 21, with original
+  classes absent from rebuilt classpaths and separate compile/verify/runtime records.
+  Cover legal wide bytecode, malformed decoder inputs, determinism, and race checks.
+- Preserve full OS/Go test coverage while sharding the large race corpus without
+  reducing determinism repetitions. Cache persistent stack depth for O(1) Size.
+
+The historical v0.3.0 benchmark below is not current semantic acceptance evidence.
+Release is blocked by the [38-JAR differential audit](docs/historical-jar-audit.md).
+The initial PR regressed 12 previously compile-clean JARs; ordinary CI had skipped
+the opt-in historical corpus. Repairs are incomplete. Full operand-stack SSA, general
+type constraints and irreducible restructuring are not complete; see
+[the implementation and validation boundaries](docs/decompiler-semantic-audit.md).
+
 ## v0.3.0 — 2026-09-05
 
 34-jar tree-zero: the original 8 benchmark jars plus 6 expansion jars and 20
