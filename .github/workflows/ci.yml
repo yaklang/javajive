@@ -240,12 +240,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
-      AUDIT_ROOT: ${{ runner.temp }}/historical-audit
       BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Set evidence directory
+        run: echo "AUDIT_ROOT=$RUNNER_TEMP/historical-audit" >> "$GITHUB_ENV"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
