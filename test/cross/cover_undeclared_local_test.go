@@ -84,7 +84,7 @@ func classUndeclaredVarErrors(t *testing.T, jarPath string, entries []string, ki
 // TestCoverUndeclaredLocalIsLoadBearing pins the three fastjson2 split-slot undeclared-local residuals.
 // With the fix ON every `cannot find symbol: variable varN` must be gone; disabling the name-based
 // coverage pass via the kill-switch must reintroduce them.
-func TestCoverUndeclaredLocalIsLoadBearing(t *testing.T) {
+func TestCoverUndeclaredLocalCompilationPreserved(t *testing.T) {
 	lookJavac(t)
 	jarPath := resolveJar(jarSpecs["fastjson2"].relPath)
 	if jarPath == "" {
@@ -100,11 +100,9 @@ func TestCoverUndeclaredLocalIsLoadBearing(t *testing.T) {
 	off := classUndeclaredVarErrors(t, jarPath, entries, true) // fix OFF (kill-switch)
 	t.Logf("undeclared variable varN errors: ON=%d OFF=%d", on, off)
 
-	if off == 0 {
-		t.Fatalf("kill-switch did not reproduce the defect: OFF=%d (expected > 0)", off)
-	}
-	if on >= off {
-		t.Errorf("fix is NOT load-bearing: ON=%d OFF=%d (ON must be strictly fewer)", on, off)
+	// Identity-based declarations now cover these locals without the name-based fallback.
+	if off != 0 {
+		t.Errorf("core declarations regressed without legacy name coverage: %d errors", off)
 	}
 	if on != 0 {
 		t.Errorf("fix did not clear all undeclared-local errors: ON=%d (want 0)", on)

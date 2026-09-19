@@ -254,6 +254,9 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		if ref.IsParam && !ref.IsThis && os.Getenv("JDEC_PARAM_REASSIGN_SPLIT") == "" {
 			_, refPrim := ref.Type().RawType().(*types.JavaPrimer)
 			_, valPrim := typ.RawType().(*types.JavaPrimer)
+			if p, ok := typ.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaString {
+				valPrim = false
+			}
 			if !refPrim && !valPrim {
 				return ref, false
 			}

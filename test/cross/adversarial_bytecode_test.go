@@ -17,6 +17,9 @@ import (
 // auditClass builds a version-49 class so all branch fixtures are checked by the
 // real JVM verifier without fabricating or stripping a modern StackMapTable.
 func auditClass(code []byte, descriptor string, locals int) []byte {
+	return auditClassWithExceptions(code, descriptor, locals, nil)
+}
+func auditClassWithExceptions(code []byte, descriptor string, locals int, exceptions [][4]int) []byte {
 	var out bytes.Buffer
 	u2 := func(v int) { binary.Write(&out, binary.BigEndian, uint16(v)) }
 	u4 := func(v int) { binary.Write(&out, binary.BigEndian, uint32(v)) }
@@ -45,12 +48,17 @@ func auditClass(code []byte, descriptor string, locals int) []byte {
 	u2(6)
 	u2(1)
 	u2(7)
-	u4(12 + len(code))
+	u4(12 + len(code) + 8*len(exceptions))
 	u2(8)
 	u2(locals)
 	u4(len(code))
 	out.Write(code)
-	u2(0)
+	u2(len(exceptions))
+	for _, entry := range exceptions {
+		for _, value := range entry {
+			u2(value)
+		}
+	}
 	u2(0)
 	u2(0)
 	return out.Bytes()
@@ -113,6 +121,8 @@ func TestAuditLegalBytecode(t *testing.T) {
 		code   []byte
 		locals int
 	}{
+		{"A03_nested_jsr", []byte{core.OP_ICONST_0, core.OP_ISTORE_1, core.OP_JSR, 0, 5, core.OP_ILOAD_1, core.OP_IRETURN, core.OP_ASTORE_2, core.OP_IINC, 1, 1, core.OP_JSR, 0, 8, core.OP_IINC, 1, 2, core.OP_RET, 2, core.OP_ASTORE_3, core.OP_IINC, 1, 4, core.OP_RET, 3}, 4},
+		{"A03_jsr_expanded_pc", []byte{core.OP_ICONST_0, core.OP_ISTORE_0, core.OP_JSR, 0, 14, core.OP_NOP, core.OP_JSR, 0, 10, core.OP_NOP, core.OP_JSR, 0, 6, core.OP_NOP, core.OP_ILOAD_0, core.OP_IRETURN, core.OP_ASTORE_1, core.OP_IINC, 0, 1, core.OP_RET, 1}, 2},
 		{"A03_short_goto_w", []byte{core.OP_GOTO_W, 0, 0, 0, 7, core.OP_ICONST_1, core.OP_IRETURN, core.OP_ICONST_2, core.OP_IRETURN}, 1},
 		{"A03_forward_40k", forward, 1}, {"A03_backward_40k", backward, 1},
 		{"A04_wide_slot300", []byte{core.OP_ICONST_5, core.OP_WIDE, core.OP_ISTORE, 1, 44, core.OP_WIDE, core.OP_ILOAD, 1, 44, core.OP_IRETURN}, 301},
@@ -152,4 +162,10 @@ func TestAuditIrreducibleDiagnostic(t *testing.T) {
 	if !found {
 		t.Fatalf("missing reason: %+v", r.Diagnostics)
 	}
+}
+
+func TestAuditNestedJSRException(t *testing.T) {
+	code := []byte{core.OP_ICONST_0, core.OP_ISTORE_1, core.OP_JSR, 0, 5, core.OP_ILOAD_1, core.OP_IRETURN, core.OP_ASTORE_2, core.OP_ILOAD_0, core.OP_IFNE, 0, 5, core.OP_ACONST_NULL, core.OP_ATHROW, core.OP_IINC, 1, 1, core.OP_JSR, 0, 12, core.OP_GOTO, 0, 16, core.OP_ASTORE_3, core.OP_JSR, 0, 5, core.OP_ALOAD_3, core.OP_ATHROW, core.OP_ASTORE, 4, core.OP_IINC, 1, 4, core.OP_RET, 4, core.OP_RET, 2}
+	raw := auditClassWithExceptions(code, "(I)I", 5, [][4]int{{8, 20, 23, 0}, {23, 27, 23, 0}})
+	auditBytecodeRoundTrip(t, raw, `for(int x:new int[]{0,1,-1}){try{System.out.println(Fixture.f(x));}catch(Throwable e){System.out.println(e.getClass().getName());}}`)
 }

@@ -542,6 +542,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// flat while GetAllImported (after wiring) imports the OUTER class -- javac "cannot find
 	// symbol". Kill-switch JDEC_EXTERNAL_NESTED_DOT_OFF still applies inside nestedTypeShouldDot.
 	funcCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
+	funcCtx.SiblingClassAccessible = c.buildSiblingClassAccessible()
 	// Precompute the same-package simple names that must be rendered fully-qualified because the class
 	// also references a different-package type of the same simple name (whose import would shadow the
 	// same-package one). Constant-pool based, so it is independent of body render order. See
@@ -1166,6 +1167,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		c.FuncCtx.ClassSig = classSigStr
 		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
 		c.FuncCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
+		c.FuncCtx.SiblingClassAccessible = c.buildSiblingClassAccessible()
 		c.FuncCtx.SiblingCtorSig = c.buildSiblingCtorSig()
 		c.FuncCtx.SiblingFieldSig = c.buildSiblingFieldSig()
 	}
@@ -2477,6 +2479,45 @@ func (c *ClassObjectDumper) buildSiblingFieldSig() func(internalName, fieldName 
 // subtype/LUB widening (types.CrossClassDirectLUB). Returns nil when no cross-class resolver is
 // available (single-class decompile), which disables the widening. A nil/empty cache entry records a
 // confirmed miss (JDK/external class not in the jar) so the result is deterministic and bounded.
+func (c *ClassObjectDumper) buildSiblingClassAccessible() func(string) (bool, bool) {
+	if c.foldSiblingResolver == nil {
+		return nil
+	}
+	self := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
+	pkg := func(s string) string {
+		if i := strings.LastIndexByte(s, '/'); i >= 0 {
+			return s[:i]
+		}
+		return ""
+	}
+	cache := map[string][2]bool{}
+	return func(name string) (bool, bool) {
+		name = strings.ReplaceAll(name, ".", "/")
+		if pkg(name) == pkg(self) {
+			return true, true
+		}
+		if result, ok := cache[name]; ok {
+			return result[0], result[1]
+		}
+		result := [2]bool{}
+		defer func() { cache[name] = result }()
+		raw, ok := c.foldSiblingResolver(name)
+		if !ok {
+			return false, false
+		}
+		obj, err := Parse(raw)
+		if err != nil {
+			return false, false
+		}
+		flags := obj.AccessFlags
+		if inner, ok := innerSelfAccessFlags(obj); ok {
+			flags = inner
+		}
+		result = [2]bool{flags&0x0001 != 0 || flags&0x0004 != 0, true}
+		return result[0], result[1]
+	}
+}
+
 func (c *ClassObjectDumper) buildSiblingSuperTypes() func(internalName string) ([]string, bool) {
 	if c.foldSiblingResolver == nil {
 		return nil
@@ -3653,6 +3694,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			staticHoistAllowedHere := true
 			hoistEventCount := 0
 			statementSet := utils.NewSet[statements.Statement]()
+			statementHasContinuation := map[statements.Statement]bool{}
 			var statementToString func(statement statements.Statement) string
 			var statementListToString func(statements []statements.Statement) string
 			statementListToString = func(statementList []statements.Statement) string {
@@ -3660,6 +3702,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				defer c.UnTab()
 				var res []string
 				for i, statement := range statementList {
+					statementHasContinuation[statement] = i+1 < len(statementList)
 					if _, ok := statement.(*statements.MiddleStatement); ok {
 						continue
 					}
@@ -3798,6 +3841,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						// JDEC_FIX_EMPTY_CATCH_THROW_OFF=1.
 						// Canonical: commons-lang3 NumberUtils.createNumber catch(NumberFormatException).
 						if strings.TrimSpace(bodyStr) == "" &&
+							!statementHasContinuation[statement] &&
 							os.Getenv("JDEC_FIX_EMPTY_CATCH_THROW_OFF") == "" &&
 							methodType.FunctionType().ReturnType != nil &&
 							methodType.FunctionType().ReturnType.String(funcCtx) != "void" {
@@ -8894,24 +8938,6 @@ func fixNettyRemainingReconstructs(body string) string {
 			"synchronized(this){\n\n\t\t\t}\n\t\t}\n\t}\n\tpublic final long getSession",
 			"synchronized(this){\n\n\t\t\t}\n\t\t\treturn true;\n\t\t}\n\t}\n\tpublic final long getSession")
 	}
-	// ReferenceCountedOpenSslContext: compression-mode switch cases fall through
-	// into default throw, making the loop continue unreachable.
-	if strings.Contains(body, "class ReferenceCountedOpenSslContext") {
-		body = strings.ReplaceAll(body,
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_DECOMPRESS,(CertificateCompressionAlgo)(var30));",
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_DECOMPRESS,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;")
-		body = strings.ReplaceAll(body,
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_COMPRESS,(CertificateCompressionAlgo)(var30));",
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_COMPRESS,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;")
-		body = strings.ReplaceAll(body,
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_BOTH,(CertificateCompressionAlgo)(var30));",
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_BOTH,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;")
-		for strings.Contains(body, "break;\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;") {
-			body = strings.ReplaceAll(body,
-				"break;\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;",
-				"break;")
-		}
-	}
 	// LazyX509Certificate: getInstance hoisted out of static catch(CertificateException).
 	if strings.Contains(body, "class LazyX509Certificate") {
 		body = strings.ReplaceAll(body,
@@ -9472,15 +9498,6 @@ func fixLog4jRemainingReconstructs(body string) string {
 			"}catch(UnsupportedEncodingException | NoSuchMethodException var4_1){",
 			"}catch(UnsupportedEncodingException var4_1){")
 	}
-	// versions/9 Log4jStackTraceElementDeserializer (7-arg StackTraceElement
-	// ctor): do-while(true) always returns inside, but javac does not prove it.
-	// The Java 8 4-arg deserializer is already proven and must not gain a
-	// dead `return null`.
-	if strings.Contains(body, "class Log4jStackTraceElementDeserializer") && strings.Contains(body, "new StackTraceElement(var4,var5,var6,var7,var8,var9,var10)") {
-		body = strings.ReplaceAll(body,
-			"\t\t\t} while (true);\n\t\t}else{\n\t\t\tthrow JsonMappingException.from(var1,String.format(\"Cannot deserialize instance of %s out of %s token\"",
-			"\t\t\t} while (true);\n\t\t\treturn null;\n\t\t}else{\n\t\t\tthrow JsonMappingException.from(var1,String.format(\"Cannot deserialize instance of %s out of %s token\"")
-	}
 	// ScriptManager$MainScriptRunner.execute: compiledScript.eval throws
 	// ScriptException outside the try; the outer catch is then dead.
 	if strings.Contains(body, "class ScriptManager$MainScriptRunner") {
@@ -9742,10 +9759,30 @@ func tryThrowsNSME(tryBody string) bool {
 			if name == ".newInstanceOf(" || name == ".findConstructor(" {
 				return true
 			}
-			if getMethodHasClassArgs(after) {
+			before := tryBody[:len(tryBody)-len(rest)+i]
+			if strings.HasSuffix(strings.TrimSpace(before), ".class.") || getMethodHasClassArgs(after) || reflectionUsesClassArrayLocal(before, after) {
 				return true
 			}
 			rest = after
+		}
+	}
+	return false
+}
+
+// An effectful Class[] initializer may remain in a local instead of being
+// folded into a reflective call. Its type still proves the checked exception.
+func reflectionUsesClassArrayLocal(beforeCall, afterOpen string) bool {
+	decl := regexp.MustCompile(`(?m)^\s*(?:java\.lang\.)?Class(?:<[^\n;]+?>)?\s*\[\]\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=`)
+	end := strings.IndexByte(afterOpen, ')')
+	if end < 0 {
+		return false
+	}
+	args := afterOpen[:end]
+	for _, m := range decl.FindAllStringSubmatch(beforeCall, -1) {
+		for _, arg := range strings.Split(args, ",") {
+			if strings.TrimSpace(arg) == m[1] {
+				return true
+			}
 		}
 	}
 	return false
@@ -10495,6 +10532,10 @@ func fixDiskLruIteratorHasNext(body string) string {
 	if !strings.Contains(body, "class DiskLruCache$3") {
 		return body
 	}
+	// Core declaration synthesis can retain the unused monitor temporary after
+	// the compatibility monitor rewrite folds it back to this.this$0.
+	monitorDecl := regexp.MustCompile(`public boolean hasNext\(\) \{\n\t\tDiskLruCache var\d+;\n`)
+	body = monitorDecl.ReplaceAllString(body, "public boolean hasNext() {\n")
 	return strings.ReplaceAll(body, diskLruHasNextEmpty, diskLruHasNextFixed)
 }
 

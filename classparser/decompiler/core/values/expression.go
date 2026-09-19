@@ -725,6 +725,13 @@ func (f *FunctionCallExpression) Type() types.JavaType {
 	if inst := f.instantiatedReturnType(); inst != nil {
 		return inst
 	}
+	if typ := f.FuncType.ReturnType; typ != nil {
+		if _, primitive := typ.RawType().(*types.JavaPrimer); !primitive {
+			// Local and ternary inference may unify mutable type wrappers.
+			// Keep the invocation's descriptor independent of those wrappers.
+			return typ.Copy()
+		}
+	}
 	return f.FuncType.ReturnType
 }
 
@@ -1769,7 +1776,10 @@ func (f *FunctionCallExpression) genericMethodWitnessArgParamType(i int, funcCtx
 		}
 	} else if funcCtx.SiblingClassSig != nil {
 		if _, methodSigs, ok := funcCtx.SiblingClassSig(strings.ReplaceAll(f.ClassName, ".", "/")); ok && methodSigs != nil {
-			sig = methodSigs[class_context.MethodSigKey(f.FunctionName, len(f.Arguments))]
+			sig = methodSigs[class_context.MethodDescKey(f.FunctionName, f.Descriptor)]
+			if sig == "" {
+				sig = methodSigs[class_context.MethodSigKey(f.FunctionName, len(f.Arguments))]
+			}
 		}
 	}
 	if sig == "" {
@@ -3685,7 +3695,7 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 		}
 	}
 	switch obj.(type) {
-	case *JavaExpression, *TernaryExpression, *SlotValue:
+	case *JavaExpression, *TernaryExpression, *SlotValue, *AssignmentExpression:
 		return fmt.Sprintf("(%s).%s(%s)", f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
 	default:
 		// A member access on a java.lang.Object-typed local whose bytecode invoke target is a
@@ -3739,7 +3749,7 @@ func (f *FunctionCallExpression) objectReceiverInvokeCast(funcCtx *class_context
 	if strings.HasPrefix(f.ClassName, "[") {
 		return ""
 	}
-	return f.ClassName
+	return funcCtx.ShortTypeName(f.ClassName)
 }
 
 func coerceBooleanArgument(arg JavaValue) JavaValue {

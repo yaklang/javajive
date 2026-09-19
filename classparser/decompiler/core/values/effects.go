@@ -46,6 +46,11 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		return []JavaValue{v.Value}, true
 	case *AssignmentExpression:
 		return []JavaValue{v.Target, v.Value}, true
+	case *CustomValue:
+		if v.CapturesKnown && (v.Flag == "lambda" || v.Flag == "primitive_cast") {
+			return v.Captures, true
+		}
+		return nil, false
 	default:
 		return nil, false
 	}
@@ -84,6 +89,10 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 			effect |= EffectThrow
 		case *AssignmentExpression:
 			effect |= EffectWriteMemory
+		case *CustomValue:
+			if v.CapturesKnown && v.Flag == "lambda" {
+				effect |= EffectAllocate | EffectThrow
+			}
 		}
 		children, known := Children(value)
 		if !known {

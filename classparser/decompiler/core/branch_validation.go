@@ -31,8 +31,12 @@ func BranchTarget(pc int, operand []byte, width, codeLen int) (int, error) {
 
 // Validate all encoded edges, including unreachable instructions, before graph construction.
 func (d *Decompiler) validateControlFlow() error {
+	codeLen := d.opcodeCodeLength
+	if codeLen == 0 {
+		codeLen = len(d.bytecodes)
+	}
 	boundary := func(pc int64) error {
-		if pc < 0 || pc >= int64(len(d.bytecodes)) {
+		if pc < 0 || pc >= int64(codeLen) {
 			return fmt.Errorf("target PC %d out of Code", pc)
 		}
 		if _, ok := d.offsetToOpcodeIndex[uint16(pc)]; !ok {
@@ -58,7 +62,7 @@ func (d *Decompiler) validateControlFlow() error {
 			}
 		}
 		if width > 0 {
-			target, err := BranchTarget(int(op.CurrentOffset), op.Data, width, len(d.bytecodes))
+			target, err := BranchTarget(int(op.CurrentOffset), op.Data, width, codeLen)
 			if err != nil {
 				return err
 			}
@@ -69,7 +73,7 @@ func (d *Decompiler) validateControlFlow() error {
 		}
 	}
 	for _, entry := range d.ExceptionTable {
-		if entry.StartPc >= entry.EndPc || int(entry.EndPc) > len(d.bytecodes) {
+		if entry.StartPc >= entry.EndPc || int(entry.EndPc) > codeLen {
 			return fmt.Errorf("invalid exception range %d..%d", entry.StartPc, entry.EndPc)
 		}
 		for _, pc := range []uint16{entry.StartPc, entry.HandlerPc} {
@@ -77,7 +81,7 @@ func (d *Decompiler) validateControlFlow() error {
 				return fmt.Errorf("exception table: %w", err)
 			}
 		}
-		if int(entry.EndPc) != len(d.bytecodes) {
+		if int(entry.EndPc) != codeLen {
 			if err := boundary(int64(entry.EndPc)); err != nil {
 				return fmt.Errorf("exception table end: %w", err)
 			}

@@ -70,19 +70,58 @@ func switchCompletesNormally(sw *statements.SwitchStatement) bool {
 	if !hasDefault {
 		return true // an unmatched value falls through past the switch.
 	}
-	for _, c := range sw.Cases {
+	for i, c := range sw.Cases {
+		if subtreeHasBreak(c.Body) {
+			// A nested conditional can break before the arm's final return.
+			// Counting inner-loop breaks too is conservative: retain the tail.
+			return true
+		}
 		if len(c.Body) == 0 {
-			return true // an empty case falls through to the next arm / past the switch.
+			if i == len(sw.Cases)-1 {
+				return true
+			}
+			continue // a grouped label uses the following nonempty body.
 		}
 		last := c.Body[len(c.Body)-1]
 		if isBreakStatement(last) {
 			return true
 		}
-		if !isTerminatorStatement(last) {
-			return true // the arm falls off its end, reaching the post-switch point.
+		if i == len(sw.Cases)-1 && statementCompletesNormally(last) {
+			return true // Earlier bodies fall through to the next label, not out of the switch.
 		}
 	}
 	return false
+}
+
+// Compound statements can terminate every path too. Checking only their first
+// rendered token mistakes `if (...) return; else return;` for fall-through.
+func statementCompletesNormally(st statements.Statement) bool {
+	switch s := st.(type) {
+	case *statements.IfStatement:
+		return bodyCompletesNormally(s.IfBody) || bodyCompletesNormally(s.ElseBody)
+	case *statements.SwitchStatement:
+		return switchCompletesNormally(s)
+	case *statements.TryCatchStatement:
+		if bodyCompletesNormally(s.TryBody) {
+			return true
+		}
+		for _, body := range s.CatchBodies {
+			if bodyCompletesNormally(body) {
+				return true
+			}
+		}
+		return false
+	}
+	return !isTerminatorStatement(st)
+}
+
+func bodyCompletesNormally(body []statements.Statement) bool {
+	for _, st := range body {
+		if !statementCompletesNormally(st) {
+			return false
+		}
+	}
+	return true
 }
 
 // caseBodyExitNodes collects the EXIT targets of the case body rooted at startNode, using the same
@@ -278,6 +317,9 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 				return "break"
 			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
 			}))
+			// Keep the semantic destination after replacing the edge with a
+			// printable break leaf. Enclosing-loop analysis still needs it.
+			breakNode.HideNext = mergeNode
 			// Splice the break leaf in at the merge edge's ORIGINAL position instead of remove+append.
 			// A case body that breaks to the merge via a ConditionStatement (the String-switch
 			// `if (s.equals(k)) var=i;` guard reaches the dispatch switch on its FALSE edge) keeps its

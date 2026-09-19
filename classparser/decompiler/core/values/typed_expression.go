@@ -39,3 +39,13 @@ func (a *AssignmentExpression) ReplaceVar(old, new *utils.VariableId) {
 	a.Target.ReplaceVar(old, new)
 	a.Value.ReplaceVar(old, new)
 }
+
+// AssignmentOperand preserves precedence when an assignment is used as a
+// receiver, indexee or instanceof operand. Assignment chains remain bare.
+func AssignmentOperand(v JavaValue, ctx *class_context.ClassContext) string {
+	text := v.String(ctx)
+	if _, ok := UnpackSoltValue(v).(*AssignmentExpression); ok {
+		return "(" + text + ")"
+	}
+	return text
+}

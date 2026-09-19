@@ -42,12 +42,11 @@ func TestReflectMemberLUBTableIsLoadBearing(t *testing.T) {
 		t.Errorf("fix ON: expected `Member var1 = ` LUB declaration, got:\n%s", on)
 	}
 
-	// Fix OFF (kill-switch): MergeTypes falls back to the first arm (Method), reproducing the
-	// `Method var1 = cond ? method : field` recompile blocker -- proving the table rows load-bearing.
+	// The core web now owns the join even with the legacy LUB disabled.
 	t.Setenv("JDEC_TYPELUB_OFF", "1")
 	off := reflectMemberLUBDecompile(t)
-	if strings.Contains(off, "Member var1 = ") || !strings.Contains(off, "Method var1 = ") {
-		t.Errorf("fix OFF: expected first-arm fallback `Method var1 = `, got:\n%s", off)
+	if !strings.Contains(off, "Member var1 = ") || strings.Contains(off, "Method var1 = ") {
+		t.Errorf("core web must preserve Member with the legacy LUB disabled, got:\n%s", off)
 	}
 }
 
@@ -62,12 +61,10 @@ func TestTernaryDeclLUBCacheRefreshIsLoadBearing(t *testing.T) {
 		t.Errorf("fix ON: expected `Member var1 = `, got:\n%s", on)
 	}
 
-	// Fix OFF (kill-switch): ternaryDeclLUB still widens the ref, but the declaration renders the
-	// STALE cached first-arm type `Method` -- the exact symptom the refresh removes -- proving it
-	// load-bearing even when the LUB itself is available.
+	// The core declaration now supersedes the legacy ternary cache repair.
 	t.Setenv("JDEC_TERNARY_DECL_LUB_CACHE_OFF", "1")
 	off := reflectMemberLUBDecompile(t)
-	if strings.Contains(off, "Member var1 = ") || !strings.Contains(off, "Method var1 = ") {
-		t.Errorf("fix OFF: expected stale `Method var1 = ` declaration, got:\n%s", off)
+	if !strings.Contains(off, "Member var1 = ") || strings.Contains(off, "Method var1 = ") {
+		t.Errorf("core web must preserve Member with the legacy cache repair disabled, got:\n%s", off)
 	}
 }

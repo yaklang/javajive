@@ -180,14 +180,8 @@ func TestIdentAsTypeDeclJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if strings.Contains(off, "MethodGraph var4 =") {
-		t.Fatalf("OFF already has MethodGraph var4 (switch inert):\n%s", clipForTest(off, "var4"))
-	}
-	if !strings.Contains(off, "Object var4 =") {
-		t.Fatalf("OFF missing unfixed Object var4:\n%s", clipForTest(off, "var4"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	if !strings.Contains(off, "MethodGraph var4 =") || strings.Contains(off, "var3 var4 =") {
+		t.Fatalf("core join lost the MethodGraph declaration:\n%s", clipForTest(off, "var4"))
 	}
 }
 
@@ -1718,6 +1712,13 @@ func TestRetypeTernarySiblingLocal(t *testing.T) {
 	}
 	if strings.Contains(out, "ClassFileLocator$Resolution$Illegal var4 =") {
 		t.Fatal("specific sibling decl still present")
+	}
+}
+
+func TestTernarySiblingKeepsResolvedBase(t *testing.T) {
+	in := "class C {\n\tObject m(boolean b) {\n\t\tParser$Strategy var4 = ((b)) ? (new Parser$TimeZoneStrategy()) : (new Parser$TextStrategy());\n\t\treturn var4;\n\t}\n}\n"
+	if got := retypeTernarySiblingLocal(in); got != in {
+		t.Fatalf("lexical nesting replaced resolved superclass:\n%s", got)
 	}
 }
 
@@ -5148,4 +5149,27 @@ func TestFillMissingReturnAfterLabeledBreakJarFS(t *testing.T) {
 		"org/apache/lucene/index/Terms.class",
 		"} while (true);\n\t\t\t\treturn var4.get();",
 		"break LOOP_1;")
+}
+
+func TestSelfWrappedLocalIsNotMethodReturn(t *testing.T) {
+	in := "class C {\nByteBuffer read() {\nInputStream var8 = open();\nvar8 = new CRC32VerifyingInputStream(var8, 4, 1);\nbyte[] var9 = readAll(var8);\nreturn ByteBuffer.wrap(var9);\n}\n}\n"
+	if out := retypeSelfWrapToMethodReturn(in); out != in {
+		t.Fatalf("local stream was retyped to unrelated return type:\n%s", out)
+	}
+}
+
+func TestHardjarShapesPreserveResolvedDeclarations(t *testing.T) {
+	cases := []string{
+		"class Example { X509TrustManager f(Object o) { X509TrustManager var5 = ((X509TrustManager)(o)); var5 = new EnhancingX509ExtendedTrustManager(var5); return var5; } TrustManager unused; }",
+		"class Example { Object f(boolean b) { Advice$OffsetMapping$Factory var2 = null; if(b) var2 = new Advice$OffsetMapping$Factory$One(); else var2 = new Advice$OffsetMapping$Factory$Two(); return var2; } }",
+	}
+	for _, in := range cases {
+		if got := fixHardjarCodeShapes(in); got != in {
+			t.Errorf("resolved type changed:\n%s", got)
+		}
+	}
+	in := "class Example<T> { void f(){ try{ work(); }catch(Throwable var3_1){ failure(var3_1); } Object var3_1 = value(); sink((T)(var3_1)); } }"
+	if got := wrapObjectTypeVarArgs(in); got != in {
+		t.Fatalf("cast leaked into catch scope:\n%s", got)
+	}
 }

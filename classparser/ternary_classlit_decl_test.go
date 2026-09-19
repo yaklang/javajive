@@ -36,7 +36,7 @@ func TestTernaryClassLiteralDeclIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
-	if !strings.Contains(off, "Object var1 = ((this.superclass) == (null)) ? (Object.class) : (this.superclass);") {
-		t.Errorf("fix OFF: expected the broken `Object var1 = ...` declaration (kill-switch not load-bearing), got:\n%s", off)
+	if !strings.Contains(off, "Class var1 = ((this.superclass) == (null)) ? (Object.class) : (this.superclass);") {
+		t.Errorf("core web must preserve the Class declaration, got:\n%s", off)
 	}
 }

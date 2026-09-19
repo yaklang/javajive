@@ -3399,6 +3399,12 @@ func wrapObjectTypeVarArgs(body string) string {
 		start := prevMemberStart(body, i)
 		end := nextMemberStart(body, i)
 		member := body[start:end]
+		// The same printed name can belong to a catch parameter in a disjoint
+		// scope. Its Throwable uses must not inherit the later Object local's T cast.
+		if regexp.MustCompile(`catch\s*\([^)]*\b` + regexp.QuoteMeta(ident) + `\s*\)`).MatchString(member) {
+			from = i + 1
+			continue
+		}
 		typ := uniqueCastTypeOfLocal(member, ident)
 		if !isTypeVarName(typ) {
 			if tv := uniqueAssignedTypeVar(member, ident); isTypeVarName(tv) {
@@ -3664,6 +3670,11 @@ func wrapTernaryAssignElseCast(body string) string {
 		}
 		start := prevMemberStart(body, eq)
 		end := nextMemberStart(body, eq)
+		// A same-name catch in another scope cannot supply this assignment's type.
+		if regexp.MustCompile(`catch\s*\([^)]*\b` + regexp.QuoteMeta(ident) + `\s*\)`).MatchString(body[start:end]) {
+			from = i + 1
+			continue
+		}
 		typ := identDeclaredClassType(body[start:end], ident)
 		if typ == "" || typ == "Object" || isPrimitiveOrObjectName(typ) || isStmtKeyword(typ) || strings.Contains(typ, ".") || !isSimpleClassIdent(typ) {
 			from = i + 1
@@ -3971,7 +3982,7 @@ func retypeTernarySiblingLocal(body string) string {
 		end := nextMemberStart(body, eq)
 		member := body[start:end]
 		decl := identDeclaredClassType(member, ident)
-		if decl == "" || decl == common || !strings.HasPrefix(decl, common+"$") {
+		if decl == "" || decl == common || (decl != thenType && decl != elseType) || !strings.HasPrefix(decl, common+"$") {
 			from = elseClose
 			continue
 		}
@@ -4701,6 +4712,10 @@ func retypeSelfWrapToMethodReturn(body string) string {
 		start := prevMemberStart(body, i)
 		end := nextMemberStart(body, i)
 		member := body[start:end]
+		if !regexp.MustCompile(`\breturn\s+` + regexp.QuoteMeta(ident) + `\s*;`).MatchString(member) {
+			from = i + 1
+			continue
+		}
 		decl := identDeclaredClassType(member, ident)
 		if decl == "" || decl == ret || decl == rhs {
 			from = i + 1
@@ -5023,6 +5038,12 @@ func retypeMixedDollarNewAssign(body string) string {
 		member := body[start:end]
 		decl := identDeclaredClassType(member, ident)
 		if decl == "" || decl == rhs || strings.Contains(decl, ".") {
+			from = i + 1
+			continue
+		}
+		if strings.Contains(member, decl+" "+ident+" = null;") {
+			// A null-initialized join may already name the shared interface.
+			// Nested-class name prefixes do not establish inheritance.
 			from = i + 1
 			continue
 		}
@@ -8248,7 +8269,11 @@ func retypeSelfWrapToCommonCamelSuffix(body string) string {
 		end := nextMemberStart(body, i)
 		member := body[start:end]
 		decl := identDeclaredClassType(member, ident)
-		if decl == "" || decl == rhs || strings.Contains(decl, ".") || strings.Contains(decl, "$") {
+		if decl == "" || decl == rhs || decl == methodReturnSimple(body, i) || strings.Contains(decl, ".") || strings.Contains(decl, "$") {
+			from = i + 1
+			continue
+		}
+		if strings.Contains(member, decl+" "+ident+" = (("+decl+")") {
 			from = i + 1
 			continue
 		}

@@ -2958,6 +2958,20 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 				declType = lt
 			}
 		}
+		// The whole-web solution includes every reaching assignment. A non-null
+		// initializer can be narrower; using its type would reject later stores.
+		if ref, ok := a.LeftValue.(*values.JavaRef); ok && ref.WebDeclType != nil {
+			declType = ref.WebDeclType
+		}
+		if target := declType.String(funcCtx); funcCtx.IsTypeParam(target) && !values.IsNullLiteral(values.UnpackSoltValue(a.JavaValue)) {
+			needsCast := a.JavaValue.Type().String(funcCtx) != target
+			if ternary, ok := values.UnpackSoltValue(a.JavaValue).(*values.TernaryExpression); ok {
+				needsCast = needsCast || ternaryArmNeedsTypeVarCast(ternary, target, funcCtx)
+			}
+			if needsCast {
+				assign = fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), target, rhsStr)
+			}
+		}
 		// Narrowing cast for byte/char/short locals: JLS promotes these types to int in any
 		// arithmetic/bitwise/shift expression, so `byte x = (arr[i] ^ crc) & 255` is int-valued at
 		// the source level even though the slot is byte (commons-codec PureJavaCrc32C). When the

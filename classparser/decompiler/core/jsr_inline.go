@@ -33,7 +33,7 @@ var jsrInlineDisabled bool
 //   - No-op when the method contains no jsr/ret, so the ~99% of modern classes are byte-for-byte
 //     unaffected.
 //   - Conservative: only the canonical, well-understood javac subroutine shape is transformed.
-//     Anything unusual (jsr_w/goto_w, switches, nested/multi-ret subroutines, subroutines that
+//     Anything unusual (jsr_w/goto_w, switches, multi-ret subroutines, subroutines that
 //     are fallen-through-into or sit inside a try region, return-address reuse, branch targets we
 //     cannot remap) makes the pass leave the bytecode untouched, so the method degrades to
 //     exactly today's stub.
@@ -78,10 +78,41 @@ func (d *Decompiler) inlineJSRSubroutines() {
 	if !hasJSR {
 		return
 	}
-	d.tryInlineJSR(ops)
+	// Work on private opcode copies: even a late exception-PC validation failure
+	// must leave the original method intact. Inline innermost subroutines first;
+	// each successful round removes at least one return-address local.
+	work := *d
+	work.opCodes = make([]*OpCode, len(ops))
+	for i, op := range ops {
+		clone := *op
+		clone.Data = append([]byte(nil), op.Data...)
+		work.opCodes[i] = &clone
+	}
+	for round := 0; round < len(ops); round++ {
+		if !work.tryInlineJSR(work.opCodes) {
+			return
+		}
+		remaining := false
+		for _, op := range work.opCodes {
+			if op.Instr.OpCode == OP_JSR || op.Instr.OpCode == OP_RET || op.Instr.OpCode == OP_JSR_W {
+				remaining = true
+				break
+			}
+		}
+		if !remaining {
+			d.opCodes = work.opCodes
+			d.opcodeCodeLength = work.opcodeCodeLength
+			d.ExceptionTable = work.ExceptionTable
+			d.offsetToOpcodeIndex = work.offsetToOpcodeIndex
+			d.opcodeIndexToOffset = work.opcodeIndexToOffset
+			d.CurrentId = work.CurrentId
+			d.RootOpCode = work.RootOpCode
+			return
+		}
+	}
 }
 
-func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
+func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 	n := len(ops)
 	bail := func(reason string) {
 		if jsrInlineDebug {
@@ -97,7 +128,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		switch op.Instr.OpCode {
 		case OP_JSR_W, OP_GOTO_W, OP_TABLESWITCH, OP_LOOKUPSWITCH:
 			bail("contains jsr_w/goto_w/switch")
-			return
+			return false
 		}
 	}
 
@@ -112,7 +143,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		idx, ok := d.offsetToOpcodeIndex[dst]
 		if !ok || idx < 0 || idx >= n {
 			bail("branch target offset not resolvable")
-			return
+			return false
 		}
 		origTarget[op] = ops[idx]
 	}
@@ -129,14 +160,14 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		entryIdx := indexOfOpcode(ops, entry)
 		if entryIdx < 0 {
 			bail("jsr entry index not found")
-			return
+			return false
 		}
 		sub, ok := subsByEntry[entryIdx]
 		if !ok {
 			built := buildSubroutine(ops, entryIdx)
 			if built == nil {
-				bail("subroutine shape not canonical")
-				return
+				// A nested body becomes canonical after its leaf callees are expanded.
+				continue
 			}
 			subsByEntry[entryIdx] = built
 			sub = built
@@ -144,7 +175,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		jsrSub[i] = sub
 	}
 	if len(jsrSub) == 0 {
-		return
+		return false
 	}
 
 	// Mark every opcode index that belongs to some subroutine body (inclusive of entry & ret),
@@ -154,7 +185,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		for k := sub.entryIdx; k <= sub.retIdx; k++ {
 			if inBody[k] {
 				bail("overlapping subroutines")
-				return
+				return false
 			}
 			inBody[k] = true
 		}
@@ -166,11 +197,11 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		prev := sub.entryIdx - 1
 		if prev < 0 {
 			bail("subroutine entry has no predecessor")
-			return
+			return false
 		}
 		if ops[prev].Instr.OpCode != OP_START && !isUnconditionalTransfer(ops[prev].Instr.OpCode) {
 			bail("fall-through into subroutine entry")
-			return
+			return false
 		}
 	}
 
@@ -210,7 +241,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		sE := subContaining(e.EndPc, true)
 		if touchesEntry(e.StartPc) || touchesEntry(e.HandlerPc) {
 			bail("exception references subroutine entry")
-			return
+			return false
 		}
 		if sS == nil && sH == nil && sE == nil {
 			outsideExc = append(outsideExc, e)
@@ -225,7 +256,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 				e.StartPc, e.EndPc, e.HandlerPc, e.CatchType)
 		}
 		bail("exception straddles subroutine boundary")
-		return
+		return false
 	}
 
 	// Build the rewritten opcode list. Survivors reuse their original pointers; subroutine bodies
@@ -250,11 +281,10 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		if inBody[i] {
 			continue // emitted via cloning at each jsr site
 		}
-		if op.Instr.OpCode == OP_JSR {
-			sub := jsrSub[i]
-			if i+1 >= n || inBody[i+1] || ops[i+1].Instr.OpCode == OP_JSR {
+		if sub := jsrSub[i]; sub != nil {
+			if i+1 >= n || inBody[i+1] {
 				bail("jsr return site is not ordinary code")
-				return // return site must be ordinary survivor code
+				return false // return site must be ordinary survivor code
 			}
 			returnSite := ops[i+1]
 			// Clone the body interior [entry+1 .. ret-1] (drop the entry astore and the ret).
@@ -305,7 +335,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		}
 		// Ordinary survivor.
 		newOps = append(newOps, op)
-		if isTwoByteBranch(op.Instr.OpCode) {
+		if isTwoByteBranch(op.Instr.OpCode) || op.Instr.OpCode == OP_JSR {
 			branches = append(branches, branchTarget{op: op, target: origTarget[op]})
 		}
 	}
@@ -332,14 +362,14 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 	for _, b := range branches {
 		if b.target == nil {
 			bail("unresolved branch target (nil)")
-			return
+			return false
 		}
 		if _, ok := inNew[b.target]; !ok {
 			if jsrInlineDebug {
 				log.Infof("jsr-inline bail: branch target not in list, target op=0x%x off=%d", b.target.Instr.OpCode, b.target.CurrentOffset)
 			}
 			bail("branch target not in rewritten list")
-			return
+			return false
 		}
 	}
 
@@ -353,7 +383,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 	}
 	if total >= 1<<16 {
 		bail("rewritten method exceeds 16-bit offset space")
-		return
+		return false
 	}
 
 	// Pre-compute the new code length and the original code length for exception EndPc remapping.
@@ -399,7 +429,12 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 	codeLenNew := uint16(offset)
 
 	for _, b := range branches {
-		delta := b.target.CurrentOffset - b.op.CurrentOffset
+		signedDelta := int(b.target.CurrentOffset) - int(b.op.CurrentOffset)
+		if signedDelta < -32768 || signedDelta > 32767 {
+			bail("expanded short branch exceeds signed 16-bit range")
+			return false
+		}
+		delta := uint16(int16(signedDelta))
 		if len(b.op.Data) != 2 {
 			b.op.Data = make([]byte, 2)
 		}
@@ -427,7 +462,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		h, ok3 := mapPc(e.HandlerPc, false)
 		if !ok1 || !ok2 || !ok3 {
 			bail("exception PC unmappable")
-			return // unmappable PC: abandon the rewrite (d.opCodes not yet reassigned)
+			return false // unmappable PC: abandon the rewrite (d.opCodes not yet reassigned)
 		}
 		newExc = append(newExc, &ExceptionTableEntry{StartPc: s, EndPc: en, HandlerPc: h, CatchType: e.CatchType})
 	}
@@ -450,12 +485,13 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 		h, ok3 := cloneOff(job.src.HandlerPc, job.cloneMap)
 		if !ok1 || !ok2 || !ok3 {
 			bail("nested exception PC unmappable")
-			return
+			return false
 		}
 		newExc = append(newExc, &ExceptionTableEntry{StartPc: s, EndPc: en, HandlerPc: h, CatchType: job.src.CatchType})
 	}
 
 	d.opCodes = newOps
+	d.opcodeCodeLength = int(codeLenNew)
 	d.ExceptionTable = newExc
 	d.offsetToOpcodeIndex = offsetToIndex
 	d.opcodeIndexToOffset = indexToOffset
@@ -466,6 +502,7 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) {
 	if jsrInlineDebug {
 		log.Infof("jsr-inline committed: %d subroutines, %d->%d opcodes", len(subsByEntry), n, len(newOps))
 	}
+	return true
 }
 
 // jsrInlineDebug, when set via the JSR_INLINE_DEBUG env at init, logs every committed inline so

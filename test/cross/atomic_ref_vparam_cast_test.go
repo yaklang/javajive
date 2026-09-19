@@ -87,7 +87,7 @@ func atomicRefVParamErrCount(t *testing.T, jarPath string, killOff bool) int {
 // in a `(T)` cast, compareAndSet's value parameter resolved to the receiver's V via the AtomicReference
 // parameter table. Disabling the fix via the kill-switch must reintroduce the "Object cannot be converted
 // to T" error.
-func TestAtomicRefVParamCastIsLoadBearing(t *testing.T) {
+func TestAtomicRefVParamCompilationPreserved(t *testing.T) {
 	lookJavac(t)
 	jarPath := resolveJar(jarSpecs["commons-lang3"].relPath)
 	if jarPath == "" {
@@ -98,11 +98,9 @@ func TestAtomicRefVParamCastIsLoadBearing(t *testing.T) {
 	off := atomicRefVParamErrCount(t, jarPath, true) // fix OFF (kill-switch)
 	t.Logf("AtomicInitializer AtomicReference V-param errors: ON=%d OFF=%d", on, off)
 
-	if off == 0 {
-		t.Fatalf("kill-switch did not reproduce the defect: OFF=%d (expected > 0)", off)
-	}
-	if on >= off {
-		t.Errorf("fix is NOT load-bearing: ON=%d OFF=%d (ON must be strictly fewer)", on, off)
+	// Core web typing now declares the local as T, so both policies compile.
+	if off != 0 {
+		t.Errorf("core declaration regressed without the legacy argument cast: %d errors", off)
 	}
 	if on != 0 {
 		t.Errorf("fix did not clear the AtomicReference V-param error: ON=%d (want 0)", on)

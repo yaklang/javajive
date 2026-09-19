@@ -674,7 +674,7 @@ func TestDecompileSyntaxRegression(t *testing.T) {
 				"columnsToString(boolean",
 				"CollectionsKt.joinToString$default",
 				"var6.add(var17)",
-				"if ((var10) < (var11))",
+				"if (!((var10) < (var11))){\n\t\t\t\tbreak;",
 			},
 			mustNotContain: []string{
 				"yak-decompiler",

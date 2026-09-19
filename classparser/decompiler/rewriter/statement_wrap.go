@@ -1001,6 +1001,7 @@ func collectSESEMergeConditions(s *RewriteManager, ifNodes *[]*core.Node, mergeN
 }
 
 func (s *RewriteManager) Rewrite() error {
+
 	err := s.ScanCoreInfo()
 	if err != nil {
 		return err
@@ -1089,11 +1090,14 @@ func (s *RewriteManager) Rewrite() error {
 			s.DominatorMap = GenerateDominatorTree(s.RootNode)
 		}
 
-		// Switch-only loops also need back edges materialized before their bodies are consumed.
-		if slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
+		// Materialize loop exits before a container consumes its body, including retry try/catch loops.
+		if isTry || slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
 			for j := i; j < len(order); j++ {
 				n := order[j]
 				if slices.Contains(s.WhileNode, n) && utils2.IsDominate(s.DominatorMap, n, node) {
+					if isTry && (len(n.Next) == 0 || n.Next[0] != node || hasSharedCatchEntry(node)) {
+						continue
+					}
 					if _, ok := loopJmpRewriterRecoed[n]; ok {
 						break
 					}

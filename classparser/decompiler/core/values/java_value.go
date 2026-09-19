@@ -28,6 +28,9 @@ type JavaRef struct {
 	IsParam bool
 	Val     JavaValue
 	typ     types.JavaType
+	// WebDeclType is the declaration type solved from all definitions in an
+	// immutable local def-use web. Keep it separate from mutable expression types.
+	WebDeclType types.JavaType
 	// nullTypeAdopted records that a null-initialized slot (`T x = null`, Val is the null literal so
 	// IsNullInitialized stays true forever) has ALREADY adopted a concrete reference type via the
 	// AssignVarGuarded null-adopt shortcut. Because ResetVarType only repoints typ and never clears
@@ -67,6 +70,9 @@ func (j *JavaRef) Type() types.JavaType {
 // kept as one variable and adopts the concrete type instead of being split.
 func (j *JavaRef) ResetVarType(t types.JavaType) {
 	j.typ = t
+	if j.WebDeclType != nil && t != nil {
+		j.WebDeclType = t.Copy()
+	}
 }
 
 // IsNullInitialized reports whether this variable's stored value is the `null` literal, i.e.
@@ -453,7 +459,7 @@ func (j *JavaArrayMember) Type() types.JavaType {
 	return ot.ElementType()
 }
 func (j *JavaArrayMember) String(funcCtx *class_context.ClassContext) string {
-	obj := j.Object.String(funcCtx)
+	obj := AssignmentOperand(j.Object, funcCtx)
 	// A ternary used as an array indexee MUST be parenthesized: `?:` binds
 	// looser than `[]`, so `cond ? a : b[i]` parses as `cond ? a : (b[i])`
 	// (int[] vs int → "bad type in conditional expression"). Real hit:
@@ -494,7 +500,7 @@ func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
 	//if j.Id == 0 {
 	//	return j.Member
 	//}
-	obj := j.Object.String(funcCtx)
+	obj := AssignmentOperand(j.Object, funcCtx)
 	// A ternary used as a field receiver MUST be parenthesized: `?:` binds looser than `.`,
 	// so `(cond) ? (a) : (b).field` parses as `(cond) ? (a) : ((b).field)` (Range vs Cut →
 	// Object, then Range.create cannot be applied). FunctionCallExpression already wraps
@@ -863,6 +869,17 @@ func (s *SlotValue) ResetValue(val JavaValue) {
 	// instead of panicking the whole method into a stub.
 	if val == nil {
 		return
+	}
+	// Folding changes the expression represented by this slot, not the JVM
+	// descriptor of a call or checkcast. A provisional branch type must not
+	// overwrite either expression's reference type through a shared wrapper.
+	switch val.(type) {
+	case *FunctionCallExpression, *CastExpression:
+		if typ := val.Type(); typ != nil {
+			if _, primitive := typ.RawType().(*types.JavaPrimer); !primitive {
+				return
+			}
+		}
 	}
 	// Both the value's type and the slot's temp type can be nil under incomplete stack
 	// simulation (e.g. a reused slot whose type was never committed). ResetTypeRef

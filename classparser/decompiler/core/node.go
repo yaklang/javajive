@@ -49,7 +49,10 @@ type Node struct {
 	// whose merge coincides with the explicit default target so the generic fallback restores it), so without saving it
 	// the second run would corrupt MergeNode to the default/throw node. Reused on re-entry.
 	SwitchEmptyCaseMergeNode *Node
-	IsTryCatch               bool
+	// ProtectedEnd is the exclusive bytecode boundary of a synthetic try region.
+	ProtectedEnd           *Node
+	SharedProtectedHandler bool
+	IsTryCatch             bool
 	// IsCatchStart marks a node that is the entry of an exception handler (catch / finally-desugar)
 	// block, set when the try node is built from the exception table. TryRewriter uses it to classify
 	// a try node's successors structurally instead of inferring the handler from its body's first
@@ -280,6 +283,12 @@ func NewNode(statement statements.Statement) *Node {
 
 // ReplaceSwitchTarget keeps semantic label identity independent of successor order.
 func (n *Node) ReplaceSwitchTarget(old, target *Node) {
+	// Conditional branches also pin their target by identity before temporary
+	// folding. Replacing a value producer must retain that identity even when
+	// the successor slice is rebuilt in a different order.
+	if n.JmpNode == old {
+		n.JmpNode = target
+	}
 	if n.MergeNode == old {
 		n.MergeNode = target
 	}

@@ -22,7 +22,6 @@ func fixZxingRemainingReconstructs(body string) string {
 	body = retypeZxingIntLocalsByUse(body)
 	body = rewriteSavedExceptionCatchRethrow(body)
 	body = wrapZxingUPCEANChecksumTry(body)
-	body = addZxingMacroBlockSwitchBreaks(body)
 	body = wrapZxingToStringThrowThrowable(body)
 	body = dropZxingUnreachableAmbiguousContinue(body)
 
@@ -267,9 +266,6 @@ func fixZxingRemainingReconstructs(body string) string {
 		"int var5 = (((var6 = var0.readBits(13)) / (192)) << (8)) | ((var6) % (192));\n\t\t\t\t\tint var6 = var5;",
 		"int var6 = var0.readBits(13);\n\t\t\t\t\tint var5 = (((var6) / (192)) << (8)) | ((var6) % (192));")
 	body = strings.ReplaceAll(body,
-		"if (((var8 = var4[var6]) < (var3)) && ((var8) > (var2))){",
-		"int var8 = var4[var6];\n\t\t\t\tif (((var8) < (var3)) && ((var8) > (var2))){")
-	body = strings.ReplaceAll(body,
 		"int var5 = 0;\n\t\tif (((Math.abs((var2) - (this.getY()))) <= (var1)) && ((Math.abs((var3) - (this.getX()))) <= (var1))){\n\t\t\tif (((var5 = Math.abs((var1) - (this.estimatedModuleSize))) > (1F))",
 		"float var5 = 0.0F;\n\t\tif (((Math.abs((var2) - (this.getY()))) <= (var1)) && ((Math.abs((var3) - (this.getX()))) <= (var1))){\n\t\t\tif (((var5 = Math.abs((var1) - (this.estimatedModuleSize))) > (1F))")
 	body = strings.ReplaceAll(body,
@@ -425,35 +421,6 @@ func wrapZxingToStringThrowThrowable(body string) string {
 			from = ms + 1
 		}
 	}
-}
-
-func addZxingMacroBlockSwitchBreaks(body string) string {
-	if !strings.Contains(body, "decodeMacroBlock") {
-		return body
-	}
-	for _, p := range [][2]string{
-		{"var2.setFileName(var7.toString());\n\t\t\t\t\t\tcase 3:",
-			"var2.setFileName(var7.toString());\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tcase 3:"},
-		{"var2.setSender(var8.toString());\n\t\t\t\t\t\tcase 4:",
-			"var2.setSender(var8.toString());\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tcase 4:"},
-		{"var2.setAddressee(var9.toString());\n\t\t\t\t\t\tcase 1:",
-			"var2.setAddressee(var9.toString());\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tcase 1:"},
-		{"var2.setSegmentCount(Integer.parseInt(var10.toString()));\n\t\t\t\t\t\tcase 2:",
-			"var2.setSegmentCount(Integer.parseInt(var10.toString()));\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tcase 2:"},
-		{"var2.setTimestamp(Long.parseLong(var11.toString()));\n\t\t\t\t\t\tcase 6:",
-			"var2.setTimestamp(Long.parseLong(var11.toString()));\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tcase 6:"},
-		{"var2.setChecksum(Integer.parseInt(var12.toString()));\n\t\t\t\t\t\tcase 5:",
-			"var2.setChecksum(Integer.parseInt(var12.toString()));\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tcase 5:"},
-		{"var2.setFileSize(Long.parseLong(var13.toString()));\n\t\t\t\t\t\tdefault:",
-			"var2.setFileSize(Long.parseLong(var13.toString()));\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tdefault:"},
-		{"throw FormatException.getFormatInstance();\n\t\t\t\t\t\t}\n\t\t\t\t\tcase 922:",
-			"throw FormatException.getFormatInstance();\n\t\t\t\t\t\t}\n\t\t\t\t\t\tbreak;\n\t\t\t\t\tcase 922:"},
-		{"var2.setLastSegment(true);\n\t\t\t\t\tdefault:",
-			"var2.setLastSegment(true);\n\t\t\t\t\t\tbreak;\n\t\t\t\t\tdefault:"},
-	} {
-		body = strings.ReplaceAll(body, p[0], p[1])
-	}
-	return body
 }
 
 func flattenNestedCheckStandardTry(body string) string {

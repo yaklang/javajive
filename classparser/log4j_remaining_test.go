@@ -149,7 +149,7 @@ func TestLog4jRemainingReconstructsAreLoadBearing(t *testing.T) {
 		"var0.versionHelpRequested |= var1;",
 		"this.mapWriter.accept((String)(l0),l1,var2);",
 		"}catch(UnsupportedEncodingException var4_1){",
-		"return null;\n\t\t}else{",
+		"} while (true);\n\t\t}else{",
 		"this.reconnector.reconnect();\n\t\t\t\t\t\t\tthis.createMessageAndSend",
 		"LOGGER.error(\"No Base64 Converter is available\");\n\t\t\t}",
 		"catch(IOException var_io)",

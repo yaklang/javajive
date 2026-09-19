@@ -284,17 +284,9 @@ func collectEmbeddedDeclInfos(sts []statements.Statement, byID map[*utils.Variab
 // (commons-codec Metaphone.metaphone: the `txtLength` embedded assignment collides with a later
 // `StringBuilder` local).
 //
-// This is DELIBERATELY narrow. It synthesizes a bare `T varN;` at method top ONLY when the orphan's
-// slot-derived name collides with a declaration of a DIFFERENT variable whose rendered type is
-// INCOMPATIBLE (the residual-C signature: an `int` n vs a `StringBuilder`). That declaration makes the
-// orphan a real declaration the identity collision renamer can see, so it renames the colliding sibling
-// to varN_1 and rebinds its uses. Two cases are intentionally left untouched:
-//   - same name + SAME rendered type: the legitimate chained assignment `int b = a = 1`, where the
-//     embedded `(a = 1)` reuses the already-declared slot `a`; minting a second `int a;` would make the
-//     renamer split one variable into two and break the program (TestDecompiler/ContinuousAssign).
-//   - name with NO declaration at all: an ordinary orphan whose type the textual safety net
-//     (addMissingGeneratedLocalDecls / inferGeneratedLocalRefType, kill-switches JDEC_NO_EMBED_ASSIGN_*)
-//     already recovers; staying out of its way keeps those fixes load-bearing.
+// Materialize orphan declarations before identity-based collision renaming. A declaration
+// of another identity cannot cover this local even if its name and type happen to match.
+// Precision mode has no textual declaration repair.
 //
 // A bare declaration at method top is legal Java and semantically inert (the embedded assignment still
 // assigns before any read on every reaching path, so definite-assignment holds). Kill-switch:
@@ -324,27 +316,24 @@ func SynthesizeUndeclaredEmbeddedAssignDecls(sts *[]statements.Statement, target
 		if !generatedLocalNameRe.MatchString(name) || ref.Type() == nil {
 			continue
 		}
-		targetType := ref.Type().String(&class_context.ClassContext{})
-		hasIncompatibleCollider := false
-		hasCompatibleSameName := false
-		for _, d := range declByName[name] {
-			if d.id == ref.Id {
-				continue
-			}
-			if d.typeStr == targetType {
-				hasCompatibleSameName = true
-			} else {
-				hasIncompatibleCollider = true
-			}
-		}
-		if !hasIncompatibleCollider || hasCompatibleSameName {
-			continue
-		}
 		seen[ref.Id] = struct{}{}
 		prepend = append(prepend, statements.NewDeclareStatement(ref))
 	}
 	if len(prepend) > 0 {
-		*sts = append(prepend, *sts...)
+		insert := 0
+		for i, st := range *sts {
+			if expr, ok := st.(*statements.ExpressionStatement); ok {
+				if call, ok := core.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression); ok && call.IsSpecialInvoke && call.FunctionName == "<init>" {
+					if receiver, ok := core.UnpackSoltValue(call.Object).(*values.JavaRef); ok && receiver.IsThis {
+						insert = i + 1
+						break
+					}
+				}
+			}
+		}
+		out := append([]statements.Statement{}, (*sts)[:insert]...)
+		out = append(out, prepend...)
+		*sts = append(out, (*sts)[insert:]...)
 	}
 }
 
@@ -3129,6 +3118,12 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 		}
 		objT := types.NewJavaClass("java.lang.Object")
 		for _, ref := range in.declRefs {
+			if ref.WebDeclType != nil {
+				// A whole-web solution already includes every reaching RHS and
+				// descriptor constraint. This name-based fallback sees erased
+				// expression types and would discard recovered type variables.
+				continue
+			}
 			ref.ResetVarType(objT)
 		}
 	}
@@ -3285,4 +3280,26 @@ func typeTokenPrecedes(before string) bool {
 		}
 	}
 	return true
+}
+
+// PlaceConstructorCallFirst moves only inert, uninitialized declarations past an
+// explicit this/super invocation. Initializers and effects retain their order.
+func PlaceConstructorCallFirst(sts *[]statements.Statement) {
+	if sts == nil {
+		return
+	}
+	for i, st := range *sts {
+		if as, ok := st.(*statements.AssignStatement); ok && as.IsDeclare && as.JavaValue == nil && as.ArrayMember == nil {
+			continue
+		}
+		if expr, ok := st.(*statements.ExpressionStatement); ok {
+			if call, ok := core.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression); ok && call.IsSpecialInvoke && call.FunctionName == "<init>" {
+				if receiver, ok := core.UnpackSoltValue(call.Object).(*values.JavaRef); ok && receiver.IsThis && i > 0 {
+					copy((*sts)[1:i+1], (*sts)[:i])
+					(*sts)[0] = st
+				}
+			}
+		}
+		return
+	}
 }

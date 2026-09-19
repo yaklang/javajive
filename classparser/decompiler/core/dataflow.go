@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
 // dataflow.go 是 Phase 1 的「可信图」: 把一个方法里每个局部变量的 store / load 字节码, 按到达定义
@@ -18,7 +19,8 @@ import (
 
 // slotWeb is the precomputed reaching-definition partition for one method.
 type slotWeb struct {
-	webOf map[*OpCode]int // store/load opcode -> web id
+	webOf    map[*OpCode]int // store/load opcode -> web id
+	entryWeb map[int]int     // slot -> web containing the method-entry definition
 }
 
 // unionFind is a tiny disjoint-set over dense int ids used to coalesce store/load opcodes into webs.
@@ -81,8 +83,14 @@ func reachingStoresOf(load *OpCode, slot int) (stores []*OpCode, reachesEntry bo
 }
 
 // computeSlotWebs builds the reaching-definition web partition for the whole method. It is
-// deterministic (keyed by opcode discovery order over d.opCodes) so repeated decompiles are stable.
+// deterministic (keyed by original bytecode order) so repeated decompiles are stable.
 func (d *Decompiler) computeSlotWebs() *slotWeb {
+	opcodes := d.opCodes
+	if d.semanticCFG != nil {
+		// Structuring may have removed a store from the mutable opcode list.
+		// Reaching definitions and their identities must use the same snapshot.
+		opcodes = d.semanticCFG.Nodes
+	}
 	// Assign each local store/load opcode a dense index; also reserve one entry pseudo-def per slot.
 	idx := map[*OpCode]int{}
 	var nodes []*OpCode
@@ -93,7 +101,7 @@ func (d *Decompiler) computeSlotWebs() *slotWeb {
 		}
 	}
 	maxSlot := -1
-	for _, op := range d.opCodes {
+	for _, op := range opcodes {
 		if op == nil || op.Instr == nil {
 			continue
 		}
@@ -117,7 +125,7 @@ func (d *Decompiler) computeSlotWebs() *slotWeb {
 	uf := newUnionFind(total)
 	entryNode := func(slot int) int { return base + slot }
 
-	for _, op := range d.opCodes {
+	for _, op := range opcodes {
 		if op == nil || op.Instr == nil || !isLocalLoadOpcode(op.Instr.OpCode) {
 			continue
 		}
@@ -128,7 +136,9 @@ func (d *Decompiler) computeSlotWebs() *slotWeb {
 		stores, reachesEntry := d.reachingStores(op, slot)
 		li := idx[op]
 		for _, st := range stores {
-			uf.union(li, idx[st])
+			if si, found := idx[st]; found && GetStoreIdx(st) == slot {
+				uf.union(li, si)
+			}
 		}
 		if reachesEntry && slot <= maxSlot {
 			uf.union(li, entryNode(slot))
@@ -139,7 +149,33 @@ func (d *Decompiler) computeSlotWebs() *slotWeb {
 	for op, i := range idx {
 		webOf[op] = uf.find(i)
 	}
-	return &slotWeb{webOf: webOf}
+	entryWeb := make(map[int]int, maxSlot+1)
+	for slot := 0; slot <= maxSlot; slot++ {
+		entryWeb[slot] = uf.find(entryNode(slot))
+	}
+	return &slotWeb{webOf: webOf, entryWeb: entryWeb}
+}
+
+// A parameter is a real reaching definition even though it has no store opcode.
+// Preserve its identity when a conditional assignment rejoins the live-in value.
+func (d *Decompiler) parameterWebRefs(webs *slotWeb) map[int]*values.JavaRef {
+	result := map[int]*values.JavaRef{}
+	slot := 0
+	for _, value := range d.Params {
+		ref, ok := value.(*values.JavaRef)
+		if !ok {
+			continue
+		}
+		if web, ok := webs.entryWeb[slot]; ok {
+			result[web] = ref
+			d.tracef("var-fold", "parameter slot=%d web=%d type=%s", slot, web, ref.Type().String(d.FunctionContext))
+		}
+		slot++
+		if p, ok := ref.Type().RawType().(*types.JavaPrimer); ok && (p.Name == types.JavaLong || p.Name == types.JavaDouble) {
+			slot++
+		}
+	}
+	return result
 }
 
 // slotWebs returns the cached web partition, computing it on first use. Returns nil when the

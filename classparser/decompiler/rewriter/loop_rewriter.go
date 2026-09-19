@@ -519,7 +519,7 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 				continue
 			}
 			allNodes.Add(n)
-			for _, next := range n.Next {
+			for _, next := range loopAnalysisSuccessors(n) {
 				reverseAdj[next] = append(reverseAdj[next], n)
 				if !allNodes.Has(next) {
 					stk = append(stk, next)
@@ -532,7 +532,7 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 	// deterministic.
 	var allSources []*core.Node
 	for _, n := range sortNodesByID(allNodes.List()) {
-		if slices.Contains(n.Next, circleNode) {
+		if slices.Contains(loopAnalysisSuccessors(n), circleNode) {
 			allSources = append(allSources, n)
 		}
 	}
@@ -555,7 +555,69 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		}
 	}
 	finalSet = reverseBFSStopAt(sources, reverseAdj, circleNode)
+	// A retry may return to the header only through its catch. The synthetic
+	// try node represents exceptional edges at region entry, so reverse reachability
+	// alone omits the successful protected path. Include that path up to the
+	// exception table's exclusive end; otherwise the first protected store is
+	// mistaken for the loop exit and moved outside the handler.
+	for _, tr := range finalSet.List() {
+		end := tr.ProtectedEnd
+		if end == nil || hasSharedCatchEntry(tr) {
+			continue
+		}
+		for seen := map[*core.Node]bool{}; end != nil && !seen[end]; {
+			seen[end] = true
+			if _, jump := end.Statement.(*statements.GOTOStatement); !jump || len(end.Next) != 1 {
+				break
+			}
+			end = end.Next[0]
+		}
+		hasRetry := false
+		for _, next := range tr.Next {
+			if next.IsCatchStart && finalSet.Has(next) {
+				hasRetry = true
+			}
+		}
+		if !hasRetry {
+			continue
+		}
+		var path []*core.Node
+		reachedEnd := false
+		seen := map[*core.Node]bool{}
+		var visit func(*core.Node)
+		visit = func(n *core.Node) {
+			if n == end {
+				reachedEnd = true
+				return
+			}
+			if n == nil || n == circleNode || n.IsCatchStart || seen[n] {
+				return
+			}
+			seen[n] = true
+			path = append(path, n)
+			for _, next := range loopAnalysisSuccessors(n) {
+				visit(next)
+			}
+		}
+		for _, next := range tr.Next {
+			if !next.IsCatchStart {
+				visit(next)
+			}
+		}
+		if reachedEnd {
+			for _, n := range path {
+				finalSet.Add(n)
+			}
+		}
+	}
 	return finalSet
+}
+
+func loopAnalysisSuccessors(node *core.Node) []*core.Node {
+	if node.HideNext != nil && len(node.Next) == 0 {
+		return []*core.Node{node.HideNext}
+	}
+	return node.Next
 }
 
 // isReducibleCFG reports whether the (pristine) CFG rooted at root is a reducible flow graph, using the
@@ -669,7 +731,7 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 	elementSet := circleElementSet(circleNode, loopStart, domTree, reducible)
 	outNodes := []*core.Node{}
 	elementSet.ForEach(func(node *core.Node) {
-		for _, n := range node.Next {
+		for _, n := range loopAnalysisSuccessors(node) {
 			if !elementSet.Has(n) {
 				// An exception-handler entry (catch / finally-desugar / try-with-resources suppress
 				// handler) is reached ONLY via the exception edge, never as a normal loop exit. Counting
@@ -719,7 +781,7 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 		edgeSet := utils2.NewSet[*core.Node]()
 		core.WalkGraph[*core.Node](outNodes[0], func(node *core.Node) ([]*core.Node, error) {
 			edgeSet.Add(node)
-			return node.Next, nil
+			return loopAnalysisSuccessors(node), nil
 		})
 		var mergeNode *core.Node
 		core.WalkGraph[*core.Node](outNodes[1], func(node *core.Node) ([]*core.Node, error) {
@@ -727,10 +789,24 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 				mergeNode = node
 				return nil, nil
 			}
-			return node.Next, nil
+			return loopAnalysisSuccessors(node), nil
 		})
 		return mergeNode
 	}
 
 	return nil
+}
+
+// Shared handler entries describe split protected intervals, not one lexical
+// try body. Leave those regions to the existing shared-handler structurer.
+func hasSharedCatchEntry(node *core.Node) bool {
+	if node.SharedProtectedHandler {
+		return true
+	}
+	for _, next := range node.Next {
+		if next.IsCatchStart && len(next.Source) > 1 {
+			return true
+		}
+	}
+	return false
 }

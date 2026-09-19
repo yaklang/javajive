@@ -347,7 +347,7 @@ func TestJacksonRemainingBeanDeserializerFactoryPropertyIsLoadBearing(t *testing
 	if err != nil {
 		t.Fatalf("decompile ON: %v", err)
 	}
-	if !strings.Contains(on, "SettableBeanProperty var8 = null;") && !(strings.Contains(on, "Object var8 = null;") && strings.Contains(on, "((com.fasterxml.jackson.databind.deser.SettableBeanProperty)(var8)).withValueDeserializer")) {
+	if !strings.Contains(on, "SettableBeanProperty var8 = null;") && !(strings.Contains(on, "Object var8 = null;") && strings.Contains(on, "((SettableBeanProperty)(var8)).withValueDeserializer")) {
 		t.Errorf("ON: expected unified SettableBeanProperty slot, got:\n%s", on)
 	}
 

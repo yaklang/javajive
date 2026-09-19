@@ -65,6 +65,7 @@ type Decompiler struct {
 	// receivers/arguments using the now-complete opcodeIdToRef. Populated in the phase-1 invoke handler.
 	invokeFuncCall                map[*OpCode]*values.FunctionCallExpression
 	bytecodes                     []byte
+	opcodeCodeLength              int // PC space of the current opcode list, including jsr expansion
 	opCodes                       []*OpCode
 	RootOpCode                    *OpCode
 	RootNode                      *Node
@@ -250,6 +251,7 @@ func (d *Decompiler) ParseOpcode() (err error) {
 	if len(d.bytecodes) == 0 || len(d.bytecodes) > 65535 {
 		return fmt.Errorf("invalid Code length %d", len(d.bytecodes))
 	}
+	d.opcodeCodeLength = len(d.bytecodes)
 	sizeHint := len(d.bytecodes)/2 + 8
 	opcodes := make([]*OpCode, 0, sizeHint)
 	opcodes = append(opcodes, &OpCode{Instr: &Instruction{OpCode: OP_START}})
@@ -1501,7 +1503,7 @@ func (d *Decompiler) nullInitDefDominates(store *OpCode, slot int, nullRef *valu
 		}
 		if refs, ok := d.opcodeIdToRef[op]; ok && len(refs) > 0 {
 			if ref, ok2 := refs[len(refs)-1][0].(*values.JavaRef); ok2 && ref != nil {
-				return ref.VarUid == nullRef.VarUid
+				return ref.VarUid == nullRef.VarUid && values.IsNullLiteral(d.slotStoreValue[op])
 			}
 		}
 		return false
@@ -3681,7 +3683,14 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 				reuseNullBranchStore = true
 			}
 		}
-		if refPhiMerged {
+		if caught, ok := UnpackSoltValue(value).(*values.CustomValue); ok && caught.Flag == "exception" && oldRef != nil &&
+			oldRef.Type().String(funcCtx) == caught.Type().String(funcCtx) {
+			// A handler store declares a new catch parameter. Equal Throwable types
+			// do not make it the same local as a prior resource's primary exception.
+			// Genuine joins are reconciled later using reaching-definition webs.
+			ref, isFirst = runtimeStackSimulation.NewVar(value), true
+			runtimeStackSimulation.SetVar(slot, ref)
+		} else if refPhiMerged {
 			// oldRef is the unified dominating definition; the store is a plain reassignment of it.
 			ref, isFirst = oldRef, false
 		} else if !reuseNullBranchStore {
@@ -3808,7 +3817,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			ref.ReplaceVar(oldId, newId)
 		}
 		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			return fmt.Sprintf("%s.length", ref.String(funcCtx))
+			return fmt.Sprintf("%s.length", values.AssignmentOperand(ref, funcCtx))
 		}, func() types.JavaType {
 			return types.NewJavaPrimer(types.JavaInteger)
 		}, arrayLenReplace))
@@ -3925,7 +3934,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			typ = types.NewJavaPrimer(types.JavaLong)
 		}
 		arg := runtimeStackSimulation.Pop().(values.JavaValue)
-		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+		cast := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 			// Parenthesize the operand so the (unary) cast keeps the right precedence
 			// when the operand is a lower-precedence expression: without it,
 			// `(long)a * b` parses as `((long)a) * b` instead of `(long)(a * b)`,
@@ -3942,12 +3951,16 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			// `(int) rem` printed the old name `var5` after rem was renamed `var4_1`). CHECKCAST
 			// already does this; the numeric conversions must too.
 			arg.ReplaceVar(oldId, newId)
-		}))
+		})
+		cast.Flag = "primitive_cast"
+		cast.CapturesKnown = true
+		cast.Captures = []values.JavaValue{arg}
+		runtimeStackSimulation.Push(cast)
 	case OP_INSTANCEOF:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			return fmt.Sprintf("%s instanceof %s", value.String(funcCtx), classInfo.String(funcCtx))
+			return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
 		}, func() types.JavaType {
 			return types.NewJavaPrimer(types.JavaBoolean)
 		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
@@ -5821,6 +5834,10 @@ func (d *Decompiler) ParseStatement() error {
 	if err != nil {
 		return err
 	}
+	// Validate encoded offsets before a normalizer changes the instruction PC space.
+	if err := d.validateControlFlow(); err != nil {
+		return err
+	}
 	// Rewrite pre-Java-6 jsr/ret finally subroutines into the modern inlined-duplicate form so the
 	// CFG/structuring below never sees jsr/ret. No-op when the method has none; conservatively
 	// leaves the bytecode (and thus the existing stub path) untouched for non-canonical shapes.
@@ -6687,6 +6704,14 @@ func (d *Decompiler) ParseStatement() error {
 			if dupRef.VarUid != ref.VarUid || rightRef.VarUid != ref.VarUid {
 				return
 			}
+			// Statement lookup can skip intervening expressions. A reference
+			// store followed by an integer/boolean consumer is not `a = b = v`.
+			// Do not redirect that consumer's assignment to the reference slot.
+			_, sourcePrimitive := val.Type().RawType().(*types.JavaPrimer)
+			_, targetPrimitive := nextAssign.LeftValue.Type().RawType().(*types.JavaPrimer)
+			if sourcePrimitive != targetPrimitive {
+				return
+			}
 			if len(nextNode.Next) != 1 {
 				return
 			}
@@ -6851,6 +6876,15 @@ func (d *Decompiler) ParseStatement() error {
 					if orderPreserved[source] {
 						continue
 					}
+					if len(next) > 0 {
+						same := true
+						for _, n := range next {
+							same = same && n == next[0]
+						}
+						if same {
+							source.ReplaceSwitchTarget(node, next[0])
+						}
+					}
 					for _, n := range next {
 						source.AddNext(n)
 					}
@@ -6978,6 +7012,19 @@ func (d *Decompiler) ParseStatement() error {
 					catchNodes := catchNodeMap[endIndex]
 					tryNode := NewNode(statements.NewMiddleStatement(statements.MiddleTryStart, nil))
 					tryNode.Id = statementsIndex
+					for _, info := range catchInfos {
+						for _, entry := range d.ExceptionTable {
+							if entry.HandlerPc == info.OpCode.CurrentOffset && entry.StartPc != start {
+								tryNode.SharedProtectedHandler = true
+							}
+						}
+					}
+					for _, op := range d.opCodes {
+						if int(op.CurrentOffset) == endIndex && op.Instr.OpCode != OP_START {
+							tryNode.ProtectedEnd = idToNode[getStatementNextIdByOpcodeId(op.Id)]
+							break
+						}
+					}
 					if preserveBranchOrder {
 						for _, n := range slices.Clone(currentTryNode.Source) {
 							n.ReplaceNext(currentTryNode, tryNode)

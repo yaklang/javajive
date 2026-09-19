@@ -81,6 +81,18 @@ func statementIsTerminal(st statements.Statement) bool {
 			return false
 		}
 		return blockIsTerminal(s.IfBody) && blockIsTerminal(s.ElseBody)
+	case *statements.SwitchStatement:
+		return !switchCompletesNormally(s)
+	case *statements.TryCatchStatement:
+		if !blockIsTerminal(s.TryBody) {
+			return false
+		}
+		for _, body := range s.CatchBodies {
+			if !blockIsTerminal(body) {
+				return false
+			}
+		}
+		return true
 	case *statements.DoWhileStatement:
 		return isLiteralTrue(s.ConditionValue) && !subtreeHasBreak(s.Body)
 	case *statements.WhileStatement:

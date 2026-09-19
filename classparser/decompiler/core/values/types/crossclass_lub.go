@@ -23,6 +23,19 @@ import "os"
 // class_context.ClassContext.SiblingSuperTypes so the field is assignable without an import cycle.
 type SuperTypeProvider func(internalName string) (supers []string, ok bool)
 
+// HasKnownDirectSupertypes distinguishes an unresolved class from a class with
+// a known hierarchy. Failure to prove subtyping is otherwise ambiguous.
+func HasKnownDirectSupertypes(name string, provider SuperTypeProvider) bool {
+	if _, known := jdkSuperEdges[name]; known {
+		return true
+	}
+	if provider != nil {
+		_, known := provider(dotToInternal(name))
+		return known
+	}
+	return false
+}
+
 // crossClassSubtypeWalkCap bounds the supertype BFS so a pathological/cyclic hierarchy can never spin.
 const crossClassSubtypeWalkCap = 4096
 
@@ -213,12 +226,36 @@ func BridgedCommonSuperType(a, b JavaType, provider SuperTypeProvider) JavaType 
 	}
 	da := bridgedAncestorDepths(an, provider)
 	db := bridgedAncestorDepths(bn, provider)
+	// Distance is only a tie-breaker between incomparable common supertypes.
+	// A directly implemented marker interface can be closer than the actual
+	// shared base class even when that base itself implements the interface.
+	common := map[string]map[string]int{}
+	for anc := range da {
+		if _, ok := db[anc]; ok {
+			common[anc] = bridgedAncestorDepths(anc, provider)
+		}
+	}
 	best := ""
 	bestScore := 1 << 30
 	bestIsClass := false
 	for anc, d1 := range da {
 		d2, ok := db[anc]
 		if !ok {
+			continue
+		}
+		dominated := false
+		for other, ancestors := range common {
+			if other == anc {
+				continue
+			}
+			if _, aboveOther := ancestors[anc]; aboveOther {
+				if _, cycle := common[anc][other]; !cycle {
+					dominated = true
+					break
+				}
+			}
+		}
+		if dominated {
 			continue
 		}
 		score := d1 + d2
