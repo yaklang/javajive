@@ -24,8 +24,8 @@ import (
 // numericSlotWidenErrCount decompiles the WHOLE fastjson2 jar, then compiles
 // ObjectWriterCreatorASM.java ALONE against the original jar (iso), and counts
 // "Long cannot be converted to Integer" (the #OWCASM-2380 signature). With the fix ON
-// that error is gone; with the fix OFF (kill-switch) the Integer-typed declaration rejects
-// the Long reassignment.
+// that error is gone; core reference-web joins must also preserve the Number declaration
+// with the legacy numeric widening switch OFF.
 func numericSlotWidenErrCount(t *testing.T, killOff bool) int {
 	t.Helper()
 	const sw = "JDEC_NUMERIC_DECL_SLOT_TYPE_OFF"
@@ -73,16 +73,15 @@ func numericSlotWidenErrCount(t *testing.T, killOff bool) int {
 	return strings.Count(string(out), "Long cannot be converted to Integer")
 }
 
-// TestNumericSlotWidenIsLoadBearing pins numericSlotWiderThan as load-bearing on fastjson2's
-// ObjectWriterCreatorASM.gwFieldName: with the fix ON the "Long cannot be converted to Integer"
-// signature is gone from the iso compile; disabling the widen via the kill-switch must
-// reintroduce it.
-func TestNumericSlotWidenIsLoadBearing(t *testing.T) {
+// TestNumericSlotWidenCompilationPreserved requires ObjectWriterCreatorASM.gwFieldName
+// to retain its Number declaration with either setting of the legacy widening pass.
+func TestNumericSlotWidenCompilationPreserved(t *testing.T) {
 	lookJavac(t)
 	on := numericSlotWidenErrCount(t, false) // fix ON
 	off := numericSlotWidenErrCount(t, true) // fix OFF (kill-switch)
 	t.Logf("ObjectWriterCreatorASM.java iso 'Long cannot be converted to Integer': ON=%d OFF=%d", on, off)
-	if off <= on {
-		t.Fatalf("numericSlotWiderThan is NOT load-bearing: ON=%d OFF=%d (OFF must be strictly greater)", on, off)
+	// Reference-web joins recover Number before the legacy textual widening pass.
+	if on != 0 || off != 0 {
+		t.Fatalf("numeric declaration regressed: ON=%d OFF=%d (both must be zero)", on, off)
 	}
 }

@@ -28,15 +28,15 @@
   再用 JavaJive 验证（见 [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)）。
 - **收敛的依赖图**：`utils` / `codec` / `log` / `go-funk` 被重写为 `internal/` 下最小自包含实现。
 
-## 未发布改动的验证
+## v0.4.0 验证
 
-PR 初版在 JDK 17、21 上各通过 167 项独立往返用例，分别记录重新编译、JVM 校验、
-stub 和运行结果一致性；重建产物的类路径中不包含原始应用类。
-完整说明见[审计与剩余边界](docs/decompiler-semantic-audit.md)，其中列出了历史 jar
-的剩余编译问题及尚未完成的架构迁移。
+全部 **38 个历史 JAR 的固定基线差分未检出回归**：原本可完整编译的 20 个包全部保留，
+当前 26 个包完整编译成功；基线既有缺陷和 4 个方法 stub 保持可见。
+详见[逐包结果及复现方法](docs/historical-jar-audit.md)。
 
-**发布暂缓：** 全部 38 个 JAR 的差分复测发现了回归，普通 CI 未执行这些需显式启用的
-历史整包测试。详见[历史语料复测报告](docs/historical-jar-audit.md)。
+**250 项隔离语义往返**分别记录编译、JVM 校验、stub 与运行结果一致性，重建类路径不含
+原始应用类。CI 在 JDK 17、21 重跑语义测试，并执行全量历史对比、OS/Go 矩阵及 race 语料。
+这些检查不证明全部库方法行为等价；完整说明见[实现与剩余边界](docs/decompiler-semantic-audit.md)。
 
 ## 历史评测（v0.3.0）
 

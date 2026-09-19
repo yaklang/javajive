@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 — 2026-09-19
 
 Preserve bytecode semantics and separate decompilation results from independent
 compilation, JVM verification, and runtime observations.
@@ -12,18 +12,21 @@ compilation, JVM verification, and runtime observations.
   Existing APIs retain compatibility behavior.
 - Add immutable instruction-flow/reaching-definition analysis; remove selected
   guessed source repairs and isolate concurrent request and synthetic-catch state.
-- Validate 167 isolated semantic round trips on each of JDK 17 and 21, with original
+- Add 250 isolated semantic round trips to the JDK 17 and 21 CI matrix, with original
   classes absent from rebuilt classpaths and separate compile/verify/runtime records.
   Cover legal wide bytecode, malformed decoder inputs, determinism, and race checks.
 - Preserve full OS/Go test coverage while sharding the large race corpus without
   reducing determinism repetitions. Cache persistent stack depth for O(1) Size.
+- Repair nested JSR expansion, reference-web declaration types, constructor and
+  assignment ordering, retry/cleanup regions, catch identity and Kotlin monitor boundaries.
+- Enforce all 38 historical JARs in CI with 174 SHA-256-pinned artifacts. Local
+  comparison records zero new regressions, retaining all 20 compile-clean baseline
+  JARs and increasing full compilations to 26; 4 existing stubs remain.
 
 The historical v0.3.0 benchmark below is not current semantic acceptance evidence.
-Release is blocked by the [38-JAR differential audit](docs/historical-jar-audit.md).
-The initial PR regressed 12 previously compile-clean JARs; ordinary CI had skipped
-the opt-in historical corpus. Repairs are incomplete. Full operand-stack SSA, general
-type constraints and irreducible restructuring are not complete; see
-[the implementation and validation boundaries](docs/decompiler-semantic-audit.md).
+See the [complete corpus results](docs/historical-jar-audit.md) and
+[implementation boundaries](docs/decompiler-semantic-audit.md). Full operand-stack
+SSA, general type constraints and irreducible restructuring remain incomplete.
 
 ## v0.3.0 — 2026-09-05
 

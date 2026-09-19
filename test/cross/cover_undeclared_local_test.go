@@ -11,7 +11,7 @@ package cross
 //
 // 因两个 id 共享槽派生的 varN 名、javac 按名字解析局部变量, 治本是把「已存在的同名声明」扩到能词法覆盖所有
 // 该名字出现处的最低公共祖先块 (含 if/loop 条件这种 head 引用)。kill-switch JDEC_COVER_UNDECLARED_OFF=1
-// 关掉该名字制安全网必复现这些 "cannot find symbol: variable varN"。
+// 关闭旧名字安全网后，基于变量身份的声明恢复仍须避免这些缺失声明。
 
 import (
 	"os"
@@ -81,9 +81,8 @@ func classUndeclaredVarErrors(t *testing.T, jarPath string, entries []string, ki
 	return n
 }
 
-// TestCoverUndeclaredLocalIsLoadBearing pins the three fastjson2 split-slot undeclared-local residuals.
-// With the fix ON every `cannot find symbol: variable varN` must be gone; disabling the name-based
-// coverage pass via the kill-switch must reintroduce them.
+// TestCoverUndeclaredLocalCompilationPreserved checks the three fastjson2 split-slot
+// cases with and without the legacy name-based declaration fallback.
 func TestCoverUndeclaredLocalCompilationPreserved(t *testing.T) {
 	lookJavac(t)
 	jarPath := resolveJar(jarSpecs["fastjson2"].relPath)

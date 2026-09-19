@@ -1,6 +1,10 @@
 # Decompiler semantic audit implementation
 
-Baseline: `e1710d5e63736a747dd9a02c164507348c59ad5e` (the revision examined by the optimization report). This change repairs the report's immediate semantic defects and introduces an immutable instruction-flow analysis alongside the existing structurer. The implementation is intentionally explicit about the boundary between the new analysis and the remaining legacy machinery.
+Baseline: `e1710d5e63736a747dd9a02c164507348c59ad5e` (the revision examined by the optimization report). This change targets the report's immediate semantic defects and introduces an immutable instruction-flow analysis alongside the existing structurer. The implementation is intentionally explicit about the boundary between the new analysis and the remaining legacy machinery.
+
+The [complete historical JAR differential audit](historical-jar-audit.md) is a
+separate CI gate. Its 38 pinned targets are observed for both baseline and candidate;
+completion of measurements alone never counts as a passing comparison.
 
 ## API and evidence
 
@@ -30,10 +34,10 @@ Requests own their mode, analysis budget, resolver, result and rewrite history. 
 | P0-06 truthful acceptance | Independent compile, verification, stub and runtime observations; original and rebuilt classpaths are isolated; required Java tools fail instead of skipping audit tests; failed cases also write their observation. | Existing historical jar tests still measure compile diagnostics and are not semantic proof. |
 | P1-01 exceptional CFG | Immutable typed instruction edges; exception edges originate at potentially throwing instructions, use input locals, preserve handler order and stop at catch-all; distinct try starts sharing a switch predecessor keep separate handler ownership. | Exact exception-class dispatch and the existing synthetic try structurer are not replaced. |
 | P1-02 fixed point | Monotone cached reaching definitions on immutable flow; stable opcode definition IDs, loop/iinc joins and bounded work. | Full block-frame and operand-stack SSA migration is not complete. |
-| P1-03 variable identity | Reference web coalescing follows reaching definitions, separately joins RHS types, and preserves null and array facts. | Some older variable repairs remain; this is not complete SSA destruction. |
+| P1-03 variable identity | Reference web coalescing follows immutable reaching definitions, separately joins RHS types, and preserves parameter entry, null, array and catch-variable identities. Embedded assignment declarations use variable identity. | Some older variable repairs remain; this is not complete SSA destruction. |
 | P1-04 explicit expressions | Cast and embedded-assignment nodes expose dependencies; a cycle-safe visitor records reference uses and effects. | Other CustomValue nodes remain opaque barriers. |
-| P1-05 type identity | Joins use binary class identity and hierarchy providers; nested-name spelling alone no longer proves receiver subtyping. | Full member/overload constraints, intersection types and all legacy suffix rules remain a future type-system migration. |
-| P1-06 regions | Switch preparation is idempotent; shared continuations take precedence over interior candidates; merge identity follows node replacement; switch-only loops materialize back edges and label loop exits captured by switches; unsupported multi-entry normal regions produce diagnostics. | Handler regions and general irreducible restructuring/state machines are not implemented; existing natural-loop reconstruction remains. |
+| P1-05 type identity | Joins use binary class identity, accessible hierarchy providers and descriptor-derived use bounds; method witnesses use the full descriptor to distinguish overloads. | Full member/overload constraints, intersection types and all legacy suffix rules remain a future type-system migration. |
+| P1-06 regions | Switch preparation is idempotent; shared continuations take precedence over interior candidates; merge identity follows node replacement; switch-only loops materialize back edges and label loop exits captured by switches; unsupported multi-entry normal regions produce diagnostics. | Exclusive exception-table boundaries constrain Throwable cleanup regions; shared-handler retry and monitor cases retain distinct handling. General irreducible restructuring/state machines remain unimplemented. |
 | P1-07 effects | Array initializer folding checks dependencies, distinct entry paths and exception-table coverage; preserves self reads and partially filled arrays observed by handlers. | A universal motion/scheduling proof for every rewrite is not implemented. |
 | P1-08 rewrite contracts | Precision/compatibility policy, rule/phase provenance, class-source oscillation rejection, and regression tests that allow proven patch retirement. | All older structural passes have not been migrated to declarative preconditions/postconditions. |
 | P2-01 cost control | Slot queries reuse a method-local fixed point; declaration-placement probes cache within an invalidated mutation epoch; stack Size is O(1). | General graph-versioned dominator/postdominator caches are not implemented. |
@@ -57,7 +61,7 @@ The single-class source suite has 39 shapes × 2 debug configurations × 2 polic
 | A24–A26 | Generic overload selection, identical simple names from different packages, unrelated nested classes; every application class is rebuilt. |
 | A27–A30 | Final constructor assignments, literal/comment shielding, lambda context, nested monitor release. |
 
-Five generated version-49 classfiles cover legal wide bytecode that javac would otherwise normalize away. Six further round trips rebuild complete multi-class source sets. No original target class is retained on their rebuilt classpaths. The decoder unit/fuzz suite separately exercises truncation, illegal wide targets, extreme switch counts, invalid branches and malformed ranges.
+Eight generated classfile round trips cover legal wide bytecode and nested JSR normal/exceptional return paths that javac would otherwise normalize away. Twelve round trips rebuild complete multi-class source sets, including accessible interface joins, overloaded generic witnesses, and sequential resource exception identities. Eighteen historical source shapes × two debug settings × two policies add 72 round trips for reassigned references, embedded array/receiver assignments, constructors, retry handlers, reflection and nested switches. Two number-suffix continuation cases complete the total of **250 successful round trips**, separate from the unsupported diagnostic case. No original target class is retained on their rebuilt classpaths. The decoder unit/fuzz suite separately exercises truncation, illegal wide targets, extreme switch counts, invalid branches and malformed ranges.
 
 ## Reproduction
 
@@ -76,12 +80,12 @@ go test ./classparser/decompiler/core -run '^$' -fuzz '^FuzzAuditDecoder$' -fuzz
 go test ./... -count=1 -timeout=30m
 ```
 
-CI runs the dedicated semantic audit on JDK 17 and 21 and uploads the observation records even on failure. The pre-existing operating-system/Go matrix and race jobs remain enabled.
+CI runs the dedicated semantic audit on JDK 17 and 21 and uploads the observation records even on failure. The operating-system/Go matrix and full sharded race corpus remain enabled. A required historical job downloads and verifies all 174 pinned artifacts, measures both revisions with the same harness, compares all 38 JARs, and uploads the source/compile/verification evidence.
 
 ## Baseline and performance interpretation
 
-The exact base revision's CI was already failing all six test jobs (run `34084803010`). A local baseline also failed the VarFold and SuperTest source snapshots, several obsolete ON/OFF sensitivity assertions, and timed out in the Maven-backed cross corpus. This change updates those two embedded snapshots to the actual baseline output; the source files and their embedded archive agree.
+The exact base revision's CI was already failing all six test jobs (run `34084803010`). A local baseline also failed the VarFold and SuperTest source snapshots, several obsolete ON/OFF sensitivity assertions, and timed out in the Maven-backed cross corpus. The embedded snapshots and archive are kept in sync. The later TryCatch1 update places normal close outside its cleanup catch; isolated resource tests separately check close order and suppressed-exception identity.
 
 A narrow repair becoming redundant is allowed when both modes retain the positive invariant. Historical aggregate-error tests use non-regression comparisons and print residual error counts; those residual counts are not converted into semantic passes. The new isolated audit remains a separate acceptance gate.
 
-On one macOS arm64/Go 1.22.12 run, a 65,535-element stack Size query changed from about 76–78 microseconds to about 0.72–0.74 nanoseconds with zero allocations. This is an intentionally deep-stack microbenchmark demonstrating O(depth) → O(1), **not** an end-to-end decompiler speedup. The decoder fuzz run completed approximately 1.26 million executions in 30 seconds without a crash. Machine-dependent counts and timings are evidence from that run, not CI thresholds.
+On one macOS arm64/Go 1.22.12 run, a 65,535-element stack Size query changed from about 76–78 microseconds to about 0.72–0.74 nanoseconds with zero allocations. This is an intentionally deep-stack microbenchmark demonstrating O(depth) → O(1), **not** an end-to-end decompiler speedup. The final local decoder fuzz run completed 1,006,701 executions in 30 seconds without a crash. Machine-dependent counts and timings are evidence from that run, not CI thresholds.
