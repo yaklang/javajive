@@ -25,8 +25,8 @@ func TestAtomicRefVParamArgCastIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix ON) failed: %v", err)
 	}
-	// The V-typed argument (var2) must carry a `(T)` cast at the compareAndSet call site.
-	if !strings.Contains(on, "this.reference.compareAndSet((T)(null),(T)(var2))") {
+	// Whole-web inference declares var2 as T; its call argument needs no extra cast.
+	if !strings.Contains(on, "T var2 = ") || !strings.Contains(on, "this.reference.compareAndSet((T)(null),var2)") {
 		t.Errorf("fix ON: expected `(T)` casts on the AtomicReference V-args, got:\n%s", on)
 	}
 

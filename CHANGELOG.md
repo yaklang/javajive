@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.4.0 — 2026-09-19
+
+Preserve bytecode semantics and separate decompilation results from independent
+compilation, JVM verification, and runtime observations.
+
+- Fix signed switch/default identity, wide branches and local accesses,
+  exception-handler ownership, loop exits, reference joins, and array side effects.
+- Add `DecompileWithOptions` with precision/compatibility modes, method-local
+  analysis budgets, type resolution, rewrite provenance, and degradation diagnostics.
+  Existing APIs retain compatibility behavior.
+- Add immutable instruction-flow/reaching-definition analysis; remove selected
+  guessed source repairs and isolate concurrent request and synthetic-catch state.
+- Add 250 isolated semantic round trips to the JDK 17 and 21 CI matrix, with original
+  classes absent from rebuilt classpaths and separate compile/verify/runtime records.
+  Cover legal wide bytecode, malformed decoder inputs, determinism, and race checks.
+- Preserve full OS/Go test coverage while sharding the large race corpus without
+  reducing determinism repetitions. Cache persistent stack depth for O(1) Size.
+- Repair nested JSR expansion, reference-web declaration types, constructor and
+  assignment ordering, retry/cleanup regions, catch identity and Kotlin monitor boundaries.
+- Enforce all 38 historical JARs in CI with 174 SHA-256-pinned artifacts. Local
+  comparison records zero new regressions, retaining all 20 compile-clean baseline
+  JARs and increasing full compilations to 26; 4 existing stubs remain.
+
+The historical v0.3.0 benchmark below is not current semantic acceptance evidence.
+See the [complete corpus results](docs/historical-jar-audit.md) and
+[implementation boundaries](docs/decompiler-semantic-audit.md). Full operand-stack
+SSA, general type constraints and irreducible restructuring remain incomplete.
+
 ## v0.3.0 — 2026-09-05
 
 34-jar tree-zero: the original 8 benchmark jars plus 6 expansion jars and 20

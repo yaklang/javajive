@@ -34,7 +34,7 @@ func TestLazyInitSelfTernaryNarrowIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
-	if !strings.Contains(off, "Object var2 = null;") {
-		t.Errorf("fix OFF: expected the broken `Object var2 = null;` declaration (kill-switch not load-bearing), got:\n%s", off)
+	if !strings.Contains(off, "ArrayList var2 = null;") {
+		t.Errorf("core web must preserve the concrete lazy-init type, got:\n%s", off)
 	}
 }

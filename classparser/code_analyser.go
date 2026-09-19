@@ -186,15 +186,17 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 		savedTypeParams := dumper.FuncCtx.TypeParams
 		savedMethodType := dumper.MethodType
 		savedCurrentMethod := dumper.CurrentMethod
-		dumped, err := dumper.DumpMethodWithInitialId(name, desc, id)
 		if restore {
-			dumper.FuncCtx.FunctionName = savedFunctionName
-			dumper.FuncCtx.FunctionType = savedFunctionType
-			dumper.FuncCtx.IsStatic = savedIsStatic
-			dumper.FuncCtx.TypeParams = savedTypeParams
-			dumper.MethodType = savedMethodType
-			dumper.CurrentMethod = savedCurrentMethod
+			defer func() {
+				dumper.FuncCtx.FunctionName = savedFunctionName
+				dumper.FuncCtx.FunctionType = savedFunctionType
+				dumper.FuncCtx.IsStatic = savedIsStatic
+				dumper.FuncCtx.TypeParams = savedTypeParams
+				dumper.MethodType = savedMethodType
+				dumper.CurrentMethod = savedCurrentMethod
+			}()
 		}
+		dumped, err := dumper.DumpMethodWithInitialId(name, desc, id)
 		if err != nil {
 			return "", err
 		}
@@ -249,6 +251,7 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 			panic("error")
 		}
 	}
+	parser.MaxAnalysisUpdates = dumper.options.MaxAnalysisUpdates
 	st, err := decompiler.ParseBytesCode(parser)
 	return parser.Params, st, err
 }

@@ -56,53 +56,15 @@ func TestJavassistExprEditorDoitFlagIsLoadBearing(t *testing.T) {
 		"int var6 = 0;")
 }
 
-func TestJavassistLexTokenIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/Lex.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
-	}
-	os.Unsetenv("JDEC_JAVASSIST_REMAINING_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Contains(on, "Object var2 = null;") && strings.Contains(on, "var2.tokenId") {
-		t.Errorf("ON still Object var2 with tokenId:\n%s", on)
-	}
-	if !strings.Contains(on, "Token var2 = null;") && !strings.Contains(on, "this.currentToken = this.lookAheadTokens") {
-		t.Errorf("ON expected Token var2 or folded assign, got:\n%s", on)
-	}
-	t.Setenv("JDEC_JAVASSIST_REMAINING_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !strings.Contains(off, "Object var2 = null;") {
-		t.Errorf("OFF expected Object var2, got:\n%s", off)
-	}
+// The semantic assignment target retains Token without the legacy Object repair.
+func TestJavassistLexTokenPreservesCoreDeclaration(t *testing.T) {
+	assertDecompileBothPreserve(t, "testdata/regression/Lex.class", "JDEC_JAVASSIST_REMAINING_OFF",
+		"Token var2 = null;", "this.currentToken = var2 = this.lookAheadTokens;", "return var2.tokenId;")
 }
 
+// The core reference join supersedes the legacy SignatureAttribute text repair.
 func TestJavassistSignatureAttributeTypeIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/SignatureAttribute.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
-	}
-	os.Unsetenv("JDEC_JAVASSIST_REMAINING_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Contains(on, "SignatureAttribute$ObjectType var2 = parseObjectType") {
-		t.Errorf("ON still ObjectType var2:\n%s", on)
-	}
-	t.Setenv("JDEC_JAVASSIST_REMAINING_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !strings.Contains(off, "SignatureAttribute$ObjectType var2 = parseObjectType") {
-		t.Errorf("OFF expected ObjectType var2, got:\n%s", off)
-	}
+	assertDecompileBothPreserve(t, "testdata/regression/SignatureAttribute.class", "JDEC_JAVASSIST_REMAINING_OFF", "SignatureAttribute$Type var2 = parseObjectType", "var2 = new SignatureAttribute$BaseType", "return var2;")
 }
 
 func TestJavassistMemberResolverIteratorIsLoadBearing(t *testing.T) {
@@ -123,7 +85,7 @@ func TestJavassistMemberResolverIteratorIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OFF: %v", err)
 	}
-	if !strings.Contains(off, "var9.notmatch") {
-		t.Errorf("OFF expected var9.notmatch, got:\n%s", off)
+	if strings.Contains(off, "var9.notmatch") {
+		t.Errorf("retired patch restored an invalid receiver:\n%s", off)
 	}
 }

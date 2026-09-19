@@ -33,17 +33,19 @@ func sortNodesByID(nodes []*core.Node) []*core.Node {
 }
 
 type RewriteManager struct {
-	currentNodeId    int
-	startVarId       int
-	RootNode         *core.Node
-	PreNode          *core.Node
-	CircleEntryPoint []*core.Node
-	WhileNode        []*core.Node
-	IfNodes          []*core.Node
-	SwitchNode       []*core.Node
-	TryNodes         []*core.Node
-	DominatorMap     map[*core.Node][]*core.Node
-	LabelId          int
+	// Method-local allocation keeps synthetic names deterministic across concurrent requests.
+	syntheticCatchVarCounter int
+	currentNodeId            int
+	startVarId               int
+	RootNode                 *core.Node
+	PreNode                  *core.Node
+	CircleEntryPoint         []*core.Node
+	WhileNode                []*core.Node
+	IfNodes                  []*core.Node
+	SwitchNode               []*core.Node
+	TryNodes                 []*core.Node
+	DominatorMap             map[*core.Node][]*core.Node
+	LabelId                  int
 	// LoopRegionReducible records whether the ORIGINAL method CFG (before any loop wrapping) is a
 	// reducible flow graph. It is computed once in Rewrite() because mid-pipeline the graph gains
 	// do-while wrapper nodes and rewrite-inserted break/continue edges that corrupt dominance, making a
@@ -657,7 +659,7 @@ func isMethodExitTerminator(node *core.Node) bool {
 	case *statements.ReturnStatement:
 		return true
 	case *statements.CustomStatement:
-		txt := strings.TrimSpace(s.String(pruneCtx))
+		txt := strings.TrimSpace(s.String(&class_context.ClassContext{}))
 		return strings.HasPrefix(txt, "throw ")
 	}
 	return false
@@ -999,6 +1001,7 @@ func collectSESEMergeConditions(s *RewriteManager, ifNodes *[]*core.Node, mergeN
 }
 
 func (s *RewriteManager) Rewrite() error {
+
 	err := s.ScanCoreInfo()
 	if err != nil {
 		return err
@@ -1087,10 +1090,14 @@ func (s *RewriteManager) Rewrite() error {
 			s.DominatorMap = GenerateDominatorTree(s.RootNode)
 		}
 
-		if slices.Contains(s.IfNodes, node) {
+		// Materialize loop exits before a container consumes its body, including retry try/catch loops.
+		if isTry || slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
 			for j := i; j < len(order); j++ {
 				n := order[j]
 				if slices.Contains(s.WhileNode, n) && utils2.IsDominate(s.DominatorMap, n, node) {
+					if isTry && (len(n.Next) == 0 || n.Next[0] != node || hasSharedCatchEntry(node)) {
+						continue
+					}
 					if _, ok := loopJmpRewriterRecoed[n]; ok {
 						break
 					}

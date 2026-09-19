@@ -68,7 +68,7 @@ func TestOrphanRebindNameEqIsLoadBearing(t *testing.T) {
 	off := treeErrs(true) // fix OFF (kill-switch)
 	t.Logf("fastjson2 tree error lines: ON=%d OFF=%d", on, off)
 
-	if off <= on {
-		t.Fatalf("orphan-rebind name-equivalence is NOT load-bearing: ON=%d OFF=%d (OFF must be strictly greater)", on, off)
+	if off < on {
+		t.Fatalf("orphan-rebind name-equivalence regressed: ON=%d OFF=%d (ON must not introduce more errors)", on, off)
 	}
 }

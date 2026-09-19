@@ -11,7 +11,6 @@ public class TryCatch1 {
 			var1 = new FileInputStream(new File(""));
 			try{
 				System.out.println(1);
-				var1.close();
 			}catch(Throwable var2){
 				try{
 					var1.close();
@@ -20,6 +19,7 @@ public class TryCatch1 {
 				}
 				throw var2;
 			}
+			var1.close();
 		}catch(Exception var1_1){
 			var1_1.printStackTrace();
 		}

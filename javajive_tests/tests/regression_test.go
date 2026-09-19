@@ -674,7 +674,7 @@ func TestDecompileSyntaxRegression(t *testing.T) {
 				"columnsToString(boolean",
 				"CollectionsKt.joinToString$default",
 				"var6.add(var17)",
-				"if ((var10) < (var11))",
+				"if (!((var10) < (var11))){\n\t\t\t\tbreak;",
 			},
 			mustNotContain: []string{
 				"yak-decompiler",
@@ -1111,9 +1111,9 @@ func TestDecompileSyntaxRegression(t *testing.T) {
 				"Parameter rendering must keep generated names unique, and argument folding must not inline the empty parameter placeholder into method calls.",
 			mustContain: []string{
 				"class CopyOnWriteHashMap$InnerNode",
-				"CopyOnWriteHashMap$InnerNode<K, V> put(K var1, int var2, int var3, V var3_1, MutableValueInt var4)",
-				"this.putExisting(var1,var2,var3,var7,var3_1,var4)",
-				"this.putNew(var1,var6,var7,var3_1)",
+				"CopyOnWriteHashMap$InnerNode<K, V> put(K var1, int var2, int var3, V var4, MutableValueInt var5)",
+				"this.putExisting(var1,var2,var3,var7,var4,var5)",
+				"this.putNew(var1,var6,var7,var4)",
 			},
 			mustNotContain: []string{
 				"int var3, V var3, MutableValueInt",

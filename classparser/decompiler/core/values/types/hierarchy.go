@@ -82,11 +82,16 @@ var jdkSuperEdges = map[string][]string{
 	// `AccessibleObject & Member` that javac actually computes is not denotable in a declaration, so
 	// Member is the single use-correct choice (fastjson2 FieldReader.toString / compareTo
 	// `Member m = method != null ? method : field; m.getName()`).
-	"java.lang.reflect.Method":      {"java.lang.reflect.Member"},
-	"java.lang.reflect.Field":       {"java.lang.reflect.Member"},
-	"java.lang.reflect.Constructor": {"java.lang.reflect.Member"},
-	"java.lang.reflect.Executable":  {"java.lang.reflect.Member"},
-	"java.lang.reflect.Member":      {"java.lang.Object"},
+	"java.lang.reflect.Method":             {"java.lang.reflect.Executable"},
+	"java.lang.reflect.Field":              {"java.lang.reflect.Member"},
+	"java.lang.reflect.Constructor":        {"java.lang.reflect.Executable"},
+	"java.lang.reflect.Executable":         {"java.lang.reflect.Member"},
+	"java.lang.reflect.Member":             {"java.lang.Object"},
+	"java.lang.Class":                      {"java.lang.reflect.Type", "java.lang.reflect.GenericDeclaration", "java.lang.reflect.AnnotatedElement", "java.io.Serializable"},
+	"java.lang.reflect.Type":               {"java.lang.Object"},
+	"java.lang.reflect.GenericDeclaration": {"java.lang.reflect.AnnotatedElement"},
+	"java.lang.reflect.AnnotatedElement":   {"java.lang.Object"},
+	"java.io.Serializable":                 {"java.lang.Object"},
 
 	// I/O stream family. Decorator streams (`in = new GZIPInputStream(in)`, `out = new
 	// BufferedOutputStream(out)`) reassign a slot with a SUBTYPE of the abstract stream it wraps, so the

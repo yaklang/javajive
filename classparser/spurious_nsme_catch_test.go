@@ -115,3 +115,21 @@ func TestRequestWrapperSpuriousNSMEIsLoadBearing(t *testing.T) {
 		t.Fatal("ON/OFF identical")
 	}
 }
+
+func TestSpuriousNSMEKeepsClassArrayLocal(t *testing.T) {
+	in := "try{\nClass<?>[] types = new Class<?>[1];\ntypes[0] = value.getClass();\nvalue.getClass().getDeclaredConstructor(types);\n}catch(InstantiationException | NoSuchMethodException e){\nthrow new RuntimeException(e);\n}"
+	if out := fixSpuriousNSMECatch(in); !strings.Contains(out, "NoSuchMethodException") {
+		t.Fatalf("dropped exception from reflective call with Class[] local:\n%s", out)
+	}
+	ct := strings.ReplaceAll(in, "Class<?>[]", "CtClass[]")
+	if out := fixSpuriousNSMECatch(ct); strings.Contains(out, "NoSuchMethodException") {
+		t.Fatalf("CtClass[] was mistaken for java.lang.Class[]:\n%s", out)
+	}
+}
+
+func TestSpuriousNSMEKeepsClassLiteralWithHoistedArray(t *testing.T) {
+	in := "Class[] types = new Class[]{String.class};\ntry{\nString.class.getDeclaredConstructor(types);\n}catch(NoSuchMethodException e){\nthrow new RuntimeException(e);\n}"
+	if got := fixSpuriousNSMECatch(in); got != in {
+		t.Fatalf("lost reflection catch:\n%s", got)
+	}
+}

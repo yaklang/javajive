@@ -31,7 +31,7 @@ import (
 )
 
 // Version is the javajive library/CLI version.
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // ---------------------------------------------------------------------------
 // Re-exported types
@@ -50,6 +50,20 @@ type JavaSerializable = yserx.JavaSerializable
 // Decompile decompiles the bytes of a single Java .class file into Java source.
 func Decompile(classBytes []byte) (string, error) {
 	return classparser.Decompile(classBytes)
+}
+
+// DecompileOptions selects the source-recovery policy and optional class resolver.
+type DecompileOptions = classparser.DecompileOptions
+type DecompileResult = classparser.DecompileResult
+type DecompileMode = classparser.DecompileMode
+
+const (
+	Precision     = classparser.Precision
+	Compatibility = classparser.Compatibility
+)
+
+func DecompileWithOptions(classBytes []byte, options DecompileOptions) (DecompileResult, error) {
+	return classparser.DecompileWithOptions(classBytes, options)
 }
 
 // DecompileFile reads a single .class file from disk and decompiles it.

@@ -35,7 +35,23 @@ Built for portability and embedding:
 - **Trimmed dependency graph** — `utils` / `codec` / `log` / `go-funk` are
   reimplemented as a minimal, self-contained `internal/` core.
 
-## Benchmarks
+## Validation of v0.4.0
+
+The complete **38-JAR differential audit reports zero recorded regressions** against
+the fixed baseline: all 20 previously compile-clean JARs are retained and 26 now
+compile in full. Baseline defects and 4 existing method stubs remain visible.
+See the [per-JAR results and reproduction](docs/historical-jar-audit.md).
+
+**250 isolated semantic round trips** record compilation, JVM verification, stubs
+and runtime equality separately; original application classes are absent from rebuilt
+classpaths. CI runs the semantic audit on JDK 17 and 21, the full historical comparison,
+and the OS/Go and race matrices. These checks do not prove equivalence of every library
+method. See the [implementation and remaining boundaries](docs/decompiler-semantic-audit.md).
+
+## Historical benchmarks (v0.3.0)
+
+The following figures were reported for v0.3.0 on 2026-09-05. They are not
+current-version acceptance results or proof of behavioral equivalence.
 
 Measured on 34 real-world jars (18,759 flattened units) via decompile → `javac --release 8`
 recompile → repackage → JVM verify:

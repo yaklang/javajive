@@ -4,10 +4,15 @@ import (
 	"slices"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	"github.com/yaklang/javajive/internal/omap"
 	"github.com/yaklang/javajive/internal/utils"
 )
 
 type Node struct {
+	SwitchCases    *omap.OrderedMap[int, *Node]
+	SwitchDefault  *Node
+	SwitchPrepared bool
+
 	Id                  int
 	LoopBreak           bool
 	Statement           statements.Statement
@@ -41,10 +46,13 @@ type Node struct {
 	// SwitchEmptyCaseMergeNode persists the empty-case merge node across the two SwitchRewriter1
 	// invocations per switch (the prep loop, then the call inside SwitchRewriter). After the first run
 	// inserts the case `break`s, the structure no longer re-derives this merge (unlike an empty default,
-	// whose merge coincides with caseMap[-1] so the generic fallback restores it), so without saving it
+	// whose merge coincides with the explicit default target so the generic fallback restores it), so without saving it
 	// the second run would corrupt MergeNode to the default/throw node. Reused on re-entry.
 	SwitchEmptyCaseMergeNode *Node
-	IsTryCatch               bool
+	// ProtectedEnd is the exclusive bytecode boundary of a synthetic try region.
+	ProtectedEnd           *Node
+	SharedProtectedHandler bool
+	IsTryCatch             bool
 	// IsCatchStart marks a node that is the entry of an exception handler (catch / finally-desugar)
 	// block, set when the try node is built from the exception table. TryRewriter uses it to classify
 	// a try node's successors structurally instead of inferring the handler from its body's first
@@ -89,6 +97,7 @@ func (n *Node) RemoveAllNext() {
 	}
 }
 func (n *Node) ReplaceNext(node1, node2 *Node) {
+	n.ReplaceSwitchTarget(node1, node2)
 	for i, next := range n.Next {
 		if next == node1 {
 			n.Next[i] = node2
@@ -156,6 +165,17 @@ func (n *Node) AddNext(node *Node) {
 // (e.g. an intervening local store) sat on the jump-target branch (Bug M). Source back-links are
 // kept consistent and duplicates are removed.
 func (n *Node) ReplaceNextSliceKeepOrder(oldNode *Node, news []*Node) {
+	if len(news) > 0 {
+		// A consumed ternary can have duplicate edges to its single consumer.
+		// Preserve the semantic label even when the edge slice has length two.
+		same := true
+		for _, target := range news {
+			same = same && target == news[0]
+		}
+		if same {
+			n.ReplaceSwitchTarget(oldNode, news[0])
+		}
+	}
 	for i, s := range oldNode.Source {
 		if s == n {
 			oldNode.Source = append(oldNode.Source[:i], oldNode.Source[i+1:]...)
@@ -259,4 +279,31 @@ func canReachNode(start, target *Node) bool {
 
 func NewNode(statement statements.Statement) *Node {
 	return &Node{Statement: statement}
+}
+
+// ReplaceSwitchTarget keeps semantic label identity independent of successor order.
+func (n *Node) ReplaceSwitchTarget(old, target *Node) {
+	// Conditional branches also pin their target by identity before temporary
+	// folding. Replacing a value producer must retain that identity even when
+	// the successor slice is rebuilt in a different order.
+	if n.JmpNode == old {
+		n.JmpNode = target
+	}
+	if n.MergeNode == old {
+		n.MergeNode = target
+	}
+	if n.SwitchEmptyCaseMergeNode == old {
+		n.SwitchEmptyCaseMergeNode = target
+	}
+	if n.SwitchCases != nil {
+		n.SwitchCases.ForEach(func(v int, t *Node) bool {
+			if t == old {
+				n.SwitchCases.Set(v, target)
+			}
+			return true
+		})
+	}
+	if n.SwitchDefault == old {
+		n.SwitchDefault = target
+	}
 }

@@ -194,6 +194,8 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 						cv.NoOuterCapture = len(captured) == 0
 					}
 				}
+				cv.CapturesKnown = true
+				cv.Captures = captured
 				return cv, nil
 			}
 
@@ -255,6 +257,8 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// A method reference, like a lambda, has no target type when used directly as a call
 			// receiver (`(C::m).apply(x)` does not compile); flag it so the call site adds the cast.
 			refVal.Flag = "lambda"
+			refVal.CapturesKnown = true
+			refVal.Captures = capturedArgs
 			refVal.NoOuterCapture = len(capturedArgs) == 0
 			refVal.IsMethodRef = true
 			// Carry the instantiatedMethodType descriptor so a constructor argument whose formal is a

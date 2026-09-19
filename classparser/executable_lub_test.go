@@ -34,8 +34,8 @@ func TestExecutableArmMergeIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
-	if !methodSlotThenConstructorStore(off) {
-		t.Errorf("fix OFF: expected Method local assigned the Constructor store, got:\n%s", off)
+	if !executableSlotThenConstructorStore(off) {
+		t.Errorf("retired rule: expected the core Executable join, got:\n%s", off)
 	}
 }
 
@@ -63,8 +63,8 @@ func TestExecutableArmMergeSpringObjectToObjectConverter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
-	if !methodSlotThenConstructorStore(off) {
-		t.Errorf("fix OFF: expected Method local assigned Constructor (kill-switch load-bearing), got:\n%s", snippetValidatedExecutable(off))
+	if !executableSlotThenConstructorStore(off) {
+		t.Errorf("retired rule: expected the core Executable join, got:\n%s", snippetValidatedExecutable(off))
 	}
 }
 

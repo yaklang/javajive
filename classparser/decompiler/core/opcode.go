@@ -12,6 +12,7 @@ type OpCode struct {
 	CurrentOffset    uint16
 	Data             []byte
 	Jmp              int
+	BranchTarget     int
 	IsWide           bool
 	IsCatch          bool
 	GetStackChange   func()
@@ -29,6 +30,8 @@ type OpCode struct {
 	ExceptionTypeIndexes           []uint16
 	SwitchJmpCase                  *omap.OrderedMap[int, int32]
 	SwitchJmpCase1                 *omap.OrderedMap[int, int]
+	SwitchDefaultOffset            int32
+	SwitchDefaultIndex             int
 	stackProduced                  []values.JavaValue
 	stackConsumed                  []values.JavaValue
 	Source                         []*OpCode

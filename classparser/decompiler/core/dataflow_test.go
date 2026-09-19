@@ -68,3 +68,37 @@ func TestSlotWebPartition(t *testing.T) {
 		t.Errorf("web partition is not deterministic across recomputation")
 	}
 }
+
+// A pruned store remains a definition in the immutable graph. An absent map
+// entry must never be interpreted as index zero and merge it with a parameter.
+func TestSlotWebPartitionKeepsPrunedDefinitions(t *testing.T) {
+	d := auditCFG(t, []byte{OP_ILOAD_0, OP_POP, OP_ACONST_NULL, OP_ASTORE_1, OP_ALOAD_1, OP_ARETURN})
+	g, err := d.buildSemanticCFG()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.semanticCFG = g
+	parameter, store, load := g.Nodes[0], g.Nodes[3], g.Nodes[4]
+	d.opCodes = []*OpCode{parameter, load, g.Nodes[5]}
+	webs := d.computeSlotWebs()
+	storedWeb, present := webs.webOf[store]
+	if !present || storedWeb != webs.webOf[load] {
+		t.Fatal("pruned definition lost its load identity")
+	}
+	if storedWeb == webs.webOf[parameter] || storedWeb == webs.entryWeb[0] {
+		t.Fatal("reference local merged with the unrelated integer parameter")
+	}
+	if webs.webOf[parameter] != webs.entryWeb[0] {
+		t.Fatal("parameter lost its method-entry definition")
+	}
+}
+
+func TestSlotWebPartitionMissingLegacyStore(t *testing.T) {
+	parameter := op(OP_ILOAD_0, 0)
+	store, load := op(OP_ASTORE_1, 1), op(OP_ALOAD_1, 2)
+	load.Source = []*OpCode{store}
+	webs := (&Decompiler{opCodes: []*OpCode{parameter, load}}).computeSlotWebs()
+	if webs.webOf[parameter] == webs.webOf[load] {
+		t.Fatal("missing legacy store defaulted to the first opcode index")
+	}
+}

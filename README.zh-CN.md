@@ -28,7 +28,19 @@
   再用 JavaJive 验证（见 [HARNESS-WORKFLOW.md](HARNESS-WORKFLOW.md)）。
 - **收敛的依赖图**：`utils` / `codec` / `log` / `go-funk` 被重写为 `internal/` 下最小自包含实现。
 
-## 评测（Benchmark）
+## v0.4.0 验证
+
+全部 **38 个历史 JAR 的固定基线差分未检出回归**：原本可完整编译的 20 个包全部保留，
+当前 26 个包完整编译成功；基线既有缺陷和 4 个方法 stub 保持可见。
+详见[逐包结果及复现方法](docs/historical-jar-audit.md)。
+
+**250 项隔离语义往返**分别记录编译、JVM 校验、stub 与运行结果一致性，重建类路径不含
+原始应用类。CI 在 JDK 17、21 重跑语义测试，并执行全量历史对比、OS/Go 矩阵及 race 语料。
+这些检查不证明全部库方法行为等价；完整说明见[实现与剩余边界](docs/decompiler-semantic-audit.md)。
+
+## 历史评测（v0.3.0）
+
+以下为 v0.3.0 在 2026-09-05 发布的历史数据，不作为当前版本的验收结果或行为等价证明。
 
 在 34 个真实流行 jar（18,759 个摊平单元）上，走「反编译 → `javac --release 8` 重编译 → 重打包 → JVM 校验」：
 

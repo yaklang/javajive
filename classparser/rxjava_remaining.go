@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -132,8 +133,14 @@ func fixRxjavaRemainingReconstructs(body string) string {
 			1)
 		body = replaceDuplicateEmptyLoopLabel(body)
 	}
-	if rxClassHasTypeVar(body, "TRight") {
-		body = strings.ReplaceAll(body, ".onNext(var15.next())", ".onNext((TRight)(var15.next()))")
+	// The compatibility declarations parameterize GroupJoin's Unicast receivers.
+	// Its raw iterator still erases the rights map element to Object. Resolve
+	// the iterator from that field expression instead of a slot-number guess.
+	if rxClassHasTypeVar(body, "TRight") && strings.Contains(body, "GroupJoin$") {
+		for _, match := range regexp.MustCompile(`(?:Iterator )?(var[0-9]+(?:_[0-9]+)?) = this\.rights\.values\(\)\.iterator\(\);`).FindAllStringSubmatch(body, -1) {
+			arg := match[1] + ".next()"
+			body = strings.ReplaceAll(body, ".onNext("+arg+")", ".onNext((TRight)("+arg+"))")
+		}
 	}
 	if strings.Contains(body, "class ScalarXMapZHelper") {
 		body = strings.ReplaceAll(body, "var1.apply(var5)", "var1.apply((T)(var5))")

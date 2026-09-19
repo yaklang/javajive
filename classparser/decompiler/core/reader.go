@@ -17,7 +17,7 @@ func (j *JavaByteCodeReader) ReadByte() (b byte, err error) {
 	return j.reader.ReadByte()
 }
 func (j *JavaByteCodeReader) Read(p []byte) (n int, err error) {
-	n, err = j.reader.Read(p)
+	n, err = io.ReadFull(j.reader, p)
 	j.CurrentPos += n
 	return
 }

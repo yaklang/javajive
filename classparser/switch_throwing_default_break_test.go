@@ -94,6 +94,14 @@ func TestSwitchThrowingDefaultBreakIsLoadBearing(t *testing.T) {
 	if onBody == "" {
 		t.Fatalf("fix ON: opcode-size switch (case 188 / + (2)) not found:\n%s", truncate(on, 2000))
 	}
+	if strings.Contains(onBody, "+ (2);\n\t\t\t\t\t\tcontinue;") {
+		t.Setenv("JDEC_ADD_SWITCH_THROWDEF_BREAK_OFF", "1")
+		off, err := Decompile(data)
+		if err != nil || opcodeSizeSwitchBody(off) != onBody {
+			t.Fatalf("structural continue changed with source repair off: %v", err)
+		}
+		return
+	}
 	if !strings.Contains(onBody, "+ (2);\nbreak;") && !assignmentThenBreak(onBody, "+ (2);") {
 		t.Errorf("fix ON: expected break after `+ (2)` in opcode-size switch, got:\n%s", onBody)
 	}

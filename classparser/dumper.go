@@ -26,6 +26,10 @@ import (
 )
 
 type ClassObjectDumper struct {
+	options     DecompileOptions
+	report      *DecompileResult
+	rewriteSeen map[string]bool
+
 	obj           *ClassObject
 	FuncCtx       *class_context.ClassContext
 	ClassName     string
@@ -538,6 +542,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// flat while GetAllImported (after wiring) imports the OUTER class -- javac "cannot find
 	// symbol". Kill-switch JDEC_EXTERNAL_NESTED_DOT_OFF still applies inside nestedTypeShouldDot.
 	funcCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
+	funcCtx.SiblingClassAccessible = c.buildSiblingClassAccessible()
 	// Precompute the same-package simple names that must be rendered fully-qualified because the class
 	// also references a different-package type of the same simple name (whose import would shadow the
 	// same-package one). Constant-pool based, so it is independent of body render order. See
@@ -649,9 +654,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 	}
 
-	if packageName == "" {
-		packageName = "defaultpackagename"
-	}
 	// Extract class-level type parameters from the Signature attribute so that
 	// fields/methods referencing type variables (e.g. `T value`) compile. A class
 	// without generic parameters or without a Signature attribute yields "".
@@ -1165,10 +1167,14 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		c.FuncCtx.ClassSig = classSigStr
 		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
 		c.FuncCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
+		c.FuncCtx.SiblingClassAccessible = c.buildSiblingClassAccessible()
 		c.FuncCtx.SiblingCtorSig = c.buildSiblingCtorSig()
 		c.FuncCtx.SiblingFieldSig = c.buildSiblingFieldSig()
 	}
-	packageSource := fmt.Sprintf("package %s;\n\n", packageName)
+	packageSource := ""
+	if packageName != "" {
+		packageSource = fmt.Sprintf("package %s;\n\n", packageName)
+	}
 	if className == "" {
 		return "", utils.Error("className is empty")
 	}
@@ -1291,7 +1297,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 
 	full := assemble()
-	if EnableDecompileSyntaxValidation && len(full) < 50000 {
+	if c.options.Mode == Precision && c.report != nil {
+		c.report.Diagnostics = append(c.report.Diagnostics, DecompileDiagnostic{Code: "legacy_source_recovery_disabled", Message: "Unproven class-source repairs are disabled. Core structuring and type recovery still require round-trip validation."})
+	}
+	if c.options.Mode != Precision && EnableDecompileSyntaxValidation && len(full) < 50000 {
 		if err := validateJavaSyntax(full); err != nil {
 			// The assembled class is not valid Java. Degrade malformed members (using the real
 			// class header so interface/enum/constructor context is honored) and re-render, so a
@@ -1314,388 +1323,388 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// read inside the lambda, so initProximateSplitSlotDecl (next) can safely default-initialize it
 	// (the lambda-capture skip won't fire for a var whose reads were already rewritten to the copy).
 	// Kill-switch: JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
-	full = fixLambdaLoopCapture(full)
+	full = c.sourceRewrite("fixLambdaLoopCapture", "class_source", full, fixLambdaLoopCapture)
 	// Run the split-slot definite-assignment init on the FULL class text (all methods merged).
 	// This overcomes the chunked-sourceCode limitation where the per-method init couldn't see
 	// assignments in other method blocks. Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
-	full = initProximateSplitSlotDecl(full)
+	full = c.sourceRewrite("initProximateSplitSlotDecl", "class_source", full, initProximateSplitSlotDecl)
 	// removeUnreachableSwitchBreak drops `break;` after a nested switch whose default throws/returns.
 	// Kill-switch: JDEC_RM_UNREACHABLE_BREAK_OFF=1.
-	full = removeUnreachableSwitchBreak(full)
+	full = c.sourceRewrite("removeUnreachableSwitchBreak", "class_source", full, removeUnreachableSwitchBreak)
 	// fixMissingReturn inserts `return null;` after a no-op empty-if (`if(cond){};`) that follows a
 	// switch-closing `}`, when the enclosing block does not otherwise terminate (the CFA-targeted
 	// pattern that produces "missing return statement" in deep switch/if chains). Kill-switch:
 	// JDEC_FIX_MISSING_RETURN_OFF=1.
-	full = fixMissingReturn(full)
+	full = c.sourceRewrite("fixMissingReturn", "class_source", full, fixMissingReturn)
 	// fixEmptySwitchDefault inserts a terminator (throw) into `switch` default labels whose body is
 	// empty, which otherwise leaves a value-returning method without a return on that path.
 	// Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
-	full = fixEmptySwitchDefault(full)
+	full = c.sourceRewrite("fixEmptySwitchDefault", "class_source", full, fixEmptySwitchDefault)
 	// fixUnreachableDefaultThrow removes a `throw new RuntimeException();` that fixEmptySwitchDefault
 	// inserted into an empty `default:` when the switch is followed by an ACTUAL statement (not a
 	// block-closing `}`). In that case the empty default FALLS THROUGH to the post-switch code, and
 	// the throw makes it unreachable. Kill-switch: JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF=1.
-	full = fixUnreachableDefaultThrow(full)
+	full = c.sourceRewrite("fixUnreachableDefaultThrow", "class_source", full, fixUnreachableDefaultThrow)
 	// fixTryBreakReturn moves a hoisted `return <expr>;` back into a `try { break; }` block
 	// inside a do-while(true) loop, where the try's catch clauses require the return's
 	// checked-exception to be throwable. Kill-switch: JDEC_FIX_TRY_BREAK_RETURN_OFF=1.
-	full = fixTryBreakReturn(full)
+	full = c.sourceRewrite("fixTryBreakReturn", "class_source", full, fixTryBreakReturn)
 	// fixThrowTypeVarCast adds the `(T)` cast to `throw <var>;` inside a method whose `throws`
 	// clause declares a type variable (e.g. `throws T` where `T extends Throwable`), when the
 	// thrown variable's type is `Throwable` (too broad for `throws T`). The original source had
 	// `throw (T) throwable;` but the bytecode erased the cast. Kill-switch:
 	// JDEC_FIX_THROW_TYPEVAR_CAST_OFF=1. Canonical: commons-lang3 ExceptionUtils.typeErasure.
-	full = fixThrowTypeVarCast(full)
+	full = c.sourceRewrite("fixThrowTypeVarCast", "class_source", full, fixThrowTypeVarCast)
 	// fixLoopCatchThrow removes a `throw new RuntimeException(<var>);` that was added to an empty
 	// catch by the catch-rendering fix when the catch is inside a loop (followed by
 	// continue/break). Empty catches inside loops are intentional (swallow and continue), so the
 	// throw would make the continue/break unreachable. Kill-switch: JDEC_FIX_LOOP_CATCH_THROW_OFF=1.
-	full = fixLoopCatchThrow(full)
+	full = c.sourceRewrite("fixLoopCatchThrow", "class_source", full, fixLoopCatchThrow)
 	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
 	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
-	full = fixTryCatchExceptionPlacement(full)
+	full = c.sourceRewrite("fixTryCatchExceptionPlacement", "class_source", full, fixTryCatchExceptionPlacement)
 	// addMissingCatchException performs per-call-site exception-flow analysis: for each reflection
 	// call site (getConstructor etc.) it walks the enclosing try/catch chain and only augments the
 	// nearest catch with NoSuchMethodException if no enclosing catch already handles it (or a
 	// supertype). Kill-switch: JDEC_ADD_MISSING_CATCH_OFF=1.
-	full = addMissingCatchException(full)
+	full = c.sourceRewrite("addMissingCatchException", "class_source", full, addMissingCatchException)
 	// dedupNestedCatchException removes exception types from an outer catch that are already caught
 	// by a nested try/catch in the try body (javac: "exception X is never thrown in body of
 	// corresponding try statement"). Kill-switch: JDEC_DEDUP_NESTED_CATCH_OFF=1.
-	full = dedupNestedCatchException(full)
+	full = c.sourceRewrite("dedupNestedCatchException", "class_source", full, dedupNestedCatchException)
 	// wrapUncaughtThrowingCall wraps `UNSAFE.allocateInstance()` in try/catch. Kill-switch:
 	// JDEC_WRAP_ALLOCATE_OFF=1.
-	full = wrapUncaughtThrowingCall(full)
+	full = c.sourceRewrite("wrapUncaughtThrowingCall", "class_source", full, wrapUncaughtThrowingCall)
 	// wrapReflectionCallInSwitchCase wraps switch-case reflection calls in try/catch. Kill-switch:
 	// JDEC_WRAP_REFLECTION_CASE_OFF=1.
-	full = wrapReflectionCallInSwitchCase(full)
+	full = c.sourceRewrite("wrapReflectionCallInSwitchCase", "class_source", full, wrapReflectionCallInSwitchCase)
 	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. Kill-switch:
 	// JDEC_ADD_SWITCH_BREAK_OFF=1.
-	full = addBreakToSwitchCases(full)
+	full = c.sourceRewrite("addBreakToSwitchCases", "class_source", full, addBreakToSwitchCases)
 	// fixSwitchBreakMissingReturn inserts `return null;` after a switch that is the last statement
 	// of its enclosing block in a reference-returning method, when a case exits via `break`
 	// (switch fall-through reconstructed as break: commons-lang3 NumberUtils.createNumber).
 	// Kill-switch: JDEC_FIX_SWITCH_BREAK_RETURN_OFF=1.
-	full = fixSwitchBreakMissingReturn(full)
+	full = c.sourceRewrite("fixSwitchBreakMissingReturn", "class_source", full, fixSwitchBreakMissingReturn)
 	// wrapFieldInitializerReflection converts a field initializer containing a reflection call
 	// (getMethod etc.) that throws a checked exception into a static-block init with try/catch.
 	// Kill-switch: JDEC_WRAP_FIELD_INIT_OFF=1.
-	full = wrapFieldInitializerReflection(full)
+	full = c.sourceRewrite("wrapFieldInitializerReflection", "class_source", full, wrapFieldInitializerReflection)
 	// wrapUncaughtGetConstructor wraps a bare first-stmt `cls.getConstructor(...)` in
 	// try/catch(NoSuchMethodException). Class-gated to AddDelegateTransformer (global wrap
 	// unmasks snakeyaml/fastjson2). Kill-switch: JDEC_WRAP_GETCONSTRUCTOR_OFF=1.
-	full = wrapUncaughtGetConstructor(full)
+	full = c.sourceRewrite("wrapUncaughtGetConstructor", "class_source", full, wrapUncaughtGetConstructor)
 	// Drop NoSuchMethodException from a multicatch (or an empty static-clinit
 	// try/catch) when the try body has no getConstructor/getMethod call.
 	// RequestWrapper: `new URI` throws URISyntaxException only; the decompiler
 	// unions NSME onto that catch. Kill-switch: JDEC_SPURIOUS_NSME_CATCH_OFF=1.
-	full = fixSpuriousNSMECatch(full)
+	full = c.sourceRewrite("fixSpuriousNSMECatch", "class_source", full, fixSpuriousNSMECatch)
 	// Drop catch(T) when an earlier catch in the same try already covers T
 	// (multicatch then a second catch(T)). Kill-switch: JDEC_ALREADY_CAUGHT_OFF=1.
-	full = fixAlreadyCaughtDuplicateCatch(full)
+	full = c.sourceRewrite("fixAlreadyCaughtDuplicateCatch", "class_source", full, fixAlreadyCaughtDuplicateCatch)
 	// Empty a wrapUncaught RuntimeException rethrow catch when a return follows
 	// (otherwise unreachable). Kill-switch: JDEC_CATCH_RETHROW_UNREACHABLE_RETURN_OFF=1.
-	full = fixCatchRethrowUnreachableReturn(full)
+	full = c.sourceRewrite("fixCatchRethrowUnreachableReturn", "class_source", full, fixCatchRethrowUnreachableReturn)
 	// Subclass field `this.f = this.f` is getfield Super.f; putfield This.f.
 	// Kill-switch: JDEC_SHADOW_FIELD_SUPER_ASSIGN_OFF=1.
-	full = fixShadowFieldSuperAssign(full)
+	full = c.sourceRewrite("fixShadowFieldSuperAssign", "class_source", full, fixShadowFieldSuperAssign)
 	// fixImmutableBuilderWitness inserts an explicit type witness on
 	// `ImmutableMap<A,B> f = ImmutableMap.builder()` so builder() does not infer <Object,Object>.
 	// Kill-switch: JDEC_IMMUTABLE_BUILDER_WITNESS_OFF=1.
-	full = fixImmutableBuilderWitness(full)
+	full = c.sourceRewrite("fixImmutableBuilderWitness", "class_source", full, fixImmutableBuilderWitness)
 	// fixNeverThrownCNFE inserts `Class.forName("java.lang.Object")` into a try whose
 	// catch(ClassNotFoundException) would otherwise be "never thrown" (spring
 	// ConfigurableObjectInputStream: forName reconstructed outside the catch's try).
 	// Kill-switch: JDEC_CNFE_NEVER_THROWN_OFF=1.
-	full = fixNeverThrownCNFE(full)
+	full = c.sourceRewrite("fixNeverThrownCNFE", "class_source", full, fixNeverThrownCNFE)
 	// fixSelectMethodsAmbiguous casts the lambda in MethodIntrospector.selectMethods(Class,
 	// MethodFilter) so javac does not confuse it with the MetadataLookup overload.
 	// Kill-switch: JDEC_SELECTMETHODS_CAST_OFF=1.
-	full = fixSelectMethodsAmbiguous(full)
+	full = c.sourceRewrite("fixSelectMethodsAmbiguous", "class_source", full, fixSelectMethodsAmbiguous)
 	// fixAsMapFunctionRawCast wraps asMap(lambda, Adapt...) lambdas in a raw Function
 	// cast so javac does not reject Function<MergedAnnotation, AnnotationAttributes>
 	// against Function<? super MergedAnnotation<A>, T>.
 	// Kill-switch: JDEC_ASMAP_FUNCTION_CAST_OFF=1.
-	full = fixAsMapFunctionRawCast(full)
+	full = c.sourceRewrite("fixAsMapFunctionRawCast", "class_source", full, fixAsMapFunctionRawCast)
 	// fixNeverThrownIOException inserts `if(false)throw new TYPE();` as the first
 	// statement of the try that catch(TYPE) pairs with via matching braces. TYPE is
 	// IOException or FileAlreadyExistsException. Kill-switch:
 	// JDEC_IOEXCEPTION_NEVER_THROWN_OFF=1.
-	full = fixNeverThrownIOException(full)
+	full = c.sourceRewrite("fixNeverThrownIOException", "class_source", full, fixNeverThrownIOException)
 	// fixThrowClassCastDropsThrowable unwraps `throw ((Throwable)(cls.cast(x)))` to
 	// `throw cls.cast(x)` so a method `throws X` (X a type variable) actually throws X
 	// rather than undeclared Throwable. Real hit: guava Throwables.throwIfInstanceOf.
 	// Kill-switch: JDEC_THROW_CLASS_CAST_DROP_THROWABLE_OFF=1.
-	full = fixThrowClassCastDropsThrowable(full)
+	full = c.sourceRewrite("fixThrowClassCastDropsThrowable", "class_source", full, fixThrowClassCastDropsThrowable)
 	// fixReplaceAllListStreamCast casts the replaceAll value param to List before .stream()
 	// on a raw HashMap (l1 is Object). Real hit: spring SpringFactoriesLoader.loadSpringFactories.
 	// Kill-switch: JDEC_REPLACEALL_LIST_STREAM_CAST_OFF=1.
-	full = fixReplaceAllListStreamCast(full)
+	full = c.sourceRewrite("fixReplaceAllListStreamCast", "class_source", full, fixReplaceAllListStreamCast)
 	// fixClassMapEntryPutCasts inserts (Class) on raw Map.Entry getKey/getValue fed to a
 	// Class-valued map. Real hit: spring ClassUtils <clinit> primitiveTypeToWrapperMap.
 	// Kill-switch: JDEC_CLASS_MAP_ENTRY_PUT_CAST_OFF=1.
-	full = fixClassMapEntryPutCasts(full)
+	full = c.sourceRewrite("fixClassMapEntryPutCasts", "class_source", full, fixClassMapEntryPutCasts)
 	// fixVisitAnnotationConsumerCast rewrites Consumer<MergedAnnotation> to raw Consumer
 	// so it applies to Consumer<MergedAnnotation<T>>. Real hit: spring
 	// MergedAnnotationReadingVisitor.visitAnnotation.
 	// Kill-switch: JDEC_VISITANNOTATION_CONSUMER_CAST_OFF=1.
-	full = fixVisitAnnotationConsumerCast(full)
+	full = c.sourceRewrite("fixVisitAnnotationConsumerCast", "class_source", full, fixVisitAnnotationConsumerCast)
 	// fixValueDifferenceCreateCast wraps Maps$ValueDifferenceImpl.create(...) in a raw
 	// MapDifference$ValueDifference cast so put(K, ValueDifference<V>) does not infer
 	// V from Object,Object. Real hit: guava Maps.doDifference.
 	// Kill-switch: JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF=1.
-	full = fixValueDifferenceCreateCast(full)
+	full = c.sourceRewrite("fixValueDifferenceCreateCast", "class_source", full, fixValueDifferenceCreateCast)
 	// Scoped to the exact getUninterruptibly empty-try shape (not a class-wide regex).
-	full = fixGetUninterruptiblyGetInTry(full)
+	full = c.sourceRewrite("fixGetUninterruptiblyGetInTry", "class_source", full, fixGetUninterruptiblyGetInTry)
 	// Scoped to the exact drainUninterruptibly empty-try shape: poll() folded out of
 	// the InterruptedException catch (guava Queues, unmasked once DescendingSet compiled).
-	full = fixDrainUninterruptiblyPollInTry(full)
+	full = c.sourceRewrite("fixDrainUninterruptiblyPollInTry", "class_source", full, fixDrainUninterruptiblyPollInTry)
 	// TRANSPOSE_CELL is Function<Cell<?,?,?>, Cell<?,?,?>>; Iterators.transform then
 	// infers T from the wildcards instead of the Iterator<Cell<C,R,V>> return
 	// ("inference variable T has incompatible bounds"). Raw Function is unchecked.
 	// Kill-switch: JDEC_TRANSPOSE_CELL_FUNCTION_CAST_OFF=1.
-	full = fixTransposeCellFunctionCast(full)
+	full = c.sourceRewrite("fixTransposeCellFunctionCast", "class_source", full, fixTransposeCellFunctionCast)
 	// Class.getConstructors() is Constructor<?>[]; asList infers List<Constructor<?>>
 	// which cannot convert to List<Constructor<X>> (preferringStrings). Raw List
 	// is unchecked. Kill-switch: JDEC_PREFERSTRINGS_ASLIST_CAST_OFF=1.
-	full = fixPreferringStringsAsListCast(full)
+	full = c.sourceRewrite("fixPreferringStringsAsListCast", "class_source", full, fixPreferringStringsAsListCast)
 	// SynchronizedNavigableMap lazy-init accessors: CFG emptied the
 	// synchronized body (field==null assign + return), leaving a non-void
 	// method with no return. Restore the original lazy-init reconstruct.
 	// Kill-switch: JDEC_SYNC_LAZY_NAV_RETURN_OFF=1.
-	full = fixSyncLazyNavigableReturn(full)
+	full = c.sourceRewrite("fixSyncLazyNavigableReturn", "class_source", full, fixSyncLazyNavigableReturn)
 	// AbstractCatchingFuture.run: CFG copied the finally-clear into try/catch
 	// AND emitted a second catch(Throwable) for the finally-rethrow, which
 	// javac rejects ("exception Throwable has already been caught"). Fold
 	// back to try/catch/finally. Kill-switch: JDEC_CATCHING_FUTURE_FINALLY_OFF=1.
-	full = fixCatchingFutureFinally(full)
+	full = c.sourceRewrite("fixCatchingFutureFinally", "class_source", full, fixCatchingFutureFinally)
 	// AbstractService.startAsync/stopAsync: same finally-copied-into-catch(Throwable)
 	// twice. Kill-switch: JDEC_ABSTRACT_SERVICE_FINALLY_OFF=1.
-	full = fixAbstractServiceFinally(full)
+	full = c.sourceRewrite("fixAbstractServiceFinally", "class_source", full, fixAbstractServiceFinally)
 	// Monitor: empty try{break} catch(IE) with tryLock/awaitNanos folded out.
 	// Inject a never-taken throw so the catch is live, and wrap the folded
 	// calls so InterruptedException is not unreported. Kill-switch:
 	// JDEC_MONITOR_IE_TRY_OFF=1.
-	full = fixMonitorInterruptedTry(full)
+	full = c.sourceRewrite("fixMonitorInterruptedTry", "class_source", full, fixMonitorInterruptedTry)
 	// AbstractFuture$SynchronizedHelper cas* methods: CFG emptied the
 	// synchronized CAS body (private outer fields aren't denotable from the
 	// flattened inner class), leaving boolean methods with no return.
 	// Kill-switch: JDEC_SYNC_HELPER_CAS_RETURN_OFF=1.
-	full = fixSyncHelperCasReturn(full)
+	full = c.sourceRewrite("fixSyncHelperCasReturn", "class_source", full, fixSyncHelperCasReturn)
 	// ReschedulableCallable.reschedule: lock.unlock finally cloned into
 	// two catch(Throwable). Kill-switch: JDEC_RESCHEDULE_UNLOCK_FINALLY_OFF=1.
-	full = fixRescheduleUnlockFinally(full)
+	full = c.sourceRewrite("fixRescheduleUnlockFinally", "class_source", full, fixRescheduleUnlockFinally)
 	// General: consecutive catch(Throwable x){UNIQUE; COMMON} catch(Throwable x){COMMON; throw x}
 	// is a finally reconstruct. Remaining guava inner classes keep unmasking this shape.
 	// Kill-switch: JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF=1.
-	full = fixDupThrowableCatchFinally(full)
+	full = c.sourceRewrite("fixDupThrowableCatchFinally", "class_source", full, fixDupThrowableCatchFinally)
 	// MoreExecutors.isAppEngineWithApiClasses: outer try is Class.forName
 	// (throws CNFE) but the catch is NoSuchMethodException (getMethod lives
 	// in the inner try). Kill-switch: JDEC_APPENGINE_CNFE_CATCH_OFF=1.
-	full = fixAppEngineCNFECatch(full)
+	full = c.sourceRewrite("fixAppEngineCNFECatch", "class_source", full, fixAppEngineCNFECatch)
 	// RateLimiter.tryAcquire(int,long,TimeUnit): CFG emptied the synchronized
 	// body and dropped the return. Kill-switch: JDEC_RATELIMITER_TRYACQUIRE_RETURN_OFF=1.
-	full = fixRateLimiterTryAcquireReturn(full)
+	full = c.sourceRewrite("fixRateLimiterTryAcquireReturn", "class_source", full, fixRateLimiterTryAcquireReturn)
 	// AnnotationReadingVisitorUtils.convertClassValues: var9_1 is used as both
 	// String[] and Class[] (ternary on classValuesAsString); declaring String[]
 	// makes `new Class[n]` / Class elements inconvertible. Object[] is the LUB.
 	// put(entry.getKey(), throwable) needs (String) on the raw Map.Entry key.
 	// Kill-switch: JDEC_CONVERT_CLASS_VALUES_OBJECT_ARRAY_OFF=1.
-	full = fixConvertClassValuesObjectArray(full)
+	full = c.sourceRewrite("fixConvertClassValuesObjectArray", "class_source", full, fixConvertClassValuesObjectArray)
 	// MergedAnnotationCollectors.toAnnotationArray finisher: (Annotation[])
 	// toArray((Object[]) generator.apply) pins R to Annotation, incompatible
 	// with bounded R extends Annotation. Drop both casts so toArray infers R[].
 	// Kill-switch: JDEC_TO_ANNOTATION_ARRAY_FINISHER_OFF=1.
-	full = fixToAnnotationArrayFinisher(full)
+	full = c.sourceRewrite("fixToAnnotationArrayFinisher", "class_source", full, fixToAnnotationArrayFinisher)
 	// Raw Flux.doOnNext lambda param is Object; logValue/touchDataBuffer want
 	// DataBuffer. Kill-switch: JDEC_DATABUFFER_LAMBDA_CAST_OFF=1.
-	full = fixDataBufferLambdaCast(full)
+	full = c.sourceRewrite("fixDataBufferLambdaCast", "class_source", full, fixDataBufferLambdaCast)
 	// jackson POJOPropertyBuilder._explode: Linked<?> receiver's withNext(Linked<T>)
 	// captures T to CAP#1, so Linked<AnnotatedField> is not Linked<CAP#1>. A raw
 	// `(POJOPropertyBuilder$Linked)` argument makes the call unchecked.
 	// Kill-switch: JDEC_LINKED_WITHNEXT_RAW_OFF=1.
-	full = fixLinkedWithNextRawCast(full)
+	full = c.sourceRewrite("fixLinkedWithNextRawCast", "class_source", full, fixLinkedWithNextRawCast)
 	// jackson DeserializationContext.isEnabled(StreamReadCapability): generic
 	// JacksonFeatureSet.isEnabled erases to JacksonFeature, so the arg is wrapped
 	// `(JacksonFeature)(var1)` and javac cannot convert that back to StreamReadCapability.
 	// Kill-switch: JDEC_JACKSON_FEATURE_CAST_OFF=1.
-	full = fixJacksonFeatureUpcast(full)
+	full = c.sourceRewrite("fixJacksonFeatureUpcast", "class_source", full, fixJacksonFeatureUpcast)
 	// jackson StdKeyDeserializers: raw List.removeIf lambda param is Object, so
 	// `l0.annotated` / `l0.metadata` cannot find symbol. Cast to AnnotatedAndMetadata.
 	// Kill-switch: JDEC_ANNOTATED_AND_METADATA_LAMBDA_OFF=1.
-	full = fixAnnotatedAndMetadataLambda(full)
+	full = c.sourceRewrite("fixAnnotatedAndMetadataLambda", "class_source", full, fixAnnotatedAndMetadataLambda)
 	// jackson DefaultAccessorNamingStrategy$Provider: findPOJOBuilderConfig returns
 	// Object, then `var5.withPrefix` cannot find symbol. Cast to JsonPOJOBuilder$Value.
 	// Kill-switch: JDEC_POJO_BUILDER_VALUE_CAST_OFF=1.
-	full = fixPOJOBuilderValueCast(full)
+	full = c.sourceRewrite("fixPOJOBuilderValueCast", "class_source", full, fixPOJOBuilderValueCast)
 	// jackson POJOPropertyBuilder.getField: Class locals assigned before declaration.
 	// Kill-switch: JDEC_GETFIELD_CLASS_HOIST_OFF=1.
-	full = fixGetFieldClassHoist(full)
-	full = fixJacksonRemainingReconstructs(full)
+	full = c.sourceRewrite("fixGetFieldClassHoist", "class_source", full, fixGetFieldClassHoist)
+	full = c.sourceRewrite("fixJacksonRemainingReconstructs", "class_source", full, fixJacksonRemainingReconstructs)
 	// javac 9-13 TWR synthetic `$closeResource(Throwable, AutoCloseable)` invokeinterfaces
 	// AutoCloseable.close() which throws Exception, but the synthetic method does not declare
 	// it (okhttp ResponseBody / DiskLruCache). Kill-switch: JDEC_CLOSE_RESOURCE_THROWS_OFF=1.
-	full = fixCloseResourceThrows(full)
+	full = c.sourceRewrite("fixCloseResourceThrows", "class_source", full, fixCloseResourceThrows)
 	// okhttp Transmitter: CFG emptied synchronized bodies of newExchange /
 	// exchangeMessageDone / maybeReleaseConnection (missing return). Reconstruct
 	// from bytecode. Kill-switch: JDEC_TRANSMITTER_SYNC_OFF=1.
-	full = fixTransmitterEmptySync(full)
+	full = c.sourceRewrite("fixTransmitterEmptySync", "class_source", full, fixTransmitterEmptySync)
 	// okhttp ExchangeFinder: CFG emptied synchronized bodies of findHealthyConnection /
 	// findConnection / hasRouteToTry (missing return). Kill-switch:
 	// JDEC_EXCHANGEFINDER_SYNC_OFF=1.
-	full = fixExchangeFinderEmptySync(full)
+	full = c.sourceRewrite("fixExchangeFinderEmptySync", "class_source", full, fixExchangeFinderEmptySync)
 	// okhttp RealConnection.connect: CFG emptied the try body to `if(false) throw
 	// IOException; break;` and left connectTunnel/connectSocket outside, so those
 	// IOException-throwing calls are uncaught. Kill-switch: JDEC_REALCONNECTION_CONNECT_OFF=1.
-	full = fixRealConnectionConnect(full)
+	full = c.sourceRewrite("fixRealConnectionConnect", "class_source", full, fixRealConnectionConnect)
 	// okhttp RealConnectionPool.cleanup: CFG emptied the synchronized body
 	// (missing return of long). Kill-switch: JDEC_CONNECTIONPOOL_CLEANUP_OFF=1.
-	full = fixConnectionPoolCleanup(full)
+	full = c.sourceRewrite("fixConnectionPoolCleanup", "class_source", full, fixConnectionPoolCleanup)
 	// okhttp Http2Connection.newStream: CFG emptied the synchronized(writer) body
 	// (missing return of Http2Stream). Kill-switch: JDEC_HTTP2_NEWSTREAM_OFF=1.
-	full = fixHttp2NewStream(full)
+	full = c.sourceRewrite("fixHttp2NewStream", "class_source", full, fixHttp2NewStream)
 	// okhttp Http2Stream.getSink / closeInternal: CFG emptied synchronized
 	// bodies (missing return). Kill-switch: JDEC_HTTP2_STREAM_SYNC_OFF=1.
-	full = fixHttp2StreamEmptySync(full)
+	full = c.sourceRewrite("fixHttp2StreamEmptySync", "class_source", full, fixHttp2StreamEmptySync)
 	// Catch-all: a non-void method whose last statement is an empty synchronized
 	// body is missing a return (okhttp DiskLruCache$Editor.newSource/newSink and
 	// remaining empty-sync sites). Specific reconstructs above run first.
 	// Kill-switch: JDEC_EMPTY_SYNC_RETURN_OFF=1.
-	full = fixEmptySyncMissingReturn(full)
+	full = c.sourceRewrite("fixEmptySyncMissingReturn", "class_source", full, fixEmptySyncMissingReturn)
 	// okhttp Util.skipLeading/TrailingAsciiWhitespace: whitespace cases fall
 	// through into `default: return`, making the loop `continue` unreachable.
 	// Kill-switch: JDEC_SKIP_WS_CONTINUE_OFF=1.
-	full = fixSkipAsciiWhitespaceContinue(full)
+	full = c.sourceRewrite("fixSkipAsciiWhitespaceContinue", "class_source", full, fixSkipAsciiWhitespaceContinue)
 	// okhttp DiskLruCache$3.hasNext: empty synchronized in the else of
 	// `if (nextSnapshot != null) return true`. Kill-switch: JDEC_DISKLRU_ITER_OFF=1.
-	full = fixDiskLruIteratorHasNext(full)
+	full = c.sourceRewrite("fixDiskLruIteratorHasNext", "class_source", full, fixDiskLruIteratorHasNext)
 	// okhttp PublicSuffixDatabase: findMatchingRule empty sync (missing return)
 	// and readTheListUninterruptibly's readTheList() escaped the IOException try.
 	// Kill-switch: JDEC_PUBLIC_SUFFIX_OFF=1.
-	full = fixPublicSuffixDatabase(full)
+	full = c.sourceRewrite("fixPublicSuffixDatabase", "class_source", full, fixPublicSuffixDatabase)
 	// commons-collections4 leftover unique sites (compare inference, singletonList
 	// capture, ArrayList.class factory, inherited inToRange Object key).
 	// Kill-switch: JDEC_COLLECTIONS4_REMAINING_OFF=1.
-	full = fixCollections4RemainingReconstructs(full)
+	full = c.sourceRewrite("fixCollections4RemainingReconstructs", "class_source", full, fixCollections4RemainingReconstructs)
 	// netty-handler leftover unique sites. Kill-switch: JDEC_NETTY_REMAINING_OFF=1.
-	full = fixNettyRemainingReconstructs(full)
+	full = c.sourceRewrite("fixNettyRemainingReconstructs", "class_source", full, fixNettyRemainingReconstructs)
 	// log4j-core leftover unique sites. Kill-switch: JDEC_LOG4J_REMAINING_OFF=1.
-	full = fixLog4jRemainingReconstructs(full)
+	full = c.sourceRewrite("fixLog4jRemainingReconstructs", "class_source", full, fixLog4jRemainingReconstructs)
 	// original-14 remainder uniques unmasked by later global reconstructs.
 	// Kill-switch: JDEC_ORIG14_REMAINING_OFF=1.
-	full = fixOrig14RemainderReconstructs(full)
+	full = c.sourceRewrite("fixOrig14RemainderReconstructs", "class_source", full, fixOrig14RemainderReconstructs)
 	// protobuf-java leftover unique sites. Kill-switch: JDEC_PROTOBUF_REMAINING_OFF=1.
-	full = fixProtobufRemainingReconstructs(full)
+	full = c.sourceRewrite("fixProtobufRemainingReconstructs", "class_source", full, fixProtobufRemainingReconstructs)
 	// jedis leftover unique sites. Kill-switch: JDEC_JEDIS_REMAINING_OFF=1.
-	full = fixJedisRemainingReconstructs(full)
+	full = c.sourceRewrite("fixJedisRemainingReconstructs", "class_source", full, fixJedisRemainingReconstructs)
 	// logback leftover unique sites. Kill-switch: JDEC_LOGBACK_REMAINING_OFF=1.
-	full = fixLogbackRemainingReconstructs(full)
+	full = c.sourceRewrite("fixLogbackRemainingReconstructs", "class_source", full, fixLogbackRemainingReconstructs)
 	// HikariCP leftover unique sites. Kill-switch: JDEC_HIKARICP_REMAINING_OFF=1.
-	full = fixHikaricpRemainingReconstructs(full)
+	full = c.sourceRewrite("fixHikaricpRemainingReconstructs", "class_source", full, fixHikaricpRemainingReconstructs)
 	// commons-pool2 leftover unique sites. Kill-switch: JDEC_POOL2_REMAINING_OFF=1.
-	full = fixPool2RemainingReconstructs(full)
+	full = c.sourceRewrite("fixPool2RemainingReconstructs", "class_source", full, fixPool2RemainingReconstructs)
 	// picocli leftover unique sites. Kill-switch: JDEC_PICOCLI_REMAINING_OFF=1.
-	full = fixPicocliRemainingReconstructs(full)
+	full = c.sourceRewrite("fixPicocliRemainingReconstructs", "class_source", full, fixPicocliRemainingReconstructs)
 	// httpclient leftover unique sites. Kill-switch: JDEC_HTTPCLIENT_REMAINING_OFF=1.
-	full = fixHttpclientRemainingReconstructs(full)
+	full = c.sourceRewrite("fixHttpclientRemainingReconstructs", "class_source", full, fixHttpclientRemainingReconstructs)
 	// javassist leftover unique sites. Kill-switch: JDEC_JAVASSIST_REMAINING_OFF=1.
-	full = fixJavassistRemainingReconstructs(full)
+	full = c.sourceRewrite("fixJavassistRemainingReconstructs", "class_source", full, fixJavassistRemainingReconstructs)
 	// commons-io leftover unique sites. Kill-switch: JDEC_COMMONS_IO_REMAINING_OFF=1.
-	full = fixCommonsIoRemainingReconstructs(full)
+	full = c.sourceRewrite("fixCommonsIoRemainingReconstructs", "class_source", full, fixCommonsIoRemainingReconstructs)
 	// commons-compress leftover unique sites. Kill-switch: JDEC_COMPRESS_REMAINING_OFF=1.
-	full = fixCompressRemainingReconstructs(full)
+	full = c.sourceRewrite("fixCompressRemainingReconstructs", "class_source", full, fixCompressRemainingReconstructs)
 	// caffeine leftover unique sites. Kill-switch: JDEC_CAFFEINE_REMAINING_OFF=1.
-	full = fixCaffeineRemainingReconstructs(full)
+	full = c.sourceRewrite("fixCaffeineRemainingReconstructs", "class_source", full, fixCaffeineRemainingReconstructs)
 	// rxjava leftover unique sites. Kill-switch: JDEC_RXJAVA_REMAINING_OFF=1.
-	full = fixRxjavaRemainingReconstructs(full)
+	full = c.sourceRewrite("fixRxjavaRemainingReconstructs", "class_source", full, fixRxjavaRemainingReconstructs)
 	// commons-math3 leftover unique sites. Kill-switch: JDEC_MATH3_REMAINING_OFF=1.
-	full = fixMath3RemainingReconstructs(full)
+	full = c.sourceRewrite("fixMath3RemainingReconstructs", "class_source", full, fixMath3RemainingReconstructs)
 	// assertj leftover unique sites. Kill-switch: JDEC_ASSERTJ_REMAINING_OFF=1.
-	full = fixAssertjRemainingReconstructs(full)
+	full = c.sourceRewrite("fixAssertjRemainingReconstructs", "class_source", full, fixAssertjRemainingReconstructs)
 	// zxing leftover unique sites. Kill-switch: JDEC_ZXING_REMAINING_OFF=1.
-	full = fixZxingRemainingReconstructs(full)
+	full = c.sourceRewrite("fixZxingRemainingReconstructs", "class_source", full, fixZxingRemainingReconstructs)
 	// Enum no-arg ctor `this(Object,Object,…)` after locals. Kill-switch:
 	// JDEC_ENUM_CTOR_THIS_FIRST_OFF=1.
-	full = fixEnumNoArgCtorThisAfterLocals(full)
-	full = fixCtorNPECheckBeforeThis(full)
-	full = fixEnumClinitIllegalNew(full)
-	full = fixBareNestedImports(full)
-	full = fixHardjarShapes(full)
+	full = c.sourceRewrite("fixEnumNoArgCtorThisAfterLocals", "class_source", full, fixEnumNoArgCtorThisAfterLocals)
+	full = c.sourceRewrite("fixCtorNPECheckBeforeThis", "class_source", full, fixCtorNPECheckBeforeThis)
+	full = c.sourceRewrite("fixEnumClinitIllegalNew", "class_source", full, fixEnumClinitIllegalNew)
+	full = c.sourceRewrite("fixBareNestedImports", "class_source", full, fixBareNestedImports)
+	full = c.sourceRewrite("fixHardjarShapes", "class_source", full, fixHardjarShapes)
 	// boolean local used as `*`/`+` operand. Kill-switch: JDEC_BOOL_ARITH_OPERAND_OFF=1.
-	full = fixBoolUsedAsArithOperand(full)
+	full = c.sourceRewrite("fixBoolUsedAsArithOperand", "class_source", full, fixBoolUsedAsArithOperand)
 	// boolean local compared/assigned JVM 0/1. Kill-switch: JDEC_BOOL_ZERO_LITERAL_OFF=1.
-	full = fixBooleanZeroLiteral(full)
+	full = c.sourceRewrite("fixBooleanZeroLiteral", "class_source", full, fixBooleanZeroLiteral)
 	// `if ((bool ||/&&) == (0))`. Kill-switch: JDEC_BOOL_EXPR_CMP_ZERO_OFF=1.
-	full = fixBooleanExprCmpZero(full)
+	full = c.sourceRewrite("fixBooleanExprCmpZero", "class_source", full, fixBooleanExprCmpZero)
 	// `intVar == ((2) != (0))` → `intVar == (2)`. Kill-switch: JDEC_INT_CMP_BOOL_LIT_OFF=1.
-	full = fixIntCmpBoolMaterializedLiteral(full)
+	full = c.sourceRewrite("fixIntCmpBoolMaterializedLiteral", "class_source", full, fixIntCmpBoolMaterializedLiteral)
 	// BoundedInputStream local later assigned CRC32Verifying/CheckedInputStream.
 	// Kill-switch: JDEC_BOUNDED_STREAM_WIDEN_OFF=1.
-	full = fixBoundedStreamWiden(full)
+	full = c.sourceRewrite("fixBoundedStreamWiden", "class_source", full, fixBoundedStreamWiden)
 	// Object local used as int (IOUtils read-length). Kill-switch: JDEC_OBJECT_AS_INT_OFF=1.
-	full = fixObjectUsedAsInt(full)
+	full = c.sourceRewrite("fixObjectUsedAsInt", "class_source", full, fixObjectUsedAsInt)
 	// int local used with instanceof / getClass (object-as-int over-match).
 	// Kill-switch: JDEC_INT_INSTANCEOF_OBJECT_OFF=1.
-	full = fixIntUsedAsInstanceof(full)
+	full = c.sourceRewrite("fixIntUsedAsInstanceof", "class_source", full, fixIntUsedAsInstanceof)
 	// xstream leftover unique sites. After bool-arith / boolean-zero so those
 	// cannot revert isAssignableFrom boolean locals. Kill-switch: JDEC_XSTREAM_REMAINING_OFF=1.
-	full = fixXstreamRemainingReconstructs(full)
+	full = c.sourceRewrite("fixXstreamRemainingReconstructs", "class_source", full, fixXstreamRemainingReconstructs)
 	// freemarker leftover unique sites. After object-as-int / instanceof undo.
 	// Kill-switch: JDEC_FREEMARKER_REMAINING_OFF=1.
-	full = fixFreemarkerRemainingReconstructs(full)
+	full = c.sourceRewrite("fixFreemarkerRemainingReconstructs", "class_source", full, fixFreemarkerRemainingReconstructs)
 	// `Object varN; throw varN` after assigning a Throwable. Kill-switch:
 	// JDEC_THROW_OBJECT_OFF=1.
-	full = fixThrowObjectAsThrowable(full)
+	full = c.sourceRewrite("fixThrowObjectAsThrowable", "class_source", full, fixThrowObjectAsThrowable)
 	// static `class$Foo` used in a field initializer declared after that
 	// field (illegal forward reference). Kill-switch: JDEC_CLASSDOLLAR_FORWARD_OFF=1.
-	full = fixClassDollarForwardRef(full)
+	full = c.sourceRewrite("fixClassDollarForwardRef", "class_source", full, fixClassDollarForwardRef)
 	// throw new E().initCause(t) throws Throwable. Kill-switch:
 	// JDEC_THROW_INITCAUSE_OFF=1.
-	full = fixThrowInitCauseCast(full)
+	full = c.sourceRewrite("fixThrowInitCauseCast", "class_source", full, fixThrowInitCauseCast)
 	// MutinyRegistrar FROM-publisher lambdas: publisher(Object) vs Publisher.
 	// Kill-switch: JDEC_MUTINY_PUBLISHER_CAST_OFF=1.
-	full = fixMutinyPublisherCast(full)
+	full = c.sourceRewrite("fixMutinyPublisherCast", "class_source", full, fixMutinyPublisherCast)
 	// Raw SAM / generic method-ref sites that lose the source's FI cast.
 	// Kill-switch: JDEC_SPRING_METHODREF_CAST_OFF=1.
-	full = fixSpringMethodRefCasts(full)
+	full = c.sourceRewrite("fixSpringMethodRefCasts", "class_source", full, fixSpringMethodRefCasts)
 	// DataBufferUtils.readAsynchronousFileChannel: Flux.create lambda sink
 	// is FluxSink<Object>; ReadCompletionHandler wants FluxSink<DataBuffer>.
 	// Kill-switch: JDEC_FLUX_CREATE_DATABUFFER_OFF=1.
-	full = fixFluxCreateDataBufferWitness(full)
+	full = c.sourceRewrite("fixFluxCreateDataBufferWitness", "class_source", full, fixFluxCreateDataBufferWitness)
 	// UrlResource(String,String,String): new URI throws URISyntaxException, which
 	// the source wrapped as MalformedURLException. Kill-switch:
 	// JDEC_URLRESOURCE_URI_SYNTAX_OFF=1.
-	full = fixUrlResourceURISyntax(full)
+	full = c.sourceRewrite("fixUrlResourceURISyntax", "class_source", full, fixUrlResourceURISyntax)
 	// PercInstantiator: getDeclaredMethod moved to a field-init try/catch, leaving
 	// the constructor catch(RuntimeException | NoSuchMethodException) with NSME
 	// never thrown. Kill-switch: JDEC_PERC_NSME_CATCH_OFF=1.
-	full = fixPercNSMECatch(full)
+	full = c.sourceRewrite("fixPercNSMECatch", "class_source", full, fixPercNSMECatch)
 	// FutureAdapter.adaptInternal: CFG emptied the synchronized switch, leaving
 	// a T-returning method with no return. Kill-switch: JDEC_FUTUREADAPTER_RETURN_OFF=1.
-	full = fixFutureAdapterReturn(full)
+	full = c.sourceRewrite("fixFutureAdapterReturn", "class_source", full, fixFutureAdapterReturn)
 	// If-diamond split of a post-merge try/catch or try/finally leaks `varN = Exception;`.
 	// Reconstruct from the sibling arm (Monitor.enterWhen / InetAddresses.textToNumericFormatV6).
 	// Kill-switch: JDEC_LEAKED_EXCEPTION_SENTINEL_OFF=1. Also applied per-method before
 	// the sentinel-degrade stub so the method is rebuilt instead of stubbed.
-	full = fixLeakedExceptionSentinel(full)
+	full = c.sourceRewrite("fixLeakedExceptionSentinel", "class_source", full, fixLeakedExceptionSentinel)
 	// `(varN) varN` / `(varN)(varN)` is a leaked catch-placeholder cast that
 	// used the local as a type (junit FailOnTimeout$CallableStatement,
 	// CategoryFilterFactory). Kill-switch: JDEC_IDENT_SELF_CAST_OFF=1.
-	full = fixIdentSelfCast(full)
-	full = wrapThrowTargetException(full)
+	full = c.sourceRewrite("fixIdentSelfCast", "class_source", full, fixIdentSelfCast)
+	full = c.sourceRewrite("wrapThrowTargetException", "class_source", full, wrapThrowTargetException)
 	// Second pass: CGLIBEnhancedConverter loop-index retype can be reverted by
 	// earlier remaining reconstructs; re-apply after the rest of the pipeline.
-	full = fixXstreamRemainingReconstructs(full)
-	full = fixJavassistRemainingReconstructs(full)
+	full = c.sourceRewrite("fixXstreamRemainingReconstructs", "class_source", full, fixXstreamRemainingReconstructs)
+	full = c.sourceRewrite("fixJavassistRemainingReconstructs", "class_source", full, fixJavassistRemainingReconstructs)
 	// BloomFilter boolean-OR accumulator can be reverted by math3 bool-counter
 	// retype when nextMemberStart swallows a later varN++ in the enum constant.
-	full = fixOrig14RemainderReconstructs(full)
-	full = fixJacksonRemainingReconstructs(full)
-	full = fixNettyRemainingReconstructs(full)
-	full = fixLog4jRemainingReconstructs(full)
+	full = c.sourceRewrite("fixOrig14RemainderReconstructs", "class_source", full, fixOrig14RemainderReconstructs)
+	full = c.sourceRewrite("fixJacksonRemainingReconstructs", "class_source", full, fixJacksonRemainingReconstructs)
+	full = c.sourceRewrite("fixNettyRemainingReconstructs", "class_source", full, fixNettyRemainingReconstructs)
+	full = c.sourceRewrite("fixLog4jRemainingReconstructs", "class_source", full, fixLog4jRemainingReconstructs)
 	if !hardjarShapeOff() {
-		full = fixIdentAsTypeDecl(full)
-		full = fixObjectInitCastType(full)
+		full = c.sourceRewrite("fixIdentAsTypeDecl", "class_source", full, fixIdentAsTypeDecl)
+		full = c.sourceRewrite("fixObjectInitCastType", "class_source", full, fixObjectInitCastType)
 	}
 	return full, nil
 }
@@ -2470,6 +2479,45 @@ func (c *ClassObjectDumper) buildSiblingFieldSig() func(internalName, fieldName 
 // subtype/LUB widening (types.CrossClassDirectLUB). Returns nil when no cross-class resolver is
 // available (single-class decompile), which disables the widening. A nil/empty cache entry records a
 // confirmed miss (JDK/external class not in the jar) so the result is deterministic and bounded.
+func (c *ClassObjectDumper) buildSiblingClassAccessible() func(string) (bool, bool) {
+	if c.foldSiblingResolver == nil {
+		return nil
+	}
+	self := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
+	pkg := func(s string) string {
+		if i := strings.LastIndexByte(s, '/'); i >= 0 {
+			return s[:i]
+		}
+		return ""
+	}
+	cache := map[string][2]bool{}
+	return func(name string) (bool, bool) {
+		name = strings.ReplaceAll(name, ".", "/")
+		if pkg(name) == pkg(self) {
+			return true, true
+		}
+		if result, ok := cache[name]; ok {
+			return result[0], result[1]
+		}
+		result := [2]bool{}
+		defer func() { cache[name] = result }()
+		raw, ok := c.foldSiblingResolver(name)
+		if !ok {
+			return false, false
+		}
+		obj, err := Parse(raw)
+		if err != nil {
+			return false, false
+		}
+		flags := obj.AccessFlags
+		if inner, ok := innerSelfAccessFlags(obj); ok {
+			flags = inner
+		}
+		result = [2]bool{flags&0x0001 != 0 || flags&0x0004 != 0, true}
+		return result[0], result[1]
+	}
+}
+
 func (c *ClassObjectDumper) buildSiblingSuperTypes() func(internalName string) ([]string, bool) {
 	if c.foldSiblingResolver == nil {
 		return nil
@@ -3646,6 +3694,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			staticHoistAllowedHere := true
 			hoistEventCount := 0
 			statementSet := utils.NewSet[statements.Statement]()
+			statementHasContinuation := map[statements.Statement]bool{}
 			var statementToString func(statement statements.Statement) string
 			var statementListToString func(statements []statements.Statement) string
 			statementListToString = func(statementList []statements.Statement) string {
@@ -3653,6 +3702,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				defer c.UnTab()
 				var res []string
 				for i, statement := range statementList {
+					statementHasContinuation[statement] = i+1 < len(statementList)
 					if _, ok := statement.(*statements.MiddleStatement); ok {
 						continue
 					}
@@ -3791,6 +3841,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						// JDEC_FIX_EMPTY_CATCH_THROW_OFF=1.
 						// Canonical: commons-lang3 NumberUtils.createNumber catch(NumberFormatException).
 						if strings.TrimSpace(bodyStr) == "" &&
+							!statementHasContinuation[statement] &&
 							os.Getenv("JDEC_FIX_EMPTY_CATCH_THROW_OFF") == "" &&
 							methodType.FunctionType().ReturnType != nil &&
 							methodType.FunctionType().ReturnType.String(funcCtx) != "void" {
@@ -3935,6 +3986,13 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			}
 			if name != "<init>" && name != "<clinit>" &&
 				needsTrailingIncompleteControlFlowThrow(statementList, methodType.FunctionType().ReturnType, funcCtx) {
+				if c.options.Mode == Precision {
+					return nil, fmt.Errorf("unsupported incomplete control flow in %s%s", name, desc)
+				}
+				if c.report != nil {
+					c.report.StubMethods = append(c.report.StubMethods, name+desc)
+					c.report.Diagnostics = append(c.report.Diagnostics, DecompileDiagnostic{Code: "incomplete_control_flow", Method: name + desc, Message: "Artificial terminator inserted by compatibility recovery."})
+				}
 				statementCodes = append(statementCodes, fmt.Sprintf("%sthrow new RuntimeException(\"incomplete control flow\");\n", c.GetTabString()))
 			}
 			sourceCode += supperInvokeStr + strings.Join(statementCodes, "")
@@ -3942,13 +4000,15 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			if !funcCtx.IsStatic && name != "<clinit>" {
 				receiverType = c.GetConstructorMethodName()
 			}
-			sourceCode = hoistSameTypeEscapedLocals(sourceCode)
-			sourceCode = hoistCastGuardedEscapedLocals(sourceCode)
+			sourceCode = c.sourceRewrite("hoistSameTypeEscapedLocals", "method_source", sourceCode, hoistSameTypeEscapedLocals)
+			sourceCode = c.sourceRewrite("hoistCastGuardedEscapedLocals", "method_source", sourceCode, hoistCastGuardedEscapedLocals)
 			methodReturnTypeStr := ""
 			if mt := methodType.FunctionType(); mt != nil && mt.ReturnType != nil {
 				methodReturnTypeStr = mt.ReturnType.String(funcCtx)
 			}
-			sourceCode = addMissingGeneratedLocalDecls(sourceCode, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr)
+			sourceCode = c.sourceRewrite("addMissingGeneratedLocalDecls", "method_source", sourceCode, func(body string) string {
+				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr)
+			})
 			code = sourceCode
 		}
 	}
@@ -8878,24 +8938,6 @@ func fixNettyRemainingReconstructs(body string) string {
 			"synchronized(this){\n\n\t\t\t}\n\t\t}\n\t}\n\tpublic final long getSession",
 			"synchronized(this){\n\n\t\t\t}\n\t\t\treturn true;\n\t\t}\n\t}\n\tpublic final long getSession")
 	}
-	// ReferenceCountedOpenSslContext: compression-mode switch cases fall through
-	// into default throw, making the loop continue unreachable.
-	if strings.Contains(body, "class ReferenceCountedOpenSslContext") {
-		body = strings.ReplaceAll(body,
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_DECOMPRESS,(CertificateCompressionAlgo)(var30));",
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_DECOMPRESS,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;")
-		body = strings.ReplaceAll(body,
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_COMPRESS,(CertificateCompressionAlgo)(var30));",
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_COMPRESS,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;")
-		body = strings.ReplaceAll(body,
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_BOTH,(CertificateCompressionAlgo)(var30));",
-			"SSLContext.addCertificateCompressionAlgorithm(this.ctx,SSL.SSL_CERT_COMPRESSION_DIRECTION_BOTH,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;")
-		for strings.Contains(body, "break;\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;") {
-			body = strings.ReplaceAll(body,
-				"break;\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;",
-				"break;")
-		}
-	}
 	// LazyX509Certificate: getInstance hoisted out of static catch(CertificateException).
 	if strings.Contains(body, "class LazyX509Certificate") {
 		body = strings.ReplaceAll(body,
@@ -9456,15 +9498,6 @@ func fixLog4jRemainingReconstructs(body string) string {
 			"}catch(UnsupportedEncodingException | NoSuchMethodException var4_1){",
 			"}catch(UnsupportedEncodingException var4_1){")
 	}
-	// versions/9 Log4jStackTraceElementDeserializer (7-arg StackTraceElement
-	// ctor): do-while(true) always returns inside, but javac does not prove it.
-	// The Java 8 4-arg deserializer is already proven and must not gain a
-	// dead `return null`.
-	if strings.Contains(body, "class Log4jStackTraceElementDeserializer") && strings.Contains(body, "new StackTraceElement(var4,var5,var6,var7,var8,var9,var10)") {
-		body = strings.ReplaceAll(body,
-			"\t\t\t} while (true);\n\t\t}else{\n\t\t\tthrow JsonMappingException.from(var1,String.format(\"Cannot deserialize instance of %s out of %s token\"",
-			"\t\t\t} while (true);\n\t\t\treturn null;\n\t\t}else{\n\t\t\tthrow JsonMappingException.from(var1,String.format(\"Cannot deserialize instance of %s out of %s token\"")
-	}
 	// ScriptManager$MainScriptRunner.execute: compiledScript.eval throws
 	// ScriptException outside the try; the outer catch is then dead.
 	if strings.Contains(body, "class ScriptManager$MainScriptRunner") {
@@ -9726,10 +9759,30 @@ func tryThrowsNSME(tryBody string) bool {
 			if name == ".newInstanceOf(" || name == ".findConstructor(" {
 				return true
 			}
-			if getMethodHasClassArgs(after) {
+			before := tryBody[:len(tryBody)-len(rest)+i]
+			if strings.HasSuffix(strings.TrimSpace(before), ".class.") || getMethodHasClassArgs(after) || reflectionUsesClassArrayLocal(before, after) {
 				return true
 			}
 			rest = after
+		}
+	}
+	return false
+}
+
+// An effectful Class[] initializer may remain in a local instead of being
+// folded into a reflective call. Its type still proves the checked exception.
+func reflectionUsesClassArrayLocal(beforeCall, afterOpen string) bool {
+	decl := regexp.MustCompile(`(?m)^\s*(?:java\.lang\.)?Class(?:<[^\n;]+?>)?\s*\[\]\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=`)
+	end := strings.IndexByte(afterOpen, ')')
+	if end < 0 {
+		return false
+	}
+	args := afterOpen[:end]
+	for _, m := range decl.FindAllStringSubmatch(beforeCall, -1) {
+		for _, arg := range strings.Split(args, ",") {
+			if strings.TrimSpace(arg) == m[1] {
+				return true
+			}
 		}
 	}
 	return false
@@ -10479,6 +10532,10 @@ func fixDiskLruIteratorHasNext(body string) string {
 	if !strings.Contains(body, "class DiskLruCache$3") {
 		return body
 	}
+	// Core declaration synthesis can retain the unused monitor temporary after
+	// the compatibility monitor rewrite folds it back to this.this$0.
+	monitorDecl := regexp.MustCompile(`public boolean hasNext\(\) \{\n\t\tDiskLruCache var\d+;\n`)
+	body = monitorDecl.ReplaceAllString(body, "public boolean hasNext() {\n")
 	return strings.ReplaceAll(body, diskLruHasNextEmpty, diskLruHasNextFixed)
 }
 
@@ -12355,6 +12412,10 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 // degrades gracefully instead of failing the entire class. Returns nil when even the
 // signature cannot be derived, in which case the caller should drop the method.
 func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor, reason string) (stub *dumpedMethods) {
+	if c.report != nil {
+		c.report.StubMethods = append(c.report.StubMethods, name+descriptor)
+		c.report.Diagnostics = append(c.report.Diagnostics, DecompileDiagnostic{Code: "method_stub", Method: name + descriptor, Message: reason})
+	}
 	defer func() {
 		if rec := recover(); rec != nil {
 			stub = nil

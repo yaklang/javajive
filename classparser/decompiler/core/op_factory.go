@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"github.com/yaklang/javajive/internal/omap"
 )
 
@@ -45,7 +46,11 @@ func OperationFactoryLookupSwitch(reader *JavaByteCodeReader, opcode *OpCode) er
 		return err
 	}
 	defaultTargetPos := Convert4bytesToInt(defaultValue)
-	pairN := Convert4bytesToInt(pairsValue)
+	pairN := int32(Convert4bytesToInt(pairsValue))
+	if pairN < 0 || int64(pairN)*8 > int64(reader.reader.Len()) {
+		return fmt.Errorf("invalid lookupswitch pair count %d at PC %d", pairN, opcode.CurrentOffset)
+	}
+	var previous int32
 	opcode.SwitchJmpCase = omap.NewEmptyOrderedMap[int, int32]()
 	opcode.SwitchJmpCase1 = omap.NewEmptyOrderedMap[int, int]()
 	for i := 0; i < int(pairN); i++ {
@@ -60,15 +65,18 @@ func OperationFactoryLookupSwitch(reader *JavaByteCodeReader, opcode *OpCode) er
 			return err
 		}
 		targetPos := Convert4bytesToInt(target)
-		if targetPos == defaultTargetPos {
-			continue
-		}
+
 		// The lookupswitch match key is a signed 32-bit int (JVMS 6.5 lookupswitch); reading it as
 		// uint32 turns negative labels like -5 into 4294967291, which renders as `case 4294967291`
 		// and breaks recompilation ("integer number too large"). Sign-extend through int32.
-		opcode.SwitchJmpCase.Set(int(int32(Convert4bytesToInt(val))), int32(targetPos+uint32(opcode.CurrentOffset)))
+		key := int32(Convert4bytesToInt(val))
+		if i > 0 && key <= previous {
+			return fmt.Errorf("unsorted lookupswitch keys at PC %d", opcode.CurrentOffset)
+		}
+		previous = key
+		opcode.SwitchJmpCase.Set(int(key), int32(int64(int32(targetPos))+int64(opcode.CurrentOffset)))
 	}
-	opcode.SwitchJmpCase.Set(-1, int32(defaultTargetPos+uint32(opcode.CurrentOffset)))
+	opcode.SwitchDefaultOffset = int32(int64(int32(defaultTargetPos)) + int64(opcode.CurrentOffset))
 	return nil
 }
 func OperationFactoryTableSwitch(reader *JavaByteCodeReader, opcode *OpCode) error {
@@ -103,22 +111,23 @@ func OperationFactoryTableSwitch(reader *JavaByteCodeReader, opcode *OpCode) err
 	// signed to stay obviously correct).
 	startVal := int32(Convert4bytesToInt(lowValue))
 	highVal := int32(Convert4bytesToInt(highValue))
-	targetN := int(highVal) - int(startVal) + 1
+	targetN := int64(highVal) - int64(startVal) + 1
+	if targetN <= 0 || targetN*4 > int64(reader.reader.Len()) {
+		return fmt.Errorf("invalid tableswitch range %d..%d at PC %d", startVal, highVal, opcode.CurrentOffset)
+	}
 	defaultTargetPos := Convert4bytesToInt(defaultValue)
 	opcode.SwitchJmpCase = omap.NewEmptyOrderedMap[int, int32]()
 	opcode.SwitchJmpCase1 = omap.NewEmptyOrderedMap[int, int]()
-	for i := 0; i < targetN; i++ {
+	for i := 0; int64(i) < targetN; i++ {
 		target := make([]byte, 4)
 		_, err = reader.Read(target)
 		if err != nil {
 			return err
 		}
 		targetPos := Convert4bytesToInt(target)
-		if targetPos == defaultTargetPos {
-			continue
-		}
+
 		opcode.SwitchJmpCase.Set(int(startVal)+i, int32(uint32(opcode.CurrentOffset)+targetPos))
 	}
-	opcode.SwitchJmpCase.Set(-1, int32(defaultTargetPos+uint32(opcode.CurrentOffset)))
+	opcode.SwitchDefaultOffset = int32(int64(int32(defaultTargetPos)) + int64(opcode.CurrentOffset))
 	return nil
 }

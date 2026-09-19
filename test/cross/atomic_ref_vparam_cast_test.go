@@ -16,7 +16,7 @@ package cross
 // AtomicReference<V>.compareAndSet(V, V) 定型判 "Object cannot be converted to T"。治本
 // (jdkMethodParamTypeArgIndex 增 AtomicReference 分支, 使 instantiatedParamType 把
 // compareAndSet 形参 0/1 解析为接收者 V, 既有 arg-cast 路径遂重下 (T) 造型)。
-// JDEC_ATOMIC_REF_PARAM_OFF=1 关掉治本必复现。
+// 核心 reference-web 类型恢复现在也能声明 T；关闭旧造型补丁后仍须保持该诊断为零。
 
 import (
 	"os"
@@ -82,12 +82,9 @@ func atomicRefVParamErrCount(t *testing.T, jarPath string, killOff bool) int {
 	return n
 }
 
-// TestAtomicRefVParamCastIsLoadBearing pins commons-lang3 AtomicInitializer.get: an Object-typed
-// argument to `reference.compareAndSet(...)` (receiver recovered as AtomicReference<T>) must be wrapped
-// in a `(T)` cast, compareAndSet's value parameter resolved to the receiver's V via the AtomicReference
-// parameter table. Disabling the fix via the kill-switch must reintroduce the "Object cannot be converted
-// to T" error.
-func TestAtomicRefVParamCastIsLoadBearing(t *testing.T) {
+// TestAtomicRefVParamCompilationPreserved keeps AtomicInitializer free of the
+// Object-to-T diagnostic with either setting of the legacy argument-cast pass.
+func TestAtomicRefVParamCompilationPreserved(t *testing.T) {
 	lookJavac(t)
 	jarPath := resolveJar(jarSpecs["commons-lang3"].relPath)
 	if jarPath == "" {
@@ -98,11 +95,9 @@ func TestAtomicRefVParamCastIsLoadBearing(t *testing.T) {
 	off := atomicRefVParamErrCount(t, jarPath, true) // fix OFF (kill-switch)
 	t.Logf("AtomicInitializer AtomicReference V-param errors: ON=%d OFF=%d", on, off)
 
-	if off == 0 {
-		t.Fatalf("kill-switch did not reproduce the defect: OFF=%d (expected > 0)", off)
-	}
-	if on >= off {
-		t.Errorf("fix is NOT load-bearing: ON=%d OFF=%d (ON must be strictly fewer)", on, off)
+	// Core web typing now declares the local as T, so both policies compile.
+	if off != 0 {
+		t.Errorf("core declaration regressed without the legacy argument cast: %d errors", off)
 	}
 	if on != 0 {
 		t.Errorf("fix did not clear the AtomicReference V-param error: ON=%d (want 0)", on)

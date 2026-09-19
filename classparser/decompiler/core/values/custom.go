@@ -7,6 +7,10 @@ import (
 )
 
 type CustomValue struct {
+	// Known captures describe lambda creation, without executing or inspecting
+	// the deferred lambda body. Other custom expressions remain opaque.
+	CapturesKnown  bool
+	Captures       []JavaValue
 	Flag           string
 	NoOuterCapture bool
 	// IsMethodRef distinguishes a method reference (`Type::method`, `receiver::method`, `Type::new`)

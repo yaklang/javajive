@@ -3,7 +3,6 @@ package rewriter
 import (
 	"fmt"
 	"slices"
-	"sync/atomic"
 
 	"github.com/samber/lo"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -13,10 +12,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/utils"
 )
-
-// syntheticCatchVarCounter backs unique names for synthesized catch variables (empty/pop catches
-// have no named exception in the bytecode). The name only has to be a unique valid identifier.
-var syntheticCatchVarCounter atomic.Int64
 
 // extractCatchException pulls the caught-exception variable out of a structured catch handler body
 // and returns the remaining handler statements. Three handler shapes occur in real bytecode:
@@ -28,7 +23,7 @@ var syntheticCatchVarCounter atomic.Int64
 //     and drop the discard.
 //  3. fully elided: neither of the above. Synthesize a catch variable and keep the whole body so no
 //     code is lost.
-func extractCatchException(body []statements.Statement) (*values.JavaRef, []statements.Statement) {
+func (manager *RewriteManager) extractCatchException(body []statements.Statement) (*values.JavaRef, []statements.Statement) {
 	if len(body) > 0 {
 		if assign, ok := body[0].(*statements.AssignStatement); ok {
 			if ref, ok := assign.LeftValue.(*values.JavaRef); ok {
@@ -50,7 +45,8 @@ func extractCatchException(body []statements.Statement) (*values.JavaRef, []stat
 			}
 		}
 	}
-	name := fmt.Sprintf("ex%d", syntheticCatchVarCounter.Add(1))
+	manager.syntheticCatchVarCounter++
+	name := fmt.Sprintf("ex%d", manager.syntheticCatchVarCounter)
 	ref := values.NewJavaRef(nil, nil, excType)
 	ref.CustomValue = values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 		return name
@@ -94,9 +90,13 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	tryNode.RemoveAllNext()
 	var endNodes []*core.Node
 	visitedSet := utils.NewSet[*core.Node]()
-	getBody := func(startNode *core.Node) ([]statements.Statement, error) {
+	getBody := func(startNode, stopAt *core.Node) ([]statements.Statement, error) {
 		var sts []statements.Statement
 		err := core.WalkGraph[*core.Node](startNode, func(node *core.Node) ([]*core.Node, error) {
+			if node == stopAt {
+				endNodes = append(endNodes, node)
+				return nil, nil
+			}
 			visitedSet.Add(node)
 			err := manager.CheckVisitedNode(node)
 			if err != nil {
@@ -126,9 +126,58 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	// handler by content (handler bodies open with the caught-exception store). The walk order
 	// is preserved (it determines which path claims shared merge nodes), so only the labelling
 	// changes versus the old positional scheme.
+	// Throwable cleanup handlers (including try-with-resources) must not absorb
+	// subsequent resources into the protected body. Typed user catches still
+	// use the existing region builder, whose folded expression boundaries differ.
+	cleanupRegion := false
+	handlerCount := 0
+	for _, start := range next {
+		if !start.IsCatchStart {
+			continue
+		}
+		handlerCount++
+		if as, ok := start.Statement.(*statements.AssignStatement); ok {
+			if cv, ok := core.UnpackSoltValue(as.JavaValue).(*values.CustomValue); ok && cv.Flag == "exception" {
+				typ := cv.Type().String(&class_context.ClassContext{})
+				if typ == "Throwable" || typ == "java.lang.Throwable" {
+					cleanupRegion = true
+				}
+			}
+		}
+	}
+	// Mixed typed catches plus a finally handler share the normal cleanup tail;
+	// stopping only the try arm would detach that tail from the normal path.
+	cleanupRegion = cleanupRegion && handlerCount == 1
 	bodies := make([][]statements.Statement, len(next))
 	for i := range next {
-		body, err := getBody(next[i])
+		var stopAt *core.Node
+		if cleanupRegion && !next[i].IsCatchStart {
+			stopAt = node.ProtectedEnd
+			for seen := map[*core.Node]bool{}; stopAt != nil && !seen[stopAt]; {
+				seen[stopAt] = true
+				if _, jump := stopAt.Statement.(*statements.GOTOStatement); !jump || len(stopAt.Next) != 1 {
+					break
+				}
+				stopAt = stopAt.Next[0]
+			}
+			// javac excludes the return instruction from its protected range,
+			// but the returned expression may contain a protected invocation.
+			// Expression folding similarly moves a whole protected expression
+			// onto the first emitted statement at the exclusive boundary.
+			if stopAt == next[i] {
+				stopAt = nil
+			}
+			if stopAt != nil {
+				if _, ret := stopAt.Statement.(*statements.ReturnStatement); ret {
+					stopAt = nil
+				} else if middle, ok := stopAt.Statement.(*statements.MiddleStatement); ok && middle.Flag == "monitor_exit" {
+					// Kotlin's protected range ends before the normal monitorexit.
+					// The synchronized structurer needs that marker in the body.
+					stopAt = nil
+				}
+			}
+		}
+		body, err := getBody(next[i], stopAt)
 		if err != nil {
 			return err
 		}
@@ -172,7 +221,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 		// variable (synthesizing one for empty/pop handlers). This is what eliminates the
 		// "try without catch handler" malformed-try stub.
 		for i, body := range catchBodies {
-			ref, rest := extractCatchException(body)
+			ref, rest := manager.extractCatchException(body)
 			tryCatchSt.Exception = append(tryCatchSt.Exception, ref)
 			catchBodies[i] = rest
 		}

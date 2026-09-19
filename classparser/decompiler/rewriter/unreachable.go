@@ -9,9 +9,9 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
-// pruneCtx is a throwaway rendering context used only to inspect the textual form of
+// &class_context.ClassContext{} is a throwaway rendering context used only to inspect the textual form of
 // the opaque CustomStatement break/continue/throw markers. It carries no state.
-var pruneCtx = &class_context.ClassContext{}
+// Render probes own their import state.
 
 // PruneUnreachableStatements removes statements that follow a statement which cannot
 // complete normally (a "terminal" statement) within the same block. javac rejects
@@ -72,7 +72,7 @@ func statementIsTerminal(st statements.Statement) bool {
 	case *statements.ReturnStatement:
 		return true
 	case *statements.CustomStatement:
-		txt := strings.TrimSpace(s.String(pruneCtx))
+		txt := strings.TrimSpace(s.String(&class_context.ClassContext{}))
 		return txt == "break" || strings.HasPrefix(txt, "break ") ||
 			txt == "continue" || strings.HasPrefix(txt, "continue ") ||
 			strings.HasPrefix(txt, "throw ")
@@ -81,6 +81,18 @@ func statementIsTerminal(st statements.Statement) bool {
 			return false
 		}
 		return blockIsTerminal(s.IfBody) && blockIsTerminal(s.ElseBody)
+	case *statements.SwitchStatement:
+		return !switchCompletesNormally(s)
+	case *statements.TryCatchStatement:
+		if !blockIsTerminal(s.TryBody) {
+			return false
+		}
+		for _, body := range s.CatchBodies {
+			if !blockIsTerminal(body) {
+				return false
+			}
+		}
+		return true
 	case *statements.DoWhileStatement:
 		return isLiteralTrue(s.ConditionValue) && !subtreeHasBreak(s.Body)
 	case *statements.WhileStatement:
@@ -123,7 +135,7 @@ func subtreeHasBreak(sts []statements.Statement) bool {
 func statementSubtreeHasBreak(st statements.Statement) bool {
 	switch s := st.(type) {
 	case *statements.CustomStatement:
-		txt := strings.TrimSpace(s.String(pruneCtx))
+		txt := strings.TrimSpace(s.String(&class_context.ClassContext{}))
 		return txt == "break" || strings.HasPrefix(txt, "break ")
 	case *statements.IfStatement:
 		return subtreeHasBreak(s.IfBody) || subtreeHasBreak(s.ElseBody)

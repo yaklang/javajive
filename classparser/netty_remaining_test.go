@@ -102,7 +102,7 @@ func TestNettyRemainingReconstructsAreLoadBearing(t *testing.T) {
 		"(PemEncoded)(var18_1.retain())",
 		"wildcard4 = InetAddress.getByAddress(new byte[4]);",
 		"X509_CERT_FACTORY = CertificateFactory.getInstance(\"X.509\");",
-		"DIRECTION_DECOMPRESS,(CertificateCompressionAlgo)(var30));\n\t\t\t\t\t\t\t\t\t\t\t\tbreak;",
+		"DIRECTION_DECOMPRESS,(CertificateCompressionAlgo)(var30));\n}",
 	}
 	for _, want := range checks {
 		if !strings.Contains(on, want) {

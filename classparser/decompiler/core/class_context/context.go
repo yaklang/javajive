@@ -194,6 +194,9 @@ type ClassContext struct {
 	// Nil when no cross-class resolver is available (single-class decompile); set only on the jar /
 	// DecompileWithResolver path.
 	SiblingSuperTypes func(internalName string) (supers []string, ok bool)
+	// SiblingClassAccessible checks whether a flattened class can be named in
+	// this class's package. Unknown external types return known=false.
+	SiblingClassAccessible func(internalName string) (accessible, known bool)
 	// SiblingCtorSig resolves a jar-internal class's CONSTRUCTOR generic Signature by binary internal name
 	// (slash-form) and DESCRIPTOR argument count. It returns the raw `<init>` Signature string (e.g.
 	// `(Lcom/google/common/graph/BaseGraph<TN;>;TN;)V` for IncidentEdgeSet) or ok=false for JDK/external

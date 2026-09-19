@@ -184,8 +184,10 @@ func fixFreemarkerRemainingReconstructs(body string) string {
 	body = strings.ReplaceAll(body,
 		"Expression var3 = ((this.blamedExpression) != (null)) ? (this.blamedExpression) : (((this.ftlInstructionStackSnapshot) != (null)) ? (((this.ftlInstructionStackSnapshot.length) != (0)) ? ((Expression)(this.ftlInstructionStackSnapshot[0])) : (null)) : (null));",
 		"TemplateObject var3 = null;\n\t\t\t\tif ((this.blamedExpression) != (null)){\n\t\t\t\t\tvar3 = this.blamedExpression;\n\t\t\t\t}else{\n\t\t\t\t\tif (((this.ftlInstructionStackSnapshot) != (null)) && ((this.ftlInstructionStackSnapshot.length) != (0))){\n\t\t\t\t\t\tvar3 = this.ftlInstructionStackSnapshot[0];\n\t\t\t\t\t}\n\t\t\t\t}")
-	body = strings.ReplaceAll(body, "TemplateElement var3 = null;", "freemarker.core.TemplateObject var3 = null;")
-	body = strings.ReplaceAll(body, "TemplateObject var3 = null;", "freemarker.core.TemplateObject var3 = null;")
+	if strings.Contains(body, "this.blamedExpression") && strings.Contains(body, "this.ftlInstructionStackSnapshot") {
+		body = strings.ReplaceAll(body, "TemplateElement var3 = null;", "freemarker.core.TemplateObject var3 = null;")
+		body = strings.ReplaceAll(body, "\tTemplateObject var3 = null;", "\tfreemarker.core.TemplateObject var3 = null;")
+	}
 
 	if strings.Contains(body, "class TemplateCache") && strings.Contains(body, "throw var13;") {
 		body = strings.Replace(body, "throw var13;", "throw new RuntimeException(var13);", 1)

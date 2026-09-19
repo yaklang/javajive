@@ -24,10 +24,12 @@ func TestFreemarkerTemplateCtorThisFirstIsLoadBearing(t *testing.T) {
 		"ParserConfiguration var7 = null;\n\t\tthis(var1,var2,var4,var5);")
 }
 
-func TestFreemarkerFMParserCtorThisFirstIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FMParser.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"this(var3);\n\t\tOutputFormat var7 = null;",
-		"OutputFormat var7 = null;\n\t\tLegacyConstructorParserConfiguration var5 = null;\n\t\tthis(var3);")
+// Constructor invocation precedes inert declarations in the core, independently
+// of the legacy FreeMarker source reconstruction switch.
+func TestFreemarkerFMParserPreservesConstructorOrder(t *testing.T) {
+	assertDecompileBothPreserve(t, "testdata/regression/FMParser.class", "JDEC_FREEMARKER_REMAINING_OFF",
+		"this(var3);\n\t\tLegacyConstructorParserConfiguration var5 = null;",
+		"OutputFormat var7 = null;", "NullArgumentException.check(var4);")
 }
 
 func TestFreemarkerMarkupOutputStringIsLoadBearing(t *testing.T) {
@@ -36,10 +38,10 @@ func TestFreemarkerMarkupOutputStringIsLoadBearing(t *testing.T) {
 		"this.output((MO)(var1.getPlainTextContent()),var2);")
 }
 
-func TestFreemarkerIsoBIInstanceofSplitIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/BuiltInsForDates$iso_BI$Result.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"var4 = ((AdapterTemplateModel)(var2)).getAdaptedObject(TimeZone.class);\n\t\t\t\tif (var4 instanceof TimeZone){",
-		"if (var4 = ((AdapterTemplateModel)(var2)).getAdaptedObject(TimeZone.class) instanceof TimeZone){")
+// Assignment operands must be parenthesized before instanceof in both policies.
+func TestFreemarkerIsoBIPreservesAssignmentPrecedence(t *testing.T) {
+	assertDecompileBothPreserve(t, "testdata/regression/BuiltInsForDates$iso_BI$Result.class", "JDEC_FREEMARKER_REMAINING_OFF",
+		"if ((var4 = ((AdapterTemplateModel)(var2)).getAdaptedObject(TimeZone.class)) instanceof TimeZone){")
 }
 
 func TestFreemarkerUnknownSettingSuperIsLoadBearing(t *testing.T) {
@@ -109,9 +111,8 @@ func TestFreemarkerNfaLoopBreakSnippet(t *testing.T) {
 }
 
 func TestFreemarkerNfaLoopBreakIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FMParserTokenManager.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"if ((var4) == (var3)){\n\t\t\t\t\t\t\tbreak;",
-		"if ((var4) == (var3)){\n\n\t\t\t\t\t\t}else{")
+	assertDecompileBothPreserve(t, "testdata/regression/FMParserTokenManager.class", "JDEC_FREEMARKER_REMAINING_OFF",
+		"if ((var4) == (var3)){\n\t\t\t\t\t\tbreak LOOP_1;", "break LOOP_2;", "this.jjstateSet[this.jjnewStateCnt++]")
 }
 
 func TestFreemarkerParserLoopExitSnippet(t *testing.T) {
@@ -123,9 +124,9 @@ func TestFreemarkerParserLoopExitSnippet(t *testing.T) {
 }
 
 func TestFreemarkerParserLoopExitIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FMParser.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"\t\t\t}\n\t\t\tbreak;\n\t\t} while (true);\n\t\tthis.jj_la1[",
-		"\t\t\tdefault:\n\t\t\t\tbreak;\n\t\t\t}\n\t\t} while (true);\n\t\tthis.jj_la1[")
+	assertDecompileBothPreserve(t, "testdata/regression/FMParser.class", "JDEC_FREEMARKER_REMAINING_OFF",
+		"LOOP_1:", "break LOOP_1;", "this.jj_la1[0] = this.jj_gen;", "return var1;",
+		"case 153:\n\t\t\t\tswitch (")
 }
 
 func TestFreemarkerTruncateStaticInitSnippet(t *testing.T) {
@@ -147,9 +148,8 @@ func TestFreemarkerTruncateStaticInitIsLoadBearing(t *testing.T) {
 }
 
 func TestFreemarkerBuilderCallCheckedExceptionsIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/BuilderCallExpression.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"return ClassUtil.forName(this.className).newInstance();\n\t\t\t\t\t}catch(InstantiationException var1_3){",
-		"return ClassUtil.forName(this.className).newInstance();\n\t\t\t}else{")
+	assertDecompileBothPreserve(t, "testdata/regression/BuilderCallExpression.class", "JDEC_FREEMARKER_REMAINING_OFF",
+		"return ClassUtil.forName(this.className).newInstance();", "catch(InstantiationException var1_4)", "catch(IllegalAccessException var1_4)")
 }
 
 func TestFreemarkerClassIntrospectorGetReturnIsLoadBearing(t *testing.T) {
@@ -185,9 +185,8 @@ func TestFreemarkerDefaultMemberAccessPolicyCheckedIsLoadBearing(t *testing.T) {
 }
 
 func TestFreemarkerNodeListModelGetReturnIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/NodeListModel.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"if (((var2) == (null)) && ((var3) == (null))){\n\t\t\t\t\tthrow new TemplateModelException",
-		"if (((var2) == (null)) && ((var3) == (null))){};")
+	assertDecompileBothPreserve(t, "testdata/regression/NodeListModel.class", "JDEC_FREEMARKER_REMAINING_OFF",
+		"var3 = NAMED_CHILDREN_OP;", "evaluateElementOperation(var2,this.nodes)", "return createNodeListModel(var5_1,this.namespaces);")
 }
 
 func TestFreemarkerRhinoWrapperStaticInitIsLoadBearing(t *testing.T) {

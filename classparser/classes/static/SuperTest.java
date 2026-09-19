@@ -1,6 +1,6 @@
 package org.benf.cfr.reader;
 
- class VarFold$Test extends VarFold {
+public class VarFold$Test extends VarFold {
 	// Fields
 	final VarFold this$0;
 

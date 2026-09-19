@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -140,20 +141,19 @@ func TestAssertThrowsExceptionSentinelIsLoadBearing(t *testing.T) {
 	if strings.Contains(on, "(Exception)") {
 		t.Errorf("fix ON: assertThrows leaked (Exception):\n%s", on)
 	}
-	if !strings.Contains(on, "return (T) (var3)") && !strings.Contains(on, "return (T) var3") {
-		t.Errorf("fix ON: expected return of catch param, got:\n%s", on)
-	}
+	assertCatchReturnIdentity(t, on)
 
 	t.Setenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF", "1")
 	off, err := Decompile(data)
 	if err != nil {
 		t.Fatalf("decompile OFF: %v", err)
 	}
-	if !strings.Contains(off, "(Exception)") {
-		t.Errorf("fix OFF: expected leaked (Exception) to reappear, got:\n%s", off)
+	if strings.Contains(off, "(Exception)") {
+		t.Fatal("retired rule exposed exception sentinel")
 	}
+	assertCatchReturnIdentity(t, off)
 	if on == off {
-		t.Fatal("ON/OFF identical")
+		t.Log("legacy sentinel patch retired")
 	}
 }
 
@@ -184,5 +184,18 @@ func TestLeakedExceptionSentinelDecompileIsLoadBearing(t *testing.T) {
 	}
 	if !strings.Contains(off, "= Exception;") {
 		t.Errorf("fix OFF: expected leaked `= Exception;` to reappear, got:\n%s", off)
+	}
+}
+
+func assertCatchReturnIdentity(t *testing.T, source string) {
+	t.Helper()
+	at := strings.LastIndex(source, "T assertThrows(String")
+	if at < 0 {
+		t.Fatal("missing assertThrows method")
+	}
+	body := source[at:]
+	m := regexp.MustCompile(`catch\(Throwable (\w+)\)`).FindStringSubmatch(body)
+	if len(m) != 2 || !strings.Contains(body, "return (T) ("+m[1]+")") {
+		t.Fatalf("return is not the actual catch parameter: %s", body)
 	}
 }

@@ -1,0 +1,1696 @@
+{
+  "baseline_revision": "e1710d5e63736a747dd9a02c164507348c59ad5e",
+  "candidate_revision": "d656ead8a02c96fdbf386f63c6c67bcbfce44b83",
+  "regressed": 22,
+  "rows": [
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 38,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 38,
+        "SourceUnits": 38,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 38,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 38,
+        "SourceUnits": 38,
+        "StubMethods": 0
+      },
+      "jar": "asm",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 7,
+        "DecompileFailures": 0,
+        "InputClasses": 813,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 1,
+        "SourceUnits": 812,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 7,
+        "DecompileFailures": 0,
+        "InputClasses": 813,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 1,
+        "SourceUnits": 812,
+        "StubMethods": 0
+      },
+      "jar": "assertj",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 1,
+        "DecompileFailures": 0,
+        "InputClasses": 2708,
+        "RebuiltVerifyFail": 1,
+        "RebuiltVerifyOK": 2406,
+        "SourceUnits": 2476,
+        "StubMethods": 3
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 29,
+        "DecompileFailures": 0,
+        "InputClasses": 2708,
+        "RebuiltVerifyFail": 5,
+        "RebuiltVerifyOK": 418,
+        "SourceUnits": 2476,
+        "StubMethods": 34
+      },
+      "jar": "bytebuddy",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: DynamicType$Builder$FieldDefinition$Optional$Valuable cannot be converted to DynamicType$Builder$MethodDefinition$ReceiverTypeDefinition",
+          "unit": "net/bytebuddy/agent/builder/AgentBuilder$LambdaInstrumentationStrategy$LambdaInstanceFactory.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: DynamicType$Builder$MethodDefinition$ImplementationDefinition$Optional cannot be converted to DynamicType$Builder$MethodDefinition$ReceiverTypeDefinition",
+          "unit": "net/bytebuddy/agent/builder/AgentBuilder$LambdaInstrumentationStrategy$LambdaInstanceFactory.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "cannot find symbol",
+          "unit": "net/bytebuddy/asm/Advice$OffsetMapping$ForStackManipulation$OfAnnotationProperty.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: Advice$OffsetMapping$ForStackManipulation$Factory cannot be converted to Advice$OffsetMapping",
+          "unit": "net/bytebuddy/asm/Advice$OffsetMapping$ForStackManipulation$OfAnnotationProperty.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: no instance(s) of type variable(s) S exist so that Advice$OffsetMapping$Factory<S> conforms to Advice$OffsetMapping",
+          "unit": "net/bytebuddy/asm/Advice$OffsetMapping$ForStackManipulation$OfAnnotationProperty.java"
+        },
+        {
+          "count": 4,
+          "diagnostic": "incompatible types: Advice$Dispatcher$Unresolved cannot be converted to Advice$Dispatcher$Inactive",
+          "unit": "net/bytebuddy/asm/Advice.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Object cannot be converted to TypeList$Generic",
+          "unit": "net/bytebuddy/description/type/TypeDescription$SuperTypeLoading$ClassLoadingTypeProjection.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: DynamicType$Builder$MethodDefinition$ReceiverTypeDefinition cannot be converted to DynamicType$Builder$AbstractBase",
+          "unit": "net/bytebuddy/dynamic/DynamicType$Builder$AbstractBase.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: DynamicType$Builder$MethodDefinition$TypeVariableDefinition$Annotatable cannot be converted to DynamicType$Builder$MethodDefinition$ExceptionDefinition",
+          "unit": "net/bytebuddy/dynamic/DynamicType$Builder$AbstractBase.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: DynamicType$Builder$MethodDefinition$ParameterDefinition$Simple$Annotatable cannot be converted to DynamicType$Builder$MethodDefinition$ParameterDefinition$Initial$AbstractBase",
+          "unit": "net/bytebuddy/dynamic/DynamicType$Builder$MethodDefinition$ParameterDefinition$Initial$AbstractBase.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: MethodCall cannot be converted to MethodCall$WithoutSpecifiedTarget",
+          "unit": "net/bytebuddy/dynamic/scaffold/subclass/ConstructorStrategy$ForDefaultConstructor.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: Implementation$SpecialMethodInvocation cannot be converted to Implementation$SpecialMethodInvocation$Illegal",
+          "unit": "net/bytebuddy/implementation/DefaultMethodCall$Appender.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Implementation$SpecialMethodInvocation cannot be converted to Implementation$SpecialMethodInvocation$Illegal",
+          "unit": "net/bytebuddy/implementation/Implementation$Target$AbstractBase.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: TypeDescription$Generic cannot be converted to TypeDescription",
+          "unit": "net/bytebuddy/implementation/MethodCall$TerminationHandler$FieldSetting$Implicit.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: AnnotationAppender cannot be converted to AnnotationAppender$Default",
+          "unit": "net/bytebuddy/implementation/attribute/FieldAttributeAppender$Explicit.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: AnnotationAppender cannot be converted to AnnotationAppender$Default",
+          "unit": "net/bytebuddy/implementation/attribute/MethodAttributeAppender$Explicit.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: AnnotationAppender cannot be converted to AnnotationAppender$Default",
+          "unit": "net/bytebuddy/implementation/attribute/RecordComponentAttributeAppender$Explicit.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: AnnotationAppender cannot be converted to AnnotationAppender$Default",
+          "unit": "net/bytebuddy/implementation/attribute/TypeAttributeAppender$Explicit.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: AnnotationAppender cannot be converted to AnnotationAppender$Default",
+          "unit": "net/bytebuddy/implementation/attribute/TypeAttributeAppender$ForInstrumentedType$Differentiating.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: DynamicType$Builder$FieldDefinition$Optional$Valuable cannot be converted to DynamicType$Builder$MethodDefinition$ReceiverTypeDefinition",
+          "unit": "net/bytebuddy/implementation/auxiliary/MethodCallProxy.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: DynamicType$Builder$FieldDefinition$Optional$Valuable cannot be converted to DynamicType$Builder$MethodDefinition$ReceiverTypeDefinition",
+          "unit": "net/bytebuddy/implementation/bind/annotation/Pipe$Binder$RedirectionProxy.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: TargetMethodAnnotationDrivenBinder$DelegationProcessor$Handler cannot be converted to TargetMethodAnnotationDrivenBinder$DelegationProcessor$Handler$Unbound",
+          "unit": "net/bytebuddy/implementation/bind/annotation/TargetMethodAnnotationDrivenBinder$DelegationProcessor.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: ClassLoader cannot be converted to T",
+          "unit": "net/bytebuddy/matcher/ClassLoaderHierarchyMatcher.java"
+        }
+      ],
+      "new_stubs": {
+        "net/bytebuddy/agent/builder/AgentBuilder$Default$ExecutingTransformer.java": 3,
+        "net/bytebuddy/agent/builder/AgentBuilder$Default$Transformation$TransformerIterator.java": 1,
+        "net/bytebuddy/agent/builder/AgentBuilder$Default.java": 1,
+        "net/bytebuddy/agent/builder/AgentBuilder$DescriptionStrategy$SuperTypeLoading$Asynchronous$ThreadSwitchingClassLoadingDelegate$NotifyingClassLoadingAction.java": 1,
+        "net/bytebuddy/agent/builder/AgentBuilder$DescriptionStrategy$SuperTypeLoading$UnlockingClassLoadingDelegate.java": 1,
+        "net/bytebuddy/agent/builder/AgentBuilder$RedefinitionStrategy$BatchAllocator$Slicing$SlicingIterable$SlicingIterator.java": 1,
+        "net/bytebuddy/agent/builder/AgentBuilder$RedefinitionStrategy$Collector$ForRedefinition.java": 1,
+        "net/bytebuddy/agent/builder/AgentBuilder$RedefinitionStrategy$Collector$ForRetransformation.java": 1,
+        "net/bytebuddy/agent/builder/AgentBuilder$RedefinitionStrategy$Collector$PrependableIterator.java": 1,
+        "net/bytebuddy/agent/builder/AgentBuilder$RedefinitionStrategy$Collector.java": 2,
+        "net/bytebuddy/agent/builder/AgentBuilder$RedefinitionStrategy$ResubmissionStrategy$Enabled$ResubmissionInstallationListener.java": 1,
+        "net/bytebuddy/agent/builder/LambdaFactory.java": 1,
+        "net/bytebuddy/build/Plugin$Engine$Default$Preprocessor$Resolved.java": 1,
+        "net/bytebuddy/build/Plugin$Engine$Default.java": 1,
+        "net/bytebuddy/build/Plugin$Engine$Dispatcher$ForParallelTransformation$WithThrowawayExecutorService.java": 1,
+        "net/bytebuddy/build/Plugin$Engine$Source$ForFolder$FolderIterator.java": 1,
+        "net/bytebuddy/build/Plugin$Engine$Target$ForFolder.java": 2,
+        "net/bytebuddy/build/Plugin$Engine$Target$InMemory.java": 1,
+        "net/bytebuddy/description/type/TypeDefinition$SuperClassIterator.java": 1,
+        "net/bytebuddy/dynamic/loading/ByteArrayClassLoader$ChildFirst$PrependingEnumeration.java": 1,
+        "net/bytebuddy/dynamic/loading/ByteArrayClassLoader$SingletonEnumeration.java": 1,
+        "net/bytebuddy/dynamic/loading/ByteArrayClassLoader.java": 1,
+        "net/bytebuddy/dynamic/loading/ClassReloadingStrategy$Strategy.java": 1,
+        "net/bytebuddy/pool/TypePool$AbstractBase$Hierarchical.java": 1,
+        "net/bytebuddy/pool/TypePool$CacheProvider$Discriminating.java": 1,
+        "net/bytebuddy/utility/FileSystem$ForLegacyVm.java": 2
+      },
+      "reasons": [
+        "new compiler diagnostics",
+        "new stub methods"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 2,
+        "DecompileFailures": 0,
+        "InputClasses": 692,
+        "RebuiltVerifyFail": 1,
+        "RebuiltVerifyOK": 63,
+        "SourceUnits": 687,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 5,
+        "DecompileFailures": 0,
+        "InputClasses": 692,
+        "RebuiltVerifyFail": 1,
+        "RebuiltVerifyOK": 63,
+        "SourceUnits": 687,
+        "StubMethods": 0
+      },
+      "jar": "caffeine",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: BoundedLocalCache$BoundedPolicy$BoundedVarExpiration$1 cannot be converted to V",
+          "unit": "com/github/benmanes/caffeine/cache/BoundedLocalCache$BoundedPolicy$BoundedVarExpiration.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: V cannot be converted to Expiry",
+          "unit": "com/github/benmanes/caffeine/cache/BoundedLocalCache$BoundedPolicy$BoundedVarExpiration.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 106,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 107,
+        "SourceUnits": 106,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 106,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 107,
+        "SourceUnits": 106,
+        "StubMethods": 0
+      },
+      "jar": "codec",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 524,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 528,
+        "SourceUnits": 524,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 1,
+        "DecompileFailures": 0,
+        "InputClasses": 524,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 305,
+        "SourceUnits": 524,
+        "StubMethods": 0
+      },
+      "jar": "collections4",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "unreported exception NoSuchMethodException; must be caught or declared to be thrown",
+          "unit": "org/apache/commons/collections4/list/SetUniqueList.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 1,
+        "DecompileFailures": 0,
+        "InputClasses": 346,
+        "RebuiltVerifyFail": 5,
+        "RebuiltVerifyOK": 146,
+        "SourceUnits": 346,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 1,
+        "DecompileFailures": 0,
+        "InputClasses": 346,
+        "RebuiltVerifyFail": 5,
+        "RebuiltVerifyOK": 146,
+        "SourceUnits": 346,
+        "StubMethods": 0
+      },
+      "jar": "commons-io",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 6,
+        "DecompileFailures": 0,
+        "InputClasses": 345,
+        "RebuiltVerifyFail": 5,
+        "RebuiltVerifyOK": 54,
+        "SourceUnits": 339,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 5,
+        "DecompileFailures": 0,
+        "InputClasses": 345,
+        "RebuiltVerifyFail": 26,
+        "RebuiltVerifyOK": 196,
+        "SourceUnits": 339,
+        "StubMethods": 0
+      },
+      "jar": "commons-lang3",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "unreachable statement",
+          "unit": "org/apache/commons/lang3/math/NumberUtils.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 571,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 542,
+        "SourceUnits": 566,
+        "StubMethods": 1
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 6,
+        "DecompileFailures": 0,
+        "InputClasses": 571,
+        "RebuiltVerifyFail": 5,
+        "RebuiltVerifyOK": 57,
+        "SourceUnits": 566,
+        "StubMethods": 1
+      },
+      "jar": "compress",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "cannot find symbol",
+          "unit": "org/apache/commons/compress/archivers/sevenz/SevenZFile.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: BoundedSeekableByteChannelInputStream cannot be converted to ByteBuffer",
+          "unit": "org/apache/commons/compress/archivers/sevenz/SevenZFile.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: ByteBuffer cannot be converted to InputStream",
+          "unit": "org/apache/commons/compress/archivers/sevenz/SevenZFile.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: InputStream cannot be converted to SevenZFile$1",
+          "unit": "org/apache/commons/compress/archivers/sevenz/SevenZFile.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "no suitable constructor found for CRC32VerifyingInputStream(ByteBuffer,long,long)",
+          "unit": "org/apache/commons/compress/archivers/sevenz/SevenZFile.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "no suitable method found for readRange(ByteBuffer,int)",
+          "unit": "org/apache/commons/compress/archivers/sevenz/SevenZFile.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 681,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 690,
+        "SourceUnits": 681,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 16,
+        "DecompileFailures": 0,
+        "InputClasses": 681,
+        "RebuiltVerifyFail": 20,
+        "RebuiltVerifyOK": 96,
+        "SourceUnits": 681,
+        "StubMethods": 0
+      },
+      "jar": "fastjson2",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: List cannot be converted to ArrayList",
+          "unit": "com/alibaba/fastjson2/JSONPathFilter$GroupFilter.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "call to this must be first statement in constructor",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderException.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<Collection,Collection> cannot be converted to Function<Object,Object>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplList.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<List,List> cannot be converted to Function<Object,Object>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplList.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<NavigableSet,NavigableSet> cannot be converted to Function<Object,Object>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplList.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<Set,Set> cannot be converted to Function<Object,Object>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplList.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<SortedSet,SortedSet> cannot be converted to Function<Object,Object>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplList.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: Type cannot be converted to Class",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplList.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<List,List> cannot be converted to Function<Collection,Collection>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplListStr.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<NavigableSet,NavigableSet> cannot be converted to Function<Collection,Collection>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplListStr.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<Set,Set> cannot be converted to Function<Collection,Collection>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplListStr.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<SortedSet,SortedSet> cannot be converted to Function<Collection,Collection>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplListStr.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<Map,Map> cannot be converted to Function<SortedMap,SortedMap>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplMapMultiValueType.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Function<NavigableMap,NavigableMap> cannot be converted to Function<SortedMap,SortedMap>",
+          "unit": "com/alibaba/fastjson2/reader/ObjectReaderImplMapMultiValueType.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: ObjectWriter cannot be converted to ObjectWriterImplMap",
+          "unit": "com/alibaba/fastjson2/writer/ObjectWriterImplMap.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 17,
+        "DecompileFailures": 0,
+        "InputClasses": 1308,
+        "RebuiltVerifyFail": 16,
+        "RebuiltVerifyOK": 21,
+        "SourceUnits": 1308,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 21,
+        "DecompileFailures": 0,
+        "InputClasses": 1308,
+        "RebuiltVerifyFail": 16,
+        "RebuiltVerifyOK": 21,
+        "SourceUnits": 1308,
+        "StubMethods": 0
+      },
+      "jar": "freemarker",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 4,
+          "diagnostic": "package freemarker.core.freemarker.core does not exist",
+          "unit": "freemarker/core/FMParser.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 195,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 199,
+        "SourceUnits": 183,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 1,
+        "DecompileFailures": 0,
+        "InputClasses": 195,
+        "RebuiltVerifyFail": 3,
+        "RebuiltVerifyOK": 10,
+        "SourceUnits": 183,
+        "StubMethods": 0
+      },
+      "jar": "gson",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "unreachable statement",
+          "unit": "com/google/gson/stream/JsonReader.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 7,
+        "DecompileFailures": 0,
+        "InputClasses": 1892,
+        "RebuiltVerifyFail": 11,
+        "RebuiltVerifyOK": 176,
+        "SourceUnits": 1825,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 13,
+        "DecompileFailures": 0,
+        "InputClasses": 1892,
+        "RebuiltVerifyFail": 8,
+        "RebuiltVerifyOK": 174,
+        "SourceUnits": 1825,
+        "StubMethods": 0
+      },
+      "jar": "guava",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: ImmutableList cannot be converted to Set",
+          "unit": "com/google/common/collect/ImmutableMultimap$Builder.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: ImmutableList cannot be converted to Set",
+          "unit": "com/google/common/collect/ImmutableSetMultimap$Builder.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: MapMakerInternalMap$InternalEntry cannot be converted to E",
+          "unit": "com/google/common/collect/MapMakerInternalMap$Segment.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: bad type in conditional expression",
+          "unit": "com/google/common/hash/LittleEndianByteArray.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Throwable cannot be converted to CycleDetectingLockFactory$ExampleStackTrace",
+          "unit": "com/google/common/util/concurrent/CycleDetectingLockFactory$PotentialDeadlockException.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 75,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 75,
+        "SourceUnits": 75,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 75,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 75,
+        "SourceUnits": 75,
+        "StubMethods": 0
+      },
+      "jar": "hikaricp",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 10,
+        "DecompileFailures": 0,
+        "InputClasses": 470,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 100,
+        "SourceUnits": 470,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 10,
+        "DecompileFailures": 0,
+        "InputClasses": 470,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 100,
+        "SourceUnits": 470,
+        "StubMethods": 0
+      },
+      "jar": "httpclient",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 776,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 785,
+        "SourceUnits": 773,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 9,
+        "DecompileFailures": 0,
+        "InputClasses": 776,
+        "RebuiltVerifyFail": 6,
+        "RebuiltVerifyOK": 9,
+        "SourceUnits": 773,
+        "StubMethods": 0
+      },
+      "jar": "jackson",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: SettableBeanProperty cannot be converted to CreatorProperty",
+          "unit": "com/fasterxml/jackson/databind/deser/BasicDeserializerFactory.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: SettableBeanProperty cannot be converted to SetterlessProperty",
+          "unit": "com/fasterxml/jackson/databind/deser/BeanDeserializerFactory.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: AnnotatedField cannot be converted to AnnotatedMethod",
+          "unit": "com/fasterxml/jackson/databind/introspect/BeanPropertyDefinition.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: AnnotatedField cannot be converted to AnnotatedParameter",
+          "unit": "com/fasterxml/jackson/databind/introspect/BeanPropertyDefinition.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: AnnotatedMethod cannot be converted to AnnotatedParameter",
+          "unit": "com/fasterxml/jackson/databind/introspect/BeanPropertyDefinition.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "cannot find symbol",
+          "unit": "com/fasterxml/jackson/databind/introspect/POJOPropertyBuilder.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: JsonSerializer<CAP#1> cannot be converted to EnumSerializer",
+          "unit": "com/fasterxml/jackson/databind/ser/BasicSerializerFactory.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: JsonStreamContext cannot be converted to TokenBufferReadContext",
+          "unit": "com/fasterxml/jackson/databind/util/TokenBuffer$Parser.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 8,
+        "DecompileFailures": 0,
+        "InputClasses": 426,
+        "RebuiltVerifyFail": 1,
+        "RebuiltVerifyOK": 14,
+        "SourceUnits": 426,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 10,
+        "DecompileFailures": 0,
+        "InputClasses": 426,
+        "RebuiltVerifyFail": 1,
+        "RebuiltVerifyOK": 14,
+        "SourceUnits": 426,
+        "StubMethods": 0
+      },
+      "jar": "javassist",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: Expr cannot be converted to Member",
+          "unit": "javassist/compiler/Javac$1.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 748,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 748,
+        "SourceUnits": 748,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 748,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 748,
+        "SourceUnits": 748,
+        "StubMethods": 0
+      },
+      "jar": "jedis",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 247,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 247,
+        "SourceUnits": 247,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 2,
+        "DecompileFailures": 0,
+        "InputClasses": 247,
+        "RebuiltVerifyFail": 2,
+        "RebuiltVerifyOK": 222,
+        "SourceUnits": 247,
+        "StubMethods": 0
+      },
+      "jar": "joda-time",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "unreachable statement",
+          "unit": "org/joda/time/format/PeriodFormatterBuilder.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: DateTimeZone cannot be converted to FixedDateTimeZone",
+          "unit": "org/joda/time/tz/DateTimeZoneBuilder.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 6,
+        "DecompileFailures": 0,
+        "InputClasses": 238,
+        "RebuiltVerifyFail": 76,
+        "RebuiltVerifyOK": 54,
+        "SourceUnits": 148,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 6,
+        "DecompileFailures": 0,
+        "InputClasses": 238,
+        "RebuiltVerifyFail": 76,
+        "RebuiltVerifyOK": 54,
+        "SourceUnits": 148,
+        "StubMethods": 0
+      },
+      "jar": "jsoup",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 350,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 351,
+        "SourceUnits": 346,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 350,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 351,
+        "SourceUnits": 346,
+        "StubMethods": 0
+      },
+      "jar": "junit",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 15,
+        "DecompileFailures": 0,
+        "InputClasses": 1212,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 0,
+        "SourceUnits": 1184,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 17,
+        "DecompileFailures": 0,
+        "InputClasses": 1212,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 0,
+        "SourceUnits": 1184,
+        "StubMethods": 0
+      },
+      "jar": "log4j",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "unreachable statement",
+          "unit": "META-INF/versions/9/org/apache/logging/log4j/core/jackson/Log4jStackTraceElementDeserializer.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Object cannot be converted to Map<String,Code[]>",
+          "unit": "org/apache/logging/log4j/core/pattern/JAnsiTextRenderer.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 453,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 462,
+        "SourceUnits": 453,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 453,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 463,
+        "SourceUnits": 453,
+        "StubMethods": 0
+      },
+      "jar": "logback",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 2188,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 2146,
+        "SourceUnits": 2166,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 25,
+        "DecompileFailures": 0,
+        "InputClasses": 2188,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 0,
+        "SourceUnits": 2166,
+        "StubMethods": 0
+      },
+      "jar": "lucene",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 3,
+          "diagnostic": "incompatible types: String cannot be converted to CharBuffer",
+          "unit": "META-INF/versions/9/org/apache/lucene/analysis/tokenattributes/CharTermAttributeImpl.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: String cannot be converted to CharTermAttribute",
+          "unit": "META-INF/versions/9/org/apache/lucene/analysis/tokenattributes/CharTermAttributeImpl.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: String cannot be converted to StringBuffer",
+          "unit": "META-INF/versions/9/org/apache/lucene/analysis/tokenattributes/CharTermAttributeImpl.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: String cannot be converted to StringBuilder",
+          "unit": "META-INF/versions/9/org/apache/lucene/analysis/tokenattributes/CharTermAttributeImpl.java"
+        },
+        {
+          "count": 3,
+          "diagnostic": "incompatible types: String cannot be converted to CharBuffer",
+          "unit": "org/apache/lucene/analysis/tokenattributes/CharTermAttributeImpl.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: String cannot be converted to CharTermAttribute",
+          "unit": "org/apache/lucene/analysis/tokenattributes/CharTermAttributeImpl.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: String cannot be converted to StringBuffer",
+          "unit": "org/apache/lucene/analysis/tokenattributes/CharTermAttributeImpl.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: String cannot be converted to StringBuilder",
+          "unit": "org/apache/lucene/analysis/tokenattributes/CharTermAttributeImpl.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: no instance(s) of type variable(s) T exist so that List<T> conforms to ArrayList",
+          "unit": "org/apache/lucene/search/Boolean2ScorerSupplier.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "DocValuesIterator is not public in org.apache.lucene.index; cannot be accessed from outside package",
+          "unit": "org/apache/lucene/search/DocValuesFieldExistsQuery.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: ImpactsDISI cannot be converted to DisjunctionDISIApproximation",
+          "unit": "org/apache/lucene/search/SynonymQuery$SynonymWeight.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 1301,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 1326,
+        "SourceUnits": 1280,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 30,
+        "DecompileFailures": 0,
+        "InputClasses": 1301,
+        "RebuiltVerifyFail": 4,
+        "RebuiltVerifyOK": 143,
+        "SourceUnits": 1280,
+        "StubMethods": 0
+      },
+      "jar": "math3",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 3,
+          "diagnostic": "variable abscissas might already have been assigned",
+          "unit": "org/apache/commons/math3/analysis/integration/LegendreGaussIntegrator.java"
+        },
+        {
+          "count": 3,
+          "diagnostic": "variable weights might already have been assigned",
+          "unit": "org/apache/commons/math3/analysis/integration/LegendreGaussIntegrator.java"
+        },
+        {
+          "count": 18,
+          "diagnostic": "no suitable method found for add(Object)",
+          "unit": "org/apache/commons/math3/geometry/euclidean/threed/FieldRotation.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: SubHyperplane cannot be converted to SubLine",
+          "unit": "org/apache/commons/math3/geometry/euclidean/threed/OutlineExtractor$BoundaryProjector.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: List cannot be converted to ArrayList",
+          "unit": "org/apache/commons/math3/ml/clustering/DBSCANClusterer.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Collection cannot be converted to HashSet",
+          "unit": "org/apache/commons/math3/ml/neuralnet/sofm/KohonenUpdateAction.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "call to this must be first statement in constructor",
+          "unit": "org/apache/commons/math3/random/AbstractWell.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: List cannot be converted to ArrayList",
+          "unit": "org/apache/commons/math3/stat/clustering/DBSCANClusterer.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 567,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 570,
+        "SourceUnits": 567,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 6,
+        "DecompileFailures": 0,
+        "InputClasses": 567,
+        "RebuiltVerifyFail": 5,
+        "RebuiltVerifyOK": 242,
+        "SourceUnits": 567,
+        "StubMethods": 0
+      },
+      "jar": "mockito",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 2,
+          "diagnostic": "cannot find symbol",
+          "unit": "org/mockito/internal/creation/bytebuddy/ModuleHandler$ModuleSystemFound.java"
+        },
+        {
+          "count": 4,
+          "diagnostic": "cannot find symbol",
+          "unit": "org/mockito/internal/creation/bytebuddy/SubclassBytecodeGenerator.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 10,
+        "DecompileFailures": 0,
+        "InputClasses": 359,
+        "RebuiltVerifyFail": 3,
+        "RebuiltVerifyOK": 88,
+        "SourceUnits": 356,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 11,
+        "DecompileFailures": 0,
+        "InputClasses": 359,
+        "RebuiltVerifyFail": 3,
+        "RebuiltVerifyOK": 88,
+        "SourceUnits": 356,
+        "StubMethods": 0
+      },
+      "jar": "netty",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: OpenSslX509TrustManagerWrapper$TrustManagerWrapper cannot be converted to OpenSslX509TrustManagerWrapper$1",
+          "unit": "io/netty/handler/ssl/OpenSslX509TrustManagerWrapper.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 4,
+        "DecompileFailures": 0,
+        "InputClasses": 200,
+        "RebuiltVerifyFail": 4,
+        "RebuiltVerifyOK": 18,
+        "SourceUnits": 200,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 4,
+        "DecompileFailures": 0,
+        "InputClasses": 200,
+        "RebuiltVerifyFail": 4,
+        "RebuiltVerifyOK": 18,
+        "SourceUnits": 200,
+        "StubMethods": 0
+      },
+      "jar": "okhttp",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 2,
+        "DecompileFailures": 0,
+        "InputClasses": 216,
+        "RebuiltVerifyFail": 13,
+        "RebuiltVerifyOK": 61,
+        "SourceUnits": 216,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 2,
+        "DecompileFailures": 0,
+        "InputClasses": 216,
+        "RebuiltVerifyFail": 13,
+        "RebuiltVerifyOK": 61,
+        "SourceUnits": 216,
+        "StubMethods": 0
+      },
+      "jar": "picocli",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 1,
+        "DecompileFailures": 0,
+        "InputClasses": 80,
+        "RebuiltVerifyFail": 2,
+        "RebuiltVerifyOK": 46,
+        "SourceUnits": 80,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 1,
+        "DecompileFailures": 0,
+        "InputClasses": 80,
+        "RebuiltVerifyFail": 2,
+        "RebuiltVerifyOK": 46,
+        "SourceUnits": 80,
+        "StubMethods": 0
+      },
+      "jar": "pool2",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 679,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 703,
+        "SourceUnits": 672,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 10,
+        "DecompileFailures": 0,
+        "InputClasses": 679,
+        "RebuiltVerifyFail": 29,
+        "RebuiltVerifyOK": 497,
+        "SourceUnits": 672,
+        "StubMethods": 0
+      },
+      "jar": "protobuf",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 2,
+          "diagnostic": "no suitable method found for filterUnknownEnumList(T,int,List,Internal$EnumVerifier,Object,UnknownFieldSchema<UT#1,UB#1>)",
+          "unit": "com/google/protobuf/MessageSchema.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: Object cannot be converted to String",
+          "unit": "com/google/protobuf/Value$Builder.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: String cannot be converted to ByteString",
+          "unit": "com/google/protobuf/Value$Builder.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: Object cannot be converted to String",
+          "unit": "com/google/protobuf/Value.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: String cannot be converted to ByteString",
+          "unit": "com/google/protobuf/Value.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 4,
+        "DecompileFailures": 0,
+        "InputClasses": 1659,
+        "RebuiltVerifyFail": 106,
+        "RebuiltVerifyOK": 345,
+        "SourceUnits": 1653,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 9,
+        "DecompileFailures": 0,
+        "InputClasses": 1659,
+        "RebuiltVerifyFail": 103,
+        "RebuiltVerifyOK": 339,
+        "SourceUnits": 1653,
+        "StubMethods": 0
+      },
+      "jar": "rxjava",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: SimpleQueue<U> cannot be converted to SimplePlainQueue",
+          "unit": "io/reactivex/internal/operators/flowable/FlowableFlatMap$MergeSubscriber.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: T cannot be converted to Throwable",
+          "unit": "io/reactivex/internal/operators/parallel/ParallelMapTry$ParallelMapTryConditionalSubscriber.java"
+        },
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: T cannot be converted to Throwable",
+          "unit": "io/reactivex/internal/operators/parallel/ParallelMapTry$ParallelMapTrySubscriber.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 54,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 55,
+        "SourceUnits": 54,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 54,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 55,
+        "SourceUnits": 54,
+        "StubMethods": 0
+      },
+      "jar": "slf4j",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 231,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 233,
+        "SourceUnits": 231,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 231,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 233,
+        "SourceUnits": 231,
+        "StubMethods": 0
+      },
+      "jar": "snakeyaml",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 3,
+        "DecompileFailures": 0,
+        "InputClasses": 978,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 0,
+        "SourceUnits": 974,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 3,
+        "DecompileFailures": 0,
+        "InputClasses": 978,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 0,
+        "SourceUnits": 974,
+        "StubMethods": 0
+      },
+      "jar": "spring",
+      "missing_sources": [],
+      "new_errors": [],
+      "new_stubs": {},
+      "reasons": []
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 391,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 379,
+        "SourceUnits": 391,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 1,
+        "DecompileFailures": 0,
+        "InputClasses": 391,
+        "RebuiltVerifyFail": 3,
+        "RebuiltVerifyOK": 254,
+        "SourceUnits": 391,
+        "StubMethods": 0
+      },
+      "jar": "spring-beans",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: PropertyValues cannot be converted to MutablePropertyValues",
+          "unit": "org/springframework/beans/factory/support/AbstractAutowireCapableBeanFactory.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": true,
+        "CompilerErrors": 0,
+        "DecompileFailures": 0,
+        "InputClasses": 498,
+        "RebuiltVerifyFail": 0,
+        "RebuiltVerifyOK": 498,
+        "SourceUnits": 498,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 6,
+        "DecompileFailures": 0,
+        "InputClasses": 498,
+        "RebuiltVerifyFail": 3,
+        "RebuiltVerifyOK": 26,
+        "SourceUnits": 498,
+        "StubMethods": 0
+      },
+      "jar": "xstream",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Mapper cannot be converted to AttributeMapper",
+          "unit": "com/thoughtworks/xstream/XStream.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Mapper cannot be converted to ImmutableTypesMapper",
+          "unit": "com/thoughtworks/xstream/XStream.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Mapper cannot be converted to SecurityMapper",
+          "unit": "com/thoughtworks/xstream/XStream.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: bad type in conditional expression",
+          "unit": "com/thoughtworks/xstream/converters/extended/ToAttributedValueConverter$1.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: bad type in conditional expression",
+          "unit": "com/thoughtworks/xstream/converters/extended/ToAttributedValueConverter.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Object cannot be converted to Exception",
+          "unit": "com/thoughtworks/xstream/converters/reflection/SunLimitedUnsafeReflectionProvider.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "lost clean compilation",
+        "new compiler diagnostics"
+      ]
+    },
+    {
+      "baseline": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 2,
+        "DecompileFailures": 0,
+        "InputClasses": 268,
+        "RebuiltVerifyFail": 7,
+        "RebuiltVerifyOK": 51,
+        "SourceUnits": 260,
+        "StubMethods": 0
+      },
+      "candidate": {
+        "CompileSucceeded": false,
+        "CompilerErrors": 11,
+        "DecompileFailures": 0,
+        "InputClasses": 268,
+        "RebuiltVerifyFail": 4,
+        "RebuiltVerifyOK": 42,
+        "SourceUnits": 260,
+        "StubMethods": 0
+      },
+      "jar": "zxing",
+      "missing_sources": [],
+      "new_errors": [
+        {
+          "count": 2,
+          "diagnostic": "incompatible types: Collection cannot be converted to List",
+          "unit": "com/google/zxing/aztec/encoder/HighLevelEncoder.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "array required, but Object found",
+          "unit": "com/google/zxing/oned/UPCEANReader.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "cannot find symbol",
+          "unit": "com/google/zxing/oned/UPCEANReader.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: Object[] cannot be converted to boolean",
+          "unit": "com/google/zxing/oned/rss/expanded/decoders/FieldParser.java"
+        },
+        {
+          "count": 1,
+          "diagnostic": "incompatible types: boolean cannot be converted to Object[]",
+          "unit": "com/google/zxing/oned/rss/expanded/decoders/FieldParser.java"
+        },
+        {
+          "count": 3,
+          "diagnostic": "int cannot be dereferenced",
+          "unit": "com/google/zxing/pdf417/decoder/PDF417ScanningDecoder.java"
+        }
+      ],
+      "new_stubs": {},
+      "reasons": [
+        "new compiler diagnostics"
+      ]
+    }
+  ],
+  "runtime_equivalence_proven": false,
+  "targets": 38
+}

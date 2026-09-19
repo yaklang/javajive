@@ -11,16 +11,14 @@ func TestCharacterSetECIEnumFoldIsLoadBearing(t *testing.T) {
 		"Cp437 = new CharacterSetECI(")
 }
 
-func TestMultiFormatReaderArrayLengthIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/MultiFormatReader.class", "JDEC_ZXING_REMAINING_OFF",
-		"var2 = this.readers;",
-		"int var1 = var2 = this.readers.length;")
+func TestMultiFormatReaderPreservesAssignmentArrayLength(t *testing.T) {
+	assertDecompileBothPreserve(t, "testdata/regression/MultiFormatReader.class", "JDEC_ZXING_REMAINING_OFF",
+		"Reader[] var2 = null;", "int var1 = (var2 = this.readers).length;", "var2[var2_1].reset();")
 }
 
-func TestISBNResultParserStringSlotIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/ISBNResultParser.class", "JDEC_ZXING_REMAINING_OFF",
-		"String var3 = getMassagedText(var1);",
-		"int var3 = 0;")
+func TestISBNResultParserPreservesStringAssignmentReceiver(t *testing.T) {
+	assertDecompileBothPreserve(t, "testdata/regression/ISBNResultParser.class", "JDEC_ZXING_REMAINING_OFF",
+		"String var3 = null;", "(var3 = getMassagedText(var1)).length()", "return new ISBNParsedResult(var3);")
 }
 
 func TestPDF417BarcodeMetadataObjectRetypeIsLoadBearing(t *testing.T) {
@@ -35,10 +33,10 @@ func TestDetectionResultCodewordObjectRetypeIsLoadBearing(t *testing.T) {
 		"Object var8 = null;")
 }
 
-func TestGenericGFPolyThisCoefficientsIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/GenericGFPoly.class", "JDEC_ZXING_REMAINING_OFF",
-		"int[] var3 = this.coefficients;",
-		"var3 = this.coefficients;")
+func TestGenericGFPolyPreservesDistinctCoefficientLocals(t *testing.T) {
+	assertDecompileBothPreserve(t, "testdata/regression/GenericGFPoly.class", "JDEC_ZXING_REMAINING_OFF",
+		"int[] var3 = null;", "int var2 = (var3 = this.coefficients).length;",
+		"int[] var3_1 = var1.coefficients;", "int[] var4 = var3_1;", "int var8 = var3[var7];", "this.field.multiply(var8,var4[var9])")
 }
 
 func TestURIResultParserMatcherFindIsLoadBearing(t *testing.T) {
@@ -78,9 +76,8 @@ func TestEAN13WriterChecksumTryIsLoadBearing(t *testing.T) {
 }
 
 func TestPDF417MacroBlockSwitchBreaksAreLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/PDF417DecodedBitStreamParser.class", "JDEC_ZXING_REMAINING_OFF",
-		"var2.setLastSegment(true);\n\t\t\t\t\t\tbreak;",
-		"var2.setLastSegment(true);\n\t\t\t\t\tdefault:")
+	assertDecompileBothPreserve(t, "testdata/regression/PDF417DecodedBitStreamParser.class", "JDEC_ZXING_REMAINING_OFF",
+		"var2.setLastSegment(true);\n\t\t\t\t\t\tcontinue;", "return var1;")
 }
 
 func TestDetectionResultToStringThrowRuntimeIsLoadBearing(t *testing.T) {
