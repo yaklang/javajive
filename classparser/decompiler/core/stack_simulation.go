@@ -71,7 +71,7 @@ type StackSimulation interface {
 	GetVarId() *utils.VariableId
 	SetVarId(*utils.VariableId)
 	AssignVar(slot int, val values.JavaValue) (*values.JavaRef, bool)
-	AssignVarGuarded(slot int, val values.JavaValue, blockNullAdopt bool) (*values.JavaRef, bool)
+	AssignVarGuarded(slot int, val values.JavaValue, blockNullAdopt bool, funcCtx *class_context.ClassContext) (*values.JavaRef, bool)
 	GetVar(slot int) *values.JavaRef
 	SetVar(slot int, ref *values.JavaRef)
 }
@@ -132,7 +132,7 @@ func slotDeclType(val values.JavaValue) types.JavaType {
 }
 
 func (s *StackSimulationImpl) AssignVar(slot int, val values.JavaValue) (*values.JavaRef, bool) {
-	return s.AssignVarGuarded(slot, val, false)
+	return s.AssignVarGuarded(slot, val, false, nil)
 }
 
 // AssignVarGuarded is AssignVar with an extra control: when blockNullAdopt is true the
@@ -141,7 +141,7 @@ func (s *StackSimulationImpl) AssignVar(slot int, val values.JavaValue) (*values
 // slot's null initializer does NOT reach this store along the CFG (i.e. the null `T x = null`
 // lives on a sibling/disjoint branch, e.g. a try-with-resources synthetic `primaryExc = null`),
 // so adopting an unrelated type here would wrongly unify two distinct variables onto one slot.
-func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, blockNullAdopt bool) (*values.JavaRef, bool) {
+func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, blockNullAdopt bool, funcCtx *class_context.ClassContext) (*values.JavaRef, bool) {
 	typ := slotDeclType(val)
 	ref, ok := s.varTable[slot]
 	// Both the incoming value's type and the slot's current ref type must be present to compare
@@ -252,7 +252,7 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		// to proven assignment-compatible references: optimized bytecode also reuses dead
 		// parameter slots for unrelated reference types (e.g. Gradle wrapper captures). Kill-switch: JDEC_PARAM_REASSIGN_SPLIT=1.
 		if ref.IsParam && !ref.IsThis && os.Getenv("JDEC_PARAM_REASSIGN_SPLIT") == "" {
-			if (values.IsNullLiteral(val) && parameterAcceptsReference(types.NewJavaClass("java.lang.Object"), ref.Type())) || parameterAcceptsReference(ref.Type(), typ) {
+			if (values.IsNullLiteral(values.UnpackSoltValue(val)) && parameterAcceptsReference(types.NewJavaClass("java.lang.Object"), ref.Type(), funcCtx)) || parameterAcceptsReference(ref.Type(), typ, funcCtx) {
 				return ref, false
 			}
 		}
@@ -282,15 +282,17 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 	return newRef, true
 }
 
-// parameterAcceptsReference only merges stores whose assignment compatibility
-// can be established. Sharing the JVM reference category is not sufficient:
+// parameterAcceptsReference only merges stores whose source compatibility can
+// be established. Sharing the JVM reference category is not sufficient:
 // optimized bytecode can reuse a dead parameter slot for unrelated objects.
-func parameterAcceptsReference(dst, src types.JavaType) bool {
+// A declared type variable may retain an Object-valued store because the
+// assignment renderer restores the erased `(T)` cast at that store.
+func parameterAcceptsReference(dst, src types.JavaType, funcCtx *class_context.ClassContext) bool {
 	if dst == nil || src == nil {
 		return false
 	}
 	if dst.IsArray() {
-		return src.IsArray() && (dst.String(&class_context.ClassContext{}) == src.String(&class_context.ClassContext{}) || parameterAcceptsReference(dst.ElementType(), src.ElementType()))
+		return src.IsArray() && (dst.String(&class_context.ClassContext{}) == src.String(&class_context.ClassContext{}) || parameterAcceptsReference(dst.ElementType(), src.ElementType(), funcCtx))
 	}
 	name := func(t types.JavaType) string {
 		if p, ok := t.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaString {
@@ -303,10 +305,17 @@ func parameterAcceptsReference(dst, src types.JavaType) bool {
 	}
 	dn := name(dst)
 	sn := name(src)
+	if funcCtx != nil && funcCtx.IsTypeParam(dn) {
+		return sn != "" || src.IsArray()
+	}
 	if dn == "java.lang.Object" {
 		return sn != "" || src.IsArray()
 	}
-	return dn != "" && sn != "" && types.IsReferenceSubtypeBridged(sn, dn, nil)
+	var provider types.SuperTypeProvider
+	if funcCtx != nil {
+		provider = funcCtx.SiblingSuperTypes
+	}
+	return dn != "" && sn != "" && types.IsReferenceSubtypeBridged(sn, dn, provider)
 }
 
 // classifyRawGenericPair compares two reference types by their rendered form and reports, for each,
