@@ -3720,7 +3720,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 				d.slotDefPhiReachesLoad(opcode, slot, oldRef.VarUid) {
 				blockNullAdopt = false
 			}
-			ref, isFirst = runtimeStackSimulation.AssignVarGuarded(slot, value, blockNullAdopt)
+			ref, isFirst = runtimeStackSimulation.AssignVarGuarded(slot, value, blockNullAdopt, funcCtx)
 		}
 		if slot == 0 && oldRef != nil && oldRef.IsThis && ref != nil && oldRef.VarUid == ref.VarUid {
 			ref.IsThis = false
