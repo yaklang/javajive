@@ -249,15 +249,10 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		// declaration sat inside the conditional that performed the reassignment, so a later read of
 		// the slot referenced an out-of-scope name ("cannot find symbol", guava Ascii.truncate). Keep
 		// the parameter as one variable (its broader declared type still accepts the subtype). Limit
-		// to reference types on both sides: a parameter slot genuinely repurposed for a different
-		// primitive category must still split. Kill-switch: JDEC_PARAM_REASSIGN_SPLIT=1.
+		// to proven assignment-compatible references: optimized bytecode also reuses dead
+		// parameter slots for unrelated reference types (e.g. Gradle wrapper captures). Kill-switch: JDEC_PARAM_REASSIGN_SPLIT=1.
 		if ref.IsParam && !ref.IsThis && os.Getenv("JDEC_PARAM_REASSIGN_SPLIT") == "" {
-			_, refPrim := ref.Type().RawType().(*types.JavaPrimer)
-			_, valPrim := typ.RawType().(*types.JavaPrimer)
-			if p, ok := typ.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaString {
-				valPrim = false
-			}
-			if !refPrim && !valPrim {
+			if (values.IsNullLiteral(val) && parameterAcceptsReference(types.NewJavaClass("java.lang.Object"), ref.Type())) || parameterAcceptsReference(ref.Type(), typ) {
 				return ref, false
 			}
 		}
@@ -285,6 +280,33 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 	newRef := s.NewVar(val)
 	s.varTable[slot] = newRef
 	return newRef, true
+}
+
+// parameterAcceptsReference only merges stores whose assignment compatibility
+// can be established. Sharing the JVM reference category is not sufficient:
+// optimized bytecode can reuse a dead parameter slot for unrelated objects.
+func parameterAcceptsReference(dst, src types.JavaType) bool {
+	if dst == nil || src == nil {
+		return false
+	}
+	if dst.IsArray() {
+		return src.IsArray() && (dst.String(&class_context.ClassContext{}) == src.String(&class_context.ClassContext{}) || parameterAcceptsReference(dst.ElementType(), src.ElementType()))
+	}
+	name := func(t types.JavaType) string {
+		if p, ok := t.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaString {
+			return "java.lang.String"
+		}
+		if c, ok := t.RawType().(*types.JavaClass); ok {
+			return c.Name
+		}
+		return ""
+	}
+	dn := name(dst)
+	sn := name(src)
+	if dn == "java.lang.Object" {
+		return sn != "" || src.IsArray()
+	}
+	return dn != "" && sn != "" && types.IsReferenceSubtypeBridged(sn, dn, nil)
 }
 
 // classifyRawGenericPair compares two reference types by their rendered form and reports, for each,
