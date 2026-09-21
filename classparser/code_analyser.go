@@ -2,12 +2,13 @@ package javaclassparser
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 
 	"github.com/samber/lo"
 	"github.com/yaklang/javajive/classparser/decompiler"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/methodir"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -57,7 +58,13 @@ func GetValueFromCP(pool []ConstantInfo, index int) values.JavaValue {
 	}
 	switch ret := constant.(type) {
 	case *ConstantMethodHandleInfo:
-		return GetValueFromCP(pool, int(ret.ReferenceIndex))
+		v := GetValueFromCP(pool, int(ret.ReferenceIndex))
+		if m, ok := v.(*values.JavaClassMember); ok && m != nil {
+			m.RefKind = ret.ReferenceKind
+		}
+		return v
+	case *ConstantDynamicInfo:
+		return literalFromDynamic(pool, ret)
 	case *ConstantMemberrefInfo:
 		return convertMemberInfo(ret)
 	case *ConstantInterfaceMethodrefInfo:
@@ -149,9 +156,41 @@ func GetLiteralFromCP(pool []ConstantInfo, index int) values.JavaValue {
 		return GetValueFromCP(pool, index)
 	case *ConstantPackageInfo:
 		return GetValueFromCP(pool, index)
+	case *ConstantDynamicInfo:
+		return literalFromDynamic(pool, ret)
 	default:
 		return GetValueFromCP(pool, index)
 	}
+}
+
+func literalFromDynamic(pool []ConstantInfo, dyn *ConstantDynamicInfo) values.JavaValue {
+	name, desc := "", ""
+	reason := ""
+	if dyn == nil {
+		return core.NewCondyValue("", "", 0, true, "nil CONSTANT_Dynamic")
+	}
+	idx := int(dyn.NameAndTypeIndex)
+	if idx <= 0 || idx > len(pool) {
+		reason = "condy NameAndType index out of range"
+	} else if nt, ok := pool[idx-1].(*ConstantNameAndTypeInfo); ok && nt != nil {
+		if int(nt.NameIndex) > 0 && int(nt.NameIndex) <= len(pool) {
+			if u, ok := pool[nt.NameIndex-1].(*ConstantUtf8Info); ok && u != nil {
+				name = u.Value
+			}
+		}
+		if int(nt.DescriptorIndex) > 0 && int(nt.DescriptorIndex) <= len(pool) {
+			if u, ok := pool[nt.DescriptorIndex-1].(*ConstantUtf8Info); ok && u != nil {
+				desc = u.Value
+			}
+		}
+	} else {
+		reason = "condy NameAndType is not CONSTANT_NameAndType"
+	}
+	malformed := name == "" || desc == ""
+	if malformed && reason == "" {
+		reason = "condy missing name or descriptor"
+	}
+	return core.NewCondyValue(name, desc, dyn.BootstrapMethodAttrIndex, malformed, reason)
 }
 
 type VarMap struct {
@@ -182,7 +221,7 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 		// parse resumes with its own context. (TypeParams is also restored by DumpMethod's own
 		// defer; we save/restore it defensively in case that path is skipped.)
 		// Kill-switch JDEC_LAMBDA_CTX_RESTORE_OFF=1 disables the restore to reproduce the defect.
-		restore := os.Getenv("JDEC_LAMBDA_CTX_RESTORE_OFF") != "1"
+		restore := jdecenv.Get("JDEC_LAMBDA_CTX_RESTORE_OFF") != "1"
 		savedFunctionName := dumper.FuncCtx.FunctionName
 		savedFunctionType := dumper.FuncCtx.FunctionType
 		savedIsStatic := dumper.FuncCtx.IsStatic
@@ -255,6 +294,22 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 		}
 	}
 	parser.MaxAnalysisUpdates = dumper.options.MaxAnalysisUpdates
+	parser.TargetSourceVersion = dumper.options.TargetSourceVersion
+	if dumper.obj != nil {
+		parser.ClassMajor = dumper.obj.MajorVersion
+	}
+	parser.Work = dumper.Work
+	parser.Env = dumper.getenv
+	parser.EnableShadowIR = dumper.options.EnableShadowIR
 	st, err := decompiler.ParseBytesCode(parser)
+	dumper.bootstrapReports = append(dumper.bootstrapReports, parser.BootstrapReports...)
+	if dumper.options.EnableShadowIR && dumper.report != nil {
+		if parser.ShadowIRVersion != 0 {
+			dumper.report.ShadowIRVersion = parser.ShadowIRVersion
+		}
+		if parser.ShadowIRHash != "" {
+			dumper.report.ShadowIRHash = methodir.CombineHashes(dumper.report.ShadowIRHash, parser.ShadowIRHash)
+		}
+	}
 	return parser.Params, st, err
 }

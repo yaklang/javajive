@@ -2,7 +2,7 @@ package core
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -165,7 +165,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// apply -- structurally inert for lambdas whose captures are never rewritten.
 				// Kill-switch: JDEC_LAMBDA_CAPTURE_REBIND_OFF=1 restores the (broken) nil ReplaceFunc.
 				var lambdaReplace func(oldId *utils.VariableId, newId *utils.VariableId)
-				if os.Getenv("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
+				if jdecenv.Get("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
 					lambdaReplace = func(oldId *utils.VariableId, newId *utils.VariableId) {
 						for _, ca := range captured {
 							if ca != nil {
@@ -191,7 +191,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// ("bad return type in lambda expression: Object cannot be converted to T"). Re-emit the cast.
 				// Kill-switch: JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF=1.
 				var retTypevarCast string
-				if os.Getenv("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") == "" {
+				if jdecenv.Get("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") == "" {
 					var instantiatedMT values.JavaValue
 					if len(args1) >= 3 {
 						instantiatedMT = args1[2]
@@ -252,7 +252,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// ListStr,Map,MapMultiValueType} `var = Collections::synchronized*/unmodifiable*` (25
 			// "invalid method reference" sites). Kill-switch: JDEC_METHODREF_INSTANTIATED_TYPE_OFF=1.
 			refType := typ
-			if os.Getenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(args1) >= 3 {
+			if jdecenv.Get("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(args1) >= 3 {
 				if up := inferLambdaTypeFromInstantiated(typ, args1[2]); up != nil {
 					refType = up
 				}
@@ -263,7 +263,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// (disjoint-slot splitting etc.) or it renders a stale slot name. Kill-switch shared
 			// with the lambda branch: JDEC_LAMBDA_CAPTURE_REBIND_OFF=1.
 			var refReplace func(oldId *utils.VariableId, newId *utils.VariableId)
-			if os.Getenv("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
+			if jdecenv.Get("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
 				refReplace = func(oldId *utils.VariableId, newId *utils.VariableId) {
 					for _, ca := range capturedArgs {
 						if ca != nil {
@@ -280,7 +280,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					// and produced `ClassName::new_`, an "invalid method reference" (javac then resolves a
 					// method literally named `new_`, which does not exist). Kill-switch
 					// JDEC_CTOR_METHODREF_FIX_OFF restores the legacy (broken) sanitized form.
-					if os.Getenv("JDEC_CTOR_METHODREF_FIX_OFF") == "" {
+					if jdecenv.Get("JDEC_CTOR_METHODREF_FIX_OFF") == "" {
 						return funcCtx.ShortTypeName(implClassName) + "::new"
 					}
 					refMember = "new"

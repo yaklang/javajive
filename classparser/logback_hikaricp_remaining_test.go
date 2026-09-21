@@ -7,9 +7,34 @@ import (
 )
 
 func TestLogbackEchoEncoderGetBytesIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/EchoEncoder.class", "JDEC_LOGBACK_REMAINING_OFF",
-		"(String.valueOf(var1) + CoreConstants.LINE_SEPARATOR).getBytes()",
-		`"" + String.valueOf(var1) + "" + CoreConstants.LINE_SEPARATOR.getBytes()`)
+	raw, err := os.ReadFile("testdata/regression/EchoEncoder.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("JDEC_LOGBACK_REMAINING_OFF")
+	on, err := Decompile(raw)
+	if err != nil {
+		t.Fatalf("ON: %v", err)
+	}
+	if !echoEncoderGetBytesParenthesized(on) {
+		t.Errorf("ON missing parenthesized concat.getBytes():\n%s", on)
+	}
+	if strings.Contains(on, "var1 + CoreConstants.LINE_SEPARATOR.getBytes()") {
+		t.Errorf("ON still has unparenthesized concat receiver:\n%s", on)
+	}
+	t.Setenv("JDEC_LOGBACK_REMAINING_OFF", "1")
+	off, err := Decompile(raw)
+	if err != nil {
+		t.Fatalf("OFF: %v", err)
+	}
+	if !echoEncoderGetBytesParenthesized(off) {
+		t.Errorf("OFF structural emitter must still parenthesize concat receiver:\n%s", off)
+	}
+}
+
+func echoEncoderGetBytesParenthesized(src string) bool {
+	return strings.Contains(src, "(var1 + CoreConstants.LINE_SEPARATOR).getBytes()") ||
+		strings.Contains(src, "(String.valueOf(var1) + CoreConstants.LINE_SEPARATOR).getBytes()")
 }
 
 func TestLogbackPutUninterruptiblyIsLoadBearing(t *testing.T) {

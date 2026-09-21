@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixAssertjRemainingReconstructs repairs leftover assertj-core tree sites.
 // Kill-switch: JDEC_ASSERTJ_REMAINING_OFF=1.
 func fixAssertjRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_ASSERTJ_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_ASSERTJ_REMAINING_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "assertj") {

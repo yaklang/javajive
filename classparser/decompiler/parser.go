@@ -1,7 +1,7 @@
 package decompiler
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"slices"
 	"strings"
 
@@ -87,7 +87,7 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 	nodes, err := statementManager.ToStatements(func(node *core.Node) bool {
 		return true
 	})
-	if os.Getenv("JDEC_TRACE_SUMMARY") != "" {
+	if jdecenv.Get("JDEC_TRACE_SUMMARY") != "" {
 		log.Infof("[jdec-trace][summary] %s.%s graph-nodes=%d root=%T root-next=%d to-statements=%d err=%v",
 			decompiler.FunctionContext.ClassName, decompiler.FunctionContext.FunctionName, len(allNodes),
 			statementManager.RootNode.Statement, len(statementManager.RootNode.Next), len(nodes), err)
@@ -110,7 +110,7 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 		return nil, err
 	}
 	sts := core.NodesToStatements(nodes)
-	if os.Getenv("JDEC_TRACE_SUMMARY") != "" {
+	if jdecenv.Get("JDEC_TRACE_SUMMARY") != "" {
 		log.Infof("[jdec-trace][summary] %s.%s filtered-nodes=%d statements=%d",
 			decompiler.FunctionContext.ClassName, decompiler.FunctionContext.FunctionName, len(nodes), len(sts))
 	}

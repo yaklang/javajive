@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"fmt"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"os"
 	"regexp"
 	"strings"
@@ -176,7 +177,7 @@ func validateJavaSyntaxWithBudget(src string, budget time.Duration) error {
 	if err == nil {
 		return nil
 	}
-	if os.Getenv("JDEC_NO_DOLLAR_IDENT_VALIDATE") != "" {
+	if jdecenv.Get("JDEC_NO_DOLLAR_IDENT_VALIDATE") != "" {
 		return err
 	}
 	if neutral, changed := neutralizeStandaloneDollarForValidation(src); changed {
@@ -202,14 +203,14 @@ func validateJavaSyntaxOnce(src string, budget time.Duration) error {
 		return nil
 	}
 	ch := make(chan error, 1)
-	go func() {
+	jdecenv.Go(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				ch <- utils.Errorf("panic during syntax validation: %v", r)
 			}
 		}()
 		ch <- nil
-	}()
+	})
 	// Use a stoppable timer rather than time.After so the budget timer (and the
 	// src it retains via the closure) is released as soon as validation returns.
 	// time.After would keep one ~budget-long timer alive per validation, which on

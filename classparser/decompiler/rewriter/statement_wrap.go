@@ -3,7 +3,7 @@ package rewriter
 import (
 	"errors"
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"sort"
 	"strings"
 
@@ -477,7 +477,7 @@ func (s *RewriteManager) mergeIf() bool {
 				// leaves swapped, truncating every encode). Reset JmpNode + the closures to the freshly
 				// built order so downstream readers see the correct branches. No-op for the common
 				// trueIndex=1 node (the closures already pointed there). Kill-switch: JDEC_MERGEIF_PIN_OFF=1.
-				if os.Getenv("JDEC_MERGEIF_PIN_OFF") == "" && len(parentNode.Next) >= 2 {
+				if jdecenv.Get("JDEC_MERGEIF_PIN_OFF") == "" && len(parentNode.Next) >= 2 {
 					pn := parentNode
 					pn.JmpNode = pn.Next[1]
 					pn.TrueNode = func() *core.Node {

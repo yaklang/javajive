@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixCommonsIoRemainingReconstructs repairs leftover commons-io tree sites.
 // Kill-switch: JDEC_COMMONS_IO_REMAINING_OFF=1.
 func fixCommonsIoRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_COMMONS_IO_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_COMMONS_IO_REMAINING_OFF") == "1" {
 		return body
 	}
 	// WildcardFileFilter(String): locals before this().

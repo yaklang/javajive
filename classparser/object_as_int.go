@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -10,7 +10,7 @@ import (
 // length). commons-io IOUtils.copyLarge: a read() int reuses an Object slot.
 // Kill-switch: JDEC_OBJECT_AS_INT_OFF=1.
 func fixObjectUsedAsInt(body string) string {
-	if os.Getenv("JDEC_OBJECT_AS_INT_OFF") == "1" {
+	if jdecenv.Get("JDEC_OBJECT_AS_INT_OFF") == "1" {
 		return body
 	}
 	from := 0
@@ -37,7 +37,7 @@ func fixObjectUsedAsInt(body string) string {
 }
 
 func fixIntUsedAsInstanceof(body string) string {
-	if os.Getenv("JDEC_INT_INSTANCEOF_OBJECT_OFF") == "1" {
+	if jdecenv.Get("JDEC_INT_INSTANCEOF_OBJECT_OFF") == "1" {
 		return body
 	}
 	from := 0

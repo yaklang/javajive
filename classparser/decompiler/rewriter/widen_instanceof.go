@@ -1,7 +1,7 @@
 package rewriter
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"regexp"
 	"strings"
 
@@ -25,7 +25,7 @@ import (
 // methods in the bytecode). Declaring the variable as Number compiles cleanly while preserving the
 // method-dispatch semantics. See isNumberSafeWiden for the read-side gate.
 func WidenNumericMixedSlotDecl(sts *[]statements.Statement) {
-	if sts == nil || len(*sts) == 0 || os.Getenv("JDEC_WIDEN_NUMERIC_MIXED_OFF") == "1" {
+	if sts == nil || len(*sts) == 0 || jdecenv.Get("JDEC_WIDEN_NUMERIC_MIXED_OFF") == "1" {
 		return
 	}
 	ctx := &class_context.ClassContext{}
@@ -124,7 +124,7 @@ func WidenNumericMixedSlotDecl(sts *[]statements.Statement) {
 // WidenInstanceofReadRefs is a post-RewriteVar pass. Kill-switch:
 // JDEC_POST_RW_INSTANCEOF_WIDEN_OFF=1.
 func WidenInstanceofReadRefs(sts *[]statements.Statement) {
-	if sts == nil || len(*sts) == 0 || os.Getenv("JDEC_POST_RW_INSTANCEOF_WIDEN_OFF") == "1" {
+	if sts == nil || len(*sts) == 0 || jdecenv.Get("JDEC_POST_RW_INSTANCEOF_WIDEN_OFF") == "1" {
 		return
 	}
 	ctx := &class_context.ClassContext{}

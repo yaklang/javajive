@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -10,7 +10,7 @@ import (
 // BoundedInputStream) to InputStream.
 // Kill-switch: JDEC_BOUNDED_STREAM_WIDEN_OFF=1.
 func fixBoundedStreamWiden(body string) string {
-	if os.Getenv("JDEC_BOUNDED_STREAM_WIDEN_OFF") == "1" {
+	if jdecenv.Get("JDEC_BOUNDED_STREAM_WIDEN_OFF") == "1" {
 		return body
 	}
 	const prefix = "BoundedInputStream "

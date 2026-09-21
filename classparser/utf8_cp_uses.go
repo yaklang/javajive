@@ -39,11 +39,18 @@ func annotationStringUnits(v any) []uint16 {
 			return nil
 		}
 		return x.semanticUnits()
+	case []uint16:
+		return x
 	case string:
 		return utf16.Encode([]rune(x))
 	default:
 		return nil
 	}
+}
+
+func utf8StringFromUnits(units []uint16) Utf8String {
+	out := append([]uint16(nil), units...)
+	return Utf8String{Units: out, Value: unitsToDisplay(out)}
 }
 
 // CheckUtf8UseSites applies JVMS name/descriptor rules to actual CP references.

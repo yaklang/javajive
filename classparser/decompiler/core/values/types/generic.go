@@ -2,7 +2,7 @@ package types
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -328,7 +328,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// Only KEY positions resolve to K; NavigableMap's boolean inclusivity flags and the value-typed
 	// get/remove/containsKey(Object) are left as fixed (fall through to -1). Kill-switch
 	// JDEC_SORTED_MAP_KEY_PARAM_OFF.
-	if jdkSortedMapFamily[rawClass] && ntype == 2 && os.Getenv("JDEC_SORTED_MAP_KEY_PARAM_OFF") == "" {
+	if jdkSortedMapFamily[rawClass] && ntype == 2 && jdecenv.Get("JDEC_SORTED_MAP_KEY_PARAM_OFF") == "" {
 		switch method {
 		case "headMap", "tailMap":
 			// SortedMap.headMap(K) [argc 1]; NavigableMap.headMap(K, boolean) [argc 2, only param0=K].
@@ -360,7 +360,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// descriptor erases E to its bound, so an Object-typed value flows in without the source's `(E)` cast;
 	// guava Iterators$ConcatenatedIterator `this.metaIterators.addFirst(rawDeque.removeLast())`).
 	if (method == "addFirst" || method == "addLast" || method == "offerFirst" || method == "offerLast" || method == "push") &&
-		argc == 1 && ntype == 1 && paramIndex == 0 && jdkDequeFamily[rawClass] && os.Getenv("JDEC_DEQUE_PARAM_OFF") == "" {
+		argc == 1 && ntype == 1 && paramIndex == 0 && jdkDequeFamily[rawClass] && jdecenv.Get("JDEC_DEQUE_PARAM_OFF") == "" {
 		return 0
 	}
 	// List<E>.set(int, E) / add(int, E): the SECOND parameter is the element type arg (the first is the
@@ -371,7 +371,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// the List sub-family: only List declares 2-arg set/add(int, E); Set/Queue/Deque never do, so a
 	// same-named 2-arg call on them cannot exist in verified bytecode, but the family gate keeps it
 	// provably scoped.
-	if (method == "set" || method == "add") && argc == 2 && ntype == 1 && paramIndex == 1 && jdkListFamily[rawClass] && os.Getenv("JDEC_LIST_SET_PARAM_OFF") == "" {
+	if (method == "set" || method == "add") && argc == 2 && ntype == 1 && paramIndex == 1 && jdkListFamily[rawClass] && jdecenv.Get("JDEC_LIST_SET_PARAM_OFF") == "" {
 		return 0
 	}
 	// AtomicReference<V>: the V-typed value-parameter methods whose descriptor erases V to Object. The
@@ -387,7 +387,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// InstantiateJDKMethodParam already returns nil for `AtomicReference<?>`. Kill-switch
 	// JDEC_ATOMIC_REF_PARAM_OFF.
 	if rawClass == "java.util.concurrent.atomic.AtomicReference" && ntype == 1 &&
-		os.Getenv("JDEC_ATOMIC_REF_PARAM_OFF") == "" {
+		jdecenv.Get("JDEC_ATOMIC_REF_PARAM_OFF") == "" {
 		switch method {
 		case "compareAndSet", "weakCompareAndSet", "weakCompareAndSetPlain":
 			if argc == 2 && (paramIndex == 0 || paramIndex == 1) {
@@ -1406,7 +1406,7 @@ func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider 
 	// re-cast (`(E)`). It is therefore allowed through here and resolved to its bound by substituteAndGateParam.
 	// An unbounded `?` or upper-bounded `? extends X` arg captures to an unnameable CAP# with NO denotable
 	// cast target, so those still bail. Kill-switch JDEC_GENERIC_SUPERWILDCARD_OFF restores the blanket bail.
-	superWildcardOff := os.Getenv("JDEC_GENERIC_SUPERWILDCARD_OFF") != ""
+	superWildcardOff := funcCtx.Getenv("JDEC_GENERIC_SUPERWILDCARD_OFF") != ""
 	for _, a := range recvArgs {
 		if !isWildcardType(a) {
 			continue

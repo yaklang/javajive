@@ -134,6 +134,9 @@ public class T04SuperCtorMain {
 		if strings.Contains(src, "class T04Sub") && !strings.Contains(src, "super.m") {
 			t.Fatalf("T04-C04 Sub lost super.m:\n%s", src)
 		}
+		if !strings.Contains(src, "super.m((Object)") && !strings.Contains(src, "super.m((java.lang.Object)") {
+			t.Fatalf("T04-C04 missing super.m((Object)null) pin:\n%s", src)
+		}
 	})
 }
 
@@ -229,6 +232,94 @@ public class T04CrossMain {
 	t04RoundTripModes(t, "8", "T04CrossMain", origOut, classes, func(t *testing.T, src string) {
 		if strings.Contains(src, "pick(s)") && !strings.Contains(src, "(Object)") {
 			// may still be pick((Object)s)
+		}
+	})
+}
+
+func TestT04PoolDescriptorsOnDumper(t *testing.T) {
+	_, classes := t04CompileRun(t, "8", "T04RegMain", map[string]string{
+		"T04RegMain.java": `class T04RegOver {
+  static String pick(Object x) { return "Object"; }
+  static String pick(String x) { return "String"; }
+}
+public class T04RegMain {
+  public static void main(String[] args) {
+    String s = "hi";
+    System.out.println(T04RegOver.pick((Object)s));
+    System.out.println(T04RegOver.pick(s));
+  }
+}
+`,
+	})
+	raw := classes["T04RegMain"]
+	obj, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewClassObjectDumper(obj)
+	d.foldSiblingResolver = func(internalName string) ([]byte, bool) {
+		base := internalName
+		if i := strings.LastIndexByte(internalName, '/'); i >= 0 {
+			base = internalName[i+1:]
+		}
+		b, ok := classes[base]
+		return b, ok
+	}
+	src, err := d.DumpClass()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.FuncCtx.PoolMethodDescriptors["T04RegOver.pick(Ljava/lang/Object;)Ljava/lang/String;"] != true {
+		t.Fatalf("missing pick(Object) pool key in %v", d.FuncCtx.PoolMethodDescriptors)
+	}
+	if !strings.Contains(src, "pick((Object)") {
+		t.Fatalf("expected pick((Object) pin, got:\n%s", src)
+	}
+}
+
+func TestT04RegressionGenericBridgeOverloadArrayLambda(t *testing.T) {
+	const src = `class T04RegP<T> {
+  void m(T t) { System.out.println("P:" + t); }
+}
+class T04RegC extends T04RegP<String> {
+  void m(String s) { System.out.println("C:" + s); }
+}
+class T04RegOver {
+  static String pick(Object x) { return "Object"; }
+  static String pick(String x) { return "String"; }
+  static String pick(Object[] x) { return "Object[]"; }
+  static String pick(String... x) { return "String..."; }
+}
+public class T04RegMain {
+  public static void main(String[] args) {
+    java.util.List<Integer> xs = new java.util.ArrayList<Integer>();
+    xs.add(Integer.valueOf(3));
+    xs.add(Integer.valueOf(1));
+    xs.add(Integer.valueOf(2));
+    java.util.Collections.sort(xs, (Integer l0, Integer l1) -> l1.compareTo(l0));
+    System.out.println(xs);
+    T04RegP<String> p = new T04RegC();
+    p.m(null);
+    T04RegC c = new T04RegC();
+    c.m(null);
+    String s = "hi";
+    System.out.println(T04RegOver.pick((Object)s));
+    System.out.println(T04RegOver.pick(s));
+    System.out.println(T04RegOver.pick((Object[])null));
+    System.out.println(T04RegOver.pick("a", "b"));
+  }
+}
+`
+	origOut, classes := t04CompileRun(t, "8", "T04RegMain", map[string]string{"T04RegMain.java": src})
+	if !strings.Contains(origOut, "Object") || !strings.Contains(origOut, "String") {
+		t.Fatalf("T04 regression original stdout missing overload pins: %q", origOut)
+	}
+	t04RoundTripModes(t, "8", "T04RegMain", origOut, classes, func(t *testing.T, src string) {
+		if strings.Contains(src, "(Comparator)((Integer") || strings.Contains(src, "(Comparator)((") {
+			t.Fatalf("raw Comparator/FI cast on typed lambda (breaks javac inference):\n%s", src)
+		}
+		if t04BareValueOfNull.MatchString(src) {
+			t.Fatalf("uncast valueOf(null) in family rebuild:\n%s", src)
 		}
 	})
 }

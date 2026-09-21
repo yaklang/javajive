@@ -2,7 +2,7 @@ package core
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"sort"
 	"strings"
 
@@ -22,12 +22,12 @@ type decompileTraceConfig struct {
 
 func currentTraceConfig() decompileTraceConfig {
 	return decompileTraceConfig{
-		classFilter:  os.Getenv("JDEC_TRACE_CLASS"),
-		methodFilter: os.Getenv("JDEC_TRACE_METHOD"),
-		varTable:     os.Getenv("JDEC_TRACE_VAR_TABLE") != "",
-		varFold:      os.Getenv("JDEC_TRACE_VAR_FOLD") != "",
-		rewriteVar:   os.Getenv("JDEC_TRACE_REWRITE_VAR") != "",
-		slotVersion:  os.Getenv("JDEC_TRACE_SLOT_VERSION") != "",
+		classFilter:  jdecenv.Get("JDEC_TRACE_CLASS"),
+		methodFilter: jdecenv.Get("JDEC_TRACE_METHOD"),
+		varTable:     jdecenv.Get("JDEC_TRACE_VAR_TABLE") != "",
+		varFold:      jdecenv.Get("JDEC_TRACE_VAR_FOLD") != "",
+		rewriteVar:   jdecenv.Get("JDEC_TRACE_REWRITE_VAR") != "",
+		slotVersion:  jdecenv.Get("JDEC_TRACE_SLOT_VERSION") != "",
 	}
 }
 

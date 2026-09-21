@@ -49,7 +49,31 @@ func (v *CustomValue) Type() types.JavaType {
 	return v.TypeFunc()
 }
 func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
-	return v.StringFunc(funcCtx)
+	guard := renderGuarded(funcCtx)
+	if guard {
+		if err := beginValueRender(funcCtx); err != nil {
+			return ""
+		}
+		defer endValueRender(funcCtx)
+	}
+	if v.StringFunc == nil {
+		return ""
+	}
+	s := v.StringFunc(funcCtx)
+	if renderRejected(funcCtx) {
+		return ""
+	}
+	if !guard {
+		return s
+	}
+	n := int64(len(s))
+	if err := funcCtx.CheckAlloc(n); err != nil {
+		return ""
+	}
+	if err := funcCtx.PreflightOutput(n); err != nil {
+		return ""
+	}
+	return s
 }
 func NewCustomValue(stringFun func(funcCtx *class_context.ClassContext) string, typeFunc func() types.JavaType, replaceFunc ...func(oldId *utils.VariableId, newId *utils.VariableId)) *CustomValue {
 	var rf func(oldId *utils.VariableId, newId *utils.VariableId)

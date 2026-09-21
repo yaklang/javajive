@@ -177,18 +177,28 @@ func bytes2bcel(data []byte) (string, error) {
 	return "$$BCEL$$" + buf.String(), nil
 }
 
-func ParseAnnotationElementValue(cp *ClassParser) *ElementValuePairAttribute {
-	getUtf8 := func(index uint16) string {
-		s, err := cp.classObj.getUtf8(index)
-		if err != nil {
-			panic(fmt.Errorf("get utf8 error: %s", err))
+const maxAnnotationNesting = 64
+
+func annotationGetUtf8(cp *ClassParser, index uint16) string {
+	s, err := cp.classObj.getUtf8(index)
+	if err != nil {
+		if cp.reader != nil {
+			cp.reader.fail(ParseCodeCPIndex, fmt.Sprintf("get utf8 error: %s", err))
+			return ""
 		}
-		return s
+		panic(fmt.Errorf("get utf8 error: %s", err))
 	}
+	return s
+}
+
+func ParseAnnotationElementValue(cp *ClassParser) *ElementValuePairAttribute {
 	reader := cp.reader
 	tag := reader.readUint8()
 	ele := &ElementValuePairAttribute{
 		Tag: tag,
+	}
+	if reader != nil && reader.Err() != nil {
+		return ele
 	}
 	switch tag {
 	case 'B', 'C', 'D', 'F', 'I', 'J', 'S', 'Z':
@@ -196,18 +206,31 @@ func ParseAnnotationElementValue(cp *ClassParser) *ElementValuePairAttribute {
 		var err error
 		ele.Value, err = cp.classObj.getConstantInfo(index)
 		if err != nil {
-			panic(fmt.Errorf("get constant info error: %s", err))
+			if reader != nil {
+				reader.fail(ParseCodeCPIndex, fmt.Sprintf("get constant info error: %s", err))
+			} else {
+				panic(fmt.Errorf("get constant info error: %s", err))
+			}
 		}
 	case 's':
-		ele.Value = getUtf8(reader.readUint16())
+		idx := reader.readUint16()
+		units, err := cp.classObj.getUtf8Units(idx)
+		if err != nil {
+			if reader != nil {
+				reader.fail(ParseCodeCPIndex, err.Error())
+			}
+			ele.Value = utf8StringFromUnits(units)
+		} else {
+			ele.Value = utf8StringFromUnits(units)
+		}
 	case 'e':
 		val := &EnumConstValue{
-			TypeName:  getUtf8(reader.readUint16()),
-			ConstName: getUtf8(reader.readUint16()),
+			TypeName:  annotationGetUtf8(cp, reader.readUint16()),
+			ConstName: annotationGetUtf8(cp, reader.readUint16()),
 		}
 		ele.Value = val
 	case 'c':
-		ele.Value = getUtf8(reader.readUint16())
+		ele.Value = annotationGetUtf8(cp, reader.readUint16())
 	case '@':
 		ele.Value = ParseAnnotation(cp)
 	case '[':
@@ -219,21 +242,18 @@ func ParseAnnotationElementValue(cp *ClassParser) *ElementValuePairAttribute {
 		}
 		ele.Value = l
 	default:
+		if reader != nil {
+			reader.fail(ParseCodeInvalidInput, fmt.Sprintf("parse annotation error, unknown tag: %c", tag))
+			return ele
+		}
 		panic(fmt.Errorf("parse annotation error, unknown tag: %c", tag))
 	}
 	return ele
 }
 func ParseAnnotationElementValuePair(cp *ClassParser) *ElementValuePairAttribute {
-	getUtf8 := func(index uint16) string {
-		s, err := cp.classObj.getUtf8(index)
-		if err != nil {
-			panic(fmt.Errorf("get utf8 error: %s", err))
-		}
-		return s
-	}
 	reader := cp.reader
 	nameIndex := reader.readUint16()
-	name := getUtf8(nameIndex)
+	name := annotationGetUtf8(cp, nameIndex)
 	value := ParseAnnotationElementValue(cp)
 	value.Name = name
 	return value
@@ -330,13 +350,25 @@ func WriteElementValue(cp *ConstantPool, element *ElementValuePairAttribute, wri
 			}
 			return 0
 		}
-		strValue, ok := element.Value.(string)
-		if ok {
-			strIndex := getOrAddUtf8Index(strValue)
-			writer.Write2Byte(strIndex)
-		} else {
-			writer.Write2Byte(0) // Default value if not a string
+		strIndex := uint16(0)
+		units := annotationStringUnits(element.Value)
+		if units != nil {
+			for i, constant := range cp.GetData() {
+				if utf8Info, ok := constant.(*ConstantUtf8Info); ok {
+					if utf8Info.Units != nil && utf16UnitsEqual(utf8Info.Units, units) {
+						strIndex = uint16(i + 1)
+						break
+					}
+					if utf8Info.Value == unitsToDisplay(units) {
+						strIndex = uint16(i + 1)
+						break
+					}
+				}
+			}
+		} else if sv, ok := element.Value.(string); ok {
+			strIndex = getOrAddUtf8Index(sv)
 		}
+		writer.Write2Byte(strIndex)
 
 	case 'e':
 		// For enum constant value
@@ -417,24 +449,30 @@ func WriteElementValue(cp *ConstantPool, element *ElementValuePairAttribute, wri
 }
 
 func ParseAnnotation(cp *ClassParser) *AnnotationAttribute {
-	getUtf8 := func(index uint16) string {
-		s, err := cp.classObj.getUtf8(index)
-		if err != nil {
-			panic(fmt.Errorf("get utf8 error: %s", err))
+	if cp.annoDepth >= maxAnnotationNesting {
+		if cp.reader != nil {
+			cp.reader.fail(ParseCodeResourceLimit, fmt.Sprintf("annotation nesting exceeds %d", maxAnnotationNesting))
 		}
-		return s
+		return &AnnotationAttribute{}
 	}
+	cp.annoDepth++
+	defer func() { cp.annoDepth-- }()
 	reader := cp.reader
-
 	typeIndex := reader.readUint16()
 	elementLen := reader.readUint16()
-	typeName := getUtf8(typeIndex)
+	if reader != nil && reader.Err() != nil {
+		return &AnnotationAttribute{}
+	}
+	typeName := annotationGetUtf8(cp, typeIndex)
 	anno := &AnnotationAttribute{
 		TypeName:          typeName,
 		ElementValuePairs: make([]*ElementValuePairAttribute, elementLen),
 	}
 	for j := range anno.ElementValuePairs {
 		anno.ElementValuePairs[j] = ParseAnnotationElementValuePair(cp)
+		if reader != nil && reader.Err() != nil {
+			return anno
+		}
 	}
 	return anno
 }

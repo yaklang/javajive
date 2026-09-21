@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -12,7 +12,7 @@ import (
 // payload ctor: `this(args)`.
 // Kill-switch: JDEC_ENUM_CTOR_THIS_FIRST_OFF=1.
 func fixEnumNoArgCtorThisAfterLocals(body string) string {
-	if os.Getenv("JDEC_ENUM_CTOR_THIS_FIRST_OFF") == "1" {
+	if jdecenv.Get("JDEC_ENUM_CTOR_THIS_FIRST_OFF") == "1" {
 		return body
 	}
 	const mid = "{\n\tObject var1 = null;\n\tObject var2 = null;\n\t\tthis(var1,var2,"

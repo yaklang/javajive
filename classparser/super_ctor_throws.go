@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"os"
 	"strings"
 )
 
@@ -13,7 +12,7 @@ import (
 // "unreported exception InitializationError". Kill-switch:
 // JDEC_SUPER_CTOR_THROWS_OFF=1.
 func (c *ClassObjectDumper) superCtorCheckedThrows() string {
-	if os.Getenv("JDEC_SUPER_CTOR_THROWS_OFF") == "1" {
+	if c.getenv("JDEC_SUPER_CTOR_THROWS_OFF") == "1" {
 		return ""
 	}
 	if c == nil || c.obj == nil {

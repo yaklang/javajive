@@ -1,6 +1,7 @@
 package filesys
 
 import (
+	"context"
 	"io"
 	"io/fs"
 	"os"
@@ -9,9 +10,9 @@ import (
 	"strings"
 
 	fi "github.com/yaklang/javajive/internal/filesys/filesys_interface"
-	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/memfile"
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/workbudget"
 	zip "github.com/yaklang/javajive/internal/zipx"
 )
 
@@ -23,6 +24,15 @@ type ZipFSOption func(*zipFSConfig)
 // 关键词: ZipFS 配置, 加密 zip 读
 type zipFSConfig struct {
 	Password string
+
+	limits        ArchiveLimits
+	limitsSet     bool
+	budget        *ArchiveBudget
+	work          *workbudget.Budget
+	ctx           context.Context
+	depth         int
+	targetRelease int
+	safeArchive   bool
 }
 
 // WithZipFSPassword 设置加密 zip 的解密密码
@@ -50,6 +60,14 @@ type ZipFS struct {
 	// 加密 zip 解密密码
 	// 关键词: ZipFS 密码字段
 	password string
+
+	budget        *ArchiveBudget
+	limits        ArchiveLimits
+	ctx           context.Context
+	depth         int
+	targetRelease int
+	safeArchive   bool
+	archiveActive bool
 }
 
 // SetPassword 后置设置 ZipFS 解密密码
@@ -215,35 +233,7 @@ func (z *ZipFS) Ext(i string) string {
 }
 
 func (z *ZipFS) ReadFile(name string) ([]byte, error) {
-	name = z.Clean(name)
-	node, err := z.forest.Get(name)
-	if err != nil {
-		return nil, utils.Wrapf(err, "get %v failed", name)
-	}
-	if node == nil || utils.IsNil(node.Value) {
-		return nil, os.ErrNotExist
-	}
-	f, ok := node.Value.(*zip.File)
-	if !ok {
-		return nil, os.ErrNotExist
-	}
-	if f.FileInfo().IsDir() {
-		return nil, utils.Wrapf(os.ErrNotExist, "%v is dir", name)
-	}
-	// 加密 zip 条目设置密码
-	// 关键词: ZipFS 加密读, SetPassword
-	if f.IsEncrypted() {
-		if z.password == "" {
-			return nil, utils.Errorf("zip entry %s is encrypted but no password supplied", f.Name)
-		}
-		f.SetPassword(z.password)
-	}
-	rc, err := f.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-	return io.ReadAll(rc)
+	return z.readFileBounded(name)
 }
 
 func (f *ZipFS) String() string {
@@ -368,29 +358,32 @@ func NewZipFSFromLocalWithOptions(i string, opts ...ZipFSOption) (*ZipFS, error)
 // buildZipFS 是 ZipFS 构造的内部统一入口
 // 关键词: ZipFS 内部构造
 func buildZipFS(i io.ReaderAt, size int64, closer io.Closer, cfg *zipFSConfig) (*ZipFS, error) {
+	fail := func(err error) (*ZipFS, error) {
+		if closer != nil {
+			_ = closer.Close()
+		}
+		return nil, err
+	}
 	reader, err := zip.NewReader(i, size)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 
 	forest, err := utils.GeneratePathTrees()
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-
-	for _, f := range reader.File {
-		name := f.Name
-		err := forest.AddPath(zipPathClean(name), f)
-		if err != nil {
-			log.Warnf("BUG: cache zip tree failed: %v", err)
-			continue
-		}
-	}
-	forest.ReadOnly()
 
 	zfs := &ZipFS{r: reader, forest: forest, closer: closer}
 	if cfg != nil {
 		zfs.password = cfg.Password
+		if err := zfs.applyArchiveConfig(cfg); err != nil {
+			return fail(err)
+		}
 	}
+	if err := zfs.catalogArchiveFiles(); err != nil {
+		return fail(err)
+	}
+	forest.ReadOnly()
 	return zfs, nil
 }

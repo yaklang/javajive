@@ -32,7 +32,18 @@ func TestHttp2StreamEmptySyncIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
-	if strings.Contains(off, "return this.sink;") {
-		t.Errorf("fix OFF: reconstruct survived the kill-switch, got:\n%s", off)
+	if !strings.Contains(off, "return this.sink;") {
+		t.Errorf("OFF dump lost getSink return (CFG regression):\n%s", off)
+	}
+	canned := "class Http2Stream {\n" + http2GetSinkEmpty + "\n" + http2CloseInternalEmpty + "\nhasResponseHeaders\n}\n"
+	os.Unsetenv("JDEC_HTTP2_STREAM_SYNC_OFF")
+	onR := fixHttp2StreamEmptySync(canned)
+	if !strings.Contains(onR, "return this.sink;") {
+		t.Errorf("reconstruct ON must fill canned getSink, got:\n%s", onR)
+	}
+	t.Setenv("JDEC_HTTP2_STREAM_SYNC_OFF", "1")
+	offR := fixHttp2StreamEmptySync(canned)
+	if strings.Contains(offR, "return this.sink;") {
+		t.Errorf("reconstruct kill-switch must leave canned empty getSink, got:\n%s", offR)
 	}
 }

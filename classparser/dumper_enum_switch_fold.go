@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,13 +52,13 @@ type switchMapSwitch struct {
 // integer case label has a constant mapping; otherwise that switch is left byte-for-byte untouched.
 // Disabled by a nil resolver or JDEC_NO_ENUM_SWITCH_FOLD.
 func (c *ClassObjectDumper) foldEnumSwitchMaps(src string) string {
-	if c.foldSiblingResolver == nil || os.Getenv("JDEC_NO_ENUM_SWITCH_FOLD") != "" {
+	if c.foldSiblingResolver == nil || c.getenv("JDEC_NO_ENUM_SWITCH_FOLD") != "" {
 		return src
 	}
 	if !strings.Contains(src, "$SwitchMap$") {
 		return src
 	}
-	debug := os.Getenv("JDEC_FOLD_DEBUG") != ""
+	debug := c.getenv("JDEC_FOLD_DEBUG") != ""
 	pkgPath := strings.ReplaceAll(c.PackageName, ".", "/")
 	searchFrom := 0
 	for {

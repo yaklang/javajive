@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixZxingRemainingReconstructs repairs leftover zxing-core tree sites.
 // Kill-switch: JDEC_ZXING_REMAINING_OFF=1.
 func fixZxingRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_ZXING_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_ZXING_REMAINING_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "com.google.zxing") {

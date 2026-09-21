@@ -1,7 +1,7 @@
 package rewriter
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
@@ -73,14 +73,20 @@ func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
 			break
 		}
 	}
-	if !foundTop && os.Getenv("JDEC_SYNC_NESTED_MONITOREXIT_OFF") == "" {
+	if !foundTop && jdecenv.Get("JDEC_SYNC_NESTED_MONITOREXIT_OFF") == "" {
 		// monitor_exit was sunk into a nested try body (synchronized body is itself a try/catch).
 		// Strip it in place and keep the entire TryBody as the synchronized body; there is no
 		// post-synchronized continuation to hoist out in this shape.
 		if nb, done := removeSunkMonitorExit(trySt.TryBody); done {
 			bodySts = nb
 			otherBody = nil
+			foundTop = true
 		}
+	}
+	if !foundTop {
+		// Throw-only (or otherwise non-completing) synchronized bodies have no normal-path
+		// monitorexit; javac puts the only monitorexit in the synthetic catch-all.
+		bodySts = trySt.TryBody
 	}
 	next := slices.Clone(currentNode.Next)
 	source := slices.Clone(node.Source)

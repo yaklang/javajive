@@ -42,11 +42,20 @@ type ConstantUtf8Info struct {
 func (self *ConstantUtf8Info) readInfo(cp *ClassParser) {
 	length := uint32(cp.reader.readUint16())
 	raw := cp.reader.readBytes(length)
+	if cp.reader != nil && cp.reader.Err() != nil {
+		return
+	}
 	self.Raw = bytes.Clone(raw)
 	units, err := mutf8.Decode(self.Raw)
 	if err != nil {
+		// Sticky parse errors must not overwrite lossless units with error text.
 		self.DecodeErr = err
 		self.Units = nil
+		self.Value = ""
+		if cp.reader != nil {
+			cp.reader.fail(ParseCodeInvalidInput, err.Error())
+			return
+		}
 		panic(err)
 	}
 	self.Units = units

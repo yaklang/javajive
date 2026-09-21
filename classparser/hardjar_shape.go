@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"regexp"
 	"strings"
 )
@@ -11,7 +11,7 @@ import (
 // class-name unique. Kill-switch: JDEC_HARDJAR_SHAPE_OFF=1.
 
 func hardjarShapeOff() bool {
-	return os.Getenv("JDEC_HARDJAR_SHAPE_OFF") == "1"
+	return jdecenv.Get("JDEC_HARDJAR_SHAPE_OFF") == "1"
 }
 
 func fixHardjarShapes(body string) string {

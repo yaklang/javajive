@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -11,7 +11,7 @@ import (
 // CustomObjectInputStream.DATA_HOLDER_KEY). Kill-switch:
 // JDEC_CLASSDOLLAR_FORWARD_OFF=1.
 func fixClassDollarForwardRef(body string) string {
-	if os.Getenv("JDEC_CLASSDOLLAR_FORWARD_OFF") == "1" {
+	if jdecenv.Get("JDEC_CLASSDOLLAR_FORWARD_OFF") == "1" {
 		return body
 	}
 	from := 0

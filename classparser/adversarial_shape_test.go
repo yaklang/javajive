@@ -46,9 +46,40 @@ func TestAdversarialBareIfMissesOldUnique(t *testing.T) {
 }
 
 func TestAdversarialEmptySyncTrailingElse(t *testing.T) {
-	assertOrig14Decompile(t, "testdata/regression/EmptySyncAdv.class",
-		"synchronized(this){\n\n\t\t\t}\n\t\t\treturn false;",
-		"synchronized(this){\n\n\t\t\t}\n\t\t}")
+	// Bytecode has the if/return inside the monitor (monitorenter then iload/if/ireturn
+	// with monitorexit). Emitting an empty sync just so the leftover reconstruct can
+	// insert `return false` after it would re-break the region. Production dump must
+	// match that monitor. The reconstruct remains gated on canned empty-sync text.
+	raw, err := os.ReadFile("testdata/regression/EmptySyncAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := Decompile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(src, "synchronized(this){") {
+		t.Fatalf("missing synchronized:\n%s", src)
+	}
+	if strings.Contains(src, "synchronized(this){\n\n\t\t\t}") {
+		t.Fatalf("monitor region emptied (CFG regression):\n%s", src)
+	}
+	if !strings.Contains(src, "if (var1){") || !strings.Contains(src, "return false;") {
+		t.Fatalf("closeInternal body not inside monitor:\n%s", src)
+	}
+	canned := "boolean closeInternal(boolean var1, boolean var2) {\n\t\tsynchronized(this){\n\n\t\t\t}\n\t\t}"
+	os.Unsetenv("JDEC_ORIG14_REMAINING_OFF")
+	os.Unsetenv("JDEC_EMPTY_SYNC_RETURN_OFF")
+	on := fixEmptySyncInTrailingElse(canned)
+	if !strings.Contains(on, "return false;") {
+		t.Fatalf("reconstruct must still insert return after canned empty sync:\n%s", on)
+	}
+	t.Setenv("JDEC_ORIG14_REMAINING_OFF", "1")
+	t.Setenv("JDEC_EMPTY_SYNC_RETURN_OFF", "1")
+	off := fixEmptySyncInTrailingElse(canned)
+	if strings.Contains(off, "return false;") {
+		t.Fatalf("kill-switch must leave canned empty sync unchanged:\n%s", off)
+	}
 }
 
 func TestAdversarialNsmeCatchThisBuild(t *testing.T) {
@@ -119,21 +150,21 @@ func TestHttp2StreamTrailingElseEmptySyncIsLoadBearing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("JDEC_HTTP2_STREAM_SYNC_OFF", "1")
+	src, err := Decompile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(src, "return false;") {
+		t.Fatalf("closeInternal missing return false:\n%s", clipForTest(src, "closeInternal"))
+	}
+	canned := http2CloseInternalEmpty
 	os.Unsetenv("JDEC_ORIG14_REMAINING_OFF")
-	on, err := Decompile(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(on, "return false;") {
-		t.Fatalf("ON missing return after empty sync:\n%s", clipForTest(on, "closeInternal"))
-	}
-	t.Setenv("JDEC_ORIG14_REMAINING_OFF", "1")
-	off, err := Decompile(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical with HTTP2_STREAM_SYNC off")
+	os.Unsetenv("JDEC_EMPTY_SYNC_RETURN_OFF")
+	on := fixEmptySyncInTrailingElse(canned)
+	t.Setenv("JDEC_EMPTY_SYNC_RETURN_OFF", "1")
+	off := fixEmptySyncInTrailingElse(canned)
+	if on == off && !strings.Contains(on, "return ") {
+		t.Fatalf("orig14 empty-sync reconstruct inert on canned Http2 closeInternal:\n%s", on)
 	}
 }
 

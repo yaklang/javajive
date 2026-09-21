@@ -187,7 +187,7 @@ func TestInvokeWitnessEnvSnapshotFlag(t *testing.T) {
 	call.IsStatic = true
 	call.Kind = InvokeStatic
 	call.Arguments = []JavaValue{NewJavaLiteral("null", types.NewJavaClass("java.lang.Object"))}
-	off := &class_context.ClassContext{Getenv: func(string) string { return "1" }}
+	off := &class_context.ClassContext{Env: func(string) string { return "1" }}
 	got := call.String(off)
 	if !strings.Contains(got, "valueOf(null)") && strings.Contains(got, "(Object)") {
 		// flag on: Object cast must not be required
@@ -195,10 +195,362 @@ func TestInvokeWitnessEnvSnapshotFlag(t *testing.T) {
 	if strings.Contains(got, "(Object)") {
 		t.Fatalf("EnvSnapshot JDEC_NULL_ARG_CAST_OFF=1 still cast: %q", got)
 	}
-	on := &class_context.ClassContext{Getenv: func(string) string { return "" }}
+	on := &class_context.ClassContext{Env: func(string) string { return "" }}
 	got2 := call.String(on)
 	if !strings.Contains(got2, "(Object)") {
 		t.Fatalf("empty snapshot should still cast: %q", got2)
+	}
+}
+
+func TestInvokeWitnessDoesNotRawCastGenericOrLambda(t *testing.T) {
+	listFT, err := types.ParseMethodDescriptor("(Ljava/util/List;Ljava/util/Comparator;)V")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "java.util.Collections", Member: "sort",
+		Description: "(Ljava/util/List;Ljava/util/Comparator;)V", JavaType: listFT,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("java.util.Collections")), member, listFT.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	listArg := NewCustomValue(func(*class_context.ClassContext) string {
+		return "xs"
+	}, func() types.JavaType {
+		return types.NewParameterizedType("java.util.List", []types.JavaType{types.NewJavaClass("java.lang.Integer")})
+	})
+	lam := NewCustomValue(func(*class_context.ClassContext) string {
+		return "(Integer l0, Integer l1) -> l0.compareTo(l1)"
+	}, func() types.JavaType {
+		return types.NewParameterizedType("java.util.Comparator", []types.JavaType{types.NewJavaClass("java.lang.Integer")})
+	})
+	lam.Flag = "lambda"
+	call.Arguments = []JavaValue{listArg, lam}
+	got := call.String(&class_context.ClassContext{})
+	if strings.Contains(got, "(List)") {
+		t.Fatalf("erased List cast on generic argument: %q", got)
+	}
+	if strings.Contains(got, "(Comparator)") {
+		t.Fatalf("raw Comparator cast on typed lambda: %q", got)
+	}
+	if !strings.Contains(got, "(Integer l0, Integer l1)") {
+		t.Fatalf("lambda body dropped: %q", got)
+	}
+}
+
+func TestInvokeWitnessDoesNotCastMapGetToErasure(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/Object;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "java.util.HashMap", Member: "get",
+		Description: "(Ljava/lang/Object;)Ljava/lang/Object;", JavaType: ft,
+	}
+	recv := NewCustomValue(func(*class_context.ClassContext) string {
+		return "var1"
+	}, func() types.JavaType {
+		return types.NewParameterizedType("java.util.HashMap", []types.JavaType{
+			types.NewJavaClass("java.lang.Long"), types.NewJavaClass("java.lang.Long"),
+		})
+	})
+	call := NewFunctionCallExpression(recv, member, ft.FunctionType())
+	call.Kind = InvokeVirtual
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string {
+			return "Long.valueOf(1L)"
+		}, func() types.JavaType {
+			return types.NewJavaClass("java.lang.Long")
+		}),
+	}
+	got := call.String(&class_context.ClassContext{})
+	if strings.Contains(got, "(Object)") {
+		t.Fatalf("HashMap.get must not pin the key to erased Object: %q", got)
+	}
+	if !strings.Contains(got, "Long.valueOf(1L)") {
+		t.Fatalf("key argument dropped: %q", got)
+	}
+}
+
+func TestInvokeWitnessPinsCompetingSameClassOverload(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "T04Parent", Member: "pick",
+		Description: "(Ljava/lang/Object;)Ljava/lang/String;", JavaType: ft,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("T04Parent")), member, ft.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string {
+			return "s"
+		}, func() types.JavaType {
+			return types.NewJavaClass("java.lang.String")
+		}),
+	}
+	ctx := &class_context.ClassContext{
+		ClassName: "T04Parent",
+		MethodDescriptors: map[string]bool{
+			"pick(Ljava/lang/Object;)Ljava/lang/String;": true,
+			"pick(Ljava/lang/String;)Ljava/lang/String;": true,
+		},
+	}
+	got := call.String(ctx)
+	if !strings.Contains(got, "(Object)") {
+		t.Fatalf("String argument to pick(Object) must pin Object: %q", got)
+	}
+}
+
+func TestInvokeWitnessPinsStringPrimerToObjectOverload(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "T04RegOver", Member: "pick",
+		Description: "(Ljava/lang/Object;)Ljava/lang/String;", JavaType: ft,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("T04RegOver")), member, ft.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string {
+			return "s"
+		}, func() types.JavaType {
+			return types.NewJavaPrimer(types.JavaString)
+		}),
+	}
+	ctx := &class_context.ClassContext{
+		ClassName: "T04RegMain",
+		PoolMethodDescriptors: map[string]bool{
+			"T04RegOver.pick(Ljava/lang/Object;)Ljava/lang/String;": true,
+			"T04RegOver.pick(Ljava/lang/String;)Ljava/lang/String;": true,
+		},
+	}
+	got := call.String(ctx)
+	if !strings.Contains(got, "(Object)") {
+		t.Fatalf("String primer argument to pick(Object) must pin Object: %q", got)
+	}
+}
+
+func TestInvokeWitnessPinsPoolOverload(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "T04RegOver", Member: "pick",
+		Description: "(Ljava/lang/Object;)Ljava/lang/String;", JavaType: ft,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("T04RegOver")), member, ft.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string {
+			return "s"
+		}, func() types.JavaType {
+			return types.NewJavaClass("java.lang.String")
+		}),
+	}
+	ctx := &class_context.ClassContext{
+		ClassName: "T04RegMain",
+		PoolMethodDescriptors: map[string]bool{
+			"T04RegOver.pick(Ljava/lang/Object;)Ljava/lang/String;": true,
+			"T04RegOver.pick(Ljava/lang/String;)Ljava/lang/String;": true,
+		},
+	}
+	got := call.String(ctx)
+	if !strings.Contains(got, "(Object)") {
+		t.Fatalf("caller CP overload evidence must pin pick(Object): %q", got)
+	}
+}
+
+func TestInvokeWitnessPinsSiblingOverload(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "T04Parent", Member: "pick",
+		Description: "(Ljava/lang/Object;)Ljava/lang/String;", JavaType: ft,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("T04Parent")), member, ft.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string {
+			return "s"
+		}, func() types.JavaType {
+			return types.NewJavaClass("java.lang.String")
+		}),
+	}
+	ctx := &class_context.ClassContext{
+		ClassName: "T04Child",
+		SiblingClassSig: func(internal string) (string, map[string]string, bool) {
+			if internal != "T04Parent" {
+				return "", nil, false
+			}
+			return "", map[string]string{
+				"pick(Ljava/lang/Object;)Ljava/lang/String;": "",
+				"pick(Ljava/lang/String;)Ljava/lang/String;": "",
+			}, true
+		},
+	}
+	got := call.String(ctx)
+	if !strings.Contains(got, "(Object)") {
+		t.Fatalf("cross-class pick(Object) must pin Object from sibling descriptors: %q", got)
+	}
+}
+
+func TestInvokeWitnessArrayToObjectNeedsOverload(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "java.lang.String", Member: "valueOf",
+		Description: "(Ljava/lang/Object;)Ljava/lang/String;", JavaType: ft,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("java.lang.String")), member, ft.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	arrT, err := types.ParseDescriptor("[C")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string {
+			return "chars"
+		}, func() types.JavaType { return arrT }),
+	}
+	got := call.String(&class_context.ClassContext{})
+	if !strings.Contains(got, "(Object)") {
+		t.Fatalf("valueOf(Object) with char[] must pin Object vs valueOf(char[]): %q", got)
+	}
+}
+
+func TestInvokeWitnessUnknownExternalDoesNotInventObjectPin(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "ext.Lib", Member: "pick",
+		Description: "(Ljava/lang/Object;)Ljava/lang/String;", JavaType: ft,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("ext.Lib")), member, ft.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string {
+			return "payload"
+		}, func() types.JavaType {
+			return types.NewJavaClass("java.lang.String")
+		}),
+	}
+	var noted []string
+	ctx := &class_context.ClassContext{
+		ClassName: "Caller",
+		PoolMethodDescriptors: map[string]bool{
+			"ext.Lib.pick(Ljava/lang/Object;)Ljava/lang/String;": true,
+		},
+		OnOverloadUnknown: func(owner, name, descriptor string) {
+			noted = append(noted, owner+"."+name+descriptor)
+		},
+	}
+	got := call.String(ctx)
+	if strings.Contains(got, "(Object)") {
+		t.Fatalf("unknown family must not invent String→Object pin (requireNonNull/generic V), got %q", got)
+	}
+	if len(noted) == 0 {
+		t.Fatalf("missing overload_family_unknown evidence, got %q", got)
+	}
+}
+
+func TestInvokeWitnessRequireNonNullStringArgNoObjectPin(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/Object;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "java.util.Objects", Member: "requireNonNull",
+		Description: "(Ljava/lang/Object;)Ljava/lang/Object;", JavaType: ft,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("java.util.Objects")), member, ft.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string {
+			return "var1"
+		}, func() types.JavaType {
+			return types.NewJavaClass("java.lang.String")
+		}),
+	}
+	got := call.String(&class_context.ClassContext{})
+	if strings.Contains(got, "(Object)") {
+		t.Fatalf("requireNonNull must not pin String arg as Object: %q", got)
+	}
+	if !strings.Contains(got, "requireNonNull(var1)") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestInvokeWitnessResolverOwnerCompetingOverloadPins(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "ext.Lib", Member: "pick",
+		Description: "(Ljava/lang/Object;)Ljava/lang/String;", JavaType: ft,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("ext.Lib")), member, ft.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string {
+			return "payload"
+		}, func() types.JavaType {
+			return types.NewJavaClass("java.lang.String")
+		}),
+	}
+	ctx := &class_context.ClassContext{
+		ClassName: "Caller",
+		SiblingClassSig: func(internal string) (string, map[string]string, bool) {
+			if internal != "ext/Lib" {
+				return "", nil, false
+			}
+			return "", map[string]string{
+				"pick(Ljava/lang/Object;)Ljava/lang/String;": "",
+				"pick(Ljava/lang/String;)Ljava/lang/String;": "",
+			}, true
+		},
+	}
+	got := call.String(ctx)
+	if !strings.Contains(got, "(Object)") {
+		t.Fatalf("resolver-loaded competing family must pin pick(Object): %q", got)
+	}
+}
+
+func TestInvokeWitnessUnknownExternalNullStillPins(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := &JavaClassMember{
+		Name: "ext.Lib", Member: "pick",
+		Description: "(Ljava/lang/Object;)Ljava/lang/String;", JavaType: ft,
+	}
+	call := NewFunctionCallExpression(NewJavaClassValue(types.NewJavaClass("ext.Lib")), member, ft.FunctionType())
+	call.IsStatic = true
+	call.Kind = InvokeStatic
+	call.Arguments = []JavaValue{NewJavaLiteral("null", types.NewJavaClass("java.lang.Object"))}
+	got := call.String(&class_context.ClassContext{ClassName: "Caller"})
+	if !strings.Contains(got, "(Object)") {
+		t.Fatalf("null vs reference formal must still pin when family unknown: %q", got)
 	}
 }
 

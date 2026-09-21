@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixMath3RemainingReconstructs repairs leftover commons-math3 tree sites.
 // Kill-switch: JDEC_MATH3_REMAINING_OFF=1.
 func fixMath3RemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_MATH3_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_MATH3_REMAINING_OFF") == "1" {
 		return body
 	}
 	if strings.Contains(body, "T extends RealFieldElement") || strings.Contains(body, "T extends FieldElement") {

@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"regexp"
 	"strings"
 )
@@ -13,7 +13,7 @@ import (
 // is `var1.getClass(); this(var1::setReader,…)`.
 // Kill-switch: JDEC_CTOR_NPE_THIS_OFF=1.
 func fixCtorNPECheckBeforeThis(body string) string {
-	if os.Getenv("JDEC_CTOR_NPE_THIS_OFF") == "1" {
+	if jdecenv.Get("JDEC_CTOR_NPE_THIS_OFF") == "1" {
 		return body
 	}
 	body = stripPreludeBeforeCtorCall(body, "this(")
@@ -67,7 +67,7 @@ func stripPreludeBeforeCtorCall(body, call string) string {
 var enumClinitNewRe = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*) = new [A-Za-z0-9_$]+\("([A-Za-z_][A-Za-z0-9_]*)",\d+((?:,(?:true|false))*)\);\n`)
 
 func fixEnumClinitIllegalNew(body string) string {
-	if os.Getenv("JDEC_ENUM_CLINIT_NEW_OFF") == "1" {
+	if jdecenv.Get("JDEC_ENUM_CLINIT_NEW_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "enum ") || !strings.Contains(body, " = new ") {
@@ -111,7 +111,7 @@ func patchEnumConstantArgs(body, name, args string) string {
 var bareNestedImportRe = regexp.MustCompile(`(?m)^import [A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)+;\n`)
 
 func fixBareNestedImports(body string) string {
-	if os.Getenv("JDEC_BARE_NESTED_IMPORT_OFF") == "1" {
+	if jdecenv.Get("JDEC_BARE_NESTED_IMPORT_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "import ") {

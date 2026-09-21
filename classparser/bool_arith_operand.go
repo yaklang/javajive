@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strconv"
 	"strings"
 )
@@ -16,7 +16,7 @@ import (
 // (`int cannot be converted to boolean`).
 // Kill-switch: JDEC_BOOL_ARITH_OPERAND_OFF=1.
 func fixBoolUsedAsArithOperand(body string) string {
-	if os.Getenv("JDEC_BOOL_ARITH_OPERAND_OFF") == "1" {
+	if jdecenv.Get("JDEC_BOOL_ARITH_OPERAND_OFF") == "1" {
 		return body
 	}
 	from := 0
@@ -121,7 +121,7 @@ func booleanInstanceFields(body string) []string {
 // boolean decompiler locals: `boolean varN = 0`, `varN = 0`, and
 // `(varN) == (0)` / `!= (0)`. Kill-switch: JDEC_BOOL_ZERO_LITERAL_OFF=1.
 func fixBooleanZeroLiteral(body string) string {
-	if os.Getenv("JDEC_BOOL_ZERO_LITERAL_OFF") == "1" {
+	if jdecenv.Get("JDEC_BOOL_ZERO_LITERAL_OFF") == "1" {
 		return body
 	}
 	// Freemarker Environment reuses boolean slots as int; rewriting
@@ -161,7 +161,7 @@ func fixBooleanZeroLiteral(body string) string {
 // ifeq encoding of `if (!boolExpr)`. jsoup Tokeniser character-reference
 // lookup. Kill-switch: JDEC_BOOL_EXPR_CMP_ZERO_OFF=1.
 func fixBooleanExprCmpZero(body string) string {
-	if os.Getenv("JDEC_BOOL_EXPR_CMP_ZERO_OFF") == "1" {
+	if jdecenv.Get("JDEC_BOOL_EXPR_CMP_ZERO_OFF") == "1" {
 		return body
 	}
 	for _, pair := range [][2]string{
@@ -203,7 +203,7 @@ func fixBooleanExprCmpZero(body string) string {
 // literal 2..9 that wrap is `intVar == ((2) != (0))` (incomparable). Restore
 // `intVar == (2)`. Kill-switch: JDEC_INT_CMP_BOOL_LIT_OFF=1.
 func fixIntCmpBoolMaterializedLiteral(body string) string {
-	if os.Getenv("JDEC_INT_CMP_BOOL_LIT_OFF") == "1" {
+	if jdecenv.Get("JDEC_INT_CMP_BOOL_LIT_OFF") == "1" {
 		return body
 	}
 	for n := 2; n <= 9; n++ {

@@ -48,8 +48,18 @@ func utf8InfoFromPayload(payload []byte) (info *ConstantUtf8Info, panicked error
 			}
 		}
 	}()
-	info.readInfo(NewClassParser(buf))
-	return info, panicked
+	cp := NewClassParser(buf)
+	info.readInfo(cp)
+	if panicked != nil {
+		return info, panicked
+	}
+	if info.DecodeErr != nil {
+		return info, info.DecodeErr
+	}
+	if cp.reader != nil && cp.reader.Err() != nil {
+		return info, cp.reader.Err()
+	}
+	return info, nil
 }
 
 func constantUtf8ASCII(s string) []byte {

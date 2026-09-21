@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixXstreamRemainingReconstructs repairs leftover xstream tree sites.
 // Kill-switch: JDEC_XSTREAM_REMAINING_OFF=1.
 func fixXstreamRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_XSTREAM_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_XSTREAM_REMAINING_OFF") == "1" {
 		return body
 	}
 	// XStream.buildMapper: DefaultMapper local later assigned XStream11XmlFriendlyMapper.

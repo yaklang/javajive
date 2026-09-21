@@ -29,6 +29,12 @@ type SignatureAttribute struct {
 
 func (i *SignatureAttribute) readInfo(cp *ClassParser) {
 	i.SignatureIndex = cp.reader.readUint16()
+	if cp.reader.Err() != nil {
+		return
+	}
+	if err := cp.classObj.checkCPIndex(i.SignatureIndex, false, "signature_index", CONSTANT_Utf8); err != nil {
+		cp.reader.fail(ParseCodeCPIndex, err.Error())
+	}
 }
 
 /*
@@ -96,8 +102,12 @@ func (r *BootstrapMethodsAttribute) readInfo(cp *ClassParser) {
 			BootstrapMethodRef:    cp.reader.readUint16(),
 			NumBootstrapArguments: cp.reader.readUint16(),
 		}
+		if err := cp.classObj.checkCPIndex(m.BootstrapMethodRef, false, "bootstrap_method_ref", CONSTANT_MethodHandle); err != nil && cp.reader.Err() == nil {
+			cp.reader.fail(ParseCodeCPIndex, err.Error())
+		}
 		for j := 0; j < int(m.NumBootstrapArguments); j++ {
-			m.BootstrapArguments = append(m.BootstrapArguments, cp.reader.readUint16())
+			arg := cp.reader.readUint16()
+			m.BootstrapArguments = append(m.BootstrapArguments, arg)
 		}
 		r.BootstrapMethods[i] = m
 	}
@@ -161,6 +171,12 @@ func (self *MarkerAttribute) readInfo(reader *ClassParser) {
 
 func (self *SourceFileAttribute) readInfo(cp *ClassParser) {
 	self.SourceFileIndex = cp.reader.readUint16()
+	if cp.reader.Err() != nil {
+		return
+	}
+	if err := cp.classObj.checkCPIndex(self.SourceFileIndex, false, "sourcefile_index", CONSTANT_Utf8); err != nil {
+		cp.reader.fail(ParseCodeCPIndex, err.Error())
+	}
 }
 
 /*
@@ -217,6 +233,13 @@ type ConstantValueAttribute struct {
 
 func (self *ConstantValueAttribute) readInfo(cp *ClassParser) {
 	self.ConstantValueIndex = cp.reader.readUint16()
+	if cp.reader.Err() != nil {
+		return
+	}
+	if err := cp.classObj.checkCPIndex(self.ConstantValueIndex, false, "constantvalue_index",
+		CONSTANT_Integer, CONSTANT_Float, CONSTANT_Long, CONSTANT_Double, CONSTANT_String); err != nil {
+		cp.reader.fail(ParseCodeCPIndex, err.Error())
+	}
 }
 
 /*
@@ -281,6 +304,12 @@ type AnnotationAttribute struct {
 	}
 */
 type RuntimeVisibleParameterAnnotationsAttribute struct {
+	Type                 string
+	AttrLen              uint32
+	IsInvisible          bool
+	NumParameters        uint8
+	ParameterAnnotations [][]*AnnotationAttribute
+	Info                 []byte
 }
 
 /*
@@ -366,7 +395,11 @@ func (self *CodeAttribute) readInfo(cp *ClassParser) {
 	codeLength := cp.reader.readUint32()
 	self.Code = cp.reader.readBytes(codeLength)
 	self.ExceptionTable = readExceptionTable(cp.reader)
+	saved := cp.attrCtx
+	cp.attrCtx = attrCtxCode
 	self.Attributes = cp.readAttributes()
+	cp.attrCtx = saved
+	self.validateStatic(cp)
 }
 
 func readExceptionTable(reader *ClassReader) []*ExceptionTableEntry {
@@ -420,16 +453,14 @@ func newAttributeInfo(attrName string, attrLen uint32) AttributeInfo {
 		return &InnerClassesAttribute{AttrLen: attrLen}
 	case "Signature":
 		return &SignatureAttribute{AttrLen: attrLen}
+	case "RuntimeVisibleParameterAnnotations":
+		return &RuntimeVisibleParameterAnnotationsAttribute{AttrLen: attrLen}
+	case "RuntimeInvisibleParameterAnnotations":
+		return &RuntimeVisibleParameterAnnotationsAttribute{AttrLen: attrLen, IsInvisible: true}
 	case "RuntimeVisibleTypeAnnotations":
-		// JSR 308 type_annotation has a different binary layout than a plain annotation: each entry is
-		// prefixed by target_type (u1) + target_info (variable) + type_path (variable) before the
-		// regular type_index/element_value_pairs body. Reusing RuntimeVisibleAnnotationsAttribute's
-		// readInfo (which expects plain annotations) consumed the wrong number of bytes and desynced the
-		// reader, corrupting every subsequent attribute-name index ("Invalid constant pool index!").
-		// The decompiler never renders type-use annotations, and RuntimeInvisibleTypeAnnotations already
-		// falls through to UnparsedAttribute, so treat the visible variant identically: keep the raw
-		// bytes (byte-exact round-trip) and skip exactly attrLen bytes so parsing never desyncs.
-		return &UnparsedAttribute{Name: attrName, Length: attrLen, Info: nil}
+		return &TypeAnnotationsAttribute{Name: attrName, AttrLen: attrLen}
+	case "RuntimeInvisibleTypeAnnotations":
+		return &TypeAnnotationsAttribute{Name: attrName, AttrLen: attrLen, IsInvisible: true}
 	default:
 		return &UnparsedAttribute{Name: attrName, Length: attrLen, Info: nil}
 

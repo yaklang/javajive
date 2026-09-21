@@ -1,23 +1,31 @@
 package class_context
 
 import (
-	"os"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/yaklang/javajive/internal/funk"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/omap"
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type ClassContext struct {
+	// Env looks up JDEC_* flags for this request. Nil falls back to jdecenv.Get.
+	Env func(string) string
+	// Work is the request budget used to cap source construction before allocation.
+	Work *workbudget.Budget
+	// OutputHeld is retained source bytes already committed in this request's
+	// current assembly (statement/method pieces kept for the final compilation
+	// unit). It is not intermediate concat fragments.
+	OutputHeld int64
+
 	ClassName    string
 	FunctionName string
-	// Getenv reads a JDEC_* flag from the request EnvSnapshot when T31 wired
-	// it; nil means os.Getenv (legacy). Resources owner populates this.
-	Getenv func(string) string
 	// CurrentMethodDesc is the raw JVM descriptor of the method currently being
 	// rendered (e.g. `(Lcom/foo/LRUMap;)V`). A `this(...)` self-call whose
 	// Descriptor differs needs an explicit cast so javac does not bind the more
@@ -100,6 +108,10 @@ type ClassContext struct {
 	// vs readField(Object,String,boolean) are visible. Empty on the single-class path. Kill-switch consumer:
 	// JDEC_NULL_ARG_CAST_OFF.
 	MethodDescriptors map[string]bool
+	// PoolMethodDescriptors records invoke targets from this class's constant pool as
+	// MethodDescKey(owner.name, descriptor) with owner in dot form.
+	PoolMethodDescriptors map[string]bool
+	sameArityOverloadMemo map[string]bool
 	// ConstructorSignatures maps a same-class constructor's argument count to its raw generic Signature
 	// string (e.g. 1 -> `(Ljava/util/Comparator<-TK;>;)V`). A `this(...)` self-call loses the source's
 	// unchecked wildcard cast on an argument whose parameter is a wildcard parameterization mentioning a
@@ -240,6 +252,78 @@ type ClassContext struct {
 	// for the overwhelming majority of classes (no cross-package simple-name clash), so a strict no-op
 	// there. Kill-switch: JDEC_SAMEPKG_FQ_OFF=1 (dumper leaves this nil).
 	SamePkgFQNames map[string]bool
+	// OnOverloadUnknown records invoke sites whose competing-overload family could
+	// not be proven (no same-class/sibling/CP/JDK-family table). It is evidence of
+	// missing proof, not a license to invent or drop casts.
+	OnOverloadUnknown func(owner, name, descriptor string)
+}
+
+// Getenv returns a request-local JDEC_* value. Missing snapshot keys are unset.
+// Explicit Env (dumper/decompiler policy) wins; otherwise the nested jdecenv stack.
+func (f *ClassContext) Getenv(key string) string {
+	if f != nil && f.Env != nil {
+		return f.Env(key)
+	}
+	return jdecenv.Get(key)
+}
+
+// PreflightOutput rejects a construction fragment of n bytes if it cannot fit
+// in MaxOutputBytes together with OutputHeld, or if the derived intermediate
+// cap would be exceeded. It does not increment output_bytes.
+func (f *ClassContext) PreflightOutput(n int64) error {
+	if f == nil || f.Work == nil || !f.Work.RenderGuarded() {
+		return nil
+	}
+	if err := f.Work.Check(); err != nil {
+		return err
+	}
+	if n <= 0 {
+		return nil
+	}
+	held := f.OutputHeld
+	if held < 0 {
+		held = 0
+	}
+	if held > math.MaxInt64-n {
+		return f.Work.CheckOutput(math.MaxInt64)
+	}
+	if err := f.Work.CheckOutput(held + n); err != nil {
+		return err
+	}
+	return f.Work.CheckAlloc(n)
+}
+
+// ChargeOutput is the construction-site hook: cancel, remaining emitted cap,
+// and intermediate cap. It does not accumulate output_bytes.
+func (f *ClassContext) ChargeOutput(n int64) error {
+	return f.PreflightOutput(n)
+}
+
+// CheckAlloc bounds a single intermediate allocation.
+func (f *ClassContext) CheckAlloc(n int64) error {
+	if f == nil || f.Work == nil || !f.Work.RenderGuarded() {
+		return nil
+	}
+	return f.Work.CheckAlloc(n)
+}
+
+// HoldOutput commits n retained bytes into OutputHeld after they are kept for
+// the final source.
+func (f *ClassContext) HoldOutput(n int64) error {
+	if f == nil {
+		return nil
+	}
+	if err := f.PreflightOutput(n); err != nil {
+		return err
+	}
+	if n > 0 {
+		if f.OutputHeld > math.MaxInt64-n {
+			f.OutputHeld = math.MaxInt64
+		} else {
+			f.OutputHeld += n
+		}
+	}
+	return nil
 }
 
 // FieldSignature returns the raw generic Signature string of a same-class parameterized field, or ""
@@ -306,28 +390,72 @@ func methodSigKey(name string, argc int) string {
 // Returns false when only one same-arity overload exists (no ambiguity) or when MethodDescriptors is
 // unset (single-class path, no sibling info).
 func (f *ClassContext) HasOverloadedSameArity(name, descriptor string) bool {
-	if f == nil || name == "" || descriptor == "" || f.MethodDescriptors == nil {
+	if f == nil {
 		return false
 	}
+	key := name + "\x00" + descriptor
+	if f.sameArityOverloadMemo != nil {
+		if v, ok := f.sameArityOverloadMemo[key]; ok {
+			return v
+		}
+	} else {
+		f.sameArityOverloadMemo = map[string]bool{}
+	}
+	v := nameHasSameArityOverload(name, descriptor, f.MethodDescriptors)
+	f.sameArityOverloadMemo[key] = v
+	return v
+}
+
+// PoolHasSameArityOverload is a memoized NameHasSameArityOverload over PoolMethodDescriptors.
+func (f *ClassContext) PoolHasSameArityOverload(qualified, descriptor string) bool {
+	if f == nil || f.PoolMethodDescriptors == nil {
+		return false
+	}
+	key := "pool\x00" + qualified + "\x00" + descriptor
+	if f.sameArityOverloadMemo != nil {
+		if v, ok := f.sameArityOverloadMemo[key]; ok {
+			return v
+		}
+	} else {
+		f.sameArityOverloadMemo = map[string]bool{}
+	}
+	v := nameHasSameArityOverload(qualified, descriptor, f.PoolMethodDescriptors)
+	f.sameArityOverloadMemo[key] = v
+	return v
+}
+
+// NameHasSameArityOverload reports whether `keys` contain a different
+// same-arity descriptor for `name` than `descriptor`.
+func NameHasSameArityOverload(name, descriptor string, keys map[string]bool) bool {
+	if name == "" || descriptor == "" || keys == nil {
+		return false
+	}
+	return nameHasSameArityOverload(name, descriptor, keys)
+}
+
+func nameHasSameArityOverload(name, descriptor string, keys map[string]bool) bool {
 	argc := descriptorArgc(descriptor)
-	for k := range f.MethodDescriptors {
+	for k := range keys {
 		if len(k) <= len(name) || k[:len(name)] != name {
 			continue
 		}
-		// Keys are name+descriptor (e.g. m(Ljava/lang/Object;)V). Require the
-		// descriptor to start immediately so `m` does not match `main`.
 		if k[len(name)] != '(' {
 			continue
 		}
 		otherDesc := k[len(name):]
 		if otherDesc == descriptor {
-			continue // same method
+			continue
 		}
 		if descriptorArgc(otherDesc) == argc {
 			return true
 		}
 	}
 	return false
+}
+
+// DescriptorArgc counts parameter field descriptors in a JVM method descriptor.
+func DescriptorArgc(descriptor string) int {
+	return descriptorArgc(descriptor)
 }
 
 // descriptorArgc counts the number of parameter field descriptors in a JVM method descriptor string
@@ -507,10 +635,10 @@ func (f *ClassContext) GetAllImported() []string {
 					continue
 				}
 				src, dotOK := binaryNestedNameToSource(className)
-				if !dotOK && os.Getenv("JDEC_DOLLAR_FLAT_IMPORT_OFF") != "" {
+				if !dotOK && f.Getenv("JDEC_DOLLAR_FLAT_IMPORT_OFF") != "" {
 					continue
 				}
-				stdlibOrLegacy := f.nestedTypeShouldDot(pkg, className) || os.Getenv("JDEC_NESTED_FLAT_IMPORT_OFF") != ""
+				stdlibOrLegacy := f.nestedTypeShouldDot(pkg, className) || f.Getenv("JDEC_NESTED_FLAT_IMPORT_OFF") != ""
 				// stdlib nested types import the OUTER class (the reference uses the dotted Outer.Inner
 				// spelling); this only applies when the name is dot-splittable (dotOK). A '$'-leading flat
 				// unit (dotOK==false) keeps its flat name so the import matches the flat reference.
@@ -589,7 +717,7 @@ func (f *ClassContext) nestedTypeShouldDot(pkg, className string) bool {
 	if isStdlibNestedDottedPackage(pkg) {
 		return true
 	}
-	if f == nil || f.SiblingSuperTypes == nil || os.Getenv("JDEC_EXTERNAL_NESTED_DOT_OFF") != "" {
+	if f == nil || f.SiblingSuperTypes == nil || f.Getenv("JDEC_EXTERNAL_NESTED_DOT_OFF") != "" {
 		return false
 	}
 	// Same-package nested types are (almost always) Yak's own flat units; never dot them.
@@ -656,7 +784,7 @@ func (f *ClassContext) ShortTypeName(name string) string {
 	// safe. The import statement still carries the OUTER class (see GetAllImported). Kill-switch:
 	// JDEC_STDLIB_NESTED_DOT_OFF=1 restores the legacy flat spelling.
 	dotted := className
-	if strings.Contains(className, "$") && os.Getenv("JDEC_STDLIB_NESTED_DOT_OFF") == "" && f.nestedTypeShouldDot(pkg, className) {
+	if strings.Contains(className, "$") && f.Getenv("JDEC_STDLIB_NESTED_DOT_OFF") == "" && f.nestedTypeShouldDot(pkg, className) {
 		if src, ok := binaryNestedNameToSource(className); ok {
 			dotted = src
 		}

@@ -1,8 +1,10 @@
 package javaclassparser
 
 import (
+	"fmt"
 	"io/ioutil"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/yaklang/javajive/internal/codec"
 	"github.com/yaklang/javajive/internal/utils"
@@ -200,6 +202,28 @@ func (this *ClassObject) findUtf8IndexFromPool(v string) int {
 	}
 	return -1
 }
+func (this *ClassObject) getUtf8Units(index uint16) ([]uint16, error) {
+	utf8Info, err := this.getConstantInfo(index)
+	if err != nil {
+		return nil, err
+	}
+	switch ret := utf8Info.(type) {
+	case *ConstantUtf8Info:
+		su := ret.semanticUnits()
+		out := make([]uint16, len(su))
+		copy(out, su)
+		return out, nil
+	case *ConstantStringInfo:
+		return this.getUtf8Units(ret.StringIndex)
+	default:
+		s, err := this.getUtf8(index)
+		if err != nil {
+			return nil, err
+		}
+		return utf16.Encode([]rune(s)), nil
+	}
+}
+
 func (this *ClassObject) getUtf8(index uint16) (string, error) {
 	utf8Info, err := this.getConstantInfo(index)
 	if err != nil {
@@ -236,11 +260,18 @@ func (this *ClassObject) getUtf8(index uint16) (string, error) {
 	return "", utils.Errorf("index %d is not utf8", index)
 }
 func (this *ClassObject) getConstantInfo(index uint16) (ConstantInfo, error) {
-	index -= 1
-	if len(this.ConstantPool) <= int(index) {
-		return nil, utils.Error("Invalid constant pool index!")
+	if index == 0 {
+		return nil, &ClassParseError{Code: ParseCodeCPIndex, Stage: "constant_pool", Field: "index", Msg: "CP index 0 is not a valid reference"}
 	}
-	return this.ConstantPool[index], nil
+	i := int(index) - 1
+	if i < 0 || i >= len(this.ConstantPool) {
+		return nil, &ClassParseError{Code: ParseCodeCPIndex, Stage: "constant_pool", Field: "index", Msg: fmt.Sprintf("Invalid constant pool index %d", index)}
+	}
+	info := this.ConstantPool[i]
+	if info == nil {
+		return nil, &ClassParseError{Code: ParseCodeCPIndex, Stage: "constant_pool", Field: "index", Msg: fmt.Sprintf("CP index %d is an unusable long/double slot", index)}
+	}
+	return info, nil
 }
 func ParseFromBCEL(data string) (cf *ClassObject, err error) {
 	bytes, err := Bcel2bytes(data)
