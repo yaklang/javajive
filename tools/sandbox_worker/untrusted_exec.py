@@ -77,55 +77,50 @@ def _read_regular_file(path: Path, *, root: Path) -> bytes:
     return path.read_bytes()
 
 
-def _stage_dir(root: Path, prefix: str, files: dict[str, bytes], cp_entries: list[str]) -> None:
+def _stage_class_tree(root: Path, prefix: str, files: dict[str, bytes]) -> None:
+    """Stage .class files under prefix. Directory `-cp` does not load nested jars.
+
+    Symlink directories and symlink files fail closed (never silently skipped).
+    """
     if root.is_symlink():
         raise StagingError("invalid_input", f"directory symlink rejected: {root}")
     if not root.is_dir():
         raise StagingError("invalid_input", f"not a directory: {root}")
     root_res = root.resolve()
-    saw_class = False
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+        for d in list(dirnames):
+            child = Path(dirpath) / d
+            if child.is_symlink():
+                raise StagingError("invalid_input", f"directory symlink rejected: {child}")
         for name in filenames:
             path = Path(dirpath) / name
             if path.is_symlink():
                 raise StagingError("invalid_input", f"symlink rejected: {path}")
-            if path.suffix not in {".class", ".jar"}:
+            if path.suffix != ".class":
                 continue
             rel = path.relative_to(root).as_posix()
             if ".." in Path(rel).parts:
                 raise StagingError("invalid_input", f"parent segment in extra_cp: {rel}")
             key = f"{prefix}/{rel}" if prefix else rel
             files[key] = _read_regular_file(path, root=root_res)
-            container = f"{CONTAINER_INPUTS}/{key}"
-            if path.suffix == ".jar":
-                if container not in cp_entries:
-                    cp_entries.append(container)
-            else:
-                saw_class = True
-    dir_entry = CONTAINER_INPUTS if not prefix else f"{CONTAINER_INPUTS}/{prefix}"
-    if saw_class or dir_entry not in cp_entries:
-        if dir_entry not in cp_entries:
-            cp_entries.append(dir_entry)
 
 
 def _rel_files(root: Path, extra_cp: Iterable[Path] | None) -> tuple[dict[str, bytes], list[str]]:
-    """Stage class/jar family. extra_cp dirs are class roots; extra_cp jars are jar entries.
+    """Stage class/jar family. Classpath order is [class_dir, *extra_cp] (Java semantics).
 
-    Missing / unsupported / symlink-escaped inputs raise StagingError (never silent drop).
-    Jars found inside a staged directory are also added as classpath entries.
+    extra_cp FILE jars are classpath entries. extra_cp directories are class roots only;
+    nested jars inside a directory are not put on -cp (no implicit wildcard).
+    Missing / unsupported / symlink inputs raise StagingError (never silent drop).
     """
     files: dict[str, bytes] = {}
     cp_entries: list[str] = []
     root = Path(root)
+    if root.is_symlink():
+        raise StagingError("invalid_input", f"class_dir symlink rejected: {root}")
     if not root.exists():
         raise StagingError("invalid_input", f"class_dir missing: {root}")
-    _stage_dir(root, "", files, cp_entries)
-    if CONTAINER_INPUTS not in cp_entries:
-        cp_entries.insert(0, CONTAINER_INPUTS)
-    else:
-        cp_entries.remove(CONTAINER_INPUTS)
-        cp_entries.insert(0, CONTAINER_INPUTS)
+    _stage_class_tree(root, "", files)
+    cp_entries.append(CONTAINER_INPUTS)
     for i, extra in enumerate(extra_cp or []):
         extra = Path(extra)
         if extra.is_symlink():
@@ -138,12 +133,11 @@ def _rel_files(root: Path, extra_cp: Iterable[Path] | None) -> tuple[dict[str, b
                 raise StagingError("unsupported", f"extra_cp file is not a jar: {extra}")
             key = f"{prefix}/{extra.name}"
             files[key] = _read_regular_file(extra, root=extra.parent.resolve())
-            jar_entry = f"{CONTAINER_INPUTS}/{key}"
-            if jar_entry not in cp_entries:
-                cp_entries.append(jar_entry)
+            cp_entries.append(f"{CONTAINER_INPUTS}/{key}")
             continue
         if extra.is_dir():
-            _stage_dir(extra, prefix, files, cp_entries)
+            _stage_class_tree(extra, prefix, files)
+            cp_entries.append(f"{CONTAINER_INPUTS}/{prefix}")
             continue
         raise StagingError("unsupported", f"extra_cp is not a directory or jar: {extra}")
     if not files:

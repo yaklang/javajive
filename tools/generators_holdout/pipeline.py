@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .classfile import class_enclosing_info
 from .identity import (
     CompilerIdentity,
     InfraError,
@@ -26,6 +27,13 @@ from .identity import (
     java_command,
     verify_and_run,
 )
+
+_JAVA_IDENT = r"[A-Za-z_$][A-Za-z0-9_$]*"
+_JAVA_IDENT_RE = re.compile(rf"^{_JAVA_IDENT}$")
+
+
+class InvalidBinaryName(ValueError):
+    """Absolute, slash, parent, or illegal JVM binary name. Maps to invalid_input."""
 
 REPO = Path(__file__).resolve().parents[2]
 PROBE_PKG = Path(__file__).resolve().parent / "probe"
@@ -99,37 +107,105 @@ def _sha(data: bytes) -> str:
 
 
 def extract_class_name(source: str) -> str:
-    m = re.search(r"public class (\w+)", source)
+    m = re.search(rf"public(?:\s+(?:final|abstract))*\s+class\s+({_JAVA_IDENT})", source)
     if not m:
         raise InfraError("source has no public class")
     return m.group(1)
 
 
 def extract_binary_name(source: str) -> str:
-    pkg = re.search(r"^\s*package\s+([\w.]+)\s*;", source, re.M)
+    pkg = re.search(rf"^\s*package\s+({_JAVA_IDENT}(?:\.{_JAVA_IDENT})*)\s*;", source, re.M)
     cls = extract_class_name(source)
     return f"{pkg.group(1)}.{cls}" if pkg else cls
 
 
-def source_relpath(binary_name: str) -> str:
-    """JVM binary name -> compilation-unit path.
+def validate_binary_name(name: str) -> str:
+    """Reject empty, NUL, absolute, slash, and parent-segment names. `$` is legal in identifiers."""
+    if name is None:
+        raise InvalidBinaryName("empty binary name")
+    text = str(name).strip()
+    if not text:
+        raise InvalidBinaryName("empty binary name")
+    if "\x00" in text:
+        raise InvalidBinaryName("nul in binary name")
+    if text.startswith("/") or text.startswith("\\") or (len(text) >= 2 and text[1] == ":"):
+        raise InvalidBinaryName("absolute class-name path")
+    if "/" in text or "\\" in text:
+        raise InvalidBinaryName("slash in binary name; use JVM dot form")
+    parts = text.split(".")
+    if any(p in {".", ".."} or p == "" for p in parts):
+        raise InvalidBinaryName("parent or empty segment in binary name")
+    for part in parts:
+        if not _JAVA_IDENT_RE.match(part):
+            raise InvalidBinaryName(f"illegal binary name segment {part!r}")
+    return text
 
-    demo.Pack -> demo/Pack.java
-    demo.Outer$Inner / demo.Outer$1 -> demo/Outer.java (outer compilation unit)
-    App -> App.java
+
+def _rel_java_path(binary_name: str, suffix: str) -> str:
+    name = validate_binary_name(binary_name)
+    rel = name.replace(".", "/") + suffix
+    if Path(rel).is_absolute() or ".." in Path(rel).parts:
+        raise InvalidBinaryName(f"escaping class artifact path {rel!r}")
+    return rel
+
+
+def compilation_unit_binary_name(
+    binary_name: str,
+    *,
+    source: str | None = None,
+    class_bytes: bytes | None = None,
+) -> str:
+    """Top-level compilation-unit binary name. Does not assume every `$` is nested.
+
+    Priority: public class in source; then InnerClasses/EnclosingMethod in class bytes;
+    otherwise the binary name itself (legal `$` identifiers stay intact).
     """
-    unit = (binary_name or "").split("$", 1)[0].strip()
-    if not unit:
-        raise InfraError("empty binary name")
-    return unit.replace(".", "/") + ".java"
+    name = validate_binary_name(binary_name)
+    if source:
+        try:
+            return validate_binary_name(extract_binary_name(source))
+        except (InfraError, InvalidBinaryName):
+            pass
+    if class_bytes:
+        info = class_enclosing_info(class_bytes)
+        if info.get("kind") in {"nested_member", "nested_local"} and info.get("enclosing"):
+            return validate_binary_name(info["enclosing"])
+    return name
+
+
+def source_relpath(
+    binary_name: str,
+    *,
+    source: str | None = None,
+    class_bytes: bytes | None = None,
+) -> str:
+    """JVM binary name -> compilation-unit .java path using source/class metadata."""
+    unit = compilation_unit_binary_name(binary_name, source=source, class_bytes=class_bytes)
+    return _rel_java_path(unit, ".java")
 
 
 def class_relpath(binary_name: str) -> str:
-    """JVM binary name -> class-file path, including inner/anonymous suffixes."""
-    name = (binary_name or "").strip()
-    if not name:
-        raise InfraError("empty binary name")
-    return name.replace(".", "/") + ".class"
+    """JVM binary name -> class-file path. `$` is part of the file name, not a package."""
+    return _rel_java_path(binary_name, ".class")
+
+
+def nested_rebuild_unsupported(decompiled: str, class_bytes: bytes) -> str | None:
+    """Genuine nested class without an enclosing compilation unit is unsupported, not a `$` guess."""
+    info = class_enclosing_info(class_bytes)
+    if info.get("kind") not in {"nested_member", "nested_local"}:
+        return None
+    outer = info.get("enclosing") or ""
+    try:
+        pub = extract_class_name(decompiled)
+    except InfraError:
+        pub = ""
+    outer_simple = outer.rsplit(".", 1)[-1]
+    if pub == outer_simple:
+        return None
+    return (
+        f"nested class {info.get('this_name')} requires enclosing compilation unit "
+        f"{outer}; decompiled public class is {pub!r}"
+    )
 
 
 def _write_text(path: Path, text: str) -> Path:
@@ -142,6 +218,37 @@ def _write_bytes(path: Path, data: bytes) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return path
+
+
+def _invalid_name_result(
+    *,
+    name: str,
+    mode: str,
+    debug: str,
+    source: str,
+    work: Path,
+    stages: dict[str, StageRecord],
+    notes: str,
+) -> PipelineResult:
+    return PipelineResult(
+        name or "invalid",
+        mode,
+        debug,
+        "invalid_input",
+        stages,
+        source,
+        "",
+        "",
+        "",
+        "",
+        None,
+        None,
+        [],
+        str(work),
+        "",
+        [],
+        notes=notes,
+    )
 
 
 ISOLATION_STAGES = frozenset(
@@ -271,10 +378,21 @@ def run_pipeline(
     work.mkdir(parents=True, exist_ok=True)
     artifacts = work / "artifacts"
     artifacts.mkdir(exist_ok=True)
-    name = class_name or extract_binary_name(source)
-    src_path = _write_text(artifacts / source_relpath(name), source)
     stages: dict[str, StageRecord] = {}
     classpath: list[str] = []
+    try:
+        name = class_name or extract_binary_name(source)
+        src_path = _write_text(artifacts / source_relpath(name, source=source), source)
+    except (InvalidBinaryName, InfraError) as exc:
+        return _invalid_name_result(
+            name=class_name or "",
+            mode=mode,
+            debug=debug,
+            source=source,
+            work=work,
+            stages=stages,
+            notes=str(exc),
+        )
 
     orig_dir = work / "original"
     compiled = compile_sources(identity, [src_path], orig_dir, debug=debug)
@@ -344,12 +462,23 @@ def run_pipeline_from_class_bytes(
     work.mkdir(parents=True, exist_ok=True)
     artifacts = work / "artifacts"
     artifacts.mkdir(exist_ok=True)
-    name = class_name or extract_binary_name(source)
-    src_path = _write_text(artifacts / source_relpath(name), source)
-    orig_dir = work / "original"
-    orig_dir.mkdir(parents=True, exist_ok=True)
-    class_file = _write_bytes(orig_dir / class_relpath(name), class_bytes)
-    _write_bytes(artifacts / class_relpath(name), class_bytes)
+    try:
+        name = class_name or extract_binary_name(source)
+        src_path = _write_text(artifacts / source_relpath(name, source=source, class_bytes=class_bytes), source)
+        orig_dir = work / "original"
+        orig_dir.mkdir(parents=True, exist_ok=True)
+        class_file = _write_bytes(orig_dir / class_relpath(name), class_bytes)
+        _write_bytes(artifacts / class_relpath(name), class_bytes)
+    except (InvalidBinaryName, InfraError) as exc:
+        return _invalid_name_result(
+            name=class_name or "",
+            mode=mode,
+            debug=debug,
+            source=source,
+            work=work,
+            stages={},
+            notes=str(exc),
+        )
     stages: dict[str, StageRecord] = {
         "compile": StageRecord(
             "compile",
@@ -399,11 +528,12 @@ def _pipeline_after_class(
     bytes_path = _write_bytes(artifacts / class_relpath(name), class_bytes)
     classpath = list(classpath) + [str(orig_dir)]
 
+    extra_runtime_cp = [Path(p) for p in classpath if p != str(orig_dir)]
     orig_run = verify_and_run(
         orig_dir,
         name,
         java_bin=java_command(identity),
-        extra_cp=[Path(p) for p in classpath if p != str(orig_dir)],
+        extra_cp=extra_runtime_cp,
         trusted=trusted,
     )
     orig_stage = orig_run["stage"]
@@ -480,9 +610,35 @@ def _pipeline_after_class(
             dec.get("stub_methods") or [], notes="empty decompile",
         )
 
+    nested_reason = nested_rebuild_unsupported(source, class_bytes) or nested_rebuild_unsupported(
+        decompiled, class_bytes
+    )
+    if nested_reason:
+        stages["rebuild_compile"] = StageRecord(
+            "rebuild_compile", "unsupported", None, decompiled, nested_reason, [], None
+        )
+        return PipelineResult(
+            name, mode, debug, "unsupported", stages, source, _sha(class_bytes),
+            decompiled, "", orig_run.get("stdout") or "", str(bytes_path), str(src_path),
+            classpath, str(work), dec.get("status") or "", dec.get("stub_methods") or [],
+            notes=nested_reason,
+        )
+
     rebuilt_src_dir = work / f"rebuilt-{mode}"
     rebuilt_src_dir.mkdir(exist_ok=True)
-    rebuilt_java = _write_text(rebuilt_src_dir / source_relpath(name), decompiled)
+    try:
+        rebuilt_rel = source_relpath(name, source=decompiled, class_bytes=class_bytes)
+    except InvalidBinaryName as exc:
+        stages["rebuild_compile"] = StageRecord(
+            "rebuild_compile", "invalid_input", None, decompiled, str(exc), [], None
+        )
+        return PipelineResult(
+            name, mode, debug, "invalid_input", stages, source, _sha(class_bytes),
+            decompiled, "", orig_run.get("stdout") or "", str(bytes_path), str(src_path),
+            classpath, str(work), dec.get("status") or "", dec.get("stub_methods") or [],
+            notes=str(exc),
+        )
+    rebuilt_java = _write_text(rebuilt_src_dir / rebuilt_rel, decompiled)
     rebuilt_classes = work / f"rebuilt-{mode}-classes"
     rebuilt = compile_sources(identity, [rebuilt_java], rebuilt_classes, debug=debug)
     stages["rebuild_compile"] = StageRecord(
@@ -506,6 +662,7 @@ def _pipeline_after_class(
         rebuilt_classes,
         name,
         java_bin=java_command(identity),
+        extra_cp=extra_runtime_cp,
         trusted=trusted,
     )
     rstage = rebuilt_run["stage"]
