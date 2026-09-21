@@ -21,6 +21,9 @@ type DecompileOptions struct {
 	// MaxAnalysisUpdates bounds method-local reaching-definition work; zero uses the default.
 	MaxAnalysisUpdates int
 	Resolve            func(internalName string) ([]byte, bool)
+	// EnvSnapshot is an optional request-local JDEC_* map (T31). Nil means
+	// kill-switches still read os.Getenv. Resources owner fills this at request entry.
+	EnvSnapshot map[string]string
 }
 
 type DecompileDiagnostic struct {

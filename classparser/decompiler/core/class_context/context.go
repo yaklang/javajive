@@ -15,6 +15,9 @@ import (
 type ClassContext struct {
 	ClassName    string
 	FunctionName string
+	// Getenv reads a JDEC_* flag from the request EnvSnapshot when T31 wired
+	// it; nil means os.Getenv (legacy). Resources owner populates this.
+	Getenv func(string) string
 	// CurrentMethodDesc is the raw JVM descriptor of the method currently being
 	// rendered (e.g. `(Lcom/foo/LRUMap;)V`). A `this(...)` self-call whose
 	// Descriptor differs needs an explicit cast so javac does not bind the more
@@ -309,6 +312,11 @@ func (f *ClassContext) HasOverloadedSameArity(name, descriptor string) bool {
 	argc := descriptorArgc(descriptor)
 	for k := range f.MethodDescriptors {
 		if len(k) <= len(name) || k[:len(name)] != name {
+			continue
+		}
+		// Keys are name+descriptor (e.g. m(Ljava/lang/Object;)V). Require the
+		// descriptor to start immediately so `m` does not match `main`.
+		if k[len(name)] != '(' {
 			continue
 		}
 		otherDesc := k[len(name):]

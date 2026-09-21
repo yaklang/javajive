@@ -682,6 +682,31 @@ func promoteBinaryNumericResult(op string, resultType types.JavaType) types.Java
 	return resultType
 }
 
+// InvokeKind is the bytecode invoke instruction that produced a call. It is part of
+// the call's identity: super/ctor (special) must not be rewritten as virtual, and
+// static/interface/dynamic dispatch must survive ReplaceVar / inlining.
+type InvokeKind uint8
+
+const (
+	InvokeVirtual InvokeKind = iota
+	InvokeSpecial
+	InvokeStatic
+	InvokeInterface
+	InvokeDynamic
+)
+
+// InvokeWitness is the bytecode identity of a call site: owner, name, descriptor,
+// invoke-kind, and origin PC. Renderers use it to emit source casts so javac
+// overload resolution cannot retarget the call (null vs String.valueOf(Object)
+// vs valueOf(char[])).
+type InvokeWitness struct {
+	Owner      string
+	Name       string
+	Descriptor string
+	Kind       InvokeKind
+	OriginPC   int
+}
+
 type FunctionCallExpression struct {
 	IsStatic     bool
 	Object       JavaValue
@@ -702,9 +727,42 @@ type FunctionCallExpression struct {
 	// varargs `putAll(K, V...)`; `add(E)` vs `add(E...)`), enabling a precise descriptor-keyed same-class
 	// signature lookup (sameClassMethodParamType). Empty for synthesized calls with no pool member.
 	Descriptor string
+	// Kind is the invoke opcode family (virtual/special/static/interface/dynamic).
+	Kind InvokeKind
+	// OriginPC is the bytecode offset of the invoke that produced this call.
+	OriginPC int
 }
 
-// ReplaceVar implements JavaValue.
+// Witness returns the bytecode invoke identity. Owner is ClassName, name is
+// FunctionName; Descriptor/Kind/OriginPC are the raw invoke fields.
+func (f *FunctionCallExpression) Witness() InvokeWitness {
+	if f == nil {
+		return InvokeWitness{}
+	}
+	return InvokeWitness{
+		Owner:      f.ClassName,
+		Name:       f.FunctionName,
+		Descriptor: f.Descriptor,
+		Kind:       f.Kind,
+		OriginPC:   f.OriginPC,
+	}
+}
+
+// Clone copies invoke identity. Argument/object slices are copied; nested
+// values are shared. Rewriters must Clone rather than drop Kind/OriginPC.
+func (f *FunctionCallExpression) Clone() *FunctionCallExpression {
+	if f == nil {
+		return nil
+	}
+	cp := *f
+	if f.Arguments != nil {
+		cp.Arguments = append([]JavaValue(nil), f.Arguments...)
+	}
+	return &cp
+}
+
+// ReplaceVar implements JavaValue. Nested variable ids are rewritten; invoke
+// identity (Kind, OriginPC, Descriptor, ClassName, FunctionName) is kept.
 func (f *FunctionCallExpression) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
 	if f.Object != nil {
 		f.Object.ReplaceVar(oldId, newId)
@@ -3262,6 +3320,12 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	if cast := f.wildcardArgInvariantAddCast(i, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
+	// Witness-based conversion: pin javac overload resolution to the bytecode
+	// descriptor (null vs String.valueOf(Object) vs valueOf(char[]); array vs Object).
+	// Specialized helpers above already returned if they fired.
+	if cast := f.witnessDescriptorArgCast(i, arg, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
 	argType := f.FuncType.ParamTypes[i]
 	// Recover the generic parameter type the descriptor erased (e.g. BiConsumer<T,V>.accept's
 	// param erases to Object): the source carried a `(V)` cast on the argument, so feed the
@@ -3433,7 +3497,7 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	// argument is NOT cast — an ungated `(Object) null` smashes javac's type-variable inference on
 	// generic calls and changes overload selection (fastjson2 JSONReader.readBytes regression). The
 	// formal is the bytecode-pinned type so behaviour is preserved. Kill-switch: JDEC_NULL_ARG_CAST_OFF=1.
-	if os.Getenv("JDEC_NULL_ARG_CAST_OFF") == "" {
+	if jdecFlag(funcCtx, "JDEC_NULL_ARG_CAST_OFF") == "" {
 		if castType := f.nullArgDisambiguationCast(i, argType, arg, funcCtx); castType != "" {
 			argStr := arg.String(funcCtx)
 			arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
@@ -3489,6 +3553,171 @@ func (f *FunctionCallExpression) nullArgDisambiguationCast(i int, argType types.
 		return ""
 	}
 	return argType.String(&class_context.ClassContext{})
+}
+
+// witnessDescriptorParamType is the i-th formal from the bytecode descriptor
+// (f.Descriptor), falling back to FuncType.ParamTypes. This is the erased JVM
+// type, not a recovered generic instantiation.
+func (f *FunctionCallExpression) witnessDescriptorParamType(i int) types.JavaType {
+	if f == nil || i < 0 {
+		return nil
+	}
+	if f.Descriptor != "" {
+		if mt, err := types.ParseMethodDescriptor(f.Descriptor); err == nil && mt != nil {
+			if ft := mt.FunctionType(); ft != nil && i < len(ft.ParamTypes) {
+				return ft.ParamTypes[i]
+			}
+		}
+	}
+	if f.FuncType != nil && i < len(f.FuncType.ParamTypes) {
+		return f.FuncType.ParamTypes[i]
+	}
+	return nil
+}
+
+func isWitnessReferenceType(t types.JavaType) bool {
+	if t == nil {
+		return false
+	}
+	if _, isPrim := t.RawType().(*types.JavaPrimer); isPrim {
+		return false
+	}
+	return true
+}
+
+func isJavaLangObjectType(t types.JavaType) bool {
+	if t == nil {
+		return false
+	}
+	jc, ok := t.RawType().(*types.JavaClass)
+	return ok && jc != nil && jc.Name == "java.lang.Object"
+}
+
+func sameClassInvokeCallee(f *FunctionCallExpression, funcCtx *class_context.ClassContext) bool {
+	if f == nil || funcCtx == nil || f.ClassName == "" || funcCtx.ClassName == "" {
+		return false
+	}
+	a := strings.ReplaceAll(f.ClassName, "/", ".")
+	b := strings.ReplaceAll(funcCtx.ClassName, "/", ".")
+	return a == b
+}
+
+func witnessObjectNullNeedsCast(f *FunctionCallExpression) bool {
+	if f == nil {
+		return false
+	}
+	switch f.Kind {
+	case InvokeStatic, InvokeSpecial:
+		return true
+	}
+	owner := strings.ReplaceAll(f.ClassName, "/", ".")
+	if strings.HasPrefix(owner, "java.") || strings.HasPrefix(owner, "javax.") {
+		return true
+	}
+	// Invokevirtual/interface onto a more-specific reconstructed receiver
+	// (inlined `new C().m` whose bytecode owner is generic P.m(T)) must not
+	// pin the argument as Object.
+	if f.Object != nil {
+		if rt := f.Object.Type(); rt != nil {
+			if jc, ok := rt.RawType().(*types.JavaClass); ok && jc != nil {
+				recv := strings.ReplaceAll(jc.Name, "/", ".")
+				if recv != "" && recv != "java.lang.Object" && recv != owner {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func jdecFlag(funcCtx *class_context.ClassContext, key string) string {
+	if funcCtx != nil && funcCtx.Getenv != nil {
+		return funcCtx.Getenv(key)
+	}
+	return os.Getenv(key)
+}
+
+func renderWitnessParamType(param types.JavaType, funcCtx *class_context.ClassContext) string {
+	if param == nil {
+		return ""
+	}
+	ctx := funcCtx
+	if ctx == nil {
+		ctx = &class_context.ClassContext{}
+	}
+	return param.String(ctx)
+}
+
+// witnessDescriptorArgCast returns the cast type that forces javac to bind the
+// i-th argument to the bytecode descriptor's formal. Null literals targeting a
+// reference formal become `(ParamType)(null)` so String.valueOf(Object) is not
+// retargeted to valueOf(char[]). An array argument targeting a non-array
+// reference formal (typically Object) is likewise pinned. Does not box/unbox
+// primitives (valueOf(int) vs valueOf(Object)). Same-class Object-null stays on
+// nullArgDisambiguationCast so generic T inference is not pinned to Object.
+func (f *FunctionCallExpression) witnessDescriptorArgCast(i int, arg JavaValue, funcCtx *class_context.ClassContext) string {
+	if f == nil || arg == nil {
+		return ""
+	}
+	param := f.witnessDescriptorParamType(i)
+	if param == nil || !isWitnessReferenceType(param) {
+		return ""
+	}
+	inner := UnpackSoltValue(arg)
+	if IsNullLiteral(inner) {
+		if jdecFlag(funcCtx, "JDEC_NULL_ARG_CAST_OFF") != "" {
+			return ""
+		}
+		if f.calleeParamIsErasedTypeVar(i, funcCtx) {
+			return ""
+		}
+		if jdkCalleeParamIsErasedTypeVar(f.ClassName, f.FunctionName, i, len(f.Arguments), param) {
+			return ""
+		}
+		if isJavaLangObjectType(param) {
+			// Same-class Object formals: nullArgDisambiguationCast covers overloads;
+			// an ungated (Object)null pins generic T.
+			if sameClassInvokeCallee(f, funcCtx) {
+				return ""
+			}
+			// Cross-class Object-null: String.valueOf / println / super / ctor need the
+			// cast. User invokevirtual onto a generic/bridge (P<T>.m) must stay uncast
+			// so javac binds the source-level T/String formal.
+			if !witnessObjectNullNeedsCast(f) {
+				return ""
+			}
+		}
+		return renderWitnessParamType(param, funcCtx)
+	}
+	at := arg.Type()
+	if at != nil && at.IsArray() && !param.IsArray() {
+		// Array vs Object (and other non-array reference formals): without the
+		// cast javac may pick a more-specific array/varargs overload.
+		return renderWitnessParamType(param, funcCtx)
+	}
+	if at != nil && isWitnessReferenceType(at) && !IsNullLiteral(inner) {
+		if f.calleeParamIsErasedTypeVar(i, funcCtx) {
+			return ""
+		}
+		if jdkCalleeParamIsErasedTypeVar(f.ClassName, f.FunctionName, i, len(f.Arguments), param) {
+			return ""
+		}
+		aName := at.String(funcCtx)
+		pName := param.String(funcCtx)
+		if aName != "" && pName != "" && aName != pName {
+			return renderWitnessParamType(param, funcCtx)
+		}
+	}
+	return ""
+}
+
+// HasDescriptorOverloadConflict reports same-arity overloads recorded on the
+// request context. Missing tables mean "unknown", not "no overload".
+func (f *FunctionCallExpression) HasDescriptorOverloadConflict(funcCtx *class_context.ClassContext) bool {
+	if f == nil || funcCtx == nil || f.FunctionName == "" || f.Descriptor == "" {
+		return false
+	}
+	return funcCtx.HasOverloadedSameArity(f.FunctionName, f.Descriptor)
 }
 
 // varargsTypeVarSpread detects the javac varargs-call idiom on a generic method whose varargs COMPONENT

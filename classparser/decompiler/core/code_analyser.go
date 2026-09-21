@@ -191,6 +191,18 @@ func (d *Decompiler) GetMethodFromPool(index int) *values.JavaClassMember {
 	return d.constantPoolGetter(index).(*values.JavaClassMember)
 }
 
+// stampInvokeWitness records invoke-kind and origin PC on a call so overload
+// casts and super/ctor rendering can recover bytecode identity after ReplaceVar.
+func stampInvokeWitness(call *values.FunctionCallExpression, kind values.InvokeKind, opcode *OpCode) {
+	if call == nil {
+		return
+	}
+	call.Kind = kind
+	if opcode != nil {
+		call.OriginPC = int(opcode.CurrentOffset)
+	}
+}
+
 // CountFieldStores parses ONLY the opcode stream of this method and returns, keyed by
 // field name, how many times each field is the target of a putfield/putstatic. It is a
 // read-only structural scan: it does not build statements, simulate the stack, dump
@@ -4002,6 +4014,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		//funcCallValue.JavaType = classInfo.JavaType
 		funcCallValue.Object = values.NewJavaClassValue(types.NewJavaClass(classInfo.Name))
 		funcCallValue.IsStatic = true
+		stampInvokeWitness(funcCallValue, values.InvokeStatic, opcode)
 		for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
 			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
 		}
@@ -4041,6 +4054,15 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 				return fmt.Errorf("call bootstrap method error: %v", err)
 			}
 		}
+		if fc, ok := values.UnpackSoltValue(callResult).(*values.FunctionCallExpression); ok && fc != nil {
+			stampInvokeWitness(fc, values.InvokeDynamic, opcode)
+			if fc.Descriptor == "" {
+				fc.Descriptor = desc
+			}
+			if fc.FunctionName == "" {
+				fc.FunctionName = name
+			}
+		}
 		if callResult.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(callResult)
 		}
@@ -4048,6 +4070,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
 		funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
 		funcCallValue.IsSpecialInvoke = true
+		stampInvokeWitness(funcCallValue, values.InvokeSpecial, opcode)
 		for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
 			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
 		}
@@ -4061,6 +4084,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_INVOKEINTERFACE:
 		classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
 		funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+		stampInvokeWitness(funcCallValue, values.InvokeInterface, opcode)
 		for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
 			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
 		}
@@ -4073,6 +4097,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_INVOKEVIRTUAL:
 		classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
 		funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+		stampInvokeWitness(funcCallValue, values.InvokeVirtual, opcode)
 		for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
 			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
 		}
@@ -5994,6 +6019,7 @@ func (d *Decompiler) ParseStatement() error {
 				//funcCallValue.JavaType = classInfo.JavaType
 				funcCallValue.Object = values.NewJavaClassValue(types.NewJavaClass(classInfo.Name))
 				funcCallValue.IsStatic = true
+				stampInvokeWitness(funcCallValue, values.InvokeStatic, opcode)
 				n := 0
 				for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
 					funcCallValue.Arguments = append(funcCallValue.Arguments, opcode.stackConsumed[n])
@@ -6008,6 +6034,7 @@ func (d *Decompiler) ParseStatement() error {
 				methodName := classInfo.Member
 				funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
 				funcCallValue.IsSpecialInvoke = true
+				stampInvokeWitness(funcCallValue, values.InvokeSpecial, opcode)
 				n := 0
 				for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
 					funcCallValue.Arguments = append(funcCallValue.Arguments, opcode.stackConsumed[n])
@@ -6086,6 +6113,7 @@ func (d *Decompiler) ParseStatement() error {
 			if len(opcode.stackProduced) == 0 {
 				classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
 				funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+				stampInvokeWitness(funcCallValue, values.InvokeInterface, opcode)
 				n := 0
 				for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
 					funcCallValue.Arguments = append(funcCallValue.Arguments, opcode.stackConsumed[n])
@@ -6099,6 +6127,7 @@ func (d *Decompiler) ParseStatement() error {
 			if len(opcode.stackProduced) == 0 {
 				classInfo := d.GetMethodFromPool(int(Convert2bytesToInt(opcode.Data)))
 				funcCallValue := values.NewFunctionCallExpression(nil, classInfo, classInfo.JavaType.FunctionType()) // 不push到栈中
+				stampInvokeWitness(funcCallValue, values.InvokeVirtual, opcode)
 				n := 0
 				for i := 0; i < len(funcCallValue.FuncType.ParamTypes); i++ {
 					funcCallValue.Arguments = append(funcCallValue.Arguments, opcode.stackConsumed[n])

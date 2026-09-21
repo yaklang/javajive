@@ -78,9 +78,7 @@ func (c *ConstantPool) AppendConstantInfo(info ConstantInfo) int {
 func (c *ConstantPool) AddUtf8Info(s string) int {
 	index := c.SearchUtf8Index(s)
 	if index == 0 {
-		nameIns := &ConstantUtf8Info{
-			Value: s,
-		}
+		nameIns := NewUtf8FromString(s)
 		c.AppendConstantInfo(nameIns)
 		index = len(c.GetData())
 	}

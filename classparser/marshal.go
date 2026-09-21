@@ -72,8 +72,12 @@ func _MarshalJavaClass(cp *ClassObject, charLength int) []byte {
 			writer.Write8Byte(cp.ConstantPool[i].(*ConstantDoubleInfo).Value)
 		case *ConstantUtf8Info:
 			writer.Write1Byte(CONSTANT_Utf8)
-			str := cp.ConstantPool[i].(*ConstantUtf8Info).Value
-			writer.WriteString(str)
+			payload, err := cp.ConstantPool[i].(*ConstantUtf8Info).mutf8BytesChecked()
+			if err != nil {
+				panic(err)
+			}
+			writer.Write2Byte(len(payload))
+			writer.Write(payload)
 
 		case *ConstantStringInfo:
 			writer.Write1Byte(CONSTANT_String)

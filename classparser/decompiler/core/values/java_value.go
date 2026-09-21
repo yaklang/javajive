@@ -11,8 +11,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
-	"github.com/yaklang/javajive/internal/codec"
-	regexp_utils "github.com/yaklang/javajive/internal/regexp-utils"
 )
 
 type JavaRef struct {
@@ -160,6 +158,7 @@ func NewJavaArray(class *types.JavaClass, length JavaValue) *JavaArray {
 type JavaLiteral struct {
 	JavaType types.JavaType
 	Data     any
+	Units    []uint16 // lossless; when non-nil, String() uses Units for String/char
 }
 
 // ReplaceVar implements JavaValue.
@@ -168,83 +167,6 @@ func (j *JavaLiteral) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableI
 
 func (j *JavaLiteral) Type() types.JavaType {
 	return j.JavaType
-}
-
-func JavaStringToLiteral(i any) string {
-	data := fmt.Sprint(i)
-	// MatchMIMEType runs full magic-byte sniffing (allocating a csv/bufio reader) and
-	// is only useful to recover a mis-decoded Chinese charset, which by definition needs
-	// non-ASCII bytes. Pure-ASCII literals (the overwhelming majority) can never match a
-	// Chinese charset, so skip the expensive detection -- it was ~4% of all decompiler
-	// allocations. Behavior is unchanged: ASCII already fell through to the quote path.
-	if !isPureASCII(data) {
-		mimeType, _ := codec.MatchMIMEType(data)
-		if mimeType != nil && mimeType.IsChineseCharset() {
-			result, ok := mimeType.TryUTF8Convertor([]byte(data))
-			if ok {
-				return fixJavaStringEscapes(strconv.Quote(string(result)))
-			}
-		}
-	}
-	return fixJavaStringEscapes(strconv.Quote(data))
-}
-
-// isPureASCII reports whether s contains only bytes < 0x80.
-func isPureASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
-			return false
-		}
-	}
-	return true
-}
-
-// These regexes are compiled once at package init rather than per call: fixJavaStringEscapes
-// runs for every decompiled string literal, and re-creating the wrappers each time made
-// regexp compilation one of the top decompiler-core allocators (~5% of all bytes). A
-// *regexp.Regexp is safe for concurrent use, so a single shared wrapper serves all (including
-// parallel) decompiles.
-var (
-	reJavaHexEscape  = regexp_utils.NewRegexpWrapper(`(\\+)x[0-9a-fA-F]{2}`)
-	reJavaBellEscape = regexp_utils.NewRegexpWrapper(`(\\+)a`)
-	reJavaVTabEscape = regexp_utils.NewRegexpWrapper(`(\\+)v`)
-)
-
-// fixJavaStringEscapes converts Go-style escapes (emitted by strconv.Quote) that are not
-// valid in Java string literals into Java-compatible "\uXXXX" escapes:
-//   - "\xHH"  -> "\u00HH"   (Java has no \x hex escape)
-//   - "\a"    -> "\u0007"   (Java has no bell escape)
-//   - "\v"    -> "\u000b"   (Java has no vertical-tab escape)
-func fixJavaStringEscapes(raw string) string {
-	results, err := reJavaHexEscape.ReplaceAllStringFunc(raw, func(s string) string {
-		if strings.Count(s, `\`)%2 == 0 {
-			return s
-		}
-		// return \u00xx
-		length := len(s)
-		pre, after := s[:length-3], "u00"+s[length-2:]
-		return pre + after
-	})
-	if err != nil {
-		results = raw
-	}
-	// single-char escapes that Java does not support
-	convertSingle := func(input string, re *regexp_utils.RegexpWrapper, replacement string) string {
-		out, e := re.ReplaceAllStringFunc(input, func(s string) string {
-			if strings.Count(s, `\`)%2 == 0 {
-				return s // even number of backslashes => literal, not an escape
-			}
-			// drop the trailing "\<escChar>" and append the replacement (which carries its own backslash)
-			return s[:len(s)-2] + replacement
-		})
-		if e != nil {
-			return input
-		}
-		return out
-	}
-	results = convertSingle(results, reJavaBellEscape, `\u0007`)
-	results = convertSingle(results, reJavaVTabEscape, `\u000b`)
-	return results
 }
 
 func (j *JavaLiteral) String(funcCtx *class_context.ClassContext) string {
@@ -274,8 +196,15 @@ func (j *JavaLiteral) String(funcCtx *class_context.ClassContext) string {
 		// The D suffix keeps an integral double (e.g. 1.0 -> "1") from being read as
 		// an int, which would break overloads like Double.valueOf(double).
 		return javaDoubleLiteralExpr(j.Data)
+	case types.NewJavaPrimer(types.JavaChar).String(funcCtx):
+		if u, ok := javaLiteralCharUnit(j); ok {
+			return JavaUnitToCharLiteral(u)
+		}
 	}
 	if typeStr == "java.lang.String" || typeStr == "String" {
+		if j.Units != nil {
+			return JavaUnitsToStringLiteral(j.Units)
+		}
 		return JavaStringToLiteral(j.Data)
 	}
 	return fmt.Sprint(j.Data)

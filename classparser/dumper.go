@@ -532,6 +532,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		ClassName:       c.ClassName,
 		SupperClassName: supperClassName,
 		PackageName:     c.PackageName,
+		Getenv: func(key string) string {
+			if c.options.EnvSnapshot != nil {
+				return c.options.EnvSnapshot[key]
+			}
+			return os.Getenv(key)
+		},
 	}
 	c.FuncCtx = funcCtx
 	// Wire SiblingSuperTypes BEFORE the class header (`extends` / `implements`) is rendered.
@@ -1776,8 +1782,7 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 				}
 				switch constVal := value.(type) {
 				case *ConstantStringInfo:
-					constStr, _ := c.obj.getUtf8(constVal.StringIndex)
-					valueLiteral = values.JavaStringToLiteral(constStr)
+					valueLiteral = javaUtf8IndexToStringLiteral(c.obj, constVal.StringIndex)
 				case *ConstantIntegerInfo:
 					// boolean/char are stored as int constants in the pool; render them
 					// in their declared type so the field initializer type-checks
@@ -2561,22 +2566,26 @@ func (c *ClassObjectDumper) buildSiblingSuperTypes() func(internalName string) (
 // Java char literal: printable ASCII becomes 'x' (with the four chars that need escaping handled),
 // everything else becomes a '\uXXXX' escape so the result always compiles.
 func javaCharLiteralFromCode(code int) string {
-	switch code {
-	case '\'':
-		return "'\\''"
-	case '\\':
-		return "'\\\\'"
-	case '\n':
-		return "'\\n'"
-	case '\r':
-		return "'\\r'"
-	case '\t':
-		return "'\\t'"
+	return values.JavaUnitToCharLiteral(uint16(code))
+}
+
+func javaUtf8IndexToStringLiteral(obj *ClassObject, index uint16) string {
+	if obj == nil {
+		return values.JavaStringToLiteral("")
 	}
-	if code >= 0x20 && code <= 0x7e {
-		return fmt.Sprintf("'%c'", rune(code))
+	info, err := obj.getConstantInfo(index)
+	if err != nil {
+		return values.JavaStringToLiteral("")
 	}
-	return fmt.Sprintf("'\\u%04x'", code&0xffff)
+	utf, ok := info.(*ConstantUtf8Info)
+	if !ok {
+		s, _ := obj.getUtf8(index)
+		return values.JavaStringToLiteral(s)
+	}
+	if utf.Units != nil {
+		return values.JavaUnitsToStringLiteral(utf.Units)
+	}
+	return values.JavaStringToLiteral(utf.Value)
 }
 
 // externalNestedEnumSourceName converts an enum-constant annotation value's binary type name
@@ -2628,11 +2637,7 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 		constant := element.Value.(ConstantInfo)
 		switch ret := constant.(type) {
 		case *ConstantStringInfo:
-			s, err := c.obj.getUtf8(ret.StringIndex)
-			if err != nil {
-				return "", err
-			}
-			valStr = values.JavaStringToLiteral(s)
+			valStr = javaUtf8IndexToStringLiteral(c.obj, ret.StringIndex)
 		case *ConstantLongInfo:
 			valStr = fmt.Sprintf("%dL", ret.Value)
 		case *ConstantIntegerInfo:
@@ -2655,7 +2660,7 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 			return "", errors.New("parse annotation error, unknown constant type")
 		}
 	case 's':
-		valStr = values.JavaStringToLiteral(element.Value)
+		valStr = values.JavaUnitsToStringLiteral(annotationStringUnits(element.Value))
 	case 'c':
 		descStr, _ := element.Value.(string)
 		classTyp, perr := types.ParseDescriptor(descStr)
@@ -2770,11 +2775,7 @@ func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, e
 			constant := element.Value.(ConstantInfo)
 			switch ret := constant.(type) {
 			case *ConstantStringInfo:
-				s, err := c.obj.getUtf8(ret.StringIndex)
-				if err != nil {
-					return "", err
-				}
-				valStr = values.JavaStringToLiteral(s)
+				valStr = javaUtf8IndexToStringLiteral(c.obj, ret.StringIndex)
 			case *ConstantLongInfo:
 				valStr = fmt.Sprintf("%dL", ret.Value)
 			case *ConstantIntegerInfo:
@@ -2802,7 +2803,7 @@ func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, e
 				return "", errors.New("parse annotation error, unknown constant type")
 			}
 		case 's':
-			valStr = values.JavaStringToLiteral(element.Value) // fmt.Sprintf("\"%s\"", element.Value.(string))
+			valStr = values.JavaUnitsToStringLiteral(annotationStringUnits(element.Value))
 		case 'c':
 			// class element value: the raw value is a field descriptor like
 			// "Lcom/example/Foo;" or "[I"; render it as a Java class literal "Foo.class".

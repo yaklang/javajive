@@ -19,6 +19,52 @@ type BuildinBootstrapMethod func(d *Decompiler, sim StackSimulation, typ types.J
 // surrounding concat `+` would capture only its left operand. A ternary (`c ? a : b`) is likewise
 // lower precedence than `+`. Atomic operands (variables, literals, field/array accesses, method
 // calls, casts, unary ops) need no extra parentheses.
+func replaceConcatRecipeHole(recipe, replacement string) string {
+	for _, hole := range []string{"\u0001", `\001`, `\u0001`} {
+		if strings.Contains(recipe, hole) {
+			return strings.Replace(recipe, hole, replacement, 1)
+		}
+	}
+	return recipe
+}
+
+func concatArgString(arg values.JavaValue, funcCtx *class_context.ClassContext) string {
+	if arg == nil {
+		return "null"
+	}
+	s := arg.String(funcCtx)
+	if concatArgNeedsParens(arg) {
+		return "(" + s + ")"
+	}
+	return s
+}
+
+func renderConcatFromUnits(units []uint16, args []values.JavaValue, funcCtx *class_context.ClassContext) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	ai := 0
+	for _, u := range units {
+		if u == 1 && ai < len(args) {
+			b.WriteString(`" + `)
+			b.WriteString(concatArgString(args[ai], funcCtx))
+			b.WriteString(` + "`)
+			ai++
+			continue
+		}
+		piece := values.JavaUnitsToStringLiteral([]uint16{u})
+		if len(piece) >= 2 {
+			b.WriteString(piece[1 : len(piece)-1])
+		}
+	}
+	b.WriteByte('"')
+	s := b.String()
+	s = strings.ReplaceAll(s, `"" + `, "")
+	if strings.HasSuffix(s, ` + ""`) {
+		s = strings.TrimSuffix(s, ` + ""`)
+	}
+	return s
+}
+
 func concatArgNeedsParens(v values.JavaValue) bool {
 	switch e := values.UnpackSoltValue(v).(type) {
 	case *values.JavaExpression:
@@ -34,29 +80,21 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 	"java.lang.invoke.StringConcatFactory.makeConcatWithConstants": func(args1 ...values.JavaValue) BuildinBootstrapMethod {
 		return func(d *Decompiler, sim StackSimulation, typ types.JavaType, args2 ...values.JavaValue) (values.JavaValue, error) {
 			return values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-				str1 := args1[0].String(funcCtx)
-
+				ordered := make([]values.JavaValue, 0, len(args2))
 				for i := 0; i < len(args2); i++ {
 					idx := len(args2) - 1 - i
 					if idx < 0 || idx >= len(args2) {
 						break
 					}
-					arg := args2[idx]
-					newStr := arg.String(funcCtx)
-					// String concatenation `+` binds tighter than the bitwise/shift/relational/
-					// logical operators, so an interpolated sub-expression such as `n & 0xff`
-					// (which renders as `(n) & (255)`) would reparse as `("prefix" + n) & 255`
-					// once spliced after a `+`, yielding `String & int` - a compile error. Wrap any
-					// binary/ternary concat argument in parentheses so it stays a single operand of
-					// the concatenation. Atomic args (variables, literals, calls, casts) are left
-					// alone to keep the common output unchanged.
-					if concatArgNeedsParens(arg) {
-						newStr = "(" + newStr + ")"
-					}
-					tag := `\u0001`
-					str1 = strings.Replace(str1, tag, `" + `+newStr+` + "`, 1)
+					ordered = append(ordered, args2[idx])
 				}
-
+				if lit, ok := values.UnpackSoltValue(args1[0]).(*values.JavaLiteral); ok && lit != nil && lit.Units != nil {
+					return renderConcatFromUnits(lit.Units, ordered, funcCtx)
+				}
+				str1 := args1[0].String(funcCtx)
+				for _, arg := range ordered {
+					str1 = replaceConcatRecipeHole(str1, `" + `+concatArgString(arg, funcCtx)+` + "`)
+				}
 				if strings.HasSuffix(str1, ` + ""`) {
 					str1 = strings.TrimSuffix(str1, ` + ""`)
 				}

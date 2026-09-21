@@ -131,7 +131,10 @@ func GetLiteralFromCP(pool []ConstantInfo, index int) values.JavaValue {
 	constant := pool[index-1]
 	switch ret := constant.(type) {
 	case *ConstantStringInfo:
-		return values.NewJavaLiteral(pool[ret.StringIndex-1].(*ConstantUtf8Info).Value, types.NewJavaPrimer(types.JavaString))
+		utf := pool[ret.StringIndex-1].(*ConstantUtf8Info)
+		lit := values.NewJavaLiteral(utf.Value, types.NewJavaPrimer(types.JavaString))
+		lit.Units = utf.CodeUnits()
+		return lit
 	case *ConstantLongInfo:
 		return values.NewJavaLiteral(ret.Value, types.NewJavaPrimer(types.JavaLong))
 	case *ConstantIntegerInfo:

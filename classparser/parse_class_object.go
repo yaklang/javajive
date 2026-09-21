@@ -141,7 +141,7 @@ func (this *ClassObject) SetClassName(name string) error {
 	if !ok {
 		return utils.Errorf("index %d is not ConstantUtf8Info", this.ThisClass)
 	}
-	oldName.Value = name
+	oldName.SetString(name)
 	return nil
 }
 
@@ -161,7 +161,7 @@ func (this *ClassObject) SetSourceFileName(name string) error {
 	if !ok {
 		return utils.Errorf("index %d is not ConstantUtf8Info", index)
 	}
-	oldSourceFileName.Value = name
+	oldSourceFileName.SetString(name)
 	return nil
 }
 
@@ -185,7 +185,7 @@ func (this *ClassObject) SetMethodName(old, name string) error {
 	if !ok {
 		return utils.Errorf("index %d is not ConstantUtf8Info", index)
 	}
-	oldMethodName.Value = name
+	oldMethodName.SetString(name)
 	return nil
 }
 
@@ -279,7 +279,16 @@ func Parse(classData []byte) (cf *ClassObject, err error) {
 		}
 	}()
 	cp := NewClassParser(classData)
-	return cp.Parse()
+	obj, err := cp.Parse()
+	if err != nil {
+		return nil, err
+	}
+	if obj != nil {
+		if err := obj.CheckUtf8UseSites(); err != nil {
+			return nil, err
+		}
+	}
+	return obj, nil
 }
 
 func Decompile(i []byte) (string, error) {
