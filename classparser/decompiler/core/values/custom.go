@@ -59,6 +59,11 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 	if v.StringFunc == nil {
 		return ""
 	}
+	if guard {
+		if err := funcCtx.Work.Check(); err != nil {
+			return ""
+		}
+	}
 	s := v.StringFunc(funcCtx)
 	if renderRejected(funcCtx) {
 		return ""
@@ -75,6 +80,10 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 	}
 	return s
 }
+
+// Opaque StringFunc may still allocate before CheckAlloc. Production concat
+// (T18) writes through workbudget.Writer; lambda capture splicing checks then
+// WriteString the joined body. Condy placeholders are tiny format strings.
 func NewCustomValue(stringFun func(funcCtx *class_context.ClassContext) string, typeFunc func() types.JavaType, replaceFunc ...func(oldId *utils.VariableId, newId *utils.VariableId)) *CustomValue {
 	var rf func(oldId *utils.VariableId, newId *utils.VariableId)
 	if len(replaceFunc) > 0 {

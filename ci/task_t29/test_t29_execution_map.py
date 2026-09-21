@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools.ci_scheduler.execution_map import (  # noqa: E402
+    EVIDENCE_COMMANDS,
     PACK_CASE_IDS,
     RequiredCommand,
     command_outcome,
@@ -76,6 +77,28 @@ class TestExecutionEventMapping(unittest.TestCase):
         snap = required_coverage_snapshot(ROOT)
         for job in BASELINE_CI_JOBS:
             self.assertIn(job, snap["jobs"]["ci.yml"])
+
+    def test_mapped_execution_is_not_187_pack_acceptance(self) -> None:
+        lines = []
+        for cmds in EVIDENCE_COMMANDS.values():
+            for cmd in cmds:
+                if cmd.kind == "python_unittest":
+                    lines.append(f"{cmd.test_name} ({cmd.package}.Cls) ... ok")
+                else:
+                    lines.append(f"=== RUN   {cmd.test_name}")
+                    lines.append(f"--- PASS: {cmd.test_name} (0.01s)")
+        inv = evaluate_inventory("\n".join(lines) + "\n")
+        self.assertGreater(inv["counts"]["pass"], 0)
+        self.assertGreater(inv["counts"]["not_mapped"], 0)
+        self.assertFalse(inv["mapping_complete"])
+        self.assertFalse(inv["pack_contracts_proven"])
+        self.assertFalse(inv["overall_pass"])
+        t30 = next(c for c in inv["cases"] if c["case_id"] == "T30-C01")
+        self.assertEqual(t30["status"], "PASS")
+        self.assertFalse(t30["contract_proven"])
+        t09 = next(c for c in inv["cases"] if c["case_id"] == "T09-C06")
+        self.assertEqual(t09["status"], "NOT_MAPPED")
+        self.assertFalse(t09["pass"])
 
 
 if __name__ == "__main__":

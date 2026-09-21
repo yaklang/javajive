@@ -26,7 +26,7 @@ from ..constants import (
 from ..job import UntrustedJob
 from ..mounts import assert_mounts_allowed, inventory
 from ..policy import Limits
-from ..procutil import close_pipes, docker_leftovers, force_rm_containers
+from ..procutil import cleanup_job_containers, close_pipes
 from .result import BackendResult
 
 
@@ -220,6 +220,14 @@ def run_docker(
     timed_out = False
     killed = False
     proc: subprocess.Popen[bytes] | None = None
+    code: int | None = None
+    os_error: OSError | None = None
+    leftover_info: dict = {
+        "leftover_containers": [],
+        "query_error": "cleanup not run",
+        "rm_failed": True,
+        "verified": False,
+    }
     try:
         proc = subprocess.Popen(
             argv,
@@ -256,24 +264,33 @@ def run_docker(
         close_pipes(proc)
         code = proc.returncode
     except OSError as exc:
+        os_error = exc
+    finally:
+        leftover_info = cleanup_job_containers(engine_path, job_id, [name])
+
+    extra = {
+        "container_name": name,
+        "image": image,
+        "leftover_containers": list(leftover_info.get("leftover_containers") or []),
+        "leftover_query_failed": leftover_info.get("query_error") is not None,
+        "leftover_query_error": leftover_info.get("query_error"),
+        "leftover_rm_failed": bool(leftover_info.get("rm_failed")),
+        "leftover_verified": bool(leftover_info.get("verified")),
+    }
+    if os_error is not None:
         return BackendResult(
             exit_code=None,
             stdout=bytes(stdout_buf),
-            stderr=bytes(stderr_buf) + str(exc).encode(),
+            stderr=bytes(stderr_buf) + str(os_error).encode(),
             timed_out=False,
             output_capped=capped[0],
             killed=False,
             argv=argv,
             mount_inventory=inv,
             resource_limits=resource_limits,
-            error=str(exc),
+            extra=extra,
+            error=str(os_error),
         )
-    finally:
-        force_rm_containers(engine_path, [name])
-        leftover = docker_leftovers(engine_path, job_id)
-        if leftover:
-            force_rm_containers(engine_path, leftover)
-
     return BackendResult(
         exit_code=code,
         stdout=bytes(stdout_buf),
@@ -284,5 +301,5 @@ def run_docker(
         argv=argv,
         mount_inventory=inv,
         resource_limits=resource_limits,
-        extra={"container_name": name, "image": image},
+        extra=extra,
     )

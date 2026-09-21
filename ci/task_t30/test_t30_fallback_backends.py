@@ -14,6 +14,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -251,6 +252,25 @@ class TestUnshareFallbackPlan(unittest.TestCase):
 
 
 class TestSeatbeltProfile(unittest.TestCase):
+    def test_resolve_host_jdk_is_real_not_usr_bin_stub(self) -> None:
+        from tools.sandbox_worker.jdk import resolve_host_jdk
+
+        dropped = {
+            "JAVA_HOME",
+            "JAVA21_HOME",
+            "JAVA_HOME_21",
+            "JDK_HOME",
+            "JAVA_TOOL_OPTIONS",
+            "JAVAJIVE_JAVA_HOME",
+        }
+        clean = {k: v for k, v in os.environ.items() if k not in dropped}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            jdk = resolve_host_jdk()
+        self.assertIsNotNone(jdk, "real JDK must be discoverable without JAVA_HOME")
+        self.assertNotEqual(str(jdk / "bin" / "java"), "/usr/bin/java")
+        self.assertTrue((jdk / "bin" / "javac").is_file())
+        self.assertTrue((jdk / "release").is_file() or (jdk / "lib" / "modules").is_file())
+
     def test_profile_denies_home_users_docker_sock_and_tightens_opt(self) -> None:
         inputs = Path(tempfile.mkdtemp(prefix="t30-sb-in-"))
         artifacts = Path(tempfile.mkdtemp(prefix="t30-sb-art-"))
@@ -479,12 +499,50 @@ echo ok-inside > "$ART/inside.txt" || echo INSIDE_WRITE_DENIED
         self.assertTrue(BASELINE.is_file())
         src = BASELINE.read_text(encoding="utf-8")
         self.assertIn("class Baseline", src)
-        obs = self.worker.compile_and_run_java(BASELINE, limits=SOFT)
-        _require_executed(self, obs, "seatbelt Baseline.java")
-        self.assertEqual(obs.status, "ok", obs.stdout + "\n" + obs.stderr)
-        self.assertEqual(obs.exit_code, 0, obs.stdout + "\n" + obs.stderr)
-        self.assertIn("\n7", "\n" + obs.stdout.replace("\r\n", "\n"))
-        _dump_evidence({"status": obs.status, "stdout": obs.stdout[-200:], "backend": obs.backend})
+        from tools.sandbox_worker.jdk import resolve_host_jdk
+
+        dropped = {
+            "JAVA_HOME",
+            "JAVA21_HOME",
+            "JAVA_HOME_21",
+            "JAVA8_HOME",
+            "JAVA_HOME_8",
+            "JDK_HOME",
+            "JDK8_HOME",
+            "JAVA_TOOL_OPTIONS",
+            "JAVAJIVE_JAVA_HOME",
+        }
+        clean = {k: v for k, v in os.environ.items() if k not in dropped}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            jdk = resolve_host_jdk()
+            self.assertIsNotNone(
+                jdk,
+                "infra_error: real JDK is installed but resolve_host_jdk returned None "
+                "(must not skip seatbelt or accept /usr/bin/java stub)",
+            )
+            self.assertNotEqual(str(jdk / "bin" / "java"), "/usr/bin/java")
+            self.assertTrue((jdk / "bin" / "javac").is_file())
+            obs = self.worker.compile_and_run_java(BASELINE, limits=SOFT)
+            _require_executed(self, obs, "seatbelt Baseline.java")
+            self.assertNotEqual(obs.status, "blocked", obs.stdout + "\n" + obs.stderr)
+            self.assertEqual(obs.status, "ok", obs.stdout + "\n" + obs.stderr)
+            self.assertEqual(obs.exit_code, 0, obs.stdout + "\n" + obs.stderr)
+            self.assertIn("\n7", "\n" + obs.stdout.replace("\r\n", "\n"))
+            home = obs.extra.get("host_jdk_home")
+            self.assertTrue(home, msg=obs.extra)
+            self.assertEqual(Path(home).resolve(), Path(jdk).resolve())
+            argv_blob = " ".join(obs.argv or [])
+            self.assertNotIn("/usr/bin/java", argv_blob)
+            _dump_evidence(
+                {
+                    "status": obs.status,
+                    "stdout": obs.stdout[-200:],
+                    "backend": obs.backend,
+                    "host_jdk_home": home,
+                    "compiler": obs.compiler,
+                    "argv": obs.argv,
+                }
+            )
 
 
 class TestHardLimitSelector(unittest.TestCase):
@@ -561,6 +619,11 @@ class TestHardLimitSelector(unittest.TestCase):
         self.assertTrue(obs.resource_limits.get("memory_enforced"), obs.resource_limits)
         self.assertEqual(obs.leftover_host_pids, [])
         self.assertEqual(obs.leftover_containers, [])
+        self.assertFalse(obs.extra.get("leftover_query_failed"), obs.extra)
+        self.assertTrue(obs.extra.get("leftover_verified"), obs.extra)
+        if obs.leftover_host_pids or obs.leftover_containers:
+            self.assertNotEqual(obs.status, "ok")
+            self.assertEqual(obs.reason, "leftover_process")
         self.assertIn(obs.backend, {"docker", "podman"})
         self.assertTrue(
             obs.status in {STATUS_RESOURCE, STATUS_UNSUPPORTED, "blocked"}
@@ -575,6 +638,8 @@ class TestHardLimitSelector(unittest.TestCase):
                 "timed_out": obs.timed_out,
                 "output_capped": obs.output_capped,
                 "leftover_host_pids": obs.leftover_host_pids,
+                "leftover_containers": obs.leftover_containers,
+                "leftover_verified": obs.extra.get("leftover_verified"),
                 "resource_limits": obs.resource_limits,
             }
         )
@@ -610,6 +675,11 @@ class TestHardLimitSelector(unittest.TestCase):
         self.assertTrue(obs.resource_limits.get("pids_enforced"), obs.resource_limits)
         self.assertEqual(obs.leftover_host_pids, [])
         self.assertEqual(obs.leftover_containers, [])
+        self.assertFalse(obs.extra.get("leftover_query_failed"), obs.extra)
+        self.assertTrue(obs.extra.get("leftover_verified"), obs.extra)
+        if obs.leftover_host_pids or obs.leftover_containers:
+            self.assertNotEqual(obs.status, "ok")
+            self.assertEqual(obs.reason, "leftover_process")
         _dump_evidence(
             {
                 "backend": obs.backend,
@@ -617,7 +687,49 @@ class TestHardLimitSelector(unittest.TestCase):
                 "exit_code": obs.exit_code,
                 "timed_out": obs.timed_out,
                 "leftover_host_pids": obs.leftover_host_pids,
+                "leftover_containers": obs.leftover_containers,
+                "leftover_verified": obs.extra.get("leftover_verified"),
                 "stdout_tail": (obs.stdout or "")[-400:],
+            }
+        )
+
+    def test_docker_timeout_unmarked_children_engine_cleanup(self) -> None:
+        worker = SandboxWorker()
+        self.assertEqual(worker.backend, "docker")
+        marker = "T30NOMARK-" + os.urandom(4).hex()
+        obs = worker.run(
+            UntrustedJob(
+                argv=["sh", "-c", "unset T30_MARKER; exec sleep 20"],
+                limits=Limits(
+                    memory_bytes=32 * 1024 * 1024,
+                    pids=16,
+                    timeout_seconds=2,
+                    output_bytes=8192,
+                    artifact_bytes=8192,
+                ),
+                marker=marker,
+            )
+        )
+        blob = (obs.stdout or "") + "\n" + (obs.stderr or "")
+        self.assertTrue(obs.did_execute, obs.as_dict())
+        self.assertTrue(obs.timed_out, blob)
+        self.assertNotEqual(obs.status, "ok", blob)
+        self.assertEqual(obs.leftover_host_pids, [])
+        self.assertEqual(obs.leftover_containers, [])
+        self.assertFalse(obs.extra.get("leftover_query_failed"), obs.extra)
+        self.assertTrue(obs.extra.get("leftover_verified"), obs.extra)
+        if obs.leftover_host_pids or obs.leftover_containers:
+            self.assertNotEqual(obs.status, "ok")
+            self.assertEqual(obs.reason, "leftover_process")
+        _dump_evidence(
+            {
+                "backend": obs.backend,
+                "status": obs.status,
+                "timed_out": obs.timed_out,
+                "leftover_host_pids": obs.leftover_host_pids,
+                "leftover_containers": obs.leftover_containers,
+                "leftover_verified": obs.extra.get("leftover_verified"),
+                "marker": marker,
             }
         )
 

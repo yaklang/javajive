@@ -3577,38 +3577,98 @@ func methodParamTypeVar(body string, pos int, ident string) string {
 	if brace < 0 {
 		return ""
 	}
-	sig := head[:brace]
-	p := strings.LastIndex(sig, "(")
-	if p < 0 {
+	params := methodParamList(head[:brace])
+	if params == "" {
 		return ""
 	}
-	close := matchingCloseParen(sig, p)
+	needle := " " + ident
+	from := 0
+	for {
+		rel := strings.Index(params[from:], needle)
+		if rel < 0 {
+			return ""
+		}
+		idx := from + rel
+		after := idx + len(needle)
+		if after < len(params) && isJavaIdentChar(params[after]) {
+			from = idx + 1
+			continue
+		}
+		if paramIdentInsideAnnotation(params, idx) {
+			from = idx + 1
+			continue
+		}
+		typ := paramTypeBefore(params, idx)
+		if isTypeVarName(typ) {
+			return typ
+		}
+		from = idx + 1
+	}
+}
+
+// methodParamList returns the argument list of a method header, using the
+// closing ')' before `{` / `throws` so parameter annotations like
+// `@MaybeNull()` do not steal LastIndex('(').
+func methodParamList(sig string) string {
+	sig = strings.TrimSpace(sig)
+	if i := strings.LastIndex(sig, " throws "); i >= 0 {
+		sig = strings.TrimSpace(sig[:i])
+	}
+	close := strings.LastIndexByte(sig, ')')
 	if close < 0 {
 		return ""
 	}
-	params := sig[p+1 : close]
-	needle := " " + ident
-	idx := strings.Index(params, needle)
-	if idx < 0 {
+	open := matchingOpenParen(sig, close)
+	if open < 0 {
 		return ""
 	}
-	after := idx + len(needle)
-	if after < len(params) && isJavaIdentChar(params[after]) {
-		return ""
+	return sig[open+1 : close]
+}
+
+func paramIdentInsideAnnotation(params string, identStart int) bool {
+	depth := 0
+	for i := identStart - 1; i >= 0; i-- {
+		switch params[i] {
+		case ')':
+			depth++
+		case '(':
+			if depth > 0 {
+				depth--
+				continue
+			}
+			j := i
+			for j > 0 && (params[j-1] == ' ' || params[j-1] == '\t') {
+				j--
+			}
+			k := j
+			for k > 0 && isJavaIdentChar(params[k-1]) {
+				k--
+			}
+			if k > 0 && params[k-1] == '@' {
+				return true
+			}
+			return false
+		}
 	}
-	typeEnd := idx
-	for typeEnd > 0 && params[typeEnd-1] == ' ' {
+	return false
+}
+
+func paramTypeBefore(params string, identStart int) string {
+	typeEnd := identStart
+	for typeEnd > 0 && (params[typeEnd-1] == ' ' || params[typeEnd-1] == '\t') {
 		typeEnd--
+	}
+	if typeEnd >= 3 && params[typeEnd-3:typeEnd] == "..." {
+		typeEnd -= 3
+		for typeEnd > 0 && (params[typeEnd-1] == ' ' || params[typeEnd-1] == '\t') {
+			typeEnd--
+		}
 	}
 	typeStart := typeEnd
 	for typeStart > 0 && isJavaIdentChar(params[typeStart-1]) {
 		typeStart--
 	}
-	typ := params[typeStart:typeEnd]
-	if isTypeVarName(typ) {
-		return typ
-	}
-	return ""
+	return params[typeStart:typeEnd]
 }
 
 func wrapEmptyIteratorTernaryArm(body string) string {

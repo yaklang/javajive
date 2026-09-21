@@ -288,9 +288,18 @@ def run_seatbelt(
         w = shutil.which(exe)
         if w:
             extra_read.append(Path(w))
-    java_home = os.environ.get("JAVA_HOME")
+    from ..jdk import resolve_host_jdk
+
+    java_home = None
+    need_jdk = bool(job.need_java or (job.argv and Path(job.argv[0]).name in {"java", "javac"}))
+    if need_jdk:
+        probed = resolve_host_jdk()
+        if probed is not None:
+            java_home = str(probed)
     if java_home:
         extra_read.append(Path(java_home))
+        extra_read.append(Path(java_home) / "bin" / "java")
+        extra_read.append(Path(java_home) / "bin" / "javac")
     profile = build_profile(inputs=inputs, artifacts=artifacts, work=work, extra_read=extra_read)
     profile_path = work / "profile.sb"
     profile_path.write_text(profile, encoding="utf-8")
@@ -307,14 +316,22 @@ def run_seatbelt(
         "TMPDIR": str(work),
         "JAVA_TOOL_OPTIONS": "-Djava.awt.headless=true",
     }
+    env.update(job.env)
     if java_home:
         env["JAVA_HOME"] = java_home
-    env.update(job.env)
+        env["PATH"] = str(Path(java_home) / "bin") + os.pathsep + env.get("PATH", "/usr/bin:/bin")
     env["HOME"] = str(work / "home")
     env["TMPDIR"] = str(work)
     (work / "home").mkdir(exist_ok=True)
 
-    argv = [binary, "-f", str(profile_path), *job.argv]
+    child_argv = list(job.argv)
+    if java_home and child_argv:
+        name = Path(child_argv[0]).name
+        if name in {"java", "javac"}:
+            real = Path(java_home) / "bin" / name
+            if real.is_file():
+                child_argv[0] = str(real)
+    argv = [binary, "-f", str(profile_path), *child_argv]
     binds = [
         (str(inputs), str(inputs), "ro"),
         (str(artifacts), str(artifacts), "rw"),
@@ -332,6 +349,7 @@ def run_seatbelt(
             "seatbelt_deny_network": True,
             "host_home_bind": False,
             "docker_sock_bind": False,
+            "host_jdk_home": java_home,
         },
     )
     resource_limits = {
@@ -405,7 +423,7 @@ def run_seatbelt(
             argv=argv,
             mount_inventory=inv,
             resource_limits=resource_limits,
-            extra={"profile": profile, "work": str(work)},
+            extra={"profile": profile, "work": str(work), "host_jdk_home": java_home},
             error=str(exc),
         )
     return BackendResult(
@@ -418,5 +436,5 @@ def run_seatbelt(
         argv=argv,
         mount_inventory=inv,
         resource_limits=resource_limits,
-        extra={"profile": profile, "work": str(work)},
+        extra={"profile": profile, "work": str(work), "host_jdk_home": java_home},
     )

@@ -170,8 +170,17 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		return result, budget, err
 	}
 	result.Status = "complete"
+	if d.FuncCtx != nil && d.FuncCtx.OverloadFamilyUnproven {
+		result.Status = "unsupported"
+		d.appendDiagnostic(DecompileDiagnostic{
+			Code:    "overload_family_unknown",
+			Message: "external overload family not loaded; conservative Object pin is not Unique proof",
+		})
+	}
 	if len(result.StubMethods) > 0 || d.typeAnnosUnsupported {
-		result.Status = "partial"
+		if result.Status == "complete" {
+			result.Status = "partial"
+		}
 	}
 	applyBootstrapCapabilities(&result, d)
 	noteUnsupportedBootstraps(&result, obj)

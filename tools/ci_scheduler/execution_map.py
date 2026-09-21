@@ -232,7 +232,9 @@ def evaluate_case(
         "case_id": case_id,
         "status": overall,
         "pass": overall == "PASS",
+        "contract_proven": False,
         "reason": None if overall == "PASS" else "missing/unrun/fail is fail-closed",
+        "note": "execution event only; not pack-oracle completeness",
         "commands": rows,
     }
 
@@ -253,11 +255,30 @@ def evaluate_inventory(
         "not_run": sum(1 for c in cases if c["status"] == "NOT_RUN"),
         "not_mapped": sum(1 for c in cases if c["status"] == "NOT_MAPPED"),
     }
+    mapping = commands if commands is not None else EVIDENCE_COMMANDS
+    mapping_complete = all(cid in mapping and len(mapping[cid]) > 0 for cid in ids)
+    # A mapped unit PASS is an execution event. It does not prove the pack oracle.
+    pack_contracts_proven = False
+    overall = (
+        mapping_complete
+        and counts["total"] == 187
+        and counts["pass"] == 187
+        and counts["fail"] == 0
+        and counts["not_run"] == 0
+        and counts["not_mapped"] == 0
+        and pack_contracts_proven
+    )
     return {
         "schema_version": 1,
         "rule": "execution-event exact name; mention/truncation/unrun is not PASS",
         "counts": counts,
-        "overall_pass": counts["pass"] == counts["total"] and counts["total"] == 187,
+        "overall_pass": overall,
+        "mapping_complete": mapping_complete,
+        "pack_contracts_proven": pack_contracts_proven,
+        "note": (
+            "Mapped unittest/go-test PASS is not pack-oracle completeness. "
+            "Unmapped cases stay NOT_MAPPED. This helper never claims all 187 contracts."
+        ),
         "cases": cases,
         "event_count": len(events),
     }

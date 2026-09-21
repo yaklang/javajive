@@ -96,6 +96,167 @@ class TestTaskT01C04ComparabilityRejection(unittest.TestCase):
         )
         self._assert_incomparable(a, b, "dependency_lock_digest")
 
+    def test_T01_C04_same_fail_status_different_rebuilt_stdout_not_equal(self) -> None:
+        """Same ledger fail is not equality when rebuilt outputs differ."""
+        axes = dict(
+            sample="ParamAnnotation",
+            compiler_version="javac 21.0.11",
+            harness_digest=digest(b"h"),
+            dependency_lock_digest=digest(b"l"),
+            input_hash=digest(b"i"),
+        )
+        left = obs(
+            status="fail",
+            execution_evidence={
+                "executed": True,
+                "kind": "api-live",
+                "original_run": {"stdout": "1\n", "stderr": "", "rc": 0},
+                "rebuilt_run": {"stdout": "0\n", "stderr": "", "rc": 0},
+                "failure": "behavior mismatch",
+                "stdout_match": False,
+            },
+            **axes,
+        )
+        right = obs(
+            status="fail",
+            execution_evidence={
+                "executed": True,
+                "kind": "api-live",
+                "original_run": {"stdout": "1\n", "stderr": "", "rc": 0},
+                "rebuilt_run": {"stdout": "2\n", "stderr": "", "rc": 0},
+                "failure": "behavior mismatch",
+                "stdout_match": False,
+            },
+            **axes,
+        )
+        result = compare_anchors([left], [right], [right])
+        row = result["candidate_vs_pr_base"]["cases"][0]
+        self.assertEqual(left.status, right.status)
+        self.assertEqual(row["verdict"], "status_match_observation_differs", row)
+        self.assertTrue(row["comparable"])
+        self.assertIsNot(row.get("equals"), True)
+        self.assertFalse(bool(row.get("equality_conclusion")))
+        same = obs(
+            status="fail",
+            execution_evidence={
+                "executed": True,
+                "kind": "api-live",
+                "original_run": {"stdout": "1\n", "stderr": "", "rc": 0},
+                "rebuilt_run": {"stdout": "0\n", "stderr": "", "rc": 0},
+                "failure": "behavior mismatch",
+                "stdout_match": False,
+            },
+            **axes,
+        )
+        same_row = compare_anchors([left], [same], [same])["candidate_vs_pr_base"]["cases"][0]
+        self.assertEqual(same_row["verdict"], "equal")
+        self.assertTrue(same_row.get("equals"))
+
+    def test_T01_C04_same_behavior_different_decompiled_source_is_not_regression(self) -> None:
+        axes = dict(
+            sample="Fmt",
+            compiler_version="javac 21.0.11",
+            harness_digest=digest(b"h"),
+            dependency_lock_digest=digest(b"l"),
+            input_hash=digest(b"i"),
+        )
+        run = {
+            "executed": True,
+            "kind": "api-live",
+            "original_run": {"stdout": "7\n", "stderr": "", "rc": 0},
+            "rebuilt_run": {"stdout": "7\n", "stderr": "", "rc": 0},
+            "failure": None,
+            "stdout_match": True,
+            "decompile_status": "ok",
+        }
+        a = obs(status="pass", execution_evidence={**run, "decompiled_source_sha256": "a" * 64}, **axes)
+        b = obs(status="pass", execution_evidence={**run, "decompiled_source_sha256": "b" * 64}, **axes)
+        row = compare_anchors([a], [b], [b])["candidate_vs_pr_base"]["cases"][0]
+        self.assertEqual(row["verdict"], "equal", row)
+        self.assertTrue(row["runtime_equal"])
+        self.assertFalse(row["source_equal"])
+        self.assertTrue(row.get("equals"))
+        self.assertTrue(any("format change" in r for r in row["reasons"]))
+
+    def test_T01_C04_missing_one_runtime_payload_not_equality(self) -> None:
+        axes = dict(
+            sample="Gap",
+            compiler_version="javac 21.0.11",
+            harness_digest=digest(b"h"),
+            dependency_lock_digest=digest(b"l"),
+            input_hash=digest(b"i"),
+        )
+        full = obs(
+            status="fail",
+            execution_evidence={
+                "executed": True,
+                "kind": "api-live",
+                "original_run": {"stdout": "1\n", "stderr": "", "rc": 0},
+                "rebuilt_run": {"stdout": "0\n", "stderr": "", "rc": 0},
+                "failure": "behavior mismatch",
+                "stdout_match": False,
+            },
+            **axes,
+        )
+        empty = obs(status="fail", execution_evidence=None, **axes)
+        row = compare_anchors([full], [empty], [empty])["candidate_vs_pr_base"]["cases"][0]
+        self.assertEqual(row["verdict"], "status_match_incomplete_observation", row)
+        self.assertFalse(bool(row.get("equals")))
+        self.assertFalse(bool(row.get("no_regression")))
+
+    def test_T01_C04_different_stderr_or_stage_not_equal(self) -> None:
+        axes = dict(
+            sample="Stage",
+            compiler_version="javac 21.0.11",
+            harness_digest=digest(b"h"),
+            dependency_lock_digest=digest(b"l"),
+            input_hash=digest(b"i"),
+        )
+        a = obs(
+            status="fail",
+            execution_evidence={
+                "executed": True,
+                "kind": "api-live",
+                "original_run": {"stdout": "", "stderr": "VerifyError", "rc": 1},
+                "rebuilt_run": {"stdout": "", "stderr": "VerifyError", "rc": 1},
+                "failure": "verify",
+                "stdout_match": True,
+                "failure_stage": "verify_fail",
+            },
+            **axes,
+        )
+        b = obs(
+            status="fail",
+            execution_evidence={
+                "executed": True,
+                "kind": "api-live",
+                "original_run": {"stdout": "", "stderr": "boom", "rc": 1},
+                "rebuilt_run": {"stdout": "", "stderr": "boom", "rc": 1},
+                "failure": "run",
+                "stdout_match": True,
+                "failure_stage": "run_fail",
+            },
+            **axes,
+        )
+        row = compare_anchors([a], [b], [b])["candidate_vs_pr_base"]["cases"][0]
+        self.assertEqual(row["verdict"], "status_match_observation_differs", row)
+        self.assertFalse(bool(row.get("equals")))
+
+    def test_T01_C04_gained_capability_without_payload_is_not_runtime_proof(self) -> None:
+        axes = dict(
+            sample="Gain",
+            compiler_version="javac 21.0.11",
+            harness_digest=digest(b"h"),
+            dependency_lock_digest=digest(b"l"),
+            input_hash=digest(b"i"),
+        )
+        cand = obs(status="pass", **axes)
+        ref = obs(status="fail", **axes)
+        row = compare_anchors([cand], [ref], [ref])["candidate_vs_pr_base"]["cases"][0]
+        self.assertEqual(row["verdict"], "improvement", row)
+        self.assertFalse(row.get("runtime_proof"), row)
+        self.assertFalse(bool(row.get("equals")))
+
     def test_T01_C04_broken_run_is_infra_error_not_equal(self) -> None:
         a = obs(sample="SameName", status="infra_error")
         b = obs(sample="SameName", status="pass")

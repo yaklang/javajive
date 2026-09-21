@@ -36,7 +36,25 @@ from .job import UntrustedJob
 from .network import PROBE_PYTHON, PROBE_SH, classify_text
 from .observation import Observation
 from .policy import Limits, make_policy
-from .procutil import docker_leftovers, snapshot_pids
+from .procutil import LeftoverQueryError, docker_leftovers, snapshot_pids
+
+
+def apply_leftover_status(
+    status: str,
+    reason: str,
+    leftover_pids: list[int],
+    leftover_containers: list[str],
+    leftover_query_failed: bool,
+    leftover_rm_failed: bool = False,
+) -> tuple[str, str]:
+    """Cleanup failure is a failed observation; empty leftover lists are success only if the query ran."""
+    if leftover_query_failed:
+        return STATUS_INFRA_ERROR, "leftover_query_failed"
+    if leftover_rm_failed or leftover_pids or leftover_containers:
+        if status == STATUS_OK:
+            status = STATUS_INFRA_ERROR
+        return status, "leftover_process"
+    return status, reason
 
 
 class SandboxWorker:
@@ -195,7 +213,22 @@ class SandboxWorker:
                 )
 
         policy, digest = self._policy(job.limits, extra_policy)
-        before_pids = snapshot_pids(marker)
+        try:
+            before_pids = snapshot_pids(marker)
+        except LeftoverQueryError as exc:
+            return Observation(
+                status=STATUS_INFRA_ERROR,
+                reason="leftover_query_failed",
+                backend=self.backend,
+                policy_digest=digest,
+                policy=policy.as_dict(),
+                argv=list(job.argv),
+                exit_code=None,
+                stdout="",
+                stderr=str(exc),
+                did_execute=False,
+                extra={"leftover_query_failed": True, "leftover_verified": False},
+            )
         result = None
         try:
             if self.backend in {"docker", "podman"}:
@@ -251,10 +284,33 @@ class SandboxWorker:
             )
 
         art_size, art_capped = enforce_cap(artifacts, job.limits.artifact_bytes)
-        leftover_pids = [p for p in snapshot_pids(marker) if p not in before_pids]
-        leftover_ct = []
+        leftover_pids: list[int] = []
+        leftover_ct: list[str] = []
+        leftover_query_failed = False
+        leftover_query_error = None
+        leftover_rm_failed = False
+        try:
+            leftover_pids = [p for p in snapshot_pids(marker) if p not in before_pids]
+        except LeftoverQueryError as exc:
+            leftover_query_failed = True
+            leftover_query_error = str(exc)
         if self.backend in {"docker", "podman"}:
-            leftover_ct = docker_leftovers(self.engine_path() or self.backend, job_id)
+            engine = self.engine_path() or self.backend
+            try:
+                leftover_ct = docker_leftovers(engine, job_id)
+            except LeftoverQueryError as exc:
+                leftover_query_failed = True
+                leftover_query_error = str(exc)
+                leftover_ct = []
+        backend_extra = result.extra or {}
+        if backend_extra.get("leftover_query_failed"):
+            leftover_query_failed = True
+            leftover_query_error = leftover_query_error or backend_extra.get("leftover_query_error")
+        if backend_extra.get("leftover_rm_failed"):
+            leftover_rm_failed = True
+        for cid in backend_extra.get("leftover_containers") or []:
+            if cid and cid not in leftover_ct:
+                leftover_ct.append(cid)
 
         stdout = result.stdout.decode("utf-8", "replace")
         stderr = result.stderr.decode("utf-8", "replace")
@@ -270,6 +326,14 @@ class SandboxWorker:
             status, reason = STATUS_OK, "ok"
         else:
             status, reason = STATUS_BLOCKED, f"exit:{result.exit_code}"
+        status, reason = apply_leftover_status(
+            status,
+            reason,
+            leftover_pids,
+            leftover_ct,
+            leftover_query_failed,
+            leftover_rm_failed,
+        )
 
         return Observation(
             status=status,
@@ -298,6 +362,20 @@ class SandboxWorker:
                 "artifact_root": str(artifacts),
                 "backend_extra": result.extra,
                 "killed": result.killed,
+                "leftover_query_failed": leftover_query_failed,
+                "leftover_query_error": leftover_query_error,
+                "leftover_rm_failed": leftover_rm_failed,
+                "leftover_verified": (
+                    not leftover_query_failed
+                    and not leftover_rm_failed
+                    and not leftover_ct
+                    and not leftover_pids
+                ),
+                "leftover_cleanup_failed": bool(
+                    leftover_pids or leftover_ct or leftover_query_failed or leftover_rm_failed
+                ),
+                "host_jdk_home": (result.extra or {}).get("host_jdk_home")
+                or extra_policy.get("host_jdk_home"),
             },
         )
 
@@ -445,7 +523,14 @@ exit 0
             job_id=job_id,
         )
         art_size, art_capped = enforce_cap(artifacts, limits.artifact_bytes)
-        leftover_pids = snapshot_pids(job.marker)
+        leftover_query_failed = False
+        leftover_pids: list[int] = []
+        leftover_ct: list[str] = []
+        try:
+            leftover_pids = snapshot_pids(job.marker)
+        except LeftoverQueryError:
+            leftover_query_failed = True
+            leftover_pids = []
         stdout = result.stdout.decode("utf-8", "replace")
         stderr = result.stderr.decode("utf-8", "replace")
         if result.timed_out:
@@ -458,6 +543,9 @@ exit 0
             status, reason = STATUS_OK, "ok"
         else:
             status, reason = STATUS_BLOCKED, f"exit:{result.exit_code}"
+        status, reason = apply_leftover_status(
+            status, reason, leftover_pids, leftover_ct, leftover_query_failed
+        )
         return Observation(
             status=status,
             reason=reason,
@@ -477,8 +565,18 @@ exit 0
             network_class=classify_text(stdout + "\n" + stderr) if "NETWORK_CLASS=" in (stdout + stderr) else None,
             did_execute=True,
             leftover_host_pids=leftover_pids,
-            leftover_containers=[],
-            extra={"job_id": job_id, "artifact_root": str(artifacts), "stage": str(stage), "killed": result.killed},
+            leftover_containers=leftover_ct,
+            extra={
+                "job_id": job_id,
+                "artifact_root": str(artifacts),
+                "stage": str(stage),
+                "killed": result.killed,
+                "leftover_query_failed": leftover_query_failed,
+                "leftover_verified": (not leftover_query_failed) and not leftover_pids and not leftover_ct,
+                "leftover_cleanup_failed": bool(leftover_pids or leftover_ct or leftover_query_failed),
+                "backend_extra": result.extra,
+                "host_jdk_home": (result.extra or {}).get("host_jdk_home"),
+            },
         )
 
     def probe_network(self, ip: str, port: int, limits: Limits | None = None) -> Observation:
@@ -680,15 +778,39 @@ ls -la "$ARTROOT" || true
                         stderr=str(exc),
                         did_execute=False,
                     )
+        seatbelt_env: dict[str, str] | None = None
         if self.backend == "sandbox-exec":
+            from .jdk import resolve_host_jdk
+
+            jdk = resolve_host_jdk()
+            if jdk is None:
+                return Observation(
+                    status=STATUS_INFRA_ERROR,
+                    reason="jdk_not_found",
+                    backend=self.backend,
+                    policy_digest=None,
+                    policy=None,
+                    argv=[],
+                    exit_code=None,
+                    stdout="",
+                    stderr="unable to locate a real JDK (javac+java); refusing /usr/bin/java stub",
+                    did_execute=False,
+                    extra={"host_jdk_home": None},
+                )
+            seatbelt_env = {"JAVA_HOME": str(jdk)}
             script = f"""#!/bin/sh
 set -e
 DIR=$(dirname "$0")
 ART=$(cd "$DIR/../artifacts" && pwd)
+if [ -z "$JAVA_HOME" ] || [ ! -x "$JAVA_HOME/bin/javac" ] || [ ! -x "$JAVA_HOME/bin/java" ]; then
+  echo "real JDK missing under JAVA_HOME=$JAVA_HOME" >&2
+  exit 127
+fi
+export PATH="$JAVA_HOME/bin:$PATH"
 mkdir -p "$ART/classes"
-javac -proc:none -encoding UTF-8 --release 8 -d "$ART/classes" "$DIR/{class_name}.java"
-javac -version > "$ART/javac.version" 2>&1 || true
-java -Xverify:all -classpath "$ART/classes" {class_name}
+"$JAVA_HOME/bin/javac" -proc:none -encoding UTF-8 --release 8 -d "$ART/classes" "$DIR/{class_name}.java"
+"$JAVA_HOME/bin/javac" -version > "$ART/javac.version" 2>&1 || true
+"$JAVA_HOME/bin/java" -Xverify:all -classpath "$ART/classes" {class_name}
 """
         else:
             script = f"""#!/bin/sh
@@ -708,7 +830,15 @@ java -Xverify:all -classpath {CONTAINER_ARTIFACTS}/classes {class_name}
             limits,
             need_java=True,
             extra_files={f"{class_name}.java": src},
+            env=seatbelt_env,
         )
+        extra = dict(obs.extra or {})
+        if seatbelt_env and seatbelt_env.get("JAVA_HOME"):
+            extra["host_jdk_home"] = seatbelt_env["JAVA_HOME"]
+        backend_extra = extra.get("backend_extra") or {}
+        if backend_extra.get("host_jdk_home"):
+            extra["host_jdk_home"] = backend_extra["host_jdk_home"]
+        obs.extra = extra
         obs.compiler = (obs.extra.get("artifact_root") and _read_quiet(Path(obs.extra["artifact_root"]) / "javac.version")) or None
         return obs
 

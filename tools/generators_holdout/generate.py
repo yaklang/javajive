@@ -213,7 +213,7 @@ def compile_and_verify_family(
             failures.append({"sample": sample.class_name, "error": "missing class file", "class": "generator_error"})
             continue
         digest = hashlib.sha256(class_file.read_bytes()).hexdigest()
-        ran = verify_and_run(dest, sample.class_name, java_bin=java_bin)
+        ran = verify_and_run(dest, sample.class_name, java_bin=java_bin, trusted=True)
         ok = ran["verified_and_ran"] and ran["stdout"] == sample.expected_stdout
         row = {
             "class_name": sample.class_name,

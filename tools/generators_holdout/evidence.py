@@ -84,12 +84,12 @@ def tool_versions() -> dict[str, str]:
 def classify_failure(stage: str, *, legal_input: bool, infra: bool, budget: bool, mismatch: bool) -> str:
     if infra:
         return "infra_error"
-    if not legal_input:
-        return "invalid_input"
     if budget:
         return "budget"
-    if stage in {"generate", "morph"} and mismatch:
+    if stage in {"generate", "morph"} and (mismatch or not legal_input):
         return "generator_error"
+    if not legal_input:
+        return "invalid_input"
     if mismatch:
         return "behavior"
     return "pass"

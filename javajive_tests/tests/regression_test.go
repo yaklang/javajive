@@ -714,9 +714,10 @@ func TestDecompileSyntaxRegression(t *testing.T) {
 		{
 			file: "mybatis_plus_ktupdatewrapper_lambda_name.class",
 			desc: "Kotlin synthetic lambda method names may contain JVM-only characters such as '-' " +
-				"(set$lambda-0). Method declarations and method references must be rendered with a safe Java identifier instead of dropping the method.",
+				"(set$lambda-0). javap: REF_invokeStatic KtUpdateWrapper.set$lambda-0; " +
+				"unbound Class::method is the handle, not a bound KProperty receiver.",
 			mustContain: []string{
-				"::set$lambda_0",
+				"KtUpdateWrapper::set$lambda_0",
 				"private static final void set$lambda_0",
 				"formatParam(var1,var2)",
 			},

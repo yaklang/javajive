@@ -302,7 +302,7 @@ def classify_java_process(ran: dict[str, Any]) -> str:
     blob = stderr + "\n" + stdout
     if ran.get("timeout"):
         return "infra_error"
-    if "VerifyError" in blob:
+    if "VerifyError" in blob or "ClassFormatError" in blob or "Truncated class file" in blob:
         return "verify_fail"
     if any(
         tok in blob
@@ -329,7 +329,18 @@ def verify_and_run(
     java_bin: str | None = None,
     extra_cp: list[Path] | None = None,
     timeout: float = 20,
+    trusted: bool = False,
 ) -> dict[str, Any]:
+    """Host java only when trusted=True (reviewed generated fixtures). Default is sandbox."""
+    if not trusted:
+        from tools.sandbox_worker.untrusted_exec import run_untrusted_class_dir
+
+        return run_untrusted_class_dir(
+            class_dir,
+            class_name,
+            extra_cp=extra_cp,
+            timeout=timeout,
+        )
     java = java_bin or shutil.which("java") or "java"
     cp = os.pathsep.join([str(class_dir), *([str(p) for p in extra_cp] if extra_cp else [])])
     argv = [

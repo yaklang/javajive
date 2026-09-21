@@ -47,7 +47,7 @@ def classify_original_legality(result: PipelineResult) -> str:
 def _legal_original(identity: CompilerIdentity, source: str, class_name: str, work: Path) -> tuple[bool, str, PipelineResult | None]:
     """Original input must compile, verify, and run before it can be a decompiler defect."""
     try:
-        result = run_pipeline(source, identity, work, mode="precision", class_name=class_name)
+        result = run_pipeline(source, identity, work, mode="precision", class_name=class_name, trusted=True)
     except InfraError as exc:
         return False, "infra_error", None
     kind = classify_original_legality(result)
@@ -104,7 +104,7 @@ def reduce_source(
                     return None, lkind
                 return predicate(text), "legal"
             try:
-                obs = run_pipeline(text, identity, folder, mode=mode, class_name=class_name)
+                obs = run_pipeline(text, identity, folder, mode=mode, class_name=class_name, trusted=True)
             except InfraError:
                 return "infra_error", "infra_error"
             legality = classify_original_legality(obs)

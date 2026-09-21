@@ -14,11 +14,15 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 )
 
 type stack []map[string]string
 
 var byGid sync.Map // uint64 -> stack
+var liveBinds int32
+
+func hasBind() bool { return atomic.LoadInt32(&liveBinds) != 0 }
 
 // Run pushes snap for this goroutine, runs fn, then pops (panic-safe).
 // A nil snap does not push: the existing outer binding is left unchanged.
@@ -52,6 +56,9 @@ func EnterLive() func() {
 // Current returns the innermost bound snapshot and whether a frame exists.
 // A live-env sentinel is reported as (nil, true).
 func Current() (map[string]string, bool) {
+	if !hasBind() {
+		return nil, false
+	}
 	id := gid()
 	v, ok := byGid.Load(id)
 	if !ok {
@@ -68,6 +75,9 @@ func Current() (map[string]string, bool) {
 // A live-env sentinel or no bind reads os.Getenv. Child goroutines do not
 // inherit a bind; use Go or Run(Current()) explicitly.
 func Get(key string) string {
+	if !hasBind() {
+		return os.Getenv(key)
+	}
 	if snap, ok := Current(); ok {
 		if snap == nil {
 			return os.Getenv(key)
@@ -108,6 +118,7 @@ func push(id uint64, snap map[string]string) {
 	copy(n, st)
 	n[len(st)] = snap
 	byGid.Store(id, n)
+	atomic.AddInt32(&liveBinds, 1)
 }
 
 func pop(id uint64) {
@@ -118,12 +129,19 @@ func pop(id uint64) {
 	st := v.(stack)
 	if len(st) <= 1 {
 		byGid.Delete(id)
+		atomic.AddInt32(&liveBinds, -1)
 		return
 	}
 	n := make(stack, len(st)-1)
 	copy(n, st[:len(st)-1])
 	byGid.Store(id, n)
+	atomic.AddInt32(&liveBinds, -1)
 }
+
+// gid identifies this goroutine for the ambient snapshot stack. It parses
+// runtime.Stack once per Get when a frame is bound. Hot reconstructors must
+// use ClassContext.Getenv / Decompiler.getenv (explicit policy), not Get.
+func gid() uint64 { return gidFromStack() }
 
 func gidFromStack() uint64 {
 	var buf [64]byte

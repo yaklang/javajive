@@ -9,6 +9,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func init() {
@@ -220,11 +221,19 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 	}
 	typ := resultType
 	stringFn := func(funcCtx *class_context.ClassContext) string {
+		if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.RenderGuarded() {
+			if err := funcCtx.Work.Check(); err != nil {
+				return ""
+			}
+		}
 		s := methodStr
 		for i, ca := range captured {
 			name := ""
 			if ca != nil {
 				name = ca.String(funcCtx)
+			}
+			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() != nil {
+				return ""
 			}
 			s = strings.ReplaceAll(s, fmt.Sprintf("\x00LCAP%d\x00", i), name)
 		}
@@ -233,6 +242,14 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 			if castTarget != "" {
 				s = injectLambdaReturnCast(s, castTarget)
 			}
+		}
+		if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.RenderGuarded() {
+			w := workbudget.NewWriter(funcCtx.Work)
+			w.SetBase(funcCtx.OutputHeld)
+			if err := w.WriteString(s); err != nil {
+				return ""
+			}
+			return w.String()
 		}
 		return s
 	}

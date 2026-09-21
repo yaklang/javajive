@@ -44,14 +44,12 @@ from .toolchain import (
     sha256_hex,
 )
 
+from tools.evidence_paths import evidence_subdir
+
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_DIR.parents[1]
 FIXTURES_DIR = PACKAGE_DIR / "fixtures"
-EVIDENCE_DIR = (
-    Path(os.environ["JAVAJIVE_EVIDENCE_DIR"]) / "milestone_ledger" / "live_replay"
-    if os.environ.get("JAVAJIVE_EVIDENCE_DIR")
-    else PACKAGE_DIR / "evidence" / "live_replay"
-)
+EVIDENCE_DIR = evidence_subdir("t01", "live_replay")
 PROBE_PKG = PACKAGE_DIR / "cmd_probe"
 JAVAJIVE_PKG = "./cmd/javajive"
 PROBE_IMPORT = "./tools/milestone_ledger/cmd_probe"

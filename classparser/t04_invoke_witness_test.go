@@ -350,6 +350,40 @@ func TestT04C08EnvSnapshotNullCast(t *testing.T) {
 	_ = liveOff
 }
 
+func TestT04ExternalUnreferencedOverloadFamily(t *testing.T) {
+	const lib = `public class T04ExtLib {
+  public static String pick(Object o) { return "O"; }
+  public static String pick(String s) { return "S"; }
+}
+`
+	const caller = `public class T04ExtCaller {
+  public static void main(String[] args) {
+    String x = "hi";
+    System.out.println(T04ExtLib.pick((Object)x));
+  }
+}
+`
+	origOut, classes := t04CompileRun(t, "8", "T04ExtCaller", map[string]string{
+		"T04ExtLib.java":    lib,
+		"T04ExtCaller.java": caller,
+	})
+	if strings.TrimSpace(origOut) != "O" {
+		t.Fatalf("original bytecode must bind pick(Object), stdout %q", origOut)
+	}
+	t04RoundTripModes(t, "8", "T04ExtCaller", origOut, classes, func(t *testing.T, src string) {
+		if !strings.Contains(src, "pick((Object)") && !strings.Contains(src, "pick((java.lang.Object)") {
+			t.Fatalf("family rebuild must keep Object pin, else javac binds pick(String):\n%s", src)
+		}
+	})
+	callerOnly, err := DecompileWithOptions(classes["T04ExtCaller"], DecompileOptions{Mode: Precision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callerOnly.Status == "complete" {
+		t.Fatalf("caller-only dump without Lib family must not claim complete (silent retarget risk), status=%s\n%s", callerOnly.Status, callerOnly.Source)
+	}
+}
+
 func t04AssertSpecialWitness(t *testing.T) {
 	t.Helper()
 	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)V")

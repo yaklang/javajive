@@ -3788,6 +3788,17 @@ func (f *FunctionCallExpression) witnessOverloadPinCast(i int, argType, param ty
 	case overloadCompete:
 		// pin below
 	case overloadUnknown:
+		if isJavaLangObjectType(param) && witnessStringyArg(argType) && f != nil &&
+			(f.Kind == InvokeStatic || f.Kind == InvokeSpecial || f.IsSpecialInvoke) {
+			// Conservative pin so javac cannot steal pick(String). Not Unique proof.
+			if funcCtx != nil {
+				funcCtx.OverloadFamilyUnproven = true
+				if funcCtx.OnOverloadUnknown != nil {
+					funcCtx.OnOverloadUnknown(f.ClassName, f.FunctionName, f.Descriptor)
+				}
+			}
+			break
+		}
 		if !witnessStealShaped(f, argType, param) {
 			if funcCtx != nil && funcCtx.OnOverloadUnknown != nil && isJavaLangObjectType(param) {
 				funcCtx.OnOverloadUnknown(f.ClassName, f.FunctionName, f.Descriptor)
@@ -3869,6 +3880,26 @@ var jdkSameArityReferenceOverloadFamily = map[string]bool{
 	"java.lang.StringBuffer.insert":  true,
 }
 
+func witnessStringyArg(argType types.JavaType) bool {
+	switch witnessRawClassName(argType) {
+	case "java.lang.String", "java.lang.StringBuffer":
+		return true
+	}
+	return false
+}
+
+var jdkUniqueNoCompeteFamily = map[string]bool{
+	"java.util.Objects.requireNonNull": true,
+}
+
+func jdkKnownUniqueNoCompete(className, method string) bool {
+	if className == "" || method == "" {
+		return false
+	}
+	cn := strings.ReplaceAll(className, "/", ".")
+	return jdkUniqueNoCompeteFamily[cn+"."+method]
+}
+
 func jdkKnownSameArityOverload(className, method string) bool {
 	if className == "" || method == "" {
 		return false
@@ -3941,6 +3972,9 @@ func (f *FunctionCallExpression) overloadFamilyProof(funcCtx *class_context.Clas
 	}
 	if jdkKnownSameArityOverload(f.ClassName, f.FunctionName) {
 		return overloadCompete
+	}
+	if jdkKnownUniqueNoCompete(f.ClassName, f.FunctionName) {
+		return overloadUnique
 	}
 	if funcCtx != nil && f.ClassName != "" {
 		owner := strings.ReplaceAll(f.ClassName, "/", ".")

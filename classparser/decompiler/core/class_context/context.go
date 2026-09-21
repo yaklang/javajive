@@ -256,6 +256,9 @@ type ClassContext struct {
 	// not be proven (no same-class/sibling/CP/JDK-family table). It is evidence of
 	// missing proof, not a license to invent or drop casts.
 	OnOverloadUnknown func(owner, name, descriptor string)
+	// OverloadFamilyUnproven is set when a static/special Object formal received a
+	// conservative pin because the competing-overload family could not be loaded.
+	OverloadFamilyUnproven bool
 }
 
 // Getenv returns a request-local JDEC_* value. Missing snapshot keys are unset.

@@ -432,7 +432,7 @@ func TestInvokeWitnessArrayToObjectNeedsOverload(t *testing.T) {
 	}
 }
 
-func TestInvokeWitnessUnknownExternalDoesNotInventObjectPin(t *testing.T) {
+func TestInvokeWitnessUnknownExternalStaticStringPinsObject(t *testing.T) {
 	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
 	if err != nil {
 		t.Fatal(err)
@@ -462,11 +462,11 @@ func TestInvokeWitnessUnknownExternalDoesNotInventObjectPin(t *testing.T) {
 		},
 	}
 	got := call.String(ctx)
-	if strings.Contains(got, "(Object)") {
-		t.Fatalf("unknown family must not invent String→Object pin (requireNonNull/generic V), got %q", got)
+	if !strings.Contains(got, "(Object)") {
+		t.Fatalf("unknown static pick(Object) with String arg must pin to prevent pick(String) steal: %q", got)
 	}
-	if len(noted) == 0 {
-		t.Fatalf("missing overload_family_unknown evidence, got %q", got)
+	if !ctx.OverloadFamilyUnproven || len(noted) == 0 {
+		t.Fatalf("must record unproven family, got %q noted=%v unproven=%v", got, noted, ctx.OverloadFamilyUnproven)
 	}
 }
 

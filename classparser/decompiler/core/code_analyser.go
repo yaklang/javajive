@@ -137,6 +137,8 @@ type Decompiler struct {
 	MaxAnalysisUpdates int
 	Work               *workbudget.Budget
 	Env                func(string) string
+	traceCfg           decompileTraceConfig
+	traceCfgLoaded     bool
 	EnableShadowIR     bool
 	ShadowIRHash       string
 	ShadowIRVersion    uint64

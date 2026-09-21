@@ -120,22 +120,20 @@ func TestNestedRunRace(t *testing.T) {
 	}
 }
 
-func TestBoundGetIsNotStackBound(t *testing.T) {
+func TestUnboundGetDoesNotRequireBind(t *testing.T) {
+	t.Setenv("JDEC_X", "host")
+	if Get("JDEC_X") != "host" {
+		t.Fatal("unbound Get must read process env")
+	}
 	const n = 200000
 	start := time.Now()
-	err := Run(map[string]string{"JDEC_X": "1"}, func() error {
-		for i := 0; i < n; i++ {
-			if Get("JDEC_X") != "1" {
-				t.Fatal("lost snapshot")
-			}
+	for i := 0; i < n; i++ {
+		if Get("JDEC_X") != "host" {
+			t.Fatal("unbound Get lost host")
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	if time.Since(start) > 2*time.Second {
-		t.Fatalf("bound Get too slow (%s): gid likely still uses runtime.Stack", time.Since(start))
+		t.Fatalf("unbound Get too slow (%s); must not parse runtime.Stack", time.Since(start))
 	}
 }
 

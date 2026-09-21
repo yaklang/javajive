@@ -8,6 +8,12 @@ import subprocess
 import time
 from pathlib import Path
 
+from .constants import LABEL_ID, LABEL_JOB
+
+
+class LeftoverQueryError(RuntimeError):
+    """Engine leftover query failed; an empty list is not success."""
+
 
 def kill_pg(pid: int, *, grace: float = 0.4) -> None:
     if pid <= 0:
@@ -29,14 +35,24 @@ def kill_pg(pid: int, *, grace: float = 0.4) -> None:
 
 
 def snapshot_pids(needle: str) -> list[int]:
-    """Host PIDs whose command line contains needle (self-check leftover detector)."""
+    """Host PIDs whose command line contains needle. Query failure is not an empty success."""
     if not needle:
-        return []
+        raise LeftoverQueryError("empty leftover marker")
     argv = ["ps", "-ax", "-o", "pid=,command="]
     try:
-        proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-    except OSError:
-        return []
+        proc = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LeftoverQueryError(f"host pid query failed: {exc}") from exc
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise LeftoverQueryError(f"host pid query failed rc={proc.returncode}: {err}")
     found: list[int] = []
     me = os.getpid()
     parent = os.getppid()
@@ -56,21 +72,75 @@ def snapshot_pids(needle: str) -> list[int]:
 
 
 def docker_leftovers(engine: str, job_id: str | None = None) -> list[str]:
-    argv = [engine, "ps", "-aq", "--filter", "label=javajive.t30=1"]
+    """List leftover containers via the engine. Raises on query failure; [] is verified empty."""
+    if not engine:
+        raise LeftoverQueryError("no engine path for leftover query")
+    argv = [engine, "ps", "-aq", "--filter", f"label={LABEL_JOB}=1"]
     if job_id:
-        argv.extend(["--filter", f"label=javajive.t30.job={job_id}"])
+        argv.extend(["--filter", f"label={LABEL_ID}={job_id}"])
     try:
-        proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False, timeout=20)
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        proc = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LeftoverQueryError(f"leftover query failed: {exc}") from exc
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise LeftoverQueryError(f"leftover query failed rc={proc.returncode}: {err}")
+    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
 
 
 def force_rm_containers(engine: str, names: list[str]) -> None:
     for name in names:
         if not name:
             continue
-        subprocess.run([engine, "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        try:
+            subprocess.run(
+                [engine, "rm", "-f", name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=20,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+
+
+def cleanup_job_containers(engine: str, job_id: str, names: list[str]) -> dict[str, object]:
+    """rm then verify leftovers with the engine. leftover list is valid only if query_error is None."""
+    force_rm_containers(engine, names)
+    try:
+        leftover = docker_leftovers(engine, job_id)
+    except LeftoverQueryError as exc:
+        return {
+            "leftover_containers": [],
+            "query_error": str(exc),
+            "rm_failed": True,
+            "verified": False,
+        }
+    if leftover:
+        force_rm_containers(engine, leftover)
+        try:
+            leftover = docker_leftovers(engine, job_id)
+        except LeftoverQueryError as exc:
+            return {
+                "leftover_containers": leftover,
+                "query_error": str(exc),
+                "rm_failed": True,
+                "verified": False,
+            }
+    return {
+        "leftover_containers": leftover,
+        "query_error": None,
+        "rm_failed": bool(leftover),
+        "verified": not leftover,
+    }
 
 
 def close_pipes(proc: subprocess.Popen) -> None:

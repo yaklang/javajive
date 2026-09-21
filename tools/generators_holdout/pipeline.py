@@ -89,6 +89,8 @@ class PipelineResult:
             "stub_methods": list(self.stub_methods),
             "notes": self.notes,
             "oracle_kind": self.oracle_kind,
+            "debug_used": self.debug,
+            "decompiled_source_sha256": _sha(self.decompiled_source.encode()) if self.decompiled_source else "",
         }
 
 
@@ -101,6 +103,84 @@ def extract_class_name(source: str) -> str:
     if not m:
         raise InfraError("source has no public class")
     return m.group(1)
+
+
+def extract_binary_name(source: str) -> str:
+    pkg = re.search(r"^\s*package\s+([\w.]+)\s*;", source, re.M)
+    cls = extract_class_name(source)
+    return f"{pkg.group(1)}.{cls}" if pkg else cls
+
+
+def source_relpath(binary_name: str) -> str:
+    """JVM binary name -> compilation-unit path.
+
+    demo.Pack -> demo/Pack.java
+    demo.Outer$Inner / demo.Outer$1 -> demo/Outer.java (outer compilation unit)
+    App -> App.java
+    """
+    unit = (binary_name or "").split("$", 1)[0].strip()
+    if not unit:
+        raise InfraError("empty binary name")
+    return unit.replace(".", "/") + ".java"
+
+
+def class_relpath(binary_name: str) -> str:
+    """JVM binary name -> class-file path, including inner/anonymous suffixes."""
+    name = (binary_name or "").strip()
+    if not name:
+        raise InfraError("empty binary name")
+    return name.replace(".", "/") + ".class"
+
+
+def _write_text(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _write_bytes(path: Path, data: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+ISOLATION_STAGES = frozenset(
+    {
+        "isolation_unavailable",
+        "policy_deny",
+        "capability_unsupported",
+        "leftover_process",
+        "leftover_query_failed",
+        "resource_limit",
+        "timeout",
+    }
+)
+
+
+def _isolation_failure_class(ran: dict[str, Any]) -> str | None:
+    stage = ran.get("stage") or ""
+    status = ran.get("status") or ""
+    if stage in ISOLATION_STAGES or status in {
+        "unsupported",
+        "infra_error",
+        "timeout",
+        "resource_limit",
+        "isolation_unavailable",
+    }:
+        if status in {"unsupported", "isolation_unavailable"} or stage in {
+            "isolation_unavailable",
+            "capability_unsupported",
+            "policy_deny",
+        }:
+            return "unsupported"
+        return "infra_error"
+    if ran.get("leftover_query_failed") or ran.get("leftover_cleanup_failed"):
+        return "infra_error"
+    if ran.get("verified_and_ran") and (
+        ran.get("leftover_host_pids") or ran.get("leftover_containers")
+    ):
+        return "infra_error"
+    return None
 
 
 def ensure_probe(work: Path) -> Path:
@@ -126,13 +206,23 @@ def ensure_probe(work: Path) -> Path:
     return dest
 
 
-def decompile_class(class_file: Path, mode: str, work: Path) -> dict[str, Any]:
+def decompile_class(
+    class_file: Path,
+    mode: str,
+    work: Path,
+    *,
+    max_analysis_updates: int | None = None,
+) -> dict[str, Any]:
     probe = ensure_probe(work)
     env = os.environ.copy()
     env["CGO_ENABLED"] = "1"
     env["GOTOOLCHAIN"] = "local"
+    argv = [str(probe), "-mode", mode]
+    if max_analysis_updates is not None:
+        argv.extend(["-max-analysis-updates", str(int(max_analysis_updates))])
+    argv.append(str(class_file))
     proc = subprocess.run(
-        [str(probe), "-mode", mode, str(class_file)],
+        argv,
         capture_output=True,
         text=True,
         timeout=30,
@@ -145,16 +235,26 @@ def decompile_class(class_file: Path, mode: str, work: Path) -> dict[str, Any]:
         except json.JSONDecodeError:
             parsed = {"error": "probe_json_corrupt", "raw": proc.stdout[:2000]}
     result = parsed.get("result") or {}
+    diagnostics = result.get("diagnostics") or []
+    budget_hit = any(
+        "analysis_budget_exceeded" in str(d.get("message") or d) for d in diagnostics
+    )
+    status = result.get("status") or ("infra_error" if proc.returncode == 2 else "behavior")
+    if budget_hit:
+        status = "budget"
     return {
         "rc": proc.returncode,
         "stderr": proc.stderr,
         "stdout": proc.stdout,
         "source": result.get("source") or "",
-        "status": result.get("status") or ("infra_error" if proc.returncode == 2 else "behavior"),
+        "status": status,
         "stub_methods": result.get("stub_methods") or [],
         "error": parsed.get("error") or "",
         "input_hash": result.get("input_hash") or "",
         "mode": result.get("mode") or mode,
+        "diagnostics": diagnostics,
+        "budget_hit": budget_hit,
+        "argv": argv,
     }
 
 
@@ -166,13 +266,13 @@ def run_pipeline(
     mode: str = "precision",
     debug: str = "nodebug",
     class_name: str | None = None,
+    trusted: bool = False,
 ) -> PipelineResult:
     work.mkdir(parents=True, exist_ok=True)
     artifacts = work / "artifacts"
     artifacts.mkdir(exist_ok=True)
-    name = class_name or extract_class_name(source)
-    src_path = artifacts / f"{name}.java"
-    src_path.write_text(source, encoding="utf-8")
+    name = class_name or extract_binary_name(source)
+    src_path = _write_text(artifacts / source_relpath(name), source)
     stages: dict[str, StageRecord] = {}
     classpath: list[str] = []
 
@@ -188,13 +288,21 @@ def run_pipeline(
         str(orig_dir),
     )
     if compiled["rc"] != 0:
+        missing_compiler = compiled.get("rc") == 127 or str(compiled.get("stderr") or "").startswith("infra_error:")
+        if missing_compiler:
+            stages["compile"].status = "infra_error"
+            return PipelineResult(
+                name, mode, debug, "infra_error", stages, source, "", "", "", "",
+                None, str(src_path), classpath, str(work), "", [],
+                notes="compiler missing or unusable (infra_error, not invalid_input)",
+            )
         return PipelineResult(
             name, mode, debug, "invalid_input", stages, source, "", "", "", "",
             None, str(src_path), classpath, str(work), "", [],
             notes="original source did not compile",
         )
 
-    class_file = orig_dir / f"{name}.class"
+    class_file = orig_dir / class_relpath(name)
     if not class_file.is_file():
         stages["compile"].status = "compile_fail"
         return PipelineResult(
@@ -203,12 +311,103 @@ def run_pipeline(
             notes="missing class file after compile",
         )
     class_bytes = class_file.read_bytes()
-    bytes_path = artifacts / f"{name}.class"
-    bytes_path.write_bytes(class_bytes)
-    classpath.append(str(orig_dir))
+    return _pipeline_after_class(
+        source=source,
+        identity=identity,
+        work=work,
+        artifacts=artifacts,
+        name=name,
+        mode=mode,
+        debug=debug,
+        src_path=src_path,
+        orig_dir=orig_dir,
+        class_file=class_file,
+        class_bytes=class_bytes,
+        stages=stages,
+        classpath=classpath,
+        trusted=trusted,
+    )
 
-    orig_run = verify_and_run(orig_dir, name, java_bin=java_command(identity))
+
+def run_pipeline_from_class_bytes(
+    source: str,
+    class_bytes: bytes,
+    identity: CompilerIdentity,
+    work: Path,
+    *,
+    mode: str = "precision",
+    debug: str = "nodebug",
+    class_name: str | None = None,
+    trusted: bool = False,
+) -> PipelineResult:
+    """Decompile provided class bytes. Default untrusted (sandbox orig+rebuilt)."""
+    work.mkdir(parents=True, exist_ok=True)
+    artifacts = work / "artifacts"
+    artifacts.mkdir(exist_ok=True)
+    name = class_name or extract_binary_name(source)
+    src_path = _write_text(artifacts / source_relpath(name), source)
+    orig_dir = work / "original"
+    orig_dir.mkdir(parents=True, exist_ok=True)
+    class_file = _write_bytes(orig_dir / class_relpath(name), class_bytes)
+    _write_bytes(artifacts / class_relpath(name), class_bytes)
+    stages: dict[str, StageRecord] = {
+        "compile": StageRecord(
+            "compile",
+            "provided_class_bytes",
+            0,
+            "",
+            f"input_class_sha256={_sha(class_bytes)} debug={debug}",
+            [],
+            str(class_file),
+        )
+    }
+    return _pipeline_after_class(
+        source=source,
+        identity=identity,
+        work=work,
+        artifacts=artifacts,
+        name=name,
+        mode=mode,
+        debug=debug,
+        src_path=src_path,
+        orig_dir=orig_dir,
+        class_file=class_file,
+        class_bytes=class_bytes,
+        stages=stages,
+        classpath=[],
+        trusted=trusted,
+    )
+
+
+def _pipeline_after_class(
+    *,
+    source: str,
+    identity: CompilerIdentity,
+    work: Path,
+    artifacts: Path,
+    name: str,
+    mode: str,
+    debug: str,
+    src_path: Path,
+    orig_dir: Path,
+    class_file: Path,
+    class_bytes: bytes,
+    stages: dict[str, StageRecord],
+    classpath: list[str],
+    trusted: bool,
+) -> PipelineResult:
+    bytes_path = _write_bytes(artifacts / class_relpath(name), class_bytes)
+    classpath = list(classpath) + [str(orig_dir)]
+
+    orig_run = verify_and_run(
+        orig_dir,
+        name,
+        java_bin=java_command(identity),
+        extra_cp=[Path(p) for p in classpath if p != str(orig_dir)],
+        trusted=trusted,
+    )
     orig_stage = orig_run["stage"]
+    iso = _isolation_failure_class(orig_run)
     stages["original_verify_run"] = StageRecord(
         "original_verify_run",
         orig_stage,
@@ -218,6 +417,12 @@ def run_pipeline(
         orig_run.get("argv") or [],
         str(class_file),
     )
+    if iso:
+        return PipelineResult(
+            name, mode, debug, iso, stages, source, _sha(class_bytes),
+            "", "", orig_run.get("stdout") or "", str(bytes_path), str(src_path),
+            classpath, str(work), orig_stage, [], notes=f"original isolation {orig_stage}/{orig_run.get('status')}",
+        )
     if orig_stage == "infra_error":
         return PipelineResult(
             name, mode, debug, "infra_error", stages, source, _sha(class_bytes),
@@ -277,8 +482,7 @@ def run_pipeline(
 
     rebuilt_src_dir = work / f"rebuilt-{mode}"
     rebuilt_src_dir.mkdir(exist_ok=True)
-    rebuilt_java = rebuilt_src_dir / f"{name}.java"
-    rebuilt_java.write_text(decompiled, encoding="utf-8")
+    rebuilt_java = _write_text(rebuilt_src_dir / source_relpath(name), decompiled)
     rebuilt_classes = work / f"rebuilt-{mode}-classes"
     rebuilt = compile_sources(identity, [rebuilt_java], rebuilt_classes, debug=debug)
     stages["rebuild_compile"] = StageRecord(
@@ -298,8 +502,14 @@ def run_pipeline(
             dec.get("stub_methods") or [], notes="decompiled source did not compile",
         )
 
-    rebuilt_run = verify_and_run(rebuilt_classes, name, java_bin=java_command(identity))
+    rebuilt_run = verify_and_run(
+        rebuilt_classes,
+        name,
+        java_bin=java_command(identity),
+        trusted=trusted,
+    )
     rstage = rebuilt_run["stage"]
+    rebuilt_iso = _isolation_failure_class(rebuilt_run)
     stages["rebuild_verify_run"] = StageRecord(
         "rebuild_verify_run",
         rstage,
@@ -307,9 +517,11 @@ def run_pipeline(
         rebuilt_run.get("stdout") or "",
         rebuilt_run.get("stderr") or "",
         rebuilt_run.get("argv") or [],
-        str(rebuilt_classes / f"{name}.class"),
+        str(rebuilt_classes / class_relpath(name)),
     )
-    if rstage == "infra_error":
+    if rebuilt_iso:
+        fc = rebuilt_iso
+    elif rstage == "infra_error":
         fc = "infra_error"
     elif rstage != "run_ok":
         fc = "behavior"

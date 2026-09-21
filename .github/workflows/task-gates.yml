@@ -30,6 +30,16 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch immutable T01 replay anchors
+        run: |
+          set -euo pipefail
+          # Shallow PR checkouts omit 31de113/81f8ef5. Missing objects are infra_error, never skip.
+          git fetch --no-tags origin 31de113dded2fec7c34799776f43cca213aa1d77
+          git fetch --no-tags origin 81f8ef55603419bf737f10aa36e582f94619b35d
+          git cat-file -t 31de113dded2fec7c34799776f43cca213aa1d77 | grep -x commit
+          git cat-file -t 81f8ef55603419bf737f10aa36e582f94619b35d | grep -x commit
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -90,6 +100,7 @@ jobs:
           CGO_ENABLED: '1'
           GOFLAGS: '-ldflags=-linkmode=external'
           T32_FORCE_REFRESH: '1'
+          JAVAJIVE_FETCH_ANCHORS: '1'
         run: |
           set -euo pipefail
           test -n "${JAVA8_HOME:-}"

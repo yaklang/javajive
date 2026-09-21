@@ -32,6 +32,10 @@ class CaseComparison:
     comparable: bool = True
     equality_conclusion: bool | None = None
     no_regression_conclusion: bool | None = None
+    status_equal: bool | None = None
+    runtime_equal: bool | None = None
+    source_equal: bool | None = None
+    runtime_proof: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -42,6 +46,10 @@ class CaseComparison:
             "right_status": self.right_status,
             "reasons": list(self.reasons),
             "comparable": self.comparable,
+            "status_equal": self.status_equal,
+            "runtime_equal": self.runtime_equal,
+            "source_equal": self.source_equal,
+            "runtime_proof": self.runtime_proof,
         }
         # Incomparable/infra must not emit equality / no-regression conclusions.
         if self.verdict in {"incomparable", "infra_error"}:
@@ -55,6 +63,48 @@ class CaseComparison:
             payload["equals"] = bool(self.equality_conclusion)
             payload["no_regression"] = bool(self.no_regression_conclusion)
         return payload
+
+
+def _run_payload(ee: dict[str, Any] | None, key: str) -> tuple[Any, Any, Any]:
+    rec = (ee or {}).get(key) if isinstance(ee, dict) else None
+    if not isinstance(rec, dict):
+        return (None, None, None)
+    return (rec.get("stdout"), rec.get("stderr"), rec.get("rc"))
+
+
+def observation_runtime(obs: Observation) -> tuple[Any, ...] | None:
+    """Runtime/oracle payload. Decompiled source SHA is format, not behavior."""
+    ee = obs.execution_evidence if isinstance(obs.execution_evidence, dict) else None
+    if not ee:
+        return None
+    orig = _run_payload(ee, "original_run")
+    rebuilt = _run_payload(ee, "rebuilt_run")
+    payload = (
+        orig,
+        rebuilt,
+        ee.get("failure"),
+        ee.get("stdout_match"),
+        ee.get("decompile_status"),
+        ee.get("failure_stage") or ee.get("stage"),
+    )
+    if payload == ((None, None, None), (None, None, None), None, None, None, None):
+        return None
+    return payload
+
+
+def observation_source(obs: Observation) -> str | None:
+    ee = obs.execution_evidence if isinstance(obs.execution_evidence, dict) else None
+    if not ee:
+        return None
+    sha = ee.get("decompiled_source_sha256")
+    if not sha:
+        return None
+    return str(sha)
+
+
+def observation_behavior(obs: Observation) -> tuple[Any, ...] | None:
+    """Backward-compatible alias: runtime payload only (not decompiled source SHA)."""
+    return observation_runtime(obs)
 
 
 def comparability_reasons(left: Observation, right: Observation) -> list[str]:
@@ -174,7 +224,69 @@ def compare_pair(
         )
 
     left, right = candidate.status, reference.status
+    status_equal = left == right
     if left == right:
+        lb = observation_runtime(candidate)
+        rb = observation_runtime(reference)
+        ls = observation_source(candidate)
+        rs = observation_source(reference)
+        source_equal = None if (ls is None and rs is None) else (ls == rs)
+        if (lb is None) != (rb is None):
+            return CaseComparison(
+                case_id=case_id,
+                anchor=anchor,
+                verdict="status_match_incomplete_observation",
+                left_status=left,
+                right_status=right,
+                reasons=[
+                    "one side lacks runtime payload; status match is not behavior equality or no-regression",
+                ],
+                comparable=True,
+                equality_conclusion=False,
+                no_regression_conclusion=False,
+                status_equal=True,
+                runtime_equal=None,
+                source_equal=source_equal,
+                runtime_proof=False,
+            )
+        if lb is None and rb is None:
+            return CaseComparison(
+                case_id=case_id,
+                anchor=anchor,
+                verdict="status_match",
+                left_status=left,
+                right_status=right,
+                reasons=["synthetic/status-only ledger: status relation only, not runtime proof"],
+                comparable=True,
+                equality_conclusion=False,
+                no_regression_conclusion=False,
+                status_equal=True,
+                runtime_equal=None,
+                source_equal=source_equal,
+                runtime_proof=False,
+            )
+        if lb != rb:
+            return CaseComparison(
+                case_id=case_id,
+                anchor=anchor,
+                verdict="status_match_observation_differs",
+                left_status=left,
+                right_status=right,
+                reasons=[
+                    "same ledger status is not behavior equivalence",
+                    f"runtime differs: {lb!r} vs {rb!r}",
+                ],
+                comparable=True,
+                equality_conclusion=False,
+                no_regression_conclusion=False,
+                status_equal=True,
+                runtime_equal=False,
+                source_equal=source_equal,
+                runtime_proof=True,
+            )
+        reasons = []
+        if source_equal is False:
+            reasons.append("decompiled_source_sha256 differs; format change is not semantic regression")
         verdict = "equal"
         equals = True
         no_reg = True
@@ -188,10 +300,14 @@ def compare_pair(
             verdict=verdict,
             left_status=left,
             right_status=right,
-            reasons=[],
+            reasons=reasons,
             comparable=True,
             equality_conclusion=equals,
             no_regression_conclusion=no_reg,
+            status_equal=True,
+            runtime_equal=True,
+            source_equal=source_equal,
+            runtime_proof=True,
         )
 
     lost_capability = right in SUCCESS_STATUSES and left not in SUCCESS_STATUSES
@@ -208,6 +324,9 @@ def compare_pair(
             comparable=True,
             equality_conclusion=False,
             no_regression_conclusion=False,
+            status_equal=False,
+            runtime_equal=False,
+            runtime_proof=bool(observation_runtime(candidate) and observation_runtime(reference)),
         )
     if gained:
         return CaseComparison(
@@ -220,6 +339,9 @@ def compare_pair(
             comparable=True,
             equality_conclusion=False,
             no_regression_conclusion=True,
+            status_equal=False,
+            runtime_equal=False,
+            runtime_proof=bool(observation_runtime(candidate) and observation_runtime(reference)),
         )
     return CaseComparison(
         case_id=case_id,
@@ -231,6 +353,8 @@ def compare_pair(
         comparable=True,
         equality_conclusion=False,
         no_regression_conclusion=left not in {"fail", "infra_error"} or right not in SUCCESS_STATUSES,
+        status_equal=False,
+        runtime_proof=bool(observation_runtime(candidate) and observation_runtime(reference)),
     )
 
 
@@ -303,7 +427,9 @@ def compare_anchors(
     base_summary = _summarize(vs_base)
     mile_summary = _summarize(vs_mile)
     long_term_drift = any(row.verdict == "drift" for row in vs_mile)
-    equal_to_base = all(row.verdict == "equal" for row in vs_base) and bool(vs_base)
+    status_equal_to_base = all(row.status_equal for row in vs_base) and bool(vs_base)
+    runtime_equal_to_base = all(row.verdict == "equal" and row.runtime_proof for row in vs_base) and bool(vs_base)
+    equal_to_base = all(row.verdict == "equal" and row.runtime_proof for row in vs_base) and bool(vs_base)
     incomparable_any = any(row.verdict == "incomparable" for row in vs_base + vs_mile)
     infra_any = any(row.verdict == "infra_error" for row in vs_base + vs_mile)
 
@@ -327,6 +453,8 @@ def compare_anchors(
         "candidate_vs_pr_base": base_summary,
         "candidate_vs_milestone": mile_summary,
         "equal_to_pr_base": equal_to_base,
+        "status_equal_to_pr_base": status_equal_to_base,
+        "runtime_equal_to_pr_base": runtime_equal_to_base,
         "long_term_drift": long_term_drift,
         "no_regression_vs_base_only_insufficient": insufficient,
         "overall_verdict": overall,

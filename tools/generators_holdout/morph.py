@@ -29,6 +29,11 @@ class MorphResult:
     morphed_stdout: str
     original_class_sha256: str
     morphed_class_sha256: str
+    original_class_bytes: bytes
+    morphed_class_bytes: bytes
+    original_debug: str
+    morph_debug: str
+    compiler_coverage_key: str
     oracle_equal: bool
     notes: str
 
@@ -40,6 +45,9 @@ class MorphResult:
             "morphed_source_sha256": hashlib.sha256(self.morphed_source.encode()).hexdigest(),
             "original_class_sha256": self.original_class_sha256,
             "morphed_class_sha256": self.morphed_class_sha256,
+            "original_debug": self.original_debug,
+            "morph_debug": self.morph_debug,
+            "compiler_coverage_key": self.compiler_coverage_key,
             "oracle_equal": self.oracle_equal,
             "notes": self.notes,
         }
@@ -127,14 +135,18 @@ def apply_morph(
     orig_bytes = _compile_one(identity, sample.source, sample.class_name, orig_dir, original_debug)
     morph_bytes = _compile_one(identity, morphed, sample.class_name, morph_dir, morph_debug)
     java_bin = java_command(identity)
-    orig_run = verify_and_run(orig_dir, sample.class_name, java_bin=java_bin)
-    morph_run = verify_and_run(morph_dir, sample.class_name, java_bin=java_bin)
+    orig_run = verify_and_run(orig_dir, sample.class_name, java_bin=java_bin, trusted=True)
+    morph_run = verify_and_run(morph_dir, sample.class_name, java_bin=java_bin, trusted=True)
     if not orig_run["verified_and_ran"]:
         raise InfraError(f"original failed verify/run: {orig_run['stderr']}")
     if not morph_run["verified_and_ran"]:
         raise InfraError(f"morphed program is not a legal equivalent: {morph_run['stderr']}")
     equal = orig_run["stdout"] == morph_run["stdout"] == sample.expected_stdout
-    notes = f"{kind.value}: debug={morph_debug} stdout_equal={equal}"
+    notes = (
+        f"{kind.value}: original_debug={original_debug} morph_debug={morph_debug} "
+        f"orig_class={hashlib.sha256(orig_bytes).hexdigest()[:12]} "
+        f"morph_class={hashlib.sha256(morph_bytes).hexdigest()[:12]} stdout_equal={equal}"
+    )
     return MorphResult(
         kind=kind,
         original=sample,
@@ -143,6 +155,11 @@ def apply_morph(
         morphed_stdout=morph_run["stdout"],
         original_class_sha256=hashlib.sha256(orig_bytes).hexdigest(),
         morphed_class_sha256=hashlib.sha256(morph_bytes).hexdigest(),
+        original_class_bytes=orig_bytes,
+        morphed_class_bytes=morph_bytes,
+        original_debug=original_debug,
+        morph_debug=morph_debug,
+        compiler_coverage_key=identity.coverage_key(),
         oracle_equal=equal,
         notes=notes,
     )
@@ -155,30 +172,75 @@ def compare_decompiled_pair(
     work: Path,
     *,
     modes: tuple[str, ...] = ("precision", "compatibility"),
-    debug: str = "nodebug",
+    original_debug: str = "nodebug",
+    morph_debug: str = "nodebug",
+    original_class_bytes: bytes | None = None,
+    morphed_class_bytes: bytes | None = None,
+    class_name: str | None = None,
 ) -> dict:
-    """Rebuild/run JavaJive outputs for every requested mode. Infra cannot be a pass."""
-    from .pipeline import run_pipeline
+    """JavaJive sees the provided class bytes (DEBUG morph must not be recompiled nodebug)."""
+    from .pipeline import run_pipeline, run_pipeline_from_class_bytes
 
     rows = []
     for mode in modes:
-        orig = run_pipeline(original_source, identity, work / f"orig-{mode}", mode=mode, debug=debug)
-        morph = run_pipeline(morphed_source, identity, work / f"morph-{mode}", mode=mode, debug=debug)
+        if original_class_bytes is not None:
+            orig = run_pipeline_from_class_bytes(
+                original_source,
+                original_class_bytes,
+                identity,
+                work / f"orig-{mode}",
+                mode=mode,
+                debug=original_debug,
+                class_name=class_name,
+                trusted=True,
+            )
+        else:
+            orig = run_pipeline(
+                original_source,
+                identity,
+                work / f"orig-{mode}",
+                mode=mode,
+                debug=original_debug,
+                trusted=True,
+            )
+        if morphed_class_bytes is not None:
+            morph = run_pipeline_from_class_bytes(
+                morphed_source,
+                morphed_class_bytes,
+                identity,
+                work / f"morph-{mode}",
+                mode=mode,
+                debug=morph_debug,
+                class_name=class_name,
+                trusted=True,
+            )
+        else:
+            morph = run_pipeline(
+                morphed_source,
+                identity,
+                work / f"morph-{mode}",
+                mode=mode,
+                debug=morph_debug,
+                trusted=True,
+            )
         if orig.failure_class == "infra_error" or morph.failure_class == "infra_error":
             raise InfraError(
                 f"compiler/probe infra_error cannot satisfy T28-C02 behavioral acceptance: "
                 f"orig={orig.failure_class} morph={morph.failure_class} mode={mode}"
             )
-        # Byte-different decompiled source may still be semantically equal via rebuilt stdout.
         semantic_equal = (
-            orig.failure_class == "pass"
-            and morph.failure_class == "pass"
+            orig.failure_class == morph.failure_class
             and orig.rebuilt_stdout == morph.rebuilt_stdout
             and orig.original_stdout == morph.original_stdout
         )
         rows.append(
             {
                 "mode": mode,
+                "original_debug": orig.debug,
+                "morph_debug": morph.debug,
+                "original_input_class_sha256": orig.original_class_sha256,
+                "morphed_input_class_sha256": morph.original_class_sha256,
+                "compiler_coverage_key": identity.coverage_key(),
                 "original": orig.to_dict(),
                 "morphed": morph.to_dict(),
                 "semantic_equal": semantic_equal,
@@ -186,4 +248,4 @@ def compare_decompiled_pair(
                 "source_bytes_equal": orig.decompiled_source == morph.decompiled_source,
             }
         )
-    return {"modes": rows}
+    return {"modes": rows, "compiler_coverage_key": identity.coverage_key()}

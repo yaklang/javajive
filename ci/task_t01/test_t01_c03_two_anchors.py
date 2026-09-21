@@ -44,7 +44,8 @@ class TestTaskT01C03TwoAnchorCumulativeDrift(unittest.TestCase):
             [pr_base, base_stable],
             [milestone, mile_stable],
         )
-        self.assertTrue(result["equal_to_pr_base"], "T01-C03 candidate equals PR base")
+        self.assertTrue(result["status_equal_to_pr_base"], "T01-C03 candidate status matches PR base")
+        self.assertFalse(result["equal_to_pr_base"], "T01-C03 status-only is not runtime equality")
         self.assertTrue(result["long_term_drift"], "T01-C03 long-term drift versus milestone")
         self.assertTrue(
             result["no_regression_vs_base_only_insufficient"],
@@ -57,7 +58,16 @@ class TestTaskT01C03TwoAnchorCumulativeDrift(unittest.TestCase):
         self.assertEqual(mile_rows[candidate.case_id]["verdict"], "drift", "T01-C03")
         self.assertFalse(mile_rows[candidate.case_id]["no_regression"], "T01-C03")
         base_rows = {row["case_id"]: row for row in result["candidate_vs_pr_base"]["cases"]}
-        self.assertEqual(base_rows[candidate.case_id]["verdict"], "equal", "T01-C03 vs base only looks unchanged")
+        self.assertEqual(
+            base_rows[candidate.case_id]["verdict"],
+            "status_match",
+            "T01-C03 vs base is status relation only (no runtime payload)",
+        )
+        self.assertTrue(base_rows[candidate.case_id]["status_equal"], "T01-C03")
+        self.assertFalse(base_rows[candidate.case_id]["runtime_proof"], "T01-C03 must not claim runtime proof")
+        self.assertFalse(bool(base_rows[candidate.case_id].get("equals")), "T01-C03")
+        self.assertTrue(result.get("status_equal_to_pr_base"), "T01-C03")
+        self.assertFalse(result.get("runtime_equal_to_pr_base"), "T01-C03")
 
 
 if __name__ == "__main__":

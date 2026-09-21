@@ -26,7 +26,7 @@ from tools.generators_holdout.generate import (
 from tools.generators_holdout.holdout import CorpusItem, HoldoutLeakError, assert_frozen, split_holdout
 from tools.generators_holdout.identity import InfraError, compile_sources, discover_compilers, java_command, verify_and_run
 from tools.generators_holdout.morph import MorphKind, apply_morph, compare_decompiled_pair
-from tools.generators_holdout.pipeline import FaultInjectedOracle, run_pipeline
+from tools.generators_holdout.pipeline import FaultInjectedOracle, decompile_class, run_pipeline
 from tools.generators_holdout.reduce import (
     FAILURE_INVALID,
     feature_regex_negative_control,
@@ -102,6 +102,8 @@ class T28Contracts(unittest.TestCase):
                 self.assertEqual(len(samples), SAMPLES_PER_FAMILY, family)
                 report = compile_and_verify_family(samples, self.javac21, work / family)
                 self.assertTrue(report["ok"], msg=json.dumps(report["failures"], indent=2)[:2000])
+                for fail in report["failures"]:
+                    self.assertEqual(fail.get("class"), "generator_error", fail)
                 self.assertEqual(report["verified"], SAMPLES_PER_FAMILY)
                 rows.extend(report["results"])
                 legal = (work / family / "classes" / f"{samples[0].class_name}.class").read_bytes()
@@ -113,14 +115,16 @@ class T28Contracts(unittest.TestCase):
                     dest = work / "illegal" / kind
                     dest.mkdir(parents=True, exist_ok=True)
                     (dest / f"{samples[0].class_name}.class").write_bytes(bad)
-                    ran = verify_and_run(dest, samples[0].class_name, java_bin=java_command(self.javac21))
+                    ran = verify_and_run(
+                        dest, samples[0].class_name, java_bin=java_command(self.javac21), trusted=True
+                    )
                     self.assertFalse(
                         ran["verified_and_ran"],
                         msg=f"illegal {kind} must not verify: {ran}",
                     )
                     self.assertEqual(
                         classify_failure("generate", legal_input=False, infra=False, budget=False, mismatch=True),
-                        "invalid_input",
+                        "generator_error",
                     )
         inv = EVIDENCE / "t28_c01_inventory.json"
         inv.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -152,18 +156,34 @@ class T28Contracts(unittest.TestCase):
                     self.javac21,
                     work / f"jj-{result.kind.value}",
                     modes=("precision", "compatibility"),
+                    original_debug=result.original_debug,
+                    morph_debug=result.morph_debug,
+                    original_class_bytes=result.original_class_bytes,
+                    morphed_class_bytes=result.morphed_class_bytes,
+                    class_name=result.original.class_name,
                 )
                 reports[result.kind.value] = pair
                 for row in pair["modes"]:
-                    self.assertNotEqual(row["original"]["failure_class"], "infra_error", msg=row)
-                    self.assertNotEqual(row["morphed"]["failure_class"], "infra_error", msg=row)
-                    # Byte-different decompiled source is allowed if rebuilt runs match.
-                    if row["original"]["failure_class"] == "pass" and row["morphed"]["failure_class"] == "pass":
-                        self.assertEqual(
-                            row["original"]["rebuilt_stdout"],
-                            row["morphed"]["rebuilt_stdout"],
-                            msg=f"{result.kind.value} {row['mode']}",
-                        )
+                    orig_fc = row["original"]["failure_class"]
+                    morph_fc = row["morphed"]["failure_class"]
+                    self.assertNotEqual(orig_fc, "infra_error", msg=row)
+                    self.assertNotEqual(morph_fc, "infra_error", msg=row)
+                    self.assertEqual(row["original_debug"], result.original_debug)
+                    self.assertEqual(row["morph_debug"], result.morph_debug)
+                    self.assertEqual(row["original_input_class_sha256"], result.original_class_sha256)
+                    self.assertEqual(row["morphed_input_class_sha256"], result.morphed_class_sha256)
+                    self.assertEqual(row["original"]["debug_used"], result.original_debug)
+                    self.assertEqual(row["morphed"]["debug_used"], result.morph_debug)
+                    self.assertEqual(orig_fc, morph_fc, msg=row)
+                    self.assertEqual(
+                        row["original"]["rebuilt_stdout"],
+                        row["morphed"]["rebuilt_stdout"],
+                        msg=f"{result.kind.value} {row['mode']}",
+                    )
+                if result.kind is MorphKind.DEBUG:
+                    self.assertNotEqual(result.original_class_sha256, result.morphed_class_sha256)
+                    self.assertEqual(result.morph_debug, "debug")
+                    self.assertEqual(result.original_debug, "nodebug")
             (EVIDENCE / "t28_c02_morph.json").write_text(json.dumps(reports, indent=2)[:200000] + "\n")
 
     def test_T28_C03_reduce_keeps_failure_class_and_rejects_illegal(self) -> None:
@@ -179,12 +199,15 @@ class T28Contracts(unittest.TestCase):
         self.assertIsNone(feature_regex_negative_control(baseline_src))
         with tempfile.TemporaryDirectory(prefix="t28-c03-") as raw:
             work = Path(raw)
-            base_obs = run_pipeline(baseline_src, self.javac21, work / "baseline", mode="precision")
-            uni_obs = run_pipeline(unicode_src, self.javac21, work / "unicode", mode="precision")
+            base_obs = run_pipeline(baseline_src, self.javac21, work / "baseline", mode="precision", trusted=True)
+            uni_obs = run_pipeline(unicode_src, self.javac21, work / "unicode", mode="precision", trusted=True)
             self.assertNotEqual(base_obs.failure_class, "infra_error", msg=base_obs.to_dict())
             self.assertNotEqual(uni_obs.failure_class, "infra_error", msg=uni_obs.to_dict())
-            # Baseline is the positive control: legal and not a decompiler defect if pass.
+            # Baseline is the positive control: orig+rebuilt must both run_ok.
+            self.assertEqual(base_obs.failure_class, "pass", msg=base_obs.to_dict())
             self.assertEqual(base_obs.stages["original_verify_run"].status, "run_ok")
+            self.assertEqual(base_obs.stages["rebuild_verify_run"].status, "run_ok")
+            self.assertEqual(base_obs.original_stdout.strip(), base_obs.rebuilt_stdout.strip())
             # Regex would "detect" UnicodePair even if the live oracle says pass.
             self.assertNotEqual(feature_regex_negative_control(unicode_src), uni_obs.failure_class)
 
@@ -193,6 +216,22 @@ class T28Contracts(unittest.TestCase):
                 "unicode": uni_obs.to_dict(),
                 "regex_is_not_oracle": True,
             }
+            for label, src in (("overload", overload_src), ("phi", phi_src)):
+                live = run_pipeline(src, self.javac21, work / label, mode="precision", trusted=True)
+                self.assertNotEqual(live.failure_class, "infra_error", msg=live.to_dict())
+                payload[label] = {
+                    "failure_class": live.failure_class,
+                    "oracle": "javajive_live",
+                    "original_stdout": live.original_stdout,
+                    "rebuilt_stdout": live.rebuilt_stdout,
+                }
+                if live.failure_class not in {"pass", "infra_error"}:
+                    reduced_live = reduce_source(src, self.javac21, work=work / f"reduce-{label}")
+                    self.assertEqual(reduced_live["oracle_kind"], "javajive_live")
+                    self.assertEqual(reduced_live["failure_class"], live.failure_class)
+                    payload[label]["reduced"] = {
+                        k: reduced_live[k] for k in reduced_live if k != "original_observation"
+                    }
             if uni_obs.failure_class not in {"pass", "infra_error"}:
                 padded = (
                     "public class UnicodePad {\n"
@@ -238,41 +277,72 @@ class T28Contracts(unittest.TestCase):
             (EVIDENCE / "t28_c03_reduce.json").write_text(json.dumps(payload, indent=2)[:200000] + "\n")
 
     def test_T28_C04_holdout_groups_forbid_leakage(self) -> None:
-        """T28-C04: split by group; near-dups cannot cross train/holdout; hashes freeze."""
-        foo_v1 = b"class Foo { int x=1; }"
-        foo_v2_copy = b"class Foo { int x=1; }"  # near-dup / identical normalized
-        foo_v2_real = b"class Foo { int x=2; }"
-        bar = b"class Bar { int y=9; }"
-        items = [
-            CorpusItem("foo-1.0", "commons-foo", "1.0", "javac21_release8", hashlib.sha256(foo_v1).hexdigest(), hashlib.sha256(foo_v1).hexdigest(), "synthetic"),
-            CorpusItem("foo-1.1", "commons-foo", "1.1", "javac21_release8", hashlib.sha256(foo_v2_real).hexdigest(), hashlib.sha256(foo_v2_real).hexdigest(), "synthetic"),
-            CorpusItem("foo-1.0-rebuild", "commons-foo", "1.0-rebuild", "javac8_native", hashlib.sha256(foo_v2_copy).hexdigest(), hashlib.sha256(foo_v2_copy).hexdigest(), "synthetic"),
-            CorpusItem("bar-1.0", "other-bar", "1.0", "ecj_pinned", hashlib.sha256(bar).hexdigest(), hashlib.sha256(bar).hexdigest(), "synthetic"),
-        ]
-        split = split_holdout(items, holdout_groups={"other-bar"})
-        self.assertGreaterEqual(split.duplicate_rate, 0.0)
-        self.assertEqual(split.holdout[0].group, "other-bar")
-        self.assertNotIn("commons-foo", {x.group for x in split.holdout})
+        """T28-C04: same-source multi-compiler class groups; train/holdout disjoint."""
+        found = self.compilers
+        baseline = FIXTURES / "Baseline.java"
+        other = FIXTURES / "PhiSwap.java"
+        items: list[CorpusItem] = []
+        matrix = []
+        with tempfile.TemporaryDirectory(prefix="t28-c04-") as raw:
+            work = Path(raw)
+            for src, group, class_name in ((baseline, "lib-baseline", "Baseline"), (other, "lib-phiswap", "PhiSwap")):
+                for compiler_name, ident in found.items():
+                    if ident is None:
+                        raise AssertionError(f"infra_error: {compiler_name} required for T28-C04")
+                    dest = work / group / compiler_name
+                    compiled = compile_sources(ident, [src], dest, debug="nodebug")
+                    self.assertEqual(compiled["rc"], 0, msg=f"{group}/{compiler_name}: {compiled['stderr']}")
+                    class_file = dest / f"{class_name}.class"
+                    self.assertTrue(class_file.is_file())
+                    data = class_file.read_bytes()
+                    self.assertGreaterEqual(len(data), 10)
+                    self.assertEqual(data[:4], b"\xca\xfe\xba\xbe")
+                    item = CorpusItem(
+                        item_id=f"{group}:{compiler_name}",
+                        group=group,
+                        version=ident.coverage_key(),
+                        compiler_family=ident.kind,
+                        content_sha256=hashlib.sha256(data).hexdigest(),
+                        normalized_sha256=hashlib.sha256(data).hexdigest(),
+                        origin=f"{src.name}|{ident.coverage_key()}",
+                    )
+                    items.append(item)
+                    matrix.append(
+                        {
+                            "group": group,
+                            "compiler": compiler_name,
+                            "coverage_key": ident.coverage_key(),
+                            "class_sha256": item.content_sha256,
+                            "class_size": len(data),
+                        }
+                    )
+        # Same source, different compilers: at least javac8 vs javac21 bytes differ for Baseline.
+        base_hashes = {i.compiler_family + i.version: i.content_sha256 for i in items if i.group == "lib-baseline"}
+        self.assertGreaterEqual(len(set(base_hashes.values())), 2, msg=base_hashes)
+        groups = {i.group for i in items}
+        self.assertEqual(groups, {"lib-baseline", "lib-phiswap"})
+        split = split_holdout(items, holdout_groups={"lib-phiswap"})
+        self.assertEqual({x.group for x in split.holdout}, {"lib-phiswap"})
+        self.assertEqual({x.group for x in split.train}, {"lib-baseline"})
+        self.assertEqual({i.item_id for i in split.train} & {i.item_id for i in split.holdout}, set())
         assert_frozen(split, items)
-        # Explicit near-dup leakage: put identical normalized payload in two groups, then split.
-        leaked_items = items + [
+        leaked = items + [
             CorpusItem(
-                "bar-clone-of-foo",
-                "other-bar",
+                "clone-across-groups",
+                "lib-phiswap",
                 "clone",
-                "javac21_release8",
-                hashlib.sha256(foo_v1).hexdigest(),
-                hashlib.sha256(foo_v1).hexdigest(),
-                "synthetic",
+                "javac",
+                items[0].content_sha256,
+                items[0].normalized_sha256,
+                "clone",
             )
         ]
         with self.assertRaises(HoldoutLeakError) as ctx:
-            split_holdout(leaked_items, holdout_groups={"other-bar"})
+            split_holdout(leaked, holdout_groups={"lib-phiswap"})
         self.assertIn("near-duplicate leakage", str(ctx.exception))
-        (EVIDENCE / "t28_c04_holdout.json").write_text(split.to_dict() and json.dumps(split.to_dict(), indent=2) + "\n")
-        # Group-only split of commons-foo into holdout is allowed if no cross-group dup.
-        foo_only = split_holdout(items, holdout_groups={"commons-foo"})
-        self.assertEqual({x.group for x in foo_only.holdout}, {"commons-foo"})
+        (EVIDENCE / "t28_c04_holdout.json").write_text(
+            json.dumps({"split": split.to_dict(), "matrix": matrix}, indent=2) + "\n"
+        )
 
     def test_T28_C05_compiler_identities_are_not_merged(self) -> None:
         """T28-C05: javac21 --release 8, real javac8, pinned ECJ are distinct coverage keys."""
@@ -299,7 +369,12 @@ class T28Contracts(unittest.TestCase):
                 self.assertEqual(compiled["rc"], 0, msg=f"{name}: {compiled['stderr']}")
                 class_file = dest / "Baseline.class"
                 self.assertTrue(class_file.is_file(), name)
-                ran = verify_and_run(dest, "Baseline", java_bin=java_command(ident) if ident.kind == "javac" else java_command(found["javac21_release8"]))
+                ran = verify_and_run(
+                    dest,
+                    "Baseline",
+                    java_bin=java_command(ident) if ident.kind == "javac" else java_command(found["javac21_release8"]),
+                    trusted=True,
+                )
                 self.assertTrue(ran["verified_and_ran"], msg=ran)
                 self.assertEqual(ran["stdout"], "7\n")
                 keys[name] = {
@@ -321,6 +396,33 @@ class T28Contracts(unittest.TestCase):
         # Merging --release 8 into a javac8 bucket is forbidden.
         merged = keys["javac21_release8"]["version"] == keys["javac8_native"]["version"]
         self.assertFalse(merged)
+        loop = generate_family("loop", count=1)[0]
+        family_edge = {}
+        with tempfile.TemporaryDirectory(prefix="t28-c05-edge-") as raw:
+            work = Path(raw)
+            src = work / f"{loop.class_name}.java"
+            src.write_text(loop.source, encoding="utf-8")
+            for name, ident in found.items():
+                dest = work / name
+                compiled = compile_sources(ident, [src], dest, debug="nodebug")
+                self.assertEqual(compiled["rc"], 0, msg=f"loop/{name}: {compiled['stderr']}")
+                class_file = dest / f"{loop.class_name}.class"
+                ran = verify_and_run(
+                    dest,
+                    loop.class_name,
+                    java_bin=java_command(ident) if ident.kind == "javac" else java_command(found["javac21_release8"]),
+                    trusted=True,
+                )
+                self.assertTrue(ran["verified_and_ran"], msg=ran)
+                family_edge[name] = {
+                    "coverage_key": ident.coverage_key(),
+                    "class_sha256": hashlib.sha256(class_file.read_bytes()).hexdigest(),
+                    "stdout": ran["stdout"],
+                    "stage": ran["stage"],
+                }
+        self.assertEqual(len(family_edge), 3)
+        self.assertEqual(len({v["coverage_key"] for v in family_edge.values()}), 3)
+        keys["loop_family_edge"] = family_edge
         (EVIDENCE / "t28_c05_compilers.json").write_text(json.dumps(keys, indent=2) + "\n")
 
     def test_T28_C06_every_failure_stage_has_full_evidence(self) -> None:
@@ -330,30 +432,31 @@ class T28Contracts(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="t28-c06-") as raw:
             work = Path(raw)
             compile_fail_src = "public class C06Compile { public static void main(String[] a) { int x = ; } }"
-            compile_obs = run_pipeline(compile_fail_src, self.javac21, work / "compile", mode="precision")
+            compile_obs = run_pipeline(compile_fail_src, self.javac21, work / "compile", mode="precision", trusted=True)
             self.assertEqual(compile_obs.failure_class, "invalid_input")
             self.assertEqual(compile_obs.stages["compile"].status, "compile_fail")
             items.append(from_pipeline("T28-C06-compile", compile_obs, versions))
 
             # Verify: legal source compiled then class bytes corrupted.
             sample = generate_family("loop", count=1)[0]
-            good = run_pipeline(sample.source, self.javac21, work / "good", mode="precision")
-            self.assertIn(good.failure_class, {"pass", "behavior", "partial", "unsupported"})
+            good = run_pipeline(sample.source, self.javac21, work / "good", mode="precision", trusted=True)
+            self.assertEqual(good.stages["compile"].status, "ok", msg=good.to_dict())
+            self.assertEqual(good.stages["original_verify_run"].status, "run_ok", msg=good.to_dict())
             class_path = Path(good.input_bytes_path)
             bad_bytes = class_path.read_bytes()[:20]
             (work / "verify").mkdir()
             dest = work / "verify" / "classes"
             dest.mkdir()
             (dest / f"{sample.class_name}.class").write_bytes(bad_bytes)
-            ran = verify_and_run(dest, sample.class_name, java_bin=java_command(self.javac21))
-            self.assertIn(ran["stage"], {"verify_fail", "linkage_error", "run_fail"})
+            ran = verify_and_run(dest, sample.class_name, java_bin=java_command(self.javac21), trusted=True)
+            self.assertEqual(ran["stage"], "verify_fail", msg=ran)
             verify_ev = FailureEvidence(
                 case_id="T28-C06-verify",
                 failure_class="invalid_input",
                 input_sha256=hashlib.sha256(bad_bytes).hexdigest(),
                 output=ran.get("stderr") or "",
                 classpath=[str(dest)],
-                trace=["compile", "corrupt", "verify"],
+                trace=["compile", "corrupt", ran["stage"]],
                 tool_versions=versions,
                 extra={
                     "require_artifacts": True,
@@ -363,10 +466,56 @@ class T28Contracts(unittest.TestCase):
                     "argv": ran.get("argv"),
                 },
             )
+            self.assertEqual(verify_ev.extra["stage"], "verify_fail")
             items.append(verify_ev)
+            live_budget = decompile_class(
+                class_path, "precision", work / "budget-probe", max_analysis_updates=1
+            )
+            self.assertTrue(
+                live_budget.get("budget_hit") or live_budget.get("status") in {"budget", "partial"},
+                msg=live_budget,
+            )
+            self.assertTrue(
+                any("analysis_budget_exceeded" in str(d) for d in live_budget.get("diagnostics") or [])
+                or live_budget.get("budget_hit"),
+                msg=live_budget.get("diagnostics"),
+            )
+            budget_class = classify_failure(
+                "decompile",
+                legal_input=True,
+                infra=False,
+                budget=bool(live_budget.get("budget_hit") or live_budget.get("status") in {"budget", "partial"}),
+                mismatch=False,
+            )
+            self.assertEqual(budget_class, "budget")
+            budget_ev = FailureEvidence(
+                case_id="T28-C06-budget",
+                failure_class=budget_class,
+                input_sha256=hashlib.sha256(sample.source.encode()).hexdigest(),
+                output=json.dumps(
+                    {
+                        "status": live_budget.get("status"),
+                        "diagnostics": live_budget.get("diagnostics"),
+                        "argv": live_budget.get("argv"),
+                    }
+                ),
+                classpath=[],
+                trace=["compile", "decompile", "analysis_budget"],
+                tool_versions=versions,
+                extra={
+                    "require_artifacts": True,
+                    "input_source": sample.source,
+                    "input_bytes_sha256": hashlib.sha256(class_path.read_bytes()).hexdigest(),
+                    "stage": "decompile_budget",
+                    "probe_status": live_budget.get("status"),
+                    "probe_argv": live_budget.get("argv"),
+                    "compiler": self.javac21.coverage_key(),
+                },
+            )
+            items.append(budget_ev)
 
             uni = (FIXTURES / "UnicodePair.java").read_text(encoding="utf-8")
-            dec_obs = run_pipeline(uni, self.javac21, work / "decompile", mode="precision")
+            dec_obs = run_pipeline(uni, self.javac21, work / "decompile", mode="precision", trusted=True)
             items.append(from_pipeline("T28-C06-decompile-rebuild-run", dec_obs, versions))
 
             from tools.generators_holdout.identity import CompilerIdentity
@@ -380,10 +529,11 @@ class T28Contracts(unittest.TestCase):
                 home="/no/such/home",
                 label="missing javac",
             )
-            infra_obs = run_pipeline(sample.source, bogus, work / "infra", mode="precision")
-            self.assertEqual(infra_obs.stages["compile"].status, "compile_fail")
+            infra_obs = run_pipeline(sample.source, bogus, work / "infra", mode="precision", trusted=True)
+            self.assertEqual(infra_obs.failure_class, "infra_error")
+            self.assertEqual(infra_obs.stages["compile"].status, "infra_error")
             infra_ev = from_pipeline("T28-C06-infra", infra_obs, versions)
-            infra_ev.failure_class = "infra_error"
+            self.assertEqual(infra_ev.failure_class, "infra_error")
             infra_ev.extra["stage"] = "compile_toolchain"
             items.append(infra_ev)
 

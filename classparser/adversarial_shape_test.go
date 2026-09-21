@@ -46,10 +46,9 @@ func TestAdversarialBareIfMissesOldUnique(t *testing.T) {
 }
 
 func TestAdversarialEmptySyncTrailingElse(t *testing.T) {
-	// Bytecode has the if/return inside the monitor (monitorenter then iload/if/ireturn
-	// with monitorexit). Emitting an empty sync just so the leftover reconstruct can
-	// insert `return false` after it would re-break the region. Production dump must
-	// match that monitor. The reconstruct remains gated on canned empty-sync text.
+	// javap EmptySyncAdv.closeInternal: monitorenter at 24, then iload_1/if/ireturn
+	// with monitorexit on each path. Production must keep those returns INSIDE
+	// the synchronized statement, not after an emptied monitor.
 	raw, err := os.ReadFile("testdata/regression/EmptySyncAdv.class")
 	if err != nil {
 		t.Fatal(err)
@@ -58,28 +57,49 @@ func TestAdversarialEmptySyncTrailingElse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(src, "synchronized(this){") {
-		t.Fatalf("missing synchronized:\n%s", src)
+	if !javaSynchronizedContains(src, "synchronized(this)", "return false;") {
+		t.Fatalf("return false must be inside synchronized(this), not after it:\n%s", src)
 	}
-	if strings.Contains(src, "synchronized(this){\n\n\t\t\t}") {
-		t.Fatalf("monitor region emptied (CFG regression):\n%s", src)
+	if !javaSynchronizedContains(src, "synchronized(this)", "if (var1){") {
+		t.Fatalf("if (var1) must be inside synchronized(this):\n%s", src)
 	}
-	if !strings.Contains(src, "if (var1){") || !strings.Contains(src, "return false;") {
-		t.Fatalf("closeInternal body not inside monitor:\n%s", src)
+}
+
+func javaSynchronizedContains(src, header, inner string) bool {
+	from := 0
+	for from < len(src) {
+		rel := strings.Index(src[from:], header)
+		if rel < 0 {
+			return false
+		}
+		i := from + rel
+		brace := strings.Index(src[i:], "{")
+		if brace < 0 {
+			return false
+		}
+		start := i + brace
+		depth := 0
+		end := -1
+		for j := start; j < len(src); j++ {
+			switch src[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = j
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end > start && strings.Contains(src[start:end+1], inner) {
+			return true
+		}
+		from = start + 1
 	}
-	canned := "boolean closeInternal(boolean var1, boolean var2) {\n\t\tsynchronized(this){\n\n\t\t\t}\n\t\t}"
-	os.Unsetenv("JDEC_ORIG14_REMAINING_OFF")
-	os.Unsetenv("JDEC_EMPTY_SYNC_RETURN_OFF")
-	on := fixEmptySyncInTrailingElse(canned)
-	if !strings.Contains(on, "return false;") {
-		t.Fatalf("reconstruct must still insert return after canned empty sync:\n%s", on)
-	}
-	t.Setenv("JDEC_ORIG14_REMAINING_OFF", "1")
-	t.Setenv("JDEC_EMPTY_SYNC_RETURN_OFF", "1")
-	off := fixEmptySyncInTrailingElse(canned)
-	if strings.Contains(off, "return false;") {
-		t.Fatalf("kill-switch must leave canned empty sync unchanged:\n%s", off)
-	}
+	return false
 }
 
 func TestAdversarialNsmeCatchThisBuild(t *testing.T) {
@@ -154,17 +174,14 @@ func TestHttp2StreamTrailingElseEmptySyncIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(src, "return false;") {
-		t.Fatalf("closeInternal missing return false:\n%s", clipForTest(src, "closeInternal"))
+	closeIdx := strings.Index(src, "closeInternal")
+	if closeIdx < 0 {
+		t.Fatalf("missing closeInternal:\n%s", src)
 	}
-	canned := http2CloseInternalEmpty
-	os.Unsetenv("JDEC_ORIG14_REMAINING_OFF")
-	os.Unsetenv("JDEC_EMPTY_SYNC_RETURN_OFF")
-	on := fixEmptySyncInTrailingElse(canned)
-	t.Setenv("JDEC_EMPTY_SYNC_RETURN_OFF", "1")
-	off := fixEmptySyncInTrailingElse(canned)
-	if on == off && !strings.Contains(on, "return ") {
-		t.Fatalf("orig14 empty-sync reconstruct inert on canned Http2 closeInternal:\n%s", on)
+	chunk := src[closeIdx:]
+	if !javaSynchronizedContains(chunk, "synchronized(this)", "return false;") &&
+		!javaSynchronizedContains(chunk, "synchronized(this)", "return true;") {
+		t.Fatalf("closeInternal monitor must contain a return (bytecode monitorexit on return paths):\n%s", clipForTest(src, "closeInternal"))
 	}
 }
 

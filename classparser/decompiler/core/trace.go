@@ -31,8 +31,27 @@ func currentTraceConfig() decompileTraceConfig {
 	}
 }
 
+func (d *Decompiler) currentTraceConfig() decompileTraceConfig {
+	if d == nil {
+		return currentTraceConfig()
+	}
+	if d.traceCfgLoaded {
+		return d.traceCfg
+	}
+	d.traceCfg = decompileTraceConfig{
+		classFilter:  d.getenv("JDEC_TRACE_CLASS"),
+		methodFilter: d.getenv("JDEC_TRACE_METHOD"),
+		varTable:     d.getenv("JDEC_TRACE_VAR_TABLE") != "",
+		varFold:      d.getenv("JDEC_TRACE_VAR_FOLD") != "",
+		rewriteVar:   d.getenv("JDEC_TRACE_REWRITE_VAR") != "",
+		slotVersion:  d.getenv("JDEC_TRACE_SLOT_VERSION") != "",
+	}
+	d.traceCfgLoaded = true
+	return d.traceCfg
+}
+
 func (d *Decompiler) traceEnabled(kind string) bool {
-	cfg := currentTraceConfig()
+	cfg := d.currentTraceConfig()
 	switch kind {
 	case "var-table":
 		if !cfg.varTable {
