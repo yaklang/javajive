@@ -13,6 +13,8 @@ var dummyTypeCtx class_context.ClassContext
 // CastExpression and AssignmentExpression retain dependencies and origin PCs,
 // unlike string-producing CustomValue closures.
 type CastExpression struct {
+	// Binding preserves source overload resolution even for an identity conversion.
+	Binding    bool
 	Value      JavaValue
 	TargetType types.JavaType
 	OriginPC   int

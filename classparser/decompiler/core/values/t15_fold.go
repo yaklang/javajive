@@ -47,7 +47,7 @@ func FoldIdentityCast(c *CastExpression) JavaValue {
 	if c == nil {
 		return nil
 	}
-	if c.Value == nil || c.TargetType == nil {
+	if c.Binding || c.Value == nil || c.TargetType == nil {
 		return c
 	}
 	if !sameDeclaredType(c.Value.Type(), c.TargetType) {

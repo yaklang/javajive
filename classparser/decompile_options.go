@@ -170,7 +170,7 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		return result, budget, err
 	}
 	result.Status = "complete"
-	if d.FuncCtx != nil && d.FuncCtx.OverloadFamilyUnproven {
+	if d.overloadFamilyUnproven || (d.FuncCtx != nil && d.FuncCtx.OverloadFamilyUnproven) {
 		result.Status = "unsupported"
 		d.appendDiagnostic(DecompileDiagnostic{
 			Code:    "overload_family_unknown",

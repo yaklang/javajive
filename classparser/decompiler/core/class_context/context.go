@@ -1,6 +1,7 @@
 package class_context
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"math"
 	"slices"
 	"strconv"
@@ -15,6 +16,8 @@ import (
 )
 
 type ClassContext struct {
+	// InvocationMetadata supplies complete member and parent tables, never CP-only guesses.
+	InvocationMetadata callbinding.Provider
 	// Env looks up JDEC_* flags for this request. Nil falls back to jdecenv.Get.
 	Env func(string) string
 	// Work is the request budget used to cap source construction before allocation.

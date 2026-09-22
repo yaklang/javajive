@@ -28,11 +28,12 @@ import (
 )
 
 type ClassObjectDumper struct {
-	options       DecompileOptions
-	report        *DecompileResult
-	rewriteSeen   map[string]bool
-	Work          *workbudget.Budget
-	diagTruncated bool
+	options                DecompileOptions
+	report                 *DecompileResult
+	rewriteSeen            map[string]bool
+	Work                   *workbudget.Budget
+	diagTruncated          bool
+	overloadFamilyUnproven bool
 	// typeAnnosUnsupported is set when a legal type annotation cannot be
 	// placed on a declaration (code-offset/local/inner path).
 	typeAnnosUnsupported bool
@@ -563,8 +564,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		PackageName:     c.PackageName,
 	}
 	c.FuncCtx = funcCtx
+	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
 	overloadUnknownSeen := map[string]bool{}
 	funcCtx.OnOverloadUnknown = func(owner, name, descriptor string) {
+		c.overloadFamilyUnproven = true
 		key := owner + "\x00" + name + "\x00" + descriptor
 		if overloadUnknownSeen[key] {
 			return
@@ -572,7 +575,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		overloadUnknownSeen[key] = true
 		c.appendDiagnostic(DecompileDiagnostic{
 			Code:    "overload_family_unknown",
-			Message: "invoke " + owner + "." + name + descriptor + " family not proven; steal-shaped pins only",
+			Message: "invoke " + owner + "." + name + descriptor + " family not proven; binding requires further validation",
 		})
 	}
 	// Wire SiblingSuperTypes BEFORE the class header (`extends` / `implements`) is rendered.
@@ -12460,8 +12463,7 @@ func canFlattenNoCatchTry(body string) bool {
 	}
 	if strings.Contains(body, malformedTryNoCatchMarker) ||
 		strings.Contains(body, values.EmptySlotValuePlaceholder) ||
-		strings.Contains(body, "= Exception;") ||
-		strings.Contains(body, "= Exception\n") {
+		hasExceptionSentinel(body) {
 		return false
 	}
 	return true
@@ -12520,7 +12522,7 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 		// A leaked `varN = Exception;` caught-throwable sentinel is broken Java ("cannot find symbol");
 		// reject it so the method keeps its honest stub instead of adopting silently-broken output.
 		(c.getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") != "" ||
-			(!strings.Contains(res.code, "= Exception;") && !strings.Contains(res.code, "= Exception\n"))) &&
+			!hasExceptionSentinel(res.code)) &&
 		// Reject results that are syntactically valid but reference a local before its declaration
 		// (a slot-reuse renaming bug). Adopting such a result would replace an honest stub with
 		// silently-wrong code; keeping the stub upholds the never-emit-broken-code contract until the
@@ -12979,7 +12981,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			err = utils.Errorf("try-region structuring failed: try without catch handler")
 		}
 		if err == nil && res != nil && c.getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") == "" &&
-			(strings.Contains(res.code, "= Exception;") || strings.Contains(res.code, "= Exception\n")) {
+			hasExceptionSentinel(res.code) {
 			// A bare `varN = Exception;` is the fingerprint of a try/finally (or synchronized-region)
 			// structuring failure: the handler's caught-throwable stack value could not be bound to a
 			// real local, so it rendered as the bare type name `Exception` -- valid to the ANTLR syntax

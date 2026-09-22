@@ -21,9 +21,8 @@ func fixLeakedExceptionSentinel(body string) string {
 	if jdecenv.Get("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF") == "1" {
 		return body
 	}
-	if !strings.Contains(body, "= Exception;") && !strings.Contains(body, "= Exception\n") &&
-		!strings.Contains(body, "(Exception)") && !strings.Contains(body, "return Exception;") &&
-		!strings.Contains(body, "throw Exception;") {
+	code := sourceCodeMask(body)
+	if !hasExceptionSentinel(body) && !strings.Contains(code, "(Exception)") && !strings.Contains(code, "return Exception;") && !strings.Contains(code, "throw Exception;") {
 		return body
 	}
 	body = rewriteLeakedTryLockFinally(body)

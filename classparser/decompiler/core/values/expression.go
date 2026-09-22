@@ -5,6 +5,7 @@ import (
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -724,12 +725,13 @@ type InvokeWitness struct {
 }
 
 type FunctionCallExpression struct {
-	IsStatic     bool
-	Object       JavaValue
-	FunctionName string
-	ClassName    string
-	Arguments    []JavaValue
-	FuncType     *types.JavaFuncType
+	bindingPlanned bool
+	IsStatic       bool
+	Object         JavaValue
+	FunctionName   string
+	ClassName      string
+	Arguments      []JavaValue
+	FuncType       *types.JavaFuncType
 	// IsSpecialInvoke marks a call decoded from invokespecial. For a non-constructor invokespecial
 	// whose receiver is `this` and whose target class is NOT the current class, this is a `super.m()`
 	// call (the only other invokespecial forms are constructors and private same-class calls). It must
@@ -3243,6 +3245,9 @@ var rawFIMethodRefCastFamily = map[string]bool{
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
+	if c, ok := arg.(*CastExpression); ok && c.Binding {
+		return fmt.Sprintf("(%s)(%s)", c.TargetType.String(funcCtx), c.Value.String(funcCtx))
+	}
 	// Enum.valueOf(Class<T extends Enum<T>>, String) rejects a Class<?> / raw Class argument
 	// ("method valueOf in class Enum<E> cannot be applied"). The source carried an unchecked
 	// `(Class)` cast that bytecode drops as a no-op checkcast on Class. Re-emit it. Real hit:
@@ -3767,6 +3772,15 @@ func witnessSameRawClass(argType, param types.JavaType) bool {
 }
 
 func (f *FunctionCallExpression) witnessOverloadPinCast(i int, argType, param types.JavaType, funcCtx *class_context.ClassContext) string {
+	// These exact JDK declarations have a method-scoped T formal. Casting
+	// argument zero to erased Object changes inference of the return type.
+	if i == 0 && strings.ReplaceAll(f.ClassName, "/", ".") == "java.util.Objects" && f.FunctionName == "requireNonNull" {
+		switch f.Descriptor {
+		case "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;", "(Ljava/lang/Object;Ljava/util/function/Supplier;)Ljava/lang/Object;":
+			return ""
+		}
+	}
+
 	if f.calleeParamIsErasedTypeVar(i, funcCtx) {
 		return ""
 	}
@@ -3788,23 +3802,19 @@ func (f *FunctionCallExpression) witnessOverloadPinCast(i int, argType, param ty
 	case overloadCompete:
 		// pin below
 	case overloadUnknown:
-		if isJavaLangObjectType(param) && witnessStringyArg(argType) && f != nil &&
-			(f.Kind == InvokeStatic || f.Kind == InvokeSpecial || f.IsSpecialInvoke) {
-			// Conservative pin so javac cannot steal pick(String). Not Unique proof.
-			if funcCtx != nil {
-				funcCtx.OverloadFamilyUnproven = true
-				if funcCtx.OnOverloadUnknown != nil {
-					funcCtx.OnOverloadUnknown(f.ClassName, f.FunctionName, f.Descriptor)
-				}
-			}
-			break
-		}
-		if !witnessStealShaped(f, argType, param) {
-			if funcCtx != nil && funcCtx.OnOverloadUnknown != nil && isJavaLangObjectType(param) {
+		// Missing metadata cannot justify a source binding cast. Record the
+		// unresolved call, preserving generic/source reconstruction behavior.
+		if funcCtx != nil && (isJavaLangObjectType(param) || witnessStealShaped(f, argType, param)) {
+			funcCtx.OverloadFamilyUnproven = true
+			if funcCtx.OnOverloadUnknown != nil {
 				funcCtx.OnOverloadUnknown(f.ClassName, f.FunctionName, f.Descriptor)
 			}
+		}
+		if f.Kind != InvokeStatic || f.FunctionName == "<init>" || !isJavaLangObjectType(param) || !witnessStringyArg(argType) {
 			return ""
 		}
+		// Retain the legacy static-call conservative pin, but never call it a
+		// proven binding. Constructors use their dedicated reconstruction path.
 	}
 	if argType == nil || param == nil {
 		return ""
@@ -3888,18 +3898,6 @@ func witnessStringyArg(argType types.JavaType) bool {
 	return false
 }
 
-var jdkUniqueNoCompeteFamily = map[string]bool{
-	"java.util.Objects.requireNonNull": true,
-}
-
-func jdkKnownUniqueNoCompete(className, method string) bool {
-	if className == "" || method == "" {
-		return false
-	}
-	cn := strings.ReplaceAll(className, "/", ".")
-	return jdkUniqueNoCompeteFamily[cn+"."+method]
-}
-
 func jdkKnownSameArityOverload(className, method string) bool {
 	if className == "" || method == "" {
 		return false
@@ -3919,50 +3917,71 @@ func siblingKeysHaveSameArityOverload(name, descriptor string, methodSigs map[st
 	return class_context.NameHasSameArityOverload(name, descriptor, keys)
 }
 
-func siblingHierarchyProof(funcCtx *class_context.ClassContext, className, method, descriptor string) (found bool, compete bool) {
-	if funcCtx == nil || funcCtx.SiblingClassSig == nil || className == "" || method == "" || descriptor == "" {
+// siblingHierarchyProof requires every ancestor table. Seeing one class is not
+// evidence that an unresolved parent has no competing method.
+func siblingHierarchyProof(ctx *class_context.ClassContext, className, method, descriptor string) (found, compete bool) {
+	if ctx == nil || ctx.SiblingClassSig == nil || className == "" {
 		return false, false
 	}
-	visited := map[string]bool{}
-	var walk func(internal string) (bool, bool)
-	walk = func(internal string) (bool, bool) {
-		internal = strings.ReplaceAll(internal, ".", "/")
-		if internal == "" || internal == "java/lang/Object" || visited[internal] {
-			return false, false
+	active, done := map[string]bool{}, map[string]bool{}
+	complete, target, conflict := true, false, false
+	var walk func(string)
+	walk = func(n string) {
+		n = strings.ReplaceAll(n, ".", "/")
+		if active[n] {
+			complete = false
+			return
 		}
-		visited[internal] = true
-		_, methodSigs, ok := funcCtx.SiblingClassSig(internal)
-		foundHere := ok
-		competeHere := ok && siblingKeysHaveSameArityOverload(method, descriptor, methodSigs)
-		if competeHere {
-			return true, true
+		if done[n] {
+			return
 		}
-		any := foundHere
-		if funcCtx.SiblingSuperTypes != nil {
-			if supers, ok := funcCtx.SiblingSuperTypes(internal); ok {
-				for _, s := range supers {
-					fnd, cmp := walk(s)
-					if cmp {
-						return true, true
-					}
-					any = any || fnd
-				}
-			}
+		active[n] = true
+		defer func() { active[n] = false; done[n] = true }()
+		_, ms, ok := ctx.SiblingClassSig(n)
+		if !ok {
+			complete = false
+			return
 		}
-		return any, false
+		if _, ok := ms[class_context.MethodDescKey(method, descriptor)]; ok {
+			target = true
+		}
+		conflict = conflict || siblingKeysHaveSameArityOverload(method, descriptor, ms)
+		if ctx.SiblingSuperTypes == nil {
+			complete = false
+			return
+		}
+		parents, ok := ctx.SiblingSuperTypes(n)
+		if !ok {
+			complete = false
+			return
+		}
+		for _, parent := range parents {
+			walk(parent)
+		}
 	}
-	return walk(className)
+	walk(className)
+	return (complete && target) || conflict, conflict
 }
 
 func (f *FunctionCallExpression) overloadFamilyProof(funcCtx *class_context.ClassContext) overloadProof {
 	if f == nil || f.FunctionName == "" || f.Descriptor == "" {
 		return overloadUnknown
 	}
+	if funcCtx != nil && funcCtx.InvocationMetadata != nil {
+		family, err := callbinding.FamilyOf(callbinding.Witness{Owner: strings.ReplaceAll(f.ClassName, ".", "/"), Name: f.FunctionName, Desc: f.Descriptor}, funcCtx.InvocationMetadata)
+		if err == nil {
+			switch family.Proof {
+			case callbinding.Unique:
+				return overloadUnique
+			case callbinding.Compete:
+				return overloadCompete
+			}
+		}
+	}
 	if sameClassInvokeCallee(f, funcCtx) && funcCtx != nil && funcCtx.MethodDescriptors != nil {
 		if funcCtx.HasOverloadedSameArity(f.FunctionName, f.Descriptor) {
 			return overloadCompete
 		}
-		return overloadUnique
 	}
 	if found, compete := siblingHierarchyProof(funcCtx, f.ClassName, f.FunctionName, f.Descriptor); found {
 		if compete {
@@ -3972,9 +3991,6 @@ func (f *FunctionCallExpression) overloadFamilyProof(funcCtx *class_context.Clas
 	}
 	if jdkKnownSameArityOverload(f.ClassName, f.FunctionName) {
 		return overloadCompete
-	}
-	if jdkKnownUniqueNoCompete(f.ClassName, f.FunctionName) {
-		return overloadUnique
 	}
 	if funcCtx != nil && f.ClassName != "" {
 		owner := strings.ReplaceAll(f.ClassName, "/", ".")
@@ -4119,6 +4135,11 @@ func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) str
 }
 
 func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext) string {
+	if !f.bindingPlanned {
+		if planned, ok := f.planCallBinding(funcCtx); ok {
+			return planned.renderCall(funcCtx)
+		}
+	}
 	paramStrs := f.ArgumentStrings(funcCtx)
 	if f.FunctionName == "<init>" {
 		if f.ClassName == funcCtx.ClassName {
