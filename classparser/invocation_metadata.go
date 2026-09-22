@@ -1,8 +1,10 @@
 package javaclassparser
 
 import (
-	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 )
 
 // buildInvocationMetadata reads declaration tables, not just referenced CP entries.
@@ -10,6 +12,18 @@ import (
 func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 	cache := map[string]callbinding.Class{}
 	misses := map[string]bool{}
+	target := c.options.TargetSourceVersion
+	if target == 0 {
+		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
+	}
+	fallback := func(n string) (callbinding.Class, bool) {
+		if v, ok := jdkInvocationMetadata(n, target); ok {
+			cache[n] = v
+			return v, true
+		}
+		misses[n] = true
+		return callbinding.Class{}, false
+	}
 	return func(n string) (callbinding.Class, bool) {
 		n = strings.ReplaceAll(n, ".", "/")
 		if v, ok := cache[n]; ok {
@@ -19,6 +33,10 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 			return callbinding.Class{}, false
 		}
 		if n == "java/lang/Object" {
+			if v, ok := jdkInvocationMetadata(n, target); ok {
+				cache[n] = v
+				return v, true
+			}
 			v := callbinding.Class{Name: n, Public: true, MembersComplete: true, ParentsComplete: true}
 			for _, m := range []struct {
 				name, desc string
@@ -37,13 +55,11 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 		obj := c.obj
 		if obj.GetClassName() != n {
 			if c.foldSiblingResolver == nil {
-				misses[n] = true
-				return callbinding.Class{}, false
+				return fallback(n)
 			}
 			data, ok := c.foldSiblingResolver(n)
 			if !ok {
-				misses[n] = true
-				return callbinding.Class{}, false
+				return fallback(n)
 			}
 			var err error
 			obj, err = c.parseResolved(data)
