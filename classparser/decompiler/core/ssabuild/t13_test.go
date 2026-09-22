@@ -263,6 +263,13 @@ func TestT13_C03_ThrowSiteLocals(t *testing.T) {
 	loadPC := uint16(16)
 	ex := []*core.ExceptionTableEntry{{StartPc: 2, EndPc: 14, HandlerPc: handlerPC, CatchType: 1}}
 	cfg, ir := parseThroughProduction(t, code, "()I", ex)
+	// This synthetic constant-pool-free fixture explicitly supplies the call
+	// signature; production provenance must never guess a missing descriptor.
+	for i := range ir.Instrs {
+		if ir.Instrs[i].Opcode == core.OP_INVOKESTATIC {
+			ir.Instrs[i].Desc = "()V"
+		}
+	}
 
 	var invokePCs []uint16
 	var storePCs []uint16
@@ -377,10 +384,16 @@ func TestT13_C03_ThrowSiteLocals(t *testing.T) {
 		if op.Origin.Kind != OriginInstr {
 			t.Fatalf("handler phi operand origin %s want throw-site store", op.Origin.Key())
 		}
-		if op.Origin.PC == tryExit {
+		if op.Origin.PC+1 == tryExit {
 			t.Fatal("handler phi includes the try-exit store after the last invoke")
 		}
-		ssaPCs = append(ssaPCs, op.Origin.PC)
+		// A store preserves the producing value identity. Verify the store
+		// independently, then compare its immediately preceding constant producer.
+		producer := op.Origin.PC
+		if int(producer)+1 >= len(code) || code[producer] < core.OP_ICONST_0 || code[producer] > core.OP_ICONST_3 || code[producer+1] != core.OP_ISTORE_0 {
+			t.Fatalf("unexpected producer/store pair at %d", producer)
+		}
+		ssaPCs = append(ssaPCs, producer+1)
 	}
 	sort.Slice(ssaPCs, func(i, j int) bool { return ssaPCs[i] < ssaPCs[j] })
 	if !reflect.DeepEqual(ssaPCs, wantDefs) {

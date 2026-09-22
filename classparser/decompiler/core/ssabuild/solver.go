@@ -14,6 +14,7 @@ import (
 type Options struct {
 	MaxUpdates  int
 	Counter     WorkCounter
+	LIFO        bool
 	Shuffle     bool
 	ShuffleSeed int64
 }
@@ -26,162 +27,118 @@ func Build(ir *methodir.MethodIR, opt Options) (*Function, error) {
 	if maxUp == 0 {
 		maxUp = 1000000
 	}
+	if maxUp < 0 {
+		return nil, fmt.Errorf("invalid_input: negative update budget")
+	}
 	ctr := opt.Counter
 	if ctr == nil {
 		ctr = &LimitCounter{Max: uint64(maxUp)}
 	}
-
-	fn := &Function{IR: ir, Blocks: make([]BlockFrame, len(ir.Blocks))}
+	fn := &Function{IR: ir, Blocks: make([]BlockFrame, len(ir.Blocks)), EdgeStates: map[methodir.EdgeID]EdgeState{}}
+	if len(ir.Blocks) == 0 {
+		return fn, nil
+	}
 	index := map[methodir.BlockID]int{}
+	blockOf := map[uint16]methodir.BlockID{}
 	for i, b := range ir.Blocks {
 		fn.Blocks[i] = BlockFrame{ID: b.ID, First: b.FirstPC}
 		index[b.ID] = i
-	}
-	blockOf := map[uint16]methodir.BlockID{}
-	for _, b := range ir.Blocks {
 		blockOf[b.FirstPC] = b.ID
 	}
-
+	entryID, ok := blockOf[ir.EntryPC]
+	if !ok {
+		return nil, fmt.Errorf("invalid_input: missing entry block")
+	}
 	entry, err := initialFrame(ir)
 	if err != nil {
 		return nil, err
 	}
-	if len(fn.Blocks) == 0 {
-		return fn, nil
+	// A distinct edge kind retains method entry independently of all backedges.
+	entryEdge := methodir.Edge{ID: methodir.EdgeID{From: methodir.InstrID(ir.EntryPC), To: methodir.InstrID(ir.EntryPC), Kind: EntryEdgeKind}, From: methodir.InstrID(ir.EntryPC), To: methodir.InstrID(ir.EntryPC), Kind: EntryEdgeKind}
+	fn.entryEdge = &entryEdge
+	incoming := map[methodir.BlockID][]methodir.Edge{entryID: {entryEdge}}
+	outgoing := map[methodir.InstrID][]methodir.Edge{}
+	for _, e := range ir.Edges {
+		tb, ok := blockOf[uint16(e.To)]
+		if !ok {
+			return nil, fmt.Errorf("invalid_input: edge target is not a block entry")
+		}
+		incoming[tb] = append(incoming[tb], e)
+		outgoing[e.From] = append(outgoing[e.From], e)
 	}
-	fn.Blocks[0].In = entry
-	fn.Blocks[0].InOrig = paramOrigins(entry)
-
-	ef := edgeFrames{normal: map[methodir.EdgeID]frametransfer.Frame{}, orig: map[methodir.EdgeID][]Origin{}}
-
-	pending := []methodir.BlockID{fn.Blocks[0].ID}
-	inQ := map[methodir.BlockID]bool{fn.Blocks[0].ID: true}
+	for id := range incoming {
+		sort.Slice(incoming[id], func(i, j int) bool { return incoming[id][i].ID.String() < incoming[id][j].ID.String() })
+	}
+	ef := edgeFrames{normal: map[methodir.EdgeID]frametransfer.Frame{entryEdge.ID: entry}, orig: map[methodir.EdgeID][]Origin{entryEdge.ID: paramOrigins(entry)}}
+	pending := []methodir.BlockID{entryID}
+	inQ := map[methodir.BlockID]bool{entryID: true}
 	rng := rand.New(rand.NewSource(opt.ShuffleSeed))
-
-	pop := func() methodir.BlockID {
-		var i int
-		if opt.Shuffle && len(pending) > 1 {
-			i = rng.Intn(len(pending))
-		} else {
-			i = 0
-		}
-		id := pending[i]
-		pending = append(pending[:i], pending[i+1:]...)
-		inQ[id] = false
-		return id
-	}
-
-	enqueue := func(id methodir.BlockID) {
-		if !inQ[id] {
-			inQ[id] = true
-			pending = append(pending, id)
-		}
-	}
-
-	seen := map[methodir.BlockID]bool{}
+	records := map[uint16]InstructionValues{}
 	for len(pending) > 0 {
 		if err := charge(ctr, 1); err != nil {
 			return nil, err
 		}
 		fn.Work++
-		bid := pop()
-		bi := index[bid]
-		b := ir.Blocks[bid]
-		preds := fn.Incoming(b.FirstPC)
-		joinOrig := func(preds []methodir.Edge) []Origin {
-			var joined []Origin
-			for _, e := range preds {
-				og, ok := ef.orig[e.ID]
-				if !ok {
-					continue
-				}
-				if joined == nil {
-					joined = append([]Origin(nil), og...)
-					continue
-				}
-				n := len(joined)
-				if len(og) < n {
-					n = len(og)
-				}
-				for i := 0; i < n; i++ {
-					if joined[i].Key() != og[i].Key() {
-						joined[i] = Origin{Kind: OriginPhi, PC: b.FirstPC, Slot: i, Aux: int(bid)}
-					}
-				}
-			}
-			return joined
+		qi := 0
+		if opt.LIFO {
+			qi = len(pending) - 1
+		} else if opt.Shuffle && len(pending) > 1 {
+			qi = rng.Intn(len(pending))
 		}
-		if bid != fn.Blocks[0].ID {
-			var joined *frametransfer.Frame
-			for _, e := range preds {
-				fr, ok := ef.normal[e.ID]
-				if !ok {
-					continue
-				}
-				if joined == nil {
-					cp := fr.Clone()
-					joined = &cp
-					continue
-				}
-				j, err := frametransfer.JoinFrames(*joined, fr)
-				if err != nil {
-					return nil, err
-				}
-				if err := charge(ctr, 1); err != nil {
-					return nil, err
-				}
-				*joined = j
+		bid := pending[qi]
+		pending = append(pending[:qi], pending[qi+1:]...)
+		inQ[bid] = false
+		bi := index[bid]
+		b := ir.Blocks[bi]
+		var joined *frametransfer.Frame
+		var origins []Origin
+		for _, e := range incoming[bid] {
+			fr, available := ef.normal[e.ID]
+			if !available {
+				continue
+			} // absence is unreachable, never TOP
+			og := ef.orig[e.ID]
+			if err := charge(ctr, uint64(1+len(og))); err != nil {
+				return nil, err
 			}
 			if joined == nil {
+				cp := fr.Clone()
+				joined = &cp
+				origins = append([]Origin(nil), og...)
 				continue
 			}
-			og := joinOrig(preds)
-			if seen[bid] && fn.Blocks[bi].In.Equal(*joined) && originsEqual(fn.Blocks[bi].InOrig, og) {
-				continue
+			j, err := frametransfer.JoinFrames(*joined, fr)
+			if err != nil {
+				return nil, err
 			}
-			fn.Blocks[bi].In = *joined
-			fn.Blocks[bi].InOrig = og
-		} else if len(preds) > 0 {
-			joined := fn.Blocks[bi].In.Clone()
-			have := false
-			for _, e := range preds {
-				fr, ok := ef.normal[e.ID]
-				if !ok {
-					continue
-				}
-				if !have {
-					joined = fr.Clone()
-					have = true
-					continue
-				}
-				j, err := frametransfer.JoinFrames(joined, fr)
-				if err != nil {
-					return nil, err
-				}
-				if err := charge(ctr, 1); err != nil {
-					return nil, err
-				}
-				joined = j
+			if len(origins) != len(og) {
+				return nil, fmt.Errorf("invalid_input: origin join shape mismatch")
 			}
-			og := joinOrig(preds)
-			if have && (!fn.Blocks[bi].In.Equal(joined) || !originsEqual(fn.Blocks[bi].InOrig, og)) {
-				fn.Blocks[bi].In = joined
-				fn.Blocks[bi].InOrig = og
-			} else if seen[bid] && have && fn.Blocks[bi].In.Equal(joined) && originsEqual(fn.Blocks[bi].InOrig, og) {
-				continue
+			for i := range origins {
+				if origins[i] != og[i] {
+					origins[i] = Origin{Kind: OriginPhi, PC: b.FirstPC, Slot: i, Aux: int(bid)}
+				}
 			}
-		} else if seen[bid] {
+			*joined = j
+		}
+		if joined == nil {
 			continue
 		}
-		seen[bid] = true
-		in := fn.Blocks[bi].In
-		cur := in.Clone()
-		curOrig := fn.Blocks[bi].InOrig
-		if len(curOrig) == 0 {
-			curOrig = paramOrigins(in)
+		// TOP is a reachable unavailable local, and a wide pair is one SSA value.
+		normalizeOrigins(*joined, origins)
+		bf := &fn.Blocks[bi]
+		if bf.Reachable && bf.In.Equal(*joined) && originsEqual(bf.InOrig, origins) {
+			continue
 		}
-
+		bf.Reachable = true
+		bf.In = *joined
+		bf.InOrig = origins
+		cur := joined.Clone()
+		curOrig := append([]Origin(nil), origins...)
 		for _, iid := range b.InstrIDs {
+			if err := charge(ctr, uint64(1+len(curOrig))); err != nil {
+				return nil, err
+			}
 			ins, ok := ir.InstrByID(iid)
 			if !ok {
 				return nil, fmt.Errorf("invalid_input: missing instr %d", iid)
@@ -196,41 +153,80 @@ func Build(ir *methodir.MethodIR, opt Options) (*Function, error) {
 			if err != nil {
 				return nil, err
 			}
-			afterOrig := transferOrigins(beforeOrig, before, after, ins)
-			for _, e := range fn.Outgoing(iid) {
-				var fr frametransfer.Frame
-				var og []Origin
+			afterOrig, record, err := transferOrigins(beforeOrig, before, after, ins)
+			if err != nil {
+				return nil, err
+			}
+			record.Before = before
+			record.BeforeOrigins = beforeOrig
+			records[ins.PC] = record
+			for _, e := range outgoing[iid] {
+				if err := charge(ctr, 1); err != nil {
+					return nil, err
+				}
+				fr := after.Clone()
+				og := append([]Origin(nil), afterOrig...)
 				if e.Kind == core.EdgeException {
-					if ex != nil {
-						fr = ex.Clone()
-					} else {
-						fr = frametransfer.Frame{Locals: append([]frametransfer.Type(nil), before.Locals...), Stack: []frametransfer.Type{frametransfer.RefOf("java/lang/Throwable")}}
+					if ex == nil {
+						return nil, fmt.Errorf("invalid_input: exception edge from nonthrowing pc %d", ins.PC)
+					}
+					fr = ex.Clone()
+					if err := fr.Validate(); err != nil {
+						return nil, err
 					}
 					og = originsFromFrame(fr, Origin{Kind: OriginInstr, PC: ins.PC, Slot: -1})
-					for i := 0; i < len(fr.Locals) && i < len(beforeOrig); i++ {
-						og[i] = beforeOrig[i]
-					}
-				} else {
-					fr = after.Clone()
-					og = append([]Origin(nil), afterOrig...)
+					copy(og[:len(fr.Locals)], beforeOrig[:len(before.Locals)])
+					normalizeOrigins(fr, og) // constructor exceptions may invalidate aliases
+				}
+				old, exists := ef.normal[e.ID]
+				if exists && old.Equal(fr) && originsEqual(ef.orig[e.ID], og) {
+					continue
 				}
 				ef.normal[e.ID] = fr
 				ef.orig[e.ID] = og
-				if tb, ok := blockOf[uint16(e.To)]; ok {
-					enqueue(tb)
+				tb := blockOf[uint16(e.To)]
+				if !inQ[tb] {
+					inQ[tb] = true
+					pending = append(pending, tb)
 				}
 			}
 			cur = after
 			curOrig = afterOrig
 		}
-		fn.Blocks[bi].Out = cur
-		fn.Blocks[bi].OutOrig = append([]Origin(nil), curOrig...)
+		bf.Out = cur
+		bf.OutOrig = append([]Origin(nil), curOrig...)
 	}
-
+	for _, ins := range ir.Instrs {
+		if r, ok := records[ins.PC]; ok {
+			fn.Instructions = append(fn.Instructions, r)
+		}
+	}
+	for id, fr := range ef.normal {
+		fn.EdgeStates[id] = EdgeState{Frame: fr.Clone(), Origins: append([]Origin(nil), ef.orig[id]...)}
+	}
 	if err := assignPhis(fn, ef); err != nil {
 		return nil, err
 	}
+	if err := bindValues(fn); err != nil {
+		return nil, err
+	}
 	return fn, nil
+}
+
+func normalizeOrigins(f frametransfer.Frame, origins []Origin) {
+	for _, part := range []struct {
+		types  []frametransfer.Type
+		offset int
+	}{{f.Locals, 0}, {f.Stack, len(f.Locals)}} {
+		for i, t := range part.types {
+			at := part.offset + i
+			if t.Kind == frametransfer.Top {
+				origins[at] = Origin{Kind: OriginTop, Slot: at}
+			} else if t.Kind.IsTail() && i > 0 {
+				origins[at] = origins[at-1]
+			}
+		}
+	}
 }
 
 func effectiveLocal(ins methodir.Instr) int {
@@ -254,7 +250,18 @@ func effectiveLocal(ins methodir.Instr) int {
 }
 
 func initialFrame(ir *methodir.MethodIR) (frametransfer.Frame, error) {
-	max := 4
+	args, _, _, err := frametransfer.ParseDescriptor(ir.Descriptor)
+	if err != nil {
+		return frametransfer.Frame{}, err
+	}
+	slots := 0
+	if !ir.IsStatic {
+		slots = 1
+	}
+	for _, a := range args {
+		slots += a.Width()
+	}
+	max := slots
 	for _, in := range ir.Instrs {
 		loc := effectiveLocal(in)
 		if loc < 0 {
@@ -264,32 +271,31 @@ func initialFrame(ir *methodir.MethodIR) (frametransfer.Frame, error) {
 		if width < 1 {
 			width = 1
 		}
-		if need := loc + width; need > max {
-			max = need
+		if loc+width > max {
+			max = loc + width
 		}
 	}
+	if max > 65535 {
+		return frametransfer.Frame{}, fmt.Errorf("invalid_input: method locals exceed JVM limit")
+	}
 	f := frametransfer.NewFrame(max)
+	f.ThisClass = ir.ClassName
 	slot := 0
 	if !ir.IsStatic {
+		typ := frametransfer.RefOf(ir.ClassName)
 		if ir.Name == "<init>" {
-			_ = f.StoreLocal(0, frametransfer.T(frametransfer.UninitThis))
-		} else {
-			cls := ir.ClassName
-			if cls == "" {
-				cls = "java/lang/Object"
-			}
-			_ = f.StoreLocal(0, frametransfer.RefOf(cls))
+			typ = frametransfer.T(frametransfer.UninitThis)
+		}
+		if err := f.StoreLocal(0, typ); err != nil {
+			return frametransfer.Frame{}, err
 		}
 		slot = 1
 	}
-	args, _, _, _ := frametransfer.ParseDescriptor(ir.Descriptor)
 	for _, a := range args {
-		_ = f.StoreLocal(slot, a)
-		if a.Kind.IsCat2Head() {
-			slot += 2
-		} else {
-			slot++
+		if err := f.StoreLocal(slot, a); err != nil {
+			return frametransfer.Frame{}, err
 		}
+		slot += a.Width()
 	}
 	return f, nil
 }
@@ -304,7 +310,9 @@ func paramOrigins(f frametransfer.Frame) []Origin {
 		} else {
 			t = f.Stack[i-len(f.Locals)]
 		}
-		if t.Kind == frametransfer.Top || t.Kind.IsTail() {
+		if t.Kind.IsTail() && i > 0 {
+			out[i] = out[i-1]
+		} else if t.Kind == frametransfer.Top {
 			out[i] = Origin{Kind: OriginTop, Slot: i}
 		} else {
 			out[i] = Origin{Kind: OriginParam, Slot: i}
@@ -345,43 +353,6 @@ func originsFromFrame(f frametransfer.Frame, def Origin) []Origin {
 	return out
 }
 
-func transferOrigins(before []Origin, beforeF, afterF frametransfer.Frame, ins methodir.Instr) []Origin {
-	out := originsFromFrame(afterF, Origin{Kind: OriginInstr, PC: ins.PC})
-	nl := len(afterF.Locals)
-	wrote := -1
-	if core.LocalAccessOf(ins.Opcode).Write {
-		wrote = effectiveLocal(ins)
-	}
-	for i := 0; i < nl; i++ {
-		if wrote == i {
-			out[i] = Origin{Kind: OriginInstr, PC: ins.PC, Slot: i}
-			continue
-		}
-		if i < len(beforeF.Locals) && i < len(before) && afterF.Locals[i].SameLattice(beforeF.Locals[i]) && afterF.Locals[i].Kind != frametransfer.Top {
-			out[i] = before[i]
-		}
-	}
-	if len(afterF.Stack) == len(beforeF.Stack) {
-		same := true
-		for i := range afterF.Stack {
-			if !afterF.Stack[i].SameLattice(beforeF.Stack[i]) {
-				same = false
-				break
-			}
-		}
-		if same {
-			for i := range afterF.Stack {
-				bi := len(beforeF.Locals) + i
-				ai := nl + i
-				if bi >= 0 && bi < len(before) && ai < len(out) {
-					out[ai] = before[bi]
-				}
-			}
-		}
-	}
-	return out
-}
-
 type edgeFrames struct {
 	normal map[methodir.EdgeID]frametransfer.Frame
 	orig   map[methodir.EdgeID][]Origin
@@ -396,7 +367,7 @@ func assignPhis(fn *Function, ef edgeFrames) error {
 	var phis []Phi
 	for _, b := range fn.Blocks {
 		preds := fn.Incoming(b.First)
-		if len(preds) < 2 {
+		if !b.Reachable || len(preds) < 2 {
 			continue
 		}
 		nloc := len(b.In.Locals)
@@ -420,7 +391,10 @@ func assignPhis(fn *Function, ef edgeFrames) error {
 			diff := false
 			var first Origin
 			for _, e := range preds {
-				og := ef.orig[e.ID]
+				og, available := ef.orig[e.ID]
+				if !available {
+					continue
+				}
 				fr := ef.normal[e.ID]
 				idx := sk.Index
 				if !sk.Local {
@@ -430,7 +404,7 @@ func assignPhis(fn *Function, ef edgeFrames) error {
 				if idx >= 0 && idx < len(og) {
 					o = og[idx]
 				} else {
-					o = Origin{Kind: OriginTop, Slot: idx}
+					return fmt.Errorf("invalid_input: missing reachable phi origin at %d", idx)
 				}
 				ops = append(ops, PhiOperand{Edge: e.ID, Origin: o})
 				if len(seen) == 0 {

@@ -59,20 +59,38 @@ type Phi struct {
 }
 
 type BlockFrame struct {
-	ID      methodir.BlockID
-	First   uint16
-	In      frametransfer.Frame
-	Out     frametransfer.Frame
-	InOrig  []Origin
-	OutOrig []Origin
+	Reachable bool
+	ID        methodir.BlockID
+	First     uint16
+	In        frametransfer.Frame
+	Out       frametransfer.Frame
+	InOrig    []Origin
+	OutOrig   []Origin
+}
+
+// EntryEdgeKind is reserved for the permanent synthetic method-entry edge.
+const EntryEdgeKind core.EdgeKind = 255
+
+type EdgeState struct {
+	Frame   frametransfer.Frame
+	Origins []Origin
+}
+
+type ValueDefinition struct {
+	ID     ValueID
+	Origin Origin
 }
 
 type Function struct {
-	IR     *methodir.MethodIR
-	Blocks []BlockFrame
-	Phis   []Phi
-	Params []ValueID
-	Work   uint64
+	Values       []ValueDefinition
+	EdgeStates   map[methodir.EdgeID]EdgeState
+	Instructions []InstructionValues
+	entryEdge    *methodir.Edge
+	IR           *methodir.MethodIR
+	Blocks       []BlockFrame
+	Phis         []Phi
+	Params       []ValueID
+	Work         uint64
 }
 
 func (f *Function) PhisOf(b methodir.BlockID) []Phi {
@@ -99,7 +117,7 @@ func (f *Function) Normalize() string {
 		}
 		return phis[i].Slot.Index < phis[j].Slot.Index
 	})
-	s := fmt.Sprintf("work=%d blocks=%d\n", f.Work, len(f.Blocks))
+	s := fmt.Sprintf("blocks=%d\n", len(f.Blocks))
 	for _, b := range f.Blocks {
 		s += fmt.Sprintf("block %d pc=%d in=%s out=%s\n", b.ID, b.First, b.In.Canonical(), b.Out.Canonical())
 	}
@@ -123,6 +141,9 @@ func (f *Function) Incoming(blockPC uint16) []methodir.Edge {
 		return nil
 	}
 	var out []methodir.Edge
+	if f.entryEdge != nil && uint16(f.entryEdge.To) == blockPC {
+		out = append(out, *f.entryEdge)
+	}
 	for _, e := range f.IR.Edges {
 		if uint16(e.To) == blockPC {
 			out = append(out, e)
