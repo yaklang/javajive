@@ -69,6 +69,10 @@ func Build(ir *methodir.MethodIR, opt Options) (*Function, error) {
 	for id := range incoming {
 		sort.Slice(incoming[id], func(i, j int) bool { return incoming[id][i].ID.String() < incoming[id][j].ID.String() })
 	}
+	fn.incoming = map[uint16][]methodir.Edge{}
+	for bid, edges := range incoming {
+		fn.incoming[ir.Blocks[index[bid]].FirstPC] = edges
+	}
 	ef := edgeFrames{normal: map[methodir.EdgeID]frametransfer.Frame{entryEdge.ID: entry}, orig: map[methodir.EdgeID][]Origin{entryEdge.ID: paramOrigins(entry)}}
 	pending := []methodir.BlockID{entryID}
 	inQ := map[methodir.BlockID]bool{entryID: true}
@@ -204,10 +208,10 @@ func Build(ir *methodir.MethodIR, opt Options) (*Function, error) {
 	for id, fr := range ef.normal {
 		fn.EdgeStates[id] = EdgeState{Frame: fr.Clone(), Origins: append([]Origin(nil), ef.orig[id]...)}
 	}
-	if err := assignPhis(fn, ef); err != nil {
+	if err := assignPhis(fn, ef, ctr); err != nil {
 		return nil, err
 	}
-	if err := bindValues(fn); err != nil {
+	if err := bindValues(fn, ctr); err != nil {
 		return nil, err
 	}
 	return fn, nil
@@ -358,7 +362,7 @@ type edgeFrames struct {
 	orig   map[methodir.EdgeID][]Origin
 }
 
-func assignPhis(fn *Function, ef edgeFrames) error {
+func assignPhis(fn *Function, ef edgeFrames, ctr WorkCounter) error {
 	type key struct {
 		b methodir.BlockID
 		s SlotKey
@@ -366,6 +370,9 @@ func assignPhis(fn *Function, ef edgeFrames) error {
 	next := ValueID(1)
 	var phis []Phi
 	for _, b := range fn.Blocks {
+		if err := charge(ctr, uint64(1+len(b.InOrig))); err != nil {
+			return err
+		}
 		preds := fn.Incoming(b.First)
 		if !b.Reachable || len(preds) < 2 {
 			continue
@@ -391,6 +398,9 @@ func assignPhis(fn *Function, ef edgeFrames) error {
 			diff := false
 			var first Origin
 			for _, e := range preds {
+				if err := charge(ctr, 1); err != nil {
+					return err
+				}
 				og, available := ef.orig[e.ID]
 				if !available {
 					continue

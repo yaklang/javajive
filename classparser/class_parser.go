@@ -113,6 +113,9 @@ func (this *ClassParser) readMembers() ([]*MemberInfo, error) {
 	if err := this.reader.Err(); err != nil {
 		return nil, err
 	}
+	if !this.reader.reserve(int64(memberCount), 8) {
+		return nil, this.reader.Err()
+	}
 	members := make([]*MemberInfo, memberCount)
 	for i := range members {
 		members[i] = this.readMember()
@@ -136,6 +139,9 @@ func (this *ClassParser) readAttributes() []AttributeInfo {
 		return nil
 	}
 	seen := map[string]int{}
+	if !this.reader.reserve(int64(attributesCount), 6) {
+		return nil
+	}
 	attributes := make([]AttributeInfo, attributesCount)
 	for i := range attributes {
 		attributes[i] = this.readAttribute(seen)
@@ -220,6 +226,9 @@ func (this *ClassParser) readConstantPool() error {
 		return this.reader.fail(ParseCodeCPCount, "constant_pool_count must be >= 1")
 	}
 	cpCount := int(cpCountU)
+	if !this.reader.reserve(int64(cpCount-1), 1) {
+		return this.reader.Err()
+	}
 	cp := make([]ConstantInfo, cpCount-1)
 
 	//索引从1开始，这里用了 <cpCount 说明index是从1到cpCount-1 及上文的1 ~ n-1

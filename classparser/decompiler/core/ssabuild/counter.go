@@ -1,6 +1,9 @@
 package ssabuild
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 type WorkCounter interface {
 	Charge(units uint64) error
@@ -15,10 +18,10 @@ func (c *LimitCounter) Charge(units uint64) error {
 	if c == nil {
 		return nil
 	}
-	c.Used += units
-	if c.Max > 0 && c.Used > c.Max {
+	if units > math.MaxUint64-c.Used || c.Max > 0 && (c.Used > c.Max || units > c.Max-c.Used) {
 		return fmt.Errorf("analysis_budget_exceeded: after %d updates", c.Used)
 	}
+	c.Used += units
 	return nil
 }
 

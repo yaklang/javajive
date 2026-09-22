@@ -192,6 +192,15 @@ func annotationGetUtf8(cp *ClassParser, index uint16) string {
 }
 
 func ParseAnnotationElementValue(cp *ClassParser) *ElementValuePairAttribute {
+	if cp.annoDepth >= maxAnnotationNesting {
+		cp.reader.fail(ParseCodeResourceLimit, "annotation element nesting exceeds limit")
+		return &ElementValuePairAttribute{}
+	}
+	cp.annoDepth++
+	defer func() { cp.annoDepth-- }()
+	if !cp.reader.reserve(1, 1) {
+		return &ElementValuePairAttribute{}
+	}
 	reader := cp.reader
 	tag := reader.readUint8()
 	ele := &ElementValuePairAttribute{
@@ -235,10 +244,16 @@ func ParseAnnotationElementValue(cp *ClassParser) *ElementValuePairAttribute {
 		ele.Value = ParseAnnotation(cp)
 	case '[':
 		length := reader.readUint16()
+		if !reader.reserve(int64(length), 1) {
+			return ele
+		}
 		l := []*ElementValuePairAttribute{}
 		for k := 0; k < int(length); k++ {
 			val := ParseAnnotationElementValue(cp)
 			l = append(l, val)
+			if reader.Err() != nil {
+				return ele
+			}
 		}
 		ele.Value = l
 	default:
@@ -461,6 +476,9 @@ func ParseAnnotation(cp *ClassParser) *AnnotationAttribute {
 	typeIndex := reader.readUint16()
 	elementLen := reader.readUint16()
 	if reader != nil && reader.Err() != nil {
+		return &AnnotationAttribute{}
+	}
+	if !reader.reserve(int64(elementLen), 3) {
 		return &AnnotationAttribute{}
 	}
 	typeName := annotationGetUtf8(cp, typeIndex)

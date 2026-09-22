@@ -114,7 +114,6 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 	}
 	result = DecompileResult{
 		Mode:            options.Mode,
-		InputHash:       fmt.Sprintf("%x", sha256.Sum256(data)),
 		Status:          "invalid_input",
 		EffectiveConfig: effectiveConfigOf(options),
 	}
@@ -124,6 +123,12 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 	defer func() {
 		if v := recover(); v != nil {
 			err = fmt.Errorf("decompile: %v", v)
+			if budget != nil && budget.Err() != nil {
+				err = budget.Err()
+				result.Status = statusForDecompileError(err)
+				result.Source = ""
+				return
+			}
 			if result.Status != "invalid_input" {
 				result.Status = "unsupported"
 			}
@@ -135,10 +140,29 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 	if err := options.Limits.Validate(); err != nil {
 		return result, nil, err
 	}
-	obj, err := Parse(data)
+	budget = options.Work
+	if budget == nil {
+		budget = workbudget.New(options.Context, options.Limits)
+	}
+	if err := budget.CheckContext(options.Context); err != nil {
+		result.Status = statusForDecompileError(err)
+		return result, budget, err
+	}
+	// Cancellation and input admission precede hashing and all parser allocations.
+	reader, err := NewClassReaderWithBudget(data, budget)
+	if err != nil {
+		result.Status = statusForDecompileError(err)
+		return result, budget, err
+	}
+	reader.context = options.Context
+	result.InputHash = fmt.Sprintf("%x", sha256.Sum256(data))
+	obj, err := parseWithReader(reader)
 	if err != nil {
 		result.Status = StatusClassifies(err)
-		return result, nil, err
+		if workbudget.Is(err) {
+			result.Status = statusForDecompileError(err)
+		}
+		return result, budget, err
 	}
 	result.Members = newMemberLedger(obj)
 	result.Syntax = ValidationObservation{Status: "not_run"}
@@ -149,10 +173,6 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		}
 	}()
 	result.Status = "unsupported"
-	budget = options.Work
-	if budget == nil {
-		budget = workbudget.New(options.Context, options.Limits)
-	}
 	d := NewClassObjectDumper(obj)
 	d.options = options
 	d.report = &result
@@ -198,6 +218,11 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 	}
 	applyBootstrapCapabilities(&result, d)
 	noteUnsupportedBootstraps(&result, obj)
+	if err := budget.CheckContext(options.Context); err != nil {
+		result.Status = statusForDecompileError(err)
+		result.Source = ""
+		return result, budget, err
+	}
 	return result, budget, nil
 }
 

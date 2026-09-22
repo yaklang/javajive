@@ -355,3 +355,26 @@ func TestValueBindingsUniqueAndRefreshed(t *testing.T) {
 		}
 	}
 }
+
+func TestFinalValueBindingWorkAndCounterOverflow(t *testing.T) {
+	ir := irOf(t, []byte{core.OP_ILOAD_0, core.OP_IRETURN}, "(I)I", nil)
+	unlimited := &LimitCounter{}
+	if _, err := Build(ir, Options{Counter: unlimited}); err != nil {
+		t.Fatal(err)
+	}
+	if unlimited.Used < 2 {
+		t.Fatal("fixture did not perform budgeted work")
+	}
+	exact := &LimitCounter{Max: unlimited.Used}
+	if _, err := Build(ir, Options{Counter: exact}); err != nil {
+		t.Fatal(err)
+	}
+	short := &LimitCounter{Max: unlimited.Used - 1}
+	if _, err := Build(ir, Options{Counter: short}); err == nil {
+		t.Fatal("final binding work escaped budget")
+	}
+	overflow := &LimitCounter{Used: ^uint64(0)}
+	if err := overflow.Charge(1); err == nil || overflow.Used != ^uint64(0) {
+		t.Fatal("local counter overflow wrapped")
+	}
+}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/yaklang/javajive/internal/codec"
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type ClassObject struct {
@@ -298,6 +299,20 @@ func ParseFromFile(path string) (cf *ClassObject, err error) {
 	return Parse(bytes)
 }
 func Parse(classData []byte) (cf *ClassObject, err error) {
+	return ParseWithBudget(classData, nil)
+}
+
+// ParseWithBudget shares cancellation, input, read and allocation work with the
+// enclosing decompile/archive request. Standalone Parse keeps legacy defaults.
+func ParseWithBudget(classData []byte, work *workbudget.Budget) (cf *ClassObject, err error) {
+	reader, err := NewClassReaderWithBudget(classData, work)
+	if err != nil {
+		return nil, err
+	}
+	return parseWithReader(reader)
+}
+
+func parseWithReader(reader *ClassReader) (cf *ClassObject, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			var ok bool
@@ -306,10 +321,10 @@ func Parse(classData []byte) (cf *ClassObject, err error) {
 			if !ok {
 				e = utils.Errorf("%v", r)
 			}
-			err = utils.Errorf("parse class error: %v", e)
+			err = fmt.Errorf("parse class error: %w", e)
 		}
 	}()
-	cp := NewClassParser(classData)
+	cp := &ClassParser{reader: reader, classObj: NewClassObject()}
 	obj, err := cp.Parse()
 	if err != nil {
 		return nil, err
@@ -318,6 +333,9 @@ func Parse(classData []byte) (cf *ClassObject, err error) {
 		if err := obj.CheckUtf8UseSites(); err != nil {
 			return nil, err
 		}
+	}
+	if err := reader.work.CheckContext(reader.context); err != nil {
+		return nil, err
 	}
 	return obj, nil
 }

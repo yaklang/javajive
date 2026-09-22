@@ -46,7 +46,7 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 				return callbinding.Class{}, false
 			}
 			var err error
-			obj, err = Parse(data)
+			obj, err = c.parseResolved(data)
 			if err != nil || obj.GetClassName() != n {
 				misses[n] = true
 				return callbinding.Class{}, false

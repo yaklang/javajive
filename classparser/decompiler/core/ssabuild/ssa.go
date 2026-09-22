@@ -86,6 +86,7 @@ type Function struct {
 	EdgeStates   map[methodir.EdgeID]EdgeState
 	Instructions []InstructionValues
 	entryEdge    *methodir.Edge
+	incoming     map[uint16][]methodir.Edge
 	IR           *methodir.MethodIR
 	Blocks       []BlockFrame
 	Phis         []Phi
@@ -139,6 +140,9 @@ func (f *Function) Normalize() string {
 func (f *Function) Incoming(blockPC uint16) []methodir.Edge {
 	if f == nil || f.IR == nil {
 		return nil
+	}
+	if f.incoming != nil {
+		return append([]methodir.Edge(nil), f.incoming[blockPC]...)
 	}
 	var out []methodir.Edge
 	if f.entryEdge != nil && uint16(f.entryEdge.To) == blockPC {

@@ -42,6 +42,9 @@ func captureReaderWindow(r *ClassReader) []byte {
 	if r == nil || r.Remaining() == 0 {
 		return nil
 	}
+	if !r.reserve(int64(r.Remaining()), 1) {
+		return nil
+	}
 	return append([]byte{}, r.orig[r.pos:r.end]...)
 }
 
@@ -51,10 +54,16 @@ func (a *RuntimeVisibleParameterAnnotationsAttribute) readInfo(cp *ClassParser) 
 	if cp.reader.Err() != nil {
 		return
 	}
+	if !cp.reader.reserve(int64(a.NumParameters), 2) {
+		return
+	}
 	a.ParameterAnnotations = make([][]*AnnotationAttribute, a.NumParameters)
 	for i := range a.ParameterAnnotations {
 		n := cp.reader.readUint16()
 		if cp.reader.Err() != nil {
+			return
+		}
+		if !cp.reader.reserve(int64(n), 4) {
 			return
 		}
 		list := make([]*AnnotationAttribute, n)

@@ -65,8 +65,14 @@ type InnerClassInfo struct {
 
 func (i *InnerClassesAttribute) readInfo(cp *ClassParser) {
 	i.NumberOfClasses = cp.reader.readUint16()
+	if !cp.reader.reserve(int64(i.NumberOfClasses), 8) {
+		return
+	}
 	i.Classes = make([]*InnerClassInfo, i.NumberOfClasses)
 	for j := range i.Classes {
+		if cp.reader.Err() != nil {
+			return
+		}
 		i.Classes[j] = &InnerClassInfo{
 			InnerClassInfoIndex:   cp.reader.readUint16(),
 			OuterClassInfoIndex:   cp.reader.readUint16(),
@@ -96,14 +102,23 @@ type BootstrapMethodsAttribute struct {
 
 func (r *BootstrapMethodsAttribute) readInfo(cp *ClassParser) {
 	r.NumBootstrapMethods = cp.reader.readUint16()
+	if !cp.reader.reserve(int64(r.NumBootstrapMethods), 4) {
+		return
+	}
 	r.BootstrapMethods = make([]*BootstrapMethod, r.NumBootstrapMethods)
 	for i := range r.BootstrapMethods {
+		if cp.reader.Err() != nil {
+			return
+		}
 		m := &BootstrapMethod{
 			BootstrapMethodRef:    cp.reader.readUint16(),
 			NumBootstrapArguments: cp.reader.readUint16(),
 		}
 		if err := cp.classObj.checkCPIndex(m.BootstrapMethodRef, false, "bootstrap_method_ref", CONSTANT_MethodHandle); err != nil && cp.reader.Err() == nil {
 			cp.reader.fail(ParseCodeCPIndex, err.Error())
+		}
+		if !cp.reader.reserve(int64(m.NumBootstrapArguments), 2) {
+			return
 		}
 		for j := 0; j < int(m.NumBootstrapArguments); j++ {
 			arg := cp.reader.readUint16()
@@ -206,8 +221,14 @@ type LineNumberTableEntry struct {
 
 func (self *LineNumberTableAttribute) readInfo(cp *ClassParser) {
 	lineNumberTableLength := cp.reader.readUint16()
+	if !cp.reader.reserve(int64(lineNumberTableLength), 4) {
+		return
+	}
 	self.LineNumberTable = make([]*LineNumberTableEntry, lineNumberTableLength)
 	for i := range self.LineNumberTable {
+		if cp.reader.Err() != nil {
+			return
+		}
 		self.LineNumberTable[i] = &LineNumberTableEntry{
 			StartPc:    cp.reader.readUint16(),
 			LineNumber: cp.reader.readUint16(),
@@ -382,8 +403,14 @@ type EnumConstValue struct {
 
 func (r *RuntimeVisibleAnnotationsAttribute) readInfo(cp *ClassParser) {
 	annotationsCount := cp.reader.readUint16()
+	if !cp.reader.reserve(int64(annotationsCount), 4) {
+		return
+	}
 	r.Annotations = make([]*AnnotationAttribute, annotationsCount)
 	for i := range r.Annotations {
+		if cp.reader.Err() != nil {
+			return
+		}
 		anno := ParseAnnotation(cp)
 		r.Annotations[i] = anno
 	}
@@ -404,8 +431,14 @@ func (self *CodeAttribute) readInfo(cp *ClassParser) {
 
 func readExceptionTable(reader *ClassReader) []*ExceptionTableEntry {
 	exceptionTableLength := reader.readUint16()
+	if !reader.reserve(int64(exceptionTableLength), 8) {
+		return nil
+	}
 	exceptionTable := make([]*ExceptionTableEntry, exceptionTableLength)
 	for i := range exceptionTable {
+		if reader.Err() != nil {
+			return nil
+		}
 		exceptionTable[i] = &ExceptionTableEntry{
 			StartPc:   reader.readUint16(),
 			EndPc:     reader.readUint16(),

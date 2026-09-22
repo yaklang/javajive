@@ -38,7 +38,10 @@ func applySecureGraphBounds(opts *DecompileOptions) {
 	}
 	derived := defaultGraphBound
 	if opts.MaxAnalysisUpdates > 0 {
-		derived = int64(opts.MaxAnalysisUpdates) * analysisGraphFactor
+		derived = defaultGraphBound
+		if int64(opts.MaxAnalysisUpdates) <= defaultGraphBound/analysisGraphFactor {
+			derived = int64(opts.MaxAnalysisUpdates) * analysisGraphFactor
+		}
 		if derived < analysisGraphFactor {
 			derived = analysisGraphFactor
 		}
@@ -199,4 +202,19 @@ func (c *ClassObjectDumper) consultResolverForCancel() error {
 		_, _ = c.foldSiblingResolver(super)
 	}
 	return c.checkWork()
+}
+
+// parseResolved preserves the caller's request budget across resolver metadata
+// reads. Parsing failure remains sticky even when a best-effort lookup returns
+// "not found" to its caller.
+func (c *ClassObjectDumper) parseResolved(data []byte) (*ClassObject, error) {
+	if err := c.checkWork(); err != nil {
+		return nil, err
+	}
+	reader, err := NewClassReaderWithBudget(data, c.Work)
+	if err != nil {
+		return nil, err
+	}
+	reader.context = c.options.Context
+	return parseWithReader(reader)
 }

@@ -248,7 +248,7 @@ func (c *ClassObjectDumper) superIsOwnFormalFlattenedSibling() bool {
 	if !ok || len(data) == 0 {
 		return false
 	}
-	sObj, err := Parse(data)
+	sObj, err := c.parseResolved(data)
 	if err != nil {
 		return false
 	}
@@ -2044,7 +2044,7 @@ func (c *ClassObjectDumper) enclosingTypeParamBounds(free []string) map[string]s
 		if !ok || len(data) == 0 {
 			continue
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			continue
 		}
@@ -2111,7 +2111,7 @@ func (c *ClassObjectDumper) enclosingTypeParamErasures(vars map[string]bool) map
 		if !ok || len(data) == 0 {
 			continue
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			continue
 		}
@@ -2197,7 +2197,7 @@ func (c *ClassObjectDumper) enclosingFormalTypeParamsForArity() []string {
 		if !ok || len(data) == 0 {
 			continue
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			continue
 		}
@@ -2293,7 +2293,7 @@ func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr str
 		if !ok || len(data) == 0 {
 			continue // JDK / external supertype not in this jar (covered by InstantiateJDKMethodParam)
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			continue
 		}
@@ -2394,7 +2394,7 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 		if !ok || len(data) == 0 {
 			return "", nil, false // JDK / external: not in jar
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			return "", nil, false
 		}
@@ -2479,7 +2479,7 @@ func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc
 			cache[internal] = e
 			data, ok := resolver(internal)
 			if ok && len(data) > 0 {
-				if sObj, err := Parse(data); err == nil {
+				if sObj, err := c.parseResolved(data); err == nil {
 					ctorSigs := map[int]string{}
 					seen := map[int]bool{}
 					for _, m := range sObj.Methods {
@@ -2568,7 +2568,7 @@ func (c *ClassObjectDumper) buildSiblingFieldSig() func(internalName, fieldName 
 			cache[internal] = e
 			data, ok := resolver(internal)
 			if ok && len(data) > 0 {
-				if sObj, err := Parse(data); err == nil {
+				if sObj, err := c.parseResolved(data); err == nil {
 					fieldSigs := map[string]string{}
 					for _, fld := range sObj.Fields {
 						name, err := sObj.getUtf8(fld.NameIndex)
@@ -2668,7 +2668,7 @@ func (c *ClassObjectDumper) buildSiblingSuperTypes() func(internalName string) (
 		if !ok || len(data) == 0 {
 			return nil, false // JDK / external: not in jar
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			return nil, false
 		}

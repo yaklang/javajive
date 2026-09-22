@@ -57,6 +57,9 @@ func (a *TypeAnnotationsAttribute) readInfo(cp *ClassParser) {
 	if cp.reader.Err() != nil {
 		return
 	}
+	if !cp.reader.reserve(int64(n), 6) {
+		return
+	}
 	a.Annotations = make([]*TypeAnnotation, n)
 	for i := range a.Annotations {
 		ta := parseTypeAnnotation(cp)
@@ -90,6 +93,9 @@ func parseTypeAnnotation(cp *ClassParser) *TypeAnnotation {
 	case 0x40, 0x41:
 		ta.CodeOffsetTarget = true
 		tl := cp.reader.readUint16()
+		if !cp.reader.reserve(int64(tl), 6) {
+			return ta
+		}
 		ta.LocalVarTable = make([]LocalVarTarget, tl)
 		for i := range ta.LocalVarTable {
 			ta.LocalVarTable[i] = LocalVarTarget{
@@ -117,6 +123,9 @@ func parseTypeAnnotation(cp *ClassParser) *TypeAnnotation {
 	}
 	pathLen := cp.reader.readUint8()
 	if cp.reader.Err() != nil {
+		return ta
+	}
+	if !cp.reader.reserve(int64(pathLen), 2) {
 		return ta
 	}
 	ta.TypePath = make([]TypePathEntry, pathLen)

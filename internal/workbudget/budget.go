@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -14,6 +15,10 @@ import (
 type Counter string
 
 const (
+	CounterInputBytes        Counter = "input_bytes"
+	CounterReadBytes         Counter = "read_bytes"
+	CounterReadOps           Counter = "read_ops"
+	CounterParseItems        Counter = "parse_items"
 	CounterGraphScans        Counter = "graph_scans"
 	CounterGraphEdges        Counter = "graph_edges"
 	CounterSetElementWork    Counter = "set_element_work"
@@ -54,6 +59,9 @@ const (
 
 // Limits are request-scoped. Zero fields are unlimited; negative fields are invalid.
 type Limits struct {
+	MaxInputBytes        int64
+	MaxReadBytes         int64
+	MaxParseItems        int64
 	MaxGraphScans        int64
 	MaxGraphEdges        int64
 	MaxSetElementWork    int64
@@ -87,6 +95,12 @@ func (l Limits) Validate() error {
 
 func (l Limits) limitFor(c Counter) int64 {
 	switch c {
+	case CounterInputBytes:
+		return l.MaxInputBytes
+	case CounterReadBytes:
+		return l.MaxReadBytes
+	case CounterParseItems:
+		return l.MaxParseItems
 	case CounterGraphScans:
 		return l.MaxGraphScans
 	case CounterGraphEdges:
@@ -208,6 +222,9 @@ func (b *Budget) Snapshot() map[Counter]int64 {
 }
 
 func (b *Budget) checkCancelLocked() error {
+	if b.err != nil {
+		return b.err
+	}
 	if b.ctx == nil {
 		return nil
 	}
@@ -217,6 +234,27 @@ func (b *Budget) checkCancelLocked() error {
 			b.err = fail
 		}
 		return fail
+	}
+	return nil
+}
+
+// CheckContext also honors an explicit request context when callers supply a
+// preexisting archive budget. The first error remains shared and sticky.
+func (b *Budget) CheckContext(ctx context.Context) error {
+	if b == nil {
+		if ctx != nil {
+			return ctx.Err()
+		}
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.checkCancelLocked(); err != nil {
+		return err
+	}
+	if ctx != nil && ctx.Err() != nil {
+		b.err = &Error{Kind: KindCanceled, Err: ctx.Err()}
+		return b.err
 	}
 	return nil
 }
@@ -262,9 +300,6 @@ func (b *Budget) Charge(c Counter, n int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.err != nil {
-		if fail := b.checkCancelLocked(); fail != nil {
-			return fail
-		}
 		return b.err
 	}
 	if err := b.checkCancelLocked(); err != nil {
@@ -276,24 +311,69 @@ func (b *Budget) Charge(c Counter, n int64) error {
 	return b.chargeLocked(c, n, true)
 }
 
-func (b *Budget) chargeLocked(c Counter, n int64, aggregate bool) error {
-	used := b.used[c]
-	limit := b.limits.limitFor(c)
-	if overflowOrExceed(used, n, limit) {
-		fail := exceedError(c, used, n, limit)
-		if b.err == nil {
-			b.err = fail
-		}
-		return fail
+// ChargeMany validates every named counter and aggregate request work before
+// committing any counter. Sorted names make simultaneous failures deterministic.
+// Nonpositive entries retain Charge's cancellation-check-only semantics.
+func (b *Budget) ChargeMany(cost map[Counter]int64) error {
+	if b == nil {
+		return nil
 	}
-	b.used[c] = used + n
-	if aggregate && c != CounterRequestWork {
-		if err := b.chargeLocked(CounterRequestWork, n, false); err != nil {
-			b.used[c] = used
-			return err
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.checkCancelLocked(); err != nil {
+		return err
+	}
+	return b.chargeManyLocked(cost, true)
+}
+
+func (b *Budget) chargeLocked(c Counter, n int64, aggregate bool) error {
+	return b.chargeManyLocked(map[Counter]int64{c: n}, aggregate)
+}
+
+func (b *Budget) chargeManyLocked(cost map[Counter]int64, aggregate bool) error {
+	keys := make([]Counter, 0, len(cost))
+	for c, n := range cost {
+		if n > 0 {
+			keys = append(keys, c)
 		}
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	total := int64(0)
+	for _, c := range keys {
+		n := cost[c]
+		if overflowOrExceed(b.used[c], n, b.limits.limitFor(c)) {
+			b.err = exceedError(c, b.used[c], n, b.limits.limitFor(c))
+			return b.err
+		}
+		if aggregate {
+			if total > math.MaxInt64-n {
+				b.err = exceedError(CounterRequestWork, total, n, b.limits.MaxRequestWork)
+				return b.err
+			}
+			total += n
+		}
+	}
+	if aggregate && overflowOrExceed(b.used[CounterRequestWork], total, b.limits.MaxRequestWork) {
+		b.err = exceedError(CounterRequestWork, b.used[CounterRequestWork], total, b.limits.MaxRequestWork)
+		return b.err
+	}
+	for _, c := range keys {
+		if !aggregate || c != CounterRequestWork {
+			b.used[c] += cost[c]
+		}
+	}
+	if aggregate {
+		b.used[CounterRequestWork] += total
 	}
 	return nil
+}
+
+// CheckedProduct rejects unrepresentable allocation sizes before multiplication.
+func CheckedProduct(count, width int64) (int64, error) {
+	if count < 0 || width < 0 || width != 0 && count > math.MaxInt64/width {
+		return 0, fmt.Errorf("resource_limit: allocation size overflow")
+	}
+	return count * width, nil
 }
 
 // CheckOutput reports whether retaining `total` emitted source bytes would

@@ -8,7 +8,22 @@ import (
 // bindValues assigns IDs only after convergence. Phi identities are structural;
 // instruction result identities are method-local (PC, result index), so revisiting
 // a block changes operand bindings without allocating another definition.
-func bindValues(fn *Function) error {
+func bindValues(fn *Function, ctr WorkCounter) error {
+	for _, b := range fn.Blocks {
+		if err := charge(ctr, uint64(1+len(b.InOrig)+len(b.OutOrig))); err != nil {
+			return err
+		}
+	}
+	for _, r := range fn.Instructions {
+		if err := charge(ctr, uint64(1+len(r.Uses)+len(r.Results)+len(r.BeforeOrigins))); err != nil {
+			return err
+		}
+	}
+	for _, s := range fn.EdgeStates {
+		if err := charge(ctr, uint64(1+len(s.Origins))); err != nil {
+			return err
+		}
+	}
 	ids := map[Origin]ValueID{}
 	for _, p := range fn.Phis {
 		var block *BlockFrame

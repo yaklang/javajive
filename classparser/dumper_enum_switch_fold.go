@@ -93,7 +93,7 @@ func (c *ClassObjectDumper) tryFoldOneSwitchMap(src string, sw *switchMapSwitch,
 		}
 		return src, false
 	}
-	m := parseSwitchMap(data, sw.array)
+	m := c.parseSwitchMap(data, sw.array)
 	if len(m) == 0 {
 		if debug {
 			log.Infof("enum-switch fold: holder %s array %s yielded empty map", internal, sw.array)
@@ -173,8 +173,8 @@ func findSwitchMapSwitch(src string, from int) *switchMapSwitch {
 // parseSwitchMap decompiles the synthetic holder bytes and builds intKey -> constantName for the given
 // array field, by parsing its <clinit> entries. Returns nil on any failure. The sub-dumper has no
 // resolver, so this never recurses into folding.
-func parseSwitchMap(data []byte, arrayName string) map[int]string {
-	obj, err := Parse(data)
+func (c *ClassObjectDumper) parseSwitchMap(data []byte, arrayName string) map[int]string {
+	obj, err := c.parseResolved(data)
 	if err != nil {
 		return nil
 	}

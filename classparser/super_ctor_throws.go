@@ -45,7 +45,7 @@ func (c *ClassObjectDumper) superCtorCheckedThrows() string {
 	if !ok || len(data) == 0 {
 		return ""
 	}
-	sObj, err := Parse(data)
+	sObj, err := c.parseResolved(data)
 	if err != nil || sObj == nil {
 		return ""
 	}

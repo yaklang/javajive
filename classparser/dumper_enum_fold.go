@@ -139,11 +139,15 @@ func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple stri
 			result = ""
 		}
 	}()
-	subObj, err := Parse(data)
+	subObj, err := c.parseResolved(data)
 	if err != nil {
 		return ""
 	}
-	src, err := subObj.Dump()
+	child := NewClassObjectDumper(subObj)
+	child.options = c.options
+	child.Work = c.Work
+	child.report = c.report
+	src, err := child.DumpClass()
 	if err != nil || src == "" {
 		return ""
 	}

@@ -1,8 +1,10 @@
 package javaclassparser
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 /*
@@ -18,14 +20,16 @@ jvm中定义了u1，u2，u4来表示1，2，4字节的 无 符号整数
 // window orig[pos:end] so existing remaining-slice snapshots (attribute_info)
 // stay valid. Always 0 <= pos <= end <= len(orig).
 type ClassReader struct {
-	orig   []byte
-	data   []byte // remaining view; always orig[pos:end]
-	pos    int
-	end    int
-	err    error
-	stage  string
-	field  string
-	parent *ClassReader
+	orig    []byte
+	data    []byte // remaining view; always orig[pos:end]
+	pos     int
+	end     int
+	err     error
+	stage   string
+	field   string
+	parent  *ClassReader
+	work    *workbudget.Budget
+	context context.Context
 }
 
 func NewClassReader(data []byte) *ClassReader {
@@ -39,6 +43,62 @@ func NewClassReader(data []byte) *ClassReader {
 	}
 	r.syncData()
 	return r
+}
+
+// NewClassReaderWithBudget charges input before parsing or parser allocation.
+// Child attribute views share the same budget and never bill input twice.
+func NewClassReaderWithBudget(data []byte, work *workbudget.Budget) (*ClassReader, error) {
+	if err := work.Charge(workbudget.CounterInputBytes, int64(len(data))); err != nil {
+		return nil, err
+	}
+	r := NewClassReader(data)
+	r.work = work
+	return r, nil
+}
+
+func (r *ClassReader) failWork(err error) bool {
+	if err == nil {
+		return true
+	}
+	if r.err == nil {
+		r.err = err
+	}
+	for p := r.parent; p != nil; p = p.parent {
+		if p.err == nil {
+			p.err = r.err
+		}
+	}
+	return false
+}
+
+func (r *ClassReader) chargeRead(n int) bool {
+	if r.err != nil {
+		return false
+	}
+	if !r.failWork(r.work.CheckContext(r.context)) {
+		return false
+	}
+	return r.failWork(r.work.ChargeMany(map[workbudget.Counter]int64{workbudget.CounterReadBytes: int64(n), workbudget.CounterReadOps: 1}))
+}
+
+// reserve checks the minimum encoded bytes and bills logical parser objects
+// before make/append. This is a work bound, not a generic heap-memory quota.
+func (r *ClassReader) reserve(count, minBytes int64) bool {
+	if r.err != nil {
+		return false
+	}
+	if !r.failWork(r.work.CheckContext(r.context)) {
+		return false
+	}
+	n, err := workbudget.CheckedProduct(count, minBytes)
+	if err != nil {
+		return r.failWork(err)
+	}
+	if n > int64(r.Remaining()) {
+		r.fail(ParseCodeTruncated, fmt.Sprintf("table requires at least %d bytes, remaining %d", n, r.Remaining()))
+		return false
+	}
+	return r.failWork(r.work.Charge(workbudget.CounterParseItems, count))
 }
 
 func (r *ClassReader) syncData() {
@@ -150,13 +210,15 @@ func (r *ClassReader) need(n int, field string) bool {
 // If length exceeds remaining, the parent fails without advancing past Bound.
 func (r *ClassReader) Subreader(length uint32) *ClassReader {
 	child := &ClassReader{
-		orig:   r.orig,
-		pos:    r.pos,
-		end:    r.pos,
-		stage:  r.stage,
-		field:  r.field,
-		parent: r,
-		err:    r.err,
+		orig:    r.orig,
+		pos:     r.pos,
+		end:     r.pos,
+		stage:   r.stage,
+		field:   r.field,
+		parent:  r,
+		work:    r.work,
+		context: r.context,
+		err:     r.err,
 	}
 	if r.err != nil {
 		child.syncData()
@@ -169,6 +231,11 @@ func (r *ClassReader) Subreader(length uint32) *ClassReader {
 			code = ParseCodeLengthOverflow
 		}
 		r.fail(code, fmt.Sprintf("subreader length %d exceeds remaining %d", length, r.Remaining()))
+		child.err = r.err
+		child.syncData()
+		return child
+	}
+	if !r.chargeRead(0) {
 		child.err = r.err
 		child.syncData()
 		return child
@@ -187,7 +254,7 @@ func (r *ClassReader) Subreader(length uint32) *ClassReader {
 相当于java的 byte 8位无符号整数
 */
 func (this *ClassReader) readUint8() uint8 {
-	if !this.need(1, "u1") {
+	if !this.need(1, "u1") || !this.chargeRead(1) {
 		return 0
 	}
 	val := this.orig[this.pos]
@@ -202,7 +269,7 @@ func (this *ClassReader) readUint8() uint8 {
 这里class文件在文件系统中以大端法存储
 */
 func (this *ClassReader) readUint16() uint16 {
-	if !this.need(2, "u2") {
+	if !this.need(2, "u2") || !this.chargeRead(2) {
 		return 0
 	}
 	val := binary.BigEndian.Uint16(this.orig[this.pos : this.pos+2])
@@ -216,7 +283,7 @@ func (this *ClassReader) readUint16() uint16 {
 相当于java的 int 32位无符号整数
 */
 func (this *ClassReader) readUint32() uint32 {
-	if !this.need(4, "u4") {
+	if !this.need(4, "u4") || !this.chargeRead(4) {
 		return 0
 	}
 	val := binary.BigEndian.Uint32(this.orig[this.pos : this.pos+4])
@@ -230,7 +297,7 @@ func (this *ClassReader) readUint32() uint32 {
 相当于java的 long 64位无符号整数
 */
 func (this *ClassReader) readUint64() uint64 {
-	if !this.need(8, "u8") {
+	if !this.need(8, "u8") || !this.chargeRead(8) {
 		return 0
 	}
 	val := binary.BigEndian.Uint64(this.orig[this.pos : this.pos+8])
@@ -250,6 +317,9 @@ func (this *ClassReader) readUint16s() []uint16 {
 	}
 	need := int(n) * 2
 	if !this.need(need, "u2s") {
+		return nil
+	}
+	if !this.reserve(int64(n), 2) {
 		return nil
 	}
 	s := make([]uint16, n)
@@ -280,6 +350,9 @@ func (this *ClassReader) readBytes(length uint32) []byte {
 		return nil
 	}
 	n := int(length)
+	if !this.chargeRead(n) {
+		return nil
+	}
 	bytes := this.orig[this.pos : this.pos+n]
 	this.pos += n
 	this.syncData()
