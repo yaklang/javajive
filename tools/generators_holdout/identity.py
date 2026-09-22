@@ -229,6 +229,7 @@ def compile_sources(
     dest: Path,
     *,
     debug: str = "nodebug",
+    extra_cp: list[Path] | None = None,
     timeout: float = 120,
 ) -> dict[str, Any]:
     dest.mkdir(parents=True, exist_ok=True)
@@ -241,6 +242,8 @@ def compile_sources(
             argv.extend(["--release", str(identity.release)])
         else:
             argv.extend(["-source", "8", "-target", "8"])
+        if extra_cp:
+            argv.extend(["-classpath", os.pathsep.join(str(p) for p in extra_cp)])
         argv.extend(str(p) for p in sources)
     elif identity.kind == "ecj":
         java = shutil.which("java")
@@ -261,6 +264,8 @@ def compile_sources(
             "-d",
             str(dest),
         ]
+        if extra_cp:
+            argv.extend(["-classpath", os.pathsep.join(str(p) for p in extra_cp)])
         argv.extend(str(p) for p in sources)
     else:
         raise InfraError(f"unsupported compiler kind {identity.kind}")

@@ -62,22 +62,68 @@ def _under(root: Path, path: Path) -> bool:
         return False
 
 
-def _read_regular_file(path: Path, *, root: Path) -> bytes:
+MAX_STAGED_BYTES = 64 * 1024 * 1024
+MAX_STAGED_FILES = 10000
+
+
+def _read_regular_file(path: Path, *, root: Path, max_bytes: int = MAX_STAGED_BYTES) -> bytes:
+    if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")):
+        raise StagingError("unsupported", "safe staging requires no-follow directory descriptors")
     if path.is_symlink():
         raise StagingError("invalid_input", f"symlink rejected: {path}")
+    fd = None
     try:
-        st = os.lstat(path)
-    except OSError as exc:
-        raise StagingError("invalid_input", f"unreadable: {path}: {exc}") from exc
-    if not stat.S_ISREG(st.st_mode):
-        raise StagingError("invalid_input", f"not a regular file: {path}")
-    resolved = path.resolve()
-    if not _under(root, resolved) and resolved != root.resolve():
-        raise StagingError("invalid_input", f"path escaped staging root: {path} -> {resolved}")
-    return path.read_bytes()
+        root = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        relative = resolved.relative_to(root)
+        # Anchor each lookup to an opened directory and reject symlinks on every
+        # component; a concurrent symlink swap cannot redirect a staged read.
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for component in relative.parts[:-1]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        child = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        os.close(fd)
+        fd = child
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise StagingError("invalid_input", f"not a regular file: {path}")
+        if st.st_size > max_bytes:
+            raise StagingError("resource_limit", f"staged input bytes exceed {MAX_STAGED_BYTES}")
+        with os.fdopen(fd, "rb") as stream:
+            fd = None
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise StagingError("resource_limit", "staged input grew beyond byte limit")
+        return data
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, StagingError):
+            raise
+        raise StagingError("invalid_input", f"unreadable or escaping input {path}: {exc}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
-def _stage_class_tree(root: Path, prefix: str, files: dict[str, bytes]) -> None:
+class _StagingBudget:
+    def __init__(self, max_bytes: int, max_files: int):
+        self.remaining, self.files = max_bytes, max_files
+
+    def read(self, path: Path, root: Path) -> bytes:
+        if self.files <= 0:
+            raise StagingError("resource_limit", "staged input file count exceeded")
+        data = _read_regular_file(path, root=root, max_bytes=self.remaining)
+        self.remaining -= len(data)
+        self.files -= 1
+        return data
+
+
+def _walk_error(exc: OSError) -> None:
+    raise StagingError("invalid_input", f"unreadable classpath directory: {exc}")
+
+
+def _stage_class_tree(root: Path, prefix: str, files: dict[str, bytes], budget: _StagingBudget) -> None:
     """Stage .class files under prefix. Directory `-cp` does not load nested jars.
 
     Symlink directories and symlink files fail closed (never silently skipped).
@@ -87,7 +133,7 @@ def _stage_class_tree(root: Path, prefix: str, files: dict[str, bytes]) -> None:
     if not root.is_dir():
         raise StagingError("invalid_input", f"not a directory: {root}")
     root_res = root.resolve()
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=_walk_error):
         for d in list(dirnames):
             child = Path(dirpath) / d
             if child.is_symlink():
@@ -102,16 +148,19 @@ def _stage_class_tree(root: Path, prefix: str, files: dict[str, bytes]) -> None:
             if ".." in Path(rel).parts:
                 raise StagingError("invalid_input", f"parent segment in extra_cp: {rel}")
             key = f"{prefix}/{rel}" if prefix else rel
-            files[key] = _read_regular_file(path, root=root_res)
+            files[key] = budget.read(path, root_res)
 
 
-def _rel_files(root: Path, extra_cp: Iterable[Path] | None) -> tuple[dict[str, bytes], list[str]]:
+def _rel_files(root: Path, extra_cp: Iterable[Path] | None, *, max_bytes: int = MAX_STAGED_BYTES, max_files: int = MAX_STAGED_FILES) -> tuple[dict[str, bytes], list[str]]:
     """Stage class/jar family. Classpath order is [class_dir, *extra_cp] (Java semantics).
 
     extra_cp FILE jars are classpath entries. extra_cp directories are class roots only;
     nested jars inside a directory are not put on -cp (no implicit wildcard).
     Missing / unsupported / symlink inputs raise StagingError (never silent drop).
     """
+    if max_bytes < 0 or max_files < 0:
+        raise StagingError("invalid_input", "negative staging limit")
+    budget = _StagingBudget(max_bytes, max_files)
     files: dict[str, bytes] = {}
     cp_entries: list[str] = []
     root = Path(root)
@@ -119,8 +168,8 @@ def _rel_files(root: Path, extra_cp: Iterable[Path] | None) -> tuple[dict[str, b
         raise StagingError("invalid_input", f"class_dir symlink rejected: {root}")
     if not root.exists():
         raise StagingError("invalid_input", f"class_dir missing: {root}")
-    _stage_class_tree(root, "", files)
-    cp_entries.append(CONTAINER_INPUTS)
+    _stage_class_tree(root, "main", files, budget)
+    cp_entries.append(f"{CONTAINER_INPUTS}/main")
     for i, extra in enumerate(extra_cp or []):
         extra = Path(extra)
         if extra.is_symlink():
@@ -132,11 +181,11 @@ def _rel_files(root: Path, extra_cp: Iterable[Path] | None) -> tuple[dict[str, b
             if extra.suffix != ".jar":
                 raise StagingError("unsupported", f"extra_cp file is not a jar: {extra}")
             key = f"{prefix}/{extra.name}"
-            files[key] = _read_regular_file(extra, root=extra.parent.resolve())
+            files[key] = budget.read(extra, extra.parent.resolve())
             cp_entries.append(f"{CONTAINER_INPUTS}/{key}")
             continue
         if extra.is_dir():
-            _stage_class_tree(extra, prefix, files)
+            _stage_class_tree(extra, prefix, files, budget)
             cp_entries.append(f"{CONTAINER_INPUTS}/{prefix}")
             continue
         raise StagingError("unsupported", f"extra_cp is not a directory or jar: {extra}")
@@ -163,6 +212,8 @@ def _isolation_stage(obs) -> str | None:
         return obs.reason
     if not obs.did_execute:
         return "policy_deny"
+    if extra.get("leftover_verified") is not True:
+        return "leftover_query_failed"
     return None
 
 
@@ -183,6 +234,11 @@ def run_untrusted_class_dir(
 ) -> dict[str, Any]:
     """Run a class family inside the isolation worker. Never subprocess host java."""
     try:
+        from tools.generators_holdout.pipeline import InvalidBinaryName, validate_binary_name
+        try:
+            class_name = validate_binary_name(class_name)
+        except InvalidBinaryName as exc:
+            raise StagingError("invalid_input", str(exc)) from exc
         files, cp_entries = _rel_files(Path(class_dir), extra_cp)
     except StagingError as exc:
         return {
@@ -233,6 +289,7 @@ def run_untrusted_class_dir(
         and obs.exit_code == 0
         and obs.status == "ok"
         and isolation is None
+        and extra.get("leftover_verified") is True
         and not extra.get("leftover_query_failed")
         and not extra.get("leftover_cleanup_failed")
         and not obs.leftover_host_pids

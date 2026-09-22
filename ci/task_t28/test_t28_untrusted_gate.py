@@ -43,7 +43,7 @@ def _obs(**kwargs):
     }
     extra.update(kwargs.pop("extra", {}))
     defaults = dict(
-        argv=["docker", "run", "java", "-cp", "/inputs", "Baseline"],
+        argv=["docker", "run", "java", "-cp", "/inputs/main", "Baseline"],
         exit_code=0,
         stdout="7\n",
         stderr="",
@@ -402,10 +402,10 @@ class TestExtraCpAndLimits(unittest.TestCase):
             jar = root / "dep.jar"
             jar.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
             files, cp = _rel_files(root / "app", [jar])
-            self.assertIn("Main.class", files)
+            self.assertIn("main/Main.class", files)
             self.assertNotIn("lib.jar", files)
             self.assertTrue(any(k.endswith("dep.jar") for k in files))
-            self.assertEqual(cp[0], "/inputs")
+            self.assertEqual(cp[0], "/inputs/main")
             self.assertTrue(any(e.endswith("dep.jar") for e in cp), cp)
             self.assertFalse(any(e.endswith("lib.jar") for e in cp), cp)
 
@@ -417,10 +417,10 @@ class TestExtraCpAndLimits(unittest.TestCase):
             files2, cp2 = _rel_files(root / "app", [extra_dir])
             self.assertIn("extra0/lib/Lib.class", files2)
             self.assertNotIn("extra0/more.jar", files2)
-            self.assertEqual(cp2, ["/inputs", "/inputs/extra0"])
+            self.assertEqual(cp2, ["/inputs/main", "/inputs/extra0"])
 
             files3, cp3 = _rel_files(root / "app", [extra_dir, jar])
-            self.assertEqual(cp3, ["/inputs", "/inputs/extra0", "/inputs/extra1/dep.jar"])
+            self.assertEqual(cp3, ["/inputs/main", "/inputs/extra0", "/inputs/extra1/dep.jar"])
 
     def test_rel_files_missing_and_symlink_are_not_silent(self) -> None:
         with tempfile.TemporaryDirectory(prefix="t28-rel-neg-") as raw:
@@ -549,6 +549,22 @@ class TestExtraCpAndLimits(unittest.TestCase):
             self.assertIn("fsize=409600:409600", argv_blob)
             self.assertIn("nofile=180:180", argv_blob)
 
+            # These are live original+decompile+rebuild worker runs; dependency
+            # compilation and execution must use the same explicit classpath.
+            for label, dependency in (("jar", jar), ("dir", lib_dir)):
+                with mock.patch("tools.generators_holdout.identity._run", wraps=real) as host_run:
+                    host_run.side_effect = _no_host_java(real)
+                    result = run_pipeline(main_src, ident, work / ("pipeline-" + label),
+                        class_name="app.Main", extra_cp=[dependency], trusted=False)
+                self.assertEqual(result.failure_class, "pass", result.to_dict())
+                self.assertEqual(result.stages["original_verify_run"].status, "run_ok")
+                self.assertEqual(result.stages["rebuild_verify_run"].status, "run_ok")
+                self.assertEqual(result.original_stdout.strip(), "7")
+                self.assertEqual(result.rebuilt_stdout.strip(), "7")
+                self.assertIn(str(dependency), result.stages["rebuild_compile"].argv)
+                _docker_argv(result.stages["original_verify_run"])
+                _docker_argv(result.stages["rebuild_verify_run"])
+
             missing = run_untrusted_class_dir(main_dir, "app.Main", extra_cp=[work / "missing.jar"])
             self.assertEqual(missing["stage"], "invalid_input")
             self.assertFalse(missing["verified_and_ran"])
@@ -607,15 +623,32 @@ class TestExtraCpAndLimits(unittest.TestCase):
             self.assertEqual(iso_dir["stage"], "run_ok", msg=iso_dir)
             self.assertTrue(iso_dir["verified_and_ran"], msg=iso_dir)
             self.assertEqual(iso_dir["stdout"].strip(), host["stdout"].strip())
-            self.assertEqual(iso_dir["cp_entries"], ["/inputs", "/inputs/extra0"])
+            self.assertEqual(iso_dir["cp_entries"], ["/inputs/main", "/inputs/extra0"])
             self.assertFalse(any(str(e).endswith("hidden.jar") for e in iso_dir["cp_entries"]))
             for arm, expect in ((iso_jar, "2"), (dir_then_jar, "1"), (jar_then_dir, "2")):
                 self.assertEqual(arm["stage"], "run_ok", msg=arm)
                 self.assertTrue(arm["verified_and_ran"], msg=arm)
                 self.assertEqual(arm["stdout"].strip(), expect, msg=arm)
-            self.assertEqual(dir_then_jar["cp_entries"][0], "/inputs")
+            self.assertEqual(dir_then_jar["cp_entries"][0], "/inputs/main")
             self.assertTrue(dir_then_jar["cp_entries"][1].endswith("extra0"))
             self.assertTrue(dir_then_jar["cp_entries"][2].endswith("lib-jar.jar"))
+            for label, dependencies, expected in (
+                ("dir-first", [lib_dir, jar_path], "1"),
+                ("jar-first", [jar_path, lib_dir], "2"),
+            ):
+                with mock.patch("tools.generators_holdout.identity._run", wraps=real) as host_run:
+                    host_run.side_effect = _no_host_java(real)
+                    result = run_pipeline_from_class_bytes(main_src,
+                        (main_dir / "app" / "Main.class").read_bytes(), ident,
+                        work / label, class_name="app.Main", extra_cp=dependencies, trusted=False)
+                self.assertEqual(result.failure_class, "pass", result.to_dict())
+                self.assertEqual(result.stages["original_verify_run"].status, "run_ok")
+                self.assertEqual(result.stages["rebuild_verify_run"].status, "run_ok")
+                self.assertEqual(result.original_stdout.strip(), expected)
+                self.assertEqual(result.rebuilt_stdout.strip(), expected)
+                _docker_argv(result.stages["original_verify_run"])
+                _docker_argv(result.stages["rebuild_verify_run"])
+
 
 
 class TestDollarAndNestedPipeline(unittest.TestCase):
@@ -670,8 +703,23 @@ class TestDollarAndNestedPipeline(unittest.TestCase):
             self.assertEqual(outer_result.stages["original_verify_run"].status, "run_ok")
             self.assertEqual(outer_result.original_stdout.strip(), "7")
             self.assertTrue((work / "outer" / "artifacts" / "demo" / "Outer.java").is_file())
-            # Rebuild of Outer is a decompiler oracle (Inner body may be omitted) — not a harness path pass.
-            self.assertIn(outer_result.failure_class, {"pass", "behavior"}, msg=outer_result.to_dict())
+            # The current single-class probe omits Inner. This is an explicit
+            # negative capability result, never an orig+rebuilt positive.
+            self.assertEqual(outer_result.failure_class, "unsupported", msg=outer_result.to_dict())
+            self.assertEqual(outer_result.stages["rebuild_compile"].status, "unsupported")
+            self.assertIn("missing member declaration demo.Outer$Inner", outer_result.notes)
+            self.assertNotIn("rebuild_verify_run", outer_result.stages)
+            # A reviewed reconstructed unit exercises the positive harness path
+            # independently; this mock is labeled and is not decompiler evidence.
+            with mock.patch("tools.generators_holdout.pipeline.decompile_class", return_value={
+                "status": "complete", "rc": 0, "source": outer_src, "stub_methods": []
+            }):
+                reconstructed = run_pipeline(outer_src, ident, work / "reconstructed-control", trusted=False)
+            self.assertEqual(reconstructed.failure_class, "pass", reconstructed.to_dict())
+            self.assertEqual(reconstructed.stages["original_verify_run"].status, "run_ok")
+            self.assertEqual(reconstructed.stages["rebuild_verify_run"].status, "run_ok")
+            self.assertEqual(reconstructed.original_stdout.strip(), "7")
+            self.assertEqual(reconstructed.rebuilt_stdout.strip(), "7")
             inner_bytes = (work / "outer" / "original" / "demo" / "Outer$Inner.class").read_bytes()
             info = class_enclosing_info(inner_bytes)
             self.assertEqual(info["kind"], "nested_member")

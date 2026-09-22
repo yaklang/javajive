@@ -169,7 +169,7 @@ def compilation_unit_binary_name(
     if class_bytes:
         info = class_enclosing_info(class_bytes)
         if info.get("kind") in {"nested_member", "nested_local"} and info.get("enclosing"):
-            return validate_binary_name(info["enclosing"])
+            return validate_binary_name(info.get("compilation_unit") or info["enclosing"])
     return name
 
 
@@ -192,9 +192,19 @@ def class_relpath(binary_name: str) -> str:
 def nested_rebuild_unsupported(decompiled: str, class_bytes: bytes) -> str | None:
     """Genuine nested class without an enclosing compilation unit is unsupported, not a `$` guess."""
     info = class_enclosing_info(class_bytes)
+    if info.get("kind") == "invalid":
+        return "invalid class metadata; enclosing compilation unit cannot be established"
+    # The single-class probe may omit member classes. Make that capability
+    # boundary explicit instead of treating a failed rebuild as a positive case.
+    for member in info.get("declared_members", []):
+        binary_leaf = member.rsplit(".", 1)[-1]
+        simple = binary_leaf.rsplit("$", 1)[-1]
+        candidates = (re.escape(simple), re.escape(binary_leaf))
+        if not re.search(r"\b(?:class|interface|enum|record)\s+(?:" + "|".join(candidates) + r")(?![A-Za-z0-9_$])", decompiled):
+            return f"incomplete enclosing compilation unit: missing member declaration {member}"
     if info.get("kind") not in {"nested_member", "nested_local"}:
         return None
-    outer = info.get("enclosing") or ""
+    outer = info.get("compilation_unit") or info.get("enclosing") or ""
     try:
         pub = extract_class_name(decompiled)
     except InfraError:
@@ -264,7 +274,7 @@ ISOLATION_STAGES = frozenset(
 )
 
 
-def _isolation_failure_class(ran: dict[str, Any]) -> str | None:
+def _isolation_failure_class(ran: dict[str, Any], *, require_isolation: bool = False) -> str | None:
     stage = ran.get("stage") or ""
     status = ran.get("status") or ""
     if stage in ISOLATION_STAGES or status in {
@@ -283,9 +293,16 @@ def _isolation_failure_class(ran: dict[str, Any]) -> str | None:
         return "infra_error"
     if ran.get("leftover_query_failed") or ran.get("leftover_cleanup_failed"):
         return "infra_error"
-    if ran.get("verified_and_ran") and (
-        ran.get("leftover_host_pids") or ran.get("leftover_containers")
+    if ran.get("leftover_host_pids") or ran.get("leftover_containers"):
+        return "infra_error"
+    if stage == "run_ok" and ran.get("verified_and_ran") is not True:
+        return "infra_error"
+    if require_isolation and stage == "run_ok" and (
+        ran.get("host_java") is not False or ran.get("did_execute") is not True
+        or ran.get("leftover_verified") is not True
     ):
+        return "infra_error"
+    if ran.get("host_java") is False and ran.get("did_execute") and not ran.get("leftover_verified"):
         return "infra_error"
     return None
 
@@ -374,12 +391,13 @@ def run_pipeline(
     debug: str = "nodebug",
     class_name: str | None = None,
     trusted: bool = False,
+    extra_cp: list[Path] | None = None,
 ) -> PipelineResult:
     work.mkdir(parents=True, exist_ok=True)
     artifacts = work / "artifacts"
     artifacts.mkdir(exist_ok=True)
     stages: dict[str, StageRecord] = {}
-    classpath: list[str] = []
+    classpath = [str(p) for p in extra_cp or []]
     try:
         name = class_name or extract_binary_name(source)
         src_path = _write_text(artifacts / source_relpath(name, source=source), source)
@@ -395,7 +413,7 @@ def run_pipeline(
         )
 
     orig_dir = work / "original"
-    compiled = compile_sources(identity, [src_path], orig_dir, debug=debug)
+    compiled = compile_sources(identity, [src_path], orig_dir, debug=debug, extra_cp=extra_cp)
     stages["compile"] = StageRecord(
         "compile",
         "ok" if compiled["rc"] == 0 else "compile_fail",
@@ -457,6 +475,7 @@ def run_pipeline_from_class_bytes(
     debug: str = "nodebug",
     class_name: str | None = None,
     trusted: bool = False,
+    extra_cp: list[Path] | None = None,
 ) -> PipelineResult:
     """Decompile provided class bytes. Default untrusted (sandbox orig+rebuilt)."""
     work.mkdir(parents=True, exist_ok=True)
@@ -503,7 +522,7 @@ def run_pipeline_from_class_bytes(
         class_file=class_file,
         class_bytes=class_bytes,
         stages=stages,
-        classpath=[],
+        classpath=[str(p) for p in extra_cp or []],
         trusted=trusted,
     )
 
@@ -525,10 +544,13 @@ def _pipeline_after_class(
     classpath: list[str],
     trusted: bool,
 ) -> PipelineResult:
+    info = class_enclosing_info(class_bytes)
+    if info["kind"] == "invalid" or info["this_name"] != name:
+        return _invalid_name_result(name=name, mode=mode, debug=debug, source=source,
+            work=work, stages=stages, notes=f"invalid class metadata/name: {info}")
     bytes_path = _write_bytes(artifacts / class_relpath(name), class_bytes)
-    classpath = list(classpath) + [str(orig_dir)]
-
-    extra_runtime_cp = [Path(p) for p in classpath if p != str(orig_dir)]
+    extra_runtime_cp = [Path(p) for p in classpath]
+    classpath = [str(orig_dir), *classpath]
     orig_run = verify_and_run(
         orig_dir,
         name,
@@ -537,7 +559,7 @@ def _pipeline_after_class(
         trusted=trusted,
     )
     orig_stage = orig_run["stage"]
-    iso = _isolation_failure_class(orig_run)
+    iso = _isolation_failure_class(orig_run, require_isolation=not trusted)
     stages["original_verify_run"] = StageRecord(
         "original_verify_run",
         orig_stage,
@@ -610,9 +632,7 @@ def _pipeline_after_class(
             dec.get("stub_methods") or [], notes="empty decompile",
         )
 
-    nested_reason = nested_rebuild_unsupported(source, class_bytes) or nested_rebuild_unsupported(
-        decompiled, class_bytes
-    )
+    nested_reason = nested_rebuild_unsupported(decompiled, class_bytes)
     if nested_reason:
         stages["rebuild_compile"] = StageRecord(
             "rebuild_compile", "unsupported", None, decompiled, nested_reason, [], None
@@ -627,20 +647,25 @@ def _pipeline_after_class(
     rebuilt_src_dir = work / f"rebuilt-{mode}"
     rebuilt_src_dir.mkdir(exist_ok=True)
     try:
+        rebuilt_name = validate_binary_name(extract_binary_name(decompiled))
+        if rebuilt_name != compilation_unit_binary_name(name, class_bytes=class_bytes):
+            raise InvalidBinaryName(
+                f"decompiled binary name {rebuilt_name!r} does not match requested class {name!r}"
+            )
         rebuilt_rel = source_relpath(name, source=decompiled, class_bytes=class_bytes)
-    except InvalidBinaryName as exc:
+    except (InvalidBinaryName, InfraError) as exc:
         stages["rebuild_compile"] = StageRecord(
-            "rebuild_compile", "invalid_input", None, decompiled, str(exc), [], None
+            "rebuild_compile", "invalid_source", None, decompiled, str(exc), [], None
         )
         return PipelineResult(
-            name, mode, debug, "invalid_input", stages, source, _sha(class_bytes),
+            name, mode, debug, "behavior", stages, source, _sha(class_bytes),
             decompiled, "", orig_run.get("stdout") or "", str(bytes_path), str(src_path),
             classpath, str(work), dec.get("status") or "", dec.get("stub_methods") or [],
             notes=str(exc),
         )
     rebuilt_java = _write_text(rebuilt_src_dir / rebuilt_rel, decompiled)
     rebuilt_classes = work / f"rebuilt-{mode}-classes"
-    rebuilt = compile_sources(identity, [rebuilt_java], rebuilt_classes, debug=debug)
+    rebuilt = compile_sources(identity, [rebuilt_java], rebuilt_classes, debug=debug, extra_cp=extra_runtime_cp)
     stages["rebuild_compile"] = StageRecord(
         "rebuild_compile",
         "ok" if rebuilt["rc"] == 0 else "rebuild_compile_fail",
@@ -651,12 +676,22 @@ def _pipeline_after_class(
         str(rebuilt_classes),
     )
     if rebuilt["rc"] != 0:
+        infra = rebuilt["rc"] == 127 or str(rebuilt.get("stderr") or "").startswith("infra_error:")
+        if infra:
+            stages["rebuild_compile"].status = "infra_error"
         return PipelineResult(
-            name, mode, debug, "behavior", stages, source, _sha(class_bytes),
+            name, mode, debug, "infra_error" if infra else "behavior", stages, source, _sha(class_bytes),
             decompiled, "", orig_run.get("stdout") or "", str(bytes_path), str(src_path),
             classpath + [str(rebuilt_classes)], str(work), dec.get("status") or "",
             dec.get("stub_methods") or [], notes="decompiled source did not compile",
         )
+
+    if not (rebuilt_classes / class_relpath(name)).is_file():
+        stages["rebuild_compile"].status = "missing_class"
+        return PipelineResult(name, mode, debug, "behavior", stages, source, _sha(class_bytes),
+            decompiled, "", orig_run.get("stdout") or "", str(bytes_path), str(src_path),
+            classpath, str(work), dec.get("status") or "", dec.get("stub_methods") or [],
+            notes="rebuild did not produce the requested class; dependencies cannot substitute it")
 
     rebuilt_run = verify_and_run(
         rebuilt_classes,
@@ -666,7 +701,7 @@ def _pipeline_after_class(
         trusted=trusted,
     )
     rstage = rebuilt_run["stage"]
-    rebuilt_iso = _isolation_failure_class(rebuilt_run)
+    rebuilt_iso = _isolation_failure_class(rebuilt_run, require_isolation=not trusted)
     stages["rebuild_verify_run"] = StageRecord(
         "rebuild_verify_run",
         rstage,

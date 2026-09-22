@@ -51,9 +51,7 @@ def apply_leftover_status(
     if leftover_query_failed:
         return STATUS_INFRA_ERROR, "leftover_query_failed"
     if leftover_rm_failed or leftover_pids or leftover_containers:
-        if status == STATUS_OK:
-            status = STATUS_INFRA_ERROR
-        return status, "leftover_process"
+        return STATUS_INFRA_ERROR, "leftover_process"
     return status, reason
 
 

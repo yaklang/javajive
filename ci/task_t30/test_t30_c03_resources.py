@@ -255,7 +255,7 @@ class TestTaskT30C03Resources(unittest.TestCase):
         self.assertEqual(obs.leftover_host_pids, [424242])
         _assert_leftovers_fail_status(self, obs)
 
-    def test_apply_leftover_status_overrides_ok_only(self) -> None:
+    def test_apply_leftover_status_overrides_all_exit_statuses(self) -> None:
         status, reason = apply_leftover_status("ok", "ok", [], [], True)
         self.assertEqual(status, "infra_error")
         self.assertEqual(reason, "leftover_query_failed")
@@ -266,7 +266,7 @@ class TestTaskT30C03Resources(unittest.TestCase):
         self.assertEqual(status, "infra_error")
         self.assertEqual(reason, "leftover_process")
         status, reason = apply_leftover_status("timeout", "timeout", [], ["cid"], False)
-        self.assertEqual(status, "timeout")
+        self.assertEqual(status, "infra_error")
         self.assertEqual(reason, "leftover_process")
         status, reason = apply_leftover_status("ok", "ok", [], [], False)
         self.assertEqual(status, "ok")
