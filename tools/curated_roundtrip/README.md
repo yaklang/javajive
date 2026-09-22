@@ -9,7 +9,7 @@ running static initializers. The runner separately executes each reviewed main.
 Build and run from the repository root:
 
 ```sh
-go build -o /tmp/draft-followup-probe ./tools/draft-followup-probe
+python3 tools/curated_roundtrip/build_adapter.py --out /tmp/draft-followup-probe
 python3 tools/curated_roundtrip/roundtrip.py --adapter /tmp/draft-followup-probe \
   --out /tmp/curated-roundtrip-new-run --allow-trusted-fixture-execution
 ```
@@ -32,3 +32,7 @@ This is a developer/CI tool for the reviewed sources in this directory, not a
 sandbox. Do not add arbitrary downloaded classes/JARs or run untrusted input on
 the host; use the isolated worker. CI uses a disposable GitHub-hosted runner with
 read-only permissions, no persisted checkout credentials, and no injected secrets.
+
+The build wrapper writes a binary-hash-bound revision manifest. This supports Go
+1.22 worktrees, where the Go tool does not recognize a `.git` file for automatic
+VCS stamping. The audit rejects a stale revision or mismatched binary hash.

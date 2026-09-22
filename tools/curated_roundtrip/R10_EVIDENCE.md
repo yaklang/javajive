@@ -20,7 +20,8 @@ Changes preserve all existing assertions:
   adapter, runs 36 strict rows, checks parser versus typechecker separation, and
   always uploads evidence. No expected-failure list or observation-mode gate.
 - The runner records hashes, toolchains, HEAD, dirty-tree state, commands/results,
-  and requires the adapter's embedded VCS revision to match checked-out HEAD.
+  and requires the adapter's embedded VCS revision or hash-bound build manifest to
+  match checked-out HEAD. The manifest handles Go 1.22's unstamped worktrees.
   Rebuilt classpaths never contain original target classes.
 
 Local validation (macOS; Go commands use CGO_ENABLED=1 GOTOOLCHAIN=local

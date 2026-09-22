@@ -135,7 +135,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest tools.curated_roundtrip.test_roundtrip -v
       - name: Build current revision adapter
-        run: go build -trimpath -o "$RUNNER_TEMP/draft-followup-probe" ./tools/draft-followup-probe
+        run: python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/draft-followup-probe"
       - name: Run every reviewed fixture in both modes and debug settings
         run: |
           python3 tools/curated_roundtrip/roundtrip.py \

@@ -185,9 +185,23 @@ def main():
     write_json(out / 'report.json', result)
     built_revisions = [word.split('=', 1)[1] for word in result['adapter_build']['stdout'].split()
                        if word.startswith('vcs.revision=')]
+    revision = result['revision']['stdout'].strip()
+    # Go 1.22 recognizes .git directories but omits VCS stamps for worktrees
+    # (.git files), even with -buildvcs=true. The build wrapper supplies a
+    # hash-bound manifest for this supported local workflow.
+    manifest_path = Path(str(adapter) + '.build.json')
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        result['build_manifest'] = manifest
+        stamp_valid = (manifest.get('revision') == revision
+                       and manifest.get('binary_sha256') == result['adapter_sha256']
+                       and manifest.get('working_tree') == result['working_tree']['stdout'])
+    else:
+        stamp_valid = built_revisions == [revision]
+    write_json(out / 'report.json', result)
     if (result['revision']['exit_code'] or result['adapter_build']['exit_code']
-            or built_revisions != [result['revision']['stdout'].strip()]):
-        raise SystemExit('Adapter build revision does not match checked-out HEAD; rebuild it with VCS metadata')
+            or not stamp_valid or built_revisions and built_revisions != [revision]):
+        raise SystemExit('Adapter build revision/hash does not match source; use build_adapter.py')
     result['prepare'] = execute(['javac', '-proc:none', '-encoding', 'UTF-8', '-d', helper, ROOT / 'helpers/VerifyOnly.java', ROOT / 'helpers/ParseOnly.java'], out, out / 'prepare')
     write_json(out / 'report.json', result)
     if result['prepare']['exit_code']:
