@@ -33,7 +33,18 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 			return nil, true
 		}
 		return []JavaValue{v.GetValue()}, true
-	case *JavaRef, *JavaLiteral, *JavaClassValue, *JavaClassMember, javaNull:
+	case *JavaRef:
+		if v == nil {
+			return nil, true
+		}
+		if v.CustomValue != nil {
+			return []JavaValue{v.CustomValue}, true
+		}
+		if v.StackVar != nil {
+			return []JavaValue{v.StackVar}, true
+		}
+		return nil, true
+	case *JavaLiteral, *JavaClassValue, *JavaClassMember, javaNull:
 		return nil, true
 	case *JavaExpression:
 		return v.Values, true
@@ -52,6 +63,8 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 			out = append(out, v.ConstructorCall.Arguments...)
 		}
 		return out, v.ArgumentsGetter == nil || v.ConstructorCall != nil
+	case *LambdaIntersection:
+		return []JavaValue{v.Value}, true
 	case *CastExpression:
 		return []JavaValue{v.Value}, true
 	case *AssignmentExpression:
@@ -66,7 +79,7 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		}
 		return []JavaValue{v.Inner}, true
 	case *CustomValue:
-		if v.CapturesKnown && (v.Flag == "lambda" || v.Flag == "primitive_cast") {
+		if v.CapturesKnown && (v.Flag == "lambda" || v.Flag == "primitive_cast" || v.Flag == "concat") {
 			return v.Captures, true
 		}
 		return nil, false
@@ -93,7 +106,7 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 			}
 		case *JavaExpression:
 			switch v.Op {
-			case "++", "--", "=", "+=", "-=":
+			case "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
 				effect |= EffectWriteMemory
 			case "/", "%":
 				effect |= EffectThrow
@@ -122,6 +135,9 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 				effect |= v.Extra
 			}
 		case *CustomValue:
+			if v.CapturesKnown && v.Flag == "concat" {
+				effect |= EffectCall | EffectThrow
+			}
 			if v.CapturesKnown && v.Flag == "lambda" {
 				effect |= EffectAllocate | EffectThrow
 			}

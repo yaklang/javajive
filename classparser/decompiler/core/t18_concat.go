@@ -27,6 +27,15 @@ func t18ConcatAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	if err := validateConcatRequest(req); err != nil {
 		return invalidDispatch(req, FamilyConcat, DiagBootstrapArgMismatch, err.Error(), resultType)
 	}
+	// Production passes dedicated operand temps. Standalone adapter callers
+	// must not obtain a + chain that interleaves conversions with later effects.
+	if len(req.DynamicArgs) > 1 {
+		for _, arg := range req.DynamicArgs {
+			if !values.IsPure(arg) {
+				return unsupportedDispatch(req, FamilyConcat, DiagBootstrapUnknown, "concat operands require materialized evaluation snapshots", resultType)
+			}
+		}
+	}
 	var (
 		val values.JavaValue
 		err error
@@ -188,6 +197,9 @@ func t18ConcatValueFromParts(kinds []byte, lits []string, ops []values.JavaValue
 			}
 		}
 	})
+	cv.Flag = "concat"
+	cv.CapturesKnown = true
+	cv.Captures = tracked
 	return cv
 }
 

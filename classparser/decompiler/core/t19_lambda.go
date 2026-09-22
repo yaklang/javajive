@@ -26,6 +26,25 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 		if handled {
 			return res
 		}
+		flags, _ := intFromLiteral(static[3])
+		next := 4
+		if flags&lambdaFlagMarkers != 0 {
+			n, _ := intFromLiteral(static[next])
+			next++
+			for _, marker := range static[next : next+n] {
+				cv, ok := marker.(*values.JavaClassValue)
+				if !ok || cv == nil || cv.Type() == nil {
+					return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, "altMetafactory marker is not a class constant", resultType)
+				}
+			}
+			next += n
+		}
+		if flags&lambdaFlagBridges != 0 {
+			n, _ := intFromLiteral(static[next])
+			if n != 0 {
+				return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "altMetafactory explicit bridge methods require a proven source representation", resultType)
+			}
+		}
 		if len(static) < 3 {
 			return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, "altMetafactory missing sam/impl/instantiated", resultType)
 		}
@@ -60,17 +79,17 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 			if err != nil {
 				return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 			}
-			return okDispatch(req, FamilyLambda, val, values.EffectCall|values.EffectAllocate)
+			return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
 		}
 		val, err := t19InlineLambda(req, d, static, impl, capturedEval, resultType)
 		if err != nil {
 			return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 		}
-		return okDispatch(req, FamilyLambda, val, values.EffectCall|values.EffectAllocate)
+		return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
 	}
 
 	val := t19MethodRef(req, d, static, impl, req.DynamicArgs, resultType)
-	return okDispatch(req, FamilyLambda, val, values.EffectCall|values.EffectAllocate)
+	return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
 }
 
 func t19EvalOrder(pop []values.JavaValue) []values.JavaValue {
@@ -388,4 +407,24 @@ func t19OwnerSource(owner string, funcCtx *class_context.ClassContext) string {
 		funcCtx = &class_context.ClassContext{}
 	}
 	return funcCtx.ShortTypeName(owner)
+}
+
+// Marker interfaces are part of lambda identity, not a later runtime cast.
+func t19PreserveMarkers(req CallSiteRequest, value values.JavaValue, resultType types.JavaType) values.JavaValue {
+	if req.Identity.Name != "altMetafactory" || len(req.StaticArgs) < 5 {
+		return value
+	}
+	flags, _ := intFromLiteral(req.StaticArgs[3])
+	if flags&lambdaFlagMarkers == 0 {
+		return value
+	}
+	n, _ := intFromLiteral(req.StaticArgs[4])
+	if n <= 0 {
+		return value
+	}
+	markers := make([]types.JavaType, 0, n)
+	for _, m := range req.StaticArgs[5 : 5+n] {
+		markers = append(markers, m.Type().Copy())
+	}
+	return &values.LambdaIntersection{Value: value, Primary: resultType.Copy(), Markers: markers, OriginPC: req.OriginPC}
 }

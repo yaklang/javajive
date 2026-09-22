@@ -2,6 +2,7 @@ package values
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -118,3 +119,22 @@ func AssignmentOperand(v JavaValue, ctx *class_context.ClassContext) string {
 	}
 	return text
 }
+
+// LambdaIntersection preserves altMetafactory marker interfaces when lambda
+// creation is materialized outside the original assignment's target context.
+type LambdaIntersection struct {
+	Value    JavaValue
+	Primary  types.JavaType
+	Markers  []types.JavaType
+	OriginPC int
+}
+
+func (v *LambdaIntersection) Type() types.JavaType { return v.Primary }
+func (v *LambdaIntersection) String(ctx *class_context.ClassContext) string {
+	names := []string{v.Primary.String(ctx)}
+	for _, m := range v.Markers {
+		names = append(names, m.String(ctx))
+	}
+	return "((" + strings.Join(names, " & ") + ") (" + v.Value.String(ctx) + "))"
+}
+func (v *LambdaIntersection) ReplaceVar(old, new *utils.VariableId) { v.Value.ReplaceVar(old, new) }

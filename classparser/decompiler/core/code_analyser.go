@@ -35,6 +35,7 @@ type ExceptionTableEntry struct {
 }
 
 type Decompiler struct {
+	evaluationSnapshots   map[*OpCode][]EvaluationSnapshot
 	FunctionType          *types.JavaFuncType
 	opcodeToSimulateStack map[*OpCode]*StackSimulationImpl
 	FunctionContext       *class_context.ClassContext
@@ -4140,6 +4141,13 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			}
 			return fmt.Errorf("invalid_input: %s", rep.Reason)
 		}
+		snapshotFamily := id.Normalized() == IdentityMakeConcat || id.Normalized() == IdentityMakeConcatWithConstants || id.Normalized() == IdentityLambdaMetafactory || id.Normalized() == IdentityLambdaAltMetafactory
+		if snapshotFamily {
+			req.DynamicArgs, err = d.snapshotDynamicOperands(opcode, runtimeStackSimulation, args, callSiteReturnType.FunctionType().ParamTypes)
+			if err != nil {
+				return err
+			}
+		}
 		rep := DispatchInvokeDynamic(req, d, runtimeStackSimulation, resultType)
 		d.BootstrapReports = append(d.BootstrapReports, rep)
 		if rep.Status == "invalid_input" {
@@ -4157,6 +4165,9 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			if fc.FunctionName == "" {
 				fc.FunctionName = name
 			}
+		}
+		if snapshotFamily && rep.Status == "" && callResult != nil {
+			callResult = d.snapshotDynamicResult(opcode, runtimeStackSimulation, callResult)
 		}
 		if callResult != nil && callResult.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(callResult)
@@ -6060,6 +6071,9 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		//opcodeIndex := opcode.Id
 		statementsIndex = opcode.Id
+		for _, snap := range d.evaluationSnapshots[opcode] {
+			appendNode(statements.NewAssignStatement(snap.Ref, snap.Value, true))
+		}
 		switch opcode.Instr.OpCode {
 		case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
 			refInfos := d.opcodeIdToRef[opcode]
@@ -6476,7 +6490,7 @@ func (d *Decompiler) ParseStatement() error {
 		return err
 	}
 	// generate to statement
-	sort.Slice(nodes, func(i, j int) bool {
+	sort.SliceStable(nodes, func(i, j int) bool {
 		return nodes[i].Id < nodes[j].Id
 	})
 
@@ -6594,7 +6608,7 @@ func (d *Decompiler) ParseStatement() error {
 				continue
 			}
 			switch op.Instr.OpCode {
-			case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
+			case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2, OP_INVOKEDYNAMIC:
 			default:
 				continue
 			}
@@ -6694,7 +6708,7 @@ func (d *Decompiler) ParseStatement() error {
 		idToNode[node.Id] = node
 		return node.Next, nil
 	})
-	sort.Slice(nodes, func(i, j int) bool {
+	sort.SliceStable(nodes, func(i, j int) bool {
 		return nodes[i].Id < nodes[j].Id
 	})
 	// A typed-nil *JavaRef can end up as a varUserMap key when loadVarBySlot loads an
@@ -6887,6 +6901,9 @@ func (d *Decompiler) ParseStatement() error {
 					}
 				}
 			}
+			if !d.canInlineValue(val, currentNode, nextNode, idToOpcode) {
+				return
+			}
 			currentNode.RemoveNext(nextNode)
 			nextNode.RemoveNext(nnext)
 			currentNode.AddNext(nnext)
@@ -6950,6 +6967,9 @@ func (d *Decompiler) ParseStatement() error {
 			if node != nil && d.foldReordersSideEffect(val, node, ref) {
 				d.tracef("var-fold", "skip single-use-fold (side-effect reorder) ref=%s val=%s",
 					traceRef(ref, d.FunctionContext), traceValue(val, d.FunctionContext))
+				return true
+			}
+			if !d.canInlineValue(val, sourceNode, node, idToOpcode) {
 				return true
 			}
 			rewriteIsOk := false
@@ -7061,6 +7081,9 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		return true
 	})
+	if d.Work != nil && d.Work.Err() != nil {
+		return d.Work.Err()
+	}
 
 	idToNode = map[int]*Node{}
 	nodes = []*Node{}
@@ -7069,7 +7092,7 @@ func (d *Decompiler) ParseStatement() error {
 		idToNode[node.Id] = node
 		return node.Next, nil
 	})
-	sort.Slice(nodes, func(i, j int) bool {
+	sort.SliceStable(nodes, func(i, j int) bool {
 		return nodes[i].Id < nodes[j].Id
 	})
 	err = WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
