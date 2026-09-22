@@ -149,7 +149,7 @@ func (t Type) Width() int {
 }
 
 func (t Type) Computational() bool {
-	return !t.Kind.IsTail() && t.Kind != Top
+	return t.Kind >= Int && t.Kind <= UninitNew && !t.Kind.IsTail()
 }
 
 func (t Type) String() string {
@@ -189,6 +189,14 @@ func (t Type) DropValue() Type {
 type Frame struct {
 	Locals []Type
 	Stack  []Type
+	// Both locals and stack use expanded category-2 head/tail slots.
+	// Locals never grow during transfer. A zero-value frame has the legacy
+	// stack bound; NewFrameWithLimits also represents max_stack == 0.
+	maxStack          int
+	hasLimits         bool
+	ThisUninitialized bool
+	ThisClass         string
+	DirectSuperClass  string
 }
 
 func NewFrame(nLocals int) Frame {
@@ -202,15 +210,31 @@ func NewFrame(nLocals int) Frame {
 	return Frame{Locals: locals, Stack: nil}
 }
 
-func (f Frame) Clone() Frame {
-	return Frame{
-		Locals: append([]Type(nil), f.Locals...),
-		Stack:  append([]Type(nil), f.Stack...),
+// NewFrameWithLimits retains the declared Code attribute limits.
+func NewFrameWithLimits(maxLocals, maxStack int) (Frame, error) {
+	if maxLocals < 0 || maxLocals > maxSlots || maxStack < 0 || maxStack > maxSlots {
+		return Frame{}, invalidf("invalid frame limits %d/%d", maxLocals, maxStack)
 	}
+	f := NewFrame(maxLocals)
+	f.maxStack, f.hasLimits = maxStack, true
+	return f, nil
+}
+
+func (f Frame) stackLimit() int {
+	if f.hasLimits {
+		return f.maxStack
+	}
+	return maxSlots
+}
+
+func (f Frame) Clone() Frame {
+	f.Locals = append([]Type(nil), f.Locals...)
+	f.Stack = append([]Type(nil), f.Stack...)
+	return f
 }
 
 func (f Frame) Equal(o Frame) bool {
-	if len(f.Locals) != len(o.Locals) || len(f.Stack) != len(o.Stack) {
+	if len(f.Locals) != len(o.Locals) || len(f.Stack) != len(o.Stack) || f.stackLimit() != o.stackLimit() || f.ThisUninitialized != o.ThisUninitialized || f.ThisClass != o.ThisClass || f.DirectSuperClass != o.DirectSuperClass {
 		return false
 	}
 	for i := range f.Locals {
@@ -244,19 +268,11 @@ func (f Frame) Canonical() string {
 	return s + "]"
 }
 
-const maxSlots = 65536
+const maxSlots = 65535
 
 func (f *Frame) ensureLocal(idx int) error {
-	if idx < 0 || idx >= maxSlots {
-		return invalidf("local index %d", idx)
-	}
-	if idx >= len(f.Locals) {
-		n := make([]Type, idx+1)
-		copy(n, f.Locals)
-		for i := len(f.Locals); i < len(n); i++ {
-			n[i] = T(Top)
-		}
-		f.Locals = n
+	if idx < 0 || idx >= len(f.Locals) || idx >= maxSlots {
+		return invalidf("local index %d exceeds max_locals %d", idx, len(f.Locals))
 	}
 	return nil
 }
@@ -286,6 +302,12 @@ func (f *Frame) invalidatePairAt(idx int) {
 func (f *Frame) StoreLocal(idx int, t Type) error { return f.storeLocal(idx, t) }
 
 func (f *Frame) storeLocal(idx int, t Type) error {
+	if !t.Computational() {
+		return invalidf("invalid local value %s", t)
+	}
+	if idx < 0 || idx >= len(f.Locals) {
+		return invalidf("local index %d", idx)
+	}
 	width := 1
 	if t.Kind.IsCat2Head() {
 		width = 2
@@ -302,6 +324,9 @@ func (f *Frame) storeLocal(idx int, t Type) error {
 		}
 	}
 	f.Locals[idx] = t
+	if t.Kind == UninitThis {
+		f.ThisUninitialized = true
+	}
 	if width == 2 {
 		f.Locals[idx+1] = TailOf(t)
 	}
@@ -313,44 +338,66 @@ func (f *Frame) loadLocal(idx int, want Kind) (Type, error) {
 		return Type{}, err
 	}
 	t := f.Locals[idx]
-	if want == Long || want == Double {
-		if err := f.ensureLocal(idx + 1); err != nil {
-			return Type{}, err
-		}
-		if t.Kind != want || !f.Locals[idx+1].Kind.IsTail() {
-			return Type{}, invalidf("local %d is %s, want %s pair", idx, t.Kind, want)
-		}
-		return t, nil
+	if !t.Computational() {
+		return Type{}, invalidf("local %d is %s", idx, t)
 	}
-	if t.Kind.IsCat2Head() || t.Kind.IsTail() {
-		return Type{}, invalidf("local %d category-2 overlap load", idx)
+	if want == Ref {
+		if !referenceLike(t, true) {
+			return Type{}, invalidf("local %d is %s, want ref", idx, t)
+		}
+	} else if t.Kind != want {
+		return Type{}, invalidf("local %d is %s, want %s", idx, t, want)
 	}
-	if want != Top && t.Kind != want && !(want == Ref && (t.Kind == Ref || t.Kind == Null || t.Kind == UninitThis || t.Kind == UninitNew)) {
-		if t.Kind == Top {
-			return Type{}, invalidf("local %d is top", idx)
-		}
-		if want != Ref {
-			return Type{}, invalidf("local %d is %s, want %s", idx, t.Kind, want)
-		}
+	if t.Kind.IsCat2Head() && (idx+1 >= len(f.Locals) || !f.Locals[idx+1].Equal(TailOf(t))) {
+		return Type{}, invalidf("local %d has mismatched category-2 tail", idx)
 	}
 	return t, nil
 }
 
+func referenceLike(t Type, allowUninit bool) bool {
+	return t.Kind == Ref || t.Kind == Null || allowUninit && (t.Kind == UninitThis || t.Kind == UninitNew)
+}
+
 func (f *Frame) push(t Type) error {
-	if t.Kind.IsCat2Head() {
-		if len(f.Stack)+2 > maxSlots {
-			return invalidf("stack overflow")
-		}
-		f.Stack = append(f.Stack, t, TailOf(t))
-		return nil
+	if !t.Computational() {
+		return invalidf("push of non-computational value %s", t)
 	}
-	if t.Kind.IsTail() {
-		return invalidf("push of tail")
-	}
-	if len(f.Stack)+1 > maxSlots {
-		return invalidf("stack overflow")
+	if len(f.Stack)+t.Width() > f.stackLimit() {
+		return invalidf("max_stack exceeded")
 	}
 	f.Stack = append(f.Stack, t)
+	if t.Kind.IsCat2Head() {
+		f.Stack = append(f.Stack, TailOf(t))
+	}
+	return nil
+}
+
+// Validate checks the representation and available bounds, not JVM class
+// hierarchy, member accessibility, or return-descriptor assignability.
+func (f Frame) Validate() error {
+	if len(f.Locals) > maxSlots || len(f.Stack) > f.stackLimit() {
+		return invalidf("frame bounds exceeded")
+	}
+	for _, part := range []struct {
+		values []Type
+		locals bool
+	}{{f.Locals, true}, {f.Stack, false}} {
+		for i := 0; i < len(part.values); i++ {
+			t := part.values[i]
+			if part.locals && t.Kind == Top {
+				continue
+			}
+			if !t.Computational() {
+				return invalidf("non-computational slot %d: %s", i, t)
+			}
+			if t.Kind.IsCat2Head() {
+				if i+1 >= len(part.values) || !part.values[i+1].Equal(TailOf(t)) {
+					return invalidf("mismatched category-2 slot %d", i)
+				}
+				i++
+			}
+		}
+	}
 	return nil
 }
 
@@ -370,8 +417,8 @@ func (f *Frame) popValue() (Type, error) {
 		f.Stack = f.Stack[:len(f.Stack)-2]
 		return head, nil
 	}
-	if top.Kind.IsCat2Head() {
-		return Type{}, invalidf("category-2 head on top without tail")
+	if !top.Computational() || top.Kind.IsCat2Head() {
+		return Type{}, invalidf("invalid computational stack top")
 	}
 	f.Stack = f.Stack[:len(f.Stack)-1]
 	return top, nil
@@ -384,7 +431,7 @@ func (f *Frame) popKind(want Kind) (Type, error) {
 	}
 	if want == Ref {
 		switch t.Kind {
-		case Ref, Null, UninitThis, UninitNew:
+		case Ref, Null:
 			return t, nil
 		}
 		return Type{}, invalidf("pop %s, want ref", t.Kind)
@@ -402,20 +449,18 @@ func (f *Frame) peek(n int) (Type, error) {
 	return f.Stack[len(f.Stack)-1-n], nil
 }
 
+func sameUninitialized(t, site Type) bool {
+	return site.Kind == UninitThis && t.Kind == UninitThis || site.Kind == UninitNew && t.Kind == UninitNew && t.NewPC == site.NewPC
+}
+
 func (f *Frame) initialize(site Type, to Type) {
-	match := func(t Type) bool {
-		if site.Kind == UninitThis {
-			return t.Kind == UninitThis
-		}
-		return t.Kind == UninitNew && t.NewPC == site.NewPC
-	}
 	for i, t := range f.Locals {
-		if match(t) {
+		if sameUninitialized(t, site) {
 			f.Locals[i] = to
 		}
 	}
 	for i, t := range f.Stack {
-		if match(t) {
+		if sameUninitialized(t, site) {
 			f.Stack[i] = to
 		}
 	}
@@ -444,7 +489,10 @@ func JoinTypes(a, b Type) (Type, bool) {
 		return a.DropValue(), true
 	}
 	if a.Kind == UninitNew && b.Kind == UninitNew && a.NewPC == b.NewPC {
-		return UninitAt(a.NewPC), true
+		if a.Class != b.Class {
+			return Type{}, false
+		}
+		return a.DropValue(), true
 	}
 	if a.Kind == UninitThis && b.Kind == UninitThis {
 		return T(UninitThis), true
@@ -474,40 +522,49 @@ func JoinTypes(a, b Type) (Type, bool) {
 	return Type{}, false
 }
 
+// JoinFrames forgets incompatible locals but never turns a computational
+// stack value into TOP. Unknown predecessors must be omitted by the solver.
 func JoinFrames(a, b Frame) (Frame, error) {
 	if len(a.Stack) != len(b.Stack) {
 		return Frame{}, invalidf("stack height mismatch %d vs %d", len(a.Stack), len(b.Stack))
 	}
-	nloc := len(a.Locals)
-	if len(b.Locals) > nloc {
-		nloc = len(b.Locals)
+	if len(a.Locals) != len(b.Locals) || a.stackLimit() != b.stackLimit() || a.ThisClass != b.ThisClass || a.DirectSuperClass != b.DirectSuperClass {
+		return Frame{}, invalidf("frame shape/context mismatch")
 	}
-	out := NewFrame(nloc)
-	out.Stack = make([]Type, len(a.Stack))
-	for i := 0; i < nloc; i++ {
-		var ta, tb Type
-		if i < len(a.Locals) {
-			ta = a.Locals[i]
-		} else {
-			ta = T(Top)
-		}
-		if i < len(b.Locals) {
-			tb = b.Locals[i]
-		} else {
-			tb = T(Top)
-		}
-		j, ok := JoinTypes(ta, tb)
+	if err := a.Validate(); err != nil {
+		return Frame{}, err
+	}
+	if err := b.Validate(); err != nil {
+		return Frame{}, err
+	}
+	out := a.Clone()
+	out.ThisUninitialized = a.ThisUninitialized || b.ThisUninitialized
+	for i := range out.Locals {
+		j, ok := JoinTypes(a.Locals[i], b.Locals[i])
 		if !ok {
-			return Frame{}, invalidf("local %d width/kind mismatch %s vs %s", i, ta, tb)
+			j = T(Top)
 		}
 		out.Locals[i] = j
 	}
-	for i := range a.Stack {
+	// A merge may kill one half of a pair; its other half is also unusable.
+	for i, t := range out.Locals {
+		if t.Kind.IsCat2Head() && (i+1 >= len(out.Locals) || !out.Locals[i+1].Equal(TailOf(t))) {
+			out.Locals[i] = T(Top)
+		}
+		if t.Kind.IsTail() && (i == 0 || !t.Equal(TailOf(out.Locals[i-1]))) {
+			out.Locals[i] = T(Top)
+		}
+	}
+	for i := 0; i < len(a.Stack); i++ {
 		j, ok := JoinTypes(a.Stack[i], b.Stack[i])
-		if !ok {
-			return Frame{}, invalidf("stack %d width/kind mismatch %s vs %s", i, a.Stack[i], b.Stack[i])
+		if !ok || !j.Computational() {
+			return Frame{}, invalidf("incompatible computational stack at %d: %s vs %s", i, a.Stack[i], b.Stack[i])
 		}
 		out.Stack[i] = j
+		if j.Kind.IsCat2Head() {
+			i++
+			out.Stack[i] = TailOf(j)
+		}
 	}
 	return out, nil
 }

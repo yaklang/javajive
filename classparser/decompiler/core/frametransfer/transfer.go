@@ -15,6 +15,9 @@ func Transfer(in Frame, instr Instr) (out Frame, exceptionFrame *Frame, err erro
 			exceptionFrame = nil
 		}
 	}()
+	if err := in.Validate(); err != nil {
+		return Frame{}, nil, err
+	}
 	out = in.Clone()
 	op := instr.Op
 	if op == core.OP_JSR || op == core.OP_JSR_W || op == core.OP_RET {
@@ -22,8 +25,22 @@ func Transfer(in Frame, instr Instr) (out Frame, exceptionFrame *Frame, err erro
 	}
 
 	mayThrow := core.MayThrowOpcode(op)
+	var constructorSite *Type
 	mkEx := func() *Frame {
-		ef := Frame{Locals: append([]Type(nil), in.Locals...), Stack: []Type{RefOf("java/lang/Throwable")}}
+		ef := in.Clone()
+		// JVMS 4.9.2: a throwing constructor makes every local copy of
+		// its target unusable. Preserve the incoming initialization flag.
+		if constructorSite != nil {
+			for i, t := range ef.Locals {
+				if sameUninitialized(t, *constructorSite) {
+					ef.Locals[i] = T(Top)
+				}
+			}
+		}
+		// This is a candidate handler frame. A throwing instruction can
+		// legally have max_stack == 0 if it has no handler. The solver
+		// validates this frame only when propagating it to a handler.
+		ef.Stack = []Type{RefOf("java/lang/Throwable")}
 		return &ef
 	}
 
@@ -211,6 +228,9 @@ func Transfer(in Frame, instr Instr) (out Frame, exceptionFrame *Frame, err erro
 	case core.OP_ARETURN:
 		_, terr = out.popKind(Ref)
 	case core.OP_RETURN:
+		if out.ThisUninitialized {
+			terr = invalidf("constructor return before initialization")
+		}
 	case core.OP_GETSTATIC:
 		terr = fieldOp(&out, instr, true, false)
 	case core.OP_PUTSTATIC:
@@ -220,14 +240,19 @@ func Transfer(in Frame, instr Instr) (out Frame, exceptionFrame *Frame, err erro
 	case core.OP_PUTFIELD:
 		terr = fieldOp(&out, instr, false, true)
 	case core.OP_INVOKEVIRTUAL, core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEINTERFACE, core.OP_INVOKEDYNAMIC:
-		terr = invoke(&out, instr)
+		constructorSite, terr = invoke(&out, instr)
 	case core.OP_NEW:
 		class := instr.Class
 		if class == "" && instr.Const.Class != "" {
 			class = instr.Const.Class
 		}
-		terr = out.push(UninitAt(instr.PC))
-		_ = class
+		if class == "" {
+			terr = unsupportedf("new without class")
+		} else {
+			t := UninitAt(instr.PC)
+			t.Class = class
+			terr = out.push(t)
+		}
 	case core.OP_NEWARRAY:
 		if _, err := out.popKind(Int); err != nil {
 			terr = err
@@ -355,7 +380,16 @@ func load(f *Frame, instr Instr, want Kind) error {
 }
 
 func store(f *Frame, instr Instr, want Kind) error {
-	t, err := f.popKind(want)
+	var t Type
+	var err error
+	if want == Ref {
+		t, err = f.popValue()
+		if err == nil && !referenceLike(t, true) {
+			err = invalidf("astore of %s", t)
+		}
+	} else {
+		t, err = f.popKind(want)
+	}
 	if err != nil {
 		return err
 	}
@@ -363,26 +397,15 @@ func store(f *Frame, instr Instr, want Kind) error {
 }
 
 func doIinc(f *Frame, instr Instr) error {
-	idx := instr.Local
-	if err := f.ensureLocal(idx); err != nil {
+	cur, err := f.loadLocal(instr.Local, Int)
+	if err != nil {
 		return err
-	}
-	cur := f.Locals[idx]
-	if cur.Kind.IsCat2Head() || cur.Kind.IsTail() || (idx-1 >= 0 && idx-1 < len(f.Locals) && f.Locals[idx-1].Kind.IsCat2Head()) {
-		f.invalidatePairAt(idx)
-		if idx-1 >= 0 && idx-1 < len(f.Locals) && f.Locals[idx-1].Kind.IsCat2Head() {
-			f.invalidatePairAt(idx - 1)
-		}
-		return f.storeLocal(idx, T(Int))
-	}
-	if cur.Kind != Int && cur.Kind != Top {
-		return invalidf("iinc of %s", cur.Kind)
 	}
 	out := T(Int)
 	if cur.HasInt {
 		out = IntConst(cur.Int + instr.IincConst)
 	}
-	return f.storeLocal(idx, out)
+	return f.storeLocal(instr.Local, out)
 }
 
 func conv(f *Frame, from, to Kind) error {
@@ -465,8 +488,21 @@ func fieldOp(f *Frame, instr Instr, static, put bool) error {
 			}
 		}
 		if !static {
-			if _, err := f.popKind(Ref); err != nil {
+			recv, err := f.popValue()
+			if err != nil {
 				return err
+			}
+			// putfield may assign a field declared in the current class
+			// before this object's constructor has called super/this.
+			if recv.Kind == UninitThis {
+				if f.ThisClass == "" {
+					return unsupportedf("putfield before init without current class")
+				}
+				if instr.Class != f.ThisClass {
+					return invalidf("putfield before init outside current class")
+				}
+			} else if !referenceLike(recv, false) {
+				return invalidf("putfield receiver is %s", recv)
 			}
 		}
 		return nil
@@ -479,47 +515,75 @@ func fieldOp(f *Frame, instr Instr, static, put bool) error {
 	return f.push(t)
 }
 
-func invoke(f *Frame, instr Instr) error {
-	desc := instr.Desc
-	if desc == "" {
-		desc = "()V"
+// invoke returns the uninitialized target only after checking the limited
+// constructor context represented here. General member/hierarchy verification
+// remains the caller's responsibility.
+func invoke(f *Frame, instr Instr) (*Type, error) {
+	if instr.Desc == "" {
+		return nil, unsupportedf("invoke without descriptor")
 	}
-	args, ret, hasRet, err := ParseDescriptor(desc)
+	args, ret, hasRet, err := ParseDescriptor(instr.Desc)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	constructor := instr.Name == "<init>"
+	if instr.Name == "<clinit>" || constructor && (instr.Op != core.OP_INVOKESPECIAL || hasRet) {
+		return nil, invalidf("invalid initializer invocation")
 	}
 	for i := len(args) - 1; i >= 0; i-- {
-		want := args[i].Kind
-		if want == Ref {
-			if _, err := f.popKind(Ref); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := f.popKind(want); err != nil {
-			return err
+		if _, err := f.popKind(args[i].Kind); err != nil {
+			return nil, err
 		}
 	}
 	isStatic := instr.Op == core.OP_INVOKESTATIC || instr.Op == core.OP_INVOKEDYNAMIC
 	var recv Type
 	if !isStatic {
-		var err error
-		recv, err = f.popKind(Ref)
+		if constructor {
+			recv, err = f.popValue()
+		} else {
+			recv, err = f.popKind(Ref)
+		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	if instr.Name == "<init>" && instr.Op == core.OP_INVOKESPECIAL {
-		cls := instr.Class
-		if cls == "" {
-			cls = "java/lang/Object"
+	if constructor {
+		if recv.Kind != UninitThis && recv.Kind != UninitNew {
+			return nil, invalidf("constructor target is %s", recv)
+		}
+		if instr.Class == "" {
+			return nil, unsupportedf("constructor without owner")
+		}
+		cls := recv.Class
+		if recv.Kind == UninitNew {
+			if cls == "" {
+				return nil, unsupportedf("allocation class unavailable")
+			}
+			if cls != instr.Class {
+				return nil, invalidf("constructor owner differs from allocation class")
+			}
+		} else {
+			cls = f.ThisClass
+			if cls == "" {
+				return nil, unsupportedf("constructor this class unavailable")
+			}
+			if instr.Class != cls && instr.Class != f.DirectSuperClass {
+				if f.DirectSuperClass == "" {
+					return nil, unsupportedf("direct superclass unavailable")
+				}
+				return nil, invalidf("constructor owner is not current/direct superclass")
+			}
 		}
 		f.initialize(recv, RefOf(cls))
+		if recv.Kind == UninitThis {
+			f.ThisUninitialized = false
+		}
+		return &recv, nil
 	}
 	if hasRet {
-		return f.push(ret)
+		return nil, f.push(ret)
 	}
-	return nil
+	return nil, nil
 }
 
 func floatBin(f *Frame, op int) error {

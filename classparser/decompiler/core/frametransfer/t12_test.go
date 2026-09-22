@@ -146,12 +146,8 @@ func TestT12_C02_Category2Overlap(t *testing.T) {
 		t.Fatalf("head store %s", out2.Canonical())
 	}
 	in3 := f.Clone()
-	out3, _, err := Transfer(in3, Instr{Op: core.OP_IINC, Local: 1, IincConst: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out3.Locals[0].Kind == Long || out3.Locals[1].Kind == LongTail || out3.Locals[1].Kind == Null {
-		t.Fatalf("iinc overlap %s", out3.Canonical())
+	if _, _, err := Transfer(in3, Instr{Op: core.OP_IINC, Local: 1, IincConst: 1}); err == nil {
+		t.Fatal("iinc must reject a category-2 tail, not treat it as a store")
 	}
 }
 
@@ -181,8 +177,8 @@ func TestT12_C03_InitAliases(t *testing.T) {
 	if outInit.Locals[1].Kind != Ref {
 		t.Fatalf("successful init %s", outInit.Canonical())
 	}
-	if ex == nil || ex.Locals[1].Kind != UninitNew || ex.Locals[1].NewPC != 10 {
-		t.Fatalf("exception must keep uninit: %+v", ex)
+	if ex == nil || ex.Locals[1].Kind != Top {
+		t.Fatalf("exception must make constructor alias unusable: %+v", ex)
 	}
 	f2 := NewFrame(4)
 	a, _, _ := Transfer(f2, Instr{Op: core.OP_NEW, PC: 10, Class: "Foo"})
@@ -203,16 +199,17 @@ func TestT12_C03_InitAliases(t *testing.T) {
 		t.Fatalf("distinct new sites merged: %s", done.Canonical())
 	}
 	ctor := NewFrame(2)
+	ctor.ThisClass, ctor.DirectSuperClass = "Foo", "java/lang/Object"
 	_ = ctor.StoreLocal(0, T(UninitThis))
 	_ = ctor.push(ctor.Locals[0])
 	after, ex2, err := Transfer(ctor, Instr{Op: core.OP_INVOKESPECIAL, Name: "<init>", Class: "java/lang/Object", Desc: "()V"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Locals[0].Kind != Ref {
+	if after.Locals[0].Kind != Ref || after.Locals[0].Class != "Foo" || after.ThisUninitialized {
 		t.Fatalf("this init %s", after.Canonical())
 	}
-	if ex2 == nil || ex2.Locals[0].Kind != UninitThis {
+	if ex2 == nil || ex2.Locals[0].Kind != Top || !ex2.ThisUninitialized {
 		t.Fatalf("super init exception %v", ex2)
 	}
 }

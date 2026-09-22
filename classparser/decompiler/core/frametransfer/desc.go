@@ -2,7 +2,7 @@ package frametransfer
 
 func ParseDescriptor(desc string) (args []Type, ret Type, hasRet bool, err error) {
 	if desc == "" {
-		return nil, Type{}, false, nil
+		return nil, Type{}, false, invalidf("empty method descriptor")
 	}
 	if desc[0] != '(' {
 		return nil, Type{}, false, invalidf("bad descriptor %q", desc)
@@ -21,14 +21,20 @@ func ParseDescriptor(desc string) (args []Type, ret Type, hasRet bool, err error
 	}
 	i++
 	if i >= len(desc) {
-		return args, Type{}, false, nil
+		return nil, Type{}, false, invalidf("missing return descriptor")
 	}
 	if desc[i] == 'V' {
+		if i+1 != len(desc) {
+			return nil, Type{}, false, invalidf("trailing method descriptor")
+		}
 		return args, Type{}, false, nil
 	}
-	t, _, e := parseField(desc[i:])
+	t, n, e := parseField(desc[i:])
 	if e != nil {
 		return nil, Type{}, false, e
+	}
+	if i+n != len(desc) {
+		return nil, Type{}, false, invalidf("trailing method descriptor")
 	}
 	return args, t, true, nil
 }
@@ -51,8 +57,8 @@ func parseField(s string) (Type, int, error) {
 		for end < len(s) && s[end] != ';' {
 			end++
 		}
-		if end >= len(s) {
-			return Type{}, 0, invalidf("unterminated class descriptor")
+		if end >= len(s) || end == 1 {
+			return Type{}, 0, invalidf("invalid class descriptor")
 		}
 		return RefOf(s[1:end]), end + 1, nil
 	case '[':
@@ -63,17 +69,14 @@ func parseField(s string) (Type, int, error) {
 		if n >= len(s) {
 			return Type{}, 0, invalidf("bad array descriptor")
 		}
-		if s[n] == 'L' {
-			end := n
-			for end < len(s) && s[end] != ';' {
-				end++
-			}
-			if end >= len(s) {
-				return Type{}, 0, invalidf("unterminated array class")
-			}
-			return RefOf(s[:end+1]), end + 1, nil
+		if n > 255 {
+			return Type{}, 0, invalidf("array dimension limit")
 		}
-		return RefOf(s[:n+1]), n + 1, nil
+		_, used, err := parseField(s[n:])
+		if err != nil {
+			return Type{}, 0, err
+		}
+		return RefOf(s[:n+used]), n + used, nil
 	default:
 		return Type{}, 0, invalidf("unknown field type %c", s[0])
 	}
