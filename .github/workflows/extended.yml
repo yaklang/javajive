@@ -1,0 +1,111 @@
+name: Extended regression (manual)
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Commit or branch for the historical comparison
+        default: main
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: extended-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  GOTOOLCHAIN: local
+jobs:
+  full-go-suite:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: go test ./... -count=1 -timeout=30m
+  historical-audit:
+    name: Historical JAR differential audit (38 targets)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      BASE_REF: ${{ inputs.baseline }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set evidence directory
+        run: echo "AUDIT_ROOT=$RUNNER_TEMP/historical-audit" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/historical-audit/m2
+          key: historical-jars-${{ hashFiles('test/cross/testdata/historical-jars.lock.json') }}
+      - name: Verify every pinned target and dependency
+        run: python3 scripts/historical_jar_audit.py prepare --cache "$AUDIT_ROOT/m2" --manifest "$AUDIT_ROOT/manifest.json"
+      - name: Build baseline and candidate with the same observation harness
+        run: |
+          baseline="$BASE_REF"
+          if [ -z "$baseline" ] || [ "$baseline" = 0000000000000000000000000000000000000000 ]; then
+            baseline=$(git rev-parse HEAD^)
+          fi
+          git worktree add --detach "$AUDIT_ROOT/base-worktree" "$baseline"
+          cp test/cross/historical_audit_test.go "$AUDIT_ROOT/base-worktree/test/cross/"
+          git rev-parse HEAD > "$AUDIT_ROOT/candidate-revision.txt"
+          git -C "$AUDIT_ROOT/base-worktree" rev-parse HEAD > "$AUDIT_ROOT/baseline-revision.txt"
+          (cd "$AUDIT_ROOT/base-worktree" && go test -c ./test/cross -o "$AUDIT_ROOT/baseline.test")
+          go test -c ./test/cross -o "$AUDIT_ROOT/candidate.test"
+      - name: Observe all 38 baseline JARs
+        run: |
+          cd "$AUDIT_ROOT/base-worktree/test/cross"
+          HISTORICAL_JAR_MANIFEST="$AUDIT_ROOT/manifest.json" \
+          HISTORICAL_JAR_REPORT="$AUDIT_ROOT/baseline" \
+          HISTORICAL_JAR_REVISION="$(cat "$AUDIT_ROOT/baseline-revision.txt")" \
+          "$AUDIT_ROOT/baseline.test" -test.run '^TestHistoricalJarAudit$' -test.timeout=40m -test.v
+      - name: Observe all 38 candidate JARs
+        run: |
+          cd test/cross
+          HISTORICAL_JAR_MANIFEST="$AUDIT_ROOT/manifest.json" \
+          HISTORICAL_JAR_REPORT="$AUDIT_ROOT/candidate" \
+          HISTORICAL_JAR_REVISION="$(cat "$AUDIT_ROOT/candidate-revision.txt")" \
+          "$AUDIT_ROOT/candidate.test" -test.run '^TestHistoricalJarAudit$' -test.timeout=40m -test.v
+      - name: Reject regressions independently of observation completion
+        run: |
+          python3 scripts/historical_jar_audit.py compare \
+            --baseline "$AUDIT_ROOT/baseline" --candidate "$AUDIT_ROOT/candidate" \
+            --output "$AUDIT_ROOT/comparison.json"
+      - name: Package reproduction evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, tarfile
+          from pathlib import Path
+          root = Path(os.environ['AUDIT_ROOT'])
+          root.mkdir(parents=True, exist_ok=True)
+          with tarfile.open(root / 'historical-evidence.tar.gz', 'w:gz') as archive:
+              for name in ['baseline', 'candidate', 'comparison.json', 'manifest.json',
+                           'baseline-revision.txt', 'candidate-revision.txt']:
+                  if (root / name).exists():
+                      archive.add(root / name, arcname=name)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: historical-jar-evidence
+          path: ${{ runner.temp }}/historical-audit/historical-evidence.tar.gz
+          if-no-files-found: error
+          retention-days: 14

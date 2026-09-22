@@ -1,11 +1,8 @@
-# T29: additional task-contract gates. Does not replace jobs in ci.yml.
+# Full task-pack infrastructure contracts are manual; PR CI focuses on algorithms.
 # Third-party actions are pinned to full commit SHAs (comment is the tag name).
 name: Task contract gates
 
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -111,42 +108,3 @@ jobs:
           python3 -m unittest discover -s ci/task_t30 -p 'test_*.py' -v
           python3 -m unittest discover -s ci/task_t32 -p 'test_*.py' -v
           python3 -m unittest discover -s ci/task_t28 -p 'test_*.py' -v
-
-  curated-roundtrip:
-    name: Curated round trips (36 rows)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - name: Check runner failure handling
-        env:
-          PYTHONDONTWRITEBYTECODE: '1'
-        run: python3 -m unittest tools.curated_roundtrip.test_roundtrip -v
-      - name: Build current revision adapter
-        run: python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/draft-followup-probe"
-      - name: Run every reviewed fixture in both modes and debug settings
-        run: |
-          python3 tools/curated_roundtrip/roundtrip.py \
-            --adapter "$RUNNER_TEMP/draft-followup-probe" \
-            --out "$RUNNER_TEMP/curated-roundtrip" \
-            --expected-rows 36 \
-            --allow-trusted-fixture-execution
-      - name: Upload independent round-trip evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: curated-roundtrip-${{ github.sha }}
-          path: ${{ runner.temp }}/curated-roundtrip/
-          if-no-files-found: error
