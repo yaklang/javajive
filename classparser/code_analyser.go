@@ -304,6 +304,11 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 	st, err := decompiler.ParseBytesCode(parser)
 	dumper.bootstrapReports = append(dumper.bootstrapReports, parser.BootstrapReports...)
 	if dumper.options.EnableShadowIR && dumper.report != nil {
+		observation := parser.ShadowObservation
+		if observation.Status == "" {
+			observation = core.ShadowObservation{Method: dumper.FuncCtx.FunctionName + dumper.FuncCtx.CurrentMethodDesc, Status: "unavailable", Error: "decompilation did not reach shadow capture"}
+		}
+		dumper.report.Shadow = append(dumper.report.Shadow, observation)
 		if parser.ShadowIRVersion != 0 {
 			dumper.report.ShadowIRVersion = parser.ShadowIRVersion
 		}

@@ -2,6 +2,7 @@ package class_context
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -862,4 +863,38 @@ func SplitPackageClassName(s string) (string, string) {
 	}
 	log.Errorf("split package name and class name failed: %v", s)
 	return "", ""
+}
+
+// CloneForRetry isolates mutable source-rendering state. Resolver functions and the
+// monotonic request budget are shared intentionally.
+func (f *ClassContext) CloneForRetry() *ClassContext {
+	if f == nil {
+		return nil
+	}
+	out := *f
+	out.Arguments = append([]string(nil), f.Arguments...)
+	out.TypeParams = append([]string(nil), f.TypeParams...)
+	out.ClassTypeParams = append([]string(nil), f.ClassTypeParams...)
+	out.InjectedTypeParamBounds = maps.Clone(f.InjectedTypeParamBounds)
+	out.FieldTypeVars = maps.Clone(f.FieldTypeVars)
+	out.FieldSignatures = maps.Clone(f.FieldSignatures)
+	out.MethodSignatures = maps.Clone(f.MethodSignatures)
+	out.MethodSignaturesByDesc = maps.Clone(f.MethodSignaturesByDesc)
+	out.MethodDescriptors = maps.Clone(f.MethodDescriptors)
+	out.PoolMethodDescriptors = maps.Clone(f.PoolMethodDescriptors)
+	out.sameArityOverloadMemo = maps.Clone(f.sameArityOverloadMemo)
+	out.ConstructorSignatures = maps.Clone(f.ConstructorSignatures)
+	out.ConstructorSignaturesByDesc = maps.Clone(f.ConstructorSignaturesByDesc)
+	out.RawEraseTypeVars = maps.Clone(f.RawEraseTypeVars)
+	out.StandaloneEraseTypeVars = maps.Clone(f.StandaloneEraseTypeVars)
+	out.ForceParamEraseTypeVars = maps.Clone(f.ForceParamEraseTypeVars)
+	out.SamePkgFQNames = maps.Clone(f.SamePkgFQNames)
+	out.BuildInLibsMap = f.BuildInLibsMap.Copy()
+	if out.BuildInLibsMap != nil {
+		out.BuildInLibsMap.ForEach(func(k string, v []string) bool { out.BuildInLibsMap.Set(k, append([]string(nil), v...)); return true })
+	}
+	if f.KeySet != nil {
+		out.KeySet = utils.NewSet[string](f.KeySet.List())
+	}
+	return &out
 }

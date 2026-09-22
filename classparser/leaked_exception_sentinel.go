@@ -18,10 +18,13 @@ import (
 // Catch parameters renamed `varN_1` while the rethrow still uses uninitialized `varN` are rewritten
 // to `throw varN_1`. Kill-switch: JDEC_LEAKED_EXCEPTION_SENTINEL_OFF.
 func fixLeakedExceptionSentinel(body string) string {
+	return rewriteJavaCode(body, fixLeakedExceptionSentinelCode)
+}
+func fixLeakedExceptionSentinelCode(body string) string {
 	if jdecenv.Get("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF") == "1" {
 		return body
 	}
-	code := sourceCodeMask(body)
+	code := body
 	if !hasExceptionSentinel(body) && !strings.Contains(code, "(Exception)") && !strings.Contains(code, "return Exception;") && !strings.Contains(code, "throw Exception;") {
 		return body
 	}

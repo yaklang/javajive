@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -21,7 +22,9 @@ const (
 
 // DecompileOptions is copied at request entry. No process environment is changed.
 type DecompileOptions struct {
-	Mode DecompileMode
+	// ValidateSyntax is an optional request-local syntax-only validator.
+	ValidateSyntax func(context.Context, string) error
+	Mode           DecompileMode
 	// MaxAnalysisUpdates bounds method-local reaching-definition work; zero uses the default.
 	MaxAnalysisUpdates int
 	Resolve            func(internalName string) ([]byte, bool)
@@ -70,16 +73,19 @@ type RewriteRecord struct {
 	AfterHash  string `json:"after_hash"`
 }
 type DecompileResult struct {
-	Source          string                `json:"source"`
-	Mode            DecompileMode         `json:"mode"`
-	InputHash       string                `json:"input_hash"`
-	Status          string                `json:"status"`
-	StubMethods     []string              `json:"stub_methods"`
-	RulesApplied    []RewriteRecord       `json:"rules_applied"`
-	Diagnostics     []DecompileDiagnostic `json:"diagnostics"`
-	EffectiveConfig *EffectiveConfig      `json:"effective_config,omitempty"`
-	ShadowIRHash    string                `json:"shadow_ir_hash,omitempty"`
-	ShadowIRVersion uint64                `json:"shadow_ir_version,omitempty"`
+	Members         []MemberRecord           `json:"members"`
+	Shadow          []core.ShadowObservation `json:"shadow"`
+	Syntax          ValidationObservation    `json:"syntax"`
+	Source          string                   `json:"source"`
+	Mode            DecompileMode            `json:"mode"`
+	InputHash       string                   `json:"input_hash"`
+	Status          string                   `json:"status"`
+	StubMethods     []string                 `json:"stub_methods"`
+	RulesApplied    []RewriteRecord          `json:"rules_applied"`
+	Diagnostics     []DecompileDiagnostic    `json:"diagnostics"`
+	EffectiveConfig *EffectiveConfig         `json:"effective_config,omitempty"`
+	ShadowIRHash    string                   `json:"shadow_ir_hash,omitempty"`
+	ShadowIRVersion uint64                   `json:"shadow_ir_version,omitempty"`
 }
 
 // EffectiveConfig is the request-local snapshot of policy actually used.
@@ -134,6 +140,14 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		result.Status = StatusClassifies(err)
 		return result, nil, err
 	}
+	result.Members = newMemberLedger(obj)
+	result.Syntax = ValidationObservation{Status: "not_run"}
+	defer func() {
+		finalizeMemberStatus(&result)
+		if err == nil {
+			observeSyntax(&result, options)
+		}
+	}()
 	result.Status = "unsupported"
 	budget = options.Work
 	if budget == nil {

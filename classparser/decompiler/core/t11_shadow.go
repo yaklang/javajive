@@ -1,5 +1,15 @@
 package core
 
+import "fmt"
+
+type ShadowObservation struct {
+	Method  string `json:"method"`
+	Status  string `json:"status"`
+	Hash    string `json:"hash,omitempty"`
+	Version uint64 `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
 // ShadowIRRequest is the read-only snapshot input for MethodIR construction.
 // It is filled after buildSemanticCFG succeeds and must not alias mutable printer state.
 type ShadowIRRequest struct {
@@ -19,9 +29,30 @@ var ShadowIRBuilder func(ShadowIRRequest) (hash string, version uint64, err erro
 func (d *Decompiler) CaptureShadowIR() { d.captureShadowIR() }
 
 func (d *Decompiler) captureShadowIR() {
-	if !d.EnableShadowIR || ShadowIRBuilder == nil || d.semanticCFG == nil {
+	d.ShadowObservation = ShadowObservation{Status: "disabled"}
+	if !d.EnableShadowIR {
 		return
 	}
+	d.ShadowObservation.Status = "unavailable"
+	if d.FunctionContext != nil {
+		d.ShadowObservation.Method = d.FunctionContext.FunctionName + d.FunctionContext.CurrentMethodDesc
+	}
+	if ShadowIRBuilder == nil {
+		d.ShadowObservation.Error = "shadow builder is not installed"
+		return
+	}
+	if d.semanticCFG == nil {
+		d.ShadowObservation.Error = "semantic CFG is unavailable"
+		return
+	}
+	defer func() {
+		if v := recover(); v != nil {
+			d.ShadowObservation.Status = "failed"
+			d.ShadowObservation.Error = fmt.Sprint(v)
+			d.ShadowIRHash = ""
+			d.ShadowIRVersion = 0
+		}
+	}()
 	className, methodName, desc := "", "", ""
 	static := false
 	if d.FunctionContext != nil {
@@ -42,8 +73,18 @@ func (d *Decompiler) captureShadowIR() {
 		D:          d,
 	})
 	if err != nil {
+		d.ShadowObservation.Status = "failed"
+		d.ShadowObservation.Error = err.Error()
 		return
 	}
+	if hash == "" || ver == 0 {
+		d.ShadowObservation.Status = "failed"
+		d.ShadowObservation.Error = "builder returned empty snapshot"
+		return
+	}
+	d.ShadowObservation.Status = "ok"
+	d.ShadowObservation.Hash = hash
+	d.ShadowObservation.Version = ver
 	d.ShadowIRHash = hash
 	d.ShadowIRVersion = ver
 }

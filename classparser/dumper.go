@@ -34,6 +34,7 @@ type ClassObjectDumper struct {
 	Work                   *workbudget.Budget
 	diagTruncated          bool
 	overloadFamilyUnproven bool
+	overloadUnknownSeen    map[string]bool
 	// typeAnnosUnsupported is set when a legal type annotation cannot be
 	// placed on a declaration (code-offset/local/inner path).
 	typeAnnosUnsupported bool
@@ -565,14 +566,14 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	c.FuncCtx = funcCtx
 	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
-	overloadUnknownSeen := map[string]bool{}
+	c.overloadUnknownSeen = map[string]bool{}
 	funcCtx.OnOverloadUnknown = func(owner, name, descriptor string) {
 		c.overloadFamilyUnproven = true
 		key := owner + "\x00" + name + "\x00" + descriptor
-		if overloadUnknownSeen[key] {
+		if c.overloadUnknownSeen[key] {
 			return
 		}
-		overloadUnknownSeen[key] = true
+		c.overloadUnknownSeen[key] = true
 		c.appendDiagnostic(DecompileDiagnostic{
 			Code:    "overload_family_unknown",
 			Message: "invoke " + owner + "." + name + descriptor + " family not proven; binding requires further validation",
@@ -1416,7 +1417,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		c.appendDiagnostic(DecompileDiagnostic{Code: "legacy_source_recovery_disabled", Message: "Unproven class-source repairs are disabled. Core structuring and type recovery still require round-trip validation."})
 	}
 	if c.options.Mode != Precision && EnableDecompileSyntaxValidation && len(full) < 50000 {
-		if err := validateJavaSyntax(full); err != nil {
+		if err := validateJavaSyntax(full); err != nil && !errors.Is(err, ErrSyntaxUnavailable) {
 			// The assembled class is not valid Java. Degrade malformed members (using the real
 			// class header so interface/enum/constructor context is honored) and re-render, so a
 			// single broken method/field cannot make the whole class un-parseable.
@@ -1429,6 +1430,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 		}
 	}
+	c.recordMembers(methods, fields)
 	// Enum-switch ($SwitchMap) cross-class fold (Bug V): rewrite `switch(Outer$N.$SwitchMap$E[sel.
 	// ordinal()])` back to the idiomatic `switch(sel){ case CONST: ... }`. No-op without a resolver
 	// or when JDEC_NO_ENUM_SWITCH_FOLD is set; produces valid Java, so it runs after assembly.
@@ -12508,8 +12510,14 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 	}
 	c.aggressiveRetried[traitId] = true
 
+	rollback := c.snapshotRetryState()
+	committed := false
+	defer func() {
+		if !committed {
+			rollback()
+		}
+	}()
 	savedAggressive := c.aggressive
-	savedEntry, hadEntry := c.dumpedMethodsSet[traitId]
 	c.aggressive = true
 	delete(c.dumpedMethodsSet, traitId)
 	defer func() { c.aggressive = savedAggressive }()
@@ -12533,14 +12541,9 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 		// body with a leaked unconditional throw). Such output is valid Java but semantically wrong.
 		!containsEmptyControlBlock(res.bodyCode)
 	if !clean {
-		// Restore the exact pre-retry cache state so downstream rendering is unchanged.
-		if hadEntry {
-			c.dumpedMethodsSet[traitId] = savedEntry
-		} else {
-			delete(c.dumpedMethodsSet, traitId)
-		}
 		return nil
 	}
+	committed = true
 	return res
 }
 

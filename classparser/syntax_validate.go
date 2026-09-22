@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/yaklang/javajive/internal/log"
-	"github.com/yaklang/javajive/internal/utils"
 )
 
 // debugInvalidMethods, when set via DEBUG_INVALID, logs the raw (pre-degradation) source of any
@@ -193,37 +192,8 @@ func validateJavaSyntaxWithBudget(src string, budget time.Duration) error {
 // abandoned goroutine still finishes on its own (ANTLR has no cancellation hook), but its result
 // is dropped via the buffered channel so nothing blocks or leaks permanently.
 func validateJavaSyntaxOnce(src string, budget time.Duration) error {
-	// javajive ships without the ANTLR-based Java grammar parser to stay portable
-	// and dependency-light. The post-decompile syntax safety net is therefore a
-	// no-op: validation always "passes", so the decompiler emits its rendered
-	// output as-is instead of degrading members to stubs. EnableDecompileSyntaxValidation
-	// defaults to false, so this path is normally not even reached at runtime.
-	_ = src
-	if budget <= 0 {
-		return nil
-	}
-	ch := make(chan error, 1)
-	jdecenv.Go(func() {
-		defer func() {
-			if r := recover(); r != nil {
-				ch <- utils.Errorf("panic during syntax validation: %v", r)
-			}
-		}()
-		ch <- nil
-	})
-	// Use a stoppable timer rather than time.After so the budget timer (and the
-	// src it retains via the closure) is released as soon as validation returns.
-	// time.After would keep one ~budget-long timer alive per validation, which on
-	// large jars (thousands of classes/members) accumulates thousands of pending
-	// timers and goroutines, wasting memory and delaying GC during batch scans.
-	timer := time.NewTimer(budget)
-	defer timer.Stop()
-	select {
-	case err := <-ch:
-		return err
-	case <-timer.C:
-		return utils.Errorf("syntax validation exceeded budget %s (treated as invalid for safe degradation)", budget)
-	}
+	// No bundled parser is installed. Absence must never be reported as valid.
+	return ErrSyntaxUnavailable
 }
 
 // validatorDollarPlaceholder is a guaranteed-valid Java identifier substituted for a standalone

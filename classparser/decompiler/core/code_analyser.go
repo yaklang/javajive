@@ -140,6 +140,7 @@ type Decompiler struct {
 	traceCfg           decompileTraceConfig
 	traceCfgLoaded     bool
 	EnableShadowIR     bool
+	ShadowObservation  ShadowObservation
 	ShadowIRHash       string
 	ShadowIRVersion    uint64
 }
