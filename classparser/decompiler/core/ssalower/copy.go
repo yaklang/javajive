@@ -1,6 +1,9 @@
 package ssalower
 
-import "fmt"
+import (
+	"container/heap"
+	"fmt"
+)
 
 type VarID int
 
@@ -22,49 +25,98 @@ type Move struct {
 	Tmp bool
 }
 
+// Sequentialize is the legacy convenience API. Invalid input panics instead of
+// returning a partial plan. Production lowering uses SequentializeChecked.
 func Sequentialize(copies []Copy, nextTemp func() VarID) []Move {
-	var remain []Copy
+	moves, err := SequentializeChecked(copies, nextTemp)
+	if err != nil {
+		panic(err)
+	}
+	return moves
+}
+
+type idHeap []VarID
+
+func (h idHeap) Len() int           { return len(h) }
+func (h idHeap) Less(i, j int) bool { return h[i] < h[j] }
+func (h idHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *idHeap) Push(v any)        { *h = append(*h, v.(VarID)) }
+func (h *idHeap) Pop() any          { a := *h; v := a[len(a)-1]; *h = a[:len(a)-1]; return v }
+
+// SequentializeChecked schedules logical values, never individual wide slots.
+// Destinations are unique even for self copies. A cycle saves a destination's
+// OLD value and redirects every reader before overwriting it. The allocator
+// must reserve the whole method's namespace, not just this edge's values.
+func SequentializeChecked(copies []Copy, nextTemp func() VarID) ([]Move, error) {
+	pending := map[VarID]VarID{}
+	readers := map[VarID]map[VarID]bool{}
+	occupied, destinations := map[VarID]bool{}, map[VarID]bool{}
 	for _, c := range copies {
+		if c.Dst <= 0 || c.Src <= 0 || destinations[c.Dst] {
+			return nil, fmt.Errorf("invalid_input: invalid or duplicate copy destination %d", c.Dst)
+		}
+		destinations[c.Dst] = true
+		occupied[c.Dst], occupied[c.Src] = true, true
 		if c.Dst == c.Src {
 			continue
 		}
-		remain = append(remain, c)
+		pending[c.Dst] = c.Src
+		if readers[c.Src] == nil {
+			readers[c.Src] = map[VarID]bool{}
+		}
+		readers[c.Src][c.Dst] = true
+	}
+	ready, all := &idHeap{}, &idHeap{}
+	for d := range pending {
+		heap.Push(all, d)
+		if len(readers[d]) == 0 {
+			heap.Push(ready, d)
+		}
 	}
 	var out []Move
-	for len(remain) > 0 {
-		emitted := false
-		for i := 0; i < len(remain); i++ {
-			c := remain[i]
-			if sourceOf(remain, c.Dst) {
+	for len(pending) > 0 {
+		for ready.Len() > 0 {
+			d := heap.Pop(ready).(VarID)
+			s, ok := pending[d]
+			if !ok || len(readers[d]) != 0 {
 				continue
 			}
-			out = append(out, Move{Dst: c.Dst, Src: c.Src})
-			remain = append(remain[:i], remain[i+1:]...)
-			emitted = true
-			break
-		}
-		if emitted {
-			continue
-		}
-		c := remain[0]
-		t := nextTemp()
-		out = append(out, Move{Dst: t, Src: c.Dst, Tmp: true})
-		for i := range remain {
-			if remain[i].Src == c.Dst {
-				remain[i].Src = t
+			out = append(out, Move{Dst: d, Src: s})
+			delete(pending, d)
+			delete(readers[s], d)
+			if _, ok := pending[s]; ok && len(readers[s]) == 0 {
+				heap.Push(ready, s)
 			}
 		}
-	}
-	return out
-}
-
-func sourceOf(copies []Copy, id VarID) bool {
-	for _, c := range copies {
-		if c.Src == id {
-			return true
+		if len(pending) == 0 {
+			break
 		}
+		var victim VarID
+		for all.Len() > 0 {
+			v := heap.Pop(all).(VarID)
+			if _, ok := pending[v]; ok {
+				victim = v
+				break
+			}
+		}
+		if victim == 0 || nextTemp == nil {
+			return nil, fmt.Errorf("invalid_input: cycle requires fresh temporary")
+		}
+		tmp := nextTemp()
+		if tmp <= 0 || occupied[tmp] {
+			return nil, fmt.Errorf("invalid_input: temporary %d is not fresh", tmp)
+		}
+		occupied[tmp] = true
+		out = append(out, Move{Dst: tmp, Src: victim, Tmp: true})
+		readers[tmp] = map[VarID]bool{}
+		for d := range readers[victim] {
+			pending[d] = tmp
+			readers[tmp][d] = true
+		}
+		delete(readers, victim)
+		heap.Push(ready, victim)
 	}
-	return false
+	return out, nil
 }
 
 func ParallelEval(copies []Copy, state map[VarID]int64) map[VarID]int64 {

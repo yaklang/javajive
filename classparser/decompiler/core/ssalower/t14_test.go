@@ -104,7 +104,7 @@ func testT14C03Diamond(t *testing.T) {
 	trueWant := ParallelEval(phiCopies(fn, trueEdge), pre)
 	falseWant := ParallelEval(phiCopies(fn, falseEdge), pre)
 	for _, p := range phis {
-		dst := PhiDest(p)
+		dst := testPhiDest(fn, p)
 		if trueGot[dst] != trueWant[dst] {
 			t.Fatalf("T14-C03 true arm dst %d got %d want %d moves=%v", dst, trueGot[dst], trueWant[dst], low.MovesOn(trueEdge.ID))
 		}
@@ -147,7 +147,7 @@ func testT14C03LoopExit(t *testing.T) {
 	exitGot := applyMoves(low.MovesOn(exit.ID), cloneState(pre))
 	backWant := ParallelEval(phiCopies(fn, back), pre)
 	for _, p := range fn.PhisOf(header.ID) {
-		dst := PhiDest(p)
+		dst := testPhiDest(fn, p)
 		if backGot[dst] != backWant[dst] {
 			t.Fatalf("T14-C03 backedge dst %d got %d want %d moves=%v", dst, backGot[dst], backWant[dst], low.MovesOn(back.ID))
 		}
@@ -177,6 +177,13 @@ func TestT14_C04_ExceptionRegionBoundary(t *testing.T) {
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The fixture's synthetic constant-pool method is a void static call.
+	// Populate its descriptor explicitly; unknown invocation effects are rejected.
+	for i := range ir.Instrs {
+		if ir.Instrs[i].Opcode == core.OP_INVOKESTATIC {
+			ir.Instrs[i].Desc = "()V"
+		}
 	}
 	before := cloneCoverage(coverageMap(ir))
 	throwAt := map[uint16]methodir.Instr{}
@@ -358,9 +365,9 @@ func diamondArmEdges(t *testing.T, fn *ssabuild.Function, incoming []methodir.Ed
 func preJoinState(fn *ssabuild.Function, join methodir.Block, incoming []methodir.Edge) map[VarID]int64 {
 	st := map[VarID]int64{}
 	for _, p := range fn.PhisOf(join.ID) {
-		st[PhiDest(p)] = -999999
+		st[testPhiDest(fn, p)] = -999999
 		for _, op := range p.Operands {
-			st[OriginVar(op.Origin)] = int64(OriginVar(op.Origin))
+			st[testOriginVar(fn, op.Origin)] = int64(testOriginVar(fn, op.Origin))
 		}
 	}
 	for _, e := range incoming {
@@ -544,7 +551,7 @@ func exceptionTwoRangeBytecode() ([]byte, []*core.ExceptionTableEntry, []Range) 
 	b0 := len(c)
 	c = append(c, core.OP_ICONST_2, core.OP_ISTORE_0, core.OP_INVOKESTATIC, 0, 1)
 	endB := len(c)
-	c = append(c, core.OP_RETURN)
+	c = append(c, core.OP_ILOAD_0, core.OP_IRETURN)
 	h := len(c)
 	c = append(c, core.OP_ASTORE_1, core.OP_ILOAD_0, core.OP_IRETURN)
 	ex := []*core.ExceptionTableEntry{
@@ -575,4 +582,39 @@ func loweredDump(l *Lowered) string {
 		s += fmt.Sprintf("split %d edge=%s moves=%v\n", sp.ID, sp.Edge, sp.Moves)
 	}
 	return s
+}
+
+// Helpers resolve the same method-local namespace as Destroy; errors fail hard.
+func testPhiDest(fn *ssabuild.Function, p ssabuild.Phi) VarID {
+	r, err := registryFor(fn)
+	if err != nil {
+		panic(err)
+	}
+	id, err := r.Phi(p)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+func testOriginVar(fn *ssabuild.Function, o ssabuild.Origin) VarID {
+	r, err := registryFor(fn)
+	if err != nil {
+		panic(err)
+	}
+	id, err := r.Origin(o)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+func phiCopies(fn *ssabuild.Function, e methodir.Edge) []Copy {
+	r, err := registryFor(fn)
+	if err != nil {
+		panic(err)
+	}
+	copies, err := phiCopiesChecked(fn, r, e)
+	if err != nil {
+		panic(err)
+	}
+	return copies
 }

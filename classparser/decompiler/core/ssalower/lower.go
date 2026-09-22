@@ -41,15 +41,26 @@ type SplitBlock struct {
 }
 
 type Lowered struct {
-	IR       *methodir.MethodIR
-	SSA      *ssabuild.Function
-	Assigns  []EdgeAssign
-	Splits   []SplitBlock
-	Temps    int
-	Coverage map[uint16][]Range
+	// EntryMoves initialize entry-block phis from the synthetic method-entry edge.
+	EntryMoves []Move
+	Values     *ValueRegistry
+	Exception  ExceptionPlan
+	IR         *methodir.MethodIR
+	SSA        *ssabuild.Function
+	Assigns    []EdgeAssign
+	Splits     []SplitBlock
+	Temps      int
+	Coverage   map[uint16][]Range
 }
 
 func Destroy(fn *ssabuild.Function) (*Lowered, error) {
+	return DestroyWithOptions(fn, Options{MaxSpills: 100000})
+}
+
+// DestroyWithOptions returns a complete emission plan or nil and an error.
+// Consumers must emit Exception.Sites before throwing instructions and bind
+// Exception.Catch from catch parameters in addition to normal edge moves.
+func DestroyWithOptions(fn *ssabuild.Function, opt Options) (*Lowered, error) {
 	if fn == nil || fn.IR == nil {
 		return nil, fmt.Errorf("invalid_input: nil SSA")
 	}
@@ -58,18 +69,42 @@ func Destroy(fn *ssabuild.Function) (*Lowered, error) {
 	succN := map[methodir.InstrID]int{}
 	predN := map[methodir.InstrID]int{}
 	for _, e := range ir.Edges {
+		if _, ok := fn.EdgeStates[e.ID]; !ok {
+			continue
+		}
 		succN[e.From]++
 		predN[e.To]++
 	}
 
-	nextTmp := VarID(100000)
-	fresh := func() VarID {
-		nextTmp++
-		return nextTmp
+	values, err := registryFor(fn)
+	if err != nil {
+		return nil, err
 	}
-	out := &Lowered{IR: ir, SSA: fn, Coverage: cov}
+	out := &Lowered{IR: ir, SSA: fn, Coverage: cov, Values: values}
+	plan, err := exceptionPlan(fn, values, cov, opt.MaxSpills)
+	if err != nil {
+		return nil, err
+	}
+	out.Exception = plan
+	for _, e := range fn.Incoming(ir.EntryPC) {
+		if e.Kind != ssabuild.EntryEdgeKind {
+			continue
+		}
+		copies, err := phiCopiesChecked(fn, values, e)
+		if err != nil {
+			return nil, err
+		}
+		moves, err := values.sequentialize(copies)
+		if err != nil {
+			return nil, err
+		}
+		out.EntryMoves = moves
+	}
 	nextSplit := 0
 	for _, e := range ir.Edges {
+		if _, ok := fn.EdgeStates[e.ID]; !ok {
+			continue
+		}
 		originPC := uint16(e.From)
 		ea := EdgeAssign{
 			Edge:     e.ID,
@@ -80,13 +115,19 @@ func Destroy(fn *ssabuild.Function) (*Lowered, error) {
 			OriginPC: originPC,
 		}
 		if e.Kind == core.EdgeException {
-			// Exception edges keep pre-throw locals; do not move copies onto
-			// them or invent a split PC that would leave [start,end).
+			// Exception transfers are represented by out.Exception: spills
+			// before the throw and catch-parameter bindings at the handler.
 			out.Assigns = append(out.Assigns, ea)
 			continue
 		}
-		copies := phiCopies(fn, e)
-		moves := Sequentialize(copies, fresh)
+		copies, err := phiCopiesChecked(fn, values, e)
+		if err != nil {
+			return nil, err
+		}
+		moves, err := values.sequentialize(copies)
+		if err != nil {
+			return nil, err
+		}
 		critical := succN[e.From] > 1 && predN[e.To] > 1
 		if critical && len(moves) > 0 {
 			nextSplit++
@@ -107,17 +148,7 @@ func Destroy(fn *ssabuild.Function) (*Lowered, error) {
 			// and not the join (every pred).
 			ea.Moves = nil
 			out.Assigns = append(out.Assigns, ea)
-			out.Assigns = append(out.Assigns, EdgeAssign{
-				Edge:     e.ID,
-				From:     e.From,
-				To:       e.To,
-				Kind:     e.Kind,
-				Moves:    moves,
-				Split:    true,
-				SplitID:  split.ID,
-				Coverage: append([]Range(nil), ea.Coverage...),
-				OriginPC: originPC,
-			})
+
 			continue
 		}
 		ea.Moves = moves
@@ -136,32 +167,42 @@ func Destroy(fn *ssabuild.Function) (*Lowered, error) {
 		}
 		return len(a.Moves) < len(b.Moves)
 	})
-	out.Temps = int(nextTmp - 100000)
+	out.Temps = values.temps
 	return out, nil
 }
 
-func PhiDest(p ssabuild.Phi) VarID { return VarID(p.ID) + 1 }
-
-func OriginVar(o ssabuild.Origin) VarID { return originVar(o) }
-
-func phiCopies(fn *ssabuild.Function, e methodir.Edge) []Copy {
+// phiCopiesChecked resolves both ends in the same method registry.
+func phiCopiesChecked(fn *ssabuild.Function, values *ValueRegistry, e methodir.Edge) ([]Copy, error) {
 	var copies []Copy
 	bl, ok := fn.IR.BlockOf(e.To)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("invalid_input: edge target missing")
 	}
 	for _, p := range fn.PhisOf(bl.ID) {
+		var found bool
 		for _, op := range p.Operands {
 			if op.Edge == e.ID {
-				copies = append(copies, Copy{Dst: PhiDest(p), Src: originVar(op.Origin)})
+				if found {
+					return nil, fmt.Errorf("invalid_input: duplicate phi operand")
+				}
+				found = true
+				dst, err := values.Phi(p)
+				if err != nil {
+					return nil, err
+				}
+				src, err := values.Origin(op.Origin)
+				if err != nil {
+					return nil, err
+				}
+				copies = append(copies, Copy{Dst: dst, Src: src})
 			}
 		}
+		if !found {
+			return nil, fmt.Errorf("invalid_input: phi %d missing edge %s", p.ID, e.ID)
+		}
 	}
-	return copies
-}
-
-func originVar(o ssabuild.Origin) VarID {
-	return VarID(int(o.Kind)*1_000_000 + int(o.PC)*100 + o.Slot)
+	sort.Slice(copies, func(i, j int) bool { return copies[i].Dst < copies[j].Dst })
+	return copies, nil
 }
 
 func coverageMap(ir *methodir.MethodIR) map[uint16][]Range {
