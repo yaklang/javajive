@@ -35,12 +35,13 @@ type ExceptionTableEntry struct {
 }
 
 type Decompiler struct {
-	evaluationSnapshots   map[*OpCode][]EvaluationSnapshot
-	FunctionType          *types.JavaFuncType
-	opcodeToSimulateStack map[*OpCode]*StackSimulationImpl
-	FunctionContext       *class_context.ClassContext
-	varTable              map[int]*values.JavaRef
-	opcodeIdToRef         map[*OpCode][][2]any
+	evaluationSnapshots    map[*OpCode][]EvaluationSnapshot
+	constructorInitialized bool
+	FunctionType           *types.JavaFuncType
+	opcodeToSimulateStack  map[*OpCode]*StackSimulationImpl
+	FunctionContext        *class_context.ClassContext
+	varTable               map[int]*values.JavaRef
+	opcodeIdToRef          map[*OpCode][][2]any
 	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
 	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
 	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
@@ -4143,6 +4144,12 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			return fmt.Errorf("invalid_input: %s", rep.Reason)
 		}
 		snapshotFamily := id.Normalized() == IdentityMakeConcat || id.Normalized() == IdentityMakeConcatWithConstants || id.Normalized() == IdentityLambdaMetafactory || id.Normalized() == IdentityLambdaAltMetafactory
+		// Java source cannot declare operand temps before this()/super().
+		// Preserve the original constructor-argument expression there; unsafe
+		// concat operands remain explicitly unsupported by the adapter.
+		if d.FunctionContext != nil && d.FunctionContext.FunctionName == "<init>" && !d.constructorInitialized {
+			snapshotFamily = false
+		}
 		if snapshotFamily {
 			req.DynamicArgs, err = d.snapshotDynamicOperands(opcode, runtimeStackSimulation, args, callSiteReturnType.FunctionType().ParamTypes)
 			if err != nil {
@@ -4184,6 +4191,11 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
 
 		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
+		if funcCallValue.FunctionName == "<init>" {
+			if ref, ok := values.UnpackSoltValue(funcCallValue.Object).(*values.JavaRef); ok && ref != nil && ref.IsThis {
+				d.constructorInitialized = true
+			}
+		}
 		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(funcCallValue)

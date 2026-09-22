@@ -39,3 +39,28 @@ func TestInlineMotionChecksEntirePath(t *testing.T) {
 		t.Fatal("ambiguous/cyclic path accepted")
 	}
 }
+
+func TestAdjacentCallInliningRespectsEvaluatedPrefix(t *testing.T) {
+	typ := types.NewJavaPrimer(types.JavaInteger)
+	saved := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+	effect := values.TagEffects(values.NewJavaLiteral(1, typ), values.EffectCall)
+	source := NewNode(statements.NewAssignStatement(saved, effect, true))
+	source.Id = 0
+	call := &values.FunctionCallExpression{Arguments: []values.JavaValue{values.NewJavaLiteral(0, typ), saved}}
+	target := NewNode(statements.NewExpressionStatement(call))
+	target.Id = 1
+	source.AddNext(target)
+	d := &Decompiler{}
+	origins := map[int]*OpCode{0: {CurrentOffset: 0}, 1: {CurrentOffset: 1}}
+	if !d.canInlineValue(effect, source, target, origins) {
+		t.Fatal("adjacent use with pure prefix rejected")
+	}
+	call.Arguments[0] = values.TagEffects(values.NewJavaLiteral(0, typ), values.EffectCall)
+	if d.canInlineValue(effect, source, target, origins) {
+		t.Fatal("reordered two calls")
+	}
+	call.Arguments = []values.JavaValue{saved, saved}
+	if d.canInlineValue(effect, source, target, origins) {
+		t.Fatal("duplicated effectful value")
+	}
+}

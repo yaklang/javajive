@@ -23,8 +23,10 @@ Tested above R01 `5f85ebe` (local cherry-pick `ffe6e16`) and R02/R03/R11/R04/R05
   before mutation. Several assignments at one PC retain stable emission order.
 - Lambda marker intersections are explicit before result materialization;
   malformed markers fail, nonzero explicit bridge lists remain unsupported.
-  Standalone concat adapter callers with multiple effectful raw operands receive
-  unsupported rather than a conversion/evaluation-interleaved + expression.
+  Constructors keep safe String/primitive concat operands inside this()/super()
+  because Java forbids preceding temp declarations. If an unsnapshotted operand
+  may invoke object conversion, the adapter returns unsupported rather than a
+  conversion/evaluation-interleaved + expression.
 
 ## Independent checks
 
@@ -37,7 +39,8 @@ Tested above R01 `5f85ebe` (local cherry-pick `ffe6e16`) and R02/R03/R11/R04/R05
 - The Java 17 round-trip fixture compares javac/JVM behavior in precision and
   compatibility modes: an already-present String.valueOf conversion throws before
   a later operand call (trace EC, call count 0), lambda capture remains 7 after
-  later mutation, and local concat reads print 78 around ++y.
+  later mutation, local concat reads print 78 around ++y, and effectful String
+  operands inside super(...) retain left-to-right output LRLR.
 - Existing T15 covers a[i++]=f(), short circuit, OOB before call, partial array
   initialization, class initialization, volatile fields, and monitor release.
   T18 covers throwing toString and actual recipe operands. T19 covers captures,

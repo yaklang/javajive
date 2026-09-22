@@ -45,6 +45,9 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 	recv := ""
 	if f.Object != nil {
 		recv = bindingType(f.Object.Type())
+		if _, ok := UnpackSoltValue(f.Object).(*JavaClassValue); ok && kind != callbinding.Static {
+			recv = "Ljava/lang/Class;"
+		}
 		if kind != callbinding.Static && recv != "L"+owner+";" {
 			risk = true
 		}
@@ -54,6 +57,9 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 			return nil, false
 		}
 		at := bindingType(a.Type())
+		if _, ok := UnpackSoltValue(a).(*JavaClassValue); ok {
+			at = "Ljava/lang/Class;"
+		}
 		if lit, ok := UnpackSoltValue(a).(*JavaLiteral); ok && lit.Data == nil {
 			at = "null"
 		}

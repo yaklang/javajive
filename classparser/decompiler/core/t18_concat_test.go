@@ -167,6 +167,36 @@ func TestTaskT18MakeConcatEvalOrder(t *testing.T) {
 	}
 }
 
+func TestTaskT18UnsnapshottedEffectfulConversionBoundary(t *testing.T) {
+	typ := t18StringType()
+	stringArgs := []values.JavaValue{
+		values.TagEffects(values.NewJavaLiteral("R", typ), values.EffectCall),
+		values.TagEffects(values.NewJavaLiteral("L", typ), values.EffectCall),
+	}
+	res := DispatchInvokeDynamic(CallSiteRequest{
+		Identity: IdentityMakeConcat, CallSiteName: "makeConcat",
+		CallSiteDescriptor: "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+		DynamicArgs:        stringArgs, TargetSourceVersion: 17, ClassMajor: 61,
+	}, nil, nil, typ)
+	if res.Status != "" {
+		t.Fatalf("effectful String operands are safe inline: %+v", res)
+	}
+
+	objectType := types.NewJavaClass("java.lang.Object")
+	objectArgs := []values.JavaValue{
+		values.TagEffects(values.NewJavaLiteral("R", objectType), values.EffectCall),
+		values.TagEffects(values.NewJavaLiteral("L", objectType), values.EffectCall),
+	}
+	res = DispatchInvokeDynamic(CallSiteRequest{
+		Identity: IdentityMakeConcat, CallSiteName: "makeConcat",
+		CallSiteDescriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;",
+		DynamicArgs:        objectArgs, TargetSourceVersion: 17, ClassMajor: 61,
+	}, nil, nil, typ)
+	if res.Status != "unsupported" {
+		t.Fatalf("effectful Object conversion requires snapshots: %+v", res)
+	}
+}
+
 func TestTaskT18NullObjectCast(t *testing.T) {
 	t.Log("T18-C01")
 	recipe := values.NewJavaLiteral("x=\u0001,o=\u0001", t18StringType())

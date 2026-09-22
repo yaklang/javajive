@@ -27,3 +27,14 @@ public class EvaluationProof {
 	}
 	t04RoundTripModes(t, "17", "EvaluationProof", original, classes, func(t *testing.T, src string) {})
 }
+
+func TestR06ConstructorArgumentOrder(t *testing.T) {
+	original, classes := t04CompileRun(t, "17", "CtorMain", map[string]string{
+		"CtorBase.java": `public class CtorBase { public CtorBase(String s){System.out.println(s);} }`,
+		"CtorMain.java": `public class CtorMain extends CtorBase { public static String take(String s){System.out.print(s);return s;} public CtorMain(){super(take("L")+take("R"));} public static void main(String[] a){new CtorMain();} }`,
+	})
+	if strings.TrimSpace(original) != "LRLR" {
+		t.Fatalf("bad fixture oracle: %q", original)
+	}
+	t04RoundTripModes(t, "17", "CtorMain", original, classes, func(t *testing.T, s string) {})
+}

@@ -83,3 +83,18 @@ func CanSwap(a, b Access) bool {
 	}
 	return !accessOverlap(a.Writes, b.Reads) && !accessOverlap(b.Writes, a.Reads) && !accessOverlap(a.Writes, b.Writes)
 }
+
+// CanMoveAcrossPrefix allows an operation to be nested into an adjacent use
+// when the preceding operand evaluations have no effects or conflicting local
+// access. The enclosing call/store still occurs after the operation.
+func CanMoveAcrossPrefix(operation, prefix Access) bool {
+	if prefix.Effects != 0 || len(prefix.Writes) != 0 || len(operation.Handlers) != len(prefix.Handlers) {
+		return false
+	}
+	for i := range operation.Handlers {
+		if operation.Handlers[i] != prefix.Handlers[i] {
+			return false
+		}
+	}
+	return !accessOverlap(operation.Writes, prefix.Reads)
+}

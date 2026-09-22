@@ -66,3 +66,12 @@ func TestWildcardFileFilterThisFirstIsLoadBearing(t *testing.T) {
 		t.Errorf("OFF expected this() after locals, got:\n%s", off)
 	}
 }
+
+func TestWildcardThisRepairPreservesDescriptorPin(t *testing.T) {
+	t.Setenv("JDEC_COMMONS_IO_REMAINING_OFF", "")
+	in := "public WildcardFileFilter(String var1) {\n\t\tString[] var2 = new String[1];\n\t\tvar2[0] = ((String)(requireWildcards((Object)(var1))));\n\t\tthis(IOCase.SENSITIVE,var2);\n\t}"
+	out := fixCommonsIoRemainingReconstructs(in)
+	if strings.Contains(out, "this(IOCase.SENSITIVE,var2)") || strings.Count(out, "requireWildcards((Object)(var1))") != 1 {
+		t.Fatalf("lost binding/evaluation or kept prelude: %s", out)
+	}
+}

@@ -11,11 +11,13 @@ func fixCommonsIoRemainingReconstructs(body string) string {
 	if jdecenv.Get("JDEC_COMMONS_IO_REMAINING_OFF") == "1" {
 		return body
 	}
-	// WildcardFileFilter(String): locals before this().
-	body = strings.Replace(body,
-		"public WildcardFileFilter(String var1) {\n\t\tString[] var2 = new String[1];\n\t\tvar2[0] = ((String)(requireWildcards(var1)));\n\t\tthis(IOCase.SENSITIVE,var2);\n\t}",
-		"public WildcardFileFilter(String var1) {\n\t\tthis(IOCase.SENSITIVE,new String[]{((String)(requireWildcards(var1)))});\n\t}",
-		1)
+	// This compatibility repair preserves either unpinned or descriptor-pinned
+	// requireWildcards(Object) syntax; never remove the binding cast.
+	for _, arg := range []string{"var1", "(Object)(var1)"} {
+		body = strings.Replace(body,
+			"public WildcardFileFilter(String var1) {\n\t\tString[] var2 = new String[1];\n\t\tvar2[0] = ((String)(requireWildcards("+arg+")));\n\t\tthis(IOCase.SENSITIVE,var2);\n\t}",
+			"public WildcardFileFilter(String var1) {\n\t\tthis(IOCase.SENSITIVE,new String[]{((String)(requireWildcards("+arg+")))});\n\t}", 1)
+	}
 	// IOConsumer.forAll: BiFunction needs 3 type args matching IOStreams.forAll.
 	body = strings.ReplaceAll(body,
 		"(BiFunction<Integer, IOException>)(IOIndexedException::new)",

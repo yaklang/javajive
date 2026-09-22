@@ -27,12 +27,25 @@ func t18ConcatAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	if err := validateConcatRequest(req); err != nil {
 		return invalidDispatch(req, FamilyConcat, DiagBootstrapArgMismatch, err.Error(), resultType)
 	}
-	// Production passes dedicated operand temps. Standalone adapter callers
-	// must not obtain a + chain that interleaves conversions with later effects.
+	// Production normally passes dedicated operand temps. Constructors are the
+	// exception: Java forbids statements before this()/super(), so safe operands
+	// must remain in the argument expression. A String or primitive conversion is
+	// inert, and Java + evaluates those operands left-to-right. Object conversion
+	// may call toString(), so keep rejecting any unsnapshotted effectful concat
+	// unless every dynamic operand has an inert conversion.
 	if len(req.DynamicArgs) > 1 {
+		hasEffects := false
 		for _, arg := range req.DynamicArgs {
 			if !values.IsPure(arg) {
-				return unsupportedDispatch(req, FamilyConcat, DiagBootstrapUnknown, "concat operands require materialized evaluation snapshots", resultType)
+				hasEffects = true
+				break
+			}
+		}
+		if hasEffects {
+			for _, arg := range req.DynamicArgs {
+				if !t18ConversionIsInert(arg) {
+					return unsupportedDispatch(req, FamilyConcat, DiagBootstrapUnknown, "concat operands require materialized evaluation snapshots", resultType)
+				}
 			}
 		}
 	}
@@ -374,6 +387,18 @@ func t18IsStringTyped(v values.JavaValue) bool {
 	}
 	s := v.Type().String(&class_context.ClassContext{})
 	return s == "String" || s == "java.lang.String"
+}
+
+func t18ConversionIsInert(v values.JavaValue) bool {
+	v = values.UnpackSoltValue(v)
+	if t18IsBareNull(v) || t18IsStringTyped(v) {
+		return true
+	}
+	if v == nil || v.Type() == nil || v.Type().IsArray() {
+		return false
+	}
+	p, ok := v.Type().RawType().(*types.JavaPrimer)
+	return ok && p != nil && p.Name != types.JavaString && p.Name != types.JavaVoid
 }
 
 func t18NeedsStringSeed(first values.JavaValue, firstRendered string) bool {

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -42,7 +43,12 @@ func (d *Decompiler) canInlineValue(value values.JavaValue, source, target *Node
 		return false
 	}
 	moving := values.InspectAccess(value)
-	if moving.Effects != 0 || len(moving.Writes) != 0 {
+	assignment, ok := source.Statement.(*statements.AssignStatement)
+	if !ok {
+		return false
+	}
+	ref, ok := values.UnpackSoltValue(assignment.LeftValue).(*values.JavaRef)
+	if !ok || ref == nil {
 		return false
 	}
 	origin := origins[source.Id]
@@ -70,6 +76,14 @@ func (d *Decompiler) canInlineValue(value values.JavaValue, source, target *Node
 		if op == nil {
 			return false
 		}
+		if cur == target {
+			prefix, ok := inlineUsePrefix(cur.Statement, ref)
+			if !ok {
+				return false
+			}
+			prefix.Handlers = d.handlersAt(op)
+			return values.CanMoveAcrossPrefix(moving, prefix)
+		}
 		crossed := statementAccess(cur.Statement)
 		crossed.Handlers = d.handlersAt(op)
 		if !values.CanSwap(moving, crossed) {
@@ -77,4 +91,123 @@ func (d *Decompiler) canInlineValue(value values.JavaValue, source, target *Node
 		}
 	}
 	return true
+}
+
+// prefixBeforeUse computes Java's evaluated prefix before one value use. It
+// rejects deferred/conditional uses, allocation boundaries and opaque closures.
+func prefixBeforeUse(value values.JavaValue, ref *values.JavaRef) (values.Access, int, bool) {
+	empty := func() values.Access {
+		return values.Access{Reads: map[*values.JavaRef]bool{}, Writes: map[*values.JavaRef]bool{}}
+	}
+	seen := map[values.JavaValue]bool{}
+	var walk func(values.JavaValue) (values.Access, int, bool)
+	walk = func(v values.JavaValue) (values.Access, int, bool) {
+		if v == nil {
+			return empty(), 0, true
+		}
+		if seen[v] {
+			return empty(), 0, false
+		}
+		seen[v] = true
+		defer delete(seen, v)
+		if r, ok := v.(*values.JavaRef); ok && values.SameLocal(r, ref) {
+			return empty(), 1, true
+		}
+		var children []values.JavaValue
+		conditional := false
+		switch x := v.(type) {
+		case *values.SlotValue:
+			children = []values.JavaValue{x.GetValue()}
+		case *values.FunctionCallExpression:
+			children = append([]values.JavaValue{x.Object}, x.Arguments...)
+		case *values.JavaExpression:
+			children = x.Values
+			conditional = x.Op == "&&" || x.Op == "||"
+			// String + may perform conversion between operands.
+			if x.Op == "+" && x.Type() != nil && x.Type().String(&class_context.ClassContext{}) == "String" {
+				conditional = true
+			}
+		case *values.CastExpression:
+			children = []values.JavaValue{x.Value}
+		case *values.JavaArrayMember:
+			children = []values.JavaValue{x.Object, x.Index}
+		case *values.RefMember:
+			children = []values.JavaValue{x.Object}
+		case *values.JavaCompare:
+			children = []values.JavaValue{x.JavaValue1, x.JavaValue2}
+		case *values.TernaryExpression:
+			children = []values.JavaValue{x.Condition, x.TrueValue, x.FalseValue}
+			conditional = true
+		default:
+			a := values.InspectAccess(v)
+			for r := range a.Reads {
+				if values.SameLocal(r, ref) {
+					return empty(), 0, false
+				}
+			}
+			return a, 0, true
+		}
+		prefix := empty()
+		count := 0
+		for i, c := range children {
+			a, n, ok := walk(c)
+			if !ok {
+				return empty(), 0, false
+			}
+			if n > 0 && conditional && i > 0 {
+				return empty(), 0, false
+			}
+			if count == 0 {
+				prefix.Effects |= a.Effects
+				for r := range a.Reads {
+					prefix.Reads[r] = true
+				}
+				for r := range a.Writes {
+					prefix.Writes[r] = true
+				}
+			}
+			count += n
+		}
+		if count == 0 {
+			return values.InspectAccess(v), 0, true
+		}
+		return prefix, count, true
+	}
+	return walk(value)
+}
+func inlineUsePrefix(statement statements.Statement, ref *values.JavaRef) (values.Access, bool) {
+	var expression values.JavaValue
+	var lhsPrefix values.JavaValue
+	switch s := statement.(type) {
+	case *statements.ReturnStatement:
+		expression = s.JavaValue
+	case *statements.ExpressionStatement:
+		expression = s.Expression
+	case *statements.ConditionStatement:
+		expression = s.Condition
+	case *statements.AssignStatement:
+		expression = s.JavaValue
+		if s.ArrayMember != nil {
+			lhsPrefix = values.NewJavaCompare(s.ArrayMember.Object, s.ArrayMember.Index)
+		} else if target, ok := values.UnpackSoltValue(s.LeftValue).(*values.JavaRef); !ok || target == nil {
+			lhsPrefix = s.LeftValue
+		}
+	default:
+		return values.Access{}, false
+	}
+	p, count, ok := prefixBeforeUse(expression, ref)
+	if !ok || count != 1 {
+		return values.Access{}, false
+	}
+	if lhsPrefix != nil {
+		a := values.InspectAccess(lhsPrefix)
+		p.Effects |= a.Effects
+		for r := range a.Reads {
+			p.Reads[r] = true
+		}
+		for r := range a.Writes {
+			p.Writes[r] = true
+		}
+	}
+	return p, true
 }
