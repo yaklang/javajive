@@ -89,14 +89,14 @@ func fixEnumClinitIllegalNew(body string) string {
 	for _, e := range extras {
 		body = patchEnumConstantArgs(body, e.name, e.args)
 	}
-	// javac synthesizes $VALUES; it is illegal in enum source.
-	if strings.Contains(body, "$VALUES = new ") {
-		body = enumValuesAssignRe.ReplaceAllString(body, "")
-	}
+	// javac synthesizes $VALUES; it is illegal in enum source. Newer javac
+	// commonly materializes the array in a temporary and then assigns that
+	// local, so match the assignment rather than only `new Enum[]{...}`.
+	body = enumValuesAssignRe.ReplaceAllString(body, "")
 	return body
 }
 
-var enumValuesAssignRe = regexp.MustCompile(`(?m)^[ \t]+\$VALUES = new [A-Za-z0-9_$]+\[\]\{[^;]*\};\n`)
+var enumValuesAssignRe = regexp.MustCompile(`(?m)^[ \t]*\$VALUES[ \t]*=[ \t]*[^;\r\n]+;\r?\n?`)
 
 func patchEnumConstantArgs(body, name, args string) string {
 	re := regexp.MustCompile(`(?m)^([ \t]+)` + regexp.QuoteMeta(name) + `([,;])`)

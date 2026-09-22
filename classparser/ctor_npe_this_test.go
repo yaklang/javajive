@@ -62,6 +62,23 @@ func TestEnumClinitIllegalNewIsLoadBearing(t *testing.T) {
 	}
 }
 
+func TestEnumClinitIndirectValuesAssignmentRoundTrip(t *testing.T) {
+	original, classes := t04CompileRun(t, "17", "IndirectValuesEnum", map[string]string{
+		"IndirectValuesEnum.java": `public enum IndirectValuesEnum {
+  FIRST, SECOND;
+  public static void main(String[] args) { System.out.println(values().length); }
+}`,
+	})
+	if strings.TrimSpace(original) != "2" {
+		t.Fatalf("bad fixture oracle: %q", original)
+	}
+	t04RoundTripModes(t, "17", "IndirectValuesEnum", original, classes, func(t *testing.T, source string) {
+		if strings.Contains(source, "$VALUES") {
+			t.Fatalf("synthetic enum values assignment remained:\n%s", source)
+		}
+	})
+}
+
 func TestBareNestedImportsIsLoadBearing(t *testing.T) {
 	in := "package p;\nimport Advice.OnMethodEnter;\nimport net.bytebuddy.asm.Advice;\nclass C {}\n"
 	os.Unsetenv("JDEC_BARE_NESTED_IMPORT_OFF")
