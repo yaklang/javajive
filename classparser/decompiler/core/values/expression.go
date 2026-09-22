@@ -1782,7 +1782,7 @@ func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context
 		if !ok {
 			return nil
 		}
-		return types.ResolveInstantiatedParamType(funcCtx, funcCtx.SiblingClassSig, pt.RawClassName, pt.TypeArgs, f.FunctionName, len(f.Arguments), i)
+		return types.ResolveInstantiatedParamType(funcCtx, funcCtx.SiblingClassSig, pt.RawClassName, pt.TypeArgs, f.FunctionName, f.Descriptor, len(f.Arguments), i)
 	}
 	var recvRaw string
 	var recvArgs []types.JavaType
@@ -1790,14 +1790,12 @@ func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context
 		// `this` receiver: start at the current class with an IDENTITY type-argument mapping (each class
 		// formal mapped to itself), built from the authoritative class Signature so the count always
 		// matches the walk's formals. The walk then ascends this class's generic supertypes (covering
-		// non-identity edges and deep chains).
-		if funcCtx.ClassSig == "" {
+		// non-identity edges and deep chains). A non-generic current class still needs to enter the walk:
+		// it may extend ArrayList<String> or reach a fixed generic ancestor through raw interfaces.
+		if funcCtx.ClassName == "" {
 			return nil
 		}
 		formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
-		if len(formals) == 0 {
-			return nil
-		}
 		recvRaw = funcCtx.ClassName
 		recvArgs = make([]types.JavaType, len(formals))
 		for idx, n := range formals {
@@ -1811,11 +1809,20 @@ func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context
 		// parameterized local (`var0` of `Multiset<E>`) and a same-class field (`this.box` of `Box<E>`)
 		// are both handled.
 		recvRaw, recvArgs = f.receiverParamTypeArgs(funcCtx)
+		// A non-generic receiver can still fix a generic ancestor's arguments,
+		// for example LazyStringList -> ProtocolStringList -> List<String>.
+		// Keep its raw identity so the hierarchy resolver can cross the plain
+		// intermediate interface before it reaches the parameterized edge.
+		if recvRaw == "" {
+			if raw, ok := types.RawClassFQN(f.Object.Type()); ok {
+				recvRaw = raw
+			}
+		}
 	}
-	if recvRaw == "" || len(recvArgs) == 0 {
+	if recvRaw == "" {
 		return nil
 	}
-	return types.ResolveInstantiatedParamType(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, f.FunctionName, len(f.Arguments), i)
+	return types.ResolveInstantiatedParamType(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, f.FunctionName, f.Descriptor, len(f.Arguments), i)
 }
 
 // genericMethodWitnessArgParamType recovers the instantiated type of the i-th argument of a SAME-CLASS

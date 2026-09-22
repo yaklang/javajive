@@ -1394,10 +1394,11 @@ func internalToDot(name string) string {
 // (funcCtx.IsTypeParam) or a concrete (dotted) class name. A method-scope `<T>` formal, a leftover
 // FOREIGN bare type variable (un-substituted because the receiver was raw, or a supertype formal not
 // in scope), a wildcard/capture, or a parameterized/array result all yield nil -- emitting `(T)` for a
-// non-in-scope variable would not compile, and the erasure blocker bucket is scalar casts only. JDK /
-// external supertypes (provider miss) yield nil and are left to the JDK table. provider==nil disables
-// the walk. Gated upstream by JDEC_GENERIC_RESOLVE_OFF.
-func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method string, argc, paramIndex int) JavaType {
+// non-in-scope variable would not compile, and the erasure blocker bucket is scalar casts only. A JDK
+// supertype reached after jar-internal substitution is resolved through the bounded JDK declaration
+// table; other external provider misses yield nil. provider==nil disables the walk. Gated upstream by
+// JDEC_GENERIC_RESOLVE_OFF.
+func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method, descriptor string, argc, paramIndex int) JavaType {
 	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" || paramIndex < 0 {
 		return nil
 	}
@@ -1417,21 +1418,24 @@ func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider 
 		return nil
 	}
 	visited := map[string]bool{}
-	return resolveParamWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, argc, paramIndex, visited)
+	return resolveParamWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, descriptor, argc, paramIndex, visited)
 }
 
 // resolveParamWalk performs the depth-first hierarchy walk for ResolveInstantiatedParamType. sigma maps
 // the CURRENT node's formal type-parameter names to their actual arguments (in terms of the original
 // call site's denotable types). It is rebuilt for each supertype edge by substituting the supertype's
 // type arguments through the current sigma.
-func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method string, argc, paramIndex int, visited map[string]bool) JavaType {
+func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method, descriptor string, argc, paramIndex int, visited map[string]bool) JavaType {
 	if internal == "" || visited[internal] {
 		return nil
 	}
 	visited[internal] = true
 	classSig, methodSigs, ok := provider(internal)
 	if !ok {
-		return nil // JDK / external: not in jar, covered by the InstantiateJDKMethodParam table
+		// A jar-internal hierarchy may terminate at a parameterized JDK
+		// declaration (ProtocolStrings -> List<String>). Reuse the bounded JDK
+		// method table after composing the arguments along the preceding edges.
+		return InstantiateJDKMethodParam(internalToDot(internal), method, argc, paramIndex, args)
 	}
 	// sigma: this node's formal type params -> actual args (positional; raw receiver -> empty sigma).
 	formals := ClassFormalTypeParamNames(classSig)
@@ -1441,11 +1445,31 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 			sigma[formals[i]] = args[i]
 		}
 	}
+	rawGenericReceiver := len(formals) > 0 && len(args) != len(formals)
 	// Most-derived declaration with a generic Signature wins: if THIS class declares (method, argc)
 	// generically, it is the binding declaration -- resolve here and stop (do not let an ancestor's
 	// signature shadow an override).
 	if methodSigs != nil {
+		// An exact concrete declaration is authoritative even without a generic
+		// Signature. Do not walk past LazyStringList.add(ByteString) and mistake
+		// it for the inherited List<String>.add(E). buildSiblingClassSig records
+		// exact descriptor keys with an empty value for such declarations.
+		if descriptor != "" {
+			if msig, declared := methodSigs[class_context.MethodDescKey(method, descriptor)]; declared {
+				if msig == "" || rawGenericReceiver {
+					return nil
+				}
+				_, params, _ := ParseMethodSignatureFull(msig, funcCtx)
+				if paramIndex < len(params) && params[paramIndex] != nil {
+					return substituteAndGateParam(funcCtx, params[paramIndex], sigma, MethodFormalTypeParamNames(msig))
+				}
+				return nil
+			}
+		}
 		if msig := methodSigs[class_context.MethodSigKey(method, argc)]; msig != "" {
+			if rawGenericReceiver {
+				return nil
+			}
 			_, params, _ := ParseMethodSignatureFull(msig, funcCtx)
 			if paramIndex < len(params) && params[paramIndex] != nil {
 				if t := substituteAndGateParam(funcCtx, params[paramIndex], sigma, MethodFormalTypeParamNames(msig)); t != nil {
@@ -1471,8 +1495,23 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 		for i, ta := range pt.TypeArgs {
 			childArgs[i] = SubstituteTypeVars(ta, sigma)
 		}
-		if t := resolveParamWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, paramIndex, visited); t != nil {
+		if t := resolveParamWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, descriptor, argc, paramIndex, visited); t != nil {
 			return t
+		}
+	}
+	// A class without a Signature attribute can still have raw, non-generic
+	// intermediate supertypes. Their names live in the mandatory class-file
+	// super/interface tables, exposed separately by SiblingSuperTypes. Only use
+	// this fallback when classSig is empty: when a Signature exists it already
+	// carries the authoritative parameterized edges and walking them raw would
+	// discard type arguments.
+	if classSig == "" && funcCtx.SiblingSuperTypes != nil {
+		if rawSupers, found := funcCtx.SiblingSuperTypes(internal); found {
+			for _, raw := range rawSupers {
+				if t := resolveParamWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, paramIndex, visited); t != nil {
+					return t
+				}
+			}
 		}
 	}
 	return nil
