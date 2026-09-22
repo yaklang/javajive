@@ -36,9 +36,9 @@ func compilePackFixture(t *testing.T, srcPath, className string) []byte {
 }
 
 func TestT24C06ExceptionBehaviorRegression(t *testing.T) {
-	pack := "/private/tmp/javajive-grok-task-20260921/JavaJive_Agent_Task_Pack"
+	fixtures := filepath.Join("testdata", "task_contracts")
 	for _, name := range []string{"FinallyOverride", "MonitorRelease"} {
-		src := filepath.Join(pack, "T24_exception-edge-index", "tests", "fixtures", name+".java")
+		src := filepath.Join(fixtures, name+".java")
 		raw := compilePackFixture(t, src, name)
 		off, err := DecompileWithOptions(raw, DecompileOptions{Mode: Precision})
 		if err != nil {

@@ -35,6 +35,8 @@ def _path_forms(path: Path | str) -> set[str]:
         forms.add(str(raw.resolve()))
     except OSError:
         pass
+    if sys.platform != "darwin":
+        return {p for p in forms if p}
     extra: set[str] = set()
     for s in list(forms):
         if s.startswith("/private/var/") or s.startswith("/private/tmp/") or s.startswith("/private/etc/"):

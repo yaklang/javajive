@@ -22,7 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tools.sandbox_worker.artifacts import ArtifactEscape, confined_path, write_bytes  # noqa: E402
-from tools.sandbox_worker.backends.seatbelt import _allow_subpaths_for_binary, build_profile  # noqa: E402
+from tools.sandbox_worker.backends.seatbelt import _allow_subpaths_for_binary, _path_forms, build_profile  # noqa: E402
 from tools.sandbox_worker.backends.unshare import plan_unshare, ulimit_block, ulimit_values  # noqa: E402
 from tools.sandbox_worker.constants import CONTAINER_ARTIFACTS, CONTAINER_INPUTS  # noqa: E402
 from tools.sandbox_worker.detect import detect  # noqa: E402
@@ -270,6 +270,16 @@ class TestSeatbeltProfile(unittest.TestCase):
         self.assertNotEqual(str(jdk / "bin" / "java"), "/usr/bin/java")
         self.assertTrue((jdk / "bin" / "javac").is_file())
         self.assertTrue((jdk / "release").is_file() or (jdk / "lib" / "modules").is_file())
+
+    def test_path_aliases_are_darwin_only(self) -> None:
+        # Mock resolve as well as platform so the Linux assertion is meaningful
+        # even when this test itself runs on a Darwin /tmp symlink filesystem.
+        path = Path("/tmp/t30-reviewed-work")
+        with mock.patch("pathlib.Path.resolve", return_value=path):
+            with mock.patch("tools.sandbox_worker.backends.seatbelt.sys.platform", "linux"):
+                self.assertEqual(_path_forms(path), {str(path)})
+            with mock.patch("tools.sandbox_worker.backends.seatbelt.sys.platform", "darwin"):
+                self.assertEqual(_path_forms(path), {str(path), "/private/tmp/t30-reviewed-work"})
 
     def test_profile_denies_home_users_docker_sock_and_tightens_opt(self) -> None:
         inputs = Path(tempfile.mkdtemp(prefix="t30-sb-in-"))

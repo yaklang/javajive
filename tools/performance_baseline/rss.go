@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -23,29 +22,12 @@ type childOut struct {
 	NS           int64      `json:"ns"`
 	BOp          int64      `json:"b_op"`
 	Allocs       int64      `json:"allocs_op"`
-	PeakRSSBytes int64      `json:"peak_rss_bytes"`
+	PeakRSSBytes *int64     `json:"peak_rss_bytes"`
 	RSSSource    string     `json:"rss_source"`
 	OK           bool       `json:"ok"`
 	Error        string     `json:"error,omitempty"`
 	OutputSHA256 string     `json:"output_sha256,omitempty"`
 	Work         WorkCounts `json:"work"`
-}
-
-func peakRSSBytes() (int64, string, error) {
-	var ru syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
-		return 0, "", err
-	}
-	rss := ru.Maxrss
-	src := "rusage_maxrss_raw"
-	switch runtime.GOOS {
-	case "linux":
-		rss *= 1024
-		src = "rusage_maxrss_linux_kilobytes_to_bytes"
-	case "darwin":
-		src = "rusage_maxrss_darwin_bytes"
-	}
-	return rss, src, nil
 }
 
 // RunChild is invoked from TestMain when T32_CHILD=1.
@@ -75,12 +57,16 @@ func RunChild() error {
 		}
 	}
 	rss, src, rssErr := peakRSSBytes()
+	var measuredRSS *int64
+	if rssErr == nil {
+		measuredRSS = &rss
+	}
 	work, _ := harvestWork(spec.Stage, fam.Bytes)
 	out := childOut{
 		NS:           last.NS,
 		BOp:          last.BOp,
 		Allocs:       last.Allocs,
-		PeakRSSBytes: rss,
+		PeakRSSBytes: measuredRSS,
 		RSSSource:    src,
 		OK:           lastErr == nil && last.OK && rssErr == nil,
 		Work:         work,
@@ -117,13 +103,12 @@ func spawnColdSample(exe, familyID, stage, tmpDir string) (Sample, WorkCounts, e
 	if uerr := json.Unmarshal(stdout.Bytes(), &out); uerr != nil {
 		return Sample{}, WorkCounts{}, fmt.Errorf("child json: %v (run-err=%v stderr=%s stdout=%s)", uerr, err, stderr.String(), stdout.String())
 	}
-	rss := out.PeakRSSBytes
 	s := Sample{
 		Role:         "measured",
 		NS:           out.NS,
 		BOp:          out.BOp,
 		Allocs:       out.Allocs,
-		PeakRSSBytes: &rss,
+		PeakRSSBytes: out.PeakRSSBytes,
 		RSSSource:    out.RSSSource,
 		OK:           out.OK,
 		Error:        out.Error,

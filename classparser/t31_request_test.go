@@ -256,7 +256,7 @@ func TestT31C04StatusTruth(t *testing.T) {
 	})
 
 	t.Run("unknown_bootstrap", func(t *testing.T) {
-		src, err := os.ReadFile("/private/tmp/javajive-grok-task-20260921/JavaJive_Agent_Task_Pack/T31_request-policy/tests/fixtures/ConcatProbe.java")
+		src, err := os.ReadFile(filepath.Join("testdata", "task_contracts", "ConcatProbe.java"))
 		if err != nil {
 			t.Fatal(err)
 		}
