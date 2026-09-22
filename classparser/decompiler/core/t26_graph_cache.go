@@ -367,11 +367,12 @@ func (a *GraphAnalysis) PostDominates(p, n int) bool {
 	if p == VirtualExitSentinel {
 		return false
 	}
-	if a.IPDom[n] == -1 && p != n {
+	// -1 denotes a node outside this root domain, including self queries.
+	if a.IPDom[n] == -1 {
 		return false
 	}
 	if p == n {
-		return a.IPDom[n] != -1 || p >= 0
+		return true
 	}
 	seen := map[int]struct{}{}
 	for cur := n; cur >= 0 && cur < len(a.IPDom); {
