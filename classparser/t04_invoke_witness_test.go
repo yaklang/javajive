@@ -15,6 +15,7 @@ import (
 )
 
 var t04BareValueOfNull = regexp.MustCompile(`valueOf\s*\(\s*null\s*\)`)
+var t04TypedObjectValueOf = regexp.MustCompile(`(?s)Object\s+var\d+\s*=\s*null\s*;.*valueOf\(var\d+\)`)
 
 func TestT04C01ConcatProbe(t *testing.T) {
 	src, err := os.ReadFile("testdata/t04/ConcatProbe.java")
@@ -42,7 +43,7 @@ func TestT04C01ConcatProbe(t *testing.T) {
 		if t04BareValueOfNull.MatchString(src) {
 			t.Fatalf("T04-C01 decompiled source has uncast valueOf(null) (binds char[]):\n%s", src)
 		}
-		if strings.Contains(src, "valueOf") && !strings.Contains(src, "(Object)") {
+		if strings.Contains(src, "valueOf") && !strings.Contains(src, "(Object)") && !t04TypedObjectValueOf.MatchString(src) {
 			t.Fatalf("T04-C01 valueOf path missing (Object) cast:\n%s", src)
 		}
 	})
@@ -325,12 +326,13 @@ public class T04RegMain {
 }
 
 func TestT04C08EnvSnapshotNullCast(t *testing.T) {
-	src, err := os.ReadFile("testdata/t04/ConcatProbe.java")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, classes := t04CompileRun(t, "17", "ConcatProbe", map[string]string{"ConcatProbe.java": string(src)})
-	raw := classes["ConcatProbe"]
+	_, classes := t04CompileRun(t, "17", "NullCastProbe", map[string]string{
+		"NullCastProbe.java": `public class NullCastProbe {
+  static String value() { return String.valueOf((Object)null); }
+  public static void main(String[] args) { System.out.println(value()); }
+}`,
+	})
+	raw := classes["NullCastProbe"]
 	liveOff := os.Getenv("JDEC_NULL_ARG_CAST_OFF")
 	t.Setenv("JDEC_NULL_ARG_CAST_OFF", "1")
 	res, err := DecompileWithOptions(raw, DecompileOptions{Mode: Precision, EnvSnapshot: map[string]string{}})

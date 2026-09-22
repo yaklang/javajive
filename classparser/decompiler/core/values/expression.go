@@ -3716,11 +3716,13 @@ func (f *FunctionCallExpression) witnessDescriptorArgCast(i int, arg JavaValue, 
 				}
 			}
 		}
-		if rec := f.recoverableGenericParamType(i, funcCtx); rec != nil && !isJavaLangObjectType(rec) {
-			if funcCtx != nil {
-				if jc, ok := rec.RawType().(*types.JavaClass); ok && jc != nil && funcCtx.IsTypeParam(jc.Name) {
-					return ""
-				}
+		// A null literal is assignable to a recovered instance-generic formal.
+		// Casting it to the erased descriptor type (normally Object) makes calls
+		// such as List<E>.add(null) ill-typed at source level. Static overloads
+		// such as String.valueOf(Object) still require their descriptor pin.
+		if !f.IsStatic && f.Kind != InvokeStatic && f.Object != nil {
+			if rec := f.recoverableGenericParamType(i, funcCtx); rec != nil && !isJavaLangObjectType(rec) {
+				return ""
 			}
 		}
 		return renderWitnessParamType(param, funcCtx)
