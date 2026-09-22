@@ -385,3 +385,32 @@ func TestTaskT08C05LocalCapability(t *testing.T) {
 		}
 	})
 }
+
+func TestTaskT08C06AuthoritativeParamsAndInnerType(t *testing.T) {
+	dir := t.TempDir()
+	t08WriteCompile(t, dir, map[string]string{
+		"A.java": "import java.lang.annotation.*;\n@Retention(RetentionPolicy.RUNTIME)\n@Target(ElementType.TYPE_USE)\npublic @interface A {}\n",
+		"AnnotatedShapes.java": `import java.util.Map;
+import java.util.function.Function;
+public class AnnotatedShapes<E> {
+  Map.@A Entry<String, E> entry;
+  E value;
+  AnnotatedShapes(@A E value) { this.value = value; }
+  void link(@A AnnotatedShapes<E> next) { this.value = next.value; }
+  void pair(@A Iterable<? extends @A E> values,
+            @A Function<Iterable<? extends E>, String> function) {}
+}`,
+	})
+	rebuild := t.TempDir()
+	decompileFamily(t, dir, rebuild)
+	source := string(mustRead(t, filepath.Join(rebuild, "AnnotatedShapes.java")))
+	if !strings.Contains(source, "Map.@A() Entry<String, E>") && !strings.Contains(source, "Map.@A Entry<String, E>") {
+		t.Fatalf("inner type annotation is not attached to Entry:\n%s", source)
+	}
+	for _, want := range []string{"AnnotatedShapes(@A() E ", "link(@A() AnnotatedShapes<E> ", "pair(@A() Iterable<? extends @A() E> "} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("authoritative annotated parameter %q missing:\n%s", want, source)
+		}
+	}
+	compileFamily(t, rebuild, "8")
+}

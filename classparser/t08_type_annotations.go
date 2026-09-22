@@ -263,6 +263,17 @@ func (c *ClassObjectDumper) renderTypeWithAnnos(t types.JavaType, annos []*TypeA
 
 func (c *ClassObjectDumper) renderTypePath(t types.JavaType, all []*TypeAnnotation, prefix []TypePathEntry) string {
 	here := c.formatAnnotationList(collectAnnosAt(all, prefix))
+	if wildcard, ok := t.(*types.JavaWildcardType); ok && wildcard != nil {
+		mark := "?"
+		if here != "" {
+			mark = here + " ?"
+		}
+		if wildcard.Bound == nil {
+			return mark
+		}
+		bound := c.renderTypePath(wildcard.Bound, all, appendPath(prefix, typePathKindWildcard, 0))
+		return mark + " " + wildcard.Variant + " " + bound
+	}
 	if t != nil && t.IsArray() {
 		// javac treats the leftmost `[]` after the element type as the OUTERMOST
 		// dimension (`@A String @B [] @C []` → outer @B, inner @C). Emit outer-to-inner.
@@ -307,7 +318,7 @@ func (c *ClassObjectDumper) renderTypePath(t types.JavaType, all []*TypeAnnotati
 				base = c.FuncCtx.ShortTypeName(pt.RawClassName)
 			}
 			if here != "" {
-				base = here + " " + base
+				base = placeTypeAnnotation(base, pt.RawClassName, here)
 			}
 			if len(args) == 0 {
 				return base
@@ -316,15 +327,37 @@ func (c *ClassObjectDumper) renderTypePath(t types.JavaType, all []*TypeAnnotati
 		}
 	}
 	base := "java.lang.Object"
+	rawName := ""
 	if t != nil && c.FuncCtx != nil {
 		base = t.String(c.FuncCtx)
 	} else if t != nil {
 		base = t.String(nil)
 	}
+	if t != nil {
+		if jc, ok := t.RawType().(*types.JavaClass); ok && jc != nil {
+			rawName = jc.Name
+		}
+	}
 	if here != "" {
-		return here + " " + base
+		return placeTypeAnnotation(base, rawName, here)
 	}
 	return base
+}
+
+// A type-use annotation on a nested member type belongs after the qualifier:
+// Map.@Nullable Entry, not @Nullable Map.Entry (which attempts to annotate the
+// scoping construct and javac rejects). The binary '$' is authoritative proof
+// that the rendered final segment is a member type rather than a package name.
+func placeTypeAnnotation(rendered, rawName, annotation string) string {
+	if annotation == "" {
+		return rendered
+	}
+	if strings.Contains(rawName, "$") {
+		if dot := strings.LastIndex(rendered, "."); dot >= 0 {
+			return rendered[:dot+1] + annotation + " " + rendered[dot+1:]
+		}
+	}
+	return annotation + " " + rendered
 }
 
 func (c *ClassObjectDumper) applyFieldTypeAnnotations(field *MemberInfo, fieldType types.JavaType, rendered string) string {
@@ -364,10 +397,26 @@ func (c *ClassObjectDumper) applyParamTypeAnnotations(method *MemberInfo, method
 		return decls
 	}
 	out := append([]string{}, decls...)
+	// Data-flow inference may narrow or otherwise mutate the FunctionType used
+	// to render a method body. Type annotations describe declaration types, so
+	// recover those types from the member descriptor/signature instead. Align
+	// from the tail because enum/inner constructors can have synthetic leading
+	// descriptor parameters omitted from source declarations.
+	declaredParams := paramTypes
+	if c != nil && c.obj != nil {
+		if _, authoritative := memberSignatureAndDescriptorTypes(c.obj, method); len(authoritative) > 0 {
+			declaredParams = authoritative
+		}
+	}
+	offset := len(declaredParams) - len(out)
+	if offset < 0 {
+		offset = 0
+	}
 	for i := range out {
+		formal := i + offset
 		var matching []*TypeAnnotation
 		for _, ta := range all {
-			if int(ta.FormalParameterIndex) == i {
+			if int(ta.FormalParameterIndex) == formal {
 				matching = append(matching, ta)
 			}
 		}
@@ -375,8 +424,8 @@ func (c *ClassObjectDumper) applyParamTypeAnnotations(method *MemberInfo, method
 			continue
 		}
 		var pt types.JavaType
-		if i < len(paramTypes) {
-			pt = paramTypes[i]
+		if formal < len(declaredParams) {
+			pt = declaredParams[formal]
 		}
 		annotated := c.renderTypeWithAnnos(pt, matching)
 		// Replace the leading type token of "Type name" / "Type... name".
@@ -458,8 +507,16 @@ func walkTypePath(t types.JavaType, path []TypePathEntry) error {
 				return fmt.Errorf("type_path[%d]: type argument %d does not exist (arity %d)", i, p.ArgumentIndex, len(pt.TypeArgs))
 			}
 			cur = pt.TypeArgs[p.ArgumentIndex]
-		case typePathKindWildcard, typePathKindInner:
-			// Bound/inner nodes are legal; placement may be partial at dump time.
+		case typePathKindWildcard:
+			wildcard, ok := cur.(*types.JavaWildcardType)
+			if !ok || wildcard == nil || wildcard.Bound == nil {
+				return fmt.Errorf("type_path[%d]: wildcard step on non-wildcard type", i)
+			}
+			cur = wildcard.Bound
+		case typePathKindInner:
+			// The type model flattens a binary member class into one class name.
+			// Legality is validated by the parser; placement uses the '$' proof in
+			// placeTypeAnnotation when the annotation is at the member segment.
 		default:
 			return fmt.Errorf("type_path[%d]: illegal kind %d", i, p.Kind)
 		}
