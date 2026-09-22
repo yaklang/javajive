@@ -234,16 +234,17 @@ func normalizeOrigins(f frametransfer.Frame, origins []Origin) {
 }
 
 func effectiveLocal(ins methodir.Instr) int {
-	if ins.Local >= 0 {
-		return ins.Local
-	}
 	acc := core.LocalAccessOf(ins.Opcode)
-	if acc.Slot >= 0 {
-		return acc.Slot
-	}
 	if !acc.Read && !acc.Write {
 		return -1
 	}
+	if ins.Local >= 0 {
+		return ins.Local
+	}
+	if acc.Slot >= 0 {
+		return acc.Slot
+	}
+
 	if ins.Wide && len(ins.Data) >= 2 {
 		return int(binary.BigEndian.Uint16(ins.Data))
 	}
@@ -283,6 +284,16 @@ func initialFrame(ir *methodir.MethodIR) (frametransfer.Frame, error) {
 		return frametransfer.Frame{}, fmt.Errorf("invalid_input: method locals exceed JVM limit")
 	}
 	f := frametransfer.NewFrame(max)
+	if ir.Limits.Present {
+		if max > ir.Limits.MaxLocals {
+			return frametransfer.Frame{}, fmt.Errorf("invalid_input: local access/parameters exceed declared max_locals")
+		}
+		f, err = frametransfer.NewFrameWithLimits(ir.Limits.MaxLocals, ir.Limits.MaxStack)
+		if err != nil {
+			return frametransfer.Frame{}, err
+		}
+	}
+	f.DirectSuperClass = ir.Limits.DirectSuperClass
 	f.ThisClass = ir.ClassName
 	slot := 0
 	if !ir.IsStatic {

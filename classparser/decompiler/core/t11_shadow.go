@@ -12,7 +12,16 @@ type ShadowObservation struct {
 
 // ShadowIRRequest is the read-only snapshot input for MethodIR construction.
 // It is filled after buildSemanticCFG succeeds and must not alias mutable printer state.
+// CodeLimits carries authoritative Code-attribute bounds into analysis. The
+// Present bit distinguishes a declared zero limit from an unspecified test IR.
+type CodeLimits struct {
+	Present             bool
+	MaxLocals, MaxStack int
+	DirectSuperClass    string
+}
+
 type ShadowIRRequest struct {
+	Limits     CodeLimits
 	CFG        *SemanticCFG
 	ClassName  string
 	MethodName string
@@ -30,6 +39,8 @@ func (d *Decompiler) CaptureShadowIR() { d.captureShadowIR() }
 
 func (d *Decompiler) captureShadowIR() {
 	d.ShadowObservation = ShadowObservation{Status: "disabled"}
+	d.ShadowIRHash = ""
+	d.ShadowIRVersion = 0
 	if !d.EnableShadowIR {
 		return
 	}
@@ -71,6 +82,7 @@ func (d *Decompiler) captureShadowIR() {
 		Bytecode:   bc,
 		IsStatic:   static,
 		D:          d,
+		Limits:     d.CodeLimits,
 	})
 	if err != nil {
 		d.ShadowObservation.Status = "failed"

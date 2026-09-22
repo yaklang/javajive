@@ -27,6 +27,7 @@ func (m *MethodIR) Canonical() string {
 	fmt.Fprintf(&b, "version %d\n", m.Version)
 	fmt.Fprintf(&b, "method %s\n", m.ID)
 	fmt.Fprintf(&b, "static %t\n", m.IsStatic)
+	fmt.Fprintf(&b, "limits %t %d %d %q\n", m.Limits.Present, m.Limits.MaxLocals, m.Limits.MaxStack, m.Limits.DirectSuperClass)
 	blocks := append([]Block(nil), m.Blocks...)
 	sort.Slice(blocks, func(i, j int) bool { return blocks[i].FirstPC < blocks[j].FirstPC })
 	for _, bl := range blocks {

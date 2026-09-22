@@ -8,7 +8,7 @@ import (
 
 // SnapshotVersion is the MethodIR schema version. It is constant for a built snapshot
 // and does not change when the old printer mutates AST or opcode Target lists.
-const SnapshotVersion uint64 = 1
+const SnapshotVersion uint64 = 2
 
 type MethodID string
 type BlockID uint32
@@ -28,6 +28,7 @@ func (e EdgeID) String() string {
 }
 
 type MethodMeta struct {
+	Limits     core.CodeLimits
 	ClassName  string
 	Name       string
 	Descriptor string
@@ -116,6 +117,7 @@ type Block struct {
 
 // MethodIR is an immutable semantic snapshot copied from SemanticCFG.
 type MethodIR struct {
+	Limits     core.CodeLimits
 	ID         MethodID
 	Version    uint64
 	ClassName  string

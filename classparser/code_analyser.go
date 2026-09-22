@@ -300,6 +300,7 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 	}
 	parser.Work = dumper.Work
 	parser.Env = dumper.getenv
+	parser.CodeLimits = core.CodeLimits{Present: true, MaxLocals: int(codeAttr.MaxLocals), MaxStack: int(codeAttr.MaxStack), DirectSuperClass: dumper.obj.GetSupperClassName()}
 	parser.EnableShadowIR = dumper.options.EnableShadowIR
 	st, err := decompiler.ParseBytesCode(parser)
 	dumper.bootstrapReports = append(dumper.bootstrapReports, parser.BootstrapReports...)

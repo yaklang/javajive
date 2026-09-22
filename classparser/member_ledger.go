@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -164,7 +165,7 @@ func (c *ClassObjectDumper) recordMembers(methods []*dumpedMethods, fields []dum
 			continue
 		}
 		access, _ := getMethodAccessFlagsVerbose(member.AccessFlags)
-		if row.Name == "<init>" && cached != nil && strings.TrimSpace(cached.bodyCode) == "" && c.isOmittableDefaultCtor(row.Descriptor, access) {
+		if row.Name == "<init>" && cached != nil && strings.TrimSpace(cached.bodyCode) == "" && c.isOmittableDefaultCtor(row.Descriptor, access) && c.isImplicitSuperBody(member) {
 			row.State = "regenerated"
 			row.Evidence = "sole no-arg constructor with matching class visibility and implicit super body"
 			continue
@@ -175,4 +176,43 @@ func (c *ClassObjectDumper) recordMembers(methods []*dumpedMethods, fields []dum
 			continue
 		}
 	}
+}
+
+// A dropped default constructor is regenerated only for the exact implicit
+// super() bytecode shape. An accidentally emptied body is not proof.
+func (c *ClassObjectDumper) isImplicitSuperBody(m *MemberInfo) bool {
+	for _, a := range m.Attributes {
+		code, ok := a.(*CodeAttribute)
+		if !ok {
+			continue
+		}
+		b := code.Code
+		if len(code.ExceptionTable) != 0 || len(b) != 5 || b[0] != 0x2a || b[1] != 0xb7 || b[4] != 0xb1 {
+			return false
+		}
+		cp, e := c.obj.getConstantInfo(binary.BigEndian.Uint16(b[2:4]))
+		if e != nil {
+			return false
+		}
+		ref, ok := cp.(*ConstantMethodrefInfo)
+		if !ok {
+			return false
+		}
+		owner, e := c.obj.getUtf8(ref.ClassIndex)
+		if e != nil || owner != c.obj.GetSupperClassName() {
+			return false
+		}
+		nt, e := c.obj.getConstantInfo(ref.NameAndTypeIndex)
+		if e != nil {
+			return false
+		}
+		pair, ok := nt.(*ConstantNameAndTypeInfo)
+		if !ok {
+			return false
+		}
+		name, e1 := c.obj.getUtf8(pair.NameIndex)
+		desc, e2 := c.obj.getUtf8(pair.DescriptorIndex)
+		return e1 == nil && e2 == nil && name == "<init>" && desc == "()V"
+	}
+	return false
 }

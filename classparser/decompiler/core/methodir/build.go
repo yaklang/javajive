@@ -11,6 +11,7 @@ import (
 
 func BuildFromRequest(req core.ShadowIRRequest) (string, uint64, error) {
 	meta := MethodMeta{
+		Limits:     req.Limits,
 		ClassName:  req.ClassName,
 		Name:       req.MethodName,
 		Descriptor: req.Descriptor,
@@ -52,6 +53,7 @@ func BuildFromCFG(cfg *core.SemanticCFG, meta MethodMeta, d ...*core.Decompiler)
 	id := MethodID(meta.ClassName + "\x1f" + meta.Name + "\x1f" + meta.Descriptor + "\x1f" + hex.EncodeToString(sum[:]))
 
 	ir := &MethodIR{
+		Limits:     meta.Limits,
 		ID:         id,
 		Version:    SnapshotVersion,
 		ClassName:  meta.ClassName,

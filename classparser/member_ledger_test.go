@@ -136,3 +136,26 @@ func TestMemberLedgerProductionDetectsUnconsumedSynthetic(t *testing.T) {
 		t.Fatal("missing member record")
 	}
 }
+
+func TestProductionShadowReceivesDeclaredCodeLimits(t *testing.T) {
+	old := core.ShadowIRBuilder
+	defer func() { core.ShadowIRBuilder = old }()
+	_, classes := t04CompileRun(t, "8", "LimitsMain", map[string]string{"LimitsMain.java": `public class LimitsMain { public static void main(String[] x){System.out.println(7);} }`})
+	seen := false
+	core.ShadowIRBuilder = func(r core.ShadowIRRequest) (string, uint64, error) {
+		if r.MethodName == "main" {
+			seen = true
+			if !r.Limits.Present || r.Limits.MaxLocals != 1 || r.Limits.MaxStack != 2 || r.Limits.DirectSuperClass != "java/lang/Object" {
+				t.Errorf("Code metadata lost: %+v", r.Limits)
+			}
+		}
+		return old(r)
+	}
+	_, e := DecompileWithOptions(classes["LimitsMain"], DecompileOptions{Mode: Precision, EnableShadowIR: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !seen {
+		t.Fatal("production hook not reached")
+	}
+}
