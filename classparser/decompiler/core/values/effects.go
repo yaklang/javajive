@@ -84,7 +84,7 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		}
 		return []JavaValue{v.Inner}, true
 	case *CustomValue:
-		if v.CapturesKnown && (v.Flag == "lambda" || v.Flag == "primitive_cast" || v.Flag == "concat") {
+		if v.CapturesKnown && (v.Flag == "lambda" || v.Flag == "primitive_cast" || v.Flag == "concat" || v.Flag == "instanceof") {
 			return v.Captures, true
 		}
 		return nil, false

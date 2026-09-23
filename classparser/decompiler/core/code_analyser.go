@@ -3837,17 +3837,22 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		n := Convert2bytesToInt(opcode.Data)
 		javaClass := d.constantPoolGetter(int(n)).(*values.JavaClassValue)
 		//runtimeStackSimulation.Push(javaClass)
-		runtimeStackSimulation.Push(values.NewNewExpression(javaClass.Type()))
+		newValue := values.NewNewExpression(javaClass.Type())
+		newValue.OriginPC, newValue.HasOriginPC = int(opcode.CurrentOffset), true
+		runtimeStackSimulation.Push(newValue)
 		//appendNode()
 	case OP_NEWARRAY:
 		length := runtimeStackSimulation.Pop().(values.JavaValue)
 		primerTypeName := types.GetPrimerArrayType(int(opcode.Data[0]))
-		runtimeStackSimulation.Push(values.NewNewArrayExpression(types.NewJavaArrayType(primerTypeName), length))
+		newValue := values.NewNewArrayExpression(types.NewJavaArrayType(primerTypeName), length)
+		newValue.OriginPC, newValue.HasOriginPC = int(opcode.CurrentOffset), true
+		runtimeStackSimulation.Push(newValue)
 	case OP_ANEWARRAY:
 		value := d.getPoolValue(int(Convert2bytesToInt(opcode.Data)))
 		length := runtimeStackSimulation.Pop().(values.JavaValue)
 		arrayType := types.NewJavaArrayType(value.(*values.JavaClassValue).Type())
 		exp := values.NewNewArrayExpression(arrayType, length)
+		exp.OriginPC, exp.HasOriginPC = int(opcode.CurrentOffset), true
 		runtimeStackSimulation.Push(exp)
 	case OP_MULTIANEWARRAY:
 		// The constant-pool entry is ALREADY the full array class type (e.g. "[[I" is
@@ -3863,6 +3868,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		lens = funk.Reverse(lens).([]values.JavaValue)
 		exp := values.NewNewArrayExpression(typ, lens...)
+		exp.OriginPC, exp.HasOriginPC = int(opcode.CurrentOffset), true
 		runtimeStackSimulation.Push(exp)
 	case OP_ARRAYLENGTH:
 		ref := runtimeStackSimulation.Pop().(values.JavaValue)
@@ -4025,7 +4031,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_INSTANCEOF:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
-		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+		instanceOf := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 			return fmt.Sprintf("%s instanceof %s", values.AssignmentOperand(value, funcCtx), classInfo.String(funcCtx))
 		}, func() types.JavaType {
 			return types.NewJavaPrimer(types.JavaBoolean)
@@ -4043,7 +4049,11 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 				return
 			}
 			value.ReplaceVar(oldId, newId)
-		}))
+		})
+		instanceOf.Flag = "instanceof"
+		instanceOf.CapturesKnown = true
+		instanceOf.Captures = []values.JavaValue{value}
+		runtimeStackSimulation.Push(instanceOf)
 	case OP_CHECKCAST:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
 		arg := runtimeStackSimulation.Pop().(values.JavaValue)
@@ -5096,9 +5106,10 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// ref in the ternary can strand its definition inside one branch; RewriteVar then
 	// hoists an uninitialized declaration and the merged expression reads null or an
 	// undeclared temp. Inline only a non-parameter CastExpression temp with exactly
-	// one registered use and a pure operand. An effectful operand may still be
-	// emitted at its producer, so substituting it here could evaluate a call twice.
-	// This keeps the cast lazy in its original arm and excludes dup-family values.
+	// one registered use. Pure operands are safe; an effectful operand needs proof
+	// that CHECKCAST directly feeds this selected arm's merge edge under one handler
+	// domain. This keeps the cast lazy in its original arm and excludes dup-family
+	// values, deferred uses, and shared leaves.
 	dupSharedRefs := map[string]bool{}
 	for op, infos := range d.opcodeIdToRef {
 		if op == nil || op.Instr == nil {
@@ -5113,7 +5124,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 		}
 	}
-	inlineSingleUseMergeLeaf := func(value values.JavaValue) values.JavaValue {
+	inlineSingleUseMergeLeaf := func(value values.JavaValue, leaf *OpCode) values.JavaValue {
 		ref, ok := UnpackSoltValue(value).(*values.JavaRef)
 		if !ok || ref == nil || ref.IsThis || ref.IsParam || ref.Id == nil || ref.Val == nil || dupSharedRefs[ref.VarUid] {
 			return value
@@ -5128,7 +5139,10 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		}
 		resolved := GetRealValue(ref)
 		cast, isCast := resolved.(*values.CastExpression)
-		if !isCast || !values.IsPure(cast.Value) {
+		if !isCast {
+			return value
+		}
+		if !values.IsPure(cast.Value) && !d.canInlineEffectfulCastAtMergeLeaf(ref, cast, leaf) {
 			return value
 		}
 		return resolved
@@ -5350,7 +5364,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					if putfieldValue := putFieldLeafValue(cur); putfieldValue != nil {
 						return putfieldValue
 					}
-					return inlineSingleUseMergeLeaf(cur.StackEntry.value)
+					return inlineSingleUseMergeLeaf(cur.StackEntry.value, cur)
 				}
 				if isTernaryCondition(cur) {
 					return probe(cur)
@@ -6969,7 +6983,7 @@ func (d *Decompiler) ParseStatement() error {
 					}
 				}
 			}
-			if !d.canInlineValue(val, currentNode, nextNode, idToOpcode) {
+			if !d.canInlineValue(val, currentNode, nextNode, idToOpcode, ref, idToOpcode[currentNode.Id]) {
 				return
 			}
 			currentNode.RemoveNext(nextNode)
@@ -7037,7 +7051,20 @@ func (d *Decompiler) ParseStatement() error {
 					traceRef(ref, d.FunctionContext), traceValue(val, d.FunctionContext))
 				return true
 			}
-			if !d.canInlineValue(val, sourceNode, node, idToOpcode) {
+			if !d.canInlineValue(val, sourceNode, node, idToOpcode, ref, pair.CurrentOpcode) {
+				sourceNodeID, targetNodeID := -1, -1
+				sourceKind, targetKind, targetOpName := "<nil>", "<nil>", "<nil>"
+				targetPC := -1
+				if sourceNode != nil {
+					sourceNodeID, sourceKind = sourceNode.Id, fmt.Sprintf("%T", sourceNode.Statement)
+				}
+				if node != nil {
+					targetNodeID, targetKind = node.Id, fmt.Sprintf("%T", node.Statement)
+					if op := idToOpcode[node.Id]; op != nil && op.Instr != nil {
+						targetPC, targetOpName = int(op.CurrentOffset), op.Instr.Name
+					}
+				}
+				d.tracef("var-fold", "single-use-fold blocked sourceNode=%d/%s targetNode=%d/%s targetPC=%d/%s originPC=%d originOp=%s ref=%s value=%s", sourceNodeID, sourceKind, targetNodeID, targetKind, targetPC, targetOpName, pair.CurrentOpcode.CurrentOffset, pair.CurrentOpcode.Instr.Name, traceRef(ref, d.FunctionContext), traceValue(val, d.FunctionContext))
 				return true
 			}
 			rewriteIsOk := false

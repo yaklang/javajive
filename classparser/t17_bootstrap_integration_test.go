@@ -308,6 +308,78 @@ func TestTaskT17C06ConcatLambdaNoRegress(t *testing.T) {
 	}
 }
 
+func TestTernaryCheckcastInvocationReceiverRoundTrip(t *testing.T) {
+	const main = "TernaryCheckcastInvocationReceiver"
+	source := `import java.util.function.Supplier;
+public final class TernaryCheckcastInvocationReceiver {
+    static String select(boolean useBuffer, Supplier<Object> reader, String fallback) {
+        String result = new String(useBuffer ? ((StringBuilder) reader.get()).substring(0) : fallback);
+        return result;
+    }
+    public static void main(String[] args) {
+        Supplier<Object> decoded = () -> new StringBuilder("decoded");
+        Supplier<Object> unused = () -> new Object();
+        System.out.println(select(true, decoded, "fallback") + ":" + select(false, unused, "plain"));
+    }
+}`
+	want, classes := t17CompileRun(t, "8", main, map[string]string{main + ".java": source})
+	if strings.TrimSpace(want) != "decoded:plain" {
+		t.Fatalf("independent javac/java oracle changed: %q", want)
+	}
+	raw, ok := classes[main]
+	if !ok {
+		t.Fatal("javac did not produce the cast-receiver fixture class")
+	}
+	for _, mode := range []DecompileMode{Precision, Compatibility} {
+		result, err := DecompileWithOptions(raw, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
+		if err != nil {
+			t.Fatalf("decompile %s: %v", mode, err)
+		}
+		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			t.Fatalf("branch-local checkcast invocation round-trip %s (status %s, diagnostics %+v): %v\n%s", mode, result.Status, result.Diagnostics, err, result.Source)
+		}
+	}
+}
+
+func TestConditionalThisCtorCheckcastRoundTrip(t *testing.T) {
+	const main = "ConditionalThisCtorRoundTrip"
+	source := `public final class ConditionalThisCtorRoundTrip {
+    private final String value;
+
+    public ConditionalThisCtorRoundTrip(Object value) {
+        this(value instanceof String ? (String) value : ((StringBuilder) value).toString());
+    }
+
+    public ConditionalThisCtorRoundTrip(String value) {
+        this.value = value;
+    }
+
+    public String value() { return value; }
+
+    public static void main(String[] args) {
+        System.out.println(new ConditionalThisCtorRoundTrip("direct").value());
+        System.out.println(new ConditionalThisCtorRoundTrip(new StringBuilder("fallback")).value());
+    }
+}`
+	want, classes := t17CompileRun(t, "8", main, map[string]string{main + ".java": source})
+	raw, ok := classes[main]
+	if !ok {
+		t.Fatal("javac did not produce the constructor fixture class")
+	}
+	for _, mode := range []DecompileMode{Precision, Compatibility} {
+		result, err := DecompileWithOptions(raw, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
+		if err != nil {
+			t.Fatalf("decompile %s: %v", mode, err)
+		}
+		if result.Status != "complete" && result.Status != "partial" {
+			t.Fatalf("decompile %s status=%s diagnostics=%+v\n%s", mode, result.Status, result.Diagnostics, result.Source)
+		}
+		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			t.Fatalf("conditional constructor round-trip %s: %v", mode, err)
+		}
+	}
+}
+
 func t17RebuildRun(t *testing.T, release, main, src, wantStdout string) {
 	t.Helper()
 	if err := t17RebuildRunErr(t, release, main, src, wantStdout); err != nil {

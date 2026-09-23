@@ -13,9 +13,19 @@ import (
 
 type NewExpression struct {
 	types.JavaType
-	Length          []JavaValue
-	ArgumentsGetter func() string
-	Initializer     []JavaValue
+	// OriginPC records the bytecode allocation instruction when this value came
+	// directly from NEW/NEWARRAY/ANEWARRAY/MULTIANEWARRAY. It lets expression
+	// motion preserve the allocation-before-arguments order in constructor calls.
+	OriginPC    int
+	HasOriginPC bool
+	// EvaluationEndPC records the last bytecode instruction required to finish an
+	// inline array initializer. It is populated only after the sequential stores
+	// have been proven and folded by RewriteNewArrayList.
+	EvaluationEndPC    int
+	HasEvaluationEndPC bool
+	Length             []JavaValue
+	ArgumentsGetter    func() string
+	Initializer        []JavaValue
 	// ConstructorCall holds the invokespecial `<init>` call whose arguments this `new T(...)`
 	// renders through ArgumentsGetter. The arguments live ONLY inside that closure (string
 	// rendering), so without this back-reference any value-tree traversal — most importantly

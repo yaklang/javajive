@@ -72,6 +72,30 @@ func TestT15_MayFoldBarriers(t *testing.T) {
 	t.Run("T15-C05", func(t *testing.T) { testT15MayFoldBarriers(t) })
 }
 
+func TestT15_InstanceofCaptureIsInspectable(t *testing.T) {
+	typ := types.NewJavaClass("java.lang.Object")
+	ref := NewJavaRef(nil, nil, typ)
+	call := &FunctionCallExpression{FunctionName: "next", Object: ref}
+	instanceOf := NewCustomValue(func(*class_context.ClassContext) string { return "value.next() instanceof String" }, func() types.JavaType {
+		return types.NewJavaPrimer(types.JavaBoolean)
+	})
+	instanceOf.Flag = "instanceof"
+	instanceOf.CapturesKnown = true
+	instanceOf.Captures = []JavaValue{call}
+
+	_, refs := InspectValue(instanceOf)
+	if !refs[ref] {
+		t.Fatal("instanceof must expose the local reads of its operand")
+	}
+	if IsPure(instanceOf) {
+		t.Fatal("side effects in the instanceof operand must remain visible")
+	}
+	children, known := Children(instanceOf)
+	if !known || len(children) != 1 || children[0] != call {
+		t.Fatalf("children=%v known=%v", children, known)
+	}
+}
+
 func testT15MayFoldBarriers(t *testing.T) {
 	intType := types.NewJavaPrimer(types.JavaInteger)
 	lit := NewJavaLiteral(1, intType)
