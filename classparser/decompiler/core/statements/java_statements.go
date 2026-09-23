@@ -2595,6 +2595,8 @@ type AssignStatement struct {
 	JavaValue   values.JavaValue
 	IsDeclare   bool
 	IsFirst     bool
+	OriginPC    int
+	HasOriginPC bool
 }
 
 // ReplaceVar implements Statement.

@@ -9,6 +9,20 @@ type WorkCounter interface {
 	Charge(units uint64) error
 }
 
+func sortWorkEstimate(n int) uint64 {
+	if n < 2 {
+		return 0
+	}
+	log := uint64(0)
+	for size := uint64(n); size > 1; size = (size + 1) / 2 {
+		log++
+	}
+	if uint64(n) > math.MaxUint64/log {
+		return math.MaxUint64
+	}
+	return uint64(n) * log
+}
+
 type LimitCounter struct {
 	Max  uint64
 	Used uint64

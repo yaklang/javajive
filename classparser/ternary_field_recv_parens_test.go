@@ -314,6 +314,9 @@ func TestJacksonRemainingDeserializerCacheSyncReturnIsLoadBearing(t *testing.T) 
 }
 
 func TestJacksonRemainingMapEntryDeserializerCastIsLoadBearing(t *testing.T) {
+	// This test owns the legacy Jackson source reconstruction. Keep the newer typed
+	// constructor-binding algorithm out of the two configurations under comparison.
+	t.Setenv("JDEC_THIS_CTOR_OVERLOAD_CAST_OFF", "1")
 	data, err := os.ReadFile("testdata/regression/MapEntryDeserializer.class")
 	if err != nil {
 		t.Fatalf("read MapEntryDeserializer: %v", err)

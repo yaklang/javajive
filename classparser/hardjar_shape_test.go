@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -142,6 +143,11 @@ func TestAnswerParamCtorArgJarFS(t *testing.T) {
 	}
 }
 
+var (
+	methodGraphLocalDeclaration = regexp.MustCompile(`\bMethodGraph var[0-9]+(_[0-9]+)?\s*=`)
+	identifierAsTypeDeclaration = regexp.MustCompile(`\bvar[0-9]+(_[0-9]+)?\s+var[0-9]+(_[0-9]+)?\s*=`)
+)
+
 func TestIdentAsTypeDeclJarFS(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -163,11 +169,11 @@ func TestIdentAsTypeDeclJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if strings.Contains(on, "var3 var4 =") {
-		t.Fatalf("ON still has ident-as-type decl:\n%s", clipForTest(on, "var3 var4"))
+	if hasIdentifierAsTypeDeclaration(on) {
+		t.Fatalf("ON still has ident-as-type decl:\n%s", clipForTest(on, "var"))
 	}
-	if !strings.Contains(on, "MethodGraph var4 =") {
-		t.Fatalf("ON missing MethodGraph var4:\n%s", clipForTest(on, "var4"))
+	if !methodGraphLocalDeclaration.MatchString(on) {
+		t.Fatalf("ON missing typed MethodGraph declaration:\n%s", clipForTest(on, "MethodGraph"))
 	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
 	jfs2, err := NewJarFSFromLocal(jar)
@@ -180,9 +186,13 @@ func TestIdentAsTypeDeclJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if !strings.Contains(off, "MethodGraph var4 =") || strings.Contains(off, "var3 var4 =") {
-		t.Fatalf("core join lost the MethodGraph declaration:\n%s", clipForTest(off, "var4"))
+	if !methodGraphLocalDeclaration.MatchString(off) || hasIdentifierAsTypeDeclaration(off) {
+		t.Fatalf("core join lost the typed MethodGraph declaration:\n%s", clipForTest(off, "MethodGraph"))
 	}
+}
+
+func hasIdentifierAsTypeDeclaration(source string) bool {
+	return identifierAsTypeDeclaration.MatchString(source)
 }
 
 func TestIdentAsTypeDeclRewrites(t *testing.T) {

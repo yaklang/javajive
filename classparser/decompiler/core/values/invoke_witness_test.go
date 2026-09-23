@@ -554,6 +554,40 @@ func TestInvokeWitnessUnknownExternalNullStillPins(t *testing.T) {
 	}
 }
 
+func TestInvokeWitnessUnknownVirtualNullFamilyIsNotComplete(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/String;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, owner, receiver string
+		kind                  InvokeKind
+	}{
+		{name: "virtual", owner: "ext.Base", receiver: "ext.Child", kind: InvokeVirtual},
+		{name: "interface", owner: "ext.Api", receiver: "ext.Impl", kind: InvokeInterface},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member := &JavaClassMember{
+				Name: tc.owner, Member: "pick",
+				Description: "(Ljava/lang/Object;)Ljava/lang/String;", JavaType: ft,
+			}
+			receiver := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass(tc.receiver))
+			call := NewFunctionCallExpression(receiver, member, ft.FunctionType())
+			call.Kind = tc.kind
+			call.Arguments = []JavaValue{NewJavaLiteral("null", types.NewJavaClass("java.lang.Object"))}
+			var noted []string
+			ctx := &class_context.ClassContext{ClassName: "Caller"}
+			ctx.OnOverloadUnknown = func(owner, name, descriptor string) {
+				noted = append(noted, owner+"."+name+descriptor)
+			}
+			_ = call.String(ctx)
+			if !ctx.OverloadFamilyUnproven || len(noted) == 0 {
+				t.Fatalf("missing family must be explicit for null argument: unproven=%v diagnostics=%v", ctx.OverloadFamilyUnproven, noted)
+			}
+		})
+	}
+}
+
 func mustFunc(desc string) *types.JavaFuncType {
 	mt, err := types.ParseMethodDescriptor(desc)
 	if err != nil {

@@ -62,6 +62,9 @@ type Decompiler struct {
 	// the original local-load without unpacking the CustomValue's closures (which are opaque).
 	// Populated in the phase-1 OP_CHECKCAST handler.
 	checkcastInnerArg map[*OpCode]values.JavaValue
+	// inlineCheckcast marks a cast kept directly in the operand expression when its next
+	// instruction is an exact-owner zero-argument instance call.
+	inlineCheckcast map[*OpCode]bool
 	// invokeFuncCall records, per invoke-family opcode, the FunctionCallExpression it produced (for
 	// value-returning invokes, the FCE is pushed on the phase-1 stack and consumed later; the FCE's
 	// receiver and arguments were bound at phase-1 time when opcodeIdToRef was incomplete). The
@@ -194,6 +197,7 @@ func NewDecompiler(bytecodes []byte, constantPoolGetter func(id int) values.Java
 		refToCreatingStore:   map[*values.JavaRef]*OpCode{},
 		dupConvertedRefValue: map[*OpCode][]values.JavaValue{},
 		checkcastInnerArg:    map[*OpCode]values.JavaValue{},
+		inlineCheckcast:      map[*OpCode]bool{},
 		invokeFuncCall:       map[*OpCode]*values.FunctionCallExpression{},
 		varUserMap:           omap.NewEmptyOrderedMap[*values.JavaRef, []*VarFoldRule](),
 		delRefUserAttr:       map[string][3]int{},
@@ -4047,6 +4051,11 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// without unpacking the cast CustomValue's closures (fastjson2 JDKUtils:318).
 		d.checkcastInnerArg[opcode] = arg
 		value := &values.CastExpression{Value: arg, TargetType: classInfo, OriginPC: int(opcode.CurrentOffset)}
+		if d.canInlineImmediateZeroArgCheckcast(opcode, classInfo) {
+			d.inlineCheckcast[opcode] = true
+			runtimeStackSimulation.Push(value)
+			break
+		}
 		ref := runtimeStackSimulation.NewVar(value)
 		slotvalue := values.NewSlotValue(ref, ref.Type())
 		users := d.varUserMap.GetMust(ref)
@@ -6042,6 +6051,8 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		node := NewNode(statement)
 		if v, ok := statement.(*statements.AssignStatement); ok {
+			v.OriginPC = int(opcode.CurrentOffset)
+			v.HasOriginPC = true
 			if v1, ok := v.LeftValue.(*values.JavaRef); ok {
 				refToNewExpressionAssignNode[v1.Id] = node
 			}
@@ -6140,6 +6151,9 @@ func (d *Decompiler) ParseStatement() error {
 				appendNode(assignSt)
 			}
 		case OP_CHECKCAST:
+			if d.inlineCheckcast[opcode] {
+				break
+			}
 			slotVal := opcode.stackProduced[0]
 			leftRef := UnpackSoltValue(slotVal).(*values.JavaRef)
 			val := GetRealValue(leftRef.Val)

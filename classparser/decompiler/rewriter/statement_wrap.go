@@ -758,6 +758,18 @@ func (s *RewriteManager) ScanCoreInfo() error {
 	subNodeRoute := NewRootNodeRoute()
 	walkIfStatement(s.RootNode, subNodeRoute)
 	circleNodes = sortNodesByID(utils.NewSet[*core.Node](circleNodes).List())
+	// The route walk above is useful for finding candidate loop heads, but a node can be
+	// revisited by multiple paths through a forward-only diamond.  Only retain candidates
+	// that are members of an actual CFG cycle; otherwise RebuildLoopNode wraps an acyclic
+	// join in `do { ... } while (true)` and drops its forward branch edges.
+	cyclicNodes := cyclicCFGNodes(s.RootNode)
+	actualCircleNodes := circleNodes[:0]
+	for _, node := range circleNodes {
+		if cyclicNodes[node] {
+			actualCircleNodes = append(actualCircleNodes, node)
+		}
+	}
+	circleNodes = actualCircleNodes
 	//for _, node := range circleNodes {
 	//	//mergeNode := funk.Filter(node.Next, func(item *core.Node) bool {
 	//	//	return !node.CircleNodesSet.Has(item)

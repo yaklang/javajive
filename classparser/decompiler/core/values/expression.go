@@ -2603,12 +2603,22 @@ func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_c
 	if err != nil || cur == nil || cur.FunctionType() == nil || i >= len(cur.FunctionType().ParamTypes) {
 		return ""
 	}
-	tp := tgt.FunctionType().ParamTypes[i]
+	targetType := tgt.FunctionType().ParamTypes[i]
 	cp := cur.FunctionType().ParamTypes[i]
-	if tp == nil || cp == nil {
+	if targetType == nil || cp == nil {
 		return ""
 	}
-	tStr, cStr := tp.String(funcCtx), cp.String(funcCtx)
+	tStr := targetType.String(funcCtx)
+	exactGenericTarget := false
+	if sig := funcCtx.ConstructorSignatureByDesc(f.Descriptor); sig != "" {
+		_, sigParams, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+		if len(sigParams) == len(tgt.FunctionType().ParamTypes) && i < len(sigParams) && sigParams[i] != nil {
+			targetType = sigParams[i]
+			tStr = targetType.String(funcCtx)
+			_, exactGenericTarget = types.AsParameterizedType(targetType)
+		}
+	}
+	cStr := cp.String(funcCtx)
 	if tStr == "" || tStr == cStr {
 		return ""
 	}
@@ -2617,14 +2627,26 @@ func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_c
 		return ""
 	}
 	aStr := arg.Type().String(funcCtx)
-	// Only when the argument looks like the ENCLOSING ctor's param (or its erasure),
-	// so javac would pick that more-specific overload without a cast.
-	if erasureNameOf(aStr) != erasureNameOf(cStr) && aStr != cStr {
+	// Cast when javac would otherwise choose the enclosing constructor's more-specific
+	// overload. A second case needs exact Signature evidence: an erased raw argument can
+	// be ambiguous between `List<String>` and `ArrayList<Object>`, so only pin it to a
+	// parameterized target when the exact invokespecial descriptor supplies that type and
+	// the argument itself is raw. Already-parameterized arguments need only the erased
+	// cast to select the descriptor; preserving their inferred arguments avoids narrowing
+	// valid poly-expression inference (for example Arrays.stream(...)).
+	aRaw, cRaw := erasureNameOf(aStr), erasureNameOf(cStr)
+	sameAsCurrent := aRaw == cRaw || aStr == cStr
+	_, argumentParameterized := types.AsParameterizedType(arg.Type())
+	pinsExactGenericTarget := exactGenericTarget && !argumentParameterized && aRaw == erasureNameOf(tStr)
+	if !sameAsCurrent && !pinsExactGenericTarget {
 		return ""
 	}
 	raw := erasureNameOf(tStr)
 	if raw == "" || raw == "int" || raw == "boolean" || raw == "long" || raw == "double" || raw == "float" || raw == "short" || raw == "byte" || raw == "char" {
 		return ""
+	}
+	if pinsExactGenericTarget {
+		return tStr
 	}
 	return raw
 }
@@ -3710,6 +3732,13 @@ func (f *FunctionCallExpression) witnessDescriptorArgCast(i int, arg JavaValue, 
 			if sameClassInvokeCallee(f, funcCtx) {
 				return ""
 			}
+			if f.overloadFamilyProof(funcCtx) == overloadUnknown &&
+				f.recoverableGenericParamType(i, funcCtx) == nil {
+				// A missing family must not make an untyped null look uniquely bound.
+				// Keep the best-effort source shape, but force the public result to
+				// unsupported until the declaring hierarchy can be verified.
+				f.noteUnknownOverloadFamily(funcCtx)
+			}
 			if !witnessObjectNullNeedsCast(f) {
 				return ""
 			}
@@ -3754,6 +3783,16 @@ func (f *FunctionCallExpression) witnessDescriptorArgCast(i int, arg JavaValue, 
 		return f.witnessOverloadPinCast(i, at, param, funcCtx)
 	}
 	return ""
+}
+
+func (f *FunctionCallExpression) noteUnknownOverloadFamily(funcCtx *class_context.ClassContext) {
+	if f == nil || funcCtx == nil {
+		return
+	}
+	funcCtx.OverloadFamilyUnproven = true
+	if funcCtx.OnOverloadUnknown != nil {
+		funcCtx.OnOverloadUnknown(f.ClassName, f.FunctionName, f.Descriptor)
+	}
 }
 
 func isWitnessLambdaArg(v JavaValue) bool {
@@ -3814,10 +3853,7 @@ func (f *FunctionCallExpression) witnessOverloadPinCast(i int, argType, param ty
 		// Missing metadata cannot justify a source binding cast. Record the
 		// unresolved call, preserving generic/source reconstruction behavior.
 		if funcCtx != nil && (isJavaLangObjectType(param) || witnessStealShaped(f, argType, param)) {
-			funcCtx.OverloadFamilyUnproven = true
-			if funcCtx.OnOverloadUnknown != nil {
-				funcCtx.OnOverloadUnknown(f.ClassName, f.FunctionName, f.Descriptor)
-			}
+			f.noteUnknownOverloadFamily(funcCtx)
 		}
 		if f.Kind != InvokeStatic || f.FunctionName == "<init>" || !isJavaLangObjectType(param) || !witnessStringyArg(argType) {
 			return ""

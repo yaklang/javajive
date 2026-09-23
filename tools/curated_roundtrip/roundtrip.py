@@ -10,6 +10,11 @@ import signal
 import subprocess
 import time
 
+try:
+    from .build_adapter import source_state
+except ImportError:
+    from build_adapter import source_state
+
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 MAX_LOG = 2 << 20
@@ -167,6 +172,7 @@ def main():
     if out.exists():
         parser.error('Use a new output directory; existing evidence is never overwritten')
     out.mkdir(parents=True)
+    current_source = source_state(exclude=out)
     helper = out / 'helper'
     helper.mkdir()
     result = {
@@ -174,6 +180,7 @@ def main():
         'expected_rows': len(specs) * 4, 'adapter_sha256': sha256(adapter),
         'revision': execute(['git', 'rev-parse', 'HEAD'], REPO, out / 'revision'),
         'working_tree': execute(['git', 'status', '--porcelain'], REPO, out / 'working-tree'),
+        'source_state': current_source,
         'java': execute(['java', '-version'], out, out / 'java-version'),
         'javac': execute(['javac', '-version'], out, out / 'javac-version'),
         'go': execute(['go', 'version'], REPO, out / 'go-version'),
@@ -195,7 +202,8 @@ def main():
         result['build_manifest'] = manifest
         stamp_valid = (manifest.get('revision') == revision
                        and manifest.get('binary_sha256') == result['adapter_sha256']
-                       and manifest.get('working_tree') == result['working_tree']['stdout'])
+                       and all(manifest.get(key) == current_source.get(key)
+                               for key in ('working_tree', 'diff_sha256', 'untracked_sha256')))
     else:
         stamp_valid = built_revisions == [revision]
     write_json(out / 'report.json', result)
@@ -224,14 +232,16 @@ def main():
                 result['cases'].append(row)
                 write_json(out / 'report.json', result)
                 print(spec['case'], debug, mode, 'PASS' if row['passed'] else 'FAIL', ','.join(row['failures']), flush=True)
+    source_stable = source_state(exclude=out) == current_source
     failures = sum(not row['passed'] for row in result['cases'])
     result['summary'] = {'total': len(result['cases']), 'failed': failures,
                          'passed': len(result['cases']) - failures,
+                         'source_stable_during_audit': source_stable,
                          'runtime_equivalence_for_all_inputs_proven': False}
     write_json(out / 'report.json', result)
     if len(result['cases']) != result['expected_rows']:
         raise SystemExit('Incomplete fixture matrix')
-    raise SystemExit(0 if args.observe else int(failures > 0))
+    raise SystemExit(0 if args.observe and source_stable else int(failures > 0 or not source_stable))
 
 
 if __name__ == '__main__':

@@ -134,6 +134,11 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 		}
 	}
 	rewriter.RewriteVar(&sts, decompiler.BodyStartId, params, decompiler.FunctionContext)
+	// Restore lazy evaluation when CFG value merging left a single-use instance call
+	// in a local immediately before its null-guarded ternary. Run after RewriteVar so
+	// uses of the same JVM local have their final identities. The pass requires exact
+	// local-use, bytecode-origin, side-effect, and exception-handler proofs.
+	decompiler.InlineGuardedCallTemps(&sts)
 	// Post-RewriteVar per-VarUid instanceof-widen with Object-safe gate. Kill-switch:
 	// JDEC_POST_RW_INSTANCEOF_WIDEN_OFF=1.
 	rewriter.WidenInstanceofReadRefs(&sts)

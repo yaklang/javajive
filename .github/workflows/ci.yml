@@ -32,20 +32,22 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Algorithm and budget tests (race)
-        run: go test ./classparser/decompiler/core/... ./internal/workbudget ./internal/jdecenv -race -count=1 -timeout=3m
+        run: go test ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv -race -count=1 -timeout=3m
       - name: Production-path regression tests
-        run: go test ./classparser -run '^Test(BindingPlan|EnumClinit|GenericNull|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|TaskT20)' -count=1 -timeout=3m
+        run: |
+          go test ./classparser -run '^Test(BindingPlan|CtorNPECheckBeforeThis|EnumClinit|GenericNull|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|TaskT20)' -count=1 -timeout=3m
+          python3 -m unittest tools.curated_roundtrip.test_roundtrip
       - name: Recompile and run trusted small Java fixtures
         run: |
           mkdir -p artifacts
           git rev-parse HEAD > artifacts/revision.txt
-          go build -buildvcs=true -o "$RUNNER_TEMP/javajive-probe" ./tools/draft-followup-probe
+          python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/javajive-probe"
           python3 tools/curated_roundtrip/roundtrip.py --adapter "$RUNNER_TEMP/javajive-probe" --out artifacts/roundtrip --allow-trusted-fixture-execution --expected-rows 36
-      - name: Failure reproduction files
-        if: failure()
+      - name: Roundtrip evidence
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: regression-failure
+          name: algorithm-regression-evidence
           path: artifacts/
           if-no-files-found: ignore
           retention-days: 7

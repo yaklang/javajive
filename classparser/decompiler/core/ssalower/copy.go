@@ -3,6 +3,8 @@ package ssalower
 import (
 	"container/heap"
 	"fmt"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 )
 
 type VarID int
@@ -48,10 +50,21 @@ func (h *idHeap) Pop() any          { a := *h; v := a[len(a)-1]; *h = a[:len(a)-
 // OLD value and redirects every reader before overwriting it. The allocator
 // must reserve the whole method's namespace, not just this edge's values.
 func SequentializeChecked(copies []Copy, nextTemp func() VarID) ([]Move, error) {
+	return sequentializeChecked(copies, nextTemp, nil)
+}
+
+func sequentializeChecked(copies []Copy, nextTemp func() VarID, counter ssabuild.WorkCounter) ([]Move, error) {
+	// Reserve the initial linear scan and map/heap entries before allocating them.
+	if err := chargeScaledWork(counter, len(copies), 4); err != nil {
+		return nil, err
+	}
 	pending := map[VarID]VarID{}
 	readers := map[VarID]map[VarID]bool{}
 	occupied, destinations := map[VarID]bool{}, map[VarID]bool{}
 	for _, c := range copies {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		if c.Dst <= 0 || c.Src <= 0 || destinations[c.Dst] {
 			return nil, fmt.Errorf("invalid_input: invalid or duplicate copy destination %d", c.Dst)
 		}
@@ -67,6 +80,9 @@ func SequentializeChecked(copies []Copy, nextTemp func() VarID) ([]Move, error) 
 		readers[c.Src][c.Dst] = true
 	}
 	ready, all := &idHeap{}, &idHeap{}
+	if err := chargeScaledWork(counter, len(pending), 2); err != nil {
+		return nil, err
+	}
 	for d := range pending {
 		heap.Push(all, d)
 		if len(readers[d]) == 0 {
@@ -75,7 +91,13 @@ func SequentializeChecked(copies []Copy, nextTemp func() VarID) ([]Move, error) 
 	}
 	var out []Move
 	for len(pending) > 0 {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		for ready.Len() > 0 {
+			if err := chargeWork(counter, 1); err != nil {
+				return nil, err
+			}
 			d := heap.Pop(ready).(VarID)
 			s, ok := pending[d]
 			if !ok || len(readers[d]) != 0 {
@@ -110,6 +132,9 @@ func SequentializeChecked(copies []Copy, nextTemp func() VarID) ([]Move, error) 
 		out = append(out, Move{Dst: tmp, Src: victim, Tmp: true})
 		readers[tmp] = map[VarID]bool{}
 		for d := range readers[victim] {
+			if err := chargeWork(counter, 1); err != nil {
+				return nil, err
+			}
 			pending[d] = tmp
 			readers[tmp][d] = true
 		}

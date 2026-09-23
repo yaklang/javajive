@@ -37,18 +37,26 @@ type ExceptionPlan struct {
 	Sites []SpillSite
 	Catch []CatchBinding
 }
-type Options struct{ MaxSpills int }
+type Options struct {
+	MaxSpills int
+}
 
-func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16][]Range, maxSpills int) (ExceptionPlan, error) {
+func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16][]Range, maxSpills int, counter ssabuild.WorkCounter) (ExceptionPlan, error) {
 	fail := func(format string, args ...any) (ExceptionPlan, error) {
 		return ExceptionPlan{}, fmt.Errorf("unsupported: exception phi: "+format, args...)
 	}
 	if maxSpills <= 0 {
 		return fail("positive spill budget required")
 	}
+	if err := chargeWork(counter, uint64(len(fn.IR.Edges))); err != nil {
+		return ExceptionPlan{}, err
+	}
 	byEdge := map[methodir.EdgeID]methodir.Edge{}
 	handlers := map[methodir.BlockID]bool{}
 	for _, e := range fn.IR.Edges {
+		if err := chargeWork(counter, 1); err != nil {
+			return ExceptionPlan{}, err
+		}
 		if _, ok := byEdge[e.ID]; ok {
 			return fail("duplicate edge %s", e.ID)
 		}
@@ -67,21 +75,38 @@ func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16]
 	}
 	out := ExceptionPlan{}
 	sites := map[uint16]*SpillSite{}
+	siteSpills := map[uint16]map[VarID]Spill{}
 	before := map[uint16]ssabuild.InstructionValues{}
 	for _, v := range fn.Instructions {
+		if err := chargeWork(counter, 1); err != nil {
+			return ExceptionPlan{}, err
+		}
 		before[v.PC] = v
 	}
 	count := 0
 	// Iterate blocks and phis in deterministic order, never a map traversal.
+	if err := chargeWork(counter, uint64(len(fn.Blocks))+sortWork(len(fn.Blocks))); err != nil {
+		return ExceptionPlan{}, err
+	}
 	blocks := append([]ssabuild.BlockFrame(nil), fn.Blocks...)
 	sort.Slice(blocks, func(i, j int) bool { return blocks[i].ID < blocks[j].ID })
 	for _, b := range blocks {
+		if err := chargeWork(counter, 1); err != nil {
+			return ExceptionPlan{}, err
+		}
 		if !handlers[b.ID] {
 			continue
 		}
 		// A catch parameter has one reference stack value. Mixed normal entry cannot
 		// be represented by this handler-local emission plan.
-		for _, e := range fn.Incoming(b.First) {
+		incoming, err := fn.IncomingWithCounter(b.First, counter)
+		if err != nil {
+			return ExceptionPlan{}, err
+		}
+		for _, e := range incoming {
+			if err := chargeWork(counter, 1); err != nil {
+				return ExceptionPlan{}, err
+			}
 			if _, ok := fn.EdgeStates[e.ID]; ok && e.Kind != core.EdgeException {
 				return fail("handler %d has normal or entry predecessor", b.ID)
 			}
@@ -93,12 +118,26 @@ func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16]
 		if err != nil {
 			return ExceptionPlan{}, err
 		}
+		if err := chargeWork(counter, 1); err != nil {
+			return ExceptionPlan{}, err
+		}
 		out.Catch = append(out.Catch, CatchBinding{Handler: b.ID, Destination: catchID, Type: b.In.Stack[0].DropValue()})
-		phis := fn.PhisOf(b.ID)
-		sort.Slice(phis, func(i, j int) bool { return phis[i].ID < phis[j].ID })
+		phis, err := fn.PhisOfWithCounter(b.ID, counter)
+		if err != nil {
+			return ExceptionPlan{}, err
+		}
 		for _, p := range phis {
-			expected := map[methodir.EdgeID]bool{}
-			for _, e := range fn.Incoming(b.First) {
+			if err := chargeWork(counter, 1); err != nil {
+				return ExceptionPlan{}, err
+			}
+			if err := chargeWork(counter, uint64(len(incoming))); err != nil {
+				return ExceptionPlan{}, err
+			}
+			expected := make(map[methodir.EdgeID]bool, len(incoming))
+			for _, e := range incoming {
+				if err := chargeWork(counter, 1); err != nil {
+					return ExceptionPlan{}, err
+				}
 				if _, ok := fn.EdgeStates[e.ID]; ok {
 					expected[e.ID] = true
 				}
@@ -108,6 +147,9 @@ func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16]
 			}
 			used := map[methodir.EdgeID]bool{}
 			for _, op := range p.Operands {
+				if err := chargeWork(counter, 1); err != nil {
+					return ExceptionPlan{}, err
+				}
 				if !expected[op.Edge] || used[op.Edge] {
 					return fail("phi %d operand/edge mismatch", p.ID)
 				}
@@ -135,6 +177,9 @@ func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16]
 				return fail("phi %d has uninitialized or noncomputational type", p.ID)
 			}
 			for _, op := range p.Operands {
+				if err := chargeWork(counter, 1); err != nil {
+					return ExceptionPlan{}, err
+				}
 				e := byEdge[op.Edge]
 				pc := uint16(e.From)
 				state := fn.EdgeStates[op.Edge]
@@ -156,28 +201,35 @@ func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16]
 				}
 				site := sites[pc]
 				if site == nil {
-					site = &SpillSite{PC: pc, Coverage: rangesForPC(cov, pc)}
-					sites[pc] = site
-				}
-				duplicate := false
-				for _, s := range site.Spills {
-					if s.Destination == dst {
-						if s.Source != src || s.LocalSlot != slot {
-							return fail("PC %d conflicting destination %d", pc, dst)
-						}
-						duplicate = true
+					coverage, err := rangesForPCWithCounter(cov, pc, counter)
+					if err != nil {
+						return ExceptionPlan{}, err
 					}
+					site = &SpillSite{PC: pc, Coverage: coverage}
+					sites[pc] = site
+					siteSpills[pc] = map[VarID]Spill{}
 				}
-				if duplicate {
+				if existing, duplicate := siteSpills[pc][dst]; duplicate {
+					if existing.Source != src || existing.LocalSlot != slot {
+						return fail("PC %d conflicting destination %d", pc, dst)
+					}
 					continue
 				}
 				if count >= maxSpills {
 					return fail("spill budget exceeded")
 				}
 				count++
-				site.Spills = append(site.Spills, Spill{Handler: b.ID, Destination: dst, Source: src, LocalSlot: slot, Type: p.Type.DropValue()})
+				spill := Spill{Handler: b.ID, Destination: dst, Source: src, LocalSlot: slot, Type: p.Type.DropValue()}
+				if err := chargeWork(counter, 1); err != nil {
+					return ExceptionPlan{}, err
+				}
+				site.Spills = append(site.Spills, spill)
+				siteSpills[pc][dst] = spill
 			}
 		}
+	}
+	if err := chargeWork(counter, uint64(len(sites))*2+sortWork(len(sites))); err != nil {
+		return ExceptionPlan{}, err
 	}
 	pcs := make([]int, 0, len(sites))
 	for pc := range sites {
@@ -185,13 +237,22 @@ func exceptionPlan(fn *ssabuild.Function, values *ValueRegistry, cov map[uint16]
 	}
 	sort.Ints(pcs)
 	for _, pc := range pcs {
+		if err := chargeWork(counter, 1); err != nil {
+			return ExceptionPlan{}, err
+		}
 		s := sites[uint16(pc)]
+		if err := chargeWork(counter, sortWork(len(s.Spills))+uint64(len(s.Spills))); err != nil {
+			return ExceptionPlan{}, err
+		}
 		sort.Slice(s.Spills, func(i, j int) bool { return s.Spills[i].Destination < s.Spills[j].Destination })
 		copies := make([]Copy, 0, len(s.Spills))
 		for _, sp := range s.Spills {
+			if err := chargeWork(counter, 1); err != nil {
+				return ExceptionPlan{}, err
+			}
 			copies = append(copies, Copy{Dst: sp.Destination, Src: sp.Source})
 		}
-		moves, err := values.sequentialize(copies)
+		moves, err := values.sequentializeWithCounter(copies, counter)
 		if err != nil {
 			return ExceptionPlan{}, err
 		}

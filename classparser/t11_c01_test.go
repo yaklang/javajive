@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"context"
 	"flag"
 	"os"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/classes"
 	"github.com/yaklang/javajive/classparser/decompiler/core/methodir"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func TestMain(m *testing.M) {
@@ -51,7 +53,8 @@ func TestT11_C01_ShadowDoesNotInterfere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	on, err := DecompileWithOptions(raw, DecompileOptions{Mode: Precision, EnableShadowIR: true})
+	work := workbudget.New(context.Background(), Limits{})
+	on, err := DecompileWithOptions(raw, DecompileOptions{Mode: Precision, EnableShadowIR: true, Work: work})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +76,9 @@ func TestT11_C01_ShadowDoesNotInterfere(t *testing.T) {
 	if on.InputHash != off.InputHash {
 		t.Fatal("input hash diverged")
 	}
+	if work.Used(workbudget.CounterAnalysisUpdates) == 0 {
+		t.Fatal("shadow SSA/lowering work did not use the request analysis counter")
+	}
 }
 
 func TestEnableShadowIR_DefaultOff(t *testing.T) {
@@ -87,4 +93,35 @@ func TestEnableShadowIR_DefaultOff(t *testing.T) {
 	if r.ShadowIRHash != "" || r.ShadowIRVersion != 0 {
 		t.Fatalf("default path leaked shadow IR: %+v", r)
 	}
+}
+
+func TestShadowIRRunsFrameSSAAndLowering(t *testing.T) {
+	_, classes := t04CompileRun(t, "8", "ShadowPipelineMain", map[string]string{
+		"ShadowPipelineMain.java": `public final class ShadowPipelineMain {
+			static int choose(int value) { return value < 0 ? -value : value; }
+			public static void main(String[] args) { System.out.println(choose(args.length)); }
+		}`,
+	})
+	raw := classes["ShadowPipelineMain"]
+	off, err := DecompileWithOptions(raw, DecompileOptions{Mode: Precision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := workbudget.New(context.Background(), Limits{})
+	on, err := DecompileWithOptions(raw, DecompileOptions{Mode: Precision, EnableShadowIR: true, Work: work})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on.Source != off.Source || on.Status != off.Status {
+		t.Fatalf("shadow pipeline changed printer output/status: source=%t status=%q/%q", on.Source != off.Source, on.Status, off.Status)
+	}
+	if on.ShadowIRHash == "" || on.ShadowIRVersion != methodir.SnapshotVersion {
+		t.Fatalf("missing pipeline observation: hash=%q version=%d shadow=%+v", on.ShadowIRHash, on.ShadowIRVersion, on.Shadow)
+	}
+	for _, observation := range on.Shadow {
+		if observation.Status == "ok" && observation.Hash != "" {
+			return
+		}
+	}
+	t.Fatalf("no method completed frame transfer, SSA construction, and phi lowering: %+v", on.Shadow)
 }

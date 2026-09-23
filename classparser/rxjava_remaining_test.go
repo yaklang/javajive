@@ -57,6 +57,9 @@ func TestRxThreadFactoryThreadLubIsLoadBearing(t *testing.T) {
 }
 
 func TestToListSingleCallableCastIsLoadBearing(t *testing.T) {
+	// This test owns the legacy RxJava source rewrite; the typed constructor
+	// binding pass has its own end-to-end test and kill switch.
+	t.Setenv("JDEC_THIS_CTOR_OVERLOAD_CAST_OFF", "1")
 	assertKillSwitchDecompile(t, "testdata/regression/FlowableToListSingle.class", "JDEC_RXJAVA_REMAINING_OFF",
 		"this(var1,(Callable)(ArrayListSupplier.asCallable()))",
 		"this(var1,ArrayListSupplier.asCallable())")

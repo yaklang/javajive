@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/frametransfer"
+	"github.com/yaklang/javajive/classparser/decompiler/core/methodir"
 	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 )
 
@@ -35,13 +36,28 @@ type ValueRegistry struct {
 }
 
 func NewValueRegistry(keys []ValueKey, aliases map[ValueKey]ValueKey) (*ValueRegistry, error) {
+	return newValueRegistry(keys, aliases, nil)
+}
+
+func newValueRegistry(keys []ValueKey, aliases map[ValueKey]ValueKey, counter ssabuild.WorkCounter) (*ValueRegistry, error) {
+	keyCount, aliasCount := uint64(len(keys)), uint64(len(aliases))
+	if aliasCount > (^uint64(0)-keyCount)/2 {
+		if err := chargeWork(counter, ^uint64(0)); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("analysis_budget_exceeded: value registry work overflow")
+	}
+	if err := chargeWork(counter, keyCount+2*aliasCount); err != nil {
+		return nil, err
+	}
 	canonical := func(k ValueKey) (ValueKey, error) {
-		seen := map[ValueKey]bool{}
-		for {
-			if seen[k] {
+		for hops := 0; ; hops++ {
+			if err := chargeWork(counter, 1); err != nil {
+				return ValueKey{}, err
+			}
+			if hops > len(aliases) {
 				return ValueKey{}, fmt.Errorf("invalid_input: value alias cycle at %+v", k)
 			}
-			seen[k] = true
 			n, ok := aliases[k]
 			if !ok {
 				return k, nil
@@ -53,17 +69,26 @@ func NewValueRegistry(keys []ValueKey, aliases map[ValueKey]ValueKey) (*ValueReg
 	for a, b := range aliases {
 		all = append(all, a, b)
 	}
-	set := map[ValueKey]bool{}
+	set := make(map[ValueKey]bool, len(all))
 	for _, k := range all {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		c, err := canonical(k)
 		if err != nil {
 			return nil, err
 		}
 		set[c] = true
 	}
+	if err := chargeWork(counter, uint64(len(set))); err != nil {
+		return nil, err
+	}
 	sorted := make([]ValueKey, 0, len(set))
 	for k := range set {
 		sorted = append(sorted, k)
+	}
+	if err := chargeWork(counter, sortWork(len(sorted))); err != nil {
+		return nil, err
 	}
 	sort.Slice(sorted, func(i, j int) bool {
 		a, b := sorted[i], sorted[j]
@@ -75,13 +100,27 @@ func NewValueRegistry(keys []ValueKey, aliases map[ValueKey]ValueKey) (*ValueReg
 		}
 		return false
 	})
-	r := &ValueRegistry{ids: map[ValueKey]VarID{}, Info: map[VarID]ValueInfo{}, next: 1}
+	// Reserve map construction before make; capacities are bounded by the
+	// already charged key and alias lists.
+	if err := chargeScaledWork(counter, len(sorted), 2); err != nil {
+		return nil, err
+	}
+	r := &ValueRegistry{ids: make(map[ValueKey]VarID, len(all)), Info: make(map[VarID]ValueInfo, len(sorted)), next: 1}
 	for _, k := range sorted {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		r.ids[k] = r.next
 		r.next++
 	}
 	for _, k := range all {
-		c, _ := canonical(k)
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
+		c, err := canonical(k)
+		if err != nil {
+			return nil, err
+		}
 		r.ids[k] = r.ids[c]
 	}
 	return r, nil
@@ -109,86 +148,163 @@ func (r *ValueRegistry) Fresh() (VarID, error) {
 }
 
 func registryFor(fn *ssabuild.Function) (*ValueRegistry, error) {
+	return registryForWithCounter(fn, nil)
+}
+
+func registryForWithCounter(fn *ssabuild.Function, counter ssabuild.WorkCounter) (*ValueRegistry, error) {
 	keys := []ValueKey{}
 	aliases := map[ValueKey]ValueKey{}
 	types := map[ValueKey]ValueInfo{}
-	register := func(o ssabuild.Origin, t frametransfer.Type) {
+	register := func(o ssabuild.Origin, t frametransfer.Type) error {
+		if err := chargeWork(counter, 1); err != nil {
+			return err
+		}
 		if !t.Computational() {
-			return
+			return nil
 		}
 		k := OriginKey(o)
 		keys = append(keys, k)
 		types[k] = ValueInfo{Type: t.DropValue(), Width: t.Width(), Origin: o}
+		return nil
 	}
 	for _, b := range fn.Blocks {
-		for _, v := range []struct {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
+		for _, frame := range []struct {
 			f frametransfer.Frame
 			o []ssabuild.Origin
 		}{{b.In, b.InOrig}, {b.Out, b.OutOrig}} {
-			ts := append(append([]frametransfer.Type(nil), v.f.Locals...), v.f.Stack...)
-			for i, t := range ts {
-				if i < len(v.o) {
-					register(v.o[i], t)
+			for i, t := range frame.f.Locals {
+				if i < len(frame.o) {
+					if err := register(frame.o[i], t); err != nil {
+						return nil, err
+					}
+				} else if err := chargeWork(counter, 1); err != nil {
+					return nil, err
+				}
+			}
+			for i, t := range frame.f.Stack {
+				j := len(frame.f.Locals) + i
+				if j < len(frame.o) {
+					if err := register(frame.o[j], t); err != nil {
+						return nil, err
+					}
+				} else if err := chargeWork(counter, 1); err != nil {
+					return nil, err
 				}
 			}
 		}
 	}
 	for _, v := range fn.EdgeStates {
-		ts := append(append([]frametransfer.Type(nil), v.Frame.Locals...), v.Frame.Stack...)
-		for i, t := range ts {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
+		for i, t := range v.Frame.Locals {
 			if i < len(v.Origins) {
-				register(v.Origins[i], t)
+				if err := register(v.Origins[i], t); err != nil {
+					return nil, err
+				}
+			} else if err := chargeWork(counter, 1); err != nil {
+				return nil, err
+			}
+		}
+		for i, t := range v.Frame.Stack {
+			j := len(v.Frame.Locals) + i
+			if j < len(v.Origins) {
+				if err := register(v.Origins[j], t); err != nil {
+					return nil, err
+				}
+			} else if err := chargeWork(counter, 1); err != nil {
+				return nil, err
 			}
 		}
 	}
 	for _, v := range fn.Instructions {
-		ts := append(append([]frametransfer.Type(nil), v.Before.Locals...), v.Before.Stack...)
-		for i, t := range ts {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
+		for i, t := range v.Before.Locals {
 			if i < len(v.BeforeOrigins) {
-				register(v.BeforeOrigins[i], t)
+				if err := register(v.BeforeOrigins[i], t); err != nil {
+					return nil, err
+				}
+			} else if err := chargeWork(counter, 1); err != nil {
+				return nil, err
 			}
 		}
-		for _, origins := range [][]ssabuild.Origin{v.Uses, v.Results} {
-			for _, o := range origins {
-				if o.Kind != ssabuild.OriginTop {
-					keys = append(keys, OriginKey(o))
+		for i, t := range v.Before.Stack {
+			j := len(v.Before.Locals) + i
+			if j < len(v.BeforeOrigins) {
+				if err := register(v.BeforeOrigins[j], t); err != nil {
+					return nil, err
 				}
+			} else if err := chargeWork(counter, 1); err != nil {
+				return nil, err
+			}
+		}
+		for _, o := range v.Uses {
+			if err := chargeWork(counter, 1); err != nil {
+				return nil, err
+			}
+			if o.Kind != ssabuild.OriginTop {
+				keys = append(keys, OriginKey(o))
+			}
+		}
+		for _, o := range v.Results {
+			if err := chargeWork(counter, 1); err != nil {
+				return nil, err
+			}
+			if o.Kind != ssabuild.OriginTop {
+				keys = append(keys, OriginKey(o))
 			}
 		}
 	}
 	seenPhi := map[ssabuild.ValueID]bool{}
+	if err := chargeWork(counter, uint64(len(fn.Blocks))); err != nil {
+		return nil, err
+	}
+	blockByID := make(map[methodir.BlockID]ssabuild.BlockFrame, len(fn.Blocks))
+	for _, b := range fn.Blocks {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
+		if _, found := blockByID[b.ID]; !found {
+			blockByID[b.ID] = b
+		}
+	}
 	for _, p := range fn.Phis {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		if p.ID == 0 || seenPhi[p.ID] || !p.Type.Computational() {
 			return nil, fmt.Errorf("invalid_input: duplicate/invalid logical phi %d", p.ID)
 		}
 		seenPhi[p.ID] = true
-		var found bool
-		for _, b := range fn.Blocks {
-			if b.ID == p.Block {
-				flat := p.Slot.Index
-				n := len(b.In.Locals)
-				if !p.Slot.Local {
-					flat += n
-					n = len(b.In.Stack)
-				}
-				if p.Slot.Index < 0 || p.Slot.Index >= n {
-					return nil, fmt.Errorf("invalid_input: phi %d slot out of bounds", p.ID)
-				}
-				use := OriginKey(ssabuild.Origin{Kind: ssabuild.OriginPhi, PC: b.First, Slot: flat, Aux: int(b.ID)})
-				if _, ok := aliases[use]; ok {
-					return nil, fmt.Errorf("invalid_input: duplicate phi slot")
-				}
-				aliases[use] = PhiKey(p)
-				found = true
-				break
-			}
-		}
+		b, found := blockByID[p.Block]
 		if !found {
 			return nil, fmt.Errorf("invalid_input: phi block missing")
 		}
+		flat := p.Slot.Index
+		n := len(b.In.Locals)
+		if !p.Slot.Local {
+			flat += n
+			n = len(b.In.Stack)
+		}
+		if p.Slot.Index < 0 || p.Slot.Index >= n {
+			return nil, fmt.Errorf("invalid_input: phi %d slot out of bounds", p.ID)
+		}
+		use := OriginKey(ssabuild.Origin{Kind: ssabuild.OriginPhi, PC: b.First, Slot: flat, Aux: int(b.ID)})
+		if _, ok := aliases[use]; ok {
+			return nil, fmt.Errorf("invalid_input: duplicate phi slot")
+		}
+		aliases[use] = PhiKey(p)
 		keys = append(keys, PhiKey(p))
 		types[PhiKey(p)] = ValueInfo{Type: p.Type.DropValue(), Width: p.Type.Width()}
 		for _, op := range p.Operands {
+			if err := chargeWork(counter, 1); err != nil {
+				return nil, err
+			}
 			if op.Origin.Kind == ssabuild.OriginTop {
 				return nil, fmt.Errorf("invalid_input: phi %d has top operand", p.ID)
 			}
@@ -200,24 +316,33 @@ func registryFor(fn *ssabuild.Function) (*ValueRegistry, error) {
 		}
 	}
 	for _, k := range keys {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		if k.Domain == 0 && k.Kind == int(ssabuild.OriginPhi) {
 			if _, ok := aliases[k]; !ok {
 				return nil, fmt.Errorf("invalid_input: phi use has no definition %+v", k)
 			}
 		}
 	}
-	r, err := NewValueRegistry(keys, aliases)
+	r, err := newValueRegistry(keys, aliases, counter)
 	if err != nil {
 		return nil, err
 	}
 	// Definition metadata wins over aliased incoming/use metadata.
 	for _, k := range keys {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		if info, ok := types[k]; ok {
 			id, _ := r.Lookup(k)
 			r.Info[id] = info
 		}
 	}
 	for _, p := range fn.Phis {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		id, _ := r.Phi(p)
 		r.Info[id] = types[PhiKey(p)]
 	}
@@ -225,7 +350,14 @@ func registryFor(fn *ssabuild.Function) (*ValueRegistry, error) {
 }
 
 func (r *ValueRegistry) sequentialize(copies []Copy) ([]Move, error) {
+	return r.sequentializeWithCounter(copies, nil)
+}
+
+func (r *ValueRegistry) sequentializeWithCounter(copies []Copy, counter ssabuild.WorkCounter) ([]Move, error) {
 	for _, c := range copies {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		d, dok := r.Info[c.Dst]
 		s, sok := r.Info[c.Src]
 		if !dok || !sok || d.Width <= 0 || d.Width != s.Width {
@@ -234,13 +366,13 @@ func (r *ValueRegistry) sequentialize(copies []Copy) ([]Move, error) {
 	}
 
 	var freshErr error
-	moves, err := SequentializeChecked(copies, func() VarID {
+	moves, err := sequentializeChecked(copies, func() VarID {
 		id, e := r.Fresh()
 		if e != nil {
 			freshErr = e
 		}
 		return id
-	})
+	}, counter)
 	if freshErr != nil {
 		return nil, freshErr
 	}
@@ -248,6 +380,9 @@ func (r *ValueRegistry) sequentialize(copies []Copy) ([]Move, error) {
 		return nil, err
 	}
 	for _, m := range moves {
+		if err := chargeWork(counter, 1); err != nil {
+			return nil, err
+		}
 		if m.Tmp {
 			info, ok := r.Info[m.Src]
 			if !ok || info.Width == 0 {

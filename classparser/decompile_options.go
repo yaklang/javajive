@@ -208,7 +208,7 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		result.Status = "unsupported"
 		d.appendDiagnostic(DecompileDiagnostic{
 			Code:    "overload_family_unknown",
-			Message: "external overload family not loaded; conservative Object pin is not Unique proof",
+			Message: "external overload family was not fully resolved; reconstructed binding is unverified",
 		})
 	}
 	if len(result.StubMethods) > 0 || d.typeAnnosUnsupported {

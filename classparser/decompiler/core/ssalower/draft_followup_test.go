@@ -147,6 +147,48 @@ func TestCheckedCopiesRejectInvalidInputs(t *testing.T) {
 		t.Fatal("reused temp accepted")
 	}
 }
+
+func TestLowerWorkCounterIsTransactionalAndPreservesPlan(t *testing.T) {
+	code := []byte{
+		core.OP_ILOAD_0, core.OP_IFEQ, 0, 7,
+		core.OP_ICONST_1, core.OP_GOTO, 0, 4,
+		core.OP_ICONST_2,
+		core.OP_IRETURN,
+	}
+	fn, want := ssaDestroy(t, code, "(I)I", nil)
+	before := fn.Normalize()
+
+	complete := &ssabuild.LimitCounter{Max: 100_000}
+	got, err := DestroyWithWorkCounter(fn, Options{MaxSpills: 1000}, complete)
+	if err != nil || got == nil {
+		t.Fatalf("sufficient work budget rejected lowering: plan=%+v err=%v used=%d", got, err, complete.Used)
+	}
+	if complete.Used == 0 {
+		t.Fatal("successful lowering did not report its work")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("work accounting changed the emission plan\n got: %+v\nwant: %+v", got, want)
+	}
+	if complete.Used < 2 {
+		t.Fatalf("fixture did not traverse enough stages to test late exhaustion: used=%d", complete.Used)
+	}
+
+	// Exhaust on the final unit of the successful run so the method has already
+	// built most of the private plan; callers must still receive nil, not that
+	// partly validated plan.
+	exhausted := &ssabuild.LimitCounter{Max: complete.Used - 1}
+	partial, err := DestroyWithWorkCounter(fn, Options{MaxSpills: 1000}, exhausted)
+	if err == nil || partial != nil {
+		t.Fatalf("budget exhaustion returned partial lowering plan: plan=%+v err=%v", partial, err)
+	}
+	if exhausted.Used > exhausted.Max {
+		t.Fatalf("counter exceeded its limit: used=%d max=%d", exhausted.Used, exhausted.Max)
+	}
+	if got := fn.Normalize(); got != before {
+		t.Fatal("budgeted lowering mutated its SSA input")
+	}
+}
+
 func TestRegistryTemporaryPreservesLogicalMetadata(t *testing.T) {
 	keys := []ValueKey{{Slot: 1}, {Slot: 2}, {Slot: 99999}}
 	r, err := NewValueRegistry(keys, nil)

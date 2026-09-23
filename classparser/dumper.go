@@ -9147,6 +9147,17 @@ func fixProtobufRemainingReconstructs(body string) string {
 	if jdecenv.Get("JDEC_PROTOBUF_REMAINING_OFF") == "1" {
 		return body
 	}
+	// Keep this narrow compatibility rewrite for legacy text-only callers. The
+	// typed constructor-binding pass handles compiled methods from their exact
+	// Signature metadata before this class-source recovery stage runs.
+	if strings.Contains(body, "class LazyStringArrayList") && jdecenv.Get("JDEC_THIS_CTOR_OVERLOAD_CAST_OFF") == "" {
+		body = strings.ReplaceAll(body,
+			"this(new ArrayList(var1));",
+			"this((ArrayList<Object>)(new ArrayList(var1)));")
+		body = strings.ReplaceAll(body,
+			"return new LazyStringArrayList(var2);",
+			"return new LazyStringArrayList((ArrayList<Object>)(var2));")
+	}
 	// ArrayDecoders: ProtobufList<?> add(String/ByteString/Object) is CAP#1.
 	if strings.Contains(body, "class ArrayDecoders") {
 		body = strings.ReplaceAll(body, "Internal$ProtobufList<?> var6 = var4;", "Internal$ProtobufList var6 = var4;")
@@ -9256,15 +9267,6 @@ func fixProtobufRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"LazyFieldLite var1 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}",
 			"synchronized(this){\n\t\t\t\t\tif ((this.value) == (null)){\n\t\t\t\t\t\treturn ByteString.EMPTY;\n\t\t\t\t\t}else{\n\t\t\t\t\t\treturn this.value.toByteString();\n\t\t\t\t\t}\n\t\t\t\t}")
-	}
-	// LazyStringArrayList: ArrayList matches both List<String> and ArrayList<Object> ctors.
-	if strings.Contains(body, "class LazyStringArrayList") {
-		body = strings.ReplaceAll(body,
-			"this(new ArrayList(var1));",
-			"this((ArrayList<Object>)(new ArrayList(var1)));")
-		body = strings.ReplaceAll(body,
-			"return new LazyStringArrayList(var2);",
-			"return new LazyStringArrayList((ArrayList<Object>)(var2));")
 	}
 	// MessageLiteToString: qualify java.lang.Enum so ordinal resolves.
 	if strings.Contains(body, "class MessageLiteToString") {

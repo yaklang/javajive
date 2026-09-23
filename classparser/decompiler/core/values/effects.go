@@ -1,5 +1,7 @@
 package values
 
+import "github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+
 // Effects describes observable operations, not a claim that an expression can
 // be moved. Unknown expressions are opaque and conservatively non-movable.
 // New bits are appended so existing iota values stay stable.
@@ -27,6 +29,9 @@ const BarrierEffects = EffectOpaque | EffectClassInit | EffectVolatile | EffectM
 // Children exposes value dependencies without following a JavaRef back into its
 // defining value (which would confuse a use with a definition or create cycles).
 func Children(value JavaValue) ([]JavaValue, bool) {
+	if isNilJavaValue(value) {
+		return nil, true
+	}
 	switch v := value.(type) {
 	case *SlotValue:
 		if v == nil {
@@ -44,7 +49,7 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 			return []JavaValue{v.StackVar}, true
 		}
 		return nil, true
-	case *JavaLiteral, *JavaClassValue, *JavaClassMember, javaNull:
+	case *JavaLiteral, *JavaClassValue, *JavaClassMember, *types.JavaClass, javaNull:
 		return nil, true
 	case *JavaExpression:
 		return v.Values, true
@@ -88,6 +93,57 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 	}
 }
 
+// isNilJavaValue handles typed nil pointers before a visitor dereferences them.
+// JavaValue is an interface, so a nil *JavaArrayMember (for example) is not equal
+// to a nil interface even though it represents no expression node.
+func isNilJavaValue(value JavaValue) bool {
+	if value == nil {
+		return true
+	}
+	switch v := value.(type) {
+	case *JavaRef:
+		return v == nil
+	case *JavaArray:
+		return v == nil
+	case *JavaLiteral:
+		return v == nil
+	case *JavaClassValue:
+		return v == nil
+	case *JavaClassMember:
+		return v == nil
+	case *JavaExpression:
+		return v == nil
+	case *NewExpression:
+		return v == nil
+	case *FunctionCallExpression:
+		return v == nil
+	case *RefMember:
+		return v == nil
+	case *JavaCompare:
+		return v == nil
+	case *types.JavaClass:
+		return v == nil
+	case *TernaryExpression:
+		return v == nil
+	case *JavaArrayMember:
+		return v == nil
+	case *SlotValue:
+		return v == nil
+	case *CustomValue:
+		return v == nil
+	case *CastExpression:
+		return v == nil
+	case *AssignmentExpression:
+		return v == nil
+	case *EffectTag:
+		return v == nil
+	case *LambdaIntersection:
+		return v == nil
+	default:
+		return false
+	}
+}
+
 // InspectValue walks all explicit dependencies once. RefUses are keyed by stable
 // JavaRef identity, not local names or printed types.
 func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
@@ -95,7 +151,7 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 	seen := map[JavaValue]bool{}
 	var visit func(JavaValue)
 	visit = func(value JavaValue) {
-		if value == nil || seen[value] {
+		if isNilJavaValue(value) || seen[value] {
 			return
 		}
 		seen[value] = true

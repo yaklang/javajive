@@ -104,6 +104,28 @@ func (f *Function) PhisOf(b methodir.BlockID) []Phi {
 	return out
 }
 
+// PhisOfWithCounter filters and sorts block phis under the supplied work
+// counter. Each source phi is charged before it can be copied into the result.
+func (f *Function) PhisOfWithCounter(b methodir.BlockID, counter WorkCounter) ([]Phi, error) {
+	if f == nil {
+		return nil, nil
+	}
+	var out []Phi
+	for _, p := range f.Phis {
+		if err := charge(counter, 1); err != nil {
+			return nil, err
+		}
+		if p.Block == b {
+			out = append(out, p)
+		}
+	}
+	if err := charge(counter, sortWorkEstimate(len(out))); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
 func (f *Function) Normalize() string {
 	if f == nil {
 		return ""
@@ -155,6 +177,57 @@ func (f *Function) Incoming(blockPC uint16) []methodir.Edge {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
 	return out
+}
+
+// IncomingWithCounter returns a deterministic copy of a block's incoming
+// edges, charging scan/copy/sort work before performing it.
+func (f *Function) IncomingWithCounter(blockPC uint16, counter WorkCounter) ([]methodir.Edge, error) {
+	if f == nil || f.IR == nil {
+		return nil, nil
+	}
+	if f.incoming != nil {
+		edges := f.incoming[blockPC]
+		if err := charge(counter, uint64(len(edges))); err != nil {
+			return nil, err
+		}
+		return append([]methodir.Edge(nil), edges...), nil
+	}
+	var entryCount uint64
+	if f.entryEdge != nil && uint16(f.entryEdge.To) == blockPC {
+		entryCount = 1
+	}
+	if err := charge(counter, uint64(len(f.IR.Edges))); err != nil {
+		return nil, err
+	}
+	count := entryCount
+	for _, e := range f.IR.Edges {
+		if uint16(e.To) == blockPC {
+			if count == ^uint64(0) {
+				return nil, fmt.Errorf("analysis_budget_exceeded: incoming edge count overflow")
+			}
+			count++
+		}
+	}
+	if count > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf("analysis_budget_exceeded: incoming edge count overflow")
+	}
+	if err := charge(counter, count); err != nil {
+		return nil, err
+	}
+	out := make([]methodir.Edge, 0, count)
+	if entryCount != 0 {
+		out = append(out, *f.entryEdge)
+	}
+	for _, e := range f.IR.Edges {
+		if uint16(e.To) == blockPC {
+			out = append(out, e)
+		}
+	}
+	if err := charge(counter, sortWorkEstimate(len(out))); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
+	return out, nil
 }
 
 func (f *Function) Outgoing(from methodir.InstrID) []methodir.Edge {

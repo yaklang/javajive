@@ -120,6 +120,30 @@ func testT15MayFoldBarriers(t *testing.T) {
 	}
 }
 
+func TestInspectValueTypedNilNodesAreEmpty(t *testing.T) {
+	for _, value := range []JavaValue{
+		(*JavaArrayMember)(nil),
+		(*JavaExpression)(nil),
+		(*RefMember)(nil),
+		(*TernaryExpression)(nil),
+		(*FunctionCallExpression)(nil),
+		(*NewExpression)(nil),
+		(*CastExpression)(nil),
+		(*AssignmentExpression)(nil),
+		(*CustomValue)(nil),
+		(*EffectTag)(nil),
+	} {
+		effect, refs := InspectValue(value)
+		children, known := Children(value)
+		if effect != 0 || len(refs) != 0 || !known || len(children) != 0 {
+			t.Fatalf("typed nil %T: effects=%v refs=%v children=%v known=%v", value, effect, refs, children, known)
+		}
+		if !MayFold(value) || !IsPure(value) || EffectSummary(value) != "pure" {
+			t.Fatalf("typed nil %T should behave like an absent value", value)
+		}
+	}
+}
+
 func opaqueValue(typ types.JavaType) JavaValue {
 	return NewCustomValue(func(funcCtx *class_context.ClassContext) string { return "opaque" }, func() types.JavaType { return typ })
 }
