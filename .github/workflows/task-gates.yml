@@ -92,12 +92,19 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare pinned T30 sandbox image
+        run: docker pull alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+
+      - name: Build T30 sandbox toolchain image
+        run: docker build -t javajive-sandbox-toolchain:t30 -f tools/sandbox_worker/image/Dockerfile tools/sandbox_worker/image
+
       - name: Run Python contract tests
         env:
           CGO_ENABLED: '1'
           GOFLAGS: '-ldflags=-linkmode=external'
           T32_FORCE_REFRESH: '1'
           JAVAJIVE_FETCH_ANCHORS: '1'
+          JAVAJIVE_SANDBOX_IMAGE: javajive-sandbox-toolchain:t30
         run: |
           set -euo pipefail
           test -n "${JAVA8_HOME:-}"

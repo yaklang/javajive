@@ -265,6 +265,12 @@ class T29Contracts(unittest.TestCase):
         self.assertIn("JAVA8_HOME", text)
         self.assertIn("fetch_ecj.py", text)
         self.assertIn("java-version: '8'", text)
+        sandbox_prepare = text.index("docker pull alpine:3.20@sha256:")
+        sandbox_build = text.index("docker build -t javajive-sandbox-toolchain:t30")
+        python_contracts = text.index("Run Python contract tests")
+        self.assertLess(sandbox_prepare, sandbox_build)
+        self.assertLess(sandbox_build, python_contracts)
+        self.assertIn("JAVAJIVE_SANDBOX_IMAGE: javajive-sandbox-toolchain:t30", text)
         (EVIDENCE / "t29_c06_upgrade.json").write_text(
             json.dumps(
                 {
