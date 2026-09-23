@@ -258,12 +258,63 @@ func fixCtorDelegationTrailingArgumentSpills(body string) string {
 			searchEnd = at
 			continue
 		}
+		parameters := ctorParameterNames(body, blockStart)
+		argumentTemps := make(map[string]bool)
+		argumentTempsKnown := true
+		for _, arg := range args {
+			tokens, safeReferences := ctorSpillTempTokensWithParameters(arg, parameters)
+			if !safeReferences {
+				argumentTempsKnown = false
+				break
+			}
+			for _, token := range tokens {
+				argumentTemps[token] = true
+			}
+		}
 
 		var following []enumLocalDecl
 		var followingNames []string
+		bridgeNames := make(map[string]bool)
 		cursor := lineEnd
 		if cursor < len(body) && body[cursor] == '\n' {
 			cursor++
+		}
+		// The decompiler may leave harmless constructor scaffolding between the
+		// mandatory super(...) call and a spilled argument declaration: a null
+		// catch-temp initialization or a synthetic this.field = parameter write.
+		// Keep those statements after super, but allow scanning past them so the
+		// argument initializer can return to its original pre-super position.
+		// Calls, arbitrary assignments, and nonconstant local initializers remain
+		// barriers because moving values across them could change evaluation order.
+		for argumentTempsKnown && cursor < blockEnd {
+			end := strings.IndexByte(body[cursor:], '\n')
+			if end < 0 {
+				end = blockEnd
+			} else {
+				end += cursor
+			}
+			line := strings.TrimSpace(body[cursor:end])
+			if line == "" {
+				if end >= blockEnd {
+					break
+				}
+				cursor = end + 1
+				continue
+			}
+			if decl, name, ok := parseEnumLocalInitializerLine(body, cursor, end, indent); ok &&
+				!argumentTemps[name] && ctorSafeReadOnlyArgument(decl.rhs) {
+				bridgeNames[name] = true
+				cursor = decl.rangeSpan.end
+				continue
+			}
+			if ctorIsThisFieldParameterWrite(line, parameters) {
+				if end >= blockEnd {
+					break
+				}
+				cursor = end + 1
+				continue
+			}
+			break
 		}
 		for cursor < blockEnd {
 			end := strings.IndexByte(body[cursor:], '\n')
@@ -300,7 +351,7 @@ func fixCtorDelegationTrailingArgumentSpills(body string) string {
 		seen := make(map[string]bool)
 		lastNeededArg := -1
 		for i, arg := range args {
-			tokens, safeReferences := ctorSpillTempTokens(arg)
+			tokens, safeReferences := ctorSpillTempTokensWithParameters(arg, parameters)
 			if !safeReferences {
 				needed = nil
 				break
@@ -309,7 +360,7 @@ func fixCtorDelegationTrailingArgumentSpills(body string) string {
 				if _, isFollowingDecl := available[token]; !isFollowingDecl {
 					continue
 				}
-				if seen[token] || ctorSpillIdentifierCount(arg, token) != 1 {
+				if seen[token] || ctorSpillIdentifierCountWithParameters(arg, token, parameters) != 1 {
 					needed = nil
 					break
 				}
@@ -332,13 +383,13 @@ func fixCtorDelegationTrailingArgumentSpills(body string) string {
 				ordered = false
 				break
 			}
-			rhsTokens, safeReferences := ctorSpillTempTokens(following[i].rhs)
+			rhsTokens, safeReferences := ctorSpillTempTokensWithParameters(following[i].rhs, parameters)
 			if !safeReferences {
 				ordered = false
 				break
 			}
 			for _, token := range rhsTokens {
-				if seen[token] {
+				if seen[token] || bridgeNames[token] {
 					ordered = false
 					break
 				}
@@ -347,10 +398,9 @@ func fixCtorDelegationTrailingArgumentSpills(body string) string {
 				break
 			}
 		}
-		parameters := ctorParameterNames(body, blockStart)
 		methodBody := body[blockStart:blockEnd]
 		for _, arg := range args {
-			tokens, safeReferences := ctorSpillTempTokens(arg)
+			tokens, safeReferences := ctorSpillTempTokensWithParameters(arg, parameters)
 			if !safeReferences {
 				ordered = false
 				break
@@ -369,7 +419,7 @@ func fixCtorDelegationTrailingArgumentSpills(body string) string {
 			}
 		}
 		for i := 0; ordered && i < lastNeededArg; i++ {
-			if len(argNames[i]) == 0 && !ctorSafeReadOnlyArgument(args[i]) && !ctorParameterArgument(args[i], parameters) {
+			if len(argNames[i]) == 0 && !ctorSafeReadOnlyArgumentInConstructor(args[i], parameters) {
 				ordered = false
 			}
 		}
@@ -399,6 +449,16 @@ func fixCtorDelegationTrailingArgumentSpills(body string) string {
 // those shapes are ambiguous without a Java parser, so the spill rewrite
 // rejects them instead of replacing the wrong identifier.
 func ctorSpillTempTokens(source string) ([]string, bool) {
+	return ctorSpillTempTokensWithParameters(source, nil)
+}
+
+// Constructor formal parameters are lexically resolved identifiers, even when
+// used as a receiver (var1.member) or functional value (var1(...)). The
+// generic spill scanner rejects those postfix forms because an unbound varN
+// could instead name a generated member. In a constructor argument rewrite we
+// know the formal bindings, so ignore those names as spill temporaries while
+// retaining the conservative checks for every generated local.
+func ctorSpillTempTokensWithParameters(source string, parameters map[string]bool) ([]string, bool) {
 	var tokens []string
 	var prevPrev, prev byte
 	hasLambda := false
@@ -427,6 +487,10 @@ func ctorSpillTempTokens(source string) ([]string, bool) {
 		}
 		name := source[start:i]
 		if isEnumTempName(name) {
+			if parameters[name] {
+				prevPrev, prev = prev, source[i-1]
+				continue
+			}
 			nextAt := nextJavaCodeOffset(source, i)
 			next := byte(0)
 			if nextAt < len(source) {
@@ -468,7 +532,11 @@ func ctorSpillTempTokens(source string) ([]string, bool) {
 }
 
 func ctorSpillIdentifierCount(source, name string) int {
-	tokens, safe := ctorSpillTempTokens(source)
+	return ctorSpillIdentifierCountWithParameters(source, name, nil)
+}
+
+func ctorSpillIdentifierCountWithParameters(source, name string, parameters map[string]bool) int {
+	tokens, safe := ctorSpillTempTokensWithParameters(source, parameters)
 	if !safe {
 		return -1
 	}
@@ -543,6 +611,13 @@ func lastCtorDelegationCall(source string, before int) (int, string) {
 	return -1, ""
 }
 
+var ctorThisFieldParameterWritePattern = regexp.MustCompile(`^this\.[A-Za-z_$][A-Za-z0-9_$]*\s*=\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*;$`)
+
+func ctorIsThisFieldParameterWrite(line string, parameters map[string]bool) bool {
+	matches := ctorThisFieldParameterWritePattern.FindStringSubmatch(strings.TrimSpace(line))
+	return len(matches) == 2 && parameters[matches[1]]
+}
+
 var ctorCastTypeExpression = regexp.MustCompile(`^(?:boolean|byte|short|char|int|long|float|double|[A-Za-z_$][A-Za-z0-9_.$]*)(?:\s*<[^()]+>)?(?:\s*\[\s*\])*$`)
 
 func ctorSafeReadOnlyArgument(expression string) bool {
@@ -563,6 +638,58 @@ func ctorSafeReadOnlyArgument(expression string) bool {
 		}
 	}
 	return false
+}
+
+// ctorSafeReadOnlyArgumentInConstructor additionally accepts a deliberately
+// small conditional-expression grammar over constructor parameters and Java
+// literals. This is needed when a pure earlier argument selects a constant
+// overload value, e.g. super(flag ? "a" : "b", spilledArray). It does not
+// accept method calls, increments, assignments, lambdas, or unknown names.
+func ctorSafeReadOnlyArgumentInConstructor(expression string, parameters map[string]bool) bool {
+	expression = strings.TrimSpace(expression)
+	for len(expression) > 1 && expression[0] == '(' && enumMatchingDelimiter(expression, 0, '(', ')') == len(expression)-1 {
+		expression = strings.TrimSpace(expression[1 : len(expression)-1])
+	}
+	if ctorSafeReadOnlyArgument(expression) || parameters[expression] {
+		return true
+	}
+	if open := strings.IndexByte(expression, '?'); open >= 0 {
+		if colon := matchingJavaConditionalColon(expression, open); colon > open {
+			return ctorSafeReadOnlyArgumentInConstructor(expression[:open], parameters) &&
+				ctorSafeReadOnlyArgumentInConstructor(expression[open+1:colon], parameters) &&
+				ctorSafeReadOnlyArgumentInConstructor(expression[colon+1:], parameters)
+		}
+	}
+	return false
+}
+
+func matchingJavaConditionalColon(expression string, question int) int {
+	depth, nested := 0, 0
+	for i := question + 1; i < len(expression); {
+		if next, skipped := skipJavaNonCode(expression, i); skipped {
+			i = next
+			continue
+		}
+		switch expression[i] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case '?':
+			if depth == 0 {
+				nested++
+			}
+		case ':':
+			if depth == 0 {
+				if nested == 0 {
+					return i
+				}
+				nested--
+			}
+		}
+		i++
+	}
+	return -1
 }
 
 func ctorParameterArgument(expression string, parameters map[string]bool) bool {

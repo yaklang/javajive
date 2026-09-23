@@ -131,3 +131,71 @@ func TestSuperDelegationTrailingArgumentSpills(t *testing.T) {
 		})
 	}
 }
+
+func TestSuperDelegationSpillAcrossSafePostSuperPrelude(t *testing.T) {
+	original := `public class SuperPreludeMain extends SuperPreludeBase {
+  static final class Helper {
+    final String name;
+    Helper(String name) { this.name = name; }
+    String render() { System.out.print("A"); return "value"; }
+    public String toString() { return name; }
+  }
+  final Helper this$0;
+  static int mark(int value) { System.out.print("B"); return value; }
+  SuperPreludeMain(Helper var1, int var2, boolean var3) {
+    super(var3 ? "value" : "other", new Object[]{var1.render(),mark(var2)});
+    this.this$0 = var1;
+    System.out.print("D");
+  }
+  public static void main(String[] args) {
+    SuperPreludeMain value = new SuperPreludeMain(new Helper("host"), 5, true);
+    System.out.print(":" + value.this$0);
+  }
+}
+class SuperPreludeBase {
+  SuperPreludeBase(String label, Object[] values) {
+    System.out.print("C" + values[0] + ":" + values[1]);
+  }
+}`
+	want, _ := t04CompileRun(t, "17", "SuperPreludeMain", map[string]string{"SuperPreludeMain.java": original})
+	if want != "ABCvalue:5D:host" {
+		t.Fatalf("independent javac/java oracle changed: got %q", want)
+	}
+
+	spilled := strings.Replace(original,
+		`super(var3 ? "value" : "other", new Object[]{var1.render(),mark(var2)});
+    this.this$0 = var1;`,
+		`super(var3 ? "value" : "other", var4);
+    String var5 = null;
+    this.this$0 = var1;
+    Object[] var4 = new Object[]{var1.render(),mark(var2)};`, 1)
+	fixed := fixCtorDelegationArgumentSpills(spilled)
+	if !strings.Contains(fixed, `super(var3 ? "value" : "other",new Object[]{var1.render(),mark(var2)});`) ||
+		!strings.Contains(fixed, "String var5 = null;") || !strings.Contains(fixed, "this.this$0 = var1;") ||
+		strings.Contains(fixed, "Object[] var4") {
+		t.Fatalf("safe post-super scaffolding blocked an ordered spill:\n%s", fixed)
+	}
+	javac, java := t04Tools(t)
+	workDir, outDir := t.TempDir(), t.TempDir()
+	sourcePath := filepath.Join(workDir, "SuperPreludeMain.java")
+	if err := os.WriteFile(sourcePath, []byte(fixed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(javac, "-proc:none", "-encoding", "UTF-8", "--release", "17", "-d", outDir, sourcePath)
+	cmd.Dir = workDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("recompile safe post-super spill: %v\n%s\n----- source -----\n%s", err, out, fixed)
+	}
+	if got := t04RunJava(t, java, outDir, "SuperPreludeMain"); got != want {
+		t.Fatalf("restored superclass argument changed behavior: got %q want %q", got, want)
+	}
+
+	unsafe := strings.Replace(spilled, "    this.this$0 = var1;", "    this.this$0 = touch();", 1)
+	if got := fixCtorDelegationArgumentSpills(unsafe); got != unsafe {
+		t.Fatalf("effectful post-super assignment must not be crossed:\n%s", got)
+	}
+	unsafe = strings.Replace(spilled, "    String var5 = null;", "    String var5 = touch();", 1)
+	if got := fixCtorDelegationArgumentSpills(unsafe); got != unsafe {
+		t.Fatalf("effectful local initializer must remain a spill barrier:\n%s", got)
+	}
+}
