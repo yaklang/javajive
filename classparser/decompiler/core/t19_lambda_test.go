@@ -137,6 +137,40 @@ func TestTaskT19MethodRefKindIdentity(t *testing.T) {
 	}
 }
 
+func TestTaskT19DirectoryStreamFilterInstantiatedType(t *testing.T) {
+	raw := types.NewJavaClass("java.nio.file.DirectoryStream$Filter")
+	instantiated := func(desc string) values.JavaValue {
+		return values.NewCustomValue(
+			func(*class_context.ClassContext) string { return desc },
+			func() types.JavaType { return types.NewJavaClass("java.lang.invoke.MethodType") },
+		)
+	}
+
+	got, ok := types.AsParameterizedType(inferLambdaTypeFromInstantiated(raw, instantiated("(Ljava/nio/file/Path;)Z")))
+	if !ok {
+		t.Fatal("DirectoryStream.Filter did not retain its instantiated target type")
+	}
+	if got.RawClassName != "java.nio.file.DirectoryStream$Filter" || len(got.TypeArgs) != 1 {
+		t.Fatalf("unexpected target type: %#v", got)
+	}
+	pathType, ok := got.TypeArgs[0].RawType().(*types.JavaClass)
+	if !ok || pathType == nil || pathType.Name != "java.nio.file.Path" {
+		t.Fatalf("Filter type argument = %#v, want java.nio.file.Path", got.TypeArgs[0])
+	}
+
+	for _, desc := range []string{
+		"(Ljava/nio/file/Path;Ljava/lang/Object;)Z", // Wrong SAM arity must not invent Filter<T>.
+		"(Ljava/nio/file/Path;)Ljava/lang/Object;",  // Filter.accept returns primitive boolean.
+	} {
+		if inferred := inferLambdaTypeFromInstantiated(raw, instantiated(desc)); inferred != nil {
+			t.Errorf("malformed Filter SAM %q unexpectedly inferred %s", desc, inferred.String(&class_context.ClassContext{}))
+		}
+	}
+	if inferred := inferLambdaTypeFromInstantiated(types.NewJavaClass("java.nio.file.OpenOption"), instantiated("(Ljava/nio/file/Path;)Z")); inferred != nil {
+		t.Errorf("unrelated JDK interface unexpectedly inferred %s", inferred.String(&class_context.ClassContext{}))
+	}
+}
+
 func TestTaskT19BudgetedLambdaCaptureRender(t *testing.T) {
 	body := "() -> { return \x00LCAP0\x00 + \x00LCAP1\x00; }"
 	captured := []values.JavaValue{

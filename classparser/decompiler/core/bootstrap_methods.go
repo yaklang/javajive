@@ -509,6 +509,15 @@ func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodT
 		if len(mtParams) >= 1 {
 			typeArgs = append(typeArgs, mtParams[0])
 		}
+	case "java.nio.file.DirectoryStream$Filter":
+		// Filter<T>.accept(T) has an instantiated `(T)Z` SAM descriptor. Keeping
+		// that T on method references such as `predicate::test` is required: a raw
+		// Filter target asks javac to adapt the method to `accept(Object)`.
+		if len(mtParams) == 1 {
+			if ret, ok := mtRet.RawType().(*types.JavaPrimer); ok && ret.Name == types.JavaBoolean {
+				typeArgs = append(typeArgs, mtParams[0])
+			}
+		}
 	default:
 		return nil
 	}
