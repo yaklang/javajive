@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -59,12 +60,16 @@ func stripPreludeBeforeCtorCall(body, call string) string {
 	}
 }
 
-// fixEnumClinitIllegalNew removes `CONST = new EnumType("CONST", ordinal);`
-// from an enum's <clinit>. javac emits those in bytecode; they are illegal in
-// source (`enum classes may not be instantiated`). Nested enums dump as
-// `TypeDefinition$Sort` with the same clinit shape.
+// fixEnumClinitIllegalNew moves enum construction back to the constant list.
+// javac injects name/ordinal in <clinit>, and array constructor arguments may
+// be spilled into a one-use local first. Removing only `CONST = new Enum(...)`
+// is insufficient: the source constant must receive the source arguments,
+// with any proven one-use local initializer substituted at that argument's
+// original position so allocation and side effects keep their order.
 // Kill-switch: JDEC_ENUM_CLINIT_NEW_OFF=1.
-var enumClinitNewRe = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_]*) = new [A-Za-z0-9_$]+\("([A-Za-z_][A-Za-z0-9_]*)",\d+((?:,(?:true|false))*)\);\n`)
+var enumClinitNewRe = regexp.MustCompile(`(?m)^[ \t]*([A-Za-z_$][A-Za-z0-9_$]*) = new [A-Za-z0-9_.$]+\("([A-Za-z_$][A-Za-z0-9_$]*)",\d+(?:,(.*))?\);\r?\n`)
+
+type enumSourceRange struct{ start, end int }
 
 func fixEnumClinitIllegalNew(body string) string {
 	if jdecenv.Get("JDEC_ENUM_CLINIT_NEW_OFF") == "1" {
@@ -73,21 +78,65 @@ func fixEnumClinitIllegalNew(body string) string {
 	if !strings.Contains(body, "enum ") || !strings.Contains(body, " = new ") {
 		return body
 	}
-	type extra struct{ name, args string }
-	var extras []extra
-	body = enumClinitNewRe.ReplaceAllStringFunc(body, func(m string) string {
-		sm := enumClinitNewRe.FindStringSubmatch(m)
-		if len(sm) < 4 {
-			return ""
+	type enumConstantRewrite struct{ name, args string }
+	var rewrites []enumConstantRewrite
+	var removals []enumSourceRange
+	matches := enumClinitNewRe.FindAllStringSubmatchIndex(body, -1)
+	for _, match := range matches {
+		lhs := body[match[2]:match[3]]
+		name := body[match[4]:match[5]]
+		if lhs != name {
+			continue
 		}
-		args := strings.TrimPrefix(sm[3], ",")
+		args := ""
+		if match[6] >= 0 {
+			args = body[match[6]:match[7]]
+		}
+		blockStart, blockEnd, ok := enumClinitBlockBounds(body, match[0])
+		if !ok {
+			continue
+		}
+		indent := enumLineIndent(body, match[0])
+		var renderedArgs []string
+		var localRemovals []enumSourceRange
+		supported := true
+		for _, arg := range splitTopLevelArgs(args) {
+			rendered, consumed, ok := expandEnumClinitLocals(body, blockStart, blockEnd, match[0], indent, arg, map[string]bool{})
+			if !ok {
+				supported = false
+				break
+			}
+			renderedArgs = append(renderedArgs, rendered)
+			localRemovals = append(localRemovals, consumed...)
+		}
+		if !supported {
+			// Keep the original illegal expression visible for unsupported cases;
+			// silently deleting it would drop constructor arguments and behavior.
+			continue
+		}
 		if args != "" {
-			extras = append(extras, extra{sm[1], args})
+			if _, ok := patchEnumConstantArgs(body, name, strings.Join(renderedArgs, ", ")); !ok {
+				continue
+			}
+			rewrites = append(rewrites, enumConstantRewrite{name, strings.Join(renderedArgs, ", ")})
 		}
-		return ""
-	})
-	for _, e := range extras {
-		body = patchEnumConstantArgs(body, e.name, e.args)
+		removals = append(removals, localRemovals...)
+		removals = append(removals, enumSourceRange{match[0], match[1]})
+	}
+	// Match ranges refer to the original body. Removing from right to left keeps
+	// every earlier span stable, including a local immediately before its enum
+	// constructor assignment.
+	sort.Slice(removals, func(i, j int) bool { return removals[i].start > removals[j].start })
+	lastStart := len(body) + 1
+	for _, removal := range removals {
+		if removal.start < 0 || removal.end > len(body) || removal.start >= removal.end || removal.end > lastStart {
+			continue
+		}
+		body = body[:removal.start] + body[removal.end:]
+		lastStart = removal.start
+	}
+	for _, rewrite := range rewrites {
+		body, _ = patchEnumConstantArgs(body, rewrite.name, rewrite.args)
 	}
 	// javac synthesizes $VALUES; it is illegal in enum source. Newer javac
 	// commonly materializes the array in a temporary and then assigns that
@@ -98,9 +147,284 @@ func fixEnumClinitIllegalNew(body string) string {
 
 var enumValuesAssignRe = regexp.MustCompile(`(?m)^[ \t]*\$VALUES[ \t]*=[ \t]*[^;\r\n]+;\r?\n?`)
 
-func patchEnumConstantArgs(body, name, args string) string {
-	re := regexp.MustCompile(`(?m)^([ \t]+)` + regexp.QuoteMeta(name) + `([,;])`)
-	return re.ReplaceAllString(body, "${1}"+name+"("+args+")${2}")
+func patchEnumConstantArgs(body, name, args string) (string, bool) {
+	if args == "" {
+		return body, false
+	}
+	for lineStart := 0; lineStart < len(body); {
+		lineEnd := strings.IndexByte(body[lineStart:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(body)
+		} else {
+			lineEnd += lineStart
+		}
+		line := body[lineStart:lineEnd]
+		trimmed := strings.TrimLeft(line, " \t")
+		indent := len(line) - len(trimmed)
+		if strings.HasPrefix(trimmed, name) {
+			pos := len(name)
+			afterName := pos
+			for afterName < len(trimmed) && (trimmed[afterName] == ' ' || trimmed[afterName] == '\t') {
+				afterName++
+			}
+			if afterName == len(trimmed) || trimmed[afterName] == ',' || trimmed[afterName] == ';' || trimmed[afterName] == '(' || trimmed[afterName] == '{' {
+				constantEnd := pos
+				if afterName < len(trimmed) && trimmed[afterName] == '(' {
+					close := enumMatchingDelimiter(trimmed, afterName, '(', ')')
+					if close < 0 {
+						return body, false
+					}
+					constantEnd = close + 1
+				}
+				replacement := trimmed[:pos] + "(" + args + ")" + trimmed[constantEnd:]
+				return body[:lineStart+indent] + replacement + body[lineEnd:], true
+			}
+		}
+		if lineEnd == len(body) {
+			break
+		}
+		lineStart = lineEnd + 1
+	}
+	return body, false
+}
+
+func enumClinitBlockBounds(body string, at int) (int, int, bool) {
+	lineStart := strings.LastIndex(body[:at], "\n") + 1
+	for lineStart >= 0 {
+		lineEnd := strings.IndexByte(body[lineStart:], '\n')
+		if lineEnd < 0 {
+			return 0, 0, false
+		}
+		lineEnd += lineStart
+		line := strings.TrimSpace(body[lineStart:lineEnd])
+		if strings.HasPrefix(line, "static") && strings.HasSuffix(line, "{") && !strings.Contains(line, "(") {
+			close := strings.Index(body[lineEnd:], "\n\t}")
+			if close < 0 {
+				return 0, 0, false
+			}
+			return lineStart, lineEnd + close + len("\n\t}"), true
+		}
+		if lineStart == 0 {
+			break
+		}
+		lineStart = strings.LastIndex(body[:lineStart-1], "\n") + 1
+	}
+	return 0, 0, false
+}
+
+func enumLineIndent(body string, lineStart int) string {
+	end := lineStart
+	for end < len(body) && (body[end] == ' ' || body[end] == '\t') {
+		end++
+	}
+	return body[lineStart:end]
+}
+
+func expandEnumClinitLocals(body string, blockStart, blockEnd, before int, indent, expression string, active map[string]bool) (string, []enumSourceRange, bool) {
+	locals := enumLocalTokens(expression)
+	var removals []enumSourceRange
+	for _, name := range locals {
+		if active[name] || enumIdentifierCount(expression, name) != 1 || enumIdentifierCount(body[blockStart:blockEnd], name) != 2 {
+			return "", nil, false
+		}
+		decl, ok := findEnumLocalInitializer(body, blockStart, before, indent, name)
+		if !ok {
+			return "", nil, false
+		}
+		active[name] = true
+		rhs, nested, ok := expandEnumClinitLocals(body, blockStart, decl.rangeSpan.start, decl.rangeSpan.start, indent, decl.rhs, active)
+		delete(active, name)
+		if !ok {
+			return "", nil, false
+		}
+		expression = replaceEnumIdentifier(expression, name, rhs)
+		removals = append(removals, nested...)
+		removals = append(removals, decl.rangeSpan)
+	}
+	return strings.TrimSpace(expression), removals, true
+}
+
+type enumLocalDecl struct {
+	rangeSpan enumSourceRange
+	rhs       string
+}
+
+func findEnumLocalInitializer(body string, blockStart, before int, indent, name string) (enumLocalDecl, bool) {
+	// A compiler spill immediately before its only constructor consumer is the
+	// only shape we move. Even a harmless-looking statement between them may
+	// call user code, so do not float the initializer across it.
+	lineEnd := before
+	for lineEnd > blockStart {
+		lineStart := strings.LastIndex(body[blockStart:lineEnd], "\n")
+		if lineStart < 0 {
+			lineStart = blockStart
+		} else {
+			lineStart = blockStart + lineStart + 1
+		}
+		line := strings.TrimSpace(body[lineStart:lineEnd])
+		if eq := strings.Index(line, " = "); eq >= 0 && strings.HasSuffix(line, ";") && enumLineIndent(body, lineStart) == indent {
+			fields := strings.Fields(strings.TrimSpace(line[:eq]))
+			if len(fields) > 0 && fields[len(fields)-1] == name {
+				if len(fields) == 1 {
+					// A later reassignment means the value at the constructor site is
+					// not the declaration initializer, so the source move is unsafe.
+					return enumLocalDecl{}, false
+				}
+				rhs := strings.TrimSpace(strings.TrimSuffix(line[eq+3:], ";"))
+				if rhs == "" {
+					return enumLocalDecl{}, false
+				}
+				decl := enumLocalDecl{enumSourceRange{lineStart, lineEnd + 1}, rhs}
+				if strings.TrimSpace(body[decl.rangeSpan.end:before]) != "" {
+					return enumLocalDecl{}, false
+				}
+				return decl, true
+			}
+		}
+		if lineStart == blockStart {
+			break
+		}
+		lineEnd = lineStart - 1
+	}
+	return enumLocalDecl{}, false
+}
+
+func enumLocalTokens(expression string) []string {
+	var out []string
+	var quote byte
+	for i := 0; i < len(expression); {
+		ch := expression[i]
+		if quote != 0 {
+			if ch == '\\' {
+				i += 2
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			i++
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			i++
+			continue
+		}
+		if !isEnumIdentStart(ch) {
+			i++
+			continue
+		}
+		start := i
+		i++
+		for i < len(expression) && isEnumIdentPart(expression[i]) {
+			i++
+		}
+		token := expression[start:i]
+		if isEnumTempName(token) {
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
+func enumIdentifierCount(source, name string) int {
+	count := 0
+	for _, token := range enumLocalTokens(source) {
+		if token == name {
+			count++
+		}
+	}
+	return count
+}
+
+func replaceEnumIdentifier(source, target, replacement string) string {
+	var out strings.Builder
+	var quote byte
+	for i := 0; i < len(source); {
+		ch := source[i]
+		if quote != 0 {
+			out.WriteByte(ch)
+			if ch == '\\' && i+1 < len(source) {
+				i++
+				out.WriteByte(source[i])
+			} else if ch == quote {
+				quote = 0
+			}
+			i++
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			out.WriteByte(ch)
+			i++
+			continue
+		}
+		if !isEnumIdentStart(ch) {
+			out.WriteByte(ch)
+			i++
+			continue
+		}
+		start := i
+		i++
+		for i < len(source) && isEnumIdentPart(source[i]) {
+			i++
+		}
+		token := source[start:i]
+		if token == target {
+			out.WriteString(replacement)
+		} else {
+			out.WriteString(token)
+		}
+	}
+	return out.String()
+}
+
+func isEnumTempName(name string) bool {
+	if len(name) < 4 || !strings.HasPrefix(name, "var") {
+		return false
+	}
+	for i := 3; i < len(name); i++ {
+		if name[i] < '0' || name[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isEnumIdentStart(ch byte) bool {
+	return ch == '_' || ch == '$' || ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z'
+}
+func isEnumIdentPart(ch byte) bool {
+	return isEnumIdentStart(ch) || ch >= '0' && ch <= '9'
+}
+
+func enumMatchingDelimiter(source string, start int, open, close byte) int {
+	depth := 0
+	var quote byte
+	for i := start; i < len(source); i++ {
+		ch := source[i]
+		if quote != 0 {
+			if ch == '\\' {
+				i++
+			} else if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote = ch
+			continue
+		}
+		if ch == open {
+			depth++
+		} else if ch == close {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // fixBareNestedImports drops `import Outer.Inner;` lines whose first segment
