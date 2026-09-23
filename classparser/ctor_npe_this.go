@@ -401,12 +401,16 @@ func fixCtorDelegationTrailingArgumentSpills(body string) string {
 func ctorSpillTempTokens(source string) ([]string, bool) {
 	var tokens []string
 	var prevPrev, prev byte
+	hasLambda := false
 	for i := 0; i < len(source); {
 		if next, skipped := skipJavaNonCode(source, i); skipped {
 			i = next
 			continue
 		}
 		ch := source[i]
+		if ch == '-' && i+1 < len(source) && source[i+1] == '>' {
+			hasLambda = true
+		}
 		if isJavaWhitespace(ch) {
 			i++
 			continue
@@ -438,18 +442,27 @@ func ctorSpillTempTokens(source string) ([]string, bool) {
 			if next3At < len(source) {
 				next3 = source[next3At]
 			}
+			unsignedRightShiftAssignment := strings.HasPrefix(source[nextAt:], ">>>=")
 			prefixIncrement := (prev == '+' || prev == '-') && prevPrev == prev
 			postfixIncrement := (next == '+' || next == '-') && next2 == next
 			compoundAssignment := strings.ContainsRune("+-*/%&|^", rune(next)) && next2 == '=' ||
 				(next == '<' || next == '>') && next2 == next && next3 == '='
 			if prev == '.' || prev == ':' && prevPrev == ':' || prefixIncrement ||
 				next == '.' || next == ':' || next == '(' || next == '[' ||
-				next == '=' && next2 != '=' || postfixIncrement || compoundAssignment {
+				next == '=' && next2 != '=' || postfixIncrement || compoundAssignment || unsignedRightShiftAssignment {
 				return nil, false
 			}
 			tokens = append(tokens, name)
 		}
 		prevPrev, prev = prev, source[i-1]
+	}
+	// A spill referenced from a lambda may represent a value captured when the
+	// lambda is created. Substituting its initializer into the lambda body would
+	// defer that evaluation until the lambda runs, changing both timing and
+	// side-effect behavior. Without binding-aware Java parsing, leave such
+	// expressions untouched.
+	if hasLambda && len(tokens) > 0 {
+		return nil, false
 	}
 	return tokens, true
 }
