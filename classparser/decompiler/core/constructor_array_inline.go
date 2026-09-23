@@ -115,20 +115,19 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 	}
 
 	argIndex := -1
+	tempUses := 0
 	for i, arg := range call.Arguments {
-		if ref, isRef := values.UnpackSoltValue(arg).(*values.JavaRef); isRef && values.SameLocal(ref, temp) {
-			if argIndex >= 0 {
-				return skip("temporary occurs in multiple constructor arguments")
-			}
-			argIndex = i
-			continue
+		count, supported := delegatingConstructorTempUses(arg, temp)
+		if !supported {
+			return skip("temporary occurs through a conditional or unsupported expression")
 		}
-		if valueMentionsLocal(arg, temp) {
-			return skip("temporary is nested in a non-direct constructor argument")
+		if count > 0 {
+			argIndex = i
+			tempUses += count
 		}
 	}
-	if argIndex < 0 {
-		return skip("constructor call does not directly consume the array temporary")
+	if argIndex < 0 || tempUses != 1 {
+		return skip("constructor call must consume the array temporary exactly once (args=%d uses=%d)", len(call.Arguments), tempUses)
 	}
 
 	// Refuse the rewrite if any other statement reads or writes the temporary.
@@ -155,7 +154,7 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 		return skip("temporary has another use or crosses an unsupported statement")
 	}
 
-	call.Arguments[argIndex] = array
+	call.Arguments[argIndex] = replaceDelegatingConstructorTemp(call.Arguments[argIndex], temp, array)
 
 	// The temp node is a straight-line entry node. Reconnect its sole predecessor
 	// directly to the constructor call and keep the call's remaining graph intact.
@@ -191,6 +190,130 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 		temp.Id.Delete()
 	}
 	return true
+}
+
+// delegatingConstructorTempUses counts references in eager source positions
+// only. A short-circuit arm, ternary, or lambda capture can defer evaluation,
+// so substituting the initializer there would change when allocation or an
+// initializer expression runs. Unknown containers fail closed.
+func delegatingConstructorTempUses(value values.JavaValue, temp *values.JavaRef) (int, bool) {
+	value = values.UnpackSoltValue(value)
+	if value == nil {
+		return 0, true
+	}
+	switch v := value.(type) {
+	case *values.JavaRef:
+		if values.SameLocal(v, temp) {
+			return 1, true
+		}
+		return 0, true
+	case *values.CastExpression:
+		return delegatingConstructorTempUses(v.Value, temp)
+	case *values.JavaExpression:
+		if v.Op == "&&" || v.Op == "||" {
+			if valueMentionsLocal(value, temp) {
+				return 0, false
+			}
+			return 0, true
+		}
+		return countConstructorTempChildren(v.Values, temp)
+	case *values.FunctionCallExpression:
+		children := append([]values.JavaValue{v.Object}, v.Arguments...)
+		return countConstructorTempChildren(children, temp)
+	case *values.NewExpression:
+		children := append([]values.JavaValue{}, v.Length...)
+		children = append(children, v.Initializer...)
+		if v.ConstructorCall != nil {
+			children = append(children, v.ConstructorCall.Arguments...)
+		} else if v.ArgumentsGetter != nil {
+			return 0, !valueMentionsLocal(value, temp)
+		}
+		return countConstructorTempChildren(children, temp)
+	case *values.JavaArrayMember:
+		return countConstructorTempChildren([]values.JavaValue{v.Object, v.Index}, temp)
+	case *values.RefMember:
+		return delegatingConstructorTempUses(v.Object, temp)
+	case *values.JavaCompare:
+		return countConstructorTempChildren([]values.JavaValue{v.JavaValue1, v.JavaValue2}, temp)
+	case *values.AssignmentExpression:
+		if ref, ok := values.UnpackSoltValue(v.Target).(*values.JavaRef); ok && values.SameLocal(ref, temp) {
+			// Replacing an assignment target with an array expression would turn
+			// a legal local write into an invalid lvalue (and could change later
+			// reads), so this shape is outside the single-read proof.
+			return 0, false
+		}
+		return countConstructorTempChildren([]values.JavaValue{v.Target, v.Value}, temp)
+	case *values.TernaryExpression:
+		if valueMentionsLocal(value, temp) {
+			return 0, false
+		}
+		return 0, true
+	default:
+		if valueMentionsLocal(value, temp) {
+			return 0, false
+		}
+		return 0, true
+	}
+}
+
+func countConstructorTempChildren(children []values.JavaValue, temp *values.JavaRef) (int, bool) {
+	count := 0
+	for _, child := range children {
+		n, supported := delegatingConstructorTempUses(child, temp)
+		if !supported {
+			return 0, false
+		}
+		count += n
+	}
+	return count, true
+}
+
+// replaceDelegatingConstructorTemp mutates the already-proven single eager
+// use. NewExpression's ArgumentsGetter renders ConstructorCall.Arguments, so
+// updating that typed tree also updates the final source text.
+func replaceDelegatingConstructorTemp(value values.JavaValue, temp *values.JavaRef, replacement values.JavaValue) values.JavaValue {
+	value = values.UnpackSoltValue(value)
+	switch v := value.(type) {
+	case *values.JavaRef:
+		if values.SameLocal(v, temp) {
+			return replacement
+		}
+	case *values.CastExpression:
+		v.Value = replaceDelegatingConstructorTemp(v.Value, temp, replacement)
+	case *values.JavaExpression:
+		for i := range v.Values {
+			v.Values[i] = replaceDelegatingConstructorTemp(v.Values[i], temp, replacement)
+		}
+	case *values.FunctionCallExpression:
+		v.Object = replaceDelegatingConstructorTemp(v.Object, temp, replacement)
+		for i := range v.Arguments {
+			v.Arguments[i] = replaceDelegatingConstructorTemp(v.Arguments[i], temp, replacement)
+		}
+	case *values.NewExpression:
+		for i := range v.Length {
+			v.Length[i] = replaceDelegatingConstructorTemp(v.Length[i], temp, replacement)
+		}
+		for i := range v.Initializer {
+			v.Initializer[i] = replaceDelegatingConstructorTemp(v.Initializer[i], temp, replacement)
+		}
+		if v.ConstructorCall != nil {
+			for i := range v.ConstructorCall.Arguments {
+				v.ConstructorCall.Arguments[i] = replaceDelegatingConstructorTemp(v.ConstructorCall.Arguments[i], temp, replacement)
+			}
+		}
+	case *values.JavaArrayMember:
+		v.Object = replaceDelegatingConstructorTemp(v.Object, temp, replacement)
+		v.Index = replaceDelegatingConstructorTemp(v.Index, temp, replacement)
+	case *values.RefMember:
+		v.Object = replaceDelegatingConstructorTemp(v.Object, temp, replacement)
+	case *values.JavaCompare:
+		v.JavaValue1 = replaceDelegatingConstructorTemp(v.JavaValue1, temp, replacement)
+		v.JavaValue2 = replaceDelegatingConstructorTemp(v.JavaValue2, temp, replacement)
+	case *values.AssignmentExpression:
+		v.Target = replaceDelegatingConstructorTemp(v.Target, temp, replacement)
+		v.Value = replaceDelegatingConstructorTemp(v.Value, temp, replacement)
+	}
+	return value
 }
 
 func constructorInlineNodeValues(statement statements.Statement) ([]values.JavaValue, bool) {
