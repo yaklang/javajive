@@ -39,9 +39,9 @@ jobs:
       - name: Production-path regression tests
         run: |
           go test ./classparser -run '^Test(BindingPlan|CtorDelegationNestedArrayTempRoundTrip|CtorNPECheckBeforeThis|EnumClinit|GenericNull|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|TaskT20|TernaryCheckcastMergeRoundTrip)' -count=1 -timeout=3m
-      - name Curated algorithm round-trip contracts
+      - name: Curated algorithm round-trip contracts
         run: python3 -m unittest tools.curated_roundtrip.test_roundtrip
-      - name Historical diagnostic-key regression
+      - name: Historical diagnostic-key regression
         run: python3 -m unittest ci.task_t30.test_t30_historical_diagnostics
       - name: Recompile and run trusted small Java fixtures
         run: |
