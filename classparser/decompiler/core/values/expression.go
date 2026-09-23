@@ -3716,9 +3716,10 @@ func renderWitnessParamType(param types.JavaType, funcCtx *class_context.ClassCo
 // the chosen (owner, name, descriptor); they do not mandate a cast on every
 // type-string mismatch (that smashed generic inference and lambda SAMs).
 //
-// Overload family proof is tri-state: Compete pins, Unique omits, Unknown keeps
-// steal-shaped pins (null / array→non-array / more-specific ref vs Object) unless
-// a suppression fires. Missing tables are Unknown, never Unique.
+// Overload family proof is tri-state: Compete pins and Unique omits. Unknown is
+// never treated as Unique, but it does not justify guessing an instance
+// method's source signature; only the legacy static String-to-Object fallback
+// remains. Missing tables are Unknown, never Unique.
 func (f *FunctionCallExpression) witnessDescriptorArgCast(i int, arg JavaValue, funcCtx *class_context.ClassContext) string {
 	if f == nil || arg == nil {
 		return ""
@@ -3756,13 +3757,8 @@ func (f *FunctionCallExpression) witnessDescriptorArgCast(i int, arg JavaValue, 
 				switch proof {
 				case overloadCompete:
 					// pin Object-null when a competing same-arity overload exists
-				case overloadUnknown:
-					if f.recoverableGenericParamType(i, funcCtx) != nil {
-						return ""
-					}
-					// Preserve an external invocation's exact Object descriptor.
 				default:
-					// A proven unique instance method keeps source-level inference.
+					// Unknown or unique instance methods keep source-level inference.
 					return ""
 				}
 			}
@@ -3871,13 +3867,14 @@ func (f *FunctionCallExpression) witnessOverloadPinCast(i int, argType, param ty
 		if funcCtx != nil && (isJavaLangObjectType(param) || witnessStealShaped(f, argType, param)) {
 			f.noteUnknownOverloadFamily(funcCtx)
 		}
-		if f.FunctionName == "<init>" || f.IsSpecialInvoke || f.Kind == InvokeSpecial ||
+		if f.Kind != InvokeStatic || f.FunctionName == "<init>" || f.IsSpecialInvoke ||
 			!isJavaLangObjectType(param) || !witnessStringyArg(argType) {
 			return ""
 		}
-		// Static, virtual, and interface calls can all be stolen by a more
-		// specific overload. Constructors and invokespecial have their own
-		// reconstruction rules.
+		// An unknown static Object overload retains the legacy conservative pin.
+		// Unknown instance families may be generic (e.g. Box<T>.set(T)); without
+		// their Signature, an Object cast can make the reconstructed call
+		// ill-typed. Keep that call unsupported and preserve source inference.
 	}
 	if argType == nil || param == nil {
 		return ""
