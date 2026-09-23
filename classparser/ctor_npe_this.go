@@ -23,6 +23,317 @@ func fixCtorNPECheckBeforeThis(body string) string {
 	return body
 }
 
+// fixCtorDelegationArgumentSpills folds one-use argument locals back into a
+// delegating this(...) call. A decompiler may spill an invokespecial argument
+// to a source local even though Java requires this(...) to be the first
+// constructor statement. We only move an uninterrupted prelude at the start
+// of the constructor and require declaration order to match argument order.
+// Substitution keeps every expression at its original argument index, so Java
+// still evaluates direct calls and restored initializer expressions left to
+// right in the same order.
+// Kill-switch: JDEC_CTOR_DELEGATION_SPILLS_OFF=1.
+func fixCtorDelegationArgumentSpills(body string) string {
+	if jdecenv.Get("JDEC_CTOR_DELEGATION_SPILLS_OFF") == "1" {
+		return body
+	}
+	searchEnd := len(body)
+	for searchEnd > 0 {
+		at := strings.LastIndex(body[:searchEnd], "this(")
+		if at < 0 {
+			break
+		}
+		if !javaCodePosition(body, at) {
+			searchEnd = at
+			continue
+		}
+		lineStart := strings.LastIndex(body[:at], "\n") + 1
+		if strings.TrimSpace(body[lineStart:at]) != "" {
+			searchEnd = at
+			continue
+		}
+		open := at + len("this")
+		close := enumMatchingDelimiter(body, open, '(', ')')
+		if close < 0 {
+			searchEnd = at
+			continue
+		}
+		semicolon := close + 1
+		for semicolon < len(body) && (body[semicolon] == ' ' || body[semicolon] == '\t' || body[semicolon] == '\r') {
+			semicolon++
+		}
+		if semicolon >= len(body) || body[semicolon] != ';' {
+			searchEnd = at
+			continue
+		}
+		blockStart, blockEnd, ok := javaBlockBoundsAt(body, at)
+		if !ok {
+			searchEnd = at
+			continue
+		}
+		indent := enumLineIndent(body, lineStart)
+		var reverse []enumLocalDecl
+		var reverseNames []string
+		cursor := lineStart
+		for cursor > blockStart+1 {
+			prevEnd := cursor
+			if prevEnd > 0 && body[prevEnd-1] == '\n' {
+				prevEnd--
+			}
+			prevStart := strings.LastIndex(body[:prevEnd], "\n") + 1
+			if prevStart <= blockStart {
+				break
+			}
+			if strings.TrimSpace(body[prevStart:prevEnd]) == "" {
+				cursor = prevStart
+				continue
+			}
+			decl, name, ok := parseEnumLocalInitializerLine(body, prevStart, prevEnd, indent)
+			if !ok {
+				break
+			}
+			reverse = append(reverse, decl)
+			reverseNames = append(reverseNames, name)
+			cursor = prevStart
+		}
+		if len(reverse) == 0 {
+			searchEnd = at
+			continue
+		}
+		decls := make([]enumLocalDecl, len(reverse))
+		names := make([]string, len(reverseNames))
+		for i := range reverse {
+			decls[i] = reverse[len(reverse)-1-i]
+			names[i] = reverseNames[len(reverseNames)-1-i]
+		}
+		first := decls[0].rangeSpan.start
+		if strings.TrimSpace(body[blockStart+1:first]) != "" {
+			searchEnd = at
+			continue
+		}
+		methodBody := body[blockStart:blockEnd]
+		declared := make(map[string]bool, len(names))
+		unique := true
+		for i, name := range names {
+			if declared[name] || enumIdentifierCount(methodBody, name) != 2 {
+				unique = false
+				break
+			}
+			declared[name] = true
+			if i+1 < len(decls) && strings.TrimSpace(body[decls[i].rangeSpan.end:decls[i+1].rangeSpan.start]) != "" {
+				unique = false
+				break
+			}
+		}
+		if !unique {
+			searchEnd = at
+			continue
+		}
+		args := splitTopLevelArgs(body[open+1 : close])
+		if len(args) == 0 {
+			searchEnd = at
+			continue
+		}
+		argTemps := make([]string, len(args))
+		ordered := 0
+		valid := true
+		lastTempArg := -1
+		for i, arg := range args {
+			for _, token := range enumLocalTokens(arg) {
+				if !declared[token] {
+					continue
+				}
+				if strings.TrimSpace(arg) != token || enumIdentifierCount(arg, token) != 1 || ordered >= len(names) || names[ordered] != token || argTemps[i] != "" {
+					valid = false
+					break
+				}
+				argTemps[i] = token
+				lastTempArg = i
+				ordered++
+			}
+			if !valid {
+				break
+			}
+		}
+		if !valid || ordered != len(names) {
+			searchEnd = at
+			continue
+		}
+		for i := 0; i < lastTempArg; i++ {
+			if argTemps[i] == "" && !ctorSafeReadOnlyArgument(args[i]) {
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			searchEnd = at
+			continue
+		}
+		expanded := make(map[string]string, len(names))
+		for i, name := range names {
+			for _, token := range enumLocalTokens(decls[i].rhs) {
+				if declared[token] {
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				break
+			}
+			expanded[name] = decls[i].rhs
+		}
+		if !valid {
+			searchEnd = at
+			continue
+		}
+		for i := range args {
+			if name := argTemps[i]; name != "" {
+				args[i] = expanded[name]
+			}
+		}
+		body = body[:open+1] + strings.Join(args, ",") + body[close:]
+		sort.Slice(decls, func(i, j int) bool { return decls[i].rangeSpan.start > decls[j].rangeSpan.start })
+		for _, decl := range decls {
+			span := decl.rangeSpan
+			body = body[:span.start] + body[span.end:]
+		}
+		searchEnd = first
+	}
+	return body
+}
+
+var ctorCastTypeExpression = regexp.MustCompile(`^(?:boolean|byte|short|char|int|long|float|double|[A-Za-z_$][A-Za-z0-9_.$]*)(?:\s*<[^()]+>)?(?:\s*\[\s*\])*$`)
+
+func ctorSafeReadOnlyArgument(expression string) bool {
+	expression = strings.TrimSpace(expression)
+	for len(expression) > 1 && expression[0] == '(' && enumMatchingDelimiter(expression, 0, '(', ')') == len(expression)-1 {
+		expression = strings.TrimSpace(expression[1 : len(expression)-1])
+	}
+	if expression == "null" || expression == "true" || expression == "false" || enumMovedNumber.MatchString(expression) {
+		return true
+	}
+	if _, err := strconv.Unquote(expression); err == nil {
+		return true
+	}
+	if len(expression) > 2 && expression[0] == '(' {
+		close := enumMatchingDelimiter(expression, 0, '(', ')')
+		if close > 0 && close+1 < len(expression) && ctorCastTypeExpression.MatchString(strings.TrimSpace(expression[1:close])) {
+			return ctorSafeReadOnlyArgument(expression[close+1:])
+		}
+	}
+	return false
+}
+
+func javaCodePosition(source string, target int) bool {
+	if target < 0 || target >= len(source) {
+		return false
+	}
+	for i := 0; i <= target; {
+		if next, skipped := skipJavaNonCode(source, i); skipped {
+			if next > target {
+				return false
+			}
+			i = next
+			continue
+		}
+		if i == target {
+			return true
+		}
+		i++
+	}
+	return false
+}
+
+func javaBlockBoundsAt(source string, at int) (int, int, bool) {
+	var stack []int
+	for i := 0; i < at; {
+		if next, skipped := skipJavaNonCode(source, i); skipped {
+			i = next
+			continue
+		}
+		switch source[i] {
+		case '{':
+			stack = append(stack, i)
+		case '}':
+			if len(stack) == 0 {
+				return 0, 0, false
+			}
+			stack = stack[:len(stack)-1]
+		}
+		i++
+	}
+	if len(stack) == 0 {
+		return 0, 0, false
+	}
+	start := stack[len(stack)-1]
+	depth := 0
+	for i := start; i < len(source); {
+		if next, skipped := skipJavaNonCode(source, i); skipped {
+			i = next
+			continue
+		}
+		if source[i] == '{' {
+			depth++
+		} else if source[i] == '}' {
+			depth--
+			if depth == 0 {
+				return start, i + 1, true
+			}
+		}
+		i++
+	}
+	return 0, 0, false
+}
+
+func skipJavaNonCode(source string, at int) (int, bool) {
+	if at < 0 || at >= len(source) {
+		return at, false
+	}
+	if source[at] == '/' && at+1 < len(source) {
+		if source[at+1] == '/' {
+			end := strings.IndexByte(source[at+2:], '\n')
+			if end < 0 {
+				return len(source), true
+			}
+			return at + 2 + end, true
+		}
+		if source[at+1] == '*' {
+			end := strings.Index(source[at+2:], "*/")
+			if end < 0 {
+				return len(source), true
+			}
+			return at + 2 + end + 2, true
+		}
+	}
+	if source[at] == '"' && strings.HasPrefix(source[at:], `"""`) {
+		for i := at + 3; i < len(source); {
+			if source[i] == '\\' {
+				i += 2
+				continue
+			}
+			if strings.HasPrefix(source[i:], `"""`) {
+				return i + 3, true
+			}
+			i++
+		}
+		return len(source), true
+	}
+	if source[at] == '"' || source[at] == '\'' {
+		quote := source[at]
+		for i := at + 1; i < len(source); {
+			if source[i] == '\\' {
+				i += 2
+				continue
+			}
+			if source[i] == quote {
+				return i + 1, true
+			}
+			i++
+		}
+		return len(source), true
+	}
+	return at, false
+}
+
 func stripPreludeBeforeCtorCall(body, call string) string {
 	from := 0
 	for {
@@ -100,15 +411,25 @@ func fixEnumClinitIllegalNew(body string) string {
 		indent := enumLineIndent(body, match[0])
 		var renderedArgs []string
 		var localRemovals []enumSourceRange
+		payloadArgs := splitTopLevelArgs(args)
+		directArgs, directRemovals, hadDirectLocals, directOK := expandEnumClinitDirectArgumentLocals(body, blockStart, blockEnd, match[0], indent, payloadArgs)
 		supported := true
-		for _, arg := range splitTopLevelArgs(args) {
-			rendered, consumed, ok := expandEnumClinitLocals(body, blockStart, blockEnd, match[0], indent, arg, map[string]bool{})
-			if !ok {
-				supported = false
-				break
+		if directOK && hadDirectLocals {
+			renderedArgs = directArgs
+			localRemovals = append(localRemovals, directRemovals...)
+		} else {
+			for _, arg := range payloadArgs {
+				if !supported {
+					break
+				}
+				rendered, consumed, ok := expandEnumClinitLocals(body, blockStart, blockEnd, match[0], indent, arg, map[string]bool{})
+				if !ok {
+					supported = false
+					break
+				}
+				renderedArgs = append(renderedArgs, rendered)
+				localRemovals = append(localRemovals, consumed...)
 			}
-			renderedArgs = append(renderedArgs, rendered)
-			localRemovals = append(localRemovals, consumed...)
 		}
 		if !supported {
 			// Keep the original illegal expression visible for unsupported cases;
@@ -276,11 +597,6 @@ func expandEnumClinitDirectArgumentLocals(body string, blockStart, blockEnd, bef
 	if len(names) == 0 {
 		return args, nil, false, true
 	}
-	for i, arg := range args {
-		if _, isLocal := argNames[i]; !isLocal && !enumSafeMovedArgument(arg) {
-			return nil, nil, true, false
-		}
-	}
 	if blockStart < 0 || blockEnd > len(body) || before <= blockStart || before > blockEnd {
 		return nil, nil, true, false
 	}
@@ -403,21 +719,6 @@ func parseEnumLocalInitializerLine(body string, lineStart, lineEnd int, indent s
 }
 
 var enumMovedNumber = regexp.MustCompile(`^[+-]?(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|(?:[0-9][0-9_]*)(?:\.[0-9_]*)?(?:[eE][+-]?[0-9_]+)?)(?:[fFdDlL])?$`)
-var enumMovedZeroArray = regexp.MustCompile(`^new\s+[A-Za-z_$][A-Za-z0-9_.$]*\s*\[\s*0\s*\]$`)
-
-func enumSafeMovedArgument(expression string) bool {
-	expression = strings.TrimSpace(expression)
-	for len(expression) > 1 && expression[0] == '(' && enumMatchingDelimiter(expression, 0, '(', ')') == len(expression)-1 {
-		expression = strings.TrimSpace(expression[1 : len(expression)-1])
-	}
-	if expression == "null" || expression == "true" || expression == "false" || enumMovedNumber.MatchString(expression) || enumMovedZeroArray.MatchString(expression) {
-		return true
-	}
-	if _, err := strconv.Unquote(expression); err == nil {
-		return true
-	}
-	return false
-}
 
 func findEnumLocalInitializer(body string, blockStart, before int, indent, name string) (enumLocalDecl, bool) {
 	// A compiler spill immediately before its only constructor consumer is the

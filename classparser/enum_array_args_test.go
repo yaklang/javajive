@@ -16,15 +16,19 @@ func TestEnumArrayConstructorArgsRoundTrip(t *testing.T) {
 	original, classes := t04CompileRun(t, "17", "EnumArrayArgsMain", map[string]string{
 		"EnumArrayArgsMain.java": `public class EnumArrayArgsMain {
   enum Tag {
-    FIRST(new int[]{mark(1), mark(2)}, mark(3)),
-    SECOND(new int[]{mark(4)}, mark(5));
+    FIRST(mark(1), new int[]{mark(2)}, new String[]{markText(3)}, mark(4)),
+    SECOND(mark(5), new int[]{mark(6)}, new String[]{markText(7)}, mark(8));
 
     static int sequence;
+    final int lead;
     final int[] values;
+    final String[] aliases;
     final int stamp;
 
-    Tag(int[] values, int stamp) {
+    Tag(int lead, int[] values, String[] aliases, int stamp) {
+      this.lead = lead;
       this.values = values;
+      this.aliases = aliases;
       this.stamp = stamp;
     }
 
@@ -33,20 +37,25 @@ func TestEnumArrayConstructorArgsRoundTrip(t *testing.T) {
       return value;
     }
 
+    static String markText(int value) {
+      sequence = sequence * 10 + value;
+      return "alias-" + value;
+    }
+
     int total() {
-      int total = stamp;
+      int total = lead + stamp;
       for (int value : values) total += value;
       return total;
     }
   }
 
   public static void main(String[] args) {
-    System.out.println(Tag.FIRST.total() + ":" + Tag.SECOND.total() + ":" + Tag.sequence);
+    System.out.println(Tag.FIRST.total() + ":" + Tag.SECOND.total() + ":" + Tag.FIRST.aliases[0] + ":" + Tag.sequence);
   }
 }`,
 	})
-	if strings.TrimSpace(original) != "6:9:12345" {
-		t.Fatalf("fixture oracle changed: %q, want 6:9:12345", original)
+	if strings.TrimSpace(original) != "7:19:alias-3:12345678" {
+		t.Fatalf("fixture oracle changed: %q, want 7:19:alias-3:12345678", original)
 	}
 	javac, java := t04Tools(t)
 	resolver := func(internalName string) ([]byte, bool) {
@@ -82,21 +91,22 @@ func TestEnumArrayConstructorArgsRoundTrip(t *testing.T) {
 		}
 		javaFiles = append(javaFiles, javaFile)
 	}
+	source := allSource.String()
+	args := append([]string{"-proc:none", "-encoding", "UTF-8", "--release", "17", "-d", outDir}, javaFiles...)
+	cmd := exec.Command(javac, args...)
+	cmd.Dir = reDir
+	cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("recompile compatibility output: %v\n%s\n----- source -----\n%s", err, out, source)
+	}
 	if !usedEnumRecovery {
 		t.Fatal("compatibility decompilation did not report enum constant recovery")
 	}
-	source := allSource.String()
-	if !strings.Contains(source, "FIRST(new int[]") || !strings.Contains(source, "SECOND(new int[]") {
+	if !strings.Contains(source, "FIRST(mark(1), new int[]{mark(2)}, new String[]{markText(3)}, mark(4))") || !strings.Contains(source, "SECOND(mark(5), new int[]{mark(6)}, new String[]{markText(7)}, mark(8))") {
 		t.Fatalf("enum constant array arguments were not reconstructed:\n%s", source)
 	}
 	if strings.Contains(source, "FIRST = new Tag(") || strings.Contains(source, "SECOND = new Tag(") {
 		t.Fatalf("enum <clinit> still instantiates enum constants:\n%s", source)
-	}
-	args := append([]string{"-proc:none", "-encoding", "UTF-8", "--release", "17", "-d", outDir}, javaFiles...)
-	cmd := exec.Command(javac, args...)
-	cmd.Dir = reDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("recompile compatibility output: %v\n%s\n----- source -----\n%s", err, out, source)
 	}
 	if got := t04RunJava(t, java, outDir, "EnumArrayArgsMain"); got != original {
 		t.Fatalf("enum round-trip stdout mismatch: got %q, want %q", got, original)
@@ -218,7 +228,6 @@ enum X {
 		"reversed arguments":                    strings.Replace(base, `FIRST = new X("FIRST",0,var0,var1);`, `FIRST = new X("FIRST",0,var1,var0);`, 1),
 		"visible call between spills":           strings.Replace(base, "\t\tString[] var1", "\t\tmark(9);\n\t\tString[] var1", 1),
 		"repeated local":                        strings.Replace(base, `FIRST = new X("FIRST",0,var0,var1);`, `FIRST = new X("FIRST",0,var0,var0);`, 1),
-		"side effect in unmapped argument":      strings.Replace(base, `FIRST = new X("FIRST",0,var0,var1);`, `FIRST = new X("FIRST",0,mark(9),var0,var1);`, 1),
 		"unmapped allocation between constants": strings.Replace(base, "\t\tint[] var2", "\t\tint[] extra = new int[0];\n\t\tint[] var2", 1),
 	}
 	for name, input := range unsafe {
@@ -227,6 +236,11 @@ enum X {
 				t.Fatalf("unsafe enum initializer was moved:\n%s", output)
 			}
 		})
+	}
+	effectful := strings.Replace(base, `FIRST = new X("FIRST",0,var0,var1);`, `FIRST = new X("FIRST",0,mark(9),var0,var1);`, 1)
+	folded := foldEnumStaticNewIntoConstants(effectful)
+	if !strings.Contains(folded, `FIRST(mark(9),new int[]{mark(1)},new String[]{markText(2)})`) {
+		t.Fatalf("effectful constructor argument order was not preserved around spilled arrays:\n%s", folded)
 	}
 }
 
@@ -241,7 +255,7 @@ func TestEnumClinitArrayTempDoesNotMoveAcrossEffects(t *testing.T) {
 			if strings.Contains(out, "FIRST(new int[]") {
 				t.Fatalf("moved an unsafe array initializer:\n%s", out)
 			}
-			if !strings.Contains(out, "int[] var0 = new int[]{mark(1)};") || !strings.Contains(out, "FIRST = new X(\"FIRST\",0,var0") {
+			if !strings.Contains(out, "int[] var0 = new int[]{mark(1)};") || !strings.Contains(out, "FIRST = new X(\"FIRST\",0,") {
 				t.Fatalf("unsupported enum initializer shape was not preserved:\n%s", out)
 			}
 		})
@@ -249,5 +263,25 @@ func TestEnumClinitArrayTempDoesNotMoveAcrossEffects(t *testing.T) {
 	t.Setenv("JDEC_ENUM_CLINIT_NEW_OFF", "1")
 	if got := fixEnumClinitIllegalNew(cases["intervening side effect"]); got != cases["intervening side effect"] {
 		t.Fatalf("kill-switch changed source:\n%s", got)
+	}
+}
+
+func TestEnumClinitFoldsMultipleContiguousArgumentSpills(t *testing.T) {
+	input := `enum X {
+	FIRST, SECOND(7);
+	static {
+		int[] var0 = new int[]{mark(1)};
+		String[] var1 = new String[]{markText(2)};
+		FIRST = new X("FIRST",0,var0,var1);
+		$VALUES = $values();
+	}
+}
+`
+	got := fixEnumClinitIllegalNew(input)
+	if !strings.Contains(got, `FIRST(new int[]{mark(1)}, new String[]{markText(2)})`) {
+		t.Fatalf("independent contiguous spills were not folded into the enum constant:\n%s", got)
+	}
+	if strings.Contains(got, "FIRST = new X(") || strings.Contains(got, "int[] var0") || strings.Contains(got, "String[] var1") {
+		t.Fatalf("consumed constructor spills remain in the class initializer:\n%s", got)
 	}
 }

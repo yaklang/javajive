@@ -1744,6 +1744,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// JDEC_ENUM_CTOR_THIS_FIRST_OFF=1.
 	full = c.sourceRewrite("fixEnumNoArgCtorThisAfterLocals", "class_source", full, fixEnumNoArgCtorThisAfterLocals)
 	full = c.sourceRewrite("fixCtorNPECheckBeforeThis", "class_source", full, fixCtorNPECheckBeforeThis)
+	full = c.sourceRewrite("fixCtorDelegationArgumentSpills", "class_source", full, fixCtorDelegationArgumentSpills)
 	full = c.sourceRewrite("fixEnumClinitIllegalNew", "class_source", full, fixEnumClinitIllegalNew)
 	full = c.sourceRewrite("fixBareNestedImports", "class_source", full, fixBareNestedImports)
 	full = c.sourceRewrite("fixHardjarShapes", "class_source", full, fixHardjarShapes)
