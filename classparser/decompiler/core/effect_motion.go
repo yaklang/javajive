@@ -35,38 +35,6 @@ func (d *Decompiler) handlersAt(op *OpCode) []int {
 	return out
 }
 
-// canInlineImmediateStore recognizes a value temp consumed immediately by a
-// store opcode. Substituting the defining expression into the store RHS keeps
-// JVM order: evaluate the value, then perform the field store. No expression is
-// moved across a statement or a handler boundary.
-func (d *Decompiler) canInlineImmediateStore(source, target *Node, origins map[int]*OpCode) bool {
-	if source == nil || target == nil || len(source.Next) != 1 || source.Next[0] != target || len(target.Source) != 1 || target.Source[0] != source {
-		return false
-	}
-	srcOp, dstOp := origins[source.Id], origins[target.Id]
-	if srcOp == nil || dstOp == nil || srcOp.Instr == nil || dstOp.Instr == nil {
-		return false
-	}
-	allowedPair := srcOp.Instr.OpCode == OP_DUP && dstOp.Instr.OpCode == OP_PUTSTATIC || srcOp.Instr.OpCode == OP_CHECKCAST && dstOp.Instr.OpCode == OP_PUTFIELD
-	if !allowedPair || !sameHandlerCoverage(d.handlersAt(srcOp), d.handlersAt(dstOp)) {
-		return false
-	}
-	srcAssign, ok := source.Statement.(*statements.AssignStatement)
-	if !ok {
-		return false
-	}
-	dstAssign, ok := target.Statement.(*statements.AssignStatement)
-	if !ok {
-		return false
-	}
-	srcRef, ok := values.UnpackSoltValue(srcAssign.LeftValue).(*values.JavaRef)
-	if !ok || srcRef == nil {
-		return false
-	}
-	dstRef, ok := values.UnpackSoltValue(dstAssign.JavaValue).(*values.JavaRef)
-	return ok && values.SameLocal(srcRef, dstRef)
-}
-
 // countLocalUses counts rendered local reads under a Java value. Unknown
 // closures and cycles fail closed; JavaRef.Val is deliberately not followed,
 // because that is the definition rather than a rendered use.
@@ -91,6 +59,66 @@ func countLocalUses(value values.JavaValue, ref *values.JavaRef, path map[values
 	for _, child := range children {
 		n, childKnown := countLocalUses(child, ref, path)
 		if !childKnown {
+			return 0, false
+		}
+		count += n
+		if count > 1 {
+			return count, true
+		}
+	}
+	return count, true
+}
+
+// countCallOperandLocalUses counts a local read in the receiver or argument
+// expressions evaluated by this invocation, but does not count reads captured
+// inside an earlier nested invocation. Otherwise a later call such as
+// escape(value).replace(...) looks like a second consumer of value and makes
+// the exact CHECKCAST producer ambiguous.
+func countCallOperandLocalUses(call *values.FunctionCallExpression, ref *values.JavaRef) (int, bool) {
+	if call == nil || ref == nil {
+		return 0, false
+	}
+	operands := make([]values.JavaValue, 0, len(call.Arguments)+1)
+	operands = append(operands, call.Object)
+	operands = append(operands, call.Arguments...)
+	var count int
+	var walk func(values.JavaValue, map[values.JavaValue]bool) (int, bool)
+	walk = func(value values.JavaValue, path map[values.JavaValue]bool) (int, bool) {
+		value = values.UnpackSoltValue(value)
+		if value == nil {
+			return 0, true
+		}
+		if local, ok := value.(*values.JavaRef); ok && values.SameLocal(local, ref) {
+			return 1, true
+		}
+		if _, isInvocation := value.(*values.FunctionCallExpression); isInvocation {
+			return 0, true
+		}
+		if path[value] {
+			return 0, false
+		}
+		path[value] = true
+		defer delete(path, value)
+		children, known := values.Children(value)
+		if !known {
+			return 0, false
+		}
+		uses := 0
+		for _, child := range children {
+			n, childKnown := walk(child, path)
+			if !childKnown {
+				return 0, false
+			}
+			uses += n
+			if uses > 1 {
+				return uses, true
+			}
+		}
+		return uses, true
+	}
+	for _, operand := range operands {
+		n, known := walk(operand, map[values.JavaValue]bool{})
+		if !known {
 			return 0, false
 		}
 		count += n
@@ -153,8 +181,17 @@ func (d *Decompiler) canInlineCheckcastAtInvocation(value values.JavaValue, sour
 	if sourceOp == nil || targetOp == nil || sourceOp.Instr == nil || targetOp.Instr == nil || sourceOp.Instr.OpCode != OP_CHECKCAST {
 		return false
 	}
-	if sourceOp.CurrentOffset >= targetOp.CurrentOffset || !isUnconditionalTransferOrStore(targetOp.Instr.OpCode) ||
-		!d.opcodeProducesLocal(sourceOp, foldedRef) {
+	storedCast, ok := values.UnpackSoltValue(srcAssign.JavaValue).(*values.CastExpression)
+	foldedCast, foldedOK := values.UnpackSoltValue(value).(*values.CastExpression)
+	if !ok || !foldedOK || storedCast.OriginPC != int(sourceOp.CurrentOffset) || foldedCast.OriginPC != storedCast.OriginPC ||
+		!castPreservesLocalStaticType(foldedRef, storedCast, d.FunctionContext) ||
+		!castPreservesLocalStaticType(foldedRef, foldedCast, d.FunctionContext) {
+		return false
+	}
+	if sourceOp.CurrentOffset >= targetOp.CurrentOffset ||
+		!isUnconditionalTransferOrStore(targetOp.Instr.OpCode) && !isInvokeOpcode(targetOp.Instr.OpCode) ||
+		!d.opcodeProducesLocal(sourceOp, foldedRef) ||
+		!d.hasUniqueCheckcastProducerForLocal(sourceOp, foldedRef) {
 		return false
 	}
 	handlers := d.handlersAt(sourceOp)
@@ -175,7 +212,7 @@ func (d *Decompiler) canInlineCheckcastAtInvocation(value values.JavaValue, sour
 			!singleLinearOpcodePathInHandlers(d, invokeOp, targetOp, handlers) {
 			continue
 		}
-		uses, known := countLocalUses(call, foldedRef, map[values.JavaValue]bool{})
+		uses, known := countCallOperandLocalUses(call, foldedRef)
 		if !known || uses != 1 {
 			continue
 		}
@@ -187,6 +224,33 @@ func (d *Decompiler) canInlineCheckcastAtInvocation(value values.JavaValue, sour
 	if selectedOp == nil || selectedCall == nil || !sameHandlerCoverage(handlers, d.handlersAt(selectedOp)) {
 		return false
 	}
+	branchStackUse := hasBranchMergeStackUse(d, targetOp, selectedCall)
+	roots, known := statementValueRoots(target.Statement)
+	if !known && !branchStackUse {
+		return false
+	}
+	callUses := 0
+	if known {
+		for _, root := range roots {
+			n, known := countCallIdentity(root, selectedCall, map[values.JavaValue]bool{})
+			if !known {
+				return false
+			}
+			callUses += n
+		}
+	}
+	if branchStackUse {
+		if known && callUses != 0 {
+			return false
+		}
+		callUses = 1
+	}
+	linearNodePath := singleLinearNodePath(source, target)
+	callInTernaryArm := known && containsCallInOneTernaryArm(roots, selectedCall)
+	d.tracef("var-fold", "checkcast merge producerPC=%d consumerPC=%d invokePC=%d branchStack=%t roots=%t callUses=%d linearNodePath=%t callInTernaryArm=%t", sourceOp.CurrentOffset, targetOp.CurrentOffset, selectedOp.CurrentOffset, branchStackUse, known, callUses, linearNodePath, callInTernaryArm)
+	if callUses != 1 || !linearNodePath && !branchStackUse && !callInTernaryArm {
+		return false
+	}
 	prefix, count, known := prefixBeforeUse(d, selectedCall, foldedRef, sourceOp)
 	if !known || count != 1 {
 		return false
@@ -195,6 +259,131 @@ func (d *Decompiler) canInlineCheckcastAtInvocation(value values.JavaValue, sour
 	moving.Handlers = handlers
 	prefix.Handlers = d.handlersAt(selectedOp)
 	return canMoveInlineAcrossPrefix(moving, prefix)
+}
+
+func hasBranchMergeStackUse(d *Decompiler, target *OpCode, call *values.FunctionCallExpression) bool {
+	if d == nil || target == nil || target.Instr == nil || call == nil || target.StackEntry == nil {
+		return false
+	}
+	if target.Instr.OpCode != OP_GOTO && target.Instr.OpCode != OP_GOTO_W || len(target.Target) != 1 {
+		return false
+	}
+	merge := target.Target[0]
+	if merge == nil || len(merge.Source) < 2 || !sameHandlerCoverage(d.handlersAt(target), d.handlersAt(merge)) {
+		return false
+	}
+	fromMerge, otherPredecessor := false, false
+	for _, source := range merge.Source {
+		if source == target {
+			fromMerge = true
+		} else if source != nil {
+			otherPredecessor = true
+		}
+	}
+	return fromMerge && otherPredecessor && values.UnpackSoltValue(target.StackEntry.value) == call
+}
+
+func statementValueRoots(statement statements.Statement) ([]values.JavaValue, bool) {
+	switch s := statement.(type) {
+	case *statements.ExpressionStatement:
+		return []values.JavaValue{s.Expression}, true
+	case *statements.AssignStatement:
+		roots := []values.JavaValue{s.LeftValue, s.JavaValue}
+		if s.ArrayMember != nil {
+			roots = append(roots, s.ArrayMember)
+		}
+		return roots, true
+	case *statements.ConditionStatement:
+		return []values.JavaValue{s.Condition}, true
+	case *statements.ReturnStatement:
+		return []values.JavaValue{s.JavaValue}, true
+	case *statements.StackAssignStatement:
+		return []values.JavaValue{s.JavaValue}, true
+	default:
+		return nil, false
+	}
+}
+
+func countCallIdentity(value values.JavaValue, target *values.FunctionCallExpression, active map[values.JavaValue]bool) (int, bool) {
+	if value == nil {
+		return 0, true
+	}
+	if value == target {
+		return 1, true
+	}
+	if active[value] {
+		return 0, false
+	}
+	active[value] = true
+	defer delete(active, value)
+	children, known := values.Children(value)
+	if !known {
+		return 0, false
+	}
+	count := 0
+	for _, child := range children {
+		n, known := countCallIdentity(child, target, active)
+		if !known {
+			return 0, false
+		}
+		count += n
+	}
+	return count, true
+}
+
+func containsCallInOneTernaryArm(roots []values.JavaValue, target *values.FunctionCallExpression) bool {
+	var visit func(values.JavaValue, map[values.JavaValue]bool) bool
+	visit = func(value values.JavaValue, active map[values.JavaValue]bool) bool {
+		if value == nil || active[value] {
+			return false
+		}
+		active[value] = true
+		defer delete(active, value)
+		if ternary, ok := value.(*values.TernaryExpression); ok && ternary != nil {
+			trueCount, trueKnown := countCallIdentity(ternary.TrueValue, target, map[values.JavaValue]bool{})
+			falseCount, falseKnown := countCallIdentity(ternary.FalseValue, target, map[values.JavaValue]bool{})
+			if trueKnown && falseKnown && (trueCount == 1 && falseCount == 0 || trueCount == 0 && falseCount == 1) {
+				return true
+			}
+		}
+		children, known := values.Children(value)
+		if !known {
+			return false
+		}
+		for _, child := range children {
+			if visit(child, active) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, root := range roots {
+		if visit(root, map[values.JavaValue]bool{}) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasUniqueCheckcastProducerForLocal refuses to fold one checkcast from a
+// local that is also produced by a different checkcast. Alternate bytecode
+// arms can assign the same logical local at a join; folding only one arm
+// removes a definition while leaving the other arm's use behind.
+func (d *Decompiler) hasUniqueCheckcastProducerForLocal(source *OpCode, ref *values.JavaRef) bool {
+	if d == nil || source == nil || source.Instr == nil || source.Instr.OpCode != OP_CHECKCAST || ref == nil {
+		return false
+	}
+	seenSource := false
+	for op := range d.opcodeToSimulateStack {
+		if op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || !d.opcodeProducesLocal(op, ref) {
+			continue
+		}
+		if op != source || seenSource {
+			return false
+		}
+		seenSource = true
+	}
+	return seenSource
 }
 
 func isUnconditionalTransferOrStore(opcode int) bool {
@@ -211,6 +400,21 @@ func isInvokeOpcode(opcode int) bool {
 	default:
 		return false
 	}
+}
+
+// castPreservesLocalStaticType makes cast folding fail closed when a JVM
+// CHECKCAST's erased target differs from the Java source type carried by the
+// temp. Keeping that temp can be necessary for generic overload resolution and
+// target typing even when the runtime cast itself is redundant.
+func castPreservesLocalStaticType(ref *values.JavaRef, cast *values.CastExpression, ctx *class_context.ClassContext) bool {
+	if ref == nil || cast == nil || cast.TargetType == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = &class_context.ClassContext{}
+	}
+	localType := ref.Type()
+	return localType != nil && localType.String(ctx) == cast.TargetType.String(ctx)
 }
 
 // sameHandlerCoverage preserves exception behavior when an expression stays in one
@@ -248,6 +452,52 @@ func singleLinearOpcodePathInHandlers(d *Decompiler, from, to *OpCode, handlers 
 		cur = cur.Target[0]
 	}
 	return sameHandlerCoverage(d.handlersAt(to), handlers)
+}
+
+// hasProvenAllocationPrefix is used only for constructor-delegation arguments,
+// where the bytecode path must prove that NEW completed before the spilled
+// value. Generic expression motion retains the allocation barrier because
+// branch-local variable scopes and lambda-capture typing are not represented
+// by bytecode offsets alone.
+func (d *Decompiler) hasProvenAllocationPrefix(value *values.NewExpression, sourceOp *OpCode) bool {
+	if d == nil || value == nil || sourceOp == nil || sourceOp.Instr == nil || !value.HasOriginPC || value.OriginPC >= int(sourceOp.CurrentOffset) {
+		return false
+	}
+	allocation := d.opcodeAtOffset(value.OriginPC)
+	if allocation == nil || allocation.Instr == nil {
+		return false
+	}
+	switch allocation.Instr.OpCode {
+	case OP_NEW, OP_NEWARRAY, OP_ANEWARRAY, OP_MULTIANEWARRAY:
+	default:
+		return false
+	}
+	handlers := d.handlersAt(sourceOp)
+	return sameHandlerCoverage(handlers, d.handlersAt(allocation)) &&
+		singleLinearOpcodePathInHandlers(d, allocation, sourceOp, handlers)
+}
+
+// singleLinearNodePath applies the same fail-closed rule to the source graph:
+// every step to the consumer must have one successor and one matching
+// predecessor, including the consumer itself.
+func singleLinearNodePath(from, to *Node) bool {
+	if from == nil || to == nil || from == to {
+		return false
+	}
+	seen := map[*Node]bool{}
+	cur := from
+	for cur != to {
+		if cur == nil || seen[cur] || len(cur.Next) != 1 {
+			return false
+		}
+		seen[cur] = true
+		next := cur.Next[0]
+		if next == nil || len(next.Source) != 1 || next.Source[0] != cur {
+			return false
+		}
+		cur = next
+	}
+	return true
 }
 
 // canMoveInlineAcrossPrefix permits a side-effect-free value to cross observable
@@ -298,38 +548,6 @@ func (d *Decompiler) opcodeProducesLocal(op *OpCode, ref *values.JavaRef) bool {
 	return false
 }
 
-// canInlineEffectfulCastAtMergeLeaf proves that an effectful cast temp is the
-// value of one specific ternary/short-circuit arm. The cast itself must produce
-// the referenced local and flow directly to that arm's unconditional merge edge;
-// this keeps calls and throws at the same selected-arm evaluation point.
-func (d *Decompiler) canInlineEffectfulCastAtMergeLeaf(ref *values.JavaRef, cast *values.CastExpression, leaf *OpCode) bool {
-	if d == nil || ref == nil || cast == nil || leaf == nil || leaf.Instr == nil {
-		return false
-	}
-	if leaf.Instr.OpCode != OP_GOTO && leaf.Instr.OpCode != OP_GOTO_W {
-		return false
-	}
-	var source *OpCode
-	for op := range d.opcodeToSimulateStack {
-		if op != nil && int(op.CurrentOffset) == cast.OriginPC && op.Instr != nil && op.Instr.OpCode == OP_CHECKCAST {
-			source = op
-			break
-		}
-	}
-	if source == nil || source.CurrentOffset >= leaf.CurrentOffset || len(source.Target) != 1 || source.Target[0] != leaf ||
-		!sameHandlerCoverage(d.handlersAt(source), d.handlersAt(leaf)) || !d.opcodeProducesLocal(source, ref) {
-		return false
-	}
-	access := values.InspectAccess(cast.Value)
-	if access.Effects&values.EffectOpaque != 0 || access.Effects&(values.EffectMonitor|values.EffectVolatile) != 0 || len(access.Writes) != 0 {
-		return false
-	}
-	if access.Effects&values.EffectWriteMemory != 0 && access.Effects&values.EffectCall == 0 {
-		return false
-	}
-	return true
-}
-
 // canInlineDelegationValue permits only a unique, eager use inside this(...)/super(...).
 // Earlier constructor arguments must be pure: bytecode can legally compute them out of
 // source order, and moving an effectful spill past one would change Java's left-to-right
@@ -337,6 +555,9 @@ func (d *Decompiler) canInlineEffectfulCastAtMergeLeaf(ref *values.JavaRef, cast
 // also required; unknown captures, deferred uses, and ambiguous origins fail closed.
 func (d *Decompiler) canInlineDelegationValue(value values.JavaValue, ref *values.JavaRef, sourceOp *OpCode) bool {
 	if d == nil || ref == nil || sourceOp == nil || sourceOp.Instr == nil {
+		return false
+	}
+	if isInitializedArrayLiteral(value) {
 		return false
 	}
 	stackProducer := isDupFamily(sourceOp.Instr.OpCode) || sourceOp.Instr.OpCode == OP_CHECKCAST
@@ -380,7 +601,7 @@ func (d *Decompiler) canInlineDelegationValue(value values.JavaValue, ref *value
 				}
 				continue
 			}
-			prefix, count, known := prefixBeforeUse(d, arg, ref, sourceOp)
+			prefix, count, known := prefixBeforeDelegationUse(d, arg, ref, sourceOp)
 			if !known || count != 1 {
 				ordered = false
 				break
@@ -396,6 +617,21 @@ func (d *Decompiler) canInlineDelegationValue(value values.JavaValue, ref *value
 		}
 	}
 	return false
+}
+
+// Initialized arrays used as this()/super() arguments are handled by the
+// dedicated constructor-entry rewrite, which proves the declaration is the
+// first real statement. Folding them through the generic spill path can leave
+// their declaration after the mandatory delegation call.
+func isInitializedArrayLiteral(value values.JavaValue) bool {
+	switch x := values.UnpackSoltValue(value).(type) {
+	case *values.NewExpression:
+		return x != nil && x.IsArray() && len(x.Initializer) > 0
+	case *values.CastExpression:
+		return x != nil && isInitializedArrayLiteral(x.Value)
+	default:
+		return false
+	}
 }
 
 // isProvableNull recognizes casts of the null literal. Such a cast has no
@@ -451,9 +687,6 @@ func (d *Decompiler) canInlineValue(value values.JavaValue, source, target *Node
 	}
 	if source == nil || source == target {
 		return false
-	}
-	if d.canInlineImmediateStore(source, target, origins) {
-		return true
 	}
 	if d.canInlineCheckcastAtInvocation(value, source, target, origins, foldedRef) {
 		return true
@@ -610,10 +843,17 @@ func (d *Decompiler) evaluationCompletedBefore(value values.JavaValue, sourceOp 
 // prefixBeforeUse computes Java's evaluated prefix before one value use. It
 // rejects deferred/conditional uses, allocation boundaries and opaque closures.
 func prefixBeforeUse(d *Decompiler, value values.JavaValue, ref *values.JavaRef, sourceOp *OpCode) (values.Access, int, bool) {
-	evaluationPC := -1
-	if sourceOp != nil {
-		evaluationPC = int(sourceOp.CurrentOffset)
-	}
+	return prefixBeforeUseWithAllocationProof(d, value, ref, sourceOp, false)
+}
+
+// Constructor delegation has an additional bytecode proof that can preserve a
+// completed allocation before an inlined argument. Keep it separate from the
+// generic motion path so that proof never relaxes lambda/generic branch safety.
+func prefixBeforeDelegationUse(d *Decompiler, value values.JavaValue, ref *values.JavaRef, sourceOp *OpCode) (values.Access, int, bool) {
+	return prefixBeforeUseWithAllocationProof(d, value, ref, sourceOp, true)
+}
+
+func prefixBeforeUseWithAllocationProof(d *Decompiler, value values.JavaValue, ref *values.JavaRef, sourceOp *OpCode, allowProvenAllocation bool) (values.Access, int, bool) {
 	empty := func() values.Access {
 		return values.Access{Reads: map[*values.JavaRef]bool{}, Writes: map[*values.JavaRef]bool{}}
 	}
@@ -651,11 +891,20 @@ func prefixBeforeUse(d *Decompiler, value values.JavaValue, ref *values.JavaRef,
 			if x.ConstructorCall != nil {
 				children = append(children, x.ConstructorCall.Arguments...)
 			}
-			// Allocation and class initialization precede constructor arguments. If
-			// bytecode proves the spill was produced after NEW, the reconstructed
-			// nested argument remains after that same allocation.
-			if evaluationPC < 0 || !x.HasOriginPC || x.OriginPC >= evaluationPC {
+			// Allocation and class initialization precede constructor arguments.
+			// An older OriginPC alone is not proof that the allocation stayed before
+			// this spill across every branch and handler boundary.
+			// Keep allocation and class initialization at their bytecode position
+			// unless this is a constructor-delegation argument whose complete NEW path
+			// is proven before the spill. A linear bytecode path is not enough for
+			// generic expression motion across branch-local or lambda scopes.
+			if !allowProvenAllocation || !d.hasProvenAllocationPrefix(x, sourceOp) {
 				leading.Effects = values.EffectAllocate | values.EffectThrow | values.EffectClassInit
+			}
+			if x.IsArray() && len(x.Initializer) > 0 {
+				// Filling an array is observable and may still be in progress even
+				// when its allocation is proven to precede the spilled value.
+				leading.Effects |= values.EffectWriteMemory | values.EffectThrow
 			}
 		case *values.CustomValue:
 			var known bool

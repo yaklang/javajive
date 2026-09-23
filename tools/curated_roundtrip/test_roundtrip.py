@@ -59,8 +59,8 @@ class RunnerContractTests(unittest.TestCase):
 
     def test_full_matrix_contains_reviewed_sources(self):
         specs = json.loads((roundtrip.ROOT / 'fixtures.json').read_text())
-        self.assertEqual(len(specs), 9)
-        self.assertEqual(len({spec['case'] for spec in specs}), 9)
+        self.assertEqual(len(specs), 10)
+        self.assertEqual(len({spec['case'] for spec in specs}), 10)
         for spec in specs:
             self.assertTrue(list((roundtrip.ROOT / 'fixtures' / spec['case']).glob('*.java')))
             self.assertTrue((roundtrip.ROOT / 'fixtures' / spec['case'] / (spec['main'] + '.java')).is_file())

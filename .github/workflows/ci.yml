@@ -48,7 +48,7 @@ jobs:
           mkdir -p artifacts
           git rev-parse HEAD > artifacts/revision.txt
           python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/javajive-probe"
-          python3 tools/curated_roundtrip/roundtrip.py --adapter "$RUNNER_TEMP/javajive-probe" --out artifacts/roundtrip --allow-trusted-fixture-execution --expected-rows 36
+          python3 tools/curated_roundtrip/roundtrip.py --adapter "$RUNNER_TEMP/javajive-probe" --out artifacts/roundtrip --allow-trusted-fixture-execution --expected-rows 40
       - name: Roundtrip evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

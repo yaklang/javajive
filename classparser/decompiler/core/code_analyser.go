@@ -5106,10 +5106,9 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// ref in the ternary can strand its definition inside one branch; RewriteVar then
 	// hoists an uninitialized declaration and the merged expression reads null or an
 	// undeclared temp. Inline only a non-parameter CastExpression temp with exactly
-	// one registered use. Pure operands are safe; an effectful operand needs proof
-	// that CHECKCAST directly feeds this selected arm's merge edge under one handler
-	// domain. This keeps the cast lazy in its original arm and excludes dup-family
-	// values, deferred uses, and shared leaves.
+	// one registered use and a pure operand. Effectful cast motion across a merge can
+	// alter generic typing, exception flow, or definite assignment even when one
+	// bytecode arm appears to feed the merge.
 	dupSharedRefs := map[string]bool{}
 	for op, infos := range d.opcodeIdToRef {
 		if op == nil || op.Instr == nil {
@@ -5124,7 +5123,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 		}
 	}
-	inlineSingleUseMergeLeaf := func(value values.JavaValue, leaf *OpCode) values.JavaValue {
+	inlineSingleUseMergeLeaf := func(value values.JavaValue) values.JavaValue {
 		ref, ok := UnpackSoltValue(value).(*values.JavaRef)
 		if !ok || ref == nil || ref.IsThis || ref.IsParam || ref.Id == nil || ref.Val == nil || dupSharedRefs[ref.VarUid] {
 			return value
@@ -5139,10 +5138,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		}
 		resolved := GetRealValue(ref)
 		cast, isCast := resolved.(*values.CastExpression)
-		if !isCast {
-			return value
-		}
-		if !values.IsPure(cast.Value) && !d.canInlineEffectfulCastAtMergeLeaf(ref, cast, leaf) {
+		if !isCast || !values.IsPure(cast.Value) {
 			return value
 		}
 		return resolved
@@ -5364,7 +5360,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					if putfieldValue := putFieldLeafValue(cur); putfieldValue != nil {
 						return putfieldValue
 					}
-					return inlineSingleUseMergeLeaf(cur.StackEntry.value, cur)
+					return inlineSingleUseMergeLeaf(cur.StackEntry.value)
 				}
 				if isTernaryCondition(cur) {
 					return probe(cur)

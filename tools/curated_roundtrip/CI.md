@@ -7,8 +7,15 @@ Pull requests run one Ubuntu/Go-module-version/JDK21 job with a ten-minute ceili
    isolation tests with the race detector.
 3. Run production entry-path regressions for invocation, frames/metadata,
    bootstrap behavior, request limits, ledgers, and shadow observations.
-4. Recompile and execute nine reviewed tiny Java families in both modes and
-   with/without debug information (36 observations).
+4. Recompile and execute ten reviewed tiny Java families, including checkcast
+   branch merges, in both modes and with/without debug information (40 observations).
+
+The checkcast fixture writes a quote before a branch-local cast that can throw.
+It checks both transformed text and the partial output after `ClassCastException`,
+so moving the cast ahead of an observable write fails even when valid inputs still match.
+For a failure, inspect the CHECKCAST-to-call path and handler range first; a later
+chained call must not be counted as a second use merely because its receiver contains
+the earlier call expression.
 
 Each failed Java observation names its case and stage, and retains source,
 compiler output and original/rebuilt stdout. The failure artifact contains these

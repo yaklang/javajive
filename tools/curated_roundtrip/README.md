@@ -1,7 +1,8 @@
 # Curated round-trip gate
 
-This directory vendors the nine reviewed R10 AlgorithmKit fixture families:
-virtual, interface, generic, handler, effects, phis, markers, unicode, and metadata.
+This directory vendors ten reviewed Java round-trip fixture families:
+virtual, interface, generic, handler, effects, phis, markers, unicode, metadata,
+and checkcast branch merges.
 These small sources only perform bounded local computation and print observations.
 The JDK helpers independently parse Java syntax and verify class loading without
 running static initializers. The runner separately executes each reviewed main.
@@ -14,7 +15,7 @@ python3 tools/curated_roundtrip/roundtrip.py --adapter /tmp/draft-followup-probe
   --out /tmp/curated-roundtrip-new-run --allow-trusted-fixture-execution
 ```
 
-A normal run is a strict gate over 9 families × 2 debug settings × 2 API modes.
+A normal run is a strict gate over 10 families × 2 debug settings × 2 API modes.
 There is no expected-failure list. `--observe` is an explicit investigation mode;
 its zero exit status means observation completed, never that failed rows passed.
 `--case NAME` selects one family and rejects an unknown name. Missing source files,

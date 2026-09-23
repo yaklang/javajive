@@ -1,5 +1,10 @@
 [
   {
+    "case": "checkcast",
+    "main": "Main",
+    "release": 17
+  },
+  {
     "case": "effects",
     "main": "Main",
     "release": 17
