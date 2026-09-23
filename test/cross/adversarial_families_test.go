@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yaklang/javajive"
+	javaclassparser "github.com/yaklang/javajive/classparser"
 )
 
 // auditObservation keeps recompilation, verification and execution separate. A
@@ -81,6 +82,14 @@ func newAuditObservation(t *testing.T, mode javajive.DecompileMode, debug string
 }
 
 func auditRoundTrip(t *testing.T, pkg, body, driver, debug string, mode javajive.DecompileMode) {
+	auditRoundTripWithExpectedUnsupported(t, pkg, body, driver, debug, mode, "")
+}
+
+// auditRoundTripWithExpectedUnsupported keeps the semantic oracle strict while
+// allowing one explicitly named conservative-recovery diagnostic. The test
+// still recompiles, verifies, and executes the rebuilt classes against the
+// original output; only the public status is expected to be unsupported.
+func auditRoundTripWithExpectedUnsupported(t *testing.T, pkg, body, driver, debug string, mode javajive.DecompileMode, expectedInvoke string) {
 	t.Helper()
 	javac, java := auditTool(t, "javac"), auditTool(t, "java")
 	original, rebuilt := t.TempDir(), t.TempDir()
@@ -114,9 +123,20 @@ func auditRoundTrip(t *testing.T, pkg, body, driver, debug string, mode javajive
 		t.Fatal(err)
 	}
 	record.Decompiled = true
-	record.Stub = result.Status != "complete" || len(result.StubMethods) > 0
+	if expectedInvoke == "" {
+		record.Stub = result.Status != "complete" || len(result.StubMethods) > 0
+	} else {
+		record.Stub = result.Status != "unsupported" || len(result.StubMethods) > 0 ||
+			!hasOnlyExpectedUnsupportedDiagnostic(result.Diagnostics, expectedInvoke)
+		for _, member := range result.Members {
+			if member.State != "preserved" && member.State != "regenerated" {
+				record.Stub = true
+			}
+		}
+	}
 	if record.Stub {
-		t.Fatalf("decompilation produced a stub:\n%s", src)
+		t.Fatalf("decompilation status/stubs/diagnostics violate the expected contract: status=%s expected_invoke=%q stub_methods=%v diagnostics=%+v members=%+v\n%s",
+			result.Status, expectedInvoke, result.StubMethods, result.Diagnostics, result.Members, src)
 	}
 	writeSources(t, rebuilt, map[string]string{"Fixture.java": src, "Driver.java": runner, "AuditVerifier.java": auditVerifierSource})
 	t.Logf("decompiled source:\n%s", src)
@@ -130,6 +150,35 @@ func auditRoundTrip(t *testing.T, pkg, body, driver, debug string, mode javajive
 		t.Fatalf("behavior changed\noriginal: %q\nrebuilt: %q", record.Original, record.Rebuilt)
 	}
 
+}
+
+func hasOnlyExpectedUnsupportedDiagnostic(diagnostics []javaclassparser.DecompileDiagnostic, expectedInvoke string) bool {
+	found := false
+	unresolved := false
+	for _, diagnostic := range diagnostics {
+		switch diagnostic.Code {
+		case "overload_family_unknown":
+			if strings.Contains(diagnostic.Message, expectedInvoke) {
+				if found {
+					return false
+				}
+				found = true
+			} else if diagnostic.Message == "external overload family was not fully resolved; reconstructed binding is unverified" && !unresolved {
+				// The caller-level binding audit and expression-level planner both
+				// report the same unresolved external family. Permit that one
+				// companion diagnostic, but reject every unrelated uncertainty.
+				unresolved = true
+			} else {
+				return false
+			}
+		case "legacy_source_recovery_disabled":
+			// Precision mode reports this global policy warning; it is not a
+			// call-site uncertainty and does not weaken the targeted expectation.
+		default:
+			return false
+		}
+	}
+	return found
 }
 
 func TestAuditSemanticFamilies(t *testing.T) {

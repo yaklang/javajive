@@ -75,6 +75,16 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 	if !risk {
 		return nil, false
 	}
+	// With an exact raw receiver type, a complete Unique family, and arguments
+	// already assignable to the erased descriptor, javac has no competing
+	// overload to steal the call. In that case a widening cast is unnecessary;
+	// requiring the planner to prove a generic/access/bridge rewrite would mark
+	// valid raw calls such as List.add(String) unsupported for no source-level
+	// benefit. Parameterized receivers and incomplete/competing families still
+	// go through the conservative planner below.
+	if f.rawReceiverHasUniqueErasedBinding(ctx, owner, ps, args) {
+		return nil, false
+	}
 	plan := callbinding.Build(callbinding.Witness{Owner: owner, Name: f.FunctionName, Desc: f.Descriptor, Kind: kind, PC: f.OriginPC}, recv, args, ctx.InvocationMetadata)
 	if !plan.Supported {
 		// Existing generic target-typing paths own these calls. They must not be
@@ -105,4 +115,41 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 	}
 	out.bindingPlanned = true
 	return out, true
+}
+
+func (f *FunctionCallExpression) rawReceiverHasUniqueErasedBinding(ctx *class_context.ClassContext, owner string, params []string, args []callbinding.Argument) bool {
+	if f == nil || ctx == nil || ctx.InvocationMetadata == nil || f.Object == nil ||
+		f.IsStatic || f.Kind == InvokeStatic || f.IsSpecialInvoke || f.Kind == InvokeSpecial ||
+		len(params) != len(args) {
+		return false
+	}
+	receiverType := f.Object.Type()
+	if receiverType == nil {
+		return false
+	}
+	receiver, ok := receiverType.RawType().(*types.JavaClass)
+	if !ok {
+		return false
+	}
+	receiverOwner := strings.ReplaceAll(receiver.Name, ".", "/")
+	metadata, ok := ctx.InvocationMetadata(receiverOwner)
+	if !ok || !metadata.Public || !callbinding.Assignable("L"+receiverOwner+";", "L"+owner+";", ctx.InvocationMetadata) {
+		return false
+	}
+	kind := callbinding.Virtual
+	if metadata.IsInterface {
+		kind = callbinding.Interface
+	}
+	family, err := callbinding.FamilyOf(callbinding.Witness{
+		Owner: receiverOwner, Name: f.FunctionName, Desc: f.Descriptor, Kind: kind,
+	}, ctx.InvocationMetadata)
+	if err != nil || !family.Complete || family.Proof != callbinding.Unique {
+		return false
+	}
+	for i, arg := range args {
+		if !callbinding.Assignable(arg.Type, params[i], ctx.InvocationMetadata) {
+			return false
+		}
+	}
+	return true
 }

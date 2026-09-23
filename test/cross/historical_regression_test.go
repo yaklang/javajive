@@ -31,7 +31,18 @@ func TestAuditHistoricalReferenceDeclarations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, debug := range []string{"-g", "-g:none"} {
 				for _, mode := range []javajive.DecompileMode{javajive.Precision, javajive.Compatibility} {
-					t.Run(debug+"/"+string(mode), func(t *testing.T) { auditRoundTrip(t, "audit", tc.body, tc.driver, debug, mode) })
+					t.Run(debug+"/"+string(mode), func(t *testing.T) {
+						if tc.name == "list_reassignment" {
+							// JDK 8's bounded invocation catalog omits List, so the
+							// correct API result is explicit unsupported for add(Object).
+							// Keep the stronger source compile, verifier, and runtime
+							// comparison oracles for this case.
+							auditRoundTripWithExpectedUnsupported(t, "audit", tc.body, tc.driver, debug, mode,
+								"invoke java.util.List.add(Ljava/lang/Object;)Z")
+							return
+						}
+						auditRoundTrip(t, "audit", tc.body, tc.driver, debug, mode)
+					})
 				}
 			}
 		})
@@ -58,13 +69,14 @@ func TestAuditHistoricalTypeGraphs(t *testing.T) {
 				}, "public class Driver {public static void main(String[] x){for(int i=0;i<3;i++)System.out.println(Fixture.f(i));}}", mode)
 			})
 			t.Run("inaccessible_common_class", func(t *testing.T) {
-				auditSourceSet(t, map[string]string{
+				auditSourceSetWithLedgerExpectations(t, map[string]string{
 					"api/Common.java":  "package api;public interface Common {int id();}",
 					"impl/Hidden.java": "package impl;class Hidden implements api.Common {public int id(){return 1;}}",
 					"impl/One.java":    "package impl;public class One extends Hidden {}",
 					"impl/Two.java":    "package impl;public class Two extends Hidden {public int id(){return 2;}}",
 					"Fixture.java":     "public class Fixture {public static int f(boolean b){api.Common value=new impl.One();if(b)value=new impl.Two();return value.id();}}",
-				}, "public class Driver {public static void main(String[] x){System.out.println(Fixture.f(false));System.out.println(Fixture.f(true));}}", mode)
+				}, "public class Driver {public static void main(String[] x){System.out.println(Fixture.f(false));System.out.println(Fixture.f(true));}}", mode,
+					[]memberLedgerExpectation{{owner: "impl/One", name: "id", descriptor: "()I", state: "regenerated", evidence: "inherited bridge"}})
 			})
 			t.Run("overloaded_generic_witness", func(t *testing.T) {
 				auditSourceSet(t, map[string]string{

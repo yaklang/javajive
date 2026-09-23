@@ -7152,6 +7152,9 @@ func (d *Decompiler) ParseStatement() error {
 	if d.Work != nil && d.Work.Err() != nil {
 		return d.Work.Err()
 	}
+	if d.inlineDelegatingConstructorArrayTemp(idToOpcode) {
+		d.tracef("ctor-array-inline", "inlined first-statement array temporary into constructor delegation")
+	}
 
 	idToNode = map[int]*Node{}
 	nodes = []*Node{}

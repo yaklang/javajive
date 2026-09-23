@@ -18,6 +18,7 @@ type decompileTraceConfig struct {
 	varFold      bool
 	rewriteVar   bool
 	slotVersion  bool
+	ctorArray    bool
 }
 
 func currentTraceConfig() decompileTraceConfig {
@@ -28,6 +29,7 @@ func currentTraceConfig() decompileTraceConfig {
 		varFold:      jdecenv.Get("JDEC_TRACE_VAR_FOLD") != "",
 		rewriteVar:   jdecenv.Get("JDEC_TRACE_REWRITE_VAR") != "",
 		slotVersion:  jdecenv.Get("JDEC_TRACE_SLOT_VERSION") != "",
+		ctorArray:    jdecenv.Get("JDEC_TRACE_CTOR_ARRAY_INLINE") != "",
 	}
 }
 
@@ -45,6 +47,7 @@ func (d *Decompiler) currentTraceConfig() decompileTraceConfig {
 		varFold:      d.getenv("JDEC_TRACE_VAR_FOLD") != "",
 		rewriteVar:   d.getenv("JDEC_TRACE_REWRITE_VAR") != "",
 		slotVersion:  d.getenv("JDEC_TRACE_SLOT_VERSION") != "",
+		ctorArray:    d.getenv("JDEC_TRACE_CTOR_ARRAY_INLINE") != "",
 	}
 	d.traceCfgLoaded = true
 	return d.traceCfg
@@ -63,6 +66,10 @@ func (d *Decompiler) traceEnabled(kind string) bool {
 		}
 	case "slot-version":
 		if !cfg.slotVersion {
+			return false
+		}
+	case "ctor-array-inline":
+		if !cfg.ctorArray {
 			return false
 		}
 	default:

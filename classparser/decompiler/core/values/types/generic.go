@@ -418,7 +418,12 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 // nil (caller keeps the erased descriptor param) for raw receivers, wildcard type args, or anything
 // outside the table.
 func InstantiateJDKMethodParam(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) JavaType {
-	if len(typeArgs) == 0 {
+	// This helper is also the leaf reached when the unified hierarchy resolver
+	// walks out of the input jar and hits a JDK declaration. Keep the public
+	// umbrella switch authoritative at that boundary too; otherwise
+	// JDEC_GENERIC_PARAM_INFER_OFF disables direct call-site inference but leaves
+	// inherited JDK fallbacks active (e.g. jar class -> List<String>.add).
+	if jdecenv.Get("JDEC_GENERIC_PARAM_INFER_OFF") != "" || len(typeArgs) == 0 {
 		return nil
 	}
 	idx := jdkMethodParamTypeArgIndex(rawClass, method, argc, paramIndex, len(typeArgs))
