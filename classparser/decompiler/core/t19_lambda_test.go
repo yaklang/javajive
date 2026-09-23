@@ -1,12 +1,14 @@
 package core
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func t19IntOpType() types.JavaType {
@@ -112,6 +114,61 @@ func TestTaskT19MethodRefKindIdentity(t *testing.T) {
 	}
 	if got := t19RenderMethodRef(ctx, RefNewInvokeSpecial, "[I", "<init>", nil); got != "int[]::new" {
 		t.Fatalf("array ctor ref: %s", got)
+	}
+	for _, tc := range []struct {
+		kind     uint8
+		owner    string
+		member   string
+		captured []values.JavaValue
+	}{
+		{RefNewInvokeSpecial, "MethodRefs", "<init>", nil},
+		{RefInvokeStatic, "MethodRefs", "st", nil},
+		{RefInvokeVirtual, "MethodRefs", "inst", []values.JavaValue{recv}},
+		{RefInvokeVirtual, "java.lang.String", "length", nil},
+		{RefNewInvokeSpecial, "[I", "<init>", nil},
+	} {
+		out := workbudget.NewWriter(nil)
+		if err := t19WriteMethodRef(ctx, out, tc.kind, tc.owner, tc.member, tc.captured); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := out.String(), t19RenderMethodRef(ctx, tc.kind, tc.owner, tc.member, tc.captured); got != want {
+			t.Fatalf("streamed method reference changed: got=%q want=%q", got, want)
+		}
+	}
+}
+
+func TestTaskT19BudgetedLambdaCaptureRender(t *testing.T) {
+	body := "() -> { return \x00LCAP0\x00 + \x00LCAP1\x00; }"
+	captured := []values.JavaValue{
+		values.NewJavaLiteral("first", types.NewJavaClass("java.lang.String")),
+		values.NewJavaLiteral("second", types.NewJavaClass("java.lang.String")),
+	}
+	want := `() -> { return "first" + "second"; }`
+	value := values.NewStreamingCustomValue(func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
+		return t19WriteLambdaBody(ctx, out, body, captured, "")
+	}, func() types.JavaType { return types.NewJavaClass("java.lang.String") })
+	if got := value.String(&class_context.ClassContext{}); got != want {
+		t.Fatalf("unlimited output changed: got=%q want=%q", got, want)
+	}
+	for _, tc := range []struct {
+		max      int64
+		wantFail bool
+	}{{int64(len(want) - 1), true}, {int64(len(want)), false}, {int64(len(want) + 1), false}} {
+		ctx := &class_context.ClassContext{Work: workbudget.New(context.Background(), workbudget.Limits{MaxOutputBytes: tc.max})}
+		got := value.String(ctx)
+		if tc.wantFail {
+			if !workbudget.Is(ctx.Work.Err()) || got == want || len(got) >= len(want) {
+				t.Fatalf("cap=%d should reject incomplete lambda: got=%q err=%v", tc.max, got, ctx.Work.Err())
+			}
+		} else if ctx.Work.Err() != nil || got != want {
+			t.Fatalf("cap=%d changed lambda: got=%q want=%q err=%v", tc.max, got, want, ctx.Work.Err())
+		}
+	}
+
+	castBody := "() -> { return value; }"
+	projected, ok := lambdaReturnCastOutputLen(castBody, "T")
+	if !ok || projected != int64(len(injectLambdaReturnCast(castBody, "T"))) {
+		t.Fatalf("cast allocation preflight inaccurate: projected=%d ok=%v actual=%d", projected, ok, len(injectLambdaReturnCast(castBody, "T")))
 	}
 }
 

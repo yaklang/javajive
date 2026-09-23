@@ -2,6 +2,8 @@ package core
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -239,46 +241,16 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 		retTypevarCast = lambdaReturnPositionTypevar(resultType, instantiatedMT)
 	}
 	typ := resultType
-	stringFn := func(funcCtx *class_context.ClassContext) string {
-		if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.RenderGuarded() {
-			if err := funcCtx.Work.Check(); err != nil {
-				return ""
-			}
-		}
-		s := methodStr
-		for i, ca := range captured {
-			name := ""
-			if ca != nil {
-				name = ca.String(funcCtx)
-			}
-			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() != nil {
-				return ""
-			}
-			s = strings.ReplaceAll(s, fmt.Sprintf("\x00LCAP%d\x00", i), name)
-		}
-		if retTypevarCast != "" {
-			castTarget := resolveLambdaReturnTypevar(funcCtx, retTypevarCast)
-			if castTarget != "" {
-				s = injectLambdaReturnCast(s, castTarget)
-			}
-		}
-		if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.RenderGuarded() {
-			w := workbudget.NewWriter(funcCtx.Work)
-			w.SetBase(funcCtx.OutputHeld)
-			if err := w.WriteString(s); err != nil {
-				return ""
-			}
-			return w.String()
-		}
-		return s
+	writeFn := func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
+		return t19WriteLambdaBody(funcCtx, out, methodStr, captured, retTypevarCast)
 	}
-	cv := values.NewCustomValue(stringFn, func() types.JavaType { return typ }, lambdaReplace)
+	cv := values.NewStreamingCustomValue(writeFn, func() types.JavaType { return typ }, lambdaReplace)
 	cv.Flag = "lambda"
 	cv.NoOuterCapture = len(captured) == 0
 	if len(static) >= 3 {
 		if upgradedType := inferLambdaTypeFromInstantiated(typ, static[2]); upgradedType != nil {
 			lambdaType := upgradedType
-			cv = values.NewCustomValue(cv.StringFunc, func() types.JavaType { return lambdaType }, lambdaReplace)
+			cv = cv.WithType(func() types.JavaType { return lambdaType })
 			cv.Flag = "lambda"
 			cv.NoOuterCapture = len(captured) == 0
 		}
@@ -311,8 +283,8 @@ func t19MethodRef(req CallSiteRequest, d *Decompiler, static []values.JavaValue,
 	kind := impl.RefKind
 	member := impl.Member
 	owner := impl.Name
-	refVal := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-		return t19RenderMethodRef(funcCtx, kind, owner, member, capturedArgs)
+	refVal := values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
+		return t19WriteMethodRef(funcCtx, out, kind, owner, member, capturedArgs)
 	}, func() types.JavaType {
 		return refType
 	}, refReplace)
@@ -352,6 +324,149 @@ func t19RenderMethodRef(funcCtx *class_context.ClassContext, kind uint8, owner, 
 		}
 		return typeName + "::" + class_context.SafeIdentifier(member)
 	}
+}
+
+func t19WriteMethodRef(funcCtx *class_context.ClassContext, out *workbudget.Writer, kind uint8, owner, member string, captured []values.JavaValue) error {
+	typeName := t19OwnerSource(owner, funcCtx)
+	if member == "<init>" || kind == RefNewInvokeSpecial {
+		name := "new"
+		if jdecenv.Get("JDEC_CTOR_METHODREF_FIX_OFF") != "" {
+			name = class_context.SafeIdentifier("new")
+		}
+		return writeMethodReference(out, typeName, name)
+	}
+	if strings.HasPrefix(owner, "[") && member == "new" {
+		return writeMethodReference(out, typeName, "new")
+	}
+	name := class_context.SafeIdentifier(member)
+	switch kind {
+	case RefInvokeVirtual, RefInvokeSpecial, RefInvokeInterface:
+		if len(captured) > 0 && captured[0] != nil {
+			if err := out.WriteString(captured[0].String(funcCtx)); err != nil {
+				return err
+			}
+			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() != nil {
+				return funcCtx.Work.Err()
+			}
+			if err := out.WriteString("::"); err != nil {
+				return err
+			}
+			return out.WriteString(name)
+		}
+	case RefInvokeStatic:
+	default:
+		if len(captured) > 0 && captured[0] != nil {
+			if err := out.WriteString(captured[0].String(funcCtx)); err != nil {
+				return err
+			}
+			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() != nil {
+				return funcCtx.Work.Err()
+			}
+			if err := out.WriteString("::"); err != nil {
+				return err
+			}
+			return out.WriteString(name)
+		}
+	}
+	return writeMethodReference(out, typeName, name)
+}
+
+func writeMethodReference(out *workbudget.Writer, owner, member string) error {
+	if err := out.WriteString(owner); err != nil {
+		return err
+	}
+	if err := out.WriteString("::"); err != nil {
+		return err
+	}
+	return out.WriteString(member)
+}
+
+// t19WriteLambdaBody substitutes capture placeholders directly into the
+// budget-aware writer. The erased method body stays as the existing input
+// string; we avoid building a second full-size string for each capture.
+func t19WriteLambdaBody(funcCtx *class_context.ClassContext, out *workbudget.Writer, methodBody string, captured []values.JavaValue, returnTypevar string) error {
+	body := methodBody
+	if returnTypevar != "" {
+		if castTarget := resolveLambdaReturnTypevar(funcCtx, returnTypevar); castTarget != "" {
+			if projected, ok := lambdaReturnCastOutputLen(body, castTarget); ok {
+				if funcCtx != nil && funcCtx.Work != nil {
+					if err := funcCtx.CheckAlloc(projected); err != nil {
+						return err
+					}
+				}
+				body = injectLambdaReturnCast(body, castTarget)
+			}
+		}
+	}
+	for cursor := 0; cursor < len(body); {
+		nul := strings.IndexByte(body[cursor:], 0)
+		if nul < 0 {
+			return out.WriteString(body[cursor:])
+		}
+		nul += cursor
+		if err := out.WriteString(body[cursor:nul]); err != nil {
+			return err
+		}
+		endRel := strings.IndexByte(body[nul+1:], 0)
+		if endRel < 0 {
+			return out.WriteString(body[nul:])
+		}
+		end := nul + 1 + endRel
+		marker := body[nul+1 : end]
+		if !strings.HasPrefix(marker, "LCAP") {
+			if err := out.WriteString(body[nul : nul+1]); err != nil {
+				return err
+			}
+			cursor = nul + 1
+			continue
+		}
+		captureIndex, err := strconv.Atoi(marker[len("LCAP"):])
+		if err != nil || captureIndex < 0 || captureIndex >= len(captured) {
+			if writeErr := out.WriteString(body[nul : end+1]); writeErr != nil {
+				return writeErr
+			}
+			cursor = end + 1
+			continue
+		}
+		if captured[captureIndex] != nil {
+			if err := out.WriteString(captured[captureIndex].String(funcCtx)); err != nil {
+				return err
+			}
+			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() != nil {
+				return funcCtx.Work.Err()
+			}
+		}
+		cursor = end + 1
+	}
+	return nil
+}
+
+func lambdaReturnCastOutputLen(body, typevar string) (int64, bool) {
+	idx := strings.LastIndex(body, "return ")
+	if idx < 0 {
+		return int64(len(body)), false
+	}
+	exprStart := idx + len("return ")
+	skipped := 0
+	for exprStart+skipped < len(body) && (body[exprStart+skipped] == ' ' || body[exprStart+skipped] == '\t') {
+		skipped++
+	}
+	rest := body[exprStart+skipped:]
+	if strings.HasPrefix(rest, ";") {
+		return int64(len(body)), false
+	}
+	end := strings.IndexByte(rest, ';')
+	if end < 0 {
+		return int64(len(body)), false
+	}
+	expr := strings.TrimSpace(rest[:end])
+	castBytes := int64(len(typevar)) + int64(len(expr)) + 6 // `(T) (expr);`
+	removed := skipped + end + 1
+	base := int64(len(body) - removed)
+	if base > math.MaxInt64-castBytes {
+		return math.MaxInt64, true
+	}
+	return base + castBytes, true
 }
 
 func t19UpgradeFI(rawType types.JavaType, instantiatedMethodType values.JavaValue) types.JavaType {

@@ -2,6 +2,7 @@ package values
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -202,18 +203,41 @@ func TestT22DeepTreeHitsASTDepth(t *testing.T) {
 }
 
 func TestT22CustomValueCallbackBoundedAfterEmit(t *testing.T) {
-	huge := strings.Repeat("x", 400)
+	called := false
 	cv := NewCustomValue(func(*class_context.ClassContext) string {
-		return huge
+		called = true
+		return strings.Repeat("x", 400)
 	}, func() types.JavaType { return types.NewJavaClass("java.lang.String") })
 	ctx := &class_context.ClassContext{
 		Work: workbudget.New(context.Background(), workbudget.Limits{MaxOutputBytes: 32}),
 	}
 	got := cv.String(ctx)
-	if got == huge {
-		t.Fatal("opaque CustomValue returned unbounded payload as success")
+	if called {
+		t.Fatal("opaque callback ran before its output could be bounded")
 	}
-	if !workbudget.Is(ctx.Work.Err()) {
+	if got != "" {
+		t.Fatalf("rejected opaque callback returned %q", got)
+	}
+	var budgetErr *workbudget.Error
+	if !errors.As(ctx.Work.Err(), &budgetErr) || budgetErr.Kind != workbudget.KindResource || budgetErr.Counter != workbudget.CounterOutputBytes {
 		t.Fatalf("want budget error, got %v result=%q", ctx.Work.Err(), got)
 	}
+	if !strings.Contains(budgetErr.Error(), "opaque renderer") {
+		t.Fatalf("missing rejection reason: %v", budgetErr)
+	}
+}
+
+func TestT22StreamingCustomValueChecksBeforeEachAppend(t *testing.T) {
+	const source = "(this).toString()"
+	assertPublicOutputLpm1(t, "streamed custom", int64(len(source)), func(ctx *class_context.ClassContext) string {
+		cv := NewStreamingCustomValue(func(_ *class_context.ClassContext, out *workbudget.Writer) error {
+			for _, part := range []string{"(this)", ".toString", "()"} {
+				if err := out.WriteString(part); err != nil {
+					return err
+				}
+			}
+			return nil
+		}, func() types.JavaType { return types.NewJavaClass("java.lang.String") })
+		return cv.String(ctx)
+	})
 }

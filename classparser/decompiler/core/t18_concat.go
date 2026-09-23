@@ -191,8 +191,8 @@ func t18ConcatValue(eval []values.JavaValue, extra []values.JavaValue, resultTyp
 
 func t18ConcatValueFromParts(kinds []byte, lits []string, ops []values.JavaValue, tracked []values.JavaValue, resultType types.JavaType) values.JavaValue {
 	typ := resultType
-	cv := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-		return t18RenderParts(kinds, lits, ops, funcCtx)
+	cv := values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
+		return t18WriteParts(kinds, lits, ops, funcCtx, out)
 	}, func() types.JavaType {
 		if typ == nil {
 			return types.NewJavaPrimer(types.JavaString)
@@ -216,20 +216,18 @@ func t18ConcatValueFromParts(kinds []byte, lits []string, ops []values.JavaValue
 	return cv
 }
 
-func t18RenderParts(kinds []byte, lits []string, ops []values.JavaValue, funcCtx *class_context.ClassContext) string {
+func t18WriteParts(kinds []byte, lits []string, ops []values.JavaValue, funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
 	if len(kinds) == 0 {
-		return `""`
+		return out.WriteString(`""`)
 	}
-	rendered := make([]string, 0, len(kinds)+1)
-	var firstVal values.JavaValue
 	firstSet := false
 	for i, k := range kinds {
 		var piece string
 		var val values.JavaValue
 		switch k {
 		case 0:
-			piece = values.JavaUnitsToStringLiteral(utf16.Encode([]rune(lits[i])))
 			val = values.NewJavaLiteral(lits[i], types.NewJavaPrimer(types.JavaString))
+			piece = val.String(funcCtx)
 		case 1, 2:
 			val = ops[i]
 			if k == 2 {
@@ -239,55 +237,35 @@ func t18RenderParts(kinds []byte, lits []string, ops []values.JavaValue, funcCtx
 			}
 		}
 		if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() != nil {
-			return ""
+			return funcCtx.Work.Err()
 		}
 		if piece == "" {
 			continue
 		}
 		if !firstSet {
-			firstVal = val
-			firstSet = true
-		}
-		rendered = append(rendered, piece)
-	}
-	if len(rendered) == 0 {
-		return `""`
-	}
-	seed := t18NeedsStringSeed(firstVal, rendered[0])
-	if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.RenderGuarded() {
-		w := workbudget.NewWriter(funcCtx.Work)
-		w.SetBase(funcCtx.OutputHeld)
-		if seed {
-			if err := w.WriteString(`"" + `); err != nil {
-				return ""
-			}
-		}
-		for i, piece := range rendered {
-			if i > 0 {
-				if err := w.WriteString(" + "); err != nil {
-					return ""
+			if t18NeedsStringSeed(val, piece) {
+				if err := out.WriteString(`"" + `); err != nil {
+					return err
 				}
 			}
-			if err := w.WriteString(piece); err != nil {
-				return ""
-			}
+			firstSet = true
+		} else if err := out.WriteString(" + "); err != nil {
+			return err
 		}
-		return w.String()
+		if err := out.WriteString(piece); err != nil {
+			return err
+		}
 	}
-	out := rendered[0]
-	for i := 1; i < len(rendered); i++ {
-		out = out + " + " + rendered[i]
+	if !firstSet {
+		return out.WriteString(`""`)
 	}
-	if seed {
-		out = `"" + ` + out
-	}
-	return out
+	return nil
 }
 
 func t18RenderConst(v values.JavaValue, funcCtx *class_context.ClassContext) string {
 	v = values.UnpackSoltValue(v)
 	if units, ok := LiteralStringUnits(v); ok {
-		return values.JavaUnitsToStringLiteral(units)
+		return (&values.JavaLiteral{Data: units, Units: units, JavaType: types.NewJavaClass("java.lang.String")}).String(funcCtx)
 	}
 	return t18RenderOperand(v, funcCtx)
 }

@@ -496,6 +496,96 @@ func (b *Budget) RemainingOutput() int64 {
 	return limit - used
 }
 
+// HasOutputLimit reports whether rendering has an explicit output cap. It is
+// used by legacy renderers that cannot prove an allocation bound before they
+// run; zero keeps the public "unlimited" meaning.
+func (b *Budget) HasOutputLimit() bool {
+	return b != nil && b.limits.MaxOutputBytes > 0
+}
+
+// RejectUnboundedRender fails closed before an opaque renderer can allocate a
+// complete string. Budget-aware renderers should use Writer instead. The
+// reason is attached to the sticky resource error because no exact prospective
+// byte count exists for an opaque callback.
+func (b *Budget) RejectUnboundedRender() error {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.checkCancelLocked(); err != nil {
+		return err
+	}
+	if b.err != nil {
+		return b.err
+	}
+	fail := &Error{
+		Kind:    KindResource,
+		Counter: CounterOutputBytes,
+		Used:    b.used[CounterOutputBytes],
+		Limit:   b.limits.MaxOutputBytes,
+		Err:     errors.New("opaque renderer has no pre-allocation output bound"),
+	}
+	b.err = fail
+	return fail
+}
+
+// FailRender makes a renderer's non-budget failure sticky and fail-closed.
+// Writer operations normally set the budget error themselves; this covers a
+// renderer that rejects an input without a Writer operation causing failure.
+func (b *Budget) FailRender(err error) error {
+	if b == nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if cancelErr := b.checkCancelLocked(); cancelErr != nil {
+		return cancelErr
+	}
+	if b.err != nil {
+		return b.err
+	}
+	if err == nil {
+		err = errors.New("bounded renderer failed")
+	}
+	fail := &Error{
+		Kind:    KindResource,
+		Counter: CounterOutputBytes,
+		Used:    b.used[CounterOutputBytes],
+		Limit:   b.limits.MaxOutputBytes,
+		Err:     fmt.Errorf("bounded renderer failed: %w", err),
+	}
+	b.err = fail
+	return fail
+}
+
+// FailOutputOverflow records an unrepresentable retained-output size. It is
+// sticky even when the configured output cap is unlimited: integer wraparound
+// must never turn an impossible size into a successful budget check.
+func (b *Budget) FailOutputOverflow() error {
+	fail := &Error{
+		Kind:    KindResource,
+		Counter: CounterOutputBytes,
+		Used:    math.MaxInt64,
+		Limit:   0,
+		Err:     errors.New("output byte count overflow"),
+	}
+	if b == nil {
+		return fail
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if cancelErr := b.checkCancelLocked(); cancelErr != nil {
+		return cancelErr
+	}
+	if b.err != nil {
+		return b.err
+	}
+	fail.Limit = b.limits.MaxOutputBytes
+	b.err = fail
+	return fail
+}
+
 // Writer is a bounded strings.Builder. Each WriteString checks the derived
 // intermediate cap and MaxOutputBytes (base + buffer length) before appending.
 type Writer struct {
@@ -510,6 +600,9 @@ func NewWriter(work *Budget) *Writer {
 
 func (w *Writer) SetBase(held int64) {
 	if w != nil {
+		if held < 0 {
+			held = 0
+		}
 		w.base = held
 	}
 }
@@ -522,7 +615,11 @@ func (w *Writer) WriteString(s string) error {
 	if err := w.work.CheckAlloc(n); err != nil {
 		return err
 	}
-	next := w.base + int64(w.buf.Len()) + n
+	current := int64(w.buf.Len())
+	if current > math.MaxInt64-w.base || n > math.MaxInt64-w.base-current {
+		return w.work.FailOutputOverflow()
+	}
+	next := w.base + current + n
 	if err := w.work.CheckOutput(next); err != nil {
 		return err
 	}

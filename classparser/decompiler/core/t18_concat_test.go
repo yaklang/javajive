@@ -1,12 +1,14 @@
 package core
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func t18StringType() types.JavaType {
@@ -222,4 +224,28 @@ func TestTaskT18NullObjectCast(t *testing.T) {
 		t.Fatalf("T18-C01 expected Object-null concat form: %s", src)
 	}
 	t.Logf("T18-C01 unit render: %s", src)
+}
+
+func TestTaskT18ConcatRendererHonorsExactOutputCap(t *testing.T) {
+	value := t18ConcatValueFromParts([]byte{0, 0}, []string{"left", "right"}, nil, nil, t18StringType())
+	want := value.String(nil)
+	if want != `"left" + "right"` {
+		t.Fatalf("unlimited source changed: got %q", want)
+	}
+	for _, tc := range []struct {
+		max      int64
+		wantFail bool
+	}{{int64(len(want) - 1), true}, {int64(len(want)), false}, {int64(len(want) + 1), false}} {
+		ctx := &class_context.ClassContext{Work: workbudget.New(context.Background(), workbudget.Limits{MaxOutputBytes: tc.max})}
+		got := value.String(ctx)
+		if tc.wantFail {
+			if !workbudget.Is(ctx.Work.Err()) || got == want || len(got) >= len(want) {
+				t.Fatalf("cap=%d should reject incomplete output: got=%q err=%v", tc.max, got, ctx.Work.Err())
+			}
+			continue
+		}
+		if ctx.Work.Err() != nil || got != want {
+			t.Fatalf("cap=%d changed exact source: got=%q want=%q err=%v", tc.max, got, want, ctx.Work.Err())
+		}
+	}
 }

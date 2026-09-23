@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -225,5 +226,21 @@ func TestWriterBoundsRetainedOutput(t *testing.T) {
 	}
 	if w.String() != "abcd" {
 		t.Fatalf("partial keep: %q", w.String())
+	}
+}
+
+func TestWriterBaseOverflowFailsClosedBeforeAppend(t *testing.T) {
+	b := New(context.Background(), Limits{})
+	w := NewWriter(b)
+	w.SetBase(math.MaxInt64 - 1)
+	if err := w.WriteString("xx"); err == nil || !Is(err) {
+		t.Fatalf("output count overflow accepted: %v", err)
+	}
+	if w.Len() != 0 {
+		t.Fatalf("overflow appended bytes before rejecting: %q", w.String())
+	}
+	var be *Error
+	if !errors.As(b.Err(), &be) || be.Counter != CounterOutputBytes || !strings.Contains(be.Error(), "overflow") {
+		t.Fatalf("missing sticky output overflow evidence: %v", b.Err())
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func init() {
@@ -75,25 +76,42 @@ func validateConcatRequest(req CallSiteRequest) error {
 func renderMakeConcatPlus(req CallSiteRequest, resultType types.JavaType) values.JavaValue {
 	args := append([]values.JavaValue(nil), req.DynamicArgs...)
 	typ := resultType
-	return values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+	return values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
 		if len(args) == 0 {
-			return `""`
+			return out.WriteString(`""`)
 		}
-		parts := make([]string, 0, len(args))
 		// DynamicArgs arrive in the same order as the old invokedynamic pop loop
 		// (last param first). Restore left-to-right evaluation.
 		for i := len(args) - 1; i >= 0; i-- {
-			s := args[i].String(funcCtx)
-			if concatArgNeedsParens(args[i]) {
-				s = "(" + s + ")"
+			arg := args[i]
+			if i != len(args)-1 {
+				if err := out.WriteString(" + "); err != nil {
+					return err
+				}
 			}
-			parts = append(parts, s)
+			paren := concatArgNeedsParens(arg)
+			if paren {
+				if err := out.WriteString("("); err != nil {
+					return err
+				}
+			}
+			s := ""
+			if arg != nil {
+				s = arg.String(funcCtx)
+			}
+			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() != nil {
+				return funcCtx.Work.Err()
+			}
+			if err := out.WriteString(s); err != nil {
+				return err
+			}
+			if paren {
+				if err := out.WriteString(")"); err != nil {
+					return err
+				}
+			}
 		}
-		out := parts[0]
-		for i := 1; i < len(parts); i++ {
-			out = out + " + " + parts[i]
-		}
-		return out
+		return nil
 	}, func() types.JavaType {
 		if typ == nil {
 			return types.NewJavaPrimer(types.JavaString)

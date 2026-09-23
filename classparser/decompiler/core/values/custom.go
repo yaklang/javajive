@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type CustomValue struct {
@@ -34,6 +35,7 @@ type CustomValue struct {
 	// branch; consumed by ctorRawFISAMMethodRefCast (renderArgAt). Empty/unused for lambdas and non-FI uses.
 	InstantiatedMtdDesc string
 	StringFunc          func(funcCtx *class_context.ClassContext) string
+	WriteFunc           func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error
 	TypeFunc            func() types.JavaType
 	ReplaceFunc         func(oldId *utils.VariableId, newId *utils.VariableId)
 }
@@ -56,13 +58,34 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 		}
 		defer endValueRender(funcCtx)
 	}
-	if v.StringFunc == nil {
+	if v.StringFunc == nil && v.WriteFunc == nil {
 		return ""
 	}
 	if guard {
 		if err := funcCtx.Work.Check(); err != nil {
 			return ""
 		}
+	}
+	if guard && funcCtx.Work.HasOutputLimit() && v.WriteFunc == nil {
+		funcCtx.Work.RejectUnboundedRender()
+		return ""
+	}
+	if v.WriteFunc != nil {
+		out := workbudget.NewWriter(nil)
+		if guard {
+			out = workbudget.NewWriter(funcCtx.Work)
+			out.SetBase(funcCtx.OutputHeld)
+		}
+		if err := v.WriteFunc(funcCtx, out); err != nil {
+			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() == nil {
+				funcCtx.Work.FailRender(err)
+			}
+			return ""
+		}
+		if guard && renderRejected(funcCtx) {
+			return ""
+		}
+		return out.String()
 	}
 	s := v.StringFunc(funcCtx)
 	if renderRejected(funcCtx) {
@@ -81,9 +104,22 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 	return s
 }
 
-// Opaque StringFunc may still allocate before CheckAlloc. Production concat
-// (T18) writes through workbudget.Writer; lambda capture splicing checks then
-// WriteString the joined body. Condy placeholders are tiny format strings.
+// WithType returns a shallow copy with a replacement type function. Unlike
+// reconstructing a CustomValue from StringFunc, it preserves a bounded writer
+// and the capture/replace metadata.
+func (v *CustomValue) WithType(typeFunc func() types.JavaType) *CustomValue {
+	if v == nil {
+		return nil
+	}
+	copy := *v
+	copy.TypeFunc = typeFunc
+	return &copy
+}
+
+// NewCustomValue is the compatibility constructor for an opaque string
+// callback. It remains usable with unlimited output or AST-depth-only budgets,
+// but an explicit output cap rejects it before callback execution. Renderers
+// that can include class-file-controlled text should use NewStreamingCustomValue.
 func NewCustomValue(stringFun func(funcCtx *class_context.ClassContext) string, typeFunc func() types.JavaType, replaceFunc ...func(oldId *utils.VariableId, newId *utils.VariableId)) *CustomValue {
 	var rf func(oldId *utils.VariableId, newId *utils.VariableId)
 	if len(replaceFunc) > 0 {
@@ -91,6 +127,21 @@ func NewCustomValue(stringFun func(funcCtx *class_context.ClassContext) string, 
 	}
 	return &CustomValue{
 		StringFunc:  stringFun,
+		TypeFunc:    typeFunc,
+		ReplaceFunc: rf,
+	}
+}
+
+// NewStreamingCustomValue creates a CustomValue whose output is charged before
+// each append when request output limits are enabled. Prefer it for any
+// callback that can incorporate class-file-controlled text or child values.
+func NewStreamingCustomValue(writeFun func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error, typeFunc func() types.JavaType, replaceFunc ...func(oldId *utils.VariableId, newId *utils.VariableId)) *CustomValue {
+	var rf func(oldId *utils.VariableId, newId *utils.VariableId)
+	if len(replaceFunc) > 0 {
+		rf = replaceFunc[0]
+	}
+	return &CustomValue{
+		WriteFunc:   writeFun,
 		TypeFunc:    typeFunc,
 		ReplaceFunc: rf,
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type BuildinBootstrapMethod func(d *Decompiler, sim StackSimulation, typ types.JavaType, args ...values.JavaValue) (values.JavaValue, error)
@@ -198,18 +199,8 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					}
 					retTypevarCast = lambdaReturnPositionTypevar(typ, instantiatedMT)
 				}
-				cv := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-					s := methodStr
-					for i, ca := range captured {
-						s = strings.ReplaceAll(s, fmt.Sprintf("\x00LCAP%d\x00", i), ca.String(funcCtx))
-					}
-					if retTypevarCast != "" {
-						castTarget := resolveLambdaReturnTypevar(funcCtx, retTypevarCast)
-						if castTarget != "" {
-							s = injectLambdaReturnCast(s, castTarget)
-						}
-					}
-					return s
+				cv := values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
+					return t19WriteLambdaBody(funcCtx, out, methodStr, captured, retTypevarCast)
 				}, func() types.JavaType {
 					return typ
 				}, lambdaReplace)
@@ -225,9 +216,9 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				if len(args1) >= 3 {
 					if upgradedType := inferLambdaTypeFromInstantiated(typ, args1[2]); upgradedType != nil {
 						lambdaType := upgradedType
-						cv = values.NewCustomValue(cv.StringFunc, func() types.JavaType {
+						cv = cv.WithType(func() types.JavaType {
 							return lambdaType
-						}, lambdaReplace)
+						})
 						cv.Flag = "lambda"
 						cv.NoOuterCapture = len(captured) == 0
 					}
