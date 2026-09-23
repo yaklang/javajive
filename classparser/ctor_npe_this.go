@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -247,6 +248,175 @@ func expandEnumClinitLocals(body string, blockStart, blockEnd, before int, inden
 type enumLocalDecl struct {
 	rangeSpan enumSourceRange
 	rhs       string
+}
+
+// expandEnumClinitDirectArgumentLocals expands direct local arguments from a
+// compiler-generated enum constructor call. It only moves a run of unique,
+// single-use local initializers when their declaration order is identical to
+// the constructor argument order and no other statement lies between them.
+// This is the shape javac emits when an enum argument stack is spilled into
+// locals; preserving that order also preserves side effects inside initializers.
+func expandEnumClinitDirectArgumentLocals(body string, blockStart, blockEnd, before int, indent string, args []string) ([]string, []enumSourceRange, bool, bool) {
+	names := make([]string, 0, len(args))
+	argNames := make(map[int]string)
+	seen := make(map[string]bool)
+	for i, arg := range args {
+		tokens := enumLocalTokens(arg)
+		if len(tokens) == 0 {
+			continue
+		}
+		name := strings.TrimSpace(arg)
+		if len(tokens) != 1 || name != tokens[0] || seen[name] {
+			return nil, nil, true, false
+		}
+		seen[name] = true
+		names = append(names, name)
+		argNames[i] = name
+	}
+	if len(names) == 0 {
+		return args, nil, false, true
+	}
+	for i, arg := range args {
+		if _, isLocal := argNames[i]; !isLocal && !enumSafeMovedArgument(arg) {
+			return nil, nil, true, false
+		}
+	}
+	if blockStart < 0 || blockEnd > len(body) || before <= blockStart || before > blockEnd {
+		return nil, nil, true, false
+	}
+	block := body[blockStart:blockEnd]
+	decls := make(map[string]enumLocalDecl, len(names))
+	lastStart := -1
+	for _, name := range names {
+		if enumIdentifierCount(block, name) != 2 {
+			return nil, nil, true, false
+		}
+		decl, ok := findEnumLocalDeclaration(body, blockStart, before, indent, name)
+		if !ok || decl.rangeSpan.start <= lastStart {
+			return nil, nil, true, false
+		}
+		if len(enumLocalTokens(decl.rhs)) != 0 {
+			return nil, nil, true, false
+		}
+		decls[name] = decl
+		lastStart = decl.rangeSpan.start
+	}
+
+	// The declarations must form one uninterrupted run, in the same order as
+	// their arguments. Crossing an arbitrary statement could move a call,
+	// assignment, or exception point across enum construction.
+	first := decls[names[0]].rangeSpan.start
+	expected := 0
+	for lineStart := first; lineStart < before; {
+		lineEnd := strings.IndexByte(body[lineStart:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(body)
+		} else {
+			lineEnd += lineStart
+		}
+		if strings.TrimSpace(body[lineStart:lineEnd]) != "" {
+			if expected >= len(names) {
+				return nil, nil, true, false
+			}
+			decl, name, ok := parseEnumLocalInitializerLine(body, lineStart, lineEnd, indent)
+			if !ok || name != names[expected] || decl.rangeSpan.start != decls[name].rangeSpan.start {
+				return nil, nil, true, false
+			}
+			expected++
+		}
+		if lineEnd == len(body) {
+			break
+		}
+		lineStart = lineEnd + 1
+	}
+	if expected != len(names) {
+		return nil, nil, true, false
+	}
+
+	expanded := append([]string(nil), args...)
+	removals := make([]enumSourceRange, 0, len(names))
+	for i, name := range argNames {
+		decl := decls[name]
+		expanded[i] = replaceEnumIdentifier(expanded[i], name, decl.rhs)
+		removals = append(removals, decl.rangeSpan)
+	}
+	return expanded, removals, true, true
+}
+
+func findEnumLocalDeclaration(body string, blockStart, before int, indent, name string) (enumLocalDecl, bool) {
+	lineStart := strings.IndexByte(body[blockStart:before], '\n')
+	if lineStart < 0 {
+		return enumLocalDecl{}, false
+	}
+	lineStart += blockStart + 1
+	var found enumLocalDecl
+	count := 0
+	for lineStart < before {
+		lineEnd := strings.IndexByte(body[lineStart:before], '\n')
+		if lineEnd < 0 {
+			lineEnd = before
+		} else {
+			lineEnd += lineStart
+		}
+		decl, candidate, ok := parseEnumLocalInitializerLine(body, lineStart, lineEnd, indent)
+		if ok && candidate == name {
+			found = decl
+			count++
+		}
+		if lineEnd == before {
+			break
+		}
+		lineStart = lineEnd + 1
+	}
+	return found, count == 1
+}
+
+func parseEnumLocalInitializerLine(body string, lineStart, lineEnd int, indent string) (enumLocalDecl, string, bool) {
+	if lineStart < 0 || lineEnd > len(body) || lineStart >= lineEnd || enumLineIndent(body, lineStart) != indent {
+		return enumLocalDecl{}, "", false
+	}
+	line := strings.TrimSpace(body[lineStart:lineEnd])
+	if !strings.HasSuffix(line, ";") {
+		return enumLocalDecl{}, "", false
+	}
+	eq := strings.Index(line, " = ")
+	if eq < 0 {
+		return enumLocalDecl{}, "", false
+	}
+	lhs := strings.Fields(strings.TrimSpace(line[:eq]))
+	if len(lhs) < 2 {
+		return enumLocalDecl{}, "", false
+	}
+	name := lhs[len(lhs)-1]
+	if !isEnumTempName(name) {
+		return enumLocalDecl{}, "", false
+	}
+	rhs := strings.TrimSpace(strings.TrimSuffix(line[eq+3:], ";"))
+	if rhs == "" {
+		return enumLocalDecl{}, "", false
+	}
+	end := lineEnd
+	if end < len(body) && body[end] == '\n' {
+		end++
+	}
+	return enumLocalDecl{rangeSpan: enumSourceRange{lineStart, end}, rhs: rhs}, name, true
+}
+
+var enumMovedNumber = regexp.MustCompile(`^[+-]?(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|(?:[0-9][0-9_]*)(?:\.[0-9_]*)?(?:[eE][+-]?[0-9_]+)?)(?:[fFdDlL])?$`)
+var enumMovedZeroArray = regexp.MustCompile(`^new\s+[A-Za-z_$][A-Za-z0-9_.$]*\s*\[\s*0\s*\]$`)
+
+func enumSafeMovedArgument(expression string) bool {
+	expression = strings.TrimSpace(expression)
+	for len(expression) > 1 && expression[0] == '(' && enumMatchingDelimiter(expression, 0, '(', ')') == len(expression)-1 {
+		expression = strings.TrimSpace(expression[1 : len(expression)-1])
+	}
+	if expression == "null" || expression == "true" || expression == "false" || enumMovedNumber.MatchString(expression) || enumMovedZeroArray.MatchString(expression) {
+		return true
+	}
+	if _, err := strconv.Unquote(expression); err == nil {
+		return true
+	}
+	return false
 }
 
 func findEnumLocalInitializer(body string, blockStart, before int, indent, name string) (enumLocalDecl, bool) {
