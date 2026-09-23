@@ -3742,22 +3742,27 @@ func (f *FunctionCallExpression) witnessDescriptorArgCast(i int, arg JavaValue, 
 			if sameClassInvokeCallee(f, funcCtx) {
 				return ""
 			}
-			if f.overloadFamilyProof(funcCtx) == overloadUnknown &&
-				f.recoverableGenericParamType(i, funcCtx) == nil {
+			proof := f.overloadFamilyProof(funcCtx)
+			if proof == overloadUnknown && f.recoverableGenericParamType(i, funcCtx) == nil {
 				// A missing family must not make an untyped null look uniquely bound.
-				// Keep the best-effort source shape, but force the public result to
-				// unsupported until the declaring hierarchy can be verified.
+				// Preserve the bytecode descriptor with an Object upcast and force
+				// the public result to unsupported until the hierarchy is verified.
 				f.noteUnknownOverloadFamily(funcCtx)
 			}
 			if !witnessObjectNullNeedsCast(f) {
 				return ""
 			}
 			if f.Kind != InvokeStatic && f.Kind != InvokeSpecial && f.Kind != InvokeInterface && !f.IsSpecialInvoke {
-				switch f.overloadFamilyProof(funcCtx) {
+				switch proof {
 				case overloadCompete:
 					// pin Object-null when a competing same-arity overload exists
+				case overloadUnknown:
+					if f.recoverableGenericParamType(i, funcCtx) != nil {
+						return ""
+					}
+					// Preserve an external invocation's exact Object descriptor.
 				default:
-					// Unique/Unknown instance get/compareAndSet(V,V): do not pin erased Object
+					// A proven unique instance method keeps source-level inference.
 					return ""
 				}
 			}
@@ -3860,16 +3865,19 @@ func (f *FunctionCallExpression) witnessOverloadPinCast(i int, argType, param ty
 	case overloadCompete:
 		// pin below
 	case overloadUnknown:
-		// Missing metadata cannot justify a source binding cast. Record the
-		// unresolved call, preserving generic/source reconstruction behavior.
+		// The exact descriptor permits a safe String-to-Object upcast. Record
+		// the unresolved family because that cast does not prove metadata
+		// completeness or the external method's generic source signature.
 		if funcCtx != nil && (isJavaLangObjectType(param) || witnessStealShaped(f, argType, param)) {
 			f.noteUnknownOverloadFamily(funcCtx)
 		}
-		if f.Kind != InvokeStatic || f.FunctionName == "<init>" || !isJavaLangObjectType(param) || !witnessStringyArg(argType) {
+		if f.FunctionName == "<init>" || f.IsSpecialInvoke || f.Kind == InvokeSpecial ||
+			!isJavaLangObjectType(param) || !witnessStringyArg(argType) {
 			return ""
 		}
-		// Retain the legacy static-call conservative pin, but never call it a
-		// proven binding. Constructors use their dedicated reconstruction path.
+		// Static, virtual, and interface calls can all be stolen by a more
+		// specific overload. Constructors and invokespecial have their own
+		// reconstruction rules.
 	}
 	if argType == nil || param == nil {
 		return ""
