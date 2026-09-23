@@ -5092,6 +5092,47 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		}
 		return false
 	}
+	// A value-merge leaf may be the temporary created for OP_CHECKCAST. Keeping that
+	// ref in the ternary can strand its definition inside one branch; RewriteVar then
+	// hoists an uninitialized declaration and the merged expression reads null or an
+	// undeclared temp. Inline only a non-parameter CastExpression temp with exactly
+	// one registered use and a pure operand. An effectful operand may still be
+	// emitted at its producer, so substituting it here could evaluate a call twice.
+	// This keeps the cast lazy in its original arm and excludes dup-family values.
+	dupSharedRefs := map[string]bool{}
+	for op, infos := range d.opcodeIdToRef {
+		if op == nil || op.Instr == nil {
+			continue
+		}
+		switch op.Instr.OpCode {
+		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
+			for _, info := range infos {
+				if ref, ok := info[0].(*values.JavaRef); ok && ref != nil {
+					dupSharedRefs[ref.VarUid] = true
+				}
+			}
+		}
+	}
+	inlineSingleUseMergeLeaf := func(value values.JavaValue) values.JavaValue {
+		ref, ok := UnpackSoltValue(value).(*values.JavaRef)
+		if !ok || ref == nil || ref.IsThis || ref.IsParam || ref.Id == nil || ref.Val == nil || dupSharedRefs[ref.VarUid] {
+			return value
+		}
+		if len(d.varUserMap.GetMust(ref)) != 1 {
+			return value
+		}
+		for _, protected := range d.disFoldRef {
+			if protected != nil && protected.VarUid == ref.VarUid {
+				return value
+			}
+		}
+		resolved := GetRealValue(ref)
+		cast, isCast := resolved.(*values.CastExpression)
+		if !isCast || !values.IsPure(cast.Value) {
+			return value
+		}
+		return resolved
+	}
 	// buildSharedLeafTernary rebuilds the value left on the operand stack at mergeNode as a nested
 	// ternary tree. It is the principled replacement for the legacy chain combiner on short-circuit
 	// shapes: each conditional arm is walked straight-line; an if-node whose BOTH branches converge on
@@ -5309,7 +5350,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					if putfieldValue := putFieldLeafValue(cur); putfieldValue != nil {
 						return putfieldValue
 					}
-					return cur.StackEntry.value
+					return inlineSingleUseMergeLeaf(cur.StackEntry.value)
 				}
 				if isTernaryCondition(cur) {
 					return probe(cur)
