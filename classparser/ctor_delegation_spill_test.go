@@ -20,20 +20,21 @@ func TestCtorDelegationArgumentSpillsRoundTrip(t *testing.T) {
   }
 
   static final class Target {
+    final int seed;
     final double[] first;
     final double[] second;
-    Target(Pair<double[], double[]> pair) { this(pair.first(), pair.second()); }
-    Target(double[] first, double[] second) { this.first = first; this.second = second; }
-    double total() { return first[0] + second[0]; }
+    Target(int seed, Pair<double[], double[]> pair) { this(seed, pair.first(), pair.second()); }
+    Target(int seed, double[] first, double[] second) { this.seed = seed; this.first = first; this.second = second; }
+    double total() { return seed + first[0] + second[0]; }
   }
 
   public static void main(String[] args) {
-    Target target = new Target(new Pair<>(new double[]{2}, new double[]{5}));
+    Target target = new Target(2, new Pair<>(new double[]{2}, new double[]{5}));
     System.out.println(":" + target.total());
   }
 }`,
 	})
-	if original != "AB:7.0\n" {
+	if original != "AB:9.0\n" {
 		t.Fatalf("independent javac/java oracle changed: got %q", original)
 	}
 	javac, java := t04Tools(t)
@@ -69,7 +70,7 @@ func TestCtorDelegationArgumentSpillsRoundTrip(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("recompile compatibility output: %v\n%s\n----- source -----\n%s", err, out, source)
 	}
-	if strings.Contains(source, "this(var2,") || !strings.Contains(source, "this(((double[])(var1.first())),((double[])(var1.second())));") {
+	if strings.Contains(source, "this(var2,") || !strings.Contains(source, "this(var1,((double[])(var2.first())),((double[])(var2.second())));") {
 		t.Fatalf("delegating constructor spills were not folded in evaluation order:\n%s", source)
 	}
 	if got := t04RunJava(t, java, outDir, "CtorDelegationSpillMain"); got != original {
@@ -88,6 +89,11 @@ func TestCtorDelegationArgumentSpillsRejectUnsafeShapes(t *testing.T) {
 `
 	if got := fixCtorDelegationArgumentSpills(base); !strings.Contains(got, "this(first(),second());") || strings.Contains(got, "int var2") || strings.Contains(got, "int var3") {
 		t.Fatalf("ordered one-use spills were not folded:\n%s", got)
+	}
+	parameter := strings.Replace(base, "X(Pair var1)", "X(Object var0,Pair var1)", 1)
+	parameter = strings.Replace(parameter, "this(var2,var3);", "this(var0,var2,var3);", 1)
+	if got := fixCtorDelegationArgumentSpills(parameter); !strings.Contains(got, "this(var0,first(),second());") || strings.Contains(got, "int var2") || strings.Contains(got, "int var3") {
+		t.Fatalf("read-only constructor parameter before spills blocked a safe fold:\n%s", got)
 	}
 
 	unsafe := map[string]string{

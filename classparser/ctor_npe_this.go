@@ -158,8 +158,9 @@ func fixCtorDelegationArgumentSpills(body string) string {
 			searchEnd = at
 			continue
 		}
+		parameters := ctorParameterNames(body, blockStart)
 		for i := 0; i < lastTempArg; i++ {
-			if argTemps[i] == "" && !ctorSafeReadOnlyArgument(args[i]) {
+			if argTemps[i] == "" && !ctorSafeReadOnlyArgument(args[i]) && !ctorParameterArgument(args[i], parameters) {
 				valid = false
 				break
 			}
@@ -198,7 +199,335 @@ func fixCtorDelegationArgumentSpills(body string) string {
 		}
 		searchEnd = first
 	}
+	return fixCtorDelegationTrailingArgumentSpills(body)
+}
+
+// fixCtorDelegationTrailingArgumentSpills handles a complementary decompiler
+// shape: javac's super(...) is rendered first, while one-use argument arrays
+// are rendered as local initializers immediately after it. Moving only a
+// contiguous, argument-ordered run back into its exact argument slots restores
+// the required first-statement form and Java's left-to-right evaluation order.
+func fixCtorDelegationTrailingArgumentSpills(body string) string {
+	searchEnd := len(body)
+	for searchEnd > 0 {
+		at, keyword := lastCtorDelegationCall(body, searchEnd)
+		if at < 0 {
+			break
+		}
+		if !javaCodePosition(body, at) {
+			searchEnd = at
+			continue
+		}
+		lineStart := strings.LastIndex(body[:at], "\n") + 1
+		if strings.TrimSpace(body[lineStart:at]) != "" {
+			searchEnd = at
+			continue
+		}
+		open := at + len(keyword)
+		close := enumMatchingDelimiter(body, open, '(', ')')
+		if close < 0 {
+			searchEnd = at
+			continue
+		}
+		semicolon := close + 1
+		for semicolon < len(body) && (body[semicolon] == ' ' || body[semicolon] == '\t' || body[semicolon] == '\r') {
+			semicolon++
+		}
+		if semicolon >= len(body) || body[semicolon] != ';' {
+			searchEnd = at
+			continue
+		}
+		blockStart, blockEnd, ok := javaBlockBoundsAt(body, at)
+		if !ok || strings.TrimSpace(body[blockStart+1:lineStart]) != "" {
+			searchEnd = at
+			continue
+		}
+		lineEnd := strings.IndexByte(body[semicolon:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(body)
+		} else {
+			lineEnd += semicolon
+		}
+		if strings.TrimSpace(body[semicolon+1:lineEnd]) != "" {
+			searchEnd = at
+			continue
+		}
+		indent := enumLineIndent(body, lineStart)
+		args := splitTopLevelArgs(body[open+1 : close])
+		if len(args) == 0 {
+			searchEnd = at
+			continue
+		}
+
+		var following []enumLocalDecl
+		var followingNames []string
+		cursor := lineEnd
+		if cursor < len(body) && body[cursor] == '\n' {
+			cursor++
+		}
+		for cursor < blockEnd {
+			end := strings.IndexByte(body[cursor:], '\n')
+			if end < 0 {
+				end = blockEnd
+			} else {
+				end += cursor
+			}
+			if strings.TrimSpace(body[cursor:end]) == "" {
+				if end >= blockEnd {
+					break
+				}
+				cursor = end + 1
+				continue
+			}
+			decl, name, ok := parseEnumLocalInitializerLine(body, cursor, end, indent)
+			if !ok {
+				break
+			}
+			following = append(following, decl)
+			followingNames = append(followingNames, name)
+			cursor = decl.rangeSpan.end
+		}
+		if len(following) == 0 {
+			searchEnd = at
+			continue
+		}
+		available := make(map[string]int, len(followingNames))
+		for i, name := range followingNames {
+			available[name] = i
+		}
+		needed := make([]string, 0, len(followingNames))
+		argNames := make(map[int][]string)
+		seen := make(map[string]bool)
+		lastNeededArg := -1
+		for i, arg := range args {
+			tokens, safeReferences := ctorSpillTempTokens(arg)
+			if !safeReferences {
+				needed = nil
+				break
+			}
+			for _, token := range tokens {
+				if _, isFollowingDecl := available[token]; !isFollowingDecl {
+					continue
+				}
+				if seen[token] || ctorSpillIdentifierCount(arg, token) != 1 {
+					needed = nil
+					break
+				}
+				seen[token] = true
+				needed = append(needed, token)
+				argNames[i] = append(argNames[i], token)
+				lastNeededArg = i
+			}
+			if needed == nil {
+				break
+			}
+		}
+		if len(needed) == 0 || len(needed) > len(followingNames) {
+			searchEnd = at
+			continue
+		}
+		ordered := true
+		for i, name := range needed {
+			if followingNames[i] != name || enumIdentifierCount(body[blockStart:blockEnd], name) != 2 {
+				ordered = false
+				break
+			}
+			rhsTokens, safeReferences := ctorSpillTempTokens(following[i].rhs)
+			if !safeReferences {
+				ordered = false
+				break
+			}
+			for _, token := range rhsTokens {
+				if seen[token] {
+					ordered = false
+					break
+				}
+			}
+			if !ordered {
+				break
+			}
+		}
+		parameters := ctorParameterNames(body, blockStart)
+		methodBody := body[blockStart:blockEnd]
+		for _, arg := range args {
+			tokens, safeReferences := ctorSpillTempTokens(arg)
+			if !safeReferences {
+				ordered = false
+				break
+			}
+			for _, token := range tokens {
+				_, isContiguous := available[token]
+				// Do not partially rewrite a call if it also references a
+				// generated local outside the contiguous declaration run.
+				if !parameters[token] && !isContiguous && enumIdentifierCount(methodBody, token) > 1 {
+					ordered = false
+					break
+				}
+			}
+			if !ordered {
+				break
+			}
+		}
+		for i := 0; ordered && i < lastNeededArg; i++ {
+			if len(argNames[i]) == 0 && !ctorSafeReadOnlyArgument(args[i]) && !ctorParameterArgument(args[i], parameters) {
+				ordered = false
+			}
+		}
+		if !ordered {
+			searchEnd = at
+			continue
+		}
+		expanded := append([]string(nil), args...)
+		for i := range expanded {
+			for _, name := range argNames[i] {
+				decl := following[available[name]]
+				expanded[i] = replaceCtorSpillIdentifier(expanded[i], name, decl.rhs)
+			}
+		}
+		for i := len(needed) - 1; i >= 0; i-- {
+			span := following[i].rangeSpan
+			body = body[:span.start] + body[span.end:]
+		}
+		body = body[:open+1] + strings.Join(expanded, ",") + body[close:]
+		searchEnd = at
+	}
 	return body
+}
+
+// ctorSpillTempTokens reads only Java code, not strings, comments, or text
+// blocks. A generated varN name can also be a qualified member or method name;
+// those shapes are ambiguous without a Java parser, so the spill rewrite
+// rejects them instead of replacing the wrong identifier.
+func ctorSpillTempTokens(source string) ([]string, bool) {
+	var tokens []string
+	var prevPrev, prev byte
+	for i := 0; i < len(source); {
+		if next, skipped := skipJavaNonCode(source, i); skipped {
+			i = next
+			continue
+		}
+		ch := source[i]
+		if isJavaWhitespace(ch) {
+			i++
+			continue
+		}
+		if !isEnumIdentStart(ch) {
+			prevPrev, prev = prev, ch
+			i++
+			continue
+		}
+		start := i
+		i++
+		for i < len(source) && isEnumIdentPart(source[i]) {
+			i++
+		}
+		name := source[start:i]
+		if isEnumTempName(name) {
+			nextAt := nextJavaCodeOffset(source, i)
+			next := byte(0)
+			if nextAt < len(source) {
+				next = source[nextAt]
+			}
+			next2At := nextJavaCodeOffset(source, nextAt+1)
+			next2 := byte(0)
+			if next2At < len(source) {
+				next2 = source[next2At]
+			}
+			next3At := nextJavaCodeOffset(source, next2At+1)
+			next3 := byte(0)
+			if next3At < len(source) {
+				next3 = source[next3At]
+			}
+			prefixIncrement := (prev == '+' || prev == '-') && prevPrev == prev
+			postfixIncrement := (next == '+' || next == '-') && next2 == next
+			compoundAssignment := strings.ContainsRune("+-*/%&|^", rune(next)) && next2 == '=' ||
+				(next == '<' || next == '>') && next2 == next && next3 == '='
+			if prev == '.' || prev == ':' && prevPrev == ':' || prefixIncrement ||
+				next == '.' || next == ':' || next == '(' || next == '[' ||
+				next == '=' && next2 != '=' || postfixIncrement || compoundAssignment {
+				return nil, false
+			}
+			tokens = append(tokens, name)
+		}
+		prevPrev, prev = prev, source[i-1]
+	}
+	return tokens, true
+}
+
+func ctorSpillIdentifierCount(source, name string) int {
+	tokens, safe := ctorSpillTempTokens(source)
+	if !safe {
+		return -1
+	}
+	count := 0
+	for _, token := range tokens {
+		if token == name {
+			count++
+		}
+	}
+	return count
+}
+
+func nextJavaCodeOffset(source string, at int) int {
+	for i := at; i < len(source); {
+		if next, skipped := skipJavaNonCode(source, i); skipped {
+			i = next
+			continue
+		}
+		if isJavaWhitespace(source[i]) {
+			i++
+			continue
+		}
+		return i
+	}
+	return len(source)
+}
+
+func isJavaWhitespace(ch byte) bool {
+	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f'
+}
+
+func replaceCtorSpillIdentifier(source, target, replacement string) string {
+	var out strings.Builder
+	for i := 0; i < len(source); {
+		if next, skipped := skipJavaNonCode(source, i); skipped {
+			out.WriteString(source[i:next])
+			i = next
+			continue
+		}
+		if !isEnumIdentStart(source[i]) {
+			out.WriteByte(source[i])
+			i++
+			continue
+		}
+		start := i
+		i++
+		for i < len(source) && isEnumIdentPart(source[i]) {
+			i++
+		}
+		name := source[start:i]
+		if name == target {
+			out.WriteString(replacement)
+		} else {
+			out.WriteString(name)
+		}
+	}
+	return out.String()
+}
+
+func lastCtorDelegationCall(source string, before int) (int, string) {
+	if before > len(source) {
+		before = len(source)
+	}
+	thisAt := strings.LastIndex(source[:before], "this(")
+	superAt := strings.LastIndex(source[:before], "super(")
+	if thisAt > superAt {
+		return thisAt, "this"
+	}
+	if superAt >= 0 {
+		return superAt, "super"
+	}
+	return -1, ""
 }
 
 var ctorCastTypeExpression = regexp.MustCompile(`^(?:boolean|byte|short|char|int|long|float|double|[A-Za-z_$][A-Za-z0-9_.$]*)(?:\s*<[^()]+>)?(?:\s*\[\s*\])*$`)
@@ -221,6 +550,36 @@ func ctorSafeReadOnlyArgument(expression string) bool {
 		}
 	}
 	return false
+}
+
+func ctorParameterArgument(expression string, parameters map[string]bool) bool {
+	expression = strings.TrimSpace(expression)
+	for len(expression) > 1 && expression[0] == '(' && enumMatchingDelimiter(expression, 0, '(', ')') == len(expression)-1 {
+		expression = strings.TrimSpace(expression[1 : len(expression)-1])
+	}
+	return parameters[expression]
+}
+
+func ctorParameterNames(source string, blockStart int) map[string]bool {
+	parameters := make(map[string]bool)
+	if blockStart <= 0 || blockStart > len(source) {
+		return parameters
+	}
+	header := source[:blockStart]
+	close := strings.LastIndexByte(header, ')')
+	if close < 0 {
+		return parameters
+	}
+	for open := strings.LastIndexByte(header[:close], '('); open >= 0; open = strings.LastIndexByte(header[:open], '(') {
+		if enumMatchingDelimiter(header, open, '(', ')') != close || !javaCodePosition(header, open) {
+			continue
+		}
+		for _, name := range enumLocalTokens(header[open+1 : close]) {
+			parameters[name] = true
+		}
+		return parameters
+	}
+	return parameters
 }
 
 func javaCodePosition(source string, target int) bool {
