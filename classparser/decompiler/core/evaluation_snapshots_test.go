@@ -54,6 +54,97 @@ func TestDynamicOperandsEvaluateBeforeConcatConversion(t *testing.T) {
 		t.Fatalf("conversion re-evaluates operand: %s", converted)
 	}
 }
+
+func TestImmediateMethodRefInliningRequiresOneFinalArgumentConsumer(t *testing.T) {
+	typ, err := types.ParseMethodDescriptor("(Ljava/lang/String;Ljava/util/function/Function;)V")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := values.NewJavaClassMember("Probe", "consume", "(Ljava/lang/String;Ljava/util/function/Function;)V", typ)
+	d := NewDecompiler(nil, func(int) values.JavaValue { return member })
+	d.FunctionContext.ClassName = "Probe"
+	methodRef := values.NewCustomValue(
+		func(*class_context.ClassContext) string { return "Probe::method" },
+		func() types.JavaType { return types.NewJavaClass("java.util.function.Function") },
+	)
+	methodRef.IsMethodRef = true
+
+	makePair := func(nextOpcode int, nextDescriptor string, nextPC uint16, sources int) (*OpCode, *OpCode) {
+		d.ExceptionTable = nil
+		indy := &OpCode{
+			CurrentOffset: 10,
+			Instr:         &Instruction{OpCode: OP_INVOKEDYNAMIC},
+			Data:          []byte{0, 1, 0, 0},
+		}
+		cpMember := member
+		if nextDescriptor != member.Description {
+			parsed, parseErr := types.ParseMethodDescriptor(nextDescriptor)
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			cpMember = values.NewJavaClassMember("Probe", "consume", nextDescriptor, parsed)
+		}
+		d.constantPoolGetter = func(int) values.JavaValue { return cpMember }
+		next := &OpCode{
+			CurrentOffset: nextPC,
+			Instr:         &Instruction{OpCode: nextOpcode},
+			Data:          []byte{0, 2},
+			Source:        make([]*OpCode, sources),
+		}
+		if sources > 0 {
+			next.Source[0] = indy
+		}
+		indy.Target = []*OpCode{next}
+		return indy, next
+	}
+
+	indy, _ := makePair(OP_INVOKESTATIC, "(Ljava/lang/String;Ljava/util/function/Function;)V", 15, 1)
+	if !d.canInlineImmediateMethodRef(indy, methodRef) {
+		t.Fatal("direct, contiguous final invocation argument lost its poly target type")
+	}
+
+	for name, pair := range map[string]struct {
+		opcode int
+		desc   string
+		pc     uint16
+		src    int
+	}{
+		"later argument evaluation": {OP_INVOKESTATIC, "()V", 15, 1},
+		"duplicate before use":      {OP_DUP, "(Ljava/lang/Object;)V", 15, 1},
+		"nonadjacent consumer":      {OP_INVOKESTATIC, "(Ljava/lang/Object;)V", 16, 1},
+		"merged consumer":           {OP_INVOKESTATIC, "(Ljava/lang/Object;)V", 15, 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			op, _ := makePair(pair.opcode, pair.desc, pair.pc, pair.src)
+			if d.canInlineImmediateMethodRef(op, methodRef) {
+				t.Fatal("inlined a reference without a direct, unique final-argument consumer")
+			}
+		})
+	}
+
+	t.Run("handler coverage change", func(t *testing.T) {
+		op, _ := makePair(OP_INVOKESTATIC, "(Ljava/lang/String;Ljava/util/function/Function;)V", 15, 1)
+		d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 10, EndPc: 11, HandlerPc: 30}}
+		if d.canInlineImmediateMethodRef(op, methodRef) {
+			t.Fatal("inlined a method reference across a protected-region boundary")
+		}
+	})
+	t.Run("external erased generic consumer", func(t *testing.T) {
+		op, _ := makePair(OP_INVOKESTATIC, "(Ljava/lang/String;Ljava/util/function/Function;)V", 15, 1)
+		external := values.NewJavaClassMember("java.util.stream.Stream", "consume", "(Ljava/lang/String;Ljava/util/function/Function;)V", typ)
+		d.constantPoolGetter = func(int) values.JavaValue { return external }
+		if d.canInlineImmediateMethodRef(op, methodRef) {
+			t.Fatal("inlined across an external generic call's erased receiver type")
+		}
+	})
+	t.Run("mismatched functional target", func(t *testing.T) {
+		op, _ := makePair(OP_INVOKESTATIC, "(Ljava/lang/String;Ljava/lang/Object;)V", 15, 1)
+		if d.canInlineImmediateMethodRef(op, methodRef) {
+			t.Fatal("inlined a method reference into a non-matching argument type")
+		}
+	})
+}
+
 func TestCaptureSnapshotSurvivesLaterLocalMutation(t *testing.T) {
 	typ := types.NewJavaPrimer(types.JavaInteger)
 	local := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
