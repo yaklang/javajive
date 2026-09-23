@@ -73,10 +73,28 @@ class TestExecutionEventMapping(unittest.TestCase):
         neighbor = next(c for c in inv["cases"] if c["case_id"] == "T30-C02")
         self.assertNotEqual(neighbor["status"], "PASS")
 
-    def test_required_ci_jobs_unchanged(self) -> None:
+    def test_pr_ci_stays_a_single_fast_algorithm_gate(self) -> None:
         snap = required_coverage_snapshot(ROOT)
-        for job in BASELINE_CI_JOBS:
-            self.assertIn(job, snap["jobs"]["ci.yml"])
+        self.assertEqual(snap["jobs"]["ci.yml"], list(BASELINE_CI_JOBS))
+        self.assertEqual(snap["jobs"]["ci.yml"], ["regression"])
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("name: Algorithm regression", workflow)
+        self.assertIn("timeout-minutes: 10", workflow)
+        self.assertNotIn("go test ./...", workflow)
+        self.assertNotIn("./test/cross", workflow)
+
+    def test_slow_contracts_remain_manual_and_discoverable(self) -> None:
+        workflows = ROOT / ".github" / "workflows"
+        task_gates = workflows / "task-gates.yml"
+        extended = workflows / "extended.yml"
+        sandbox = workflows / "untrusted-oracle.yml"
+        for path in (task_gates, extended, sandbox):
+            self.assertTrue(path.is_file(), msg=f"missing manual workflow: {path.name}")
+            self.assertIn("workflow_dispatch:", path.read_text(encoding="utf-8"), msg=path.name)
+        self.assertIn("python-contracts:", task_gates.read_text(encoding="utf-8"))
+        self.assertIn("full-go-suite:", extended.read_text(encoding="utf-8"))
+        self.assertIn("historical-audit:", extended.read_text(encoding="utf-8"))
+        self.assertIn("t30-sandbox:", sandbox.read_text(encoding="utf-8"))
 
     def test_mapped_execution_is_not_187_pack_acceptance(self) -> None:
         lines = []

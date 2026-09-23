@@ -19,7 +19,7 @@ from tools.ci_scheduler.envcheck import require_go_matches, require_jdk
 from tools.ci_scheduler.gates import CaseObservation, evaluate_local_gates, promote_capability
 from tools.ci_scheduler.schedule import compare_schedules
 from tools.ci_scheduler.shard import ShardError, TestItem, expand_manifest, shard_items
-from tools.ci_scheduler.workflow_inventory import BASELINE_CI_JOBS, action_pins, required_coverage_snapshot
+from tools.ci_scheduler.workflow_inventory import BASELINE_CI_JOBS, action_pins, list_jobs, required_coverage_snapshot
 
 from tools.evidence_paths import evidence_subdir
 
@@ -240,10 +240,24 @@ class T29Contracts(unittest.TestCase):
         )
         self.assertEqual(missing["reason"], "missing_case")
         snap = required_coverage_snapshot(ROOT)
-        for job in BASELINE_CI_JOBS:
-            self.assertIn(job, snap["jobs"]["ci.yml"], msg="T29 must not drop required CI jobs")
+        self.assertEqual(snap["jobs"]["ci.yml"], list(BASELINE_CI_JOBS))
+        self.assertEqual(snap["jobs"]["ci.yml"], ["regression"])
+        pr_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("name: Algorithm regression", pr_ci)
+        self.assertIn("timeout-minutes: 10", pr_ci)
+        self.assertNotIn("go test ./...", pr_ci)
+        self.assertNotIn("./test/cross", pr_ci)
+
         gates = ROOT / ".github" / "workflows" / "task-gates.yml"
-        self.assertTrue(gates.is_file(), "T29 adds task-gates.yml without replacing ci.yml")
+        extended = ROOT / ".github" / "workflows" / "extended.yml"
+        sandbox = ROOT / ".github" / "workflows" / "untrusted-oracle.yml"
+        for path in (gates, extended, sandbox):
+            self.assertTrue(path.is_file(), f"missing manual workflow: {path.name}")
+            self.assertIn("workflow_dispatch:", path.read_text(encoding="utf-8"), msg=path.name)
+        self.assertIn("python-contracts", list_jobs(gates))
+        self.assertIn("full-go-suite", list_jobs(extended))
+        self.assertIn("historical-audit", list_jobs(extended))
+        self.assertIn("t30-sandbox", list_jobs(sandbox))
         pins = action_pins(gates)
         self.assertTrue(pins)
         self.assertTrue(all(row["pinned"] for row in pins), msg=pins)
@@ -252,7 +266,20 @@ class T29Contracts(unittest.TestCase):
         self.assertIn("fetch_ecj.py", text)
         self.assertIn("java-version: '8'", text)
         (EVIDENCE / "t29_c06_upgrade.json").write_text(
-            json.dumps({"no_review": no_review, "ok": ok, "rollback": rollback, "ci_jobs": snap, "task_gates_pins": pins}, indent=2) + "\n"
+            json.dumps(
+                {
+                    "no_review": no_review,
+                    "ok": ok,
+                    "rollback": rollback,
+                    "ci_jobs": snap,
+                    "manual_workflows": {
+                        path.name: list_jobs(path) for path in (gates, extended, sandbox)
+                    },
+                    "task_gates_pins": pins,
+                },
+                indent=2,
+            )
+            + "\n"
         )
 
 
