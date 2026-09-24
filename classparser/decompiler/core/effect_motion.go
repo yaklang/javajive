@@ -296,11 +296,11 @@ func (d *Decompiler) canInlineCheckcastAtInvocation(value values.JavaValue, sour
 	return canMoveInlineAcrossPrefix(moving, prefix)
 }
 
-// canInlineCheckcastIntoBranchMerge recognizes the String CHECKCAST value in a
-// null-joined reference-local store. This is the map-cache shape covered by an
-// independent javac/java round trip. Keeping other reference types materialized
-// avoids changing target typing or surrounding control structuring without a
-// dedicated oracle for those shapes.
+// canInlineCheckcastIntoBranchMerge recognizes a String or current-class
+// CHECKCAST value in a null-joined reference-local store. The latter covers
+// a self-typed child lookup whose selected value stays live after the merge.
+// Other reference types stay materialized until their surrounding target
+// typing and control structuring have dedicated oracles.
 //
 // The proof is deliberately limited to a direct CHECKCAST -> GOTO -> merge
 // path, a two-predecessor forward ASTORE, a provably-null alternate input, one
@@ -325,7 +325,9 @@ func (d *Decompiler) canInlineCheckcastIntoBranchMerge(value values.JavaValue, s
 		return false
 	}
 	castClass, isClass := cast.TargetType.RawType().(*types.JavaClass)
-	if !isClass || castClass == nil || castClass.Name != "java.lang.String" {
+	if !isClass || castClass == nil ||
+		(castClass.Name != "java.lang.String" &&
+			(d.FunctionContext == nil || castClass.Name != d.FunctionContext.ClassName)) {
 		return false
 	}
 	sourceOp, targetOp := origins[source.Id], origins[target.Id]
