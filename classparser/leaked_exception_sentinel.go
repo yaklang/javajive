@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -18,12 +18,14 @@ import (
 // Catch parameters renamed `varN_1` while the rethrow still uses uninitialized `varN` are rewritten
 // to `throw varN_1`. Kill-switch: JDEC_LEAKED_EXCEPTION_SENTINEL_OFF.
 func fixLeakedExceptionSentinel(body string) string {
-	if os.Getenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF") == "1" {
+	return rewriteJavaCode(body, fixLeakedExceptionSentinelCode)
+}
+func fixLeakedExceptionSentinelCode(body string) string {
+	if jdecenv.Get("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF") == "1" {
 		return body
 	}
-	if !strings.Contains(body, "= Exception;") && !strings.Contains(body, "= Exception\n") &&
-		!strings.Contains(body, "(Exception)") && !strings.Contains(body, "return Exception;") &&
-		!strings.Contains(body, "throw Exception;") {
+	code := body
+	if !hasExceptionSentinel(body) && !strings.Contains(code, "(Exception)") && !strings.Contains(code, "return Exception;") && !strings.Contains(code, "throw Exception;") {
 		return body
 	}
 	body = rewriteLeakedTryLockFinally(body)

@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -13,7 +13,7 @@ import (
 // they replace). Nested empty-sync also honors JDEC_EMPTY_SYNC_RETURN_OFF.
 
 func shapeReconstructOff() bool {
-	return os.Getenv("JDEC_ORIG14_REMAINING_OFF") == "1"
+	return jdecenv.Get("JDEC_ORIG14_REMAINING_OFF") == "1"
 }
 
 // fixIntBareIf rewrites `if (varN){` to `if ((varN) != (0)){` when the nearest
@@ -699,7 +699,7 @@ func fixUncheckedAwaitNanos(body string) string {
 // `synchronized(...) { }` that is the last statement of a method's trailing
 // else (Http2Stream.closeInternal, OpenSslClientSessionCache.setSession).
 func fixEmptySyncInTrailingElse(body string) string {
-	if shapeReconstructOff() || os.Getenv("JDEC_EMPTY_SYNC_RETURN_OFF") == "1" {
+	if shapeReconstructOff() || jdecenv.Get("JDEC_EMPTY_SYNC_RETURN_OFF") == "1" {
 		return body
 	}
 	from := 0

@@ -92,7 +92,10 @@ func (j *JarWar) DumpToLocalFileSystem(dir string) error {
 	}
 
 	err := filesys.Recursive(".", filesys.WithFileSystem(j.fs), filesys.WithStat(func(isDir bool, s string, info fs.FileInfo) error {
-		target := filepath.Join(dir, s)
+		target, err := SafeJoin(dir, s)
+		if err != nil {
+			return err
+		}
 		if isDir {
 			err := os.MkdirAll(target, 0755)
 			if err != nil {
@@ -125,8 +128,11 @@ func (j *JarWar) DumpToLocalFileSystem(dir string) error {
 			log.Infof("Decompiled [%v] - Original size: %d bytes, Decompiled size: %d bytes, Lines of code: %d",
 				s, originalSize, len(decompiled), lines)
 
-			// 将.class文件改为.java后缀
-			javaTarget := strings.TrimSuffix(target, ".class") + ".java"
+			javaName := strings.TrimSuffix(s, ".class") + ".java"
+			javaTarget, joinErr := SafeJoin(dir, javaName)
+			if joinErr != nil {
+				return joinErr
+			}
 			return os.WriteFile(javaTarget, decompiled, 0755)
 		} else {
 			// 非.class文件，保持原样

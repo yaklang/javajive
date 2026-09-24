@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 
 LOCK = Path(__file__).resolve().parents[1] / "test/cross/testdata/historical-jars.lock.json"
+CAPTURE_COPY_SUFFIX = re.compile(r"\b(var\d+)_f\d+\b")
 
 
 def read(path):
@@ -70,9 +71,14 @@ def prepare(args):
 
 def compiler_errors(directory):
     # Source lines shift between revisions. Compare the unit and javac diagnostic,
-    # retaining multiplicity so identical new failures cannot hide in a set.
+    # retaining multiplicity so identical new failures cannot hide in a set. The
+    # `_fN` suffix is a generated final-capture copy, not a source identifier;
+    # its ordinal changes when an unrelated capture is added earlier in a method.
     from collections import Counter
-    return Counter((m.group(1), m.group(2)) for m in re.finditer(
+    def diagnostic_key(match):
+        diagnostic = CAPTURE_COPY_SUFFIX.sub(r"\1_f", match.group(2))
+        return match.group(1), diagnostic
+    return Counter(diagnostic_key(m) for m in re.finditer(
         r"/sources/(.*?\.java):\d+: error: ([^\n]+)", (directory / "javac.log").read_text()))
 
 

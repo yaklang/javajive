@@ -3,7 +3,7 @@ package rewriter
 import (
 	"errors"
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"sort"
 	"strings"
 
@@ -477,7 +477,7 @@ func (s *RewriteManager) mergeIf() bool {
 				// leaves swapped, truncating every encode). Reset JmpNode + the closures to the freshly
 				// built order so downstream readers see the correct branches. No-op for the common
 				// trueIndex=1 node (the closures already pointed there). Kill-switch: JDEC_MERGEIF_PIN_OFF=1.
-				if os.Getenv("JDEC_MERGEIF_PIN_OFF") == "" && len(parentNode.Next) >= 2 {
+				if jdecenv.Get("JDEC_MERGEIF_PIN_OFF") == "" && len(parentNode.Next) >= 2 {
 					pn := parentNode
 					pn.JmpNode = pn.Next[1]
 					pn.TrueNode = func() *core.Node {
@@ -758,6 +758,18 @@ func (s *RewriteManager) ScanCoreInfo() error {
 	subNodeRoute := NewRootNodeRoute()
 	walkIfStatement(s.RootNode, subNodeRoute)
 	circleNodes = sortNodesByID(utils.NewSet[*core.Node](circleNodes).List())
+	// The route walk above is useful for finding candidate loop heads, but a node can be
+	// revisited by multiple paths through a forward-only diamond.  Only retain candidates
+	// that are members of an actual CFG cycle; otherwise RebuildLoopNode wraps an acyclic
+	// join in `do { ... } while (true)` and drops its forward branch edges.
+	cyclicNodes := cyclicCFGNodes(s.RootNode)
+	actualCircleNodes := circleNodes[:0]
+	for _, node := range circleNodes {
+		if cyclicNodes[node] {
+			actualCircleNodes = append(actualCircleNodes, node)
+		}
+	}
+	circleNodes = actualCircleNodes
 	//for _, node := range circleNodes {
 	//	//mergeNode := funk.Filter(node.Next, func(item *core.Node) bool {
 	//	//	return !node.CircleNodesSet.Has(item)

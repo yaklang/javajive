@@ -2,7 +2,7 @@ package rewriter
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"slices"
 	"sort"
 	"strings"
@@ -253,7 +253,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 		// before that fallback wrongly promotes the default/throw node to the merge.
 		mergeNode = node.SwitchEmptyCaseMergeNode
 	}
-	if mergeNode == nil && os.Getenv("JDEC_SWITCH_EMPTY_CASE_MERGE_OFF") == "" {
+	if mergeNode == nil && jdecenv.Get("JDEC_SWITCH_EMPTY_CASE_MERGE_OFF") == "" {
 		// Empty case whose target is the switch's merge (commons-codec Base64/Base32 EOF switch). The
 		// start node of an empty `case K:` is just `goto merge` in bytecode, so after goto-folding its
 		// start node IS the post-switch merge. The dominator-based search excludes it (it is a case
@@ -310,7 +310,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 			// switch's OWN case bodies (transitively dominated by the switch node) may break to the
 			// merge; leave external edges intact so control flows naturally into the merge.
 			// Kill-switch: JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF=1 restores the legacy (buggy) behavior.
-			if os.Getenv("JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF") == "" && !utils.IsDominate(manager.DominatorMap, node, source) {
+			if jdecenv.Get("JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF") == "" && !utils.IsDominate(manager.DominatorMap, node, source) {
 				continue
 			}
 			breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
@@ -495,7 +495,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	// reach the point after the inner switch) and that does NOT fall through to a sibling case must end
 	// with a `break`. The nested-switch + completes-normally guards keep this from emitting unreachable
 	// code after a loop, a return/throw, or a switch all of whose arms return.
-	if os.Getenv("JDEC_SWITCH_NO_BREAK_FIX") == "" {
+	if jdecenv.Get("JDEC_SWITCH_NO_BREAK_FIX") == "" {
 		for idx, ci := range caseItems {
 			if idx == len(caseItems)-1 {
 				continue // the last case exits to the merge naturally; no break needed.

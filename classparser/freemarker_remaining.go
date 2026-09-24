@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixFreemarkerRemainingReconstructs repairs leftover freemarker 2.3.33 tree sites.
 // Kill-switch: JDEC_FREEMARKER_REMAINING_OFF=1.
 func fixFreemarkerRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_FREEMARKER_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_FREEMARKER_REMAINING_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "freemarker.") && !strings.Contains(body, "package freemarker") {

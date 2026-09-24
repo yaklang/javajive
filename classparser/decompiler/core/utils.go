@@ -3,7 +3,7 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"reflect"
 	"sort"
 	"strings"
@@ -408,7 +408,7 @@ func GetRealValue(value values.JavaValue) values.JavaValue {
 // whose receiver is itself side-effecting like `foo().f`) is kept so the side effect is preserved.
 // Kill-switch: JDEC_POP_ELIDE_OFF=1 restores the legacy unconditional emission.
 func keepDiscardedStackValue(v values.JavaValue) bool {
-	if os.Getenv("JDEC_POP_ELIDE_OFF") != "" {
+	if jdecenv.Get("JDEC_POP_ELIDE_OFF") != "" {
 		return true
 	}
 	return !isSideEffectFreeDiscard(v)

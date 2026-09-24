@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -12,7 +12,7 @@ import (
 // IllegalAccessException then emits a second catch(NSME).
 // Kill-switch: JDEC_ALREADY_CAUGHT_OFF=1.
 func fixAlreadyCaughtDuplicateCatch(body string) string {
-	if os.Getenv("JDEC_ALREADY_CAUGHT_OFF") == "1" {
+	if jdecenv.Get("JDEC_ALREADY_CAUGHT_OFF") == "1" {
 		return body
 	}
 	for i := 0; i < 16; i++ {

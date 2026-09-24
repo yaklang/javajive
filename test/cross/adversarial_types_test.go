@@ -14,6 +14,14 @@ import (
 // Every application class is rebuilt. The original directory serves only as
 // a resolver during decompilation, and never appears on javac/java rebuilt CPs.
 func auditSourceSet(t *testing.T, sources map[string]string, driver string, mode javajive.DecompileMode) {
+	auditSourceSetWithLedgerExpectations(t, sources, driver, mode, nil)
+}
+
+type memberLedgerExpectation struct {
+	owner, name, descriptor, state, evidence string
+}
+
+func auditSourceSetWithLedgerExpectations(t *testing.T, sources map[string]string, driver string, mode javajive.DecompileMode, expected []memberLedgerExpectation) {
 	t.Helper()
 	original, rebuilt := t.TempDir(), t.TempDir()
 	record := newAuditObservation(t, mode, "source-set-g:none")
@@ -72,11 +80,30 @@ func auditSourceSet(t *testing.T, sources map[string]string, driver string, mode
 	record.Original = want
 	for _, key := range keys {
 		result, err := javajive.DecompileWithOptions(raws[key], javajive.DecompileOptions{Mode: mode, Resolve: resolver})
+		for _, want := range expected {
+			if want.owner != key {
+				continue
+			}
+			found := false
+			for _, member := range result.Members {
+				if member.Owner == want.owner && member.Name == want.name && member.Descriptor == want.descriptor {
+					found = member.State == want.state && strings.Contains(member.Evidence, want.evidence)
+					if !found {
+						t.Fatalf("ledger %s.%s%s = %+v, want state=%q evidence containing %q", member.Owner, member.Name, member.Descriptor, member, want.state, want.evidence)
+					}
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("member ledger did not contain expected row %+v: %+v", want, result.Members)
+			}
+		}
 		if result.Status != "complete" || len(result.StubMethods) > 0 {
 			record.Stub = true
 		}
 		if err != nil || record.Stub {
-			t.Fatalf("%s: status=%s diagnostics=%+v err=%v", key, result.Status, result.Diagnostics, err)
+			t.Fatalf("%s: status=%s stub_methods=%v diagnostics=%+v members=%+v err=%v\nsource:\n%s",
+				key, result.Status, result.StubMethods, result.Diagnostics, result.Members, err, result.Source)
 		}
 		for _, rule := range result.RulesApplied {
 			record.Rules = append(record.Rules, rule.Rule)

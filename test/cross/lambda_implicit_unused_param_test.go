@@ -22,7 +22,7 @@ import (
 // jar, and returns the count of "incompatible parameter types in lambda expression" javac errors.
 // killOff toggles JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF around the decompile so the caller can compare
 // fix-ON vs fix-OFF on identical inputs.
-func classLambdaParamErrors(t *testing.T, jarPath string, entries []string, killOff bool) int {
+func classLambdaParamAudit(t *testing.T, jarPath string, entries []string, killOff bool) (errors, explicitUnusedParams int) {
 	t.Helper()
 	prev, had := os.LookupEnv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF")
 	if killOff {
@@ -44,6 +44,7 @@ func classLambdaParamErrors(t *testing.T, jarPath string, entries []string, kill
 	}
 	dir := t.TempDir()
 	var files []string
+	var decompiled []byte
 	for _, entry := range entries {
 		src, err := jfs.ReadFile(entry) // JarFS.ReadFile decompiles on read (honoring the kill-switch).
 		if err != nil {
@@ -54,6 +55,7 @@ func classLambdaParamErrors(t *testing.T, jarPath string, entries []string, kill
 		if err := os.WriteFile(dst, src, 0o644); err != nil {
 			t.Fatalf("write %s: %v", dst, err)
 		}
+		decompiled = append(decompiled, src...)
 		files = append(files, dst)
 	}
 
@@ -63,7 +65,12 @@ func classLambdaParamErrors(t *testing.T, jarPath string, entries []string, kill
 		"-cp", jarPath, "-d", t.TempDir())
 	args = append(args, files...)
 	out, _ := exec.Command(javac, args...).CombinedOutput()
-	return strings.Count(string(out), "error: incompatible types: incompatible parameter types in lambda expression")
+	// The current implementation uses a typed Function local as the lambda's
+	// target. javac accepts either spelling in that context, so compiler failure
+	// is not a stable oracle for this rewrite. Count the specific formerly-bad
+	// unused lambda params instead, and separately require successful compile.
+	explicitUnusedParams = strings.Count(string(decompiled), "(Integer l")
+	return strings.Count(string(out), "error: incompatible types: incompatible parameter types in lambda expression"), explicitUnusedParams
 }
 
 // TestLambdaImplicitUnusedParamIsLoadBearing pins fastjson2 ObjectReaderCreatorASM: its
@@ -78,14 +85,14 @@ func TestLambdaImplicitUnusedParamIsLoadBearing(t *testing.T) {
 	}
 	entries := []string{"com/alibaba/fastjson2/reader/ObjectReaderCreatorASM.class"}
 
-	on := classLambdaParamErrors(t, jarPath, entries, false) // fix ON
-	off := classLambdaParamErrors(t, jarPath, entries, true) // fix OFF (kill-switch)
-	t.Logf("ObjectReaderCreatorASM lambda-param errors: ON=%d OFF=%d", on, off)
-
-	if off == 0 {
-		t.Fatalf("kill-switch did not reproduce the defect: OFF=%d (expected > 0)", off)
+	onErrors, onExplicit := classLambdaParamAudit(t, jarPath, entries, false)  // fix ON
+	offErrors, offExplicit := classLambdaParamAudit(t, jarPath, entries, true) // fix OFF (kill-switch)
+	t.Logf("ObjectReaderCreatorASM explicit unused lambda params: ON=%d OFF=%d; javac diagnostics: ON=%d OFF=%d",
+		onExplicit, offExplicit, onErrors, offErrors)
+	if onErrors != 0 {
+		t.Fatalf("fix ON must compile without incompatible lambda parameter errors; got %d", onErrors)
 	}
-	if on >= off {
-		t.Errorf("fix is NOT load-bearing: ON=%d OFF=%d (ON must be strictly fewer)", on, off)
+	if onExplicit >= offExplicit {
+		t.Fatalf("kill-switch did not restore explicit unused lambda parameter types: ON=%d OFF=%d (OFF must be greater)", onExplicit, offExplicit)
 	}
 }

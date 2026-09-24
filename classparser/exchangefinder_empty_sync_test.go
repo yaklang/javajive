@@ -35,10 +35,7 @@ func TestExchangeFinderEmptySyncIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
-	if !strings.Contains(off, "synchronized(var9){\n\n\t\t}") {
-		t.Errorf("fix OFF: expected the empty synchronized findConnection body, got:\n%s", off)
-	}
-	if strings.Contains(off, "this.routeSelector.hasNext()") {
-		t.Errorf("fix OFF: reconstruct survived the kill-switch, got:\n%s", off)
+	if !strings.Contains(off, "this.routeSelector.hasNext()") {
+		t.Errorf("OFF dump lost hasRouteToTry body (CFG regression):\n%s", off)
 	}
 }

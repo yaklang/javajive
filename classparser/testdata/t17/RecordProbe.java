@@ -1,0 +1,1 @@
+public record RecordProbe(int x, String y) { public static void main(String[] a) { RecordProbe p = new RecordProbe(7,"ok"); System.out.println(p); System.out.println(p.equals(new RecordProbe(7,"ok"))); System.out.println(RecordProbe.class.isRecord()); } }

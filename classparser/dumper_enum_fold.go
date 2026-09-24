@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"os"
 	"strings"
 
 	"github.com/yaklang/javajive/internal/log"
@@ -58,10 +57,10 @@ func isSyntheticEnumConstantSubclass(cf *ClassObject) bool {
 // the enclosing unit's import block (assembled after this) carries them. Returns nil (no folding) on
 // the single-class path, for non-enums, or when JDEC_NO_ENUM_FOLD is set (load-bearing kill-switch).
 func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) map[string]string {
-	if !isEnum || c.foldSiblingResolver == nil || os.Getenv("JDEC_NO_ENUM_FOLD") != "" {
+	if !isEnum || c.foldSiblingResolver == nil || c.getenv("JDEC_NO_ENUM_FOLD") != "" {
 		return nil
 	}
-	debug := os.Getenv("JDEC_FOLD_DEBUG") != ""
+	debug := c.getenv("JDEC_FOLD_DEBUG") != ""
 	enumSimple := c.GetConstructorMethodName()
 	if enumSimple == "" {
 		return nil
@@ -140,11 +139,15 @@ func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple stri
 			result = ""
 		}
 	}()
-	subObj, err := Parse(data)
+	subObj, err := c.parseResolved(data)
 	if err != nil {
 		return ""
 	}
-	src, err := subObj.Dump()
+	child := NewClassObjectDumper(subObj)
+	child.options = c.options
+	child.Work = c.Work
+	child.report = c.report
+	src, err := child.DumpClass()
 	if err != nil || src == "" {
 		return ""
 	}

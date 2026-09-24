@@ -1,7 +1,7 @@
 package rewriter
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 
 	"github.com/samber/lo"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -66,7 +66,7 @@ func replaceNextInPlace(node, oldNext, newNext *core.Node) {
 // `break` (which would only leave the innermost loop) into a labeled `break LOOP_n` when the exit
 // actually lies outside an enclosing loop. Setting JDEC_NO_LOOP_BREAK_LABEL_FIX is the kill-switch.
 func outermostEnclosingLoopWithExit(manager *RewriteManager, preWhileNodes []*core.Node, preWhileNodeEnds map[*core.Node]*core.Node, circleNode, exitNode *core.Node) *core.Node {
-	if os.Getenv("JDEC_NO_LOOP_BREAK_LABEL_FIX") != "" {
+	if jdecenv.Get("JDEC_NO_LOOP_BREAK_LABEL_FIX") != "" {
 		return nil
 	}
 	var best *core.Node
@@ -127,7 +127,7 @@ func asLatchIncExpr(n *core.Node) (*values.JavaExpression, bool) {
 // single-continue loop (handled by IfRewriter branch inversion) and loops without a separable step
 // latch are byte-for-byte unchanged. Kill-switch: JDEC_SPLIT_CONTINUE_LATCH_OFF=1.
 func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node) {
-	if os.Getenv("JDEC_SPLIT_CONTINUE_LATCH_OFF") != "" {
+	if jdecenv.Get("JDEC_SPLIT_CONTINUE_LATCH_OFF") != "" {
 		return
 	}
 	for _, latch := range slices.Clone(circleNode.Source) {
@@ -212,7 +212,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 			// caught-exception placeholder leaks as a bare `Exception` token (Bug U, observed on a
 			// try-with-resources whose body is a loop). Leave the edge intact and do NOT descend into the
 			// handler (it is not loop body). Kill-switch: JDEC_LOOP_KEEP_CATCH_EDGE_OFF=1.
-			if next.IsCatchStart && os.Getenv("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
+			if next.IsCatchStart && jdecenv.Get("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
 				continue
 			}
 			if next == circleNode {
@@ -389,7 +389,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 						// before it) was dropped, leaving the inner loop spinning forever. Relax the guard for
 						// reducible methods (preWhileNodeEnds is only populated for genuine enclosing loops, so
 						// non-enclosing while-nodes still cannot match). Irreducible methods keep the guard.
-						relaxLabelGuard := manager.LoopRegionReducible && os.Getenv("JDEC_NO_LOOP_BREAK_LABEL_FIX") == ""
+						relaxLabelGuard := manager.LoopRegionReducible && jdecenv.Get("JDEC_NO_LOOP_BREAK_LABEL_FIX") == ""
 						if len(n.Next) < 2 && !relaxLabelGuard {
 							continue
 						}
@@ -537,7 +537,7 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		}
 	}
 	sources := allSources
-	if excludePreHeader && os.Getenv("JDEC_NO_LOOP_BACKEDGE_DOM_FILTER") == "" {
+	if excludePreHeader && jdecenv.Get("JDEC_NO_LOOP_BACKEDGE_DOM_FILTER") == "" {
 		// Drop forward pre-header entry edges. The caller only sets excludePreHeader for a method whose
 		// ORIGINAL CFG is reducible (see RewriteManager.LoopRegionReducible), so a forward, non-dominated
 		// predecessor is a genuine pre-header rather than an alternate entry of an irreducible tangle.
@@ -742,7 +742,7 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 				// a non-terminating do-while(true) with the post-loop continuation absorbed into the body
 				// (Bug U second form: try-with-resources + finally whose body is a loop). Exclude handler
 				// edges so the tight fall-out exit is found. Kill-switch: JDEC_LOOP_KEEP_CATCH_EDGE_OFF=1.
-				if n.IsCatchStart && os.Getenv("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
+				if n.IsCatchStart && jdecenv.Get("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
 					continue
 				}
 				outNodes = append(outNodes, n)
@@ -766,7 +766,7 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 	// exit, and the remaining out-edges are then correctly classified as labeled break/continue by
 	// LoopJmpRewriter. Gated on a reducible method (the header is well-defined) and only when there is
 	// genuine multi-exit ambiguity, so single-exit loops are byte-for-byte unchanged.
-	if reducible && os.Getenv("JDEC_NO_LOOP_HEADER_EXIT") == "" {
+	if reducible && jdecenv.Get("JDEC_NO_LOOP_HEADER_EXIT") == "" {
 		var headerOut []*core.Node
 		for _, n := range loopStart.Next {
 			if !elementSet.Has(n) {

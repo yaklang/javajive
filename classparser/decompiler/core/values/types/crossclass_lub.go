@@ -1,6 +1,6 @@
 package types
 
-import "os"
+import "github.com/yaklang/javajive/internal/jdecenv"
 
 // crossclass_lub.go adds a CROSS-CLASS (jar-internal) least-upper-bound primitive for declaration
 // widening. The static JDK table in hierarchy.go only knows JDK families; a merge of two jar-internal
@@ -110,7 +110,7 @@ func IsReferenceSubtypeBridged(sub, sup string, provider SuperTypeProvider) bool
 // never java.lang.Object (a widening to Object would defeat any later member access and is left to the
 // caller's fallback). Gated by JDEC_TERNARY_DECL_LUB_CROSS_OFF.
 func CrossClassDirectLUB(a, b JavaType, provider SuperTypeProvider) JavaType {
-	if os.Getenv("JDEC_TERNARY_DECL_LUB_CROSS_OFF") != "" || provider == nil {
+	if jdecenv.Get("JDEC_TERNARY_DECL_LUB_CROSS_OFF") != "" || provider == nil {
 		return nil
 	}
 	an, aok := classNameOf(a)
@@ -213,11 +213,26 @@ func bridgedAncestorDepths(start string, provider SuperTypeProvider) map[string]
 // valid reference types) when nothing closer is shared. Callers gate their own behaviour on whether the
 // result is Object. Gated by JDEC_TERNARY_DECL_LUB_CROSS_OFF (shared cross-class kill-switch).
 func BridgedCommonSuperType(a, b JavaType, provider SuperTypeProvider) JavaType {
-	if os.Getenv("JDEC_TERNARY_DECL_LUB_CROSS_OFF") != "" {
+	if jdecenv.Get("JDEC_TERNARY_DECL_LUB_CROSS_OFF") != "" {
 		return nil
 	}
+	if a != nil && b != nil && (a.IsArray() || b.IsArray() || isNullType(a) || isNullType(b)) {
+		got, ok, unknown := joinArrayTypes([]JavaType{a, b}, provider)
+		if unknown {
+			return nil
+		}
+		if ok {
+			return got
+		}
+	}
 	an, aok := classNameOf(a)
+	if !aok {
+		an, aok = RawClassFQN(a)
+	}
 	bn, bok := classNameOf(b)
+	if !bok {
+		bn, bok = RawClassFQN(b)
+	}
 	if !aok || !bok {
 		return nil
 	}
@@ -291,7 +306,7 @@ func BridgedCommonSuperType(a, b JavaType, provider SuperTypeProvider) JavaType 
 // unknown, or when one subtypes the other (that case belongs to CrossClassDirectLUB). Gated by
 // JDEC_TERNARY_DECL_LUB_CROSS_OFF.
 func CrossClassCommonSuperType(a, b JavaType, provider SuperTypeProvider) JavaType {
-	if os.Getenv("JDEC_TERNARY_DECL_LUB_CROSS_OFF") != "" || provider == nil {
+	if jdecenv.Get("JDEC_TERNARY_DECL_LUB_CROSS_OFF") != "" || provider == nil {
 		return nil
 	}
 	an, aok := classNameOf(a)

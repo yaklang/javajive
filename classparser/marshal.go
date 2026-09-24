@@ -72,8 +72,12 @@ func _MarshalJavaClass(cp *ClassObject, charLength int) []byte {
 			writer.Write8Byte(cp.ConstantPool[i].(*ConstantDoubleInfo).Value)
 		case *ConstantUtf8Info:
 			writer.Write1Byte(CONSTANT_Utf8)
-			str := cp.ConstantPool[i].(*ConstantUtf8Info).Value
-			writer.WriteString(str)
+			payload, err := cp.ConstantPool[i].(*ConstantUtf8Info).mutf8BytesChecked()
+			if err != nil {
+				panic(err)
+			}
+			writer.Write2Byte(len(payload))
+			writer.Write(payload)
 
 		case *ConstantStringInfo:
 			writer.Write1Byte(CONSTANT_String)
@@ -108,6 +112,10 @@ func _MarshalJavaClass(cp *ClassObject, charLength int) []byte {
 			writer.Write1Byte(CONSTANT_InvokeDynamic)
 			writer.Write2Byte(cp.ConstantPool[i].(*ConstantInvokeDynamicInfo).BootstrapMethodAttrIndex)
 			writer.Write2Byte(cp.ConstantPool[i].(*ConstantInvokeDynamicInfo).NameAndTypeIndex)
+		case *ConstantDynamicInfo:
+			writer.Write1Byte(CONSTANT_Dynamic)
+			writer.Write2Byte(cp.ConstantPool[i].(*ConstantDynamicInfo).BootstrapMethodAttrIndex)
+			writer.Write2Byte(cp.ConstantPool[i].(*ConstantDynamicInfo).NameAndTypeIndex)
 		case *ConstantModuleInfo:
 			writer.Write1Byte(CONSTANT_Module)
 			writer.Write2Byte(cp.ConstantPool[i].(*ConstantModuleInfo).NameIndex)
@@ -260,6 +268,29 @@ func writeAttributes(writer *JavaBufferWriter, info []AttributeInfo, classObj *C
 			writer.Write2Byte(n)
 			writer.Write4Byte(info[j].(*SignatureAttribute).AttrLen)
 			writer.Write2Byte(info[j].(*SignatureAttribute).SignatureIndex)
+		case *RuntimeVisibleParameterAnnotationsAttribute:
+			pa := info[j].(*RuntimeVisibleParameterAnnotationsAttribute)
+			attrName := "RuntimeVisibleParameterAnnotations"
+			if pa.IsInvisible {
+				attrName = "RuntimeInvisibleParameterAnnotations"
+			}
+			n := classObj.findUtf8IndexFromPool(attrName) + 1
+			writer.Write2Byte(n)
+			writer.Write4Byte(pa.AttrLen)
+			writer.Write(pa.Info)
+		case *TypeAnnotationsAttribute:
+			ta := info[j].(*TypeAnnotationsAttribute)
+			attrName := ta.Name
+			if attrName == "" {
+				attrName = "RuntimeVisibleTypeAnnotations"
+				if ta.IsInvisible {
+					attrName = "RuntimeInvisibleTypeAnnotations"
+				}
+			}
+			n := classObj.findUtf8IndexFromPool(attrName) + 1
+			writer.Write2Byte(n)
+			writer.Write4Byte(ta.AttrLen)
+			writer.Write(ta.Info)
 		case *RuntimeVisibleTypeAnnotationsAttribute:
 			n := classObj.findUtf8IndexFromPool("RuntimeVisibleTypeAnnotations") + 1
 			writer.Write2Byte(n)

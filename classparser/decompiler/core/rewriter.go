@@ -52,6 +52,7 @@ func RewriteNewArrayList(node *Node, delMap map[string][3]int, allowEffects ...f
 	}
 	next := node.Next[0]
 	vs := []values.JavaValue{}
+	lastStore := (*Node)(nil)
 	for i := 0; i < lvar1; i++ {
 		if len(next.Next) != 1 || hasDistinctPredecessors(next) {
 			return
@@ -90,7 +91,13 @@ func RewriteNewArrayList(node *Node, delMap map[string][3]int, allowEffects ...f
 			}
 		}
 		vs = append(vs, asEleSt.JavaValue)
+		lastStore = next
 		next = next.Next[0]
+	}
+	if len(vs) == 0 {
+		newExp.EvaluationEndPC, newExp.HasEvaluationEndPC = newExp.OriginPC, newExp.HasOriginPC
+	} else if store, ok := lastStore.Statement.(*statements.AssignStatement); ok && store.HasOriginPC {
+		newExp.EvaluationEndPC, newExp.HasEvaluationEndPC = store.OriginPC, true
 	}
 	attr := delMap[refVal.VarUid]
 	attr[0]++

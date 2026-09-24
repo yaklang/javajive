@@ -2,13 +2,14 @@ package core
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type BuildinBootstrapMethod func(d *Decompiler, sim StackSimulation, typ types.JavaType, args ...values.JavaValue) (values.JavaValue, error)
@@ -19,6 +20,52 @@ type BuildinBootstrapMethod func(d *Decompiler, sim StackSimulation, typ types.J
 // surrounding concat `+` would capture only its left operand. A ternary (`c ? a : b`) is likewise
 // lower precedence than `+`. Atomic operands (variables, literals, field/array accesses, method
 // calls, casts, unary ops) need no extra parentheses.
+func replaceConcatRecipeHole(recipe, replacement string) string {
+	for _, hole := range []string{"\u0001", `\001`, `\u0001`} {
+		if strings.Contains(recipe, hole) {
+			return strings.Replace(recipe, hole, replacement, 1)
+		}
+	}
+	return recipe
+}
+
+func concatArgString(arg values.JavaValue, funcCtx *class_context.ClassContext) string {
+	if arg == nil {
+		return "null"
+	}
+	s := arg.String(funcCtx)
+	if concatArgNeedsParens(arg) {
+		return "(" + s + ")"
+	}
+	return s
+}
+
+func renderConcatFromUnits(units []uint16, args []values.JavaValue, funcCtx *class_context.ClassContext) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	ai := 0
+	for _, u := range units {
+		if u == 1 && ai < len(args) {
+			b.WriteString(`" + `)
+			b.WriteString(concatArgString(args[ai], funcCtx))
+			b.WriteString(` + "`)
+			ai++
+			continue
+		}
+		piece := values.JavaUnitsToStringLiteral([]uint16{u})
+		if len(piece) >= 2 {
+			b.WriteString(piece[1 : len(piece)-1])
+		}
+	}
+	b.WriteByte('"')
+	s := b.String()
+	s = strings.ReplaceAll(s, `"" + `, "")
+	if strings.HasSuffix(s, ` + ""`) {
+		s = strings.TrimSuffix(s, ` + ""`)
+	}
+	return s
+}
+
 func concatArgNeedsParens(v values.JavaValue) bool {
 	switch e := values.UnpackSoltValue(v).(type) {
 	case *values.JavaExpression:
@@ -34,29 +81,21 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 	"java.lang.invoke.StringConcatFactory.makeConcatWithConstants": func(args1 ...values.JavaValue) BuildinBootstrapMethod {
 		return func(d *Decompiler, sim StackSimulation, typ types.JavaType, args2 ...values.JavaValue) (values.JavaValue, error) {
 			return values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-				str1 := args1[0].String(funcCtx)
-
+				ordered := make([]values.JavaValue, 0, len(args2))
 				for i := 0; i < len(args2); i++ {
 					idx := len(args2) - 1 - i
 					if idx < 0 || idx >= len(args2) {
 						break
 					}
-					arg := args2[idx]
-					newStr := arg.String(funcCtx)
-					// String concatenation `+` binds tighter than the bitwise/shift/relational/
-					// logical operators, so an interpolated sub-expression such as `n & 0xff`
-					// (which renders as `(n) & (255)`) would reparse as `("prefix" + n) & 255`
-					// once spliced after a `+`, yielding `String & int` - a compile error. Wrap any
-					// binary/ternary concat argument in parentheses so it stays a single operand of
-					// the concatenation. Atomic args (variables, literals, calls, casts) are left
-					// alone to keep the common output unchanged.
-					if concatArgNeedsParens(arg) {
-						newStr = "(" + newStr + ")"
-					}
-					tag := `\u0001`
-					str1 = strings.Replace(str1, tag, `" + `+newStr+` + "`, 1)
+					ordered = append(ordered, args2[idx])
 				}
-
+				if lit, ok := values.UnpackSoltValue(args1[0]).(*values.JavaLiteral); ok && lit != nil && lit.Units != nil {
+					return renderConcatFromUnits(lit.Units, ordered, funcCtx)
+				}
+				str1 := args1[0].String(funcCtx)
+				for _, arg := range ordered {
+					str1 = replaceConcatRecipeHole(str1, `" + `+concatArgString(arg, funcCtx)+` + "`)
+				}
 				if strings.HasSuffix(str1, ` + ""`) {
 					str1 = strings.TrimSuffix(str1, ` + ""`)
 				}
@@ -127,7 +166,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// apply -- structurally inert for lambdas whose captures are never rewritten.
 				// Kill-switch: JDEC_LAMBDA_CAPTURE_REBIND_OFF=1 restores the (broken) nil ReplaceFunc.
 				var lambdaReplace func(oldId *utils.VariableId, newId *utils.VariableId)
-				if os.Getenv("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
+				if jdecenv.Get("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
 					lambdaReplace = func(oldId *utils.VariableId, newId *utils.VariableId) {
 						for _, ca := range captured {
 							if ca != nil {
@@ -153,25 +192,15 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// ("bad return type in lambda expression: Object cannot be converted to T"). Re-emit the cast.
 				// Kill-switch: JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF=1.
 				var retTypevarCast string
-				if os.Getenv("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") == "" {
+				if jdecenv.Get("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") == "" {
 					var instantiatedMT values.JavaValue
 					if len(args1) >= 3 {
 						instantiatedMT = args1[2]
 					}
 					retTypevarCast = lambdaReturnPositionTypevar(typ, instantiatedMT)
 				}
-				cv := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-					s := methodStr
-					for i, ca := range captured {
-						s = strings.ReplaceAll(s, fmt.Sprintf("\x00LCAP%d\x00", i), ca.String(funcCtx))
-					}
-					if retTypevarCast != "" {
-						castTarget := resolveLambdaReturnTypevar(funcCtx, retTypevarCast)
-						if castTarget != "" {
-							s = injectLambdaReturnCast(s, castTarget)
-						}
-					}
-					return s
+				cv := values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
+					return t19WriteLambdaBody(funcCtx, out, methodStr, captured, retTypevarCast)
 				}, func() types.JavaType {
 					return typ
 				}, lambdaReplace)
@@ -187,9 +216,9 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				if len(args1) >= 3 {
 					if upgradedType := inferLambdaTypeFromInstantiated(typ, args1[2]); upgradedType != nil {
 						lambdaType := upgradedType
-						cv = values.NewCustomValue(cv.StringFunc, func() types.JavaType {
+						cv = cv.WithType(func() types.JavaType {
 							return lambdaType
-						}, lambdaReplace)
+						})
 						cv.Flag = "lambda"
 						cv.NoOuterCapture = len(captured) == 0
 					}
@@ -214,7 +243,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// ListStr,Map,MapMultiValueType} `var = Collections::synchronized*/unmodifiable*` (25
 			// "invalid method reference" sites). Kill-switch: JDEC_METHODREF_INSTANTIATED_TYPE_OFF=1.
 			refType := typ
-			if os.Getenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(args1) >= 3 {
+			if jdecenv.Get("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(args1) >= 3 {
 				if up := inferLambdaTypeFromInstantiated(typ, args1[2]); up != nil {
 					refType = up
 				}
@@ -225,7 +254,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// (disjoint-slot splitting etc.) or it renders a stale slot name. Kill-switch shared
 			// with the lambda branch: JDEC_LAMBDA_CAPTURE_REBIND_OFF=1.
 			var refReplace func(oldId *utils.VariableId, newId *utils.VariableId)
-			if os.Getenv("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
+			if jdecenv.Get("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
 				refReplace = func(oldId *utils.VariableId, newId *utils.VariableId) {
 					for _, ca := range capturedArgs {
 						if ca != nil {
@@ -242,7 +271,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					// and produced `ClassName::new_`, an "invalid method reference" (javac then resolves a
 					// method literally named `new_`, which does not exist). Kill-switch
 					// JDEC_CTOR_METHODREF_FIX_OFF restores the legacy (broken) sanitized form.
-					if os.Getenv("JDEC_CTOR_METHODREF_FIX_OFF") == "" {
+					if jdecenv.Get("JDEC_CTOR_METHODREF_FIX_OFF") == "" {
 						return funcCtx.ShortTypeName(implClassName) + "::new"
 					}
 					refMember = "new"
@@ -479,6 +508,15 @@ func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodT
 		// javac rejects as "invalid method reference".
 		if len(mtParams) >= 1 {
 			typeArgs = append(typeArgs, mtParams[0])
+		}
+	case "java.nio.file.DirectoryStream$Filter":
+		// Filter<T>.accept(T) has an instantiated `(T)Z` SAM descriptor. Keeping
+		// that T on method references such as `predicate::test` is required: a raw
+		// Filter target asks javac to adapt the method to `accept(Object)`.
+		if len(mtParams) == 1 {
+			if ret, ok := mtRet.RawType().(*types.JavaPrimer); ok && ret.Name == types.JavaBoolean {
+				typeArgs = append(typeArgs, mtParams[0])
+			}
 		}
 	default:
 		return nil

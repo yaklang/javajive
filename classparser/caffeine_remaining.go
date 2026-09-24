@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixCaffeineRemainingReconstructs repairs leftover caffeine tree sites.
 // Kill-switch: JDEC_CAFFEINE_REMAINING_OFF=1.
 func fixCaffeineRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_CAFFEINE_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_CAFFEINE_REMAINING_OFF") == "1" {
 		return body
 	}
 	// UnsafeAccess: load() throws checked exceptions; the empty static

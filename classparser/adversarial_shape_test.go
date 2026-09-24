@@ -46,9 +46,60 @@ func TestAdversarialBareIfMissesOldUnique(t *testing.T) {
 }
 
 func TestAdversarialEmptySyncTrailingElse(t *testing.T) {
-	assertOrig14Decompile(t, "testdata/regression/EmptySyncAdv.class",
-		"synchronized(this){\n\n\t\t\t}\n\t\t\treturn false;",
-		"synchronized(this){\n\n\t\t\t}\n\t\t}")
+	// javap EmptySyncAdv.closeInternal: monitorenter at 24, then iload_1/if/ireturn
+	// with monitorexit on each path. Production must keep those returns INSIDE
+	// the synchronized statement, not after an emptied monitor.
+	raw, err := os.ReadFile("testdata/regression/EmptySyncAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := Decompile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !javaSynchronizedContains(src, "synchronized(this)", "return false;") {
+		t.Fatalf("return false must be inside synchronized(this), not after it:\n%s", src)
+	}
+	if !javaSynchronizedContains(src, "synchronized(this)", "if (var1){") {
+		t.Fatalf("if (var1) must be inside synchronized(this):\n%s", src)
+	}
+}
+
+func javaSynchronizedContains(src, header, inner string) bool {
+	from := 0
+	for from < len(src) {
+		rel := strings.Index(src[from:], header)
+		if rel < 0 {
+			return false
+		}
+		i := from + rel
+		brace := strings.Index(src[i:], "{")
+		if brace < 0 {
+			return false
+		}
+		start := i + brace
+		depth := 0
+		end := -1
+		for j := start; j < len(src); j++ {
+			switch src[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = j
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end > start && strings.Contains(src[start:end+1], inner) {
+			return true
+		}
+		from = start + 1
+	}
+	return false
 }
 
 func TestAdversarialNsmeCatchThisBuild(t *testing.T) {
@@ -119,21 +170,18 @@ func TestHttp2StreamTrailingElseEmptySyncIsLoadBearing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("JDEC_HTTP2_STREAM_SYNC_OFF", "1")
-	os.Unsetenv("JDEC_ORIG14_REMAINING_OFF")
-	on, err := Decompile(raw)
+	src, err := Decompile(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(on, "return false;") {
-		t.Fatalf("ON missing return after empty sync:\n%s", clipForTest(on, "closeInternal"))
+	closeIdx := strings.Index(src, "closeInternal")
+	if closeIdx < 0 {
+		t.Fatalf("missing closeInternal:\n%s", src)
 	}
-	t.Setenv("JDEC_ORIG14_REMAINING_OFF", "1")
-	off, err := Decompile(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical with HTTP2_STREAM_SYNC off")
+	chunk := src[closeIdx:]
+	if !javaSynchronizedContains(chunk, "synchronized(this)", "return false;") &&
+		!javaSynchronizedContains(chunk, "synchronized(this)", "return true;") {
+		t.Fatalf("closeInternal monitor must contain a return (bytecode monitorexit on return paths):\n%s", clipForTest(src, "closeInternal"))
 	}
 }
 

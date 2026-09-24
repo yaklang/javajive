@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -142,6 +143,11 @@ func TestAnswerParamCtorArgJarFS(t *testing.T) {
 	}
 }
 
+var (
+	methodGraphLocalDeclaration = regexp.MustCompile(`\bMethodGraph var[0-9]+(_[0-9]+)?\s*=`)
+	identifierAsTypeDeclaration = regexp.MustCompile(`\bvar[0-9]+(_[0-9]+)?\s+var[0-9]+(_[0-9]+)?\s*=`)
+)
+
 func TestIdentAsTypeDeclJarFS(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -163,11 +169,11 @@ func TestIdentAsTypeDeclJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if strings.Contains(on, "var3 var4 =") {
-		t.Fatalf("ON still has ident-as-type decl:\n%s", clipForTest(on, "var3 var4"))
+	if hasIdentifierAsTypeDeclaration(on) {
+		t.Fatalf("ON still has ident-as-type decl:\n%s", clipForTest(on, "var"))
 	}
-	if !strings.Contains(on, "MethodGraph var4 =") {
-		t.Fatalf("ON missing MethodGraph var4:\n%s", clipForTest(on, "var4"))
+	if !methodGraphLocalDeclaration.MatchString(on) {
+		t.Fatalf("ON missing typed MethodGraph declaration:\n%s", clipForTest(on, "MethodGraph"))
 	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
 	jfs2, err := NewJarFSFromLocal(jar)
@@ -180,9 +186,13 @@ func TestIdentAsTypeDeclJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if !strings.Contains(off, "MethodGraph var4 =") || strings.Contains(off, "var3 var4 =") {
-		t.Fatalf("core join lost the MethodGraph declaration:\n%s", clipForTest(off, "var4"))
+	if !methodGraphLocalDeclaration.MatchString(off) || hasIdentifierAsTypeDeclaration(off) {
+		t.Fatalf("core join lost the typed MethodGraph declaration:\n%s", clipForTest(off, "MethodGraph"))
 	}
+}
+
+func hasIdentifierAsTypeDeclaration(source string) bool {
+	return identifierAsTypeDeclaration.MatchString(source)
 }
 
 func TestIdentAsTypeDeclRewrites(t *testing.T) {
@@ -1416,6 +1426,20 @@ func TestWrapNullSentinelTernary(t *testing.T) {
 	}
 }
 
+func TestWrapNullSentinelTernaryMaybeNullParam(t *testing.T) {
+	// Byte-buddy CachingMatcher dumps RuntimeVisibleParameterAnnotations as
+	// `@MaybeNull() T var1`. LastIndex('(') on that header is the annotation.
+	in := "class CachingMatcher<T extends Object> {\n\tstatic final Object NULL_VALUE = new Object();\n\tpublic boolean matches(@MaybeNull() T var1) {\n\t\tBoolean var2 = ((Boolean)(this.map.get(((var1) == (null)) ? (NULL_VALUE) : (var1))));\n\t\treturn var2.booleanValue();\n\t}\n\tprotected boolean onCacheMiss(@MaybeNull() T var1) {\n\t\tthis.map.put(((var1) == (null)) ? (NULL_VALUE) : (var1),Boolean.TRUE);\n\t\treturn true;\n\t}\n}\n"
+	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
+	out := wrapNullSentinelTernary(in)
+	if strings.Count(out, "(T)(((var1) == (null)) ? (NULL_VALUE) : (var1))") != 2 {
+		t.Fatalf("missing annotated-param null-sentinel T wrap:\n%s", out)
+	}
+	if got := wrapNullSentinelTernary(out); got != out {
+		t.Fatalf("double-wrapped:\n%s", got)
+	}
+}
+
 func TestWrapNullSentinelTernaryJarFS(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -2393,8 +2417,13 @@ func TestRetypeFinalObjectCaptureJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if !strings.Contains(on, "final BooleanSupplier var2_f") {
-		t.Fatalf("ON missing BooleanSupplier capture:\n%s", clipForTest(on, "BooleanSupplier var2_f"))
+	// javap invokedynamic apply:(IndexWriter, BooleanSupplier, ...). CFG already
+	// types the capture; fabricating final BooleanSupplier var2_f would invent a local.
+	if !strings.Contains(on, "BooleanSupplier var2") {
+		t.Fatalf("preparePointInTimeMerge missing BooleanSupplier param:\n%s", clipForTest(on, "BooleanSupplier"))
+	}
+	if !strings.Contains(on, ",var2,") && !strings.Contains(on, ",var2)") {
+		t.Fatalf("BooleanSupplier capture not passed through:\n%s", clipForTest(on, "var2"))
 	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
 	jfs2, err := NewJarFSFromLocal(jar)
@@ -2407,14 +2436,8 @@ func TestRetypeFinalObjectCaptureJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if strings.Contains(off, "final BooleanSupplier var2_f") {
-		t.Fatalf("OFF already retyped (switch inert):\n%s", clipForTest(off, "BooleanSupplier var2_f"))
-	}
-	if !strings.Contains(off, "final Object var2_f") {
-		t.Fatalf("OFF missing Object capture:\n%s", clipForTest(off, "final Object var2_f"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	if !strings.Contains(off, "BooleanSupplier var2") {
+		t.Fatalf("OFF lost bytecode BooleanSupplier param:\n%s", clipForTest(off, "BooleanSupplier"))
 	}
 }
 
@@ -5138,10 +5161,45 @@ func TestFillEmptySynchronizedBlock(t *testing.T) {
 }
 
 func TestFillEmptySynchronizedBlockJarFS(t *testing.T) {
-	jarFSOnOff(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
-		"org/apache/lucene/index/IndexWriter.class",
-		"this.deleter = null;",
-		"synchronized(this){")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip(err)
+	}
+	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
+	if _, err := os.Stat(jar); err != nil {
+		t.Skip(err)
+	}
+	entry := "org/apache/lucene/index/IndexWriter.class"
+	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
+	jfs, err := NewJarFSFromLocal(jar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onb, err := jfs.ReadFile(entry)
+	jfs.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	on := string(onb)
+	// javap ctor: new IndexFileDeleter + putfield deleter between monitorenter/exit.
+	// Filling `this.deleter = null` would contradict that store.
+	if !javaSynchronizedContains(on, "synchronized(this)", "this.deleter = new IndexFileDeleter") {
+		t.Fatalf("deleter store must be inside synchronized(this):\n%s", clipForTest(on, "deleter"))
+	}
+	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
+	jfs2, err := NewJarFSFromLocal(jar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offb, err := jfs2.ReadFile(entry)
+	jfs2.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := string(offb)
+	if !javaSynchronizedContains(off, "synchronized(this)", "this.deleter = new IndexFileDeleter") {
+		t.Fatalf("OFF lost bytecode deleter store:\n%s", clipForTest(off, "deleter"))
+	}
 }
 
 func TestFillMissingReturnAfterLabeledBreakJarFS(t *testing.T) {

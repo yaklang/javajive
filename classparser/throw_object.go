@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -10,7 +10,7 @@ import (
 // stores a ConversionException into an Object local and rethrows it.
 // Kill-switch: JDEC_THROW_OBJECT_OFF=1.
 func fixThrowObjectAsThrowable(body string) string {
-	if os.Getenv("JDEC_THROW_OBJECT_OFF") == "1" {
+	if jdecenv.Get("JDEC_THROW_OBJECT_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "throw var") || !strings.Contains(body, "Object var") {

@@ -29,6 +29,12 @@ type SignatureAttribute struct {
 
 func (i *SignatureAttribute) readInfo(cp *ClassParser) {
 	i.SignatureIndex = cp.reader.readUint16()
+	if cp.reader.Err() != nil {
+		return
+	}
+	if err := cp.classObj.checkCPIndex(i.SignatureIndex, false, "signature_index", CONSTANT_Utf8); err != nil {
+		cp.reader.fail(ParseCodeCPIndex, err.Error())
+	}
 }
 
 /*
@@ -59,8 +65,14 @@ type InnerClassInfo struct {
 
 func (i *InnerClassesAttribute) readInfo(cp *ClassParser) {
 	i.NumberOfClasses = cp.reader.readUint16()
+	if !cp.reader.reserve(int64(i.NumberOfClasses), 8) {
+		return
+	}
 	i.Classes = make([]*InnerClassInfo, i.NumberOfClasses)
 	for j := range i.Classes {
+		if cp.reader.Err() != nil {
+			return
+		}
 		i.Classes[j] = &InnerClassInfo{
 			InnerClassInfoIndex:   cp.reader.readUint16(),
 			OuterClassInfoIndex:   cp.reader.readUint16(),
@@ -90,14 +102,27 @@ type BootstrapMethodsAttribute struct {
 
 func (r *BootstrapMethodsAttribute) readInfo(cp *ClassParser) {
 	r.NumBootstrapMethods = cp.reader.readUint16()
+	if !cp.reader.reserve(int64(r.NumBootstrapMethods), 4) {
+		return
+	}
 	r.BootstrapMethods = make([]*BootstrapMethod, r.NumBootstrapMethods)
 	for i := range r.BootstrapMethods {
+		if cp.reader.Err() != nil {
+			return
+		}
 		m := &BootstrapMethod{
 			BootstrapMethodRef:    cp.reader.readUint16(),
 			NumBootstrapArguments: cp.reader.readUint16(),
 		}
+		if err := cp.classObj.checkCPIndex(m.BootstrapMethodRef, false, "bootstrap_method_ref", CONSTANT_MethodHandle); err != nil && cp.reader.Err() == nil {
+			cp.reader.fail(ParseCodeCPIndex, err.Error())
+		}
+		if !cp.reader.reserve(int64(m.NumBootstrapArguments), 2) {
+			return
+		}
 		for j := 0; j < int(m.NumBootstrapArguments); j++ {
-			m.BootstrapArguments = append(m.BootstrapArguments, cp.reader.readUint16())
+			arg := cp.reader.readUint16()
+			m.BootstrapArguments = append(m.BootstrapArguments, arg)
 		}
 		r.BootstrapMethods[i] = m
 	}
@@ -161,6 +186,12 @@ func (self *MarkerAttribute) readInfo(reader *ClassParser) {
 
 func (self *SourceFileAttribute) readInfo(cp *ClassParser) {
 	self.SourceFileIndex = cp.reader.readUint16()
+	if cp.reader.Err() != nil {
+		return
+	}
+	if err := cp.classObj.checkCPIndex(self.SourceFileIndex, false, "sourcefile_index", CONSTANT_Utf8); err != nil {
+		cp.reader.fail(ParseCodeCPIndex, err.Error())
+	}
 }
 
 /*
@@ -190,8 +221,14 @@ type LineNumberTableEntry struct {
 
 func (self *LineNumberTableAttribute) readInfo(cp *ClassParser) {
 	lineNumberTableLength := cp.reader.readUint16()
+	if !cp.reader.reserve(int64(lineNumberTableLength), 4) {
+		return
+	}
 	self.LineNumberTable = make([]*LineNumberTableEntry, lineNumberTableLength)
 	for i := range self.LineNumberTable {
+		if cp.reader.Err() != nil {
+			return
+		}
 		self.LineNumberTable[i] = &LineNumberTableEntry{
 			StartPc:    cp.reader.readUint16(),
 			LineNumber: cp.reader.readUint16(),
@@ -217,6 +254,13 @@ type ConstantValueAttribute struct {
 
 func (self *ConstantValueAttribute) readInfo(cp *ClassParser) {
 	self.ConstantValueIndex = cp.reader.readUint16()
+	if cp.reader.Err() != nil {
+		return
+	}
+	if err := cp.classObj.checkCPIndex(self.ConstantValueIndex, false, "constantvalue_index",
+		CONSTANT_Integer, CONSTANT_Float, CONSTANT_Long, CONSTANT_Double, CONSTANT_String); err != nil {
+		cp.reader.fail(ParseCodeCPIndex, err.Error())
+	}
 }
 
 /*
@@ -281,6 +325,12 @@ type AnnotationAttribute struct {
 	}
 */
 type RuntimeVisibleParameterAnnotationsAttribute struct {
+	Type                 string
+	AttrLen              uint32
+	IsInvisible          bool
+	NumParameters        uint8
+	ParameterAnnotations [][]*AnnotationAttribute
+	Info                 []byte
 }
 
 /*
@@ -353,8 +403,14 @@ type EnumConstValue struct {
 
 func (r *RuntimeVisibleAnnotationsAttribute) readInfo(cp *ClassParser) {
 	annotationsCount := cp.reader.readUint16()
+	if !cp.reader.reserve(int64(annotationsCount), 4) {
+		return
+	}
 	r.Annotations = make([]*AnnotationAttribute, annotationsCount)
 	for i := range r.Annotations {
+		if cp.reader.Err() != nil {
+			return
+		}
 		anno := ParseAnnotation(cp)
 		r.Annotations[i] = anno
 	}
@@ -366,13 +422,23 @@ func (self *CodeAttribute) readInfo(cp *ClassParser) {
 	codeLength := cp.reader.readUint32()
 	self.Code = cp.reader.readBytes(codeLength)
 	self.ExceptionTable = readExceptionTable(cp.reader)
+	saved := cp.attrCtx
+	cp.attrCtx = attrCtxCode
 	self.Attributes = cp.readAttributes()
+	cp.attrCtx = saved
+	self.validateStatic(cp)
 }
 
 func readExceptionTable(reader *ClassReader) []*ExceptionTableEntry {
 	exceptionTableLength := reader.readUint16()
+	if !reader.reserve(int64(exceptionTableLength), 8) {
+		return nil
+	}
 	exceptionTable := make([]*ExceptionTableEntry, exceptionTableLength)
 	for i := range exceptionTable {
+		if reader.Err() != nil {
+			return nil
+		}
 		exceptionTable[i] = &ExceptionTableEntry{
 			StartPc:   reader.readUint16(),
 			EndPc:     reader.readUint16(),
@@ -420,16 +486,14 @@ func newAttributeInfo(attrName string, attrLen uint32) AttributeInfo {
 		return &InnerClassesAttribute{AttrLen: attrLen}
 	case "Signature":
 		return &SignatureAttribute{AttrLen: attrLen}
+	case "RuntimeVisibleParameterAnnotations":
+		return &RuntimeVisibleParameterAnnotationsAttribute{AttrLen: attrLen}
+	case "RuntimeInvisibleParameterAnnotations":
+		return &RuntimeVisibleParameterAnnotationsAttribute{AttrLen: attrLen, IsInvisible: true}
 	case "RuntimeVisibleTypeAnnotations":
-		// JSR 308 type_annotation has a different binary layout than a plain annotation: each entry is
-		// prefixed by target_type (u1) + target_info (variable) + type_path (variable) before the
-		// regular type_index/element_value_pairs body. Reusing RuntimeVisibleAnnotationsAttribute's
-		// readInfo (which expects plain annotations) consumed the wrong number of bytes and desynced the
-		// reader, corrupting every subsequent attribute-name index ("Invalid constant pool index!").
-		// The decompiler never renders type-use annotations, and RuntimeInvisibleTypeAnnotations already
-		// falls through to UnparsedAttribute, so treat the visible variant identically: keep the raw
-		// bytes (byte-exact round-trip) and skip exactly attrLen bytes so parsing never desyncs.
-		return &UnparsedAttribute{Name: attrName, Length: attrLen, Info: nil}
+		return &TypeAnnotationsAttribute{Name: attrName, AttrLen: attrLen}
+	case "RuntimeInvisibleTypeAnnotations":
+		return &TypeAnnotationsAttribute{Name: attrName, AttrLen: attrLen, IsInvisible: true}
 	default:
 		return &UnparsedAttribute{Name: attrName, Length: attrLen, Info: nil}
 

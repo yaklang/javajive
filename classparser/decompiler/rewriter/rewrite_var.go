@@ -2,8 +2,8 @@ package rewriter
 
 import (
 	"fmt"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"maps"
-	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -38,7 +38,7 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// live in a sibling scope of their minting store (see Scope.allReplace). Runs before the
 	// declaration-placement passes so they see the unified ids and place the single declaration to
 	// dominate the rescued reads too. Kill-switch: JDEC_ORPHAN_GLOBAL_REBIND_OFF=1.
-	if os.Getenv("JDEC_ORPHAN_GLOBAL_REBIND_OFF") != "1" {
+	if jdecenv.Get("JDEC_ORPHAN_GLOBAL_REBIND_OFF") != "1" {
 		replayUnambiguousRebindings(sts, scope.allReplace, className, methodName)
 	}
 	var checkUndefinedVar func(scope *Scope, parentAssigned map[*utils.VariableId]struct{})
@@ -162,7 +162,7 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// The topLevelDeclDominatesAllUses gate still relocates ONLY declarations that fail to dominate a
 	// use, so correctly-scoped locals are untouched. Setting the switch restores the reused-only pass
 	// (byte-for-byte baseline).
-	liveIntervalAll := os.Getenv("JDEC_LIVEINTERVAL_OFF") == ""
+	liveIntervalAll := jdecenv.Get("JDEC_LIVEINTERVAL_OFF") == ""
 	placeCrossScopeDeclarations(sts, scope.reused, liveIntervalAll)
 	// switchHoistDeclarations (keyed by VarUid) and placeCrossScopeDeclarations (keyed by
 	// *VariableId) can independently emit a bare `T x;` for the SAME logical local when both
@@ -178,7 +178,7 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// so never sees the declaration-less id; coverUndeclaredGeneratedLocals widens the existing
 	// same-name declaration's scope to lexically cover those uncovered occurrences. It only acts when a
 	// name genuinely has an out-of-scope occurrence, so it cannot disturb already-valid output.
-	if os.Getenv("JDEC_COVER_UNDECLARED_OFF") != "1" {
+	if jdecenv.Get("JDEC_COVER_UNDECLARED_OFF") != "1" {
 		coverUndeclaredGeneratedLocals(sts)
 		dropDuplicateDeclarations(sts)
 	}
@@ -188,10 +188,10 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// concrete-typed slot under one varN spelling and keep the Object declaration, so a later
 	// `varN.method(...)` fails ("cannot find symbol: method ..., location: variable varN of type
 	// Object"). See narrowNullInitObjectDecl. Kill-switch: JDEC_NULLINIT_NARROW_OFF=1.
-	if os.Getenv("JDEC_NULLINIT_NARROW_OFF") != "1" {
+	if jdecenv.Get("JDEC_NULLINIT_NARROW_OFF") != "1" {
 		narrowNullInitObjectDecl(sts)
 	}
-	if os.Getenv("JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF") != "1" {
+	if jdecenv.Get("JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF") != "1" {
 		widenConcreteDeclToObject(sts)
 	}
 }
@@ -292,7 +292,7 @@ func collectEmbeddedDeclInfos(sts []statements.Statement, byID map[*utils.Variab
 // assigns before any read on every reaching path, so definite-assignment holds). Kill-switch:
 // JDEC_EMBED_ASSIGN_DECL_OFF=1.
 func SynthesizeUndeclaredEmbeddedAssignDecls(sts *[]statements.Statement, targets []*values.JavaRef) {
-	if sts == nil || len(targets) == 0 || os.Getenv("JDEC_EMBED_ASSIGN_DECL_OFF") == "1" {
+	if sts == nil || len(targets) == 0 || jdecenv.Get("JDEC_EMBED_ASSIGN_DECL_OFF") == "1" {
 		return
 	}
 	declaredID := map[*utils.VariableId]struct{}{}
@@ -360,7 +360,7 @@ func SynthesizeUndeclaredEmbeddedAssignDecls(sts *[]statements.Statement, target
 // defs), a non-array copy, or an already-typed local is left untouched. Kill-switch:
 // JDEC_COPY_ARRAY_DECL_TYPE_OFF=1.
 func PropagateCopyArrayDeclType(sts *[]statements.Statement) {
-	if sts == nil || os.Getenv("JDEC_COPY_ARRAY_DECL_TYPE_OFF") == "1" {
+	if sts == nil || jdecenv.Get("JDEC_COPY_ARRAY_DECL_TYPE_OFF") == "1" {
 		return
 	}
 	// Per unified variable id: every left-hand JavaRef (declarations + stores) and its value-defining
@@ -504,7 +504,7 @@ func replayUnambiguousRebindings(sts *[]statements.Statement, allReplace map[*ut
 			}
 		}
 		if !unique {
-			if os.Getenv("JDEC_ORPHAN_REBIND_NAMEEQ_OFF") == "" {
+			if jdecenv.Get("JDEC_ORPHAN_REBIND_NAMEEQ_OFF") == "" {
 				newName := newId.String()
 				nameEq := newId != nil
 				for _, t := range targets[1:] {
@@ -819,10 +819,10 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 				core.TraceRewriteVar(className, methodName, "reuse depth=%d uid=%s id=%s", scope.deep, ref.VarUid, id.String())
 			}
 		case *statements.IfStatement:
-			if os.Getenv("JDEC_IFELSE_PREBIND_OFF") == "" {
+			if jdecenv.Get("JDEC_IFELSE_PREBIND_OFF") == "" {
 				prebindEscapingIfElseSlots(scope, statement, stsSnapshot[stmtIdx+1:], idReplaceMap, className, methodName)
 			}
-			if os.Getenv("JDEC_IFELSE_PARALLEL_PREBIND_OFF") == "" {
+			if jdecenv.Get("JDEC_IFELSE_PARALLEL_PREBIND_OFF") == "" {
 				prebindParallelTypedIfElseDefs(scope, statement, stsSnapshot[stmtIdx+1:], idReplaceMap, className, methodName)
 			}
 			subScope := scope.SubScope(&statement.IfBody)
@@ -844,7 +844,7 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 			core.TraceRewriteVar(className, methodName, "enter do-while depth=%d body=%d", subScope.deep, len(statement.Body))
 			rewriteVar(subScope, className, methodName)
 		case *statements.SwitchStatement:
-			if os.Getenv("JDEC_SWITCH_PREBIND_OFF") == "" {
+			if jdecenv.Get("JDEC_SWITCH_PREBIND_OFF") == "" {
 				prebindEscapingSwitchSlots(scope, statement, stsSnapshot[stmtIdx+1:], idReplaceMap, className, methodName)
 			}
 			subScope := scope.SubScope(nil)
@@ -1078,7 +1078,7 @@ func prebindEscapingIfElseSlots(scope *Scope, ifst *statements.IfStatement, afte
 		// instead: the ordinary AssignStatement reuse-minted path already reuses this id, marks it
 		// reused, and hoists its single declaration to the common ancestor (identical to the output
 		// with this whole pass disabled). Kill-switch: JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF=1.
-		if os.Getenv("JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF") == "" {
+		if jdecenv.Get("JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF") == "" {
 			_, ifMinted := scope.minted[origId]
 			_, elseMinted := scope.minted[elseRef.Id]
 			if ifMinted || elseMinted {
@@ -1365,12 +1365,12 @@ func hoistSwitchDeclarations(sts *[]statements.Statement) {
 		case *statements.IfStatement:
 			hoistSwitchDeclarations(&s.IfBody)
 			hoistSwitchDeclarations(&s.ElseBody)
-			if os.Getenv("JDEC_IF_HOIST_OFF") == "" {
+			if jdecenv.Get("JDEC_IF_HOIST_OFF") == "" {
 				for _, decl := range ifHoistDeclarations(s, list[i+1:]) {
 					out = append(out, decl)
 				}
 			}
-			if os.Getenv("JDEC_PARALLEL_ARM_HOIST_OFF") == "" {
+			if jdecenv.Get("JDEC_PARALLEL_ARM_HOIST_OFF") == "" {
 				for _, decl := range parallelArmDeclHoist(s, list[:i], list[i+1:]) {
 					out = append(out, decl)
 				}
@@ -1532,7 +1532,7 @@ func switchHoistDeclarations(sw *statements.SwitchStatement, afterSts []statemen
 // one declaration read afterwards must be hoisted. Widening scope is always valid Java. Kill-switch:
 // JDEC_SYNC_HOIST_OFF=1.
 func syncHoistDeclarations(sync *statements.SynchronizedStatement, afterSts []statements.Statement) []statements.Statement {
-	if os.Getenv("JDEC_SYNC_HOIST_OFF") != "" {
+	if jdecenv.Get("JDEC_SYNC_HOIST_OFF") != "" {
 		return nil
 	}
 	declaredInside := map[string]bool{}
@@ -2054,7 +2054,7 @@ func assignRendersAsPlain(as *statements.AssignStatement) (ok bool) {
 // the name-collision false positives/negatives that statementsReadName suffers. Kill-switch:
 // JDEC_SWITCH_HOIST_IDENTITY_OFF=1 falls back to the legacy name-based test.
 func assignsReadAfterByIdentity(afterSts []statements.Statement, assigns []*statements.AssignStatement) bool {
-	if os.Getenv("JDEC_SWITCH_HOIST_IDENTITY_OFF") == "1" {
+	if jdecenv.Get("JDEC_SWITCH_HOIST_IDENTITY_OFF") == "1" {
 		for _, as := range assigns {
 			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
 				if statementsReadName(afterSts, ref.String(&class_context.ClassContext{})) {
@@ -2535,7 +2535,7 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 				// Only leave it alone when that top-level declaration actually dominates every use;
 				// a later disjoint live-range re-declaration does not, and the earlier sibling use
 				// would otherwise stay out of scope. Kill-switch restores the existence-only skip.
-				if os.Getenv("JDEC_NO_CROSS_SCOPE_DOMINATE") != "" || topLevelDeclDominatesAllUses(list, id) {
+				if jdecenv.Get("JDEC_NO_CROSS_SCOPE_DOMINATE") != "" || topLevelDeclDominatesAllUses(list, id) {
 					continue
 				}
 			}

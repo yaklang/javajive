@@ -1,0 +1,117 @@
+# Full task-pack infrastructure contracts are manual; PR CI focuses on algorithms.
+# Third-party actions are pinned to full commit SHAs (comment is the tag name).
+name: Task contract gates
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: task-gates-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+  PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  python-contracts:
+    name: Python task contracts
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch immutable T01 replay anchors
+        run: |
+          set -euo pipefail
+          # Shallow PR checkouts omit 31de113/81f8ef5. Missing objects are infra_error, never skip.
+          git fetch --no-tags origin 31de113dded2fec7c34799776f43cca213aa1d77
+          git fetch --no-tags origin 81f8ef55603419bf737f10aa36e582f94619b35d
+          git cat-file -t 31de113dded2fec7c34799776f43cca213aa1d77 | grep -x commit
+          git cat-file -t 81f8ef55603419bf737f10aa36e582f94619b35d | grep -x commit
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up JDK 8 (real javac 8, not --release 8)
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Record JAVA8_HOME
+        run: |
+          set -euo pipefail
+          test -x "$JAVA_HOME/bin/javac"
+          "$JAVA_HOME/bin/javac" -version 2>&1 | tee /tmp/javac8.version
+          grep -E '1\.8' /tmp/javac8.version
+          echo "JAVA8_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Record JAVA21_HOME and pin ECJ
+        run: |
+          set -euo pipefail
+          echo "JAVA21_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+          python3 tools/generators_holdout/fetch_ecj.py "$GITHUB_WORKSPACE/tools/generators_holdout/testdata/ecj-3.37.0.jar"
+          echo "ECJ_JAR=$GITHUB_WORKSPACE/tools/generators_holdout/testdata/ecj-3.37.0.jar" >> "$GITHUB_ENV"
+
+      - name: Fail closed if a task test directory is missing
+        run: |
+          set -euo pipefail
+          missing=0
+          for dir in ci/task_t01 ci/task_t28 ci/task_t29 ci/task_t30 ci/task_t32; do
+            if [ ! -d "$dir" ]; then
+              echo "infra_error: missing $dir"
+              missing=1
+            else
+              count=$(find "$dir" -name 'test_*.py' | wc -l | tr -d ' ')
+              if [ "$count" = 0 ]; then
+                echo "infra_error: zero tests in $dir"
+                missing=1
+              fi
+            fi
+          done
+          if [ "$missing" != 0 ]; then
+            echo "missing tests are infra_error, not skip/pass"
+            exit 1
+          fi
+
+      - name: Prepare pinned T30 sandbox image
+        run: docker pull alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+
+      - name: Build T30 sandbox toolchain image
+        run: docker build -t javajive-sandbox-toolchain:t30 -f tools/sandbox_worker/image/Dockerfile tools/sandbox_worker/image
+
+      - name: Run Python contract tests
+        env:
+          CGO_ENABLED: '1'
+          GOFLAGS: '-ldflags=-linkmode=external'
+          T32_FORCE_REFRESH: '1'
+          JAVAJIVE_FETCH_ANCHORS: '1'
+          JAVAJIVE_SANDBOX_IMAGE: javajive-sandbox-toolchain:t30
+        run: |
+          set -euo pipefail
+          test -n "${JAVA8_HOME:-}"
+          test -n "${ECJ_JAR:-}"
+          test -x "$JAVA8_HOME/bin/javac"
+          python3 -m unittest discover -s ci/task_t29 -p 'test_*.py' -v
+          python3 -m unittest discover -s ci/task_t01 -p 'test_*.py' -v
+          python3 -m unittest discover -s ci/task_t30 -p 'test_*.py' -v
+          python3 -m unittest discover -s ci/task_t32 -p 'test_*.py' -v
+          python3 -m unittest discover -s ci/task_t28 -p 'test_*.py' -v

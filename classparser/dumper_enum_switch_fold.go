@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,13 +52,13 @@ type switchMapSwitch struct {
 // integer case label has a constant mapping; otherwise that switch is left byte-for-byte untouched.
 // Disabled by a nil resolver or JDEC_NO_ENUM_SWITCH_FOLD.
 func (c *ClassObjectDumper) foldEnumSwitchMaps(src string) string {
-	if c.foldSiblingResolver == nil || os.Getenv("JDEC_NO_ENUM_SWITCH_FOLD") != "" {
+	if c.foldSiblingResolver == nil || c.getenv("JDEC_NO_ENUM_SWITCH_FOLD") != "" {
 		return src
 	}
 	if !strings.Contains(src, "$SwitchMap$") {
 		return src
 	}
-	debug := os.Getenv("JDEC_FOLD_DEBUG") != ""
+	debug := c.getenv("JDEC_FOLD_DEBUG") != ""
 	pkgPath := strings.ReplaceAll(c.PackageName, ".", "/")
 	searchFrom := 0
 	for {
@@ -94,7 +93,7 @@ func (c *ClassObjectDumper) tryFoldOneSwitchMap(src string, sw *switchMapSwitch,
 		}
 		return src, false
 	}
-	m := parseSwitchMap(data, sw.array)
+	m := c.parseSwitchMap(data, sw.array)
 	if len(m) == 0 {
 		if debug {
 			log.Infof("enum-switch fold: holder %s array %s yielded empty map", internal, sw.array)
@@ -174,8 +173,8 @@ func findSwitchMapSwitch(src string, from int) *switchMapSwitch {
 // parseSwitchMap decompiles the synthetic holder bytes and builds intKey -> constantName for the given
 // array field, by parsing its <clinit> entries. Returns nil on any failure. The sub-dumper has no
 // resolver, so this never recurses into folding.
-func parseSwitchMap(data []byte, arrayName string) map[int]string {
-	obj, err := Parse(data)
+func (c *ClassObjectDumper) parseSwitchMap(data []byte, arrayName string) map[int]string {
+	obj, err := c.parseResolved(data)
 	if err != nil {
 		return nil
 	}

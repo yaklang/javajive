@@ -2,7 +2,7 @@ package core
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"sort"
 	"strings"
 
@@ -18,21 +18,43 @@ type decompileTraceConfig struct {
 	varFold      bool
 	rewriteVar   bool
 	slotVersion  bool
+	ctorArray    bool
 }
 
 func currentTraceConfig() decompileTraceConfig {
 	return decompileTraceConfig{
-		classFilter:  os.Getenv("JDEC_TRACE_CLASS"),
-		methodFilter: os.Getenv("JDEC_TRACE_METHOD"),
-		varTable:     os.Getenv("JDEC_TRACE_VAR_TABLE") != "",
-		varFold:      os.Getenv("JDEC_TRACE_VAR_FOLD") != "",
-		rewriteVar:   os.Getenv("JDEC_TRACE_REWRITE_VAR") != "",
-		slotVersion:  os.Getenv("JDEC_TRACE_SLOT_VERSION") != "",
+		classFilter:  jdecenv.Get("JDEC_TRACE_CLASS"),
+		methodFilter: jdecenv.Get("JDEC_TRACE_METHOD"),
+		varTable:     jdecenv.Get("JDEC_TRACE_VAR_TABLE") != "",
+		varFold:      jdecenv.Get("JDEC_TRACE_VAR_FOLD") != "",
+		rewriteVar:   jdecenv.Get("JDEC_TRACE_REWRITE_VAR") != "",
+		slotVersion:  jdecenv.Get("JDEC_TRACE_SLOT_VERSION") != "",
+		ctorArray:    jdecenv.Get("JDEC_TRACE_CTOR_ARRAY_INLINE") != "",
 	}
 }
 
+func (d *Decompiler) currentTraceConfig() decompileTraceConfig {
+	if d == nil {
+		return currentTraceConfig()
+	}
+	if d.traceCfgLoaded {
+		return d.traceCfg
+	}
+	d.traceCfg = decompileTraceConfig{
+		classFilter:  d.getenv("JDEC_TRACE_CLASS"),
+		methodFilter: d.getenv("JDEC_TRACE_METHOD"),
+		varTable:     d.getenv("JDEC_TRACE_VAR_TABLE") != "",
+		varFold:      d.getenv("JDEC_TRACE_VAR_FOLD") != "",
+		rewriteVar:   d.getenv("JDEC_TRACE_REWRITE_VAR") != "",
+		slotVersion:  d.getenv("JDEC_TRACE_SLOT_VERSION") != "",
+		ctorArray:    d.getenv("JDEC_TRACE_CTOR_ARRAY_INLINE") != "",
+	}
+	d.traceCfgLoaded = true
+	return d.traceCfg
+}
+
 func (d *Decompiler) traceEnabled(kind string) bool {
-	cfg := currentTraceConfig()
+	cfg := d.currentTraceConfig()
 	switch kind {
 	case "var-table":
 		if !cfg.varTable {
@@ -44,6 +66,10 @@ func (d *Decompiler) traceEnabled(kind string) bool {
 		}
 	case "slot-version":
 		if !cfg.slotVersion {
+			return false
+		}
+	case "ctor-array-inline":
+		if !cfg.ctorArray {
 			return false
 		}
 	default:

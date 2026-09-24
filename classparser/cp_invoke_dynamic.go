@@ -55,3 +55,21 @@ func (self *ConstantInvokeDynamicInfo) readInfo(cp *ClassParser) {
 	self.BootstrapMethodAttrIndex = cp.reader.readUint16()
 	self.NameAndTypeIndex = cp.reader.readUint16()
 }
+
+/*
+	CONSTANT_Dynamic_info {
+	    u1 tag;
+	    u2 bootstrap_method_attr_index;
+	    u2 name_and_type_index;
+	}
+*/
+type ConstantDynamicInfo struct {
+	Type                     string
+	BootstrapMethodAttrIndex uint16
+	NameAndTypeIndex         uint16
+}
+
+func (self *ConstantDynamicInfo) readInfo(cp *ClassParser) {
+	self.BootstrapMethodAttrIndex = cp.reader.readUint16()
+	self.NameAndTypeIndex = cp.reader.readUint16()
+}

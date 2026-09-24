@@ -1,0 +1,1 @@
+public class Main { public static void f(@Flag String x){} public static void main(String[] a)throws Exception {System.out.println(Main.class.getDeclaredMethod("f",String.class).getParameterAnnotations()[0].length);} }

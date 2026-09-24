@@ -1,14 +1,16 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
+	"sort"
+	"strconv"
 	"strings"
 )
 
 // fixZxingRemainingReconstructs repairs leftover zxing-core tree sites.
 // Kill-switch: JDEC_ZXING_REMAINING_OFF=1.
 func fixZxingRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_ZXING_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_ZXING_REMAINING_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "com.google.zxing") {
@@ -793,7 +795,12 @@ func foldEnumStaticNewIntoConstants(body string) string {
 		return body
 	}
 	payloads := make(map[string]string, len(consts))
-	for _, c := range consts {
+	var assignments []enumSourceRange
+	var consumedLocals []enumSourceRange
+	blockStart, blockEnd := -1, -1
+	anySpilledArgs := false
+	lastAssignment := -1
+	for i, c := range consts {
 		asg := c + " = new " + name + "("
 		p := strings.Index(body, asg)
 		if p < 0 {
@@ -808,7 +815,62 @@ func foldEnumStaticNewIntoConstants(body string) string {
 		if len(args) < 3 {
 			return body
 		}
-		payloads[c] = strings.Join(args[2:], ",")
+		enumName, err := strconv.Unquote(strings.TrimSpace(args[0]))
+		if err != nil || enumName != c {
+			return body
+		}
+		ordinal, err := strconv.Atoi(strings.TrimSpace(args[1]))
+		if err != nil || ordinal != i {
+			return body
+		}
+		lineStart := strings.LastIndex(body[:p], "\n") + 1
+		if p <= lastAssignment {
+			return body
+		}
+		lastAssignment = p
+		lineEnd := strings.IndexByte(body[p:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(body)
+		} else {
+			lineEnd += p
+		}
+		assignmentEnd := lineEnd
+		if assignmentEnd < len(body) {
+			assignmentEnd++
+		}
+		bs, be, ok := enumClinitBlockBounds(body, p)
+		if !ok || (blockStart >= 0 && (bs != blockStart || be != blockEnd)) {
+			return body
+		}
+		blockStart, blockEnd = bs, be
+		assignmentIndent := enumLineIndent(body, lineStart)
+		payloadArgs := args[2:]
+		expanded, locals, hadLocals, ok := expandEnumClinitDirectArgumentLocals(body, blockStart, blockEnd, lineStart, assignmentIndent, payloadArgs)
+		if !ok {
+			return body
+		}
+		if hadLocals {
+			anySpilledArgs = true
+			consumedLocals = append(consumedLocals, locals...)
+		}
+		payloads[c] = strings.Join(expanded, ",")
+		assignments = append(assignments, enumSourceRange{lineStart, assignmentEnd})
+	}
+	if anySpilledArgs && !enumZxingFoldRegionSafe(body, blockStart, assignments, consumedLocals) {
+		return body
+	}
+	if anySpilledArgs {
+		// Declarations move into enum arguments. Remove each uniquely consumed
+		// spill before replacing the enum constant list so offsets stay stable.
+		sort.Slice(consumedLocals, func(i, j int) bool { return consumedLocals[i].start > consumedLocals[j].start })
+		lastStart := len(body) + 1
+		for _, span := range consumedLocals {
+			if span.start < 0 || span.end > len(body) || span.start >= span.end || span.end > lastStart {
+				return body
+			}
+			body = body[:span.start] + body[span.end:]
+			lastStart = span.start
+		}
 	}
 	var b strings.Builder
 	for i, c := range consts {
@@ -862,5 +924,59 @@ func foldEnumStaticNewIntoConstants(body string) string {
 		}
 		body = body[:line] + body[end:]
 	}
+	// JDK 17+ renders the synthetic enum values array through $values();
+	// after this fold there may be no remaining `= new Enum(...)` for the later
+	// generic enum cleanup to recognize.
+	body = enumValuesAssignRe.ReplaceAllString(body, "")
 	return body
+}
+
+func enumZxingFoldRegionSafe(body string, blockStart int, assignments, consumed []enumSourceRange) bool {
+	if blockStart < 0 || len(assignments) == 0 {
+		return false
+	}
+	assignmentByStart := make(map[int]enumSourceRange, len(assignments))
+	consumedByStart := make(map[int]enumSourceRange, len(consumed))
+	for _, span := range assignments {
+		assignmentByStart[span.start] = span
+	}
+	for _, span := range consumed {
+		consumedByStart[span.start] = span
+	}
+	lineStart := strings.IndexByte(body[blockStart:], '\n')
+	if lineStart < 0 {
+		return false
+	}
+	lineStart += blockStart + 1
+	lastAssignmentEnd := assignments[len(assignments)-1].end
+	assignmentCount, consumedCount := 0, 0
+	for lineStart < lastAssignmentEnd {
+		if span, ok := assignmentByStart[lineStart]; ok {
+			assignmentCount++
+			lineStart = span.end
+			continue
+		}
+		if span, ok := consumedByStart[lineStart]; ok {
+			consumedCount++
+			lineStart = span.end
+			continue
+		}
+		lineEnd := strings.IndexByte(body[lineStart:lastAssignmentEnd], '\n')
+		if lineEnd < 0 {
+			lineEnd = lastAssignmentEnd
+		} else {
+			lineEnd += lineStart
+		}
+		if strings.TrimSpace(body[lineStart:lineEnd]) != "" {
+			// An unconsumed declaration can still affect class initialization
+			// (for example by allocating, failing, or running an initializer).
+			// Keep this rewrite limited to the exact spill-and-constructor shape.
+			return false
+		}
+		if lineEnd == lastAssignmentEnd {
+			break
+		}
+		lineStart = lineEnd + 1
+	}
+	return assignmentCount == len(assignments) && consumedCount == len(consumed)
 }

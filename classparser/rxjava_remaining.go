@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"regexp"
 	"strings"
 )
@@ -9,7 +9,7 @@ import (
 // fixRxjavaRemainingReconstructs repairs leftover rxjava tree sites.
 // Kill-switch: JDEC_RXJAVA_REMAINING_OFF=1.
 func fixRxjavaRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_RXJAVA_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_RXJAVA_REMAINING_OFF") == "1" {
 		return body
 	}
 	// Functions.ArrayNFunc: Object[] elements vs BiFunction/FunctionN type params.

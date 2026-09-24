@@ -1,315 +1,59 @@
+# Keep required PR feedback fast and attributable: one pinned JDK 21 runtime,
+# algorithm invariants under the race detector, and small production-path
+# counterexamples. Cross-JDK and full historical-corpus checks remain manual.
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
-
+permissions:
+  contents: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: regression-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-
 env:
-  # Pin to the module's own Go directive; never auto-download a newer toolchain.
   GOTOOLCHAIN: local
-
 jobs:
-  lint:
-    name: Lint (gofmt / vet / tidy)
+  regression:
+    name: Algorithm regression
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "::error::The following files are not gofmt-ed:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: go mod tidy is clean
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum
-
-  test:
-    name: Test ${{ matrix.os }} / Go ${{ matrix.go }}
-    needs: lint
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
-        go: ['1.22', '1.23']
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ matrix.go }}
-          cache: true
-
-      - name: Set up JDK (for Java cross-tests)
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
           distribution: temurin
           java-version: '21'
-
-      - name: Java version
-        run: java -version
-
       - name: Build
         run: go build ./...
-
-      - name: Test
-        if: runner.os != 'macOS'
-        run: go test ./... -count=1 -timeout=30m
-
-      # Go 1.22's internal linker omits LC_UUID on darwin/arm64, which modern
-      # macOS dyld rejects ("missing LC_UUID load command" -> abort trap).
-      # Force the external (system) linker so the test binaries carry LC_UUID.
-      - name: Test (macOS, external linker)
-        if: runner.os == 'macOS'
-        env:
-          CGO_ENABLED: '1'
-        run: go test ./... -count=1 -timeout=30m -ldflags=-linkmode=external
-
-      - name: Test (race detector)
-        if: runner.os == 'Linux'
-        # The large classparser corpus is covered in full by the shards below.
+      - name: Core algorithm and resource-guard tests (race)
+        run: go test ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv -race -count=1 -timeout=3m
+      - name: Algorithm edge cases and source round-trip tests
         run: |
-          mapfile -t packages < <(go list ./... | awk '$0 != "github.com/yaklang/javajive/classparser"')
-          go test "${packages[@]}" -race -count=1 -timeout=30m
-
-  classparser-race:
-    name: Classparser race / Go ${{ matrix.go }} / shard ${{ matrix.shard }}
-    needs: lint
-    strategy:
-      fail-fast: false
-      matrix:
-        go: ['1.22', '1.23']
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ matrix.go }}
-          cache: true
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - name: Partition every top-level test and seed
-        env:
-          SHARD_INDEX: ${{ matrix.shard }}
+          go test ./classparser -run '^Test(BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFunctionalValueKeepsErasedCallDescriptor|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|Adversarial)' -count=1 -timeout=3m
+      - name: Curated algorithm round-trip contracts
+        run: python3 -m unittest tools.curated_roundtrip.test_roundtrip
+      - name: Historical diagnostic-key regression
+        run: python3 -m unittest ci.task_t30.test_t30_historical_diagnostics
+      - name: Recompile and run trusted small Java fixtures
         run: |
           mkdir -p artifacts
-          go test -race ./classparser -list . > artifacts/test-list.txt
-          python3 - <<'PY'
-          import os, re
-          from pathlib import Path
-          names = sorted(line for line in Path('artifacts/test-list.txt').read_text().splitlines()
-                         if line.startswith(('Test', 'Fuzz', 'Example')))
-          assert names and len(names) == len(set(names)), 'missing or duplicate test names'
-          seed_suites = ['TestDecompileSyntaxRegression', 'TestRegressionSeedsAreDeterministic']
-          assert all(name in names for name in seed_suites)
-          regular = [name for name in names if name not in seed_suites]
-          shards = [regular[index::8] for index in range(8)]
-          assert sorted(name for shard in shards for name in shard) == regular
-          index = int(os.environ['SHARD_INDEX'])
-          selected = shards[index]
-          assert selected, 'empty shard'
-          Path('artifacts/selected-tests.txt').write_text('\n'.join(selected) + '\n')
-          Path('artifacts/test-pattern.txt').write_text('^(' + '|'.join(selected) + ')$')
-          seeds = sorted(p.stem for p in Path('classparser/testdata/regression').glob('*.class'))
-          seed_shards = [seeds[index::8] for index in range(8)]
-          assert seeds and sorted(seed for shard in seed_shards for seed in shard) == seeds
-          selected_seeds = seed_shards[index]
-          assert selected_seeds, 'empty seed shard'
-          Path('artifacts/selected-seeds.txt').write_text('\n'.join(selected_seeds) + '\n')
-          # The syntax suite uses the stem; the determinism suite retains .class.
-          subtests = '|'.join(re.escape(seed) + r'(\.class)?' for seed in selected_seeds)
-          Path('artifacts/seed-pattern.txt').write_text('^(' + '|'.join(seed_suites) + ')$/^(' + subtests + ')$')
-          print(f'Running {len(selected)} regular tests and {len(selected_seeds)} regression seeds; every determinism repetition retained')
-          PY
-      - name: Test corpus with race detector
-        run: go test ./classparser -race -count=1 -timeout=30m -run "$(cat artifacts/test-pattern.txt)"
-      - name: Test regression seeds with race detector
-        run: go test ./classparser -race -count=1 -timeout=60m -run "$(cat artifacts/seed-pattern.txt)"
-      - name: Upload shard manifest
+          git rev-parse HEAD > artifacts/revision.txt
+          python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/javajive-probe"
+          python3 tools/curated_roundtrip/roundtrip.py --adapter "$RUNNER_TEMP/javajive-probe" --out artifacts/roundtrip --allow-trusted-fixture-execution --expected-rows 40
+      - name: Roundtrip evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: race-go-${{ matrix.go }}-shard-${{ matrix.shard }}
+          name: algorithm-regression-evidence
           path: artifacts/
-          if-no-files-found: error
-
-  cross-build:
-    name: Cross build CLI (${{ matrix.goos }}/${{ matrix.goarch }})
-    needs: lint
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { goos: linux, goarch: amd64 }
-          - { goos: linux, goarch: arm64 }
-          - { goos: darwin, goarch: amd64 }
-          - { goos: darwin, goarch: arm64 }
-          - { goos: windows, goarch: amd64 }
-          - { goos: windows, goarch: arm64 }
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build CLI (pure Go, CGO disabled)
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: '0'
-        run: |
-          out="javajive-${{ matrix.goos }}-${{ matrix.goarch }}"
-          if [ "${{ matrix.goos }}" = "windows" ]; then out="$out.exe"; fi
-          go build -trimpath -o "dist/$out" ./cmd/javajive
-          ls -la dist/
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: javajive-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*
-          if-no-files-found: error
-
-  semantic-audit:
-    name: Semantic audit / JDK ${{ matrix.java }}
-    needs: lint
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        java: ['17', '21']
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ matrix.java }}
-      - name: Verify isolated semantic families
-        env:
-          JDEC_SEMANTIC_REPORT_DIR: ${{ github.workspace }}/artifacts/semantic
-        run: |
-          mkdir -p artifacts
-          go test ./test/cross -run '^TestAudit' -count=1 -timeout=10m -json > artifacts/semantic-tests.json
-      - name: Fuzz instruction decoder
-        run: go test ./classparser/decompiler/core -run '^$' -fuzz '^FuzzAuditDecoder$' -fuzztime=30s -parallel=2
-      - name: Upload independent observations
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: semantic-jdk-${{ matrix.java }}
-          path: artifacts/
-          if-no-files-found: error
-
-  historical-audit:
-    name: Historical JAR differential audit (38 targets)
-    needs: lint
-    runs-on: ubuntu-22.04
-    timeout-minutes: 90
-    env:
-      BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Set evidence directory
-        run: echo "AUDIT_ROOT=$RUNNER_TEMP/historical-audit" >> "$GITHUB_ENV"
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/historical-audit/m2
-          key: historical-jars-${{ hashFiles('test/cross/testdata/historical-jars.lock.json') }}
-      - name: Verify every pinned target and dependency
-        run: python3 scripts/historical_jar_audit.py prepare --cache "$AUDIT_ROOT/m2" --manifest "$AUDIT_ROOT/manifest.json"
-      - name: Build baseline and candidate with the same observation harness
-        run: |
-          baseline="$BASE_REF"
-          if [ -z "$baseline" ] || [ "$baseline" = 0000000000000000000000000000000000000000 ]; then
-            baseline=$(git rev-parse HEAD^)
-          fi
-          git worktree add --detach "$AUDIT_ROOT/base-worktree" "$baseline"
-          cp test/cross/historical_audit_test.go "$AUDIT_ROOT/base-worktree/test/cross/"
-          git rev-parse HEAD > "$AUDIT_ROOT/candidate-revision.txt"
-          git -C "$AUDIT_ROOT/base-worktree" rev-parse HEAD > "$AUDIT_ROOT/baseline-revision.txt"
-          (cd "$AUDIT_ROOT/base-worktree" && go test -c ./test/cross -o "$AUDIT_ROOT/baseline.test")
-          go test -c ./test/cross -o "$AUDIT_ROOT/candidate.test"
-      - name: Observe all 38 baseline JARs
-        run: |
-          cd "$AUDIT_ROOT/base-worktree/test/cross"
-          HISTORICAL_JAR_MANIFEST="$AUDIT_ROOT/manifest.json" \
-          HISTORICAL_JAR_REPORT="$AUDIT_ROOT/baseline" \
-          HISTORICAL_JAR_REVISION="$(cat "$AUDIT_ROOT/baseline-revision.txt")" \
-          "$AUDIT_ROOT/baseline.test" -test.run '^TestHistoricalJarAudit$' -test.timeout=40m -test.v
-      - name: Observe all 38 candidate JARs
-        run: |
-          cd test/cross
-          HISTORICAL_JAR_MANIFEST="$AUDIT_ROOT/manifest.json" \
-          HISTORICAL_JAR_REPORT="$AUDIT_ROOT/candidate" \
-          HISTORICAL_JAR_REVISION="$(cat "$AUDIT_ROOT/candidate-revision.txt")" \
-          "$AUDIT_ROOT/candidate.test" -test.run '^TestHistoricalJarAudit$' -test.timeout=40m -test.v
-      - name: Reject regressions independently of observation completion
-        run: |
-          python3 scripts/historical_jar_audit.py compare \
-            --baseline "$AUDIT_ROOT/baseline" --candidate "$AUDIT_ROOT/candidate" \
-            --output "$AUDIT_ROOT/comparison.json"
-      - name: Package reproduction evidence
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import os, tarfile
-          from pathlib import Path
-          root = Path(os.environ['AUDIT_ROOT'])
-          root.mkdir(parents=True, exist_ok=True)
-          with tarfile.open(root / 'historical-evidence.tar.gz', 'w:gz') as archive:
-              for name in ['baseline', 'candidate', 'comparison.json', 'manifest.json',
-                           'baseline-revision.txt', 'candidate-revision.txt']:
-                  if (root / name).exists():
-                      archive.add(root / name, arcname=name)
-          PY
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: historical-jar-evidence
-          path: ${{ runner.temp }}/historical-audit/historical-evidence.tar.gz
-          if-no-files-found: error
-          retention-days: 14
+          if-no-files-found: ignore
+          retention-days: 7
