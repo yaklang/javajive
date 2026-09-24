@@ -8,12 +8,13 @@ import (
 	"testing"
 )
 
-// TestGenericFunctionalValueKeepsErasedCallDescriptor covers a lambda that is
-// materialized as a local before a generic Map.computeIfAbsent call. Its
-// invokedynamic descriptor preserves only Function<String, List>; the receiver
-// signature expects Function<? super String, ? extends List<Integer>>. Keeping
-// the call's raw Function descriptor lets javac preserve the receiver's key
-// inference without inventing unavailable nested lambda return types.
+// TestGenericFunctionalValueKeepsErasedCallDescriptor covers a captured lambda
+// materialized as a local before a generic Map.computeIfAbsent call on a static
+// field. Its invokedynamic descriptor preserves only Function<String, List>;
+// the receiver signature expects Function<? super String, ? extends
+// List<Integer>>. Keeping the call's raw Function descriptor lets javac
+// preserve the receiver's key inference without inventing unavailable nested
+// lambda return types.
 func TestGenericFunctionalValueKeepsErasedCallDescriptor(t *testing.T) {
 	javac, java := t04Tools(t)
 	for _, debug := range []string{"-g", "-g:none"} {
@@ -30,17 +31,21 @@ import java.util.List;
 import java.util.Map;
 
 public class GenericFunctionArg {
-  private final Map<String, List<Integer>> table = new HashMap<>();
-  private void add(String key, int value) {
-    table.computeIfAbsent(key, ignored -> new ArrayList<>()).add(value);
+  private static final Map<String, List<Integer>> table = new HashMap<>();
+  private static void add(String key, int value) {
+    table.computeIfAbsent(key, ignored -> {
+      ArrayList<Integer> rows = new ArrayList<>();
+      rows.add(value);
+      return rows;
+    }).add(value);
   }
   public static void main(String[] args) {
-    GenericFunctionArg example = new GenericFunctionArg();
-    example.add("x", 1);
-    example.add("x", 2);
-    example.add("y", 3);
-    System.out.println(example.table.get("x").get(0) + "," +
-        example.table.get("x").get(1) + ";" + example.table.get("y").get(0));
+    add("x", 1);
+    add("x", 2);
+    add("y", 3);
+    System.out.println(table.get("x").get(0) + "," +
+        table.get("x").get(1) + "," + table.get("x").get(2) + ";" +
+        table.get("y").get(0) + "," + table.get("y").get(1));
   }
 }`
 			if err := os.WriteFile(originalPath, []byte(original), 0o644); err != nil {

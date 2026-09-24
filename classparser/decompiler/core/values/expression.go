@@ -918,8 +918,20 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 	if jdecenv.Get("JDEC_GENERIC_PARAM_FIELD_OFF") != "" {
 		return "", nil
 	}
-	// Same-class field receiver (`this.field`): recover type args from the field's generic Signature;
-	// an INHERITED field (declared in a superclass) is recovered via the cross-class hierarchy walk.
+	// Same-class static field receiver: GETSTATIC carries only the descriptor's raw type in
+	// JavaClassMember, even when the classfile field has a parameterized Signature. Recover the
+	// signature only when the constant-pool owner is the class currently being decompiled; a
+	// same-named external field must never borrow this class's metadata.
+	if member, ok := UnpackSoltValue(f.Object).(*JavaClassMember); ok && funcCtx.ClassName != "" &&
+		sameErasureClassName(member.Name, funcCtx.ClassName) {
+		if sig := funcCtx.FieldSignature(class_context.SafeIdentifier(member.Member)); sig != "" {
+			if pt, ok := types.AsParameterizedType(types.ParseSignature(sig)); ok {
+				return pt.RawClassName, pt.TypeArgs
+			}
+		}
+	}
+	// Same-class instance field receiver (`this.field`): recover type args from the field's generic
+	// Signature; an inherited field (declared in a superclass) is recovered via the hierarchy walk.
 	if pt, ok := types.AsParameterizedType(RecoverThisFieldInstantiatedType(funcCtx, f.Object)); ok {
 		return pt.RawClassName, pt.TypeArgs
 	}
