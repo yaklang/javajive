@@ -3279,6 +3279,109 @@ var rawFIMethodRefCastFamily = map[string]bool{
 	"java.util.function.BiPredicate": true,
 }
 
+// nestedGenericErasureArgCast restores the erased descriptor type when a
+// reconstructed parameterized argument has lost nested type arguments. A
+// lambda's instantiatedMethodType records (for example) Function<String,List>,
+// while the receiver's generic signature may require
+// Function<? super String,? extends List<Integer>>. Passing that local directly
+// is rejected by javac even though the bytecode call site accepts the erased
+// Function descriptor. A raw cast to that exact descriptor is a no-op at
+// runtime and keeps Java's inference for other arguments (notably the receiver
+// key) intact. Never apply it to a lambda or method reference: a raw SAM target
+// can change parameter inference or invalidate the body.
+func (f *FunctionCallExpression) nestedGenericErasureArgCast(i int, arg JavaValue, funcCtx *class_context.ClassContext) string {
+	if f == nil || arg == nil || f.Descriptor == "" || f.FuncType == nil ||
+		i < 0 || i >= len(f.FuncType.ParamTypes) || isWitnessLambdaArg(UnpackSoltValue(arg)) {
+		return ""
+	}
+	actual, ok := types.AsParameterizedType(arg.Type())
+	if !ok || actual == nil {
+		return ""
+	}
+	formalType := f.FuncType.ParamTypes[i]
+	if inst := f.instantiatedParamType(i, funcCtx); inst != nil {
+		formalType = inst
+	} else if inst := f.sameClassMethodParamType(i, funcCtx); inst != nil {
+		formalType = inst
+	} else if inst := f.resolvedParamType(i, funcCtx); inst != nil {
+		formalType = inst
+	} else if inst := f.genericMethodWitnessArgParamType(i, funcCtx); inst != nil {
+		formalType = inst
+	} else if inst := f.varargsTypeVarArrayArgParamType(i, funcCtx); inst != nil {
+		formalType = inst
+	} else if inst := f.thisCtorTypeVarArrayParamType(i, funcCtx); inst != nil {
+		formalType = inst
+	}
+	// Map.computeIfAbsent's Function<? super K, ? extends V> parameter is a
+	// nested generic signature, not a direct receiver type variable. Recover it
+	// only for this stable JDK declaration; the ordinary descriptor still stays
+	// the authority for the emitted raw cast.
+	if raw, args := f.receiverParamTypeArgs(funcCtx); raw != "" && len(args) > 0 {
+		if inst := types.InstantiateJDKMethodParamType(raw, f.FunctionName, len(f.Arguments), i, args); inst != nil {
+			formalType = inst
+		}
+	}
+	formal, ok := types.AsParameterizedType(formalType)
+	if !ok || formal == nil || !sameErasureClassName(actual.RawClassName, formal.RawClassName) {
+		return ""
+	}
+	// Only erase when the call site's generic signature proves that details
+	// were lost. A concrete mismatch such as Function<String,List<String>> vs
+	// Function<String,List<Integer>> is not evidence of erased metadata.
+	if !nestedGenericTypeArgumentsLost(actual, formal) {
+		return ""
+	}
+	descriptor := f.witnessDescriptorParamType(i)
+	if !sameErasureClassName(witnessRawClassName(descriptor), actual.RawClassName) {
+		return ""
+	}
+	typeCtx := funcCtx
+	if typeCtx == nil {
+		typeCtx = &class_context.ClassContext{}
+	}
+	return types.NewJavaClass(actual.RawClassName).String(typeCtx)
+}
+
+func nestedGenericTypeArgumentsLost(actual, formal *types.JavaParameterizedType) bool {
+	if actual == nil || formal == nil || !sameErasureClassName(actual.RawClassName, formal.RawClassName) ||
+		len(actual.TypeArgs) != len(formal.TypeArgs) {
+		return false
+	}
+	for i := range actual.TypeArgs {
+		if nestedGenericTypeArgumentLost(actual.TypeArgs[i], formal.TypeArgs[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func nestedGenericTypeArgumentLost(actual, formal types.JavaType) bool {
+	if actual == nil || formal == nil {
+		return false
+	}
+	if wildcard, ok := formal.RawType().(*types.JavaWildcardType); ok {
+		if wildcard == nil || wildcard.Bound == nil {
+			return false
+		}
+		formal = wildcard.Bound
+	}
+	formalPT, ok := types.AsParameterizedType(formal)
+	if !ok || formalPT == nil || len(formalPT.TypeArgs) == 0 {
+		return false
+	}
+	actualPT, ok := types.AsParameterizedType(actual)
+	if !ok || actualPT == nil {
+		actualRaw := actual.RawType()
+		actualClass, classOK := actualRaw.(*types.JavaClass)
+		return classOK && actualClass != nil && sameErasureClassName(actualClass.Name, formalPT.RawClassName)
+	}
+	return nestedGenericTypeArgumentsLost(actualPT, formalPT)
+}
+
+func sameErasureClassName(a, b string) bool {
+	return strings.ReplaceAll(a, "/", ".") == strings.ReplaceAll(b, "/", ".")
+}
+
 // renderArgAt renders the i-th call argument, applying the generic-erasure parameter-type recovery and
 // the synthesized argument cast (`(V)`/`(T)`/primitive) that reproduce the original source. Factored
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
@@ -3378,6 +3481,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	if cast := f.wildcardArgInvariantAddCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	if cast := f.nestedGenericErasureArgCast(i, arg, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	// Witness-based conversion: pin javac overload resolution to the bytecode
