@@ -28,6 +28,218 @@ func delegationDecompiler(ref *values.JavaRef, sourceOpcode int) (*Decompiler, *
 	}, sourceOp
 }
 
+func TestInlineImmediateStoreRequiresExactOpcodeIdentityAndHandlerDomain(t *testing.T) {
+	typ := types.NewJavaClass("java.lang.Class")
+	newCase := func(sourceOpcode, targetOpcode int) (*Decompiler, *Node, *Node, map[int]*OpCode, *values.JavaRef, values.JavaValue) {
+		local := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+		field := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+		value := values.TagEffects(values.NewJavaLiteral("resolved", typ), values.EffectCall)
+		sourceOp := &OpCode{Instr: &Instruction{OpCode: sourceOpcode}, CurrentOffset: 10}
+		targetOp := &OpCode{Instr: &Instruction{OpCode: targetOpcode}, CurrentOffset: 11}
+		sourceOp.Target = []*OpCode{targetOp}
+		source := NewNode(statements.NewAssignStatement(local, value, true))
+		target := NewNode(statements.NewAssignStatement(field, local, false))
+		source.Id, target.Id = 1, 2
+		source.AddNext(target)
+		d := &Decompiler{}
+		return d, source, target, map[int]*OpCode{source.Id: sourceOp, target.Id: targetOp}, local, value
+	}
+
+	for _, pair := range []struct{ source, target int }{
+		{OP_DUP, OP_PUTSTATIC},
+	} {
+		d, source, target, origins, local, value := newCase(pair.source, pair.target)
+		if !d.canInlineImmediateStore(source, target, origins) {
+			t.Fatalf("exact adjacent opcode pair %d->%d should pass the narrow proof", pair.source, pair.target)
+		}
+		if !d.canInlineValue(value, source, target, origins, local, nil) {
+			t.Fatalf("exact adjacent opcode pair %d->%d should preserve the stored value", pair.source, pair.target)
+		}
+	}
+
+	d, source, target, origins, _, _ := newCase(OP_ASTORE, OP_PUTSTATIC)
+	if d.canInlineImmediateStore(source, target, origins) {
+		t.Fatal("unrecognized producer/store pair must not use the special fold")
+	}
+	d, source, target, origins, _, _ = newCase(OP_CHECKCAST, OP_PUTFIELD)
+	if d.canInlineImmediateStore(source, target, origins) {
+		t.Fatal("CHECKCAST/PUTFIELD is outside the class-cache store proof")
+	}
+	d, source, target, origins, _, _ = newCase(OP_DUP, OP_PUTSTATIC)
+	targetStmt := target.Statement.(*statements.AssignStatement)
+	targetStmt.JavaValue = values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+	if d.canInlineImmediateStore(source, target, origins) {
+		t.Fatal("store of a different local must not consume this definition")
+	}
+	d, source, target, origins, _, _ = newCase(OP_DUP, OP_PUTSTATIC)
+	middle := NewNode(statements.NewExpressionStatement(values.NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger))))
+	middle.Id = 3
+	source.Next = nil
+	source.AddNext(middle)
+	middle.AddNext(target)
+	if d.canInlineImmediateStore(source, target, origins) {
+		t.Fatal("a non-adjacent store must not use the special fold")
+	}
+	d, source, target, origins, _, _ = newCase(OP_DUP, OP_PUTSTATIC)
+	sourceOp := origins[source.Id]
+	targetOp := origins[target.Id]
+	otherOp := &OpCode{Instr: &Instruction{OpCode: OP_NOP}, CurrentOffset: 10}
+	sourceOp.Target = []*OpCode{otherOp, targetOp}
+	if d.canInlineImmediateStore(source, target, origins) {
+		t.Fatal("a producer with an alternate opcode successor must remain materialized")
+	}
+	d, source, target, origins, _, _ = newCase(OP_DUP, OP_PUTSTATIC)
+	d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 10, EndPc: 11, HandlerPc: 30}}
+	if d.canInlineImmediateStore(source, target, origins) {
+		t.Fatal("a handler-domain boundary between producer and store must block the fold")
+	}
+}
+
+func TestArraySpillOrderUsesUniqueBytecodeProducers(t *testing.T) {
+	field := &values.JavaClassMember{Name: "example.Owner", Member: "FLAG", JavaType: types.NewJavaPrimer(types.JavaInteger)}
+	producedField := &values.JavaClassMember{Name: "example.Owner", Member: "FLAG", Description: "I", JavaType: types.NewJavaPrimer(types.JavaInteger)}
+	field.Description = "I"
+	producer := &OpCode{Instr: &Instruction{OpCode: OP_GETSTATIC}, CurrentOffset: 4, stackProduced: []values.JavaValue{producedField}}
+	allocation := &OpCode{Instr: &Instruction{OpCode: OP_NEWARRAY}, CurrentOffset: 6}
+	producer.Target = []*OpCode{allocation}
+	d := &Decompiler{
+		opCodes:               []*OpCode{producer, allocation},
+		opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{producer: nil, allocation: nil},
+	}
+	if !d.valueWasProducedBefore(field, allocation) {
+		t.Fatal("a unique earlier GETSTATIC with an equivalent constant-pool field must prove the prefix evaluation order")
+	}
+
+	late := &OpCode{Instr: &Instruction{OpCode: OP_GETSTATIC}, CurrentOffset: 8, stackProduced: []values.JavaValue{field}}
+	d.opCodes = []*OpCode{allocation, late}
+	if d.valueWasProducedBefore(field, allocation) {
+		t.Fatal("a field value produced after array allocation cannot count as an earlier prefix")
+	}
+
+	duplicate := &OpCode{Instr: &Instruction{OpCode: OP_GETSTATIC}, CurrentOffset: 2, stackProduced: []values.JavaValue{field}, Target: []*OpCode{producer}}
+	producer.Target = []*OpCode{allocation}
+	d.opCodes = []*OpCode{duplicate, producer, allocation}
+	if d.valueWasProducedBefore(field, allocation) {
+		t.Fatal("ambiguous repeated producers must fail closed")
+	}
+
+	d.opCodes = []*OpCode{producer, allocation}
+	producer.stackProduced = []values.JavaValue{&values.JavaClassMember{
+		Name: "other.Owner", Member: "FLAG", Description: "I", JavaType: types.NewJavaPrimer(types.JavaInteger),
+	}}
+	if d.valueWasProducedBefore(field, allocation) {
+		t.Fatal("a different field identity must not prove the prefix evaluation order")
+	}
+
+	duplicate.Target = []*OpCode{allocation, producer}
+	d.opCodes = []*OpCode{duplicate, producer, allocation}
+	if d.valueWasProducedBefore(field, allocation) {
+		t.Fatal("a branch between a prefix producer and allocation must fail closed")
+	}
+}
+
+func TestCompletedConstructorArgumentCanPrecedeArraySpill(t *testing.T) {
+	classType := types.NewJavaClass("example.Prefix")
+	prefix := &values.NewExpression{JavaType: classType, OriginPC: 4, HasOriginPC: true}
+	constructor := &values.FunctionCallExpression{FunctionName: "<init>", OriginPC: 8, Object: prefix}
+	prefix.ConstructorCall = constructor
+	allocation := &OpCode{Instr: &Instruction{OpCode: OP_NEW}, CurrentOffset: 4}
+	dup := &OpCode{Instr: &Instruction{OpCode: OP_DUP}, CurrentOffset: 5}
+	init := &OpCode{Instr: &Instruction{OpCode: OP_INVOKESPECIAL}, CurrentOffset: 8}
+	between := &OpCode{Instr: &Instruction{OpCode: OP_NOP}, CurrentOffset: 12}
+	arrayAllocation := &OpCode{Instr: &Instruction{OpCode: OP_ANEWARRAY}, CurrentOffset: 16}
+	allocation.Target = []*OpCode{dup}
+	dup.Target = []*OpCode{init}
+	init.Target = []*OpCode{between}
+	between.Target = []*OpCode{arrayAllocation}
+	d := &Decompiler{opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{
+		allocation: nil, dup: nil, init: nil, between: nil, arrayAllocation: nil,
+	}, invokeFuncCall: map[*OpCode]*values.FunctionCallExpression{init: constructor}}
+	if !d.evaluationCompletedBefore(prefix, arrayAllocation) {
+		t.Fatal("a constructed argument whose invokespecial completed before NEWARRAY must prove its order")
+	}
+
+	zeroArgPrefix := &values.NewExpression{JavaType: classType, OriginPC: 4, HasOriginPC: true}
+	zeroArgInit := &OpCode{Instr: &Instruction{OpCode: OP_INVOKESPECIAL}, CurrentOffset: 8}
+	zeroArgInvoke := &values.FunctionCallExpression{FunctionName: "<init>", OriginPC: 8, Object: zeroArgPrefix}
+	zeroArgAllocation := &OpCode{Instr: &Instruction{OpCode: OP_NEW}, CurrentOffset: 4}
+	zeroArgDup := &OpCode{Instr: &Instruction{OpCode: OP_DUP}, CurrentOffset: 5}
+	zeroArgBetween := &OpCode{Instr: &Instruction{OpCode: OP_NOP}, CurrentOffset: 12}
+	zeroArgArray := &OpCode{Instr: &Instruction{OpCode: OP_ANEWARRAY}, CurrentOffset: 16}
+	zeroArgAllocation.Target = []*OpCode{zeroArgDup}
+	zeroArgDup.Target = []*OpCode{zeroArgInit}
+	zeroArgInit.Target = []*OpCode{zeroArgBetween}
+	zeroArgBetween.Target = []*OpCode{zeroArgArray}
+	zeroArgD := &Decompiler{
+		opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{
+			zeroArgAllocation: nil, zeroArgDup: nil, zeroArgInit: nil, zeroArgBetween: nil, zeroArgArray: nil,
+		},
+		invokeFuncCall: map[*OpCode]*values.FunctionCallExpression{zeroArgInit: zeroArgInvoke},
+	}
+	if !zeroArgD.evaluationCompletedBefore(zeroArgPrefix, zeroArgArray) {
+		t.Fatal("a zero-argument constructor still needs its invokespecial proven before the later array allocation")
+	}
+	missingCallD := &Decompiler{opcodeToSimulateStack: zeroArgD.opcodeToSimulateStack}
+	if missingCallD.evaluationCompletedBefore(zeroArgPrefix, zeroArgArray) {
+		t.Fatal("NEW without its matching invokespecial must not count as a completed object argument")
+	}
+
+	branch := &OpCode{Instr: &Instruction{OpCode: OP_IFEQ}, CurrentOffset: 10}
+	init.Target = []*OpCode{branch}
+	branch.Target = []*OpCode{between, arrayAllocation}
+	d.opcodeToSimulateStack[branch] = nil
+	if d.evaluationCompletedBefore(prefix, arrayAllocation) {
+		t.Fatal("a control-flow split after the constructor call must not count as a unique completed prefix")
+	}
+
+	init.Target = []*OpCode{between}
+	branch.Target = nil
+	d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 8, EndPc: 9, HandlerPc: 30}}
+	if d.evaluationCompletedBefore(prefix, arrayAllocation) {
+		t.Fatal("a handler-domain change after constructor completion must keep the prefix unproven")
+	}
+}
+
+func TestDelegatingArraySpillRequiresCompleteLinearInitializer(t *testing.T) {
+	arrayType := types.NewJavaArrayType(types.NewJavaPrimer(types.JavaChar))
+	array := values.NewNewExpression(arrayType)
+	array.Initializer = []values.JavaValue{values.NewJavaLiteral(32, types.NewJavaPrimer(types.JavaChar))}
+	array.OriginPC, array.HasOriginPC = 6, true
+	array.EvaluationEndPC, array.HasEvaluationEndPC = 17, true
+	pcs := []uint16{6, 8, 10, 12, 14, 17}
+	ops := make([]*OpCode, len(pcs))
+	for i, pc := range pcs {
+		opcode := OP_DUP
+		if i == 0 {
+			opcode = OP_NEWARRAY
+		}
+		if i == len(pcs)-1 {
+			opcode = OP_CASTORE
+		}
+		ops[i] = &OpCode{Instr: &Instruction{OpCode: opcode}, CurrentOffset: pc}
+		if i > 0 {
+			ops[i-1].Target = []*OpCode{ops[i]}
+		}
+	}
+	opcodeIndex := map[*OpCode]*StackSimulationImpl{}
+	for _, op := range ops {
+		opcodeIndex[op] = nil
+	}
+	d := &Decompiler{opCodes: ops, opcodeToSimulateStack: opcodeIndex}
+	if !d.provesDelegatingArraySpillSpan(array, ops[1]) {
+		t.Fatal("complete straight-line initializer spanning the DUP producer should pass")
+	}
+	array.HasEvaluationEndPC = false
+	if d.provesDelegatingArraySpillSpan(array, ops[1]) {
+		t.Fatal("initializer without an exact final-store origin must fail closed")
+	}
+	array.HasEvaluationEndPC = true
+	ops[1].Target = []*OpCode{ops[2], ops[3]}
+	if d.provesDelegatingArraySpillSpan(array, ops[1]) {
+		t.Fatal("branching array initialization must fail closed")
+	}
+}
+
 func TestInlineConstructorDelegationValueAtExactNestedUse(t *testing.T) {
 	typ := types.NewJavaClass("example.Value")
 	ref := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)

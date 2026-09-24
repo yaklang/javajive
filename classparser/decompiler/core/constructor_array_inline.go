@@ -51,55 +51,111 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 		return skip("candidate is not uniquely reached from the constructor entry")
 	}
 
-	assign, ok := entry.Statement.(*statements.AssignStatement)
-	if !ok || assign.ArrayMember != nil || len(entry.Next) != 1 {
-		return skip("entry is not a single-successor local assignment: node=%d stmt=%T next=%d", entry.Id, entry.Statement, len(entry.Next))
+	type spill struct {
+		node   *Node
+		temp   *values.JavaRef
+		value  values.JavaValue
+		opcode *OpCode
+		arg    int
 	}
-	temp, ok := values.UnpackSoltValue(assign.LeftValue).(*values.JavaRef)
-	if !ok || temp == nil {
-		return skip("assignment target is not a local ref: node=%d left=%T", entry.Id, assign.LeftValue)
-	}
-	array, ok := values.UnpackSoltValue(assign.JavaValue).(*values.NewExpression)
-	if !ok || array == nil || array.JavaType == nil || array.JavaType.ArrayDim() == 0 || len(array.Initializer) == 0 {
-		return skip("entry value is not an initialized array literal")
-	}
-	if valueMentionsLocal(assign.JavaValue, temp) {
-		return skip("array initializer reads its own temporary")
-	}
-
-	callNode := entry.Next[0]
-	if callNode == nil {
-		return skip("array assignment has a nil successor")
+	spills := make([]spill, 0, 2)
+	current := entry
+	var callNode *Node
+	for {
+		assign, ok := current.Statement.(*statements.AssignStatement)
+		if !ok || assign.ArrayMember != nil || len(current.Next) != 1 {
+			return skip("entry sequence is not a single-successor local assignment: node=%d stmt=%T next=%d", current.Id, current.Statement, len(current.Next))
+		}
+		temp, ok := values.UnpackSoltValue(assign.LeftValue).(*values.JavaRef)
+		if !ok || temp == nil {
+			return skip("assignment target is not a local ref: node=%d left=%T", current.Id, assign.LeftValue)
+		}
+		array, ok := values.UnpackSoltValue(assign.JavaValue).(*values.NewExpression)
+		if !ok || array == nil || array.JavaType == nil || array.JavaType.ArrayDim() == 0 || len(array.Initializer) == 0 {
+			return skip("entry sequence contains a non-array initializer: node=%d", current.Id)
+		}
+		spills = append(spills, spill{node: current, temp: temp, value: assign.JavaValue, opcode: origins[current.Id], arg: -1})
+		next := current.Next[0]
+		if next == nil {
+			return skip("array assignment has a nil successor")
+		}
+		if _, moreAssignments := next.Statement.(*statements.AssignStatement); moreAssignments {
+			// Once the first array spill is found, consecutive assignments are part
+			// of the same entry prefix. If one is not a literal array spill, fail
+			// closed instead of silently skipping an observable statement.
+			current = next
+			continue
+		}
+		callNode = next
+		break
 	}
 	reachable := map[*Node]bool{}
 	_ = WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
 		reachable[node] = true
 		return node.Next, nil
 	})
-	otherReachablePred := false
-	for _, source := range callNode.Source {
-		if reachable[source] && source != entry {
-			otherReachablePred = true
+	spillNodes := make(map[*Node]bool, len(spills))
+	spillTemps := make(map[*values.JavaRef]bool, len(spills))
+	for i, candidate := range spills {
+		spillNodes[candidate.node] = true
+		spillTemps[candidate.temp] = true
+		wantSource := entryPred
+		if i > 0 {
+			wantSource = spills[i-1].node
 		}
-	}
-	if otherReachablePred || !containsNode(callNode.Source, entry) {
-		nextType := "<nil>"
-		if len(entry.Next) > 0 && entry.Next[0] != nil {
-			nextType = fmt.Sprintf("%T", entry.Next[0].Statement)
-		}
-		sources := []int{}
-		if callNode != nil {
-			for _, source := range callNode.Source {
-				if source != nil {
-					sources = append(sources, source.Id)
+		if wantSource == nil {
+			if candidate.node != d.RootNode || len(candidate.node.Source) != 0 {
+				return skip("first array spill has an unexpected predecessor")
+			}
+		} else {
+			foundSource := false
+			for _, source := range candidate.node.Source {
+				if reachable[source] {
+					if source != wantSource {
+						return skip("array spill has an alternate reachable predecessor")
+					}
+					foundSource = true
 				}
 			}
+			if !foundSource {
+				return skip("array spill is not reached from the preceding entry node")
+			}
 		}
-		return skip("array assignment is not immediately followed by its only consumer: node=%d next=%d/%s target-sources=%v", entry.Id, len(entry.Next), nextType, sources)
+		if candidate.opcode == nil || candidate.opcode.Instr == nil {
+			return skip("array spill has no bytecode origin: node=%d", candidate.node.Id)
+		}
+		if !d.canInlineDelegatingArrayValue(candidate.value, candidate.temp, candidate.opcode) {
+			array := values.UnpackSoltValue(candidate.value).(*values.NewExpression)
+			return skip("array spill lacks producer or use-order proof: node=%d op=%d pc=%d produced=%t array=%d..%d", candidate.node.Id, candidate.opcode.Instr.OpCode, candidate.opcode.CurrentOffset, d.opcodeProducesLocal(candidate.opcode, candidate.temp), array.OriginPC, array.EvaluationEndPC)
+		}
+		if !sameIntSlice(d.handlersAt(candidate.opcode), d.handlersAt(origins[callNode.Id])) {
+			return skip("array spill and delegation have different or unknown handler domains")
+		}
+	}
+	lastSpillNode := spills[len(spills)-1].node
+	foundLastSpillSource := false
+	for _, source := range callNode.Source {
+		if !reachable[source] {
+			continue
+		}
+		if source != lastSpillNode {
+			return skip("delegation call has an alternate reachable predecessor")
+		}
+		foundLastSpillSource = true
+	}
+	if !foundLastSpillSource {
+		return skip("delegation call is not reached from the final array spill")
+	}
+	for _, candidate := range spills {
+		for temp := range spillTemps {
+			if valueMentionsLocal(candidate.value, temp) {
+				return skip("array initializer depends on a constructor spill")
+			}
+		}
 	}
 	expr, ok := callNode.Statement.(*statements.ExpressionStatement)
 	if !ok {
-		return skip("array consumer is not an expression statement")
+		return skip("array consumer is not an expression statement: node=%d stmt=%T", callNode.Id, callNode.Statement)
 	}
 	call, ok := values.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression)
 	if !ok || call == nil || !call.IsSpecialInvoke || call.FunctionName != "<init>" {
@@ -109,25 +165,20 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 	if !ok || receiver == nil || !receiver.IsThis {
 		return skip("constructor call receiver is not this")
 	}
-	entryOp, callOp := origins[entry.Id], origins[callNode.Id]
-	if entryOp == nil || callOp == nil || !sameIntSlice(d.handlersAt(entryOp), d.handlersAt(callOp)) {
-		return skip("origin or exception-handler proof is unavailable")
+	callOp := origins[callNode.Id]
+	if callOp == nil {
+		return skip("delegation call origin is unavailable")
 	}
-
-	argIndex := -1
-	tempUses := 0
-	for i, arg := range call.Arguments {
-		count, supported := delegatingConstructorTempUses(arg, temp)
-		if !supported {
-			return skip("temporary occurs through a conditional or unsupported expression")
-		}
-		if count > 0 {
-			argIndex = i
-			tempUses += count
-		}
+	spillTempsInOrder := make([]*values.JavaRef, len(spills))
+	for i := range spills {
+		spillTempsInOrder[i] = spills[i].temp
 	}
-	if argIndex < 0 || tempUses != 1 {
-		return skip("constructor call must consume the array temporary exactly once (args=%d uses=%d)", len(call.Arguments), tempUses)
+	argIndexes, ordered := orderedDelegatingConstructorTempArgIndexes(call.Arguments, spillTempsInOrder)
+	if !ordered {
+		return skip("constructor arguments must consume each array spill once in source order")
+	}
+	for i := range spills {
+		spills[i].arg = argIndexes[i]
 	}
 
 	// Refuse the rewrite if any other statement reads or writes the temporary.
@@ -135,15 +186,17 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 	// would miss, while allowing the parameter references inside the initializer.
 	usedElsewhere := false
 	_ = WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
-		if node != entry && node != callNode {
+		if !spillNodes[node] && node != callNode {
 			if nodeValues, known := constructorInlineNodeValues(node.Statement); !known {
 				usedElsewhere = true
 				return nil, nil
 			} else {
 				for _, value := range nodeValues {
-					if valueMentionsLocal(value, temp) {
-						usedElsewhere = true
-						return nil, nil
+					for temp := range spillTemps {
+						if valueMentionsLocal(value, temp) {
+							usedElsewhere = true
+							return nil, nil
+						}
 					}
 				}
 			}
@@ -153,8 +206,9 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 	if usedElsewhere {
 		return skip("temporary has another use or crosses an unsupported statement")
 	}
-
-	call.Arguments[argIndex] = replaceDelegatingConstructorTemp(call.Arguments[argIndex], temp, array)
+	for _, candidate := range spills {
+		call.Arguments[candidate.arg] = replaceDelegatingConstructorTemp(call.Arguments[candidate.arg], candidate.temp, candidate.value)
+	}
 
 	// The temp node is a straight-line entry node. Reconnect its sole predecessor
 	// directly to the constructor call and keep the call's remaining graph intact.
@@ -166,30 +220,169 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 			source.RemoveNext(callNode)
 		}
 	}
-	predecessors := append([]*Node(nil), entry.Source...)
-	for _, predecessor := range predecessors {
-		predecessor.ReplaceNext(entry, callNode)
-	}
-	for i, source := range callNode.Source {
-		if source == entry {
-			callNode.Source = append(callNode.Source[:i], callNode.Source[i+1:]...)
-			break
+	for _, candidate := range spills {
+		for _, next := range append([]*Node(nil), candidate.node.Next...) {
+			candidate.node.RemoveNext(next)
+		}
+		for _, source := range append([]*Node(nil), candidate.node.Source...) {
+			source.RemoveNext(candidate.node)
+		}
+		candidate.node.Source = nil
+		candidate.node.Next = nil
+		if candidate.temp.Id != nil {
+			candidate.temp.Id.Delete()
 		}
 	}
-	for _, predecessor := range predecessors {
-		if !containsNode(callNode.Source, predecessor) {
-			callNode.Source = append(callNode.Source, predecessor)
-		}
-	}
-	entry.Source = nil
-	entry.Next = nil
 	if entryPred == nil {
 		d.RootNode = callNode
+	} else {
+		entryPred.ReplaceNext(entry, callNode)
+		if !containsNode(callNode.Source, entryPred) {
+			callNode.AddSource(entryPred)
+		}
 	}
-	if temp.Id != nil {
-		temp.Id.Delete()
+	for _, source := range append([]*Node(nil), callNode.Source...) {
+		if spillNodes[source] {
+			callNode.RemoveSource(source)
+		}
 	}
 	return true
+}
+
+// orderedDelegatingConstructorTempArgIndexes proves that each spill has one
+// eager use in the constructor call, in the same order that the bytecode
+// evaluated the spill initializers. Several temps may occur inside one nested
+// argument (for example new Format(temp1, temp2)); their tree order must still
+// match bytecode order because replacing them removes the preceding stores.
+func orderedDelegatingConstructorTempArgIndexes(args []values.JavaValue, temps []*values.JavaRef) ([]int, bool) {
+	indexes := make([]int, len(temps))
+	for i := range indexes {
+		indexes[i] = -1
+	}
+	var sequence []int
+	for argIndex, arg := range args {
+		argSequence, supported := delegatingConstructorTempOrder(arg, temps)
+		if !supported {
+			return nil, false
+		}
+		for _, tempIndex := range argSequence {
+			if tempIndex < 0 || tempIndex >= len(indexes) || indexes[tempIndex] >= 0 {
+				return nil, false
+			}
+			indexes[tempIndex] = argIndex
+			sequence = append(sequence, tempIndex)
+		}
+	}
+	if len(sequence) != len(temps) {
+		return nil, false
+	}
+	for i, tempIndex := range sequence {
+		if tempIndex != i {
+			return nil, false
+		}
+	}
+	for _, argIndex := range indexes {
+		if argIndex < 0 {
+			return nil, false
+		}
+	}
+	return indexes, true
+}
+
+// delegatingConstructorTempOrder walks only eager Java evaluation positions
+// and returns the spills in the order their values are read. Conditional and
+// opaque containers fail closed if they mention any spill.
+func delegatingConstructorTempOrder(value values.JavaValue, temps []*values.JavaRef) ([]int, bool) {
+	return delegatingConstructorTempOrderPath(value, temps, make(map[values.JavaValue]bool))
+}
+
+func delegatingConstructorTempOrderPath(value values.JavaValue, temps []*values.JavaRef, path map[values.JavaValue]bool) ([]int, bool) {
+	value = values.UnpackSoltValue(value)
+	if value == nil {
+		return nil, true
+	}
+	if path[value] {
+		return nil, false
+	}
+	path[value] = true
+	defer delete(path, value)
+	switch v := value.(type) {
+	case *values.JavaRef:
+		for i, temp := range temps {
+			if values.SameLocal(v, temp) {
+				return []int{i}, true
+			}
+		}
+		return nil, true
+	case *values.CastExpression:
+		return delegatingConstructorTempOrderPath(v.Value, temps, path)
+	case *values.JavaExpression:
+		if v.Op == "&&" || v.Op == "||" {
+			return nil, !constructorValueMentionsAnyTemp(value, temps)
+		}
+		return orderedConstructorTempChildrenPath(v.Values, temps, path)
+	case *values.FunctionCallExpression:
+		children := append([]values.JavaValue{v.Object}, v.Arguments...)
+		return orderedConstructorTempChildrenPath(children, temps, path)
+	case *values.NewExpression:
+		children := append([]values.JavaValue{}, v.Length...)
+		children = append(children, v.Initializer...)
+		if v.ConstructorCall != nil {
+			// ConstructorCall.Object points back to this allocation node; only
+			// its arguments are evaluated after the allocation.
+			children = append(children, v.ConstructorCall.Arguments...)
+		} else if v.ArgumentsGetter != nil {
+			return nil, !constructorValueMentionsAnyTemp(value, temps)
+		}
+		return orderedConstructorTempChildrenPath(children, temps, path)
+	case *values.JavaArrayMember:
+		return orderedConstructorTempChildrenPath([]values.JavaValue{v.Object, v.Index}, temps, path)
+	case *values.RefMember:
+		return delegatingConstructorTempOrderPath(v.Object, temps, path)
+	case *values.JavaCompare:
+		return orderedConstructorTempChildrenPath([]values.JavaValue{v.JavaValue1, v.JavaValue2}, temps, path)
+	case *values.AssignmentExpression:
+		if ref, ok := values.UnpackSoltValue(v.Target).(*values.JavaRef); ok {
+			for _, temp := range temps {
+				if values.SameLocal(ref, temp) {
+					return nil, false
+				}
+			}
+		}
+		return orderedConstructorTempChildrenPath([]values.JavaValue{v.Target, v.Value}, temps, path)
+	case *values.TernaryExpression:
+		return nil, !constructorValueMentionsAnyTemp(value, temps)
+	default:
+		return nil, !constructorValueMentionsAnyTemp(value, temps)
+	}
+}
+
+func orderedConstructorTempChildren(children []values.JavaValue, temps []*values.JavaRef) ([]int, bool) {
+	return orderedConstructorTempChildrenPath(children, temps, make(map[values.JavaValue]bool))
+}
+
+func orderedConstructorTempChildrenPath(children []values.JavaValue, temps []*values.JavaRef, path map[values.JavaValue]bool) ([]int, bool) {
+	var sequence []int
+	for _, child := range children {
+		childSequence, supported := delegatingConstructorTempOrderPath(child, temps, path)
+		if !supported {
+			return nil, false
+		}
+		sequence = append(sequence, childSequence...)
+	}
+	return sequence, true
+}
+
+func constructorValueMentionsAnyTemp(value values.JavaValue, temps []*values.JavaRef) bool {
+	for _, temp := range temps {
+		if temp == nil {
+			return true
+		}
+		if valueMentionsLocal(value, temp) {
+			return true
+		}
+	}
+	return false
 }
 
 // delegatingConstructorTempUses counts references in eager source positions

@@ -1,6 +1,8 @@
 package core
 
 import (
+	"fmt"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -33,6 +35,38 @@ func (d *Decompiler) handlersAt(op *OpCode) []int {
 		}
 	}
 	return out
+}
+
+// canInlineImmediateStore recognizes a value temp consumed immediately by a
+// store opcode. Substituting the defining expression into the store RHS keeps
+// JVM order: evaluate the value, then perform the field store. No expression is
+// moved across a statement or a handler boundary.
+func (d *Decompiler) canInlineImmediateStore(source, target *Node, origins map[int]*OpCode) bool {
+	if source == nil || target == nil || len(source.Next) != 1 || source.Next[0] != target || len(target.Source) != 1 || target.Source[0] != source {
+		return false
+	}
+	srcOp, dstOp := origins[source.Id], origins[target.Id]
+	if srcOp == nil || dstOp == nil || srcOp.Instr == nil || dstOp.Instr == nil {
+		return false
+	}
+	allowedPair := srcOp.Instr.OpCode == OP_DUP && dstOp.Instr.OpCode == OP_PUTSTATIC
+	if !allowedPair || len(srcOp.Target) != 1 || srcOp.Target[0] != dstOp || !sameHandlerCoverage(d.handlersAt(srcOp), d.handlersAt(dstOp)) {
+		return false
+	}
+	srcAssign, ok := source.Statement.(*statements.AssignStatement)
+	if !ok {
+		return false
+	}
+	dstAssign, ok := target.Statement.(*statements.AssignStatement)
+	if !ok {
+		return false
+	}
+	srcRef, ok := values.UnpackSoltValue(srcAssign.LeftValue).(*values.JavaRef)
+	if !ok || srcRef == nil {
+		return false
+	}
+	dstRef, ok := values.UnpackSoltValue(dstAssign.JavaValue).(*values.JavaRef)
+	return ok && values.SameLocal(srcRef, dstRef)
 }
 
 // countLocalUses counts rendered local reads under a Java value. Unknown
@@ -554,15 +588,45 @@ func (d *Decompiler) opcodeProducesLocal(op *OpCode, ref *values.JavaRef) bool {
 // argument evaluation. A direct producer/local read and an unchanged handler domain are
 // also required; unknown captures, deferred uses, and ambiguous origins fail closed.
 func (d *Decompiler) canInlineDelegationValue(value values.JavaValue, ref *values.JavaRef, sourceOp *OpCode) bool {
+	return d.canInlineDelegationValueProof(value, ref, sourceOp, false)
+}
+
+// canInlineDelegatingArrayValue is reserved for the constructor-entry array
+// rewrite, which separately proves that every removed declaration is a
+// contiguous, single-use entry spill and that the constructor call consumes
+// those spills in source order.
+func (d *Decompiler) canInlineDelegatingArrayValue(value values.JavaValue, ref *values.JavaRef, sourceOp *OpCode) bool {
+	return d.canInlineDelegationValueProof(value, ref, sourceOp, true)
+}
+
+func (d *Decompiler) canInlineDelegationValueProof(value values.JavaValue, ref *values.JavaRef, sourceOp *OpCode, allowInitializedArray bool) bool {
 	if d == nil || ref == nil || sourceOp == nil || sourceOp.Instr == nil {
 		return false
 	}
-	if isInitializedArrayLiteral(value) {
+	if isInitializedArrayLiteral(value) && !allowInitializedArray {
 		return false
+	}
+	var arraySpill *values.NewExpression
+	if allowInitializedArray {
+		var directArray bool
+		arraySpill, directArray = values.UnpackSoltValue(value).(*values.NewExpression)
+		if !isInitializedArrayLiteral(value) {
+			d.tracef("ctor-array-inline", "array proof reject: value is not an initialized literal: %T", values.UnpackSoltValue(value))
+			return false
+		}
+		if !directArray || arraySpill == nil {
+			d.tracef("ctor-array-inline", "array proof reject: value is not a direct allocation: %T", values.UnpackSoltValue(value))
+			return false
+		}
+		if !d.provesDelegatingArraySpillSpan(arraySpill, sourceOp) {
+			d.tracef("ctor-array-inline", "array proof reject: incomplete linear span origin=%d end=%d producer=%d", arraySpill.OriginPC, arraySpill.EvaluationEndPC, sourceOp.CurrentOffset)
+			return false
+		}
 	}
 	stackProducer := isDupFamily(sourceOp.Instr.OpCode) || sourceOp.Instr.OpCode == OP_CHECKCAST
 	parameterRead := isLocalLoadOpcode(sourceOp.Instr.OpCode) && ref.IsParam && values.IsPure(value)
-	if !stackProducer && !parameterRead {
+	arrayProducer := arraySpill != nil && d.opcodeProducesLocal(sourceOp, ref)
+	if !stackProducer && !parameterRead && !arrayProducer {
 		return false
 	}
 	if stackProducer && !d.opcodeProducesLocal(sourceOp, ref) {
@@ -577,25 +641,53 @@ func (d *Decompiler) canInlineDelegationValue(value values.JavaValue, ref *value
 			!sameHandlerCoverage(d.handlersAt(sourceOp), d.handlersAt(targetOp)) {
 			continue
 		}
+		if arraySpill != nil {
+			arrayEnd := d.opcodeAtOffset(arraySpill.EvaluationEndPC)
+			handlers := d.handlersAt(sourceOp)
+			if arrayEnd == nil || arrayEnd.CurrentOffset >= targetOp.CurrentOffset ||
+				!sameHandlerCoverage(handlers, d.handlersAt(arrayEnd)) ||
+				!singleLinearOpcodePathInHandlers(d, arrayEnd, targetOp, handlers) {
+				continue
+			}
+		}
 		uses := 0
 		ordered := true
+		useSeen := false
 		moving := values.InspectAccess(value)
 		moving.Handlers = d.handlersAt(sourceOp)
-		for _, arg := range call.Arguments {
+		for argIndex, arg := range call.Arguments {
 			n, known := countLocalUses(arg, ref, map[values.JavaValue]bool{})
 			if !known {
+				d.tracef("ctor-array-inline", "argument order reject pc=%d arg=%d reason=unknown local-use shape", sourceOp.CurrentOffset, argIndex)
 				ordered = false
 				break
 			}
 			uses += n
 			if uses > 1 {
+				d.tracef("ctor-array-inline", "argument order reject pc=%d reason=multiple temp reads", sourceOp.CurrentOffset)
 				ordered = false
 				break
 			}
 			if n == 0 {
+				// Only arguments before the selected use form a prefix. Later
+				// arguments naturally remain after the inlined expression and must
+				// not be treated as work that the array would cross.
+				if useSeen {
+					continue
+				}
 				prefix := values.InspectAccess(arg)
 				prefix.Handlers = d.handlersAt(targetOp)
+				if arraySpill != nil && (prefix.Effects != 0 || len(prefix.Writes) != 0) {
+					arrayStart := d.opcodeAtOffset(arraySpill.OriginPC)
+					if d.valueWasProducedBefore(arg, arrayStart) || d.evaluationCompletedBefore(arg, arrayStart) {
+						continue
+					}
+					d.tracef("ctor-array-inline", "argument order reject pc=%d arg=%d reason=effectful prefix was not proven complete before array allocation type=%T details=%s access=%+v", sourceOp.CurrentOffset, argIndex, arg, delegationPrefixTraceDetails(arg), prefix)
+					ordered = false
+					break
+				}
 				if !canMoveInlineAcrossPrefix(moving, prefix) {
+					d.tracef("ctor-array-inline", "argument order reject pc=%d arg=%d reason=move crosses prefix access=%+v", sourceOp.CurrentOffset, argIndex, prefix)
 					ordered = false
 					break
 				}
@@ -603,20 +695,154 @@ func (d *Decompiler) canInlineDelegationValue(value values.JavaValue, ref *value
 			}
 			prefix, count, known := prefixBeforeDelegationUse(d, arg, ref, sourceOp)
 			if !known || count != 1 {
+				d.tracef("ctor-array-inline", "argument order reject pc=%d arg=%d reason=use prefix proof known=%t count=%d", sourceOp.CurrentOffset, argIndex, known, count)
 				ordered = false
 				break
 			}
 			prefix.Handlers = d.handlersAt(targetOp)
 			if !canMoveInlineAcrossPrefix(moving, prefix) {
+				d.tracef("ctor-array-inline", "argument order reject pc=%d arg=%d reason=move crosses use prefix access=%+v", sourceOp.CurrentOffset, argIndex, prefix)
 				ordered = false
 				break
 			}
+			useSeen = true
 		}
 		if ordered && uses == 1 {
 			return true
 		}
 	}
 	return false
+}
+
+// delegationPrefixTraceDetails reports bytecode origin metadata that is useful
+// when an effectful earlier constructor argument cannot be proven complete
+// before a later array spill. It is only called under the opt-in trace flag.
+func delegationPrefixTraceDetails(value values.JavaValue) string {
+	switch v := values.UnpackSoltValue(value).(type) {
+	case *values.NewExpression:
+		if v == nil {
+			return "<nil-new>"
+		}
+		callPC := -1
+		callName := "<nil>"
+		callArgs := -1
+		if v.ConstructorCall != nil {
+			callPC = v.ConstructorCall.OriginPC
+			callName = v.ConstructorCall.FunctionName
+			callArgs = len(v.ConstructorCall.Arguments)
+		}
+		return fmt.Sprintf("newPC=%d hasNewPC=%t arrayElements=%d ctor=%s ctorPC=%d ctorArgs=%d", v.OriginPC, v.HasOriginPC, len(v.Initializer), callName, callPC, callArgs)
+	case *values.FunctionCallExpression:
+		if v == nil {
+			return "<nil-call>"
+		}
+		return fmt.Sprintf("call=%s pc=%d args=%d", v.FunctionName, v.OriginPC, len(v.Arguments))
+	case *values.CastExpression:
+		if v == nil {
+			return "<nil-cast>"
+		}
+		return fmt.Sprintf("castPC=%d", v.OriginPC)
+	default:
+		return "no-origin-fields"
+	}
+}
+
+// provesDelegatingArraySpillSpan ties a synthetic local back to one complete,
+// straight-line array initializer. The producer can occur inside its DUP/store
+// sequence, so checking only that opcode's offset would miss later element
+// stores and could move allocation ahead of an earlier constructor argument.
+func (d *Decompiler) provesDelegatingArraySpillSpan(array *values.NewExpression, sourceOp *OpCode) bool {
+	reject := func(reason string) bool {
+		d.tracef("ctor-array-inline", "array span reject: %s", reason)
+		return false
+	}
+	if d == nil || array == nil || sourceOp == nil || sourceOp.Instr == nil {
+		return reject("missing decompiler, initializer, or producer")
+	}
+	if !array.HasOriginPC || !array.HasEvaluationEndPC || len(array.Initializer) == 0 {
+		return reject("initializer does not have a complete origin span")
+	}
+	if array.OriginPC > int(sourceOp.CurrentOffset) || array.EvaluationEndPC < int(sourceOp.CurrentOffset) {
+		return reject("producer is outside the initializer span")
+	}
+	start := d.opcodeAtOffset(array.OriginPC)
+	end := d.opcodeAtOffset(array.EvaluationEndPC)
+	if start == nil || start.Instr == nil || end == nil || end.Instr == nil {
+		return reject("allocation or final store opcode cannot be resolved")
+	}
+	switch start.Instr.OpCode {
+	case OP_NEWARRAY, OP_ANEWARRAY, OP_MULTIANEWARRAY:
+	default:
+		return reject(fmt.Sprintf("span starts at %s, not an allocation", start.Instr.Name))
+	}
+	switch end.Instr.OpCode {
+	case OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
+	default:
+		return reject(fmt.Sprintf("span ends at %s, not an array store", end.Instr.Name))
+	}
+	if !sameHandlerCoverage(d.handlersAt(start), d.handlersAt(sourceOp)) || !sameHandlerCoverage(d.handlersAt(start), d.handlersAt(end)) {
+		return reject("handler coverage differs across array construction")
+	}
+	if !singleLinearOpcodePathInHandlers(d, start, sourceOp, d.handlersAt(start)) {
+		return reject("allocation to local producer crosses a control-flow or handler boundary")
+	}
+	if !singleLinearOpcodePathInHandlers(d, sourceOp, end, d.handlersAt(start)) {
+		return reject("local producer to final array store crosses a control-flow or handler boundary")
+	}
+	return true
+}
+
+func sameStackProducedValue(want, produced values.JavaValue) bool {
+	want = values.UnpackSoltValue(want)
+	produced = values.UnpackSoltValue(produced)
+	if want == produced {
+		return true
+	}
+	wantMember, wantOK := want.(*values.JavaClassMember)
+	producedMember, producedOK := produced.(*values.JavaClassMember)
+	if !wantOK || !producedOK || wantMember == nil || producedMember == nil || wantMember.Description == "" {
+		return false
+	}
+	return wantMember.Name == producedMember.Name &&
+		wantMember.Member == producedMember.Member &&
+		wantMember.Description == producedMember.Description &&
+		wantMember.RefKind == producedMember.RefKind
+}
+
+// valueWasProducedBefore locates a stack value's unique bytecode producer and
+// verifies a straight-line path to the array allocation. This preserves the
+// original order when an earlier constructor argument is itself effectful;
+// the source graph alone cannot express that a GETSTATIC or call ran before a
+// synthetic array local was rendered. Field references may be rebuilt while
+// stack values are translated, so compare their complete constant-pool identity
+// when pointer identity is unavailable; duplicate reads remain ambiguous.
+func (d *Decompiler) valueWasProducedBefore(value values.JavaValue, before *OpCode) bool {
+	if d == nil || before == nil || before.Instr == nil {
+		return false
+	}
+	want := values.UnpackSoltValue(value)
+	if want == nil {
+		return true
+	}
+	var producer *OpCode
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil || op.CurrentOffset >= before.CurrentOffset {
+			continue
+		}
+		for _, produced := range op.stackProduced {
+			if sameStackProducedValue(want, produced) {
+				if producer != nil {
+					return false
+				}
+				producer = op
+			}
+		}
+	}
+	if producer == nil {
+		return false
+	}
+	handlers := d.handlersAt(before)
+	return sameHandlerCoverage(handlers, d.handlersAt(producer)) && singleLinearOpcodePathInHandlers(d, producer, before, handlers)
 }
 
 // Initialized arrays used as this()/super() arguments are handled by the
@@ -687,6 +913,9 @@ func (d *Decompiler) canInlineValue(value values.JavaValue, source, target *Node
 	}
 	if source == nil || source == target {
 		return false
+	}
+	if d.getenv("JDEC_IMMEDIATE_STORE_FOLD_OFF") == "" && d.canInlineImmediateStore(source, target, origins) {
+		return true
 	}
 	if d.canInlineCheckcastAtInvocation(value, source, target, origins, foldedRef) {
 		return true
@@ -784,10 +1013,13 @@ func (d *Decompiler) evaluationCompletedBefore(value values.JavaValue, sourceOp 
 			} else {
 				return false
 			}
-		} else if x.ConstructorCall != nil && x.ConstructorCall.FunctionName == "<init>" {
-			endPC = x.ConstructorCall.OriginPC
 		} else {
-			return false
+			var ok bool
+			endPC, ok = d.constructorCompletionBefore(x, sourceOp)
+			if !ok {
+				d.tracef("ctor-array-inline", "completed-prefix reject: NEW at pc=%d has no unique matching invokespecial before pc=%d", x.OriginPC, sourceOp.CurrentOffset)
+				return false
+			}
 		}
 	case *values.FunctionCallExpression:
 		if x == nil || x.OriginPC < 0 {
@@ -825,7 +1057,7 @@ func (d *Decompiler) evaluationCompletedBefore(value values.JavaValue, sourceOp 
 					return false
 				}
 			}
-		} else if !isInvokeOpcode(endOp.Instr.OpCode) || x.ConstructorCall == nil || x.ConstructorCall.OriginPC != endPC {
+		} else if endOp.Instr.OpCode != OP_INVOKESPECIAL {
 			return false
 		}
 	case *values.FunctionCallExpression:
@@ -838,6 +1070,68 @@ func (d *Decompiler) evaluationCompletedBefore(value values.JavaValue, sourceOp 
 		}
 	}
 	return singleLinearOpcodePathInHandlers(d, endOp, sourceOp, d.handlersAt(sourceOp))
+}
+
+// constructorCompletionBefore locates the invokespecial that consumes this
+// exact NEW value. In particular, an allocation is not evidence that the
+// object is fully constructed: a zero-argument constructor still has a
+// throwing invocation that must precede a later array allocation before its
+// expression can safely remain earlier in a reconstructed constructor call.
+func (d *Decompiler) constructorCompletionBefore(value *values.NewExpression, before *OpCode) (int, bool) {
+	reject := func(reason string) (int, bool) {
+		if d != nil {
+			d.tracef("ctor-array-inline", "constructor completion reject: %s", reason)
+		}
+		return -1, false
+	}
+	if d == nil || value == nil || before == nil || !value.HasOriginPC {
+		return reject("missing decompiler, allocation, spill boundary, or allocation PC")
+	}
+	var completion *OpCode
+	if value.ConstructorCall != nil {
+		call := value.ConstructorCall
+		if call.FunctionName != "<init>" {
+			return reject("attached constructor call has a different method name")
+		}
+		op := d.opcodeAtOffset(call.OriginPC)
+		mappedCall := d.invokeFuncCall[op]
+		attachedObject := values.UnpackSoltValue(GetRealValue(call.Object))
+		var mappedObject values.JavaValue
+		if mappedCall != nil {
+			mappedObject = values.UnpackSoltValue(GetRealValue(mappedCall.Object))
+		}
+		if op == nil || op.Instr == nil || op.Instr.OpCode != OP_INVOKESPECIAL || mappedCall == nil ||
+			mappedCall.FunctionName != "<init>" || mappedCall.OriginPC != call.OriginPC ||
+			attachedObject != value || mappedObject != value {
+			return reject(fmt.Sprintf("attached call mismatch callPC=%d opcode=%v mapped=%t attachedObject=%T mappedObject=%T", call.OriginPC, op, mappedCall != nil, attachedObject, mappedObject))
+		}
+		completion = op
+	} else {
+		for op, call := range d.invokeFuncCall {
+			if op == nil || op.Instr == nil || op.Instr.OpCode != OP_INVOKESPECIAL || call == nil ||
+				call.FunctionName != "<init>" || call.OriginPC <= value.OriginPC || call.OriginPC >= int(before.CurrentOffset) {
+				continue
+			}
+			if values.UnpackSoltValue(GetRealValue(call.Object)) != value {
+				continue
+			}
+			if completion != nil {
+				return reject("more than one invokespecial consumes the allocation")
+			}
+			completion = op
+		}
+	}
+	if completion == nil || int(completion.CurrentOffset) <= value.OriginPC || completion.CurrentOffset >= before.CurrentOffset {
+		return reject(fmt.Sprintf("no completion before spill boundary: match=%v allocationPC=%d beforePC=%d", completion, value.OriginPC, before.CurrentOffset))
+	}
+	start := d.opcodeAtOffset(value.OriginPC)
+	handlers := d.handlersAt(start)
+	if start == nil || start.Instr == nil || start.Instr.OpCode != OP_NEW ||
+		!sameHandlerCoverage(handlers, d.handlersAt(completion)) ||
+		!singleLinearOpcodePathInHandlers(d, start, completion, handlers) {
+		return reject(fmt.Sprintf("allocation-to-invokespecial path is not linear under one handler domain: start=%v completion=%v", start, completion))
+	}
+	return int(completion.CurrentOffset), true
 }
 
 // prefixBeforeUse computes Java's evaluated prefix before one value use. It

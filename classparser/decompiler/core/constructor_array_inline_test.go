@@ -58,6 +58,59 @@ func TestDelegatingConstructorArrayTempRejectsRepeatedAndDeferredUses(t *testing
 	}
 }
 
+func TestDelegatingConstructorArraySpillsKeepArgumentOrder(t *testing.T) {
+	arrayType := types.NewJavaArrayType(types.NewJavaClass("byte"))
+	first := values.NewJavaRef(utils.NewRootVariableId(), nil, arrayType)
+	second := values.NewJavaRef(utils.NewRootVariableId(), nil, arrayType)
+	separator := values.NewJavaLiteral("|", types.NewJavaClass("java.lang.String"))
+
+	indexes, ok := orderedDelegatingConstructorTempArgIndexes(
+		[]values.JavaValue{first, separator, second}, []*values.JavaRef{first, second},
+	)
+	if !ok || len(indexes) != 2 || indexes[0] != 0 || indexes[1] != 2 {
+		t.Fatalf("ordered spills = (%v, %t), want ([0 2], true)", indexes, ok)
+	}
+	nested := &values.NewExpression{
+		JavaType: types.NewJavaClass("example.Format"),
+		ConstructorCall: &values.FunctionCallExpression{
+			FunctionName: "<init>",
+			Arguments:    []values.JavaValue{first, second},
+		},
+	}
+	indexes, ok = orderedDelegatingConstructorTempArgIndexes([]values.JavaValue{nested}, []*values.JavaRef{first, second})
+	if !ok || len(indexes) != 2 || indexes[0] != 0 || indexes[1] != 0 {
+		t.Fatalf("nested ordered spills = (%v, %t), want ([0 0], true)", indexes, ok)
+	}
+	nested.ConstructorCall.Arguments = []values.JavaValue{second, first}
+	if _, ok := orderedDelegatingConstructorTempArgIndexes([]values.JavaValue{nested}, []*values.JavaRef{first, second}); ok {
+		t.Fatal("reversed nested argument evaluation must not reorder array creation")
+	}
+	cyclic := &values.NewExpression{JavaType: types.NewJavaClass("example.Cycle")}
+	cyclic.ConstructorCall = &values.FunctionCallExpression{
+		FunctionName: "<init>",
+		Arguments:    []values.JavaValue{first, cyclic},
+	}
+	if _, ok := orderedDelegatingConstructorTempArgIndexes([]values.JavaValue{cyclic}, []*values.JavaRef{first}); ok {
+		t.Fatal("cyclic expression trees must fail closed instead of recursing indefinitely")
+	}
+	if _, ok := orderedDelegatingConstructorTempArgIndexes(
+		[]values.JavaValue{second, first}, []*values.JavaRef{first, second},
+	); ok {
+		t.Fatal("reverse argument mapping must not reorder array creation")
+	}
+	if _, ok := orderedDelegatingConstructorTempArgIndexes(
+		[]values.JavaValue{first, first, second}, []*values.JavaRef{first, second},
+	); ok {
+		t.Fatal("repeated spill use must be rejected")
+	}
+	deferred := &values.TernaryExpression{TrueValue: first, FalseValue: second}
+	if _, ok := orderedDelegatingConstructorTempArgIndexes(
+		[]values.JavaValue{deferred, second}, []*values.JavaRef{first, second},
+	); ok {
+		t.Fatal("conditional spill use must be rejected")
+	}
+}
+
 func arrayForConstructorTempTest() values.JavaValue {
 	arrayType := types.NewJavaArrayType(types.NewJavaClass("java.lang.Object"))
 	array := values.NewNewExpression(arrayType)
