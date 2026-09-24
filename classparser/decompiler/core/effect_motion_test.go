@@ -580,6 +580,93 @@ func TestInlineCheckcastAtGotoMergeUsesExactStackValue(t *testing.T) {
 	}
 }
 
+func TestInlineCheckcastIntoConditionalStackMerge(t *testing.T) {
+	typ := types.NewJavaClass("java.lang.String")
+	input := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.Object"))
+	cast := values.NewCastExpression(input, typ, 10).(*values.CastExpression)
+	ref := values.NewJavaRef(utils.NewRootVariableId(), cast, typ)
+	branch := &OpCode{Instr: &Instruction{OpCode: OP_IFNULL}, CurrentOffset: 1}
+	armStart := &OpCode{Instr: &Instruction{OpCode: OP_INVOKEINTERFACE}, CurrentOffset: 4}
+	producer := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 10, stackProduced: []values.JavaValue{ref}}
+	gotoMerge := &OpCode{Instr: &Instruction{OpCode: OP_GOTO}, CurrentOffset: 13, StackEntry: newStackItem(nil, values.NewSlotValue(ref, typ))}
+	otherArm := &OpCode{Instr: &Instruction{OpCode: OP_ACONST_NULL}, CurrentOffset: 16}
+	merge := &OpCode{Instr: &Instruction{OpCode: OP_ASTORE_1}, CurrentOffset: 20}
+	branch.Target = []*OpCode{armStart, otherArm}
+	armStart.Source = []*OpCode{branch}
+	armStart.Target = []*OpCode{producer}
+	producer.Source = []*OpCode{armStart}
+	producer.Target = []*OpCode{gotoMerge}
+	gotoMerge.Source = []*OpCode{producer}
+	gotoMerge.Target = []*OpCode{merge}
+	otherArm.Source = []*OpCode{branch}
+	otherArm.Target = []*OpCode{merge}
+	otherArm.StackEntry = newStackItem(nil, values.NewJavaLiteral(nil, typ))
+	merge.Source = []*OpCode{gotoMerge, otherArm}
+	source := NewNode(statements.NewAssignStatement(ref, cast, true))
+	target := NewNode(statements.NewGOTOStatement())
+	source.Id, target.Id = 1, 2
+	source.AddNext(target)
+	origins := map[int]*OpCode{source.Id: producer, target.Id: gotoMerge}
+	newDecompiler := func() *Decompiler {
+		return &Decompiler{
+			opCodes:               []*OpCode{branch, armStart, producer, gotoMerge, otherArm, merge},
+			opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{producer: nil, gotoMerge: nil},
+		}
+	}
+	d := newDecompiler()
+	if !d.canInlineCheckcastIntoBranchMerge(cast, source, target, origins, ref) {
+		t.Fatal("the exact CHECKCAST value merged with null into a reference local should fold into its forward stack merge")
+	}
+	if !d.canInlineValue(cast, source, target, origins, ref, producer) {
+		t.Fatal("the general single-use fold should use the proven stack-merge rule")
+	}
+
+	otherType := types.NewJavaClass("example.Value")
+	cast.TargetType = otherType
+	if newDecompiler().canInlineCheckcastIntoBranchMerge(cast, source, target, origins, ref) {
+		t.Fatal("non-String reference casts need a separate round-trip proof before this fold is enabled")
+	}
+	cast.TargetType = typ
+
+	wrongValue := values.NewJavaRef(utils.NewRootVariableId(), values.NewJavaLiteral("other", typ), typ)
+	gotoMerge.StackEntry = newStackItem(nil, values.NewSlotValue(wrongValue, typ))
+	if newDecompiler().canInlineCheckcastIntoBranchMerge(cast, source, target, origins, ref) {
+		t.Fatal("a merge leaf carrying a different value must not consume this cast")
+	}
+	gotoMerge.StackEntry = newStackItem(nil, values.NewSlotValue(ref, typ))
+	merge.Source = []*OpCode{gotoMerge}
+	if newDecompiler().canInlineCheckcastIntoBranchMerge(cast, source, target, origins, ref) {
+		t.Fatal("a single-predecessor GOTO is not a value merge")
+	}
+	merge.Source = []*OpCode{gotoMerge, otherArm}
+	merge.CurrentOffset = 8
+	if newDecompiler().canInlineCheckcastIntoBranchMerge(cast, source, target, origins, ref) {
+		t.Fatal("a backward loop join must keep the cast local")
+	}
+	merge.CurrentOffset = 20
+	extraPredecessor := &OpCode{Instr: &Instruction{OpCode: OP_NOP}, CurrentOffset: 2}
+	armStart.Source = []*OpCode{branch, extraPredecessor}
+	if newDecompiler().canInlineCheckcastIntoBranchMerge(cast, source, target, origins, ref) {
+		t.Fatal("a branch arm shared with an unrelated predecessor must not be rewritten as a ternary value")
+	}
+	armStart.Source = []*OpCode{branch}
+	otherArm.StackEntry = newStackItem(nil, values.NewJavaLiteral("not-null", typ))
+	if newDecompiler().canInlineCheckcastIntoBranchMerge(cast, source, target, origins, ref) {
+		t.Fatal("a non-null alternate value needs its own type and target-typing proof")
+	}
+	otherArm.StackEntry = newStackItem(nil, values.NewJavaLiteral(nil, typ))
+	merge.Instr.OpCode = OP_ISTORE_1
+	if newDecompiler().canInlineCheckcastIntoBranchMerge(cast, source, target, origins, ref) {
+		t.Fatal("a non-reference local store cannot consume this reference stack merge")
+	}
+	merge.Instr.OpCode = OP_ASTORE_1
+	d = newDecompiler()
+	d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 10, EndPc: 13, HandlerPc: 30}}
+	if d.canInlineCheckcastIntoBranchMerge(cast, source, target, origins, ref) {
+		t.Fatal("a handler-domain change between cast and merge must block the fold")
+	}
+}
+
 func TestInlineCheckcastAtInvocationConsumerInTernaryArm(t *testing.T) {
 	typ := types.NewJavaClass("example.Value")
 	input := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.Object"))

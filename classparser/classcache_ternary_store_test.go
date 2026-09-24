@@ -55,11 +55,11 @@ public final class MapCacheTernaryLocal {
   }
   public static void main(String[] args) {
     cache.put("java.lang.String", "hit");
-    System.out.println(lookup(String.class) + ":" + lookup(null));
+    System.out.println(lookup(String.class) + ":" + lookup(Integer.class) + ":" + lookup(null));
   }
 }`
 	want, classes := t17CompileRun(t, "8", main, map[string]string{main + ".java": source})
-	if strings.TrimSpace(want) != "hit:missing" {
+	if strings.TrimSpace(want) != "hit:missing:missing" {
 		t.Fatalf("independent javac/java oracle changed: %q", want)
 	}
 	raw := classes[main]

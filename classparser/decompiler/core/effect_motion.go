@@ -6,6 +6,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -293,6 +294,175 @@ func (d *Decompiler) canInlineCheckcastAtInvocation(value values.JavaValue, sour
 	moving.Handlers = handlers
 	prefix.Handlers = d.handlersAt(selectedOp)
 	return canMoveInlineAcrossPrefix(moving, prefix)
+}
+
+// canInlineCheckcastIntoBranchMerge recognizes the String CHECKCAST value in a
+// null-joined reference-local store. This is the map-cache shape covered by an
+// independent javac/java round trip. Keeping other reference types materialized
+// avoids changing target typing or surrounding control structuring without a
+// dedicated oracle for those shapes.
+//
+// The proof is deliberately limited to a direct CHECKCAST -> GOTO -> merge
+// path, a two-predecessor forward ASTORE, a provably-null alternate input, one
+// matching conditional with two straight-line arms, exact stack-value
+// identity, and an unchanged handler domain. Other or loop-carried stack joins
+// remain materialized.
+func (d *Decompiler) canInlineCheckcastIntoBranchMerge(value values.JavaValue, source, target *Node, origins map[int]*OpCode, foldedRef *values.JavaRef) bool {
+	if d == nil || d.getenv("JDEC_CHECKCAST_STACK_MERGE_OFF") != "" || source == nil || target == nil || foldedRef == nil {
+		return false
+	}
+	srcAssign, ok := source.Statement.(*statements.AssignStatement)
+	if !ok {
+		return false
+	}
+	srcRef, ok := values.UnpackSoltValue(srcAssign.LeftValue).(*values.JavaRef)
+	if !ok || !values.SameLocal(srcRef, foldedRef) {
+		return false
+	}
+	cast, ok := values.UnpackSoltValue(value).(*values.CastExpression)
+	storedCast, storedCastOK := values.UnpackSoltValue(srcAssign.JavaValue).(*values.CastExpression)
+	if !ok || !storedCastOK || cast == nil || storedCast != cast || !castPreservesLocalStaticType(foldedRef, cast, d.FunctionContext) {
+		return false
+	}
+	castClass, isClass := cast.TargetType.RawType().(*types.JavaClass)
+	if !isClass || castClass == nil || castClass.Name != "java.lang.String" {
+		return false
+	}
+	sourceOp, targetOp := origins[source.Id], origins[target.Id]
+	if sourceOp == nil || targetOp == nil || sourceOp.Instr == nil || targetOp.Instr == nil ||
+		sourceOp.Instr.OpCode != OP_CHECKCAST || cast.OriginPC != int(sourceOp.CurrentOffset) ||
+		targetOp.Instr.OpCode != OP_GOTO && targetOp.Instr.OpCode != OP_GOTO_W ||
+		len(source.Next) != 1 || source.Next[0] != target || len(target.Source) != 1 || target.Source[0] != source ||
+		len(sourceOp.Target) != 1 || sourceOp.Target[0] != targetOp || len(targetOp.Target) != 1 ||
+		!d.opcodeProducesLocal(sourceOp, foldedRef) || !d.hasUniqueCheckcastProducerForLocal(sourceOp, foldedRef) {
+		return false
+	}
+	merge := targetOp.Target[0]
+	if merge == nil || merge.Instr == nil || merge.CurrentOffset <= targetOp.CurrentOffset || len(merge.Source) != 2 ||
+		targetOp.CurrentOffset <= sourceOp.CurrentOffset || targetOp.StackEntry == nil ||
+		GetRealValue(values.UnpackSoltValue(targetOp.StackEntry.value)) != values.UnpackSoltValue(value) ||
+		!sameHandlerCoverage(d.handlersAt(sourceOp), d.handlersAt(targetOp)) ||
+		!sameHandlerCoverage(d.handlersAt(sourceOp), d.handlersAt(merge)) {
+		return false
+	}
+	var otherPred *OpCode
+	for _, pred := range merge.Source {
+		if pred == targetOp {
+			continue
+		}
+		if pred == nil || otherPred != nil {
+			return false
+		}
+		otherPred = pred
+	}
+	if otherPred == nil {
+		return false
+	}
+	if !sameHandlerCoverage(d.handlersAt(otherPred), d.handlersAt(merge)) || !isReferenceLocalStoreOpcode(merge.Instr.OpCode) ||
+		otherPred.StackEntry == nil || !isProvableNull(GetRealValue(values.UnpackSoltValue(otherPred.StackEntry.value))) {
+		return false
+	}
+	// Walk backward through unique predecessors to find the condition that
+	// directly selects this cast arm. The other successor must lead only to the
+	// other merge input. This avoids a full-method branch scan for every cast.
+	var branch, castArmStart *OpCode
+	cur := sourceOp
+	seen := map[*OpCode]bool{}
+	for {
+		if cur == nil || seen[cur] || cur.Instr == nil || len(cur.Source) != 1 {
+			return false
+		}
+		seen[cur] = true
+		pred := cur.Source[0]
+		if pred == nil || pred.Instr == nil {
+			return false
+		}
+		if isConditionalBranchOpcode(pred.Instr.OpCode) {
+			branch, castArmStart = pred, cur
+			break
+		}
+		if d.Work != nil {
+			if err := d.Work.Charge(workbudget.CounterGraphEdges, 1); err != nil {
+				return false
+			}
+		}
+		cur = pred
+	}
+	if branch == nil || branch.CurrentOffset >= sourceOp.CurrentOffset || len(branch.Target) != 2 {
+		return false
+	}
+	var otherTarget *OpCode
+	castTargets := 0
+	for _, successor := range branch.Target {
+		if successor == castArmStart {
+			castTargets++
+		} else {
+			otherTarget = successor
+		}
+	}
+	if castTargets != 1 || otherTarget == nil ||
+		!d.singleLinearConditionalArmForProof(branch, castArmStart, sourceOp) ||
+		!d.singleLinearConditionalArmForProof(branch, otherTarget, otherPred) {
+		return false
+	}
+	d.tracef("var-fold", "inline checkcast into conditional stack merge producerPC=%d gotoPC=%d mergePC=%d", sourceOp.CurrentOffset, targetOp.CurrentOffset, merge.CurrentOffset)
+	return true
+}
+
+func isReferenceLocalStoreOpcode(opcode int) bool {
+	switch opcode {
+	case OP_ASTORE, OP_ASTORE_0, OP_ASTORE_1, OP_ASTORE_2, OP_ASTORE_3:
+		return true
+	default:
+		return false
+	}
+}
+
+func isConditionalBranchOpcode(opcode int) bool {
+	switch opcode {
+	case OP_IFEQ, OP_IFNE, OP_IFLT, OP_IFGE, OP_IFGT, OP_IFLE,
+		OP_IF_ICMPEQ, OP_IF_ICMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPLE,
+		OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IFNULL, OP_IFNONNULL:
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Decompiler) singleLinearConditionalArmForProof(branch, from, to *OpCode) bool {
+	if branch == nil || branch.Instr == nil || from == nil || to == nil {
+		return false
+	}
+	cur := from
+	prev := branch
+	seen := map[*OpCode]bool{}
+	for {
+		if cur == nil || seen[cur] || cur.Instr == nil || len(cur.Source) != 1 || cur.Source[0] != prev ||
+			!sameHandlerCoverage(d.handlersAt(cur), d.handlersAt(to)) {
+			return false
+		}
+		seen[cur] = true
+		if cur == to {
+			return true
+		}
+		if len(cur.Target) != 1 {
+			return false
+		}
+		switch cur.Instr.OpCode {
+		case OP_GOTO, OP_GOTO_W, OP_TABLESWITCH, OP_LOOKUPSWITCH,
+			OP_IFEQ, OP_IFNE, OP_IFLT, OP_IFGE, OP_IFGT, OP_IFLE,
+			OP_IF_ICMPEQ, OP_IF_ICMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPLE,
+			OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IFNULL, OP_IFNONNULL:
+			return false
+		}
+		if d.Work != nil {
+			if err := d.Work.Charge(workbudget.CounterGraphEdges, 1); err != nil {
+				return false
+			}
+		}
+		prev = cur
+		cur = cur.Target[0]
+	}
 }
 
 func hasBranchMergeStackUse(d *Decompiler, target *OpCode, call *values.FunctionCallExpression) bool {
@@ -918,6 +1088,9 @@ func (d *Decompiler) canInlineValue(value values.JavaValue, source, target *Node
 		return true
 	}
 	if d.canInlineCheckcastAtInvocation(value, source, target, origins, foldedRef) {
+		return true
+	}
+	if d.canInlineCheckcastIntoBranchMerge(value, source, target, origins, foldedRef) {
 		return true
 	}
 	moving := values.InspectAccess(value)
