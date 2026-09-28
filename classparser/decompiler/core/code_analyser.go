@@ -34,6 +34,13 @@ type ExceptionTableEntry struct {
 	CatchType uint16
 }
 
+type branchArrayCall struct {
+	call     *values.FunctionCallExpression
+	argIndex int
+	ref      *values.JavaRef
+	array    *values.NewExpression
+}
+
 type Decompiler struct {
 	evaluationSnapshots    map[*OpCode][]EvaluationSnapshot
 	constructorInitialized bool
@@ -42,6 +49,7 @@ type Decompiler struct {
 	FunctionContext        *class_context.ClassContext
 	varTable               map[int]*values.JavaRef
 	opcodeIdToRef          map[*OpCode][][2]any
+	branchArrayCalls       []branchArrayCall
 	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
 	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
 	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
@@ -5544,6 +5552,34 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			// condition, and TernaryExpression.String folds the shared-leaf shape back into idiomatic
 			// &&/|| at render time, so this is both more complete and equally readable.
 			if ok {
+				// Remember branch-local arrays whose DUP temporary may disappear when
+				// this value-merge is structured. Decide whether to inline only after
+				// the final statement tree tells us whether its definition survived.
+				firstIfPC := int(^uint(0) >> 1)
+				for ifNode := range built {
+					if int(ifNode.CurrentOffset) < firstIfPC {
+						firstIfPC = int(ifNode.CurrentOffset)
+					}
+				}
+				for ifNode := range built {
+					if len(ifNode.stackConsumed) != 1 {
+						continue
+					}
+					call, isCall := UnpackSoltValue(ifNode.stackConsumed[0]).(*values.FunctionCallExpression)
+					if !isCall || call == nil {
+						continue
+					}
+					for i, arg := range call.Arguments {
+						ref, isRef := UnpackSoltValue(arg).(*values.JavaRef)
+						if !isRef || ref == nil || !dupSharedRefs[ref.VarUid] {
+							continue
+						}
+						array, isArray := GetRealValue(ref).(*values.NewExpression)
+						if isArray && array != nil && array.HasOriginPC && array.OriginPC > firstIfPC {
+							d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call, i, ref, array})
+						}
+					}
+				}
 				// Wire every condition: its statement's Callback fills its own nested ternary's
 				// Condition (post-MergeIf). Marking TernaryChainArm keeps MergeIf from folding the
 				// condition NODES (which would unfire some callbacks and leak), so each condition is
