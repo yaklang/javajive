@@ -297,13 +297,14 @@ func (d *Decompiler) canInlineCheckcastAtInvocation(value values.JavaValue, sour
 }
 
 // canInlineCheckcastIntoBranchMerge recognizes a String or current-class
-// CHECKCAST value in a null-joined reference-local store. The latter covers
-// a self-typed child lookup whose selected value stays live after the merge.
-// Other reference types stay materialized until their surrounding target
-// typing and control structuring have dedicated oracles.
+// CHECKCAST value in a null-joined reference-local store, or an array cast
+// feeding a null-joined field store. The array case covers javac's
+// `field = array != null ? (T[]) array.clone() : null` shape: the CHECKCAST
+// temporary exists only on the stack and must be inlined before the branch
+// is rendered as a ternary.
 //
 // The proof is deliberately limited to a direct CHECKCAST -> GOTO -> merge
-// path, a two-predecessor forward ASTORE, a provably-null alternate input, one
+// path, a two-predecessor forward ASTORE or array PUTFIELD, a provably-null alternate input, one
 // matching conditional with two straight-line arms, exact stack-value
 // identity, and an unchanged handler domain. Other or loop-carried stack joins
 // remain materialized.
@@ -325,9 +326,10 @@ func (d *Decompiler) canInlineCheckcastIntoBranchMerge(value values.JavaValue, s
 		return false
 	}
 	castClass, isClass := cast.TargetType.RawType().(*types.JavaClass)
-	if !isClass || castClass == nil ||
+	_, isArray := cast.TargetType.RawType().(*types.JavaArrayType)
+	if !isArray && (!isClass || castClass == nil ||
 		(castClass.Name != "java.lang.String" &&
-			(d.FunctionContext == nil || castClass.Name != d.FunctionContext.ClassName)) {
+			(d.FunctionContext == nil || castClass.Name != d.FunctionContext.ClassName))) {
 		return false
 	}
 	sourceOp, targetOp := origins[source.Id], origins[target.Id]
@@ -360,7 +362,10 @@ func (d *Decompiler) canInlineCheckcastIntoBranchMerge(value values.JavaValue, s
 	if otherPred == nil {
 		return false
 	}
-	if !sameHandlerCoverage(d.handlersAt(otherPred), d.handlersAt(merge)) || !isReferenceLocalStoreOpcode(merge.Instr.OpCode) ||
+	fieldArrayMerge := isArray && merge.Instr.OpCode == OP_PUTFIELD && len(merge.stackConsumed) == 2
+	if !sameHandlerCoverage(d.handlersAt(otherPred), d.handlersAt(merge)) ||
+		isArray && !fieldArrayMerge ||
+		!isReferenceLocalStoreOpcode(merge.Instr.OpCode) && !fieldArrayMerge ||
 		otherPred.StackEntry == nil || !isProvableNull(GetRealValue(values.UnpackSoltValue(otherPred.StackEntry.value))) {
 		return false
 	}

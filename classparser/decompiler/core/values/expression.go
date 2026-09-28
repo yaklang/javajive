@@ -2611,6 +2611,8 @@ func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_c
 	if f.FunctionName != "<init>" || f.ClassName != funcCtx.ClassName || !f.IsSpecialInvoke {
 		return ""
 	}
+	receiver, ok := UnpackSoltValue(f.Object).(*JavaRef)
+	isThisDelegation := ok && receiver != nil && receiver.IsThis && funcCtx.FunctionName == "<init>"
 	if f.Descriptor == "" || funcCtx.CurrentMethodDesc == "" || f.Descriptor == funcCtx.CurrentMethodDesc {
 		return ""
 	}
@@ -2623,6 +2625,12 @@ func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_c
 	}
 	cur, err := types.ParseMethodDescriptor(funcCtx.CurrentMethodDesc)
 	if err != nil || cur == nil || cur.FunctionType() == nil || i >= len(cur.FunctionType().ParamTypes) {
+		return ""
+	}
+	// A different-arity target cannot bind to the enclosing constructor. In
+	// particular, this(true, arrayA, arrayB, fallback) is not competing with
+	// the three-argument constructor that contains it.
+	if isThisDelegation && len(tgt.FunctionType().ParamTypes) != len(cur.FunctionType().ParamTypes) {
 		return ""
 	}
 	targetType := tgt.FunctionType().ParamTypes[i]
@@ -2646,6 +2654,14 @@ func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_c
 	}
 	arg := f.Arguments[i]
 	if arg.Type() == nil {
+		return ""
+	}
+	// Same-class `new CurrentClass(array)` is an allocation, not a delegating
+	// overload choice. The generic constructor signature can cause the erased
+	// array to be rendered as an ELEMENT cast (Predicate[] -> Predicate), which
+	// is invalid Java. Keep factory-call casts for non-array parameters: they
+	// can pin a generic Map/Collection constructor's type inference.
+	if !isThisDelegation && targetType.IsArray() && arg.Type().IsArray() {
 		return ""
 	}
 	aStr := arg.Type().String(funcCtx)
