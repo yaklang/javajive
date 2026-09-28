@@ -40,6 +40,7 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 	statementManager := rewriter.NewRootStatementManager(decompiler.RootNode)
 	statementManager.SetId(decompiler.CurrentId)
 	statementManager.Aggressive = decompiler.Aggressive
+	decompiler.InlineLiteralArrayGuardChains()
 	statementManager.MergeIf()
 	// Tail-duplicate `return cond ? A : B` whose arm computes its value through intermediate local
 	// stores (ECJ pre-sized StringBuilder, lazy field init, ...). Those stores cannot be inlined into a
