@@ -32,7 +32,9 @@ func exclusiveTerminalBranch(entry *core.Node) bool {
 			return state[n] == 2
 		}
 		state[n] = 1
-		if !isMethodTerminal(n) {
+		// A structured try/if can end in a switch break or outer continue.
+		// It has no normal fall-through and must retain its lexical owner too.
+		if !statementIsTerminal(n.Statement) {
 			next := loopAnalysisSuccessors(n)
 			if len(next) == 0 {
 				return false

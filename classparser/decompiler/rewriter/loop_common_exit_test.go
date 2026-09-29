@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 )
 
@@ -101,5 +102,33 @@ func TestTerminalLoopArmRetainsEffectsAndAlternativeReturns(t *testing.T) {
 				t.Fatalf("exclusive terminal arm=%v want=%v", got, want)
 			}
 		})
+	}
+}
+
+func TestStructuredTryBreakIsNotALoopContinuation(t *testing.T) {
+	for _, abrupt := range []bool{true, false} {
+		loop := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+		header := core.NewNode(&statements.MiddleStatement{})
+		condition := core.NewNode(&statements.ConditionStatement{})
+		branch := core.NewNode(&statements.ConditionStatement{})
+		terminal := core.NewNode(&statements.ReturnStatement{})
+		body := []statements.Statement{statements.NewCustomStatement(func(*class_context.ClassContext) string { return "break" }, nil)}
+		if !abrupt {
+			body = nil
+		}
+		tr := core.NewNode(statements.NewTryCatchStatement(body, [][]statements.Statement{{&statements.ReturnStatement{}}}))
+		loop.AddNext(header)
+		header.AddNext(condition)
+		condition.AddNext(terminal)
+		condition.AddNext(branch)
+		branch.AddNext(tr)
+		branch.AddNext(loop)
+		want := tr
+		if abrupt {
+			want = nil
+		}
+		if got := searchCircleEndNode(loop, header, GenerateDominatorTree(loop), true); got != want {
+			t.Fatalf("abrupt=%v continuation=%p want=%p", abrupt, got, want)
+		}
 	}
 }

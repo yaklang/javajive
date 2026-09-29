@@ -797,7 +797,11 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 				headerOut = append(headerOut, n)
 			}
 		}
-		if len(NodeDeduplication(headerOut)) == 1 {
+		// A successful nested search may return directly at its header's
+		// false edge, while mismatch continues an outer loop through its
+		// step. Keep that terminal arm inline; the step is the actual normal
+		// continuation. Picking the return loses the outer-continue edge.
+		if len(NodeDeduplication(headerOut)) == 1 && !exclusiveTerminalBranch(headerOut[0]) {
 			return headerOut[0]
 		}
 	}
