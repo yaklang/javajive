@@ -20,6 +20,21 @@ type LoopStatement struct {
 	BodyStart *core.Node
 }
 
+// Executing a loop also dominates its normal continuation. That does not make
+// the continuation part of its body. When choosing which loop must materialize
+// jumps before an if/try is consumed, use body membership as well as dominance;
+// otherwise an already processed inner loop hides the pending enclosing loop.
+func loopOwnsRewriteNode(manager *RewriteManager, loop, node *core.Node) bool {
+	if loop == node {
+		return true
+	}
+	if len(loop.Next) == 0 || !utils.IsDominate(manager.DominatorMap, loop, node) {
+		return false
+	}
+	return !manager.LoopRegionReducible ||
+		circleElementSet(loop, loop.Next[0], manager.DominatorMap, true).Has(node)
+}
+
 // A bounded retry loop has a condition between its wrapper and try body.
 // Structure its successful break before TryRewriter consumes that body; doing
 // so afterwards loses the normal exit and incorrectly retries on success.

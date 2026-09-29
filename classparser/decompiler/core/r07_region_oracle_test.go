@@ -41,7 +41,14 @@ func r07Dominance(succ [][]int, root int) [][]bool {
 // Kahn elimination independently checks the graph after dominance backedges
 // are removed; production uses a DFS color stack for its residual-cycle test.
 func r07Reducible(succ [][]int, root int) bool {
+	return r07ReducibleWithContext(succ, root, nil)
+}
+
+func r07ReducibleWithContext(succ [][]int, root int, context [][]bool) bool {
 	dom := r07Dominance(succ, root)
+	backedge := func(u, v int) bool {
+		return dom[v][u] || (context != nil && context[v][u])
+	}
 	reach := r07Reach(succ, root, -1)
 	degree := make([]int, len(succ))
 	remaining := 0
@@ -51,7 +58,7 @@ func r07Reducible(succ [][]int, root int) bool {
 		}
 		remaining++
 		for _, v := range succ[u] {
-			if !dom[v][u] {
+			if !backedge(u, v) {
 				degree[v]++
 			}
 		}
@@ -66,7 +73,7 @@ func r07Reducible(succ [][]int, root int) bool {
 		u := queue[head]
 		remaining--
 		for _, v := range succ[u] {
-			if dom[v][u] {
+			if backedge(u, v) {
 				continue
 			}
 			degree[v]--
@@ -76,6 +83,33 @@ func r07Reducible(succ [][]int, root int) bool {
 		}
 	}
 	return remaining == 0
+}
+
+// Context is computed independently by deleting vertices from the full graph.
+// Only normal edges can be backedges; unreachable handlers cannot inherit the
+// entry context. Keeping exceptional entry history is necessary when a catch
+// rejoins an inner loop or breaks out into an enclosing loop.
+func r07ContextualReducibility(succ [][]int, exceptions [][2]int) bool {
+	full := make([][]int, len(succ))
+	for i, next := range succ {
+		full[i] = append([]int(nil), next...)
+	}
+	roots := []int{0}
+	for _, e := range exceptions {
+		full[e[0]] = append(full[e[0]], e[1])
+		roots = append(roots, e[1])
+	}
+	context := r07Dominance(full, 0)
+	for _, root := range roots {
+		var inherited [][]bool
+		if root != 0 && context[0][root] {
+			inherited = context
+		}
+		if !r07ReducibleWithContext(succ, root, inherited) {
+			return false
+		}
+	}
+	return true
 }
 
 func r07CheckMatrix(t *testing.T, got *GraphAnalysis, succ [][]int, root int) {
@@ -103,10 +137,11 @@ func TestR07AllThreeNodeGraphs(t *testing.T) {
 		for root := 0; root < 3; root++ {
 			// Force this root to be a handler as well as checking it directly.
 			// Its exceptional edge must never become a normal graph edge.
-			g := t09CFGFromSuccs(succ, [][2]int{{0, root}, {0, root}})
+			exceptions := [][2]int{{0, root}, {0, root}}
+			g := t09CFGFromSuccs(succ, exceptions)
 			got := g.GetOrCompute(AnalysisDominators, GraphAnalysisDomain{Roots: []int{root}})
 			r07CheckMatrix(t, got, succ, root)
-			want := r07Reducible(succ, 0) && r07Reducible(succ, root)
+			want := r07ContextualReducibility(succ, exceptions)
 			if err := g.ValidateReducible(); (err == nil) != want {
 				t.Fatalf("mask=%d handler=%d reducible=%t error=%v", mask, root, want, err)
 			}
@@ -128,11 +163,11 @@ func TestR07RandomGraphsAndHandlerDomains(t *testing.T) {
 			}
 		}
 		h1, h2 := rng.Intn(n), rng.Intn(n)
-		g := t09CFGFromSuccs(succ, [][2]int{{0, h1}, {0, h2}, {h1, h2}})
-		want := true
+		exceptions := [][2]int{{0, h1}, {0, h2}, {h1, h2}}
+		g := t09CFGFromSuccs(succ, exceptions)
+		want := r07ContextualReducibility(succ, exceptions)
 		for _, root := range []int{0, h1, h2} {
 			r07CheckMatrix(t, g.GetOrCompute(AnalysisDominators, GraphAnalysisDomain{Roots: []int{root}}), succ, root)
-			want = want && r07Reducible(succ, root)
 		}
 		if err := g.ValidateReducible(); (err == nil) != want {
 			t.Fatalf("seed=%d trial=%d roots=%v adjacency=%v err=%v", seed, trial, []int{0, h1, h2}, succ, err)

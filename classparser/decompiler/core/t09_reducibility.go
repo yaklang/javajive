@@ -80,7 +80,7 @@ func firstForwardCycle(forward [][]int) int {
 	return best
 }
 
-func (g *SemanticCFG) validateDomainReducible(root *OpCode, rootIdx int, analysis *GraphAnalysis) error {
+func (g *SemanticCFG) validateDomainReducible(root *OpCode, analysis, methodContext *GraphAnalysis) error {
 	n := len(g.Nodes)
 	idx := g.nodeIndexMap()
 	inDomain := func(i int) bool {
@@ -100,6 +100,12 @@ func (g *SemanticCFG) validateDomainReducible(root *OpCode, rootIdx int, analysi
 		if analysis.Dominates(v, u) {
 			continue
 		}
+		// All paths from method entry, INCLUDING exceptions, must pass
+		// through v before u. An external handler jumping into a loop body
+		// therefore cannot borrow that loop's header as a backedge proof.
+		if methodContext != nil && methodContext.Dominates(v, u) {
+			continue
+		}
 		if seen[u] == nil {
 			seen[u] = map[int]struct{}{}
 		}
@@ -112,6 +118,5 @@ func (g *SemanticCFG) validateDomainReducible(root *OpCode, rootIdx int, analysi
 	if cycle := firstForwardCycle(forward); cycle >= 0 {
 		return irreducibleDiagnostic(g.Nodes[cycle].CurrentOffset, root.CurrentOffset, "")
 	}
-	_ = rootIdx
 	return nil
 }

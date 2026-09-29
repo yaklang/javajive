@@ -1087,7 +1087,7 @@ func (s *RewriteManager) Rewrite() error {
 		if isTry || slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
 			for j := i; j < len(order); j++ {
 				n := order[j]
-				if slices.Contains(s.WhileNode, n) && utils2.IsDominate(s.DominatorMap, n, node) {
+				if slices.Contains(s.WhileNode, n) && loopOwnsRewriteNode(s, n, node) {
 					if isTry && (len(n.Next) == 0 || (n.Next[0] != node && !loopHeaderGuardsTry(s, n, node)) || hasSharedCatchEntry(node)) {
 						continue
 					}
