@@ -30,12 +30,26 @@ func (d *Decompiler) canInlineImmediateCheckcastArgument(op *OpCode) bool {
 		return false
 	}
 	member, ok := d.constantPoolGetter(int(Convert2bytesToInt(consumer.Data))).(*values.JavaClassMember)
-	if !ok || member == nil || member.Member == "<init>" || member.JavaType == nil {
+	if !ok || member == nil || member.JavaType == nil {
 		return false
 	}
 	method := member.JavaType.FunctionType()
 	if method == nil || len(method.ParamTypes) == 0 {
 		return false
+	}
+	// Constructors consume their last argument in the same stack position.
+	// The already-evaluated uninitialized receiver and earlier arguments stay
+	// below it; keeping this CHECKCAST here neither moves the allocation nor
+	// evaluates another operand. Only a valid invokespecial <init>(...)V can
+	// use this rule, with the same single-edge/handler proof as ordinary calls.
+	if member.Member == "<init>" {
+		if consumer.Instr.OpCode != OP_INVOKESPECIAL || method.ReturnType == nil {
+			return false
+		}
+		ret, ok := method.ReturnType.RawType().(*types.JavaPrimer)
+		if !ok || ret.Name != types.JavaVoid {
+			return false
+		}
 	}
 	last := method.ParamTypes[len(method.ParamTypes)-1]
 	if last == nil {

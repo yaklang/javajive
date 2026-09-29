@@ -5132,8 +5132,9 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// ref in the ternary can strand its definition inside one branch; RewriteVar then
 	// hoists an uninitialized declaration and the merged expression reads null or an
 	// undeclared temp. Inline only a non-parameter CastExpression temp with exactly
-	// one registered use and a pure operand, or a proven call/cast suffix that
-	// stays on its original arm. Other effectful cast motion across a merge can
+	// one registered use and a proven load/cast or call/cast suffix that stays
+	// on its original arm. Adopt the producer too: CHECKCAST can throw even
+	// when its operand is pure. Other effectful cast motion across a merge can
 	// alter generic typing, exception flow, or definite assignment even when one
 	// bytecode arm appears to feed the merge.
 	dupSharedRefs := map[string]bool{}
@@ -5168,13 +5169,16 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		if !isCast {
 			return value
 		}
-		if !values.IsPure(cast.Value) {
-			check := d.branchCallCastLeaf(ref, cast, entry, leaf, merge)
-			if check == nil {
-				return value
-			}
-			adopted[check] = true
+		var check *OpCode
+		if values.IsPure(cast.Value) {
+			check = d.branchPureCastLeaf(ref, cast, entry, leaf, merge)
+		} else {
+			check = d.branchCallCastLeaf(ref, cast, entry, leaf, merge)
 		}
+		if check == nil {
+			return value
+		}
+		adopted[check] = true
 		return resolved
 	}
 	// buildSharedLeafTernary rebuilds the value left on the operand stack at mergeNode as a nested

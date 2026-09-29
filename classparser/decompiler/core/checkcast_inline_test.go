@@ -8,7 +8,7 @@ import (
 )
 
 func TestImmediateCheckcastArgumentProof(t *testing.T) {
-	for _, change := range []string{"valid", "other source", "handler boundary", "dup", "constructor", "no arguments", "primitive", "invalid source"} {
+	for _, change := range []string{"valid", "other source", "handler boundary", "dup", "constructor", "constructor invoke", "constructor return", "no arguments", "primitive", "invalid source"} {
 		t.Run(change, func(t *testing.T) {
 			check := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 1}
 			invoke := &OpCode{Instr: &Instruction{OpCode: OP_INVOKESTATIC}, Data: []byte{0, 1}, CurrentOffset: 4, Source: []*OpCode{check}}
@@ -24,6 +24,12 @@ func TestImmediateCheckcastArgumentProof(t *testing.T) {
 				invoke.Instr = &Instruction{OpCode: OP_DUP}
 			case "constructor":
 				name = "<init>"
+			case "constructor invoke", "constructor return":
+				name = "<init>"
+				invoke.Instr.OpCode = OP_INVOKESPECIAL
+				if change == "constructor invoke" {
+					descriptor = "(ILjava/lang/CharSequence;)V"
+				}
 			case "no arguments":
 				descriptor = "()V"
 			case "primitive":
@@ -36,7 +42,7 @@ func TestImmediateCheckcastArgumentProof(t *testing.T) {
 				t.Fatal(err)
 			}
 			d.constantPoolGetter = func(int) values.JavaValue { return values.NewJavaClassMember("Probe", name, descriptor, typ) }
-			if got := d.canInlineImmediateCheckcastArgument(check); got != (change == "valid") {
+			if got := d.canInlineImmediateCheckcastArgument(check); got != (change == "valid" || change == "constructor invoke") {
 				t.Fatalf("accepted=%v", got)
 			}
 		})

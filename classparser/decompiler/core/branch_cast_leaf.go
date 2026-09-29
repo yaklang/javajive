@@ -19,12 +19,9 @@ func (d *Decompiler) branchCallCastLeaf(ref *values.JavaRef, cast *values.CastEx
 	if call.Object != nil && !values.IsPure(call.Object) {
 		return nil
 	}
-	invoke, check := d.opcodeAtOffset(call.OriginPC), d.opcodeAtOffset(cast.OriginPC)
-	if invoke == nil || check == nil || check.Instr == nil || check.Instr.OpCode != OP_CHECKCAST ||
-		d.invokeFuncCall[invoke] != call || !d.opcodeProducesLocal(check, ref) ||
-		!d.hasUniqueCheckcastProducerForLocal(check, ref) ||
-		len(invoke.Target) != 1 || invoke.Target[0] != check || len(check.Source) != 1 || check.Source[0] != invoke ||
-		!singleLinearOpcodePathInHandlers(d, entry, check, d.handlersAt(check)) {
+	invoke, check := d.opcodeAtOffset(call.OriginPC), d.branchCastOpcode(ref, cast, entry, leaf, merge)
+	if invoke == nil || check == nil || d.invokeFuncCall[invoke] != call ||
+		len(invoke.Target) != 1 || invoke.Target[0] != check || len(check.Source) != 1 || check.Source[0] != invoke {
 		return nil
 	}
 	for i, arg := range call.Arguments {
@@ -43,6 +40,45 @@ func (d *Decompiler) branchCallCastLeaf(ref *values.JavaRef, cast *values.CastEx
 		if load.Instr == nil || load.Instr.OpCode != OP_GETSTATIC || load.CurrentOffset < entry.CurrentOffset || len(load.stackProduced) != 1 || values.UnpackSoltValue(load.stackProduced[0]) != field {
 			return nil
 		}
+	}
+	return check
+}
+
+// A pure operand does not make CHECKCAST pure: even a cast of a parameter can
+// throw. Adopt its statement together with the branch value, after proving the
+// cast was performed on this arm. A cast evaluated before the condition must
+// stay at that earlier point, including on paths that do not use its result.
+func (d *Decompiler) branchPureCastLeaf(ref *values.JavaRef, cast *values.CastExpression, entry, leaf, merge *OpCode) *OpCode {
+	if cast == nil || !values.IsPure(cast.Value) {
+		return nil
+	}
+	check := d.branchCastOpcode(ref, cast, entry, leaf, merge)
+	if check == nil {
+		return nil
+	}
+	for cur := entry; cur != check; cur = cur.Target[0] {
+		switch cur.Instr.OpCode {
+		case OP_ALOAD, OP_ALOAD_0, OP_ALOAD_1, OP_ALOAD_2, OP_ALOAD_3, OP_ACONST_NULL, OP_NOP:
+		default:
+			return nil
+		}
+		next := cur.Target[0]
+		if len(next.Source) != 1 || next.Source[0] != cur {
+			return nil
+		}
+	}
+	return check
+}
+
+func (d *Decompiler) branchCastOpcode(ref *values.JavaRef, cast *values.CastExpression, entry, leaf, merge *OpCode) *OpCode {
+	if d == nil || cast == nil || entry == nil || leaf == nil || merge == nil || cast.OriginPC < int(entry.CurrentOffset) {
+		return nil
+	}
+	check := d.opcodeAtOffset(cast.OriginPC)
+	if check == nil || check.Instr == nil || check.Instr.OpCode != OP_CHECKCAST ||
+		!d.opcodeProducesLocal(check, ref) || !d.hasUniqueCheckcastProducerForLocal(check, ref) ||
+		!singleLinearOpcodePathInHandlers(d, entry, check, d.handlersAt(check)) {
+		return nil
 	}
 	if check != leaf {
 		if leaf.Instr == nil || (leaf.Instr.OpCode != OP_GOTO && leaf.Instr.OpCode != OP_GOTO_W) ||
