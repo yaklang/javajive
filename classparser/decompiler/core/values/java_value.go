@@ -827,10 +827,10 @@ func (s *SlotValue) ResetValue(val JavaValue) {
 		return
 	}
 	// Folding changes the expression represented by this slot, not the JVM
-	// descriptor of a call or checkcast. A provisional branch type must not
-	// overwrite either expression's reference type through a shared wrapper.
+	// descriptor of a call, checkcast or allocation. A provisional branch type
+	// must not overwrite the instruction's reference type through a shared wrapper.
 	switch val.(type) {
-	case *FunctionCallExpression, *CastExpression:
+	case *FunctionCallExpression, *CastExpression, *NewExpression:
 		if typ := val.Type(); typ != nil {
 			if _, primitive := typ.RawType().(*types.JavaPrimer); !primitive {
 				return

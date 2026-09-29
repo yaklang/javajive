@@ -89,7 +89,14 @@ func NewNewExpression(typ types.JavaType) *NewExpression {
 	}
 }
 func (n *NewExpression) Type() types.JavaType {
-	return n.JavaType
+	// NEW/ANEWARRAY fix the allocated class and array rank in the bytecode.
+	// A merge may widen the receiving local to Object, but it cannot change
+	// the constructor being called. Keep inference wrappers independent of
+	// the allocation's intrinsic type, just as for invocation descriptors.
+	if n.JavaType == nil {
+		return nil
+	}
+	return n.JavaType.Copy()
 }
 
 func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {

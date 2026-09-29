@@ -50,6 +50,7 @@ type Decompiler struct {
 	varTable               map[int]*values.JavaRef
 	opcodeIdToRef          map[*OpCode][][2]any
 	branchArrayCalls       []branchArrayCall
+	branchArrayLeaves      []branchArrayLeaf
 	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
 	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
 	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
@@ -4597,11 +4598,10 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 	case OP_DNEG, OP_FNEG, OP_LNEG, OP_INEG:
 		v := runtimeStackSimulation.Pop().(values.JavaValue)
-		runtimeStackSimulation.Push(values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			return "-" + values.UnaryMinusOperand(v, funcCtx)
-		}, func() types.JavaType {
-			return v.Type()
-		}))
+		// Negation has an ordinary value dependency. An opaque rendering
+		// closure hid local uses from renaming and blocked array initializer
+		// folding even when the operand was a pure local read.
+		runtimeStackSimulation.Push(values.NewUnaryExpression(v, values.SUB, v.Type()))
 	case OP_END:
 	case OP_START:
 	default:
@@ -5179,6 +5179,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// it is a plain tree the legacy probe already handles, so the caller also defers to avoid churn.
 	buildSharedLeafTernary := func(mergeNode *OpCode, detectedIfNodes []*OpCode) (root *values.TernaryExpression, built map[*OpCode]*values.TernaryExpression, sharedLeaf bool, hasMiddleCond bool, ok bool) {
 		adoptedCasts := map[*OpCode]bool{}
+		var arrayLeaves []branchArrayLeaf
 		// valueMergeSet is every node the merge detection registered as carrying a value across control
 		// flow (a ternary / short-circuit result on the operand stack). It is the principled signal for
 		// an INNER value computation: if two branches of a condition reconverge on such a node (other
@@ -5375,6 +5376,16 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					if value == nil {
 						value = inlineSingleUseMergeLeaf(cur.StackEntry.value, entry, cur, mergeNode, adoptedCasts)
 					}
+					if ref, isRef := UnpackSoltValue(value).(*values.JavaRef); isRef && ref != nil && !ref.IsParam && !ref.IsThis {
+						if array, isArray := UnpackSoltValue(ref.Val).(*values.NewExpression); isArray && array.IsArray() && array.HasOriginPC {
+							// Initializer stores are folded later on the statement graph.
+							// Keep a distinct arm slot so that pass can transfer ownership
+							// of the completed value without rebinding other local reads.
+							slot := values.NewSlotValue(value, nil)
+							arrayLeaves = append(arrayLeaves, branchArrayLeaf{ref, array, slot, entry, cur, mergeNode})
+							value = slot
+						}
+					}
 					leafValues[cur] = value
 					return value
 				}
@@ -5558,6 +5569,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		for check := range adoptedCasts {
 			d.inlineCheckcast[check] = true
 		}
+		d.branchArrayLeaves = append(d.branchArrayLeaves, arrayLeaves...)
 		return root, built, sharedLeaf, hasMiddleCond, true
 	}
 	for _, code := range ternaryExpMergeNode {
@@ -6809,7 +6821,7 @@ func (d *Decompiler) ParseStatement() error {
 		idToNode[toNodeId].SourceConditionNode = idToNode[conditionId]
 	}
 	d.RootNode = nodes[0]
-	MiscRewriter(d.RootNode, d.delRefUserAttr, func(first, last *Node) bool {
+	allowArrayEffects := func(first, last *Node) bool {
 		a, b := idToOpcode[first.Id], idToOpcode[last.Id]
 		if a == nil || b == nil || a.CurrentOffset > b.CurrentOffset {
 			return false
@@ -6820,7 +6832,12 @@ func (d *Decompiler) ParseStatement() error {
 			}
 		}
 		return true
-	})
+	}
+	MiscRewriter(d.RootNode, d.delRefUserAttr, allowArrayEffects)
+	for d.inlineNestedArrayInitializers(idToOpcode) {
+		MiscRewriter(d.RootNode, d.delRefUserAttr, allowArrayEffects)
+	}
+	d.inlineBranchArrayLeaves()
 	uidToPairs := omap.NewEmptyOrderedMap[string, []*VarFoldRule]()
 	uidToRef := map[string]*values.JavaRef{}
 	WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {

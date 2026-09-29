@@ -35,7 +35,7 @@ func RewriteNewArrayList(node *Node, delMap map[string][3]int, allowEffects ...f
 		return
 	}
 	newExp, ok := st.JavaValue.(*values.NewExpression)
-	if !ok {
+	if !ok || newExp.HasEvaluationEndPC {
 		return
 	}
 	if len(newExp.Length) == 0 {
@@ -53,6 +53,7 @@ func RewriteNewArrayList(node *Node, delMap map[string][3]int, allowEffects ...f
 	next := node.Next[0]
 	vs := []values.JavaValue{}
 	lastStore := (*Node)(nil)
+	var removed []*Node
 	for i := 0; i < lvar1; i++ {
 		if len(next.Next) != 1 || hasDistinctPredecessors(next) {
 			return
@@ -92,6 +93,7 @@ func RewriteNewArrayList(node *Node, delMap map[string][3]int, allowEffects ...f
 		}
 		vs = append(vs, asEleSt.JavaValue)
 		lastStore = next
+		removed = append(removed, next)
 		next = next.Next[0]
 	}
 	if len(vs) == 0 {
@@ -104,6 +106,12 @@ func RewriteNewArrayList(node *Node, delMap map[string][3]int, allowEffects ...f
 	delMap[refVal.VarUid] = attr
 	newExp.Initializer = vs
 	node.RemoveAllNext()
+	// Removed stores must not remain as phantom predecessors of their
+	// successor; later single-entry proofs inspect those back-links.
+	for _, store := range removed {
+		store.RemoveAllNext()
+		store.RemoveAllSource()
+	}
 	node.AddNext(next)
 }
 

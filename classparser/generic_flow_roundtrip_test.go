@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -13,9 +14,10 @@ import (
 func roundTripGenericFlow(t *testing.T, main, source string) {
 	t.Helper()
 	javac, java := t04Tools(t)
+	simple := main[strings.LastIndex(main, ".")+1:]
 	for _, debug := range []string{"-g", "-g:none"} {
 		dir := t.TempDir()
-		path := filepath.Join(dir, main+".java")
+		path := filepath.Join(dir, simple+".java")
 		if err := os.WriteFile(path, []byte(source), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -24,7 +26,7 @@ func roundTripGenericFlow(t *testing.T, main, source string) {
 			t.Fatalf("original: %v\n%s", err, out)
 		}
 		want := t04RunJava(t, java, dir, main)
-		raw, err := os.ReadFile(filepath.Join(dir, main+".class"))
+		raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(strings.ReplaceAll(main, ".", "/"))+".class"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -38,7 +40,7 @@ func roundTripGenericFlow(t *testing.T, main, source string) {
 				t.Fatal(err)
 			}
 			rebuilt := t.TempDir()
-			src := filepath.Join(rebuilt, main+".java")
+			src := filepath.Join(rebuilt, simple+".java")
 			if err := os.WriteFile(src, []byte(result.Source), 0644); err != nil {
 				t.Fatal(err)
 			}

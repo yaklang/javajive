@@ -20,7 +20,6 @@ func fixZxingRemainingReconstructs(body string) string {
 	body = retypeZxingObjectLocals(body)
 	body = retypeIntLocalsUsedAsCodeword(body)
 	body = rewriteIntCombinedLengthAssign(body)
-	body = rewriteLengthIdentUsedAsArray(body)
 	body = retypeZxingIntLocalsByUse(body)
 	body = rewriteSavedExceptionCatchRethrow(body)
 	body = wrapZxingUPCEANChecksumTry(body)
@@ -711,37 +710,6 @@ func rewriteIntCombinedLengthAssign(body string) string {
 		repl := ident2 + " = " + expr + ";\n\t\t\tint " + ident1 + " = " + ident2 + ".length"
 		body = body[:i] + repl + body[end:]
 		from = i + len(repl)
-	}
-}
-
-func rewriteLengthIdentUsedAsArray(body string) string {
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "int var")
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		ident, ok, rest := readJavaIdent(body[i+len("int "):])
-		if !ok || !isDecompilerLocal(ident) || !strings.HasPrefix(rest, " = var") {
-			from = i + 1
-			continue
-		}
-		arr, ok, rest2 := readJavaIdent(rest[len(" = "):])
-		if !ok || !isDecompilerLocal(arr) || !strings.HasPrefix(rest2, ".length") {
-			from = i + 1
-			continue
-		}
-		methodEnd := nextZxingMethodStart(body, i)
-		chunk := body[i:methodEnd]
-		sub := ident + "["
-		if !strings.Contains(chunk, sub) {
-			from = i + 1
-			continue
-		}
-		replaced := strings.ReplaceAll(chunk, sub, arr+"[")
-		body = body[:i] + replaced + body[methodEnd:]
-		from = i + len(replaced)
 	}
 }
 
