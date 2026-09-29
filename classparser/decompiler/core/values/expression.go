@@ -4120,6 +4120,9 @@ func (f *FunctionCallExpression) witnessDescriptorArgCast(i int, arg JavaValue, 
 	if param == nil || !isWitnessReferenceType(param) {
 		return ""
 	}
+	if f.jdkStaticInferenceFormal(i) {
+		return ""
+	}
 	inner := UnpackSoltValue(arg)
 	if IsNullLiteral(inner) {
 		if jdecFlag(funcCtx, "JDEC_NULL_ARG_CAST_OFF") != "" {
@@ -4223,15 +4226,6 @@ func witnessSameRawClass(argType, param types.JavaType) bool {
 }
 
 func (f *FunctionCallExpression) witnessOverloadPinCast(i int, argType, param types.JavaType, funcCtx *class_context.ClassContext) string {
-	// These exact JDK declarations have a method-scoped T formal. Casting
-	// argument zero to erased Object changes inference of the return type.
-	if i == 0 && strings.ReplaceAll(f.ClassName, "/", ".") == "java.util.Objects" && f.FunctionName == "requireNonNull" {
-		switch f.Descriptor {
-		case "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;", "(Ljava/lang/Object;Ljava/util/function/Supplier;)Ljava/lang/Object;":
-			return ""
-		}
-	}
-
 	if f.calleeParamIsErasedTypeVar(i, funcCtx) {
 		return ""
 	}
