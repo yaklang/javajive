@@ -4070,7 +4070,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// without unpacking the cast CustomValue's closures (fastjson2 JDKUtils:318).
 		d.checkcastInnerArg[opcode] = arg
 		value := &values.CastExpression{Value: arg, TargetType: classInfo, OriginPC: int(opcode.CurrentOffset)}
-		if d.canInlineImmediateZeroArgCheckcast(opcode, classInfo) {
+		if d.canInlineImmediateZeroArgCheckcast(opcode, classInfo) || d.canInlineImmediateCheckcastArgument(opcode) {
 			d.inlineCheckcast[opcode] = true
 			runtimeStackSimulation.Push(value)
 			break
