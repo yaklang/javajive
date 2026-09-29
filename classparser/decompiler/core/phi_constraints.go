@@ -1,9 +1,11 @@
 package core
 
 import (
+	"reflect"
+	"strings"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
-	"strings"
 )
 
 // Descriptors supply upper bounds on the source declaration. In particular,
@@ -59,6 +61,17 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 	name, ok := types.RawClassFQN(joined)
 	if !ok {
 		return joined
+	}
+	// A lambda/method-reference is a Java poly expression: Function<Object,
+	// Object> in the instantiated classfile descriptor is not its source
+	// declaration type.  When all definitions in the web are poly expressions
+	// and every parameterized use with the same erasure agrees, the use target
+	// is authoritative.  This is the same target-typing rule javac applied at
+	// the original assignment (not a best-effort generic cast).
+	if d.getenv("JDEC_GENERIC_USE_CONSTRAINT_OFF") == "" {
+		if target := d.uniqueParameterizedUseConstraint(name, stores, uses); target != nil && webHasOnlyPolyFunctionalDefinitions(stores) {
+			return target.Copy()
+		}
 	}
 	var bounds []types.JavaType
 	seen := map[string]bool{}
@@ -135,4 +148,56 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 		}
 	}
 	return joined
+}
+
+func (d *Decompiler) uniqueParameterizedUseConstraint(rawName string, stores []*OpCode, uses map[*values.JavaRef][]types.JavaType) types.JavaType {
+	var target types.JavaType
+	for _, store := range stores {
+		if store == nil {
+			continue
+		}
+		for _, info := range d.opcodeIdToRef[store] {
+			ref, ok := info[0].(*values.JavaRef)
+			if !ok || ref == nil {
+				continue
+			}
+			candidate, conflict := uniqueParameterizedConstraint(rawName, uses[ref])
+			if conflict {
+				return nil
+			}
+			if candidate == nil {
+				continue
+			}
+			if target == nil {
+				target = candidate
+				continue
+			}
+			if !reflect.DeepEqual(target.RawType(), candidate.RawType()) {
+				return nil
+			}
+		}
+	}
+	return target
+}
+
+func uniqueParameterizedConstraint(rawName string, constraints []types.JavaType) (target types.JavaType, conflict bool) {
+	for _, constraint := range constraints {
+		useRaw, ok := types.RawClassFQN(constraint)
+		if !ok || useRaw != rawName {
+			continue
+		}
+		if _, ok := types.AsParameterizedType(constraint); !ok {
+			continue
+		}
+		if target == nil {
+			target = constraint
+			continue
+		}
+		if !reflect.DeepEqual(target.RawType(), constraint.RawType()) {
+			// A single value consumed at incompatible generic targets was
+			// necessarily raw in source; preserve erasure instead of guessing.
+			return nil, true
+		}
+	}
+	return target, false
 }

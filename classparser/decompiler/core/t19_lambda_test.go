@@ -206,6 +206,57 @@ func TestTaskT19BudgetedLambdaCaptureRender(t *testing.T) {
 	}
 }
 
+func TestResolveLambdaReturnTypevarFromCovariantTarget(t *testing.T) {
+	tests := []struct {
+		name string
+		fi   string
+		sig  string
+		want string
+	}{
+		{
+			name: "bare supplier type variable",
+			fi:   "java.util.function.Supplier",
+			sig:  "<T:Ljava/lang/Object;>()Ljava/util/function/Supplier<TT;>;",
+			want: "T",
+		},
+		{
+			name: "covariant function result",
+			fi:   "java.util.function.Function",
+			sig:  "<T:Ljava/lang/Object;R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)Ljava/util/function/Function<-TT;+TR;>;",
+			want: "R",
+		},
+		{
+			name: "covariant bifunction result",
+			fi:   "java.util.function.BiFunction",
+			sig:  "<T:Ljava/lang/Object;U:Ljava/lang/Object;R:Ljava/lang/Object;>()Ljava/util/function/BiFunction<-TT;-TU;+TR;>;",
+			want: "R",
+		},
+		{
+			name: "lower bound is not an exact return target",
+			fi:   "java.util.function.Function",
+			sig:  "<T:Ljava/lang/Object;R:Ljava/lang/Object;>()Ljava/util/function/Function<TT;-TR;>;",
+		},
+		{
+			name: "concrete result needs no typevar cast",
+			fi:   "java.util.function.Function",
+			sig:  "()Ljava/util/function/Function<Ljava/lang/Object;Ljava/lang/String;>;",
+		},
+		{
+			name: "unbounded result is not evidence",
+			fi:   "java.util.function.Function",
+			sig:  "()Ljava/util/function/Function<Ljava/lang/Object;*>;",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := &class_context.ClassContext{CurrentMethodSig: test.sig}
+			if got := resolveLambdaReturnTypevar(ctx, test.fi); got != test.want {
+				t.Fatalf("resolveLambdaReturnTypevar(%q, %q) = %q, want %q", test.sig, test.fi, got, test.want)
+			}
+		})
+	}
+}
+
 func TestTaskT19InlineVsMethodRef(t *testing.T) {
 	t.Log("T19-C06")
 	d := &Decompiler{FunctionContext: &class_context.ClassContext{ClassName: "LambdaCapture"}}

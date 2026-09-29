@@ -197,7 +197,11 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					if len(args1) >= 3 {
 						instantiatedMT = args1[2]
 					}
-					retTypevarCast = lambdaReturnPositionTypevar(typ, instantiatedMT)
+					fiRawName := lambdaReturnPositionTypevar(typ, instantiatedMT)
+					// StreamingCustomValue may be rendered after DumpMethod has restored the
+					// enclosing method signature. Resolve the concrete type-variable target while
+					// the invokedynamic is still being decoded under that method's context.
+					retTypevarCast = resolveLambdaReturnTypevar(d.FunctionContext, fiRawName)
 				}
 				cv := values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
 					return t19WriteLambdaBody(funcCtx, out, methodStr, captured, retTypevarCast)
@@ -543,9 +547,9 @@ var lambdaFIReturnPosition = map[string]int{
 
 // lambdaReturnPositionTypevar returns the FI's raw class name when the lambda is a JDK
 // Supplier/Function/BiFunction whose instantiatedMethodType return type is Object (erased) -- the
-// necessary precondition for a return-position type-variable cast. The actual type variable name
-// is resolved later from the enclosing method's Signature (see resolveLambdaReturnTypevar), since
-// the lambda value carries only the erased/instantiated type, not the enclosing method's type vars.
+// necessary precondition for a return-position type-variable cast. The caller resolves the actual
+// type-variable name immediately from the enclosing method's Signature (see
+// resolveLambdaReturnTypevar), since the lambda value carries only the erased/instantiated type.
 // Returns "" when no cast applies (non-Object return, or an FI whose SAM returns void).
 func lambdaReturnPositionTypevar(rawType types.JavaType, instantiatedMethodType values.JavaValue) string {
 	if rawType == nil {
@@ -642,6 +646,16 @@ func resolveLambdaReturnTypevar(funcCtx *class_context.ClassContext, fiRawName s
 	ta := pt.TypeArgs[pos]
 	if ta == nil {
 		return ""
+	}
+	// A function return target is commonly covariant (`Function<? super T, ? extends R>`).
+	// The ground target type used for lambda compatibility has R in the SAM return position;
+	// recover that upper bound before looking for a type variable. A lower-bounded or unbounded
+	// wildcard does not provide an exact return target and is deliberately left unresolved.
+	if wildcard, ok := ta.(*types.JavaWildcardType); ok {
+		if wildcard.Variant != "extends" || wildcard.Bound == nil {
+			return ""
+		}
+		ta = wildcard.Bound
 	}
 	// A bare type variable parses as a *JavaClass whose Name is a single identifier (no dot), e.g. "T".
 	// A concrete class arg (Object/String/...) has a dotted FQN and binds directly, so no cast.

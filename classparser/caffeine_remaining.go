@@ -49,17 +49,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body, "Object[] var1 = this.consumerBuffer", "E[] var1 = this.consumerBuffer")
 		body = strings.ReplaceAll(body, "Object[] var5 = this.producerBuffer", "E[] var5 = this.producerBuffer")
 	}
-	// LocalCache.statsAware: lambda accumulator erased to Object vs R.
-	if strings.Contains(body, "interface LocalCache") {
-		body = strings.Replace(body,
-			"return (l0) -> {\n\t\t\tObject lv1_5 = null;",
-			"return (l0) -> {\n\t\t\tR lv1_5 = null;",
-			1)
-		body = strings.Replace(body,
-			"return (l0, l1) -> {\n\t\t\tObject lv2_8 = null;",
-			"return (l0, l1) -> {\n\t\t\tR lv2_8 = null;",
-			1)
-	}
 	// Tree dump inserts raw Object SAM casts; upgrade them to K/V witnesses.
 	// Gate on caffeine: the Object,Object,Object BiFunction witness is not
 	// valid on IOStream.reduce (U/T, not K/V).

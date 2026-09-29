@@ -238,7 +238,8 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 		if len(static) >= 3 {
 			instantiatedMT = static[2]
 		}
-		retTypevarCast = lambdaReturnPositionTypevar(resultType, instantiatedMT)
+		fiRawName := lambdaReturnPositionTypevar(resultType, instantiatedMT)
+		retTypevarCast = resolveLambdaReturnTypevar(d.FunctionContext, fiRawName)
 	}
 	typ := resultType
 	writeFn := func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
@@ -387,15 +388,13 @@ func writeMethodReference(out *workbudget.Writer, owner, member string) error {
 func t19WriteLambdaBody(funcCtx *class_context.ClassContext, out *workbudget.Writer, methodBody string, captured []values.JavaValue, returnTypevar string) error {
 	body := methodBody
 	if returnTypevar != "" {
-		if castTarget := resolveLambdaReturnTypevar(funcCtx, returnTypevar); castTarget != "" {
-			if projected, ok := lambdaReturnCastOutputLen(body, castTarget); ok {
-				if funcCtx != nil && funcCtx.Work != nil {
-					if err := funcCtx.CheckAlloc(projected); err != nil {
-						return err
-					}
+		if projected, ok := lambdaReturnCastOutputLen(body, returnTypevar); ok {
+			if funcCtx != nil && funcCtx.Work != nil {
+				if err := funcCtx.CheckAlloc(projected); err != nil {
+					return err
 				}
-				body = injectLambdaReturnCast(body, castTarget)
 			}
+			body = injectLambdaReturnCast(body, returnTypevar)
 		}
 	}
 	for cursor := 0; cursor < len(body); {

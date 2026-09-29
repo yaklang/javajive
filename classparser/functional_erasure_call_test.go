@@ -168,6 +168,120 @@ public class FunctionalErasureVariants<T> {
 	}
 }
 
+// A local web whose only definition is an invokedynamic lambda still has a
+// source-level target type at its ARETURN use.  The classfile descriptor erases
+// Function<T,R> to Function and the lambda's instantiated descriptor to
+// (Object)Object; keeping that provisional Function<Object,Object> declaration
+// makes it impossible to return from a method whose Signature says
+// Function<? super T,? extends R>.  The return constraint must refine the web's
+// parameterization while preserving the same JVM erasure.
+func TestT19ReturnedFunctionalWebUsesGenericReturnConstraint(t *testing.T) {
+	t.Setenv("JDEC_GENERIC_USE_CONSTRAINT_OFF", "")
+	const main = "ReturnedFunctionalWeb"
+	const source = `import java.util.function.BiFunction;
+import java.util.function.Function;
+
+public class ReturnedFunctionalWeb {
+  static <T, R> Function<? super T, ? extends R> measured(
+      Function<? super T, ? extends R> delegate) {
+    Function<? super T, ? extends R> result = value -> delegate.apply(value);
+    return result;
+  }
+
+  static <T, U, R> BiFunction<? super T, ? super U, ? extends R> measured(
+      BiFunction<? super T, ? super U, ? extends R> delegate) {
+    BiFunction<? super T, ? super U, ? extends R> result =
+        (left, right) -> delegate.apply(left, right);
+    return result;
+  }
+
+  public static void main(String[] args) {
+    Function<? super String, ? extends Integer> one = measured(String::length);
+    BiFunction<? super String, ? super Integer, ? extends String> two =
+        measured((text, count) -> text.substring(0, count));
+    System.out.print(one.apply("four") + ":" + two.apply("value", 3));
+  }
+}`
+	var killSwitchFixture []byte
+	for _, debug := range []string{"-g", "-g:none"} {
+		want, classBytes := functionalFixture(t, main, source, debug)
+		if debug == "-g" {
+			killSwitchFixture = classBytes
+		}
+		for _, mode := range []DecompileMode{Precision, Compatibility} {
+			result, err := DecompileWithOptions(classBytes, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
+			if err != nil {
+				t.Fatalf("decompile %s/%s: %v", mode, debug, err)
+			}
+			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+				t.Fatalf("returned functional web %s/%s: %v\n%s", mode, debug, err, result.Source)
+			}
+		}
+	}
+
+	t.Setenv("JDEC_GENERIC_USE_CONSTRAINT_OFF", "1")
+	legacy, err := DecompileWithOptions(killSwitchFixture, DecompileOptions{Mode: Precision, TargetSourceVersion: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"Function<Object, Object>", "BiFunction<Object, Object, Object>"} {
+		if !strings.Contains(legacy.Source, raw) {
+			t.Fatalf("kill switch did not restore erased functional declaration %q:\n%s", raw, legacy.Source)
+		}
+	}
+}
+
+func TestT19LocalCacheReturnedFunctionalWebUsesGenericSignature(t *testing.T) {
+	raw, err := os.ReadFile("testdata/regression/LocalCache.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JDEC_GENERIC_USE_CONSTRAINT_OFF", "")
+	t.Setenv("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF", "")
+	on, err := Decompile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range []string{
+		"Function<? super T, ? extends R> var6 =",
+		"BiFunction<? super T, ? super U, ? extends R> var10 =",
+	} {
+		if !strings.Contains(on, decl) {
+			t.Fatalf("generic return constraint did not reach Caffeine declaration %q:\n%s", decl, on)
+		}
+	}
+	if got := strings.Count(on, "return (R) ("); got < 2 {
+		t.Fatalf("covariant functional return target did not reach both lambda bodies (got %d casts):\n%s", got, on)
+	}
+
+	// The outer Signature carries `? extends R`, while invokedynamic retains only an
+	// Object-returning SAM descriptor. Disabling the return-target recovery must remove the
+	// load-bearing casts without relying on the former Caffeine-specific source rewrite.
+	t.Setenv("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF", "1")
+	uncast, err := Decompile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(uncast, "return (R) (") {
+		t.Fatalf("lambda return-target kill switch did not remove the recovered casts:\n%s", uncast)
+	}
+
+	t.Setenv("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF", "")
+	t.Setenv("JDEC_GENERIC_USE_CONSTRAINT_OFF", "1")
+	off, err := Decompile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range []string{
+		"Function<Object, Object> var6 =",
+		"BiFunction<Object, Object, Object> var10 =",
+	} {
+		if !strings.Contains(off, decl) {
+			t.Fatalf("kill switch did not restore Caffeine's erased declaration %q:\n%s", decl, off)
+		}
+	}
+}
+
 // A call into another class in the same JAR cannot use the caller's local
 // MethodSignatures table. The sibling resolver must walk the parameterized
 // receiver declaration, substitute its K/V arguments, and recover the full

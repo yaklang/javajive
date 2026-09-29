@@ -1,9 +1,10 @@
 package core
 
 import (
+	"reflect"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
-	"reflect"
 )
 
 // unifyReferenceWebs lowers reference joins to one source variable AFTER every
@@ -19,6 +20,7 @@ func (d *Decompiler) unifyReferenceWebs() {
 	order := []int{}
 	owners := map[*values.JavaRef]map[int]bool{}
 	uses := d.referenceUseConstraints()
+	d.constrainPolyEvaluationSnapshots(uses)
 	parameters := d.parameterWebRefs(webs)
 	for _, op := range d.opCodes {
 		if !isLocalStoreOpcode(op.Instr.OpCode) {
@@ -54,7 +56,12 @@ func (d *Decompiler) unifyReferenceWebs() {
 		for _, web := range order {
 			stores := groups[web]
 			param := parameters[web]
-			if len(stores) < 2 && param == nil {
+			var polyUseTarget types.JavaType
+			if d.getenv("JDEC_GENERIC_USE_CONSTRAINT_OFF") == "" {
+				polyUseTarget = d.polyFunctionalUseTarget(stores, uses)
+			}
+			d.tracef("var-fold", "phi gate web=%d stores=%d poly-use-target=%v", web, len(stores), polyUseTarget != nil)
+			if len(stores) < 2 && param == nil && polyUseTarget == nil {
 				if len(stores) != 1 || len(stores[0].stackConsumed) != 1 {
 					continue
 				}
@@ -139,6 +146,19 @@ func (d *Decompiler) unifyReferenceWebs() {
 				// definition cannot be discarded or narrowed to a branch's value.
 				joined = param.Type().Copy()
 			}
+			if polyUseTarget != nil {
+				for _, store := range stores {
+					if store != nil && len(store.stackConsumed) == 1 {
+						// A parameter web keeps its declared signature type; an ordinary
+						// poly web uses the exact unique consumer target proved above.
+						target := polyUseTarget
+						if param != nil {
+							target = joined
+						}
+						applyPolyFunctionalTarget(store.stackConsumed[0], target, map[*values.JavaRef]bool{})
+					}
+				}
+			}
 			if d.traceEnabled("var-fold") {
 				d.tracef("var-fold", "phi joined web=%d type=%s", web, joined.String(d.FunctionContext))
 			}
@@ -164,6 +184,149 @@ func (d *Decompiler) unifyReferenceWebs() {
 		}
 	}
 
+}
+
+// constrainPolyEvaluationSnapshots handles a direct lambda/method-reference
+// result that the evaluator materialized before an ARETURN or other constrained
+// use.  Such a temporary has no JVM local-store web, so unifyReferenceWebs cannot
+// discover it through groups.  The snapshot is nevertheless an explicit IR
+// definition with a stable JavaRef identity, and referenceUseConstraints records
+// its exact consumer.  Applying the unique same-erasure generic target here
+// restores Java's target typing without inventing information.
+func (d *Decompiler) constrainPolyEvaluationSnapshots(uses map[*values.JavaRef][]types.JavaType) {
+	if d.getenv("JDEC_GENERIC_USE_CONSTRAINT_OFF") != "" {
+		return
+	}
+	for _, op := range d.opCodes {
+		for _, snapshot := range d.evaluationSnapshots[op] {
+			if snapshot.Ref == nil {
+				continue
+			}
+			poly, admissible := polyFunctionalDefinition(snapshot.Value)
+			if !poly || !admissible {
+				continue
+			}
+			rawName, ok := types.RawClassFQN(snapshot.Ref.Type())
+			if !ok {
+				continue
+			}
+			target, conflict := uniqueParameterizedConstraint(rawName, uses[snapshot.Ref])
+			if target == nil || conflict {
+				continue
+			}
+			applyPolyFunctionalTarget(snapshot.Ref, target, map[*values.JavaRef]bool{})
+			d.tracef("var-fold", "poly snapshot pc=%d ref=%s target=%s", op.CurrentOffset, traceRef(snapshot.Ref, d.FunctionContext), target.String(d.FunctionContext))
+		}
+	}
+}
+
+// webHasOnlyPolyFunctionalDefinitions reports whether every substantive value
+// stored into the web is a lambda or method reference.  Those expressions are
+// poly expressions in Java: their source type comes from the assignment/use
+// target, while the classfile preserves only the erased invokedynamic type.
+// Null initializers do not constrain the target and are therefore ignored.
+func webHasOnlyPolyFunctionalDefinitions(stores []*OpCode) bool {
+	hasPoly := false
+	for _, store := range stores {
+		if store == nil || len(store.stackConsumed) != 1 {
+			return false
+		}
+		poly, admissible := polyFunctionalDefinition(store.stackConsumed[0])
+		if !admissible {
+			return false
+		}
+		hasPoly = hasPoly || poly
+	}
+	return hasPoly
+}
+
+func polyFunctionalDefinition(value values.JavaValue) (poly, admissible bool) {
+	return polyFunctionalDefinitionSeen(value, map[*values.JavaRef]bool{})
+}
+
+func polyFunctionalDefinitionSeen(value values.JavaValue, seen map[*values.JavaRef]bool) (poly, admissible bool) {
+	value = values.UnpackSoltValue(value)
+	if values.IsNullLiteral(value) {
+		return false, true
+	}
+	if ref, ok := value.(*values.JavaRef); ok && ref != nil && ref.Val != nil && ref.Val != value {
+		if seen[ref] {
+			return false, false
+		}
+		seen[ref] = true
+		return polyFunctionalDefinitionSeen(ref.Val, seen)
+	}
+	if custom, ok := value.(*values.CustomValue); ok && custom != nil {
+		return custom.Flag == "lambda" || custom.IsMethodRef, custom.Flag == "lambda" || custom.IsMethodRef
+	}
+	if ternary, ok := value.(*values.TernaryExpression); ok && ternary != nil {
+		leftPoly, leftOK := polyFunctionalDefinitionSeen(ternary.TrueValue, seen)
+		rightPoly, rightOK := polyFunctionalDefinitionSeen(ternary.FalseValue, seen)
+		return leftPoly || rightPoly, leftOK && rightOK
+	}
+	return false, false
+}
+
+// applyPolyFunctionalTarget carries the use-derived target through compiler
+// temporaries introduced while preserving invokedynamic evaluation order.  A
+// store often consumes `tmp`, where tmp's backing value is the actual lambda;
+// later single-use folding removes the store-local and leaves tmp's declaration
+// in source.  Refining only the destination web would therefore be correct in
+// IR but disappear from the rendered program.  Every traversed ref is a pure
+// copy on a path already proven by polyFunctionalDefinition, so assigning the
+// same target type preserves identity and runtime erasure.
+func applyPolyFunctionalTarget(value values.JavaValue, target types.JavaType, seen map[*values.JavaRef]bool) {
+	if value == nil || target == nil {
+		return
+	}
+	value = values.UnpackSoltValue(value)
+	if ref, ok := value.(*values.JavaRef); ok && ref != nil {
+		if seen[ref] {
+			return
+		}
+		seen[ref] = true
+		if poly, admissible := polyFunctionalDefinition(ref); poly && admissible {
+			ref.ResetVarType(target.Copy())
+			ref.WebDeclType = target.Copy()
+			applyPolyFunctionalTarget(ref.Val, target, seen)
+		}
+		return
+	}
+	if ternary, ok := value.(*values.TernaryExpression); ok && ternary != nil {
+		applyPolyFunctionalTarget(ternary.TrueValue, target, seen)
+		applyPolyFunctionalTarget(ternary.FalseValue, target, seen)
+	}
+}
+
+func (d *Decompiler) polyFunctionalUseTarget(stores []*OpCode, uses map[*values.JavaRef][]types.JavaType) types.JavaType {
+	if !webHasOnlyPolyFunctionalDefinitions(stores) {
+		return nil
+	}
+	rawName := ""
+	for _, store := range stores {
+		if store == nil {
+			return nil
+		}
+		for _, info := range d.opcodeIdToRef[store] {
+			ref, ok := info[0].(*values.JavaRef)
+			if !ok || ref == nil {
+				return nil
+			}
+			name, ok := types.RawClassFQN(ref.Type())
+			if !ok {
+				return nil
+			}
+			if rawName == "" {
+				rawName = name
+			} else if rawName != name {
+				return nil
+			}
+		}
+	}
+	if rawName == "" {
+		return nil
+	}
+	return d.uniqueParameterizedUseConstraint(rawName, stores, uses)
 }
 
 // Preserve array rank and component identity at reference joins. A blanket Object
