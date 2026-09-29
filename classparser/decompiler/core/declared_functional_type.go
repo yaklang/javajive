@@ -27,6 +27,11 @@ func inferDeclaredFunctionalType(ctx *class_context.ClassContext, fi types.JavaT
 	if !known || len(formals) == 0 {
 		return nil
 	}
+	// A descriptor does not prove dependent or intersection bounds. In
+	// particular, Assert<T> erased to Assert cannot prove A extends Assert<A,T>.
+	if len(types.ClassFormalTypeParamBounds(sig, nil)) != 0 {
+		return nil
+	}
 	sam, err := types.ParseMethodDescriptor(samDescriptor)
 	if err != nil || sam.FunctionType() == nil {
 		return nil
@@ -52,7 +57,7 @@ func inferDeclaredFunctionalType(ctx *class_context.ClassContext, fi types.JavaT
 			return false
 		}
 		if variable, ok := pattern.RawType().(*types.JavaClass); ok && variables[variable.Name] {
-			if _, primitive := actual.RawType().(*types.JavaPrimer); primitive {
+			if !descriptorHasCompleteTypeArguments(ctx, actual) {
 				return false
 			}
 			if old := bindings[variable.Name]; old != nil {
@@ -83,4 +88,35 @@ func inferDeclaredFunctionalType(ctx *class_context.ClassContext, fi types.JavaT
 		args[i] = bindings[variable]
 	}
 	return types.NewParameterizedType(raw.Name, args)
+}
+
+// Bootstrap descriptors erase both unresolved variables and nested generic
+// arguments. Object and raw generic classes therefore cannot establish an
+// invariant type argument: Consumer<Collection> is not Consumer<Collection<T>>.
+// Require declaration evidence that a named class has no parameters. For JDK
+// classes outside the resolver, only these fixed scalar declarations are known.
+func descriptorHasCompleteTypeArguments(ctx *class_context.ClassContext, actual types.JavaType) bool {
+	if actual == nil {
+		return false
+	}
+	if actual.IsArray() {
+		if _, primitive := actual.ElementType().RawType().(*types.JavaPrimer); primitive {
+			return true
+		}
+		return descriptorHasCompleteTypeArguments(ctx, actual.ElementType())
+	}
+	name, ok := types.ClassFQNOf(actual)
+	if !ok || name == "java.lang.Object" {
+		return false
+	}
+	if ctx != nil && ctx.SiblingClassSig != nil {
+		if sig, _, known := ctx.SiblingClassSig(strings.ReplaceAll(name, ".", "/")); known {
+			return len(types.ClassFormalTypeParamNames(sig)) == 0
+		}
+	}
+	switch name {
+	case "java.lang.String", "java.lang.Boolean", "java.lang.Byte", "java.lang.Character", "java.lang.Short", "java.lang.Integer", "java.lang.Long", "java.lang.Float", "java.lang.Double":
+		return true
+	}
+	return false
 }

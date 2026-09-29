@@ -8,7 +8,7 @@ import (
 )
 
 func TestDeclaredFunctionalTypeNeedsConsistentSAMWitnesses(t *testing.T) {
-	for _, scenario := range []string{"direct", "inherited", "conflict", "unbound", "missing signature", "method formal", "other overload", "primitive binding", "wrong arity"} {
+	for _, scenario := range []string{"direct", "inherited", "conflict", "unbound", "missing signature", "method formal", "other overload", "primitive binding", "wrong arity", "erased variable", "raw generic", "unknown class", "dependent bound"} {
 		t.Run(scenario, func(t *testing.T) {
 			classSig := "<T:Ljava/lang/Object;>Ljava/lang/Object;"
 			methodSig := "(TT;)TT;"
@@ -31,6 +31,14 @@ func TestDeclaredFunctionalTypeNeedsConsistentSAMWitnesses(t *testing.T) {
 				inst = "(I)I"
 			case "wrong arity":
 				inst = "(Ljava/lang/String;I)Ljava/lang/String;"
+			case "erased variable":
+				inst = "(Ljava/lang/Object;)Ljava/lang/Object;"
+			case "raw generic":
+				inst = "(Lexample/Box;)Lexample/Box;"
+			case "unknown class":
+				inst = "(Lmissing/Box;)Lmissing/Box;"
+			case "dependent bound":
+				classSig = "<T::Ljava/lang/Comparable<TT;>;>Ljava/lang/Object;"
 			}
 			ctx := &class_context.ClassContext{SiblingClassSig: func(owner string) (string, map[string]string, bool) {
 				if owner == "example/Action" {
@@ -41,6 +49,9 @@ func TestDeclaredFunctionalTypeNeedsConsistentSAMWitnesses(t *testing.T) {
 				}
 				if owner == "example/Parent" {
 					return "<T:Ljava/lang/Object;>Ljava/lang/Object;", map[string]string{key: methodSig}, true
+				}
+				if owner == "example/Box" {
+					return "<X:Ljava/lang/Object;>Ljava/lang/Object;", nil, true
 				}
 				return "", nil, false
 			}}
