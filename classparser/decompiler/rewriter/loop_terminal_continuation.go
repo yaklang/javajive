@@ -15,6 +15,53 @@ func isMethodTerminal(n *core.Node) bool {
 	return custom && renderHead(n.Statement) == "throw"
 }
 
+// A return arm may update state or select between several returns first.
+// Its entire exclusive region belongs in that arm. Treating only the final
+// return as terminal promotes the preceding effects to a loop continuation,
+// which can drop nested-loop exits and needlessly move local definitions.
+// Keep shared entries, joins from outside the region, cycles and unknown sinks
+// conservative: those may be a real continuation or a nonlocal control transfer.
+func exclusiveTerminalBranch(entry *core.Node) bool {
+	if len(entry.Source) > 1 {
+		return false
+	}
+	state := map[*core.Node]uint8{}
+	var visit func(*core.Node) bool
+	visit = func(n *core.Node) bool {
+		if state[n] != 0 {
+			return state[n] == 2
+		}
+		state[n] = 1
+		if !isMethodTerminal(n) {
+			next := loopAnalysisSuccessors(n)
+			if len(next) == 0 {
+				return false
+			}
+			for _, target := range next {
+				if !visit(target) {
+					return false
+				}
+			}
+		}
+		state[n] = 2
+		return true
+	}
+	if !visit(entry) {
+		return false
+	}
+	for n := range state {
+		if n == entry {
+			continue
+		}
+		for _, source := range n.Source {
+			if state[source] == 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // An early return/throw does not flow through a normal loop continuation. A
 // strict post-dominator therefore misses a shared break target when an exit
 // branch may either return or reach it. Require reachability from every exit

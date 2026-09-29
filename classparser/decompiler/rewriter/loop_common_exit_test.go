@@ -69,3 +69,37 @@ func TestCommonLoopExitAllowsOnlyTerminalBypasses(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminalLoopArmRetainsEffectsAndAlternativeReturns(t *testing.T) {
+	for _, scenario := range []string{"return", "diamond", "shared entry", "shared tail", "cycle", "unknown sink"} {
+		t.Run(scenario, func(t *testing.T) {
+			newNode := func() *core.Node { return core.NewNode(&statements.MiddleStatement{}) }
+			entry, effect, other := newNode(), newNode(), newNode()
+			terminal := core.NewNode(&statements.ReturnStatement{})
+			entry.AddNext(effect)
+			effect.AddNext(terminal)
+			want := true
+			switch scenario {
+			case "diamond":
+				entry.AddNext(other)
+				other.AddNext(terminal)
+			case "shared entry":
+				newNode().AddNext(entry)
+				newNode().AddNext(entry)
+				want = false
+			case "shared tail":
+				other.AddNext(effect)
+				want = false
+			case "cycle":
+				effect.AddNext(entry)
+				want = false
+			case "unknown sink":
+				effect.AddNext(other)
+				want = false
+			}
+			if got := exclusiveTerminalBranch(entry); got != want {
+				t.Fatalf("exclusive terminal arm=%v want=%v", got, want)
+			}
+		})
+	}
+}

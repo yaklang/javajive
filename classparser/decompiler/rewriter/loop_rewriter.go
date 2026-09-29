@@ -836,7 +836,7 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 		}
 		// A return shared by distinct branches can itself be the normal
 		// continuation. A single-path return is already an inline terminal.
-		if isMethodTerminal(out) && len(out.Source) < 2 {
+		if exclusiveTerminalBranch(out) {
 			continue
 		}
 		continuations = append(continuations, out)
