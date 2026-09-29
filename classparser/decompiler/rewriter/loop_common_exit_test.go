@@ -40,3 +40,32 @@ func TestCommonLoopExitUsesEveryPath(t *testing.T) {
 		})
 	}
 }
+
+func TestCommonLoopExitAllowsOnlyTerminalBypasses(t *testing.T) {
+	for _, bypass := range []string{"return", "unknown sink", "cycle"} {
+		t.Run(bypass, func(t *testing.T) {
+			entry := core.NewNode(&statements.ConditionStatement{})
+			other := core.NewNode(&statements.ConditionStatement{})
+			merge := core.NewNode(&statements.MiddleStatement{})
+			terminal := core.NewNode(&statements.ReturnStatement{})
+			alternative := core.NewNode(&statements.ReturnStatement{})
+			entry.AddNext(merge)
+			other.AddNext(merge)
+			other.AddNext(alternative)
+			merge.AddNext(terminal)
+			if bypass != "return" {
+				alternative.Statement = &statements.MiddleStatement{}
+			}
+			if bypass == "cycle" {
+				alternative.AddNext(alternative)
+			}
+			want := merge
+			if bypass != "return" {
+				want = nil
+			}
+			if got := commonLoopExit([]*core.Node{entry, other}); got != want {
+				t.Fatalf("common exit=%p want=%p", got, want)
+			}
+		})
+	}
+}

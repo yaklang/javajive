@@ -30,14 +30,10 @@ import (
 // bitset style of GenerateDominatorTree. Verified against a brute-force reference by
 // TestGeneratePostDominatorEquivalence.
 func GeneratePostDominatorMap(rootNode *core.Node) map[*core.Node]*core.Node {
-	return generatePostDominatorMap(rootNode, func(n *core.Node) []*core.Node { return n.Next })
-}
-
-func generatePostDominatorMap(rootNode *core.Node, successors func(*core.Node) []*core.Node) map[*core.Node]*core.Node {
 	nodes := []*core.Node{}
 	err := core.WalkGraph[*core.Node](rootNode, func(node *core.Node) ([]*core.Node, error) {
 		nodes = append(nodes, node)
-		return successors(node), nil
+		return node.Next, nil
 	})
 	if err != nil {
 		return nil
@@ -54,7 +50,7 @@ func generatePostDominatorMap(rootNode *core.Node, successors func(*core.Node) [
 	// successor ids per node, restricted to nodes reachable from root.
 	succIds := make([][]int, n)
 	for i, nd := range nodes {
-		for _, s := range successors(nd) {
+		for _, s := range nd.Next {
 			if sid, ok := nodeToId[s]; ok {
 				succIds[i] = append(succIds[i], sid)
 			}

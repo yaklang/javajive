@@ -801,22 +801,53 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 			return headerOut[0]
 		}
 	}
-	return commonLoopExit(outNodes)
-}
-
-// Every exit path must pass through a shared loop continuation. Intersecting
-// only the first two reachable sets can select a terminal case body while a
-// third exit returns elsewhere. A labeled break to that body then skips its
-// effects (or leaves them unreachable inside the loop). Use the nearest common
-// post-dominator of ALL exit entries, including destinations hidden by switch
-// break leaves. The method-end sentinel is not a printable continuation.
-func commonLoopExit(exits []*core.Node) *core.Node {
-	root := &core.Node{Next: exits}
-	end := generatePostDominatorMap(root, loopAnalysisSuccessors)[root]
-	if IsEndNode(end) {
+	// Early returns and terminal switch bodies are inline alternatives to a
+	// loop continuation. Requiring a continuation to post-dominate them loses
+	// ordinary breaks whenever a loop can also return early. Conversely, a
+	// terminal case shared by fall-through labels must remain inside switch,
+	// rather than becoming an enclosing-loop break that skips its effects.
+	inlineCases := map[*core.Node]bool{}
+	for _, sw := range elementSet.List() {
+		middle, ok := sw.Statement.(*statements.MiddleStatement)
+		if !ok || middle.Flag != statements.MiddleSwitch {
+			continue
+		}
+		data, ok := middle.Data.([]any)
+		if !ok {
+			continue
+		}
+		cases, err := switchCaseNodes(data, sw)
+		if err != nil {
+			continue
+		}
+		for _, target := range cases.Values() {
+			if target == sw.MergeNode && (sw.SwitchEmptyCaseMerge || sw.SwitchEmptyDefaultMerge) {
+				continue
+			}
+			if !switchCaseHasOnlyJumpEntries(sw, target, cases) {
+				inlineCases[target] = true
+			}
+		}
+	}
+	var continuations []*core.Node
+	for _, out := range outNodes {
+		if inlineCases[out] || IsEndNode(out) {
+			continue
+		}
+		// A return shared by distinct branches can itself be the normal
+		// continuation. A single-path return is already an inline terminal.
+		if isMethodTerminal(out) && len(out.Source) < 2 {
+			continue
+		}
+		continuations = append(continuations, out)
+	}
+	if len(continuations) == 0 {
 		return nil
 	}
-	return end
+	if len(continuations) == 1 {
+		return continuations[0]
+	}
+	return commonLoopExit(continuations)
 }
 
 // Shared handler entries describe split protected intervals, not one lexical
