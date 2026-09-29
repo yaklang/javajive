@@ -10,7 +10,7 @@ import (
 
 func TestParameterizedOverloadCastRequiresDeclarationAndScopeProof(t *testing.T) {
 	const descriptor = "(Ljava/util/List;)I"
-	for _, scenario := range []string{"concrete", "missing ancestor", "missing platform method table", "caller variable", "class variable shadowed by caller", "foreign variable", "shadowed method variable", "unrelated method variable", "missing signature", "different owner", "incomplete family", "missing target", "unique", "different erasure", "already parameterized", "varargs", "inapplicable competitor"} {
+	for _, scenario := range []string{"concrete", "missing ancestor", "missing platform method table", "caller variable", "class variable shadowed by caller", "foreign variable", "shadowed method variable", "unrelated method variable", "missing signature", "different owner", "incomplete family", "missing target", "unique", "different erasure", "already parameterized", "varargs", "inapplicable competitor", "subtype", "narrower competitor", "external concrete", "external raw owner", "external owner variable", "inaccessible bound", "unknown bound", "private declaration"} {
 		t.Run(scenario, func(t *testing.T) {
 			sig := "(Ljava/util/List<+Ljava/lang/CharSequence;>;)I"
 			want := "List<? extends CharSequence>"
@@ -18,6 +18,8 @@ func TestParameterizedOverloadCastRequiresDeclarationAndScopeProof(t *testing.T)
 				want = ""
 			}
 			switch scenario {
+			case "subtype", "narrower competitor", "external concrete", "external raw owner":
+				want = "List<? extends CharSequence>"
 			case "caller variable":
 				sig, want = "(Ljava/util/List<+TE;>;)I", "List<? extends E>"
 			case "class variable shadowed by caller":
@@ -32,8 +34,8 @@ func TestParameterizedOverloadCastRequiresDeclarationAndScopeProof(t *testing.T)
 				sig = ""
 			}
 			methods := []callbinding.Method{
-				{Name: "pick", Desc: descriptor, Generic: true},
-				{Name: "pick", Desc: "(Ljava/util/Collection;)I", Generic: true},
+				{Name: "pick", Desc: descriptor, Generic: true, Public: true},
+				{Name: "pick", Desc: "(Ljava/util/Collection;)I", Generic: true, Public: true},
 			}
 			if scenario == "unique" {
 				methods = methods[:1]
@@ -41,6 +43,10 @@ func TestParameterizedOverloadCastRequiresDeclarationAndScopeProof(t *testing.T)
 				methods = methods[1:]
 			} else if scenario == "varargs" {
 				methods[0].Varargs = true
+			} else if scenario == "narrower competitor" {
+				methods[1].Desc = "(Ljava/util/ArrayList;)I"
+			} else if scenario == "private declaration" {
+				methods[0].Public = false
 			} else if scenario == "inapplicable competitor" {
 				methods[1].Desc = "(Ljava/util/Set;)I"
 			}
@@ -61,7 +67,9 @@ func TestParameterizedOverloadCastRequiresDeclarationAndScopeProof(t *testing.T)
 							return callbinding.Class{}, false
 						}
 						c.Parents = []string{"java/util/Collection"}
-					case "java/util/Collection", "java/util/Set":
+					case "example/Hidden":
+						c.Public = scenario == "inaccessible bound"
+					case "java/util/Collection", "java/util/Set", "java/lang/CharSequence":
 					default:
 						return callbinding.Class{}, false
 					}
@@ -75,7 +83,9 @@ func TestParameterizedOverloadCastRequiresDeclarationAndScopeProof(t *testing.T)
 			receiver := NewJavaRef(nil, nil, types.NewJavaClass("example.Owner"))
 			receiver.IsThis = true
 			argType := types.NewJavaClass("java.util.List")
-			if scenario == "different erasure" {
+			if scenario == "subtype" || scenario == "narrower competitor" {
+				argType = types.NewJavaClass("java.util.ArrayList")
+			} else if scenario == "different erasure" {
 				argType = types.NewJavaClass("java.util.Collection")
 			} else if scenario == "already parameterized" {
 				argType = types.NewParameterizedType("java.util.List", []types.JavaType{types.NewJavaClass("java.lang.String")})
@@ -90,6 +100,32 @@ func TestParameterizedOverloadCastRequiresDeclarationAndScopeProof(t *testing.T)
 				ctx.SiblingClassSig = func(name string) (string, map[string]string, bool) {
 					if name == "example/Other" {
 						return "", map[string]string{class_context.MethodDescKey("pick", descriptor): "(Ljava/util/List<+Lexample/Hidden;>;)I"}, true
+					}
+					return "", nil, false
+				}
+			}
+			switch scenario {
+			case "external concrete", "external raw owner", "external owner variable", "inaccessible bound", "unknown bound", "private declaration":
+				call.ClassName = "example.Other"
+				call.Object = NewJavaRef(nil, nil, types.NewJavaClass("example.Other"))
+				ownerSig := ""
+				if scenario == "external raw owner" || scenario == "external owner variable" {
+					ownerSig = "<V:Ljava/lang/Object;>Ljava/lang/Object;"
+				}
+				if scenario == "external owner variable" {
+					sig = "(Ljava/util/List<+TV;>;)I"
+					ctx.TypeParams = append(ctx.TypeParams, "V")
+				} else if scenario == "inaccessible bound" || scenario == "unknown bound" {
+					sig = "(Ljava/util/List<+Lexample/Hidden;>;)I"
+					if scenario == "inaccessible bound" {
+						ctx.SiblingClassAccessible = func(string) (bool, bool) { return false, true }
+					} else {
+						sig = "(Ljava/util/List<+Lexample/Unknown;>;)I"
+					}
+				}
+				ctx.SiblingClassSig = func(name string) (string, map[string]string, bool) {
+					if name == "example/Other" {
+						return ownerSig, map[string]string{class_context.MethodDescKey("pick", descriptor): sig}, true
 					}
 					return "", nil, false
 				}

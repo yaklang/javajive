@@ -3102,7 +3102,7 @@ func TestListOverloadUsesExactDeclarationBeforeTextRewritesJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if !strings.Contains(on, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(") {
+	if !strings.Contains(on, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(var2))") {
 		t.Fatalf("ON lost the exact List overload target:\n%s", clipForTest(on, "withFallbackTo((List"))
 	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
@@ -3116,7 +3116,7 @@ func TestListOverloadUsesExactDeclarationBeforeTextRewritesJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if !strings.Contains(off, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(") {
+	if !strings.Contains(off, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(var2))") {
 		t.Fatalf("binding must also hold without text rewrites:\n%s", clipForTest(off, "withFallbackTo((List"))
 	}
 }
@@ -3839,7 +3839,7 @@ func TestWrapComparingLongLambdaFromNextCastJarFS(t *testing.T) {
 	}
 }
 
-func TestListOverloadDoesNotInventWithParametersTypeJarFS(t *testing.T) {
+func TestListOverloadUsesResolvedExternalParameterJarFS(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip(err)
@@ -3860,8 +3860,8 @@ func TestListOverloadDoesNotInventWithParametersTypeJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if !strings.Contains(on, "withParameters(((List)(CompoundList.of(") {
-		t.Fatalf("ON lost the descriptor cast or invented a generic bound:\n%s", clipForTest(on, "withParameters"))
+	if !strings.Contains(on, "withParameters((List<? extends Type>)(") {
+		t.Fatalf("ON lost the resolved generic overload target:\n%s", clipForTest(on, "withParameters"))
 	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
 	jfs2, err := NewJarFSFromLocal(jar)
@@ -3874,8 +3874,8 @@ func TestListOverloadDoesNotInventWithParametersTypeJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if !strings.Contains(off, "withParameters(CompoundList.of(") || strings.Contains(off, "List<? extends Type>") {
-		t.Fatalf("OFF changed the original call or invented a generic bound:\n%s", clipForTest(off, "withParameters"))
+	if !strings.Contains(off, "withParameters((List<? extends Type>)(") {
+		t.Fatalf("binding must also hold without text rewrites:\n%s", clipForTest(off, "withParameters"))
 	}
 }
 

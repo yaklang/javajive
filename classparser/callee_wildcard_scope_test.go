@@ -8,6 +8,11 @@ func TestAdversarialCalleeWildcardScopeRoundTrip(t *testing.T) {
 class OtherListOwner {
   static int count(List<?> input) {return 100+input.size();}
 }
+class ExternalScopeOwner<V> {
+  static ExternalScopeOwner<String> make() {return new ExternalScopeOwner<>();}
+  public int select(List<? extends CharSequence> input) {return 500+input.size();}
+  public int select(Collection<? extends Number> input) {return 600+input.size();}
+}
 public class CalleeWildcardScope<E extends Number> {
   private <T> T first(List<? extends T> input) {return input.get(0);}
   private <K> int count(List<? extends K> input) {return input.size();}
@@ -20,13 +25,19 @@ public class CalleeWildcardScope<E extends Number> {
   private int overload(Collection<? extends Number> input) {return 400+input.size();}
   private int overload(Object input) {return 300;}
   int selected(Object value) {return this.overload((List<String>)value);}
+  int subtype(Object value) {
+    ArrayList<String> copy=new ArrayList<>((List<String>)value);
+    return this.overload(copy);
+  }
+  int external(Object value) {return ExternalScopeOwner.make().select((List<String>)value);}
   public static void main(String[] args) {
     CalleeWildcardScope<Integer> worker=new CalleeWildcardScope<>();
     Object[] inputs={Arrays.asList("a","b"),Arrays.asList(1,2),Collections.emptyList(),null,"wrong"};
-    for(Object value:inputs)for(int operation=0;operation<5;operation++) {
+    for(Object value:inputs)for(int operation=0;operation<7;operation++) {
       try {Object out;
         switch(operation) {case 0:out=worker.head(value);break;case 1:out=worker.size(value);break;
-          case 2:out=worker.other(value);break;case 3:out=worker.shadow(value);break;default:out=worker.selected(value);}
+          case 2:out=worker.other(value);break;case 3:out=worker.shadow(value);break;
+          case 4:out=worker.selected(value);break;case 5:out=worker.subtype(value);break;default:out=worker.external(value);}
         System.out.print(out+";");
       }catch(RuntimeException ex){System.out.print(ex.getClass().getSimpleName()+";");}
     }
