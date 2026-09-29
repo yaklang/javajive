@@ -87,3 +87,24 @@ func sameIntSlice(a, b []int) bool {
 	}
 	return true
 }
+
+// A CHECKCAST immediately consumed by GETFIELD is one checked receiver
+// expression. Creating a separate local strands its definition when a guarded
+// field read becomes &&/||/?:. Inline only this single-use stack edge, with the
+// same exception coverage and an exact field-owner witness; do not move an
+// earlier cast stored in a local into a conditional read.
+func (d *Decompiler) canInlineImmediateCheckcastField(op *OpCode, castType types.JavaType) bool {
+	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || len(op.Target) != 1 || d.constantPoolGetter == nil {
+		return false
+	}
+	read := op.Target[0]
+	if read == nil || read.IsCustom || read.Instr == nil || read.Instr.OpCode != OP_GETFIELD || len(read.Data) != 2 || len(read.Source) != 1 || read.Source[0] != op || !sameHandlerCoverage(d.handlersAt(op), d.handlersAt(read)) {
+		return false
+	}
+	member, ok := d.constantPoolGetter(int(Convert2bytesToInt(read.Data))).(*values.JavaClassMember)
+	if !ok || member == nil {
+		return false
+	}
+	owner, ok := types.ClassFQNOf(castType)
+	return ok && owner != "" && strings.ReplaceAll(member.Name, "/", ".") == owner
+}

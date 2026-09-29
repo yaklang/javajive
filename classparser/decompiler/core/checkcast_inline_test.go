@@ -42,3 +42,39 @@ func TestImmediateCheckcastArgumentProof(t *testing.T) {
 		})
 	}
 }
+
+func TestImmediateCheckcastFieldProof(t *testing.T) {
+	for _, change := range []string{"valid", "other source", "handler boundary", "dup", "store", "static field", "different owner", "missing constant", "short operand", "wrong cast"} {
+		t.Run(change, func(t *testing.T) {
+			check := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 1}
+			read := &OpCode{Instr: &Instruction{OpCode: OP_GETFIELD}, Data: []byte{0, 1}, CurrentOffset: 4, Source: []*OpCode{check}}
+			check.Target = []*OpCode{read}
+			d := &Decompiler{}
+			member := values.NewJavaClassMember("example/Record", "value", "I", types.NewJavaPrimer(types.JavaInteger))
+			d.constantPoolGetter = func(int) values.JavaValue { return member }
+			switch change {
+			case "other source":
+				read.Source = append(read.Source, &OpCode{})
+			case "handler boundary":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 1, EndPc: 4, HandlerPc: 8}}
+			case "dup":
+				read.Instr.OpCode = OP_DUP
+			case "store":
+				read.Instr.OpCode = OP_ASTORE
+			case "static field":
+				read.Instr.OpCode = OP_GETSTATIC
+			case "different owner":
+				member.Name = "example/Other"
+			case "missing constant":
+				d.constantPoolGetter = func(int) values.JavaValue { return nil }
+			case "short operand":
+				read.Data = nil
+			case "wrong cast":
+				check.Instr.OpCode = OP_ALOAD
+			}
+			if got := d.canInlineImmediateCheckcastField(check, types.NewJavaClass("example.Record")); got != (change == "valid") {
+				t.Fatalf("accepted=%v", got)
+			}
+		})
+	}
+}
