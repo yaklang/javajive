@@ -35,7 +35,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = fixObjectInitCastType(body)
 	body = fixTernaryParamReturnArms(body)
 	body = fixEnumAssignedStaticField(body)
-	body = fixIntUsedAsMonitor(body)
+	// Monitor and numeric locals can have related generated names. Their
+	// types come from the IR; a source-name prefix cannot prove identity.
 	body = fixCallSiteDupLocals(body)
 	body = fixForNameAddAnnoClass(body)
 	body = fixCachedFieldReturn(body)
@@ -839,33 +840,6 @@ func intUsedAsReference(chunk, ident string) bool {
 	// Only `varN = new Type(...)` is a high-confidence int/reference slot mix.
 	// `= null` / synchronized / class-cast over-fire on lucene (Object+int).
 	return strings.Contains(chunk, ident+" = new ")
-}
-
-// fixIntUsedAsMonitor retypes `int varN = 0` to `Object varN = null` when the
-// same member uses it as a synchronized monitor. An int cannot be a monitor;
-// ConstructorResolver dumps a lock object in an int slot.
-func fixIntUsedAsMonitor(body string) string {
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "int var")
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		ident, ok, rest := readJavaIdent(body[i+len("int "):])
-		if !ok || !isDecompilerLocal(ident) || !strings.HasPrefix(rest, " = 0;") {
-			from = i + 1
-			continue
-		}
-		end := nextMemberStart(body, i)
-		chunk := body[i:end]
-		if strings.Contains(chunk, "synchronized("+ident) {
-			body = body[:i] + "Object " + ident + " = null;" + rest[len(" = 0;"):]
-			from = i + len("Object "+ident+" = null;")
-			continue
-		}
-		from = i + 1
-	}
 }
 
 // fixDupLocalDecls drops `Type varN = varN;` self-init duplicates and renames
