@@ -1023,8 +1023,9 @@ func (d *Decompiler) valueWasProducedBefore(value values.JavaValue, before *OpCo
 }
 
 // Initialized arrays used as this()/super() arguments are handled by the
-// dedicated constructor-entry rewrite, which proves the declaration is the
-// first real statement. Folding them through the generic spill path can leave
+// dedicated constructor-entry rewrite, which proves that every entry path
+// reaches the same ordered spill sequence and preserves earlier arguments.
+// Folding them through the generic spill path can leave
 // their declaration after the mandatory delegation call.
 func isInitializedArrayLiteral(value values.JavaValue) bool {
 	switch x := values.UnpackSoltValue(value).(type) {

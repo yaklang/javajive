@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -12,12 +13,13 @@ import (
 // instructions. Java requires this()/super() to be the first constructor
 // statement, so an otherwise-correct `T[] temp = ...; this(temp);` is invalid.
 //
-// The rewrite is intentionally limited to a straight-line entry sequence:
-// the temp must be the first real statement, the next statement must be the
+// The rewrite is limited to an entry prefix and a straight-line spill sequence:
+// every entry path must reach the same temp, the next statement must be the
 // delegation call, the temp must have no other uses, and exception-handler
 // coverage must match. Substituting the array expression at its original
 // argument position preserves Java's left-to-right evaluation order with the
-// other constructor arguments.
+// other constructor arguments. Conditional scaffolding is allowed only when
+// its bytecode identity belongs to an earlier, already reconstructed argument.
 func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCode) bool {
 	skip := func(reason string, args ...any) bool {
 		d.tracef("ctor-array-inline", "skip: %s", fmt.Sprintf(reason, args...))
@@ -28,27 +30,9 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 		return false
 	}
 
-	entry := d.RootNode
-	var entryPred *Node
-	for {
-		if _, ok := entry.Statement.(*statements.AssignStatement); ok {
-			break
-		}
-		middle, ok := entry.Statement.(*statements.MiddleStatement)
-		if !ok || middle.Flag != "start" || len(entry.Next) != 1 {
-			return skip("constructor entry is not a single start-marker path")
-		}
-		entryPred, entry = entry, entry.Next[0]
-		if entry == nil {
-			return skip("start marker has no successor")
-		}
-	}
-	if entryPred == nil {
-		if entry != d.RootNode || len(entry.Source) != 0 {
-			return skip("root assignment has an unexpected predecessor")
-		}
-	} else if len(entry.Source) != 1 || entry.Source[0] != entryPred {
-		return skip("candidate is not uniquely reached from the constructor entry")
+	entry, prefix, conditions, ok := constructorArrayEntry(d.RootNode)
+	if !ok {
+		return skip("constructor entry does not converge through value-only scaffolding")
 	}
 
 	type spill struct {
@@ -59,9 +43,14 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 		arg    int
 	}
 	spills := make([]spill, 0, 2)
+	seenSpills := map[*Node]bool{}
 	current := entry
 	var callNode *Node
 	for {
+		if seenSpills[current] || len(seenSpills) >= 256 {
+			return skip("array spill sequence is cyclic or exceeds the proof bound")
+		}
+		seenSpills[current] = true
 		assign, ok := current.Statement.(*statements.AssignStatement)
 		if !ok || assign.ArrayMember != nil || len(current.Next) != 1 {
 			return skip("entry sequence is not a single-successor local assignment: node=%d stmt=%T next=%d", current.Id, current.Statement, len(current.Next))
@@ -99,11 +88,7 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 	for i, candidate := range spills {
 		spillNodes[candidate.node] = true
 		spillTemps[candidate.temp] = true
-		wantSource := entryPred
-		if i > 0 {
-			wantSource = spills[i-1].node
-		}
-		if wantSource == nil {
+		if i == 0 && entry == d.RootNode {
 			if candidate.node != d.RootNode || len(candidate.node.Source) != 0 {
 				return skip("first array spill has an unexpected predecessor")
 			}
@@ -111,7 +96,11 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 			foundSource := false
 			for _, source := range candidate.node.Source {
 				if reachable[source] {
-					if source != wantSource {
+					expected := i == 0 && prefix[source]
+					if i > 0 {
+						expected = source == spills[i-1].node
+					}
+					if !expected {
 						return skip("array spill has an alternate reachable predecessor")
 					}
 					foundSource = true
@@ -180,6 +169,9 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 	for i := range spills {
 		spills[i].arg = argIndexes[i]
 	}
+	if !constructorConditionsBelongToPrefixArguments(conditions, origins, call.Arguments[:argIndexes[0]]) {
+		return skip("entry condition is not owned by an earlier constructor argument")
+	}
 
 	// Refuse the rewrite if any other statement reads or writes the temporary.
 	// This catches aliases and later uses that a local adjacency check alone
@@ -210,14 +202,19 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 		call.Arguments[candidate.arg] = replaceDelegatingConstructorTemp(call.Arguments[candidate.arg], candidate.temp, candidate.value)
 	}
 
-	// The temp node is a straight-line entry node. Reconnect its sole predecessor
-	// directly to the constructor call and keep the call's remaining graph intact.
+	// Reconnect each entry edge in place. The surviving conditions still supply
+	// their argument callbacks; only the array declarations disappear.
 	// MiscRewriter can leave stale Source links from removed array-fill nodes; they
 	// are unreachable from the method root, so discard those backlinks before the
 	// constructor call participates in later predecessor-sensitive rewrites.
 	for _, source := range append([]*Node(nil), callNode.Source...) {
 		if !reachable[source] {
 			source.RemoveNext(callNode)
+		}
+	}
+	for _, source := range slices.Clone(entry.Source) {
+		if prefix[source] {
+			source.ReplaceNextSliceKeepOrder(entry, []*Node{callNode})
 		}
 	}
 	for _, candidate := range spills {
@@ -233,13 +230,8 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 			candidate.temp.Id.Delete()
 		}
 	}
-	if entryPred == nil {
+	if entry == d.RootNode {
 		d.RootNode = callNode
-	} else {
-		entryPred.ReplaceNext(entry, callNode)
-		if !containsNode(callNode.Source, entryPred) {
-			callNode.AddSource(entryPred)
-		}
 	}
 	for _, source := range append([]*Node(nil), callNode.Source...) {
 		if spillNodes[source] {
@@ -525,6 +517,8 @@ func constructorInlineNodeValues(statement statements.Statement) ([]values.JavaV
 		return []values.JavaValue{s.JavaValue}, true
 	case *statements.StackAssignStatement:
 		return []values.JavaValue{s.JavaValue}, true
+	case *statements.GOTOStatement:
+		return nil, true
 	case *statements.MiddleStatement:
 		if value, ok := s.Data.(values.JavaValue); ok {
 			return []values.JavaValue{value}, true
