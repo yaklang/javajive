@@ -289,6 +289,7 @@ func t19MethodRef(req CallSiteRequest, d *Decompiler, static []values.JavaValue,
 		if up := t19UpgradeFI(resultType, static[2]); up != nil {
 			refType = up
 		}
+		refType = methodRefReceiverType(d.FunctionContext, refType, impl, static[2], len(capturedArgs))
 	}
 	var refReplace func(oldId *utils.VariableId, newId *utils.VariableId)
 	if d.getenv("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
