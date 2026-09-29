@@ -203,8 +203,10 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					// the invokedynamic is still being decoded under that method's context.
 					retTypevarCast = resolveLambdaReturnTypevar(d.FunctionContext, fiRawName)
 				}
-				cv := values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
-					return t19WriteLambdaBody(funcCtx, out, methodStr, captured, retTypevarCast)
+				var cv *values.CustomValue
+				cv = values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
+					target, rawBridge := t19LambdaReturnCastStrings(funcCtx, cv, retTypevarCast)
+					return t19WriteLambdaBodyWithBridge(funcCtx, out, methodStr, captured, target, rawBridge)
 				}, func() types.JavaType {
 					return typ
 				}, lambdaReplace)
@@ -218,6 +220,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// the lambda VALUE's type, not the stack simulation's slot type, so it doesn't
 				// interfere with slot reuse.
 				if len(args1) >= 3 {
+					cv.InstantiatedMtdDesc = t19MethodTypeDesc(args1[2])
 					if upgradedType := inferLambdaTypeFromInstantiated(typ, args1[2]); upgradedType != nil {
 						lambdaType := upgradedType
 						cv = cv.WithType(func() types.JavaType {
@@ -684,26 +687,196 @@ func resolveLambdaReturnTypevar(funcCtx *class_context.ClassContext, fiRawName s
 // the terminating `;`. A bare `return;` (void) is left untouched. Returns the body unchanged if no
 // return site matches. Kill-switch: JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF.
 func injectLambdaReturnCast(body, typevar string) string {
-	idx := strings.LastIndex(body, "return ")
-	if idx < 0 {
+	return injectLambdaReturnCastWithBridge(body, typevar, "")
+}
+
+func injectLambdaReturnCastWithBridge(body, target, rawBridge string) string {
+	spans := lambdaReturnCastSpans(body, target)
+	if len(spans) == 0 {
 		return body
 	}
-	exprStart := idx + len("return ")
-	// Skip leading whitespace of the return expression; remember how many bytes we trimmed so the
-	// tail splice stays byte-aligned.
-	skipped := 0
-	for exprStart+skipped < len(body) && (body[exprStart+skipped] == ' ' || body[exprStart+skipped] == '\t') {
-		skipped++
+	bridge := ""
+	if rawBridge != "" {
+		bridge = "(" + rawBridge + ") "
 	}
-	rest := body[exprStart+skipped:]
-	if strings.HasPrefix(rest, ";") {
-		return body // void return; nothing to cast
+	var out strings.Builder
+	extra := 0
+	for range spans {
+		extra += len(target) + len(rawBridge) + 9
 	}
-	end := strings.IndexByte(rest, ';')
-	if end < 0 {
-		return body
+	out.Grow(len(body) + extra)
+	cursor := 0
+	for _, span := range spans {
+		out.WriteString(body[cursor:span.start])
+		expr := strings.TrimSpace(body[span.start:span.end])
+		out.WriteString("(" + target + ") " + bridge + "(" + expr + ")")
+		cursor = span.end
 	}
-	expr := strings.TrimSpace(rest[:end])
-	castStmt := "(" + typevar + ") (" + expr + ");"
-	return body[:exprStart] + castStmt + body[exprStart+skipped+end+1:]
+	out.WriteString(body[cursor:])
+	return out.String()
+}
+
+type lambdaReturnSpan struct {
+	start int
+	end   int // excludes the terminating semicolon
+}
+
+// lambdaReturnCastSpans finds every value-return belonging to the current
+// lambda, including returns nested in if/try blocks, while excluding returns in
+// a nested block lambda. Generated lambda bodies can have several control-flow
+// exits; casting only the final textual return leaves earlier paths ill-typed.
+func lambdaReturnCastSpans(body, target string) []lambdaReturnSpan {
+	nestedStarts := nestedLambdaBlockStarts(body)
+	braceNested := make([]bool, 0, 8)
+	nestedDepth := 0
+	var spans []lambdaReturnSpan
+	for i := 0; i < len(body); {
+		next, token := nextJavaCodeByte(body, i)
+		if next != i {
+			i = next
+			continue
+		}
+		switch token {
+		case '{':
+			nested := nestedStarts[i]
+			braceNested = append(braceNested, nested)
+			if nested {
+				nestedDepth++
+			}
+			i++
+			continue
+		case '}':
+			if n := len(braceNested); n > 0 {
+				if braceNested[n-1] {
+					nestedDepth--
+				}
+				braceNested = braceNested[:n-1]
+			}
+			i++
+			continue
+		}
+		if nestedDepth == 0 && strings.HasPrefix(body[i:], "return") &&
+			(i == 0 || !javaIdentByte(body[i-1])) &&
+			(i+len("return") == len(body) || !javaIdentByte(body[i+len("return")])) {
+			start := i + len("return")
+			for start < len(body) && (body[start] == ' ' || body[start] == '\t' || body[start] == '\r' || body[start] == '\n') {
+				start++
+			}
+			end := lambdaReturnSemicolon(body, start)
+			if end >= start {
+				expr := strings.TrimSpace(body[start:end])
+				if expr != "" && !strings.HasPrefix(expr, "("+target+")") {
+					spans = append(spans, lambdaReturnSpan{start: start, end: end})
+				}
+				i = end + 1
+				continue
+			}
+		}
+		i++
+	}
+	return spans
+}
+
+// nestedLambdaBlockStarts returns the opening braces belonging to nested block
+// lambdas. The first arrow is the body currently being rewritten; later arrows
+// are child lambdas whose return statements have a different SAM target.
+func nestedLambdaBlockStarts(body string) map[int]bool {
+	starts := map[int]bool{}
+	arrows := 0
+	for i := 0; i+1 < len(body); {
+		next, token := nextJavaCodeByte(body, i)
+		if next != i {
+			i = next
+			continue
+		}
+		if token == '-' && body[i+1] == '>' {
+			arrows++
+			j := i + 2
+			for j < len(body) && (body[j] == ' ' || body[j] == '\t' || body[j] == '\r' || body[j] == '\n') {
+				j++
+			}
+			if arrows > 1 && j < len(body) && body[j] == '{' {
+				starts[j] = true
+			}
+			i += 2
+			continue
+		}
+		i++
+	}
+	return starts
+}
+
+// nextJavaCodeByte skips one complete string, character literal, or comment;
+// otherwise it returns the current byte as Java code.
+func nextJavaCodeByte(body string, i int) (int, byte) {
+	if i >= len(body) {
+		return i, 0
+	}
+	if body[i] == '/' && i+1 < len(body) {
+		switch body[i+1] {
+		case '/':
+			if end := strings.IndexByte(body[i+2:], '\n'); end >= 0 {
+				return i + 2 + end + 1, 0
+			}
+			return len(body), 0
+		case '*':
+			if end := strings.Index(body[i+2:], "*/"); end >= 0 {
+				return i + 2 + end + 2, 0
+			}
+			return len(body), 0
+		}
+	}
+	if body[i] == '"' || body[i] == '\'' {
+		quote := body[i]
+		for j := i + 1; j < len(body); j++ {
+			if body[j] == '\\' {
+				j++
+				continue
+			}
+			if body[j] == quote {
+				return j + 1, 0
+			}
+		}
+		return len(body), 0
+	}
+	return i, body[i]
+}
+
+func lambdaReturnSemicolon(body string, start int) int {
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < len(body); {
+		next, token := nextJavaCodeByte(body, i)
+		if next != i {
+			i = next
+			continue
+		}
+		switch token {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			} else {
+				return -1
+			}
+		case ';':
+			if paren == 0 && bracket == 0 && brace == 0 {
+				return i
+			}
+		}
+		i++
+	}
+	return -1
+}
+
+func javaIdentByte(b byte) bool {
+	return b == '_' || b == '$' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }

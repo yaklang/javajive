@@ -2,9 +2,11 @@ package core
 
 import (
 	"reflect"
+	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/jdecenv"
 )
 
 // unifyReferenceWebs lowers reference joins to one source variable AFTER every
@@ -141,6 +143,9 @@ func (d *Decompiler) unifyReferenceWebs() {
 				joined = types.NewJavaClass(name)
 			}
 			joined = d.constrainWebDeclaration(joined, stores, uses)
+			if polyUseTarget != nil {
+				joined = polyUseTarget.Copy()
+			}
 			if param != nil {
 				// The method signature fixes a parameter's source type. Its entry
 				// definition cannot be discarded or narrowed to a branch's value.
@@ -214,6 +219,7 @@ func (d *Decompiler) constrainPolyEvaluationSnapshots(uses map[*values.JavaRef][
 			if target == nil || conflict {
 				continue
 			}
+			target = polyLambdaInputTarget(snapshot.Value, target)
 			applyPolyFunctionalTarget(snapshot.Ref, target, map[*values.JavaRef]bool{})
 			d.tracef("var-fold", "poly snapshot pc=%d ref=%s target=%s", op.CurrentOffset, traceRef(snapshot.Ref, d.FunctionContext), target.String(d.FunctionContext))
 		}
@@ -292,10 +298,84 @@ func applyPolyFunctionalTarget(value values.JavaValue, target types.JavaType, se
 		}
 		return
 	}
+	if custom, ok := value.(*values.CustomValue); ok && custom != nil && custom.Flag == "lambda" && !custom.IsMethodRef {
+		applyPolyLambdaReturnTarget(custom, target)
+		return
+	}
 	if ternary, ok := value.(*values.TernaryExpression); ok && ternary != nil {
 		applyPolyFunctionalTarget(ternary.TrueValue, target, seen)
 		applyPolyFunctionalTarget(ternary.FalseValue, target, seen)
 	}
+}
+
+// applyPolyLambdaReturnTarget bridges the second half of Java poly-expression
+// target typing. Retyping the functional local fixes its declaration and SAM
+// parameters, but the reconstructed synthetic body may still return the
+// instantiated descriptor's erasure (Object, raw Future, raw Map). When the
+// unique target proves a more specific SAM result, retain that result on the
+// lambda so its deferred writer can emit the source-equivalent unchecked cast.
+// Parameterized results use a raw-erasure bridge to avoid an illegal direct
+// cast between invariant instantiations. Kill-switch:
+// JDEC_POLY_LAMBDA_RETURN_CAST_OFF=1.
+func applyPolyLambdaReturnTarget(lambda *values.CustomValue, target types.JavaType) {
+	if lambda == nil || lambda.IsMethodRef || lambda.InstantiatedMtdDesc == "" || target == nil ||
+		jdecenv.Get("JDEC_POLY_LAMBDA_RETURN_CAST_OFF") != "" ||
+		jdecenv.Get("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") != "" {
+		return
+	}
+	desired := functionalInterfaceReturnType(target)
+	current := functionalInterfaceReturnType(lambda.Type())
+	if desired == nil || current == nil || reflect.DeepEqual(desired.RawType(), current.RawType()) {
+		return
+	}
+	methodType, err := types.ParseMethodDescriptor(lambda.InstantiatedMtdDesc)
+	if err != nil || methodType == nil || methodType.FunctionType() == nil {
+		return
+	}
+	instantiatedReturn := methodType.FunctionType().ReturnType
+	if instantiatedReturn == nil {
+		return
+	}
+	if _, primitive := instantiatedReturn.RawType().(*types.JavaPrimer); primitive {
+		return
+	}
+	if parameterized, ok := types.AsParameterizedType(desired); ok && parameterized != nil {
+		instRaw, instOK := types.RawClassFQN(instantiatedReturn)
+		if !instOK || instRaw != "java.lang.Object" && !sameRawTypeName(instRaw, parameterized.RawClassName) {
+			return
+		}
+		lambda.LambdaReturnTarget = desired.Copy()
+		lambda.LambdaReturnRawBridge = true
+		return
+	}
+	// Bare in-scope type variables and type-variable arrays erase to a reference
+	// descriptor. A direct cast is sufficient and preserves the runtime check
+	// that javac encoded in the original source path.
+	lambda.LambdaReturnTarget = desired.Copy()
+	lambda.LambdaReturnRawBridge = false
+}
+
+func functionalInterfaceReturnType(typ types.JavaType) types.JavaType {
+	parameterized, ok := types.AsParameterizedType(typ)
+	if !ok || parameterized == nil {
+		return nil
+	}
+	position, known := lambdaFIReturnPosition[parameterized.RawClassName]
+	if !known || position < 0 || position >= len(parameterized.TypeArgs) {
+		return nil
+	}
+	result := parameterized.TypeArgs[position]
+	if wildcard, ok := result.(*types.JavaWildcardType); ok {
+		if wildcard == nil || wildcard.Variant != "extends" || wildcard.Bound == nil {
+			return nil
+		}
+		result = wildcard.Bound
+	}
+	return result
+}
+
+func sameRawTypeName(left, right string) bool {
+	return strings.ReplaceAll(left, "/", ".") == strings.ReplaceAll(right, "/", ".")
 }
 
 func (d *Decompiler) polyFunctionalUseTarget(stores []*OpCode, uses map[*values.JavaRef][]types.JavaType) types.JavaType {
@@ -326,7 +406,73 @@ func (d *Decompiler) polyFunctionalUseTarget(stores []*OpCode, uses map[*values.
 	if rawName == "" {
 		return nil
 	}
-	return d.uniqueParameterizedUseConstraint(rawName, stores, uses)
+	target := d.uniqueParameterizedUseConstraint(rawName, stores, uses)
+	for _, store := range stores {
+		target = polyLambdaInputTarget(store.stackConsumed[0], target)
+	}
+	return target
+}
+
+// polyLambdaInputTarget retains the input erasure under which a synthetic
+// lambda body was decoded, when the consumer explicitly permits a supertype.
+// For example, BiFunction<Object, Entry, Entry<K,V>> is accepted by Map's
+// BiFunction<? super Object, ? super Entry<K,V>, ? extends Entry<K,V>>.
+// Replacing its raw Entry parameter by Entry<K,V> would change the static
+// contract of body calls such as entry.setValue(Object), even though the JVM
+// descriptor contains no corresponding cast. Only lower-bounded INPUT slots
+// with an exactly matching erasure qualify; invariant slots and results do not.
+func polyLambdaInputTarget(value values.JavaValue, target types.JavaType) types.JavaType {
+	if target == nil || jdecenv.Get("JDEC_POLY_LAMBDA_INPUT_ERASURE_OFF") != "" {
+		return target
+	}
+	seen := map[*values.JavaRef]bool{}
+	var visit func(values.JavaValue)
+	visit = func(value values.JavaValue) {
+		switch v := values.UnpackSoltValue(value).(type) {
+		case *values.JavaRef:
+			if v != nil && !seen[v] {
+				seen[v] = true
+				visit(v.Val)
+			}
+		case *values.TernaryExpression:
+			visit(v.TrueValue)
+			visit(v.FalseValue)
+		case *values.CustomValue:
+			if v == nil || v.Flag != "lambda" || v.IsMethodRef {
+				return
+			}
+			formal, ok := types.AsParameterizedType(target)
+			actual, actualOK := types.AsParameterizedType(v.Type())
+			if !ok || !actualOK || formal.RawClassName != actual.RawClassName || len(formal.TypeArgs) != len(actual.TypeArgs) {
+				return
+			}
+			var inputs int
+			switch formal.RawClassName {
+			case "java.util.function.Function", "java.util.function.Consumer", "java.util.function.Predicate":
+				inputs = 1
+			case "java.util.function.BiFunction", "java.util.function.BiConsumer", "java.util.function.BiPredicate":
+				inputs = 2
+			}
+			args := append([]types.JavaType(nil), formal.TypeArgs...)
+			for i := 0; i < inputs && i < len(args); i++ {
+				bound, ok := args[i].(*types.JavaWildcardType)
+				if !ok || bound == nil || bound.Variant != "super" {
+					continue
+				}
+				parameterized, ok := types.AsParameterizedType(bound.Bound)
+				if !ok || actual.TypeArgs[i] == nil {
+					continue
+				}
+				erased, ok := actual.TypeArgs[i].RawType().(*types.JavaClass)
+				if ok && erased != nil && sameRawTypeName(erased.Name, parameterized.RawClassName) {
+					args[i] = actual.TypeArgs[i].Copy()
+				}
+			}
+			target = types.NewParameterizedType(formal.RawClassName, args)
+		}
+	}
+	visit(value)
+	return target
 }
 
 // Preserve array rank and component identity at reference joins. A blanket Object

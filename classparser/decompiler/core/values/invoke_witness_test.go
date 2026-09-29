@@ -642,10 +642,147 @@ func TestJarGenericFunctionalFormalRecoversRawBridge(t *testing.T) {
 	}
 }
 
+func TestFunctionalTargetParamUsesExactSameClassOverload(t *testing.T) {
+	descriptor := "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/util/concurrent/CompletableFuture;"
+	methodType, err := types.ParseMethodDescriptor(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ft := methodType.FunctionType()
+	thisRef := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("example.Cache"))
+	thisRef.IsThis = true
+	member := &JavaClassMember{Name: "example.Cache", Member: "get", Description: descriptor, JavaType: methodType}
+	call := NewFunctionCallExpression(thisRef, member, ft)
+	call.Descriptor = descriptor
+	call.Arguments = []JavaValue{
+		NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("K")),
+		NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.util.function.BiFunction")),
+	}
+	sig := "(TK;Ljava/util/function/BiFunction<-TK;Ljava/util/concurrent/Executor;Ljava/util/concurrent/CompletableFuture<TV;>;>;)Ljava/util/concurrent/CompletableFuture<TV;>;"
+	ctx := &class_context.ClassContext{
+		ClassName:       "example.Cache",
+		ClassSig:        "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/lang/Object;",
+		TypeParams:      []string{"K", "V"},
+		ClassTypeParams: []string{"K", "V"},
+		MethodSignaturesByDesc: map[string]string{
+			class_context.MethodDescKey("get", descriptor): sig,
+		},
+		MethodDescriptors: map[string]bool{
+			class_context.MethodDescKey("get", descriptor): true,
+			class_context.MethodDescKey("get", "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/util/concurrent/CompletableFuture;"): true,
+		},
+	}
+	target := call.FunctionalTargetParamType(1, ctx)
+	if target == nil || target.String(ctx) != "BiFunction<? super K, Executor, CompletableFuture<V>>" {
+		t.Fatalf("exact overloaded target = %v", target)
+	}
+
+	t.Setenv("JDEC_POLY_CALL_TARGET_OFF", "1")
+	if got := call.FunctionalTargetParamType(1, ctx); got != nil {
+		t.Fatalf("kill switch must retain descriptor erasure, got %s", got.String(ctx))
+	}
+}
+
+func TestFunctionalTargetParamRejectsCalleeMethodVariables(t *testing.T) {
+	descriptor := "(Ljava/util/function/Function;)V"
+	methodType, err := types.ParseMethodDescriptor(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ft := methodType.FunctionType()
+	thisRef := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("example.Owner"))
+	thisRef.IsThis = true
+	member := &JavaClassMember{Name: "example.Owner", Member: "use", Description: descriptor, JavaType: methodType}
+	call := NewFunctionCallExpression(thisRef, member, ft)
+	call.Descriptor = descriptor
+	call.Arguments = []JavaValue{NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.util.function.Function"))}
+	ctx := &class_context.ClassContext{
+		ClassName:  "example.Owner",
+		TypeParams: []string{"T"}, // Deliberately collides with the callee's unrelated <T>.
+		MethodSignaturesByDesc: map[string]string{
+			class_context.MethodDescKey("use", descriptor): "<T:Ljava/lang/Object;>(Ljava/util/function/Function<TT;TT;>;)V",
+		},
+	}
+	if got := call.FunctionalTargetParamType(0, ctx); got != nil {
+		t.Fatalf("callee method variable must not leak into caller declaration: %s", got.String(ctx))
+	}
+}
+
+func TestFunctionalTargetParamUsesJDKConsumerSignatures(t *testing.T) {
+	tests := []struct {
+		name, receiver, method, descriptor, want string
+		args                                     []types.JavaType
+	}{
+		{
+			name: "map forEach", receiver: "java.util.Map", method: "forEach",
+			descriptor: "(Ljava/util/function/BiConsumer;)V",
+			args:       []types.JavaType{types.NewJavaClass("K"), types.NewJavaClass("V")},
+			want:       "BiConsumer<? super K, ? super V>",
+		},
+		{
+			name: "spliterator tryAdvance", receiver: "java.util.Spliterator", method: "tryAdvance",
+			descriptor: "(Ljava/util/function/Consumer;)Z",
+			args: []types.JavaType{types.NewParameterizedType("java.util.Map$Entry", []types.JavaType{
+				types.NewJavaClass("K"), types.NewJavaClass("V"),
+			})},
+			want: "Consumer<? super Map.Entry<K, V>>",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			methodType, err := types.ParseMethodDescriptor(test.descriptor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ft := methodType.FunctionType()
+			receiver := NewCustomValue(func(*class_context.ClassContext) string { return "receiver" }, func() types.JavaType {
+				return types.NewParameterizedType(test.receiver, test.args)
+			})
+			member := &JavaClassMember{Name: test.receiver, Member: test.method, Description: test.descriptor, JavaType: methodType}
+			call := NewFunctionCallExpression(receiver, member, ft)
+			call.Descriptor = test.descriptor
+			call.Arguments = []JavaValue{NewJavaRef(utils.NewRootVariableId(), nil, ft.ParamTypes[0])}
+			ctx := &class_context.ClassContext{TypeParams: []string{"K", "V"}}
+			target := call.FunctionalTargetParamType(0, ctx)
+			got := "<nil>"
+			if target != nil {
+				got = target.String(ctx)
+			}
+			if got != test.want {
+				t.Fatalf("target = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
 func mustFunc(desc string) *types.JavaFuncType {
 	mt, err := types.ParseMethodDescriptor(desc)
 	if err != nil {
 		panic(err)
 	}
 	return mt.FunctionType()
+}
+
+func TestInvokeGenericProducerTypeDoesNotAliasReceiver(t *testing.T) {
+	mt, err := types.ParseMethodDescriptor("(Ljava/lang/Object;)Ljava/lang/Object;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiverType := types.NewParameterizedType("java.util.Map", []types.JavaType{types.NewJavaClass("K"), types.NewJavaClass("V")})
+	receiver := NewCustomValue(nil, func() types.JavaType { return receiverType })
+	member := &JavaClassMember{Name: "java.util.Map", Member: "get", Description: "(Ljava/lang/Object;)Ljava/lang/Object;", JavaType: mt}
+	call := NewFunctionCallExpression(receiver, member, mt.FunctionType())
+	call.Arguments = []JavaValue{NewJavaLiteral(nil, types.NewJavaClass("java.lang.Object"))}
+	ctx := &class_context.ClassContext{}
+	first := call.Type()
+	if first.String(ctx) != "V" {
+		t.Fatalf("map result = %s", first.String(ctx))
+	}
+	first.ResetType(types.NewJavaClass("java.lang.Object"))
+	if got := receiver.Type().String(ctx); got != "Map<K, V>" {
+		t.Fatalf("call inference changed receiver: %s", got)
+	}
+	if got := call.Type().String(ctx); got != "V" {
+		t.Fatalf("call descriptor changed: %s", got)
+	}
 }

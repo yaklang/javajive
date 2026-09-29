@@ -257,6 +257,108 @@ func TestResolveLambdaReturnTypevarFromCovariantTarget(t *testing.T) {
 	}
 }
 
+func TestPolyLambdaReturnTargetUsesGenericSAMResult(t *testing.T) {
+	function := func(result types.JavaType) types.JavaType {
+		return types.NewParameterizedType("java.util.function.Function", []types.JavaType{
+			types.NewJavaClass("java.lang.Object"), result,
+		})
+	}
+
+	t.Run("bare type variable", func(t *testing.T) {
+		lambda := values.NewCustomValue(func(*class_context.ClassContext) string { return "" }, func() types.JavaType {
+			return function(types.NewJavaClass("java.lang.Object"))
+		})
+		lambda.Flag = "lambda"
+		lambda.InstantiatedMtdDesc = "(Ljava/lang/Object;)Ljava/lang/Object;"
+		target := types.NewParameterizedType("java.util.function.Function", []types.JavaType{
+			&types.JavaWildcardType{Variant: "super", Bound: types.NewJavaClass("K")},
+			&types.JavaWildcardType{Variant: "extends", Bound: types.NewJavaClass("V")},
+		})
+		applyPolyLambdaReturnTarget(lambda, target)
+		if lambda.LambdaReturnTarget == nil || lambda.LambdaReturnTarget.String(&class_context.ClassContext{}) != "V" || lambda.LambdaReturnRawBridge {
+			t.Fatalf("type-variable target not recovered: target=%v bridge=%v", lambda.LambdaReturnTarget, lambda.LambdaReturnRawBridge)
+		}
+	})
+
+	t.Run("nested parameterization", func(t *testing.T) {
+		rawFuture := types.NewJavaClass("java.util.concurrent.CompletableFuture")
+		lambda := values.NewCustomValue(func(*class_context.ClassContext) string { return "" }, func() types.JavaType {
+			return function(rawFuture)
+		})
+		lambda.Flag = "lambda"
+		lambda.InstantiatedMtdDesc = "(Ljava/lang/Object;)Ljava/util/concurrent/CompletableFuture;"
+		futureV := types.NewParameterizedType("java.util.concurrent.CompletableFuture", []types.JavaType{types.NewJavaClass("V")})
+		target := types.NewParameterizedType("java.util.function.Function", []types.JavaType{
+			types.NewJavaClass("K"), futureV,
+		})
+		applyPolyLambdaReturnTarget(lambda, target)
+		if lambda.LambdaReturnTarget == nil || lambda.LambdaReturnTarget.String(&class_context.ClassContext{}) != "CompletableFuture<V>" || !lambda.LambdaReturnRawBridge {
+			t.Fatalf("parameterized target not recovered: target=%v bridge=%v", lambda.LambdaReturnTarget, lambda.LambdaReturnRawBridge)
+		}
+	})
+
+	t.Run("consumer and method reference stay untouched", func(t *testing.T) {
+		for _, methodRef := range []bool{false, true} {
+			lambda := values.NewCustomValue(func(*class_context.ClassContext) string { return "" }, func() types.JavaType {
+				return types.NewParameterizedType("java.util.function.Consumer", []types.JavaType{types.NewJavaClass("java.lang.Object")})
+			})
+			lambda.Flag = "lambda"
+			lambda.IsMethodRef = methodRef
+			lambda.InstantiatedMtdDesc = "(Ljava/lang/Object;)V"
+			target := types.NewParameterizedType("java.util.function.Consumer", []types.JavaType{types.NewJavaClass("K")})
+			applyPolyLambdaReturnTarget(lambda, target)
+			if lambda.LambdaReturnTarget != nil {
+				t.Fatalf("void/method-reference target was modified: methodRef=%v", methodRef)
+			}
+		}
+	})
+
+	t.Run("kill switch", func(t *testing.T) {
+		t.Setenv("JDEC_POLY_LAMBDA_RETURN_CAST_OFF", "1")
+		lambda := values.NewCustomValue(func(*class_context.ClassContext) string { return "" }, func() types.JavaType {
+			return function(types.NewJavaClass("java.lang.Object"))
+		})
+		lambda.Flag = "lambda"
+		lambda.InstantiatedMtdDesc = "(Ljava/lang/Object;)Ljava/lang/Object;"
+		applyPolyLambdaReturnTarget(lambda, function(types.NewJavaClass("V")))
+		if lambda.LambdaReturnTarget != nil {
+			t.Fatal("kill switch retained return target")
+		}
+	})
+}
+
+func TestLambdaReturnParameterizedRawBridge(t *testing.T) {
+	body := "(x) -> { return future; }"
+	want := "(x) -> { return (CompletableFuture<V>) (CompletableFuture) (future); }"
+	if got := injectLambdaReturnCastWithBridge(body, "CompletableFuture<V>", "CompletableFuture"); got != want {
+		t.Fatalf("raw bridge = %q, want %q", got, want)
+	}
+	projected, ok := lambdaReturnCastOutputLenWithBridge(body, "CompletableFuture<V>", "CompletableFuture")
+	if !ok || projected != int64(len(want)) {
+		t.Fatalf("raw bridge preflight = %d/%v, want %d", projected, ok, len(want))
+	}
+
+	multi := `(x) -> {
+  if (x) { return first; }
+  Runnable nested = () -> { return; };
+  java.util.function.Supplier<Object> child = () -> { return childValue; };
+  return (V) (last);
+}`
+	wantMulti := `(x) -> {
+  if (x) { return (V) (first); }
+  Runnable nested = () -> { return; };
+  java.util.function.Supplier<Object> child = () -> { return childValue; };
+  return (V) (last);
+}`
+	if got := injectLambdaReturnCast(multi, "V"); got != wantMulti {
+		t.Fatalf("multi-return targeting crossed a nested lambda:\ngot:\n%s\nwant:\n%s", got, wantMulti)
+	}
+	projected, ok = lambdaReturnCastOutputLen(multi, "V")
+	if !ok || projected != int64(len(wantMulti)) {
+		t.Fatalf("multi-return preflight = %d/%v, want %d", projected, ok, len(wantMulti))
+	}
+}
+
 func TestTaskT19InlineVsMethodRef(t *testing.T) {
 	t.Log("T19-C06")
 	d := &Decompiler{FunctionContext: &class_context.ClassContext{ClassName: "LambdaCapture"}}
@@ -287,5 +389,33 @@ func TestTaskT19InlineVsMethodRef(t *testing.T) {
 	kt := t19Impl("LambdaCapture", "set$lambda-0", "(Ljava/lang/Object;Ljava/lang/Object;)V", RefInvokeStatic)
 	if t19ShouldInline(d, kt, 1, 1) {
 		t.Fatal("Kotlin set$lambda-0 must stay a method reference")
+	}
+}
+
+func TestPolyLambdaInputErasureRequiresContravariantSameErasure(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	raw := types.NewJavaClass("java.util.Map$Entry")
+	entry := types.NewParameterizedType("java.util.Map$Entry", []types.JavaType{types.NewJavaClass("K"), types.NewJavaClass("V")})
+	lambda := values.NewCustomValue(nil, func() types.JavaType {
+		return types.NewParameterizedType("java.util.function.Function", []types.JavaType{raw, raw})
+	})
+	lambda.Flag = "lambda"
+	for _, test := range []struct {
+		name  string
+		input types.JavaType
+		want  string
+	}{
+		{"contravariant", &types.JavaWildcardType{Variant: "super", Bound: entry}, "Function<Map.Entry, Map.Entry<K, V>>"},
+		{"invariant", entry, "Function<Map.Entry<K, V>, Map.Entry<K, V>>"},
+		{"covariant", &types.JavaWildcardType{Variant: "extends", Bound: entry}, "Function<? extends Map.Entry<K, V>, Map.Entry<K, V>>"},
+		{"other erasure", &types.JavaWildcardType{Variant: "super", Bound: types.NewParameterizedType("java.util.List", []types.JavaType{types.NewJavaClass("V")})}, "Function<? super List<V>, Map.Entry<K, V>>"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := types.NewParameterizedType("java.util.function.Function", []types.JavaType{test.input, entry})
+			got := polyLambdaInputTarget(lambda, target)
+			if got.String(ctx) != test.want {
+				t.Fatalf("target = %s, want %s", got.String(ctx), test.want)
+			}
+		})
 	}
 }

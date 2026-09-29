@@ -31,10 +31,23 @@ func (d *Decompiler) referenceUseConstraints() map[*values.JavaRef][]types.JavaT
 		case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE, OP_INVOKESTATIC, OP_INVOKESPECIAL:
 			member := d.GetMethodFromPool(int(Convert2bytesToInt(op.Data[:2])))
 			params := member.JavaType.FunctionType().ParamTypes
+			call := d.invokeFuncCall[op]
 			if len(stack) < len(params) {
 				continue
 			}
 			for i, typ := range params {
+				// A lambda or method reference is a Java poly expression. Its
+				// invokedynamic descriptor records only the functional
+				// interface erasure; the selected callee Signature supplies the
+				// source target. Record that target as use evidence so a
+				// materialized local web is declared with the same generic type
+				// javac used. FunctionalTargetParamType verifies the exact JVM
+				// descriptor, generic erasure and source denotability.
+				if call != nil {
+					if target := call.FunctionalTargetParamType(i, d.FunctionContext); target != nil {
+						typ = target
+					}
+				}
 				add(stack[len(params)-1-i], typ)
 			}
 			if op.Instr.OpCode != OP_INVOKESTATIC && len(stack) > len(params) {

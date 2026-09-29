@@ -242,13 +242,16 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 		retTypevarCast = resolveLambdaReturnTypevar(d.FunctionContext, fiRawName)
 	}
 	typ := resultType
+	var cv *values.CustomValue
 	writeFn := func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
-		return t19WriteLambdaBody(funcCtx, out, methodStr, captured, retTypevarCast)
+		target, rawBridge := t19LambdaReturnCastStrings(funcCtx, cv, retTypevarCast)
+		return t19WriteLambdaBodyWithBridge(funcCtx, out, methodStr, captured, target, rawBridge)
 	}
-	cv := values.NewStreamingCustomValue(writeFn, func() types.JavaType { return typ }, lambdaReplace)
+	cv = values.NewStreamingCustomValue(writeFn, func() types.JavaType { return typ }, lambdaReplace)
 	cv.Flag = "lambda"
 	cv.NoOuterCapture = len(captured) == 0
 	if len(static) >= 3 {
+		cv.InstantiatedMtdDesc = t19MethodTypeDesc(static[2])
 		if upgradedType := inferLambdaTypeFromInstantiated(typ, static[2]); upgradedType != nil {
 			lambdaType := upgradedType
 			cv = cv.WithType(func() types.JavaType { return lambdaType })
@@ -259,6 +262,22 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 	cv.CapturesKnown = true
 	cv.Captures = captured
 	return cv, nil
+}
+
+func t19LambdaReturnCastStrings(funcCtx *class_context.ClassContext, lambda *values.CustomValue, fallback string) (target, rawBridge string) {
+	target = fallback
+	if lambda == nil || lambda.LambdaReturnTarget == nil {
+		return target, ""
+	}
+	target = lambda.LambdaReturnTarget.String(funcCtx)
+	if !lambda.LambdaReturnRawBridge {
+		return target, ""
+	}
+	raw, ok := types.RawClassFQN(lambda.LambdaReturnTarget)
+	if !ok {
+		return target, ""
+	}
+	return target, types.NewJavaClass(raw).String(funcCtx)
 }
 
 func t19MethodRef(req CallSiteRequest, d *Decompiler, static []values.JavaValue, impl *values.JavaClassMember, capturedPop []values.JavaValue, resultType types.JavaType) values.JavaValue {
@@ -386,15 +405,23 @@ func writeMethodReference(out *workbudget.Writer, owner, member string) error {
 // budget-aware writer. The erased method body stays as the existing input
 // string; we avoid building a second full-size string for each capture.
 func t19WriteLambdaBody(funcCtx *class_context.ClassContext, out *workbudget.Writer, methodBody string, captured []values.JavaValue, returnTypevar string) error {
+	return t19WriteLambdaBodyWithBridge(funcCtx, out, methodBody, captured, returnTypevar, "")
+}
+
+// t19WriteLambdaBodyWithBridge is the late target-typing form of
+// t19WriteLambdaBody. rawBridge is empty for a scalar/array type-variable cast;
+// for an invariant parameterized result it is the raw erasure inserted between
+// the expression and the full target (`(Future<V>) (Future) expr`).
+func t19WriteLambdaBodyWithBridge(funcCtx *class_context.ClassContext, out *workbudget.Writer, methodBody string, captured []values.JavaValue, returnTarget, rawBridge string) error {
 	body := methodBody
-	if returnTypevar != "" {
-		if projected, ok := lambdaReturnCastOutputLen(body, returnTypevar); ok {
+	if returnTarget != "" {
+		if projected, ok := lambdaReturnCastOutputLenWithBridge(body, returnTarget, rawBridge); ok {
 			if funcCtx != nil && funcCtx.Work != nil {
 				if err := funcCtx.CheckAlloc(projected); err != nil {
 					return err
 				}
 			}
-			body = injectLambdaReturnCast(body, returnTypevar)
+			body = injectLambdaReturnCastWithBridge(body, returnTarget, rawBridge)
 		}
 	}
 	for cursor := 0; cursor < len(body); {
@@ -441,31 +468,29 @@ func t19WriteLambdaBody(funcCtx *class_context.ClassContext, out *workbudget.Wri
 }
 
 func lambdaReturnCastOutputLen(body, typevar string) (int64, bool) {
-	idx := strings.LastIndex(body, "return ")
-	if idx < 0 {
+	return lambdaReturnCastOutputLenWithBridge(body, typevar, "")
+}
+
+func lambdaReturnCastOutputLenWithBridge(body, target, rawBridge string) (int64, bool) {
+	spans := lambdaReturnCastSpans(body, target)
+	if len(spans) == 0 {
 		return int64(len(body)), false
 	}
-	exprStart := idx + len("return ")
-	skipped := 0
-	for exprStart+skipped < len(body) && (body[exprStart+skipped] == ' ' || body[exprStart+skipped] == '\t') {
-		skipped++
+	projected := int64(len(body))
+	for _, span := range spans {
+		exprLen := len(strings.TrimSpace(body[span.start:span.end]))
+		replacement := int64(len(target) + exprLen + 5) // `(T) (expr)`; semicolon remains in body.
+		if rawBridge != "" {
+			replacement += int64(len(rawBridge) + 3) // `(Raw) `.
+		}
+		removed := int64(span.end - span.start)
+		delta := replacement - removed
+		if delta > 0 && projected > math.MaxInt64-delta {
+			return math.MaxInt64, true
+		}
+		projected += delta
 	}
-	rest := body[exprStart+skipped:]
-	if strings.HasPrefix(rest, ";") {
-		return int64(len(body)), false
-	}
-	end := strings.IndexByte(rest, ';')
-	if end < 0 {
-		return int64(len(body)), false
-	}
-	expr := strings.TrimSpace(rest[:end])
-	castBytes := int64(len(typevar)) + int64(len(expr)) + 6 // `(T) (expr);`
-	removed := skipped + end + 1
-	base := int64(len(body) - removed)
-	if base > math.MaxInt64-castBytes {
-		return math.MaxInt64, true
-	}
-	return base + castBytes, true
+	return projected, true
 }
 
 func t19UpgradeFI(rawType types.JavaType, instantiatedMethodType values.JavaValue) types.JavaType {

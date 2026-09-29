@@ -34,10 +34,18 @@ type CustomValue struct {
 	// this descriptor -- re-targets the SAM so the method ref binds. Set only on the bootstrap method-ref
 	// branch; consumed by ctorRawFISAMMethodRefCast (renderArgAt). Empty/unused for lambdas and non-FI uses.
 	InstantiatedMtdDesc string
-	StringFunc          func(funcCtx *class_context.ClassContext) string
-	WriteFunc           func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error
-	TypeFunc            func() types.JavaType
-	ReplaceFunc         func(oldId *utils.VariableId, newId *utils.VariableId)
+	// LambdaReturnTarget is a source-level SAM return target recovered after
+	// invokedynamic decoding from a later assignment/invocation use. The lambda
+	// writer consults it lazily because Java target typing is solved after the
+	// body was reconstructed. LambdaReturnRawBridge requests an intermediate
+	// cast to the target erasure for invariant generic mismatches such as
+	// CompletableFuture<Object> -> CompletableFuture<V>.
+	LambdaReturnTarget    types.JavaType
+	LambdaReturnRawBridge bool
+	StringFunc            func(funcCtx *class_context.ClassContext) string
+	WriteFunc             func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error
+	TypeFunc              func() types.JavaType
+	ReplaceFunc           func(oldId *utils.VariableId, newId *utils.VariableId)
 }
 
 // ReplaceVar implements JavaValue.

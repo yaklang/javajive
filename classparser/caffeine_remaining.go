@@ -57,9 +57,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 			"(BiFunction<Object, Executor, CompletableFuture>)",
 			"(BiFunction<? super K, Executor, CompletableFuture<V>>)")
 		body = strings.ReplaceAll(body,
-			"(Function<Object, CompletableFuture>)",
-			"(Function<? super K, ? extends CompletableFuture<V>>)")
-		body = strings.ReplaceAll(body,
 			"(BiFunction<Iterable, Executor, CompletableFuture>)",
 			"(BiFunction<Iterable<? extends K>, Executor, CompletableFuture<Map<K, V>>>)")
 		body = strings.ReplaceAll(body,
@@ -77,12 +74,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"Consumer<Node> var3 =",
 			"Consumer<Node<K, V>> var3 =")
-		body = strings.ReplaceAll(body,
-			"(Supplier<Iterator>)",
-			"(Supplier<Iterator<Node<K, V>>>)")
-		body = strings.ReplaceAll(body,
-			"Supplier<Iterator> var4 =",
-			"Supplier<Iterator<Node<K, V>>> var4 =")
 		// Raw BoundedPolicy + lambda: diamond inference fails, and
 		// Async::getIfReady is an overloaded method-ref that javac rejects.
 		body = strings.ReplaceAll(body,
@@ -97,9 +88,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"new BoundedLocalCache$BoundedPolicy<K, V>(var1,(Function<CompletableFuture<V>, V>)(Async::getIfReady),this.isWeighted)",
 			"new BoundedLocalCache$BoundedPolicy(var1,(l0) -> Async.getIfReady((CompletableFuture)(l0)),this.isWeighted)")
-		body = strings.ReplaceAll(body,
-			"new WriteThroughEntry((ConcurrentMap)",
-			"new WriteThroughEntry<K, V>((ConcurrentMap)")
 		body = strings.ReplaceAll(body,
 			"Function<Object, CompletableFuture> var3 = this::get;",
 			"Function<? super K, CompletableFuture<V>> var3 = this::get;")
@@ -119,14 +107,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.Replace(body,
 			"var6 = var5.next();",
 			"var6 = (K)(var5.next());",
-			1)
-		body = strings.Replace(body,
-			"return this.get(var1,(l0, l1) -> {\n\t\t\treturn CompletableFuture.supplyAsync(() -> {\n\t\t\t\treturn var2.apply(var1);\n\t\t\t},l1);\n\t\t});",
-			"return this.get(var1,(BiFunction<? super K, Executor, CompletableFuture<V>>) ((l0, l1) -> {\n\t\t\treturn CompletableFuture.supplyAsync(() -> {\n\t\t\t\treturn var2.apply(var1);\n\t\t\t},l1);\n\t\t}));",
-			1)
-		body = strings.Replace(body,
-			"this.getAll(var1,(l0, l1) -> {\n\t\t\treturn CompletableFuture.supplyAsync(() -> {\n\t\t\t\treturn ((Map)(var2.apply(l0)));\n\t\t\t},l1);\n\t\t}));",
-			"this.getAll(var1,(BiFunction<Iterable<? extends K>, Executor, CompletableFuture<Map<K, V>>>) ((l0, l1) -> {\n\t\t\treturn CompletableFuture.supplyAsync(() -> {\n\t\t\t\treturn ((Map)(var2.apply(l0)));\n\t\t\t},l1);\n\t\t})));",
 			1)
 		body = strings.Replace(body,
 			"this.cache().computeIfAbsent(var1,(l0) -> {\n\t\t\tvar5_f1[0] = ((CompletableFuture)(var2.apply(var1,this.cache().executor())));\n\t\t\treturn ((CompletableFuture)(Objects.requireNonNull(var5_f1[0])));\n\t\t},var3,false)",
@@ -165,12 +145,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 	if strings.Contains(body, "class BoundedLocalCache$ValueSpliterator") {
 		body = strings.ReplaceAll(body, "var1.accept(lv1_4);", "var1.accept((V)(lv1_4));")
 		body = strings.ReplaceAll(body, "var1.accept(lv2_6);", "var1.accept((V)(lv2_6));")
-	}
-	if strings.Contains(body, "class LocalAsyncCache$AsyncBulkCompleter") {
-		body = strings.Replace(body,
-			"Object lv1_4 = var1.get(l0);\n\t\t\tl1.obtrudeValue(lv1_4);",
-			"V lv1_4 = (V)(var1.get(l0));\n\t\t\tl1.obtrudeValue(lv1_4);",
-			1)
 	}
 	if strings.Contains(body, "class LocalAsyncLoadingCache$LoadingCacheView") {
 		body = strings.ReplaceAll(body, "long lv1_9 = var1[0];", "long lv1_9 = var2[0];")

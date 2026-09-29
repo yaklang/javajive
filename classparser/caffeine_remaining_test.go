@@ -41,10 +41,10 @@ func TestBaseMpscAllocateIsLoadBearing(t *testing.T) {
 		"Object[] var4 = allocate(")
 }
 
-func TestLocalAsyncCacheGetCastIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/LocalAsyncCache.class", "JDEC_CAFFEINE_REMAINING_OFF",
-		"BiFunction<? super K, Executor, CompletableFuture<V>>",
-		"return this.get(var1,(l0, l1) -> {")
+func TestT19LocalAsyncCacheCallTargetIsLoadBearing(t *testing.T) {
+	assertKillSwitchDecompile(t, "testdata/regression/LocalAsyncCache.class", "JDEC_POLY_CALL_TARGET_OFF",
+		"BiFunction<? super K, Executor, CompletableFuture<V>> var5 =",
+		"BiFunction<Object, Executor, CompletableFuture> var5 =")
 }
 
 func TestLocalLoadingCacheLoadAllIsLoadBearing(t *testing.T) {

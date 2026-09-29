@@ -87,7 +87,6 @@ func fixHardjarCodeShapes(body string) string {
 	body = rewriteClassLocalCmpZero(body)
 	body = wrapTypeVarReturnRawCast(body)
 	body = wrapRawListArgFromListExtendsOverload(body)
-	body = retypeFunctionObjectLambdaToTypeVar(body)
 	body = wrapCollectionStreamMethodRef(body)
 	body = wrapCollectionLocalStreamMethodRef(body)
 	body = wrapEntryGetKeyPutArg(body)
@@ -6464,42 +6463,6 @@ func listExtendsOverloadElem(body, name string) string {
 		return ""
 	}
 	return typ
-}
-
-func retypeFunctionObjectLambdaToTypeVar(body string) string {
-	needle := "(Function<Object, "
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		tv := enclosingTypeVar(body, i)
-		if !isTypeVarName(tv) {
-			from = i + 1
-			continue
-		}
-		rest := body[i+len(needle):]
-		ret, ok, after := readDottedType(rest)
-		if !ok || ret == "" {
-			from = i + 1
-			continue
-		}
-		after = strings.TrimLeft(after, " \t")
-		if !strings.HasPrefix(after, ">") {
-			from = i + 1
-			continue
-		}
-		old := "(Function<Object, " + ret + ">"
-		neu := "(Function<" + tv + ", " + ret + ">"
-		if !strings.HasPrefix(body[i:], old) {
-			from = i + 1
-			continue
-		}
-		body = body[:i] + neu + body[i+len(old):]
-		from = i + len(neu)
-	}
 }
 
 func wrapCollectionStreamMethodRef(body string) string {

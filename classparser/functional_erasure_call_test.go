@@ -124,6 +124,7 @@ public class SameClassBiFunctionCall<K, V> {
 // Supplier<Iterator<Entry<T,R>>> loses the nested Iterator arguments. Both
 // shapes appear in Caffeine's same-class helper calls.
 func TestSameClassFunctionAndSupplierErasureRoundTrip(t *testing.T) {
+	t.Setenv("JDEC_POLY_CALL_TARGET_OFF", "")
 	const main = "FunctionalErasureVariants"
 	const source = `import java.util.HashMap;
 import java.util.Iterator;
@@ -151,8 +152,12 @@ public class FunctionalErasureVariants<T> {
     System.out.print(cache.result(7));
   }
 }`
+	var killSwitchFixture []byte
 	for _, debug := range []string{"-g", "-g:none"} {
 		want, classBytes := functionalFixture(t, main, source, debug)
+		if debug == "-g" {
+			killSwitchFixture = classBytes
+		}
 		for _, mode := range []DecompileMode{Precision, Compatibility} {
 			result, err := DecompileWithOptions(classBytes, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
 			if err != nil {
@@ -161,8 +166,81 @@ public class FunctionalErasureVariants<T> {
 			if !strings.Contains(result.Source, "installMapper(") || !strings.Contains(result.Source, "installSupplier(") {
 				t.Fatalf("fixture lost generic helper calls in %s/%s:\n%s", mode, debug, result.Source)
 			}
+			for _, declaration := range []string{
+				"Function<? super T, ? extends T>",
+				"Supplier<Iterator<Map.Entry<T, String>>>",
+			} {
+				if !strings.Contains(result.Source, declaration) {
+					t.Fatalf("call target did not reach materialized local %q in %s/%s:\n%s", declaration, mode, debug, result.Source)
+				}
+			}
 			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
 				t.Fatalf("Function/Supplier erasure %s/%s: %v", mode, debug, err)
+			}
+		}
+	}
+
+	t.Setenv("JDEC_POLY_CALL_TARGET_OFF", "1")
+	legacy, err := DecompileWithOptions(killSwitchFixture, DecompileOptions{Mode: Precision, TargetSourceVersion: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, erased := range []string{"Function<Object, Object>", "Supplier<Iterator>"} {
+		if !strings.Contains(legacy.Source, erased) {
+			t.Fatalf("call-target kill switch did not restore %q:\n%s", erased, legacy.Source)
+		}
+	}
+}
+
+// JDK receiver signatures also target materialized poly expressions. Map and
+// Spliterator descriptors carry only raw BiConsumer/Consumer, but their
+// receiver arguments prove the complete source target without inspecting a
+// library-specific class or source spelling.
+func TestT19JDKConsumerCallTargetsRoundTrip(t *testing.T) {
+	t.Setenv("JDEC_POLY_CALL_TARGET_OFF", "")
+	const main = "JdkConsumerTargets"
+	const source = `import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+
+public class JdkConsumerTargets<K, V> {
+  private final Map<K, V> values = new LinkedHashMap<>();
+  void copy(Map<K, V> input) {
+    BiConsumer<? super K, ? super V> put = (key, value) -> values.put(key, value);
+    input.forEach(put);
+  }
+  String entries() {
+    StringBuilder out = new StringBuilder();
+    Consumer<? super Map.Entry<K, V>> append = entry -> out.append(entry.getKey()).append('=').append(entry.getValue());
+    values.entrySet().spliterator().forEachRemaining(append);
+    return out.toString();
+  }
+  public static void main(String[] args) {
+    JdkConsumerTargets<String, Integer> target = new JdkConsumerTargets<>();
+    Map<String, Integer> input = new LinkedHashMap<>();
+    input.put("answer", 42);
+    target.copy(input);
+    System.out.print(target.entries());
+  }
+}`
+	for _, debug := range []string{"-g", "-g:none"} {
+		want, classBytes := functionalFixture(t, main, source, debug)
+		for _, mode := range []DecompileMode{Precision, Compatibility} {
+			result, err := DecompileWithOptions(classBytes, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
+			if err != nil {
+				t.Fatalf("decompile %s/%s: %v", mode, debug, err)
+			}
+			for _, declaration := range []string{
+				"BiConsumer<? super K, ? super V>",
+				"Consumer<Map.Entry>",
+			} {
+				if !strings.Contains(result.Source, declaration) {
+					t.Fatalf("JDK target did not reach local %q in %s/%s:\n%s", declaration, mode, debug, result.Source)
+				}
+			}
+			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+				t.Fatalf("JDK consumer target %s/%s: %v\n%s", mode, debug, err, result.Source)
 			}
 		}
 	}
@@ -593,6 +671,88 @@ public class CapturedParameterizedLowerBound<T> {
 			}
 			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
 				t.Fatalf("captured parameterized lower bound %s/%s: %v", mode, debug, err)
+			}
+		}
+	}
+}
+
+// The body is decoded with raw Entry, whereas compute's Signature accepts
+// ? super Entry<K,V>. Preserving that legal input supertype is necessary for
+// writes through erased captures. Exercise both branches and null results so
+// return bridges and side effects are checked against the original bytecode.
+func TestT19ContravariantLambdaErasedReceiverRoundTrip(t *testing.T) {
+	const main = "ContravariantLambdaBody"
+	const source = `import java.util.*;
+import java.util.function.*;
+public class ContravariantLambdaBody<K,V> {
+  private final Map<Object, Map.Entry<K,V>> entries = new HashMap<>();
+  V change(Object key, V value, boolean remove) {
+    Object[] box = new Object[]{value};
+    BiFunction<Object, Map.Entry<K,V>, Map.Entry<K,V>> update = (k, entry) -> {
+      if (remove) { return null; }
+      if (entry == null) { return null; }
+      entry.setValue((V) box[0]);
+      return entry;
+    };
+    Map.Entry<K,V> result = entries.compute(key, update);
+    return result == null ? null : result.getValue();
+  }
+  public static void main(String[] args) {
+    ContravariantLambdaBody<String,Integer> c = new ContravariantLambdaBody<>();
+    c.entries.put("a", new AbstractMap.SimpleEntry<>("a",1));
+    System.out.print(c.change("a",7,false)+":"+c.change("b",9,false)+":"+c.change("a",8,true)+":"+c.entries.size());
+  }
+}`
+	for _, debug := range []string{"-g", "-g:none"} {
+		want, classBytes := functionalFixture(t, main, source, debug)
+		for _, mode := range []DecompileMode{Precision, Compatibility} {
+			result, err := DecompileWithOptions(classBytes, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+				t.Fatalf("erased receiver %s/%s: %v\n%s", mode, debug, err, result.Source)
+			}
+		}
+	}
+}
+
+// A class's <T> does not prove Function's input is T. The former textual
+// rewrite chose the first enclosing type variable and could change overloads
+// or make a correctly typed assignment uncompilable. Also retain the old
+// consumer-capture example as an executable oracle, rather than checking a
+// particular rewritten cast spelling.
+func TestT19PolyCastsKeepDeclaredInputsRoundTrip(t *testing.T) {
+	const main = "PolyCastBoundaries"
+	const source = `import java.util.*;
+import java.util.function.*;
+import java.util.concurrent.*;
+public class PolyCastBoundaries<T> {
+  String evaluate(boolean flag) {
+    Function<Object,CompletionStage> f = null;
+    if (flag) { f = x -> CompletableFuture.completedFuture(x); }
+    else { f = x -> CompletableFuture.completedFuture("other"); }
+    return String.valueOf(f.apply("text").toCompletableFuture().join());
+  }
+  static <U> long visit(Collection<U> values, Consumer<U> out) {
+    return values.stream().map(x -> { out.accept(x); return x; }).filter(x -> x != null).count();
+  }
+  public static void main(String[] args) {
+    PolyCastBoundaries<Integer> p = new PolyCastBoundaries<>();
+    StringBuilder result = new StringBuilder();
+    System.out.print(p.evaluate(true)+":"+p.evaluate(false)+":"+
+      visit(Arrays.asList(3,4), x -> result.append(x))+":"+result);
+  }
+}`
+	for _, debug := range []string{"-g", "-g:none"} {
+		want, classBytes := functionalFixture(t, main, source, debug)
+		for _, mode := range []DecompileMode{Precision, Compatibility} {
+			result, err := DecompileWithOptions(classBytes, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+				t.Fatalf("poly cast boundary %s/%s: %v\n%s", mode, debug, err, result.Source)
 			}
 		}
 	}

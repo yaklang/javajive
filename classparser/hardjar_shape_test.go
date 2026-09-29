@@ -3022,15 +3022,6 @@ func TestWrapRawListArgFromListExtendsOverload(t *testing.T) {
 	}
 }
 
-func TestRetypeFunctionObjectLambdaToTypeVar(t *testing.T) {
-	in := "class C {\n\tpublic static <T> void applyToAll(Collection<T> var0, Consumer<T> var1) {\n\t\tStream var2 = var0.stream().map((Function<Object, Closeable>)((l0) -> {\n\t\t\tvar1.accept(l0);\n\t\t\treturn null;\n\t\t}));\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := retypeFunctionObjectLambdaToTypeVar(in)
-	if !strings.Contains(out, "(Function<T, Closeable>)") {
-		t.Fatalf("missing Function<T, Closeable>:\n%s", out)
-	}
-}
-
 func TestWrapObjectTypeVarArgsUtilJarFS(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

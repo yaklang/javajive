@@ -216,16 +216,67 @@ func InstantiateJDKMethodReturn(rawClass, method string, argc int, typeArgs []Ja
 	if len(typeArgs) == 0 {
 		return nil
 	}
-	for _, ta := range typeArgs {
-		if isWildcardType(ta) {
+	// A producer only depends on the type argument in its return position.  Do
+	// not reject a sound result merely because an unrelated input argument is a
+	// wildcard (Function<? super K, ? extends V>.apply is the common shape).
+	// An upper-bounded result is safely usable as its bound; a lower-bounded or
+	// unbounded result is only known to be Object and therefore stays erased.
+	producerArg := func(index int) JavaType {
+		if index < 0 || index >= len(typeArgs) || typeArgs[index] == nil {
 			return nil
 		}
+		if wildcard, ok := typeArgs[index].(*JavaWildcardType); ok {
+			if wildcard == nil || wildcard.Variant != "extends" || wildcard.Bound == nil {
+				return nil
+			}
+			return wildcard.Bound
+		}
+		if raw, ok := typeArgs[index].RawType().(*JavaWildcardType); ok {
+			if raw == nil || raw.Variant != "extends" || raw.Bound == nil {
+				return nil
+			}
+			return raw.Bound
+		}
+		return typeArgs[index]
 	}
 	switch {
 	case method == "iterator" && argc == 0 && len(typeArgs) == 1 && jdkIterableFamily[rawClass]:
+		// Iterable<? extends E>.iterator() is Iterator<? extends E>, not
+		// Iterator<E>. Preserve the wildcard when T is nested in a generic
+		// result; capture conversion only permits collapsing an upper bound when
+		// the selected argument is the result itself.
 		return NewParameterizedType("java.util.Iterator", []JavaType{typeArgs[0]})
+	case method == "spliterator" && argc == 0 && len(typeArgs) == 1 && jdkIterableFamily[rawClass]:
+		return NewParameterizedType("java.util.Spliterator", []JavaType{typeArgs[0]})
 	case method == "next" && argc == 0 && len(typeArgs) == 1 && jdkIteratorFamily[rawClass]:
-		return typeArgs[0]
+		return producerArg(0)
+	case method == "get" && argc == 0 && rawClass == "java.util.function.Supplier" && len(typeArgs) == 1:
+		return producerArg(0)
+	case method == "call" && argc == 0 && rawClass == "java.util.concurrent.Callable" && len(typeArgs) == 1:
+		return producerArg(0)
+	case method == "apply" && argc == 1 && rawClass == "java.util.function.Function" && len(typeArgs) == 2:
+		return producerArg(1)
+	case method == "apply" && argc == 2 && rawClass == "java.util.function.BiFunction" && len(typeArgs) == 3:
+		return producerArg(2)
+	case method == "apply" && argc == 1 && rawClass == "java.util.function.UnaryOperator" && len(typeArgs) == 1:
+		return producerArg(0)
+	case method == "apply" && argc == 2 && rawClass == "java.util.function.BinaryOperator" && len(typeArgs) == 1:
+		return producerArg(0)
+	case method == "get" && argc == 1 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return producerArg(1)
+	case method == "getOrDefault" && argc == 2 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return producerArg(1)
+	case (method == "put" || method == "putIfAbsent" || method == "replace") && argc == 2 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return producerArg(1)
+	case method == "remove" && argc == 1 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return producerArg(1)
+	case method == "entrySet" && argc == 0 && len(typeArgs) == 2 && jdkMapFamily[rawClass] && !isWildcardType(typeArgs[0]) && !isWildcardType(typeArgs[1]):
+		entry := NewParameterizedType("java.util.Map$Entry", []JavaType{typeArgs[0], typeArgs[1]})
+		return NewParameterizedType("java.util.Set", []JavaType{entry})
+	case method == "keySet" && argc == 0 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return NewParameterizedType("java.util.Set", []JavaType{typeArgs[0]})
+	case method == "values" && argc == 0 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return NewParameterizedType("java.util.Collection", []JavaType{typeArgs[1]})
 	}
 	return nil
 }
@@ -465,9 +516,32 @@ func InstantiateJDKMethodParamInfo(rawClass, method string, argc, paramIndex int
 // recovering their formal signatures exposes when a materialized lambda kept
 // only the erased types from LambdaMetafactory's instantiated method descriptor.
 func InstantiateJDKMethodParamType(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) JavaType {
-	if jdecenv.Get("JDEC_GENERIC_PARAM_INFER_OFF") != "" || !jdkMapFamily[rawClass] || len(typeArgs) != 2 ||
+	if jdecenv.Get("JDEC_GENERIC_PARAM_INFER_OFF") != "" {
+		return nil
+	}
+	// Consumer-taking JDK declarations are target-typed just like Map's
+	// remapping functions. Their descriptors expose only raw Consumer, while
+	// the receiver fixes the complete source formal. Keep this table bounded to
+	// stable JDK declarations whose sole type parameter is threaded unchanged.
+	if len(typeArgs) == 1 && !isWildcardType(typeArgs[0]) && argc == 1 && paramIndex == 0 {
+		consumer := method == "forEach" && jdkIterableFamily[rawClass] ||
+			method == "forEachRemaining" && jdkIteratorFamily[rawClass] ||
+			rawClass == "java.util.Spliterator" && (method == "tryAdvance" || method == "forEachRemaining")
+		if consumer {
+			return NewParameterizedType("java.util.function.Consumer", []JavaType{
+				&JavaWildcardType{Variant: "super", Bound: typeArgs[0]},
+			})
+		}
+	}
+	if !jdkMapFamily[rawClass] || len(typeArgs) != 2 ||
 		isWildcardType(typeArgs[0]) || isWildcardType(typeArgs[1]) {
 		return nil
+	}
+	if method == "forEach" && argc == 1 && paramIndex == 0 {
+		return NewParameterizedType("java.util.function.BiConsumer", []JavaType{
+			&JavaWildcardType{Variant: "super", Bound: typeArgs[0]},
+			&JavaWildcardType{Variant: "super", Bound: typeArgs[1]},
+		})
 	}
 	if method == "computeIfAbsent" && argc == 2 && paramIndex == 1 {
 		return NewParameterizedType("java.util.function.Function", []JavaType{
@@ -1376,15 +1450,23 @@ func MethodFormalTypeParamNames(sig string) []string {
 // the hard-coded JDK table). A type variable is modeled as a bare-named *JavaClass (parseSigType emits
 // `TK;` as JavaClass{Name:"K"}); a name absent from sigma is left untouched (so concrete class names,
 // which never appear as sigma keys, pass through unchanged). Parameterized type args and array element
-// types are rewritten recursively. Wildcards are returned as-is (the resolver skips wildcard receivers
-// upstream). Pure and allocation-light; nil-safe.
+// types and wildcard bounds are rewritten recursively. Receiver-capture gates
+// remain upstream; a wildcard inside a formal such as `Function<? super K,V>`
+// must still bind K when the declaring class is viewed as Super<String,V>.
+// Pure and allocation-light; nil-safe.
 func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 	if t == nil || len(sigma) == 0 {
 		return t
 	}
-	// A bare wildcard does not implement RawType safely (see isWildcardType); leave it untouched.
-	if _, ok := t.(*JavaWildcardType); ok {
-		return t
+	if wildcard, ok := t.(*JavaWildcardType); ok {
+		if wildcard.Bound == nil {
+			return t
+		}
+		bound := SubstituteTypeVars(wildcard.Bound, sigma)
+		if bound == wildcard.Bound {
+			return t
+		}
+		return &JavaWildcardType{Variant: wildcard.Variant, Bound: bound}
 	}
 	raw := t.RawType()
 	switch rt := raw.(type) {
@@ -1417,6 +1499,15 @@ func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 			return t
 		}
 		return newJavaTypeWrap(&JavaArrayType{JavaType: sub, Dimension: rt.Dimension})
+	case *JavaWildcardType:
+		if rt.Bound == nil {
+			return t
+		}
+		bound := SubstituteTypeVars(rt.Bound, sigma)
+		if bound == rt.Bound {
+			return t
+		}
+		return &JavaWildcardType{Variant: rt.Variant, Bound: bound}
 	default:
 		return t
 	}
@@ -1673,15 +1764,31 @@ func ResolveInstantiatedSignature(funcCtx *class_context.ClassContext, provider 
 		return nil, nil
 	}
 	visited := map[string]bool{}
-	return resolveSignatureWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, argc, visited)
+	params, ret, _ := resolveSignatureWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, "", argc, visited)
+	return params, ret
+}
+
+// ResolveInstantiatedSignatureExact is the descriptor-keyed form of
+// ResolveInstantiatedSignature. The JVM descriptor identifies an overload
+// uniquely, so this path can retain a generic Signature even when the
+// (name,arity) index is deliberately absent because multiple overloads share
+// that arity. methodFormals reports the callee's own type parameters; a caller
+// using the result as a source declaration target must reject a type that still
+// mentions one of those out-of-scope names.
+func ResolveInstantiatedSignatureExact(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method, descriptor string, argc int) (params []JavaType, ret JavaType, methodFormals []string) {
+	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" || descriptor == "" {
+		return nil, nil, nil
+	}
+	visited := map[string]bool{}
+	return resolveSignatureWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, descriptor, argc, visited)
 }
 
 // resolveSignatureWalk performs the depth-first hierarchy walk for ResolveInstantiatedSignature, binding
 // both the callee's PARAMETER types and RETURN type. sigma maps the current node's formal
 // type-parameter names to their actual arguments (in call-site-denotable terms), recomposed per edge.
-func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method string, argc int, visited map[string]bool) ([]JavaType, JavaType) {
+func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method, descriptor string, argc int, visited map[string]bool) ([]JavaType, JavaType, []string) {
 	if internal == "" || visited[internal] {
-		return nil, nil
+		return nil, nil, nil
 	}
 	visited[internal] = true
 	classSig, methodSigs, ok := provider(internal)
@@ -1701,9 +1808,9 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 			}
 		}
 		if found {
-			return params, nil
+			return params, nil, nil
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	formals := ClassFormalTypeParamNames(classSig)
 	sigma := map[string]JavaType{}
@@ -1713,15 +1820,61 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 		}
 	}
 	if methodSigs != nil {
-		if msig := methodSigs[class_context.MethodSigKey(method, argc)]; msig != "" {
+		// Prefer the exact declaration. An empty descriptor-keyed entry means
+		// this class declares the selected overload without a Signature; that
+		// declaration is authoritative and the walk must not borrow an
+		// ancestor's unrelated generic method.
+		if descriptor != "" {
+			if msig, declared := methodSigs[class_context.MethodDescKey(method, descriptor)]; declared {
+				if msig == "" || len(formals) > 0 && len(args) != len(formals) {
+					return nil, nil, nil
+				}
+				if _, params, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
+					// Method formals shadow same-spelled class formals. Never
+					// bind a callee's independent <T> to the receiver's class T.
+					methodSigma := make(map[string]JavaType, len(sigma))
+					for name, typ := range sigma {
+						methodSigma[name] = typ
+					}
+					for _, name := range MethodFormalTypeParamNames(msig) {
+						delete(methodSigma, name)
+					}
+					subParams := make([]JavaType, len(params))
+					for i, p := range params {
+						subParams[i] = SubstituteTypeVars(p, methodSigma)
+					}
+					return subParams, SubstituteTypeVars(ret, methodSigma), MethodFormalTypeParamNames(msig)
+				}
+				return nil, nil, nil
+			}
+		}
+		msig := methodSigs[class_context.MethodSigKey(method, argc)]
+		competingHere := false
+		if msig != "" && descriptor != "" {
+			keys := make(map[string]bool, len(methodSigs))
+			for key := range methodSigs {
+				keys[key] = true
+			}
+			competingHere = class_context.NameHasSameArityOverload(method, descriptor, keys)
+		}
+		if msig != "" && !competingHere {
 			if _, params, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
+				// Method formals shadow same-spelled class formals. Never
+				// bind a callee's independent <T> to the receiver's class T.
+				methodSigma := make(map[string]JavaType, len(sigma))
+				for name, typ := range sigma {
+					methodSigma[name] = typ
+				}
+				for _, name := range MethodFormalTypeParamNames(msig) {
+					delete(methodSigma, name)
+				}
 				subParams := make([]JavaType, len(params))
 				for i, p := range params {
-					subParams[i] = SubstituteTypeVars(p, sigma)
+					subParams[i] = SubstituteTypeVars(p, methodSigma)
 				}
-				return subParams, SubstituteTypeVars(ret, sigma)
+				return subParams, SubstituteTypeVars(ret, methodSigma), MethodFormalTypeParamNames(msig)
 			}
-			return nil, nil
+			return nil, nil, nil
 		}
 	}
 	sup, ifaces := ParseClassSignatureSupers(classSig)
@@ -1739,11 +1892,22 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 		for i, ta := range pt.TypeArgs {
 			childArgs[i] = SubstituteTypeVars(ta, sigma)
 		}
-		if params, ret := resolveSignatureWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, visited); len(params) > 0 || ret != nil {
-			return params, ret
+		if params, ret, methodFormals := resolveSignatureWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, descriptor, argc, visited); len(params) > 0 || ret != nil {
+			return params, ret, methodFormals
 		}
 	}
-	return nil, nil
+	// A non-generic intermediate class can still inherit the selected method
+	// through a raw edge recorded in the mandatory superclass/interface table.
+	if classSig == "" && funcCtx.SiblingSuperTypes != nil {
+		if rawSupers, found := funcCtx.SiblingSuperTypes(internal); found {
+			for _, raw := range rawSupers {
+				if params, ret, methodFormals := resolveSignatureWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, visited); len(params) > 0 || ret != nil {
+					return params, ret, methodFormals
+				}
+			}
+		}
+	}
+	return nil, nil, nil
 }
 
 // FieldSigProvider yields a jar-internal class's FIELD generic Signature by binary internal name and

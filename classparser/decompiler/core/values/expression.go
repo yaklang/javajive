@@ -810,7 +810,7 @@ func (f *FunctionCallExpression) Type() types.JavaType {
 	// signature to recover the instantiated return (Iterator<T>, then T). Kill-switch:
 	// JDEC_GENERIC_INFER_OFF. Conservative: only the small provably-correct JDK table fires.
 	if inst := f.instantiatedReturnType(); inst != nil {
-		return inst
+		return inst.Copy()
 	}
 	if typ := f.FuncType.ReturnType; typ != nil {
 		if _, primitive := typ.RawType().(*types.JavaPrimer); !primitive {
@@ -919,10 +919,19 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 			// General chained receiver: `this.asyncCache.cache().compute(...)`.
 			// cache()'s descriptor exposes only raw LocalCache, but its declaring
 			// class is reached from the parameterized `this.asyncCache` field. Compose
-			// that receiver substitution through cache()'s generic return. A missing
-			// or ambiguous sibling signature fails closed in the resolver.
-			if funcCtx.SiblingClassSig != nil {
-				if recvRaw, recvArgs := inner.receiverParamTypeArgs(funcCtx); recvRaw != "" && len(recvArgs) > 0 {
+			// that receiver substitution through cache()'s generic return. The same
+			// composition is needed for stable JDK chains such as
+			// Map<K,V>.entrySet().spliterator(); otherwise both links degrade to raw
+			// Set/Spliterator before the Consumer target is inspected.
+			if recvRaw, recvArgs := inner.receiverParamTypeArgs(funcCtx); recvRaw != "" && len(recvArgs) > 0 {
+				if jdecenv.Get("JDEC_GENERIC_INFER_OFF") == "" {
+					if ret := types.InstantiateJDKMethodReturn(recvRaw, inner.FunctionName, len(inner.Arguments), recvArgs); ret != nil {
+						if pt, ok := types.AsParameterizedType(ret); ok {
+							return pt.RawClassName, pt.TypeArgs
+						}
+					}
+				}
+				if funcCtx.SiblingClassSig != nil {
 					_, ret := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, inner.FunctionName, len(inner.Arguments))
 					if pt, ok := types.AsParameterizedType(ret); ok {
 						return pt.RawClassName, pt.TypeArgs
@@ -3386,38 +3395,11 @@ func (f *FunctionCallExpression) nestedGenericErasureArgCast(i int, arg JavaValu
 	} else if inst := f.thisCtorTypeVarArrayParamType(i, funcCtx); inst != nil {
 		formalType = inst
 	}
-	// The scalar-argument resolvers above intentionally reject parameterized
-	// formals. For a same-class call, use only its exact descriptor-keyed Signature:
-	// an arity-only signature can belong to another overload, and a raw cast can
-	// influence overload selection. The receiver must really be this.
-	if inst := f.sameClassFunctionalFormal(i, funcCtx); inst != nil {
+	// Parameterized functional formals require the full generic Signature rather
+	// than the scalar cast resolvers above. The same resolver also feeds poly
+	// expression declaration targeting, so rendering and data-flow cannot drift.
+	if inst := f.resolvedFunctionalFormalType(i, funcCtx); inst != nil {
 		formalType = inst
-	}
-	// A parameterized receiver declared in another class of the same input JAR can carry the full
-	// functional formal even though the invocation descriptor exposes only its raw erasure. Resolve
-	// the unique (name, arity) declaration through the receiver hierarchy and substitute the
-	// receiver's actual type arguments. The checks below still require matching raw classes plus
-	// demonstrably lost nested generic information before emitting a bridge. Ambiguous same-arity
-	// families are absent from SiblingClassSig's arity index, so they fail closed here. Canonical:
-	// LocalCache<K,CompletableFuture<V>>.compute(..., BiFunction<? super K, ? super
-	// CompletableFuture<V>, ? extends CompletableFuture<V>>, ...) fed a materialized
-	// BiFunction<Object,CompletableFuture,CompletableFuture>. Kill-switch:
-	// JDEC_FUNCTIONAL_ERASURE_RESOLVE_OFF.
-	if jdecFlag(funcCtx, "JDEC_FUNCTIONAL_ERASURE_RESOLVE_OFF") == "" && funcCtx != nil && funcCtx.SiblingClassSig != nil {
-		if raw, args := f.receiverParamTypeArgs(funcCtx); raw != "" && len(args) > 0 {
-			if params, _ := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, raw, args, f.FunctionName, len(f.Arguments)); i < len(params) && params[i] != nil {
-				formalType = params[i]
-			}
-		}
-	}
-	// Map.computeIfAbsent's Function<? super K, ? extends V> parameter is a
-	// nested generic signature, not a direct receiver type variable. Recover it
-	// only for this stable JDK declaration; the ordinary descriptor still stays
-	// the authority for the emitted raw cast.
-	if raw, args := f.receiverParamTypeArgs(funcCtx); raw != "" && len(args) > 0 {
-		if inst := types.InstantiateJDKMethodParamType(raw, f.FunctionName, len(f.Arguments), i, args); inst != nil {
-			formalType = inst
-		}
 	}
 	formal, ok := types.AsParameterizedType(formalType)
 	if !ok || formal == nil || !sameErasureClassName(actual.RawClassName, formal.RawClassName) {
@@ -3441,8 +3423,7 @@ func (f *FunctionCallExpression) nestedGenericErasureArgCast(i int, arg JavaValu
 }
 
 func (f *FunctionCallExpression) sameClassFunctionalFormal(i int, funcCtx *class_context.ClassContext) types.JavaType {
-	if funcCtx == nil || f.IsStatic || !f.isCurrentClass(funcCtx) ||
-		funcCtx.HasOverloadedSameArity(f.FunctionName, f.Descriptor) {
+	if funcCtx == nil || f.IsStatic || !f.isCurrentClass(funcCtx) {
 		return nil
 	}
 	ref, ok := UnpackSoltValue(f.Object).(*JavaRef)
@@ -3464,6 +3445,139 @@ func (f *FunctionCallExpression) sameClassFunctionalFormal(i int, funcCtx *class
 		return nil
 	}
 	return params[i]
+}
+
+// resolvedFunctionalFormalType recovers the complete generic formal at an
+// invocation argument. The JVM descriptor keeps only the SAM erasure, but Java
+// source target-types lambdas and method references from the selected method's
+// Signature. Resolution is exact-descriptor first, then hierarchy substitution,
+// then the bounded JDK declaration table. Every path fails closed when the
+// selected signature is missing or still contains a callee method type variable.
+func (f *FunctionCallExpression) resolvedFunctionalFormalType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if f == nil || funcCtx == nil || f.FuncType == nil || f.Descriptor == "" || i < 0 || i >= len(f.FuncType.ParamTypes) {
+		return nil
+	}
+	if inst := f.sameClassFunctionalFormal(i, funcCtx); inst != nil {
+		return inst
+	}
+
+	var recvRaw string
+	var recvArgs []types.JavaType
+	if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref != nil && ref.IsThis && funcCtx.ClassName != "" {
+		recvRaw = funcCtx.ClassName
+		formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
+		recvArgs = make([]types.JavaType, len(formals))
+		for i, name := range formals {
+			recvArgs[i] = types.NewJavaClass(name)
+		}
+	} else {
+		recvRaw, recvArgs = f.receiverParamTypeArgs(funcCtx)
+	}
+
+	if jdecFlag(funcCtx, "JDEC_FUNCTIONAL_ERASURE_RESOLVE_OFF") == "" && recvRaw != "" && funcCtx.SiblingClassSig != nil {
+		params, _, methodFormals := types.ResolveInstantiatedSignatureExact(
+			funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs,
+			f.FunctionName, f.Descriptor, len(f.Arguments),
+		)
+		if i < len(params) && params[i] != nil && !javaTypeMentionsNames(params[i], methodFormals) {
+			return params[i]
+		}
+	}
+	if recvRaw != "" {
+		if inst := types.InstantiateJDKMethodParamType(recvRaw, f.FunctionName, len(f.Arguments), i, recvArgs); inst != nil {
+			return inst
+		}
+	}
+	return nil
+}
+
+// FunctionalTargetParamType returns the source-level target type of a
+// functional argument when the generic Signature proves it and its erasure is
+// exactly the descriptor-selected parameter. It is consumed by reference-web
+// solving before rendering so a materialized lambda local receives the same
+// type javac used. No type is returned for non-denotable/foreign variables or a
+// mismatched erasure. Kill-switch: JDEC_POLY_CALL_TARGET_OFF=1.
+func (f *FunctionCallExpression) FunctionalTargetParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if jdecenv.Get("JDEC_POLY_CALL_TARGET_OFF") != "" || f == nil || f.FuncType == nil ||
+		i < 0 || i >= len(f.FuncType.ParamTypes) {
+		return nil
+	}
+	descriptorType := f.FuncType.ParamTypes[i]
+	target := f.resolvedFunctionalFormalType(i, funcCtx)
+	parameterized, ok := types.AsParameterizedType(target)
+	if !ok || parameterized == nil || !sourceDenotableJavaType(target, funcCtx) {
+		return nil
+	}
+	descriptorRaw, descriptorOK := types.RawClassFQN(descriptorType)
+	if !descriptorOK || !sameErasureClassName(descriptorRaw, parameterized.RawClassName) {
+		return nil
+	}
+	return target.Copy()
+}
+
+func javaTypeMentionsNames(typ types.JavaType, names []string) bool {
+	if typ == nil || len(names) == 0 {
+		return false
+	}
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	var visit func(types.JavaType) bool
+	visit = func(current types.JavaType) bool {
+		if current == nil {
+			return false
+		}
+		if wildcard, ok := current.(*types.JavaWildcardType); ok {
+			return visit(wildcard.Bound)
+		}
+		switch raw := current.RawType().(type) {
+		case *types.JavaClass:
+			return raw != nil && set[raw.Name]
+		case *types.JavaParameterizedType:
+			for _, arg := range raw.TypeArgs {
+				if visit(arg) {
+					return true
+				}
+			}
+		case *types.JavaArrayType:
+			return raw != nil && visit(raw.JavaType)
+		case *types.JavaWildcardType:
+			return raw != nil && visit(raw.Bound)
+		}
+		return false
+	}
+	return visit(typ)
+}
+
+func sourceDenotableJavaType(typ types.JavaType, funcCtx *class_context.ClassContext) bool {
+	if typ == nil || funcCtx == nil {
+		return false
+	}
+	if wildcard, ok := typ.(*types.JavaWildcardType); ok {
+		return wildcard.Bound == nil || sourceDenotableJavaType(wildcard.Bound, funcCtx)
+	}
+	switch raw := typ.RawType().(type) {
+	case *types.JavaClass:
+		return raw != nil && (strings.Contains(raw.Name, ".") || funcCtx.IsTypeParam(raw.Name))
+	case *types.JavaParameterizedType:
+		if raw == nil || raw.RawClassName == "" || !strings.Contains(raw.RawClassName, ".") {
+			return false
+		}
+		for _, arg := range raw.TypeArgs {
+			if !sourceDenotableJavaType(arg, funcCtx) {
+				return false
+			}
+		}
+		return true
+	case *types.JavaArrayType:
+		return raw != nil && sourceDenotableJavaType(raw.JavaType, funcCtx)
+	case *types.JavaWildcardType:
+		return raw != nil && (raw.Bound == nil || sourceDenotableJavaType(raw.Bound, funcCtx))
+	case *types.JavaPrimer:
+		return true
+	}
+	return false
 }
 
 func functionalTypeVariablesErased(actual, formal *types.JavaParameterizedType, funcCtx *class_context.ClassContext) bool {
