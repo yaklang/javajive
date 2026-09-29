@@ -37,6 +37,10 @@ func roundTripGenericFlow(t *testing.T, main, source string, modes ...DecompileM
 			b, e := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)+".class"))
 			return b, e == nil
 		}
+		// Modes often produce byte-for-byte identical source. Reuse only that
+		// compilation within this exact fixture/classpath/debug variant; still
+		// decompile and execute each mode independently against the original.
+		compiled := map[string]string{}
 		for _, mode := range modes {
 			var result DecompileResult
 			var err error
@@ -48,14 +52,18 @@ func roundTripGenericFlow(t *testing.T, main, source string, modes ...DecompileM
 			if err != nil {
 				t.Fatal(err)
 			}
-			rebuilt := t.TempDir()
-			src := filepath.Join(rebuilt, simple+".java")
-			if err := os.WriteFile(src, []byte(result.Source), 0644); err != nil {
-				t.Fatal(err)
-			}
-			cmd := exec.Command(javac, "-proc:none", "--release", "8", "-cp", dir, "-d", rebuilt, src)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("rebuild %s/%s: %v\n%s\n%s", mode, debug, err, out, result.Source)
+			rebuilt, cached := compiled[result.Source]
+			if !cached {
+				rebuilt = t.TempDir()
+				src := filepath.Join(rebuilt, simple+".java")
+				if err := os.WriteFile(src, []byte(result.Source), 0644); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command(javac, "-proc:none", "--release", "8", "-cp", dir, "-d", rebuilt, src)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("rebuild %s/%s: %v\n%s\n%s", mode, debug, err, out, result.Source)
+				}
+				compiled[result.Source] = rebuilt
 			}
 			if got := t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+dir, main); got != want {
 				t.Fatalf("%s/%s: got %q want %q\n%s", mode, debug, got, want, result.Source)
