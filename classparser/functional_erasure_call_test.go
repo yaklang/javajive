@@ -168,6 +168,96 @@ public class FunctionalErasureVariants<T> {
 	}
 }
 
+// A call into another class in the same JAR cannot use the caller's local
+// MethodSignatures table. The sibling resolver must walk the parameterized
+// receiver declaration, substitute its K/V arguments, and recover the full
+// functional formal before deciding that a raw-erasure bridge is necessary.
+func TestSiblingClassFunctionalErasureRoundTrip(t *testing.T) {
+	const main = "SiblingFunctionalErasureCall"
+	const source = `import java.util.concurrent.CompletableFuture;
+import java.util.function.BiFunction;
+
+final class SiblingLocalCache<K, V> {
+  V compute(K key, BiFunction<? super K, ? super V, ? extends V> remap,
+      boolean recordStats, boolean recordLoad, boolean notifyWriter) {
+    return remap.apply(key, null);
+  }
+}
+
+public class SiblingFunctionalErasureCall<K, V> {
+  private final SiblingLocalCache<K, CompletableFuture<V>> delegate = new SiblingLocalCache<>();
+
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  CompletableFuture<V> update(K key, V next) {
+    BiFunction<Object, CompletableFuture, CompletableFuture> remap =
+        (ignored, oldValue) -> oldValue == null ? CompletableFuture.completedFuture(next) : oldValue;
+    return (CompletableFuture<V>) delegate.compute(key, (BiFunction) remap, false, false, false);
+  }
+
+  public static void main(String[] args) {
+    System.out.print(new SiblingFunctionalErasureCall<String, Integer>().update("answer", 42).join());
+  }
+}`
+	javac, java := t04Tools(t)
+	for _, debug := range []string{"-g", "-g:none"} {
+		originalDir := t.TempDir()
+		sourcePath := filepath.Join(originalDir, main+".java")
+		if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		compile := exec.Command(javac, "-proc:none", "-encoding", "UTF-8", "--release", "8", debug, "-d", originalDir, sourcePath)
+		if out, err := compile.CombinedOutput(); err != nil {
+			t.Fatalf("compile %s %s: %v\n%s", main, debug, err, out)
+		}
+		want := t04RunJava(t, java, originalDir, main)
+		classBytes, err := os.ReadFile(filepath.Join(originalDir, main+".class"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver := func(internalName string) ([]byte, bool) {
+			data, readErr := os.ReadFile(filepath.Join(originalDir, filepath.FromSlash(internalName)+".class"))
+			return data, readErr == nil
+		}
+		for _, mode := range []DecompileMode{Precision, Compatibility} {
+			result, err := DecompileWithOptions(classBytes, DecompileOptions{
+				Mode: mode, TargetSourceVersion: 8, Resolve: resolver,
+			})
+			if err != nil {
+				t.Fatalf("decompile %s/%s: %v", mode, debug, err)
+			}
+			if !strings.Contains(result.Source, ".compute(") || !strings.Contains(result.Source, "(BiFunction)(") {
+				t.Fatalf("missing sibling-signature raw bridge in %s/%s:\n%s", mode, debug, result.Source)
+			}
+
+			rebuiltDir := t.TempDir()
+			rebuiltSource := filepath.Join(rebuiltDir, main+".java")
+			if err := os.WriteFile(rebuiltSource, []byte(result.Source), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			rebuild := exec.Command(javac, "-proc:none", "-encoding", "UTF-8", "--release", "8",
+				"-cp", originalDir, "-d", rebuiltDir, rebuiltSource)
+			if out, err := rebuild.CombinedOutput(); err != nil {
+				t.Fatalf("rebuild %s/%s: %v\n%s\nsource:\n%s", mode, debug, err, out, result.Source)
+			}
+			classpath := rebuiltDir + string(os.PathListSeparator) + originalDir
+			if got := t04RunJava(t, java, classpath, main); got != want {
+				t.Fatalf("runtime mismatch %s/%s: got %q want %q", mode, debug, got, want)
+			}
+
+			off, err := DecompileWithOptions(classBytes, DecompileOptions{
+				Mode: mode, TargetSourceVersion: 8, Resolve: resolver,
+				EnvSnapshot: map[string]string{"JDEC_FUNCTIONAL_ERASURE_RESOLVE_OFF": "1"},
+			})
+			if err != nil {
+				t.Fatalf("decompile kill switch %s/%s: %v", mode, debug, err)
+			}
+			if strings.Contains(off.Source, "(BiFunction)(") {
+				t.Fatalf("kill switch retained sibling-signature bridge in %s/%s:\n%s", mode, debug, off.Source)
+			}
+		}
+	}
+}
+
 // A lower-bounded wildcard accepts values of its bound, but that bound is lost
 // from the invoke descriptor. Source casts to T erase to Object, so the call
 // renderer has to recover T from Consumer/Function/BiFunction's receiver type.

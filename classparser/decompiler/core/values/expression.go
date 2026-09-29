@@ -3378,6 +3378,23 @@ func (f *FunctionCallExpression) nestedGenericErasureArgCast(i int, arg JavaValu
 	if inst := f.sameClassFunctionalFormal(i, funcCtx); inst != nil {
 		formalType = inst
 	}
+	// A parameterized receiver declared in another class of the same input JAR can carry the full
+	// functional formal even though the invocation descriptor exposes only its raw erasure. Resolve
+	// the unique (name, arity) declaration through the receiver hierarchy and substitute the
+	// receiver's actual type arguments. The checks below still require matching raw classes plus
+	// demonstrably lost nested generic information before emitting a bridge. Ambiguous same-arity
+	// families are absent from SiblingClassSig's arity index, so they fail closed here. Canonical:
+	// LocalCache<K,CompletableFuture<V>>.compute(..., BiFunction<? super K, ? super
+	// CompletableFuture<V>, ? extends CompletableFuture<V>>, ...) fed a materialized
+	// BiFunction<Object,CompletableFuture,CompletableFuture>. Kill-switch:
+	// JDEC_FUNCTIONAL_ERASURE_RESOLVE_OFF.
+	if jdecFlag(funcCtx, "JDEC_FUNCTIONAL_ERASURE_RESOLVE_OFF") == "" && funcCtx != nil && funcCtx.SiblingClassSig != nil {
+		if raw, args := f.receiverParamTypeArgs(funcCtx); raw != "" && len(args) > 0 {
+			if params, _ := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, raw, args, f.FunctionName, len(f.Arguments)); i < len(params) && params[i] != nil {
+				formalType = params[i]
+			}
+		}
+	}
 	// Map.computeIfAbsent's Function<? super K, ? extends V> parameter is a
 	// nested generic signature, not a direct receiver type variable. Recover it
 	// only for this stable JDK declaration; the ordinary descriptor still stays

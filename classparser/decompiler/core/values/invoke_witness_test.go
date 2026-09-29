@@ -588,6 +588,60 @@ func TestInvokeWitnessUnknownVirtualNullFamilyIsNotComplete(t *testing.T) {
 	}
 }
 
+func TestJarGenericFunctionalFormalRecoversRawBridge(t *testing.T) {
+	ft, err := types.ParseMethodDescriptor("(Ljava/lang/Object;Ljava/util/function/BiFunction;ZZZ)Ljava/lang/Object;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := NewCustomValue(func(*class_context.ClassContext) string { return "cache" }, func() types.JavaType {
+		return types.NewParameterizedType("example.LocalCache", []types.JavaType{
+			types.NewJavaClass("K"),
+			types.NewParameterizedType("java.util.concurrent.CompletableFuture", []types.JavaType{types.NewJavaClass("V")}),
+		})
+	})
+	member := &JavaClassMember{
+		Name:        "example.LocalCache",
+		Member:      "compute",
+		Description: "(Ljava/lang/Object;Ljava/util/function/BiFunction;ZZZ)Ljava/lang/Object;",
+		JavaType:    ft,
+	}
+	call := NewFunctionCallExpression(receiver, member, ft.FunctionType())
+	call.Kind = InvokeInterface
+	actualFunction := types.NewParameterizedType("java.util.function.BiFunction", []types.JavaType{
+		types.NewJavaClass("java.lang.Object"),
+		types.NewJavaClass("java.util.concurrent.CompletableFuture"),
+		types.NewJavaClass("java.util.concurrent.CompletableFuture"),
+	})
+	call.Arguments = []JavaValue{
+		NewCustomValue(func(*class_context.ClassContext) string { return "key" }, func() types.JavaType { return types.NewJavaClass("K") }),
+		NewCustomValue(func(*class_context.ClassContext) string { return "remap" }, func() types.JavaType { return actualFunction }),
+		NewJavaLiteral(false, types.NewJavaPrimer(types.JavaBoolean)),
+		NewJavaLiteral(false, types.NewJavaPrimer(types.JavaBoolean)),
+		NewJavaLiteral(false, types.NewJavaPrimer(types.JavaBoolean)),
+	}
+	ctx := &class_context.ClassContext{
+		ClassName:       "example.View",
+		TypeParams:      []string{"K", "V"},
+		ClassTypeParams: []string{"K", "V"},
+		SiblingClassSig: func(internal string) (string, map[string]string, bool) {
+			if internal != "example/LocalCache" {
+				return "", nil, false
+			}
+			return "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/lang/Object;", map[string]string{
+				class_context.MethodSigKey("compute", 5): "(TK;Ljava/util/function/BiFunction<-TK;-TV;+TV;>;ZZZ)TV;",
+			}, true
+		},
+	}
+
+	if got := call.renderArgAt(1, ctx); !strings.Contains(got, "(BiFunction)") {
+		t.Fatalf("jar-internal parameterized formal must restore the erased functional bridge: %q", got)
+	}
+	t.Setenv("JDEC_FUNCTIONAL_ERASURE_RESOLVE_OFF", "1")
+	if got := call.renderArgAt(1, ctx); strings.Contains(got, "(BiFunction)") {
+		t.Fatalf("kill switch must remove only the hierarchy-resolved bridge: %q", got)
+	}
+}
+
 func mustFunc(desc string) *types.JavaFuncType {
 	mt, err := types.ParseMethodDescriptor(desc)
 	if err != nil {
