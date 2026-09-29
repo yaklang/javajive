@@ -69,6 +69,11 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	if d == nil || d.FunctionContext == nil {
 		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "lambda reconstruction requires decompiler context", resultType)
 	}
+	if d.getenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(static) >= 3 {
+		if inferred := inferDeclaredFunctionalType(d.FunctionContext, resultType, req.CallSiteName, t19MethodTypeDesc(static[0]), t19MethodTypeDesc(static[2])); inferred != nil {
+			resultType = inferred
+		}
+	}
 
 	samN := t19SAMParamCount(static)
 	if t19ShouldInline(d, impl, len(capturedEval), samN) {
