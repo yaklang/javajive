@@ -3,6 +3,7 @@ package values
 import (
 	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"slices"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
@@ -3308,17 +3309,19 @@ var rawFIMethodRefCastFamily = map[string]bool{
 }
 
 // nestedGenericErasureArgCast restores the erased descriptor type when a
-// reconstructed parameterized argument has lost nested type arguments. A
+// reconstructed parameterized functional argument has lost generic arguments. A
 // lambda's instantiatedMethodType records (for example) Function<String,List>,
 // while the receiver's generic signature may require
 // Function<? super String,? extends List<Integer>>. Passing that local directly
 // is rejected by javac even though the bytecode call site accepts the erased
-// Function descriptor. A raw cast to that exact descriptor is a no-op at
-// runtime and keeps Java's inference for other arguments (notably the receiver
-// key) intact. Never apply it to a lambda or method reference: a raw SAM target
-// can change parameter inference or invalidate the body.
+// Function descriptor. The same issue affects a BiFunction<Object,Object,Object>
+// local whose K/V type variables were erased in the instantiated descriptor.
+// A raw cast to the exact invocation descriptor is a no-op at runtime and keeps
+// Java's inference for other arguments intact. Never apply it to a lambda or
+// method reference: a raw SAM target can change parameter inference or invalidate
+// the body. Kill-switch: JDEC_FUNCTIONAL_ERASURE_ARG_CAST_OFF=1.
 func (f *FunctionCallExpression) nestedGenericErasureArgCast(i int, arg JavaValue, funcCtx *class_context.ClassContext) string {
-	if f == nil || arg == nil || f.Descriptor == "" || f.FuncType == nil ||
+	if jdecenv.Get("JDEC_FUNCTIONAL_ERASURE_ARG_CAST_OFF") != "" || f == nil || arg == nil || f.Descriptor == "" || f.FuncType == nil ||
 		i < 0 || i >= len(f.FuncType.ParamTypes) || isWitnessLambdaArg(UnpackSoltValue(arg)) {
 		return ""
 	}
@@ -3340,6 +3343,13 @@ func (f *FunctionCallExpression) nestedGenericErasureArgCast(i int, arg JavaValu
 	} else if inst := f.thisCtorTypeVarArrayParamType(i, funcCtx); inst != nil {
 		formalType = inst
 	}
+	// The scalar-argument resolvers above intentionally reject parameterized
+	// formals. For a same-class call, use only its exact descriptor-keyed Signature:
+	// an arity-only signature can belong to another overload, and a raw cast can
+	// influence overload selection. The receiver must really be this.
+	if inst := f.sameClassFunctionalFormal(i, funcCtx); inst != nil {
+		formalType = inst
+	}
 	// Map.computeIfAbsent's Function<? super K, ? extends V> parameter is a
 	// nested generic signature, not a direct receiver type variable. Recover it
 	// only for this stable JDK declaration; the ordinary descriptor still stays
@@ -3356,7 +3366,7 @@ func (f *FunctionCallExpression) nestedGenericErasureArgCast(i int, arg JavaValu
 	// Only erase when the call site's generic signature proves that details
 	// were lost. A concrete mismatch such as Function<String,List<String>> vs
 	// Function<String,List<Integer>> is not evidence of erased metadata.
-	if !nestedGenericTypeArgumentsLost(actual, formal) {
+	if !nestedGenericTypeArgumentsLost(actual, formal) && !functionalTypeVariablesErased(actual, formal, funcCtx) {
 		return ""
 	}
 	descriptor := f.witnessDescriptorParamType(i)
@@ -3368,6 +3378,53 @@ func (f *FunctionCallExpression) nestedGenericErasureArgCast(i int, arg JavaValu
 		typeCtx = &class_context.ClassContext{}
 	}
 	return types.NewJavaClass(actual.RawClassName).String(typeCtx)
+}
+
+func (f *FunctionCallExpression) sameClassFunctionalFormal(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	if funcCtx == nil || f.IsStatic || !f.isCurrentClass(funcCtx) ||
+		funcCtx.HasOverloadedSameArity(f.FunctionName, f.Descriptor) {
+		return nil
+	}
+	ref, ok := UnpackSoltValue(f.Object).(*JavaRef)
+	if !ok || !ref.IsThis {
+		return nil
+	}
+	sig := funcCtx.MethodSignatureByDesc(f.FunctionName, f.Descriptor)
+	if sig == "" {
+		return nil
+	}
+	// A callee's own <T> is inferred independently from this class's <T>.
+	// Decline the raw cast rather than treating same-spelled names as proof of
+	// class-variable erasure and changing generic method inference.
+	if len(types.MethodFormalTypeParamNames(sig)) != 0 {
+		return nil
+	}
+	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
+	if i < 0 || i >= len(params) {
+		return nil
+	}
+	return params[i]
+}
+
+func functionalTypeVariablesErased(actual, formal *types.JavaParameterizedType, funcCtx *class_context.ClassContext) bool {
+	if actual == nil || formal == nil || funcCtx == nil ||
+		(actual.RawClassName != "java.util.function.BiFunction" && actual.RawClassName != "java.util.function.Function") ||
+		len(actual.TypeArgs) != len(formal.TypeArgs) {
+		return false
+	}
+	for i, sourceArg := range actual.TypeArgs {
+		if sourceArg == nil || formal.TypeArgs[i] == nil {
+			continue
+		}
+		if w, ok := formal.TypeArgs[i].(*types.JavaWildcardType); ok && w != nil && w.Bound != nil {
+			if bound, ok := w.Bound.RawType().(*types.JavaClass); ok && bound != nil && slices.Contains(funcCtx.ClassTypeParams, bound.Name) {
+				if erased, ok := sourceArg.RawType().(*types.JavaClass); ok && erased != nil && erased.Name == "java.lang.Object" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func nestedGenericTypeArgumentsLost(actual, formal *types.JavaParameterizedType) bool {

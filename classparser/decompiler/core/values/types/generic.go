@@ -442,20 +442,32 @@ func InstantiateJDKMethodParam(rawClass, method string, argc, paramIndex int, ty
 
 // InstantiateJDKMethodParamType returns a recovered full formal type when a JDK
 // method parameter is derived from receiver type arguments. Most cases are a
-// direct T/K/V and are handled by InstantiateJDKMethodParam. A narrow exception
-// is Map.computeIfAbsent: its second parameter is Function<? super K, ? extends
-// V>, so recovering only a direct type variable loses the nested value type.
-// Keeping this signature lets the decompiler recognize an erased Function local
-// whose nested generic details came from a lambda and were not present in its
-// invokedynamic descriptor.
+// direct T/K/V and are handled by InstantiateJDKMethodParam. Map's remapping
+// functions carry both K and V in nested functional-interface type arguments;
+// recovering their formal signatures exposes when a materialized lambda kept
+// only the erased types from LambdaMetafactory's instantiated method descriptor.
 func InstantiateJDKMethodParamType(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) JavaType {
-	if jdecenv.Get("JDEC_GENERIC_PARAM_INFER_OFF") != "" || len(typeArgs) == 0 {
+	if jdecenv.Get("JDEC_GENERIC_PARAM_INFER_OFF") != "" || !jdkMapFamily[rawClass] || len(typeArgs) != 2 ||
+		isWildcardType(typeArgs[0]) || isWildcardType(typeArgs[1]) {
 		return nil
 	}
-	if jdkMapFamily[rawClass] && method == "computeIfAbsent" && argc == 2 && paramIndex == 1 && len(typeArgs) == 2 &&
-		!isWildcardType(typeArgs[0]) && !isWildcardType(typeArgs[1]) {
+	if method == "computeIfAbsent" && argc == 2 && paramIndex == 1 {
 		return NewParameterizedType("java.util.function.Function", []JavaType{
 			&JavaWildcardType{Variant: "super", Bound: typeArgs[0]},
+			&JavaWildcardType{Variant: "extends", Bound: typeArgs[1]},
+		})
+	}
+	keyValue := (method == "computeIfPresent" || method == "compute") && argc == 2 && paramIndex == 1 ||
+		method == "replaceAll" && argc == 1 && paramIndex == 0
+	valueValue := method == "merge" && argc == 3 && paramIndex == 2
+	if keyValue || valueValue {
+		first := typeArgs[0]
+		if valueValue {
+			first = typeArgs[1]
+		}
+		return NewParameterizedType("java.util.function.BiFunction", []JavaType{
+			&JavaWildcardType{Variant: "super", Bound: first},
+			&JavaWildcardType{Variant: "super", Bound: typeArgs[1]},
 			&JavaWildcardType{Variant: "extends", Bound: typeArgs[1]},
 		})
 	}
