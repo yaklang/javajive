@@ -7,6 +7,62 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+func TestLinearCheckcastArgumentOrderProof(t *testing.T) {
+	for _, kind := range []string{"later cast", "repeated cast", "wide argument", "primitive argument", "receiver", "primitive formal", "field read", "store", "duplicate", "branch", "extra entry", "handler boundary", "back edge", "nil target"} {
+		t.Run(kind, func(t *testing.T) {
+			check := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 1}
+			load := &OpCode{Instr: &Instruction{OpCode: OP_ALOAD_1}, CurrentOffset: 4}
+			cast := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 5}
+			invoke := &OpCode{Instr: &Instruction{OpCode: OP_INVOKESTATIC}, CurrentOffset: 8, Data: []byte{0, 1}}
+			path := []*OpCode{check, load, cast, invoke}
+			for i := 0; i+1 < len(path); i++ {
+				path[i].Target = []*OpCode{path[i+1]}
+				path[i+1].Source = []*OpCode{path[i]}
+			}
+			descriptor, accepted := "([I[I)Z", false
+			d := &Decompiler{}
+			switch kind {
+			case "later cast":
+				accepted = true
+			case "repeated cast":
+				load.Instr.OpCode, descriptor, accepted = OP_CHECKCAST, "([I)Z", true
+			case "wide argument":
+				load.Instr.OpCode, cast.Instr.OpCode, descriptor, accepted = OP_LLOAD_1, OP_NOP, "([IJ)Z", true
+			case "primitive argument":
+				load.Instr.OpCode, cast.Instr.OpCode, descriptor, accepted = OP_ICONST_1, OP_NOP, "([II)Z", true
+			case "receiver":
+				invoke.Instr.OpCode, descriptor = OP_INVOKEVIRTUAL, "([I)Z"
+			case "primitive formal":
+				descriptor = "(I[I)Z"
+			case "field read":
+				load.Instr.OpCode = OP_GETSTATIC
+			case "store":
+				load.Instr.OpCode = OP_ASTORE_1
+			case "duplicate":
+				load.Instr.OpCode = OP_DUP
+			case "branch":
+				load.Instr.OpCode = OP_IFNULL
+			case "extra entry":
+				cast.Source = append(cast.Source, &OpCode{})
+			case "handler boundary":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 1, EndPc: 5, HandlerPc: 20}}
+			case "back edge":
+				cast.CurrentOffset = 2
+			case "nil target":
+				load.Target[0] = nil
+			}
+			typ, err := types.ParseMethodDescriptor(descriptor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.constantPoolGetter = func(int) values.JavaValue { return values.NewJavaClassMember("Probe", "consume", descriptor, typ) }
+			if got := d.canInlineCheckcastArgument(check); got != accepted {
+				t.Fatalf("accepted=%v want=%v", got, accepted)
+			}
+		})
+	}
+}
+
 func TestImmediateCheckcastArgumentProof(t *testing.T) {
 	for _, change := range []string{"valid", "other source", "handler boundary", "dup", "constructor", "constructor invoke", "constructor return", "no arguments", "primitive", "invalid source"} {
 		t.Run(change, func(t *testing.T) {
@@ -42,7 +98,7 @@ func TestImmediateCheckcastArgumentProof(t *testing.T) {
 				t.Fatal(err)
 			}
 			d.constantPoolGetter = func(int) values.JavaValue { return values.NewJavaClassMember("Probe", name, descriptor, typ) }
-			if got := d.canInlineImmediateCheckcastArgument(check); got != (change == "valid" || change == "constructor invoke") {
+			if got := d.canInlineCheckcastArgument(check); got != (change == "valid" || change == "constructor invoke") {
 				t.Fatalf("accepted=%v", got)
 			}
 		})

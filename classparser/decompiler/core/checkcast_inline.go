@@ -7,24 +7,48 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
-// CHECKCAST consumes one reference and produces one reference. If the next
-// instruction consumes it as the last method argument, it has no independently
-// observable local identity. Keep that cast in the argument tree from the start:
-// materializing it as a statement can strand or hoist its definition when a
-// surrounding branch becomes a ternary. Earlier operands stay earlier; the
-// cast and invocation remain under the same exception handlers.
-func (d *Decompiler) canInlineImmediateCheckcastArgument(op *OpCode) bool {
+// CHECKCAST consumes one reference and produces one reference. Retain it in
+// a call's argument tree when the intervening instructions only build later
+// arguments from locals/constants/casts. Java evaluates arguments left to right,
+// so these casts keep their original exception order. No store, duplicate,
+// effectful read, call or alternative entry may intervene; the handler domain
+// must remain identical. Counting values above the cast identifies its formal
+// parameter and excludes a cast used as the invocation receiver.
+func (d *Decompiler) canInlineCheckcastArgument(op *OpCode) bool {
 	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || len(op.Target) != 1 || d.constantPoolGetter == nil {
 		return false
 	}
-	consumer := op.Target[0]
-	if consumer == nil || consumer.IsCustom || consumer.Instr == nil || len(consumer.Source) != 1 || consumer.Source[0] != op || !sameHandlerCoverage(d.handlersAt(op), d.handlersAt(consumer)) {
-		return false
-	}
-	switch consumer.Instr.OpCode {
-	case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE, OP_INVOKESTATIC, OP_INVOKESPECIAL:
-	default:
-		return false
+	consumer, previous := op.Target[0], op
+	later := 0
+	for steps := 0; ; steps++ {
+		if steps >= 64 || consumer == nil || consumer.IsCustom || consumer.Instr == nil ||
+			consumer.IsCatch || consumer.IsTryCatchParent || len(consumer.Source) != 1 || consumer.Source[0] != previous ||
+			consumer.CurrentOffset <= previous.CurrentOffset ||
+			!sameHandlerCoverage(d.handlersAt(op), d.handlersAt(consumer)) {
+			return false
+		}
+		instruction := consumer.Instr.OpCode
+		if instruction == OP_INVOKEVIRTUAL || instruction == OP_INVOKEINTERFACE || instruction == OP_INVOKESTATIC || instruction == OP_INVOKESPECIAL {
+			break
+		}
+		access := LocalAccessOf(instruction)
+		switch {
+		case access.Read && !access.Write && instruction != OP_RET:
+			later++ // each load pushes one value, including category-2 values
+		case instruction == OP_CHECKCAST, instruction == OP_NOP:
+			// The top value stays in place, including repeated casts of the
+			// original argument before any later arguments are pushed.
+		case instruction == OP_ACONST_NULL,
+			instruction >= OP_ICONST_M1 && instruction <= OP_DCONST_1,
+			instruction == OP_BIPUSH, instruction == OP_SIPUSH:
+			later++
+		default:
+			return false
+		}
+		if len(consumer.Target) != 1 || consumer.Target[0] == nil || consumer.Target[0].CurrentOffset <= consumer.CurrentOffset {
+			return false
+		}
+		previous, consumer = consumer, consumer.Target[0]
 	}
 	if len(consumer.Data) < 2 {
 		return false
@@ -34,14 +58,11 @@ func (d *Decompiler) canInlineImmediateCheckcastArgument(op *OpCode) bool {
 		return false
 	}
 	method := member.JavaType.FunctionType()
-	if method == nil || len(method.ParamTypes) == 0 {
+	if method == nil || len(method.ParamTypes) <= later {
 		return false
 	}
-	// Constructors consume their last argument in the same stack position.
-	// The already-evaluated uninitialized receiver and earlier arguments stay
-	// below it; keeping this CHECKCAST here neither moves the allocation nor
-	// evaluates another operand. Only a valid invokespecial <init>(...)V can
-	// use this rule, with the same single-edge/handler proof as ordinary calls.
+	// The already-evaluated uninitialized receiver and preceding operands
+	// stay below the cast; constructor allocation is not moved by this rule.
 	if member.Member == "<init>" {
 		if consumer.Instr.OpCode != OP_INVOKESPECIAL || method.ReturnType == nil {
 			return false
@@ -51,7 +72,7 @@ func (d *Decompiler) canInlineImmediateCheckcastArgument(op *OpCode) bool {
 			return false
 		}
 	}
-	last := method.ParamTypes[len(method.ParamTypes)-1]
+	last := method.ParamTypes[len(method.ParamTypes)-1-later]
 	if last == nil {
 		return false
 	}
