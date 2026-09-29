@@ -39,3 +39,35 @@ func TestLoopContainerOwnerExcludesDominatedContinuation(t *testing.T) {
 		}
 	}
 }
+
+func TestTightLoopIgnoresPredecessorNumbering(t *testing.T) {
+	for _, preheaderID := range []int{1, 99, 1000} {
+		root := core.NewNode(&statements.ConditionStatement{})
+		outer := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+		preheader := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+		loop := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+		header := core.NewNode(&statements.ConditionStatement{})
+		body := core.NewNode(&statements.ConditionStatement{})
+		tail := core.NewNode(&statements.ConditionStatement{})
+		preheader.Id, loop.Id, header.Id, body.Id = preheaderID, 101, 10, 11
+		root.AddNext(outer)
+		outer.AddNext(preheader)
+		preheader.AddNext(loop)
+		loop.AddNext(header)
+		header.AddNext(body)
+		header.AddNext(tail)
+		body.AddNext(loop)
+		body.AddNext(outer) // a labeled continue is not an inner back edge
+		tail.AddNext(outer)
+		dom := GenerateDominatorTree(root)
+		set := circleElementSet(loop, header, dom, true)
+		for _, n := range []*core.Node{root, outer, preheader, tail} {
+			if set.Has(n) {
+				t.Fatalf("preheader id %d: external node %d entered the tight loop", preheaderID, n.Id)
+			}
+		}
+		if !set.Has(body) || !set.Has(header) || searchCircleEndNode(loop, header, dom, true) != tail {
+			t.Fatalf("preheader id %d: lost the loop body or its normal exit", preheaderID)
+		}
+	}
+}

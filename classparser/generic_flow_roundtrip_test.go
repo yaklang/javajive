@@ -73,6 +73,7 @@ func roundTripGenericFlow(t *testing.T, main, source string, modes ...DecompileM
 }
 
 func TestT19GenericFieldChainRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "FieldChain", `import java.util.function.*;
 class ChainBox<Y> {
   final Function<? super Y,? extends Y> fn;
@@ -95,6 +96,7 @@ public class FieldChain<T> {
 }
 
 func TestT19GenericWrapperAndFactoryRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "GenericFactoryFlow", `import java.util.*;
 import java.util.function.*;
 import java.util.concurrent.*;
@@ -122,6 +124,7 @@ public class GenericFactoryFlow<K,V> {
 // The original bytecode erases explicit raw casts. Recover from invariant
 // declaration conflicts, independently of neighboring argument casts or names.
 func TestT19InvariantArgumentBridgeRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "InvariantArguments", `import java.util.*;
 class ArgumentMetadata<A,B> {
   A key;
@@ -152,6 +155,7 @@ public class InvariantArguments {
 // Generic factories can return a subtype of a generic map value. Their
 // arguments must be inferred structurally; no class or local spelling is fixed.
 func TestT19GenericFactorySubtypeRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "FactorySubtype", `import java.util.*;
 interface Delta<U> { String text(); }
 class DeltaImpl<V> implements Delta<V> {
@@ -180,6 +184,7 @@ public class FactorySubtype {
 }
 
 func TestT19AnnotatedLoopCaptureRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "AnnotatedCapture", `import java.lang.annotation.*;
 import java.util.*;
 import java.util.function.*;
@@ -204,6 +209,7 @@ public class AnnotatedCapture<T> {
 }
 
 func TestT19MixedIteratorDefinitionsRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "MixedIteratorDefinitions", `import java.util.*;
 public class MixedIteratorDefinitions<T> {
   StringBuilder trace=new StringBuilder();
@@ -228,6 +234,7 @@ public class MixedIteratorDefinitions<T> {
 }
 
 func TestT19RawAndGenericIteratorSlotRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "RawIteratorSlot", `import java.util.*;
 class SlotEntries<T> extends ArrayList<T> {
   Set<Map.Entry<T,Integer>> entries() { return Collections.singleton(new AbstractMap.SimpleEntry<>(get(0),3)); }
@@ -254,6 +261,7 @@ public class RawIteratorSlot<T> {
 }
 
 func TestT19ConditionalWildcardReturnRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ConditionalWildcardReturn", `import java.util.function.*;
 class WrappedFunction<X> implements Function<X,X> {
   final Function<? super X,? super X> delegate;

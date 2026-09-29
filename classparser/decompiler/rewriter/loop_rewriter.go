@@ -248,10 +248,16 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 			// must not rewrite that edge into a break/continue: doing so deletes the handler from the
 			// enclosing try node's successor list, so the later TryRewriter can no longer wrap the loop
 			// body in try/catch - the handler is emitted as dangling post-loop code and the
-			// caught-exception placeholder leaks as a bare `Exception` token (Bug U, observed on a
-			// try-with-resources whose body is a loop). Leave the edge intact and do NOT descend into the
-			// handler (it is not loop body). Kill-switch: JDEC_LOOP_KEEP_CATCH_EDGE_OFF=1.
+			// caught-exception placeholder leaks as a bare `Exception` token. Keep that entry edge;
+			// traverse the handler's normal flow only when this loop dominates its entry.
+			// Kill-switch: JDEC_LOOP_KEEP_CATCH_EDGE_OFF=1.
 			if next.IsCatchStart && jdecenv.Get("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
+				// Keep the exceptional entry edge intact, but a handler entered
+				// only from inside this loop still owns normal break/continue
+				// edges. Materialize those before a catch/if consumes its body.
+				if utils.IsDominate(manager.DominatorMap, circleNode, next) {
+					nextList = append(nextList, next)
+				}
 				continue
 			}
 			if next == circleNode {
@@ -488,6 +494,7 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 	circleNode.RemoveNext(loopStart)
 
 	body := []statements.Statement{}
+	bodyNodes := []*core.Node{}
 	endNodes := []*core.Node{}
 	circleSet := getCircleElementSet(circleNode, loopStart, manager.DominatorMap)
 	err := core.WalkGraph[*core.Node](loopStart, func(node *core.Node) ([]*core.Node, error) {
@@ -501,6 +508,7 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 			return nil, nil
 		}
 		body = append(body, node.Statement)
+		bodyNodes = append(bodyNodes, node)
 		var next []*core.Node
 		for _, n := range node.Next {
 			if slices.Contains(manager.DominatorMap[node], n) {
@@ -532,6 +540,11 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 	for _, c := range NodeDeduplication(endNodes) {
 		loopNode.AddNext(c)
 	}
+	// An encoded transfer to an enclosing loop remains abrupt after wrapping
+	// this loop. Its own break, however, completes the wrapper normally: the
+	// old circle node carries that ordinary continuation and must participate
+	// in the classification too.
+	markEncodedJumps(loopNode, append(bodyNodes, circleNode))
 	return nil
 }
 func getCircleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*core.Node][]*core.Node) *utils2.Set[*core.Node] {
@@ -585,18 +598,17 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		// Drop forward pre-header entry edges. The caller only sets excludePreHeader for a method whose
 		// ORIGINAL CFG is reducible (see RewriteManager.LoopRegionReducible), so a forward, non-dominated
 		// predecessor is a genuine pre-header rather than an alternate entry of an irreducible tangle.
-		// circleNode is the freshly-built do-while node (Id 0); loopStart is the ORIGINAL header and still
-		// carries its bytecode Id, so a real back edge is a BACKWARD jump (source.Id >= loopStart.Id) or a
-		// dominated tail, while a pre-header is a FORWARD non-dominated edge.
+		// Node IDs are allocation order, not bytecode order. A preceding loop
+		// wrapper can have a larger ID than this header without being a back
+		// edge. Require dominance even for synthetic predecessors; otherwise
+		// reverse reachability leaks through the pre-header into an outer loop.
 		var kept []*core.Node
 		for _, n := range allSources {
-			if n.Id >= loopStart.Id || utils.IsDominate(domTree, circleNode, n) {
+			if utils.IsDominate(domTree, circleNode, n) {
 				kept = append(kept, n)
 			}
 		}
-		if len(kept) > 0 {
-			sources = kept
-		}
+		sources = kept
 	}
 	finalSet = reverseBFSStopAt(sources, reverseAdj, circleNode)
 	// A retry may return to the header only through its catch. The synthetic
@@ -606,7 +618,7 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 	// mistaken for the loop exit and moved outside the handler.
 	for _, tr := range finalSet.List() {
 		end := tr.ProtectedEnd
-		if end == nil || hasSharedCatchEntry(tr) {
+		if end == nil {
 			continue
 		}
 		for seen := map[*core.Node]bool{}; end != nil && !seen[end]; {
@@ -619,7 +631,13 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		hasRetry := false
 		for _, next := range tr.Next {
 			if next.IsCatchStart && finalSet.Has(next) {
-				hasRetry = true
+				// Sharing a finally cleanup does not share the retry catch.
+				// In that case require an exclusive entry for this particular
+				// handler before extending the successful protected path.
+				if !hasSharedCatchEntry(tr) || (!next.SharedProtectedHandler &&
+					len(next.Source) == 1 && next.Source[0] == tr) {
+					hasRetry = true
+				}
 			}
 		}
 		if !hasRetry {

@@ -37,30 +37,51 @@ func echoEncoderGetBytesParenthesized(src string) bool {
 		strings.Contains(src, "(String.valueOf(var1) + CoreConstants.LINE_SEPARATOR).getBytes()")
 }
 
-func TestLogbackPutUninterruptiblyIsLoadBearing(t *testing.T) {
+// The CFG structurer now owns this retry loop. Both settings of the unrelated
+// library workaround switch must preserve it; see the independent interrupt
+// and finally behavior oracle in TestAdversarialRetryInterruptCleanupRoundTrip.
+func TestLogbackPutUninterruptiblyUsesStructuredRetry(t *testing.T) {
 	raw, err := os.ReadFile("testdata/regression/AsyncAppenderBase.class")
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Unsetenv("JDEC_LOGBACK_REMAINING_OFF")
-	on, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_LOGBACK_REMAINING_OFF", setting)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := retryMethodSource(t, source, "void putUninterruptibly(")
+		compact := strings.Join(strings.Fields(body), "")
+		// Legacy Decompile without a resolver can retain its checked-catch
+		// sentinel. It must accompany the real protected call, never replace it.
+		compact = strings.ReplaceAll(compact, "if(false)thrownewInterruptedException();", "")
+		for _, required := range []string{
+			"do{try{try{this.blockingQueue.put(var1);",
+			"catch(InterruptedException", "Thread.currentThread().interrupt();",
+			"catch(Throwable", "while(true)",
+		} {
+			if !strings.Contains(compact, required) {
+				t.Errorf("switch=%q missing %q in retry loop:\n%s", setting, required, body)
+			}
+		}
+		if strings.Count(compact, "this.blockingQueue.put(var1);") != 1 || strings.Contains(compact, "try{break;") {
+			t.Errorf("switch=%q lost or duplicated the protected operation:\n%s", setting, body)
+		}
 	}
-	if strings.Contains(on, "try{\nbreak;\n}catch(InterruptedException") {
-		t.Errorf("ON still has empty try/break IE catch")
+}
+
+func retryMethodSource(t *testing.T, source, signature string) string {
+	t.Helper()
+	start := strings.Index(source, signature)
+	if start < 0 {
+		t.Fatalf("missing method %q", signature)
 	}
-	if !strings.Contains(on, "this.blockingQueue.put(var1)") {
-		t.Errorf("ON missing blockingQueue.put")
+	end := strings.Index(source[start:], "\n\t}")
+	if end < 0 {
+		t.Fatalf("missing end of method %q", signature)
 	}
-	t.Setenv("JDEC_LOGBACK_REMAINING_OFF", "1")
-	off, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if on == off {
-		t.Fatal("ON/OFF identical")
-	}
+	return source[start : start+end+3]
 }
 
 func TestLogbackConsoleAppenderOrElseThrowIsLoadBearing(t *testing.T) {

@@ -9250,11 +9250,7 @@ func fixLogbackRemainingReconstructs(body string) string {
 		orElseGet := regexp.MustCompile(`\.orElseThrow\(\(Supplier<NoSuchElementException>\)\(\(\) -> \{\s*return new NoSuchElementException\("No value present"\);\s*\}\)\)`)
 		body = orElseGet.ReplaceAllString(body, ".get()")
 	}
-	if strings.Contains(body, "void putUninterruptibly") && strings.Contains(body, "this.blockingQueue.put(var1)") {
-		body = strings.ReplaceAll(body,
-			"void putUninterruptibly(E var1) {\n\t\tint var2 = 0;\n\t\tdo{\n\t\t\ttry{\n\t\t\t\ttry{\n\t\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\t\tbreak;\n\t\t\t\t}catch(InterruptedException var3){\n\t\t\t\t\tvar2 = 1;\n\t\t\t\t}\n\t\t\t}catch(Throwable var3){\n\t\t\t\tif ((var2) != (0)){\n\t\t\t\t\tThread.currentThread().interrupt();\n\t\t\t\t}\n\t\t\t\tthrow var3;\n\t\t\t}\n\t\t} while (true);\n\t\tthis.blockingQueue.put(var1);\n\t\tif ((var2) != (0)){\n\t\t\tThread.currentThread().interrupt();\n\t\t}\n\t}",
-			"void putUninterruptibly(E var1) {\n\t\tint var2 = 0;\n\t\ttry{\n\t\t\tthis.blockingQueue.put(var1);\n\t\t}catch(InterruptedException var3){\n\t\t\tvar2 = 1;\n\t\t}\n\t\tif ((var2) != (0)){\n\t\t\tThread.currentThread().interrupt();\n\t\t}\n\t}")
-	}
+
 	return body
 }
 
@@ -10583,61 +10579,8 @@ const publicSuffixFindFixed = "private String[] findMatchingRule(String[] var1) 
 	"\t\t\treturn null;\n" +
 	"\t\t}\n\t}"
 
-const publicSuffixReadEmpty = "private void readTheListUninterruptibly() {\n" +
-	"\t\tint var1 = 0;\n" +
-	"\t\tdo{\n" +
-	"\t\t\ttry{\n" +
-	"\t\t\t\tif(false)throw new IOException();\n" +
-	"\t\t\t\tbreak;\n" +
-	"\t\t\t}catch(InterruptedIOException var2){\n" +
-	"\t\t\t\tThread.interrupted();\n" +
-	"\t\t\t\tvar1 = 1;\n" +
-	"\t\t\t}catch(IOException var2){\n" +
-	"\t\t\t\tPlatform.get().log(5,\"Failed to read public suffix list\",(Throwable)(var2));\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\treturn;\n" +
-	"\t\t\t}catch(Throwable var2){\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\tthrow var2;\n" +
-	"\t\t\t}\n" +
-	"\t\t} while (true);\n" +
-	"\t\tthis.readTheList();\n" +
-	"\t\tif ((var1) != (0)){\n" +
-	"\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t}\n\t}"
-
-const publicSuffixReadFixed = "private void readTheListUninterruptibly() {\n" +
-	"\t\tint var1 = 0;\n" +
-	"\t\tdo{\n" +
-	"\t\t\ttry{\n" +
-	"\t\t\t\tthis.readTheList();\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\treturn;\n" +
-	"\t\t\t}catch(InterruptedIOException var2){\n" +
-	"\t\t\t\tThread.interrupted();\n" +
-	"\t\t\t\tvar1 = 1;\n" +
-	"\t\t\t}catch(IOException var2){\n" +
-	"\t\t\t\tPlatform.get().log(5,\"Failed to read public suffix list\",(Throwable)(var2));\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\treturn;\n" +
-	"\t\t\t}catch(Throwable var2){\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\tthrow var2;\n" +
-	"\t\t\t}\n" +
-	"\t\t} while (true);\n\t}"
-
-// fixPublicSuffixDatabase reconstructs PublicSuffixDatabase.findMatchingRule and
-// readTheListUninterruptibly. Kill-switch: JDEC_PUBLIC_SUFFIX_OFF=1.
+// fixPublicSuffixDatabase reconstructs PublicSuffixDatabase.findMatchingRule.
+// Retry loops are handled by the CFG structurer. Kill-switch: JDEC_PUBLIC_SUFFIX_OFF=1.
 func fixPublicSuffixDatabase(body string) string {
 	if jdecenv.Get("JDEC_PUBLIC_SUFFIX_OFF") == "1" {
 		return body
@@ -10646,7 +10589,6 @@ func fixPublicSuffixDatabase(body string) string {
 		return body
 	}
 	body = strings.ReplaceAll(body, publicSuffixFindEmpty, publicSuffixFindFixed)
-	body = strings.ReplaceAll(body, publicSuffixReadEmpty, publicSuffixReadFixed)
 	return body
 }
 

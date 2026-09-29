@@ -42,3 +42,27 @@ func TestLoopHeaderGuardsTryRequiresExitOnOtherArm(t *testing.T) {
 		})
 	}
 }
+
+func TestRetryProtectedPathDistinguishesSharedCleanup(t *testing.T) {
+	for _, sharedRetry := range []bool{false, true} {
+		loop := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+		tr := core.NewNode(&statements.MiddleStatement{Flag: "try"})
+		call := core.NewNode(&statements.MiddleStatement{})
+		end := core.NewNode(&statements.ReturnStatement{})
+		retry := core.NewNode(&statements.MiddleStatement{})
+		cleanup := core.NewNode(&statements.ReturnStatement{})
+		tr.ProtectedEnd, tr.SharedProtectedHandler = end, true
+		retry.IsCatchStart, retry.SharedProtectedHandler = true, sharedRetry
+		cleanup.IsCatchStart, cleanup.SharedProtectedHandler = true, true
+		loop.AddNext(tr)
+		tr.AddNext(call)
+		tr.AddNext(retry)
+		tr.AddNext(cleanup)
+		call.AddNext(end)
+		retry.AddNext(loop)
+		set := circleElementSet(loop, tr, GenerateDominatorTree(loop), true)
+		if set.Has(call) == sharedRetry || set.Has(end) {
+			t.Fatalf("sharedRetry=%t: incorrect protected-path boundary", sharedRetry)
+		}
+	}
+}

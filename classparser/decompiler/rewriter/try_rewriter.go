@@ -89,6 +89,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	node.Replace(tryNode)
 	tryNode.RemoveAllNext()
 	var endNodes []*core.Node
+	var bodyNodes []*core.Node
 	visitedSet := utils.NewSet[*core.Node]()
 	getBody := func(startNode, stopAt *core.Node) ([]statements.Statement, error) {
 		var sts []statements.Statement
@@ -104,6 +105,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 				return nil, nil
 			}
 			sts = append(sts, node.Statement)
+			bodyNodes = append(bodyNodes, node)
 			var next []*core.Node
 			for _, n := range node.Next {
 				if slices.Contains(manager.DominatorMap[node], n) {
@@ -275,5 +277,6 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	for _, c := range NodeDeduplication(endNodes) {
 		tryNode.AddNext(c)
 	}
+	markEncodedJumps(tryNode, bodyNodes)
 	return nil
 }

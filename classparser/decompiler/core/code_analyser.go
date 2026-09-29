@@ -7336,6 +7336,16 @@ func (d *Decompiler) ParseStatement() error {
 					found := NodeFilter(node.Next, func(n *Node) bool {
 						return n.Id == getStatementNextIdByOpcodeId(catchInfo.OpCode.Id)
 					})
+					// Keep sharing evidence on each handler as well as the try.
+					// A shared finally handler must not obscure an independent
+					// retry catch that protects only this interval.
+					for _, entry := range d.ExceptionTable {
+						if entry.HandlerPc == catchInfo.OpCode.CurrentOffset && entry.StartPc != start {
+							for _, handler := range found {
+								handler.SharedProtectedHandler = true
+							}
+						}
+					}
 					endIndex := int(catchInfo.EndIndex)
 					catchNodeMap[endIndex] = append(catchNodeMap[endIndex], found...)
 				}

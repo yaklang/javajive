@@ -31,6 +31,7 @@ func ifBranchNodes(ifNode *core.Node) (trueNode, falseNode *core.Node) {
 }
 
 func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
+	splitSharedVoidReturns(manager, ifNode)
 	err := CalcEnd(manager.DominatorMap, ifNode)
 	if err != nil {
 		return err
@@ -73,6 +74,9 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 		hasNext := false
 		for _, node := range endNodes {
 			for _, n := range node.Next {
+				if encodedJumpTo(node, n) {
+					continue
+				}
 				hasNext = true
 				if n != node2 {
 					return false
@@ -177,8 +181,40 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	for _, node := range NodeDeduplication(endNodes) {
 		ifStatementNode.AddNext(node)
 	}
+	markEncodedJumps(ifStatementNode, ifBodyNodes)
 
 	return nil
+}
+
+// javac can share the final RETURN between a pre-loop guard and a loop exit.
+// Such a leaf is not dominated by the inner if, whose region collector would
+// otherwise emit an empty arm. Split the edge to a private void-return leaf;
+// this copies no value evaluation, cleanup, or exception-producing operation.
+func splitSharedVoidReturns(manager *RewriteManager, condition *core.Node) {
+	changed := false
+	for _, target := range slices.Clone(condition.Next) {
+		ret, ok := target.Statement.(*statements.ReturnStatement)
+		if !ok || ret.JavaValue != nil || len(target.Source) < 2 ||
+			utils2.IsDominate(manager.DominatorMap, condition, target) {
+			continue
+		}
+		terminal := true
+		for _, next := range target.Next {
+			terminal = terminal && IsEndNode(next)
+		}
+		if !terminal {
+			continue
+		}
+		leaf := manager.NewNode(&statements.ReturnStatement{})
+		for _, next := range target.Next {
+			leaf.AddNext(next)
+		}
+		replaceNextInPlace(condition, target, leaf)
+		changed = true
+	}
+	if changed {
+		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+	}
 }
 
 func CalcEnd1(domTree map[*core.Node][]*core.Node, ifNode *core.Node) error {

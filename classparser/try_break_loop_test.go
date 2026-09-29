@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialSuccessfulTryBreakExitsRetryLoopRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "TryBreakRetry", `class RetryMiss extends Exception {}
 class RetrySource {
   static int attempts;
