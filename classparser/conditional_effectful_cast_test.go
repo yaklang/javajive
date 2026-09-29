@@ -5,6 +5,7 @@ import "testing"
 // The cast and its producer belong to the selected arm. An implicit stack
 // temporary may disappear only if both the call and checkcast stay on that arm.
 func TestAdversarialConditionalEffectfulCastRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ConditionalCast", `import java.util.*;
 public class ConditionalCast {
   static int calls;

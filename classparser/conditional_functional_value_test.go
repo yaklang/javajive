@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialConditionalFunctionalValueRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ConditionalFunctional", `import java.util.function.*;
 public class ConditionalFunctional {
   Consumer<String> consumer;
@@ -22,6 +23,7 @@ public class ConditionalFunctional {
 }
 
 func TestAdversarialConditionalGenericFunctionalValueRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ConditionalGenericFunctional", `import java.util.function.*;
 class FunctionalNode<K,V> {
  final K key;final V value;

@@ -16,6 +16,7 @@ import (
 // preserve the receiver's key inference without inventing unavailable nested
 // lambda return types.
 func TestGenericFunctionalValueKeepsErasedCallDescriptor(t *testing.T) {
+	t.Parallel()
 	javac, java := t04Tools(t)
 	for _, debug := range []string{"-g", "-g:none"} {
 		t.Run(debug, func(t *testing.T) {

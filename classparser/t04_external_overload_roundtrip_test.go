@@ -13,6 +13,7 @@ import (
 // while the visible String overload would steal the call if the decompiler
 // dropped the descriptor cast. Runtime output is the independent oracle.
 func TestT04ExternalOverloadBindingRoundTrip(t *testing.T) {
+	t.Parallel()
 	javac, java := t04Tools(t)
 	cases := []struct {
 		name, ownerInternal, libraryFile, library, caller string

@@ -193,6 +193,7 @@ func testT27C04(t *testing.T) {
 }
 
 func TestT27_C05_PrecisionVsCompatibility(t *testing.T) {
+	t.Parallel()
 	t.Run("T27-C05", func(t *testing.T) { testT27C05(t) })
 }
 

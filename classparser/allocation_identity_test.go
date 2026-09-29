@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialAllocationIdentitySurvivesMutatingCallRoundTrip(t *testing.T) {
+	t.Parallel()
 	// Assignment expressions force javac to duplicate the initialized object
 	// after invokespecial. Separate assignment and mutation statements only
 	// exercise astore/aload, which did not expose the lost allocation identity.

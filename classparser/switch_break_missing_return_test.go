@@ -29,6 +29,7 @@ func TestSwitchBreakMissingReturnSeedPreservesContinuation(t *testing.T) {
 }
 
 func TestAdversarialSwitchFallthroughReturnsActualValueRoundTrip(t *testing.T) {
+	t.Parallel()
 	raw, err := os.ReadFile("testdata/regression/SwitchBreakMissingReturnSeed.java")
 	if err != nil {
 		t.Fatal(err)

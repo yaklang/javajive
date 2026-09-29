@@ -31,6 +31,7 @@ func functionalFixture(t *testing.T, main, source, debug string) (string, []byte
 // Materializing the lambda as a local must not make that erased parameterization
 // incompatible with the generic ConcurrentHashMap.computeIfPresent declaration.
 func TestMaterializedBiFunctionErasureRoundTrip(t *testing.T) {
+	t.Parallel()
 	const main = "FunctionalErasureCall"
 	const source = `import java.util.AbstractMap;
 import java.util.Map;
@@ -456,6 +457,7 @@ public class SiblingFunctionalErasureCall<K, V> {
 // use that parameterized return as compute's receiver. This is the common chain
 // shape used by cache facades and decorators.
 func TestChainedSiblingReturnFunctionalErasureRoundTrip(t *testing.T) {
+	t.Parallel()
 	const main = "ChainedSiblingFunctionalErasureCall"
 	const source = `import java.util.concurrent.CompletableFuture;
 import java.util.function.BiFunction;
@@ -550,6 +552,7 @@ public class ChainedSiblingFunctionalErasureCall<K, V> {
 // from the invoke descriptor. Source casts to T erase to Object, so the call
 // renderer has to recover T from Consumer/Function/BiFunction's receiver type.
 func TestLowerBoundedFunctionalArgumentsRoundTrip(t *testing.T) {
+	t.Parallel()
 	const main = "LowerBoundedFunctionalCall"
 	const source = `import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -596,6 +599,7 @@ public class LowerBoundedFunctionalCall<T> {
 // parameters before rendering its body, or the apply/accept arguments remain
 // Object and javac rejects the reconstructed source with a CAP# error.
 func TestCapturedLowerBoundedFunctionalArgumentsRoundTrip(t *testing.T) {
+	t.Parallel()
 	const main = "CapturedLowerBoundedFunctionalCall"
 	const source = `import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -681,6 +685,7 @@ public class CapturedParameterizedLowerBound<T> {
 // writes through erased captures. Exercise both branches and null results so
 // return bridges and side effects are checked against the original bytecode.
 func TestT19ContravariantLambdaErasedReceiverRoundTrip(t *testing.T) {
+	t.Parallel()
 	const main = "ContravariantLambdaBody"
 	const source = `import java.util.*;
 import java.util.function.*;
@@ -723,6 +728,7 @@ public class ContravariantLambdaBody<K,V> {
 // consumer-capture example as an executable oracle, rather than checking a
 // particular rewritten cast spelling.
 func TestT19PolyCastsKeepDeclaredInputsRoundTrip(t *testing.T) {
+	t.Parallel()
 	const main = "PolyCastBoundaries"
 	const source = `import java.util.*;
 import java.util.function.*;
