@@ -5151,7 +5151,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 		}
 	}
-	inlineSingleUseMergeLeaf := func(value values.JavaValue, entry, leaf, merge *OpCode, adopted map[*OpCode]bool) values.JavaValue {
+	inlineSingleUseMergeLeaf := func(value values.JavaValue, entry, leaf, merge *OpCode, adopted map[*OpCode]*values.JavaRef) values.JavaValue {
 		ref, ok := UnpackSoltValue(value).(*values.JavaRef)
 		if !ok || ref == nil || ref.IsThis || ref.IsParam || ref.Id == nil || ref.Val == nil || dupSharedRefs[ref.VarUid] {
 			return value
@@ -5172,13 +5172,21 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		var check *OpCode
 		if values.IsPure(cast.Value) {
 			check = d.branchPureCastLeaf(ref, cast, entry, leaf, merge)
+			// Resolving a pure operand does not by itself authorize removing
+			// its CHECKCAST statement. Keep the original producer when it is
+			// outside this arm (or has a more complex prefix), so its original
+			// evaluation and local definitions remain available. The branch
+			// proof only controls adoption of that producer into the ternary.
+			if check == nil {
+				return resolved
+			}
 		} else {
 			check = d.branchCallCastLeaf(ref, cast, entry, leaf, merge)
 		}
 		if check == nil {
 			return value
 		}
-		adopted[check] = true
+		adopted[check] = ref
 		return resolved
 	}
 	// buildSharedLeafTernary rebuilds the value left on the operand stack at mergeNode as a nested
@@ -5196,7 +5204,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// unresolved leaf) and the caller falls back to the legacy path unchanged. sharedLeaf=false means
 	// it is a plain tree the legacy probe already handles, so the caller also defers to avoid churn.
 	buildSharedLeafTernary := func(mergeNode *OpCode, detectedIfNodes []*OpCode) (root *values.TernaryExpression, built map[*OpCode]*values.TernaryExpression, sharedLeaf bool, hasMiddleCond bool, ok bool) {
-		adoptedCasts := map[*OpCode]bool{}
+		adoptedCasts := map[*OpCode]*values.JavaRef{}
 		var arrayLeaves []branchArrayLeaf
 		// valueMergeSet is every node the merge detection registered as carrying a value across control
 		// flow (a ternary / short-circuit result on the operand stack). It is the principled signal for
@@ -5584,8 +5592,13 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 		}
 		// Publish only after the complete routing graph has been accepted.
-		for check := range adoptedCasts {
+		for check, ref := range adoptedCasts {
 			d.inlineCheckcast[check] = true
+			// The branch expression has consumed this proven sole use. Retire
+			// the producer's old fold callback together with its statement:
+			// otherwise statement lookup maps both ends of that stale fold
+			// to the next GOTO and splices the jump into itself.
+			d.varUserMap.Delete(ref)
 		}
 		d.branchArrayLeaves = append(d.branchArrayLeaves, arrayLeaves...)
 		return root, built, sharedLeaf, hasMiddleCond, true

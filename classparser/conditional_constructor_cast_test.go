@@ -21,6 +21,10 @@ public class ConditionalNumber {
     String saved=(String)read(value);
     return selected ? saved : null;
   }
+  static String earlierPure(boolean selected,Object value) {
+    String saved=(String)value;
+    return selected ? saved : null;
+  }
   public static void main(String[] args) {
     for(Object value:new Object[]{"1.5","-42","bad",Integer.valueOf(7),Double.valueOf(-0.0),null,new Object()}) {
       try {
@@ -39,6 +43,8 @@ public class ConditionalNumber {
         trace.setLength(0);
         try { System.out.print(earlier(construct,value)+":"+trace+";"); }
         catch(ClassCastException e) { System.out.print("early-cast:"+trace+";"); }
+        try { System.out.print(earlierPure(construct,value)+";"); }
+        catch(ClassCastException e) { System.out.print("early-pure-cast;"); }
       }
     }
   }
