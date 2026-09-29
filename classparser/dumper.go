@@ -3834,7 +3834,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			staticHoistAllowedHere := true
 			hoistEventCount := 0
 			statementSet := utils.NewSet[statements.Statement]()
-			statementHasContinuation := map[statements.Statement]bool{}
+			statementHasContinuation := normalStatementContinuations(statementList)
 			var statementToString func(statement statements.Statement) string
 			var statementListToString func(statements []statements.Statement) string
 			statementListToString = func(statementList []statements.Statement) string {
@@ -3842,7 +3842,6 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				defer c.UnTab()
 				var res []string
 				for i, statement := range statementList {
-					statementHasContinuation[statement] = i+1 < len(statementList)
 					if _, ok := statement.(*statements.MiddleStatement); ok {
 						continue
 					}

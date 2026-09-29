@@ -28,7 +28,7 @@ func TestCatchRethrowUnreachableReturnRewrites(t *testing.T) {
 	}
 }
 
-func TestJUnit38ClassRunnerGetAnnotationsIsLoadBearing(t *testing.T) {
+func TestAdversarialJUnit38CatchFallbackNeedsNoSourceRepair(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/JUnit38ClassRunner.class")
 	if err != nil {
 		t.Fatalf("read seed: %v", err)
@@ -49,10 +49,12 @@ func TestJUnit38ClassRunnerGetAnnotationsIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OFF: %v", err)
 	}
-	if !strings.Contains(off, "throw new RuntimeException") {
-		t.Errorf("OFF expected RuntimeException rethrow, got:\n%s", off)
+	// The AST now proves the enclosing continuation. Disabling the legacy
+	// text repair must not reintroduce an invented throw into an empty catch.
+	if strings.Contains(off, "throw new RuntimeException") || !strings.Contains(off, "return new Annotation[0]") {
+		t.Errorf("fallback depends on the source repair:\n%s", off)
 	}
-	if on == off {
-		t.Fatal("ON/OFF identical")
+	if on != off {
+		t.Fatal("the AST continuation should make the legacy text repair unnecessary")
 	}
 }
