@@ -416,6 +416,13 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	nodeToVals.ForEach(func(k *core.Node, v []switchLabel) bool {
 		sortSwitchLabels(v)
 		newNodeToVals.Set(k, v)
+		// GOTO removal can coalesce empty cases at different bytecode offsets
+		// into one exit. They are not necessarily adjacent physical labels:
+		// moving their single body to the last label would make earlier ones
+		// fall through into intervening cases. Each keeps its own break.
+		if k == node.MergeNode && (node.SwitchEmptyCaseMerge || node.SwitchEmptyDefaultMerge) {
+			return true
+		}
 		for i, val := range v {
 			if i == len(v)-1 {
 				break

@@ -20,6 +20,7 @@ func TestAdversarialNestedSwitchEmptySharedExitRoundTrip(t *testing.T) {
               case 10: case 11: break;
               case 12: shifted=3; break;
               case 13: out.append('!'); break;
+              case 14: case 15: break;
               default: break;
             }
           }
@@ -47,7 +48,7 @@ func TestAdversarialNestedSwitchEmptySharedExitRoundTrip(t *testing.T) {
     return state+100;
   }
   public static void main(String[] args) {
-    int[] codes={0,10,1,11,2,12,3,13,4,14,5};
+    int[] codes={0,10,1,11,2,12,3,13,4,14,5,15,6};
     System.out.print(decode(1,codes)+":"+decode(2,codes));
     for(int mode=0;mode<3;mode++)
       for(int code=9;code<14;code++) System.out.print(":"+fallThrough(mode,code));
