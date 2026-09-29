@@ -4228,6 +4228,9 @@ func witnessSameRawClass(argType, param types.JavaType) bool {
 }
 
 func (f *FunctionCallExpression) witnessOverloadPinCast(i int, argType, param types.JavaType, funcCtx *class_context.ClassContext) string {
+	if i == 0 && f.objectFormalWinsBeforeUnboxing(funcCtx) {
+		return ""
+	}
 	if f.calleeParamIsErasedTypeVar(i, funcCtx) {
 		return ""
 	}

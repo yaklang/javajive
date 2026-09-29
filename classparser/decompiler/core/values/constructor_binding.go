@@ -1,6 +1,8 @@
 package values
 
 import (
+	"reflect"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
@@ -42,6 +44,13 @@ func (f *FunctionCallExpression) rawConstructorBindingCast(i int, arg JavaValue,
 	}
 	actual := arg.Type()
 	if actual == nil || !isWitnessReferenceType(actual) || witnessSameRawClass(actual, param) {
+		return ""
+	}
+	// An exact array already selects the descriptor's formal. Adding a cast
+	// supplies no binding evidence and hides array initializer/temporary
+	// structure from constructor and enum reconstruction. Covariant arrays
+	// remain distinct: String[] may still need an Object[] overload pin.
+	if actual.IsArray() && param.IsArray() && reflect.DeepEqual(actual.RawType(), param.RawType()) {
 		return ""
 	}
 	return renderWitnessParamType(param, ctx)

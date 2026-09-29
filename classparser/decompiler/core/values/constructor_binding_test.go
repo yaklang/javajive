@@ -9,7 +9,7 @@ import (
 )
 
 func TestRawConstructorBindingRequiresAllocationAndCompetition(t *testing.T) {
-	for _, scenario := range []string{"raw", "null", "array", "parameterized", "this", "other owner", "no competing declaration"} {
+	for _, scenario := range []string{"raw", "null", "array", "exact primitive array", "exact reference array", "exact nested array", "covariant array", "parameterized", "this", "other owner", "no competing declaration"} {
 		t.Run(scenario, func(t *testing.T) {
 			desc := "(Ljava/lang/Object;)V"
 			ctx := &class_context.ClassContext{ClassName: "example.Box", MethodDescriptors: map[string]bool{
@@ -25,6 +25,22 @@ func TestRawConstructorBindingRequiresAllocationAndCompetition(t *testing.T) {
 				arg = NewJavaLiteral("null", types.NewJavaClass("java.lang.Object"))
 			case "array":
 				arg = NewNewArrayExpression(types.NewJavaArrayType(types.NewJavaClass("java.lang.String")))
+			case "exact primitive array", "exact reference array", "exact nested array", "covariant array":
+				desc, want = "([Ljava/lang/String;)V", ""
+				argType := types.NewJavaArrayType(types.NewJavaClass("java.lang.String"))
+				if scenario == "exact primitive array" {
+					desc = "([I)V"
+					argType = types.NewJavaArrayType(types.NewJavaPrimer(types.JavaInteger))
+				}
+				if scenario == "exact nested array" {
+					desc = "([[Ljava/lang/String;)V"
+					argType = types.NewJavaArrayType(argType)
+				}
+				if scenario == "covariant array" {
+					desc, want = "([Ljava/lang/Object;)V", "Object[]"
+				}
+				arg = NewNewArrayExpression(argType)
+				ctx.MethodDescriptors[class_context.MethodDescKey("<init>", desc)] = true
 			case "parameterized":
 				allocation.JavaType = types.NewParameterizedType("example.Box", []types.JavaType{types.NewJavaClass("java.lang.String")})
 				want = ""
