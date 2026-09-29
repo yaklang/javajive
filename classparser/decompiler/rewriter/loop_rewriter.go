@@ -434,7 +434,12 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 							})
 							breakNode.IsJmp = true
 							replaceNextInPlace(node, next, breakNode)
-							breakNode.AddNext(endNode)
+							// The enclosing loop owns its continuation; a jump leaf
+							// alone is consumed by the inner branch collector. Keep
+							// the original exit as analysis metadata, without adding
+							// a synthetic back edge that would absorb the outer body.
+							breakNode.HideNext = endNode
+							n.AddNext(endNode)
 							break
 						}
 					}
@@ -801,8 +806,10 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 		// false edge, while mismatch continues an outer loop through its
 		// step. Keep that terminal arm inline; the step is the actual normal
 		// continuation. Picking the return loses the outer-continue edge.
-		if len(NodeDeduplication(headerOut)) == 1 && !exclusiveTerminalBranch(headerOut[0]) {
-			return headerOut[0]
+		if len(NodeDeduplication(headerOut)) == 1 {
+			if !exclusiveTerminalBranch(headerOut[0]) || !hasEnclosingLoopContinuation(outNodes, circleNode, domTree) {
+				return headerOut[0]
+			}
 		}
 	}
 	// Early returns and terminal switch bodies are inline alternatives to a

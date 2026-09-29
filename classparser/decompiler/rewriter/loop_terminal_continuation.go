@@ -5,6 +5,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	"github.com/yaklang/javajive/classparser/decompiler/utils"
 )
 
 func isMethodTerminal(n *core.Node) bool {
@@ -62,6 +63,29 @@ func exclusiveTerminalBranch(entry *core.Node) bool {
 		}
 	}
 	return true
+}
+
+// Changing a terminal header's role is necessary only when an alternative
+// resumes an enclosing loop. Ordinary loops keep their canonical header exit;
+// turning every final return into an inline arm needlessly changes variable
+// scopes and can confuse later region collection.
+func hasEnclosingLoopContinuation(exits []*core.Node, loop *core.Node, dom map[*core.Node][]*core.Node) bool {
+	queue := append([]*core.Node(nil), exits...)
+	seen := map[*core.Node]bool{loop: true}
+	for i := 0; i < len(queue); i++ {
+		n := queue[i]
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		if _, header := n.Statement.(*statements.DoWhileStatement); header && utils.IsDominate(dom, n, loop) {
+			return true
+		}
+		if !isMethodTerminal(n) && !IsEndNode(n) {
+			queue = append(queue, loopAnalysisSuccessors(n)...)
+		}
+	}
+	return false
 }
 
 // An early return/throw does not flow through a normal loop continuation. A

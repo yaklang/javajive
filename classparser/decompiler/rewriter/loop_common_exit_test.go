@@ -132,3 +132,37 @@ func TestStructuredTryBreakIsNotALoopContinuation(t *testing.T) {
 		}
 	}
 }
+
+func TestTerminalHeaderNeedsAnEnclosingContinuationWitness(t *testing.T) {
+	for _, enclosing := range []bool{false, true} {
+		outer := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+		loop := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+		header := core.NewNode(&statements.ConditionStatement{})
+		compare := core.NewNode(&statements.ConditionStatement{})
+		found := core.NewNode(&statements.ReturnStatement{})
+		step := core.NewNode(&statements.MiddleStatement{})
+		// Preserve bytecode order used to distinguish a forward pre-header
+		// entry from the inner loop's back edge.
+		outer.Id, header.Id, compare.Id, step.Id = 1, 10, 11, 12
+		root := loop
+		if enclosing {
+			outer.AddNext(loop)
+			step.AddNext(outer)
+			root = outer
+		} else {
+			step.AddNext(core.NewNode(&statements.ReturnStatement{}))
+		}
+		loop.AddNext(header)
+		header.AddNext(found)
+		header.AddNext(compare)
+		compare.AddNext(loop)
+		compare.AddNext(step)
+		want := found
+		if enclosing {
+			want = step
+		}
+		if got := searchCircleEndNode(loop, header, GenerateDominatorTree(root), true); got != want {
+			t.Fatalf("enclosing=%v continuation=%p want=%p", enclosing, got, want)
+		}
+	}
+}
