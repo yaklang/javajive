@@ -27,6 +27,13 @@ public class MethodRefResult {
   static String cells(List<RefCell<String,Integer>> inputs) {
     return inputs.stream().map(RefCell::read).collect(Collectors.joining(","));
   }
+  static List<String> wrapped(List<String> inputs) {
+    return inputs.stream().map(Optional::of).filter(Optional::isPresent).map(Optional::get).collect(Collectors.toList());
+  }
+  static Optional<String> keep(Optional<String> value) { return value; }
+  static long erasedDiscarded(List<Optional<String>> inputs) {
+    return inputs.stream().map(MethodRefResult::keep).filter(x -> true).map(Optional::get).count();
+  }
   static long discarded(List<Optional<String>> inputs) {
     // filter prevents size-based count shortcuts. Each getter runs, but its
     // erased result is discarded without an added String checkcast.
@@ -37,7 +44,9 @@ public class MethodRefResult {
     System.out.print(pipeline(Arrays.asList(Optional.of("a"),Optional.of("b")))+":");
     System.out.print(f.apply(Optional.of("ok"))+":"+key().apply(new AbstractMap.SimpleEntry<>("key",7))+":"+number().applyAsInt(Optional.of(9)));
     System.out.print(":"+keys(Arrays.asList(new AbstractMap.SimpleEntry<>("k",1)))+":"+numbers(Arrays.asList(Optional.of(2),Optional.of(3)))+":"+cells(Arrays.asList(new RefCell<String,Integer>("cell"))));
+    System.out.print(":"+wrapped(Arrays.asList("first","second")));
     System.out.print(":"+discarded((List)Arrays.asList(Optional.of(1),Optional.of(2))));
+    System.out.print(":"+erasedDiscarded((List)Arrays.asList(Optional.of(1),Optional.of(2))));
     try { f.apply(Optional.empty()); } catch(NoSuchElementException e) { System.out.print(":empty"); }
     try { ((Function)f).apply(Optional.of(1)); } catch(ClassCastException e) { System.out.print(":cast"); }
   }

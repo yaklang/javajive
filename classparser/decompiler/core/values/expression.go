@@ -3667,6 +3667,10 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	if c, ok := arg.(*CastExpression); ok && c.Binding {
 		return fmt.Sprintf("(%s)(%s)", c.TargetType.String(funcCtx), c.Value.String(funcCtx))
 	}
+	if bridge := f.streamFunctionInputBridge(i); bridge != nil {
+		raw := types.NewJavaClass("java.util.function.Function").String(funcCtx)
+		return fmt.Sprintf("(%s)(%s)(%s)", bridge.String(funcCtx), raw, arg.String(funcCtx))
+	}
 	// Enum.valueOf(Class<T extends Enum<T>>, String) rejects a Class<?> / raw Class argument
 	// ("method valueOf in class Enum<E> cannot be applied"). The source carried an unchecked
 	// `(Class)` cast that bytecode drops as a no-op checkcast on Class. Re-emit it. Real hit:
