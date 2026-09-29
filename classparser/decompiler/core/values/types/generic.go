@@ -415,29 +415,47 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 // against the generic signature -- rejects it ("BigDecimal/Object cannot be converted to V"). Feeding
 // the instantiated parameter type back lets the existing ArgumentStrings cast logic re-emit the
 // original `(V)` / `(T)` cast (unchecked but behavior-preserving, matching CFR/Fernflower). Returns
-// nil (caller keeps the erased descriptor param) for raw receivers, wildcard type args, or anything
-// outside the table.
+// nil (caller keeps the erased descriptor param) for raw receivers, non-consumer wildcards, or
+// anything outside the table. A selected `? super X` argument is a consumer position and therefore
+// accepts X; X is the source-level cast target erased by the descriptor.
 func InstantiateJDKMethodParam(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) JavaType {
+	instantiated, _ := InstantiateJDKMethodParamInfo(rawClass, method, argc, paramIndex, typeArgs)
+	return instantiated
+}
+
+// InstantiateJDKMethodParamInfo is InstantiateJDKMethodParam with provenance for the one case where
+// source rendering needs more than the resulting type: lowerBound is true when the selected receiver
+// argument was `? super X` and the returned type is X. If X is itself parameterized while the argument
+// retains only X's raw erasure, javac capture conversion requires an explicit `(X)` cast even though
+// the raw classes match. Ordinary concrete receiver arguments do not need that same-erasure cast.
+func InstantiateJDKMethodParamInfo(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) (instantiated JavaType, lowerBound bool) {
 	// This helper is also the leaf reached when the unified hierarchy resolver
 	// walks out of the input jar and hits a JDK declaration. Keep the public
 	// umbrella switch authoritative at that boundary too; otherwise
 	// JDEC_GENERIC_PARAM_INFER_OFF disables direct call-site inference but leaves
 	// inherited JDK fallbacks active (e.g. jar class -> List<String>.add).
 	if jdecenv.Get("JDEC_GENERIC_PARAM_INFER_OFF") != "" || len(typeArgs) == 0 {
-		return nil
+		return nil, false
 	}
 	idx := jdkMethodParamTypeArgIndex(rawClass, method, argc, paramIndex, len(typeArgs))
 	if idx < 0 || idx >= len(typeArgs) {
-		return nil
+		return nil, false
 	}
-	// Only the SELECTED type argument must be a denotable (non-wildcard) target. A sibling
+	// Only the SELECTED type argument must be a denotable target. A sibling
 	// wildcard (`Map<E, ? super V>.put`) used to abort the whole method, dropping the
 	// perfectly-denotable `E` key cast (commons-collections4 MapBackedSet.addAll). A wildcard
-	// at idx itself still bails: `(? super V)` is not legal Java.
+	// at idx itself ordinarily bails because `(? extends V)` / `?` have an unnameable capture.
+	// The lower-bounded `? super V` exception is safe for the methods in this table: every mapped
+	// position consumes that type argument, so V is exactly the value type accepted by the capture.
+	// This is the direct-JDK counterpart of ResolveInstantiatedParamType's hierarchy path.
 	if isWildcardType(typeArgs[idx]) {
-		return nil
+		if wildcard, ok := lowerBoundedWildcard(typeArgs[idx]); ok &&
+			jdecenv.Get("JDEC_GENERIC_SUPERWILDCARD_OFF") == "" {
+			return wildcard.Bound, true
+		}
+		return nil, false
 	}
-	return typeArgs[idx]
+	return typeArgs[idx], false
 }
 
 // InstantiateJDKMethodParamType returns a recovered full formal type when a JDK

@@ -20,6 +20,10 @@ func (c *ClassObjectDumper) snapshotRetryState() func() {
 		saved.lambdaMethods[k] = slices.Clone(v)
 	}
 	saved.lambdaCaptureCount = maps.Clone(c.lambdaCaptureCount)
+	saved.lambdaCaptureTypes = maps.Clone(c.lambdaCaptureTypes)
+	for k, v := range saved.lambdaCaptureTypes {
+		saved.lambdaCaptureTypes[k] = slices.Clone(v)
+	}
 	saved.fieldStoreTotals = maps.Clone(c.fieldStoreTotals)
 	saved.methodReturnTypes = maps.Clone(c.methodReturnTypes)
 	saved.recordSkipMethods = maps.Clone(c.recordSkipMethods)

@@ -990,14 +990,35 @@ func RecoverThisFieldInstantiatedType(funcCtx *class_context.ClassContext, field
 // parameter / this, OR a same-class parameterized field (see receiverParamTypeArgs). Kill-switch
 // JDEC_GENERIC_PARAM_INFER_OFF.
 func (f *FunctionCallExpression) instantiatedParamType(i int, funcCtx *class_context.ClassContext) types.JavaType {
+	instantiated, _ := f.instantiatedParamTypeInfo(i, funcCtx)
+	return instantiated
+}
+
+// instantiatedParamTypeInfo preserves whether the selected JDK receiver argument was a lower-bounded
+// wildcard. The renderer needs that provenance when the lower bound is parameterized but the argument
+// has the same raw erasure: wildcard capture still requires an unchecked cast to the full bound.
+func (f *FunctionCallExpression) instantiatedParamTypeInfo(i int, funcCtx *class_context.ClassContext) (types.JavaType, bool) {
 	if jdecenv.Get("JDEC_GENERIC_PARAM_INFER_OFF") != "" || f.IsStatic || f.Object == nil {
-		return nil
+		return nil, false
 	}
 	raw, typeArgs := f.receiverParamTypeArgs(funcCtx)
 	if raw == "" || len(typeArgs) == 0 {
-		return nil
+		return nil, false
 	}
-	return types.InstantiateJDKMethodParam(raw, f.FunctionName, len(f.Arguments), i, typeArgs)
+	inst, lowerBound := types.InstantiateJDKMethodParamInfo(raw, f.FunctionName, len(f.Arguments), i, typeArgs)
+	if inst == nil {
+		return nil, false
+	}
+	// A generic helper may return Function<? super T,...> where T belongs to the
+	// HELPER method, not the current source scope. Its erased invocation result
+	// can carry that foreign bare name into the receiver type, but emitting `(T)`
+	// here would produce "cannot find symbol". Only current in-scope type variables
+	// or qualified concrete classes are denotable at this call site.
+	if jc, ok := inst.RawType().(*types.JavaClass); ok && jc != nil &&
+		!strings.Contains(jc.Name, ".") && (funcCtx == nil || !funcCtx.IsTypeParam(jc.Name)) {
+		return nil, false
+	}
+	return inst, lowerBound
 }
 
 // sameClassMethodParamType recovers the i-th formal parameter type of a call to a same-class generic
@@ -2407,11 +2428,11 @@ func arrayParamRefArgCast(argType types.JavaType, arg JavaValue) bool {
 // concrete `Cut<C>` would be a spurious over-cast, cf. suppressTypeVarArgCast). guava
 // TreeRangeSet$RangesByUpperBound / $SubRangeSetRangesByLowerBound `rangesByLowerBound.tailMap/headMap`.
 // Kill-switch JDEC_PARAM_ARG_CAST_OFF.
-func resolvedParameterizedArgCast(funcCtx *class_context.ClassContext, argType types.JavaType, resolvedGeneric bool, arg JavaValue) bool {
-	if funcCtx.Getenv("JDEC_PARAM_ARG_CAST_OFF") != "" {
+func resolvedParameterizedArgCast(funcCtx *class_context.ClassContext, argType types.JavaType, resolvedGeneric, lowerBound bool, arg JavaValue) bool {
+	if funcCtx == nil || funcCtx.Getenv("JDEC_PARAM_ARG_CAST_OFF") != "" {
 		return false
 	}
-	if !resolvedGeneric || argType == nil || arg == nil || funcCtx == nil {
+	if !resolvedGeneric || argType == nil || arg == nil {
 		return false
 	}
 	pt, ok := types.AsParameterizedType(argType)
@@ -2427,6 +2448,13 @@ func resolvedParameterizedArgCast(funcCtx *class_context.ClassContext, argType t
 		return false // array / primitive / parameterized argument: not this case.
 	}
 	if ajc.Name == pt.RawClassName {
+		// A raw X is unchecked-convertible to X<A>, but it cannot be fed directly to the captured
+		// parameter of `? super X<A>`. The resolver proved that this formal is that exact lower
+		// bound, so restore the erased `(X<A>)` cast. An ordinary concrete X<A> parameter keeps the
+		// legacy no-cast path below.
+		if lowerBound {
+			return true
+		}
 		// Same erasure, but a raw `Class` argument fed to a `Class<L>` formal (L a class-scope type
 		// variable) cannot convert without an unchecked cast ("Class<CAP#1> cannot be converted to
 		// Class<L>"; commons-lang3 EventListenerSupport.readObject). The source carried an unchecked
@@ -3584,9 +3612,11 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	// that one of the resolvers recovered a concrete/denotable type, so the erased-type-var cast
 	// SUPPRESSION below (calleeParamIsErasedTypeVar) is skipped -- a recovered cast is wanted.
 	resolvedGeneric := false
-	if inst := f.instantiatedParamType(i, funcCtx); inst != nil {
+	lowerBoundedParam := false
+	if inst, lowerBound := f.instantiatedParamTypeInfo(i, funcCtx); inst != nil {
 		argType = inst
 		resolvedGeneric = true
+		lowerBoundedParam = lowerBound
 	} else if inst := f.sameClassMethodParamType(i, funcCtx); inst != nil {
 		argType = inst
 		resolvedGeneric = true
@@ -3638,7 +3668,7 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 				return argType
 			})
 		}
-	} else if resolvedParameterizedArgCast(funcCtx, argType, resolvedGeneric, arg) {
+	} else if resolvedParameterizedArgCast(funcCtx, argType, resolvedGeneric, lowerBoundedParam, arg) {
 		// A generic resolver recovered the formal as a PARAMETERIZED type (e.g.
 		// NavigableMap<Cut<C>,Range<C>>.tailMap's key formal -> `Cut<C>`) whose raw class differs from
 		// the argument's erased static type. The (ok1 && ok2) class-vs-class branch never fires because a

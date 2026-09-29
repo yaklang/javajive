@@ -91,7 +91,7 @@ type Decompiler struct {
 	opcodeIndexToOffset           map[int]uint16
 	ExceptionTable                []*ExceptionTableEntry
 	BootstrapMethods              []*BootstrapMethod
-	DumpClassLambdaMethod         func(name, desc string, id *utils2.VariableId, capturedCount int) (string, error)
+	DumpClassLambdaMethod         func(name, desc string, id *utils2.VariableId, captured []values.JavaValue) (string, error)
 	InvokeDynamicName             string
 	// TargetSourceVersion is the reconstructed Java language level (8/11/17/21/...). Zero
 	// means derive from ClassMajor. Threaded from DecompileOptions; T17 capability checks.

@@ -54,6 +54,12 @@ type ClassObjectDumper struct {
 	// parameter list and renames them to capture placeholders that the invokedynamic call site
 	// resolves to the actual captured values.
 	lambdaCaptureCount map[string]int
+	// lambdaCaptureTypes records the static types at the invokedynamic call site. A synthetic
+	// lambda impl method has no generic Signature and its descriptor erases leading capture
+	// parameters (Function<? super T, R> becomes raw Function). Before simulating that hidden
+	// method, project same-erasure parameterized capture types back onto those parameters so its
+	// body is rendered under the source-level generic contract.
+	lambdaCaptureTypes map[string][]types.JavaType
 	// lambdaLocalSeq hands each inlined lambda body a unique id so its own locals can be renamed
 	// into a private `lv<seq>_<n>` namespace. A lambda arrow body is spliced INLINE into the
 	// enclosing method, and Java forbids a local declared in the lambda body from shadowing a
@@ -136,6 +142,7 @@ func NewClassObjectDumper(obj *ClassObject) *ClassObjectDumper {
 		deepStack:          utils.NewStack[int](),
 		lambdaMethods:      map[string][]string{},
 		lambdaCaptureCount: map[string]int{},
+		lambdaCaptureTypes: map[string][]types.JavaType{},
 		fieldDefaultValue:  map[string]string{},
 		dumpedMethodsSet:   map[string]*dumpedMethods{},
 		aggressiveRetried:  map[string]bool{},
@@ -3486,6 +3493,33 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			break
 		}
 	}
+	// Synthetic lambda methods encode their captured values only in an erased descriptor; unlike
+	// ordinary methods, javac emits no Signature attribute for those hidden parameters. The
+	// invokedynamic call site supplies each capture exactly once and therefore carries the
+	// authoritative static source type. Reapply only parameterized types whose raw class exactly
+	// matches the descriptor parameter. This preserves verifier-level identity while recovering
+	// wildcard/type-variable arguments needed to render the lambda body (for example
+	// Function<? super T,R>.apply((T) value)). An instance lambda's first dynamic capture is its
+	// receiver and maps to `this`, not to a descriptor parameter.
+	if isLambda && c.getenv("JDEC_LAMBDA_CAPTURE_TYPES_OFF") == "" {
+		captureTypes := c.lambdaCaptureTypes[name+descriptor]
+		captureOffset := 0
+		if method.AccessFlags&StaticFlag == 0 && len(captureTypes) > 0 {
+			captureOffset = 1
+		}
+		params := methodType.FunctionType().ParamTypes
+		for paramIndex, captureIndex := 0, captureOffset; paramIndex < len(params) && captureIndex < len(captureTypes); paramIndex, captureIndex = paramIndex+1, captureIndex+1 {
+			captured, ok := types.AsParameterizedType(captureTypes[captureIndex])
+			if !ok || captured == nil || captured.RawClassName == "" || params[paramIndex] == nil || params[paramIndex].IsArray() {
+				continue
+			}
+			descriptorClass, ok := params[paramIndex].RawType().(*types.JavaClass)
+			if !ok || descriptorClass == nil || descriptorClass.Name != captured.RawClassName {
+				continue
+			}
+			params[paramIndex] = captureTypes[captureIndex].Copy()
+		}
+	}
 	// A synthetic access-bridge constructor carries NO Signature attribute, so its parameters stay
 	// erased to their descriptor types (Object / raw). Its only body is `this(args...)` forwarding to
 	// the private target ctor, so when that target declares a type variable (e.g. guava
@@ -5451,7 +5485,16 @@ func fixLambdaLoopCapture(body string) string {
 		}
 	}
 	changed := false
-	for _, mr := range methods {
+	// Each processed method may insert final-copy lines into the shared `lines`
+	// slice.  The ranges above were measured before any insertion, so walking
+	// them from the front would shift every still-pending range and eventually
+	// make one method inspect declarations from a different method.  Slot-derived
+	// names repeat across methods; that stale-coordinate bug retyped captures
+	// according to an unrelated later declaration (for example U -> int).
+	// Process bottom-up: edits in a later range never change the coordinates of
+	// any earlier range that remains to be processed.
+	for methodIndex := len(methods) - 1; methodIndex >= 0; methodIndex-- {
+		mr := methods[methodIndex]
 		mlines := lines[mr.start:mr.end]
 		depths := lambdaDepthPerLine(mlines)
 		// Collect captured names + their declared type + the lambda-opening line indices that read them.

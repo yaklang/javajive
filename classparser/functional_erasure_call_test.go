@@ -167,3 +167,133 @@ public class FunctionalErasureVariants<T> {
 		}
 	}
 }
+
+// A lower-bounded wildcard accepts values of its bound, but that bound is lost
+// from the invoke descriptor. Source casts to T erase to Object, so the call
+// renderer has to recover T from Consumer/Function/BiFunction's receiver type.
+func TestLowerBoundedFunctionalArgumentsRoundTrip(t *testing.T) {
+	const main = "LowerBoundedFunctionalCall"
+	const source = `import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
+
+public class LowerBoundedFunctionalCall<T> {
+  @SuppressWarnings("unchecked")
+  public String invoke(Object raw, Consumer<? super T> sink,
+      Function<? super T, String> one,
+      BiFunction<? super T, ? super T, String> two) {
+    sink.accept((T) raw);
+    return one.apply((T) raw) + ":" + two.apply((T) raw, (T) raw);
+  }
+  public static void main(String[] args) {
+    StringBuilder seen = new StringBuilder();
+    LowerBoundedFunctionalCall<String> call = new LowerBoundedFunctionalCall<>();
+    String result = call.invoke("x", seen::append, String::toUpperCase, (a, b) -> a + b);
+    System.out.print(seen + ":" + result);
+  }
+}`
+	for _, debug := range []string{"-g", "-g:none"} {
+		want, classBytes := functionalFixture(t, main, source, debug)
+		for _, mode := range []DecompileMode{Precision, Compatibility} {
+			result, err := DecompileWithOptions(classBytes, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
+			if err != nil {
+				t.Fatalf("decompile %s/%s: %v", mode, debug, err)
+			}
+			for _, call := range []string{".accept(", ".apply("} {
+				if !strings.Contains(result.Source, call) {
+					t.Fatalf("fixture lost %s in %s/%s:\n%s", call, mode, debug, result.Source)
+				}
+			}
+			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+				t.Fatalf("lower-bounded functional arguments %s/%s: %v", mode, debug, err)
+			}
+		}
+	}
+}
+
+// javac lowers a capturing lambda to a synthetic method whose descriptor carries
+// only erased capture types. The invokedynamic call site still knows that the
+// captured functional values are lower-bounded consumers. The decompiler must
+// project those call-site types back onto the synthetic method's leading capture
+// parameters before rendering its body, or the apply/accept arguments remain
+// Object and javac rejects the reconstructed source with a CAP# error.
+func TestCapturedLowerBoundedFunctionalArgumentsRoundTrip(t *testing.T) {
+	const main = "CapturedLowerBoundedFunctionalCall"
+	const source = `import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+public class CapturedLowerBoundedFunctionalCall<T> {
+  @SuppressWarnings("unchecked")
+  public Supplier<String> defer(Object raw, Consumer<? super T> sink,
+      Function<? super T, String> one,
+      BiFunction<? super T, ? super T, String> two) {
+    return () -> {
+      sink.accept((T) raw);
+      return one.apply((T) raw) + ":" + two.apply((T) raw, (T) raw);
+    };
+  }
+  public static void main(String[] args) {
+    StringBuilder seen = new StringBuilder();
+    CapturedLowerBoundedFunctionalCall<String> call = new CapturedLowerBoundedFunctionalCall<>();
+    String result = call.defer("x", seen::append, String::toUpperCase, (a, b) -> a + b).get();
+    System.out.print(seen + ":" + result);
+  }
+}`
+	for _, debug := range []string{"-g", "-g:none"} {
+		want, classBytes := functionalFixture(t, main, source, debug)
+		for _, mode := range []DecompileMode{Precision, Compatibility} {
+			result, err := DecompileWithOptions(classBytes, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
+			if err != nil {
+				t.Fatalf("decompile %s/%s: %v", mode, debug, err)
+			}
+			for _, call := range []string{".accept(", ".apply("} {
+				if !strings.Contains(result.Source, call) {
+					t.Fatalf("capturing fixture lost %s in %s/%s:\n%s", call, mode, debug, result.Source)
+				}
+			}
+			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+				t.Fatalf("captured lower-bounded functional arguments %s/%s: %v", mode, debug, err)
+			}
+		}
+	}
+}
+
+// A lower bound can itself be parameterized. Its raw class survives as a
+// checkcast in bytecode, while its type arguments do not. Passing that raw value
+// to a captured `? super List<T>` still needs the source-level `(List<T>)` cast;
+// matching erasures alone are not sufficient under wildcard capture conversion.
+func TestCapturedParameterizedLowerBoundRoundTrip(t *testing.T) {
+	const main = "CapturedParameterizedLowerBound"
+	const source = `import java.util.Arrays;
+import java.util.List;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+public class CapturedParameterizedLowerBound<T> {
+  @SuppressWarnings("unchecked")
+  public Supplier<String> defer(Object raw, Function<? super List<T>, String> fn) {
+    return () -> fn.apply((List<T>) raw);
+  }
+  public static void main(String[] args) {
+    CapturedParameterizedLowerBound<String> call = new CapturedParameterizedLowerBound<>();
+    System.out.print(call.defer(Arrays.asList("x"), values -> values.get(0)).get());
+  }
+}`
+	for _, debug := range []string{"-g", "-g:none"} {
+		want, classBytes := functionalFixture(t, main, source, debug)
+		for _, mode := range []DecompileMode{Precision, Compatibility} {
+			result, err := DecompileWithOptions(classBytes, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
+			if err != nil {
+				t.Fatalf("decompile %s/%s: %v", mode, debug, err)
+			}
+			if !strings.Contains(result.Source, ".apply(") {
+				t.Fatalf("parameterized lower-bound fixture lost apply in %s/%s:\n%s", mode, debug, result.Source)
+			}
+			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+				t.Fatalf("captured parameterized lower bound %s/%s: %v", mode, debug, err)
+			}
+		}
+	}
+}

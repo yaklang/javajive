@@ -179,7 +179,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// parameters (var0, var1, ...) never collide with the enclosing method's locals.
 				// Captured values are resolved via LCAP placeholders, which are independent of
 				// the id chain, so a fresh root is safe.
-				methodStr, err := d.DumpClassLambdaMethod(member, classMember.Description, utils.NewRootVariableId(), len(captured))
+				methodStr, err := d.DumpClassLambdaMethod(member, classMember.Description, utils.NewRootVariableId(), captured)
 				if err != nil {
 					return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", classMember.Name, member, err)
 				}

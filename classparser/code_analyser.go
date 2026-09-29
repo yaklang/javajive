@@ -203,9 +203,16 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 	parser := core.NewDecompiler(codeAttr.Code, func(id int) values.JavaValue {
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
-	parser.DumpClassLambdaMethod = func(name, desc string, id *utils.VariableId, capturedCount int) (string, error) {
+	parser.DumpClassLambdaMethod = func(name, desc string, id *utils.VariableId, captured []values.JavaValue) (string, error) {
 		dumper.lambdaMethods[name] = append(dumper.lambdaMethods[name], desc)
-		dumper.lambdaCaptureCount[name+desc] = capturedCount
+		dumper.lambdaCaptureCount[name+desc] = len(captured)
+		capturedTypes := make([]types.JavaType, len(captured))
+		for i, value := range captured {
+			if value != nil && value.Type() != nil {
+				capturedTypes[i] = value.Type().Copy()
+			}
+		}
+		dumper.lambdaCaptureTypes[name+desc] = capturedTypes
 		// A lambda body is dumped LAZILY, mid-parse of the ENCLOSING method: the bootstrap closure
 		// runs while the enclosing method's invokedynamic value is built during its stack
 		// simulation. The recursive DumpMethodWithInitialId overwrites the SHARED dumper.FuncCtx
