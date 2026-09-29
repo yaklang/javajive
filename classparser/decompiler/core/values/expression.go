@@ -840,6 +840,8 @@ func (f *FunctionCallExpression) instantiatedReturnType() types.JavaType {
 // from the receiver value's parameterized static type, or -- when the receiver is a same-class field
 // whose getfield value carries only the ERASED descriptor type (raw `BiConsumer`) -- from the field's
 // recorded generic Signature (funcCtx.FieldSignatures, e.g. `Ljava/util/function/BiConsumer<TT;TV;>;`).
+// A chained receiver `field.method().next(...)` can also recover method()'s parameterized return by
+// first instantiating the field receiver and then resolving the sibling method signature.
 // Returns ("", nil) when no parameterized receiver type is available. The field-signature fallback is
 // independently gated by JDEC_GENERIC_PARAM_FIELD_OFF.
 func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.ClassContext) (string, []types.JavaType) {
@@ -889,7 +891,7 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 	// in funcCtx.MethodSignatures, and its return type args are class-scope variables denotable at the
 	// call site. A super.m()/overloaded miss yields "" and is skipped. Kill-switch:
 	// JDEC_GENERIC_PARAM_RECV_METHOD_OFF.
-	if jdecenv.Get("JDEC_GENERIC_PARAM_RECV_METHOD_OFF") == "" {
+	if jdecFlag(funcCtx, "JDEC_GENERIC_PARAM_RECV_METHOD_OFF") == "" {
 		if inner, ok := UnpackSoltValue(f.Object).(*FunctionCallExpression); ok && !inner.IsStatic && inner.Object != nil {
 			if iref, ok := UnpackSoltValue(inner.Object).(*JavaRef); ok && iref.IsThis {
 				if sig := funcCtx.MethodSignature(inner.FunctionName, len(inner.Arguments)); sig != "" {
@@ -909,6 +911,19 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 						recvArgs[i] = types.NewJavaClass(p)
 					}
 					_, ret := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, funcCtx.ClassName, recvArgs, inner.FunctionName, len(inner.Arguments))
+					if pt, ok := types.AsParameterizedType(ret); ok {
+						return pt.RawClassName, pt.TypeArgs
+					}
+				}
+			}
+			// General chained receiver: `this.asyncCache.cache().compute(...)`.
+			// cache()'s descriptor exposes only raw LocalCache, but its declaring
+			// class is reached from the parameterized `this.asyncCache` field. Compose
+			// that receiver substitution through cache()'s generic return. A missing
+			// or ambiguous sibling signature fails closed in the resolver.
+			if funcCtx.SiblingClassSig != nil {
+				if recvRaw, recvArgs := inner.receiverParamTypeArgs(funcCtx); recvRaw != "" && len(recvArgs) > 0 {
+					_, ret := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, inner.FunctionName, len(inner.Arguments))
 					if pt, ok := types.AsParameterizedType(ret); ok {
 						return pt.RawClassName, pt.TypeArgs
 					}

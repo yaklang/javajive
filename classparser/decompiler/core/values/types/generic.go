@@ -1665,7 +1665,9 @@ func resolveReturnWalk(funcCtx *class_context.ClassContext, provider ClassSigPro
 // mirrors ResolveInstantiatedReturnType (no denotability gate) but also returns the formal parameter
 // types (substituted), so a caller can detect an UNCHECKED invocation -- a parameterized formal fed a
 // raw argument, whose return javac erases to its erasure (JLS 15.12.2.6). Returns (nil, nil) when the
-// callee is JDK/external or declares no generic Signature for (method, argc) anywhere in the hierarchy.
+// callee declares no recoverable generic Signature for (method, argc) anywhere in the hierarchy. A
+// walk that reaches a stable JDK declaration can return a PARTIAL parameter slice from the bounded
+// JDK table while leaving the return nil; no return type is invented at that external boundary.
 func ResolveInstantiatedSignature(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method string, argc int) ([]JavaType, JavaType) {
 	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" {
 		return nil, nil
@@ -1684,7 +1686,24 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 	visited[internal] = true
 	classSig, methodSigs, ok := provider(internal)
 	if !ok {
-		return nil, nil // JDK / external: not in jar
+		// The jar hierarchy may terminate at Map<K,V>/ConcurrentMap<K,V>. The
+		// composed args remain authoritative even though the JDK class bytes are
+		// outside the sibling provider. Recover only the stable full formals in
+		// the bounded JDK table; unknown/fixed positions stay nil and the return
+		// stays nil. This is enough for callers that need to restore a raw bridge
+		// around an erased functional argument.
+		params := make([]JavaType, argc)
+		found := false
+		for i := range params {
+			if p := InstantiateJDKMethodParamType(internalToDot(internal), method, argc, i, args); p != nil {
+				params[i] = p
+				found = true
+			}
+		}
+		if found {
+			return params, nil
+		}
+		return nil, nil
 	}
 	formals := ClassFormalTypeParamNames(classSig)
 	sigma := map[string]JavaType{}
@@ -1720,7 +1739,7 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 		for i, ta := range pt.TypeArgs {
 			childArgs[i] = SubstituteTypeVars(ta, sigma)
 		}
-		if params, ret := resolveSignatureWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, visited); ret != nil {
+		if params, ret := resolveSignatureWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, visited); len(params) > 0 || ret != nil {
 			return params, ret
 		}
 	}
