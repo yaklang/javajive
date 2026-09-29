@@ -1,12 +1,14 @@
 package javaclassparser
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -516,9 +518,17 @@ func t04RoundTripModes(t *testing.T, release, mainClass, origOut string, classes
 
 func t04RunJava(t *testing.T, java, classpath, mainClass string) string {
 	t.Helper()
-	cmd := exec.Command(java, "-Xverify:all", "-Xmx128m", "-Dfile.encoding=UTF-8", "-cp", classpath, mainClass)
+	// A lost loop exit must fail this fixture by name and kill its JVM,
+	// rather than consume the package timeout and leave an orphan process.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, java, "-Xverify:all", "-Xmx128m", "-Dfile.encoding=UTF-8", "-cp", classpath, mainClass)
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("java %s exceeded its 20s fixture limit: %v\n%s", mainClass, ctx.Err(), out)
+	}
 	if err != nil {
 		t.Fatalf("java %s: %v\n%s", mainClass, err, out)
 	}
