@@ -121,34 +121,6 @@ func (s *RewriteManager) RemoveDeadEndAssigns() {
 	}
 }
 
-// isIdentChar reports whether b can appear inside a Java identifier; used for whole-token matching so
-// "var1" never matches inside "var12".
-func isIdentChar(b byte) bool {
-	return b == '_' || b == '$' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
-}
-
-// containsToken reports whether tok appears in s delimited by non-identifier characters (a real
-// reference to the local named tok, not an accidental substring of a longer name).
-func containsToken(s, tok string) bool {
-	if tok == "" {
-		return false
-	}
-	for idx := 0; idx <= len(s)-len(tok); {
-		i := strings.Index(s[idx:], tok)
-		if i < 0 {
-			return false
-		}
-		i += idx
-		before := i == 0 || !isIdentChar(s[i-1])
-		after := i+len(tok) >= len(s) || !isIdentChar(s[i+len(tok)])
-		if before && after {
-			return true
-		}
-		idx = i + 1
-	}
-	return false
-}
-
 // renderValue renders a JavaValue to source text, swallowing any panic from a value type that needs ctx
 // fields unavailable at this stage (returns "" so the caller treats it as "no reference" and declines).
 func renderValue(ctx *class_context.ClassContext, value values.JavaValue) (s string) {
@@ -190,21 +162,27 @@ func followArm(start *core.Node) ([]*core.Node, *core.Node) {
 	return nil, nil
 }
 
-// definedLocals collects the rendered names of locals assigned by the AssignStatement nodes on an arm
-// path. These anchor the true/false mapping in SplitTernaryReturnArms: a value that uses an arm's locals
-// must belong to that arm.
-func definedLocals(ctx *class_context.ClassContext, path []*core.Node) []string {
-	var out []string
+// definedLocals retains SSA/local identity. Temporary names are not unique
+// until RewriteVar; unrelated Date and Collection casts may both render var2.
+func definedLocals(path []*core.Node) []*values.JavaRef {
+	var out []*values.JavaRef
 	for _, n := range path {
 		if as, ok := n.Statement.(*statements.AssignStatement); ok {
-			if ref, ok := as.LeftValue.(*values.JavaRef); ok && ref.Id != nil {
-				if name := renderValue(ctx, ref); name != "" {
-					out = append(out, name)
-				}
+			if ref, ok := as.LeftValue.(*values.JavaRef); ok && ref != nil {
+				out = append(out, ref)
 			}
 		}
 	}
 	return out
+}
+
+func usesLocal(refs map[*values.JavaRef]bool, defined *values.JavaRef) bool {
+	for ref := range refs {
+		if ref == defined || (defined.VarUid != "" && defined.VarUid == ref.VarUid) {
+			return true
+		}
+	}
+	return false
 }
 
 // SplitTernaryReturnArms undoes a value-ternary reconstruction that cannot be linearized: a
@@ -218,8 +196,8 @@ func definedLocals(ctx *class_context.ClassContext, path []*core.Node) []string 
 // `if (cond) return A; <B-stores>; return B;`. It fires only when the arm-to-value mapping is provably
 // correct - verified by which arm's locals each value references, with cross-checks that catch an
 // inverted (negated) condition - and declines otherwise, so an ambiguous shape degrades to the prior
-// stub rather than risking a silently branch-swapped result. ctx is needed only to render values during
-// the reference probe.
+// stub rather than risking a silently branch-swapped result. Dependencies are compared by
+// local identity, without rendering expressions or following references into their definitions.
 func (s *RewriteManager) SplitTernaryReturnArms(ctx *class_context.ClassContext) {
 	handled := map[*core.Node]bool{}
 	for i := 0; i < (1 << 16); i++ {
@@ -275,10 +253,13 @@ func (s *RewriteManager) trySplitTernaryReturn(ctx *class_context.ClassContext, 
 	if !ok || tern.TrueValue == nil || tern.FalseValue == nil {
 		return false
 	}
-	trueVars := definedLocals(ctx, truePath)
-	falseVars := definedLocals(ctx, falsePath)
-	trueValStr := renderValue(ctx, tern.TrueValue)
-	falseValStr := renderValue(ctx, tern.FalseValue)
+	trueVars := definedLocals(truePath)
+	falseVars := definedLocals(falsePath)
+	trueEffects, trueUses := values.InspectValue(tern.TrueValue)
+	falseEffects, falseUses := values.InspectValue(tern.FalseValue)
+	if (trueEffects|falseEffects)&values.EffectOpaque != 0 {
+		return false
+	}
 	// Need at least one arm-local to anchor the mapping; a pure value ternary (no arm stores) is left to
 	// the normal callback collapse.
 	if len(trueVars) == 0 && len(falseVars) == 0 {
@@ -287,12 +268,12 @@ func (s *RewriteManager) trySplitTernaryReturn(ctx *class_context.ClassContext, 
 	// Cross-contamination check (catches an inverted/negated condition): the value paired with one arm by
 	// the if's true/false convention must NOT reference the OTHER arm's locals.
 	for _, d := range trueVars {
-		if containsToken(falseValStr, d) {
+		if usesLocal(falseUses, d) {
 			return false
 		}
 	}
 	for _, d := range falseVars {
-		if containsToken(trueValStr, d) {
+		if usesLocal(trueUses, d) {
 			return false
 		}
 	}
@@ -301,7 +282,7 @@ func (s *RewriteManager) trySplitTernaryReturn(ctx *class_context.ClassContext, 
 	if len(trueVars) > 0 {
 		used := false
 		for _, d := range trueVars {
-			if containsToken(trueValStr, d) {
+			if usesLocal(trueUses, d) {
 				used = true
 				break
 			}
@@ -313,7 +294,7 @@ func (s *RewriteManager) trySplitTernaryReturn(ctx *class_context.ClassContext, 
 	if len(falseVars) > 0 {
 		used := false
 		for _, d := range falseVars {
-			if containsToken(falseValStr, d) {
+			if usesLocal(falseUses, d) {
 				used = true
 				break
 			}
