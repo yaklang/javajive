@@ -20,6 +20,30 @@ type LoopStatement struct {
 	BodyStart *core.Node
 }
 
+// A bounded retry loop has a condition between its wrapper and try body.
+// Structure its successful break before TryRewriter consumes that body; doing
+// so afterwards loses the normal exit and incorrectly retries on success.
+// Require the other header edge to be the proved loop exit, not another body
+// branch. Shared catch entries remain excluded by the caller.
+func loopHeaderGuardsTry(manager *RewriteManager, loop, tr *core.Node) bool {
+	if manager == nil || loop == nil || tr == nil || len(loop.Next) != 1 {
+		return false
+	}
+	header := loop.Next[0]
+	if _, ok := header.Statement.(*statements.ConditionStatement); !ok || len(header.Next) != 2 {
+		return false
+	}
+	var other *core.Node
+	if header.Next[0] == tr {
+		other = header.Next[1]
+	} else if header.Next[1] == tr {
+		other = header.Next[0]
+	} else {
+		return false
+	}
+	return other != tr && other == searchCircleEndNode(loop, header, manager.DominatorMap, manager.LoopRegionReducible)
+}
+
 func RebuildLoopNode(manager *RewriteManager) error {
 	for _, node := range manager.CircleEntryPoint {
 		doWhileSt := statements.NewDoWhileStatement(values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), nil)

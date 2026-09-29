@@ -1107,7 +1107,7 @@ func (s *RewriteManager) Rewrite() error {
 			for j := i; j < len(order); j++ {
 				n := order[j]
 				if slices.Contains(s.WhileNode, n) && utils2.IsDominate(s.DominatorMap, n, node) {
-					if isTry && (len(n.Next) == 0 || n.Next[0] != node || hasSharedCatchEntry(node)) {
+					if isTry && (len(n.Next) == 0 || (n.Next[0] != node && !loopHeaderGuardsTry(s, n, node)) || hasSharedCatchEntry(node)) {
 						continue
 					}
 					if _, ok := loopJmpRewriterRecoed[n]; ok {
