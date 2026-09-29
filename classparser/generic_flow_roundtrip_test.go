@@ -11,8 +11,11 @@ import (
 // Helpers stay on the original classpath so their Signature attributes provide
 // independent declaration evidence. Only the consumer is replaced by generated
 // source; its output must match the original across both modes and debug forms.
-func roundTripGenericFlow(t *testing.T, main, source string) {
+func roundTripGenericFlow(t *testing.T, main, source string, modes ...DecompileMode) {
 	t.Helper()
+	if len(modes) == 0 {
+		modes = []DecompileMode{Precision, Compatibility}
+	}
 	javac, java := t04Tools(t)
 	simple := main[strings.LastIndex(main, ".")+1:]
 	for _, debug := range []string{"-g", "-g:none"} {
@@ -34,8 +37,14 @@ func roundTripGenericFlow(t *testing.T, main, source string) {
 			b, e := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)+".class"))
 			return b, e == nil
 		}
-		for _, mode := range []DecompileMode{Precision, Compatibility} {
-			result, err := DecompileWithOptions(raw, DecompileOptions{Mode: mode, TargetSourceVersion: 8, Resolve: resolve})
+		for _, mode := range modes {
+			var result DecompileResult
+			var err error
+			if mode == "legacy" {
+				result.Source, err = DecompileWithResolver(raw, resolve)
+			} else {
+				result, err = DecompileWithOptions(raw, DecompileOptions{Mode: mode, TargetSourceVersion: 8, Resolve: resolve})
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1505,11 +1505,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. Kill-switch:
 	// JDEC_ADD_SWITCH_BREAK_OFF=1.
 	full = c.sourceRewrite("addBreakToSwitchCases", "class_source", full, addBreakToSwitchCases)
-	// fixSwitchBreakMissingReturn inserts `return null;` after a switch that is the last statement
-	// of its enclosing block in a reference-returning method, when a case exits via `break`
-	// (switch fall-through reconstructed as break: commons-lang3 NumberUtils.createNumber).
-	// Kill-switch: JDEC_FIX_SWITCH_BREAK_RETURN_OFF=1.
-	full = c.sourceRewrite("fixSwitchBreakMissingReturn", "class_source", full, fixSwitchBreakMissingReturn)
+	// A switch break continues along its CFG successor. Never synthesize a
+	// default return here: block-closing braces do not prove method completion,
+	// and returning null silently truncates nested switches and decode loops.
 	// wrapFieldInitializerReflection converts a field initializer containing a reflection call
 	// (getMethod etc.) that throws a checked exception into a static-block init with try/catch.
 	// Kill-switch: JDEC_WRAP_FIELD_INIT_OFF=1.
@@ -6629,129 +6627,6 @@ func fixMissingReturn(body string) string {
 			// Insert `return null;` inside the empty then branch (after the `if (cond) {` line).
 			sites = append(sites, insertSite{at: i, indent: indent + "\t"})
 		}
-	}
-	if len(sites) == 0 {
-		return body
-	}
-	for k := len(sites) - 1; k >= 0; k-- {
-		s := sites[k]
-		retLn := s.indent + "return null;"
-		lines = append(lines[:s.at+1], append([]string{retLn}, lines[s.at+1:]...)...)
-	}
-	return strings.Join(lines, "\n")
-}
-
-// fixSwitchBreakMissingReturn inserts `return null;` after a switch that is the last statement of
-// its enclosing block in a reference-returning method, when some case exits via an unlabeled
-// `break`. javac compiled a fall-through (F/f suffix → D/d in commons-lang3 NumberUtils.createNumber)
-// as `goto next-case`; the switch rewriter reconstructed that edge as `break`, so the method ends
-// without a return on that path ("missing return statement"). Inserting `return null;` after the
-// switch completes the break path; cases that already return/throw never reach it. Only fires when
-// the next non-blank line after the switch-closing `}` is a block close (`}` / `}else` / `}catch`),
-// so a switch followed by a real statement (ClassReader's `continue;`) is left alone.
-// Kill-switch: JDEC_FIX_SWITCH_BREAK_RETURN_OFF=1.
-func fixSwitchBreakMissingReturn(body string) string {
-	if jdecenv.Get("JDEC_FIX_SWITCH_BREAK_RETURN_OFF") == "1" {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	switchRe := regexp.MustCompile(`^(\t+)switch \(.*\)\{\s*$`)
-	breakRe := regexp.MustCompile(`^\t+break;\s*$`)
-	type insertSite struct {
-		at     int
-		indent string
-	}
-	var sites []insertSite
-	for i := 0; i < len(lines); i++ {
-		ln := strings.TrimRight(lines[i], "\r")
-		m := switchRe.FindStringSubmatch(ln)
-		if m == nil {
-			continue
-		}
-		switchIndent := m[1]
-		depth := 0
-		switchEnd := -1
-		for j := i; j < len(lines); j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			for b := 0; b < len(jl); b++ {
-				switch jl[b] {
-				case '{':
-					depth++
-				case '}':
-					depth--
-					if depth == 0 {
-						switchEnd = j
-					}
-				}
-			}
-			if switchEnd >= 0 {
-				break
-			}
-		}
-		if switchEnd < 0 {
-			continue
-		}
-		hasSwitchBreak := false
-		loopDepth := 0
-		nestedSwitchDepth := 0
-		for j := i + 1; j < switchEnd; j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			if switchRe.MatchString(jl) {
-				nestedSwitchDepth++
-				continue
-			}
-			compact := strings.ReplaceAll(strings.TrimSpace(jl), " ", "")
-			if strings.Contains(compact, "do{") {
-				loopDepth++
-			}
-			if nestedSwitchDepth == 0 && loopDepth == 0 && breakRe.MatchString(jl) {
-				hasSwitchBreak = true
-				break
-			}
-			if strings.Contains(compact, "}while(") || strings.HasPrefix(compact, "}while") {
-				if loopDepth > 0 {
-					loopDepth--
-				}
-			}
-			if nestedSwitchDepth > 0 {
-				for _, ch := range jl {
-					switch ch {
-					case '{':
-						nestedSwitchDepth++
-					case '}':
-						nestedSwitchDepth--
-						if nestedSwitchDepth < 0 {
-							nestedSwitchDepth = 0
-						}
-					}
-				}
-			}
-		}
-		if !hasSwitchBreak {
-			continue
-		}
-		next := -1
-		for j := switchEnd + 1; j < len(lines); j++ {
-			if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
-				continue
-			}
-			next = j
-			break
-		}
-		if next < 0 {
-			continue
-		}
-		nextTrim := strings.TrimSpace(strings.TrimRight(lines[next], "\r"))
-		if nextTrim != "}" &&
-			!strings.HasPrefix(nextTrim, "}else") && !strings.HasPrefix(nextTrim, "} else") &&
-			!strings.HasPrefix(nextTrim, "}catch") && !strings.HasPrefix(nextTrim, "} catch") &&
-			!strings.HasPrefix(nextTrim, "}finally") && !strings.HasPrefix(nextTrim, "} finally") {
-			continue
-		}
-		if !enclosingReturnsReference(lines, i) {
-			continue
-		}
-		sites = append(sites, insertSite{at: switchEnd, indent: switchIndent})
 	}
 	if len(sites) == 0 {
 		return body

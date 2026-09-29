@@ -28,3 +28,22 @@ func TestFoldDefinitionPreservesAliasAndReplacement(t *testing.T) {
 		t.Fatal("parameter lost its identity")
 	}
 }
+
+func TestArrayFoldSelectsOnlySurvivingUse(t *testing.T) {
+	array := values.NewNewArrayExpression(types.NewJavaArrayType(types.NewJavaClass("java.lang.String")))
+	array.HasEvaluationEndPC, array.EvaluationEndPC = true, 11
+	removed := &VarFoldRule{CurrentOpcode: &OpCode{CurrentOffset: 5}}
+	live := &VarFoldRule{CurrentOpcode: &OpCode{CurrentOffset: 13}}
+	if got := soleArrayUseAfterInitializer(array, []*VarFoldRule{removed, live}); got != live {
+		t.Fatal("selected removed element-store load instead of the live argument")
+	}
+	for _, pairs := range [][]*VarFoldRule{{removed}, {live, live}, {removed, nil}} {
+		if soleArrayUseAfterInitializer(array, pairs) != nil {
+			t.Fatal("accepted an ambiguous or absent surviving read")
+		}
+	}
+	array.HasEvaluationEndPC = false
+	if soleArrayUseAfterInitializer(array, []*VarFoldRule{live}) != nil {
+		t.Fatal("accepted an incomplete array")
+	}
+}

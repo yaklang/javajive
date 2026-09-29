@@ -3413,6 +3413,16 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			//appendNode(statements.NewAssignStatement(ref, val, true))
 		}
 		return func(n int) {
+			if n > 0 {
+				// The existing SlotValue is shared by all duplicated stack entries.
+				// Its one replacement callback is not a single evaluation site:
+				// inlining a checkcast/call into it would execute that call for
+				// every consumer. Retain the defining temporary until distinct
+				// use sites are represented (this applies to all DUP families).
+				if ref, ok := UnpackSoltValue(value).(*values.JavaRef); ok && ref != nil {
+					d.disFoldRef = append(d.disFoldRef, ref)
+				}
+			}
 		}
 	}
 	loadVarBySlot := func(slot int) values.JavaValue {
@@ -4347,13 +4357,17 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(v1)
 		runtimeStackSimulation.Push(v2)
 	case OP_DUP:
-		// Do not ref-fold NewExpression values from 'new; dup; invokespecial' patterns:
-		// the invokespecial modifies the NewExpression in-place (ArgumentsGetter), and
-		// ref-folding it into a shared temp variable causes both branches of an if/else
-		// to share the same variable, corrupting the output. Array creation NewExpressions
-		// (which have Length set) DO need ref-folding for array-store patterns.
+		// The uninitialized reference in NEW; DUP; invokespecial belongs to
+		// one constructor expression. A DUP AFTER that constructor instead
+		// shares the initialized object's identity (e.g. (x = new T()).mutate()).
+		// Duplicating the NewExpression there would allocate two objects,
+		// mutating a fresh copy while x still points to the untouched original.
 		peekVal := UnpackSoltValue(runtimeStackSimulation.Peek().(values.JavaValue))
-		if newExpr, ok := peekVal.(*values.NewExpression); !ok || len(newExpr.Length) > 0 {
+		materialize := true
+		if allocation, ok := peekVal.(*values.NewExpression); ok && !allocation.IsArray() {
+			materialize = d.isInitializedAllocationAtDup(allocation, opcode)
+		}
+		if materialize {
 			checkAndConvertRef(runtimeStackSimulation.Peek().(values.JavaValue))(1)
 		}
 		runtimeStackSimulation.Push(runtimeStackSimulation.Peek())
@@ -6703,9 +6717,16 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		if opcode.Instr.OpCode == OP_TABLESWITCH || opcode.Instr.OpCode == OP_LOOKUPSWITCH {
 			node.SwitchCases = omap.NewEmptyOrderedMap[int, *Node]()
+			node.SwitchJumpOnlyCases = map[int]bool{}
 			opcode.SwitchJmpCase1.ForEach(func(key, index int) bool {
 				if index >= 0 && index < len(node.Next) {
 					node.SwitchCases.Set(key, node.Next[index])
+				}
+				if index >= 0 && index < len(opcode.Target) {
+					entry := opcode.Target[index]
+					if entry != nil && entry.Instr != nil && (entry.Instr.OpCode == OP_GOTO || entry.Instr.OpCode == OP_GOTO_W) {
+						node.SwitchJumpOnlyCases[key] = true
+					}
 				}
 				return true
 			})
@@ -7045,6 +7066,15 @@ func (d *Decompiler) ParseStatement() error {
 				return true
 			}
 			pair := pairs[0]
+			if array, ok := values.UnpackSoltValue(val).(*values.NewExpression); ok && array.IsArray() && attr[0] > 0 {
+				// Array folding removed its element stores, but their old load
+				// callbacks still exist in pairs. Replacing one of those dead
+				// reads and deleting the declaration loses the live array.
+				pair = soleArrayUseAfterInitializer(array, pairs)
+				if pair == nil {
+					return true
+				}
+			}
 			var sourceNode, node *Node
 			if pair.UserIsNextOpcode {
 				if len(pair.CurrentOpcode.Target) != 1 {

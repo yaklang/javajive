@@ -174,6 +174,22 @@ func countOtherCasesExitingTo(manager *RewriteManager, switchNode, cand *core.No
 	return cnt
 }
 
+// A join also used by an empty case can have just ONE other case body: e.g.
+// grouped allowed characters versus a default validation branch. Counting two
+// other bodies misses that loop latch. Raw GOTO entries distinguish an empty
+// case from a real fall-through label, whose body must remain inside switch.
+func switchCaseHasOnlyJumpEntries(node, candidate *core.Node, cases *omap.OrderedMap[switchLabel, *core.Node]) bool {
+	found, onlyJumps := false, true
+	cases.ForEach(func(label switchLabel, target *core.Node) bool {
+		if target == candidate {
+			found = true
+			onlyJumps = onlyJumps && !label.Default && node.SwitchJumpOnlyCases[int(label.Value)]
+		}
+		return true
+	})
+	return found && onlyJumps
+}
+
 func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	if node.SwitchPrepared {
 		return nil
@@ -271,7 +287,8 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 			if cand == nil {
 				return true
 			}
-			if c := countOtherCasesExitingTo(manager, node, cand, caseStarts); c >= 2 && c > bestCnt {
+			c := countOtherCasesExitingTo(manager, node, cand, caseStarts)
+			if (c >= 2 || (c == 1 && switchCaseHasOnlyJumpEntries(node, cand, caseMap))) && c > bestCnt {
 				best = cand
 				bestCnt = c
 			}

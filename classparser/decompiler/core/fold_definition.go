@@ -18,3 +18,26 @@ func foldDefinitionValue(ref *values.JavaRef) values.JavaValue {
 	}
 	return ref.Val
 }
+
+// Only a load after a proved complete initializer can be its surviving use.
+// A DUP inside initialization can share its callback with later consumers;
+// keep that temporary instead of guessing which callback survived the fold.
+func soleArrayUseAfterInitializer(array *values.NewExpression, pairs []*VarFoldRule) *VarFoldRule {
+	if array == nil || !array.HasEvaluationEndPC {
+		return nil
+	}
+	var use *VarFoldRule
+	for _, pair := range pairs {
+		if pair == nil || pair.CurrentOpcode == nil {
+			return nil
+		}
+		if int(pair.CurrentOpcode.CurrentOffset) <= array.EvaluationEndPC {
+			continue
+		}
+		if use != nil {
+			return nil
+		}
+		use = pair
+	}
+	return use
+}

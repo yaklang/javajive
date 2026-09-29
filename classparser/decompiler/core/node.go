@@ -12,6 +12,10 @@ type Node struct {
 	SwitchCases    *omap.OrderedMap[int, *Node]
 	SwitchDefault  *Node
 	SwitchPrepared bool
+	// A raw case entry containing only GOTO is an empty transfer, rather than
+	// an ordinary label sharing the body reached after goto removal. Keep this
+	// witness by label while the target node changes during CFG rewrites.
+	SwitchJumpOnlyCases map[int]bool
 
 	Id                  int
 	LoopBreak           bool
