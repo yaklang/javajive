@@ -32,3 +32,18 @@ func TestSwitchEmptyEntryRequiresEveryLabelWitness(t *testing.T) {
 		})
 	}
 }
+
+func TestSwitchExitCountsBodiesNotGroupedLabels(t *testing.T) {
+	sw, first, second, exit := &core.Node{}, &core.Node{}, &core.Node{}, &core.Node{}
+	first.AddNext(exit)
+	second.AddNext(exit)
+	manager := &RewriteManager{DominatorMap: map[*core.Node][]*core.Node{
+		sw: {first, second, exit},
+	}}
+	if got := countOtherCasesExitingTo(manager, sw, exit, []*core.Node{first, first, exit}); got != 1 {
+		t.Fatalf("grouped labels counted as %d bodies, want 1", got)
+	}
+	if got := countOtherCasesExitingTo(manager, sw, exit, []*core.Node{first, first, second, exit}); got != 2 {
+		t.Fatalf("distinct bodies counted as %d, want 2", got)
+	}
+}

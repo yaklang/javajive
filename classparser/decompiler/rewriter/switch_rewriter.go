@@ -163,10 +163,14 @@ func countOtherCasesExitingTo(manager *RewriteManager, switchNode, cand *core.No
 		return 0
 	}
 	cnt := 0
+	seen := map[*core.Node]bool{}
 	for _, s := range caseStarts {
-		if s == nil || s == cand {
+		if s == nil || s == cand || seen[s] {
 			continue
 		}
+		// Grouped labels share one body. Counting that body twice would make
+		// a genuine fall-through target look like a multi-arm exit.
+		seen[s] = true
 		if _, ok := caseBodyExitNodes(manager, switchNode, s)[cand]; ok {
 			cnt++
 		}
@@ -381,6 +385,12 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		def := switchData[3].(statements.SwitchDefault)
 		valueToBodyOffset[switchLabel{Default: true}] = int(def.Offset)
 	}
+	// Remove a proved empty default BEFORE grouping labels by target. Otherwise
+	// default becomes the sole owner of the shared body, the explicit labels
+	// become nil aliases, and dropping default later also drops their break.
+	if node.SwitchEmptyDefaultMerge && caseMap.GetMust(switchLabel{Default: true}) == node.MergeNode {
+		caseMap.Delete(switchLabel{Default: true})
+	}
 	caseItems := []*statements.CaseItem{}
 	switchStatement := statements.NewSwitchStatement(data, caseItems)
 	caseStartNodesMap := map[*core.Node]struct{}{}
@@ -442,7 +452,10 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		// absorb the merge/tail code into this case and (because no break is emitted) make every case
 		// fall through into `default: throw`. Emit `case K: break;` (empty body + explicit break) so the
 		// matched value is a no-op and control leaves the switch; the merge code is emitted after it.
-		if !caseItem.IsDefault && node.SwitchEmptyCaseMerge && startNode == node.MergeNode {
+		// An empty default and explicit empty cases can share this same exit.
+		// Dropping default is safe, but the explicit labels still need a break
+		// or they would fall through to the next physical case body.
+		if !caseItem.IsDefault && (node.SwitchEmptyCaseMerge || node.SwitchEmptyDefaultMerge) && startNode == node.MergeNode {
 			caseItem.Body = []statements.Statement{statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
 				return "break"
 			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
