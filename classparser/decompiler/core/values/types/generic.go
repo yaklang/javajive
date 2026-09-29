@@ -1493,7 +1493,23 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 				return nil
 			}
 		}
-		if msig := methodSigs[class_context.MethodSigKey(method, argc)]; msig != "" {
+		// An arity-only signature can belong to a DIFFERENT overload declared
+		// here while the descriptor-selected method is inherited. For example,
+		// RealFieldElement<T> declares multiply(double), but inherits
+		// FieldElement<T>.multiply(T): using multiply/1 for the latter stops the
+		// walk at the double formal, then an erased Object/FieldElement cast is
+		// invented for the T argument. An exact descriptor always won above;
+		// when a competing descriptor exists, walk to the actual declaration.
+		msig := methodSigs[class_context.MethodSigKey(method, argc)]
+		competingHere := false
+		if msig != "" && descriptor != "" {
+			keys := make(map[string]bool, len(methodSigs))
+			for key := range methodSigs {
+				keys[key] = true
+			}
+			competingHere = class_context.NameHasSameArityOverload(method, descriptor, keys)
+		}
+		if msig != "" && !competingHere {
 			if rawGenericReceiver {
 				return nil
 			}
