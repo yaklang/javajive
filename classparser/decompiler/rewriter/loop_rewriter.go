@@ -801,24 +801,22 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 			return headerOut[0]
 		}
 	}
-	if len(outNodes) > 1 {
-		edgeSet := utils2.NewSet[*core.Node]()
-		core.WalkGraph[*core.Node](outNodes[0], func(node *core.Node) ([]*core.Node, error) {
-			edgeSet.Add(node)
-			return loopAnalysisSuccessors(node), nil
-		})
-		var mergeNode *core.Node
-		core.WalkGraph[*core.Node](outNodes[1], func(node *core.Node) ([]*core.Node, error) {
-			if edgeSet.Has(node) {
-				mergeNode = node
-				return nil, nil
-			}
-			return loopAnalysisSuccessors(node), nil
-		})
-		return mergeNode
-	}
+	return commonLoopExit(outNodes)
+}
 
-	return nil
+// Every exit path must pass through a shared loop continuation. Intersecting
+// only the first two reachable sets can select a terminal case body while a
+// third exit returns elsewhere. A labeled break to that body then skips its
+// effects (or leaves them unreachable inside the loop). Use the nearest common
+// post-dominator of ALL exit entries, including destinations hidden by switch
+// break leaves. The method-end sentinel is not a printable continuation.
+func commonLoopExit(exits []*core.Node) *core.Node {
+	root := &core.Node{Next: exits}
+	end := generatePostDominatorMap(root, loopAnalysisSuccessors)[root]
+	if IsEndNode(end) {
+		return nil
+	}
+	return end
 }
 
 // Shared handler entries describe split protected intervals, not one lexical
