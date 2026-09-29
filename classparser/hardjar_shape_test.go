@@ -3020,12 +3020,13 @@ func TestWrapComparatorComparingLambdaJarFS(t *testing.T) {
 	}
 }
 
-func TestWrapRawListArgFromListExtendsOverload(t *testing.T) {
-	in := "class C {\n\tvoid withFallbackTo(List<? extends Strategy> var1) {}\n\tvoid m() {\n\t\treturn this.withFallbackTo((List)(var2));\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := wrapRawListArgFromListExtendsOverload(in)
-	if !strings.Contains(out, "this.withFallbackTo((List<? extends Strategy>)(var2))") {
-		t.Fatalf("missing List<? extends> wrap:\n%s", out)
+func TestHardjarListCastKeepsCalleeTypeVariablesInTheirScope(t *testing.T) {
+	for _, receiver := range []string{"this", "other"} {
+		in := "class C {\n\t<K> int count(List<? extends K> var1) {return var1.size();}\n\tint m(Object var2) {\n\t\treturn " + receiver + ".count(((List)(var2)));\n\t}\n}\n"
+		out := fixHardjarShapes(in)
+		if !strings.Contains(out, receiver+".count(((List)(var2)))") {
+			t.Fatalf("a callee's K must not narrow a caller cast (receiver %s):\n%s", receiver, out)
+		}
 	}
 }
 
@@ -3080,7 +3081,7 @@ func TestWrapObjectTypeVarArgsUtilDump(t *testing.T) {
 	}
 }
 
-func TestWrapRawListArgFromListExtendsOverloadJarFS(t *testing.T) {
+func TestListOverloadUsesExactDeclarationBeforeTextRewritesJarFS(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip(err)
@@ -3101,8 +3102,8 @@ func TestWrapRawListArgFromListExtendsOverloadJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if !strings.Contains(on, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(var2))") {
-		t.Fatalf("ON missing List<? extends> wrap:\n%s", clipForTest(on, "withFallbackTo((List"))
+	if !strings.Contains(on, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(") {
+		t.Fatalf("ON lost the exact List overload target:\n%s", clipForTest(on, "withFallbackTo((List"))
 	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
 	jfs2, err := NewJarFSFromLocal(jar)
@@ -3115,11 +3116,8 @@ func TestWrapRawListArgFromListExtendsOverloadJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if strings.Contains(off, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(var2))") {
-		t.Fatalf("OFF already has wrap (switch inert):\n%s", clipForTest(off, "withFallbackTo((List"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	if !strings.Contains(off, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(") {
+		t.Fatalf("binding must also hold without text rewrites:\n%s", clipForTest(off, "withFallbackTo((List"))
 	}
 }
 
@@ -3841,7 +3839,7 @@ func TestWrapComparingLongLambdaFromNextCastJarFS(t *testing.T) {
 	}
 }
 
-func TestWrapWithParametersCompoundListJarFS(t *testing.T) {
+func TestListOverloadDoesNotInventWithParametersTypeJarFS(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip(err)
@@ -3862,8 +3860,8 @@ func TestWrapWithParametersCompoundListJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if !strings.Contains(on, "withParameters(((List<? extends Type>)(CompoundList.of(") {
-		t.Fatalf("ON missing List<? extends Type> wrap:\n%s", clipForTest(on, "withParameters"))
+	if !strings.Contains(on, "withParameters(((List)(CompoundList.of(") {
+		t.Fatalf("ON lost the descriptor cast or invented a generic bound:\n%s", clipForTest(on, "withParameters"))
 	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
 	jfs2, err := NewJarFSFromLocal(jar)
@@ -3876,11 +3874,8 @@ func TestWrapWithParametersCompoundListJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if strings.Contains(off, "List<? extends Type>") {
-		t.Fatalf("OFF already has List<? extends Type> (switch inert):\n%s", clipForTest(off, "withParameters"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	if !strings.Contains(off, "withParameters(CompoundList.of(") || strings.Contains(off, "List<? extends Type>") {
+		t.Fatalf("OFF changed the original call or invented a generic bound:\n%s", clipForTest(off, "withParameters"))
 	}
 }
 

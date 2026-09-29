@@ -86,7 +86,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = unwrapEnumArrayIndexCast(body)
 	body = rewriteClassLocalCmpZero(body)
 	body = wrapTypeVarReturnRawCast(body)
-	body = wrapRawListArgFromListExtendsOverload(body)
+	// Preserve raw List casts: a name-only source scan cannot establish the
+	// selected overload, receiver owner, or scope of a callee type parameter.
 	body = wrapCollectionStreamMethodRef(body)
 	body = wrapCollectionLocalStreamMethodRef(body)
 	body = wrapEntryGetKeyPutArg(body)
@@ -6350,83 +6351,6 @@ func matcherIterableElemType(body string) string {
 		return ""
 	}
 	if isStmtKeyword(typ) || isDecompilerLocal(typ) || isPrimitiveOrObjectName(typ) {
-		return ""
-	}
-	return typ
-}
-
-func wrapRawListArgFromListExtendsOverload(body string) string {
-	needle := "((List)("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		innerOpen := i + len("((List)")
-		if innerOpen >= len(body) || body[innerOpen] != '(' {
-			from = i + 1
-			continue
-		}
-		innerClose := matchingCloseParen(body, innerOpen)
-		if innerClose < 0 || innerClose+1 >= len(body) || body[innerClose+1] != ')' {
-			from = i + 1
-			continue
-		}
-		if strings.Contains(body[i:innerClose+2], "List<? extends ") {
-			from = innerClose
-			continue
-		}
-		dot := strings.LastIndex(body[:i], ".")
-		if dot < 0 || i-dot > 160 {
-			from = i + 1
-			continue
-		}
-		nameStart := dot + 1
-		for nameStart < i && (body[nameStart] == ' ' || body[nameStart] == '\t') {
-			nameStart++
-		}
-		name, ok2, afterName := readJavaIdent(body[nameStart:])
-		if !ok2 || !strings.HasPrefix(strings.TrimLeft(afterName, " \t"), "(") {
-			from = i + 1
-			continue
-		}
-		mid := strings.TrimSpace(body[dot+1 : i])
-		if mid != name && mid != name+"(" {
-			from = i + 1
-			continue
-		}
-		elem := listExtendsOverloadElem(body, name)
-		if elem == "" && name == "withParameters" && strings.Contains(body[innerOpen:innerClose+1], "CompoundList.of(") {
-			elem = "Type"
-		}
-		if elem == "" || strings.Contains(elem, ".") {
-			from = i + 1
-			continue
-		}
-		inner := body[innerOpen : innerClose+1]
-		wrap := "((List<? extends " + elem + ">)" + inner + ")"
-		body = body[:i] + wrap + body[innerClose+2:]
-		from = i + len(wrap)
-	}
-}
-
-func listExtendsOverloadElem(body, name string) string {
-	needle := name + "(List<? extends "
-	idx := strings.Index(body, needle)
-	if idx < 0 {
-		return ""
-	}
-	typ, ok, rest := readDottedType(body[idx+len(needle):])
-	if !ok || typ == "" {
-		return ""
-	}
-	rest = strings.TrimLeft(rest, " \t")
-	if !strings.HasPrefix(rest, ">") {
-		return ""
-	}
-	if isStmtKeyword(lastDottedIdent(typ)) || isDecompilerLocal(lastDottedIdent(typ)) {
 		return ""
 	}
 	return typ
