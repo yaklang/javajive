@@ -725,20 +725,6 @@ func TestFixPreferringStringsAsListCastIsLoadBearing(t *testing.T) {
 	}
 }
 
-func TestFixValueDifferenceCreateCastIsLoadBearing(t *testing.T) {
-	in := "var6.put((K)(var9),Maps$ValueDifferenceImpl.create(var10,var11));\n"
-	os.Unsetenv("JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF")
-	on := fixValueDifferenceCreateCast(in)
-	if !strings.Contains(on, "(MapDifference$ValueDifference)(Maps$ValueDifferenceImpl.create(var10,var11))") {
-		t.Errorf("fix ON: expected ValueDifference raw cast, got:\n%s", on)
-	}
-	t.Setenv("JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF", "1")
-	off := fixValueDifferenceCreateCast(in)
-	if strings.Contains(off, "(MapDifference$ValueDifference)") {
-		t.Errorf("fix OFF: expected no cast, got:\n%s", off)
-	}
-}
-
 func TestFixVisitAnnotationConsumerCastIsLoadBearing(t *testing.T) {
 	in := "return this.visitAnnotation(var2,(Consumer<MergedAnnotation>)((l0) -> {\nthis.attributes.put(var1,l0);\n}));\n"
 	os.Unsetenv("JDEC_VISITANNOTATION_CONSUMER_CAST_OFF")

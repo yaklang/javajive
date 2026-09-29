@@ -1573,11 +1573,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// MergedAnnotationReadingVisitor.visitAnnotation.
 	// Kill-switch: JDEC_VISITANNOTATION_CONSUMER_CAST_OFF=1.
 	full = c.sourceRewrite("fixVisitAnnotationConsumerCast", "class_source", full, fixVisitAnnotationConsumerCast)
-	// fixValueDifferenceCreateCast wraps Maps$ValueDifferenceImpl.create(...) in a raw
-	// MapDifference$ValueDifference cast so put(K, ValueDifference<V>) does not infer
-	// V from Object,Object. Real hit: guava Maps.doDifference.
-	// Kill-switch: JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF=1.
-	full = c.sourceRewrite("fixValueDifferenceCreateCast", "class_source", full, fixValueDifferenceCreateCast)
 	// Scoped to the exact getUninterruptibly empty-try shape (not a class-wide regex).
 	full = c.sourceRewrite("fixGetUninterruptiblyGetInTry", "class_source", full, fixGetUninterruptiblyGetInTry)
 	// Scoped to the exact drainUninterruptibly empty-try shape: poll() folded out of
@@ -5191,6 +5186,7 @@ var ctorOrMethodRe = regexp.MustCompile(`^\t+(?:(?:public|protected|private)\s+)
 // isMethodOrInitBlockStart reports whether ln opens a method/ctor body OR a static/instance
 // initializer block.
 func isMethodOrInitBlockStart(ln string) bool {
+	ln = leadingTabs(ln) + strings.TrimSpace(maskDeclarationAnnotations(ln))
 	if methodOrInitBlockRe.MatchString(ln) {
 		return true
 	}
@@ -8011,28 +8007,6 @@ func fixVisitAnnotationConsumerCast(body string) string {
 	return body
 }
 
-// fixValueDifferenceCreateCast wraps `Maps$ValueDifferenceImpl.create(a,b)` as
-// `(MapDifference$ValueDifference)(Maps$ValueDifferenceImpl.create(a,b))` so a
-// Map.put of the result infers from the cast rather than Object,Object.
-// Kill-switch: JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF=1.
-func fixValueDifferenceCreateCast(body string) string {
-	if jdecenv.Get("JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF") == "1" {
-		return body
-	}
-	if !strings.Contains(body, "ValueDifferenceImpl.create") {
-		return body
-	}
-	old := "Maps$ValueDifferenceImpl.create("
-	neu := "(MapDifference$ValueDifference)(Maps$ValueDifferenceImpl.create("
-	if !strings.Contains(body, old) {
-		return body
-	}
-	body = strings.ReplaceAll(body, old, neu)
-	// Close the extra paren after create(var10,var11) — the two-arg form used by doDifference.
-	body = strings.ReplaceAll(body, "ValueDifferenceImpl.create(var10,var11)", "ValueDifferenceImpl.create(var10,var11))")
-	return body
-}
-
 // getUnintEmptyTryBlock is the exact dump of AbstractFuture/Uninterruptibles
 // getUninterruptibly: CFG folded future.get() out of the try, leaving `try{break;}`.
 const getUnintEmptyTryBlock = "\t\tdo{\n" +
@@ -9214,24 +9188,6 @@ func fixProtobufRemainingReconstructs(body string) string {
 	// ByteBufferWriter ThreadLocal<SoftReference<byte[]>>.set(null).
 	if strings.Contains(body, "class ByteBufferWriter") {
 		body = strings.ReplaceAll(body, "BUFFER.set((Object)(null));", "BUFFER.set(null);")
-	}
-	// CodedOutputStreamWriter: Metadata<K,V> vs Metadata<Boolean/Integer/Long/String,V>.
-	if strings.Contains(body, "class CodedOutputStreamWriter") {
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicBooleanMapEntry(var1,false,(V)(var5),var2);",
-			"this.writeDeterministicBooleanMapEntry(var1,false,(V)(var5),(MapEntryLite$Metadata)(var2));")
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicBooleanMapEntry(var1,true,(V)(var5),var2);",
-			"this.writeDeterministicBooleanMapEntry(var1,true,(V)(var5),(MapEntryLite$Metadata)(var2));")
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicIntegerMap(var1,var2,var3);",
-			"this.writeDeterministicIntegerMap(var1,(MapEntryLite$Metadata)(var2),(Map)(var3));")
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicLongMap(var1,var2,var3);",
-			"this.writeDeterministicLongMap(var1,(MapEntryLite$Metadata)(var2),(Map)(var3));")
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicStringMap(var1,var2,var3);",
-			"this.writeDeterministicStringMap(var1,(MapEntryLite$Metadata)(var2),(Map)(var3));")
 	}
 	// DiscardUnknownFieldsParser$1: AbstractParser<T extends MessageLite>.
 	if strings.Contains(body, "class DiscardUnknownFieldsParser$1") {

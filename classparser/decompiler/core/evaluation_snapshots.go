@@ -101,3 +101,48 @@ func (d *Decompiler) canInlineImmediateMethodRef(op *OpCode, value values.JavaVa
 func normalizeJavaClassName(name string) string {
 	return strings.ReplaceAll(name, ".", "/")
 }
+
+// A lambda selected on the operand stack must remain in its selected arm.
+// Materializing it as a statement before reconstructing the ternary strands
+// one arm's definition (or hoists creation from the other arm). Zero captures,
+// `this`, and literals need no snapshot: their values cannot change later.
+// Other local captures retain snapshots because deferred lambda execution must
+// not observe a reassigned local. Only an immediate merge consumer and equal
+// exception coverage prove that no intervening evaluation is crossed.
+func (d *Decompiler) canInlineConditionalLambda(op *OpCode, args []values.JavaValue) bool {
+	if d == nil || op == nil || len(op.Target) != 1 {
+		return false
+	}
+	for _, arg := range args {
+		switch v := values.UnpackSoltValue(arg).(type) {
+		case *values.JavaLiteral:
+		case *values.JavaRef:
+			if v == nil || !v.IsThis {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	merge := op.Target[0]
+	if merge == nil || merge.Instr == nil {
+		return false
+	}
+	if merge.Instr.OpCode == OP_GOTO || merge.Instr.OpCode == OP_GOTO_W {
+		if len(merge.Target) != 1 || len(merge.Source) != 1 || merge.Source[0] != op ||
+			!sameHandlerCoverage(d.handlersAt(op), d.handlersAt(merge)) {
+			return false
+		}
+		merge = merge.Target[0]
+	}
+	if merge == nil || merge.Instr == nil || len(merge.Source) < 2 || merge.CurrentOffset <= op.CurrentOffset ||
+		!sameHandlerCoverage(d.handlersAt(op), d.handlersAt(merge)) {
+		return false
+	}
+	switch merge.Instr.OpCode {
+	case OP_ASTORE, OP_ASTORE_0, OP_ASTORE_1, OP_ASTORE_2, OP_ASTORE_3,
+		OP_PUTFIELD, OP_PUTSTATIC, OP_ARETURN:
+		return true
+	}
+	return false
+}

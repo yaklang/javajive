@@ -60,6 +60,14 @@ func (d *Decompiler) referenceUseConstraints() map[*values.JavaRef][]types.JavaT
 		case OP_ARETURN:
 			if len(stack) > 0 && d.FunctionType != nil {
 				add(stack[0], d.FunctionType.ReturnType)
+				if call := polyReturnedCall(stack[0]); call != nil {
+					targets := call.FunctionalReturnArgumentTargets(d.FunctionType.ReturnType, d.FunctionContext)
+					for i, arg := range call.Arguments {
+						if target := targets[i]; target != nil {
+							add(arg, target)
+						}
+					}
+				}
 			}
 		case OP_AASTORE:
 			if len(stack) > 2 && stack[2].Type().IsArray() {
@@ -213,4 +221,24 @@ func uniqueParameterizedConstraint(rawName string, constraints []types.JavaType)
 		}
 	}
 	return target, false
+}
+
+// A returned invocation may have been materialized to preserve evaluation order.
+func polyReturnedCall(value values.JavaValue) *values.FunctionCallExpression {
+	seen := map[*values.JavaRef]bool{}
+	for value != nil {
+		switch v := values.UnpackSoltValue(value).(type) {
+		case *values.FunctionCallExpression:
+			return v
+		case *values.JavaRef:
+			if seen[v] {
+				return nil
+			}
+			seen[v] = true
+			value = v.Val
+		default:
+			return nil
+		}
+	}
+	return nil
 }

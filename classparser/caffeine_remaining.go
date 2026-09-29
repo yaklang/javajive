@@ -180,10 +180,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		"new WriteThroughEntry<K, V>((ConcurrentMap)(this.this$1.this$0),(K)(var1.getKey()),(V)(var2))")
 	if strings.Contains(body, "class BoundedLocalCache") {
 		body = strings.Replace(body,
-			"this.accessPolicy = (Consumer) (((this.evicts()) && (this.expiresAfterAccess())) ? (this::onAccess) : ((l0) -> {\n\t\t}));",
-			"this.accessPolicy = ((this.evicts()) && (this.expiresAfterAccess())) ? (this::onAccess) : ((l0) -> {\n\t\t});",
-			1)
-		body = strings.Replace(body,
 			"Object lv14_4 = Objects.requireNonNull(var1.apply(l0,l1));",
 			"V lv14_4 = (V)(Objects.requireNonNull(var1.apply(l0,l1)));",
 			1)
@@ -210,12 +206,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.Replace(body,
 			"return (((this.expiresAfterAccess()) ? ((((var2) - (var1.getAccessTime())) >= (this.expiresAfterAccessNanos())) ? (1) : (0)) : (0)) | ((this.expiresAfterWrite()) ? ((((var2) - (var1.getWriteTime())) >= (this.expiresAfterWriteNanos())) ? (1) : (0)) : (0))) | ((this.expiresVariable()) ? ((((var2) - (var1.getVariableTime())) >= (0L)) ? (1) : (0)) : (0));",
 			"return ((((this.expiresAfterAccess()) ? ((((var2) - (var1.getAccessTime())) >= (this.expiresAfterAccessNanos())) ? (1) : (0)) : (0)) | ((this.expiresAfterWrite()) ? ((((var2) - (var1.getWriteTime())) >= (this.expiresAfterWriteNanos())) ? (1) : (0)) : (0))) | ((this.expiresVariable()) ? ((((var2) - (var1.getVariableTime())) >= (0L)) ? (1) : (0)) : (0))) != (0);",
-			1)
-	}
-	if strings.Contains(body, "class Caffeine") {
-		body = strings.Replace(body,
-			"return ((var1) && ((this.expiry) != (null))) ? (new Async$AsyncExpiry(this.expiry)) : (this.expiry);",
-			"return (Expiry<K, V>) (((var1) && ((this.expiry) != (null))) ? (new Async$AsyncExpiry(this.expiry)) : (this.expiry));",
 			1)
 	}
 	if strings.Contains(body, "class LocalAsyncCache$AsMapView") {

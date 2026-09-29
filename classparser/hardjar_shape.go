@@ -4949,9 +4949,9 @@ func retypeAssignedNullToClass(body, search, prefix, init string) string {
 			continue
 		}
 		typ := uniqueAssignTargetClassType(member, ident)
-		if typ == "" || strings.Contains(typ, ".") {
-			typ = receiverTypeOfNullCmpAssign(member, ident)
-		}
+		// The receiver's type is not evidence for a call's result type:
+		// Node.getValue(), for example, returns Object, not Node.
+		// Require an actual typed assignment use of the result.
 		if typ == "" || strings.Contains(typ, ".") {
 			from = i + 1
 			continue
@@ -5980,39 +5980,6 @@ func assignComparedToNull(chunk, ident string) bool {
 		}
 	}
 	return false
-}
-
-func receiverTypeOfNullCmpAssign(chunk, ident string) string {
-	for _, needle := range []string{"(" + ident + " = ", "(" + ident + "="} {
-		from := 0
-		for {
-			rel := strings.Index(chunk[from:], needle)
-			if rel < 0 {
-				break
-			}
-			i := from + rel
-			rhs := chunk[i+len(needle):]
-			recv, ok, rest := readJavaIdent(rhs)
-			if !ok || recv == ident || !strings.HasPrefix(rest, ".") {
-				from = i + 1
-				continue
-			}
-			window := rhs
-			if len(window) > 240 {
-				window = window[:240]
-			}
-			if !strings.Contains(window, ") != (null)") && !strings.Contains(window, ") == (null)") {
-				from = i + 1
-				continue
-			}
-			typ := identDeclaredClassType(chunk, recv)
-			if typ != "" && !strings.Contains(typ, ".") {
-				return typ
-			}
-			from = i + 1
-		}
-	}
-	return ""
 }
 
 func uniqueAddElemType(chunk, ident string) string {

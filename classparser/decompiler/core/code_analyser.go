@@ -4171,6 +4171,10 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			return fmt.Errorf("invalid_input: %s", rep.Reason)
 		}
 		snapshotFamily := id.Normalized() == IdentityMakeConcat || id.Normalized() == IdentityMakeConcatWithConstants || id.Normalized() == IdentityLambdaMetafactory || id.Normalized() == IdentityLambdaAltMetafactory
+		if (id.Normalized() == IdentityLambdaMetafactory || id.Normalized() == IdentityLambdaAltMetafactory) &&
+			d.canInlineConditionalLambda(opcode, args) {
+			snapshotFamily = false
+		}
 		// Java source cannot declare operand temps before this()/super().
 		// Preserve the original constructor-argument expression there; unsafe
 		// concat operands remain explicitly unsupported by the adapter.
@@ -5114,7 +5118,8 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// ref in the ternary can strand its definition inside one branch; RewriteVar then
 	// hoists an uninitialized declaration and the merged expression reads null or an
 	// undeclared temp. Inline only a non-parameter CastExpression temp with exactly
-	// one registered use and a pure operand. Effectful cast motion across a merge can
+	// one registered use and a pure operand, or a proven call/cast suffix that
+	// stays on its original arm. Other effectful cast motion across a merge can
 	// alter generic typing, exception flow, or definite assignment even when one
 	// bytecode arm appears to feed the merge.
 	dupSharedRefs := map[string]bool{}
@@ -5131,7 +5136,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 		}
 	}
-	inlineSingleUseMergeLeaf := func(value values.JavaValue) values.JavaValue {
+	inlineSingleUseMergeLeaf := func(value values.JavaValue, entry, leaf, merge *OpCode, adopted map[*OpCode]bool) values.JavaValue {
 		ref, ok := UnpackSoltValue(value).(*values.JavaRef)
 		if !ok || ref == nil || ref.IsThis || ref.IsParam || ref.Id == nil || ref.Val == nil || dupSharedRefs[ref.VarUid] {
 			return value
@@ -5144,10 +5149,17 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				return value
 			}
 		}
-		resolved := GetRealValue(ref)
+		resolved := UnpackSoltValue(ref.Val)
 		cast, isCast := resolved.(*values.CastExpression)
-		if !isCast || !values.IsPure(cast.Value) {
+		if !isCast {
 			return value
+		}
+		if !values.IsPure(cast.Value) {
+			check := d.branchCallCastLeaf(ref, cast, entry, leaf, merge)
+			if check == nil {
+				return value
+			}
+			adopted[check] = true
 		}
 		return resolved
 	}
@@ -5166,6 +5178,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// unresolved leaf) and the caller falls back to the legacy path unchanged. sharedLeaf=false means
 	// it is a plain tree the legacy probe already handles, so the caller also defers to avoid churn.
 	buildSharedLeafTernary := func(mergeNode *OpCode, detectedIfNodes []*OpCode) (root *values.TernaryExpression, built map[*OpCode]*values.TernaryExpression, sharedLeaf bool, hasMiddleCond bool, ok bool) {
+		adoptedCasts := map[*OpCode]bool{}
 		// valueMergeSet is every node the merge detection registered as carrying a value across control
 		// flow (a ternary / short-circuit result on the operand stack). It is the principled signal for
 		// an INNER value computation: if two branches of a condition reconverge on such a node (other
@@ -5301,6 +5314,8 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 
 		built = map[*OpCode]*values.TernaryExpression{}
 		usedLeaf := map[*OpCode]bool{}
+		leafValues := map[*OpCode]values.JavaValue{}
+		nonLiteralShared := false
 		failed := false
 		putFieldLeafValue := func(cur *OpCode) values.JavaValue {
 			if cur == nil || cur.Instr.OpCode != OP_PUTFIELD || len(cur.stackConsumed) < 2 || cur.StackEntry == nil {
@@ -5349,26 +5364,19 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 						return nil
 					}
 					if usedLeaf[cur] {
-						// A ternary only evaluates its chosen arm, so textually reusing a shared leaf is
-						// semantically exact - BUT a ternary tree cannot share nodes, so a shared leaf is
-						// duplicated once per arm that reaches it at render time. That is harmless for the
-						// canonical short-circuit shape (the shared leaf is a single iconst_0 / iconst_1
-						// literal), but a shared leaf that is a large value subtree (e.g. a method-call
-						// fall-through in a giant instanceof type-dispatch) would expand combinatorially
-						// into megabytes of duplicated source. Only adopt literal shared leaves; decline
-						// any non-literal shared leaf so the legacy path (which keeps it as control flow)
-						// handles it unchanged.
-						if _, isLit := UnpackSoltValue(cur.StackEntry.value).(*values.JavaLiteral); !isLit {
-							failed = true
-							return nil
-						}
 						sharedLeaf = true
+						if _, literal := UnpackSoltValue(cur.StackEntry.value).(*values.JavaLiteral); !literal {
+							nonLiteralShared = true
+						}
+						return leafValues[cur]
 					}
 					usedLeaf[cur] = true
-					if putfieldValue := putFieldLeafValue(cur); putfieldValue != nil {
-						return putfieldValue
+					value := putFieldLeafValue(cur)
+					if value == nil {
+						value = inlineSingleUseMergeLeaf(cur.StackEntry.value, entry, cur, mergeNode, adoptedCasts)
 					}
-					return inlineSingleUseMergeLeaf(cur.StackEntry.value)
+					leafValues[cur] = value
+					return value
 				}
 				if isTernaryCondition(cur) {
 					return probe(cur)
@@ -5527,6 +5535,29 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		if failed || root == nil {
 			return nil, nil, false, false, false
 		}
+		if nonLiteralShared {
+			// Factor two shared value leaves behind a boolean routing tree.
+			// Duplicating an effectful leaf textually can explode output; the
+			// legacy fallback can also invert short-circuit polarity. A tree
+			// of conditions with two terminal values needs each value only once.
+			if len(leafValues) != 2 {
+				return nil, nil, false, false, false
+			}
+			leaves := make([]*OpCode, 0, 2)
+			for leaf := range leafValues {
+				leaves = append(leaves, leaf)
+			}
+			sort.Slice(leaves, func(i, j int) bool { return leaves[i].CurrentOffset < leaves[j].CurrentOffset })
+			var factored bool
+			root, built, factored = factorSharedValueTernary(root, built, leafValues[leaves[0]], leafValues[leaves[1]])
+			if !factored {
+				return nil, nil, false, false, false
+			}
+		}
+		// Publish only after the complete routing graph has been accepted.
+		for check := range adoptedCasts {
+			d.inlineCheckcast[check] = true
+		}
 		return root, built, sharedLeaf, hasMiddleCond, true
 	}
 	for _, code := range ternaryExpMergeNode {
@@ -5543,8 +5574,8 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					mergeNode.Id, mergeNode.CurrentOffset, len(ifNodes), ok, sharedLeaf, hasMiddleCond, len(built))
 			}
 			// Intercept every value ternary the principled builder can fully rebuild. The builder already
-			// rejects statement-dispatch paths (stores), cycles, unresolved arms, and non-literal shared
-			// leaves, so an ok result is a self-contained expression tree with callbacks for every adopted
+			// rejects statement-dispatch paths (stores), cycles, unresolved arms, and shared values that
+			// cannot be factored, so an ok result is a self-contained expression tree with callbacks for every adopted
 			// condition. The legacy combiner is kept only for shapes the probe cannot prove.
 			// The legacy chain combiner only attaches a condition callback to if-nodes with a direct leaf
 			// arm; any chain whose detection under-reports an interior condition leaks an empty slot
@@ -6842,68 +6873,14 @@ func (d *Decompiler) ParseStatement() error {
 	disRefUid := lo.Map(d.disFoldRef, func(item *values.JavaRef, index int) string {
 		return item.VarUid
 	})
-	// dupSharedRefUids collects every temporary that dup/dup_x1/dup_x2/dup2/dup2_x2 materialized to
-	// share ONE computed value between two consumers (the canonical shape is a compound assignment
-	// whose result is also consumed: `int r = (a[i] += 3)` compiles to `...iadd; dup_x2; iastore;
-	// istore`). Such a temp stays its own variable. When a SECOND variable (`r`) copies it, resolving
-	// the fold value THROUGH the temp all the way to its defining expression makes the copy
-	// re-evaluate that expression (Bug J: `return a[i] + 3` instead of `return r`, double-applying
-	// the add). resolveFoldValue below stops at these temps so the copy references the temp instead.
-	// Only refs MATERIALIZED by checkAndConvertRef inside a dup-family handler are genuine shared
-	// temps. opcodeIdToRef is also populated by every normal local store (keyed by the store
-	// opcode), so we must filter by the key opcode being a dup; otherwise ordinary copy chains
-	// (`var2 = var1; var3 = var2`) would be treated as shared and stop legitimate constant folding.
-	dupSharedRefUids := map[string]bool{}
-	for op, infos := range d.opcodeIdToRef {
-		if op == nil || op.Instr == nil {
-			continue
-		}
-		switch op.Instr.OpCode {
-		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
-			for _, info := range infos {
-				if r, ok := info[0].(*values.JavaRef); ok && r != nil {
-					dupSharedRefUids[r.VarUid] = true
-				}
-			}
-		}
-	}
-	// resolveFoldValue mirrors GetRealValue (unwrap ref/slot chains) but halts at a dup-shared temp
-	// other than the starting ref, returning that temp so a copy folds into a reference to it rather
-	// than into a re-evaluation of the shared expression.
-	resolveFoldValue := func(start *values.JavaRef) values.JavaValue {
-		var cur values.JavaValue = start
-		for {
-			if r, ok := cur.(*values.JavaRef); ok {
-				// A transitive alias must not inline a catch parameter or another
-				// definition explicitly protected from folding.
-				if r != start && slices.Contains(disRefUid, r.VarUid) {
-					return r
-				}
-				if r != start && dupSharedRefUids[r.VarUid] {
-					return r
-				}
-				if r.Val == nil {
-					return r
-				}
-				if cv, ok := r.Val.(*values.CustomValue); ok && cv.Flag == "param_placeholder" {
-					return r
-				}
-				cur = r.Val
-				continue
-			}
-			if s, ok := cur.(*values.SlotValue); ok {
-				if s.GetValue() == nil {
-					return s
-				}
-				cur = s.GetValue()
-				continue
-			}
-			return cur
-		}
-	}
+	// Fold one definition at a time. A copy's RHS is a local read, not the
+	// initializer of that local. Following JavaRef.Val transitively duplicates
+	// calls/allocations and loses intervening writes to the object. Keep the
+	// original SlotValue as well: its registered replacement callback must
+	// remain live if the source's own single-use fold runs later.
 	uidToPairs.ForEach(func(uid string, pairs []*VarFoldRule) bool {
 		ref := uidToRef[uid]
-		val := resolveFoldValue(ref)
+		val := foldDefinitionValue(ref)
 		attr := d.delRefUserAttr[ref.VarUid]
 		if slices.Contains(disRefUid, ref.VarUid) {
 			d.tracef("var-fold", "skip disabled ref=%s pairs=%d", traceRef(ref, d.FunctionContext), len(pairs))

@@ -2450,6 +2450,13 @@ func TestRetypeIntAssignedNullToClass(t *testing.T) {
 	}
 }
 
+func TestRetypeIntAssignedNullToClassRejectsReceiverType(t *testing.T) {
+	in := "class C {\n\tvoid read() {\n\t\tObject var6 = null;\n\t\tNode var4 = this.root;\n\t\tif ((var6 = var4.getValue()) != (null)){\n\t\t\tuse(var6);\n\t\t}\n\t}\n}\n"
+	if out := retypeIntAssignedNullToClass(in); out != in {
+		t.Fatalf("method receiver was used as result type evidence:\n%s", out)
+	}
+}
+
 func TestWrapIntIdentAsBooleanIf(t *testing.T) {
 	in := "class C {\n\tvoid m() {\n\t\tint var4 = 0;\n\t\tif (var4){\n\t\t\treturn;\n\t\t}\n\t}\n}\n"
 	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")

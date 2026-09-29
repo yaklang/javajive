@@ -13,6 +13,36 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
+func TestConditionalLambdaInliningPreservesCaptureAndHandlerBoundaries(t *testing.T) {
+	for _, kind := range []string{"uncaptured", "this", "mutable local", "call", "handler boundary", "intervening instruction", "no merge"} {
+		t.Run(kind, func(t *testing.T) {
+			op := &OpCode{Instr: &Instruction{OpCode: OP_INVOKEDYNAMIC}, CurrentOffset: 10}
+			merge := &OpCode{Instr: &Instruction{OpCode: OP_PUTFIELD}, CurrentOffset: 15, Source: []*OpCode{op, {}}}
+			op.Target = []*OpCode{merge}
+			d := &Decompiler{}
+			var args []values.JavaValue
+			switch kind {
+			case "this", "mutable local":
+				ref := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("Probe"))
+				ref.IsThis = kind == "this"
+				args = []values.JavaValue{values.NewSlotValue(ref, ref.Type())}
+			case "call":
+				args = []values.JavaValue{&values.FunctionCallExpression{}}
+			case "handler boundary":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 10, EndPc: 15, HandlerPc: 20}}
+			case "intervening instruction":
+				op.Target = []*OpCode{{Instr: &Instruction{OpCode: OP_INVOKESTATIC}, CurrentOffset: 12, Target: []*OpCode{merge}}}
+			case "no merge":
+				merge.Source = []*OpCode{op}
+			}
+			want := kind == "this" || kind == "uncaptured"
+			if got := d.canInlineConditionalLambda(op, args); got != want {
+				t.Fatalf("accepted=%t want=%t", got, want)
+			}
+		})
+	}
+}
+
 func TestDynamicOperandsEvaluateBeforeConcatConversion(t *testing.T) {
 	typ := types.NewJavaClass("java.lang.Object")
 	operand := func(name string) values.JavaValue {

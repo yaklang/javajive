@@ -893,6 +893,11 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 	// JDEC_GENERIC_PARAM_RECV_METHOD_OFF.
 	if jdecFlag(funcCtx, "JDEC_GENERIC_PARAM_RECV_METHOD_OFF") == "" {
 		if inner, ok := UnpackSoltValue(f.Object).(*FunctionCallExpression); ok && !inner.IsStatic && inner.Object != nil {
+			if ret := inner.inferredGenericMethodReturn(funcCtx); ret != nil {
+				if pt, ok := types.AsParameterizedType(ret); ok {
+					return pt.RawClassName, pt.TypeArgs
+				}
+			}
 			if iref, ok := UnpackSoltValue(inner.Object).(*JavaRef); ok && iref.IsThis {
 				if sig := funcCtx.MethodSignature(inner.FunctionName, len(inner.Arguments)); sig != "" {
 					if _, _, ret := types.ParseMethodSignatureFull(sig, funcCtx); ret != nil {
@@ -958,6 +963,9 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 	// Same-class instance field receiver (`this.field`): recover type args from the field's generic
 	// Signature; an inherited field (declared in a superclass) is recovered via the hierarchy walk.
 	if pt, ok := types.AsParameterizedType(RecoverThisFieldInstantiatedType(funcCtx, f.Object)); ok {
+		return pt.RawClassName, pt.TypeArgs
+	}
+	if pt, ok := types.AsParameterizedType(recoverParameterizedFieldReceiver(funcCtx, f.Object)); ok {
 		return pt.RawClassName, pt.TypeArgs
 	}
 	return "", nil
@@ -3561,7 +3569,10 @@ func sourceDenotableJavaType(typ types.JavaType, funcCtx *class_context.ClassCon
 	case *types.JavaClass:
 		return raw != nil && (strings.Contains(raw.Name, ".") || funcCtx.IsTypeParam(raw.Name))
 	case *types.JavaParameterizedType:
-		if raw == nil || raw.RawClassName == "" || !strings.Contains(raw.RawClassName, ".") {
+		// A parameterized Signature node always names a class (L...), including
+		// one in the default package. Bare foreign type variables are rejected
+		// above; they cannot legally carry their own type arguments.
+		if raw == nil || raw.RawClassName == "" {
 			return false
 		}
 		for _, arg := range raw.TypeArgs {
@@ -3740,6 +3751,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	if cast := f.wildcardArgInvariantAddCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	if cast := f.invariantGenericArgumentBridge(i, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	if cast := f.nestedGenericErasureArgCast(i, arg, funcCtx); cast != "" {

@@ -114,6 +114,9 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		return "return"
 	}
 	expr := r.JavaValue.String(funcCtx)
+	if target, raw := conditionalGenericReturnBridge(funcCtx, r.JavaValue); target != "" {
+		return fmt.Sprintf("return (%s) (%s) (%s)", target, raw, expr)
+	}
 	// Narrowing cast for char/byte/short return types: bytecode stores char/byte/short
 	// literals as ints (bipush/sipush/iconst), so a method returning char whose body
 	// returns `cond ? 102 : 101` renders int literals that javac rejects ("possible
@@ -3028,7 +3031,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// Same-erasure invariant field-store mismatch (`X<B>` value into concrete `X<A>` field): the
 		// source carried a raw `(X)` cast that bytecode erased. See parameterizedFieldStoreRawCast.
 		if cast := parameterizedFieldStoreRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, values.StandaloneFunctionalArms(a.JavaValue).String(funcCtx))
 		}
 		// Concrete `X<A>` field assigned a raw-rendered call whose RECOVERED instantiated return is a
 		// same-erasure WILDCARD parameterization (`this.comparator = var1.comparator()` -> the callee

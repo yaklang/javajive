@@ -50,6 +50,11 @@ func (d *Decompiler) unifyReferenceWebs() {
 		}
 		groups[web] = append(groups[web], op)
 	}
+	// The legacy stack simulator can reuse one ref for distinct, disjoint
+	// local webs with identical erasure. Its last store must not parameterize
+	// every earlier/later read. Solve those shared declarations before the
+	// per-web loop (which correctly refuses to claim a ref owned by two webs).
+	d.eraseConflictingSharedWebTypes(groups, order, owners)
 	// Copy chains can point forward to a web solved later in bytecode order.
 	// Iterate until those declarations stop changing (at most one propagation
 	// step per web); a single pass leaves caches typed at a provisional branch.
@@ -189,6 +194,45 @@ func (d *Decompiler) unifyReferenceWebs() {
 		}
 	}
 
+}
+
+func (d *Decompiler) eraseConflictingSharedWebTypes(groups map[int][]*OpCode, order []int, owners map[*values.JavaRef]map[int]bool) {
+	definitions := map[*values.JavaRef][]types.JavaType{}
+	refs := []*values.JavaRef{}
+	for _, web := range order {
+		for _, store := range groups[web] {
+			ref := d.opcodeIdToRef[store][0][0].(*values.JavaRef)
+			if ref.IsParam || len(owners[ref]) < 2 || len(store.stackConsumed) != 1 {
+				continue
+			}
+			if _, seen := definitions[ref]; !seen {
+				refs = append(refs, ref)
+			}
+			definitions[ref] = append(definitions[ref], webDefinitionTypes(store.stackConsumed[0], map[*values.JavaRef]bool{ref: true})...)
+		}
+	}
+	for _, ref := range refs {
+		var joined types.JavaType
+		for _, typ := range definitions[ref] {
+			if typ == nil {
+				continue
+			}
+			if joined == nil {
+				joined = typ
+			} else {
+				joined = joinWebTypes(joined, typ, d.FunctionContext.SiblingSuperTypes)
+			}
+		}
+		// This repair only erases conflicting generic arguments of the same
+		// declaration; unrelated classes still need proper web separation.
+		current, parameterized := types.AsParameterizedType(ref.Type())
+		raw, ok := types.RawClassFQN(joined)
+		_, stillParameterized := types.AsParameterizedType(joined)
+		if parameterized && ok && !stillParameterized && sameRawTypeName(raw, current.RawClassName) {
+			ref.ResetVarType(joined.Copy())
+			ref.WebDeclType = joined.Copy()
+		}
+	}
 }
 
 // constrainPolyEvaluationSnapshots handles a direct lambda/method-reference
@@ -498,18 +542,10 @@ func joinWebTypes(a, b types.JavaType, provider types.SuperTypeProvider) types.J
 			if reflect.DeepEqual(a.RawType(), b.RawType()) {
 				return a
 			}
-			_, ap := a.RawType().(*types.JavaParameterizedType)
-			_, bp := b.RawType().(*types.JavaParameterizedType)
-			// A raw method-reference type carries no generic constraint; retain
-			// the concrete parameterization recovered from the other definition.
-			if ap && !bp {
-				return a
-			}
-			if bp && !ap {
-				return b
-			}
-			// Different parameterizations are invariant. Keeping the first arm
-			// rejects legal assignments from the other arm; use JVM erasure.
+			// Every non-poly definition contributes a constraint. A raw
+			// Iterator may contain Entry<E>, so joining it with Iterator<E>
+			// cannot make all reads produce E. Preserve erasure; functional
+			// poly definitions recover a target separately from their uses.
 			return types.NewJavaClass(an)
 		}
 	}
