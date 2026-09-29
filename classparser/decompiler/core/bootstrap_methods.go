@@ -451,6 +451,9 @@ func init() {
 // descriptor (e.g. "(Ljava/lang/Integer;Ljava/lang/Integer;)Ljava/lang/Integer;").
 // Only standard JDK functional interfaces are upgraded (exact FQN match).
 func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodType values.JavaValue) types.JavaType {
+	if rawType == nil {
+		return nil
+	}
 	var desc string
 	if cv, ok := instantiatedMethodType.(*values.CustomValue); ok {
 		s := cv.String(&class_context.ClassContext{})
@@ -526,7 +529,7 @@ func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodT
 			}
 		}
 	default:
-		return nil
+		return inferPrimitiveFunctionalType(rawName, mt.FunctionType())
 	}
 
 	if len(typeArgs) == 0 {

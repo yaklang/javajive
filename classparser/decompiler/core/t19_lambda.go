@@ -494,41 +494,9 @@ func lambdaReturnCastOutputLenWithBridge(body, target, rawBridge string) (int64,
 }
 
 func t19UpgradeFI(rawType types.JavaType, instantiatedMethodType values.JavaValue) types.JavaType {
-	if up := inferLambdaTypeFromInstantiated(rawType, instantiatedMethodType); up != nil {
-		return up
-	}
-	if rawType == nil {
-		return nil
-	}
-	jc, ok := rawType.RawType().(*types.JavaClass)
-	if !ok || jc == nil {
-		return nil
-	}
-	desc := t19MethodTypeDesc(instantiatedMethodType)
-	if desc == "" {
-		return nil
-	}
-	mt, err := types.ParseMethodDescriptor(desc)
-	if err != nil || mt == nil || mt.FunctionType() == nil {
-		return nil
-	}
-	mtParams := mt.FunctionType().ParamTypes
-	mtRet := mt.FunctionType().ReturnType
-	switch jc.Name {
-	case "java.util.function.ToIntFunction", "java.util.function.ToLongFunction", "java.util.function.ToDoubleFunction":
-		if len(mtParams) >= 1 {
-			return types.NewParameterizedType(jc.Name, []types.JavaType{mtParams[0]})
-		}
-	case "java.util.function.IntFunction", "java.util.function.LongFunction", "java.util.function.DoubleFunction":
-		if mtRet != nil {
-			return types.NewParameterizedType(jc.Name, []types.JavaType{mtRet})
-		}
-	case "java.util.function.ToIntBiFunction":
-		if len(mtParams) >= 2 {
-			return types.NewParameterizedType(jc.Name, []types.JavaType{mtParams[0], mtParams[1]})
-		}
-	}
-	return nil
+	// Method references and lambda bodies obey the same instantiated SAM
+	// contract. Separate tables previously upgraded only method references.
+	return inferLambdaTypeFromInstantiated(rawType, instantiatedMethodType)
 }
 
 func t19OwnerSource(owner string, funcCtx *class_context.ClassContext) string {
