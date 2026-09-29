@@ -586,15 +586,19 @@ func (d *Decompiler) DropUnreachableOpcode() error {
 		if _, ok := visitNodeRecord[code]; !ok {
 			continue
 		}
-		if code.Instr.OpCode == OP_NOP {
+		if code.Instr.OpCode == OP_NOP && !code.IsTryCatchParent && !code.IsCatch && len(code.Target) == 1 && code.Target[0] != code {
 			for _, source := range code.Source {
-				source.Target = funk.Filter(source.Target, func(opCode *OpCode) bool {
-					return opCode != code
-				}).([]*OpCode)
-				for _, target := range code.Target {
-					if !slices.Contains(source.Target, target) {
-						source.Target = append(source.Target, target)
+				// Edge positions encode conditional polarity and switch indices.
+				// Splice in place; removing then appending reverses a branch.
+				for i, target := range source.Target {
+					if target == code {
+						source.Target[i] = code.Target[0]
 					}
+				}
+				if source.Jmp == code.Id {
+					source.Jmp = code.Target[0].Id
+				}
+				for _, target := range code.Target {
 					target.Source = funk.Filter(target.Source, func(opCode *OpCode) bool {
 						return opCode != code
 					}).([]*OpCode)
@@ -4972,7 +4976,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			if len(validSources) == 0 {
 				// Keep the conservative empty-stack simulation created above. This path can appear
 				// in hard switch/loop CFGs where all incoming sources were not stack-simulated yet.
-			} else if isIfMergeNode {
+			} else if isIfMergeNode && !d.isProtectedStackStore(code) {
 				validSource := validSources[0]
 				scope := getVarScope(validSource)
 				preSim := NewStackSimulation(validSource.StackEntry, scope.VarTable, scope.VarId)
@@ -6242,6 +6246,10 @@ func (d *Decompiler) ParseStatement() error {
 	// statement building. fastjson2 ObjectReaderBaseModule:793 (var7.getParameters receiver).
 	d.rebindIncompatibleInvokeArgs()
 	d.unifyReferenceWebs()
+	protectedStores, protectedEdges, err := d.lowerProtectedStackStores()
+	if err != nil {
+		return err
+	}
 	if d.semanticCFG != nil && d.semanticCFG.Err != nil {
 		return d.semanticCFG.Err
 	}
@@ -6261,6 +6269,9 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		switch opcode.Instr.OpCode {
 		case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
+			if protectedStores[opcode] {
+				break
+			}
 			refInfos := d.opcodeIdToRef[opcode]
 			for i, refInfo := range refInfos {
 				value := opcode.stackConsumed[i]
@@ -6504,6 +6515,10 @@ func (d *Decompiler) ParseStatement() error {
 		case OP_RET:
 			// No-op if JSR inliner bailed.
 		case OP_GOTO, OP_GOTO_W:
+			if assign := protectedEdges[opcode]; assign != nil {
+				appendNode(assign)
+				break
+			}
 			st := statements.NewGOTOStatement()
 			appendNode(st)
 		case OP_ATHROW:
@@ -6583,6 +6598,11 @@ func (d *Decompiler) ParseStatement() error {
 			st := statements.NewMiddleStatement("monitor_exit", nil)
 			appendNode(st)
 		case OP_NOP:
+			if opcode.IsTryCatchParent {
+				// This NOP owns exception-table edges. Retain its structural
+				// node even though it has no JVM value or execution effect.
+				appendNode(statements.NewCustomStatement(func(*class_context.ClassContext) string { return "" }, func(_, _ *utils2.VariableId) {}))
+			}
 			return nil
 		case OP_POP:
 			// Only emit a discarded value that is a real statement-expression (a side-effecting
