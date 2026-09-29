@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialConditionalConstructorCastRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ConditionalNumber", `import java.math.BigDecimal;
 class ConstructorOperand {
   ConstructorOperand(int first,String value) { ConditionalNumber.trace.append("C"); }

@@ -6,6 +6,7 @@ import "testing"
 // iteration count, allocation count, mutated contents, identity and a scalar
 // snapshot after reassignment, rather than generated variable names.
 func TestAdversarialAliasPreservesEvaluationRoundTrip(t *testing.T) {
+	t.Parallel()
 	const main = "AliasEvaluation"
 	const source = `import java.util.*;
 public class AliasEvaluation {

@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialConditionalArrayValueRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ConditionalArrayValue", `import java.util.Arrays;
 public class ConditionalArrayValue {
   static StringBuilder trace=new StringBuilder();
@@ -39,6 +40,7 @@ public class ConditionalArrayValue {
 }
 
 func TestAdversarialNegationPreservesValueDependenciesRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "NegationDependencies", `public class NegationDependencies {
   static int negate(int a,int b) { int before=a+b; return -before; }
   static long negate(long value) { return -(-value); }

@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialErasedSelfBoundArithmeticRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ArithmeticOps", `interface PlainElement<T> {
   T multiply(T other); T multiply(int n); T subtract(T other); int value();
 }

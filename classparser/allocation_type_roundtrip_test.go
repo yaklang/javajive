@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialCachedAllocationKeepsConcreteTypeRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "CachedAllocation", `interface AllocationResult<T> { String value(); }
 class MissingAllocation<T> implements AllocationResult<T> {
   final String name;

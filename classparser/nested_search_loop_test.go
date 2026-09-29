@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialNestedSearchReturnsAndContinuesRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "NestedSearch", `public class NestedSearch {
   final char[] data;
   int pos,limit,lines,fills;

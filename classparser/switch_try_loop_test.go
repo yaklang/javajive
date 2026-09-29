@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialSwitchTryKeepsLoopOwnerRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "SwitchTryLoop", `public class SwitchTryLoop {
   final String[] names,values;
   int index;

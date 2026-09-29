@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialMethodReferenceResultAdaptationRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "MethodRefResult", `import java.util.*;
 import java.util.function.*;
 import java.util.stream.*;

@@ -135,6 +135,7 @@ func protectedNopStackFixture(handlerNop, reference bool) []byte {
 }
 
 func TestAdversarialProtectedNopStackMergeRoundTrip(t *testing.T) {
+	t.Parallel()
 	javac, java := t04Tools(t)
 	for _, reference := range []bool{false, true} {
 		for _, handlerNop := range []bool{false, true} {

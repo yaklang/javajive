@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialNestedScannerTerminalBranchesRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "NestedScanner", `public class NestedScanner {
   char[] data;
   int pos,limit;

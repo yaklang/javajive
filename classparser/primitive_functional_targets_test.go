@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialPrimitiveFunctionalTargetsRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "PrimitiveFunctionalTargets", `import java.util.*;
 import java.util.function.*;
 public class PrimitiveFunctionalTargets {

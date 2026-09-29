@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialConditionalCastProducerRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "CastProducer", `import java.util.*;
 public class CastProducer {
   static final Object KEY=new Object();

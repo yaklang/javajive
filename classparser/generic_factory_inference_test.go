@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialGenericFactoryInferenceRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "GenericFactories", `import java.util.*;
 public class GenericFactories {
   static final List<String> LABELS=Collections.singletonList("label");

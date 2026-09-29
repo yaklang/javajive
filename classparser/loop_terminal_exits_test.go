@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialLoopContinuationBesideEarlyReturnsRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "LoopTerminalExits", `public class LoopTerminalExits {
   static int scan(String input) {
     int limit=Math.min(3,input.length()),i=0,value=0,sign=1;

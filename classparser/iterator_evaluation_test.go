@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialIteratorElementEvaluatedOnceRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "IteratorEvaluation", `import java.util.*;
 public class IteratorEvaluation {
   static String primary(Collection<List<String>> values) {

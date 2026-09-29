@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialConditionalFieldArgumentCastRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ConditionalFieldCast", `import java.util.*;
 class CastKey {
   static final Object KEY=initialize();

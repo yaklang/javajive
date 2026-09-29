@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialDeclaredFunctionalInterfaceRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "DeclaredAction", `import java.io.*;
 import java.util.*;
 interface CheckedAction<T> { void accept(T value) throws IOException; }
@@ -44,6 +45,7 @@ public class DeclaredAction {
 }
 
 func TestAdversarialErasedFunctionalArgumentsRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ErasedActions", `import java.util.*;
 interface GroupAction<T> { void apply(T value); }
 interface AssertMaker<T,A extends SelfAssert<A,T>> { A make(T value); }

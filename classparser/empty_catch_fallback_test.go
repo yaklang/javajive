@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialNestedCatchNumericFallbackRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "NumericFallback", `public class NumericFallback {
   static int effects;
   static long read(String text,int mode) {
