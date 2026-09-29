@@ -127,7 +127,9 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	ifStatement.Condition = condition
 	ifBodyNodes := []*core.Node{}
 	copyIfBody := false
-	if IsEndNode(ifNode.MergeNode) && len(trueNode.Source) > 1 && len(falseNode.Source) > 1 {
+	// Normal-join extraction above can remove either arm: that path is now a
+	// shared continuation, not a second body eligible for shared-body copying.
+	if trueNode != nil && falseNode != nil && IsEndNode(ifNode.MergeNode) && len(trueNode.Source) > 1 && len(falseNode.Source) > 1 {
 		copyIfBody = true
 		trueNode.RemoveSource(ifStatementNode)
 	}
