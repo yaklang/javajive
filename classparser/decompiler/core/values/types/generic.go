@@ -1593,7 +1593,13 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 			sigma[formals[i]] = args[i]
 		}
 	}
-	rawGenericReceiver := len(formals) > 0 && len(args) != len(formals)
+	// A raw generic receiver erases its parameterized supertypes as well.
+	// Following Child<X> -> Parent<X> with an empty substitution otherwise
+	// mistakes the declaration's X for a same-spelled caller type variable.
+	// Non-generic subclasses with fixed generic ancestors still resolve below.
+	if len(formals) > 0 && len(sigma) != len(formals) {
+		return nil
+	}
 	// Most-derived declaration with a generic Signature wins: if THIS class declares (method, argc)
 	// generically, it is the binding declaration -- resolve here and stop (do not let an ancestor's
 	// signature shadow an override).
@@ -1604,7 +1610,7 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 		// exact descriptor keys with an empty value for such declarations.
 		if descriptor != "" {
 			if msig, declared := methodSigs[class_context.MethodDescKey(method, descriptor)]; declared {
-				if msig == "" || rawGenericReceiver {
+				if msig == "" {
 					return nil
 				}
 				_, params, _ := ParseMethodSignatureFull(msig, funcCtx)
@@ -1631,9 +1637,6 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 			competingHere = class_context.NameHasSameArityOverload(method, descriptor, keys)
 		}
 		if msig != "" && !competingHere {
-			if rawGenericReceiver {
-				return nil
-			}
 			_, params, _ := ParseMethodSignatureFull(msig, funcCtx)
 			if paramIndex < len(params) && params[paramIndex] != nil {
 				if t := substituteAndGateParam(funcCtx, params[paramIndex], sigma, MethodFormalTypeParamNames(msig)); t != nil {

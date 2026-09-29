@@ -2681,6 +2681,13 @@ func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_c
 	}
 	receiver, ok := UnpackSoltValue(f.Object).(*JavaRef)
 	isThisDelegation := ok && receiver != nil && receiver.IsThis && funcCtx.FunctionName == "<init>"
+	// A same-class allocation has its own generic instantiation. Its overload
+	// cannot be inferred by comparing against the surrounding factory method's
+	// descriptor, and the current class's T is not that allocation's argument.
+	// Allocation binding remains the responsibility of descriptor witnesses.
+	if !isThisDelegation {
+		return ""
+	}
 	if f.Descriptor == "" || funcCtx.CurrentMethodDesc == "" || f.Descriptor == funcCtx.CurrentMethodDesc {
 		return ""
 	}
@@ -2698,7 +2705,7 @@ func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_c
 	// A different-arity target cannot bind to the enclosing constructor. In
 	// particular, this(true, arrayA, arrayB, fallback) is not competing with
 	// the three-argument constructor that contains it.
-	if isThisDelegation && len(tgt.FunctionType().ParamTypes) != len(cur.FunctionType().ParamTypes) {
+	if len(tgt.FunctionType().ParamTypes) != len(cur.FunctionType().ParamTypes) {
 		return ""
 	}
 	targetType := tgt.FunctionType().ParamTypes[i]
@@ -2722,14 +2729,6 @@ func (f *FunctionCallExpression) thisCtorOverloadArgCast(i int, funcCtx *class_c
 	}
 	arg := f.Arguments[i]
 	if arg.Type() == nil {
-		return ""
-	}
-	// Same-class `new CurrentClass(array)` is an allocation, not a delegating
-	// overload choice. The generic constructor signature can cause the erased
-	// array to be rendered as an ELEMENT cast (Predicate[] -> Predicate), which
-	// is invalid Java. Keep factory-call casts for non-array parameters: they
-	// can pin a generic Map/Collection constructor's type inference.
-	if !isThisDelegation && targetType.IsArray() && arg.Type().IsArray() {
 		return ""
 	}
 	aStr := arg.Type().String(funcCtx)
@@ -3685,6 +3684,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		}
 	}
 	if cast := f.thisCtorOverloadArgCast(i, funcCtx); cast != "" {
+		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+	}
+	if cast := f.rawConstructorBindingCast(i, arg, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	if cast := f.wildcardObjectParamRawCast(i, funcCtx); cast != "" {
