@@ -4085,7 +4085,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// without unpacking the cast CustomValue's closures (fastjson2 JDKUtils:318).
 		d.checkcastInnerArg[opcode] = arg
 		value := &values.CastExpression{Value: arg, TargetType: classInfo, OriginPC: int(opcode.CurrentOffset)}
-		if d.canInlineImmediateZeroArgCheckcast(opcode, classInfo) || d.canInlineCheckcastArgument(opcode) || d.canInlineImmediateCheckcastField(opcode, classInfo) {
+		if d.canInlineImmediateZeroArgCheckcast(opcode, classInfo) || d.canInlineCheckcastArgument(opcode) || d.canInlineImmediateCheckcastField(opcode, classInfo) || d.canInlineCheckcastArrayStore(opcode, classInfo) {
 			d.inlineCheckcast[opcode] = true
 			runtimeStackSimulation.Push(value)
 			break
@@ -6478,6 +6478,7 @@ func (d *Decompiler) ParseStatement() error {
 			index := opcode.stackConsumed[1]
 			ref := opcode.stackConsumed[2]
 			st := statements.NewArrayMemberAssignStatement(values.NewJavaArrayMember(ref, index), value)
+			st.ReferenceArrayStore = opcode.Instr.OpCode == OP_AASTORE
 			appendNode(st)
 		case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE:
 			op := ""

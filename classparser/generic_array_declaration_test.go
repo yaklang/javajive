@@ -107,11 +107,12 @@ class MutableNumber implements MutableInput<Integer> {
 }
 public class GenericArrayMutation {
   static String trace;
-  static <T> String change(MutableInput<? extends T> a,MutableInput<? extends T> b,MutableInput replacement,int index) {
+  static <T> String change(MutableInput<? extends T> a,MutableInput<? extends T> b,Object replacement,int index) {
     MutableInput<? extends T>[] inputs=new MutableInput[]{a,b};
     Object[] alias=inputs;
     try { alias[index]=replacement;trace+="W"; }
     catch(ArrayIndexOutOfBoundsException failure) { trace+="E"; }
+    catch(ArrayStoreException failure) { trace+="A"; }
     try { return inputs[0].read().toString()+":"+inputs[1].read(); }
     catch(NullPointerException failure) { return "null"; }
   }
@@ -120,11 +121,11 @@ public class GenericArrayMutation {
     return inputs[0].read()+":"+inputs[1].read();
   }
   public static void main(String[] args) {
-    MutableInput[] replacements={new MutableText("z"),null,new MutableNumber()};
-    for(int mask=0;mask<6;mask++) {
-      MutableInput replacement=replacements[mask%3];
+    Object[] replacements={new MutableText("z"),null,new MutableNumber(),new Object()};
+    for(int mask=0;mask<8;mask++) {
+      Object replacement=replacements[mask%4];
       trace="";
-      System.out.print(change(new MutableText("a"),new MutableText("b"),replacement,mask<3?0:2)+":"+trace+";");
+      System.out.print(change(new MutableText("a"),new MutableText("b"),replacement,mask<4?0:2)+":"+trace+";");
     }
     trace="";
     System.out.print(mixed(new MutableText("m"),new MutableNumber())+":"+trace);

@@ -3,6 +3,7 @@ package statements
 import (
 	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"reflect"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -2600,6 +2601,8 @@ type AssignStatement struct {
 	IsFirst     bool
 	OriginPC    int
 	HasOriginPC bool
+	// ReferenceArrayStore is a decoded AASTORE witness, never an inferred cast.
+	ReferenceArrayStore bool
 }
 
 // ReplaceVar implements Statement.
@@ -2781,6 +2784,41 @@ func arrayStoreRHS(member *values.JavaArrayMember, value values.JavaValue, funcC
 	return value.String(funcCtx)
 }
 
+// AASTORE checks the actual array component after evaluating array, index and
+// value. Narrowing the RHS would add a CHECKCAST, change the exception class,
+// and run that check before the null/bounds checks. A widening Object[] view of
+// a proven reference array keeps the original AASTORE and evaluation order.
+func (a *AssignStatement) referenceArrayStoreNeedsObjectView(ctx *class_context.ClassContext) bool {
+	if !a.ReferenceArrayStore || a.ArrayMember == nil || a.ArrayMember.Object == nil || a.JavaValue == nil || values.IsNullLiteral(a.JavaValue) {
+		return false
+	}
+	array := a.ArrayMember.Object.Type()
+	if array == nil || !array.IsArray() || array.ElementType() == nil {
+		return false
+	}
+	element := array.ElementType()
+	if _, primitive := element.RawType().(*types.JavaPrimer); primitive {
+		return false
+	}
+	valueType := a.JavaValue.Type()
+	if valueType != nil {
+		if _, primitive := valueType.RawType().(*types.JavaPrimer); primitive {
+			return false
+		}
+	}
+	if ctx != nil && typeVarArrayElementStoreCast(ctx, a.ArrayMember, a.JavaValue) != "" {
+		return true
+	}
+	if valueType != nil && reflect.DeepEqual(element.RawType(), valueType.RawType()) {
+		return false
+	}
+	// Erasure equality does not prove invariant type-argument compatibility.
+	if _, generic := types.AsParameterizedType(element); generic {
+		return true
+	}
+	return !isReferenceAssignable(ctx, valueType, element)
+}
+
 // ternaryHasClassLiteralArm reports whether either arm of the ternary is a class literal (`Foo.class`,
 // a JavaClassValue). Such an arm's Type() reports the referenced class rather than java.lang.Class, so
 // the ternary's arm-merge can under-type to the arms' LUB; the declaration path uses this to prefer the
@@ -2826,6 +2864,9 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 	if a.ArrayMember != nil {
 		if a.JavaValue == nil {
 			return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), values.EmptySlotValuePlaceholder)
+		}
+		if a.referenceArrayStoreNeedsObjectView(funcCtx) {
+			return fmt.Sprintf("((java.lang.Object[]) (%s))[%s] = %s", values.AssignmentOperand(a.ArrayMember.Object, funcCtx), a.ArrayMember.Index.String(funcCtx), a.JavaValue.String(funcCtx))
 		}
 		return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), arrayStoreRHS(a.ArrayMember, a.JavaValue, funcCtx))
 	}

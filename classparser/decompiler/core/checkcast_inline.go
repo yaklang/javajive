@@ -143,3 +143,35 @@ func (d *Decompiler) canInlineImmediateCheckcastField(op *OpCode, castType types
 	owner, ok := types.ClassFQNOf(castType)
 	return ok && owner != "" && strings.ReplaceAll(member.Name, "/", ".") == owner
 }
+
+// CHECKCAST on the top stack value immediately before AASTORE checks the RHS.
+// Keep that cast in the RHS tree: a separate local could evaluate it before
+// an earlier effectful array index. Only further casts/NOPs may intervene;
+// stores, duplication, alternate entries and handler changes reject the fold.
+func (d *Decompiler) canInlineCheckcastArrayStore(op *OpCode, castType types.JavaType) bool {
+	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || len(op.stackConsumed) != 1 || castType == nil {
+		return false
+	}
+	if _, primitive := castType.RawType().(*types.JavaPrimer); primitive {
+		return false
+	}
+	previous := op
+	for steps := 0; steps < 8; steps++ {
+		if len(previous.Target) != 1 {
+			return false
+		}
+		next := previous.Target[0]
+		if next == nil || next.Instr == nil || next.IsCustom || next.IsCatch || next.IsTryCatchParent || next.CurrentOffset <= previous.CurrentOffset || len(next.Source) != 1 || next.Source[0] != previous || !sameHandlerCoverage(d.handlersAt(op), d.handlersAt(next)) {
+			return false
+		}
+		switch next.Instr.OpCode {
+		case OP_AASTORE:
+			return true
+		case OP_CHECKCAST, OP_NOP:
+			previous = next
+		default:
+			return false
+		}
+	}
+	return false
+}

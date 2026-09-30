@@ -140,3 +140,65 @@ func TestImmediateCheckcastFieldProof(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckcastArrayStoreRequiresPrivateOrderedStackPath(t *testing.T) {
+	for _, change := range []string{"valid", "repeated cast", "NOP", "invalid check opcode", "missing stack input", "primitive cast", "nil target", "multiple targets", "other entry", "back edge", "handler boundary", "custom consumer", "catch entry", "primitive store", "intervening store", "intervening call", "duplicate", "branch", "path budget"} {
+		t.Run(change, func(t *testing.T) {
+			check := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 1, stackConsumed: []values.JavaValue{values.JavaNull}}
+			store := &OpCode{Instr: &Instruction{OpCode: OP_AASTORE}, CurrentOffset: 4, Source: []*OpCode{check}}
+			check.Target = []*OpCode{store}
+			d := &Decompiler{}
+			typ := types.NewJavaClass("java.lang.String")
+			add := func(opcode int, count int) {
+				previous := check
+				for i := 0; i < count; i++ {
+					next := &OpCode{Instr: &Instruction{OpCode: opcode}, CurrentOffset: uint16(i + 2), Source: []*OpCode{previous}}
+					previous.Target, previous = []*OpCode{next}, next
+				}
+				store.CurrentOffset = uint16(count + 3)
+				previous.Target, store.Source = []*OpCode{store}, []*OpCode{previous}
+			}
+			switch change {
+			case "repeated cast":
+				add(OP_CHECKCAST, 2)
+			case "NOP":
+				add(OP_NOP, 1)
+			case "invalid check opcode":
+				check.Instr.OpCode = OP_ALOAD_0
+			case "missing stack input":
+				check.stackConsumed = nil
+			case "primitive cast":
+				typ = types.NewJavaPrimer(types.JavaInteger)
+			case "nil target":
+				check.Target[0] = nil
+			case "multiple targets":
+				check.Target = append(check.Target, store)
+			case "other entry":
+				store.Source = append(store.Source, &OpCode{})
+			case "back edge":
+				store.CurrentOffset = 0
+			case "handler boundary":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 1, EndPc: 4, HandlerPc: 8}}
+			case "custom consumer":
+				store.IsCustom = true
+			case "catch entry":
+				store.IsCatch = true
+			case "primitive store":
+				store.Instr.OpCode = OP_IASTORE
+			case "intervening store":
+				add(OP_ASTORE_0, 1)
+			case "intervening call":
+				add(OP_INVOKESTATIC, 1)
+			case "duplicate":
+				add(OP_DUP, 1)
+			case "branch":
+				add(OP_IFNULL, 1)
+			case "path budget":
+				add(OP_NOP, 8)
+			}
+			if got := d.canInlineCheckcastArrayStore(check, typ); got != (change == "valid" || change == "repeated cast" || change == "NOP") {
+				t.Fatalf("cast/store path accepted=%v", got)
+			}
+		})
+	}
+}
