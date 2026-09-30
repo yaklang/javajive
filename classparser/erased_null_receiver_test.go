@@ -52,32 +52,42 @@ public class ErasedNullReceiver<T> {
 		}
 		want := t04RunJava(t, java, original, "ErasedNullReceiver")
 		raw := readClassBytes(t, original, "ErasedNullReceiver")
-		for _, mode := range []DecompileMode{Precision, Compatibility, "legacy"} {
-			var generated string
-			var err error
-			// Dependencies intentionally remain unavailable to the decompiler,
-			// as when only one classfile is supplied. The independent compiler
-			// and JVM still see their original declarations and implementations.
-			if mode == "legacy" {
-				generated, err = DecompileWithResolver(raw, nil)
-			} else {
-				var result DecompileResult
-				result, err = DecompileWithOptions(raw, DecompileOptions{Mode: mode, TargetSourceVersion: 8})
-				generated = result.Source
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			rebuilt := t.TempDir()
-			src := filepath.Join(rebuilt, "ErasedNullReceiver.java")
-			if err := os.WriteFile(src, []byte(generated), 0644); err != nil {
-				t.Fatal(err)
-			}
-			if out, err := exec.Command(javac, "-proc:none", "--release", "8", "-cp", original, "-d", rebuilt, src).CombinedOutput(); err != nil {
-				t.Fatalf("rebuild %s/%s: %v\n%s\n%s", mode, debug, err, out, generated)
-			}
-			if got := t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+original, "ErasedNullReceiver"); got != want {
-				t.Fatalf("%s/%s got=%q want=%q\n%s", mode, debug, got, want, generated)
+		resolve := func(name string) ([]byte, bool) {
+			b, err := os.ReadFile(filepath.Join(original, filepath.FromSlash(name)+".class"))
+			return b, err == nil
+		}
+		compiled := map[string]string{}
+		// Verify both isolated classfiles and available dependency metadata.
+		for _, resolver := range []func(string) ([]byte, bool){nil, resolve} {
+			for _, mode := range []DecompileMode{Precision, Compatibility, "legacy"} {
+				var generated string
+				var err error
+				// The independent compiler and JVM always see the original helpers.
+				if mode == "legacy" {
+					generated, err = DecompileWithResolver(raw, resolver)
+				} else {
+					var result DecompileResult
+					result, err = DecompileWithOptions(raw, DecompileOptions{Mode: mode, TargetSourceVersion: 8, Resolve: resolver})
+					generated = result.Source
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				rebuilt, cached := compiled[generated]
+				if !cached {
+					rebuilt = t.TempDir()
+					src := filepath.Join(rebuilt, "ErasedNullReceiver.java")
+					if err := os.WriteFile(src, []byte(generated), 0644); err != nil {
+						t.Fatal(err)
+					}
+					if out, err := exec.Command(javac, "-proc:none", "--release", "8", "-cp", original, "-d", rebuilt, src).CombinedOutput(); err != nil {
+						t.Fatalf("rebuild %s/%s: %v\n%s\n%s", mode, debug, err, out, generated)
+					}
+					compiled[generated] = rebuilt
+				}
+				if got := t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+original, "ErasedNullReceiver"); got != want {
+					t.Fatalf("%s/%s got=%q want=%q\n%s", mode, debug, got, want, generated)
+				}
 			}
 		}
 	}

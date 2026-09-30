@@ -1,6 +1,9 @@
 package values
 
 import (
+	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
@@ -27,6 +30,21 @@ func (f *FunctionCallExpression) planErasedNullBinding(ctx *class_context.ClassC
 	raw, args := f.receiverParamTypeArgs(ctx)
 	if raw == "" || len(args) == 0 || !sameErasureClassName(raw, f.ClassName) {
 		return nil, false
+	}
+	// Keep a recovered, denotable formal when the complete method family has
+	// no competing overload. In that case the existing typed null rendering is
+	// already valid and preserves the selected descriptor without erasing the
+	// receiver. A recovered formal alone is insufficient: accept(T) can still
+	// compete with accept(String) after T is instantiated.
+	if ctx.InvocationMetadata != nil && f.resolvedParamType(0, ctx) != nil {
+		kind := callbinding.Virtual
+		if f.Kind == InvokeInterface {
+			kind = callbinding.Interface
+		}
+		family, err := callbinding.FamilyOf(callbinding.Witness{Owner: strings.ReplaceAll(raw, ".", "/"), Name: f.FunctionName, Desc: f.Descriptor, Kind: kind}, ctx.InvocationMetadata)
+		if err == nil && family.Complete && family.Proof == callbinding.Unique {
+			return nil, false
+		}
 	}
 	out := f.Clone()
 	out.Object = &CastExpression{Value: f.Object, TargetType: types.NewJavaClass(raw), OriginPC: f.OriginPC, Binding: true}

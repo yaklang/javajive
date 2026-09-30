@@ -3,6 +3,7 @@ package values
 import (
 	"testing"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -29,6 +30,33 @@ func TestErasedNullBindingKeepsDescriptorAndEvaluationIdentity(t *testing.T) {
 		if got := planned.String(ctx); got != "((Sink)(sink)).consume((Object)(null))" {
 			t.Fatalf("descriptor rendering=%q", got)
 		}
+	}
+}
+
+func TestErasedNullBindingPreservesProvenUniqueGenericFormal(t *testing.T) {
+	const desc = "(Ljava/lang/Object;)V"
+	ctx := &class_context.ClassContext{
+		TypeParams: []string{"T"},
+		SiblingClassSig: func(name string) (string, map[string]string, bool) {
+			return "<E:Ljava/lang/Object;>Ljava/lang/Object;", map[string]string{class_context.MethodDescKey("consume", desc): "(TE;)V"}, name == "example/Sink"
+		},
+		InvocationMetadata: func(name string) (callbinding.Class, bool) {
+			return callbinding.Class{Name: name, Public: true, IsInterface: true, MembersComplete: true, ParentsComplete: true, Methods: []callbinding.Method{{Name: "consume", Desc: desc, Public: true, Generic: true}}}, name == "example/Sink"
+		},
+	}
+	receiver := NewJavaRef(utils.NewRootVariableId(), nil, types.ParseSignature("Lexample/Sink<TT;>;"))
+	call := &FunctionCallExpression{Object: receiver, ClassName: "example.Sink", FunctionName: "consume", Descriptor: desc, Kind: InvokeInterface, Arguments: []JavaValue{NewJavaLiteral("null", types.NewJavaClass("java.lang.Object"))}}
+	if _, ok := call.planErasedNullBinding(ctx); ok {
+		t.Fatal("an already proven generic formal was needlessly erased")
+	}
+	metadata := ctx.InvocationMetadata
+	ctx.InvocationMetadata = func(name string) (callbinding.Class, bool) {
+		c, ok := metadata(name)
+		c.Methods = append(c.Methods, callbinding.Method{Name: "consume", Desc: "(Ljava/lang/String;)V", Public: true})
+		return c, ok
+	}
+	if _, ok := call.planErasedNullBinding(ctx); !ok {
+		t.Fatal("a competing String overload stole the Object descriptor")
 	}
 }
 
