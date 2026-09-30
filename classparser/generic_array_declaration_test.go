@@ -12,6 +12,7 @@ interface ArrayInput<T> { T read(); }
 interface ArrayMapper<A,B> { B map(A value); }
 class ArrayFunctions {
   static <T> ArrayMapper<T,T> identity() { return value -> value; }
+  static <T> T require(T value) { if(value==null)throw new NullPointerException("source");return value; }
 }
 
 
@@ -25,6 +26,7 @@ class ArraySequence<T> {
     return new ArraySequence<R>(result);
   }
   public String toString() { return values.toString(); }
+  int keep(T witness) { return values.size()+(witness==null?0:1); }
 }
 class ArrayText implements ArrayInput<String> {
   final String value;
@@ -50,7 +52,32 @@ public class GenericArrayDeclaration<X> {
     ArrayInput<? extends X>[] inputs=new ArrayInput[]{a,b,c,d};
     return ArraySequence.fromArray(inputs).flatten(ArrayFunctions.identity());
   }
+  static <T> ArraySequence<ArrayInput<String>> rawResult(ArrayInput<? extends T> a,ArrayInput<? extends T> b) {
+    ArrayInput[] inputs=new ArrayInput[]{a,b};
+    return ArraySequence.fromArray(inputs);
+  }
+  static <T> int rawReceiver(ArrayInput<? extends T> a,ArrayInput<? extends T> b) {
+    ArrayInput[] inputs=new ArrayInput[]{a,b};
+    return ArraySequence.fromArray(inputs).keep(new ArrayText("witness"));
+  }
+  static <T> ArraySequence<T> inlinePair(ArrayInput<? extends T> a,ArrayInput<? extends T> b) {
+    ArrayFunctions.require(a);ArrayFunctions.require(b);
+    return ArraySequence.fromArray(a,b).flatten(ArrayFunctions.identity());
+  }
+  static <T extends Number> ArraySequence<T> inlineTriple(ArrayInput<? extends T> a,ArrayInput<? extends T> b,ArrayInput<? extends T> c) {
+    ArrayFunctions.require(a);ArrayFunctions.require(b);ArrayFunctions.require(c);
+    return ArraySequence.fromArray(a,b,c).flatten(ArrayFunctions.identity());
+  }
+  static <X> ArraySequence<X> inlineFour(ArrayInput<? extends X> a,ArrayInput<? extends X> b,ArrayInput<? extends X> c,ArrayInput<? extends X> d) {
+    ArrayFunctions.require(a);ArrayFunctions.require(b);ArrayFunctions.require(c);ArrayFunctions.require(d);
+    return ArraySequence.fromArray(a,b,c,d).flatten(ArrayFunctions.identity());
+  }
   public static void main(String[] args) {
+    System.out.print("raw-count:"+rawResult(new ArrayNumber(1),new ArrayNumber(2)).values.size()+";");
+    System.out.print("raw-receiver:"+rawReceiver(new ArrayNumber(1),new ArrayNumber(2))+";");
+    System.out.print(inlinePair(new ArrayText("a"),new ArrayText("b"))+":"+
+        inlineTriple(new ArrayNumber(1),new ArrayNumber(2),new ArrayNumber(3))+":"+
+        inlineFour(new ArrayText("w"),new ArrayText("x"),new ArrayText("y"),new ArrayText("z"))+";");
     for(int mask=0;mask<4;mask++) {
       trace="";
       try { System.out.print(pair(new ArrayText("a"),(mask&1)==0?new ArrayText("b"):null)+":"+
