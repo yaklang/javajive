@@ -5,6 +5,7 @@ import "testing"
 // Constructor fields must receive the clone from the guarded branch, not a
 // null-initialized temporary that loses the result at the ternary merge.
 func TestConditionalArrayCloneStoreRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "ConditionalArrayCloneStore"
 	source := `public final class ConditionalArrayCloneStore {
   private final Class<?>[] types;
@@ -28,7 +29,7 @@ func TestConditionalArrayCloneStoreRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("conditional array clone %s: %v\n%s", mode, err, result.Source)
 		}
 	}

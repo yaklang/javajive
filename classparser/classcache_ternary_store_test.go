@@ -11,6 +11,7 @@ import (
 // and emits source that no longer type-checks. The original/rebuilt JVM output
 // is the independent oracle for both decompiler modes.
 func TestClassCacheTernaryStoreRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "ClassCacheTernaryStore"
 	source := `public final class ClassCacheTernaryStore {
   private static Class class$Foo;
@@ -37,13 +38,14 @@ func TestClassCacheTernaryStoreRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("class-cache round-trip %s (status %s, diagnostics %+v): %v\n%s", mode, result.Status, result.Diagnostics, err, result.Source)
 		}
 	}
 }
 
 func TestMapCacheTernaryLocalRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "MapCacheTernaryLocal"
 	source := `import java.util.HashMap;
 import java.util.Map;
@@ -71,7 +73,7 @@ public final class MapCacheTernaryLocal {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("map-cache ternary round-trip %s (status %s, diagnostics %+v): %v\n%s", mode, result.Status, result.Diagnostics, err, result.Source)
 		}
 	}

@@ -9,6 +9,7 @@ import (
 // Inlining the cast into its own conditional arm must preserve both the value
 // and the empty-list null path in each decompiler mode.
 func TestSelfCastNullMergeRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "SelfCastNullMerge"
 	source := `import java.util.ArrayList;
 import java.util.List;
@@ -38,7 +39,7 @@ public final class SelfCastNullMerge {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("self-cast null-merge round-trip %s: %v\n%s", mode, err, result.Source)
 		}
 	}

@@ -10,6 +10,7 @@ import (
 // to remain the first statement. The independent runtime oracle makes sure
 // the rewrite preserves the array values and constructor effects.
 func TestCtorArrayThisSpillsRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "CtorArrayThisSpill"
 	source := `public final class CtorArrayThisSpill {
   private final String value;
@@ -33,7 +34,7 @@ func TestCtorArrayThisSpillsRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("constructor-array-spill round-trip %s (status %s, diagnostics %+v): %v\n%s", mode, result.Status, result.Diagnostics, err, result.Source)
 		}
 	}
@@ -44,6 +45,7 @@ func TestCtorArrayThisSpillsRoundTrip(t *testing.T) {
 // producers prove they completed before the array allocation; the independent
 // runtime trace checks their original left-to-right order.
 func TestCtorArrayThisSpillPreservesEarlierArgumentOrder(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "CtorArrayThisSpillOrder"
 	source := `public final class CtorArrayThisSpillOrder {
   private static final StringBuilder EVENTS = new StringBuilder();
@@ -75,7 +77,7 @@ func TestCtorArrayThisSpillPreservesEarlierArgumentOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("constructor-array order round-trip %s (status %s, diagnostics %+v): %v\n%s", mode, result.Status, result.Diagnostics, err, result.Source)
 		}
 	}

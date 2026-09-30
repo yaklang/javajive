@@ -262,6 +262,7 @@ func TestTaskT17C05VersionCapabilityIntegration(t *testing.T) {
 }
 
 func TestTaskT17C06ConcatLambdaNoRegress(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Log("T17-C06")
 	concatSrc := t17ReadSeed(t, "ConcatProbe.java")
 	origConcat, concatClasses := t17CompileRun(t, "17", "ConcatProbe", map[string]string{"ConcatProbe.java": concatSrc})
@@ -280,7 +281,7 @@ func TestTaskT17C06ConcatLambdaNoRegress(t *testing.T) {
 		if !strings.Contains(res.Source, "+") && !strings.Contains(res.Source, "concat") {
 			t.Fatalf("T17-C06 ConcatProbe lost concat form:\n%s", res.Source)
 		}
-		if err := t17RebuildRunErr(t, "17", "ConcatProbe", res.Source, origConcat); err != nil {
+		if err := rebuild("17", "ConcatProbe", res.Source, origConcat); err != nil {
 			// Known baseline (T04/T18): String.valueOf(null) binds char[] and NPEs. T17 must not
 			// drop the concat form; the NPE is recorded, not treated as a dispatch regression.
 			if !strings.Contains(err.Error(), "NullPointerException") && !strings.Contains(err.Error(), "valueOf") {
@@ -309,6 +310,7 @@ func TestTaskT17C06ConcatLambdaNoRegress(t *testing.T) {
 }
 
 func TestTernaryCheckcastInvocationReceiverRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "TernaryCheckcastInvocationReceiver"
 	source := `import java.util.function.Supplier;
 public final class TernaryCheckcastInvocationReceiver {
@@ -335,13 +337,14 @@ public final class TernaryCheckcastInvocationReceiver {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("branch-local checkcast invocation round-trip %s (status %s, diagnostics %+v): %v\n%s", mode, result.Status, result.Diagnostics, err, result.Source)
 		}
 	}
 }
 
 func TestConditionalThisCtorCheckcastRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "ConditionalThisCtorRoundTrip"
 	source := `public final class ConditionalThisCtorRoundTrip {
     private final String value;
@@ -374,7 +377,7 @@ func TestConditionalThisCtorCheckcastRoundTrip(t *testing.T) {
 		if result.Status != "complete" && result.Status != "partial" {
 			t.Fatalf("decompile %s status=%s diagnostics=%+v\n%s", mode, result.Status, result.Diagnostics, result.Source)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("conditional constructor round-trip %s: %v", mode, err)
 		}
 	}
@@ -387,19 +390,58 @@ func t17RebuildRun(t *testing.T, release, main, src, wantStdout string) {
 	}
 }
 
+// Each fixture owns its cache. Byte-identical source at the same release/main
+// needs one javac invocation; every mode/debug variant still executes the JVM
+// independently and compares against its own original oracle. No cache crosses
+// fixture classpaths, tests or compiler versions, and failures are never cached.
+func t17RebuildRunner(t *testing.T) func(string, string, string, string) error {
+	t.Helper()
+	type key struct{ release, main, source string }
+	compiled := map[key]string{}
+	return func(release, main, src, want string) error {
+		t.Helper()
+		k := key{release, main, src}
+		dir, ok := compiled[k]
+		if !ok {
+			var err error
+			dir, err = t17CompileRebuilt(t, release, main, src)
+			if err != nil {
+				return err
+			}
+			compiled[k] = dir
+		}
+		return t17RunRebuilt(t, dir, main, src, want)
+	}
+}
+
 func t17RebuildRunErr(t *testing.T, release, main, src, wantStdout string) error {
 	t.Helper()
-	javac, java := t17Tools(t)
+	dir, err := t17CompileRebuilt(t, release, main, src)
+	if err != nil {
+		return err
+	}
+	return t17RunRebuilt(t, dir, main, src, wantStdout)
+}
+
+func t17CompileRebuilt(t *testing.T, release, main, src string) (string, error) {
+	t.Helper()
+	javac, _ := t17Tools(t)
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, main+".java")
 	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
-		return err
+		return "", err
 	}
 	cmd := exec.Command(javac, "-proc:none", "-encoding", "UTF-8", "--release", release, "-d", dir, srcPath)
 	cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("rebuild javac %s: %v\n%s\nsource:\n%s", main, err, out, src)
+		return "", fmt.Errorf("rebuild javac %s: %v\n%s\nsource:\n%s", main, err, out, src)
 	}
+	return dir, nil
+}
+
+func t17RunRebuilt(t *testing.T, dir, main, src, wantStdout string) error {
+	t.Helper()
+	_, java := t17Tools(t)
 	run := exec.Command(java, "-cp", dir, main)
 	run.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
 	out, err := run.CombinedOutput()

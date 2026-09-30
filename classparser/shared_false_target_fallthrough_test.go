@@ -5,6 +5,7 @@ import "testing"
 // Both failed predicates in the compound guard enter the same suffix. The
 // suffix must run even when the first predicate's index == 0 branch was taken.
 func TestSharedFalseTargetFallthroughRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "SharedFalseTargetFallthrough"
 	source := `public final class SharedFalseTargetFallthrough {
   private static boolean contains(String text, int start, int len, String... choices) {
@@ -43,7 +44,7 @@ func TestSharedFalseTargetFallthroughRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("shared false-target fallthrough %s: %v\n%s", mode, err, result.Source)
 		}
 	}

@@ -6,6 +6,7 @@ import "testing"
 // call must be evaluated once after the original || / && predicate, including
 // its short-circuit order; a value leaf is not a second condition operand.
 func TestAdversarialSharedCallValueShortCircuitRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "SharedCallValue"
 	const source = `public class SharedCallValue {
   static StringBuilder trace;
@@ -43,7 +44,7 @@ func TestAdversarialSharedCallValueShortCircuitRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("shared value %s/%s: %v\n%s", mode, debug, err, result.Source)
 			}
 		}

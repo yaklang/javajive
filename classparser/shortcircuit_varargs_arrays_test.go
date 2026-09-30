@@ -9,6 +9,7 @@ import (
 // The source is checked against the original JVM result, so an Object/null
 // placeholder cannot satisfy the Java compiler or silently change a branch.
 func TestShortCircuitVarargsArraysRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "ShortCircuitVarargsArrays"
 	source := `public final class ShortCircuitVarargsArrays {
   private static final String[] END = {"L", "R", "N", "M", "B", "H", "F", "V", "W", " "};
@@ -57,7 +58,7 @@ func TestShortCircuitVarargsArraysRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("short-circuit varargs array round-trip %s: %v\n%s", mode, err, result.Source)
 		}
 		// A retained local initializer must not be repeated at the later call:

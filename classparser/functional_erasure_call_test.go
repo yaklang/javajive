@@ -31,6 +31,7 @@ func functionalFixture(t *testing.T, main, source, debug string) (string, []byte
 // Materializing the lambda as a local must not make that erased parameterization
 // incompatible with the generic ConcurrentHashMap.computeIfPresent declaration.
 func TestMaterializedBiFunctionErasureRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Parallel()
 	const main = "FunctionalErasureCall"
 	const source = `import java.util.AbstractMap;
@@ -75,7 +76,7 @@ public class FunctionalErasureCall<K, V> {
 			if !strings.Contains(result.Source, "computeIfPresent") || !strings.Contains(result.Source, "BiFunction") {
 				t.Fatalf("fixture lost generic functional call in %s/%s:\n%s", mode, debug, result.Source)
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("materialized BiFunction %s/%s: %v", mode, debug, err)
 			}
 		}
@@ -85,6 +86,7 @@ public class FunctionalErasureCall<K, V> {
 // A class generic method carries the same erased SAM problem even when the
 // argument is a local and the callee is declared by the current class.
 func TestSameClassBiFunctionTypeVariablesRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "SameClassBiFunctionCall"
 	const source = `import java.util.function.BiFunction;
 
@@ -114,7 +116,7 @@ public class SameClassBiFunctionCall<K, V> {
 			if !strings.Contains(result.Source, "BiFunction") || !strings.Contains(result.Source, "install(") {
 				t.Fatalf("fixture lost same-class generic call in %s/%s:\n%s", mode, debug, result.Source)
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("same-class BiFunction %s/%s: %v", mode, debug, err)
 			}
 		}
@@ -125,6 +127,7 @@ public class SameClassBiFunctionCall<K, V> {
 // Supplier<Iterator<Entry<T,R>>> loses the nested Iterator arguments. Both
 // shapes appear in Caffeine's same-class helper calls.
 func TestSameClassFunctionAndSupplierErasureRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Setenv("JDEC_POLY_CALL_TARGET_OFF", "")
 	const main = "FunctionalErasureVariants"
 	const source = `import java.util.HashMap;
@@ -175,7 +178,7 @@ public class FunctionalErasureVariants<T> {
 					t.Fatalf("call target did not reach materialized local %q in %s/%s:\n%s", declaration, mode, debug, result.Source)
 				}
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("Function/Supplier erasure %s/%s: %v", mode, debug, err)
 			}
 		}
@@ -198,6 +201,7 @@ public class FunctionalErasureVariants<T> {
 // receiver arguments prove the complete source target without inspecting a
 // library-specific class or source spelling.
 func TestT19JDKConsumerCallTargetsRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Setenv("JDEC_POLY_CALL_TARGET_OFF", "")
 	const main = "JdkConsumerTargets"
 	const source = `import java.util.LinkedHashMap;
@@ -240,7 +244,7 @@ public class JdkConsumerTargets<K, V> {
 					t.Fatalf("JDK target did not reach local %q in %s/%s:\n%s", declaration, mode, debug, result.Source)
 				}
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("JDK consumer target %s/%s: %v\n%s", mode, debug, err, result.Source)
 			}
 		}
@@ -255,6 +259,7 @@ public class JdkConsumerTargets<K, V> {
 // Function<? super T,? extends R>.  The return constraint must refine the web's
 // parameterization while preserving the same JVM erasure.
 func TestT19ReturnedFunctionalWebUsesGenericReturnConstraint(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Setenv("JDEC_GENERIC_USE_CONSTRAINT_OFF", "")
 	const main = "ReturnedFunctionalWeb"
 	const source = `import java.util.function.BiFunction;
@@ -292,7 +297,7 @@ public class ReturnedFunctionalWeb {
 			if err != nil {
 				t.Fatalf("decompile %s/%s: %v", mode, debug, err)
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("returned functional web %s/%s: %v\n%s", mode, debug, err, result.Source)
 			}
 		}
@@ -552,6 +557,7 @@ public class ChainedSiblingFunctionalErasureCall<K, V> {
 // from the invoke descriptor. Source casts to T erase to Object, so the call
 // renderer has to recover T from Consumer/Function/BiFunction's receiver type.
 func TestLowerBoundedFunctionalArgumentsRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Parallel()
 	const main = "LowerBoundedFunctionalCall"
 	const source = `import java.util.function.BiFunction;
@@ -585,7 +591,7 @@ public class LowerBoundedFunctionalCall<T> {
 					t.Fatalf("fixture lost %s in %s/%s:\n%s", call, mode, debug, result.Source)
 				}
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("lower-bounded functional arguments %s/%s: %v", mode, debug, err)
 			}
 		}
@@ -599,6 +605,7 @@ public class LowerBoundedFunctionalCall<T> {
 // parameters before rendering its body, or the apply/accept arguments remain
 // Object and javac rejects the reconstructed source with a CAP# error.
 func TestCapturedLowerBoundedFunctionalArgumentsRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Parallel()
 	const main = "CapturedLowerBoundedFunctionalCall"
 	const source = `import java.util.function.BiFunction;
@@ -635,7 +642,7 @@ public class CapturedLowerBoundedFunctionalCall<T> {
 					t.Fatalf("capturing fixture lost %s in %s/%s:\n%s", call, mode, debug, result.Source)
 				}
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("captured lower-bounded functional arguments %s/%s: %v", mode, debug, err)
 			}
 		}
@@ -647,6 +654,7 @@ public class CapturedLowerBoundedFunctionalCall<T> {
 // to a captured `? super List<T>` still needs the source-level `(List<T>)` cast;
 // matching erasures alone are not sufficient under wildcard capture conversion.
 func TestCapturedParameterizedLowerBoundRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "CapturedParameterizedLowerBound"
 	const source = `import java.util.Arrays;
 import java.util.List;
@@ -673,7 +681,7 @@ public class CapturedParameterizedLowerBound<T> {
 			if !strings.Contains(result.Source, ".apply(") {
 				t.Fatalf("parameterized lower-bound fixture lost apply in %s/%s:\n%s", mode, debug, result.Source)
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("captured parameterized lower bound %s/%s: %v", mode, debug, err)
 			}
 		}
@@ -685,6 +693,7 @@ public class CapturedParameterizedLowerBound<T> {
 // writes through erased captures. Exercise both branches and null results so
 // return bridges and side effects are checked against the original bytecode.
 func TestT19ContravariantLambdaErasedReceiverRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Parallel()
 	const main = "ContravariantLambdaBody"
 	const source = `import java.util.*;
@@ -715,7 +724,7 @@ public class ContravariantLambdaBody<K,V> {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("erased receiver %s/%s: %v\n%s", mode, debug, err, result.Source)
 			}
 		}
@@ -728,6 +737,7 @@ public class ContravariantLambdaBody<K,V> {
 // consumer-capture example as an executable oracle, rather than checking a
 // particular rewritten cast spelling.
 func TestT19PolyCastsKeepDeclaredInputsRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Parallel()
 	const main = "PolyCastBoundaries"
 	const source = `import java.util.*;
@@ -757,7 +767,7 @@ public class PolyCastBoundaries<T> {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("poly cast boundary %s/%s: %v\n%s", mode, debug, err, result.Source)
 			}
 		}

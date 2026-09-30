@@ -5,6 +5,7 @@ import "testing"
 // A generic array returned by copy remains the complete array argument to a
 // varargs constructor. Casting it to the element type makes the source invalid.
 func TestGenericVarargsConstructorArrayRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "GenericVarargsConstructorArray"
 	source := `import java.util.function.Predicate;
 public final class GenericVarargsConstructorArray<T> implements Predicate<T> {
@@ -36,7 +37,7 @@ public final class GenericVarargsConstructorArray<T> implements Predicate<T> {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("varargs array argument %s: %v\n%s", mode, err, result.Source)
 		}
 	}
@@ -46,6 +47,7 @@ public final class GenericVarargsConstructorArray<T> implements Predicate<T> {
 // Different arities cannot select the enclosing constructor, so no overload
 // pin cast may turn the third array argument into a single Predicate.
 func TestShiftedThisCtorGenericArrayRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	const main = "ShiftedThisCtorGenericArray"
 	source := `import java.util.function.Predicate;
 public final class ShiftedThisCtorGenericArray<T> {
@@ -70,7 +72,7 @@ public final class ShiftedThisCtorGenericArray<T> {
 		if err != nil {
 			t.Fatalf("decompile %s: %v", mode, err)
 		}
-		if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+		if err := rebuild("8", main, result.Source, want); err != nil {
 			t.Fatalf("shifted this(...) array %s: %v\n%s", mode, err, result.Source)
 		}
 	}

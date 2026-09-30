@@ -6,6 +6,7 @@ import "testing"
 // iteration count, allocation count, mutated contents, identity and a scalar
 // snapshot after reassignment, rather than generated variable names.
 func TestAdversarialAliasPreservesEvaluationRoundTrip(t *testing.T) {
+	rebuild := t17RebuildRunner(t)
 	t.Parallel()
 	const main = "AliasEvaluation"
 	const source = `import java.util.*;
@@ -47,7 +48,7 @@ public class AliasEvaluation {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := t17RebuildRunErr(t, "8", main, result.Source, want); err != nil {
+			if err := rebuild("8", main, result.Source, want); err != nil {
 				t.Fatalf("alias %s/%s: %v\n%s", mode, debug, err, result.Source)
 			}
 		}
