@@ -53,7 +53,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = wrapErasedFieldAsTypeVar(body, ".output")
 	body = wrapNullSentinelTernary(body)
 	body = wrapEmptyIteratorTernaryArm(body)
-	body = retypeTernarySiblingLocal(body)
+	// Allocation joins use the hierarchy proved by the IR. A shared binary-name
+	// prefix only describes lexical nesting; it cannot prove a common base type.
 	body = retypeTernaryThisFieldsToImportedLUB(body)
 	body = wrapTernaryAssignElseCast(body)
 	body = fixErasedZeroArgInnerCast(body)
