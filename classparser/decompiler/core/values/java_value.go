@@ -412,7 +412,14 @@ func (j *JavaArrayMember) Type() types.JavaType {
 	if ot == nil {
 		return nil
 	}
-	return ot.ElementType()
+	element := ot.ElementType()
+	if element == nil {
+		return nil
+	}
+	// A load's inferred value type is a use-site view. Returning the array's
+	// component wrapper lets later local folding mutate the array declaration
+	// and even a CHECKCAST descriptor shared with that array (int[] -> Object[]).
+	return element.Copy()
 }
 func (j *JavaArrayMember) String(funcCtx *class_context.ClassContext) string {
 	obj := AssignmentOperand(j.Object, funcCtx)
@@ -824,6 +831,12 @@ func (s *SlotValue) ResetValue(val JavaValue) {
 	// propagating the slot's temp type so a typeless value degrades gracefully
 	// instead of panicking the whole method into a stub.
 	if val == nil {
+		return
+	}
+	if ref, ok := val.(*JavaRef); ok && ref != nil && ref.WebDeclType != nil {
+		// A late reaching-definition rebind selects this solved local. The
+		// SlotValue's DFS-era temporary type is not another definition and
+		// must not overwrite the local's complete declaration constraints.
 		return
 	}
 	// Folding changes the expression represented by this slot, not the JVM

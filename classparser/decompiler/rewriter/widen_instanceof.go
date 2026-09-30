@@ -153,7 +153,9 @@ func WidenInstanceofReadRefs(sts *[]statements.Statement) {
 			continue
 		}
 		declRef := nameToDeclRef[varName]
-		if declRef == nil || declRef.Type() == nil || declRef.IsThis || declRef.IsParam {
+		// A solved def-use web already accounts for every definition. An
+		// instanceof name scan cannot discard its member/array constraints.
+		if declRef == nil || declRef.Type() == nil || declRef.IsThis || declRef.IsParam || declRef.WebDeclType != nil {
 			continue
 		}
 		if _, isPrim := declRef.Type().RawType().(*types.JavaPrimer); isPrim {

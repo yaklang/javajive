@@ -2,9 +2,35 @@ package values
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"testing"
 )
+
+func TestArrayLoadInferenceCannotMutateArrayComponentOrCast(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	for _, element := range []types.JavaType{types.NewJavaPrimer(types.JavaInteger), types.NewJavaPrimer(types.JavaBoolean), types.NewJavaClass("java.lang.StackTraceElement"), types.NewJavaClass("T"), types.NewJavaArrayType(types.NewJavaPrimer(types.JavaInteger))} {
+		t.Run(element.String(ctx), func(t *testing.T) {
+			arrayType := types.NewJavaArrayType(element)
+			want := arrayType.String(ctx)
+			array := NewJavaRef(utils.NewRootVariableId(), nil, arrayType.Copy())
+			array.WebDeclType = arrayType.Copy()
+			cast := &CastExpression{Value: JavaNull, TargetType: arrayType.Copy()}
+			load := NewJavaArrayMember(array, NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger)))
+			inferred := load.Type()
+			inferred.ResetTypeRef(types.NewJavaClass("java.lang.Object"))
+			NewSlotValue(nil, types.NewJavaClass("java.lang.Object")).ResetValue(load)
+			for _, typ := range []types.JavaType{array.Type(), array.WebDeclType, cast.Type()} {
+				if got := typ.String(ctx); got != want {
+					t.Fatalf("array descriptor mutated by element inference: %s want %s", got, want)
+				}
+			}
+			if got := load.Type().String(ctx); got != element.String(ctx) {
+				t.Fatalf("load lost its component type: %s", got)
+			}
+		})
+	}
+}
 
 func TestInvocationTypeIndependentOfLocalInference(t *testing.T) {
 	expected := types.NewJavaClass("sample.Left")
