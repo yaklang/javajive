@@ -3102,7 +3102,7 @@ func TestListOverloadUsesExactDeclarationBeforeTextRewritesJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	on := string(onb)
-	if !strings.Contains(on, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(var2))") {
+	if !strings.Contains(on, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(List)(var2))") {
 		t.Fatalf("ON lost the exact List overload target:\n%s", clipForTest(on, "withFallbackTo((List"))
 	}
 	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
@@ -3116,7 +3116,7 @@ func TestListOverloadUsesExactDeclarationBeforeTextRewritesJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if !strings.Contains(off, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(var2))") {
+	if !strings.Contains(off, "this.withFallbackTo((List<? extends AgentBuilder$LocationStrategy>)(List)(var2))") {
 		t.Fatalf("binding must also hold without text rewrites:\n%s", clipForTest(off, "withFallbackTo((List"))
 	}
 }

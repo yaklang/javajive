@@ -30,14 +30,18 @@ public class CalleeWildcardScope<E extends Number> {
     return this.overload(copy);
   }
   int external(Object value) {return ExternalScopeOwner.make().select((List<String>)value);}
+  int empty() {return this.overload(Collections.<Integer>emptyList());}
+  private static <V> List<V> blank() {return Collections.emptyList();}
+  int customEmpty() {return this.overload(CalleeWildcardScope.<Integer>blank());}
   public static void main(String[] args) {
     CalleeWildcardScope<Integer> worker=new CalleeWildcardScope<>();
     Object[] inputs={Arrays.asList("a","b"),Arrays.asList(1,2),Collections.emptyList(),null,"wrong"};
-    for(Object value:inputs)for(int operation=0;operation<7;operation++) {
+    for(Object value:inputs)for(int operation=0;operation<9;operation++) {
       try {Object out;
         switch(operation) {case 0:out=worker.head(value);break;case 1:out=worker.size(value);break;
           case 2:out=worker.other(value);break;case 3:out=worker.shadow(value);break;
-          case 4:out=worker.selected(value);break;case 5:out=worker.subtype(value);break;default:out=worker.external(value);}
+          case 4:out=worker.selected(value);break;case 5:out=worker.subtype(value);break;
+          case 6:out=worker.external(value);break;case 7:out=worker.empty();break;default:out=worker.customEmpty();}
         System.out.print(out+";");
       }catch(RuntimeException ex){System.out.print(ex.getClass().getSimpleName()+";");}
     }

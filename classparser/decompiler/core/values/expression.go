@@ -3667,7 +3667,13 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		return fmt.Sprintf("(%s)(%s)", c.TargetType.String(funcCtx), c.Value.String(funcCtx))
 	}
 	if cast := f.parameterizedOverloadArgCast(i, funcCtx); cast != "" {
-		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+		// The value model records the JVM erasure. A poly producer such as
+		// emptyList() may instead infer List<Object> in a Java cast context,
+		// which cannot directly become Collection<? extends Number>. Restore
+		// the proven erased widening first; both casts then have that erasure
+		// and neither adds a runtime check or evaluates the argument again.
+		raw := f.witnessDescriptorParamType(i).String(funcCtx)
+		return fmt.Sprintf("(%s)(%s)(%s)", cast, raw, arg.String(funcCtx))
 	}
 	if bridge := f.streamFunctionInputBridge(i); bridge != nil {
 		raw := types.NewJavaClass("java.util.function.Function").String(funcCtx)
