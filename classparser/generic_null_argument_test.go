@@ -6,6 +6,7 @@ import (
 )
 
 func TestGenericNullArgumentUsesRecoveredFormal(t *testing.T) {
+	t.Parallel()
 	original, classes := t04CompileRun(t, "17", "GenericNullMain", map[string]string{
 		"GenericBag.java":  `public interface GenericBag<E> { void add(E value); }`,
 		"GenericImpl.java": `public class GenericImpl implements GenericBag<String> { public void add(String value) { System.out.println(value == null ? "null" : value); } }`,
@@ -25,6 +26,7 @@ func TestGenericNullArgumentUsesRecoveredFormal(t *testing.T) {
 }
 
 func TestJDKListNullArgumentUsesElementFormal(t *testing.T) {
+	t.Parallel()
 	original, classes := t04CompileRun(t, "17", "ListNullMain", map[string]string{
 		"ListNullMain.java": `import java.util.ArrayList;
 import java.util.List;
