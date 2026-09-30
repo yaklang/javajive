@@ -6952,6 +6952,7 @@ func (d *Decompiler) ParseStatement() error {
 		MiscRewriter(d.RootNode, d.delRefUserAttr, allowArrayEffects)
 	}
 	d.inlineBranchArrayLeaves()
+	d.inlineBranchConstructorArrays()
 	d.recoverGenericArrayDeclarations(idToOpcode)
 	uidToPairs := omap.NewEmptyOrderedMap[string, []*VarFoldRule]()
 	uidToRef := map[string]*values.JavaRef{}

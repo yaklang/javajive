@@ -42,84 +42,98 @@ func (d *Decompiler) branchExpressionCastLeaf(ref *values.JavaRef, cast *values.
 			}
 			continue
 		}
-		if len(cur.stackProduced) != 1 {
+		var ok bool
+		stack, ok = d.branchExpressionStackStep(cur, stack)
+		if !ok {
 			return nil
 		}
-		produced := values.UnpackSoltValue(cur.stackProduced[0])
-		if produced == nil {
-			return nil
-		}
-		// Operands are listed in pop order: last argument first, receiver last.
-		var operands []values.JavaValue
-		op := cur.Instr.OpCode
-		switch op {
-		case OP_GETFIELD:
-			field, ok := produced.(*values.RefMember)
-			if !ok || field == nil || field.Object == nil {
-				return nil
-			}
-			operands = []values.JavaValue{field.Object}
-		case OP_GETSTATIC:
-			if field, ok := produced.(*values.JavaClassMember); !ok || field == nil {
-				return nil
-			}
-		case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE, OP_INVOKESTATIC:
-			call, ok := produced.(*values.FunctionCallExpression)
-			if !ok || call == nil || d.invokeFuncCall[cur] != call || call.OriginPC != int(cur.CurrentOffset) || call.Descriptor == "" ||
-				call.IsStatic != (op == OP_INVOKESTATIC) {
-				return nil
-			}
-			method, err := types.ParseMethodDescriptor(call.Descriptor)
-			if err != nil || method.FunctionType() == nil || method.FunctionType().ReturnType == nil ||
-				len(method.FunctionType().ParamTypes) != len(call.Arguments) {
-				return nil
-			}
-			if p, ok := method.FunctionType().ReturnType.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaVoid {
-				return nil
-			}
-			for i := len(call.Arguments) - 1; i >= 0; i-- {
-				operands = append(operands, call.Arguments[i])
-			}
-			if !call.IsStatic {
-				if call.Object == nil {
-					return nil
-				}
-				operands = append(operands, call.Object)
-			}
-		case OP_CHECKCAST:
-			inner, ok := produced.(*values.CastExpression)
-			if !ok || inner == nil || !d.inlineCheckcast[cur] || inner.OriginPC != int(cur.CurrentOffset) ||
-				values.UnpackSoltValue(d.checkcastInnerArg[cur]) != values.UnpackSoltValue(inner.Value) {
-				return nil
-			}
-			operands = []values.JavaValue{inner.Value}
-		default:
-			access := LocalAccessOf(op)
-			if !(access.Read && !access.Write && op != OP_RET) &&
-				op != OP_ACONST_NULL && !(op >= OP_ICONST_M1 && op <= OP_DCONST_1) &&
-				op != OP_BIPUSH && op != OP_SIPUSH && op != OP_LDC && op != OP_LDC_W && op != OP_LDC2_W {
-				return nil
-			}
-			// A load/constant cannot stand in for a hidden defining expression.
-			switch produced.(type) {
-			case *values.JavaRef, *values.JavaLiteral, *values.JavaClassValue:
-			default:
-				return nil
-			}
-		}
-		if len(cur.stackConsumed) != len(operands) || len(stack) < len(operands) {
-			return nil
-		}
-		for i, operand := range operands {
-			value := values.UnpackSoltValue(operand)
-			if value == nil || value != values.UnpackSoltValue(cur.stackConsumed[i]) || value != stack[len(stack)-1-i] {
-				return nil
-			}
-		}
-		stack = append(stack[:len(stack)-len(operands)], produced)
 	}
 	if len(stack) != 1 || stack[0] != values.UnpackSoltValue(cast.Value) {
 		return nil
 	}
 	return check
+}
+
+// branchExpressionStackStep matches one value-producing AST node to the JVM's
+// decoded pop order. Path isolation and handler coverage belong to the caller.
+// It does not admit DUP, stores, discarded effects or opaque expressions.
+func (d *Decompiler) branchExpressionStackStep(cur *OpCode, stack []values.JavaValue) ([]values.JavaValue, bool) {
+	if d == nil || cur == nil || cur.Instr == nil {
+		return nil, false
+	}
+	if len(cur.stackProduced) != 1 {
+		return nil, false
+	}
+	produced := values.UnpackSoltValue(cur.stackProduced[0])
+	if produced == nil {
+		return nil, false
+	}
+	// Operands are listed in pop order: last argument first, receiver last.
+	var operands []values.JavaValue
+	op := cur.Instr.OpCode
+	switch op {
+	case OP_GETFIELD:
+		field, ok := produced.(*values.RefMember)
+		if !ok || field == nil || field.Object == nil {
+			return nil, false
+		}
+		operands = []values.JavaValue{field.Object}
+	case OP_GETSTATIC:
+		if field, ok := produced.(*values.JavaClassMember); !ok || field == nil {
+			return nil, false
+		}
+	case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE, OP_INVOKESTATIC:
+		call, ok := produced.(*values.FunctionCallExpression)
+		if !ok || call == nil || d.invokeFuncCall[cur] != call || call.OriginPC != int(cur.CurrentOffset) || call.Descriptor == "" ||
+			call.IsStatic != (op == OP_INVOKESTATIC) {
+			return nil, false
+		}
+		method, err := types.ParseMethodDescriptor(call.Descriptor)
+		if err != nil || method.FunctionType() == nil || method.FunctionType().ReturnType == nil ||
+			len(method.FunctionType().ParamTypes) != len(call.Arguments) {
+			return nil, false
+		}
+		if p, ok := method.FunctionType().ReturnType.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaVoid {
+			return nil, false
+		}
+		for i := len(call.Arguments) - 1; i >= 0; i-- {
+			operands = append(operands, call.Arguments[i])
+		}
+		if !call.IsStatic {
+			if call.Object == nil {
+				return nil, false
+			}
+			operands = append(operands, call.Object)
+		}
+	case OP_CHECKCAST:
+		inner, ok := produced.(*values.CastExpression)
+		if !ok || inner == nil || !d.inlineCheckcast[cur] || inner.OriginPC != int(cur.CurrentOffset) ||
+			values.UnpackSoltValue(d.checkcastInnerArg[cur]) != values.UnpackSoltValue(inner.Value) {
+			return nil, false
+		}
+		operands = []values.JavaValue{inner.Value}
+	default:
+		access := LocalAccessOf(op)
+		if !(access.Read && !access.Write && op != OP_RET) &&
+			op != OP_ACONST_NULL && !(op >= OP_ICONST_M1 && op <= OP_DCONST_1) &&
+			op != OP_BIPUSH && op != OP_SIPUSH && op != OP_LDC && op != OP_LDC_W && op != OP_LDC2_W {
+			return nil, false
+		}
+		// A load/constant cannot stand in for a hidden defining expression.
+		switch produced.(type) {
+		case *values.JavaRef, *values.JavaLiteral, *values.JavaClassValue:
+		default:
+			return nil, false
+		}
+	}
+	if len(cur.stackConsumed) != len(operands) || len(stack) < len(operands) {
+		return nil, false
+	}
+	for i, operand := range operands {
+		value := values.UnpackSoltValue(operand)
+		if value == nil || value != values.UnpackSoltValue(cur.stackConsumed[i]) || value != stack[len(stack)-1-i] {
+			return nil, false
+		}
+	}
+	return append(stack[:len(stack)-len(operands)], produced), true
 }
