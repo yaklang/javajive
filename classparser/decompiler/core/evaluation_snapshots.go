@@ -1,6 +1,7 @@
 package core
 
 import (
+	"reflect"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -14,6 +15,7 @@ type EvaluationSnapshot struct {
 	Ref      *values.JavaRef
 	Value    values.JavaValue
 	OriginPC int
+	Operand  bool
 }
 
 func (d *Decompiler) snapshotDynamicOperands(op *OpCode, sim StackSimulation, args []values.JavaValue, parameters []types.JavaType) ([]values.JavaValue, error) {
@@ -35,11 +37,45 @@ func (d *Decompiler) snapshotDynamicOperands(op *OpCode, sim StackSimulation, ar
 			}
 		}
 		d.disFoldRef = append(d.disFoldRef, ref)
-		d.evaluationSnapshots[op] = append(d.evaluationSnapshots[op], EvaluationSnapshot{Ref: ref, Value: args[i], OriginPC: int(op.CurrentOffset)})
+		d.evaluationSnapshots[op] = append(d.evaluationSnapshots[op], EvaluationSnapshot{Ref: ref, Value: args[i], OriginPC: int(op.CurrentOffset), Operand: true})
 		result[i] = ref
 	}
 	return result, nil
 }
+
+// Operand snapshots are immutable value copies, but their declaration type was
+// copied before reference webs were solved. Refresh direct reference copies
+// from the final source declaration; never follow JavaRef.Val (an earlier store)
+// or change the copied value, evaluation point, primitive descriptor, or poly
+// result target. This also lets a downstream local copy see the solved type on
+// the next web iteration.
+func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
+	changed := false
+	for _, op := range d.opCodes {
+		for _, snapshot := range d.evaluationSnapshots[op] {
+			if !snapshot.Operand || snapshot.Ref == nil {
+				continue
+			}
+			source, ok := values.UnpackSoltValue(snapshot.Value).(*values.JavaRef)
+			if !ok || source == nil || source == snapshot.Ref {
+				continue
+			}
+			if _, primitive := snapshot.Ref.Type().RawType().(*types.JavaPrimer); primitive {
+				continue
+			}
+			typ := source.Type()
+			if _, primitive := typ.RawType().(*types.JavaPrimer); primitive {
+				continue
+			}
+			if !reflect.DeepEqual(snapshot.Ref.Type().RawType(), typ.RawType()) {
+				snapshot.Ref.ResetVarType(typ.Copy())
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
 func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, value values.JavaValue) values.JavaValue {
 	if d.canInlineImmediateMethodRef(op, value) {
 		return value

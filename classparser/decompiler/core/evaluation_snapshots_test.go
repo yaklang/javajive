@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,6 +13,66 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
+
+func TestReferenceOperandSnapshotsKeepSolvedDeclarationAndCopyIdentity(t *testing.T) {
+	for _, kind := range []string{"joined base", "parameterized", "array", "earlier allocation", "primitive descriptor", "poly result", "opaque call"} {
+		t.Run(kind, func(t *testing.T) {
+			initial := types.JavaType(types.NewJavaClass("example.FirstArm"))
+			final := types.JavaType(types.NewJavaClass("example.Base"))
+			if kind == "parameterized" {
+				initial = types.NewJavaClass("java.util.List")
+				final = types.NewParameterizedType("java.util.List", []types.JavaType{types.NewJavaClass("T")})
+			} else if kind == "array" {
+				initial = types.NewJavaClass("java.lang.Object")
+				final = types.NewJavaArrayType(types.NewJavaClass("java.lang.String"))
+			} else if kind == "primitive descriptor" {
+				initial = types.NewJavaPrimer(types.JavaInteger)
+				final = types.NewJavaPrimer(types.JavaBoolean)
+			}
+			local := values.NewJavaRef(utils.NewRootVariableId(), nil, initial)
+			if kind == "earlier allocation" {
+				local.Val = values.NewCustomValue(nil, func() types.JavaType { return initial })
+			}
+			source := values.JavaValue(values.NewSlotValue(local, initial))
+			if kind == "opaque call" {
+				source = values.NewCustomValue(nil, func() types.JavaType { return initial })
+			}
+			sim := NewStackSimulation(nil, map[int]*values.JavaRef{}, utils.NewRootVariableId().Next())
+			op := &OpCode{Instr: InstrInfos[OP_INVOKEDYNAMIC], CurrentOffset: 42}
+			d := &Decompiler{opCodes: []*OpCode{op}, evaluationSnapshots: map[*OpCode][]EvaluationSnapshot{}}
+			var snapshot *values.JavaRef
+			if kind == "poly result" {
+				snapshot = d.snapshotDynamicResult(op, sim, source).(*values.JavaRef)
+			} else {
+				args, err := d.snapshotDynamicOperands(op, sim, []values.JavaValue{source}, []types.JavaType{initial})
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot = args[0].(*values.JavaRef)
+			}
+			before := snapshot.Type().Copy()
+			local.ResetVarType(final)
+			local.WebDeclType = final.Copy()
+			wantChange := kind != "primitive descriptor" && kind != "poly result" && kind != "opaque call"
+			if d.refreshReferenceOperandSnapshotTypes() != wantChange {
+				t.Fatal("wrong source-type propagation gate")
+			}
+			want := before
+			if wantChange {
+				want = final
+			}
+			if !reflect.DeepEqual(snapshot.Type().RawType(), want.RawType()) {
+				t.Fatal("snapshot kept a provisional type or lost its target/descriptor")
+			}
+			if values.SameLocal(snapshot, local) || snapshot.Val != source || d.evaluationSnapshots[op][0].Value != source || d.evaluationSnapshots[op][0].OriginPC != 42 {
+				t.Fatal("type propagation changed the captured value, identity or evaluation point")
+			}
+			if d.refreshReferenceOperandSnapshotTypes() {
+				t.Fatal("type propagation did not converge")
+			}
+		})
+	}
+}
 
 func TestConditionalLambdaInliningPreservesCaptureAndHandlerBoundaries(t *testing.T) {
 	for _, kind := range []string{"uncaptured", "this", "mutable local", "call", "handler boundary", "intervening instruction", "no merge"} {

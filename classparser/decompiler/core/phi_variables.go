@@ -58,7 +58,7 @@ func (d *Decompiler) unifyReferenceWebs() {
 	// Copy chains can point forward to a web solved later in bytecode order.
 	// Iterate until those declarations stop changing (at most one propagation
 	// step per web); a single pass leaves caches typed at a provisional branch.
-	for round := 0; round <= len(order); round++ {
+	for round := 0; round <= len(order)+len(d.evaluationSnapshots); round++ {
 		changed := false
 		for _, web := range order {
 			stores := groups[web]
@@ -72,7 +72,16 @@ func (d *Decompiler) unifyReferenceWebs() {
 				if len(stores) != 1 || len(stores[0].stackConsumed) != 1 {
 					continue
 				}
-				if _, ternary := values.UnpackSoltValue(stores[0].stackConsumed[0]).(*values.TernaryExpression); !ternary {
+				switch value := values.UnpackSoltValue(stores[0].stackConsumed[0]).(type) {
+				case *values.TernaryExpression:
+				case *values.JavaRef:
+					// A pure copy gets its declaration from the solved source web,
+					// not the first branch observed during DFS simulation. No cast
+					// is introduced and the source's earlier Val is not a definition.
+					if value == nil || value == d.opcodeIdToRef[stores[0]][0][0] {
+						continue
+					}
+				default:
 					continue
 				}
 			}
@@ -188,6 +197,9 @@ func (d *Decompiler) unifyReferenceWebs() {
 					d.opcodeIdToRef[store][0][1] = i == 0 && param == nil
 				}
 			}
+		}
+		if d.refreshReferenceOperandSnapshotTypes() {
+			changed = true
 		}
 		if !changed {
 			break
