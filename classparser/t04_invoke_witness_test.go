@@ -2,10 +2,12 @@ package javaclassparser
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -465,6 +467,16 @@ func t04CompileRun(t *testing.T, release, mainClass string, sources map[string]s
 func t04RoundTripModes(t *testing.T, release, mainClass, origOut string, classes map[string][]byte, checkSrc func(*testing.T, string)) {
 	t.Helper()
 	javac, java := t04Tools(t)
+	// Compile the whole generated family only when one of its source files
+	// changes. The cache is scoped to this release and fixture, and every mode
+	// still decompiles, checks its source and runs a fresh verified JVM.
+	compiled := map[string]string{}
+	parent := t
+	names := make([]string, 0, len(classes))
+	for name := range classes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	resolver := func(internalName string) ([]byte, bool) {
 		base := internalName
 		if i := strings.LastIndexByte(internalName, '/'); i >= 0 {
@@ -478,11 +490,10 @@ func t04RoundTripModes(t *testing.T, release, mainClass, origOut string, classes
 	for _, mode := range []DecompileMode{Precision, Compatibility} {
 		mode := mode
 		t.Run(string(mode), func(t *testing.T) {
-			reDir := t.TempDir()
-			outDir := t.TempDir()
-			var javaFiles []string
+			sources := map[string]string{}
 			var allSrc strings.Builder
-			for name, raw := range classes {
+			for _, name := range names {
+				raw := classes[name]
 				res, err := DecompileWithOptions(raw, DecompileOptions{Mode: mode, Resolve: resolver})
 				if err != nil {
 					t.Fatalf("decompile %s: %v", name, err)
@@ -492,21 +503,35 @@ func t04RoundTripModes(t *testing.T, release, mainClass, origOut string, classes
 				}
 				allSrc.WriteString(res.Source)
 				allSrc.WriteByte('\n')
-				jp := filepath.Join(reDir, name+".java")
-				if err := os.WriteFile(jp, []byte(res.Source), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				javaFiles = append(javaFiles, jp)
+				sources[name] = res.Source
 			}
 			if checkSrc != nil {
 				checkSrc(t, allSrc.String())
 			}
-			args := append([]string{"-proc:none", "-encoding", "UTF-8", "--release", release, "-d", outDir}, javaFiles...)
-			cmd := exec.Command(javac, args...)
-			cmd.Dir = reDir
-			cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("recompile decompiled %s: %v\n%s\n----- source -----\n%s", mode, err, out, allSrc.String())
+			key, err := json.Marshal(sources)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outDir, cached := compiled[string(key)]
+			if !cached {
+				reDir := parent.TempDir()
+				outDir = parent.TempDir()
+				var javaFiles []string
+				for _, name := range names {
+					jp := filepath.Join(reDir, name+".java")
+					if err := os.WriteFile(jp, []byte(sources[name]), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					javaFiles = append(javaFiles, jp)
+				}
+				args := append([]string{"-proc:none", "-encoding", "UTF-8", "--release", release, "-d", outDir}, javaFiles...)
+				cmd := exec.Command(javac, args...)
+				cmd.Dir = reDir
+				cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("recompile decompiled %s: %v\n%s\n----- source -----\n%s", mode, err, out, allSrc.String())
+				}
+				compiled[string(key)] = outDir
 			}
 			got := t04RunJava(t, java, outDir, mainClass)
 			if got != origOut {
