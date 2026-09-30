@@ -1550,21 +1550,10 @@ func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider 
 	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" || paramIndex < 0 {
 		return nil
 	}
-	// A lower-bounded `? super X` receiver type arg is a CONSUMER position: a callee param that maps to it
-	// accepts an X, so the erased `Object` argument the source cast to X (the wildcard's lower bound) can be
-	// re-cast (`(E)`). It is therefore allowed through here and resolved to its bound by substituteAndGateParam.
-	// An unbounded `?` or upper-bounded `? extends X` arg captures to an unnameable CAP# with NO denotable
-	// cast target, so those still bail. Kill-switch JDEC_GENERIC_SUPERWILDCARD_OFF restores the blanket bail.
-	superWildcardOff := funcCtx.Getenv("JDEC_GENERIC_SUPERWILDCARD_OFF") != ""
-	for _, a := range recvArgs {
-		if !isWildcardType(a) {
-			continue
-		}
-		if _, ok := lowerBoundedWildcard(a); ok && !superWildcardOff {
-			continue
-		}
-		return nil
-	}
+	// Gate the selected formal AFTER substitution. An unrelated producer
+	// argument must not block a consumer: Mapping<? super U, ? extends T>
+	// accepts U through apply(A), regardless of its result B. A formal that
+	// actually depends on an upper/unbounded capture is still rejected below.
 	visited := map[string]bool{}
 	return resolveParamWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, descriptor, argc, paramIndex, visited)
 }
@@ -2011,6 +2000,9 @@ func substituteAndGateParam(funcCtx *class_context.ClassContext, param JavaType,
 	// Function<? super F,...>.apply(F) / Collections2$FilteredCollection family. A concrete or out-of-scope
 	// bound is rarer and riskier, so it stays nil.
 	if w, isW := lowerBoundedWildcard(res); isW {
+		if funcCtx.Getenv("JDEC_GENERIC_SUPERWILDCARD_OFF") != "" {
+			return nil
+		}
 		if bjc, okb := w.Bound.RawType().(*JavaClass); okb && funcCtx.IsTypeParam(bjc.Name) {
 			return w.Bound
 		}
