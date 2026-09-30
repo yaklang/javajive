@@ -12,7 +12,7 @@ func inferDeclaredLambdaTarget(d *Decompiler, raw types.JavaType, erased, instan
 	if known := inferLambdaTypeFromInstantiated(raw, instantiated); known != nil {
 		return known
 	}
-	if d == nil || d.FunctionContext == nil || d.FunctionContext.SiblingClassSig == nil || raw == nil || raw.IsArray() {
+	if d == nil || d.blockPartialFunctionalTarget || d.FunctionContext == nil || d.FunctionContext.SiblingClassSig == nil || raw == nil || raw.IsArray() {
 		return nil
 	}
 	jc, ok := raw.RawType().(*types.JavaClass)

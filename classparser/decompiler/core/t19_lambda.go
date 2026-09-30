@@ -69,6 +69,17 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	if d == nil || d.FunctionContext == nil {
 		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "lambda reconstruction requires decompiler context", resultType)
 	}
+	// The existing complete declaration proof can target marker lambdas. A
+	// descriptor-only partial target would cast a separately-created lambda,
+	// losing the marker at its creation site. Preserve the existing poly form.
+	priorPartialBlock := d.blockPartialFunctionalTarget
+	d.blockPartialFunctionalTarget = false
+	if req.Identity.Name == "altMetafactory" && len(req.StaticArgs) >= 5 {
+		flags, _ := intFromLiteral(req.StaticArgs[3])
+		count, _ := intFromLiteral(req.StaticArgs[4])
+		d.blockPartialFunctionalTarget = flags&lambdaFlagMarkers != 0 && count > 0
+	}
+	defer func() { d.blockPartialFunctionalTarget = priorPartialBlock }()
 	if d.getenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(static) >= 3 {
 		if inferred := inferDeclaredFunctionalType(d.FunctionContext, resultType, req.CallSiteName, t19MethodTypeDesc(static[0]), t19MethodTypeDesc(static[2])); inferred != nil {
 			resultType = inferred
