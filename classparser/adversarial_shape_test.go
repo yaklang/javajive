@@ -40,9 +40,23 @@ func assertOrig14Decompile(t *testing.T, seed, onMust, offMust string) {
 }
 
 func TestAdversarialBareIfMissesOldUnique(t *testing.T) {
-	assertOrig14Decompile(t, "testdata/regression/BareIfAdv.class",
-		"if ((var3_1) != (0)){",
-		"if (var3_1){")
+	raw, err := os.ReadFile("testdata/regression/BareIfAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The bytecode iinc proves this counter is numeric. The core must retain
+	// that proof even when compatibility source recovery is disabled. Names
+	// can change when the two numeric slot ranges stop being split as bool/int.
+	for _, disabled := range []string{"", "1"} {
+		t.Setenv("JDEC_ORIG14_REMAINING_OFF", disabled)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(source, "boolean var3") || !strings.Contains(source, "if ((var3) != (0)){") || !strings.Contains(source, "var3++;") {
+			t.Fatalf("counter must stay int with explicit numeric zero test (recovery off=%q):\n%s", disabled, source)
+		}
+	}
 }
 
 func TestAdversarialEmptySyncTrailingElse(t *testing.T) {

@@ -2200,12 +2200,17 @@ func (d *Decompiler) reachingBoolZStoreSlotSplit(store *OpCode, slot int, curren
 // slotStoreFollowedByBooleanZStore reports whether, after `store`, the same slot is later stored
 // from a Z-returning invoke (or loaded into ifeq/ifne) without an intervening iinc of the slot.
 // The iinc gate keeps a live int loop counter from being mistaken for a boolean flag init.
+// A zero test is only a candidate: it must not return before the remaining live
+// paths are checked. JVM ifeq/ifne accepts integers too, so a later iinc disproves
+// boolean typing regardless of branch enumeration order. A same-slot store ends
+// this definition; an increment beyond that store belongs to a different value.
 func (d *Decompiler) slotStoreFollowedByBooleanZStore(store *OpCode, slot int) bool {
 	if store == nil {
 		return false
 	}
 	visited := map[*OpCode]bool{store: true}
 	queue := append([]*OpCode{}, store.Target...)
+	sawBooleanUse := false
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -2219,20 +2224,20 @@ func (d *Decompiler) slotStoreFollowedByBooleanZStore(store *OpCode, slot int) b
 		}
 		if isLocalStoreOpcode(op) && GetStoreIdx(cur) == slot {
 			if d.storeFedByBooleanInvoke(cur) {
-				return true
+				sawBooleanUse = true
 			}
 			continue
 		}
 		if isLocalLoadOpcode(op) && GetRetrieveIdx(cur) == slot {
 			for _, t := range cur.Target {
 				if t != nil && t.Instr != nil && (t.Instr.OpCode == OP_IFEQ || t.Instr.OpCode == OP_IFNE) {
-					return true
+					sawBooleanUse = true
 				}
 			}
 		}
 		queue = append(queue, cur.Target...)
 	}
-	return false
+	return sawBooleanUse
 }
 
 func (d *Decompiler) storeFedByBooleanInvoke(store *OpCode) bool {
