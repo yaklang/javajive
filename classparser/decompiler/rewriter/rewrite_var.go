@@ -47,6 +47,9 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	varAssignMapDeep := map[*utils.VariableId][]int{}
 	checkUndefinedVar = func(scope *Scope, parentAssigned map[*utils.VariableId]struct{}) {
 		assigned := maps.Clone(parentAssigned)
+		if scope.entryDefinition != nil {
+			assigned[scope.entryDefinition] = struct{}{}
+		}
 		for _, v := range scope.varMap {
 			switch value := v.(type) {
 			case *Scope:
@@ -431,6 +434,9 @@ type Scope struct {
 	sts         *[]statements.Statement
 	varMap      []any
 	assignedMap map[string]*utils.VariableId
+	// A catch parameter is defined by handler entry, independently of ASTOREs
+	// inside its body. Keep these definitions local to this lexical scope.
+	entryDefinition *utils.VariableId
 	// minted is the set of VariableIds this method's rewriteVar has freshly minted. It is shared
 	// (same map pointer) across every scope of one method, unlike assignedMap which is copied into
 	// each SubScope. The slot's JavaRef object can be shared across sibling/disjoint branches and is
@@ -872,9 +878,16 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 			subScope := scope.SubScope(&statement.TryBody)
 			core.TraceRewriteVar(className, methodName, "enter try depth=%d body=%d", subScope.deep, len(statement.TryBody))
 			rewriteVar(subScope, className, methodName)
-			for _, c := range statement.CatchBodies {
-				subScope = scope.SubScope(&c)
-				core.TraceRewriteVar(className, methodName, "enter catch depth=%d body=%d", subScope.deep, len(c))
+			for i := range statement.CatchBodies {
+				subScope = scope.SubScope(&statement.CatchBodies[i])
+				if i < len(statement.Exception) {
+					if ex := statement.Exception[i]; ex != nil && ex.Id != nil {
+						subScope.assignedMap[ex.VarUid] = ex.Id
+						subScope.entryDefinition = ex.Id
+						core.TraceRewriteVar(className, methodName, "catch entry depth=%d uid=%s id=%s", subScope.deep, ex.VarUid, ex.Id.String())
+					}
+				}
+				core.TraceRewriteVar(className, methodName, "enter catch depth=%d body=%d", subScope.deep, len(statement.CatchBodies[i]))
 				rewriteVar(subScope, className, methodName)
 			}
 		}
