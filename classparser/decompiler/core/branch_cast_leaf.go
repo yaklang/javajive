@@ -16,13 +16,19 @@ func (d *Decompiler) branchCallCastLeaf(ref *values.JavaRef, cast *values.CastEx
 	if !ok || call == nil || call.OriginPC < int(entry.CurrentOffset) || call.Descriptor == "" {
 		return nil
 	}
-	if call.Object != nil && !values.IsPure(call.Object) {
-		return nil
-	}
 	invoke, check := d.opcodeAtOffset(call.OriginPC), d.branchCastOpcode(ref, cast, entry, leaf, merge)
 	if invoke == nil || check == nil || d.invokeFuncCall[invoke] != call ||
 		len(invoke.Target) != 1 || invoke.Target[0] != check || len(check.Source) != 1 || check.Source[0] != invoke {
 		return nil
+	}
+	if call.Object != nil && !values.IsPure(call.Object) {
+		// A directly represented receiver chain is evaluated on this arm,
+		// before the final invocation. Prove every call and throwing cast in
+		// that suffix rather than treating the receiver as pure. Arguments
+		// would require a separate operand-order proof.
+		if len(call.Arguments) != 0 || !d.branchZeroArgReceiverSuffix(call.Object, entry, invoke) {
+			return nil
+		}
 	}
 	for i, arg := range call.Arguments {
 		if values.IsPure(arg) {
@@ -42,6 +48,82 @@ func (d *Decompiler) branchCallCastLeaf(ref *values.JavaRef, cast *values.CastEx
 		}
 	}
 	return check
+}
+
+// branchZeroArgReceiverSuffix matches Java receiver evaluation, inside out, to
+// one private bytecode suffix. It never follows a local's defining value: a
+// local read is already a snapshot, while only directly represented calls and
+// already-inline CHECKCASTs belong to the expression being adopted. Every edge
+// is adjacent, forward and in the same handler domain, so no call, cast, local
+// write or discarded operation can be skipped or moved across selection.
+func (d *Decompiler) branchZeroArgReceiverSuffix(value values.JavaValue, entry, consumer *OpCode) bool {
+	if d == nil || entry == nil || consumer == nil {
+		return false
+	}
+	next := consumer
+	seen := map[values.JavaValue]bool{}
+	for steps := 0; steps < 256; steps++ {
+		value = values.UnpackSoltValue(value)
+		if value == nil || seen[value] {
+			return false
+		}
+		seen[value] = true
+		if values.IsPure(value) {
+			// Only local/null loads may precede the represented suffix. Their
+			// reads cannot cross a local write or any observable operation.
+			prefix := map[*OpCode]bool{}
+			for cur := entry; cur != next; cur = cur.Target[0] {
+				if cur == nil || prefix[cur] || cur.Instr == nil || len(cur.Target) != 1 ||
+					cur.CurrentOffset >= next.CurrentOffset || !sameHandlerCoverage(d.handlersAt(cur), d.handlersAt(consumer)) {
+					return false
+				}
+				prefix[cur] = true
+				switch cur.Instr.OpCode {
+				case OP_ALOAD, OP_ALOAD_0, OP_ALOAD_1, OP_ALOAD_2, OP_ALOAD_3, OP_ACONST_NULL, OP_NOP:
+				default:
+					return false
+				}
+				successor := cur.Target[0]
+				if successor == nil || len(successor.Source) != 1 || successor.Source[0] != cur {
+					return false
+				}
+			}
+			return next != consumer
+		}
+		var producer *OpCode
+		switch v := value.(type) {
+		case *values.CastExpression:
+			producer = d.opcodeAtOffset(v.OriginPC)
+			if producer == nil || producer.Instr == nil || producer.Instr.OpCode != OP_CHECKCAST ||
+				!d.inlineCheckcast[producer] || values.UnpackSoltValue(d.checkcastInnerArg[producer]) != values.UnpackSoltValue(v.Value) {
+				return false
+			}
+			value = v.Value
+		case *values.FunctionCallExpression:
+			producer = d.opcodeAtOffset(v.OriginPC)
+			if producer == nil || producer.Instr == nil || v.Descriptor == "" || len(v.Arguments) != 0 ||
+				d.invokeFuncCall[producer] != v {
+				return false
+			}
+			// A static call's class initialization needs a separate witness;
+			// this proof covers only nested instance receiver evaluation.
+			switch producer.Instr.OpCode {
+			case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE:
+			default:
+				return false
+			}
+			value = v.Object
+		default:
+			return false
+		}
+		if producer.CurrentOffset < entry.CurrentOffset || producer.CurrentOffset >= next.CurrentOffset ||
+			len(producer.Target) != 1 || producer.Target[0] != next || len(next.Source) != 1 || next.Source[0] != producer ||
+			!sameHandlerCoverage(d.handlersAt(producer), d.handlersAt(consumer)) {
+			return false
+		}
+		next = producer
+	}
+	return false
 }
 
 // A pure operand does not make CHECKCAST pure: even a cast of a parameter can

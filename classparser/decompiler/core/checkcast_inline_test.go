@@ -105,6 +105,73 @@ func TestImmediateCheckcastArgumentProof(t *testing.T) {
 	}
 }
 
+func TestCheckcastArgumentAcrossLaterCalls(t *testing.T) {
+	for _, kind := range []string{"instance", "static argument", "static no arguments", "wide return", "wide input", "void call", "constructor call", "checked receiver", "primitive formal", "discarded result", "duplicate", "local write", "extra entry", "handler boundary", "unknown call", "unknown return"} {
+		t.Run(kind, func(t *testing.T) {
+			check := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 1}
+			load := &OpCode{Instr: &Instruction{OpCode: OP_ALOAD_1}, CurrentOffset: 4}
+			later := &OpCode{Instr: &Instruction{OpCode: OP_INVOKEVIRTUAL}, CurrentOffset: 5, Data: []byte{0, 1}}
+			cast := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 8}
+			consume := &OpCode{Instr: &Instruction{OpCode: OP_INVOKESTATIC}, CurrentOffset: 11, Data: []byte{0, 2}}
+			path := []*OpCode{check, load, later, cast, consume}
+			for i := 0; i+1 < len(path); i++ {
+				path[i].Target, path[i+1].Source = []*OpCode{path[i+1]}, []*OpCode{path[i]}
+			}
+			nestedDesc, finalDesc, name := "()Ljava/lang/Object;", "(Ljava/lang/Object;Ljava/lang/Object;)Z", "next"
+			d := &Decompiler{}
+			switch kind {
+			case "static argument":
+				later.Instr.OpCode, nestedDesc = OP_INVOKESTATIC, "(Ljava/lang/Object;)Ljava/lang/Object;"
+			case "static no arguments":
+				load.Instr.OpCode, later.Instr.OpCode = OP_NOP, OP_INVOKESTATIC
+			case "wide return":
+				nestedDesc, finalDesc, cast.Instr.OpCode = "()J", "(Ljava/lang/Object;J)Z", OP_NOP
+			case "wide input":
+				load.Instr.OpCode, later.Instr.OpCode, nestedDesc = OP_LLOAD_1, OP_INVOKESTATIC, "(J)Ljava/lang/Object;"
+			case "void call":
+				nestedDesc = "()V"
+			case "constructor call":
+				later.Instr.OpCode, name = OP_INVOKESPECIAL, "<init>"
+			case "checked receiver":
+				nestedDesc = "(Ljava/lang/Object;)Ljava/lang/Object;"
+			case "primitive formal":
+				finalDesc = "(ILjava/lang/Object;)Z"
+			case "discarded result":
+				cast.Instr.OpCode = OP_POP
+			case "duplicate":
+				cast.Instr.OpCode = OP_DUP
+			case "local write":
+				cast.Instr.OpCode = OP_ASTORE_1
+			case "extra entry":
+				later.Source = append(later.Source, &OpCode{})
+			case "handler boundary":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 1, EndPc: 5, HandlerPc: 20}}
+			}
+			d.constantPoolGetter = func(index int) values.JavaValue {
+				desc, member := nestedDesc, name
+				if index == 2 {
+					desc, member = finalDesc, "consume"
+				}
+				if index == 1 && kind == "unknown call" {
+					return nil
+				}
+				typ, err := types.ParseMethodDescriptor(desc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if index == 1 && kind == "unknown return" {
+					typ.FunctionType().ReturnType = nil
+				}
+				return values.NewJavaClassMember("Probe", member, desc, typ)
+			}
+			want := kind == "instance" || kind == "static argument" || kind == "static no arguments" || kind == "wide return" || kind == "wide input"
+			if got := d.canInlineCheckcastArgument(check); got != want {
+				t.Fatalf("proof accepted=%t, want=%t", got, want)
+			}
+		})
+	}
+}
+
 func TestImmediateCheckcastFieldProof(t *testing.T) {
 	for _, change := range []string{"valid", "other source", "handler boundary", "dup", "store", "static field", "different owner", "missing constant", "short operand", "wrong cast"} {
 		t.Run(change, func(t *testing.T) {

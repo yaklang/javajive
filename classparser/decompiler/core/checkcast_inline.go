@@ -9,17 +9,20 @@ import (
 
 // CHECKCAST consumes one reference and produces one reference. Retain it in
 // a call's argument tree when the intervening instructions only build later
-// arguments from locals/constants/casts. Java evaluates arguments left to right,
-// so these casts keep their original exception order. No store, duplicate,
-// effectful read, call or alternative entry may intervene; the handler domain
-// must remain identical. Counting values above the cast identifies its formal
-// parameter and excludes a cast used as the invocation receiver.
+// arguments from locals/constants/casts and value-returning calls wholly above
+// this operand. Java evaluates arguments left to right, so calls in those later
+// argument trees still follow this cast. No store, duplicate, discarded result,
+// allocation or alternative entry may intervene; the handler domain must stay
+// identical. Counting values above the cast identifies the actual consumer and
+// formal parameter, and excludes a cast used as the invocation receiver.
 func (d *Decompiler) canInlineCheckcastArgument(op *OpCode) bool {
 	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || len(op.Target) != 1 || d.constantPoolGetter == nil {
 		return false
 	}
 	consumer, previous := op.Target[0], op
 	later := 0
+	var member *values.JavaClassMember
+	var method *types.JavaFuncType
 	for steps := 0; ; steps++ {
 		if steps >= 64 || consumer == nil || consumer.IsCustom || consumer.Instr == nil ||
 			consumer.IsCatch || consumer.IsTryCatchParent || len(consumer.Source) != 1 || consumer.Source[0] != previous ||
@@ -29,35 +32,56 @@ func (d *Decompiler) canInlineCheckcastArgument(op *OpCode) bool {
 		}
 		instruction := consumer.Instr.OpCode
 		if instruction == OP_INVOKEVIRTUAL || instruction == OP_INVOKEINTERFACE || instruction == OP_INVOKESTATIC || instruction == OP_INVOKESPECIAL {
-			break
-		}
-		access := LocalAccessOf(instruction)
-		switch {
-		case access.Read && !access.Write && instruction != OP_RET:
-			later++ // each load pushes one value, including category-2 values
-		case instruction == OP_CHECKCAST, instruction == OP_NOP:
-			// The top value stays in place, including repeated casts of the
-			// original argument before any later arguments are pushed.
-		case instruction == OP_ACONST_NULL,
-			instruction >= OP_ICONST_M1 && instruction <= OP_DCONST_1,
-			instruction == OP_BIPUSH, instruction == OP_SIPUSH:
-			later++
-		default:
-			return false
+			if len(consumer.Data) < 2 {
+				return false
+			}
+			var ok bool
+			member, ok = d.constantPoolGetter(int(Convert2bytesToInt(consumer.Data))).(*values.JavaClassMember)
+			if !ok || member == nil || member.JavaType == nil {
+				return false
+			}
+			method = member.JavaType.FunctionType()
+			if method == nil {
+				return false
+			}
+			consumed := len(method.ParamTypes)
+			if instruction != OP_INVOKESTATIC {
+				consumed++ // instance receiver, including category-2 arguments as one value each
+			}
+			if consumed > later {
+				break // this invocation reaches the checked operand
+			}
+			// A call wholly above the operand builds a later argument. Void
+			// calls/constructors cannot be nested there without changing their
+			// statement order; only a retained return value is admissible.
+			if member.Member == "<init>" || method.ReturnType == nil {
+				return false
+			}
+			if p, ok := method.ReturnType.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaVoid {
+				return false
+			}
+			later = later - consumed + 1
+		} else {
+			access := LocalAccessOf(instruction)
+			switch {
+			case access.Read && !access.Write && instruction != OP_RET:
+				later++ // each load pushes one value, including category-2 values
+			case instruction == OP_CHECKCAST, instruction == OP_NOP:
+				// The top value stays in place, including repeated casts of the
+				// original argument before any later arguments are pushed.
+			case instruction == OP_ACONST_NULL,
+				instruction >= OP_ICONST_M1 && instruction <= OP_DCONST_1,
+				instruction == OP_BIPUSH, instruction == OP_SIPUSH:
+				later++
+			default:
+				return false
+			}
 		}
 		if len(consumer.Target) != 1 || consumer.Target[0] == nil || consumer.Target[0].CurrentOffset <= consumer.CurrentOffset {
 			return false
 		}
 		previous, consumer = consumer, consumer.Target[0]
 	}
-	if len(consumer.Data) < 2 {
-		return false
-	}
-	member, ok := d.constantPoolGetter(int(Convert2bytesToInt(consumer.Data))).(*values.JavaClassMember)
-	if !ok || member == nil || member.JavaType == nil {
-		return false
-	}
-	method := member.JavaType.FunctionType()
 	if method == nil || len(method.ParamTypes) <= later {
 		return false
 	}

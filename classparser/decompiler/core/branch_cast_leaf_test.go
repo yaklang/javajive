@@ -115,3 +115,74 @@ func TestBranchCallCastLeafProof(t *testing.T) {
 		})
 	}
 }
+
+func TestBranchCallCastReceiverChainProof(t *testing.T) {
+	for _, kind := range []string{"valid", "direct call", "call before arm", "handler boundary", "alternate entry", "unmatched call", "unmatched cast", "materialized cast", "nested argument", "static receiver", "field receiver", "intervening effect", "local write", "cyclic value", "shared producer"} {
+		t.Run(kind, func(t *testing.T) {
+			load := &OpCode{Instr: &Instruction{OpCode: OP_ALOAD_0}, CurrentOffset: 10}
+			first := &OpCode{Instr: &Instruction{OpCode: OP_INVOKEINTERFACE}, CurrentOffset: 11}
+			inner := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 16}
+			invoke := &OpCode{Instr: &Instruction{OpCode: OP_INVOKEINTERFACE}, CurrentOffset: 19}
+			check := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 24}
+			merge := &OpCode{Instr: &Instruction{OpCode: OP_ARETURN}, CurrentOffset: 27}
+			path := []*OpCode{load, first, inner, invoke, check, merge}
+			for i := 0; i+1 < len(path); i++ {
+				path[i].Target, path[i+1].Source = []*OpCode{path[i+1]}, []*OpCode{path[i]}
+			}
+			param := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("Probe"))
+			param.IsParam = true
+			one := &values.FunctionCallExpression{Object: param, OriginPC: 11, Descriptor: "()Ljava/lang/Object;"}
+			castOne := &values.CastExpression{Value: one, OriginPC: 16, TargetType: types.NewJavaClass("Probe")}
+			call := &values.FunctionCallExpression{Object: castOne, OriginPC: 19, Descriptor: "()Ljava/lang/Object;"}
+			cast := &values.CastExpression{Value: call, OriginPC: 24, TargetType: types.NewJavaClass("Probe")}
+			ref := values.NewJavaRef(utils.NewRootVariableId(), cast, cast.Type())
+			check.stackProduced = []values.JavaValue{ref}
+			d := &Decompiler{
+				opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{},
+				invokeFuncCall:        map[*OpCode]*values.FunctionCallExpression{first: one, invoke: call},
+				inlineCheckcast:       map[*OpCode]bool{inner: true},
+				checkcastInnerArg:     map[*OpCode]values.JavaValue{inner: one},
+			}
+			for _, op := range path {
+				d.opcodeToSimulateStack[op] = nil
+			}
+			entry := load
+			switch kind {
+			case "direct call":
+				first.Target, invoke.Source, call.Object = []*OpCode{invoke}, []*OpCode{first}, one
+			case "call before arm":
+				entry = inner
+			case "handler boundary":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 10, EndPc: 19, HandlerPc: 30}}
+			case "alternate entry":
+				inner.Source = append(inner.Source, &OpCode{})
+			case "unmatched call":
+				d.invokeFuncCall[first] = &values.FunctionCallExpression{}
+			case "unmatched cast":
+				d.checkcastInnerArg[inner] = values.JavaNull
+			case "materialized cast":
+				d.inlineCheckcast[inner] = false
+			case "nested argument":
+				one.Arguments = []values.JavaValue{values.JavaNull}
+			case "static receiver":
+				first.Instr.OpCode = OP_INVOKESTATIC
+			case "field receiver":
+				one.Object = &values.RefMember{Object: param, JavaType: param.Type()}
+			case "intervening effect":
+				load.Instr.OpCode = OP_INVOKESTATIC
+			case "local write":
+				load.Instr.OpCode = OP_ASTORE_0
+			case "cyclic value":
+				one.Object = call
+			case "shared producer":
+				other := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 6, stackProduced: []values.JavaValue{ref}}
+				d.opcodeToSimulateStack[other] = nil
+			}
+			got := d.branchCallCastLeaf(ref, cast, entry, check, merge)
+			want := kind == "valid" || kind == "direct call"
+			if (got == check) != want {
+				t.Fatalf("proof accepted=%t, want=%t", got != nil, want)
+			}
+		})
+	}
+}
