@@ -560,6 +560,37 @@ func t04RunJava(t *testing.T, java, classpath, mainClass string) string {
 	return string(out)
 }
 
+// A consumer cache belongs to one immutable original classpath, compiler and
+// flag set. Distinct generated source is always recompiled; callers still run
+// and compare each mode separately. Parent-owned directories outlive subtests.
+func t04ConsumerCompiler(parent *testing.T, release, debug, classpath, main string) func(*testing.T, string) string {
+	parent.Helper()
+	javac, _ := t04Tools(parent)
+	compiled := map[string]string{}
+	return func(t *testing.T, source string) string {
+		t.Helper()
+		if dir, ok := compiled[source]; ok {
+			return dir
+		}
+		dir := parent.TempDir()
+		path := filepath.Join(dir, main+".java")
+		if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{"-proc:none", "-encoding", "UTF-8", "--release", release}
+		if debug != "" {
+			args = append(args, debug)
+		}
+		args = append(args, "-cp", classpath, "-d", dir, path)
+		cmd := exec.Command(javac, args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("recompile generated %s: %v\n%s\n----- source -----\n%s", main, err, out, source)
+		}
+		compiled[source] = dir
+		return dir
+	}
+}
+
 func t04Tools(t *testing.T) (javac, java string) {
 	t.Helper()
 	var err error

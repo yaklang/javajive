@@ -62,6 +62,7 @@ public class GenericFunctionArg {
 				t.Fatal(err)
 			}
 
+			compileConsumer := t04ConsumerCompiler(t, "8", debug, originalDir, "GenericFunctionArg")
 			for _, mode := range []DecompileMode{Precision, Compatibility} {
 				t.Run(string(mode), func(t *testing.T) {
 					result, err := DecompileWithOptions(classBytes, DecompileOptions{Mode: mode})
@@ -71,18 +72,7 @@ public class GenericFunctionArg {
 					if !strings.Contains(result.Source, "Function") {
 						t.Fatalf("fixture no longer exercises the materialized Function value:\n%s", result.Source)
 					}
-					rebuiltDir := filepath.Join(root, string(mode), "rebuilt")
-					if err := os.MkdirAll(rebuiltDir, 0o755); err != nil {
-						t.Fatal(err)
-					}
-					decompiledPath := filepath.Join(rebuiltDir, "GenericFunctionArg.java")
-					if err := os.WriteFile(decompiledPath, []byte(result.Source), 0o644); err != nil {
-						t.Fatal(err)
-					}
-					compileRebuilt := exec.Command(javac, "-proc:none", "-encoding", "UTF-8", "--release", "8", debug, "-cp", originalDir, "-d", rebuiltDir, decompiledPath)
-					if out, err := compileRebuilt.CombinedOutput(); err != nil {
-						t.Fatalf("recompile decompiled generic functional fixture (%s/%s): %v\n%s\n----- source -----\n%s", mode, debug, err, out, result.Source)
-					}
+					rebuiltDir := compileConsumer(t, result.Source)
 					classpath := rebuiltDir + string(os.PathListSeparator) + originalDir
 					if got := t04RunJava(t, java, classpath, "GenericFunctionArg"); got != want {
 						t.Fatalf("generic functional behavior changed (%s/%s): got %q want %q\n%s", mode, debug, got, want, result.Source)

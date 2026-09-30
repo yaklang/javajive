@@ -103,6 +103,7 @@ public interface Api {
 						t.Fatalf("read resolved overload owner %s: %v", tc.ownerInternal, err)
 					}
 
+					compileConsumer := t04ConsumerCompiler(t, "8", debug, originalDir, "Caller")
 					for _, mode := range []DecompileMode{Precision, Compatibility} {
 						t.Run(string(mode), func(t *testing.T) {
 							result, err := DecompileWithOptions(callerBytes, DecompileOptions{
@@ -128,18 +129,7 @@ public interface Api {
 								t.Fatalf("resolved overload family remained unknown: %+v", result.Diagnostics)
 							}
 
-							decompiledPath := filepath.Join(root, string(mode), "Caller.java")
-							rebuiltDir := filepath.Dir(decompiledPath)
-							if err := os.MkdirAll(rebuiltDir, 0o755); err != nil {
-								t.Fatal(err)
-							}
-							if err := os.WriteFile(decompiledPath, []byte(result.Source), 0o644); err != nil {
-								t.Fatal(err)
-							}
-							compileRebuilt := exec.Command(javac, "-proc:none", "-encoding", "UTF-8", "--release", "8", debug, "-cp", originalDir, "-d", rebuiltDir, decompiledPath)
-							if out, err := compileRebuilt.CombinedOutput(); err != nil {
-								t.Fatalf("recompile decompiled caller (%s/%s): %v\n%s\n----- source -----\n%s", mode, debug, err, out, result.Source)
-							}
+							rebuiltDir := compileConsumer(t, result.Source)
 							classpath := rebuiltDir + string(os.PathListSeparator) + originalDir
 							if got := t04RunJava(t, java, classpath, "Caller"); got != want {
 								t.Fatalf("rebuilt overload binding changed behavior (%s/%s): got %q want %q\n%s", mode, debug, got, want, result.Source)
@@ -195,6 +185,7 @@ public class Box<T> {
 				t.Fatal(err)
 			}
 
+			compileConsumer := t04ConsumerCompiler(t, "8", debug, originalDir, "Caller")
 			for _, mode := range []DecompileMode{Precision, Compatibility} {
 				t.Run(string(mode), func(t *testing.T) {
 					// Deliberately omit ext.Box from Resolve: this models an external
@@ -214,18 +205,7 @@ public class Box<T> {
 						t.Fatalf("unknown external generic family lacks its diagnostic: %+v", result.Diagnostics)
 					}
 
-					rebuiltDir := filepath.Join(root, string(mode), "rebuilt")
-					if err := os.MkdirAll(rebuiltDir, 0o755); err != nil {
-						t.Fatal(err)
-					}
-					decompiledPath := filepath.Join(rebuiltDir, "Caller.java")
-					if err := os.WriteFile(decompiledPath, []byte(result.Source), 0o644); err != nil {
-						t.Fatal(err)
-					}
-					compileRebuilt := exec.Command(javac, "-proc:none", "-encoding", "UTF-8", "--release", "8", debug, "-cp", originalDir, "-d", rebuiltDir, decompiledPath)
-					if out, err := compileRebuilt.CombinedOutput(); err != nil {
-						t.Fatalf("recompile generic caller (%s/%s): %v\n%s\n----- source -----\n%s", mode, debug, err, out, result.Source)
-					}
+					rebuiltDir := compileConsumer(t, result.Source)
 					classpath := rebuiltDir + string(os.PathListSeparator) + originalDir
 					if got := t04RunJava(t, java, classpath, "Caller"); got != want {
 						t.Fatalf("generic call behavior changed (%s/%s): got %q want %q\n%s", mode, debug, got, want, result.Source)

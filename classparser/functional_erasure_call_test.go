@@ -416,6 +416,7 @@ public class SiblingFunctionalErasureCall<K, V> {
 			data, readErr := os.ReadFile(filepath.Join(originalDir, filepath.FromSlash(internalName)+".class"))
 			return data, readErr == nil
 		}
+		compileConsumer := t04ConsumerCompiler(t, "8", "", originalDir, main)
 		for _, mode := range []DecompileMode{Precision, Compatibility} {
 			result, err := DecompileWithOptions(classBytes, DecompileOptions{
 				Mode: mode, TargetSourceVersion: 8, Resolve: resolver,
@@ -427,16 +428,7 @@ public class SiblingFunctionalErasureCall<K, V> {
 				t.Fatalf("missing sibling-signature raw bridge in %s/%s:\n%s", mode, debug, result.Source)
 			}
 
-			rebuiltDir := t.TempDir()
-			rebuiltSource := filepath.Join(rebuiltDir, main+".java")
-			if err := os.WriteFile(rebuiltSource, []byte(result.Source), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			rebuild := exec.Command(javac, "-proc:none", "-encoding", "UTF-8", "--release", "8",
-				"-cp", originalDir, "-d", rebuiltDir, rebuiltSource)
-			if out, err := rebuild.CombinedOutput(); err != nil {
-				t.Fatalf("rebuild %s/%s: %v\n%s\nsource:\n%s", mode, debug, err, out, result.Source)
-			}
+			rebuiltDir := compileConsumer(t, result.Source)
 			classpath := rebuiltDir + string(os.PathListSeparator) + originalDir
 			if got := t04RunJava(t, java, classpath, main); got != want {
 				t.Fatalf("runtime mismatch %s/%s: got %q want %q", mode, debug, got, want)
@@ -513,6 +505,7 @@ public class ChainedSiblingFunctionalErasureCall<K, V> {
 			data, readErr := os.ReadFile(filepath.Join(originalDir, filepath.FromSlash(internalName)+".class"))
 			return data, readErr == nil
 		}
+		compileConsumer := t04ConsumerCompiler(t, "8", "", originalDir, main)
 		for _, mode := range []DecompileMode{Precision, Compatibility} {
 			result, err := DecompileWithOptions(classBytes, DecompileOptions{
 				Mode: mode, TargetSourceVersion: 8, Resolve: resolver,
@@ -524,16 +517,7 @@ public class ChainedSiblingFunctionalErasureCall<K, V> {
 				t.Fatalf("missing chained-receiver raw bridge in %s/%s:\n%s", mode, debug, result.Source)
 			}
 
-			rebuiltDir := t.TempDir()
-			rebuiltSource := filepath.Join(rebuiltDir, main+".java")
-			if err := os.WriteFile(rebuiltSource, []byte(result.Source), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			rebuild := exec.Command(javac, "-proc:none", "-encoding", "UTF-8", "--release", "8",
-				"-cp", originalDir, "-d", rebuiltDir, rebuiltSource)
-			if out, err := rebuild.CombinedOutput(); err != nil {
-				t.Fatalf("rebuild %s/%s: %v\n%s\nsource:\n%s", mode, debug, err, out, result.Source)
-			}
+			rebuiltDir := compileConsumer(t, result.Source)
 			classpath := rebuiltDir + string(os.PathListSeparator) + originalDir
 			if got := t04RunJava(t, java, classpath, main); got != want {
 				t.Fatalf("runtime mismatch %s/%s: got %q want %q", mode, debug, got, want)
