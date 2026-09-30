@@ -162,6 +162,7 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// The topLevelDeclDominatesAllUses gate still relocates ONLY declarations that fail to dominate a
 	// use, so correctly-scoped locals are untouched. Setting the switch restores the reused-only pass
 	// (byte-for-byte baseline).
+	restoreSingleDefinitionArrayDeclarations(sts, params)
 	liveIntervalAll := jdecenv.Get("JDEC_LIVEINTERVAL_OFF") == ""
 	placeCrossScopeDeclarations(sts, scope.reused, liveIntervalAll)
 	// switchHoistDeclarations (keyed by VarUid) and placeCrossScopeDeclarations (keyed by
@@ -2476,6 +2477,89 @@ func relocateDeclarations(block *[]statements.Statement, id *utils.VariableId) {
 		out = append(out, st)
 	}
 	*block = out
+}
+
+// restoreSingleDefinitionArrayDeclarations retains the declaration of a fresh array
+// temporary whose first-store flag was lost during slot reuse. A later local with
+// the same printed name cannot provide that declaration. Only one direct allocation
+// definition, an exact array type, and no declaration/parameter identity qualify.
+// This changes declaration syntax only; allocation and initializer evaluation stay put.
+func restoreSingleDefinitionArrayDeclarations(root *[]statements.Statement, params []*values.JavaRef) {
+	declared := map[*utils.VariableId]bool{}
+	definitions := map[*utils.VariableId][]*statements.AssignStatement{}
+	for _, param := range params {
+		if param != nil && param.Id != nil {
+			declared[param.Id] = true
+		}
+	}
+	var walk func([]statements.Statement)
+	walk = func(list []statements.Statement) {
+		for _, st := range list {
+			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+				if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil && !ref.IsThis {
+					if as.IsFirst || as.IsDeclare {
+						declared[ref.Id] = true
+					}
+					if as.JavaValue != nil {
+						definitions[ref.Id] = append(definitions[ref.Id], as)
+					}
+				}
+			}
+			switch container := st.(type) {
+			case *statements.ForStatement:
+				walk([]statements.Statement{container.InitVar, container.Condition, container.EndExp})
+			case *statements.TryCatchStatement:
+				for _, exception := range container.Exception {
+					if exception != nil && exception.Id != nil {
+						declared[exception.Id] = true
+					}
+				}
+			}
+			for _, child := range childStatementLists(st) {
+				walk(*child)
+			}
+		}
+	}
+	if root == nil {
+		return
+	}
+	walk(*root)
+	for id, assigns := range definitions {
+		if declared[id] || len(assigns) != 1 {
+			continue
+		}
+		as := assigns[0]
+		ref := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
+		array, ok := values.UnpackSoltValue(as.JavaValue).(*values.NewExpression)
+		if !ok || array == nil || array.JavaType == nil || !array.JavaType.IsArray() ||
+			ref.Type() == nil || !ref.Type().IsArray() ||
+			!generatedLocalNameRe.MatchString(ref.String(&class_context.ClassContext{})) ||
+			!sameArrayTemporaryType(ref.Type(), array.JavaType) {
+			continue
+		}
+		as.IsFirst = true
+	}
+}
+
+func sameArrayTemporaryType(a, b types.JavaType) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	x, xok := a.RawType().(*types.JavaArrayType)
+	y, yok := b.RawType().(*types.JavaArrayType)
+	if !xok || !yok || x.Dimension != y.Dimension || x.JavaType == nil || y.JavaType == nil {
+		return false
+	}
+	switch component := x.JavaType.RawType().(type) {
+	case *types.JavaPrimer:
+		other, ok := y.JavaType.RawType().(*types.JavaPrimer)
+		return ok && component.Name == other.Name
+	case *types.JavaClass:
+		other, ok := y.JavaType.RawType().(*types.JavaClass)
+		return ok && strings.ReplaceAll(component.Name, "/", ".") == strings.ReplaceAll(other.Name, "/", ".")
+	default:
+		return false
+	}
 }
 
 // placeCrossScopeDeclarations hoists each generated local's declaration to the lowest block that
