@@ -198,6 +198,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	if node.SwitchPrepared {
 		return nil
 	}
+	splitExternalSharedSwitchVoidReturns(manager, node)
 	// manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
 	// manager.DumpDominatorTree()
 	middleStatement := node.Statement.(*statements.MiddleStatement)
@@ -361,6 +362,52 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	node.SwitchPrepared = true
 	return nil
 }
+
+// A terminal RETURN shared with a path before the switch is not dominated by
+// the switch, so it cannot serve as that switch's ordinary break destination.
+// If its edge is merely discarded, every non-last case falls into the next
+// case. Give each in-region edge a private void return before collecting case
+// bodies. Only the empty terminal is copied: cleanup, arguments, and value
+// returns stay on their original paths. Real case-to-case edges stay intact.
+func splitExternalSharedSwitchVoidReturns(manager *RewriteManager, owner *core.Node) {
+	if manager == nil || owner == nil {
+		return
+	}
+	type edge struct{ source, target *core.Node }
+	var edges []edge
+	core.WalkGraph(owner, func(source *core.Node) ([]*core.Node, error) {
+		if source != owner && !utils.IsDominate(manager.DominatorMap, owner, source) {
+			return nil, nil
+		}
+		for _, target := range source.Next {
+			ret, ok := target.Statement.(*statements.ReturnStatement)
+			if !ok || ret.JavaValue != nil || len(target.Source) < 2 ||
+				utils.IsDominate(manager.DominatorMap, owner, target) {
+				continue
+			}
+			terminal := true
+			for _, next := range target.Next {
+				terminal = terminal && IsEndNode(next)
+			}
+			if terminal {
+				edges = append(edges, edge{source, target})
+			}
+		}
+		return source.Next, nil
+	})
+	for _, e := range edges {
+		leaf := manager.NewNode(&statements.ReturnStatement{})
+		leaf.OriginPC, leaf.HasOriginPC = e.target.OriginPC, e.target.HasOriginPC
+		for _, next := range e.target.Next {
+			leaf.AddNext(next)
+		}
+		replaceNextInPlace(e.source, e.target, leaf)
+	}
+	if len(edges) > 0 {
+		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+	}
+}
+
 func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	startSwitchNode := node
 	if err := SwitchRewriter1(manager, node); err != nil {
