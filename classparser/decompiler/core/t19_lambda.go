@@ -244,7 +244,7 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 			}
 		}
 	}
-	methodStr, err := d.DumpClassLambdaMethod(impl.Member, impl.Description, utils.NewRootVariableId(), captured)
+	methodStr, err := dumpLambdaWithReferenceAdapter(d, impl, captured, resultType, static)
 	if err != nil {
 		return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", impl.Name, impl.Member, err)
 	}

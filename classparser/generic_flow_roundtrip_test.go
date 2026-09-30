@@ -13,6 +13,11 @@ import (
 // source; its output must match the original across both modes and debug forms.
 func roundTripGenericFlow(t *testing.T, main, source string, modes ...DecompileMode) {
 	t.Helper()
+	roundTripGenericFlowWithResolverFilter(t, main, source, nil, modes...)
+}
+
+func roundTripGenericFlowWithResolverFilter(t *testing.T, main, source string, allow func(string) bool, modes ...DecompileMode) {
+	t.Helper()
 	if len(modes) == 0 {
 		modes = []DecompileMode{Precision, Compatibility}
 	}
@@ -34,6 +39,9 @@ func roundTripGenericFlow(t *testing.T, main, source string, modes ...DecompileM
 			t.Fatal(err)
 		}
 		resolve := func(name string) ([]byte, bool) {
+			if allow != nil && !allow(name) {
+				return nil, false
+			}
 			b, e := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)+".class"))
 			return b, e == nil
 		}

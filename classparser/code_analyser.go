@@ -203,7 +203,7 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 	parser := core.NewDecompiler(codeAttr.Code, func(id int) values.JavaValue {
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
-	parser.DumpClassLambdaMethod = func(name, desc string, id *utils.VariableId, captured []values.JavaValue) (string, error) {
+	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter) (string, error) {
 		dumper.lambdaMethods[name] = append(dumper.lambdaMethods[name], desc)
 		dumper.lambdaCaptureCount[name+desc] = len(captured)
 		capturedTypes := make([]types.JavaType, len(captured))
@@ -245,12 +245,16 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 				dumper.CurrentMethod = savedCurrentMethod
 			}()
 		}
-		dumped, err := dumper.DumpMethodWithInitialId(name, desc, id)
+		dumped, err := dumper.dumpMethodWithInitialId(name, desc, id, adapter)
 		if err != nil {
 			return "", err
 		}
 		return dumped.code, nil
 	}
+	parser.DumpClassLambdaMethod = func(name, desc string, id *utils.VariableId, captured []values.JavaValue) (string, error) {
+		return dumpLambda(name, desc, id, captured, nil)
+	}
+	parser.DumpClassLambdaMethodWithAdapter = dumpLambda
 	parser.BaseVarId = id
 	parser.Aggressive = dumper.aggressive
 	parser.FunctionContext = dumper.FuncCtx

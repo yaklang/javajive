@@ -3340,7 +3340,14 @@ func (c *ClassObjectDumper) DumpMethod(methodName, desc string) (*dumpedMethods,
 }
 
 func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id *utils2.VariableId) (*dumpedMethods, error) {
+	return c.dumpMethodWithInitialId(methodName, desc, id, nil)
+}
+
+func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id *utils2.VariableId, adapter *core.LambdaReferenceAdapter) (*dumpedMethods, error) {
 	traitId := fmt.Sprintf("name:%s,desc:%s", methodName, desc)
+	if adapter != nil {
+		traitId += ",sam:" + adapter.ErasedDescriptor + ",inst:" + adapter.InstantiatedDescriptor
+	}
 	if v, ok := c.dumpedMethodsSet[traitId]; ok {
 		return v, nil
 	}
@@ -3573,6 +3580,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	funcCtx.FunctionType = c.MethodType
 	var paramsNewStr string
 	var lambdaParamNames []string
+	var lambdaAdapterPrologue string
 	var exceptions string
 	for _, attribute := range method.Attributes {
 		if exceptionAttr, ok := attribute.(*ExceptionsAttribute); ok {
@@ -3733,7 +3741,15 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			// generic-capable class rendered raw -- and keep the explicit type otherwise (concrete types
 			// like Integer/String help inference and match exactly).
 			// Kill-switch: JDEC_LAMBDA_IMPLICIT_PARAMS_OFF=1 forces explicit-typed lambda parameters.
-			if isLambda && c.getenv("JDEC_LAMBDA_IMPLICIT_PARAMS_OFF") == "" && c.lambdaParamsShouldBeImplicit(samParams) {
+			if isLambda && adapter != nil {
+				paramsNewStrList, lambdaAdapterPrologue, err = lambdaReferenceAdapterParams(adapter, samParams, funcCtx, c.GetTabString())
+				if err != nil {
+					return dumped, err
+				}
+				if err := c.holdOutput(int64(len(lambdaAdapterPrologue))); err != nil {
+					return dumped, err
+				}
+			} else if isLambda && c.getenv("JDEC_LAMBDA_IMPLICIT_PARAMS_OFF") == "" && c.lambdaParamsShouldBeImplicit(samParams) {
 				// Implicit: emit only the (unique) parameter names, letting Java infer their types.
 				for _, val := range samParams {
 					nm := ""
@@ -4206,6 +4222,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 		paramsNewStr = strings.Join(paramList, ", ")
 	}
 	if isLambda {
+		code = lambdaAdapterPrologue + code
 		// A lambda arrow body is spliced inline into the enclosing method. Lift its own locals into a
 		// private `lv<seq>_N` namespace so they never shadow an enclosing local/parameter or a captured
 		// variable (Java: "variable varN is already defined in method"). Nested lambda bodies were
@@ -4223,7 +4240,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 		// ALL-UNUSED case so a body that references a parameter as a specific type keeps its explicit
 		// declaration (no behavioral change, no overload-disambiguation risk).
 		// Kill-switch: JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF=1.
-		if len(lambdaParamNames) > 0 && c.getenv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF") == "" && !lambdaParamsUsed(code, lambdaParamNames) {
+		if adapter == nil && len(lambdaParamNames) > 0 && c.getenv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF") == "" && !lambdaParamsUsed(code, lambdaParamNames) {
 			paramsNewStr = strings.Join(lambdaParamNames, ", ")
 		}
 		res := fmt.Sprintf("(%s) -> {%s", paramsNewStr, code)
