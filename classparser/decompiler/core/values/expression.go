@@ -4596,6 +4596,9 @@ func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) str
 
 func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext) string {
 	if !f.bindingPlanned {
+		if planned, ok := f.planErasedNullBinding(funcCtx); ok {
+			return planned.renderCall(funcCtx)
+		}
 		if planned, ok := f.planCallBinding(funcCtx); ok {
 			return planned.renderCall(funcCtx)
 		}
