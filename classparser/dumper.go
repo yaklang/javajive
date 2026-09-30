@@ -16,6 +16,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	utils2 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
+	"github.com/yaklang/javajive/classparser/decompiler/rewriter"
 
 	"github.com/samber/lo"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -3956,18 +3957,21 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						"%s\n"+
 						c.GetTabString()+"}", arg, statementListToString(ret.Body))
 				case *statements.TryCatchStatement:
+					tryBody, catchExc, catchBodies := ret.TryBody, ret.Exception, ret.CatchBodies
+					finally, haveFinally := rewriter.RecoverCatchAllFinally(ret)
+					if haveFinally {
+						tryBody, catchExc, catchBodies = finally.TryBody, finally.Exceptions, finally.CatchBodies
+					}
 					statementStr = fmt.Sprintf(c.GetTabString()+"try{\n"+
 						"%s\n"+
-						c.GetTabString()+"}", statementListToString(ret.TryBody))
+						c.GetTabString()+"}", statementListToString(tryBody))
 					// Two catch handlers of the SAME type are illegal Java (a try may not declare two
 					// handlers of the same exception type), but they are exactly what bytecode emits for
 					// try-with-resources / try-catch-finally: a Throwable primaryExc-capture handler whose
 					// region is nested inside a Throwable cleanup ("any") handler. Collapse such adjacent
 					// pairs back into one handler so the source recompiles. Kill-switch:
 					// JDEC_NO_CATCH_MERGE=1 restores the raw duplicate-catch output.
-					catchExc := ret.Exception
-					catchBodies := ret.CatchBodies
-					if c.getenv("JDEC_NO_CATCH_MERGE") == "" {
+					if !haveFinally && c.getenv("JDEC_NO_CATCH_MERGE") == "" {
 						catchExc, catchBodies = mergeNestedSameTypeCatches(funcCtx, catchExc, catchBodies)
 					}
 					for i, body := range catchBodies {
@@ -3994,7 +3998,10 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 							c.GetTabString()+"}", excType, catchExc[i].String(funcCtx), bodyStr)
 					}
 					haveCatch := len(catchBodies) > 0
-					if !haveCatch {
+					if haveFinally {
+						statementStr += fmt.Sprintf("finally{\n%s\n%s}", statementListToString(finally.Cleanup), c.GetTabString())
+					}
+					if !haveCatch && !haveFinally {
 						body := statementListToString(ret.TryBody)
 						if canFlattenNoCatchTry(body) {
 							// A try without catch/finally has no Java-level effect. Some legacy bytecode

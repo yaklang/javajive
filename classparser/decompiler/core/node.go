@@ -78,6 +78,7 @@ type Node struct {
 	// leading exception-store assignment, so the body-content heuristic alone mis-classified it as the
 	// try body and produced a malformed try with no catch handler.
 	IsCatchStart        bool
+	CatchHandler        *statements.CatchHandler
 	TryNodeId           int
 	CatchNodeInfo       []*CatchNode
 	IsDoWhile           bool

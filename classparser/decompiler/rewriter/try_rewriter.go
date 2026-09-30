@@ -207,6 +207,11 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 		for i := range bodies {
 			if next[i].IsCatchStart {
 				catchBodies = append(catchBodies, bodies[i])
+				if next[i].CatchHandler != nil {
+					tryCatchSt.Handlers = append(tryCatchSt.Handlers, *next[i].CatchHandler)
+				} else {
+					tryCatchSt.Handlers = append(tryCatchSt.Handlers, statements.CatchHandler{})
+				}
 			} else if tryIdx == -1 {
 				tryIdx = i
 				tryBody = bodies[i]
@@ -214,6 +219,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 				// More than one non-handler successor: keep the first as the try body and treat
 				// the rest as catches so no code is silently dropped.
 				catchBodies = append(catchBodies, bodies[i])
+				tryCatchSt.Handlers = append(tryCatchSt.Handlers, statements.CatchHandler{})
 			}
 		}
 		if tryIdx == -1 && len(bodies) > 0 {

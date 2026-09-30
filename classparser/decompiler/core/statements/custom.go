@@ -12,6 +12,8 @@ type CustomStatement struct {
 	// ThrownValue retains ATHROW's dependency without changing its rendering.
 	// Region proofs must not infer a thrown operand from an opaque closure.
 	ThrownValue values.JavaValue
+	OriginPC    int
+	HasOriginPC bool
 	StringFunc  func(funcCtx *class_context.ClassContext) string
 	replaceVar  func(oldId *utils.VariableId, newId *utils.VariableId)
 }

@@ -7,6 +7,56 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+func TestImmediateCheckcastThrowRequiresPrivateHandlerPreservingEdge(t *testing.T) {
+	for _, change := range []string{"valid", "same handler", "other entry", "wrong source", "multiple targets", "nil target", "back edge", "handler boundary", "different handler", "duplicate", "store", "call", "custom check", "custom throw", "catch check", "catch throw", "try boundary", "invalid check"} {
+		t.Run(change, func(t *testing.T) {
+			check := &OpCode{Instr: &Instruction{OpCode: OP_CHECKCAST}, CurrentOffset: 1}
+			throw := &OpCode{Instr: &Instruction{OpCode: OP_ATHROW}, CurrentOffset: 4, Source: []*OpCode{check}}
+			check.Target = []*OpCode{throw}
+			d := &Decompiler{}
+			switch change {
+			case "same handler":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 0, EndPc: 5, HandlerPc: 8}}
+			case "other entry":
+				throw.Source = append(throw.Source, &OpCode{})
+			case "wrong source":
+				throw.Source[0] = &OpCode{}
+			case "multiple targets":
+				check.Target = append(check.Target, throw)
+			case "nil target":
+				check.Target[0] = nil
+			case "back edge":
+				throw.CurrentOffset = 0
+			case "handler boundary":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 1, EndPc: 4, HandlerPc: 8}}
+			case "different handler":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 1, EndPc: 4, HandlerPc: 8}, {StartPc: 4, EndPc: 5, HandlerPc: 9}}
+			case "duplicate":
+				throw.Instr.OpCode = OP_DUP
+			case "store":
+				throw.Instr.OpCode = OP_ASTORE_0
+			case "call":
+				throw.Instr.OpCode = OP_INVOKESTATIC
+			case "custom check":
+				check.IsCustom = true
+			case "custom throw":
+				throw.IsCustom = true
+			case "catch check":
+				check.IsCatch = true
+			case "catch throw":
+				throw.IsCatch = true
+			case "try boundary":
+				throw.IsTryCatchParent = true
+			case "invalid check":
+				check.Instr.OpCode = OP_ALOAD_0
+			}
+			if got, want := d.canInlineImmediateCheckcastThrow(check), change == "valid" || change == "same handler"; got != want {
+				t.Fatalf("private typed throw edge accepted=%v want=%v", got, want)
+			}
+		})
+	}
+}
+
 func TestLinearCheckcastArgumentOrderProof(t *testing.T) {
 	for _, kind := range []string{"later cast", "repeated cast", "wide argument", "primitive argument", "receiver", "primitive formal", "field read", "store", "duplicate", "branch", "extra entry", "handler boundary", "back edge", "nil target"} {
 		t.Run(kind, func(t *testing.T) {

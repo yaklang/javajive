@@ -100,7 +100,9 @@ func NewConditionStatement(cmp values.JavaValue, op string) *ConditionStatement 
 }
 
 type ReturnStatement struct {
-	JavaValue values.JavaValue
+	JavaValue   values.JavaValue
+	OriginPC    int
+	HasOriginPC bool
 }
 
 // ReplaceVar implements Statement.

@@ -232,7 +232,7 @@ func sameUnprotectedTryCall(rows []core.HandlerRange, a, b values.JavaValue, exc
 		}
 		return false
 	}
-	if !same(x.Object, y.Object) {
+	if !(finallyStaticQualifier(x) && finallyStaticQualifier(y)) && !same(x.Object, y.Object) {
 		return false
 	}
 	for i := range x.Arguments {
@@ -241,6 +241,15 @@ func sameUnprotectedTryCall(rows []core.HandlerRange, a, b values.JavaValue, exc
 		}
 	}
 	return true
+}
+
+func finallyStaticQualifier(call *values.FunctionCallExpression) bool {
+	q, ok := plainTryValue(call.Object).(*values.JavaClassValue)
+	if !ok || q == nil || q.JavaType == nil || !call.IsStatic || call.Kind != values.InvokeStatic {
+		return false
+	}
+	c, ok := q.JavaType.RawType().(*types.JavaClass)
+	return ok && c != nil && strings.ReplaceAll(c.Name, ".", "/") == strings.ReplaceAll(call.ClassName, ".", "/")
 }
 
 // Removing branch-private result definitions is safe only when the handler

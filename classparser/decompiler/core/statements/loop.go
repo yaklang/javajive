@@ -193,6 +193,15 @@ type TryCatchStatement struct {
 	Exception   []*values.JavaRef
 	TryBody     []Statement
 	CatchBodies [][]Statement
+	// Handlers preserves raw exception-table evidence in CatchBodies order.
+	// A typed Throwable catch is distinct from catch_type == 0 (finally).
+	Handlers []CatchHandler
+}
+
+type CatchHandler struct {
+	EntryPC         int
+	CatchAll        bool
+	ProtectedRanges [][2]int // half-open bytecode ranges
 }
 
 // ReplaceVar implements Statement.

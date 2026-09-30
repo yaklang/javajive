@@ -147,6 +147,22 @@ func sameIntSlice(a, b []int) bool {
 	return true
 }
 
+// An immediate CHECKCAST/ATHROW pair is one typed throw expression. Keeping
+// the checked operand on this private stack edge avoids materializing a local
+// that may join unrelated catch variables and lose the cast's declaration type.
+// The check still runs before ATHROW in the same handler domain; in particular
+// a failed cast and a null throw keep their original exception routing.
+func (d *Decompiler) canInlineImmediateCheckcastThrow(op *OpCode) bool {
+	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || op.IsCustom || op.IsCatch || op.IsTryCatchParent || len(op.Target) != 1 {
+		return false
+	}
+	throw := op.Target[0]
+	return throw != nil && throw.Instr != nil && throw.Instr.OpCode == OP_ATHROW &&
+		!throw.IsCustom && !throw.IsCatch && !throw.IsTryCatchParent &&
+		throw.CurrentOffset > op.CurrentOffset && len(throw.Source) == 1 && throw.Source[0] == op &&
+		sameHandlerCoverage(d.handlersAt(op), d.handlersAt(throw))
+}
+
 // A CHECKCAST immediately consumed by GETFIELD is one checked receiver
 // expression. Creating a separate local strands its definition when a guarded
 // field read becomes &&/||/?:. Inline only this single-use stack edge, with the

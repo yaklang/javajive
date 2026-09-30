@@ -4085,6 +4085,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		instanceOf.Flag = "instanceof"
 		instanceOf.CapturesKnown = true
 		instanceOf.Captures = []values.JavaValue{value}
+		instanceOf.OriginPC, instanceOf.HasOriginPC = int(opcode.CurrentOffset), true
 		runtimeStackSimulation.Push(instanceOf)
 	case OP_CHECKCAST:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
@@ -4093,7 +4094,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// without unpacking the cast CustomValue's closures (fastjson2 JDKUtils:318).
 		d.checkcastInnerArg[opcode] = arg
 		value := &values.CastExpression{Value: arg, TargetType: classInfo, OriginPC: int(opcode.CurrentOffset)}
-		if d.canInlineImmediateZeroArgCheckcast(opcode, classInfo) || d.canInlineCheckcastArgument(opcode) || d.canInlineImmediateCheckcastField(opcode, classInfo) || d.canInlineCheckcastArrayStore(opcode, classInfo) {
+		if d.canInlineImmediateZeroArgCheckcast(opcode, classInfo) || d.canInlineCheckcastArgument(opcode) || d.canInlineImmediateCheckcastField(opcode, classInfo) || d.canInlineCheckcastArrayStore(opcode, classInfo) || d.canInlineImmediateCheckcastThrow(opcode) {
 			d.inlineCheckcast[opcode] = true
 			runtimeStackSimulation.Push(value)
 			break
@@ -6267,6 +6268,14 @@ func (d *Decompiler) ParseStatement() error {
 		node.OriginPC = int(opcode.CurrentOffset)
 		node.HasOriginPC = opcode.Instr != nil && !opcode.IsCustom &&
 			opcode.Instr.OpCode != OP_START && opcode.Instr.OpCode != OP_END
+		switch terminal := statement.(type) {
+		case *statements.CustomStatement:
+			if terminal.ThrownValue != nil {
+				terminal.OriginPC, terminal.HasOriginPC = node.OriginPC, node.HasOriginPC
+			}
+		case *statements.ReturnStatement:
+			terminal.OriginPC, terminal.HasOriginPC = node.OriginPC, node.HasOriginPC
+		}
 		if v, ok := statement.(*statements.AssignStatement); ok {
 			v.OriginPC = int(opcode.CurrentOffset)
 			v.HasOriginPC = true
@@ -7399,6 +7408,16 @@ func (d *Decompiler) ParseStatement() error {
 					found := NodeFilter(node.Next, func(n *Node) bool {
 						return n.Id == getStatementNextIdByOpcodeId(catchInfo.OpCode.Id)
 					})
+					for _, handler := range found {
+						witness := &statements.CatchHandler{EntryPC: int(catchInfo.OpCode.CurrentOffset), CatchAll: true}
+						for _, row := range d.ExceptionTable {
+							if row.HandlerPc == catchInfo.OpCode.CurrentOffset {
+								witness.ProtectedRanges = append(witness.ProtectedRanges, [2]int{int(row.StartPc), int(row.EndPc)})
+								witness.CatchAll = witness.CatchAll && row.CatchType == 0
+							}
+						}
+						handler.CatchHandler = witness
+					}
 					// Keep sharing evidence on each handler as well as the try.
 					// A shared finally handler must not obscure an independent
 					// retry catch that protects only this interval.
