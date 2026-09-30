@@ -4120,6 +4120,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
 		}
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+		funcCallValue.RetainFunctionalReturnSignature(funcCtx)
 		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(funcCallValue)
@@ -4251,6 +4252,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 				d.constructorInitialized = true
 			}
 		}
+		funcCallValue.RetainFunctionalReturnSignature(funcCtx)
 		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(funcCallValue)
@@ -4264,6 +4266,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
 		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
+		funcCallValue.RetainFunctionalReturnSignature(funcCtx)
 		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(funcCallValue)
@@ -4277,6 +4280,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
 		funcCallValue.Object = runtimeStackSimulation.Pop().(values.JavaValue)
+		funcCallValue.RetainFunctionalReturnSignature(funcCtx)
 		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 			runtimeStackSimulation.Push(funcCallValue)
@@ -6291,6 +6295,7 @@ func (d *Decompiler) ParseStatement() error {
 	// statement building. fastjson2 ObjectReaderBaseModule:793 (var7.getParameters receiver).
 	d.rebindIncompatibleInvokeArgs()
 	d.unifyReferenceWebs()
+	d.restoreOptionalSupplierDefinitionViews()
 	protectedStores, protectedEdges, err := d.lowerProtectedStackStores()
 	if err != nil {
 		return err

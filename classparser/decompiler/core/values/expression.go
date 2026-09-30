@@ -750,6 +750,9 @@ type FunctionCallExpression struct {
 	ClassName      string
 	Arguments      []JavaValue
 	FuncType       *types.JavaFuncType
+	// SourceReturnType records declaration evidence for use-site erasure views.
+	// It never changes Type(): the caller may deliberately store the result raw.
+	SourceReturnType types.JavaType
 	// IsSpecialInvoke marks a call decoded from invokespecial. For a non-constructor invokespecial
 	// whose receiver is `this` and whose target class is NOT the current class, this is a `super.m()`
 	// call (the only other invokespecial forms are constructors and private same-class calls). It must
@@ -793,6 +796,9 @@ func (f *FunctionCallExpression) Clone() *FunctionCallExpression {
 		return nil
 	}
 	cp := *f
+	if f.SourceReturnType != nil {
+		cp.SourceReturnType = f.SourceReturnType.Copy()
+	}
 	if f.Arguments != nil {
 		cp.Arguments = append([]JavaValue(nil), f.Arguments...)
 	}
@@ -4618,6 +4624,9 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 		}
 	}
 	functionName := class_context.SafeIdentifier(f.FunctionName)
+	if view := f.optionalGenericThrowsReceiver(funcCtx); view != nil {
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", view.String(funcCtx), f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+	}
 
 	// A non-constructor invokespecial whose receiver is `this` and whose target is a DIFFERENT class
 	// (the superclass / an ancestor, never the current class which would be a private same-class call)

@@ -122,7 +122,7 @@ func provenOverloadWidening(actual, formal string, ctx *class_context.ClassConte
 }
 
 func accessibleOverloadBound(typ types.JavaType, ctx *class_context.ClassContext) bool {
-	if typ == nil {
+	if typ == nil || ctx == nil {
 		return false
 	}
 	if w, ok := typ.(*types.JavaWildcardType); ok {
@@ -144,6 +144,9 @@ func accessibleOverloadBound(typ types.JavaType, ctx *class_context.ClassContext
 		accessible, known = ctx.SiblingClassAccessible(internal)
 	}
 	if !known {
+		if ctx.InvocationMetadata == nil {
+			return false
+		}
 		metadata, found := ctx.InvocationMetadata(internal)
 		accessible = found && metadata.Name == internal && metadata.Public
 	}

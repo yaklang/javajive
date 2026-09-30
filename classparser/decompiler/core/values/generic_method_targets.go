@@ -142,6 +142,56 @@ func methodVariableSet(names []string) map[string]bool {
 	return set
 }
 
+// RetainFunctionalReturnSignature records a factory's complete declaration for
+// a use-site view. It does not refine the local declaration or the SAM result:
+// callers may deliberately use a raw interface with polluted payloads.
+// Only an exact, denotable declaration whose erasure matches the invoke return
+// is evidence. Foreign callee variables remain unresolved even when a caller
+// variable has the same spelling. No producer is chased through a local .Val.
+func (f *FunctionCallExpression) RetainFunctionalReturnSignature(ctx *class_context.ClassContext) {
+	if f == nil || ctx == nil || f.FuncType == nil || f.FuncType.ReturnType == nil ||
+		ctx.Getenv("JDEC_FUNCTIONAL_RETURN_SIGNATURE_OFF") != "" {
+		return
+	}
+	raw, known := types.RawClassFQN(f.FuncType.ReturnType)
+	if !known || !strings.HasPrefix(raw, "java.util.function.") {
+		return
+	}
+	descriptor, err := types.ParseMethodDescriptor(f.Descriptor)
+	if err != nil || descriptor.FunctionType() == nil || len(descriptor.FunctionType().ParamTypes) != len(f.Arguments) {
+		return
+	}
+	descriptorRaw, known := types.RawClassFQN(descriptor.FunctionType().ReturnType)
+	if !known || !sameErasureClassName(descriptorRaw, raw) {
+		return
+	}
+	params, ret, formals := f.genericMethodSignature(ctx)
+	pt, parameterized := types.AsParameterizedType(ret)
+	if len(params) != len(f.Arguments) || !parameterized || !sameErasureClassName(pt.RawClassName, raw) || javaTypeMentionsNames(ret, formals) ||
+		!sourceDenotableJavaType(ret, ctx) {
+		return
+	}
+	if f.IsStatic && ctx.SiblingClassSig != nil {
+		ownerSig, _, _ := ctx.SiblingClassSig(strings.ReplaceAll(f.ClassName, ".", "/"))
+		if javaTypeMentionsNames(ret, types.ClassFormalTypeParamNames(ownerSig)) {
+			return
+		}
+	}
+	for _, method := range types.MethodFormalTypeParamNames(ctx.CurrentMethodSig) {
+		for _, class := range ctx.ClassTypeParams {
+			if method == class && javaTypeMentionsNames(ret, []string{class}) {
+				return
+			}
+		}
+	}
+	for _, arg := range pt.TypeArgs {
+		if !accessibleOverloadBound(arg, ctx) {
+			return
+		}
+	}
+	f.SourceReturnType = ret.Copy()
+}
+
 // inferredGenericMethodReturn instantiates a generic wrapper's return using
 // matching parameterized arguments. Erased arguments cannot supply evidence.
 func (f *FunctionCallExpression) inferredGenericMethodReturn(ctx *class_context.ClassContext) types.JavaType {
