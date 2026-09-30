@@ -628,19 +628,7 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 			}
 			end = end.Next[0]
 		}
-		hasRetry := false
-		for _, next := range tr.Next {
-			if next.IsCatchStart && finalSet.Has(next) {
-				// Sharing a finally cleanup does not share the retry catch.
-				// In that case require an exclusive entry for this particular
-				// handler before extending the successful protected path.
-				if !hasSharedCatchEntry(tr) || (!next.SharedProtectedHandler &&
-					len(next.Source) == 1 && next.Source[0] == tr) {
-					hasRetry = true
-				}
-			}
-		}
-		if !hasRetry {
+		if !hasPrivateRetryHandler(tr, finalSet) {
 			continue
 		}
 		var path []*core.Node
@@ -666,6 +654,17 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 				visit(next)
 			}
 		}
+		if !reachedEnd {
+			// Boolean/if reduction can remove the old exclusive-end node.
+			// Re-establish only a private straight-line protected prefix from
+			// original PC witnesses, then retain its current boundary for later
+			// break/continue materialization. IDs and dangling pointers are not
+			// evidence that a throwing store lies outside the retry's try.
+			if prefix, boundary := protectedRetryPrefix(tr, circleNode); boundary != nil {
+				tr.ProtectedEnd = boundary
+				path, reachedEnd = prefix, true
+			}
+		}
 		if reachedEnd {
 			for _, n := range path {
 				finalSet.Add(n)
@@ -673,6 +672,80 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		}
 	}
 	return finalSet
+}
+
+func protectedRetryPrefix(tr, header *core.Node) ([]*core.Node, *core.Node) {
+	if tr == nil || !tr.HasProtectedRange || tr.ProtectedStartPC < 0 || tr.ProtectedEndPC <= tr.ProtectedStartPC {
+		return nil, nil
+	}
+	var first *core.Node
+	for _, next := range tr.Next {
+		if next != nil && !next.IsCatchStart {
+			if first != nil {
+				return nil, nil
+			}
+			first = next
+		}
+	}
+	var prefix []*core.Node
+	previous, pc := tr, tr.ProtectedStartPC-1
+	for current := first; len(prefix) < 32; {
+		if current == nil || current == header || current.IsCatchStart || current.IsJmp || !current.HasOriginPC || current.OriginPC <= pc {
+			return nil, nil
+		}
+		if current.OriginPC >= tr.ProtectedEndPC {
+			if len(prefix) != 0 {
+				return prefix, current
+			}
+			return nil, nil
+		}
+		if current.OriginPC < tr.ProtectedStartPC || len(current.Source) != 1 || current.Source[0] != previous || len(current.Next) != 1 {
+			return nil, nil
+		}
+		switch current.Statement.(type) {
+		case *statements.AssignStatement, *statements.ExpressionStatement:
+		default:
+			return nil, nil
+		}
+		prefix = append(prefix, current)
+		previous, pc, current = current, current.OriginPC, current.Next[0]
+	}
+	return nil, nil
+}
+
+func hasPrivateRetryHandler(tr *core.Node, body *utils2.Set[*core.Node]) bool {
+	for _, next := range tr.Next {
+		if next != nil && next.IsCatchStart && body.Has(next) {
+			// A shared finally cleanup may coexist with a private retry catch;
+			// a retry handler with alternate entries cannot prove this region.
+			if !hasSharedCatchEntry(tr) || (!next.SharedProtectedHandler &&
+				len(next.Source) == 1 && next.Source[0] == tr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func protectedRetryContinuations(body *utils2.Set[*core.Node], header *core.Node) map[*core.Node]bool {
+	exits := map[*core.Node]bool{}
+	for _, tr := range body.List() {
+		if !hasPrivateRetryHandler(tr, body) {
+			continue
+		}
+		prefix, boundary := protectedRetryPrefix(tr, header)
+		if boundary == nil || body.Has(boundary) {
+			continue
+		}
+		complete := true
+		for _, node := range prefix {
+			complete = complete && body.Has(node)
+		}
+		if complete {
+			exits[boundary] = true
+		}
+	}
+	return exits
 }
 
 func loopAnalysisSuccessors(node *core.Node) []*core.Node {
@@ -874,13 +947,23 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 		}
 	}
 	var continuations []*core.Node
+	protectedExits := map[*core.Node]bool{}
+	if reducible {
+		protectedExits = protectedRetryContinuations(elementSet, circleNode)
+	}
 	for _, out := range outNodes {
 		if inlineCases[out] || IsEndNode(out) {
 			continue
 		}
 		// A return shared by distinct branches can itself be the normal
 		// continuation. A single-path return is already an inline terminal.
-		if exclusiveTerminalBranch(out) {
+		// A retry catch's back edge is exceptional; the successful protected
+		// prefix falls out normally at the exception table's exclusive end.
+		// Its sole return may contain a downstream call outside that handler.
+		// Keeping it as an inline early return absorbs that call into the try
+		// and retries downstream exceptions. Only the private PC-proved path
+		// may override the ordinary terminal-arm rule.
+		if exclusiveTerminalBranch(out) && !protectedExits[out] {
 			continue
 		}
 		continuations = append(continuations, out)

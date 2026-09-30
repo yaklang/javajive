@@ -6216,6 +6216,9 @@ func (d *Decompiler) ParseStatement() error {
 			}
 		}
 		node := NewNode(statement)
+		node.OriginPC = int(opcode.CurrentOffset)
+		node.HasOriginPC = opcode.Instr != nil && !opcode.IsCustom &&
+			opcode.Instr.OpCode != OP_START && opcode.Instr.OpCode != OP_END
 		if v, ok := statement.(*statements.AssignStatement); ok {
 			v.OriginPC = int(opcode.CurrentOffset)
 			v.HasOriginPC = true

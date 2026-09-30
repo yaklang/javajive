@@ -17,12 +17,16 @@ type Node struct {
 	// witness by label while the target node changes during CFG rewrites.
 	SwitchJumpOnlyCases map[int]bool
 
-	Id        int
-	LoopBreak bool
-	Statement statements.Statement
-	Source    []*Node
-	HideNext  *Node
-	Next      []*Node
+	Id int
+	// Origin survives renumbering/statement rewrites. Synthetic wrappers have
+	// no witness and cannot establish an exception-table boundary by ID order.
+	OriginPC    int
+	HasOriginPC bool
+	LoopBreak   bool
+	Statement   statements.Statement
+	Source      []*Node
+	HideNext    *Node
+	Next        []*Node
 	// EncodedJumps marks Next edges already expressed by break/continue in a
 	// structured body's statements, with no normal fall-through to that target.
 	// Keep these edges for loop analysis, but not for normal branch joins.
