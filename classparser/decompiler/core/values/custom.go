@@ -14,6 +14,10 @@ type CustomValue struct {
 	Captures       []JavaValue
 	Flag           string
 	NoOuterCapture bool
+	// Lambda creation is eager even though its body is deferred. Keep the
+	// invokedynamic location for argument motion and exception-region proofs.
+	OriginPC    int
+	HasOriginPC bool
 	// IsMethodRef distinguishes a method reference (`Type::method`, `receiver::method`, `Type::new`)
 	// from an inlined lambda body (`(x) -> ...`). Both carry Flag=="lambda" (so receiver/call-site
 	// functional-interface cast logic fires for both), but a method reference binds NATURALLY to a

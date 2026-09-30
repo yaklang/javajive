@@ -524,6 +524,9 @@ func t19OwnerSource(owner string, funcCtx *class_context.ClassContext) string {
 
 // Marker interfaces are part of lambda identity, not a later runtime cast.
 func t19PreserveMarkers(req CallSiteRequest, value values.JavaValue, resultType types.JavaType) values.JavaValue {
+	if cv, ok := values.UnpackSoltValue(value).(*values.CustomValue); ok && cv.Flag == "lambda" {
+		cv.OriginPC, cv.HasOriginPC = req.OriginPC, true
+	}
 	if req.Identity.Name != "altMetafactory" || len(req.StaticArgs) < 5 {
 		return value
 	}

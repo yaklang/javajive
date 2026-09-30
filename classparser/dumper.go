@@ -4070,6 +4070,14 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 					}
 				case *statements.ReturnStatement:
 					statementStr = c.GetTabString() + statement.String(funcCtx) + ";"
+				case *statements.ExpressionStatement:
+					if isEnumCtor && len(params) >= 2 {
+						if source, ok := enumThisDelegateSource(ret, params[:2], funcCtx); ok {
+							statementStr = c.GetTabString() + source + ";"
+							break
+						}
+					}
+					statementStr = c.GetTabString() + statement.String(funcCtx) + ";"
 				case *statements.ForStatement:
 					datas := []string{}
 					datas = append(datas, ret.InitVar.String(funcCtx))

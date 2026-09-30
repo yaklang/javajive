@@ -310,6 +310,16 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 	parser.CodeLimits = core.CodeLimits{Present: true, MaxLocals: int(codeAttr.MaxLocals), MaxStack: int(codeAttr.MaxStack), DirectSuperClass: dumper.obj.GetSupperClassName()}
 	parser.EnableShadowIR = dumper.options.EnableShadowIR
 	st, err := decompiler.ParseBytesCode(parser)
+	if err == nil && dumper.FuncCtx.FunctionName == "<clinit>" && dumper.isGenuineEnum() {
+		constants := map[string]int{}
+		for _, field := range dumper.obj.Fields {
+			if field.AccessFlags&0x4000 != 0 {
+				name := dumper.obj.ConstantPoolManager.GetUtf8(int(field.NameIndex)).Value
+				constants[name] = len(constants)
+			}
+		}
+		parser.InlineEnumLambdaArgumentTemps(&st, constants)
+	}
 	dumper.bootstrapReports = append(dumper.bootstrapReports, parser.BootstrapReports...)
 	if dumper.options.EnableShadowIR && dumper.report != nil {
 		observation := parser.ShadowObservation
