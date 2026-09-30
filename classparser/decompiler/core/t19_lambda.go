@@ -562,5 +562,16 @@ func t19PreserveMarkers(req CallSiteRequest, value values.JavaValue, resultType 
 	for _, m := range req.StaticArgs[5 : 5+n] {
 		markers = append(markers, m.Type().Copy())
 	}
-	return &values.LambdaIntersection{Value: value, Primary: resultType.Copy(), Markers: markers, OriginPC: req.OriginPC}
+	primary := resultType.Copy()
+	// The bootstrap return descriptor gives only the interface erasure. Its
+	// reconstructed poly value may already have a proven instantiated target
+	// (Function<List,Stream>, for example). Keep that target at the intersection
+	// creation site: a raw primary would retarget List::stream to apply(Object).
+	// This changes neither the interface erasure nor the marker set.
+	if target, ok := types.AsParameterizedType(value.Type()); ok {
+		if raw, known := types.RawClassFQN(resultType); known && normalizeJavaClassName(raw) == normalizeJavaClassName(target.RawClassName) {
+			primary = value.Type().Copy()
+		}
+	}
+	return &values.LambdaIntersection{Value: value, Primary: primary, Markers: markers, OriginPC: req.OriginPC}
 }

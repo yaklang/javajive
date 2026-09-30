@@ -3416,6 +3416,10 @@ func (f *FunctionCallExpression) nestedGenericErasureArgCast(i int, arg JavaValu
 	// expression declaration targeting, so rendering and data-flow cannot drift.
 	if inst := f.resolvedFunctionalFormalType(i, funcCtx); inst != nil {
 		formalType = inst
+	} else if inst := f.functionalFormalForErasure(i, funcCtx); inst != nil {
+		// An unsolved method variable cannot target a source lambda, but its
+		// nested Signature shape can prove erasure of an existing function.
+		formalType = inst
 	}
 	formal, ok := types.AsParameterizedType(formalType)
 	if !ok || formal == nil || !sameErasureClassName(actual.RawClassName, formal.RawClassName) {
