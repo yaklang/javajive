@@ -278,5 +278,24 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 		tryNode.AddNext(c)
 	}
 	markEncodedJumps(tryNode, bodyNodes)
+	if declaration, tail := factorUnprotectedTryTail(node, tryCatchSt); declaration != nil {
+		// Preserve the result's method-local identity across the protected
+		// prefixes and the unprotected tail, without replaying slot names.
+		declNode := manager.NewNode(declaration)
+		tryNode.Replace(declNode)
+		declNode.RemoveAllNext()
+		declNode.AddNext(tryNode)
+		continuations := slices.Clone(tryNode.Next)
+		tryNode.RemoveAllNext()
+		last := tryNode
+		for _, statement := range tail {
+			next := manager.NewNode(statement)
+			last.AddNext(next)
+			last = next
+		}
+		for _, next := range continuations {
+			last.AddNext(next)
+		}
+	}
 	return nil
 }

@@ -157,12 +157,16 @@ func TestInvokeWitnessCloneKeepsIdentity(t *testing.T) {
 		Kind:            InvokeSpecial,
 		IsSpecialInvoke: true,
 		OriginPC:        99,
+		HasOriginPC:     true,
 		FuncType:        ft,
 		Arguments:       []JavaValue{NewJavaLiteral("null", types.NewJavaClass("java.lang.Object"))},
 	}
 	cp := call.Clone()
 	if cp == call {
 		t.Fatal("Clone must return a new object")
+	}
+	if !cp.HasOriginPC {
+		t.Fatal("Clone lost the decoded invoke origin witness")
 	}
 	cp.Kind = InvokeVirtual
 	cp.OriginPC = 0

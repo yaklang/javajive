@@ -767,6 +767,8 @@ type FunctionCallExpression struct {
 	Kind InvokeKind
 	// OriginPC is the bytecode offset of the invoke that produced this call.
 	OriginPC int
+	// Only decoded bytecode calls have an origin witness, including PC zero.
+	HasOriginPC bool
 }
 
 // Witness returns the bytecode invoke identity. Owner is ClassName, name is

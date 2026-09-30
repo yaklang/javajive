@@ -263,6 +263,7 @@ func stampInvokeWitness(call *values.FunctionCallExpression, kind values.InvokeK
 	call.Kind = kind
 	if opcode != nil {
 		call.OriginPC = int(opcode.CurrentOffset)
+		call.HasOriginPC = true
 	}
 }
 
@@ -6523,11 +6524,13 @@ func (d *Decompiler) ParseStatement() error {
 			appendNode(st)
 		case OP_ATHROW:
 			val := opcode.stackConsumed[0]
-			appendNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
+			throw := statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
 				return fmt.Sprintf("throw %v", val.String(funcCtx))
 			}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
 				val.ReplaceVar(oldId, newId)
-			}))
+			})
+			throw.ThrownValue = val
+			appendNode(throw)
 		case OP_IRETURN:
 			v := opcode.stackConsumed[0]
 			resetReturnValueTypeSafe(v, funcCtx)
@@ -7286,6 +7289,11 @@ func (d *Decompiler) ParseStatement() error {
 	sort.SliceStable(nodes, func(i, j int) bool {
 		return nodes[i].Id < nodes[j].Id
 	})
+	sharedHandlerRanges := map[[2]uint16][]HandlerRange{}
+	for _, entry := range d.ExceptionTable {
+		key := [2]uint16{entry.HandlerPc, entry.CatchType}
+		sharedHandlerRanges[key] = append(sharedHandlerRanges[key], HandlerRange{entry.StartPc, entry.EndPc, entry.HandlerPc, entry.CatchType})
+	}
 	err = WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
 		if node.IsTryCatch {
 			// A switch predecessor can enter several distinct protected regions.
@@ -7373,6 +7381,21 @@ func (d *Decompiler) ParseStatement() error {
 					catchNodes := catchNodeMap[endIndex]
 					tryNode := NewNode(statements.NewMiddleStatement(statements.MiddleTryStart, nil))
 					tryNode.Id = statementsIndex
+					tryNode.ProtectedStartPC, tryNode.ProtectedEndPC = int(start), endIndex
+					tryNode.HasProtectedRange = true
+					var soleHandler *CatchNode
+					handlerRows := 0
+					for _, info := range catchInfos {
+						if int(info.EndIndex) == endIndex {
+							soleHandler = info
+							handlerRows++
+						}
+					}
+					if handlerRows == 1 {
+						key := [2]uint16{soleHandler.OpCode.CurrentOffset, soleHandler.ExceptionTypeIndex}
+						tryNode.SharedProtectedRanges = sharedHandlerRanges[key]
+					}
+
 					for _, info := range catchInfos {
 						for _, entry := range d.ExceptionTable {
 							if entry.HandlerPc == info.OpCode.CurrentOffset && entry.StartPc != start {

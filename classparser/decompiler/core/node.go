@@ -58,7 +58,11 @@ type Node struct {
 	// the second run would corrupt MergeNode to the default/throw node. Reused on re-entry.
 	SwitchEmptyCaseMergeNode *Node
 	// ProtectedEnd is the exclusive bytecode boundary of a synthetic try region.
-	ProtectedEnd *Node
+	ProtectedEnd                     *Node
+	ProtectedStartPC, ProtectedEndPC int
+	HasProtectedRange                bool
+	// Half-open rows for the sole shared handler; gaps remain unprotected.
+	SharedProtectedRanges []HandlerRange
 	// On a try: at least one handler spans other protected starts. On a
 	// catch entry: this specific handler spans other protected starts.
 	SharedProtectedHandler bool
