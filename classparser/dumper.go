@@ -1487,11 +1487,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
 	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
 	full = c.sourceRewrite("fixTryCatchExceptionPlacement", "class_source", full, fixTryCatchExceptionPlacement)
-	// addMissingCatchException performs per-call-site exception-flow analysis: for each reflection
-	// call site (getConstructor etc.) it walks the enclosing try/catch chain and only augments the
-	// nearest catch with NoSuchMethodException if no enclosing catch already handles it (or a
-	// supertype). Kill-switch: JDEC_ADD_MISSING_CATCH_OFF=1.
-	full = c.sourceRewrite("addMissingCatchException", "class_source", full, addMissingCatchException)
+	// Catch types are recovered from the exception table. A call's spelling
+	// does not prove its declaring owner, throws signature, or handler coverage;
+	// guessing here adds exceptions to unrelated catches (e.g. getMethod()).
 	// dedupNestedCatchException removes exception types from an outer catch that are already caught
 	// by a nested try/catch in the try body (javac: "exception X is never thrown in body of
 	// corresponding try statement"). Kill-switch: JDEC_DEDUP_NESTED_CATCH_OFF=1.
@@ -1516,11 +1514,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// try/catch(NoSuchMethodException). Class-gated to AddDelegateTransformer (global wrap
 	// unmasks snakeyaml/fastjson2). Kill-switch: JDEC_WRAP_GETCONSTRUCTOR_OFF=1.
 	full = c.sourceRewrite("wrapUncaughtGetConstructor", "class_source", full, wrapUncaughtGetConstructor)
-	// Drop NoSuchMethodException from a multicatch (or an empty static-clinit
-	// try/catch) when the try body has no getConstructor/getMethod call.
-	// RequestWrapper: `new URI` throws URISyntaxException only; the decompiler
-	// unions NSME onto that catch. Kill-switch: JDEC_SPURIOUS_NSME_CATCH_OFF=1.
-	full = c.sourceRewrite("fixSpuriousNSMECatch", "class_source", full, fixSpuriousNSMECatch)
+	// Preserve the recovered alternatives too. A materialized Class[] can be
+	// declared outside the try, and any callee may declare a checked exception.
+	// Absence of a familiar reflection expression cannot prove a catch redundant.
 	// Drop catch(T) when an earlier catch in the same try already covers T
 	// (multicatch then a second catch(T)). Kill-switch: JDEC_ALREADY_CAUGHT_OFF=1.
 	full = c.sourceRewrite("fixAlreadyCaughtDuplicateCatch", "class_source", full, fixAlreadyCaughtDuplicateCatch)
