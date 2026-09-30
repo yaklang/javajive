@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialNestedCompactionExitRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "NestedCompaction", `public class NestedCompaction {
   static String compact(String input) {
     int cursor=input.indexOf('x');

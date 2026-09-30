@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialConditionalCastArgumentRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ConditionalCastArgument", `import java.util.*;
 import java.util.regex.Pattern;
 class CountedItems extends AbstractList<CharSequence> {

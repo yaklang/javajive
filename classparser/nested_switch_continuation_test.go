@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialNestedSwitchKeepsContinuationRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "NestedSwitchContinuation", `public class NestedSwitchContinuation {
   static String decode(int[] values) {
     StringBuilder out=new StringBuilder();

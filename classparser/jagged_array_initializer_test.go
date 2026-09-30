@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialJaggedArrayInitializerKeepsOuterReceiverRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "com.google.zxing.regression.JaggedInitializer", `package com.google.zxing.regression;
 import java.util.Arrays;
 public class JaggedInitializer {

@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialStaticFactoryGenericScopeRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ScopedFactory", `public class ScopedFactory<U> {
   final U value;
   ScopedFactory(U value) { this.value=value; }
@@ -18,6 +19,7 @@ func TestAdversarialStaticFactoryGenericScopeRoundTrip(t *testing.T) {
 }
 
 func TestAdversarialRawGenericHierarchyScopeRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "RawHierarchy", `class RawParent<X> {
   X value;
   void accept(X value) { this.value=value; }
@@ -41,6 +43,7 @@ public class RawHierarchy<X> extends RawParent<X> {
 }
 
 func TestAdversarialGenericFactoryConstructorBindingRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "FactoryOverloads", `public class FactoryOverloads<U> {
   final String chosen;
   FactoryOverloads(U value) { chosen="generic"; }

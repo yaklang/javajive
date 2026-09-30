@@ -3,6 +3,7 @@ package javaclassparser
 import "testing"
 
 func TestAdversarialCompletedArrayArgumentRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "ArrayArgument", `import java.util.*;
 class ArraySink {
   static int reads;

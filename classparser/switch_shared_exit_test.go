@@ -5,6 +5,7 @@ import "testing"
 // javac shares the inner break with the enclosing switch's exit. Empty arms
 // still transfer control; rendering them as grouped labels changes state.
 func TestAdversarialNestedSwitchEmptySharedExitRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "NestedEmptyExit", `public class NestedEmptyExit {
   static String decode(int mode, int[] codes) {
     StringBuilder out=new StringBuilder();

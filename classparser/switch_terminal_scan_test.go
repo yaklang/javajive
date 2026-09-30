@@ -5,6 +5,7 @@ import "testing"
 // A case can fall through into a sibling's terminal body. That shared body
 // must keep its state update even when other arms continue a nested scan loop.
 func TestAdversarialSwitchTerminalScanRoundTrip(t *testing.T) {
+	t.Parallel()
 	roundTripGenericFlow(t, "TerminalScan", `public class TerminalScan {
   final String input;
   final boolean lenient;
