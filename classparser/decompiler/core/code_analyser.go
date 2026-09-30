@@ -6899,6 +6899,7 @@ func (d *Decompiler) ParseStatement() error {
 		MiscRewriter(d.RootNode, d.delRefUserAttr, allowArrayEffects)
 	}
 	d.inlineBranchArrayLeaves()
+	d.recoverGenericArrayDeclarations(idToOpcode)
 	uidToPairs := omap.NewEmptyOrderedMap[string, []*VarFoldRule]()
 	uidToRef := map[string]*values.JavaRef{}
 	WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
