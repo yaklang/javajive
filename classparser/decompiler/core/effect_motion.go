@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
@@ -298,13 +299,14 @@ func (d *Decompiler) canInlineCheckcastAtInvocation(value values.JavaValue, sour
 
 // canInlineCheckcastIntoBranchMerge recognizes a String or current-class
 // CHECKCAST value in a null-joined reference-local store, or an array cast
-// feeding a null-joined field store. The array case covers javac's
+// feeding an array field store whose alternate value is null or the exact same array
+// type. The array case covers javac's
 // `field = array != null ? (T[]) array.clone() : null` shape: the CHECKCAST
 // temporary exists only on the stack and must be inlined before the branch
 // is rendered as a ternary.
 //
 // The proof is deliberately limited to a direct CHECKCAST -> GOTO -> merge
-// path, a two-predecessor forward ASTORE or array PUTFIELD, a provably-null alternate input, one
+// path, a two-predecessor forward ASTORE or array PUTFIELD, a null or exact-array alternate input, one
 // matching conditional with two straight-line arms, exact stack-value
 // identity, and an unchanged handler domain. Other or loop-carried stack joins
 // remain materialized.
@@ -366,8 +368,18 @@ func (d *Decompiler) canInlineCheckcastIntoBranchMerge(value values.JavaValue, s
 	if !sameHandlerCoverage(d.handlersAt(otherPred), d.handlersAt(merge)) ||
 		isArray && !fieldArrayMerge ||
 		!isReferenceLocalStoreOpcode(merge.Instr.OpCode) && !fieldArrayMerge ||
-		otherPred.StackEntry == nil || !isProvableNull(GetRealValue(values.UnpackSoltValue(otherPred.StackEntry.value))) {
+		otherPred.StackEntry == nil {
 		return false
+	}
+	alternate := GetRealValue(values.UnpackSoltValue(otherPred.StackEntry.value))
+	if !isProvableNull(alternate) {
+		// A copied array may merge with the original array instead of null. Exact
+		// array types keep target typing unchanged; the private arm proof below
+		// keeps the clone, cast and any receiver failures inside the selected arm.
+		if !fieldArrayMerge || alternate == nil || alternate.Type() == nil ||
+			!sameExactArrayType(alternate.Type(), cast.TargetType) {
+			return false
+		}
 	}
 	// Walk backward through unique predecessors to find the condition that
 	// directly selects this cast arm. The other successor must lead only to the
@@ -414,6 +426,29 @@ func (d *Decompiler) canInlineCheckcastIntoBranchMerge(value values.JavaValue, s
 	}
 	d.tracef("var-fold", "inline checkcast into conditional stack merge producerPC=%d gotoPC=%d mergePC=%d", sourceOp.CurrentOffset, targetOp.CurrentOffset, merge.CurrentOffset)
 	return true
+}
+
+// Compare JVM component identities, never imported display names or inferred LUBs.
+func sameExactArrayType(a, b types.JavaType) bool {
+	if a == nil || b == nil || !a.IsArray() || !b.IsArray() || a.ArrayDim() != b.ArrayDim() {
+		return false
+	}
+	for a.IsArray() && b.IsArray() {
+		a, b = a.ElementType(), b.ElementType()
+		if a == nil || b == nil {
+			return false
+		}
+	}
+	switch x := a.RawType().(type) {
+	case *types.JavaPrimer:
+		y, ok := b.RawType().(*types.JavaPrimer)
+		return ok && x.Name == y.Name
+	case *types.JavaClass:
+		y, ok := b.RawType().(*types.JavaClass)
+		return ok && strings.ReplaceAll(x.Name, "/", ".") == strings.ReplaceAll(y.Name, "/", ".")
+	default:
+		return false
+	}
 }
 
 func isReferenceLocalStoreOpcode(opcode int) bool {
