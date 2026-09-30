@@ -5199,6 +5199,9 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 		} else {
 			check = d.branchCallCastLeaf(ref, cast, entry, leaf, merge)
+			if check == nil {
+				check = d.branchExpressionCastLeaf(ref, cast, entry, leaf, merge)
+			}
 		}
 		if check == nil {
 			return value
