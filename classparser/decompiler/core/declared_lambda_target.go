@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"strings"
 )
 
@@ -156,4 +157,33 @@ func directSamTokens(desc string, variables bool) ([]string, bool) {
 		return nil, false
 	}
 	return append(result, token), true
+}
+
+// Instantiation descriptors erase nested generic arguments. Target the poly
+// expression at that proven SAM without claiming those erased arguments are a
+// complete invariant local type. A raw local retains legal unchecked conversion
+// to a later, declaration-proved Foo<Collection<String>> consumer.
+func retainErasedFunctionalValue(v *values.CustomValue, raw, target types.JavaType) *values.CustomValue {
+	if v == nil || target == nil {
+		return v
+	}
+	copy := *v
+	copy.TypeFunc = func() types.JavaType { return raw }
+	if write := v.WriteFunc; write != nil {
+		copy.WriteFunc = func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
+			if err := out.WriteString("(" + raw.String(ctx) + ") ((" + target.String(ctx) + ") ("); err != nil {
+				return err
+			}
+			if err := write(ctx, out); err != nil {
+				return err
+			}
+			return out.WriteString("))")
+		}
+	} else if render := v.StringFunc; render != nil {
+		// Preserve the existing bounded-render rejection for string-only callbacks.
+		copy.StringFunc = func(ctx *class_context.ClassContext) string {
+			return "(" + raw.String(ctx) + ") ((" + target.String(ctx) + ") (" + render(ctx) + "))"
+		}
+	}
+	return &copy
 }

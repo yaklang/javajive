@@ -223,9 +223,11 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					cv.InstantiatedMtdDesc = t19MethodTypeDesc(args1[2])
 					if upgradedType := inferDeclaredLambdaTarget(d, typ, args1[0], args1[2]); upgradedType != nil {
 						lambdaType := upgradedType
-						cv = cv.WithType(func() types.JavaType {
-							return lambdaType
-						})
+						if inferLambdaTypeFromInstantiated(typ, args1[2]) == nil {
+							cv = retainErasedFunctionalValue(cv, typ, lambdaType)
+						} else {
+							cv = cv.WithType(func() types.JavaType { return lambdaType })
+						}
 						cv.Flag = "lambda"
 						cv.NoOuterCapture = len(captured) == 0
 					}
@@ -250,9 +252,14 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// ListStr,Map,MapMultiValueType} `var = Collections::synchronized*/unmodifiable*` (25
 			// "invalid method reference" sites). Kill-switch: JDEC_METHODREF_INSTANTIATED_TYPE_OFF=1.
 			refType := typ
+			var declaredTarget types.JavaType
 			if jdecenv.Get("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(args1) >= 3 {
 				if up := inferDeclaredLambdaTarget(d, typ, args1[0], args1[2]); up != nil {
-					refType = up
+					if inferLambdaTypeFromInstantiated(typ, args1[2]) == nil {
+						declaredTarget = up
+					} else {
+						refType = up
+					}
 				}
 				refType = methodRefReceiverType(d.FunctionContext, refType, classMember, args1[2], len(capturedArgs))
 			}
@@ -309,7 +316,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					}
 				}
 			}
-			return refVal, nil
+			return retainErasedFunctionalValue(refVal, typ, declaredTarget), nil
 		}
 	},
 	"defaultBootstrapMethod": func(args ...values.JavaValue) BuildinBootstrapMethod {

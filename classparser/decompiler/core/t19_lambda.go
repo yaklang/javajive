@@ -259,7 +259,11 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 		cv.InstantiatedMtdDesc = t19MethodTypeDesc(static[2])
 		if upgradedType := inferDeclaredLambdaTarget(d, typ, static[0], static[2]); upgradedType != nil {
 			lambdaType := upgradedType
-			cv = cv.WithType(func() types.JavaType { return lambdaType })
+			if inferLambdaTypeFromInstantiated(typ, static[2]) == nil {
+				cv = retainErasedFunctionalValue(cv, typ, lambdaType)
+			} else {
+				cv = cv.WithType(func() types.JavaType { return lambdaType })
+			}
 			cv.Flag = "lambda"
 			cv.NoOuterCapture = len(captured) == 0
 		}
@@ -290,9 +294,14 @@ func t19MethodRef(req CallSiteRequest, d *Decompiler, static []values.JavaValue,
 	// DynamicArgs arrive in stack-pop order, matching the historical method-ref renderer.
 	capturedArgs := append([]values.JavaValue{}, capturedPop...)
 	refType := resultType
+	var declaredTarget types.JavaType
 	if d.getenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(static) >= 3 {
 		if up := inferDeclaredLambdaTarget(d, resultType, static[0], static[2]); up != nil {
-			refType = up
+			if inferLambdaTypeFromInstantiated(resultType, static[2]) == nil {
+				declaredTarget = up
+			} else {
+				refType = up
+			}
 		}
 		refType = methodRefReceiverType(d.FunctionContext, refType, impl, static[2], len(capturedArgs))
 	}
@@ -324,7 +333,7 @@ func t19MethodRef(req CallSiteRequest, d *Decompiler, static []values.JavaValue,
 			refVal.InstantiatedMtdDesc = desc
 		}
 	}
-	return refVal
+	return retainErasedFunctionalValue(refVal, resultType, declaredTarget)
 }
 
 func t19RenderMethodRef(funcCtx *class_context.ClassContext, kind uint8, owner, member string, captured []values.JavaValue) string {
