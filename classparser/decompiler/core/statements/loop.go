@@ -203,7 +203,14 @@ func (w *TryCatchStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.Var
 	for _, body := range w.TryBody {
 		body.ReplaceVar(oldId, newId)
 	}
-
+	// A handler can read a local defined before the try. The same identity
+	// rebinding must reach every handler, including nested catch bodies; a
+	// coincidentally equal temporary name is not a binding.
+	for _, handler := range w.CatchBodies {
+		for _, body := range handler {
+			body.ReplaceVar(oldId, newId)
+		}
+	}
 }
 
 func NewTryCatchStatement(body1 []Statement, body2 [][]Statement) *TryCatchStatement {
