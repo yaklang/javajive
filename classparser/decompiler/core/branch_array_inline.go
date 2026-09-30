@@ -109,6 +109,17 @@ func findBranchArrayReturn(body *[]statements.Statement, call *values.FunctionCa
 	return found, walk(body) && count == 1 && found != nil
 }
 
+func branchArrayInertElement(item values.JavaValue) bool {
+	switch v := values.UnpackSoltValue(item).(type) {
+	case *values.JavaLiteral:
+		return v != nil
+	case *values.JavaRef:
+		return v != nil && v.CustomValue == nil && v.StackVar == nil
+	default:
+		return false
+	}
+}
+
 // InlineDroppedBranchArrayCalls repairs only a branch-local DUP temporary whose
 // definition was removed when a short-circuit value merge became one return
 // expression. A live allocation in the final statement tree is never
@@ -127,27 +138,19 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 			values.UnpackSoltValue(call.Arguments[candidate.argIndex]) != ref ||
 			!array.IsArray() || !array.HasOriginPC || !array.HasEvaluationEndPC ||
 			len(array.Initializer) == 0 || array.EvaluationEndPC >= call.OriginPC ||
-			array.Type().String(d.FunctionContext) != "String[]" ||
-			call.FuncType.ParamTypes[candidate.argIndex].String(d.FunctionContext) != "String[]" {
+			!sameExactArrayType(array.Type(), call.FuncType.ParamTypes[candidate.argIndex]) {
 			continue
 		}
-		// The completed initializer must be a bytecode literal. An effectful
-		// element could change timing if moved into the call expression.
+		// Only inert literals and ordinary local reads may move; arbitrary
+		// expression/field/call elements need a stronger evaluation proof.
 		literal := true
 		for _, item := range array.Initializer {
-			v, ok := item.(*values.JavaLiteral)
-			if !ok {
-				literal = false
-				break
-			}
-			if _, ok := v.Data.(string); !ok {
+			if !branchArrayInertElement(item) {
 				literal = false
 				break
 			}
 		}
-		if !literal {
-			continue
-		}
+
 		for _, earlier := range call.Arguments[:candidate.argIndex] {
 			effect, _ := values.InspectValue(earlier)
 			if effect != 0 {
@@ -162,6 +165,19 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 		if allocation == nil || invocation == nil || allocation.Instr == nil || invocation.Instr == nil ||
 			allocation.Instr.OpCode != OP_ANEWARRAY ||
 			!branchArraySinglePath(d, allocation, invocation) {
+			continue
+		}
+		// A local element must retain its value at the original array store.
+		// Even an unrelated slot write is conservatively rejected here; this
+		// avoids changing captured values while moving the initializer.
+		writesLocal := false
+		for cur := allocation; cur != invocation; cur = cur.Target[0] {
+			if cur.Instr != nil && LocalAccessOf(cur.Instr.OpCode).Write {
+				writesLocal = true
+				break
+			}
+		}
+		if writesLocal {
 			continue
 		}
 		uses, stores := 0, 0

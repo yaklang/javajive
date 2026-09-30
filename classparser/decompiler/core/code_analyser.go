@@ -5664,6 +5664,35 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 						}
 					}
 				}
+				// Value ternaries can contain a branch-local invocation whose
+				// array argument is not itself a condition (c ? f(array) : null).
+				// Register those calls too; final inlining still requires the
+				// private bytecode suffix and a unique, missing definition.
+				seenValues := map[values.JavaValue]bool{}
+				pendingValues := []values.JavaValue{rootTern}
+				for len(pendingValues) > 0 {
+					v := pendingValues[len(pendingValues)-1]
+					pendingValues = pendingValues[:len(pendingValues)-1]
+					if v == nil || seenValues[v] {
+						continue
+					}
+					seenValues[v] = true
+					if call, ok := v.(*values.FunctionCallExpression); ok && call != nil {
+						for i, arg := range call.Arguments {
+							ref, isRef := UnpackSoltValue(arg).(*values.JavaRef)
+							if !isRef || ref == nil || !dupSharedRefs[ref.VarUid] {
+								continue
+							}
+							array, isArray := GetRealValue(ref).(*values.NewExpression)
+							if isArray && array != nil && array.HasOriginPC && array.OriginPC > firstIfPC {
+								d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call, i, ref, array})
+							}
+						}
+					}
+					if children, known := values.Children(v); known {
+						pendingValues = append(pendingValues, children...)
+					}
+				}
 				// Wire every condition: its statement's Callback fills its own nested ternary's
 				// Condition (post-MergeIf). Marking TernaryChainArm keeps MergeIf from folding the
 				// condition NODES (which would unfire some callbacks and leak), so each condition is
