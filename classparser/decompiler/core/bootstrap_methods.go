@@ -221,7 +221,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// interfere with slot reuse.
 				if len(args1) >= 3 {
 					cv.InstantiatedMtdDesc = t19MethodTypeDesc(args1[2])
-					if upgradedType := inferLambdaTypeFromInstantiated(typ, args1[2]); upgradedType != nil {
+					if upgradedType := inferDeclaredLambdaTarget(d, typ, args1[0], args1[2]); upgradedType != nil {
 						lambdaType := upgradedType
 						cv = cv.WithType(func() types.JavaType {
 							return lambdaType
@@ -251,7 +251,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// "invalid method reference" sites). Kill-switch: JDEC_METHODREF_INSTANTIATED_TYPE_OFF=1.
 			refType := typ
 			if jdecenv.Get("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(args1) >= 3 {
-				if up := inferLambdaTypeFromInstantiated(typ, args1[2]); up != nil {
+				if up := inferDeclaredLambdaTarget(d, typ, args1[0], args1[2]); up != nil {
 					refType = up
 				}
 				refType = methodRefReceiverType(d.FunctionContext, refType, classMember, args1[2], len(capturedArgs))

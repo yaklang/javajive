@@ -257,7 +257,7 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 	cv.NoOuterCapture = len(captured) == 0
 	if len(static) >= 3 {
 		cv.InstantiatedMtdDesc = t19MethodTypeDesc(static[2])
-		if upgradedType := inferLambdaTypeFromInstantiated(typ, static[2]); upgradedType != nil {
+		if upgradedType := inferDeclaredLambdaTarget(d, typ, static[0], static[2]); upgradedType != nil {
 			lambdaType := upgradedType
 			cv = cv.WithType(func() types.JavaType { return lambdaType })
 			cv.Flag = "lambda"
@@ -291,7 +291,7 @@ func t19MethodRef(req CallSiteRequest, d *Decompiler, static []values.JavaValue,
 	capturedArgs := append([]values.JavaValue{}, capturedPop...)
 	refType := resultType
 	if d.getenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(static) >= 3 {
-		if up := t19UpgradeFI(resultType, static[2]); up != nil {
+		if up := inferDeclaredLambdaTarget(d, resultType, static[0], static[2]); up != nil {
 			refType = up
 		}
 		refType = methodRefReceiverType(d.FunctionContext, refType, impl, static[2], len(capturedArgs))
