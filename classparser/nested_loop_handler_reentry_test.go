@@ -51,13 +51,16 @@ func TestAdversarialNestedLoopHandlerReentryRoundTrip(t *testing.T) {
     }
     return sum;
   }
+  public static void main(String[] args) { NestedLoopHandlerReentryOracle.main(args); }
+}
+class NestedLoopHandlerReentryOracle {
   public static void main(String[] args) {
     for(int[] values:new int[][]{{},{1,2},{0},{1,0,2},{0,2,0},{-4,5}})
       for(int rounds:new int[]{0,1,3})for(boolean delay:new boolean[]{false,true}) {
-        trace="";
-        System.out.print(evaluate(values,rounds,delay)+":"+trace+";");
-        trace="";
-        System.out.print(drain(values,rounds,delay)+":"+trace+";");
+        NestedLoopHandlerReentry.trace="";
+        System.out.print(NestedLoopHandlerReentry.evaluate(values,rounds,delay)+":"+NestedLoopHandlerReentry.trace+";");
+        NestedLoopHandlerReentry.trace="";
+        System.out.print(NestedLoopHandlerReentry.drain(values,rounds,delay)+":"+NestedLoopHandlerReentry.trace+";");
       }
   }
 }`, Precision, Compatibility, "legacy")

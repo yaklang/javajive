@@ -24,16 +24,19 @@ static String join(String a,long value,CharSequence b) { trace+="J";return a+":"
 static String choose(boolean selected,Object a,long value,Object b) {
  return selected ? join((String)(CharSequence)read(a),value,(CharSequence)b) : "skip";
 }
-public static void main(String[] args) {
+public static void main(String[] args) { ArrayCastArgumentsOracle.main(args); }
+}
+class ArrayCastArgumentsOracle {
+  public static void main(String[] args) {
  Object[] samples={new boolean[]{true},new byte[]{1},new short[]{2},new char[]{'x'},new int[]{3},new long[]{4},new float[]{Float.NaN,-0.0f},new double[]{Double.NaN,-0.0},new Object[]{"x"}};
  for(int i=0;i<samples.length;i++)for(Object left:new Object[]{samples[i],null,"wrong"})for(Object right:new Object[]{samples[i],null,"wrong"}) {
-   try { System.out.print(eq(i,left,right)+";"); }
+   try { System.out.print(ArrayCastArguments.eq(i,left,right)+";"); }
    catch(ClassCastException e) { System.out.print("cast;"); }
  }
  for(boolean selected:new boolean[]{false,true})for(Object left:new Object[]{"ok",new StringBuilder("bad"),null})for(Object right:new Object[]{"end",Integer.valueOf(4)}) {
-   trace="";
-   try { System.out.print(choose(selected,left,9L,right)+":"+trace+";"); }
-   catch(ClassCastException e) { System.out.print(e.getMessage()+":"+trace+";"); }
+   ArrayCastArguments.trace="";
+   try { System.out.print(ArrayCastArguments.choose(selected,left,9L,right)+":"+ArrayCastArguments.trace+";"); }
+   catch(ClassCastException e) { System.out.print(e.getMessage()+":"+ArrayCastArguments.trace+";"); }
  }
 }
 }`)

@@ -26,6 +26,9 @@ public class ConditionalNumber {
     String saved=(String)value;
     return selected ? saved : null;
   }
+  public static void main(String[] args) { ConditionalNumberOracle.main(args); }
+}
+class ConditionalNumberOracle {
   public static void main(String[] args) {
     for(Object value:new Object[]{"1.5","-42","bad",Integer.valueOf(7),Double.valueOf(-0.0),null,new Object()}) {
       try {
@@ -36,15 +39,15 @@ public class ConditionalNumber {
     }
     for(boolean construct:new boolean[]{false,true}) {
       for(Object value:new Object[]{"ok",Integer.valueOf(7),null}) {
-        trace.setLength(0);
+        ConditionalNumber.trace.setLength(0);
         try {
-          Object result=choose(construct,value);
-          System.out.print((result==null ? "null" : result.getClass().getSimpleName())+":"+trace+";");
-        } catch(ClassCastException e) { System.out.print("cast:"+trace+";"); }
-        trace.setLength(0);
-        try { System.out.print(earlier(construct,value)+":"+trace+";"); }
-        catch(ClassCastException e) { System.out.print("early-cast:"+trace+";"); }
-        try { System.out.print(earlierPure(construct,value)+";"); }
+          Object result=ConditionalNumber.choose(construct,value);
+          System.out.print((result==null ? "null" : result.getClass().getSimpleName())+":"+ConditionalNumber.trace+";");
+        } catch(ClassCastException e) { System.out.print("cast:"+ConditionalNumber.trace+";"); }
+        ConditionalNumber.trace.setLength(0);
+        try { System.out.print(ConditionalNumber.earlier(construct,value)+":"+ConditionalNumber.trace+";"); }
+        catch(ClassCastException e) { System.out.print("early-cast:"+ConditionalNumber.trace+";"); }
+        try { System.out.print(ConditionalNumber.earlierPure(construct,value)+";"); }
         catch(ClassCastException e) { System.out.print("early-pure-cast;"); }
       }
     }

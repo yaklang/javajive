@@ -24,17 +24,20 @@ public class ConditionalArrayValue {
   static String[][] nested(boolean a,String text) {
     return a ? new String[][]{new String[]{text},null} : null;
   }
+  public static void main(String[] args) { ConditionalArrayValueOracle.main(args); }
+}
+class ConditionalArrayValueOracle {
   public static void main(String[] args) {
-    System.out.print(Arrays.toString(wrap(false,"x"))+":"+Arrays.toString(wrap(true,""))+":"+Arrays.toString(wrap(true,"nil"))+":"+Arrays.toString(wrap(true,"x"))+":"+trace);
+    System.out.print(Arrays.toString(ConditionalArrayValue.wrap(false,"x"))+":"+Arrays.toString(ConditionalArrayValue.wrap(true,""))+":"+Arrays.toString(ConditionalArrayValue.wrap(true,"nil"))+":"+Arrays.toString(ConditionalArrayValue.wrap(true,"x"))+":"+ConditionalArrayValue.trace);
     for(int mask=0;mask<4;mask++) {
-      int[] values=choose((mask&1)!=0,(mask&2)!=0,mask);
+      int[] values=ConditionalArrayValue.choose((mask&1)!=0,(mask&2)!=0,mask);
       System.out.print(":"+Arrays.toString(values));
     }
-    System.out.print(":"+Arrays.deepToString(nested(true,"nested"))+":"+Arrays.deepToString(nested(false,"none"))+":"+trace);
-    try { choose(true,false,6); } catch(IllegalArgumentException e) { System.out.print(":"+e.getMessage()+":"+trace); }
-    String[] left=wrap(true,"same"),right=wrap(true,"same");
+    System.out.print(":"+Arrays.deepToString(ConditionalArrayValue.nested(true,"ConditionalArrayValue.nested"))+":"+Arrays.deepToString(ConditionalArrayValue.nested(false,"none"))+":"+ConditionalArrayValue.trace);
+    try { ConditionalArrayValue.choose(true,false,6); } catch(IllegalArgumentException e) { System.out.print(":"+e.getMessage()+":"+ConditionalArrayValue.trace); }
+    String[] left=ConditionalArrayValue.wrap(true,"same"),right=ConditionalArrayValue.wrap(true,"same");
     left[0]="changed";
-    System.out.print(":"+(left==right)+":"+right[0]+":"+Arrays.toString(choose(false,false,Integer.MIN_VALUE)));
+    System.out.print(":"+(left==right)+":"+right[0]+":"+Arrays.toString(ConditionalArrayValue.choose(false,false,Integer.MIN_VALUE)));
   }
 }`)
 }
