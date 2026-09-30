@@ -51,6 +51,7 @@ type Decompiler struct {
 	opcodeIdToRef          map[*OpCode][][2]any
 	branchArrayCalls       []branchArrayCall
 	branchArrayLeaves      []branchArrayLeaf
+	valueTernaryMerges     map[*values.TernaryExpression]*OpCode
 	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
 	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
 	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration
@@ -5707,6 +5708,10 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					}
 				}
 				ternaryExpMergeNodeSlot[code].ResetValue(rootTern)
+				if d.valueTernaryMerges == nil {
+					d.valueTernaryMerges = map[*values.TernaryExpression]*OpCode{}
+				}
+				d.valueTernaryMerges[rootTern] = code
 				code.conditionOpId = 0
 				continue
 			}

@@ -891,7 +891,7 @@ func (d *Decompiler) canInlineDelegationValueProof(value values.JavaValue, ref *
 				prefix.Handlers = d.handlersAt(targetOp)
 				if arraySpill != nil && (prefix.Effects != 0 || len(prefix.Writes) != 0) {
 					arrayStart := d.opcodeAtOffset(arraySpill.OriginPC)
-					if d.valueWasProducedBefore(arg, arrayStart) || d.evaluationCompletedBefore(arg, arrayStart) {
+					if d.valueWasProducedBefore(arg, arrayStart) || d.evaluationCompletedBefore(arg, arrayStart) || d.delegationTernaryCompletedBefore(arg, arrayStart) {
 						continue
 					}
 					d.tracef("ctor-array-inline", "argument order reject pc=%d arg=%d reason=effectful prefix was not proven complete before array allocation type=%T details=%s access=%+v", sourceOp.CurrentOffset, argIndex, arg, delegationPrefixTraceDetails(arg), prefix)
@@ -1288,6 +1288,25 @@ func (d *Decompiler) evaluationCompletedBefore(value values.JavaValue, sourceOp 
 	return singleLinearOpcodePathInHandlers(d, endOp, sourceOp, d.handlersAt(sourceOp))
 }
 
+// Only the constructor-delegation proof may use this registry. A reconstructed
+// value ternary was installed into the exact merge stack slot by the accepted
+// builder. Its selected-arm evaluation has completed at that merge; the suffix
+// to the array allocation must remain linear and in the same handler domain.
+func (d *Decompiler) delegationTernaryCompletedBefore(value values.JavaValue, before *OpCode) bool {
+	if d == nil || before == nil || before.Instr == nil {
+		return false
+	}
+	ternary, ok := values.UnpackSoltValue(value).(*values.TernaryExpression)
+	if !ok || ternary == nil {
+		return false
+	}
+	merge := d.valueTernaryMerges[ternary]
+	if merge == nil || merge.Instr == nil || merge.CurrentOffset >= before.CurrentOffset || d.opcodeAtOffset(int(merge.CurrentOffset)) != merge {
+		return false
+	}
+	return sameHandlerCoverage(d.handlersAt(merge), d.handlersAt(before)) && branchArraySinglePath(d, merge, before)
+}
+
 // constructorCompletionBefore locates the invokespecial that consumes this
 // exact NEW value. In particular, an allocation is not evidence that the
 // object is fully constructed: a zero-argument constructor still has a
@@ -1383,7 +1402,7 @@ func prefixBeforeUseWithAllocationProof(d *Decompiler, value values.JavaValue, r
 		}
 		if d != nil && sourceOp != nil {
 			uses, known := countLocalUses(v, ref, map[values.JavaValue]bool{})
-			if known && uses == 0 && d.evaluationCompletedBefore(v, sourceOp) {
+			if known && uses == 0 && (d.evaluationCompletedBefore(v, sourceOp) || (allowProvenAllocation && d.delegationTernaryCompletedBefore(v, sourceOp))) {
 				return empty(), 0, true
 			}
 		}
