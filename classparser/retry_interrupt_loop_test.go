@@ -56,6 +56,9 @@ public class RetryInterruptCleanup {
       }
     } finally {if(interrupted)Thread.currentThread().interrupt();}
   }
+  public static void main(String[] args) { RetryInterruptCleanupOracle.main(args); }
+}
+class RetryInterruptCleanupOracle {
   public static void main(String[] args) {
     for(int failures:new int[]{0,1,3})for(int outcome=0;outcome<3;outcome++)
       for(boolean initial:new boolean[]{false,true})for(int kind=0;kind<3;kind++) {
@@ -63,7 +66,7 @@ public class RetryInterruptCleanup {
         RetryOperation.attempts=0;RetryOperation.completed=0;
         RetryOperation.failures=failures;RetryOperation.outcome=outcome;
         String result="ok";
-        try {if(kind==0)put();else if(kind==1)read();else readFinallyOutside();}catch(RuntimeException e) {result=e.getClass().getSimpleName();}
+        try {if(kind==0)RetryInterruptCleanup.put();else if(kind==1)RetryInterruptCleanup.read();else RetryInterruptCleanup.readFinallyOutside();}catch(RuntimeException e) {result=e.getClass().getSimpleName();}
         boolean restored=Thread.interrupted();
         System.out.print(RetryOperation.attempts+":"+RetryOperation.completed+":"+restored+":"+result+";");
       }

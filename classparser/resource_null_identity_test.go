@@ -29,10 +29,13 @@ public class ResourceNullIdentity {
       return resource.read();
     }
   }
+  public static void main(String[] args) { ResourceNullIdentityOracle.main(args); }
+}
+class ResourceNullIdentityOracle {
   public static void main(String[] args) {
     for(int empty=0;empty<2;empty++)for(int body=0;body<2;body++)for(int close=0;close<2;close++) {
       IdentityResource.trace="";IdentityResource.readFailure=body!=0;IdentityResource.closeFailure=close!=0;
-      try {System.out.print(read(empty!=0)+":");}
+      try {System.out.print(ResourceNullIdentity.read(empty!=0)+":");}
       catch(Throwable failure) {
         System.out.print(failure.getClass().getSimpleName()+":"+failure.getMessage()+":");
         for(Throwable suppressed:failure.getSuppressed())System.out.print(suppressed.getMessage()+",");
@@ -77,13 +80,16 @@ public class ProtectedDecisionCleanup {
       return resource.read();
     }
   }
+  public static void main(String[] args) { ProtectedDecisionCleanupOracle.main(args); }
+}
+class ProtectedDecisionCleanupOracle {
   public static void main(String[] args) {
     for(int mask=0;mask<16;mask++) {
       DecisionResource.trace="";
       DecisionResource.decideFailure=(mask&1)!=0;
       DecisionResource.readFailure=(mask&2)!=0;
       DecisionResource.closeFailure=(mask&4)!=0;
-      try {System.out.print(run((mask&8)!=0)+":");}
+      try {System.out.print(ProtectedDecisionCleanup.run((mask&8)!=0)+":");}
       catch(Throwable failure) {
         System.out.print(failure.getClass().getSimpleName()+":"+failure.getMessage()+":");
         for(Throwable suppressed:failure.getSuppressed())System.out.print(suppressed.getMessage()+",");

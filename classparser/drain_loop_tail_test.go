@@ -31,6 +31,9 @@ public class DrainLoopTail extends AtomicInteger {
     }
     }
   }
+  public static void main(String[] args) { DrainLoopTailOracle.main(args); }
+}
+class DrainLoopTailOracle {
   public static void main(String[] args) {
     for(int[] items:new int[][]{{},{1,2},{0,2},{-4},{200,3}})
       for(boolean active:new boolean[]{false,true})for(boolean cancelled:new boolean[]{false,true})for(boolean recover:new boolean[]{false,true}) {
