@@ -2627,6 +2627,7 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 // Orphan reads are rebound only by the earlier explicit oldId -> newId proof;
 // an unrelated same-spelled declaration cannot provide their definition.
 func coverUndeclaredGeneratedLocals(block *[]statements.Statement) {
+	restoreExplicitLocalDeclarations(block)
 	placeCrossScopeDeclarations(block, nil, true)
 }
 

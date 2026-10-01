@@ -3792,6 +3792,9 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		} else if refPhiMerged {
 			// oldRef is the unified dominating definition; the store is a plain reassignment of it.
 			ref, isFirst = oldRef, false
+		} else if d.primitiveStoreStartsDisjointWeb(opcode, oldRef, value) {
+			ref, isFirst = runtimeStackSimulation.NewVar(value), true
+			runtimeStackSimulation.SetVar(slot, ref)
 		} else if !reuseNullBranchStore {
 			// Gate the null-init type adoption: only let a null-initialized slot adopt this
 			// store's concrete reference type when the null initializer actually reaches here.
