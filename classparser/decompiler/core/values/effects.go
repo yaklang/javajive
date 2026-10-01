@@ -55,6 +55,8 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		return v.Values, true
 	case *JavaArrayMember:
 		return []JavaValue{v.Object, v.Index}, true
+	case *ArrayLengthExpression:
+		return []JavaValue{v.Array}, true
 	case *RefMember:
 		return []JavaValue{v.Object}, true
 	case *TernaryExpression:
@@ -127,6 +129,8 @@ func isNilJavaValue(value JavaValue) bool {
 		return v == nil
 	case *JavaArrayMember:
 		return v == nil
+	case *ArrayLengthExpression:
+		return v == nil
 	case *SlotValue:
 		return v == nil
 	case *CustomValue:
@@ -167,7 +171,7 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 			case "/", "%":
 				effect |= EffectThrow
 			}
-		case *JavaArrayMember:
+		case *JavaArrayMember, *ArrayLengthExpression:
 			effect |= EffectReadMemory | EffectThrow
 		case *RefMember:
 			effect |= EffectReadMemory | EffectThrow

@@ -3905,6 +3905,10 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(exp)
 	case OP_ARRAYLENGTH:
 		ref := runtimeStackSimulation.Pop().(values.JavaValue)
+		if d.getenv("JDEC_ARRAYLENGTH_REPLACE_FWD_OFF") == "" {
+			runtimeStackSimulation.Push(&values.ArrayLengthExpression{Array: ref, OriginPC: int(opcode.CurrentOffset), HasOriginPC: true})
+			break
+		}
 		arrayLenReplace := func(oldId *utils2.VariableId, newId *utils2.VariableId) {
 			// The `.length` operand is captured in this CustomValue's String closure, so -- exactly
 			// like OP_CHECKCAST / OP_INSTANCEOF / the numeric-conversion CustomValues -- it MUST forward
@@ -5170,7 +5174,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 		}
 	}
-	inlineSingleUseMergeLeaf := func(value values.JavaValue, entry, leaf, merge *OpCode, adopted map[*OpCode]*values.JavaRef) values.JavaValue {
+	inlineSingleUseMergeLeaf := func(value values.JavaValue, entry, leaf, merge, selection *OpCode, adopted map[*OpCode]*values.JavaRef) values.JavaValue {
 		ref, ok := UnpackSoltValue(value).(*values.JavaRef)
 		if !ok || ref == nil || ref.IsThis || ref.IsParam || ref.Id == nil || ref.Val == nil || dupSharedRefs[ref.VarUid] {
 			return value
@@ -5202,7 +5206,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		} else {
 			check = d.branchCallCastLeaf(ref, cast, entry, leaf, merge)
 			if check == nil {
-				check = d.branchExpressionCastLeaf(ref, cast, entry, leaf, merge)
+				check = d.branchExpressionCastLeaf(ref, cast, entry, leaf, merge, selection)
 			}
 		}
 		if check == nil {
@@ -5393,6 +5397,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		}
 		var arm func(entry *OpCode) values.JavaValue
 		var probe func(ifNode *OpCode) *values.TernaryExpression
+		var rootNode *OpCode
 		arm = func(entry *OpCode) values.JavaValue {
 			cur := entry
 			for step := 0; cur != nil && step < (1<<16); step++ {
@@ -5422,7 +5427,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					usedLeaf[cur] = true
 					value := putFieldLeafValue(cur)
 					if value == nil {
-						value = inlineSingleUseMergeLeaf(cur.StackEntry.value, entry, cur, mergeNode, adoptedCasts)
+						value = inlineSingleUseMergeLeaf(cur.StackEntry.value, entry, cur, mergeNode, rootNode, adoptedCasts)
 					}
 					if ref, isRef := UnpackSoltValue(value).(*values.JavaRef); isRef && ref != nil && !ref.IsParam && !ref.IsThis {
 						if array, isArray := UnpackSoltValue(ref.Val).(*values.NewExpression); isArray && array.IsArray() && array.HasOriginPC {
@@ -5502,7 +5507,6 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		// Seed the root with the lowest-id detected condition, then climb to the outermost enclosing
 		// ternary condition (both arms still converge on mergeNode). probe(root) then discovers the
 		// entire condition set top-down, including chain links the bottom-up detection missed.
-		var rootNode *OpCode
 		for _, n := range detectedIfNodes {
 			if rootNode == nil || n.Id < rootNode.Id {
 				rootNode = n

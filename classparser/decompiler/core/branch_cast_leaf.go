@@ -152,7 +152,7 @@ func (d *Decompiler) branchPureCastLeaf(ref *values.JavaRef, cast *values.CastEx
 	return check
 }
 
-func (d *Decompiler) branchCastOpcode(ref *values.JavaRef, cast *values.CastExpression, entry, leaf, merge *OpCode) *OpCode {
+func (d *Decompiler) branchCastOpcode(ref *values.JavaRef, cast *values.CastExpression, entry, leaf, merge *OpCode, selection ...*OpCode) *OpCode {
 	if d == nil || cast == nil || entry == nil || leaf == nil || merge == nil || cast.OriginPC < int(entry.CurrentOffset) {
 		return nil
 	}
@@ -169,9 +169,105 @@ func (d *Decompiler) branchCastOpcode(ref *values.JavaRef, cast *values.CastExpr
 		}
 	}
 	if len(leaf.Target) != 1 || leaf.Target[0] != merge ||
-		!sameHandlerCoverage(d.handlersAt(check), d.handlersAt(leaf)) ||
-		!sameHandlerCoverage(d.handlersAt(check), d.handlersAt(merge)) {
+		!sameHandlerCoverage(d.handlersAt(check), d.handlersAt(leaf)) {
 		return nil
 	}
+	if !sameHandlerCoverage(d.handlersAt(check), d.handlersAt(merge)) {
+		if len(selection) != 1 || !d.protectedTerminalValueMerge(selection[0], merge, check) {
+			return nil
+		}
+	}
 	return check
+}
+
+// protectedTerminalValueMerge recognizes a non-throwing ARETURN immediately
+// outside a protected value-routing region. Java's `try { return expression; }`
+// covers evaluation of the expression, while javac excludes ARETURN itself.
+// Every routed instruction and entrance must remain in that same handler domain;
+// a store, loop, external entrance or newly active handler is not this boundary.
+func (d *Decompiler) protectedTerminalValueMerge(selection, merge, check *OpCode) bool {
+	if selection == nil || merge == nil || check == nil || merge.Instr == nil || merge.Instr.OpCode != OP_ARETURN ||
+		merge.IsCustom || merge.IsCatch || merge.IsTryCatchParent || len(merge.Target) > 1 {
+		return false
+	}
+	if len(merge.Target) == 1 {
+		exit := merge.Target[0]
+		if exit == nil || exit.Instr == nil || exit.Instr.OpCode != OP_END || len(exit.Target) != 0 || exit.IsCustom || exit.IsCatch || exit.IsTryCatchParent {
+			return false
+		}
+	}
+	handlers := d.handlersAt(check)
+	if len(handlers) == 0 || !sameHandlerCoverage(d.handlersAt(selection), handlers) {
+		return false
+	}
+	remaining := d.handlersAt(merge)
+	for _, handler := range remaining {
+		found := false
+		for _, previous := range handlers {
+			if handler == previous {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	for _, handler := range handlers {
+		if handler < 0 || handler >= len(d.ExceptionTable) || d.ExceptionTable[handler] == nil {
+			return false
+		}
+		if d.ExceptionTable[handler].EndPc != merge.CurrentOffset {
+			found := false
+			for _, kept := range remaining {
+				found = found || kept == handler
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+	region := map[*OpCode]bool{}
+	queue := []*OpCode{selection}
+	for len(queue) > 0 {
+		if d.Work != nil && d.Work.Check() != nil {
+			return false
+		}
+		cur := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if cur == merge || region[cur] {
+			continue
+		}
+		if cur == nil || cur.Instr == nil || cur.IsCustom || cur.IsCatch || cur.IsTryCatchParent || len(region) >= 4096 ||
+			len(cur.Target) == 0 || !sameHandlerCoverage(d.handlersAt(cur), handlers) {
+			return false
+		}
+		access := LocalAccessOf(cur.Instr.OpCode)
+		if access.Write || cur.Instr.OpCode == OP_PUTFIELD || cur.Instr.OpCode == OP_PUTSTATIC || cur.Instr.OpCode == OP_ATHROW {
+			return false
+		}
+		region[cur] = true
+		for _, next := range cur.Target {
+			if next == nil || next.CurrentOffset <= cur.CurrentOffset {
+				return false
+			}
+			queue = append(queue, next)
+		}
+	}
+	for cur := range region {
+		if cur == selection {
+			continue
+		}
+		for _, previous := range cur.Source {
+			if !region[previous] {
+				return false
+			}
+		}
+	}
+	for _, previous := range merge.Source {
+		if !region[previous] {
+			return false
+		}
+	}
+	return region[check]
 }

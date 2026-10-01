@@ -16,11 +16,11 @@ import (
 // follows JavaRef.Val: a materialized local is a snapshot, not its old defining
 // expression. Stores, DUP/POP, void calls, constructors, forks and handler
 // changes are rejected. Existing single-use/unique-producer checks still apply.
-func (d *Decompiler) branchExpressionCastLeaf(ref *values.JavaRef, cast *values.CastExpression, entry, leaf, merge *OpCode) *OpCode {
+func (d *Decompiler) branchExpressionCastLeaf(ref *values.JavaRef, cast *values.CastExpression, entry, leaf, merge *OpCode, selection ...*OpCode) *OpCode {
 	if d == nil || d.getenv("JDEC_BRANCH_EXPRESSION_CAST_OFF") != "" {
 		return nil
 	}
-	check := d.branchCastOpcode(ref, cast, entry, leaf, merge)
+	check := d.branchCastOpcode(ref, cast, entry, leaf, merge, selection...)
 	if check == nil || check.IsCustom || check.IsCatch || check.IsTryCatchParent ||
 		len(check.stackConsumed) != 1 || values.UnpackSoltValue(check.stackConsumed[0]) != values.UnpackSoltValue(cast.Value) ||
 		values.UnpackSoltValue(d.checkcastInnerArg[check]) != values.UnpackSoltValue(cast.Value) {
@@ -82,6 +82,12 @@ func (d *Decompiler) branchExpressionStackStep(cur *OpCode, stack []values.JavaV
 		if field, ok := produced.(*values.JavaClassMember); !ok || field == nil {
 			return nil, false
 		}
+	case OP_ARRAYLENGTH:
+		length, ok := produced.(*values.ArrayLengthExpression)
+		if !ok || length == nil || length.Array == nil || !length.HasOriginPC || length.OriginPC != int(cur.CurrentOffset) {
+			return nil, false
+		}
+		operands = []values.JavaValue{length.Array}
 	case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE, OP_INVOKESTATIC:
 		call, ok := produced.(*values.FunctionCallExpression)
 		if !ok || call == nil || d.invokeFuncCall[cur] != call || call.OriginPC != int(cur.CurrentOffset) || call.Descriptor == "" ||
