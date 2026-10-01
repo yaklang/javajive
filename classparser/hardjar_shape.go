@@ -41,7 +41,6 @@ func fixHardjarCodeShapes(body string) string {
 	body = fixForNameAddAnnoClass(body)
 	body = fixCachedFieldReturn(body)
 	body = fixStringCastToClass(body)
-	body = fixConvertNumberClassArg(body)
 	body = fixRawRemoveIfMethodRef(body)
 	body = wrapStreamReturnRawCast(body)
 	body = wrapIntrospectionExceptionCalls(body)
@@ -76,7 +75,7 @@ func fixHardjarCodeShapes(body string) string {
 	body = unwrapObjectNullCast(body)
 	body = wrapBangOnStringLocal(body)
 	body = retypeInstanceThenNewSibling(body)
-	body = retypeMixedDollarNewAssign(body)
+	// Lexical nesting does not establish assignability or a method result type.
 	body = wrapComputeIfAbsentLambdaArg(body)
 	body = wrapArraySortLambdaElem(body)
 	body = fixBlankFinalTryCatchAssign(body)
@@ -1180,7 +1179,7 @@ func charSeqNullParam(chunk, ident string) string {
 func fixObjectRetypedFromCast(body string) string {
 	from := 0
 	for {
-		rel := strings.Index(body[from:], "Object var")
+		rel := objectLocalDeclarationIndex(body[from:])
 		if rel < 0 {
 			return body
 		}
@@ -2043,7 +2042,7 @@ func fixForNameAddAnnoClass(body string) string {
 func fixCachedFieldReturn(body string) string {
 	from := 0
 	for {
-		rel := strings.Index(body[from:], "Object var")
+		rel := objectLocalDeclarationIndex(body[from:])
 		if rel < 0 {
 			return body
 		}
@@ -2223,40 +2222,6 @@ func identDeclaredString(chunk, ident string) bool {
 		}
 	}
 	return false
-}
-
-// fixConvertNumberClassArg wraps the Class target of convertNumberToTargetClass
-// as raw `(Class)`. Class<T> is not Class<T extends Number>.
-func fixConvertNumberClassArg(body string) string {
-	needle := "convertNumberToTargetClass("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		open := i + len("convertNumberToTargetClass")
-		close := matchingCloseParen(body, open)
-		if close < 0 {
-			from = i + 1
-			continue
-		}
-		args := body[open+1 : close]
-		comma := indexCommaAtDepth0(args)
-		if comma < 0 {
-			from = close
-			continue
-		}
-		second := strings.TrimSpace(args[comma+1:])
-		if second == "" || strings.HasPrefix(second, "(Class)") || strings.HasPrefix(second, "((Class") {
-			from = close
-			continue
-		}
-		neu := needle + args[:comma+1] + "(Class)(" + second + ")"
-		body = body[:i] + neu + body[close:]
-		from = i + len(neu)
-	}
 }
 
 func indexCommaAtDepth0(s string) int {
@@ -3363,7 +3328,7 @@ func isTypeVarName(s string) bool {
 func wrapObjectTypeVarArgs(body string) string {
 	from := 0
 	for {
-		rel := strings.Index(body[from:], "Object var")
+		rel := objectLocalDeclarationIndex(body[from:])
 		if rel < 0 {
 			return body
 		}
@@ -3911,7 +3876,7 @@ func wrapErasedFieldAsTypeVar(body, field string) string {
 func wrapGetNoOutputObjectArgs(body string) string {
 	from := 0
 	for {
-		rel := strings.Index(body[from:], "Object var")
+		rel := objectLocalDeclarationIndex(body[from:])
 		if rel < 0 {
 			return body
 		}
@@ -9823,5 +9788,22 @@ func retypeObjectArrayFromResolveClass(body string) string {
 		neu := "((" + typ + "[])("
 		body = body[:i] + neu + body[i+len(old):]
 		from = i + len(neu)
+	}
+}
+
+// Declaration scanning must match a complete type token. PooledObject and
+// arbitrary user class names ending in Object do not denote java.lang.Object.
+func objectLocalDeclarationIndex(text string) int {
+	from := 0
+	for {
+		rel := strings.Index(text[from:], "Object var")
+		if rel < 0 {
+			return -1
+		}
+		at := from + rel
+		if at == 0 || !isJavaIdentChar(text[at-1]) {
+			return at
+		}
+		from = at + len("Object")
 	}
 }

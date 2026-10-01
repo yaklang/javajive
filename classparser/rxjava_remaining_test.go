@@ -118,3 +118,10 @@ func TestBehaviorProcessorDefaultCtorThisIsLoadBearing(t *testing.T) {
 		"BehaviorProcessor(T var1) {\n\t\tthis();\n\t\tthis.value.lazySet",
 		"BehaviorProcessor(T var1) {\n\t\tthis.value.lazySet")
 }
+
+func TestRxRecoveryPreservesDisjointQueueAndCounterIdentities(t *testing.T) {
+	body := "package io.reactivex;\nclass FlowablePublish$PublishSubscriber {\n void scan() {Object var14;long var14_1=2;var14 = var5.poll();var14 = null;if (this.checkTerminated(var4,(var14) == (null))) return;} }"
+	if got := fixRxjavaRemainingReconstructs(body); got != body {
+		t.Fatalf("rewrote queue stores to an unrelated counter:\n%s", got)
+	}
+}

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -25,17 +26,21 @@ func inferDeclaredLambdaTarget(d *Decompiler, raw types.JavaType, erased, instan
 	}
 	erasedDesc, actualDesc := t19MethodTypeDesc(erased), t19MethodTypeDesc(instantiated)
 	sig := methods[class_context.MethodDescKey(d.InvokeDynamicName, erasedDesc)]
-	return inferDeclaredSamInstantiation(jc.Name, classSig, sig, erasedDesc, actualDesc)
+	return inferDeclaredSamInstantiation(jc.Name, classSig, sig, erasedDesc, actualDesc, d.FunctionContext.InvocationMetadata)
 }
 
 // Bind declaration variables by their Signature identity, not SAM parameter order.
-// This conservative proof handles direct occurrences of Object-bounded class
+// This conservative proof handles direct occurrences of class
 // variables only. A variable appearing only in the throws clause is existential:
 // its bootstrap descriptor contains no binding, so retain a wildcard rather than
 // inventing Throwable (or a caller's same-spelled variable). Inherited SAMs,
-// nested generic substitutions and bounds on input/result variables still need
+// nested generic substitutions and dependent/intersection bounds still need
 // additional evidence and remain unchanged.
-func inferDeclaredSamInstantiation(name, classSig, sig, erased, actual string) types.JavaType {
+func inferDeclaredSamInstantiation(name, classSig, sig, erased, actual string, providers ...callbinding.Provider) types.JavaType {
+	var provider callbinding.Provider
+	if len(providers) == 1 {
+		provider = providers[0]
+	}
 	formals := types.ClassFormalTypeParamNames(classSig)
 	if len(formals) == 0 {
 		return nil
@@ -56,12 +61,14 @@ func inferDeclaredSamInstantiation(name, classSig, sig, erased, actual string) t
 		}
 		known[f] = true
 		bound := "java.lang.Object"
-		if throws[f] {
-			if erased := erasures[f]; erased != "" {
-				bound = erased
-			}
+		if erased := erasures[f]; erased != "" && (throws[f] || provider != nil) {
+			bound = erased
 		}
-		prefix += f + ":L" + strings.ReplaceAll(bound, ".", "/") + ";"
+		separator := ":"
+		if provider != nil && strings.HasPrefix(classSig, prefix+f+"::L") {
+			separator = "::"
+		}
+		prefix += f + separator + "L" + strings.ReplaceAll(bound, ".", "/") + ";"
 	}
 	prefix += ">"
 	if !strings.HasPrefix(classSig, prefix) {
@@ -88,7 +95,10 @@ func inferDeclaredSamInstantiation(name, classSig, sig, erased, actual string) t
 	for i, token := range declared {
 		if strings.HasPrefix(token, "T") {
 			variable := token[1 : len(token)-1]
-			if !known[variable] || (throws[variable] && erasures[variable] != "java.lang.Object") || erasedTokens[i] != "Ljava/lang/Object;" || !(strings.HasPrefix(actualTokens[i], "L") || strings.HasPrefix(actualTokens[i], "[")) {
+			if !known[variable] || (throws[variable] && erasures[variable] != "java.lang.Object") || erasedTokens[i] != "L"+strings.ReplaceAll(erasures[variable], ".", "/")+";" || !(strings.HasPrefix(actualTokens[i], "L") || strings.HasPrefix(actualTokens[i], "[")) {
+				return nil
+			}
+			if erasedTokens[i] != "Ljava/lang/Object;" && (provider == nil || !callbinding.Assignable(actualTokens[i], erasedTokens[i], provider)) {
 				return nil
 			}
 			if prior, exists := substitutions[variable]; exists && prior != actualTokens[i] {

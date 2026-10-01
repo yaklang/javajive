@@ -187,3 +187,21 @@ func TestJDKInvocationMetadataUsesSourceProfileAndResolver(t *testing.T) {
 		t.Fatal("invalid explicit resolver bytes hidden by catalog fallback")
 	}
 }
+
+func TestJDKCatalogRetainsExactGenericSignatures(t *testing.T) {
+	for _, release := range []int{8, 11, 17, 21} {
+		optional, ok := jdkInvocationMetadata("java/util/Optional", release)
+		if !ok || optional.Signature != "<T:Ljava/lang/Object;>Ljava/lang/Object;" {
+			t.Fatalf("missing Optional class Signature for %d", release)
+		}
+		found := false
+		for _, m := range optional.Methods {
+			if m.Name == "of" && m.Desc == "(Ljava/lang/Object;)Ljava/util/Optional;" {
+				found = m.Signature == "<T:Ljava/lang/Object;>(TT;)Ljava/util/Optional<TT;>;"
+			}
+		}
+		if !found {
+			t.Fatalf("missing exact generic method Signature for %d", release)
+		}
+	}
+}

@@ -149,36 +149,6 @@ func fixMath3RemainingReconstructs(body string) string {
 			"(T)((T)(this.this$0.getStepSize()))",
 			"(T)(this.this$0.getStepSize())")
 	}
-	if strings.Contains(body, "class BetaDistribution$ChengBetaSampler") {
-		body = strings.Replace(body,
-			"double var6 = (var2) + ((1D) / (var5));\n\t\tdo{\n\t\t\tdouble var7",
-			"double var6 = (var2) + ((1D) / (var5));\n\t\tdouble var10 = 0.0;\n\t\tdo{\n\t\t\tdouble var7",
-			1)
-		body = strings.Replace(body,
-			"double var10 = (var2) * (FastMath.exp(var9));",
-			"var10 = (var2) * (FastMath.exp(var9));",
-			1)
-		body = strings.Replace(body,
-			"double var10 = FastMath.min(var10,",
-			"var10 = FastMath.min(var10,",
-			1)
-		body = strings.Replace(body,
-			"double var14;\n\t\tdouble var13 = 0.0;",
-			"double var14 = 0.0;\n\t\tdouble var14_1 = 0.0;\n\t\tdouble var13 = 0.0;",
-			1)
-		body = strings.Replace(body,
-			"var14 = (var2) * (FastMath.exp(var13));",
-			"var14_1 = (var2) * (FastMath.exp(var13));",
-			1)
-		body = strings.Replace(body,
-			"double var14_1 = (var2) * (FastMath.exp(var13));",
-			"var14_1 = (var2) * (FastMath.exp(var13));",
-			1)
-		body = strings.Replace(body,
-			"double var14_1 = FastMath.min(var14_1,",
-			"var14_1 = FastMath.min(var14_1,",
-			1)
-	}
 	if strings.Contains(body, "class ResizableDoubleArray") {
 		filled := "ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\t\t\t\t\tResizableDoubleArray var3 = ((ResizableDoubleArray)(var1));\n\t\t\t\t\treturn ((this.numElements) == (var3.numElements)) && ((this.startIndex) == (var3.startIndex));\n\t\t\t\t}"
 		body = strings.Replace(body,

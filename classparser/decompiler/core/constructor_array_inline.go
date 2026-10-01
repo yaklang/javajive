@@ -8,9 +8,10 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
-// inlineDelegatingConstructorArrayTemp removes the synthetic local that can be
-// emitted when javac lowers `this(new T[]{...})` through dup/array-store
-// instructions. Java requires this()/super() to be the first constructor
+// inlineDelegatingConstructorArrayTemp removes proven constructor-entry spills.
+// Initialized arrays require their full DUP/array-store span; ordinary CHECKCAST
+// spills (including a null-check result consumed by arraylength) use the eager
+// single-use effect-motion proof. Java requires this()/super() to be the first constructor
 // statement, so an otherwise-correct `T[] temp = ...; this(temp);` is invalid.
 //
 // The rewrite is limited to an entry prefix and a straight-line spill sequence:
@@ -59,9 +60,8 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 		if !ok || temp == nil {
 			return skip("assignment target is not a local ref: node=%d left=%T", current.Id, assign.LeftValue)
 		}
-		array, ok := values.UnpackSoltValue(assign.JavaValue).(*values.NewExpression)
-		if !ok || array == nil || array.JavaType == nil || array.JavaType.ArrayDim() == 0 || len(array.Initializer) == 0 {
-			return skip("entry sequence contains a non-array initializer: node=%d", current.Id)
+		if assign.JavaValue == nil {
+			return skip("entry spill has no value: node=%d", current.Id)
 		}
 		spills = append(spills, spill{node: current, temp: temp, value: assign.JavaValue, opcode: origins[current.Id], arg: -1})
 		next := current.Next[0]
@@ -113,9 +113,14 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 		if candidate.opcode == nil || candidate.opcode.Instr == nil {
 			return skip("array spill has no bytecode origin: node=%d", candidate.node.Id)
 		}
-		if !d.canInlineDelegatingArrayValue(candidate.value, candidate.temp, candidate.opcode) {
-			array := values.UnpackSoltValue(candidate.value).(*values.NewExpression)
-			return skip("array spill lacks producer or use-order proof: node=%d op=%d pc=%d produced=%t array=%d..%d", candidate.node.Id, candidate.opcode.Instr.OpCode, candidate.opcode.CurrentOffset, d.opcodeProducesLocal(candidate.opcode, candidate.temp), array.OriginPC, array.EvaluationEndPC)
+		// Literal arrays need a complete fill-span proof. Other spills retain
+		// the same unique-use, effect-order and producer-identity requirements.
+		proven := d.canInlineDelegationValue(candidate.value, candidate.temp, candidate.opcode)
+		if isInitializedArrayLiteral(candidate.value) {
+			proven = d.canInlineDelegatingArrayValue(candidate.value, candidate.temp, candidate.opcode)
+		}
+		if !proven {
+			return skip("entry spill lacks producer or use-order proof: node=%d", candidate.node.Id)
 		}
 		if !sameIntSlice(d.handlersAt(candidate.opcode), d.handlersAt(origins[callNode.Id])) {
 			return skip("array spill and delegation have different or unknown handler domains")
@@ -306,6 +311,8 @@ func delegatingConstructorTempOrderPath(value values.JavaValue, temps []*values.
 			}
 		}
 		return nil, true
+	case *values.ArrayLengthExpression:
+		return delegatingConstructorTempOrderPath(v.Array, temps, path)
 	case *values.CastExpression:
 		return delegatingConstructorTempOrderPath(v.Value, temps, path)
 	case *values.JavaExpression:
@@ -392,6 +399,8 @@ func delegatingConstructorTempUses(value values.JavaValue, temp *values.JavaRef)
 			return 1, true
 		}
 		return 0, true
+	case *values.ArrayLengthExpression:
+		return delegatingConstructorTempUses(v.Array, temp)
 	case *values.CastExpression:
 		return delegatingConstructorTempUses(v.Value, temp)
 	case *values.JavaExpression:
@@ -463,6 +472,8 @@ func replaceDelegatingConstructorTemp(value values.JavaValue, temp *values.JavaR
 		if values.SameLocal(v, temp) {
 			return replacement
 		}
+	case *values.ArrayLengthExpression:
+		v.Array = replaceDelegatingConstructorTemp(v.Array, temp, replacement)
 	case *values.CastExpression:
 		v.Value = replaceDelegatingConstructorTemp(v.Value, temp, replacement)
 	case *values.JavaExpression:

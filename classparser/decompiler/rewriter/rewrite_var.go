@@ -196,28 +196,44 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	}
 }
 
-// dropDuplicateDeclarations removes redundant bare `T x;` declarations that name a *VariableId
-// already declared earlier in the SAME block list. Re-declaring the same id in a sibling/nested
-// block is legal Java (and intentional after hoisting), so each block list is scoped with its own
-// seen-set rather than a single global one.
+// dropDuplicateDeclarations removes repeated declaration flags for an exact
+// identity already visible in the current lexical scope. Value stores and
+// independent identities in sibling scopes remain intact.
 func dropDuplicateDeclarations(sts *[]statements.Statement) {
+	deduplicateDeclarationIdentity(sts, map[*utils.VariableId]bool{})
+}
+
+// Declaration flags are placement decisions, not value definitions. Once the
+// exact identity is in scope, a later store remains a store with its effects;
+// only its redundant declaration flag is removed. Sibling scopes have their
+// own sets, and equal spellings never unify two different identities.
+func deduplicateDeclarationIdentity(sts *[]statements.Statement, ancestors map[*utils.VariableId]bool) {
 	if sts == nil {
 		return
 	}
+	seen := maps.Clone(ancestors)
 	list := *sts
-	seen := map[*utils.VariableId]struct{}{}
 	out := list[:0]
 	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok && as.IsDeclare && as.JavaValue == nil && as.ArrayMember == nil {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil {
-				if _, dup := seen[ref.Id]; dup {
-					continue
+		if as, ok := st.(*statements.AssignStatement); ok && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
+			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
+				if seen[ref.Id] {
+					if as.JavaValue == nil {
+						continue
+					}
+					// A leaf statement may be shared by two structured arms.
+					// Declaration placement belongs to this occurrence only.
+					copy := *as
+					copy.IsFirst = false
+					copy.IsDeclare = false
+					st = &copy
+				} else {
+					seen[ref.Id] = true
 				}
-				seen[ref.Id] = struct{}{}
 			}
 		}
-		for _, cl := range childStatementLists(st) {
-			dropDuplicateDeclarations(cl)
+		for _, child := range childStatementLists(st) {
+			deduplicateDeclarationIdentity(child, seen)
 		}
 		out = append(out, st)
 	}
@@ -430,6 +446,9 @@ type Scope struct {
 	sts         *[]statements.Statement
 	varMap      []any
 	assignedMap map[string]*utils.VariableId
+	// Shared across lexical scopes; only immutable, solved def-use identities
+	// can claim an existing source declaration through this map.
+	solvedWebNames map[*utils.VariableId]*utils.VariableId
 	// A catch parameter is defined by handler entry, independently of ASTOREs
 	// inside its body. Keep these definitions local to this lexical scope.
 	entryDefinition *utils.VariableId
@@ -468,12 +487,13 @@ type Scope struct {
 
 func NewScope(startId int, sts *[]statements.Statement) *Scope {
 	return &Scope{
-		nowId:       startId,
-		sts:         sts,
-		assignedMap: map[string]*utils.VariableId{},
-		minted:      map[*utils.VariableId]int{},
-		reused:      map[*utils.VariableId]struct{}{},
-		allReplace:  map[*utils.VariableId][]*utils.VariableId{},
+		nowId:          startId,
+		sts:            sts,
+		assignedMap:    map[string]*utils.VariableId{},
+		solvedWebNames: map[*utils.VariableId]*utils.VariableId{},
+		minted:         map[*utils.VariableId]int{},
+		reused:         map[*utils.VariableId]struct{}{},
+		allReplace:     map[*utils.VariableId][]*utils.VariableId{},
 	}
 }
 func (s *Scope) NextId() int {
@@ -538,13 +558,14 @@ func (s *Scope) SubScope(sts *[]statements.Statement) *Scope {
 	assignedMap := map[string]*utils.VariableId{}
 	maps.Copy(assignedMap, s.assignedMap)
 	newScope := &Scope{
-		nowId:       s.nowId,
-		sts:         sts,
-		deep:        s.deep + 1,
-		assignedMap: assignedMap,
-		minted:      s.minted,
-		reused:      s.reused,
-		allReplace:  s.allReplace,
+		nowId:          s.nowId,
+		sts:            sts,
+		deep:           s.deep + 1,
+		assignedMap:    assignedMap,
+		solvedWebNames: s.solvedWebNames,
+		minted:         s.minted,
+		reused:         s.reused,
+		allReplace:     s.allReplace,
 	}
 	s.varMap = append(s.varMap, newScope)
 	return newScope
@@ -770,6 +791,14 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 			left := core.UnpackSoltValue(statement.LeftValue)
 			hasNamed := false
 			if v, ok := left.(*values.JavaRef); ok {
+				if identity := v.SolvedWebIdentity; identity != nil {
+					if named := scope.solvedWebNames[identity]; named != nil {
+						idReplaceMap[v.Id] = named
+						v.Id = named
+						scope.assignedMap[v.VarUid] = named
+						scope.reused[named] = struct{}{}
+					}
+				}
 				_, ok := scope.assignedMap[v.VarUid]
 				if ok {
 					hasNamed = true
@@ -806,6 +835,9 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 					newRef.Id = newId
 					newRef.Id.SetName(fmt.Sprintf("var%d", scope.nowId))
 					statement.LeftValue = &newRef
+					if newRef.SolvedWebIdentity != nil {
+						scope.solvedWebNames[newRef.SolvedWebIdentity] = newId
+					}
 					scope.varMap = append(scope.varMap, statement)
 					scope.nowId++
 					scope.assignedMap[v.VarUid] = newId

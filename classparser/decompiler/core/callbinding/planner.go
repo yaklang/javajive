@@ -19,10 +19,12 @@ const (
 )
 
 type Method struct {
+	Signature                                string `json:",omitempty"`
 	Name, Desc                               string
 	Public, Static, Generic, Varargs, Bridge bool
 }
 type Class struct {
+	Signature                                string `json:",omitempty"`
 	Name                                     string
 	Parents                                  []string
 	Methods                                  []Method

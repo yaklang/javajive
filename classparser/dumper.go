@@ -1501,9 +1501,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// wrapReflectionCallInSwitchCase wraps switch-case reflection calls in try/catch. Kill-switch:
 	// JDEC_WRAP_REFLECTION_CASE_OFF=1.
 	full = c.sourceRewrite("wrapReflectionCallInSwitchCase", "class_source", full, wrapReflectionCallInSwitchCase)
-	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. Kill-switch:
-	// JDEC_ADD_SWITCH_BREAK_OFF=1.
-	full = c.sourceRewrite("addBreakToSwitchCases", "class_source", full, addBreakToSwitchCases)
+	// Case exits are determined from CFG edges. Source assignments cannot
+	// distinguish a genuine break from an intentional fall-through dependency;
+	// inserting terminators here truncates rolling hash tails and numeric state.
 	// A switch break continues along its CFG successor. Never synthesize a
 	// default return here: block-closing braces do not prove method completion,
 	// and returning null silently truncates nested switches and decode loops.
@@ -2404,11 +2404,21 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 				break
 			}
 		}
+		if e.classSig == "" {
+			// No generic Signature still has a real superclass/interface ABI.
+			// Preserve those raw edges; no type arguments are invented.
+			if parent := sObj.GetSupperClassName(); parent != "" {
+				e.classSig = "L" + strings.ReplaceAll(parent, ".", "/") + ";"
+			}
+			for _, iface := range sObj.GetInterfacesName() {
+				e.classSig += "L" + strings.ReplaceAll(iface, ".", "/") + ";"
+			}
+		}
 		methodSigs := map[string]string{}
 		methodSeen := map[string]bool{}
 		for _, m := range sObj.Methods {
 			name, err := sObj.getUtf8(m.NameIndex)
-			if err != nil || name == "" || name == "<init>" || name == "<clinit>" {
+			if err != nil || name == "" || name == "<clinit>" {
 				continue
 			}
 			descriptor, err := sObj.getUtf8(m.DescriptorIndex)
@@ -2435,6 +2445,16 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 				// whose shared arity key is dropped, leaving calleeParamIsErasedTypeVar unable to see
 				// that the 3rd formal is the type variable K -> the spurious `(Comparable)` cast that
 				// breaks binarySearch's K inference (guava ImmutableRangeMap/ImmutableRangeSet).
+				if name == "<init>" {
+					// Synthetic captured/outer parameters may be absent from
+					// Signature. Never align constructor arguments by arity
+					// or inherit an ancestor's constructor declaration.
+					_, ps, _ := types.ParseMethodSignatureFull(sigStr, c.FuncCtx)
+					if len(ps) == len(methodParamFieldDescriptors(descriptor)) {
+						methodSigs[descKey] = sigStr
+					}
+					continue
+				}
 				methodSigs[descKey] = sigStr
 				key := class_context.MethodSigKey(name, len(methodParamFieldDescriptors(descriptor)))
 				if methodSeen[key] {
@@ -2453,8 +2473,7 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 }
 
 // buildSiblingCtorSig returns a lazy, cached provider of a jar-internal class's CONSTRUCTOR generic
-// Signature keyed by DESCRIPTOR argument count. It complements buildSiblingClassSig (which deliberately
-// skips <init>): a `super(...)` call needs the superclass ctor's parameter types WITH type variables
+// Signature keyed by DESCRIPTOR argument count. It complements the exact-descriptor constructor entries in buildSiblingClassSig: a `super(...)` call needs the superclass ctor's parameter types WITH type variables
 // (e.g. `(BaseGraph<TN;>;TN;)V`) to know which arguments feed a bare type-variable parameter, so the
 // erased `(N)` cast can be re-emitted. Only ctors whose Signature parameter count EQUALS the descriptor
 // parameter count are recorded (a non-static inner class's ctor Signature omits the synthetic leading
@@ -2546,8 +2565,8 @@ func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc
 // current class's FieldSignatures, so `this.<inheritedField>.m(...)` loses the receiver's type
 // arguments. Exposing per-class field Signatures lets types.ResolveInstantiatedFieldType walk the
 // hierarchy and recover the instantiated field type (guava RegularContiguousSet `this.domain` ->
-// `DiscreteDomain<C>`). Only fields carrying a Signature attribute (generic fields) are recorded; a
-// plain-descriptor field yields ok=false (nothing to recover). Returns nil when no cross-class resolver
+// `DiscreteDomain<C>`). Every declared field is recorded: its generic Signature when present, otherwise
+// its descriptor, which also prevents borrowing a shadowed ancestor field. Returns nil when no cross-class resolver
 // is available (single-class decompile). A nil/empty cache entry records a confirmed miss.
 func (c *ClassObjectDumper) buildSiblingFieldSig() func(internalName, fieldName string) (string, bool) {
 	if c.foldSiblingResolver == nil {
@@ -2572,6 +2591,10 @@ func (c *ClassObjectDumper) buildSiblingFieldSig() func(internalName, fieldName 
 						name, err := sObj.getUtf8(fld.NameIndex)
 						if err != nil || name == "" {
 							continue
+						}
+						// A raw redeclaration shadows an inherited generic field too.
+						if descriptor, err := sObj.getUtf8(fld.DescriptorIndex); err == nil {
+							fieldSigs[name] = descriptor
 						}
 						for _, attr := range fld.Attributes {
 							sigAttr, ok := attr.(*SignatureAttribute)

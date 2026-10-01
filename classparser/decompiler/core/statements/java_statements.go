@@ -8,6 +8,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -116,7 +117,45 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 	if r.JavaValue == nil {
 		return "return"
 	}
+	if funcCtx != nil {
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && ft.ReturnType != nil {
+			if call, ok := values.UnpackSoltValue(r.JavaValue).(*values.FunctionCallExpression); ok {
+				if planned, ok := call.PlanErasedMethodReturn(funcCtx); ok {
+					if ft.ReturnType.String(funcCtx) == "Object" || ft.ReturnType.String(funcCtx) == "java.lang.Object" {
+						return "return " + planned.String(funcCtx)
+					}
+					return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), planned.String(funcCtx))
+				}
+				if _, ret, e := callbinding.Descriptor(funcCtx.CurrentMethodDesc); e == nil {
+					if _, result, e := callbinding.Descriptor(call.Descriptor); e == nil && ret == result {
+						if planned, ok := call.PlanErasedClassResultUse(funcCtx); ok {
+							return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), planned.String(funcCtx))
+						}
+					}
+				}
+				if _, parameterized := types.AsParameterizedType(ft.ReturnType); parameterized {
+					if _, ret, err := callbinding.Descriptor(funcCtx.CurrentMethodDesc); err == nil {
+						if planned, ok := call.PlanErasedResultChain(funcCtx, ret); ok {
+							return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), planned.String(funcCtx))
+						}
+					}
+				}
+			}
+		}
+	}
 	expr := r.JavaValue.String(funcCtx)
+	if funcCtx != nil {
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil {
+			if call, ok := values.UnpackSoltValue(r.JavaValue).(*values.FunctionCallExpression); ok {
+				if planned, ok := call.PlanErasedFormalResult(funcCtx, ft.ReturnType); ok {
+					expr = planned.String(funcCtx)
+				}
+			}
+		}
+	}
+	if target, raw := erasedFactoryReturnCast(funcCtx, r.JavaValue); target != "" {
+		return fmt.Sprintf("return (%s) (%s) (%s)", target, raw, expr)
+	}
 	if target, raw := conditionalGenericReturnBridge(funcCtx, r.JavaValue); target != "" {
 		return fmt.Sprintf("return (%s) (%s) (%s)", target, raw, expr)
 	}
@@ -127,7 +166,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 	// int and the returned value is int-typed, wrap it in an explicit cast. This is a
 	// pure rendering fix — the recompiled bytecode is behaviorally identical.
 	if cast := narrowingReturnCast(funcCtx, r.JavaValue); cast != "" {
-		return fmt.Sprintf("return (%s) (%s)", cast, expr)
+		return renderExistingReturnCast(funcCtx, cast, expr)
 	}
 	// Type-variable return: when the method's recovered return type is a class-scope type
 	// variable (e.g. T/K/V) but the returned value's static type is the erased bound/Object,
@@ -147,7 +186,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 			if bridge := nestedGenericRawBridge(funcCtx, r.JavaValue, cast); bridge != "" {
 				return fmt.Sprintf("return (%s) (%s) (%s)", cast, bridge, expr)
 			}
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// An instance call on a NON-`this` receiver (a field/local of a jar-internal class) whose recovered
 		// generic return is a WILDCARD parameterization of the SAME erasure as a type-variable-mentioning
@@ -157,7 +196,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		// typeVarReturnCast's own wildcard branch only covers this-receiver same-class calls; this handles
 		// the cross-receiver case via the sibling resolver. See crossRecvWildcardReturnCast.
 		if cast := crossRecvWildcardReturnCast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// A `Class.forName(...)` return into a type-variable-mentioning `Class<...>` declared return: the
 		// JDK signature is `Class<?> forName(String)`, so javac captures the wildcard to CAP#1 and rejects
@@ -165,17 +204,17 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		// `(Class<ObjectInstantiator<T>>)` cast. See classForNameReturnCast (spring objenesis
 		// DelegatingToExoticInstantiator.instantiatorClass).
 		if cast := classForNameReturnCast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// Concrete reference return type with an Object-typed value (erased generic / null-only slot):
 		// emit an explicit downcast so the source recompiles. See objectReturnDowncast.
 		if cast := objectReturnDowncast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// Parameterized return type (`Entry<E>`) whose value erases to the same raw class with an
 		// erased/Object type argument: wrap in an unchecked parameterization cast. See parameterizedReturnCast.
 		if cast := parameterizedReturnCast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// Bounded / concrete parameterized return vs a generic factory that infers Object
 		// (`ImmutableMap.of()`, `ImmutableMap.of(k,v)` with erased keys): a direct
@@ -200,7 +239,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		// "Comparator<CAP#1> cannot be converted to Comparator<Object>". A wildcard-source same-erasure
 		// cast is an unchecked conversion (legal). See inheritedFieldReturnCast.
 		if cast := inheritedFieldReturnCast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// A method-call value (a synthetic singleton accessor `Cut$AboveAll.access$100()`) whose static
 		// type is a NON-GENERIC jar-internal SUBTYPE returned where the declared return type is a
@@ -2054,6 +2093,15 @@ func parameterizedFieldStoreRawCast(funcCtx *class_context.ClassContext, left, v
 	if !strings.Contains(fieldTypeStr, "<") || strings.Contains(fieldTypeStr, "?") {
 		return ""
 	}
+	if p, ok := types.AsParameterizedType(ft); ok && !ft.IsArray() {
+		descriptor := "L" + strings.ReplaceAll(p.RawClassName, ".", "/") + ";"
+		// The exact field erasure and factory result coincide. A raw view
+		// suppresses source-only invariant inference without introducing a
+		// narrower JVM check; deferred/poly factory inputs remain excluded.
+		if values.ErasedFactoryReturn(funcCtx, value, descriptor) {
+			return types.NewJavaClass(p.RawClassName).String(funcCtx)
+		}
+	}
 	if lit, ok := values.UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
 		return ""
 	}
@@ -3102,7 +3150,13 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// source's unchecked `(T)` cast. See typeVarLocalReassignCast (commons-collections4
 		// ChainedTransformer / TransformedList$TransformedListIterator).
 		if cast := typeVarLocalReassignCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			expr := a.JavaValue.String(funcCtx)
+			if call, ok := values.UnpackSoltValue(a.JavaValue).(*values.FunctionCallExpression); ok {
+				if planned, ok := call.PlanErasedFormalResult(funcCtx, a.LeftValue.Type()); ok {
+					expr = planned.String(funcCtx)
+				}
+			}
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, expr)
 		}
 		// A LOCAL / parameter declared as a type-variable array (`T[] var1`) REASSIGNED from
 		// `Array.newInstance` (typed Object / Object[]): bytecode dropped the source's
@@ -3748,6 +3802,11 @@ func (a *ExpressionStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.V
 }
 
 func (a *ExpressionStatement) String(funcCtx *class_context.ClassContext) string {
+	if call, ok := values.UnpackSoltValue(a.Expression).(*values.FunctionCallExpression); ok {
+		if planned, ok := call.PlanErasedClassResultUse(funcCtx); ok {
+			return planned.String(funcCtx)
+		}
+	}
 	return a.Expression.String(funcCtx)
 }
 

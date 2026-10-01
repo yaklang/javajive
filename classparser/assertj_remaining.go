@@ -112,14 +112,8 @@ func fixAssertjRemainingReconstructs(body string) string {
 			"}catch(IllegalAccessException | InvocationTargetException | InstantiationException var3){",
 			"}catch(IllegalAccessException | InvocationTargetException | InstantiationException | NoSuchMethodException var3){")
 	}
-	if strings.Contains(body, "isMultiValueMapAdapterInstance") {
-		body = strings.ReplaceAll(body,
-			"private static <K, V> Map<K, V> clone(Map<K, V> var0) throws NoSuchMethodException {",
-			"private static <K, V> Map<K, V> clone(Map<K, V> var0) {")
-		body = strings.ReplaceAll(body,
-			"}catch(IllegalAccessException | InvocationTargetException | InstantiationException var1_1){",
-			"}catch(IllegalAccessException | InvocationTargetException | InstantiationException | NoSuchMethodException var1_1){")
-	}
+	// Exceptions attributes and handler tables own the checked-exception contract.
+	// Never move a declared exception into a catch based on source-name matches.
 	if strings.Contains(body, "Function<Map.Entry") {
 		body = strings.ReplaceAll(body,
 			"return failsRequirements((Consumer)(var3),l0);",

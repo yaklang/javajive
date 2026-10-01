@@ -6,7 +6,11 @@ private, generic, bridge, static, and varargs flags. It is not a whitelist of
 method names presumed unique. For example, Map.get/merge remain generic, whereas
 String.valueOf remains a competing overload family.
 
-Roots are Object, String, Map, and Record where available. Reference types in root
+Roots include Object, String, Map, Record where available, and the standard
+collection, stream and functional APIs listed in the generator. Class and
+method Signature attributes are extracted verbatim from the same classfiles
+and indexed by exact descriptor, preserving first-bound erasure and overload
+identity for generic binding proofs. Reference types in root
 method descriptors are included for source denotability, together with their full
 ancestors. Other classes remain unavailable; no open-world completeness is claimed.
 No method execution, reflection, or host JDK lookup occurs during decompilation.

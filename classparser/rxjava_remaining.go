@@ -125,12 +125,6 @@ func fixRxjavaRemainingReconstructs(body string) string {
 		".flatMapPublisher(FlowableInternalHelper.zipIterable(var1))",
 		".flatMapPublisher((Function)(FlowableInternalHelper.zipIterable(var1)))")
 	if strings.Contains(body, "class FlowablePublish$PublishSubscriber") {
-		body = strings.Replace(body, "var14 = var5.poll();", "var14_1 = var5.poll();", 1)
-		body = strings.Replace(body, "var14 = null;", "var14_1 = null;", 1)
-		body = strings.Replace(body,
-			"if (this.checkTerminated(var4,(var14) == (null)))",
-			"if (this.checkTerminated(var4,(var14_1) == (null)))",
-			1)
 		body = replaceDuplicateEmptyLoopLabel(body)
 	}
 	// The compatibility declarations parameterize GroupJoin's Unicast receivers.

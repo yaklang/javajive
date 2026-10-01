@@ -792,61 +792,6 @@ func TestCachedFieldNullInitJarFS(t *testing.T) {
 	}
 }
 
-func TestFixConvertNumberClassArg(t *testing.T) {
-	in := "class C {\n\t<T> void m(Class<T> var4, Object var9_1) {\n\t\tvar9_1 = NumberUtils.convertNumberToTargetClass(((Number)(var9_1)),var4);\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := fixConvertNumberClassArg(in)
-	if !strings.Contains(out, "convertNumberToTargetClass(((Number)(var9_1)),(Class)(var4))") {
-		t.Fatalf("missing Class wrap:\n%s", out)
-	}
-}
-
-func TestConvertNumberClassArgJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/springframework/beans/TypeConverterDelegate.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "convertNumberToTargetClass(((Number)(var9_1)),(Class)(var4))") {
-		t.Fatalf("ON missing Class wrap:\n%s", clipForTest(on, "convertNumberToTargetClass"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "convertNumberToTargetClass(((Number)(var9_1)),(Class)(var4))") {
-		t.Fatalf("OFF already has Class wrap (switch inert):\n%s", clipForTest(off, "convertNumberToTargetClass"))
-	}
-	if !strings.Contains(off, "convertNumberToTargetClass(((Number)(var9_1)),var4)") {
-		t.Fatalf("OFF missing unfixed call:\n%s", clipForTest(off, "convertNumberToTargetClass"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
-}
-
 func TestFixRawRemoveIfMethodRef(t *testing.T) {
 	in := "class C {\n\tvoid m() {\n\t\tArrayList var2 = new ArrayList();\n\t\tvar2.removeIf(this::isExcludedFromDependencyCheck);\n\t}\n\tboolean isExcludedFromDependencyCheck(PropertyDescriptor var1) { return false; }\n}\n"
 	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
@@ -5222,5 +5167,12 @@ func TestHardjarShapesPreserveResolvedDeclarations(t *testing.T) {
 	in := "class Example<T> { void f(){ try{ work(); }catch(Throwable var3_1){ failure(var3_1); } Object var3_1 = value(); sink((T)(var3_1)); } }"
 	if got := wrapObjectTypeVarArgs(in); got != in {
 		t.Fatalf("cast leaked into catch scope:\n%s", got)
+	}
+}
+
+func TestObjectTypeVarRewriteDoesNotMatchTypeSuffix(t *testing.T) {
+	in := "class Holder<K> { void run(K key) { Object var4 = key; PooledObject var6_1 = create((K)(var4)); if (var6_1 != null) add((K)(var4),var6_1); } }"
+	if got := wrapObjectTypeVarArgs(in); got != in {
+		t.Fatalf("a type ending in Object is a different token:\n%s", got)
 	}
 }

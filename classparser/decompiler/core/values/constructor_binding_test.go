@@ -1,12 +1,33 @@
 package values
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
+
+func TestProvenArgumentCastBridgesOnlyItsDescriptorHead(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	arg := NewCustomValue(func(*class_context.ClassContext) string { return "factory()" }, func() types.JavaType { return types.NewJavaClass("java.util.List") })
+	f := &FunctionCallExpression{Descriptor: "(Ljava/util/List;)V"}
+	got := f.renderProvenArgumentCast(0, "List<List<T>>", arg, ctx)
+	if !strings.Contains(got, "(List<List<T>>)(List)") || strings.Count(got, "factory()") != 1 {
+		t.Fatal(got)
+	}
+	for _, target := range []string{"Set<T>", "List<T>[]", "T", "Object"} {
+		if got := f.renderProvenArgumentCast(0, target, arg, ctx); strings.Contains(got, ")(List)(") {
+			t.Fatalf("unrelated argument view: %s", got)
+		}
+	}
+	allocation := NewNewExpression(types.NewJavaClass("java.util.List"))
+	if got := f.renderProvenArgumentCast(0, "List<T>", allocation, ctx); strings.Contains(got, ")(List)(") {
+		t.Fatal("raw allocation already supports unchecked conversion")
+	}
+}
 
 func TestRawConstructorBindingRequiresAllocationAndCompetition(t *testing.T) {
 	for _, scenario := range []string{"raw", "null", "array", "exact primitive array", "exact reference array", "exact nested array", "covariant array", "parameterized", "this", "other owner", "no competing declaration"} {
@@ -57,6 +78,47 @@ func TestRawConstructorBindingRequiresAllocationAndCompetition(t *testing.T) {
 			call := &FunctionCallExpression{ClassName: "example.Box", FunctionName: "<init>", Descriptor: desc, Kind: InvokeSpecial, Object: receiver}
 			if got := call.rawConstructorBindingCast(0, arg, ctx); got != want {
 				t.Fatalf("binding cast=%q want=%q", got, want)
+			}
+		})
+	}
+}
+
+func TestConstructorMethodFormalInferenceKeepsCallerScope(t *testing.T) {
+	for _, name := range []string{"proved", "method shadow", "unknown family", "generic class", "foreign formal", "dependent bound", "applicable rival", "varargs rival", "missing argument"} {
+		t.Run(name, func(t *testing.T) {
+			desc := "(Ljava/lang/Object;Ljava/util/function/Predicate;)V"
+			signature := "<U:Ljava/lang/Object;>(TU;Ljava/util/function/Predicate<TU;>;)V"
+			classSig := "Ljava/lang/Object;"
+			object := types.NewJavaClass("java.lang.Object")
+			arg := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("T"))
+			meta := map[string]callbinding.Class{"probe/Box": {Name: "probe/Box", MembersComplete: true, ParentsComplete: true, Methods: []callbinding.Method{{Name: "<init>", Desc: desc, Generic: true}, {Name: "<init>", Desc: "(Ljava/lang/String;Ljava/lang/Object;)V"}}}, "java/lang/Object": {Name: "java/lang/Object", MembersComplete: true, ParentsComplete: true}, "java/lang/String": {Name: "java/lang/String", MembersComplete: true, ParentsComplete: true, Parents: []string{"java/lang/Object"}}}
+			ctx := &class_context.ClassContext{TypeParams: []string{"T"}, CurrentMethodSig: "<T:Ljava/lang/Object;>(TT;)V", InvocationMetadata: func(n string) (callbinding.Class, bool) { m, ok := meta[n]; return m, ok }, SiblingClassSig: func(n string) (string, map[string]string, bool) {
+				return classSig, map[string]string{class_context.MethodDescKey("<init>", desc): signature}, n == "probe/Box"
+			}}
+			f := &FunctionCallExpression{ClassName: "probe.Box", FunctionName: "<init>", Descriptor: desc, Arguments: []JavaValue{arg, NewJavaRef(utils.NewRootVariableId(), nil, object)}}
+			owner := meta["probe/Box"]
+			switch name {
+			case "method shadow":
+				ctx.ClassSig = "<T:Ljava/lang/String;>Ljava/lang/Object;"
+			case "unknown family":
+				owner.MembersComplete = false
+			case "generic class":
+				classSig = "<U:Ljava/lang/Object;>Ljava/lang/Object;"
+			case "foreign formal":
+				ctx.TypeParams = nil
+			case "dependent bound":
+				signature = "<U:TT;>(TU;Ljava/util/function/Predicate<TU;>;)V"
+			case "applicable rival":
+				owner.Methods[1].Desc = "(Ljava/lang/Object;Ljava/lang/Object;)V"
+			case "varargs rival":
+				owner.Methods[1].Varargs = true
+			case "missing argument":
+				f.Arguments[1] = nil
+			}
+			meta["probe/Box"] = owner
+			got := f.constructorMethodFormalCallerInference(0, arg, ctx)
+			if got != (name == "proved" || name == "method shadow") {
+				t.Fatalf("inference=%v", got)
 			}
 		})
 	}

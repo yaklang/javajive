@@ -59,3 +59,38 @@ func TestGenericFieldReceiverComposesEachDeclaration(t *testing.T) {
 		t.Fatalf("cycle recovered %v", got)
 	}
 }
+
+func TestFixedGenericFieldCrossesOnlyNonGenericRawOwners(t *testing.T) {
+	for _, scenario := range []string{"fixed", "raw generic parent", "raw generic owner", "shadowed"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := &class_context.ClassContext{}
+			ctx.SiblingClassSig = func(n string) (string, map[string]string, bool) {
+				if n == "sample/Owner" {
+					if scenario == "raw generic owner" {
+						return "<T:Ljava/lang/Object;>Lsample/Base;", nil, true
+					}
+					return "Lsample/Base;", nil, true
+				}
+				if n == "sample/Base" {
+					if scenario == "raw generic parent" {
+						return "<T:Ljava/lang/Object;>Ljava/lang/Object;", nil, true
+					}
+					return "Ljava/lang/Object;", nil, true
+				}
+				return "", nil, false
+			}
+			ctx.SiblingFieldSig = func(n, field string) (string, bool) {
+				if n == "sample/Owner" && scenario == "shadowed" {
+					return "Ljava/util/Map;", true
+				}
+				return "Ljava/util/Map<Ljava/lang/String;Ljava/lang/Integer;>;", n == "sample/Base"
+			}
+			obj := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("sample.Owner"))
+			got := recoverParameterizedFieldReceiver(ctx, NewRefMember(obj, "values", types.NewJavaClass("java.util.Map")))
+			_, parameterized := types.AsParameterizedType(got)
+			if parameterized != (scenario == "fixed") {
+				t.Fatalf("recovered %v", got)
+			}
+		})
+	}
+}

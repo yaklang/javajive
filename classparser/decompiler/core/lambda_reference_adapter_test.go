@@ -2,6 +2,32 @@ package core
 
 import "testing"
 
+func TestUnboxingLambdaAdapterRequiresExactWrapperAndEntryOrder(t *testing.T) {
+	for primitive, wrapper := range map[string]string{"Z": "Boolean", "B": "Byte", "C": "Character", "S": "Short", "I": "Integer", "J": "Long", "F": "Float", "D": "Double"} {
+		t.Run(primitive, func(t *testing.T) {
+			actual := "(Ljava/lang/" + wrapper + ";)V"
+			if !UnboxingLambdaAdapterProven("("+primitive+")V", "(Ljava/lang/Object;)V", actual, 0, RefInvokeStatic) {
+				t.Fatal("exact unboxing rejected")
+			}
+			if UnboxingLambdaAdapterProven("("+primitive+")V", "(Ljava/lang/Object;)V", "(Ljava/lang/Number;)V", 0, RefInvokeStatic) {
+				t.Fatal("guessed Number unboxing")
+			}
+			if UnboxingLambdaAdapterProven("("+primitive+")V", "(Ljava/lang/Object;)V", actual, 1, RefInvokeStatic) {
+				t.Fatal("lost capture prefix")
+			}
+			if UnboxingLambdaAdapterProven("("+primitive+")V", "(Ljava/lang/Object;)V", actual, 0, RefNewInvokeSpecial) {
+				t.Fatal("constructor adaptation guessed")
+			}
+		})
+	}
+	if !UnboxingLambdaAdapterProven("([CII)Ljava/lang/Integer;", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", "([CLjava/lang/Integer;Ljava/lang/Integer;)Ljava/lang/Integer;", 1, RefInvokeSpecial) {
+		t.Fatal("ordered reference check and two unboxings rejected")
+	}
+	if UnboxingLambdaAdapterProven("(J)V", "(Ljava/lang/Object;)V", "(Ljava/lang/Integer;)V", 0, RefInvokeStatic) {
+		t.Fatal("numeric widening outside proof")
+	}
+}
+
 func TestRawLambdaReferenceAdapterRequiresExactDescriptors(t *testing.T) {
 	const obj = "Ljava/lang/Object;"
 	const text = "Ljava/lang/String;"

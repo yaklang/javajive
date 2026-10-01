@@ -130,3 +130,20 @@ func TestZxingSnippetBullsEyeAndPDF417(t *testing.T) {
 		t.Fatalf("flatten ate switch default:\n%s", out6)
 	}
 }
+
+// Declaration placement belongs to the identity-based IR pass. A library source
+// rewrite must not manufacture another declaration after that pass has run.
+func TestZxingRecoveryPreservesEmbeddedAssignmentDeclaration(t *testing.T) {
+	body := "package com.google.zxing.aztec.decoder;\nclass Probe {\nvoid scan() {\n\t\t\ttry{\n\t\t\t\tint var13 = 0;\n\t\t\t\tint var10 = 0;\n\t\t\t\tint var11 = 0;\n\t\t\t\tdo{\n\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\tif (((var13 = var8[var11]) != (0)){}\n} } } } }"
+	if got := fixZxingRemainingReconstructs(body); got != body {
+		t.Fatalf("source recovery changed an existing declaration:\n%s", got)
+	}
+}
+
+func TestZxingRecoveryPreservesNearbyDeclarationPlacement(t *testing.T) {
+	body := "package com.google.zxing.pdf417.decoder;\nclass Probe {\nfinal Codeword getCodewordNearby(int var1) {\n\t\tCodeword var2 = this.getCodeword(var1);\n\t\tint var6;\n\t\tint var5 = (this.imageRowToCodewordIndex(var1)) + (var4);\n\t\t\t\t\tvar6 = var5;\n}\n}"
+	got := fixZxingRemainingReconstructs(body)
+	if got != body {
+		t.Fatalf("text recovery changed IR declaration placement:\n%s", got)
+	}
+}

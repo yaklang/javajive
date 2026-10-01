@@ -23,7 +23,29 @@ type CastExpression struct {
 
 func (c *CastExpression) Type() types.JavaType { return c.TargetType }
 func (c *CastExpression) String(ctx *class_context.ClassContext) string {
-	return fmt.Sprintf("((%s)(%s))", c.TargetType.String(ctx), c.Value.String(ctx))
+	operand := c.Value
+	if !c.Binding && c.TargetType != nil {
+		if _, reference := types.RawClassFQN(c.TargetType); reference || c.TargetType.IsArray() {
+			if call, ok := UnpackSoltValue(operand).(*FunctionCallExpression); ok {
+				if planned, ok := call.PlanErasedCheckedMethodInput(ctx); ok {
+					operand = planned
+				} else if planned, ok := call.PlanErasedClassResultUse(ctx); ok {
+					operand = planned
+				} else if planned, ok := call.PlanErasedFormalResult(ctx, c.TargetType); ok {
+					operand = planned
+				} else if planned, ok := call.PlanErasedResultChain(ctx, bindingType(c.TargetType)); ok {
+					operand = planned
+				}
+			}
+		}
+	}
+	if p, ok := types.AsParameterizedType(c.TargetType); ok && !c.TargetType.IsArray() && len(p.TypeArgs) > 0 && !isWitnessLambdaArg(UnpackSoltValue(c.Value)) {
+		// Generic invariance is a source constraint, not a JVM CHECKCAST operand.
+		// Keep the already selected check at the same position, through its erasure.
+		raw := types.NewJavaClass(p.RawClassName).String(ctx)
+		return fmt.Sprintf("((%s)((%s)(%s)))", c.TargetType.String(ctx), raw, operand.String(ctx))
+	}
+	return fmt.Sprintf("((%s)(%s))", c.TargetType.String(ctx), operand.String(ctx))
 }
 func (c *CastExpression) ReplaceVar(old, new *utils.VariableId) { c.Value.ReplaceVar(old, new) }
 

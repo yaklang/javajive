@@ -117,3 +117,20 @@ func arrayForConstructorTempTest() values.JavaValue {
 	array.Initializer = []values.JavaValue{values.NewJavaLiteral("item", types.NewJavaClass("java.lang.String"))}
 	return array
 }
+
+func TestDelegatingConstructorArrayLengthRetainsThrowingOperand(t *testing.T) {
+	typ := types.NewJavaArrayType(types.NewJavaClass("java.lang.String"))
+	temp := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+	length := &values.ArrayLengthExpression{Array: temp, OriginPC: 12, HasOriginPC: true}
+	effect := &values.CastExpression{Value: values.TagEffects(values.JavaNull, values.EffectCall|values.EffectThrow), TargetType: typ, OriginPC: 10}
+	if n, ok := delegatingConstructorTempUses(length, temp); !ok || n != 1 {
+		t.Fatal("arraylength is an eager unique read")
+	}
+	if _, ok := orderedDelegatingConstructorTempArgIndexes([]values.JavaValue{length}, []*values.JavaRef{temp}); !ok {
+		t.Fatal("arraylength lost operand order")
+	}
+	got := replaceDelegatingConstructorTemp(length, temp, effect)
+	if got != length || length.Array != effect || length.OriginPC != 12 {
+		t.Fatal("lost check, length read or bytecode identity")
+	}
+}

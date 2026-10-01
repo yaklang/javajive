@@ -78,6 +78,61 @@ func TestErasedInvocationDeclaringOwnerPreservesWitnessAndValues(t *testing.T) {
 	}
 }
 
+func TestErasedClassResultUseKeepsBoundAndPackedArray(t *testing.T) {
+	for _, scenario := range []string{"scalar", "packed array", "unpacked array", "wrong result bound", "competing varargs", "incomplete family"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, ctx, classes, _, methods := erasedInvocationFixture()
+			owner := classes["example/Owner"]
+			desc, sig := "(Lexample/Item;Z)Lexample/Item;", "(TE;Z)TE;"
+			array := scenario == "packed array" || scenario == "unpacked array" || scenario == "competing varargs"
+			if array {
+				desc, sig = "([Lexample/Item;Z)Lexample/Item;", "([TE;Z)TE;"
+				typ, _ := types.ParseDescriptor("[Lexample/Item;")
+				if scenario == "unpacked array" {
+					typ = types.NewJavaClass("example.Item")
+				}
+				f.Arguments[0] = NewJavaRef(utils.NewRootVariableId(), nil, typ)
+				// Varargs must be the last formal, as in a valid class file.
+				desc, sig = "(Z[Lexample/Item;)Lexample/Item;", "(Z[TE;)TE;"
+				f.Arguments[0], f.Arguments[1] = f.Arguments[1], f.Arguments[0]
+			}
+			if scenario == "wrong result bound" {
+				sig = "(TE;Z)Ljava/lang/Object;"
+			}
+			owner.Methods = []callbinding.Method{{Name: "release", Desc: desc, Generic: true, Public: true, Varargs: array}}
+			if scenario == "competing varargs" {
+				owner.Methods = append(owner.Methods, callbinding.Method{Name: "release", Desc: "(Z[Ljava/lang/Object;)Lexample/Item;", Public: true, Varargs: true})
+			}
+			if scenario == "incomplete family" {
+				owner.MembersComplete = false
+			}
+			classes[owner.Name] = owner
+			methods[owner.Name] = map[string]string{class_context.MethodDescKey("release", desc): sig}
+			f.Descriptor = desc
+			ft, _ := types.ParseMethodDescriptor(desc)
+			f.FuncType = ft.FunctionType()
+			if _, ok := f.planErasedInvocation(ctx); ok {
+				t.Fatal("result permission leaked to normal call")
+			}
+			out, ok := f.PlanErasedClassResultUse(ctx)
+			want := scenario == "scalar" || scenario == "packed array"
+			if ok != want {
+				t.Fatalf("proof=%v want=%v", ok, want)
+			}
+			if ok {
+				if out.Witness() != f.Witness() {
+					t.Fatal("changed erased invoke")
+				}
+				for i, arg := range f.Arguments {
+					if cast, ok := out.Arguments[i].(*CastExpression); ok && cast.Value != arg {
+						t.Fatal("changed packed operand identity")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestErasedInvocationRejectsIncompleteOrUnsafeProof(t *testing.T) {
 	for _, scenario := range []string{"nil context", "missing receiver", "static", "special", "dynamic", "constructor", "descriptor", "arity", "missing metadata", "identity mismatch", "incomplete members", "incomplete parents", "cycle", "ambiguous declarations", "nonpublic owner", "nonpublic method", "bridge target", "varargs", "competing varargs", "method variable", "generic result", "throws", "empty signature", "dependent first bound", "descriptor bound mismatch", "foreign formal", "nested formal", "array formal", "receiver unrelated", "argument narrowing", "primitive conversion", "poly argument", "nil argument", "already valid", "raw receiver"} {
 		t.Run(scenario, func(t *testing.T) {

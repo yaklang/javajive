@@ -65,11 +65,12 @@ def declarations(data):
     parents = [cls(parent)] if parent else []
     parents += [cls(r.u2()) for _ in range(r.u2())]
     def attributes():
-        names = []
+        attrs = {}
         for _ in range(r.u2()):
-            names.append(utf(r.u2()))
-            r.take(r.u4())
-        return names
+            name = utf(r.u2())
+            raw = r.take(r.u4())
+            attrs[name] = utf(struct.unpack('>H', raw)[0]) if name == 'Signature' else None
+        return attrs
     methods = []
     for fields in (True, False):
         for _ in range(r.u2()):
@@ -79,10 +80,12 @@ def declarations(data):
                 methods.append({'Name': name, 'Desc': desc, 'Public': bool(access & 1),
                                 'Static': bool(access & 8), 'Generic': 'Signature' in attrs,
                                 'Varargs': bool(access & 0x80), 'Bridge': bool(access & 0x40)})
-    attributes()
+                if attrs.get('Signature'):
+                    methods[-1]['Signature'] = attrs['Signature']
+    class_attrs = attributes()
     if r.offset != len(data):
         raise ValueError('trailing classfile data')
-    return {'Name': cls(own), 'Parents': parents, 'Methods': methods,
+    return {**({'Signature': class_attrs['Signature']} if class_attrs.get('Signature') else {}), 'Name': cls(own), 'Parents': parents, 'Methods': methods,
             'Public': bool(flags & 1), 'IsInterface': bool(flags & 0x200),
             'MembersComplete': True, 'ParentsComplete': True}, major
 
@@ -90,7 +93,13 @@ def declarations(data):
 def profile(release, archive, prefix, jdk_version):
     with zipfile.ZipFile(archive) as source:
         classes, provenance = {}, {}
-        roots = ['java/lang/Object', 'java/lang/String', 'java/util/Map']
+        roots = ['java/lang/Object', 'java/lang/String', 'java/util/Map',
+                 'java/util/Optional', 'java/util/Collections', 'java/util/Arrays',
+                 'java/util/Iterator', 'java/util/EnumMap', 'java/util/List',
+                 'java/util/Set', 'java/util/Collection', 'java/util/stream/Stream',
+                 'java/util/stream/Collectors', 'java/util/function/Function',
+                 'java/util/function/Consumer', 'java/util/function/Supplier',
+                 'java/util/function/Predicate']
         if release >= 16:
             roots.append('java/lang/Record')
         pending = list(roots)
@@ -136,7 +145,7 @@ def main():
     for release, home in ((11, args.jdk11), (17, args.jdk17), (21, args.jdk21)):
         if home is not None:
             profiles.append(profile(release, home / 'jmods/java.base.jmod', 'classes/', version(home)))
-    result = {'schema': 1, 'roots': ['java/lang/Object', 'java/lang/String', 'java/util/Map', 'java/lang/Record (16+)'],
+    result = {'schema': 1, 'roots': ['Object/String/Map/Record and standard collection, stream and functional APIs; see generator roots'],
               'profiles': profiles}
     args.out.write_text(json.dumps(result, sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
 

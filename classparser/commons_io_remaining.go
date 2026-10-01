@@ -129,13 +129,5 @@ func fixCommonsIoRemainingReconstructs(body string) string {
 		"public MessageDigestCalculatingInputStream$Builder() {\n\t\tthis.messageDigest = MessageDigestCalculatingInputStream.getDefaultMessageDigest();\n\t}",
 		"public MessageDigestCalculatingInputStream$Builder() {\n\t\ttry{\n\t\t\tthis.messageDigest = MessageDigestCalculatingInputStream.getDefaultMessageDigest();\n\t\t}catch(NoSuchAlgorithmException var1){\n\t\t\tthrow new IllegalStateException(var1);\n\t\t}\n\t}",
 		1)
-	body = strings.Replace(body,
-		"\t\t}\n\t}\n\tprivate static boolean contentEquals(Iterator<?> var0, Iterator<?> var1) {",
-		"\t\t}\n\t\treturn false;\n\t}\n\tprivate static boolean contentEquals(Iterator<?> var0, Iterator<?> var1) {",
-		1)
-	body = strings.Replace(body,
-		"\t\t}\n\t}\n\tprivate static boolean contentEquals(Stream<?> var0, Stream<?> var1) {",
-		"\t\t}\n\t\treturn false;\n\t}\n\tprivate static boolean contentEquals(Stream<?> var0, Stream<?> var1) {",
-		1)
 	return body
 }

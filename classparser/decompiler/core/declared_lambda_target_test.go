@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -149,5 +150,38 @@ func TestDeclaredSamExactDeclaration(t *testing.T) {
 	}
 	if got := inferDeclaredLambdaTarget(nil, types.NewJavaClass("example.Sam"), constant(erased), constant("(Ljava/lang/String;)V")); got != nil {
 		t.Fatalf("missing resolver accepted: %v", got)
+	}
+}
+
+func TestDeclaredSamBoundRequiresKnownHierarchy(t *testing.T) {
+	provider := callbinding.Provider(func(name string) (callbinding.Class, bool) {
+		switch name {
+		case "fixture/Leaf":
+			return callbinding.Class{Name: name, Parents: []string{"fixture/Base"}, ParentsComplete: true}, true
+		case "fixture/Base":
+			return callbinding.Class{Name: name, Parents: []string{"java/lang/Object"}, ParentsComplete: true, IsInterface: true}, true
+		case "java/lang/Object":
+			return callbinding.Class{Name: name, ParentsComplete: true}, true
+		}
+		return callbinding.Class{}, false
+	})
+	for _, tc := range []struct {
+		name, class, erased, actual string
+		want                        bool
+	}{
+		{"class bound", "<T:Lfixture/Base;>Ljava/lang/Object;", "(Lfixture/Base;)V", "(Lfixture/Leaf;)V", true},
+		{"interface bound", "<T::Lfixture/Base;>Ljava/lang/Object;", "(Lfixture/Base;)V", "(Lfixture/Leaf;)V", true},
+		{"unknown subtype", "<T::Lfixture/Base;>Ljava/lang/Object;", "(Lfixture/Base;)V", "(Lfixture/Missing;)V", false},
+		{"wrong erased ABI", "<T::Lfixture/Base;>Ljava/lang/Object;", "(Ljava/lang/Object;)V", "(Lfixture/Leaf;)V", false},
+		{"unrelated type", "<T::Lfixture/Base;>Ljava/lang/Object;", "(Lfixture/Base;)V", "(Ljava/lang/Object;)V", false},
+		{"intersection needs more evidence", "<T::Lfixture/Base;:Ljava/io/Serializable;>Ljava/lang/Object;", "(Lfixture/Base;)V", "(Lfixture/Leaf;)V", false},
+		{"dependent needs more evidence", "<T:TU;U:Lfixture/Base;>Ljava/lang/Object;", "(Lfixture/Base;)V", "(Lfixture/Leaf;)V", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := inferDeclaredSamInstantiation("fixture.Action", tc.class, "(TT;)V", tc.erased, tc.actual, provider)
+			if (got != nil) != tc.want {
+				t.Fatalf("got %v want proven=%v", got, tc.want)
+			}
+		})
 	}
 }

@@ -1448,6 +1448,8 @@ func prefixBeforeUseWithAllocationProof(d *Decompiler, value values.JavaValue, r
 			if x.Op == "+" && x.Type() != nil && x.Type().String(&class_context.ClassContext{}) == "String" {
 				conditional = true
 			}
+		case *values.ArrayLengthExpression:
+			children = []values.JavaValue{x.Array}
 		case *values.CastExpression:
 			children = []values.JavaValue{x.Value}
 		case *values.JavaArrayMember:

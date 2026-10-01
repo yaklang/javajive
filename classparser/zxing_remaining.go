@@ -252,12 +252,6 @@ func fixZxingRemainingReconstructs(body string) string {
 		"var3 = var3.clone().rotate180();",
 		"var3 = var3.clone();\n\t\t\tvar3.rotate180();")
 	body = strings.ReplaceAll(body,
-		"int var10 = 0;\n\t\t\t\tint var11 = 0;\n\t\t\t\tdo{\n\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\tif (((var13 = var8[var11]) != (0))",
-		"int var10 = 0;\n\t\t\t\tint var11 = 0;\n\t\t\t\tint var13 = 0;\n\t\t\t\tdo{\n\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\tif (((var13 = var8[var11]) != (0))")
-	body = strings.ReplaceAll(body,
-		"boolean[] var12 = new boolean[((var4) * (var2)) - (var10)];\n\t\t\t\tint var13 = 0;",
-		"boolean[] var12 = new boolean[((var4) * (var2)) - (var10)];\n\t\t\t\tvar13 = 0;")
-	body = strings.ReplaceAll(body,
 		"if ((var3.find()) && ((var4.start()) == (0))){\n\t\t\tif ((var6 = matchVCardPrefixedField(\"FN\",var2,true,false)) == (null)){\n\t\t\t\tformatNames((Iterable)(var6 = matchVCardPrefixedField(\"N\",var2,true,false)));\n\t\t\t}\n\t\t\tList var5 = matchSingleVCardPrefixedField(\"NICKNAME\",var2,true,false);\n\t\t\tList var6 = var5;",
 		"if ((var3.find()) && ((var4.start()) == (0))){\n\t\t\tList var6 = matchVCardPrefixedField(\"FN\",var2,true,false);\n\t\t\tif ((var6) == (null)){\n\t\t\t\tvar6 = matchVCardPrefixedField(\"N\",var2,true,false);\n\t\t\t\tformatNames((Iterable)(var6));\n\t\t\t}\n\t\t\tList var5 = matchSingleVCardPrefixedField(\"NICKNAME\",var2,true,false);")
 	body = strings.ReplaceAll(body,
@@ -272,15 +266,6 @@ func fixZxingRemainingReconstructs(body string) string {
 	body = strings.ReplaceAll(body,
 		"if ((var12 = patternMatchVariance(var4,CODE_PATTERNS[var10],0.7F)) < (var8)){",
 		"if ((var12 = patternMatchVariance(var4,CODE_PATTERNS[var10],0.7F)) < ((float)(var8))){")
-	body = strings.ReplaceAll(body,
-		"int var11 = 0;\n\t\t\t\t\tdo{\n\t\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\t\tif (((var13 = var8[var11]) != (0))",
-		"int var11 = 0;\n\t\t\t\t\tint var13 = 0;\n\t\t\t\t\tdo{\n\t\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\t\tif (((var13 = var8[var11]) != (0))")
-	body = strings.ReplaceAll(body,
-		"final Codeword getCodewordNearby(int var1) {\n\t\tCodeword var2 = this.getCodeword(var1);",
-		"final Codeword getCodewordNearby(int var1) {\n\t\tint var6 = 0;\n\t\tCodeword var2 = this.getCodeword(var1);")
-	body = strings.ReplaceAll(body,
-		"int var5 = (this.imageRowToCodewordIndex(var1)) + (var4);\n\t\t\t\t\tint var6 = var5;",
-		"int var5 = (this.imageRowToCodewordIndex(var1)) + (var4);\n\t\t\t\t\tvar6 = var5;")
 	body = strings.ReplaceAll(body,
 		"var13 = var7[var11].setRowNumberAsRowIndicatorColumn();",
 		"var7[var11].setRowNumberAsRowIndicatorColumn();\n\t\t\t\t\tvar13 = var7[var11];")

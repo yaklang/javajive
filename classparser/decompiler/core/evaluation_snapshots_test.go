@@ -159,6 +159,7 @@ func TestImmediateMethodRefInliningRequiresOneFinalArgumentConsumer(t *testing.T
 		func() types.JavaType { return types.NewJavaClass("java.util.function.Function") },
 	)
 	methodRef.IsMethodRef = true
+	methodRef.CapturesKnown = true
 
 	makePair := func(nextOpcode int, nextDescriptor string, nextPC uint16, sources int) (*OpCode, *OpCode) {
 		d.ExceptionTable = nil
@@ -224,9 +225,33 @@ func TestImmediateMethodRefInliningRequiresOneFinalArgumentConsumer(t *testing.T
 		op, _ := makePair(OP_INVOKESTATIC, "(Ljava/lang/String;Ljava/util/function/Function;)V", 15, 1)
 		external := values.NewJavaClassMember("java.util.stream.Stream", "consume", "(Ljava/lang/String;Ljava/util/function/Function;)V", typ)
 		d.constantPoolGetter = func(int) values.JavaValue { return external }
-		if d.canInlineImmediateMethodRef(op, methodRef) {
-			t.Fatal("inlined across an external generic call's erased receiver type")
+		if !d.canInlineImmediateMethodRef(op, methodRef) {
+			t.Fatal("adjacent external consumer lost original explicit SAM target")
 		}
+		got := d.snapshotDynamicResult(op, nil, methodRef)
+		cast, ok := got.(*values.CastExpression)
+		if !ok || !cast.Binding {
+			t.Fatal("missing erased call-site view")
+		}
+		inner, innerOK := cast.Value.(*values.CastExpression)
+		if !innerOK || inner.Value != methodRef || !inner.Binding || inner.TargetType.String(d.FunctionContext) != methodRef.Type().String(d.FunctionContext) {
+			t.Fatal("external adaptation changed SAM target")
+		}
+		methodRef.CapturesKnown = false
+		if d.canInlineImmediateMethodRef(op, methodRef) {
+			t.Fatal("unknown captures accepted")
+		}
+		methodRef.CapturesKnown = true
+		source := values.TagEffects(values.JavaNull, values.EffectCall)
+		snapshot := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.String"))
+		if d.evaluationSnapshots == nil {
+			d.evaluationSnapshots = map[*OpCode][]EvaluationSnapshot{}
+		}
+		d.evaluationSnapshots[op] = []EvaluationSnapshot{{Ref: snapshot, Value: source, Operand: true}}
+		if d.canInlineImmediateMethodRef(op, methodRef) {
+			t.Fatal("effectful capture moved")
+		}
+		delete(d.evaluationSnapshots, op)
 	})
 	t.Run("mismatched functional target", func(t *testing.T) {
 		op, _ := makePair(OP_INVOKESTATIC, "(Ljava/lang/String;Ljava/lang/Object;)V", 15, 1)
@@ -260,6 +285,28 @@ func TestCaptureSnapshotSurvivesLaterLocalMutation(t *testing.T) {
 	}
 	if len(d.disFoldRef) != 1 || d.disFoldRef[0] != snapshot {
 		t.Fatal("snapshot may fold back into mutable source")
+	}
+}
+
+func TestImmediateLambdaCaptureRequiresAnUnwrittenParameterSlot(t *testing.T) {
+	wide := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaLong))
+	param := values.NewJavaRef(utils.NewRootVariableId().Next(), nil, types.NewJavaClass("java.lang.String"))
+	param.IsParam = true
+	d := &Decompiler{Params: []values.JavaValue{wide, param}, opCodes: []*OpCode{{Instr: &Instruction{OpCode: OP_NOP}}}}
+	if !d.immutableCaptureParameter(param) {
+		t.Fatal("unwritten parameter lost its capture identity")
+	}
+	d.opCodes = append(d.opCodes, &OpCode{Instr: &Instruction{OpCode: OP_ASTORE}, Data: []byte{2}})
+	if d.immutableCaptureParameter(param) {
+		t.Fatal("later write to wide-prefix parameter slot accepted")
+	}
+	d.opCodes[1].Data[0] = 3
+	if !d.immutableCaptureParameter(param) {
+		t.Fatal("unrelated local write rejected")
+	}
+	param.IsParam = false
+	if d.immutableCaptureParameter(param) {
+		t.Fatal("mutable body local substituted into deferred closure")
 	}
 }
 func TestSnapshotBudgetFailsBeforeMutation(t *testing.T) {

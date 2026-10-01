@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -77,6 +78,59 @@ func TestBoundMethodReferenceErasureNeedsExactSAMAndOwner(t *testing.T) {
 			changed := strings.Contains(source, "((Check)(")
 			if changed != (scenario == "wildcard" || scenario == "concrete") {
 				t.Fatalf("receiver erasure=%v source=%s", changed, source)
+			}
+		})
+	}
+}
+
+func TestBoundMethodReferenceResultUsesCaptureABI(t *testing.T) {
+	for _, scenario := range []string{"exact", "missing capture ABI", "wrong capture ABI", "narrow input", "incomplete", "different bound", "void result"} {
+		t.Run(scenario, func(t *testing.T) {
+			desc := "(Ljava/lang/Object;)Ljava/lang/Object;"
+			impl := &values.JavaClassMember{Name: "probe/Factory", Member: "build", Description: desc, RefKind: RefInvokeVirtual}
+			meta := map[string]callbinding.Class{}
+			for _, n := range []string{"probe/Factory", "java/lang/Object", "java/lang/String"} {
+				meta[n] = callbinding.Class{Name: n, Public: true, MembersComplete: true, ParentsComplete: true}
+			}
+			c := meta["probe/Factory"]
+			c.Methods = []callbinding.Method{{Name: "build", Desc: desc, Public: true, Generic: true}}
+			if scenario == "incomplete" {
+				c.ParentsComplete = false
+			}
+			meta[c.Name] = c
+			cs := "<T:Ljava/lang/Object;>Ljava/lang/Object;"
+			if scenario == "different bound" {
+				cs = "<T:Ljava/lang/String;>Ljava/lang/Object;"
+			}
+			ctx := &class_context.ClassContext{InvocationMetadata: func(n string) (callbinding.Class, bool) { c, ok := meta[n]; return c, ok }, SiblingClassSig: func(n string) (string, map[string]string, bool) {
+				return cs, map[string]string{class_context.MethodDescKey("build", desc): "(Ljava/lang/Object;)TT;"}, n == "probe/Factory"
+			}}
+			actualDesc := "(Ljava/lang/Object;)Ljava/lang/String;"
+			if scenario == "narrow input" {
+				actualDesc = "(Ljava/lang/String;)Ljava/lang/String;"
+			}
+			if scenario == "void result" {
+				actualDesc = "(Ljava/lang/Object;)V"
+			}
+			actual := values.NewCustomValue(func(*class_context.ClassContext) string { return actualDesc }, func() types.JavaType { return types.NewJavaClass("java.lang.invoke.MethodType") })
+			captured := []values.JavaValue{values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.Object"))}
+			abi := "(Lprobe/Factory;)Ljava/util/function/Function;"
+			if scenario == "missing capture ABI" {
+				abi = ""
+			}
+			if scenario == "wrong capture ABI" {
+				abi = "(Ljava/lang/Object;)Ljava/util/function/Function;"
+			}
+			out := methodRefErasedReceiver(ctx, impl, actual, captured, abi)
+			changed := out[0] != captured[0]
+			if changed != (scenario == "exact") {
+				t.Fatalf("view=%v", changed)
+			}
+			if changed {
+				cast := out[0].(*values.CastExpression)
+				if cast.Value != captured[0] || !cast.Binding {
+					t.Fatal("changed receiver evaluation")
+				}
 			}
 		})
 	}

@@ -112,6 +112,9 @@ func (f *FunctionCallExpression) planIncompleteErasedOwner(ctx *class_context.Cl
 // poly arguments. Those require separate target/inference/effect evidence. An
 // unchanged descriptor result cannot introduce a use-site narrowing check.
 func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassContext) (*FunctionCallExpression, bool) {
+	return f.planErasedInvocationProof(ctx, false)
+}
+func (f *FunctionCallExpression) planErasedInvocationProof(ctx *class_context.ClassContext, erasedResultUse bool) (*FunctionCallExpression, bool) {
 	if f == nil || ctx == nil || ctx.InvocationMetadata == nil || ctx.SiblingClassSig == nil ||
 		f.Object == nil || f.IsStatic || f.IsSpecialInvoke || f.FunctionName == "<init>" ||
 		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface) {
@@ -127,12 +130,21 @@ func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassCo
 		return nil, false
 	}
 	end := strings.IndexByte(sig, ')')
-	if end < 0 || sig[end+1:] != result { // No class or method variable in the result.
+	if end < 0 {
+		return nil, false
+	}
+	resultToken := sig[end+1:]
+	if resultToken != result && !erasedResultUse {
 		return nil, false
 	}
 	bounds := erasedInvocationBounds(classSig)
 	if len(bounds) == 0 {
 		return nil, false
+	}
+	if resultToken != result {
+		if !strings.HasPrefix(resultToken, "T") || !strings.HasSuffix(resultToken, ";") || bounds[resultToken[1:len(resultToken)-1]] != result {
+			return nil, false
+		}
 	}
 	_, declared, _ := types.ParseMethodSignatureFull(sig, ctx)
 	if len(declared) != len(params) {
@@ -141,18 +153,25 @@ func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassCo
 	tokens := make([]string, len(params))
 	usesClassFormal := false
 	for i, param := range declared {
-		if param == nil || param.IsArray() || types.IsWildcardType(param) {
+		if param == nil || (!erasedResultUse && param.IsArray()) || types.IsWildcardType(param) {
 			return nil, false
 		}
 		if _, nested := types.AsParameterizedType(param); nested {
 			return nil, false
 		}
-		name, _ := types.RawClassFQN(param)
+		base, rank := param, 0
+		for base.IsArray() {
+			rank++
+			base = base.ElementType()
+		}
+		name, _ := types.RawClassFQN(base)
 		if bound := bounds[name]; bound != "" {
+			prefix := strings.Repeat("[", rank)
+			bound = prefix + bound
 			if bound != params[i] {
 				return nil, false
 			}
-			tokens[i] = "T" + name + ";"
+			tokens[i] = strings.Repeat("[", rank) + "T" + name + ";"
 			usesClassFormal = true
 		} else {
 			tokens[i] = bindingType(param)
@@ -163,7 +182,7 @@ func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassCo
 	}
 	// Reconstruct the entire Signature with tagged variables. Substring
 	// replacement could confuse TA; with a class whose binary name ends in TA.
-	if !usesClassFormal || sig != "("+strings.Join(tokens, "")+")"+result {
+	if !usesClassFormal || sig != "("+strings.Join(tokens, "")+")"+resultToken {
 		return nil, false
 	}
 	raw, args := f.receiverParamTypeArgs(ctx)
@@ -180,7 +199,27 @@ func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassCo
 	if raw == "" {
 		raw, _ = types.RawClassFQN(f.Object.Type())
 	}
-	inst, _, formals := types.ResolveInstantiatedSignatureExact(ctx, ctx.SiblingClassSig, raw, args, f.FunctionName, f.Descriptor, len(params))
+	if len(args) == 0 && sameErasureClassName(raw, ctx.ClassName) {
+		if receiver, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && receiver.IsThis {
+			// `this` is the current generic declaration, even though its stack
+			// descriptor is raw. Only its own unshadowed formals can supply the
+			// identity substitution; arbitrary raw locals remain unresolved.
+			cs, _, known := invocationSignatureEvidence(ctx, strings.ReplaceAll(raw, ".", "/"))
+			owned := types.ClassFormalTypeParamNames(cs)
+			for _, name := range owned {
+				for _, shadow := range types.MethodFormalTypeParamNames(ctx.CurrentMethodSig) {
+					if name == shadow {
+						return nil, false
+					}
+				}
+				if !known || !ctx.IsTypeParam(name) {
+					return nil, false
+				}
+				args = append(args, types.NewJavaClass(name))
+			}
+		}
+	}
+	inst, _, formals := types.ResolveInstantiatedSignatureExact(ctx, func(n string) (string, map[string]string, bool) { return invocationSignatureEvidence(ctx, n) }, raw, args, f.FunctionName, f.Descriptor, len(params))
 	if len(inst) != len(params) || len(formals) != 0 {
 		return nil, false
 	}
@@ -199,12 +238,18 @@ func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassCo
 	family, e2 := callbinding.FamilyOf(callbinding.Witness{Owner: declaring, Name: f.FunctionName, Desc: f.Descriptor, Kind: kind}, ctx.InvocationMetadata)
 	metadata, known := ctx.InvocationMetadata(declaring)
 	if e != nil || e2 != nil || !original.Complete || !family.Complete || !known || !metadata.Public ||
-		family.Target == nil || !family.Target.Public || family.Target.Static || family.Target.Bridge || family.Target.Varargs {
+		family.Target == nil || !family.Target.Public || family.Target.Static || family.Target.Bridge || (family.Target.Varargs && !erasedResultUse) {
 		return nil, false
 	}
 	for _, m := range family.Methods {
 		ps, ret, e := callbinding.Descriptor(m.Desc)
-		if e != nil || m.Varargs || (!m.Bridge && strings.Join(ps, "") == strings.Join(params, "") && ret != result) {
+		if e != nil || (m.Varargs && (!erasedResultUse || m.Desc != f.Descriptor)) || (!m.Bridge && strings.Join(ps, "") == strings.Join(params, "") && ret != result) {
+			return nil, false
+		}
+	}
+	if family.Target.Varargs {
+		last := len(params) - 1
+		if last < 0 || !strings.HasPrefix(params[last], "[") || f.Arguments[last] == nil || bindingType(f.Arguments[last].Type()) != params[last] {
 			return nil, false
 		}
 	}
@@ -216,6 +261,15 @@ func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassCo
 		actual := erasedInvocationArgumentType(arg, params[i])
 		if !callbinding.Assignable(actual, params[i], ctx.InvocationMetadata) || inst[i] == nil {
 			return nil, false
+		}
+		if erasedResultUse {
+			// An in-scope formal may also carry a stronger recursive bound
+			// (T extends Algebra<T>). Its recovered source declaration owns
+			// that relationship; descriptor-only erasure must not replace it
+			// with Object arguments on a still-parameterized receiver.
+			if name, ok := types.RawClassFQN(inst[i]); ok && !inst[i].IsArray() && ctx.IsTypeParam(name) && !IsNullLiteral(UnpackSoltValue(arg)) {
+				return nil, false
+			}
 		}
 		if types.IsWildcardType(inst[i]) {
 			conflict = true
@@ -322,7 +376,7 @@ func erasedInvocationDeclaration(ctx *class_context.ClassContext, owner, name, d
 				if m.Name != name || m.Desc != desc {
 					continue
 				}
-				cs, methods, known := ctx.SiblingClassSig(node)
+				cs, methods, known := invocationSignatureEvidence(ctx, node)
 				if !known || found != "" {
 					return "", "", ""
 				}
@@ -396,4 +450,39 @@ func erasedInvocationBounds(sig string) map[string]string {
 		return nil
 	}
 	return result
+}
+
+// Discarded results and existing CHECKCASTs carry explicit erased use evidence.
+// Generic class results may be viewed raw there without a new payload check.
+func (f *FunctionCallExpression) PlanErasedClassResultUse(ctx *class_context.ClassContext) (*FunctionCallExpression, bool) {
+	if ctx != nil && ctx.Getenv("JDEC_ERASED_CLASS_RESULT_USE_OFF") != "" {
+		return nil, false
+	}
+	return f.planErasedInvocationProof(ctx, true)
+}
+
+// Platform declaration Signatures belong to this proof's evidence scope. Do
+// not feed them into unrelated legacy generic inference, where unconstrained
+// captures could otherwise become non-denotable source types (e.g. ? super ?).
+func invocationSignatureEvidence(ctx *class_context.ClassContext, name string) (string, map[string]string, bool) {
+	if ctx == nil {
+		return "", nil, false
+	}
+	if ctx.SiblingClassSig != nil {
+		if cs, m, ok := ctx.SiblingClassSig(name); ok {
+			return cs, m, true
+		}
+	}
+	if ctx.InvocationMetadata == nil {
+		return "", nil, false
+	}
+	meta, ok := ctx.InvocationMetadata(name)
+	if !ok || meta.Name != name || !meta.MembersComplete || !meta.ParentsComplete {
+		return "", nil, false
+	}
+	m := map[string]string{}
+	for _, method := range meta.Methods {
+		m[class_context.MethodDescKey(method.Name, method.Desc)] = method.Signature
+	}
+	return meta.Signature, m, true
 }

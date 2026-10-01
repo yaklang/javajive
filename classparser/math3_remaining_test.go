@@ -79,3 +79,10 @@ func TestErfTwoArgEmptyIfReturnIsLoadBearing(t *testing.T) {
 		"return ((var1) < (0D)) ? ((erfc(-var1)) - (erfc(-var0))) : ((erfc(-var0)) - (erfc(var1)));",
 		"if ((var0) < (-0.4769362762044697D)){\n\n\t\t\t}else{")
 }
+
+func TestMathRecoveryPreservesLoopDeclarationIdentities(t *testing.T) {
+	body := "package org.apache.commons.math3.distribution;\nclass BetaDistribution$ChengBetaSampler {\n double scan() {\n\t\tdouble var10 = 0.0;\n\t\tdouble var6 = (var2) + ((1D) / (var5));\n\t\tdo{\n\t\t\tdouble var7 = 2;\n var14 = (var2) * (FastMath.exp(var13));\n } while(true); } }"
+	if got := fixMath3RemainingReconstructs(body); got != body {
+		t.Fatalf("changed a proved declaration or its store:\n%s", got)
+	}
+}

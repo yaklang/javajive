@@ -5389,13 +5389,11 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 			field := values.NewRefMember(cur.stackConsumed[1], staticVal.Member, staticVal.JavaType)
 			cur.SelfOpFolded = true
-			return values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-				return fmt.Sprintf("(%s = %s)", field.String(funcCtx), storedValue.String(funcCtx))
-			}, func() types.JavaType {
-				return storedValue.Type()
-			}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-				field.ReplaceVar(oldId, newId)
-				storedValue.ReplaceVar(oldId, newId)
+			// Keep the field store enumerable and use the same assignment
+			// lowering as a standalone putfield. A CustomValue string hid its
+			// target Signature and bypassed invariant-generic store repair.
+			return values.NewAssignmentExpression(field, storedValue, int(cur.CurrentOffset), func(ctx *class_context.ClassContext) string {
+				return "(" + statements.NewAssignStatement(field, storedValue, false).String(ctx) + ")"
 			})
 		}
 		var arm func(entry *OpCode) values.JavaValue
@@ -6315,6 +6313,9 @@ func (d *Decompiler) ParseStatement() error {
 	// statement building. fastjson2 ObjectReaderBaseModule:793 (var7.getParameters receiver).
 	d.rebindIncompatibleInvokeArgs()
 	d.unifyReferenceWebs()
+	d.propagateNullOnlyLocalLoads()
+	d.refreshReferenceOperandSnapshotTypes()
+	d.unifyNumericExitWebs()
 	d.restoreOptionalSupplierDefinitionViews()
 	protectedStores, protectedEdges, err := d.lowerProtectedStackStores()
 	if err != nil {

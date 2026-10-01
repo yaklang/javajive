@@ -75,3 +75,10 @@ func TestWildcardThisRepairPreservesDescriptorPin(t *testing.T) {
 		t.Fatalf("lost binding/evaluation or kept prelude: %s", out)
 	}
 }
+
+func TestIORecoveryDoesNotAppendReturnAfterTerminalLoop(t *testing.T) {
+	body := "package org.apache.commons.io;\nclass Probe {\n boolean read() {\n\t\tdo{}while(true);\n\t\t}\n\t}\n\tprivate static boolean contentEquals(Iterator<?> var0, Iterator<?> var1) { return true; }"
+	if got := fixCommonsIoRemainingReconstructs(body); got != body {
+		t.Fatalf("appended an unreachable return:\n%s", got)
+	}
+}

@@ -1,11 +1,32 @@
 package values
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
+
+// A selected generic argument view may need an unchecked conversion between
+// invariant parameterizations. The descriptor establishes the raw head of
+// that already-selected cast. Bridging through the same head changes source
+// inference without introducing a different runtime CHECKCAST or evaluation.
+func (f *FunctionCallExpression) renderProvenArgumentCast(i int, target string, arg JavaValue, ctx *class_context.ClassContext) string {
+	expr := arg.String(ctx)
+	_, rawAllocation := UnpackSoltValue(arg).(*NewExpression)
+	if strings.Contains(target, "<") && !strings.HasSuffix(target, "[]") && !rawAllocation && !isWitnessLambdaArg(UnpackSoltValue(arg)) {
+		if param := f.witnessDescriptorParamType(i); param != nil && !param.IsArray() {
+			raw := param.String(ctx)
+			if raw == erasureNameOf(target) {
+				return fmt.Sprintf("(%s)(%s)(%s)", target, raw, expr)
+			}
+		}
+	}
+	return fmt.Sprintf("(%s)(%s)", target, expr)
+}
 
 // A raw allocation's constructor parameters are erased. If another overload
 // competes, preserve the actual invokespecial descriptor before any generic
@@ -35,6 +56,9 @@ func (f *FunctionCallExpression) rawConstructorBindingCast(i int, arg JavaValue,
 	if _, parameterized := types.AsParameterizedType(allocation.Type()); parameterized || allocation.genericCtorDiamond(ctx) != "" {
 		return ""
 	}
+	if f.constructorMethodFormalCallerInference(i, arg, ctx) {
+		return ""
+	}
 	param := f.witnessDescriptorParamType(i)
 	if param == nil || !isWitnessReferenceType(param) {
 		return ""
@@ -54,4 +78,71 @@ func (f *FunctionCallExpression) rawConstructorBindingCast(i int, arg JavaValue,
 		return ""
 	}
 	return renderWitnessParamType(param, ctx)
+}
+
+// A non-generic allocated class does not erase its constructor's method
+// formals. An already typed caller variable must keep its input inference if
+// every competing constructor is proved inapplicable at the source bound.
+func (f *FunctionCallExpression) constructorMethodFormalCallerInference(i int, arg JavaValue, ctx *class_context.ClassContext) bool {
+	if ctx == nil || ctx.InvocationMetadata == nil || ctx.SiblingClassSig == nil || arg == nil || arg.Type() == nil {
+		return false
+	}
+	owner := strings.ReplaceAll(f.ClassName, ".", "/")
+	cs, methods, known := ctx.SiblingClassSig(owner)
+	if !known || len(types.ClassFormalTypeParamNames(cs)) != 0 {
+		return false
+	}
+	sig := methods[class_context.MethodDescKey("<init>", f.Descriptor)]
+	if !strings.HasPrefix(sig, "<") {
+		return false
+	}
+	bounds := erasedInvocationBounds(sig)
+	_, params, _ := types.ParseMethodSignatureFull(sig, ctx)
+	ps, _, err := callbinding.Descriptor(f.Descriptor)
+	if err != nil || i < 0 || i >= len(ps) || len(params) != len(ps) || len(f.Arguments) != len(ps) {
+		return false
+	}
+	for _, value := range f.Arguments {
+		if value == nil || value.Type() == nil {
+			return false
+		}
+	}
+	formal, bare := types.RawClassFQN(params[i])
+	if !bare || bounds[formal] != ps[i] || !erasedInvocationCallerFormal(arg.Type(), ps[i], ctx) {
+		return false
+	}
+	c, known := ctx.InvocationMetadata(owner)
+	if !known || !c.MembersComplete {
+		return false
+	}
+	for _, m := range c.Methods {
+		if m.Name != "<init>" || m.Desc == f.Descriptor {
+			continue
+		}
+		competing, _, err := callbinding.Descriptor(m.Desc)
+		if err != nil || m.Varargs {
+			return false
+		}
+		if len(competing) != len(ps) {
+			continue
+		}
+		excluded := false
+		for j, other := range competing {
+			if f.Arguments[j] == nil || f.Arguments[j].Type() == nil {
+				return false
+			}
+			actual := erasedInvocationArgumentType(f.Arguments[j], ps[j])
+			if erasedInvocationCallerFormal(f.Arguments[j].Type(), ps[j], ctx) {
+				actual = ps[j]
+			}
+			if !callbinding.Assignable(actual, other, ctx.InvocationMetadata) {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			return false
+		}
+	}
+	return true
 }

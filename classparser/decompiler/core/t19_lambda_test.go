@@ -419,3 +419,23 @@ func TestPolyLambdaInputErasureRequiresContravariantSameErasure(t *testing.T) {
 		})
 	}
 }
+
+func TestOperatorSAMRepeatsOneDescriptorType(t *testing.T) {
+	for _, tc := range []struct {
+		owner, desc string
+		valid       bool
+	}{
+		{"BinaryOperator", "(Ljava/util/Collection;Ljava/util/Collection;)Ljava/util/Collection;", true},
+		{"UnaryOperator", "(Ljava/lang/String;)Ljava/lang/String;", true},
+		{"BinaryOperator", "(Ljava/util/Collection;Ljava/lang/Object;)Ljava/util/Collection;", false},
+		{"UnaryOperator", "(Ljava/lang/String;)Ljava/lang/Object;", false},
+		{"BinaryOperator", "(Ljava/lang/Object;)Ljava/lang/Object;", false},
+		{"UnaryOperator", "(I)I", false},
+	} {
+		mt := values.NewCustomValue(func(*class_context.ClassContext) string { return tc.desc }, func() types.JavaType { return types.NewJavaClass("java.lang.invoke.MethodType") })
+		got := inferLambdaTypeFromInstantiated(types.NewJavaClass("java.util.function."+tc.owner), mt)
+		if (got != nil) != tc.valid {
+			t.Errorf("%s %s inferred %v", tc.owner, tc.desc, got)
+		}
+	}
+}

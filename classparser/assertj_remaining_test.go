@@ -60,10 +60,9 @@ func TestPreferredAssumptionFlatMapIsLoadBearing(t *testing.T) {
 		".flatMap((Function<Optional, Stream>)")
 }
 
-func TestMapsCloneDropsNSMEThrowsIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/Maps.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"private static <K, V> Map<K, V> clone(Map<K, V> var0) {",
-		"private static <K, V> Map<K, V> clone(Map<K, V> var0) throws NoSuchMethodException {")
+func TestMapsClonePreservesDeclaredException(t *testing.T) {
+	const declaration = "private static <K, V> Map<K, V> clone(Map<K, V> var0) throws NoSuchMethodException {"
+	assertKillSwitchDecompile(t, "testdata/regression/Maps.class", "JDEC_ASSERTJ_REMAINING_OFF", declaration, declaration)
 }
 
 func TestAssumptionsGetConstructorCatchesNSMEIsLoadBearing(t *testing.T) {

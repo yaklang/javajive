@@ -65,18 +65,32 @@ func NewNewArrayExpression(typ types.JavaType, length ...JavaValue) *NewExpressi
 	}
 }
 
-// coerceInitializerLiteral renders an array-initializer element with the array's
-// element type when that yields more faithful source. Today this only matters for
-// boolean element types: a boolean[] initializer is filled by iconst_0/iconst_1,
-// whose values carry an int type, so they must be rendered as false/true.
+// The folded initializer replaces a JVM array store. CASTORE, BASTORE and
+// SASTORE narrow an int-category operand; Java array initializers require the
+// corresponding explicit conversion for non-constant int expressions. Apply
+// it at the store position, once, without changing the operand's shared type.
 func coerceInitializerLiteral(v JavaValue, elemType types.JavaType, funcCtx *class_context.ClassContext) string {
-	if lit, ok := v.(*JavaLiteral); ok {
-		if elemType.String(funcCtx) == types.NewJavaPrimer(types.JavaBoolean).String(funcCtx) {
+	if elemType == nil {
+		return v.String(funcCtx)
+	}
+	target, ok := elemType.RawType().(*types.JavaPrimer)
+	if !ok {
+		return v.String(funcCtx)
+	}
+	if target.Name == types.JavaBoolean {
+		if lit, ok := UnpackSoltValue(v).(*JavaLiteral); ok {
 			if n, ok := lit.Data.(int); ok {
-				if n == 0 {
+				if n&1 == 0 {
 					return "false"
 				}
 				return "true"
+			}
+		}
+	}
+	if target.Name == types.JavaByte || target.Name == types.JavaChar || target.Name == types.JavaShort {
+		if v.Type() != nil {
+			if actual, ok := v.Type().RawType().(*types.JavaPrimer); ok && actual.Name == types.JavaInteger {
+				return fmt.Sprintf("((%s)(%s))", elemType.String(funcCtx), v.String(funcCtx))
 			}
 		}
 	}
@@ -115,11 +129,9 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 			}
 			vsStr := []string{}
 			for _, v := range n.Initializer {
-				// Coerce int 0/1 literals to boolean false/true when the array element type is
-				// boolean: iconst_0/iconst_1 fill a boolean[] but carry an int type, so without
-				// this coercion the initializer renders `new boolean[]{1,1,1,1}`, which javac
-				// rejects ("int cannot be converted to boolean").
-				vsStr = append(vsStr, coerceInitializerLiteral(v, base, funcCtx))
+				// Restore the immediate element store, not the innermost
+				// leaf type of a multidimensional array.
+				vsStr = append(vsStr, coerceInitializerLiteral(v, n.JavaType.ElementType(), funcCtx))
 			}
 			s += fmt.Sprintf("{%s}", strings.Join(vsStr, ","))
 			return s
@@ -988,8 +1000,22 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 	}
 	// Same-class instance field receiver (`this.field`): recover type args from the field's generic
 	// Signature; an inherited field (declared in a superclass) is recovered via the hierarchy walk.
-	if pt, ok := types.AsParameterizedType(RecoverThisFieldInstantiatedType(funcCtx, f.Object)); ok {
+	fieldType := RecoverThisFieldInstantiatedType(funcCtx, f.Object)
+	if pt, ok := types.AsParameterizedType(fieldType); ok {
 		return pt.RawClassName, pt.TypeArgs
+	}
+	if name, ok := types.RawClassFQN(fieldType); ok && funcCtx.IsTypeParam(name) {
+		shadowed := false
+		for _, methodFormal := range types.MethodFormalTypeParamNames(funcCtx.CurrentMethodSig) {
+			shadowed = shadowed || methodFormal == name
+		}
+		if !shadowed {
+			if bound := types.FormalTypeParamBounds(funcCtx.ClassSig)[name]; bound != nil {
+				if pt, ok := types.AsParameterizedType(bound); ok {
+					return pt.RawClassName, pt.TypeArgs
+				}
+			}
+		}
 	}
 	if pt, ok := types.AsParameterizedType(recoverParameterizedFieldReceiver(funcCtx, f.Object)); ok {
 		return pt.RawClassName, pt.TypeArgs
@@ -1027,9 +1053,9 @@ func RecoverThisFieldInstantiatedType(funcCtx *class_context.ClassContext, field
 		return types.ParseSignature(sig)
 	}
 	if funcCtx.Getenv("JDEC_INHERITED_FIELD_SIG_OFF") == "" && funcCtx.SiblingClassSig != nil &&
-		funcCtx.SiblingFieldSig != nil && funcCtx.ClassSig != "" && funcCtx.ClassName != "" {
+		funcCtx.SiblingFieldSig != nil && funcCtx.ClassName != "" {
 		formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
-		if len(formals) > 0 {
+		{
 			recvArgs := make([]types.JavaType, len(formals))
 			for i, n := range formals {
 				recvArgs[i] = types.NewJavaClass(n)
@@ -3716,7 +3742,7 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		}
 	}
 	if cast := f.thisCtorOverloadArgCast(i, funcCtx); cast != "" {
-		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}
 	if cast := f.rawConstructorBindingCast(i, arg, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
@@ -3799,7 +3825,7 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 	}
 	if cast := f.invariantGenericArgumentBridge(i, funcCtx); cast != "" {
-		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}
 	if cast := f.nestedGenericErasureArgCast(i, arg, funcCtx); cast != "" {
 		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
@@ -4617,6 +4643,9 @@ func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) str
 
 func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext) string {
 	if !f.bindingPlanned {
+		if planned, ok := f.planErasedMethodInput(funcCtx); ok {
+			return planned.renderCall(funcCtx)
+		}
 		if planned, ok := f.planErasedInvocation(funcCtx); ok {
 			return planned.renderCall(funcCtx)
 		}

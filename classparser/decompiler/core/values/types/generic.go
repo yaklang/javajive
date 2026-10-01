@@ -1645,7 +1645,14 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 	for _, st := range supers {
 		pt, isPT := st.RawType().(*JavaParameterizedType)
 		if !isPT || pt.RawClassName == "" {
-			continue // raw supertype carries no mapping -> cannot substitute, skip this subtree
+			raw, known := RawClassFQN(st)
+			parentSig, _, available := provider(dotToInternal(raw))
+			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
+				if t := resolveParamWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, paramIndex, visited); t != nil {
+					return t
+				}
+			}
+			continue
 		}
 		childArgs := make([]JavaType, len(pt.TypeArgs))
 		for i, ta := range pt.TypeArgs {
@@ -1729,7 +1736,14 @@ func resolveReturnWalk(funcCtx *class_context.ClassContext, provider ClassSigPro
 	for _, st := range supers {
 		pt, isPT := st.RawType().(*JavaParameterizedType)
 		if !isPT || pt.RawClassName == "" {
-			continue // raw supertype carries no mapping -> cannot substitute, skip this subtree
+			raw, known := RawClassFQN(st)
+			parentSig, _, available := provider(dotToInternal(raw))
+			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
+				if t := resolveReturnWalk(funcCtx, provider, dotToInternal(raw), nil, method, argc, visited); t != nil {
+					return t
+				}
+			}
+			continue
 		}
 		childArgs := make([]JavaType, len(pt.TypeArgs))
 		for i, ta := range pt.TypeArgs {
@@ -1878,6 +1892,13 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 	for _, st := range supers {
 		pt, isPT := st.RawType().(*JavaParameterizedType)
 		if !isPT || pt.RawClassName == "" {
+			raw, known := RawClassFQN(st)
+			parentSig, _, available := provider(dotToInternal(raw))
+			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
+				if ps, r, fs := resolveSignatureWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, visited); len(ps) > 0 || r != nil {
+					return ps, r, fs
+				}
+			}
 			continue
 		}
 		childArgs := make([]JavaType, len(pt.TypeArgs))
@@ -1968,7 +1989,16 @@ func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSi
 	for _, st := range supers {
 		pt, isPT := st.RawType().(*JavaParameterizedType)
 		if !isPT || pt.RawClassName == "" {
-			continue // raw supertype carries no mapping -> cannot substitute, skip this subtree
+			// A non-generic parent has no substitution to lose. A raw generic
+			// parent remains unresolved: never borrow its unbound names.
+			raw, known := RawClassFQN(st)
+			parentSig, _, available := classProvider(dotToInternal(raw))
+			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
+				if t := resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(raw), nil, fieldName, visited); t != nil {
+					return t
+				}
+			}
+			continue
 		}
 		childArgs := make([]JavaType, len(pt.TypeArgs))
 		for i, ta := range pt.TypeArgs {

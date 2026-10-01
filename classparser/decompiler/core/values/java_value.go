@@ -29,6 +29,9 @@ type JavaRef struct {
 	// WebDeclType is the declaration type solved from all definitions in an
 	// immutable local def-use web. Keep it separate from mutable expression types.
 	WebDeclType types.JavaType
+	// SolvedWebIdentity is immutable evidence from the complete def-use web.
+	// Source naming may change Id, but must not split this proved identity.
+	SolvedWebIdentity *utils.VariableId
 	// nullTypeAdopted records that a null-initialized slot (`T x = null`, Val is the null literal so
 	// IsNullInitialized stays true forever) has ALREADY adopted a concrete reference type via the
 	// AssignVarGuarded null-adopt shortcut. Because ResetVarType only repoints typ and never clears

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"reflect"
 	"strings"
 
@@ -16,6 +17,8 @@ type EvaluationSnapshot struct {
 	Value    values.JavaValue
 	OriginPC int
 	Operand  bool
+	// Call-site descriptor type, used only for a proved constant-null copy.
+	ExpectedType types.JavaType
 }
 
 func (d *Decompiler) snapshotDynamicOperands(op *OpCode, sim StackSimulation, args []values.JavaValue, parameters []types.JavaType) ([]values.JavaValue, error) {
@@ -30,14 +33,16 @@ func (d *Decompiler) snapshotDynamicOperands(op *OpCode, sim StackSimulation, ar
 	for i := len(args) - 1; i >= 0; i-- {
 		ref := sim.NewVar(args[i])
 		ref.ResetVarType(ref.Type().Copy())
+		var expected types.JavaType
 		if len(parameters) == len(args) {
 			want := parameters[len(args)-1-i]
+			expected = want.Copy()
 			if _, ok := want.RawType().(*types.JavaPrimer); ok {
 				ref.ResetVarType(want.Copy())
 			}
 		}
 		d.disFoldRef = append(d.disFoldRef, ref)
-		d.evaluationSnapshots[op] = append(d.evaluationSnapshots[op], EvaluationSnapshot{Ref: ref, Value: args[i], OriginPC: int(op.CurrentOffset), Operand: true})
+		d.evaluationSnapshots[op] = append(d.evaluationSnapshots[op], EvaluationSnapshot{Ref: ref, Value: args[i], OriginPC: int(op.CurrentOffset), Operand: true, ExpectedType: expected})
 		result[i] = ref
 	}
 	return result, nil
@@ -54,6 +59,17 @@ func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
 	for _, op := range d.opCodes {
 		for _, snapshot := range d.evaluationSnapshots[op] {
 			if !snapshot.Operand || snapshot.Ref == nil {
+				continue
+			}
+			// Constant propagation has proved this operand to be null; the
+			// snapshot may adopt its call-site reference descriptor without a
+			// CHECKCAST. Preserve that capture type in the inlined lambda body
+			// instead of exposing an Object placeholder to overload inference.
+			if values.IsNullLiteral(values.UnpackSoltValue(snapshot.Value)) && snapshot.ExpectedType != nil {
+				if _, primitive := snapshot.ExpectedType.RawType().(*types.JavaPrimer); !primitive && !reflect.DeepEqual(snapshot.Ref.Type().RawType(), snapshot.ExpectedType.RawType()) {
+					snapshot.Ref.ResetVarType(snapshot.ExpectedType.Copy())
+					changed = true
+				}
 				continue
 			}
 			source, ok := values.UnpackSoltValue(snapshot.Value).(*values.JavaRef)
@@ -78,7 +94,21 @@ func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
 
 func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, value values.JavaValue) values.JavaValue {
 	if d.canInlineImmediateMethodRef(op, value) {
-		return value
+		// An explicit target preserves the bootstrap's existing SAM adaptation
+		// even when the consuming declaration is outside this compilation unit.
+		// Only adjacent consumption permits replacing eager operand snapshots.
+		for _, snapshot := range d.evaluationSnapshots[op] {
+			if !snapshot.Operand {
+				continue
+			}
+			source := snapshot.Value
+			ref := snapshot.Ref
+			ref.CustomValue = values.NewCustomValue(func(ctx *class_context.ClassContext) string { return source.String(ctx) }, func() types.JavaType { return source.Type() })
+		}
+		delete(d.evaluationSnapshots, op)
+		typed := &values.CastExpression{Value: value, TargetType: value.Type().Copy(), Binding: true, OriginPC: int(op.CurrentOffset)}
+		name, _ := types.RawClassFQN(value.Type())
+		return &values.CastExpression{Value: typed, TargetType: types.NewJavaClass(name), Binding: true, OriginPC: int(op.CurrentOffset)}
 	}
 	ref := sim.NewVar(value)
 	ref.ResetVarType(ref.Type().Copy())
@@ -89,13 +119,13 @@ func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, valu
 
 // canInlineImmediateMethodRef keeps a method reference as a poly expression
 // only when the next instruction consumes it as the final argument of a
-// same-class invocation whose functional-interface parameter exactly matches
-// the invokedynamic result type. The declaration being rebuilt in the same
-// compilation unit preserves its generic target signature; external calls can
-// cross raw receiver/erasure boundaries, so their typed temporary stays.
+// invocation whose functional-interface parameter exactly matches the
+// invokedynamic result erasure. The explicit original SAM target prevents an
+// external raw receiver from changing parameter or result adaptation. Pure
+// capture copies can be read at this adjacent use; effectful captures stay.
 func (d *Decompiler) canInlineImmediateMethodRef(op *OpCode, value values.JavaValue) bool {
 	ref, ok := value.(*values.CustomValue)
-	if !ok || ref == nil || !ref.IsMethodRef || d == nil || d.constantPoolGetter == nil ||
+	if !ok || ref == nil || (!ref.IsMethodRef && ref.Flag != "lambda") || !ref.CapturesKnown || d == nil || d.constantPoolGetter == nil ||
 		d.FunctionContext == nil || d.FunctionContext.ClassName == "" ||
 		op == nil || op.Instr == nil || op.Instr.OpCode != OP_INVOKEDYNAMIC {
 		return false
@@ -121,15 +151,82 @@ func (d *Decompiler) canInlineImmediateMethodRef(op *OpCode, value values.JavaVa
 		return false
 	}
 	params := member.JavaType.FunctionType().ParamTypes
+	if !ref.IsMethodRef {
+		result := member.JavaType.FunctionType().ReturnType
+		if result == nil {
+			return false
+		}
+		primitive, ok := result.RawType().(*types.JavaPrimer)
+		if !ok || primitive.Name != types.JavaBoolean {
+			return false
+		}
+	}
 	if len(params) == 0 || params[len(params)-1] == nil || ref.Type() == nil {
 		return false
 	}
-	ownerType, ownerOK := params[len(params)-1].RawType().(*types.JavaClass)
-	refType, refOK := ref.Type().RawType().(*types.JavaClass)
-	if !ownerOK || ownerType == nil || !refOK || refType == nil ||
-		normalizeJavaClassName(member.Name) != normalizeJavaClassName(d.FunctionContext.ClassName) ||
-		normalizeJavaClassName(ownerType.Name) != normalizeJavaClassName(refType.Name) {
+	ownerType, ownerOK := types.RawClassFQN(params[len(params)-1])
+	refType, refOK := types.RawClassFQN(ref.Type())
+	if !ownerOK || !refOK || normalizeJavaClassName(ownerType) != normalizeJavaClassName(refType) {
 		return false
+	}
+	for _, snapshot := range d.evaluationSnapshots[op] {
+		if !snapshot.Operand || snapshot.Ref == nil {
+			return false
+		}
+		switch v := values.UnpackSoltValue(snapshot.Value).(type) {
+		case *values.JavaLiteral:
+		case *values.JavaRef:
+			if v == nil || v.CustomValue != nil || v.StackVar != nil {
+				return false
+			}
+			if !ref.IsMethodRef && !d.immutableCaptureParameter(v) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// Lambda source captures must be effectively final even if the consumer
+// retains the closure after this call. A parameter with no writes anywhere in
+// the complete opcode stream is stable; arbitrary locals remain snapshots.
+func (d *Decompiler) immutableCaptureParameter(ref *values.JavaRef) bool {
+	if ref.IsThis {
+		return true
+	}
+	if !ref.IsParam || len(d.opCodes) == 0 {
+		return false
+	}
+	slot := -1
+	index := 0
+	for _, value := range d.Params {
+		param, ok := values.UnpackSoltValue(value).(*values.JavaRef)
+		if !ok || param == nil || param.Type() == nil {
+			return false
+		}
+		if values.SameLocal(ref, param) {
+			if slot >= 0 {
+				return false
+			}
+			slot = index
+		}
+		index++
+		if primitive, ok := param.Type().RawType().(*types.JavaPrimer); ok && (primitive.Name == types.JavaLong || primitive.Name == types.JavaDouble) {
+			index++
+		}
+	}
+	if slot < 0 {
+		return false
+	}
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil {
+			return false
+		}
+		if LocalAccessOf(op.Instr.OpCode).Write && GetStoreIdx(op) == slot {
+			return false
+		}
 	}
 	return true
 }

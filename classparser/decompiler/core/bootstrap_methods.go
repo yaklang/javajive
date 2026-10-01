@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"reflect"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -492,6 +493,26 @@ func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodT
 
 	typeArgs := []types.JavaType{}
 	switch rawName {
+	case "java.util.function.BinaryOperator", "java.util.function.UnaryOperator":
+		// These standard declarations repeat one variable at every SAM input
+		// and result. A single descriptor equality class establishes its erased
+		// argument; conflicting occurrences supply no instantiation proof.
+		arity := 1
+		if rawName == "java.util.function.BinaryOperator" {
+			arity = 2
+		}
+		if len(mtParams) != arity || mtRet == nil {
+			return nil
+		}
+		for _, input := range mtParams {
+			if !reflect.DeepEqual(input.RawType(), mtRet.RawType()) {
+				return nil
+			}
+		}
+		if _, primitive := mtRet.RawType().(*types.JavaPrimer); primitive {
+			return nil
+		}
+		typeArgs = append(typeArgs, mtRet)
 	case "java.util.function.BiFunction":
 		if len(mtParams) >= 2 {
 			typeArgs = append(typeArgs, mtParams[0], mtParams[1])
