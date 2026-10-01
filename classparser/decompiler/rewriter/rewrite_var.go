@@ -2428,9 +2428,9 @@ func topLevelDeclDominatesAllUses(list []statements.Statement, id *utils.Variabl
 // child that declares id itself is covered (must NOT hoist; the VarFold dual-scope shape). Declaration
 // statements are matched by id identity and never counted as uses. Compound statements are recursed
 // into instead of name-matched whole, so an inner self-declaring scope never makes its enclosing
-// if/loop look like an uncovered use. A compound statement's own head (condition/selector) is not
-// separately inspected here: that conservative miss can only fail to hoist (matching the prior
-// existence-only behaviour, never a new over-hoist), so it cannot regress already-valid output.
+// if/loop look like an uncovered use. Conditions/selectors are evaluated in the
+// enclosing scope. For initializer and catch parameter definitions cover only
+// their respective child scopes, never the following sibling statement.
 func blockHasUncoveredRef(list []statements.Statement, id *utils.VariableId, name string, declaredOut bool) bool {
 	declared := declaredOut
 	for _, st := range list {
@@ -2451,8 +2451,25 @@ func blockHasUncoveredRef(list []statements.Statement, id *utils.VariableId, nam
 			}
 			continue
 		}
-		for _, cl := range children {
-			if blockHasUncoveredRef(*cl, id, name, declared) {
+		childDeclared := declared
+		if loop, ok := st.(*statements.ForStatement); ok {
+			if init, ok := loop.InitVar.(*statements.AssignStatement); ok && init.ArrayMember == nil && (init.IsFirst || init.IsDeclare) {
+				if ref, ok := core.UnpackSoltValue(init.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id == id {
+					childDeclared = true
+				}
+			}
+		}
+		if !childDeclared && statementHeadReferencesName(st, name, stmtRenderMemo{}) {
+			return true
+		}
+		for i, cl := range children {
+			bound := childDeclared
+			if handler, ok := st.(*statements.TryCatchStatement); ok && i > 0 && i-1 < len(handler.Exception) {
+				if ex := handler.Exception[i-1]; ex != nil && ex.Id == id {
+					bound = true
+				}
+			}
+			if blockHasUncoveredRef(*cl, id, name, bound) {
 				return true
 			}
 		}
@@ -2663,6 +2680,13 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 				belongs = refChildren >= 2
 			}
 			if !belongs {
+				continue
+			}
+			// Printed names can coincide in distinct live ranges (e.g. a
+			// branch-local ByteBuffer and a later Path). Name-based sibling
+			// counts are only candidates, not a proof that this identity
+			// escapes its declaration. Check before moving either definition.
+			if jdecenv.Get("JDEC_NO_CROSS_SCOPE_DOMINATE") == "" && topLevelDeclDominatesAllUses(list, id) {
 				continue
 			}
 			relocateDeclarations(block, id)

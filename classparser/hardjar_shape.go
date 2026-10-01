@@ -119,7 +119,9 @@ func fixHardjarCodeShapes(body string) string {
 	body = wrapWildcardArrayCompareValues(body)
 	body = wrapComparingIntDocAsScoreDoc(body)
 	body = wrapComputeIntValueLambda(body)
-	body = hoistIdentAssignedBeforeDecl(body)
+	// Declaration placement is proved on VariableId identities in the IR.
+	// A catch parameter assignment and a later, unrelated local may share a
+	// printed name; source text cannot prove that either declaration escapes.
 	body = retypeObjectUsedAsIntArray(body)
 	body = rewriteInvokeExactSelfToHandle(body)
 	body = retypeExecCatchWaitToInterrupted(body)
