@@ -3862,6 +3862,7 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	}
 	if ok1 && ok2 && expectClassType.Name != atcClassType.Name {
 		if expectClassType.Name != "java.lang.Object" && !suppressTypeVarArgCast(funcCtx, atcClassType, expectClassType) &&
+			!(!resolvedGeneric && f.unprovenWideningArgCast(arg.Type(), argType, funcCtx)) &&
 			!(!resolvedGeneric && f.calleeParamIsErasedTypeVar(i, funcCtx)) &&
 			!(!resolvedGeneric && jdkCalleeParamIsErasedTypeVar(f.ClassName, f.FunctionName, i, len(f.Arguments), argType, funcCtx)) &&
 			!classLiteralArgToClassParam(arg, expectClassType, funcCtx) {
@@ -4616,6 +4617,9 @@ func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) str
 
 func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext) string {
 	if !f.bindingPlanned {
+		if planned, ok := f.planErasedInvocation(funcCtx); ok {
+			return planned.renderCall(funcCtx)
+		}
 		if planned, ok := f.planErasedNullBinding(funcCtx); ok {
 			return planned.renderCall(funcCtx)
 		}
