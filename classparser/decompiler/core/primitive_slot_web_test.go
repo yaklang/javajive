@@ -35,6 +35,9 @@ func TestPrimitiveSlotStoresKeepDisjointIdentitiesBeforeTypeRecovery(t *testing.
 			t.Fatal(err)
 		}
 		flag := sim.GetVar(1)
+		invoke := op(OP_INVOKESTATIC, 2)
+		invoke.stackConsumed = []values.JavaValue{values.NewSlotValue(flag, flag.Type())}
+		d.invokeFuncCall[invoke] = &values.FunctionCallExpression{FuncType: types.NewJavaFuncType("(Z)V", []types.JavaType{types.NewJavaPrimer(types.JavaBoolean)}, types.NewJavaPrimer(types.JavaVoid))}
 		sim.Push(values.NewJavaLiteral(12, types.NewJavaPrimer(types.JavaInteger)))
 		if err := d.calcOpcodeStackInfo(sim, next); err != nil {
 			t.Fatal(err)
@@ -53,12 +56,16 @@ func TestPrimitiveSlotStoresKeepDisjointIdentitiesBeforeTypeRecovery(t *testing.
 }
 
 func TestPrimitiveStoreDisjointWebProof(t *testing.T) {
-	for _, kind := range []string{"disjoint", "same web", "shared identity", "missing target", "missing owner", "unknown identity", "reference", "parameter reuse", "parameter phi", "unknown parameter"} {
+	for _, kind := range []string{"disjoint", "same web", "shared identity", "missing target", "missing owner", "unknown identity", "reference", "ambiguous zero", "ambiguous one", "numeric sink", "numeric comparison", "missing operand", "parameter reuse", "parameter phi", "unknown parameter"} {
 		t.Run(kind, func(t *testing.T) {
 			first, next := op(OP_ISTORE_1, 1), op(OP_ISTORE_1, 3)
 			ref := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaBoolean))
 			value := values.NewJavaLiteral(12, types.NewJavaPrimer(types.JavaInteger))
 			d := &Decompiler{cachedSlotWebs: &slotWeb{webOf: map[*OpCode]int{first: 1, next: 2}, entryWeb: map[int]int{0: 1}}, opcodeIdToRef: map[*OpCode][][2]any{first: {{ref, true}}}}
+			invoke := op(OP_INVOKESTATIC, 2)
+			invoke.stackConsumed = []values.JavaValue{values.NewSlotValue(ref, ref.Type())}
+			call := &values.FunctionCallExpression{FuncType: types.NewJavaFuncType("(Z)V", []types.JavaType{types.NewJavaPrimer(types.JavaBoolean)}, types.NewJavaPrimer(types.JavaVoid))}
+			d.invokeFuncCall = map[*OpCode]*values.FunctionCallExpression{invoke: call}
 			switch kind {
 			case "same web":
 				d.cachedSlotWebs.webOf[next] = 1
@@ -74,6 +81,16 @@ func TestPrimitiveStoreDisjointWebProof(t *testing.T) {
 				d.opcodeIdToRef = nil
 			case "reference":
 				value = values.NewJavaLiteral(nil, types.NewJavaClass("java.lang.Object"))
+			case "ambiguous zero":
+				value = values.NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger))
+			case "ambiguous one":
+				value = values.NewJavaLiteral(1, types.NewJavaPrimer(types.JavaInteger))
+			case "numeric sink":
+				call.FuncType.ParamTypes[0] = types.NewJavaPrimer(types.JavaInteger)
+			case "numeric comparison":
+				invoke.stackConsumed[0] = values.NewBinaryExpression(ref, value, values.NE, types.NewJavaPrimer(types.JavaBoolean))
+			case "missing operand":
+				invoke.stackConsumed = nil
 			case "parameter reuse", "parameter phi", "unknown parameter":
 				ref.IsParam = true
 				d.opcodeIdToRef = nil
