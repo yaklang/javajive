@@ -4505,6 +4505,7 @@ func resolveLocalNameCollisions(params []values.JavaValue, body []statements.Sta
 		}
 	}
 	renameStatementsInScope(body, live)
+	nameMethodDeclarationIdentities(params, body)
 }
 
 // paramDescriptorNarrowType returns the parameter's authoritative descriptor type when that type is a

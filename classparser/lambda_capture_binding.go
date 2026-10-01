@@ -122,11 +122,12 @@ func lambdaCaptureBindings(lines []string) []*lambdaCaptureBinding {
 			if match != nil && start == match[6] {
 				typ := strings.TrimSpace(ln[match[4]:match[5]])
 				typ = strings.TrimPrefix(typ, "final ")
-				if prevTokenIsControlKeyword(typ) {
+				if !prevTokenIsControlKeyword(typ) {
+					scope.declarations[name] = &lambdaCaptureDeclaration{name: name, typ: typ, line: line, scope: scope}
 					continue
 				}
-				scope.declarations[name] = &lambdaCaptureDeclaration{name: name, typ: typ, line: line, scope: scope}
-				continue
+				// `return varN;` / `throw varN;` also match the declaration
+				// shape. Their operand remains a read of the visible binding.
 			}
 			if !lambdaCaptureTokenIsRead(ln, start, i) {
 				continue

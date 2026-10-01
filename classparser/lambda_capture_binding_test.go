@@ -64,3 +64,14 @@ func TestAdversarialLambdaCaptureKeepsNestedBindingAndLiteral(t *testing.T) {
 		t.Fatalf("nested lambda lost its own enclosing local:\n%s", out)
 	}
 }
+
+func TestAdversarialLambdaCaptureBareGenericDeclaration(t *testing.T) {
+	for _, header := range []string{"T run(T var0)", "@Mark() T run(T var0)"} {
+		in := "class C<T> {\n\t" + header + " {\n\t\tT var1;\n\t\twhile (true) {\n" +
+			"\t\t\tvar1 = var0;\n\t\t\tSupplier<T> var2 = () -> {\n\t\t\t\treturn var1;\n\t\t\t};\n\t\t}\n\t}\n}\n"
+		out := fixLambdaLoopCapture(in)
+		if !regexp.MustCompile(`final T var1_f\d+ = var1;`).MatchString(out) {
+			t.Fatalf("bare generic declaration was not captured for %q:\n%s", header, out)
+		}
+	}
+}
