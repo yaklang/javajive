@@ -1651,9 +1651,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Object, then `var5.withPrefix` cannot find symbol. Cast to JsonPOJOBuilder$Value.
 	// Kill-switch: JDEC_POJO_BUILDER_VALUE_CAST_OFF=1.
 	full = c.sourceRewrite("fixPOJOBuilderValueCast", "class_source", full, fixPOJOBuilderValueCast)
-	// jackson POJOPropertyBuilder.getField: Class locals assigned before declaration.
-	// Kill-switch: JDEC_GETFIELD_CLASS_HOIST_OFF=1.
-	full = c.sourceRewrite("fixGetFieldClassHoist", "class_source", full, fixGetFieldClassHoist)
+	// Local declarations are placed by VariableId and lexical dominance in
+	// RewriteVar. Reintroducing declarations from printed slot names here
+	// can duplicate a declaration already recovered by that typed pass.
 	full = c.sourceRewrite("fixJacksonRemainingReconstructs", "class_source", full, fixJacksonRemainingReconstructs)
 	// javac 9-13 TWR synthetic `$closeResource(Throwable, AutoCloseable)` invokeinterfaces
 	// AutoCloseable.close() which throws Exception, but the synthetic method does not declare
@@ -4042,7 +4042,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						"%s\n"+
 						c.GetTabString()+"}", values.SimplifyConditionValue(ret.ConditionValue).String(funcCtx), statementListToString(ret.Body))
 				case *statements.DoWhileStatement:
-					body := normalizeDoWhileBreakGuardSource(statementListToString(statements.NormalizeDoWhileDecrementGuard(ret.Body, funcCtx)))
+					body := statementListToString(statements.NormalizeDoWhileDecrementGuard(ret.Body, funcCtx))
 					statementStr = fmt.Sprintf(c.GetTabString()+"do{\n"+
 						"%s\n"+
 						c.GetTabString()+"} while (%s);", body, values.SimplifyConditionValue(ret.ConditionValue).String(funcCtx))
@@ -4718,7 +4718,6 @@ var mismatchedDoWhileIndexDeclRe = regexp.MustCompile(`int\s+(var\d+(?:_\d+)?)\s
 // monitorTempAssignRe matches a dead synthetic monitor temp left in the synchronized()
 // argument position, e.g. `var2 = this.lock`, capturing the lock expression itself.
 var monitorTempAssignRe = regexp.MustCompile(`^var\d+ = (.+)$`)
-var doWhileBreakGuardRe = regexp.MustCompile(`^(\s*)if \(([^\n{}]*)\)\{\n\s*break;\n\s*\}else\{`)
 
 // methodReturnTypeByName builds (and caches) a same-class method-name -> rendered-return-type map.
 // Constructors and void methods are skipped; a name overloaded with conflicting return types is
@@ -12107,34 +12106,6 @@ const DecompileStubMarker = "yak-decompiler:"
 // the marker degrades the whole method to an honest stub instead of emitting silently-wrong code.
 // It never survives into final output because the offending method is re-rendered as a stub.
 const malformedTryNoCatchMarker = "yak-decompiler-internal: try without catch handler"
-
-func normalizeDoWhileBreakGuardSource(body string) string {
-	match := doWhileBreakGuardRe.FindStringSubmatchIndex(body)
-	if len(match) < 6 {
-		return body
-	}
-	conditionStart, conditionEnd := match[4], match[5]
-	condition := strings.TrimSpace(body[conditionStart:conditionEnd])
-	if !shouldInvertDoWhileBreakGuard(condition) {
-		return body
-	}
-	return body[:conditionStart] + "!(" + condition + ")" + body[conditionEnd:]
-}
-
-func shouldInvertDoWhileBreakGuard(condition string) bool {
-	condition = strings.TrimSpace(condition)
-	if condition == "" || strings.HasPrefix(condition, "!") {
-		return false
-	}
-	// Only invert the common structured-loop shape where the positive loop/body
-	// condition (`i < n` / `i <= n`) was attached to the synthetic break arm.
-	// Already-negative break guards such as `i >= n` are semantically correct as-is.
-	if strings.Contains(condition, ">=") || strings.Contains(condition, ">") ||
-		strings.Contains(condition, "==") || strings.Contains(condition, "!=") {
-		return false
-	}
-	return strings.Contains(condition, "<")
-}
 
 func canFlattenNoCatchTry(body string) bool {
 	body = strings.TrimSpace(body)
