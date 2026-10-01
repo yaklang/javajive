@@ -160,3 +160,17 @@ func (v *LambdaIntersection) String(ctx *class_context.ClassContext) string {
 	return "((" + strings.Join(names, " & ") + ") (" + v.Value.String(ctx) + "))"
 }
 func (v *LambdaIntersection) ReplaceVar(old, new *utils.VariableId) { v.Value.ReplaceVar(old, new) }
+
+// RenderPrimitiveConversion preserves the verifier's int category after the
+// source type solver represents a proven 0/1 value as boolean. Java cannot
+// cast boolean to a number; the conditional recreates exactly the original
+// numeric operand, evaluates it once, and then performs the requested opcode.
+func RenderPrimitiveConversion(value JavaValue, target types.JavaType, ctx *class_context.ClassContext) string {
+	operand := value.String(ctx)
+	if value.Type() != nil {
+		if p, ok := value.Type().RawType().(*types.JavaPrimer); ok && p.Name == types.JavaBoolean {
+			operand = fmt.Sprintf("(%s) ? (1) : (0)", operand)
+		}
+	}
+	return fmt.Sprintf("(%s)(%s)", target.String(ctx), operand)
+}

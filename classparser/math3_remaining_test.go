@@ -1,6 +1,11 @@
 package javaclassparser
 
-import "testing"
+import (
+	"os"
+	"regexp"
+	"strings"
+	"testing"
+)
 
 func TestLutherFieldTLocalIsLoadBearing(t *testing.T) {
 	assertKillSwitchDecompile(t, "testdata/regression/LutherFieldStepInterpolator.class", "JDEC_MATH3_REMAINING_OFF",
@@ -68,10 +73,24 @@ func TestSymmLQMachPrecOrderIsLoadBearing(t *testing.T) {
 		"static final double CBRT_MACH_PREC = FastMath.cbrt(MACH_PREC);\n\tstatic final double MACH_PREC")
 }
 
-func TestPoissonBoolAsDoubleIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/PoissonDistribution.class", "JDEC_MATH3_REMAINING_OFF",
-		"((var25_1) ? (1.0D) : (0.0D))",
-		"((double)(var25_1))")
+func TestAdversarialPoissonBoolAsDoubleIsLoadBearing(t *testing.T) {
+	raw, err := os.ReadFile("testdata/regression/PoissonDistribution.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JDEC_MATH3_REMAINING_OFF", "1")
+	source, err := Decompile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(source, "? (1) : (0)") {
+		t.Fatalf("missing opcode-based bool/int conversion:\n%s", source)
+	}
+	for _, decl := range regexp.MustCompile(`boolean (var[0-9_]+)`).FindAllStringSubmatch(source, -1) {
+		if strings.Contains(source, "(double)("+decl[1]+")") {
+			t.Fatalf("illegal boolean-to-double cast: %s", decl[1])
+		}
+	}
 }
 
 func TestErfTwoArgEmptyIfReturnIsLoadBearing(t *testing.T) {

@@ -36,10 +36,11 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/fixture-java"
           # These short JVM processes exit before full JIT warmup pays off.
-          # Original and rebuilt programs use the same pinned JDK and VM option;
+          # One CPU and serial GC avoid competing compiler/GC pools on the
+          # two-core runner. Original and rebuilt programs use the same options;
           # the fixtures, assertions, test set and deadlines stay unchanged.
-          printf '#!/bin/sh\nexec "%s" -J-XX:TieredStopAtLevel=1 "$@"\n' "$(command -v javac)" > "$RUNNER_TEMP/fixture-java/javac"
-          printf '#!/bin/sh\nexec "%s" -XX:TieredStopAtLevel=1 "$@"\n' "$(command -v java)" > "$RUNNER_TEMP/fixture-java/java"
+          printf '#!/bin/sh\nexec "%s" -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 "$@"\n' "$(command -v javac)" > "$RUNNER_TEMP/fixture-java/javac"
+          printf '#!/bin/sh\nexec "%s" -XX:TieredStopAtLevel=1 -XX:+UseSerialGC -XX:ActiveProcessorCount=1 "$@"\n' "$(command -v java)" > "$RUNNER_TEMP/fixture-java/java"
           chmod +x "$RUNNER_TEMP/fixture-java/javac" "$RUNNER_TEMP/fixture-java/java"
           echo "$RUNNER_TEMP/fixture-java" >> "$GITHUB_PATH"
       - name: Build

@@ -84,9 +84,6 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.Replace(body, "var5[var8] = var5[var10_1];", "var5[var8] = var5[var10];", 1)
 		body = strings.Replace(body, "var5[var10_1] = var12_1;", "var5[var10] = var12_1;", 1)
 	}
-	if strings.Contains(body, "class PoissonDistribution") {
-		body = strings.ReplaceAll(body, "((double)(var25_1))", "((var25_1) ? (1.0D) : (0.0D))")
-	}
 	if strings.Contains(body, "class AVLTree$Node") {
 		body = strings.ReplaceAll(body, "Comparable var1 = this.element;", "T var1 = this.element;")
 	}

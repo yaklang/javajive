@@ -146,7 +146,16 @@ func (f *FunctionCallExpression) planErasedMethodInputProof(ctx *class_context.C
 		if !known || !meta.Public {
 			return nil, false
 		}
-		out.Object = &CastExpression{Value: f.Object, TargetType: types.NewJavaClass(strings.ReplaceAll(declaring, "/", ".")), Binding: true, OriginPC: f.OriginPC}
+		receiverValue := f.Object
+		if child, ok := UnpackSoltValue(receiverValue).(*FunctionCallExpression); ok {
+			// The proved raw receiver use also consumes the producer at its
+			// original result erasure. Propagate that use through fully proved
+			// fluent edges before freezing it in a binding cast.
+			if planned, ok := child.PlanErasedResultChain(ctx, "L"+owner+";"); ok {
+				receiverValue = planned
+			}
+		}
+		out.Object = &CastExpression{Value: receiverValue, TargetType: types.NewJavaClass(strings.ReplaceAll(declaring, "/", ".")), Binding: true, OriginPC: f.OriginPC}
 	}
 	for i, p := range ps {
 		if callbinding.Reference(p) {

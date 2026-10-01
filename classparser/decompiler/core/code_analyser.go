@@ -3996,53 +3996,37 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		runtimeStackSimulation.Push(values.NewBinaryExpression(var1, var2, op, resultType))
 	case OP_I2B, OP_I2C, OP_I2D, OP_I2F, OP_I2L, OP_I2S, OP_L2D, OP_L2F, OP_L2I, OP_F2D, OP_F2I, OP_F2L, OP_D2F, OP_D2I, OP_D2L:
-		var fname string
 		var typ types.JavaType
 		switch opcode.Instr.OpCode {
 		case OP_I2B:
-			fname = TypeCaseByte
 			typ = types.NewJavaPrimer(types.JavaByte)
 		case OP_I2C:
-			fname = TypeCaseChar
 			typ = types.NewJavaPrimer(types.JavaChar)
 		case OP_I2D:
-			fname = TypeCaseDouble
 			typ = types.NewJavaPrimer(types.JavaDouble)
 		case OP_I2F:
-			fname = TypeCaseFloat
 			typ = types.NewJavaPrimer(types.JavaFloat)
 		case OP_I2L:
-			fname = TypeCaseLong
 			typ = types.NewJavaPrimer(types.JavaLong)
 		case OP_I2S:
-			fname = TypeCaseShort
 			typ = types.NewJavaPrimer(types.JavaShort)
 		case OP_L2D:
-			fname = TypeCaseDouble
 			typ = types.NewJavaPrimer(types.JavaDouble)
 		case OP_L2F:
-			fname = TypeCaseFloat
 			typ = types.NewJavaPrimer(types.JavaFloat)
 		case OP_L2I:
-			fname = TypeCaseInt
 			typ = types.NewJavaPrimer(types.JavaInteger)
 		case OP_F2D:
-			fname = TypeCaseDouble
 			typ = types.NewJavaPrimer(types.JavaDouble)
 		case OP_F2I:
-			fname = TypeCaseInt
 			typ = types.NewJavaPrimer(types.JavaInteger)
 		case OP_F2L:
-			fname = TypeCaseLong
 			typ = types.NewJavaPrimer(types.JavaLong)
 		case OP_D2F:
-			fname = TypeCaseFloat
 			typ = types.NewJavaPrimer(types.JavaFloat)
 		case OP_D2I:
-			fname = TypeCaseInt
 			typ = types.NewJavaPrimer(types.JavaInteger)
 		case OP_D2L:
-			fname = TypeCaseLong
 			typ = types.NewJavaPrimer(types.JavaLong)
 		}
 		arg := runtimeStackSimulation.Pop().(values.JavaValue)
@@ -4052,7 +4036,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			// `(long)a * b` parses as `((long)a) * b` instead of `(long)(a * b)`,
 			// causing "possible lossy conversion" recompile failures. The extra parens
 			// are always valid Java.
-			return fmt.Sprintf("(%s)(%s)", fname, arg.String(funcCtx))
+			return values.RenderPrimitiveConversion(arg, typ, funcCtx)
 		}, func() types.JavaType {
 			return typ
 		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {

@@ -448,3 +448,25 @@ public class BoundedResultIntoCallerFormal {
  public static void main(String[]args){for(int i=0;i<4;i++)System.out.println(i+":"+run(i,true)+":"+run(i,false));}
 }`, func(name string) bool { return name != "BoundApi" }, Precision, Compatibility, "legacy")
 }
+
+func TestAdversarialBooleanNumericConversionsRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "BooleanNumericConversions", `public class BooleanNumericConversions {
+ static int trace;
+ static int flag(int input){trace=trace*10+1;return input<0?1:0;}
+ static String run(int input){trace=0;int value=input<0?1:0;trace=trace*10+1;if(value==0)trace=trace*10+2;else trace=trace*10+3;double d=(double)value;float f=(float)value;long l=(long)value;short s=(short)value;byte b=(byte)value;char c=(char)value;return d+":"+f+":"+l+":"+s+":"+b+":"+(int)c+":"+trace;}
+ public static void main(String[]args){for(int value:new int[]{Integer.MIN_VALUE,-1,0,1,Integer.MAX_VALUE})System.out.println(run(value));}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialErasedCollectorReceiverChainRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "ErasedCollectorReceiverChain", `import java.util.*;import java.util.function.*;import java.util.stream.*;
+class CollectorParent<A> {final A values;CollectorParent(A values){this.values=values;}}
+public class ErasedCollectorReceiverChain<E> extends CollectorParent<E[]> {
+ static int trace;ErasedCollectorReceiverChain(E[]values){super(values);}
+ List<E> filter(Predicate<? super E> predicate){return (List)((Stream)Arrays.stream((Object[])values)).filter((Predicate)predicate).collect(Collectors.toList());}
+ static String run(int mode){trace=0;String[] values=mode==0?null:new String[]{null,"a","bbb"};ErasedCollectorReceiverChain<String> instance=new ErasedCollectorReceiverChain<String>(values);Predicate<String> action=x->{trace=trace*10+1;if(x==null)return false;if(mode==2)throw new IllegalArgumentException();return x.length()>1;};try{return "ok:"+instance.filter(mode==3?null:action)+":"+trace;}catch(Throwable t){return t.getClass().getName()+":"+trace;}}
+ public static void main(String[]args){for(int i=0;i<4;i++)System.out.println(i+":"+run(i));}
+}`, Precision, Compatibility, "legacy")
+}
