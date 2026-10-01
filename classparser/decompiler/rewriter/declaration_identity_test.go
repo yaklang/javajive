@@ -3,6 +3,7 @@ package rewriter
 import (
 	"testing"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -33,6 +34,88 @@ func TestDeclarationPlacementKeepsDistinctScopedIdentities(t *testing.T) {
 	}
 }
 
+func TestDeclarationDominanceReadsDependenciesWithoutRendering(t *testing.T) {
+	ref := values.NewJavaRef(utils.NewRootVariableId().Next(), nil, types.NewJavaClass("Payload"))
+	ref.Id.SetName("var7")
+	renders := 0
+	capture := values.NewCustomValue(func(*class_context.ClassContext) string {
+		renders++
+		return "() -> null" // A rendering is not the capture dependency graph.
+	}, func() types.JavaType { return types.NewJavaClass("java.util.function.Supplier") })
+	capture.Flag, capture.CapturesKnown, capture.Captures = "lambda", true, []values.JavaValue{ref}
+	throw := &statements.CustomStatement{ThrownValue: ref, StringFunc: func(*class_context.ClassContext) string {
+		renders++
+		return "throw null;"
+	}}
+	for _, use := range []statements.Statement{statements.NewReturnStatement(capture), throw} {
+		if topLevelDeclDominatesAllUses([]statements.Statement{use}, ref.Id) {
+			t.Fatal("an explicit capture/throw dependency was lost because it was absent from rendered text")
+		}
+	}
+	if renders != 0 || ref.Id.String() != "var7" {
+		t.Fatal("typed declaration analysis rendered an expression or changed a variable name")
+	}
+}
+
+func TestDeclarationDominanceDoesNotCountProbeLiterals(t *testing.T) {
+	ref := values.NewJavaRef(utils.NewRootVariableId().Next(), nil, types.NewJavaClass("Payload"))
+	ref.Id.SetName("var7")
+	for _, code := range []string{`"__jdec_dom_probe__"`, `helper("__jdec_dom_probe__")`, `0 /* __jdec_dom_probe__ */`, "0 // __jdec_dom_probe__"} {
+		opaque := values.NewCustomValue(func(*class_context.ClassContext) string { return code }, func() types.JavaType { return types.NewJavaClass("java.lang.Object") })
+		if !topLevelDeclDominatesAllUses([]statements.Statement{statements.NewReturnStatement(opaque)}, ref.Id) {
+			t.Fatalf("literal/comment was mistaken for an identity reference: %s", code)
+		}
+	}
+}
+
+func TestDeclarationDominanceKeepsOpaqueIdentityAndRestoresName(t *testing.T) {
+	ref := values.NewJavaRef(utils.NewRootVariableId().Next(), nil, types.NewJavaClass("Payload"))
+	ref.Id.SetName("var7")
+	other := values.NewJavaRef(utils.NewRootVariableId().Next(), nil, ref.Type())
+	other.Id.SetName("var7")
+	for _, target := range []*values.JavaRef{ref, other} {
+		opaque := values.NewCustomValue(func(ctx *class_context.ClassContext) string {
+			return `helper("__jdec_dom_probe__", ` + target.String(ctx) + `)`
+		}, ref.Type)
+		got := topLevelDeclDominatesAllUses([]statements.Statement{statements.NewReturnStatement(opaque)}, ref.Id)
+		if got != (target != ref) || ref.Id.String() != "var7" || other.Id.String() != "var7" {
+			t.Fatal("opaque fallback confused distinct identities or leaked its temporary name")
+		}
+	}
+	opaque := values.NewCustomValue(func(*class_context.ClassContext) string { panic("unavailable legacy renderer") }, ref.Type)
+	if topLevelDeclDominatesAllUses([]statements.Statement{statements.NewReturnStatement(opaque)}, ref.Id) || ref.Id.String() != "var7" {
+		t.Fatal("failed legacy rendering must preserve the name and conservative uncovered-use result")
+	}
+}
+
+func TestDeclarationDominanceChecksInitializerBeforeBinding(t *testing.T) {
+	ref := values.NewJavaRef(utils.NewRootVariableId().Next(), nil, types.NewJavaPrimer(types.JavaInteger))
+	definition := statements.NewAssignStatement(ref, ref, true)
+	for _, root := range [][]statements.Statement{{definition}, {&statements.ForStatement{InitVar: definition}}} {
+		if topLevelDeclDominatesAllUses(root, ref.Id) {
+			t.Fatal("a declaration cannot supply the old value used by its own initializer")
+		}
+	}
+}
+
+func TestDeclarationDominanceSkipsStringCharacterCommentAndTextBlockTokens(t *testing.T) {
+	const name = "__jdec_dom_probe__"
+	for _, code := range []string{
+		`"__jdec_dom_probe__"`, `'__jdec_dom_probe__'`, `/* __jdec_dom_probe__ */`, "// __jdec_dom_probe__",
+		"\"\"\"\n__jdec_dom_probe__\n\"\"\"", `"escaped \\"" /* __jdec_dom_probe__ */`,
+		`prefix$__jdec_dom_probe__`, `__jdec_dom_probe__$suffix`, `变量__jdec_dom_probe__`,
+	} {
+		if codeContainsIdentifier(code, name) {
+			t.Fatalf("non-identifier text counted as a variable dependency: %q", code)
+		}
+	}
+	for _, code := range []string{`f(__jdec_dom_probe__)`, "// ignored\n__jdec_dom_probe__", `"ignored" + __jdec_dom_probe__`} {
+		if !codeContainsIdentifier(code, name) {
+			t.Fatalf("actual identifier dependency was skipped: %q", code)
+		}
+	}
+}
+
 func TestDeclarationPlacementStillCoversEscapingIdentity(t *testing.T) {
 	ref := values.NewJavaRef(utils.NewRootVariableId().Next(), nil, types.NewJavaClass("java.lang.String"))
 	definition := statements.NewAssignStatement(ref, values.NewJavaLiteral(nil, ref.Type()), true)
@@ -45,16 +128,27 @@ func TestDeclarationPlacementStillCoversEscapingIdentity(t *testing.T) {
 }
 
 func TestDeclarationDominanceIncludesControlHeads(t *testing.T) {
-	for _, shape := range []string{"if", "while"} {
+	for _, shape := range []string{"if", "while", "do while", "switch", "monitor", "for condition", "for update"} {
 		t.Run(shape, func(t *testing.T) {
 			ref := values.NewJavaRef(utils.NewRootVariableId().Next(), nil, types.NewJavaPrimer(types.JavaBoolean))
 			body := []statements.Statement{statements.NewAssignStatement(ref, values.NewJavaLiteral(false, ref.Type()), true)}
 			var container statements.Statement = &statements.IfStatement{Condition: ref, IfBody: body}
-			if shape == "while" {
+			switch shape {
+			case "while":
 				container = &statements.WhileStatement{ConditionValue: ref, Body: body}
+			case "do while":
+				container = &statements.DoWhileStatement{ConditionValue: ref, Body: body}
+			case "switch":
+				container = &statements.SwitchStatement{Value: ref, Cases: []*statements.CaseItem{{Body: body}}}
+			case "monitor":
+				container = &statements.SynchronizedStatement{Argument: ref, Body: body}
+			case "for condition":
+				container = &statements.ForStatement{Condition: &statements.ConditionStatement{Condition: ref}, SubStatements: body}
+			case "for update":
+				container = &statements.ForStatement{EndExp: statements.NewExpressionStatement(ref), SubStatements: body}
 			}
 			if topLevelDeclDominatesAllUses([]statements.Statement{container}, ref.Id) {
-				t.Fatal("a body declaration cannot cover the condition evaluated before it")
+				t.Fatal("a body declaration cannot cover an enclosing control-head use")
 			}
 		})
 	}
