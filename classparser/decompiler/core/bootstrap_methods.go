@@ -262,6 +262,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					}
 				}
 				refType = methodRefReceiverType(d.FunctionContext, refType, classMember, args1[2], len(capturedArgs))
+				capturedArgs = methodRefErasedReceiver(d.FunctionContext, classMember, args1[2], capturedArgs)
 			}
 			// Forward ReplaceVar to captured values for the SAME reason as the inlined-lambda branch:
 			// a bound instance method reference `receiver::method` renders its captured receiver

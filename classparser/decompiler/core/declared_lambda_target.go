@@ -30,13 +30,24 @@ func inferDeclaredLambdaTarget(d *Decompiler, raw types.JavaType, erased, instan
 
 // Bind declaration variables by their Signature identity, not SAM parameter order.
 // This conservative proof handles direct occurrences of Object-bounded class
-// variables only. Inherited SAMs, nested generic substitutions, method variables,
-// and stronger bounds require additional evidence and remain unchanged.
+// variables only. A variable appearing only in the throws clause is existential:
+// its bootstrap descriptor contains no binding, so retain a wildcard rather than
+// inventing Throwable (or a caller's same-spelled variable). Inherited SAMs,
+// nested generic substitutions and bounds on input/result variables still need
+// additional evidence and remain unchanged.
 func inferDeclaredSamInstantiation(name, classSig, sig, erased, actual string) types.JavaType {
 	formals := types.ClassFormalTypeParamNames(classSig)
 	if len(formals) == 0 {
 		return nil
 	}
+	// Keep Signature variable tags separate from class names. Only direct throws
+	// variables are eligible for existential arguments; malformed/foreign tokens
+	// and dependent/intersection bounds fail the exact prefix check below.
+	body, throws, valid := directSamThrows(sig)
+	if !valid {
+		return nil
+	}
+	erasures := types.ClassFormalTypeParamErasures(classSig)
 	prefix := "<"
 	known := map[string]bool{}
 	for _, f := range formals {
@@ -44,13 +55,24 @@ func inferDeclaredSamInstantiation(name, classSig, sig, erased, actual string) t
 			return nil
 		}
 		known[f] = true
-		prefix += f + ":Ljava/lang/Object;"
+		bound := "java.lang.Object"
+		if throws[f] {
+			if erased := erasures[f]; erased != "" {
+				bound = erased
+			}
+		}
+		prefix += f + ":L" + strings.ReplaceAll(bound, ".", "/") + ";"
 	}
 	prefix += ">"
 	if !strings.HasPrefix(classSig, prefix) {
 		return nil
 	}
-	declared, ok := directSamTokens(sig, true)
+	for variable := range throws {
+		if !known[variable] {
+			return nil
+		}
+	}
+	declared, ok := directSamTokens(body, true)
 	if !ok {
 		return nil
 	}
@@ -66,7 +88,7 @@ func inferDeclaredSamInstantiation(name, classSig, sig, erased, actual string) t
 	for i, token := range declared {
 		if strings.HasPrefix(token, "T") {
 			variable := token[1 : len(token)-1]
-			if !known[variable] || erasedTokens[i] != "Ljava/lang/Object;" || !(strings.HasPrefix(actualTokens[i], "L") || strings.HasPrefix(actualTokens[i], "[")) {
+			if !known[variable] || (throws[variable] && erasures[variable] != "java.lang.Object") || erasedTokens[i] != "Ljava/lang/Object;" || !(strings.HasPrefix(actualTokens[i], "L") || strings.HasPrefix(actualTokens[i], "[")) {
 				return nil
 			}
 			if prior, exists := substitutions[variable]; exists && prior != actualTokens[i] {
@@ -81,7 +103,11 @@ func inferDeclaredSamInstantiation(name, classSig, sig, erased, actual string) t
 	for i, f := range formals {
 		desc, exists := substitutions[f]
 		if !exists {
-			return nil
+			if !throws[f] {
+				return nil
+			}
+			args[i] = &types.JavaWildcardType{}
+			continue
 		}
 		typ, err := types.ParseDescriptor(desc)
 		if err != nil || typ == nil {
@@ -90,6 +116,27 @@ func inferDeclaredSamInstantiation(name, classSig, sig, erased, actual string) t
 		args[i] = typ
 	}
 	return types.NewParameterizedType(name, args)
+}
+
+// directSamThrows separates a direct SAM signature's optional throws clauses.
+// Throws do not occur in a JVM method descriptor, so they must not participate
+// in input/result matching. Concrete exception classes need no type binding.
+func directSamThrows(sig string) (string, map[string]bool, bool) {
+	parts := strings.Split(sig, "^")
+	variables := map[string]bool{}
+	for _, token := range parts[1:] {
+		if len(token) < 3 || token[len(token)-1] != ';' || strings.ContainsAny(token[1:len(token)-1], "<>():.[;") {
+			return "", nil, false
+		}
+		switch token[0] {
+		case 'T':
+			variables[token[1:len(token)-1]] = true
+		case 'L':
+		default:
+			return "", nil, false
+		}
+	}
+	return parts[0], variables, true
 }
 
 // Tokens retain TT; versus LT;: the generic type parser represents both as a

@@ -22,6 +22,7 @@ func TestDeclaredSamInstantiationProof(t *testing.T) {
 		{"reversed", two, "(TB;TA;)V", "(" + obj + obj + ")V", "(" + integer + text + ")V", []string{"java.lang.String", "java.lang.Integer"}},
 		{"repeated consistent", one, "(TT;TT;)V", "(" + obj + obj + ")V", "(" + text + text + ")V", []string{"java.lang.String"}},
 		{"return only", one, "()TT;", "()" + obj, "()" + text, []string{"java.lang.String"}},
+		{"concrete throws", one, "(TT;)V^Ljava/io/IOException;", "(" + obj + ")V", "(" + text + ")V", []string{"java.lang.String"}},
 		{"array actual", one, "(TT;)V", "(" + obj + ")V", "([I)V", []string{"int[]"}},
 		{"concrete class named T", one, "(LT;TT;)V", "(LT;" + obj + ")V", "(LT;" + text + ")V", []string{"java.lang.String"}},
 		{"repeated conflict", one, "(TT;TT;)V", "(" + obj + obj + ")V", "(" + text + integer + ")V", nil},
@@ -61,6 +62,51 @@ func TestDeclaredSamInstantiationProof(t *testing.T) {
 				}
 				if actual != tt.want[i] {
 					t.Fatalf("argument %d: %s want %s", i, actual, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestDeclaredSamThrowsOnlyVariablesKeepExistentialBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name, class, sig, actual string
+		want                     bool
+	}{
+		{"consumer", "<T:Ljava/lang/Object;E:Ljava/lang/Throwable;>Ljava/lang/Object;", "(TT;)V^TE;", "(Ljava/lang/Throwable;)V", true},
+		{"two inputs", "<A:Ljava/lang/Object;B:Ljava/lang/Object;E:Ljava/lang/Throwable;>Ljava/lang/Object;", "(TA;TB;)V^TE;", "(Ljava/lang/Long;Ljava/lang/Integer;)V", true},
+		{"return", "<T:Ljava/lang/Object;E:Ljava/lang/Exception;>Ljava/lang/Object;", "()TT;^TE;", "()Ljava/lang/String;", true},
+		{"unused without throws", "<T:Ljava/lang/Object;E:Ljava/lang/Throwable;>Ljava/lang/Object;", "(TT;)V", "(Ljava/lang/String;)V", false},
+		{"dependent throws bound", "<T:Ljava/lang/Object;E:TT;>Ljava/lang/Object;", "(TT;)V^TE;", "(Ljava/lang/String;)V", false},
+		{"intersection throws bound", "<T:Ljava/lang/Object;E:Ljava/lang/Throwable;:Ljava/io/Serializable;>Ljava/lang/Object;", "(TT;)V^TE;", "(Ljava/lang/String;)V", false},
+		{"strong input bound", "<T:Ljava/lang/Number;E:Ljava/lang/Throwable;>Ljava/lang/Object;", "(TT;)V^TE;", "(Ljava/lang/Integer;)V", false},
+		{"foreign throws variable", "<T:Ljava/lang/Object;E:Ljava/lang/Throwable;>Ljava/lang/Object;", "(TT;)V^TX;", "(Ljava/lang/String;)V", false},
+		{"malformed throws", "<T:Ljava/lang/Object;E:Ljava/lang/Throwable;>Ljava/lang/Object;", "(TT;)V^TE;junk", "(Ljava/lang/String;)V", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actual, ok := directSamTokens(tc.actual, false)
+			if !ok {
+				t.Fatal("invalid test descriptor")
+			}
+			erased := "("
+			for range actual[:len(actual)-1] {
+				erased += "Ljava/lang/Object;"
+			}
+			erased += ")" + actual[len(actual)-1]
+			if tc.name == "return" {
+				erased = "()Ljava/lang/Object;"
+			}
+			got := inferDeclaredSamInstantiation("example.Effect", tc.class, tc.sig, erased, tc.actual)
+			if (got != nil) != tc.want {
+				t.Fatalf("target=%v want=%v", got, tc.want)
+			}
+			if tc.want {
+				pt, ok := types.AsParameterizedType(got)
+				if !ok {
+					t.Fatal("missing target")
+				}
+				if _, wildcard := pt.TypeArgs[len(pt.TypeArgs)-1].(*types.JavaWildcardType); !wildcard {
+					t.Fatal("throws-only variable was guessed instead of captured")
 				}
 			}
 		})
