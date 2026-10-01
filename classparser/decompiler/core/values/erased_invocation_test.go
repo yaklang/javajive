@@ -151,7 +151,7 @@ func TestErasedInvocationRejectsIncompleteOrUnsafeProof(t *testing.T) {
 			case "argument narrowing":
 				f.Arguments[0] = NewJavaLiteral("bad", types.NewJavaClass("java.lang.String"))
 			case "primitive conversion":
-				f.Arguments[1] = NewJavaLiteral(1, types.NewJavaPrimer(types.JavaInteger))
+				f.Arguments[1] = NewJavaLiteral(2, types.NewJavaPrimer(types.JavaInteger))
 			case "poly argument":
 				f.Arguments[0] = &CustomValue{Flag: "lambda", TypeFunc: func() types.JavaType { return types.NewJavaClass("example.Item") }}
 			case "nil argument":
@@ -198,12 +198,17 @@ func TestErasedInvocationUnknownWideningDoesNotClaimBindingProof(t *testing.T) {
 	owner := classes["example/Owner"]
 	owner.Methods = owner.Methods[:1]
 	classes[owner.Name] = owner
+	if f.unprovenWideningArgCast(actual, formal, ctx) {
+		t.Fatal("unique generic inference may still need an argument view")
+	}
+	owner.Methods[0].Generic = false
+	classes[owner.Name] = owner
 	if !f.unprovenWideningArgCast(actual, formal, ctx) || ctx.OverloadFamilyUnproven {
 		t.Fatal("unique family must omit gratuitous widening without an unknown report")
 	}
 	delete(classes, "example/Owner")
-	if !f.unprovenWideningArgCast(actual, formal, ctx) || !ctx.OverloadFamilyUnproven {
-		t.Fatal("missing ancestor must stay unproven, without a speculative widening")
+	if f.unprovenWideningArgCast(actual, formal, ctx) {
+		t.Fatal("unknown family must not be treated as unique")
 	}
 	if f.unprovenWideningArgCast(formal, actual, ctx) {
 		t.Fatal("a necessary narrowing cast was omitted")
@@ -211,6 +216,67 @@ func TestErasedInvocationUnknownWideningDoesNotClaimBindingProof(t *testing.T) {
 	f.IsSpecialInvoke = true
 	if f.unprovenWideningArgCast(actual, formal, ctx) {
 		t.Fatal("special invocation needs a separate proof")
+	}
+}
+
+func TestIncompleteErasedOwnerPinsDescriptorWithoutClaimingCompleteness(t *testing.T) {
+	f, ctx, classes, _, _ := erasedInvocationFixture()
+	f.Arguments[0] = NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("example.Specific"))
+	delete(classes, "example/Owner")
+	out, ok := f.planIncompleteErasedOwner(ctx)
+	if !ok || !ctx.OverloadFamilyUnproven || out.Witness() != f.Witness() {
+		t.Fatal("partial view silently claimed complete binding")
+	}
+	if bindingType(out.Object.(*CastExpression).TargetType) != "Lexample/Owner;" || bindingType(out.Arguments[0].(*CastExpression).TargetType) != "Lexample/Item;" {
+		t.Fatal("partial view dropped descriptor pin")
+	}
+	if out.Object.(*CastExpression).Value != f.Object || out.Arguments[0].(*CastExpression).Value != f.Arguments[0] {
+		t.Fatal("changed operand evaluation identity")
+	}
+}
+
+func TestIncompleteErasedOwnerRejectsGuessing(t *testing.T) {
+	for _, scenario := range []string{"available parent", "declared method", "multiple parents", "not fixed", "no binding conflict", "not subtype", "nonvoid", "array", "poly", "static", "special", "foreign owner", "unknown child"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, ctx, classes, sigs, _ := erasedInvocationFixture()
+			f.Arguments[0] = NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("example.Specific"))
+			if scenario != "available parent" {
+				delete(classes, "example/Owner")
+			}
+			c := classes["example/Fixed"]
+			switch scenario {
+			case "declared method":
+				c.Methods = []callbinding.Method{{Name: "release", Desc: "(Ljava/lang/Object;)V", Public: true}}
+			case "multiple parents":
+				c.Parents = append(c.Parents, "example/Other")
+			case "not fixed":
+				sigs[c.Name] = "<T:Ljava/lang/Object;>Lexample/Owner<TT;>;"
+			case "no binding conflict":
+				f.Arguments[0] = NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("example.Item"))
+			case "not subtype":
+				f.Arguments[0] = NewJavaLiteral("bad", types.NewJavaClass("java.lang.String"))
+			case "nonvoid":
+				f.Descriptor = "(Lexample/Item;Z)Ljava/lang/Object;"
+			case "array":
+				f.Descriptor = "([Lexample/Item;Z)V"
+			case "poly":
+				f.Arguments[0] = &CustomValue{Flag: "lambda", TypeFunc: func() types.JavaType { return types.NewJavaClass("example.Specific") }}
+			case "static":
+				f.IsStatic = true
+			case "special":
+				f.IsSpecialInvoke = true
+			case "foreign owner":
+				f.ClassName = "example.Other"
+			case "unknown child":
+				delete(classes, c.Name)
+			}
+			if scenario != "unknown child" {
+				classes[c.Name] = c
+			}
+			if _, ok := f.planIncompleteErasedOwner(ctx); ok {
+				t.Fatal("unproven partial owner view accepted")
+			}
+		})
 	}
 }
 
@@ -228,5 +294,52 @@ func TestErasedInvocationCallerVariableErasureAndShadowing(t *testing.T) {
 	ctx.CurrentMethodSig = "<A:Ljava/lang/String;T:TA;>()V"
 	if erasedInvocationCallerFormal(param, "Ljava/lang/Object;", ctx) {
 		t.Fatal("unknown dependent erasure defaulted to Object")
+	}
+}
+
+func TestErasedInvocationBooleanMaterializationProof(t *testing.T) {
+	integer := types.NewJavaPrimer(types.JavaInteger)
+	boolean := types.NewJavaPrimer(types.JavaBoolean)
+	cond := NewJavaRef(utils.NewRootVariableId(), nil, boolean)
+	zero, one, two := NewJavaLiteral(0, integer), NewJavaLiteral(1, integer), NewJavaLiteral(2, integer)
+	inner := NewTernaryExpression(cond, one, zero)
+	shortCircuit := NewTernaryExpression(cond, inner, zero)
+	bad := NewTernaryExpression(cond, inner, two)
+	badCondition := NewTernaryExpression(two, one, zero)
+	cycle := &TernaryExpression{Condition: cond, FalseValue: zero}
+	cycle.TrueValue = cycle
+	for _, tc := range []struct {
+		name  string
+		value JavaValue
+		want  bool
+	}{
+		{"zero", zero, true}, {"one", one, true}, {"two", two, false},
+		{"materialization", inner, true}, {"short circuit", shortCircuit, true},
+		{"nonboolean arm", bad, false}, {"nonboolean condition", badCondition, false},
+		{"bare int", NewJavaRef(utils.NewRootVariableId(), nil, integer), false}, {"cycle", cycle, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := erasedInvocationBooleanValue(tc.value, map[*TernaryExpression]uint8{}, 0); got != tc.want {
+				t.Fatalf("proof=%v want %v", got, tc.want)
+			}
+		})
+	}
+	for _, partial := range []bool{false, true} {
+		f, ctx, classes, _, _ := erasedInvocationFixture()
+		f.Arguments[0] = NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("example.Specific"))
+		f.Arguments[1] = shortCircuit
+		if partial {
+			delete(classes, "example/Owner")
+		}
+		var out *FunctionCallExpression
+		var ok bool
+		if partial {
+			out, ok = f.planIncompleteErasedOwner(ctx)
+		} else {
+			out, ok = f.planErasedInvocation(ctx)
+		}
+		if !ok || out.Arguments[1] != shortCircuit || f.Arguments[1] != shortCircuit || shortCircuit.TrueValue != inner || inner.TrueValue != one {
+			t.Fatal("boolean proof must preserve original evaluation tree")
+		}
 	}
 }

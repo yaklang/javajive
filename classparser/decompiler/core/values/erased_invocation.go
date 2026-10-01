@@ -8,11 +8,10 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
-// Descriptor inequality alone does not require a source cast. An already
-// assignable argument needs a widening cast only to pin a competing overload;
-// widening it speculatively can erase an unavailable ancestor's generic
-// formal. Unknown stays unsupported, rather than masquerading as Unique. A
-// decoded CHECKCAST is part of arg itself and is never removed here.
+// A complete, unique NON-generic declaration needs no widening cast for an
+// already assignable value. Generic declarations still need their argument
+// views: even with one overload, a raw Iterable cast can control inference
+// between Iterable<E> and Consumer<? super E>. Unknown is not Unique.
 func (f *FunctionCallExpression) unprovenWideningArgCast(actual, formal types.JavaType, ctx *class_context.ClassContext) bool {
 	if f == nil || ctx == nil || f.IsStatic || f.IsSpecialInvoke || f.FunctionName == "<init>" ||
 		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface) || actual == nil || formal == nil ||
@@ -20,14 +19,86 @@ func (f *FunctionCallExpression) unprovenWideningArgCast(actual, formal types.Ja
 		!provenOverloadWidening(witnessRawClassName(actual), witnessRawClassName(formal), ctx) {
 		return false
 	}
-	switch f.overloadFamilyProof(ctx) {
-	case overloadUnique:
-		return true
-	case overloadUnknown:
-		f.noteUnknownOverloadFamily(ctx)
-		return true
+	if ctx.InvocationMetadata == nil {
+		return false
 	}
-	return false
+	family, err := callbinding.FamilyOf(callbinding.Witness{Owner: strings.ReplaceAll(f.ClassName, ".", "/"), Name: f.FunctionName, Desc: f.Descriptor}, ctx.InvocationMetadata)
+	return err == nil && family.Complete && family.Proof == callbinding.Unique && family.Target != nil && !family.Target.Generic
+}
+
+// A fixed child's Signature can expose a parameterized direct parent whose
+// bytes are unavailable. If the child declares no method of this name, a raw
+// view of that SAME parent plus the exact descriptor arguments preserves the
+// erased lookup. Dropping the argument cast alone is unsafe: the hidden parent
+// may also have an overload for the concrete payload type, even when the
+// selected method does not use its class variable at all.
+//
+// This is a partial source binding view, never a completeness proof. Unknown
+// access/throws declarations remain unsupported. Void, non-array descriptors
+// and widening-only operands avoid new result checks, varargs or poly inference.
+func (f *FunctionCallExpression) planIncompleteErasedOwner(ctx *class_context.ClassContext) (*FunctionCallExpression, bool) {
+	if f == nil || ctx == nil || ctx.InvocationMetadata == nil || ctx.SiblingClassSig == nil || f.Object == nil ||
+		f.IsStatic || f.IsSpecialInvoke || f.FunctionName == "<init>" || (f.Kind != InvokeVirtual && f.Kind != InvokeInterface) {
+		return nil, false
+	}
+	ps, ret, err := callbinding.Descriptor(f.Descriptor)
+	if err != nil || ret != "V" || len(ps) == 0 || len(ps) != len(f.Arguments) {
+		return nil, false
+	}
+	raw, ok := types.RawClassFQN(f.Object.Type())
+	if !ok || !sameErasureClassName(raw, f.ClassName) {
+		return nil, false
+	}
+	owner := strings.ReplaceAll(raw, ".", "/")
+	meta, known := ctx.InvocationMetadata(owner)
+	cs, _, sigKnown := ctx.SiblingClassSig(owner)
+	if !known || meta.Name != owner || !meta.MembersComplete || !meta.ParentsComplete || !sigKnown ||
+		len(meta.Parents) != 1 || len(types.ClassFormalTypeParamNames(cs)) != 0 {
+		return nil, false
+	}
+	for _, m := range meta.Methods {
+		if m.Name == f.FunctionName {
+			return nil, false
+		}
+	}
+	parent, ok := types.AsParameterizedType(types.ParseSignature(cs))
+	if !ok || len(parent.TypeArgs) == 0 || strings.ReplaceAll(parent.RawClassName, ".", "/") != meta.Parents[0] {
+		return nil, false
+	}
+	if _, available := ctx.InvocationMetadata(meta.Parents[0]); available {
+		return nil, false
+	}
+	// There must be an actual source constraint exposed by this fixed binding.
+	// Otherwise the existing renderer owns the call and needs no speculative view.
+	conflict := false
+	for i, arg := range f.Arguments {
+		if arg == nil || arg.Type() == nil || strings.HasPrefix(ps[i], "[") || isWitnessLambdaArg(UnpackSoltValue(arg)) {
+			return nil, false
+		}
+		actual := erasedInvocationArgumentType(arg, ps[i])
+		if !callbinding.Assignable(actual, ps[i], ctx.InvocationMetadata) {
+			return nil, false
+		}
+		for _, bound := range parent.TypeArgs {
+			if bound != nil && !types.IsWildcardType(bound) && actual == bindingType(bound) && actual != ps[i] {
+				conflict = true
+			}
+		}
+	}
+	if !conflict {
+		return nil, false
+	}
+	out := f.Clone()
+	out.Object = &CastExpression{Value: f.Object, TargetType: types.NewJavaClass(parent.RawClassName), Binding: true, OriginPC: f.OriginPC}
+	for i, p := range ps {
+		if callbinding.Reference(p) {
+			typ, _ := types.ParseDescriptor(p)
+			out.Arguments[i] = &CastExpression{Value: f.Arguments[i], TargetType: typ, Binding: true, OriginPC: f.OriginPC}
+		}
+	}
+	out.bindingPlanned = true
+	f.noteUnknownOverloadFamily(ctx)
+	return out, true
 }
 
 // Restore a source binding view, not the receiver's semantic type. A recovered
@@ -142,12 +213,7 @@ func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassCo
 		if arg == nil || arg.Type() == nil || isWitnessLambdaArg(UnpackSoltValue(arg)) {
 			return nil, false
 		}
-		actual := bindingType(arg.Type())
-		if IsNullLiteral(UnpackSoltValue(arg)) {
-			actual = "null"
-		} else if _, ok := UnpackSoltValue(arg).(*JavaClassValue); ok {
-			actual = "Ljava/lang/Class;"
-		}
+		actual := erasedInvocationArgumentType(arg, params[i])
 		if !callbinding.Assignable(actual, params[i], ctx.InvocationMetadata) || inst[i] == nil {
 			return nil, false
 		}
@@ -171,6 +237,50 @@ func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassCo
 	}
 	out.bindingPlanned = true
 	return out, true
+}
+
+func erasedInvocationArgumentType(arg JavaValue, descriptor string) string {
+	inner := UnpackSoltValue(arg)
+	if IsNullLiteral(inner) {
+		return "null"
+	}
+	if _, ok := inner.(*JavaClassValue); ok {
+		return "Ljava/lang/Class;"
+	}
+	if descriptor == "Z" && erasedInvocationBooleanValue(inner, map[*TernaryExpression]uint8{}, 0) {
+		return "Z"
+	}
+	return bindingType(arg.Type())
+}
+
+// The verifier's int stack category does not distinguish booleans. Recognize
+// only 0/1 literals and ternary trees with boolean conditions and proven 0/1
+// arms. Do not use coerceBooleanArgument as a proof: it can convert any int to
+// a nonzero test. Planning reads the tree without rewriting or evaluating it.
+// Memoization handles shared diamonds; cycles and excessive depth fail closed.
+func erasedInvocationBooleanValue(v JavaValue, memo map[*TernaryExpression]uint8, depth int) bool {
+	v = UnpackSoltValue(v)
+	if v == nil || depth > 64 {
+		return false
+	}
+	if t, ok := v.(*TernaryExpression); ok {
+		if state := memo[t]; state != 0 {
+			return state == 2
+		}
+		memo[t] = 1
+		valid := t.Condition != nil && isBooleanTyped(t.Condition) &&
+			erasedInvocationBooleanValue(t.TrueValue, memo, depth+1) &&
+			erasedInvocationBooleanValue(t.FalseValue, memo, depth+1)
+		if valid {
+			memo[t] = 2
+		}
+		return valid
+	}
+	if lit, ok := v.(*JavaLiteral); ok && bindingType(lit.Type()) == "I" {
+		value, ok := lit.Data.(int)
+		return ok && (value == 0 || value == 1)
+	}
+	return isBooleanTyped(v)
 }
 
 // An in-scope caller variable with this exact erasure needs no raw view: its

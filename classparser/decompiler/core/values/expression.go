@@ -4620,6 +4620,9 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 		if planned, ok := f.planErasedInvocation(funcCtx); ok {
 			return planned.renderCall(funcCtx)
 		}
+		if planned, ok := f.planIncompleteErasedOwner(funcCtx); ok {
+			return planned.renderCall(funcCtx)
+		}
 		if planned, ok := f.planErasedNullBinding(funcCtx); ok {
 			return planned.renderCall(funcCtx)
 		}

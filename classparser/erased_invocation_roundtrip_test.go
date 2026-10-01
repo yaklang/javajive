@@ -96,20 +96,77 @@ class HiddenItem { }
 class HiddenSpecific extends HiddenItem { }
 class MissingTrace { static int value; }
 class HiddenOwner<E extends HiddenItem> {
- public void take(E value,boolean flag) { MissingTrace.value=MissingTrace.value*10+3; }
+ public void take(E value,boolean flag) { MissingTrace.value=MissingTrace.value*10+(flag?3:8); }
+ public void plain(HiddenItem value) { MissingTrace.value=MissingTrace.value*10+5; }
+ public void plain(HiddenSpecific value) { MissingTrace.value=MissingTrace.value*10+6; }
 }
 class VisibleFixed extends HiddenOwner<HiddenSpecific> { }
 class VisibleOverride extends VisibleFixed {
- public void take(HiddenSpecific value,boolean flag) { MissingTrace.value=MissingTrace.value*10+4; }
+ public void take(HiddenSpecific value,boolean flag) { MissingTrace.value=MissingTrace.value*10+(flag?4:9); }
 }
 public class MissingAncestorCalls {
  static VisibleFixed owner(int mode) { MissingTrace.value=MissingTrace.value*10+1; return mode==0?new VisibleFixed():mode==1?new VisibleOverride():null; }
  static HiddenSpecific payload(boolean missing) { MissingTrace.value=MissingTrace.value*10+2; return missing?null:new HiddenSpecific(); }
+ static boolean flag(boolean value) { MissingTrace.value=MissingTrace.value*10+7; return value; }
  static String run(int mode,boolean missing) {
   MissingTrace.value=0;
-  try { owner(mode).take(payload(missing),true); return "ok:"+MissingTrace.value; }
+  try { owner(mode).take(payload(missing),flag(mode!=2)&&flag(!missing)); return "ok:"+MissingTrace.value; }
   catch(Throwable failure) { return failure.getClass().getName()+":"+MissingTrace.value; }
  }
- public static void main(String[] args) { for(int o=0;o<3;o++) for(int n=0;n<2;n++) System.out.println(o+":"+n+":"+run(o,n==0)); }
+ static String plain(int mode,boolean missing) {
+  MissingTrace.value=0;
+  try { owner(mode).plain((HiddenItem)payload(missing)); return "ok:"+MissingTrace.value; }
+  catch(Throwable failure) { return failure.getClass().getName()+":"+MissingTrace.value; }
+ }
+ public static void main(String[] args) { for(int o=0;o<3;o++) for(int n=0;n<2;n++) { System.out.println(o+":"+n+":"+run(o,n==0)); System.out.println("plain:"+o+":"+n+":"+plain(o,n==0)); } }
 }`, func(name string) bool { return name != "HiddenOwner" }, Precision, Compatibility, "legacy")
+}
+
+// A unique generic method can need a raw argument view to avoid inventing an
+// input constraint. A dual-interface value can need a descriptor pin even when
+// the external overload table is unavailable. These caught the rejected broad
+// "omit widening" attempt; neither may regress when fixing inherited erasure.
+func TestAdversarialUniqueGenericArgumentViewRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "GenericArgumentViews", `import java.util.*;
+import java.util.function.*;
+class ArgumentViewOps {
+ static int trace;
+ public <E> void check(Iterable<E> values,Consumer<? super E> sink) { trace=trace*10+1; for(E value:values) sink.accept(value); }
+ static void accept(String value) { trace=trace*10+2; if(value==null) throw new IllegalArgumentException(); }
+}
+public class GenericArgumentViews {
+ static String run(int mode) {
+  ArgumentViewOps.trace=0;
+  List<Object> values=new ArrayList<Object>();
+  values.add(mode==0?"ok":mode==1?null:Integer.valueOf(mode));
+  Consumer<String> sink=ArgumentViewOps::accept;
+  try { new ArgumentViewOps().check((Iterable)values,sink); return "ok:"+ArgumentViewOps.trace; }
+  catch(Throwable failure) { return failure.getClass().getName()+":"+ArgumentViewOps.trace; }
+ }
+ public static void main(String[] args) { for(int i=0;i<8;i++) System.out.println(i+":"+run(i)); }
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialUnknownDualInterfaceDescriptorRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlowWithResolverFilter(t, "DualInterfaceCalls", `import java.util.concurrent.*;
+class DualTrace { static int value; }
+class DualTask implements Callable<String>,Runnable {
+ public String call() { DualTrace.value=DualTrace.value*10+2; return "value"; }
+ public void run() { DualTrace.value=DualTrace.value*10+3; }
+}
+class HiddenDispatch {
+ public void submit(Callable<String> task) throws Exception { DualTrace.value=DualTrace.value*10+4; task.call(); }
+ public void submit(Runnable task) { DualTrace.value=DualTrace.value*10+5; task.run(); }
+}
+public class DualInterfaceCalls {
+ static String run(boolean missing) {
+  DualTrace.value=0;
+  DualTask task=missing?null:new DualTask();
+  try { new HiddenDispatch().submit((Callable)task); return "ok:"+DualTrace.value; }
+  catch(Throwable failure) { return failure.getClass().getName()+":"+DualTrace.value; }
+ }
+ public static void main(String[] args) { System.out.println(run(false)); System.out.println(run(true)); }
+}`, func(name string) bool { return name != "HiddenDispatch" }, Precision, Compatibility, "legacy")
 }
