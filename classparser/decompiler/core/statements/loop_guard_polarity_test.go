@@ -42,3 +42,17 @@ func TestDoWhileRenderingKeepsGuardPolarity(t *testing.T) {
 		}
 	}
 }
+
+func TestDoWhileRenderingSeparatesOpaqueStatements(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	texts := []string{"long[] buffer = null", "int count = 0", "use(buffer, count)"}
+	var body []Statement
+	for _, text := range texts {
+		text := text
+		body = append(body, NewCustomStatement(func(*class_context.ClassContext) string { return text }, nil))
+	}
+	loop := NewDoWhileStatement(values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), body)
+	if got := loop.String(ctx); !strings.Contains(got, strings.Join(texts, "\n")) {
+		t.Fatalf("opaque declaration and use tokens must remain separate statements: %s", got)
+	}
+}

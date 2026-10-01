@@ -106,7 +106,13 @@ func (w *DoWhileStatement) String(funcCtx *class_context.ClassContext) string {
 	normalizedBody := NormalizeDoWhileDecrementGuard(w.Body, funcCtx)
 	// Branch polarity belongs to the structured condition and its arms.
 	// Comparison spelling alone cannot determine which arm exits the loop.
-	body := StatementsString(normalizedBody, funcCtx)
+	parts := make([]string, 0, len(normalizedBody))
+	for _, statement := range normalizedBody {
+		parts = append(parts, statement.String(funcCtx))
+	}
+	// Opaque compatibility leaves do not carry their own separators. Keep
+	// the statement boundaries used by declaration/reference recovery.
+	body := strings.Join(parts, "\n")
 	s := fmt.Sprintf("do{\n%s\n}while(%s)", body, w.ConditionValue.String(funcCtx))
 	if w.Label != "" {
 		return fmt.Sprintf("%s: %s", w.Label, s)
