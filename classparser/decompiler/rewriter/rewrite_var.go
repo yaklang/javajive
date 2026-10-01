@@ -2580,16 +2580,21 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 				// common ancestor of all uses is exactly this block.
 				belongs = true
 			} else if cnt == 1 {
-				// Referenced from a single child container: it belongs here only if that container
-				// uses it in two or more of its OWN child scopes (both if-arms, >=2 switch cases,
-				// try+catch); otherwise the true home is deeper and recursion will place it.
+				// A body's declaration cannot bind the enclosing head, including
+				// an assignment folded into the condition. Keep that assignment
+				// in place; only its declaration belongs before the container.
+				// Printed-name counts nominate candidates; the head must use this
+				// exact identity, not a same-spelled local in another live range.
+				belongs = statementHeadReferencesIdentity(list[singleIdx], id)
+				// Otherwise this block is the lowest common ancestor only when
+				// at least two child scopes use the candidate.
 				refChildren := 0
 				for _, cl := range childStatementLists(list[singleIdx]) {
 					if statementsReferenceName(*cl, name, memo) {
 						refChildren++
 					}
 				}
-				belongs = refChildren >= 2
+				belongs = belongs || refChildren >= 2
 			}
 			if !belongs {
 				continue

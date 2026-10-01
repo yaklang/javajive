@@ -97,6 +97,13 @@ func statementHeadReferencesIdentity(st statements.Statement, id *utils.Variable
 		operands = []values.JavaValue{s.Value}
 	case *statements.SynchronizedStatement:
 		operands = []values.JavaValue{s.Argument}
+	case *statements.ForStatement:
+		// The loop's initializer has its own lexical binding, checked by
+		// blockHasUncoveredRef. Enumerate heads here without rendering a
+		// whole loop or mistaking dependencies of its body for head uses.
+		return statementHeadReferencesIdentity(s.InitVar, id) ||
+			statementHeadReferencesIdentity(s.Condition, id) ||
+			statementHeadReferencesIdentity(s.EndExp, id)
 	case *statements.ReturnStatement:
 		operands = []values.JavaValue{s.JavaValue}
 	case *statements.ExpressionStatement:
