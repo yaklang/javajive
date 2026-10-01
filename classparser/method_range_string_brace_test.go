@@ -27,12 +27,13 @@ func TestApplyLineBracesSkipsStringBraces(t *testing.T) {
 	}
 }
 
-// TestMethodRangeStringBraceIsLoadBearing pins applyLineBraces on the real decompile path.
+// TestMethodRangeStringBraceIsLoadBearing pins capture isolation on the real decompile path.
 // Spring SynthesizedMergedAnnotationInvocationHandler.toString reconstructs
 // `new StringBuilder("{")`; without string-aware counting the method range swallows
 // getAttributeValue and getName, so a local from another method is treated as the declaration
-// of getAttributeValue's captured Method parameter (an invalid non-Method final copy). Kill-switch:
-// JDEC_BRACE_SKIP_STRINGS_OFF.
+// of getAttributeValue's captured Method parameter (an invalid non-Method final copy).
+// Lexical capture binding must remain safe even when the old method-range walker
+// is disabled; TestApplyLineBracesSkipsStringBraces separately pins that walker.
 func TestMethodRangeStringBraceIsLoadBearing(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/SpringSynthesizedMergedAnnotationInvocationHandler.class")
 	if err != nil {
@@ -53,8 +54,8 @@ func TestMethodRangeStringBraceIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile (fix OFF) failed: %v", err)
 	}
-	if !methodParamCopiedAsWrongType(off) {
-		t.Errorf("fix OFF: expected a wrongly typed final copy of the Method param used with getReturnType, got:\n%s", off)
+	if methodParamCopiedAsWrongType(off) {
+		t.Errorf("lexical capture binding crossed a method scope with the brace walker disabled:\n%s", off)
 	}
 }
 

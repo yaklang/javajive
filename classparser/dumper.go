@@ -5460,8 +5460,10 @@ func assignTargetIs(ln, name string) bool {
 // and rewrite READS of <name> inside that lambda body to <name>_f. The copy is effectively-final
 // (single assignment), so the capture is legal; each loop iteration captures a fresh value.
 //
-// Detection is method-local (varN name reuse across methods) and depth-aware (only names read at a
-// STRICTLY DEEPER lambda depth than the declaration are captures). Kill-switch:
+// Detection resolves each read to an already visible lexical declaration. The
+// first lambda crossing that declaration's scope owns its snapshot, including
+// reads in nested lambdas. Same-name declarations in sibling scopes are distinct.
+// Kill-switch:
 // JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
 //
 // NOTE: chained-call lambdas (e.g. `flux.concatMap(x -> {...}).doOnTerminate(...)`) have the
@@ -5473,269 +5475,97 @@ func fixLambdaLoopCapture(body string) string {
 		return body
 	}
 	lines := strings.Split(body, "\n")
-	// declRe matches a local variable declaration (with or without initializer) to recover the
-	// declared type for the final copy. Captures both bare `Type varN;` and `Type varN = init;`.
-	declRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(?:=[^;]*)?;(\s*)$`)
-	// We process per-method so varN reuse across methods does not conflate. Collect method ranges.
 	type methodRange struct{ start, end int }
 	var methods []methodRange
-	{
-		i := 0
-		for i < len(lines) {
-			ln := strings.TrimRight(lines[i], "\r")
-			if isMethodOrInitBlockStart(ln) {
-				if jdecenv.Get("JDEC_FLC_DBG") == "1" && strings.Contains(ln, "isExtendedMap") {
-					fmt.Fprintf(os.Stderr, "[FLC] found method at L%d: %q\n", i+1, strings.TrimSpace(ln))
-				}
-				depth := 0
-				end := len(lines)
-				for k := i; k < len(lines); k++ {
-					lk := strings.TrimRight(lines[k], "\r")
-					var closed bool
-					depth, closed = applyLineBraces(lk, depth)
-					if closed {
-						end = k + 1
-						break
-					}
-				}
-				methods = append(methods, methodRange{i, end})
-				i = end
-				continue
-			}
+	for i := 0; i < len(lines); {
+		if !isMethodOrInitBlockStart(strings.TrimRight(lines[i], "\r")) {
 			i++
-		}
-	}
-	changed := false
-	// Each processed method may insert final-copy lines into the shared `lines`
-	// slice.  The ranges above were measured before any insertion, so walking
-	// them from the front would shift every still-pending range and eventually
-	// make one method inspect declarations from a different method.  Slot-derived
-	// names repeat across methods; that stale-coordinate bug retyped captures
-	// according to an unrelated later declaration (for example U -> int).
-	// Process bottom-up: edits in a later range never change the coordinates of
-	// any earlier range that remains to be processed.
-	for methodIndex := len(methods) - 1; methodIndex >= 0; methodIndex-- {
-		mr := methods[methodIndex]
-		mlines := lines[mr.start:mr.end]
-		depths := lambdaDepthPerLine(mlines)
-		// Collect captured names + their declared type + the lambda-opening line indices that read them.
-		type captureInfo struct {
-			declType string
-			// lambdaOpenSubIdxs: sub-line indices where a `-> {` lambda body begins that reads the name
-			// at a deeper depth than the declaration.
-			lambdaOpenSubIdxs []int
-		}
-		captured := map[string]*captureInfo{}
-		// First pass: for each bare decl, determine if it's captured and record capture sites.
-		for di, ln := range mlines {
-			lnClean := strings.TrimRight(ln, "\r")
-			m := declRe.FindStringSubmatch(lnClean)
-			if m == nil {
-				continue
-			}
-			declType := strings.TrimSpace(m[2])
-			name := m[3]
-			switch declType {
-			case "throw", "return", "new", "if", "else", "for", "while", "do", "switch", "case",
-				"break", "continue", "try", "catch", "finally", "synchronized", "assert":
-				continue
-			}
-			declDepth := depths[di]
-			// Find lambda bodies (-> {) in this method and check whether `name` is read at a deeper depth.
-			nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-			var openIdxs []int
-			for li, lraw := range mlines {
-				lln := strings.TrimRight(lraw, "\r")
-				if depths[li] <= declDepth {
-					continue
-				}
-				// Is there a read of name on this line?
-				readHere := false
-				for _, loc := range nameRe.FindAllStringIndex(lln, -1) {
-					before := lln[:loc[0]]
-					after := lln[loc[1]:]
-					bTrim := strings.TrimRight(before, " \t")
-					aTrim := strings.TrimLeft(after, " \t")
-					if strings.Contains(after, "->") &&
-						len(bTrim) > 0 && (bTrim[len(bTrim)-1] == '(' || bTrim[len(bTrim)-1] == ',') &&
-						(len(aTrim) > 0 && (aTrim[0] == ')' || aTrim[0] == ',')) {
-						continue
-					}
-					lineBefore := strings.TrimSpace(before)
-					if lineBefore != "" {
-						c := lineBefore[len(lineBefore)-1]
-						if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
-							continue
-						}
-					}
-					if strings.HasPrefix(aTrim, "=") && !strings.HasPrefix(aTrim, "==") {
-						continue
-					}
-					readHere = true
-					break
-				}
-				if readHere {
-					// Find the lambda-open line for this depth: the nearest preceding `-> {`.
-					openIdx := -1
-					for k := li; k >= 0; k-- {
-						kl := strings.TrimRight(mlines[k], "\r")
-						if idx := strings.Index(kl, "->"); idx >= 0 {
-							rest := kl[idx:]
-							if strings.Contains(rest, "{") && depths[k] > declDepth {
-								// Only handle lambdas that begin a fresh statement: the previous
-								// non-blank line must end in `;`, `{`, or `}` (a statement boundary).
-								// This avoids multi-line argument lambdas (e.g.
-								// `x.register(a, () -> {\n ... \n}, ...)`) where inserting a copy
-								// before the `-> {` line lands inside the enclosing call's argument
-								// list and breaks structure.
-								if lambdaLineIsStmtStart(mlines, k) {
-									openIdx = k
-								}
-								break
-							}
-						}
-					}
-					if openIdx >= 0 {
-						// dedupe
-						found := false
-						for _, e := range openIdxs {
-							if e == openIdx {
-								found = true
-								break
-							}
-						}
-						if !found {
-							openIdxs = append(openIdxs, openIdx)
-						}
-					}
-				}
-			}
-			if len(openIdxs) > 0 {
-				captured[name] = &captureInfo{declType: declType, lambdaOpenSubIdxs: openIdxs}
-				if jdecenv.Get("JDEC_FLC_DBG") == "1" {
-					fmt.Fprintf(os.Stderr, "[FLC] captured %s declType=%q openIdxs=%v\n", name, declType, openIdxs)
-				}
-			}
-		}
-		if len(captured) == 0 {
 			continue
 		}
-		// For each capture site, we need to:
-		//  1. insert a final copy line before the lambda-open line, and
-		//  2. rewrite reads of the name inside that lambda body to <name>_f.
-		// We collect insertions and rewrites, then apply them on the GLOBAL lines slice via offsets.
-		// Process capture sites in REVERSE order so earlier insert offsets remain valid.
-		type edit struct {
-			insertAtGlobal int
-			insertIndent   string
-			insertText     string
-			// rewrite within [bodyStartGlobal, bodyEndGlobal): replace word reads name -> fname
-			bodyStartGlobal int
-			bodyEndGlobal   int
-			name            string
-			fname           string
+		depth, end := 0, len(lines)
+		for k := i; k < len(lines); k++ {
+			var closed bool
+			depth, closed = applyLineBraces(lines[k], depth)
+			if closed {
+				end = k + 1
+				break
+			}
 		}
-		var edits []edit
-		copySeq := 0 // per-method counter for unique final-copy names
-		for name, ci := range captured {
-			// For EACH capture site, insert a dedicated final-copy (each lambda body may be in a
-			// different branch/scope, so one copy cannot cover all). The copy is inserted just before
-			// the lambda-open line (in the same scope), and ONLY that lambda body is rewritten.
-			for _, openSub := range ci.lambdaOpenSubIdxs {
-				openGlobal := mr.start + openSub
-				copySeq++
-				fname := fmt.Sprintf("%s_f%d", name, copySeq)
-				openLn := strings.TrimRight(lines[openGlobal], "\r")
-				insIndent := leadingTabs(openLn)
-				// Insertion point: normally the lambda-open line. But when the lambda is a deeply-
-				// nested argument (parenDepth ≥ 2), the `-> {` is mid-statement — inserting there is
-				// syntactically invalid. Walk back to the start of the enclosing statement (the
-				// nearest preceding line at a shallower-or-equal indent following a `;`/`}`/`{`
-				// boundary) and insert there instead.
-				insertAt := openGlobal
-				if arrowIdx := strings.Index(openLn, "->"); arrowIdx >= 0 {
-					parenDepth := 0
-					for i := 0; i < arrowIdx; i++ {
-						switch openLn[i] {
-						case '(':
-							parenDepth++
-						case ')':
-							parenDepth--
-						}
-					}
-					if parenDepth >= 2 {
-						stmtStart := findEnclosingStmtStart(lines, openGlobal, mr.start)
-						if stmtStart >= 0 {
-							insertAt = stmtStart
-							insIndent = leadingTabs(strings.TrimRight(lines[stmtStart], "\r"))
-						}
-					}
-				}
-				// The lambda body starts AFTER the `-> {` line. Find the matching close brace of the
-				// `-> {` block by brace depth.
-				bodyStart := openGlobal + 1
-				bodyEnd := bodyStart
+		methods = append(methods, methodRange{i, end})
+		i = end
+	}
+	// Bottom-up edits keep all unprocessed method coordinates valid.
+	changed := false
+	for mi := len(methods) - 1; mi >= 0; mi-- {
+		mr := methods[mi]
+		mlines := lines[mr.start:mr.end]
+		type readEdit struct {
+			lambdaCaptureRead
+			name string
+		}
+		type insertion struct {
+			line, sequence int
+			text           string
+		}
+		var reads []readEdit
+		var inserts []insertion
+		sequence := 0
+		for _, binding := range lambdaCaptureBindings(mlines) {
+			decl, lambda := binding.declaration, binding.lambda
+			if lambda.end == 0 {
+				continue // An incomplete block cannot prove a bounded capture.
+			}
+			insertAt := lambda.open
+			open := mlines[lambda.open]
+			if arrow := strings.Index(open, "->"); arrow >= 0 {
 				depth := 0
-				started := false
-				for k := openGlobal; k < len(lines); k++ {
-					lk := strings.TrimRight(lines[k], "\r")
-					for b := 0; b < len(lk); b++ {
-						switch lk[b] {
-						case '{':
-							depth++
-							started = true
-						case '}':
-							depth--
-						}
-					}
-					if started && depth <= 0 {
-						bodyEnd = k + 1
-						break
+				for _, c := range open[:arrow] {
+					if c == '(' {
+						depth++
+					} else if c == ')' {
+						depth--
 					}
 				}
-				edits = append(edits, edit{
-					insertAtGlobal:  insertAt,
-					insertIndent:    insIndent,
-					insertText:      insIndent + "final " + ci.declType + " " + fname + " = " + name + ";",
-					bodyStartGlobal: bodyStart,
-					bodyEndGlobal:   bodyEnd,
-					name:            name,
-					fname:           fname,
-				})
-			}
-		}
-		// Phase A: apply ALL body rewrites first (these do not change line count).
-		for _, e := range edits {
-			if e.bodyEndGlobal == 0 {
-				continue // this is an insert-only edit
-			}
-			nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(e.name) + `\b`)
-			for k := e.bodyStartGlobal; k < e.bodyEndGlobal && k < len(lines); k++ {
-				ln := strings.TrimRight(lines[k], "\r")
-				if !nameRe.MatchString(ln) {
-					continue
-				}
-				newLn := rewriteLambdaReads(ln, e.name, e.fname)
-				if newLn != ln {
-					lines[k] = newLn
-					changed = true
+				if depth >= 2 {
+					if start := findEnclosingStmtStart(mlines, lambda.open, 0); start >= 0 {
+						insertAt = start
+					}
 				}
 			}
-		}
-		// Phase B: collect insert-only edits, sort by insertAtGlobal DESC, apply (shifts offsets).
-		var inserts []edit
-		for _, e := range edits {
-			if e.insertText != "" {
-				inserts = append(inserts, e)
+			if insertAt <= decl.line {
+				continue // Never read a declaration before its initialization.
+			}
+			sequence++
+			name := fmt.Sprintf("%s_f%d", decl.name, sequence)
+			inserts = append(inserts, insertion{line: insertAt, sequence: sequence,
+				text: leadingTabs(mlines[insertAt]) + "final " + decl.typ + " " + name + " = " + decl.name + ";"})
+			for _, read := range binding.reads {
+				reads = append(reads, readEdit{lambdaCaptureRead: read, name: name})
 			}
 		}
-		sort.Slice(inserts, func(a, b int) bool { return inserts[a].insertAtGlobal > inserts[b].insertAtGlobal })
-		for _, e := range inserts {
-			at := e.insertAtGlobal
-			if at > len(lines) {
-				at = len(lines)
+		// Token offsets refer to the original text. Apply from the right so
+		// each exact declaration-bound read remains at its recorded offset.
+		sort.Slice(reads, func(i, j int) bool {
+			if reads[i].line != reads[j].line {
+				return reads[i].line > reads[j].line
 			}
-			lines = append(lines[:at], append([]string{e.insertText}, lines[at:]...)...)
+			return reads[i].start > reads[j].start
+		})
+		for _, edit := range reads {
+			line := mr.start + edit.line
+			ln := lines[line]
+			lines[line] = ln[:edit.start] + edit.name + ln[edit.end:]
+			changed = true
+		}
+		sort.Slice(inserts, func(i, j int) bool {
+			if inserts[i].line != inserts[j].line {
+				return inserts[i].line > inserts[j].line
+			}
+			return inserts[i].sequence > inserts[j].sequence
+		})
+		for _, edit := range inserts {
+			at := mr.start + edit.line
+			lines = append(lines[:at], append([]string{edit.text}, lines[at:]...)...)
 			changed = true
 		}
 	}
@@ -5744,9 +5574,6 @@ func fixLambdaLoopCapture(body string) string {
 	}
 	return strings.Join(lines, "\n")
 }
-
-// sortEditsDesc sorts edits by insertAtGlobal in descending order.
-// (sort.Slice is used inline instead.)
 
 // findEnclosingStmtStart scans backward from idx (within [methodStart, idx]) to find the first
 // line of the statement containing idx: the nearest preceding line at a shallower-or-equal indent
