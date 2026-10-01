@@ -36,3 +36,40 @@ func TestRenderPolicyUsesExplicitContextBeforeAmbientSnapshot(t *testing.T) {
 		})
 	}
 }
+
+func TestInvocationTypeKeepsOriginatingRequestPolicy(t *testing.T) {
+	const flag = "JDEC_GENERIC_INFER_OFF"
+	t.Setenv(flag, "1")
+	create := func() *FunctionCallExpression {
+		receiver := NewJavaRef(nil, nil, types.NewParameterizedType("java.util.Iterator", []types.JavaType{types.NewJavaClass("java.lang.String")}))
+		return NewFunctionCallExpression(receiver, &JavaClassMember{Name: "java.util.Iterator", Member: "next"}, &types.JavaFuncType{ReturnType: types.NewJavaClass("java.lang.Object")})
+	}
+	var inferred, erased *FunctionCallExpression
+	_ = jdecenv.Run(map[string]string{}, func() error { inferred = create(); return nil })
+	_ = jdecenv.Run(map[string]string{flag: "1"}, func() error { erased = create(); return nil })
+	name := func(call *FunctionCallExpression) string { return call.Type().RawType().(*types.JavaClass).Name }
+	assertTypes := func() {
+		t.Helper()
+		if got := name(inferred); got != "java.lang.String" {
+			t.Errorf("originating request enabled inference, got %q", got)
+		}
+		if got := name(erased); got != "java.lang.Object" {
+			t.Errorf("originating request disabled inference, got %q", got)
+		}
+		if got := name(inferred.Clone()); got != "java.lang.String" {
+			t.Errorf("cloned call lost request policy: %q", got)
+		}
+	}
+	assertTypes()
+	_ = jdecenv.Run(map[string]string{}, func() error { assertTypes(); return nil })
+	live := create()
+	t.Setenv(flag, "")
+	assertTypes()
+	if got := name(live); got != "java.lang.String" {
+		t.Errorf("unbound legacy invocation must keep live lookup, got %q", got)
+	}
+	t.Setenv(flag, "1")
+	if got := name(live); got != "java.lang.Object" {
+		t.Errorf("live policy was frozen, got %q", got)
+	}
+}

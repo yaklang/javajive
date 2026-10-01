@@ -772,6 +772,10 @@ type FunctionCallExpression struct {
 	OriginPC int
 	// Only decoded bytecode calls have an origin witness, including PC zero.
 	HasOriginPC bool
+	// TypeEnv binds context-free Type() queries to the originating request.
+	// Legacy/unbound construction keeps a live lookup; nil supports direct IR
+	// literals that deliberately use the current ambient policy.
+	TypeEnv func(string) string
 }
 
 // Witness returns the bytecode invoke identity. Owner is ClassName, name is
@@ -840,7 +844,14 @@ func (f *FunctionCallExpression) Type() types.JavaType {
 // instantiatedReturnType applies InstantiateJDKMethodReturn using the receiver's parameterized type,
 // or returns nil to keep the erased descriptor return.
 func (f *FunctionCallExpression) instantiatedReturnType() types.JavaType {
-	if f.IsStatic || f.Object == nil || jdecenv.Get("JDEC_GENERIC_INFER_OFF") != "" {
+	if f.IsStatic || f.Object == nil {
+		return nil
+	}
+	lookup := f.TypeEnv
+	if lookup == nil {
+		lookup = jdecenv.Get
+	}
+	if lookup("JDEC_GENERIC_INFER_OFF") != "" {
 		return nil
 	}
 	recv := f.Object.Type()
@@ -4919,5 +4930,6 @@ func NewFunctionCallExpression(object JavaValue, methodMember *JavaClassMember, 
 		FunctionName: methodMember.Member,
 		ClassName:    methodMember.Name,
 		Descriptor:   methodMember.Description,
+		TypeEnv:      jdecenv.Lookup(),
 	}
 }
