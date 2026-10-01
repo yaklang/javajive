@@ -23,6 +23,12 @@ func roundTripGenericFlowWithResolverFilter(t *testing.T, main, source string, a
 	}
 	javac, java := t04Tools(t)
 	simple := main[strings.LastIndex(main, ".")+1:]
+	// Both debug forms compile the same trusted fixture source with the same
+	// compiler/release and no processors. Debug tables do not change helper ABI.
+	// Reuse only byte-for-byte identical generated Java; each original debug form
+	// is still independently compiled/decompiled, and every mode runs in a fresh
+	// JVM against that form's helpers and original output.
+	compiled := map[string]string{}
 	for _, debug := range []string{"-g", "-g:none"} {
 		dir := t.TempDir()
 		path := filepath.Join(dir, simple+".java")
@@ -45,10 +51,6 @@ func roundTripGenericFlowWithResolverFilter(t *testing.T, main, source string, a
 			b, e := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)+".class"))
 			return b, e == nil
 		}
-		// Modes often produce byte-for-byte identical source. Reuse only that
-		// compilation within this exact fixture/classpath/debug variant; still
-		// decompile and execute each mode independently against the original.
-		compiled := map[string]string{}
 		for _, mode := range modes {
 			var result DecompileResult
 			var err error

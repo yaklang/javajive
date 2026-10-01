@@ -2,6 +2,7 @@ package class_context
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"maps"
 	"math"
 	"slices"
@@ -17,6 +18,9 @@ import (
 )
 
 type ClassContext struct {
+	// LocalNames supplies scoped source bindings by identity. It does not rename
+	// the underlying IR or conflate locals that merely share a JVM slot spelling.
+	LocalNames map[*coreutils.VariableId]string
 	// InvocationMetadata supplies complete member and parent tables, never CP-only guesses.
 	InvocationMetadata callbinding.Provider
 	// Env looks up JDEC_* flags for this request. Nil falls back to jdecenv.Get.

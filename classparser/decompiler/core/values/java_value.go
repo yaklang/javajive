@@ -108,6 +108,11 @@ func (j *JavaRef) String(funcCtx *class_context.ClassContext) string {
 	if j.StackVar != nil {
 		return j.StackVar.String(funcCtx)
 	}
+	if funcCtx != nil {
+		if name := funcCtx.LocalNames[j.Id]; name != "" {
+			return name
+		}
+	}
 	return j.Id.String()
 }
 

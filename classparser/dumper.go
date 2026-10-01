@@ -3066,7 +3066,7 @@ func mergeNestedSameTypeCatches(funcCtx *class_context.ClassContext, exceptions 
 		if sameType && exc[i] != nil {
 			varName = strings.TrimSpace(exc[i].String(funcCtx))
 			lastStr, lastIdx := lastMeaningfulStmt(bod[i])
-			if lastIdx >= 0 && varName != "" && lastStr == "throw "+varName {
+			if lastIdx >= 0 && varName != "" && lastStr == "throw "+varName && plainCatchRethrowID(bod[i][lastIdx]) == exc[i].Id {
 				rethrows = true
 				throwIdx = lastIdx
 			}
@@ -3076,7 +3076,7 @@ func mergeNestedSameTypeCatches(funcCtx *class_context.ClassContext, exceptions 
 			// handler) must still run. Match any throw statement that mentions the caught
 			// variable name. Canonical: commons-lang3 LockingVisitors `throw Failable.rethrow(t)`.
 			if !rethrows && lastIdx >= 0 && varName != "" &&
-				strings.HasPrefix(lastStr, "throw ") && strings.Contains(lastStr, varName) {
+				strings.HasPrefix(lastStr, "throw ") && lastStr != "throw "+varName && strings.Contains(lastStr, varName) {
 				rethrows = true
 				throwIdx = lastIdx
 			}
@@ -3110,7 +3110,7 @@ func mergeNestedSameTypeCatches(funcCtx *class_context.ClassContext, exceptions 
 			} else {
 				// Plain rethrow: drop the throw, append the second body.
 				merged := append([]statements.Statement{}, bod[i][:throwIdx]...)
-				merged = append(merged, bod[i+1]...)
+				merged = append(merged, bindCleanupParameter(bod[i+1], exc[i+1], exc[i])...)
 				bod[i] = merged
 			}
 			exc = append(exc[:i+1], exc[i+2:]...)
@@ -3904,6 +3904,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				//}
 				statementSet.Add(statement)
 				switch ret := statement.(type) {
+				case *catchBoundStatement:
+					statementStr = ret.render(funcCtx, func() string {
+						return statementListToString([]statements.Statement{ret.statement})
+					})
 				case *statements.AssignStatement:
 					foundFieldInit := false
 					if ret.LeftValue != nil && ret.JavaValue != nil && funcCtx.FunctionName == "<clinit>" && classStaticInitializersMustHoist {
