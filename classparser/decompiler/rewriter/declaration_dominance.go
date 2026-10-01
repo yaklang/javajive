@@ -7,6 +7,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/internal/jdecenv"
 )
 
 // topLevelDeclDominatesAllUses checks lexical coverage by declaration identity.
@@ -163,13 +164,14 @@ func opaqueReferencesIdentity(render func(*class_context.ClassContext) string, i
 			uses = true
 		}
 	}()
-	original := render(&class_context.ClassContext{})
+	ctx := &class_context.ClassContext{Env: jdecenv.Lookup()}
+	original := render(ctx)
 	probe := "__jdec_dom_probe__"
 	for strings.Contains(original, probe) {
 		probe += "_"
 	}
 	id.SetName(probe)
-	return codeContainsIdentifier(render(&class_context.ClassContext{}), probe)
+	return codeContainsIdentifier(render(ctx), probe)
 }
 
 func codeContainsIdentifier(code, name string) bool {

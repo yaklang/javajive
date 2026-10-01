@@ -2131,7 +2131,7 @@ func statementReadTextMatches(st statements.Statement, re *regexp.Regexp) (res b
 			res = true
 		}
 	}()
-	return re.MatchString(st.String(&class_context.ClassContext{}))
+	return re.MatchString(st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}))
 }
 
 // statementsReferenceName reports whether any of the statements textually reference the variable
@@ -2163,7 +2163,7 @@ func statementTextMatches(st statements.Statement, re *regexp.Regexp) (res bool)
 			res = true
 		}
 	}()
-	return re.MatchString(st.String(&class_context.ClassContext{}))
+	return re.MatchString(st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}))
 }
 
 // generatedLocalNameRe matches a decompiler-generated local name (var0, var1, var2_1, ...). Only
@@ -2211,7 +2211,7 @@ func safeRenderStatement(st statements.Statement) (text string, ok bool) {
 			ok = false
 		}
 	}()
-	return st.String(&class_context.ClassContext{}), true
+	return st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}), true
 }
 
 // isWordByteASCII reports whether b is an ASCII word char ([0-9A-Za-z_]) -- exactly the class Go's

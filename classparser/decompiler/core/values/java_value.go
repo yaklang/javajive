@@ -434,7 +434,7 @@ func (j *JavaArrayMember) String(funcCtx *class_context.ClassContext) string {
 	// spring TypeMappedAnnotation.getValue
 	// `(distance != 0 ? resolvedMirrors : resolvedRootMirrors)[index]`.
 	// Kill-switch: JDEC_TERNARY_ARRAY_INDEX_PARENS_OFF.
-	if jdecenv.Get("JDEC_TERNARY_ARRAY_INDEX_PARENS_OFF") == "" {
+	if funcCtx.Getenv("JDEC_TERNARY_ARRAY_INDEX_PARENS_OFF") == "" {
 		switch UnpackSoltValue(j.Object).(type) {
 		case *TernaryExpression, *JavaExpression:
 			return fmt.Sprintf("(%s)[%v]", obj, j.Index.String(funcCtx))
@@ -474,7 +474,7 @@ func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
 	// Object, then Range.create cannot be applied). FunctionCallExpression already wraps
 	// TernaryExpression receivers; field access did not. Real hit: guava Range.gap/span.
 	// Kill-switch: JDEC_TERNARY_FIELD_RECV_PARENS_OFF.
-	if jdecenv.Get("JDEC_TERNARY_FIELD_RECV_PARENS_OFF") == "" {
+	if funcCtx.Getenv("JDEC_TERNARY_FIELD_RECV_PARENS_OFF") == "" {
 		switch UnpackSoltValue(j.Object).(type) {
 		case *TernaryExpression, *JavaExpression:
 			return fmt.Sprintf("(%s).%s", obj, class_context.SafeIdentifier(j.Member))

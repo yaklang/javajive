@@ -6,6 +6,38 @@ import (
 	"time"
 )
 
+func TestLookupPreservesExplicitSnapshotAndLivePolicy(t *testing.T) {
+	t.Setenv("JDEC_LOOKUP", "host")
+	live := Lookup()
+	_ = Run(map[string]string{"JDEC_LOOKUP": "outer"}, func() error {
+		outer := Lookup()
+		if outer("JDEC_LOOKUP") != "outer" || outer("JDEC_MISSING") != "" {
+			t.Fatal("captured snapshot must be closed and keep the outer value")
+		}
+		_ = Run(map[string]string{"JDEC_LOOKUP": "inner"}, func() error {
+			if Lookup()("JDEC_LOOKUP") != "inner" || outer("JDEC_LOOKUP") != "outer" || live("JDEC_LOOKUP") != "host" {
+				t.Fatal("nested request changed a previously captured policy")
+			}
+			return nil
+		})
+		_ = RunLive(func() error {
+			lookup := Lookup()
+			t.Setenv("JDEC_LOOKUP", "changed")
+			if lookup("JDEC_LOOKUP") != "changed" || outer("JDEC_LOOKUP") != "outer" {
+				t.Fatal("live sentinel was frozen or snapshot leaked into live lookup")
+			}
+			return nil
+		})
+		if outer("JDEC_LOOKUP") != Get("JDEC_LOOKUP") {
+			t.Fatal("outer request was not restored")
+		}
+		return nil
+	})
+	if live("JDEC_LOOKUP") != "changed" || Lookup()("JDEC_LOOKUP") != "changed" {
+		t.Fatal("unbound lookups must remain live")
+	}
+}
+
 func TestNestedRunRestoresOuter(t *testing.T) {
 	t.Setenv("JDEC_NESTED", "host")
 	if Get("JDEC_NESTED") != "host" {

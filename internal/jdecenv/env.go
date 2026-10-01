@@ -87,6 +87,18 @@ func Get(key string) string {
 	return os.Getenv(key)
 }
 
+// Lookup captures the policy at a synchronous rendering/analysis boundary.
+// Snapshot lookups stay closed to the host and to nested requests; an unbound
+// or live-sentinel lookup continues to read the live process environment. Hot
+// visitors can pass this function explicitly instead of rediscovering the
+// goroutine binding by formatting its complete stack for each expression.
+func Lookup() func(string) string {
+	if snap, bound := Current(); bound && snap != nil {
+		return func(key string) string { return snap[key] }
+	}
+	return os.Getenv
+}
+
 // Go starts fn on a new goroutine with the current snapshot rebound.
 func Go(fn func()) {
 	snap, ok := Current()
