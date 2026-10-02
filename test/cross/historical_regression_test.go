@@ -32,15 +32,6 @@ func TestAuditHistoricalReferenceDeclarations(t *testing.T) {
 			for _, debug := range []string{"-g", "-g:none"} {
 				for _, mode := range []javajive.DecompileMode{javajive.Precision, javajive.Compatibility} {
 					t.Run(debug+"/"+string(mode), func(t *testing.T) {
-						if tc.name == "list_reassignment" {
-							// JDK 8's bounded invocation catalog omits List, so the
-							// correct API result is explicit unsupported for add(Object).
-							// Keep the stronger source compile, verifier, and runtime
-							// comparison oracles for this case.
-							auditRoundTripWithExpectedUnsupported(t, "audit", tc.body, tc.driver, debug, mode,
-								"invoke java.util.List.add(Ljava/lang/Object;)Z")
-							return
-						}
 						auditRoundTrip(t, "audit", tc.body, tc.driver, debug, mode)
 					})
 				}

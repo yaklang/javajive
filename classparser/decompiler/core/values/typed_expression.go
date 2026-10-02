@@ -15,10 +15,13 @@ var dummyTypeCtx class_context.ClassContext
 // unlike string-producing CustomValue closures.
 type CastExpression struct {
 	// Binding preserves source overload resolution even for an identity conversion.
-	Binding    bool
-	Value      JavaValue
-	TargetType types.JavaType
-	OriginPC   int
+	Binding bool
+	// Only the original opcode constructor supplies this exact target witness.
+	OriginalCheckCast           bool
+	originalCheckCastDescriptor string
+	Value                       JavaValue
+	TargetType                  types.JavaType
+	OriginPC                    int
 }
 
 func (c *CastExpression) Type() types.JavaType { return c.TargetType }
@@ -61,6 +64,9 @@ func (c *CastExpression) String(ctx *class_context.ClassContext) string {
 				}
 			}
 		}
+	}
+	if c.needsObjectCheckCastView(operand, ctx) {
+		operand = &checkCastObjectView{Value: operand}
 	}
 	if p, ok := types.AsParameterizedType(c.TargetType); ok && !c.TargetType.IsArray() && len(p.TypeArgs) > 0 && !isWitnessLambdaArg(UnpackSoltValue(c.Value)) {
 		// Generic invariance is a source constraint, not a JVM CHECKCAST operand.

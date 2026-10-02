@@ -110,18 +110,27 @@ func TestFreemarkerLineTableReadIntIsLoadBearing(t *testing.T) {
 	}
 	reviewedSeedSources(t, path, "JDEC_FREEMARKER_REMAINING_OFF", false, func(source string) {
 		body := reviewedSourceMethod(t, source, `public\s+int\s+read\(\)`)
-		// IRETURN is PC14, outside [0,14). The original successful ISTORE
-		// dominates it, while the catch ends in ATHROW. A method-scope inert
-		// declaration therefore remains unobservable on every failure path.
-		result := requireReviewedPattern(t, body, `int\s+(\w+)\s*=\s*0;\s*try\{\s*\w+\s*=\s*this\.in\.read\(\);`)[1]
+		// The sole successful store at PC7 dominates the PC13 load and PC14
+		// IRETURN. A primitive local return cannot throw; moving its lexical
+		// position into the try does not widen any effect's handler domain.
+		// The failed read/handle path terminates at the original ATHROW PC21.
+		result := requireReviewedPattern(t, body, `try\{\s*(?:int\s+)?(\w+)\s*=\s*this\.in\.read\(\);`)[1]
 		name := regexp.QuoteMeta(result)
-		requireReviewedPattern(t, body, `try\{\s*`+name+`\s*=\s*this\.in\.read\(\);\s*this\.handleChar\(`+name+`\);\s*\}catch\(Exception\s+\w+\)\{`)
+		requireReviewedPattern(t, body, `try\{\s*(?:int\s+)?`+name+`\s*=\s*this\.in\.read\(\);\s*this\.handleChar\(`+name+`\);\s*(?:return\s+`+name+`;\s*)?\}catch\(Exception\s+\w+\)\{`)
 		caught := requireReviewedPattern(t, body, `catch\(Exception\s+(\w+)\)\{`)[1]
-		if !strings.Contains(body, "throw this.rememberException("+caught+");") {
-			t.Fatal("exception remembering changed original caught identity")
+		requireReviewedPattern(t, body, `catch\(Exception\s+`+regexp.QuoteMeta(caught)+`\)\{\s*throw this\.rememberException\(`+regexp.QuoteMeta(caught)+`\);\s*\}\s*(?:return\s+`+name+`;\s*)?\}$`)
+		if strings.Count(body, "return "+result+";") != 1 {
+			t.Fatal("successful read must return the same stored result exactly once")
 		}
-		requireReviewedPattern(t, body, `throw this\.rememberException\(`+regexp.QuoteMeta(caught)+`\);\s*\}\s*return\s+`+name+`;\s*\}$`)
 	})
+	// Trusted authored methods use the same exception-producing domains and
+	// terminal remembering path; the original JVM is the identity oracle.
+	roundTripGenericFlowUnits(t, "ReadBoundaryDriver", `import java.io.*;import java.lang.reflect.*;
+class ReadBoundaryState{static String trace="";static int mode,handleMode,value;static final IOException io=new IOException("identity");static final RuntimeException runtime=new IllegalStateException("identity");static final Error error=new AssertionError("identity");static final Exception checked=new Exception("identity");static <E extends Throwable>void sneaky(Throwable failure)throws E{throw (E)failure;}}
+class ReadBoundaryReader extends Reader{public int read()throws IOException{ReadBoundaryState.trace+="R";switch(ReadBoundaryState.mode){case 1:throw ReadBoundaryState.io;case 2:throw ReadBoundaryState.runtime;case 3:throw ReadBoundaryState.error;case 4:ReadBoundaryState.<RuntimeException>sneaky(ReadBoundaryState.checked);}return ReadBoundaryState.value;}public int read(char[]a,int b,int c)throws IOException{return read();}public void close(){}}
+class ReadBoundaryConsumer{final Reader in;ReadBoundaryConsumer(Reader in){this.in=in;}int read()throws IOException{try{int result=in.read();handleChar(result);return result;}catch(Exception failure){throw rememberException(failure);}}private void handleChar(int result){ReadBoundaryState.trace+="H";if(ReadBoundaryState.handleMode==1)throw ReadBoundaryState.runtime;if(ReadBoundaryState.handleMode==2)throw ReadBoundaryState.error;}private IOException rememberException(Exception failure){ReadBoundaryState.trace+="E";if(failure instanceof IOException)return(IOException)failure;if(failure instanceof RuntimeException)throw(RuntimeException)failure;throw new UndeclaredThrowableException(failure);}}
+public class ReadBoundaryDriver{public static void main(String[]args){ReadBoundaryConsumer consumer=new ReadBoundaryConsumer(new ReadBoundaryReader());for(int value:new int[]{-1,0,127,65535})for(int mode=0;mode<5;mode++)for(int handle=0;handle<3;handle++){ReadBoundaryState.value=value;ReadBoundaryState.mode=mode;ReadBoundaryState.handleMode=handle;ReadBoundaryState.trace="";try{System.out.println(consumer.read()+":"+ReadBoundaryState.trace);}catch(Throwable failure){System.out.println((failure==ReadBoundaryState.io)+":"+(failure==ReadBoundaryState.runtime)+":"+(failure==ReadBoundaryState.error)+":"+(failure.getCause()==ReadBoundaryState.checked)+":"+ReadBoundaryState.trace);}}}}
+`, nil, []string{"ReadBoundaryConsumer"}, Precision, Compatibility, "legacy")
 }
 
 func TestFreemarkerInfiniteDoWhileThrowSnippet(t *testing.T) {

@@ -4131,10 +4131,6 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						"%s\n"+
 						c.GetTabString()+"}", ret.Value.String(funcCtx), getBody(ret.Cases))
 				case *statements.IfStatement:
-					if isEmptyAssertionsDisabledGuard(ret, funcCtx) {
-						statementStr = ""
-						break
-					}
 					if stmt := buildReturnFromEmptyGuardTernary(ret, funcCtx); stmt != "" {
 						statementStr = c.GetTabString() + stmt + ";"
 						break
@@ -13038,16 +13034,6 @@ func buildReturnFromEmptyGuardTernary(ifSt *statements.IfStatement, funcCtx *cla
 
 func isEffectivelyEmptyBody(body []statements.Statement) bool {
 	return len(meaningfulStatements(body)) == 0
-}
-
-func isEmptyAssertionsDisabledGuard(ifSt *statements.IfStatement, funcCtx *class_context.ClassContext) bool {
-	if ifSt == nil || ifSt.Condition == nil {
-		return false
-	}
-	if !isEffectivelyNoOpBody(ifSt.IfBody) || !isEffectivelyNoOpBody(ifSt.ElseBody) {
-		return false
-	}
-	return strings.Contains(ifSt.Condition.String(funcCtx), "$assertionsDisabled")
 }
 
 func isEffectivelyNoOpBody(body []statements.Statement) bool {

@@ -4,12 +4,14 @@ import java.util.List;
 
 public class VarFold {
 	void common() {
-		System.out.println(1);
+		int var1 = 1;
+		System.out.println(var1);
 	}
 	void commonNegative() {
 		int var1 = 1;
-		System.out.println(1);
 		int var2 = var1;
+		System.out.println(var2);
+		int var3 = var1;
 	}
 	void scope() {
 		if ((1) > (1)){
@@ -30,6 +32,6 @@ public class VarFold {
 	}
 	void typeCase() {
 		Integer var1 = Integer.valueOf(1);
-		Object var2 = (var1 instanceof Object) ? (((List)(var1))) : (var1.getClass());
+		Object var2 = (var1 instanceof Object) ? (((List)(((java.lang.Object)(var1))))) : (var1.getClass());
 	}
 }

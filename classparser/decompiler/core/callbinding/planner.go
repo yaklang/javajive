@@ -32,6 +32,8 @@ type Class struct {
 	Methods                                  []Method
 	Public, MembersComplete, ParentsComplete bool
 	IsInterface                              bool
+	// Final is positive original ACC_FINAL evidence; false supplies no finality proof.
+	Final bool
 }
 type Provider func(string) (Class, bool)
 type Witness struct {

@@ -4097,7 +4097,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// Record the inner arg so phase-2 invoke-arg rebinding can reach the original local-load
 		// without unpacking the cast CustomValue's closures (fastjson2 JDKUtils:318).
 		d.checkcastInnerArg[opcode] = arg
-		value := &values.CastExpression{Value: arg, TargetType: classInfo, OriginPC: int(opcode.CurrentOffset)}
+		value := values.NewOriginalCheckCast(arg, classInfo, int(opcode.CurrentOffset))
 		if d.canInlineImmediateZeroArgCheckcast(opcode, classInfo) || d.canInlineCheckcastArgument(opcode) || d.canInlineImmediateCheckcastField(opcode, classInfo) || d.canInlineCheckcastArrayStore(opcode, classInfo) || d.canInlineImmediateCheckcastThrow(opcode) {
 			d.inlineCheckcast[opcode] = true
 			runtimeStackSimulation.Push(value)
@@ -6921,6 +6921,8 @@ func (d *Decompiler) ParseStatement() error {
 			}
 		}
 	}
+
+	d.normalizeSameSuccessorConditions(nodes, idToOpcode)
 
 	// dup-family multi-temp splice: a single dup/dup2 opcode that materialized MORE THAN ONE temp
 	// (checkAndConvertRef ran for BOTH the array reference AND the index of a compound array store

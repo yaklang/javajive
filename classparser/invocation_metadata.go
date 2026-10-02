@@ -77,7 +77,7 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 			pkg = strings.ReplaceAll(n[:i], "/", ".")
 		}
 		samePackage := pkg == c.PackageName
-		v := callbinding.Class{Name: n, Public: obj.AccessFlags&1 != 0 || samePackage, MembersComplete: true, ParentsComplete: true, IsInterface: obj.AccessFlags&0x200 != 0}
+		v := callbinding.Class{Name: n, Public: obj.AccessFlags&1 != 0 || samePackage, MembersComplete: true, ParentsComplete: true, IsInterface: obj.AccessFlags&0x200 != 0, Final: obj.AccessFlags&0x10 != 0}
 		if sup := obj.GetSupperClassName(); sup != "" {
 			v.Parents = append(v.Parents, sup)
 		}
