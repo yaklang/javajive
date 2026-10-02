@@ -120,6 +120,9 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 	if funcCtx != nil {
 		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && ft.ReturnType != nil {
 			if call, ok := values.UnpackSoltValue(r.JavaValue).(*values.FunctionCallExpression); ok {
+				if fixedParameterizedFactoryReturn(funcCtx, call) {
+					return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), call.String(funcCtx))
+				}
 				if planned, ok := call.PlanErasedMethodReturn(funcCtx); ok {
 					if ft.ReturnType.String(funcCtx) == "Object" || ft.ReturnType.String(funcCtx) == "java.lang.Object" {
 						return "return " + planned.String(funcCtx)

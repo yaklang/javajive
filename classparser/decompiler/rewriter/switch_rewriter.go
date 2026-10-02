@@ -236,7 +236,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	if node.SwitchPrepared {
 		return nil
 	}
-	splitExternalSharedSwitchVoidReturns(manager, node)
+	splitExternalSharedSwitchReturns(manager, node)
 	// manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
 	// manager.DumpDominatorTree()
 	middleStatement := node.Statement.(*statements.MiddleStatement)
@@ -407,10 +407,11 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 // A terminal RETURN shared with a path before the switch is not dominated by
 // the switch, so it cannot serve as that switch's ordinary break destination.
 // If its edge is merely discarded, every non-last case falls into the next
-// case. Give each in-region edge a private void return before collecting case
-// bodies. Only the empty terminal is copied: cleanup, arguments, and value
-// returns stay on their original paths. Real case-to-case edges stay intact.
-func splitExternalSharedSwitchVoidReturns(manager *RewriteManager, owner *core.Node) {
+// case. Give each in-region edge a private terminal before collecting case
+// bodies. A pure literal (or null) can also be copied when its exact bytecode
+// return PC and protected-range membership agree. References, invocations and
+// cleanup stay on their original paths. Real case-to-case edges stay intact.
+func splitExternalSharedSwitchReturns(manager *RewriteManager, owner *core.Node) {
 	if manager == nil || owner == nil {
 		return
 	}
@@ -422,9 +423,20 @@ func splitExternalSharedSwitchVoidReturns(manager *RewriteManager, owner *core.N
 		}
 		for _, target := range source.Next {
 			ret, ok := target.Statement.(*statements.ReturnStatement)
-			if !ok || ret.JavaValue != nil || len(target.Source) < 2 ||
+			if !ok || len(target.Source) < 2 || target.HideNext != nil ||
+				target.IsTryCatch || target.IsCatchStart || target.IsCircle || target.IsInCircle ||
+				len(target.EncodedJumps) != 0 || encodedJumpTo(source, target) ||
 				utils.IsDominate(manager.DominatorMap, owner, target) {
 				continue
+			}
+			if ret.JavaValue != nil {
+				value := values.UnpackSoltValue(ret.JavaValue)
+				_, literal := value.(*values.JavaLiteral)
+				if (!literal && value != values.JavaNull) || !ret.HasOriginPC ||
+					!target.HasOriginPC || ret.OriginPC != target.OriginPC ||
+					!sameProtectedMembership(manager.RootNode, source, target) {
+					continue
+				}
 			}
 			terminal := true
 			for _, next := range target.Next {

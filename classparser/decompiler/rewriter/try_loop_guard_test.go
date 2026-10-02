@@ -4,7 +4,11 @@ import (
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	valueutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	utils2 "github.com/yaklang/javajive/internal/utils"
 )
 
@@ -344,5 +348,106 @@ func TestProtectedTryLoopHeaderKeepsNonRetryHandlersOutsideLoop(t *testing.T) {
 				t.Fatal("external entry must not become a loop backedge")
 			}
 		})
+	}
+}
+
+func protectedRetryReturnFixture() (*core.Node, *core.Node, *values.FunctionCallExpression) {
+	region := core.NewNode(&statements.MiddleStatement{Flag: "try"})
+	region.HasProtectedRange, region.ProtectedStartPC, region.ProtectedEndPC = true, 10, 20
+	receiver := values.NewJavaRef(valueutils.NewRootVariableId(), nil, types.NewJavaClass("example.Worker"))
+	call := &values.FunctionCallExpression{Object: receiver, ClassName: "example/Worker", FunctionName: "compute", Descriptor: "()Ljava/lang/String;", Kind: values.InvokeVirtual, OriginPC: 15, HasOriginPC: true, FuncType: types.NewJavaFuncType("()Ljava/lang/String;", nil, types.NewJavaClass("String"))}
+	ret := statements.NewReturnStatement(call)
+	ret.HasOriginPC, ret.OriginPC = true, 20
+	node := core.NewNode(ret)
+	node.HasOriginPC, node.OriginPC = true, 20
+	node.AddNext(core.NewNode(&statements.MiddleStatement{Flag: "end"}))
+	region.AddNext(node)
+	region.ProtectedEnd = node
+	return region, node, call
+}
+
+func TestProtectedRetryFoldedReturnRequiresEveryEffectInOriginalDomain(t *testing.T) {
+	for _, scenario := range []string{"protected call", "protected local update", "exclusive invoke", "missing invoke witness", "missing invoke tuple", "foreign entry", "shared handler", "missing return witness", "different return PC", "return beyond boundary", "not terminal", "pure local", "unprotected nested call", "unprotected cast", "division", "opaque operand", "field update", "monitor barrier", "cyclic operand", "nested region entrance", "unprotected entrance", "private prefix"} {
+		t.Run(scenario, func(t *testing.T) {
+			region, node, call := protectedRetryReturnFixture()
+			ret := node.Statement.(*statements.ReturnStatement)
+			local := values.NewJavaRef(valueutils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
+			one := values.NewJavaLiteral(1, types.NewJavaPrimer(types.JavaInteger))
+			switch scenario {
+			case "protected local update":
+				call.Arguments = []values.JavaValue{values.NewBinaryExpression(local, one, values.INC, local.Type())}
+			case "exclusive invoke":
+				call.OriginPC = 20
+			case "missing invoke witness":
+				call.HasOriginPC = false
+			case "missing invoke tuple":
+				call.Descriptor = ""
+			case "foreign entry":
+				core.NewNode(&statements.ExpressionStatement{}).AddNext(node)
+			case "shared handler":
+				region.SharedProtectedHandler = true
+			case "missing return witness":
+				ret.HasOriginPC = false
+			case "different return PC":
+				ret.OriginPC++
+			case "return beyond boundary":
+				node.OriginPC++
+				ret.OriginPC++
+			case "not terminal":
+				node.Next[0].Statement = &statements.ExpressionStatement{}
+			case "pure local":
+				ret.JavaValue = local
+			case "unprotected nested call":
+				nested := call.Clone()
+				nested.OriginPC = 21
+				call.Arguments = []values.JavaValue{nested}
+			case "unprotected cast":
+				ret.JavaValue = &values.CastExpression{Value: call, TargetType: types.NewJavaClass("String"), OriginPC: 20}
+			case "division":
+				call.Arguments = []values.JavaValue{values.NewBinaryExpression(local, one, values.DIV, local.Type())}
+			case "opaque operand":
+				call.Arguments = []values.JavaValue{values.NewCustomValue(func(*class_context.ClassContext) string { return "unknown()" }, func() types.JavaType { return local.Type() })}
+			case "field update":
+				call.Arguments = []values.JavaValue{values.NewBinaryExpression(&values.RefMember{Object: call.Object, Member: "index", JavaType: local.Type(), HasOriginPC: true, OriginPC: 12}, one, values.INC, local.Type())}
+			case "monitor barrier":
+				ret.JavaValue = values.TagMonitor(call)
+			case "cyclic operand":
+				call.Arguments = []values.JavaValue{call}
+			case "nested region entrance", "unprotected entrance", "private prefix":
+				prefix := core.NewNode(&statements.ExpressionStatement{})
+				prefix.HasOriginPC, prefix.OriginPC = true, 12
+				region.RemoveNext(node)
+				region.AddNext(prefix)
+				prefix.AddNext(node)
+				if scenario == "nested region entrance" {
+					prefix.HasProtectedRange = true
+				}
+				if scenario == "unprotected entrance" {
+					prefix.OriginPC = 9
+				}
+			}
+			want := scenario == "protected call" || scenario == "protected local update" || scenario == "private prefix"
+			if got := protectedRetryFoldedReturn(region, node); got != want {
+				t.Fatalf("proved=%t want=%t", got, want)
+			}
+		})
+	}
+}
+
+func TestRetryProtectedFoldedReturnRetainsLoopAndHandlerOwnership(t *testing.T) {
+	loop := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+	region, ret, _ := protectedRetryReturnFixture()
+	handler := core.NewNode(&statements.MiddleStatement{})
+	handler.IsCatchStart = true
+	loop.AddNext(region)
+	region.AddNext(handler)
+	handler.AddNext(loop)
+	dom := GenerateDominatorTree(loop)
+	body := circleElementSet(loop, region, dom, true)
+	if !body.Has(ret) {
+		t.Fatal("return containing a protected invocation escaped retry body")
+	}
+	if end := searchCircleEndNode(loop, region, dom, true); end == ret {
+		t.Fatal("folded protected return became the normal unprotected continuation")
 	}
 }

@@ -30,6 +30,34 @@ func TestMutableLocalMotionDependencies(t *testing.T) {
 		t.Fatal("same identity through different pointer lost")
 	}
 }
+
+func TestInspectAccessTypedNilChildrenPreserveEffectBarriers(t *testing.T) {
+	// An interface holding a nil expression pointer represents no operand.
+	// Both passes of the visitor must apply the same empty-node convention.
+	var assignment *AssignmentExpression
+	var expression *JavaExpression
+	var tag *EffectTag
+	var call *FunctionCallExpression
+	var ref *JavaRef
+	for _, value := range []JavaValue{nil, assignment, expression, tag, call, ref} {
+		got := InspectAccess(value)
+		if got.Effects != 0 || len(got.Reads) != 0 || len(got.Writes) != 0 {
+			t.Fatalf("empty operand %T produced access: %+v", value, got)
+		}
+	}
+	x := motionRef()
+	write := NewAssignmentExpression(x, NewJavaLiteral(1, x.Type()), 1, nil)
+	// A nil child must not erase its sibling's write or enclosing effect.
+	parent := &JavaExpression{Op: "+", Values: []JavaValue{expression, write}}
+	got := InspectAccess(parent)
+	if !got.Writes[x] || CanSwap(got, InspectAccess(x)) {
+		t.Fatal("nil child hid a real local write")
+	}
+	heap := InspectAccess(&EffectTag{Inner: parent, Extra: EffectWriteMemory})
+	if heap.Effects&EffectWriteMemory == 0 || !heap.Writes[x] || CanSwap(heap, InspectAccess(x)) {
+		t.Fatal("nil child hid the enclosing heap effect")
+	}
+}
 func TestMotionEffectAndHandlerBarriers(t *testing.T) {
 	pure := InspectAccess(motionRef())
 	for _, effect := range []Effects{EffectReadMemory, EffectWriteMemory, EffectThrow, EffectCall, EffectAllocate, EffectMonitor, EffectClassInit, EffectVolatile, EffectOpaque} {

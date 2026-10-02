@@ -62,3 +62,20 @@ public class SharedBooleanGuard {
  }
 }`, Precision, Compatibility, "legacy")
 }
+
+func TestAdversarialBooleanShortCircuitBeforeCachedClassRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "BooleanCachedClass", `public class BooleanCachedClass {
+ static Class cached;
+ static String trace;
+ static int faults;
+ static final RuntimeException failure=new IllegalStateException("probe");
+ static boolean enhanced(Class type){trace+="E;";if((faults&1)!=0)throw failure;return type.getName().indexOf("String")>=0;}
+ static Class marker(){trace+="M;";if((faults&2)!=0)throw failure;return Integer.class;}
+ static boolean accepts(Class type){return type!=null && enhanced(type) && type.getName().indexOf("Builder")<=0 || type==(cached==null?(cached=marker()):cached);}
+ static String run(Class type){try{return "value:"+accepts(type);}catch(RuntimeException e){return "error:"+(e==failure);}}
+ public static void main(String[] args){for(faults=0;faults<4;faults++)for(boolean initialized:new boolean[]{false,true})for(Class type:new Class[]{null,String.class,StringBuilder.class,Integer.class,Long.class}){
+  cached=initialized?Integer.class:null;trace="";System.out.println(faults+":"+initialized+":"+type+":"+run(type)+":"+trace+":"+cached);
+ }}
+}`, Precision, Compatibility, "legacy")
+}

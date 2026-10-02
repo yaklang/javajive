@@ -18,7 +18,7 @@ func InspectAccess(value JavaValue) Access {
 	heapWrite := false
 	var visit func(JavaValue)
 	visit = func(v JavaValue) {
-		if v == nil || seen[v] {
+		if isNilJavaValue(v) || seen[v] {
 			return
 		}
 		seen[v] = true

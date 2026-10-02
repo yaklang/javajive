@@ -376,3 +376,157 @@ func tryValueIndependent(root values.JavaValue, excluded []*values.JavaRef) bool
 	}
 	return len(queue) == 0
 }
+
+// javac places ARETURN at the exclusive handler boundary while its operand
+// evaluation remains protected. A folded value must stay on the successful
+// retry path when all of its throwing operations carry that original coverage.
+// Moving only the nonthrowing return is safe; moving its call is not. Unknown
+// expressions, foreign entrances and mixed protected/unprotected effects fail
+// closed rather than extending a catch over downstream work.
+func protectedRetryFoldedReturn(region, node *core.Node) bool {
+	if region == nil || node == nil || !region.HasProtectedRange || region.SharedProtectedHandler ||
+		region.ProtectedStartPC < 0 || region.ProtectedEndPC <= region.ProtectedStartPC ||
+		!node.HasOriginPC || node.OriginPC != region.ProtectedEndPC || node.IsCatchStart || node.IsJmp || len(node.Source) != 1 {
+		return false
+	}
+	// Prove a private straight-line entrance back to this exact region. An
+	// intervening nested try or shared/foreign predecessor carries a different
+	// lexical handler domain, even if the final value uses a covered invoke PC.
+	for current, seen := node, map[*core.Node]bool{}; current != region; {
+		if len(seen) >= 32 || seen[current] || len(current.Source) != 1 {
+			return false
+		}
+		seen[current] = true
+		prior := current.Source[0]
+		if prior == region {
+			break
+		}
+		if prior == nil || !prior.HasOriginPC || prior.OriginPC < region.ProtectedStartPC || prior.OriginPC >= region.ProtectedEndPC ||
+			prior.IsCatchStart || prior.IsJmp || prior.HasProtectedRange || len(prior.Next) != 1 || prior.Next[0] != current {
+			return false
+		}
+		switch prior.Statement.(type) {
+		case *statements.AssignStatement, *statements.ExpressionStatement:
+		default:
+			return false
+		}
+		current = prior
+	}
+	ret, ok := node.Statement.(*statements.ReturnStatement)
+	if !ok || ret == nil || ret.JavaValue == nil || !ret.HasOriginPC || ret.OriginPC != node.OriginPC {
+		return false
+	}
+	if len(node.Next) > 1 || len(node.Next) == 1 && !IsEndNode(node.Next[0]) {
+		return false
+	}
+	covered := func(pc int) bool { return pc >= region.ProtectedStartPC && pc < region.ProtectedEndPC }
+	active := map[values.JavaValue]bool{}
+	remaining, throwing := 512, false
+	var visit func(values.JavaValue) bool
+	visit = func(v values.JavaValue) bool {
+		remaining--
+		if v == nil || remaining < 0 || active[v] {
+			return false
+		}
+		active[v] = true
+		defer delete(active, v)
+		var children []values.JavaValue
+		if v == values.JavaNull || values.IsNullLiteral(v) {
+			return true
+		}
+		switch x := v.(type) {
+		case *values.JavaRef:
+			return x != nil && x.Id != nil && x.CustomValue == nil && x.StackVar == nil
+		case *values.JavaLiteral:
+			return x != nil
+		case *values.SlotValue:
+			if x == nil {
+				return false
+			}
+			children = []values.JavaValue{x.GetValue()}
+		case *values.FunctionCallExpression:
+			if x == nil || !x.HasOriginPC || !covered(x.OriginPC) || x.Kind >= values.InvokeDynamic || x.Descriptor == "" || x.ClassName == "" || x.FunctionName == "" || x.FuncType == nil ||
+				(x.Kind == values.InvokeStatic) != x.IsStatic || (!x.IsStatic && x.Object == nil) {
+				return false
+			}
+			throwing = true
+			children = append(children, x.Arguments...)
+			if x.IsStatic {
+				if x.Object != nil && !finallyStaticQualifier(x) {
+					return false
+				}
+			} else {
+				children = append(children, x.Object)
+			}
+		case *values.CastExpression:
+			if x == nil || x.TargetType == nil || !covered(x.OriginPC) {
+				return false
+			}
+			children = []values.JavaValue{x.Value}
+		case *values.JavaExpression:
+			if x == nil {
+				return false
+			}
+			switch x.Op {
+			case values.INC, values.DEC:
+				// A decoded iinc folds into a nonthrowing integral local update. It
+				// stays inside this same operand and executes before the same call.
+				if len(x.Values) != 2 {
+					return false
+				}
+				ref, rok := plainTryValue(x.Values[0]).(*values.JavaRef)
+				one, lok := plainTryValue(x.Values[1]).(*values.JavaLiteral)
+				if !rok || ref == nil || ref.Type() == nil || !lok || one == nil || !reflect.DeepEqual(one.Data, 1) {
+					return false
+				}
+				typ, ok := ref.Type().RawType().(*types.JavaPrimer)
+				if !ok || typ.Name != types.JavaInteger {
+					return false
+				}
+			case values.Not:
+				if len(x.Values) != 1 {
+					return false
+				}
+			case values.ADD, values.SUB, values.MUL, values.AND, values.OR, values.XOR, values.SHL, values.SHR, values.USHR,
+				values.EQ, values.NEQ, values.LT, values.LTE, values.GT, values.GTE, values.LOGICAL_AND, values.LOGICAL_OR:
+				if len(x.Values) != 2 {
+					return false
+				}
+				// Reference addition is string concatenation, not pure arithmetic.
+				if x.Op == values.ADD || x.Op == values.SUB || x.Op == values.MUL {
+					for _, value := range x.Values {
+						if value == nil || value.Type() == nil {
+							return false
+						}
+						if _, ok := value.Type().RawType().(*types.JavaPrimer); !ok {
+							return false
+						}
+					}
+				}
+			default:
+				return false
+			}
+			children = x.Values
+		case *values.RefMember:
+			if x == nil || !x.HasOriginPC || !covered(x.OriginPC) || x.Member == "" || x.JavaType == nil {
+				return false
+			}
+			throwing = true
+			children = []values.JavaValue{x.Object}
+		case *values.JavaClassMember:
+			if x == nil || !x.HasOriginPC || !covered(x.OriginPC) || x.Name == "" || x.Member == "" || x.Description == "" {
+				return false
+			}
+			throwing = true
+		default:
+			return false
+		}
+		for _, child := range children {
+			if !visit(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return visit(ret.JavaValue) && throwing
+}

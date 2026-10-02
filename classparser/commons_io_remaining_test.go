@@ -45,26 +45,11 @@ func TestObjectUsedAsIntRewritesReadLength(t *testing.T) {
 }
 
 func TestWildcardFileFilterThisFirstIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/WildcardFileFilter.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
-	}
-	os.Unsetenv("JDEC_COMMONS_IO_REMAINING_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Contains(on, "String[] var2 = new String[1]") && strings.Contains(on, "this(IOCase.SENSITIVE,var2)") {
-		t.Errorf("ON still has this() after locals:\n%s", on)
-	}
-	t.Setenv("JDEC_COMMONS_IO_REMAINING_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !strings.Contains(off, "this(IOCase.SENSITIVE,var2)") {
-		t.Errorf("OFF expected this() after locals, got:\n%s", off)
-	}
+	// javap identifies seven same-owner invokespecial <init> delegations.
+	// Every emitted delegation must precede declarations; the String constructor
+	// also retains requireWildcards inside the delegated array argument.
+	assertReviewedConstructorDelegations(t, "testdata/regression/WildcardFileFilter.class", "WildcardFileFilter", "JDEC_COMMONS_IO_REMAINING_OFF", 7,
+		"this(IOCase.SENSITIVE,new String[]{", "requireWildcards")
 }
 
 func TestWildcardThisRepairPreservesDescriptorPin(t *testing.T) {

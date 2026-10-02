@@ -7,9 +7,10 @@ import (
 )
 
 func TestPool2LinkedBlockingDequeThisFirstIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/LinkedBlockingDeque.class", "JDEC_POOL2_REMAINING_OFF",
-		"this(2147483647);\n\t\tIterator var2 = null;",
-		"Iterator var2 = null;\n\t\tthis(2147483647);")
+	// Four original same-owner constructor calls include the collection overload;
+	// its lock/iteration effects must remain after delegation.
+	assertReviewedConstructorDelegations(t, "testdata/regression/LinkedBlockingDeque.class", "LinkedBlockingDeque", "JDEC_POOL2_REMAINING_OFF", 4,
+		"this(2147483647);", "this.lock.lock();")
 }
 
 func TestPool2GetGenericTypeSuperclassCastIsLoadBearing(t *testing.T) {

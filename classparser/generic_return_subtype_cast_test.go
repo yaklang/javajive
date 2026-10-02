@@ -20,10 +20,10 @@ import (
 
 // genRetCastRe matches the recovered unchecked cast `(GenRetBase<T>) (new GenRetConcrete())`
 // (whitespace + optional grouping parens around the constructed value are flexible).
-var genRetCastRe = regexp.MustCompile(`\(\s*GenRetBase<T>\s*\)\s*\(?\s*new\s+GenRetConcrete`)
+var genRetCastRe = regexp.MustCompile(`\(\s*GenRetBase<T>\s*\)\s*(?:\(\s*GenRetBase\s*\)\s*)?\(?\s*new\s+GenRetConcrete`)
 
 // genRetIdentOverCastRe matches the FORBIDDEN over-cast on the same-erasure generic-subtype identity return.
-var genRetIdentOverCastRe = regexp.MustCompile(`\(\s*GenRetBase<[^)]*>\s*\)\s*new\s+GenRetInner`)
+var genRetIdentOverCastRe = regexp.MustCompile(`\(\s*GenRetBase<[^)]*>\s*\)\s*(?:\(\s*GenRetBase\s*\)\s*)?\(?\s*new\s+GenRetInner`)
 
 func genRetResolver() func(string) ([]byte, bool) {
 	table := map[string]string{
@@ -45,34 +45,23 @@ func genRetResolver() func(string) ([]byte, bool) {
 }
 
 func TestGenericReturnSubtypeCastIsLoadBearing(t *testing.T) {
-	seedBytes, err := os.ReadFile("testdata/regression/GenRetSeed.class")
+	data, err := os.ReadFile("testdata/regression/GenRetSeed.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-	resolver := genRetResolver()
-
-	// Fix ON (default): non-generic GenRetConcrete returned as GenRetBase<T> gets the `(GenRetBase<T>)`
-	// cast; the generic-subtype identity `new GenRetInner<...>()` -> GenRetBase<K> stays un-cast.
-	os.Unsetenv("JDEC_GENERIC_RET_SUBTYPE_CAST_OFF")
-	on, err := DecompileWithResolver(seedBytes, resolver)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !genRetCastRe.MatchString(on) {
-		t.Errorf("fix ON: expected recovered `(GenRetBase<T>)new GenRetConcrete(...)` cast, got:\n%s", on)
-	}
-	if genRetIdentOverCastRe.MatchString(on) {
-		t.Errorf("fix ON: same-erasure generic-subtype identity `new GenRetInner` must NOT be over-cast, got:\n%s", on)
-	}
-
-	// Fix OFF: cast suppressed, proving the genericReturnSubtypeCastNeeded pass -- not unrelated
-	// rendering -- is what produced it (the OFF form is the faithful-but-uncompilable output).
-	t.Setenv("JDEC_GENERIC_RET_SUBTYPE_CAST_OFF", "1")
-	off, err := DecompileWithResolver(seedBytes, resolver)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if genRetCastRe.MatchString(off) {
-		t.Errorf("fix OFF: expected the `(GenRetBase<T>)` cast to be gone, got:\n%s", off)
+	assertReviewedGenericMethod(t, data, "create", "()LGenRetBase;", "<T:Ljava/lang/Object;>()LGenRetBase<TT;>;")
+	assertReviewedGenericMethod(t, data, "ident", "()LGenRetBase;", "<K:Ljava/lang/Object;V:Ljava/lang/Object;>()LGenRetBase<TK;>;")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_GENERIC_RET_SUBTYPE_CAST_OFF", setting)
+		source, err := DecompileWithResolver(data, genRetResolver())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if genRetCastRe.MatchString(source) != (setting == "") {
+			t.Fatalf("switch=%q: missing widening/same-erasure generic return view: %s", setting, source)
+		}
+		if genRetIdentOverCastRe.MatchString(source) {
+			t.Fatalf("switch=%q: already assignable generic identity return must not receive a new narrowing cast: %s", setting, source)
+		}
 	}
 }

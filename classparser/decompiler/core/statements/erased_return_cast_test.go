@@ -67,3 +67,85 @@ func TestExistingReturnCastUsesOnlyItsDeclaredErasure(t *testing.T) {
 		t.Fatal("unrelated existing cast changed")
 	}
 }
+
+func TestFixedParameterizedFactoryRequiresExactStaticDeclaration(t *testing.T) {
+	for _, name := range []string{"fixed wildcard", "fixed concrete", "true generic factory", "same target", "unknown family", "unknown signature", "foreign signature key", "foreign return", "consumer erasure mismatch", "raw target", "instance producer", "dynamic producer", "missing origin", "ambiguous declaration", "bridge declaration", "varargs declaration", "descriptor arguments", "hidden operand", "trailing signature", "free signature variable", "unavailable ancestor", "return-only overload"} {
+		t.Run(name, func(t *testing.T) {
+			target := types.NewParameterizedType("probe.Box", []types.JavaType{types.NewJavaClass("T")})
+			methods := []callbinding.Method{{Name: "choose", Desc: "()Lprobe/Box;", Static: true, Generic: true}}
+			signatures := map[string]string{class_context.MethodDescKey("choose", "()Lprobe/Box;"): "()Lprobe/Box<*>;"}
+			metadata := map[string]callbinding.Class{"probe/Factory": {Name: "probe/Factory", MembersComplete: true, ParentsComplete: true, Methods: methods}}
+			ctx := &class_context.ClassContext{FunctionType: &types.JavaFuncType{ReturnType: target}, CurrentMethodDesc: "()Lprobe/Box;", TypeParams: []string{"T"}, InvocationMetadata: func(n string) (callbinding.Class, bool) { c, ok := metadata[n]; return c, ok }, SiblingClassSig: func(n string) (string, map[string]string, bool) { return "", signatures, n == "probe/Factory" }}
+			call := &values.FunctionCallExpression{ClassName: "probe.Factory", FunctionName: "choose", Descriptor: "()Lprobe/Box;", IsStatic: true, Kind: values.InvokeStatic, OriginPC: 19, HasOriginPC: true}
+			switch name {
+			case "fixed concrete":
+				signatures[class_context.MethodDescKey("choose", call.Descriptor)] = "()Lprobe/Box<Ljava/lang/String;>;"
+			case "true generic factory":
+				signatures[class_context.MethodDescKey("choose", call.Descriptor)] = "<U:Ljava/lang/Object;>()Lprobe/Box<TU;>;"
+			case "trailing signature":
+				signatures[class_context.MethodDescKey("choose", call.Descriptor)] = "()Lprobe/Box<*>;junk"
+			case "free signature variable":
+				signatures[class_context.MethodDescKey("choose", call.Descriptor)] = "()Lprobe/Box<TGhost;>;"
+			case "unavailable ancestor":
+				c := metadata["probe/Factory"]
+				c.Parents = []string{"probe/Missing"}
+				metadata["probe/Factory"] = c
+			case "same target":
+				signatures[class_context.MethodDescKey("choose", call.Descriptor)] = "()Lprobe/Box<TT;>;"
+			case "unknown family":
+				delete(metadata, "probe/Factory")
+			case "unknown signature":
+				ctx.SiblingClassSig = nil
+			case "foreign signature key":
+				signatures = map[string]string{class_context.MethodDescKey("choose", "(I)Lprobe/Box;"): "()Lprobe/Box<*>;"}
+			case "foreign return":
+				signatures[class_context.MethodDescKey("choose", call.Descriptor)] = "()Lprobe/Other<*>;"
+			case "consumer erasure mismatch":
+				ctx.CurrentMethodDesc = "()Ljava/lang/Object;"
+			case "raw target":
+				ctx.FunctionType = &types.JavaFuncType{ReturnType: types.NewJavaClass("probe.Box")}
+			case "instance producer":
+				call.IsStatic = false
+				call.Kind = values.InvokeVirtual
+			case "dynamic producer":
+				call.Kind = values.InvokeDynamic
+			case "missing origin":
+				call.HasOriginPC = false
+			case "return-only overload":
+				c := metadata["probe/Factory"]
+				c.Methods = append(c.Methods, callbinding.Method{Name: "choose", Desc: "()Lprobe/Other;", Static: true})
+				metadata["probe/Factory"] = c
+			case "ambiguous declaration":
+				c := metadata["probe/Factory"]
+				c.Methods = append(c.Methods, c.Methods[0])
+				metadata["probe/Factory"] = c
+			case "bridge declaration":
+				c := metadata["probe/Factory"]
+				c.Methods[0].Bridge = true
+				metadata["probe/Factory"] = c
+			case "varargs declaration":
+				c := metadata["probe/Factory"]
+				c.Methods[0].Varargs = true
+				metadata["probe/Factory"] = c
+			case "descriptor arguments":
+				call.Descriptor = "(I)Lprobe/Box;"
+			case "hidden operand":
+				call.Arguments = []values.JavaValue{values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("Object"))}
+			}
+			before := call.Witness()
+			origin := call.OriginPC
+			got := fixedParameterizedFactoryReturn(ctx, call)
+			if got != (name == "fixed wildcard" || name == "fixed concrete") {
+				t.Fatalf("proof=%t", got)
+			}
+			if call.Witness() != before || call.OriginPC != origin || len(call.Arguments) != func() int {
+				if name == "hidden operand" {
+					return 1
+				}
+				return 0
+			}() {
+				t.Fatal("proof changed the invoke tuple or operands")
+			}
+		})
+	}
+}

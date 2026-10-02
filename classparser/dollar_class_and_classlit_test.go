@@ -25,30 +25,23 @@ import (
 )
 
 // classLitCastRe matches the recovered `(Class<T>) (Integer.class)` cast (parens/space flexible).
-var classLitCastRe = regexp.MustCompile(`\(\s*Class<T>\s*\)\s*\(?\s*Integer\.class`)
+var classLitCastRe = regexp.MustCompile(`\(\s*Class<T>\s*\)\s*(?:\(\s*Class\s*\)\s*)?\(?\s*Integer\.class`)
 
 func TestClassLitReturnCastIsLoadBearing(t *testing.T) {
-	seed, err := os.ReadFile("testdata/regression/ClassLitRetSeed.class")
+	data, err := os.ReadFile("testdata/regression/ClassLitRetSeed.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-
-	os.Unsetenv("JDEC_CLASSLIT_RET_CAST_OFF")
-	on, err := Decompile(seed)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !classLitCastRe.MatchString(on) {
-		t.Errorf("fix ON: expected `(Class<T>) Integer.class` cast, got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_CLASSLIT_RET_CAST_OFF", "1")
-	off, err := Decompile(seed)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if classLitCastRe.MatchString(off) {
-		t.Errorf("fix OFF: expected the `(Class<T>)` cast to be gone, got:\n%s", off)
+	assertReviewedGenericMethod(t, data, "wrap", "()Ljava/lang/Class;", "<T:Ljava/lang/Object;>()Ljava/lang/Class<TT;>;")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_CLASSLIT_RET_CAST_OFF", setting)
+		source, err := Decompile(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if classLitCastRe.MatchString(source) != (setting == "") {
+			t.Fatalf("switch=%q: class literal must retain its declared generic return view: %s", setting, source)
+		}
 	}
 }
 

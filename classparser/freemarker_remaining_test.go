@@ -19,17 +19,19 @@ func TestFreemarkerIntBareIfIsLoadBearing(t *testing.T) {
 }
 
 func TestFreemarkerTemplateCtorThisFirstIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/Template.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"this(var1,var2,var4,var5);\n\t\tParserConfiguration var7 = null;",
-		"ParserConfiguration var7 = null;\n\t\tthis(var1,var2,var4,var5);")
+	// Eight original constructor delegations (excluding getPlainTextTemplate
+	// allocation), independently confirmed with javap; local IDs are not ABI.
+	assertReviewedConstructorDelegations(t, "testdata/regression/Template.class", "Template", "JDEC_FREEMARKER_REMAINING_OFF", 8,
+		"this.setEncoding(", "this.getParserConfiguration()")
 }
 
 // Constructor invocation precedes inert declarations in the core, independently
 // of the legacy FreeMarker source reconstruction switch.
 func TestFreemarkerFMParserPreservesConstructorOrder(t *testing.T) {
-	assertDecompileBothPreserve(t, "testdata/regression/FMParser.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"this(var3);\n\t\tLegacyConstructorParserConfiguration var5 = null;",
-		"OutputFormat var7 = null;", "NullArgumentException.check(var4);")
+	// Eight constructor delegations (excluding the createExpressionParser
+	// factory's ordinary allocation), with original post-delegation validation.
+	assertReviewedConstructorDelegations(t, "testdata/regression/FMParser.class", "FMParser", "JDEC_FREEMARKER_REMAINING_OFF", 8,
+		"NullArgumentException.check(var4);")
 }
 
 func TestFreemarkerMarkupOutputStringIsLoadBearing(t *testing.T) {
@@ -148,8 +150,15 @@ func TestFreemarkerTruncateStaticInitIsLoadBearing(t *testing.T) {
 }
 
 func TestFreemarkerBuilderCallCheckedExceptionsIsLoadBearing(t *testing.T) {
+	// Original handler membership (including nested wrapper handlers) is the
+	// contract. Reuse of a catch local number is a printer choice.
+	raw, err := os.ReadFile("testdata/regression/BuilderCallExpression.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReviewedHandlerMultiplicity(t, raw, "JDEC_FREEMARKER_REMAINING_OFF")
 	assertDecompileBothPreserve(t, "testdata/regression/BuilderCallExpression.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"return ClassUtil.forName(this.className).newInstance();", "catch(InstantiationException var1_4)", "catch(IllegalAccessException var1_4)")
+		"return ClassUtil.forName(this.className).newInstance();")
 }
 
 func TestFreemarkerClassIntrospectorGetReturnIsLoadBearing(t *testing.T) {

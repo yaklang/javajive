@@ -1,13 +1,8 @@
 package javaclassparser
 
-// 承重测试: lambda / 方法引用作实参传给 RAW 泛型接收者的方法时, 必须补回函数式接口造型
-// (kill-switch JDEC_LAMBDA_RAWRECV_CAST_OFF)。
-//
-// 镜像 fastjson2 JSONSchema.of `((ObjectReaderAdapter) reader).apply((Consumer<FieldReader>) e -> ...)`:
-// 通过 RAW 引用调用方法会擦除整个方法签名 (JLS 4.8), `Consumer<Elem>` 退化成原始 `Consumer`
-// (SAM accept(Object)), 显式类型 lambda `(Elem l0) -> ...` 于是被拒 ("incompatible parameter types
-// in lambda expression")。补回 `(Consumer<Elem>)` 造型可恢复编译。种子里 RawRecvBox<T> 是泛型类,
-// 由 resolver 提供其 class 使 SiblingClassSig 能确认其泛型 (造型门控条件之一)。
+// Invoking through a raw generic receiver erases the formal FI declaration.
+// A separately materialized Consumer<Elem> keeps the original instantiated SAM
+// and captured body valid without an extra inline cast at the invocation.
 
 import (
 	"os"
@@ -38,27 +33,18 @@ func rawRecvLambdaDecompile(t *testing.T) string {
 }
 
 func TestLambdaRawReceiverCastIsLoadBearing(t *testing.T) {
-	// Fix ON (default): the lambda argument carries the functional-interface cast, so the raw receiver
-	// accepts the explicitly-typed lambda.
-	os.Unsetenv("JDEC_LAMBDA_RAWRECV_CAST_OFF")
-	on := rawRecvLambdaDecompile(t)
-	if !strings.Contains(on, "(Consumer<Elem>)") {
-		t.Errorf("fix ON: expected `(Consumer<Elem>)` functional-interface cast on the lambda arg, got:\n%s", on)
+	data, err := os.ReadFile("testdata/regression/RawRecvLambdaSeed.class")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// Fix OFF (kill-switch): the cast disappears -- the raw receiver then gets an explicitly-typed
-	// lambda with no target type, the exact "incompatible parameter types in lambda expression"
-	// recompile blocker the fix removes -- proving it is load-bearing.
-	t.Setenv("JDEC_LAMBDA_RAWRECV_CAST_OFF", "1")
-	off := rawRecvLambdaDecompile(t)
-	if strings.Contains(off, "(Consumer<Elem>)") {
-		t.Errorf("fix OFF: expected NO `(Consumer<Elem>)` cast, got:\n%s", off)
-	}
-	// Lambda parameters are now rendered implicitly (JDEC_LAMBDA_IMPLICIT_PARAMS default), so the bare
-	// (uncast) lambda reads `.apply((l0) -> ...)`. Against the RAW receiver its SAM is accept(Object),
-	// so `l0` is inferred Object and the body's `l0.flag`/`l0.name` no longer resolve -- the same
-	// recompile blocker the functional-interface cast (fix ON) removes.
-	if !strings.Contains(off, ".apply((l0) ->") {
-		t.Errorf("fix OFF: expected the bare `.apply((l0) -> ` lambda, got:\n%s", off)
+	assertReviewedSAMInstantiation(t, data, "(Ljava/lang/Object;)V => (LElem;)V")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_LAMBDA_RAWRECV_CAST_OFF", setting)
+		source := rawRecvLambdaDecompile(t)
+		carrier := reviewedFunctionalCarrier(t, source, "Consumer<Elem>", `(`)
+		compact := compactReviewedGenericSource(source)
+		if !strings.Contains(compact, ".apply("+carrier+")") || !strings.Contains(compact, ".flag") || !strings.Contains(compact, ".add(") || !strings.Contains(compact, ".name") {
+			t.Fatalf("switch=%q: materialized Consumer must preserve the lambda's entry type and captured body: %s", setting, source)
+		}
 	}
 }

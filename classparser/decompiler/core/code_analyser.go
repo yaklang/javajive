@@ -5271,12 +5271,13 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			reachFalse
 			reachVisiting
 		)
+		var innerValueMerge func(*OpCode) *OpCode
 		reachMemo := map[*OpCode]int{}
 		var canReachMerge func(n *OpCode) bool
 		canReachMerge = func(n *OpCode) bool {
 			cur := n
 			for step := 0; cur != nil && step < (1<<16); step++ {
-				if cur == mergeNode || slices.Contains(cur.Target, mergeNode) ||
+				if cur == mergeNode || (len(cur.Target) == 1 && cur.Target[0] == mergeNode) ||
 					(cur.Instr.OpCode == OP_PUTFIELD && len(cur.Target) == 1 &&
 						cur.Target[0].Instr.OpCode == OP_GOTO && slices.Contains(cur.Target[0].Target, mergeNode)) {
 					return true
@@ -5286,6 +5287,14 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					return true
 				case reachFalse, reachVisiting:
 					return false
+				}
+				// An inner value diamond owns its stores and stack result. Its
+				// postdominator is an opaque operand boundary for this routing
+				// tree, just as in arm() below. Inspecting inside it here while
+				// skipping it there incorrectly rejects the outer short circuit.
+				if inner := innerValueMerge(cur); inner != nil {
+					cur = inner
+					continue
 				}
 				if isTernaryArmStore(cur.Instr.OpCode) && !isInlineArrayInitStore(cur) {
 					reachMemo[cur] = reachFalse
@@ -5309,76 +5318,20 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 			return false
 		}
-		// bfsDist returns BFS hop distances from start to every forward-reachable node (start excluded
-		// from the result unless it is on a cycle). Used to find the NEAREST common reconvergence of a
-		// condition's two branches by minimising the summed distance, which is robust to target ordering
-		// (a plain reachability probe can return a farther shared node first when a branch forks).
-		bfsDist := func(start *OpCode) map[*OpCode]int {
-			dist := map[*OpCode]int{}
-			queue := []*OpCode{start}
-			d := map[*OpCode]int{start: 0}
-			for i := 0; i < len(queue) && i < (1<<16); i++ {
-				n := queue[i]
-				cd := d[n]
-				if _, ok := dist[n]; !ok {
-					dist[n] = cd
-				}
-				for _, t := range n.Target {
-					if _, seen := d[t]; !seen {
-						d[t] = cd + 1
-						queue = append(queue, t)
-					}
-				}
-			}
-			return dist
-		}
-		// firstReconverge finds the NEAREST node reachable from BOTH of c's branches (the common node
-		// minimising branch0-distance + branch1-distance). It distinguishes two shapes:
-		//   - a real condition of THIS value-merge: its branches stay disjoint until mergeNode, or one
-		//     branch flows into the other (short-circuit &&/|| chain), so the reconvergence is mergeNode,
-		//     one of c's targets, or a plain control node (the next chained condition / range check);
-		//   - an inner value ternary (a diamond): both branches meet at a value-merge node whose result
-		//     is then consumed (e.g. `!x` feeding an ixor). isInnerValueTernary keys off that.
-		firstReconvMemo := map[*OpCode]*OpCode{}
-		firstReconverge := func(c *OpCode) *OpCode {
-			if len(c.Target) < 2 {
+		// A common reachable node may be bypassed on another arm. Use the
+		// immediate postdominator already proved on the original opcode CFG
+		// to delimit a nested value computation, preserving its stack slot.
+		innerValueMerge = func(n *OpCode) *OpCode {
+			if !isIfNode(n) || len(n.Target) != 2 {
 				return nil
 			}
-			if m, found := firstReconvMemo[c]; found {
+			m := ifNodeToMergeNode[n]
+			if m != nil && m != mergeNode && valueMergeSet[m] {
 				return m
 			}
-			d0 := bfsDist(c.Target[0])
-			d1 := bfsDist(c.Target[1])
-			var res *OpCode
-			best := 1 << 30
-			for n, a := range d0 {
-				if n == c {
-					continue
-				}
-				if b, ok := d1[n]; ok {
-					if a+b < best {
-						best = a + b
-						res = n
-					}
-				}
-			}
-			firstReconvMemo[c] = res
-			return res
+			return nil
 		}
-		// isInnerValueTernary reports a diamond whose merged VALUE is consumed before mergeNode: the two
-		// branches reconverge on a registered value-merge node other than our own mergeNode. A control
-		// reconvergence (next ||-chain condition / range check, not a value merge) is NOT inner, so the
-		// short-circuit condition is kept as a genuine arm of this ternary.
-		isInnerValueTernary := func(n *OpCode) bool {
-			if !isIfNode(n) || len(n.Target) < 2 {
-				return false
-			}
-			fr := firstReconverge(n)
-			if fr == nil || fr == mergeNode {
-				return false
-			}
-			return valueMergeSet[fr]
-		}
+		isInnerValueTernary := func(n *OpCode) bool { return innerValueMerge(n) != nil }
 		isTernaryCondition := func(n *OpCode) bool {
 			return isIfNode(n) && len(n.Target) >= 2 && !isInnerValueTernary(n) &&
 				canReachMerge(n.Target[0]) && canReachMerge(n.Target[1])
@@ -5421,7 +5374,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				if failed {
 					return nil
 				}
-				reachesMerge := slices.Contains(cur.Target, mergeNode)
+				reachesMerge := len(cur.Target) == 1 && cur.Target[0] == mergeNode
 				if !reachesMerge && cur.Instr.OpCode == OP_PUTFIELD && len(cur.Target) == 1 &&
 					cur.Target[0].Instr.OpCode == OP_GOTO && slices.Contains(cur.Target[0].Target, mergeNode) {
 					reachesMerge = true
@@ -5480,7 +5433,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				// reconstructed by its OWN merge pass); skip the whole sub-region to its reconvergence
 				// point and keep walking toward this merge's conditions/leaves.
 				if isInnerValueTernary(cur) {
-					cur = firstReconverge(cur)
+					cur = innerValueMerge(cur)
 					continue
 				}
 				if isTernaryArmStore(cur.Instr.OpCode) && !isInlineArrayInitStore(cur) {

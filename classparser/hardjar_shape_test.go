@@ -220,9 +220,13 @@ func TestObjectInitCastTypeRewrites(t *testing.T) {
 }
 
 func TestCatchObjectAsThrowableIsLoadBearing(t *testing.T) {
-	assertHardjarDecompile(t, "testdata/regression/CatchObjAdv.class", "JDEC_HARDJAR_SHAPE_OFF",
-		"catch(Throwable var2)",
-		"catch(Object var2)")
+	// The original catches Exception, not Throwable: broadening this handler
+	// would swallow Error. Catch-local reassignment remains within that domain.
+	raw, err := os.ReadFile("testdata/regression/CatchObjAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReviewedHandlerMultiplicity(t, raw, "JDEC_HARDJAR_SHAPE_OFF")
 }
 
 func TestIdentSelfCastCallIsLoadBearing(t *testing.T) {

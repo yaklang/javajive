@@ -66,9 +66,13 @@ func TestMapsClonePreservesDeclaredException(t *testing.T) {
 }
 
 func TestAssumptionsGetConstructorCatchesNSMEIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/Assumptions.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"}catch(IllegalAccessException | InvocationTargetException | InstantiationException | NoSuchMethodException var3){",
-		"}catch(IllegalAccessException | InvocationTargetException | InstantiationException var3){")
+	// The four types share one original handler PC. Its membership must be
+	// derived from the exception table even when the source workaround is off.
+	raw, err := os.ReadFile("testdata/regression/Assumptions.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReviewedHandlerMultiplicity(t, raw, "JDEC_ASSERTJ_REMAINING_OFF")
 }
 
 const assertjCoreJar = "testdata/regression/assertj-core-3.24.2.jar"

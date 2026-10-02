@@ -693,6 +693,11 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		var visit func(*core.Node)
 		visit = func(n *core.Node) {
 			if n == end {
+				// The return PC is outside the protected interval, but folded
+				// operand calls can still belong entirely to this private try.
+				if protectedRetryFoldedReturn(tr, n) {
+					path = append(path, n)
+				}
 				reachedEnd = true
 				return
 			}

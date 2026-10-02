@@ -49,7 +49,7 @@ func TestSharedSwitchVoidReturnSplitKeepsExitOwnership(t *testing.T) {
 			}
 			manager := NewRootStatementManager(root)
 			manager.DominatorMap = GenerateDominatorTree(root)
-			splitExternalSharedSwitchVoidReturns(manager, owner)
+			splitExternalSharedSwitchReturns(manager, owner)
 			accepted := kind == "void" || kind == "fallthrough" || kind == "direct grouped label"
 			if !accepted {
 				if first.Next[0] != target {
