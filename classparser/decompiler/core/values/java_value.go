@@ -668,7 +668,7 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 	}
 	and := func(a, b JavaValue) JavaValue { return NewBinaryExpression(a, b, LOGICAL_AND, boolType) }
 	or := func(a, b JavaValue) JavaValue { return NewBinaryExpression(a, b, LOGICAL_OR, boolType) }
-	c := SimplifyConditionValue(t.Condition)
+	c := branchConditionView(t.Condition)
 	var reduced JavaValue
 	defer func() {
 		if reduced != nil {
@@ -754,7 +754,7 @@ func (j *TernaryExpression) String(funcCtx *class_context.ClassContext) string {
 		return booleanStackWord(reduced).String(funcCtx)
 	}
 	if rt, ok := reduced.(*TernaryExpression); ok {
-		condition := SimplifyConditionValue(rt.Condition)
+		condition := branchConditionView(rt.Condition)
 		return fmt.Sprintf("(%s) ? (%s) : (%s)", condition.String(funcCtx), rt.TrueValue.String(funcCtx), rt.FalseValue.String(funcCtx))
 	}
 	return reduced.String(funcCtx)
@@ -781,7 +781,7 @@ func ternaryRawString(t *TernaryExpression, funcCtx *class_context.ClassContext)
 	if t == nil {
 		return EmptySlotValuePlaceholder
 	}
-	condition := SimplifyConditionValue(t.Condition)
+	condition := branchConditionView(t.Condition)
 	return fmt.Sprintf("(%s) ? (%s) : (%s)",
 		javaValueRawString(condition, funcCtx),
 		javaValueRawString(t.TrueValue, funcCtx),
@@ -823,7 +823,12 @@ func BoolTernaryCondition(v JavaValue) (JavaValue, bool) {
 	if !tok || !fok || !tv || fv {
 		return nil, false
 	}
-	return t.Condition, true
+	// Extracting cond ? 1 : 0 selects a Boolean consumer, not the source
+	// representation of cond's computational word. A nested materialized
+	// decision can retain int as its producer type. Branch truth tests the
+	// whole word against zero; Z stores/returns instead narrow its low bit.
+	// Keep this conversion local, with one evaluation and no producer retype.
+	return branchConditionView(t.Condition), true
 }
 
 // EmptySlotValuePlaceholder is rendered when a SlotValue has no underlying value,

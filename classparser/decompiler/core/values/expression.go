@@ -4997,6 +4997,12 @@ func CoerceIntAssignRHS(leftType types.JavaType, rhs JavaValue, funcCtx *class_c
 	if !ok || prim.Name != types.JavaInteger {
 		return rhs
 	}
+	// A decision may reduce to Boolean logic while retaining an int producer
+	// view. Its renderer already reconstructs the exact computational word.
+	// Wrapping that word again as a conditional makes int the Java condition.
+	if isIntTyped(rhs) {
+		return rhs
+	}
 	eligible := IntrinsicBooleanValue(rhs)
 	if !eligible && funcCtx.Getenv("JDEC_BOOL_TO_INT_COERCE_EXPR_OFF") == "" {
 		eligible = structurallyBooleanForIntCoerce(rhs, funcCtx)
