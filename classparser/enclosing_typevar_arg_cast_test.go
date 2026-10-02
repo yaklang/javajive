@@ -6,38 +6,28 @@ import (
 	"testing"
 )
 
-// TestEnclosingTypeVarArgCastIsLoadBearing pins enclosingTypeVarArgCast.
-// Kill-switch: JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF. Real hit: guava
-// AbstractMapBasedMultimap$AsMap.wrapEntry Maps.immutableEntry(Object key, ...).
+// A type witness can live on the argument or on the erased result view.
+// The old text workaround switch must not disable the production binding plan.
 func TestEnclosingTypeVarArgCastIsLoadBearing(t *testing.T) {
 	view, err := os.ReadFile("testdata/regression/EnclosingTypeVarArgSeed$View.class")
 	if err != nil {
-		t.Fatalf("read View seed: %v", err)
+		t.Fatal(err)
 	}
-	resolver := func(internalName string) ([]byte, bool) {
-		b, e := os.ReadFile("testdata/regression/" + internalName + ".class")
-		if e != nil {
-			return nil, false
+	resolver := func(name string) ([]byte, bool) {
+		b, e := os.ReadFile("testdata/regression/" + name + ".class")
+		return b, e == nil
+	}
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF", setting)
+		source, err := DecompileWithResolver(view, resolver)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return b, true
-	}
-
-	os.Unsetenv("JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF")
-	on, err := DecompileWithResolver(view, resolver)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	if !strings.Contains(on, "immutableEntry((K)") && !strings.Contains(on, "immutableEntry((K) (") {
-		t.Errorf("fix ON: expected (K) cast on immutableEntry key, got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF", "1")
-	off, err := DecompileWithResolver(view, resolver)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	if strings.Contains(off, "immutableEntry((K)") || strings.Contains(off, "immutableEntry((K) (") {
-		t.Errorf("fix OFF: expected no (K) cast, got:\n%s", off)
+		argumentWitness := strings.Contains(source, "(K)")
+		resultWitness := strings.Contains(source, "(Map.Entry<K, Collection<V>>) (Map.Entry)")
+		if !strings.Contains(source, "immutableEntry(") || (!argumentWitness && !resultWitness) || !strings.Contains(source, "wrapCollection(") {
+			t.Fatalf("lost enclosing type witness or factory call:\n%s", source)
+		}
 	}
 }
 

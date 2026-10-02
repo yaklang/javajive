@@ -97,15 +97,23 @@ func TestOkhttpCloseResourceNonPrivateIsLoadBearing(t *testing.T) {
 }
 
 func TestJacksonRecordAccessorNSMEIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/JDK14Util$RecordAccessor.class", "JDEC_JACKSON_REMAINING_OFF",
-		"catch(ClassNotFoundException | NoSuchMethodException var1)",
-		"Class var1 = Class.forName(\"java.lang.reflect.RecordComponent\");")
+	raw, err := os.ReadFile("testdata/regression/JDK14Util$RecordAccessor.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the original broad Exception handlers, including the initialization
+	// failure channel. A guessed CNFE/NSME union excludes other reflective errors.
+	assertOriginalCatchContract(t, raw, "JDEC_JACKSON_REMAINING_OFF")
 }
 
 func TestLog4jCompositeMergeStrategyNSMEIsLoadBearing(t *testing.T) {
-	assertOrig14Decompile(t, "testdata/regression/NsmeCatchAdv.class",
-		"ClassNotFoundException | NoSuchMethodException var2",
-		"catch(ClassNotFoundException var2){")
+	raw, err := os.ReadFile("testdata/regression/NsmeCatchAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This fixture wraps only CNFE. NSME propagates as declared by make(); widening
+	// its handler would incorrectly wrap a missing constructor.
+	assertOriginalCatchContract(t, raw, "JDEC_ORIG14_REMAINING_OFF")
 }
 
 func TestNettyWildcardAddressHolderIsLoadBearing(t *testing.T) {

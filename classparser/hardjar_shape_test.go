@@ -629,44 +629,25 @@ func TestForNameAddAnnoClassJarFS(t *testing.T) {
 }
 
 func TestDeadObjectFieldAssignJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
+	raw := originalJarClassForReview(t, "org/mockito/mockito-core/4.5.1/mockito-core-4.5.1.jar", "org/mockito/internal/util/reflection/ModuleMemberAccessor.class")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_HARDJAR_SHAPE_OFF", setting)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Slot/web numbering can change. Both normal and exceptional definitions
+		// must feed the same local read by the field assignment.
+		matches := regexp.MustCompile(`this\.delegate = (\w+);`).FindAllStringSubmatch(source, -1)
+		if len(matches) != 1 {
+			t.Fatalf("delegate field assignment missing or duplicated:\n%s", source)
+		}
+		local := matches[0][1]
+		if !regexp.MustCompile(`MemberAccessor\s+`+local+`\s*(?:;|=)`).MatchString(source) ||
+			len(regexp.MustCompile(`\b`+local+`\s*=`).FindAllString(source, -1)) < 2 {
+			t.Fatalf("normal/catch definitions do not feed delegate local %s:\n%s", local, source)
+		}
 	}
-	jar := filepath.Join(home, ".m2/repository/org/mockito/mockito-core/4.5.1/mockito-core-4.5.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/mockito/internal/util/reflection/ModuleMemberAccessor.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "this.delegate = var1;") {
-		t.Fatalf("ON missing this.delegate = var1:\n%s", on)
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "this.delegate = var1;") {
-		t.Fatalf("core def-use solver lost delegate assignment: %s", off)
-	}
-
 }
 
 func TestFixStringCastToClass(t *testing.T) {
@@ -1042,48 +1023,19 @@ func TestCallSiteDupBlockScopeJarFS(t *testing.T) {
 }
 
 func TestWrapIntrospectionExceptionCallsJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/springframework/beans/CachedIntrospectionResults.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "catch (IntrospectionException ex)") && !strings.Contains(on, "catch(IntrospectionException ex)") {
-		t.Fatalf("ON missing IntrospectionException catch:\n%s", clipForTest(on, "getBeanInfo"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "catch (IntrospectionException ex)") || strings.Contains(off, "catch(IntrospectionException ex)") {
-		t.Fatalf("OFF already has IntrospectionException catch (switch inert):\n%s", clipForTest(off, "getBeanInfo"))
-	}
-	if !strings.Contains(off, "this.beanInfo = getBeanInfo(var1);") {
-		t.Fatalf("OFF missing unfixed getBeanInfo assign:\n%s", clipForTest(off, "getBeanInfo"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	raw := originalJarClassForReview(t, "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar", "org/springframework/beans/CachedIntrospectionResults.class")
+	assertOriginalCatchContract(t, raw, "JDEC_HARDJAR_SHAPE_OFF")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_HARDJAR_SHAPE_OFF", setting)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The helper declares the checked exception. Only the original constructor
+		// handler wraps it; inventing a wrapper at every invocation changes behavior.
+		if !regexp.MustCompile(`getBeanInfo\(Class<\?>\s+\w+\) throws IntrospectionException`).MatchString(source) {
+			t.Fatalf("lost helper throws declaration:\n%s", source)
+		}
 	}
 }
 
@@ -4566,9 +4518,10 @@ func TestRewriteInvokeExactSelfToHandleJarFS(t *testing.T) {
 }
 
 func TestRetypeExecCatchWaitToInterruptedJarFS(t *testing.T) {
-	jarFSOnOff(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
-		"net/bytebuddy/agent/builder/AgentBuilder$DescriptionStrategy$SuperTypeLoading$Asynchronous$ThreadSwitchingClassLoadingDelegate.class",
-		"catch(InterruptedException", "catch(ExecutionException")
+	raw := originalJarClassForReview(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/agent/builder/AgentBuilder$DescriptionStrategy$SuperTypeLoading$Asynchronous$ThreadSwitchingClassLoadingDelegate.class")
+	// The original catches ExecutionException and Exception. The latter includes
+	// InterruptedException; narrowing it would change other failures' dispatch.
+	assertOriginalCatchContract(t, raw, "JDEC_HARDJAR_SHAPE_OFF")
 }
 
 func TestRetypeMixedNewToCamelLUBJarFS(t *testing.T) {

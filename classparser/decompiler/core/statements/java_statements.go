@@ -136,6 +136,9 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 				if planned, target, ok := call.PlanErasedDeclaredReturnChain(funcCtx); ok {
 					return renderExistingReturnCast(funcCtx, target.String(funcCtx), planned.String(funcCtx))
 				}
+				if planned, ok := erasedWidenedReturnChain(funcCtx, call); ok {
+					return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), planned.String(funcCtx))
+				}
 				if _, parameterized := types.AsParameterizedType(ft.ReturnType); parameterized {
 					if _, ret, err := callbinding.Descriptor(funcCtx.CurrentMethodDesc); err == nil {
 						if planned, ok := call.PlanErasedResultChain(funcCtx, ret); ok {

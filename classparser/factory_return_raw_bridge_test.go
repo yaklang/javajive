@@ -264,44 +264,22 @@ func TestParamFieldRetRawBridgeIsLoadBearing(t *testing.T) {
 	}
 }
 
-// TestUnmodifiableListBridgeIsLoadBearing pins factoryReturnRawBridge on
-// Collections.unmodifiableList(Arrays.asList(Object[])). Kill-switch:
-// JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF. Real hits: guava Ordering.leastOf
-// (List<E extends T>) and Striped.bulkGet (Iterable<L>).
+// Generic return bridges preserve the erased Object[] factory result. The
+// production binding planner supplies them even with the old workaround off.
 func TestUnmodifiableListBridgeIsLoadBearing(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/UnmodifiableListBridgeSeed.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-
-	os.Unsetenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	if !strings.Contains(on, "unmodifiableList") {
-		t.Fatalf("expected unmodifiableList in decompile, got:\n%s", on)
-	}
-	hasListBridge := strings.Contains(on, "(List<E>) (List)") ||
-		strings.Contains(on, "(List<E>)(List)") ||
-		strings.Contains(on, "(java.util.List<E>) (List)") ||
-		strings.Contains(on, "(java.util.List<E>)(List)")
-	hasIterBridge := strings.Contains(on, "(Iterable<T>) (Iterable)") ||
-		strings.Contains(on, "(Iterable<T>)(Iterable)") ||
-		strings.Contains(on, "(java.lang.Iterable<T>) (Iterable)") ||
-		strings.Contains(on, "(java.lang.Iterable<T>)(Iterable)")
-	if !hasListBridge && !hasIterBridge {
-		t.Errorf("fix ON: expected raw List or Iterable bridge around unmodifiableList, got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	if strings.Contains(off, "(List<E>) (List)") || strings.Contains(off, "(List<E>)(List)") ||
-		strings.Contains(off, "(Iterable<T>) (Iterable)") || strings.Contains(off, "(Iterable<T>)(Iterable)") {
-		t.Errorf("fix OFF: expected no raw unmodifiableList bridge, got:\n%s", off)
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF", setting)
+		source, err := Decompile(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(source, "unmodifiableList") || !strings.Contains(source, "(List<E>) (List)") || !strings.Contains(source, "(Iterable<T>) (Iterable)") {
+			t.Fatalf("erased factory result has no generic return witness:\n%s", source)
+		}
 	}
 }
 

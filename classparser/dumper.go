@@ -4103,10 +4103,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						statementStr = c.GetTabString() + stmt + ";"
 						break
 					}
-					// Recover short-circuit boolean returns: when a method returns boolean and the
-					// if-then is empty (or only a `return true`) while the else is `return expr`,
-					// rewrite to `return condition || expr`. This is the simplest case of the
-					// boolean short-circuit DAG where the true arm shares a constant leaf.
+					// Only two explicit value returns can become a boolean expression.
+					// An empty arm falls through to the following statements; it does
+					// not imply a constant true return, even in a boolean method.
 					if isBoolReturnIfElse(ret, funcCtx) {
 						if stmt := buildBoolReturnFromIfElse(ret, funcCtx); stmt != "" {
 							statementStr = c.GetTabString() + stmt + ";"
@@ -12947,11 +12946,9 @@ func (c *ClassObjectDumper) dumpConstantPool() ([]string, error) {
 	return result, nil
 }
 
-// isBoolReturnIfElse detects the pattern where an if-then-else in a boolean-returning
-// method has an empty (or trivially `return true`) then-body and a boolean return in the
-// else-body. This is the simplest manifestation of the boolean short-circuit DAG where the
-// compiler shared a constant true leaf across both the short-circuit and the fallback.
-// We can recover `return cond || elseReturnExpr` from it.
+// isBoolReturnIfElse proves `if (c) return true; else return v;` before
+// rendering `return c || v`. Fallthrough is a control edge, not a value leaf:
+// treating an empty arm as true skips its continuation and its side effects.
 func isBoolReturnIfElse(ifSt *statements.IfStatement, funcCtx *class_context.ClassContext) bool {
 	// Only applies to boolean-returning methods.
 	if funcCtx.FunctionType == nil {
@@ -12964,26 +12961,19 @@ func isBoolReturnIfElse(ifSt *statements.IfStatement, funcCtx *class_context.Cla
 	if retType != "boolean" {
 		return false
 	}
-	// Then-body must be empty or contain only `return true`.
-	thenIsTrue := len(ifSt.IfBody) == 0
-	if !thenIsTrue && len(ifSt.IfBody) == 1 {
-		if rs, ok := ifSt.IfBody[0].(*statements.ReturnStatement); ok {
-			thenIsTrue = rs.JavaValue != nil && rs.JavaValue.String(funcCtx) == "true"
-		}
-	}
-	if !thenIsTrue {
+	if len(ifSt.IfBody) != 1 || len(ifSt.ElseBody) != 1 {
 		return false
 	}
-	// Else-body must end with a boolean return.
-	if len(ifSt.ElseBody) == 0 {
+	thenReturn, ok := ifSt.IfBody[0].(*statements.ReturnStatement)
+	if !ok || thenReturn.JavaValue == nil {
 		return false
 	}
-	lastElse := ifSt.ElseBody[len(ifSt.ElseBody)-1]
-	rs, ok := lastElse.(*statements.ReturnStatement)
-	if !ok || rs.JavaValue == nil {
+	literal, ok := values.UnpackSoltValue(thenReturn.JavaValue).(*values.JavaLiteral)
+	if !ok || literal.Data != true {
 		return false
 	}
-	return true
+	elseReturn, ok := ifSt.ElseBody[0].(*statements.ReturnStatement)
+	return ok && elseReturn.JavaValue != nil
 }
 
 func buildReturnFromEmptyGuardTernary(ifSt *statements.IfStatement, funcCtx *class_context.ClassContext) string {

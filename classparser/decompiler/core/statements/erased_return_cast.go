@@ -9,6 +9,35 @@ import (
 	"strings"
 )
 
+// A declared supertype return can consume a descriptor-exact factory result.
+// Prove the reference widening from declared hierarchy metadata before using
+// the existing chain planner at the producer's own erasure. The unchecked
+// generic view remains outside that call; overload selection, operand order
+// and any original operand checks stay unchanged. Unrelated/narrowing results
+// and unavailable hierarchy evidence cannot license this adaptation.
+func erasedWidenedReturnChain(ctx *class_context.ClassContext, call *values.FunctionCallExpression) (*values.FunctionCallExpression, bool) {
+	if ctx == nil || call == nil || ctx.InvocationMetadata == nil {
+		return nil, false
+	}
+	ft, ok := ctx.FunctionType.(*types.JavaFuncType)
+	if !ok || ft == nil {
+		return nil, false
+	}
+	target, ok := types.AsParameterizedType(ft.ReturnType)
+	if !ok || len(target.TypeArgs) == 0 {
+		return nil, false
+	}
+	_, ret, err := callbinding.Descriptor(ctx.CurrentMethodDesc)
+	_, produced, producerErr := callbinding.Descriptor(call.Descriptor)
+	if err != nil || producerErr != nil || ret == produced ||
+		ret != "L"+strings.ReplaceAll(target.RawClassName, ".", "/")+";" ||
+		!strings.HasPrefix(produced, "L") ||
+		!callbinding.Assignable(produced, ret, ctx.InvocationMetadata) {
+		return nil, false
+	}
+	return call.PlanErasedResultChain(ctx, produced)
+}
+
 // A cast already chosen by return lowering suppresses poly target inference.
 // Bridge invariant generic types through that SAME return erasure. The extra
 // raw cast cannot add a new runtime check or move the existing check, and this
