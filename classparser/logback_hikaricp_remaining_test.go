@@ -41,9 +41,30 @@ func echoEncoderGetBytesParenthesized(src string) bool {
 // library workaround switch must preserve it; see the independent interrupt
 // and finally behavior oracle in TestAdversarialRetryInterruptCleanupRoundTrip.
 func TestLogbackPutUninterruptiblyUsesStructuredRetry(t *testing.T) {
-	raw, err := os.ReadFile("testdata/regression/AsyncAppenderBase.class")
-	if err != nil {
-		t.Fatal(err)
+	path := "testdata/regression/AsyncAppenderBase.class"
+	raw, code, object := reviewedFixtureMethod(t, path, "putUninterruptibly", "(Ljava/lang/Object;)V")
+	assertReviewedTypeVarMethod(t, raw, "putUninterruptibly", "(Ljava/lang/Object;)V", "(TE;)V")
+	assertReviewedTypeVarInvoke(t, path, "putUninterruptibly", "(Ljava/lang/Object;)V", 7, 185, "java/util/concurrent/BlockingQueue", "put", "(Ljava/lang/Object;)V")
+	assertReviewedTypeVarInvoke(t, path, "putUninterruptibly", "(Ljava/lang/Object;)V", 28, 182, "java/lang/Thread", "interrupt", "()V")
+	assertReviewedTypeVarInvoke(t, path, "putUninterruptibly", "(Ljava/lang/Object;)V", 43, 182, "java/lang/Thread", "interrupt", "()V")
+	// The retry handler protects put only; the cleanup handler protects both
+	// the attempt and the retry path. Its self-entry is the javac finally guard.
+	expected := [][3]uint16{{2, 12, 15}, {2, 21, 34}, {34, 36, 34}}
+	if len(code.ExceptionTable) != len(expected) {
+		t.Fatal("original retry/cleanup domains changed")
+	}
+	cp := NewConstantPoolWithConstant(&object.ConstantPool)
+	for i, handler := range code.ExceptionTable {
+		if handler.StartPc != expected[i][0] || handler.EndPc != expected[i][1] || handler.HandlerPc != expected[i][2] {
+			t.Fatal("original retry/cleanup coverage changed")
+		}
+		if i == 0 {
+			if cp.GetClassName(int(handler.CatchType)) != "java/lang/InterruptedException" {
+				t.Fatal("original retry exception changed")
+			}
+		} else if handler.CatchType != 0 {
+			t.Fatal("cleanup is not original catch-all")
+		}
 	}
 	for _, setting := range []string{"", "1"} {
 		t.Setenv("JDEC_LOGBACK_REMAINING_OFF", setting)
@@ -52,23 +73,16 @@ func TestLogbackPutUninterruptiblyUsesStructuredRetry(t *testing.T) {
 			t.Fatal(err)
 		}
 		body := retryMethodSource(t, source, "void putUninterruptibly(")
-		compact := strings.Join(strings.Fields(body), "")
-		// Legacy Decompile without a resolver can retain its checked-catch
-		// sentinel. It must accompany the real protected call, never replace it.
+		flag := requireReviewedPattern(t, body, `boolean\s+(\w+)\s*=\s*false;`)[1]
+		input := requireReviewedPattern(t, body, `putUninterruptibly\(E\s+(\w+)\)`)[1]
+		compact := compactReviewedGenericSource(body)
 		compact = strings.ReplaceAll(compact, "if(false)thrownewInterruptedException();", "")
-		for _, required := range []string{
-			// The terminal cleanup covers the whole retry loop; the retry
-			// handler covers the put operation on each iteration.
-			"try{do{try{this.blockingQueue.put(var1);",
-			"catch(InterruptedException", "Thread.currentThread().interrupt();",
-			"catch(Throwable", "while(true)",
-		} {
-			if !strings.Contains(compact, required) {
-				t.Errorf("switch=%q missing %q in retry loop:\n%s", setting, required, body)
-			}
-		}
-		if strings.Count(compact, "this.blockingQueue.put(var1);") != 1 || strings.Contains(compact, "try{break;") {
-			t.Errorf("switch=%q lost or duplicated the protected operation:\n%s", setting, body)
+		// Match the complete nested scope: put and its success break are inside
+		// the retry catch, the loop is inside one outer try, and the same flag
+		// controls interrupt restoration in that try's finally on every exit.
+		requireReviewedPattern(t, compact, `try\{do\{try\{this\.blockingQueue\.put\(`+input+`\);break;\}catch\(InterruptedException\w+\)\{`+flag+`=true;continue;\}\}while\(true\);return;\}finally\{if\(`+flag+`\)\{Thread\.currentThread\(\)\.interrupt\(\);\}\}`)
+		if strings.Count(compact, "this.blockingQueue.put("+input+");") != 1 || strings.Count(compact, "Thread.currentThread().interrupt();") != 1 {
+			t.Fatal("retry operation or terminal cleanup duplicated")
 		}
 	}
 }
