@@ -65,7 +65,38 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p artifacts
-          go test ./classparser -run '^TestAdversarial' -json -parallel=4 -count=1 -timeout=8m | tee artifacts/adversarial-tests.jsonl
+          go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
+          # Two isolated test processes use the runner's two CPUs. Discover every
+          # adversarial parent from this exact binary; omit no tests or variants.
+          python3 - <<'PYTHON'
+          import json, os, pathlib, re, subprocess, sys
+          binary = str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "adversarial.test")
+          names = sorted(set(line for line in subprocess.check_output(
+              [binary, "-test.list", "^TestAdversarial"], text=True, cwd="classparser").splitlines()
+              if line.startswith("TestAdversarial")))
+          if not names:
+              raise SystemExit("no adversarial tests discovered")
+          groups = [names[0::2], names[1::2]]
+          pathlib.Path("artifacts/adversarial-manifest.json").write_text(json.dumps(groups, indent=2))
+          runs = []
+          for index, group in enumerate(groups):
+              path = pathlib.Path(f"artifacts/adversarial-tests-{index+1}.jsonl")
+              output = path.open("w")
+              command = ["go", "tool", "test2json", "-t", "-p",
+                         "github.com/yaklang/javajive/classparser", binary,
+                         "-test.v=test2json", "-test.count=1", "-test.parallel=2",
+                         "-test.timeout=8m", "-test.run=^(" + "|".join(map(re.escape, group)) + ")$"]
+              runs.append((subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, cwd="classparser"), output, path))
+          failed = False
+          for process, output, path in runs:
+              result = process.wait()
+              output.close()
+              print(f"{path}: exit={result}")
+              if result:
+                  failed = True
+                  print("\n".join(path.read_text().splitlines()[-80:]))
+          sys.exit(int(failed))
+          PYTHON
       - name: Curated algorithm round-trip contracts
         run: python3 -m unittest tools.curated_roundtrip.test_roundtrip
       - name: Historical diagnostic-key regression

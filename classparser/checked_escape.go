@@ -234,7 +234,7 @@ func typedAbsorbingHandlers(body []statements.Statement, uncheckedThrows map[int
 // invoke PC. An absent declaration is unknown, never a guessed checked throw.
 // Unknown exception ancestry is conservatively treated as potentially checked;
 // the resulting bridge propagates the same Throwable without wrapping it.
-func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body []statements.Statement, method *MemberInfo) (bool, error) {
+func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body []statements.Statement, method *MemberInfo, plans ...*constructorSourceBoundary) (bool, error) {
 	if code == nil || c.FuncCtx == nil {
 		return false, nil
 	}
@@ -248,6 +248,13 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 		return false, err
 	}
 	delegatePC := constructorDelegationPC(body)
+	var sourcePlan *constructorSourceBoundary
+	if len(plans) > 0 {
+		sourcePlan = plans[0]
+		if sourcePlan != nil {
+			delegatePC = sourcePlan.pc
+		}
+	}
 	// The IR may omit an implicit no-argument superclass delegation. Recover
 	// its exact raw prefix only when complete declaration metadata proves all
 	// checked exceptions are already declared by this caller. The implicit
@@ -353,6 +360,9 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 			if !covered {
 				name, _ := c.obj.getUtf8(method.NameIndex)
 				if name == "<init>" {
+					if sourcePlan != nil && sourcePlan.bridgeNames[int(op.CurrentOffset)] != "" {
+						continue
+					}
 					if delegatePC < 0 || int(op.CurrentOffset) <= delegatePC {
 						// Java requires this/super (including its argument effects)
 						// before any try. A body bridge cannot cover that prefix.

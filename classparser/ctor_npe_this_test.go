@@ -12,27 +12,45 @@ func TestCtorNPECheckBeforeThisIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Unsetenv("JDEC_CTOR_NPE_THIS_OFF")
+	obj, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range obj.Methods {
+		desc, _ := obj.getUtf8(m.DescriptorIndex)
+		name, _ := obj.getUtf8(m.NameIndex)
+		if name != "<init>" || desc != "(Ljava/util/function/Consumer;)V" {
+			continue
+		}
+		for _, a := range m.Attributes {
+			if sig, ok := a.(*SignatureAttribute); ok {
+				text, _ := obj.getUtf8(sig.SignatureIndex)
+				found = text == "(Ljava/util/function/Consumer<Ljava/lang/String;>;)V"
+			}
+		}
+	}
+	if !found {
+		t.Fatal("original constructor SAM Signature changed")
+	}
+	t.Setenv("JDEC_CTOR_NPE_THIS_OFF", "")
 	on, err := Decompile(raw)
 	if err != nil {
-		t.Fatalf("ON: %v", err)
+		t.Fatal(err)
 	}
-	if strings.Contains(on, "requireNonNull") || strings.Contains(on, ".getClass();") {
-		t.Fatalf("ON still has NPE-check before this():\n%s", on)
-	}
-	if !strings.Contains(on, "this(var1::append)") {
-		t.Fatalf("ON missing this(method-ref):\n%s", on)
+	// This check is retained in a source carrier, before bound SAM creation.
+	// Its original parameterized formal must not be erased to a raw Consumer:
+	// the authored SAM oracle separately checks overload choice and erased CCE.
+	if !strings.Contains(on, "this(jdec$ctor$") || !strings.Contains(on, "private static Consumer<String> jdec$ctor$") || strings.Count(on, "Objects.requireNonNull(var1)") != 1 || !strings.Contains(on, "(Consumer<String>)(var1::append)") {
+		t.Fatalf("lost original delegation/SAM binding:\n%s", on)
 	}
 	t.Setenv("JDEC_CTOR_NPE_THIS_OFF", "1")
 	off, err := Decompile(raw)
 	if err != nil {
-		t.Fatalf("OFF: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(off, "Objects.requireNonNull(var1)") {
-		t.Fatalf("OFF missing requireNonNull:\n%s", off)
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	if on != off {
+		t.Fatal("legacy text-deletion switch changed the proved constructor view")
 	}
 }
 

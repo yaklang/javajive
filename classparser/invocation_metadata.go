@@ -58,10 +58,14 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 		}
 		obj := c.obj
 		if obj.GetClassName() != n {
-			if c.foldSiblingResolver == nil {
-				return fallback(n)
+			var data []byte
+			var ok bool
+			if c.foldSiblingResolver != nil {
+				data, ok = c.foldSiblingResolver(n)
 			}
-			data, ok := c.foldSiblingResolver(n)
+			if !ok && c.declarationResolver != nil {
+				data, ok = c.declarationResolver(n)
+			}
 			if !ok {
 				return fallback(n)
 			}
@@ -99,8 +103,13 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 			x := callbinding.Method{Name: name, Desc: desc, Public: m.AccessFlags&1 != 0 || (samePackage && m.AccessFlags&2 == 0), Static: m.AccessFlags&8 != 0, Varargs: m.AccessFlags&0x80 != 0, Bridge: m.AccessFlags&0x40 != 0}
 			x.Exceptions, x.ExceptionsKnown = originalMethodExceptions(obj, m)
 			for _, a := range m.Attributes {
-				if _, ok := a.(*SignatureAttribute); ok {
+				if signature, ok := a.(*SignatureAttribute); ok {
 					x.Generic = true
+					var err error
+					x.Signature, err = obj.getUtf8(signature.SignatureIndex)
+					if err != nil {
+						v.MembersComplete = false
+					}
 				}
 			}
 			v.Methods = append(v.Methods, x)

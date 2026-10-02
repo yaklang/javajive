@@ -29,6 +29,9 @@ type ClassContext struct {
 	// PrivateNestBridge returns a source access bridge only for a witnessed
 	// original private nestmate invocation. It never widens the target method.
 	PrivateNestBridge func(owner, name, descriptor string, kind uint8, pc int) (string, bool)
+	// ConstructorInvokeBridge is scoped to a proved pre-initialization source
+	// boundary. The receiver and arguments remain evaluated at the caller.
+	ConstructorInvokeBridge func(owner, name, descriptor string, kind uint8, pc int) (string, bool)
 	// Env looks up JDEC_* flags for this request. Nil falls back to jdecenv.Get.
 	Env func(string) string
 	// Work is the request budget used to cap source construction before allocation.
@@ -226,6 +229,9 @@ type ClassContext struct {
 	// SiblingClassAccessible checks whether a flattened class can be named in
 	// this class's package. Unknown external types return known=false.
 	SiblingClassAccessible func(internalName string) (accessible, known bool)
+	// Named nested dependency types retain their original source ownership.
+	// This callback supplies a full source name proved from InnerClasses bytes.
+	DeclarationSourceName func(binaryName string) (sourceName string, known bool)
 	// SiblingCtorSig resolves a jar-internal class's CONSTRUCTOR generic Signature by binary internal name
 	// (slash-form) and DESCRIPTOR argument count. It returns the raw `<init>` Signature string (e.g.
 	// `(Lcom/google/common/graph/BaseGraph<TN;>;TN;)V` for IncidentEdgeSet) or ok=false for JDK/external
@@ -685,6 +691,11 @@ func (f *ClassContext) GetAllImported() []string {
 	return imports
 }
 func (f *ClassContext) Import(name string) {
+	if f.DeclarationSourceName != nil {
+		if _, known := f.DeclarationSourceName(name); known {
+			return
+		}
+	}
 	if f.KeySet == nil {
 		f.KeySet = utils.NewSet[string]()
 	}
@@ -786,6 +797,11 @@ func isStdlibNestedDottedPackage(pkg string) bool {
 }
 
 func (f *ClassContext) ShortTypeName(name string) string {
+	if f.DeclarationSourceName != nil {
+		if source, known := f.DeclarationSourceName(name); known {
+			return source
+		}
+	}
 	pkg, className := SplitPackageClassName(name)
 	className = SafeIdentifier(className)
 	if pkg == "" {

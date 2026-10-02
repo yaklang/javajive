@@ -4721,6 +4721,9 @@ func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) str
 }
 
 func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext) string {
+	if bridge, ok := f.constructorCheckedInvokeView(funcCtx); ok {
+		return bridge
+	}
 	if bridge, ok := f.privateNestBridgeCall(funcCtx); ok {
 		return bridge
 	}

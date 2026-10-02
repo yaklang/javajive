@@ -16,8 +16,9 @@ import (
 func TestAdversarialJarDeclarationResolverRoundTrip(t *testing.T) {
 	javac, java := t04Tools(t)
 	const source = `class JarDeclarationParent { public static RuntimeException jdec$rethrow$0(Throwable failure){return new IllegalStateException(failure);} }
-class JarDeclarationActions {static final java.io.IOException failure=new java.io.IOException("identity");static Object action()throws java.io.IOException{throw failure;}}
-public class JarDeclarationOwner extends JarDeclarationParent {Object invoke()throws java.io.IOException{return JarDeclarationActions.action();} public static void main(String[]args){try{new JarDeclarationOwner().invoke();}catch(Throwable caught){System.out.println(caught==JarDeclarationActions.failure);}}}`
+class JarDeclarationActions {static class Payload {} static class Inner$Dollar {} static final java.io.IOException failure=new java.io.IOException("identity");static Object action()throws java.io.IOException{throw failure;}}
+class Dependency$Top {}
+public class JarDeclarationOwner extends JarDeclarationParent {JarDeclarationActions.Payload payload;JarDeclarationActions.Inner$Dollar named;Dependency$Top flat;Object invoke()throws java.io.IOException{return JarDeclarationActions.action();} public static void main(String[]args){try{new JarDeclarationOwner().invoke();}catch(Throwable caught){System.out.println(caught==JarDeclarationActions.failure);}}}`
 	for _, debug := range []string{"-g", "-g:none"} {
 		t.Run(debug, func(t *testing.T) {
 			dir := t.TempDir()
@@ -138,6 +139,12 @@ public class JarDeclarationOwner extends JarDeclarationParent {Object invoke()th
 				}
 				if strings.Contains(string(b), "yak-decompiler:") {
 					t.Fatalf("complete namespace stubbed:\n%s", b)
+				}
+				if !strings.Contains(string(b), "JarDeclarationActions.Inner$Dollar") || !strings.Contains(string(b), "Dependency$Top flat;") {
+					t.Fatalf("literal dollar or external nesting changed:\n%s", b)
+				}
+				if strings.Contains(string(b), "JarDeclarationActions$Payload") {
+					t.Fatalf("dependency nested type was flattened:\n%s", b)
 				}
 				rebuilt := t.TempDir()
 				file := filepath.Join(rebuilt, "JarDeclarationOwner.java")

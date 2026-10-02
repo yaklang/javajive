@@ -106,6 +106,7 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	// non-enum, non-switch class is rendered byte-for-byte identically to the bare Dump().
 	d := NewClassObjectDumper(cf)
 	d.foldSiblingResolver = z.enumSiblingResolver()
+	d.declarationResolver = z.declarationResolver
 	if z.archive != nil && z.archive.budget != nil {
 		d.Work = z.archive.budget.Work()
 		d.options.Context = z.archive.ctx
@@ -124,9 +125,6 @@ func (z *JarFS) enumSiblingResolver() func(internalName string) ([]byte, bool) {
 	return func(internalName string) ([]byte, bool) {
 		raw, err := z.ZipFS.ReadFile(internalName + ".class")
 		if err != nil || len(raw) == 0 {
-			if z.declarationResolver != nil {
-				return z.declarationResolver(internalName)
-			}
 			return nil, false
 		}
 		return raw, true

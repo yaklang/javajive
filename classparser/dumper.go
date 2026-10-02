@@ -87,6 +87,7 @@ type ClassObjectDumper struct {
 	lambdaDepth                 int
 	fieldDefaultValue           map[string]string
 	interfaceInitializerHelpers []*dumpedMethods
+	constructorBoundaryHelpers  []*dumpedMethods
 	privateNestOwnPlan          *privateNestPlan
 	dumpedMethodsSet            map[string]*dumpedMethods
 	// aggressive marks that the CURRENT method dump is a second attempt for a method whose
@@ -126,6 +127,8 @@ type ClassObjectDumper struct {
 	// this nil, so folding is OFF and per-class output is byte-for-byte unchanged (zero regression by
 	// construction); only the multi-class entry (DecompileWithResolver / jar path) sets it.
 	foldSiblingResolver func(internalName string) ([]byte, bool)
+	// Declaration-only inputs are not members of the flattened output family.
+	declarationResolver func(internalName string) ([]byte, bool)
 }
 
 func (c *ClassObjectDumper) GetConstructorMethodName() string {
@@ -575,6 +578,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		PackageName:     c.PackageName,
 	}
 	c.FuncCtx = funcCtx
+	funcCtx.DeclarationSourceName = c.buildDeclarationSourceNames()
 	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
 	c.wirePrivateNestBridges()
 	c.overloadUnknownSeen = map[string]bool{}
@@ -3693,7 +3697,14 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if err != nil {
 				return dumped, utils.Wrap(err, "ParseBytesCode failed")
 			}
-			needsCheckedEscape, escapeErr := c.methodNeedsCheckedEscape(codeAttr, statementList, method)
+			priorConstructorBridge := funcCtx.ConstructorInvokeBridge
+			funcCtx.ConstructorInvokeBridge = nil
+			defer func() { funcCtx.ConstructorInvokeBridge = priorConstructorBridge }()
+			constructorPlan, constructorErr := c.planConstructorSourceBoundary(codeAttr, statementList, params, method)
+			if constructorErr != nil {
+				return nil, constructorErr
+			}
+			needsCheckedEscape, escapeErr := c.methodNeedsCheckedEscape(codeAttr, statementList, method, constructorPlan)
 			if escapeErr != nil {
 				return nil, escapeErr
 			}
@@ -4181,6 +4192,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			delegationPC := -1
 			if needsCheckedEscape && name == "<init>" {
 				delegationPC = constructorDelegationPC(statementList)
+				if constructorPlan != nil {
+					delegationPC = constructorPlan.pc
+				}
 			}
 			if needsCheckedEscape && name == "<clinit>" {
 				staticHoistBarrierHit = true
@@ -4198,14 +4212,33 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				statementList = nil
 			}
 			for i, statement := range statementList {
+				if constructorPlan != nil && constructorPlan.carrier != "" {
+					inPrefix := false
+					for _, prefix := range constructorPlan.prefix {
+						if statement == prefix {
+							inPrefix = true
+							break
+						}
+					}
+					if inPrefix {
+						continue
+					}
+				}
 				if i == len(statementList)-1 && methodType.FunctionType().ReturnType.String(funcCtx) == "void" {
 					if _, ok := statement.(*statements.ReturnStatement); ok {
 						continue
 					}
 				}
 				if v, ok := statement.(*statements.ExpressionStatement); ok {
+					if call, ok := v.Expression.(*values.FunctionCallExpression); ok && constructorPlan != nil && constructorPlan.delegate == call && constructorPlan.carrier != "" {
+						supperInvokeStr = c.GetTabString() + constructorPlan.renderDelegation(funcCtx) + ";\n"
+						continue
+					}
 					if v1, ok := v.Expression.(*values.FunctionCallExpression); ok && v1.IsSupperConstructorInvoke(funcCtx) {
 						supperInvokeStr = fmt.Sprintf("%s\n", statementToString(statement))
+						if constructorPlan != nil && constructorPlan.delegate == v1 {
+							supperInvokeStr = c.GetTabString() + constructorPlan.renderDelegation(funcCtx) + ";\n"
+						}
 						continue
 					}
 					if v1, ok := v.Expression.(*values.FunctionCallExpression); ok && needsCheckedEscape && name == "<init>" && v1.HasOriginPC && v1.OriginPC == delegationPC {
@@ -4267,6 +4300,12 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					c.appendDiagnostic(DecompileDiagnostic{Code: "incomplete_control_flow", Method: name + desc, Message: "Artificial terminator inserted by compatibility recovery."})
 				}
 				statementCodes = append(statementCodes, fmt.Sprintf("%sthrow new RuntimeException(\"incomplete control flow\");\n", c.GetTabString()))
+			}
+			if constructorPlan != nil {
+				c.constructorBoundaryHelpers = append(c.constructorBoundaryHelpers, constructorPlan.helpers...)
+				if len(constructorPlan.helpers) > 0 {
+					dumped.checkedEscape = true
+				}
 			}
 			methodBodyCode := strings.Join(statementCodes, "")
 			if needsCheckedEscape && !(name == "<clinit>" && classStaticInitializersMustHoist) {
@@ -12841,6 +12880,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		return nil, err
 	}
 	result = append(result, c.interfaceInitializerHelpers...)
+	result = append(result, c.constructorBoundaryHelpers...)
 	privateHelpers, err := c.privateNestHelpers()
 	if err != nil {
 		return nil, err
