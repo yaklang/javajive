@@ -119,7 +119,7 @@ func TestSharedVoidReturnSplitPreservesOtherEntrances(t *testing.T) {
 			}
 			manager := NewRootStatementManager(root)
 			manager.DominatorMap = GenerateDominatorTree(root)
-			splitSharedVoidReturns(manager, condition)
+			splitSharedTerminalLeaves(manager, condition)
 			if kind != "void" {
 				if condition.Next[0] != target {
 					t.Fatal("return split without a terminal void-return proof")
@@ -132,6 +132,47 @@ func TestSharedVoidReturnSplitPreservesOtherEntrances(t *testing.T) {
 			private, ok := condition.Next[0].Statement.(*statements.ReturnStatement)
 			if !ok || private.JavaValue != nil || len(target.Source) != 1 || target.Source[0] != external {
 				t.Fatal("return split changed the terminal or original predecessor set")
+			}
+		})
+	}
+}
+
+func TestSharedThrowSplitRequiresOperandAndOrigin(t *testing.T) {
+	for _, kind := range []string{"throw", "opaque", "missing pc", "nonterminal"} {
+		t.Run(kind, func(t *testing.T) {
+			root, external, tail := jumpTestNode("root"), jumpTestNode("external"), jumpTestNode("tail")
+			condition := core.NewNode(&statements.ConditionStatement{})
+			operand := values.NewJavaRef(nil, nil, types.NewJavaClass("java.lang.RuntimeException"))
+			thrown := statements.NewCustomStatement(func(*class_context.ClassContext) string { return "throw failure" }, nil)
+			thrown.ThrownValue, thrown.OriginPC, thrown.HasOriginPC = operand, 42, true
+			if kind == "opaque" {
+				thrown.ThrownValue = nil
+			}
+			if kind == "missing pc" {
+				thrown.HasOriginPC = false
+			}
+			target := core.NewNode(thrown)
+			target.OriginPC, target.HasOriginPC = 42, true
+			root.AddNext(condition)
+			root.AddNext(external)
+			condition.AddNext(target)
+			condition.AddNext(tail)
+			external.AddNext(target)
+			if kind == "nonterminal" {
+				target.AddNext(tail)
+			}
+			manager := NewRootStatementManager(root)
+			manager.DominatorMap = GenerateDominatorTree(root)
+			splitSharedTerminalLeaves(manager, condition)
+			if kind != "throw" {
+				if condition.Next[0] != target {
+					t.Fatal("unproved terminal duplicated")
+				}
+				return
+			}
+			private, ok := condition.Next[0].Statement.(*statements.CustomStatement)
+			if !ok || private == thrown || private.ThrownValue != operand || private.OriginPC != 42 || !private.HasOriginPC || external.Next[0] != target || condition.Next[1] != tail || len(target.Source) != 1 {
+				t.Fatal("tail duplication lost operand, PC, polarity or other predecessor")
 			}
 		})
 	}

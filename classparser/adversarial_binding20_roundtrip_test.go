@@ -613,3 +613,44 @@ func TestAdversarialAutomaticLayerSelectionRoundTrip(t *testing.T) {
  public static void main(String[]args){for(int input:new int[]{0,3,10,30,70})for(int extra:new int[]{0,7})for(int req:new int[]{0,2,-2}){trace="";try{System.out.println(run(input,extra,req)+":"+trace);}catch(Exception e){System.out.println(e.getClass().getName()+":"+trace);}}}
 }`, Precision, Compatibility, "legacy")
 }
+
+func TestAdversarialProtectedLookupLoopContinuationRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "ProtectedLookupLoopContinuation", `public class ProtectedLookupLoopContinuation {
+ static String trace;static String read(String s)throws javax.naming.NamingException{trace+="r"+s+",";if(s.equals("bad"))throw new javax.naming.NamingException();return s.isEmpty()?null:s;}
+ static String find(java.util.List<String> values){for(int i=values.size()-1;i>=0;i--){String attribute=values.get(i);if(attribute!=null){try{String value=read(attribute);if(value!=null)return value;}catch(java.util.NoSuchElementException e){}catch(javax.naming.NamingException e){}}}return null;}
+ public static void main(String[]args){String[][] cases={{},{null},{"first",null},{"first","bad",""},{"first","last"},{"bad","",null}};for(String[] c:cases){trace="";System.out.println(find(java.util.Arrays.asList(c))+":"+trace);}}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialConditionalFieldStoreValueRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "ConditionalFieldStoreValue", `interface FieldStoreHandler {} class FieldStoreVisitor implements FieldStoreHandler {final int code;FieldStoreVisitor(int code){this.code=code;}}
+public class ConditionalFieldStoreValue {
+ static String trace;FieldStoreHandler handler;
+ static FieldStoreHandler create(boolean enabled,FieldStoreVisitor value,boolean first,boolean second){trace+="make:"+enabled+":"+first+":"+second+",";return new FieldStoreVisitor(value.code+1);}
+ FieldStoreVisitor visit(boolean missing,int flags){FieldStoreVisitor visitor=missing?null:new FieldStoreVisitor(flags);return visitor==null?null:(FieldStoreVisitor)(handler=create(true,visitor,(flags&2)==0&&flags>=3,(flags&8)!=0));}
+ public static void main(String[]args){for(boolean missing:new boolean[]{false,true})for(int flags:new int[]{0,2,3,8,11}){trace="";ConditionalFieldStoreValue owner=new ConditionalFieldStoreValue();FieldStoreVisitor result=owner.visit(missing,flags);System.out.println((result==null?"null":String.valueOf(result.code))+":"+(owner.handler==result)+":"+trace);}}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialWrappingLoopThenProtectedCallRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "WrappingLoopThenProtectedCall", `class WrappingFailure extends Exception {}
+public class WrappingLoopThenProtectedCall {
+ static String trace;static Object wrap(Object value)throws WrappingFailure{trace+="w"+value+",";if("bad".equals(value))throw new WrappingFailure();return value;}
+ static Object construct(java.util.List<Object> values)throws Exception{trace+="c,";if(values.contains("fail"))throw new Exception();return values.toString();}
+ static Object build(java.util.List<Object> input){if(input.isEmpty()){try{return construct(input);}catch(Exception e){throw new IllegalStateException("empty",e);}}else{java.util.List<Object> wrapped=new java.util.ArrayList<Object>(input.size());for(int i=0;i<input.size();i++){try{wrapped.add(wrap(input.get(i)));}catch(WrappingFailure e){throw new IllegalArgumentException("wrap:"+i,e);}}try{return construct(wrapped);}catch(Exception e){throw new IllegalStateException("construct",e);}}}
+ public static void main(String[]args){Object[][] cases={{},{"a"},{"a","b"},{"bad"},{"a","bad"},{"fail"}};for(Object[] c:cases){trace="";try{System.out.println(build(java.util.Arrays.asList(c))+":"+trace);}catch(Exception e){System.out.println(e.getClass().getName()+":"+e.getMessage()+":"+trace);}}}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialLoopCatchSharedRethrowRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "LoopCatchSharedRethrow", `class CreationFailure extends RuntimeException { final int code;CreationFailure(int code){this.code=code;} }
+public class LoopCatchSharedRethrow {
+ static String trace; static int read(int value){trace+="r"+value+",";if(value<0)throw new CreationFailure(value);return value;}
+ static int collect(int[] values){int sum=0;for(int value:values){try{sum+=read(value);}catch(CreationFailure e){if(e.code==-1){String name=values.length>1?"active":null;if(name!=null&&name.equals("active")){trace+="s,";continue;}}throw e;}}return sum;}
+ public static void main(String[] args){int[][] cases={{},{1,2},{-1},{-1,2},{-2,1},{2,-1,4},{1,-2,-1}};for(int[] c:cases){trace="";try{System.out.println(collect(c)+":"+trace);}catch(CreationFailure e){System.out.println(e.code+":"+trace);}}}
+}`, Precision, Compatibility, "legacy")
+}

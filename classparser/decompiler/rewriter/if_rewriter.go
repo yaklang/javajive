@@ -31,7 +31,7 @@ func ifBranchNodes(ifNode *core.Node) (trueNode, falseNode *core.Node) {
 }
 
 func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
-	splitSharedVoidReturns(manager, ifNode)
+	splitSharedTerminalLeaves(manager, ifNode)
 	err := CalcEnd(manager.DominatorMap, ifNode)
 	if err != nil {
 		return err
@@ -188,15 +188,28 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	return nil
 }
 
-// javac can share the final RETURN between a pre-loop guard and a loop exit.
-// Such a leaf is not dominated by the inner if, whose region collector would
-// otherwise emit an empty arm. Split the edge to a private void-return leaf;
-// this copies no value evaluation, cleanup, or exception-producing operation.
-func splitSharedVoidReturns(manager *RewriteManager, condition *core.Node) {
+// Shared terminal leaves are not necessarily dominated by an inner condition.
+// Split its selected edge before collecting dominated regions, or an abrupt
+// arm can disappear. Preserve the ATHROW operand and original PC; its expression
+// is still evaluated once on the selected path. Opaque custom statements and
+// value returns remain outside this narrowly proved transformation.
+func splitSharedTerminalLeaves(manager *RewriteManager, condition *core.Node) {
 	changed := false
 	for _, target := range slices.Clone(condition.Next) {
-		ret, ok := target.Statement.(*statements.ReturnStatement)
-		if !ok || ret.JavaValue != nil || len(target.Source) < 2 ||
+		var terminalCopy statements.Statement
+		switch st := target.Statement.(type) {
+		case *statements.ReturnStatement:
+			if st.JavaValue == nil {
+				copy := *st
+				terminalCopy = &copy
+			}
+		case *statements.CustomStatement:
+			if st.ThrownValue != nil && st.HasOriginPC {
+				copy := *st
+				terminalCopy = &copy
+			}
+		}
+		if terminalCopy == nil || len(target.Source) < 2 ||
 			utils2.IsDominate(manager.DominatorMap, condition, target) {
 			continue
 		}
@@ -207,9 +220,7 @@ func splitSharedVoidReturns(manager *RewriteManager, condition *core.Node) {
 		if !terminal {
 			continue
 		}
-		// Tail duplication retains the original return's PC witness.
-		copy := *ret
-		leaf := manager.NewNode(&copy)
+		leaf := manager.NewNode(terminalCopy)
 		leaf.OriginPC, leaf.HasOriginPC = target.OriginPC, target.HasOriginPC
 		for _, next := range target.Next {
 			leaf.AddNext(next)

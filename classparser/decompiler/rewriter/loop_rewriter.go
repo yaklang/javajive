@@ -1085,8 +1085,9 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 			// the throw as the loop boundary lifts the remaining candidate
 			// checks (and their back edges) outside the loop.
 			normalAlternative := false
+			throwingHeader := terminalRegionOnlyThrows(headerOut[0])
 			for _, out := range outNodes {
-				if out != headerOut[0] && !IsEndNode(out) && !exclusiveTerminalLoopBranch(out, circleNode, domTree) {
+				if throwingHeader && out != headerOut[0] && !IsEndNode(out) && !exclusiveTerminalLoopBranch(out, circleNode, domTree) && loopExitCannotResumeOwner(out, circleNode) {
 					normalAlternative = true
 					break
 				}

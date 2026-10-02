@@ -6929,7 +6929,12 @@ func (d *Decompiler) ParseStatement() error {
 			switch op.Instr.OpCode {
 			case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2, OP_INVOKEDYNAMIC:
 			default:
-				continue
+				// An edge-materialized phi is emitted after this opcode's
+				// own statement. Preserve both in their original order, e.g.
+				// CHECKCAST's definition followed by the incoming assignment.
+				if d.effectfulStackPhiEdges[op] == nil {
+					continue
+				}
 			}
 			primary := idToNode[id]
 			if primary == nil {
@@ -7403,6 +7408,14 @@ func (d *Decompiler) ParseStatement() error {
 	for _, entry := range d.ExceptionTable {
 		key := [2]uint16{entry.HandlerPc, entry.CatchType}
 		sharedHandlerRanges[key] = append(sharedHandlerRanges[key], HandlerRange{entry.StartPc, entry.EndPc, entry.HandlerPc, entry.CatchType})
+	}
+	// Parsing follows CFG traversal order, so statementsIndex is not a high-water
+	// mark. Synthetic try entries must never alias an existing handler identity:
+	// later sibling-region lookup matches successors by Id.
+	for _, node := range nodes {
+		if statementsIndex <= node.Id {
+			statementsIndex = node.Id + 1
+		}
 	}
 	err = WalkGraph[*Node](d.RootNode, func(node *Node) ([]*Node, error) {
 		if node.IsTryCatch {

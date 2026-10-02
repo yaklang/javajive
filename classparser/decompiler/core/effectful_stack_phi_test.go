@@ -8,7 +8,7 @@ import (
 )
 
 func TestEffectfulStackPhiRequiresClosedForwardRegion(t *testing.T) {
-	for _, kind := range []string{"valid", "pure pop", "outside entry", "back edge", "handler", "protected effect", "extra stack word", "conditional predecessor", "missing simulation"} {
+	for _, kind := range []string{"valid", "field store", "static store", "pure pop", "outside entry", "back edge", "handler", "protected effect", "extra stack word", "conditional predecessor", "missing simulation"} {
 		t.Run(kind, func(t *testing.T) {
 			merge := &OpCode{CurrentOffset: 40, Instr: &Instruction{OpCode: OP_ARETURN}}
 			root := &OpCode{CurrentOffset: 1, Instr: &Instruction{OpCode: OP_IFEQ}}
@@ -26,8 +26,12 @@ func TestEffectfulStackPhiRequiresClosedForwardRegion(t *testing.T) {
 			right.StackEntry = newStackItem(NewEmptyStackEntry(), b)
 			slot := values.NewSlotValue(a, a.Type())
 			d := &Decompiler{opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{merge: NewStackSimulation(NewEmptyStackEntry(), nil, utils.NewRootVariableId())}}
-			accepted := kind == "valid"
+			accepted := kind == "valid" || kind == "field store" || kind == "static store"
 			switch kind {
+			case "field store":
+				pop.Instr.OpCode = OP_PUTFIELD
+			case "static store":
+				pop.Instr.OpCode = OP_PUTSTATIC
 			case "pure pop":
 				pop.stackConsumed = []values.JavaValue{a}
 			case "outside entry":

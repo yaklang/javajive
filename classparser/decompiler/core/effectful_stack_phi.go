@@ -7,7 +7,7 @@ import (
 	"reflect"
 )
 
-// A conditional value with a discarded invocation in an arm is a sequence,
+// A conditional value with a discarded invocation or field store in an arm is a sequence,
 // not a Java conditional expression. Keep the original statement CFG and
 // materialize the value on each incoming edge. The bounded proof below accepts
 // only a closed, forward region with a single stack word at its exit; handler
@@ -53,6 +53,12 @@ func (d *Decompiler) lowerEffectfulStackPhi(merge *OpCode, conditions []*OpCode,
 					effect = true
 				}
 			}
+		}
+		if n.Instr.OpCode == OP_PUTFIELD || n.Instr.OpCode == OP_PUTSTATIC {
+			// Keep the field store on its original selected arm, before its
+			// retained stack value is cast or consumed. Reconstructing only
+			// the value can hoist the store or lose its producer entirely.
+			effect = true
 		}
 	}
 	if !effect || merge.IsCatch || merge.IsTryCatchParent {
@@ -111,8 +117,26 @@ func (d *Decompiler) lowerEffectfulStackPhi(merge *OpCode, conditions []*OpCode,
 	}
 	for _, pred := range merge.Source {
 		d.effectfulStackPhiEdges[pred] = statements.NewAssignStatement(ref, pred.StackEntry.value, false)
+		// The new edge assignment is a real use which did not exist during
+		// stack simulation. Keep its producer local: an old single-use fold
+		// callback otherwise rewrites the original merged slot and deletes
+		// the CHECKCAST while this edge still reads its uncast input.
+		if incoming, ok := values.UnpackSoltValue(pred.StackEntry.value).(*values.JavaRef); ok && incoming != nil {
+			d.disFoldRef = append(d.disFoldRef, incoming)
+		}
 	}
 	d.disFoldRef = append(d.disFoldRef, ref)
+	// These producers have new edge uses. Their pre-lowering fold callbacks
+	// refer to the old merged stack slot and cannot authorize their removal.
+	for op := range region {
+		if op.Instr.OpCode == OP_CHECKCAST {
+			for _, value := range op.stackProduced {
+				if producer, ok := values.UnpackSoltValue(value).(*values.JavaRef); ok && producer != nil {
+					d.disFoldRef = append(d.disFoldRef, producer)
+				}
+			}
+		}
+	}
 	slot.ResetValue(ref)
 	return true
 }

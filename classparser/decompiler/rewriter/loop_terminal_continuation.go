@@ -153,6 +153,39 @@ func hasEnclosingLoopContinuation(exits []*core.Node, loop *core.Node, dom map[*
 	return false
 }
 
+// A non-terminal region is not necessarily a normal exit: a protected arm or
+// an already wrapped container can still carry a continue to this same loop.
+// Preserve both explicit CFG edges and the transfers captured by containers.
+func loopExitCannotResumeOwner(entry, owner *core.Node) bool {
+	if entry == nil || owner == nil {
+		return false
+	}
+	seen := map[*core.Node]bool{}
+	queue := []*core.Node{entry}
+	for len(queue) > 0 {
+		n := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if n == nil || n == owner || len(seen) >= 4096 {
+			return false
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		if n.EncodedJumps[owner] {
+			return false
+		}
+		if !isMethodTerminal(n) && !IsEndNode(n) {
+			next := loopAnalysisSuccessors(n)
+			if len(next) == 0 {
+				return false
+			}
+			queue = append(queue, next...)
+		}
+	}
+	return true
+}
+
 // An early return/throw does not flow through a normal loop continuation. A
 // strict post-dominator therefore misses a shared break target when an exit
 // branch may either return or reach it. Require reachability from every exit
@@ -241,4 +274,40 @@ func commonLoopExit(exits []*core.Node) *core.Node {
 		}
 	}
 	return nil
+}
+
+// Only a rejecting guard may yield the loop boundary to a shared success path.
+// A normal header return remains the canonical exit even when a catch has a
+// shared rethrow: lifting that rethrow out loses its exception variable scope.
+func terminalRegionOnlyThrows(entry *core.Node) bool {
+	state := map[*core.Node]uint8{}
+	var visit func(*core.Node) bool
+	visit = func(n *core.Node) bool {
+		if n == nil || len(state) >= 512 {
+			return false
+		}
+		if state[n] != 0 {
+			return state[n] == 2
+		}
+		state[n] = 1
+		if isMethodTerminal(n) {
+			_, returns := n.Statement.(*statements.ReturnStatement)
+			if returns {
+				return false
+			}
+		} else {
+			next := loopAnalysisSuccessors(n)
+			if len(next) == 0 {
+				return false
+			}
+			for _, target := range next {
+				if !visit(target) {
+					return false
+				}
+			}
+		}
+		state[n] = 2
+		return true
+	}
+	return visit(entry)
 }

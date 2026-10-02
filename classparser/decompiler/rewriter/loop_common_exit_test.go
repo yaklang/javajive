@@ -239,3 +239,59 @@ func TestTerminalHeaderGuardKeepsSharedNormalExit(t *testing.T) {
 		t.Fatalf("normal exit=%p want=%p", got, shared)
 	}
 }
+
+func TestLoopNormalExitRejectsSameOwnerReentry(t *testing.T) {
+	for _, kind := range []string{"normal", "direct", "encoded", "wrapped", "unknown sink"} {
+		t.Run(kind, func(t *testing.T) {
+			owner := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+			entry := core.NewNode(&statements.ExpressionStatement{})
+			tail := core.NewNode(&statements.ReturnStatement{})
+			entry.AddNext(tail)
+			switch kind {
+			case "direct":
+				entry.AddNext(owner)
+			case "encoded":
+				entry.EncodedJumps = map[*core.Node]bool{owner: true}
+			case "wrapped":
+				tail.Statement = &statements.IfStatement{}
+				tail.EncodedJumps = map[*core.Node]bool{owner: true}
+			case "unknown sink":
+				tail.Statement = &statements.ExpressionStatement{}
+			}
+			if got := loopExitCannotResumeOwner(entry, owner); got != (kind == "normal") {
+				t.Fatalf("proved normal=%v", got)
+			}
+		})
+	}
+}
+
+func TestThrowingLoopGuardProof(t *testing.T) {
+	for _, kind := range []string{"throw", "shared throws", "return", "mixed", "cycle", "unknown sink"} {
+		t.Run(kind, func(t *testing.T) {
+			entry := core.NewNode(&statements.ConditionStatement{})
+			thrown := core.NewNode(statements.NewCustomStatement(func(*class_context.ClassContext) string { return "throw failure" }, nil))
+			left := core.NewNode(&statements.ExpressionStatement{})
+			right := core.NewNode(&statements.ExpressionStatement{})
+			entry.AddNext(left)
+			entry.AddNext(right)
+			left.AddNext(thrown)
+			right.AddNext(thrown)
+			switch kind {
+			case "return":
+				thrown.Statement = &statements.ReturnStatement{}
+			case "mixed":
+				right.RemoveNext(thrown)
+				right.AddNext(core.NewNode(&statements.ReturnStatement{}))
+			case "cycle":
+				right.AddNext(entry)
+			case "unknown sink":
+				right.RemoveNext(thrown)
+			case "throw":
+				entry = thrown
+			}
+			if got := terminalRegionOnlyThrows(entry); got != (kind == "throw" || kind == "shared throws") {
+				t.Fatalf("throw-only=%v", got)
+			}
+		})
+	}
+}
