@@ -31,8 +31,34 @@ func loopOwnsRewriteNode(manager *RewriteManager, loop, node *core.Node) bool {
 	if len(loop.Next) == 0 || !utils.IsDominate(manager.DominatorMap, loop, node) {
 		return false
 	}
-	return !manager.LoopRegionReducible ||
-		circleElementSet(loop, loop.Next[0], manager.DominatorMap, true).Has(node)
+	if !manager.LoopRegionReducible || circleElementSet(loop, loop.Next[0], manager.DominatorMap, true).Has(node) {
+		return true
+	}
+	// A successful break arm need not reach any backedge. Its private exit
+	// prefix still belongs to this loop until the normal boundary. Structure
+	// those transfers before an if on that prefix becomes an opaque container.
+	boundary := searchCircleEndNode(loop, loop.Next[0], manager.DominatorMap, true)
+	if boundary == nil || boundary == node {
+		return false
+	}
+	seen := map[*core.Node]bool{}
+	pending := []*core.Node{loop.Next[0]}
+	for len(pending) > 0 {
+		current := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if current == nil || current == boundary || current == loop || seen[current] {
+			continue
+		}
+		if len(seen) >= 512 {
+			return false
+		}
+		seen[current] = true
+		if current == node {
+			return true
+		}
+		pending = append(pending, current.Next...)
+	}
+	return false
 }
 
 // A bounded retry loop has a condition between its wrapper and try body.

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"reflect"
-	"sort"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -13,7 +12,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/log"
-	"github.com/yaklang/javajive/internal/utils"
 )
 
 func GetTypeSize(typ types.JavaType) int {
@@ -309,60 +307,44 @@ func IsPopInstr(opcode int) bool {
 		return false
 	}
 }
-func CalcMergeOpcode(ifOpcode *OpCode) *OpCode {
-	trueNode := ifOpcode.Target[0]
-	falseNode := ifOpcode.Target[1]
-	// A plain map (single-goroutine traversal) replaces utils.Set here: the mutex-guarded
-	// Set.Add was ~4.6% of all decompiler-core bytes. The `next` filter buffer is reused
-	// across visits because WalkGraph copies the returned slice into its own stack and
-	// never retains it, so a single scratch slice is safe and removes a per-node allocation.
-	trueNodeSet := make(map[*OpCode]struct{})
-	nextBuf := make([]*OpCode, 0, 2)
-	WalkGraph[*OpCode](trueNode, func(node *OpCode) ([]*OpCode, error) {
-		nextBuf = nextBuf[:0]
-		for _, n := range node.Target {
-			if n != ifOpcode {
-				nextBuf = append(nextBuf, n)
+
+// OpcodeMergePoints uses immediate postdominance, not intersection of forward
+// reachability. In a loop, both arms can reach an earlier loop header after
+// visiting their real join; choosing that header loses the merged stack value.
+// Analyze all conditions in one graph snapshot rather than walking the method
+// again for every condition. Analysis-only exits never become value joins.
+func OpcodeMergePoints(opcodes []*OpCode, root *OpCode) map[*OpCode]*OpCode {
+	index := make(map[*OpCode]int, len(opcodes))
+	for i, n := range opcodes {
+		index[n] = i
+	}
+	succs := make([][]int, len(opcodes))
+	for i, n := range opcodes {
+		for _, next := range n.Target {
+			if j, ok := index[next]; ok {
+				succs[i] = append(succs[i], j)
 			}
 		}
-		trueNodeSet[node] = struct{}{}
-		return nextBuf, nil
-	})
-	var mergeNodes []*OpCode
-	WalkGraph[*OpCode](falseNode, func(node *OpCode) ([]*OpCode, error) {
-		if _, ok := trueNodeSet[node]; ok {
-			mergeNodes = append(mergeNodes, node)
-			return nil, nil
-		}
-		return node.Target, nil
-	})
-	if len(mergeNodes) == 0 {
+	}
+	start, ok := index[root]
+	if !ok {
 		return nil
 	}
-	if len(mergeNodes) == 1 {
-		return mergeNodes[0]
-	}
-	isPreNode := func(node1, node2 *OpCode) bool {
-		if node1.Id > node2.Id {
-			return false
+	ipdom, _ := computeImmediatePostDominators(len(opcodes), succs, []int{start})
+	result := make(map[*OpCode]*OpCode)
+	for i, n := range opcodes {
+		if len(n.Target) == 2 && ipdom[i] >= 0 && ipdom[i] < len(opcodes) && ipdom[i] != i {
+			result[n] = opcodes[ipdom[i]]
 		}
-		isPre := false
-		WalkGraph[*OpCode](node1, func(node *OpCode) ([]*OpCode, error) {
-			if isPre {
-				return nil, nil
-			}
-			if node == node2 {
-				isPre = true
-				return nil, nil
-			}
-			return node.Target, nil
-		})
-		return isPre
 	}
-	sort.Slice(mergeNodes, func(i, j int) bool {
-		return isPreNode(mergeNodes[i], mergeNodes[j])
-	})
-	return utils.GetLastElement(mergeNodes)
+	return result
+}
+
+func CalcMergeOpcode(ifOpcode *OpCode) *OpCode {
+	if ifOpcode == nil || len(ifOpcode.Target) != 2 {
+		return nil
+	}
+	return OpcodeMergePoints(GraphToList(ifOpcode), ifOpcode)[ifOpcode]
 }
 
 func UnpackSoltValue(value values.JavaValue) values.JavaValue {

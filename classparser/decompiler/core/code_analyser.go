@@ -4779,11 +4779,11 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		return isIfNode(code)
 	})
 
-	ifNodeToMergeNode := map[*OpCode]*OpCode{}
+	ifNodeToMergeNode := OpcodeMergePoints(opcodes, d.RootOpCode)
 	mergeNodeToIfNode := map[*OpCode][]*OpCode{}
 	//DumpOpcodesToDotExp(d.RootOpCode)
 	for _, opcode := range ifOpcodes {
-		mergeNode := CalcMergeOpcode(opcode)
+		mergeNode := ifNodeToMergeNode[opcode]
 		if mergeNode != nil {
 			ifNodeToMergeNode[opcode] = mergeNode
 			mergeNodeToIfNode[mergeNode] = append(mergeNodeToIfNode[mergeNode], opcode)

@@ -5,6 +5,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	utils2 "github.com/yaklang/javajive/classparser/decompiler/utils"
 	"github.com/yaklang/javajive/internal/utils"
 )
@@ -257,14 +258,18 @@ func sameProtectedMembership(root, a, b *core.Node) bool {
 // Split its selected edge before collecting dominated regions, or an abrupt
 // arm can disappear. Preserve the ATHROW operand and original PC; its expression
 // is still evaluated once on the selected path. Opaque custom statements and
-// value returns remain outside this narrowly proved transformation.
+// nonliteral value returns remain outside this narrowly proved transformation.
 func splitSharedTerminalLeaves(manager *RewriteManager, condition *core.Node) {
 	changed := false
 	for _, target := range slices.Clone(condition.Next) {
 		var terminalCopy statements.Statement
 		switch st := target.Statement.(type) {
 		case *statements.ReturnStatement:
-			if st.JavaValue == nil {
+			value := values.UnpackSoltValue(st.JavaValue)
+			_, literal := value.(*values.JavaLiteral)
+			literal = literal || value == values.JavaNull
+			if st.JavaValue == nil || (literal && st.HasOriginPC && target.HasOriginPC &&
+				st.OriginPC == target.OriginPC && sameProtectedMembership(manager.RootNode, condition, target)) {
 				copy := *st
 				terminalCopy = &copy
 			}
@@ -274,7 +279,9 @@ func splitSharedTerminalLeaves(manager *RewriteManager, condition *core.Node) {
 				terminalCopy = &copy
 			}
 		}
-		if terminalCopy == nil || len(target.Source) < 2 ||
+		if terminalCopy == nil || len(target.Source) < 2 || target.HideNext != nil ||
+			target.IsTryCatch || target.IsCatchStart || target.IsCircle || target.IsInCircle ||
+			len(target.EncodedJumps) != 0 || encodedJumpTo(condition, target) ||
 			utils2.IsDominate(manager.DominatorMap, condition, target) {
 			continue
 		}

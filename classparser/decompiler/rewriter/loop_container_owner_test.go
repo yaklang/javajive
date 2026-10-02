@@ -71,3 +71,39 @@ func TestTightLoopIgnoresPredecessorNumbering(t *testing.T) {
 		}
 	}
 }
+
+func TestLoopOwnerIncludesPrivateAcyclicBreakPrefix(t *testing.T) {
+	for _, externalEntry := range []bool{false, true} {
+		nodes := make([]*core.Node, 12)
+		for i := range nodes {
+			nodes[i] = core.NewNode(&statements.ConditionStatement{})
+			nodes[i].Id = i
+		}
+		for _, edge := range [][2]int{
+			{0, 1}, {1, 2}, {2, 3}, {2, 10}, {3, 4}, {4, 1}, {4, 5},
+			{5, 6}, {6, 7}, {6, 8}, {7, 5}, {8, 9}, {8, 10}, {9, 10}, {10, 11},
+		} {
+			nodes[edge[0]].AddNext(nodes[edge[1]])
+		}
+		if externalEntry {
+			nodes[0].AddNext(nodes[8])
+		}
+		manager := NewRootStatementManager(nodes[0])
+		manager.DominatorMap = GenerateDominatorTree(nodes[0])
+		manager.LoopRegionReducible = true
+		if circleElementSet(nodes[1], nodes[2], manager.DominatorMap, true).Has(nodes[8]) {
+			t.Fatal("fixture exit prefix must not reach the outer backedge")
+		}
+		if searchCircleEndNode(nodes[1], nodes[2], manager.DominatorMap, true) != nodes[10] {
+			t.Fatal("fixture normal boundary must be shared by exhaustion and successful break")
+		}
+		if got := loopOwnsRewriteNode(manager, nodes[1], nodes[8]); got == externalEntry {
+			t.Fatalf("external=%t: exit-prefix ownership=%t", externalEntry, got)
+		}
+		for _, continuation := range []*core.Node{nodes[10], nodes[11]} {
+			if loopOwnsRewriteNode(manager, nodes[1], continuation) {
+				t.Fatal("normal continuation was absorbed into loop ownership")
+			}
+		}
+	}
+}
