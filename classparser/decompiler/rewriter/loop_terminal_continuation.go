@@ -20,22 +20,84 @@ func isMethodTerminal(n *core.Node) bool {
 // Its entire exclusive region belongs in that arm. Treating only the final
 // return as terminal promotes the preceding effects to a loop continuation,
 // which can drop nested-loop exits and needlessly move local definitions.
-// Keep shared entries, joins from outside the region, cycles and unknown sinks
+// Keep shared entries, joins from outside the region and unknown sinks
 // conservative: those may be a real continuation or a nonlocal control transfer.
 func exclusiveTerminalBranch(entry *core.Node) bool {
-	if len(entry.Source) > 1 {
+	return exclusiveTerminalRegion(entry, nil, nil)
+}
+
+// A loop exit is terminal only relative to its loop owner. Returning to an
+// ancestor header resumes that loop even if the entire method CFG is cyclic
+// and has no explicit entry predecessor. Internal nested loops may stay in an
+// exclusive arm, but transfers to the current/ancestor loop never may.
+func exclusiveTerminalLoopBranch(entry, owner *core.Node, dom map[*core.Node][]*core.Node) bool {
+	return exclusiveTerminalRegion(entry, owner, dom)
+}
+func exclusiveTerminalRegion(entry, owner *core.Node, dom map[*core.Node][]*core.Node) bool {
+	live := map[*core.Node]bool{}
+	if owner != nil {
+		for parent, children := range dom {
+			live[parent] = true
+			for _, child := range children {
+				live[child] = true
+			}
+		}
+	}
+	incoming := 0
+	for _, source := range entry.Source {
+		if owner == nil || live[source] {
+			incoming++
+		}
+	}
+	if incoming > 1 {
 		return false
 	}
 	state := map[*core.Node]uint8{}
 	var visit func(*core.Node) bool
 	visit = func(n *core.Node) bool {
+		if n == nil || len(state) > 512 {
+			return false
+		}
+		if owner != nil {
+			for target, abrupt := range n.EncodedJumps {
+				if abrupt && (target == owner || utils.IsDominate(dom, target, owner)) {
+					return false
+				}
+			}
+			if n.IsJmp {
+				for _, target := range loopAnalysisSuccessors(n) {
+					if target == owner || utils.IsDominate(dom, target, owner) {
+						return false
+					}
+				}
+			}
+			if n == owner {
+				return false
+			}
+			if _, loop := n.Statement.(*statements.DoWhileStatement); loop && utils.IsDominate(dom, n, owner) {
+				return false
+			}
+		}
 		if state[n] != 0 {
-			return state[n] == 2
+			if state[n] == 2 {
+				return true
+			}
+			// A nested natural loop is a closed part of this arm. Unknown
+			// cycles and a cycle through the arm entry remain unproved.
+			_, nested := n.Statement.(*statements.DoWhileStatement)
+			return owner != nil && nested && n != entry
 		}
 		state[n] = 1
 		// A structured try/if can end in a switch break or outer continue.
 		// It has no normal fall-through and must retain its lexical owner too.
-		if !statementIsTerminal(n.Statement) {
+		terminal := statementIsTerminal(n.Statement)
+		if loop, ok := n.Statement.(*statements.DoWhileStatement); owner != nil && ok && len(loop.Body) == 0 {
+			// RebuildLoopNode creates a true/empty wrapper before collecting
+			// its body. It still has real CFG successors; its empty AST is
+			// not evidence of an infinite or method-terminal region.
+			terminal = false
+		}
+		if !terminal {
 			next := loopAnalysisSuccessors(n)
 			if len(next) == 0 {
 				return false
@@ -56,8 +118,11 @@ func exclusiveTerminalBranch(entry *core.Node) bool {
 		if n == entry {
 			continue
 		}
+		if len(n.Source) == 0 {
+			return false
+		}
 		for _, source := range n.Source {
-			if state[source] == 0 {
+			if state[source] == 0 && (owner == nil || live[source]) {
 				return false
 			}
 		}

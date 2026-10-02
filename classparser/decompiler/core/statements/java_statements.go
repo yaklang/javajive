@@ -133,6 +133,9 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 						}
 					}
 				}
+				if planned, target, ok := call.PlanErasedDeclaredReturnChain(funcCtx); ok {
+					return renderExistingReturnCast(funcCtx, target.String(funcCtx), planned.String(funcCtx))
+				}
 				if _, parameterized := types.AsParameterizedType(ft.ReturnType); parameterized {
 					if _, ret, err := callbinding.Descriptor(funcCtx.CurrentMethodDesc); err == nil {
 						if planned, ok := call.PlanErasedResultChain(funcCtx, ret); ok {
@@ -141,6 +144,11 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 					}
 				}
 			}
+		}
+	}
+	if funcCtx != nil {
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && values.IsBooleanStackNarrowing(ft.ReturnType, r.JavaValue) {
+			return "return " + values.NarrowBooleanStackWord(r.JavaValue).String(funcCtx)
 		}
 	}
 	expr := r.JavaValue.String(funcCtx)
@@ -2843,6 +2851,14 @@ func (a *AssignStatement) referenceArrayStoreNeedsObjectView(ctx *class_context.
 		return false
 	}
 	array := a.ArrayMember.Object.Type()
+	// A solved web may render as T[] while its computational type remains the
+	// first-bound array. Judge source assignability against that declaration;
+	// the Object[] view still performs the original AASTORE at runtime.
+	if ref, ok := values.UnpackSoltValue(a.ArrayMember.Object).(*values.JavaRef); ok && ref.WebDeclType != nil {
+		array = ref.WebDeclType
+	} else if source := values.SourceFieldType(ctx, a.ArrayMember.Object); source != nil {
+		array = source
+	}
 	if array == nil || !array.IsArray() || array.ElementType() == nil {
 		return false
 	}
@@ -2935,7 +2951,24 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 	// connective or a boolean ternary, NOT a bare ref) is assigned to an int target: javac elided it
 	// because the boolean is already 0/1 on the stack (guava DoubleMath/LongMath, ImmutableSortedMap).
 	rhsVal := values.CoerceIntAssignRHS(a.LeftValue.Type(), a.JavaValue, funcCtx)
+	if values.IsBooleanStackNarrowing(a.LeftValue.Type(), rhsVal) {
+		rhsVal = values.NarrowBooleanStackWord(rhsVal)
+	}
 	rhsStr := rhsVal.String(funcCtx)
+	targetView := a.LeftValue.Type()
+	if ref, ok := a.LeftValue.(*values.JavaRef); ok && ref.WebDeclType != nil {
+		targetView = ref.WebDeclType
+	}
+	if _, field := a.LeftValue.(*values.RefMember); field {
+		if source := values.SourceFieldType(funcCtx, a.LeftValue); source != nil {
+			targetView = source
+		}
+	}
+	rhsVal = values.ErasedFactoryAssignmentView(rhsVal, targetView, funcCtx)
+	rhsStr = rhsVal.String(funcCtx)
+	if values.ScopedErasureView(funcCtx, targetView, rhsVal) {
+		rhsStr = fmt.Sprintf("(%s) (%s)", targetView.String(funcCtx), rhsStr)
+	}
 	// A lambda / method-reference REASSIGNED into a slot whose declared type is the RAW form of the
 	// target functional interface (the slot was first declared from a raw getfield, so it never adopted
 	// the lambda's parameterized type) needs an explicit cast to its own instantiated type, else the

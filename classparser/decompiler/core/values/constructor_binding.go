@@ -15,7 +15,23 @@ import (
 // that already-selected cast. Bridging through the same head changes source
 // inference without introducing a different runtime CHECKCAST or evaluation.
 func (f *FunctionCallExpression) renderProvenArgumentCast(i int, target string, arg JavaValue, ctx *class_context.ClassContext) string {
-	expr := arg.String(ctx)
+	operand := arg
+	if !strings.Contains(target, "<") && ctx != nil {
+		if param := f.witnessDescriptorParamType(i); param != nil && param.String(ctx) == target {
+			if child, ok := UnpackSoltValue(arg).(*FunctionCallExpression); ok {
+				// An existing exact descriptor cast fixes this consumption edge
+				// independently of Java's generic inference for the child. Retain
+				// the cast and recover the child's own erased argument tuple.
+				_, result, err := callbinding.Descriptor(child.Descriptor)
+				if err == nil {
+					if planned, ok := child.PlanErasedResultChain(ctx, result); ok {
+						operand = planned
+					}
+				}
+			}
+		}
+	}
+	expr := operand.String(ctx)
 	_, rawAllocation := UnpackSoltValue(arg).(*NewExpression)
 	if strings.Contains(target, "<") && !strings.HasSuffix(target, "[]") && !rawAllocation && !isWitnessLambdaArg(UnpackSoltValue(arg)) {
 		if param := f.witnessDescriptorParamType(i); param != nil && !param.IsArray() {

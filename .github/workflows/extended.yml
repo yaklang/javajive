@@ -67,22 +67,24 @@ jobs:
           cp test/cross/historical_audit_test.go "$AUDIT_ROOT/base-worktree/test/cross/"
           git rev-parse HEAD > "$AUDIT_ROOT/candidate-revision.txt"
           git -C "$AUDIT_ROOT/base-worktree" rev-parse HEAD > "$AUDIT_ROOT/baseline-revision.txt"
-          (cd "$AUDIT_ROOT/base-worktree" && go test -c ./test/cross -o "$AUDIT_ROOT/baseline.test")
-          go test -c ./test/cross -o "$AUDIT_ROOT/candidate.test"
-      - name: Observe all 38 baseline JARs
+          (cd "$AUDIT_ROOT/base-worktree" && CGO_ENABLED=0 go test -c ./test/cross -o "$AUDIT_ROOT/baseline.test")
+          CGO_ENABLED=0 go test -c ./test/cross -o "$AUDIT_ROOT/candidate.test"
+      - name: Build the trusted T30 sandbox toolchain
+        run: docker build -t javajive-sandbox-toolchain:t30 -f tools/sandbox_worker/image/Dockerfile tools/sandbox_worker/image
+      - name: Observe all 38 baseline JARs inside T30 isolation
+        env:
+          JAVAJIVE_SANDBOX_IMAGE: javajive-sandbox-toolchain:t30
         run: |
-          cd "$AUDIT_ROOT/base-worktree/test/cross"
-          HISTORICAL_JAR_MANIFEST="$AUDIT_ROOT/manifest.json" \
-          HISTORICAL_JAR_REPORT="$AUDIT_ROOT/baseline" \
-          HISTORICAL_JAR_REVISION="$(cat "$AUDIT_ROOT/baseline-revision.txt")" \
-          "$AUDIT_ROOT/baseline.test" -test.run '^TestHistoricalJarAudit$' -test.timeout=40m -test.v
-      - name: Observe all 38 candidate JARs
+          python3 scripts/historical_jar_audit.py observe --manifest "$AUDIT_ROOT/manifest.json" \
+            --binary "$AUDIT_ROOT/baseline.test" --revision "$(cat "$AUDIT_ROOT/baseline-revision.txt")" \
+            --report "$AUDIT_ROOT/baseline"
+      - name: Observe all 38 candidate JARs inside T30 isolation
+        env:
+          JAVAJIVE_SANDBOX_IMAGE: javajive-sandbox-toolchain:t30
         run: |
-          cd test/cross
-          HISTORICAL_JAR_MANIFEST="$AUDIT_ROOT/manifest.json" \
-          HISTORICAL_JAR_REPORT="$AUDIT_ROOT/candidate" \
-          HISTORICAL_JAR_REVISION="$(cat "$AUDIT_ROOT/candidate-revision.txt")" \
-          "$AUDIT_ROOT/candidate.test" -test.run '^TestHistoricalJarAudit$' -test.timeout=40m -test.v
+          python3 scripts/historical_jar_audit.py observe --manifest "$AUDIT_ROOT/manifest.json" \
+            --binary "$AUDIT_ROOT/candidate.test" --revision "$(cat "$AUDIT_ROOT/candidate-revision.txt")" \
+            --report "$AUDIT_ROOT/candidate"
       - name: Reject regressions independently of observation completion
         run: |
           python3 scripts/historical_jar_audit.py compare \
@@ -98,7 +100,10 @@ jobs:
           root.mkdir(parents=True, exist_ok=True)
           with tarfile.open(root / 'historical-evidence.tar.gz', 'w:gz') as archive:
               for name in ['baseline', 'candidate', 'comparison.json', 'manifest.json',
-                           'baseline-revision.txt', 'candidate-revision.txt']:
+                           'baseline-revision.txt', 'candidate-revision.txt',
+                           'baseline.worker.json', 'candidate.worker.json',
+                           'baseline.stdout.log', 'candidate.stdout.log',
+                           'baseline.stderr.log', 'candidate.stderr.log']:
                   if (root / name).exists():
                       archive.add(root / name, arcname=name)
           PY

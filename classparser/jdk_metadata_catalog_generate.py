@@ -96,7 +96,7 @@ def profile(release, archive, prefix, jdk_version):
         roots = ['java/lang/Object', 'java/lang/String', 'java/util/Map',
                  'java/util/Optional', 'java/util/Collections', 'java/util/Arrays',
                  'java/util/Iterator', 'java/util/EnumMap', 'java/util/List',
-                 'java/util/Set', 'java/util/Collection', 'java/util/stream/Stream',
+                 'java/util/Set', 'java/util/Collection', 'java/util/Stack', 'java/util/stream/Stream',
                  'java/util/stream/Collectors', 'java/util/function/Function',
                  'java/util/function/Consumer', 'java/util/function/Supplier',
                  'java/util/function/Predicate']

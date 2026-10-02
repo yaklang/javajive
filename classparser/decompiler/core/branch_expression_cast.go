@@ -82,12 +82,36 @@ func (d *Decompiler) branchExpressionStackStep(cur *OpCode, stack []values.JavaV
 		if field, ok := produced.(*values.JavaClassMember); !ok || field == nil {
 			return nil, false
 		}
+	case OP_AALOAD, OP_IALOAD, OP_BALOAD, OP_CALOAD, OP_SALOAD, OP_LALOAD, OP_FALOAD, OP_DALOAD:
+		access, ok := produced.(*values.JavaArrayMember)
+		if !ok || access == nil || access.Object == nil || access.Index == nil {
+			return nil, false
+		}
+		operands = []values.JavaValue{access.Index, access.Object}
 	case OP_ARRAYLENGTH:
 		length, ok := produced.(*values.ArrayLengthExpression)
 		if !ok || length == nil || length.Array == nil || !length.HasOriginPC || length.OriginPC != int(cur.CurrentOffset) {
 			return nil, false
 		}
 		operands = []values.JavaValue{length.Array}
+	case OP_ANEWARRAY, OP_NEWARRAY, OP_MULTIANEWARRAY:
+		array, ok := produced.(*values.NewExpression)
+		if !ok || array == nil || !array.IsArray() || !array.HasOriginPC || array.OriginPC != int(cur.CurrentOffset) || len(array.Initializer) != 0 || len(array.Length) == 0 {
+			return nil, false
+		}
+		if op == OP_MULTIANEWARRAY {
+			if len(cur.Data) != 3 || int(cur.Data[2]) != len(array.Length) || len(array.Length) > array.Type().ArrayDim() {
+				return nil, false
+			}
+		} else if len(array.Length) != 1 {
+			return nil, false
+		}
+		// A sized allocation is a value-producing operation, with dimensions
+		// evaluated before allocation in source order. No DUP/initializer store
+		// is consumed here: those require a separate ownership proof.
+		for i := len(array.Length) - 1; i >= 0; i-- {
+			operands = append(operands, array.Length[i])
+		}
 	case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE, OP_INVOKESTATIC:
 		call, ok := produced.(*values.FunctionCallExpression)
 		if !ok || call == nil || d.invokeFuncCall[cur] != call || call.OriginPC != int(cur.CurrentOffset) || call.Descriptor == "" ||

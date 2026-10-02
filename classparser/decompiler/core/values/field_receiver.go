@@ -27,6 +27,12 @@ func recoverParameterizedFieldReceiver(ctx *class_context.ClassContext, value Ja
 		if _, ok := types.AsParameterizedType(value.Type()); ok {
 			return value.Type()
 		}
+		if array, ok := UnpackSoltValue(value).(*JavaArrayMember); ok && array != nil {
+			if source := recover(array.Object, depth+1); source != nil && source.IsArray() {
+				return source.ElementType()
+			}
+			return nil
+		}
 		field, ok := UnpackSoltValue(value).(*RefMember)
 		if !ok || field == nil || seen[field] {
 			return nil
@@ -56,7 +62,11 @@ func recoverParameterizedFieldReceiver(ctx *class_context.ClassContext, value Ja
 			receiver.RawClassName, receiver.TypeArgs, field.Member)
 		declaredRaw, declaredOK := types.RawClassFQN(field.Type())
 		recoveredRaw, recoveredOK := types.RawClassFQN(recovered)
-		if !declaredOK || !recoveredOK || !sameErasureClassName(declaredRaw, recoveredRaw) || !sourceDenotableJavaType(recovered, ctx) {
+		matches := declaredOK && recoveredOK && sameErasureClassName(declaredRaw, recoveredRaw)
+		if !matches && recovered != nil {
+			matches = ScopedErasureView(ctx, recovered, field)
+		}
+		if !matches || !sourceDenotableJavaType(recovered, ctx) {
 			return nil
 		}
 		return recovered

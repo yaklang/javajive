@@ -406,14 +406,13 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 	}
 	out := map[string]bool{}
 	for simple, pkgs := range pkgsBySimple {
-		if _, hasOwn := pkgs[c.PackageName]; !hasOwn {
+		_, hasOwn := pkgs[c.PackageName]
+		_, hasLang := pkgs["java.lang"]
+		if !hasOwn && !hasLang {
 			continue
 		}
-		for p := range pkgs {
-			if p != c.PackageName && p != "" {
-				out[simple] = true
-				break
-			}
+		if len(pkgs) > 1 {
+			out[simple] = true
 		}
 	}
 	if len(out) == 0 {
@@ -3842,6 +3841,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			// assigned across multiple branches must keep its in-body assignments (see
 			// countConstructorFieldAssignments).
 			ctorFieldAssignCount := countConstructorFieldAssignments(statementList, funcCtx.ClassName)
+			instanceHoistCandidates := inertConstructorFieldPrefix(statementList, funcCtx.ClassName)
 
 			// Cross-constructor/<clinit> totals: a final field assigned exactly once HERE may still
 			// be assigned in another overloaded constructor. Hoisting it then double-assigns a final
@@ -3935,7 +3935,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					foundFieldInit := false
 					if ret.LeftValue != nil && ret.JavaValue != nil && funcCtx.FunctionName == "<clinit>" && classStaticInitializersMustHoist {
 						if ref, ok := ret.LeftValue.(*values.JavaRef); ok && !ref.IsThis {
-							if rhs := ret.JavaValue.String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) {
+							if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) {
 								hoistableStaticInitLocals[strings.TrimSpace(ref.String(funcCtx))] = rhs
 								foundFieldInit = true
 								hoistEventCount++
@@ -3946,8 +3946,8 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						obj := core.UnpackSoltValue(v.Object)
 						if v1, ok := obj.(*values.JavaRef); ok && v1.IsThis && (funcCtx.FunctionName == "<init>" || funcCtx.FunctionName == funcCtx.ClassName) {
 							if _, ok := finalFieldMap[v.Member]; ok {
-								if rhs := ret.JavaValue.String(funcCtx); canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
-									(!EnableFieldInitHoistGuard || (ctorFieldAssignCount[v.Member] == 1 && crossCtorStoreOK(fieldStoreTotal, v.Member) && !rhsReadsInstanceField(rhs))) {
+								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
+									(!EnableFieldInitHoistGuard || (instanceHoistCandidates[ret] && ctorFieldAssignCount[v.Member] == 1 && crossCtorStoreOK(fieldStoreTotal, v.Member) && !rhsReadsInstanceField(rhs))) {
 									foundFieldInit = true
 									c.fieldDefaultValue[v.Member] = rhs
 								}
@@ -3956,7 +3956,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					} else if v, ok := ret.LeftValue.(*values.JavaClassMember); ok && ret.JavaValue != nil {
 						if (funcCtx.FunctionName == "<clinit>" && classStaticInitializersMustHoist) || v.Name == funcCtx.ClassName {
 							if _, ok := finalFieldMap[v.Member]; ok {
-								if rhs := ret.JavaValue.String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
+								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
 									(!EnableFieldInitHoistGuard || (ctorFieldAssignCount[v.Member] <= 1 && crossCtorStoreOK(fieldStoreTotal, v.Member))) {
 									foundFieldInit = true
 									c.fieldDefaultValue[v.Member] = rhs
@@ -4000,6 +4000,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						"%s\n"+
 						c.GetTabString()+"}", arg, statementListToString(ret.Body))
 				case *statements.TryCatchStatement:
+					if layer, ok := rewriter.RecoverCoveredTypedCatchLayer(ret); ok {
+						ret = layer
+					}
 					tryBody, catchExc, catchBodies := ret.TryBody, ret.Exception, ret.CatchBodies
 					finally, haveFinally := rewriter.RecoverCatchAllFinally(ret)
 					if haveFinally {
@@ -11928,6 +11931,44 @@ func canHoistFieldInitializer(rhs string) bool {
 // localSlotRefReNarrowLegacy is the pre-fix matcher that misses the collision-renamed `varN_M` form;
 // retained only behind the JDEC_FIELD_HOIST_RENAMED_LOCAL_OFF kill-switch for the load-bearing test.
 var localSlotRefReNarrowLegacy = regexp.MustCompile(`\bvar\d+\b`)
+
+// An instance initializer executes just after super and before the constructor
+// body. Only literal writes in its initial straight-line prefix can move there
+// without evaluating a later call/branch earlier, or exposing a new field value
+// to an earlier callback. Retain all other assignments at their JVM position.
+func inertConstructorFieldPrefix(body []statements.Statement, owner string) map[*statements.AssignStatement]bool {
+	result := map[*statements.AssignStatement]bool{}
+	for i, st := range body {
+		if middle, ok := st.(*statements.MiddleStatement); ok && (middle.Flag == "start" || middle.Flag == "end") {
+			continue
+		}
+		if expression, ok := st.(*statements.ExpressionStatement); ok && i == 0 {
+			if call, ok := values.UnpackSoltValue(expression.Expression).(*values.FunctionCallExpression); ok && call.IsSpecialInvoke && call.FunctionName == "<init>" && strings.ReplaceAll(call.ClassName, ".", "/") != strings.ReplaceAll(owner, ".", "/") {
+				continue
+			}
+		}
+		assign, ok := st.(*statements.AssignStatement)
+		if !ok || assign.ArrayMember != nil || assign.JavaValue == nil {
+			break
+		}
+		field, ok := assign.LeftValue.(*values.RefMember)
+		if !ok {
+			break
+		}
+		receiver, ok := values.UnpackSoltValue(field.Object).(*values.JavaRef)
+		if !ok || !receiver.IsThis {
+			break
+		}
+		value := values.UnpackSoltValue(assign.JavaValue)
+		if value != values.JavaNull {
+			if _, ok := value.(*values.JavaLiteral); !ok {
+				break
+			}
+		}
+		result[assign] = true
+	}
+	return result
+}
 
 func canHoistFieldValueInitializer(value values.JavaValue, rhs string) bool {
 	if canHoistFieldInitializer(rhs) {

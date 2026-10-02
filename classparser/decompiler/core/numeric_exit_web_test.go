@@ -94,3 +94,42 @@ func TestNumericWebRepairDoesNotReplaceConsistentIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestIntegerExitWebRequiresClosedNonBooleanConstants(t *testing.T) {
+	for _, name := range []string{"proved", "boolean domain", "nonconstant", "byte domain", "entry", "increment"} {
+		t.Run(name, func(t *testing.T) {
+			typ := types.NewJavaPrimer(types.JavaInteger)
+			x := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			y := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			a, b, load := op(OP_ISTORE_1, 1), op(OP_ISTORE_1, 2), op(OP_ILOAD_1, 3)
+			a.stackConsumed = []values.JavaValue{values.NewJavaLiteral(1, typ)}
+			b.stackConsumed = []values.JavaValue{values.NewJavaLiteral(2, typ)}
+			slot := values.NewSlotValue(y, typ)
+			load.stackProduced = []values.JavaValue{slot}
+			webs := &slotWeb{webOf: map[*OpCode]int{a: 1, b: 1, load: 1}, entryWeb: map[int]int{}}
+			d := &Decompiler{FunctionContext: &class_context.ClassContext{}, opCodes: []*OpCode{a, b, load}, cachedSlotWebs: webs, opcodeIdToRef: map[*OpCode][][2]any{a: {{x, true}}, b: {{y, true}}}}
+			switch name {
+			case "increment":
+				inc := op(OP_IINC, 4)
+				inc.Data = []byte{1, 1}
+				d.opCodes = append(d.opCodes, inc)
+			case "boolean domain":
+				b.stackConsumed = []values.JavaValue{values.NewJavaLiteral(0, typ)}
+			case "nonconstant":
+				b.stackConsumed = []values.JavaValue{y}
+			case "byte domain":
+				b.stackConsumed = []values.JavaValue{values.NewJavaLiteral(2, types.NewJavaPrimer(types.JavaByte))}
+			case "entry":
+				webs.entryWeb[0] = 1
+			}
+			d.unifyNumericExitWebs()
+			got := d.opcodeIdToRef[a][0][0].(*values.JavaRef)
+			if (got.SolvedWebIdentity != nil) != (name == "proved") {
+				t.Fatal("wrong finite domain proof", name)
+			}
+			if name == "proved" && (got != d.opcodeIdToRef[b][0][0] || slot.GetValue() != got || got.Id == x.Id || got.Id == y.Id) {
+				t.Fatal("definitions and use did not receive one fresh identity")
+			}
+		})
+	}
+}

@@ -33,6 +33,7 @@ func sortNodesByID(nodes []*core.Node) []*core.Node {
 }
 
 type RewriteManager struct {
+	loopTransfers map[*core.Node]loopTransfer
 	// Method-local allocation keeps synthetic names deterministic across concurrent requests.
 	syntheticCatchVarCounter int
 	currentNodeId            int
@@ -1051,6 +1052,47 @@ func (s *RewriteManager) Rewrite() error {
 			continue
 		}
 
+		isTry := slices.Contains(s.TryNodes, node)
+		// Protected retry branches need their loop exits before nested ifs
+		// consume the graph. Other loops retain the existing inner-if order.
+		materializeLoopExits := func(protectedRetryOnly bool) error {
+			if isTry || slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
+				for j := i; j < len(order); j++ {
+					n := order[j]
+					if slices.Contains(s.WhileNode, n) && (loopOwnsRewriteNode(s, n, node) || (protectedRetryOnly && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && searchCircleEndNode(n, n.Next[0], s.DominatorMap, true) == node)) {
+						if protectedRetryOnly && !loopHasProvedProtectedRetry(s, n) {
+							continue
+						}
+						if isTry && (len(n.Next) == 0 || (n.Next[0] != node && !loopHeaderGuardsTry(s, n, node)) || (hasSharedCatchEntry(node) && !loopHasProvedProtectedRetry(s, n))) {
+							continue
+						}
+						if _, ok := loopJmpRewriterRecoed[n]; ok {
+							// An earlier pass can see no normal boundary
+							// until a nested terminal loop has been wrapped.
+							// Materialize newly exposed exits before this
+							// continuation becomes an opaque IfStatement.
+							if protectedRetryOnly || len(n.Next) == 0 || slices.Contains(n.Next, node) || searchCircleEndNode(n, n.Next[0], s.DominatorMap, s.LoopRegionReducible) != node {
+								// A loop that already owns this continuation
+								// needs no second pass. Keep looking for an
+								// enclosing loop whose branch also exits here.
+								continue
+							}
+						}
+						err := LoopJmpRewriter(s, n)
+						if err != nil {
+							return err
+						}
+						loopJmpRewriterRecoed[n] = struct{}{}
+						s.DominatorMap = GenerateDominatorTree(s.RootNode)
+						break
+					}
+				}
+			}
+			return nil
+		}
+		if err := materializeLoopExits(true); err != nil {
+			return err
+		}
 		// Family B (merge-condition inside a container body): TryRewriter (and, in aggressive mode,
 		// IfRewriter) collects its body's statements via a dominator walk WITHOUT recursively
 		// structuring them, so any if-node that lives in the body must be turned into an IfStatement
@@ -1063,7 +1105,6 @@ func (s *RewriteManager) Rewrite() error {
 		// needs it and it is zero-regression). Extending it to if containers regressed passing
 		// methods catastrophically when applied globally (5->318), so it is gated behind aggressive
 		// mode: only a method that already failed conservatively takes the if-container path.
-		isTry := slices.Contains(s.TryNodes, node)
 		isAggrIf := s.Aggressive && slices.Contains(s.IfNodes, node)
 		if isTry || isAggrIf {
 			body := s.containerBodyNodeSet(node)
@@ -1083,26 +1124,8 @@ func (s *RewriteManager) Rewrite() error {
 			s.DominatorMap = GenerateDominatorTree(s.RootNode)
 		}
 
-		// Materialize loop exits before a container consumes its body, including retry try/catch loops.
-		if isTry || slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
-			for j := i; j < len(order); j++ {
-				n := order[j]
-				if slices.Contains(s.WhileNode, n) && loopOwnsRewriteNode(s, n, node) {
-					if isTry && (len(n.Next) == 0 || (n.Next[0] != node && !loopHeaderGuardsTry(s, n, node)) || hasSharedCatchEntry(node)) {
-						continue
-					}
-					if _, ok := loopJmpRewriterRecoed[n]; ok {
-						break
-					}
-					err := LoopJmpRewriter(s, n)
-					if err != nil {
-						return err
-					}
-					loopJmpRewriterRecoed[n] = struct{}{}
-					s.DominatorMap = GenerateDominatorTree(s.RootNode)
-					break
-				}
-			}
+		if err := materializeLoopExits(false); err != nil {
+			return err
 		}
 		err := nodeToRewriter[node](s, node)
 		if err != nil {

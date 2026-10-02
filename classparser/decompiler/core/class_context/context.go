@@ -806,7 +806,7 @@ func (f *ClassContext) ShortTypeName(name string) string {
 		// that type gets a single-type-import which SHADOWS the same-package/java.lang one, so the bare
 		// name would bind to the wrong type. In that case emit the fully-qualified name instead. The
 		// clashing set is precomputed from the constant pool by the dumper (render-order independent).
-		if pkg == f.PackageName && f.SamePkgFQNames != nil && f.SamePkgFQNames[className] {
+		if f.SamePkgFQNames != nil && f.SamePkgFQNames[className] {
 			return pkg + "." + dotted
 		}
 		return dotted

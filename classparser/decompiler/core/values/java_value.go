@@ -63,6 +63,11 @@ func (j *JavaRef) Type() types.JavaType {
 		// avoid nil pointer dereference downstream.
 		return types.NewJavaClass("java.lang.Object")
 	}
+	if j.IsParam {
+		if _, primitive := j.typ.RawType().(*types.JavaPrimer); primitive {
+			return j.typ.Copy()
+		}
+	}
 	return j.typ
 }
 
@@ -335,6 +340,8 @@ func NewJavaClassValue(typ types.JavaType) *JavaClassValue {
 }
 
 type JavaClassMember struct {
+	OriginPC    int
+	HasOriginPC bool
 	Name        string
 	Member      string
 	Description string
@@ -371,9 +378,11 @@ func NewJavaClassMember(typeName, member string, desc string, typ types.JavaType
 }
 
 type RefMember struct {
-	Member   string
-	Object   JavaValue
-	JavaType types.JavaType
+	OriginPC    int
+	HasOriginPC bool
+	Member      string
+	Object      JavaValue
+	JavaType    types.JavaType
 }
 
 // ReplaceVar implements JavaValue.

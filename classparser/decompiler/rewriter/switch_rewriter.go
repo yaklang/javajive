@@ -194,6 +194,44 @@ func switchCaseHasOnlyJumpEntries(node, candidate *core.Node, cases *omap.Ordere
 	return found && onlyJumps
 }
 
+// Dominance alone cannot identify a switch continuation also reached by an
+// enclosing if arm. Prove a unique forward boundary shared by distinct case
+// bodies. A label remains a label (real fall-through); terminal returns were
+// already isolated above. Only switch-owned predecessors become break leaves.
+func externalSharedSwitchContinuation(manager *RewriteManager, owner *core.Node, starts []*core.Node) *core.Node {
+	if owner == nil || !owner.HasOriginPC || len(starts) > 256 {
+		return nil
+	}
+	labels := map[*core.Node]bool{}
+	for _, start := range starts {
+		labels[start] = true
+	}
+	counts := map[*core.Node]int{}
+	seen := map[*core.Node]bool{}
+	for _, start := range starts {
+		if start == nil || seen[start] {
+			continue
+		}
+		seen[start] = true
+		for exit := range caseBodyExitNodes(manager, owner, start) {
+			if exit == nil || labels[exit] || IsEndNode(exit) || exit.IsCatchStart || !exit.HasOriginPC || exit.OriginPC <= owner.OriginPC || utils.IsDominate(manager.DominatorMap, owner, exit) {
+				continue
+			}
+			counts[exit]++
+		}
+	}
+	var candidate *core.Node
+	for target, count := range counts {
+		if count >= 2 {
+			if candidate != nil {
+				return nil
+			}
+			candidate = target
+		}
+	}
+	return candidate
+}
+
 func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	if node.SwitchPrepared {
 		return nil
@@ -309,6 +347,9 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 			}
 		}
 	}
+	if shared := externalSharedSwitchContinuation(manager, node, startNodes); shared != nil {
+		mergeNode = shared
+	}
 	if mergeNode != nil {
 		allSources := slices.Clone(mergeNode.Source)
 		for _, source := range allSources {
@@ -396,7 +437,9 @@ func splitExternalSharedSwitchVoidReturns(manager *RewriteManager, owner *core.N
 		return source.Next, nil
 	})
 	for _, e := range edges {
-		leaf := manager.NewNode(&statements.ReturnStatement{})
+		// Tail duplication retains the original return's PC witness.
+		copy := *e.target.Statement.(*statements.ReturnStatement)
+		leaf := manager.NewNode(&copy)
 		leaf.OriginPC, leaf.HasOriginPC = e.target.OriginPC, e.target.HasOriginPC
 		for _, next := range e.target.Next {
 			leaf.AddNext(next)

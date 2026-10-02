@@ -148,6 +148,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				for i := range args2 {
 					captured[i] = args2[len(args2)-1-i]
 				}
+				captured = lambdaCaptureDescriptorViews(classMember, captured)
 				// A captured value is a live snapshot of an enclosing local (a JavaRef into some JVM
 				// slot). It renders LAZILY (below), so its name must track the SAME variable-id
 				// rewrites that RewriteVar applies to every other tree reference AFTER stack
@@ -224,7 +225,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					cv.InstantiatedMtdDesc = t19MethodTypeDesc(args1[2])
 					if upgradedType := inferDeclaredLambdaTarget(d, typ, args1[0], args1[2]); upgradedType != nil {
 						lambdaType := upgradedType
-						if inferLambdaTypeFromInstantiated(typ, args1[2]) == nil {
+						if inferLambdaTypeFromInstantiated(typ, args1[2]) == nil || (!d.blockPartialFunctionalTarget && instantiatedSAMErasesGenericArguments(args1[2], d.FunctionContext)) {
 							cv = retainErasedFunctionalValue(cv, typ, lambdaType)
 						} else {
 							cv = cv.WithType(func() types.JavaType { return lambdaType })

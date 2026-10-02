@@ -12,8 +12,8 @@ import (
 // web's definitions and load sites to a fresh declaration instead.
 //
 // Long/float/double have exact source domains in JVM descriptors. The int
-// category (boolean/byte/char/short/int), entry parameters, incomplete simulated
-// definitions, and mixed domains need additional proofs and are left alone.
+// category needs a finite constant-domain proof excluding boolean values.
+// Entry parameters, incomplete definitions and mixed domains remain excluded.
 func (d *Decompiler) unifyNumericExitWebs() {
 	webs := d.slotWebs()
 	if webs == nil {
@@ -44,6 +44,7 @@ func (d *Decompiler) unifyNumericExitWebs() {
 			continue
 		}
 		kind := ""
+		intConstants, nonBoolean := true, false
 		valid := true
 		count := 0
 		for op, w := range webs.webOf {
@@ -71,7 +72,7 @@ func (d *Decompiler) unifyNumericExitWebs() {
 				break
 			}
 			p, ok := rhs.Type().RawType().(*types.JavaPrimer)
-			if !ok || (p.Name != types.JavaLong && p.Name != types.JavaFloat && p.Name != types.JavaDouble) {
+			if !ok || (p.Name != types.JavaLong && p.Name != types.JavaFloat && p.Name != types.JavaDouble && p.Name != types.JavaInteger) {
 				valid = false
 				break
 			}
@@ -80,6 +81,32 @@ func (d *Decompiler) unifyNumericExitWebs() {
 				break
 			}
 			kind = p.Name
+			if p.Name == types.JavaInteger {
+				literal, ok := rhs.(*values.JavaLiteral)
+				if !ok {
+					intConstants = false
+				} else if number, ok := literal.Data.(int); !ok {
+					intConstants = false
+				} else {
+					nonBoolean = nonBoolean || (number != 0 && number != 1)
+				}
+				if d.localHasBooleanDescriptorUse(ref) {
+					intConstants = false
+				}
+			}
+		}
+		// IINC has a read/write definition outside operand-stack stores. Until
+		// that definition participates in the canonicalization, a finite
+		// integer constant proof must reject increments of this physical slot.
+		if kind == types.JavaInteger {
+			for _, op := range d.opCodes {
+				if op != nil && op.Instr != nil && op.Instr.OpCode == OP_IINC && GetStoreIdx(op) == GetStoreIdx(stores[0]) {
+					intConstants = false
+				}
+			}
+		}
+		if kind == types.JavaInteger && (!intConstants || !nonBoolean) {
+			valid = false
 		}
 		if !valid {
 			continue
@@ -89,7 +116,10 @@ func (d *Decompiler) unifyNumericExitWebs() {
 		// ref reused by another web. Rebuilding every numeric web needlessly
 		// changes declarations and can disturb downstream structuring.
 		firstRef := d.opcodeIdToRef[stores[0]][0][0].(*values.JavaRef)
-		needsRepair := false
+		// A proved multi-definition int web also needs an explicit join
+		// identity across lexical branch/monitor exits, even if DFS happened
+		// to reuse one ref. Later declaration placement must not split it.
+		needsRepair := kind == types.JavaInteger
 		for op, infos := range d.opcodeIdToRef {
 			w, known := webs.webOf[op]
 			if !known || op == nil || op.Instr == nil || !isLocalStoreOpcode(op.Instr.OpCode) {

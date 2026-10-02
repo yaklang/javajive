@@ -25,7 +25,6 @@ func fixMath3RemainingReconstructs(body string) string {
 			body = strings.ReplaceAll(body, typ+" var", typ+"<T> var")
 			body = strings.ReplaceAll(body, "("+typ+") (", "("+typ+"<T>) (")
 			body = strings.ReplaceAll(body, "("+typ+")(", "("+typ+"<T>)(")
-			body = strings.ReplaceAll(body, "new "+typ+"(", "new "+typ+"<T>(")
 		}
 		body = wrapSizedFieldArrays(body)
 		body = wrapFieldArrayReturningCalls(body)
@@ -161,12 +160,6 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.Replace(body,
 			"if ((var0) < (-0.4769362762044697D)){\n\n\t\t\t}else{",
 			"if ((var0) < (-0.4769362762044697D)){\n\t\t\t\treturn ((var1) < (0D)) ? ((erfc(-var1)) - (erfc(-var0))) : ((erfc(-var0)) - (erfc(var1)));\n\t\t\t}else{",
-			1)
-	}
-	if strings.Contains(body, "class AdamsNordsieckFieldTransformer") {
-		body = strings.Replace(body,
-			"this.update = new Array2DRowFieldMatrix<T>(var5.solve((FieldMatrix<T>)(new Array2DRowFieldMatrix<T>(var7,false))).getData());",
-			"this.update = new Array2DRowFieldMatrix<T>((T[][])(var5.solve((FieldMatrix<T>)(new Array2DRowFieldMatrix<T>(var7,false))).getData()));",
 			1)
 	}
 	return body

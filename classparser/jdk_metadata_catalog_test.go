@@ -205,3 +205,25 @@ func TestJDKCatalogRetainsExactGenericSignatures(t *testing.T) {
 		}
 	}
 }
+
+func TestJDKInvocationCatalogStackErasure(t *testing.T) {
+	for _, release := range []int{8, 11, 17, 21} {
+		cls, ok := jdkInvocationMetadata("java/util/Stack", release)
+		if !ok || cls.Signature != "<E:Ljava/lang/Object;>Ljava/util/Vector<TE;>;" {
+			t.Fatal("missing exact Stack declaration", release, cls.Signature)
+		}
+		found := false
+		for _, method := range cls.Methods {
+			if method.Name == "push" && method.Desc == "(Ljava/lang/Object;)Ljava/lang/Object;" {
+				found = method.Signature == "(TE;)TE;" && method.Public && method.Generic && !method.Static && !method.Varargs && !method.Bridge
+			}
+		}
+		if !found {
+			t.Fatal("missing erased push identity", release)
+		}
+		parent, ok := jdkInvocationMetadata("java/util/Vector", release)
+		if !ok || !parent.MembersComplete || !parent.ParentsComplete {
+			t.Fatal("missing Stack ancestor", release)
+		}
+	}
+}

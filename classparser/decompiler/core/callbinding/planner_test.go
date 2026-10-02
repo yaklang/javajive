@@ -91,3 +91,19 @@ func TestHierarchyCycle(t *testing.T) {
 		t.Fatal("cycle accepted")
 	}
 }
+
+func TestArrayAssignableUsesRecursiveReferenceComponents(t *testing.T) {
+	for _, tc := range []struct {
+		actual, formal string
+		want           bool
+	}{
+		{"[Ljava/lang/String;", "[Ljava/lang/Object;", true}, {"[[Ljava/lang/String;", "[[Ljava/lang/Object;", true}, {"[[I", "[Ljava/lang/Object;", true}, {"[[I", "[Ljava/lang/Cloneable;", true}, {"[I", "Ljava/lang/Cloneable;", true}, {"[I", "Ljava/io/Serializable;", true}, {"[I", "[I", true},
+		{"[I", "[J", false}, {"[I", "[Ljava/lang/Object;", false}, {"[[I", "[[Ljava/lang/Object;", false}, {"[Ljava/lang/Object;", "[Ljava/lang/String;", false}, {"[Ljava/lang/String;", "[[Ljava/lang/Object;", false}, {"Ljava/lang/Object;", "[Ljava/lang/Object;", false}, {"[Ljava/lang/String;", "Ljava/lang/Runnable;", false},
+	} {
+		t.Run(tc.actual+"->"+tc.formal, func(t *testing.T) {
+			if got := Assignable(tc.actual, tc.formal, provider()); got != tc.want {
+				t.Fatalf("%v want%v", got, tc.want)
+			}
+		})
+	}
+}

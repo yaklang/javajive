@@ -1,6 +1,8 @@
 package values
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -133,6 +135,7 @@ func TestErasedFormalResultUsesWideningBoundAndMethodShadow(t *testing.T) {
 		{"class formal", "", "<T:Ljava/lang/Object;>Ljava/lang/Object;", "Ljava/lang/Number;", true},
 		{"shadow", "<T:Ljava/lang/Number;>()TT;", "<T:Ljava/lang/Object;>Ljava/lang/Object;", "Ljava/lang/Object;", false},
 		{"dependent bound", "<T:TU;U:Ljava/lang/Object;>()TT;", "<T:Ljava/lang/Object;>Ljava/lang/Object;", "Ljava/lang/Number;", false},
+		{"recursive bound", "<T:Lexternal/Algebra<TT;>;>()TT;", "", "Lexternal/Algebra;", false},
 		{"out of scope", "", "", "Ljava/lang/Number;", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,6 +148,143 @@ func TestErasedFormalResultUsesWideningBoundAndMethodShadow(t *testing.T) {
 			}
 			if ok && (out.Witness() != f.Witness() || out.Arguments[0].(*CastExpression).Value != f.Arguments[0]) {
 				t.Fatal("changed original erased invocation or operand")
+			}
+		})
+	}
+}
+
+func TestErasedResultChainPreservesNestedCheckedResultAndWidening(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	param := types.NewParameterizedType("java.util.function.Function", []types.JavaType{types.NewJavaClass("java.lang.Class"), types.NewJavaClass("java.lang.Object")})
+	arg := NewJavaRef(utils.NewRootVariableId(), nil, param)
+	child := &FunctionCallExpression{ClassName: "external.Maker", FunctionName: "make", Descriptor: "(Ljava/util/function/Function;)Ljava/util/Map;", IsStatic: true, Kind: InvokeStatic, Arguments: []JavaValue{arg}, OriginPC: 7}
+	checked := &CastExpression{Value: child, TargetType: types.NewParameterizedType("java.util.LinkedHashMap", []types.JavaType{types.NewJavaClass("java.lang.String"), types.NewJavaClass("java.lang.Object")}), OriginPC: 13}
+	outer := &FunctionCallExpression{ClassName: "external.API", FunctionName: "take", Descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;", IsStatic: true, Kind: InvokeStatic, Arguments: []JavaValue{checked}, OriginPC: 19, bindingPlanned: true}
+	out, ok := outer.PlanErasedResultChain(ctx, "Ljava/lang/Object;")
+	if !ok {
+		t.Fatal("already planned consumer prevented checked child's erased tuple")
+	}
+	kept, ok := out.Arguments[0].(*CastExpression)
+	if !ok || kept == checked || kept.OriginPC != 13 || kept.TargetType != checked.TargetType || kept.Binding != checked.Binding || checked.Value != child || out.Witness() != outer.Witness() {
+		t.Fatal("existing payload check moved or changed")
+	}
+	planned, ok := kept.Value.(*FunctionCallExpression)
+	if !ok || planned.Witness() != child.Witness() || planned.Arguments[0].(*CastExpression).Value != arg || child.Arguments[0] != arg {
+		t.Fatal("changed child invocation or materialized operand")
+	}
+	// Class<T> widens to Object without unavailable hierarchy guesses.
+	classArg := NewJavaRef(utils.NewRootVariableId(), nil, types.NewParameterizedType("java.lang.Class", []types.JavaType{types.NewJavaClass("T")}))
+	widened := outer.Clone()
+	widened.bindingPlanned = false
+	widened.Arguments = []JavaValue{classArg}
+	if out, ok := widened.PlanErasedResultChain(ctx, "Ljava/lang/Object;"); !ok || out.Arguments[0].(*CastExpression).TargetType.String(ctx) != "Object" {
+		t.Fatal("universal reference widening failed")
+	}
+	// A narrower formal requires resolved hierarchy evidence, never a library name guess.
+	widened.Descriptor = "(Lexternal/Publisher;)Ljava/lang/Object;"
+	if _, ok := widened.PlanErasedResultChain(ctx, "Ljava/lang/Object;"); ok {
+		t.Fatal("unproved narrowed argument accepted")
+	}
+}
+
+func TestErasedCheckedResultUsesProducerErasureWithoutMovingCheck(t *testing.T) {
+	ctx := &class_context.ClassContext{CurrentMethodSig: "<T:Ljava/lang/Object;>()TT;"}
+	arg := NewJavaRef(utils.NewRootVariableId(), nil, types.NewParameterizedType("java.util.function.Function", []types.JavaType{types.NewJavaClass("java.lang.Class"), types.NewJavaClass("java.lang.Object")}))
+	arg.Id.SetName("action")
+	f := &FunctionCallExpression{ClassName: "example.Factory", Object: NewJavaClassValue(types.NewJavaClass("example.Factory")), FunctionName: "create", IsStatic: true, Kind: InvokeStatic, Descriptor: "(Ljava/util/function/Function;)Ljava/util/Map;", Arguments: []JavaValue{arg}, FuncType: &types.JavaFuncType{ParamTypes: []types.JavaType{types.NewJavaClass("java.util.function.Function")}, ReturnType: types.NewJavaClass("java.util.Map")}, OriginPC: 7}
+	target := types.NewJavaClass("java.util.LinkedHashMap")
+	cast := &CastExpression{Value: f, TargetType: target, OriginPC: 11}
+	rendered := cast.String(ctx)
+	if !strings.Contains(rendered, "(Function)(action)") || !strings.Contains(rendered, "LinkedHashMap") || strings.Count(rendered, "Factory.create") != 1 || cast.Value != f || cast.OriginPC != 11 || f.Arguments[0] != arg {
+		t.Fatal(rendered)
+	}
+	if out, ok := f.PlanErasedCheckedResultChain(ctx, target); !ok || out.Witness() != f.Witness() || !out.Arguments[0].(*CastExpression).Binding || out.Arguments[0].(*CastExpression).Value != arg {
+		t.Fatal("producer tuple was not retained")
+	}
+	for _, reject := range []types.JavaType{types.NewJavaClass("T"), types.NewParameterizedType("java.util.LinkedHashMap", []types.JavaType{types.NewJavaClass("java.lang.String"), types.NewJavaClass("T")}), types.NewJavaArrayType(target), types.NewJavaPrimer(types.JavaInteger)} {
+		if _, ok := f.PlanErasedCheckedResultChain(ctx, reject); ok {
+			t.Fatalf("erased constrained target %s", reject.String(ctx))
+		}
+	}
+}
+
+func TestErasedResultTupleKeepsArrayLengthEvaluationIdentity(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	owner := types.NewJavaClass("fixture.Flow")
+	mapper := NewJavaRef(utils.NewRootVariableId(), nil, types.NewParameterizedType("java.util.function.Function", []types.JavaType{types.NewJavaClass("java.lang.String"), types.NewJavaClass("java.lang.Object")}))
+	array := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaArrayType(types.NewJavaClass("java.lang.Object")))
+	length := &ArrayLengthExpression{Array: array, OriginPC: 29, HasOriginPC: true}
+	f := &FunctionCallExpression{ClassName: "fixture.Flow", FunctionName: "map", Descriptor: "(Ljava/util/function/Function;I)Lfixture/Flow;", Kind: InvokeVirtual, Object: NewJavaRef(utils.NewRootVariableId(), nil, owner), Arguments: []JavaValue{mapper, length}, OriginPC: 30}
+	planned, ok := f.PlanErasedResultChain(ctx, "Lfixture/Flow;")
+	if !ok || planned.Arguments[1] != length || length.Array != array || f.Arguments[0] != mapper || planned.Witness() != f.Witness() {
+		t.Fatal("lost nullable array evaluation or invocation identity")
+	}
+	wrong := f.Clone()
+	wrong.Descriptor = "(Ljava/util/function/Function;J)Lfixture/Flow;"
+	if _, ok := wrong.PlanErasedResultChain(ctx, "Lfixture/Flow;"); ok {
+		t.Fatal("length did not establish a long descriptor tuple")
+	}
+}
+
+func TestErasedFactoryAssignmentRequiresExactClosedZeroArgumentChain(t *testing.T) {
+	for _, scenario := range []string{"proved", "direct", "missing metadata", "missing PC", "arguments", "dynamic", "special", "malformed", "narrow target", "raw target", "nongeneric", "unproved receiver", "too deep"} {
+		t.Run(scenario, func(t *testing.T) {
+			classes := map[string]callbinding.Class{
+				"example/Base": {Name: "example/Base", Public: true, ParentsComplete: true, MembersComplete: true, Methods: []callbinding.Method{{Name: "finish", Desc: "()Lexample/Base;", Public: true}}},
+				"example/Leaf": {Name: "example/Leaf", Public: true, Parents: []string{"example/Base"}, ParentsComplete: true, MembersComplete: true, Methods: []callbinding.Method{{Name: "create", Desc: "()Lexample/Leaf;", Public: true, Static: true, Generic: true}}},
+			}
+			signature := "<T:Ljava/lang/Object;>()Lexample/Leaf<TT;>;"
+			ctx := &class_context.ClassContext{InvocationMetadata: func(n string) (callbinding.Class, bool) { c, ok := classes[n]; return c, ok }, SiblingClassSig: func(n string) (string, map[string]string, bool) {
+				if n == "example/Leaf" {
+					return "<T:Ljava/lang/Object;>Lexample/Base<TT;>;", map[string]string{class_context.MethodDescKey("create", "()Lexample/Leaf;"): signature}, true
+				}
+				return "<T:Ljava/lang/Object;>Ljava/lang/Object;", nil, n == "example/Base"
+			}}
+			leaf := &FunctionCallExpression{ClassName: "example.Leaf", FunctionName: "create", Descriptor: "()Lexample/Leaf;", IsStatic: true, Kind: InvokeStatic, OriginPC: 3, HasOriginPC: true}
+			root := &FunctionCallExpression{ClassName: "example.Base", FunctionName: "finish", Descriptor: "()Lexample/Base;", Object: leaf, Kind: InvokeVirtual, OriginPC: 7, HasOriginPC: true}
+			var value JavaValue = root
+			var target types.JavaType = types.NewParameterizedType("example.Base", []types.JavaType{types.NewJavaClass("java.lang.String")})
+			switch scenario {
+			case "direct":
+				value = leaf
+				target = types.NewParameterizedType("example.Leaf", []types.JavaType{types.NewJavaClass("java.lang.String")})
+			case "missing metadata":
+				ctx.InvocationMetadata = nil
+			case "missing PC":
+				leaf.HasOriginPC = false
+			case "arguments":
+				leaf.Arguments = []JavaValue{JavaNull}
+			case "dynamic":
+				leaf.Kind = InvokeDynamic
+			case "special":
+				root.IsSpecialInvoke = true
+			case "malformed":
+				leaf.Descriptor = "broken"
+			case "narrow target":
+				target = types.NewParameterizedType("example.Leaf", []types.JavaType{types.NewJavaClass("java.lang.String")})
+			case "raw target":
+				target = types.NewJavaClass("example.Base")
+			case "nongeneric":
+				signature = "()Lexample/Leaf;"
+			case "unproved receiver":
+				delete(classes, "example/Leaf")
+			case "too deep":
+				for i := 0; i < 32; i++ {
+					next := *root
+					next.Object = value
+					value = &next
+				}
+			}
+			out := ErasedFactoryAssignmentView(value, target, ctx)
+			want := scenario == "proved" || scenario == "direct"
+			if (out != value) != want {
+				t.Fatalf("proved=%v want=%v", out != value, want)
+			}
+			if want {
+				cast, ok := out.(*CastExpression)
+				if !ok || !cast.Binding || cast.Value != value || bindingType(cast.TargetType) != bindingType(target) || root.Object != leaf || leaf.Arguments != nil {
+					t.Fatal("changed evaluation or descriptor view")
+				}
 			}
 		})
 	}

@@ -1,6 +1,8 @@
 package rewriter
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -164,5 +166,52 @@ func TestTerminalHeaderNeedsAnEnclosingContinuationWitness(t *testing.T) {
 		if got := searchCircleEndNode(loop, header, GenerateDominatorTree(root), true); got != want {
 			t.Fatalf("enclosing=%v continuation=%p want=%p", enclosing, got, want)
 		}
+	}
+}
+
+func TestLoopTerminalRegionUsesLiveEdgesAndRespectsAncestorTargets(t *testing.T) {
+	for _, scenario := range []string{"closed nested loop", "detached backlink", "resume ancestor", "resume owner", "encoded ancestor", "foreign live entry", "unknown cycle", "unknown sink"} {
+		t.Run(scenario, func(t *testing.T) {
+			outer := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+			owner := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+			decision := core.NewNode(&statements.ConditionStatement{})
+			entry := core.NewNode(&statements.AssignStatement{})
+			nested := core.NewNode(statements.NewDoWhileStatement(values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), nil))
+			condition := core.NewNode(&statements.ConditionStatement{})
+			step := core.NewNode(&statements.ExpressionStatement{})
+			ret := core.NewNode(&statements.ReturnStatement{})
+			outer.AddNext(owner)
+			owner.AddNext(decision)
+			decision.AddNext(owner)
+			decision.AddNext(entry)
+			entry.AddNext(nested)
+			nested.AddNext(condition)
+			condition.AddNext(step)
+			condition.AddNext(ret)
+			step.AddNext(nested)
+			switch scenario {
+			case "detached backlink":
+				core.NewNode(&statements.ExpressionStatement{}).AddNext(nested)
+			case "resume ancestor":
+				step.AddNext(outer)
+			case "resume owner":
+				step.AddNext(owner)
+			case "encoded ancestor":
+				step.Statement = &statements.CustomStatement{StringFunc: func(*class_context.ClassContext) string { return "continue outer" }}
+				step.AddNext(outer)
+				step.EncodedJumps = map[*core.Node]bool{outer: true}
+			case "foreign live entry":
+				outer.AddNext(step)
+			case "unknown cycle":
+				nested.Statement = &statements.MiddleStatement{}
+			case "unknown sink":
+				step.AddNext(core.NewNode(&statements.ExpressionStatement{}))
+			}
+			got := exclusiveTerminalLoopBranch(entry, owner, GenerateDominatorTree(outer))
+			want := scenario == "closed nested loop" || scenario == "detached backlink"
+			if got != want {
+				t.Fatalf("closed=%v want=%v", got, want)
+			}
+		})
 	}
 }

@@ -12,7 +12,7 @@ func bindingType(t types.JavaType) string {
 		return ""
 	}
 	if t.IsArray() {
-		return strings.Repeat("[", t.ArrayDim()) + bindingType(t.ElementType())
+		return "[" + bindingType(t.ElementType())
 	}
 	if n := witnessRawClassName(t); n != "" {
 		return "L" + strings.ReplaceAll(n, ".", "/") + ";"

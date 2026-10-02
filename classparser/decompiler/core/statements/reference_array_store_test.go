@@ -1,6 +1,7 @@
 package statements
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"strings"
 	"testing"
 
@@ -63,5 +64,22 @@ func TestReferenceArrayStoreKeepsExplicitCheckedRHS(t *testing.T) {
 	got := statement.String(ctx)
 	if strings.Contains(got, "java.lang.Object[]") || !strings.Contains(got, "String") || strings.Count(got, "array()") != 1 || strings.Count(got, "index()") != 1 || strings.Count(got, "value()") != 1 || strings.Index(got, "index()") > strings.Index(got, "value()") {
 		t.Fatalf("lost original CHECKCAST/order/single evaluation: %s", got)
+	}
+}
+
+func TestReferenceArrayStoreUsesDeclaredWebView(t *testing.T) {
+	ctx := &class_context.ClassContext{ClassSig: "<T:Ljava/lang/Object;>Ljava/lang/Object;", TypeParams: []string{"T"}}
+	array := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaArrayType(types.NewJavaClass("java.lang.Object")))
+	array.Id.SetName("row")
+	array.WebDeclType = types.NewJavaArrayType(types.NewJavaClass("T"))
+	value := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.Object"))
+	value.Id.SetName("item")
+	st := NewArrayMemberAssignStatement(values.NewJavaArrayMember(array, values.NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger))), value)
+	st.ReferenceArrayStore = true
+	if got := st.String(ctx); got != "((java.lang.Object[]) (row))[0] = item" {
+		t.Fatal(got)
+	}
+	if array.Type().String(ctx) != "Object[]" || array.WebDeclType.String(ctx) != "T[]" {
+		t.Fatal("shared view changed")
 	}
 }

@@ -1,12 +1,59 @@
 package core
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
+
+func TestBranchSizedArrayStackProof(t *testing.T) {
+	for _, code := range []int{OP_ANEWARRAY, OP_NEWARRAY, OP_MULTIANEWARRAY} {
+		for _, kind := range []string{"proved", "wrong origin", "missing origin", "initializer", "wrong size", "extra size", "wrong pop order", "missing operand", "duplicate"} {
+			t.Run(fmt.Sprintf("%d/%s", code, kind), func(t *testing.T) {
+				first := values.NewJavaLiteral(3, types.NewJavaPrimer(types.JavaInteger))
+				second := values.NewJavaLiteral(5, types.NewJavaPrimer(types.JavaInteger))
+				array := values.NewNewExpression(types.NewJavaArrayType(types.NewJavaArrayType(types.NewJavaClass("java.lang.String"))))
+				array.OriginPC, array.HasOriginPC, array.Length = 17, true, []values.JavaValue{first}
+				stack := []values.JavaValue{first}
+				consumed := []values.JavaValue{first}
+				if code == OP_MULTIANEWARRAY {
+					array.Length = append(array.Length, second)
+					stack = append(stack, second)
+					consumed = []values.JavaValue{second, first}
+				}
+				op := &OpCode{Instr: &Instruction{OpCode: code}, Data: []byte{0, 1, 2}, CurrentOffset: 17, stackConsumed: consumed, stackProduced: []values.JavaValue{array}}
+				switch kind {
+				case "wrong origin":
+					array.OriginPC++
+				case "missing origin":
+					array.HasOriginPC = false
+				case "initializer":
+					array.Initializer = []values.JavaValue{values.JavaNull}
+				case "wrong size":
+					array.Length[0] = second
+				case "extra size":
+					array.Length = append(array.Length, second)
+				case "wrong pop order":
+					op.stackConsumed = append([]values.JavaValue{values.JavaNull}, consumed[1:]...)
+				case "missing operand":
+					stack = nil
+				case "duplicate":
+					op.Instr.OpCode = OP_DUP
+				}
+				out, ok := (&Decompiler{}).branchExpressionStackStep(op, stack)
+				if ok != (kind == "proved") {
+					t.Fatalf("accepted=%v", ok)
+				}
+				if ok && (len(out) != 1 || out[0] != array) {
+					t.Fatal("lost allocation")
+				}
+			})
+		}
+	}
+}
 
 func TestBranchExpressionCastStackProof(t *testing.T) {
 	for _, kind := range []string{"field and argument call", "static field", "inline nested cast", "nop", "snapshot local", "missing call witness", "wrong call origin", "wrong staticness", "wrong descriptor count", "void call", "changed argument", "changed receiver", "changed stack operand", "missing operand", "extra produced value", "hidden load expression", "materialized nested cast", "cast input mismatch", "cast witness mismatch", "alternate entry", "handler boundary", "local store", "discarded call", "duplicated field", "allocation", "back edge", "fork", "leftover stack", "shared cast producer", "cast before arm", "effect after cast", "bounded prefix"} {
@@ -132,5 +179,44 @@ func TestBranchExpressionCastStackProof(t *testing.T) {
 				t.Fatalf("accepted=%t, want=%t", got != nil, want)
 			}
 		})
+	}
+}
+
+func TestBranchArrayReadStackProof(t *testing.T) {
+	for _, code := range []int{OP_AALOAD, OP_IALOAD, OP_BALOAD, OP_CALOAD, OP_SALOAD, OP_LALOAD, OP_FALOAD, OP_DALOAD} {
+		for _, kind := range []string{"proved", "receiver", "index", "pop order", "missing pop", "extra pop", "missing stack", "extra product", "opaque product"} {
+			t.Run(fmt.Sprintf("%d/%s", code, kind), func(t *testing.T) {
+				array := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaArrayType(types.NewJavaClass("Node")))
+				index := values.NewJavaLiteral(2, types.NewJavaPrimer(types.JavaInteger))
+				read := values.NewJavaArrayMember(array, index)
+				step := &OpCode{Instr: &Instruction{OpCode: code}, stackConsumed: []values.JavaValue{index, array}, stackProduced: []values.JavaValue{read}}
+				stack := []values.JavaValue{array, index}
+				switch kind {
+				case "receiver":
+					read.Object = values.JavaNull
+				case "index":
+					read.Index = values.JavaNull
+				case "pop order":
+					step.stackConsumed = []values.JavaValue{array, index}
+				case "missing pop":
+					step.stackConsumed = step.stackConsumed[:1]
+				case "extra pop":
+					step.stackConsumed = append(step.stackConsumed, values.JavaNull)
+				case "missing stack":
+					stack = nil
+				case "extra product":
+					step.stackProduced = append(step.stackProduced, values.JavaNull)
+				case "opaque product":
+					step.stackProduced = []values.JavaValue{values.JavaNull}
+				}
+				out, ok := (&Decompiler{}).branchExpressionStackStep(step, stack)
+				if ok != (kind == "proved") {
+					t.Fatalf("accepted=%v", ok)
+				}
+				if ok && (len(out) != 1 || out[0] != read) {
+					t.Fatal("array read changed")
+				}
+			})
+		}
 	}
 }

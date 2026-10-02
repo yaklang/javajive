@@ -73,7 +73,7 @@ func TestErasedInvocationDeclaringOwnerPreservesWitnessAndValues(t *testing.T) {
 	if out.Arguments[0].(*CastExpression).Value != checked || f.Arguments[0] != checked || f.Object != receiver || !reflect.DeepEqual(before, receiver.Type()) {
 		t.Fatal("planning changed checked payload, evaluation identity or shared receiver type")
 	}
-	if got := out.String(ctx); !strings.HasPrefix(got, "((Owner)(pool)).release((Item)(") || strings.Contains(got, "Specific") {
+	if got := out.String(ctx); !strings.HasPrefix(got, "((example.Owner)(pool)).release((Item)(") || strings.Contains(got, "Specific") {
 		t.Fatalf("render=%s", got)
 	}
 }

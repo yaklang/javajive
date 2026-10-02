@@ -244,3 +244,28 @@ func retainErasedFunctionalValue(v *values.CustomValue, raw, target types.JavaTy
 	}
 	return &copy
 }
+
+// Bootstrap descriptors fix the SAM's entry checks, but erase nested type
+// arguments. A known generic class in an input/result descriptor is therefore
+// a partial target, not proof of an invariant local Function<Input,RawBox>.
+// Keep the checked poly target and an erased local view independently.
+func instantiatedSAMErasesGenericArguments(instantiated values.JavaValue, ctx *class_context.ClassContext) bool {
+	if ctx == nil || ctx.InvocationMetadata == nil {
+		return false
+	}
+	ps, ret, err := callbinding.Descriptor(t19MethodTypeDesc(instantiated))
+	if err != nil {
+		return false
+	}
+	for _, token := range append(ps, ret) {
+		token = strings.TrimLeft(token, "[")
+		if len(token) < 3 || token[0] != 'L' || token[len(token)-1] != ';' {
+			continue
+		}
+		metadata, ok := ctx.InvocationMetadata(token[1 : len(token)-1])
+		if ok && len(types.ClassFormalTypeParamNames(metadata.Signature)) > 0 {
+			return true
+		}
+	}
+	return false
+}

@@ -105,3 +105,14 @@ func TestMathRecoveryPreservesLoopDeclarationIdentities(t *testing.T) {
 		t.Fatalf("changed a proved declaration or its store:\n%s", got)
 	}
 }
+
+func TestMathRemainingKeepsRawConstructorBinding(t *testing.T) {
+	// The caller's T is not evidence for an allocated class's instantiation.
+	// The exact raw constructor accepts its descriptor's FieldElement[][]; a
+	// textual <T> adds a stricter constraint and then needs an invented check.
+	in := `class Any<T extends RealFieldElement<T>> {void copy(){this.update = new Array2DRowFieldMatrix(matrix.getData());}}`
+	got := fixMath3RemainingReconstructs(in)
+	if !strings.Contains(got, "new Array2DRowFieldMatrix(matrix.getData())") || strings.Contains(got, "new Array2DRowFieldMatrix<T>") {
+		t.Fatal(got)
+	}
+}

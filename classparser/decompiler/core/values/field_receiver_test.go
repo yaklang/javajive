@@ -9,6 +9,30 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+func TestGenericFieldReceiverArrayElementAndBoundedField(t *testing.T) {
+	ctx := &class_context.ClassContext{TypeParams: []string{"V"}, ClassSig: "<V:Ljava/lang/Number;>Ljava/lang/Object;"}
+	ctx.SiblingClassSig = func(name string) (string, map[string]string, bool) {
+		return "<E:Ljava/lang/Number;>Ljava/lang/Object;", nil, name == "sample/Cell"
+	}
+	ctx.SiblingFieldSig = func(owner, field string) (string, bool) { return "TE;", owner == "sample/Cell" && field == "value" }
+	cell := types.NewParameterizedType("sample.Cell", []types.JavaType{types.NewJavaClass("V")})
+	array := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaArrayType(cell))
+	element := &JavaArrayMember{Object: array, Index: NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger))}
+	field := NewRefMember(element, "value", types.NewJavaClass("java.lang.Number"))
+	if view := SourceFieldType(ctx, field); view == nil || view.String(ctx) != "V" {
+		t.Fatalf("source=%v", view)
+	}
+	field.JavaType = types.NewJavaClass("java.lang.Object")
+	if SourceFieldType(ctx, field) != nil {
+		t.Fatal("field erasure mismatch accepted")
+	}
+	array.ResetVarType(types.NewJavaArrayType(types.NewJavaClass("sample.Cell")))
+	field.JavaType = types.NewJavaClass("java.lang.Number")
+	if SourceFieldType(ctx, field) != nil {
+		t.Fatal("raw owner borrowed caller V")
+	}
+}
+
 func TestGenericFieldReceiverComposesEachDeclaration(t *testing.T) {
 	ctx := &class_context.ClassContext{TypeParams: []string{"V"}}
 	ctx.SiblingClassSig = func(name string) (string, map[string]string, bool) {

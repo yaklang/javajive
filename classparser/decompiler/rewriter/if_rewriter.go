@@ -207,7 +207,10 @@ func splitSharedVoidReturns(manager *RewriteManager, condition *core.Node) {
 		if !terminal {
 			continue
 		}
-		leaf := manager.NewNode(&statements.ReturnStatement{})
+		// Tail duplication retains the original return's PC witness.
+		copy := *ret
+		leaf := manager.NewNode(&copy)
+		leaf.OriginPC, leaf.HasOriginPC = target.OriginPC, target.HasOriginPC
 		for _, next := range target.Next {
 			leaf.AddNext(next)
 		}

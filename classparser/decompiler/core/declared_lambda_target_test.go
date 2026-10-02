@@ -185,3 +185,24 @@ func TestDeclaredSamBoundRequiresKnownHierarchy(t *testing.T) {
 		})
 	}
 }
+
+func TestInstantiatedSAMSeparatesNestedErasureFromEntryChecks(t *testing.T) {
+	ctx := &class_context.ClassContext{InvocationMetadata: func(name string) (callbinding.Class, bool) {
+		if name == "fixture/Box" {
+			return callbinding.Class{Name: name, Signature: "<T:Ljava/lang/Object;>Ljava/lang/Object;"}, true
+		}
+		if name == "fixture/Input" {
+			return callbinding.Class{Name: name}, true
+		}
+		return callbinding.Class{}, false
+	}}
+	for _, tc := range []struct {
+		desc string
+		want bool
+	}{{"(Lfixture/Input;)Lfixture/Box;", true}, {"([Lfixture/Box;)I", true}, {"(Lfixture/Input;)Ljava/lang/String;", false}, {"(Ljava/lang/Object;)V", false}, {"()Lunknown/Box;", false}, {"bad", false}} {
+		mt := values.NewCustomValue(func(*class_context.ClassContext) string { return tc.desc }, func() types.JavaType { return nil })
+		if got := instantiatedSAMErasesGenericArguments(mt, ctx); got != tc.want {
+			t.Fatalf("%s: proof %v", tc.desc, got)
+		}
+	}
+}

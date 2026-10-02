@@ -224,6 +224,15 @@ func Assignable(actual, formal string, p Provider) bool {
 		return true
 	}
 	if strings.HasPrefix(actual, "[") || strings.HasPrefix(formal, "[") {
+		if strings.HasPrefix(actual, "[") && (formal == "Ljava/lang/Cloneable;" || formal == "Ljava/io/Serializable;") {
+			return true
+		}
+		if strings.HasPrefix(actual, "[") && strings.HasPrefix(formal, "[") {
+			// Array subtyping is recursive in reference components. Primitive
+			// components have no widening conversion (int[] is not long[]),
+			// while a primitive array itself is a reference component of int[][].
+			return Assignable(actual[1:], formal[1:], p)
+		}
 		return false
 	}
 	if p == nil {

@@ -69,6 +69,91 @@ def prepare(args):
     return 0
 
 
+def observe(args):
+    """Execute parsing, javac and JVM verification inside the T30 worker."""
+    repo = Path(__file__).resolve().parents[1]
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from tools.sandbox_worker.executor import SandboxWorker
+    from tools.sandbox_worker.job import UntrustedJob
+    from tools.sandbox_worker.policy import Limits
+
+    lock, manifest = read(LOCK), read(args.manifest)
+    if manifest["artifacts"] != lock["artifacts"] or set(manifest["jars"]) != set(lock["jars"]):
+        raise ValueError("manifest does not match the complete pinned corpus")
+    if not re.fullmatch(r"[0-9a-f]{40}", args.revision):
+        raise ValueError("revision must be a fixed commit SHA")
+    if args.report.exists():
+        raise ValueError("refusing to overwrite existing observation evidence")
+    root = Path(manifest["artifactRoot"]).resolve()
+    files, staged = {}, {"artifactRoot": "/inputs", "artifacts": lock["artifacts"], "jars": {}}
+    for rel, expected in lock["artifacts"].items():
+        path = (root / rel).resolve()
+        if path.relative_to(root).as_posix() != rel:
+            raise ValueError("artifact escapes pinned root: " + rel)
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != expected:
+            raise ValueError("artifact hash mismatch: " + rel)
+        files[rel] = data
+    for name, spec in lock["jars"].items():
+        actual = manifest["jars"][name]
+        expected = {"path": str(root / spec["path"]), "sha256": lock["artifacts"][spec["path"]],
+                    "deps": [str(root / p) for p in spec["deps"]]}
+        if actual != expected:
+            raise ValueError("target or dependency mismatch: " + name)
+        staged["jars"][name] = {"path": "/inputs/" + spec["path"], "sha256": expected["sha256"],
+                                  "deps": ["/inputs/" + p for p in spec["deps"]]}
+    binary = args.binary.read_bytes()
+    files["audit.test.sh"] = binary
+    files["manifest.json"] = json.dumps(staged, sort_keys=True).encode()
+    files["run.sh"] = b"""#!/bin/sh
+set -eu
+mkdir -p /work/tmp /artifacts/java-tmp
+export TMPDIR=/work/tmp
+export JAVA_TOOL_OPTIONS="-Djava.awt.headless=true -Djava.io.tmpdir=/artifacts/java-tmp"
+export HISTORICAL_JAR_MANIFEST=/inputs/manifest.json
+export HISTORICAL_JAR_REPORT=/artifacts/result
+set +e
+/inputs/audit.test.sh -test.run '^TestHistoricalJarAudit$' -test.timeout=40m -test.v
+result=$?
+rm -rf /artifacts/java-tmp
+exit $result
+"""
+    worker = SandboxWorker(prefer="docker")
+    if worker.backend != "docker":
+        raise ValueError("historical audit requires the real Docker isolation worker")
+    observation = worker.run(UntrustedJob(
+        argv=["/bin/sh", "/inputs/run.sh"], input_files=files, name="historical-audit", need_java=True,
+        env={"HISTORICAL_JAR_REVISION": args.revision},
+        limits=Limits(memory_bytes=6 * 1024**3, pids=512, cpu_seconds=3600, cpus="2",
+                      output_bytes=16 * 1024**2, artifact_bytes=6 * 1024**3, fsize_bytes=2 * 1024**3,
+                      timeout_seconds=2700, nofile=8192)))
+    text = lambda value: value.decode(errors="replace") if isinstance(value, bytes) else str(value or "")
+    evidence = {"status": observation.status, "backend": observation.backend, "reason": observation.reason,
+                "exit_code": observation.exit_code, "timed_out": observation.timed_out,
+                "output_capped": observation.output_capped, "policy_digest": observation.policy_digest,
+                "revision": args.revision, "binary_sha256": hashlib.sha256(binary).hexdigest(),
+                "extra": observation.extra}
+    save(args.report.with_suffix(".worker.json"), evidence)
+    args.report.with_suffix(".stdout.log").write_text(text(observation.stdout))
+    args.report.with_suffix(".stderr.log").write_text(text(observation.stderr))
+    if (observation.status != "ok" or observation.backend != "docker" or observation.exit_code != 0
+            or observation.timed_out or observation.output_capped):
+        raise ValueError("isolated audit failed; see " + str(args.report.with_suffix(".worker.json")))
+    result = Path(observation.extra["artifact_root"]) / "result"
+    rows = list(result.glob("*/observation.json"))
+    if {p.parent.name for p in rows} != set(lock["jars"]):
+        raise ValueError("isolated audit did not complete every target")
+    for path in rows:
+        row = read(path)
+        expected = lock["artifacts"][lock["jars"][path.parent.name]["path"]]
+        if not row["Completed"] or row["InputSHA256"] != expected or row["Revision"] != args.revision:
+            raise ValueError("incomplete or incomparable observation: " + path.parent.name)
+    shutil.copytree(result, args.report)
+    print(f"Completed {len(rows)} targets inside Docker; compiler errors still require comparison.")
+    return 0
+
+
 def compiler_errors(directory):
     # Source lines shift between revisions. Compare the unit and javac diagnostic,
     # retaining multiplicity so identical new failures cannot hide in a set. The
@@ -139,6 +224,12 @@ def main():
     p.add_argument("--cache", type=Path, required=True)
     p.add_argument("--manifest", type=Path, required=True)
     p.set_defaults(run=prepare)
+    p = commands.add_parser("observe")
+    p.add_argument("--manifest", type=Path, required=True)
+    p.add_argument("--binary", type=Path, required=True)
+    p.add_argument("--revision", required=True)
+    p.add_argument("--report", type=Path, required=True)
+    p.set_defaults(run=observe)
     p = commands.add_parser("compare")
     p.add_argument("--baseline", type=Path, required=True)
     p.add_argument("--candidate", type=Path, required=True)

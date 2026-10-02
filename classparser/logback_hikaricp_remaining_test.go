@@ -57,7 +57,9 @@ func TestLogbackPutUninterruptiblyUsesStructuredRetry(t *testing.T) {
 		// sentinel. It must accompany the real protected call, never replace it.
 		compact = strings.ReplaceAll(compact, "if(false)thrownewInterruptedException();", "")
 		for _, required := range []string{
-			"do{try{try{this.blockingQueue.put(var1);",
+			// The terminal cleanup covers the whole retry loop; the retry
+			// handler covers the put operation on each iteration.
+			"try{do{try{this.blockingQueue.put(var1);",
 			"catch(InterruptedException", "Thread.currentThread().interrupt();",
 			"catch(Throwable", "while(true)",
 		} {

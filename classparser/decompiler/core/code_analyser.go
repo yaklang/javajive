@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"os"
+	"reflect"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -42,6 +43,7 @@ type branchArrayCall struct {
 }
 
 type Decompiler struct {
+	effectfulStackPhiEdges map[*OpCode]*statements.AssignStatement
 	evaluationSnapshots    map[*OpCode][]EvaluationSnapshot
 	constructorInitialized bool
 	FunctionType           *types.JavaFuncType
@@ -182,6 +184,11 @@ func resetReturnValueTypeSafe(v values.JavaValue, funcCtx *class_context.ClassCo
 	}
 	funcType, ok := funcCtx.FunctionType.(*types.JavaFuncType)
 	if !ok || funcType == nil {
+		return
+	}
+	// A parameter's declaration is an ABI constraint, not an inference
+	// variable. A Z return may narrow its int word without changing I to Z.
+	if ref, ok := values.UnpackSoltValue(v).(*values.JavaRef); ok && ref.IsParam && values.IsBooleanStackNarrowing(funcType.ReturnType, ref) {
 		return
 	}
 	resetJavaValueTypeSafe(v, funcType.ReturnType)
@@ -4329,10 +4336,17 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		member := d.constantPoolGetter(int(index)).(*values.JavaClassMember)
 		v := runtimeStackSimulation.Pop().(values.JavaValue)
 		v = castAnonSubclassReceiverForOwnField(v, member, funcCtx)
-		runtimeStackSimulation.Push(values.NewRefMember(v, member.Member, member.JavaType))
+		field := values.NewRefMember(v, member.Member, member.JavaType)
+		field.OriginPC, field.HasOriginPC = int(opcode.CurrentOffset), true
+		runtimeStackSimulation.Push(field)
 	case OP_GETSTATIC:
 		index := Convert2bytesToInt(opcode.Data)
-		runtimeStackSimulation.Push(d.constantPoolGetter(int(index)))
+		member := d.constantPoolGetter(int(index)).(*values.JavaClassMember)
+		// A pool member is shared by every GETSTATIC. Origin belongs to this
+		// evaluation, so keep it on a copy rather than overwriting the pool.
+		field := *member
+		field.OriginPC, field.HasOriginPC = int(opcode.CurrentOffset), true
+		runtimeStackSimulation.Push(&field)
 	case OP_PUTSTATIC:
 		index := Convert2bytesToInt(opcode.Data)
 		staticVal := d.constantPoolGetter(int(index))
@@ -5617,6 +5631,9 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	for _, code := range ternaryExpMergeNode {
 		mergeNode := code
 		ifNodes := mergeToIfNode[code]
+		if d.lowerEffectfulStackPhi(mergeNode, ifNodes, ternaryExpMergeNodeSlot[code]) {
+			continue
+		}
 		if len(ifNodes) == 0 {
 			continue
 		}
@@ -6291,15 +6308,18 @@ func (d *Decompiler) ParseStatement() error {
 	// opcodeIdToRef fully populated, checkcastInnerArg populated by the phase-1 OP_CHECKCAST handler).
 	// Rebind the inner SlotValue of each incompatible cast to the branch ref whose type matches the
 	// cast target, BEFORE phase-2 statement building consumes the cast value. fastjson2 JDKUtils:318.
+	d.partitionSharedReferenceWebs()
 	d.rebindCheckcastInnerArgs()
 	// Two-pass load rebinding for value-returning invoke receivers/arguments whose local-load bound a
 	// DFS-stale wrong-type ref at phase-1 time. Runs here (opcodeIdToRef complete) BEFORE phase-2
 	// statement building. fastjson2 ObjectReaderBaseModule:793 (var7.getParameters receiver).
 	d.rebindIncompatibleInvokeArgs()
 	d.unifyReferenceWebs()
+	d.restoreScopedReferenceWebs()
 	d.propagateNullOnlyLocalLoads()
 	d.refreshReferenceOperandSnapshotTypes()
 	d.unifyNumericExitWebs()
+	d.restoreNormalizedBooleanWebs()
 	d.restoreOptionalSupplierDefinitionViews()
 	protectedStores, protectedEdges, err := d.lowerProtectedStackStores()
 	if err != nil {
@@ -6316,9 +6336,21 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		if opcode.IsTryCatchParent {
 			tryCatchOpcode = opcode
+			// Some anchors have no source statement (for example the implicit
+			// no-argument super constructor call). Keep their original CFG edges
+			// on an empty structural node rather than attaching handler metadata
+			// to a later producer inside the protected region.
+			defer func() {
+				if tryCatchOpcode == opcode {
+					appendNode(statements.NewCustomStatement(func(*class_context.ClassContext) string { return "" }, func(_, _ *utils2.VariableId) {}))
+				}
+			}()
 		}
 		//opcodeIndex := opcode.Id
 		statementsIndex = opcode.Id
+		if assign := d.effectfulStackPhiEdges[opcode]; assign != nil {
+			defer func() { appendNode(assign) }()
+		}
 		for _, snap := range d.evaluationSnapshots[opcode] {
 			appendNode(statements.NewAssignStatement(snap.Ref, snap.Value, true))
 		}
@@ -6423,22 +6455,14 @@ func (d *Decompiler) ParseStatement() error {
 					if methodName != "<init>" {
 						return
 					}
-					if len(funcCallValue.Arguments) != 0 {
-						value := GetRealValue(funcCallValue.Object)
-						if value == nil {
-							return
-						}
-						if v, ok := value.(*values.NewExpression); ok {
-							v.ArgumentsGetter = func() string {
-								return funcCallValue.ArgumentString(funcCtx)
-							}
-							// Keep a back-reference so value-tree traversals (notably RewriteVar's
-							// ReplaceVar rename pass) can reach the constructor arguments hidden in
-							// the ArgumentsGetter closure; see NewExpression.ConstructorCall.
-							v.ConstructorCall = funcCallValue
-							skip = true
-						}
-					} else {
+					value := GetRealValue(funcCallValue.Object)
+					if v, ok := value.(*values.NewExpression); ok {
+						v.ArgumentsGetter = func() string { return funcCallValue.ArgumentString(funcCtx) }
+						// Retain the exact invokespecial witness even for no-argument
+						// constructors: allocation and initialization can both throw.
+						v.ConstructorCall = funcCallValue
+						skip = true
+					} else if len(funcCallValue.Arguments) == 0 {
 						skip = true
 					}
 				}()
@@ -6571,6 +6595,9 @@ func (d *Decompiler) ParseStatement() error {
 		case OP_RET:
 			// No-op if JSR inliner bailed.
 		case OP_GOTO, OP_GOTO_W:
+			if d.effectfulStackPhiEdges[opcode] != nil {
+				break
+			}
 			if assign := protectedEdges[opcode]; assign != nil {
 				appendNode(assign)
 				break
@@ -6944,7 +6971,7 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		for _, h := range d.ExceptionTable {
 			if a.CurrentOffset < h.EndPc && b.CurrentOffset >= h.StartPc {
-				return false
+				return d.privateArrayFillUnobservable(first, last, a, b)
 			}
 		}
 		return true
@@ -7087,6 +7114,13 @@ func (d *Decompiler) ParseStatement() error {
 			_, sourcePrimitive := val.Type().RawType().(*types.JavaPrimer)
 			_, targetPrimitive := nextAssign.LeftValue.Type().RawType().(*types.JavaPrimer)
 			if sourcePrimitive != targetPrimitive {
+				return
+			}
+			// JVM DUP duplicates the producer's value, not an assignment's
+			// converted source type. Collapsing Sub a=v; Base b=v into
+			// a=(b=v) changes the RHS to Base and loses the shared Sub value.
+			// Preserve the separate stores when their declaration views differ.
+			if !reflect.DeepEqual(v.LeftValue.Type().RawType(), nextAssign.LeftValue.Type().RawType()) {
 				return
 			}
 			if len(nextNode.Next) != 1 {
@@ -7453,7 +7487,9 @@ func (d *Decompiler) ParseStatement() error {
 					var soleHandler *CatchNode
 					handlerRows := 0
 					for _, info := range catchInfos {
-						if int(info.EndIndex) == endIndex {
+						if int(info.EndIndex) == endIndex && slices.ContainsFunc(catchNodes, func(n *Node) bool {
+							return n.CatchHandler != nil && n.CatchHandler.EntryPC == int(info.OpCode.CurrentOffset)
+						}) {
 							soleHandler = info
 							handlerRows++
 						}

@@ -58,7 +58,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = wrapTernaryAssignElseCast(body)
 	body = fixErasedZeroArgInnerCast(body)
 	body = wrapObjectTypeVarArgs(body)
-	body = unwrapCollectionArraysAsList(body)
+	// Raw argument casts may pin erased overloads and generic inference.
+	// Arrays.asList syntax alone cannot prove that removing one is safe.
 	body = unwrapCollectionNewCtor(body)
 	body = unwrapCollectionBeforeLambda(body)
 	body = wrapCompoundListOfAsList(body)
@@ -123,7 +124,7 @@ func fixHardjarCodeShapes(body string) string {
 	// printed name; source text cannot prove that either declaration escapes.
 	body = retypeObjectUsedAsIntArray(body)
 	body = rewriteInvokeExactSelfToHandle(body)
-	body = retypeExecCatchWaitToInterrupted(body)
+	// Exception-table catch types are semantic facts, not guesses from calls.
 	body = retypeMixedNewToCamelLUB(body)
 	body = unwrapAsListEnumArray(body)
 	body = wrapUnmodifiableAsListRaw(body)
@@ -4051,31 +4052,6 @@ func commonDollarPrefix(a, b string) string {
 	return strings.Join(as[:i], "$")
 }
 
-// unwrapCollectionArraysAsList drops a raw `(Collection)(Arrays.asList(...))`
-// wrapper. The raw Collection matches every Collection<...> overload equally
-// ("reference is ambiguous"); Arrays.asList(T[]) infers List<T> and picks one.
-func unwrapCollectionArraysAsList(body string) string {
-	needle := "(Collection)(Arrays.asList("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		asList := i + len("(Collection)(")
-		open := i + len(needle) - 1
-		close := matchingCloseParen(body, open)
-		if close < 0 || close+1 >= len(body) || body[close+1] != ')' {
-			from = i + 1
-			continue
-		}
-		inner := body[asList : close+1]
-		body = body[:i] + inner + body[close+2:]
-		from = i + len(inner)
-	}
-}
-
 // unwrapCollectionNewCtor drops `(Collection)(new Type(...))` so a concrete
 // collection ctor is not a raw Collection (ambiguous across Collection<A> vs
 // Collection<B> overloads).
@@ -7926,8 +7902,11 @@ func wrapClassForNameAsRawClass(body string) string {
 			from = i + 1
 			continue
 		}
-		after := body[close+1:]
-		if strings.HasPrefix(after, ".getMethod") || strings.HasPrefix(after, ".getDeclaredMethod") || strings.HasPrefix(after, ".getField") || strings.HasPrefix(after, ".getDeclaredField") {
+		after := strings.TrimLeft(body[close+1:], " \t\r\n")
+		// A cast inserted inside a postfix receiver changes the expression's
+		// result type: (Class)(lookup()).getConstructor() casts the constructor,
+		// not lookup(). Leave every member/index receiver to structural rendering.
+		if strings.HasPrefix(after, ".") || strings.HasPrefix(after, "[") {
 			from = close + 1
 			continue
 		}
@@ -8606,33 +8585,6 @@ func uniqueMethodHandleIdent(member string) string {
 		return ""
 	}
 	return ident
-}
-
-func retypeExecCatchWaitToInterrupted(body string) string {
-	needle := "}catch(ExecutionException "
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		start := prevMemberStart(body, i)
-		tryPos := strings.LastIndex(body[:i], "try{")
-		if tryPos < 0 || tryPos < start {
-			from = i + 1
-			continue
-		}
-		tryBody := body[tryPos:i]
-		if !strings.Contains(tryBody, ".wait()") {
-			from = i + 1
-			continue
-		}
-		old := "}catch(ExecutionException "
-		neu := "}catch(InterruptedException "
-		body = body[:i] + neu + body[i+len(old):]
-		from = i + len(neu)
-	}
 }
 
 func retypeMixedNewToCamelLUB(body string) string {

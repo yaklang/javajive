@@ -75,7 +75,7 @@ func TestBoundMethodReferenceErasureNeedsExactSAMAndOwner(t *testing.T) {
 				t.Fatal("receiver binding changed its local declaration type")
 			}
 			source := value.String(ctx)
-			changed := strings.Contains(source, "((Check)(")
+			changed := strings.Contains(source, "((example.Check)(")
 			if changed != (scenario == "wildcard" || scenario == "concrete") {
 				t.Fatalf("receiver erasure=%v source=%s", changed, source)
 			}

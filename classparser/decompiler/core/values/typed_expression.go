@@ -24,6 +24,29 @@ type CastExpression struct {
 func (c *CastExpression) Type() types.JavaType { return c.TargetType }
 func (c *CastExpression) String(ctx *class_context.ClassContext) string {
 	operand := c.Value
+	if c.Binding && c.TargetType != nil {
+		// A descriptor binding is an exact declaring type, independent of the
+		// caller's imported/generic source view. Spell its reference head fully
+		// qualified so later source recovery cannot reinterpret a short name as
+		// a parameterized receiver or a caller formal.
+		target := c.TargetType
+		rank := 0
+		for target != nil && target.IsArray() {
+			target, rank = target.ElementType(), rank+1
+		}
+		var rawClass bool
+		if target != nil {
+			_, rawClass = target.RawType().(*types.JavaClass)
+		}
+		if raw, ok := types.RawClassFQN(target); rawClass && ok && strings.Contains(raw, ".") {
+			pkg, _ := class_context.SplitPackageClassName(raw)
+			name := types.NewJavaClass(raw).String(ctx)
+			if !strings.HasPrefix(name, pkg+".") {
+				name = pkg + "." + name
+			}
+			return fmt.Sprintf("((%s)(%s))", name+strings.Repeat("[]", rank), operand.String(ctx))
+		}
+	}
 	if !c.Binding && c.TargetType != nil {
 		if _, reference := types.RawClassFQN(c.TargetType); reference || c.TargetType.IsArray() {
 			if call, ok := UnpackSoltValue(operand).(*FunctionCallExpression); ok {
@@ -33,7 +56,7 @@ func (c *CastExpression) String(ctx *class_context.ClassContext) string {
 					operand = planned
 				} else if planned, ok := call.PlanErasedFormalResult(ctx, c.TargetType); ok {
 					operand = planned
-				} else if planned, ok := call.PlanErasedResultChain(ctx, bindingType(c.TargetType)); ok {
+				} else if planned, ok := call.PlanErasedCheckedResultChain(ctx, c.TargetType); ok {
 					operand = planned
 				}
 			}

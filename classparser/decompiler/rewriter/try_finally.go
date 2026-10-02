@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"reflect"
 )
 
 // FinallyRegion is a rendering view. The original tree remains intact for
@@ -88,8 +89,7 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 		return nil, false
 	}
 	for _, st := range cleanup {
-		call, ok := st.(*statements.ExpressionStatement)
-		if !ok || call == nil || !sameUnprotectedTryCall(rows, call.Expression, call.Expression, excluded...) {
+		if !sameFinallyCleanup(rows, st, st, excluded, 0) {
 			return nil, false
 		}
 	}
@@ -145,6 +145,7 @@ type finallyProof struct {
 	rows      []core.HandlerRange
 	excluded  []*values.JavaRef
 	remaining int
+	loopDepth int
 }
 
 func (p *finallyProof) block(input []statements.Statement, mustExit bool, covered func(int) bool) ([]statements.Statement, bool, bool) {
@@ -163,9 +164,7 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 	if end >= len(p.cleanup) {
 		matched := true
 		for i, st := range p.cleanup {
-			copy, ok := body[end-len(p.cleanup)+i].(*statements.ExpressionStatement)
-			original := st.(*statements.ExpressionStatement)
-			if !ok || copy == nil || !sameUnprotectedTryCall(p.rows, copy.Expression, original.Expression, p.excluded...) {
+			if !sameFinallyCleanup(p.rows, body[end-len(p.cleanup)+i], st, p.excluded, 0) {
 				matched = false
 				break
 			}
@@ -189,6 +188,7 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 	}
 	var out []statements.Statement
 	exits := false
+	normalCleaned := false
 	for i, st := range body {
 		p.remaining--
 		if p.remaining < 0 || st == nil || exits {
@@ -204,6 +204,11 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 				return nil, false, false
 			}
 		case *statements.CustomStatement:
+			if x != nil && p.loopDepth > 0 && (x.Name == "break" || x.Name == "continue") && x.ThrownValue == nil {
+				out = append(out, st)
+				exits = true
+				continue
+			}
 			if x == nil || x.ThrownValue == nil || !x.HasOriginPC || !covered(x.OriginPC) || !finallyCoveredValue(x.ThrownValue, covered) {
 				return nil, false, false
 			}
@@ -224,17 +229,65 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 				return nil, false, false
 			}
 			exits = a && b
+			normalCleaned = needExit
+			st = &clone
+		case *statements.DoWhileStatement:
+			if x == nil || x.Label != "" || !finallyCoveredValue(x.ConditionValue, covered) {
+				return nil, false, false
+			}
+			clone := *x
+			p.loopDepth++
+			var ok bool
+			clone.Body, _, ok = p.block(x.Body, false, covered)
+			p.loopDepth--
+			if !ok {
+				return nil, false, false
+			}
+			st = &clone
+		case *statements.TryCatchStatement:
+			if x == nil || len(x.Exception) == 0 || len(x.Exception) != len(x.CatchBodies) || len(x.Handlers) != len(x.Exception) {
+				return nil, false, false
+			}
+			clone := *x
+			needExit := mustExit && i == len(body)-1
+			var normalExit, ok bool
+			clone.TryBody, normalExit, ok = p.block(x.TryBody, needExit, covered)
+			if !ok {
+				return nil, false, false
+			}
+			clone.CatchBodies = make([][]statements.Statement, len(x.CatchBodies))
+			allExit := normalExit
+			for j, handler := range x.Handlers {
+				if !covered(handler.EntryPC) {
+					return nil, false, false
+				}
+				var handlerExit bool
+				clone.CatchBodies[j], handlerExit, ok = p.block(x.CatchBodies[j], needExit, covered)
+				if !ok {
+					return nil, false, false
+				}
+				allExit = allExit && handlerExit
+			}
+			exits = allExit
+			// Each nested arm has independently proved either an abrupt
+			// exit or its normal cleanup copy. Normal completion is not an
+			// abrupt transfer, but still discharges this enclosing proof.
+			normalCleaned = needExit
 			st = &clone
 		default:
 			return nil, false, false
 		}
 		out = append(out, st)
 	}
-	return out, exits, !mustExit || exits
+	return out, exits, !mustExit || exits || normalCleaned
 }
 
 func finallyPureLocal(v values.JavaValue) bool {
-	switch v := plainTryValue(v).(type) {
+	v = plainTryValue(v)
+	if v == values.JavaNull || values.IsNullLiteral(v) {
+		return true
+	}
+	switch v := v.(type) {
 	case *values.JavaRef:
 		return v != nil && v.Id != nil
 	case *values.JavaLiteral:
@@ -255,6 +308,9 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		active[v] = true
 		defer delete(active, v)
 		var children []values.JavaValue
+		if v == values.JavaNull || values.IsNullLiteral(v) {
+			return true
+		}
 		switch x := v.(type) {
 		case *values.JavaRef, *values.JavaLiteral:
 			return finallyPureLocal(v)
@@ -304,6 +360,13 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 			default:
 				return false
 			}
+		case *values.RefMember:
+			if x == nil || !x.HasOriginPC || !covered(x.OriginPC) || x.Member == "" || x.JavaType == nil {
+				return false
+			}
+			children = []values.JavaValue{x.Object}
+		case *values.JavaClassMember:
+			return x != nil && x.HasOriginPC && covered(x.OriginPC) && x.Name != "" && x.Member != "" && x.Description != ""
 		case *values.CustomValue:
 			if x == nil || x.Flag != "instanceof" || !x.CapturesKnown || len(x.Captures) != 1 || !x.HasOriginPC || !covered(x.OriginPC) {
 				return false
@@ -320,4 +383,112 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		return true
 	}
 	return visit(root)
+}
+
+// Match only bounded cleanup syntax with stable operands and original PCs
+// outside every protected interval. Names are field/invoke identities from the
+// IR; rendered text and library-specific patterns never establish equivalence.
+func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, excluded []*values.JavaRef, depth int) bool {
+	if depth > 16 || a == nil || b == nil {
+		return false
+	}
+	outside := func(pc int) bool {
+		for _, row := range rows {
+			if pc >= int(row.StartPc) && pc < int(row.EndPc) {
+				return false
+			}
+		}
+		return true
+	}
+	switch x := a.(type) {
+	case *statements.ExpressionStatement:
+		y, ok := b.(*statements.ExpressionStatement)
+		return ok && x != nil && y != nil && sameUnprotectedTryCall(rows, x.Expression, y.Expression, excluded...)
+	case *statements.AssignStatement:
+		y, ok := b.(*statements.AssignStatement)
+		if !ok || x == nil || y == nil || x.IsDeclare || y.IsDeclare || x.ArrayMember != nil || y.ArrayMember != nil || !x.HasOriginPC || !y.HasOriginPC || !outside(x.OriginPC) || !outside(y.OriginPC) {
+			return false
+		}
+		lhs, lok := plainTryValue(x.LeftValue).(*values.RefMember)
+		rhs, rok := plainTryValue(y.LeftValue).(*values.RefMember)
+		if !lok || !rok || lhs == nil || rhs == nil || lhs.Member == "" || lhs.Member != rhs.Member || lhs.JavaType == nil || rhs.JavaType == nil || !reflect.DeepEqual(lhs.JavaType.RawType(), rhs.JavaType.RawType()) {
+			return false
+		}
+		self, sok := plainTryValue(lhs.Object).(*values.JavaRef)
+		return sok && self != nil && self.IsThis && sameTryLocal(rhs.Object, self) && sameFinallyStableValue(x.JavaValue, y.JavaValue, excluded, 0)
+	case *statements.IfStatement:
+		y, ok := b.(*statements.IfStatement)
+		if !ok || x == nil || y == nil || !sameFinallyStableValue(x.Condition, y.Condition, excluded, 0) {
+			return false
+		}
+		strip := func(body []statements.Statement) []statements.Statement {
+			body = finallyWithoutEnd(body)
+			if len(body) > 0 {
+				if ret, ok := body[len(body)-1].(*statements.ReturnStatement); ok && ret != nil && ret.JavaValue == nil && ret.HasOriginPC && outside(ret.OriginPC) {
+					return body[:len(body)-1]
+				}
+			}
+			return body
+		}
+		xa, xb, ya, yb := strip(x.IfBody), strip(x.ElseBody), strip(y.IfBody), strip(y.ElseBody)
+		if len(xa) != len(ya) || len(xb) != len(yb) || len(xa)+len(xb) > 16 {
+			return false
+		}
+		for i, st := range xa {
+			if !sameFinallyCleanup(rows, st, ya[i], excluded, depth+1) {
+				return false
+			}
+		}
+		for i, st := range xb {
+			if !sameFinallyCleanup(rows, st, yb[i], excluded, depth+1) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+func sameFinallyStableValue(a, b values.JavaValue, excluded []*values.JavaRef, depth int) bool {
+	if depth > 16 {
+		return false
+	}
+	a, b = plainTryValue(a), plainTryValue(b)
+	if a == nil || b == nil {
+		return false
+	}
+	if a == values.JavaNull || b == values.JavaNull {
+		return a == values.JavaNull && b == values.JavaNull
+	}
+	for _, ref := range excluded {
+		if sameTryLocal(a, ref) || sameTryLocal(b, ref) {
+			return false
+		}
+	}
+	switch x := a.(type) {
+	case *values.JavaRef:
+		return sameTryLocal(b, x)
+	case *values.JavaLiteral:
+		y, ok := b.(*values.JavaLiteral)
+		return ok && x != nil && y != nil && reflect.DeepEqual(x.Data, y.Data) && x.Type() != nil && y.Type() != nil && reflect.DeepEqual(x.Type().RawType(), y.Type().RawType())
+	case *values.JavaExpression:
+		y, ok := b.(*values.JavaExpression)
+		if !ok || x == nil || y == nil || x.Op != y.Op || len(x.Values) != len(y.Values) {
+			return false
+		}
+		switch x.Op {
+		case values.EQ, values.NEQ:
+			if len(x.Values) != 2 {
+				return false
+			}
+		default:
+			return false
+		}
+		for i, v := range x.Values {
+			if !sameFinallyStableValue(v, y.Values[i], excluded, depth+1) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }

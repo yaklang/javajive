@@ -27,7 +27,7 @@ func TestErasedNullBindingKeepsDescriptorAndEvaluationIdentity(t *testing.T) {
 		if call.Object != receiver || call.Arguments[0] != arg {
 			t.Fatal("planning mutated the shared original invocation")
 		}
-		if got := planned.String(ctx); got != "((Sink)(sink)).consume((Object)(null))" {
+		if got := planned.String(ctx); got != "((example.Sink)(sink)).consume((Object)(null))" {
 			t.Fatalf("descriptor rendering=%q", got)
 		}
 	}

@@ -18,6 +18,13 @@ func roundTripGenericFlow(t *testing.T, main, source string, modes ...DecompileM
 
 func roundTripGenericFlowWithResolverFilter(t *testing.T, main, source string, allow func(string) bool, modes ...DecompileMode) {
 	t.Helper()
+	roundTripGenericFlowUnits(t, main, source, allow, nil, modes...)
+}
+
+// Flattened member classes must be rebuilt together with the consumer.
+// The original JVM oracle still executes the untouched original class family.
+func roundTripGenericFlowUnits(t *testing.T, main, source string, allow func(string) bool, extraUnits []string, modes ...DecompileMode) {
+	t.Helper()
 	if len(modes) == 0 {
 		modes = []DecompileMode{Precision, Compatibility}
 	}
@@ -62,18 +69,42 @@ func roundTripGenericFlowWithResolverFilter(t *testing.T, main, source string, a
 			if err != nil {
 				t.Fatal(err)
 			}
-			rebuilt, cached := compiled[result.Source]
-			if !cached {
-				rebuilt = t.TempDir()
-				src := filepath.Join(rebuilt, simple+".java")
-				if err := os.WriteFile(src, []byte(result.Source), 0644); err != nil {
+			sources := map[string]string{simple: result.Source}
+			cacheKey := result.Source
+			for _, unit := range extraUnits {
+				bytes, ok := resolve(strings.ReplaceAll(unit, ".", "/"))
+				if !ok {
+					t.Fatalf("missing original unit %s", unit)
+				}
+				var extra DecompileResult
+				if mode == "legacy" {
+					extra.Source, err = DecompileWithResolver(bytes, resolve)
+				} else {
+					extra, err = DecompileWithOptions(bytes, DecompileOptions{Mode: mode, TargetSourceVersion: 8, Resolve: resolve})
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
-				cmd := exec.Command(javac, "-proc:none", "--release", "8", "-cp", dir, "-d", rebuilt, src)
+				name := unit[strings.LastIndex(unit, ".")+1:]
+				sources[name] = extra.Source
+				cacheKey += "\n" + unit + "\n" + extra.Source
+			}
+			rebuilt, cached := compiled[cacheKey]
+			if !cached {
+				rebuilt = t.TempDir()
+				args := []string{"-proc:none", "--release", "8", "-cp", dir, "-d", rebuilt}
+				for name, text := range sources {
+					src := filepath.Join(rebuilt, name+".java")
+					if err := os.WriteFile(src, []byte(text), 0644); err != nil {
+						t.Fatal(err)
+					}
+					args = append(args, src)
+				}
+				cmd := exec.Command(javac, args...)
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("rebuild %s/%s: %v\n%s\n%s", mode, debug, err, out, result.Source)
 				}
-				compiled[result.Source] = rebuilt
+				compiled[cacheKey] = rebuilt
 			}
 			if got := t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+dir, main); got != want {
 				t.Fatalf("%s/%s: got %q want %q\n%s", mode, debug, got, want, result.Source)

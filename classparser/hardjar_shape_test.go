@@ -1737,64 +1737,18 @@ func TestRetypeTernarySiblingLocalJarFS(t *testing.T) {
 	}
 }
 
-func TestUnwrapCollectionArraysAsList(t *testing.T) {
-	in := "return this.append((Collection)(Arrays.asList(var1)));\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := unwrapCollectionArraysAsList(in)
-	if !strings.Contains(out, "this.append(Arrays.asList(var1))") {
-		t.Fatalf("missing unwrap:\n%s", out)
-	}
-	if strings.Contains(out, "(Collection)(Arrays.asList") {
-		t.Fatal("Collection wrap still present")
-	}
-}
-
-func TestUnwrapCollectionArraysAsListJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/dynamic/loading/MultipleParentClassLoader$Builder.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "(Collection)(Arrays.asList(var1))") {
-		t.Fatalf("ON still has Collection wrap:\n%s", clipForTest(on, "Arrays.asList"))
-	}
-	if !strings.Contains(on, "Arrays.asList(var1)") {
-		t.Fatalf("ON missing Arrays.asList:\n%s", clipForTest(on, "append("))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "this.append(Arrays.asList(var1))") && !strings.Contains(off, "(Collection)(Arrays.asList(var1))") {
-		t.Fatalf("OFF already unwrapped (switch inert):\n%s", clipForTest(off, "append("))
-	}
-	if !strings.Contains(off, "(Collection)(Arrays.asList(var1))") {
-		t.Fatalf("OFF missing Collection wrap:\n%s", clipForTest(off, "append("))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+// Raw Collection casts also carry invocation evidence when Arrays.asList
+// returns List<RawEntry>; removing them can make a generic factory inapplicable.
+// The executable factory regression exercises overload identity and JVM output.
+func TestHardjarShapesPreserveCollectionArrayBinding(t *testing.T) {
+	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "")
+	for _, in := range []string{
+		"return this.append((Collection)(Arrays.asList(var1)));\n",
+		"return Factory.copy((Collection)(Arrays.asList(entries)));\n",
+	} {
+		if got := fixHardjarShapes(in); got != in {
+			t.Fatalf("descriptor binding changed: %s", got)
+		}
 	}
 }
 
@@ -4419,15 +4373,11 @@ func TestRewriteInvokeExactSelfToHandle(t *testing.T) {
 	}
 }
 
-func TestRetypeExecCatchWaitToInterrupted(t *testing.T) {
-	in := "class C {\n\tvoid m() {\n\t\ttry{\n\t\t\tvar2.wait();\n\t\t}catch(ExecutionException var6){\n\t\t\tthrow new IllegalStateException(var6);\n\t\t}\n\t}\n}\n"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	out := retypeExecCatchWaitToInterrupted(in)
-	if strings.Contains(out, "catch(ExecutionException") {
-		t.Fatalf("ExecutionException catch remains:\n%s", out)
-	}
-	if !strings.Contains(out, "catch(InterruptedException") {
-		t.Fatalf("missing InterruptedException catch:\n%s", out)
+func TestHardjarShapesPreserveWaitAndFutureCatchTypes(t *testing.T) {
+	in := "class C { Object m(Object lock, java.util.concurrent.Future<?> future) { try { synchronized(lock) { lock.wait(); } return future.get(); } catch(ExecutionException error) { throw new IllegalStateException(error.getCause()); } catch(Exception error) { throw new IllegalStateException(error); } } }"
+	out := fixHardjarCodeShapes(in)
+	if !strings.Contains(out, "catch(ExecutionException error)") || strings.Contains(out, "catch(InterruptedException") {
+		t.Fatalf("changed exception-table catch type: %s", out)
 	}
 }
 
@@ -5174,5 +5124,14 @@ func TestObjectTypeVarRewriteDoesNotMatchTypeSuffix(t *testing.T) {
 	in := "class Holder<K> { void run(K key) { Object var4 = key; PooledObject var6_1 = create((K)(var4)); if (var6_1 != null) add((K)(var4),var6_1); } }"
 	if got := wrapObjectTypeVarArgs(in); got != in {
 		t.Fatalf("a type ending in Object is a different token:\n%s", got)
+	}
+}
+
+func TestForNameRawCastLeavesPostfixReceiversIntact(t *testing.T) {
+	for _, tail := range []string{".getDeclaredConstructor(new Class[0])", ".getConstructor(new Class[0])", ".getMethods()", ".getName()", " .getDeclaredFields()"} {
+		in := "consume(Class.forName(name)" + tail + ");"
+		if got := wrapClassForNameAsRawClass(in); got != in {
+			t.Fatalf("postfix expression type changed: %s", got)
+		}
 	}
 }

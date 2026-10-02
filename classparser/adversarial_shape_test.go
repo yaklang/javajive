@@ -117,9 +117,22 @@ func javaSynchronizedContains(src, header, inner string) bool {
 }
 
 func TestAdversarialNsmeCatchThisBuild(t *testing.T) {
-	assertOrig14Decompile(t, "testdata/regression/NsmeCatchAdv.class",
-		"ClassNotFoundException | NoSuchMethodException var2",
-		"catch(ClassNotFoundException var2){")
+	raw, err := os.ReadFile("testdata/regression/NsmeCatchAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The original table catches only CNFE. NSME is declared by make() and
+	// propagates; adding it to this catch changes the exception contract.
+	for _, disabled := range []string{"", "1"} {
+		t.Setenv("JDEC_ORIG14_REMAINING_OFF", disabled)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(source, "catch(ClassNotFoundException") || strings.Contains(source, "ClassNotFoundException | NoSuchMethodException") {
+			t.Fatalf("original catch alternatives changed:\n%s", source)
+		}
+	}
 }
 
 // Standalone javac of `boolean acc |= bits.set()` already dumps as boolean; the

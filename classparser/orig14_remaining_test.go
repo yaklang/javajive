@@ -119,3 +119,11 @@ func TestJSONReaderUTF16BoolExprNeIsLoadBearing(t *testing.T) {
 		") != (false)){",
 		") != (0)){")
 }
+
+func TestOrig14KeepsWrapperExceptionAlternatives(t *testing.T) {
+	t.Setenv("JDEC_ORIG14_REMAINING_OFF", "")
+	in := "try{\nClass[] params=new Class[1];\nparams[0]=String.class;\nthis.getMethod(owner,\"read\",params,false).invoke(value,new Object[0]);\n}catch(IllegalAccessException var7){\nthrow new RuntimeException(var7);\n}"
+	if got := fixOrig14RemainderReconstructs(in); got != in {
+		t.Fatalf("invented checked exception: %s", got)
+	}
+}

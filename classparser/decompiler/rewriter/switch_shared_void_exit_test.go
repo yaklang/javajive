@@ -76,3 +76,61 @@ func TestSharedSwitchVoidReturnSplitKeepsExitOwnership(t *testing.T) {
 		})
 	}
 }
+
+func TestExternalSwitchContinuationRequiresUniqueForwardNonLabelJoin(t *testing.T) {
+	for _, scenario := range []string{"shared", "fallthrough", "grouped only", "owned", "label", "backward", "missing PC", "multiple boundaries"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, external := jumpTestNode("root"), jumpTestNode("external")
+			owner := core.NewNode(&statements.MiddleStatement{Flag: "switch"})
+			owner.OriginPC = 10
+			owner.HasOriginPC = true
+			first, second, third := jumpTestNode("first"), jumpTestNode("second"), jumpTestNode("third")
+			target := jumpTestNode("tail")
+			target.OriginPC = 40
+			target.HasOriginPC = true
+			root.AddNext(owner)
+			root.AddNext(external)
+			external.AddNext(target)
+			owner.AddNext(first)
+			owner.AddNext(second)
+			owner.AddNext(third)
+			first.AddNext(target)
+			second.AddNext(target)
+			third.AddNext(target)
+			starts := []*core.Node{first, second, third}
+			switch scenario {
+			case "fallthrough":
+				first.RemoveNext(target)
+				first.AddNext(second)
+			case "grouped only":
+				starts = []*core.Node{first, first}
+			case "owned":
+				root.RemoveNext(external)
+			case "label":
+				starts = append(starts, target)
+				owner.AddNext(target)
+			case "backward":
+				target.OriginPC = 5
+			case "missing PC":
+				target.HasOriginPC = false
+			case "multiple boundaries":
+				other := jumpTestNode("other")
+				other.OriginPC = 50
+				other.HasOriginPC = true
+				external.AddNext(other)
+				first.AddNext(other)
+				second.AddNext(other)
+			}
+			manager := NewRootStatementManager(root)
+			manager.DominatorMap = GenerateDominatorTree(root)
+			got := externalSharedSwitchContinuation(manager, owner, starts)
+			want := scenario == "shared" || scenario == "fallthrough"
+			if (got == target) != want || (!want && got != nil) {
+				t.Fatalf("continuation=%p want=%v", got, want)
+			}
+			if external.Next[0] != target || (scenario == "fallthrough" && first.Next[0] != second) {
+				t.Fatal("changed external path or real fallthrough")
+			}
+		})
+	}
+}

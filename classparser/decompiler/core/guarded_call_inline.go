@@ -323,6 +323,11 @@ func statementReferencesLocal(statement statements.Statement, ref *values.JavaRe
 	case *statements.SynchronizedStatement:
 		return read(s.Argument) || listReads(s.Body)
 	case *statements.CustomStatement:
+		if s.ThrownValue != nil {
+			// ATHROW records its complete typed operand. Its rendering closure
+			// adds no hidden dependencies; inspect the thrown expression itself.
+			return read(s.ThrownValue)
+		}
 		// Custom source fragments have no typed child visitor. Only structured control
 		// transfers are known to contain no local reads; every other fragment is opaque.
 		text := strings.TrimSpace(s.String(&class_context.ClassContext{}))

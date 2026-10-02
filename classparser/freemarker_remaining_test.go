@@ -194,3 +194,13 @@ func TestFreemarkerRhinoWrapperStaticInitIsLoadBearing(t *testing.T) {
 		"UNDEFINED_INSTANCE = AccessController.doPrivileged((PrivilegedExceptionAction)(new RhinoWrapper$1()));",
 		"static final Object UNDEFINED_INSTANCE = AccessController.doPrivileged((PrivilegedExceptionAction)(new RhinoWrapper$1()));")
 }
+
+// The invoke's original name is part of the binary contract. Adapting source
+// to an unrelated dependency version silently changes the API being called.
+func TestFreemarkerPreservesOriginalJDOMInvocation(t *testing.T) {
+	in := "import org.jdom.ProcessingInstruction;\nvar5.getValue(var2);\nvar5_1.getValue(var2);"
+	out := fixFreemarkerRemainingReconstructs(in)
+	if out != in {
+		t.Fatalf("changed original JDOM API: %s", out)
+	}
+}

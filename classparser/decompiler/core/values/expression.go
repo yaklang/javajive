@@ -215,6 +215,12 @@ func (j *JavaExpression) Type() types.JavaType {
 	if _, _, ok := j.boolConnectiveConds(); ok {
 		return types.NewJavaPrimer(types.JavaBoolean)
 	}
+	if j.Typ != nil {
+		switch j.Op {
+		case ADD, SUB, MUL, DIV, REM, AND, OR, XOR, SHL, SHR, USHR:
+			return j.Typ.Copy()
+		}
+	}
 	return j.Typ
 }
 
@@ -229,16 +235,40 @@ func (j *JavaExpression) boolConnectiveConds() (JavaValue, JavaValue, bool) {
 	}
 	c1, ok1 := boolOperandCondition(j.Values[0])
 	c2, ok2 := boolOperandCondition(j.Values[1])
+	// The local web solver can prove an accumulator boolean after this
+	// expression was built. View only its opposite 0/1 constant as boolean;
+	// keep numeric-only operations and the shared literal unchanged.
+	if ok1 && !ok2 {
+		c2, ok2 = booleanWordConstant(j.Values[1])
+	}
+	if ok2 && !ok1 {
+		c1, ok1 = booleanWordConstant(j.Values[0])
+	}
 	if !ok1 || !ok2 {
 		return nil, nil, false
 	}
 	return c1, c2, true
 }
 
+func booleanWordConstant(v JavaValue) (JavaValue, bool) {
+	lit, ok := UnpackSoltValue(v).(*JavaLiteral)
+	if !ok {
+		return v, false
+	}
+	word, ok := lit.Data.(int)
+	if !ok || (word != 0 && word != 1) {
+		return v, false
+	}
+	return NewJavaLiteral(word, types.NewJavaPrimer(types.JavaBoolean)), true
+}
+
 // boolOperandCondition returns the boolean condition underlying a `cond ? 1 : 0` ternary, or the
 // value itself when it is already boolean-typed (a comparison or a nested boolean connective).
 func boolOperandCondition(v JavaValue) (JavaValue, bool) {
 	u := UnpackSoltValue(v)
+	if c, ok := u.(*CustomValue); ok && c.Flag == "boolean_stack_word" && c.CapturesKnown && len(c.Captures) == 1 {
+		return boolOperandCondition(c.Captures[0])
+	}
 	if cond, ok := BoolTernaryCondition(u); ok {
 		return cond, true
 	}
@@ -267,6 +297,14 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 	}
 	vs := []string{}
 	for _, value := range j.Values {
+		// A later web solution can expose a Z operand in an otherwise I
+		// bitwise expression. Preserve the full numeric word and lift only
+		// the boolean operand to its JVM 0/1 computational representation.
+		if len(j.Values) == 2 && (j.Op == AND || j.Op == OR || j.Op == XOR) {
+			if _, ok := boolOperandCondition(value); ok {
+				value = booleanStackWord(value)
+			}
+		}
 		piece := value.String(funcCtx)
 		if guard && renderRejected(funcCtx) {
 			return ""
@@ -677,14 +715,28 @@ func NewBinaryExpression(value1, value2 JavaValue, op string, typ types.JavaType
 	if IsStrictBooleanOperator(op) {
 		resetTypeSafe(value1, types.NewJavaPrimer(types.JavaBoolean))
 		resetTypeSafe(value2, types.NewJavaPrimer(types.JavaBoolean))
-	} else if (op == AND || op == OR || op == XOR) && (isBooleanTyped(value1) || isBooleanTyped(value2)) {
-		// &, |, ^ are shared between boolean logic and integer bitwise arithmetic. Decide by
-		// the operands: if either side is already boolean (e.g. descriptor-typed parameters or
-		// a negation), this is boolean logic, so align both sides to boolean. Otherwise leave
-		// the operands as their inferred integer type.
-		resetTypeSafe(value1, types.NewJavaPrimer(types.JavaBoolean))
-		resetTypeSafe(value2, types.NewJavaPrimer(types.JavaBoolean))
-		typ = types.NewJavaPrimer(types.JavaBoolean)
+	} else if op == AND || op == OR || op == XOR {
+		_, leftBoolean := boolOperandCondition(value1)
+		_, rightBoolean := boolOperandCondition(value2)
+		if leftBoolean && !rightBoolean {
+			value2, rightBoolean = booleanWordConstant(value2)
+		}
+		if rightBoolean && !leftBoolean {
+			value1, leftBoolean = booleanWordConstant(value1)
+		}
+		if leftBoolean && rightBoolean {
+			typ = types.NewJavaPrimer(types.JavaBoolean)
+		} else if leftBoolean || rightBoolean {
+			// JVM iand/ior/ixor consumes int words. A Z operand contributes
+			// 0/1; an I operand retains all bits and its declared parameter ABI.
+			if leftBoolean {
+				value1 = booleanStackWord(value1)
+			}
+			if rightBoolean {
+				value2 = booleanStackWord(value2)
+			}
+			typ = types.NewJavaPrimer(types.JavaInteger)
+		}
 	}
 	resultType := nonNilType(typ, value1.Type(), value2.Type()).Copy()
 	resultType = promoteBinaryNumericResult(op, resultType)
@@ -3712,8 +3764,13 @@ func sameErasureClassName(a, b string) bool {
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
-	if c, ok := arg.(*CastExpression); ok && c.Binding {
-		return fmt.Sprintf("(%s)(%s)", c.TargetType.String(funcCtx), c.Value.String(funcCtx))
+	// The invocation descriptor fixes the computational category even when
+	// its source operand is a proven boolean. Synthetic accessors may have
+	// an I parameter and a Z result; changing that ABI breaks original callers.
+	if ps, _, err := callbinding.Descriptor(f.Descriptor); err == nil && len(ps) == len(f.Arguments) && ps[i] == "I" {
+		if condition, ok := boolOperandCondition(arg); ok {
+			return booleanStackWord(condition).String(funcCtx)
+		}
 	}
 	if cast := f.parameterizedOverloadArgCast(i, funcCtx); cast != "" {
 		// The value model records the JVM erasure. A poly producer such as
@@ -3723,6 +3780,12 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		// and neither adds a runtime check or evaluates the argument again.
 		raw := f.witnessDescriptorParamType(i).String(funcCtx)
 		return fmt.Sprintf("(%s)(%s)(%s)", cast, raw, arg.String(funcCtx))
+	}
+	if target := f.covariantOverloadResultCast(i, funcCtx); target != "" {
+		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
+	}
+	if c, ok := arg.(*CastExpression); ok && c.Binding {
+		return f.renderProvenArgumentCast(i, c.TargetType.String(funcCtx), c.Value, funcCtx)
 	}
 	if bridge := f.streamFunctionInputBridge(i); bridge != nil {
 		raw := types.NewJavaClass("java.util.function.Function").String(funcCtx)
@@ -3834,7 +3897,7 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	// descriptor (null vs String.valueOf(Object) vs valueOf(char[]); array vs Object).
 	// Specialized helpers above already returned if they fired.
 	if cast := f.witnessDescriptorArgCast(i, arg, funcCtx); cast != "" {
-		return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
+		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}
 	argType := f.FuncType.ParamTypes[i]
 	// Recover the generic parameter type the descriptor erased (e.g. BiConsumer<T,V>.accept's
@@ -3892,13 +3955,7 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 			!(!resolvedGeneric && f.calleeParamIsErasedTypeVar(i, funcCtx)) &&
 			!(!resolvedGeneric && jdkCalleeParamIsErasedTypeVar(f.ClassName, f.FunctionName, i, len(f.Arguments), argType, funcCtx)) &&
 			!classLiteralArgToClassParam(arg, expectClassType, funcCtx) {
-			argStr := arg.String(funcCtx)
-			argTypeStr := argType.String(funcCtx)
-			arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-				return fmt.Sprintf("(%s)(%s)", argTypeStr, argStr)
-			}, func() types.JavaType {
-				return argType
-			})
+			return f.renderProvenArgumentCast(i, argType.String(funcCtx), arg, funcCtx)
 		}
 	} else if resolvedParameterizedArgCast(funcCtx, argType, resolvedGeneric, lowerBoundedParam, arg) {
 		// A generic resolver recovered the formal as a PARAMETERIZED type (e.g.

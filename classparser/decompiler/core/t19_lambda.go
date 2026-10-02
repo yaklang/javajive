@@ -270,7 +270,7 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 		cv.InstantiatedMtdDesc = t19MethodTypeDesc(static[2])
 		if upgradedType := inferDeclaredLambdaTarget(d, typ, static[0], static[2]); upgradedType != nil {
 			lambdaType := upgradedType
-			if inferLambdaTypeFromInstantiated(typ, static[2]) == nil {
+			if inferLambdaTypeFromInstantiated(typ, static[2]) == nil || (!d.blockPartialFunctionalTarget && instantiatedSAMErasesGenericArguments(static[2], d.FunctionContext)) {
 				cv = retainErasedFunctionalValue(cv, typ, lambdaType)
 			} else {
 				cv = cv.WithType(func() types.JavaType { return lambdaType })

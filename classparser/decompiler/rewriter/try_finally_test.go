@@ -3,6 +3,7 @@ package rewriter
 import (
 	"testing"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -131,5 +132,60 @@ func TestFinallyCoverageRejectsCyclesAndUnprotectedOperands(t *testing.T) {
 	}
 	if finallyCoveredValue(deep, covered) {
 		t.Fatal("dependency budget must bound traversal")
+	}
+}
+
+func TestFinallyFieldRestoreAndGuardRequireIdentityAndOrigins(t *testing.T) {
+	for _, name := range []string{"proved", "other field", "other receiver", "other local", "declared", "missing origin", "protected write", "excluded local", "changed guard", "protected return"} {
+		t.Run(name, func(t *testing.T) {
+			typ := types.NewJavaClass("example.Resource")
+			self := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("example.Owner"))
+			self.IsThis = true
+			saved := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			restore := func(pc int) *statements.AssignStatement {
+				st := statements.NewAssignStatement(values.NewRefMember(self, "current", typ), saved, false)
+				st.OriginPC = pc
+				st.HasOriginPC = true
+				return st
+			}
+			a, b := restore(30), restore(40)
+			rows := []core.HandlerRange{{StartPc: 10, EndPc: 20}}
+			excluded := []*values.JavaRef{}
+			switch name {
+			case "other field":
+				b.LeftValue.(*values.RefMember).Member = "different"
+			case "other receiver":
+				b.LeftValue.(*values.RefMember).Object = values.NewJavaRef(utils.NewRootVariableId(), nil, self.Type())
+			case "other local":
+				b.JavaValue = values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			case "declared":
+				b.IsDeclare = true
+			case "missing origin":
+				b.HasOriginPC = false
+			case "protected write":
+				b.OriginPC = 19
+			case "excluded local":
+				excluded = append(excluded, saved)
+			}
+			condition := func() values.JavaValue {
+				return values.NewBinaryExpression(saved, values.JavaNull, values.NEQ, types.NewJavaPrimer(types.JavaBoolean))
+			}
+			guardA, guardB := statements.NewIfStatement(condition(), []statements.Statement{a}, nil), statements.NewIfStatement(condition(), []statements.Statement{b}, nil)
+			if name == "changed guard" {
+				guardB.Condition = values.NewBinaryExpression(saved, values.JavaNull, values.EQ, types.NewJavaPrimer(types.JavaBoolean))
+			}
+			if name == "protected return" {
+				ret := statements.NewReturnStatement(nil)
+				ret.OriginPC = 19
+				ret.HasOriginPC = true
+				guardB.ElseBody = []statements.Statement{ret}
+			}
+			if got := sameFinallyCleanup(rows, guardA, guardB, excluded, 0); got != (name == "proved") {
+				t.Fatalf("proof=%v", got)
+			}
+			if len(guardA.IfBody) != 1 || len(guardB.IfBody) != 1 {
+				t.Fatal("mutated input cleanup")
+			}
+		})
 	}
 }

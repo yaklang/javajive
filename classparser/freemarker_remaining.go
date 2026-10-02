@@ -151,15 +151,6 @@ func fixFreemarkerRemainingReconstructs(body string) string {
 		"var2 = var2.getParent();",
 		"var2 = (Element)(var2.getParent());")
 
-	if strings.Contains(body, "org.jdom.ProcessingInstruction") {
-		body = strings.ReplaceAll(body,
-			"var5.getValue(var2)",
-			"var5.getPseudoAttributeValue(var2)")
-		body = strings.ReplaceAll(body,
-			"var5_1.getValue(var2)",
-			"var5_1.getPseudoAttributeValue(var2)")
-	}
-
 	body = strings.ReplaceAll(body,
 		"return new SimpleScalar(new String(new char[]{var2}));",
 		"return new SimpleScalar(new String(new char[]{(char)(var2)}));")

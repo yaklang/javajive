@@ -12,7 +12,8 @@ func fixOrig14RemainderReconstructs(body string) string {
 	}
 	body = fixIntBareIf(body)
 	body = fixBoolOrAccumulator(body)
-	body = fixMissingNSMECatch(body)
+	// Exception alternatives belong to the original handler table. A Class[]
+	// argument or a reflection-like method name cannot establish a throws clause.
 	body = fixObjectGetKeyAssignedToInt(body)
 	body = fixUncheckedAwaitNanos(body)
 	body = fixEmptySyncInTrailingElse(body)
