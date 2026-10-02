@@ -416,6 +416,10 @@ func NewRefMember(object JavaValue, member string, typ types.JavaType) *RefMembe
 type JavaArrayMember struct {
 	Object JavaValue
 	Index  JavaValue
+	// A folded array access may throw. Region proofs use its decoded load/store
+	// PC rather than the PC of a surrounding expression or assignment.
+	OriginPC    int
+	HasOriginPC bool
 }
 
 // ReplaceVar implements JavaValue.

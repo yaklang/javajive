@@ -73,10 +73,11 @@ func (c *CastExpression) String(ctx *class_context.ClassContext) string {
 func (c *CastExpression) ReplaceVar(old, new *utils.VariableId) { c.Value.ReplaceVar(old, new) }
 
 type AssignmentExpression struct {
-	Target   JavaValue
-	Value    JavaValue
-	OriginPC int
-	Render   func(*class_context.ClassContext) string
+	Target      JavaValue
+	Value       JavaValue
+	OriginPC    int
+	HasOriginPC bool
+	Render      func(*class_context.ClassContext) string
 }
 
 func (a *AssignmentExpression) Type() types.JavaType { return a.Value.Type() }
@@ -101,7 +102,7 @@ func NewCastExpression(value JavaValue, target types.JavaType, pc int) JavaValue
 // NewAssignmentExpression builds an enumerable assignment rather than a
 // CustomValue closure. The assignment itself is never deleted.
 func NewAssignmentExpression(target, value JavaValue, pc int, render func(*class_context.ClassContext) string) *AssignmentExpression {
-	return &AssignmentExpression{Target: target, Value: value, OriginPC: pc, Render: render}
+	return &AssignmentExpression{Target: target, Value: value, OriginPC: pc, HasOriginPC: pc >= 0, Render: render}
 }
 
 // NewTypedArrayAccess prefers an enumerable array load over a CustomValue.

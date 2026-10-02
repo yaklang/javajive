@@ -16,8 +16,10 @@ import (
 // extractCatchException pulls the caught-exception variable out of a structured catch handler body
 // and returns the remaining handler statements. Three handler shapes occur in real bytecode:
 //
-//  1. astore (javac normal form): body[0] is `<ref> = <exception placeholder>`. The ref is reused
-//     as the catch variable and stripped from the body.
+//  1. astore: body[0] is `<ref> = <exception placeholder>`. A first definition
+//     is the catch-local parameter and its store is stripped. An overwrite of
+//     an existing method-local definition remains a write from a distinct catch
+//     parameter; a direct handler ASTORE must not erase a saved exception.
 //  2. pop (the ECJ empty-catch idiom): body[0] merely discards the exception placeholder. There is
 //     no named variable, so synthesize one (taking the concrete catch type from the placeholder)
 //     and drop the discard.
@@ -28,7 +30,21 @@ func (manager *RewriteManager) extractCatchException(body []statements.Statement
 		if assign, ok := body[0].(*statements.AssignStatement); ok {
 			if ref, ok := assign.LeftValue.(*values.JavaRef); ok {
 				if cv, ok := core.UnpackSoltValue(assign.JavaValue).(*values.CustomValue); ok && cv.Flag == "exception" {
-					return ref, body[1:]
+					if assign.IsFirst {
+						return ref, body[1:]
+					}
+					// The handler ASTORE can overwrite a method-local slot,
+					// rather than declare a new catch-local variable. Keep
+					// that write after introducing a distinct handler entry
+					// definition; stripping it would discard the saved value.
+					caught := manager.newCatchExceptionRef(cv.Type())
+					copy := *assign
+					copy.JavaValue = caught
+					copy.IsFirst, copy.IsDeclare = false, false
+					rest := make([]statements.Statement, 0, len(body))
+					rest = append(rest, &copy)
+					rest = append(rest, body[1:]...)
+					return caught, rest
 				}
 			}
 		}
@@ -45,6 +61,15 @@ func (manager *RewriteManager) extractCatchException(body []statements.Statement
 			}
 		}
 	}
+	return manager.newCatchExceptionRef(excType), rest
+}
+
+// A synthetic catch entry value has its own identity, independent of any
+// method-local slot subsequently written by the first handler instruction.
+func (manager *RewriteManager) newCatchExceptionRef(excType types.JavaType) *values.JavaRef {
+	if excType == nil {
+		excType = types.NewJavaClass("Throwable")
+	}
 	manager.syntheticCatchVarCounter++
 	name := fmt.Sprintf("ex%d", manager.syntheticCatchVarCounter)
 	ref := values.NewJavaRef(nil, nil, excType)
@@ -53,7 +78,7 @@ func (manager *RewriteManager) extractCatchException(body []statements.Statement
 	}, func() types.JavaType {
 		return excType
 	})
-	return ref, rest
+	return ref
 }
 
 // isCatchHandlerBody reports whether a structured body begins with the synthetic
@@ -261,8 +286,14 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 			if len(body) > 0 {
 				if v, ok := body[0].(*statements.AssignStatement); ok {
 					if v1, ok := v.LeftValue.(*values.JavaRef); ok {
+						rest := body[1:]
+						if isCatchHandlerBody(body) {
+							// The same handler entry definition rule applies
+							// after an earlier pass has replaced its CFG marker.
+							v1, rest = manager.extractCatchException(body)
+						}
 						tryCatchSt.Exception = append(tryCatchSt.Exception, v1)
-						catchBodies[i] = body[1:]
+						catchBodies[i] = rest
 						foundException = true
 					}
 				}
@@ -277,6 +308,9 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 	tryCatchSt.TryBody = append(tryCatchSt.TryBody, tryBody...)
 	tryCatchSt.CatchBodies = append(tryCatchSt.CatchBodies, catchBodies...)
+	if layered, ok := restoreExceptionHandlerLayers(tryCatchSt); ok {
+		*tryCatchSt = *layered
+	}
 	endNodes = lo.Filter(endNodes, func(item *core.Node, index int) bool {
 		return item != tryNode && !IsEndNode(item)
 	})
@@ -284,7 +318,12 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 		tryNode.AddNext(c)
 	}
 	markEncodedJumps(tryNode, bodyNodes)
-	if declaration, tail := factorUnprotectedTryTail(node, tryCatchSt); declaration != nil {
+	tryCatchSt.EntryInitializers = resourceEntryInitializers(tryNode)
+	declaration, tail := factorUnprotectedTryTail(node, tryCatchSt)
+	if declaration == nil {
+		declaration, tail = factorResourceNormalTail(node, tryCatchSt)
+	}
+	if declaration != nil {
 		// Preserve the result's method-local identity across the protected
 		// prefixes and the unprotected tail, without replaying slot names.
 		declNode := manager.NewNode(declaration)

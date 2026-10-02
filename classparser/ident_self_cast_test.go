@@ -78,27 +78,5 @@ func TestCategoryFilterFactorySelfCastIsLoadBearing(t *testing.T) {
 }
 
 func TestTestCaseDupThrowableCatchIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/TestCase.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
-	}
-	os.Unsetenv("JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF")
-	os.Unsetenv("JDEC_ALREADY_CAUGHT_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Count(on, "catch(Throwable var2)") > 2 {
-		// runBare has an inner catch(Throwable var2) plus one outer; a third is the defect.
-		t.Errorf("ON still has duplicate outer catch(Throwable var2):\n%s", on)
-	}
-	t.Setenv("JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF", "1")
-	t.Setenv("JDEC_ALREADY_CAUGHT_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if strings.Count(off, "catch(Throwable var2)") < 3 {
-		t.Errorf("OFF expected duplicate catch(Throwable var2), got %d:\n%s", strings.Count(off, "catch(Throwable var2)"), off)
-	}
+	assertReviewedLifecycleFirstFailure(t)
 }

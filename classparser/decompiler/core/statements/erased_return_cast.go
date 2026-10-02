@@ -83,7 +83,17 @@ func erasedFactoryReturnCast(ctx *class_context.ClassContext, value values.JavaV
 		if t, ok := values.UnpackSoltValue(v).(*values.TernaryExpression); ok {
 			return prove(t.TrueValue, depth+1) && prove(t.FalseValue, depth+1)
 		}
-		return values.IsNullLiteral(values.UnpackSoltValue(v)) || values.ErasedFactoryReturn(ctx, v, ret)
+		if values.IsNullLiteral(values.UnpackSoltValue(v)) || values.ErasedFactoryReturn(ctx, v, ret) {
+			return true
+		}
+		call, ok := values.UnpackSoltValue(v).(*values.FunctionCallExpression)
+		if !ok || ctx.InvocationMetadata == nil {
+			return false
+		}
+		_, produced, err := callbinding.Descriptor(call.Descriptor)
+		// The new view is a proved widening at the final return edge. It
+		// cannot check a payload, change an operand or retarget an inner call.
+		return err == nil && callbinding.Assignable(produced, ret, ctx.InvocationMetadata) && values.ErasedZeroInputFactoryResult(ctx, call, produced)
 	}
 	if !prove(value, 0) {
 		return "", ""

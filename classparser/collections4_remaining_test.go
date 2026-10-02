@@ -129,30 +129,21 @@ func TestCollections4IterableUtilsSingletonListCastIsLoadBearing(t *testing.T) {
 }
 
 func TestCollections4MultiValueMapClassCastIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/MultiValueMap.class")
-	if err != nil {
-		t.Fatalf("read MultiValueMap: %v", err)
-	}
-	os.Unsetenv("JDEC_COLLECTIONS4_REMAINING_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	if !strings.Contains(on, "multiValueMap(var0,(Class)(ArrayList.class))") {
-		t.Errorf("ON: expected raw Class cast, got:\n%s", on)
-	}
 
-	t.Setenv("JDEC_COLLECTIONS4_REMAINING_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	if strings.Contains(off, "multiValueMap(var0,(Class)(ArrayList.class))") {
-		t.Errorf("OFF: expected no Class reconstruct, got:\n%s", off)
-	}
-	if !strings.Contains(off, "multiValueMap(var0,ArrayList.class)") {
-		t.Errorf("OFF: expected raw ArrayList.class, got:\n%s", off)
-	}
+	path := "testdata/regression/MultiValueMap.class"
+	desc := "(Ljava/util/Map;)Lorg/apache/commons/collections4/map/MultiValueMap;"
+	raw, _, _ := reviewedFixtureMethod(t, path, "multiValueMap", desc)
+	assertReviewedTypeVarMethod(t, raw, "multiValueMap", desc, "<K:Ljava/lang/Object;V:Ljava/lang/Object;>(Ljava/util/Map<TK;-Ljava/util/Collection<TV;>;>;)Lorg/apache/commons/collections4/map/MultiValueMap<TK;TV;>;")
+	target := "(Ljava/util/Map;Ljava/lang/Class;)Lorg/apache/commons/collections4/map/MultiValueMap;"
+	assertReviewedTypeVarMethod(t, raw, "multiValueMap", target, "<K:Ljava/lang/Object;V:Ljava/lang/Object;C::Ljava/util/Collection<TV;>;>(Ljava/util/Map<TK;-TC;>;Ljava/lang/Class<TC;>;)Lorg/apache/commons/collections4/map/MultiValueMap<TK;TV;>;")
+	assertReviewedTypeVarInvoke(t, path, "multiValueMap", desc, 3, 184, "org/apache/commons/collections4/map/MultiValueMap", "multiValueMap", target)
+	reviewedSeedSources(t, path, "JDEC_COLLECTIONS4_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `multiValueMap\(Map<K, \? super Collection<V>> [^)]*\)`)
+		compact := compactReviewedGenericSource(body)
+		if !strings.Contains(compact, "multiValueMap((Map)(") || !strings.Contains(compact, ",(Class)(ArrayList.class))") || !strings.Contains(compact, "(MultiValueMap<K,V>)(MultiValueMap)") {
+			t.Fatal("lost original erased Map/Class factory tuple or generic result view: " + body)
+		}
+	})
 }
 
 func TestCollections4RangeEntryMapKeyCastIsLoadBearing(t *testing.T) {

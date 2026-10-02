@@ -83,9 +83,10 @@ type ClassObjectDumper struct {
 	// DISJOINT scopes (safe to share names). Top-level lambdas (depth 1) keep `l<i>`, so the common
 	// case is byte-for-byte unchanged. See DumpMethodWithInitialId. Kill-switch:
 	// JDEC_LAMBDA_PARAM_SCOPE_OFF=1 restores the flat `l<i>` naming.
-	lambdaDepth       int
-	fieldDefaultValue map[string]string
-	dumpedMethodsSet  map[string]*dumpedMethods
+	lambdaDepth                 int
+	fieldDefaultValue           map[string]string
+	interfaceInitializerHelpers []*dumpedMethods
+	dumpedMethodsSet            map[string]*dumpedMethods
 	// aggressive marks that the CURRENT method dump is a second attempt for a method whose
 	// conservative decompilation already failed. While set, the decompiler enables higher-risk
 	// reconstruction paths (relaxed structuring, node-duplication, synthetic rebuilds). It is
@@ -1530,11 +1531,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// `ImmutableMap<A,B> f = ImmutableMap.builder()` so builder() does not infer <Object,Object>.
 	// Kill-switch: JDEC_IMMUTABLE_BUILDER_WITNESS_OFF=1.
 	full = c.sourceRewrite("fixImmutableBuilderWitness", "class_source", full, fixImmutableBuilderWitness)
-	// fixNeverThrownCNFE inserts `Class.forName("java.lang.Object")` into a try whose
-	// catch(ClassNotFoundException) would otherwise be "never thrown" (spring
-	// ConfigurableObjectInputStream: forName reconstructed outside the catch's try).
-	// Kill-switch: JDEC_CNFE_NEVER_THROWN_OFF=1.
-	full = c.sourceRewrite("fixNeverThrownCNFE", "class_source", full, fixNeverThrownCNFE)
 	// fixSelectMethodsAmbiguous casts the lambda in MethodIntrospector.selectMethods(Class,
 	// MethodFilter) so javac does not confuse it with the MetadataLookup overload.
 	// Kill-switch: JDEC_SELECTMETHODS_CAST_OFF=1.
@@ -3439,7 +3435,12 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	_ = abstractMethod
 
 	accessFlags := accessFlagCode
-	if c.nestDemotePrivate() && !isSerializationHookMethod(name) {
+	// A private instance method is a nonvirtual target even on a subclass
+	// receiver. Widening it creates an override relation that the classfile
+	// never had. Constructors and static members do not participate in that
+	// dispatch relation; any inaccessible cross-nest instance call needs a
+	// separate access bridge rather than changing the original declaration.
+	if c.nestDemotePrivate() && !isSerializationHookMethod(name) && (name == "<init>" || method.AccessFlags&StaticFlag != 0) {
 		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "private", ""))
 	}
 	methodType, err := types.ParseMethodDescriptor(descriptor)
@@ -4148,6 +4149,14 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			}
 			statementCodes := []string{}
 			supperInvokeStr := ""
+			if name == "<clinit>" && classStaticInitializersMustHoist {
+				helpers, initErr := c.renderInterfaceInitializers(statementList, codeAttr, funcCtx, statementListToString)
+				if initErr != nil {
+					return nil, initErr
+				}
+				c.interfaceInitializerHelpers = helpers
+				statementList = nil
+			}
 			for i, statement := range statementList {
 				if i == len(statementList)-1 && methodType.FunctionType().ReturnType.String(funcCtx) == "void" {
 					if _, ok := statement.(*statements.ReturnStatement); ok {
@@ -7385,54 +7394,6 @@ func fixImmutableBuilderWitness(body string) string {
 		}
 		return m[1] + "<" + m[2] + "> " + m[3] + " = " + m[1] + ".<" + m[2] + ">builder("
 	})
-}
-
-// fixNeverThrownCNFE inserts `Class.forName("java.lang.Object")` into a try
-// whose catch(ClassNotFoundException) would otherwise be rejected as never thrown. Real hit:
-// spring ConfigurableObjectInputStream.resolveProxyClass, where ClassUtils.forName is
-// reconstructed outside the catch's try. Kill-switch: JDEC_CNFE_NEVER_THROWN_OFF=1.
-func fixNeverThrownCNFE(body string) string {
-	if jdecenv.Get("JDEC_CNFE_NEVER_THROWN_OFF") == "1" {
-		return body
-	}
-	if !strings.Contains(body, "ClassNotFoundException") {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	var insertAt []int
-	for i, ln := range lines {
-		trim := strings.TrimSpace(ln)
-		if !strings.Contains(trim, "catch(ClassNotFoundException") &&
-			!strings.Contains(trim, "catch (ClassNotFoundException") {
-			continue
-		}
-		tryAt := -1
-		for j := i; j >= 0; j-- {
-			if strings.Contains(lines[j], "try{") || strings.HasSuffix(strings.TrimSpace(lines[j]), "try {") {
-				tryAt = j
-				break
-			}
-		}
-		if tryAt < 0 {
-			continue
-		}
-		chunk := strings.Join(lines[tryAt:i+1], "\n")
-		if strings.Contains(chunk, "forName") || strings.Contains(chunk, "loadClass") ||
-			strings.Contains(chunk, "newInstance") {
-			continue
-		}
-		insertAt = append(insertAt, tryAt)
-	}
-	if len(insertAt) == 0 {
-		return body
-	}
-	for k := len(insertAt) - 1; k >= 0; k-- {
-		at := insertAt[k]
-		ind := leadingTabs(strings.TrimRight(lines[at], "\r")) + "\t"
-		inj := ind + "Class.forName(\"java.lang.Object\");"
-		lines = append(lines[:at+1], append([]string{inj}, lines[at+1:]...)...)
-	}
-	return strings.Join(lines, "\n")
 }
 
 // fixSelectMethodsAmbiguous disambiguates
@@ -12739,10 +12700,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			}
 		}
 		if name == "<clinit>" && c.isInterfaceLike() {
-			// Interfaces and annotations cannot declare a source-level static initializer.
-			// DumpMethodWithInitialId has already hoisted any representable final-field
-			// assignments into field initializers; leftover helper-array stores have no legal
-			// method form and must not be emitted only to be dropped by the syntax safety net.
+			if err != nil {
+				c.interfaceInitializerHelpers = c.interfaceInitializerStubs(err)
+			}
 			continue
 		}
 		if err != nil {
@@ -12830,6 +12790,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 	if err := c.checkWork(); err != nil {
 		return nil, err
 	}
+	result = append(result, c.interfaceInitializerHelpers...)
 	return result, nil
 }
 

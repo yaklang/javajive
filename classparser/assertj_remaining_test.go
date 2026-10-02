@@ -13,17 +13,11 @@ func TestIntegerAssertDropsNumberCastIsLoadBearing(t *testing.T) {
 }
 
 func TestBigDecimalAssertDropsStringCastIsLoadBearing(t *testing.T) {
-	assertKillSwitchJarFS(t, assertjCoreJar,
-		"org/assertj/core/api/AbstractBigDecimalAssert.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"this.isEqualTo(new BigDecimal(var1))",
-		"this.isEqualTo((String)(new BigDecimal(var1)))")
+	assertReviewedAssertjObjectDelegation(t, "AbstractBigDecimalAssert", 9, `new BigDecimal\(\w+\)`)
 }
 
 func TestInstantAssertDropsStringParseCastIsLoadBearing(t *testing.T) {
-	assertKillSwitchJarFS(t, assertjCoreJar,
-		"org/assertj/core/api/AbstractInstantAssert.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"this.isEqualTo(this.parse(var1))",
-		"this.isEqualTo((String)(this.parse(var1)))")
+	assertReviewedAssertjObjectDelegation(t, "AbstractInstantAssert", 10, `this\.parse\(\w+\)`)
 }
 
 func TestObjectArrayAssertKeepsElementActualIsLoadBearing(t *testing.T) {

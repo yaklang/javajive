@@ -21,7 +21,6 @@ func fixZxingRemainingReconstructs(body string) string {
 	body = retypeIntLocalsUsedAsCodeword(body)
 	body = rewriteIntCombinedLengthAssign(body)
 	body = retypeZxingIntLocalsByUse(body)
-	body = rewriteSavedExceptionCatchRethrow(body)
 	body = wrapZxingUPCEANChecksumTry(body)
 	body = wrapZxingToStringThrowThrowable(body)
 	body = dropZxingUnreachableAmbiguousContinue(body)
@@ -296,50 +295,6 @@ func fixZxingRemainingReconstructs(body string) string {
 // retypeZxingIntLocalsByUse retypes `int varN = 0` when the slot is clearly a
 // float ratio (distance * layers / distance vs 0.75D, patternMatchVariance)
 // or a String (toString assigned into a CharSequence / generateErrorCorrection).
-// rewriteSavedExceptionCatchRethrow turns `catch (T varN_1) { throw new RuntimeException(varN_1); }`
-// into `varN = varN_1` when the method later `throw varN` (QR Decoder retries after
-// FormatException/ChecksumException by remasking).
-func rewriteSavedExceptionCatchRethrow(body string) string {
-	const needle = "throw new RuntimeException("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		ident, ok, rest := readJavaIdent(body[i+len(needle):])
-		if !ok || !isDecompilerLocal(ident) || !strings.HasPrefix(rest, ");") {
-			from = i + 1
-			continue
-		}
-		us := strings.LastIndex(ident, "_")
-		if us < 0 {
-			from = i + 1
-			continue
-		}
-		saved := ident[:us]
-		if !isDecompilerLocal(saved) {
-			from = i + 1
-			continue
-		}
-		methodEnd := nextZxingMethodStart(body, i)
-		chunk := body[i:methodEnd]
-		if !strings.Contains(chunk, "throw "+saved+";") {
-			from = i + 1
-			continue
-		}
-		line := i
-		for line > 0 && body[line-1] != '\n' {
-			line--
-		}
-		end := i + len(needle) + len(ident) + len(");")
-		repl := body[line:i] + saved + " = " + ident + ";"
-		body = body[:line] + repl + body[end:]
-		from = line + len(repl)
-	}
-}
-
 // wrapZxingUPCEANChecksumTry puts getStandardUPCEANChecksum in try/catch(FormatException)
 // (EAN8/13/UPCE writers) and flattens the nested checkStandard try that leaves an outer
 // catch never-thrown.
@@ -366,48 +321,9 @@ func dropZxingUnreachableAmbiguousContinue(body string) string {
 		"\t\t\t\t}\n\t\t\t}else{\n\t\t\t\tbreak;")
 }
 
-func wrapZxingToStringThrowThrowable(body string) string {
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "String toString(")
-		if rel < 0 {
-			return body
-		}
-		ms := from + rel
-		me := nextZxingMethodStart(body, ms+1)
-		chunk := body[ms:me]
-		fixed := chunk
-		tfrom := 0
-		for {
-			tr := strings.Index(fixed[tfrom:], "throw var")
-			if tr < 0 {
-				break
-			}
-			ti := tfrom + tr
-			ident, ok, rest := readJavaIdent(fixed[ti+len("throw "):])
-			if !ok || !isDecompilerLocal(ident) || !strings.HasPrefix(rest, ";") {
-				tfrom = ti + 1
-				continue
-			}
-			if strings.Contains(fixed[:ti], "Throwable "+ident) || strings.Contains(fixed, "catch(Throwable ") {
-				repl := "throw new RuntimeException(" + ident + ");"
-				fixed = fixed[:ti] + repl + rest[1:]
-				tfrom = ti + len(repl)
-				continue
-			}
-			tfrom = ti + 1
-		}
-		if fixed != chunk {
-			body = body[:ms] + fixed + body[me:]
-			from = ms + len(fixed)
-			continue
-		}
-		from = me
-		if me <= ms {
-			from = ms + 1
-		}
-	}
-}
+// ATHROW preserves throwable identity. A source-only wrapper cannot infer an
+// exception type or cleanup domain; both must come from the typed IR.
+func wrapZxingToStringThrowThrowable(body string) string { return body }
 
 func flattenNestedCheckStandardTry(body string) string {
 	const call = "if (!(UPCEANReader.checkStandardUPCEANChecksum((CharSequence)(var1)))){"

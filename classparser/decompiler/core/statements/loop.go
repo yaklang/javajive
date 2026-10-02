@@ -155,6 +155,10 @@ type TryCatchStatement struct {
 	// Handlers preserves raw exception-table evidence in CatchBodies order.
 	// A typed Throwable catch is distinct from catch_type == 0 (finally).
 	Handlers []CatchHandler
+	// EntryInitializers retains decoded, private predecessor assignments. A
+	// resource-finally proof needs a real null initialization, not a printed name
+	// or an assumption about an arbitrary local's value on entry.
+	EntryInitializers []*AssignStatement
 }
 
 type CatchHandler struct {

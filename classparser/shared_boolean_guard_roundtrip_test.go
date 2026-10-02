@@ -79,3 +79,18 @@ func TestAdversarialBooleanShortCircuitBeforeCachedClassRoundTrip(t *testing.T) 
  }}
 }`, Precision, Compatibility, "legacy")
 }
+
+// The cached result is a receiver as well as a compared operand. Its branch
+// store must survive an outer short circuit and retain its reference type.
+func TestAdversarialBooleanCachedReceiverRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "BooleanCachedReceiver", `public class BooleanCachedReceiver {
+ static Class cached;static String trace;static boolean fault;static final RuntimeException failure=new IllegalStateException("probe");
+ static Class marker(){trace+="M";if(fault)throw failure;return Number.class;}
+ static boolean leading(Class type){return type==null || (cached==null?(cached=marker()):cached).isAssignableFrom(type);}
+ static boolean guarding(Class type){return type!=null && (cached==null?(cached=marker()):cached).isAssignableFrom(type);}
+ static boolean nested(Class type,boolean enabled){return enabled && type!=null && ((cached==null?(cached=marker()):cached).isAssignableFrom(type) || type==String.class);}
+ static String run(Class type,int mode){try{return "value:"+(mode==0?leading(type):mode==1?guarding(type):nested(type,mode==2));}catch(RuntimeException e){return "error:"+(e==failure);}}
+ public static void main(String[] args){for(boolean failureMode:new boolean[]{false,true})for(boolean initialized:new boolean[]{false,true})for(Class type:new Class[]{null,String.class,Integer.class,Number.class})for(int mode=0;mode<4;mode++){fault=failureMode;cached=initialized?Number.class:null;trace="";System.out.println(failureMode+":"+initialized+":"+type+":"+mode+":"+run(type,mode)+":"+trace+":"+cached);}}
+}`, Precision, Compatibility, "legacy")
+}

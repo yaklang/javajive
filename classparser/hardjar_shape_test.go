@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 )
 
 func assertHardjarDecompile(t *testing.T, seed, env, onMust, offMust string) {
@@ -98,49 +100,11 @@ func TestParametricRawAssignJarFS(t *testing.T) {
 }
 
 func TestAnswerParamCtorArgJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/mockito/mockito-core/4.5.1/mockito-core-4.5.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/mockito/AdditionalAnswers.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "(Answer)(var1)") {
-		t.Fatalf("ON missing Answer raw ctor arg:\n%s", clipForTest(on, "AnswersWithDelay"))
-	}
-	if strings.Count(on, "AnswersWithDelay(var0,(Answer)(var1))") != 1 {
-		t.Fatalf("ON paren imbalance around AnswersWithDelay:\n%s", clipForTest(on, "AnswersWithDelay"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "(Answer)(var1)") {
-		t.Fatalf("OFF already has Answer ctor wrap:\n%s", clipForTest(off, "AnswersWithDelay"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/mockito/mockito-core/4.5.1/mockito-core-4.5.1.jar", "org/mockito/AdditionalAnswers.class", []reviewedViewMember{{"answersWithDelay", "(JLorg/mockito/stubbing/Answer;)Lorg/mockito/stubbing/Answer;", "<T:Ljava/lang/Object;>(JLorg/mockito/stubbing/Answer<TT;>;)Lorg/mockito/stubbing/Answer<TT;>;", false}}, []reviewedViewInvoke{{"org/mockito/internal/stubbing/answers/AnswersWithDelay", "<init>", "(JLorg/mockito/stubbing/Answer;)V", core.OP_INVOKESPECIAL}}, func(source string) {
+		body := reviewedSourceMethod(t, source, `Answer<T>\s+answersWithDelay\(`)
+		arguments := requireReviewedPattern(t, body, `answersWithDelay\(long\s+(\w+),\s*Answer<T>\s+(\w+)\)`)
+		requireReviewedPattern(t, body, `new AnswersWithDelay\(`+regexp.QuoteMeta(arguments[1])+`,\(Answer\)\(`+regexp.QuoteMeta(arguments[2])+`\)\)`)
+	})
 }
 
 var (
@@ -407,35 +371,12 @@ func TestOuterCastInnerCallArgRewrites(t *testing.T) {
 }
 
 func TestIntUsedAsMonitorJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/springframework/beans/factory/support/ConstructorResolver.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "int var10_1 = 0;") {
-		t.Fatalf("ON still has int monitor slot:\n%s", clipForTest(on, "var10_1"))
-	}
-	if !strings.Contains(on, "Object var10_1 = null;") {
-		t.Fatalf("ON missing Object monitor slot:\n%s", clipForTest(on, "var10_1"))
-	}
-	if !strings.Contains(on, "synchronized(var10_1") {
-		t.Fatalf("ON missing synchronized(var10_1):\n%s", clipForTest(on, "synchronized"))
-	}
+	reviewedInvocationView(t, "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar", "org/springframework/beans/factory/support/ConstructorResolver.class", nil, []reviewedViewInvoke{{"org/springframework/beans/factory/support/RootBeanDefinition", "constructorArgumentLock", "Ljava/lang/Object;", core.OP_GETFIELD}}, func(source string) {
+		body := reviewedSourceMethod(t, source, `BeanWrapper\s+autowireConstructor\(`)
+		lock := requireReviewedPattern(t, body, `Object\s+(\w+)\s*=\s*\w+\.constructorArgumentLock\s*;`)[1]
+		requireReviewedPattern(t, body, `synchronized\(\s*`+regexp.QuoteMeta(lock)+`\s*\)`)
+		requireReviewedPattern(t, body, `synchronized\(\s*\w+\.constructorArgumentLock\s*\)`)
+	})
 }
 
 func TestObjectUsedAsIntSkipsMonitorSlot(t *testing.T) {
@@ -492,101 +433,11 @@ func TestCallSiteDupLocalsJarFS(t *testing.T) {
 }
 
 func TestCachedFieldReturnJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/description/field/FieldDescription$ForLoadedField.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "AnnotationList var1 =") {
-		t.Fatalf("ON missing AnnotationList var1:\n%s", clipForTest(on, "var1"))
-	}
-	if strings.Contains(on, "Object var1 =") {
-		t.Fatalf("ON still Object var1:\n%s", clipForTest(on, "var1"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "AnnotationList var1 =") {
-		t.Fatalf("OFF already has AnnotationList var1 (switch inert):\n%s", clipForTest(off, "var1"))
-	}
-	if !strings.Contains(off, "Object var1 =") {
-		t.Fatalf("OFF missing unfixed Object var1:\n%s", clipForTest(off, "var1"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	assertReviewedCachedJarField(t, "net/bytebuddy/description/field/FieldDescription$ForLoadedField.class", "declaredAnnotations", "Lnet/bytebuddy/description/annotation/AnnotationList;", "getDeclaredAnnotations", "AnnotationList", false)
 }
 
 func TestCachedFieldArrayReturnJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/description/method/MethodDescription$ForLoadedConstructor.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "Annotation[][] var1 =") {
-		t.Fatalf("ON missing Annotation[][] var1:\n%s", clipForTest(on, "parameterAnnotations"))
-	}
-	if strings.Contains(on, "Object var1 = ((this.parameterAnnotations)") {
-		t.Fatalf("ON still Object var1 cache slot:\n%s", clipForTest(on, "parameterAnnotations"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "Annotation[][] var1 =") {
-		t.Fatalf("OFF already has Annotation[][] var1 (switch inert):\n%s", clipForTest(off, "parameterAnnotations"))
-	}
-	if !strings.Contains(off, "Object var1 = ((this.parameterAnnotations)") {
-		t.Fatalf("OFF missing unfixed Object var1:\n%s", clipForTest(off, "parameterAnnotations"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	assertReviewedCachedJarField(t, "net/bytebuddy/description/method/MethodDescription$ForLoadedConstructor.class", "parameterAnnotations", "[[Ljava/lang/annotation/Annotation;", "getParameterAnnotations", "Annotation[][]", false)
 }
 
 func TestForNameAddAnnoClassJarFS(t *testing.T) {
@@ -729,52 +580,7 @@ func TestFixCachedFieldNullInit(t *testing.T) {
 }
 
 func TestCachedFieldNullInitJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/description/type/TypeDescription$SuperTypeLoading$ClassLoadingTypeProjection.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "TypeList$Generic var3 = null;") {
-		t.Fatalf("ON missing TypeList$Generic var3:\n%s", clipForTest(on, "var3 = null"))
-	}
-	if strings.Contains(on, "Object var3 = null;") {
-		t.Fatalf("ON still Object var3 cache slot:\n%s", clipForTest(on, "var3 = null"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "TypeList$Generic var3 = null;") {
-		t.Fatalf("OFF already has TypeList$Generic var3 (switch inert):\n%s", clipForTest(off, "var3 = null"))
-	}
-	if !strings.Contains(off, "Object var3 = null;") {
-		t.Fatalf("OFF missing unfixed Object var3:\n%s", clipForTest(off, "var3 = null"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	assertReviewedCachedJarField(t, "net/bytebuddy/description/type/TypeDescription$SuperTypeLoading$ClassLoadingTypeProjection.class", "interfaces", "Lnet/bytebuddy/description/type/TypeList$Generic;", "getInterfaces", "TypeList$Generic", true)
 }
 
 func TestFixRawRemoveIfMethodRef(t *testing.T) {
@@ -787,95 +593,17 @@ func TestFixRawRemoveIfMethodRef(t *testing.T) {
 }
 
 func TestRawRemoveIfMethodRefJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/springframework/beans/factory/support/AbstractAutowireCapableBeanFactory.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "var2.removeIf((x) -> this.isExcludedFromDependencyCheck((PropertyDescriptor)(x)))") {
-		t.Fatalf("ON missing lambda wrap:\n%s", clipForTest(on, "removeIf"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "removeIf((x) -> this.isExcludedFromDependencyCheck((PropertyDescriptor)(x)))") {
-		t.Fatalf("OFF already has lambda wrap (switch inert):\n%s", clipForTest(off, "removeIf"))
-	}
-	if !strings.Contains(off, "var2.removeIf(this::isExcludedFromDependencyCheck)") {
-		t.Fatalf("OFF missing unfixed removeIf:\n%s", clipForTest(off, "removeIf"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar", "org/springframework/beans/factory/support/AbstractAutowireCapableBeanFactory.class", []reviewedCollectionSAM{{"isExcludedFromDependencyCheck", "(Ljava/lang/Object;)Z", "(Ljava/beans/PropertyDescriptor;)Z", "org/springframework/beans/factory/support/AbstractAutowireCapableBeanFactory", "(Ljava/beans/PropertyDescriptor;)Z", 5}}, func(source string) {
+		requireReviewedPattern(t, source, `removeIf\([^;\n]*Predicate<PropertyDescriptor>[^;\n]*this::isExcludedFromDependencyCheck`)
+	})
 }
 
 func TestStreamMapObjectFuncJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/springframework/beans/factory/support/DefaultListableBeanFactory$1.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "return (Stream) (") {
-		t.Fatalf("ON missing raw Stream wrap:\n%s", clipForTest(on, "return "))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "return (Stream) (") {
-		t.Fatalf("OFF already has raw Stream wrap (switch inert):\n%s", clipForTest(off, "return "))
-	}
-	if !strings.Contains(off, "(Function<String, Object>)") {
-		t.Fatalf("OFF missing unfixed Function<String, Object>:\n%s", clipForTest(off, "Function<"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar", "org/springframework/beans/factory/support/DefaultListableBeanFactory$1.class", []reviewedCollectionSAM{{"lambda$stream$0", "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/String;)Ljava/lang/Object;", "org/springframework/beans/factory/support/DefaultListableBeanFactory$1", "(Ljava/lang/String;)Ljava/lang/Object;", 7}, {"lambda$stream$1", "(Ljava/lang/Object;)Z", "(Ljava/lang/Object;)Z", "org/springframework/beans/factory/support/DefaultListableBeanFactory$1", "(Ljava/lang/Object;)Z", 6}}, func(source string) {
+		reviewedCollectionCarrierUse(t, source, "Function<String, Object>", ".map")
+		reviewedCollectionCarrierUse(t, source, "Predicate<Object>", ".filter")
+		requireReviewedPattern(t, source, `Stream<T>\s+stream\(\)`)
+	})
 }
 
 func TestFixErasedZeroArgInnerCast(t *testing.T) {
@@ -1096,49 +824,18 @@ func TestWrapThrowTargetExceptionJarFS(t *testing.T) {
 }
 
 func TestWrapStmtObjectMethodAssignJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/springframework/beans/factory/xml/BeanDefinitionParserDelegate.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "var16_2 = (RuntimeBeanReference)(this.buildTypedStringValueForMap(") {
-		t.Fatalf("ON missing statement Object-method wrap:\n%s", clipForTest(on, "var16_2 ="))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "var16_2 = (RuntimeBeanReference)(this.buildTypedStringValueForMap(") {
-		t.Fatalf("OFF already has statement wrap (switch inert):\n%s", clipForTest(off, "var16_2 ="))
-	}
-	if !strings.Contains(off, "var16_2 = this.buildTypedStringValueForMap(") {
-		t.Fatalf("OFF missing unfixed assign:\n%s", clipForTest(off, "var16_2 ="))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar", "org/springframework/beans/factory/xml/BeanDefinitionParserDelegate.class", []reviewedViewMember{{"buildTypedStringValueForMap", "(Ljava/lang/String;Ljava/lang/String;Lorg/w3c/dom/Element;)Ljava/lang/Object;", "", false}}, []reviewedViewInvoke{{"org/springframework/beans/factory/xml/BeanDefinitionParserDelegate", "buildTypedStringValueForMap", "(Ljava/lang/String;Ljava/lang/String;Lorg/w3c/dom/Element;)Ljava/lang/Object;", core.OP_INVOKEVIRTUAL}}, func(source string) {
+		calls := regexp.MustCompile(`(\w+)\s*=\s*this\.buildTypedStringValueForMap\(`).FindAllStringSubmatch(source, -1)
+		if len(calls) < 2 {
+			t.Fatal("lost key/value Object producers")
+		}
+		for _, call := range calls {
+			requireReviewedPattern(t, source, `Object\s+`+regexp.QuoteMeta(call[1])+`\s*=`)
+		}
+		if strings.Contains(source, "(RuntimeBeanReference)(this.buildTypedStringValueForMap(") {
+			t.Fatal("added check to Object-returning producer")
+		}
+	})
 }
 
 func TestWrapObjectMethodAssignToClassLocal(t *testing.T) {
@@ -1270,52 +967,10 @@ func TestWrapObjectTypeVarArgs(t *testing.T) {
 }
 
 func TestWrapObjectTypeVarArgsJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/util/fst/Builder.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "common(var2,(T)(var12))") {
-		t.Fatalf("ON missing Object→T arg wrap:\n%s", clipForTest(on, "common(var2,"))
-	}
-	if !strings.Contains(on, "subtract((T)(var12),(T)(var13))") && !strings.Contains(on, "subtract((T)(var12),var13)") {
-		t.Fatalf("ON missing subtract Object→T wrap:\n%s", clipForTest(on, "subtract("))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "common(var2,(T)(var12))") {
-		t.Fatalf("OFF already has Object→T wrap (switch inert):\n%s", clipForTest(off, "common(var2,"))
-	}
-	if !strings.Contains(off, "common(var2,var12)") {
-		t.Fatalf("OFF missing unfixed common arg:\n%s", clipForTest(off, "common(var2,"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/util/fst/Builder.class", []reviewedViewMember{{"fst", "Lorg/apache/lucene/util/fst/FST;", "Lorg/apache/lucene/util/fst/FST<TT;>;", true}}, []reviewedViewInvoke{{"org/apache/lucene/util/fst/Outputs", "common", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", core.OP_INVOKEVIRTUAL}, {"org/apache/lucene/util/fst/Outputs", "subtract", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", core.OP_INVOKEVIRTUAL}}, func(source string) {
+		requireReviewedPattern(t, source, `this\.fst\.outputs\.common\(\w+,\(T\)\(\w+\)\)`)
+		requireReviewedPattern(t, source, `this\.fst\.outputs\.subtract\(\(T\)\(\w+\),\(T\)\(\w+\)\)`)
+	})
 }
 
 func TestWrapNullSentinelTernary(t *testing.T) {
@@ -1473,49 +1128,11 @@ func TestWrapTernaryAssignElseCast(t *testing.T) {
 }
 
 func TestWrapTernaryAssignElseCastJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/implementation/FieldAccessor$ForImplicitProperty$Appender.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "((StackManipulation$Trivial)(MethodVariableAccess.loadThis()))") {
-		t.Fatalf("ON missing else-arm Trivial wrap:\n%s", clipForTest(on, "loadThis()"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "((StackManipulation$Trivial)(MethodVariableAccess.loadThis()))") {
-		t.Fatalf("OFF already has else wrap (switch inert):\n%s", clipForTest(off, "loadThis()"))
-	}
-	if !strings.Contains(off, ": (MethodVariableAccess.loadThis());") {
-		t.Fatalf("OFF missing unfixed else arm:\n%s", clipForTest(off, "loadThis()"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/implementation/FieldAccessor$ForImplicitProperty$Appender.class", []reviewedViewMember{{"apply", "(Lnet/bytebuddy/jar/asm/MethodVisitor;Lnet/bytebuddy/implementation/Implementation$Context;Lnet/bytebuddy/description/method/MethodDescription;)Lnet/bytebuddy/implementation/bytecode/ByteCodeAppender$Size;", "", false}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `\bapply\(`)
+		requireReviewedPattern(t, body, `StackManipulation\s+(\w+)\s*=\s*\([^;]*\.isStatic\(\)\)\s*\?[^;]*StackManipulation\$Trivial\.INSTANCE[^;]*MethodVariableAccess\.loadThis\(\)`)
+		requireReviewedPattern(t, body, `new StackManipulation\$Compound\(`)
+	})
 }
 
 func TestWrapErasedFieldAsTypeVar(t *testing.T) {
@@ -1528,49 +1145,12 @@ func TestWrapErasedFieldAsTypeVar(t *testing.T) {
 }
 
 func TestWrapErasedFieldAsTypeVarJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/util/fst/Builder.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "merge((T)(var8_1.output),var2)") {
-		t.Fatalf("ON missing merge field T wrap:\n%s", clipForTest(on, "outputs.merge"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "merge((T)(var8_1.output),var2)") {
-		t.Fatalf("OFF already has merge wrap (switch inert):\n%s", clipForTest(off, "outputs.merge"))
-	}
-	if !strings.Contains(off, "merge(var8_1.output,var2)") {
-		t.Fatalf("OFF missing unfixed merge:\n%s", clipForTest(off, "outputs.merge"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/util/fst/Builder.class", []reviewedViewMember{{"fst", "Lorg/apache/lucene/util/fst/FST;", "Lorg/apache/lucene/util/fst/FST<TT;>;", true}}, []reviewedViewInvoke{{"org/apache/lucene/util/fst/Outputs", "merge", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", core.OP_INVOKEVIRTUAL}}, func(source string) {
+		binding := requireReviewedPattern(t, source, `(\w+)\.output\s*=\s*this\.fst\.outputs\.merge\(\(T\)\((\w+)\.output\),\w+\)`)
+		if binding[1] != binding[2] {
+			t.Fatal("merge read/write node identities differ")
+		}
+	})
 }
 
 func TestWrapGetNoOutputObjectArgs(t *testing.T) {
@@ -1583,49 +1163,10 @@ func TestWrapGetNoOutputObjectArgs(t *testing.T) {
 }
 
 func TestWrapGetNoOutputAndOutputGetterJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/util/fst/Util.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "add((T)(var4),") {
-		t.Fatalf("ON missing getNoOutput T wrap:\n%s", clipForTest(on, "outputs.add"))
-	}
-	if !strings.Contains(on, "((T)(var2.output()))") && !strings.Contains(on, "(T)(var2.output())") {
-		t.Fatalf("ON missing .output() T wrap:\n%s", clipForTest(on, ".output()"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "add((T)(var4),") {
-		t.Fatalf("OFF already has getNoOutput wrap (switch inert):\n%s", clipForTest(off, "outputs.add"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/util/fst/Util.class", []reviewedViewMember{{"get", "(Lorg/apache/lucene/util/fst/FST;Lorg/apache/lucene/util/IntsRef;)Ljava/lang/Object;", "<T:Ljava/lang/Object;>(Lorg/apache/lucene/util/fst/FST<TT;>;Lorg/apache/lucene/util/IntsRef;)TT;", false}}, []reviewedViewInvoke{{"org/apache/lucene/util/fst/Outputs", "getNoOutput", "()Ljava/lang/Object;", core.OP_INVOKEVIRTUAL}, {"org/apache/lucene/util/fst/Outputs", "add", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", core.OP_INVOKEVIRTUAL}, {"org/apache/lucene/util/fst/FST$Arc", "output", "()Ljava/lang/Object;", core.OP_INVOKEVIRTUAL}}, func(source string) {
+		local := requireReviewedViewLocal(t, source, "Object", `\w+\.outputs\.getNoOutput\(\)`)
+		requireReviewedPattern(t, source, `outputs\.add\(\(T\)\(`+local+`\),\(T\)\(\w+\.output\(\)\)\)`)
+	})
 }
 
 func TestRetypeTernarySiblingLocal(t *testing.T) {
@@ -1648,49 +1189,11 @@ func TestTernarySiblingKeepsResolvedBase(t *testing.T) {
 }
 
 func TestRetypeTernarySiblingLocalJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/dynamic/ClassFileLocator$ForInstrumentation.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "ClassFileLocator$Resolution var4 =") {
-		t.Fatalf("ON missing sibling retype:\n%s", clipForTest(on, "var4 ="))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "ClassFileLocator$Resolution var4 =") && !strings.Contains(off, "ClassFileLocator$Resolution$Illegal var4 =") {
-		t.Fatalf("OFF already retyped (switch inert):\n%s", clipForTest(off, "var4 ="))
-	}
-	if !strings.Contains(off, "ClassFileLocator$Resolution$Illegal var4 =") {
-		t.Fatalf("OFF missing unfixed Illegal decl:\n%s", clipForTest(off, "var4 ="))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/dynamic/ClassFileLocator$ForInstrumentation.class", []reviewedViewMember{{"locate", "(Ljava/lang/String;)Lnet/bytebuddy/dynamic/ClassFileLocator$Resolution;", "", false}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `\blocate\(`)
+		local := regexp.QuoteMeta(requireReviewedPattern(t, body, `ClassFileLocator\$Resolution\s+(\w+)\s*=\s*[^;]*new ClassFileLocator\$Resolution\$Illegal\([^;]*new ClassFileLocator\$Resolution\$Explicit\(`)[1])
+		requireReviewedPattern(t, body, `return `+local+`;`)
+	})
 }
 
 // Raw Collection casts also carry invocation evidence when Arrays.asList
@@ -1718,49 +1221,12 @@ func TestUnwrapCollectionBeforeLambda(t *testing.T) {
 }
 
 func TestUnwrapCollectionBeforeLambdaJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/index/IndexWriter.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "applyToAll((this.pendingMerges),(l0)") && !strings.Contains(on, "applyToAll(this.pendingMerges,(l0)") && !strings.Contains(on, "applyToAll((this.pendingMerges),(MergePolicy$OneMerge l0)") {
-		t.Fatalf("ON missing applyToAll unwrap:\n%s", clipForTest(on, "applyToAll"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "applyToAll((this.pendingMerges),(l0)") {
-		t.Fatalf("OFF already unwrapped (switch inert):\n%s", clipForTest(off, "applyToAll"))
-	}
-	if !strings.Contains(off, "applyToAll((Collection)(this.pendingMerges),(l0)") {
-		t.Fatalf("OFF missing Collection wrap:\n%s", clipForTest(off, "applyToAll"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/index/IndexWriter.class", []reviewedCollectionSAM{{"lambda$abortMerges$9", "(Ljava/lang/Object;)V", "(Lorg/apache/lucene/index/MergePolicy$OneMerge;)V", "org/apache/lucene/index/IndexWriter", "(Lorg/apache/lucene/index/MergePolicy$OneMerge;)V", 7}}, func(source string) {
+		body := reviewedSourceMethod(t, source, `void\s+abortMerges\(\)`)
+		reviewedCollectionCarrierUse(t, body, "IOUtils$IOConsumer<MergePolicy$OneMerge>", "IOUtils.applyToAll")
+		requireReviewedPattern(t, body, `this\.pendingMerges`)
+		requireReviewedPattern(t, body, `this\.mergeFinish\(\w+\)`)
+	})
 }
 
 func TestWrapCompoundListOfAsList(t *testing.T) {
@@ -2034,47 +1500,16 @@ func TestWrapVarargsAsListDelegate(t *testing.T) {
 }
 
 func TestWrapVarargsAsListDelegateJarFS(t *testing.T) {
-	// diamond ArrayList<> preserves T and picks one Collection/List overload
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/agent/builder/AgentBuilder$LocationStrategy$ForClassLoader.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "new java.util.ArrayList<>(Arrays.asList(var1))") {
-		t.Fatalf("ON missing diamond ArrayList delegate:\n%s", clipForTest(on, "Arrays.asList"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "new java.util.ArrayList<>(Arrays.asList(var1))") {
-		t.Fatalf("OFF already wrapped (switch inert):\n%s", clipForTest(off, "Arrays.asList"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/agent/builder/AgentBuilder$LocationStrategy$ForClassLoader.class", []reviewedViewMember{{"withFallbackTo", "(Ljava/util/Collection;)Lnet/bytebuddy/agent/builder/AgentBuilder$LocationStrategy;", "(Ljava/util/Collection<+Lnet/bytebuddy/dynamic/ClassFileLocator;>;)Lnet/bytebuddy/agent/builder/AgentBuilder$LocationStrategy;", false}, {"withFallbackTo", "(Ljava/util/List;)Lnet/bytebuddy/agent/builder/AgentBuilder$LocationStrategy;", "(Ljava/util/List<+Lnet/bytebuddy/agent/builder/AgentBuilder$LocationStrategy;>;)Lnet/bytebuddy/agent/builder/AgentBuilder$LocationStrategy;", false}}, []reviewedViewInvoke{{"java/util/Arrays", "asList", "([Ljava/lang/Object;)Ljava/util/List;", core.OP_INVOKESTATIC}}, func(source string) {
+		for _, typ := range []string{"ClassFileLocator", "AgentBuilder$LocationStrategy"} {
+			body := reviewedSourceMethod(t, source, `withFallbackTo\(`+regexp.QuoteMeta(typ)+`\.\.\.\s+\w+\)`)
+			argument := requireReviewedPattern(t, body, regexp.QuoteMeta(typ)+`\.\.\.\s+(\w+)`)
+			requireReviewedPattern(t, body, `Arrays\.asList\(`+regexp.QuoteMeta(argument[1])+`\)`)
+			if strings.Contains(body, "new ArrayList") || strings.Contains(body, "new java.util.ArrayList") {
+				t.Fatal("original live varargs view gained a collection copy")
+			}
+		}
+	})
 }
 
 func TestUnwrapCollectionNewCtor(t *testing.T) {
@@ -2087,46 +1522,11 @@ func TestUnwrapCollectionNewCtor(t *testing.T) {
 }
 
 func TestUnwrapCollectionNewCtorJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/implementation/DefaultMethodCall.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "prioritize(new TypeList$ForLoadedTypes(var0))") {
-		t.Fatalf("ON missing prioritize unwrap:\n%s", clipForTest(on, "prioritize("))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "prioritize((Collection)(new TypeList$ForLoadedTypes(var0))") {
-		t.Fatalf("OFF missing Collection new wrap:\n%s", clipForTest(off, "prioritize("))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/implementation/DefaultMethodCall.class", []reviewedViewMember{{"prioritize", "(Ljava/util/Collection;)Lnet/bytebuddy/implementation/Implementation;", "(Ljava/util/Collection<+Lnet/bytebuddy/description/type/TypeDescription;>;)Lnet/bytebuddy/implementation/Implementation;", false}}, []reviewedViewInvoke{{"net/bytebuddy/implementation/DefaultMethodCall", "prioritize", "(Ljava/util/Collection;)Lnet/bytebuddy/implementation/Implementation;", core.OP_INVOKESTATIC}}, func(source string) {
+		body := reviewedSourceMethod(t, source, `prioritize\(Class<\?>\.\.\.\s+\w+\)`)
+		argument := requireReviewedPattern(t, body, `Class<\?>\.\.\.\s+(\w+)`)
+		requireReviewedPattern(t, body, `prioritize\([^;\n]*new TypeList\$ForLoadedTypes\(\(Class\[\]\)\(`+regexp.QuoteMeta(argument[1])+`\)\)`)
+	})
 }
 
 func TestWrapAccessDollarLambdaArg(t *testing.T) {
@@ -2194,49 +1594,12 @@ func TestRetypeSelfWrapToMethodReturn(t *testing.T) {
 }
 
 func TestRetypeSelfWrapToMethodReturnJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/document/LatLonPoint.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "LatLonPointDistanceFeatureQuery var5 =") {
-		t.Fatalf("ON still has FeatureQuery decl:\n%s", clipForTest(on, "DistanceFeatureQuery var5"))
-	}
-	if !strings.Contains(on, "Query var5 = new LatLonPointDistanceFeatureQuery") {
-		t.Fatalf("ON missing Query retype:\n%s", clipForTest(on, "var5 = new"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "LatLonPointDistanceFeatureQuery var5 =") {
-		t.Fatalf("OFF missing unfixed FeatureQuery decl:\n%s", clipForTest(off, "DistanceFeatureQuery var5"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/document/LatLonPoint.class", []reviewedViewMember{{"newDistanceFeatureQuery", "(Ljava/lang/String;FDDD)Lorg/apache/lucene/search/Query;", "", false}}, []reviewedViewInvoke{{"org/apache/lucene/search/BoostQuery", "<init>", "(Lorg/apache/lucene/search/Query;F)V", core.OP_INVOKESPECIAL}}, func(source string) {
+		body := reviewedSourceMethod(t, source, `Query\s+newDistanceFeatureQuery\(`)
+		local := requireReviewedViewLocal(t, body, "Query", `new LatLonPointDistanceFeatureQuery\(`)
+		requireReviewedPattern(t, body, local+`\s*=\s*new BoostQuery\(`+local+`,\w+\)`)
+		requireReviewedPattern(t, body, `return\s+`+local+`\s*;`)
+	})
 }
 
 func TestRetypeFinalObjectCapture(t *testing.T) {
@@ -2334,49 +1697,11 @@ func TestWrapUnresolvedNestedNew(t *testing.T) {
 }
 
 func TestWrapUnresolvedNestedNewJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/utility/dispatcher/JavaDispatcher.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "new JavaDispatcher$Dispatcher(new StringBuilder") {
-		t.Fatalf("ON still instantiates abstract Dispatcher:\n%s", clipForTest(on, "new JavaDispatcher$Dispatcher("))
-	}
-	if !strings.Contains(on, "new JavaDispatcher$Dispatcher$ForUnresolvedMethod(new StringBuilder") {
-		t.Fatalf("ON missing ForUnresolvedMethod:\n%s", clipForTest(on, "ForUnresolvedMethod"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "new JavaDispatcher$Dispatcher(new StringBuilder") {
-		t.Fatalf("OFF missing abstract Dispatcher new:\n%s", clipForTest(off, "new JavaDispatcher$Dispatcher("))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/utility/dispatcher/JavaDispatcher.class", []reviewedViewMember{{"run", "()Ljava/lang/Object;", "()TT;", false}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `public\s+T\s+run\(\)`)
+		requireReviewedPattern(t, body, `new JavaDispatcher\$Dispatcher\$ForUnresolvedMethod\(new StringBuilder\(\)\.append\("Class not available`)
+		requireReviewedPattern(t, body, `new JavaDispatcher\$Dispatcher\$ForUnresolvedMethod\(new StringBuilder\(\)\.append\("Method not available`)
+	})
 }
 
 func TestRetypeMixedDollarNewAssign(t *testing.T) {
@@ -2464,49 +1789,13 @@ func TestFixLambdaParamFromCallee(t *testing.T) {
 }
 
 func TestFixLambdaParamFromCalleeJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/index/IndexWriter.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "this.getPooledInstance((SegmentCommitInfo)(l0),true)") {
-		t.Fatalf("ON missing lambda arg wrap:\n%s", clipForTest(on, "getPooledInstance"))
-	}
-	if strings.Contains(on, "(SegmentCommitInfo l0) ->") {
-		t.Fatalf("ON typed raw FI lambda param:\n%s", clipForTest(on, "l0) ->"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "this.getPooledInstance((SegmentCommitInfo)(l0),true)") {
-		t.Fatalf("OFF already wrapped (switch inert):\n%s", clipForTest(off, "getPooledInstance"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/index/IndexWriter.class", []reviewedCollectionSAM{{"lambda$getReader$0", "(Ljava/lang/Object;)Ljava/lang/Object;", "(Lorg/apache/lucene/index/SegmentCommitInfo;)Lorg/apache/lucene/index/SegmentReader;", "org/apache/lucene/index/IndexWriter", "(JLjava/util/Map;Lorg/apache/lucene/index/SegmentCommitInfo;)Lorg/apache/lucene/index/SegmentReader;", 7}}, func(source string) {
+		binding := requireReviewedPattern(t, source, `IOUtils\$IOFunction<SegmentCommitInfo, SegmentReader>\s+\w+\s*=\s*\([^;]*?\)\s*->\s*\{\s*SegmentCommitInfo\s+(\w+)\s*=[^;
+]*;\s*ReadersAndUpdates\s+\w+\s*=\s*this\.getPooledInstance\((\w+),true\)`)
+		if binding[1] != binding[2] {
+			t.Fatalf("typed SAM payload %s was not the actual callee argument %s", binding[1], binding[2])
+		}
+	})
 }
 
 func TestFixBlankFinalTryCatchAssign(t *testing.T) {
@@ -2652,227 +1941,45 @@ func TestUniqueAssignedTypeVarWrapsOutputToString(t *testing.T) {
 }
 
 func TestRetypeIntAssignedNullToClassJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/util/automaton/DaciukMihovAutomatonBuilder.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "int var6 = 0;") {
-		t.Fatalf("ON still has int var6:\n%s", clipForTest(on, "int var6"))
-	}
-	if !strings.Contains(on, "DaciukMihovAutomatonBuilder$State var6 = null;") {
-		t.Fatalf("ON missing State var6:\n%s", clipForTest(on, "var6"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "int var6 = 0;") {
-		t.Fatalf("OFF missing int var6:\n%s", clipForTest(off, "int var6"))
-	}
-	if strings.Contains(off, "DaciukMihovAutomatonBuilder$State var6 = null;") {
-		t.Fatalf("OFF already has State retype (switch inert):\n%s", clipForTest(off, "var6"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/util/automaton/DaciukMihovAutomatonBuilder.class", []reviewedViewMember{{"root", "Lorg/apache/lucene/util/automaton/DaciukMihovAutomatonBuilder$State;", "", true}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `void\s+add\(CharsRef\s+\w+\)`)
+		local := requireReviewedPattern(t, body, `DaciukMihovAutomatonBuilder\$State\s+(\w+)\s*=\s*null\s*;`)[1]
+		requireReviewedPattern(t, body, regexp.QuoteMeta(local)+`\s*=\s*[^;]*\.lastChild\(`)
+		if regexp.MustCompile(`\bint\s+` + regexp.QuoteMeta(local) + `\b`).MatchString(body) {
+			t.Fatalf("reference definition is primitive:\n%s", body)
+		}
+	})
 }
 
 func TestWrapCollectionsSortLambdaJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/index/CheckIndex.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "((SegmentCommitInfo)(l0)).sizeInBytes()") {
-		t.Fatalf("ON missing sort lambda wrap:\n%s", clipForTest(on, "sizeInBytes"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "((SegmentCommitInfo)(l0)).sizeInBytes()") {
-		t.Fatalf("OFF already has wrap (switch inert):\n%s", clipForTest(off, "sizeInBytes"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/index/CheckIndex.class", []reviewedCollectionSAM{{"lambda$checkIndex$0", "(Ljava/lang/Object;Ljava/lang/Object;)I", "(Lorg/apache/lucene/index/SegmentCommitInfo;Lorg/apache/lucene/index/SegmentCommitInfo;)I", "org/apache/lucene/index/CheckIndex", "(Lorg/apache/lucene/index/SegmentCommitInfo;Lorg/apache/lucene/index/SegmentCommitInfo;)I", 7}}, func(source string) {
+		reviewedCollectionCarrierUse(t, source, "Comparator<SegmentCommitInfo>", "Collections.sort")
+		requireReviewedPattern(t, source, `Long\.compare\(\w+\.sizeInBytes\(\),\w+\.sizeInBytes\(\)\)`)
+	})
 }
 
 func TestStripRawStreamTypedLambdaJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/geo/SimpleWKTShapeParser.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "(Double l0)") {
-		t.Fatalf("ON still has typed Double lambda:\n%s", clipForTest(on, "(Double l0)"))
-	}
-	if !strings.Contains(on, "((Double)(l0)).doubleValue()") {
-		t.Fatalf("ON missing Double body wrap:\n%s", clipForTest(on, "doubleValue"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "(Double l0)") {
-		t.Fatalf("OFF missing typed Double lambda:\n%s", clipForTest(off, "(Double l0)"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/geo/SimpleWKTShapeParser.class", []reviewedCollectionSAM{{"lambda$parseLine$0", "(Ljava/lang/Object;)D", "(Ljava/lang/Double;)D", "org/apache/lucene/geo/SimpleWKTShapeParser", "(Ljava/lang/Double;)D", 6}}, func(source string) {
+		reviewedCollectionCarrierUse(t, source, "ToDoubleFunction<Double>", ".mapToDouble")
+		requireReviewedPattern(t, source, `return\s+\w+\.doubleValue\(\)`)
+	})
 }
 
 func TestWrapMatcherMatchesArrayListJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/matcher/CollectionErasureMatcher.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "this.matcher.matches(((Iterable<? extends TypeDescription>)(var2)))") {
-		t.Fatalf("ON missing Iterable<? extends TypeDescription> wrap:\n%s", clipForTest(on, "matcher.matches"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "matches(((Iterable<? extends TypeDescription>)(var2)))") {
-		t.Fatalf("OFF already has wrap (switch inert):\n%s", clipForTest(off, "matcher.matches"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/matcher/CollectionErasureMatcher.class", []reviewedViewMember{{"doMatch", "(Ljava/lang/Iterable;)Z", "(TT;)Z", false}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `\bdoMatch\(`)
+		local := regexp.QuoteMeta(requireReviewedPattern(t, body, `ArrayList(?:<[^;]+>)?\s+(\w+)\s*=\s*new ArrayList`)[1])
+		requireReviewedPattern(t, body, `\.matches\(\(Object\)\(`+local+`\)\)`)
+		requireReviewedPattern(t, body, ``+local+`\.add\([^;]*\.asErasure\(\)`)
+	})
 }
 
 func TestWrapComparatorComparingLambdaJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/search/DisjunctionScoreBlockBoundaryPropagator.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "(Scorer l0)") {
-		t.Fatalf("ON missing typed Scorer lambda param:\n%s", clipForTest(on, "comparing"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "(Scorer l0)") {
-		t.Fatalf("OFF already has typed param (switch inert):\n%s", clipForTest(off, "comparing"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/search/DisjunctionScoreBlockBoundaryPropagator.class", []reviewedCollectionSAM{{"lambda$static$0", "(Ljava/lang/Object;)Ljava/lang/Object;", "(Lorg/apache/lucene/search/Scorer;)Ljava/lang/Float;", "org/apache/lucene/search/DisjunctionScoreBlockBoundaryPropagator", "(Lorg/apache/lucene/search/Scorer;)Ljava/lang/Float;", 6}, {"lambda$static$1", "(Ljava/lang/Object;)Ljava/lang/Object;", "(Lorg/apache/lucene/search/Scorer;)Ljava/lang/Long;", "org/apache/lucene/search/DisjunctionScoreBlockBoundaryPropagator", "(Lorg/apache/lucene/search/Scorer;)Ljava/lang/Long;", 6}}, func(source string) {
+		reviewedCollectionCarrierUse(t, source, "Function<Scorer, Float>", "Comparator.comparing")
+		reviewedCollectionCarrierUse(t, source, "Function<Scorer, Long>", "Comparator.comparing")
+		requireReviewedPattern(t, source, `\.thenComparing\(`)
+	})
 }
 
 func TestHardjarListCastKeepsCalleeTypeVariablesInTheirScope(t *testing.T) {
@@ -2886,45 +1993,11 @@ func TestHardjarListCastKeepsCalleeTypeVariablesInTheirScope(t *testing.T) {
 }
 
 func TestWrapObjectTypeVarArgsUtilJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/util/fst/Util.class"
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	direct := wrapObjectTypeVarArgs(off)
-	shaped := fixHardjarShapes(off)
-	if !strings.Contains(shaped, "outputToString((T)(var14_2))") && !strings.Contains(direct, "outputToString((T)(var14_2))") {
-		t.Fatalf("neither wrapObjectTypeVarArgs nor fixHardjarShapes wrap Util:\n%s", clipForTest(shaped, "outputToString(var14_2)"))
-	}
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "outputToString((T)(var14_2))") {
-		t.Fatalf("ON missing T wrap:\n%s", clipForTest(on, "outputToString(var14_2)"))
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/util/fst/Util.class", []reviewedViewMember{{"toDot", "(Lorg/apache/lucene/util/fst/FST;Ljava/io/Writer;ZZ)V", "<T:Ljava/lang/Object;>(Lorg/apache/lucene/util/fst/FST<TT;>;Ljava/io/Writer;ZZ)V", false}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `\btoDot\(`)
+		local := regexp.QuoteMeta(requireReviewedPattern(t, body, `Object\s+(\w+)\s*=\s*null;`)[1])
+		requireReviewedPattern(t, body, `\.outputToString\(\(T\)\(`+local+`\)\)`)
+	})
 }
 
 func TestWrapObjectTypeVarArgsUtilDump(t *testing.T) {
@@ -3046,92 +2119,18 @@ func TestWrapComparableNextAsTypeVar(t *testing.T) {
 }
 
 func TestWrapCollectionStreamMethodRefJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/search/Boolean2ScorerSupplier.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "(Collection<ScorerSupplier>)(") {
-		t.Fatalf("ON missing Collection<ScorerSupplier>:\n%s", clipForTest(on, "mapToLong"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "(Collection<ScorerSupplier>)(") {
-		t.Fatalf("OFF already has wrap (switch inert):\n%s", clipForTest(off, "mapToLong"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/search/Boolean2ScorerSupplier.class", []reviewedCollectionSAM{{"cost", "(Ljava/lang/Object;)J", "(Lorg/apache/lucene/search/ScorerSupplier;)J", "org/apache/lucene/search/ScorerSupplier", "()J", 5}}, func(source string) {
+		requireReviewedPattern(t, source, `mapToLong\([^;\n]*ToLongFunction<ScorerSupplier>[^;\n]*ScorerSupplier::cost`)
+	})
 }
 
 func TestRetargetAssignToTypedSiblingJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/index/ReadersAndUpdates.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "var14 = this.reader;") {
-		t.Fatalf("ON still assigns reader to String var14:\n%s", clipForTest(on, "var14 = this.reader"))
-	}
-	if !strings.Contains(on, "var14_1 = this.reader;") {
-		t.Fatalf("ON missing sibling retarget:\n%s", clipForTest(on, "this.reader"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "var14 = this.reader;") {
-		t.Fatalf("OFF missing unfixed assign:\n%s", clipForTest(off, "this.reader"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/index/ReadersAndUpdates.class", []reviewedViewMember{{"writeFieldUpdates", "(Lorg/apache/lucene/store/Directory;Lorg/apache/lucene/index/FieldInfos$FieldNumbers;JLorg/apache/lucene/util/InfoStream;)Z", "", false}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `\bwriteFieldUpdates\(`)
+		local := regexp.QuoteMeta(requireReviewedPattern(t, body, `SegmentReader\s+(\w+)\s*=\s*null;`)[1])
+		requireReviewedPattern(t, body, ``+local+`\s*=\s*this\.reader;`)
+		requireReviewedPattern(t, body, ``+local+`\.getFieldInfos\(\)`)
+	})
 }
 
 func TestStripRawStreamTypedLambdaMapToInt(t *testing.T) {
@@ -3233,89 +2232,18 @@ func TestStripStaticAssertionsInEnumConstant(t *testing.T) {
 }
 
 func TestStripRawStreamTypedLambdaMapToIntJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/util/graph/GraphTokenStreamFiniteStrings.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "(Integer l0)") {
-		t.Fatalf("ON still has typed Integer lambda:\n%s", clipForTest(on, "(Integer l0)"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "(Integer l0)") {
-		t.Fatalf("OFF missing typed Integer lambda:\n%s", clipForTest(off, "mapToInt"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/util/graph/GraphTokenStreamFiniteStrings.class", []reviewedCollectionSAM{{"lambda$articulationPoints$2", "(Ljava/lang/Object;)I", "(Ljava/lang/Integer;)I", "org/apache/lucene/util/graph/GraphTokenStreamFiniteStrings", "(Ljava/lang/Integer;)I", 6}}, func(source string) {
+		reviewedCollectionCarrierUse(t, source, "ToIntFunction<Integer>", ".mapToInt")
+		requireReviewedPattern(t, source, `return\s+\w+\.intValue\(\)`)
+	})
 }
 
 func TestRewriteInstanceCastFromSiblingJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/dynamic/DynamicType$Builder$AbstractBase.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "(TypePool)(TypeResolutionStrategy$Passive.INSTANCE)") {
-		t.Fatalf("ON still has TypePool INSTANCE cast:\n%s", clipForTest(on, "TypePool)(TypeResolutionStrategy"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "(TypePool)(TypeResolutionStrategy$Passive.INSTANCE)") {
-		t.Fatalf("OFF missing TypePool cast:\n%s", clipForTest(off, "Passive.INSTANCE"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/dynamic/DynamicType$Builder$AbstractBase.class", []reviewedViewMember{{"make", "(Lnet/bytebuddy/pool/TypePool;)Lnet/bytebuddy/dynamic/DynamicType$Unloaded;", "(Lnet/bytebuddy/pool/TypePool;)Lnet/bytebuddy/dynamic/DynamicType$Unloaded<TS;>;", false}}, nil, func(source string) {
+		body := source
+		requireReviewedPattern(t, body, `this\.make\(\(TypeResolutionStrategy\)\(TypeResolutionStrategy\$Passive\.INSTANCE\)`)
+		requireReviewedPattern(t, body, `return \(DynamicType\$Unloaded<S>\)`)
+	})
 }
 
 func TestRewriteInstanceCastFromSiblingNoSibling(t *testing.T) {
@@ -3517,181 +2445,35 @@ func TestDropEmptyTargetOnRepeatableJarFS(t *testing.T) {
 }
 
 func TestRetypeMixedIteratorElemToRawJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/index/IndexFileDeleter.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "Iterator<String> var6") {
-		t.Fatalf("ON still has Iterator<String> var6:\n%s", clipForTest(on, "Iterator<String> var6"))
-	}
-	if !strings.Contains(on, "Iterator var6") {
-		t.Fatalf("ON missing raw Iterator var6:\n%s", clipForTest(on, "Iterator var6"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "Iterator<String> var6") {
-		t.Fatalf("OFF missing Iterator<String> var6:\n%s", clipForTest(off, "Iterator"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/index/IndexFileDeleter.class", []reviewedViewMember{{"inflateGens", "(Lorg/apache/lucene/index/SegmentInfos;Ljava/util/Collection;Lorg/apache/lucene/util/InfoStream;)V", "(Lorg/apache/lucene/index/SegmentInfos;Ljava/util/Collection<Ljava/lang/String;>;Lorg/apache/lucene/util/InfoStream;)V", false}}, nil, func(source string) {
+		body := source
+		local := regexp.QuoteMeta(requireReviewedPattern(t, body, `Iterator<String>\s+(\w+)\s*=\s*\w+\.iterator\(\);`)[1])
+		requireReviewedPattern(t, body, ``+local+`\.next\(\)`)
+		requireReviewedPattern(t, body, `Iterator<IndexFileDeleter\$CommitPoint>\s+\w+\s*=\s*\w+\.iterator\(\);`)
+	})
 }
 
 func TestRetypeSelfWrapDollarNewFromCalleeParamJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/index/FreqProxTermsWriter.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "FreqProxFields var7_1") {
-		t.Fatalf("ON still has FreqProxFields var7_1:\n%s", clipForTest(on, "FreqProxFields var7_1"))
-	}
-	if !strings.Contains(on, "Fields var7_1") {
-		t.Fatalf("ON missing Fields var7_1:\n%s", clipForTest(on, "var7_1"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "FreqProxFields var7_1") {
-		t.Fatalf("OFF missing FreqProxFields var7_1:\n%s", clipForTest(off, "var7_1"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/index/FreqProxTermsWriter.class", []reviewedViewMember{{"applyDeletes", "(Lorg/apache/lucene/index/SegmentWriteState;Lorg/apache/lucene/index/Fields;)V", "", false}}, []reviewedViewInvoke{{"org/apache/lucene/index/FreqProxTermsWriter", "applyDeletes", "(Lorg/apache/lucene/index/SegmentWriteState;Lorg/apache/lucene/index/Fields;)V", core.OP_INVOKESPECIAL}}, func(source string) {
+		local := requireReviewedViewLocal(t, source, "Fields", `new FreqProxFields\(`)
+		requireReviewedPattern(t, source, `this\.applyDeletes\(\w+,`+local+`\)`)
+		requireReviewedPattern(t, source, local+`\s*=\s*new FreqProxTermsWriter\$1\(this,`+local+`,`)
+	})
 }
 
 func TestRetypeAccessDollarLocalToFieldTypeJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/dynamic/loading/ClassInjector$UsingUnsafe$Factory.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "Dispatcher$Initializable var2_2") {
-		t.Fatalf("ON missing Initializable local:\n%s", clipForTest(on, "var2_2"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "Dispatcher$Initializable var2_2") {
-		t.Fatalf("OFF missing dump Initializable local:\n%s", clipForTest(off, "var2_2"))
-	}
-	if strings.Contains(on, "Dispatcher var2_2;") && !strings.Contains(on, "Dispatcher$Initializable var2_2") {
-		t.Fatalf("ON collapsed access$ local to Dispatcher:\n%s", clipForTest(on, "var2_2"))
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/dynamic/loading/ClassInjector$UsingUnsafe$Factory.class", []reviewedViewMember{{"dispatcher", "Lnet/bytebuddy/dynamic/loading/ClassInjector$UsingUnsafe$Dispatcher$Initializable;", "", true}}, []reviewedViewInvoke{{"net/bytebuddy/dynamic/loading/ClassInjector$UsingUnsafe", "access$400", "()Lnet/bytebuddy/dynamic/loading/ClassInjector$UsingUnsafe$Dispatcher$Initializable;", core.OP_INVOKESTATIC}}, func(source string) {
+		local := requireReviewedViewLocal(t, source, "ClassInjector$UsingUnsafe$Dispatcher$Initializable", `null`)
+		requireReviewedPattern(t, source, local+`\s*=\s*ClassInjector\$UsingUnsafe\.access\$400\(\)`)
+		requireReviewedPattern(t, source, `this\.dispatcher\s*=\s*`+local+`\s*;`)
+	})
 }
 
 func TestWrapComparingLongLambdaFromNextCastJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/index/ReadersAndUpdates.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "((DocValuesFieldUpdates)(l0)).delGen") {
-		t.Fatalf("ON missing comparingLong wrap:\n%s", clipForTest(on, "comparingLong"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "((DocValuesFieldUpdates)(l0)).delGen") {
-		t.Fatalf("OFF already has comparingLong wrap (switch inert):\n%s", clipForTest(off, "comparingLong"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/index/ReadersAndUpdates.class", []reviewedCollectionSAM{{"lambda$writeFieldUpdates$2", "(Ljava/lang/Object;)J", "(Lorg/apache/lucene/index/DocValuesFieldUpdates;)J", "org/apache/lucene/index/ReadersAndUpdates", "(Lorg/apache/lucene/index/DocValuesFieldUpdates;)J", 6}}, func(source string) {
+		reviewedCollectionCarrierUse(t, source, "ToLongFunction<DocValuesFieldUpdates>", "Comparator.comparingLong")
+		requireReviewedPattern(t, source, `return\s+\w+\.delGen\s*;`)
+	})
 }
 
 func TestListOverloadUsesResolvedExternalParameterJarFS(t *testing.T) {
@@ -3840,46 +2622,11 @@ func TestWrapWildcardArrayCompareValues(t *testing.T) {
 }
 
 func TestRetypeFlatMapFunctionRawStreamJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/index/FieldInfos.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "Function<LeafReaderContext, Stream<FieldInfo>>") {
-		t.Fatalf("ON missing Stream<FieldInfo>:\n%s", clipForTest(on, "flatMap"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "Stream<FieldInfo>") {
-		t.Fatalf("OFF already has Stream<FieldInfo> (switch inert):\n%s", clipForTest(off, "flatMap"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/index/FieldInfos.class", []reviewedCollectionSAM{{"lambda$getIndexedFields$2", "(Ljava/lang/Object;)Ljava/lang/Object;", "(Lorg/apache/lucene/index/LeafReaderContext;)Ljava/util/stream/Stream;", "org/apache/lucene/index/FieldInfos", "(Lorg/apache/lucene/index/LeafReaderContext;)Ljava/util/stream/Stream;", 6}}, func(source string) {
+		carrier := requireReviewedPattern(t, source, `Function\s+(\w+)\s*=\s*\(Function\)\s*\(\(Function<LeafReaderContext, Stream(?:<FieldInfo>)?>\)`)
+		requireReviewedPattern(t, source, `\.flatMap\(`+regexp.QuoteMeta(carrier[1])+`\)`)
+		reviewedCollectionCarrierUse(t, source, "Predicate<FieldInfo>", ".filter")
+	})
 }
 
 func TestInsertDelegatingThisFromSiblingJarFS(t *testing.T) {
@@ -3929,46 +2676,11 @@ func TestInsertDelegatingThisFromSiblingJarFS(t *testing.T) {
 }
 
 func TestWrapGetClassAsRawClassArgJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/asm/Advice$WithCustomMapping.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "(Class)(var2.getClass())") {
-		t.Fatalf("ON missing Class wrap of getClass:\n%s", clipForTest(on, "bindSerialized"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "(Class)(var2.getClass())") {
-		t.Fatalf("OFF already has Class wrap (switch inert):\n%s", clipForTest(off, "bindSerialized"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/asm/Advice$WithCustomMapping.class", []reviewedViewMember{{"bindSerialized", "(Ljava/lang/Class;Ljava/io/Serializable;Ljava/lang/Class;)Lnet/bytebuddy/asm/Advice$WithCustomMapping;", "<T::Ljava/lang/annotation/Annotation;S::Ljava/io/Serializable;>(Ljava/lang/Class<TT;>;TS;Ljava/lang/Class<-TS;>;)Lnet/bytebuddy/asm/Advice$WithCustomMapping;", false}}, []reviewedViewInvoke{{"net/bytebuddy/asm/Advice$WithCustomMapping", "bindSerialized", "(Ljava/lang/Class;Ljava/io/Serializable;Ljava/lang/Class;)Lnet/bytebuddy/asm/Advice$WithCustomMapping;", core.OP_INVOKEVIRTUAL}}, func(source string) {
+		body := reviewedSourceMethod(t, source, `bindSerialized\(Class<T>\s+\w+,\s*Serializable\s+\w+\)`)
+		argument := requireReviewedPattern(t, body, `Serializable\s+(\w+)`)
+		requireReviewedPattern(t, body, `bindSerialized\([^;\n]*\(Serializable\)\(`+regexp.QuoteMeta(argument[1])+`\)[^;\n]*\(Class\)\(`+regexp.QuoteMeta(argument[1])+`\.getClass\(\)\)`)
+	})
 }
 
 func TestWrapClassForNameAsRawClassJarFS(t *testing.T) {
@@ -4058,46 +2770,13 @@ func TestWrapCallableSubmitIdentJarFS(t *testing.T) {
 }
 
 func TestWrapFutureGetAfterExecCatchJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/agent/builder/AgentBuilder$DescriptionStrategy$SuperTypeLoading$Asynchronous$ThreadSwitchingClassLoadingDelegate.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "catch(Exception varE)") {
-		t.Fatalf("ON missing try wrap of Future.get:\n%s", clipForTest(on, "var5.get"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "catch(Exception varE)") {
-		t.Fatalf("OFF already has varE catch (switch inert):\n%s", clipForTest(off, "var5.get"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/agent/builder/AgentBuilder$DescriptionStrategy$SuperTypeLoading$Asynchronous$ThreadSwitchingClassLoadingDelegate.class", []reviewedViewMember{{"load", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/Class;", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/Class<*>;", false}}, []reviewedViewInvoke{{"java/util/concurrent/Future", "get", "()Ljava/lang/Object;", core.OP_INVOKEINTERFACE}}, func(source string) {
+		body := reviewedSourceMethod(t, source, `Class<\?>\s+load\(`)
+		future := requireReviewedViewLocal(t, body, "Future", `this\.executorService\.submit\(`)
+		requireReviewedPattern(t, body, `try\{[\s\S]*?`+future+`\.get\(\)[\s\S]*?catch\(ExecutionException\s+(\w+)\)`)
+		requireReviewedPattern(t, body, `catch\(Exception\s+\w+\)`)
+		requireReviewedPattern(t, body, `new IllegalStateException\([^;\n]*\.getCause\(\)\)`)
+	})
 }
 
 func TestAddTypeVarBoundFromInnerCastJarFS(t *testing.T) {
@@ -4144,135 +2823,26 @@ func TestAddTypeVarBoundFromInnerCastJarFS(t *testing.T) {
 }
 
 func TestRetypeSelfWrapToCommonCamelSuffixJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/search/BlendedTermQuery.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "TermQuery var4 = new TermQuery") {
-		t.Fatalf("ON still has TermQuery var4:\n%s", clipForTest(on, "TermQuery var4"))
-	}
-	if !strings.Contains(on, "Query var4 = new TermQuery") {
-		t.Fatalf("ON missing Query var4:\n%s", clipForTest(on, "var4 = new"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "TermQuery var4 = new TermQuery") {
-		t.Fatalf("OFF missing TermQuery var4:\n%s", clipForTest(off, "var4 = new"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/search/BlendedTermQuery.class", []reviewedViewMember{{"toString", "(Ljava/lang/String;)Ljava/lang/String;", "", false}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `String\s+toString\(String\s+\w+\)`)
+		local := regexp.QuoteMeta(requireReviewedPattern(t, body, `Query\s+(\w+)\s*=\s*new TermQuery\(`)[1])
+		requireReviewedPattern(t, body, ``+local+`\s*=\s*new BoostQuery\(`+local+`,`)
+	})
 }
 
 func TestDropShiftedBindParamCastsJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/implementation/bind/annotation/TargetMethodAnnotationDrivenBinder$ParameterBinder$ForFieldBinding.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "(ParameterDescription)(var2)") {
-		t.Fatalf("ON still has shifted ParameterDescription cast:\n%s", clipForTest(on, "this.bind"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "(ParameterDescription)(var2)") {
-		t.Fatalf("OFF missing shifted cast:\n%s", clipForTest(off, "this.bind"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/implementation/bind/annotation/TargetMethodAnnotationDrivenBinder$ParameterBinder$ForFieldBinding.class", []reviewedViewMember{{"bind", "(Lnet/bytebuddy/description/annotation/AnnotationDescription$Loadable;Lnet/bytebuddy/description/method/MethodDescription;Lnet/bytebuddy/description/method/ParameterDescription;Lnet/bytebuddy/implementation/Implementation$Target;Lnet/bytebuddy/implementation/bytecode/assign/Assigner;Lnet/bytebuddy/implementation/bytecode/assign/Assigner$Typing;)Lnet/bytebuddy/implementation/bind/MethodDelegationBinder$ParameterBinding;", "(Lnet/bytebuddy/description/annotation/AnnotationDescription$Loadable<TS;>;Lnet/bytebuddy/description/method/MethodDescription;Lnet/bytebuddy/description/method/ParameterDescription;Lnet/bytebuddy/implementation/Implementation$Target;Lnet/bytebuddy/implementation/bytecode/assign/Assigner;Lnet/bytebuddy/implementation/bytecode/assign/Assigner$Typing;)Lnet/bytebuddy/implementation/bind/MethodDelegationBinder$ParameterBinding<*>;", false}}, nil, func(source string) {
+		body := source
+		local := regexp.QuoteMeta(requireReviewedPattern(t, body, `ParameterDescription\s+(\w+)\s*,\s*Implementation\$Target`)[1])
+		requireReviewedPattern(t, body, `this\.bind\(\w+\.getField\(\),\w+,\w+,`+local+`,`)
+	})
 }
 
 func TestWrapWildcardArrayCompareValuesJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/apache/lucene/search/TopDocs$MergeSortQueue.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "((FieldComparator)(this.comparators[") {
-		t.Fatalf("ON missing FieldComparator wrap:\n%s", clipForTest(on, "compareValues"))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "((FieldComparator)(this.comparators[") {
-		t.Fatalf("OFF already has wrap (switch inert):\n%s", clipForTest(off, "compareValues"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/search/TopDocs$MergeSortQueue.class", []reviewedViewMember{{"comparators", "[Lorg/apache/lucene/search/FieldComparator;", "[Lorg/apache/lucene/search/FieldComparator<*>;", true}}, []reviewedViewInvoke{{"org/apache/lucene/search/FieldComparator", "compareValues", "(Ljava/lang/Object;Ljava/lang/Object;)I", core.OP_INVOKEVIRTUAL}}, func(source string) {
+		binding := requireReviewedPattern(t, source, `FieldComparator\s+(\w+)\s*=\s*this\.comparators\[(\w+)\];`)
+		requireReviewedPattern(t, source, regexp.QuoteMeta(binding[1])+`\.compareValues\(\w+\.fields\[`+regexp.QuoteMeta(binding[2])+`\],\w+\.fields\[`+regexp.QuoteMeta(binding[2])+`\]\)`)
+	})
 }
 
 func TestWrapComparingIntDocAsScoreDoc(t *testing.T) {
@@ -4504,21 +3074,27 @@ func jarFSOnOffEnv(t *testing.T, env, m2rel, entry, onMust, offMust string) {
 }
 
 func TestWrapComparingIntDocAsScoreDocJarFS(t *testing.T) {
-	jarFSOnOff(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
-		"org/apache/lucene/search/SortRescorer.class",
-		"((ScoreDoc)(l0)).doc", "return l0.doc;")
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/search/SortRescorer.class", []reviewedCollectionSAM{{"lambda$rescore$0", "(Ljava/lang/Object;)I", "(Lorg/apache/lucene/search/ScoreDoc;)I", "org/apache/lucene/search/SortRescorer", "(Lorg/apache/lucene/search/ScoreDoc;)I", 6}}, func(source string) {
+		requireReviewedPattern(t, source, `ToIntFunction<ScoreDoc>\s+(\w+)\s*=\s*\(l\w+\)\s*->`)
+		requireReviewedPattern(t, source, `return\s+\w+\.doc;`)
+		requireReviewedPattern(t, source, `Comparator\.comparingInt\(`)
+	})
 }
 
 func TestRetypeObjectUsedAsIntArrayJarFS(t *testing.T) {
-	jarFSOnOff(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
-		"org/apache/lucene/util/BytesRefArray.class",
-		"int[] var3 = ((var1)", "Object var3 = ((var1)")
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/util/BytesRefArray.class", []reviewedViewMember{{"offsets", "[I", "", true}, {"iterator", "(Lorg/apache/lucene/util/BytesRefArray$SortState;)Lorg/apache/lucene/util/BytesRefArray$IndexedBytesRefIterator;", "", false}}, []reviewedViewInvoke{{"org/apache/lucene/util/BytesRefArray$SortState", "access$200", "(Lorg/apache/lucene/util/BytesRefArray$SortState;)[I", core.OP_INVOKESTATIC}}, func(source string) {
+		body := reviewedSourceMethod(t, source, `BytesRefArray\$IndexedBytesRefIterator\s+iterator\(BytesRefArray\$SortState\s+\w+\)`)
+		local := requireReviewedPattern(t, body, `int\[\]\s+(\w+)\s*=\s*[^;]*\?\s*\(null\)\s*:\s*\(BytesRefArray\$SortState\.access\$200\(`)[1]
+		requireReviewedPattern(t, body, regexp.QuoteMeta(local)+`\.length`)
+	})
 }
 
 func TestRewriteInvokeExactSelfToHandleJarFS(t *testing.T) {
-	jarFSOnOff(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
-		"org/apache/lucene/store/MMapDirectory.class",
-		"var1.invokeExact(l1)", "l1.invokeExact(l1)")
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/store/MMapDirectory.class", []reviewedViewMember{{"lambda$null$0", "(Ljava/lang/invoke/MethodHandle;Ljava/nio/ByteBuffer;)Ljava/lang/Throwable;", "", false}}, nil, func(source string) {
+		body := source
+		binding := requireReviewedPattern(t, body, `final MethodHandle\s+(\w+)\s*=\s*\w+;\s*final ByteBuffer\s+(\w+)\s*=\s*\w+;`)
+		requireReviewedPattern(t, body, regexp.QuoteMeta(binding[1])+`\.invokeExact\(`+regexp.QuoteMeta(binding[2])+`\);`)
+	})
 }
 
 func TestRetypeExecCatchWaitToInterruptedJarFS(t *testing.T) {
@@ -4529,9 +3105,11 @@ func TestRetypeExecCatchWaitToInterruptedJarFS(t *testing.T) {
 }
 
 func TestRetypeMixedNewToCamelLUBJarFS(t *testing.T) {
-	jarFSOnOff(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
-		"org/apache/lucene/util/QueryBuilder.class",
-		"SpanQuery var12", "SpanOrQuery var12")
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/util/QueryBuilder.class", []reviewedViewMember{{"analyzeGraphPhrase", "(Lorg/apache/lucene/analysis/TokenStream;Ljava/lang/String;I)Lorg/apache/lucene/search/Query;", "", false}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `Query\s+analyzeGraphPhrase\(TokenStream\s+\w+, String\s+\w+, int\s+\w+\)`)
+		local := regexp.QuoteMeta(requireReviewedPattern(t, body, `SpanQuery\s+(\w+)\s*=\s*null;`)[1])
+		requireReviewedPattern(t, body, ``+local+`\s*=\s*new SpanOrQuery\(`)
+	})
 }
 
 func TestUnwrapAsListEnumArrayJarFS(t *testing.T) {
@@ -4542,10 +3120,12 @@ func TestUnwrapAsListEnumArrayJarFS(t *testing.T) {
 }
 
 func TestWrapUnmodifiableAsListRawJarFS(t *testing.T) {
-	jarFSOnOff(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
-		"net/bytebuddy/implementation/bind/annotation/TargetMethodAnnotationDrivenBinder$ParameterBinder.class",
-		"(List)(Collections.unmodifiableList(",
-		"Collections.unmodifiableList(Arrays.asList(new")
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/implementation/bind/annotation/TargetMethodAnnotationDrivenBinder$ParameterBinder.class", []reviewedViewMember{{"DEFAULTS", "Ljava/util/List;", "Ljava/util/List<Lnet/bytebuddy/implementation/bind/annotation/TargetMethodAnnotationDrivenBinder$ParameterBinder<*>;>;", true}}, []reviewedViewInvoke{{"java/util/Arrays", "asList", "([Ljava/lang/Object;)Ljava/util/List;", core.OP_INVOKESTATIC}, {"java/util/Collections", "unmodifiableList", "(Ljava/util/List;)Ljava/util/List;", core.OP_INVOKESTATIC}, {"net/bytebuddy/implementation/bind/annotation/TargetMethodAnnotationDrivenBinder$ParameterBinder", "DEFAULTS", "Ljava/util/List;", core.OP_PUTSTATIC}}, func(source string) {
+		assertReviewedInterfaceListInitializer(t, source, "DEFAULTS")
+		if regexp.MustCompile(`DEFAULTS\s*=\s*null\s*;`).MatchString(source) {
+			t.Fatal("original interface collection initialization was erased")
+		}
+	})
 }
 
 func TestDropDupOuterIOExceptionCatchJarFS(t *testing.T) {
@@ -4590,60 +3170,32 @@ func TestDropDupOuterIOExceptionCatchJarFS(t *testing.T) {
 }
 
 func TestRetypeTernaryThisFieldsToImportedLUBJarFS(t *testing.T) {
-	jarFSOnOff(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
-		"org/apache/lucene/codecs/lucene80/Lucene80DocValuesProducer$TermsDict.class",
-		"\tDataInput var2 = (this.entry.compressed)",
-		"ByteArrayDataInput var2 = (this.entry.compressed)")
+	reviewedInvocationView(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/codecs/lucene80/Lucene80DocValuesProducer$TermsDict.class", []reviewedViewMember{{"bytes", "Lorg/apache/lucene/store/IndexInput;", "", true}, {"blockInput", "Lorg/apache/lucene/store/ByteArrayDataInput;", "", true}}, []reviewedViewInvoke{{"org/apache/lucene/store/DataInput", "readByte", "()B", core.OP_INVOKEVIRTUAL}}, func(source string) {
+		local := requireReviewedViewLocal(t, source, "DataInput", `\(this\.entry\.compressed\)\s*\?\s*\(this\.blockInput\)\s*:\s*\(this\.bytes\)`)
+		requireReviewedPattern(t, source, local+`\.readByte\(\)`)
+	})
 }
 
 func TestInitBlankDollarTypeLocalJarFS(t *testing.T) {
-	jarFSOnOff(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
-		"net/bytebuddy/build/Plugin$Factory$UsingReflection.class",
-		"Instantiator var11_1 = null;",
-		"Instantiator var11_1;")
+	reviewedInvocationView(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar", "net/bytebuddy/build/Plugin$Factory$UsingReflection.class", []reviewedViewMember{{"make", "()Lnet/bytebuddy/build/Plugin;", "", false}}, nil, func(source string) {
+		body := source
+		local := regexp.QuoteMeta(requireReviewedPattern(t, body, `Plugin\$Factory\$UsingReflection\$Instantiator\s+(\w+)\s*=\s*new Plugin\$Factory\$UsingReflection\$Instantiator\$Unresolved\(`)[1])
+		requireReviewedPattern(t, body, ``+local+`\s*=\s*`+local+`\.replaceBy\(new Plugin\$Factory\$UsingReflection\$Instantiator\$Resolved\(`)
+	})
 }
 
 func TestRewriteClassLocalCmpZeroIntGuardJarFS(t *testing.T) {
-	// spring-beans AbstractAutowireCapableBeanFactory.doCreateBean keeps
-	// `catch(Throwable var9)` and the int-materialized `int var9 = (ternary)` in
-	// one member; the class-decl cmp rewrite must defer to the nearest int decl
-	// so the branch stays `!= (0)` (was `!= (null)`: bad operand types).
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile("org/springframework/beans/factory/support/AbstractAutowireCapableBeanFactory.class")
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	// The int-materialized doCreateBean member spans from its `int var9 =` decl
-	// to the next member that reuses the var9 slot as a `Class var9` local.
-	declAt := strings.Index(on, "int var9 = (var2.isSingleton())")
-	if declAt < 0 {
-		t.Fatalf("missing int-materialized var9 decl:\n%s", clipForTest(on, "var9"))
-	}
-	nextMemberAt := strings.Index(on[declAt:], "Class var9 = null;")
-	if nextMemberAt < 0 {
-		t.Fatalf("missing following Class var9 member:\n%s", clipForTest(on, "var9"))
-	}
-	region := on[declAt : declAt+nextMemberAt]
-	if got := strings.Count(region, "if ((var9) != (0)){"); got != 2 {
-		t.Fatalf("int var9 cmp-zero sites = %d, want 2:\n%s", got, clipForTest(region, "var9"))
-	}
-	if strings.Contains(region, "(var9) != (null)") {
-		t.Fatalf("int var9 flipped to null compare:\n%s", clipForTest(region, "var9"))
-	}
+	reviewedInvocationView(t, "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar", "org/springframework/beans/factory/support/AbstractAutowireCapableBeanFactory.class", []reviewedViewMember{{"doCreateBean", "(Ljava/lang/String;Lorg/springframework/beans/factory/support/RootBeanDefinition;[Ljava/lang/Object;)Ljava/lang/Object;", "", false}}, []reviewedViewInvoke{{"org/springframework/beans/factory/support/RootBeanDefinition", "isSingleton", "()Z", core.OP_INVOKEVIRTUAL}}, func(source string) {
+		body := reviewedSourceMethod(t, source, `Object\s+doCreateBean\(`)
+		local := requireReviewedPattern(t, body, `int\s+(\w+)\s*=\s*\(\w+\.isSingleton\(\)\)`)[1]
+		compare := regexp.MustCompile(`if\s*\(\s*\(` + regexp.QuoteMeta(local) + `\)\s*!=\s*\(0\)\s*\)`)
+		if len(compare.FindAllString(body, -1)) != 2 {
+			t.Fatalf("original Boolean materialization lost two numeric guards:\n%s", body)
+		}
+		if regexp.MustCompile(`\(` + regexp.QuoteMeta(local) + `\)\s*!=\s*\(null\)`).MatchString(body) {
+			t.Fatalf("numeric definition compared to null:\n%s", body)
+		}
+	})
 }
 
 func TestDropUnusedSyntheticThisLocalJarFS(t *testing.T) {
@@ -4697,9 +3249,10 @@ func TestRetypeObjectArrayFromResolveClassJarFS(t *testing.T) {
 }
 
 func TestWrapComputeIntValueLambdaJarFS(t *testing.T) {
-	jarFSOnOff(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
-		"org/apache/lucene/search/SloppyPhraseMatcher.class",
-		"((Integer)(l1)).intValue()", "l1.intValue()")
+	reviewedCollectionNative(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar", "org/apache/lucene/search/SloppyPhraseMatcher.class", []reviewedCollectionSAM{{"lambda$repeatingTerms$1", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", "(Lorg/apache/lucene/index/Term;Ljava/lang/Integer;)Ljava/lang/Integer;", "org/apache/lucene/search/SloppyPhraseMatcher", "(Lorg/apache/lucene/index/Term;Ljava/lang/Integer;)Ljava/lang/Integer;", 6}}, func(source string) {
+		reviewedCollectionCarrierUse(t, source, "BiFunction<Term, Integer, Integer>", ".compute")
+		requireReviewedPattern(t, source, `Integer\.valueOf\([^;\n]*\.intValue\(\)`)
+	})
 }
 
 func TestObjectUsedAsIntCodePoint(t *testing.T) {
@@ -4842,10 +3395,7 @@ func TestSwapRethrowThrowableBeforeSpecificCatch(t *testing.T) {
 }
 
 func TestWrapCatchBodyGetDeclaredMethodJarFS(t *testing.T) {
-	jarFSOnOff(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
-		"net/bytebuddy/dynamic/loading/ByteArrayClassLoader$SynchronizationStrategy$CreationAction.class",
-		"catch(Exception varE)",
-		"ClassLoader.class.getDeclaredMethod(\"getClassLoadingLock\"")
+	assertReviewedCreationReflection(t)
 }
 
 func TestSwapRethrowThrowableBeforeSpecificCatchJarFS(t *testing.T) {
@@ -4856,60 +3406,15 @@ func TestSwapRethrowThrowableBeforeSpecificCatchJarFS(t *testing.T) {
 }
 
 func TestDropEmptyNSMEStaticBlockJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "net/bytebuddy/implementation/bytecode/constant/MethodConstant$ForConstructor.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if strings.Contains(on, "Could not locate Class::getDeclaredConstructor") {
-		t.Fatalf("ON still has empty NSME static")
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if !strings.Contains(off, "Could not locate Class::getDeclaredConstructor") {
-		t.Fatal("OFF missing empty NSME static (switch inert)")
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	assertReviewedConstructorReflectionInitializer(t)
 }
 
 func TestInsertBreakBeforeDefaultThrowJarFS(t *testing.T) {
-	jarFSOnOff(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
-		"org/apache/lucene/codecs/lucene80/Lucene80NormsProducer.class",
-		"readInt();\n\t\t\t\t\t\tbreak;",
-		"default:")
+	assertReviewedNormSwitch(t)
 }
 
 func TestRewriteSelfInitDeclToPrevSameTypeJarFS(t *testing.T) {
-	jarFSOnOff(t, "net/bytebuddy/byte-buddy/1.12.23/byte-buddy-1.12.23.jar",
-		"net/bytebuddy/implementation/attribute/TypeAttributeAppender$ForInstrumentedType$Differentiating.class",
-		"var8 = var8.append",
-		"AnnotationAppender var10 = var10.append")
+	assertReviewedAppenderAccumulator(t)
 }
 
 func TestWrapAliasedThrowableRethrow(t *testing.T) {
@@ -5048,10 +3553,7 @@ func TestFillEmptySynchronizedBlockJarFS(t *testing.T) {
 }
 
 func TestFillMissingReturnAfterLabeledBreakJarFS(t *testing.T) {
-	jarFSOnOff(t, "org/apache/lucene/lucene-core/8.11.1/lucene-core-8.11.1.jar",
-		"org/apache/lucene/index/Terms.class",
-		"} while (true);\n\t\t\t\treturn var4.get();",
-		"break LOOP_1;")
+	assertReviewedTermsLabeledExit(t)
 }
 
 func TestSelfWrappedLocalIsNotMethodReturn(t *testing.T) {

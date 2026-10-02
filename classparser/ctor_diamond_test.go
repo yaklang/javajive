@@ -41,24 +41,23 @@ func ctorDiamondDecompile(t *testing.T) string {
 }
 
 func TestGenericCtorDiamondIsLoadBearing(t *testing.T) {
-	// Hold the class-literal fix ON so we observe ONLY the diamond toggle.
+
 	t.Setenv("JDEC_CLASSLIT_ARG_NOCAST_OFF", "")
-	os.Unsetenv("JDEC_CLASSLIT_ARG_NOCAST_OFF")
-
-	// Fix ON (default): the generic constructor with a method-reference argument carries the diamond.
-	os.Unsetenv("JDEC_CTOR_DIAMOND_OFF")
-	on := ctorDiamondDecompile(t)
-	if !strings.Contains(on, "new CtorDiamondBox<>(") {
-		t.Errorf("fix ON: expected diamond `new CtorDiamondBox<>(`, got:\n%s", on)
+	path := "testdata/regression/CtorDiamondSeed.class"
+	raw, _, _ := reviewedFixtureMethod(t, path, "make", "()LCtorDiamondBox;")
+	assertReviewedTypeVarMethod(t, raw, "make", "()LCtorDiamondBox;", "()LCtorDiamondBox<Ljava/lang/Integer;>;")
+	helper, err := os.ReadFile("testdata/regression/CtorDiamondBox.class")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// Fix OFF (kill-switch): the constructor falls back to a RAW `new CtorDiamondBox(` -- the exact
-	// "invalid method reference" recompile blocker the diamond removes -- proving it is load-bearing.
-	t.Setenv("JDEC_CTOR_DIAMOND_OFF", "1")
-	off := ctorDiamondDecompile(t)
-	if strings.Contains(off, "new CtorDiamondBox<>(") || !strings.Contains(off, "new CtorDiamondBox(") {
-		t.Errorf("fix OFF: expected raw `new CtorDiamondBox(` (no diamond), got:\n%s", off)
-	}
+	assertReviewedTypeVarMethod(t, helper, "<init>", "(Ljava/lang/Class;Ljava/util/function/Function;)V", "(Ljava/lang/Class<TT;>;Ljava/util/function/Function<Ljava/lang/String;TT;>;)V")
+	assertReviewedTypeVarInvoke(t, path, "make", "()LCtorDiamondBox;", 11, 183, "CtorDiamondBox", "<init>", "(Ljava/lang/Class;Ljava/util/function/Function;)V")
+	assertReviewedSeedSAM(t, raw, "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/String;)Ljava/lang/Integer;")
+	reviewedSeedSources(t, path, "JDEC_CTOR_DIAMOND_OFF", true, func(source string) {
+		if !strings.Contains(compactReviewedGenericSource(source), "newCtorDiamondBox(Integer.class,(Function)(((Function<String,Integer>)(Integer::valueOf))))") {
+			t.Fatal("lost class literal or independent instantiated method-reference binding: " + source)
+		}
+	})
 }
 
 func TestClassLiteralArgNoCastIsLoadBearing(t *testing.T) {

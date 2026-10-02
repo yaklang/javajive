@@ -119,3 +119,83 @@ func TestDeclinedExpressionPhiRetainsClosedRegionProof(t *testing.T) {
 		})
 	}
 }
+
+func TestClosedBooleanStackPhiCopiesOnlyProvenIntConstants(t *testing.T) {
+	for _, kind := range []string{"zero", "one", "Boolean-typed JVM one", "nonboolean constant", "arbitrary int local", "long", "float", "null", "class", "all float", "all long", "all class", "missing target type"} {
+		t.Run(kind, func(t *testing.T) {
+			root := &OpCode{CurrentOffset: 1, Instr: &Instruction{OpCode: OP_IFEQ}}
+			left := &OpCode{CurrentOffset: 10, Instr: &Instruction{OpCode: OP_GOTO}, Source: []*OpCode{root}}
+			right := &OpCode{CurrentOffset: 20, Instr: &Instruction{OpCode: OP_ICONST_0}, Source: []*OpCode{root}}
+			merge := &OpCode{CurrentOffset: 30, Instr: &Instruction{OpCode: OP_IRETURN}, Source: []*OpCode{left, right}}
+			root.Target = []*OpCode{left, right}
+			left.Target = []*OpCode{merge}
+			right.Target = []*OpCode{merge}
+			boolean := types.NewJavaPrimer(types.JavaBoolean)
+			integer := types.NewJavaPrimer(types.JavaInteger)
+			yes := values.NewJavaLiteral(true, boolean)
+			literal := values.NewJavaLiteral(0, integer)
+			var other values.JavaValue = literal
+			var leftValue values.JavaValue = yes
+			switch kind {
+			case "one":
+				literal.Data = 1
+			case "Boolean-typed JVM one":
+				literal.Data = 1
+				literal.JavaType = boolean
+			case "nonboolean constant":
+				literal.Data = 2
+			case "arbitrary int local":
+				other = values.NewJavaRef(utils.NewRootVariableId(), nil, integer)
+			case "long":
+				other = values.NewJavaLiteral(0, types.NewJavaPrimer(types.JavaLong))
+			case "float":
+				other = values.NewJavaLiteral(float32(0), types.NewJavaPrimer(types.JavaFloat))
+			case "null":
+				other = values.JavaNull
+			case "class":
+				other = values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.String"))
+			case "all float":
+				other = values.NewJavaLiteral(float32(0), types.NewJavaPrimer(types.JavaFloat))
+				leftValue = other
+			case "all long":
+				other = values.NewJavaLiteral(int64(0), types.NewJavaPrimer(types.JavaLong))
+				leftValue = other
+			case "all class":
+				other = values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.String"))
+				leftValue = other
+			}
+			left.StackEntry = newStackItem(NewEmptyStackEntry(), leftValue)
+			right.StackEntry = newStackItem(NewEmptyStackEntry(), other)
+			slot := values.NewSlotValue(yes, boolean)
+			if kind == "missing target type" {
+				slot = values.NewSlotValue(nil, nil)
+			}
+			d := &Decompiler{opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{merge: NewStackSimulation(NewEmptyStackEntry(), nil, utils.NewRootVariableId())}}
+			originalSlot := slot.GetValue()
+			accepted := kind == "zero" || kind == "one" || kind == "Boolean-typed JVM one"
+			if got := d.lowerClosedStackPhi(merge, []*OpCode{root}, slot, false); got != accepted {
+				t.Fatalf("lowered=%v want=%v", got, accepted)
+			}
+			if !accepted {
+				if slot.GetValue() != originalSlot || left.StackEntry.value != leftValue || right.StackEntry.value != other || len(d.effectfulStackPhiEdges) != 0 || len(d.disFoldRef) != 0 {
+					t.Fatal("rejected primitive proof published IR")
+				}
+				return
+			}
+			originalType := types.JavaInteger
+			if kind == "Boolean-typed JVM one" {
+				originalType = types.JavaBoolean
+			}
+			rhs, ok := d.effectfulStackPhiEdges[right].JavaValue.(*values.JavaLiteral)
+			if !ok || rhs == literal || rhs.Data != (kind == "one" || kind == "Boolean-typed JVM one") || rhs.Type().RawType().(*types.JavaPrimer).Name != types.JavaBoolean || literal.Type().RawType().(*types.JavaPrimer).Name != originalType || right.StackEntry.value != literal {
+				t.Fatal("normalization must copy inert constants without mutating original stack evidence")
+			}
+			for _, pred := range []*OpCode{left, right} {
+				assign := d.effectfulStackPhiEdges[pred]
+				if !assign.HasOriginPC || assign.OriginPC != int(pred.CurrentOffset) {
+					t.Fatal("materialized assignment lost original routing edge placement")
+				}
+			}
+		})
+	}
+}

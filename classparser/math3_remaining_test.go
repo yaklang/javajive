@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 )
 
 func TestLutherFieldTLocalIsLoadBearing(t *testing.T) {
@@ -32,9 +34,19 @@ func TestSummaryStatisticsMeanDropsFirstMomentCastIsLoadBearing(t *testing.T) {
 }
 
 func TestCholeskyBoolCounterIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/RectangularCholeskyDecomposition.class", "JDEC_MATH3_REMAINING_OFF",
-		"int var8 = 0",
-		"boolean var8 = false")
+	raw, code, _ := reviewedFixtureMethod(t, "testdata/regression/RectangularCholeskyDecomposition.class", "<init>", "(Lorg/apache/commons/math3/linear/RealMatrix;D)V")
+	// Original slot 8 indexes a permutation and is incremented; its later reuse
+	// must not turn that computational integer into a boolean source local.
+	assertReviewedOpcode(t, code, 53, core.OP_IINC, 8, 1)
+	assertReviewedSources(t, raw, "JDEC_MATH3_REMAINING_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `public RectangularCholeskyDecomposition\(RealMatrix \w+, double \w+\)`)
+		store := requireReviewedPattern(t, body, `(\w+)\[(\w+)\]\s*=\s*(\w+)\s*;`)
+		if store[2] != store[3] {
+			t.Fatalf("permutation initialization loses counter identity: %v", store)
+		}
+		requireReviewedPattern(t, body, `int\s+`+regexp.QuoteMeta(store[2])+`\s*=\s*0\s*;`)
+		requireReviewedPattern(t, body, regexp.QuoteMeta(store[2])+`\+\+\s*;`)
+	})
 }
 
 func TestSparseGradientPutDoubleCastIsLoadBearing(t *testing.T) {
@@ -44,9 +56,42 @@ func TestSparseGradientPutDoubleCastIsLoadBearing(t *testing.T) {
 }
 
 func TestEulerSizedFieldArrayCastIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/EulerFieldStepInterpolator.class", "JDEC_MATH3_REMAINING_OFF",
-		"(T[])(new RealFieldElement[1])",
-		"new RealFieldElement[1]")
+	raw, code, _ := reviewedFixtureMethod(t, "testdata/regression/EulerFieldStepInterpolator.class", "computeInterpolatedStateAndDerivatives", "")
+	// All four arrays have one initialized element; a complete initializer is
+	// as valid as a sized allocation followed by a store. The generic view and
+	// argument identity must survive in either representation.
+	for _, pc := range []uint16{22, 37, 67, 90} {
+		assertReviewedOpcode(t, code, pc, core.OP_ANEWARRAY)
+	}
+	for _, pc := range []uint16{29, 56, 82, 109} {
+		assertReviewedOpcode(t, code, pc, core.OP_AASTORE)
+	}
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_MATH3_REMAINING_OFF", setting)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := reviewedSourceMethod(t, source, `protected FieldODEStateAndDerivative<T> computeInterpolatedStateAndDerivatives\(`)
+		pattern := `T\[\]\s+(\w+)\s*=\s*\(T\[\]\)\s*\(new RealFieldElement(\[\]\{[^;]+\}|\[1\])\)\s*;`
+		arrays := regexp.MustCompile(pattern).FindAllStringSubmatch(body, -1)
+		if setting != "" && len(arrays) == 0 {
+			// This old compatibility switch still disables the generic array
+			// view. Keep its original raw allocation witness; do not claim
+			// that the disabled compatibility recovery type-checks as T[].
+			arrays = regexp.MustCompile(`RealFieldElement\[\]\s+(\w+)\s*=\s*new RealFieldElement(\[\]\{[^;]+\}|\[1\])\s*;`).FindAllStringSubmatch(body, -1)
+		}
+		if len(arrays) != 4 {
+			t.Fatalf("expected four typed initialized one-element arrays:\n%s", body)
+		}
+		for i, array := range arrays {
+			if array[2] == "[1]" {
+				requireReviewedPattern(t, body, regexp.QuoteMeta(array[1])+`\[0\]\s*=`)
+			}
+			call := []string{"previousStateLinearCombination", "derivativeLinearCombination", "currentStateLinearCombination", "derivativeLinearCombination"}[i]
+			requireReviewedPattern(t, body, regexp.QuoteMeta(call)+`\(`+regexp.QuoteMeta(array[1])+`\)`)
+		}
+	}
 }
 
 func TestArrayFieldVectorTypedCastIsLoadBearing(t *testing.T) {

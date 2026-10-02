@@ -33,6 +33,7 @@ func ifBranchNodes(ifNode *core.Node) (trueNode, falseNode *core.Node) {
 
 func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	splitSharedFallthroughExpression(manager, ifNode)
+	splitSharedLiteralPhiStores(manager, ifNode)
 	splitSharedTerminalLeaves(manager, ifNode)
 	err := CalcEnd(manager.DominatorMap, ifNode)
 	if err != nil {

@@ -353,3 +353,226 @@ func erasedFactoryAssignmentView(value JavaValue, target types.JavaType, ctx *cl
 	}
 	return value
 }
+
+// ErasedZeroInputFactoryResult proves a closed invocation chain whose only
+// source inference starts at a generic static factory. There are no arguments
+// whose target typing could change an overload, lambda entry check or evaluation
+// order. A caller can suppress final return-target inference with an unchecked
+// view at this same descriptor erasure; every original invocation stays intact.
+func ErasedZeroInputFactoryResult(ctx *class_context.ClassContext, value JavaValue, result string) bool {
+	if ctx == nil || ctx.InvocationMetadata == nil || !strings.HasPrefix(result, "L") {
+		return false
+	}
+	call, ok := UnpackSoltValue(value).(*FunctionCallExpression)
+	if !ok {
+		return false
+	}
+	_, rootResult, err := callbinding.Descriptor(call.Descriptor)
+	if err != nil || rootResult != result {
+		return false
+	}
+	for depth := 0; depth < 32; depth++ {
+		if call == nil || !call.HasOriginPC || call.IsSpecialInvoke || strings.HasPrefix(call.FunctionName, "<") || (call.Kind == InvokeSpecial || call.Kind >= InvokeDynamic) || len(call.Arguments) != 0 || call.IsStatic != (call.Kind == InvokeStatic) {
+			return false
+		}
+		ps, ret, err := callbinding.Descriptor(call.Descriptor)
+		if err != nil || len(ps) != 0 || !strings.HasPrefix(ret, "L") {
+			return false
+		}
+		owner := strings.ReplaceAll(call.ClassName, ".", "/")
+		ownerMeta, known := ctx.InvocationMetadata(owner)
+		if !known || ownerMeta.Name != owner || (call.Kind == InvokeInterface && !ownerMeta.IsInterface) {
+			return false
+		}
+		kind := callbinding.Virtual
+		if call.IsStatic {
+			kind = callbinding.Static
+		} else if call.Kind == InvokeInterface {
+			kind = callbinding.Interface
+		}
+		family, err := callbinding.FamilyOf(callbinding.Witness{Owner: owner, Name: call.FunctionName, Desc: call.Descriptor, Kind: kind}, ctx.InvocationMetadata)
+		if err != nil || !family.Complete || family.Proof != callbinding.Unique || family.Target == nil || family.Target.Static != call.IsStatic || family.Target.Bridge || family.Target.Varargs {
+			return false
+		}
+		// A covariant bridge or duplicate return-only declaration is not a unique
+		// source binding, even though its erased argument tuple is the same.
+		if len(family.Methods) != 1 {
+			return false
+		}
+		declaring, classSig, sig := erasedInvocationDeclaration(ctx, owner, call.FunctionName, call.Descriptor)
+		if declaring == "" || (family.Target.Generic && sig == "") {
+			return false
+		}
+		if sig != "" {
+			scope := map[string]bool{}
+			if !call.IsStatic {
+				for _, name := range types.ClassFormalTypeParamNames(classSig) {
+					scope[name] = true
+				}
+			}
+			for _, name := range types.MethodFormalTypeParamNames(sig) {
+				scope[name] = true
+			}
+			if !closedZeroInputReferenceSignatureInScope(sig, scope) {
+				return false
+			}
+			_, params, declared := types.ParseMethodSignatureFull(sig, ctx)
+			if len(params) != 0 || declared == nil || bindingType(declared) != ret {
+				return false
+			}
+		}
+		if call.IsStatic {
+			names := types.MethodFormalTypeParamNames(sig)
+			if len(names) == 0 || len(erasedInvocationBounds(sig)) != len(names) {
+				return false
+			}
+			_, _, declared := types.ParseMethodSignatureFull(sig, ctx)
+			if _, generic := types.AsParameterizedType(declared); !generic {
+				return false
+			}
+			return true
+		}
+		child, ok := UnpackSoltValue(call.Object).(*FunctionCallExpression)
+		if !ok {
+			return false
+		}
+		_, produced, err := callbinding.Descriptor(child.Descriptor)
+		if err != nil || !callbinding.Assignable(produced, "L"+owner+";", ctx.InvocationMetadata) {
+			return false
+		}
+		call = child
+	}
+	return false
+}
+
+// The shared Signature parser accepts prefixes. This proof permits one entire
+// zero-input reference result, with a balanced formal prefix and no throws
+// scope. In particular a generic throws variable cannot be re-inferred here.
+func closedZeroInputReferenceSignature(sig string) bool {
+	return closedZeroInputReferenceSignatureInScope(sig, nil)
+}
+func closedZeroInputReferenceSignatureInScope(sig string, scope map[string]bool) bool {
+	if len(sig) > 4096 {
+		return false
+	}
+	at := 0
+	// A formal has one class bound (possibly empty) and zero or more interface
+	// bounds. Dependent type-variable bounds are valid on instance methods.
+	if strings.HasPrefix(sig, "<") {
+		at++
+		count := 0
+		for at < len(sig) && sig[at] != '>' {
+			begin := at
+			for at < len(sig) && sig[at] != ':' {
+				if strings.ContainsRune("<>();.[/", rune(sig[at])) {
+					return false
+				}
+				at++
+			}
+			if at == begin || at >= len(sig) {
+				return false
+			}
+			at++
+			bound := false
+			if at < len(sig) && sig[at] != ':' {
+				next, ok := takeZeroFactoryFieldSignature(sig, at, 0, scope)
+				if !ok {
+					return false
+				}
+				at = next
+				bound = true
+			}
+			for at < len(sig) && sig[at] == ':' {
+				next, ok := takeZeroFactoryFieldSignature(sig, at+1, 0, scope)
+				if !ok {
+					return false
+				}
+				at = next
+				bound = true
+			}
+			if !bound {
+				return false
+			}
+			count++
+		}
+		if count == 0 || at >= len(sig) || sig[at] != '>' {
+			return false
+		}
+		at++
+	}
+	if !strings.HasPrefix(sig[at:], "()L") {
+		return false
+	}
+	end, ok := takeZeroFactoryFieldSignature(sig, at+2, 0, scope)
+	return ok && end == len(sig)
+}
+
+func takeZeroFactoryFieldSignature(sig string, at, depth int, scope map[string]bool) (int, bool) {
+	if depth > 32 || at >= len(sig) {
+		return at, false
+	}
+	switch sig[at] {
+	case 'T':
+		begin := at + 1
+		at = begin
+		for at < len(sig) && sig[at] != ';' {
+			if strings.ContainsRune("<>:().[/", rune(sig[at])) {
+				return at, false
+			}
+			at++
+		}
+		return at + 1, at > begin && at < len(sig) && (scope == nil || scope[sig[begin:at]])
+	case '[':
+		at++
+		if at < len(sig) && strings.ContainsRune("BCDFIJSZ", rune(sig[at])) {
+			return at + 1, true
+		}
+		return takeZeroFactoryFieldSignature(sig, at, depth+1, scope)
+	case 'L':
+		at++
+		for {
+			begin := at
+			for at < len(sig) && sig[at] != '<' && sig[at] != '.' && sig[at] != ';' {
+				if strings.ContainsRune(":>()[]^", rune(sig[at])) || sig[at] <= ' ' {
+					return at, false
+				}
+				at++
+			}
+			if at == begin || at >= len(sig) {
+				return at, false
+			}
+			if sig[at] == '<' {
+				at++
+				count := 0
+				for at < len(sig) && sig[at] != '>' {
+					if sig[at] == '*' {
+						at++
+						count++
+						continue
+					}
+					if sig[at] == '+' || sig[at] == '-' {
+						at++
+					}
+					next, ok := takeZeroFactoryFieldSignature(sig, at, depth+1, scope)
+					if !ok {
+						return at, false
+					}
+					at = next
+					count++
+				}
+				if count == 0 || at >= len(sig) {
+					return at, false
+				}
+				at++
+			}
+			if at < len(sig) && sig[at] == ';' {
+				return at + 1, true
+			}
+			if at >= len(sig) || sig[at] != '.' {
+				return at, false
+			}
+			at++
+		}
+	}
+	return at, false
+}

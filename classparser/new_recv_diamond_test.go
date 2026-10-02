@@ -1,41 +1,30 @@
 package javaclassparser
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
 
-// TestNewRecvJDKGenericDiamondIsLoadBearing pins the raw-`new`-receiver diamond fix
-// (JDEC_NEW_RECV_DIAMOND_OFF). A RAW `new HashMap(typedMap)` used directly as the receiver of a
-// lambda-taking call (forEach) erases the method's functional-interface parameter (raw receiver, JLS
-// 4.8), so the lambda parameters degrade to Object and a body dereferencing them fails ("Object cannot
-// be converted to String"; spring SimpleAliasRegistry). Restoring the diamond `new HashMap<>(typedMap)`
-// lets javac re-infer the type arguments from the constructor argument, rebinding the lambda. With the
-// fix ON the diamond is present; with the kill-switch OFF it degrades to the broken raw form, proving
-// the fix is load-bearing.
+// The materialized String callback supplies its own SAM target. A raw new
+// receiver therefore preserves constructor/callback binding without a diamond.
+// Compare both legacy settings while pinning the original bootstrap and tuple.
 func TestNewRecvJDKGenericDiamondIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/NewRecvDiamondSeed.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
-	}
 
-	os.Unsetenv("JDEC_NEW_RECV_DIAMOND_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !strings.Contains(on, "new HashMap<>(this.aliasMap).forEach(") {
-		t.Errorf("fix ON: expected diamond `new HashMap<>(this.aliasMap).forEach(`, got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_NEW_RECV_DIAMOND_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if strings.Contains(off, "new HashMap<>(this.aliasMap).forEach(") ||
-		!strings.Contains(off, "new HashMap(this.aliasMap).forEach(") {
-		t.Errorf("fix OFF: expected the broken raw `new HashMap(this.aliasMap).forEach(` (kill-switch not load-bearing), got:\n%s", off)
-	}
+	path := "testdata/regression/NewRecvDiamondSeed.class"
+	raw, _, _ := reviewedFixtureMethod(t, path, "resolve", "(Ljava/util/function/UnaryOperator;)V")
+	assertReviewedTypeVarMethod(t, raw, "resolve", "(Ljava/util/function/UnaryOperator;)V", "(Ljava/util/function/UnaryOperator<Ljava/lang/String;>;)V")
+	assertReviewedGenericField(t, raw, "aliasMap", "Ljava/util/Map;", "Ljava/util/Map<Ljava/lang/String;Ljava/lang/String;>;")
+	assertReviewedTypeVarInvoke(t, path, "resolve", "(Ljava/util/function/UnaryOperator;)V", 8, 183, "java/util/HashMap", "<init>", "(Ljava/util/Map;)V")
+	assertReviewedTypeVarInvoke(t, path, "resolve", "(Ljava/util/function/UnaryOperator;)V", 18, 182, "java/util/HashMap", "forEach", "(Ljava/util/function/BiConsumer;)V")
+	assertReviewedSeedSAM(t, raw, "(Ljava/lang/Object;Ljava/lang/Object;)V", "(Ljava/lang/String;Ljava/lang/String;)V")
+	reviewedSeedSources(t, path, "JDEC_NEW_RECV_DIAMOND_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `resolve\(UnaryOperator<String> [^)]*\)`)
+		carrier := reviewedFunctionalCarrier(t, body, "BiConsumer<String, String>", "(l0, l1) ->")
+		if !strings.Contains(compactReviewedGenericSource(body), "newHashMap(this.aliasMap).forEach("+carrier+");") {
+			t.Fatal("lost copy-map receiver or independently typed String callback")
+		}
+		if strings.Count(body, ".apply(") != 2 || !strings.Contains(body, "this.aliasMap.put(") {
+			t.Fatal("lost callback resolver effects")
+		}
+	})
 }

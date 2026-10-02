@@ -3943,12 +3943,16 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_AALOAD, OP_IALOAD, OP_BALOAD, OP_CALOAD, OP_FALOAD, OP_LALOAD, OP_DALOAD, OP_SALOAD:
 		index := runtimeStackSimulation.Pop().(values.JavaValue)
 		ref := runtimeStackSimulation.Pop().(values.JavaValue)
-		runtimeStackSimulation.Push(values.NewJavaArrayMember(ref, index))
+		member := values.NewJavaArrayMember(ref, index)
+		member.OriginPC, member.HasOriginPC = int(opcode.CurrentOffset), true
+		runtimeStackSimulation.Push(member)
 	case OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		index := runtimeStackSimulation.Pop().(values.JavaValue)
 		ref := runtimeStackSimulation.Pop().(values.JavaValue)
-		statements.NewArrayMemberAssignStatement(values.NewJavaArrayMember(ref, index), value)
+		member := values.NewJavaArrayMember(ref, index)
+		member.OriginPC, member.HasOriginPC = int(opcode.CurrentOffset), true
+		statements.NewArrayMemberAssignStatement(member, value)
 	case OP_LCMP, OP_DCMPG, OP_DCMPL, OP_FCMPG, OP_FCMPL:
 		var1 := runtimeStackSimulation.Pop().(values.JavaValue)
 		var2 := runtimeStackSimulation.Pop().(values.JavaValue)
@@ -5250,6 +5254,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	var unadoptedCastRoot *OpCode
 	buildSharedLeafTernary := func(mergeNode *OpCode, detectedIfNodes []*OpCode) (root *values.TernaryExpression, built map[*OpCode]*values.TernaryExpression, sharedLeaf bool, hasMiddleCond bool, ok bool) {
 		adoptedCasts := map[*OpCode]*values.JavaRef{}
+		adoptedFieldStores := map[*OpCode]bool{}
 		var arrayLeaves []branchArrayLeaf
 		// valueMergeSet is every node the merge detection registered as carrying a value across control
 		// flow (a ternary / short-circuit result on the operand stack). It is the principled signal for
@@ -5357,7 +5362,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				return nil
 			}
 			field := values.NewRefMember(cur.stackConsumed[1], staticVal.Member, staticVal.JavaType)
-			cur.SelfOpFolded = true
+			adoptedFieldStores[cur] = true
 			// Keep the field store enumerable and use the same assignment
 			// lowering as a standalone putfield. A CustomValue string hid its
 			// target Signature and bypassed invariant-generic store repair.
@@ -5433,7 +5438,18 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				// reconstructed by its OWN merge pass); skip the whole sub-region to its reconvergence
 				// point and keep walking toward this merge's conditions/leaves.
 				if isInnerValueTernary(cur) {
-					cur = innerValueMerge(cur)
+					inner := innerValueMerge(cur)
+					// An earlier merge may have materialized its selected values
+					// as statements on incoming edges. An outer expression cannot
+					// erase that region while keeping a read of its initialized slot.
+					// Retain the routing CFG and lower this enclosing value too.
+					for _, pred := range inner.Source {
+						if d.effectfulStackPhiEdges[pred] != nil {
+							unadoptedBranchCast, failed = true, true
+							return nil
+						}
+					}
+					cur = inner
 					continue
 				}
 				if isTernaryArmStore(cur.Instr.OpCode) && !isInlineArrayInitStore(cur) {
@@ -5603,6 +5619,9 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 		}
 		// Publish only after the complete routing graph has been accepted.
+		for store := range adoptedFieldStores {
+			store.SelfOpFolded = true
+		}
 		for check, ref := range adoptedCasts {
 			d.inlineCheckcast[check] = true
 			// The branch expression has consumed this proven sole use. Retire
@@ -5614,10 +5633,19 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		d.branchArrayLeaves = append(d.branchArrayLeaves, arrayLeaves...)
 		return root, built, sharedLeaf, hasMiddleCond, true
 	}
+	// Resolve statement-owned inner values before an enclosing expression can
+	// consume their routing region. Expression reconstruction runs outer-first;
+	// deferring this proof until that walk makes the later edge writes orphaned.
+	loweredStackPhis := map[*OpCode]bool{}
+	for _, merge := range ternaryExpMergeNode {
+		if d.lowerEffectfulStackPhi(merge, mergeToIfNode[merge], ternaryExpMergeNodeSlot[merge]) {
+			loweredStackPhis[merge] = true
+		}
+	}
 	for _, code := range ternaryExpMergeNode {
 		mergeNode := code
 		ifNodes := mergeToIfNode[code]
-		if d.lowerEffectfulStackPhi(mergeNode, ifNodes, ternaryExpMergeNodeSlot[code]) {
+		if loweredStackPhis[mergeNode] {
 			continue
 		}
 		if len(ifNodes) == 0 {
@@ -6548,7 +6576,9 @@ func (d *Decompiler) ParseStatement() error {
 			value := opcode.stackConsumed[0]
 			index := opcode.stackConsumed[1]
 			ref := opcode.stackConsumed[2]
-			st := statements.NewArrayMemberAssignStatement(values.NewJavaArrayMember(ref, index), value)
+			member := values.NewJavaArrayMember(ref, index)
+			member.OriginPC, member.HasOriginPC = int(opcode.CurrentOffset), true
+			st := statements.NewArrayMemberAssignStatement(member, value)
 			st.ReferenceArrayStore = opcode.Instr.OpCode == OP_AASTORE
 			appendNode(st)
 		case OP_IFEQ, OP_IFNE, OP_IFLE, OP_IFLT, OP_IFGT, OP_IFGE:
@@ -7177,6 +7207,7 @@ func (d *Decompiler) ParseStatement() error {
 			}
 			pairs[1].Replace(&values.AssignmentExpression{
 				Target: nextAssign.LeftValue, Value: val,
+				OriginPC: nextAssign.OriginPC, HasOriginPC: nextAssign.HasOriginPC,
 				Render: func(ctx *class_context.ClassContext) string {
 					return statements.NewAssignStatement(nextAssign.LeftValue, val, false).String(ctx)
 				},

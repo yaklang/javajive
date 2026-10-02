@@ -20,9 +20,7 @@ func TestPool2GetGenericTypeSuperclassCastIsLoadBearing(t *testing.T) {
 }
 
 func TestPool2EvictionPolicyNSMECatchIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/BaseGenericObjectPool.class", "JDEC_ORIG14_REMAINING_OFF",
-		"ClassCastException | NoSuchMethodException var4",
-		"InvocationTargetException var4){\n\t\t\tthrow new IllegalArgumentException(new StringBuilder().append(\"Unable to create \")")
+	assertReviewedPoolReflectionCatchRegions(t)
 }
 
 func TestPool2SecurityManagerPrintlnIsLoadBearing(t *testing.T) {

@@ -81,6 +81,15 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 			}
 		}
 	}
+	// A Boolean consumer can constrain JVM int-category constant arms. Copy
+	// only literal 0/1 into that source type; arbitrary ints remain unproved.
+	incomingValues := map[*OpCode]values.JavaValue{}
+	booleanTarget := false
+	if target := slot.Type(); target != nil {
+		if primitive, ok := target.RawType().(*types.JavaPrimer); ok {
+			booleanTarget = primitive.Name == types.JavaBoolean
+		}
+	}
 	var typ types.JavaType
 	var provider types.SuperTypeProvider
 	if d.FunctionContext != nil {
@@ -92,6 +101,32 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 			return false
 		}
 		v := pred.StackEntry.value
+		if booleanTarget {
+			actual, primitive := v.Type().RawType().(*types.JavaPrimer)
+			if !primitive || (actual.Name != types.JavaInteger && actual.Name != types.JavaBoolean) {
+				return false
+			}
+			literal, isLiteral := values.UnpackSoltValue(v).(*values.JavaLiteral)
+			if actual.Name == types.JavaInteger && !isLiteral {
+				return false
+			}
+			if isLiteral {
+				switch data := literal.Data.(type) {
+				case int:
+					if data != 0 && data != 1 {
+						return false
+					}
+					v = values.NewJavaLiteral(data != 0, types.NewJavaPrimer(types.JavaBoolean))
+				case bool:
+					if actual.Name != types.JavaBoolean {
+						return false
+					}
+				default:
+					return false
+				}
+			}
+		}
+		incomingValues[pred] = v
 		incomingType := v.Type()
 		if primitive, ok := incomingType.RawType().(*types.JavaPrimer); ok && primitive.Name == types.JavaString {
 			incomingType = types.NewJavaClass("java.lang.String")
@@ -123,7 +158,11 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 		d.effectfulStackPhiEdges = map[*OpCode]*statements.AssignStatement{}
 	}
 	for _, pred := range merge.Source {
-		d.effectfulStackPhiEdges[pred] = statements.NewAssignStatement(ref, pred.StackEntry.value, false)
+		assign := statements.NewAssignStatement(ref, incomingValues[pred], false)
+		// This is the original edge placement, not a decoded ASTORE.
+		// The outgoing stack value is written after that routing instruction.
+		assign.OriginPC, assign.HasOriginPC = int(pred.CurrentOffset), true
+		d.effectfulStackPhiEdges[pred] = assign
 		// The new edge assignment is a real use which did not exist during
 		// stack simulation. Keep its producer local: an old single-use fold
 		// callback otherwise rewrites the original merged slot and deletes

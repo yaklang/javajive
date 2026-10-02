@@ -4,7 +4,9 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"reflect"
+	"slices"
 )
 
 // FinallyRegion is a rendering view. The original tree remains intact for
@@ -24,6 +26,9 @@ type FinallyRegion struct {
 // incorrectly. Both changes must be proved together, before any tree changes.
 // Unknown control flow, opaque effects and region gaps fail closed.
 func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, bool) {
+	if resource, ok := recoverPrimaryResourceFinally(tr); ok {
+		return resource, true
+	}
 	if tr == nil || len(tr.Exception) == 0 || len(tr.Exception) > 32 || len(tr.Handlers) != len(tr.Exception) || len(tr.CatchBodies) != len(tr.Exception) {
 		return nil, false
 	}
@@ -51,11 +56,10 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 	if len(body) < 2 || len(body) > 9 || tr.Exception[last] == nil {
 		return nil, false
 	}
-	throw, ok := body[len(body)-1].(*statements.CustomStatement)
-	if !ok || throw == nil || !throw.HasOriginPC || finallyContains(h.ProtectedRanges, throw.OriginPC) || !sameTryLocal(throw.ThrownValue, tr.Exception[last]) {
+	cleanup, ok := finallyHandlerCleanup(body, tr.Exception[last], h.ProtectedRanges)
+	if !ok {
 		return nil, false
 	}
-	cleanup := body[:len(body)-1]
 	excluded := append([]*values.JavaRef{}, tr.Exception...)
 	queue := append([]statements.Statement{}, tr.TryBody...)
 	for _, b := range tr.CatchBodies[:last] {
@@ -141,30 +145,45 @@ func finallyWithoutEnd(body []statements.Statement) []statements.Statement {
 }
 
 type finallyProof struct {
-	cleanup   []statements.Statement
-	rows      []core.HandlerRange
-	excluded  []*values.JavaRef
-	remaining int
-	loopDepth int
+	cleanup      []statements.Statement
+	rows         []core.HandlerRange
+	excluded     []*values.JavaRef
+	remaining    int
+	loopDepth    int
+	loopLabels   []string
+	cleanupMatch func(statements.Statement, statements.Statement) bool
 }
 
 func (p *finallyProof) block(input []statements.Statement, mustExit bool, covered func(int) bool) ([]statements.Statement, bool, bool) {
 	body := finallyWithoutEnd(input)
 	end := len(body)
 	var ret *statements.ReturnStatement
+	if end > 0 && len(p.cleanup) > 0 {
+		if normalized, lifted := finallyConditionalReturn(body[end-1], p.cleanup[len(p.cleanup)-1], p.rows, p.excluded); lifted != nil {
+			body = append([]statements.Statement{}, body...)
+			body[end-1] = normalized
+			ret = lifted
+		}
+	}
 	if end > 0 {
-		ret, _ = body[end-1].(*statements.ReturnStatement)
-		if ret != nil {
+		terminal, _ := body[end-1].(*statements.ReturnStatement)
+		if terminal != nil {
+			ret = terminal
 			if !ret.HasOriginPC || covered(ret.OriginPC) || (ret.JavaValue != nil && !finallyPureLocal(ret.JavaValue)) {
 				return nil, false, false
 			}
 			end--
 		}
 	}
-	if end >= len(p.cleanup) {
+	if len(p.cleanup) > 0 && end >= len(p.cleanup) {
 		matched := true
 		for i, st := range p.cleanup {
-			if !sameFinallyCleanup(p.rows, body[end-len(p.cleanup)+i], st, p.excluded, 0) {
+			candidate := body[end-len(p.cleanup)+i]
+			match := sameFinallyCleanup(p.rows, candidate, st, p.excluded, 0)
+			if p.cleanupMatch != nil {
+				match = p.cleanupMatch(candidate, st)
+			}
+			if !match {
 				matched = false
 				break
 			}
@@ -195,16 +214,20 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 			return nil, false, false
 		}
 		switch x := st.(type) {
+		case *values.JavaExpression:
+			if x == nil || (x.Op != values.INC && x.Op != values.DEC) || !finallyCoveredValue(x, covered) {
+				return nil, false, false
+			}
 		case *statements.ExpressionStatement:
 			if x == nil || !finallyCoveredValue(x.Expression, covered) {
 				return nil, false, false
 			}
 		case *statements.AssignStatement:
-			if x == nil || x.ArrayMember != nil || !finallyPureLocal(x.LeftValue) || !x.HasOriginPC || !covered(x.OriginPC) || !finallyCoveredValue(x.JavaValue, covered) {
+			if !finallyCoveredAssignment(x, covered) {
 				return nil, false, false
 			}
 		case *statements.CustomStatement:
-			if x != nil && p.loopDepth > 0 && (x.Name == "break" || x.Name == "continue") && x.ThrownValue == nil {
+			if x != nil && p.loopDepth > 0 && ((x.Name == "break" || x.Name == "continue") || ((x.LoopTransferKind == "break" || x.LoopTransferKind == "continue") && x.LoopTargetLabel != "" && slices.Contains(p.loopLabels, x.LoopTargetLabel))) && x.ThrownValue == nil {
 				out = append(out, st)
 				exits = true
 				continue
@@ -232,14 +255,20 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 			normalCleaned = needExit
 			st = &clone
 		case *statements.DoWhileStatement:
-			if x == nil || x.Label != "" || !finallyCoveredValue(x.ConditionValue, covered) {
+			if x == nil || !finallyCoveredValue(x.ConditionValue, covered) {
 				return nil, false, false
 			}
 			clone := *x
 			p.loopDepth++
+			if x.Label != "" {
+				p.loopLabels = append(p.loopLabels, x.Label)
+			}
 			var ok bool
 			clone.Body, _, ok = p.block(x.Body, false, covered)
 			p.loopDepth--
+			if x.Label != "" {
+				p.loopLabels = p.loopLabels[:len(p.loopLabels)-1]
+			}
 			if !ok {
 				return nil, false, false
 			}
@@ -289,7 +318,7 @@ func finallyPureLocal(v values.JavaValue) bool {
 	}
 	switch v := v.(type) {
 	case *values.JavaRef:
-		return v != nil && v.Id != nil
+		return v != nil && v.Id != nil && v.CustomValue == nil && v.StackVar == nil
 	case *values.JavaLiteral:
 		return v != nil
 	}
@@ -333,9 +362,26 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 			} else {
 				children = append(children, x.Object)
 			}
+		case *values.JavaArrayMember:
+			if x == nil || !x.HasOriginPC || !covered(x.OriginPC) {
+				return false
+			}
+			children = []values.JavaValue{x.Object, x.Index}
+		case *values.ArrayLengthExpression:
+			if x == nil || !x.HasOriginPC || !covered(x.OriginPC) {
+				return false
+			}
+			children = []values.JavaValue{x.Array}
 		case *values.NewExpression:
 			if x == nil {
 				return false
+			}
+			if x.IsArray() {
+				if !x.HasOriginPC || !covered(x.OriginPC) || x.HasEvaluationEndPC && !covered(x.EvaluationEndPC) || len(x.Initializer) > 0 && !x.HasEvaluationEndPC {
+					return false
+				}
+				children = append(append([]values.JavaValue{}, x.Length...), x.Initializer...)
+				break
 			}
 			ctor := x.ConstructorCall
 			if !x.HasOriginPC || !covered(x.OriginPC) || x.IsArray() || ctor == nil || !ctor.HasOriginPC || !covered(ctor.OriginPC) || ctor.Kind != values.InvokeSpecial || ctor.FunctionName != "<init>" {
@@ -357,9 +403,43 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 			switch x.Op {
 			case values.Not, values.EQ, values.NEQ, values.LT, values.LTE, values.GT, values.GTE, values.LOGICAL_AND, values.LOGICAL_OR:
 				children = x.Values
+			case values.ADD, values.SUB, values.MUL, values.AND, values.OR, values.XOR, values.SHL, values.SHR, values.USHR, values.INC, values.DEC:
+				for _, operand := range x.Values {
+					if operand == nil || operand.Type() == nil {
+						return false
+					}
+					primitive, ok := operand.Type().RawType().(*types.JavaPrimer)
+					if !ok {
+						return false
+					}
+					switch primitive.Name {
+					case types.JavaByte, types.JavaShort, types.JavaChar, types.JavaInteger, types.JavaLong, types.JavaFloat, types.JavaDouble:
+					default:
+						return false
+					}
+				}
+				if x.Op == values.INC || x.Op == values.DEC {
+					ref, ok := plainTryValue(x.Values[0]).(*values.JavaRef)
+					if !ok || ref == nil || !finallyPureLocal(ref) {
+						return false
+					}
+				}
+				children = x.Values
 			default:
 				return false
 			}
+		case *values.TernaryExpression:
+			if x == nil || x.Condition == nil || x.TrueValue == nil || x.FalseValue == nil {
+				return false
+			}
+			// The selection itself does not throw. Every evaluation on both
+			// arms must retain its own original protected-domain witness.
+			children = []values.JavaValue{x.Condition, x.TrueValue, x.FalseValue}
+		case *values.AssignmentExpression:
+			if x == nil || !x.HasOriginPC || !covered(x.OriginPC) || !finallyPureLocal(x.Target) {
+				return false
+			}
+			children = []values.JavaValue{x.Value}
 		case *values.RefMember:
 			if x == nil || !x.HasOriginPC || !covered(x.OriginPC) || x.Member == "" || x.JavaType == nil {
 				return false
@@ -403,7 +483,7 @@ func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, exc
 	switch x := a.(type) {
 	case *statements.ExpressionStatement:
 		y, ok := b.(*statements.ExpressionStatement)
-		return ok && x != nil && y != nil && sameUnprotectedTryCall(rows, x.Expression, y.Expression, excluded...)
+		return ok && x != nil && y != nil && (sameUnprotectedTryCall(rows, x.Expression, y.Expression, excluded...) || sameFinallyEffectValue(rows, x.Expression, y.Expression, excluded, depth))
 	case *statements.AssignStatement:
 		y, ok := b.(*statements.AssignStatement)
 		if !ok || x == nil || y == nil || x.IsDeclare || y.IsDeclare || x.ArrayMember != nil || y.ArrayMember != nil || !x.HasOriginPC || !y.HasOriginPC || !outside(x.OriginPC) || !outside(y.OriginPC) {
@@ -411,6 +491,10 @@ func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, exc
 		}
 		lhs, lok := plainTryValue(x.LeftValue).(*values.RefMember)
 		rhs, rok := plainTryValue(y.LeftValue).(*values.RefMember)
+		if static, ok := plainTryValue(x.LeftValue).(*values.JavaClassMember); ok {
+			other, ok := plainTryValue(y.LeftValue).(*values.JavaClassMember)
+			return ok && static != nil && other != nil && static.Name != "" && static.Name == other.Name && static.Member != "" && static.Member == other.Member && static.Description != "" && static.Description == other.Description && static.JavaType != nil && other.JavaType != nil && reflect.DeepEqual(static.JavaType.RawType(), other.JavaType.RawType()) && sameFinallyEffectValue(rows, x.JavaValue, y.JavaValue, excluded, depth)
+		}
 		if !lok || !rok || lhs == nil || rhs == nil || lhs.Member == "" || lhs.Member != rhs.Member || lhs.JavaType == nil || rhs.JavaType == nil || !reflect.DeepEqual(lhs.JavaType.RawType(), rhs.JavaType.RawType()) {
 			return false
 		}
@@ -418,7 +502,7 @@ func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, exc
 		return sok && self != nil && self.IsThis && sameTryLocal(rhs.Object, self) && sameFinallyStableValue(x.JavaValue, y.JavaValue, excluded, 0)
 	case *statements.IfStatement:
 		y, ok := b.(*statements.IfStatement)
-		if !ok || x == nil || y == nil || !sameFinallyStableValue(x.Condition, y.Condition, excluded, 0) {
+		if !ok || x == nil || y == nil || !(sameFinallyStableValue(x.Condition, y.Condition, excluded, 0) || sameFinallyEffectValue(rows, x.Condition, y.Condition, excluded, depth)) {
 			return false
 		}
 		strip := func(body []statements.Statement) []statements.Statement {
@@ -445,6 +529,9 @@ func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, exc
 			}
 		}
 		return true
+	case *statements.CustomStatement:
+		y, ok := b.(*statements.CustomStatement)
+		return ok && x != nil && y != nil && x.ThrownValue != nil && y.ThrownValue != nil && x.HasOriginPC && y.HasOriginPC && outside(x.OriginPC) && outside(y.OriginPC) && sameFinallyEffectValue(rows, x.ThrownValue, y.ThrownValue, excluded, depth)
 	}
 	return false
 }

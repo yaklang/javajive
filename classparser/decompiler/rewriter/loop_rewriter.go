@@ -1328,6 +1328,7 @@ func (manager *RewriteManager) qualifyTargetTransfer(node, target *core.Node, ki
 	}
 	copy := *original
 	copy.Name = ""
+	copy.LoopTransferKind, copy.LoopTargetLabel = kind, loop.Label
 	copy.StringFunc = func(*class_context.ClassContext) string { return kind + " " + loop.Label }
 	node.Statement = &copy
 }

@@ -80,36 +80,24 @@ func TestClosedTypeVarArgCastIsLoadBearing(t *testing.T) {
 }
 
 func TestImmediateFutureCastIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/ImmediateFutureCastSeed.class")
+
+	path := "testdata/regression/ImmediateFutureCastSeed.class"
+	raw, _, _ := reviewedFixtureMethod(t, path, "load", "()Ljava/util/concurrent/Future;")
+	assertReviewedTypeVarMethod(t, raw, "load", "()Ljava/util/concurrent/Future;", "()Ljava/util/concurrent/Future<TV;>;")
+	assertReviewedGenericField(t, raw, "futureValue", "Ljava/util/concurrent/Future;", "Ljava/util/concurrent/Future<TV;>;")
+	helper, err := os.ReadFile("testdata/regression/ImmediateFutureCastSeed$Futures.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-	resolver := func(internalName string) ([]byte, bool) {
-		b, e := os.ReadFile("testdata/regression/" + internalName + ".class")
-		if e != nil {
-			return nil, false
+	assertReviewedTypeVarMethod(t, helper, "immediateFuture", "(Ljava/lang/Object;)Ljava/util/concurrent/Future;", "<V:Ljava/lang/Object;>(TV;)Ljava/util/concurrent/Future<TV;>;")
+	assertReviewedTypeVarInvoke(t, path, "load", "()Ljava/util/concurrent/Future;", 18, 184, "ImmediateFutureCastSeed$Futures", "immediateFuture", "(Ljava/lang/Object;)Ljava/util/concurrent/Future;")
+	reviewedSeedSources(t, path, "JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF", true, func(source string) {
+		body := reviewedSourceMethod(t, source, `load\(\)`)
+		compact := compactReviewedGenericSource(body)
+		if !strings.Contains(compact, "(Future<V>)(Future)") || (!strings.Contains(compact, "this.futureValue") || !strings.Contains(compact, ".immediateFuture(null)")) {
+			t.Fatal("lost saved/fallback identity or original propagated null: " + body)
 		}
-		return b, true
-	}
-
-	os.Unsetenv("JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF")
-	on, err := DecompileWithResolver(data, resolver)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	if !strings.Contains(on, "immediateFuture((V)") && !strings.Contains(on, "immediateFuture((V) (") {
-		t.Errorf("fix ON: expected (V) cast on immediateFuture arg, got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_ENCLOSING_TYPEVAR_ARG_CAST_OFF", "1")
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	off, err := DecompileWithResolver(data, resolver)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	if strings.Contains(off, "immediateFuture((V)") || strings.Contains(off, "immediateFuture((V) (") {
-		t.Errorf("fix OFF: expected no (V) cast, got:\n%s", off)
-	}
+	})
 }
 
 func TestNewEntryTypeVarCastIsLoadBearing(t *testing.T) {

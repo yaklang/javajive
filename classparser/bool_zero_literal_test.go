@@ -1,8 +1,11 @@
 package javaclassparser
 
 import (
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 )
 
 func TestBooleanZeroLiteralSnippet(t *testing.T) {
@@ -47,9 +50,19 @@ func TestIntCmpBoolMaterializedLiteralSnippet(t *testing.T) {
 }
 
 func TestJodaTwoDigitYearIntCmpIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/TwoDigitYear.class", "JDEC_INT_CMP_BOOL_LIT_OFF",
-		"(var7_1) == (2)",
-		"(var7_1) == ((2) != (0))")
+	raw, code, _ := reviewedFixtureMethod(t, "testdata/regression/TwoDigitYear.class", "parseInto", "")
+	assertReviewedOpcode(t, code, 104, core.OP_IINC, 7, 1)
+	assertReviewedOpcode(t, code, 158, core.OP_ICONST_2)
+	assertReviewedOpcode(t, code, 159, core.OP_IF_ICMPEQ)
+	assertReviewedSources(t, raw, "JDEC_INT_CMP_BOOL_LIT_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `public int parseInto\(`)
+		comparison := requireReviewedPattern(t, body, `\((\w+)\)\s*==\s*\(2\)`)
+		requireReviewedPattern(t, body, `int\s+`+regexp.QuoteMeta(comparison[1])+`\s*=`)
+		requireReviewedPattern(t, body, regexp.QuoteMeta(comparison[1])+`\+\+`)
+		if strings.Contains(body, "(2) != (0)") {
+			t.Fatalf("numeric equality became a boolean-materialized literal:\n%s", body)
+		}
+	})
 }
 
 func TestJsoupTokeniserBoolExprCmpZeroIsLoadBearing(t *testing.T) {
