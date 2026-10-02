@@ -290,11 +290,26 @@ func (f *FunctionCallExpression) PlanErasedFormalResult(ctx *class_context.Class
 // an erased assignment view without adding a check, changing dispatch or
 // retargeting poly inputs. Every receiver edge must be a known widening.
 func ErasedFactoryAssignmentView(value JavaValue, target types.JavaType, ctx *class_context.ClassContext) JavaValue {
-	if ctx == nil || ctx.InvocationMetadata == nil || target == nil || target.IsArray() {
+	return erasedFactoryAssignmentView(value, target, ctx, 32)
+}
+func erasedFactoryAssignmentView(value JavaValue, target types.JavaType, ctx *class_context.ClassContext, budget int) JavaValue {
+	if budget <= 0 || ctx == nil || ctx.InvocationMetadata == nil || target == nil || target.IsArray() {
 		return value
 	}
 	if _, ok := types.AsParameterizedType(target); !ok {
 		return value
+	}
+	if cast, ok := UnpackSoltValue(value).(*CastExpression); ok {
+		if cast.TargetType == nil || bindingType(cast.TargetType) != bindingType(target) {
+			return value
+		}
+		inner := erasedFactoryAssignmentView(cast.Value, target, ctx, budget-1)
+		if inner == cast.Value {
+			return value
+		}
+		copy := *cast
+		copy.Value = inner
+		return &copy
 	}
 	root, ok := UnpackSoltValue(value).(*FunctionCallExpression)
 	if !ok {
@@ -305,7 +320,7 @@ func ErasedFactoryAssignmentView(value JavaValue, target types.JavaType, ctx *cl
 		return value
 	}
 	call := root
-	for depth := 0; depth < 32; depth++ {
+	for depth := 0; depth < budget; depth++ {
 		if call == nil || !call.HasOriginPC || call.Kind >= InvokeDynamic || call.IsSpecialInvoke || len(call.Arguments) != 0 {
 			return value
 		}

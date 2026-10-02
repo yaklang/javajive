@@ -1942,6 +1942,12 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 			}
 		}
 
+		// ConstantValue initializes only static fields in the JVM. An instance
+		// constant is still stored by <init>; if that store was not safely
+		// lifted, keep the declaration blank and preserve its bytecode position.
+		if valueLiteral != "" && !slices.Contains(accessFlagsVerbose, "static") && c.fieldDefaultValue[name] == "" {
+			valueLiteral = ""
+		}
 		if valueLiteral != "" {
 			fields = append(fields, dumpedFields{
 				code:      fmt.Sprintf("%s %s %s = %s;", accessFlags, lastPacket, renderName, valueLiteral),
@@ -3163,6 +3169,10 @@ func isUnconditionalTerminalStatement(st statements.Statement, funcCtx *class_co
 		case strings.HasPrefix(t, "break "), strings.HasPrefix(t, "continue "), strings.HasPrefix(t, "throw "):
 			return true
 		}
+	case *statements.SynchronizedStatement:
+		// Releasing the monitor does not add a normal continuation when
+		// every body path returns, throws, or transfers to its lexical owner.
+		return blockTerminates(s.Body, funcCtx)
 	case *statements.DoWhileStatement:
 		// An infinite loop (condition is the constant true) that never breaks back to its own
 		// successor transfers control away forever, so any sibling after it is unreachable.
@@ -3245,6 +3255,8 @@ func stmtTerminates(st statements.Statement, funcCtx *class_context.ClassContext
 		return true
 	case *statements.IfStatement:
 		return ifElseAllArmsTerminate(s, funcCtx)
+	case *statements.SynchronizedStatement:
+		return blockTerminates(s.Body, funcCtx)
 	case *statements.TryCatchStatement:
 		// A try/catch terminates iff the try body terminates and all catch bodies terminate.
 		if !blockTerminates(s.TryBody, funcCtx) {
@@ -3264,28 +3276,20 @@ func stmtTerminates(st statements.Statement, funcCtx *class_context.ClassContext
 		return loopConditionIsConstTrue(s.ConditionValue, funcCtx) &&
 			!loopBodyHasEscapingBreak(s.Body, "", true, funcCtx)
 	case *statements.SwitchStatement:
-		// A switch terminates iff it has a `default` and every fall-through chain terminates.
-		// A fall-through chain starts at a case and continues through empty cases until a
-		// case with a body. The chain terminates iff that body's last statement terminates
-		// (return/throw/break). A `break` terminates the chain (exits the switch). We check
-		// conservatively: the switch must have a default, and the LAST non-empty case body
-		// must terminate (all earlier fall-through chains reach it or their own terminator).
-		hasDefault := false
-		lastNonEmptyTerminates := false
-		foundNonEmpty := false
-		for _, c := range s.Cases {
-			if c.IsDefault {
-				hasDefault = true
+		hasDefault, chainTerminal := false, false
+		for i := len(s.Cases) - 1; i >= 0; i-- {
+			item := s.Cases[i]
+			hasDefault = hasDefault || item.IsDefault
+			if len(item.Body) > 0 {
+				// An unlabeled break completes the switch normally, while
+				// an empty grouped case inherits the following case's flow.
+				chainTerminal = blockTerminates(item.Body, funcCtx) && !loopBodyHasEscapingBreak(item.Body, "", true, funcCtx)
 			}
-			if len(c.Body) > 0 {
-				foundNonEmpty = true
-				lastNonEmptyTerminates = blockTerminates(c.Body, funcCtx)
+			if !chainTerminal {
+				return false
 			}
 		}
-		if !hasDefault || !foundNonEmpty {
-			return false // no default or all-empty → control can fall through past the switch
-		}
-		return lastNonEmptyTerminates
+		return hasDefault
 	}
 	// Check for throw/break/continue via rendered text.
 	if cs, ok := st.(*statements.CustomStatement); ok {
@@ -4158,6 +4162,15 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					}
 				}
 				if clinitHoistBarrierOn {
+					// A container cannot be wholly lifted merely because one
+					// nested assignment was lifted. Establish the barrier before
+					// rendering its protected/conditional body, preserving both
+					// handler coverage and the order of dependent static fields.
+					switch statement.(type) {
+					case *statements.AssignStatement, *statements.MiddleStatement, *statements.StackAssignStatement:
+					default:
+						staticHoistBarrierHit = true
+					}
 					staticHoistAllowedHere = !staticHoistBarrierHit
 				}
 				hoistBefore := hoistEventCount

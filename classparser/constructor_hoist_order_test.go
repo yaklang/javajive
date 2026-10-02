@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -34,6 +35,41 @@ func TestInstanceInitializerCannotCrossEffectOrControlFlow(t *testing.T) {
 			}
 			if got := inertConstructorFieldPrefix(body, "example.Owner")[candidate]; got != (scenario == "literal prefix") {
 				t.Fatalf("hoist=%v", got)
+			}
+		})
+	}
+}
+
+func TestAdversarialSynchronizedAbruptCompletionRespectsSwitchNormalExits(t *testing.T) {
+	terminal := &statements.ReturnStatement{}
+	normal := &statements.ExpressionStatement{Expression: values.JavaNull}
+	for _, scenario := range []string{"return", "both arms", "fallthrough arm", "switch break", "switch no default", "switch all return", "grouped switch"} {
+		t.Run(scenario, func(t *testing.T) {
+			var body []statements.Statement
+			switch scenario {
+			case "return":
+				body = []statements.Statement{terminal}
+			case "both arms":
+				body = []statements.Statement{&statements.IfStatement{IfBody: []statements.Statement{terminal}, ElseBody: []statements.Statement{terminal}}}
+			case "fallthrough arm":
+				body = []statements.Statement{&statements.IfStatement{IfBody: []statements.Statement{terminal}, ElseBody: []statements.Statement{normal}}}
+			default:
+				sw := &statements.SwitchStatement{Cases: []*statements.CaseItem{{Body: []statements.Statement{terminal}}, {IsDefault: true, Body: []statements.Statement{terminal}}}}
+				if scenario == "switch break" {
+					sw.Cases[0].Body = []statements.Statement{&statements.CustomStatement{Name: "break", StringFunc: func(*class_context.ClassContext) string { return "break" }}}
+				}
+				if scenario == "switch no default" {
+					sw.Cases[1].IsDefault = false
+				}
+				if scenario == "grouped switch" {
+					sw.Cases[0].Body = nil
+				}
+				body = []statements.Statement{sw}
+			}
+			want := scenario == "return" || scenario == "both arms" || scenario == "switch all return" || scenario == "grouped switch"
+			sync := &statements.SynchronizedStatement{Body: body}
+			if got := isUnconditionalTerminalStatement(sync, nil); got != want {
+				t.Fatalf("terminal=%v want=%v", got, want)
 			}
 		})
 	}

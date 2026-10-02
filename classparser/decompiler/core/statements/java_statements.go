@@ -3134,40 +3134,40 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// and they are untouched. Kill-switch JDEC_NO_NARROW_REASSIGN_CAST=1.
 		if jdecenv.Get("JDEC_NO_NARROW_REASSIGN_CAST") == "" && a.LeftValue != nil && a.JavaValue != nil {
 			if cast := narrowingInitCast(a.LeftValue.Type(), a.JavaValue.Type()); cast != "" {
-				return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+				return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 			}
 		}
 		// Type-variable field store: `this.key = objExpr` where `key` is declared `K` needs an
 		// explicit unchecked `(K)` cast (the field erases to its bound in bytecode). See
 		// typeVarFieldStoreCast.
 		if cast := typeVarFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// Wildcard-parameterized same-class field store: `this.rawType = call()` where rawType is
 		// `Class<? super T>` and the call returns `Class<?>` needs an explicit unchecked
 		// `(Class<? super T>)` cast (gson TypeToken). See wildcardFieldStoreCast.
 		if cast := wildcardFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		if cast := classTypeVarFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// Same-erasure invariant field-store mismatch (`X<B>` value into concrete `X<A>` field): the
 		// source carried a raw `(X)` cast that bytecode erased. See parameterizedFieldStoreRawCast.
 		if cast := parameterizedFieldStoreRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, values.StandaloneFunctionalArms(a.JavaValue).String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, values.StandaloneFunctionalArms(rhsVal).String(funcCtx))
 		}
 		// Concrete `X<A>` field assigned a raw-rendered call whose RECOVERED instantiated return is a
 		// same-erasure WILDCARD parameterization (`this.comparator = var1.comparator()` -> the callee
 		// truly returns `Comparator<? super K>`): wrap in `(X<A>)`. See wildcardReturnFieldStoreCast.
 		if cast := wildcardReturnFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// Proper-subtype value into a type-variable-parameterized field (`this.successorIterator =
 		// ImmutableSet.of().iterator()` -> field `Iterator<N>`, value a subtype `UnmodifiableIterator`):
 		// wrap in `(X<typevars>)`. See subtypeValueFieldStoreCast.
 		if cast := subtypeValueFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// A LOCAL variable declared as an invariant parameterization mentioning a type variable
 		// (`Class<T> var1`) REASSIGNED from a method call of the SAME erasure whose true generic return
@@ -3176,14 +3176,14 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// `(Class)` cast that bytecode erased. See parameterizedLocalReassignRawCast (objenesis
 		// SerializationInstantiatorHelper / PercSerializationInstantiator).
 		if cast := parameterizedLocalReassignRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// A LOCAL / parameter declared as a bare type variable (`T var1`) REASSIGNED from an
 		// erased Object call (`var1 = rawTransformer.transform(var1)`): bytecode dropped the
 		// source's unchecked `(T)` cast. See typeVarLocalReassignCast (commons-collections4
 		// ChainedTransformer / TransformedList$TransformedListIterator).
 		if cast := typeVarLocalReassignCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			expr := a.JavaValue.String(funcCtx)
+			expr := rhsVal.String(funcCtx)
 			if call, ok := values.UnpackSoltValue(a.JavaValue).(*values.FunctionCallExpression); ok {
 				if planned, ok := call.PlanErasedFormalResult(funcCtx, a.LeftValue.Type()); ok {
 					expr = planned.String(funcCtx)
@@ -3196,7 +3196,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// unchecked `(T[])` cast. See typeVarArrayReassignCast (commons-collections4
 		// AbstractLinkedList.toArray / AbstractMapBag.toArray).
 		if cast := typeVarArrayReassignCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// Ternary with sibling-typed arms assigned to a concrete-typed local: the JVM stored both arms
 		// into the same slot (no checkcast), but javac requires every arm to be assignable to the
@@ -3210,7 +3210,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 			}
 		}
 		if raw := wildcardObjectAssignRawBridge(funcCtx, a.LeftValue, a.JavaValue); raw != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), raw, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), raw, rhsVal.String(funcCtx))
 		}
 		return assign
 	}

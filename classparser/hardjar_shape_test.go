@@ -5135,3 +5135,19 @@ func TestForNameRawCastLeavesPostfixReceiversIntact(t *testing.T) {
 		}
 	}
 }
+
+func TestAdversarialBuilderReturnsRequireBytecodeEvidence(t *testing.T) {
+	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "")
+	for _, body := range []string{
+		"class C {\n\tObject m(boolean report) {\n\t\tBytesRefBuilder var29 = new BytesRefBuilder();\n\t\tLOOP_1:\n\t\tdo{\n\t\t\tif (var2.seekCeil(var29.get())) break LOOP_1;\n\t\t} while (true);\n\t\tif (report) {\n\t\t\tdo{\n\t\t\t\tbreak;\n\t\t\t} while (true);\n\t\t}\n\t\treturn original;\n\t}\n}\n",
+		"class C {\n\tBytesRef getMax() {\n\t\tBytesRefBuilder var4 = new BytesRefBuilder();\n\t\tLOOP_1:\n\t\tdo{\n\t\t\tif (var2.seekCeil(var4.get())) break LOOP_1;\n\t\t} while (true);\n\t}\n}\n",
+	} {
+		got := fixHardjarShapes(body)
+		if strings.Contains(got, "return var29.get()") || strings.Contains(got, "return var4.get()") {
+			t.Fatalf("invented a return without bytecode evidence:\n%s", got)
+		}
+		if strings.Contains(body, "return original;") && !strings.Contains(got, "return original;") {
+			t.Fatal("lost the original return")
+		}
+	}
+}

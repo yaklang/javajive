@@ -215,3 +215,27 @@ func TestLoopTerminalRegionUsesLiveEdgesAndRespectsAncestorTargets(t *testing.T)
 		})
 	}
 }
+
+func TestTerminalHeaderGuardKeepsSharedNormalExit(t *testing.T) {
+	root := core.NewNode(&statements.ConditionStatement{})
+	loop := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+	header := core.NewNode(&statements.ConditionStatement{})
+	check := core.NewNode(&statements.ConditionStatement{})
+	guard := core.NewNode(&statements.ExpressionStatement{})
+	thrown := core.NewNode(statements.NewCustomStatement(func(*class_context.ClassContext) string { return "throw failure" }, nil))
+	shared := core.NewNode(&statements.ExpressionStatement{})
+	ret := core.NewNode(&statements.ReturnStatement{})
+	root.Id, header.Id, check.Id, guard.Id, thrown.Id, shared.Id = 1, 10, 11, 12, 13, 14
+	root.AddNext(loop)
+	root.AddNext(shared)
+	loop.AddNext(header)
+	header.AddNext(guard)
+	header.AddNext(check)
+	guard.AddNext(thrown)
+	check.AddNext(loop)
+	check.AddNext(shared)
+	shared.AddNext(ret)
+	if got := searchCircleEndNode(loop, header, GenerateDominatorTree(root), true); got != shared {
+		t.Fatalf("normal exit=%p want=%p", got, shared)
+	}
+}

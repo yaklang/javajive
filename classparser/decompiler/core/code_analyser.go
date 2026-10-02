@@ -5176,6 +5176,22 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		}
 	}
 	inlineSingleUseMergeLeaf := func(value values.JavaValue, entry, leaf, merge, selection *OpCode, adopted map[*OpCode]*values.JavaRef) values.JavaValue {
+		if planned, casts := d.branchNestedCastExpression(value, entry, leaf, merge, func(ref *values.JavaRef) bool {
+			if ref == nil || ref.IsThis || ref.IsParam || ref.Id == nil || ref.Val == nil || dupSharedRefs[ref.VarUid] || len(d.varUserMap.GetMust(ref)) != 1 {
+				return false
+			}
+			for _, protected := range d.disFoldRef {
+				if protected != nil && protected.VarUid == ref.VarUid {
+					return false
+				}
+			}
+			return true
+		}); len(casts) > 0 {
+			for check, ref := range casts {
+				adopted[check] = ref
+			}
+			return planned
+		}
 		ref, ok := UnpackSoltValue(value).(*values.JavaRef)
 		if !ok || ref == nil || ref.IsThis || ref.IsParam || ref.Id == nil || ref.Val == nil || dupSharedRefs[ref.VarUid] {
 			return value
@@ -6462,7 +6478,10 @@ func (d *Decompiler) ParseStatement() error {
 						// constructors: allocation and initialization can both throw.
 						v.ConstructorCall = funcCallValue
 						skip = true
-					} else if len(funcCallValue.Arguments) == 0 {
+					} else if len(funcCallValue.Arguments) == 0 && funcCallValue.ClassName != funcCtx.ClassName {
+						// An implicit no-argument super call is inserted by javac.
+						// A this() delegation is not: it executes another constructor
+						// and must retain that initialization and its effects.
 						skip = true
 					}
 				}()

@@ -227,7 +227,7 @@ func TestErasedResultTupleKeepsArrayLengthEvaluationIdentity(t *testing.T) {
 }
 
 func TestErasedFactoryAssignmentRequiresExactClosedZeroArgumentChain(t *testing.T) {
-	for _, scenario := range []string{"proved", "direct", "missing metadata", "missing PC", "arguments", "dynamic", "special", "malformed", "narrow target", "raw target", "nongeneric", "unproved receiver", "too deep"} {
+	for _, scenario := range []string{"proved", "direct", "missing metadata", "missing PC", "arguments", "dynamic", "special", "malformed", "narrow target", "raw target", "nongeneric", "unproved receiver", "too deep", "parameterized wrapper", "narrow wrapper", "wrapper cycle"} {
 		t.Run(scenario, func(t *testing.T) {
 			classes := map[string]callbinding.Class{
 				"example/Base": {Name: "example/Base", Public: true, ParentsComplete: true, MembersComplete: true, Methods: []callbinding.Method{{Name: "finish", Desc: "()Lexample/Base;", Public: true}}},
@@ -248,6 +248,14 @@ func TestErasedFactoryAssignmentRequiresExactClosedZeroArgumentChain(t *testing.
 			case "direct":
 				value = leaf
 				target = types.NewParameterizedType("example.Leaf", []types.JavaType{types.NewJavaClass("java.lang.String")})
+			case "parameterized wrapper":
+				value = &CastExpression{Value: root, TargetType: target, OriginPC: 11}
+			case "narrow wrapper":
+				value = &CastExpression{Value: root, TargetType: types.NewJavaClass("example.Leaf"), OriginPC: 11}
+			case "wrapper cycle":
+				wrapper := &CastExpression{TargetType: target}
+				wrapper.Value = wrapper
+				value = wrapper
 			case "missing metadata":
 				ctx.InvocationMetadata = nil
 			case "missing PC":
@@ -276,9 +284,16 @@ func TestErasedFactoryAssignmentRequiresExactClosedZeroArgumentChain(t *testing.
 				}
 			}
 			out := ErasedFactoryAssignmentView(value, target, ctx)
-			want := scenario == "proved" || scenario == "direct"
+			want := scenario == "proved" || scenario == "direct" || scenario == "parameterized wrapper"
 			if (out != value) != want {
 				t.Fatalf("proved=%v want=%v", out != value, want)
+			}
+			if scenario == "parameterized wrapper" {
+				wrapper := out.(*CastExpression)
+				if wrapper.OriginPC != 11 || wrapper.TargetType != target || wrapper.Value.(*CastExpression).Value != root || value.(*CastExpression).Value != root {
+					t.Fatal("lost original cast/check position or changed shared wrapper")
+				}
+				return
 			}
 			if want {
 				cast, ok := out.(*CastExpression)

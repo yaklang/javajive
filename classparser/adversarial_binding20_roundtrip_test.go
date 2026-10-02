@@ -525,3 +525,91 @@ public class NestedDrainCompletion {
  public static void main(String[]args){for(int m=0;m<4;m++){DrainState.trace="";drain(new DrainState(m),new String[]{"complete-a","complete-b"});System.out.println(m+":"+DrainState.trace);}}
 }`, Precision, Compatibility, "legacy")
 }
+
+func TestAdversarialLateInstanceConstantStoreRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "LateInstanceConstantStore", `class ConstantBase {ConstantBase(){LateInstanceConstantStore.trace+="b,";}}
+public class LateInstanceConstantStore extends ConstantBase {
+ static String trace=""; final Object before=event(); final boolean enabled=true; final String text="ready";
+ Object event(){trace+="e:"+read()+",";return new Object();} boolean read(){try{return LateInstanceConstantStore.class.getDeclaredField("enabled").getBoolean(this);}catch(Exception e){throw new IllegalStateException(e);}}
+ LateInstanceConstantStore(){trace+="c:"+enabled+",";}
+ public static void main(String[]a){for(int i=0;i<3;i++){trace="";LateInstanceConstantStore x=new LateInstanceConstantStore();System.out.println(trace+":"+x.enabled+":"+x.text);}}
+}`, Precision, Compatibility, "legacy")
+}
+func TestAdversarialSynchronizedAbruptCompletionRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "SynchronizedAbruptCompletion", `public class SynchronizedAbruptCompletion {
+ static Object lock=new Object();static String trace;
+ static int run(int mode){int turn=0;while(true){synchronized(lock){trace+="m,";if(turn++==0)continue;if(mode==0)return turn;if(mode==1)throw new IllegalArgumentException("bad");return -turn;}}}
+ public static void main(String[]a){for(int mode=0;mode<3;mode++){trace="";try{System.out.println(run(mode)+":"+trace);}catch(Exception e){System.out.println(e.getClass().getName()+":"+trace);}System.out.println(Thread.holdsLock(lock));}}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialProtectedStaticInitializerOrderRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "ProtectedStaticInitializerOrder", `public class ProtectedStaticInitializerOrder {
+ static String trace=""; static final Object first; static final Object second;
+ static Object event(String name){trace+=name+",";return new Object();}
+ static {try{first=event("first");second=event("second");}catch(Exception e){throw new IllegalStateException(e);}}
+ public static void main(String[]a){System.out.println(trace+":"+(first!=second));}
+}`, Precision, Compatibility, "legacy")
+}
+func TestAdversarialParameterizedFactoryAssignmentCastRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "ParameterizedFactoryAssignmentCast", `class FactoryBox<T>{T value;static <T> FactoryBox<T> create(){return new FactoryBox<T>();}void put(T v){value=v;}T get(){return value;}}
+public class ParameterizedFactoryAssignmentCast<B> {
+ final FactoryBox<java.util.Map<Class<? extends B>,B>> values=FactoryBox.create();
+ ParameterizedFactoryAssignmentCast(){values.put(new java.util.HashMap<Class<? extends B>,B>());}
+ public static void main(String[]a){ParameterizedFactoryAssignmentCast<Number> box=new ParameterizedFactoryAssignmentCast<>();box.values.get().put(Integer.class,17);System.out.println(box.values.get().get(Integer.class));}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialNoArgumentConstructorDelegationRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "NoArgumentConstructorDelegation", `public class NoArgumentConstructorDelegation {
+ static String trace="";final java.util.List<String> entries;NoArgumentConstructorDelegation(){trace+="a,";entries=new java.util.ArrayList<String>();}
+ NoArgumentConstructorDelegation(String input){this();trace+="b,";entries.add(input);}
+ public static void main(String[]args){NoArgumentConstructorDelegation value=new NoArgumentConstructorDelegation("x");System.out.println(trace+value.entries);}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialRepeatedCheckedReceiverInConditionalRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "RepeatedCheckedReceiverInConditional", `public class RepeatedCheckedReceiverInConditional {
+ static String trace;static Object key(java.util.Map.Entry<?,?> e){trace+="k,";return e.getKey();}
+ static int run(java.util.Map<?,Integer> map,String prefix){int sum=0;for(java.util.Map.Entry<?,Integer> e:map.entrySet()){int dot=((String)key(e)).lastIndexOf('.');if(!prefix.equals(dot==-1?"":((String)key(e)).substring(0,dot)))throw new IllegalArgumentException("package");try{sum+=e.getValue();}catch(Exception ex){throw new IllegalStateException(ex);}}return sum;}
+ public static void main(String[]a){for(String name:new String[]{"Bare","good.Item","bad.Item"}){java.util.Map<Object,Integer> map=new java.util.LinkedHashMap<>();map.put(name,7);trace="";try{System.out.println(run(map,"good")+":"+trace);}catch(Exception e){System.out.println(e.getClass().getName()+":"+trace);}}}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialLoopSharedObjectReturnRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "LoopSharedObjectReturn", `public class LoopSharedObjectReturn {
+ static String trace;
+ static Object run(boolean report,java.util.Map<String,Integer> data){Object result=new Object();for(int i=0;i<2;i++)trace+="a,";if(report){for(java.util.Map.Entry<String,Integer> item:data.entrySet())trace+=item.getKey()+"="+item.getValue()+",";}return result;}
+ public static void main(String[]args){for(boolean report:new boolean[]{false,true}){trace="";java.util.Map<String,Integer> data=new java.util.LinkedHashMap<>();data.put("x",3);System.out.println((run(report,data)!=null)+":"+trace);}}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialLoopCandidateSelectionRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "LoopCandidateSelection", `public class LoopCandidateSelection {
+ static String trace;static int[] sizes={1,2,3,4,5,6,7,8};
+ static int choose(int need,int excess){int size=0;Integer chosen=null;for(int attempt=0;;attempt++){if(attempt>7)throw new IllegalArgumentException("too large");int capacity=(attempt+1)*3;trace+="c"+attempt+",";if(need>capacity)continue;if(chosen==null||size!=sizes[attempt]){size=sizes[attempt];chosen=need+size;trace+="s"+attempt+",";}if(chosen+excess>capacity)continue;break;}if(chosen==null||chosen+excess>24)throw new IllegalArgumentException("too large");return chosen;}
+ public static void main(String[]args){for(int need:new int[]{0,1,5,9,22,25})for(int extra:new int[]{0,2,10}){trace="";try{System.out.println(choose(need,extra)+":"+trace);}catch(Exception e){System.out.println(e.getClass().getName()+":"+trace);}}}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialAutomaticLayerSelectionRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "AutomaticLayerSelection", `public class AutomaticLayerSelection {
+ static final int[] WIDTH={1,2,3,4,5,6,7,8,9};static String trace;
+ static int capacity(int layer,boolean compact){trace+="c"+layer+":"+compact+",";return layer*8+4;}
+ static int[] pad(int count,int width){trace+="p"+width+",";return new int[count+width];}
+ static String run(int input,int extra,int requested){boolean compact;int layer,capacity,width;int[] bits;int usable;
+ if(requested!=0){compact=requested<0;layer=Math.abs(requested);if(layer>8)throw new IllegalArgumentException("layer");capacity=capacity(layer,compact);width=WIDTH[layer];usable=capacity-capacity%width;bits=pad(input,width);if(bits.length+extra>usable)throw new IllegalArgumentException("size");}
+ else{width=0;bits=null;for(int i=0;;i++){if(i>7)throw new IllegalArgumentException("exhausted");capacity=capacity(layer=(compact=i<=2)?i+1:i,compact);if(input+extra>capacity)continue;if(bits==null||width!=WIDTH[layer])bits=pad(input,width=WIDTH[layer]);usable=capacity-capacity%width;if(compact&&bits.length>(width<<2)||bits.length+extra>usable)continue;break;}}
+ return compact+":"+layer+":"+capacity+":"+width+":"+bits.length;}
+ public static void main(String[]args){for(int input:new int[]{0,3,10,30,70})for(int extra:new int[]{0,7})for(int req:new int[]{0,2,-2}){trace="";try{System.out.println(run(input,extra,req)+":"+trace);}catch(Exception e){System.out.println(e.getClass().getName()+":"+trace);}}}
+}`, Precision, Compatibility, "legacy")
+}

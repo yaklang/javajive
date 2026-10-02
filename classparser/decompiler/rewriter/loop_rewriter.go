@@ -1080,7 +1080,18 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 		// step. Keep that terminal arm inline; the step is the actual normal
 		// continuation. Picking the return loses the outer-continue edge.
 		if len(NodeDeduplication(headerOut)) == 1 {
-			if !exclusiveTerminalLoopBranch(headerOut[0], circleNode, domTree) || !hasEnclosingLoopContinuation(outNodes, circleNode, domTree) {
+			// A throwing header guard is an inline terminal arm when a
+			// successful body exits to a shared normal continuation. Choosing
+			// the throw as the loop boundary lifts the remaining candidate
+			// checks (and their back edges) outside the loop.
+			normalAlternative := false
+			for _, out := range outNodes {
+				if out != headerOut[0] && !IsEndNode(out) && !exclusiveTerminalLoopBranch(out, circleNode, domTree) {
+					normalAlternative = true
+					break
+				}
+			}
+			if !exclusiveTerminalLoopBranch(headerOut[0], circleNode, domTree) || (!normalAlternative && !hasEnclosingLoopContinuation(outNodes, circleNode, domTree)) {
 				return headerOut[0]
 			}
 		}

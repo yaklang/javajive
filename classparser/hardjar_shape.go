@@ -134,7 +134,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = retypeObjectArrayFromResolveClass(body)
 	body = wrapCatchBodyGetDeclaredMethod(body)
 	body = swapRethrowThrowableBeforeSpecificCatch(body)
-	body = fillMissingReturnAfterLabeledBreak(body)
+	// Returns come from the bytecode CFG. A builder seen earlier in a method
+	// does not authorize inventing a return after another, nested loop.
 	body = fillEmptySynchronizedBlock(body)
 	body = wrapReflectiveCatchBody(body)
 	body = rewriteSelfInitDeclToPrevSameType(body)
