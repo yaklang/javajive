@@ -229,7 +229,7 @@ func assertReviewedPoolReflectionCatchRegions(t *testing.T) {
 	raw, _, _ := reviewedFixtureMethod(t, "testdata/regression/BaseGenericObjectPool.class", "setEvictionPolicyClassName", "(Ljava/lang/String;Ljava/lang/ClassLoader;)V")
 	code, object := reviewedControlCode(t, raw, "setEvictionPolicyClassName", "(Ljava/lang/String;Ljava/lang/ClassLoader;)V", []string{"9:15:18:java/lang/ClassCastException", "9:15:18:java/lang/ClassNotFoundException", "9:27:30:java/lang/ClassCastException", "9:27:89:java/lang/ClassNotFoundException", "9:27:89:java/lang/InstantiationException", "9:27:89:java/lang/IllegalAccessException", "9:27:89:java/lang/reflect/InvocationTargetException", "9:27:89:java/lang/NoSuchMethodException"})
 	reviewedControlInvokes(t, code, object, reviewedViewInvoke{"org/apache/commons/pool2/impl/BaseGenericObjectPool", "setEvictionPolicy", "(Ljava/lang/String;Ljava/lang/ClassLoader;)V", core.OP_INVOKESPECIAL})
-	assertReviewedSources(t, raw, "JDEC_ORIG14_REMAINING_OFF", func(source string) {
+	reviewedOriginalFamilySources(t, raw, "org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar", "JDEC_ORIG14_REMAINING_OFF", func(source string) {
 		body := reviewedControlBody(t, source, `public\s+final\s+void\s+setEvictionPolicyClassName\(String\s+\w+,\s*ClassLoader\s+\w+\)`)
 		requireReviewedPattern(t, body, `(?s)try\s*\{\s*try\s*\{\s*this\.setEvictionPolicy\(.*?catch\(ClassCastException\s*\|\s*ClassNotFoundException\s+\w+\).*?this\.setEvictionPolicy\(.*?\}\s*return;\s*\}\s*catch\(ClassCastException\s+\w+\)`)
 		caught := requireReviewedPattern(t, body, `catch\(ClassNotFoundException\s*\|\s*InstantiationException\s*\|\s*IllegalAccessException\s*\|\s*InvocationTargetException\s*\|\s*NoSuchMethodException\s+(\w+)\)`)[1]

@@ -7,29 +7,20 @@ import (
 )
 
 func TestLogbackEchoEncoderGetBytesIsLoadBearing(t *testing.T) {
-	raw, err := os.ReadFile("testdata/regression/EchoEncoder.class")
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Unsetenv("JDEC_LOGBACK_REMAINING_OFF")
-	on, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if !echoEncoderGetBytesParenthesized(on) {
-		t.Errorf("ON missing parenthesized concat.getBytes():\n%s", on)
-	}
-	if strings.Contains(on, "var1 + CoreConstants.LINE_SEPARATOR.getBytes()") {
-		t.Errorf("ON still has unparenthesized concat receiver:\n%s", on)
-	}
-	t.Setenv("JDEC_LOGBACK_REMAINING_OFF", "1")
-	off, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !echoEncoderGetBytesParenthesized(off) {
-		t.Errorf("OFF structural emitter must still parenthesize concat receiver:\n%s", off)
-	}
+	path := "testdata/regression/EchoEncoder.class"
+	raw, _, _ := reviewedFixtureMethod(t, path, "encode", "(Ljava/lang/Object;)[B")
+	assertReviewedTypeVarMethod(t, raw, "encode", "(Ljava/lang/Object;)[B", "(TE;)[B")
+	assertReviewedTypeVarInvoke(t, path, "encode", "(Ljava/lang/Object;)[B", 1, 184, "java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;")
+	assertReviewedTypeVarInvoke(t, path, "encode", "(Ljava/lang/Object;)[B", 14, 182, "java/lang/String", "getBytes", "()[B")
+	reviewedSeedSources(t, path, "JDEC_LOGBACK_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `byte\[\]\s+encode\(E`)
+		value := requireReviewedPattern(t, body, `String\s+(\w+)\s*=\s*String\.valueOf\(\(Object\)\(\w+\)\);`)[1]
+		separator := requireReviewedPattern(t, body, `String\s+(\w+)\s*=\s*CoreConstants\.LINE_SEPARATOR;`)[1]
+		concat := requireReviewedPattern(t, body, `String\s+(\w+)\s*=\s*`+value+`\s*\+\s*`+separator+`;`)[1]
+		if !strings.Contains(body, "return "+concat+".getBytes();") {
+			t.Fatal("getBytes receiver lost complete concatenation")
+		}
+	})
 }
 
 func echoEncoderGetBytesParenthesized(src string) bool {
@@ -101,15 +92,40 @@ func retryMethodSource(t *testing.T, source, signature string) string {
 }
 
 func TestLogbackConsoleAppenderOrElseThrowIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/ConsoleAppender.class", "JDEC_LOGBACK_REMAINING_OFF",
-		"var3.get()",
-		"var3.orElseThrow")
+	path := "testdata/regression/ConsoleAppender.class"
+	raw := reviewedRemainingSAMRaw(t, "ConsoleAppender")
+	assertReviewedRemainingSAMTarget(t, raw, "ch/qos/logback/core/ConsoleAppender", "lambda$wrapWithJansi$4", "()Ljava/util/NoSuchElementException;", "()Ljava/lang/Object;", "()Ljava/util/NoSuchElementException;")
+	assertReviewedTypeVarInvoke(t, path, "wrapWithJansi", "(Ljava/io/OutputStream;)Ljava/io/OutputStream;", 111, 182, "java/util/Optional", "orElseThrow", "(Ljava/util/function/Supplier;)Ljava/lang/Object;")
+	assertReviewedTypeVarInvoke(t, path, "wrapWithJansi", "(Ljava/io/OutputStream;)Ljava/io/OutputStream;", 126, 182, "java/lang/reflect/Method", "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")
+	reviewedSeedSources(t, path, "JDEC_LOGBACK_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `OutputStream\s+wrapWithJansi\(`)
+		supplier := requireReviewedPattern(t, body, `Supplier<NoSuchElementException>\s+(\w+)\s*=\s*\(\)\s*->`)[1]
+		requireReviewedPattern(t, body, `Method[^;]*\.orElseThrow\(\(Supplier\)\(`+supplier+`\)\)[^;]*\.invoke\(null,new Object\[0\]\)`)
+		if strings.Count(body, ".orElseThrow(") != 1 || !strings.Contains(body, "new NoSuchElementException(\"No value present\")") {
+			t.Fatal("selected Optional supplier was replaced or duplicated")
+		}
+	})
 }
 
 func TestHikaricpGaugeMethodRefIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/CodaHaleMetricsTracker.class", "JDEC_HIKARICP_REMAINING_OFF",
-		"(com.codahale.metrics.Gauge)(var2::getTotalConnections)",
-		"(Metric)(var2::getTotalConnections)")
+	raw := reviewedRemainingSAMRaw(t, "CodaHaleMetricsTracker")
+	methods := []string{"getTotalConnections", "getIdleConnections", "getActiveConnections", "getPendingThreads", "getMaxConnections", "getMinConnections"}
+	for _, method := range methods {
+		assertReviewedRemainingSAMTarget(t, raw, "com/zaxxer/hikari/metrics/PoolStats", method, "()I", "()Ljava/lang/Object;", "()Ljava/lang/Integer;")
+	}
+	assertReviewedTypeVarInvoke(t, "testdata/regression/CodaHaleMetricsTracker.class", "<init>", "(Ljava/lang/String;Lcom/zaxxer/hikari/metrics/PoolStats;Lcom/codahale/metrics/MetricRegistry;)V", 148, 182, "com/codahale/metrics/MetricRegistry", "register", "(Ljava/lang/String;Lcom/codahale/metrics/Metric;)Lcom/codahale/metrics/Metric;")
+	reviewedSeedSources(t, "testdata/regression/CodaHaleMetricsTracker.class", "JDEC_HIKARICP_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `CodaHaleMetricsTracker\(`)
+		for _, method := range methods {
+			carrier := requireReviewedPattern(t, body, `Gauge\s+(\w+)\s*=\s*(\w+)::`+method+`;`)[1]
+			if !strings.Contains(body, ",(Metric)("+carrier+"));") {
+				t.Fatalf("%s lost Gauge-before-Metric target binding", method)
+			}
+		}
+		if strings.Count(body, ".register(") != len(methods) || strings.Count(body, "Objects.requireNonNull(") != len(methods) {
+			t.Fatal("eager bound-receiver null check or registration multiplicity changed")
+		}
+	})
 }
 
 func TestHikaricpProxyResultSetCloseThrowsIsLoadBearing(t *testing.T) {

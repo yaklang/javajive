@@ -11,7 +11,6 @@ package javaclassparser
 // JDEC_VARARGS_SPREAD_OFF 关掉后回退到显式 Object[] 数组形, 证明承重。
 
 import (
-	"os"
 	"regexp"
 	"testing"
 )
@@ -23,44 +22,15 @@ var varargsSpreadRe = regexp.MustCompile(`forArr\(var0\s*,\s*var1\)`)
 var varargsArrayRe = regexp.MustCompile(`forArr\(new Object\[\]\{`)
 
 func TestVarargsSpreadIsLoadBearing(t *testing.T) {
-	seedBytes, err := os.ReadFile("testdata/regression/VarargsSpreadSeed.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
-	}
-	helperBytes, err := os.ReadFile("testdata/regression/VarargsSpreadHelper.class")
-	if err != nil {
-		t.Fatalf("read helper seed: %v", err)
-	}
-	// Resolver feeds the varargs callee's bytes by binary internal name (default package -> bare name).
-	resolver := func(internalName string) ([]byte, bool) {
-		if internalName == "VarargsSpreadHelper" {
-			return helperBytes, true
-		}
-		return nil, false
-	}
-
-	// Fix ON (default): the callee's `T...` component is recognized as a type variable, so the
-	// javac-materialized `new Object[]{...}` is spread back to individual arguments.
-	os.Unsetenv("JDEC_VARARGS_SPREAD_OFF")
-	on, err := DecompileWithResolver(seedBytes, resolver)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !varargsSpreadRe.MatchString(on) {
-		t.Errorf("fix ON: expected spread `forArr(var0,var1)`, got:\n%s", on)
-	}
-	if varargsArrayRe.MatchString(on) {
-		t.Errorf("fix ON: expected the explicit Object[] array to be gone, got:\n%s", on)
-	}
-
-	// Fix OFF: spreading disabled, so the faithful (but mis-inferring) explicit array form returns,
-	// proving the spread pass -- not some unrelated rendering -- is what produced the spread form.
-	t.Setenv("JDEC_VARARGS_SPREAD_OFF", "1")
-	off, err := DecompileWithResolver(seedBytes, resolver)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if !varargsArrayRe.MatchString(off) {
-		t.Errorf("fix OFF: expected the explicit `forArr(new Object[]{...})` array form to return, got:\n%s", off)
-	}
+	raw := reviewedRemainingSAMRaw(t, "VarargsSpreadSeed")
+	helper := reviewedRemainingSAMRaw(t, "VarargsSpreadHelper")
+	assertReviewedTypeVarMethod(t, raw, "make", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Iterator;", "<N:Ljava/lang/Object;>(TN;TN;)Ljava/util/Iterator<TN;>;")
+	assertReviewedTypeVarMethod(t, helper, "forArr", "([Ljava/lang/Object;)Ljava/util/Iterator;", "<T:Ljava/lang/Object;>([TT;)Ljava/util/Iterator<TT;>;")
+	assertReviewedTypeVarInvoke(t, "testdata/regression/VarargsSpreadSeed.class", "make", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Iterator;", 12, 184, "VarargsSpreadHelper", "forArr", "([Ljava/lang/Object;)Ljava/util/Iterator;")
+	reviewedSeedSources(t, "testdata/regression/VarargsSpreadSeed.class", "JDEC_VARARGS_SPREAD_OFF", true, func(source string) {
+		body := reviewedSourceMethod(t, source, `Iterator<N>\s+make\(`)
+		params := requireReviewedPattern(t, body, `make\(N\s+(\w+),\s*N\s+(\w+)\)`)
+		carrier := requireReviewedPattern(t, body, `Object\[\]\s+(\w+)\s*=\s*new Object\[\]\{`+params[1]+`,`+params[2]+`\};`)[1]
+		requireReviewedPattern(t, body, `return\s+\(Iterator<N>\)\s*\(Iterator\)\s*\(VarargsSpreadHelper\.forArr\(`+carrier+`\)\);`)
+	})
 }

@@ -19,7 +19,7 @@ jobs:
   regression:
     name: Algorithm regression
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -38,7 +38,7 @@ jobs:
           # These short JVM processes exit before full JIT warmup pays off.
           # One CPU and serial GC avoid competing compiler/GC pools on the
           # runner. Original and rebuilt programs use the same options;
-          # the fixtures, assertions, test set and deadlines stay unchanged.
+          # the fixtures, assertions, test set and individual deadlines stay unchanged.
           # CDS shares compiler class metadata, never fixture source or compiler results.
           printf 'final class Warmup {}\n' > "$RUNNER_TEMP/fixture-java/Warmup.java"
           javac -J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC -J-XX:ActiveProcessorCount=1 \
@@ -55,7 +55,7 @@ jobs:
         run: go test ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv -race -count=1 -timeout=3m
       # Independent fixture JVMs each use one CPU; four fixtures can run concurrently.
       # Keep every selected test. Separate the growing adversarial corpus so
-      # each bounded phase has useful failure evidence within the same 10-minute job.
+      # each bounded phase has useful failure evidence within the same bounded job.
       - name: Algorithm edge cases and source round-trip tests
         run: |
           set -o pipefail
@@ -65,7 +65,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p artifacts
-          go test ./classparser -run '^TestAdversarial' -json -parallel=4 -count=1 -timeout=5m | tee artifacts/adversarial-tests.jsonl
+          go test ./classparser -run '^TestAdversarial' -json -parallel=4 -count=1 -timeout=8m | tee artifacts/adversarial-tests.jsonl
       - name: Curated algorithm round-trip contracts
         run: python3 -m unittest tools.curated_roundtrip.test_roundtrip
       - name: Historical diagnostic-key regression

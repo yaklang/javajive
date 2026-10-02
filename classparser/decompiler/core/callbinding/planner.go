@@ -19,7 +19,9 @@ const (
 )
 
 type Method struct {
-	Signature                                string `json:",omitempty"`
+	Signature                                string   `json:",omitempty"`
+	Exceptions                               []string `json:",omitempty"`
+	ExceptionsKnown                          bool     `json:",omitempty"`
 	Name, Desc                               string
 	Public, Static, Generic, Varargs, Bridge bool
 }

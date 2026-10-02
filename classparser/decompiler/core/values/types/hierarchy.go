@@ -199,6 +199,14 @@ var throwableRootedTypes = func() map[string]bool {
 // hierarchy table). Used to restrict the exception-catch-slot supertype-arm merge to genuine Throwable
 // types, where widening a merged catch variable to its LUB is always safe (its uses are Throwable-level:
 // instanceof / cast / getMessage / getCause / rethrow).
+// KnownPlatformSuperTypes exposes only the finite canonical platform parent
+// table used by the type solver. It supplies ancestry, never a complete method
+// declaration table; callers must not use it as invocation/member evidence.
+func KnownPlatformSuperTypes(fqn string) ([]string, bool) {
+	parents, known := jdkSuperEdges[fqn]
+	return append([]string(nil), parents...), known
+}
+
 func IsThrowableRooted(fqn string) bool {
 	return throwableRootedTypes[fqn]
 }

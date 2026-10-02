@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -24,24 +23,14 @@ func TestPool2EvictionPolicyNSMECatchIsLoadBearing(t *testing.T) {
 }
 
 func TestPool2SecurityManagerPrintlnIsLoadBearing(t *testing.T) {
-	raw, err := os.ReadFile("testdata/regression/SecurityManagerCallStack.class")
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Unsetenv("JDEC_POOL2_REMAINING_OFF")
-	on, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Contains(on, "l0.get()") {
-		t.Errorf("ON still has l0.get()")
-	}
-	t.Setenv("JDEC_POOL2_REMAINING_OFF", "1")
-	off, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !strings.Contains(off, "l0.get()") {
-		t.Errorf("OFF missing l0.get()")
-	}
+	raw := reviewedRemainingSAMRaw(t, "SecurityManagerCallStack")
+	assertReviewedRemainingSAMTarget(t, raw, "org/apache/commons/pool2/impl/SecurityManagerCallStack", "lambda$printStackTrace$1", "(Ljava/io/PrintWriter;Ljava/lang/ref/WeakReference;)V", "(Ljava/lang/Object;)V", "(Ljava/lang/ref/WeakReference;)V")
+	assertReviewedTypeVarInvoke(t, "testdata/regression/SecurityManagerCallStack.class", "lambda$printStackTrace$1", "(Ljava/io/PrintWriter;Ljava/lang/ref/WeakReference;)V", 5, 182, "java/io/PrintWriter", "println", "(Ljava/lang/Object;)V")
+	reviewedSeedSources(t, "testdata/regression/SecurityManagerCallStack.class", "JDEC_POOL2_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `boolean\s+printStackTrace\(`)
+		carrier := requireReviewedPattern(t, body, `Consumer<WeakReference>\s+(\w+)\s*=\s*\((\w+)\)\s*->`)
+		if !strings.Contains(body, ".println("+carrier[2]+".get());") || !strings.Contains(body, ".forEach("+carrier[1]+")") {
+			t.Fatal("weak-reference SAM carrier detached from forEach")
+		}
+	})
 }

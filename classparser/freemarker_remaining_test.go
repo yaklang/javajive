@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -13,9 +14,21 @@ func TestFreemarkerBooleanZeroIsLoadBearing(t *testing.T) {
 }
 
 func TestFreemarkerIntBareIfIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/UnifiedCall.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"if ((var4_1) != (0)){",
-		"if (var4_1){")
+	path := "testdata/regression/UnifiedCall.class"
+	_, code, _ := reviewedFixtureMethod(t, path, "dump", "(Z)Ljava/lang/String;")
+	assertReviewedOpcode(t, code, 63, 3)
+	assertReviewedOpcode(t, code, 64, 54, 4)
+	assertReviewedOpcode(t, code, 96, 21, 4)
+	assertReviewedOpcode(t, code, 98, 153)
+	assertReviewedOpcode(t, code, 125, 132, 4, 1)
+	reviewedSeedSources(t, path, "JDEC_FREEMARKER_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `String\s+dump\(boolean`)
+		counter := requireReviewedPattern(t, body, `if\s*\(\((\w+)\)\s*!=\s*\(0\)\)\{\s*\w+\.append\(\(char\)\(44\)\);`)[1]
+		requireReviewedPattern(t, body, `int\s+`+counter+`\s*=\s*0;`)
+		if !strings.Contains(body, ".get("+counter+")") || !strings.Contains(body, counter+"++;") {
+			t.Fatal("comma guard lost numeric index def-use")
+		}
+	})
 }
 
 func TestFreemarkerTemplateCtorThisFirstIsLoadBearing(t *testing.T) {
@@ -82,9 +95,33 @@ func TestFreemarkerBuilderLoopIndexIsLoadBearing(t *testing.T) {
 }
 
 func TestFreemarkerLineTableReadIntIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/LineTableBuilder.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"int var1 = 0;\n\t\ttry{\n\t\t\tvar1 = this.in.read();",
-		"Object var1 = null;\n\t\ttry{\n\t\t\tvar1 = this.in.read();")
+	path := "testdata/regression/LineTableBuilder.class"
+	_, code, object := reviewedFixtureMethod(t, path, "read", "()I")
+	assertReviewedTypeVarInvoke(t, path, "read", "()I", 4, 182, "java/io/Reader", "read", "()I")
+	assertReviewedTypeVarInvoke(t, path, "read", "()I", 10, 183, "freemarker/template/Template$LineTableBuilder", "handleChar", "(I)V")
+	assertReviewedTypeVarInvoke(t, path, "read", "()I", 18, 183, "freemarker/template/Template$LineTableBuilder", "rememberException", "(Ljava/lang/Exception;)Ljava/io/IOException;")
+	assertReviewedOpcode(t, code, 7, 60)
+	assertReviewedOpcode(t, code, 13, 27)
+	assertReviewedOpcode(t, code, 14, 172)
+	assertReviewedOpcode(t, code, 21, 191)
+	cp := NewConstantPoolWithConstant(&object.ConstantPool)
+	if len(code.ExceptionTable) != 1 || code.ExceptionTable[0].StartPc != 0 || code.ExceptionTable[0].EndPc != 14 || code.ExceptionTable[0].HandlerPc != 15 || cp.GetClassName(int(code.ExceptionTable[0].CatchType)) != "java/lang/Exception" {
+		t.Fatal("read/handle exception domain changed")
+	}
+	reviewedSeedSources(t, path, "JDEC_FREEMARKER_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `public\s+int\s+read\(\)`)
+		// IRETURN is PC14, outside [0,14). The original successful ISTORE
+		// dominates it, while the catch ends in ATHROW. A method-scope inert
+		// declaration therefore remains unobservable on every failure path.
+		result := requireReviewedPattern(t, body, `int\s+(\w+)\s*=\s*0;\s*try\{\s*\w+\s*=\s*this\.in\.read\(\);`)[1]
+		name := regexp.QuoteMeta(result)
+		requireReviewedPattern(t, body, `try\{\s*`+name+`\s*=\s*this\.in\.read\(\);\s*this\.handleChar\(`+name+`\);\s*\}catch\(Exception\s+\w+\)\{`)
+		caught := requireReviewedPattern(t, body, `catch\(Exception\s+(\w+)\)\{`)[1]
+		if !strings.Contains(body, "throw this.rememberException("+caught+");") {
+			t.Fatal("exception remembering changed original caught identity")
+		}
+		requireReviewedPattern(t, body, `throw this\.rememberException\(`+regexp.QuoteMeta(caught)+`\);\s*\}\s*return\s+`+name+`;\s*\}$`)
+	})
 }
 
 func TestFreemarkerInfiniteDoWhileThrowSnippet(t *testing.T) {
@@ -144,9 +181,27 @@ func TestFreemarkerTruncateStaticInitSnippet(t *testing.T) {
 }
 
 func TestFreemarkerTruncateStaticInitIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/DefaultTruncateBuiltinAlgorithm.class", "JDEC_FREEMARKER_REMAINING_OFF",
-		"public static final TemplateHTMLOutputModel STANDARD_M_TERMINATOR;\n\tstatic {",
-		"public static final TemplateHTMLOutputModel STANDARD_M_TERMINATOR = ((TemplateHTMLOutputModel)(HTMLOutputFormat.INSTANCE.fromMarkup")
+	path := "testdata/regression/DefaultTruncateBuiltinAlgorithm.class"
+	_, code, object := reviewedFixtureMethod(t, path, "<clinit>", "()V")
+	assertReviewedTypeVarInvoke(t, path, "<clinit>", "()V", 5, 182, "freemarker/core/HTMLOutputFormat", "fromMarkup", "(Ljava/lang/String;)Lfreemarker/core/CommonTemplateMarkupOutputModel;")
+	assertReviewedOpcode(t, code, 11, 179)
+	assertReviewedOpcode(t, code, 27, 187)
+	assertReviewedOpcode(t, code, 43, 187)
+	if len(code.ExceptionTable) != 1 {
+		t.Fatal("original initialization domains changed")
+	}
+	handler := code.ExceptionTable[0]
+	cp := NewConstantPoolWithConstant(&object.ConstantPool)
+	if handler.StartPc != 0 || handler.EndPc != 14 || handler.HandlerPc != 17 || cp.GetClassName(int(handler.CatchType)) != "freemarker/template/TemplateModelException" {
+		t.Fatal("markup initialization handler boundary changed")
+	}
+	reviewedSeedSources(t, path, "JDEC_FREEMARKER_REMAINING_OFF", false, func(source string) {
+		if !strings.Contains(source, "public static final TemplateHTMLOutputModel STANDARD_M_TERMINATOR;") {
+			t.Fatal("checked initializer left field declaration")
+		}
+		compact := compactReviewedGenericSource(source)
+		requireReviewedPattern(t, compact, `static\{try\{TemplateHTMLOutputModel(\w+)=.*?HTMLOutputFormat\.INSTANCE\.fromMarkup\("(?:\\.|[^"\\])*"\)\)*;STANDARD_M_TERMINATOR=\w+;\}catch\(TemplateModelException\w+\)\{thrownewIllegalStateException\([^;]*;\}ASCII_INSTANCE=newDefaultTruncateBuiltinAlgorithm\([^;]*STANDARD_M_TERMINATOR[^;]*;UNICODE_INSTANCE=newDefaultTruncateBuiltinAlgorithm\([^;]*STANDARD_M_TERMINATOR[^;]*;\}`)
+	})
 }
 
 func TestFreemarkerBuilderCallCheckedExceptionsIsLoadBearing(t *testing.T) {

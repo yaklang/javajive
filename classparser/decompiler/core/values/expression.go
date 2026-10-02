@@ -4699,6 +4699,9 @@ func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) str
 }
 
 func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext) string {
+	if bridge, ok := f.privateNestBridgeCall(funcCtx); ok {
+		return bridge
+	}
 	if !f.bindingPlanned {
 		if planned, ok := f.planErasedMethodInput(funcCtx); ok {
 			return planned.renderCall(funcCtx)

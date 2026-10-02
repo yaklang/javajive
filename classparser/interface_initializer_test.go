@@ -112,6 +112,16 @@ public class AnnotationInitReview {public static void main(String[]args){System.
 `, nil, []string{"ReviewedInitAnnotation"}, Precision, Compatibility, "legacy")
 }
 
+func TestAdversarialAnnotationInitializerDollarNameCollisionRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlowUnits(t, "AnnotationDollarCollisionReview", `
+import java.util.*;
+@interface ReviewedDollarAnnotation {List<String> VALUES=Collections.unmodifiableList(Arrays.asList(new String[]{"kept","once"}));class jdec$init$0 {public int marker(){return 37;}}}
+class OriginalDollarProbe {static int marker(){return new ReviewedDollarAnnotation.jdec$init$0().marker();}}
+public class AnnotationDollarCollisionReview {public static void main(String[]args){System.out.println(ReviewedDollarAnnotation.VALUES);System.out.println(ReviewedDollarAnnotation.VALUES==ReviewedDollarAnnotation.VALUES);System.out.println(OriginalDollarProbe.marker());}}
+`, nil, []string{"ReviewedDollarAnnotation"}, Precision, Compatibility, "legacy")
+}
+
 func TestAdversarialInterfaceInitializerHelperCollisionRoundTrip(t *testing.T) {
 	t.Parallel()
 	roundTripGenericFlowUnits(t, "InterfaceCollisionReview", `

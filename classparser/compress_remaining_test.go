@@ -122,7 +122,7 @@ func TestDumpArchiveInputStreamQueueIsLoadBearing(t *testing.T) {
 	assertReviewedGenericField(t, raw, "queue", "Ljava/util/Queue;", "Ljava/util/Queue<Lorg/apache/commons/compress/archivers/dump/DumpArchiveEntry;>;")
 	assertReviewedTypeVarInvoke(t, path, "<init>", desc, 196, 183, "java/util/PriorityQueue", "<init>", "(ILjava/util/Comparator;)V")
 	assertReviewedSeedSAM(t, raw, "(Ljava/lang/Object;Ljava/lang/Object;)I", "(Lorg/apache/commons/compress/archivers/dump/DumpArchiveEntry;Lorg/apache/commons/compress/archivers/dump/DumpArchiveEntry;)I")
-	reviewedSeedSources(t, path, "JDEC_COMPRESS_REMAINING_OFF", false, func(source string) {
+	reviewedOriginalFamilySources(t, raw, "org/apache/commons/commons-compress/1.26.2/commons-compress-1.26.2.jar", "JDEC_COMPRESS_REMAINING_OFF", func(source string) {
 		carrier := reviewedFunctionalCarrier(t, source, "Comparator<DumpArchiveEntry>", "(l0, l1) ->")
 		if !strings.Contains(compactReviewedGenericSource(source), "this.queue=newPriorityQueue(10,"+carrier+");") {
 			t.Fatal("lost typed queue comparator binding")

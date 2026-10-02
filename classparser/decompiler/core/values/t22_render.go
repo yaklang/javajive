@@ -42,11 +42,14 @@ func literalExactOutputBytes(j *JavaLiteral, funcCtx *class_context.ClassContext
 	if j == nil || j.JavaType == nil {
 		return 0
 	}
-	typeStr := j.JavaType.String(funcCtx)
+	typeStr := j.Type().String(funcCtx)
 	switch typeStr {
 	case types.NewJavaPrimer(types.JavaBoolean).String(funcCtx):
 		if v, ok := j.Data.(int); ok && v == 0 {
 			return 5 // false
+		}
+		if v, ok := j.Data.(bool); ok && !v {
+			return 5
 		}
 		return 4 // true
 	case types.NewJavaPrimer(types.JavaLong).String(funcCtx):

@@ -346,9 +346,9 @@ func (c *ClassObjectDumper) initializerHelperNames(count int) []string {
 			prefix := c.obj.GetClassName() + "$"
 			if strings.HasPrefix(raw, prefix) {
 				nested := strings.TrimPrefix(raw, prefix)
-				if !strings.Contains(nested, "$") {
-					reserved[class_context.SafeIdentifier(nested)] = true
-				}
+				// '$' is a legal simple-name character. Reserving every
+				// relative nested name is conservative even for deeper nests.
+				reserved[class_context.SafeIdentifier(nested)] = true
 			}
 		}
 	}

@@ -93,7 +93,7 @@ def declarations(data):
 def profile(release, archive, prefix, jdk_version):
     with zipfile.ZipFile(archive) as source:
         classes, provenance = {}, {}
-        roots = ['java/lang/Object', 'java/lang/String', 'java/util/Map',
+        roots = ['java/lang/Object', 'java/lang/String', 'java/io/FilterInputStream', 'java/util/Map',
                  'java/util/Optional', 'java/util/Collections', 'java/util/Arrays',
                  'java/util/Iterator', 'java/util/EnumMap', 'java/util/List',
                  'java/util/Set', 'java/util/Collection', 'java/util/Stack', 'java/util/stream/Stream',

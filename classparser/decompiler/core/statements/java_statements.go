@@ -119,6 +119,16 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 	}
 	if funcCtx != nil {
 		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && ft.ReturnType != nil {
+			if target, ok := ft.ReturnType.RawType().(*types.JavaPrimer); ok && target.Name == types.JavaBoolean {
+				if view, ok := values.BooleanStackConsumerView(r.JavaValue); ok {
+					return "return " + view.String(funcCtx)
+				}
+				return "return " + values.EmptySlotValuePlaceholder
+			}
+		}
+	}
+	if funcCtx != nil {
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && ft.ReturnType != nil {
 			if call, ok := values.UnpackSoltValue(r.JavaValue).(*values.FunctionCallExpression); ok {
 				if fixedParameterizedFactoryReturn(funcCtx, call) {
 					return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), call.String(funcCtx))

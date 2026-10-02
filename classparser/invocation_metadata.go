@@ -89,10 +89,11 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 				v.MembersComplete = false
 				continue
 			}
-			if name == "<init>" || name == "<clinit>" {
+			if name == "<clinit>" {
 				continue
 			}
 			x := callbinding.Method{Name: name, Desc: desc, Public: m.AccessFlags&1 != 0 || (samePackage && m.AccessFlags&2 == 0), Static: m.AccessFlags&8 != 0, Varargs: m.AccessFlags&0x80 != 0, Bridge: m.AccessFlags&0x40 != 0}
+			x.Exceptions, x.ExceptionsKnown = originalMethodExceptions(obj, m)
 			for _, a := range m.Attributes {
 				if _, ok := a.(*SignatureAttribute); ok {
 					x.Generic = true

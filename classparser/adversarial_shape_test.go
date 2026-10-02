@@ -186,9 +186,22 @@ func TestAdversarialBoolOrFoldedEnum(t *testing.T) {
 }
 
 func TestFieldWriterListFuncBareIfIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FieldWriterListFunc.class", "JDEC_ORIG14_REMAINING_OFF",
-		"if ((var6_1) != (0)){",
-		"if (var6_1){")
+	path := "testdata/regression/FieldWriterListFunc.class"
+	raw, code, _ := reviewedFixtureMethod(t, path, "writeValue", "(Lcom/alibaba/fastjson2/JSONWriter;Ljava/lang/Object;)V")
+	assertReviewedTypeVarMethod(t, raw, "writeValue", "(Lcom/alibaba/fastjson2/JSONWriter;Ljava/lang/Object;)V", "(Lcom/alibaba/fastjson2/JSONWriter;TT;)V")
+	assertReviewedOpcode(t, code, 141, 3)
+	assertReviewedOpcode(t, code, 142, 54, 6)
+	assertReviewedOpcode(t, code, 155, 21, 6)
+	assertReviewedOpcode(t, code, 157, 153)
+	assertReviewedTypeVarInvoke(t, path, "writeValue", "(Lcom/alibaba/fastjson2/JSONWriter;Ljava/lang/Object;)V", 161, 182, "com/alibaba/fastjson2/JSONWriter", "writeComma", "()V")
+	reviewedSeedSources(t, path, "JDEC_ORIG14_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `void\s+writeValue\(`)
+		counter := requireReviewedPattern(t, body, `if\s*\(\((\w+)\)\s*!=\s*\(0\)\)\{\s*\w+\.writeComma\(\);`)[1]
+		requireReviewedPattern(t, body, `int\s+`+counter+`\s*=\s*0;`)
+		if !strings.Contains(body, ".get("+counter+")") || !strings.Contains(body, counter+"++;") {
+			t.Fatal("numeric induction variable lost list indexing or increment")
+		}
+	})
 }
 
 func TestHttp2StreamTrailingElseEmptySyncIsLoadBearing(t *testing.T) {

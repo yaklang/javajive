@@ -1,7 +1,8 @@
 package javaclassparser
 
 // Flattened nested units cannot see each other's private members. nestDemotePrivate
-// widens those members to package-private. Kill-switch: JDEC_NEST_PRIVATE_PACKAGE_OFF.
+// widens fields to package-private. Private instance methods retain nonvirtual
+// dispatch and use separately proven access bridges when siblings are resolved.
 
 import (
 	"os"
@@ -25,8 +26,8 @@ func TestNestPrivateFieldDemotedOnEnclosingClass(t *testing.T) {
 	if !strings.Contains(on, "int bag") {
 		t.Errorf("ON: missing bag field:\n%s", on)
 	}
-	if strings.Contains(on, "private void addClient") {
-		t.Errorf("ON: enclosing private method was not demoted:\n%s", on)
+	if !strings.Contains(on, "private void addClient") {
+		t.Errorf("ON: private instance dispatch target was widened:\n%s", on)
 	}
 	t.Setenv("JDEC_NEST_PRIVATE_PACKAGE_OFF", "1")
 	off, err := Decompile(raw)
@@ -35,6 +36,9 @@ func TestNestPrivateFieldDemotedOnEnclosingClass(t *testing.T) {
 	}
 	if !strings.Contains(off, "private int bag") {
 		t.Errorf("OFF: expected private field kept:\n%s", off)
+	}
+	if !strings.Contains(off, "private void addClient") {
+		t.Errorf("OFF: private instance dispatch target was widened:\n%s", off)
 	}
 }
 

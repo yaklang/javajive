@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"regexp"
@@ -86,6 +87,7 @@ type ClassObjectDumper struct {
 	lambdaDepth                 int
 	fieldDefaultValue           map[string]string
 	interfaceInitializerHelpers []*dumpedMethods
+	privateNestOwnPlan          *privateNestPlan
 	dumpedMethodsSet            map[string]*dumpedMethods
 	// aggressive marks that the CURRENT method dump is a second attempt for a method whose
 	// conservative decompilation already failed. While set, the decompiler enables higher-risk
@@ -574,6 +576,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	c.FuncCtx = funcCtx
 	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
+	c.wirePrivateNestBridges()
 	c.overloadUnknownSeen = map[string]bool{}
 	funcCtx.OnOverloadUnknown = func(owner, name, descriptor string) {
 		c.overloadFamilyUnproven = true
@@ -3373,6 +3376,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	if v, ok := c.dumpedMethodsSet[traitId]; ok {
 		return v, nil
 	}
+	if c.FuncCtx != nil {
+		previousCatchEntries := c.FuncCtx.CatchEntryNames
+		c.FuncCtx.CatchEntryNames = nil
+		defer func() { c.FuncCtx.CatchEntryNames = previousCatchEntries }()
+	}
 	var method *MemberInfo
 	var name, descriptor string
 	var err error
@@ -3687,6 +3695,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if err != nil {
 				return dumped, utils.Wrap(err, "ParseBytesCode failed")
 			}
+			needsCheckedEscape, escapeErr := c.methodNeedsCheckedEscape(codeAttr, statementList, method)
+			if escapeErr != nil {
+				return nil, escapeErr
+			}
+			dumped.checkedEscape = needsCheckedEscape
 			thisRemoved := false
 			if len(params) > 0 {
 				if v, ok := params[0].(*values.JavaRef); ok && v.IsThis {
@@ -3883,6 +3896,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				defer c.UnTab()
 				var res []string
 				for i, statement := range statementList {
+					if tail, ok := statement.(*statements.ReturnStatement); ok && i > 0 {
+						if region, ok := statementList[i-1].(*statements.TryCatchStatement); ok && rewriter.FinallyConsumesSharedVoidReturn(region, tail) {
+							continue
+						}
+					}
 					if _, ok := statement.(*statements.MiddleStatement); ok {
 						continue
 					}
@@ -4027,7 +4045,24 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					}
 					for i, body := range catchBodies {
 						excType := normalizeCatchClauseType(catchExc[i].Type().String(funcCtx))
-						bodyStr := statementListToString(body)
+						// Bind only the original handler stack value, never a type
+						// token with the same spelling. Nested handlers restore the
+						// enclosing scope after rendering their own entry values.
+						previousEntries := funcCtx.CatchEntryNames
+						entries := maps.Clone(previousEntries)
+						if entries == nil {
+							entries = map[int]string{}
+						}
+						for originalIndex, originalRef := range ret.Exception {
+							if originalRef == catchExc[i] && originalIndex < len(ret.Handlers) && ret.Handlers[originalIndex].EntryPC >= 0 {
+								entries[ret.Handlers[originalIndex].EntryPC] = catchExc[i].String(funcCtx)
+							}
+						}
+						bodyStr := func() string {
+							funcCtx.CatchEntryNames = entries
+							defer func() { funcCtx.CatchEntryNames = previousEntries }()
+							return statementListToString(body)
+						}()
 						// An empty catch body in a non-void method can cause "missing return
 						// statement" when the catch handler originally had a throw that the
 						// TryRewriter dropped. Add `throw new RuntimeException(<var>)` to make
@@ -4149,8 +4184,19 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			}
 			statementCodes := []string{}
 			supperInvokeStr := ""
+			delegationPC := -1
+			if needsCheckedEscape && name == "<init>" {
+				delegationPC = constructorDelegationPC(statementList)
+			}
+			if needsCheckedEscape && name == "<clinit>" {
+				staticHoistBarrierHit = true
+			}
 			if name == "<clinit>" && classStaticInitializersMustHoist {
-				helpers, initErr := c.renderInterfaceInitializers(statementList, codeAttr, funcCtx, statementListToString)
+				renderInitializer := statementListToString
+				if needsCheckedEscape {
+					renderInitializer = func(body []statements.Statement) string { return c.wrapCheckedEscapeBody(statementListToString(body)) }
+				}
+				helpers, initErr := c.renderInterfaceInitializers(statementList, codeAttr, funcCtx, renderInitializer)
 				if initErr != nil {
 					return nil, initErr
 				}
@@ -4165,6 +4211,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				}
 				if v, ok := statement.(*statements.ExpressionStatement); ok {
 					if v1, ok := v.Expression.(*values.FunctionCallExpression); ok && v1.IsSupperConstructorInvoke(funcCtx) {
+						supperInvokeStr = fmt.Sprintf("%s\n", statementToString(statement))
+						continue
+					}
+					if v1, ok := v.Expression.(*values.FunctionCallExpression); ok && needsCheckedEscape && name == "<init>" && v1.HasOriginPC && v1.OriginPC == delegationPC {
 						supperInvokeStr = fmt.Sprintf("%s\n", statementToString(statement))
 						continue
 					}
@@ -4224,7 +4274,15 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				}
 				statementCodes = append(statementCodes, fmt.Sprintf("%sthrow new RuntimeException(\"incomplete control flow\");\n", c.GetTabString()))
 			}
-			sourceCode += supperInvokeStr + strings.Join(statementCodes, "")
+			methodBodyCode := strings.Join(statementCodes, "")
+			if needsCheckedEscape && !(name == "<clinit>" && classStaticInitializersMustHoist) {
+				wrapped := c.wrapCheckedEscapeBody(methodBodyCode)
+				if err := c.holdOutput(int64(len(wrapped) - len(methodBodyCode))); err != nil {
+					return nil, err
+				}
+				methodBodyCode = wrapped
+			}
+			sourceCode += supperInvokeStr + methodBodyCode
 			receiverType := ""
 			if !funcCtx.IsStatic && name != "<clinit>" {
 				receiverType = c.GetConstructorMethodName()
@@ -4434,9 +4492,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 }
 
 type dumpedMethods struct {
-	methodName string
-	code       string
-	bodyCode   string
+	checkedEscape bool
+	methodName    string
+	code          string
+	bodyCode      string
 	// member/descriptor are retained so the post-decompile syntax safety net can rebuild a
 	// stub for a method whose generated body turns out to be un-parseable.
 	member     *MemberInfo
@@ -9199,9 +9258,6 @@ func fixHttpclientRemainingReconstructs(body string) string {
 		return body
 	}
 	body = strings.ReplaceAll(body,
-		"public BrowserCompatSpec(String[] var1, BrowserCompatSpecFactory$SecurityLevel var2) {\n\t\tsuper(var3);\n\t\tCommonCookieAttributeHandler[] var3 = new CommonCookieAttributeHandler[7];\n\t\tvar3[0] = new BrowserCompatVersionAttributeHandler();\n\t\tvar3[1] = new BasicDomainHandler();\n\t\tvar3[2] = ((var2) == (BrowserCompatSpecFactory$SecurityLevel.SECURITYLEVEL_IE_MEDIUM)) ? (new BrowserCompatSpec$1()) : (new BasicPathHandler());\n\t\tvar3[3] = new BasicMaxAgeHandler();\n\t\tvar3[4] = new BasicSecureHandler();\n\t\tvar3[5] = new BasicCommentHandler();\n\t\tvar3[6] = new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DEFAULT_DATE_PATTERNS));\n\t}",
-		"public BrowserCompatSpec(String[] var1, BrowserCompatSpecFactory$SecurityLevel var2) {\n\t\tsuper(new CommonCookieAttributeHandler[]{new BrowserCompatVersionAttributeHandler(), new BasicDomainHandler(), ((var2) == (BrowserCompatSpecFactory$SecurityLevel.SECURITYLEVEL_IE_MEDIUM)) ? (new BrowserCompatSpec$1()) : (new BasicPathHandler()), new BasicMaxAgeHandler(), new BasicSecureHandler(), new BasicCommentHandler(), new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DEFAULT_DATE_PATTERNS))});\n\t}")
-	body = strings.ReplaceAll(body,
 		"public NetscapeDraftSpec(String[] var1) {\n\t\tsuper(var2);\n\t\tCommonCookieAttributeHandler[] var2 = new CommonCookieAttributeHandler[5];\n\t\tvar2[0] = new BasicPathHandler();\n\t\tvar2[1] = new NetscapeDomainHandler();\n\t\tvar2[2] = new BasicSecureHandler();\n\t\tvar2[3] = new BasicCommentHandler();\n\t\tvar2[4] = new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (new String[]{\"EEE, dd-MMM-yy HH:mm:ss z\"}));\n\t}",
 		"public NetscapeDraftSpec(String[] var1) {\n\t\tsuper(new CommonCookieAttributeHandler[]{new BasicPathHandler(), new NetscapeDomainHandler(), new BasicSecureHandler(), new BasicCommentHandler(), new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (new String[]{\"EEE, dd-MMM-yy HH:mm:ss z\"}))});\n\t}")
 	body = strings.ReplaceAll(body,
@@ -12791,6 +12847,21 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		return nil, err
 	}
 	result = append(result, c.interfaceInitializerHelpers...)
+	privateHelpers, err := c.privateNestHelpers()
+	if err != nil {
+		return nil, err
+	}
+	result = append(result, privateHelpers...)
+	for _, dumped := range c.dumpedMethodsSet {
+		if dumped != nil && dumped.checkedEscape {
+			helper := c.checkedEscapeHelper()
+			if err := c.holdOutput(int64(len(helper.code))); err != nil {
+				return nil, err
+			}
+			result = append(result, helper)
+			break
+		}
+	}
 	return result, nil
 }
 

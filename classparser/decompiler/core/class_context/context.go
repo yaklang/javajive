@@ -21,8 +21,14 @@ type ClassContext struct {
 	// LocalNames supplies scoped source bindings by identity. It does not rename
 	// the underlying IR or conflate locals that merely share a JVM slot spelling.
 	LocalNames map[*coreutils.VariableId]string
+	// CatchEntryNames binds original handler stack values by their exact entry PC.
+	// It is scoped to rendering this method/handler, separate from type names.
+	CatchEntryNames map[int]string
 	// InvocationMetadata supplies complete member and parent tables, never CP-only guesses.
 	InvocationMetadata callbinding.Provider
+	// PrivateNestBridge returns a source access bridge only for a witnessed
+	// original private nestmate invocation. It never widens the target method.
+	PrivateNestBridge func(owner, name, descriptor string, kind uint8, pc int) (string, bool)
 	// Env looks up JDEC_* flags for this request. Nil falls back to jdecenv.Get.
 	Env func(string) string
 	// Work is the request budget used to cap source construction before allocation.

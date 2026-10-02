@@ -179,6 +179,16 @@ func (j *JavaLiteral) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableI
 }
 
 func (j *JavaLiteral) Type() types.JavaType {
+	// A noncanonical JVM int word does not become a Java boolean merely
+	// because an inference consumer requested Z. Retain its numeric category:
+	// branches test nonzero, while Z return/store consumers keep only bit zero.
+	if j.JavaType != nil {
+		if p, ok := j.JavaType.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaBoolean {
+			if word, ok := j.Data.(int); ok && word != 0 && word != 1 {
+				return types.NewJavaPrimer(types.JavaInteger)
+			}
+		}
+	}
 	return j.JavaType
 }
 
@@ -213,7 +223,7 @@ func (j *JavaLiteral) String(funcCtx *class_context.ClassContext) string {
 			return ""
 		}
 	}
-	typeStr := j.JavaType.String(funcCtx)
+	typeStr := j.Type().String(funcCtx)
 	switch typeStr {
 	case types.NewJavaPrimer(types.JavaBoolean).String(funcCtx):
 		if v, ok := j.Data.(int); ok {
@@ -610,7 +620,7 @@ func boolLiteralValue(v JavaValue) (val bool, ok bool) {
 		return false, false
 	}
 	if d, isInt := lit.Data.(int); isInt {
-		if p.Name == types.JavaInteger && d != 0 && d != 1 {
+		if d != 0 && d != 1 {
 			return false, false
 		}
 		if p.Name != types.JavaBoolean && p.Name != types.JavaInteger {

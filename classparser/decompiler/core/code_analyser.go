@@ -186,9 +186,10 @@ func resetReturnValueTypeSafe(v values.JavaValue, funcCtx *class_context.ClassCo
 	if !ok || funcType == nil {
 		return
 	}
-	// A parameter's declaration is an ABI constraint, not an inference
-	// variable. A Z return may narrow its int word without changing I to Z.
-	if ref, ok := values.UnpackSoltValue(v).(*values.JavaRef); ok && ref.IsParam && values.IsBooleanStackNarrowing(funcType.ReturnType, ref) {
+	// Z consumes a computational int by taking bit zero. Do not change a
+	// shared numeric producer into boolean: earlier IFEQ/IFNE and arithmetic
+	// uses must retain the whole word, including noncanonical values 2/-2.
+	if values.IsBooleanStackNarrowing(funcType.ReturnType, v) {
 		return
 	}
 	resetJavaValueTypeSafe(v, funcType.ReturnType)
@@ -5058,12 +5059,19 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			default:
 				typ = types.NewJavaClass("Throwable")
 			}
+			handlerPC := int(code.CurrentOffset)
 			exceptionValue := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
+				if funcCtx != nil {
+					if name := funcCtx.CatchEntryNames[handlerPC]; name != "" {
+						return name
+					}
+				}
 				return "Exception"
 			}, func() types.JavaType {
 				return typ
 			})
 			exceptionValue.Flag = "exception"
+			exceptionValue.OriginPC, exceptionValue.HasOriginPC = handlerPC, true
 			runtimeStackSimulation.Push(exceptionValue)
 		}
 		if d.traceEnabled("var-table") {
@@ -5252,6 +5260,8 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// it is a plain tree the legacy probe already handles, so the caller also defers to avoid churn.
 	unadoptedBranchCast := false
 	var unadoptedCastRoot *OpCode
+	nestedValueRoots := map[*OpCode]*OpCode{}
+	nestedValueRootsResolved := map[*OpCode]bool{}
 	buildSharedLeafTernary := func(mergeNode *OpCode, detectedIfNodes []*OpCode) (root *values.TernaryExpression, built map[*OpCode]*values.TernaryExpression, sharedLeaf bool, hasMiddleCond bool, ok bool) {
 		adoptedCasts := map[*OpCode]*values.JavaRef{}
 		adoptedFieldStores := map[*OpCode]bool{}
@@ -5493,6 +5503,18 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		nearestIfAncestor := func(n *OpCode) *OpCode {
 			cur := n
 			for step := 0; cur != nil && step < (1<<16); step++ {
+				// A closed inner diamond is one operand boundary. Contract it
+				// only for reverse routing; arm planning still owns its effects.
+				if cur != mergeNode && valueMergeSet[cur] {
+					if !nestedValueRootsResolved[cur] {
+						nestedValueRoots[cur] = d.closedNestedValueRoot(cur, mergeToIfNode[cur])
+						nestedValueRootsResolved[cur] = true
+					}
+					if innerRoot := nestedValueRoots[cur]; innerRoot != nil {
+						cur = innerRoot
+						continue
+					}
+				}
 				if len(cur.Source) != 1 {
 					return nil
 				}
@@ -6992,6 +7014,7 @@ func (d *Decompiler) ParseStatement() error {
 		idToNode[toNodeId].SourceConditionNode = idToNode[conditionId]
 	}
 	d.RootNode = nodes[0]
+	d.inlinePrivateDelegationBranchArray(idToOpcode)
 	allowArrayEffects := func(first, last *Node) bool {
 		a, b := idToOpcode[first.Id], idToOpcode[last.Id]
 		if a == nil || b == nil || a.CurrentOffset > b.CurrentOffset {

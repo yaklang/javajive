@@ -48,10 +48,58 @@ func TestSoftProxiesCacheFindOrInsertCastIsLoadBearing(t *testing.T) {
 }
 
 func TestPreferredAssumptionFlatMapIsLoadBearing(t *testing.T) {
-	assertKillSwitchJarFS(t, assertjCoreJar,
-		"org/assertj/core/configuration/PreferredAssumptionException.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"Optional opt = (Optional)(l0)",
-		".flatMap((Function<Optional, Stream>)")
+	jar := "org/assertj/assertj-core/3.24.2/assertj-core-3.24.2.jar"
+	entry := "org/assertj/core/configuration/PreferredAssumptionException.class"
+	raw := originalJarClassForReview(t, jar, "org/assertj/core/configuration/PreferredAssumptionException$1.class")
+	assertReviewedRemainingSAMTarget(t, raw, "org/assertj/core/configuration/PreferredAssumptionException$1", "lambda$autoDetectAssumptionExceptionClass$1", "(Ljava/util/Optional;)Ljava/util/stream/Stream;", "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/util/Optional;)Ljava/util/stream/Stream;")
+	object, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := NewConstantPoolWithConstant(&object.ConstantPool)
+	found := false
+	for _, method := range object.Methods {
+		if cp.GetUtf8(int(method.NameIndex)).Value != "autoDetectAssumptionExceptionClass" {
+			continue
+		}
+		for _, attr := range method.Attributes {
+			if code, ok := attr.(*CodeAttribute); ok {
+				assertReviewedOpcode(t, code, 40, 185)
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("original flatMap path missing")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var on string
+	for _, flag := range []string{"", "1"} {
+		t.Setenv("JDEC_ASSERTJ_REMAINING_OFF", flag)
+		fs, err := NewJarFSFromLocal(home + "/.m2/repository/" + jar)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := fs.ReadFile(entry)
+		fs.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := string(data)
+		carrier := requireReviewedPattern(t, source, `Function\s+(\w+)\s*=\s*\(Function\)\s*\(\(Function<Optional,\s*Stream>\)`)[1]
+		requireReviewedPattern(t, source, `\.map\(\(Function\)[^;]*Function<Class,\s*Stream>[^;]*Stream::of[^;]*\.orElse\(\(Object\)\(Stream\.empty\(\)\)\)`)
+		if !strings.Contains(source, ".flatMap("+carrier+").findFirst()") || !strings.Contains(source, "AUTO_DETECT((String)(null)) {") {
+			t.Fatal("optional stream SAM carrier or original enum override detached")
+		}
+		if flag == "" {
+			on = source
+		} else if source != on {
+			t.Fatal("superseded source patch still changes original flatMap")
+		}
+	}
 }
 
 func TestMapsClonePreservesDeclaredException(t *testing.T) {

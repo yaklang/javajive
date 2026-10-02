@@ -9,7 +9,7 @@ import (
 	"slices"
 )
 
-// A Boolean stack-phi terminal can be shared by outer and inner routing edges.
+// An inert literal stack-phi terminal can be shared by outer and inner routing edges.
 // Give this edge its own inert store before dominance-based body collection.
 // Both copies write the same local and join its same original return; neither
 // the RHS nor the terminal continuation can allocate, invoke or throw.
@@ -26,7 +26,7 @@ func splitSharedLiteralPhiStores(manager *RewriteManager, condition *core.Node) 
 			continue
 		}
 		primitive, ok := ref.Type().RawType().(*types.JavaPrimer)
-		if !ok || primitive.Name != types.JavaBoolean {
+		if !ok || (primitive.Name != types.JavaBoolean && primitive.Name != types.JavaInteger) {
 			continue
 		}
 		literal, ok := values.UnpackSoltValue(assign.JavaValue).(*values.JavaLiteral)
@@ -34,11 +34,22 @@ func splitSharedLiteralPhiStores(manager *RewriteManager, condition *core.Node) 
 			continue
 		}
 		literalType, ok := literal.Type().RawType().(*types.JavaPrimer)
-		if !ok || literalType.Name != types.JavaBoolean {
+		if !ok || literalType.Name != primitive.Name {
 			continue
 		}
-		if _, ok := literal.Data.(bool); !ok {
-			continue
+		// Copy the same inert value on the selected original edge. Int
+		// carriers retain the whole word; a later Z sink narrows bit zero.
+		// No Boolean inference or 0/1 normalization is needed to split an
+		// assignment of a constant to the same private local.
+		switch primitive.Name {
+		case types.JavaBoolean:
+			if _, ok := literal.Data.(bool); !ok {
+				continue
+			}
+		case types.JavaInteger:
+			if _, ok := literal.Data.(int); !ok {
+				continue
+			}
 		}
 		exit := target.Next[0]
 		ret, ok := exit.Statement.(*statements.ReturnStatement)

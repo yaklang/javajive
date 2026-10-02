@@ -46,7 +46,6 @@ func fixHardjarCodeShapes(body string) string {
 	body = wrapIntrospectionExceptionCalls(body)
 	body = wrapThrowTargetException(body)
 	body = wrapStmtObjectMethodAssign(body)
-	body = wrapCallSiteMethodBodies(body)
 	body = wrapObjectTypeVarArgs(body)
 	body = wrapGetNoOutputObjectArgs(body)
 	body = wrapErasedFieldAsTypeVar(body, ".output")
@@ -2581,65 +2580,6 @@ func wrapIntroCallsInMember(chunk string, names map[string]bool) string {
 // `throw (Exception)(ident.getTargetException())` when the nearby if tested
 // `instanceof Exception`. InvocationTargetException.getTargetException returns
 // Throwable; throwing it from a method that throws Exception is illegal.
-// wrapCallSiteMethodBodies wraps the body of a method that calls
-// `$getCallSiteArray()` in `try { ... } catch (Throwable t) { throw new
-// RuntimeException(t); }`. CallSite.call throws Throwable; adding
-// `throws Throwable` would break GroovyObject.invokeMethod.
-func wrapCallSiteMethodBodies(body string) string {
-	if !strings.Contains(body, "$getCallSiteArray()") {
-		return body
-	}
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "\n\t")
-		if rel < 0 {
-			return body
-		}
-		mstart := from + rel
-		if mstart+2 >= len(body) || body[mstart+2] == '\t' || body[mstart+2] == '\n' || body[mstart+2] == ' ' || body[mstart+2] == '/' {
-			from = mstart + 2
-			continue
-		}
-		braceRel := strings.Index(body[mstart:], "{")
-		if braceRel < 0 {
-			from = mstart + 2
-			continue
-		}
-		open := mstart + braceRel
-		sig := body[mstart:open]
-		if strings.Contains(sig, "$getCallSiteArray") {
-			from = open + 1
-			continue
-		}
-		close := matchingCloseBrace(body, open)
-		if close < 0 {
-			from = open + 1
-			continue
-		}
-		chunk := body[mstart : close+1]
-		if !strings.Contains(chunk, "$getCallSiteArray()") {
-			from = close + 1
-			continue
-		}
-		if strings.Contains(chunk, "catch (Throwable") || strings.Contains(chunk, "catch(Throwable") {
-			from = close + 1
-			continue
-		}
-		inner := body[open+1 : close]
-		head := inner
-		if len(head) > 120 {
-			head = head[:120]
-		}
-		if strings.Contains(head, "super(") {
-			from = close + 1
-			continue
-		}
-		wrapped := "{\n\t\ttry {" + inner + "\t\t} catch (Throwable _t) {\n\t\t\tthrow new RuntimeException(_t);\n\t\t}\n\t}"
-		body = body[:open] + wrapped + body[close+1:]
-		from = open + len(wrapped)
-	}
-}
-
 func wrapThrowTargetException(body string) string {
 	if hardjarShapeOff() {
 		return body

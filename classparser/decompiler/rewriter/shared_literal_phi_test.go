@@ -10,7 +10,7 @@ import (
 )
 
 func TestSharedBooleanPhiStoreRequiresInertTerminalIdentity(t *testing.T) {
-	for _, kind := range []string{"true", "false", "same coverage", "different coverage", "missing store pc", "wrong store pc", "missing return pc", "wrong return pc", "int value", "int target", "invocation", "field target", "parameter", "declaration", "wrong return local", "effectful return", "hidden", "encoded", "loop", "owned", "nonterminal"} {
+	for _, kind := range []string{"true", "false", "same coverage", "different coverage", "missing store pc", "wrong store pc", "missing return pc", "wrong return pc", "int value", "int target", "invocation", "field target", "parameter", "declaration", "wrong return local", "effectful return", "hidden", "encoded", "loop", "owned", "nonterminal", "int zero", "int one", "int two", "int negative", "long target", "float value"} {
 		t.Run(kind, func(t *testing.T) {
 			root, external, tail := jumpTestNode("root"), jumpTestNode("external"), jumpTestNode("tail")
 			condition := core.NewNode(&statements.ConditionStatement{})
@@ -47,6 +47,24 @@ func TestSharedBooleanPhiStoreRequiresInertTerminalIdentity(t *testing.T) {
 				ret.HasOriginPC = false
 			case "wrong return pc":
 				ret.OriginPC = 31
+			case "int zero", "int one", "int two", "int negative":
+				ref.ResetVarType(types.NewJavaPrimer(types.JavaInteger))
+				literal.JavaType = types.NewJavaPrimer(types.JavaInteger)
+				word := 0
+				switch kind {
+				case "int one":
+					word = 1
+				case "int two":
+					word = 2
+				case "int negative":
+					word = -2
+				}
+				literal.Data = word
+			case "long target":
+				ref.ResetVarType(types.NewJavaPrimer(types.JavaLong))
+			case "float value":
+				literal.JavaType = types.NewJavaPrimer(types.JavaFloat)
+				literal.Data = float32(0)
 			case "int value":
 				assign.JavaValue = values.NewJavaLiteral(1, types.NewJavaPrimer(types.JavaInteger))
 			case "int target":
@@ -78,7 +96,7 @@ func TestSharedBooleanPhiStoreRequiresInertTerminalIdentity(t *testing.T) {
 			manager := NewRootStatementManager(root)
 			manager.DominatorMap = GenerateDominatorTree(root)
 			splitSharedLiteralPhiStores(manager, condition)
-			accepted := kind == "true" || kind == "false" || kind == "same coverage"
+			accepted := kind == "true" || kind == "false" || kind == "same coverage" || kind == "int zero" || kind == "int one" || kind == "int two" || kind == "int negative"
 			if !accepted {
 				if condition.Next[0] != target {
 					t.Fatal("split an unproved phi terminal")

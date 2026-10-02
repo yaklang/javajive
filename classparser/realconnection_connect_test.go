@@ -5,38 +5,32 @@ package javaclassparser
 // kill-switch: JDEC_REALCONNECTION_CONNECT_OFF。
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
 
 func TestRealConnectionConnectIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/RealConnection.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
+	path := "testdata/regression/RealConnection.class"
+	descriptor := "(IIIIZLokhttp3/Call;Lokhttp3/EventListener;)V"
+	raw, code, object := reviewedFixtureMethod(t, path, "connect", descriptor)
+	assertReviewedTypeVarInvoke(t, path, "connect", descriptor, 211, 183, "okhttp3/internal/connection/RealConnection", "connectTunnel", "(IIILokhttp3/Call;Lokhttp3/EventListener;)V")
+	assertReviewedTypeVarInvoke(t, path, "connect", descriptor, 231, 183, "okhttp3/internal/connection/RealConnection", "connectSocket", "(IILokhttp3/Call;Lokhttp3/EventListener;)V")
+	assertReviewedTypeVarInvoke(t, path, "connect", descriptor, 243, 183, "okhttp3/internal/connection/RealConnection", "establishProtocol", "(Lokhttp3/internal/connection/ConnectionSpecSelector;ILokhttp3/Call;Lokhttp3/EventListener;)V")
+	cp := NewConstantPoolWithConstant(&object.ConstantPool)
+	if len(code.ExceptionTable) < 2 {
+		t.Fatal("original retry handler missing")
 	}
-
-	os.Unsetenv("JDEC_REALCONNECTION_CONNECT_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
+	for i, row := range [][3]uint16{{193, 221, 274}, {224, 271, 274}} {
+		handler := code.ExceptionTable[i]
+		if handler.StartPc != row[0] || handler.EndPc != row[1] || handler.HandlerPc != row[2] || cp.GetClassName(int(handler.CatchType)) != "java/io/IOException" {
+			t.Fatal("connection call exception ranges changed")
+		}
 	}
-	if !strings.Contains(on, "this.establishProtocol(var10,var4,var6,var7);") {
-		t.Errorf("fix ON: expected establishProtocol inside connect()'s try, got:\n%s", on)
-	}
-	if strings.Contains(on, "if(false)throw new IOException();\n\t\t\t\t\tbreak;") {
-		t.Errorf("fix ON: sentinel connect() try body still present, got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_REALCONNECTION_CONNECT_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if !strings.Contains(off, "if(false)throw new IOException();\n\t\t\t\t\tbreak;") {
-		t.Errorf("fix OFF: expected the sentinel connect() try body, got:\n%s", off)
-	}
-	if strings.Contains(off, "this.establishProtocol(var10,var4,var6,var7);") {
-		t.Errorf("fix OFF: reconstruct survived the kill-switch, got:\n%s", off)
-	}
+	reviewedOriginalFamilySources(t, raw, "com/squareup/okhttp3/okhttp/3.14.9/okhttp-3.14.9.jar", "JDEC_REALCONNECTION_CONNECT_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `void\s+connect\(`)
+		requireReviewedPattern(t, body, `try\{(?:\s*if\(false\)throw new IOException\(\);)?\s*if\s*\([^{}]*requiresTunnel\(\)[^{}]*\)\{[^{}]*this\.connectTunnel\([^;]*;\s*if\s*\(\(this\.rawSocket\)\s*==\s*\(null\)\)\{\s*break;\s*\}\s*\}else\{[^{}]*this\.connectSocket\([^;]*;[^{}]*\}\s*this\.establishProtocol\([^;]*;[^{}]*connectEnd\([^;]*;[^{}]*break;\s*\}catch\(IOException\s+\w+\)`)
+		if !strings.Contains(body, ".addConnectException(") || !strings.Contains(body, "this.socket = null;") || !strings.Contains(body, "this.protocol = null;") {
+			t.Fatal("retry catch lost original accumulated failure or state cleanup")
+		}
+	})
 }

@@ -789,28 +789,18 @@ func TestSpringClassUtilsEntryPutDecompileIsLoadBearing(t *testing.T) {
 }
 
 func TestSpringVisitAnnotationConsumerDecompileIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/SpringMergedAnnotationReadingVisitor.class")
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
-	os.Unsetenv("JDEC_VISITANNOTATION_CONSUMER_CAST_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	if !strings.Contains(on, "visitAnnotation") {
-		t.Fatalf("expected visitAnnotation, got:\n%s", on)
-	}
-	if !strings.Contains(on, "(java.util.function.Consumer)((l0) ->") &&
-		!strings.Contains(on, "(Consumer)((l0) ->") {
-		t.Errorf("fix ON: expected raw Consumer cast on visitAnnotation, got:\n%s", on)
-	}
-	t.Setenv("JDEC_VISITANNOTATION_CONSUMER_CAST_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	if strings.Contains(off, "(java.util.function.Consumer)((l0) ->") {
-		t.Errorf("fix OFF: expected no raw Consumer rewrite, got:\n%s", off)
-	}
+	raw := reviewedRemainingSAMRaw(t, "SpringMergedAnnotationReadingVisitor")
+	assertReviewedRemainingSAMTarget(t, raw, "org/springframework/core/type/classreading/MergedAnnotationReadingVisitor", "lambda$visitAnnotation$1", "(Ljava/lang/String;Lorg/springframework/core/annotation/MergedAnnotation;)V", "(Ljava/lang/Object;)V", "(Lorg/springframework/core/annotation/MergedAnnotation;)V")
+	assertReviewedTypeVarInvoke(t, "testdata/regression/SpringMergedAnnotationReadingVisitor.class", "visitAnnotation", "(Ljava/lang/String;Ljava/lang/String;)Lorg/springframework/asm/AnnotationVisitor;", 9, 183, "org/springframework/core/type/classreading/MergedAnnotationReadingVisitor", "visitAnnotation", "(Ljava/lang/String;Ljava/util/function/Consumer;)Lorg/springframework/asm/AnnotationVisitor;")
+	reviewedSeedSources(t, "testdata/regression/SpringMergedAnnotationReadingVisitor.class", "JDEC_VISITANNOTATION_CONSUMER_CAST_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `public\s+AnnotationVisitor\s+visitAnnotation\(String\s+\w+,\s*String\s+\w+\)`)
+		params := requireReviewedPattern(t, body, `visitAnnotation\(String\s+(\w+),\s*String\s+(\w+)\)`)
+		carrier := requireReviewedPattern(t, body, `Consumer<MergedAnnotation>\s+(\w+)\s*=\s*\((\w+)\)\s*->`)
+		if !strings.Contains(body, "return this.visitAnnotation("+params[2]+",(Consumer)("+carrier[1]+"));") {
+			t.Fatal("typed SAM carrier lost precise Consumer overload invocation")
+		}
+		if !strings.Contains(body, "this.attributes.put(") || !strings.Contains(body, ","+carrier[2]+");") {
+			t.Fatal("annotation callback no longer stores its original argument")
+		}
+	})
 }

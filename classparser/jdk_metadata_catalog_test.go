@@ -95,6 +95,36 @@ func TestJDKInvocationCatalogVersionBounds(t *testing.T) {
 	}
 }
 
+func TestJDKFilterInputStreamOriginalNamespace(t *testing.T) {
+	// FilterInputStream is a real intermediate superclass, not an alias for
+	// InputStream. Its complete original namespace is required before adding
+	// a collision-free synthetic method to a subclass.
+	for _, release := range []int{8, 11, 17, 21} {
+		class, ok := jdkInvocationMetadata("java/io/FilterInputStream", release)
+		if !ok || !class.MembersComplete || !class.ParentsComplete || len(class.Parents) != 1 || class.Parents[0] != "java/io/InputStream" {
+			t.Fatalf("missing original FilterInputStream declaration in profile %d", release)
+		}
+		for _, descriptor := range []string{"()I", "([B)I", "([BII)I"} {
+			count := 0
+			for _, method := range class.Methods {
+				if method.Name == "read" && method.Desc == descriptor && method.Public && !method.Static {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("profile %d lost exact read overload %s", release, descriptor)
+			}
+		}
+		provider := func(name string) (callbinding.Class, bool) { return jdkInvocationMetadata(name, release) }
+		family, err := callbinding.FamilyOf(callbinding.Witness{Owner: class.Name, Name: "read", Desc: "()I", Kind: callbinding.Virtual}, provider)
+		// The zero-argument call has one effective declaration after override
+		// resolution; the other two overloads have different arities.
+		if err != nil || !family.Complete || family.Target == nil || family.Proof != callbinding.Unique {
+			t.Fatalf("profile %d lost complete original zero-argument read family: %+v %v", release, family, err)
+		}
+	}
+}
+
 func TestJDKInvocationCatalogGenericFamiliesAndStringFormal(t *testing.T) {
 	for _, release := range []int{8, 11, 17, 21} {
 		provider := func(name string) (callbinding.Class, bool) { return jdkInvocationMetadata(name, release) }
