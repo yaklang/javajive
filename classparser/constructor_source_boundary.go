@@ -143,6 +143,38 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		}
 	}
 	if p.pc < 0 {
+		// No-arg super calls may be omitted by the simulator even when the
+		// superclass observes this via virtual dispatch. An earlier capture
+		// write cannot silently move behind that implicit Java source call.
+		if p.delegate == nil && c.obj.GetSupperClassName() != "java/lang/Object" {
+			ops := constructorMotionOps(decoder)
+			for i, op := range ops {
+				member := constructorMotionMember(c.obj, op, core.OP_INVOKESPECIAL)
+				if member != nil && member.Name == c.obj.GetSupperClassName() && member.Member == "<init>" && member.Description == "()V" && i > 0 && core.GetRetrieveIdx(ops[i-1]) == 0 && constructorMotionLoad(ops[i-1], "Ljava/lang/Object;") && i > 1 {
+					// Recover only an exact leading sequence of capture triples.
+					// The common proof below binds each source assignment to its
+					// original parameter slot, field and pre-delegation position.
+					count := (i - 1) / 3
+					if (i-1)%3 == 0 && count > 0 {
+						for _, st := range body {
+							if middle, ok := st.(*statements.MiddleStatement); ok && middle != nil && middle.Data == nil {
+								continue
+							}
+							if len(p.prefix) == count {
+								break
+							}
+							p.prefix = append(p.prefix, st)
+						}
+						p.pc = int(op.CurrentOffset)
+						p.delegate = &values.FunctionCallExpression{ClassName: member.Name, FunctionName: "<init>", Descriptor: "()V", Kind: values.InvokeSpecial, IsSpecialInvoke: true, Object: &values.JavaRef{IsThis: true}, OriginPC: p.pc, HasOriginPC: true}
+						if len(p.prefix) == count && c.constructorCapturesCommute(p, code, method, decoder) {
+							return p, nil
+						}
+					}
+					return nil, fmt.Errorf("implicit constructor prefix lacks receiver-observation proof")
+				}
+			}
+		}
 		return p, nil
 	}
 	if strings.ReplaceAll(p.delegate.ClassName, ".", "/") != c.obj.GetClassName() && strings.ReplaceAll(p.delegate.ClassName, ".", "/") != c.obj.GetSupperClassName() {
@@ -157,6 +189,9 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		if err := c.planConstructorArgumentBridges(p, code, method); err != nil {
 			return nil, err
 		}
+		return p, nil
+	}
+	if c.constructorCapturesCommute(p, code, method, decoder) {
 		return p, nil
 	}
 	// A prefix cannot cross an original exception domain. The bounded carrier
