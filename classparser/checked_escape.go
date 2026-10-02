@@ -131,9 +131,10 @@ func originalExceptionUnchecked(exception string, provider callbinding.Provider)
 }
 
 // A typed handler suppresses its caught checked exception only if every typed
-// path is free of an explicit rethrow. Raw catch-all cleanup never proves
+// path has no rethrow or throws a proven unchecked operand at its original
+// decoded ATHROW. Raw catch-all cleanup never proves
 // suppression: its synthetic ATHROW propagates the original exception.
-func typedAbsorbingHandlers(body []statements.Statement) map[int]bool {
+func typedAbsorbingHandlers(body []statements.Statement, uncheckedThrows map[int]bool) map[int]bool {
 	result := map[int]bool{}
 	remaining := 1024
 	var absorbs func([]statements.Statement) bool
@@ -145,7 +146,9 @@ func typedAbsorbingHandlers(body []statements.Statement) map[int]bool {
 			}
 			switch x := statement.(type) {
 			case *statements.CustomStatement:
-				return false
+				if x == nil || x.ThrownValue == nil || !x.HasOriginPC || !uncheckedThrows[x.OriginPC] {
+					return false
+				}
 			case *statements.IfStatement:
 				if x == nil || !absorbs(x.IfBody) || !absorbs(x.ElseBody) {
 					return false
@@ -195,6 +198,30 @@ func typedAbsorbingHandlers(body []statements.Statement) map[int]bool {
 				if x != nil {
 					visit(x.IfBody)
 					visit(x.ElseBody)
+				}
+			case *statements.WhileStatement:
+				if x != nil {
+					visit(x.Body)
+				}
+			case *statements.DoWhileStatement:
+				if x != nil {
+					visit(x.Body)
+				}
+			case *statements.ForStatement:
+				if x != nil {
+					visit(x.SubStatements)
+				}
+			case *statements.SynchronizedStatement:
+				if x != nil {
+					visit(x.Body)
+				}
+			case *statements.SwitchStatement:
+				if x != nil {
+					for _, arm := range x.Cases {
+						if arm != nil {
+							visit(arm.Body)
+						}
+					}
 				}
 			}
 		}
@@ -256,8 +283,17 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 			}
 		}
 	}
-	absorbing := typedAbsorbingHandlers(body)
 	thrownTypes := checkedEscapeThrownTypes(body, provider)
+	uncheckedThrows := map[int]bool{}
+	for _, op := range decoder.Opcodes() {
+		if op != nil && op.Instr != nil && op.Instr.OpCode == core.OP_ATHROW {
+			pc := int(op.CurrentOffset)
+			if name := thrownTypes[pc]; name != "" && originalExceptionUnchecked(name, provider) {
+				uncheckedThrows[pc] = true
+			}
+		}
+	}
+	absorbing := typedAbsorbingHandlers(body, uncheckedThrows)
 	for _, op := range decoder.Opcodes() {
 		if op == nil || op.Instr == nil {
 			continue

@@ -21,6 +21,10 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 			cache[n] = v
 			return v, true
 		}
+		if v, ok := jdkThrowableAncestry(n, target); ok {
+			cache[n] = v
+			return v, true
+		}
 		misses[n] = true
 		return callbinding.Class{}, false
 	}

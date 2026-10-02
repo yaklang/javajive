@@ -16,8 +16,9 @@ import (
 var jdkInvocationCatalogJSON []byte
 
 var jdkInvocationCatalog struct {
-	once     sync.Once
-	profiles map[int]map[string]callbinding.Class
+	once             sync.Once
+	profiles         map[int]map[string]callbinding.Class
+	throwableParents map[int]map[string][]string
 }
 
 // jdkInvocationMetadata is a bounded platform-profile fallback. target must be
@@ -28,14 +29,16 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 		var document struct {
 			Schema   int `json:"schema"`
 			Profiles []struct {
-				Release int                          `json:"release"`
-				Classes map[string]callbinding.Class `json:"classes"`
+				Release          int                          `json:"release"`
+				Classes          map[string]callbinding.Class `json:"classes"`
+				ThrowableParents map[string][]string          `json:"throwable_hierarchy"`
 			} `json:"profiles"`
 		}
 		if json.Unmarshal(jdkInvocationCatalogJSON, &document) != nil || document.Schema != 1 {
 			return
 		}
 		profiles := make(map[int]map[string]callbinding.Class)
+		throwableParents := make(map[int]map[string][]string)
 		for _, profile := range document.Profiles {
 			if _, duplicate := profiles[profile.Release]; duplicate {
 				return
@@ -51,8 +54,17 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 				}
 			}
 			profiles[profile.Release] = profile.Classes
+			for _, parents := range profile.ThrowableParents {
+				for _, parent := range parents {
+					if _, ok := profile.ThrowableParents[parent]; !ok {
+						return
+					}
+				}
+			}
+			throwableParents[profile.Release] = profile.ThrowableParents
 		}
 		jdkInvocationCatalog.profiles = profiles
+		jdkInvocationCatalog.throwableParents = throwableParents
 	})
 	class, ok := jdkInvocationCatalog.profiles[target][name]
 	if !ok {
@@ -63,4 +75,16 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 	class.Parents = append([]string(nil), class.Parents...)
 	class.Methods = append([]callbinding.Method(nil), class.Methods...)
 	return class, true
+}
+
+// This fallback has original classfile ancestry but deliberately makes no
+// member-completeness claim. Checked-exception classification can use it;
+// synthetic-member naming and overload resolution must still reject it.
+func jdkThrowableAncestry(name string, target int) (callbinding.Class, bool) {
+	jdkInvocationMetadata("java/lang/Object", target)
+	parents, ok := jdkInvocationCatalog.throwableParents[target][name]
+	if !ok {
+		return callbinding.Class{}, false
+	}
+	return callbinding.Class{Name: name, Parents: append([]string(nil), parents...), ParentsComplete: true}, true
 }

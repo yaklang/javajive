@@ -297,10 +297,10 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 	}
 	vs := []string{}
 	for _, value := range j.Values {
-		// A later web solution can expose a Z operand in an otherwise I
-		// bitwise expression. Preserve the full numeric word and lift only
-		// the boolean operand to its JVM 0/1 computational representation.
-		if len(j.Values) == 2 && (j.Op == AND || j.Op == OR || j.Op == XOR) {
+		// JVM arithmetic and ordered comparisons consume computational
+		// words, including canonical Z reads. Convert only this use; numeric
+		// peers retain every bit and the original effect is evaluated once.
+		if j.consumesNumericWords(funcCtx) {
 			if _, ok := boolOperandCondition(value); ok {
 				value = booleanStackWord(value)
 			}
@@ -356,6 +356,19 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 	}
 }
 
+func (j *JavaExpression) consumesNumericWords(ctx *class_context.ClassContext) bool {
+	switch j.Op {
+	case ADD, SUB, MUL, DIV, REM, AND, OR, XOR, SHL, SHR, USHR, LT, LTE, GT, GTE:
+		return true
+	case EQ, NEQ:
+		if len(j.Values) != 2 || ctx.Getenv("JDEC_BOOL_INT_OPERAND_CMP_OFF") != "" {
+			return false
+		}
+		return (isBooleanTyped(j.Values[0]) && isIntTyped(j.Values[1])) || (isIntTyped(j.Values[0]) && isBooleanTyped(j.Values[1]))
+	}
+	return false
+}
+
 // boolVsIntTernaryCollapse handles a `==`/`!=` comparison where one operand is boolean-typed and the
 // other is a boolean-materialization ternary `cond ? 1 : 0` (or the inverse `cond ? 0 : 1`). javac
 // emits that ternary when a boolean sub-expression is forced into an int comparison, and the resulting
@@ -367,7 +380,7 @@ func boolVsIntTernaryCollapse(a, b JavaValue, op string, funcCtx *class_context.
 	if funcCtx.Getenv("JDEC_BOOL_INT_TERNARY_CMP_OFF") != "" {
 		return "", false
 	}
-	tryOrder := func(boolCand, ternCand JavaValue) (string, bool) {
+	tryOrder := func(boolCand, ternCand JavaValue, booleanFirst bool) (string, bool) {
 		if !isBooleanTyped(boolCand) {
 			return "", false
 		}
@@ -375,26 +388,29 @@ func boolVsIntTernaryCollapse(a, b JavaValue, op string, funcCtx *class_context.
 		if !ok {
 			return "", false
 		}
-		return fmt.Sprintf("(%s) %s (%s)", boolCand.String(funcCtx), op, cond.String(funcCtx)), true
+		if booleanFirst {
+			return fmt.Sprintf("(%s) %s (%s)", boolCand.String(funcCtx), op, cond.String(funcCtx)), true
+		}
+		return fmt.Sprintf("(%s) %s (%s)", cond.String(funcCtx), op, boolCand.String(funcCtx)), true
 	}
-	if s, ok := tryOrder(a, b); ok {
+	if s, ok := tryOrder(a, b, true); ok {
 		return s, true
 	}
-	if s, ok := tryOrder(b, a); ok {
+	if s, ok := tryOrder(b, a, false); ok {
 		return s, true
 	}
 	return "", false
 }
 
 // boolVsIntOperandCollapse handles `==`/`!=` between a boolean-typed operand and an int-typed
-// operand (jackson UntypedObjectDeserializer `int var3 != this._nonMerging`). The int is the
-// JVM 0/1 materialization of a boolean; comparing it with `(intVal) != 0` restores a boolean
-// vs boolean comparison. Kill-switch: JDEC_BOOL_INT_OPERAND_CMP_OFF.
+// operand. An arbitrary int is not a proved 0/1 materialization. Lift the Z
+// operand to its computational word, preserving equality with 2/-1 as false.
+// Kill-switch: JDEC_BOOL_INT_OPERAND_CMP_OFF.
 func boolVsIntOperandCollapse(a, b JavaValue, op string, funcCtx *class_context.ClassContext) (string, bool) {
 	if funcCtx.Getenv("JDEC_BOOL_INT_OPERAND_CMP_OFF") != "" {
 		return "", false
 	}
-	try := func(boolCand, intCand JavaValue) (string, bool) {
+	try := func(boolCand, intCand JavaValue, booleanFirst bool) (string, bool) {
 		if !isBooleanTyped(boolCand) || !isIntTyped(intCand) {
 			return "", false
 		}
@@ -403,12 +419,15 @@ func boolVsIntOperandCollapse(a, b JavaValue, op string, funcCtx *class_context.
 		if _, isTern := UnpackSoltValue(intCand).(*TernaryExpression); isTern {
 			return "", false
 		}
-		return fmt.Sprintf("(%s) %s ((%s) != (0))", boolCand.String(funcCtx), op, intCand.String(funcCtx)), true
+		if booleanFirst {
+			return fmt.Sprintf("(%s) %s (%s)", booleanStackWord(boolCand).String(funcCtx), op, intCand.String(funcCtx)), true
+		}
+		return fmt.Sprintf("(%s) %s (%s)", intCand.String(funcCtx), op, booleanStackWord(boolCand).String(funcCtx)), true
 	}
-	if s, ok := try(a, b); ok {
+	if s, ok := try(a, b, true); ok {
 		return s, true
 	}
-	if s, ok := try(b, a); ok {
+	if s, ok := try(b, a, false); ok {
 		return s, true
 	}
 	return "", false
@@ -704,6 +723,9 @@ func nonNilType(candidates ...types.JavaType) types.JavaType {
 func NewUnaryExpression(value1 JavaValue, op string, typ types.JavaType) *JavaExpression {
 	if IsStrictBooleanOperator(op) {
 		resetTypeSafe(value1, types.NewJavaPrimer(types.JavaBoolean))
+	}
+	if op == SUB && isBooleanTyped(value1) {
+		typ = types.NewJavaPrimer(types.JavaInteger)
 	}
 	return &JavaExpression{
 		Values: []JavaValue{value1},

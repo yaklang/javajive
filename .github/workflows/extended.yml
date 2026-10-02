@@ -29,6 +29,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      # Native binding tests parse complete original declarations; no JAR is executed here.
+      - name: Prepare hash-locked original declaration families
+        run: python3 scripts/historical_jar_audit.py prepare --cache "$HOME/.m2/repository" --manifest "$RUNNER_TEMP/native-manifest.json"
       - run: go test ./... -count=1 -timeout=30m
   historical-audit:
     name: Historical JAR differential audit (38 targets)

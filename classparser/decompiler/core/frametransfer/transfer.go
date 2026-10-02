@@ -441,6 +441,13 @@ func arrayStore(f *Frame, elem Kind) error {
 
 func pushLDC(f *Frame, instr Instr, wide bool) error {
 	c := instr.Const
+	if c.Kind == methodir.ConstNone {
+		return unsupportedf("ldc constant kind is unresolved or unsupported")
+	}
+	categoryTwo := c.Kind == methodir.ConstLong || c.Kind == methodir.ConstDouble
+	if wide != categoryTwo {
+		return invalidf("ldc opcode width does not match constant category")
+	}
 	switch c.Kind {
 	case methodir.ConstInt:
 		return f.push(IntConst(c.Int))
@@ -451,20 +458,11 @@ func pushLDC(f *Frame, instr Instr, wide bool) error {
 	case methodir.ConstClass:
 		return f.push(RefOf("java/lang/Class"))
 	case methodir.ConstLong:
-		if !wide {
-			return invalidf("long in ldc")
-		}
 		return f.push(LongConst(c.Long))
 	case methodir.ConstDouble:
-		if !wide {
-			return invalidf("double in ldc")
-		}
 		return f.push(DoubleBits(c.DoubleBits))
 	}
-	if wide {
-		return unsupportedf("ldc2_w without constant")
-	}
-	return f.push(RefOf("java/lang/Object"))
+	return unsupportedf("ldc constant kind is unsupported")
 }
 
 func fieldOp(f *Frame, instr Instr, static, put bool) error {

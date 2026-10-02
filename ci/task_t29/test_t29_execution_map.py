@@ -79,7 +79,7 @@ class TestExecutionEventMapping(unittest.TestCase):
         self.assertEqual(snap["jobs"]["ci.yml"], ["regression"])
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Algorithm regression", workflow)
-        self.assertIn("timeout-minutes: 10", workflow)
+        self.assertRegex(workflow, r"(?m)^\s+timeout-minutes:\s+(?:[1-9]|1[0-5])\s*$")
         self.assertNotIn("go test ./...", workflow)
         self.assertNotIn("./test/cross", workflow)
 

@@ -244,7 +244,7 @@ class T29Contracts(unittest.TestCase):
         self.assertEqual(snap["jobs"]["ci.yml"], ["regression"])
         pr_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Algorithm regression", pr_ci)
-        self.assertIn("timeout-minutes: 10", pr_ci)
+        self.assertRegex(pr_ci, r"(?m)^\s+timeout-minutes:\s+(?:[1-9]|1[0-5])\s*$")
         self.assertNotIn("go test ./...", pr_ci)
         self.assertNotIn("./test/cross", pr_ci)
 

@@ -122,10 +122,48 @@ def profile(release, archive, prefix, jdk_version):
             if name in roots:
                 for method in cls['Methods']:
                     pending.extend(re.findall(r'L([^;]+);', method['Desc']))
+        # Exception classification needs actual ancestry, not an exception-name
+        # suffix or a small guessed list. Read all declarations in this pinned
+        # platform archive, then retain only the closed Throwable descendant
+        # graph. This is ancestry evidence, never a complete member table.
+        declarations_by_name, source_entries = {}, {}
+        for entry in source.namelist():
+            if not entry.startswith(prefix) or not entry.endswith('.class'):
+                continue
+            raw = source.read(entry)
+            cls, major = declarations(raw)
+            declarations_by_name[cls['Name']] = cls
+            source_entries[cls['Name']] = {'entry': entry, 'sha256': hashlib.sha256(raw).hexdigest(), 'major': major}
+        rooted, active = {}, set()
+        def throwable(name):
+            if name == 'java/lang/Throwable':
+                return True
+            if name in rooted:
+                return rooted[name]
+            if name in active or name not in declarations_by_name:
+                return False
+            active.add(name)
+            result = any(throwable(parent) for parent in declarations_by_name[name]['Parents'])
+            active.remove(name)
+            rooted[name] = result
+            return result
+        exception_names = sorted(name for name in declarations_by_name if throwable(name))
+        ancestors, pending = set(exception_names), list(exception_names)
+        while pending:
+            name = pending.pop()
+            for parent in declarations_by_name[name]['Parents']:
+                if parent not in declarations_by_name:
+                    raise ValueError('missing exception ancestor ' + parent)
+                if parent not in ancestors:
+                    ancestors.add(parent)
+                    pending.append(parent)
+        exception_names = sorted(ancestors)
         return {'release': release, 'jdk_version': jdk_version,
                 'archive_sha256': hashlib.sha256(Path(archive).read_bytes()).hexdigest(),
                 'classes': {k: classes[k] for k in sorted(classes)},
-                'provenance': {k: provenance[k] for k in sorted(provenance)}}
+                'provenance': {k: provenance[k] for k in sorted(provenance)},
+                'throwable_hierarchy': {name: declarations_by_name[name]['Parents'] for name in exception_names},
+                'throwable_provenance': {name: source_entries[name] for name in exception_names}}
 
 
 def main():

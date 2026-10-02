@@ -227,8 +227,13 @@ func copyInstr(n *core.OpCode, d *core.Decompiler) (Instr, error) {
 		in.IincConst = iincConst(n)
 	}
 	switch n.Instr.OpCode {
-	case core.OP_LDC, core.OP_LDC_W, core.OP_LDC2_W,
-		core.OP_GETFIELD, core.OP_PUTFIELD, core.OP_GETSTATIC, core.OP_PUTSTATIC,
+	case core.OP_LDC, core.OP_LDC_W, core.OP_LDC2_W:
+		in.CPIndex = cpIndex(n)
+		in.Const = decodeLiteralCP(d, int(in.CPIndex))
+		if in.Const.Kind == ConstClass {
+			in.Class = in.Const.Class
+		}
+	case core.OP_GETFIELD, core.OP_PUTFIELD, core.OP_GETSTATIC, core.OP_PUTSTATIC,
 		core.OP_INVOKEVIRTUAL, core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEINTERFACE, core.OP_INVOKEDYNAMIC,
 		core.OP_NEW, core.OP_ANEWARRAY, core.OP_CHECKCAST, core.OP_INSTANCEOF, core.OP_MULTIANEWARRAY:
 		in.CPIndex = cpIndex(n)
