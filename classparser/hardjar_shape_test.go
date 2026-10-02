@@ -194,32 +194,18 @@ func TestCatchObjectAsThrowableIsLoadBearing(t *testing.T) {
 }
 
 func TestIdentSelfCastCallIsLoadBearing(t *testing.T) {
-	raw, err := os.ReadFile("testdata/regression/IdentCastAdv.class")
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Unsetenv("JDEC_IDENT_SELF_CAST_OFF")
-	on, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Contains(on, "(var1)(var1.getTargetException())") {
-		t.Fatalf("ON still has ident-as-type cast:\n%s", on)
-	}
-	if !strings.Contains(on, "var1.getTargetException()") {
-		t.Fatalf("ON missing call:\n%s", on)
-	}
-	t.Setenv("JDEC_IDENT_SELF_CAST_OFF", "1")
-	off, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !strings.Contains(off, "(var1)(var1.getTargetException())") {
-		t.Fatalf("OFF missing ident-as-type cast:\n%s", off)
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	raw, _, _ := reviewedFixtureMethod(t, "testdata/regression/IdentCastAdv.class", "m", "()Ljava/lang/Object;")
+	code, object := reviewedControlCode(t, raw, "m", "()Ljava/lang/Object;", []string{"0:4:5:java/lang/reflect/InvocationTargetException"})
+	assertReviewedOpcode(t, code, 20, core.OP_CHECKCAST)
+	assertReviewedOpcode(t, code, 23, core.OP_ATHROW)
+	assertReviewedOpcode(t, code, 24, core.OP_ALOAD_1)
+	assertReviewedOpcode(t, code, 25, core.OP_ATHROW)
+	reviewedControlInvokes(t, code, object, reviewedViewInvoke{"IdentCastAdv", "invoke", "()Ljava/lang/Object;", core.OP_INVOKEVIRTUAL}, reviewedViewInvoke{"java/lang/reflect/InvocationTargetException", "getTargetException", "()Ljava/lang/Throwable;", core.OP_INVOKEVIRTUAL})
+	// A VALUE placeholder cannot become a TYPE. The typed cast and unchanged
+	// wrapped-exception fallback are required with either legacy patch setting.
+	assertReviewedSources(t, raw, "JDEC_IDENT_SELF_CAST_OFF", func(source string) {
+		assertReviewedTargetExceptionPayload(t, reviewedControlBody(t, source, `public\s+Object\s+m\(`), false)
+	})
 }
 
 func TestNestedPackagePrivateIsPublic(t *testing.T) {
@@ -727,46 +713,9 @@ func TestWrapThrowTargetException(t *testing.T) {
 }
 
 func TestWrapThrowTargetExceptionJarFS(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip(err)
-	}
-	jar := filepath.Join(home, ".m2/repository/org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar")
-	if _, err := os.Stat(jar); err != nil {
-		t.Skip(err)
-	}
-	entry := "org/springframework/beans/factory/config/MethodInvokingBean.class"
-	os.Unsetenv("JDEC_HARDJAR_SHAPE_OFF")
-	jfs, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	onb, err := jfs.ReadFile(entry)
-	jfs.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	on := string(onb)
-	if !strings.Contains(on, "throw (Exception)(var1.getTargetException());") {
-		t.Fatalf("ON missing Exception wrap of getTargetException:\n%s", clipForTest(on, "throw ("))
-	}
-	t.Setenv("JDEC_HARDJAR_SHAPE_OFF", "1")
-	jfs2, err := NewJarFSFromLocal(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	offb, err := jfs2.ReadFile(entry)
-	jfs2.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	off := string(offb)
-	if strings.Contains(off, "throw (Exception)(var1.getTargetException());") {
-		t.Fatalf("OFF already has Exception wrap (switch inert):\n%s", clipForTest(off, "getTargetException"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
-	}
+	reviewedControlJar(t, "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar", "org/springframework/beans/factory/config/MethodInvokingBean.class", "invokeWithTargetException", "()Ljava/lang/Object;", []string{"0:4:5:java/lang/reflect/InvocationTargetException"}, []reviewedViewInvoke{{"java/lang/reflect/InvocationTargetException", "getTargetException", "()Ljava/lang/Throwable;", core.OP_INVOKEVIRTUAL}}, func(source string) {
+		assertReviewedTargetExceptionPayload(t, reviewedControlBody(t, source, `protected\s+Object\s+invokeWithTargetException\(`), true)
+	})
 }
 
 func TestWrapStmtObjectMethodAssignJarFS(t *testing.T) {

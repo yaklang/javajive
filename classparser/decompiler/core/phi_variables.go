@@ -575,15 +575,54 @@ func joinWebTypes(a, b types.JavaType, provider types.SuperTypeProvider) types.J
 // type of `x != null ? x : new T()` includes the provisional Object type of x;
 // only the concrete arm and the web's other definitions constrain the solution.
 func webDefinitionTypes(value values.JavaValue, self map[*values.JavaRef]bool) []types.JavaType {
-	value = values.UnpackSoltValue(value)
-	if values.IsNullLiteral(value) {
-		return nil
+	// A shared decision value is a DAG, not its exponentially expanded source
+	// tree. Each leaf identity contributes its static constraint once; equal
+	// types do not unify distinct definitions. Keep true-before-false discovery
+	// order, and reject cyclic/incomplete graphs rather than inventing a type.
+	type frame struct {
+		value values.JavaValue
+		exit  bool
 	}
-	if ref, ok := value.(*values.JavaRef); ok && self[ref] {
-		return nil
+	stack := []frame{{value: value}}
+	state := map[values.JavaValue]uint8{}
+	var result []types.JavaType
+	for len(stack) > 0 {
+		last := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		v := last.value
+		if v == nil || reflect.ValueOf(v).Kind() == reflect.Pointer && reflect.ValueOf(v).IsNil() {
+			return []types.JavaType{nil}
+		}
+		if last.exit {
+			state[v] = 2
+			continue
+		}
+		if state[v] == 1 {
+			return []types.JavaType{nil}
+		}
+		if state[v] == 2 {
+			continue
+		}
+		if len(state) >= 65536 {
+			return []types.JavaType{nil}
+		}
+		state[v] = 1
+		stack = append(stack, frame{value: v, exit: true})
+		if slot, ok := v.(*values.SlotValue); ok {
+			stack = append(stack, frame{value: slot.GetValue()})
+			continue
+		}
+		if values.IsNullLiteral(v) {
+			continue
+		}
+		if ref, ok := v.(*values.JavaRef); ok && self[ref] {
+			continue
+		}
+		if ternary, ok := v.(*values.TernaryExpression); ok {
+			stack = append(stack, frame{value: ternary.FalseValue}, frame{value: ternary.TrueValue})
+			continue
+		}
+		result = append(result, slotDeclType(v))
 	}
-	if ternary, ok := value.(*values.TernaryExpression); ok {
-		return append(webDefinitionTypes(ternary.TrueValue, self), webDefinitionTypes(ternary.FalseValue, self)...)
-	}
-	return []types.JavaType{slotDeclType(value)}
+	return result
 }

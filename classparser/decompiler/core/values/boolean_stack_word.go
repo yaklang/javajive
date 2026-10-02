@@ -59,6 +59,9 @@ func NarrowBooleanStackWord(value JavaValue) JavaValue {
 // semantics. Each selected arm is evaluated exactly once. Canonical Boolean
 // operands already represent the correct low bit and need no conversion.
 func BooleanStackConsumerView(value JavaValue) (JavaValue, bool) {
+	if compact, ok := canonicalIntegerDecisionCondition(value); ok {
+		return compact, true
+	}
 	memo := map[JavaValue]JavaValue{}
 	expansion := map[JavaValue]int{}
 	active := map[JavaValue]bool{}

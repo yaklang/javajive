@@ -695,34 +695,16 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 		reduced = or(notCond(c), tv)
 		return reduced
 	}
-	// Shared-leaf factoring: both arms are boolean non-literals, but a short-circuit predicate often
-	// shares a leaf between the taken arm and the fall-through (the same value appears once as a whole
-	// arm and once as a disjunct/conjunct of the other), e.g. `c ? (A || S) : S` is exactly
-	// `(c && A) || S`. The leaf is matched by pointer identity first (one DAG node) and, since
-	// SimplifyConditionValue may have rebuilt an equivalent value, by rendered equality as a fallback.
-	// This branch is only reached when neither arm is a boolean literal (the common short-circuit
-	// shape hits the literal switch above), so its rendering is not on the hot path.
-	eq := func(a, b JavaValue) bool {
-		if a == nil || b == nil {
-			return false
-		}
-		ua := UnpackSoltValue(a)
-		ub := UnpackSoltValue(b)
-		if ua == ub {
-			return true
-		}
-		switch ua.(type) {
-		case *JavaExpression, *TernaryExpression:
-			return false
-		}
-		switch ub.(type) {
-		case *JavaExpression, *TernaryExpression:
-			return false
-		}
-		return a.String(funcCtx) == b.String(funcCtx)
+	// Factor only the exact same value node. Trailing shared leaves preserve
+	// condition/arm evaluation order. Leading-leaf rules reorder c and S, so
+	// require both to be pure; rendered equality supplies no such proof.
+	eq := func(a, b JavaValue) bool { return a != nil && b != nil && UnpackSoltValue(a) == UnpackSoltValue(b) }
+	if eq(tv, fv) { // c is still evaluated once before the shared arm.
+		reduced = and(or(c, NewJavaLiteral(1, boolType)), tv)
+		return reduced
 	}
 	if orE, isOr := tv.(*JavaExpression); isOr && orE.Op == LOGICAL_OR && len(orE.Values) == 2 {
-		if eq(orE.Values[0], fv) { // c ? (S || A) : S  =>  S || (c && A)
+		if eq(orE.Values[0], fv) && IsPure(c) && IsPure(fv) { // c ? (S || A) : S  =>  S || (c && A)
 			reduced = or(fv, and(c, orE.Values[1]))
 			return reduced
 		}
@@ -732,7 +714,7 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 		}
 	}
 	if andE, isAnd := fv.(*JavaExpression); isAnd && andE.Op == LOGICAL_AND && len(andE.Values) == 2 {
-		if eq(andE.Values[0], tv) { // c ? T : (T && A)  =>  T && (c || A)
+		if eq(andE.Values[0], tv) && IsPure(c) && IsPure(tv) { // c ? T : (T && A)  =>  T && (c || A)
 			reduced = and(tv, or(c, andE.Values[1]))
 			return reduced
 		}
@@ -741,12 +723,29 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 			return reduced
 		}
 	}
+	if andE, ok := tv.(*JavaExpression); ok && andE.Op == LOGICAL_AND && len(andE.Values) == 2 && eq(andE.Values[1], fv) {
+		reduced = and(or(notCond(c), andE.Values[0]), fv)
+		return reduced
+	}
+	if orE, ok := fv.(*JavaExpression); ok && orE.Op == LOGICAL_OR && len(orE.Values) == 2 && eq(orE.Values[1], tv) {
+		reduced = or(and(notCond(c), orE.Values[0]), tv)
+		return reduced
+	}
 	reduced = NewTernaryExpression(c, tv, fv) // irreducible: keep a ternary over the reduced arms
 	return reduced
 }
 
 func (j *TernaryExpression) String(funcCtx *class_context.ClassContext) string {
+	if !boundedDecisionGraph(j, 8192, 256) {
+		return EmptySlotValuePlaceholder
+	}
+	if rendered, ok := renderIntegerDecision(j, funcCtx); ok {
+		return rendered
+	}
 	reduced := boolReduce(j, funcCtx)
+	if !boundedDecisionSource(reduced, 65536) {
+		return EmptySlotValuePlaceholder
+	}
 	if rt, ok := reduced.(*TernaryExpression); ok {
 		condition := SimplifyConditionValue(rt.Condition)
 		return fmt.Sprintf("(%s) ? (%s) : (%s)", condition.String(funcCtx), rt.TrueValue.String(funcCtx), rt.FalseValue.String(funcCtx))

@@ -327,15 +327,31 @@ func finallyPureLocal(v values.JavaValue) bool {
 
 func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 	active := map[values.JavaValue]bool{}
+	proved := map[values.JavaValue]bool{}
 	remaining := 512
 	var visit func(values.JavaValue) bool
-	visit = func(v values.JavaValue) bool {
+	visit = func(v values.JavaValue) (valid bool) {
+		if v == nil || (reflect.ValueOf(v).Kind() == reflect.Ptr && reflect.ValueOf(v).IsNil()) || active[v] {
+			return false
+		}
+		// The covered predicate is fixed for this complete proof. A shared
+		// immutable DAG node needs one domain check, irrespective of the number
+		// of paths which reach it. This memoizes evidence, never evaluation:
+		// the expression and its original conditional effects remain unchanged.
+		if proved[v] {
+			return true
+		}
 		remaining--
-		if v == nil || remaining < 0 || active[v] {
+		if remaining < 0 {
 			return false
 		}
 		active[v] = true
-		defer delete(active, v)
+		defer func() {
+			delete(active, v)
+			if valid {
+				proved[v] = true
+			}
+		}()
 		var children []values.JavaValue
 		if v == values.JavaNull || values.IsNullLiteral(v) {
 			return true

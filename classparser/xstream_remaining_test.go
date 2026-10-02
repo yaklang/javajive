@@ -10,26 +10,30 @@ import (
 )
 
 func TestSerialHookKeepsPrivateReadResolve(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/PureJavaReflectionProvider.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
+	raw, code, object := reviewedFixtureMethod(t, "testdata/regression/PureJavaReflectionProvider.class", "readResolve", "()Ljava/lang/Object;")
+	cp := NewConstantPoolWithConstant(&object.ConstantPool)
+	for _, method := range object.Methods {
+		if cp.GetUtf8(int(method.NameIndex)).Value == "readResolve" && cp.GetUtf8(int(method.DescriptorIndex)).Value == "()Ljava/lang/Object;" && method.AccessFlags&0x0002 == 0 {
+			t.Fatal("original serialization hook is not private")
+		}
 	}
-	os.Unsetenv("JDEC_SERIAL_HOOK_PRIVATE_OFF")
-	os.Unsetenv("JDEC_NEST_PRIVATE_PACKAGE_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if !strings.Contains(on, "private Object readResolve()") && !strings.Contains(on, "private java.lang.Object readResolve()") {
-		t.Errorf("ON expected private readResolve, got:\n%s", on)
-	}
-	t.Setenv("JDEC_SERIAL_HOOK_PRIVATE_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if strings.Contains(off, "private Object readResolve()") {
-		t.Errorf("OFF expected nest-demoted (non-private) readResolve, got:\n%s", off)
+	assertReviewedOpcode(t, code, 0, core.OP_ALOAD_0)
+	assertReviewedOpcode(t, code, 1, core.OP_INVOKEVIRTUAL)
+	assertReviewedOpcode(t, code, 4, core.OP_ALOAD_0)
+	assertReviewedOpcode(t, code, 5, core.OP_ARETURN)
+	reviewedControlInvokes(t, code, object, reviewedViewInvoke{"com/thoughtworks/xstream/converters/reflection/PureJavaReflectionProvider", "init", "()V", core.OP_INVOKEVIRTUAL})
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_SERIAL_HOOK_PRIVATE_OFF", setting)
+		t.Setenv("JDEC_NEST_PRIVATE_PACKAGE_OFF", setting)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := reviewedControlBody(t, source, `private\s+(?:java\.lang\.)?Object\s+readResolve\(\)`)
+		requireReviewedPattern(t, body, `\{\s*this\.init\(\);\s*return this;\s*\}`)
+		if strings.Count(body, "init()") != 1 {
+			t.Fatal("serialization receiver initialization replayed")
+		}
 	}
 }
 
