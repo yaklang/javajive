@@ -7,6 +7,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
 // A handler cannot access an array that exists only on the protected operand
@@ -127,7 +128,7 @@ func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
 			candidate.argIndex >= len(call.Arguments) || candidate.argIndex >= len(call.FuncType.ParamTypes) ||
 			values.UnpackSoltValue(call.Arguments[candidate.argIndex]) != ref || !array.HasOriginPC ||
 			!array.HasEvaluationEndPC || len(array.Initializer) == 0 || array.EvaluationEndPC >= call.OriginPC ||
-			!sameExactArrayType(array.Type(), call.FuncType.ParamTypes[candidate.argIndex]) {
+			!branchArrayKeepsArgumentView(array, ref, call.FuncType.ParamTypes[candidate.argIndex]) {
 			continue
 		}
 		valid := true
@@ -401,7 +402,7 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 			values.UnpackSoltValue(call.Arguments[candidate.argIndex]) != ref ||
 			!array.IsArray() || !array.HasOriginPC || !array.HasEvaluationEndPC ||
 			len(array.Initializer) == 0 || array.EvaluationEndPC >= call.OriginPC ||
-			!sameExactArrayType(array.Type(), call.FuncType.ParamTypes[candidate.argIndex]) {
+			!branchArrayKeepsArgumentView(array, ref, call.FuncType.ParamTypes[candidate.argIndex]) {
 			continue
 		}
 		// The whole private allocation-to-call path preserves initializer
@@ -506,4 +507,15 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 		changed++
 	}
 	return changed
+}
+
+// Inline the same array view that the existing argument already presents.
+// A generic/covariant array parameter may have a wider erased component type;
+// replacing a Token[] local with a Token[] allocation changes no overload or
+// type inference input. A widened local declaration does not prove this.
+func branchArrayKeepsArgumentView(array *values.NewExpression, ref *values.JavaRef, parameter types.JavaType) bool {
+	if array == nil || ref == nil || parameter == nil || !parameter.IsArray() || !sameExactArrayType(array.Type(), ref.Type()) {
+		return false
+	}
+	return ref.WebDeclType == nil || sameExactArrayType(array.Type(), ref.WebDeclType)
 }

@@ -69,6 +69,15 @@ class TestTaskT01CLI(unittest.TestCase):
         )
         self.assertEqual(script.returncode, 0, script.stderr)
 
+    def test_standalone_entrypoint_outside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "milestone_ledger" / "__main__.py"),
+                 "validate", "--historical"], cwd=tmp, capture_output=True, text=True,
+            )
+        self.assertEqual(script.returncode, 0, script.stderr)
+        self.assertIn('"historical_cli"', script.stdout)
+
     def test_cli_corrupt_json_validate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad.json"

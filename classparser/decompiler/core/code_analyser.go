@@ -5246,6 +5246,8 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// means the shape is irreducible (a store on an arm, a non-conditional fork, a cycle, or an
 	// unresolved leaf) and the caller falls back to the legacy path unchanged. sharedLeaf=false means
 	// it is a plain tree the legacy probe already handles, so the caller also defers to avoid churn.
+	unadoptedBranchCast := false
+	var unadoptedCastRoot *OpCode
 	buildSharedLeafTernary := func(mergeNode *OpCode, detectedIfNodes []*OpCode) (root *values.TernaryExpression, built map[*OpCode]*values.TernaryExpression, sharedLeaf bool, hasMiddleCond bool, ok bool) {
 		adoptedCasts := map[*OpCode]*values.JavaRef{}
 		var arrayLeaves []branchArrayLeaf
@@ -5454,6 +5456,20 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 							value = slot
 						}
 					}
+					// An expression cannot read a temporary whose definition is
+					// removed with this selected arm. If full cast ownership was
+					// declined (e.g. a nested value diamond), retain the original
+					// CFG and materialize its outgoing stack values instead.
+					if ref, ok := UnpackSoltValue(value).(*values.JavaRef); ok && ref != nil {
+						if cast, ok := UnpackSoltValue(ref.Val).(*values.CastExpression); ok && cast != nil &&
+							cast.OriginPC >= int(entry.CurrentOffset) && cast.OriginPC < int(mergeNode.CurrentOffset) {
+							check := d.opcodeAtOffset(cast.OriginPC)
+							if check != nil && adoptedCasts[check] != ref && !d.inlineCheckcast[check] && d.opcodeProducesLocal(check, ref) {
+								unadoptedBranchCast, failed = true, true
+								return nil
+							}
+						}
+					}
 					leafValues[cur] = value
 					return value
 				}
@@ -5609,6 +5625,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		if !isTernaryCondition(rootNode) {
 			return nil, nil, false, false, false
 		}
+		unadoptedCastRoot = rootNode
 		root = probe(rootNode)
 		if failed || root == nil {
 			return nil, nil, false, false, false
@@ -5654,7 +5671,11 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			continue
 		}
 		if !EnableLegacyMergeReconstruction {
+			unadoptedBranchCast, unadoptedCastRoot = false, nil
 			rootTern, built, sharedLeaf, hasMiddleCond, ok := buildSharedLeafTernary(mergeNode, ifNodes)
+			if unadoptedBranchCast && d.lowerClosedStackPhi(mergeNode, []*OpCode{unadoptedCastRoot}, ternaryExpMergeNodeSlot[code], false) {
+				continue
+			}
 			if os.Getenv("DEBUG_TERNARY") != "" {
 				log.Errorf("TERNARY %s.%s %v merge=%d offset=%d ifNodes=%d ok=%v sharedLeaf=%v middle=%v built=%d",
 					d.FunctionContext.ClassName, d.FunctionContext.FunctionName, d.FunctionContext.FunctionType,

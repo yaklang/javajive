@@ -169,12 +169,10 @@ def run_docker(
             ]
         )
     if pids_enforced:
-        argv.extend(
-            [
-                f"--pids-limit={limits.pids}",
-                f"--ulimit=nproc={limits.pids}:{limits.pids}",
-            ]
-        )
+        # RLIMIT_NPROC counts all processes owned by the numeric host UID,
+        # including other containers. The cgroup cap is scoped to this job;
+        # adding a UID-wide cap lets unrelated workers prevent even init.
+        argv.append(f"--pids-limit={limits.pids}")
     for host, dest, mode in binds:
         spec = f"{host}:{dest}:ro" if "ro" in mode else f"{host}:{dest}"
         argv.extend(["-v", spec])

@@ -169,3 +169,30 @@ func TestBranchArrayReturnWalkPreservesNestedCatchConsumer(t *testing.T) {
 		})
 	}
 }
+
+func TestBranchArrayInlinePreservesExistingStaticArgumentView(t *testing.T) {
+	arrayType := types.NewJavaArrayType(types.NewJavaClass("example.Item"))
+	wide := types.NewJavaArrayType(types.NewJavaClass("java.lang.Object"))
+	array := values.NewNewExpression(arrayType)
+	for _, kind := range []string{"exact", "erased generic parameter", "widened local", "widened declaration", "scalar parameter", "unknown parameter"} {
+		t.Run(kind, func(t *testing.T) {
+			ref := values.NewJavaRef(utils.NewRootVariableId(), nil, arrayType)
+			var parameter types.JavaType = arrayType
+			switch kind {
+			case "erased generic parameter":
+				parameter = wide
+			case "widened local":
+				ref.ResetVarType(wide)
+			case "widened declaration":
+				ref.WebDeclType = wide
+			case "scalar parameter":
+				parameter = types.NewJavaClass("java.lang.Object")
+			case "unknown parameter":
+				parameter = nil
+			}
+			if got := branchArrayKeepsArgumentView(array, ref, parameter); got != (kind == "exact" || kind == "erased generic parameter") {
+				t.Fatalf("view unchanged=%v", got)
+			}
+		})
+	}
+}

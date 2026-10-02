@@ -71,3 +71,51 @@ func TestEffectfulStackPhiRequiresClosedForwardRegion(t *testing.T) {
 		})
 	}
 }
+
+func TestDeclinedExpressionPhiRetainsClosedRegionProof(t *testing.T) {
+	for _, kind := range []string{"closed", "outside entry", "protected", "unequal depth", "nonprivate edge"} {
+		t.Run(kind, func(t *testing.T) {
+			root := &OpCode{CurrentOffset: 1, Instr: &Instruction{OpCode: OP_IFEQ}}
+			left := &OpCode{CurrentOffset: 10, Instr: &Instruction{OpCode: OP_GOTO}, Source: []*OpCode{root}}
+			right := &OpCode{CurrentOffset: 20, Instr: &Instruction{OpCode: OP_CHECKCAST}, Source: []*OpCode{root}}
+			merge := &OpCode{CurrentOffset: 30, Instr: &Instruction{OpCode: OP_ASTORE}, Source: []*OpCode{left, right}}
+			root.Target = []*OpCode{left, right}
+			left.Target = []*OpCode{merge}
+			right.Target = []*OpCode{merge}
+			typ := types.NewJavaClass("java.lang.String")
+			a := values.NewJavaLiteral(nil, typ)
+			ref := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			right.stackProduced = []values.JavaValue{ref}
+			left.StackEntry = newStackItem(NewEmptyStackEntry(), a)
+			right.StackEntry = newStackItem(NewEmptyStackEntry(), ref)
+			slot := values.NewSlotValue(a, typ)
+			d := &Decompiler{opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{merge: NewStackSimulation(NewEmptyStackEntry(), nil, utils.NewRootVariableId())}}
+			switch kind {
+			case "outside entry":
+				right.Source = append(right.Source, &OpCode{CurrentOffset: 2})
+			case "protected":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 10, EndPc: 25}}
+			case "unequal depth":
+				right.StackEntry = newStackItem(right.StackEntry, a)
+			case "nonprivate edge":
+				right.Target = append(right.Target, left)
+			}
+			if got := d.lowerClosedStackPhi(merge, []*OpCode{root}, slot, false); got != (kind == "closed") {
+				t.Fatalf("lowered=%v", got)
+			}
+			if kind != "closed" {
+				if slot.GetValue() != a || len(d.effectfulStackPhiEdges) != 0 || len(d.disFoldRef) != 0 {
+					t.Fatal("rejected expression proof changed IR")
+				}
+				return
+			}
+			found := false
+			for _, pinned := range d.disFoldRef {
+				found = found || pinned == ref
+			}
+			if !found || d.effectfulStackPhiEdges[right].JavaValue != ref {
+				t.Fatal("cast producer lost its edge use")
+			}
+		})
+	}
+}

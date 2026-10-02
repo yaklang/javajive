@@ -654,3 +654,29 @@ public class LoopCatchSharedRethrow {
  public static void main(String[] args){int[][] cases={{},{1,2},{-1},{-1,2},{-2,1},{2,-1,4},{1,-2,-1}};for(int[] c:cases){trace="";try{System.out.println(collect(c)+":"+trace);}catch(CreationFailure e){System.out.println(e.code+":"+trace);}}}
 }`, Precision, Compatibility, "legacy")
 }
+
+func TestAdversarialNestedConditionalLookupCastRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "NestedConditionalLookupCast", `class ConditionalLookupBound{final boolean primary;ConditionalLookupBound(boolean p){primary=p;}boolean primary(){NestedConditionalLookupCast.trace+="p,";return primary;}}
+public class NestedConditionalLookupCast {
+ static String trace;
+ final java.util.Map<Integer,java.util.Map<String,String>> tokens;final java.util.List<ConditionalLookupBound> bounds;
+ NestedConditionalLookupCast(java.util.Map<Integer,java.util.Map<String,String>> t,java.util.List<ConditionalLookupBound> b){tokens=t;bounds=b;}
+ java.util.Map<String,String> select(int index){java.util.Map<String,String> result=!tokens.containsKey(index)&&!tokens.containsKey(index+1)?java.util.Collections.<String,String>emptyMap():tokens.get(index+(bounds.get(0).primary()?0:1));return result==null?java.util.Collections.<String,String>emptyMap():result;}
+ public static void main(String[] args){NestedConditionalLookupCastOracle.main(args);}
+}
+class NestedConditionalLookupCastOracle {
+ public static void main(String[] args){for(boolean p:new boolean[]{false,true})for(int mask=0;mask<8;mask++)for(int index=0;index<3;index++){java.util.Map<Integer,java.util.Map<String,String>> t=new java.util.HashMap<Integer,java.util.Map<String,String>>();for(int k=0;k<3;k++)if((mask&(1<<k))!=0){java.util.Map<String,String> v=new java.util.TreeMap<String,String>();v.put("v",String.valueOf(k));t.put(k,k==2?null:v);}NestedConditionalLookupCast.trace="";NestedConditionalLookupCast x=new NestedConditionalLookupCast(t,mask==0?java.util.Collections.<ConditionalLookupBound>emptyList():java.util.Arrays.asList(new ConditionalLookupBound(p)));System.out.println(x.select(index)+":"+NestedConditionalLookupCast.trace);}}
+}`, Precision, Compatibility, "legacy")
+}
+
+func TestAdversarialConditionalGenericVarargsFactoryRoundTrip(t *testing.T) {
+	t.Parallel()
+	roundTripGenericFlow(t, "ConditionalGenericVarargsFactory", `class FactoryItem{final int code;FactoryItem(int code){this.code=code;ConditionalGenericVarargsFactory.trace+="n"+code+",";}}
+public class ConditionalGenericVarargsFactory {
+ static String trace;final java.util.List<FactoryItem> items;
+ ConditionalGenericVarargsFactory(java.util.List<FactoryItem> values){items=values;}
+ static ConditionalGenericVarargsFactory make(boolean empty,int code){return new ConditionalGenericVarargsFactory(empty?java.util.Collections.<FactoryItem>emptyList():java.util.Arrays.asList(new FactoryItem(code)));}
+ public static void main(String[] args){for(boolean empty:new boolean[]{false,true})for(int code:new int[]{0,-1,2}){trace="";ConditionalGenericVarargsFactory value=make(empty,code);System.out.println(value.items.size()+":"+(value.items.isEmpty()?"empty":String.valueOf(value.items.get(0).code))+":"+trace);}}
+}`, Precision, Compatibility, "legacy")
+}

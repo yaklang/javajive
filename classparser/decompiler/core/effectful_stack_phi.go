@@ -13,6 +13,13 @@ import (
 // only a closed, forward region with a single stack word at its exit; handler
 // joins and joins with values below that word need separate lowering.
 func (d *Decompiler) lowerEffectfulStackPhi(merge *OpCode, conditions []*OpCode, slot *values.SlotValue) bool {
+	return d.lowerClosedStackPhi(merge, conditions, slot, true)
+}
+
+// Expression planning may also decline to own a branch-local cast producer.
+// Preserve that definition on its original edge instead of emitting a ternary
+// which reads the producer after its selected branch has disappeared.
+func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, slot *values.SlotValue, requireEffect bool) bool {
 	if merge == nil || slot == nil || len(conditions) == 0 || len(merge.Source) < 2 {
 		return false
 	}
@@ -61,7 +68,7 @@ func (d *Decompiler) lowerEffectfulStackPhi(merge *OpCode, conditions []*OpCode,
 			effect = true
 		}
 	}
-	if !effect || merge.IsCatch || merge.IsTryCatchParent {
+	if (requireEffect && !effect) || merge.IsCatch || merge.IsTryCatchParent {
 		return false
 	}
 	for n := range region {
