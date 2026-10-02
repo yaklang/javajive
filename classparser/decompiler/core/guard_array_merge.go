@@ -8,7 +8,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
-// guardArrayCall proves that a branch-local literal String[] assignment can be
+// guardArrayCall proves that a branch-local literal array assignment can be
 // evaluated at its only use, the immediately following conditional invocation.
 // In particular, no other live statement may still read the array local.
 func (d *Decompiler) guardArrayCall(definition, guard *Node, nodes []*Node, live map[*Node]bool) (*values.NewExpression, *values.FunctionCallExpression, int, bool) {
@@ -26,7 +26,7 @@ func (d *Decompiler) guardArrayCall(definition, guard *Node, nodes []*Node, live
 	array, ok := GetRealValue(assign.JavaValue).(*values.NewExpression)
 	if !ok || array == nil || array.Type() == nil || !array.IsArray() || !array.HasOriginPC ||
 		!array.HasEvaluationEndPC || len(array.Initializer) == 0 ||
-		array.Type().String(d.FunctionContext) != "String[]" {
+		!sameExactArrayType(array.Type(), ref.Type()) {
 		return nil, nil, 0, false
 	}
 	if len(array.Length) != 1 {
@@ -40,11 +40,7 @@ func (d *Decompiler) guardArrayCall(definition, guard *Node, nodes []*Node, live
 		return nil, nil, 0, false
 	}
 	for _, element := range array.Initializer {
-		lit, ok := values.UnpackSoltValue(element).(*values.JavaLiteral)
-		if !ok {
-			return nil, nil, 0, false
-		}
-		if _, ok := lit.Data.(string); !ok {
+		if lit, ok := values.UnpackSoltValue(element).(*values.JavaLiteral); !ok || lit == nil {
 			return nil, nil, 0, false
 		}
 	}
@@ -72,24 +68,28 @@ func (d *Decompiler) guardArrayCall(definition, guard *Node, nodes []*Node, live
 	}
 	if argIndex < 0 || argIndex >= len(call.FuncType.ParamTypes) ||
 		call.FuncType.ParamTypes[argIndex] == nil ||
-		call.FuncType.ParamTypes[argIndex].String(d.FunctionContext) != "String[]" ||
+		!branchArrayKeepsArgumentView(array, ref, call.FuncType.ParamTypes[argIndex]) ||
 		array.EvaluationEndPC >= call.OriginPC {
 		return nil, nil, 0, false
 	}
-	if call.Object != nil {
-		if effect, _ := values.InspectValue(call.Object); effect != 0 {
-			return nil, nil, 0, false
-		}
-	}
-	for _, earlier := range call.Arguments[:argIndex] {
-		if effect, _ := values.InspectValue(earlier); effect != 0 {
-			return nil, nil, 0, false
-		}
-	}
 	allocation, invocation := d.opcodeAtOffset(array.OriginPC), d.opcodeAtOffset(call.OriginPC)
 	if allocation == nil || invocation == nil || allocation.Instr == nil || invocation.Instr == nil ||
-		allocation.Instr.OpCode != OP_ANEWARRAY || !branchArraySinglePath(d, allocation, invocation) {
+		(allocation.Instr.OpCode != OP_ANEWARRAY && allocation.Instr.OpCode != OP_NEWARRAY) ||
+		!branchArraySinglePath(d, allocation, invocation) {
 		return nil, nil, 0, false
+	}
+	if !d.branchOperandPrecedesArray(call.Object, allocation) {
+		return nil, nil, 0, false
+	}
+	for _, earlier := range call.Arguments[:argIndex] {
+		if !d.branchOperandPrecedesArray(earlier, allocation) {
+			return nil, nil, 0, false
+		}
+	}
+	for op := allocation; op != invocation; op = op.Target[0] {
+		if op.Instr == nil || LocalAccessOf(op.Instr.OpCode).Write {
+			return nil, nil, 0, false
+		}
 	}
 	for _, n := range nodes {
 		if live[n] && n != definition && n != guard && statementReferencesLocal(n.Statement, ref) {
@@ -105,6 +105,42 @@ func (d *Decompiler) guardArrayCall(definition, guard *Node, nodes []*Node, live
 		return nil, nil, 0, false
 	}
 	return array, call, argIndex, true
+}
+
+// Expose a conditional invocation hidden by its private literal-array local.
+// Unlike a condition-chain pattern, this substitution does not need to guess
+// the guard's join or polarity. Every incoming edge still evaluates exactly
+// one allocation followed by the same call, with unchanged operand order,
+// static array view and exception domain.
+func (d *Decompiler) InlineAdjacentLiteralGuardArrays() int {
+	if d == nil || d.getenv("JDEC_GUARD_ARRAY_MERGE_OFF") != "" {
+		return 0
+	}
+	nodes, live := guardGraph(d.RootNode)
+	changed := 0
+	for _, definition := range nodes {
+		if definition == d.RootNode || definition.IsTryCatch || definition.IsCatchStart ||
+			definition.HideNext != nil || len(definition.EncodedJumps) != 0 || len(definition.Next) != 1 {
+			continue
+		}
+		guard := definition.Next[0]
+		if guard == nil || !soleLiveSources(guard, live, definition) {
+			continue
+		}
+		array, call, arg, ok := d.guardArrayCall(definition, guard, nodes, live)
+		if !ok {
+			continue
+		}
+		call.Arguments[arg] = array
+		for _, source := range slices.Clone(definition.Source) {
+			source.ReplaceNextSliceKeepOrder(definition, []*Node{guard})
+		}
+		definition.RemoveAllNext()
+		definition.RemoveAllSource()
+		live[definition] = false
+		changed++
+	}
+	return changed
 }
 
 func guardGraph(root *Node) ([]*Node, map[*Node]bool) {

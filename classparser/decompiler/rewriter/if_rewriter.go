@@ -31,6 +31,7 @@ func ifBranchNodes(ifNode *core.Node) (trueNode, falseNode *core.Node) {
 }
 
 func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
+	splitSharedFallthroughExpression(manager, ifNode)
 	splitSharedTerminalLeaves(manager, ifNode)
 	err := CalcEnd(manager.DominatorMap, ifNode)
 	if err != nil {
@@ -186,6 +187,70 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	markEncodedJumps(ifStatementNode, ifBodyNodes)
 
 	return nil
+}
+
+// A shared expression followed by the opposite successor is a conditional
+// edge block, not that condition's unconditional continuation. Its other
+// incoming edge prevents dominance-based body collection from owning it.
+// Split only this edge, retaining one execution on each original path. No
+// allocation, invocation or exception is moved across the condition.
+func splitSharedFallthroughExpression(manager *RewriteManager, condition *core.Node) {
+	left, right := ifBranchNodes(condition)
+	if left == nil || right == nil || left == right {
+		return
+	}
+	for _, pair := range [][2]*core.Node{{left, right}, {right, left}} {
+		target, continuation := pair[0], pair[1]
+		st, ok := target.Statement.(*statements.ExpressionStatement)
+		if !ok || st.Expression == nil || len(target.Source) < 2 || len(target.Next) != 1 ||
+			target.Next[0] != continuation || target.HideNext != nil || target.IsTryCatch ||
+			target.IsCatchStart || target.IsCircle || target.IsInCircle || target.LoopBreak ||
+			len(target.EncodedJumps) != 0 || encodedJumpTo(condition, target) ||
+			utils2.IsDominate(manager.DominatorMap, condition, target) ||
+			!sameProtectedMembership(manager.RootNode, condition, target) {
+			continue
+		}
+		copy := *st
+		edge := manager.NewNode(&copy)
+		edge.OriginPC, edge.HasOriginPC = target.OriginPC, target.HasOriginPC
+		edge.AddNext(continuation)
+		replaceNextInPlace(condition, target, edge)
+		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		return
+	}
+}
+
+func sameProtectedMembership(root, a, b *core.Node) bool {
+	if !a.HasOriginPC || !b.HasOriginPC {
+		return false
+	}
+	valid := true
+	core.WalkGraph[*core.Node](root, func(node *core.Node) ([]*core.Node, error) {
+		// IsTryCatch marks the pre-region anchor used during parsing. The
+		// actual synthetic protected owner is MiddleTryStart and carries the
+		// half-open range; reading the anchor as that owner loses the witness.
+		middle, isMiddle := node.Statement.(*statements.MiddleStatement)
+		if node.HasProtectedRange || (isMiddle && middle.Flag == statements.MiddleTryStart) {
+			if !node.HasProtectedRange {
+				valid = false
+				return nil, nil
+			}
+			contains := func(pc int) bool {
+				if len(node.SharedProtectedRanges) == 0 {
+					return pc >= node.ProtectedStartPC && pc < node.ProtectedEndPC
+				}
+				for _, row := range node.SharedProtectedRanges {
+					if pc >= int(row.StartPc) && pc < int(row.EndPc) {
+						return true
+					}
+				}
+				return false
+			}
+			valid = valid && contains(a.OriginPC) == contains(b.OriginPC)
+		}
+		return node.Next, nil
+	})
+	return valid
 }
 
 // Shared terminal leaves are not necessarily dominated by an inner condition.
