@@ -4700,6 +4700,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	//}
 	ternaryExpMergeNode := []*OpCode{}
 	ternaryExpMergeNodeSlot := map[*OpCode]*values.SlotValue{}
+	retainedReferenceJoins := map[*OpCode]*OpCode{}
 	if !d.FunctionContext.IsStatic {
 		d.FunctionType.ParamTypes = append([]types.JavaType{types.NewJavaClass(d.FunctionContext.ClassName)}, d.FunctionType.ParamTypes...)
 	}
@@ -4996,6 +4997,12 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				}
 				if ifSize != -1 && !ifSizeMismatch {
 					isIfMergeNode = ifSize < size
+					if ifSize == 1 && size == 1 {
+						if root := d.retainedReferenceRoutingRoot(code, ifNodes); root != nil {
+							isIfMergeNode = true
+							retainedReferenceJoins[code] = root
+						}
+					}
 				}
 			}
 			if len(validSources) == 0 {
@@ -5660,6 +5667,15 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// deferring this proof until that walk makes the later edge writes orphaned.
 	loweredStackPhis := map[*OpCode]bool{}
 	for _, merge := range ternaryExpMergeNode {
+		if root := retainedReferenceJoins[merge]; root != nil {
+			if d.retainedReferenceJoinRoot(merge, []*OpCode{root}) == nil || !d.lowerClosedStackPhi(merge, []*OpCode{root}, ternaryExpMergeNodeSlot[merge], false) {
+				return fmt.Errorf("unsupported retained-reference stack join at pc %d", merge.CurrentOffset)
+			}
+			retained, _ := retainedJoinValue(root.StackEntry.value)
+			d.disFoldRef = append(d.disFoldRef, retained.(*values.JavaRef))
+			loweredStackPhis[merge] = true
+			continue
+		}
 		if d.lowerEffectfulStackPhi(merge, mergeToIfNode[merge], ternaryExpMergeNodeSlot[merge]) {
 			loweredStackPhis[merge] = true
 		}

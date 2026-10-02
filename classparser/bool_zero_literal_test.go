@@ -23,18 +23,26 @@ func TestBooleanZeroLiteralSnippet(t *testing.T) {
 }
 
 func TestBooleanExprCmpZeroSnippet(t *testing.T) {
-	in := "if (((Entities.isBaseNamedEntity(var4_1)) || ((Entities.isNamedEntity(var4_1)) && (var5_1))) == (0)){\n"
-	out := fixBooleanExprCmpZero(in)
-	if !strings.Contains(out, ") == (false)){") {
-		t.Fatalf("expr == 0 not rewritten:\n%s", out)
+	for _, input := range []string{
+		"if (((Entities.isBaseNamedEntity(name)) || (named && suffix)) == (0)){\n",
+		"if ((((a) || (b)) ? (1) : (0)) == (0)){\n",
+		"if (((a && b) ? (2) : (3)) == (0)){\n",
+	} {
+		if got := fixBooleanExprCmpZero(input); got != input {
+			t.Fatalf("source syntax cannot prove the comparison operand type: %s", got)
+		}
 	}
 }
 
 func TestBooleanExprCmpZeroNeSnippet(t *testing.T) {
-	in := "if ((((this.ch) == (45)) || ((this.ch) == (43))) != (0)){\n"
-	out := fixBooleanExprCmpZero(in)
-	if !strings.Contains(out, ") != (false)){") {
-		t.Fatalf("expr != 0 not rewritten:\n%s", out)
+	for _, input := range []string{
+		"if ((((this.ch) == (45)) || ((this.ch) == (43))) != (0)){\n",
+		"if ((((a) || (b)) ? (1) : (0)) != (0)){\n",
+		"if (((a && b) ? (-2) : (-1)) != (0)){\n",
+	} {
+		if got := fixBooleanExprCmpZero(input); got != input {
+			t.Fatalf("a logical child is not a boolean enclosing operand: %s", got)
+		}
 	}
 }
 
@@ -66,9 +74,42 @@ func TestJodaTwoDigitYearIntCmpIsLoadBearing(t *testing.T) {
 }
 
 func TestJsoupTokeniserBoolExprCmpZeroIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/Tokeniser.class", "JDEC_BOOL_EXPR_CMP_ZERO_OFF",
-		") == (false)){",
-		"((Entities.isBaseNamedEntity(var4_1)) || ((Entities.isNamedEntity(var4_1)) && (var5_1))) == (0)){")
+	const path = "testdata/regression/Tokeniser.class"
+	const desc = "(Ljava/lang/Character;Z)[I"
+	raw, code, _ := reviewedFixtureMethod(t, path, "consumeCharacterReference", desc)
+	assertReviewedTypeVarInvoke(t, path, "consumeCharacterReference", desc, 250, core.OP_INVOKESTATIC, "org/jsoup/nodes/Entities", "isBaseNamedEntity", "(Ljava/lang/String;)Z")
+	assertReviewedTypeVarInvoke(t, path, "consumeCharacterReference", desc, 258, core.OP_INVOKESTATIC, "org/jsoup/nodes/Entities", "isNamedEntity", "(Ljava/lang/String;)Z")
+	for _, op := range []struct {
+		pc     uint16
+		opcode int
+		data   []byte
+	}{
+		{253, core.OP_IFNE, []byte{0, 16}}, {261, core.OP_IFEQ, []byte{0, 12}}, {264, core.OP_ILOAD, []byte{5}}, {266, core.OP_IFEQ, []byte{0, 7}},
+		{269, core.OP_ICONST_1, nil}, {273, core.OP_ICONST_0, nil}, {274, core.OP_ISTORE, []byte{6}}, {276, core.OP_ILOAD, []byte{6}}, {278, core.OP_IFNE, []byte{0, 35}},
+	} {
+		assertReviewedOpcode(t, code, op.pc, op.opcode, op.data...)
+	}
+	// Original metadata proves the short-circuit expression is canonical 0/1.
+	// TestAdversarialThreePredicateCanonicalWordTwoConsumersRoundTrip and
+	// TestAdversarialNoncanonicalBooleanWordsRoundTrip independently exercise
+	// ordered/effectful predicates and distinguish word consumers from Z sinks.
+	assertReviewedSources(t, raw, "JDEC_BOOL_EXPR_CMP_ZERO_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `int\[\] consumeCharacterReference\(`)
+		name := requireReviewedPattern(t, body, `String\s+(\w+)\s*=\s*this\.reader\.consumeLetterThenDigitSequence\(\);`)[1]
+		suffix := requireReviewedPattern(t, body, `boolean\s+(\w+)\s*=\s*this\.reader\.matches\(\(char\)\(59\)\);`)[1]
+		predicate := "Entities.isBaseNamedEntity(" + name + ")||Entities.isNamedEntity(" + name + ")&&" + suffix
+		start, end, ok := reviewedCanonicalPredicateIf(body, predicate, false)
+		if !ok {
+			t.Fatalf("canonical predicate has an invalid consumer or changed evaluation order:\n%s", body)
+		}
+		if strings.Count(body, "Entities.isBaseNamedEntity("+name+")") != 1 || strings.Count(body, "Entities.isNamedEntity("+name+")") != 1 {
+			t.Fatal("entity predicate evaluation duplicated")
+		}
+		tail := body[end:]
+		if strings.Index(tail, "this.reader.rewindToMark();") < 0 || start >= end {
+			t.Fatal("false predicate lost original rewind continuation")
+		}
+	})
 }
 
 // Inspect original bytecode only. Its local is an int-category OR accumulator;

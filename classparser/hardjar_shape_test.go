@@ -3080,15 +3080,91 @@ func TestInitBlankDollarTypeLocalJarFS(t *testing.T) {
 }
 
 func TestRewriteClassLocalCmpZeroIntGuardJarFS(t *testing.T) {
-	reviewedInvocationView(t, "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar", "org/springframework/beans/factory/support/AbstractAutowireCapableBeanFactory.class", []reviewedViewMember{{"doCreateBean", "(Ljava/lang/String;Lorg/springframework/beans/factory/support/RootBeanDefinition;[Ljava/lang/Object;)Ljava/lang/Object;", "", false}}, []reviewedViewInvoke{{"org/springframework/beans/factory/support/RootBeanDefinition", "isSingleton", "()Z", core.OP_INVOKEVIRTUAL}}, func(source string) {
-		body := reviewedSourceMethod(t, source, `Object\s+doCreateBean\(`)
-		local := requireReviewedPattern(t, body, `int\s+(\w+)\s*=\s*\(\w+\.isSingleton\(\)\)`)[1]
-		compare := regexp.MustCompile(`if\s*\(\s*\(` + regexp.QuoteMeta(local) + `\)\s*!=\s*\(0\)\s*\)`)
-		if len(compare.FindAllString(body, -1)) != 2 {
-			t.Fatalf("original Boolean materialization lost two numeric guards:\n%s", body)
+	const jar = "org/springframework/spring-beans/5.3.27/spring-beans-5.3.27.jar"
+	const entry = "org/springframework/beans/factory/support/AbstractAutowireCapableBeanFactory.class"
+	raw := originalJarClassForReview(t, jar, entry)
+	object, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code *CodeAttribute
+	for _, method := range object.Methods {
+		name, _ := object.getUtf8(method.NameIndex)
+		descriptor, _ := object.getUtf8(method.DescriptorIndex)
+		if name == "doCreateBean" && descriptor == "(Ljava/lang/String;Lorg/springframework/beans/factory/support/RootBeanDefinition;[Ljava/lang/Object;)Ljava/lang/Object;" {
+			for _, attribute := range method.Attributes {
+				if value, ok := attribute.(*CodeAttribute); ok {
+					code = value
+				}
+			}
 		}
-		if regexp.MustCompile(`\(` + regexp.QuoteMeta(local) + `\)\s*!=\s*\(null\)`).MatchString(body) {
-			t.Fatalf("numeric definition compared to null:\n%s", body)
+	}
+	if code == nil {
+		t.Fatal("original guard method Code unavailable")
+	}
+	decoder := core.NewDecompiler(code.Code, nil)
+	if err := decoder.ParseOpcode(); err != nil {
+		t.Fatal(err)
+	}
+	ops := map[int]*core.OpCode{}
+	for _, op := range decoder.Opcodes() {
+		ops[int(op.CurrentOffset)] = op
+	}
+	for pc, opcode := range map[int]int{135: core.OP_INVOKEVIRTUAL, 142: core.OP_GETFIELD, 150: core.OP_INVOKEVIRTUAL, 156: core.OP_ICONST_1, 160: core.OP_ICONST_0, 161: core.OP_ISTORE, 163: core.OP_ILOAD, 165: core.OP_IFEQ, 301: core.OP_ILOAD, 303: core.OP_IFEQ} {
+		if ops[pc] == nil || ops[pc].Instr.OpCode != opcode {
+			t.Fatalf("original guard opcode changed at %d", pc)
+		}
+	}
+	for pc, destination := range map[int]int{138: 160, 145: 160, 153: 160, 165: 228, 303: 474} {
+		op := ops[pc]
+		if op == nil || op.Instr.OpCode != core.OP_IFEQ || len(op.Data) != 2 || pc+int(int16(uint16(op.Data[0])<<8|uint16(op.Data[1]))) != destination {
+			t.Fatalf("original short-circuit/consumer branch changed at %d", pc)
+		}
+	}
+	for _, pc := range []int{161, 163, 301} {
+		if len(ops[pc].Data) != 1 || ops[pc].Data[0] != 7 {
+			t.Fatalf("original canonical producer/consumer is not local7 at %d", pc)
+		}
+	}
+	for _, expected := range []struct {
+		pc                      int
+		owner, name, descriptor string
+	}{{135, "org/springframework/beans/factory/support/RootBeanDefinition", "isSingleton", "()Z"}, {142, object.GetClassName(), "allowCircularReferences", "Z"}, {150, object.GetClassName(), "isSingletonCurrentlyInCreation", "(Ljava/lang/String;)Z"}} {
+		op := ops[expected.pc]
+		index := int(op.Data[0])<<8 | int(op.Data[1])
+		var member ConstantMemberrefInfo
+		switch ref := object.ConstantPoolManager.IndexInfo(index).(type) {
+		case *ConstantMethodrefInfo:
+			member = ref.ConstantMemberrefInfo
+		case *ConstantFieldrefInfo:
+			member = ref.ConstantMemberrefInfo
+		default:
+			t.Fatal("original guard member kind")
+		}
+		name, descriptor := getNameAndType(object.ConstantPool, member.NameAndTypeIndex)
+		if object.ConstantPoolManager.GetClassName(int(member.ClassIndex)) != expected.owner || name != expected.name || descriptor != expected.descriptor {
+			t.Fatalf("original guard tuple changed at%d", expected.pc)
+		}
+	}
+	reviewedInvocationView(t, jar, entry, []reviewedViewMember{{"doCreateBean", "(Ljava/lang/String;Lorg/springframework/beans/factory/support/RootBeanDefinition;[Ljava/lang/Object;)Ljava/lang/Object;", "", false}}, nil, func(source string) {
+		body := reviewedSourceMethod(t, source, `Object\s+doCreateBean\(`)
+		receiver := requireReviewedPattern(t, body, `RootBeanDefinition\s+(\w+)`)[1]
+		name := requireReviewedPattern(t, body, `doCreateBean\(String\s+(\w+)`)[1]
+		local, ok := reviewedThreePredicateWord(body, receiver, name)
+		if !ok {
+			t.Fatalf("original canonical producer order/once/word was lost:\n%s", body)
+		}
+		compare := regexp.MustCompile(`if\s*\(\s*\(` + regexp.QuoteMeta(local) + `\)\s*!=\s*\(0\)\s*\)`)
+		guards := compare.FindAllStringIndex(body, -1)
+		if len(guards) != 2 || len(regexp.MustCompile(`\b`+regexp.QuoteMeta(local)+`\b`).FindAllString(body, -1)) != 3 {
+			t.Fatalf("original one producer/two consumers changed:\n%s", body)
+		}
+		populate, initialize := strings.Index(body, "this.populateBean("), strings.Index(body, "this.initializeBean(")
+		if guards[0][0] >= populate || populate >= initialize || initialize >= guards[1][0] {
+			t.Fatal("saved word consumers crossed population/initialization")
+		}
+		if strings.Count(body, receiver+".isSingleton()") != 2 || strings.Count(body, "this.isSingletonCurrentlyInCreation("+name+")") != 1 {
+			t.Fatal("original predicate recomputed at consumers")
 		}
 	})
 }

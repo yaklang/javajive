@@ -746,6 +746,13 @@ func (j *TernaryExpression) String(funcCtx *class_context.ClassContext) string {
 	if !boundedDecisionSource(reduced, 65536) {
 		return EmptySlotValuePlaceholder
 	}
+	// A late Boolean leaf may let reduction prove a canonical predicate even
+	// while this producer retains its computational int type. Keep the source
+	// view consistent with that type; Boolean consumers choose their own view.
+	// Otherwise an IFEQ comparison becomes the invalid `boolean == 0`.
+	if isIntTyped(j) && isBooleanTyped(reduced) {
+		return booleanStackWord(reduced).String(funcCtx)
+	}
 	if rt, ok := reduced.(*TernaryExpression); ok {
 		condition := SimplifyConditionValue(rt.Condition)
 		return fmt.Sprintf("(%s) ? (%s) : (%s)", condition.String(funcCtx), rt.TrueValue.String(funcCtx), rt.FalseValue.String(funcCtx))

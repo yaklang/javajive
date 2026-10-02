@@ -1748,7 +1748,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// boolean local compared/assigned JVM 0/1. Kill-switch: JDEC_BOOL_ZERO_LITERAL_OFF=1.
 	full = c.sourceRewrite("fixBooleanZeroLiteral", "class_source", full, fixBooleanZeroLiteral)
 	// `if ((bool ||/&&) == (0))`. Kill-switch: JDEC_BOOL_EXPR_CMP_ZERO_OFF=1.
-	full = c.sourceRewrite("fixBooleanExprCmpZero", "class_source", full, fixBooleanExprCmpZero)
 	// `intVar == ((2) != (0))` → `intVar == (2)`. Kill-switch: JDEC_INT_CMP_BOOL_LIT_OFF=1.
 	full = c.sourceRewrite("fixIntCmpBoolMaterializedLiteral", "class_source", full, fixIntCmpBoolMaterializedLiteral)
 	// BoundedInputStream local later assigned CRC32Verifying/CheckedInputStream.

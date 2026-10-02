@@ -157,43 +157,11 @@ func fixBooleanZeroLiteral(body string) string {
 	}
 }
 
-// fixBooleanExprCmpZero rewrites `if ((bool ||/&& expr) == (0))` — the JVM
-// ifeq encoding of `if (!boolExpr)`. jsoup Tokeniser character-reference
-// lookup. Kill-switch: JDEC_BOOL_EXPR_CMP_ZERO_OFF=1.
+// fixBooleanExprCmpZero is retired. A logical subexpression does not prove
+// that its enclosing operand is boolean: an exact 0/1 decision projection is
+// still an int. Only the typed IR can select a Z or computational-word view.
+// Keep this legacy entry point inert for callers and regression negatives.
 func fixBooleanExprCmpZero(body string) string {
-	if jdecenv.Get("JDEC_BOOL_EXPR_CMP_ZERO_OFF") == "1" {
-		return body
-	}
-	for _, pair := range [][2]string{
-		{") == (0)){", ") == (false)){"},
-		{") != (0)){", ") != (false)){"},
-	} {
-		needle, repl := pair[0], pair[1]
-		from := 0
-		var b strings.Builder
-		for {
-			i := strings.Index(body[from:], needle)
-			if i < 0 {
-				b.WriteString(body[from:])
-				body = b.String()
-				break
-			}
-			i += from
-			window := body[from:i]
-			ifStart := strings.LastIndex(window, "if (")
-			if ifStart >= 0 {
-				cond := window[ifStart:]
-				if strings.Contains(cond, "||") || strings.Contains(cond, "&&") {
-					b.WriteString(body[from:i])
-					b.WriteString(repl)
-					from = i + len(needle)
-					continue
-				}
-			}
-			b.WriteString(body[from : i+len(needle)])
-			from = i + len(needle)
-		}
-	}
 	return body
 }
 
