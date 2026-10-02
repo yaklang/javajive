@@ -15,6 +15,27 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+func TestCheckedConstructorExceptionsAreNotInherited(t *testing.T) {
+	provider := func(name string) (callbinding.Class, bool) {
+		if name == "p/Child" {
+			return callbinding.Class{Name: name, MembersComplete: true, ParentsComplete: true, Parents: []string{"p/Parent"}}, true
+		}
+		if name == "p/Parent" {
+			return callbinding.Class{Name: name, MembersComplete: true, ParentsComplete: true, Methods: []callbinding.Method{{Name: "<init>", Desc: "()V", ExceptionsKnown: true, Exceptions: []string{"java/io/IOException"}}, {Name: "read", Desc: "()I", ExceptionsKnown: true, Exceptions: []string{"java/io/IOException"}}}}, true
+		}
+		return callbinding.Class{}, false
+	}
+	if _, known := exactInvocationExceptions(provider, "p/Child", "<init>", "()V"); known {
+		t.Fatal("constructor declaration inherited")
+	}
+	if got, known := exactInvocationExceptions(provider, "p/Parent", "<init>", "()V"); !known || len(got) != 1 || got[0] != "java/io/IOException" {
+		t.Fatal("exact owner declaration lost")
+	}
+	if got, known := exactInvocationExceptions(provider, "p/Child", "read", "()I"); !known || len(got) != 1 || got[0] != "java/io/IOException" {
+		t.Fatal("ordinary inherited declaration lost")
+	}
+}
+
 func TestCheckedEscapeRejectsUncoveredConstructorDelegatePrefix(t *testing.T) {
 	javac, _ := t04Tools(t)
 	dir := t.TempDir()

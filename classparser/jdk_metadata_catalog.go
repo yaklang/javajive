@@ -34,7 +34,7 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 				ThrowableParents map[string][]string          `json:"throwable_hierarchy"`
 			} `json:"profiles"`
 		}
-		if json.Unmarshal(jdkInvocationCatalogJSON, &document) != nil || document.Schema != 1 {
+		if json.Unmarshal(jdkInvocationCatalogJSON, &document) != nil || document.Schema != 2 {
 			return
 		}
 		profiles := make(map[int]map[string]callbinding.Class)
@@ -46,6 +46,11 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 			for name, class := range profile.Classes {
 				if name != class.Name || !class.MembersComplete || !class.ParentsComplete {
 					return
+				}
+				for _, method := range class.Methods {
+					if !method.ExceptionsKnown {
+						return
+					}
 				}
 				for _, parent := range class.Parents {
 					if _, ok := profile.Classes[parent]; !ok {
@@ -74,6 +79,9 @@ func jdkInvocationMetadata(name string, target int) (callbinding.Class, bool) {
 	// catalog, even when two requests select the same platform profile.
 	class.Parents = append([]string(nil), class.Parents...)
 	class.Methods = append([]callbinding.Method(nil), class.Methods...)
+	for i := range class.Methods {
+		class.Methods[i].Exceptions = append([]string(nil), class.Methods[i].Exceptions...)
+	}
 	return class, true
 }
 

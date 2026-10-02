@@ -68,18 +68,28 @@ def declarations(data):
         attrs = {}
         for _ in range(r.u2()):
             name = utf(r.u2())
+            if name in attrs: raise ValueError('duplicate classfile attribute ' + name)
             raw = r.take(r.u4())
-            attrs[name] = utf(struct.unpack('>H', raw)[0]) if name == 'Signature' else None
+            if name == 'Signature':
+                if len(raw) != 2: raise ValueError('invalid Signature attribute')
+                attrs[name] = utf(struct.unpack('>H', raw)[0])
+            elif name == 'Exceptions':
+                er = Reader(raw)
+                attrs[name] = [cls(er.u2()) for _ in range(er.u2())]
+                if er.offset != len(raw): raise ValueError('invalid Exceptions attribute')
+            else:
+                attrs[name] = None
         return attrs
     methods = []
     for fields in (True, False):
         for _ in range(r.u2()):
             access, name, desc = r.u2(), utf(r.u2()), utf(r.u2())
             attrs = attributes()
-            if not fields and name not in ('<init>', '<clinit>'):
+            if not fields and name != '<clinit>':
                 methods.append({'Name': name, 'Desc': desc, 'Public': bool(access & 1),
                                 'Static': bool(access & 8), 'Generic': 'Signature' in attrs,
-                                'Varargs': bool(access & 0x80), 'Bridge': bool(access & 0x40)})
+                                'Varargs': bool(access & 0x80), 'Bridge': bool(access & 0x40),
+                                'ExceptionsKnown': True, 'Exceptions': attrs.get('Exceptions', [])})
                 if attrs.get('Signature'):
                     methods[-1]['Signature'] = attrs['Signature']
     class_attrs = attributes()
@@ -99,7 +109,22 @@ def profile(release, archive, prefix, jdk_version):
                  'java/util/Set', 'java/util/Collection', 'java/util/Stack', 'java/util/stream/Stream',
                  'java/util/stream/Collectors', 'java/util/function/Function',
                  'java/util/function/Consumer', 'java/util/function/Supplier',
-                 'java/util/function/Predicate']
+                 'java/util/function/Predicate',
+                 # Complete namespaces for standard I/O, channels, reflection,
+                 # concurrent and TLS extension points. They are declarations,
+                 # never guessed uniqueness or exception rules.
+                 'java/io/FileFilter', 'java/io/FilenameFilter', 'java/io/Reader',
+                 'java/io/Writer', 'java/io/Externalizable',
+                 'java/nio/file/PathMatcher', 'java/nio/file/FileVisitor',
+                 'java/nio/channels/ReadableByteChannel',
+                 'java/nio/channels/SeekableByteChannel',
+                 'java/lang/reflect/InvocationHandler', 'java/lang/ClassLoader',
+                 'java/lang/Thread', 'java/util/LinkedHashMap',
+                 'java/util/concurrent/Callable',
+                 'java/util/concurrent/atomic/AtomicInteger',
+                 'java/util/concurrent/atomic/AtomicReference',
+                 'javax/net/ssl/SSLEngine', 'javax/net/ssl/KeyManagerFactorySpi',
+                 'javax/net/ssl/TrustManagerFactorySpi']
         if release >= 16:
             roots.append('java/lang/Record')
         pending = list(roots)
@@ -183,7 +208,7 @@ def main():
     for release, home in ((11, args.jdk11), (17, args.jdk17), (21, args.jdk21)):
         if home is not None:
             profiles.append(profile(release, home / 'jmods/java.base.jmod', 'classes/', version(home)))
-    result = {'schema': 1, 'roots': ['Object/String/Map/Record and standard collection, stream and functional APIs; see generator roots'],
+    result = {'schema': 2, 'roots': ['Object/String/Map/Record and standard collection, stream, functional, I/O, channel, reflection, concurrency and TLS APIs; see generator roots'],
               'profiles': profiles}
     args.out.write_text(json.dumps(result, sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
 

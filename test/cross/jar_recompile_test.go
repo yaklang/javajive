@@ -563,8 +563,12 @@ type recompileResult struct {
 // decompileAll decompiles every class entry via the production JarFS path and writes each unit to
 // <root>/<package path>/<SimpleName>.java. Returns the written file paths and the unit/fail counts.
 func decompileAll(t *testing.T, jarPath, root string, maxFiles int) (files []string, units, decompFail int) {
+	return decompileAllWithResolver(t, jarPath, root, maxFiles, nil)
+}
+
+func decompileAllWithResolver(t *testing.T, jarPath, root string, maxFiles int, resolve func(string) ([]byte, bool)) (files []string, units, decompFail int) {
 	t.Helper()
-	jfs, err := classparser.NewJarFSFromLocal(jarPath)
+	jfs, err := classparser.NewJarFSFromLocalWithResolver(jarPath, resolve)
 	if err != nil {
 		t.Fatalf("NewJarFSFromLocal %s: %v", jarPath, err)
 	}

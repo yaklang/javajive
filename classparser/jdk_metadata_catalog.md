@@ -1,13 +1,16 @@
 # Bounded JDK invocation metadata
 
-The generated catalog contains complete declared non-constructor method tables
+The generated catalog contains complete declared method and constructor tables
 and complete superclass/interface closure for selected JDK types. It retains
-private, generic, bridge, static, and varargs flags. It is not a whitelist of
+private, generic, bridge, static, and varargs flags. Schema 2 also retains exact
+Exceptions attributes, including known-empty declarations, indexed by the original
+name and descriptor. It is not a whitelist of
 method names presumed unique. For example, Map.get/merge remain generic, whereas
 String.valueOf remains a competing overload family.
 
 Roots include Object, String, Map, Record where available, and the standard
-collection, stream and functional APIs listed in the generator. Class and
+collection, stream, functional, I/O, channel, reflection, concurrency and TLS
+extension APIs listed in the generator. Class and
 method Signature attributes are extracted verbatim from the same classfiles
 and indexed by exact descriptor, preserving first-bound erasure and overload
 identity for generic binding proofs. Reference types in root
@@ -32,8 +35,10 @@ actual extracted class declaration table for each specific snapshot below.
 
 The generator reads classfile bytes, not javap prose or incomplete ct.sym API
 stubs. Each profile records the JDK release metadata, archive SHA256, and individual
-classfile SHA256 and major version. Constructor and class-initializer declarations
-are omitted because the invocation planner handles neither as overload families.
+classfile SHA256 and major version. Constructors are included for exact checked-exception evidence; they still do not
+participate in ordinary virtual or interface overload families. Class initializers
+are omitted. The absence of an Exceptions attribute is a known empty declaration,
+not unavailable metadata. Returned exception slices are copied for each request.
 
 Snapshots used:
 

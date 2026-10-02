@@ -70,6 +70,8 @@ jobs:
         run: python3 -m unittest tools.curated_roundtrip.test_roundtrip
       - name: Historical diagnostic-key regression
         run: python3 -m unittest ci.task_t30.test_t30_historical_diagnostics
+      - name: Declaration metadata reader regression
+        run: python3 -m unittest discover -s classparser -p test_jdk_metadata_catalog_generate.py
       - name: Recompile and run trusted small Java fixtures
         run: |
           mkdir -p artifacts

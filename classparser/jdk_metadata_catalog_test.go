@@ -52,10 +52,43 @@ func TestJDKInvocationCatalogCompleteProfiles(t *testing.T) {
 				t.Fatal("missing class provenance", name)
 			}
 			for _, method := range cls.Methods {
+				if !method.ExceptionsKnown {
+					t.Fatal("unknown Exceptions declaration", name, method.Name, method.Desc)
+				}
 				if _, _, err := callbinding.Descriptor(method.Desc); err != nil {
 					t.Fatal(name, method, err)
 				}
 			}
+		}
+	}
+}
+
+func TestJDKCatalogExactCheckedDeclarationsAndChannels(t *testing.T) {
+	for _, release := range []int{8, 11, 17, 21} {
+		provider := func(name string) (callbinding.Class, bool) { return jdkInvocationMetadata(name, release) }
+		for _, tc := range []struct{ owner, name, desc, exception string }{
+			{"java/lang/Object", "<init>", "()V", ""},
+			{"java/io/Reader", "read", "()I", "java/io/IOException"},
+			{"java/nio/channels/ReadableByteChannel", "read", "(Ljava/nio/ByteBuffer;)I", "java/io/IOException"},
+			{"java/lang/reflect/InvocationHandler", "invoke", "(Ljava/lang/Object;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;", "java/lang/Throwable"},
+		} {
+			exceptions, known := exactInvocationExceptions(provider, tc.owner, tc.name, tc.desc)
+			if !known || tc.exception == "" && len(exceptions) != 0 || tc.exception != "" && (len(exceptions) != 1 || exceptions[0] != tc.exception) {
+				t.Fatalf("%d %s.%s%s: known=%v exceptions=%v", release, tc.owner, tc.name, tc.desc, known, exceptions)
+			}
+		}
+		if _, known := exactInvocationExceptions(provider, "java/io/Reader", "read", "(I)I"); known {
+			t.Fatal("invented overload exception evidence")
+		}
+		cls, _ := provider("java/io/Reader")
+		for i := range cls.Methods {
+			if len(cls.Methods[i].Exceptions) > 0 {
+				cls.Methods[i].Exceptions[0] = "corrupted"
+			}
+		}
+		got, _ := exactInvocationExceptions(provider, "java/io/Reader", "read", "()I")
+		if len(got) != 1 || got[0] != "java/io/IOException" {
+			t.Fatal("request corrupted shared exception slice")
 		}
 	}
 }

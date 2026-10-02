@@ -19,9 +19,10 @@ import (
 
 type JarFS struct {
 	*filesys.ZipFS
-	jarCache       *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
-	recursiveParse bool // 是否递归解析嵌套的jar文件，默认为true
-	archive        *archiveFSState
+	jarCache            *utils.SafeMapWithKey[string, *filesys.UnifiedFS]
+	recursiveParse      bool // 是否递归解析嵌套的jar文件，默认为true
+	archive             *archiveFSState
+	declarationResolver func(string) ([]byte, bool)
 }
 
 var _ fs.FS = (*JarFS)(nil)
@@ -29,11 +30,21 @@ var _ fs.ReadFileFS = (*JarFS)(nil)
 var _ fs.ReadDirFS = (*JarFS)(nil)
 
 func NewJarFSFromLocal(path string) (*JarFS, error) {
+	return NewJarFSFromLocalWithResolver(path, nil)
+}
+
+// NewJarFSFromLocalWithResolver reads additional declaration bytes without
+// adding them to the target's source units. Target bytes always take precedence.
+// The resolver must remain stable, and be safe for concurrent reads, throughout
+// the filesystem's lifetime. Missing or invalid declarations remain unproved.
+func NewJarFSFromLocalWithResolver(path string, resolve func(string) ([]byte, bool)) (*JarFS, error) {
 	zipFS, err := filesys.NewZipFSFromLocal(path)
 	if err != nil {
 		return nil, err
 	}
-	return NewJarFS(zipFS), nil
+	z := NewJarFS(zipFS)
+	z.declarationResolver = resolve
+	return z, nil
 }
 
 // NewJarFSFromLocalWithOptions is like NewJarFSFromLocal but lets the caller
@@ -113,6 +124,9 @@ func (z *JarFS) enumSiblingResolver() func(internalName string) ([]byte, bool) {
 	return func(internalName string) ([]byte, bool) {
 		raw, err := z.ZipFS.ReadFile(internalName + ".class")
 		if err != nil || len(raw) == 0 {
+			if z.declarationResolver != nil {
+				return z.declarationResolver(internalName)
+			}
 			return nil, false
 		}
 		return raw, true
@@ -288,6 +302,7 @@ func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 
 	// 嵌套的jar也继承递归解析设置与共享预算
 	nestedJarFS := NewJarFSWithOptions(nestedZipFS, z.recursiveParse)
+	nestedJarFS.declarationResolver = z.declarationResolver
 	if z.archive != nil && z.archive.active {
 		nestedJarFS.archive = z.archive.nestedState()
 	}
