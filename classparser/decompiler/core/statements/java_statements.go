@@ -3855,6 +3855,9 @@ func (a *ExpressionStatement) String(funcCtx *class_context.ClassContext) string
 		if planned, ok := call.PlanErasedClassResultUse(funcCtx); ok {
 			return planned.String(funcCtx)
 		}
+		if planned, ok := call.PlanErasedDiscardedMethodInput(funcCtx); ok {
+			return planned.String(funcCtx)
+		}
 	}
 	return a.Expression.String(funcCtx)
 }

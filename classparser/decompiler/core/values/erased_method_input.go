@@ -15,6 +15,15 @@ import (
 func (f *FunctionCallExpression) planErasedMethodInput(ctx *class_context.ClassContext) (*FunctionCallExpression, bool) {
 	return f.planErasedMethodInputProof(ctx, false)
 }
+
+// A discarded invocation has no source result constraint or payload check.
+// This permission belongs to its expression-statement consumer, not to the
+// call's arguments or a parent assignment. Existing materialized functional
+// values keep their own SAM checks under a descriptor-only argument view.
+func (f *FunctionCallExpression) PlanErasedDiscardedMethodInput(ctx *class_context.ClassContext) (*FunctionCallExpression, bool) {
+	return f.planErasedMethodInputProof(ctx, true)
+}
+
 func (f *FunctionCallExpression) planErasedMethodInputProof(ctx *class_context.ClassContext, allowGenericResult bool) (*FunctionCallExpression, bool) {
 	if f == nil || ctx == nil || ctx.InvocationMetadata == nil || ctx.SiblingClassSig == nil || f.IsSpecialInvoke || f.FunctionName == "<init>" ||
 		(!f.IsStatic && f.Kind != InvokeVirtual && f.Kind != InvokeInterface) {

@@ -88,6 +88,9 @@ func TestErasedMethodInputRejectsUnprovenAdaptations(t *testing.T) {
 			if _, ok := f.planErasedMethodInput(ctx); ok {
 				t.Fatal("unsupported proof accepted")
 			}
+			if _, ok := f.PlanErasedDiscardedMethodInput(ctx); ok {
+				t.Fatal("discarded result bypassed an input or declaration proof")
+			}
 		})
 	}
 }
@@ -107,6 +110,17 @@ func TestErasedMethodResultPermissionStaysAtUseSite(t *testing.T) {
 	}
 	if _, ok := f.planErasedMethodInput(ctx); ok {
 		t.Fatal("generic result permission leaked into normal arguments")
+	}
+	original := append([]JavaValue(nil), f.Arguments...)
+	discarded, ok := f.PlanErasedDiscardedMethodInput(ctx)
+	if !ok || discarded.Witness() != f.Witness() || discarded.Arguments[1].(*CastExpression).Value != original[1] {
+		t.Fatal("discarding the result changed the invocation or materialized operand")
+	}
+	if !reflect.DeepEqual(original, f.Arguments) {
+		t.Fatal("discarded-use planning mutated shared arguments")
+	}
+	if _, ok := f.planErasedMethodInput(ctx); ok {
+		t.Fatal("discarded-use permission survived outside its consumer")
 	}
 	ctx.CurrentMethodDesc = "()Ljava/util/Optional;"
 	if _, ok := f.PlanErasedMethodReturn(ctx); ok {
@@ -141,6 +155,13 @@ func TestErasedClassOnlyMethodHasIndependentBoundsMap(t *testing.T) {
 	}
 	if _, ok := f.planErasedMethodInput(ctx); ok {
 		t.Fatal("class-only result permission escaped its use site")
+	}
+	discarded, ok := f.PlanErasedDiscardedMethodInput(ctx)
+	if !ok || discarded.Object.(*CastExpression).Value != f.Object || discarded.Witness() != f.Witness() {
+		t.Fatal("discarded class-only result lost the original receiver/invocation")
+	}
+	if _, ok := f.planErasedMethodInput(ctx); ok {
+		t.Fatal("discarded receiver view mutated the shared call")
 	}
 	out, ok := f.PlanErasedCheckedMethodInput(ctx)
 	if !ok || out.Object.(*CastExpression).Value != f.Object || out.Witness() != f.Witness() {
