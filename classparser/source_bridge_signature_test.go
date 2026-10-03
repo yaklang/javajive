@@ -27,7 +27,7 @@ public class SourceBridgeChild<T> extends SourceBridgeParent<T>{}`
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"proved", "not bridge", "not synthetic", "not public", "static", "synchronized", "native", "abstract", "extra final", "extra private", "extra protected", "no code", "duplicate code", "signature", "handler", "receiver", "virtual", "return", "extra instruction", "stack", "locals", "bad member", "bad name/type", "wrong name", "wrong descriptor", "self owner", "wrong parent", "duplicate declaration"} {
+	for _, scenario := range []string{"proved", "not bridge", "not synthetic", "not public", "static", "synchronized", "native", "abstract", "extra final", "extra private", "extra protected", "no code", "duplicate code", "signature", "handler", "receiver", "virtual", "return", "extra instruction", "stack", "locals", "bad member", "bad name/type", "wrong name", "wrong descriptor", "self owner", "wrong parent", "duplicate declaration", "method name CP tag", "method descriptor CP tag", "callee name CP tag", "callee descriptor CP tag", "owner name CP tag", "parent name CP tag", "cyclic method name", "cyclic callee name"} {
 		t.Run(scenario, func(t *testing.T) {
 			obj, err := Parse(append([]byte(nil), raw...))
 			if err != nil {
@@ -51,6 +51,10 @@ public class SourceBridgeChild<T> extends SourceBridgeParent<T>{}`
 			cp := NewConstantPoolWithConstant(&obj.ConstantPool)
 			ref := cp.IndexInfo(int(binary.BigEndian.Uint16(code.Code[2:4]))).(*ConstantMethodrefInfo)
 			nt := cp.IndexInfo(int(ref.NameAndTypeIndex)).(*ConstantNameAndTypeInfo)
+			indirect := func(index uint16) uint16 {
+				obj.ConstantPool = append(obj.ConstantPool, &ConstantStringInfo{StringIndex: index})
+				return uint16(len(obj.ConstantPool))
+			}
 			switch scenario {
 			case "not bridge":
 				method.AccessFlags &^= 0x40
@@ -104,6 +108,24 @@ public class SourceBridgeChild<T> extends SourceBridgeParent<T>{}`
 				ref.ClassIndex = obj.ThisClass
 			case "wrong parent":
 				obj.SuperClass = obj.ThisClass
+			case "cyclic method name":
+				method.NameIndex = indirect(uint16(len(obj.ConstantPool) + 1))
+			case "cyclic callee name":
+				nt.NameIndex = indirect(uint16(len(obj.ConstantPool) + 1))
+			case "method name CP tag":
+				method.NameIndex = indirect(method.NameIndex)
+			case "method descriptor CP tag":
+				method.DescriptorIndex = indirect(method.DescriptorIndex)
+			case "callee name CP tag":
+				nt.NameIndex = indirect(nt.NameIndex)
+			case "callee descriptor CP tag":
+				nt.DescriptorIndex = indirect(nt.DescriptorIndex)
+			case "owner name CP tag":
+				cl := cp.IndexInfo(int(obj.ThisClass)).(*ConstantClassInfo)
+				cl.NameIndex = indirect(cl.NameIndex)
+			case "parent name CP tag":
+				cl := cp.IndexInfo(int(obj.SuperClass)).(*ConstantClassInfo)
+				cl.NameIndex = indirect(cl.NameIndex)
 			case "duplicate declaration":
 				obj.Methods = append(obj.Methods, method)
 			}

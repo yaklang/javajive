@@ -24,13 +24,15 @@ func (c *ClassObjectDumper) buildSourceBridgeTargets() func(string, string, stri
 			if obj, ok := c.constructorMotionClass(owner); ok {
 				counts := map[string]int{}
 				for _, method := range obj.Methods {
-					n, err := obj.getUtf8(method.NameIndex)
-					if err != nil {
-						continue
+					if method == nil {
+						methods = map[string]string{}
+						break
 					}
-					d, err := obj.getUtf8(method.DescriptorIndex)
-					if err != nil {
-						continue
+					n, nameOK := sourceBridgeUTF8(obj, method.NameIndex)
+					d, descriptorOK := sourceBridgeUTF8(obj, method.DescriptorIndex)
+					if !nameOK || !descriptorOK {
+						methods = map[string]string{}
+						break
 					}
 					key := class_context.MethodDescKey(n, d)
 					counts[key]++
@@ -54,9 +56,9 @@ func sourceBridgeGetterTarget(obj *ClassObject, method *MemberInfo) (string, boo
 	if obj == nil || method == nil || method.AccessFlags != 0x1041 {
 		return "", false
 	}
-	name, nerr := obj.getUtf8(method.NameIndex)
-	desc, derr := obj.getUtf8(method.DescriptorIndex)
-	if nerr != nil || derr != nil || name == "" || strings.HasPrefix(name, "<") || !strings.HasPrefix(desc, "()L") || !strings.HasSuffix(desc, ";") {
+	name, nameOK := sourceBridgeUTF8(obj, method.NameIndex)
+	desc, descriptorOK := sourceBridgeUTF8(obj, method.DescriptorIndex)
+	if !nameOK || !descriptorOK || name == "" || strings.HasPrefix(name, "<") || !strings.HasPrefix(desc, "()L") || !strings.HasSuffix(desc, ";") {
 		return "", false
 	}
 	if params, result, err := callbinding.Descriptor(desc); err != nil || len(params) != 0 || !callbinding.Reference(result) {
@@ -79,18 +81,46 @@ func sourceBridgeGetterTarget(obj *ClassObject, method *MemberInfo) (string, boo
 	}
 	cp := NewConstantPoolWithConstant(&obj.ConstantPool)
 	ref, ok := cp.IndexInfo(int(binary.BigEndian.Uint16(code.Code[2:4]))).(*ConstantMethodrefInfo)
-	if !ok {
+	if !ok || ref == nil {
 		return "", false
 	}
 	nt, ok := cp.IndexInfo(int(ref.NameAndTypeIndex)).(*ConstantNameAndTypeInfo)
-	if !ok {
+	if !ok || nt == nil {
 		return "", false
 	}
-	n, ne := obj.getUtf8(nt.NameIndex)
-	d, de := obj.getUtf8(nt.DescriptorIndex)
-	parent := cp.GetClassName(int(ref.ClassIndex))
-	if ne != nil || de != nil || n != name || d != desc || parent == "" || parent != obj.GetSupperClassName() || parent == obj.GetClassName() {
+	n, nameOK := sourceBridgeUTF8(obj, nt.NameIndex)
+	d, descriptorOK := sourceBridgeUTF8(obj, nt.DescriptorIndex)
+	parent, targetOK := sourceBridgeClassName(obj, ref.ClassIndex)
+	super, superOK := sourceBridgeClassName(obj, obj.SuperClass)
+	owner, ownerOK := sourceBridgeClassName(obj, obj.ThisClass)
+	if !nameOK || !descriptorOK || !targetOK || !superOK || !ownerOK || n != name || d != desc || parent == "" || parent != super || parent == owner {
 		return "", false
 	}
 	return parent, true
+}
+
+// A witness must respect JVMS constant-pool tag constraints. The permissive
+// legacy getUtf8 traverses other entries; using it here could certify malformed
+// declarations (or recurse through a cyclic String entry) as real JVM evidence.
+func sourceBridgeUTF8(obj *ClassObject, index uint16) (string, bool) {
+	if obj == nil {
+		return "", false
+	}
+	cp := NewConstantPoolWithConstant(&obj.ConstantPool)
+	utf, ok := cp.IndexInfo(int(index)).(*ConstantUtf8Info)
+	if !ok || utf == nil {
+		return "", false
+	}
+	return utf.Value, true
+}
+func sourceBridgeClassName(obj *ClassObject, index uint16) (string, bool) {
+	if obj == nil {
+		return "", false
+	}
+	cp := NewConstantPoolWithConstant(&obj.ConstantPool)
+	cl, ok := cp.IndexInfo(int(index)).(*ConstantClassInfo)
+	if !ok || cl == nil {
+		return "", false
+	}
+	return sourceBridgeUTF8(obj, cl.NameIndex)
 }
