@@ -169,7 +169,15 @@ func roundTripGenericFlowUnitsClasspath(t *testing.T, main, source string, allow
 				}
 				compiled[cacheKey] = rebuilt
 			}
-			if got := t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+helperPath, main); got != want {
+			got := func() string {
+				defer func() {
+					if t.Failed() {
+						t.Logf("rebuilt runtime failure %s/%s\n%s", mode, debug, result.Source)
+					}
+				}()
+				return t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+helperPath, main)
+			}()
+			if got != want {
 				t.Fatalf("%s/%s: got %q want %q\n%s", mode, debug, got, want, result.Source)
 			}
 		}

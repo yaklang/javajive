@@ -110,6 +110,26 @@ func TestCatchAllFinallyUsesCoverageAndInvokeIdentity(t *testing.T) {
 	}
 }
 
+func TestFinallyGuardMayReadUpdatedOuterLocalButNotTryDeclaration(t *testing.T) {
+	for _, declared := range []bool{false, true} {
+		tr := finallyFixture()
+		flag := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaBoolean))
+		flag.Id.SetName("release")
+		assign := statements.NewAssignStatement(flag, values.NewJavaLiteral(false, flag.Type()), declared)
+		assign.OriginPC, assign.HasOriginPC = 11, true
+		normal, handler := tr.TryBody[1], tr.CatchBodies[1][0]
+		tr.TryBody = []statements.Statement{tr.TryBody[0], assign, statements.NewIfStatement(flag, []statements.Statement{normal}, nil), tr.TryBody[2]}
+		tr.CatchBodies[1][0] = statements.NewIfStatement(flag, []statements.Statement{handler}, nil)
+		view, ok := RecoverCatchAllFinally(tr)
+		if ok == declared {
+			t.Fatalf("declaration=%v recovery=%v", declared, ok)
+		}
+		if ok && (len(view.Cleanup) != 1 || len(view.TryBody) != 3 || view.TryBody[1] != assign || len(tr.CatchBodies) != 2 || len(tr.TryBody) != 4) {
+			t.Fatal("rendering view lost the protected update or changed original exception ownership")
+		}
+	}
+}
+
 func TestFinallyCoverageRejectsCyclesAndUnprotectedOperands(t *testing.T) {
 	covered := func(pc int) bool { return pc >= 10 && pc < 20 }
 	ref := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("Exception"))

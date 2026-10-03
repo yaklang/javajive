@@ -145,49 +145,57 @@ func (d *Decompiler) unifyNumericExitWebs() {
 		if !needsRepair {
 			continue
 		}
-		// Identity and provisional spelling are separate. Prebinding a shared
-		// try/catch variable can retain the current id before lexical minting,
-		// so a new identity must inherit a valid simulator spelling rather than
-		// render an unnamed root as var-1. Collision renaming still distinguishes
-		// unrelated ids; this name never participates in the web proof.
-		first := d.opcodeIdToRef[stores[0]][0][0].(*values.JavaRef)
-		id := utils.NewRootVariableId()
-		id.SetName(first.Id.String())
-		canon := values.NewJavaRef(id, nil, types.NewJavaPrimer(kind))
-		canon.WebDeclType = canon.Type().Copy()
-		canon.SolvedWebIdentity = canon.Id
-		// Preserve definitions even if a stale simulator ref appears single-use.
-		d.disFoldRef = append(d.disFoldRef, canon)
-		for i, store := range stores {
-			old := d.opcodeIdToRef[store][0][0].(*values.JavaRef)
-			d.disFoldRef = append(d.disFoldRef, old)
-			d.opcodeIdToRef[store][0] = [2]any{canon, i == 0}
+		d.bindProvedPrimitiveWeb(webs, web, stores, kind)
+	}
+}
+
+// bindProvedPrimitiveWeb changes source identity only after the caller proves
+// a closed primitive domain. Rebind each immutable-web load separately; never
+// globally replace a simulator ref that may belong to an unrelated lifetime.
+func (d *Decompiler) bindProvedPrimitiveWeb(webs *slotWeb, web int, stores []*OpCode, kind string) *values.JavaRef {
+	// Identity and provisional spelling are separate. Prebinding a shared
+	// try/catch variable can retain the current id before lexical minting,
+	// so a new identity must inherit a valid simulator spelling rather than
+	// render an unnamed root as var-1. Collision renaming still distinguishes
+	// unrelated ids; this name never participates in the web proof.
+	first := d.opcodeIdToRef[stores[0]][0][0].(*values.JavaRef)
+	id := utils.NewRootVariableId()
+	id.SetName(first.Id.String())
+	canon := values.NewJavaRef(id, nil, types.NewJavaPrimer(kind))
+	canon.WebDeclType = canon.Type().Copy()
+	canon.SolvedWebIdentity = canon.Id
+	// Preserve definitions even if a stale simulator ref appears single-use.
+	d.disFoldRef = append(d.disFoldRef, canon)
+	for i, store := range stores {
+		old := d.opcodeIdToRef[store][0][0].(*values.JavaRef)
+		d.disFoldRef = append(d.disFoldRef, old)
+		d.opcodeIdToRef[store][0] = [2]any{canon, i == 0}
+	}
+	for op, w := range webs.webOf {
+		if w != web || op == nil || op.Instr == nil || !isLocalLoadOpcode(op.Instr.OpCode) {
+			continue
 		}
-		for op, w := range webs.webOf {
-			if w != web || op == nil || op.Instr == nil || !isLocalLoadOpcode(op.Instr.OpCode) {
-				continue
+		for _, value := range op.stackProduced {
+			if slot, ok := value.(*values.SlotValue); ok {
+				slot.ResetValue(canon)
 			}
-			for _, value := range op.stackProduced {
-				if slot, ok := value.(*values.SlotValue); ok {
-					slot.ResetValue(canon)
-				}
-			}
-		}
-		if d.varUserMap != nil {
-			d.varUserMap.ForEach(func(ref *values.JavaRef, pairs []*VarFoldRule) bool {
-				for _, pair := range pairs {
-					if pair == nil || pair.CurrentOpcode == nil || pair.Replace == nil {
-						continue
-					}
-					op := pair.CurrentOpcode
-					w, known := webs.webOf[op]
-					if known && w == web && op.Instr != nil && isLocalLoadOpcode(op.Instr.OpCode) {
-						pair.Replace(canon)
-						d.disFoldRef = append(d.disFoldRef, ref)
-					}
-				}
-				return true
-			})
 		}
 	}
+	if d.varUserMap != nil {
+		d.varUserMap.ForEach(func(ref *values.JavaRef, pairs []*VarFoldRule) bool {
+			for _, pair := range pairs {
+				if pair == nil || pair.CurrentOpcode == nil || pair.Replace == nil {
+					continue
+				}
+				op := pair.CurrentOpcode
+				w, known := webs.webOf[op]
+				if known && w == web && op.Instr != nil && isLocalLoadOpcode(op.Instr.OpCode) {
+					pair.Replace(canon)
+					d.disFoldRef = append(d.disFoldRef, ref)
+				}
+			}
+			return true
+		})
+	}
+	return canon
 }

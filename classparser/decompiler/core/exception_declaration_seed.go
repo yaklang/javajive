@@ -4,6 +4,7 @@ import (
 	"reflect"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -147,8 +148,18 @@ func (d *Decompiler) restoreExceptionDeclarationSeeds() {
 		}
 		canonical := d.seedStoreRef(first)
 		old := d.seedStoreRef(seed)
-		if sourceSeedStoreCategory(seed) != sourceSeedStoreCategory(first) || canonical == nil || old == nil || canonical.Type() == nil || old.Type() == nil || !reflect.DeepEqual(canonical.Type().RawType(), old.Type().RawType()) {
+		if sourceSeedStoreCategory(seed) != sourceSeedStoreCategory(first) || canonical == nil || old == nil || canonical.Type() == nil || old.Type() == nil {
 			continue
+		}
+		if !reflect.DeepEqual(canonical.Type().RawType(), old.Type().RawType()) {
+			// A closed 0/1 web may already have recovered its boolean source
+			// domain. Its dead, dominating original int literal seed still owns
+			// the declaration outside try. Only an exact 0/1 seed shares that
+			// domain; arbitrary integer definitions must remain separate.
+			_, canonicalSeed := intLiteral01(seed.stackConsumed[0])
+			if !isExactPrimer(canonical.Type(), types.JavaBoolean) || !isExactPrimer(old.Type(), types.JavaInteger) || !canonicalSeed {
+				continue
+			}
 		}
 		// A mutable simulator alias belonging to another web is not proof of one
 		// source variable. Require the complete target web already normalized.

@@ -78,7 +78,12 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 			if x == nil {
 				return nil, false
 			}
-			if ref, ok := plainTryValue(x.LeftValue).(*values.JavaRef); ok {
+			// Only declarations belong to the try's lexical scope. An outer
+			// local may be updated by the protected body and read by cleanup;
+			// each copy reads its latest value at the exit. Excluding every
+			// reassignment prevents correct finally recovery and catches a
+			// cleanup failure a second time in the emitted catch-all.
+			if ref, ok := plainTryValue(x.LeftValue).(*values.JavaRef); ok && (x.IsDeclare || x.IsFirst) {
 				excluded = append(excluded, ref)
 			}
 		case *statements.IfStatement:

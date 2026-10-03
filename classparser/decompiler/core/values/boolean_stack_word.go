@@ -144,6 +144,13 @@ func narrowBooleanLeaf(value JavaValue) JavaValue {
 		return condition
 	}
 	result := NewCustomValue(func(ctx *class_context.ClassContext) string {
+		// A later closed-web proof can recover a canonical boolean source
+		// declaration. Its value already is the low bit; applying integer
+		// arithmetic to that source is both unnecessary and ill-typed. Keep
+		// this consumer view live rather than freezing simulation-time type.
+		if isBooleanTyped(value) {
+			return value.String(ctx)
+		}
 		return fmt.Sprintf("(((%s) & 1) != 0)", value.String(ctx))
 	}, func() types.JavaType { return types.NewJavaPrimer(types.JavaBoolean) })
 	result.Flag, result.CapturesKnown, result.Captures = "boolean_stack_narrowing", true, []JavaValue{value}

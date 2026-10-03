@@ -18,11 +18,20 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 	}
 	groups := map[int][]*OpCode{}
 	owners := map[*values.JavaRef]map[int]bool{}
+	for _, op := range d.opCodes {
+		if op == nil || op.Instr == nil || !isLocalStoreOpcode(op.Instr.OpCode) {
+			continue
+		}
+		w, known := webs.webOf[op]
+		if !known {
+			continue
+		}
+		groups[w] = append(groups[w], op)
+	}
 	for op, w := range webs.webOf {
 		if op == nil || op.Instr == nil || !isLocalStoreOpcode(op.Instr.OpCode) {
 			continue
 		}
-		groups[w] = append(groups[w], op)
 		for _, info := range d.opcodeIdToRef[op] {
 			if ref, ok := info[0].(*values.JavaRef); ok {
 				if owners[ref] == nil {
@@ -44,6 +53,7 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 			continue
 		}
 		var ref *values.JavaRef
+		members := map[*values.JavaRef]bool{}
 		valid := true
 		for _, op := range stores {
 			infos := d.opcodeIdToRef[op]
@@ -52,13 +62,50 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 				break
 			}
 			r, ok := infos[0][0].(*values.JavaRef)
-			if !ok || r == nil || r.IsParam || r.IsThis || len(owners[r]) != 1 || (ref != nil && r != ref) {
+			if !ok || r == nil || r.Id == nil || r.IsParam || r.IsThis || len(owners[r]) != 1 ||
+				(!isExactPrimer(r.Type(), types.JavaInteger) && !isExactPrimer(r.Type(), types.JavaBoolean)) {
 				valid = false
 				break
 			}
-			ref = r
+			if ref == nil {
+				ref = r
+			}
+			members[r] = true
 		}
-		if !valid || ref == nil || !isExactPrimer(ref.Type(), types.JavaInteger) {
+		if !valid || ref == nil {
+			continue
+		}
+		// Split simulator names can still represent one immutable reaching-
+		// definition web. Require every definition and every load snapshot to
+		// be present before making one source declaration for that web.
+		count := 0
+		loadViews := map[*values.SlotValue]bool{}
+		for op, owner := range webs.webOf {
+			if owner != w || op == nil || op.Instr == nil {
+				continue
+			}
+			if isLocalStoreOpcode(op.Instr.OpCode) {
+				count++
+			}
+			if len(members) > 1 && isLocalLoadOpcode(op.Instr.OpCode) {
+				if len(op.stackProduced) != 1 {
+					valid = false
+					break
+				}
+				snapshot, replaceable := op.stackProduced[0].(*values.SlotValue)
+				if !replaceable || snapshot == nil {
+					valid = false
+					break
+				}
+				r, ok := safeSeedOperand(op.stackProduced[0]).(*values.JavaRef)
+				if !ok || !members[r] {
+					valid = false
+					break
+				}
+				loadViews[snapshot] = true
+			}
+		}
+		if !valid || count != len(stores) {
 			continue
 		}
 		seed := false
@@ -67,13 +114,34 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 			if v == nil || depth > 32 {
 				return false
 			}
-			v = values.UnpackSoltValue(v)
+			original := v
+			v = safeSeedOperand(v)
+			if v == nil {
+				return false
+			}
 			if lit, ok := intLiteral01(v); ok && lit != nil {
 				seed = true
 				return true
 			}
+			if literal, ok := v.(*values.JavaLiteral); ok && isExactPrimer(literal.Type(), types.JavaBoolean) {
+				switch word := literal.Data.(type) {
+				case bool:
+					seed = true
+					return true
+				case int:
+					if word == 0 || word == 1 {
+						seed = true
+						return true
+					}
+				}
+				return false
+			}
 			if r, ok := v.(*values.JavaRef); ok {
-				return r == ref || isExactPrimer(r.Type(), types.JavaBoolean)
+				if members[r] && len(members) > 1 {
+					snapshot, ok := original.(*values.SlotValue)
+					return ok && loadViews[snapshot]
+				}
+				return members[r] || isExactPrimer(r.Type(), types.JavaBoolean)
 			}
 			if c, ok := v.(*values.CustomValue); ok && c.Flag == "boolean_stack_word" && c.CapturesKnown && len(c.Captures) == 1 {
 				return normalized(c.Captures[0], depth+1)
@@ -96,6 +164,14 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 			if op == nil || op.Instr == nil {
 				continue
 			}
+			if isLocalLoadOpcode(op.Instr.OpCode) {
+				for _, value := range op.stackProduced {
+					if r, ok := safeSeedOperand(value).(*values.JavaRef); ok && members[r] {
+						owner, known := webs.webOf[op]
+						valid = valid && known && owner == w
+					}
+				}
+			}
 			// IINC reads and writes a local without consuming an operand-stack
 			// value. Inspect its reaching definitions explicitly; otherwise a
 			// counter initialized/reset to zero looks like a closed boolean web.
@@ -112,9 +188,16 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 				}
 			}
 			for i, v := range op.stackConsumed {
-				r, ok := values.UnpackSoltValue(v).(*values.JavaRef)
-				if !ok || r != ref {
+				r, ok := safeSeedOperand(v).(*values.JavaRef)
+				if !ok || !members[r] {
 					continue
+				}
+				if len(members) > 1 {
+					snapshot, ok := v.(*values.SlotValue)
+					if !ok || !loadViews[snapshot] {
+						valid = false
+						continue
+					}
 				}
 				switch op.Instr.OpCode {
 				case OP_IAND, OP_IOR, OP_IXOR:
@@ -138,8 +221,12 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 		if !valid {
 			continue
 		}
-		ref.ResetVarType(types.NewJavaPrimer(types.JavaBoolean))
-		ref.WebDeclType = ref.Type().Copy()
+		if len(members) > 1 {
+			ref = d.bindProvedPrimitiveWeb(webs, w, stores, types.JavaBoolean)
+		} else {
+			ref.ResetVarType(types.NewJavaPrimer(types.JavaBoolean))
+			ref.WebDeclType = ref.Type().Copy()
+		}
 		for _, op := range stores {
 			if lit, ok := intLiteral01(op.stackConsumed[0]); ok {
 				lit.JavaType = types.NewJavaPrimer(types.JavaBoolean)

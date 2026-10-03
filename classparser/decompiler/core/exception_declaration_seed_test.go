@@ -11,7 +11,7 @@ import (
 )
 
 func TestExceptionDeclarationSeedRequiresExactDeadDominatingDefinition(t *testing.T) {
-	for _, name := range []string{"integer", "long", "reference", "observed seed", "entry web", "different type", "different category", "missing rhs", "typed nil rhs", "missing load", "incomplete snapshot", "stale load", "split target", "foreign alias", "unprotected target", "protected seed", "not handler read", "alternate seed", "entry path", "increment", "cycle", "budget"} {
+	for _, name := range []string{"integer", "long", "reference", "boolean zero seed", "boolean one seed", "boolean noncanonical seed", "boolean computed seed", "observed seed", "entry web", "different type", "different category", "missing rhs", "typed nil rhs", "missing load", "incomplete snapshot", "stale load", "split target", "foreign alias", "unprotected target", "protected seed", "not handler read", "alternate seed", "entry path", "increment", "cycle", "budget"} {
 		t.Run(name, func(t *testing.T) {
 			typ := types.NewJavaPrimer(types.JavaInteger)
 			storeCode, loadCode := OP_ISTORE_1, OP_ILOAD_1
@@ -49,6 +49,15 @@ func TestExceptionDeclarationSeedRequiresExactDeadDominatingDefinition(t *testin
 			row := &ExceptionTableEntry{StartPc: 3, EndPc: 11, HandlerPc: 13}
 			d := &Decompiler{opCodes: nodes, semanticCFG: g, cachedSlotWebs: webs, ExceptionTable: []*ExceptionTableEntry{row}, opcodeIdToRef: map[*OpCode][][2]any{seed: {{old, true}}, first: {{canonical, true}}, second: {{canonical, false}}}}
 			switch name {
+			case "boolean zero seed", "boolean one seed", "boolean noncanonical seed", "boolean computed seed":
+				canonical.ResetVarType(types.NewJavaPrimer(types.JavaBoolean))
+				if name == "boolean zero seed" {
+					rhs.Data = 0
+				} else if name == "boolean one seed" {
+					rhs.Data = 1
+				} else if name == "boolean computed seed" {
+					seed.stackConsumed[0] = values.NewBinaryExpression(values.NewJavaLiteral(1, typ), values.NewJavaLiteral(1, typ), values.SUB, typ)
+				}
 			case "observed seed":
 				g.Nodes = append(g.Nodes, op(loadCode, 2))
 				webs.webOf[g.Nodes[len(g.Nodes)-1]] = 1
@@ -101,7 +110,7 @@ func TestExceptionDeclarationSeedRequiresExactDeadDominatingDefinition(t *testin
 			}
 			d.restoreExceptionDeclarationSeeds()
 			repaired := d.opcodeIdToRef[seed][0][0] == canonical
-			want := name == "integer" || name == "long" || name == "reference"
+			want := name == "integer" || name == "long" || name == "reference" || name == "boolean zero seed" || name == "boolean one seed"
 			if repaired != want {
 				t.Fatalf("repair=%v want=%v", repaired, want)
 			}

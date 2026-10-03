@@ -77,6 +77,24 @@ func TestBooleanStackNarrowingRequiresComputationalInt(t *testing.T) {
 	}
 }
 
+func TestBooleanConsumerViewFollowsProvedLateProducerDomain(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	word := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
+	word.Id.SetName("word")
+	view, ok := BooleanStackConsumerView(word)
+	if !ok || !strings.Contains(view.String(ctx), "& 1") {
+		t.Fatal("unproved numeric word lost low-bit narrowing")
+	}
+	word.ResetVarType(types.NewJavaPrimer(types.JavaBoolean))
+	if text := view.String(ctx); text != "word" {
+		t.Fatal("late proved boolean source received integer arithmetic: " + text)
+	}
+	word.ResetVarType(types.NewJavaPrimer(types.JavaInteger))
+	if text := view.String(ctx); !strings.Contains(text, "& 1") || strings.Count(text, "word") != 1 {
+		t.Fatal("view cached a producer domain or duplicated an evaluation: " + text)
+	}
+}
+
 func TestPrimitiveABIAndNumericProducerDoNotAdoptConsumerType(t *testing.T) {
 	ctx := &class_context.ClassContext{}
 	for _, name := range []string{types.JavaBoolean, types.JavaByte, types.JavaChar, types.JavaShort, types.JavaInteger, types.JavaLong, types.JavaFloat, types.JavaDouble} {
