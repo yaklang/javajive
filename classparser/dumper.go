@@ -1451,10 +1451,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 					enumFields = append(enumFields, field)
 					continue
 				}
-				ordinaryFields = append(ordinaryFields, field.code)
+				ordinaryFields = append(ordinaryFields, field.annotations+field.code)
 			}
 			for idx, enumSimple := range enumFields {
-				constStr := enumSimple.fieldName
+				constStr := enumSimple.annotations + enumSimple.fieldName
 				if args := c.enumConstantArgs(enumSimple.fieldName); args != "" {
 					constStr += "(" + args + ")"
 				}
@@ -1955,10 +1955,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 }
 
 type dumpedFields struct {
-	code      string
-	fieldName string
-	modifier  string
-	typeName  string
+	annotations string
+	code        string
+	fieldName   string
+	modifier    string
+	typeName    string
 }
 
 func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
@@ -2019,6 +2020,7 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 		lastPacket := fieldType.String(c.FuncCtx)
 		lastPacket = c.applyFieldTypeAnnotations(field, fieldType, lastPacket)
 		valueLiteral := ""
+		annotations := []string{}
 		for _, attr := range field.Attributes {
 			switch ret := attr.(type) {
 			case *ConstantValueAttribute:
@@ -2065,6 +2067,13 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 				// Silently ignore unrecognized attributes (RuntimeInvisibleTypeAnnotations,
 				// PermittedSubclasses, Record, NestMembers, etc.) rather than flooding logs.
 			case *RuntimeVisibleAnnotationsAttribute:
+				for _, annotation := range ret.Annotations {
+					source, err := c.DumpAnnotation(annotation)
+					if err != nil {
+						return nil, err
+					}
+					annotations = append(annotations, source)
+				}
 
 			default:
 				// Silently ignore unknown attribute types on fields.
@@ -2112,6 +2121,11 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 				modifier:  accessFlags,
 				typeName:  lastPacket,
 			})
+		}
+		if len(annotations) != 0 {
+			// Keep annotations separate from the declaration: enum constants
+			// have a different source spelling but are original field members.
+			fields[len(fields)-1].annotations = strings.Join(annotations, " ") + " "
 		}
 	}
 	return fields, nil
@@ -2923,9 +2937,9 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 				valStr = fmt.Sprintf("%d", ret.Value)
 			}
 		case *ConstantDoubleInfo:
-			valStr = fmt.Sprintf("%f", ret.Value)
+			valStr = annotationFloatingLiteral(ret.Value, 64)
 		case *ConstantFloatInfo:
-			valStr = fmt.Sprintf("%f", ret.Value)
+			valStr = annotationFloatingLiteral(float64(ret.Value), 32)
 		default:
 			return "", errors.New("parse annotation error, unknown constant type")
 		}
@@ -3066,9 +3080,9 @@ func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, e
 					valStr = fmt.Sprintf("%d", ret.Value)
 				}
 			case *ConstantDoubleInfo:
-				valStr = fmt.Sprintf("%f", ret.Value)
+				valStr = annotationFloatingLiteral(ret.Value, 64)
 			case *ConstantFloatInfo:
-				valStr = fmt.Sprintf("%f", ret.Value)
+				valStr = annotationFloatingLiteral(float64(ret.Value), 32)
 			default:
 				return "", errors.New("parse annotation error, unknown constant type")
 			}
@@ -9557,12 +9571,6 @@ func fixLog4jRemainingReconstructs(body string) string {
 			"if ((var4) == (null)){\n\t\t\tvar8 = \"null\";\n\t\t}else{\n\t\t\tvar8_1 = new StringBuilder().append(var4.getElementName()).append((char)(58)).append(var4.getPluginClass()).toString();\n\t\t}\n\t\tLOGGER.debug(\"Returning {} with parent {} of type {}\",var5.getName(),((var5.getParent()) == (null)) ? (\"null\") : (((var5.getParent().getName()) == (null)) ? (\"root\") : (var5.getParent().getName())),var8);",
 			"String var8_type = ((var4) == (null)) ? (\"null\") : (new StringBuilder().append(var4.getElementName()).append((char)(58)).append(var4.getPluginClass()).toString());\n\t\tLOGGER.debug(\"Returning {} with parent {} of type {}\",var5.getName(),((var5.getParent()) == (null)) ? (\"null\") : (((var5.getParent().getName()) == (null)) ? (\"root\") : (var5.getParent().getName())),var8_type);")
 	}
-	// PluginAttribute.defaultFloat: 0.000000 is a double literal.
-	if strings.Contains(body, "@interface PluginAttribute") {
-		body = strings.ReplaceAll(body,
-			"public abstract float defaultFloat() default 0.000000;",
-			"public abstract float defaultFloat() default 0.0f;")
-	}
 	// PluginCache: computeIfAbsent key is Object on a raw Map; readBoolean
 	// inside the lambda throws IOException.
 	if strings.Contains(body, "class PluginCache") {
@@ -12354,6 +12362,26 @@ func (c *ClassObjectDumper) constructorFieldStoreTotals() map[string]int {
 		}()
 	}
 	return totals
+}
+
+// Annotation elements require constant expressions. Preserve IEEE values and
+// primitive width without six-decimal rounding or names that a lexical type
+// declaration can shadow. Floating division is a Java constant expression.
+func annotationFloatingLiteral(value float64, bits int) string {
+	suffix := "D"
+	if bits == 32 {
+		suffix = "F"
+	}
+	if math.IsNaN(value) {
+		return "(0.0" + suffix + "/0.0" + suffix + ")"
+	}
+	if math.IsInf(value, 1) {
+		return "(1.0" + suffix + "/0.0" + suffix + ")"
+	}
+	if math.IsInf(value, -1) {
+		return "(-1.0" + suffix + "/0.0" + suffix + ")"
+	}
+	return strconv.FormatFloat(value, 'g', -1, bits) + suffix
 }
 
 func javaFloatLiteral(f float32) string {
