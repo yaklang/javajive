@@ -111,3 +111,63 @@ func TestNormalizedBooleanWebJoinsSplitSourceNamesWithoutCrossWebMutation(t *tes
 		})
 	}
 }
+
+func TestBooleanCopyComponentsKeepDistinctLocalsAndRejectNumericEscapes(t *testing.T) {
+	for _, scenario := range []string{"closed", "noncanonical root", "numeric sink", "entry member", "parameter member", "foreign load", "missing snapshot", "cycle without root"} {
+		t.Run(scenario, func(t *testing.T) {
+			const length = 32
+			refs := make([]*values.JavaRef, length)
+			loads := make([]*OpCode, length)
+			stores := make([]*OpCode, length)
+			views := make([]*values.SlotValue, length)
+			webs := &slotWeb{webOf: map[*OpCode]int{}, entryWeb: map[int]int{}}
+			d := &Decompiler{cachedSlotWebs: webs, opcodeIdToRef: map[*OpCode][][2]any{}, FunctionType: &types.JavaFuncType{ReturnType: types.NewJavaPrimer(types.JavaBoolean)}}
+			d.FunctionContext = &class_context.ClassContext{FunctionType: d.FunctionType}
+			root := values.NewJavaLiteral(1, types.NewJavaPrimer(types.JavaInteger))
+			for i := 0; i < length; i++ {
+				refs[i] = values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
+				stores[i], loads[i] = op(OP_ISTORE, uint16(i*4+1)), op(OP_ILOAD, uint16(i*4+3))
+				stores[i].Data, loads[i].Data = []byte{byte(i + 1)}, []byte{byte(i + 1)}
+				views[i] = values.NewSlotValue(refs[i], types.NewJavaPrimer(types.JavaInteger))
+				loads[i].stackProduced = []values.JavaValue{views[i]}
+				var rhs values.JavaValue = root
+				if i > 0 {
+					rhs = views[i-1]
+				}
+				stores[i].stackConsumed = []values.JavaValue{rhs}
+				// Reverse IDs force type dependencies opposite to processing order.
+				webs.webOf[stores[i]], webs.webOf[loads[i]] = length-i, length-i
+				d.opcodeIdToRef[stores[i]] = [][2]any{{refs[i], true}}
+				d.opCodes = append(d.opCodes, stores[i], loads[i])
+			}
+			ret := op(OP_IRETURN, length*4+1)
+			ret.stackConsumed = []values.JavaValue{views[length-1]}
+			d.opCodes = append(d.opCodes, ret)
+			switch scenario {
+			case "noncanonical root":
+				root.Data = 2
+			case "numeric sink":
+				ret.Instr.OpCode = OP_IADD
+			case "entry member":
+				webs.entryWeb[1] = webs.webOf[stores[7]]
+			case "parameter member":
+				refs[7].IsParam = true
+			case "foreign load":
+				webs.webOf[loads[7]] = length + 1
+			case "missing snapshot":
+				loads[7].stackProduced = nil
+			case "cycle without root":
+				stores[0].stackConsumed = []values.JavaValue{views[length-1]}
+			}
+			d.restoreNormalizedBooleanWebs()
+			for i, ref := range refs {
+				if isExactPrimer(ref.Type(), types.JavaBoolean) != (scenario == "closed") {
+					t.Fatalf("member %d domain=%s", i, ref.Type().String(&class_context.ClassContext{}))
+				}
+				if views[i].GetValue() != ref || d.opcodeIdToRef[stores[i]][0][0] != ref {
+					t.Fatal("type closure merged the identities of distinct copy locals")
+				}
+			}
+		})
+	}
+}
