@@ -101,7 +101,13 @@ func (f *FunctionCallExpression) planErasedMethodInputProof(ctx *class_context.C
 	}
 	// A static call keeps its original owner and access; only argument views
 	// change. A receiver view to a different declaration requires public access.
-	if !family.Target.Public && !f.IsStatic && owner != strings.ReplaceAll(ctx.ClassName, ".", "/") {
+	if !family.Target.Public && !f.IsStatic && (owner != strings.ReplaceAll(ctx.ClassName, ".", "/") || eraseReceiver && declaring != strings.ReplaceAll(ctx.ClassName, ".", "/")) {
+		// JVM access through this class does not license a source cast to a
+		// nonpublic member's declaring ancestor. In particular, cross-package
+		// protected access requires a receiver of the accessing subtype, and
+		// casting it to the ancestor destroys that qualification. Keep the
+		// original receiver/inference unless this view has public access or
+		// the member is declared on the caller itself.
 		return nil, false
 	}
 	for _, m := range family.Methods {

@@ -169,6 +169,44 @@ func TestErasedClassOnlyMethodHasIndependentBoundsMap(t *testing.T) {
 	}
 }
 
+func TestDiscardedClassReceiverViewRequiresAccessAfterAdaptation(t *testing.T) {
+	for _, scenario := range []string{"public ancestor", "nonpublic ancestor", "nonpublic own declaration"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, ctx, meta, _ := methodInputFixture()
+			f.IsStatic, f.Kind = false, InvokeVirtual
+			f.Object = NewJavaRef(utils.NewRootVariableId(), nil, types.NewParameterizedType("probe.Owner", []types.JavaType{types.NewJavaClass("X")}))
+			owner := meta["probe/Owner"]
+			owner.Methods = owner.Methods[:1]
+			owner.Methods[0].Static = false
+			owner.Methods[0].Public = scenario == "public ancestor"
+			declaring := owner.Name
+			if scenario != "nonpublic own declaration" {
+				parent := owner
+				parent.Name = "other/Parent"
+				meta[parent.Name] = parent
+				declaring = parent.Name
+				owner.Methods, owner.Parents = nil, []string{parent.Name}
+			}
+			meta[owner.Name] = owner
+			ctx.SiblingClassSig = func(n string) (string, map[string]string, bool) {
+				_, ok := meta[n]
+				methods := map[string]string{}
+				if n == declaring {
+					methods[class_context.MethodDescKey("apply", f.Descriptor)] = "(Ljava/util/function/Consumer<-TE;>;TE;)Ljava/util/Optional<Ljava/lang/String;>;"
+				}
+				return "<E:Ljava/lang/Object;>Ljava/lang/Object;", methods, ok
+			}
+			out, ok := f.PlanErasedDiscardedMethodInput(ctx)
+			if ok != (scenario != "nonpublic ancestor") {
+				t.Fatalf("adapted=%v", ok)
+			}
+			if ok && (out.Witness() != f.Witness() || out.Object.(*CastExpression).Value != f.Object) {
+				t.Fatal("access proof changed the original invocation or receiver identity")
+			}
+		})
+	}
+}
+
 func TestErasedRawContainerReturnNeedsMatchingDeclaration(t *testing.T) {
 	for _, tc := range []string{"proved", "no metadata", "different result", "bare result", "parameterized target"} {
 		t.Run(tc, func(t *testing.T) {

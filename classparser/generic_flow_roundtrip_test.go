@@ -30,6 +30,12 @@ func roundTripGenericFlowUnits(t *testing.T, main, source string, allow func(str
 }
 
 func roundTripGenericFlowUnitsClasspath(t *testing.T, main, source string, allow func(string) bool, extraUnits []string, maskSelected bool, modes ...DecompileMode) {
+	roundTripGenericFlowSources(t, main, source, nil, allow, extraUnits, maskSelected, modes...)
+}
+
+// Extra authored sources allow access checks to cross a real package boundary.
+// Their original classfiles remain the declaration and runtime oracle.
+func roundTripGenericFlowSources(t *testing.T, main, source string, extraSources map[string]string, allow func(string) bool, extraUnits []string, maskSelected bool, modes ...DecompileMode) {
 	t.Helper()
 	if len(modes) == 0 {
 		modes = []DecompileMode{Precision, Compatibility}
@@ -48,7 +54,23 @@ func roundTripGenericFlowUnitsClasspath(t *testing.T, main, source string, allow
 		if err := os.WriteFile(path, []byte(source), 0644); err != nil {
 			t.Fatal(err)
 		}
-		cmd := exec.Command(javac, "-proc:none", "--release", "8", debug, "-d", dir, path)
+		originalArgs := []string{"-proc:none", "--release", "8", debug, "-d", dir, path}
+		extraNames := make([]string, 0, len(extraSources))
+		for name := range extraSources {
+			extraNames = append(extraNames, name)
+		}
+		sort.Strings(extraNames)
+		for _, name := range extraNames {
+			file := filepath.Join(dir, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, []byte(extraSources[name]), 0600); err != nil {
+				t.Fatal(err)
+			}
+			originalArgs = append(originalArgs, file)
+		}
+		cmd := exec.Command(javac, originalArgs...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("original: %v\n%s", err, out)
 		}
