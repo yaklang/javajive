@@ -53,6 +53,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		d.declarationResolver = nil // already consulted before the platform evidence
 		d.FuncCtx = &class_context.ClassContext{}
 		d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
+		d.constructorReceiverFinalizerSilent = d.constructorReceiverCannotObserveFinalization(&remaining)
 		safe := d.constructorChainDoesNotObserve(owner, descriptor, writes, map[string]bool{}, &remaining, 0)
 		return safe, platformUsed
 	}
@@ -184,8 +185,9 @@ func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *val
 // feasible abstract path must finish initialization and remain receiver-silent.
 // Paths are memoized by PC and exact type/receiver state; loops fail closed. A normal
 // Java exception after Object initialization can expose the receiver to a
-// finalizer, even without an explicit publication; potentially throwing opaque
-// operations after initialization are therefore deliberately rejected.
+// finalizer, even without an explicit publication. Opaque operations after
+// initialization therefore require the separate closed-finalizer proof; all
+// receiver publication and moved-storage observation remain forbidden.
 func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *CodeAttribute, ops []*core.OpCode, descriptor string, writes, active map[string]bool, remaining *int, depth int) bool {
 	params, ret, err := callbinding.Descriptor(descriptor)
 	if err != nil || ret != "V" || code.MaxLocals == 0 {
@@ -441,7 +443,7 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 				}
 			case opcode == core.OP_INVOKESPECIAL || opcode == core.OP_INVOKESTATIC || opcode == core.OP_INVOKEVIRTUAL || opcode == core.OP_INVOKEINTERFACE:
 				member := constructorMotionMember(obj, op, opcode)
-				if member == nil || initialized || member.Member == "<clinit>" {
+				if member == nil || (initialized && !c.constructorReceiverFinalizerSilent) || member.Member == "<clinit>" {
 					return false
 				}
 				args, result, err := callbinding.Descriptor(member.Description)
@@ -470,14 +472,15 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 					}
 				}
 				if member.Member == "<init>" {
-					if opcode != core.OP_INVOKESPECIAL || result != "V" || !receiver.receiver || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) || !c.constructorChainDoesNotObserve(member.Name, member.Description, writes, active, remaining, depth+1) {
+					if initialized || opcode != core.OP_INVOKESPECIAL || result != "V" || !receiver.receiver || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) || !c.constructorChainDoesNotObserve(member.Name, member.Description, writes, active, remaining, depth+1) {
 						return false
 					}
 					initialized = true
 				} else {
-					// Before Object initialization, receiver-free calls may throw
-					// but cannot publish/observe this fresh object or make it
-					// finalizable. Their external effects keep the same order.
+					// Receiver-free calls keep external effects in the same order.
+					// Before Object initialization, a throw cannot expose this via
+					// finalization. Afterward, require the separate closed-receiver
+					// proof that its original finalizer is unobservable.
 					// THIS arguments/receiver are rejected; results cannot alias
 					// THIS because no earlier operation has published it.
 					if receiver.receiver {

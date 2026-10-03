@@ -37,6 +37,9 @@ type ClassObjectDumper struct {
 	diagTruncated          bool
 	overloadFamilyUnproven bool
 	overloadUnknownSeen    map[string]bool
+	// Set only inside one constructor effect proof after checking the exact
+	// final receiver and its complete original finalizer ancestry.
+	constructorReceiverFinalizerSilent bool
 	// typeAnnosUnsupported is set when a legal type annotation cannot be
 	// placed on a declaration (code-offset/local/inner path).
 	typeAnnosUnsupported bool
