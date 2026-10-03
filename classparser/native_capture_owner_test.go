@@ -60,6 +60,53 @@ class NativeStringOwner {static NativeStringParent make(final Object x){return n
 public class NativeStringDriver {public static void main(String[] args){Object x=new Object();NativeStringParent p=NativeStringOwner.make(x);char[] expected={0xD800,'x',0xDC00,0,'\\','"','}'};if(p.get()!=x||p.text.length()!=expected.length)throw new AssertionError("literal capture");for(int i=0;i<expected.length;i++)if(p.text.charAt(i)!=expected[i])throw new AssertionError(i);System.out.println(expected.length);}}
 `
 
+const nativePrivateAccessFixture = `public class PrivateAccessCapture {
+    final long value;
+    final Object observed;
+    private PrivateAccessCapture(Object rival) { observed = null; value = 123; }
+    private PrivateAccessCapture(long n) { observed = token(); value = n; }
+    Object token() { return null; }
+    static PrivateAccessCapture make(final Object capture, long n) {
+        return new PrivateAccessCapture(n) { Object token() { return capture; } };
+    }
+    public static void main(String[] args) {
+        Object token = new Object(); int rows = 0;
+        for (Object capture : new Object[] { null, token })
+            for (long n : new long[] { Long.MIN_VALUE, -1, 0, 1, Long.MAX_VALUE }) {
+                PrivateAccessCapture result = make(capture, n);
+                if (result.observed != capture || result.token() != capture || result.value != n)
+                    throw new AssertionError("private access bridge and pre-super captured callback");
+                rows++;
+            }
+        System.out.println(rows);
+    }
+}
+`
+
+const nativePrivateFailureFixture = `
+public class NativePrivateFailure {
+ static final java.io.IOException failure=new java.io.IOException("original");
+ static NativePrivateFailure published;
+ final Object observed;final long number;
+ private NativePrivateFailure(long n)throws java.io.IOException {observed=token();number=n;published=this;if(n<0)throw failure;}
+ private NativePrivateFailure(Object rival){observed=null;number=123;}
+ Object token(){return null;}
+ static NativePrivateFailure make(final Object capture,long n)throws java.io.IOException {return new NativePrivateFailure(n){Object token(){return capture;}};}
+ public static void main(String[]args)throws Exception {Object token=new Object();int rows=0;for(Object capture:new Object[]{null,token})for(long n:new long[]{Long.MIN_VALUE,-1,0,1,Long.MAX_VALUE}){published=null;try{NativePrivateFailure p=make(capture,n);if(n<0||p.number!=n||p.observed!=capture||p.token()!=capture)throw new AssertionError("normal capture");}catch(java.io.IOException e){if(n>=0||e!=failure||published==null||published.number!=n||published.observed!=capture||published.token()!=capture)throw new AssertionError("published failed capture",e);}rows++;}System.out.println(rows);}
+}
+`
+
+const nativePrivateGenericFixture = `
+public class NativePrivateGeneric {
+ final Number number;final Object observed;final int selected;
+ private <N extends Number> NativePrivateGeneric(N n){number=n;observed=token();selected=1;}
+ private NativePrivateGeneric(Object rival){number=null;observed=null;selected=2;}
+ Object token(){return null;}
+ static <T extends Number> NativePrivateGeneric make(T n,final Object capture){return new NativePrivateGeneric(n){Object token(){return capture;}};}
+ public static void main(String[]args){Object token=new Object();int rows=0;for(Object capture:new Object[]{null,token})for(Number n:new Number[]{null,Integer.valueOf(-1),Integer.valueOf(0),Long.valueOf(Long.MIN_VALUE),Long.valueOf(Long.MAX_VALUE),Double.valueOf(-0.0),Double.valueOf(Double.NaN)}){NativePrivateGeneric p=make(n,capture);if(p.selected!=1||p.number!=n||p.observed!=capture||p.token()!=capture)throw new AssertionError("generic private overload/capture");rows++;}System.out.println(rows);}
+}
+`
+
 func nativeBinaryShape(t *testing.T, raw []byte) string {
 	t.Helper()
 	obj, err := Parse(raw)
@@ -94,6 +141,9 @@ func TestNativeAnonymousCaptureRoundTrip(t *testing.T) {
 		{"one-lexical-import-namespace", "NativeImportOwner", "NativeImportDriver", nativeImportFixture},
 		{"nested-member-local-scope", "NativeScopeOwner", "NativeScopeDriver", nativeScopeFixture},
 		{"lossless-super-string-operand", "NativeStringOwner", "NativeStringDriver", nativeStringFixture},
+		{"private-access-bridge-before-parent-callback", "PrivateAccessCapture", "PrivateAccessCapture", nativePrivateAccessFixture},
+		{"private-access-bridge-publication-and-checked-failure", "NativePrivateFailure", "NativePrivateFailure", nativePrivateFailureFixture},
+		{"private-access-generic-constructor-overload", "NativePrivateGeneric", "NativePrivateGeneric", nativePrivateGenericFixture},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			for _, debug := range []string{"-g", "-g:none"} {
@@ -196,6 +246,30 @@ func TestNativeAnonymousCaptureRoundTrip(t *testing.T) {
 								if want != got {
 									t.Fatalf("anonymous ABI %s:\noriginal:\n%s\nrebuilt:\n%s", child, want, got)
 								}
+							}
+							originalOwner, _ := Parse(files[fixture.owner])
+							rawOwner, err := os.ReadFile(filepath.Join(output, fixture.owner+".class"))
+							if err != nil {
+								t.Fatal(err)
+							}
+							rebuiltOwner, err := Parse(rawOwner)
+							if err != nil {
+								t.Fatal(err)
+							}
+							constructors := func(obj *ClassObject) string {
+								rows := []string{}
+								for _, m := range obj.Methods {
+									name, _ := obj.getUtf8(m.NameIndex)
+									if name == "<init>" {
+										desc, _ := obj.getUtf8(m.DescriptorIndex)
+										rows = append(rows, fmt.Sprintf("%s %x", desc, m.AccessFlags))
+									}
+								}
+								sort.Strings(rows)
+								return strings.Join(rows, "\n")
+							}
+							if want, got := constructors(originalOwner), constructors(rebuiltOwner); want != got {
+								t.Fatalf("owner constructor ABI original %s rebuilt %s", want, got)
 							}
 							if actual := t04RunJava(t, java, output, fixture.driver); actual != oracle {
 								t.Fatalf("JVM differs: %q != %q", actual, oracle)

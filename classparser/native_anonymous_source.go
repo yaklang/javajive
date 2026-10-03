@@ -17,21 +17,23 @@ import (
 )
 
 type nativeAnonymousClass struct {
-	object          *ClassObject
-	descriptor      string
-	method          string
-	ordinal         int
-	fields          map[string]int
-	superParams     []int
-	superDescriptor string
-	superPC         int
-	newPC           int
-	invokePC        int
+	object                *ClassObject
+	descriptor            string
+	method                string
+	ordinal               int
+	fields                map[string]int
+	superParams           []int
+	superDescriptor       string
+	sourceSuperDescriptor string
+	superPC               int
+	newPC                 int
+	invokePC              int
 }
 type nativeAnonymousFamily struct {
 	owner    string
 	children map[string]*nativeAnonymousClass
 	failed   bool
+	bridges  map[string]*nativeConstructorAccessBridge
 }
 
 // Anonymous ownership is an original attribute fact; binary spelling only
@@ -95,7 +97,7 @@ func originalAnonymousOwner(obj *ClassObject) (string, string, bool) {
 	return owner, method, found && owner != ""
 }
 
-func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, work *workbudget.Budget) *nativeAnonymousClass {
+func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, work *workbudget.Budget, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
 	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
@@ -187,8 +189,14 @@ func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, w
 		return nil
 	}
 	i++
+	nullTail := false
 	for i < len(ops) {
 		if ops[i].Instr.OpCode == core.OP_INVOKESPECIAL {
+			break
+		}
+		if ops[i].Instr.OpCode == core.OP_ACONST_NULL && len(ops[i].Data) == 0 && i+1 < len(ops) && ops[i+1].Instr.OpCode == core.OP_INVOKESPECIAL {
+			nullTail = true
+			i++
 			break
 		}
 		slot := core.GetRetrieveIdx(ops[i])
@@ -207,9 +215,25 @@ func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, w
 		return nil
 	}
 	c.superDescriptor = mem.Description
+	c.sourceSuperDescriptor = mem.Description
+	var bridge *nativeConstructorAccessBridge
+	if nullTail {
+		if mem.Name != owner || len(access) != 1 {
+			return nil
+		}
+		bridge = access[0][mem.Description]
+		if bridge == nil {
+			return nil
+		}
+		c.sourceSuperDescriptor = bridge.target
+	}
 	c.superPC = int(ops[i].CurrentOffset)
+	extra := 0
+	if nullTail {
+		extra = 1
+	}
 	ds, ret, e := callbinding.Descriptor(mem.Description)
-	if e != nil || ret != "V" || len(ds) != len(c.superParams) {
+	if e != nil || ret != "V" || len(ds) != len(c.superParams)+extra {
 		return nil
 	}
 	for j, p := range c.superParams {
@@ -304,7 +328,8 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {
 		return nil
 	}
-	p := &nativeAnonymousFamily{owner: c.obj.GetClassName(), children: map[string]*nativeAnonymousClass{}}
+	p := &nativeAnonymousFamily{owner: c.obj.GetClassName(), children: map[string]*nativeAnonymousClass{}, bridges: map[string]*nativeConstructorAccessBridge{}}
+	access := c.nativeConstructorAccessBridges()
 	names := map[string]bool{}
 	for _, a := range c.obj.Attributes {
 		if inner, ok := a.(*InnerClassesAttribute); ok {
@@ -343,11 +368,22 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 				return nil
 			}
 		}
-		child := nativeAnonymousConstructor(obj, owner, method, c.Work)
+		child := nativeAnonymousConstructor(obj, owner, method, c.Work, access)
 		if child == nil {
 			return nil
 		}
 		p.children[name] = child
+	}
+	for _, child := range p.children {
+		if child.sourceSuperDescriptor != child.superDescriptor {
+			bridge := access[child.superDescriptor]
+			// javac8 regenerates access markers using its first owned anonymous type.
+			marker := p.children[bridge.marker]
+			if marker == nil || marker.ordinal != 1 {
+				return nil
+			}
+			p.bridges[bridge.descriptor] = bridge
+		}
 	}
 	if len(p.children) == 0 {
 		return nil
@@ -428,6 +464,17 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 			}
 		}
 		for _, constant := range sibling.ConstantPool {
+			if nt, ok := constant.(*ConstantNameAndTypeInfo); ok {
+				desc, known := sourceBridgeUTF8(sibling, nt.DescriptorIndex)
+				if !known {
+					return nil
+				}
+				for child := range p.children {
+					if strings.Contains(desc, "L"+child+";") {
+						return nil
+					}
+				}
+			}
 			if member := nativeConstantMember(constant); member != nil {
 				owner, known := sourceBridgeClassName(sibling, member.ClassIndex)
 				if !known || p.children[owner] != nil {
@@ -444,6 +491,9 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 		objects = append(objects, child.object)
 	}
 	for _, object := range objects {
+		if !c.nativeAccessBridgeCalls(p, object) {
+			return nil
+		}
 		for _, a := range object.Attributes {
 			if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
 				for _, row := range inner.Classes {
@@ -475,14 +525,18 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 				}
 			}
 		}
-		for _, constant := range object.ConstantPool {
+		bridgeNameTypes := map[int]bool{}
+		if len(p.bridges) > 0 {
+			bridgeNameTypes = p.accessBridgeNameTypes(object, c.Work)
+		}
+		for constantIndex, constant := range object.ConstantPool {
 			if nt, ok := constant.(*ConstantNameAndTypeInfo); ok && nt != nil {
 				descriptor, known := sourceBridgeUTF8(object, nt.DescriptorIndex)
 				if !known {
 					return nil
 				}
 				for child := range p.children {
-					if strings.Contains(descriptor, "L"+child+";") {
+					if strings.Contains(descriptor, "L"+child+";") && !bridgeNameTypes[constantIndex+1] {
 						return nil
 					}
 				}
@@ -494,7 +548,8 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 				return nil
 			}
 			for child := range p.children {
-				if strings.Contains(descriptor, "L"+child+";") {
+				name, _ := object.getUtf8(member.NameIndex)
+				if strings.Contains(descriptor, "L"+child+";") && !p.accessBridgeDescriptor(object, name, descriptor) {
 					return nil
 				}
 			}
@@ -535,6 +590,9 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 					}
 				}
 				if member := constructorMotionMember(c.obj, op, core.OP_INVOKESPECIAL); member != nil && member.Member == "<init>" {
+					if member.Name == p.owner && p.bridges[member.Description] != nil {
+						return nil
+					}
 					if child := p.children[member.Name]; child != nil {
 						if member.Description != child.descriptor || child.method != "" && child.method != mn+md {
 							return nil
@@ -722,7 +780,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if e != nil {
 			return fail()
 		}
-		invoke := &values.FunctionCallExpression{ClassName: strings.ReplaceAll(child.object.GetSupperClassName(), "/", "."), FunctionName: "<init>", Descriptor: child.superDescriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true, Object: &values.JavaRef{IsThis: true}, OriginPC: child.superPC, HasOriginPC: true}
+		invoke := &values.FunctionCallExpression{ClassName: strings.ReplaceAll(child.object.GetSupperClassName(), "/", "."), FunctionName: "<init>", Descriptor: child.sourceSuperDescriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true, Object: &values.JavaRef{IsThis: true}, OriginPC: child.superPC, HasOriginPC: true}
 		for _, index := range child.superParams {
 			text, typ := args[index].Text, originalTypes.FunctionType().ParamTypes[index]
 			if operand, ok := args[index].Value.(values.JavaValue); ok && operand.Type() != nil {
@@ -737,12 +795,15 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			}
 			invoke.Arguments = append(invoke.Arguments, values.NewCustomValue(func(*class_context.ClassContext) string { return text }, func() types.JavaType { return typ }))
 		}
-		delegateType, e := types.ParseMethodDescriptor(child.superDescriptor)
+		delegateType, e := types.ParseMethodDescriptor(child.sourceSuperDescriptor)
 		if e != nil {
 			return fail()
 		}
 		invoke.FuncType = delegateType.FunctionType()
 		binding := *sub.FuncCtx
+		if child.sourceSuperDescriptor != child.superDescriptor {
+			binding = *ctx // The source allocation has the original enclosing private access.
+		}
 		binding.FunctionName = "<init>"
 		binding.CurrentMethodDesc = child.descriptor
 		tuple = invoke.ArgumentStrings(&binding)

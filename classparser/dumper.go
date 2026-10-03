@@ -3517,7 +3517,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	// never had. Constructors and static members do not participate in that
 	// dispatch relation; any inaccessible cross-nest instance call needs a
 	// separate access bridge rather than changing the original declaration.
-	if c.nestDemotePrivate() && !isSerializationHookMethod(name) && (name == "<init>" || method.AccessFlags&StaticFlag != 0) {
+	// A proved lexical access family needs the original private constructors;
+	// widening them would prevent javac from regenerating its synthetic bridge.
+	if c.nestDemotePrivate() && !isSerializationHookMethod(name) && (name == "<init>" || method.AccessFlags&StaticFlag != 0) && !(name == "<init>" && c.nativeAnonymousRoot != nil && len(c.nativeAnonymousRoot.bridges) > 0) {
 		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "private", ""))
 	}
 	methodType, err := types.ParseMethodDescriptor(descriptor)
@@ -12784,7 +12786,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if err != nil {
 			return nil, utils.Wrapf(err, "getUtf8(%v) failed", method.DescriptorIndex)
 		}
-		if c.nativeCaptureFields != nil && name == "<init>" {
+		if c.nativeCaptureFields != nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
 			continue
 		}
 		if genuineEnum && c.isSyntheticEnumMethod(name, descriptor) {
