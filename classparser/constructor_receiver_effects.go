@@ -21,6 +21,20 @@ type constructorEffectValue struct {
 	receiver bool
 }
 
+// Stores of THIS into THIS's own nonvolatile storage do not publish it. Until
+// a field-sensitive heap proof exists, reject their combination with any
+// reference-valued read from THIS anywhere in the constructor chain. Facts are
+// monotone across all branches and recursive delegations: a different branch
+// or parent cannot hide a potentially receiver-valued alias behind a plain L.
+type constructorSelfStorageProof struct {
+	selfStored    bool
+	referenceRead bool
+}
+
+func (p *constructorSelfStorageProof) closed() bool {
+	return p != nil && !(p.selfStored && p.referenceRead)
+}
+
 // A source release is not a runtime pin. Where original platform code is
 // supplied by the catalog, every catalogued runtime capable of running this
 // source must admit the same movement. Actual caller-supplied bytes retain
@@ -189,6 +203,11 @@ func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *val
 // initialization therefore require the separate closed-finalizer proof; all
 // receiver publication and moved-storage observation remain forbidden.
 func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *CodeAttribute, ops []*core.OpCode, descriptor string, writes, active map[string]bool, remaining *int, depth int) bool {
+	aliases := &constructorSelfStorageProof{}
+	return c.constructorReceiverEffectsWithStorage(obj, code, ops, descriptor, writes, active, remaining, depth, aliases) && aliases.closed()
+}
+
+func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObject, code *CodeAttribute, ops []*core.OpCode, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof) bool {
 	params, ret, err := callbinding.Descriptor(descriptor)
 	if err != nil || ret != "V" || code.MaxLocals == 0 {
 		return false
@@ -423,9 +442,10 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 				}
 				if opcode == core.OP_PUTFIELD {
 					value, ok := pop(typeOf.kind)
-					if !ok || value.receiver {
+					if !ok {
 						return false
 					}
+					aliases.selfStored = aliases.selfStored || value.receiver
 				}
 				receiver, ok := pop('L')
 				if !ok || !receiver.receiver {
@@ -439,6 +459,7 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 					if !initialized {
 						return false
 					}
+					aliases.referenceRead = aliases.referenceRead || typeOf.kind == 'L'
 					stack = append(stack, typeOf)
 				}
 			case opcode == core.OP_INVOKESPECIAL || opcode == core.OP_INVOKESTATIC || opcode == core.OP_INVOKEVIRTUAL || opcode == core.OP_INVOKEINTERFACE:
@@ -472,7 +493,7 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 					}
 				}
 				if member.Member == "<init>" {
-					if initialized || opcode != core.OP_INVOKESPECIAL || result != "V" || !receiver.receiver || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) || !c.constructorChainDoesNotObserve(member.Name, member.Description, writes, active, remaining, depth+1) {
+					if initialized || opcode != core.OP_INVOKESPECIAL || result != "V" || !receiver.receiver || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) || !c.constructorChainEffects(member.Name, member.Description, writes, active, remaining, depth+1, aliases) {
 						return false
 					}
 					initialized = true

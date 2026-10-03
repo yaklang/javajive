@@ -240,6 +240,11 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 }
 
 func (c *ClassObjectDumper) constructorChainDoesNotObserve(owner, descriptor string, writes, active map[string]bool, remaining *int, depth int) bool {
+	aliases := &constructorSelfStorageProof{}
+	return c.constructorChainEffects(owner, descriptor, writes, active, remaining, depth, aliases) && aliases.closed()
+}
+
+func (c *ClassObjectDumper) constructorChainEffects(owner, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof) bool {
 	if depth > 16 || *remaining <= 0 {
 		return false
 	}
@@ -290,7 +295,7 @@ func (c *ClassObjectDumper) constructorChainDoesNotObserve(owner, descriptor str
 	if len(decoder.Opcodes()) > *remaining {
 		return false
 	}
-	return c.constructorReceiverEffects(obj, code, ops, descriptor, writes, active, remaining, depth)
+	return c.constructorReceiverEffectsWithStorage(obj, code, ops, descriptor, writes, active, remaining, depth, aliases)
 }
 
 // Literal operands keep their original values and widths. Class/method-handle/

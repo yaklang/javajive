@@ -73,7 +73,7 @@ func TestAdversarialConstructorReceiverEffectsAliasesStorageAndFailureBoundaries
 			{"EffectAlias", "(I)V", "", true}, {"EffectWide", "(JD)V", "", true}, {"EffectRead", "()V", "", true},
 			{"EffectOwnRead", "()V", "", true}, {"EffectOwnRead", "()V", "EffectOwnRead", false},
 			{"EffectRead", "()V", "EffectBase", false}, {"EffectOverwrite", "()V", "EffectBase", false},
-			{"EffectPublish", "()V", "", false}, {"EffectHeapAlias", "()V", "", false},
+			{"EffectPublish", "()V", "", false}, {"EffectHeapAlias", "()V", "", true},
 			{"EffectDivide", "(I)V", "", false}, {"EffectArray", "([I)V", "", false},
 			{"EffectOpaque", "()V", "", false}, {"EffectBranch", "(I)V", "", true},
 			{"EffectPreCall", "(LEffectPreProduce;I)V", "", true}, {"EffectPostCall", "(LEffectPreProduce;I)V", "", false},
