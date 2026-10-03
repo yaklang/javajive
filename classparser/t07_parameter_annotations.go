@@ -101,6 +101,11 @@ func descriptorSyntheticPrefix(c *ClassObjectDumper, methodName string) int {
 	if c.isGenuineEnum() {
 		return 2
 	}
+	// Native ownership projects the proved enclosing operand from the source
+	// parameter list; original descriptor/table identities remain unchanged.
+	if c.nativeMemberCurrent != nil && !c.nativeMemberCurrent.static {
+		return 1
+	}
 	return 0
 }
 
@@ -108,7 +113,7 @@ func dumpedParamAnnoIndex(c *ClassObjectDumper, methodName, descriptor string, d
 	descCount := len(methodParamFieldDescriptors(descriptor))
 	prefix := descriptorSyntheticPrefix(c, methodName)
 	userStart := 0
-	if methodName == "<init>" && c != nil && c.hasOuterThisField() && !c.isGenuineEnum() {
+	if methodName == "<init>" && prefix == 0 && c != nil && c.hasOuterThisField() && !c.isGenuineEnum() {
 		// Outer this is still present in the dumped parameter list.
 		userStart = 1
 	}

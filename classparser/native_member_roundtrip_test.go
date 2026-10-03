@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"os"
@@ -41,7 +42,7 @@ func TestNativeMemberCaptureRoundTrip(t *testing.T) {
 	inherited = strings.Replace(inherited, "p.token()!=x)throw new AssertionError(\"publication\",e)", "p.token()!=x||p.baseOwner!=null)throw new AssertionError(\"publication\",e)", 1)
 
 	genericInherited := strings.Replace(nativeGenericMemberFixture, "class Child extends GenericParent", "class Base extends GenericParent {Base(T n)throws java.io.IOException{super(n);}Base(Object n){super(n);}}class Child extends Base", 1)
-	for _, fixture := range []struct{ owner, external, driver, source string }{{"MemberCapture", "MemberExternal", "MemberDriver", nativeMemberFixture}, {"MemberCaptureInherited", "MemberExternal", "MemberDriver", strings.ReplaceAll(inherited, "MemberCapture", "MemberCaptureInherited")}, {"MemberCaptureJoint", "MemberExternal", "MemberDriver", strings.ReplaceAll(joint, "MemberCapture", "MemberCaptureJoint")}, {"GenericMember", "GenericExternal", "GenericDriver", nativeGenericMemberFixture}, {"GenericMemberInherited", "GenericExternal", "GenericDriver", strings.ReplaceAll(genericInherited, "GenericMember", "GenericMemberInherited")}, {"OuterArgument", "ArgumentExternal", "ArgumentDriver", nativeMemberArgumentFixture}, {"InitMember", "InitExternal", "InitDriver", nativeMemberInitializationFixture}, {"FailInitMember", "FailInitExternal", "FailInitDriver", nativeMemberFailInitializationFixture}} {
+	for _, fixture := range []struct{ owner, external, driver, source string }{{"AnnotatedMember", "AnnotatedExternal", "AnnotatedDriver", nativeMemberParameterAnnotationFixture}, {"MemberCapture", "MemberExternal", "MemberDriver", nativeMemberFixture}, {"MemberCaptureInherited", "MemberExternal", "MemberDriver", strings.ReplaceAll(inherited, "MemberCapture", "MemberCaptureInherited")}, {"MemberCaptureJoint", "MemberExternal", "MemberDriver", strings.ReplaceAll(joint, "MemberCapture", "MemberCaptureJoint")}, {"GenericMember", "GenericExternal", "GenericDriver", nativeGenericMemberFixture}, {"GenericMemberInherited", "GenericExternal", "GenericDriver", strings.ReplaceAll(genericInherited, "GenericMember", "GenericMemberInherited")}, {"OuterArgument", "ArgumentExternal", "ArgumentDriver", nativeMemberArgumentFixture}, {"InitMember", "InitExternal", "InitDriver", nativeMemberInitializationFixture}, {"FailInitMember", "FailInitExternal", "FailInitDriver", nativeMemberFailInitializationFixture}} {
 		t.Run(fixture.owner, func(t *testing.T) {
 			for _, debug := range []string{"-g", "-g:none"} {
 				t.Run(debug, func(t *testing.T) {
@@ -138,6 +139,11 @@ func TestNativeMemberCaptureRoundTrip(t *testing.T) {
 								}
 								if want, got := nativeBinaryShape(t, files[n]), nativeBinaryShape(t, raw); want != got {
 									t.Fatalf("ABI %s\n%s\n!=\n%s", n, want, got)
+								}
+								if fixture.owner == "AnnotatedMember" && n == fixture.owner+"$Child" {
+									if want, got := nativeParameterAnnotationShape(t, files[n]), nativeParameterAnnotationShape(t, raw); want != got {
+										t.Fatalf("parameter visibility/value metadata changed\n%s\n%s", want, got)
+									}
 								}
 							}
 							if got := t04RunJava(t, java, output, fixture.driver); got != oracle {
@@ -794,4 +800,68 @@ public class GenericDriver{public static void main(java.lang.String[]args)throws
 			}
 		})
 	}
+}
+
+const nativeMemberParameterAnnotationFixture = `
+import java.lang.annotation.*;
+@Retention(RetentionPolicy.RUNTIME) @Target(ElementType.PARAMETER) @interface VisibleArgument {String value();}
+@Retention(RetentionPolicy.CLASS) @Target(ElementType.PARAMETER) @interface HiddenArgument {int value();}
+class AnnotatedMember {
+ class Child {
+  final Object value;final long number;
+  Child(@VisibleArgument("value") @HiddenArgument(1) Object x,@VisibleArgument("wide") @HiddenArgument(2) long n){value=x;number=n;}
+  Object echo(@VisibleArgument("echo") @HiddenArgument(3) Object x){return x;}
+  AnnotatedMember owner(){return AnnotatedMember.this;}
+ }
+ Child make(Object x,long n){return new Child(x,n);}
+}
+class AnnotatedExternal {static AnnotatedMember.Child make(AnnotatedMember o,Object x,long n){return o.new Child(x,n);}}
+public class AnnotatedDriver {public static void main(String[]args)throws Exception {
+ AnnotatedMember outer=new AnnotatedMember();Object token=new Object();int rows=0;
+ for(Object value:new Object[]{null,token})for(long n:new long[]{Long.MIN_VALUE,0,Long.MAX_VALUE})for(boolean external:new boolean[]{false,true}){
+  AnnotatedMember.Child c=external?AnnotatedExternal.make(outer,value,n):outer.make(value,n);
+  if(c.owner()!=outer||c.value!=value||c.number!=n||c.echo(value)!=value)throw new AssertionError("capture/identity");rows++;
+ }
+ Annotation[][] a=AnnotatedMember.Child.class.getDeclaredConstructor(AnnotatedMember.class,Object.class,long.class).getParameterAnnotations();
+ if(a.length!=3||a[0].length!=0||a[1].length!=1||a[2].length!=1||!((VisibleArgument)a[1][0]).value().equals("value")||!((VisibleArgument)a[2][0]).value().equals("wide"))throw new AssertionError("constructor annotation indices");
+ Annotation[][] b=AnnotatedMember.Child.class.getDeclaredMethod("echo",Object.class).getParameterAnnotations();if(b.length!=1||b[0].length!=1||!((VisibleArgument)b[0][0]).value().equals("echo"))throw new AssertionError("method annotation indices");System.out.println(rows);
+}}
+`
+
+// CLASS-retained parameter annotations are invisible to reflection. Compare
+// their original parsed value graphs as well as the runtime visible oracle.
+func nativeParameterAnnotationShape(t *testing.T, raw []byte) string {
+	t.Helper()
+	obj, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type annotationTable struct {
+		Invisible  bool
+		Parameters [][]*AnnotationAttribute
+	}
+	tables := map[string][]annotationTable{}
+	for _, method := range obj.Methods {
+		name, ok := sourceBridgeUTF8(obj, method.NameIndex)
+		if !ok {
+			t.Fatal("method name")
+		}
+		descriptor, ok := sourceBridgeUTF8(obj, method.DescriptorIndex)
+		if !ok {
+			t.Fatal("method descriptor")
+		}
+		for _, attribute := range method.Attributes {
+			if a, ok := attribute.(*RuntimeVisibleParameterAnnotationsAttribute); ok {
+				tables[name+descriptor] = append(tables[name+descriptor], annotationTable{a.IsInvisible, a.ParameterAnnotations})
+			}
+		}
+	}
+	if len(tables) == 0 {
+		t.Fatal("parameter annotation metadata missing")
+	}
+	data, err := json.Marshal(tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

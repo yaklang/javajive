@@ -268,20 +268,36 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 		if m == nil || !nativeProofWork(work, 1) {
 			return nil
 		}
+		n, nok := sourceBridgeUTF8(obj, m.NameIndex)
+		desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
+		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 {
+			return nil
+		}
 		for _, a := range m.Attributes {
 			switch a := a.(type) {
-			case *RuntimeVisibleTypeAnnotationsAttribute, *RuntimeVisibleParameterAnnotationsAttribute:
+			case *RuntimeVisibleTypeAnnotationsAttribute:
 				return nil
+			case *RuntimeVisibleParameterAnnotationsAttribute:
+				if !nativeMemberParameterAnnotationsClosed(a, n, desc, !p.static, work) {
+					return nil
+				}
+				for _, attribute := range m.Attributes {
+					if types, ok := attribute.(*TypeAnnotationsAttribute); ok {
+						if types == nil {
+							return nil
+						}
+						for _, annotation := range types.Annotations {
+							if annotation == nil || annotation.TargetType == 0x16 {
+								return nil
+							}
+						}
+					}
+				}
 			case *UnparsedAttribute:
 				if strings.Contains(a.Name, "TypeAnnotations") {
 					return nil
 				}
 			}
-		}
-		n, nok := sourceBridgeUTF8(obj, m.NameIndex)
-		desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
-		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 {
-			return nil
 		}
 		if p.static {
 			if n == "<init>" && m.AccessFlags&0x1000 != 0 {
