@@ -11,7 +11,7 @@ import (
 )
 
 func TestDelegationDescriptorBindingRequiresOriginalClosedTarget(t *testing.T) {
-	for _, variant := range []string{"original", "this", "unknown", "wrong identity", "incomplete", "duplicate", "generic target", "signature without generic flag", "varargs target", "allocation", "foreign owner", "no origin", "negative origin", "no rival", "wrong arity", "primitive"} {
+	for _, variant := range []string{"original", "this", "unknown", "wrong identity", "incomplete", "duplicate", "generic target", "signature without generic flag", "varargs target", "allocation", "foreign owner", "no origin", "negative origin", "no rival", "different arity rival", "applicable varargs rival", "explicit target cast", "narrower cast", "malformed rival", "wrong arity", "primitive"} {
 		t.Run(variant, func(t *testing.T) {
 			desc := "(Ljava/lang/Object;)V"
 			table := callbinding.Class{Name: "proof/Parent", MembersComplete: true, Methods: []callbinding.Method{{Name: "<init>", Desc: desc}, {Name: "<init>", Desc: "(Ljava/lang/String;)V"}}}
@@ -59,6 +59,21 @@ func TestDelegationDescriptorBindingRequiresOriginalClosedTarget(t *testing.T) {
 			case "no rival":
 				table.Methods = table.Methods[:1]
 				want = ""
+			case "different arity rival":
+				table.Methods[1].Desc = "(Ljava/lang/String;I)V"
+				want = ""
+			case "applicable varargs rival":
+				table.Methods[1].Desc = "([Ljava/lang/String;)V"
+				table.Methods[1].Varargs = true
+			case "explicit target cast":
+				argCast := &CastExpression{Value: arg, TargetType: types.NewJavaClass("java.lang.Object")}
+				f.Arguments[0] = argCast
+				want = ""
+			case "narrower cast":
+				f.Arguments[0] = &CastExpression{Value: arg, TargetType: types.NewJavaClass("java.lang.String")}
+			case "malformed rival":
+				table.Methods[1].Desc = "broken"
+				want = ""
 			case "wrong arity":
 				f.Arguments = append(f.Arguments, arg)
 				want = ""
@@ -67,7 +82,7 @@ func TestDelegationDescriptorBindingRequiresOriginalClosedTarget(t *testing.T) {
 				table.Methods[0].Desc = f.Descriptor
 				want = ""
 			}
-			if got := f.delegationDescriptorBindingCast(0, arg, ctx); got != want {
+			if got := f.delegationDescriptorBindingCast(0, f.Arguments[0], ctx); got != want {
 				t.Fatalf("cast=%q want%q", got, want)
 			}
 			if want != "" {

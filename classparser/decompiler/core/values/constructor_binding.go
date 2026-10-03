@@ -32,13 +32,27 @@ func (f *FunctionCallExpression) delegationDescriptorBindingCast(i int, arg Java
 	if !known || table.Name != owner || !table.MembersComplete {
 		return ""
 	}
+	params, result, err := callbinding.Descriptor(f.Descriptor)
+	if err != nil || result != "V" || len(params) != len(f.Arguments) || i < 0 || i >= len(params) || !callbinding.Reference(params[i]) {
+		return ""
+	}
+	if cast, ok := UnpackSoltValue(arg).(*CastExpression); ok && bindingType(cast.TargetType) == params[i] {
+		// An existing exact source cast already seals this consumption edge.
+		return ""
+	}
 	matched, competitors := 0, 0
 	for _, method := range table.Methods {
 		if method.Name != "<init>" {
 			continue
 		}
 		if method.Desc != f.Descriptor {
-			competitors++
+			other, result, err := callbinding.Descriptor(method.Desc)
+			if err != nil || result != "V" {
+				return ""
+			}
+			if len(other) == len(params) || method.Varargs && len(params) >= len(other)-1 {
+				competitors++
+			}
 			continue
 		}
 		matched++
@@ -46,8 +60,7 @@ func (f *FunctionCallExpression) delegationDescriptorBindingCast(i int, arg Java
 			return ""
 		}
 	}
-	params, result, err := callbinding.Descriptor(f.Descriptor)
-	if err != nil || result != "V" || matched != 1 || competitors == 0 || len(params) != len(f.Arguments) || i < 0 || i >= len(params) || !callbinding.Reference(params[i]) {
+	if matched != 1 || competitors == 0 {
 		return ""
 	}
 	param := f.witnessDescriptorParamType(i)
