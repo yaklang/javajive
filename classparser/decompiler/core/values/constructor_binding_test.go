@@ -10,6 +10,76 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+func TestDelegationDescriptorBindingRequiresOriginalClosedTarget(t *testing.T) {
+	for _, variant := range []string{"original", "this", "unknown", "wrong identity", "incomplete", "duplicate", "generic target", "signature without generic flag", "varargs target", "allocation", "foreign owner", "no origin", "negative origin", "no rival", "wrong arity", "primitive"} {
+		t.Run(variant, func(t *testing.T) {
+			desc := "(Ljava/lang/Object;)V"
+			table := callbinding.Class{Name: "proof/Parent", MembersComplete: true, Methods: []callbinding.Method{{Name: "<init>", Desc: desc}, {Name: "<init>", Desc: "(Ljava/lang/String;)V"}}}
+			ctx := &class_context.ClassContext{ClassName: "proof.Child", SupperClassName: "proof.Parent", FunctionName: "<init>", InvocationMetadata: func(name string) (callbinding.Class, bool) { return table, variant != "unknown" }}
+			receiver := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("proof.Child"))
+			receiver.IsThis = true
+			arg := NewCustomValue(func(*class_context.ClassContext) string { return "factory()" }, func() types.JavaType { return types.NewJavaClass("java.lang.Object") })
+			f := &FunctionCallExpression{ClassName: "proof.Parent", FunctionName: "<init>", Descriptor: desc, Object: receiver, Arguments: []JavaValue{arg}, Kind: InvokeSpecial, IsSpecialInvoke: true, OriginPC: 11, HasOriginPC: true}
+			want := "Object"
+			switch variant {
+			case "this":
+				ctx.ClassName = "proof.Parent"
+			case "unknown":
+				want = ""
+			case "wrong identity":
+				table.Name = "proof.Other"
+				want = ""
+			case "incomplete":
+				table.MembersComplete = false
+				want = ""
+			case "duplicate":
+				table.Methods = append(table.Methods, table.Methods[0])
+				want = ""
+			case "generic target":
+				table.Methods[0].Generic = true
+				want = ""
+			case "signature without generic flag":
+				table.Methods[0].Signature = "(TT;)V"
+				want = ""
+			case "varargs target":
+				table.Methods[0].Varargs = true
+				want = ""
+			case "allocation":
+				receiver.IsThis = false
+				want = ""
+			case "foreign owner":
+				f.ClassName = "proof.Other"
+				want = ""
+			case "no origin":
+				f.HasOriginPC = false
+				want = ""
+			case "negative origin":
+				f.OriginPC = -1
+				want = ""
+			case "no rival":
+				table.Methods = table.Methods[:1]
+				want = ""
+			case "wrong arity":
+				f.Arguments = append(f.Arguments, arg)
+				want = ""
+			case "primitive":
+				f.Descriptor = "(I)V"
+				table.Methods[0].Desc = f.Descriptor
+				want = ""
+			}
+			if got := f.delegationDescriptorBindingCast(0, arg, ctx); got != want {
+				t.Fatalf("cast=%q want%q", got, want)
+			}
+			if want != "" {
+				rendered := f.ArgumentStrings(ctx)[0]
+				if strings.Count(rendered, "factory()") != 1 || !strings.Contains(rendered, "(Object)") {
+					t.Fatal(rendered)
+				}
+			}
+		})
+	}
+}
+
 func TestProvenArgumentCastBridgesOnlyItsDescriptorHead(t *testing.T) {
 	ctx := &class_context.ClassContext{}
 	arg := NewCustomValue(func(*class_context.ClassContext) string { return "factory()" }, func() types.JavaType { return types.NewJavaClass("java.util.List") })

@@ -66,37 +66,53 @@ jobs:
           set -o pipefail
           mkdir -p artifacts
           go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
-          # Four isolated processes each run one fixture at a time. Tests that
-          # change process environment cannot run in parallel within Go; separate
-          # pools prevent them from blocking most of the corpus. Peak fixture
-          # concurrency remains four. Discover every parent from this binary.
+          # Small batches share four isolated workers, one fixture per worker.
+          # Environment-changing tests keep process isolation. Idle workers take
+          # the next batch instead of waiting behind one large shard. Preserve
+          # every discovered parent and the eight-minute total phase deadline.
           python3 - <<'PYTHON'
-          import json, os, pathlib, re, subprocess, sys
+          import concurrent.futures, json, os, pathlib, re, signal, subprocess, sys, time
           binary = str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "adversarial.test")
           names = sorted(set(line for line in subprocess.check_output(
               [binary, "-test.list", "^TestAdversarial"], text=True, cwd="classparser").splitlines()
               if line.startswith("TestAdversarial")))
           if not names:
               raise SystemExit("no adversarial tests discovered")
-          groups = [names[index::4] for index in range(4)]
+          groups = [names[index::16] for index in range(min(16, len(names)))]
           pathlib.Path("artifacts/adversarial-manifest.json").write_text(json.dumps(groups, indent=2))
-          runs = []
-          for index, group in enumerate(groups):
+          deadline = time.monotonic() + 480
+          def run_batch(item):
+              index, group = item
               path = pathlib.Path(f"artifacts/adversarial-tests-{index+1}.jsonl")
-              output = path.open("w")
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  path.write_text("phase deadline expired before batch started\n")
+                  return path, 1
               command = ["go", "tool", "test2json", "-t", "-p",
                          "github.com/yaklang/javajive/classparser", binary,
                          "-test.v=test2json", "-test.count=1", "-test.parallel=1",
-                         "-test.timeout=8m", "-test.run=^(" + "|".join(map(re.escape, group)) + ")$"]
-              runs.append((subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, cwd="classparser"), output, path))
+                         f"-test.timeout={remaining:.3f}s",
+                         "-test.run=^(" + "|".join(map(re.escape, group)) + ")$"]
+              with path.open("w") as output:
+                  process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
+                                             cwd="classparser", start_new_session=True)
+                  try:
+                      result = process.wait(timeout=max(0, deadline - time.monotonic()))
+                  except subprocess.TimeoutExpired:
+                      try:
+                          os.killpg(process.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      process.wait()
+                      result = 1
+              return path, result
           failed = False
-          for process, output, path in runs:
-              result = process.wait()
-              output.close()
-              print(f"{path}: exit={result}")
-              if result:
-                  failed = True
-                  print("\n".join(path.read_text().splitlines()[-80:]))
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as workers:
+              for path, result in workers.map(run_batch, enumerate(groups)):
+                  print(f"{path}: exit={result}")
+                  if result:
+                      failed = True
+                      print("\n".join(path.read_text().splitlines()[-80:]))
           sys.exit(int(failed))
           PYTHON
       - name: Curated algorithm round-trip contracts

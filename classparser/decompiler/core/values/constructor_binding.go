@@ -10,6 +10,53 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+// Source expressions can become more specific than their JVM erasure (for
+// example Box<String>.value still has an Object field descriptor). Seal a
+// non-generic this/super overload with the original descriptor, independently
+// of that inferred source view. These casts retain the original argument
+// evaluation and JVM reference type; generic/poly targets have separate proofs.
+func (f *FunctionCallExpression) delegationDescriptorBindingCast(i int, arg JavaValue, ctx *class_context.ClassContext) string {
+	if f == nil || ctx == nil || ctx.InvocationMetadata == nil || ctx.FunctionName != "<init>" ||
+		f.FunctionName != "<init>" || !f.IsSpecialInvoke || f.Kind != InvokeSpecial || !f.HasOriginPC || f.OriginPC < 0 || arg == nil || isWitnessLambdaArg(arg) {
+		return ""
+	}
+	receiver, ok := UnpackSoltValue(f.Object).(*JavaRef)
+	if !ok || receiver == nil || !receiver.IsThis {
+		return ""
+	}
+	owner := strings.ReplaceAll(f.ClassName, ".", "/")
+	if owner != strings.ReplaceAll(ctx.ClassName, ".", "/") && owner != strings.ReplaceAll(ctx.SupperClassName, ".", "/") {
+		return ""
+	}
+	table, known := ctx.InvocationMetadata(owner)
+	if !known || table.Name != owner || !table.MembersComplete {
+		return ""
+	}
+	matched, competitors := 0, 0
+	for _, method := range table.Methods {
+		if method.Name != "<init>" {
+			continue
+		}
+		if method.Desc != f.Descriptor {
+			competitors++
+			continue
+		}
+		matched++
+		if method.Generic || method.Signature != "" || method.Varargs || method.Static || method.Bridge {
+			return ""
+		}
+	}
+	params, result, err := callbinding.Descriptor(f.Descriptor)
+	if err != nil || result != "V" || matched != 1 || competitors == 0 || len(params) != len(f.Arguments) || i < 0 || i >= len(params) || !callbinding.Reference(params[i]) {
+		return ""
+	}
+	param := f.witnessDescriptorParamType(i)
+	if param == nil {
+		return ""
+	}
+	return renderWitnessParamType(param, ctx)
+}
+
 // A selected generic argument view may need an unchecked conversion between
 // invariant parameterizations. The descriptor establishes the raw head of
 // that already-selected cast. Bridging through the same head changes source
