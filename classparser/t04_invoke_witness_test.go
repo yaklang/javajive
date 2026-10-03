@@ -591,6 +591,47 @@ func t04ConsumerCompiler(parent *testing.T, release, debug, classpath, main stri
 	}
 }
 
+// A cache is local to one immutable original fixture and compiler option set.
+// Every mode still decompiles every source and runs a fresh verified JVM; only
+// byte-for-byte identical complete generated source families share javac work.
+func t04SourceFamilyCompiler(parent *testing.T, release, classpath string) func(*testing.T, map[string]string) string {
+	parent.Helper()
+	javac, _ := t04Tools(parent)
+	compiled := map[string]string{}
+	return func(t *testing.T, sources map[string]string) string {
+		t.Helper()
+		key, err := json.Marshal(sources)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dir, ok := compiled[string(key)]; ok {
+			return dir
+		}
+		dir := parent.TempDir()
+		args := []string{"-proc:none", "--release", release, "-cp", classpath, "-d", dir}
+		names := make([]string, 0, len(sources))
+		for name := range sources {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if !filepath.IsLocal(name) || filepath.Base(name) != name || !strings.HasSuffix(name, ".java") {
+				t.Fatalf("invalid fixture source filename %q", name)
+			}
+			path := filepath.Join(dir, name)
+			if err := os.WriteFile(path, []byte(sources[name]), 0600); err != nil {
+				t.Fatal(err)
+			}
+			args = append(args, path)
+		}
+		if out, err := exec.Command(javac, args...).CombinedOutput(); err != nil {
+			t.Fatalf("recompile generated family: %v\n%s\n%s", err, out, key)
+		}
+		compiled[string(key)] = dir
+		return dir
+	}
+}
+
 func t04Tools(t *testing.T) (javac, java string) {
 	t.Helper()
 	var err error

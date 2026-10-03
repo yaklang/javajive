@@ -119,6 +119,7 @@ func TestAdversarialIntegerDecisionDAGRoundTrip(t *testing.T) {
 				b, e := os.ReadFile(filepath.Join(original, n+".class"))
 				return b, e == nil
 			}
+			compile := t04SourceFamilyCompiler(t, "8", original)
 			for _, mode := range []DecompileMode{Precision, Compatibility, "legacy"} {
 				t.Run(string(mode), func(t *testing.T) {
 					var r DecompileResult
@@ -134,12 +135,7 @@ func TestAdversarialIntegerDecisionDAGRoundTrip(t *testing.T) {
 					if len(r.Source) > 50000 {
 						t.Fatalf("linear original predicate expanded to%dsource bytes", len(r.Source))
 					}
-					rebuilt := t.TempDir()
-					f := filepath.Join(rebuilt, "DecisionLadderOwner.java")
-					os.WriteFile(f, []byte(r.Source), 0600)
-					if out, e := exec.Command(javac, "-proc:none", "--release", "8", "-cp", original, "-d", rebuilt, f).CombinedOutput(); e != nil {
-						t.Fatalf("rebuilt%v %s\n%s", e, out, r.Source)
-					}
+					rebuilt := compile(t, map[string]string{"DecisionLadderOwner.java": r.Source})
 					if got := t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+original, "DecisionLadderDriver"); got != want.String() {
 						t.Fatalf("decision graph changed literal/effect/throw order got%q want%q\n%s", got, want.String(), r.Source)
 					}

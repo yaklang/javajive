@@ -90,6 +90,7 @@ func TestAdversarialNoncanonicalBooleanWordsRoundTrip(t *testing.T) {
 				if !strings.HasPrefix(want, prefix) || !strings.Contains(want, fmt.Sprintf("%d\n%d:false:\n1:true:P;", bit, bit)) {
 					t.Fatalf("original JVM narrowing/branch oracle changed: %q", want)
 				}
+				compile := t04SourceFamilyCompiler(t, "8", t.TempDir())
 				for _, mode := range []DecompileMode{Precision, Compatibility, "legacy"} {
 					var result DecompileResult
 					var e error
@@ -104,14 +105,7 @@ func TestAdversarialNoncanonicalBooleanWordsRoundTrip(t *testing.T) {
 					if len(result.StubMethods) > 0 {
 						t.Fatalf("%s stubs: %v", mode, result.StubMethods)
 					}
-					rebuilt := t.TempDir()
-					src := filepath.Join(rebuilt, "NoncanonicalBooleanWordsReview.java")
-					if e = os.WriteFile(src, []byte(result.Source), 0600); e != nil {
-						t.Fatal(e)
-					}
-					if out, e := exec.Command(javac, "-proc:none", "--release", "8", "-d", rebuilt, src).CombinedOutput(); e != nil {
-						t.Fatalf("%s rebuild: %v\n%s\n%s", mode, e, out, result.Source)
-					}
+					rebuilt := compile(t, map[string]string{"NoncanonicalBooleanWordsReview.java": result.Source})
 					if got := t04RunJava(t, java, rebuilt, "NoncanonicalBooleanWordsReview"); got != want {
 						t.Fatalf("%s got%q want%q\n%s", mode, got, want, result.Source)
 					}

@@ -53,34 +53,28 @@ jobs:
         run: go build ./...
       - name: Core algorithm and resource-guard tests (race)
         run: go test ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv -race -count=1 -timeout=3m
-      # Independent fixture JVMs each use one CPU; four fixtures can run concurrently.
-      # Keep every selected test. Separate the growing adversarial corpus so
-      # each bounded phase has useful failure evidence within the same bounded job.
-      - name: Algorithm edge cases and source round-trip tests
-        run: |
-          set -o pipefail
-          mkdir -p artifacts
-          go test ./classparser -run '^Test(CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)' -json -parallel=4 -count=1 -timeout=5m | tee artifacts/algorithm-tests.jsonl
-      - name: Adversarial algorithm round-trip tests
+      - name: Source algorithm regression tests
+        env:
+          EDGE_TEST_PATTERN: '^Test(CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)'
         run: |
           set -o pipefail
           mkdir -p artifacts
           go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
-          # Four workers each run one parent test in an isolated process.
-          # Environment-changing tests keep process isolation. Idle workers take
-          # the next test instead of waiting behind a slower batch. Preserve
-          # every discovered parent and the eight-minute total phase deadline.
+          # Edge cases and the adversarial corpus share the original 5+8 minute
+          # source-regression budget within the unchanged fifteen-minute job.
+          # Four isolated serial workers keep environment-changing tests safe;
+          # all discovered tests and every mode remain selected.
           python3 - <<'PYTHON'
           import concurrent.futures, json, os, pathlib, re, signal, subprocess, sys, time
           binary = str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "adversarial.test")
           names = sorted(set(line for line in subprocess.check_output(
-              [binary, "-test.list", "^TestAdversarial"], text=True, cwd="classparser").splitlines()
-              if line.startswith("TestAdversarial")))
+              [binary, "-test.list", "^TestAdversarial|" + os.environ["EDGE_TEST_PATTERN"]], text=True, cwd="classparser").splitlines()
+              if line.startswith("Test")))
           if not names:
-              raise SystemExit("no adversarial tests discovered")
-          groups = [[name] for name in names]
+              raise SystemExit("no source-regression tests discovered")
+          groups = [names[index::16] for index in range(min(16, len(names)))]
           pathlib.Path("artifacts/adversarial-manifest.json").write_text(json.dumps(groups, indent=2))
-          deadline = time.monotonic() + 480
+          deadline = time.monotonic() + 13 * 60
           def run_batch(item):
               index, group = item
               path = pathlib.Path(f"artifacts/adversarial-tests-{index+1}.jsonl")

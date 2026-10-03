@@ -66,9 +66,9 @@ public class PrivateNestBridgeReview<T extends CharSequence> {
 				if err != nil {
 					t.Fatal(err)
 				}
+				compile := t04SourceFamilyCompiler(t, release, t.TempDir())
 				for _, mode := range []DecompileMode{Precision, Compatibility, "legacy"} {
-					rebuilt := t.TempDir()
-					args := []string{"-proc:none", "--release", release, "-d", rebuilt}
+					sources := map[string]string{}
 					allSource := ""
 					for _, unit := range units {
 						raw, e := os.ReadFile(unit)
@@ -88,11 +88,7 @@ public class PrivateNestBridgeReview<T extends CharSequence> {
 							t.Fatalf("%s stub: %v", unit, result.StubMethods)
 						}
 						name := strings.TrimSuffix(filepath.Base(unit), ".class")
-						p := filepath.Join(rebuilt, name+".java")
-						if e = os.WriteFile(p, []byte(result.Source), 0600); e != nil {
-							t.Fatal(e)
-						}
-						args = append(args, p)
+						sources[name+".java"] = result.Source
 						allSource += result.Source
 					}
 					if !strings.Contains(allSource, "private Object pick(") {
@@ -101,9 +97,7 @@ public class PrivateNestBridgeReview<T extends CharSequence> {
 					if release != "8" && !strings.Contains(allSource, "jdec$private$") {
 						t.Fatal("direct nest invocation has no proven bridge")
 					}
-					if out, e := exec.Command(javac, args...).CombinedOutput(); e != nil {
-						t.Fatalf("rebuild %s: %v\n%s\n%s", mode, e, out, allSource)
-					}
+					rebuilt := compile(t, sources)
 					if got := t04RunJava(t, java, rebuilt, "PrivateNestBridgeReview"); got != want {
 						t.Fatalf("%s: got %s want %s\n%s", mode, got, want, allSource)
 					}

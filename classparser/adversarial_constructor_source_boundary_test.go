@@ -165,6 +165,7 @@ public class CtorPrefixOrderReview extends CtorPrefixOrderBase {
 					t.Fatalf("original oracle got %q want %q", got, want)
 				}
 				resolve := resolverFromClasses(classMapFromDir(t, dir))
+				compile := t04SourceFamilyCompiler(t, "8", dir)
 				for _, mode := range []DecompileMode{Precision, Compatibility, "legacy"} {
 					t.Run(string(mode), func(t *testing.T) {
 						var result DecompileResult
@@ -184,14 +185,7 @@ public class CtorPrefixOrderReview extends CtorPrefixOrderBase {
 						if mode == "legacy" && (e != nil || again != result.Source) {
 							t.Fatal("constructor helper order is not deterministic")
 						}
-						rebuilt := t.TempDir()
-						path := filepath.Join(rebuilt, tc.name+".java")
-						if e = os.WriteFile(path, []byte(result.Source), 0600); e != nil {
-							t.Fatal(e)
-						}
-						if out, e := exec.Command(javac, "-proc:none", "--release", "8", "-cp", dir, "-d", rebuilt, path).CombinedOutput(); e != nil {
-							t.Fatalf("rebuild %v\n%s\n%s", e, out, result.Source)
-						}
+						rebuilt := compile(t, map[string]string{tc.name + ".java": result.Source})
 						if got := run(rebuilt + string(os.PathListSeparator) + dir); got != want {
 							t.Fatalf("rebuilt %q want %q\n%s", got, want, result.Source)
 						}
