@@ -41,6 +41,89 @@ func TestGenericMethodReturnWitnesses(t *testing.T) {
 	}
 }
 
+func TestRawGenericOwnerFluentChainDoesNotSpeculateMethodVariables(t *testing.T) {
+	const links = 32
+	const owner = "example/Builder"
+	const desc = "()Lexample/Builder;"
+	queries := 0
+	ctx := &class_context.ClassContext{
+		SiblingClassSig: func(name string) (string, map[string]string, bool) {
+			queries++
+			if queries > links*20 {
+				t.Fatal("exponential speculation through raw generic receiver", queries)
+			}
+			if name != owner {
+				return "", nil, false
+			}
+			return "<T:Ljava/lang/Object;>Ljava/lang/Object;", map[string]string{
+				class_context.MethodDescKey("step", desc): "()Lexample/Builder<TT;>;",
+			}, true
+		},
+	}
+	mt, err := types.ParseMethodDescriptor(desc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value JavaValue = NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("example.Builder"))
+	var last *FunctionCallExpression
+	for i := 0; i < links; i++ {
+		last = NewFunctionCallExpression(value, &JavaClassMember{Name: "example.Builder", Member: "step", Description: desc, JavaType: mt}, mt.FunctionType())
+		last.Descriptor = desc
+		value = last
+	}
+	if got := last.inferredGenericMethodReturn(ctx); got != nil {
+		t.Fatal("class variable invented as method result witness", got)
+	}
+	if raw, args := last.receiverParamTypeArgs(ctx); raw != "" || len(args) != 0 {
+		t.Fatal("raw receiver invented parameterization", raw, args)
+	}
+}
+
+func TestInheritedRawGenericChainQueryCacheDoesNotOutliveTypeChanges(t *testing.T) {
+	const links = 32
+	const desc = "()Lexample/Child;"
+	queries := 0
+	ctx := &class_context.ClassContext{SiblingClassSig: func(name string) (string, map[string]string, bool) {
+		queries++
+		if queries > links*30 {
+			t.Fatal("repeated inherited chain proof", queries)
+		}
+		switch name {
+		case "example/Child":
+			return "<T:Ljava/lang/Object;>Lexample/Parent<TT;>;", map[string]string{}, true
+		case "example/Parent":
+			return "<A:Ljava/lang/Object;>Ljava/lang/Object;", map[string]string{class_context.MethodDescKey("step", desc): "()Lexample/Child<TA;>;"}, true
+		}
+		return "", nil, false
+	}}
+	mt, err := types.ParseMethodDescriptor(desc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("example.Child"))
+	var receiver JavaValue = root
+	var last *FunctionCallExpression
+	for i := 0; i < links; i++ {
+		last = NewFunctionCallExpression(receiver, &JavaClassMember{Name: "example.Child", Member: "step", Description: desc, JavaType: mt}, mt.FunctionType())
+		last.Descriptor = desc
+		receiver = last
+	}
+	if raw, args := last.receiverParamTypeArgs(ctx); raw != "" || len(args) != 0 {
+		t.Fatal("raw inherited receiver acquired arguments", raw, args)
+	}
+	queries = 0
+	root.ResetVarType(types.NewParameterizedType("example.Child", []types.JavaType{types.NewJavaClass("java.lang.String")}))
+	raw, args := last.receiverParamTypeArgs(ctx)
+	if !sameErasureClassName(raw, "example.Child") || len(args) != 1 || args[0].String(ctx) != "String" {
+		t.Fatal("query reused stale unknown after reference type change", raw, args)
+	}
+	queries = 0
+	root.ResetVarType(types.NewJavaClass("example.Child"))
+	if raw, args := last.receiverParamTypeArgs(ctx); raw != "" || len(args) != 0 {
+		t.Fatal("query reused stale positive after erasure", raw, args)
+	}
+}
+
 func TestGenericMethodBindingRejectsConflictingAndInvariantWitnesses(t *testing.T) {
 	ctx := &class_context.ClassContext{TypeParams: []string{"K", "V", "T"}}
 	parse := func(sig string) types.JavaType {

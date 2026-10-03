@@ -957,6 +957,18 @@ func (f *FunctionCallExpression) instantiatedReturnType() types.JavaType {
 // Returns ("", nil) when no parameterized receiver type is available. The field-signature fallback is
 // independently gated by JDEC_GENERIC_PARAM_FIELD_OFF.
 func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.ClassContext) (string, []types.JavaType) {
+	return f.receiverParamTypeArgsQuery(funcCtx, newReceiverTypeQuery())
+}
+
+func (f *FunctionCallExpression) receiverParamTypeArgsQuery(funcCtx *class_context.ClassContext, query *receiverTypeQuery) (raw string, args []types.JavaType) {
+	if prior, ok := query.results[f]; ok {
+		return prior.raw, prior.args
+	}
+	if query.active[f] {
+		return "", nil
+	}
+	query.active[f] = true
+	defer func() { delete(query.active, f); query.results[f] = receiverTypeQueryResult{raw, args} }()
 	if f.Object == nil {
 		return "", nil
 	}
@@ -1005,13 +1017,13 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 	// JDEC_GENERIC_PARAM_RECV_METHOD_OFF.
 	if jdecFlag(funcCtx, "JDEC_GENERIC_PARAM_RECV_METHOD_OFF") == "" {
 		if inner, ok := UnpackSoltValue(f.Object).(*FunctionCallExpression); ok && !inner.IsStatic && inner.Object != nil {
-			if ret := inner.inferredGenericMethodReturn(funcCtx); ret != nil {
+			if ret := inner.inferredGenericMethodReturnQuery(funcCtx, query); ret != nil {
 				if pt, ok := types.AsParameterizedType(ret); ok {
 					return pt.RawClassName, pt.TypeArgs
 				}
 			}
 			if iref, ok := UnpackSoltValue(inner.Object).(*JavaRef); ok && iref.IsThis {
-				if sig := funcCtx.MethodSignature(inner.FunctionName, len(inner.Arguments)); sig != "" {
+				if sig := funcCtx.MethodSignatureByDesc(inner.FunctionName, inner.Descriptor); sig != "" {
 					if _, _, ret := types.ParseMethodSignatureFull(sig, funcCtx); ret != nil {
 						if pt, ok := types.AsParameterizedType(ret); ok {
 							return pt.RawClassName, pt.TypeArgs
@@ -1027,7 +1039,7 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 					for i, p := range funcCtx.ClassTypeParams {
 						recvArgs[i] = types.NewJavaClass(p)
 					}
-					_, ret := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, funcCtx.ClassName, recvArgs, inner.FunctionName, len(inner.Arguments))
+					_, ret, _ := types.ResolveInstantiatedSignatureExact(funcCtx, funcCtx.SiblingClassSig, funcCtx.ClassName, recvArgs, inner.FunctionName, inner.Descriptor, len(inner.Arguments))
 					if pt, ok := types.AsParameterizedType(ret); ok {
 						return pt.RawClassName, pt.TypeArgs
 					}
@@ -1040,7 +1052,7 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 			// composition is needed for stable JDK chains such as
 			// Map<K,V>.entrySet().spliterator(); otherwise both links degrade to raw
 			// Set/Spliterator before the Consumer target is inspected.
-			if recvRaw, recvArgs := inner.receiverParamTypeArgs(funcCtx); recvRaw != "" && len(recvArgs) > 0 {
+			if recvRaw, recvArgs := inner.receiverParamTypeArgsQuery(funcCtx, query); recvRaw != "" && len(recvArgs) > 0 {
 				if funcCtx.Getenv("JDEC_GENERIC_INFER_OFF") == "" {
 					if ret := types.InstantiateJDKMethodReturn(recvRaw, inner.FunctionName, len(inner.Arguments), recvArgs); ret != nil {
 						if pt, ok := types.AsParameterizedType(ret); ok {
@@ -1049,7 +1061,7 @@ func (f *FunctionCallExpression) receiverParamTypeArgs(funcCtx *class_context.Cl
 					}
 				}
 				if funcCtx.SiblingClassSig != nil {
-					_, ret := types.ResolveInstantiatedSignature(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, inner.FunctionName, len(inner.Arguments))
+					_, ret, _ := types.ResolveInstantiatedSignatureExact(funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs, inner.FunctionName, inner.Descriptor, len(inner.Arguments))
 					if pt, ok := types.AsParameterizedType(ret); ok {
 						return pt.RawClassName, pt.TypeArgs
 					}

@@ -58,7 +58,28 @@ func bindMethodTypeArguments(pattern, actual types.JavaType, variables map[strin
 	return reflect.DeepEqual(pattern.RawType(), actual.RawType())
 }
 
+type receiverTypeQueryResult struct {
+	raw  string
+	args []types.JavaType
+}
+
+// Each query observes one immutable IR/type state. Cache positive and negative
+// receiver results only for this operation; reference webs can change types
+// between operations, so persistent expression caches would be unsound.
+type receiverTypeQuery struct {
+	results map[*FunctionCallExpression]receiverTypeQueryResult
+	active  map[*FunctionCallExpression]bool
+}
+
+func newReceiverTypeQuery() *receiverTypeQuery {
+	return &receiverTypeQuery{results: map[*FunctionCallExpression]receiverTypeQueryResult{}, active: map[*FunctionCallExpression]bool{}}
+}
+
 func (f *FunctionCallExpression) genericMethodSignature(ctx *class_context.ClassContext) ([]types.JavaType, types.JavaType, []string) {
+	return f.genericMethodSignatureQuery(ctx, newReceiverTypeQuery())
+}
+
+func (f *FunctionCallExpression) genericMethodSignatureQuery(ctx *class_context.ClassContext, query *receiverTypeQuery) ([]types.JavaType, types.JavaType, []string) {
 	if f == nil || ctx == nil || f.Descriptor == "" {
 		return nil, nil, nil
 	}
@@ -115,7 +136,7 @@ func (f *FunctionCallExpression) genericMethodSignature(ctx *class_context.Class
 			return params, ret, types.MethodFormalTypeParamNames(sig)
 		}
 	}
-	raw, args := f.receiverParamTypeArgs(ctx)
+	raw, args := f.receiverParamTypeArgsQuery(ctx, query)
 	if raw == "" && f.Object != nil && ctx.SiblingClassSig != nil {
 		// A non-generic owner can still declare generic methods. Its exact
 		// descriptor is sufficient; a raw GENERIC owner must remain erased.
@@ -195,10 +216,26 @@ func (f *FunctionCallExpression) RetainFunctionalReturnSignature(ctx *class_cont
 // inferredGenericMethodReturn instantiates a generic wrapper's return using
 // matching parameterized arguments. Erased arguments cannot supply evidence.
 func (f *FunctionCallExpression) inferredGenericMethodReturn(ctx *class_context.ClassContext) types.JavaType {
+	return f.inferredGenericMethodReturnQuery(ctx, newReceiverTypeQuery())
+}
+
+func (f *FunctionCallExpression) inferredGenericMethodReturnQuery(ctx *class_context.ClassContext, query *receiverTypeQuery) types.JavaType {
 	if f == nil || ctx == nil || ctx.Getenv("JDEC_GENERIC_METHOD_RETURN_WITNESS_OFF") != "" {
 		return nil
 	}
-	params, ret, formals := f.genericMethodSignature(ctx)
+	// Only a callee's own method variables can be solved by argument witnesses.
+	// An exact original declaration without method formals cannot contribute
+	// such a result, even when its declaring class has type parameters. Reject
+	// that speculation before recursively resolving the receiver: a raw fluent
+	// chain would otherwise solve each prefix here and again in receiver recovery,
+	// giving exponential work while ultimately returning the same unknown result.
+	if ctx.SiblingClassSig != nil && f.Descriptor != "" {
+		_, methods, known := ctx.SiblingClassSig(strings.ReplaceAll(f.ClassName, ".", "/"))
+		if sig, declared := methods[class_context.MethodDescKey(f.FunctionName, f.Descriptor)]; known && declared && len(types.MethodFormalTypeParamNames(sig)) == 0 {
+			return nil
+		}
+	}
+	params, ret, formals := f.genericMethodSignatureQuery(ctx, query)
 	if ret == nil || len(formals) == 0 || len(params) != len(f.Arguments) {
 		return nil
 	}
