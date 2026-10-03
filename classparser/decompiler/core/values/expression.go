@@ -130,6 +130,22 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 		}
 	}
 
+	if n != nil && !n.IsArray() && n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceMemberAllocation != nil && funcCtx.SourceMemberCandidate != nil && funcCtx.SourceMemberCandidate(n.ConstructorCall.ClassName) && n.HasOriginPC && n.ConstructorCall.HasOriginPC {
+		call := n.ConstructorCall
+		args := make([]class_context.SourceCaptureOperand, len(call.Arguments))
+		for i, a := range call.Arguments {
+			args[i].Value = a
+			args[i].Text = a.String(funcCtx)
+			if ref, ok := UnpackSoltValue(a).(*JavaRef); ok && ref != nil && ref.Id != nil && ref.CustomValue == nil && ref.StackVar == nil {
+				args[i].Receiver = ref.IsThis
+				args[i].Local = !ref.IsThis
+			}
+		}
+		if source, known := funcCtx.SourceMemberAllocation(call.ClassName, call.Descriptor, n.OriginPC, call.OriginPC, args); known {
+			return source
+		}
+	}
+
 	if n.IsArray() {
 		base := n.JavaType
 		for base.IsArray() {
@@ -4737,6 +4753,18 @@ func (f *FunctionCallExpression) polymorphicSignatureCastType(funcCtx *class_con
 }
 
 func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) string {
+	if f != nil && funcCtx != nil && funcCtx.SourceMemberDelegation != nil && f.HasOriginPC && f.FunctionName == "<init>" {
+		if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref != nil && ref.IsThis {
+			args := make([]any, len(f.Arguments))
+			for i, v := range f.Arguments {
+				args[i] = v
+			}
+			if src, known := funcCtx.SourceMemberDelegation(f.ClassName, f.Descriptor, f.OriginPC, args); known {
+				return src
+			}
+		}
+	}
+
 	if castType, ok := f.polymorphicSignatureCastType(funcCtx); ok {
 		// Self-parenthesize the polymorphic-signature return cast, exactly like OP_CHECKCAST does, so it
 		// keeps correct precedence when it becomes the receiver of a member access / method call. Without

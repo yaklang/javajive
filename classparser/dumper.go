@@ -32,6 +32,11 @@ import (
 type ClassObjectDumper struct {
 	originalInitializerStatus      map[string]bool
 	originalInitializerStatusReady bool
+	nativeMemberLookup             func(string) *nativeMemberClass
+	nativeMemberCalls              map[string]map[int]*nativeMemberAllocation
+	nativeMemberChecks             map[string]map[int]bool
+	nativeMemberRoot               *nativeMemberFamily
+	nativeMemberCurrent            *nativeMemberClass
 	nativeAnonymousRoot            *nativeAnonymousFamily
 	nativeCaptureFields            map[string]string
 	nativeCapturedReads            map[string]map[int]string
@@ -145,6 +150,9 @@ type ClassObjectDumper struct {
 }
 
 func (c *ClassObjectDumper) GetConstructorMethodName() string {
+	if c.nativeMemberCurrent != nil {
+		return c.nativeMemberCurrent.name
+	}
 	if c.PackageName == "" {
 		return c.ClassName
 	}
@@ -201,6 +209,9 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 // `HikariPool.connectionBag`). Widening those members to package-private is
 // recompile-safe. Kill-switch: JDEC_NEST_PRIVATE_PACKAGE_OFF=1.
 func (c *ClassObjectDumper) nestDemotePrivate() bool {
+	if c.nativeMemberCurrent != nil || c.nativeMemberRoot != nil && c.nativeMemberRoot.owner == c.obj.GetClassName() {
+		return false
+	}
 	if c.getenv("JDEC_NEST_PRIVATE_PACKAGE_OFF") == "1" {
 		return false
 	}
@@ -519,6 +530,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	c.PackageName = packageName
 	rawClassName := splits[len(splits)-1]
 	className := class_context.SafeIdentifier(rawClassName)
+	if c.nativeMemberCurrent != nil {
+		className = c.nativeMemberCurrent.name
+	}
 	// Nested/local/anonymous classes carry a '$' in their binary name (Outer$Inner). Yak emits each
 	// such class as a STANDALONE top-level unit literally named `Outer$Inner` and writes it to
 	// `Outer$Inner.java` ('$' is a legal Java identifier char), so a `public` modifier IS legal here
@@ -583,6 +597,19 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 		}
 	}
+	if child := c.nativeMemberCurrent; child != nil {
+		for _, v := range []string{"public", "private", "protected"} {
+			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, v, ""))
+		}
+		switch {
+		case child.flags&1 != 0:
+			accessFlags = "public " + accessFlags
+		case child.flags&2 != 0:
+			accessFlags = "private " + accessFlags
+		case child.flags&4 != 0:
+			accessFlags = "protected " + accessFlags
+		}
+	}
 	// module-info / package-info are synthetic descriptor pseudo-classes; their internal
 	// name ("module-info" / "package-info") is not a legal Java identifier, so emitting
 	// `class module-info {}` yields un-parseable source. Render a valid minimal compilation
@@ -602,10 +629,13 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	supperClassName := c.obj.GetSupperClassName()
 	supperClassName = strings.Replace(supperClassName, "/", ".", -1)
+	// Source headers may name a lexical member, while invocation, field and
+	// constructor proofs must retain the original binary declaration identity.
+	identityName := class_context.SafeIdentifier(rawClassName)
 	if packageName == "" {
-		c.ClassName = className
+		c.ClassName = identityName
 	} else {
-		c.ClassName = packageName + "." + className
+		c.ClassName = packageName + "." + identityName
 	}
 	funcCtx := &class_context.ClassContext{
 		Env:             c.getenv,
@@ -622,6 +652,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	c.FuncCtx = funcCtx
 	funcCtx.DeclarationSourceName = c.buildDeclarationSourceNames()
 	c.wireNativeAnonymousSource()
+	c.wireNativeMemberSource()
 
 	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
 	c.wirePrivateNestBridges()
@@ -1386,6 +1417,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// merged into funcCtx ahead of the import-assembly step below. Empty (nil) on the single-class
 	// path, leaving the constant render hook untouched.
 	enumConstantBodies := c.foldEnumConstantBodies(isEnum)
+	// Compute member scopes and merge their imports once before assembly.
+	members, memberErr := c.renderNativeMembers()
+	if memberErr != nil && c.nativeMemberRoot != nil {
+		c.nativeMemberRoot.failed = true
+	}
 	var classKeyword string
 	if c.recordKeyword != "" {
 		classKeyword = " " + c.recordKeyword
@@ -1449,6 +1485,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				attrsB.WriteString("\n")
 			}
 		}
+		attrsB.WriteString(members)
 		attrs := attrsB.String()
 		result := fmt.Sprintf("%s%s %s%s%s {%s}", accessFlags, classKeyword, className, classTypeParams, superStr, attrs)
 		if len(annoStrs) > 0 {
@@ -3775,6 +3812,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			priorConstructorBridge := funcCtx.ConstructorInvokeBridge
 			funcCtx.ConstructorInvokeBridge = nil
 			defer func() { funcCtx.ConstructorInvokeBridge = priorConstructorBridge }()
+			statementList, nativeConstructorErr := c.prepareNativeMemberConstructor(codeAttr, statementList, params, method)
+			if nativeConstructorErr != nil {
+				return nil, nativeConstructorErr
+			}
 			constructorPlan, constructorErr := c.planConstructorSourceBoundary(codeAttr, statementList, params, method)
 			if constructorErr != nil {
 				return nil, constructorErr
@@ -3798,6 +3839,12 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			// instance lambda the receiver was captured as the first dynamic arg but is represented by
 			// the impl method's `this` (already stripped above), so its placeholder index is offset.
 			samParams := params
+			if name == "<init>" && c.nativeMemberCurrent != nil {
+				if len(samParams) < 1 {
+					return nil, fmt.Errorf("missing enclosing parameter")
+				}
+				samParams = samParams[1:]
+			}
 			if isLambda {
 				if n := c.lambdaCaptureCount[name+descriptor]; n > 0 {
 					capArgOffset := 0
@@ -4289,6 +4336,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				statementList = nil
 			}
 			for i, statement := range statementList {
+				if c.nativeMemberSkipCheck(statement) {
+					continue
+				}
 				if constructorPlan != nil && constructorPlan.carrier != "" {
 					inPrefix := false
 					for _, prefix := range constructorPlan.prefix {
@@ -12789,7 +12839,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if err != nil {
 			return nil, utils.Wrapf(err, "getUtf8(%v) failed", method.DescriptorIndex)
 		}
-		if c.nativeCaptureFields != nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
+		if c.nativeCaptureFields != nil && c.nativeMemberCurrent == nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
 			continue
 		}
 		if genuineEnum && c.isSyntheticEnumMethod(name, descriptor) {

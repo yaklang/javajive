@@ -909,7 +909,13 @@ func (c *ClassObjectDumper) prepareNativeLocalShadowing(body []statements.Statem
 	if c.nativeCaptureFields == nil {
 		return
 	}
-	c.prepareNativeSourceNames(body, params, c.nativeLexicalCaptures(), nil)
+	var protected map[*coreutils.VariableId]bool
+	if child := c.nativeMemberCurrent; child != nil && c.FuncCtx.FunctionName == "<init>" && len(params) > 0 {
+		if outer, ok := params[0].(*values.JavaRef); ok && outer.Id != nil && c.FuncCtx.LocalNames[outer.Id] == c.FuncCtx.ShortTypeName(strings.ReplaceAll(child.owner, "/", "."))+".this" {
+			protected = map[*coreutils.VariableId]bool{outer.Id: true}
+		}
+	}
+	c.prepareNativeSourceNames(body, params, c.nativeLexicalCaptures(), protected)
 }
 func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool) {
 	ctx := c.FuncCtx

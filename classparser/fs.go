@@ -19,6 +19,10 @@ import (
 )
 
 type JarFS struct {
+	nativeMembersMu      sync.Mutex
+	nativeMembersIndex   nativeMemberIndex
+	nativeMembersCache   map[string]*nativeMemberCacheEntry
+	nativeMembersBytes   int64
 	nativeAnonymousMu    sync.Mutex
 	nativeAnonymousCache map[string]*nativeAnonymousCacheEntry
 	nativeAnonymousBytes int64
@@ -105,6 +109,9 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 		}
 	}
 	if path.Clean(name) == cf.GetClassName()+".class" {
+		if source, owned := z.nativeMemberSource(cf); owned {
+			return source
+		}
 		if source, owned := z.nativeAnonymousSource(cf); owned {
 			return source
 		}
@@ -114,6 +121,9 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	// $SwitchMap folding (gated by a `$SwitchMap$` presence check + JDEC_NO_ENUM_SWITCH_FOLD). A
 	// non-enum, non-switch class is rendered byte-for-byte identically to the bare Dump().
 	d := NewClassObjectDumper(cf)
+	if path.Clean(name) == cf.GetClassName()+".class" {
+		d.nativeMemberLookup = z.nativeMemberLookup
+	}
 	d.foldSiblingResolver = z.enumSiblingResolver()
 	d.declarationResolver = z.declarationResolver
 	if z.archive != nil && z.archive.budget != nil {

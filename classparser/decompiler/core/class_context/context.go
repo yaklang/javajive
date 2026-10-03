@@ -25,6 +25,12 @@ type SourceCaptureOperand struct {
 	Receiver bool
 }
 type ClassContext struct {
+	// Lexical member declarations shadow imported, same-package and java.lang
+	// simple type names. Bind external types explicitly in their actual scope.
+	LexicalTypeNames          map[string]bool
+	SourceMemberAllocation    func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceMemberCandidate     func(owner string) bool
+	SourceMemberDelegation    func(owner, descriptor string, pc int, args []any) (string, bool)
 	SourceAnonymousCandidate  func(owner string) bool
 	SourceAnonymousAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	SourceCapturedField       func(pc int, name string, receiver bool) (string, bool)
@@ -839,6 +845,10 @@ func (f *ClassContext) ShortTypeName(name string) string {
 			dotted = src
 		}
 	}
+	first := strings.SplitN(dotted, ".", 2)[0]
+	if f.LexicalTypeNames[first] {
+		return pkg + "." + dotted
+	}
 	if pkg == f.PackageName || pkg == "java.lang" {
 		// A same-package (or java.lang) type is normally reachable by its bare simple name with no
 		// import. But when this class ALSO references a DIFFERENT-package type of the same simple name,
@@ -932,6 +942,7 @@ func (f *ClassContext) CloneForRetry() *ClassContext {
 	out.StandaloneEraseTypeVars = maps.Clone(f.StandaloneEraseTypeVars)
 	out.ForceParamEraseTypeVars = maps.Clone(f.ForceParamEraseTypeVars)
 	out.SamePkgFQNames = maps.Clone(f.SamePkgFQNames)
+	out.LexicalTypeNames = maps.Clone(f.LexicalTypeNames)
 	out.BuildInLibsMap = f.BuildInLibsMap.Copy()
 	if out.BuildInLibsMap != nil {
 		out.BuildInLibsMap.ForEach(func(k string, v []string) bool { out.BuildInLibsMap.Set(k, append([]string(nil), v...)); return true })

@@ -11,9 +11,15 @@ import (
 // JavaParameterizedType represents a parameterized (generic) class type, e.g.
 // BiFunction<Integer, Integer, Integer>. It wraps a raw class name and carries
 // concrete type arguments recovered from the Signature attribute.
+type NestedTypeSegment struct {
+	BinaryName string
+	TypeArgs   []JavaType
+}
+
 type JavaParameterizedType struct {
-	RawClassName string
-	TypeArgs     []JavaType
+	OwnerSegments []NestedTypeSegment
+	RawClassName  string
+	TypeArgs      []JavaType
 }
 
 func NewParameterizedType(rawClassName string, typeArgs []JavaType) JavaType {
@@ -25,6 +31,54 @@ func NewParameterizedType(rawClassName string, typeArgs []JavaType) JavaType {
 
 func (j *JavaParameterizedType) String(funcCtx *class_context.ClassContext) string {
 	base := funcCtx.ShortTypeName(j.RawClassName)
+	if len(j.OwnerSegments) > 1 && funcCtx.DeclarationSourceName != nil {
+		if source, known := funcCtx.DeclarationSourceName(j.RawClassName); known {
+			parts := make([]string, 0, len(j.OwnerSegments))
+			valid := true
+			for i, segment := range j.OwnerSegments {
+				name := funcCtx.ShortTypeName(segment.BinaryName)
+				if i > 0 {
+					parent := j.OwnerSegments[i-1].BinaryName
+					inner, ok := strings.CutPrefix(segment.BinaryName, parent+"$")
+					if !ok || inner == "" || strings.Contains(inner, ".") {
+						valid = false
+						break
+					}
+					name = inner
+				}
+				if len(segment.TypeArgs) > 0 {
+					args := make([]string, len(segment.TypeArgs))
+					for k, arg := range segment.TypeArgs {
+						args[k] = arg.String(funcCtx)
+					}
+					name += "<" + strings.Join(args, ", ") + ">"
+				}
+				parts = append(parts, name)
+			}
+			if valid {
+				expected := j.OwnerSegments[0].BinaryName
+				if original, known := funcCtx.DeclarationSourceName(expected); known {
+					expected = original
+				}
+				for i := 1; i < len(j.OwnerSegments); i++ {
+					inner, _ := strings.CutPrefix(j.OwnerSegments[i].BinaryName, j.OwnerSegments[i-1].BinaryName+"$")
+					expected += "." + inner
+				}
+				if source != expected {
+					valid = false
+				}
+			}
+			if valid {
+				last := j.OwnerSegments[len(j.OwnerSegments)-1]
+				parent := j.OwnerSegments[len(j.OwnerSegments)-2]
+				inner, _ := strings.CutPrefix(last.BinaryName, parent.BinaryName+"$")
+				if strings.HasSuffix(source, "."+inner) {
+					return strings.Join(parts, ".")
+				}
+			}
+		}
+	}
+
 	if len(j.TypeArgs) == 0 {
 		return base
 	}
@@ -684,12 +738,14 @@ func parseSigClassType(sig string) (JavaType, string, bool) {
 		}
 		rest = rest[1:]
 	}
+	segments := []NestedTypeSegment{{BinaryName: rawName, TypeArgs: append([]JavaType(nil), typeArgs...)}}
 	for len(rest) > 0 && rest[0] == '.' {
 		innerEnd := 1
 		for innerEnd < len(rest) && rest[innerEnd] != ';' && rest[innerEnd] != '<' && rest[innerEnd] != '.' {
 			innerEnd++
 		}
-		rawName += "$" + rest[1:innerEnd]
+		innerName := rest[1:innerEnd]
+		rawName += "$" + innerName
 		rest = rest[innerEnd:]
 		if len(rest) > 0 && rest[0] == '<' {
 			rest = rest[1:]
@@ -725,16 +781,30 @@ func parseSigClassType(sig string) (JavaType, string, bool) {
 				rest = rest[1:]
 			}
 			typeArgs = innerArgs
+			segments = append(segments, NestedTypeSegment{BinaryName: rawName, TypeArgs: append([]JavaType(nil), innerArgs...)})
+		} else {
+			segments = append(segments, NestedTypeSegment{BinaryName: rawName})
 		}
 	}
 	if len(rest) == 0 || rest[0] != ';' {
 		return nil, "", false
 	}
 	rest = rest[1:]
-	if len(typeArgs) > 0 {
+	hasOwnerArgs := false
+	for _, segment := range segments {
+		hasOwnerArgs = hasOwnerArgs || len(segment.TypeArgs) > 0
+	}
+	// A single class has the same canonical representation as the public
+	// constructor. Owner segments carry additional lexical information only
+	// when the original signature actually contains a member separator.
+	if len(segments) == 1 {
+		segments = nil
+	}
+	if len(typeArgs) > 0 || hasOwnerArgs {
 		return newJavaTypeWrap(&JavaParameterizedType{
-			RawClassName: rawName,
-			TypeArgs:     typeArgs,
+			RawClassName:  rawName,
+			OwnerSegments: segments,
+			TypeArgs:      typeArgs,
 		}), rest, true
 	}
 	return newJavaTypeWrap(&JavaClass{Name: rawName}), rest, true
@@ -1505,7 +1575,7 @@ func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 		}
 		return t
 	case *JavaParameterizedType:
-		if len(rt.TypeArgs) == 0 {
+		if len(rt.TypeArgs) == 0 && len(rt.OwnerSegments) == 0 {
 			return t
 		}
 		newArgs := make([]JavaType, len(rt.TypeArgs))
@@ -1517,10 +1587,23 @@ func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 				changed = true
 			}
 		}
+		var segments []NestedTypeSegment
+		if rt.OwnerSegments != nil {
+			segments = make([]NestedTypeSegment, len(rt.OwnerSegments))
+		}
+		for i, segment := range rt.OwnerSegments {
+			segments[i].BinaryName = segment.BinaryName
+			segments[i].TypeArgs = make([]JavaType, len(segment.TypeArgs))
+			for k, arg := range segment.TypeArgs {
+				sub := SubstituteTypeVars(arg, sigma)
+				segments[i].TypeArgs[k] = sub
+				changed = changed || sub != arg
+			}
+		}
 		if !changed {
 			return t
 		}
-		return NewParameterizedType(rt.RawClassName, newArgs)
+		return newJavaTypeWrap(&JavaParameterizedType{RawClassName: rt.RawClassName, TypeArgs: newArgs, OwnerSegments: segments})
 	case *JavaArrayType:
 		elem := rt.JavaType
 		sub := SubstituteTypeVars(elem, sigma)
