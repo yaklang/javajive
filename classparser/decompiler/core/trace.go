@@ -22,14 +22,15 @@ type decompileTraceConfig struct {
 }
 
 func currentTraceConfig() decompileTraceConfig {
+	getenv := jdecenv.Lookup()
 	return decompileTraceConfig{
-		classFilter:  jdecenv.Get("JDEC_TRACE_CLASS"),
-		methodFilter: jdecenv.Get("JDEC_TRACE_METHOD"),
-		varTable:     jdecenv.Get("JDEC_TRACE_VAR_TABLE") != "",
-		varFold:      jdecenv.Get("JDEC_TRACE_VAR_FOLD") != "",
-		rewriteVar:   jdecenv.Get("JDEC_TRACE_REWRITE_VAR") != "",
-		slotVersion:  jdecenv.Get("JDEC_TRACE_SLOT_VERSION") != "",
-		ctorArray:    jdecenv.Get("JDEC_TRACE_CTOR_ARRAY_INLINE") != "",
+		classFilter:  getenv("JDEC_TRACE_CLASS"),
+		methodFilter: getenv("JDEC_TRACE_METHOD"),
+		varTable:     getenv("JDEC_TRACE_VAR_TABLE") != "",
+		varFold:      getenv("JDEC_TRACE_VAR_FOLD") != "",
+		rewriteVar:   getenv("JDEC_TRACE_REWRITE_VAR") != "",
+		slotVersion:  getenv("JDEC_TRACE_SLOT_VERSION") != "",
+		ctorArray:    getenv("JDEC_TRACE_CTOR_ARRAY_INLINE") != "",
 	}
 }
 
@@ -85,14 +86,17 @@ func (d *Decompiler) traceEnabled(kind string) bool {
 }
 
 func TraceRewriteVarEnabled(className, methodName string) bool {
-	cfg := currentTraceConfig()
-	if !cfg.rewriteVar {
+	// Trace is normally disabled. Resolve the ambient request once and read
+	// only the relevant gate before filters; unrelated trace knobs must not
+	// force seven goroutine-stack lookups for every variable visit.
+	getenv := jdecenv.Lookup()
+	if getenv("JDEC_TRACE_REWRITE_VAR") == "" {
 		return false
 	}
-	if cfg.classFilter != "" && !strings.Contains(className, cfg.classFilter) {
+	if filter := getenv("JDEC_TRACE_CLASS"); filter != "" && !strings.Contains(className, filter) {
 		return false
 	}
-	if cfg.methodFilter != "" && !strings.Contains(methodName, cfg.methodFilter) {
+	if filter := getenv("JDEC_TRACE_METHOD"); filter != "" && !strings.Contains(methodName, filter) {
 		return false
 	}
 	return true

@@ -3011,7 +3011,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// RHS type (Method), so `var2 = determineFactoryConstructor()` assigns Constructor to a
 		// Method local. Prefer the widened ref type. Kill-switch:
 		// JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF=1.
-		if jdecenv.Get("JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF") == "" && a.LeftValue != nil {
+		if funcCtx.Getenv("JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF") == "" && a.LeftValue != nil {
 			if lt := a.LeftValue.Type(); lt != nil {
 				if rf, ok := types.RawClassFQN(lt); ok && rf == "java.lang.reflect.Executable" {
 					declType = lt
@@ -3027,7 +3027,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// (spring-core cglib Enhancer.generateClass). Guarded to only NARROW toward the ref when the ref
 		// is a subtype of the RHS type, so it never widens away from a precise RHS. Shares the
 		// class-literal kill-switch JDEC_NO_CLASSLIT_SLOT_TYPE.
-		if jdecenv.Get("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
+		if funcCtx.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
 			if tern, ok := values.UnpackSoltValue(a.JavaValue).(*values.TernaryExpression); ok && ternaryHasClassLiteralArm(tern) {
 				// The slot ref (LeftValue) is minted from the FRESH arm-merge (class-literal arm counted
 				// as java.lang.Class) and is the authoritative resolved slot type, whereas the ternary's
@@ -3045,7 +3045,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// `c.isPrimitive()`) fail to recompile ("cannot find symbol"). Declare it `Class`; raw Class
 		// is assignment-compatible with `Foo.class` and always recompiles. Kill-switch:
 		// JDEC_NO_CLASSLIT_SLOT_TYPE=1 (shared with the slot-typing guard in stack_simulation.go).
-		if _, ok := values.UnpackSoltValue(a.JavaValue).(*values.JavaClassValue); ok && jdecenv.Get("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
+		if _, ok := values.UnpackSoltValue(a.JavaValue).(*values.JavaClassValue); ok && funcCtx.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
 			declType = types.NewJavaClass("java.lang.Class")
 		}
 		// Either side's type can be nil under incomplete simulation; fall back to the other
@@ -3086,7 +3086,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// Declaring `Number var11 = Integer.valueOf(0)` is valid: Integer is-a Number. This mirrors
 		// the int-category widening above but for the boxed-numeric hierarchy. Kill-switch:
 		// JDEC_NUMERIC_DECL_SLOT_TYPE_OFF=1.
-		if jdecenv.Get("JDEC_NUMERIC_DECL_SLOT_TYPE_OFF") == "" {
+		if funcCtx.Getenv("JDEC_NUMERIC_DECL_SLOT_TYPE_OFF") == "" {
 			if lt := a.LeftValue.Type(); numericSlotWiderThan(lt, declType) {
 				declType = lt
 			}
@@ -3098,7 +3098,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// access receivers); the widening is gated to a variable-copy RHS so a method-call initializer's
 		// declared return type (which downstream member access depends on) is never widened away. Kill-
 		// switch: JDEC_REF_SLOT_LUB_DECL_OFF=1.
-		if jdecenv.Get("JDEC_REF_SLOT_LUB_DECL_OFF") == "" {
+		if funcCtx.Getenv("JDEC_REF_SLOT_LUB_DECL_OFF") == "" {
 			if lt := a.LeftValue.Type(); refSlotWiderThanLUB(funcCtx, a.JavaValue, lt, declType) {
 				declType = lt
 			}
@@ -3148,7 +3148,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// opcode performs, so it is behaviorally identical. Values already typed char/byte/short (and
 		// those carrying an i2c/i2b/i2s cast) report a non-int type, so narrowingInitCast returns ""
 		// and they are untouched. Kill-switch JDEC_NO_NARROW_REASSIGN_CAST=1.
-		if jdecenv.Get("JDEC_NO_NARROW_REASSIGN_CAST") == "" && a.LeftValue != nil && a.JavaValue != nil {
+		if funcCtx.Getenv("JDEC_NO_NARROW_REASSIGN_CAST") == "" && a.LeftValue != nil && a.JavaValue != nil {
 			if cast := narrowingInitCast(a.LeftValue.Type(), a.JavaValue.Type()); cast != "" {
 				return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 			}
@@ -3220,7 +3220,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// readObject()` where readObject returns Map, a sibling of List), wrap that arm in an explicit
 		// `(TargetType)` cast so the conditional merges at the target type (fastjson2
 		// JSONPathSegment$CycleNameSegment.eval). Kill-switch: JDEC_TERNARY_ARM_CAST_OFF=1.
-		if jdecenv.Get("JDEC_TERNARY_ARM_CAST_OFF") == "" {
+		if funcCtx.Getenv("JDEC_TERNARY_ARM_CAST_OFF") == "" {
 			if rendered := ternaryArmIncompatibleCast(funcCtx, a.LeftValue, a.JavaValue); rendered != "" {
 				return fmt.Sprintf("%s = %s", a.LeftValue.String(funcCtx), rendered)
 			}
