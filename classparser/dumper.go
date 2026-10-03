@@ -6,7 +6,6 @@ import (
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"io"
 	"maps"
-	"math"
 	"os"
 	"regexp"
 	"runtime/debug"
@@ -24,6 +23,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/javaliteral"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/utils"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -12371,48 +12371,14 @@ func (c *ClassObjectDumper) constructorFieldStoreTotals() map[string]int {
 // primitive width without six-decimal rounding or names that a lexical type
 // declaration can shadow. Floating division is a Java constant expression.
 func annotationFloatingLiteral(value float64, bits int) string {
-	suffix := "D"
 	if bits == 32 {
-		suffix = "F"
+		return javaliteral.Float32(float32(value))
 	}
-	if math.IsNaN(value) {
-		return "(0.0" + suffix + "/0.0" + suffix + ")"
-	}
-	if math.IsInf(value, 1) {
-		return "(1.0" + suffix + "/0.0" + suffix + ")"
-	}
-	if math.IsInf(value, -1) {
-		return "(-1.0" + suffix + "/0.0" + suffix + ")"
-	}
-	return strconv.FormatFloat(value, 'g', -1, bits) + suffix
+	return javaliteral.Float64(value)
 }
 
-func javaFloatLiteral(f float32) string {
-	v := float64(f)
-	switch {
-	case math.IsNaN(v):
-		return "Float.NaN"
-	case math.IsInf(v, 1):
-		return "Float.POSITIVE_INFINITY"
-	case math.IsInf(v, -1):
-		return "Float.NEGATIVE_INFINITY"
-	}
-	return strconv.FormatFloat(v, 'g', -1, 32) + "F"
-}
-
-// javaDoubleLiteral renders a double constant as a valid Java double literal (with a
-// 'D' suffix so an integral value is not mistaken for an int), handling NaN/Infinity.
-func javaDoubleLiteral(f float64) string {
-	switch {
-	case math.IsNaN(f):
-		return "Double.NaN"
-	case math.IsInf(f, 1):
-		return "Double.POSITIVE_INFINITY"
-	case math.IsInf(f, -1):
-		return "Double.NEGATIVE_INFINITY"
-	}
-	return strconv.FormatFloat(f, 'g', -1, 64) + "D"
-}
+func javaFloatLiteral(value float32) string  { return javaliteral.Float32(value) }
+func javaDoubleLiteral(value float64) string { return javaliteral.Float64(value) }
 
 // DecompileStubMarker tags a method body that could not be decompiled and was replaced by a
 // throwing stub (graceful degradation). Tooling such as the jdsc self-check can scan decompiled

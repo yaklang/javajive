@@ -2,8 +2,8 @@ package values
 
 import (
 	"fmt"
+	"github.com/yaklang/javajive/internal/javaliteral"
 	"github.com/yaklang/javajive/internal/jdecenv"
-	"math"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -280,33 +280,15 @@ func javaFloatLiteralExpr(data any) string {
 	if !ok {
 		return fmt.Sprint(data)
 	}
-	switch {
-	case math.IsNaN(f):
-		return "Float.NaN"
-	case math.IsInf(f, 1):
-		return "Float.POSITIVE_INFINITY"
-	case math.IsInf(f, -1):
-		return "Float.NEGATIVE_INFINITY"
-	}
-	return strconv.FormatFloat(f, 'g', -1, 32) + "F"
+	return javaliteral.Float32(float32(f))
 }
 
-// javaDoubleLiteralExpr renders a double constant as a valid Java double literal
-// (with a D suffix), handling NaN/Infinity. Mirrors the field-path renderer.
 func javaDoubleLiteralExpr(data any) string {
 	f, ok := literalToFloat64(data)
 	if !ok {
 		return fmt.Sprint(data)
 	}
-	switch {
-	case math.IsNaN(f):
-		return "Double.NaN"
-	case math.IsInf(f, 1):
-		return "Double.POSITIVE_INFINITY"
-	case math.IsInf(f, -1):
-		return "Double.NEGATIVE_INFINITY"
-	}
-	return strconv.FormatFloat(f, 'g', -1, 64) + "D"
+	return javaliteral.Float64(f)
 }
 
 func NewJavaLiteral(data any, typ types.JavaType) *JavaLiteral {
