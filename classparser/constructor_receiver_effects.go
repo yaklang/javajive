@@ -439,13 +439,20 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 					}
 					stack = append(stack, typeOf)
 				}
-			case opcode == core.OP_INVOKESPECIAL:
+			case opcode == core.OP_INVOKESPECIAL || opcode == core.OP_INVOKESTATIC || opcode == core.OP_INVOKEVIRTUAL || opcode == core.OP_INVOKEINTERFACE:
 				member := constructorMotionMember(obj, op, opcode)
-				if member == nil || member.Member != "<init>" || initialized || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) {
+				if member == nil || initialized || member.Member == "<clinit>" {
 					return false
 				}
 				args, result, err := callbinding.Descriptor(member.Description)
-				if err != nil || result != "V" {
+				if err != nil {
+					return false
+				}
+				words := 1
+				for _, arg := range args {
+					words += constructorEffectType(arg).width()
+				}
+				if opcode == core.OP_INVOKEINTERFACE && (words > 255 || int(op.Data[2]) != words) {
 					return false
 				}
 				for i := len(args) - 1; i >= 0; i-- {
@@ -454,11 +461,32 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 						return false
 					}
 				}
-				v, ok := pop('L')
-				if !ok || !v.receiver || !c.constructorChainDoesNotObserve(member.Name, member.Description, writes, active, remaining, depth+1) {
-					return false
+				var receiver constructorEffectValue
+				if opcode != core.OP_INVOKESTATIC {
+					var ok bool
+					receiver, ok = pop('L')
+					if !ok {
+						return false
+					}
 				}
-				initialized = true
+				if member.Member == "<init>" {
+					if opcode != core.OP_INVOKESPECIAL || result != "V" || !receiver.receiver || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) || !c.constructorChainDoesNotObserve(member.Name, member.Description, writes, active, remaining, depth+1) {
+						return false
+					}
+					initialized = true
+				} else {
+					// Before Object initialization, receiver-free calls may throw
+					// but cannot publish/observe this fresh object or make it
+					// finalizable. Their external effects keep the same order.
+					// THIS arguments/receiver are rejected; results cannot alias
+					// THIS because no earlier operation has published it.
+					if receiver.receiver {
+						return false
+					}
+					if result != "V" {
+						stack = append(stack, constructorEffectType(result))
+					}
+				}
 			case opcode >= core.OP_IADD && opcode <= core.OP_DREM:
 				kind := []byte{'I', 'J', 'F', 'D'}[(opcode-core.OP_IADD)%4]
 				if kind == 'I' || kind == 'J' {

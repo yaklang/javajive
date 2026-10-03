@@ -99,7 +99,14 @@ func constructorMotionOps(decoder *core.Decompiler) []*core.OpCode {
 }
 
 func constructorMotionMember(obj *ClassObject, op *core.OpCode, opcode int) *values.JavaClassMember {
-	if obj == nil || op == nil || op.Instr == nil || op.Instr.OpCode != opcode || len(op.Data) != 2 {
+	if obj == nil || op == nil || op.Instr == nil || op.Instr.OpCode != opcode {
+		return nil
+	}
+	if opcode == core.OP_INVOKEINTERFACE {
+		if len(op.Data) != 4 || op.Data[3] != 0 {
+			return nil
+		}
+	} else if len(op.Data) != 2 {
 		return nil
 	}
 	// This proof must reject incomplete/wrong-kind symbolic references rather
@@ -111,14 +118,20 @@ func constructorMotionMember(obj *ClassObject, op *core.OpCode, opcode int) *val
 		return obj.ConstantPool[index-1]
 	}
 	var ref *ConstantMemberrefInfo
-	switch item := constant(core.Convert2bytesToInt(op.Data)).(type) {
+	interfaceRef := false
+	switch item := constant(core.Convert2bytesToInt(op.Data[:2])).(type) {
 	case *ConstantFieldrefInfo:
 		if item != nil && (opcode == core.OP_PUTFIELD || opcode == core.OP_GETFIELD) {
 			ref = &item.ConstantMemberrefInfo
 		}
 	case *ConstantMethodrefInfo:
-		if item != nil && opcode == core.OP_INVOKESPECIAL {
+		if item != nil && (opcode == core.OP_INVOKESPECIAL || opcode == core.OP_INVOKESTATIC || opcode == core.OP_INVOKEVIRTUAL) {
 			ref = &item.ConstantMemberrefInfo
+		}
+	case *ConstantInterfaceMethodrefInfo:
+		if item != nil && (opcode == core.OP_INVOKEINTERFACE || (obj.MajorVersion >= 52 && (opcode == core.OP_INVOKESTATIC || opcode == core.OP_INVOKESPECIAL))) {
+			ref = &item.ConstantMemberrefInfo
+			interfaceRef = true
 		}
 	}
 	if ref == nil {
@@ -133,6 +146,9 @@ func constructorMotionMember(obj *ClassObject, op *core.OpCode, opcode int) *val
 	name, ok2 := constant(nameType.NameIndex).(*ConstantUtf8Info)
 	desc, ok3 := constant(nameType.DescriptorIndex).(*ConstantUtf8Info)
 	if !ok || !ok2 || !ok3 || className == nil || name == nil || desc == nil {
+		return nil
+	}
+	if interfaceRef && name.Value == "<init>" {
 		return nil
 	}
 	return &values.JavaClassMember{Name: className.Value, Member: name.Value, Description: desc.Value}

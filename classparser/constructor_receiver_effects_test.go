@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -28,6 +29,11 @@ func TestAdversarialConstructorReceiverEffectsAliasesStorageAndFailureBoundaries
  class EffectDivide {int value;EffectDivide(int n){value=7/n;}}
  class EffectArray {int value;EffectArray(int[] n){value=n.length;}}
  class EffectOpaque {int value;EffectOpaque(){value=System.identityHashCode(this);}}
+ class EffectPreBase {int value;EffectPreBase(int n){value=n;}}
+ interface EffectPreProduce {int apply(int n);}
+ class EffectPreCall extends EffectPreBase {EffectPreCall(EffectPreProduce op,int n){super(op.apply(n));}}
+ class EffectPostCall extends EffectPreBase {EffectPostCall(EffectPreProduce op,int n){super(n);op.apply(n);}}
+ class EffectPreVerifyDriver {public static void main(String[] args){try{new EffectPreCall(null,1);}catch(NullPointerException expected){System.out.println("null");}}}
  class EffectBranch {int value;EffectBranch(int n){value=n==0?1:2;}}
  class EffectEarlyReturn {int value;EffectEarlyReturn(int n){if(n<0){value=3;return;}value=n;}}
  class EffectBranchPublish {static Object escaped;int value;EffectBranchPublish(int n){if(n<0){Object alias=this;escaped=alias;}else{value=n;}}}
@@ -70,6 +76,7 @@ func TestAdversarialConstructorReceiverEffectsAliasesStorageAndFailureBoundaries
 			{"EffectPublish", "()V", "", false}, {"EffectHeapAlias", "()V", "", false},
 			{"EffectDivide", "(I)V", "", false}, {"EffectArray", "([I)V", "", false},
 			{"EffectOpaque", "()V", "", false}, {"EffectBranch", "(I)V", "", true},
+			{"EffectPreCall", "(LEffectPreProduce;I)V", "", true}, {"EffectPostCall", "(LEffectPreProduce;I)V", "", false},
 			{"EffectEarlyReturn", "(I)V", "", true},
 			{"EffectBranchPublish", "(I)V", "", false},
 			{"EffectBranchDivide", "(I)V", "", false},
@@ -88,6 +95,64 @@ func TestAdversarialConstructorReceiverEffectsAliasesStorageAndFailureBoundaries
 					t.Fatalf("proof=%v want=%v", got, tc.want)
 				}
 			})
+		}
+		preRaw, _ := resolve("EffectPreCall")
+		if got := t04RunJava(t, java, dir, "EffectPreVerifyDriver"); got != "null\n" {
+			t.Fatal("original pre-initialization null oracle", got)
+		}
+		pre, err := Parse(preRaw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var preCode *CodeAttribute
+		for _, method := range pre.Methods {
+			n, _ := pre.getUtf8(method.NameIndex)
+			if n != "<init>" {
+				continue
+			}
+			for _, a := range method.Attributes {
+				if code, ok := a.(*CodeAttribute); ok {
+					preCode = code
+				}
+			}
+		}
+		if preCode == nil {
+			t.Fatal("missing original invocation code")
+		}
+		preDecoder := core.NewDecompiler(preCode.Code, func(i int) values.JavaValue { return GetValueFromCP(pre.ConstantPool, i) })
+		if err := preDecoder.ParseOpcode(); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, op := range constructorMotionOps(preDecoder) {
+			if op.Instr.OpCode != core.OP_INVOKEINTERFACE {
+				continue
+			}
+			found = true
+			originalCode := append([]byte(nil), preCode.Code...)
+			for _, operands := range [][2]byte{{0, 0}, {1, 0}, {255, 0}, {2, 1}} {
+				preCode.Code = append([]byte(nil), originalCode...)
+				pc := int(op.CurrentOffset)
+				preCode.Code[pc+3], preCode.Code[pc+4] = operands[0], operands[1]
+				if err := os.WriteFile(filepath.Join(dir, "EffectPreCall.class"), pre.Bytes(), 0600); err != nil {
+					t.Fatal(err)
+				}
+				output, err := exec.Command(java, "-Xverify:all", "-cp", dir, "EffectPreVerifyDriver").CombinedOutput()
+				if err == nil || (!strings.Contains(string(output), "VerifyError") && !strings.Contains(string(output), "ClassFormatError")) {
+					t.Fatalf("invalid interface operands %v were not rejected by original JVM: %v\n%s", operands, err, output)
+				}
+				remaining := 512
+				if dumper.constructorChainDoesNotObserve("EffectPreCall", "(LEffectPreProduce;I)V", map[string]bool{}, map[string]bool{}, &remaining, 0) {
+					t.Fatal("invalid interface operands certified", operands)
+				}
+			}
+			break
+		}
+		if !found {
+			t.Fatal("fixture lacks original interface invocation")
+		}
+		if err := os.WriteFile(filepath.Join(dir, "EffectPreCall.class"), preRaw, 0600); err != nil {
+			t.Fatal(err)
 		}
 		raw, _ := resolve("EffectWide")
 		wide, err := Parse(raw)
@@ -201,6 +266,12 @@ func TestAdversarialConstructorMotionMemberRejectsMalformedReferences(t *testing
 	for _, pool := range [][]ConstantInfo{nil, {nil}, {&ConstantMethodrefInfo{}}, {&ConstantFieldrefInfo{}}, {&ConstantFieldrefInfo{ConstantMemberrefInfo: ConstantMemberrefInfo{ClassIndex: 65535, NameAndTypeIndex: 1}}}} {
 		if constructorMotionMember(&ClassObject{ConstantPool: pool}, op, core.OP_PUTFIELD) != nil {
 			t.Fatal("malformed field reference accepted")
+		}
+	}
+	for _, data := range [][]byte{nil, {0, 1}, {0, 1, 1}, {0, 1, 1, 1}, {0, 1, 1, 0, 0}} {
+		op := &core.OpCode{Instr: &core.Instruction{OpCode: core.OP_INVOKEINTERFACE}, Data: data}
+		if constructorMotionMember(&ClassObject{}, op, core.OP_INVOKEINTERFACE) != nil {
+			t.Fatal("invalid interface invocation operand shape accepted")
 		}
 	}
 }
