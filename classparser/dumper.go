@@ -2368,7 +2368,7 @@ func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr str
 	}
 }
 
-// buildSiblingClassSig returns a lazy, cached provider of a jar-internal class's generic signature info
+// buildSiblingClassSig returns a lazy, cached provider of original declaration signature info
 // (class Signature + (name,arity)->method Signature map) keyed by binary internal name, for the unified
 // cross-class generic resolver (types.ResolveInstantiatedParamType, consumed in
 // FunctionCallExpression.resolvedParamType). It reuses the same byte resolver + parse + Signature
@@ -2378,7 +2378,7 @@ func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr str
 // disables the resolver walk (callers fall back to the JDK table / same-class paths). Caching keeps the
 // per-class-dump cost bounded and the result deterministic (a nil cache entry records a confirmed miss).
 func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (string, map[string]string, bool) {
-	if c.foldSiblingResolver == nil {
+	if c.foldSiblingResolver == nil && c.declarationResolver == nil {
 		return nil
 	}
 	type entry struct {
@@ -2387,19 +2387,28 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 		ok         bool
 	}
 	cache := map[string]*entry{}
-	resolver := c.foldSiblingResolver
 	return func(internal string) (string, map[string]string, bool) {
 		if e, hit := cache[internal]; hit {
 			return e.classSig, e.methodSigs, e.ok
 		}
 		e := &entry{}
 		cache[internal] = e
-		data, ok := resolver(internal)
+		var data []byte
+		var ok bool
+		if c.foldSiblingResolver != nil {
+			data, ok = c.foldSiblingResolver(internal)
+		}
+		// Dependencies supply declarations for source binding, never ownership
+		// of emitted units. A fixed subclass's source formal can depend on a
+		// generic ancestor outside its archive although the invoke is erased.
+		if !ok && c.declarationResolver != nil {
+			data, ok = c.declarationResolver(internal)
+		}
 		if !ok || len(data) == 0 {
-			return "", nil, false // JDK / external: not in jar
+			return "", nil, false
 		}
 		sObj, err := c.parseResolved(data)
-		if err != nil {
+		if err != nil || sObj == nil || sObj.GetClassName() != internal {
 			return "", nil, false
 		}
 		for _, attr := range sObj.Attributes {
