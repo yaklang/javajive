@@ -6377,6 +6377,7 @@ func (d *Decompiler) ParseStatement() error {
 	d.unifyNumericExitWebs()
 	d.restoreNormalizedBooleanWebs()
 	d.restoreExceptionDeclarationSeeds()
+	d.restoreConstantBranchConsumers()
 	d.restoreOptionalSupplierDefinitionViews()
 	protectedStores, protectedEdges, err := d.lowerProtectedStackStores()
 	if err != nil {
