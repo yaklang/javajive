@@ -318,6 +318,10 @@ func NewJavaLiteral(data any, typ types.JavaType) *JavaLiteral {
 
 type JavaClassValue struct {
 	types.JavaType
+	// An evaluated ldc class literal resolves at this original instruction.
+	// Symbolic class names used only as invocation/type metadata have no PC.
+	OriginPC    int
+	HasOriginPC bool
 }
 
 // ReplaceVar implements JavaValue.

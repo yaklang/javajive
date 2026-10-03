@@ -2,6 +2,7 @@ package rewriter
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
@@ -47,7 +48,15 @@ func RecoverCoveredTypedCatchLayer(tr *statements.TryCatchStatement) (*statement
 			}
 		}
 	}
-	proof := typedCatchCoverage{covered: covered, remaining: 512}
+	proof := typedCatchCoverage{covered: covered, remaining: 512, candidates: map[*utils.VariableId]int{}, constants: map[*utils.VariableId]bool{}, visible: map[*utils.VariableId]bool{}}
+	if !proof.collectConstants(tr.TryBody, 0) {
+		return nil, false
+	}
+	for _, body := range tr.CatchBodies[:last] {
+		if !proof.collectConstants(body, 0) {
+			return nil, false
+		}
+	}
 	if !proof.block(tr.TryBody) {
 		return nil, false
 	}
@@ -69,11 +78,22 @@ func RecoverCoveredTypedCatchLayer(tr *statements.TryCatchStatement) (*statement
 }
 
 type typedCatchCoverage struct {
-	covered   func(int) bool
-	remaining int
+	covered    func(int) bool
+	remaining  int
+	candidates map[*utils.VariableId]int
+	constants  map[*utils.VariableId]bool
+	visible    map[*utils.VariableId]bool
 }
 
 func (p *typedCatchCoverage) block(body []statements.Statement) bool {
+	// Constants become available only after their sole declaration, and never
+	// escape the lexical arm that dominates their use. Source operands stay intact.
+	before := p.visible
+	p.visible = map[*utils.VariableId]bool{}
+	for r, b := range before {
+		p.visible[r] = b
+	}
+	defer func() { p.visible = before }()
 	for _, st := range body {
 		p.remaining--
 		if p.remaining < 0 || st == nil {
@@ -86,6 +106,14 @@ func (p *typedCatchCoverage) block(body []statements.Statement) bool {
 			}
 		case *statements.AssignStatement:
 			if x == nil {
+				return false
+			}
+			if ref, ok := plainTryValue(x.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam && (x.IsDeclare || x.IsFirst) && p.candidates[ref.Id] == 1 {
+				if _, known := p.constants[ref.Id]; known {
+					p.visible[ref.Id] = true
+				}
+			}
+			if ref, local := x.LeftValue.(*values.JavaRef); local && (ref == nil || ref.CustomValue != nil || ref.StackVar != nil || ref.IsThis) {
 				return false
 			}
 			if x.JavaValue == nil {
@@ -117,7 +145,7 @@ func (p *typedCatchCoverage) block(body []statements.Statement) bool {
 			if !p.value(x.Condition, 0) {
 				return false
 			}
-			if truth, known := pureBooleanGuardTruth(x.Condition, 0); known {
+			if truth, known := p.guardTruth(x.Condition, 0); known {
 				live := x.IfBody
 				if !truth {
 					live = x.ElseBody
@@ -169,8 +197,8 @@ func (p *typedCatchCoverage) value(v values.JavaValue, depth int) bool {
 	case *values.JavaLiteral:
 		return x != nil
 	case *values.JavaClassValue:
-		// ldc class resolution may throw; this leaf carries no opcode PC.
-		return false
+		// Resolution is covered only at an actual evaluated ldc use.
+		return x != nil && x.HasOriginPC && p.covered(x.OriginPC)
 	case *values.TernaryExpression:
 		if x == nil {
 			return false
@@ -296,8 +324,15 @@ func pureBooleanGuardTruth(v values.JavaValue, depth int) (bool, bool) {
 		return false, false
 	}
 	if literal, ok := v.(*values.JavaLiteral); ok && literal != nil {
-		b, ok := literal.Data.(bool)
-		return b, ok
+		switch data := literal.Data.(type) {
+		case bool:
+			return data, true
+		case int:
+			if data == 0 || data == 1 {
+				return data != 0, true
+			}
+		}
+		return false, false
 	}
 	x, ok := v.(*values.JavaExpression)
 	if !ok || x == nil {
@@ -380,4 +415,68 @@ func typedCatchNumericValue(v values.JavaValue) bool {
 		}
 	}
 	return typedCatchNumericPrimitive(t)
+}
+
+// A local whose only source write is a literal declaration can supply a
+// predicate fact. This is a coverage proof, not a source constant-folding pass.
+func (p *typedCatchCoverage) collectConstants(body []statements.Statement, depth int) bool {
+	if depth > 32 {
+		return false
+	}
+	for _, st := range body {
+		p.remaining--
+		if p.remaining < 0 || st == nil {
+			return false
+		}
+		switch x := st.(type) {
+		case *statements.AssignStatement:
+			if x == nil {
+				return false
+			}
+			if r, ok := x.LeftValue.(*values.JavaRef); ok && r != nil && r.Id != nil && x.ArrayMember == nil {
+				p.candidates[r.Id]++
+				if x.IsDeclare || x.IsFirst {
+					if b, known := pureBooleanGuardTruth(x.JavaValue, 0); known {
+						p.constants[r.Id] = b
+					}
+				}
+			}
+		case *statements.IfStatement:
+			if x == nil || !p.collectConstants(x.IfBody, depth+1) || !p.collectConstants(x.ElseBody, depth+1) {
+				return false
+			}
+		case *statements.TryCatchStatement:
+			if x == nil || !p.collectConstants(x.TryBody, depth+1) {
+				return false
+			}
+			for _, b := range x.CatchBodies {
+				if !p.collectConstants(b, depth+1) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+func (p *typedCatchCoverage) guardTruth(v values.JavaValue, depth int) (bool, bool) {
+	if depth > 16 {
+		return false, false
+	}
+	v = plainTryValue(v)
+	if r, ok := v.(*values.JavaRef); ok && r != nil && r.Id != nil {
+		if p.candidates[r.Id] == 1 && p.visible[r.Id] && r.Type() != nil {
+			primitive, ok := r.Type().RawType().(*types.JavaPrimer)
+			if !ok || primitive == nil || primitive.Name != types.JavaBoolean {
+				return false, false
+			}
+			b, known := p.constants[r.Id]
+			return b, known
+		}
+		return false, false
+	}
+	if x, ok := v.(*values.JavaExpression); ok && x != nil && x.Op == values.Not && len(x.Values) == 1 {
+		b, known := p.guardTruth(x.Values[0], depth+1)
+		return !b, known
+	}
+	return pureBooleanGuardTruth(v, depth)
 }

@@ -413,10 +413,34 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 			}
 		}
 	}
+	// A zero catch type supplies Throwable even when no CP class references it.
+	for _, method := range c.obj.Methods {
+		for _, attribute := range method.Attributes {
+			if code, ok := attribute.(*CodeAttribute); ok && code != nil {
+				for _, entry := range code.ExceptionTable {
+					if entry.CatchType == 0 {
+						record("java/lang/Throwable")
+					}
+				}
+			}
+		}
+	}
 	out := map[string]bool{}
 	for simple, pkgs := range pkgsBySimple {
 		_, hasOwn := pkgs[c.PackageName]
 		_, hasLang := pkgs["java.lang"]
+		// java.lang is imported implicitly. A same-package declaration can
+		// shadow it without appearing in this class's constant pool at all.
+		// Resolve that candidate by original class identity before shortening.
+		if hasLang && c.PackageName != "java.lang" && c.FuncCtx != nil && c.FuncCtx.InvocationMetadata != nil {
+			owner := simple
+			if c.PackageName != "" {
+				owner = strings.ReplaceAll(c.PackageName, ".", "/") + "/" + simple
+			}
+			if decl, known := c.FuncCtx.InvocationMetadata(owner); known && decl.Name == owner {
+				out[simple] = true
+			}
+		}
 		if !hasOwn && !hasLang {
 			continue
 		}
@@ -4077,6 +4101,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						}
 						for originalIndex, originalRef := range ret.Exception {
 							if originalRef == catchExc[i] && originalIndex < len(ret.Handlers) && ret.Handlers[originalIndex].EntryPC >= 0 {
+								// Catch type zero is the JVM Throwable domain, independent
+								// of a same-package or lexical class with the simple name.
+								if ret.Handlers[originalIndex].CatchAll {
+									excType = "java.lang.Throwable"
+								}
 								entries[ret.Handlers[originalIndex].EntryPC] = catchExc[i].String(funcCtx)
 							}
 						}

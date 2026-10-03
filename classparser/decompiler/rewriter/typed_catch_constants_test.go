@@ -98,7 +98,7 @@ func TestTypedCatchPrimitiveConversionProvesCapturedEffects(t *testing.T) {
 }
 
 func TestTypedCatchCoverageRejectsUnwitnessedResolutionAndCast(t *testing.T) {
-	for _, scenario := range []string{"original cast", "uncovered cast", "synthetic cast", "negative PC", "class literal", "numeric comparison", "reference comparison", "missing call type"} {
+	for _, scenario := range []string{"original cast", "uncovered cast", "synthetic cast", "negative PC", "class literal", "covered class literal", "uncovered class literal", "numeric comparison", "reference comparison", "missing call type"} {
 		t.Run(scenario, func(t *testing.T) {
 			ref := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.Object"))
 			c := values.NewOriginalCheckCast(ref, types.NewJavaClass("example.Value"), 2)
@@ -110,8 +110,11 @@ func TestTypedCatchCoverageRejectsUnwitnessedResolutionAndCast(t *testing.T) {
 				c.OriginalCheckCast = false
 			case "negative PC":
 				c.OriginPC = -1
-			case "class literal":
-				v = &values.JavaClassValue{JavaType: types.NewJavaClass("example.Value")}
+			case "class literal", "covered class literal", "uncovered class literal":
+				v = &values.JavaClassValue{JavaType: types.NewJavaClass("example.Value"), OriginPC: 2, HasOriginPC: scenario != "class literal"}
+				if scenario == "uncovered class literal" {
+					v.(*values.JavaClassValue).OriginPC = 20
+				}
 			case "numeric comparison", "reference comparison", "missing call type":
 				var left values.JavaValue = values.NewJavaLiteral(2, types.NewJavaPrimer(types.JavaInteger))
 				if scenario == "reference comparison" {
@@ -124,7 +127,7 @@ func TestTypedCatchCoverageRejectsUnwitnessedResolutionAndCast(t *testing.T) {
 			}
 			p := typedCatchCoverage{covered: func(pc int) bool { return pc >= 0 && pc < 10 }, remaining: 512}
 			got := p.value(v, 0)
-			want := scenario == "original cast" || scenario == "numeric comparison"
+			want := scenario == "original cast" || scenario == "numeric comparison" || scenario == "covered class literal"
 			if got != want {
 				t.Fatalf("covered=%v want=%v", got, want)
 			}
@@ -156,5 +159,62 @@ func TestTypedCatchTotalNumericOperatorsKeepOperandCoverage(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestTypedCatchLocalConstantRequiresSingleDominatingSourceDeclaration(t *testing.T) {
+	for _, scenario := range []string{"local true", "local false", "reassigned", "alias reassigned", "opaque alias reassigned", "declaration after read", "declaration in sibling", "fake simulator value", "missing declaration", "missing identifier", "nonboolean", "effectful declaration", "budget"} {
+		t.Run(scenario, func(t *testing.T) {
+			b := types.NewJavaPrimer(types.JavaBoolean)
+			ref := values.NewJavaRef(utils.NewRootVariableId(), values.NewJavaLiteral(true, b), b)
+			initial := values.NewJavaLiteral(true, b)
+			declaration := statements.NewAssignStatement(ref, initial, true)
+			outside := &values.FunctionCallExpression{OriginPC: 20, HasOriginPC: true, Descriptor: "()V", Kind: values.InvokeStatic, IsStatic: true}
+			branch := &statements.IfStatement{Condition: values.NewUnaryExpression(ref, values.Not, b), IfBody: []statements.Statement{&statements.ExpressionStatement{Expression: outside}}}
+			body := []statements.Statement{declaration, branch}
+			switch scenario {
+			case "local false":
+				initial.Data = false
+				branch.IfBody, branch.ElseBody = branch.ElseBody, branch.IfBody
+			case "reassigned", "alias reassigned", "opaque alias reassigned":
+				target := ref
+				if scenario == "alias reassigned" || scenario == "opaque alias reassigned" {
+					copy := *ref
+					target = &copy
+					if scenario == "opaque alias reassigned" {
+						target.CustomValue = &values.CustomValue{}
+					}
+				}
+				body = []statements.Statement{declaration, statements.NewAssignStatement(target, values.NewJavaLiteral(false, b), false), branch}
+			case "declaration after read":
+				body = []statements.Statement{branch, declaration}
+			case "declaration in sibling":
+				body = []statements.Statement{&statements.IfStatement{Condition: values.NewJavaRef(utils.NewRootVariableId(), nil, b), IfBody: []statements.Statement{declaration}}, branch}
+			case "fake simulator value", "missing declaration":
+				body = []statements.Statement{branch}
+			case "missing identifier":
+				ref.Id = nil
+			case "nonboolean":
+				ref.ResetVarType(types.NewJavaPrimer(types.JavaInteger))
+				initial.JavaType = ref.Type()
+			case "effectful declaration":
+				declaration.JavaValue = &values.FunctionCallExpression{OriginPC: 2, HasOriginPC: true, Descriptor: "()Z", Kind: values.InvokeStatic, IsStatic: true, FuncType: &types.JavaFuncType{ReturnType: b}}
+			}
+			p := typedCatchCoverage{covered: func(pc int) bool { return pc >= 0 && pc < 10 }, remaining: 512, candidates: map[*utils.VariableId]int{}, constants: map[*utils.VariableId]bool{}, visible: map[*utils.VariableId]bool{}}
+			if scenario == "budget" {
+				p.remaining = 2
+			}
+			got := p.collectConstants(body, 0) && p.block(body)
+			want := scenario == "local true" || scenario == "local false"
+			if got != want {
+				t.Fatalf("covered=%v want=%v", got, want)
+			}
+			if branch.Condition == nil || branch.IfBody == nil && branch.ElseBody == nil {
+				t.Fatal("changed source guard or discarded arm")
+			}
+			if scenario != "missing identifier" && ref.Val == nil {
+				t.Fatal("changed original simulator value")
+			}
+		})
 	}
 }

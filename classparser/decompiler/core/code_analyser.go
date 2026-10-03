@@ -4543,11 +4543,21 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		if err := d.observeCondyLoad(v); err != nil {
 			return err
 		}
+		if literal, ok := v.(*values.JavaClassValue); ok && literal != nil {
+			use := *literal
+			use.OriginPC, use.HasOriginPC = int(opcode.CurrentOffset), true
+			v = &use
+		}
 		runtimeStackSimulation.Push(v)
 	case OP_LDC_W:
 		v := d.ConstantPoolLiteralGetter(int(Convert2bytesToInt(opcode.Data)))
 		if err := d.observeCondyLoad(v); err != nil {
 			return err
+		}
+		if literal, ok := v.(*values.JavaClassValue); ok && literal != nil {
+			use := *literal
+			use.OriginPC, use.HasOriginPC = int(opcode.CurrentOffset), true
+			v = &use
 		}
 		runtimeStackSimulation.Push(v)
 	case OP_LDC2_W:
@@ -5064,7 +5074,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			case code.ExceptionTypeIndex != 0:
 				typ = d.GetValueFromPool(int(code.ExceptionTypeIndex)).Type()
 			default:
-				typ = types.NewJavaClass("Throwable")
+				typ = types.NewJavaClass("java.lang.Throwable")
 			}
 			handlerPC := int(code.CurrentOffset)
 			exceptionValue := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
@@ -6377,7 +6387,6 @@ func (d *Decompiler) ParseStatement() error {
 	d.unifyNumericExitWebs()
 	d.restoreNormalizedBooleanWebs()
 	d.restoreExceptionDeclarationSeeds()
-	d.restoreConstantBranchConsumers()
 	d.restoreOptionalSupplierDefinitionViews()
 	protectedStores, protectedEdges, err := d.lowerProtectedStackStores()
 	if err != nil {
