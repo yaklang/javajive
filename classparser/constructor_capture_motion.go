@@ -199,11 +199,20 @@ func constructorMotionField(obj *ClassObject, member *values.JavaClassMember, ca
 	return count == 1
 }
 
-func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int, params []string, slots map[int]int, metadata callbinding.Provider) (int, *values.JavaClassMember) {
+func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int, params []string, slots map[int]int, metadata callbinding.Provider, enclosingSlots ...int) (int, *values.JavaClassMember) {
 	if start < 0 || start >= len(ops) || ops[start] == nil || ops[start].Instr == nil || core.GetRetrieveIdx(ops[start]) != 0 || !constructorMotionLoad(ops[start], "Ljava/lang/Object;") {
 		return 0, nil
 	}
 	arguments := []string{}
+	// Exact local origins complement erased assignability. Duplication retains
+	// an origin; casts, field reads, computations and calls do not establish
+	// identity with the original enclosing parameter. The optional source
+	// projection may omit only that exact first delegation operand.
+	origins := []int{}
+	appendArgument := func(descriptor string, slot int) {
+		arguments = append(arguments, descriptor)
+		origins = append(origins, slot)
+	}
 	allocations := map[string]string{}
 	widening := newConstructorWideningQuery(metadata)
 	index := start + 1
@@ -225,7 +234,7 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 			}
 			token := "@allocation:" + strconv.Itoa(index)
 			allocations[token] = owner
-			arguments = append(arguments, token)
+			appendArgument(token, -1)
 			index++
 			continue
 		}
@@ -238,7 +247,7 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 			if !allocated && value != "null" && constructorEffectType(value).width() != 1 {
 				return 0, nil
 			}
-			arguments = append(arguments, value)
+			appendArgument(value, origins[len(origins)-1])
 			index++
 			continue
 		}
@@ -258,6 +267,9 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				}
 			}
 			if base == 0 {
+				if len(enclosingSlots) > 0 && (len(enclosingSlots) != 1 || len(origins) == 0 || origins[0] != enclosingSlots[0]) {
+					return 0, nil
+				}
 				if member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName() {
 					return 0, nil
 				}
@@ -272,6 +284,7 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				return 0, nil
 			}
 			arguments = arguments[:base-1]
+			origins = origins[:base-1]
 			for i, value := range arguments {
 				if value == token {
 					arguments[i] = "L" + allocation + ";"
@@ -300,6 +313,7 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				return 0, nil
 			}
 			arguments[len(arguments)-1] = descriptor
+			origins[len(origins)-1] = -1
 			index++
 			continue
 		}
@@ -328,14 +342,16 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				return 0, nil
 			}
 			arguments = arguments[:base]
+			origins = origins[:base]
 			if opcode != core.OP_INVOKESTATIC {
 				if len(arguments) == 0 || !widening.assignable(arguments[len(arguments)-1], "L"+member.Name+";") {
 					return 0, nil
 				}
 				arguments = arguments[:len(arguments)-1]
+				origins = origins[:len(origins)-1]
 			}
 			if result != "V" {
-				arguments = append(arguments, result)
+				appendArgument(result, -1)
 			}
 			index++
 			continue
@@ -345,6 +361,7 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				return 0, nil
 			}
 			arguments[len(arguments)-1] = "I"
+			origins[len(origins)-1] = -1
 			index++
 			continue
 		}
@@ -367,20 +384,21 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 					return 0, nil
 				}
 				arguments = arguments[:len(arguments)-1]
+				origins = origins[:len(origins)-1]
 			}
-			arguments = append(arguments, fields[0])
+			appendArgument(fields[0], -1)
 			index++
 			continue
 		}
 		if literal, proved := constructorMotionLiteral(obj, ops[index]); proved {
-			arguments = append(arguments, literal)
+			appendArgument(literal, -1)
 		} else {
 			slot := core.GetRetrieveIdx(ops[index])
 			parameter, ok := slots[slot]
 			if !ok || parameter < 0 || parameter >= len(params) || slot == 0 || !constructorMotionLoad(ops[index], params[parameter]) {
 				return 0, nil
 			}
-			arguments = append(arguments, params[parameter])
+			appendArgument(params[parameter], slot)
 		}
 		index++
 	}

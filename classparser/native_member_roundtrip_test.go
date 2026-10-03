@@ -31,7 +31,17 @@ func TestNativeMemberCaptureRoundTrip(t *testing.T) {
 	joint := strings.Replace(nativeMemberFixture, "MemberParent make(long n)", "Runnable probe(final Object x){return new Runnable(){public void run(){if(token!=x)throw new AssertionError(\"capture identity\");}};}MemberParent make(long n)", 1)
 	joint = strings.Replace(joint, "Runnable probe(", "MemberParent another(long n)throws java.io.IOException{return new MemberParent(n){Object owner(){return MemberCapture.this;}};}Runnable probe(", 1)
 	joint = strings.Replace(joint, "MemberCapture outer=new MemberCapture(x);", "MemberCapture outer=new MemberCapture(x);outer.probe(x).run();for(long a:new long[]{Long.MIN_VALUE,-1,0,1,Long.MAX_VALUE}){MemberEffects.published=null;try{MemberParent p=outer.another(a);if(a<0||p.observed!=outer||p.number!=a)throw new AssertionError(\"anonymous parent publication\");}catch(java.io.IOException e){MemberParent p=(MemberParent)MemberEffects.published;if(a>=0||e!=MemberEffects.failure||p.observed!=outer||p.number!=a)throw new AssertionError(\"anonymous failure identity\",e);}}", 1)
-	for _, fixture := range []struct{ owner, external, driver, source string }{{"MemberCapture", "MemberExternal", "MemberDriver", nativeMemberFixture}, {"MemberCaptureJoint", "MemberExternal", "MemberDriver", strings.ReplaceAll(joint, "MemberCapture", "MemberCaptureJoint")}, {"GenericMember", "GenericExternal", "GenericDriver", nativeGenericMemberFixture}, {"OuterArgument", "ArgumentExternal", "ArgumentDriver", nativeMemberArgumentFixture}, {"InitMember", "InitExternal", "InitDriver", nativeMemberInitializationFixture}, {"FailInitMember", "FailInitExternal", "FailInitDriver", nativeMemberFailInitializationFixture}} {
+	inherited := strings.Replace(nativeMemberFixture, "class Child extends MemberParent", "class Base extends MemberParent {final Object baseOwner;Base(long n)throws java.io.IOException{super(n);baseOwner=MemberCapture.this;}Object owner(){return MemberCapture.this;}}class Child extends Base", 1)
+	inherited = strings.Replace(inherited, "p.observed!=outer", "p.observed!=outer||((MemberCapture.Base)p).baseOwner!=outer", 1)
+	inherited = strings.Replace(inherited, "final Object observed;", "final Object observed,observedBase;", 1)
+	inherited = strings.Replace(inherited, "observed=owner();", "observed=owner();observedBase=baseOwner();", 1)
+	inherited = strings.Replace(inherited, "Object owner(){return null;}", "Object owner(){return null;}Object baseOwner(){return null;}", 1)
+	inherited = strings.Replace(inherited, "Object owner(){return MemberCapture.this;}}class Child", "Object owner(){return MemberCapture.this;}Object baseOwner(){return MemberCapture.this;}}class Child", 1)
+	inherited = strings.ReplaceAll(inherited, "p.observed!=outer", "p.observed!=outer||p.observedBase!=outer")
+	inherited = strings.Replace(inherited, "p.token()!=x)throw new AssertionError(\"publication\",e)", "p.token()!=x||p.baseOwner!=null)throw new AssertionError(\"publication\",e)", 1)
+
+	genericInherited := strings.Replace(nativeGenericMemberFixture, "class Child extends GenericParent", "class Base extends GenericParent {Base(T n)throws java.io.IOException{super(n);}Base(Object n){super(n);}}class Child extends Base", 1)
+	for _, fixture := range []struct{ owner, external, driver, source string }{{"MemberCapture", "MemberExternal", "MemberDriver", nativeMemberFixture}, {"MemberCaptureInherited", "MemberExternal", "MemberDriver", strings.ReplaceAll(inherited, "MemberCapture", "MemberCaptureInherited")}, {"MemberCaptureJoint", "MemberExternal", "MemberDriver", strings.ReplaceAll(joint, "MemberCapture", "MemberCaptureJoint")}, {"GenericMember", "GenericExternal", "GenericDriver", nativeGenericMemberFixture}, {"GenericMemberInherited", "GenericExternal", "GenericDriver", strings.ReplaceAll(genericInherited, "GenericMember", "GenericMemberInherited")}, {"OuterArgument", "ArgumentExternal", "ArgumentDriver", nativeMemberArgumentFixture}, {"InitMember", "InitExternal", "InitDriver", nativeMemberInitializationFixture}, {"FailInitMember", "FailInitExternal", "FailInitDriver", nativeMemberFailInitializationFixture}} {
 		t.Run(fixture.owner, func(t *testing.T) {
 			for _, debug := range []string{"-g", "-g:none"} {
 				t.Run(debug, func(t *testing.T) {
@@ -115,6 +125,9 @@ func TestNativeMemberCaptureRoundTrip(t *testing.T) {
 								t.Fatalf("rebuilt %v %s", e, out)
 							}
 							binaryNames := []string{fixture.owner + "$Child", fixture.owner}
+							if fixture.owner == "MemberCaptureInherited" || fixture.owner == "GenericMemberInherited" {
+								binaryNames = append(binaryNames, fixture.owner+"$Base")
+							}
 							if fixture.owner == "MemberCaptureJoint" {
 								binaryNames = append(binaryNames, fixture.owner+"$1", fixture.owner+"$2")
 							}

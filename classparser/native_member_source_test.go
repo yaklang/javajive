@@ -129,7 +129,7 @@ func TestNativeMemberArchiveRequiresCompleteRepresentableFamily(t *testing.T) {
 		{"deeper owner", `class NativeArchiveOwner{class Child{class Deep{}Child(){}}Child make(){return new Child();}}`, false},
 		{"mixed static owner", `class NativeArchiveOwner{static class Static{}class Child{Child(){}}Child make(){return new Child();}}`, true},
 		{"mixed anonymous owner", `class NativeArchiveOwner{class Child{Child(){}}Object make(){return new Child();}Object other(){return new Object(){};}}`, false},
-		{"member superclass", `class NativeArchiveOwner{class Base{}class Child extends Base{}Object make(){return new Child();}}`, false},
+		{"member superclass", `class NativeArchiveOwner{class Base{}class Child extends Base{}Object make(){return new Child();}}`, true},
 		{"foreign subclass implicit owner", `class NativeArchiveOwner{class Child{Child(){}}Child make(){return new Child();}}class Sub extends NativeArchiveOwner.Child{Sub(NativeArchiveOwner o){o.super();}}`, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -582,6 +582,82 @@ func TestNativeMemberJointClosureRequiresCompleteOriginalAnonymousProof(t *testi
 			src, owned := z.nativeMemberSource(child)
 			if owned != (scenario == "original") {
 				t.Fatalf("joint proof %s owned=%v source=%s", scenario, owned, src)
+			}
+		})
+	}
+}
+
+func TestNativeMemberSiblingSuperRequiresOriginalEnclosingOperand(t *testing.T) {
+	const source = `class SiblingProofOwner{static SiblingProofOwner selected;static SiblingProofOwner choose(SiblingProofOwner n){return selected;}class Base{Base(long n){}}class Child extends Base{Child(long n){super(n);}SiblingProofOwner query(){return choose(SiblingProofOwner.this);}}Child make(long n){return new Child(n);}}`
+	files := nativeCompileClasses(t, source)
+	for _, scenario := range []string{"original", "computed enclosing operand", "missing parent constructor", "hierarchy cycle", "budget", "canceled"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, err := Parse(files["SiblingProofOwner.class"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := NewClassObjectDumper(root)
+			d.foldSiblingResolver = func(name string) ([]byte, bool) { raw, ok := files[name+".class"]; return raw, ok }
+			p := d.planNativeMemberFamily()
+			if p == nil {
+				t.Fatal("original family proof")
+			}
+			child := p.children["SiblingProofOwner$Child"]
+			parent := p.children["SiblingProofOwner$Base"]
+			var work *workbudget.Budget
+			switch scenario {
+			case "computed enclosing operand":
+				// The same erased type is not the same enclosing instance. Insert
+				// the original fixture's receiver-free choose call after ALOAD_1.
+				// The general motion proof allows the call and its effects; only
+				// the stronger omitted-enclosing operand proof must reject it.
+				var methodIndex int
+				for i, item := range child.object.ConstantPool {
+					if member := nativeConstantMember(item); member != nil {
+						name, _ := sourceBridgeClassName(child.object, member.ClassIndex)
+						if name == "SiblingProofOwner" {
+							nt, ok := child.object.ConstantPool[member.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+							if ok {
+								n, _ := sourceBridgeUTF8(child.object, nt.NameIndex)
+								if n == "choose" {
+									methodIndex = i + 1
+								}
+							}
+						}
+					}
+				}
+				if methodIndex == 0 {
+					t.Fatal("missing original call witness")
+				}
+				for _, method := range child.object.Methods {
+					name, _ := sourceBridgeUTF8(child.object, method.NameIndex)
+					if name != "<init>" {
+						continue
+					}
+					for _, attr := range method.Attributes {
+						if code, ok := attr.(*CodeAttribute); ok {
+							code.Code = append(append(append([]byte{}, code.Code[:7]...), byte(core.OP_INVOKESTATIC), byte(methodIndex>>8), byte(methodIndex)), code.Code[7:]...)
+						}
+					}
+				}
+				child = nativeMemberProofWithOwner(child.object, root, nil, d.buildInvocationMetadata())
+				if child == nil {
+					t.Fatal("receiver-free effect should retain general proof")
+				}
+				p.children[child.object.GetClassName()] = child
+			case "missing parent constructor":
+				parent.constructors = map[string]*nativeMemberConstructor{}
+			case "hierarchy cycle":
+				parent.object.SuperClass = uint16(NewConstantPoolWithConstant(&parent.object.ConstantPool).AddNewClassInfo(child.object.GetClassName()))
+			case "budget":
+				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			if got := nativeMemberSiblingSuperClosed(child, p, work, d.buildInvocationMetadata()); got != (scenario == "original") {
+				t.Fatalf("projection %s accepted=%v", scenario, got)
 			}
 		})
 	}

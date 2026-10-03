@@ -17,6 +17,7 @@ import (
 type nativeMemberConstructor struct {
 	descriptor, sourceDescriptor, delegateOwner, delegateDescriptor string
 	capturePC, delegatePC                                           int
+	projectedSuper                                                  bool
 }
 type nativeMemberClass struct {
 	object                        *ClassObject
@@ -478,8 +479,9 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	}
 	// A joint deeper/local/anonymous ownership plan is required before their
 	// scopes can be moved. This plan handles complete direct member families.
+	metadata := c.buildInvocationMetadata()
 	for _, child := range p.children {
-		if p.children[child.object.GetSupperClassName()] != nil {
+		if !nativeMemberSiblingSuperClosed(child, p, c.Work, metadata) {
 			return nil
 		}
 		for _, a := range child.object.Attributes {
@@ -497,6 +499,73 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 		}
 	}
 	return p
+}
+
+// Source super(...) may omit an enclosing operand only when both original
+// declarations belong to this complete family and the bytecode passes this
+// constructor's unchanged enclosing parameter. A qualified foreign outer or a
+// computed operand needs its own source origin proof and is refused here.
+func nativeMemberSiblingSuperClosed(child *nativeMemberClass, p *nativeMemberFamily, work *workbudget.Budget, metadata callbinding.Provider) bool {
+	seen := map[string]bool{}
+	for node := child; node != nil; node = p.children[node.object.GetSupperClassName()] {
+		name := node.object.GetClassName()
+		if seen[name] || !nativeProofWork(work, 1) {
+			return false
+		}
+		seen[name] = true
+	}
+	parent := p.children[child.object.GetSupperClassName()]
+	if parent == nil || parent.static {
+		return true
+	}
+	if child.static || parent.owner != child.owner {
+		return false
+	}
+	for _, method := range child.object.Methods {
+		name, _ := sourceBridgeUTF8(child.object, method.NameIndex)
+		desc, _ := sourceBridgeUTF8(child.object, method.DescriptorIndex)
+		ctor := child.constructors[desc]
+		if name != "<init>" || ctor == nil || ctor.capturePC < 0 {
+			continue
+		}
+		if ctor.delegateOwner != parent.object.GetClassName() || parent.constructors[ctor.delegateDescriptor] == nil {
+			return false
+		}
+		proved := false
+		for _, attr := range method.Attributes {
+			code, ok := attr.(*CodeAttribute)
+			if !ok {
+				continue
+			}
+			if !nativeProofWork(work, int64(len(code.Code))) {
+				return false
+			}
+			d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(child.object.ConstantPool, i) })
+			d.Work = work
+			if d.ParseOpcode() != nil {
+				return false
+			}
+			ops := constructorMotionOps(d)
+			start := -1
+			for i, op := range ops {
+				if int(op.CurrentOffset) == ctor.capturePC {
+					start = i + 1
+					break
+				}
+			}
+			params, _, err := callbinding.Descriptor(desc)
+
+			if err == nil && start >= 0 {
+				next, call := constructorMotionDelegation(child.object, ops, start, params, constructorParameterSlots(params), metadata, 1)
+				proved = next > 0 && call != nil && call.Name == ctor.delegateOwner && call.Description == ctor.delegateDescriptor && int(ops[next-1].CurrentOffset) == ctor.delegatePC
+			}
+		}
+		if !proved {
+			return false
+		}
+		ctor.projectedSuper = true
+	}
+	return true
 }
 
 func (p *nativeMemberFamily) sourceName(binary string) (string, bool) {
@@ -605,6 +674,12 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				ctor := p.children[call.Name].constructors[desc]
 				if name == "<init>" && c.obj.GetClassName() == call.Name && ctor != nil && ctor.capturePC < 0 && ctor.delegateDescriptor == call.Description && ctor.delegatePC == int(op.CurrentOffset) {
 					continue
+				}
+				if current := p.children[c.obj.GetClassName()]; name == "<init>" && current != nil {
+					ctor := current.constructors[desc]
+					if ctor != nil && ctor.projectedSuper && ctor.delegateOwner == call.Name && ctor.delegateDescriptor == call.Description && ctor.delegatePC == int(op.CurrentOffset) {
+						continue
+					}
 				}
 				return nil, false
 			}
@@ -836,12 +911,21 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	}
 	if child := c.nativeMemberCurrent; child != nil && !child.static {
 		ctx.SourceMemberDelegation = func(owner, desc string, pc int, args []any) (string, bool) {
-			if strings.ReplaceAll(owner, ".", "/") != child.object.GetClassName() {
+			name := strings.ReplaceAll(owner, ".", "/")
+			targetClass := p.children[name]
+			if targetClass == nil || targetClass.static {
 				return "", false
 			}
 			ctor := child.constructors[ctx.CurrentMethodDesc]
-			target := child.constructors[desc]
-			if ctor == nil || target == nil || ctor.delegatePC != pc || ctor.delegateDescriptor != desc || len(args) < 1 {
+			keyword := "this"
+			if name != child.object.GetClassName() {
+				if ctor == nil || !ctor.projectedSuper || name != child.object.GetSupperClassName() {
+					return "", false
+				}
+				keyword = "super"
+			}
+			target := targetClass.constructors[desc]
+			if ctor == nil || target == nil || ctor.delegateOwner != name || ctor.delegatePC != pc || ctor.delegateDescriptor != desc || len(args) < 1 {
 				p.failed = true
 				return "", false
 			}
@@ -864,7 +948,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			delegationBinding.InvocationMetadata = binding.InvocationMetadata
 			delegationBinding.SiblingClassSig = binding.SiblingClassSig
 			delegationBinding.CurrentMethodDesc = ctor.sourceDescriptor
-			return "this(" + strings.Join(call.ArgumentStrings(&delegationBinding), ",") + ")", true
+			return keyword + "(" + strings.Join(call.ArgumentStrings(&delegationBinding), ",") + ")", true
 		}
 	}
 }
