@@ -1,7 +1,9 @@
 package javaclassparser
 
 import (
+	"context"
 	"fmt"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,6 +72,50 @@ func TestNativeMemberRestorationRetainsForeignEnclosingAccess(t *testing.T) {
 					directSource, e := direct.ReadFile("p/AccessOwner.class")
 					if e != nil || !strings.Contains(string(directSource), "class Token") {
 						t.Fatalf("direct protected subtype lost ownership %v %s", e, directSource)
+					}
+					if visibility == "protected" {
+						for _, scenario := range []string{"original", "cycle", "missing", "wrong identity", "canceled"} {
+							t.Run("access-proof-"+scenario, func(t *testing.T) {
+								inputs := map[string][]byte{}
+								for n, b := range directFiles {
+									inputs[n] = b
+								}
+								if scenario == "missing" {
+									delete(inputs, "q/DirectOwner.class")
+								}
+								if scenario == "cycle" || scenario == "wrong identity" {
+									obj, e := Parse(append([]byte(nil), inputs["q/DirectOwner.class"]...))
+									if e != nil {
+										t.Fatal(e)
+									}
+									if scenario == "cycle" {
+										obj.SuperClass = obj.ThisClass
+									} else {
+										obj.ThisClass = obj.SuperClass
+									}
+									inputs["q/DirectOwner.class"] = obj.Bytes()
+								}
+								z := nativeArchive(t, inputs)
+								owner, e := Parse(inputs["p/AccessOwner.class"])
+								if e != nil {
+									t.Fatal(e)
+								}
+								family := z.nativeMemberReader(owner).planNativeMemberFamily()
+								if family == nil {
+									t.Fatal("fixture ownership proof missing")
+								}
+								index := &nativeMemberIndex{typeUsers: map[string]map[string]bool{"p/AccessOwner$Token": {"q/DirectOwner": true}}}
+								var work *workbudget.Budget
+								if scenario == "canceled" {
+									ctx, cancel := context.WithCancel(context.Background())
+									cancel()
+									work = workbudget.New(ctx, workbudget.Limits{})
+								}
+								if got := z.nativeMemberAccessRepresentable(family, index, work); got != (scenario == "original") {
+									t.Fatalf("access proof %s = %v", scenario, got)
+								}
+							})
+						}
 					}
 					for _, mode := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
 						t.Run(mode, func(t *testing.T) {
