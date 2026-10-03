@@ -142,3 +142,45 @@ func TestAdversarialPlatformConstructorMovementRequiresRuntimeAgreement(t *testi
 	}
 	t.Fatal("catalog contains no cross-profile counterexample; add explicit original evidence")
 }
+
+func TestAdversarialInvocationMetadataRetainsOriginalClassSignature(t *testing.T) {
+	for _, release := range []int{8, 11, 17, 21} {
+		for _, name := range []string{"java/util/List", "java/util/Collection", "java/lang/Iterable", "java/util/AbstractCollection"} {
+			raw, ok := jdkConstructorClassBytes(name, release)
+			if !ok {
+				t.Fatal("missing original generic declaration", release, name)
+			}
+			obj, err := Parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := &ClassObjectDumper{obj: obj}
+			d.options.TargetSourceVersion = release
+			catalog, ok := jdkInvocationMetadata(name, release)
+			if !ok || catalog.Signature == "" {
+				t.Fatal("missing independent original catalog signature", name)
+			}
+			original, ok := d.buildInvocationMetadata()(name)
+			if !ok || original.Signature != catalog.Signature {
+				t.Fatalf("original class formal/inheritance Signature lost: %d/%s: %q want %q", release, name, original.Signature, catalog.Signature)
+			}
+			for _, a := range obj.Attributes {
+				if signature, ok := a.(*SignatureAttribute); ok {
+					// Explicit malformed original evidence cannot be concealed by
+					// the otherwise valid platform declaration fallback.
+					prior := signature.SignatureIndex
+					signature.SignatureIndex = 0
+					if _, ok := d.buildInvocationMetadata()(name); ok {
+						t.Fatal("malformed original class Signature accepted")
+					}
+					signature.SignatureIndex = prior
+					obj.Attributes = append(obj.Attributes, signature)
+					if _, ok := d.buildInvocationMetadata()(name); ok {
+						t.Fatal("duplicate original class Signature accepted")
+					}
+					break
+				}
+			}
+		}
+	}
+}

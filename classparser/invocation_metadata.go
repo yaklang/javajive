@@ -85,6 +85,26 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 		}
 		samePackage := pkg == c.PackageName
 		v := callbinding.Class{Name: n, Public: obj.AccessFlags&1 != 0 || samePackage, MembersComplete: true, ParentsComplete: true, IsInterface: obj.AccessFlags&0x200 != 0, Final: obj.AccessFlags&0x10 != 0}
+		// Method Signatures alone cannot describe an instantiated parent:
+		// preserve the class formal parameters and generic inheritance edges.
+		// Losing them turns Iterable<T> into a falsely non-generic declaration
+		// and can suppress a required erased invocation view.
+		seenSignature := false
+		for _, attribute := range obj.Attributes {
+			if signature, ok := attribute.(*SignatureAttribute); ok {
+				var err error
+				if seenSignature || signature == nil {
+					misses[n] = true
+					return callbinding.Class{}, false
+				}
+				v.Signature, err = obj.getUtf8(signature.SignatureIndex)
+				if err != nil {
+					misses[n] = true
+					return callbinding.Class{}, false
+				}
+				seenSignature = true
+			}
+		}
 		if sup := obj.GetSupperClassName(); sup != "" {
 			v.Parents = append(v.Parents, sup)
 		}
