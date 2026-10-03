@@ -375,7 +375,16 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 	if len(allNames) > 256 {
 		return nil
 	}
+	// InnerClasses lists direct references, not the complete lexical family.
+	// A deeper named sibling may use this anonymous type as a javac-8 private
+	// constructor access parameter. Traverse original owned nesting to closure
+	// before suppressing any source unit; unresolved external types stay external.
+	queue := make([]string, 0, len(allNames))
 	for name := range allNames {
+		queue = append(queue, name)
+	}
+	for cursor := 0; cursor < len(queue); cursor++ {
+		name := queue[cursor]
 		if name == p.owner || p.children[name] != nil {
 			continue
 		}
@@ -386,6 +395,26 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 		sibling, err := c.parseResolved(raw)
 		if err != nil || sibling.GetClassName() != name {
 			return nil
+		}
+		for _, attribute := range sibling.Attributes {
+			if inner, ok := attribute.(*InnerClassesAttribute); ok && inner != nil {
+				for _, row := range inner.Classes {
+					if row == nil {
+						return nil
+					}
+					nested, known := sourceBridgeClassName(sibling, row.InnerClassInfoIndex)
+					if !known {
+						return nil
+					}
+					if !allNames[nested] {
+						if len(allNames) >= 256 || !nativeProofWork(c.Work, 1) {
+							return nil
+						}
+						allNames[nested] = true
+						queue = append(queue, nested)
+					}
+				}
+			}
 		}
 		for _, member := range append(append([]*MemberInfo{}, sibling.Fields...), sibling.Methods...) {
 			descriptor, known := sourceBridgeUTF8(sibling, member.DescriptorIndex)
