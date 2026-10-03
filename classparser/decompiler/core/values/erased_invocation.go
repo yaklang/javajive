@@ -271,9 +271,15 @@ func (f *FunctionCallExpression) planErasedInvocationProof(ctx *class_context.Cl
 				return nil, false
 			}
 		}
+		// A caller variable with the selected erasure needs no raw view only
+		// when the operand actually has that same source variable. Object is
+		// assignable to K's erasure, not to K itself. This distinction matters
+		// inside erased SAM helpers: inventing a (K) check would change their
+		// payload checks and effects. Keep the exact descriptor input instead.
+		callerFormal := erasedInvocationCallerFormal(inst[i], params[i], ctx) && actual == bindingType(inst[i])
 		if types.IsWildcardType(inst[i]) {
 			conflict = true
-		} else if source := bindingType(inst[i]); source != params[i] && !erasedInvocationCallerFormal(inst[i], params[i], ctx) &&
+		} else if source := bindingType(inst[i]); source != params[i] && !callerFormal &&
 			(!callbinding.Assignable(actual, source, ctx.InvocationMetadata) || family.Proof == callbinding.Compete) {
 			conflict = true
 		}

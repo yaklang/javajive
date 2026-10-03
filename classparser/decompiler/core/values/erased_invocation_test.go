@@ -352,6 +352,42 @@ func TestErasedInvocationCallerVariableErasureAndShadowing(t *testing.T) {
 	}
 }
 
+func TestErasedInvocationCallerVariableDoesNotLicenseErasedPayload(t *testing.T) {
+	for _, scenario := range []string{"erased payload", "original checked payload", "same caller variable", "incomplete family", "different result", "poly payload"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, ctx, classes, _, _ := erasedInvocationFixture()
+			ctx.ClassName = "example.Consumer"
+			ctx.ClassSig = "<K:Lexample/Item;>Ljava/lang/Object;"
+			ctx.ClassTypeParams, ctx.TypeParams = []string{"K"}, []string{"K"}
+			f.Object = NewJavaRef(utils.NewRootVariableId(), nil, types.NewParameterizedType("example.Owner", []types.JavaType{types.NewJavaClass("K")}))
+			f.ClassName = "example.Owner"
+			want := scenario == "erased payload" || scenario == "original checked payload"
+			switch scenario {
+			case "original checked payload":
+				f.Arguments[0] = &CastExpression{Value: f.Arguments[0], TargetType: f.Arguments[0].Type(), OriginPC: 19}
+			case "same caller variable":
+				f.Arguments[0] = NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("K"))
+			case "incomplete family":
+				owner := classes["example/Owner"]
+				owner.MembersComplete = false
+				classes[owner.Name] = owner
+			case "different result":
+				f.Descriptor = "(Lexample/Item;Z)Ljava/lang/Object;"
+			case "poly payload":
+				f.Arguments[0] = &CustomValue{Flag: "lambda", TypeFunc: func() types.JavaType { return types.NewJavaClass("example.Item") }}
+			}
+			before, receiver := f.Arguments[0], f.Object
+			out, ok := f.planErasedInvocation(ctx)
+			if ok != want {
+				t.Fatalf("proof=%v want=%v", ok, want)
+			}
+			if ok && (out.Witness() != f.Witness() || out.Arguments[0].(*CastExpression).Value != before || out.Object.(*CastExpression).Value != receiver || f.Arguments[0] != before) {
+				t.Fatal("changed invocation witness, original checks or evaluation identity")
+			}
+		})
+	}
+}
+
 func TestErasedInvocationBooleanMaterializationProof(t *testing.T) {
 	integer := types.NewJavaPrimer(types.JavaInteger)
 	boolean := types.NewJavaPrimer(types.JavaBoolean)
