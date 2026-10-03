@@ -15,7 +15,7 @@ import (
 // particular an alias of this must never become a receiver-free value, and an
 // inherited Fieldref must resolve to the same storage as a moved capture.
 func TestAdversarialConstructorReceiverEffectsAliasesStorageAndFailureBoundaries(t *testing.T) {
-	javac, _ := t04Tools(t)
+	javac, java := t04Tools(t)
 	dir := t.TempDir()
 	source := `class EffectBase {int value;EffectBase(){value=3;}}
  class EffectAlias {int value;EffectAlias(int n){EffectAlias alias=this;alias.value=n+2;}}
@@ -29,6 +29,16 @@ func TestAdversarialConstructorReceiverEffectsAliasesStorageAndFailureBoundaries
  class EffectArray {int value;EffectArray(int[] n){value=n.length;}}
  class EffectOpaque {int value;EffectOpaque(){value=System.identityHashCode(this);}}
  class EffectBranch {int value;EffectBranch(int n){value=n==0?1:2;}}
+ class EffectEarlyReturn {int value;EffectEarlyReturn(int n){if(n<0){value=3;return;}value=n;}}
+ class EffectBranchPublish {static Object escaped;int value;EffectBranchPublish(int n){if(n<0){Object alias=this;escaped=alias;}else{value=n;}}}
+ class EffectBranchDivide {int value;EffectBranchDivide(int n){if(n<0){value=7/n;}else{value=n;}}}
+ class EffectBranchRead {int value;int copied;EffectBranchRead(int n){value=n;if(n<0){copied=value;}else{copied=3;}}}
+ class EffectLoop {int value;EffectLoop(int n){for(int i=0;i<n;i++){value+=i;}}}
+ class EffectCompareWide {long value;EffectCompareWide(long n,double d){if(n>0&&d>0){value=n;}else{value=0;}}}
+ class EffectAccessDriver {public static void main(String[] args){
+ try{System.out.println("read:"+new EffectRead().copied);}catch(IllegalAccessError failure){System.out.println("read:IllegalAccessError");}
+ try{new EffectOverwrite();System.out.println("write:ok");}catch(IllegalAccessError failure){System.out.println("write:IllegalAccessError");}
+ }}
  class EffectVolatile {volatile int value;EffectVolatile(){value=3;}}
  `
 	path := filepath.Join(dir, "Effects.java")
@@ -59,7 +69,14 @@ func TestAdversarialConstructorReceiverEffectsAliasesStorageAndFailureBoundaries
 			{"EffectRead", "()V", "EffectBase", false}, {"EffectOverwrite", "()V", "EffectBase", false},
 			{"EffectPublish", "()V", "", false}, {"EffectHeapAlias", "()V", "", false},
 			{"EffectDivide", "(I)V", "", false}, {"EffectArray", "([I)V", "", false},
-			{"EffectOpaque", "()V", "", false}, {"EffectBranch", "(I)V", "", false}, {"EffectVolatile", "()V", "", false},
+			{"EffectOpaque", "()V", "", false}, {"EffectBranch", "(I)V", "", true},
+			{"EffectEarlyReturn", "(I)V", "", true},
+			{"EffectBranchPublish", "(I)V", "", false},
+			{"EffectBranchDivide", "(I)V", "", false},
+			{"EffectBranchRead", "(I)V", "", true},
+			{"EffectBranchRead", "(I)V", "EffectBranchRead", false},
+			{"EffectLoop", "(I)V", "", false},
+			{"EffectCompareWide", "(JD)V", "", true}, {"EffectVolatile", "()V", "", false},
 		} {
 			t.Run(debug+"/"+tc.name+"/"+tc.storage, func(t *testing.T) {
 				writes := map[string]bool{}
@@ -101,6 +118,81 @@ func TestAdversarialConstructorReceiverEffectsAliasesStorageAndFailureBoundaries
 		if dumper.constructorReceiverEffects(wide, &malformed, constructorMotionOps(decoder), "(JD)V", map[string]bool{}, map[string]bool{}, &remaining, 0) {
 			t.Fatal("invalid declared stack capacity accepted")
 		}
+		raw, _ = resolve("EffectBranch")
+		branch, err := Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var branchCode *CodeAttribute
+		for _, m := range branch.Methods {
+			n, _ := branch.getUtf8(m.NameIndex)
+			if n == "<init>" {
+				for _, a := range m.Attributes {
+					if v, ok := a.(*CodeAttribute); ok {
+						branchCode = v
+					}
+				}
+			}
+		}
+		if branchCode == nil {
+			t.Fatal("missing branch constructor")
+		}
+		decoder = core.NewDecompiler(branchCode.Code, func(i int) values.JavaValue { return GetValueFromCP(branch.ConstantPool, i) })
+		if err := decoder.ParseOpcode(); err != nil {
+			t.Fatal(err)
+		}
+		originalOps := constructorMotionOps(decoder)
+		changed := false
+		for index, op := range originalOps {
+			if op.Instr.OpCode >= core.OP_IFEQ && op.Instr.OpCode <= core.OP_IFLE {
+				changed = true
+				for _, data := range [][]byte{{0, 0}, {0, 1}, {0x7f, 0xff}, {0xff, 0xff}} {
+					badOps := append([]*core.OpCode(nil), originalOps...)
+					bad := *op
+					bad.Data = data
+					badOps[index] = &bad
+					remaining := 512
+					if dumper.constructorReceiverEffects(branch, branchCode, badOps, "(I)V", map[string]bool{}, map[string]bool{}, &remaining, 0) {
+						t.Fatalf("invalid/cyclic bytecode target accepted: %x", data)
+					}
+				}
+				break
+			}
+		}
+		if !changed {
+			t.Fatal("fixture lacks original branch")
+		}
+
+		baseRaw, _ := resolve("EffectBase")
+		for _, tc := range []struct {
+			flags  uint16
+			read   bool
+			output string
+		}{
+			{2, false, "read:IllegalAccessError\nwrite:IllegalAccessError\n"},
+			{16, true, "read:3\nwrite:IllegalAccessError\n"},
+		} {
+			base, err := Parse(baseRaw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base.Fields[0].AccessFlags = tc.flags
+			if err := os.WriteFile(filepath.Join(dir, "EffectBase.class"), base.Bytes(), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if got := t04RunJava(t, java, dir, "EffectAccessDriver"); got != tc.output {
+				t.Fatalf("original access oracle: %q want %q", got, tc.output)
+			}
+			remaining := 512
+			if got := dumper.constructorChainDoesNotObserve("EffectRead", "()V", map[string]bool{}, map[string]bool{}, &remaining, 0); got != tc.read {
+				t.Fatalf("ancestor access flags %x: read proof=%v", tc.flags, got)
+			}
+			remaining = 512
+			if dumper.constructorChainDoesNotObserve("EffectOverwrite", "()V", map[string]bool{}, map[string]bool{}, &remaining, 0) {
+				t.Fatalf("IllegalAccessError write accepted for motion: %x", tc.flags)
+			}
+		}
+
 	}
 }
 

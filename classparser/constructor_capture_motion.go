@@ -259,9 +259,13 @@ func (c *ClassObjectDumper) constructorChainDoesNotObserve(owner, descriptor str
 	if decoder.ParseOpcode() != nil {
 		return false
 	}
-	ops := constructorMotionOps(decoder)
-	*remaining -= len(decoder.Opcodes())
-	if *remaining < 0 {
+	ops := []*core.OpCode{}
+	for _, op := range decoder.Opcodes() {
+		if op != nil && op.Instr != nil && op.Instr.OpCode != core.OP_START {
+			ops = append(ops, op)
+		}
+	}
+	if len(decoder.Opcodes()) > *remaining {
 		return false
 	}
 	return c.constructorReceiverEffects(obj, code, ops, descriptor, writes, active, remaining, depth)

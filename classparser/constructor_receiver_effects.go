@@ -1,6 +1,10 @@
 package javaclassparser
 
 import (
+	"encoding/binary"
+	"strconv"
+	"strings"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -60,9 +64,16 @@ func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, 
 // A Fieldref may name a subclass while resolving to an ancestor's field. Bind
 // the symbolic owner first, then search its original declaration hierarchy.
 // Parent and child fields named this$0 must remain different storage locations.
-func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *values.JavaClassMember, remaining *int) (string, bool) {
+func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *values.JavaClassMember, put bool, remaining *int) (string, bool) {
 	if member == nil {
 		return "", false
+	}
+	caller := obj.GetClassName()
+	pkg := func(name string) string {
+		if slash := strings.LastIndexByte(name, '/'); slash >= 0 {
+			return name[:slash]
+		}
+		return ""
 	}
 	symbolic := false
 	seen := map[string]bool{}
@@ -86,7 +97,12 @@ func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *val
 				}
 			}
 			if matches != 0 {
-				return name + "\x00" + member.Member + "\x00" + member.Description, matches == 1 && flags&(0x0008|0x0040) == 0
+				// Resolution must not introduce an IllegalAccessError after
+				// initialization. Protected access is through this descendant;
+				// private ancestor access needs a separate nestmate proof.
+				accessible := name == caller || flags&0x0001 != 0 || flags&0x0004 != 0 || flags&0x0002 == 0 && pkg(name) == pkg(caller)
+				writable := !put || flags&0x0010 == 0 || name == caller
+				return name + "\x00" + member.Member + "\x00" + member.Description, matches == 1 && flags&(0x0008|0x0040) == 0 && accessible && writable
 			}
 		}
 		var ok bool
@@ -98,9 +114,10 @@ func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *val
 	return "", false
 }
 
-// This first effect domain admits straight-line receiver-independent scalar
-// computation, local aliases, own/inherited ordinary field access and complete
-// constructor delegation. Unknown control flow remains unsupported. A normal
+// This effect domain admits receiver-independent scalar computation, local
+// aliases, ordinary field access and acyclic conditional control flow. Every
+// feasible abstract path must finish initialization and remain receiver-silent.
+// Paths are memoized by PC and exact type/receiver state; loops fail closed. A normal
 // Java exception after Object initialization can expose the receiver to a
 // finalizer, even without an explicit publication; potentially throwing opaque
 // operations after initialization are therefore deliberately rejected.
@@ -120,257 +137,352 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 		locals[slot] = value
 		slot += value.width()
 	}
-	stack := []constructorEffectValue{}
-	pop := func(kind byte) (constructorEffectValue, bool) {
-		if len(stack) == 0 {
-			return constructorEffectValue{}, false
-		}
-		v := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		return v, kind == 0 || v.kind == kind
-	}
-	initialized := false
+	offsets := map[int]int{}
 	for index, op := range ops {
-		// Check before each instruction, including local-load fast paths and
-		// RETURN. A malformed declared stack limit cannot certify movement.
-		words := 0
-		for _, v := range stack {
-			words += v.width()
+		if op != nil {
+			offsets[int(op.CurrentOffset)] = index
 		}
-		if words > int(code.MaxStack) {
+	}
+	target := func(op *core.OpCode) (int, bool) {
+		delta := 0
+		if len(op.Data) == 2 {
+			delta = int(int16(binary.BigEndian.Uint16(op.Data)))
+		} else if len(op.Data) == 4 && op.Instr.OpCode == core.OP_GOTO_W {
+			delta = int(int32(binary.BigEndian.Uint32(op.Data)))
+		} else {
+			return 0, false
+		}
+		pc := int(op.CurrentOffset) + delta
+		index, ok := offsets[pc]
+		return index, ok
+	}
+	memo := map[string]bool{}
+	var walk func(int, []constructorEffectValue, []constructorEffectValue, bool) bool
+	walk = func(start int, locals, stack []constructorEffectValue, initialized bool) (result bool) {
+		if start < 0 || start >= len(ops) {
 			return false
 		}
-		if op == nil || op.Instr == nil {
-			return false
+		key := strconv.Itoa(start) + ":"
+		state := []byte(key)
+		if initialized {
+			state = append(state, 1)
+		} else {
+			state = append(state, 0)
 		}
-		opcode := op.Instr.OpCode
-		access := core.LocalAccessOf(opcode)
-		if access.Read || access.Write {
-			kind := byte(0)
-			if opcode == core.OP_IINC {
-				slot := core.GetRetrieveIdx(op)
-				if slot < 0 || slot >= len(locals) || locals[slot].kind != 'I' {
+		for _, part := range [][]constructorEffectValue{locals, stack} {
+			for _, v := range part {
+				state = append(state, v.kind)
+				if v.receiver {
+					state = append(state, 1)
+				} else {
+					state = append(state, 0)
+				}
+			}
+			state = append(state, 255)
+		}
+		key = string(state)
+		if prior, known := memo[key]; known {
+			return prior
+		}
+		defer func() { memo[key] = result }()
+		pop := func(kind byte) (constructorEffectValue, bool) {
+			if len(stack) == 0 {
+				return constructorEffectValue{}, false
+			}
+			v := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			return v, kind == 0 || v.kind == kind
+		}
+		for index := start; index < len(ops); index++ {
+			op := ops[index]
+			*remaining--
+			if *remaining < 0 {
+				return false
+			}
+			// Check before each instruction, including local-load fast paths and
+			// RETURN. A malformed declared stack limit cannot certify movement.
+			words := 0
+			for _, v := range stack {
+				words += v.width()
+			}
+			if words > int(code.MaxStack) {
+				return false
+			}
+			if op == nil || op.Instr == nil {
+				return false
+			}
+			opcode := op.Instr.OpCode
+			access := core.LocalAccessOf(opcode)
+			if access.Read || access.Write {
+				kind := byte(0)
+				if opcode == core.OP_IINC {
+					slot := core.GetRetrieveIdx(op)
+					if slot < 0 || slot >= len(locals) || locals[slot].kind != 'I' {
+						return false
+					}
+					continue
+				}
+				for category, k := range []byte{'I', 'J', 'F', 'D', 'L'} {
+					if opcode == core.OP_ILOAD+category || opcode == core.OP_ISTORE+category || opcode >= core.OP_ILOAD_0+category*4 && opcode < core.OP_ILOAD_0+category*4+4 || opcode >= core.OP_ISTORE_0+category*4 && opcode < core.OP_ISTORE_0+category*4+4 {
+						kind = k
+					}
+				}
+				if kind == 0 {
 					return false
+				}
+				if access.Read {
+					slot := core.GetRetrieveIdx(op)
+					if slot < 0 || slot+access.Width > len(locals) || locals[slot].kind != kind {
+						return false
+					}
+					stack = append(stack, locals[slot])
+				} else {
+					v, ok := pop(kind)
+					slot := core.GetStoreIdx(op)
+					if !ok || slot < 0 || slot+v.width() > len(locals) {
+						return false
+					}
+					// Overwriting either half invalidates the previous wide value.
+					if slot > 0 && locals[slot-1].width() == 2 {
+						locals[slot-1] = constructorEffectValue{}
+					}
+					if locals[slot].width() == 2 {
+						locals[slot+1] = constructorEffectValue{}
+					}
+					locals[slot] = v
+					if v.width() == 2 {
+						locals[slot+1] = constructorEffectValue{}
+					}
 				}
 				continue
 			}
-			for category, k := range []byte{'I', 'J', 'F', 'D', 'L'} {
-				if opcode == core.OP_ILOAD+category || opcode == core.OP_ISTORE+category || opcode >= core.OP_ILOAD_0+category*4 && opcode < core.OP_ILOAD_0+category*4+4 || opcode >= core.OP_ISTORE_0+category*4 && opcode < core.OP_ISTORE_0+category*4+4 {
-					kind = k
+			switch {
+			case opcode == core.OP_NOP:
+				continue
+			case opcode == core.OP_ACONST_NULL:
+				stack = append(stack, constructorEffectValue{kind: 'L'})
+			case opcode >= core.OP_ICONST_M1 && opcode <= core.OP_ICONST_5 || opcode == core.OP_BIPUSH || opcode == core.OP_SIPUSH:
+				stack = append(stack, constructorEffectValue{kind: 'I'})
+			case opcode >= core.OP_LCONST_0 && opcode <= core.OP_DCONST_1:
+				kind := byte('F')
+				if opcode <= core.OP_LCONST_1 {
+					kind = 'J'
+				} else if opcode >= core.OP_DCONST_0 {
+					kind = 'D'
 				}
-			}
-			if kind == 0 {
-				return false
-			}
-			if access.Read {
-				slot := core.GetRetrieveIdx(op)
-				if slot < 0 || slot+access.Width > len(locals) || locals[slot].kind != kind {
+				stack = append(stack, constructorEffectValue{kind: kind})
+			case opcode == core.OP_LDC || opcode == core.OP_LDC_W || opcode == core.OP_LDC2_W:
+				cp := 0
+				if len(op.Data) == 1 {
+					cp = int(op.Data[0])
+				} else if len(op.Data) == 2 {
+					cp = int(core.Convert2bytesToInt(op.Data))
+				}
+				if cp <= 0 || cp > len(obj.ConstantPool) {
 					return false
 				}
-				stack = append(stack, locals[slot])
-			} else {
-				v, ok := pop(kind)
-				slot := core.GetStoreIdx(op)
-				if !ok || slot < 0 || slot+v.width() > len(locals) {
+				kind := byte(0)
+				switch obj.ConstantPool[cp-1].(type) {
+				case *ConstantIntegerInfo:
+					kind = 'I'
+				case *ConstantFloatInfo:
+					kind = 'F'
+				case *ConstantLongInfo:
+					kind = 'J'
+				case *ConstantDoubleInfo:
+					kind = 'D'
+				case *ConstantStringInfo, *ConstantClassInfo:
+					kind = 'L'
+				}
+				if _, class := obj.ConstantPool[cp-1].(*ConstantClassInfo); class && initialized {
+					// A missing class can fail linkage after Object initialization.
+					// Do not move captures past that potentially finalizable failure.
 					return false
 				}
-				// Overwriting either half invalidates the previous wide value.
-				if slot > 0 && locals[slot-1].width() == 2 {
-					locals[slot-1] = constructorEffectValue{}
+				if kind == 0 || (opcode == core.OP_LDC2_W) != (kind == 'J' || kind == 'D') {
+					return false
 				}
-				if locals[slot].width() == 2 {
-					locals[slot+1] = constructorEffectValue{}
+				stack = append(stack, constructorEffectValue{kind: kind})
+			case opcode == core.OP_DUP:
+				v, ok := pop(0)
+				if !ok || v.width() != 1 {
+					return false
 				}
-				locals[slot] = v
-				if v.width() == 2 {
-					locals[slot+1] = constructorEffectValue{}
-				}
-			}
-			continue
-		}
-		switch {
-		case opcode == core.OP_ACONST_NULL:
-			stack = append(stack, constructorEffectValue{kind: 'L'})
-		case opcode >= core.OP_ICONST_M1 && opcode <= core.OP_ICONST_5 || opcode == core.OP_BIPUSH || opcode == core.OP_SIPUSH:
-			stack = append(stack, constructorEffectValue{kind: 'I'})
-		case opcode >= core.OP_LCONST_0 && opcode <= core.OP_DCONST_1:
-			kind := byte('F')
-			if opcode <= core.OP_LCONST_1 {
-				kind = 'J'
-			} else if opcode >= core.OP_DCONST_0 {
-				kind = 'D'
-			}
-			stack = append(stack, constructorEffectValue{kind: kind})
-		case opcode == core.OP_LDC || opcode == core.OP_LDC_W || opcode == core.OP_LDC2_W:
-			cp := 0
-			if len(op.Data) == 1 {
-				cp = int(op.Data[0])
-			} else if len(op.Data) == 2 {
-				cp = int(core.Convert2bytesToInt(op.Data))
-			}
-			if cp <= 0 || cp > len(obj.ConstantPool) {
-				return false
-			}
-			kind := byte(0)
-			switch obj.ConstantPool[cp-1].(type) {
-			case *ConstantIntegerInfo:
-				kind = 'I'
-			case *ConstantFloatInfo:
-				kind = 'F'
-			case *ConstantLongInfo:
-				kind = 'J'
-			case *ConstantDoubleInfo:
-				kind = 'D'
-			case *ConstantStringInfo, *ConstantClassInfo:
-				kind = 'L'
-			}
-			if _, class := obj.ConstantPool[cp-1].(*ConstantClassInfo); class && initialized {
-				// A missing class can fail linkage after Object initialization.
-				// Do not move captures past that potentially finalizable failure.
-				return false
-			}
-			if kind == 0 || (opcode == core.OP_LDC2_W) != (kind == 'J' || kind == 'D') {
-				return false
-			}
-			stack = append(stack, constructorEffectValue{kind: kind})
-		case opcode == core.OP_DUP:
-			v, ok := pop(0)
-			if !ok || v.width() != 1 {
-				return false
-			}
-			stack = append(stack, v, v)
-		case opcode == core.OP_DUP2:
-			v, ok := pop(0)
-			if !ok {
-				return false
-			}
-			if v.width() == 2 {
 				stack = append(stack, v, v)
-			} else {
-				w, ok := pop(0)
-				if !ok || w.width() != 1 {
+			case opcode == core.OP_DUP2:
+				v, ok := pop(0)
+				if !ok {
 					return false
 				}
-				stack = append(stack, w, v, w, v)
-			}
-		case opcode == core.OP_SWAP:
-			v, ok := pop(0)
-			w, ok2 := pop(0)
-			if !ok || !ok2 || v.width() != 1 || w.width() != 1 {
-				return false
-			}
-			stack = append(stack, v, w)
-		case opcode == core.OP_POP || opcode == core.OP_POP2:
-			v, ok := pop(0)
-			if !ok {
-				return false
-			}
-			if opcode == core.OP_POP && v.width() != 1 {
-				return false
-			}
-			if opcode == core.OP_POP2 && v.width() == 1 {
-				w, ok := pop(0)
-				if !ok || w.width() != 1 {
+				if v.width() == 2 {
+					stack = append(stack, v, v)
+				} else {
+					w, ok := pop(0)
+					if !ok || w.width() != 1 {
+						return false
+					}
+					stack = append(stack, w, v, w, v)
+				}
+			case opcode == core.OP_SWAP:
+				v, ok := pop(0)
+				w, ok2 := pop(0)
+				if !ok || !ok2 || v.width() != 1 || w.width() != 1 {
 					return false
 				}
-			}
-		case opcode == core.OP_GETFIELD || opcode == core.OP_PUTFIELD:
-			member := constructorMotionMember(obj, op, opcode)
-			if member == nil {
-				return false
-			}
-			typeOf := constructorEffectType(member.Description)
-			if typeOf.width() == 0 {
-				return false
-			}
-			if opcode == core.OP_PUTFIELD {
-				value, ok := pop(typeOf.kind)
-				if !ok || value.receiver {
+				stack = append(stack, v, w)
+			case opcode == core.OP_POP || opcode == core.OP_POP2:
+				v, ok := pop(0)
+				if !ok {
 					return false
 				}
-			}
-			receiver, ok := pop('L')
-			if !ok || !receiver.receiver {
-				return false
-			}
-			field, known := c.constructorEffectField(obj, member, remaining)
-			if !known || writes[field] {
-				return false
-			}
-			if opcode == core.OP_GETFIELD {
-				if !initialized {
+				if opcode == core.OP_POP && v.width() != 1 {
 					return false
 				}
-				stack = append(stack, typeOf)
-			}
-		case opcode == core.OP_INVOKESPECIAL:
-			member := constructorMotionMember(obj, op, opcode)
-			if member == nil || member.Member != "<init>" || initialized || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) {
-				return false
-			}
-			args, result, err := callbinding.Descriptor(member.Description)
-			if err != nil || result != "V" {
-				return false
-			}
-			for i := len(args) - 1; i >= 0; i-- {
-				v, ok := pop(constructorEffectType(args[i]).kind)
-				if !ok || v.receiver {
+				if opcode == core.OP_POP2 && v.width() == 1 {
+					w, ok := pop(0)
+					if !ok || w.width() != 1 {
+						return false
+					}
+				}
+			case opcode == core.OP_GETFIELD || opcode == core.OP_PUTFIELD:
+				member := constructorMotionMember(obj, op, opcode)
+				if member == nil {
 					return false
 				}
-			}
-			v, ok := pop('L')
-			if !ok || !v.receiver || !c.constructorChainDoesNotObserve(member.Name, member.Description, writes, active, remaining, depth+1) {
-				return false
-			}
-			initialized = true
-		case opcode >= core.OP_IADD && opcode <= core.OP_DREM:
-			kind := []byte{'I', 'J', 'F', 'D'}[(opcode-core.OP_IADD)%4]
-			if kind == 'I' || kind == 'J' {
-				if opcode >= core.OP_IDIV {
+				typeOf := constructorEffectType(member.Description)
+				params, _, err := callbinding.Descriptor("(" + member.Description + ")V")
+				if err != nil || len(params) != 1 || typeOf.width() == 0 {
 					return false
 				}
-			}
-			_, ok := pop(kind)
-			_, ok2 := pop(kind)
-			if !ok || !ok2 {
+				if opcode == core.OP_PUTFIELD {
+					value, ok := pop(typeOf.kind)
+					if !ok || value.receiver {
+						return false
+					}
+				}
+				receiver, ok := pop('L')
+				if !ok || !receiver.receiver {
+					return false
+				}
+				field, known := c.constructorEffectField(obj, member, opcode == core.OP_PUTFIELD, remaining)
+				if !known || writes[field] {
+					return false
+				}
+				if opcode == core.OP_GETFIELD {
+					if !initialized {
+						return false
+					}
+					stack = append(stack, typeOf)
+				}
+			case opcode == core.OP_INVOKESPECIAL:
+				member := constructorMotionMember(obj, op, opcode)
+				if member == nil || member.Member != "<init>" || initialized || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) {
+					return false
+				}
+				args, result, err := callbinding.Descriptor(member.Description)
+				if err != nil || result != "V" {
+					return false
+				}
+				for i := len(args) - 1; i >= 0; i-- {
+					v, ok := pop(constructorEffectType(args[i]).kind)
+					if !ok || v.receiver {
+						return false
+					}
+				}
+				v, ok := pop('L')
+				if !ok || !v.receiver || !c.constructorChainDoesNotObserve(member.Name, member.Description, writes, active, remaining, depth+1) {
+					return false
+				}
+				initialized = true
+			case opcode >= core.OP_IADD && opcode <= core.OP_DREM:
+				kind := []byte{'I', 'J', 'F', 'D'}[(opcode-core.OP_IADD)%4]
+				if kind == 'I' || kind == 'J' {
+					if opcode >= core.OP_IDIV {
+						return false
+					}
+				}
+				_, ok := pop(kind)
+				_, ok2 := pop(kind)
+				if !ok || !ok2 {
+					return false
+				}
+				stack = append(stack, constructorEffectValue{kind: kind})
+			case opcode >= core.OP_INEG && opcode <= core.OP_DNEG:
+				kind := []byte{'I', 'J', 'F', 'D'}[opcode-core.OP_INEG]
+				_, ok := pop(kind)
+				if !ok {
+					return false
+				}
+				stack = append(stack, constructorEffectValue{kind: kind})
+			case opcode >= core.OP_ISHL && opcode <= core.OP_LXOR:
+				kind := byte('I')
+				if (opcode-core.OP_ISHL)%2 == 1 {
+					kind = 'J'
+				}
+				right := kind
+				if opcode <= core.OP_LUSHR {
+					right = 'I'
+				}
+				_, ok := pop(right)
+				_, ok2 := pop(kind)
+				if !ok || !ok2 {
+					return false
+				}
+				stack = append(stack, constructorEffectValue{kind: kind})
+			case opcode >= core.OP_I2L && opcode <= core.OP_I2S:
+				conversions := [][2]byte{{'I', 'J'}, {'I', 'F'}, {'I', 'D'}, {'J', 'I'}, {'J', 'F'}, {'J', 'D'}, {'F', 'I'}, {'F', 'J'}, {'F', 'D'}, {'D', 'I'}, {'D', 'J'}, {'D', 'F'}, {'I', 'I'}, {'I', 'I'}, {'I', 'I'}}
+				pair := conversions[opcode-core.OP_I2L]
+				_, ok := pop(pair[0])
+				if !ok {
+					return false
+				}
+				stack = append(stack, constructorEffectValue{kind: pair[1]})
+			case opcode >= core.OP_IFEQ && opcode <= core.OP_IF_ACMPNE || opcode == core.OP_IFNULL || opcode == core.OP_IFNONNULL:
+				kind, count := byte('I'), 1
+				if opcode >= core.OP_IF_ICMPEQ && opcode <= core.OP_IF_ACMPNE {
+					count = 2
+				}
+				if opcode >= core.OP_IF_ACMPEQ && opcode <= core.OP_IF_ACMPNE || opcode == core.OP_IFNULL || opcode == core.OP_IFNONNULL {
+					kind = 'L'
+				}
+				for i := 0; i < count; i++ {
+					if _, ok := pop(kind); !ok {
+						return false
+					}
+				}
+				branch, ok := target(op)
+				if !ok || branch <= index {
+					return false
+				}
+				// Each arm owns its aliases and operand stack. A publication or exceptional
+				// operation in even one arm rejects the entire movement proof.
+				return walk(branch, append([]constructorEffectValue(nil), locals...), append([]constructorEffectValue(nil), stack...), initialized) && walk(index+1, locals, stack, initialized)
+			case opcode == core.OP_GOTO || opcode == core.OP_GOTO_W:
+				branch, ok := target(op)
+				if !ok || branch <= index {
+					return false
+				}
+				return walk(branch, locals, stack, initialized)
+			case opcode >= core.OP_LCMP && opcode <= core.OP_DCMPG:
+				kind := byte('D')
+				if opcode == core.OP_LCMP {
+					kind = 'J'
+				} else if opcode <= core.OP_FCMPG {
+					kind = 'F'
+				}
+				_, ok := pop(kind)
+				_, ok2 := pop(kind)
+				if !ok || !ok2 {
+					return false
+				}
+				stack = append(stack, constructorEffectValue{kind: 'I'})
+			case opcode == core.OP_RETURN:
+				return initialized && len(stack) == 0
+			default:
 				return false
 			}
-			stack = append(stack, constructorEffectValue{kind: kind})
-		case opcode >= core.OP_INEG && opcode <= core.OP_DNEG:
-			kind := []byte{'I', 'J', 'F', 'D'}[opcode-core.OP_INEG]
-			_, ok := pop(kind)
-			if !ok {
-				return false
-			}
-			stack = append(stack, constructorEffectValue{kind: kind})
-		case opcode >= core.OP_ISHL && opcode <= core.OP_LXOR:
-			kind := byte('I')
-			if (opcode-core.OP_ISHL)%2 == 1 {
-				kind = 'J'
-			}
-			right := kind
-			if opcode <= core.OP_LUSHR {
-				right = 'I'
-			}
-			_, ok := pop(right)
-			_, ok2 := pop(kind)
-			if !ok || !ok2 {
-				return false
-			}
-			stack = append(stack, constructorEffectValue{kind: kind})
-		case opcode >= core.OP_I2L && opcode <= core.OP_I2S:
-			conversions := [][2]byte{{'I', 'J'}, {'I', 'F'}, {'I', 'D'}, {'J', 'I'}, {'J', 'F'}, {'J', 'D'}, {'F', 'I'}, {'F', 'J'}, {'F', 'D'}, {'D', 'I'}, {'D', 'J'}, {'D', 'F'}, {'I', 'I'}, {'I', 'I'}, {'I', 'I'}}
-			pair := conversions[opcode-core.OP_I2L]
-			_, ok := pop(pair[0])
-			if !ok {
-				return false
-			}
-			stack = append(stack, constructorEffectValue{kind: pair[1]})
-		case opcode == core.OP_RETURN:
-			return initialized && len(stack) == 0 && index == len(ops)-1
-		default:
-			return false
 		}
+		return false
 	}
-	return false
+	return walk(0, locals, nil, false)
 }
