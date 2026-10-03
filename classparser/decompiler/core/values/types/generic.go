@@ -1862,8 +1862,11 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 		// ancestor's unrelated generic method.
 		if descriptor != "" {
 			if msig, declared := methodSigs[class_context.MethodDescKey(method, descriptor)]; declared {
-				if msig == "" || len(formals) > 0 && len(args) != len(formals) {
+				if len(formals) > 0 && len(args) != len(formals) {
 					return nil, nil, nil
+				}
+				if msig == "" {
+					return resolveSourceBridgeReturn(funcCtx, provider, internal, classSig, sigma, method, descriptor, argc, visited)
 				}
 				if _, params, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
 					// Method formals shadow same-spelled class formals. Never
@@ -1951,6 +1954,41 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 		}
 	}
 	return nil, nil, nil
+}
+
+// The empty exact entry still blocks ordinary inheritance. A separately
+// witnessed omitted bridge can expose its direct parent's source declaration;
+// compose that exact superclass edge rather than searching sibling interfaces
+// or falling back to an arity-only overload. No arguments or runtime casts move.
+func resolveSourceBridgeReturn(ctx *class_context.ClassContext, provider ClassSigProvider, owner, classSig string, sigma map[string]JavaType, method, descriptor string, argc int, visited map[string]bool) ([]JavaType, JavaType, []string) {
+	if ctx.SourceBridgeTarget == nil || argc != 0 || !strings.HasPrefix(descriptor, "()L") || len(sigma) != len(ClassFormalTypeParamNames(classSig)) {
+		return nil, nil, nil
+	}
+	target, proved := ctx.SourceBridgeTarget(owner, method, descriptor)
+	if !proved || target == "" || target == owner {
+		return nil, nil, nil
+	}
+	sup, _ := ParseClassSignatureSupers(classSig)
+	if sup == nil {
+		return nil, nil, nil
+	}
+	raw, known := RawClassFQN(sup)
+	if !known || dotToInternal(raw) != dotToInternal(target) {
+		return nil, nil, nil
+	}
+	var args []JavaType
+	if pt, ok := AsParameterizedType(sup); ok {
+		args = make([]JavaType, len(pt.TypeArgs))
+		for i, t := range pt.TypeArgs {
+			args[i] = SubstituteTypeVars(t, sigma)
+		}
+	} else {
+		parent, _, ok := provider(target)
+		if !ok || len(ClassFormalTypeParamNames(parent)) != 0 {
+			return nil, nil, nil
+		}
+	}
+	return resolveSignatureWalk(ctx, provider, target, args, method, descriptor, argc, visited)
 }
 
 // FieldSigProvider yields a jar-internal class's FIELD generic Signature by binary internal name and

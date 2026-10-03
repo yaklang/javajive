@@ -279,6 +279,10 @@ type ClassContext struct {
 	// OverloadFamilyUnproven is set when an invocation's overload family could not
 	// be proven complete, so reconstructed overload selection remains unverified.
 	OverloadFamilyUnproven bool
+	// SourceBridgeTarget proves an omitted receiver-only accessibility bridge
+	// forwards the same descriptor to its direct superclass. This affects only
+	// source return-type lookup; original declarations and invoke witnesses stay.
+	SourceBridgeTarget func(owner, name, descriptor string) (string, bool)
 }
 
 // Getenv returns a request-local JDEC_* value. Missing snapshot keys are unset.

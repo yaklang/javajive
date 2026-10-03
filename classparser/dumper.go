@@ -1274,6 +1274,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// cases. Only wired on the jar / DecompileWithResolver path (foldSiblingResolver != nil).
 		c.FuncCtx.ClassSig = classSigStr
 		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
+		c.FuncCtx.SourceBridgeTarget = c.buildSourceBridgeTargets()
 		c.FuncCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
 		c.FuncCtx.SiblingClassAccessible = c.buildSiblingClassAccessible()
 		c.FuncCtx.SiblingCtorSig = c.buildSiblingCtorSig()
