@@ -187,6 +187,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 		ifStatementNode.AddNext(node)
 	}
 	markEncodedJumps(ifStatementNode, ifBodyNodes)
+	retargetProtectedIfBoundary(manager.TryNodes, ifNode, ifStatementNode)
 
 	return nil
 }
