@@ -115,7 +115,13 @@ func sameFinallyEffectTree(rows []core.HandlerRange, a, b values.JavaValue, excl
 		return same(&copyX, &copyY)
 	case *values.JavaExpression:
 		y, ok := b.(*values.JavaExpression)
-		if !ok || x == nil || y == nil || x.Op != y.Op || len(x.Values) != len(y.Values) || len(x.Values) != 2 || !typeSame(x.Type(), y.Type()) {
+		if !ok || x == nil || y == nil || x.Op != y.Op || len(x.Values) != len(y.Values) || !typeSame(x.Type(), y.Type()) {
+			return false
+		}
+		if x.Op == values.Not {
+			return sameFinallyBooleanNotShape(x, y) && same(x.Values[0], y.Values[0])
+		}
+		if len(x.Values) != 2 {
 			return false
 		}
 		switch x.Op {

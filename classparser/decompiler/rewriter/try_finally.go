@@ -584,6 +584,10 @@ func sameFinallyStableValue(a, b values.JavaValue, excluded []*values.JavaRef, d
 			return false
 		}
 		switch x.Op {
+		case values.Not:
+			if !sameFinallyBooleanNotShape(x, y) {
+				return false
+			}
 		case values.EQ, values.NEQ:
 			if len(x.Values) != 2 {
 				return false
@@ -599,4 +603,22 @@ func sameFinallyStableValue(a, b values.JavaValue, excluded []*values.JavaRef, d
 		return true
 	}
 	return false
+}
+
+// Boolean negation is a total, effect-free operator. Its operands still require
+// the same binding/effect-domain proof; numeric nonzero tests, different arity
+// or a coincidentally rendered "!" are not evidence of the same cleanup guard.
+func sameFinallyBooleanNotShape(x, y *values.JavaExpression) bool {
+	if x == nil || y == nil || x.Op != values.Not || y.Op != values.Not || len(x.Values) != 1 || len(y.Values) != 1 {
+		return false
+	}
+	boolean := func(v values.JavaValue) bool {
+		v = plainTryValue(v)
+		if v == nil || v.Type() == nil {
+			return false
+		}
+		p, ok := v.Type().RawType().(*types.JavaPrimer)
+		return ok && p != nil && p.Name == types.JavaBoolean
+	}
+	return boolean(x) && boolean(y) && boolean(x.Values[0]) && boolean(y.Values[0])
 }
