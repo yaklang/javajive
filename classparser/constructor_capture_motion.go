@@ -63,8 +63,8 @@ func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBound
 		writes[key] = true
 		index += 3
 	}
-	// The remaining pre-delegation operands are the receiver and direct
-	// parameter loads. No expression can observe an earlier capture write.
+	// Remaining operands are direct parameters or original scalar/null/String
+	// constants. No operation can read, publish or overwrite an early capture.
 	next, call := constructorMotionDelegation(c.obj, ops, index, params, slots)
 	if call == nil || next == 0 || int(ops[next-1].CurrentOffset) != p.pc || call.Name != strings.ReplaceAll(p.delegate.ClassName, ".", "/") || call.Description != p.delegate.Descriptor {
 		return false
@@ -199,12 +199,15 @@ func constructorMotionField(obj *ClassObject, member *values.JavaClassMember, ca
 }
 
 func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int, params []string, slots map[int]int) (int, *values.JavaClassMember) {
-	if start >= len(ops) || core.GetRetrieveIdx(ops[start]) != 0 || !constructorMotionLoad(ops[start], "Ljava/lang/Object;") {
+	if start < 0 || start >= len(ops) || ops[start] == nil || ops[start].Instr == nil || core.GetRetrieveIdx(ops[start]) != 0 || !constructorMotionLoad(ops[start], "Ljava/lang/Object;") {
 		return 0, nil
 	}
 	arguments := []string{}
 	index := start + 1
-	for index < len(ops) {
+	for index < len(ops) && index-start <= 512 {
+		if ops[index] == nil || ops[index].Instr == nil {
+			return 0, nil
+		}
 		if ops[index].Instr.OpCode == core.OP_INVOKESPECIAL {
 			member := constructorMotionMember(obj, ops[index], core.OP_INVOKESPECIAL)
 			if member == nil || member.Member != "<init>" || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) {
@@ -215,18 +218,22 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				return 0, nil
 			}
 			for i := range formals {
-				if formals[i] != arguments[i] {
+				if formals[i] != arguments[i] && !(arguments[i] == "null" && callbinding.Reference(formals[i])) {
 					return 0, nil
 				}
 			}
 			return index + 1, member
 		}
-		slot := core.GetRetrieveIdx(ops[index])
-		parameter, ok := slots[slot]
-		if !ok || slot == 0 || !constructorMotionLoad(ops[index], params[parameter]) {
-			return 0, nil
+		if literal, proved := constructorMotionLiteral(obj, ops[index]); proved {
+			arguments = append(arguments, literal)
+		} else {
+			slot := core.GetRetrieveIdx(ops[index])
+			parameter, ok := slots[slot]
+			if !ok || parameter < 0 || parameter >= len(params) || slot == 0 || !constructorMotionLoad(ops[index], params[parameter]) {
+				return 0, nil
+			}
+			arguments = append(arguments, params[parameter])
 		}
-		arguments = append(arguments, params[parameter])
 		index++
 	}
 	return 0, nil
@@ -284,4 +291,69 @@ func (c *ClassObjectDumper) constructorChainDoesNotObserve(owner, descriptor str
 		return false
 	}
 	return c.constructorReceiverEffects(obj, code, ops, descriptor, writes, active, remaining, depth)
+}
+
+// Literal operands keep their original values and widths. Class/method-handle/
+// dynamic constants can have linkage or bootstrap effects and require a separate
+// proof; never admit them merely because they produce a reference on the stack.
+func constructorMotionLiteral(obj *ClassObject, op *core.OpCode) (string, bool) {
+	if obj == nil || op == nil || op.Instr == nil {
+		return "", false
+	}
+	opcode := op.Instr.OpCode
+	switch {
+	case opcode == core.OP_ACONST_NULL && len(op.Data) == 0:
+		return "null", true
+	case opcode >= core.OP_ICONST_M1 && opcode <= core.OP_ICONST_5 && len(op.Data) == 0:
+		return "I", true
+	case opcode == core.OP_BIPUSH && len(op.Data) == 1 || opcode == core.OP_SIPUSH && len(op.Data) == 2:
+		return "I", true
+	case opcode >= core.OP_LCONST_0 && opcode <= core.OP_DCONST_1 && len(op.Data) == 0:
+		if opcode <= core.OP_LCONST_1 {
+			return "J", true
+		}
+		if opcode >= core.OP_DCONST_0 {
+			return "D", true
+		}
+		return "F", true
+	case opcode == core.OP_LDC || opcode == core.OP_LDC_W || opcode == core.OP_LDC2_W:
+		index := 0
+		if opcode == core.OP_LDC && len(op.Data) == 1 {
+			index = int(op.Data[0])
+		} else if opcode != core.OP_LDC && len(op.Data) == 2 {
+			index = int(core.Convert2bytesToInt(op.Data))
+		} else {
+			return "", false
+		}
+		if index <= 0 || index > len(obj.ConstantPool) {
+			return "", false
+		}
+		descriptor := ""
+		switch constant := obj.ConstantPool[index-1].(type) {
+		case *ConstantIntegerInfo:
+			if constant != nil {
+				descriptor = "I"
+			}
+		case *ConstantFloatInfo:
+			if constant != nil {
+				descriptor = "F"
+			}
+		case *ConstantLongInfo:
+			if constant != nil {
+				descriptor = "J"
+			}
+		case *ConstantDoubleInfo:
+			if constant != nil {
+				descriptor = "D"
+			}
+		case *ConstantStringInfo:
+			if constant != nil {
+				if utf, valid := NewConstantPoolWithConstant(&obj.ConstantPool).IndexInfo(int(constant.StringIndex)).(*ConstantUtf8Info); valid && utf != nil {
+					descriptor = "Ljava/lang/String;"
+				}
+			}
+		}
+		return descriptor, descriptor != "" && (opcode == core.OP_LDC2_W) == (descriptor == "J" || descriptor == "D")
+	}
+	return "", false
 }
