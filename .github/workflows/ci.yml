@@ -66,9 +66,9 @@ jobs:
           set -o pipefail
           mkdir -p artifacts
           go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
-          # Small batches share four isolated workers, one fixture per worker.
+          # Four workers each run one parent test in an isolated process.
           # Environment-changing tests keep process isolation. Idle workers take
-          # the next batch instead of waiting behind one large shard. Preserve
+          # the next test instead of waiting behind a slower batch. Preserve
           # every discovered parent and the eight-minute total phase deadline.
           python3 - <<'PYTHON'
           import concurrent.futures, json, os, pathlib, re, signal, subprocess, sys, time
@@ -78,7 +78,7 @@ jobs:
               if line.startswith("TestAdversarial")))
           if not names:
               raise SystemExit("no adversarial tests discovered")
-          groups = [names[index::16] for index in range(min(16, len(names)))]
+          groups = [[name] for name in names]
           pathlib.Path("artifacts/adversarial-manifest.json").write_text(json.dumps(groups, indent=2))
           deadline = time.monotonic() + 480
           def run_batch(item):
