@@ -317,7 +317,7 @@ var jdkSortedMapFamily = map[string]bool{
 // or a method outside the set). The JDK signatures are stable API, so substituting the receiver's
 // type args is sound -- this is the parameter analogue of InstantiateJDKMethodReturn. ntype is the
 // number of receiver type args, used to disambiguate arities.
-func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype int) int {
+func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype int, getenv func(string) string) int {
 	switch rawClass {
 	case "java.util.function.Consumer":
 		if method == "accept" && argc == 1 && ntype == 1 && paramIndex == 0 {
@@ -379,7 +379,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// Only KEY positions resolve to K; NavigableMap's boolean inclusivity flags and the value-typed
 	// get/remove/containsKey(Object) are left as fixed (fall through to -1). Kill-switch
 	// JDEC_SORTED_MAP_KEY_PARAM_OFF.
-	if jdkSortedMapFamily[rawClass] && ntype == 2 && jdecenv.Get("JDEC_SORTED_MAP_KEY_PARAM_OFF") == "" {
+	if jdkSortedMapFamily[rawClass] && ntype == 2 && getenv("JDEC_SORTED_MAP_KEY_PARAM_OFF") == "" {
 		switch method {
 		case "headMap", "tailMap":
 			// SortedMap.headMap(K) [argc 1]; NavigableMap.headMap(K, boolean) [argc 2, only param0=K].
@@ -411,7 +411,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// descriptor erases E to its bound, so an Object-typed value flows in without the source's `(E)` cast;
 	// guava Iterators$ConcatenatedIterator `this.metaIterators.addFirst(rawDeque.removeLast())`).
 	if (method == "addFirst" || method == "addLast" || method == "offerFirst" || method == "offerLast" || method == "push") &&
-		argc == 1 && ntype == 1 && paramIndex == 0 && jdkDequeFamily[rawClass] && jdecenv.Get("JDEC_DEQUE_PARAM_OFF") == "" {
+		argc == 1 && ntype == 1 && paramIndex == 0 && jdkDequeFamily[rawClass] && getenv("JDEC_DEQUE_PARAM_OFF") == "" {
 		return 0
 	}
 	// List<E>.set(int, E) / add(int, E): the SECOND parameter is the element type arg (the first is the
@@ -422,7 +422,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// the List sub-family: only List declares 2-arg set/add(int, E); Set/Queue/Deque never do, so a
 	// same-named 2-arg call on them cannot exist in verified bytecode, but the family gate keeps it
 	// provably scoped.
-	if (method == "set" || method == "add") && argc == 2 && ntype == 1 && paramIndex == 1 && jdkListFamily[rawClass] && jdecenv.Get("JDEC_LIST_SET_PARAM_OFF") == "" {
+	if (method == "set" || method == "add") && argc == 2 && ntype == 1 && paramIndex == 1 && jdkListFamily[rawClass] && getenv("JDEC_LIST_SET_PARAM_OFF") == "" {
 		return 0
 	}
 	// AtomicReference<V>: the V-typed value-parameter methods whose descriptor erases V to Object. The
@@ -438,7 +438,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// InstantiateJDKMethodParam already returns nil for `AtomicReference<?>`. Kill-switch
 	// JDEC_ATOMIC_REF_PARAM_OFF.
 	if rawClass == "java.util.concurrent.atomic.AtomicReference" && ntype == 1 &&
-		jdecenv.Get("JDEC_ATOMIC_REF_PARAM_OFF") == "" {
+		getenv("JDEC_ATOMIC_REF_PARAM_OFF") == "" {
 		switch method {
 		case "compareAndSet", "weakCompareAndSet", "weakCompareAndSetPlain":
 			if argc == 2 && (paramIndex == 0 || paramIndex == 1) {
@@ -480,15 +480,25 @@ func InstantiateJDKMethodParam(rawClass, method string, argc, paramIndex int, ty
 // retains only X's raw erasure, javac capture conversion requires an explicit `(X)` cast even though
 // the raw classes match. Ordinary concrete receiver arguments do not need that same-erasure cast.
 func InstantiateJDKMethodParamInfo(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) (instantiated JavaType, lowerBound bool) {
+	return InstantiateJDKMethodParamInfoWithEnv(rawClass, method, argc, paramIndex, typeArgs, jdecenv.Lookup())
+}
+
+// InstantiateJDKMethodParamInfoWithEnv threads an explicit request policy through
+// the complete JDK leaf resolution. Never rediscover ambient goroutine bindings
+// inside a hierarchy walk; a nested request must not change its caller policy.
+func InstantiateJDKMethodParamInfoWithEnv(rawClass, method string, argc, paramIndex int, typeArgs []JavaType, getenv func(string) string) (instantiated JavaType, lowerBound bool) {
+	if getenv == nil {
+		getenv = jdecenv.Lookup()
+	}
 	// This helper is also the leaf reached when the unified hierarchy resolver
 	// walks out of the input jar and hits a JDK declaration. Keep the public
 	// umbrella switch authoritative at that boundary too; otherwise
 	// JDEC_GENERIC_PARAM_INFER_OFF disables direct call-site inference but leaves
 	// inherited JDK fallbacks active (e.g. jar class -> List<String>.add).
-	if jdecenv.Get("JDEC_GENERIC_PARAM_INFER_OFF") != "" || len(typeArgs) == 0 {
+	if getenv("JDEC_GENERIC_PARAM_INFER_OFF") != "" || len(typeArgs) == 0 {
 		return nil, false
 	}
-	idx := jdkMethodParamTypeArgIndex(rawClass, method, argc, paramIndex, len(typeArgs))
+	idx := jdkMethodParamTypeArgIndex(rawClass, method, argc, paramIndex, len(typeArgs), getenv)
 	if idx < 0 || idx >= len(typeArgs) {
 		return nil, false
 	}
@@ -501,7 +511,7 @@ func InstantiateJDKMethodParamInfo(rawClass, method string, argc, paramIndex int
 	// This is the direct-JDK counterpart of ResolveInstantiatedParamType's hierarchy path.
 	if isWildcardType(typeArgs[idx]) {
 		if wildcard, ok := lowerBoundedWildcard(typeArgs[idx]); ok &&
-			jdecenv.Get("JDEC_GENERIC_SUPERWILDCARD_OFF") == "" {
+			getenv("JDEC_GENERIC_SUPERWILDCARD_OFF") == "" {
 			return wildcard.Bound, true
 		}
 		return nil, false
@@ -516,7 +526,16 @@ func InstantiateJDKMethodParamInfo(rawClass, method string, argc, paramIndex int
 // recovering their formal signatures exposes when a materialized lambda kept
 // only the erased types from LambdaMetafactory's instantiated method descriptor.
 func InstantiateJDKMethodParamType(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) JavaType {
-	if jdecenv.Get("JDEC_GENERIC_PARAM_INFER_OFF") != "" {
+	return InstantiateJDKMethodParamTypeWithEnv(rawClass, method, argc, paramIndex, typeArgs, jdecenv.Lookup())
+}
+
+// InstantiateJDKMethodParamTypeWithEnv is the nested-formal counterpart of
+// InstantiateJDKMethodParamInfoWithEnv and preserves the same explicit policy.
+func InstantiateJDKMethodParamTypeWithEnv(rawClass, method string, argc, paramIndex int, typeArgs []JavaType, getenv func(string) string) JavaType {
+	if getenv == nil {
+		getenv = jdecenv.Lookup()
+	}
+	if getenv("JDEC_GENERIC_PARAM_INFER_OFF") != "" {
 		return nil
 	}
 	// Consumer-taking JDK declarations are target-typed just like Map's
@@ -1582,7 +1601,8 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 		// A jar-internal hierarchy may terminate at a parameterized JDK
 		// declaration (ProtocolStrings -> List<String>). Reuse the bounded JDK
 		// method table after composing the arguments along the preceding edges.
-		return InstantiateJDKMethodParam(internalToDot(internal), method, argc, paramIndex, args)
+		instantiated, _ := InstantiateJDKMethodParamInfoWithEnv(internalToDot(internal), method, argc, paramIndex, args, funcCtx.Getenv)
+		return instantiated
 	}
 	// sigma: this node's formal type params -> actual args (positional; raw receiver -> empty sigma).
 	formals := ClassFormalTypeParamNames(classSig)
@@ -1818,7 +1838,7 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 		params := make([]JavaType, argc)
 		found := false
 		for i := range params {
-			if p := InstantiateJDKMethodParamType(internalToDot(internal), method, argc, i, args); p != nil {
+			if p := InstantiateJDKMethodParamTypeWithEnv(internalToDot(internal), method, argc, i, args, funcCtx.Getenv); p != nil {
 				params[i] = p
 				found = true
 			}

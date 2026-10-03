@@ -1175,7 +1175,7 @@ func (f *FunctionCallExpression) instantiatedParamTypeInfo(i int, funcCtx *class
 	if raw == "" || len(typeArgs) == 0 {
 		return nil, false
 	}
-	inst, lowerBound := types.InstantiateJDKMethodParamInfo(raw, f.FunctionName, len(f.Arguments), i, typeArgs)
+	inst, lowerBound := types.InstantiateJDKMethodParamInfoWithEnv(raw, f.FunctionName, len(f.Arguments), i, typeArgs, funcCtx.Getenv)
 	if inst == nil {
 		return nil, false
 	}
@@ -3633,7 +3633,7 @@ func (f *FunctionCallExpression) resolvedFunctionalFormalType(i int, funcCtx *cl
 		}
 	}
 	if recvRaw != "" {
-		if inst := types.InstantiateJDKMethodParamType(recvRaw, f.FunctionName, len(f.Arguments), i, recvArgs); inst != nil {
+		if inst := types.InstantiateJDKMethodParamTypeWithEnv(recvRaw, f.FunctionName, len(f.Arguments), i, recvArgs, funcCtx.Getenv); inst != nil {
 			return inst
 		}
 	}
