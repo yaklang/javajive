@@ -365,3 +365,413 @@ public class ScopeDriver{public static void main(java.lang.String[]args){for(jav
 		})
 	}
 }
+
+func TestNativeMemberMixedStaticGenericScopeRoundTrip(t *testing.T) {
+	javac, java := t04Tools(t)
+	const source = `package mixed.scope;
+class MixedEffects{static java.lang.String trace="";static Object seen;static java.io.IOException failure=new java.io.IOException("parent");}
+class MixedParent{final Object owner;final java.lang.Number value;MixedParent(java.lang.Number n)throws java.io.IOException{MixedEffects.trace+="P";owner=owner();value=n;MixedEffects.seen=this;if(n!=null&&n.longValue()<0)throw MixedEffects.failure;}Object owner(){return null;}}
+class MixedOwner<T extends java.lang.Number>{final T token;MixedOwner(T n){token=n;}
+ static class Box<U extends java.lang.Number>{static final int runtime;static{MixedEffects.trace+="B";runtime=7;}final U value;final int selected;Box(U n){value=n;selected=1;}Box(Object rival){value=null;selected=2;}U get(){return value;}<V extends U> V echo(V v){return v;}static <T extends java.lang.Number> T own(T v){return v;}static int status(){return runtime;}}
+ class Child extends MixedParent{Child(T n)throws java.io.IOException{super(n);}Object owner(){return MixedOwner.this;}T token(){return MixedOwner.this.token;}}
+ Box<T> box(T n){return new Box<T>(n);}Child child(T n)throws java.io.IOException{return new Child(n);}
+}
+class MixedExternal{static <T extends java.lang.Number> MixedOwner.Box<T> box(T n){return new MixedOwner.Box<T>(n);}static <T extends java.lang.Number> MixedOwner<T>.Child child(MixedOwner<T> o,T n)throws java.io.IOException{return o.new Child(n);}static int status(){return MixedOwner.Box.runtime;}}
+public class MixedDriver{public static void main(java.lang.String[]args)throws Exception{if(MixedExternal.status()!=7||!MixedEffects.trace.equals("B"))throw new AssertionError("blank static read");int rows=0;for(java.lang.Number n:new java.lang.Number[]{null,Integer.valueOf(-1),Integer.valueOf(0),Long.valueOf(Long.MIN_VALUE),Long.valueOf(Long.MAX_VALUE),Double.valueOf(-0.0),Double.valueOf(Double.NaN)}){MixedOwner<java.lang.Number> o=new MixedOwner<>(n);for(boolean external:new boolean[]{false,true}){MixedOwner.Box<java.lang.Number> b=external?MixedExternal.box(n):o.box(n);if(b.value!=n||b.get()!=n||b.echo(n)!=n||MixedOwner.Box.own(n)!=n||b.selected!=1)throw new AssertionError("static generic rival");MixedEffects.seen=null;try{MixedOwner<java.lang.Number>.Child c=external?MixedExternal.child(o,n):o.child(n);if(c.owner!=o||c.value!=n||c.token()!=n)throw new AssertionError("member identity");}catch(java.io.IOException e){MixedOwner<java.lang.Number>.Child c=(MixedOwner<java.lang.Number>.Child)MixedEffects.seen;if(e!=MixedEffects.failure||n==null||n.longValue()>=0||c.owner!=o||c.value!=n||c.token()!=n)throw new AssertionError("parent publication",e);}rows++;}}System.out.println(rows+":"+MixedEffects.trace);}}
+`
+	for _, debug := range []string{"-g", "-g:none"} {
+		t.Run(debug, func(t *testing.T) {
+			original := t.TempDir()
+			file := filepath.Join(original, "MixedDriver.java")
+			if e := os.WriteFile(file, []byte(source), 0600); e != nil {
+				t.Fatal(e)
+			}
+			if out, e := exec.Command(javac, "-proc:none", "--release", "8", debug, "-d", original, file).CombinedOutput(); e != nil {
+				t.Fatalf("original %v %s", e, out)
+			}
+			oracle := t04RunJava(t, java, original, "mixed.scope.MixedDriver")
+			files := map[string][]byte{}
+			if e := filepath.Walk(original, func(p string, info os.FileInfo, e error) error {
+				if e != nil {
+					return e
+				}
+				if !info.IsDir() && strings.HasSuffix(p, ".class") {
+					r, e := os.ReadFile(p)
+					if e != nil {
+						return e
+					}
+					rel, e := filepath.Rel(original, p)
+					if e != nil {
+						return e
+					}
+					files[filepath.ToSlash(rel)] = r
+				}
+				return nil
+			}); e != nil {
+				t.Fatal(e)
+			}
+			for _, mode := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+				t.Run(mode, func(t *testing.T) {
+					if mode == "no-source-rewrites" {
+						t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")
+					}
+					if mode == "no-core-cleanups" {
+						t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
+					}
+					z := nativeArchive(t, files)
+					for _, n := range []string{"mixed/scope/MixedOwner$Box.class", "mixed/scope/MixedOwner$Child.class"} {
+						s, e := z.ReadFile(n)
+						if e != nil || !strings.Contains(string(s), "original member body owned by") {
+							t.Fatalf("unowned %s %v %s", n, e, s)
+						}
+					}
+					output := t.TempDir()
+					for n, b := range files {
+						if strings.HasPrefix(n, "mixed/scope/MixedOwner") || n == "mixed/scope/MixedExternal.class" {
+							continue
+						}
+						p := filepath.Join(output, filepath.FromSlash(n))
+						if e := os.MkdirAll(filepath.Dir(p), 0700); e != nil {
+							t.Fatal(e)
+						}
+						if e := os.WriteFile(p, b, 0600); e != nil {
+							t.Fatal(e)
+						}
+					}
+					paths := []string{}
+					for _, n := range []string{"mixed/scope/MixedOwner", "mixed/scope/MixedExternal"} {
+						src, e := z.ReadFile(n + ".class")
+						if e != nil || strings.Contains(string(src), DecompileStubMarker) {
+							t.Fatalf("source %v %s", e, src)
+						}
+						p := filepath.Join(output, filepath.FromSlash(n)+".java")
+						if e := os.WriteFile(p, src, 0600); e != nil {
+							t.Fatal(e)
+						}
+						paths = append(paths, p)
+					}
+					if out, e := exec.Command(javac, append([]string{"-proc:none", "--release", "8", "-cp", output, "-d", output}, paths...)...).CombinedOutput(); e != nil {
+						t.Fatalf("rebuilt %v %s", e, out)
+					}
+					for _, n := range []string{"mixed/scope/MixedOwner", "mixed/scope/MixedOwner$Box", "mixed/scope/MixedOwner$Child"} {
+						b, e := os.ReadFile(filepath.Join(output, filepath.FromSlash(n)+".class"))
+						if e != nil {
+							t.Fatal(e)
+						}
+						if want, got := nativeBinaryShape(t, files[n+".class"]), nativeBinaryShape(t, b); want != got {
+							t.Fatalf("ABI %s\n%s\n!=\n%s", n, want, got)
+						}
+					}
+					if got := t04RunJava(t, java, output, "mixed.scope.MixedDriver"); got != oracle {
+						t.Fatalf("%q != %q", got, oracle)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNativeMemberAndAnonymousCrossFamilySourceBinding(t *testing.T) {
+	javac, java := t04Tools(t)
+	const source = `package mixed.scope;
+class MixedOwner{public static abstract class Box{final int tag;Box(int t){tag=t;}abstract long read();}}
+class MixedExternal{MixedOwner.Box make(final long n){return new MixedOwner.Box(7){long read(){return n;}};}}
+public class MixedDriver{public static void main(String[]args){for(long n:new long[]{Long.MIN_VALUE,-1,0,1,Long.MAX_VALUE}){MixedOwner.Box b=new MixedExternal().make(n);if(b.tag!=7||b.read()!=n)throw new AssertionError("cross family capture");}System.out.println(5);}}
+`
+	for _, debug := range []string{"-g", "-g:none"} {
+		t.Run(debug, func(t *testing.T) {
+			original := t.TempDir()
+			file := filepath.Join(original, "MixedDriver.java")
+			if e := os.WriteFile(file, []byte(source), 0600); e != nil {
+				t.Fatal(e)
+			}
+			if out, e := exec.Command(javac, "-proc:none", "--release", "8", debug, "-d", original, file).CombinedOutput(); e != nil {
+				t.Fatalf("original %v %s", e, out)
+			}
+			oracle := t04RunJava(t, java, original, "mixed.scope.MixedDriver")
+			files := map[string][]byte{}
+			if e := filepath.Walk(original, func(p string, info os.FileInfo, e error) error {
+				if e != nil {
+					return e
+				}
+				if !info.IsDir() && strings.HasSuffix(p, ".class") {
+					r, e := os.ReadFile(p)
+					if e != nil {
+						return e
+					}
+					rel, e := filepath.Rel(original, p)
+					if e != nil {
+						return e
+					}
+					files[filepath.ToSlash(rel)] = r
+				}
+				return nil
+			}); e != nil {
+				t.Fatal(e)
+			}
+			for _, mode := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+				t.Run(mode, func(t *testing.T) {
+					if mode == "no-source-rewrites" {
+						t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")
+					}
+					if mode == "no-core-cleanups" {
+						t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
+					}
+					z := nativeArchive(t, files)
+					for _, n := range []string{"mixed/scope/MixedOwner$Box.class", "mixed/scope/MixedExternal$1.class"} {
+						s, e := z.ReadFile(n)
+						if e != nil || !strings.Contains(string(s), "body owned by") {
+							t.Fatalf("unowned %s %v %s", n, e, s)
+						}
+					}
+					output := t.TempDir()
+					for n, b := range files {
+						if strings.HasPrefix(n, "mixed/scope/MixedOwner") || strings.HasPrefix(n, "mixed/scope/MixedExternal") {
+							continue
+						}
+						p := filepath.Join(output, filepath.FromSlash(n))
+						if e := os.MkdirAll(filepath.Dir(p), 0700); e != nil {
+							t.Fatal(e)
+						}
+						if e := os.WriteFile(p, b, 0600); e != nil {
+							t.Fatal(e)
+						}
+					}
+					paths := []string{}
+					for _, n := range []string{"mixed/scope/MixedOwner", "mixed/scope/MixedExternal"} {
+						src, e := z.ReadFile(n + ".class")
+						if e != nil || strings.Contains(string(src), DecompileStubMarker) {
+							t.Fatalf("source %v %s", e, src)
+						}
+						p := filepath.Join(output, filepath.FromSlash(n)+".java")
+						if e := os.WriteFile(p, src, 0600); e != nil {
+							t.Fatal(e)
+						}
+						paths = append(paths, p)
+					}
+					if out, e := exec.Command(javac, append([]string{"-proc:none", "--release", "8", "-cp", output, "-d", output}, paths...)...).CombinedOutput(); e != nil {
+						t.Fatalf("rebuilt %v %s", e, out)
+					}
+					for _, n := range []string{"mixed/scope/MixedOwner", "mixed/scope/MixedOwner$Box", "mixed/scope/MixedExternal$1"} {
+						b, e := os.ReadFile(filepath.Join(output, filepath.FromSlash(n)+".class"))
+						if e != nil {
+							t.Fatal(e)
+						}
+						if want, got := nativeBinaryShape(t, files[n+".class"]), nativeBinaryShape(t, b); want != got {
+							t.Fatalf("ABI %s\n%s\n!=\n%s", n, want, got)
+						}
+					}
+					if got := t04RunJava(t, java, output, "mixed.scope.MixedDriver"); got != oracle {
+						t.Fatalf("%q != %q", got, oracle)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNativeMemberPeerGenericFieldsKeepSeparateBindings(t *testing.T) {
+	javac, java := t04Tools(t)
+	const source = `package mixed.scope;
+interface ValueObserver<T>{void onNext(T n);}
+class MixedOwner{public static abstract class Box<T> implements ValueObserver<T>{Object seen;}public static final class Source<T,R> implements ValueObserver<T>{final Box<T> box;Source(Box<T> b){box=b;}public void onNext(T n){box.onNext(n);}}public static final class Target<T,R> implements ValueObserver<R>{final ValueObserver<? super R> sink;Target(ValueObserver<? super R> b){sink=b;}public void onNext(R n){sink.onNext(n);}}}
+class MixedBox<A> extends MixedOwner.Box<A>{public void onNext(A n){seen=n;}}
+class MixedExternal{static <T,R> MixedOwner.Source<T,R> source(MixedOwner.Box<T> b){return new MixedOwner.Source<T,R>(b);}static <T,R> MixedOwner.Target<T,R> target(ValueObserver<R> s){return new MixedOwner.Target<T,R>(s);}}
+public class MixedDriver{public static void main(String[]args){for(Object n:new Object[]{null,"text",Long.valueOf(Long.MIN_VALUE),Long.valueOf(Long.MAX_VALUE)}){MixedOwner.Box<Object> a=new MixedBox<>();MixedOwner.Box<String> b=new MixedBox<>();MixedOwner.Source<Object,String> source=MixedExternal.source(a);MixedOwner.Target<Object,String> target=MixedExternal.target(b);source.onNext(n);target.onNext("marker");if(a.seen!=n||b.seen!="marker")throw new AssertionError("peer generic binding");}System.out.println(4);}}
+`
+	for _, debug := range []string{"-g", "-g:none"} {
+		t.Run(debug, func(t *testing.T) {
+			original := t.TempDir()
+			file := filepath.Join(original, "MixedDriver.java")
+			if e := os.WriteFile(file, []byte(source), 0600); e != nil {
+				t.Fatal(e)
+			}
+			if out, e := exec.Command(javac, "-proc:none", "--release", "8", debug, "-d", original, file).CombinedOutput(); e != nil {
+				t.Fatalf("original %v %s", e, out)
+			}
+			oracle := t04RunJava(t, java, original, "mixed.scope.MixedDriver")
+			files := map[string][]byte{}
+			if e := filepath.Walk(original, func(p string, info os.FileInfo, e error) error {
+				if e != nil {
+					return e
+				}
+				if !info.IsDir() && strings.HasSuffix(p, ".class") {
+					r, e := os.ReadFile(p)
+					if e != nil {
+						return e
+					}
+					rel, e := filepath.Rel(original, p)
+					if e != nil {
+						return e
+					}
+					files[filepath.ToSlash(rel)] = r
+				}
+				return nil
+			}); e != nil {
+				t.Fatal(e)
+			}
+			for _, mode := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+				t.Run(mode, func(t *testing.T) {
+					if mode == "no-source-rewrites" {
+						t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")
+					}
+					if mode == "no-core-cleanups" {
+						t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
+					}
+					z := nativeArchive(t, files)
+					for _, n := range []string{"mixed/scope/MixedOwner$Box.class", "mixed/scope/MixedOwner$Source.class", "mixed/scope/MixedOwner$Target.class"} {
+						s, e := z.ReadFile(n)
+						if e != nil || !strings.Contains(string(s), "body owned by") {
+							t.Fatalf("unowned %s %v %s", n, e, s)
+						}
+					}
+					output := t.TempDir()
+					for n, b := range files {
+						if strings.HasPrefix(n, "mixed/scope/MixedOwner") || strings.HasPrefix(n, "mixed/scope/MixedExternal") {
+							continue
+						}
+						p := filepath.Join(output, filepath.FromSlash(n))
+						if e := os.MkdirAll(filepath.Dir(p), 0700); e != nil {
+							t.Fatal(e)
+						}
+						if e := os.WriteFile(p, b, 0600); e != nil {
+							t.Fatal(e)
+						}
+					}
+					paths := []string{}
+					for _, n := range []string{"mixed/scope/MixedOwner", "mixed/scope/MixedExternal"} {
+						src, e := z.ReadFile(n + ".class")
+						if e != nil || strings.Contains(string(src), DecompileStubMarker) {
+							t.Fatalf("source %v %s", e, src)
+						}
+						p := filepath.Join(output, filepath.FromSlash(n)+".java")
+						if e := os.WriteFile(p, src, 0600); e != nil {
+							t.Fatal(e)
+						}
+						paths = append(paths, p)
+					}
+					if out, e := exec.Command(javac, append([]string{"-proc:none", "--release", "8", "-cp", output, "-d", output}, paths...)...).CombinedOutput(); e != nil {
+						t.Fatalf("rebuilt %v %s", e, out)
+					}
+					for _, n := range []string{"mixed/scope/MixedOwner", "mixed/scope/MixedOwner$Box", "mixed/scope/MixedOwner$Source", "mixed/scope/MixedOwner$Target"} {
+						b, e := os.ReadFile(filepath.Join(output, filepath.FromSlash(n)+".class"))
+						if e != nil {
+							t.Fatal(e)
+						}
+						if want, got := nativeBinaryShape(t, files[n+".class"]), nativeBinaryShape(t, b); want != got {
+							t.Fatalf("ABI %s\n%s\n!=\n%s", n, want, got)
+						}
+					}
+					if got := t04RunJava(t, java, output, "mixed.scope.MixedDriver"); got != oracle {
+						t.Fatalf("%q != %q", got, oracle)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNativeMemberOwnAndOuterGenericScopeRoundTrip(t *testing.T) {
+	javac, java := t04Tools(t)
+	const source = `package generic.member;
+class GenericEffects{static java.lang.String trace="";static Object seen;static java.io.IOException failure=new java.io.IOException("parent");}
+class GenericParent{final Object owner;final java.lang.Number value;GenericParent(java.lang.Number n)throws java.io.IOException{GenericEffects.trace+="P";owner=owner();value=n;GenericEffects.seen=this;if(n!=null&&n.longValue()<0)throw GenericEffects.failure;}Object owner(){return null;}}
+class GenericOwner<T extends java.lang.Number>{final T token;GenericOwner(T n){token=n;}
+ static class Box<U extends java.lang.Number>{static final int runtime;static{GenericEffects.trace+="B";runtime=7;}final U value;final int selected;Box(U n){value=n;selected=1;}Box(Object rival){value=null;selected=2;}U get(){return value;}<V extends U> V echo(V v){return v;}static <T extends java.lang.Number> T own(T v){return v;}static int status(){return runtime;}}
+ class Child<U extends T> extends GenericParent{final U argument;final int selected;Child(U n)throws java.io.IOException{super(n);argument=n;selected=1;}Child(Object rival)throws java.io.IOException{super(null);argument=null;selected=2;}Child(CharSequence rival)throws java.io.IOException{super(null);argument=null;selected=3;}Object owner(){return GenericOwner.this;}T token(){return GenericOwner.this.token;}U argument(){return argument;}Child<U> self(){return this;}<V extends U> V echo(V n){return n;}}class Shadow<T extends CharSequence>{final T text;final int selected;Shadow(T t){text=t;selected=1;}Shadow(Object rival){text=null;selected=2;}T text(){return text;}Shadow<T> self(){return this;}Object owner(){return GenericOwner.this;}}
+ Box<T> box(T n){return new Box<T>(n);}Child<T> child(T n)throws java.io.IOException{return new Child<T>(n);}Shadow<java.lang.String> shadow(java.lang.String s){return new Shadow<java.lang.String>(s);}
+}
+class GenericExternal{static <T extends java.lang.Number> GenericOwner.Box<T> box(T n){return new GenericOwner.Box<T>(n);}static <T extends java.lang.Number> GenericOwner<T>.Child<T> child(GenericOwner<T> o,T n)throws java.io.IOException{return o.new Child<T>(n);}static GenericOwner<java.lang.Number>.Child<java.lang.Long> specific(GenericOwner<java.lang.Number> o,java.lang.Long n)throws java.io.IOException{return o.new Child<java.lang.Long>(n);}static Object raw(GenericOwner o,java.lang.Number n)throws java.io.IOException{return o.new Child(n);}static Object rival(GenericOwner o,CharSequence n)throws java.io.IOException{return o.new Child((Object)n);}static int status(){return GenericOwner.Box.runtime;}}
+public class GenericDriver{public static void main(java.lang.String[]args)throws Exception{if(GenericExternal.status()!=7||!GenericEffects.trace.equals("B"))throw new AssertionError("blank static read");int rows=0;for(java.lang.Number n:new java.lang.Number[]{null,Integer.valueOf(-1),Integer.valueOf(0),Long.valueOf(Long.MIN_VALUE),Long.valueOf(Long.MAX_VALUE),Double.valueOf(-0.0),Double.valueOf(Double.NaN)}){GenericOwner<java.lang.Number> o=new GenericOwner<>(n);for(boolean external:new boolean[]{false,true}){GenericOwner.Box<java.lang.Number> b=external?GenericExternal.box(n):o.box(n);if(b.value!=n||b.get()!=n||b.echo(n)!=n||GenericOwner.Box.own(n)!=n||b.selected!=1)throw new AssertionError("static generic rival");GenericEffects.seen=null;try{GenericOwner<java.lang.Number>.Child<java.lang.Number> c=external?GenericExternal.child(o,n):o.child(n);if(c.owner!=o||c.value!=n||c.token()!=n||c.argument()!=n||c.echo(n)!=n)throw new AssertionError("member identity");}catch(java.io.IOException e){GenericOwner<java.lang.Number>.Child<java.lang.Number> c=(GenericOwner<java.lang.Number>.Child<java.lang.Number>)GenericEffects.seen;if(e!=GenericEffects.failure||n==null||n.longValue()>=0||c.owner!=o||c.value!=n||c.token()!=n)throw new AssertionError("parent publication",e);}GenericOwner<java.lang.Number>.Shadow<java.lang.String> shadow=o.shadow("value");if(shadow.owner()!=o||shadow.text()!= "value"||shadow.selected!=1||shadow.self()!=shadow)throw new AssertionError("shadowed class variable");rows++;}}GenericOwner<java.lang.Number> rawOwner=new GenericOwner<>(Long.valueOf(31));java.lang.Long rawValue=Long.valueOf(41);GenericOwner.Child rawChild=(GenericOwner.Child)GenericExternal.raw(rawOwner,rawValue);if(rawChild.owner!=rawOwner||rawChild.argument()!=rawValue)throw new AssertionError("raw member pair");GenericOwner<java.lang.Number>.Child<java.lang.Long> precise=GenericExternal.specific(rawOwner,rawValue);if(precise.owner!=rawOwner||precise.argument()!=rawValue||precise.selected!=1||precise.self()!=precise)throw new AssertionError("separate owner and member arguments");GenericOwner.Child pinned=(GenericOwner.Child)GenericExternal.rival(rawOwner,"text");if(pinned.selected!=2||pinned.owner!=rawOwner)throw new AssertionError("original Object constructor");System.out.println(rows+":"+GenericEffects.trace);}}
+`
+	for _, debug := range []string{"-g", "-g:none"} {
+		t.Run(debug, func(t *testing.T) {
+			original := t.TempDir()
+			file := filepath.Join(original, "GenericDriver.java")
+			if e := os.WriteFile(file, []byte(source), 0600); e != nil {
+				t.Fatal(e)
+			}
+			if out, e := exec.Command(javac, "-proc:none", "--release", "8", debug, "-d", original, file).CombinedOutput(); e != nil {
+				t.Fatalf("original %v %s", e, out)
+			}
+			oracle := t04RunJava(t, java, original, "generic.member.GenericDriver")
+			files := map[string][]byte{}
+			if e := filepath.Walk(original, func(p string, info os.FileInfo, e error) error {
+				if e != nil {
+					return e
+				}
+				if !info.IsDir() && strings.HasSuffix(p, ".class") {
+					r, e := os.ReadFile(p)
+					if e != nil {
+						return e
+					}
+					rel, e := filepath.Rel(original, p)
+					if e != nil {
+						return e
+					}
+					files[filepath.ToSlash(rel)] = r
+				}
+				return nil
+			}); e != nil {
+				t.Fatal(e)
+			}
+			for _, mode := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+				t.Run(mode, func(t *testing.T) {
+					if mode == "no-source-rewrites" {
+						t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")
+					}
+					if mode == "no-core-cleanups" {
+						t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
+					}
+					z := nativeArchive(t, files)
+					for _, n := range []string{"generic/member/GenericOwner$Box.class", "generic/member/GenericOwner$Child.class", "generic/member/GenericOwner$Shadow.class"} {
+						s, e := z.ReadFile(n)
+						if e != nil || !strings.Contains(string(s), "original member body owned by") {
+							t.Fatalf("unowned %s %v %s", n, e, s)
+						}
+					}
+					output := t.TempDir()
+					for n, b := range files {
+						if strings.HasPrefix(n, "generic/member/GenericOwner") || n == "generic/member/GenericExternal.class" {
+							continue
+						}
+						p := filepath.Join(output, filepath.FromSlash(n))
+						if e := os.MkdirAll(filepath.Dir(p), 0700); e != nil {
+							t.Fatal(e)
+						}
+						if e := os.WriteFile(p, b, 0600); e != nil {
+							t.Fatal(e)
+						}
+					}
+					paths := []string{}
+					for _, n := range []string{"generic/member/GenericOwner", "generic/member/GenericExternal"} {
+						src, e := z.ReadFile(n + ".class")
+						if e != nil || strings.Contains(string(src), DecompileStubMarker) {
+							t.Fatalf("source %v %s", e, src)
+						}
+						p := filepath.Join(output, filepath.FromSlash(n)+".java")
+						if e := os.WriteFile(p, src, 0600); e != nil {
+							t.Fatal(e)
+						}
+						paths = append(paths, p)
+					}
+					if out, e := exec.Command(javac, append([]string{"-proc:none", "--release", "8", "-cp", output, "-d", output}, paths...)...).CombinedOutput(); e != nil {
+						t.Fatalf("rebuilt %v %s", e, out)
+					}
+					for _, n := range []string{"generic/member/GenericOwner", "generic/member/GenericOwner$Box", "generic/member/GenericOwner$Child", "generic/member/GenericOwner$Shadow"} {
+						b, e := os.ReadFile(filepath.Join(output, filepath.FromSlash(n)+".class"))
+						if e != nil {
+							t.Fatal(e)
+						}
+						if want, got := nativeBinaryShape(t, files[n+".class"]), nativeBinaryShape(t, b); want != got {
+							t.Fatalf("ABI %s\n%s\n!=\n%s", n, want, got)
+						}
+					}
+					if got := t04RunJava(t, java, output, "generic.member.GenericDriver"); got != oracle {
+						t.Fatalf("%q != %q", got, oracle)
+					}
+				})
+			}
+		})
+	}
+}

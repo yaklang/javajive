@@ -712,6 +712,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		sub.Work = c.Work
 		sub.foldSiblingResolver = c.foldSiblingResolver
 		sub.declarationResolver = c.declarationResolver
+		sub.nativeMemberLookup = c.nativeMemberLookup
 		sub.nativeCaptureFields = bindings
 		sub.nativeCaptureTypes = captureTypes
 		sub.nativeOuterContext = ctx

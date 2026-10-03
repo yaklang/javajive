@@ -16,6 +16,7 @@ type nativeMemberIndex struct {
 	valid        bool
 	constructors map[string]map[string]bool
 	captureUsers map[string]map[string]bool
+	typeUsers    map[string]map[string]bool
 	handles      map[string]bool
 }
 type nativeMemberCacheEntry struct {
@@ -43,8 +44,10 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 	idx.once.Do(func() {
 		idx.constructors = map[string]map[string]bool{}
 		idx.captureUsers = map[string]map[string]bool{}
+		idx.typeUsers = map[string]map[string]bool{}
 		idx.handles = map[string]bool{}
 		total, classes, edges := int64(0), 0, 0
+		seenClasses := map[string]bool{}
 		e := fs.WalkDir(z.ZipFS, ".", func(path string, entry fs.DirEntry, e error) error {
 			if e != nil {
 				return e
@@ -52,14 +55,26 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 			if entry.IsDir() {
 				return nil
 			}
-			if !strings.HasSuffix(path, ".class") || strings.HasPrefix(path, "META-INF/") {
+			if !strings.HasSuffix(path, ".class") {
 				return nil
 			}
+			logical := path
+			if strings.HasPrefix(path, "META-INF/") {
+				release, candidate, known := physicalClassNamespace(path)
+				if !known || release > z.ZipFS.TargetRelease() {
+					return nil
+				}
+				logical = candidate
+			}
+			if seenClasses[logical] {
+				return nil
+			}
+			seenClasses[logical] = true
 			classes++
 			if classes > 16384 {
 				return fmt.Errorf("member index class limit")
 			}
-			raw, e := z.ZipFS.ReadFile(path)
+			raw, e := z.ZipFS.ReadFile(logical)
 			if e != nil {
 				return e
 			}
@@ -72,7 +87,7 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 				return fmt.Errorf("member index budget")
 			}
 			obj, e := reader.parseResolved(raw)
-			if e != nil || obj.GetClassName()+".class" != path {
+			if e != nil || obj.GetClassName()+".class" != logical {
 				return fmt.Errorf("member index identity")
 			}
 			referencer := obj.GetClassName()
@@ -89,6 +104,15 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 				}
 				table[owner][referencer] = true
 				return true
+			}
+			references, closed := nativeMemberDependencyNames(obj, reader.Work)
+			if !closed {
+				return fmt.Errorf("member index type closure")
+			}
+			for _, name := range references {
+				if !record(idx.typeUsers, name) {
+					return fmt.Errorf("member index type edge limit")
+				}
 			}
 			for _, constant := range obj.ConstantPool {
 				if !nativeProofWork(reader.Work, 1) {
@@ -166,7 +190,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 						return nil
 					}
 					outer, known := sourceBridgeClassName(obj, row.OuterClassInfoIndex)
-					if known && outer == owner && row.InnerNameIndex != 0 && row.InnerClassAccessFlags&8 == 0 {
+					if known && outer == owner && row.InnerNameIndex != 0 {
 						candidate = true
 					}
 				}
@@ -219,7 +243,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 			return
 		}
 		index := z.originalMemberIndex()
-		if !index.valid {
+		if !index.valid || !z.nativeMemberAccessRepresentable(p, index, d.Work) {
 			return
 		}
 		objects := map[string]*ClassObject{owner: root}
@@ -287,8 +311,8 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 				if e != nil {
 					return
 				}
-				otherOwner, _, flags, isMember := originalMemberOwner(other)
-				if isMember && flags&8 == 0 && otherOwner != owner {
+				otherOwner, _, _, isMember := originalMemberOwner(other)
+				if isMember && otherOwner != owner {
 					return
 				}
 				if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil) {
@@ -317,6 +341,9 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 			return
 		}
 		if d.Work != nil && d.Work.CheckAlloc(int64(len(src))) != nil {
+			return
+		}
+		if !z.reserveOwnershipSource(int64(len(src))) {
 			return
 		}
 		z.nativeMembersMu.Lock()

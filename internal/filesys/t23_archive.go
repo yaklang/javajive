@@ -404,6 +404,19 @@ func (z *ZipFS) ArchiveActive() bool {
 	return z.archiveActive
 }
 
+// ReleaseView shares the immutable archive catalog and request budget while
+// selecting declarations in a different multi-release namespace. It borrows
+// the parent's reader; closing a view cannot close the parent's file handle.
+func (z *ZipFS) ReleaseView(release int) *ZipFS {
+	if z == nil || release < 9 {
+		return nil
+	}
+	view := *z
+	view.targetRelease = release
+	view.closer = nil
+	return &view
+}
+
 func (z *ZipFS) EntryNames() []string {
 	if z == nil || z.r == nil {
 		return nil

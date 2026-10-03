@@ -7,11 +7,26 @@ import "strings"
 // Type-variable identifiers are skipped by their T grammar tag, so a literal
 // dollar in a formal name cannot become a guessed class reference.
 func SignatureClassReferences(signature string) ([]string, bool) {
+	classes, _, _, ok := signatureReferences(signature)
+	return classes, ok
+}
+
+// SignatureTypeVariableReferences includes variables in formal bounds as well
+// as parameter, return, throws and owner arguments. Declarations are separate:
+// a static member cannot inherit enclosing class variables merely because the
+// renderer knows their names.
+func SignatureTypeVariableReferences(signature string) (formals, references []string, valid bool) {
+	_, formals, references, valid = signatureReferences(signature)
+	return
+}
+
+func signatureReferences(signature string) (classes, formals, references []string, valid bool) {
 	if signature == "" || len(signature) > 65535 {
-		return nil, false
+		return nil, nil, nil, false
 	}
 	names := []string{}
 	seen := map[string]bool{}
+	declared := map[string]bool{}
 	cursor, work, retained := 0, 0, 0
 	add := func(name string) bool {
 		name = SlashToDot(name)
@@ -41,6 +56,7 @@ func SignatureClassReferences(signature string) ([]string, bool) {
 			if end <= 0 {
 				return false
 			}
+			references = append(references, signature[cursor:cursor+end])
 			cursor += end + 1
 			return true
 		case '[':
@@ -111,8 +127,18 @@ func SignatureClassReferences(signature string) ([]string, bool) {
 		for cursor < len(signature) && signature[cursor] != '>' {
 			colon := strings.IndexByte(signature[cursor:], ':')
 			if colon <= 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
+			name := signature[cursor : cursor+colon]
+			if strings.ContainsAny(name, ".;[/<>():") {
+				return nil, nil, nil, false
+			}
+			work++
+			if declared[name] || work > 8192 {
+				return nil, nil, nil, false
+			}
+			declared[name] = true
+			formals = append(formals, name)
 			cursor += colon
 			for cursor < len(signature) && signature[cursor] == ':' {
 				cursor++
@@ -120,44 +146,44 @@ func SignatureClassReferences(signature string) ([]string, bool) {
 					continue
 				}
 				if !typ(0) {
-					return nil, false
+					return nil, nil, nil, false
 				}
 			}
 		}
 		if cursor >= len(signature) {
-			return nil, false
+			return nil, nil, nil, false
 		}
 		cursor++
 	}
 	if cursor >= len(signature) {
-		return nil, false
+		return nil, nil, nil, false
 	}
 	if signature[cursor] == '(' {
 		cursor++
 		for cursor < len(signature) && signature[cursor] != ')' {
 			if !typ(0) {
-				return nil, false
+				return nil, nil, nil, false
 			}
 		}
 		if cursor >= len(signature) {
-			return nil, false
+			return nil, nil, nil, false
 		}
 		cursor++
 		if !typ(0) {
-			return nil, false
+			return nil, nil, nil, false
 		}
 		for cursor < len(signature) && signature[cursor] == '^' {
 			cursor++
 			if !typ(0) {
-				return nil, false
+				return nil, nil, nil, false
 			}
 		}
 	} else {
 		for cursor < len(signature) {
 			if !typ(0) {
-				return nil, false
+				return nil, nil, nil, false
 			}
 		}
 	}
-	return names, cursor == len(signature)
+	return names, formals, references, cursor == len(signature)
 }

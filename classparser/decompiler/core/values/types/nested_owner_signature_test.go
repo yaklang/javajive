@@ -106,3 +106,57 @@ func TestSignatureClassReferencesFollowTypeGrammar(t *testing.T) {
 		}
 	}
 }
+
+func TestSignatureTypeVariablesIncludeBoundsWithoutGuessingClassNames(t *testing.T) {
+	for _, row := range []struct {
+		signature     string
+		formals, refs []string
+	}{
+		{"<U:TT;:Ljava/lang/Comparable<TU;>;>(TU;)TU;^TX;", []string{"U"}, []string{"T", "U", "U", "U", "X"}},
+		{"<T$Dollar:Ljava/lang/Number;>(TT$Dollar;)Ljava/util/List<+TT$Dollar;>;", []string{"T$Dollar"}, []string{"T$Dollar", "T$Dollar"}},
+		{"Ljava/lang/Thread;", nil, nil},
+		{"Lp/Outer<TT;>.Child<TU;>;", nil, []string{"T", "U"}},
+	} {
+		own, refs, ok := SignatureTypeVariableReferences(row.signature)
+		if !ok || !reflect.DeepEqual(own, row.formals) || !reflect.DeepEqual(refs, row.refs) {
+			t.Fatalf("%s: %v %v %v", row.signature, own, refs, ok)
+		}
+	}
+	for _, sig := range []string{"<U:TT;U:TU;>Ljava/lang/Object;", "<U/Bad:Ljava/lang/Object;>Ljava/lang/Object;", "(TT;)TU", strings.Repeat("[", 129) + "TT;"} {
+		if _, _, ok := SignatureTypeVariableReferences(sig); ok {
+			t.Fatalf("malformed signature admitted %s", sig)
+		}
+	}
+}
+
+func TestNestedSelfTypeRequiresOriginalLexicalDeclaration(t *testing.T) {
+	value := ParseSignature("Lp/Outer<TT;>.Child<TT;>;")
+	for _, scenario := range []string{"owned self", "no lexical declaration", "different current class", "wrong member name", "wrong source owner"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := &class_context.ClassContext{ClassName: "p.Outer$Child", LexicalClassName: "Child", TypeParams: []string{"T"}, DeclarationSourceName: func(name string) (string, bool) {
+				if name == "p.Outer$Child" {
+					return "p.Outer.Child", true
+				}
+				return "", false
+			}}
+			switch scenario {
+			case "no lexical declaration":
+				ctx.LexicalClassName = ""
+			case "different current class":
+				ctx.ClassName = "p.Other$Child"
+			case "wrong member name":
+				ctx.LexicalClassName = "Other"
+			case "wrong source owner":
+				ctx.DeclarationSourceName = func(string) (string, bool) { return "p.Other.Child", true }
+			}
+			got := value.String(ctx)
+			if scenario == "owned self" {
+				if got != "Child<T>" {
+					t.Fatal(got)
+				}
+			} else if got == "Child<T>" {
+				t.Fatal("unproved implicit enclosing scope")
+			}
+		})
+	}
+}

@@ -601,6 +601,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		for _, v := range []string{"public", "private", "protected"} {
 			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, v, ""))
 		}
+		if child.static {
+			accessFlags = "static " + accessFlags
+		}
 		switch {
 		case child.flags&1 != 0:
 			accessFlags = "public " + accessFlags
@@ -970,7 +973,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// matching the local var already emitted raw. Derived from THIS class's own bytecode only (no sibling
 	// resolver), so it works under single-class decompile too. Kill-switch: JDEC_INNER_RAW_ERASE_OFF.
 	var rawEraseTypeVars map[string]bool
-	if ownFormalNames := types.ClassFormalTypeParamNames(classSigStr); c.getenv("JDEC_INNER_RAW_ERASE_OFF") == "" {
+	if ownFormalNames := types.ClassFormalTypeParamNames(classSigStr); c.getenv("JDEC_INNER_RAW_ERASE_OFF") == "" && c.nativeCaptureFields == nil {
 		if flags, ok := c.selfInnerClassAccessFlags(); ok && flags&StaticFlag == 0 {
 			own := make(map[string]bool, len(ownFormalNames))
 			for _, n := range ownFormalNames {
@@ -1127,6 +1130,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// ClassTypeParams is the CLASS-only snapshot (never extended with a method's own `<T>` while
 		// that method renders); it lets typeVarReturnCast recover `this`'s real parameterization.
 		c.FuncCtx.ClassTypeParams = classTypeParamNames
+		if c.nativeMemberCurrent != nil {
+			c.FuncCtx.ClassTypeParams = types.ClassFormalTypeParamNames(classSigStr)
+		}
 		// Record which same-class fields are declared as a bare class-scope type variable (e.g.
 		// `private final K key;`). A store into such a field whose RHS erased to Object/the bound
 		// needs an unchecked `(K)` cast to recompile (see AssignStatement.typeVarFieldStoreCast).
@@ -1485,7 +1491,8 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				attrsB.WriteString("\n")
 			}
 		}
-		attrsB.WriteString(members)
+		// Owned members already completed their own rendering and recovery.
+		// Keep them outside the enclosing class's source-recovery input.
 		attrs := attrsB.String()
 		result := fmt.Sprintf("%s%s %s%s%s {%s}", accessFlags, classKeyword, className, classTypeParams, superStr, attrs)
 		if len(annoStrs) > 0 {
@@ -1913,6 +1920,28 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	if !hardjarShapeOff() {
 		full = c.sourceRewrite("fixIdentAsTypeDecl", "class_source", full, fixIdentAsTypeDecl)
 		full = c.sourceRewrite("fixObjectInitCastType", "class_source", full, fixObjectInitCastType)
+	}
+	if members != "" {
+		// Assemble completed lexical declarations only after the enclosing
+		// class's recovery. Its metadata cannot justify edits in a child scope.
+		open := javaIndexTopBrace(full)
+		close := -1
+		if open >= 0 {
+			close = javaMatchBrace(full, open)
+		}
+		if open < 0 || close < 0 || strings.TrimSpace(full[close+1:]) != "" {
+			if c.nativeMemberRoot != nil {
+				c.nativeMemberRoot.failed = true
+			}
+			return "", fmt.Errorf("member source enclosing boundary unproved")
+		}
+		if err := c.ensureOutput(int64(len(full)) + int64(len(members))); err != nil {
+			return "", err
+		}
+		if c.Work != nil && (!nativeProofWork(c.Work, int64(len(full))) || c.Work.CheckAlloc(int64(len(full))+int64(len(members))) != nil) {
+			return "", fmt.Errorf("member source assembly budget")
+		}
+		full = full[:close] + members + full[close:]
 	}
 	if err := c.ensureOutput(int64(len(full))); err != nil {
 		return "", err
@@ -3839,7 +3868,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			// instance lambda the receiver was captured as the first dynamic arg but is represented by
 			// the impl method's `this` (already stripped above), so its placeholder index is offset.
 			samParams := params
-			if name == "<init>" && c.nativeMemberCurrent != nil {
+			if name == "<init>" && c.nativeMemberCurrent != nil && !c.nativeMemberCurrent.static {
 				if len(samParams) < 1 {
 					return nil, fmt.Errorf("missing enclosing parameter")
 				}

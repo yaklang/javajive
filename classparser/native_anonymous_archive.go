@@ -80,6 +80,7 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 		d := NewClassObjectDumper(object)
 		d.foldSiblingResolver = z.enumSiblingResolver()
 		d.declarationResolver = z.declarationResolver
+		d.nativeMemberLookup = z.nativeMemberLookup
 		if z.archive != nil && z.archive.budget != nil {
 			d.Work = z.archive.budget.Work()
 			d.options.Context = z.archive.ctx
@@ -95,6 +96,9 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 		var err error
 		jdecenv.Run(snap, func() error { source, err = d.DumpClass(); return err })
 		if err != nil || !p.completeSource(source) {
+			return
+		}
+		if !z.reserveOwnershipSource(int64(len(source))) {
 			return
 		}
 		z.nativeAnonymousMu.Lock()

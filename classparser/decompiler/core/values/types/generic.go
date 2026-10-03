@@ -73,6 +73,9 @@ func (j *JavaParameterizedType) String(funcCtx *class_context.ClassContext) stri
 				parent := j.OwnerSegments[len(j.OwnerSegments)-2]
 				inner, _ := strings.CutPrefix(last.BinaryName, parent.BinaryName+"$")
 				if strings.HasSuffix(source, "."+inner) {
+					if funcCtx.LexicalClassName == inner && funcCtx.ClassName == j.RawClassName {
+						return parts[len(parts)-1]
+					}
 					return strings.Join(parts, ".")
 				}
 			}

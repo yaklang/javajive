@@ -97,7 +97,7 @@ func TestNativeAnonymousCacheKeepsArchiveEntryAndPolicyIdentity(t *testing.T) {
 				}
 			}
 			raw, err := z.ReadFile("META-INF/versions/9/NativeArchiveOwner.class")
-			if err != nil || !strings.Contains(string(raw), "return 2;") || strings.Contains(string(raw), "jdec-owned-anonymous-ordinal:") {
+			if err != nil || !strings.Contains(string(raw), "return 2;") || !strings.Contains(string(raw), "jdec-owned-anonymous-ordinal:") {
 				t.Fatalf("version identity: %v\n%s", err, raw)
 			}
 			raw, err = z.ReadFile("NativeArchiveOwner$1.class")

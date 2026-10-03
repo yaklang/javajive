@@ -19,10 +19,12 @@ type nativeMemberConstructor struct {
 	capturePC, delegatePC                                           int
 }
 type nativeMemberClass struct {
-	object             *ClassObject
-	owner, name, field string
-	flags              uint16
-	constructors       map[string]*nativeMemberConstructor
+	object                        *ClassObject
+	owner, name, field            string
+	static                        bool
+	formalCount, outerFormalCount int
+	flags                         uint16
+	constructors                  map[string]*nativeMemberConstructor
 }
 type nativeMemberFamily struct {
 	owner    string
@@ -70,25 +72,158 @@ func originalMemberOwner(obj *ClassObject) (owner, name string, flags uint16, va
 	return
 }
 
+// A static member's type-variable scope starts at its own declaration. Read
+// the original Signature grammar, including formal bounds; names available in
+// an enclosing dumper are not evidence of lexical binding.
+func nativeMemberTypeScope(obj *ClassObject, inherited map[string]bool, work *workbudget.Budget) bool {
+	signature := func(attrs []AttributeInfo) (string, bool) {
+		result := ""
+		for _, attr := range attrs {
+			if a, ok := attr.(*SignatureAttribute); ok {
+				if result != "" {
+					return "", false
+				}
+				var valid bool
+				result, valid = sourceBridgeUTF8(obj, a.SignatureIndex)
+				if !valid || result == "" || !nativeProofWork(work, int64(len(result))) {
+					return "", false
+				}
+			}
+		}
+		return result, true
+	}
+	check := func(sig string, inherited map[string]bool, declaration bool) ([]string, bool) {
+		if sig == "" {
+			return nil, true
+		}
+		own, refs, ok := types.SignatureTypeVariableReferences(sig)
+		if !ok || !declaration && len(own) != 0 {
+			return nil, false
+		}
+		scope := map[string]bool{}
+		for n := range inherited {
+			scope[n] = true
+		}
+		for _, n := range own {
+			scope[n] = true
+		}
+		for _, n := range refs {
+			if !scope[n] {
+				return nil, false
+			}
+		}
+		return own, true
+	}
+	sig, ok := signature(obj.Attributes)
+	if !ok {
+		return false
+	}
+	own, ok := check(sig, inherited, true)
+	if !ok {
+		return false
+	}
+	classScope := map[string]bool{}
+	for n := range inherited {
+		classScope[n] = true
+	}
+	for _, n := range own {
+		classScope[n] = true
+	}
+	for _, field := range obj.Fields {
+		if field == nil {
+			return false
+		}
+		sig, ok := signature(field.Attributes)
+		scope := classScope
+		if field.AccessFlags&8 != 0 {
+			scope = nil
+		}
+		if !ok {
+			return false
+		}
+		if _, ok := check(sig, scope, false); !ok {
+			return false
+		}
+	}
+	for _, method := range obj.Methods {
+		if method == nil {
+			return false
+		}
+		sig, ok := signature(method.Attributes)
+		scope := classScope
+		if method.AccessFlags&8 != 0 {
+			scope = nil
+		}
+		if !ok {
+			return false
+		}
+		if _, ok := check(sig, scope, true); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // Prove the compiler-recreated enclosing instance for every constructor,
 // including this chains. The original descriptor, Code and IR remain intact.
 func nativeMemberProof(obj *ClassObject, work *workbudget.Budget, providers ...callbinding.Provider) *nativeMemberClass {
+	return nativeMemberProofWithOwner(obj, nil, work, providers...)
+}
+
+func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Budget, providers ...callbinding.Provider) *nativeMemberClass {
 	var provider callbinding.Provider
 	if len(providers) > 0 {
 		provider = providers[0]
 	}
 	owner, name, flags, known := originalMemberOwner(obj)
-	if !known || obj.MajorVersion < 49 || obj.MajorVersion > 52 || flags&(0x0008|0x0200|0x2000|0x4000) != 0 || obj.AccessFlags & ^uint16(0x0431) != 0 {
+	if !known || obj.MajorVersion < 49 || obj.MajorVersion > 52 || flags&(0x0200|0x2000|0x4000) != 0 || obj.AccessFlags & ^uint16(0x0431) != 0 {
 		return nil
 	}
+	formalCount, outerFormalCount := 0, 0
 	for _, a := range obj.Attributes {
 		switch a := a.(type) {
 		case *RuntimeVisibleAnnotationsAttribute, *RuntimeVisibleTypeAnnotationsAttribute, *DeprecatedAttribute:
 			return nil
 		case *SignatureAttribute:
 			signature, ok := sourceBridgeUTF8(obj, a.SignatureIndex)
-			if !ok || len(types.ClassFormalTypeParamNames(signature)) > 0 {
+			if !ok {
 				return nil
+			}
+			formalCount = len(types.ClassFormalTypeParamNames(signature))
+			if flags&8 == 0 && formalCount > 0 {
+				if enclosing == nil || enclosing.GetClassName() != owner {
+					return nil
+				}
+				scope := map[string]bool{}
+				found := false
+				for _, attr := range enclosing.Attributes {
+					if sig, ok := attr.(*SignatureAttribute); ok {
+						if found {
+							return nil
+						}
+						found = true
+						raw, ok := sourceBridgeUTF8(enclosing, sig.SignatureIndex)
+						if !ok || !nativeProofWork(work, int64(len(raw))) {
+							return nil
+						}
+						own, refs, ok := types.SignatureTypeVariableReferences(raw)
+						if !ok {
+							return nil
+						}
+						outerFormalCount = len(own)
+						for _, n := range own {
+							scope[n] = true
+						}
+						for _, n := range refs {
+							if !scope[n] {
+								return nil
+							}
+						}
+					}
+				}
+				if !nativeMemberTypeScope(obj, scope, work) {
+					return nil
+				}
 			}
 		case *UnparsedAttribute:
 			if strings.Contains(a.Name, "Annotation") {
@@ -96,7 +231,10 @@ func nativeMemberProof(obj *ClassObject, work *workbudget.Budget, providers ...c
 			}
 		}
 	}
-	p := &nativeMemberClass{object: obj, owner: owner, name: name, flags: flags, constructors: map[string]*nativeMemberConstructor{}}
+	if flags&8 != 0 && !nativeMemberTypeScope(obj, nil, work) {
+		return nil
+	}
+	p := &nativeMemberClass{object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}}
 	for _, f := range obj.Fields {
 		if f == nil || !nativeProofWork(work, 1) {
 			return nil
@@ -105,6 +243,12 @@ func nativeMemberProof(obj *ClassObject, work *workbudget.Budget, providers ...c
 		d, dok := sourceBridgeUTF8(obj, f.DescriptorIndex)
 		if !nok || !dok {
 			return nil
+		}
+		if p.static {
+			if f.AccessFlags&0x1000 != 0 {
+				return nil
+			}
+			continue
 		}
 		if f.AccessFlags&0x1000 != 0 {
 			if p.field != "" || n != "this$0" || f.AccessFlags != 0x1010 || d != "L"+owner+";" || len(f.Attributes) != 0 {
@@ -115,7 +259,7 @@ func nativeMemberProof(obj *ClassObject, work *workbudget.Budget, providers ...c
 			return nil
 		}
 	}
-	if p.field == "" {
+	if !p.static && p.field == "" {
 		return nil
 	}
 	for _, m := range obj.Methods {
@@ -134,8 +278,14 @@ func nativeMemberProof(obj *ClassObject, work *workbudget.Budget, providers ...c
 		}
 		n, nok := sourceBridgeUTF8(obj, m.NameIndex)
 		desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
-		if !nok || !dok || m.AccessFlags&0x0008 != 0 {
+		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 {
 			return nil
+		}
+		if p.static {
+			if n == "<init>" && m.AccessFlags&0x1000 != 0 {
+				return nil
+			}
+			continue
 		}
 		if n != "<init>" {
 			for _, a := range m.Attributes {
@@ -160,6 +310,23 @@ func nativeMemberProof(obj *ClassObject, work *workbudget.Budget, providers ...c
 		ps, ret, e := callbinding.Descriptor(desc)
 		if e != nil || ret != "V" || len(ps) == 0 || ps[0] != "L"+owner+";" || p.constructors[desc] != nil || m.AccessFlags&^uint16(0x0087) != 0 {
 			return nil
+		}
+		seenSignature := false
+		for _, a := range m.Attributes {
+			if sig, ok := a.(*SignatureAttribute); ok {
+				if seenSignature {
+					return nil
+				}
+				seenSignature = true
+				raw, ok := sourceBridgeUTF8(obj, sig.SignatureIndex)
+				if !ok || !nativeProofWork(work, int64(len(raw))) {
+					return nil
+				}
+				_, sourceParams, result := types.ParseMethodSignatureFull(raw, nil)
+				if result == nil || result.String(&class_context.ClassContext{}) != "void" || len(sourceParams) != len(ps)-1 {
+					return nil
+				}
+			}
 		}
 		var code *CodeAttribute
 		for _, a := range m.Attributes {
@@ -224,6 +391,9 @@ func nativeMemberProof(obj *ClassObject, work *workbudget.Budget, providers ...c
 			}
 		}
 		p.constructors[desc] = cp
+	}
+	if p.static {
+		return p
 	}
 	if len(p.constructors) == 0 {
 		return nil
@@ -293,7 +463,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				reader.Work = c.Work
 				reader.foldSiblingResolver = c.foldSiblingResolver
 				reader.declarationResolver = c.declarationResolver
-				child := nativeMemberProof(obj, c.Work, reader.buildInvocationMetadata())
+				child := nativeMemberProofWithOwner(obj, c.obj, c.Work, reader.buildInvocationMetadata())
 				rowName, rowKnown := sourceBridgeUTF8(c.obj, row.InnerNameIndex)
 				if child == nil || child.owner != p.owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags || p.children[name] != nil {
 					return nil
@@ -378,7 +548,7 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				}
 				owner, known := sourceBridgeClassName(c.obj, core.Convert2bytesToInt(op.Data))
 				child := p.children[owner]
-				if !known || child == nil {
+				if !known || child == nil || child.static {
 					continue
 				}
 				if i+3 >= len(ops) || ops[i+1].Instr.OpCode != core.OP_DUP || !constructorMotionLoad(ops[i+2], "L"+child.owner+";") {
@@ -425,7 +595,7 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 			}
 			for _, op := range d.Opcodes() {
 				call := constructorMotionMember(c.obj, op, core.OP_INVOKESPECIAL)
-				if call == nil || call.Member != "<init>" || p.children[call.Name] == nil {
+				if call == nil || call.Member != "<init>" || p.children[call.Name] == nil || p.children[call.Name].static {
 					continue
 				}
 				if result[name+desc][int(op.CurrentOffset)] != nil {
@@ -458,7 +628,7 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 			return cl, false
 		}
 		child := p.children[strings.ReplaceAll(owner, ".", "/")]
-		if child == nil {
+		if child == nil || child.static {
 			return cl, true
 		}
 		if !nativeProofWork(work, int64(len(cl.Methods))) || work != nil && work.CheckAlloc(int64(len(cl.Methods))*96) != nil {
@@ -476,9 +646,67 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 		projected[owner] = cl
 		return cl, true
 	}
+
+	// Constructor Signature omits the compiler's enclosing parameter. Its
+	// exact descriptor key must move with the proved source descriptor; merely
+	// shortening the call loses generic inference (or binds a different ctor).
+	{
+		type entry struct {
+			signature string
+			methods   map[string]string
+			known     bool
+		}
+		cache := map[string]entry{}
+		copy.SiblingClassSig = func(owner string) (string, map[string]string, bool) {
+			if hit, ok := cache[owner]; ok {
+				return hit.signature, hit.methods, hit.known
+			}
+			if ctx.SiblingClassSig == nil {
+				return "", nil, false
+			}
+			signature, methods, known := ctx.SiblingClassSig(owner)
+			child := p.children[strings.ReplaceAll(owner, ".", "/")]
+			if child == nil || child.static {
+				return signature, methods, known
+			}
+			cl, ok := copy.InvocationMetadata(owner)
+			if !ok || !nativeProofWork(work, int64(len(methods)+len(cl.Methods))) || work != nil && work.CheckAlloc(int64(len(methods)+len(cl.Methods))*96) != nil {
+				p.failed = true
+				return "", nil, false
+			}
+			projected := make(map[string]string, len(methods)+len(cl.Methods))
+			for key, value := range methods {
+				projected[key] = value
+			}
+			for descriptor := range child.constructors {
+				delete(projected, class_context.MethodDescKey("<init>", descriptor))
+			}
+			for _, m := range cl.Methods {
+				if m.Name != "<init>" {
+					continue
+				}
+				projected[class_context.MethodDescKey(m.Name, m.Desc)] = ""
+				if m.Signature == "" {
+					continue
+				}
+				_, params, _ := types.ParseMethodSignatureFull(m.Signature, ctx)
+				descriptorParams, result, err := callbinding.Descriptor(m.Desc)
+				if err != nil || result != "V" || len(params) != len(descriptorParams) {
+					p.failed = true
+					return "", nil, false
+				}
+				projected[class_context.MethodDescKey(m.Name, m.Desc)] = m.Signature
+			}
+			cache[owner] = entry{signature, projected, known}
+			return signature, projected, known
+		}
+	}
 	return &copy
 }
 func (c *ClassObjectDumper) wireNativeMemberSource() {
+	if child := c.nativeMemberCurrent; child != nil {
+		c.FuncCtx.LexicalClassName = child.name
+	}
 	p := c.nativeMemberRoot
 	looked := map[string]bool{}
 	if p == nil && c.nativeMemberLookup != nil {
@@ -548,7 +776,10 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		c.nativeMemberChecks[method] = checks
 	}
 	binding := nativeMemberBinding(ctx, p, c.Work)
-	ctx.SourceMemberCandidate = func(owner string) bool { return p.children[strings.ReplaceAll(owner, ".", "/")] != nil }
+	ctx.SourceMemberCandidate = func(owner string) bool {
+		child := p.children[strings.ReplaceAll(owner, ".", "/")]
+		return child != nil && !child.static
+	}
 	ctx.SourceMemberAllocation = func(owner, desc string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
 		fail := func() (string, bool) { p.failed = true; return "", false }
 		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
@@ -582,13 +813,27 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		invoke.FuncType = mt.FunctionType()
 		allocationBinding := *ctx
 		allocationBinding.InvocationMetadata = binding.InvocationMetadata
+		allocationBinding.SiblingClassSig = binding.SiblingClassSig
 		arguments := invoke.ArgumentStrings(&allocationBinding)
-		if args[0].Receiver && c.obj.GetClassName() == plan.child.owner {
-			return "new " + plan.child.name + "(" + strings.Join(arguments, ",") + ")", true
+		sourceName := plan.child.name
+		if plan.child.formalCount > 0 {
+			// Java forbids a raw member beneath a parameterized enclosing
+			// instance (and the reverse). Infer only the member's parameters;
+			// preserve a genuinely raw outer/member pair.
+			typedOuter := plan.child.outerFormalCount == 0 || args[0].Receiver && c.obj.GetClassName() == plan.child.owner
+			if param, ok := outer.Type().RawType().(*types.JavaParameterizedType); ok && len(param.TypeArgs) == plan.child.outerFormalCount {
+				typedOuter = true
+			}
+			if typedOuter {
+				sourceName += "<>"
+			}
 		}
-		return "(" + args[0].Text + ").new " + plan.child.name + "(" + strings.Join(arguments, ",") + ")", true
+		if args[0].Receiver && c.obj.GetClassName() == plan.child.owner {
+			return "new " + sourceName + "(" + strings.Join(arguments, ",") + ")", true
+		}
+		return "(" + args[0].Text + ").new " + sourceName + "(" + strings.Join(arguments, ",") + ")", true
 	}
-	if child := c.nativeMemberCurrent; child != nil {
+	if child := c.nativeMemberCurrent; child != nil && !child.static {
 		ctx.SourceMemberDelegation = func(owner, desc string, pc int, args []any) (string, bool) {
 			if strings.ReplaceAll(owner, ".", "/") != child.object.GetClassName() {
 				return "", false
@@ -616,6 +861,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			call.FuncType = mt.FunctionType()
 			delegationBinding := *ctx
 			delegationBinding.InvocationMetadata = binding.InvocationMetadata
+			delegationBinding.SiblingClassSig = binding.SiblingClassSig
 			delegationBinding.CurrentMethodDesc = ctor.sourceDescriptor
 			return "this(" + strings.Join(call.ArgumentStrings(&delegationBinding), ",") + ")", true
 		}
@@ -625,7 +871,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 func (c *ClassObjectDumper) prepareNativeMemberConstructor(code *CodeAttribute, body []statements.Statement, params []values.JavaValue, method *MemberInfo) ([]statements.Statement, error) {
 	child := c.nativeMemberCurrent
 	n, _ := c.obj.getUtf8(method.NameIndex)
-	if child == nil || n != "<init>" {
+	if child == nil || child.static || n != "<init>" {
 		return body, nil
 	}
 	desc, _ := c.obj.getUtf8(method.DescriptorIndex)
@@ -699,10 +945,14 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 		sub.declarationResolver = c.declarationResolver
 		sub.nativeMemberRoot = p
 		sub.nativeMemberCurrent = child
-		sub.nativeCaptureFields = map[string]string{child.field: c.FuncCtx.ShortTypeName(strings.ReplaceAll(p.owner, "/", ".")) + ".this"}
+		if !child.static {
+			sub.nativeCaptureFields = map[string]string{child.field: c.FuncCtx.ShortTypeName(strings.ReplaceAll(p.owner, "/", ".")) + ".this"}
+		}
 		sub.nativeCapturedReads = map[string]map[int]string{}
 		sub.nativeOuterContext = c.FuncCtx
-		sub.nativeTypeParams = append([]string(nil), c.FuncCtx.TypeParams...)
+		if !child.static {
+			sub.nativeTypeParams = append([]string(nil), c.FuncCtx.TypeParams...)
+		}
 		for _, m := range child.object.Methods {
 			n, _ := child.object.getUtf8(m.NameIndex)
 			desc, _ := child.object.getUtf8(m.DescriptorIndex)

@@ -125,9 +125,9 @@ func TestNativeMemberArchiveRequiresCompleteRepresentableFamily(t *testing.T) {
 	}{
 		{"direct", nativeMemberProofFixture, true},
 		{"qualified", `class NativeArchiveOwner {class Child{Child(long n){}}}class MemberUser{static Object make(NativeArchiveOwner o,long n){return o.new Child(n);}}`, true},
-		{"generic child", `class NativeArchiveOwner{class Child<T>{Child(T n){}}Child<String> make(){return new Child<String>("x");}}`, false},
+		{"generic child", `class NativeArchiveOwner{class Child<T>{Child(T n){}}Child<String> make(){return new Child<String>("x");}}`, true},
 		{"deeper owner", `class NativeArchiveOwner{class Child{class Deep{}Child(){}}Child make(){return new Child();}}`, false},
-		{"mixed static owner", `class NativeArchiveOwner{static class Static{}class Child{Child(){}}Child make(){return new Child();}}`, false},
+		{"mixed static owner", `class NativeArchiveOwner{static class Static{}class Child{Child(){}}Child make(){return new Child();}}`, true},
 		{"mixed anonymous owner", `class NativeArchiveOwner{class Child{Child(){}}Object make(){return new Child();}Object other(){return new Object(){};}}`, false},
 		{"member superclass", `class NativeArchiveOwner{class Base{}class Child extends Base{}Object make(){return new Child();}}`, false},
 		{"foreign subclass implicit owner", `class NativeArchiveOwner{class Child{Child(){}}Child make(){return new Child();}}class Sub extends NativeArchiveOwner.Child{Sub(NativeArchiveOwner o){o.super();}}`, false},
@@ -184,11 +184,19 @@ func TestNativeMemberArchiveKeepsPolicyPhysicalEntryAndConcurrentIdentity(t *tes
 					t.Fatalf("base ownership: %s", src)
 				}
 			}
-			for _, n := range []string{"NativeArchiveOwner$Child.raw", "META-INF/versions/9/NativeArchiveOwner$Child.class"} {
+			for _, n := range []string{"NativeArchiveOwner$Child.raw"} {
 				src, e := z.ReadFile(n)
 				if e != nil || strings.Contains(string(src), "original member body owned by") {
 					t.Fatalf("physical alias %s: %v %s", n, e, src)
 				}
+			}
+			versionSource, e := z.ReadFile("META-INF/versions/9/NativeArchiveOwner.class")
+			if e != nil || !strings.Contains(string(versionSource), "class Child") || !strings.Contains(string(versionSource), "this(13") || strings.Contains(string(versionSource), "this(7") {
+				t.Fatalf("version member identity %v %s", e, versionSource)
+			}
+			versionChild, e := z.ReadFile("META-INF/versions/9/NativeArchiveOwner$Child.class")
+			if e != nil || !strings.Contains(string(versionChild), "original member body owned by") {
+				t.Fatalf("version child ownership %v %s", e, versionChild)
 			}
 			t.Setenv("JDEC_NATIVE_MEMBER_OFF", "1")
 			src, e := z.ReadFile("NativeArchiveOwner$Child.class")
@@ -369,5 +377,150 @@ func TestNativeMemberDescriptorOnlyDependencyUsesAcceptedScope(t *testing.T) {
 	root, e := z.ReadFile("NativeArchiveOwner.class")
 	if e != nil || strings.Contains(string(root), "OtherOwner$Child") || !strings.Contains(string(root), "OtherOwner.Child") {
 		t.Fatalf("dangling flat field/Signature type %v %s", e, root)
+	}
+}
+
+func TestNativeMemberStaticTypeVariablesRequireOriginalLexicalBinding(t *testing.T) {
+	files := nativeCompileClasses(t, `class NativeStaticScopeOwner<T extends Number>{static class Box<U extends Number>{U field;Box(U v){field=v;}<V extends U> V echo(V v){return v;}static <W extends Number> W own(W v){return v;}}}`)
+	for _, scenario := range []string{"original", "field outer variable", "class bound outer variable", "method bound outer variable", "static field class variable", "static method class variable", "method own shadow", "malformed signature", "duplicate signature", "budget"} {
+		t.Run(scenario, func(t *testing.T) {
+			obj, err := Parse(append([]byte(nil), files["NativeStaticScopeOwner$Box.class"]...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool := NewConstantPoolWithConstant(&obj.ConstantPool)
+			replace := func(attrs *[]AttributeInfo, sig string) {
+				var kept []AttributeInfo
+				for _, a := range *attrs {
+					if _, ok := a.(*SignatureAttribute); !ok {
+						kept = append(kept, a)
+					}
+				}
+				*attrs = append(kept, &SignatureAttribute{Type: "Signature", AttrLen: 2, SignatureIndex: uint16(pool.AddUtf8Info(sig))})
+			}
+			var echo, own *MemberInfo
+			for _, m := range obj.Methods {
+				n, _ := sourceBridgeUTF8(obj, m.NameIndex)
+				if n == "echo" {
+					echo = m
+				}
+				if n == "own" {
+					own = m
+				}
+			}
+			if echo == nil || own == nil || len(obj.Fields) != 1 {
+				t.Fatal("missing signature witnesses")
+			}
+			var work *workbudget.Budget
+			switch scenario {
+			case "field outer variable":
+				replace(&obj.Fields[0].Attributes, "TT;")
+			case "class bound outer variable":
+				replace(&obj.Attributes, "<U:TT;>Ljava/lang/Object;")
+			case "method bound outer variable":
+				replace(&echo.Attributes, "<V:TT;>(TV;)TV;")
+			case "static field class variable":
+				obj.Fields[0].AccessFlags |= 8
+			case "static method class variable":
+				replace(&own.Attributes, "<W:TU;>(TW;)TW;")
+			case "method own shadow":
+				replace(&echo.Attributes, "<T:Ljava/lang/Number;>(TT;)TT;")
+			case "malformed signature":
+				replace(&echo.Attributes, "<V:TU;>(TV;)TV")
+			case "duplicate signature":
+				obj.Attributes = append(obj.Attributes, obj.Attributes[0])
+			case "budget":
+				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			}
+			want := scenario == "original" || scenario == "method own shadow"
+			if got := nativeMemberProof(obj, work) != nil; got != want {
+				t.Fatalf("accepted=%v want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestNativeMemberOwnGenericScopeRequiresEnclosingDeclarations(t *testing.T) {
+	files := nativeCompileClasses(t, `class NativeGenericProofOwner<T extends Number>{class Child<U extends T>{U field;Child(U n){field=n;}<V extends U> V echo(V n){return n;}}}`)
+	for _, scenario := range []string{"original", "missing owner", "wrong owner", "missing owner signature", "duplicate owner signature", "free class bound", "free field variable", "free method bound", "constructor signature includes outer", "duplicate constructor signature", "method own shadow", "budget"} {
+		t.Run(scenario, func(t *testing.T) {
+			owner, e := Parse(append([]byte(nil), files["NativeGenericProofOwner.class"]...))
+			if e != nil {
+				t.Fatal(e)
+			}
+			child, e := Parse(append([]byte(nil), files["NativeGenericProofOwner$Child.class"]...))
+			if e != nil {
+				t.Fatal(e)
+			}
+			pool := NewConstantPoolWithConstant(&child.ConstantPool)
+			replace := func(attrs *[]AttributeInfo, sig string) {
+				var kept []AttributeInfo
+				for _, a := range *attrs {
+					if _, ok := a.(*SignatureAttribute); !ok {
+						kept = append(kept, a)
+					}
+				}
+				*attrs = append(kept, &SignatureAttribute{SignatureIndex: uint16(pool.AddUtf8Info(sig))})
+			}
+			var ctor, echo *MemberInfo
+			var field *MemberInfo
+			for _, m := range child.Methods {
+				n, _ := sourceBridgeUTF8(child, m.NameIndex)
+				if n == "<init>" {
+					ctor = m
+				}
+				if n == "echo" {
+					echo = m
+				}
+			}
+			for _, f := range child.Fields {
+				n, _ := sourceBridgeUTF8(child, f.NameIndex)
+				if n == "field" {
+					field = f
+				}
+			}
+			if ctor == nil || echo == nil || field == nil {
+				t.Fatal("missing witnesses")
+			}
+			var work *workbudget.Budget
+			switch scenario {
+			case "missing owner":
+				owner = nil
+			case "wrong owner":
+				owner = child
+			case "missing owner signature":
+				owner.Attributes = nil
+			case "duplicate owner signature":
+				for _, a := range owner.Attributes {
+					if _, ok := a.(*SignatureAttribute); ok {
+						owner.Attributes = append(owner.Attributes, a)
+						break
+					}
+				}
+			case "free class bound":
+				replace(&child.Attributes, "<U:TX;>Ljava/lang/Object;")
+			case "free field variable":
+				replace(&field.Attributes, "TX;")
+			case "free method bound":
+				replace(&echo.Attributes, "<V:TX;>(TV;)TV;")
+			case "constructor signature includes outer":
+				replace(&ctor.Attributes, "(LNativeGenericProofOwner<TT;>;TU;)V")
+			case "duplicate constructor signature":
+				for _, a := range ctor.Attributes {
+					if _, ok := a.(*SignatureAttribute); ok {
+						ctor.Attributes = append(ctor.Attributes, a)
+						break
+					}
+				}
+			case "method own shadow":
+				replace(&echo.Attributes, "<T:Ljava/lang/Number;>(TT;)TT;")
+			case "budget":
+				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			}
+			want := scenario == "original" || scenario == "method own shadow"
+			if got := nativeMemberProofWithOwner(child, owner, work) != nil; got != want {
+				t.Fatalf("accepted=%v want %v", got, want)
+			}
+		})
 	}
 }

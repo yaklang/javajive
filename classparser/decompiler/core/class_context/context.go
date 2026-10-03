@@ -27,6 +27,10 @@ type SourceCaptureOperand struct {
 type ClassContext struct {
 	// Lexical member declarations shadow imported, same-package and java.lang
 	// simple type names. Bind external types explicitly in their actual scope.
+	// LexicalClassName is the current source member declaration, supplied only
+	// after original ownership proof. Its enclosing parameters are implicit
+	// in a self type, including when an own formal shadows an outer formal.
+	LexicalClassName          string
 	LexicalTypeNames          map[string]bool
 	SourceMemberAllocation    func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	SourceMemberCandidate     func(owner string) bool
