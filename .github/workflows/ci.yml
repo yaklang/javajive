@@ -66,8 +66,10 @@ jobs:
           set -o pipefail
           mkdir -p artifacts
           go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
-          # Two isolated test processes use the runner's two CPUs. Discover every
-          # adversarial parent from this exact binary; omit no tests or variants.
+          # Four isolated processes each run one fixture at a time. Tests that
+          # change process environment cannot run in parallel within Go; separate
+          # pools prevent them from blocking most of the corpus. Peak fixture
+          # concurrency remains four. Discover every parent from this binary.
           python3 - <<'PYTHON'
           import json, os, pathlib, re, subprocess, sys
           binary = str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "adversarial.test")
@@ -76,7 +78,7 @@ jobs:
               if line.startswith("TestAdversarial")))
           if not names:
               raise SystemExit("no adversarial tests discovered")
-          groups = [names[0::2], names[1::2]]
+          groups = [names[index::4] for index in range(4)]
           pathlib.Path("artifacts/adversarial-manifest.json").write_text(json.dumps(groups, indent=2))
           runs = []
           for index, group in enumerate(groups):
@@ -84,7 +86,7 @@ jobs:
               output = path.open("w")
               command = ["go", "tool", "test2json", "-t", "-p",
                          "github.com/yaklang/javajive/classparser", binary,
-                         "-test.v=test2json", "-test.count=1", "-test.parallel=2",
+                         "-test.v=test2json", "-test.count=1", "-test.parallel=1",
                          "-test.timeout=8m", "-test.run=^(" + "|".join(map(re.escape, group)) + ")$"]
               runs.append((subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, cwd="classparser"), output, path))
           failed = False
