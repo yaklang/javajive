@@ -10,7 +10,7 @@ import (
 )
 
 func TestProtectedIfBoundaryRetainsExactReferenceAndWholeEffectDomain(t *testing.T) {
-	for _, scenario := range []string{"direct", "detached jump", "jump chain", "wrong original", "missing range", "invalid range", "ambiguous jump", "jump cycle", "protected condition", "protected branch", "unknown call PC", "opaque branch", "shared interval", "handler interval", "budget"} {
+	for _, scenario := range []string{"direct", "detached jump", "jump chain", "wrong original", "missing range", "invalid range", "ambiguous jump", "jump cycle", "protected condition", "protected branch", "unknown call PC", "opaque branch", "shared interval", "handler interval", "budget", "catch-all cleanup ownership", "missing handler metadata"} {
 		t.Run(scenario, func(t *testing.T) {
 			original := core.NewNode(&statements.ConditionStatement{})
 			branch := layerTestCall(18)
@@ -21,6 +21,10 @@ func TestProtectedIfBoundaryRetainsExactReferenceAndWholeEffectDomain(t *testing
 			region.HasProtectedRange = true
 			region.ProtectedStartPC, region.ProtectedEndPC = 0, 10
 			region.ProtectedEnd = original
+			handler := core.NewNode(&statements.ReturnStatement{})
+			handler.IsCatchStart = true
+			handler.CatchHandler = &statements.CatchHandler{ProtectedRanges: [][2]int{{0, 10}}}
+			region.AddNext(handler)
 			jump := core.NewNode(&statements.GOTOStatement{})
 			jump.AddNext(original)
 			switch scenario {
@@ -56,9 +60,11 @@ func TestProtectedIfBoundaryRetainsExactReferenceAndWholeEffectDomain(t *testing
 			case "shared interval":
 				region.SharedProtectedRanges = []core.HandlerRange{{StartPc: 16, EndPc: 20}}
 			case "handler interval":
-				handler := core.NewNode(&statements.ReturnStatement{})
-				handler.CatchHandler = &statements.CatchHandler{ProtectedRanges: [][2]int{{16, 20}}}
-				region.AddNext(handler)
+				handler.CatchHandler.ProtectedRanges = append(handler.CatchHandler.ProtectedRanges, [2]int{16, 20})
+			case "catch-all cleanup ownership":
+				handler.CatchHandler.CatchAll = true
+			case "missing handler metadata":
+				handler.CatchHandler = nil
 			case "budget":
 				for i := 0; i < 512; i++ {
 					view.IfBody = append(view.IfBody, statements.NewExpressionStatement(branch))

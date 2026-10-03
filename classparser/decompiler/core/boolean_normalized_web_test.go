@@ -10,7 +10,7 @@ import (
 )
 
 func TestNormalizedBooleanWebRequiresClosedDefinitionsAndBooleanUses(t *testing.T) {
-	for _, kind := range []string{"proved", "nonboolean seed", "numeric consumer", "increment", "wide increment", "parameter", "entry", "foreign owner", "missing definition", "nonboolean operand", "diagnostic off"} {
+	for _, kind := range []string{"proved", "nonboolean seed", "numeric consumer", "no boolean consumer", "increment", "wide increment", "parameter", "entry", "foreign owner", "missing definition", "nonboolean operand", "diagnostic off"} {
 		t.Run(kind, func(t *testing.T) {
 			ref := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
 			zero := values.NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger))
@@ -26,6 +26,8 @@ func TestNormalizedBooleanWebRequiresClosedDefinitionsAndBooleanUses(t *testing.
 				zero.Data = 2
 			case "numeric consumer":
 				ret.Instr.OpCode = OP_IADD
+			case "no boolean consumer":
+				d.opCodes = []*OpCode{seed, store}
 			case "increment", "wide increment":
 				inc := op(OP_IINC, 8)
 				inc.Data = []byte{1, 1}

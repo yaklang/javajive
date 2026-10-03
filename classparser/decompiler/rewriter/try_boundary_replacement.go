@@ -38,10 +38,22 @@ func retargetProtectedIfBoundary(regions []*core.Node, original, replacement *co
 		for _, row := range region.SharedProtectedRanges {
 			rows = append(rows, [2]int{int(row.StartPc), int(row.EndPc)})
 		}
+		typedBoundary, handlersKnown := false, true
 		for _, next := range region.Next {
-			if next != nil && next.CatchHandler != nil {
+			if next != nil && next.IsCatchStart {
+				if next.CatchHandler == nil || next.CatchHandler.CatchAll {
+					// Catch-all structuring owns the normal cleanup copy as
+					// input to the whole finally-domain proof. Its collector
+					// boundary is not a typed handler's normal continuation.
+					handlersKnown = false
+					break
+				}
+				typedBoundary = true
 				rows = append(rows, next.CatchHandler.ProtectedRanges...)
 			}
+		}
+		if !typedBoundary || !handlersKnown {
+			continue
 		}
 		ranges, valid := canonicalHandlerRanges(rows)
 		if !valid {

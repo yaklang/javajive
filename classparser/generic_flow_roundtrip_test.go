@@ -177,7 +177,10 @@ func roundTripGenericFlowSources(t *testing.T, main, source string, extraSources
 				}
 				cmd := exec.Command(javac, args...)
 				if out, err := cmd.CombinedOutput(); err != nil {
-					t.Fatalf("rebuild %s/%s: %v\n%s\n%s", mode, debug, err, out, result.Source)
+					for _, name := range names {
+						t.Logf("rebuilt unit %s\n%s", name, sources[name])
+					}
+					t.Fatalf("rebuild %s/%s: %v\n%s", mode, debug, err, out)
 				}
 				if maskSelected && len(extraUnits) > 0 {
 					// Compile the selected family before consulting the original

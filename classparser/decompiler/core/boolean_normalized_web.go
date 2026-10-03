@@ -261,6 +261,7 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 		if !valid || !seed {
 			continue
 		}
+		booleanConsumer := false
 		for _, op := range d.opCodes {
 			if op == nil || op.Instr == nil {
 				continue
@@ -308,19 +309,25 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 						}
 					}
 				case OP_IFEQ, OP_IFNE:
+					booleanConsumer = true
 				case OP_IRETURN:
 					valid = valid && d.functionReturnsBoolean()
+					booleanConsumer = booleanConsumer || d.functionReturnsBoolean()
 				case OP_ISTORE, OP_ISTORE_0, OP_ISTORE_1, OP_ISTORE_2, OP_ISTORE_3:
 					owner, known := webs.webOf[op]
 					valid = valid && known && component[owner]
 				case OP_PUTFIELD, OP_PUTSTATIC:
 					valid = valid && i == 0 && isExactPrimer(d.GetMethodFromPool(int(Convert2bytesToInt(op.Data))).JavaType, types.JavaBoolean)
+					booleanConsumer = booleanConsumer || valid
 				default:
 					valid = false
 				}
 			}
 		}
-		if !valid {
+		// A dead canonical seed is still an integer definition. Exceptional
+		// before-state restoration may later reconnect it to a numeric web;
+		// a 0/1 domain alone does not justify a boolean source declaration.
+		if !valid || !booleanConsumer {
 			continue
 		}
 		for _, memberWeb := range componentOrder {
