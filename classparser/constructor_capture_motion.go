@@ -63,9 +63,9 @@ func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBound
 		writes[key] = true
 		index += 3
 	}
-	// Remaining operands are direct parameters or original scalar/null/String
-	// constants. No operation can read, publish or overwrite an early capture.
-	next, call := constructorMotionDelegation(c.obj, ops, index, params, slots)
+	// Remaining operands are receiver-free original parameters, literals and
+	// casts evaluated before initialization. None observes an early capture.
+	next, call := constructorMotionDelegation(c.obj, ops, index, params, slots, c.FuncCtx.InvocationMetadata)
 	if call == nil || next == 0 || int(ops[next-1].CurrentOffset) != p.pc || call.Name != strings.ReplaceAll(p.delegate.ClassName, ".", "/") || call.Description != p.delegate.Descriptor {
 		return false
 	}
@@ -198,11 +198,12 @@ func constructorMotionField(obj *ClassObject, member *values.JavaClassMember, ca
 	return count == 1
 }
 
-func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int, params []string, slots map[int]int) (int, *values.JavaClassMember) {
+func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int, params []string, slots map[int]int, metadata callbinding.Provider) (int, *values.JavaClassMember) {
 	if start < 0 || start >= len(ops) || ops[start] == nil || ops[start].Instr == nil || core.GetRetrieveIdx(ops[start]) != 0 || !constructorMotionLoad(ops[start], "Ljava/lang/Object;") {
 		return 0, nil
 	}
 	arguments := []string{}
+	widening := newConstructorWideningQuery(metadata)
 	index := start + 1
 	for index < len(ops) && index-start <= 512 {
 		if ops[index] == nil || ops[index].Instr == nil {
@@ -218,11 +219,33 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				return 0, nil
 			}
 			for i := range formals {
-				if formals[i] != arguments[i] && !(arguments[i] == "null" && callbinding.Reference(formals[i])) {
+				if !widening.assignable(arguments[i], formals[i]) {
 					return 0, nil
 				}
 			}
 			return index + 1, member
+		}
+		if ops[index].Instr.OpCode == core.OP_CHECKCAST {
+			// The original cast is evaluated before Object initialization, so
+			// a cast/linkage failure cannot expose this receiver by finalization.
+			// Only an already receiver-free operand is on this argument stack.
+			if len(ops[index].Data) != 2 || len(arguments) == 0 || arguments[len(arguments)-1] != "null" && !callbinding.Reference(arguments[len(arguments)-1]) {
+				return 0, nil
+			}
+			name, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(ops[index].Data))
+			if !known {
+				return 0, nil
+			}
+			descriptor := name
+			if !strings.HasPrefix(name, "[") {
+				descriptor = "L" + name + ";"
+			}
+			if ps, _, err := callbinding.Descriptor("(" + descriptor + ")V"); err != nil || len(ps) != 1 {
+				return 0, nil
+			}
+			arguments[len(arguments)-1] = descriptor
+			index++
+			continue
 		}
 		if literal, proved := constructorMotionLiteral(obj, ops[index]); proved {
 			arguments = append(arguments, literal)
@@ -237,6 +260,53 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 		index++
 	}
 	return 0, nil
+}
+
+// Conversion proves that the original operand can enter the original formal;
+// it does not select a source overload. The original invocation descriptor and
+// source constructor binding remain authoritative. Share a bounded immutable
+// hierarchy query across all operands, including a guard on retained edges.
+type constructorWideningQuery struct {
+	provider  callbinding.Provider
+	classes   map[string]callbinding.Class
+	known     map[string]bool
+	remaining int
+	exhausted bool
+}
+
+func newConstructorWideningQuery(provider callbinding.Provider) *constructorWideningQuery {
+	return &constructorWideningQuery{provider: provider, classes: map[string]callbinding.Class{}, known: map[string]bool{}, remaining: 64}
+}
+
+func (q *constructorWideningQuery) assignable(actual, formal string) bool {
+	lookup := func(name string) (callbinding.Class, bool) {
+		if ok, seen := q.known[name]; seen {
+			return q.classes[name], ok
+		}
+		q.remaining--
+		if q.remaining < 0 {
+			q.exhausted = true
+			return callbinding.Class{}, false
+		}
+		if q.provider == nil {
+			q.known[name] = false
+			return callbinding.Class{}, false
+		}
+		class, known := q.provider(name)
+		known = known && class.Name == name && class.ParentsComplete
+		if known && len(class.Parents) > q.remaining {
+			q.exhausted = true
+			known = false
+		}
+		if known {
+			q.remaining -= len(class.Parents)
+			class.Parents = append([]string(nil), class.Parents...)
+			q.classes[name] = class
+		}
+		q.known[name] = known
+		return class, known
+	}
+	return callbinding.Assignable(actual, formal, lookup) && !q.exhausted
 }
 
 func (c *ClassObjectDumper) constructorChainDoesNotObserve(owner, descriptor string, writes, active map[string]bool, remaining *int, depth int) bool {
