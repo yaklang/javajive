@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -203,27 +204,82 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 		return 0, nil
 	}
 	arguments := []string{}
+	allocations := map[string]string{}
 	widening := newConstructorWideningQuery(metadata)
 	index := start + 1
 	for index < len(ops) && index-start <= 512 {
 		if ops[index] == nil || ops[index].Instr == nil {
 			return 0, nil
 		}
+		if ops[index].Instr.OpCode == core.OP_NEW {
+			if len(ops[index].Data) != 2 {
+				return 0, nil
+			}
+			owner, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(ops[index].Data))
+			if !known || strings.HasPrefix(owner, "[") {
+				return 0, nil
+			}
+			decl, known := widening.class(owner)
+			if !known || !decl.MembersComplete || decl.IsInterface {
+				return 0, nil
+			}
+			token := "@allocation:" + strconv.Itoa(index)
+			allocations[token] = owner
+			arguments = append(arguments, token)
+			index++
+			continue
+		}
+		if ops[index].Instr.OpCode == core.OP_DUP {
+			if len(ops[index].Data) != 0 || len(arguments) == 0 {
+				return 0, nil
+			}
+			value := arguments[len(arguments)-1]
+			_, allocated := allocations[value]
+			if !allocated && value != "null" && constructorEffectType(value).width() != 1 {
+				return 0, nil
+			}
+			arguments = append(arguments, value)
+			index++
+			continue
+		}
 		if ops[index].Instr.OpCode == core.OP_INVOKESPECIAL {
 			member := constructorMotionMember(obj, ops[index], core.OP_INVOKESPECIAL)
-			if member == nil || member.Member != "<init>" || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) {
+			if member == nil || member.Member != "<init>" {
 				return 0, nil
 			}
 			formals, ret, err := callbinding.Descriptor(member.Description)
-			if err != nil || ret != "V" || len(formals) != len(arguments) {
+			if err != nil || ret != "V" || len(arguments) < len(formals) {
 				return 0, nil
 			}
+			base := len(arguments) - len(formals)
 			for i := range formals {
-				if !widening.assignable(arguments[i], formals[i]) {
+				if !widening.assignable(arguments[base+i], formals[i]) {
 					return 0, nil
 				}
 			}
-			return index + 1, member
+			if base == 0 {
+				if member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName() {
+					return 0, nil
+				}
+				return index + 1, member
+			}
+			// A different freshly allocated receiver may be constructed while
+			// THIS remains uninitialized. Its exact NEW-site token cannot be
+			// passed to a call, cast or field access until this matching init.
+			token := arguments[base-1]
+			allocation, exists := allocations[token]
+			if !exists || allocation != member.Name || !widening.constructor(member) {
+				return 0, nil
+			}
+			arguments = arguments[:base-1]
+			for i, value := range arguments {
+				if value == token {
+					arguments[i] = "L" + allocation + ";"
+				}
+			}
+			delete(allocations, token)
+			index++
+			continue
 		}
 		if ops[index].Instr.OpCode == core.OP_CHECKCAST {
 			// The original cast is evaluated before Object initialization, so
@@ -244,6 +300,51 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				return 0, nil
 			}
 			arguments[len(arguments)-1] = descriptor
+			index++
+			continue
+		}
+		if opcode := ops[index].Instr.OpCode; opcode == core.OP_INVOKESTATIC || opcode == core.OP_INVOKEVIRTUAL || opcode == core.OP_INVOKEINTERFACE {
+			// THIS stays outside the argument stack. Original receiver-free
+			// calls may have effects and throw, but remain before initialization
+			// and cannot publish the uninitialized receiver. Bind the original
+			// descriptor, opcode and declared method instead of assuming purity.
+			member := constructorMotionMember(obj, ops[index], opcode)
+			if member == nil || !widening.invocation(member, opcode) {
+				return 0, nil
+			}
+			formals, result, err := callbinding.Descriptor(member.Description)
+			if err != nil || len(arguments) < len(formals) {
+				return 0, nil
+			}
+			words := 1
+			base := len(arguments) - len(formals)
+			for i, formal := range formals {
+				words += constructorEffectType(formal).width()
+				if !widening.assignable(arguments[base+i], formal) {
+					return 0, nil
+				}
+			}
+			if opcode == core.OP_INVOKEINTERFACE && (words > 255 || int(ops[index].Data[2]) != words) {
+				return 0, nil
+			}
+			arguments = arguments[:base]
+			if opcode != core.OP_INVOKESTATIC {
+				if len(arguments) == 0 || !widening.assignable(arguments[len(arguments)-1], "L"+member.Name+";") {
+					return 0, nil
+				}
+				arguments = arguments[:len(arguments)-1]
+			}
+			if result != "V" {
+				arguments = append(arguments, result)
+			}
+			index++
+			continue
+		}
+		if ops[index].Instr.OpCode == core.OP_ARRAYLENGTH {
+			if len(ops[index].Data) != 0 || len(arguments) == 0 || arguments[len(arguments)-1] != "null" && !strings.HasPrefix(arguments[len(arguments)-1], "[") {
+				return 0, nil
+			}
+			arguments[len(arguments)-1] = "I"
 			index++
 			continue
 		}
@@ -291,46 +392,150 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 // source constructor binding remain authoritative. Share a bounded immutable
 // hierarchy query across all operands, including a guard on retained edges.
 type constructorWideningQuery struct {
-	provider  callbinding.Provider
-	classes   map[string]callbinding.Class
-	known     map[string]bool
-	remaining int
-	exhausted bool
+	provider         callbinding.Provider
+	classes          map[string]callbinding.Class
+	known            map[string]bool
+	remaining        int
+	exhausted        bool
+	methods          map[string]map[string][]callbinding.Method
+	remainingMethods int
 }
 
 func newConstructorWideningQuery(provider callbinding.Provider) *constructorWideningQuery {
-	return &constructorWideningQuery{provider: provider, classes: map[string]callbinding.Class{}, known: map[string]bool{}, remaining: 64}
+	return &constructorWideningQuery{provider: provider, classes: map[string]callbinding.Class{}, known: map[string]bool{}, remaining: 64, methods: map[string]map[string][]callbinding.Method{}, remainingMethods: 512}
 }
 
 func (q *constructorWideningQuery) assignable(actual, formal string) bool {
-	lookup := func(name string) (callbinding.Class, bool) {
-		if ok, seen := q.known[name]; seen {
-			return q.classes[name], ok
+	return callbinding.Assignable(actual, formal, q.class) && !q.exhausted
+}
+
+func (q *constructorWideningQuery) class(name string) (callbinding.Class, bool) {
+	if ok, seen := q.known[name]; seen {
+		return q.classes[name], ok
+	}
+	q.remaining--
+	if q.remaining < 0 {
+		q.exhausted = true
+		return callbinding.Class{}, false
+	}
+	if q.provider == nil {
+		q.known[name] = false
+		return callbinding.Class{}, false
+	}
+	class, known := q.provider(name)
+	known = known && class.Name == name && class.ParentsComplete
+	if known && len(class.Parents) > q.remaining {
+		q.exhausted = true
+		known = false
+	}
+	if known {
+		q.remaining -= len(class.Parents)
+		class.Parents = append([]string(nil), class.Parents...)
+		q.classes[name] = class
+	}
+	q.known[name] = known
+	return class, known
+}
+
+// Resolve one exact original method through a bounded declaration graph.
+// Static interface methods are not inherited. Multiple inherited candidates,
+// unknown declarations, wrong opcode kinds and cycles cannot certify a call.
+func (q *constructorWideningQuery) invocation(member *values.JavaClassMember, opcode int) bool {
+	if member == nil || member.Member == "<init>" || member.Member == "<clinit>" || opcode != core.OP_INVOKESTATIC && opcode != core.OP_INVOKEVIRTUAL && opcode != core.OP_INVOKEINTERFACE {
+		return false
+	}
+	seen := map[string]bool{}
+	var find func(string) (int, bool)
+	find = func(name string) (int, bool) {
+		if seen[name] {
+			return 0, false
 		}
+		seen[name] = true
+		defer delete(seen, name)
 		q.remaining--
 		if q.remaining < 0 {
 			q.exhausted = true
-			return callbinding.Class{}, false
+			return 0, false
 		}
-		if q.provider == nil {
-			q.known[name] = false
-			return callbinding.Class{}, false
+		decl, known := q.class(name)
+		if !known || !decl.MembersComplete {
+			return 0, false
 		}
-		class, known := q.provider(name)
-		known = known && class.Name == name && class.ParentsComplete
-		if known && len(class.Parents) > q.remaining {
-			q.exhausted = true
-			known = false
+		methods, indexed := q.methodIndex(decl)
+		if !indexed {
+			return 0, false
 		}
-		if known {
-			q.remaining -= len(class.Parents)
-			class.Parents = append([]string(nil), class.Parents...)
-			q.classes[name] = class
+		count := 0
+		for _, method := range methods[member.Member+"\x00"+member.Description] {
+			if method.Static != (opcode == core.OP_INVOKESTATIC) {
+				return 0, false
+			}
+			count++
 		}
-		q.known[name] = known
-		return class, known
+		if count != 0 {
+			return count, count == 1
+		}
+		if decl.IsInterface && opcode == core.OP_INVOKESTATIC {
+			return 0, false
+		}
+		for _, parent := range decl.Parents {
+			n, ok := find(parent)
+			if !ok {
+				return 0, false
+			}
+			count += n
+		}
+		return count, true
 	}
-	return callbinding.Assignable(actual, formal, lookup) && !q.exhausted
+	decl, known := q.class(member.Name)
+	if !known || opcode == core.OP_INVOKEINTERFACE && !decl.IsInterface || opcode == core.OP_INVOKEVIRTUAL && decl.IsInterface {
+		return false
+	}
+	n, ok := find(member.Name)
+	return ok && n == 1 && !q.exhausted
+}
+
+func (q *constructorWideningQuery) constructor(member *values.JavaClassMember) bool {
+	if member == nil || member.Member != "<init>" {
+		return false
+	}
+	decl, known := q.class(member.Name)
+	if !known || !decl.MembersComplete || decl.IsInterface {
+		return false
+	}
+	methods, indexed := q.methodIndex(decl)
+	if !indexed {
+		return false
+	}
+	count := 0
+	for _, method := range methods["<init>\x00"+member.Description] {
+		if method.Static {
+			return false
+		}
+		count++
+	}
+	return count == 1 && !q.exhausted
+}
+
+// Index each exact declaration once, with a separate shared method-entry
+// budget. A large but ordinary SDK method table is one hierarchy node, not
+// hundreds of hierarchy edges. Repeated calls never rescan the same table.
+func (q *constructorWideningQuery) methodIndex(decl callbinding.Class) (map[string][]callbinding.Method, bool) {
+	if methods, known := q.methods[decl.Name]; known {
+		return methods, true
+	}
+	if len(decl.Methods) > q.remainingMethods {
+		q.exhausted = true
+		return nil, false
+	}
+	q.remainingMethods -= len(decl.Methods)
+	methods := map[string][]callbinding.Method{}
+	for _, method := range decl.Methods {
+		key := method.Name + "\x00" + method.Desc
+		methods[key] = append(methods[key], method)
+	}
+	q.methods[decl.Name] = methods
+	return methods, true
 }
 
 func (c *ClassObjectDumper) constructorChainDoesNotObserve(owner, descriptor string, writes, active map[string]bool, remaining *int, depth int) bool {
