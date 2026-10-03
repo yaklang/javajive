@@ -63,8 +63,8 @@ func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBound
 		writes[key] = true
 		index += 3
 	}
-	// Remaining operands are receiver-free original parameters, literals and
-	// casts evaluated before initialization. None observes an early capture.
+	// Remaining operands are original receiver-free computations evaluated
+	// before initialization. None can observe an early capture on this receiver.
 	next, call := constructorMotionDelegation(c.obj, ops, index, params, slots, c.FuncCtx.InvocationMetadata)
 	if call == nil || next == 0 || int(ops[next-1].CurrentOffset) != p.pc || call.Name != strings.ReplaceAll(p.delegate.ClassName, ".", "/") || call.Description != p.delegate.Descriptor {
 		return false
@@ -244,6 +244,30 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				return 0, nil
 			}
 			arguments[len(arguments)-1] = descriptor
+			index++
+			continue
+		}
+		if opcode := ops[index].Instr.OpCode; opcode == core.OP_GETFIELD || opcode == core.OP_GETSTATIC {
+			// Only external references enter the argument stack: the original
+			// uninitialized THIS is held outside it. Reading an external field
+			// cannot recover an alias to THIS because the leading captures have
+			// not published it. Keep the original read and its linkage, null and
+			// class-initialization failures before the original delegate.
+			member := constructorMotionMember(obj, ops[index], opcode)
+			if member == nil {
+				return 0, nil
+			}
+			fields, _, err := callbinding.Descriptor("(" + member.Description + ")V")
+			if err != nil || len(fields) != 1 {
+				return 0, nil
+			}
+			if opcode == core.OP_GETFIELD {
+				if len(arguments) == 0 || !widening.assignable(arguments[len(arguments)-1], "L"+member.Name+";") {
+					return 0, nil
+				}
+				arguments = arguments[:len(arguments)-1]
+			}
+			arguments = append(arguments, fields[0])
 			index++
 			continue
 		}
