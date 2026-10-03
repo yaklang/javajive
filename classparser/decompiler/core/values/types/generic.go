@@ -616,6 +616,16 @@ func parseSigClassType(sig string) (JavaType, string, bool) {
 	} else {
 		return nil, "", false
 	}
+	// JVMS ClassTypeSignature separates packages with '/' and member-class
+	// suffixes with '.'. An unparameterized enclosing class still ends before
+	// that suffix; consuming it as a package dot loses the binary '$' identity.
+	if dot := strings.IndexByte(rest[:nameEnd], '.'); dot >= 0 {
+		nameEnd = dot
+		hasTypeArgs = false
+	}
+	if nameEnd == 0 {
+		return nil, "", false
+	}
 	rawName := SlashToDot(rest[:nameEnd])
 	rest = rest[nameEnd:]
 	var typeArgs []JavaType

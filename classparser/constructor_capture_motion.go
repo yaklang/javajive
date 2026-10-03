@@ -11,9 +11,9 @@ import (
 
 // A flattened inner class cannot write captures before super in Java source.
 // Such writes commute only when the original constructor chain cannot read,
-// publish or overwrite this receiver's captures. This deliberately small proof
-// admits parameter-only field stores and constructor delegation; it rejects
-// virtual calls, field reads, handlers, branches and every opaque effect.
+// publish or overwrite this receiver's captures. The receiver-effect analysis
+// follows local aliases and original field identities, rather than requiring
+// every ancestor to have one particular assignment/delegation source shape.
 func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) bool {
 	if p == nil || p.delegate == nil || len(p.prefix) == 0 || len(code.ExceptionTable) != 0 {
 		return false
@@ -100,16 +100,43 @@ func constructorMotionOps(decoder *core.Decompiler) []*core.OpCode {
 }
 
 func constructorMotionMember(obj *ClassObject, op *core.OpCode, opcode int) *values.JavaClassMember {
-	if op == nil || op.Instr == nil || op.Instr.OpCode != opcode || len(op.Data) != 2 {
+	if obj == nil || op == nil || op.Instr == nil || op.Instr.OpCode != opcode || len(op.Data) != 2 {
 		return nil
 	}
-	member, _ := GetValueFromCP(obj.ConstantPool, int(core.Convert2bytesToInt(op.Data))).(*values.JavaClassMember)
-	if member == nil {
+	// This proof must reject incomplete/wrong-kind symbolic references rather
+	// than allowing the general expression decoder to panic or coerce them.
+	constant := func(index uint16) ConstantInfo {
+		if index == 0 || int(index) > len(obj.ConstantPool) {
+			return nil
+		}
+		return obj.ConstantPool[index-1]
+	}
+	var ref *ConstantMemberrefInfo
+	switch item := constant(core.Convert2bytesToInt(op.Data)).(type) {
+	case *ConstantFieldrefInfo:
+		if item != nil && (opcode == core.OP_PUTFIELD || opcode == core.OP_GETFIELD) {
+			ref = &item.ConstantMemberrefInfo
+		}
+	case *ConstantMethodrefInfo:
+		if item != nil && opcode == core.OP_INVOKESPECIAL {
+			ref = &item.ConstantMemberrefInfo
+		}
+	}
+	if ref == nil {
 		return nil
 	}
-	copy := *member
-	copy.Name = strings.ReplaceAll(copy.Name, ".", "/")
-	return &copy
+	owner, ok := constant(ref.ClassIndex).(*ConstantClassInfo)
+	nameType, ok2 := constant(ref.NameAndTypeIndex).(*ConstantNameAndTypeInfo)
+	if !ok || !ok2 || owner == nil || nameType == nil {
+		return nil
+	}
+	className, ok := constant(owner.NameIndex).(*ConstantUtf8Info)
+	name, ok2 := constant(nameType.NameIndex).(*ConstantUtf8Info)
+	desc, ok3 := constant(nameType.DescriptorIndex).(*ConstantUtf8Info)
+	if !ok || !ok2 || !ok3 || className == nil || name == nil || desc == nil {
+		return nil
+	}
+	return &values.JavaClassMember{Name: className.Value, Member: name.Value, Description: desc.Value}
 }
 
 func constructorMotionLoad(op *core.OpCode, descriptor string) bool {
@@ -149,11 +176,9 @@ func constructorMotionField(obj *ClassObject, member *values.JavaClassMember, ca
 		if field.AccessFlags&(0x0008|0x0040) != 0 || capture && field.AccessFlags&(0x0010|0x1000) != (0x0010|0x1000) {
 			return false
 		}
-		for _, attribute := range field.Attributes {
-			if _, generic := attribute.(*SignatureAttribute); generic {
-				return false
-			}
-		}
+		// The movement proof concerns the erased, original field storage and
+		// parameter identity. Signature still governs source binding elsewhere;
+		// its presence does not make this field observe a different capture.
 	}
 	return count == 1
 }
@@ -206,24 +231,9 @@ func (c *ClassObjectDumper) constructorChainDoesNotObserve(owner, descriptor str
 	}
 	active[key] = true
 	defer delete(active, key)
-	obj := c.obj
-	if owner != obj.GetClassName() {
-		var raw []byte
-		var ok bool
-		if c.foldSiblingResolver != nil {
-			raw, ok = c.foldSiblingResolver(owner)
-		}
-		if !ok && c.declarationResolver != nil {
-			raw, ok = c.declarationResolver(owner)
-		}
-		var err error
-		if !ok {
-			return false
-		}
-		obj, err = c.parseResolved(raw)
-		if err != nil || obj.GetClassName() != owner {
-			return false
-		}
+	obj, ok := c.constructorMotionClass(owner)
+	if !ok {
+		return false
 	}
 	var code *CodeAttribute
 	matches := 0
@@ -254,26 +264,5 @@ func (c *ClassObjectDumper) constructorChainDoesNotObserve(owner, descriptor str
 	if *remaining < 0 {
 		return false
 	}
-	params, _, err := callbinding.Descriptor(descriptor)
-	if err != nil {
-		return false
-	}
-	slots := constructorParameterSlots(params)
-	index, delegated := constructorMotionDelegation(obj, ops, 0, params, slots)
-	if delegated == nil || !c.constructorChainDoesNotObserve(delegated.Name, delegated.Description, writes, active, remaining, depth+1) {
-		return false
-	}
-	for index < len(ops)-1 {
-		if index+2 >= len(ops) || core.GetRetrieveIdx(ops[index]) != 0 || !constructorMotionLoad(ops[index], "Ljava/lang/Object;") {
-			return false
-		}
-		slot := core.GetRetrieveIdx(ops[index+1])
-		parameter, known := slots[slot]
-		member := constructorMotionMember(obj, ops[index+2], core.OP_PUTFIELD)
-		if !known || !constructorMotionLoad(ops[index+1], params[parameter]) || member == nil || member.Description != params[parameter] || !constructorMotionField(obj, member, false) || writes[member.Name+"\x00"+member.Member+"\x00"+member.Description] {
-			return false
-		}
-		index += 3
-	}
-	return index == len(ops)-1 && ops[index].Instr.OpCode == core.OP_RETURN
+	return c.constructorReceiverEffects(obj, code, ops, descriptor, writes, active, remaining, depth)
 }

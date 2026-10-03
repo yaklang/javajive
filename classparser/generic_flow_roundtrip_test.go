@@ -1,9 +1,11 @@
 package javaclassparser
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -24,6 +26,10 @@ func roundTripGenericFlowWithResolverFilter(t *testing.T, main, source string, a
 // Flattened member classes must be rebuilt together with the consumer.
 // The original JVM oracle still executes the untouched original class family.
 func roundTripGenericFlowUnits(t *testing.T, main, source string, allow func(string) bool, extraUnits []string, modes ...DecompileMode) {
+	roundTripGenericFlowUnitsClasspath(t, main, source, allow, extraUnits, false, modes...)
+}
+
+func roundTripGenericFlowUnitsClasspath(t *testing.T, main, source string, allow func(string) bool, extraUnits []string, maskSelected bool, modes ...DecompileMode) {
 	t.Helper()
 	if len(modes) == 0 {
 		modes = []DecompileMode{Precision, Compatibility}
@@ -57,6 +63,45 @@ func roundTripGenericFlowUnits(t *testing.T, main, source string, allow func(str
 			}
 			b, e := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)+".class"))
 			return b, e == nil
+		}
+		helperPath := dir
+		if maskSelected {
+			// Original InnerClasses tables in selected classfiles can enroll
+			// nested declarations while javac compiles their flat replacements.
+			// Keep the original oracle tree untouched; remove only the selected
+			// original implementations from both candidate classpaths.
+			helperPath = t.TempDir()
+			selected := map[string]bool{strings.ReplaceAll(main, ".", "/") + ".class": true}
+			for _, unit := range extraUnits {
+				selected[strings.ReplaceAll(unit, ".", "/")+".class"] = true
+			}
+			err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if entry.IsDir() || !strings.HasSuffix(path, ".class") {
+					return nil
+				}
+				rel, err := filepath.Rel(dir, path)
+				if err != nil {
+					return err
+				}
+				if selected[filepath.ToSlash(rel)] {
+					return nil
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				dest := filepath.Join(helperPath, rel)
+				if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+					return err
+				}
+				return os.WriteFile(dest, data, 0600)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
 		for _, mode := range modes {
 			var result DecompileResult
@@ -92,21 +137,39 @@ func roundTripGenericFlowUnits(t *testing.T, main, source string, allow func(str
 			rebuilt, cached := compiled[cacheKey]
 			if !cached {
 				rebuilt = t.TempDir()
-				args := []string{"-proc:none", "--release", "8", "-cp", dir, "-d", rebuilt}
-				for name, text := range sources {
+				args := []string{"-proc:none", "--release", "8", "-cp", helperPath, "-d", rebuilt}
+				names := make([]string, 0, len(sources))
+				for name := range sources {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				for _, name := range names {
+					text := sources[name]
 					src := filepath.Join(rebuilt, name+".java")
 					if err := os.WriteFile(src, []byte(text), 0644); err != nil {
 						t.Fatal(err)
 					}
-					args = append(args, src)
+					if !maskSelected || len(extraUnits) == 0 || name != simple {
+						args = append(args, src)
+					}
 				}
 				cmd := exec.Command(javac, args...)
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("rebuild %s/%s: %v\n%s\n%s", mode, debug, err, out, result.Source)
 				}
+				if maskSelected && len(extraUnits) > 0 {
+					// Compile the selected family before consulting the original
+					// oracle's declaration. Otherwise its InnerClasses table can
+					// enroll original nested declarations depending on source-file
+					// discovery order, even though their bytes are masked above.
+					cmd = exec.Command(javac, "-proc:none", "--release", "8", "-cp", rebuilt+string(os.PathListSeparator)+helperPath, "-d", rebuilt, filepath.Join(rebuilt, simple+".java"))
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("rebuild consumer %s/%s: %v\n%s\n%s", mode, debug, err, out, result.Source)
+					}
+				}
 				compiled[cacheKey] = rebuilt
 			}
-			if got := t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+dir, main); got != want {
+			if got := t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+helperPath, main); got != want {
 				t.Fatalf("%s/%s: got %q want %q\n%s", mode, debug, got, want, result.Source)
 			}
 		}
