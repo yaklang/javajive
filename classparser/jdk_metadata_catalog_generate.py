@@ -3,6 +3,7 @@
 Reads ZIP/classfile bytes only; does not load or execute any Java code.
 """
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 from pathlib import Path
@@ -100,8 +101,44 @@ def declarations(data):
             'MembersComplete': True, 'ParentsComplete': True}, major
 
 
-def profile(release, archive, prefix, jdk_version):
-    with zipfile.ZipFile(archive) as source:
+class PlatformArchives:
+    """An exact classfile namespace across modules of one trusted JDK image."""
+    def __init__(self, archives):
+        self.archives = [Path(p) for p in archives]
+
+    def __enter__(self):
+        self.stack = ExitStack()
+        self.entries = {}
+        try:
+            for path in self.archives:
+                archive = self.stack.enter_context(zipfile.ZipFile(path))
+                for entry in archive.namelist():
+                    if not entry.endswith('.class') or entry.endswith('/module-info.class'):
+                        continue
+                    if entry in self.entries:
+                        raise ValueError('ambiguous platform classfile ' + entry)
+                    self.entries[entry] = (path, archive)
+        except BaseException:
+            self.stack.close()
+            raise
+        return self
+
+    def __exit__(self, *args):
+        return self.stack.__exit__(*args)
+
+    def read(self, entry):
+        return self.entries[entry][1].read(entry)
+
+    def namelist(self):
+        return sorted(self.entries)
+
+    def provenance(self, entry, raw, major):
+        return {'archive': self.entries[entry][0].name, 'entry': entry,
+                'sha256': hashlib.sha256(raw).hexdigest(), 'major': major}
+
+
+def profile(release, archive, prefix, jdk_version, modules=()):
+    with PlatformArchives([archive, *modules]) as source:
         classes, provenance = {}, {}
         roots = ['java/lang/Object', 'java/lang/String', 'java/lang/Runnable', 'java/io/FilterInputStream', 'java/util/Map',
                  'java/util/Optional', 'java/util/Collections', 'java/util/Arrays',
@@ -124,7 +161,14 @@ def profile(release, archive, prefix, jdk_version):
                  'java/util/concurrent/atomic/AtomicInteger',
                  'java/util/concurrent/atomic/AtomicReference',
                  'javax/net/ssl/SSLEngine', 'javax/net/ssl/KeyManagerFactorySpi',
-                 'javax/net/ssl/TrustManagerFactorySpi']
+                 'javax/net/ssl/TrustManagerFactorySpi',
+                 # Standard extension namespaces can live outside java.base.
+                 # Read their actual declarations from the same JDK image.
+                 'java/security/PrivilegedAction',
+                 'java/beans/PropertyEditorSupport',
+                 'javax/naming/spi/ObjectFactory', 'javax/sql/DataSource',
+                 'org/xml/sax/helpers/DefaultHandler',
+                 'org/xml/sax/ext/LexicalHandler', 'org/xml/sax/XMLReader']
         if release >= 16:
             roots.append('java/lang/Record')
         pending = list(roots)
@@ -138,7 +182,7 @@ def profile(release, archive, prefix, jdk_version):
             if cls['Name'] != name or major != release + 44:
                 raise ValueError('profile identity/version mismatch ' + name)
             classes[name] = cls
-            provenance[name] = {'entry': entry, 'sha256': hashlib.sha256(raw).hexdigest(), 'major': major}
+            provenance[name] = source.provenance(entry, raw, major)
             pending.extend(cls['Parents'])
             # Include source-denotability metadata for every reference type in
             # the root method descriptors, plus each type's complete ancestry.
@@ -158,7 +202,11 @@ def profile(release, archive, prefix, jdk_version):
             raw = source.read(entry)
             cls, major = declarations(raw)
             declarations_by_name[cls['Name']] = cls
-            source_entries[cls['Name']] = {'entry': entry, 'sha256': hashlib.sha256(raw).hexdigest(), 'major': major}
+            # Pinned images can retain older precompiled implementation stubs.
+            # Keep their real version; never certify code newer than the image.
+            if not 45 <= major <= release + 44:
+                raise ValueError('platform classfile version mismatch ' + entry)
+            source_entries[cls['Name']] = source.provenance(entry, raw, major)
         rooted, active = {}, set()
         def throwable(name):
             if name == 'java/lang/Throwable':
@@ -185,6 +233,8 @@ def profile(release, archive, prefix, jdk_version):
         exception_names = sorted(ancestors)
         return {'release': release, 'jdk_version': jdk_version,
                 'archive_sha256': hashlib.sha256(Path(archive).read_bytes()).hexdigest(),
+                'archives': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                             for p in source.archives},
                 'classes': {k: classes[k] for k in sorted(classes)},
                 'provenance': {k: provenance[k] for k in sorted(provenance)},
                 'throwable_hierarchy': {name: declarations_by_name[name]['Parents'] for name in exception_names},
@@ -207,8 +257,11 @@ def main():
     profiles = [profile(8, args.jdk8 / 'jre/lib/rt.jar', '', version(args.jdk8))]
     for release, home in ((11, args.jdk11), (17, args.jdk17), (21, args.jdk21)):
         if home is not None:
-            profiles.append(profile(release, home / 'jmods/java.base.jmod', 'classes/', version(home)))
-    result = {'schema': 2, 'roots': ['Object/String/Map/Record and standard collection, stream, functional, I/O, channel, reflection, concurrency and TLS APIs; see generator roots'],
+            archives = sorted((home / 'jmods').glob('*.jmod'))
+            base = home / 'jmods/java.base.jmod'
+            profiles.append(profile(release, base, 'classes/', version(home),
+                                    [p for p in archives if p != base]))
+    result = {'schema': 2, 'roots': ['Object/String/Map/Record and standard collection, stream, functional, I/O, channel, reflection, concurrency, TLS, XML, JavaBeans, naming and SQL APIs; see generator roots'],
               'profiles': profiles}
     args.out.write_text(json.dumps(result, sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
 

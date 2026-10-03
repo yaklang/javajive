@@ -93,6 +93,59 @@ func TestJDKCatalogExactCheckedDeclarationsAndChannels(t *testing.T) {
 	}
 }
 
+func TestJDKCatalogModularNamespaceAndCheckedDeclarations(t *testing.T) {
+	for _, release := range []int{8, 11, 17, 21} {
+		provider := func(name string) (callbinding.Class, bool) { return jdkInvocationMetadata(name, release) }
+		for _, tc := range []struct{ owner, name, desc, exception string }{
+			{"org/xml/sax/helpers/DefaultHandler", "startDocument", "()V", "org/xml/sax/SAXException"},
+			{"org/xml/sax/ext/LexicalHandler", "comment", "([CII)V", "org/xml/sax/SAXException"},
+			{"java/beans/PropertyEditorSupport", "setValue", "(Ljava/lang/Object;)V", ""},
+			{"javax/sql/DataSource", "getConnection", "()Ljava/sql/Connection;", "java/sql/SQLException"},
+			{"javax/naming/spi/ObjectFactory", "getObjectInstance", "(Ljava/lang/Object;Ljavax/naming/Name;Ljavax/naming/Context;Ljava/util/Hashtable;)Ljava/lang/Object;", "java/lang/Exception"},
+			{"java/security/PrivilegedAction", "run", "()Ljava/lang/Object;", ""},
+		} {
+			exceptions, known := exactInvocationExceptions(provider, tc.owner, tc.name, tc.desc)
+			if !known || tc.exception == "" && len(exceptions) != 0 || tc.exception != "" && (len(exceptions) != 1 || exceptions[0] != tc.exception) {
+				t.Fatalf("%d %s.%s%s known=%v exceptions=%v", release, tc.owner, tc.name, tc.desc, known, exceptions)
+			}
+		}
+		xml, known := provider("org/xml/sax/XMLReader")
+		if !known || !xml.IsInterface || !xml.MembersComplete || !xml.ParentsComplete {
+			t.Fatalf("%d incomplete original XMLReader", release)
+		}
+		// The enclosing source helper still needs a complete ancestor namespace.
+		// Unavailable third-party parents must not become guessed platform tables.
+		if _, known := provider("org/eclipse/jetty/alpn/ALPN$ClientProvider"); known {
+			t.Fatal("invented third-party namespace")
+		}
+	}
+	var document struct {
+		Profiles []struct {
+			Release    int               `json:"release"`
+			Archives   map[string]string `json:"archives"`
+			Provenance map[string]struct {
+				Archive string `json:"archive"`
+			} `json:"provenance"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(jdkInvocationCatalogJSON, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range document.Profiles {
+		for _, tc := range []struct{ name, module string }{{"org/xml/sax/helpers/DefaultHandler", "java.xml.jmod"}, {"java/beans/PropertyEditorSupport", "java.desktop.jmod"}, {"javax/naming/spi/ObjectFactory", "java.naming.jmod"}, {"javax/sql/DataSource", "java.sql.jmod"}} {
+			module := tc.module
+			if profile.Release == 8 {
+				module = "rt.jar"
+			}
+			evidence, known := profile.Provenance[tc.name]
+			digest, err := hex.DecodeString(profile.Archives[module])
+			if !known || evidence.Archive != module || err != nil || len(digest) != 32 {
+				t.Fatalf("%d %s invalid original archive provenance", profile.Release, tc.name)
+			}
+		}
+	}
+}
+
 func TestJDKInvocationCatalogVersionBounds(t *testing.T) {
 	has := func(release int, class, name string) bool {
 		c, ok := jdkInvocationMetadata(class, release)

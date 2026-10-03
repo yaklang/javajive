@@ -10,7 +10,10 @@ String.valueOf remains a competing overload family.
 
 Roots include Object, String, Map, Record where available, and the standard
 collection, stream, functional, I/O, channel, reflection, concurrency and TLS
-extension APIs listed in the generator. Class and
+extension APIs listed in the generator, including XML, JavaBeans, naming and SQL
+namespaces. On modular JDKs the generator indexes the original JMOD classfiles
+across the supplied image, rejects duplicate class identities, and records each
+declaration's module archive and SHA256. Class and
 method Signature attributes are extracted verbatim from the same classfiles
 and indexed by exact descriptor, preserving first-bound erasure and overload
 identity for generic binding proofs. Reference types in root
@@ -44,15 +47,16 @@ Snapshots used:
 
 - JDK8: Amazon Corretto 8.422.05.1, locally installed rt.jar.
 - JDK11: locally installed Homebrew OpenJDK; exact release/build metadata is in JSON.
-- JDK17: Eclipse Temurin 17.0.18+8 java.base.jmod.
-- JDK21: locally installed Homebrew OpenJDK 21.0.2 java.base.jmod.
+- JDK17: Eclipse Temurin 17.0.18+8 JMOD archives.
+- JDK21: locally installed Homebrew OpenJDK 21.0.2 JMOD archives.
 
 The JDK17 archive was downloaded from the official
 [Temurin release](https://github.com/adoptium/temurin17-binaries/releases/tag/jdk-17.0.18%2B8)
 and checked against its published SHA256:
 `d81de06d938384fe76c4aa3c13395933aa11e2d19b0428743f810db06b05e312`.
-Only java.base.jmod and the release file were extracted; downloaded programs were
-not executed. The JMOD is only read as a ZIP of classfile data.
+Only JMOD archives and the release file were extracted; downloaded programs were
+not executed. The expanded extraction verifies that the original java.base.jmod
+and release file remain identical. JMODs are only read as ZIPs of classfile data.
 
 Regenerate with reviewed JDK installations:
 

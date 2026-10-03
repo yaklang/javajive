@@ -1,6 +1,35 @@
 import struct
+import tempfile
 import unittest
-from jdk_metadata_catalog_generate import declarations
+import zipfile
+from pathlib import Path
+from jdk_metadata_catalog_generate import declarations, PlatformArchives
+
+
+class PlatformArchiveTest(unittest.TestCase):
+    def test_exact_cross_module_lookup_and_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ('java.base.jmod', 'java.xml.jmod')]
+            for path, entry, data in zip(paths, ('classes/java/lang/Object.class', 'classes/org/xml/sax/XMLReader.class'), (b'base', b'xml')):
+                with zipfile.ZipFile(path, 'w') as archive:
+                    archive.writestr(entry, data)
+                    archive.writestr('classes/module-info.class', b'module')
+            with PlatformArchives(paths) as source:
+                self.assertEqual(source.namelist(), ['classes/java/lang/Object.class', 'classes/org/xml/sax/XMLReader.class'])
+                self.assertEqual(source.read('classes/org/xml/sax/XMLReader.class'), b'xml')
+                self.assertEqual(source.provenance('classes/org/xml/sax/XMLReader.class', b'xml', 52)['archive'], 'java.xml.jmod')
+                with self.assertRaises(KeyError):
+                    source.read('classes/missing/Declaration.class')
+
+    def test_ambiguous_original_classfiles_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ('first.jmod', 'second.jmod')]
+            for path in paths:
+                with zipfile.ZipFile(path, 'w') as archive:
+                    archive.writestr('classes/p/Owner.class', b'original')
+            with self.assertRaisesRegex(ValueError, 'ambiguous platform classfile'):
+                with PlatformArchives(paths):
+                    self.fail('duplicate classfile accepted')
 
 
 class CatalogDeclarationTest(unittest.TestCase):
