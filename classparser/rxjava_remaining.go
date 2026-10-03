@@ -9,6 +9,15 @@ import (
 // fixRxjavaRemainingReconstructs repairs leftover rxjava tree sites.
 // Kill-switch: JDEC_RXJAVA_REMAINING_OFF=1.
 func fixRxjavaRemainingReconstructs(body string) string {
+	return fixRxjavaRemainingWithBinding(body, false)
+}
+
+// Declaration-aware dumps resolve call arguments from the receiver's original
+// hierarchy and Signature. A later whole-class textual guess has no authority
+// to replace that result, including a confirmed metadata miss. Single-class
+// legacy callers retain their compatibility recovery until they can supply the
+// same declaration context; this flag is not evidence that every call resolved.
+func fixRxjavaRemainingWithBinding(body string, declarationBinding bool) string {
 	if jdecenv.Get("JDEC_RXJAVA_REMAINING_OFF") == "1" {
 		return body
 	}
@@ -91,7 +100,9 @@ func fixRxjavaRemainingReconstructs(body string) string {
 	body = stripRxjavaObjectSentinels(body)
 	body = castRxjavaFunctionApply(body)
 	body = castRxjavaDownstreamOnNext(body)
-	body = castRxjavaLooseOnNextLocals(body)
+	if !declarationBinding {
+		body = castRxjavaLooseOnNextLocals(body)
+	}
 	if strings.Contains(body, "TimeInterval") {
 		body = strings.ReplaceAll(body, "new Timed(", "new Timed<T>(")
 		body = strings.ReplaceAll(body, "new Timed<T><T>(", "new Timed<T>(")

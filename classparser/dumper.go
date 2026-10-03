@@ -1832,7 +1832,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// caffeine leftover unique sites. Kill-switch: JDEC_CAFFEINE_REMAINING_OFF=1.
 	full = c.sourceRewrite("fixCaffeineRemainingReconstructs", "class_source", full, fixCaffeineRemainingReconstructs)
 	// rxjava leftover unique sites. Kill-switch: JDEC_RXJAVA_REMAINING_OFF=1.
-	full = c.sourceRewrite("fixRxjavaRemainingReconstructs", "class_source", full, fixRxjavaRemainingReconstructs)
+	full = c.sourceRewrite("fixRxjavaRemainingReconstructs", "class_source", full, func(source string) string {
+		return fixRxjavaRemainingWithBinding(source, c.FuncCtx.SiblingClassSig != nil)
+	})
 	// commons-math3 leftover unique sites. Kill-switch: JDEC_MATH3_REMAINING_OFF=1.
 	full = c.sourceRewrite("fixMath3RemainingReconstructs", "class_source", full, fixMath3RemainingReconstructs)
 	// assertj leftover unique sites. Kill-switch: JDEC_ASSERTJ_REMAINING_OFF=1.
