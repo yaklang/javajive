@@ -30,13 +30,15 @@ import (
 )
 
 type ClassObjectDumper struct {
-	nativeAnonymousRoot *nativeAnonymousFamily
-	nativeCaptureFields map[string]string
-	nativeCapturedReads map[string]map[int]string
-	nativeTypeParams    []string
-	nativeCaptureFailed bool
-	nativeCaptureTypes  map[string]types.JavaType
-	nativeOuterContext  *class_context.ClassContext
+	originalInitializerStatus      map[string]bool
+	originalInitializerStatusReady bool
+	nativeAnonymousRoot            *nativeAnonymousFamily
+	nativeCaptureFields            map[string]string
+	nativeCapturedReads            map[string]map[int]string
+	nativeTypeParams               []string
+	nativeCaptureFailed            bool
+	nativeCaptureTypes             map[string]types.JavaType
+	nativeOuterContext             *class_context.ClassContext
 
 	options                DecompileOptions
 	report                 *DecompileResult
@@ -3672,6 +3674,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	//}
 	//println(name)
 	finalFieldMap := map[string]struct{}{}
+	finalInitializerKeepsStatus := c.originalFieldInitializerStatuses()
 	finalFieldRenderNameToRaw := map[string]string{}
 	classStaticInitializersMustHoist := slices.Contains(c.obj.AccessFlagsVerbose, "interface") || slices.Contains(c.obj.AccessFlagsVerbose, "annotation")
 	for _, field := range c.obj.Fields {
@@ -4052,7 +4055,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						obj := core.UnpackSoltValue(v.Object)
 						if v1, ok := obj.(*values.JavaRef); ok && v1.IsThis && (funcCtx.FunctionName == "<init>" || funcCtx.FunctionName == funcCtx.ClassName) {
 							if _, ok := finalFieldMap[v.Member]; ok {
-								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
+								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[v.Member] &&
 									(!EnableFieldInitHoistGuard || (instanceHoistCandidates[ret] && ctorFieldAssignCount[v.Member] == 1 && crossCtorStoreOK(fieldStoreTotal, v.Member) && !rhsReadsInstanceField(rhs))) {
 									foundFieldInit = true
 									c.fieldDefaultValue[v.Member] = rhs
@@ -4062,7 +4065,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					} else if v, ok := ret.LeftValue.(*values.JavaClassMember); ok && ret.JavaValue != nil {
 						if (funcCtx.FunctionName == "<clinit>" && classStaticInitializersMustHoist) || v.Name == funcCtx.ClassName {
 							if _, ok := finalFieldMap[v.Member]; ok {
-								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
+								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[v.Member] &&
 									(!EnableFieldInitHoistGuard || (ctorFieldAssignCount[v.Member] <= 1 && crossCtorStoreOK(fieldStoreTotal, v.Member))) {
 									foundFieldInit = true
 									c.fieldDefaultValue[v.Member] = rhs
@@ -4083,7 +4086,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 									rhs = localInit
 								}
 							}
-							if staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
+							if staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[rawName] &&
 								(!EnableFieldInitHoistGuard || (ctorFieldAssignCount[rawName] <= 1 && crossCtorStoreOK(fieldStoreTotal, rawName))) {
 								foundFieldInit = true
 								c.fieldDefaultValue[rawName] = rhs
