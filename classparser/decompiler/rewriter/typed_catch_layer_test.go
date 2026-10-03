@@ -9,7 +9,7 @@ import (
 )
 
 func TestTypedCatchLayerRequiresCompletePriorityAndCoverage(t *testing.T) {
-	for _, scenario := range []string{"covered", "same type", "missing handler", "catch all", "sibling", "partial interval", "uncovered invoke", "missing invoke PC", "missing constructor", "uncovered constructor", "opaque", "budget"} {
+	for _, scenario := range []string{"covered", "same type", "missing handler", "catch all", "catch all uncovered", "catch all wrong type", "sibling", "partial interval", "uncovered invoke", "missing invoke PC", "missing constructor", "uncovered constructor", "opaque", "budget"} {
 		t.Run(scenario, func(t *testing.T) {
 			exception := func(name string) *values.JavaRef {
 				return values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass(name))
@@ -26,8 +26,15 @@ func TestTypedCatchLayerRequiresCompletePriorityAndCoverage(t *testing.T) {
 				tr.Exception[0] = exception("java.lang.Exception")
 			case "missing handler":
 				tr.Handlers = tr.Handlers[:1]
+			case "catch all wrong type":
+				tr.Handlers[1].CatchAll = true
+			case "catch all uncovered":
+				tr.Handlers[1].CatchAll = true
+				tr.Exception[1] = exception("java.lang.Throwable")
+				call.OriginPC = 19
 			case "catch all":
 				tr.Handlers[1].CatchAll = true
+				tr.Exception[1] = exception("java.lang.Throwable")
 			case "sibling":
 				tr.Handlers[1].ProtectedRanges[1] = [2]int{13, 19}
 			case "partial interval":
@@ -48,7 +55,7 @@ func TestTypedCatchLayerRequiresCompletePriorityAndCoverage(t *testing.T) {
 				}
 			}
 			out, ok := RecoverCoveredTypedCatchLayer(tr)
-			want := scenario == "covered" || scenario == "same type"
+			want := scenario == "covered" || scenario == "same type" || scenario == "catch all"
 			if ok != want {
 				t.Fatalf("proved=%v want=%v", ok, want)
 			}

@@ -3,6 +3,7 @@ package rewriter
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
 // Exception-table order establishes priority. A later handler protecting both
@@ -15,7 +16,17 @@ func RecoverCoveredTypedCatchLayer(tr *statements.TryCatchStatement) (*statement
 	}
 	last := len(tr.Handlers) - 1
 	outer := tr.Handlers[last]
-	if outer.CatchAll || len(outer.ProtectedRanges) < 2 {
+	if outer.CatchAll {
+		ref := tr.Exception[last]
+		if ref == nil {
+			return nil, false
+		}
+		name, known := types.RawClassFQN(ref.Type())
+		if !known || name != "java.lang.Throwable" {
+			return nil, false
+		}
+	}
+	if len(outer.ProtectedRanges) < 2 {
 		return nil, false
 	}
 	covered := func(pc int) bool { return finallyContains(outer.ProtectedRanges, pc) }
@@ -74,6 +85,9 @@ func (p *typedCatchCoverage) block(body []statements.Statement) bool {
 				return false
 			}
 		case *statements.AssignStatement:
+			if x == nil {
+				return false
+			}
 			if x.JavaValue == nil {
 				if _, local := x.LeftValue.(*values.JavaRef); !local || x.ArrayMember != nil {
 					return false
@@ -100,7 +114,18 @@ func (p *typedCatchCoverage) block(body []statements.Statement) bool {
 				return false
 			}
 		case *statements.IfStatement:
-			if !p.value(x.Condition, 0) || !p.block(x.IfBody) || !p.block(x.ElseBody) {
+			if !p.value(x.Condition, 0) {
+				return false
+			}
+			if truth, known := pureBooleanGuardTruth(x.Condition, 0); known {
+				live := x.IfBody
+				if !truth {
+					live = x.ElseBody
+				}
+				if !p.block(live) {
+					return false
+				}
+			} else if !p.block(x.IfBody) || !p.block(x.ElseBody) {
 				return false
 			}
 		case *statements.TryCatchStatement:
@@ -139,19 +164,53 @@ func (p *typedCatchCoverage) value(v values.JavaValue, depth int) bool {
 	}
 	var children []values.JavaValue
 	switch x := v.(type) {
-	case *values.JavaRef, *values.JavaLiteral, *values.JavaClassValue:
-		return true
+	case *values.JavaRef:
+		return x != nil
+	case *values.JavaLiteral:
+		return x != nil
+	case *values.JavaClassValue:
+		// ldc class resolution may throw; this leaf carries no opcode PC.
+		return false
 	case *values.TernaryExpression:
+		if x == nil {
+			return false
+		}
 		children = []values.JavaValue{x.Condition, x.TrueValue, x.FalseValue}
 	case *values.JavaExpression:
+		if x == nil {
+			return false
+		}
 		switch x.Op {
 		case values.Not, values.EQ, values.NEQ, values.LOGICAL_AND, values.LOGICAL_OR:
+		case values.ADD, values.SUB, values.MUL, values.AND, values.OR, values.XOR, values.SHL, values.SHR, values.USHR:
+			// Total numeric operators carry no independent throw site. String
+			// concatenation, boxing and integer division/remainder are excluded.
+			if len(x.Values) != 2 && !(x.Op == values.SUB && len(x.Values) == 1) {
+				return false
+			}
+			if !typedCatchNumericPrimitive(x.Typ) {
+				return false
+			}
+			for _, v := range x.Values {
+				if !typedCatchNumericValue(v) {
+					return false
+				}
+			}
+		case values.LT, values.LTE, values.GT, values.GTE:
+			if len(x.Values) != 2 {
+				return false
+			}
+			for _, v := range x.Values {
+				if !typedCatchNumericValue(v) {
+					return false
+				}
+			}
 		default:
 			return false
 		}
 		children = x.Values
 	case *values.FunctionCallExpression:
-		if !x.HasOriginPC || !p.covered(x.OriginPC) || x.Kind >= values.InvokeDynamic || x.Descriptor == "" {
+		if x == nil || !x.HasOriginPC || !p.covered(x.OriginPC) || x.Kind >= values.InvokeDynamic || x.Descriptor == "" {
 			return false
 		}
 		children = append(children, x.Arguments...)
@@ -159,7 +218,7 @@ func (p *typedCatchCoverage) value(v values.JavaValue, depth int) bool {
 			children = append(children, x.Object)
 		}
 	case *values.NewExpression:
-		if !x.HasOriginPC || !p.covered(x.OriginPC) {
+		if x == nil || !x.HasOriginPC || !p.covered(x.OriginPC) {
 			return false
 		}
 		if x.IsArray() {
@@ -176,14 +235,26 @@ func (p *typedCatchCoverage) value(v values.JavaValue, depth int) bool {
 			children = ctor.Arguments
 		}
 	case *values.RefMember:
-		if !x.HasOriginPC || !p.covered(x.OriginPC) {
+		if x == nil || !x.HasOriginPC || !p.covered(x.OriginPC) {
 			return false
 		}
 		children = []values.JavaValue{x.Object}
 	case *values.JavaClassMember:
-		return x.HasOriginPC && p.covered(x.OriginPC)
+		return x != nil && x.HasOriginPC && p.covered(x.OriginPC)
+	case *values.CustomValue:
+		// JVM numeric conversions are total. The closure remains opaque unless
+		// its decoder-owned category, complete single capture and both numeric
+		// types establish that only the captured operand can throw.
+		if x == nil || x.Flag != "primitive_cast" || !x.CapturesKnown || len(x.Captures) != 1 || x.TypeFunc == nil || !typedCatchNumericPrimitive(x.Type()) {
+			return false
+		}
+		operand := plainTryValue(x.Captures[0])
+		if !typedCatchNumericValue(operand) {
+			return false
+		}
+		children = []values.JavaValue{operand}
 	case *values.CastExpression:
-		if !p.covered(x.OriginPC) {
+		if x == nil || !x.OriginalCheckCast || x.OriginPC < 0 || !p.covered(x.OriginPC) {
 			return false
 		}
 		children = []values.JavaValue{x.Value}
@@ -196,4 +267,117 @@ func (p *typedCatchCoverage) value(v values.JavaValue, depth int) bool {
 		}
 	}
 	return true
+}
+
+// Only literal boolean trees establish an unreachable arm. A ref's mutable Val,
+// field read, call or rendered spelling supplies no constant/effect evidence.
+func pureBooleanGuardTruth(v values.JavaValue, depth int) (bool, bool) {
+	if depth > 16 {
+		return false, false
+	}
+	v = plainTryValue(v)
+	switch x := v.(type) {
+	case *values.JavaLiteral:
+		if x == nil {
+			return false, false
+		}
+	case *values.JavaExpression:
+		if x == nil {
+			return false, false
+		}
+	default:
+		return false, false
+	}
+	if v == nil || v.Type() == nil {
+		return false, false
+	}
+	p, ok := v.Type().RawType().(*types.JavaPrimer)
+	if !ok || p == nil || p.Name != types.JavaBoolean {
+		return false, false
+	}
+	if literal, ok := v.(*values.JavaLiteral); ok && literal != nil {
+		b, ok := literal.Data.(bool)
+		return b, ok
+	}
+	x, ok := v.(*values.JavaExpression)
+	if !ok || x == nil {
+		return false, false
+	}
+	if x.Op == values.Not && len(x.Values) == 1 {
+		b, ok := pureBooleanGuardTruth(x.Values[0], depth+1)
+		return !b, ok
+	}
+	if (x.Op == values.LOGICAL_AND || x.Op == values.LOGICAL_OR || x.Op == values.EQ || x.Op == values.NEQ) && len(x.Values) == 2 {
+		a, ak := pureBooleanGuardTruth(x.Values[0], depth+1)
+		b, bk := pureBooleanGuardTruth(x.Values[1], depth+1)
+		if !ak || !bk {
+			return false, false
+		}
+		switch x.Op {
+		case values.LOGICAL_AND:
+			return a && b, true
+		case values.LOGICAL_OR:
+			return a || b, true
+		case values.EQ:
+			return a == b, true
+		case values.NEQ:
+			return a != b, true
+		}
+	}
+	return false, false
+}
+
+func typedCatchNumericPrimitive(t types.JavaType) bool {
+	if t == nil {
+		return false
+	}
+	p, ok := t.RawType().(*types.JavaPrimer)
+	if !ok || p == nil {
+		return false
+	}
+	switch p.Name {
+	case types.JavaByte, types.JavaShort, types.JavaChar, types.JavaInteger, types.JavaLong, types.JavaFloat, types.JavaDouble:
+		return true
+	}
+	return false
+}
+
+func typedCatchNumericValue(v values.JavaValue) bool {
+	v = plainTryValue(v)
+	var t types.JavaType
+	switch x := v.(type) {
+	case *values.JavaRef:
+		if x != nil {
+			t = x.Type()
+		}
+	case *values.JavaLiteral:
+		if x != nil {
+			t = x.Type()
+		}
+	case *values.JavaExpression:
+		if x != nil {
+			t = x.Typ
+		}
+	case *values.FunctionCallExpression:
+		if x != nil && x.FuncType != nil {
+			t = x.FuncType.ReturnType
+		}
+	case *values.CustomValue:
+		if x != nil && x.TypeFunc != nil {
+			t = x.Type()
+		}
+	case *values.CastExpression:
+		if x != nil {
+			t = x.TargetType
+		}
+	case *values.RefMember:
+		if x != nil {
+			t = x.JavaType
+		}
+	case *values.JavaClassMember:
+		if x != nil {
+			t = x.JavaType
+		}
+	}
+	return typedCatchNumericPrimitive(t)
 }
