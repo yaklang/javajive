@@ -17,8 +17,9 @@ import (
 // object, static field or opaque call is rejected. Therefore a receiver-free
 // value loaded from a parameter/field/call cannot acquire an alias to it.
 type constructorEffectValue struct {
-	kind     byte
-	receiver bool
+	kind       byte
+	receiver   bool
+	allocation int // Original NEW PC + 1, until its exact <init> completes.
 }
 
 // Stores of THIS into THIS's own nonvolatile storage do not publish it. Until
@@ -242,6 +243,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 		index, ok := offsets[pc]
 		return index, ok
 	}
+	allocations := map[int]string{}
 	memo := map[string]bool{}
 	var walk func(int, []constructorEffectValue, []constructorEffectValue, bool) bool
 	walk = func(start int, locals, stack []constructorEffectValue, initialized bool) (result bool) {
@@ -258,6 +260,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 		for _, part := range [][]constructorEffectValue{locals, stack} {
 			for _, v := range part {
 				state = append(state, v.kind)
+				state = binary.BigEndian.AppendUint32(state, uint32(v.allocation))
 				if v.receiver {
 					state = append(state, 1)
 				} else {
@@ -369,13 +372,27 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					return false
 				}
 				v, ok := pop('L')
-				if !ok || v.receiver {
+				if !ok || v.receiver || v.allocation != 0 {
 					return false
 				}
 				if opcode == core.OP_INSTANCEOF {
 					v = constructorEffectValue{kind: 'I'}
 				}
 				stack = append(stack, v)
+			case opcode == core.OP_NEW:
+				// A distinct allocation is not THIS. Preserve its identity through
+				// DUP/local aliases until its original constructor initializes all
+				// those aliases. Failure still needs the caller's finalizer proof.
+				if len(op.Data) != 2 || initialized && !c.constructorReceiverFinalizerSilent {
+					return false
+				}
+				owner, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(op.Data))
+				if !known || strings.HasPrefix(owner, "[") || owner == "" {
+					return false
+				}
+				id := int(op.CurrentOffset) + 1
+				allocations[id] = owner
+				stack = append(stack, constructorEffectValue{kind: 'L', allocation: id})
 			case opcode == core.OP_NEWARRAY || opcode == core.OP_ANEWARRAY:
 				// Allocation and array-component linkage can fail, including
 				// OOME. This is the same failure boundary as a receiver-free call;
@@ -499,7 +516,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					if !ok {
 						return false
 					}
-					if value.receiver && !initialized {
+					if value.allocation != 0 || value.receiver && !initialized {
 						// Uninitialized THIS is not a legal stored reference value.
 						return false
 					}
@@ -538,7 +555,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				}
 				for i := len(args) - 1; i >= 0; i-- {
 					v, ok := pop(constructorEffectType(args[i]).kind)
-					if !ok || v.receiver {
+					if !ok || v.receiver || v.allocation != 0 {
 						return false
 					}
 				}
@@ -551,10 +568,28 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					}
 				}
 				if member.Member == "<init>" {
-					if initialized || opcode != core.OP_INVOKESPECIAL || result != "V" || !receiver.receiver || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) || !c.constructorChainEffects(member.Name, member.Description, writes, active, remaining, depth+1, aliases) {
-						return false
+					if receiver.allocation != 0 {
+						if opcode != core.OP_INVOKESPECIAL || result != "V" || member.Name != allocations[receiver.allocation] {
+							return false
+						}
+						// JVM initialization changes every alias of THIS allocation,
+						// without changing the enclosing receiver's initialized state.
+						for i := range locals {
+							if locals[i].allocation == receiver.allocation {
+								locals[i].allocation = 0
+							}
+						}
+						for i := range stack {
+							if stack[i].allocation == receiver.allocation {
+								stack[i].allocation = 0
+							}
+						}
+					} else {
+						if initialized || opcode != core.OP_INVOKESPECIAL || result != "V" || !receiver.receiver || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) || !c.constructorChainEffects(member.Name, member.Description, writes, active, remaining, depth+1, aliases) {
+							return false
+						}
+						initialized = true
 					}
-					initialized = true
 				} else {
 					// Receiver-free calls keep external effects in the same order.
 					// Before Object initialization, a throw cannot expose this via
@@ -562,7 +597,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					// proof that its original finalizer is unobservable.
 					// THIS arguments/receiver are rejected; results cannot alias
 					// THIS because no earlier operation has published it.
-					if receiver.receiver {
+					if receiver.receiver || receiver.allocation != 0 {
 						return false
 					}
 					if result != "V" {
@@ -621,7 +656,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					kind = 'L'
 				}
 				for i := 0; i < count; i++ {
-					if _, ok := pop(kind); !ok {
+					if v, ok := pop(kind); !ok || v.allocation != 0 {
 						return false
 					}
 				}
