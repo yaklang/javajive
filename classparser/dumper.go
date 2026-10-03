@@ -4101,11 +4101,6 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						}
 						for originalIndex, originalRef := range ret.Exception {
 							if originalRef == catchExc[i] && originalIndex < len(ret.Handlers) && ret.Handlers[originalIndex].EntryPC >= 0 {
-								// Catch type zero is the JVM Throwable domain, independent
-								// of a same-package or lexical class with the simple name.
-								if ret.Handlers[originalIndex].CatchAll {
-									excType = "java.lang.Throwable"
-								}
 								entries[ret.Handlers[originalIndex].EntryPC] = catchExc[i].String(funcCtx)
 							}
 						}

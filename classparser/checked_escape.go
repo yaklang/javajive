@@ -11,6 +11,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/classparser/decompiler/rewriter"
 )
 
 func originalMethodExceptions(object *ClassObject, method *MemberInfo) ([]string, bool) {
@@ -410,8 +411,11 @@ func checkedEscapeThrowableType(name string, provider callbinding.Provider) bool
 	return false
 }
 
-// Retain only immutable handler/control evidence: typed thrown operands tied
-// to original ATHROW locations. Missing origins, erased/unknown type variables,
+// Inspect the emitted source view, not the synthetic rethrow of a proved
+// finally. That rethrow propagates the protected operation's exception; its
+// broad stack type is not a new source-level checked throw. Original invoke
+// declarations and explicit ATHROWs are still checked at their decoded PCs.
+// Missing origins, erased/unknown type variables,
 // contradictory copies and opaque statements cannot establish an escape.
 func checkedEscapeThrownTypes(body []statements.Statement, provider callbinding.Provider) map[int]string {
 	result, ambiguous := map[int]string{}, map[int]bool{}
@@ -447,6 +451,14 @@ func checkedEscapeThrownTypes(body []statements.Statement, provider callbinding.
 		case *statements.TryCatchStatement:
 			if st == nil {
 				continue
+			}
+			if view, ok := rewriter.RecoverCatchAllFinally(st); ok {
+				queue = append(queue, view.TryBody...)
+				queue = append(queue, view.Cleanup...)
+				for _, handler := range view.CatchBodies {
+					queue = append(queue, handler...)
+				}
+				break
 			}
 			queue = append(queue, st.TryBody...)
 			for _, handler := range st.CatchBodies {
