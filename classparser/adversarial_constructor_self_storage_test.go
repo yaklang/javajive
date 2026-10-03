@@ -4,9 +4,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
 // A self-reference retained inside the unpublished receiver is not a heap
@@ -62,6 +65,57 @@ class SelfVolatile {volatile Object self;SelfVolatile(){self=this;}}
 				}
 			})
 		}
+	}
+}
+
+func TestAdversarialConstructorSelfStorageRejectsUninitializedStoredValue(t *testing.T) {
+	javac, java := t04Tools(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "SelfInitDriver.java")
+	if err := os.WriteFile(file, []byte(`class SelfInit {Object self;SelfInit(){self=this;}} public class SelfInitDriver {public static void main(String[]args){new SelfInit();}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(javac, "-proc:none", "--release", "8", "-g:none", "-d", dir, file).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, out)
+	}
+	_ = t04RunJava(t, java, dir, "SelfInitDriver")
+	raw := readClassBytes(t, dir, "SelfInit")
+	obj, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var code *CodeAttribute
+	for _, m := range obj.Methods {
+		name, _ := obj.getUtf8(m.NameIndex)
+		if name == "<init>" {
+			for _, a := range m.Attributes {
+				if c, ok := a.(*CodeAttribute); ok {
+					code = c
+				}
+			}
+		}
+	}
+	if code == nil || len(code.Code) != 10 || code.Code[1] != core.OP_INVOKESPECIAL || code.Code[6] != core.OP_PUTFIELD {
+		t.Fatal("unexpected original constructor")
+	}
+	// Keep the original field/delegation operands, but illegally store the
+	// uninitialized receiver as the field value before Object initialization.
+	code.Code = append(append(append([]byte{}, code.Code[4:9]...), code.Code[:4]...), core.OP_RETURN)
+	if err := os.WriteFile(filepath.Join(dir, "SelfInit.class"), obj.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(java, "-Xverify:all", "-cp", dir, "SelfInitDriver").CombinedOutput(); err == nil || !strings.Contains(string(out), "VerifyError") {
+		t.Fatalf("original verifier accepted malformed self store: %v\n%s", err, out)
+	}
+	d := &ClassObjectDumper{obj: obj, FuncCtx: &class_context.ClassContext{}}
+	d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
+	decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
+	if err := decoder.ParseOpcode(); err != nil {
+		t.Fatal(err)
+	}
+	remaining := 512
+	if d.constructorReceiverEffects(obj, code, constructorMotionOps(decoder), "()V", map[string]bool{}, map[string]bool{}, &remaining, 0) {
+		t.Fatal("uninitialized receiver field value certified")
 	}
 }
 

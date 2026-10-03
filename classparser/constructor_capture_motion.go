@@ -121,7 +121,7 @@ func constructorMotionMember(obj *ClassObject, op *core.OpCode, opcode int) *val
 	interfaceRef := false
 	switch item := constant(core.Convert2bytesToInt(op.Data[:2])).(type) {
 	case *ConstantFieldrefInfo:
-		if item != nil && (opcode == core.OP_PUTFIELD || opcode == core.OP_GETFIELD) {
+		if item != nil && (opcode == core.OP_PUTFIELD || opcode == core.OP_GETFIELD || opcode == core.OP_GETSTATIC) {
 			ref = &item.ConstantMemberrefInfo
 		}
 	case *ConstantMethodrefInfo:

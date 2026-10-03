@@ -345,6 +345,60 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 			switch {
 			case opcode == core.OP_NOP:
 				continue
+			case opcode == core.OP_GETSTATIC:
+				// Class initialization/linkage may fail, but no published THIS
+				// can reside in a static field. Preserve the original operation;
+				// after initialization, failure requires a closed finalizer.
+				if initialized && !c.constructorReceiverFinalizerSilent {
+					return false
+				}
+				member := constructorMotionMember(obj, op, opcode)
+				if member == nil {
+					return false
+				}
+				fields, _, err := callbinding.Descriptor("(" + member.Description + ")V")
+				if err != nil || len(fields) != 1 {
+					return false
+				}
+				stack = append(stack, constructorEffectType(fields[0]))
+			case opcode == core.OP_CHECKCAST || opcode == core.OP_INSTANCEOF:
+				if len(op.Data) != 2 || initialized && !c.constructorReceiverFinalizerSilent {
+					return false
+				}
+				if _, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(op.Data)); !known {
+					return false
+				}
+				v, ok := pop('L')
+				if !ok || v.receiver {
+					return false
+				}
+				if opcode == core.OP_INSTANCEOF {
+					v = constructorEffectValue{kind: 'I'}
+				}
+				stack = append(stack, v)
+			case opcode == core.OP_NEWARRAY || opcode == core.OP_ANEWARRAY:
+				// Allocation and array-component linkage can fail, including
+				// OOME. This is the same failure boundary as a receiver-free call;
+				// the allocation never receives THIS or changes effect order.
+				if initialized && !c.constructorReceiverFinalizerSilent {
+					return false
+				}
+				if opcode == core.OP_NEWARRAY {
+					if len(op.Data) != 1 || op.Data[0] < 4 || op.Data[0] > 11 {
+						return false
+					}
+				} else {
+					if len(op.Data) != 2 {
+						return false
+					}
+					if _, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(op.Data)); !known {
+						return false
+					}
+				}
+				if _, ok := pop('I'); !ok {
+					return false
+				}
+				stack = append(stack, constructorEffectValue{kind: 'L'})
 			case opcode == core.OP_ACONST_NULL:
 				stack = append(stack, constructorEffectValue{kind: 'L'})
 			case opcode >= core.OP_ICONST_M1 && opcode <= core.OP_ICONST_5 || opcode == core.OP_BIPUSH || opcode == core.OP_SIPUSH:
@@ -443,6 +497,10 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				if opcode == core.OP_PUTFIELD {
 					value, ok := pop(typeOf.kind)
 					if !ok {
+						return false
+					}
+					if value.receiver && !initialized {
+						// Uninitialized THIS is not a legal stored reference value.
 						return false
 					}
 					aliases.selfStored = aliases.selfStored || value.receiver
