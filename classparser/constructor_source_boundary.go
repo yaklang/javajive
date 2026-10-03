@@ -18,13 +18,14 @@ import (
 // Prefix effects are either kept behind a proved inert Object initialization or
 // evaluated in the first delegation argument, before any effect of the callee.
 type constructorSourceBoundary struct {
-	pc          int
-	delegate    *values.FunctionCallExpression
-	prefix      []statements.Statement
-	params      []values.JavaValue
-	carrier     string
-	bridgeNames map[int]string
-	helpers     []*dumpedMethods
+	pc             int
+	delegate       *values.FunctionCallExpression
+	prefix         []statements.Statement
+	params         []values.JavaValue
+	carrier        string
+	carrierFormals []string
+	bridgeNames    map[int]string
+	helpers        []*dumpedMethods
 }
 
 func constructorBoundaryValue(v values.JavaValue, allowed map[*values.JavaRef]bool, active map[values.JavaValue]bool, calls map[int]*values.FunctionCallExpression, remaining *int) bool {
@@ -246,8 +247,15 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	}
 	// Constructing a source helper must not turn a class-scoped formal into an
 	// illegal static use or silently change source binding under erasure.
+	var sourceParams []types.JavaType
+	var sourceReturn types.JavaType
+	formalHeader := ""
 	if len(c.FuncCtx.TypeParams) > 0 {
-		return nil, fmt.Errorf("generic constructor prefix requires a formal binding proof")
+		var proved bool
+		formalHeader, p.carrierFormals, sourceParams, sourceReturn, proved = c.constructorPrefixFormalBinding(p, method)
+		if !proved {
+			return nil, fmt.Errorf("generic constructor prefix requires a formal binding proof")
+		}
 	}
 	helperName, err := c.constructorBoundaryHelperName("prefix", p.pc)
 	if err != nil {
@@ -256,7 +264,11 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	p.carrier = helperName
 	declarations := []string{}
 	for i, param := range p.params {
-		declarations = append(declarations, mt.FunctionType().ParamTypes[i].String(c.FuncCtx)+" "+param.String(c.FuncCtx))
+		paramType := mt.FunctionType().ParamTypes[i]
+		if sourceParams != nil {
+			paramType = sourceParams[i]
+		}
+		declarations = append(declarations, paramType.String(c.FuncCtx)+" "+param.String(c.FuncCtx))
 	}
 	var prefix strings.Builder
 	for _, st := range p.prefix {
@@ -264,10 +276,13 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		prefix.WriteString(";\n")
 	}
 	ret := target.FunctionType().ParamTypes[0].String(c.FuncCtx)
+	if sourceReturn != nil {
+		ret = sourceReturn.String(c.FuncCtx)
+	}
 	// A poly first argument must keep its declaration's instantiated target.
 	// Erasing Consumer<String> to Consumer here changes the generated SAM bridge
 	// and overload binding even though the constructor descriptor is unchanged.
-	if owner, known := c.FuncCtx.InvocationMetadata(p.delegate.ClassName); known {
+	if owner, known := c.FuncCtx.InvocationMetadata(p.delegate.ClassName); known && sourceReturn == nil {
 		for _, declaration := range owner.Methods {
 			if declaration.Name != "<init>" || declaration.Desc != p.delegate.Descriptor || declaration.Signature == "" {
 				continue
@@ -281,7 +296,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	}
 	helperBody := prefix.String() + "return (" + ret + ")(" + p.delegate.ArgumentStrings(c.FuncCtx)[0] + ");"
 	helperBody = c.wrapCheckedEscapeBody(helperBody)
-	p.helpers = append(p.helpers, &dumpedMethods{methodName: helperName, code: "private static " + ret + " " + helperName + "(" + strings.Join(declarations, ",") + ") {" + helperBody + "}", bodyCode: helperBody, checkedEscape: true})
+	p.helpers = append(p.helpers, &dumpedMethods{methodName: helperName, code: "private static " + formalHeader + ret + " " + helperName + "(" + strings.Join(declarations, ",") + ") {" + helperBody + "}", bodyCode: helperBody, checkedEscape: true})
 	return p, nil
 }
 
@@ -542,6 +557,10 @@ func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassCon
 		inputs[i] = param.String(ctx)
 	}
 	args[0] = p.carrier + "(" + strings.Join(inputs, ",") + ")"
+	if len(p.carrierFormals) > 0 {
+		owner := types.NewJavaClass(ctx.ClassName).String(ctx)
+		args[0] = owner + ".<" + strings.Join(p.carrierFormals, ",") + ">" + args[0]
+	}
 	target := "super"
 	if strings.ReplaceAll(p.delegate.ClassName, ".", "/") == strings.ReplaceAll(ctx.ClassName, ".", "/") {
 		target = "this"
