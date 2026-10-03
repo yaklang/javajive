@@ -292,6 +292,11 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 		}
 	}
 	thrownTypes := checkedEscapeThrownTypes(body, provider)
+	for pc, precise := range c.preciseCatchRethrows(body, code) {
+		if precise {
+			delete(thrownTypes, pc)
+		}
+	}
 	uncheckedThrows := map[int]bool{}
 	for _, op := range decoder.Opcodes() {
 		if op != nil && op.Instr != nil && op.Instr.OpCode == core.OP_ATHROW {
