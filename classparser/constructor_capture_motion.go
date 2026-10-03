@@ -69,8 +69,7 @@ func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBound
 	if call == nil || next == 0 || int(ops[next-1].CurrentOffset) != p.pc || call.Name != strings.ReplaceAll(p.delegate.ClassName, ".", "/") || call.Description != p.delegate.Descriptor {
 		return false
 	}
-	remaining := 512
-	return c.constructorChainDoesNotObserve(call.Name, call.Description, writes, map[string]bool{}, &remaining, 0)
+	return c.constructorCaptureChainDoesNotObserve(call.Name, call.Description, writes)
 }
 
 func constructorParameterSlots(params []string) map[int]int {

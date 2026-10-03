@@ -67,6 +67,9 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 				data, ok = c.declarationResolver(n)
 			}
 			if !ok {
+				data, ok = jdkConstructorClassBytes(n, target)
+			}
+			if !ok {
 				return fallback(n)
 			}
 			var err error

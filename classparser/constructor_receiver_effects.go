@@ -2,11 +2,13 @@ package javaclassparser
 
 import (
 	"encoding/binary"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
@@ -17,6 +19,62 @@ import (
 type constructorEffectValue struct {
 	kind     byte
 	receiver bool
+}
+
+// A source release is not a runtime pin. Where original platform code is
+// supplied by the catalog, every catalogued runtime capable of running this
+// source must admit the same movement. Actual caller-supplied bytes retain
+// precedence. All attempts share the original bounded proof budget.
+func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descriptor string, writes map[string]bool) bool {
+	target := c.options.TargetSourceVersion
+	if target == 0 {
+		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
+	}
+	remaining := 512
+	prove := func(release int) (bool, bool) {
+		d := *c
+		d.options.TargetSourceVersion = release
+		platformUsed := false
+		d.foldSiblingResolver = func(name string) ([]byte, bool) {
+			if c.foldSiblingResolver != nil {
+				if raw, ok := c.foldSiblingResolver(name); ok {
+					return raw, true
+				}
+			}
+			if c.declarationResolver != nil {
+				if raw, ok := c.declarationResolver(name); ok {
+					return raw, true
+				}
+			}
+			raw, ok := jdkConstructorClassBytes(name, release)
+			platformUsed = platformUsed || ok
+			return raw, ok
+		}
+		d.declarationResolver = nil // already consulted before the platform evidence
+		d.FuncCtx = &class_context.ClassContext{}
+		d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
+		safe := d.constructorChainDoesNotObserve(owner, descriptor, writes, map[string]bool{}, &remaining, 0)
+		return safe, platformUsed
+	}
+	if safe, platformUsed := prove(target); !safe {
+		return false
+	} else if !platformUsed {
+		return true
+	}
+	// Metadata initialization above also initializes the supported release set.
+	releases := []int{}
+	for release := range jdkInvocationCatalog.profiles {
+		if release > target {
+			releases = append(releases, release)
+		}
+	}
+	sort.Ints(releases)
+	for _, release := range releases {
+		if safe, _ := prove(release); !safe {
+			return false
+		}
+	}
+	return true
 }
 
 func constructorEffectType(desc string) constructorEffectValue {
@@ -53,6 +111,13 @@ func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, 
 	}
 	if !ok && c.declarationResolver != nil {
 		raw, ok = c.declarationResolver(owner)
+	}
+	if !ok {
+		target := c.options.TargetSourceVersion
+		if target == 0 {
+			target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
+		}
+		raw, ok = jdkConstructorClassBytes(owner, target)
 	}
 	if !ok {
 		return nil, false
