@@ -27,9 +27,10 @@ type nativeMemberClass struct {
 	constructors                  map[string]*nativeMemberConstructor
 }
 type nativeMemberFamily struct {
-	owner    string
-	children map[string]*nativeMemberClass
-	failed   bool
+	anonymous *nativeAnonymousFamily
+	owner     string
+	children  map[string]*nativeMemberClass
+	failed    bool
 }
 
 // Source ownership comes from one original self row, never dollar spelling.
@@ -1023,4 +1024,65 @@ func nativeMemberNullCheck(obj *ClassObject, op *core.OpCode) bool {
 		return call.Name == "java/lang/Object" && call.Member == "getClass" && call.Description == "()Ljava/lang/Class;"
 	}
 	return false
+}
+
+// Anonymous rows are references, not ownership declarations. A root NEW whose
+// target has an unnamed InnerClasses row still requires its original enclosing
+// identity and complete anonymous allocation proof. Missing bytes/attributes
+// must not turn that target into an unrelated flat type during joint planning.
+func nativeJointAnonymousAllocationsClosed(obj *ClassObject, anonymous *nativeAnonymousFamily, work *workbudget.Budget) bool {
+	if obj == nil {
+		return false
+	}
+	unnamed := map[string]bool{}
+	for _, attr := range obj.Attributes {
+		if table, ok := attr.(*InnerClassesAttribute); ok && table != nil {
+			for _, row := range table.Classes {
+				if row == nil {
+					return false
+				}
+				if row.InnerNameIndex != 0 {
+					continue
+				}
+				name, known := sourceBridgeClassName(obj, row.InnerClassInfoIndex)
+				if !known {
+					return false
+				}
+				unnamed[name] = true
+			}
+		}
+	}
+	if len(unnamed) == 0 {
+		return true
+	}
+	for _, method := range obj.Methods {
+		if method == nil {
+			return false
+		}
+		for _, attr := range method.Attributes {
+			if code, ok := attr.(*CodeAttribute); ok {
+				if !nativeProofWork(work, int64(len(code.Code))) {
+					return false
+				}
+				d := core.NewDecompiler(code.Code, func(int) values.JavaValue { return nil })
+				d.Work = work
+				if d.ParseOpcode() != nil {
+					return false
+				}
+				for _, op := range d.Opcodes() {
+					if op.Instr.OpCode != core.OP_NEW {
+						continue
+					}
+					name, known := sourceBridgeClassName(obj, uint16(core.Convert2bytesToInt(op.Data)))
+					if !known {
+						return false
+					}
+					if unnamed[name] && (anonymous == nil || anonymous.children[name] == nil) {
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
 }

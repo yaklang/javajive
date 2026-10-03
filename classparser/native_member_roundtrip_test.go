@@ -28,7 +28,10 @@ public class MemberDriver {
 
 func TestNativeMemberCaptureRoundTrip(t *testing.T) {
 	javac, java := t04Tools(t)
-	for _, fixture := range []struct{ owner, external, driver, source string }{{"MemberCapture", "MemberExternal", "MemberDriver", nativeMemberFixture}, {"GenericMember", "GenericExternal", "GenericDriver", nativeGenericMemberFixture}, {"OuterArgument", "ArgumentExternal", "ArgumentDriver", nativeMemberArgumentFixture}, {"InitMember", "InitExternal", "InitDriver", nativeMemberInitializationFixture}, {"FailInitMember", "FailInitExternal", "FailInitDriver", nativeMemberFailInitializationFixture}} {
+	joint := strings.Replace(nativeMemberFixture, "MemberParent make(long n)", "Runnable probe(final Object x){return new Runnable(){public void run(){if(token!=x)throw new AssertionError(\"capture identity\");}};}MemberParent make(long n)", 1)
+	joint = strings.Replace(joint, "Runnable probe(", "MemberParent another(long n)throws java.io.IOException{return new MemberParent(n){Object owner(){return MemberCapture.this;}};}Runnable probe(", 1)
+	joint = strings.Replace(joint, "MemberCapture outer=new MemberCapture(x);", "MemberCapture outer=new MemberCapture(x);outer.probe(x).run();for(long a:new long[]{Long.MIN_VALUE,-1,0,1,Long.MAX_VALUE}){MemberEffects.published=null;try{MemberParent p=outer.another(a);if(a<0||p.observed!=outer||p.number!=a)throw new AssertionError(\"anonymous parent publication\");}catch(java.io.IOException e){MemberParent p=(MemberParent)MemberEffects.published;if(a>=0||e!=MemberEffects.failure||p.observed!=outer||p.number!=a)throw new AssertionError(\"anonymous failure identity\",e);}}", 1)
+	for _, fixture := range []struct{ owner, external, driver, source string }{{"MemberCapture", "MemberExternal", "MemberDriver", nativeMemberFixture}, {"MemberCaptureJoint", "MemberExternal", "MemberDriver", strings.ReplaceAll(joint, "MemberCapture", "MemberCaptureJoint")}, {"GenericMember", "GenericExternal", "GenericDriver", nativeGenericMemberFixture}, {"OuterArgument", "ArgumentExternal", "ArgumentDriver", nativeMemberArgumentFixture}, {"InitMember", "InitExternal", "InitDriver", nativeMemberInitializationFixture}, {"FailInitMember", "FailInitExternal", "FailInitDriver", nativeMemberFailInitializationFixture}} {
 		t.Run(fixture.owner, func(t *testing.T) {
 			for _, debug := range []string{"-g", "-g:none"} {
 				t.Run(debug, func(t *testing.T) {
@@ -111,7 +114,11 @@ func TestNativeMemberCaptureRoundTrip(t *testing.T) {
 							if out, e := exec.Command(javac, argv...).CombinedOutput(); e != nil {
 								t.Fatalf("rebuilt %v %s", e, out)
 							}
-							for _, n := range []string{fixture.owner + "$Child", fixture.owner} {
+							binaryNames := []string{fixture.owner + "$Child", fixture.owner}
+							if fixture.owner == "MemberCaptureJoint" {
+								binaryNames = append(binaryNames, fixture.owner+"$1", fixture.owner+"$2")
+							}
+							for _, n := range binaryNames {
 								raw, e := os.ReadFile(filepath.Join(output, n+".class"))
 								if e != nil {
 									t.Fatal(e)

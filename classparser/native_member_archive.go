@@ -242,6 +242,10 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		if p == nil {
 			return
 		}
+		p.anonymous = d.planNativeAnonymousFamily()
+		if !nativeJointAnonymousAllocationsClosed(root, p.anonymous, d.Work) {
+			return
+		}
 		index := z.originalMemberIndex()
 		if !index.valid || !z.nativeMemberAccessRepresentable(p, index, d.Work) {
 			return
@@ -316,7 +320,9 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 					return
 				}
 				if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil) {
-					return
+					if p.anonymous == nil || anonOwner != owner || p.anonymous.children[n] == nil {
+						return
+					}
 				}
 			}
 		}
@@ -334,10 +340,11 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 			}
 		}
 		d.nativeMemberRoot = p
+		d.nativeAnonymousRoot = p.anonymous
 		var src string
 		var e error
 		jdecenv.Run(snap, func() error { src, e = d.DumpClass(); return e })
-		if e != nil || p.failed || strings.Contains(src, DecompileStubMarker) {
+		if e != nil || p.failed || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {
 			return
 		}
 		if d.Work != nil && d.Work.CheckAlloc(int64(len(src))) != nil {

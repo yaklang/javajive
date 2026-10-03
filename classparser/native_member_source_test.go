@@ -524,3 +524,65 @@ func TestNativeMemberOwnGenericScopeRequiresEnclosingDeclarations(t *testing.T) 
 		})
 	}
 }
+
+func TestNativeMemberJointClosureRequiresCompleteOriginalAnonymousProof(t *testing.T) {
+	const source = `class NativeArchiveOwner{final Object token;NativeArchiveOwner(Object x){token=x;}class Child{Child(long n){}Object owner(){return NativeArchiveOwner.this;}}Object make(long n){return new Child(n);}Runnable probe(final Object x){return new Runnable(){public void run(){if(token!=x)throw new AssertionError();}};}}`
+	base := nativeCompileClasses(t, source)
+	for _, scenario := range []string{"original", "missing anonymous", "mutable capture", "unsupported anonymous body", "missing enclosing identity", "disabled anonymous"} {
+		t.Run(scenario, func(t *testing.T) {
+			files := map[string][]byte{}
+			for n, b := range base {
+				files[n] = append([]byte(nil), b...)
+			}
+			if scenario == "missing anonymous" {
+				delete(files, "NativeArchiveOwner$1.class")
+			}
+			if scenario == "disabled anonymous" {
+				t.Setenv("JDEC_NATIVE_ANONYMOUS_OFF", "1")
+			}
+			if scenario == "mutable capture" || scenario == "unsupported anonymous body" || scenario == "missing enclosing identity" {
+				obj, e := Parse(files["NativeArchiveOwner$1.class"])
+				if e != nil {
+					t.Fatal(e)
+				}
+				switch scenario {
+				case "mutable capture":
+					for _, field := range obj.Fields {
+						field.AccessFlags &^= 0x10
+					}
+				case "unsupported anonymous body":
+					for _, method := range obj.Methods {
+						name, _ := obj.getUtf8(method.NameIndex)
+						if name != "run" {
+							continue
+						}
+						for _, a := range method.Attributes {
+							if code, ok := a.(*CodeAttribute); ok {
+								code.Code[len(code.Code)-1] = byte(core.OP_JSR)
+							}
+						}
+					}
+				case "missing enclosing identity":
+					attrs := []AttributeInfo{}
+					for _, a := range obj.Attributes {
+						if raw, ok := a.(*UnparsedAttribute); ok && raw.Name == "EnclosingMethod" {
+							continue
+						}
+						attrs = append(attrs, a)
+					}
+					obj.Attributes = attrs
+				}
+				files["NativeArchiveOwner$1.class"] = obj.Bytes()
+			}
+			z := nativeArchive(t, files)
+			child, e := Parse(files["NativeArchiveOwner$Child.class"])
+			if e != nil {
+				t.Fatal(e)
+			}
+			src, owned := z.nativeMemberSource(child)
+			if owned != (scenario == "original") {
+				t.Fatalf("joint proof %s owned=%v source=%s", scenario, owned, src)
+			}
+		})
+	}
+}
