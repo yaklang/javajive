@@ -649,3 +649,52 @@ func (c *ClassObjectDumper) applyTypeParamBoundAnnotations(method *MemberInfo, t
 	}
 	return typeParams
 }
+
+// One source annotation can produce both declaration and type-use attributes.
+// Emitting both physical attributes as source annotations duplicates a
+// non-repeatable annotation. Only coalesce the same original value/retention at
+// the outer nominal prefix; annotations on dimensions, arguments or qualified
+// member tokens do not reproduce a field declaration annotation.
+func (c *ClassObjectDumper) fieldAnnotationEmittedByType(field *MemberInfo, fieldType types.JavaType, declaration *AnnotationAttribute, invisible bool) bool {
+	if field == nil || fieldType == nil || declaration == nil {
+		return false
+	}
+	prefix := []TypePathEntry{}
+	element := fieldType
+	for element.IsArray() {
+		prefix = appendPath(prefix, typePathKindArray, 0)
+		element = element.ElementType()
+		if element == nil {
+			return false
+		}
+	}
+	rawName := ""
+	if pt, ok := types.AsParameterizedType(element); ok && pt != nil {
+		rawName = pt.RawClassName
+	} else if cls, ok := element.RawType().(*types.JavaClass); ok && cls != nil {
+		rawName = cls.Name
+	}
+	if strings.Contains(rawName, "$") && strings.Contains(c.FuncCtx.ShortTypeName(rawName), ".") {
+		return false
+	}
+	rendered, err := c.DumpAnnotation(declaration)
+	if err != nil {
+		return false
+	}
+	for _, attribute := range field.Attributes {
+		table, ok := attribute.(*TypeAnnotationsAttribute)
+		if !ok || table == nil || table.IsInvisible != invisible {
+			continue
+		}
+		for _, annotation := range table.Annotations {
+			if annotation == nil || annotation.TargetType != 0x13 || annotation.CodeOffsetTarget || !pathEqual(annotation.TypePath, prefix) || annotation.Annotation == nil || annotation.Annotation.TypeName != declaration.TypeName {
+				continue
+			}
+			source, err := c.DumpAnnotation(annotation.Annotation)
+			if err == nil && source == rendered {
+				return true
+			}
+		}
+	}
+	return false
+}

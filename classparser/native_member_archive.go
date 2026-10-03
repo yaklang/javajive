@@ -475,6 +475,9 @@ func nativeMemberDependencyNames(obj *ClassObject, work *workbudget.Budget) ([]s
 		if !known || !signature(desc) {
 			return nil, false
 		}
+		if !nativeAnnotationDependencies(member.Attributes, work, add) {
+			return nil, false
+		}
 		for _, attribute := range member.Attributes {
 			if sig, ok := attribute.(*SignatureAttribute); ok {
 				desc, known := sourceBridgeUTF8(obj, sig.SignatureIndex)
@@ -483,6 +486,9 @@ func nativeMemberDependencyNames(obj *ClassObject, work *workbudget.Budget) ([]s
 				}
 			}
 		}
+	}
+	if !nativeAnnotationDependencies(obj.Attributes, work, add) {
+		return nil, false
 	}
 	for _, attribute := range obj.Attributes {
 		if sig, ok := attribute.(*SignatureAttribute); ok {

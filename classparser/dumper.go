@@ -2068,6 +2068,9 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 				// PermittedSubclasses, Record, NestMembers, etc.) rather than flooding logs.
 			case *RuntimeVisibleAnnotationsAttribute:
 				for _, annotation := range ret.Annotations {
+					if c.fieldAnnotationEmittedByType(field, fieldType, annotation, ret.IsInvisible) {
+						continue
+					}
 					source, err := c.DumpAnnotation(annotation)
 					if err != nil {
 						return nil, err
