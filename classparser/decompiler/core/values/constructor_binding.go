@@ -28,6 +28,41 @@ func (f *FunctionCallExpression) delegationDescriptorBindingCast(i int, arg Java
 	if owner != strings.ReplaceAll(ctx.ClassName, ".", "/") && owner != strings.ReplaceAll(ctx.SupperClassName, ".", "/") {
 		return ""
 	}
+	return f.originalConstructorDescriptorBindingCast(i, arg, ctx)
+}
+
+// Allocation arguments can also acquire a narrower source view than their
+// original erased producer (for example Generic<String>.read()). For a
+// non-generic allocated class and constructor, the original invokespecial
+// descriptor seals the same overload independently of that inferred view.
+func (f *FunctionCallExpression) allocationDescriptorBindingCast(i int, arg JavaValue, ctx *class_context.ClassContext) string {
+	if f == nil || ctx == nil || ctx.InvocationMetadata == nil || f.FunctionName != "<init>" || !f.IsSpecialInvoke || f.Kind != InvokeSpecial || !f.HasOriginPC || f.OriginPC < 0 || arg == nil || isWitnessLambdaArg(arg) {
+		return ""
+	}
+	object := UnpackSoltValue(f.Object)
+	if ref, ok := object.(*JavaRef); ok {
+		if ref == nil || ref.IsThis || ref.Val == nil {
+			return ""
+		}
+		object = UnpackSoltValue(ref.Val)
+	}
+	allocation, ok := object.(*NewExpression)
+	if !ok || allocation == nil || allocation.Type() == nil || !sameErasureClassName(witnessRawClassName(allocation.Type()), f.ClassName) {
+		return ""
+	}
+	if _, parameterized := types.AsParameterizedType(allocation.Type()); parameterized {
+		return ""
+	}
+	owner := strings.ReplaceAll(f.ClassName, ".", "/")
+	table, known := ctx.InvocationMetadata(owner)
+	if !known || table.Name != owner || !table.MembersComplete || len(types.ClassFormalTypeParamNames(table.Signature)) != 0 {
+		return ""
+	}
+	return f.originalConstructorDescriptorBindingCast(i, arg, ctx)
+}
+
+func (f *FunctionCallExpression) originalConstructorDescriptorBindingCast(i int, arg JavaValue, ctx *class_context.ClassContext) string {
+	owner := strings.ReplaceAll(f.ClassName, ".", "/")
 	table, known := ctx.InvocationMetadata(owner)
 	if !known || table.Name != owner || !table.MembersComplete {
 		return ""

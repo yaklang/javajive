@@ -208,3 +208,92 @@ func TestConstructorMethodFormalInferenceKeepsCallerScope(t *testing.T) {
 		})
 	}
 }
+
+func TestAllocationDescriptorBindingKeepsOriginalErasedProducer(t *testing.T) {
+	for _, variant := range []string{"original", "receiver alias", "no receiver value", "THIS", "other allocation owner", "parameterized allocation", "generic class", "generic constructor", "signature without generic flag", "varargs target", "static target", "duplicate target", "unknown", "incomplete", "wrong metadata identity", "no origin", "negative origin", "wrong invoke kind", "no rival", "different arity rival", "explicit exact cast", "narrower cast"} {
+		t.Run(variant, func(t *testing.T) {
+			desc := "(Ljava/lang/Object;)V"
+			table := callbinding.Class{Name: "proof/Allocated", MembersComplete: true, Methods: []callbinding.Method{{Name: "<init>", Desc: desc}, {Name: "<init>", Desc: "(Ljava/lang/String;)V"}}}
+			ctx := &class_context.ClassContext{ClassName: "proof.UnrelatedCaller", FunctionName: "factory", InvocationMetadata: func(n string) (callbinding.Class, bool) { return table, variant != "unknown" }}
+			allocation := NewNewExpression(types.NewJavaClass("proof.Allocated"))
+			// JVM Object erasure does not establish the source result type. This source
+			// producer may infer String without changing its recorded bytecode type.
+			arg := NewCustomValue(func(*class_context.ClassContext) string { return "generic.read()" }, func() types.JavaType { return types.NewJavaClass("java.lang.Object") })
+			f := &FunctionCallExpression{ClassName: "proof.Allocated", FunctionName: "<init>", Descriptor: desc, Object: allocation, Arguments: []JavaValue{arg}, Kind: InvokeSpecial, IsSpecialInvoke: true, OriginPC: 7, HasOriginPC: true}
+			want := "Object"
+			switch variant {
+			case "receiver alias":
+				f.Object = NewJavaRef(utils.NewRootVariableId(), allocation, allocation.Type())
+			case "no receiver value":
+				f.Object = NewJavaRef(utils.NewRootVariableId(), nil, allocation.Type())
+				want = ""
+			case "THIS":
+				ref := NewJavaRef(utils.NewRootVariableId(), allocation, allocation.Type())
+				ref.IsThis = true
+				f.Object = ref
+				want = ""
+			case "other allocation owner":
+				allocation.JavaType = types.NewJavaClass("proof.Other")
+				want = ""
+			case "parameterized allocation":
+				allocation.JavaType = types.NewParameterizedType("proof.Allocated", []types.JavaType{types.NewJavaClass("java.lang.String")})
+				want = ""
+			case "generic class":
+				table.Signature = "<T:Ljava/lang/Object;>Ljava/lang/Object;"
+				want = ""
+			case "generic constructor":
+				table.Methods[0].Generic = true
+				want = ""
+			case "signature without generic flag":
+				table.Methods[0].Signature = "(TT;)V"
+				want = ""
+			case "varargs target":
+				table.Methods[0].Varargs = true
+				want = ""
+			case "static target":
+				table.Methods[0].Static = true
+				want = ""
+			case "duplicate target":
+				table.Methods = append(table.Methods, table.Methods[0])
+				want = ""
+			case "unknown":
+				want = ""
+			case "incomplete":
+				table.MembersComplete = false
+				want = ""
+			case "wrong metadata identity":
+				table.Name = "other"
+				want = ""
+			case "no origin":
+				f.HasOriginPC = false
+				want = ""
+			case "negative origin":
+				f.OriginPC = -1
+				want = ""
+			case "wrong invoke kind":
+				f.Kind = InvokeVirtual
+				want = ""
+			case "no rival":
+				table.Methods = table.Methods[:1]
+				want = ""
+			case "different arity rival":
+				table.Methods[1].Desc = "(Ljava/lang/String;I)V"
+				want = ""
+			case "explicit exact cast":
+				f.Arguments[0] = &CastExpression{Value: arg, TargetType: types.NewJavaClass("java.lang.Object")}
+				want = ""
+			case "narrower cast":
+				f.Arguments[0] = &CastExpression{Value: arg, TargetType: types.NewJavaClass("java.lang.String")}
+			}
+			if got := f.allocationDescriptorBindingCast(0, f.Arguments[0], ctx); got != want {
+				t.Fatalf("cast=%q want=%q", got, want)
+			}
+			if want != "" {
+				rendered := f.ArgumentStrings(ctx)[0]
+				if strings.Count(rendered, "generic.read()") != 1 || !strings.Contains(rendered, "(Object)") {
+					t.Fatal(rendered)
+				}
+			}
+		})
+	}
+}
