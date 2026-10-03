@@ -30,6 +30,14 @@ import (
 )
 
 type ClassObjectDumper struct {
+	nativeAnonymousRoot *nativeAnonymousFamily
+	nativeCaptureFields map[string]string
+	nativeCapturedReads map[string]map[int]string
+	nativeTypeParams    []string
+	nativeCaptureFailed bool
+	nativeCaptureTypes  map[string]types.JavaType
+	nativeOuterContext  *class_context.ClassContext
+
 	options                DecompileOptions
 	report                 *DecompileResult
 	rewriteSeen            map[string]bool
@@ -604,8 +612,15 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		SupperClassName: supperClassName,
 		PackageName:     c.PackageName,
 	}
+	if outer := c.nativeOuterContext; outer != nil {
+		funcCtx.BuildInLibsMap = outer.BuildInLibsMap
+		funcCtx.KeySet = outer.KeySet
+		funcCtx.SamePkgFQNames = outer.SamePkgFQNames
+	}
 	c.FuncCtx = funcCtx
 	funcCtx.DeclarationSourceName = c.buildDeclarationSourceNames()
+	c.wireNativeAnonymousSource()
+
 	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
 	c.wirePrivateNestBridges()
 	c.overloadUnknownSeen = map[string]bool{}
@@ -635,6 +650,14 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// same-package one). Constant-pool based, so it is independent of body render order. See
 	// ClassContext.SamePkgFQNames. Kill-switch: JDEC_SAMEPKG_FQ_OFF=1.
 	funcCtx.SamePkgFQNames = c.computeSamePkgFQNames()
+	if c.nativeOuterContext != nil {
+		if funcCtx.SamePkgFQNames == nil {
+			funcCtx.SamePkgFQNames = map[string]bool{}
+		}
+		for name := range c.nativeOuterContext.SamePkgFQNames {
+			funcCtx.SamePkgFQNames[name] = true
+		}
+	}
 	if err := c.consultResolverForCancel(); err != nil {
 		return "", err
 	}
@@ -795,7 +818,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// It is propagated to the render context so statement renderers can recognize type-variable
 	// references (e.g. to emit an unchecked `(T)` cast on an erased return value).
 	classTypeParamNames := types.ClassFormalTypeParamNames(classSigStr)
-	if c.getenv("JDEC_INNER_TYPEVAR_OFF") == "" && len(classTypeParamNames) == 0 {
+	if c.nativeCaptureFields != nil {
+		classTypeParamNames = append(classTypeParamNames, c.nativeTypeParams...)
+	}
+	if c.nativeCaptureFields == nil && c.getenv("JDEC_INNER_TYPEVAR_OFF") == "" && len(classTypeParamNames) == 0 {
 		seen := map[string]bool{}
 		var free []string
 		addRef := func(n string) {
@@ -1869,6 +1895,10 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 	genuineEnum := c.isGenuineEnum()
 	fields := make([]dumpedFields, 0, len(c.obj.Fields))
 	for _, field := range c.obj.Fields {
+		fieldName, _ := c.obj.getUtf8(field.NameIndex)
+		if _, captured := c.nativeCaptureFields[fieldName]; captured {
+			continue
+		}
 		accessFlagsVerbose, accessCode := getFieldAccessFlagsVerbose(field.AccessFlags)
 		//if len(accessFlagsVerbose) < 1 {
 		//	return nil, utils.Error("fields accessFlagsVerbose is empty")
@@ -3734,6 +3764,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if err != nil {
 				return dumped, utils.Wrap(err, "ParseBytesCode failed")
 			}
+			priorStable := funcCtx.SourceCaptureStable
+			funcCtx.SourceCaptureStable = nil
+			defer func() { funcCtx.SourceCaptureStable = priorStable }()
 			priorConstructorBridge := funcCtx.ConstructorInvokeBridge
 			funcCtx.ConstructorInvokeBridge = nil
 			defer func() { funcCtx.ConstructorInvokeBridge = priorConstructorBridge }()
@@ -3811,6 +3844,8 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				}
 			}
 			ensureUniqueParameterNames(samParams, funcCtx)
+			c.prepareNativeCaptureBindings(statementList, params)
+			c.prepareNativeLocalShadowing(statementList, params)
 			paramsNewStrList := []string{}
 			// A lambda arrow parameter whose type is a GENERIC class rendered RAW is best emitted WITHOUT
 			// an explicit type: the bytecode only preserves the ERASED impl-method descriptor (e.g.
@@ -4364,7 +4399,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				methodReturnTypeStr = mt.ReturnType.String(funcCtx)
 			}
 			sourceCode = c.sourceRewrite("addMissingGeneratedLocalDecls", "method_source", sourceCode, func(body string) string {
-				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr)
+				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr, c.nativeLexicalCaptures())
 			})
 			code = sourceCode
 		}
@@ -4935,10 +4970,15 @@ func (c *ClassObjectDumper) methodReturnTypeByName() map[string]string {
 	return m
 }
 
-func addMissingGeneratedLocalDecls(body, params, receiverType string, methodReturnTypes map[string]string, methodReturnType string) string {
+func addMissingGeneratedLocalDecls(body, params, receiverType string, methodReturnTypes map[string]string, methodReturnType string, lexical ...map[string]bool) string {
 	body = repairMismatchedDoWhileIndexDecls(body)
 	returnDeclFix := jdecenv.Get("JDEC_RETURN_DECL_FIX_OFF") == ""
 	declared := map[string]bool{}
+	for _, names := range lexical {
+		for name := range names {
+			declared[name] = true
+		}
+	}
 	for _, match := range generatedLocalDeclRe.FindAllStringSubmatch(params+"\n"+body, -1) {
 		if len(match) > 1 {
 			// `return varN;` / `throw varN;` match generatedLocalDeclRe's type-identifier alternative
@@ -12743,6 +12783,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		descriptor, err := c.obj.getUtf8(method.DescriptorIndex)
 		if err != nil {
 			return nil, utils.Wrapf(err, "getUtf8(%v) failed", method.DescriptorIndex)
+		}
+		if c.nativeCaptureFields != nil && name == "<init>" {
+			continue
 		}
 		if genuineEnum && c.isSyntheticEnumMethod(name, descriptor) {
 			continue

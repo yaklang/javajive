@@ -230,7 +230,7 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 	return nil, nil, false
 }
 
-func catchParameterUnwritten(body []statements.Statement, ref *values.JavaRef, remaining *int) bool {
+func catchParameterUnwritten(body []statements.Statement, ref *values.JavaRef, remaining *int, declaration ...*statements.AssignStatement) bool {
 	if ref == nil || ref.Id == nil {
 		return false
 	}
@@ -301,7 +301,10 @@ func catchParameterUnwritten(body []statements.Statement, ref *values.JavaRef, r
 			}
 			active[st] = true
 			if assign, ok := st.(*statements.AssignStatement); ok && assign.ArrayMember == nil && same(assign.LeftValue) {
-				return false
+				allowed := len(declaration) == 1 && assign == declaration[0] && (assign.IsDeclare || assign.IsFirst)
+				if !allowed {
+					return false
+				}
 			}
 			if tr, ok := st.(*statements.TryCatchStatement); ok {
 				for _, caught := range tr.Exception {

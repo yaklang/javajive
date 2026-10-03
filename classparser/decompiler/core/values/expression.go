@@ -114,6 +114,22 @@ func (n *NewExpression) Type() types.JavaType {
 }
 
 func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
+	if n != nil && !n.IsArray() && n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceAnonymousAllocation != nil && funcCtx.SourceAnonymousCandidate != nil && funcCtx.SourceAnonymousCandidate(n.ConstructorCall.ClassName) && n.HasOriginPC && n.ConstructorCall.HasOriginPC {
+		call := n.ConstructorCall
+		args := make([]class_context.SourceCaptureOperand, len(call.Arguments))
+		for i, arg := range call.Arguments {
+			args[i].Value = arg
+			args[i].Text = arg.String(funcCtx)
+			if ref, ok := UnpackSoltValue(arg).(*JavaRef); ok && ref != nil && ref.Id != nil && ref.CustomValue == nil && ref.StackVar == nil {
+				args[i].Receiver = ref.IsThis
+				args[i].Local = !ref.IsThis && funcCtx.SourceCaptureStable != nil && funcCtx.SourceCaptureStable(call.OriginPC, ref.Id)
+			}
+		}
+		if source, known := funcCtx.SourceAnonymousAllocation(call.ClassName, call.Descriptor, n.OriginPC, call.OriginPC, args); known {
+			return source
+		}
+	}
+
 	if n.IsArray() {
 		base := n.JavaType
 		for base.IsArray() {

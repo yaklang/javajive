@@ -495,6 +495,17 @@ func NewJavaArrayMember(object JavaValue, index JavaValue) *JavaArrayMember {
 }
 
 func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
+	if funcCtx != nil && funcCtx.SourceCapturedField != nil {
+		pc := -1
+		if j.HasOriginPC {
+			pc = j.OriginPC
+		}
+		ref, direct := UnpackSoltValue(j.Object).(*JavaRef)
+		if text, known := funcCtx.SourceCapturedField(pc, j.Member, direct && ref != nil && ref.IsThis); known {
+			return text
+		}
+	}
+
 	//if j.Id == 0 {
 	//	return j.Member
 	//}

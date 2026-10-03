@@ -233,7 +233,14 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 	if wrapped := wrapContractedSourceRule(id, rule); wrapped != nil {
 		rule = wrapped
 	}
-	changed := rule(source)
+	changed := source
+	if phase == "method_source" && c.nativeAnonymousRoot != nil {
+		if nativeProofWork(c.Work, int64(len(source))) {
+			changed = nativeRewriteEnclosingMethod(source, rule)
+		}
+	} else {
+		changed = rule(source)
+	}
 	if c.Work != nil {
 		if err := c.Work.CheckAlloc(int64(len(changed))); err != nil {
 			return source

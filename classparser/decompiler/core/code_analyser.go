@@ -4341,7 +4341,17 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		member := d.constantPoolGetter(int(index)).(*values.JavaClassMember)
 		v := runtimeStackSimulation.Pop().(values.JavaValue)
 		v = castAnonSubclassReceiverForOwnField(v, member, funcCtx)
-		field := values.NewRefMember(v, member.Member, member.JavaType)
+		fieldType := member.JavaType
+		// A proven lexical capture supplies the caller's parameterization while
+		// the original member descriptor and opcode remain unchanged.
+		if funcCtx != nil && funcCtx.SourceCapturedFieldType != nil {
+			if ref, ok := values.UnpackSoltValue(v).(*values.JavaRef); ok && ref.IsThis {
+				if view, ok := funcCtx.SourceCapturedFieldType(int(opcode.CurrentOffset), strings.ReplaceAll(member.Name, ".", "/"), member.Member, member.Description).(types.JavaType); ok && view != nil {
+					fieldType = view.Copy()
+				}
+			}
+		}
+		field := values.NewRefMember(v, member.Member, fieldType)
 		field.OriginPC, field.HasOriginPC = int(opcode.CurrentOffset), true
 		runtimeStackSimulation.Push(field)
 	case OP_GETSTATIC:

@@ -17,7 +17,20 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
+// SourceCaptureOperand carries rendering evidence, never executable class bytes.
+type SourceCaptureOperand struct {
+	Value    any
+	Text     string
+	Local    bool
+	Receiver bool
+}
 type ClassContext struct {
+	SourceAnonymousCandidate  func(owner string) bool
+	SourceAnonymousAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceCapturedField       func(pc int, name string, receiver bool) (string, bool)
+	SourceCaptureStable       func(int, *coreutils.VariableId) bool
+	SourceCapturedFieldType   func(pc int, owner, name, descriptor string) any
+
 	// LocalNames supplies scoped source bindings by identity. It does not rename
 	// the underlying IR or conflate locals that merely share a JVM slot spelling.
 	LocalNames map[*coreutils.VariableId]string

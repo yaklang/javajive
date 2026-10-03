@@ -501,3 +501,29 @@ func invocationSignatureEvidence(ctx *class_context.ClassContext, name string) (
 	}
 	return meta.Signature, m, true
 }
+
+// SourceTypeErasure requires a denotable caller type with an exact JVM erasure.
+// A lexical method formal shadows a class formal. Unknown/dependent bounds
+// remain unproved; they must never default to Object.
+func SourceTypeErasure(t types.JavaType, ctx *class_context.ClassContext) (string, bool) {
+	if t == nil || ctx == nil {
+		return "", false
+	}
+	if t.IsArray() {
+		element, known := SourceTypeErasure(t.ElementType(), ctx)
+		return "[" + element, known
+	}
+	if name, ok := types.RawClassFQN(t); ok && ctx.IsTypeParam(name) {
+		for _, sig := range []string{ctx.CurrentMethodSig, ctx.ClassSig} {
+			for _, formal := range types.ClassFormalTypeParamNames(sig) {
+				if formal == name {
+					descriptor := erasedInvocationBounds(sig)[name]
+					return descriptor, descriptor != ""
+				}
+			}
+		}
+		return "", false
+	}
+	descriptor := bindingType(t)
+	return descriptor, descriptor != ""
+}
