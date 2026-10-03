@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 )
 
 func functionalFixture(t *testing.T, main, source, debug string) (string, []byte) {
@@ -460,15 +462,24 @@ func TestChainedSiblingReturnFunctionalErasureRoundTrip(t *testing.T) {
 import java.util.function.BiFunction;
 
 final class ChainedLocalCache<K, V> {
+  int calls;
+  static final Object failureKey = new Object();
+  static final IllegalStateException failure = new IllegalStateException("original");
   V compute(K key, BiFunction<? super K, ? super V, ? extends V> remap,
       boolean recordStats, boolean recordLoad, boolean notifyWriter) {
+    calls++;
+    if (key == failureKey) throw failure;
     return remap.apply(key, null);
   }
+  V compute(String key, BiFunction<? super K, ? super V, ? extends V> remap,
+      boolean recordStats, boolean recordLoad, boolean notifyWriter) {throw new AssertionError("wrong overload");}
 }
 
 final class ChainedCacheOwner<K, V> {
+  int reads;
   private final ChainedLocalCache<K, CompletableFuture<V>> cache = new ChainedLocalCache<>();
-  ChainedLocalCache<K, CompletableFuture<V>> cache() { return cache; }
+  ChainedLocalCache<K, CompletableFuture<V>> cache() { reads++; return cache; }
+  int calls() { return cache.calls; }
 }
 
 public class ChainedSiblingFunctionalErasureCall<K, V> {
@@ -482,7 +493,15 @@ public class ChainedSiblingFunctionalErasureCall<K, V> {
   }
 
   public static void main(String[] args) {
-    System.out.print(new ChainedSiblingFunctionalErasureCall<String, Integer>().update("answer", 42).join());
+    ChainedSiblingFunctionalErasureCall<Object,Object> subject=new ChainedSiblingFunctionalErasureCall<>();
+    Object token=new Object();int calls=0;
+    for(Object next:new Object[]{null,token,Integer.valueOf(42)})for(Object key:new Object[]{null,"answer",token}) {
+      if(subject.update(key,next).join()!=next)throw new AssertionError("result identity");
+      calls++;if(subject.owner.reads!=calls||subject.owner.calls()!=calls)throw new AssertionError("receiver evaluated twice");
+      System.out.println("identity:"+calls);
+    }
+    try{subject.update(ChainedLocalCache.failureKey,token);throw new AssertionError("lost throw");}
+    catch(IllegalStateException failure){if(failure!=ChainedLocalCache.failure||subject.owner.reads!=calls+1||subject.owner.calls()!=calls+1)throw new AssertionError("failure identity/effects");System.out.println("failure");}
   }
 }`
 	javac, java := t04Tools(t)
@@ -513,11 +532,43 @@ public class ChainedSiblingFunctionalErasureCall<K, V> {
 			if err != nil {
 				t.Fatalf("decompile %s/%s: %v", mode, debug, err)
 			}
-			if !strings.Contains(result.Source, ".cache().compute(") || !strings.Contains(result.Source, "(BiFunction)(") {
+			if !strings.Contains(result.Source, "(BiFunction)(") {
 				t.Fatalf("missing chained-receiver raw bridge in %s/%s:\n%s", mode, debug, result.Source)
 			}
 
 			rebuiltDir := compileConsumer(t, result.Source)
+			// Receiver binding may legitimately insert a raw view around cache().
+			// Certify the original and rebuilt bytecode tuples rather than requiring
+			// a particular dot/parenthesis spelling of the source chain.
+			for _, path := range []string{filepath.Join(originalDir, main+".class"), filepath.Join(rebuiltDir, main+".class")} {
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				obj, err := Parse(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, method := range obj.Methods {
+					n, _ := obj.getUtf8(method.NameIndex)
+					desc, _ := obj.getUtf8(method.DescriptorIndex)
+					if n != "update" || desc != "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/concurrent/CompletableFuture;" {
+						continue
+					}
+					for _, attr := range method.Attributes {
+						if code, ok := attr.(*CodeAttribute); ok {
+							found = true
+							reviewedControlInvokes(t, code, obj,
+								reviewedViewInvoke{"ChainedCacheOwner", "cache", "()LChainedLocalCache;", core.OP_INVOKEVIRTUAL},
+								reviewedViewInvoke{"ChainedLocalCache", "compute", "(Ljava/lang/Object;Ljava/util/function/BiFunction;ZZZ)Ljava/lang/Object;", core.OP_INVOKEVIRTUAL})
+						}
+					}
+				}
+				if !found {
+					t.Fatal("original/rebuilt update bytecode missing")
+				}
+			}
 			classpath := rebuiltDir + string(os.PathListSeparator) + originalDir
 			if got := t04RunJava(t, java, classpath, main); got != want {
 				t.Fatalf("runtime mismatch %s/%s: got %q want %q", mode, debug, got, want)

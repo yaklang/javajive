@@ -44,7 +44,10 @@ func TestBaseMpscAllocateIsLoadBearing(t *testing.T) {
 func TestT19LocalAsyncCacheCallTargetIsLoadBearing(t *testing.T) {
 	assertKillSwitchDecompile(t, "testdata/regression/LocalAsyncCache.class", "JDEC_POLY_CALL_TARGET_OFF",
 		"BiFunction<? super K, Executor, CompletableFuture<V>> var5 =",
-		"BiFunction<Object, Executor, CompletableFuture> var5 =")
+		// With original class formal parameters available, disabling the poly
+		// target leaves an erased interface local, rather than invented concrete
+		// type arguments. The ON target contract is unchanged.
+		"BiFunction var5 =")
 }
 
 func TestLocalLoadingCacheLoadAllIsLoadBearing(t *testing.T) {
