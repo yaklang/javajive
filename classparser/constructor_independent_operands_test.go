@@ -19,6 +19,10 @@ class IndependentCast {String value;IndependentCast(Object x){value=(String)x;}}
 class IndependentInstance {boolean value;IndependentInstance(Object x){value=x instanceof String;}}
 class IndependentPrimitiveArray {int[] value;IndependentPrimitiveArray(int n){value=new int[n];}}
 class IndependentReferenceArray {Object[] value;IndependentReferenceArray(int n){value=new Object[n];}}
+class IndependentFieldBox {Object value;volatile int count;}
+class IndependentFieldGet {Object value;IndependentFieldGet(IndependentFieldBox box){value=box.value;}}
+class IndependentFieldPut {IndependentFieldPut(IndependentFieldBox box,Object value){box.value=value;}}
+class IndependentVolatileGet {int count;IndependentVolatileGet(IndependentFieldBox box){count=box.count;}}
 class IndependentFresh {Object value;IndependentFresh(Object x){value=new StringBuilder();}}
 class IndependentFreshArgument {Object value;IndependentFreshArgument(Object x){value=new StringBuilder((String)x);}}
 class IndependentFreshRoot {IndependentFreshRoot(Object x){}}
@@ -42,11 +46,11 @@ class IndependentBefore extends IndependentRoot {IndependentBefore(Object x){sup
 			name, desc string
 			opcode     int
 		}{
-			{"IndependentFresh", "(Ljava/lang/Object;)V", core.OP_NEW}, {"IndependentFreshBefore", "()V", core.OP_NEW}, {"IndependentFreshArgument", "(Ljava/lang/Object;)V", core.OP_NEW}, {"IndependentStatic", "()V", core.OP_GETSTATIC}, {"IndependentCast", "(Ljava/lang/Object;)V", core.OP_CHECKCAST},
+			{"IndependentFieldGet", "(LIndependentFieldBox;)V", core.OP_GETFIELD}, {"IndependentFieldPut", "(LIndependentFieldBox;Ljava/lang/Object;)V", core.OP_PUTFIELD}, {"IndependentVolatileGet", "(LIndependentFieldBox;)V", core.OP_GETFIELD}, {"IndependentFresh", "(Ljava/lang/Object;)V", core.OP_NEW}, {"IndependentFreshBefore", "()V", core.OP_NEW}, {"IndependentFreshArgument", "(Ljava/lang/Object;)V", core.OP_NEW}, {"IndependentStatic", "()V", core.OP_GETSTATIC}, {"IndependentCast", "(Ljava/lang/Object;)V", core.OP_CHECKCAST},
 			{"IndependentInstance", "(Ljava/lang/Object;)V", core.OP_INSTANCEOF}, {"IndependentPrimitiveArray", "(I)V", core.OP_NEWARRAY},
 			{"IndependentReferenceArray", "(I)V", core.OP_ANEWARRAY}, {"IndependentBefore", "(Ljava/lang/Object;)V", core.OP_CHECKCAST},
 		} {
-			for _, variant := range []string{"closed finalizer", "open finalizer", "bad operand bytes", "bad constant kind", "receiver operand", "wrong new owner", "fresh local alias", "receiver passed to fresh constructor", "budget"} {
+			for _, variant := range []string{"closed finalizer", "open finalizer", "bad operand bytes", "bad constant kind", "receiver operand", "wrong new owner", "fresh local alias", "receiver passed to fresh constructor", "receiver published by external field", "budget"} {
 				t.Run(debug+"/"+tc.name+"/"+variant, func(t *testing.T) {
 					raw, _ := resolve(tc.name)
 					obj, err := Parse(raw)
@@ -114,6 +118,14 @@ class IndependentBefore extends IndependentRoot {IndependentBefore(Object x){sup
 									break
 								}
 							}
+						case "receiver published by external field":
+							if tc.name != "IndependentFieldPut" {
+								t.Skip("needs independent field store")
+							}
+							copy := *ops[index-1].Instr
+							copy.OpCode = core.OP_ALOAD_0
+							ops[index-1].Instr = &copy
+							ops[index-1].Data = nil
 						case "wrong new owner":
 							if tc.opcode != core.OP_NEW {
 								t.Skip("requires distinct allocation")
@@ -128,8 +140,12 @@ class IndependentBefore extends IndependentRoot {IndependentBefore(Object x){sup
 							}
 							load := *ops[0].Instr
 							load.OpCode = core.OP_ALOAD_0
-							ops[index-1].Instr = &load
-							ops[index-1].Data = nil
+							operand := index - 1
+							if tc.opcode == core.OP_PUTFIELD {
+								operand = index - 2
+							}
+							ops[operand].Instr = &load
+							ops[operand].Data = nil
 						}
 						break
 					}

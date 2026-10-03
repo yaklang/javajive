@@ -460,33 +460,15 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					return false
 				}
 				stack = append(stack, constructorEffectValue{kind: kind})
-			case opcode == core.OP_DUP:
-				v, ok := pop(0)
-				if !ok || v.width() != 1 {
+			case opcode >= core.OP_DUP && opcode <= core.OP_SWAP:
+				if len(op.Data) != 0 {
 					return false
 				}
-				stack = append(stack, v, v)
-			case opcode == core.OP_DUP2:
-				v, ok := pop(0)
-				if !ok {
+				var known bool
+				stack, known = constructorEffectStackPermutation(stack, opcode)
+				if !known {
 					return false
 				}
-				if v.width() == 2 {
-					stack = append(stack, v, v)
-				} else {
-					w, ok := pop(0)
-					if !ok || w.width() != 1 {
-						return false
-					}
-					stack = append(stack, w, v, w, v)
-				}
-			case opcode == core.OP_SWAP:
-				v, ok := pop(0)
-				w, ok2 := pop(0)
-				if !ok || !ok2 || v.width() != 1 || w.width() != 1 {
-					return false
-				}
-				stack = append(stack, v, w)
 			case opcode == core.OP_POP || opcode == core.OP_POP2:
 				v, ok := pop(0)
 				if !ok {
@@ -511,6 +493,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				if err != nil || len(params) != 1 || typeOf.width() == 0 {
 					return false
 				}
+				var stored constructorEffectValue
 				if opcode == core.OP_PUTFIELD {
 					value, ok := pop(typeOf.kind)
 					if !ok {
@@ -520,12 +503,26 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 						// Uninitialized THIS is not a legal stored reference value.
 						return false
 					}
-					aliases.selfStored = aliases.selfStored || value.receiver
+					stored = value
 				}
 				receiver, ok := pop('L')
-				if !ok || !receiver.receiver {
+				if !ok || receiver.allocation != 0 {
 					return false
 				}
+				if !receiver.receiver {
+					// No earlier operation has published THIS. An independent
+					// input or initialized allocation cannot hide an alias to it.
+					// Keep the original field operation and failure timing; after
+					// Object initialization, failure needs the closed finalizer.
+					if stored.receiver || initialized && !c.constructorReceiverFinalizerSilent {
+						return false
+					}
+					if opcode == core.OP_GETFIELD {
+						stack = append(stack, typeOf)
+					}
+					continue
+				}
+				aliases.selfStored = aliases.selfStored || stored.receiver
 				field, known := c.constructorEffectField(obj, member, opcode == core.OP_PUTFIELD, remaining)
 				if !known || writes[field] {
 					return false
@@ -539,7 +536,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				}
 			case opcode == core.OP_INVOKESPECIAL || opcode == core.OP_INVOKESTATIC || opcode == core.OP_INVOKEVIRTUAL || opcode == core.OP_INVOKEINTERFACE:
 				member := constructorMotionMember(obj, op, opcode)
-				if member == nil || (initialized && !c.constructorReceiverFinalizerSilent) || member.Member == "<clinit>" {
+				if member == nil || member.Member == "<clinit>" {
 					return false
 				}
 				args, result, err := callbinding.Descriptor(member.Description)
@@ -566,6 +563,23 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					if !ok {
 						return false
 					}
+				}
+				if receiver.receiver && member.Member != "<init>" {
+					if !initialized || !c.constructorReceiverFinalizerSilent || len(args) != 0 {
+						return false
+					}
+					value, known := c.constructorReceiverReadOnlyMethod(obj, member, opcode, writes, remaining)
+					if !known {
+						return false
+					}
+					aliases.referenceRead = aliases.referenceRead || value.kind == 'L'
+					if result != "V" {
+						stack = append(stack, value)
+					}
+					continue
+				}
+				if initialized && !c.constructorReceiverFinalizerSilent {
+					return false
 				}
 				if member.Member == "<init>" {
 					if receiver.allocation != 0 {
@@ -695,4 +709,59 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 		return false
 	}
 	return walk(0, locals, nil, false)
+}
+
+// JVM dup forms copy an exact one/two-word top packet below an exact
+// zero/one/two-word packet. Packet boundaries may never split a category-2
+// value. Copy whole abstract values so receiver and NEW identities survive.
+func constructorEffectStackPermutation(stack []constructorEffectValue, opcode int) ([]constructorEffectValue, bool) {
+	packet := func(end, words int) (int, bool) {
+		for words > 0 {
+			if end <= 0 {
+				return 0, false
+			}
+			end--
+			width := stack[end].width()
+			if width == 0 {
+				return 0, false
+			}
+			words -= width
+		}
+		return end, words == 0
+	}
+	if opcode == core.OP_SWAP {
+		top, ok := packet(len(stack), 1)
+		if !ok {
+			return nil, false
+		}
+		under, ok := packet(top, 1)
+		if !ok {
+			return nil, false
+		}
+		result := append([]constructorEffectValue(nil), stack[:under]...)
+		result = append(result, stack[top:]...)
+		result = append(result, stack[under:top]...)
+		return result, true
+	}
+	if opcode < core.OP_DUP || opcode > core.OP_DUP2_X2 {
+		return nil, false
+	}
+	copyWords, insertWords := 1, opcode-core.OP_DUP
+	if opcode >= core.OP_DUP2 {
+		copyWords = 2
+		insertWords = opcode - core.OP_DUP2
+	}
+	top, ok := packet(len(stack), copyWords)
+	if !ok {
+		return nil, false
+	}
+	under, ok := packet(top, insertWords)
+	if !ok {
+		return nil, false
+	}
+	result := make([]constructorEffectValue, 0, len(stack)+len(stack)-top)
+	result = append(result, stack[:under]...)
+	result = append(result, stack[top:]...)
+	result = append(result, stack[under:]...)
+	return result, true
 }
