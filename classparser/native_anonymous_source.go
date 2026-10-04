@@ -643,7 +643,16 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			if owner != c.obj.GetClassName() || c.nativeCapturedReads[ctx.FunctionName+ctx.CurrentMethodDesc][pc] != name {
 				return nil
 			}
-			return c.nativeCaptureTypes[name]
+			view := c.nativeCaptureTypes[name]
+			if c.nativeMemberCurrent != nil && view != nil {
+				// An enclosing formal has a different declaration identity from a
+				// same-spelled current class/method formal. It cannot be named as
+				// that shadowing variable in a materialized outer qualifier.
+				if !nativeMemberEnclosingTypeDenotable(c, view) {
+					return nil
+				}
+			}
+			return view
 		}
 		ctx.SourceCapturedField = func(pc int, name string, receiver bool) (string, bool) {
 			if _, captured := c.nativeCaptureFields[name]; !captured {

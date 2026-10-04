@@ -34,6 +34,7 @@ type ClassObjectDumper struct {
 	originalInitializerStatusReady bool
 	nativeMemberLookup             func(string) *nativeMemberClass
 	nativeMemberCalls              map[string]map[int]*nativeMemberAllocation
+	nativeMemberBody               []statements.Statement
 	nativeMemberChecks             map[string]map[int]bool
 	nativeMemberRoot               *nativeMemberFamily
 	nativeMemberCurrent            *nativeMemberClass
@@ -3951,6 +3952,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				}
 			}
 			ensureUniqueParameterNames(samParams, funcCtx)
+			priorMemberBody := c.nativeMemberBody
+			c.nativeMemberBody = statementList
+			defer func() { c.nativeMemberBody = priorMemberBody }()
 			c.prepareNativeCaptureBindings(statementList, params)
 			c.prepareNativeLocalShadowing(statementList, params)
 			paramsNewStrList := []string{}

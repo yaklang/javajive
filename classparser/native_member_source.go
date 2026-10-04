@@ -613,6 +613,8 @@ type nativeMemberAllocation struct {
 	descriptor               string
 	newPC, invokePC, checkPC int
 	slot                     int
+	enclosingReadPC          int
+	implicitEnclosing        bool
 }
 
 func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[string]map[int]*nativeMemberAllocation, bool) {
@@ -656,9 +658,27 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				if i+3 >= len(ops) || ops[i+1].Instr.OpCode != core.OP_DUP || !constructorMotionLoad(ops[i+2], "L"+child.owner+";") {
 					return nil, false
 				}
-				plan := &nativeMemberAllocation{child: child, newPC: int(op.CurrentOffset), checkPC: -1, slot: core.GetRetrieveIdx(ops[i+2])}
+				plan := &nativeMemberAllocation{child: child, newPC: int(op.CurrentOffset), checkPC: -1, enclosingReadPC: -1, slot: core.GetRetrieveIdx(ops[i+2])}
 				cursor := i + 3
-				if plan.slot != 0 || m.AccessFlags&8 != 0 || c.obj.GetClassName() != child.owner {
+				// An unqualified sibling allocation reads the current member's
+				// original enclosing capture. This is an origin witness, not
+				// a same-erasure field or an assumption that an outer is nonnull.
+				if current := p.children[c.obj.GetClassName()]; current != nil && !current.static && current.owner == child.owner && m.AccessFlags&8 == 0 && plan.slot == 0 && cursor < len(ops) {
+					field := constructorMotionMember(c.obj, ops[cursor], core.OP_GETFIELD)
+					if field != nil && field.Name == current.object.GetClassName() && field.Member == current.field && field.Description == "L"+child.owner+";" {
+						plan.enclosingReadPC = int(ops[cursor].CurrentOffset)
+						cursor++
+						plan.implicitEnclosing = true
+						// Explicit Outer.this.new uses the same capture but retains
+						// the original qualifier check. Do not erase that protocol.
+						if cursor+2 < len(ops) && ops[cursor].Instr.OpCode == core.OP_DUP && nativeMemberNullCheck(c.obj, ops[cursor+1]) && ops[cursor+2].Instr.OpCode == core.OP_POP {
+							plan.checkPC = int(ops[cursor+1].CurrentOffset)
+							cursor += 3
+							plan.implicitEnclosing = false
+						}
+					}
+				}
+				if plan.enclosingReadPC < 0 && (plan.slot != 0 || m.AccessFlags&8 != 0 || c.obj.GetClassName() != child.owner) {
 					if cursor+2 >= len(ops) || ops[cursor].Instr.OpCode != core.OP_DUP {
 						return nil, false
 					}
@@ -891,7 +911,14 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	ctx.SourceMemberAllocation = func(owner, desc string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
 		fail := func() (string, bool) { p.failed = true; return "", false }
 		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
-		if plan == nil || plan.child.object.GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.newPC != newPC || plan.descriptor != desc || len(args) == 0 || !args[0].Receiver && !args[0].Local {
+		if plan == nil || plan.child.object.GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.newPC != newPC || plan.descriptor != desc || len(args) == 0 {
+			return fail()
+		}
+		if plan.enclosingReadPC >= 0 {
+			if !nativeMemberLexicalEnclosingOperand(args[0].Value, plan, p, c.obj.GetClassName(), c.nativeMemberBody, c.Work) {
+				return fail()
+			}
+		} else if !args[0].Receiver && !args[0].Local {
 			return fail()
 		}
 		outer, outerKnown := args[0].Value.(values.JavaValue)
@@ -928,7 +955,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			// Java forbids a raw member beneath a parameterized enclosing
 			// instance (and the reverse). Infer only the member's parameters;
 			// preserve a genuinely raw outer/member pair.
-			typedOuter := plan.child.outerFormalCount == 0 || args[0].Receiver && c.obj.GetClassName() == plan.child.owner
+			typedOuter := plan.child.outerFormalCount == 0 || plan.implicitEnclosing || args[0].Receiver && c.obj.GetClassName() == plan.child.owner
 			if param, ok := outer.Type().RawType().(*types.JavaParameterizedType); ok && len(param.TypeArgs) == plan.child.outerFormalCount {
 				typedOuter = true
 			}
@@ -936,7 +963,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				sourceName += "<>"
 			}
 		}
-		if args[0].Receiver && c.obj.GetClassName() == plan.child.owner {
+		if plan.implicitEnclosing || args[0].Receiver && c.obj.GetClassName() == plan.child.owner {
 			return "new " + sourceName + "(" + strings.Join(arguments, ",") + ")", true
 		}
 		return "(" + args[0].Text + ").new " + sourceName + "(" + strings.Join(arguments, ",") + ")", true
@@ -1064,6 +1091,13 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 		sub.nativeMemberCurrent = child
 		if !child.static {
 			sub.nativeCaptureFields = map[string]string{child.field: c.FuncCtx.ShortTypeName(strings.ReplaceAll(p.owner, "/", ".")) + ".this"}
+			var arguments []types.JavaType
+			for _, formal := range c.FuncCtx.ClassTypeParams {
+				arguments = append(arguments, types.NewJavaClass(formal))
+			}
+			if len(arguments) > 0 {
+				sub.nativeCaptureTypes = map[string]types.JavaType{child.field: types.NewParameterizedType(strings.ReplaceAll(p.owner, "/", "."), arguments)}
+			}
 		}
 		sub.nativeCapturedReads = map[string]map[int]string{}
 		sub.nativeOuterContext = c.FuncCtx
