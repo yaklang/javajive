@@ -13,19 +13,38 @@ import (
 )
 
 func TestNativeAnonymousLexicalCaptureChainRequiresExactOriginalIRPath(t *testing.T) {
-	files := nativeCompileClasses(t, nativeAnonymousNestedFixture)
-	for _, variant := range []string{"original", "missing final PC", "wrong final PC", "missing inner PC", "wrong field", "wrong field type", "foreign THIS type", "foreign receiver", "mutable alias", "opaque", "cycle", "budget", "canceled"} {
+	testNativeAnonymousLexicalCaptureChain(t, nativeAnonymousNestedFixture, "NestedOwner$1$1", false)
+}
+
+func TestNativeAnonymousNamedLexicalThisRequiresExactOriginalIRPath(t *testing.T) {
+	testNativeAnonymousLexicalCaptureChain(t, nativeAnonymousNestedContextFixture("member-context-depth"), "NestedOwner$Layer$Middle$1$1", true)
+}
+
+func testNativeAnonymousLexicalCaptureChain(t *testing.T, fixture, leafName string, named bool) {
+	files := nativeCompileClasses(t, fixture)
+	for _, variant := range []string{"original", "missing binding", "wrong binding", "missing named anchor", "missing final PC", "wrong final PC", "missing inner PC", "wrong field", "wrong field type", "foreign THIS type", "foreign receiver", "mutable alias", "opaque", "cycle", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
 			root, _ := Parse(files["NestedOwner.class"])
 			d := z.nativeMemberReader(root)
-			p := d.planNativeAnonymousForest()
-			if p == nil {
+			var forest *nativeAnonymousForest
+			if named {
+				members := d.planNativeMemberFamily()
+				if members != nil && d.planNativeMemberAnonymousScopes(members) {
+					forest = members.anonymousForest
+				}
+			} else {
+				p := d.planNativeAnonymousForest()
+				if p != nil {
+					forest = p.forest
+				}
+			}
+			if forest == nil {
 				t.Fatal("original complete family")
 			}
-			leaf := p.forest.units["NestedOwner$1$1"]
-			reads := p.forest.reads[leaf.object.GetClassName()]
+			leaf := forest.units[leafName]
+			reads := forest.reads[leaf.object.GetClassName()]
 			var read *nativeMemberLexicalRead
 			for _, r := range reads["origin()Ljava/lang/Object;"] {
 				if r.prior != nil {
@@ -83,14 +102,31 @@ func TestNativeAnonymousLexicalCaptureChainRequiresExactOriginalIRPath(t *testin
 				cancel()
 				work = workbudget.New(ctx, workbudget.Limits{})
 			}
-			if got := nativeMemberLexicalReadOperand(value, read, work); got != (variant == "original") {
+			irValid := variant == "original" || variant == "missing binding" || variant == "wrong binding" || variant == "missing named anchor"
+			if got := nativeMemberLexicalReadOperand(value, read, work); got != irValid {
 				t.Fatalf("IR path %v", got)
 			}
 			leafD := NewClassObjectDumper(leaf.object)
 			leafD.Work = work
-			leafD.nativeAnonymousForest = p.forest
-			leafD.nativeAnonymousBindings = map[string]string{nativeMemberCaptureIndexKey(read.owner, read.field): "token"}
+			leafD.nativeAnonymousForest = forest
 			ctx := &class_context.ClassContext{ClassName: leaf.object.GetClassName()}
+			want := "token"
+			if named {
+				want = ctx.ShortTypeName(read.descriptor[1:len(read.descriptor)-1]) + ".this"
+			}
+			leafD.nativeAnonymousBindings = map[string]string{nativeMemberCaptureIndexKey(read.owner, read.field): want}
+			switch variant {
+			case "missing binding":
+				delete(leafD.nativeAnonymousBindings, nativeMemberCaptureIndexKey(read.owner, read.field))
+			case "wrong binding":
+				leafD.nativeAnonymousBindings[nativeMemberCaptureIndexKey(read.owner, read.field)] = "Foreign.this"
+			case "missing named anchor":
+				if named {
+					delete(forest.members.children, read.descriptor[1:len(read.descriptor)-1])
+				} else {
+					delete(leafD.nativeAnonymousBindings, nativeMemberCaptureIndexKey(read.owner, read.field))
+				}
+			}
 			leafD.FuncCtx = ctx
 			ctx.FunctionName = "origin"
 			ctx.CurrentMethodDesc = "()Ljava/lang/Object;"
@@ -101,7 +137,7 @@ func TestNativeAnonymousLexicalCaptureChainRequiresExactOriginalIRPath(t *testin
 				pc = final.OriginPC
 			}
 			source, known := ctx.SourceLexicalCapturedField(value, pc, final.Member)
-			if known != (variant == "original") || leafD.nativeCaptureFailed != (variant != "original") || known && source != "token" {
+			if known != (variant == "original") || leafD.nativeCaptureFailed != (variant != "original") || known && source != want {
 				t.Fatalf("source binding %q known=%v failed=%v", source, known, leafD.nativeCaptureFailed)
 			}
 
@@ -110,18 +146,37 @@ func TestNativeAnonymousLexicalCaptureChainRequiresExactOriginalIRPath(t *testin
 }
 
 func TestNativeAnonymousLexicalReadsRequireWholeOriginalReceiverPath(t *testing.T) {
-	files := nativeCompileClasses(t, nativeAnonymousNestedFixture)
+	testNativeAnonymousLexicalReceiverPath(t, nativeAnonymousNestedFixture, "NestedOwner$1$1", false)
+}
+
+func TestNativeAnonymousNamedLexicalThisRequiresWholeOriginalReceiverPath(t *testing.T) {
+	testNativeAnonymousLexicalReceiverPath(t, nativeAnonymousNestedContextFixture("member-context-depth"), "NestedOwner$Layer$Middle$1$1", true)
+}
+
+func testNativeAnonymousLexicalReceiverPath(t *testing.T, fixture, leafName string, named bool) {
+	files := nativeCompileClasses(t, fixture)
 	for _, variant := range []string{"original", "foreign local receiver", "slot zero redefined", "capture store outside constructor", "branch into field", "catch starts inside chain", "catch ends inside chain", "handler inside chain", "foreign descriptor", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
 			root, _ := Parse(files["NestedOwner.class"])
 			d := z.nativeMemberReader(root)
-			p := d.planNativeAnonymousForest()
-			if p == nil {
+			var forest *nativeAnonymousForest
+			if named {
+				p := d.planNativeMemberFamily()
+				if p != nil && d.planNativeMemberAnonymousScopes(p) {
+					forest = p.anonymousForest
+				}
+			} else {
+				p := d.planNativeAnonymousForest()
+				if p != nil {
+					forest = p.forest
+				}
+			}
+			if forest == nil {
 				t.Fatal("original family")
 			}
-			obj := p.forest.units["NestedOwner$1$1"].object
+			obj := forest.units[leafName].object
 			var code *CodeAttribute
 			for _, m := range obj.Methods {
 				n, _ := sourceBridgeUTF8(obj, m.NameIndex)
@@ -141,7 +196,11 @@ func TestNativeAnonymousLexicalReadsRequireWholeOriginalReceiverPath(t *testing.
 				t.Fatal("original decode")
 			}
 			ops := constructorMotionOps(decoder)
-			if len(ops) != 4 {
+			wantOps := 4
+			if named {
+				wantOps = 5
+			}
+			if len(ops) != wantOps {
 				t.Fatal("original two-hop path")
 			}
 			first, second := int(ops[1].CurrentOffset), int(ops[2].CurrentOffset)
@@ -176,7 +235,7 @@ func TestNativeAnonymousLexicalReadsRequireWholeOriginalReceiverPath(t *testing.
 				cancel()
 				work = workbudget.New(ctx, workbudget.Limits{})
 			}
-			known := nativeAnonymousForestCaptureReads(p.forest, work)
+			known := nativeAnonymousForestCaptureReads(forest, work)
 			if known != (variant == "original") {
 				t.Fatalf("original path closure %v", known)
 			}

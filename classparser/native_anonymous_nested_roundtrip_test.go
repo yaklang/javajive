@@ -17,7 +17,7 @@ class NestedDriver{public static void main(String[]args)throws Exception{Object 
 
 func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 	javac, java := t04Tools(t)
-	for _, scope := range []string{"static-root", "dollar-root", "instance-root", "static-local", "dollar-local", "instance-local", "depth3", "depth4", "depth3-instance", "depth3-shadow", "depth3-major51", "depth3-multiple", "member-static", "member-instance", "member-depth-static", "member-depth-instance"} {
+	for _, scope := range []string{"static-root", "dollar-root", "instance-root", "static-local", "dollar-local", "instance-local", "depth3", "depth4", "depth3-instance", "depth3-shadow", "depth3-major51", "depth3-multiple", "member-static", "member-instance", "member-depth-static", "member-depth-instance", "member-context", "member-context-depth"} {
 		fixture := nativeAnonymousNestedFixture
 		if strings.HasPrefix(scope, "depth") {
 			depth := 3
@@ -45,7 +45,17 @@ func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 			}
 		}
 		if strings.HasPrefix(scope, "member-") {
-			fixture = nativeAnonymousNestedMemberFixture(scope)
+			fixtureScope := scope
+			if strings.Contains(scope, "context") {
+				fixtureScope = "member-instance"
+				if strings.Contains(scope, "depth") {
+					fixtureScope = "member-depth-instance"
+				}
+			}
+			fixture = nativeAnonymousNestedMemberFixture(fixtureScope)
+			if strings.Contains(scope, "context") {
+				fixture = nativeAnonymousNestedContextFixture(scope)
+			}
 		}
 		rootName := "NestedOwner"
 		if strings.HasPrefix(scope, "dollar-") {
@@ -57,6 +67,9 @@ func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 			fixture = strings.ReplaceAll(fixture, "NestedOwner.make(", "new NestedOwner().make(")
 		}
 		wantOracle := "58:P\n"
+		if strings.Contains(scope, "context") {
+			wantOracle = "60:AP\n"
+		}
 		if strings.HasSuffix(scope, "-local") {
 			fixture = strings.Replace(fixture, "NestedPhase build(long n){return new NestedPhase", "NestedPhase build(long n){final Object captured=token;final long copiedSeed=seed;return new NestedPhase", 1)
 			fixture = strings.Replace(fixture, "Object origin(){return token;}long calc(long n){return n^seed;}", "Object origin(){return captured;}long calc(long n){return n^copiedSeed;}", 1)
@@ -203,4 +216,17 @@ func nativeAnonymousNestedMemberFixture(scope string) string {
 		fixture = strings.ReplaceAll(fixture, "NestedOwner.make(", "new NestedOwner().make(")
 	}
 	return fixture
+}
+
+func nativeAnonymousNestedContextFixture(scope string) string {
+	fixtureScope, owner := "member-instance", "Layer"
+	if strings.Contains(scope, "depth") {
+		fixtureScope, owner = "member-depth-instance", "Middle"
+	}
+	fixture := nativeAnonymousNestedMemberFixture(fixtureScope)
+	fixture = strings.Replace(fixture, "class "+owner+"{NestedFactory make(", "class "+owner+"{final Object token;final long seed;"+owner+"(Object token,long seed){this.token=token;this.seed=seed;}NestedFactory make(", 1)
+	fixture = strings.ReplaceAll(fixture, "new "+owner+"().make(token,seed)", "new "+owner+"(token,seed).make(token,seed)")
+	fixture = strings.Replace(fixture, "Object origin(){return token;}long calc(long n){return n^seed;}", "Object origin(){return "+owner+".this.token;}long calc(long n){return n^"+owner+".this.seed;}", 1)
+	checks := `java.lang.reflect.Constructor<?>factoryCtor=factory.getClass().getDeclaredConstructor(Class.forName(factory.getClass().getName().substring(0,factory.getClass().getName().lastIndexOf('$'))));factoryCtor.setAccessible(true);NestedFactory nullNamed=(NestedFactory)factoryCtor.newInstance(new Object[]{null});for(boolean fail:new boolean[]{false,true}){NestedEffects.fail=fail;NestedEffects.trace="";NestedEffects.published=null;try{nullNamed.build(Long.MIN_VALUE);throw new AssertionError("missing named ancestor dereference");}catch(NullPointerException expected){NestedPhase phase=(NestedPhase)NestedEffects.published;if(phase==null||phase.factory!=nullNamed||phase.observed!=null||phase.parentN!=0||!NestedEffects.trace.equals("AP"))throw new AssertionError("named ancestor callback order");try{phase.origin();throw new AssertionError("missing named ancestor dereference");}catch(NullPointerException wanted){}}rows++;}`
+	return strings.Replace(fixture, "System.out.println(rows+", checks+"System.out.println(rows+", 1)
 }

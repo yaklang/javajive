@@ -21,6 +21,7 @@ type nativeAnonymousForest struct {
 	anonymousTypes    map[string]bool
 	captureReferences map[string]map[int]*nativeMemberLexicalRead
 	members           *nativeMemberFamily
+	lexicalThis       map[string]map[string]map[int]bool
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
@@ -38,7 +39,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {
 		return nil
 	}
-	forest := &nativeAnonymousForest{root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}, members: members}
+	forest := &nativeAnonymousForest{root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}, members: members, lexicalThis: map[string]map[string]map[int]bool{}}
 	queue := []*ClassObject{c.obj}
 	if members != nil {
 		if members.owner != forest.root {
