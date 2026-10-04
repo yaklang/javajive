@@ -199,10 +199,13 @@ func nativeMemberStaticBridgeSource(plan *nativeMemberAllocation, args []class_c
 	allocationBinding.SiblingClassSig = binding.SiblingClassSig
 	arguments := invoke.ArgumentStrings(&allocationBinding)
 	name := ctx.ShortTypeName(invoke.ClassName)
-	if plan.child.formalCount > 0 {
-		name += "<>"
+	node := &values.NewExpression{JavaType: types.NewJavaClass(invoke.ClassName), ConstructorCall: invoke}
+	diamond := node.SourceConstructorDiamond(&allocationBinding)
+	source := "new " + name + diamond + "(" + strings.Join(arguments, ",") + ")"
+	if diamond != "" {
+		return nativeMemberErasedAllocation(p, plan.child, source)
 	}
-	return "new " + name + "(" + strings.Join(arguments, ",") + ")", true
+	return source, true
 }
 
 // Original archive users of a marker must all remain inside the committed
@@ -376,4 +379,22 @@ func nativeMemberBridgeSourceDummy(value any) bool {
 	}
 	literal, ok := values.UnpackSoltValue(v).(*values.JavaLiteral)
 	return ok && literal != nil && literal.Data == "null" && len(literal.Units) == 0
+}
+
+// A required diamond types constructor SAM operands, but must not introduce
+// target-type constraints on the allocation result. NEW carries the original
+// class erasure. Cast only to that same proved allocated class: the cast cannot
+// fail, repeats no operands, and preserves enclosing-instance evaluation and
+// private constructor binding. In particular, a method T and a member T are
+// distinct variables even if their names match.
+func nativeMemberErasedAllocation(p *nativeMemberFamily, child *nativeMemberClass, source string) (string, bool) {
+	if p == nil || child == nil || child.object == nil {
+		return "", false
+	}
+	name, ok := p.sourceName(child.object.GetClassName())
+	if !ok {
+		p.failed = true
+		return "", false
+	}
+	return "((" + name + ")(" + source + "))", true
 }

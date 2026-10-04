@@ -1031,6 +1031,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		allocationBinding.SiblingClassSig = binding.SiblingClassSig
 		arguments := invoke.ArgumentStrings(&allocationBinding)
 		sourceName := plan.child.name
+		diamond := false
 		if plan.child.formalCount > 0 {
 			// Java forbids a raw member beneath a parameterized enclosing
 			// instance (and the reverse). Infer only the member's parameters;
@@ -1041,12 +1042,17 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			}
 			if typedOuter {
 				sourceName += "<>"
+				diamond = true
 			}
 		}
-		if plan.implicitEnclosing || args[0].Receiver && c.obj.GetClassName() == plan.child.owner {
-			return "new " + sourceName + "(" + strings.Join(arguments, ",") + ")", true
+		source := "new " + sourceName + "(" + strings.Join(arguments, ",") + ")"
+		if !plan.implicitEnclosing && !(args[0].Receiver && c.obj.GetClassName() == plan.child.owner) {
+			source = "(" + args[0].Text + ")." + source
 		}
-		return "(" + args[0].Text + ").new " + sourceName + "(" + strings.Join(arguments, ",") + ")", true
+		if diamond {
+			return nativeMemberErasedAllocation(p, plan.child, source)
+		}
+		return source, true
 	}
 	if child := c.nativeMemberCurrent; child != nil && !child.static {
 		ctx.SourceMemberDelegation = func(owner, desc string, pc int, args []any) (string, bool) {

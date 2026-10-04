@@ -187,22 +187,16 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 	return fmt.Sprintf("new %s(%s)", name, args)
 }
 
-// genericCtorDiamond returns "<>" when this `new T(...)` constructs a GENERIC jar-internal class and at
-// least one constructor argument is a method reference or lambda (a LambdaFuncRef). The decompiler
-// renders constructor instantiations of generic classes RAW (`new ObjectReaderImplFromString(...)`),
-// which is normally only a harmless unchecked warning -- EXCEPT when an argument is a method reference
-// or lambda: a raw instantiation erases the constructor's functional-interface parameter (e.g.
-// `Function<String,T>` collapses to raw `Function`), so javac cannot type the method reference against
-// the raw SAM and rejects it ("incompatible types: invalid method reference"). The canonical case is
-// fastjson2 `new ObjectReaderImplFromString(Duration.class, Duration::parse)` and its URI/Charset/
-// Pattern/ZoneOffset/ZoneId/TimeZone siblings. Emitting the diamond `<>` restores the source form: javac
-// infers the class's type argument from the constructor arguments (`Class<Duration>` -> T=Duration),
-// re-parameterizing the functional-interface parameter so the method reference binds. Gated to (a) a
-// class the SiblingClassSig resolver confirms is generic and (b) a method-reference/lambda argument, so
-// non-generic classes and ordinary raw instantiations (whose unchecked-warning behaviour is intentionally
-// preserved) are never touched. Kill-switch: JDEC_CTOR_DIAMOND_OFF=1.
+// SourceConstructorDiamond restores a parameterized SAM target for a lambda or
+// method-reference argument to a known generic constructor. Ordinary allocations
+// retain their bytecode erasure; a class Signature alone does not prove the
+// allocation was parameterized. Native lexical projections share this rule.
+func (n *NewExpression) SourceConstructorDiamond(ctx *class_context.ClassContext) string {
+	return n.genericCtorDiamond(ctx)
+}
+
 func (n *NewExpression) genericCtorDiamond(funcCtx *class_context.ClassContext) string {
-	if funcCtx.Getenv("JDEC_CTOR_DIAMOND_OFF") != "" || funcCtx == nil || funcCtx.SiblingClassSig == nil || n.ConstructorCall == nil {
+	if n == nil || n.JavaType == nil || funcCtx == nil || funcCtx.Getenv("JDEC_CTOR_DIAMOND_OFF") != "" || funcCtx.SiblingClassSig == nil || n.ConstructorCall == nil {
 		return ""
 	}
 	jc, ok := n.JavaType.RawType().(*types.JavaClass)
