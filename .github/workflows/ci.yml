@@ -15,6 +15,7 @@ concurrency:
   cancel-in-progress: true
 env:
   GOTOOLCHAIN: local
+  PYTHONDONTWRITEBYTECODE: "1"
 jobs:
   regression:
     name: Algorithm regression
@@ -66,7 +67,7 @@ jobs:
           # Trusted fixtures use the same pool, avoiding a serial tail.
           # Every discovered test, mode and all forty fixtures remain selected.
           python3 - <<'PYTHON'
-          import concurrent.futures, json, os, pathlib, re, signal, subprocess, sys, time
+          import concurrent.futures, json, os, pathlib, re, shutil, signal, subprocess, sys, time
           binary = str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "adversarial.test")
           names = sorted(set(line for line in subprocess.check_output(
               [binary, "-test.list", "^TestAdversarial|" + os.environ["EDGE_TEST_PATTERN"]], text=True, cwd="classparser").splitlines()
@@ -74,12 +75,16 @@ jobs:
           if not names:
               raise SystemExit("no source-regression tests discovered")
           groups = [names[index::16] for index in range(min(16, len(names)))]
-          pathlib.Path("artifacts/adversarial-manifest.json").write_text(json.dumps(groups, indent=2))
+          # Concurrent evidence must not mutate the source fingerprint checked
+          # while the trusted adapter is built and executed.
+          evidence = pathlib.Path(os.environ["RUNNER_TEMP"]) / "algorithm-regression-evidence"
+          evidence.mkdir(parents=True, exist_ok=True)
+          (evidence / "adversarial-manifest.json").write_text(json.dumps(groups, indent=2))
           deadline = time.monotonic() + 13 * 60
           def run_batch(item):
               index, group = item
               trusted = group is None
-              path = pathlib.Path("artifacts/trusted-roundtrip.log" if trusted else f"artifacts/adversarial-tests-{index+1}.jsonl")
+              path = evidence / ("trusted-roundtrip.log" if trusted else f"adversarial-tests-{index+1}.jsonl")
               remaining = deadline - time.monotonic()
               if remaining <= 0:
                   path.write_text("phase deadline expired before batch started\n")
@@ -90,10 +95,10 @@ jobs:
                          f"-test.timeout={remaining:.3f}s",
                          "-test.run=^(" + "|".join(map(re.escape, group or [])) + ")$"]
               if trusted:
-                  command = ["bash", "-ec", "git rev-parse HEAD > artifacts/revision.txt; "
+                  command = ["bash", "-ec", 'git rev-parse HEAD > "$RUNNER_TEMP/algorithm-regression-evidence/revision.txt"; '
                              'python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/javajive-probe"; '
                              'python3 tools/curated_roundtrip/roundtrip.py --adapter "$RUNNER_TEMP/javajive-probe" '
-                             "--out artifacts/roundtrip --allow-trusted-fixture-execution --expected-rows 40"]
+                             '--out "$RUNNER_TEMP/algorithm-regression-evidence/roundtrip" --allow-trusted-fixture-execution --expected-rows 40']
               with path.open("w") as output:
                   process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
                                              cwd="." if trusted else "classparser", start_new_session=True)
@@ -114,6 +119,7 @@ jobs:
                   if result:
                       failed = True
                       print("\n".join(path.read_text().splitlines()[-80:]))
+          shutil.copytree(evidence, "artifacts", dirs_exist_ok=True)
           sys.exit(int(failed))
           PYTHON
       - name: Curated algorithm round-trip contracts
