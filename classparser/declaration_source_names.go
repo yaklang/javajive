@@ -29,6 +29,11 @@ func (c *ClassObjectDumper) buildDeclarationSourceNames() func(string) (string, 
 				return "", false
 			}
 		}
+		if c.archiveDeclarationResolver != nil {
+			if raw, known := c.archiveDeclarationResolver(binary); known && len(raw) > 0 {
+				return "", false
+			}
+		}
 		seen := map[string]bool{}
 		name := binary
 		parts := []string{}

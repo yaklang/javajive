@@ -151,6 +151,8 @@ type ClassObjectDumper struct {
 	foldSiblingResolver func(internalName string) ([]byte, bool)
 	// Declaration-only inputs are not members of the flattened output family.
 	declarationResolver func(internalName string) ([]byte, bool)
+	// Archive lookup preserves declaration identity without proving nested source layout.
+	archiveDeclarationResolver func(internalName string) ([]byte, bool)
 	// Java8 inner source bodies cannot declare static helper methods.
 	sourceInnerClassBody bool
 }
@@ -2538,7 +2540,7 @@ func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr str
 // disables the resolver walk (callers fall back to the JDK table / same-class paths). Caching keeps the
 // per-class-dump cost bounded and the result deterministic (a nil cache entry records a confirmed miss).
 func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (string, map[string]string, bool) {
-	if c.foldSiblingResolver == nil && c.declarationResolver == nil {
+	if c.foldSiblingResolver == nil && c.archiveDeclarationResolver == nil && c.declarationResolver == nil {
 		return nil
 	}
 	type entry struct {
@@ -2561,6 +2563,9 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 		// Dependencies supply declarations for source binding, never ownership
 		// of emitted units. A fixed subclass's source formal can depend on a
 		// generic ancestor outside its archive although the invoke is erased.
+		if !ok && c.archiveDeclarationResolver != nil {
+			data, ok = c.archiveDeclarationResolver(internal)
+		}
 		if !ok && c.declarationResolver != nil {
 			data, ok = c.declarationResolver(internal)
 		}

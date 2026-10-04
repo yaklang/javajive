@@ -63,6 +63,9 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 			if c.foldSiblingResolver != nil {
 				data, ok = c.foldSiblingResolver(n)
 			}
+			if !ok && c.archiveDeclarationResolver != nil {
+				data, ok = c.archiveDeclarationResolver(n)
+			}
 			if !ok && c.declarationResolver != nil {
 				data, ok = c.declarationResolver(n)
 			}
