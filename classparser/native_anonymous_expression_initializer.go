@@ -162,13 +162,18 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 			return nil
 		}
 		field := fields[f.Member]
-		if field == nil || field.AccessFlags&(8|0x1000) != 0 || used[f.Member] || class_context.SafeIdentifier(f.Member) != f.Member {
+		if field == nil || field.AccessFlags&(8|0x1000) != 0 || used[f.Member] && field.AccessFlags&0x10 != 0 || class_context.SafeIdentifier(f.Member) != f.Member {
 			return nil
 		}
 		d, ok := sourceBridgeUTF8(obj, field.DescriptorIndex)
 		if !ok || d != f.Description {
 			return nil
 		}
+		// Stores are original events identified by PC, not one initializer per
+		// field. A mutable/volatile field may be written repeatedly; the source
+		// closure must retain every write and intermediate read in exact order.
+		// Repeated final stores are valid in JVM constructors but cannot be
+		// expressed by Java definite-assignment rules, so keep them refused.
 		used[f.Member] = true
 		plan.stores[pc] = f.Member
 	}

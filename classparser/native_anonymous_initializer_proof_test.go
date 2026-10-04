@@ -15,7 +15,7 @@ import (
 
 func TestNativeAnonymousInitializerRequiresExactPostSuperPackets(t *testing.T) {
 	files := nativeCompileClasses(t, nativeAnonymousInitializerFixture)
-	for _, variant := range []string{"original", "foreign receiver", "foreign target", "captured store", "wrong descriptor", "wrong load width", "non-captured parameter", "bad literal bytes", "effectful RHS", "duplicate store", "handler", "small stack", "small locals", "ConstantValue", "budget", "canceled"} {
+	for _, variant := range []string{"original", "foreign receiver", "foreign target", "captured store", "wrong descriptor", "wrong load width", "non-captured parameter", "bad literal bytes", "effectful RHS", "duplicate store", "duplicate final store", "handler", "small stack", "small locals", "ConstantValue", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			obj, err := Parse(append([]byte(nil), files["AnonymousInitOwner$1.class"]...))
 			if err != nil {
@@ -88,6 +88,9 @@ func TestNativeAnonymousInitializerRequiresExactPostSuperPackets(t *testing.T) {
 				code.Code[ops[start+1].CurrentOffset] = byte(core.OP_LDC2_W)
 			case "effectful RHS":
 				code.Code[ops[start+1].CurrentOffset] = byte(core.OP_INVOKESTATIC)
+			case "duplicate final store":
+				field.AccessFlags |= 0x10
+				fallthrough
 			case "duplicate store":
 				offset := int(ops[start].CurrentOffset)
 				packet := append([]byte(nil), code.Code[offset:int(ops[start+2].CurrentOffset)+3]...)
@@ -112,6 +115,24 @@ func TestNativeAnonymousInitializerRequiresExactPostSuperPackets(t *testing.T) {
 				work = workbudget.New(ctx, workbudget.Limits{})
 			}
 			child := nativeAnonymousConstructor(obj, "AnonymousInitOwner", "make(Ljava/lang/Object;Ljava/lang/Object;D)LAnonymousInitParent;", work)
+			if variant == "duplicate store" {
+				// The literal packet shortcut still requires unique fields. The
+				// expression capability instead retains both mutable writes as
+				// distinct original-PC events; it must not discard either store.
+				if child == nil || child.expressionInitializer == nil || len(child.initializers) != 0 || len(child.expressionInitializer.stores) != 6 {
+					t.Fatal("repeated mutable writes require complete ordered expression proof")
+				}
+				writes := 0
+				for _, name := range child.expressionInitializer.stores {
+					if name == "initial" {
+						writes++
+					}
+				}
+				if writes != 2 {
+					t.Fatalf("original initial writes=%d", writes)
+				}
+				return
+			}
 			if (child != nil) != (variant == "original") {
 				t.Fatalf("proof=%v", child != nil)
 			}
