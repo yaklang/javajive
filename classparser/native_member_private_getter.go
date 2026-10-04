@@ -289,10 +289,18 @@ func nativeMemberPrivateGetterReferencesClosed(p *nativeMemberFamily, index *nat
 	if len(p.getters) == 0 {
 		return true
 	}
-	// Anonymous lowering has its own traversal order. Do not assume that lexical
-	// comment order is javac's accessor numbering through an anonymous allocation.
+	// Anonymous users require the same committed ownership forest. The final
+	// source-order proof still checks every regenerated accessor ordinal;
+	// merely sharing a binary-name prefix never licenses private access.
 	if len(p.anonymousUnits) != 0 {
-		return false
+		if p.anonymousForest == nil || p.anonymousForest.members != p {
+			return false
+		}
+		for user := range p.anonymousUnits {
+			if !nativeMemberJointAnonymousAccess(p, user, work) {
+				return false
+			}
+		}
 	}
 	for key, getter := range p.getters {
 		if !nativeProofWork(work, 1) || index.getterHandles[key] || index.getterInvalidReferences[key] {
@@ -301,6 +309,9 @@ func nativeMemberPrivateGetterReferencesClosed(p *nativeMemberFamily, index *nat
 		used := false
 		for user := range index.getterUsers[key] {
 			object := p.lexicalObjects[user]
+			if object == nil && p.anonymousForest != nil && nativeMemberJointAnonymousAccess(p, user, work) {
+				object = p.anonymousForest.objects[user]
+			}
 			if object == nil || user == getter.owner {
 				return false
 			}

@@ -86,15 +86,22 @@ func TestNativeMemberPrivateGetterRequiresPureOriginalDeclaration(t *testing.T) 
 }
 
 func TestNativeMemberPrivateGetterRequiresClosedArchiveReferences(t *testing.T) {
-	files := nativeCompileClasses(t, nativeMemberGetterFixture)
-	for _, variant := range []string{"original", "foreign user", "method handle", "interface reference", "unused getter", "dead reference", "wrong opcode", "own caller", "budget", "canceled"} {
+	testNativeMemberPrivateGetterArchiveReferences(t, nativeMemberGetterFixture, "GetterOwner", "GetterOwner", "GetterOwner$Layer$Leaf", "token", false)
+}
+func TestNativeMemberAnonymousPrivateGetterRequiresClosedArchiveReferences(t *testing.T) {
+	fixture := strings.Replace(nativeAnonymousNestedContextFixture("member-context-depth"), "final Object token;final long seed;", "private final Object token;private final long seed;", 1)
+	testNativeMemberPrivateGetterArchiveReferences(t, fixture, "NestedOwner", "NestedOwner$Layer$Middle", "NestedOwner$Layer$Middle$1$1", "origin", true)
+}
+func testNativeMemberPrivateGetterArchiveReferences(t *testing.T, fixture, rootName, getterOwner, user, methodName string, anonymous bool) {
+	files := nativeCompileClasses(t, fixture)
+	for _, variant := range []string{"original", "foreign user", "method handle", "interface reference", "unused getter", "dead reference", "wrong opcode", "own caller", "uncommitted anonymous forest", "foreign anonymous forest", "missing anonymous parent", "failed anonymous group", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
-			root, _ := Parse(files["GetterOwner.class"])
+			root, _ := Parse(files[rootName+".class"])
 			d := z.nativeMemberReader(root)
 			p := d.planNativeMemberFamily()
-			if p == nil {
+			if p == nil || anonymous && !d.planNativeMemberAnonymousScopes(p) {
 				t.Fatal("member family")
 			}
 			original := z.originalMemberIndex()
@@ -105,7 +112,7 @@ func TestNativeMemberPrivateGetterRequiresClosedArchiveReferences(t *testing.T) 
 					index.getterUsers[key][user] = true
 				}
 			}
-			key := nativeMemberGetterKey("GetterOwner", "access$000", "(LGetterOwner;)Ljava/lang/Object;")
+			key := nativeMemberGetterKey(getterOwner, "access$000", "(L"+getterOwner+";)Ljava/lang/Object;")
 			var work *workbudget.Budget
 			switch variant {
 			case "foreign user":
@@ -117,13 +124,17 @@ func TestNativeMemberPrivateGetterRequiresClosedArchiveReferences(t *testing.T) 
 			case "unused getter":
 				delete(index.getterUsers, key)
 			case "dead reference":
-				index.getterUsers[key]["GetterOwner$Layer"] = true
+				index.getterUsers[key][rootName+"$Layer"] = true
 			case "own caller":
-				index.getterUsers[key]["GetterOwner"] = true
+				index.getterUsers[key][getterOwner] = true
 			case "wrong opcode":
-				for _, m := range p.children["GetterOwner$Layer$Leaf"].object.Methods {
-					n, _ := sourceBridgeUTF8(p.children["GetterOwner$Layer$Leaf"].object, m.NameIndex)
-					if n == "token" {
+				object := p.lexicalObjects[user]
+				if anonymous {
+					object = p.anonymousForest.objects[user]
+				}
+				for _, m := range object.Methods {
+					n, _ := sourceBridgeUTF8(object, m.NameIndex)
+					if n == methodName {
 						for _, a := range m.Attributes {
 							if c, ok := a.(*CodeAttribute); ok {
 								for i, op := range c.Code {
@@ -135,6 +146,22 @@ func TestNativeMemberPrivateGetterRequiresClosedArchiveReferences(t *testing.T) 
 							}
 						}
 					}
+				}
+			case "uncommitted anonymous forest", "foreign anonymous forest", "missing anonymous parent", "failed anonymous group":
+				if !anonymous {
+					index.getterUsers[key]["Foreign"] = true
+					break
+				}
+				switch variant {
+				case "uncommitted anonymous forest":
+					p.anonymousForest = nil
+				case "foreign anonymous forest":
+					clone := *p.anonymousForest
+					p.anonymousForest = &clone
+				case "missing anonymous parent":
+					delete(p.anonymousForest.units, "NestedOwner$Layer$Middle$1")
+				case "failed anonymous group":
+					p.anonymousUnits[user].failed = true
 				}
 			case "budget":
 				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
