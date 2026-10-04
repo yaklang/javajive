@@ -36,6 +36,7 @@ type nativeMemberFamily struct {
 	children        map[string]*nativeMemberClass
 	failed          bool
 	bridgeCalls     map[string]int
+	emptyMarkers    map[string]*ClassObject
 }
 
 // Source ownership comes from one original self row, never dollar spelling.
@@ -523,6 +524,22 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	}
 	if len(p.children) == 0 {
 		return nil
+	}
+	p.emptyMarkers = map[string]*ClassObject{}
+	for _, child := range p.children {
+		for _, bridge := range child.accessBridges {
+			raw, known := c.foldSiblingResolver(bridge.marker)
+			if !known {
+				return nil
+			}
+			marker, e := c.parseResolved(raw)
+			if e != nil || marker.GetClassName() != bridge.marker {
+				return nil
+			}
+			if nativeMemberEmptyAccessMarker(marker, p.owner, c.Work) {
+				p.emptyMarkers[bridge.marker] = marker
+			}
+		}
 	}
 	// A joint deeper/local/anonymous ownership plan is required before their
 	// scopes can be moved. This plan handles complete direct member families.

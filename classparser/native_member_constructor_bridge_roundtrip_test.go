@@ -18,24 +18,31 @@ class BridgeDriver{public static void main(String[]args)throws Exception{BridgeO
 
 func TestNativeMemberPrivateConstructorBridgeRoundTrip(t *testing.T) {
 	javac, java := t04Tools(t)
-	for _, bounds := range []string{"unbounded", "Number", "varargs", "DollarRoot"} {
+	for _, bounds := range []string{"unbounded", "Number", "varargs", "DollarRoot", "emptyMarker", "emptyMarkerNumber", "emptyMarkerVarargs", "emptyMarkerDollar", "major51", "emptyMarker51"} {
 		fixture := nativeMemberPrivateBridgeFixture
 		rootName := "BridgeOwner"
 		debugModes := []string{"none", "source,lines,vars"}
 		policies := []string{"normal", "no-source-rewrites", "no-core-cleanups"}
-		if bounds == "Number" {
+		if bounds == "Number" || bounds == "emptyMarkerNumber" {
 			fixture = strings.ReplaceAll(fixture, "BridgeOwner<T>", "BridgeOwner<T extends Number>")
 			fixture = strings.ReplaceAll(fixture, "BridgeOwner<Object>", "BridgeOwner<Number>")
 			fixture = strings.ReplaceAll(fixture, "Child<Object>", "Child<Number>")
 			fixture = strings.ReplaceAll(fixture, "Object token=new Object()", "Number token=Long.valueOf(7)")
 			fixture = strings.ReplaceAll(fixture, "for(Object value:new Object[]{null,token,\"text\"})", "for(Number value:new Number[]{null,token,Integer.valueOf(3)})")
 		}
-		if bounds == "varargs" {
+		if bounds == "varargs" || bounds == "emptyMarkerVarargs" {
 			fixture = strings.ReplaceAll(fixture, "private Child(U value,long n)", "private Child(U value,long n,Object...tail)")
 			fixture = strings.ReplaceAll(fixture, "new Child<T>(value,BridgeEffects.arg(n))", "new Child<T>(value,BridgeEffects.arg(n),(Object[])null)")
 			fixture = strings.ReplaceAll(fixture, "getDeclaredConstructor(Object.class,long.class)", "getDeclaredConstructor(Object.class,long.class,Object[].class)")
 		}
-		if bounds == "DollarRoot" {
+		if strings.HasPrefix(bounds, "emptyMarker") {
+			fixture = strings.Replace(fixture, `static Object capture(final Object x){return new Object(){public String toString(){return x==null?"null":"value";}};}`, "", 1)
+			fixture = strings.Replace(fixture, `if(!BridgeOwner.capture(null).toString().equals("null")||!BridgeOwner.capture(token).toString().equals("value"))throw new AssertionError("anonymous capture");`, "", 1)
+		}
+		if strings.HasPrefix(bounds, "emptyMarker") {
+			fixture = strings.Replace(fixture, `System.out.println(rows+":"+BridgeEffects.trace);`, `Class<?>marker=Class.forName("BridgeOwner$1");if(!marker.isSynthetic()||marker.getDeclaredFields().length!=0||marker.getDeclaredMethods().length!=0||marker.getDeclaredConstructors().length!=0||marker.getEnclosingClass()!=BridgeOwner.class||marker.getEnclosingMethod()!=null)throw new AssertionError("empty marker role");System.out.println(rows+":"+BridgeEffects.trace);`, 1)
+		}
+		if bounds == "DollarRoot" || bounds == "emptyMarkerDollar" {
 			rootName = "Bridge$Owner"
 			fixture = strings.ReplaceAll(fixture, "BridgeOwner", rootName)
 			debugModes = []string{"none"}
@@ -44,6 +51,16 @@ func TestNativeMemberPrivateConstructorBridgeRoundTrip(t *testing.T) {
 		for _, debug := range debugModes {
 			t.Run(bounds+"/"+debug, func(t *testing.T) {
 				files := nativeCompileDebugClasses(t, fixture, debug)
+				if bounds == "major51" || bounds == "emptyMarker51" {
+					for n, raw := range files {
+						obj, err := Parse(raw)
+						if err != nil {
+							t.Fatal(err)
+						}
+						obj.MajorVersion = 51
+						files[n] = obj.Bytes()
+					}
+				}
 				original := t.TempDir()
 				for n, raw := range files {
 					if err := os.WriteFile(filepath.Join(original, n), raw, 0600); err != nil {

@@ -410,6 +410,9 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 		if !anon || owner != p.owner {
 			continue
 		}
+		if members != nil && members.emptyMarkers[name] != nil && nativeMemberEmptyAccessMarker(obj, members.owner, c.Work) {
+			continue
+		}
 		if !nativeSourceBinaryName(obj.GetSupperClassName()) {
 			return nil
 		}

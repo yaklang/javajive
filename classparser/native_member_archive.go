@@ -374,6 +374,9 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 					return
 				}
 				if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil) {
+					if p.emptyMarkers[n] != nil && anonOwner == owner && nativeMemberEmptyAccessMarker(other, owner, d.Work) {
+						continue
+					}
 					if group := p.anonymousUnits[n]; group == nil || group.owner != anonOwner {
 						return
 					}
@@ -465,6 +468,9 @@ func (z *JarFS) nativeMemberSource(obj *ClassObject) ([]byte, bool) {
 	}
 	if entry.family.children[obj.GetClassName()] != nil {
 		return []byte("// original member body owned by " + entry.family.owner + "; javac regenerates its binary class\n"), true
+	}
+	if entry.family.emptyMarkers[obj.GetClassName()] != nil {
+		return []byte("// original private-constructor marker body owned by " + entry.family.owner + "; javac regenerates its binary class\n"), true
 	}
 	if group := entry.family.anonymousUnits[obj.GetClassName()]; group != nil {
 		return []byte("// original anonymous body owned by " + group.owner + "; javac regenerates its binary class\n"), true

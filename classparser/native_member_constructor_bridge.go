@@ -65,7 +65,13 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 			return false
 		}
 		for _, bridge := range child.accessBridges {
-			if !nativeProofWork(work, 1) || !child.static || p.anonymous == nil {
+			if !nativeProofWork(work, 1) || !child.static {
+				return false
+			}
+			if marker := p.emptyMarkers[bridge.marker]; marker != nil && nativeMemberEmptyAccessMarker(marker, p.owner, work) {
+				continue
+			}
+			if p.anonymous == nil {
 				return false
 			}
 			marker := p.anonymous.children[bridge.marker]
@@ -224,7 +230,7 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 		if !nativeProofWork(work, 1) {
 			return false
 		}
-		if user != p.owner && p.children[user] == nil && p.anonymousUnits[user] == nil {
+		if user != p.owner && p.children[user] == nil && p.anonymousUnits[user] == nil && p.emptyMarkers[user] == nil {
 			return false
 		}
 		raw, ok := z.enumSiblingResolver()(user)
@@ -234,6 +240,9 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 		reader := z.nativeMemberReader(nil)
 		obj, err := reader.parseResolved(raw)
 		if err != nil || obj.GetClassName() != user {
+			return false
+		}
+		if !nativeMemberBridgeMarkerAttributesClosed(obj, markers, work) {
 			return false
 		}
 		allowed := nativeMemberJointBridgeNameTypes(p, obj, work)
@@ -306,6 +315,51 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 					}
 				}
 			}
+		}
+	}
+	return true
+}
+
+// Even an otherwise valid bridge descriptor cannot stand for a source type in
+// bounds or annotations. Those paths are independent from a Methodref alias.
+func nativeMemberBridgeMarkerAttributesClosed(obj *ClassObject, markers map[string]bool, work *workbudget.Budget) bool {
+	check := func(attrs []AttributeInfo) bool {
+		bad := false
+		if !nativeAnnotationDependencies(attrs, work, func(n string) {
+			if markers[n] {
+				bad = true
+			}
+		}) || bad {
+			return false
+		}
+		for _, a := range attrs {
+			if sig, ok := a.(*SignatureAttribute); ok {
+				if sig == nil {
+					return false
+				}
+				text, ok := sourceBridgeUTF8(obj, sig.SignatureIndex)
+				if !ok || !nativeProofWork(work, int64(len(text))) {
+					return false
+				}
+				names, ok := types.SignatureClassReferences(text)
+				if !ok {
+					return false
+				}
+				for _, n := range names {
+					if markers[n] {
+						return false
+					}
+				}
+			}
+		}
+		return true
+	}
+	if obj == nil || !check(obj.Attributes) {
+		return false
+	}
+	for _, m := range append(append([]*MemberInfo{}, obj.Fields...), obj.Methods...) {
+		if m == nil || !check(m.Attributes) {
+			return false
 		}
 	}
 	return true
