@@ -283,25 +283,10 @@ func isJavaIdentChar(b byte) bool {
 func javaIndexTopBrace(src string) int {
 	st := scanNormal
 	depth := 0
-	parentheses := 0
 	for i := 0; i < len(src); i++ {
 		st = scanAdvance(src, &i, st, &depth)
-		if st == scanNormal && i < len(src) {
-			switch src[i] {
-			case '(':
-				parentheses++
-			case ')':
-				parentheses--
-				if parentheses < 0 {
-					return -1
-				}
-			case '{':
-				// Annotation array values are inside their argument list,
-				// and therefore cannot be the enclosing class body.
-				if parentheses == 0 {
-					return i
-				}
-			}
+		if st == scanNormal && i < len(src) && src[i] == '{' {
+			return i
 		}
 	}
 	return -1

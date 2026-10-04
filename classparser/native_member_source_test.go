@@ -69,7 +69,7 @@ func TestNativeMemberProofRequiresOriginalCaptureAndConstructorGraph(t *testing.
 			case "duplicate capture":
 				obj.Fields = append(obj.Fields, obj.Fields[0])
 			case "class annotation":
-				obj.Attributes = append(obj.Attributes, &RuntimeVisibleAnnotationsAttribute{Annotations: []*AnnotationAttribute{nil}})
+				obj.Attributes = append(obj.Attributes, &RuntimeVisibleAnnotationsAttribute{})
 			case "method type annotation":
 				ctor.Attributes = append(ctor.Attributes, &RuntimeVisibleTypeAnnotationsAttribute{})
 			case "missing code":
