@@ -31,7 +31,7 @@ func (d *Decompiler) inlineDelegatingConstructorArrayTemp(origins map[int]*OpCod
 		return false
 	}
 
-	entry, prefix, conditions, ok := constructorArrayEntry(d.RootNode)
+	entry, prefix, conditions, ok := d.constructorArrayEntryAfterRetainedStores(origins)
 	if !ok {
 		return skip("constructor entry does not converge through value-only scaffolding")
 	}

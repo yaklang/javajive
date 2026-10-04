@@ -239,6 +239,10 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 		origins = append(origins, slot)
 	}
 	allocations := map[string]string{}
+	// Track only newly allocated reference arrays on this operand stack.
+	// Stores must consume that exact allocation origin, an int index and an
+	// assignable reference element; parameter arrays never borrow this proof.
+	freshArrays := map[int]string{}
 	widening := newConstructorWideningQuery(metadata)
 	index := start + 1
 	for index < len(ops) && index-start <= 512 {
@@ -260,6 +264,45 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			token := "@allocation:" + strconv.Itoa(index)
 			allocations[token] = owner
 			appendArgument(token, -1)
+			index++
+			continue
+		}
+
+		if ops[index].Instr.OpCode == core.OP_ANEWARRAY {
+			if len(ops[index].Data) != 2 || len(arguments) == 0 || arguments[len(arguments)-1] != "I" {
+				return 0, nil
+			}
+			component, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(ops[index].Data))
+			if !known {
+				return 0, nil
+			}
+			if !strings.HasPrefix(component, "[") {
+				component = "L" + component + ";"
+			}
+			descriptor := "[" + component
+			ps, _, err := callbinding.Descriptor("(" + descriptor + ")V")
+			if err != nil || len(ps) != 1 {
+				return 0, nil
+			}
+			arguments = arguments[:len(arguments)-1]
+			origins = origins[:len(origins)-1]
+			origin := -1000 - index
+			freshArrays[origin] = descriptor
+			appendArgument(descriptor, origin)
+			index++
+			continue
+		}
+		if ops[index].Instr.OpCode == core.OP_AASTORE {
+			if len(ops[index].Data) != 0 || len(arguments) < 3 {
+				return 0, nil
+			}
+			base := len(arguments) - 3
+			descriptor, known := freshArrays[origins[base]]
+			if !known || arguments[base] != descriptor || arguments[base+1] != "I" || !callbinding.Reference(descriptor[1:]) || !widening.assignable(arguments[base+2], descriptor[1:]) {
+				return 0, nil
+			}
+			arguments = arguments[:base]
+			origins = origins[:base]
 			index++
 			continue
 		}

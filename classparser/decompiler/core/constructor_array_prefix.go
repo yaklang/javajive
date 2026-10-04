@@ -120,3 +120,47 @@ func constructorConditionsBelongToPrefixArguments(conditions []*Node, origins ma
 	}
 	return true
 }
+
+// Leading instance stores remain at their original position. Finding an array
+// spill after them permits moving only that spill into its unique delegation
+// operand. It neither removes these stores nor proves they may cross SUPER;
+// the constructor boundary still independently owns that decision.
+func (d *Decompiler) constructorArrayEntryAfterRetainedStores(origins map[int]*OpCode) (*Node, map[*Node]bool, []*Node, bool) {
+	prefix := map[*Node]bool{}
+	var conditions []*Node
+	current := d.RootNode
+	seen := map[*Node]bool{}
+	for len(seen) < 256 {
+		entry, scaffolding, owned, ok := constructorArrayEntry(current)
+		if !ok || seen[entry] {
+			return nil, nil, nil, false
+		}
+		seen[entry] = true
+		for node := range scaffolding {
+			if prefix[node] || len(prefix) >= 256 {
+				return nil, nil, nil, false
+			}
+			prefix[node] = true
+		}
+		conditions = append(conditions, owned...)
+		assign, ok := entry.Statement.(*statements.AssignStatement)
+		if !ok || assign == nil {
+			return nil, nil, nil, false
+		}
+		field, isField := values.UnpackSoltValue(assign.LeftValue).(*values.RefMember)
+		if !isField {
+			return entry, prefix, conditions, true
+		}
+		if field == nil {
+			return nil, nil, nil, false
+		}
+		receiver, isReceiver := values.UnpackSoltValue(field.Object).(*values.JavaRef)
+		op := origins[entry.Id]
+		if assign.ArrayMember != nil || !isReceiver || receiver == nil || !receiver.IsThis || receiver.CustomValue != nil || receiver.StackVar != nil || !assign.HasOriginPC || op == nil || op.Instr == nil || op.Instr.OpCode != OP_PUTFIELD || int(op.CurrentOffset) != assign.OriginPC || entry.IsTryCatch || entry.IsCatchStart || len(entry.Next) != 1 {
+			return nil, nil, nil, false
+		}
+		prefix[entry] = true
+		current = entry.Next[0]
+	}
+	return nil, nil, nil, false
+}
