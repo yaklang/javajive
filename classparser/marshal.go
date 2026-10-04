@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/yaklang/javajive/internal/codec"
@@ -63,13 +64,13 @@ func _MarshalJavaClass(cp *ClassObject, charLength int) []byte {
 			writer.Write4Byte(cp.ConstantPool[i].(*ConstantIntegerInfo).Value)
 		case *ConstantFloatInfo:
 			writer.Write1Byte(CONSTANT_Float)
-			writer.Write4Byte(cp.ConstantPool[i].(*ConstantFloatInfo).Value)
+			writer.Write4Byte(math.Float32bits(cp.ConstantPool[i].(*ConstantFloatInfo).Value))
 		case *ConstantLongInfo:
 			writer.Write1Byte(CONSTANT_Long)
 			writer.Write8Byte(cp.ConstantPool[i].(*ConstantLongInfo).Value)
 		case *ConstantDoubleInfo:
 			writer.Write1Byte(CONSTANT_Double)
-			writer.Write8Byte(cp.ConstantPool[i].(*ConstantDoubleInfo).Value)
+			writer.Write8Byte(math.Float64bits(cp.ConstantPool[i].(*ConstantDoubleInfo).Value))
 		case *ConstantUtf8Info:
 			writer.Write1Byte(CONSTANT_Utf8)
 			payload, err := cp.ConstantPool[i].(*ConstantUtf8Info).mutf8BytesChecked()

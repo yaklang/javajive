@@ -19,6 +19,7 @@ import (
 type nativeAnonymousClass struct {
 	assertions            *nativeMemberAssertion
 	initializers          []nativeAnonymousInitializer
+	expressionInitializer *nativeAnonymousExpressionInitializer
 	enclosingField        string
 	parentAnonymous       bool
 	capturePCs            map[string]int
@@ -425,7 +426,11 @@ func nativeAnonymousConstructorWithinSourceRoot(obj *ClassObject, owner, method,
 	var initialized bool
 	c.initializers, initialized = nativeAnonymousInitializerPackets(obj, ops, i+1, c, ps, work)
 	if !initialized || len(c.initializers) > 0 && !nativeAnonymousInitializerStack(c, ps, code) {
-		return nil
+		c.initializers = nil
+		c.expressionInitializer = nativeAnonymousExpressionInitializerProof(obj, code, ops, i+1, c, work)
+		if c.expressionInitializer == nil {
+			return nil
+		}
 	}
 	return c
 }
@@ -979,6 +984,9 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			return fail()
 		}
 		initialization, known := nativeAnonymousInitializerSource(child, bindings, sub.FuncCtx, sub.nativeAnnotationDeclarationResolver(), c.Work)
+		if child.expressionInitializer != nil {
+			initialization, known = sub.nativeAnonymousExpressionInitializerSource(child, bindings)
+		}
 		if !known {
 			return fail()
 		}
