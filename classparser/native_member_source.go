@@ -308,7 +308,7 @@ func nativeMemberProofWithLexicalGraph(obj, enclosing *ClassObject, work *workbu
 				return nil
 			}
 			p.field = n
-		} else if f.AccessFlags&0x0008 != 0 {
+		} else if f.AccessFlags&0x0008 != 0 && !nativeMemberStaticConstantField(obj, f, work) {
 			return nil
 		}
 	}

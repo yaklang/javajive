@@ -1,6 +1,8 @@
 package javaclassparser
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +20,7 @@ class NestedDriver{public static void main(String[]args)throws Exception{Object 
 
 func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 	javac, java := t04Tools(t)
-	for _, scope := range []string{"static-root-interface-default", "depth3-interface-default", "member-private-context-interface-default", "member-private-context-depth-interface-default", "static-root-interface-major51", "static-root-interface", "depth3-interface", "member-private-context-interface", "member-private-context-depth-interface", "static-root", "dollar-root", "instance-root", "static-local", "dollar-local", "instance-local", "depth3", "depth4", "depth3-instance", "depth3-shadow", "depth3-major51", "depth3-multiple", "member-static", "member-instance", "member-depth-static", "member-depth-instance", "member-context", "member-context-depth", "member-private-context", "member-private-context-depth", "member-private-context-args", "member-private-context-depth-args"} {
+	for _, scope := range []string{"static-root-interface-default", "depth3-interface-default", "member-private-context-interface-default", "member-private-context-depth-interface-default", "static-root-interface-major51", "static-root-interface", "depth3-interface", "member-private-context-interface", "member-private-context-depth-interface", "member-instance-constants", "member-depth-instance-constants", "member-private-context-constants", "member-private-context-depth-constants", "static-root", "dollar-root", "instance-root", "static-local", "dollar-local", "instance-local", "depth3", "depth4", "depth3-instance", "depth3-shadow", "depth3-major51", "depth3-multiple", "member-static", "member-instance", "member-depth-static", "member-depth-instance", "member-context", "member-context-depth", "member-private-context", "member-private-context-depth", "member-private-context-args", "member-private-context-depth-args"} {
 		fixture := nativeAnonymousNestedFixture
 		if strings.HasPrefix(scope, "depth") {
 			depth := 3
@@ -71,6 +73,12 @@ func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 		if strings.Contains(scope, "interface-default") {
 			fixture = strings.Replace(fixture, "T echo(T n);", `Object identity=new Object();T echo(T n);default long mix(long n){return n^Long.MAX_VALUE;}static long sum(long a,long b){return a+b;}`, 1)
 			fixture = strings.Replace(fixture, `if(new NestedOwner.Implementation()`, `if(NestedOwner.Contract.identity==null||new NestedOwner.Implementation().mix(Long.MIN_VALUE)!=-1||NestedOwner.Contract.sum(Long.MAX_VALUE,1)!=Long.MIN_VALUE||new NestedOwner.Implementation()`, 1)
+		}
+		if strings.Contains(scope, "constants") {
+			const declarations = `private static final byte tiny=-128;protected static final short shorty=-32768;public static final char letter='\uffff';static final boolean enabled=true;static final int count=Integer.MIN_VALUE;private static final long wide=Long.MIN_VALUE;static final float fraction=-0.0f;static final double precise=Double.POSITIVE_INFINITY;static final String text="\u03bb:\"\n";`
+			fixture = strings.Replace(fixture, "class Layer{", "class Layer{"+declarations, 1)
+			const probe = `Class<?>constants=Class.forName("NestedOwner$Layer");java.lang.reflect.Field[]constantFields=constants.getDeclaredFields();int constantCount=0;for(java.lang.reflect.Field f:constantFields){if(!java.lang.reflect.Modifier.isStatic(f.getModifiers()))continue;if(!java.lang.reflect.Modifier.isFinal(f.getModifiers()))throw new AssertionError("constant flags");f.setAccessible(true);Object v=f.get(null);String name=f.getName();if(name.equals("tiny")&&!v.equals(Byte.valueOf((byte)-128))||name.equals("shorty")&&!v.equals(Short.valueOf((short)-32768))||name.equals("letter")&&!v.equals(Character.valueOf('\uffff'))||name.equals("enabled")&&!v.equals(Boolean.TRUE)||name.equals("count")&&!v.equals(Integer.valueOf(Integer.MIN_VALUE))||name.equals("wide")&&!v.equals(Long.valueOf(Long.MIN_VALUE))||name.equals("fraction")&&Float.floatToRawIntBits(((Float)v).floatValue())!=0x80000000||name.equals("precise")&&!v.equals(Double.valueOf(Double.POSITIVE_INFINITY))||name.equals("text")&&!v.equals("\u03bb:\"\n"))throw new AssertionError("constant value "+name);constantCount++;}if(constantCount!=9)throw new AssertionError("constant layout");`
+			fixture = strings.Replace(fixture, "int rows=0;", "int rows=0;"+probe, 1)
 		}
 		rootName := "NestedOwner"
 		if strings.HasPrefix(scope, "dollar-") {
@@ -172,6 +180,9 @@ func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 							}
 							if got := nativeBinaryShape(t, raw); got != nativeBinaryShape(t, want) {
 								t.Fatalf("ABI %s\n%s\n%s", n, nativeBinaryShape(t, want), got)
+							}
+							if got := nativeOriginalConstantValueShape(t, raw); got != nativeOriginalConstantValueShape(t, want) {
+								t.Fatalf("constant status/bits %s\n%s\n%s", n, nativeOriginalConstantValueShape(t, want), got)
 							}
 							if got := nativeAnonymousAccessorShape(t, raw); got != nativeAnonymousAccessorShape(t, want) {
 								t.Fatalf("accessor ABI %s\n%s\n%s", n, nativeAnonymousAccessorShape(t, want), got)
@@ -280,4 +291,51 @@ func nativeAnonymousNestedPrivateArgsFixture(fixture, scope string) string {
 	old := `if(phase==null||phase.factory!=nullNamed||phase.observed!=null||phase.parentN!=0||!NestedEffects.trace.equals("AP"))throw new AssertionError("named ancestor callback order");try{phase.origin();throw new AssertionError("missing named ancestor dereference");}catch(NullPointerException wanted){}`
 	next := `if(phase!=null||!NestedEffects.trace.equals(""))throw new AssertionError("named ancestor argument before constructor");`
 	return strings.Replace(fixture, old, next, 1)
+}
+
+// This records physical ConstantValue tags/values, independently of the
+// source proof. The JVM fixture separately checks reflection and raw FP bits.
+func nativeOriginalConstantValueShape(t *testing.T, raw []byte) string {
+	t.Helper()
+	object, e := Parse(raw)
+	if e != nil {
+		t.Fatal(e)
+	}
+	rows := []string{}
+	for _, field := range object.Fields {
+		name, _ := sourceBridgeUTF8(object, field.NameIndex)
+		descriptor, _ := sourceBridgeUTF8(object, field.DescriptorIndex)
+		for _, attribute := range field.Attributes {
+			a, ok := attribute.(*ConstantValueAttribute)
+			if !ok {
+				continue
+			}
+			value, e := object.getConstantInfo(a.ConstantValueIndex)
+			if e != nil {
+				t.Fatal(e)
+			}
+			payload := ""
+			switch n := value.(type) {
+			case *ConstantIntegerInfo:
+				payload = fmt.Sprintf("I:%d", n.Value)
+			case *ConstantLongInfo:
+				payload = fmt.Sprintf("J:%d", n.Value)
+			case *ConstantFloatInfo:
+				payload = fmt.Sprintf("F:%08x", math.Float32bits(n.Value))
+			case *ConstantDoubleInfo:
+				payload = fmt.Sprintf("D:%016x", math.Float64bits(n.Value))
+			case *ConstantStringInfo:
+				s, known := sourceBridgeUTF8(object, n.StringIndex)
+				if !known {
+					t.Fatal("string constant")
+				}
+				payload = fmt.Sprintf("S:%q", s)
+			default:
+				t.Fatalf("original constant tag %T", value)
+			}
+			rows = append(rows, fmt.Sprintf("%s:%s:%x:%d:%s", name, descriptor, field.AccessFlags, a.AttrLen, payload))
+		}
+	}
+	sort.Strings(rows)
+	return strings.Join(rows, "\n")
 }
