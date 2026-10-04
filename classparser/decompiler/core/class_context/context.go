@@ -34,8 +34,11 @@ type ClassContext struct {
 	// LexicalClassName is the current source member declaration, supplied only
 	// after original ownership proof. Its enclosing parameters are implicit
 	// in a self type, including when an own formal shadows an outer formal.
-	LexicalClassName       string
-	LexicalTypeNames       map[string]bool
+	LexicalClassName string
+	LexicalTypeNames map[string]bool
+	// Optional lexical-layout proof may exchange both conditional arms. The
+	// renderer negates the same condition once, preserving evaluation and effects.
+	SourceBranchSwap       func(ifSource, elseSource string) bool
 	SourceMemberAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	SourceMemberCandidate  func(owner string) bool
 	// Optional descriptor gate runs before operands are rendered. Knowing a

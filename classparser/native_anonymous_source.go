@@ -789,6 +789,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		}
 		return "", false
 	}
+	ctx.SourceBranchSwap = func(left, right string) bool { return nativeAnonymousBranchSwap(p, left, right, c.Work) }
 	ctx.SourceAnonymousCandidate = func(owner string) bool { return p.children[strings.ReplaceAll(owner, ".", "/")] != nil }
 	ctx.SourceAnonymousAllocation = func(owner, descriptor string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
 		child := p.children[strings.ReplaceAll(owner, ".", "/")]

@@ -3793,11 +3793,10 @@ func (g *IfStatement) String(funcCtx *class_context.ClassContext) string {
 		}
 		return strings.Join(res, "\n")
 	}
-	return fmt.Sprintf("if (%s){\n"+
-		"%s\n"+
-		"}else{\n"+
-		"%s\n"+
-		"}", g.Condition.String(funcCtx), getBody(g.IfBody), getBody(g.ElseBody))
+	condition := g.Condition.String(funcCtx)
+	left, right := getBody(g.IfBody), getBody(g.ElseBody)
+	condition, left, right = funcCtx.OrderSourceConditionalArms(condition, left, right)
+	return fmt.Sprintf("if (%s){\n%s\n}else{\n%s\n}", condition, left, right)
 }
 func NewIfStatement(condition values.JavaValue, ifBody, elseBody []Statement) *IfStatement {
 	return &IfStatement{

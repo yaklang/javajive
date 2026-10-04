@@ -4344,13 +4344,12 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 							break
 						}
 					}
-					statementStr = fmt.Sprintf(c.GetTabString()+"if (%s){\n"+
-						"%s\n"+
-						c.GetTabString()+"}", values.SimplifyConditionValue(ret.Condition).String(funcCtx), statementListToString(ret.IfBody))
+					condition := values.SimplifyConditionValue(ret.Condition).String(funcCtx)
+					left, right := statementListToString(ret.IfBody), statementListToString(ret.ElseBody)
+					condition, left, right = funcCtx.OrderSourceConditionalArms(condition, left, right)
+					statementStr = fmt.Sprintf(c.GetTabString()+"if (%s){\n%s\n"+c.GetTabString()+"}", condition, left)
 					if len(ret.ElseBody) > 0 {
-						statementStr += fmt.Sprintf("else{\n"+
-							"%s\n"+
-							c.GetTabString()+"}", statementListToString(ret.ElseBody))
+						statementStr += fmt.Sprintf("else{\n%s\n"+c.GetTabString()+"}", right)
 					}
 				case *statements.ReturnStatement:
 					statementStr = c.GetTabString() + statement.String(funcCtx) + ";"
