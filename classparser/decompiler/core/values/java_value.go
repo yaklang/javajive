@@ -357,7 +357,7 @@ func (j *JavaClassMember) Type() types.JavaType {
 }
 
 func (j *JavaClassMember) String(funcCtx *class_context.ClassContext) string {
-	if j.Name == funcCtx.ClassName {
+	if j.Name == funcCtx.ClassName && !funcCtx.QualifiedStaticFields {
 		return class_context.SafeIdentifier(j.Member)
 	}
 	//name := funcCtx.ShortTypeName(j.Name)

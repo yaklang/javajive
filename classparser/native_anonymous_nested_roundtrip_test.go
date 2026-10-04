@@ -18,7 +18,7 @@ class NestedDriver{public static void main(String[]args)throws Exception{Object 
 
 func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 	javac, java := t04Tools(t)
-	for _, scope := range []string{"static-root", "dollar-root", "instance-root", "static-local", "dollar-local", "instance-local", "depth3", "depth4", "depth3-instance", "depth3-shadow", "depth3-major51", "depth3-multiple", "member-static", "member-instance", "member-depth-static", "member-depth-instance", "member-context", "member-context-depth", "member-private-context", "member-private-context-depth", "member-private-context-args", "member-private-context-depth-args"} {
+	for _, scope := range []string{"static-root-interface-default", "depth3-interface-default", "member-private-context-interface-default", "member-private-context-depth-interface-default", "static-root-interface-major51", "static-root-interface", "depth3-interface", "member-private-context-interface", "member-private-context-depth-interface", "static-root", "dollar-root", "instance-root", "static-local", "dollar-local", "instance-local", "depth3", "depth4", "depth3-instance", "depth3-shadow", "depth3-major51", "depth3-multiple", "member-static", "member-instance", "member-depth-static", "member-depth-instance", "member-context", "member-context-depth", "member-private-context", "member-private-context-depth", "member-private-context-args", "member-private-context-depth-args"} {
 		fixture := nativeAnonymousNestedFixture
 		if strings.HasPrefix(scope, "depth") {
 			depth := 3
@@ -64,6 +64,14 @@ func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 				}
 			}
 		}
+		if strings.Contains(scope, "-interface") {
+			fixture = strings.Replace(fixture, "class NestedOwner{", `class NestedOwner{interface Contract<T extends Number>{T echo(T n);}static class Implementation implements Contract<Long>{public Long echo(Long n){return n;}}`, 1)
+			fixture = strings.Replace(fixture, "int rows=0;", `int rows=0;if(new NestedOwner.Implementation().echo(Long.valueOf(7)).longValue()!=7||!NestedOwner.Contract.class.isMemberClass()||NestedOwner.Contract.class.getDeclaringClass()!=NestedOwner.class||!java.lang.reflect.Modifier.isStatic(NestedOwner.Contract.class.getModifiers()))throw new AssertionError("interface scope");`, 1)
+		}
+		if strings.Contains(scope, "interface-default") {
+			fixture = strings.Replace(fixture, "T echo(T n);", `Object identity=new Object();T echo(T n);default long mix(long n){return n^Long.MAX_VALUE;}static long sum(long a,long b){return a+b;}`, 1)
+			fixture = strings.Replace(fixture, `if(new NestedOwner.Implementation()`, `if(NestedOwner.Contract.identity==null||new NestedOwner.Implementation().mix(Long.MIN_VALUE)!=-1||NestedOwner.Contract.sum(Long.MAX_VALUE,1)!=Long.MIN_VALUE||new NestedOwner.Implementation()`, 1)
+		}
 		rootName := "NestedOwner"
 		if strings.HasPrefix(scope, "dollar-") {
 			rootName = "Dollar$Nested"
@@ -91,7 +99,7 @@ func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 		for _, debug := range []string{"none", "source,lines,vars"} {
 			t.Run(scope+"/"+debug, func(t *testing.T) {
 				files := nativeCompileDebugClasses(t, fixture, debug)
-				if scope == "depth3-major51" {
+				if scope == "depth3-major51" || scope == "static-root-interface-major51" {
 					for n, raw := range files {
 						if strings.HasPrefix(n, rootName) {
 							copy := append([]byte(nil), raw...)

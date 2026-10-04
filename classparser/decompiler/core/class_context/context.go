@@ -25,6 +25,10 @@ type SourceCaptureOperand struct {
 	Receiver bool
 }
 type ClassContext struct {
+	// QualifiedStaticFields preserves legal qualified reads of own fields in
+	// declaration initializers, including forward/self reads during circular
+	// initialization. It never changes invocation or lexical-owner binding.
+	QualifiedStaticFields bool
 	// Lexical member declarations shadow imported, same-package and java.lang
 	// simple type names. Bind external types explicitly in their actual scope.
 	// LexicalClassName is the current source member declaration, supplied only

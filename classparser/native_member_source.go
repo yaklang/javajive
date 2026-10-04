@@ -203,7 +203,7 @@ func nativeMemberProofWithLexicalGraph(obj, enclosing *ClassObject, work *workbu
 		provider = providers[0]
 	}
 	owner, name, flags, known := originalMemberOwner(obj)
-	if !known || !nativeMemberVersionMetadata(obj, work) || flags&(0x0200|0x2000|0x4000) != 0 || obj.AccessFlags & ^uint16(0x0431) != 0 {
+	if !known || !nativeMemberVersionMetadata(obj, work) || !nativeMemberDeclarationKindRepresentable(obj, flags, work) {
 		return nil
 	}
 	if !nativeMemberDeprecatedMarkerRepresentable(obj, work) {
@@ -1327,7 +1327,7 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 			}
 		}
 		src, e := sub.DumpClass()
-		if e != nil || sub.nativeCaptureFailed || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
+		if e != nil || sub.nativeCaptureFailed || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || len(sub.interfaceInitializerHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
 			return "", fmt.Errorf("member body unproved: %v", e)
 		}
 		if group := p.memberAnonymous[name]; group != nil && !group.completeOwnSource(src) {

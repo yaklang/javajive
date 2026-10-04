@@ -4392,7 +4392,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				if needsCheckedEscape {
 					renderInitializer = func(body []statements.Statement) string { return c.wrapCheckedEscapeBody(statementListToString(body)) }
 				}
-				helpers, initErr := c.renderInterfaceInitializers(statementList, codeAttr, funcCtx, renderInitializer)
+				helpers, initErr := c.renderInterfaceInitializers(statementList, codeAttr, funcCtx, !needsCheckedEscape, renderInitializer)
 				if initErr != nil {
 					return nil, initErr
 				}

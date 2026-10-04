@@ -362,7 +362,7 @@ func (c *ClassObjectDumper) initializerHelperNames(count int) []string {
 	}
 	return out
 }
-func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statement, code *CodeAttribute, ctx *class_context.ClassContext, render func([]statements.Statement) string) ([]*dumpedMethods, error) {
+func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statement, code *CodeAttribute, ctx *class_context.ClassContext, directExpressions bool, render func([]statements.Statement) string) ([]*dumpedMethods, error) {
 	writes, err := c.interfaceWrites(code)
 	if err != nil {
 		return nil, err
@@ -381,12 +381,24 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 	oldName, oldDescriptor, oldType := ctx.FunctionName, ctx.CurrentMethodDesc, ctx.FunctionType
 	defer func() { ctx.FunctionName, ctx.CurrentMethodDesc, ctx.FunctionType = oldName, oldDescriptor, oldType }()
 	for i, plan := range plans {
+		ctx.FunctionName, ctx.CurrentMethodDesc, ctx.FunctionType = oldName, oldDescriptor, oldType
 		fieldType, fieldErr := c.interfaceFieldType(plan.write.name, plan.write.descriptor)
 		if fieldErr != nil {
 			return nil, fieldErr
 		}
 		if fieldType == nil {
 			return nil, fmt.Errorf("interface initializer has unresolved field type")
+		}
+		// An expression-only segment already has the exact original store/order
+		// witness. A direct declaration preserves its ABI without a helper,
+		// provided it cannot create a new JLS constant variable or expose an
+		// unchecked declaration of a checked exception.
+		if directExpressions && len(plan.prefix) == 0 && interfaceInitializerNonconstant(plan.value, plan.write.descriptor) {
+			directContext := *ctx
+			directContext.QualifiedStaticFields = true
+			value := values.ErasedFactoryAssignmentView(plan.value, fieldType, &directContext)
+			initializers[plan.write.name] = value.String(&directContext)
+			continue
 		}
 		ctx.FunctionName = names[i]
 		ctx.CurrentMethodDesc = "()" + plan.write.descriptor
@@ -501,4 +513,26 @@ func (c *ClassObjectDumper) interfaceFieldType(name, descriptor string) (types.J
 		return typ, nil
 	}
 	return nil, fmt.Errorf("missing interface field metadata")
+}
+
+// Reference fields other than String are never JLS constant variables. For
+// primitive/String stores, only roots that necessarily remain nonconstant
+// expressions are admitted here; compound or field-reference expressions keep
+// the established helper proof rather than guessing their constant status.
+func interfaceInitializerNonconstant(value values.JavaValue, descriptor string) bool {
+	if value == nil || sourceProofNil(value) {
+		return false
+	}
+	if len(descriptor) > 1 && descriptor != "Ljava/lang/String;" {
+		return true
+	}
+	value = values.UnpackSoltValue(value)
+	if value == values.JavaNull {
+		return len(descriptor) > 1
+	}
+	switch value.(type) {
+	case *values.NewExpression, *values.FunctionCallExpression:
+		return true
+	}
+	return false
 }
