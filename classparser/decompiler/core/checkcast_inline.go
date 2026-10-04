@@ -9,7 +9,7 @@ import (
 
 // CHECKCAST consumes one reference and produces one reference. Retain it in
 // a call's argument tree when the intervening instructions only build later
-// arguments from locals/constants/casts and value-returning calls wholly above
+// arguments from retained expression trees and value-returning calls wholly above
 // this operand. Java evaluates arguments left to right, so calls in those later
 // argument trees still follow this cast. No store, duplicate, discarded result,
 // allocation or alternative entry may intervene; the handler domain must stay
@@ -74,7 +74,11 @@ func (d *Decompiler) canInlineCheckcastArgument(op *OpCode) bool {
 				instruction == OP_BIPUSH, instruction == OP_SIPUSH:
 				later++
 			default:
-				return false
+				consumed, produced, ok := d.checkcastLaterExpressionEffect(consumer)
+				if !ok || later < consumed {
+					return false
+				}
+				later = later - consumed + produced
 			}
 		}
 		if len(consumer.Target) != 1 || consumer.Target[0] == nil || consumer.Target[0].CurrentOffset <= consumer.CurrentOffset {
@@ -245,4 +249,78 @@ func (d *Decompiler) canInlineImmediateCheckcastFieldStore(op *OpCode, castType 
 	}
 	_, primitive := target.RawType().(*types.JavaPrimer)
 	return !primitive && target.FunctionType() == nil
+}
+
+// checkcastLaterExpressionEffect counts JVM values rather than words: a long
+// occupies one expression operand even though it occupies two verifier slots.
+// Only instructions represented as retained Java expressions are admissible.
+// Their operands must lie wholly above the checked value; this prevents a
+// later array/field/arithmetic operation from becoming its actual consumer.
+// Java evaluates these trees after the preceding cast in argument order,
+// preserving their null/bounds/division failures, volatile reads and clinit.
+// Stores, DUP, NEW, branches and unrepresented constant-dynamic effects remain
+// barriers. Object allocation cannot be moved to its constructor invocation.
+func (d *Decompiler) checkcastLaterExpressionEffect(op *OpCode) (consumed, produced int, ok bool) {
+	if op == nil || op.Instr == nil {
+		return 0, 0, false
+	}
+	switch op.Instr.OpCode {
+	case OP_GETSTATIC, OP_GETFIELD:
+		if len(op.Data) != 2 || d.constantPoolGetter == nil {
+			return 0, 0, false
+		}
+		member, valid := d.constantPoolGetter(int(Convert2bytesToInt(op.Data))).(*values.JavaClassMember)
+		if !valid || member == nil || member.JavaType == nil || member.JavaType.FunctionType() != nil {
+			return 0, 0, false
+		}
+		typ, err := types.ParseDescriptor(member.Description)
+		if err != nil || typ == nil || typ.FunctionType() != nil {
+			return 0, 0, false
+		}
+		if primitive, isPrimitive := typ.RawType().(*types.JavaPrimer); isPrimitive && primitive.Name == types.JavaVoid {
+			return 0, 0, false
+		}
+		if op.Instr.OpCode == OP_GETFIELD {
+			return 1, 1, true
+		}
+		return 0, 1, true
+	case OP_LDC, OP_LDC_W, OP_LDC2_W:
+		width := 2
+		if op.Instr.OpCode == OP_LDC {
+			width = 1
+		}
+		if len(op.Data) != width || d.ConstantPoolLiteralGetter == nil {
+			return 0, 0, false
+		}
+		index := int(op.Data[0])
+		if width == 2 {
+			index = int(Convert2bytesToInt(op.Data))
+		}
+		literal, valid := d.ConstantPoolLiteralGetter(index).(*values.JavaLiteral)
+		if !valid || literal == nil || literal.Type() == nil {
+			return 0, 0, false
+		}
+		primitive, isPrimitive := literal.Type().RawType().(*types.JavaPrimer)
+		if !isPrimitive || primitive.Name == types.JavaVoid {
+			return 0, 0, false
+		}
+		wide := primitive.Name == types.JavaLong || primitive.Name == types.JavaDouble
+		if wide != (op.Instr.OpCode == OP_LDC2_W) {
+			return 0, 0, false
+		}
+		return 0, 1, true
+	case OP_ARRAYLENGTH, OP_INEG, OP_LNEG, OP_FNEG, OP_DNEG,
+		OP_I2B, OP_I2C, OP_I2D, OP_I2F, OP_I2L, OP_I2S, OP_L2D, OP_L2F, OP_L2I, OP_F2D, OP_F2I, OP_F2L, OP_D2F, OP_D2I, OP_D2L:
+		if len(op.Data) != 0 {
+			return 0, 0, false
+		}
+		return 1, 1, true
+	case OP_AALOAD, OP_IALOAD, OP_BALOAD, OP_CALOAD, OP_FALOAD, OP_LALOAD, OP_DALOAD, OP_SALOAD,
+		OP_LSUB, OP_ISUB, OP_DSUB, OP_FSUB, OP_LADD, OP_IADD, OP_FADD, OP_DADD, OP_IREM, OP_FREM, OP_LREM, OP_DREM, OP_IDIV, OP_FDIV, OP_DDIV, OP_LDIV, OP_IMUL, OP_DMUL, OP_FMUL, OP_LMUL, OP_LAND, OP_LOR, OP_LXOR, OP_ISHR, OP_ISHL, OP_LSHL, OP_LSHR, OP_IUSHR, OP_LUSHR, OP_IOR, OP_IAND, OP_IXOR:
+		if len(op.Data) != 0 {
+			return 0, 0, false
+		}
+		return 2, 1, true
+	}
+	return 0, 0, false
 }
