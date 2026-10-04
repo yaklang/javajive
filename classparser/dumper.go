@@ -151,6 +151,8 @@ type ClassObjectDumper struct {
 	foldSiblingResolver func(internalName string) ([]byte, bool)
 	// Declaration-only inputs are not members of the flattened output family.
 	declarationResolver func(internalName string) ([]byte, bool)
+	// Java8 inner source bodies cannot declare static helper methods.
+	sourceInnerClassBody bool
 }
 
 func (c *ClassObjectDumper) GetConstructorMethodName() string {

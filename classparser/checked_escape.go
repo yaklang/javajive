@@ -680,6 +680,9 @@ func (c *ClassObjectDumper) checkedEscapeHelper() *dumpedMethods {
 	name := c.checkedEscapeHelperName()
 	body := "throw (E) failure;"
 	access := "private static"
+	if c.sourceInnerClassBody {
+		access = "private"
+	}
 	if c.isInterfaceLike() {
 		access = "static"
 	}

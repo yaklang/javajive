@@ -147,6 +147,21 @@ func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple stri
 	child.options = c.options
 	child.Work = c.Work
 	child.report = c.report
+	child.sourceInnerClassBody = true
+	// Keep original declaration lookup without enabling recursive source folding.
+	// The constant-specific subclass still inherits from the original enum and
+	// calls original sibling declarations after its members change source scope.
+	child.declarationResolver = func(name string) ([]byte, bool) {
+		if c.foldSiblingResolver != nil {
+			if data, known := c.foldSiblingResolver(name); known {
+				return data, true
+			}
+		}
+		if c.declarationResolver != nil {
+			return c.declarationResolver(name)
+		}
+		return nil, false
+	}
 	src, err := child.DumpClass()
 	if err != nil || src == "" {
 		return ""
