@@ -74,7 +74,18 @@ jobs:
               if line.startswith("Test")))
           if not names:
               raise SystemExit("no source-regression tests discovered")
-          groups = [names[index::16] for index in range(min(16, len(names)))]
+          # Split the large nested-capture matrix by its actual source scopes.
+          heavy = "TestNativeAnonymousNestedOriginalCaptureRoundTrip"
+          source = pathlib.Path("classparser/native_anonymous_nested_roundtrip_test.go").read_text()
+          scope_text = re.search(r'for _, scope := range \[\]string\{([^}]+)\}', source).group(1)
+          scopes = re.findall(r'"([^"\n]+)"', scope_text)
+          if heavy not in names or not scopes or len(scopes) != len(set(scopes)):
+              raise SystemExit("incomplete nested-capture scope inventory")
+          ordinary = [name for name in names if name != heavy]
+          groups = [{"parents": ordinary[index::32]} for index in range(min(32, len(ordinary)))]
+          groups += [{"scopes": scopes[index:index+5]} for index in range(0, len(scopes), 5)]
+          if sorted(name for group in groups for name in group.get("parents", [])) != sorted(ordinary):
+              raise SystemExit("source parent inventory mismatch")
           # Concurrent evidence must not mutate the source fingerprint checked
           # while the trusted adapter is built and executed.
           evidence = pathlib.Path(os.environ["RUNNER_TEMP"]) / "algorithm-regression-evidence"
@@ -93,7 +104,8 @@ jobs:
                          "github.com/yaklang/javajive/classparser", binary,
                          "-test.v=test2json", "-test.count=1", "-test.parallel=1",
                          f"-test.timeout={remaining:.3f}s",
-                         "-test.run=^(" + "|".join(map(re.escape, group or [])) + ")$"]
+                         "-test.run=^(" + "|".join(map(re.escape, (group or {}).get("parents", [heavy]))) + ")$" +
+                         ("/^(" + "|".join(map(re.escape, group["scopes"])) + ")$" if group and "scopes" in group else "")]
               if trusted:
                   command = ["bash", "-ec", 'git rev-parse HEAD > "$RUNNER_TEMP/algorithm-regression-evidence/revision.txt"; '
                              'python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/javajive-probe"; '
@@ -119,6 +131,24 @@ jobs:
                   if result:
                       failed = True
                       print("\n".join(path.read_text().splitlines()[-80:]))
+          terminal = []
+          for path in evidence.glob("adversarial-tests-*.jsonl"):
+              for line in path.read_text().splitlines():
+                  if not line.startswith("{"):
+                      continue
+                  row = json.loads(line)
+                  if row.get("Test") and row.get("Action") in ("pass", "fail", "skip"):
+                      terminal.append(row)
+          parents = [row for row in terminal if "/" not in row["Test"]]
+          leaves = [row for row in terminal if row["Test"].startswith(heavy+"/") and row["Test"].count("/") == 3]
+          expected = {heavy+"/"+scope+"/"+debug+"/"+policy for scope in scopes
+                      for debug in ("none", "source,lines,vars")
+                      for policy in ("normal", "no-source-rewrites", "no-core-cleanups")}
+          if (set(row["Test"] for row in parents) != set(names) or any(row["Action"] != "pass" for row in parents)
+                  or len(leaves) != len(expected) or set(row["Test"] for row in leaves) != expected
+                  or any(row["Action"] != "pass" for row in leaves)):
+              print("source parent or nested debug/policy coverage failed")
+              failed = True
           shutil.copytree(evidence, "artifacts", dirs_exist_ok=True)
           sys.exit(int(failed))
           PYTHON
