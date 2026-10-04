@@ -215,3 +215,34 @@ func (d *Decompiler) canInlineCheckcastArrayStore(op *OpCode, castType types.Jav
 	}
 	return false
 }
+
+// An immediately consumed CHECKCAST is the field assignment's RHS. Its
+// receiver (when present) already lies below the checked value on the JVM
+// stack. Retaining the cast in that RHS preserves receiver/value evaluation,
+// the check before the store and both exception points. Alternate entries,
+// duplication and differing handler domains cannot use this private edge.
+func (d *Decompiler) canInlineImmediateCheckcastFieldStore(op *OpCode, castType types.JavaType) bool {
+	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || len(op.Data) != 2 || castType == nil || op.IsCustom || op.IsCatch || op.IsTryCatchParent || len(op.Target) != 1 || d.constantPoolGetter == nil {
+		return false
+	}
+	if _, primitive := castType.RawType().(*types.JavaPrimer); primitive {
+		return false
+	}
+	store := op.Target[0]
+	if store == nil || store.Instr == nil || store.IsCustom || store.IsCatch || store.IsTryCatchParent || store.CurrentOffset <= op.CurrentOffset || len(store.Data) != 2 || len(store.Source) != 1 || store.Source[0] != op || !sameHandlerCoverage(d.handlersAt(op), d.handlersAt(store)) {
+		return false
+	}
+	if store.Instr.OpCode != OP_PUTFIELD && store.Instr.OpCode != OP_PUTSTATIC {
+		return false
+	}
+	field, known := d.constantPoolGetter(int(Convert2bytesToInt(store.Data))).(*values.JavaClassMember)
+	if !known || field == nil {
+		return false
+	}
+	target, err := types.ParseDescriptor(field.Description)
+	if err != nil || target == nil {
+		return false
+	}
+	_, primitive := target.RawType().(*types.JavaPrimer)
+	return !primitive && target.FunctionType() == nil
+}

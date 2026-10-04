@@ -16,6 +16,16 @@ func NewOriginalCheckCast(value JavaValue, target types.JavaType, pc int) *CastE
 	return &CastExpression{Value: value, TargetType: target, OriginPC: pc, OriginalCheckCast: true, originalCheckCastDescriptor: descriptor}
 }
 
+// OriginalCheckCastWitness binds a retained source cast to its immutable
+// decoded target and PC. Synthetic binding casts and later target mutations
+// cannot supply an original runtime-check witness.
+func (c *CastExpression) OriginalCheckCastWitness(ctx *class_context.ClassContext) (int, string, bool) {
+	if c == nil || ctx == nil || c.Binding || !c.OriginalCheckCast || c.OriginPC < 0 || c.originalCheckCastDescriptor == "" || checkCastReferenceDescriptor(c.TargetType, ctx, 0) != c.originalCheckCastDescriptor {
+		return 0, "", false
+	}
+	return c.OriginPC, c.originalCheckCastDescriptor, true
+}
+
 // This is a widening reference view, not a second runtime check. It is kept
 // separate from CastExpression so effects and original target ownership remain
 // attached to the single original CHECKCAST.

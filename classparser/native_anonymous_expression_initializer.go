@@ -108,7 +108,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 			return nil
 		}
 		switch kind {
-		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IDIV, core.OP_LDIV, core.OP_IREM, core.OP_LREM, core.OP_CHECKCAST, core.OP_IALOAD, core.OP_LALOAD, core.OP_FALOAD, core.OP_DALOAD, core.OP_AALOAD, core.OP_BALOAD, core.OP_CALOAD, core.OP_SALOAD, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE:
+		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IDIV, core.OP_LDIV, core.OP_IREM, core.OP_LREM, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE:
 			return nil
 		}
 		if kind >= core.OP_IFEQ && kind <= core.OP_IF_ACMPNE || kind == core.OP_IFNULL || kind == core.OP_IFNONNULL || kind >= core.OP_IRETURN && kind <= core.OP_ARETURN {
@@ -267,7 +267,7 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 		if !ok || !ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
 			return "", false
 		}
-		if !nativeAnonymousInitializerExpressionEvents(child, plan, assign.JavaValue, &events, c.nativeAnnotationDeclarationResolver(), c.Work) {
+		if !nativeAnonymousInitializerExpressionEvents(child, plan, assign.JavaValue, &events, c.nativeAnnotationDeclarationResolver(), c.Work, c.FuncCtx) {
 			return "", false
 		}
 		events = append(events, assign.OriginPC)
@@ -280,7 +280,7 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	expected := []int{}
 	for _, op := range plan.ops[plan.start:] {
 		k := op.Instr.OpCode
-		if k == core.OP_PUTFIELD || k == core.OP_GETFIELD || k == core.OP_GETSTATIC || k == core.OP_NEW || k == core.OP_NEWARRAY || k == core.OP_ANEWARRAY || k == core.OP_MULTIANEWARRAY || k == core.OP_ARRAYLENGTH || k >= core.OP_INVOKEVIRTUAL && k <= core.OP_INVOKEINTERFACE {
+		if k == core.OP_PUTFIELD || k == core.OP_GETFIELD || k == core.OP_GETSTATIC || k == core.OP_NEW || k == core.OP_NEWARRAY || k == core.OP_ANEWARRAY || k == core.OP_MULTIANEWARRAY || k == core.OP_ARRAYLENGTH || k == core.OP_CHECKCAST || k >= core.OP_IALOAD && k <= core.OP_SALOAD || k >= core.OP_INVOKEVIRTUAL && k <= core.OP_INVOKEINTERFACE {
 			expected = append(expected, int(op.CurrentOffset))
 		}
 	}
@@ -296,7 +296,11 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	return source.String(), !c.nativeCaptureFailed
 }
 
-func nativeAnonymousInitializerExpressionEvents(child *nativeAnonymousClass, plan *nativeAnonymousExpressionInitializer, value values.JavaValue, events *[]int, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+func nativeAnonymousInitializerExpressionEvents(child *nativeAnonymousClass, plan *nativeAnonymousExpressionInitializer, value values.JavaValue, events *[]int, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, contexts ...*class_context.ClassContext) bool {
+	var ctx *class_context.ClassContext
+	if len(contexts) == 1 {
+		ctx = contexts[0]
+	}
 	path := map[values.JavaValue]bool{}
 	steps := 0
 	byPC := plan.byPC
@@ -415,6 +419,18 @@ func nativeAnonymousInitializerExpressionEvents(child *nativeAnonymousClass, pla
 				// Array dimensions are evaluated before allocation or its failure.
 				*events = append(*events, x.OriginPC)
 			}
+		case *values.CastExpression:
+			if x.OriginalCheckCast {
+				if !nativeAnonymousInitializerOriginalCast(child.object, byPC[x.OriginPC], x, ctx, work) {
+					return false
+				}
+				*events = append(*events, x.OriginPC)
+			}
+		case *values.JavaArrayMember:
+			if !x.HasOriginPC || !nativeAnonymousInitializerArrayRead(byPC[x.OriginPC], x) {
+				return false
+			}
+			*events = append(*events, x.OriginPC)
 		case *values.ArrayLengthExpression:
 			if !x.HasOriginPC || byPC[x.OriginPC] == nil || byPC[x.OriginPC].Instr.OpCode != core.OP_ARRAYLENGTH {
 				return false
@@ -554,4 +570,86 @@ func nativeAnonymousInitializerSameArrayType(actual, expected types.JavaType) bo
 	default:
 		return false
 	}
+}
+
+// Source indexing evaluates the array and index once, then performs the same
+// null/bounds check and typed JVM load. Keep this operation's original PC after
+// both operands; a store, an invented access or a mismatched component refuses.
+func nativeAnonymousInitializerArrayRead(op *core.OpCode, value *values.JavaArrayMember) bool {
+	if op == nil || op.Instr == nil || len(op.Data) != 0 || value == nil || sourceProofNil(value.Object) || sourceProofNil(value.Index) || value.Object.Type() == nil || value.Index.Type() == nil {
+		return false
+	}
+	array := value.Object.Type()
+	if !array.IsArray() || array.ArrayDim() < 1 || array.ArrayDim() > 255 || array.ElementType() == nil {
+		return false
+	}
+	index, known := value.Index.Type().RawType().(*types.JavaPrimer)
+	if !known || index.Name != types.JavaInteger && index.Name != types.JavaByte && index.Name != types.JavaShort && index.Name != types.JavaChar {
+		return false
+	}
+	element := array.ElementType()
+	if op.Instr.OpCode == core.OP_AALOAD {
+		_, reference := element.RawType().(*types.JavaClass)
+		return element.IsArray() || reference
+	}
+	primitive, known := element.RawType().(*types.JavaPrimer)
+	if !known {
+		return false
+	}
+	expected, known := map[int]string{core.OP_IALOAD: types.JavaInteger, core.OP_LALOAD: types.JavaLong, core.OP_FALOAD: types.JavaFloat, core.OP_DALOAD: types.JavaDouble, core.OP_CALOAD: types.JavaChar, core.OP_SALOAD: types.JavaShort}[op.Instr.OpCode]
+	if op.Instr.OpCode == core.OP_BALOAD {
+		return primitive.Name == types.JavaByte || primitive.Name == types.JavaBoolean
+	}
+	return known && primitive.Name == expected
+}
+
+// The source cast must retain the actual CHECKCAST target and exception point.
+// Generic formals can shadow a class spelling even when its binary target was
+// correct, so close the rendered type head over the actual lexical signatures.
+func nativeAnonymousInitializerOriginalCast(object *ClassObject, op *core.OpCode, value *values.CastExpression, ctx *class_context.ClassContext, work *workbudget.Budget) bool {
+	if object == nil || op == nil || op.Instr == nil || op.Instr.OpCode != core.OP_CHECKCAST || len(op.Data) != 2 || value == nil || ctx == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	pc, descriptor, known := value.OriginalCheckCastWitness(ctx)
+	if !known || pc != int(op.CurrentOffset) {
+		return false
+	}
+	name, known := sourceBridgeClassName(object, core.Convert2bytesToInt(op.Data))
+	if !known {
+		return false
+	}
+	expected := name
+	if !strings.HasPrefix(name, "[") {
+		expected = "L" + name + ";"
+	}
+	if expected != descriptor {
+		return false
+	}
+	source := value.TargetType.String(ctx)
+	head := source
+	if end := strings.IndexAny(head, ".<[ "); end >= 0 {
+		head = head[:end]
+	}
+	if head == "" {
+		return false
+	}
+	signatures := append([]string{ctx.ClassSig, ctx.CurrentMethodSig}, ctx.LexicalTypeParamSignatures...)
+	for _, signature := range signatures {
+		if signature == "" {
+			continue
+		}
+		if !nativeProofWork(work, int64(len(signature))) {
+			return false
+		}
+		formals, _, valid := types.SignatureTypeVariableReferences(signature)
+		if !valid {
+			return false
+		}
+		for _, formal := range formals {
+			if formal == head {
+				return false
+			}
+		}
+	}
+	return true
 }
