@@ -477,6 +477,15 @@ func NewJavaArrayMember(object JavaValue, index JavaValue) *JavaArrayMember {
 }
 
 func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
+	if j != nil && funcCtx != nil && funcCtx.SourceLexicalCapturedField != nil {
+		pc := -1
+		if j.HasOriginPC {
+			pc = j.OriginPC
+		}
+		if source, known := funcCtx.SourceLexicalCapturedField(j, pc, j.Member); known {
+			return source
+		}
+	}
 	if funcCtx != nil && funcCtx.SourceCapturedField != nil {
 		pc := -1
 		if j.HasOriginPC {

@@ -4747,6 +4747,20 @@ func (f *FunctionCallExpression) polymorphicSignatureCastType(funcCtx *class_con
 }
 
 func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) string {
+	if f != nil && funcCtx != nil && funcCtx.SourcePrivateGetter != nil && f.Kind == InvokeStatic {
+		args := make([]any, len(f.Arguments))
+		for i, a := range f.Arguments {
+			args[i] = a
+		}
+		if source, known := funcCtx.SourcePrivateGetter(f.ClassName, f.FunctionName, f.Descriptor, func() int {
+			if f.HasOriginPC {
+				return f.OriginPC
+			}
+			return -1
+		}(), args); known {
+			return source
+		}
+	}
 	if f != nil && funcCtx != nil && funcCtx.SourceMemberDelegation != nil && f.HasOriginPC && f.FunctionName == "<init>" {
 		if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref != nil && ref.IsThis {
 			args := make([]any, len(f.Arguments))

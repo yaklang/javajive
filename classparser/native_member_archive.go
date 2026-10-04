@@ -12,12 +12,15 @@ import (
 )
 
 type nativeMemberIndex struct {
-	once         sync.Once
-	valid        bool
-	constructors map[string]map[string]bool
-	captureUsers map[string]map[string]bool
-	typeUsers    map[string]map[string]bool
-	handles      map[string]bool
+	once                    sync.Once
+	valid                   bool
+	constructors            map[string]map[string]bool
+	captureUsers            map[string]map[string]bool
+	typeUsers               map[string]map[string]bool
+	handles                 map[string]bool
+	getterUsers             map[string]map[string]bool
+	getterHandles           map[string]bool
+	getterInvalidReferences map[string]bool
 }
 type nativeMemberCacheEntry struct {
 	once   sync.Once
@@ -46,6 +49,9 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 		idx.captureUsers = map[string]map[string]bool{}
 		idx.typeUsers = map[string]map[string]bool{}
 		idx.handles = map[string]bool{}
+		idx.getterUsers = map[string]map[string]bool{}
+		idx.getterHandles = map[string]bool{}
+		idx.getterInvalidReferences = map[string]bool{}
 		total, classes, edges := int64(0), 0, 0
 		seenClasses := map[string]bool{}
 		e := fs.WalkDir(z.ZipFS, ".", func(path string, entry fs.DirEntry, e error) error {
@@ -138,15 +144,24 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 					return fmt.Errorf("member index member")
 				}
 				switch constant.(type) {
-				case *ConstantMethodrefInfo:
+				case *ConstantMethodrefInfo, *ConstantInterfaceMethodrefInfo:
+					if strings.HasPrefix(name, "access$") {
+						desc, known := sourceBridgeUTF8(obj, nt.DescriptorIndex)
+						if _, normalMethodRef := constant.(*ConstantMethodrefInfo); !normalMethodRef {
+							idx.getterInvalidReferences[nativeMemberGetterKey(owner, name, desc)] = true
+						}
+						if !known || !record(idx.getterUsers, nativeMemberGetterKey(owner, name, desc)) {
+							return fmt.Errorf("member getter reference")
+						}
+					}
 					if name == "<init>" {
 						if !record(idx.constructors, owner) {
 							return fmt.Errorf("member index edge limit")
 						}
 					}
 				case *ConstantFieldrefInfo:
-					if name == "this$0" {
-						if !record(idx.captureUsers, owner) {
+					if nativeMemberCaptureIndexName(name) {
+						if !record(idx.captureUsers, nativeMemberCaptureIndexKey(owner, name)) {
 							return fmt.Errorf("member index edge limit")
 						}
 					}
@@ -169,6 +184,19 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 					return fmt.Errorf("member index handle owner")
 				}
 				idx.handles[owner] = true
+				if member.NameAndTypeIndex == 0 || int(member.NameAndTypeIndex) > len(obj.ConstantPool) {
+					return fmt.Errorf("member handle name type")
+				}
+				nt, valid := obj.ConstantPool[member.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+				if !valid || nt == nil {
+					return fmt.Errorf("member handle name type")
+				}
+				name, nok := sourceBridgeUTF8(obj, nt.NameIndex)
+				desc, dok := sourceBridgeUTF8(obj, nt.DescriptorIndex)
+				if !nok || !dok {
+					return fmt.Errorf("member handle symbol")
+				}
+				idx.getterHandles[nativeMemberGetterKey(owner, name, desc)] = true
 			}
 			return nil
 		})
@@ -194,6 +222,13 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 	}
 	if !member {
 		owner = obj.GetClassName()
+	}
+	if member {
+		var known bool
+		owner, known = z.nativeMemberOutermostNamedOwner(owner, z.nativeMemberReader(obj).Work)
+		if !known {
+			return nil
+		}
 	}
 	if !member {
 		candidate := false
@@ -290,7 +325,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 			return
 		}
 		index := z.originalMemberIndex()
-		if !index.valid || !z.nativeMemberAccessRepresentable(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
+		if !index.valid || !nativeMemberPrivateGetterReferencesClosed(p, index, d.Work) || !z.nativeMemberAccessRepresentable(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
 			return
 		}
 		objects := map[string]*ClassObject{owner: root}
@@ -299,11 +334,17 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 			if index.handles[n] {
 				return
 			}
-			for user := range index.captureUsers[n] {
+			for user := range index.captureUsers[nativeMemberCaptureIndexKey(n, child.field)] {
 				if user != n {
-					group := p.anonymousUnits[user]
-					if group == nil || !nativeMemberProjectedAnonymousCaptureRead(p, group.children[user], n, d.Work) {
-						return
+					if named := p.children[user]; named != nil {
+						if _, valid := nativeMemberLexicalReads(named.object, p, d.Work); !valid {
+							return
+						}
+					} else {
+						group := p.anonymousUnits[user]
+						if group == nil || !nativeMemberProjectedAnonymousCaptureRead(p, group.children[user], n, d.Work) {
+							return
+						}
 					}
 				}
 			}
@@ -401,7 +442,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		var src string
 		var e error
 		jdecenv.Run(snap, func() error { src, e = d.DumpClass(); return e })
-		if e != nil || p.failed || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {
+		if e != nil || p.failed || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {
 			return
 		}
 		if d.Work != nil && d.Work.CheckAlloc(int64(len(src))) != nil {

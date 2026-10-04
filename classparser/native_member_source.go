@@ -20,6 +20,7 @@ type nativeMemberConstructor struct {
 	projectedSuper                                                  bool
 }
 type nativeMemberClass struct {
+	sourceName                    string
 	object                        *ClassObject
 	owner, name, field            string
 	static                        bool
@@ -29,6 +30,8 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
+	getters         map[string]*nativeMemberPrivateGetter
+	lexicalObjects  map[string]*ClassObject
 	anonymous       *nativeAnonymousFamily
 	anonymousUnits  map[string]*nativeAnonymousFamily
 	memberAnonymous map[string]*nativeAnonymousFamily
@@ -182,6 +185,18 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 }
 
 func nativeMemberProofWithinJointOwner(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, providers ...callbinding.Provider) *nativeMemberClass {
+	return nativeMemberProofWithLexicalGraph(obj, enclosing, work, bridges, nil, providers...)
+}
+
+func nativeMemberProofWithLexicalGraph(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, providers ...callbinding.Provider) *nativeMemberClass {
+	expectedCapture := "this$0"
+	if lexical != nil {
+		var known bool
+		expectedCapture, known = nativeMemberLexicalCaptureField(enclosing, lexical, work)
+		if !known {
+			return nil
+		}
+	}
 	var provider callbinding.Provider
 	if len(providers) > 0 {
 		provider = providers[0]
@@ -215,6 +230,13 @@ func nativeMemberProofWithinJointOwner(obj, enclosing *ClassObject, work *workbu
 					return nil
 				}
 				scope := map[string]bool{}
+				if lexical != nil {
+					var valid bool
+					scope, valid = nativeMemberLexicalTypeScope(enclosing, lexical, work)
+					if !valid {
+						return nil
+					}
+				}
 				found := false
 				for _, attr := range enclosing.Attributes {
 					if sig, ok := attr.(*SignatureAttribute); ok {
@@ -251,6 +273,12 @@ func nativeMemberProofWithinJointOwner(obj, enclosing *ClassObject, work *workbu
 			}
 		}
 	}
+	if flags&8 == 0 && lexical != nil {
+		scope, valid := nativeMemberLexicalTypeScope(enclosing, lexical, work)
+		if !valid || !nativeMemberTypeScope(obj, scope, work) {
+			return nil
+		}
+	}
 	if flags&8 != 0 && !nativeMemberTypeScope(obj, nil, work) {
 		return nil
 	}
@@ -275,7 +303,7 @@ func nativeMemberProofWithinJointOwner(obj, enclosing *ClassObject, work *workbu
 			continue
 		}
 		if flags&0x1000 != 0 {
-			if p.field != "" || n != "this$0" || flags != 0x1010 || d != "L"+owner+";" || !onlySynthetic {
+			if p.field != "" || n != expectedCapture || flags != 0x1010 || d != "L"+owner+";" || !onlySynthetic {
 				return nil
 			}
 			p.field = n
@@ -292,7 +320,7 @@ func nativeMemberProofWithinJointOwner(obj, enclosing *ClassObject, work *workbu
 		}
 		n, nok := sourceBridgeUTF8(obj, m.NameIndex)
 		desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
-		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 {
+		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 && (lexical == nil || nativeMemberPrivateGetterProof(obj, m, work) == nil) {
 			return nil
 		}
 		for _, a := range m.Attributes {
@@ -481,19 +509,31 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if !c.nativeMemberAnnotationTablesRepresentable() {
 		return nil
 	}
-	p := &nativeMemberFamily{owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}}
-	for _, a := range c.obj.Attributes {
-		if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
+	if !nativeMemberTopLevelEvidence(c.obj, c.Work) {
+		return nil
+	}
+	p := &nativeMemberFamily{owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}}
+	queue := []*ClassObject{c.obj}
+	for cursor := 0; cursor < len(queue); cursor++ {
+		enclosing := queue[cursor]
+		if !nativeProofWork(c.Work, 1) {
+			return nil
+		}
+		for _, a := range enclosing.Attributes {
+			inner, ok := a.(*InnerClassesAttribute)
+			if !ok || inner == nil {
+				continue
+			}
 			for _, row := range inner.Classes {
-				if row == nil {
+				if row == nil || !nativeProofWork(c.Work, 1) {
 					return nil
 				}
-				owner, known := sourceBridgeClassName(c.obj, row.OuterClassInfoIndex)
-				if !known || owner != p.owner {
+				owner, known := sourceBridgeClassName(enclosing, row.OuterClassInfoIndex)
+				if !known || owner != enclosing.GetClassName() {
 					continue
 				}
-				name, known := sourceBridgeClassName(c.obj, row.InnerClassInfoIndex)
-				if !known || len(p.children) >= 64 {
+				name, known := sourceBridgeClassName(enclosing, row.InnerClassInfoIndex)
+				if !known || len(p.children) >= 64 || p.children[name] != nil || p.lexicalObjects[name] != nil {
 					return nil
 				}
 				raw, found := c.foldSiblingResolver(name)
@@ -510,16 +550,28 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				reader.foldSiblingResolver = c.foldSiblingResolver
 				reader.declarationResolver = c.declarationResolver
 				bridges := reader.nativeConstructorAccessBridges()
-				child := nativeMemberProofWithinJointOwner(obj, c.obj, c.Work, bridges, reader.buildInvocationMetadata())
-				rowName, rowKnown := sourceBridgeUTF8(c.obj, row.InnerNameIndex)
-				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != p.owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags || p.children[name] != nil {
+				child := nativeMemberProofWithLexicalGraph(obj, enclosing, c.Work, bridges, p.lexicalObjects, reader.buildInvocationMetadata())
+				rowName, rowKnown := sourceBridgeUTF8(enclosing, row.InnerNameIndex)
+				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags {
 					return nil
 				}
 				p.children[name] = child
+				p.lexicalObjects[name] = obj
+				queue = append(queue, obj)
 			}
 		}
 	}
 	if len(p.children) == 0 {
+		return nil
+	}
+	for name, child := range p.children {
+		source, known := p.sourceName(name)
+		if !known {
+			return nil
+		}
+		child.sourceName = source
+	}
+	if !nativeMemberCollectPrivateGetters(p, c.Work) {
 		return nil
 	}
 	p.emptyMarkers = map[string]*ClassObject{}
@@ -538,25 +590,12 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 			}
 		}
 	}
-	// A joint deeper/local/anonymous ownership plan is required before their
-	// scopes can be moved. This plan handles complete direct member families.
+	// The complete original named forest is committed together. Local and
+	// anonymous scopes still require their separately proved joint plans.
 	metadata := c.buildInvocationMetadata()
 	for _, child := range p.children {
 		if !nativeMemberSiblingSuperClosed(child, p, c.Work, metadata) {
 			return nil
-		}
-		for _, a := range child.object.Attributes {
-			if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
-				for _, row := range inner.Classes {
-					if row == nil {
-						return nil
-					}
-					outer, known := sourceBridgeClassName(child.object, row.OuterClassInfoIndex)
-					if known && p.children[outer] != nil {
-						return nil
-					}
-				}
-			}
 		}
 	}
 	return p
@@ -638,8 +677,29 @@ func nativeMemberSiblingSuperClosed(child *nativeMemberClass, p *nativeMemberFam
 
 func (p *nativeMemberFamily) sourceName(binary string) (string, bool) {
 	binary = strings.ReplaceAll(binary, ".", "/")
+	if p == nil {
+		return "", false
+	}
 	if child := p.children[binary]; child != nil {
-		return strings.ReplaceAll(child.owner, "/", ".") + "." + child.name, true
+		if child.sourceName != "" {
+			return child.sourceName, true
+		}
+		parts := []string{child.name}
+		owner := child.owner
+		seen := map[string]bool{binary: true}
+		for parent := p.children[owner]; parent != nil; parent = p.children[owner] {
+			if seen[owner] || len(parts) >= 64 {
+				return "", false
+			}
+			seen[owner] = true
+			parts = append(parts, parent.name)
+			owner = parent.owner
+		}
+		name := strings.ReplaceAll(owner, "/", ".")
+		for i := len(parts) - 1; i >= 0; i-- {
+			name += "." + parts[i]
+		}
+		return name, true
 	}
 	return "", false
 }
@@ -932,6 +992,38 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		return
 	}
 	ctx := c.FuncCtx
+	c.wireNativeMemberPrivateGetters(p, ctx)
+	if c.nativeMemberCurrent != nil && p.lexicalObjects != nil {
+		reads, valid := nativeMemberLexicalReads(c.obj, p, c.Work)
+		if !valid {
+			p.failed = true
+		} else {
+			ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
+				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+				if read == nil {
+					if field, ok := value.(*values.RefMember); ok && field != nil && !sourceProofNil(field.Object) {
+						if erased, known := values.SourceTypeErasure(field.Object.Type(), ctx); known && strings.HasPrefix(erased, "L") && strings.HasSuffix(erased, ";") {
+							owner := p.children[erased[1:len(erased)-1]]
+							if owner != nil && !owner.static && owner.field == name {
+								p.failed = true
+							}
+						}
+					}
+					return "", false
+				}
+				if name != read.field || !nativeMemberLexicalReadOperand(value, read, c.Work, ctx) {
+					p.failed = true
+					return "", false
+				}
+				owner := p.children[read.owner]
+				if owner == nil {
+					p.failed = true
+					return "", false
+				}
+				return ctx.ShortTypeName(strings.ReplaceAll(owner.owner, "/", ".")) + ".this", true
+			}
+		}
+	}
 	if c.obj.GetClassName() == p.owner || c.nativeMemberCurrent != nil {
 		ctx.LexicalTypeNames = map[string]bool{}
 		for _, child := range p.children {
@@ -1172,12 +1264,14 @@ func (c *ClassObjectDumper) nativeMemberSkipCheck(st statements.Statement) bool 
 }
 func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 	p := c.nativeMemberRoot
-	if p == nil || c.obj.GetClassName() != p.owner {
+	if p == nil || c.obj.GetClassName() != p.owner && p.children[c.obj.GetClassName()] == nil {
 		return "", nil
 	}
 	names := make([]string, 0, len(p.children))
-	for n := range p.children {
-		names = append(names, n)
+	for n, child := range p.children {
+		if child.owner == c.obj.GetClassName() {
+			names = append(names, n)
+		}
 	}
 	sort.Strings(names)
 	var out strings.Builder
@@ -1192,13 +1286,13 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 		sub.nativeMemberCurrent = child
 		sub.nativeAnonymousRoot = p.memberAnonymous[name]
 		if !child.static {
-			sub.nativeCaptureFields = map[string]string{child.field: c.FuncCtx.ShortTypeName(strings.ReplaceAll(p.owner, "/", ".")) + ".this"}
+			sub.nativeCaptureFields = map[string]string{child.field: c.FuncCtx.ShortTypeName(strings.ReplaceAll(child.owner, "/", ".")) + ".this"}
 			var arguments []types.JavaType
 			for _, formal := range c.FuncCtx.ClassTypeParams {
 				arguments = append(arguments, types.NewJavaClass(formal))
 			}
 			if len(arguments) > 0 {
-				sub.nativeCaptureTypes = map[string]types.JavaType{child.field: types.NewParameterizedType(strings.ReplaceAll(p.owner, "/", "."), arguments)}
+				sub.nativeCaptureTypes = map[string]types.JavaType{child.field: types.NewParameterizedType(strings.ReplaceAll(child.owner, "/", "."), arguments)}
 			}
 		}
 		sub.nativeCapturedReads = map[string]map[int]string{}

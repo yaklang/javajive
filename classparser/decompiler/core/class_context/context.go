@@ -30,16 +30,18 @@ type ClassContext struct {
 	// LexicalClassName is the current source member declaration, supplied only
 	// after original ownership proof. Its enclosing parameters are implicit
 	// in a self type, including when an own formal shadows an outer formal.
-	LexicalClassName          string
-	LexicalTypeNames          map[string]bool
-	SourceMemberAllocation    func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
-	SourceMemberCandidate     func(owner string) bool
-	SourceMemberDelegation    func(owner, descriptor string, pc int, args []any) (string, bool)
-	SourceAnonymousCandidate  func(owner string) bool
-	SourceAnonymousAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
-	SourceCapturedField       func(pc int, name string, receiver bool) (string, bool)
-	SourceCaptureStable       func(int, *coreutils.VariableId) bool
-	SourceCapturedFieldType   func(pc int, owner, name, descriptor string) any
+	LexicalClassName           string
+	LexicalTypeNames           map[string]bool
+	SourceMemberAllocation     func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceMemberCandidate      func(owner string) bool
+	SourcePrivateGetter        func(owner, name, descriptor string, pc int, args []any) (string, bool)
+	SourceMemberDelegation     func(owner, descriptor string, pc int, args []any) (string, bool)
+	SourceAnonymousCandidate   func(owner string) bool
+	SourceAnonymousAllocation  func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceCapturedField        func(pc int, name string, receiver bool) (string, bool)
+	SourceLexicalCapturedField func(value any, pc int, name string) (string, bool)
+	SourceCaptureStable        func(int, *coreutils.VariableId) bool
+	SourceCapturedFieldType    func(pc int, owner, name, descriptor string) any
 
 	// LocalNames supplies scoped source bindings by identity. It does not rename
 	// the underlying IR or conflate locals that merely share a JVM slot spelling.

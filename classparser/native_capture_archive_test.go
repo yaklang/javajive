@@ -126,7 +126,7 @@ func TestNativeAnonymousOwnershipAndConstructorRefusals(t *testing.T) {
 		name, source string
 		accept       bool
 	}{
-		{"transitive synthetic constructor dependency", `class NativeArchiveOwner {static Runnable make(final Object x){return new Runnable(){public void run(){if(x==null)throw new IllegalArgumentException();}};}static Object nested(){return Middle.build();}static class Middle {static Object build(){return new Deep();}static class Deep{private Deep(){}}}}`, false},
+		{"joint transitive synthetic constructor dependency", `class NativeArchiveOwner {static Runnable make(final Object x){return new Runnable(){public void run(){if(x==null)throw new IllegalArgumentException();}};}static Object nested(){return Middle.build();}static class Middle {static Object build(){return new Deep();}static class Deep{private Deep(){}}}}`, true},
 		{"plain capture", `class NativeArchiveOwner {static Runnable make(final Object x){return new Runnable(){public void run(){if(x==null)throw new IllegalArgumentException();}};}}`, true},
 		{"post-super initialization", `class NativeArchiveOwner {static Runnable make(final Object x){return new Runnable(){final Object y=x;public void run(){if(y==null)throw new IllegalArgumentException();}};}}`, false},
 		{"nested member owner", `class NativeArchiveOwner {static Runnable make(){return new Runnable(){class Nested{int read(){return 1;}}public void run(){new Nested().read();}};}}`, false},
