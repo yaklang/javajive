@@ -71,7 +71,7 @@ func TestAdversarialPlatformConstructorCodeIdentityAndEffectProof(t *testing.T) 
 			t.Fatal("wrong original identity hidden by platform fallback")
 		}
 	}
-	for _, release := range []int{0, 7, 9, 12, 18, 22} {
+	for _, release := range []int{0, 7, 10, 12, 18, 22} {
 		if _, ok := jdkConstructorClassBytes("java/util/AbstractList", release); ok {
 			t.Fatal("uncataloged profile was substituted", release)
 		}
@@ -144,7 +144,7 @@ func TestAdversarialPlatformConstructorMovementRequiresRuntimeAgreement(t *testi
 }
 
 func TestAdversarialInvocationMetadataRetainsOriginalClassSignature(t *testing.T) {
-	for _, release := range []int{8, 11, 17, 21} {
+	for _, release := range []int{8, 9, 11, 16, 17, 21} {
 		for _, name := range []string{"java/util/List", "java/util/Collection", "java/lang/Iterable", "java/util/AbstractCollection"} {
 			raw, ok := jdkConstructorClassBytes(name, release)
 			if !ok {

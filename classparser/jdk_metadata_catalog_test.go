@@ -25,10 +25,15 @@ func TestJDKInvocationCatalogCompleteProfiles(t *testing.T) {
 	if err := json.Unmarshal(jdkInvocationCatalogJSON, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Profiles) != 4 {
-		t.Fatal("expected exact profiles 8/11/17/21")
+	if len(document.Profiles) != 6 {
+		t.Fatal("expected exact profiles 8/9/11/16/17/21")
 	}
+	expected := map[int]bool{8: true, 9: true, 11: true, 16: true, 17: true, 21: true}
 	for _, profile := range document.Profiles {
+		if !expected[profile.Release] {
+			t.Fatal("unexpected or duplicate profile", profile.Release)
+		}
+		delete(expected, profile.Release)
 		if digest, err := hex.DecodeString(profile.ArchiveSHA256); err != nil || len(digest) != 32 {
 			t.Fatal("missing archive provenance")
 		}
@@ -64,7 +69,7 @@ func TestJDKInvocationCatalogCompleteProfiles(t *testing.T) {
 }
 
 func TestJDKCatalogExactCheckedDeclarationsAndChannels(t *testing.T) {
-	for _, release := range []int{8, 11, 17, 21} {
+	for _, release := range []int{8, 9, 11, 16, 17, 21} {
 		provider := func(name string) (callbinding.Class, bool) { return jdkInvocationMetadata(name, release) }
 		for _, tc := range []struct{ owner, name, desc, exception string }{
 			{"java/lang/Object", "<init>", "()V", ""},
@@ -94,7 +99,7 @@ func TestJDKCatalogExactCheckedDeclarationsAndChannels(t *testing.T) {
 }
 
 func TestJDKCatalogModularNamespaceAndCheckedDeclarations(t *testing.T) {
-	for _, release := range []int{8, 11, 17, 21} {
+	for _, release := range []int{8, 9, 11, 16, 17, 21} {
 		provider := func(name string) (callbinding.Class, bool) { return jdkInvocationMetadata(name, release) }
 		for _, tc := range []struct{ owner, name, desc, exception string }{
 			{"org/xml/sax/helpers/DefaultHandler", "startDocument", "()V", "org/xml/sax/SAXException"},
@@ -159,19 +164,19 @@ func TestJDKInvocationCatalogVersionBounds(t *testing.T) {
 		}
 		return false
 	}
-	if has(8, "java/util/Map", "of") || !has(11, "java/util/Map", "of") {
+	if has(8, "java/util/Map", "of") || !has(9, "java/util/Map", "of") || !has(11, "java/util/Map", "of") {
 		t.Fatal("Map.of leaked across profile boundary")
 	}
-	if has(11, "java/lang/String", "indent") || !has(17, "java/lang/String", "indent") {
+	if has(11, "java/lang/String", "indent") || !has(16, "java/lang/String", "indent") || !has(17, "java/lang/String", "indent") {
 		t.Fatal("String.indent leaked across profile boundary")
 	}
-	for _, release := range []int{8, 11, 17, 21} {
+	for _, release := range []int{8, 9, 11, 16, 17, 21} {
 		_, ok := jdkInvocationMetadata("java/lang/Record", release)
-		if ok != (release >= 17) {
+		if ok != (release >= 16) {
 			t.Fatal("Record profile mismatch", release)
 		}
 	}
-	for _, release := range []int{7, 9, 10, 12, 16, 18, 20, 22, 99} {
+	for _, release := range []int{7, 10, 12, 18, 20, 22, 99} {
 		if _, ok := jdkInvocationMetadata("java/util/Map", release); ok {
 			t.Fatal("uncataloged release was guessed", release)
 		}
@@ -185,7 +190,7 @@ func TestJDKFilterInputStreamOriginalNamespace(t *testing.T) {
 	// FilterInputStream is a real intermediate superclass, not an alias for
 	// InputStream. Its complete original namespace is required before adding
 	// a collision-free synthetic method to a subclass.
-	for _, release := range []int{8, 11, 17, 21} {
+	for _, release := range []int{8, 9, 11, 16, 17, 21} {
 		class, ok := jdkInvocationMetadata("java/io/FilterInputStream", release)
 		if !ok || !class.MembersComplete || !class.ParentsComplete || len(class.Parents) != 1 || class.Parents[0] != "java/io/InputStream" {
 			t.Fatalf("missing original FilterInputStream declaration in profile %d", release)
@@ -212,7 +217,7 @@ func TestJDKFilterInputStreamOriginalNamespace(t *testing.T) {
 }
 
 func TestJDKInvocationCatalogGenericFamiliesAndStringFormal(t *testing.T) {
-	for _, release := range []int{8, 11, 17, 21} {
+	for _, release := range []int{8, 9, 11, 16, 17, 21} {
 		provider := func(name string) (callbinding.Class, bool) { return jdkInvocationMetadata(name, release) }
 		for _, signature := range []struct{ name, desc string }{
 			{"get", "(Ljava/lang/Object;)Ljava/lang/Object;"},
@@ -223,7 +228,7 @@ func TestJDKInvocationCatalogGenericFamiliesAndStringFormal(t *testing.T) {
 				t.Fatalf("release%d %s: %+v err=%v", release, signature.name, f, err)
 			}
 		}
-		if release >= 17 {
+		if release >= 16 {
 			f, err := callbinding.FamilyOf(callbinding.Witness{Owner: "java/lang/Class", Name: "isRecord", Desc: "()Z", Kind: callbinding.Virtual}, provider)
 			if err != nil || !f.Complete || f.Proof != callbinding.Unique || f.Target == nil || !f.Target.Public {
 				t.Fatalf("Class.isRecord metadata: %+v %v", f, err)
@@ -305,7 +310,7 @@ func TestJDKInvocationMetadataUsesSourceProfileAndResolver(t *testing.T) {
 }
 
 func TestJDKCatalogRetainsExactGenericSignatures(t *testing.T) {
-	for _, release := range []int{8, 11, 17, 21} {
+	for _, release := range []int{8, 9, 11, 16, 17, 21} {
 		optional, ok := jdkInvocationMetadata("java/util/Optional", release)
 		if !ok || optional.Signature != "<T:Ljava/lang/Object;>Ljava/lang/Object;" {
 			t.Fatalf("missing Optional class Signature for %d", release)
@@ -323,7 +328,7 @@ func TestJDKCatalogRetainsExactGenericSignatures(t *testing.T) {
 }
 
 func TestJDKInvocationCatalogStackErasure(t *testing.T) {
-	for _, release := range []int{8, 11, 17, 21} {
+	for _, release := range []int{8, 9, 11, 16, 17, 21} {
 		cls, ok := jdkInvocationMetadata("java/util/Stack", release)
 		if !ok || cls.Signature != "<E:Ljava/lang/Object;>Ljava/util/Vector<TE;>;" {
 			t.Fatal("missing exact Stack declaration", release, cls.Signature)

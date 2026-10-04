@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"context"
+	"fmt"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"testing"
 )
@@ -126,6 +127,97 @@ func TestNativeClassAnnotationPolicyRejectsMalformedOriginalDefinitions(t *testi
 			}
 			if _, _, valid := nativeAnnotationDeclarationPolicy(obj, NewClassObjectDumper(obj)); valid {
 				t.Fatal("malformed original declaration policy accepted")
+			}
+		})
+	}
+}
+
+// Platform annotations are resolved from the same exact original classfile
+// evidence as archive declarations. An explicit provider, even invalid, wins.
+func TestNativeClassAnnotationUsesOriginalPlatformDefinition(t *testing.T) {
+	files := nativeCompileClasses(t, `@Deprecated class PlatformAnnotationSubject{}`)
+	for _, release := range []int{8, 9, 11, 16, 17, 21, 10} {
+		for _, scenario := range []string{"original platform", "invalid explicit", "wrong identity", "wrong table"} {
+			t.Run(fmt.Sprintf("%d/%s", release, scenario), func(t *testing.T) {
+				obj, err := Parse(files["PlatformAnnotationSubject.class"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				d := NewClassObjectDumper(obj)
+				d.options.TargetSourceVersion = release
+				switch scenario {
+				case "invalid explicit":
+					d.foldSiblingResolver = func(string) ([]byte, bool) { return []byte{0, 1}, true }
+				case "wrong identity":
+					d.declarationResolver = func(string) ([]byte, bool) { return files["PlatformAnnotationSubject.class"], true }
+				case "wrong table":
+					for _, a := range obj.Attributes {
+						if table, ok := a.(*RuntimeVisibleAnnotationsAttribute); ok {
+							table.IsInvisible = true
+						}
+					}
+				}
+				want := scenario == "original platform" && release != 10
+				if got := d.nativeMemberAnnotationTablesRepresentable(); got != want {
+					t.Fatalf("original policy=%v want=%v", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestNativeClassDeprecatedMarkerRequiresExactOriginalPair(t *testing.T) {
+	files := nativeCompileClasses(t, `@Deprecated class MarkerPair{}`)
+	for _, scenario := range []string{"original", "unpaired marker", "unpaired annotation", "duplicate marker", "duplicate annotation", "nonempty marker", "nil marker", "invisible annotation", "budget", "canceled"} {
+		t.Run(scenario, func(t *testing.T) {
+			obj, err := Parse(files["MarkerPair.class"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var marker *DeprecatedAttribute
+			var table *RuntimeVisibleAnnotationsAttribute
+			for _, a := range obj.Attributes {
+				if d, ok := a.(*DeprecatedAttribute); ok {
+					marker = d
+				}
+				if d, ok := a.(*RuntimeVisibleAnnotationsAttribute); ok {
+					table = d
+				}
+			}
+			if marker == nil || table == nil || len(table.Annotations) != 1 {
+				t.Fatal("independent javac fixture lacks exact marker pair")
+			}
+			var work *workbudget.Budget
+			switch scenario {
+			case "unpaired marker":
+				table.Annotations = nil
+			case "unpaired annotation":
+				var attrs []AttributeInfo
+				for _, a := range obj.Attributes {
+					if _, ok := a.(*DeprecatedAttribute); !ok {
+						attrs = append(attrs, a)
+					}
+				}
+				obj.Attributes = attrs
+			case "duplicate marker":
+				obj.Attributes = append(obj.Attributes, marker)
+			case "duplicate annotation":
+				table.Annotations = append(table.Annotations, table.Annotations[0])
+			case "nonempty marker":
+				marker.AttrLen = 1
+			case "nil marker":
+				obj.Attributes = append(obj.Attributes, (*DeprecatedAttribute)(nil))
+			case "invisible annotation":
+				table.IsInvisible = true
+			case "budget":
+				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			if got := nativeMemberDeprecatedMarkerRepresentable(obj, work); got != (scenario == "original") {
+				t.Fatalf("original marker pair proof=%v", got)
 			}
 		})
 	}

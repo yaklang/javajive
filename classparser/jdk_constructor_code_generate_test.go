@@ -166,6 +166,13 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 			if !strings.HasPrefix(name, "java/") && !strings.HasPrefix(name, "javax/") {
 				continue
 			}
+			// Declaration annotation policy also needs original classfiles:
+			// Retention/Target cannot be guessed from an annotation's name.
+			// These entries carry metadata, never a constructor-silence fact.
+			if obj.AccessFlags&0x2001 == 0x2001 {
+				selected[name] = true
+				continue
+			}
 			// An external source subclass cannot extend a final/non-public
 			// platform class. Retain usable extension points, then their full
 			// ancestry below; internal implementation constructors are not roots.

@@ -20,13 +20,13 @@ import java.lang.annotation.*;
 @Retention(RetentionPolicy.RUNTIME) @interface Detail{String value();}
 enum Mode{FIRST,SECOND}
 class Parent{final Object seen;Parent(long n){seen=owner();}Object owner(){return null;}}
-@VisibleClass(text="root",values={3,5,7},type=String.class,mode=Mode.FIRST,detail=@Detail("root-inner")) @HiddenClass("root-hidden")
+@Deprecated @VisibleClass(text="root",values={3,5,7},type=String.class,mode=Mode.FIRST,detail=@Detail("root-inner")) @HiddenClass("root-hidden")
 class NativeAnnotationOwner{
- @VisibleClass(text=" class Bogus { } package false; ",values={-1,0,2147483647},type=Child.class,mode=Mode.SECOND,detail=@Detail("child-inner")) @HiddenClass("child-hidden")
+ @Deprecated @VisibleClass(text=" class Bogus { } package false; ",values={-1,0,2147483647},type=Child.class,mode=Mode.SECOND,detail=@Detail("child-inner")) @HiddenClass("child-hidden")
  class Child extends Parent{Child(){super(0L);}Object owner(){return NativeAnnotationOwner.this;}}
  Child make(){return new Child();}
 }
-class Driver{public static void main(String[]args){NativeAnnotationOwner outer=new NativeAnnotationOwner();NativeAnnotationOwner.Child c=outer.make();if(c.seen!=outer||c.owner()!=outer)throw new AssertionError("capture");VisibleClass root=NativeAnnotationOwner.class.getDeclaredAnnotation(VisibleClass.class),child=NativeAnnotationOwner.Child.class.getDeclaredAnnotation(VisibleClass.class);if(root==null||child==null||root.mode()!=Mode.FIRST||child.mode()!=Mode.SECOND||child.type()!=NativeAnnotationOwner.Child.class||!child.detail().value().equals("child-inner"))throw new AssertionError("metadata");System.out.println(root.text()+":"+java.util.Arrays.toString(root.values())+":"+child.text()+":"+java.util.Arrays.toString(child.values())+":"+child.type().getName()+":"+child.mode()+":"+child.detail().value());}}
+class Driver{public static void main(String[]args){NativeAnnotationOwner outer=new NativeAnnotationOwner();NativeAnnotationOwner.Child c=outer.make();if(c.seen!=outer||c.owner()!=outer)throw new AssertionError("capture");VisibleClass root=NativeAnnotationOwner.class.getDeclaredAnnotation(VisibleClass.class),child=NativeAnnotationOwner.Child.class.getDeclaredAnnotation(VisibleClass.class);if(!NativeAnnotationOwner.class.isAnnotationPresent(Deprecated.class)||!NativeAnnotationOwner.Child.class.isAnnotationPresent(Deprecated.class)||root==null||child==null||root.mode()!=Mode.FIRST||child.mode()!=Mode.SECOND||child.type()!=NativeAnnotationOwner.Child.class||!child.detail().value().equals("child-inner"))throw new AssertionError("metadata");System.out.println(root.text()+":"+java.util.Arrays.toString(root.values())+":"+child.text()+":"+java.util.Arrays.toString(child.values())+":"+child.type().getName()+":"+child.mode()+":"+child.detail().value());}}
 `
 	javac, java := t04Tools(t)
 	snapshot := func(t *testing.T, raw []byte) string {
@@ -36,7 +36,14 @@ class Driver{public static void main(String[]args){NativeAnnotationOwner outer=n
 			t.Fatal(err)
 		}
 		var annotations []string
+		markerCount := 0
 		for _, attr := range obj.Attributes {
+			if d, ok := attr.(*DeprecatedAttribute); ok {
+				if d == nil || d.AttrLen != 0 {
+					t.Fatal("invalid original Deprecated marker")
+				}
+				markerCount++
+			}
 			if a, ok := attr.(*RuntimeVisibleAnnotationsAttribute); ok {
 				data, err := json.Marshal(struct {
 					Invisible   bool
@@ -47,6 +54,9 @@ class Driver{public static void main(String[]args){NativeAnnotationOwner outer=n
 				}
 				annotations = append(annotations, string(data))
 			}
+		}
+		if markerCount != 1 {
+			t.Fatalf("Deprecated marker changed: %d", markerCount)
 		}
 		if len(annotations) != 2 {
 			t.Fatalf("both original retention tables required, got%v", annotations)

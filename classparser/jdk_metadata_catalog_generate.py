@@ -244,7 +244,9 @@ def profile(release, archive, prefix, jdk_version, modules=()):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--jdk8', type=Path, required=True)
+    parser.add_argument('--jdk9', type=Path)
     parser.add_argument('--jdk11', type=Path, required=True)
+    parser.add_argument('--jdk16', type=Path)
     parser.add_argument('--jdk17', type=Path)
     parser.add_argument('--jdk21', type=Path, required=True)
     parser.add_argument('--out', type=Path, default=Path(__file__).with_suffix('.json'))
@@ -255,7 +257,7 @@ def main():
             raise ValueError('Missing JDK version provenance')
         return {p.name: p.read_text(encoding='utf-8').strip() for p in files}
     profiles = [profile(8, args.jdk8 / 'jre/lib/rt.jar', '', version(args.jdk8))]
-    for release, home in ((11, args.jdk11), (17, args.jdk17), (21, args.jdk21)):
+    for release, home in ((9, args.jdk9), (11, args.jdk11), (16, args.jdk16), (17, args.jdk17), (21, args.jdk21)):
         if home is not None:
             archives = sorted((home / 'jmods').glob('*.jmod'))
             base = home / 'jmods/java.base.jmod'

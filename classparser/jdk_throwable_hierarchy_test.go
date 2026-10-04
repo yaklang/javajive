@@ -64,7 +64,7 @@ func TestJDKThrowableAncestryKeepsClassificationSeparateFromMembers(t *testing.T
 			t.Fatal("unknown exception spelling guessed")
 		}
 	}
-	for _, release := range []int{7, 9, 10, 12, 16, 18, 20, 22, 99} {
+	for _, release := range []int{7, 10, 12, 18, 20, 22, 99} {
 		if _, ok := jdkThrowableAncestry("java/lang/AssertionError", release); ok {
 			t.Fatal("unknown platform release guessed")
 		}

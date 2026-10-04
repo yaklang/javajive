@@ -23,7 +23,7 @@ No method execution, reflection, or host JDK lookup occurs during decompilation.
 
 ## Exact source-target profiles
 
-The fallback selects only an exact `TargetSourceVersion` of 8, 11, 17, or 21.
+The fallback selects only an exact `TargetSourceVersion` of 8, 9, 11, 16, 17, or 21.
 When that option is zero, the existing class-major-to-source-version mapping
 selects the profile. Other target levels receive no new fallback. Explicit
 resolver-supplied bytes are preferred; invalid supplied bytes do not silently
@@ -46,6 +46,8 @@ not unavailable metadata. Returned exception slices are copied for each request.
 Snapshots used:
 
 - JDK8: Amazon Corretto 8.422.05.1, locally installed rt.jar.
+- JDK9: OpenJDK 9.0.4, original archived GA JMODs.
+- JDK16: OpenJDK 16.0.2, original archived GA JMODs.
 - JDK11: locally installed Homebrew OpenJDK; exact release/build metadata is in JSON.
 - JDK17: Eclipse Temurin 17.0.18+8 JMOD archives.
 - JDK21: locally installed Homebrew OpenJDK 21.0.2 JMOD archives.
@@ -58,12 +60,21 @@ Only JMOD archives and the release file were extracted; downloaded programs were
 not executed. The expanded extraction verifies that the original java.base.jmod
 and release file remain identical. JMODs are only read as ZIPs of classfile data.
 
+The JDK9 and JDK16 inputs come from the official [OpenJDK archive](https://jdk.java.net/archive/).
+The Linux x64 GA archives were verified against their published SHA256:
+JDK9.0.4 `39362fb9bfb341fcc802e55e8ea59f4664ca58fd821ce956d48e1aa4fb3d2dec`;
+JDK16.0.2 `6c714ded7d881ca54970ec949e283f43d673a142fda1de79b646ddd619da9c0c`.
+Only JMOD, release and license files were extracted; downloaded programs were
+not executed. Exact per-module and classfile hashes remain in the catalog.
+These profiles close original major-53/60 declaration evidence; they do not
+add a test runtime matrix or substitute the closest available profile.
+
 Regenerate with reviewed JDK installations:
 
 ```sh
 python3 classparser/jdk_metadata_catalog_generate.py \
-  --jdk8 /path/to/jdk8 --jdk11 /path/to/jdk11 \
-  --jdk17 /path/to/jdk17 --jdk21 /path/to/jdk21 \
+  --jdk8 /path/to/jdk8 --jdk9 /path/to/jdk9 --jdk11 /path/to/jdk11 \
+  --jdk16 /path/to/jdk16 --jdk17 /path/to/jdk17 --jdk21 /path/to/jdk21 \
   --out classparser/jdk_metadata_catalog.json
 ```
 
@@ -82,7 +93,7 @@ release refusal, request isolation, source-profile selection, and resolver
 precedence. Existing invocation-binding regressions remain applicable.
 
 Record's ancestor metadata and Class.isRecord metadata are complete in profiles
-17/21. The existing record test still exposed a separate expression-layer class-
+16/17/21. The existing record test still exposed a separate expression-layer class-
 literal receiver typing problem in the unintegrated branch; that layer is owned
 by the parent/lowering task, not modified here. This catalog alone is not a full
 Java overload-resolution proof or a claim that all native tests pass.

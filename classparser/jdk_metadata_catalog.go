@@ -8,7 +8,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 )
 
-// These are full method tables extracted from specific trusted JDK8/11/17/21
+// These are full method tables extracted from specific trusted JDK8/9/11/16/17/21
 // classfiles, not guessed overload-name uniqueness rules. See the adjacent
 // provenance document and generator. No installed JDK is consulted at runtime.
 //

@@ -26,7 +26,9 @@ type constructorCodeDocument struct {
 // the declaration catalog. They are read only as metadata/bytecode: never
 // loaded by a JVM or used as emitted archive-owned classes. Selection by the
 // offline generator is an index optimization; the request must still prove
-// the original constructor's effects, field identity and all paths.
+// the original constructor's effects, field identity and all paths. Public
+// platform annotation declarations also retain their original Retention/Target
+// attributes; their presence is evidence, not permission to rewrite a use.
 //
 //go:embed jdk_constructor_code.zip
 var jdkConstructorCodeZIP []byte

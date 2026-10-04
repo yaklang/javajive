@@ -181,6 +181,9 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 	if !known || !nativeMemberVersionMetadata(obj, work) || flags&(0x0200|0x2000|0x4000) != 0 || obj.AccessFlags & ^uint16(0x0431) != 0 {
 		return nil
 	}
+	if !nativeMemberDeprecatedMarkerRepresentable(obj, work) {
+		return nil
+	}
 	formalCount, outerFormalCount := 0, 0
 	for _, a := range obj.Attributes {
 		switch a := a.(type) {
@@ -188,7 +191,9 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 			if !nativeAnnotationDependencies([]AttributeInfo{a}, work, func(string) {}) {
 				return nil
 			}
-		case *RuntimeVisibleTypeAnnotationsAttribute, *DeprecatedAttribute:
+		case *DeprecatedAttribute:
+			// The original paired encoding was proved above.
+		case *RuntimeVisibleTypeAnnotationsAttribute:
 			return nil
 		case *SignatureAttribute:
 			signature, ok := sourceBridgeUTF8(obj, a.SignatureIndex)

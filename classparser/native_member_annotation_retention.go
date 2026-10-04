@@ -1,9 +1,17 @@
 package javaclassparser
 
+import (
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/internal/workbudget"
+)
+
 // Java source regenerates a declaration annotation according to the annotation
 // type's original Retention/Target, not according to the use site's table name.
 // A syntactically printable value graph alone is therefore insufficient.
 func (c *ClassObjectDumper) nativeMemberAnnotationTablesRepresentable() bool {
+	if !nativeMemberDeprecatedMarkerRepresentable(c.obj, c.Work) {
+		return false
+	}
 	seen := map[string]bool{}
 	for _, attribute := range c.obj.Attributes {
 		if !nativeProofWork(c.Work, 1) {
@@ -29,6 +37,13 @@ func (c *ClassObjectDumper) nativeMemberAnnotationTablesRepresentable() bool {
 			}
 			if !known && c.declarationResolver != nil {
 				raw, known = c.declarationResolver(name)
+			}
+			if !known {
+				target := c.options.TargetSourceVersion
+				if target == 0 {
+					target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
+				}
+				raw, known = jdkConstructorClassBytes(name, target)
 			}
 			if !known {
 				return false
@@ -108,4 +123,43 @@ func nativeAnnotationDeclarationPolicy(definition *ClassObject, c *ClassObjectDu
 		}
 	}
 	return retention, target, true
+}
+
+// javac regenerates the JVM Deprecated marker from the declaration annotation.
+// An unpaired legacy documentation marker has no equivalent source annotation:
+// introducing one would add runtime metadata. Preserve only the exact paired
+// original encoding; never silently drop, duplicate or invent either member.
+func nativeMemberDeprecatedMarkerRepresentable(obj *ClassObject, work *workbudget.Budget) bool {
+	if obj == nil {
+		return false
+	}
+	markers, annotations := 0, 0
+	for _, attribute := range obj.Attributes {
+		if !nativeProofWork(work, 1) {
+			return false
+		}
+		switch a := attribute.(type) {
+		case *DeprecatedAttribute:
+			if a == nil || a.AttrLen != 0 {
+				return false
+			}
+			markers++
+		case *RuntimeVisibleAnnotationsAttribute:
+			if a == nil {
+				return false
+			}
+			for _, annotation := range a.Annotations {
+				if annotation == nil || !nativeProofWork(work, 1) {
+					return false
+				}
+				if annotation.TypeName == "Ljava/lang/Deprecated;" {
+					if a.IsInvisible {
+						return false
+					}
+					annotations++
+				}
+			}
+		}
+	}
+	return markers <= 1 && annotations == markers
 }
