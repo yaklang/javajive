@@ -65,7 +65,7 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 			return false
 		}
 		for _, bridge := range child.accessBridges {
-			if !nativeProofWork(work, 1) || !child.static {
+			if !nativeProofWork(work, 1) || !child.static && child.constructors[bridge.target] == nil {
 				return false
 			}
 			if marker := p.emptyMarkers[bridge.marker]; marker != nil && nativeMemberEmptyAccessMarker(marker, p.owner, work) {
@@ -178,12 +178,7 @@ func nativeMemberStaticBridgeSource(plan *nativeMemberAllocation, args []class_c
 	if bridge == nil || len(args) == 0 {
 		return fail()
 	}
-	last, ok := args[len(args)-1].Value.(values.JavaValue)
-	if !ok {
-		return fail()
-	}
-	literal, ok := values.UnpackSoltValue(last).(*values.JavaLiteral)
-	if !ok || literal == nil || literal.Data != "null" || len(literal.Units) != 0 {
+	if !nativeMemberBridgeSourceDummy(args[len(args)-1].Value) {
 		return fail()
 	}
 	invoke := &values.FunctionCallExpression{ClassName: strings.ReplaceAll(plan.child.object.GetClassName(), "/", "."), FunctionName: "<init>", Descriptor: bridge.target, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC}
@@ -363,4 +358,22 @@ func nativeMemberBridgeMarkerAttributesClosed(obj *ClassObject, markers map[stri
 		}
 	}
 	return true
+}
+
+func nativeMemberConstructorForAllocation(child *nativeMemberClass, desc string) *nativeMemberConstructor {
+	if child == nil {
+		return nil
+	}
+	if bridge := child.accessBridges[desc]; bridge != nil {
+		return child.constructors[bridge.target]
+	}
+	return child.constructors[desc]
+}
+func nativeMemberBridgeSourceDummy(value any) bool {
+	v, ok := value.(values.JavaValue)
+	if !ok {
+		return false
+	}
+	literal, ok := values.UnpackSoltValue(v).(*values.JavaLiteral)
+	return ok && literal != nil && literal.Data == "null" && len(literal.Units) == 0
 }

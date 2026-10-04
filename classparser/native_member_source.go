@@ -321,13 +321,13 @@ func nativeMemberProofWithinJointOwner(obj, enclosing *ClassObject, work *workbu
 				}
 			}
 		}
-		if p.static {
-			if n == "<init>" && m.AccessFlags&0x1000 != 0 {
-				if bridge := bridges[desc]; bridge == nil || bridge.method != m {
-					return nil
-				}
-				continue
+		if n == "<init>" && m.AccessFlags&0x1000 != 0 {
+			if bridge := bridges[desc]; bridge == nil || bridge.method != m {
+				return nil
 			}
+			continue
+		}
+		if p.static {
 			continue
 		}
 		if n != "<init>" {
@@ -511,9 +511,6 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				reader.declarationResolver = c.declarationResolver
 				bridges := reader.nativeConstructorAccessBridges()
 				child := nativeMemberProofWithinJointOwner(obj, c.obj, c.Work, bridges, reader.buildInvocationMetadata())
-				if child != nil && !child.static && len(bridges) > 0 {
-					return nil
-				}
 				rowName, rowKnown := sourceBridgeUTF8(c.obj, row.InnerNameIndex)
 				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != p.owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags || p.children[name] != nil {
 					return nil
@@ -659,6 +656,12 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 			return nil, false
 		}
 		result[key] = map[int]*nativeMemberAllocation{}
+		if current := p.children[c.obj.GetClassName()]; name == "<init>" && current != nil && current.accessBridges[desc] != nil {
+			if !nativeMemberBridgeEquivalent(current, c.obj, m, desc, c.Work) {
+				return nil, false
+			}
+			continue
+		}
 		codeSeen := false
 		for _, a := range m.Attributes {
 			code, ok := a.(*CodeAttribute)
@@ -744,7 +747,10 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 					}
 					call := constructorMotionMember(c.obj, ops[j], core.OP_INVOKESPECIAL)
 					if call != nil && call.Name == owner && call.Member == "<init>" {
-						if child.constructors[call.Description] == nil {
+						if nativeMemberConstructorForAllocation(child, call.Description) == nil {
+							return nil, false
+						}
+						if child.accessBridges[call.Description] != nil && (j == cursor || ops[j-1].Instr.OpCode != core.OP_ACONST_NULL || len(ops[j-1].Data) != 0) {
 							return nil, false
 						}
 						plan.descriptor = call.Description
@@ -996,12 +1002,19 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		if !typeKnown || erasure != "L"+plan.child.owner+";" {
 			return fail()
 		}
-		ctor := plan.child.constructors[desc]
+		ctor := nativeMemberConstructorForAllocation(plan.child, desc)
 		if ctor == nil {
 			return fail()
 		}
 		invoke := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: ctor.sourceDescriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: pc}
-		for _, arg := range args[1:] {
+		sourceArgs := args[1:]
+		if plan.child.accessBridges[desc] != nil {
+			if len(sourceArgs) == 0 || !nativeMemberBridgeSourceDummy(sourceArgs[len(sourceArgs)-1].Value) {
+				return fail()
+			}
+			sourceArgs = sourceArgs[:len(sourceArgs)-1]
+		}
+		for _, arg := range sourceArgs {
 			v, ok := arg.Value.(values.JavaValue)
 			if !ok {
 				return fail()

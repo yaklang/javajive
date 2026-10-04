@@ -18,7 +18,7 @@ class BridgeDriver{public static void main(String[]args)throws Exception{BridgeO
 
 func TestNativeMemberPrivateConstructorBridgeRoundTrip(t *testing.T) {
 	javac, java := t04Tools(t)
-	for _, bounds := range []string{"unbounded", "Number", "varargs", "DollarRoot", "emptyMarker", "emptyMarkerNumber", "emptyMarkerVarargs", "emptyMarkerDollar", "major51", "emptyMarker51"} {
+	for _, bounds := range []string{"unbounded", "Number", "varargs", "DollarRoot", "emptyMarker", "emptyMarkerNumber", "emptyMarkerVarargs", "emptyMarkerDollar", "major51", "emptyMarker51", "nonstatic", "nonstaticEmpty", "nonstaticCallback", "nonstaticOverload"} {
 		fixture := nativeMemberPrivateBridgeFixture
 		rootName := "BridgeOwner"
 		debugModes := []string{"none", "source,lines,vars"}
@@ -41,6 +41,37 @@ func TestNativeMemberPrivateConstructorBridgeRoundTrip(t *testing.T) {
 		}
 		if strings.HasPrefix(bounds, "emptyMarker") {
 			fixture = strings.Replace(fixture, `System.out.println(rows+":"+BridgeEffects.trace);`, `Class<?>marker=Class.forName("BridgeOwner$1");if(!marker.isSynthetic()||marker.getDeclaredFields().length!=0||marker.getDeclaredMethods().length!=0||marker.getDeclaredConstructors().length!=0||marker.getEnclosingClass()!=BridgeOwner.class||marker.getEnclosingMethod()!=null)throw new AssertionError("empty marker role");System.out.println(rows+":"+BridgeEffects.trace);`, 1)
+		}
+		if bounds == "nonstatic" || bounds == "nonstaticEmpty" || bounds == "nonstaticCallback" || bounds == "nonstaticOverload" {
+			fixture = strings.Replace(fixture, "static class Child<U>", "class Child<U>", 1)
+			fixture = strings.ReplaceAll(fixture, "BridgeOwner.Child<Object>", "BridgeOwner<Object>.Child<Object>")
+			fixture = strings.ReplaceAll(fixture, "BridgeOwner.Child<?>", "BridgeOwner<?>.Child<?>")
+			fixture = strings.Replace(fixture, "getDeclaredConstructor(Object.class,long.class)", "getDeclaredConstructor(BridgeOwner.class,Object.class,long.class)", 1)
+			if bounds == "nonstaticEmpty" {
+				fixture = strings.Replace(fixture, `static Object capture(final Object x){return new Object(){public String toString(){return x==null?"null":"value";}};}`, "", 1)
+				fixture = strings.Replace(fixture, `if(!BridgeOwner.capture(null).toString().equals("null")||!BridgeOwner.capture(token).toString().equals("value"))throw new AssertionError("anonymous capture");`, "", 1)
+			}
+		}
+		if bounds == "nonstaticCallback" {
+			fixture += ` abstract class BridgeParent{final Object observed;final long parentNumber;BridgeParent(long n){BridgeEffects.trace+="P";BridgeEffects.published=this;observed=origin();parentNumber=n;if(BridgeEffects.fail)throw BridgeEffects.error;}abstract Object origin();}`
+			fixture = strings.Replace(fixture, "class Child<U>{", "class Child<U> extends BridgeParent{", 1)
+			fixture = strings.Replace(fixture, `private Child(U value,long n){BridgeEffects.trace+="P";BridgeEffects.published=this;if(BridgeEffects.fail)throw BridgeEffects.error;`, `private Child(U value,long n){super(n);`, 1)
+			fixture = strings.Replace(fixture, `BridgeEffects.trace+="C";}}`, `BridgeEffects.trace+="C";}Object origin(){return BridgeOwner.this;}}`, 1)
+			fixture = strings.Replace(fixture, `if(fail||c.value!=value`, `if(fail||c.observed!=o||c.origin()!=o||c.parentNumber!=n||c.value!=value`, 1)
+			fixture = strings.Replace(fixture, `if(!fail||e!=BridgeEffects.error||c==null||c.value!=null`, `if(!fail||e!=BridgeEffects.error||c==null||c.observed!=o||c.origin()!=o||c.parentNumber!=n||c.value!=null`, 1)
+		}
+		if bounds == "nonstaticCallback" {
+			fixture = strings.Replace(fixture, `System.out.println(rows+":"+BridgeEffects.trace);`, `ctor.setAccessible(true);for(boolean fail:new boolean[]{true,false})for(long n:new long[]{Long.MIN_VALUE,0,Long.MAX_VALUE}){BridgeEffects.trace="";BridgeEffects.published=null;BridgeEffects.fail=fail;try{BridgeOwner<?>.Child<?> c=(BridgeOwner<?>.Child<?>)ctor.newInstance(null,token,n);if(fail||c.observed!=null||c.origin()!=null||c.parentNumber!=n||c.value!=token||c.n!=n||!BridgeEffects.trace.equals("PC"))throw new AssertionError("null outer state");}catch(java.lang.reflect.InvocationTargetException e){BridgeOwner<?>.Child<?>c=(BridgeOwner<?>.Child<?>)BridgeEffects.published;if(!fail||e.getCause()!=BridgeEffects.error||c==null||c.observed!=null||c.origin()!=null||c.parentNumber!=n||c.value!=null||c.n!=0||!BridgeEffects.trace.equals("P"))throw new AssertionError("null outer failure");}rows++;}System.out.println(rows+":"+BridgeEffects.trace);`, 1)
+		}
+		if bounds == "nonstaticOverload" {
+			fixture = strings.Replace(fixture, "final U value;final long n;", "final U value;final long n;final int selected;", 1)
+			fixture = strings.Replace(fixture, "this.value=value;this.n=n;", "this.selected=1;this.value=value;this.n=n;", 1)
+			fixture = strings.Replace(fixture, `BridgeEffects.trace+="C";}}`, `BridgeEffects.trace+="C";}private Child(String value,long n){this.selected=2;this.value=null;this.n=n;}}`, 1)
+			fixture = strings.Replace(fixture, `Child<T> make(T value,long n)`, `Child<T> nothing(long n){return new Child<T>((String)null,n);}Child<T> make(T value,long n)`, 1)
+			fixture = strings.Replace(fixture, `if(fail||c.value!=value`, `if(fail||c.selected!=1||c.value!=value`, 1)
+			fixture = strings.Replace(fixture, `c==null||c.value!=null`, `c==null||c.selected!=0||c.value!=null`, 1)
+			fixture = strings.Replace(fixture, `getDeclaredConstructors().length!=2`, `getDeclaredConstructors().length!=4`, 1)
+			fixture = strings.Replace(fixture, `System.out.println(rows+":"+BridgeEffects.trace);`, `for(long n:new long[]{Long.MIN_VALUE,0,Long.MAX_VALUE}){BridgeOwner<Object>.Child<Object> c=o.nothing(n);if(c.selected!=2||c.value!=null||c.n!=n)throw new AssertionError("original String constructor");rows++;}System.out.println(rows+":"+BridgeEffects.trace);`, 1)
 		}
 		if bounds == "DollarRoot" || bounds == "emptyMarkerDollar" {
 			rootName = "Bridge$Owner"
@@ -68,7 +99,14 @@ func TestNativeMemberPrivateConstructorBridgeRoundTrip(t *testing.T) {
 					}
 				}
 				oracle := t04RunJava(t, java, original, "BridgeDriver")
-				if oracle != "18:APC\n" {
+				wantOracle := "18:APC\n"
+				if bounds == "nonstaticCallback" {
+					wantOracle = "24:PC\n"
+				}
+				if bounds == "nonstaticOverload" {
+					wantOracle = "21:APC\n"
+				}
+				if oracle != wantOracle {
 					t.Fatalf("original oracle %q", oracle)
 				}
 				for _, policy := range policies {
