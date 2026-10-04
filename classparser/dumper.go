@@ -3867,11 +3867,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			priorConstructorBridge := funcCtx.ConstructorInvokeBridge
 			funcCtx.ConstructorInvokeBridge = nil
 			defer func() { funcCtx.ConstructorInvokeBridge = priorConstructorBridge }()
-			statementList, nativeConstructorErr := c.prepareNativeMemberConstructor(codeAttr, statementList, params, method)
+			statementList, regeneratedCapture, nativeConstructorErr := c.prepareNativeMemberConstructor(codeAttr, statementList, params, method)
 			if nativeConstructorErr != nil {
 				return nil, nativeConstructorErr
 			}
-			constructorPlan, constructorErr := c.planConstructorSourceBoundary(codeAttr, statementList, params, method)
+			constructorPlan, constructorErr := c.planConstructorSourceBoundary(codeAttr, statementList, params, method, regeneratedCapture)
 			if constructorErr != nil {
 				return nil, constructorErr
 			}

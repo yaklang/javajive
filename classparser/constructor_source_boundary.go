@@ -71,7 +71,7 @@ func constructorBoundaryValue(v values.JavaValue, allowed map[*values.JavaRef]bo
 	return true
 }
 
-func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, body []statements.Statement, params []values.JavaValue, method *MemberInfo) (*constructorSourceBoundary, error) {
+func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, body []statements.Statement, params []values.JavaValue, method *MemberInfo, regeneratedCapture *nativeMemberConstructor) (*constructorSourceBoundary, error) {
 	name, _ := c.obj.getUtf8(method.NameIndex)
 	if name != "<init>" {
 		return nil, nil
@@ -108,6 +108,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 		}
 	}
 	decoder := core.NewDecompiler(code.Code, func(index int) values.JavaValue { return GetValueFromCP(c.ConstantPool, index) })
+	decoder.Work = c.Work
 	if err := decoder.ParseOpcode(); err != nil {
 		return nil, err
 	}
@@ -142,6 +143,15 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 			// code or initialize another class; the JVM already allocated this receiver.
 			return p, nil
 		}
+	}
+	if p.pc < 0 && p.delegate == nil && c.nativeMemberImplicitSuperRegenerated(method, regeneratedCapture, decoder) {
+		// The original enclosing store was consumed only after matching its
+		// source assignment to the proved lexical capture. javac recreates
+		// it before this exact implicit no-argument delegation, including
+		// callbacks/publication/failure in the superclass. Nothing commutes.
+		p.pc = regeneratedCapture.delegatePC
+		p.delegate = &values.FunctionCallExpression{ClassName: regeneratedCapture.delegateOwner, FunctionName: "<init>", Descriptor: "()V", Kind: values.InvokeSpecial, Object: &values.JavaRef{IsThis: true}, OriginPC: p.pc, HasOriginPC: true}
+		return p, nil
 	}
 	if p.pc < 0 {
 		// No-arg super calls may be omitted by the simulator even when the

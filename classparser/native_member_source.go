@@ -980,27 +980,27 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	}
 }
 
-func (c *ClassObjectDumper) prepareNativeMemberConstructor(code *CodeAttribute, body []statements.Statement, params []values.JavaValue, method *MemberInfo) ([]statements.Statement, error) {
+func (c *ClassObjectDumper) prepareNativeMemberConstructor(code *CodeAttribute, body []statements.Statement, params []values.JavaValue, method *MemberInfo) ([]statements.Statement, *nativeMemberConstructor, error) {
 	child := c.nativeMemberCurrent
 	n, _ := c.obj.getUtf8(method.NameIndex)
 	if child == nil || child.static || n != "<init>" {
-		return body, nil
+		return body, nil, nil
 	}
 	desc, _ := c.obj.getUtf8(method.DescriptorIndex)
 	ctor := child.constructors[desc]
 	if ctor == nil || len(params) < 2 {
-		return nil, fmt.Errorf("unproved member constructor")
+		return nil, nil, fmt.Errorf("unproved member constructor")
 	}
 	outer, ok := params[1].(*values.JavaRef)
 	if !ok || outer.Id == nil || !outer.IsParam || outer.CustomValue != nil || outer.StackVar != nil {
-		return nil, fmt.Errorf("unproved enclosing parameter")
+		return nil, nil, fmt.Errorf("unproved enclosing parameter")
 	}
 	if c.FuncCtx.LocalNames == nil {
 		c.FuncCtx.LocalNames = map[*coreutils.VariableId]string{}
 	}
 	c.FuncCtx.LocalNames[outer.Id] = c.FuncCtx.ShortTypeName(strings.ReplaceAll(child.owner, "/", ".")) + ".this"
 	if ctor.capturePC < 0 {
-		return body, nil
+		return body, nil, nil
 	}
 	filtered := make([]statements.Statement, 0, len(body))
 	found := false
@@ -1009,7 +1009,7 @@ func (c *ClassObjectDumper) prepareNativeMemberConstructor(code *CodeAttribute, 
 			if f, ok := values.UnpackSoltValue(a.LeftValue).(*values.RefMember); ok && f != nil && f.Member == child.field {
 				receiver, ok := values.UnpackSoltValue(f.Object).(*values.JavaRef)
 				if !ok || receiver == nil || !receiver.IsThis || values.UnpackSoltValue(a.JavaValue) != outer || found || a.IsDeclare || a.ArrayMember != nil {
-					return nil, fmt.Errorf("member capture source mismatch")
+					return nil, nil, fmt.Errorf("member capture source mismatch")
 				}
 				found = true
 				continue
@@ -1018,9 +1018,9 @@ func (c *ClassObjectDumper) prepareNativeMemberConstructor(code *CodeAttribute, 
 		filtered = append(filtered, st)
 	}
 	if !found {
-		return nil, fmt.Errorf("missing member capture source")
+		return nil, nil, fmt.Errorf("missing member capture source")
 	}
-	return filtered, nil
+	return filtered, ctor, nil
 }
 func (c *ClassObjectDumper) nativeMemberSkipCheck(st statements.Statement) bool {
 	p := c.nativeMemberRoot
