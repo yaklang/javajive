@@ -300,7 +300,26 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		if !index.valid || !z.nativeMemberStaticConstantsReferencesClosed(p, index, d.Work) || !nativeMemberPrivateGetterReferencesClosed(p, index, d.Work) || !z.nativeMemberAccessRepresentable(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
 			return
 		}
+		if len(p.rootAccessBridges) > 0 && index.handles[owner] {
+			return
+		}
 		objects := map[string]*ClassObject{owner: root}
+		if len(p.rootAccessBridges) > 0 {
+			for user := range index.constructors[owner] {
+				if objects[user] != nil {
+					continue
+				}
+				raw, known := z.enumSiblingResolver()(user)
+				if !known {
+					return
+				}
+				other, err := d.parseResolved(raw)
+				if err != nil || other.GetClassName() != user {
+					return
+				}
+				objects[user] = other
+			}
+		}
 		for n, child := range p.children {
 			objects[n] = child.object
 			if index.handles[n] {
@@ -342,8 +361,8 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 				return
 			}
 		}
-		for name, child := range p.children {
-			for descriptor := range child.accessBridges {
+		for name, bridges := range p.bridgeOwners() {
+			for descriptor := range bridges {
 				if p.bridgeCalls[name+descriptor] == 0 {
 					return
 				}

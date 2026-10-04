@@ -16,38 +16,28 @@ func nativeMemberJointBridgeDeclaration(p *nativeMemberFamily, obj *ClassObject,
 	if p == nil || obj == nil || m == nil || !nativeProofWork(work, 1) {
 		return false
 	}
-	child := p.children[obj.GetClassName()]
-	if child == nil {
-		return false
-	}
+	bridges := p.constructorBridges(obj.GetClassName())
 	name, nok := sourceBridgeUTF8(obj, m.NameIndex)
 	desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
-	b := child.accessBridges[desc]
-	return nok && dok && name == "<init>" && b != nil && b.marker == marker && nativeMemberBridgeEquivalent(child, obj, m, desc, work)
-}
-func nativeMemberBridgeEquivalent(child *nativeMemberClass, obj *ClassObject, m *MemberInfo, desc string, work *workbudget.Budget) bool {
-	reader := NewClassObjectDumper(obj)
-	reader.Work = work
-	fresh := reader.nativeConstructorAccessBridges()[desc]
-	b := child.accessBridges[desc]
-	return fresh != nil && b != nil && fresh.method == m && fresh.target == b.target && fresh.marker == b.marker
+	b := bridges[desc]
+	return nok && dok && name == "<init>" && b != nil && b.marker == marker && nativeMemberJointBridgeEquivalent(p, obj, m, desc, work)
 }
 func nativeMemberJointBridgeNameTypes(p *nativeMemberFamily, obj *ClassObject, work *workbudget.Budget) map[int]bool {
 	out := map[int]bool{}
 	if p == nil {
 		return out
 	}
-	for name, child := range p.children {
-		if child == nil {
+	for name, bridges := range p.bridgeOwners() {
+		if child, exists := p.children[name]; exists && child == nil {
 			return nil
 		}
-		if len(child.accessBridges) == 0 {
+		if len(bridges) == 0 {
 			continue
 		}
 		if !nativeProofWork(work, 1) {
 			return nil
 		}
-		proof := &nativeAnonymousFamily{owner: name, bridges: child.accessBridges}
+		proof := &nativeAnonymousFamily{owner: name, bridges: bridges}
 		for index, valid := range proof.accessBridgeNameTypes(obj, work) {
 			if valid {
 				out[index] = true
@@ -60,12 +50,13 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 	if p == nil {
 		return false
 	}
-	for _, child := range p.children {
-		if child == nil {
+	for owner, bridges := range p.bridgeOwners() {
+		child := p.children[owner]
+		if owner != p.owner && child == nil {
 			return false
 		}
-		for _, bridge := range child.accessBridges {
-			if !nativeProofWork(work, 1) || !child.static && child.constructors[bridge.target] == nil {
+		for _, bridge := range bridges {
+			if bridge == nil || !nativeProofWork(work, 1) || child != nil && !child.static && child.constructors[bridge.target] == nil {
 				return false
 			}
 			if marker := p.emptyMarkers[bridge.marker]; marker != nil && nativeMemberEmptyAccessMarker(marker, p.owner, work) {
@@ -113,8 +104,8 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 		return false
 	}
 	has := false
-	for _, child := range p.children {
-		if child != nil && len(child.accessBridges) > 0 {
+	for _, bridges := range p.bridgeOwners() {
+		if len(bridges) > 0 {
 			has = true
 			break
 		}
@@ -144,7 +135,7 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 					continue
 				}
 				child := p.children[call.Name]
-				if child == nil || child.accessBridges[call.Description] == nil {
+				if p.constructorBridges(call.Name)[call.Description] == nil {
 					continue
 				}
 				// A flat foreign source unit cannot reproduce a Java private lexical call.
@@ -152,7 +143,7 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 					return false
 				}
 				plan := allocations[name+desc][int(op.CurrentOffset)]
-				allocation := plan != nil && plan.child == child && plan.descriptor == call.Description
+				allocation := child != nil && plan != nil && plan.child == child && plan.descriptor == call.Description
 				super := false
 				if caller := p.children[obj.GetClassName()]; caller != nil && name == "<init>" && !caller.static {
 					ctor := caller.constructors[desc]
@@ -160,7 +151,8 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 				}
 				// Only a NEW origin or the independently verified initial
 				// member-super delegation regenerates the private bridge.
-				if !allocation && !super {
+				rootSuper := p.rootBridgeDelegation(obj, name, desc, call.Name, call.Description, int(op.CurrentOffset)) != nil
+				if !allocation && !super && !rootSuper {
 					return false
 				}
 				if p.bridgeCalls == nil {
@@ -221,8 +213,8 @@ func nativeMemberStaticBridgeSource(plan *nativeMemberAllocation, args []class_c
 // not unused compiler arguments, even when their erasures happen to match.
 func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, index *nativeMemberIndex, work *workbudget.Budget) bool {
 	markers := map[string]bool{}
-	for _, child := range p.children {
-		for _, bridge := range child.accessBridges {
+	for _, bridges := range p.bridgeOwners() {
+		for _, bridge := range bridges {
 			markers[bridge.marker] = true
 		}
 	}
@@ -314,7 +306,10 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 						name, known = sourceBridgeClassName(obj, core.Convert2bytesToInt(op.Data))
 					}
 					if known && markers[name] {
-						child := p.anonymous.children[name]
+						var child *nativeAnonymousClass
+						if p.anonymous != nil {
+							child = p.anonymous.children[name]
+						}
 						if op.Instr.OpCode != core.OP_NEW || user != p.owner || child == nil || child.newPC != int(op.CurrentOffset) {
 							return false
 						}

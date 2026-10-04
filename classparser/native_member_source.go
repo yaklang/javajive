@@ -30,17 +30,19 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
-	getters         map[string]*nativeMemberPrivateGetter
-	lexicalObjects  map[string]*ClassObject
-	anonymous       *nativeAnonymousFamily
-	anonymousUnits  map[string]*nativeAnonymousFamily
-	memberAnonymous map[string]*nativeAnonymousFamily
-	anonymousForest *nativeAnonymousForest
-	owner           string
-	children        map[string]*nativeMemberClass
-	failed          bool
-	bridgeCalls     map[string]int
-	emptyMarkers    map[string]*ClassObject
+	rootAccessBridges     map[string]*nativeConstructorAccessBridge
+	rootBridgeDelegations map[string]*nativeRootBridgeDelegation
+	getters               map[string]*nativeMemberPrivateGetter
+	lexicalObjects        map[string]*ClassObject
+	anonymous             *nativeAnonymousFamily
+	anonymousUnits        map[string]*nativeAnonymousFamily
+	memberAnonymous       map[string]*nativeAnonymousFamily
+	anonymousForest       *nativeAnonymousForest
+	owner                 string
+	children              map[string]*nativeMemberClass
+	failed                bool
+	bridgeCalls           map[string]int
+	emptyMarkers          map[string]*ClassObject
 }
 
 // Source ownership comes from one original self row, never dollar spelling.
@@ -580,9 +582,13 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if !nativeMemberCollectPrivateGetters(p, c.Work) {
 		return nil
 	}
+	p.rootAccessBridges = c.nativeConstructorAccessBridges()
+	if p.rootAccessBridges == nil || !c.proveNativeRootBridgeDelegations(p) {
+		return nil
+	}
 	p.emptyMarkers = map[string]*ClassObject{}
-	for _, child := range p.children {
-		for _, bridge := range child.accessBridges {
+	for _, bridges := range p.bridgeOwners() {
+		for _, bridge := range bridges {
 			raw, known := c.foldSiblingResolver(bridge.marker)
 			if !known {
 				return nil
@@ -729,8 +735,8 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 			return nil, false
 		}
 		result[key] = map[int]*nativeMemberAllocation{}
-		if current := p.children[c.obj.GetClassName()]; name == "<init>" && current != nil && current.accessBridges[desc] != nil {
-			if !nativeMemberBridgeEquivalent(current, c.obj, m, desc, c.Work) {
+		if name == "<init>" && p.constructorBridges(c.obj.GetClassName())[desc] != nil {
+			if !nativeMemberJointBridgeEquivalent(p, c.obj, m, desc, c.Work) {
 				return nil, false
 			}
 			continue
@@ -887,8 +893,10 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 		if !ok {
 			return cl, false
 		}
-		child := p.children[strings.ReplaceAll(owner, ".", "/")]
-		if child == nil || child.static && len(child.accessBridges) == 0 {
+		binary := strings.ReplaceAll(owner, ".", "/")
+		child := p.children[binary]
+		bridges := p.constructorBridges(binary)
+		if (child == nil || child.static) && len(bridges) == 0 {
 			return cl, true
 		}
 		if !nativeProofWork(work, int64(len(cl.Methods))) || work != nil && work.CheckAlloc(int64(len(cl.Methods))*96) != nil {
@@ -898,14 +906,14 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 		cl.Methods = append([]callbinding.Method(nil), cl.Methods...)
 		filtered := cl.Methods[:0]
 		for _, m := range cl.Methods {
-			if m.Name == "<init>" && child.accessBridges[m.Desc] != nil {
+			if m.Name == "<init>" && bridges[m.Desc] != nil {
 				continue
 			}
 			filtered = append(filtered, m)
 		}
 		cl.Methods = filtered
 		for i, m := range cl.Methods {
-			if m.Name == "<init>" {
+			if m.Name == "<init>" && child != nil {
 				if ctor := child.constructors[m.Desc]; ctor != nil {
 					cl.Methods[i].Desc = ctor.sourceDescriptor
 				}
@@ -1158,6 +1166,11 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			return nativeMemberErasedAllocation(p, plan.child, source)
 		}
 		return source, true
+	}
+	if child := c.nativeMemberCurrent; child != nil && child.static {
+		ctx.SourceMemberDelegation = func(owner, desc string, pc int, args []any) (string, bool) {
+			return nativeRootBridgeSourceDelegation(p, c.obj, ctx, binding, owner, desc, pc, args)
+		}
 	}
 	if child := c.nativeMemberCurrent; child != nil && !child.static {
 		ctx.SourceMemberDelegation = func(owner, desc string, pc int, args []any) (string, bool) {

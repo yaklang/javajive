@@ -12882,6 +12882,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if c.nativeMemberCurrent != nil && name == "<init>" && c.nativeMemberCurrent.accessBridges[descriptor] != nil {
 			continue
 		}
+		if p := c.nativeMemberRoot; p != nil && c.obj.GetClassName() == p.owner && name == "<init>" && p.rootAccessBridges[descriptor] != nil {
+			continue
+		}
 		if p := c.nativeMemberRoot; p != nil && p.getters[nativeMemberGetterKey(c.obj.GetClassName(), name, descriptor)] != nil {
 			continue
 		}
