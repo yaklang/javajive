@@ -583,6 +583,13 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 		return nil
 	}
 	p.rootAccessBridges = c.nativeConstructorAccessBridges()
+	// The current source compiler profile promotes private constructors of an
+	// abstract root to package access and removes their bridge/marker classes.
+	// A valid original JVM can retain both. Do not claim binary regeneration
+	// until that declaration kind has an independently matching profile proof.
+	if c.obj.AccessFlags&0x0400 != 0 && len(p.rootAccessBridges) > 0 {
+		return nil
+	}
 	if p.rootAccessBridges == nil || !c.proveNativeRootBridgeDelegations(p) {
 		return nil
 	}

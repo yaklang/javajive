@@ -314,3 +314,37 @@ func TestNativeRootBridgeAllocationNeedsItsOwnSourceOriginProof(t *testing.T) {
 		t.Fatal("root allocation must not borrow the initial SUPER origin proof")
 	}
 }
+
+func TestNativeRootAbstractPrivateConstructorBridgeNeedsCompilerProfileProof(t *testing.T) {
+	// A valid original JVM may keep the abstract root's constructor private and
+	// delegate through the synthetic access bridge. Modern javac --release 8
+	// instead widens that constructor and emits no bridge/marker. Source syntax
+	// alone is insufficient evidence of equivalent regenerated binary metadata.
+	fixture := strings.Replace(nativeRootPrivateConstructorFixture,
+		"Object token=new Object();int rows=0;",
+		"Object token=new Object();if(!java.lang.reflect.Modifier.isAbstract(RootBridgePacket.class.getModifiers())||!java.lang.reflect.Modifier.isPrivate(RootBridgePacket.class.getDeclaredConstructor(Object.class).getModifiers())||!Class.forName(\"RootBridgePacket$1\").isSynthetic())throw new AssertionError(\"original abstract/private/marker metadata\");int rows=0;", 1)
+	fixture = strings.Replace(fixture, "main(String[]args){", "main(String[]args)throws Exception{", 1)
+	files := nativeCompileClasses(t, fixture)
+	root, err := Parse(append([]byte(nil), files["RootBridgePacket.class"]...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root.AccessFlags |= 0x0400
+	files["RootBridgePacket.class"] = root.Bytes()
+	_, java := t04Tools(t)
+	original := t.TempDir()
+	for name, raw := range files {
+		if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := t04RunJava(t, java, original, "RootBridgeDriver"); got != "2:private-root:identity:order:owner\n" {
+		t.Fatalf("original JVM=%q", got)
+	}
+	z := nativeArchive(t, files)
+	defer z.Close()
+	entry := z.nativeMemberEntry(root)
+	if entry != nil && entry.family != nil {
+		t.Fatal("abstract private constructor metadata lacks a matching compiler profile proof")
+	}
+}
