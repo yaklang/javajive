@@ -21,6 +21,7 @@ type nativeMemberConstructor struct {
 	enclosingSuperPath                                              *nativeMemberLexicalRead
 }
 type nativeMemberClass struct {
+	assertions                    *nativeMemberAssertion
 	sourceName                    string
 	object                        *ClassObject
 	owner, name, field            string
@@ -291,6 +292,28 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		return nil
 	}
 	p := &nativeMemberClass{object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}, accessBridges: bridges}
+	if lexical != nil && len(lexical) > 0 {
+		outermost := owner
+		for depth := 0; depth < 64; depth++ {
+			o := lexical[outermost]
+			if o == nil {
+				return nil
+			}
+			next, _, _, nested := originalMemberOwner(o)
+			if !nested {
+				break
+			}
+			outermost = next
+			if depth == 63 {
+				return nil
+			}
+		}
+		var valid bool
+		p.assertions, valid = nativeMemberAssertionProof(obj, outermost, work)
+		if !valid {
+			return nil
+		}
+	}
 	for _, f := range obj.Fields {
 		if f == nil || !nativeProofWork(work, 1) {
 			return nil
@@ -303,6 +326,9 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		flags, onlySynthetic, known := nativeMemberEffectiveFieldFlags(f, work)
 		if !known {
 			return nil
+		}
+		if p.assertions != nil && n == nativeAssertionField {
+			continue
 		}
 		if p.static {
 			if flags&0x1000 != 0 {
@@ -328,7 +354,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		}
 		n, nok := sourceBridgeUTF8(obj, m.NameIndex)
 		desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
-		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 && (lexical == nil || nativeMemberPrivateAccessProof(obj, m, work) == nil) {
+		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 && (p.assertions == nil || p.assertions.initializer != m) && (lexical == nil || nativeMemberPrivateAccessProof(obj, m, work) == nil) {
 			return nil
 		}
 		for _, a := range m.Attributes {

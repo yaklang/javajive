@@ -51,6 +51,11 @@ func (z *JarFS) nativeMemberStaticConstantsReferencesClosed(p *nativeMemberFamil
 			}
 			name, nok := sourceBridgeUTF8(child.object, field.NameIndex)
 			descriptor, dok := sourceBridgeUTF8(child.object, field.DescriptorIndex)
+			// The assertion flag is regenerated from its separate runtime protocol,
+			// never treated as an inlinable ConstantValue.
+			if nok && dok && child.assertions != nil && name == nativeAssertionField && descriptor == "Z" {
+				continue
+			}
 			if !nok || !dok || !nativeMemberStaticConstantField(child.object, field, work) {
 				return false
 			}

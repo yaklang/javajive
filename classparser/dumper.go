@@ -1980,6 +1980,9 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 	fields := make([]dumpedFields, 0, len(c.obj.Fields))
 	for _, field := range c.obj.Fields {
 		fieldName, _ := c.obj.getUtf8(field.NameIndex)
+		if c.nativeMemberCurrent != nil && c.nativeMemberCurrent.assertions != nil && fieldName == nativeAssertionField {
+			continue
+		}
 		if _, captured := c.nativeCaptureFields[fieldName]; captured {
 			continue
 		}
@@ -3960,6 +3963,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				}
 			}
 			ensureUniqueParameterNames(samParams, funcCtx)
+			var assertionErr error
+			statementList, assertionErr = c.prepareNativeAssertions(name, descriptor, statementList)
+			if assertionErr != nil {
+				return nil, assertionErr
+			}
 			priorMemberBody := c.nativeMemberBody
 			c.nativeMemberBody = statementList
 			defer func() { c.nativeMemberBody = priorMemberBody }()
@@ -12874,6 +12882,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		descriptor, err := c.obj.getUtf8(method.DescriptorIndex)
 		if err != nil {
 			return nil, utils.Wrapf(err, "getUtf8(%v) failed", method.DescriptorIndex)
+		}
+		if c.nativeMemberCurrent != nil && c.nativeMemberCurrent.assertions != nil && c.nativeMemberCurrent.assertions.initializer == method {
+			continue
 		}
 		if c.nativeCaptureFields != nil && c.nativeMemberCurrent == nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
 			continue

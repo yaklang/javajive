@@ -172,6 +172,12 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 		return nil, nil, false
 	}
 	switch x := st.(type) {
+	case *nativeAssertStatement:
+		roots := []values.JavaValue{x.condition}
+		if x.message != nil {
+			roots = append(roots, x.message)
+		}
+		return roots, nil, true
 	case *statements.AssignStatement:
 		roots := []values.JavaValue{x.LeftValue}
 		if x.JavaValue != nil {
