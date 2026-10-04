@@ -722,6 +722,12 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		sub.foldSiblingResolver = c.foldSiblingResolver
 		sub.declarationResolver = c.declarationResolver
 		sub.nativeMemberLookup = c.nativeMemberLookup
+		if c.obj.GetClassName() == p.owner && nativeMemberJointAnonymousAccess(c.nativeMemberRoot, child.object.GetClassName(), c.Work) {
+			// This body is being emitted inside the same joint lexical commit.
+			// Reuse its proved member names; looking up the owner's incomplete
+			// cache entry would recurse, and a flat binary name loses private scope.
+			sub.nativeMemberRoot = c.nativeMemberRoot
+		}
 		sub.nativeCaptureFields = bindings
 		sub.nativeCaptureTypes = captureTypes
 		sub.nativeOuterContext = ctx

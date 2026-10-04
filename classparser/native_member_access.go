@@ -71,7 +71,7 @@ func (z *JarFS) nativeMemberAccessRepresentable(p *nativeMemberFamily, index *na
 			if !nativeProofWork(work, 1) {
 				return false
 			}
-			if user == p.owner || p.children[user] != nil {
+			if user == p.owner || p.children[user] != nil || nativeMemberJointAnonymousAccess(p, user, work) {
 				continue
 			}
 			if child.flags&2 != 0 {
@@ -86,4 +86,30 @@ func (z *JarFS) nativeMemberAccessRepresentable(p *nativeMemberFamily, index *na
 		}
 	}
 	return true
+}
+
+// Access belongs to the lexical declaration being committed, not its old flat
+// binary source unit. Only a proved anonymous child of this very owner receives
+// that scope. The caller still requires the whole anonymous source/ordinal
+// closure before publishing the member family; a foreign or deeper declaration
+// has not been moved into this scope and must retain the ordinary access check.
+func nativeMemberJointAnonymousAccess(p *nativeMemberFamily, user string, work *workbudget.Budget) bool {
+	if p == nil || p.anonymous == nil || p.anonymous.failed || p.anonymous.owner != p.owner || !nativeProofWork(work, 1) {
+		return false
+	}
+	child := p.anonymous.children[user]
+	if child == nil || child.object == nil {
+		return false
+	}
+	identity, known := sourceBridgeClassName(child.object, child.object.ThisClass)
+	if !known || identity != user || len(child.object.Attributes) > 65535 || !nativeProofWork(work, int64(len(child.object.Attributes))) {
+		return false
+	}
+	for _, attr := range child.object.Attributes {
+		if inner, ok := attr.(*InnerClassesAttribute); ok && inner != nil && (len(inner.Classes) > 65535 || !nativeProofWork(work, int64(len(inner.Classes)))) {
+			return false
+		}
+	}
+	owner, method, anonymous := originalAnonymousOwner(child.object)
+	return anonymous && owner == p.owner && method == child.method
 }
