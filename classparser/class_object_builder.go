@@ -28,7 +28,7 @@ func (c *ClassObjectBuilder) SetValue(old, new string) *ClassObjectBuilder {
 		c.NewError("Can't find constant string " + old)
 		return c
 	}
-	constant.Value = new
+	constant.SetString(new)
 	return c
 }
 func (c *ClassObjectBuilder) SetParam(k, v string) *ClassObjectBuilder {
@@ -38,6 +38,6 @@ func (c *ClassObjectBuilder) SetParam(k, v string) *ClassObjectBuilder {
 		c.NewError("Can't find constant string " + old)
 		return c
 	}
-	constant.Value = v
+	constant.SetString(v)
 	return c
 }

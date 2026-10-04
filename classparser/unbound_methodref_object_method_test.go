@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -16,29 +15,14 @@ import (
 // the cast is skipped (it would break downstream type inference). Kill-switch:
 // JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF. Real hit: commons-lang3 MethodUtils `map(Method::toString)`.
 func TestUnboundMethodRefObjectMethodCastIsLoadBearing(t *testing.T) {
-	// Build a minimal seed class that has a raw List → stream → map(Method::toString) pattern.
-	// We use a pre-built seed for determinism.
-	data, err := os.ReadFile("testdata/regression/UnboundMethodRefSeed.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
-	}
-
-	os.Unsetenv("JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !strings.Contains(on, "(Function") || !strings.Contains(on, "::toString") {
-		t.Errorf("fix ON: expected (Function<...>) Method::toString cast, got:\n%s", on)
-	}
-
-	os.Setenv("JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF", "1")
-	defer os.Unsetenv("JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if strings.Contains(off, "(Function") {
-		t.Errorf("fix OFF: expected bare Method::toString (no cast), got:\n%s", off)
-	}
+	raw := reviewedRemainingSAMRaw(t, "UnboundMethodRefSeed")
+	assertReviewedTypeVarMethod(t, raw, "describeMethods", "(Ljava/util/List;)Ljava/lang/String;", "(Ljava/util/List<Ljava/lang/reflect/Method;>;)Ljava/lang/String;")
+	assertReviewedRemainingSAMTarget(t, raw, "java/lang/reflect/Method", "toString", "()Ljava/lang/String;", "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/reflect/Method;)Ljava/lang/String;")
+	reviewedSeedSources(t, "testdata/regression/UnboundMethodRefSeed.class", "JDEC_LAMBDA_RAW_JDK_RECV_CAST_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `describeMethods\(`)
+		requireReviewedPattern(t, body, `\.map\([^;]*Function<Method,\s*String>[^;]*Method::toString[^;]*\.collect\([^;]*Collectors\.joining\(", "\)`)
+		if strings.Count(body, "Method::toString") != 1 {
+			t.Fatal("unbound producer duplicated")
+		}
+	})
 }

@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixCaffeineRemainingReconstructs repairs leftover caffeine tree sites.
 // Kill-switch: JDEC_CAFFEINE_REMAINING_OFF=1.
 func fixCaffeineRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_CAFFEINE_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_CAFFEINE_REMAINING_OFF") == "1" {
 		return body
 	}
 	// UnsafeAccess: load() throws checked exceptions; the empty static
@@ -49,17 +49,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body, "Object[] var1 = this.consumerBuffer", "E[] var1 = this.consumerBuffer")
 		body = strings.ReplaceAll(body, "Object[] var5 = this.producerBuffer", "E[] var5 = this.producerBuffer")
 	}
-	// LocalCache.statsAware: lambda accumulator erased to Object vs R.
-	if strings.Contains(body, "interface LocalCache") {
-		body = strings.Replace(body,
-			"return (l0) -> {\n\t\t\tObject lv1_5 = null;",
-			"return (l0) -> {\n\t\t\tR lv1_5 = null;",
-			1)
-		body = strings.Replace(body,
-			"return (l0, l1) -> {\n\t\t\tObject lv2_8 = null;",
-			"return (l0, l1) -> {\n\t\t\tR lv2_8 = null;",
-			1)
-	}
 	// Tree dump inserts raw Object SAM casts; upgrade them to K/V witnesses.
 	// Gate on caffeine: the Object,Object,Object BiFunction witness is not
 	// valid on IOStream.reduce (U/T, not K/V).
@@ -67,9 +56,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"(BiFunction<Object, Executor, CompletableFuture>)",
 			"(BiFunction<? super K, Executor, CompletableFuture<V>>)")
-		body = strings.ReplaceAll(body,
-			"(Function<Object, CompletableFuture>)",
-			"(Function<? super K, ? extends CompletableFuture<V>>)")
 		body = strings.ReplaceAll(body,
 			"(BiFunction<Iterable, Executor, CompletableFuture>)",
 			"(BiFunction<Iterable<? extends K>, Executor, CompletableFuture<Map<K, V>>>)")
@@ -88,12 +74,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"Consumer<Node> var3 =",
 			"Consumer<Node<K, V>> var3 =")
-		body = strings.ReplaceAll(body,
-			"(Supplier<Iterator>)",
-			"(Supplier<Iterator<Node<K, V>>>)")
-		body = strings.ReplaceAll(body,
-			"Supplier<Iterator> var4 =",
-			"Supplier<Iterator<Node<K, V>>> var4 =")
 		// Raw BoundedPolicy + lambda: diamond inference fails, and
 		// Async::getIfReady is an overloaded method-ref that javac rejects.
 		body = strings.ReplaceAll(body,
@@ -108,9 +88,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"new BoundedLocalCache$BoundedPolicy<K, V>(var1,(Function<CompletableFuture<V>, V>)(Async::getIfReady),this.isWeighted)",
 			"new BoundedLocalCache$BoundedPolicy(var1,(l0) -> Async.getIfReady((CompletableFuture)(l0)),this.isWeighted)")
-		body = strings.ReplaceAll(body,
-			"new WriteThroughEntry((ConcurrentMap)",
-			"new WriteThroughEntry<K, V>((ConcurrentMap)")
 		body = strings.ReplaceAll(body,
 			"Function<Object, CompletableFuture> var3 = this::get;",
 			"Function<? super K, CompletableFuture<V>> var3 = this::get;")
@@ -130,14 +107,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.Replace(body,
 			"var6 = var5.next();",
 			"var6 = (K)(var5.next());",
-			1)
-		body = strings.Replace(body,
-			"return this.get(var1,(l0, l1) -> {\n\t\t\treturn CompletableFuture.supplyAsync(() -> {\n\t\t\t\treturn var2.apply(var1);\n\t\t\t},l1);\n\t\t});",
-			"return this.get(var1,(BiFunction<? super K, Executor, CompletableFuture<V>>) ((l0, l1) -> {\n\t\t\treturn CompletableFuture.supplyAsync(() -> {\n\t\t\t\treturn var2.apply(var1);\n\t\t\t},l1);\n\t\t}));",
-			1)
-		body = strings.Replace(body,
-			"this.getAll(var1,(l0, l1) -> {\n\t\t\treturn CompletableFuture.supplyAsync(() -> {\n\t\t\t\treturn ((Map)(var2.apply(l0)));\n\t\t\t},l1);\n\t\t}));",
-			"this.getAll(var1,(BiFunction<Iterable<? extends K>, Executor, CompletableFuture<Map<K, V>>>) ((l0, l1) -> {\n\t\t\treturn CompletableFuture.supplyAsync(() -> {\n\t\t\t\treturn ((Map)(var2.apply(l0)));\n\t\t\t},l1);\n\t\t})));",
 			1)
 		body = strings.Replace(body,
 			"this.cache().computeIfAbsent(var1,(l0) -> {\n\t\t\tvar5_f1[0] = ((CompletableFuture)(var2.apply(var1,this.cache().executor())));\n\t\t\treturn ((CompletableFuture)(Objects.requireNonNull(var5_f1[0])));\n\t\t},var3,false)",
@@ -177,12 +146,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body, "var1.accept(lv1_4);", "var1.accept((V)(lv1_4));")
 		body = strings.ReplaceAll(body, "var1.accept(lv2_6);", "var1.accept((V)(lv2_6));")
 	}
-	if strings.Contains(body, "class LocalAsyncCache$AsyncBulkCompleter") {
-		body = strings.Replace(body,
-			"Object lv1_4 = var1.get(l0);\n\t\t\tl1.obtrudeValue(lv1_4);",
-			"V lv1_4 = (V)(var1.get(l0));\n\t\t\tl1.obtrudeValue(lv1_4);",
-			1)
-	}
 	if strings.Contains(body, "class LocalAsyncLoadingCache$LoadingCacheView") {
 		body = strings.ReplaceAll(body, "long lv1_9 = var1[0];", "long lv1_9 = var2[0];")
 		body = strings.ReplaceAll(body, "getIfPresentQuietly(var1,var1)", "getIfPresentQuietly(var1,var2)")
@@ -217,10 +180,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		"new WriteThroughEntry<K, V>((ConcurrentMap)(this.this$1.this$0),(K)(var1.getKey()),(V)(var2))")
 	if strings.Contains(body, "class BoundedLocalCache") {
 		body = strings.Replace(body,
-			"this.accessPolicy = (Consumer) (((this.evicts()) && (this.expiresAfterAccess())) ? (this::onAccess) : ((l0) -> {\n\t\t}));",
-			"this.accessPolicy = ((this.evicts()) && (this.expiresAfterAccess())) ? (this::onAccess) : ((l0) -> {\n\t\t});",
-			1)
-		body = strings.Replace(body,
 			"Object lv14_4 = Objects.requireNonNull(var1.apply(l0,l1));",
 			"V lv14_4 = (V)(Objects.requireNonNull(var1.apply(l0,l1)));",
 			1)
@@ -247,12 +206,6 @@ func fixCaffeineRemainingReconstructs(body string) string {
 		body = strings.Replace(body,
 			"return (((this.expiresAfterAccess()) ? ((((var2) - (var1.getAccessTime())) >= (this.expiresAfterAccessNanos())) ? (1) : (0)) : (0)) | ((this.expiresAfterWrite()) ? ((((var2) - (var1.getWriteTime())) >= (this.expiresAfterWriteNanos())) ? (1) : (0)) : (0))) | ((this.expiresVariable()) ? ((((var2) - (var1.getVariableTime())) >= (0L)) ? (1) : (0)) : (0));",
 			"return ((((this.expiresAfterAccess()) ? ((((var2) - (var1.getAccessTime())) >= (this.expiresAfterAccessNanos())) ? (1) : (0)) : (0)) | ((this.expiresAfterWrite()) ? ((((var2) - (var1.getWriteTime())) >= (this.expiresAfterWriteNanos())) ? (1) : (0)) : (0))) | ((this.expiresVariable()) ? ((((var2) - (var1.getVariableTime())) >= (0L)) ? (1) : (0)) : (0))) != (0);",
-			1)
-	}
-	if strings.Contains(body, "class Caffeine") {
-		body = strings.Replace(body,
-			"return ((var1) && ((this.expiry) != (null))) ? (new Async$AsyncExpiry(this.expiry)) : (this.expiry);",
-			"return (Expiry<K, V>) (((var1) && ((this.expiry) != (null))) ? (new Async$AsyncExpiry(this.expiry)) : (this.expiry));",
 			1)
 	}
 	if strings.Contains(body, "class LocalAsyncCache$AsMapView") {

@@ -2,8 +2,8 @@ package rewriter
 
 import (
 	"fmt"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"maps"
-	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -38,7 +38,7 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// live in a sibling scope of their minting store (see Scope.allReplace). Runs before the
 	// declaration-placement passes so they see the unified ids and place the single declaration to
 	// dominate the rescued reads too. Kill-switch: JDEC_ORPHAN_GLOBAL_REBIND_OFF=1.
-	if os.Getenv("JDEC_ORPHAN_GLOBAL_REBIND_OFF") != "1" {
+	if jdecenv.Get("JDEC_ORPHAN_GLOBAL_REBIND_OFF") != "1" {
 		replayUnambiguousRebindings(sts, scope.allReplace, className, methodName)
 	}
 	var checkUndefinedVar func(scope *Scope, parentAssigned map[*utils.VariableId]struct{})
@@ -47,6 +47,9 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	varAssignMapDeep := map[*utils.VariableId][]int{}
 	checkUndefinedVar = func(scope *Scope, parentAssigned map[*utils.VariableId]struct{}) {
 		assigned := maps.Clone(parentAssigned)
+		if scope.entryDefinition != nil {
+			assigned[scope.entryDefinition] = struct{}{}
+		}
 		for _, v := range scope.varMap {
 			switch value := v.(type) {
 			case *Scope:
@@ -162,7 +165,8 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// The topLevelDeclDominatesAllUses gate still relocates ONLY declarations that fail to dominate a
 	// use, so correctly-scoped locals are untouched. Setting the switch restores the reused-only pass
 	// (byte-for-byte baseline).
-	liveIntervalAll := os.Getenv("JDEC_LIVEINTERVAL_OFF") == ""
+	restoreSingleDefinitionArrayDeclarations(sts, params)
+	liveIntervalAll := jdecenv.Get("JDEC_LIVEINTERVAL_OFF") == ""
 	placeCrossScopeDeclarations(sts, scope.reused, liveIntervalAll)
 	// switchHoistDeclarations (keyed by VarUid) and placeCrossScopeDeclarations (keyed by
 	// *VariableId) can independently emit a bare `T x;` for the SAME logical local when both
@@ -172,13 +176,9 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// the final step: two bare declarations of the identical *VariableId in one block are never valid
 	// Java, and matching on the id pointer leaves genuinely distinct same-named locals untouched.
 	dropDuplicateDeclarations(sts)
-	// Name-based safety net: rewriteVar can split one JVM slot into two *VariableIds that render the
-	// same varN spelling, leaving one of them with NO declaration of its own (its uses then fail to
-	// compile as "cannot find symbol: variable varN"). placeCrossScopeDeclarations is keyed by id and
-	// so never sees the declaration-less id; coverUndeclaredGeneratedLocals widens the existing
-	// same-name declaration's scope to lexically cover those uncovered occurrences. It only acts when a
-	// name genuinely has an out-of-scope occurrence, so it cannot disturb already-valid output.
-	if os.Getenv("JDEC_COVER_UNDECLARED_OFF") != "1" {
+	// Complete lexical coverage by exact declaration identity. A generated
+	// spelling is provisional and never proves two JVM live ranges equivalent.
+	if jdecenv.Get("JDEC_COVER_UNDECLARED_OFF") != "1" {
 		coverUndeclaredGeneratedLocals(sts)
 		dropDuplicateDeclarations(sts)
 	}
@@ -188,36 +188,52 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 	// concrete-typed slot under one varN spelling and keep the Object declaration, so a later
 	// `varN.method(...)` fails ("cannot find symbol: method ..., location: variable varN of type
 	// Object"). See narrowNullInitObjectDecl. Kill-switch: JDEC_NULLINIT_NARROW_OFF=1.
-	if os.Getenv("JDEC_NULLINIT_NARROW_OFF") != "1" {
+	if jdecenv.Get("JDEC_NULLINIT_NARROW_OFF") != "1" {
 		narrowNullInitObjectDecl(sts)
 	}
-	if os.Getenv("JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF") != "1" {
+	if jdecenv.Get("JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF") != "1" {
 		widenConcreteDeclToObject(sts)
 	}
 }
 
-// dropDuplicateDeclarations removes redundant bare `T x;` declarations that name a *VariableId
-// already declared earlier in the SAME block list. Re-declaring the same id in a sibling/nested
-// block is legal Java (and intentional after hoisting), so each block list is scoped with its own
-// seen-set rather than a single global one.
+// dropDuplicateDeclarations removes repeated declaration flags for an exact
+// identity already visible in the current lexical scope. Value stores and
+// independent identities in sibling scopes remain intact.
 func dropDuplicateDeclarations(sts *[]statements.Statement) {
+	deduplicateDeclarationIdentity(sts, map[*utils.VariableId]bool{})
+}
+
+// Declaration flags are placement decisions, not value definitions. Once the
+// exact identity is in scope, a later store remains a store with its effects;
+// only its redundant declaration flag is removed. Sibling scopes have their
+// own sets, and equal spellings never unify two different identities.
+func deduplicateDeclarationIdentity(sts *[]statements.Statement, ancestors map[*utils.VariableId]bool) {
 	if sts == nil {
 		return
 	}
+	seen := maps.Clone(ancestors)
 	list := *sts
-	seen := map[*utils.VariableId]struct{}{}
 	out := list[:0]
 	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok && as.IsDeclare && as.JavaValue == nil && as.ArrayMember == nil {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil {
-				if _, dup := seen[ref.Id]; dup {
-					continue
+		if as, ok := st.(*statements.AssignStatement); ok && (as.IsFirst || as.IsDeclare) && as.ArrayMember == nil {
+			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
+				if seen[ref.Id] {
+					if as.JavaValue == nil {
+						continue
+					}
+					// A leaf statement may be shared by two structured arms.
+					// Declaration placement belongs to this occurrence only.
+					copy := *as
+					copy.IsFirst = false
+					copy.IsDeclare = false
+					st = &copy
+				} else {
+					seen[ref.Id] = true
 				}
-				seen[ref.Id] = struct{}{}
 			}
 		}
-		for _, cl := range childStatementLists(st) {
-			dropDuplicateDeclarations(cl)
+		for _, child := range childStatementLists(st) {
+			deduplicateDeclarationIdentity(child, seen)
 		}
 		out = append(out, st)
 	}
@@ -292,7 +308,7 @@ func collectEmbeddedDeclInfos(sts []statements.Statement, byID map[*utils.Variab
 // assigns before any read on every reaching path, so definite-assignment holds). Kill-switch:
 // JDEC_EMBED_ASSIGN_DECL_OFF=1.
 func SynthesizeUndeclaredEmbeddedAssignDecls(sts *[]statements.Statement, targets []*values.JavaRef) {
-	if sts == nil || len(targets) == 0 || os.Getenv("JDEC_EMBED_ASSIGN_DECL_OFF") == "1" {
+	if sts == nil || len(targets) == 0 || jdecenv.Get("JDEC_EMBED_ASSIGN_DECL_OFF") == "1" {
 		return
 	}
 	declaredID := map[*utils.VariableId]struct{}{}
@@ -360,7 +376,7 @@ func SynthesizeUndeclaredEmbeddedAssignDecls(sts *[]statements.Statement, target
 // defs), a non-array copy, or an already-typed local is left untouched. Kill-switch:
 // JDEC_COPY_ARRAY_DECL_TYPE_OFF=1.
 func PropagateCopyArrayDeclType(sts *[]statements.Statement) {
-	if sts == nil || os.Getenv("JDEC_COPY_ARRAY_DECL_TYPE_OFF") == "1" {
+	if sts == nil || jdecenv.Get("JDEC_COPY_ARRAY_DECL_TYPE_OFF") == "1" {
 		return
 	}
 	// Per unified variable id: every left-hand JavaRef (declarations + stores) and its value-defining
@@ -430,6 +446,12 @@ type Scope struct {
 	sts         *[]statements.Statement
 	varMap      []any
 	assignedMap map[string]*utils.VariableId
+	// Shared across lexical scopes; only immutable, solved def-use identities
+	// can claim an existing source declaration through this map.
+	solvedWebNames map[*utils.VariableId]*utils.VariableId
+	// A catch parameter is defined by handler entry, independently of ASTOREs
+	// inside its body. Keep these definitions local to this lexical scope.
+	entryDefinition *utils.VariableId
 	// minted is the set of VariableIds this method's rewriteVar has freshly minted. It is shared
 	// (same map pointer) across every scope of one method, unlike assignedMap which is copied into
 	// each SubScope. The slot's JavaRef object can be shared across sibling/disjoint branches and is
@@ -465,12 +487,13 @@ type Scope struct {
 
 func NewScope(startId int, sts *[]statements.Statement) *Scope {
 	return &Scope{
-		nowId:       startId,
-		sts:         sts,
-		assignedMap: map[string]*utils.VariableId{},
-		minted:      map[*utils.VariableId]int{},
-		reused:      map[*utils.VariableId]struct{}{},
-		allReplace:  map[*utils.VariableId][]*utils.VariableId{},
+		nowId:          startId,
+		sts:            sts,
+		assignedMap:    map[string]*utils.VariableId{},
+		solvedWebNames: map[*utils.VariableId]*utils.VariableId{},
+		minted:         map[*utils.VariableId]int{},
+		reused:         map[*utils.VariableId]struct{}{},
+		allReplace:     map[*utils.VariableId][]*utils.VariableId{},
 	}
 }
 func (s *Scope) NextId() int {
@@ -504,7 +527,7 @@ func replayUnambiguousRebindings(sts *[]statements.Statement, allReplace map[*ut
 			}
 		}
 		if !unique {
-			if os.Getenv("JDEC_ORPHAN_REBIND_NAMEEQ_OFF") == "" {
+			if jdecenv.Get("JDEC_ORPHAN_REBIND_NAMEEQ_OFF") == "" {
 				newName := newId.String()
 				nameEq := newId != nil
 				for _, t := range targets[1:] {
@@ -535,13 +558,14 @@ func (s *Scope) SubScope(sts *[]statements.Statement) *Scope {
 	assignedMap := map[string]*utils.VariableId{}
 	maps.Copy(assignedMap, s.assignedMap)
 	newScope := &Scope{
-		nowId:       s.nowId,
-		sts:         sts,
-		deep:        s.deep + 1,
-		assignedMap: assignedMap,
-		minted:      s.minted,
-		reused:      s.reused,
-		allReplace:  s.allReplace,
+		nowId:          s.nowId,
+		sts:            sts,
+		deep:           s.deep + 1,
+		assignedMap:    assignedMap,
+		solvedWebNames: s.solvedWebNames,
+		minted:         s.minted,
+		reused:         s.reused,
+		allReplace:     s.allReplace,
 	}
 	s.varMap = append(s.varMap, newScope)
 	return newScope
@@ -767,6 +791,14 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 			left := core.UnpackSoltValue(statement.LeftValue)
 			hasNamed := false
 			if v, ok := left.(*values.JavaRef); ok {
+				if identity := v.SolvedWebIdentity; identity != nil {
+					if named := scope.solvedWebNames[identity]; named != nil {
+						idReplaceMap[v.Id] = named
+						v.Id = named
+						scope.assignedMap[v.VarUid] = named
+						scope.reused[named] = struct{}{}
+					}
+				}
 				_, ok := scope.assignedMap[v.VarUid]
 				if ok {
 					hasNamed = true
@@ -803,6 +835,9 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 					newRef.Id = newId
 					newRef.Id.SetName(fmt.Sprintf("var%d", scope.nowId))
 					statement.LeftValue = &newRef
+					if newRef.SolvedWebIdentity != nil {
+						scope.solvedWebNames[newRef.SolvedWebIdentity] = newId
+					}
 					scope.varMap = append(scope.varMap, statement)
 					scope.nowId++
 					scope.assignedMap[v.VarUid] = newId
@@ -819,10 +854,10 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 				core.TraceRewriteVar(className, methodName, "reuse depth=%d uid=%s id=%s", scope.deep, ref.VarUid, id.String())
 			}
 		case *statements.IfStatement:
-			if os.Getenv("JDEC_IFELSE_PREBIND_OFF") == "" {
+			if jdecenv.Get("JDEC_IFELSE_PREBIND_OFF") == "" {
 				prebindEscapingIfElseSlots(scope, statement, stsSnapshot[stmtIdx+1:], idReplaceMap, className, methodName)
 			}
-			if os.Getenv("JDEC_IFELSE_PARALLEL_PREBIND_OFF") == "" {
+			if jdecenv.Get("JDEC_IFELSE_PARALLEL_PREBIND_OFF") == "" {
 				prebindParallelTypedIfElseDefs(scope, statement, stsSnapshot[stmtIdx+1:], idReplaceMap, className, methodName)
 			}
 			subScope := scope.SubScope(&statement.IfBody)
@@ -844,7 +879,7 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 			core.TraceRewriteVar(className, methodName, "enter do-while depth=%d body=%d", subScope.deep, len(statement.Body))
 			rewriteVar(subScope, className, methodName)
 		case *statements.SwitchStatement:
-			if os.Getenv("JDEC_SWITCH_PREBIND_OFF") == "" {
+			if jdecenv.Get("JDEC_SWITCH_PREBIND_OFF") == "" {
 				prebindEscapingSwitchSlots(scope, statement, stsSnapshot[stmtIdx+1:], idReplaceMap, className, methodName)
 			}
 			subScope := scope.SubScope(nil)
@@ -871,9 +906,16 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 			subScope := scope.SubScope(&statement.TryBody)
 			core.TraceRewriteVar(className, methodName, "enter try depth=%d body=%d", subScope.deep, len(statement.TryBody))
 			rewriteVar(subScope, className, methodName)
-			for _, c := range statement.CatchBodies {
-				subScope = scope.SubScope(&c)
-				core.TraceRewriteVar(className, methodName, "enter catch depth=%d body=%d", subScope.deep, len(c))
+			for i := range statement.CatchBodies {
+				subScope = scope.SubScope(&statement.CatchBodies[i])
+				if i < len(statement.Exception) {
+					if ex := statement.Exception[i]; ex != nil && ex.Id != nil {
+						subScope.assignedMap[ex.VarUid] = ex.Id
+						subScope.entryDefinition = ex.Id
+						core.TraceRewriteVar(className, methodName, "catch entry depth=%d uid=%s id=%s", subScope.deep, ex.VarUid, ex.Id.String())
+					}
+				}
+				core.TraceRewriteVar(className, methodName, "enter catch depth=%d body=%d", subScope.deep, len(statement.CatchBodies[i]))
 				rewriteVar(subScope, className, methodName)
 			}
 		}
@@ -1078,7 +1120,7 @@ func prebindEscapingIfElseSlots(scope *Scope, ifst *statements.IfStatement, afte
 		// instead: the ordinary AssignStatement reuse-minted path already reuses this id, marks it
 		// reused, and hoists its single declaration to the common ancestor (identical to the output
 		// with this whole pass disabled). Kill-switch: JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF=1.
-		if os.Getenv("JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF") == "" {
+		if jdecenv.Get("JDEC_IFELSE_PREBIND_MINTED_REUSE_OFF") == "" {
 			_, ifMinted := scope.minted[origId]
 			_, elseMinted := scope.minted[elseRef.Id]
 			if ifMinted || elseMinted {
@@ -1365,12 +1407,12 @@ func hoistSwitchDeclarations(sts *[]statements.Statement) {
 		case *statements.IfStatement:
 			hoistSwitchDeclarations(&s.IfBody)
 			hoistSwitchDeclarations(&s.ElseBody)
-			if os.Getenv("JDEC_IF_HOIST_OFF") == "" {
+			if jdecenv.Get("JDEC_IF_HOIST_OFF") == "" {
 				for _, decl := range ifHoistDeclarations(s, list[i+1:]) {
 					out = append(out, decl)
 				}
 			}
-			if os.Getenv("JDEC_PARALLEL_ARM_HOIST_OFF") == "" {
+			if jdecenv.Get("JDEC_PARALLEL_ARM_HOIST_OFF") == "" {
 				for _, decl := range parallelArmDeclHoist(s, list[:i], list[i+1:]) {
 					out = append(out, decl)
 				}
@@ -1532,7 +1574,7 @@ func switchHoistDeclarations(sw *statements.SwitchStatement, afterSts []statemen
 // one declaration read afterwards must be hoisted. Widening scope is always valid Java. Kill-switch:
 // JDEC_SYNC_HOIST_OFF=1.
 func syncHoistDeclarations(sync *statements.SynchronizedStatement, afterSts []statements.Statement) []statements.Statement {
-	if os.Getenv("JDEC_SYNC_HOIST_OFF") != "" {
+	if jdecenv.Get("JDEC_SYNC_HOIST_OFF") != "" {
 		return nil
 	}
 	declaredInside := map[string]bool{}
@@ -2054,7 +2096,7 @@ func assignRendersAsPlain(as *statements.AssignStatement) (ok bool) {
 // the name-collision false positives/negatives that statementsReadName suffers. Kill-switch:
 // JDEC_SWITCH_HOIST_IDENTITY_OFF=1 falls back to the legacy name-based test.
 func assignsReadAfterByIdentity(afterSts []statements.Statement, assigns []*statements.AssignStatement) bool {
-	if os.Getenv("JDEC_SWITCH_HOIST_IDENTITY_OFF") == "1" {
+	if jdecenv.Get("JDEC_SWITCH_HOIST_IDENTITY_OFF") == "1" {
 		for _, as := range assigns {
 			if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
 				if statementsReadName(afterSts, ref.String(&class_context.ClassContext{})) {
@@ -2117,7 +2159,7 @@ func statementReadTextMatches(st statements.Statement, re *regexp.Regexp) (res b
 			res = true
 		}
 	}()
-	return re.MatchString(st.String(&class_context.ClassContext{}))
+	return re.MatchString(st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}))
 }
 
 // statementsReferenceName reports whether any of the statements textually reference the variable
@@ -2149,7 +2191,7 @@ func statementTextMatches(st statements.Statement, re *regexp.Regexp) (res bool)
 			res = true
 		}
 	}()
-	return re.MatchString(st.String(&class_context.ClassContext{}))
+	return re.MatchString(st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}))
 }
 
 // generatedLocalNameRe matches a decompiler-generated local name (var0, var1, var2_1, ...). Only
@@ -2197,7 +2239,7 @@ func safeRenderStatement(st statements.Statement) (text string, ok bool) {
 			ok = false
 		}
 	}()
-	return st.String(&class_context.ClassContext{}), true
+	return st.String(&class_context.ClassContext{Env: jdecenv.Lookup()}), true
 }
 
 // isWordByteASCII reports whether b is an ASCII word char ([0-9A-Za-z_]) -- exactly the class Go's
@@ -2256,7 +2298,7 @@ func containsWholeWord(s, name string) bool {
 	return false
 }
 
-// stmtRenderMemo caches statement renders WITHIN a single coverUndeclaredGeneratedLocals pass so a deep
+// stmtRenderMemo caches statement renders within one declaration-placement pass so a deep
 // subtree is rendered ONCE rather than re-rendered for every generated-local name and again at every
 // recursion level -- the O(names x depth) render blow-up that made fastjson2 ObjectReaderBaseModule
 // take ~73s to decompile. A render is deterministic for a fixed tree (always &class_context.ClassContext{}), so a cache
@@ -2379,73 +2421,6 @@ func isDeclaredAtTopLevel(list []statements.Statement, id *utils.VariableId) boo
 	return false
 }
 
-// topLevelDeclDominatesAllUses reports whether the CURRENT declaration placement of id keeps every
-// reference to id lexically in scope, i.e. each use is preceded by a declaration of id in its own
-// block or an enclosing one. isDeclaredAtTopLevel only asks whether SOME top-level declaration
-// EXISTS, which is too weak: a reused JVM slot can have one source local declared inside an if's
-// else-arm (range B) and a disjoint later one re-declared `int var4 = ntz;` at the block top level
-// (range C, AFTER the if). The later declaration does not dominate the earlier sibling-arm use, so
-// that use is out of scope ("cannot find symbol") and the variable must still be hoisted. The check
-// must equally NOT hoist the dual shape where each scope already declares id for itself (e.g. VarFold:
-// `if(...){int var1=1; ...} int var1=2; ...` -- two disjoint scopes, both legal Java); a naive "is id
-// referenced before its top-level decl" test wrongly fires there because the if-arm references var1,
-// even though that arm self-declares it. blockHasUncoveredRef threads a scope-aware "declared so far"
-// flag and recurses, so a self-declaring child scope is covered while a bare sibling-arm use is not.
-// References are matched by id IDENTITY (a sentinel rename reusing the normal render path) so a
-// same-named but distinct reused slot can never produce a false positive. Kill-switch:
-// JDEC_NO_CROSS_SCOPE_DOMINATE restores the existence-only test.
-func topLevelDeclDominatesAllUses(list []statements.Statement, id *utils.VariableId) bool {
-	if id == nil {
-		return true
-	}
-	const probe = "__jdec_dom_probe__"
-	saved := id.Name
-	id.SetName(probe)
-	defer id.SetName(saved)
-	return !blockHasUncoveredRef(list, id, probe, false)
-}
-
-// blockHasUncoveredRef reports whether `list` contains a reference to id that is lexically OUT OF
-// SCOPE: not preceded by a declaration of id in this list or an enclosing block. `declaredOut` says
-// id is already declared by an enclosing block before this list begins. The walk threads a per-scope
-// "declared so far" flag: a simple `T id [= ...]` declaration turns it on for the rest of THIS list,
-// and every nested child block inherits the flag value as of the point it appears -- so a sibling-arm
-// use whose only declaration sits in the OTHER arm stays uncovered (must hoist), while a use inside a
-// child that declares id itself is covered (must NOT hoist; the VarFold dual-scope shape). Declaration
-// statements are matched by id identity and never counted as uses. Compound statements are recursed
-// into instead of name-matched whole, so an inner self-declaring scope never makes its enclosing
-// if/loop look like an uncovered use. A compound statement's own head (condition/selector) is not
-// separately inspected here: that conservative miss can only fail to hoist (matching the prior
-// existence-only behaviour, never a new over-hoist), so it cannot regress already-valid output.
-func blockHasUncoveredRef(list []statements.Statement, id *utils.VariableId, name string, declaredOut bool) bool {
-	declared := declaredOut
-	for _, st := range list {
-		decl := false
-		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id == id {
-				decl = true
-			}
-		}
-		if decl {
-			declared = true
-			continue
-		}
-		children := childStatementLists(st)
-		if len(children) == 0 {
-			if !declared && statementsReferenceName([]statements.Statement{st}, name) {
-				return true
-			}
-			continue
-		}
-		for _, cl := range children {
-			if blockHasUncoveredRef(*cl, id, name, declared) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // relocateDeclarations prepares a block subtree for a hoisted declaration of id: it demotes every
 // in-place declaration (`T x = ...`) of id to a plain assignment (`x = ...`) and drops any bare
 // `T x;` declaration that a deeper hoister had inserted, so exactly one declaration (the one being
@@ -2476,6 +2451,89 @@ func relocateDeclarations(block *[]statements.Statement, id *utils.VariableId) {
 		out = append(out, st)
 	}
 	*block = out
+}
+
+// restoreSingleDefinitionArrayDeclarations retains the declaration of a fresh array
+// temporary whose first-store flag was lost during slot reuse. A later local with
+// the same printed name cannot provide that declaration. Only one direct allocation
+// definition, an exact array type, and no declaration/parameter identity qualify.
+// This changes declaration syntax only; allocation and initializer evaluation stay put.
+func restoreSingleDefinitionArrayDeclarations(root *[]statements.Statement, params []*values.JavaRef) {
+	declared := map[*utils.VariableId]bool{}
+	definitions := map[*utils.VariableId][]*statements.AssignStatement{}
+	for _, param := range params {
+		if param != nil && param.Id != nil {
+			declared[param.Id] = true
+		}
+	}
+	var walk func([]statements.Statement)
+	walk = func(list []statements.Statement) {
+		for _, st := range list {
+			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
+				if ref, ok := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok && ref != nil && ref.Id != nil && !ref.IsThis {
+					if as.IsFirst || as.IsDeclare {
+						declared[ref.Id] = true
+					}
+					if as.JavaValue != nil {
+						definitions[ref.Id] = append(definitions[ref.Id], as)
+					}
+				}
+			}
+			switch container := st.(type) {
+			case *statements.ForStatement:
+				walk([]statements.Statement{container.InitVar, container.Condition, container.EndExp})
+			case *statements.TryCatchStatement:
+				for _, exception := range container.Exception {
+					if exception != nil && exception.Id != nil {
+						declared[exception.Id] = true
+					}
+				}
+			}
+			for _, child := range childStatementLists(st) {
+				walk(*child)
+			}
+		}
+	}
+	if root == nil {
+		return
+	}
+	walk(*root)
+	for id, assigns := range definitions {
+		if declared[id] || len(assigns) != 1 {
+			continue
+		}
+		as := assigns[0]
+		ref := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef)
+		array, ok := values.UnpackSoltValue(as.JavaValue).(*values.NewExpression)
+		if !ok || array == nil || array.JavaType == nil || !array.JavaType.IsArray() ||
+			ref.Type() == nil || !ref.Type().IsArray() ||
+			!generatedLocalNameRe.MatchString(ref.String(&class_context.ClassContext{})) ||
+			!sameArrayTemporaryType(ref.Type(), array.JavaType) {
+			continue
+		}
+		as.IsFirst = true
+	}
+}
+
+func sameArrayTemporaryType(a, b types.JavaType) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	x, xok := a.RawType().(*types.JavaArrayType)
+	y, yok := b.RawType().(*types.JavaArrayType)
+	if !xok || !yok || x.Dimension != y.Dimension || x.JavaType == nil || y.JavaType == nil {
+		return false
+	}
+	switch component := x.JavaType.RawType().(type) {
+	case *types.JavaPrimer:
+		other, ok := y.JavaType.RawType().(*types.JavaPrimer)
+		return ok && component.Name == other.Name
+	case *types.JavaClass:
+		other, ok := y.JavaType.RawType().(*types.JavaClass)
+		return ok && strings.ReplaceAll(component.Name, "/", ".") == strings.ReplaceAll(other.Name, "/", ".")
+	default:
+		return false
+	}
 }
 
 // placeCrossScopeDeclarations hoists each generated local's declaration to the lowest block that
@@ -2535,7 +2593,7 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 				// Only leave it alone when that top-level declaration actually dominates every use;
 				// a later disjoint live-range re-declaration does not, and the earlier sibling use
 				// would otherwise stay out of scope. Kill-switch restores the existence-only skip.
-				if os.Getenv("JDEC_NO_CROSS_SCOPE_DOMINATE") != "" || topLevelDeclDominatesAllUses(list, id) {
+				if jdecenv.Get("JDEC_NO_CROSS_SCOPE_DOMINATE") != "" || topLevelDeclDominatesAllUses(list, id) {
 					continue
 				}
 			}
@@ -2554,18 +2612,30 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 				// common ancestor of all uses is exactly this block.
 				belongs = true
 			} else if cnt == 1 {
-				// Referenced from a single child container: it belongs here only if that container
-				// uses it in two or more of its OWN child scopes (both if-arms, >=2 switch cases,
-				// try+catch); otherwise the true home is deeper and recursion will place it.
+				// A body's declaration cannot bind the enclosing head, including
+				// an assignment folded into the condition. Keep that assignment
+				// in place; only its declaration belongs before the container.
+				// Printed-name counts nominate candidates; the head must use this
+				// exact identity, not a same-spelled local in another live range.
+				belongs = statementHeadReferencesIdentity(list[singleIdx], id)
+				// Otherwise this block is the lowest common ancestor only when
+				// at least two child scopes use the candidate.
 				refChildren := 0
 				for _, cl := range childStatementLists(list[singleIdx]) {
 					if statementsReferenceName(*cl, name, memo) {
 						refChildren++
 					}
 				}
-				belongs = refChildren >= 2
+				belongs = belongs || refChildren >= 2
 			}
 			if !belongs {
+				continue
+			}
+			// Printed names can coincide in distinct live ranges (e.g. a
+			// branch-local ByteBuffer and a later Path). Name-based sibling
+			// counts are only candidates, not a proof that this identity
+			// escapes its declaration. Check before moving either definition.
+			if jdecenv.Get("JDEC_NO_CROSS_SCOPE_DOMINATE") == "" && topLevelDeclDominatesAllUses(list, id) {
 				continue
 			}
 			relocateDeclarations(block, id)
@@ -2583,263 +2653,14 @@ func placeCrossScopeDeclarations(block *[]statements.Statement, reused map[*util
 	}
 }
 
-// genLocalDeclByName scans `list` and its whole subtree for declarations (`T x;` or `T x = ...`) of
-// decompiler-generated locals, returning for each rendered name a representative LeftValue (used to
-// rebuild a `T x;` declaration) and the set of DISTINCT rendered types seen for that name. A name with
-// more than one distinct type denotes genuinely different disjoint-slot locals that merely share the
-// slot-derived varN spelling; widening one type's scope over the other would mis-type it, so such
-// names are excluded from the name-based coverage repair.
-func genLocalDeclByName(list []statements.Statement) (map[string]values.JavaValue, map[string]map[string]struct{}) {
-	refByName := map[string]values.JavaValue{}
-	typesByName := map[string]map[string]struct{}{}
-	var walk func([]statements.Statement)
-	walk = func(sts []statements.Statement) {
-		for _, st := range sts {
-			if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
-				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis {
-					name := ref.String(&class_context.ClassContext{})
-					if generatedLocalNameRe.MatchString(name) && ref.Type() != nil {
-						if _, seen := refByName[name]; !seen {
-							refByName[name] = as.LeftValue
-						}
-						if typesByName[name] == nil {
-							typesByName[name] = map[string]struct{}{}
-						}
-						typesByName[name][ref.Type().String(&class_context.ClassContext{})] = struct{}{}
-					}
-				}
-			}
-			for _, cl := range childStatementLists(st) {
-				walk(*cl)
-			}
-		}
-	}
-	walk(list)
-	return refByName, typesByName
-}
-
-// topLevelDeclByName reports whether `list` directly contains a declaration of a generated local
-// rendered as `name` (so a declaration in THIS block already dominates the whole block).
-func topLevelDeclByName(list []statements.Statement, name string) bool {
-	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(&class_context.ClassContext{}) == name {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// statementHeadReferencesName reports whether a compound statement references `name` in its OWN head
-// (an if/while condition, a for/switch selector, a try resource) rather than only inside its nested
-// statement bodies. It is computed as "occurrences in the full render" minus "occurrences across the
-// direct child bodies": the children's renders appear verbatim inside the full render, so the residual
-// is exactly the head. A head reference is evaluated in the ENCLOSING block's scope, so a local read or
-// embedded-assigned in a head (javac `(var7 = a[i]) != ' '`) must be declared in the block that
-// CONTAINS the statement, never merely in one of its bodies. Unrenderable nodes return false so the
-// repair stays conservative (it will simply not treat this as a head reference).
-func statementHeadReferencesName(st statements.Statement, name string, memo stmtRenderMemo) bool {
-	children := childStatementLists(st)
-	if len(children) == 0 {
-		return false
-	}
-	full, ok := memo.render(st)
-	if !ok {
-		return false
-	}
-	fullN := countWholeWord(full, name)
-	if fullN == 0 {
-		return false
-	}
-	childN := 0
-	for _, cl := range children {
-		for _, c := range *cl {
-			t, ok := memo.render(c)
-			if !ok {
-				return false
-			}
-			childN += countWholeWord(t, name)
-		}
-	}
-	return fullN > childN
-}
-
-// blockHasUncoveredRefByName reports whether `list` (and its subtree) contains a textual reference to
-// `name` that is not preceded by a declaration of `name` in its lexical scope chain (`declaredOut`
-// says an enclosing block already declares it). It mirrors blockHasUncoveredRef but matches BOTH
-// declarations and references by NAME -- which is exactly what javac's lexical resolution uses -- so it
-// detects the split-id residual where the ONLY `T varN` declaration lives deep in a nested arm while a
-// sibling/ancestor statement assigns or reads the same varN with no declaration of its own ("cannot
-// find symbol: variable varN"). A compound statement whose HEAD references the name (an embedded assign
-// or read inside an if/loop condition, javac `(var7 = a[i]) != ' '`) counts as an uncovered reference
-// at this block when the name is not yet declared here, because the head is evaluated in this block's
-// scope -- not the body's -- so a body-only declaration cannot cover it.
-func blockHasUncoveredRefByName(list []statements.Statement, name string, declaredOut bool, memo stmtRenderMemo) bool {
-	declared := declaredOut
-	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil && (as.IsFirst || as.IsDeclare) {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(&class_context.ClassContext{}) == name {
-				declared = true
-				continue
-			}
-		}
-		children := childStatementLists(st)
-		if len(children) == 0 {
-			// A render panic is conservatively treated as a match (mirrors statementTextMatches), so an
-			// unrenderable leaf never lets an out-of-scope use slip through the repair.
-			if !declared {
-				if t, ok := memo.render(st); !ok || containsWholeWord(t, name) {
-					return true
-				}
-			}
-			continue
-		}
-		// Prune a whole subtree that does not even mention the name: with no textual occurrence there is
-		// neither a reference nor a declaration of it below, so the head check and recursion would both
-		// find nothing. (A render failure disables the prune so behaviour stays conservative.)
-		if full, ok := memo.render(st); ok && !strings.Contains(full, name) {
-			continue
-		}
-		if !declared && statementHeadReferencesName(st, name, memo) {
-			return true
-		}
-		for _, cl := range children {
-			if blockHasUncoveredRefByName(*cl, name, declared, memo) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// relocateDeclarationsByName demotes every in-place declaration (`T x = ...`) of a generated local
-// rendered as `name` to a plain assignment and drops any bare `T x;` declaration, so that after the
-// caller prepends a single dominating `T x;` exactly one declaration survives. Matches by NAME (not id)
-// because the residual it repairs is precisely two distinct *VariableIds sharing one varN spelling.
-func relocateDeclarationsByName(block *[]statements.Statement, name string) {
-	if block == nil {
-		return
-	}
-	list := *block
-	out := list[:0]
-	for _, st := range list {
-		if as, ok := st.(*statements.AssignStatement); ok && as.ArrayMember == nil {
-			if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.String(&class_context.ClassContext{}) == name {
-				if as.IsDeclare && as.JavaValue == nil {
-					continue
-				}
-				if as.IsFirst || as.IsDeclare {
-					as.IsFirst = false
-					as.IsDeclare = false
-				}
-			}
-		}
-		for _, cl := range childStatementLists(st) {
-			relocateDeclarationsByName(cl, name)
-		}
-		out = append(out, st)
-	}
-	*block = out
-}
-
-// coverUndeclaredGeneratedLocals is a NAME-based safety net for the residual where rewriteVar splits
-// one JVM slot into two *VariableIds that render the SAME varN spelling: one carries the in-place
-// `T varN` declaration (deep in a nested arm) while the OTHER is only ever assigned/read with no
-// declaration of its own, so its uses fail to compile ("cannot find symbol: variable varN", e.g.
-// fastjson2 ObjectWriterAdapter.writeWithFilter's field-writer loop). Because both ids share the
-// slot-derived name and javac resolves locals by NAME, the fix is to widen the EXISTING declaration's
-// scope to the lowest block that lexically covers every textual occurrence of the name (the same
-// lowest-common-ancestor placement placeCrossScopeDeclarations does, but keyed by name so the
-// declaration-less id is also covered). It fires ONLY when a name actually has an out-of-scope
-// occurrence (blockHasUncoveredRefByName) and only for names with a single rendered type, so
-// correctly-scoped or genuinely-disjoint same-name locals are never touched. Hoisting only widens
-// scope and is always valid Java. Kill-switch: JDEC_COVER_UNDECLARED_OFF=1.
+// coverUndeclaredGeneratedLocals completes lexical coverage using declaration
+// identity. Printed slot names cannot establish a binding: they may coincide
+// across distinct definitions, including different types in the same branch.
+// Orphan reads are rebound only by the earlier explicit oldId -> newId proof;
+// an unrelated same-spelled declaration cannot provide their definition.
 func coverUndeclaredGeneratedLocals(block *[]statements.Statement) {
-	// One render memo is shared across the whole recursive pass: a subtree rendered while checking the
-	// root block is reused when the recursion descends into it. It is invalidated on every mutation, so
-	// the result is byte-identical to the previous (uncached) code -- just without the O(names x depth)
-	// re-rendering that dominated large methods (fastjson2 ObjectReaderBaseModule: ~73s -> sub-second).
-	coverUndeclaredGeneratedLocalsPass(block, stmtRenderMemo{})
-}
-
-func coverUndeclaredGeneratedLocalsPass(block *[]statements.Statement, memo stmtRenderMemo) {
-	if block == nil || len(*block) == 0 {
-		return
-	}
-	list := *block
-	refByName, typesByName := genLocalDeclByName(list)
-	if len(refByName) > 0 {
-		names := make([]string, 0, len(refByName))
-		for n := range refByName {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		texts := make([]string, len(list))
-		allMatch := make([]bool, len(list))
-		for i, st := range list {
-			t, ok := safeRenderStatement(st)
-			texts[i] = t
-			allMatch[i] = !ok
-			if ok {
-				memo[st] = t // seed the memo with the top-level renders we just computed
-			}
-		}
-		var hoisted []statements.Statement
-		for _, name := range names {
-			if len(typesByName[name]) != 1 {
-				continue
-			}
-			if topLevelDeclByName(list, name) {
-				continue
-			}
-			if !blockHasUncoveredRefByName(list, name, false, memo) {
-				continue
-			}
-			cnt := 0
-			singleIdx := -1
-			for i := range list {
-				if allMatch[i] || containsWholeWord(texts[i], name) {
-					cnt++
-					singleIdx = i
-				}
-			}
-			belongs := false
-			if cnt >= 2 {
-				belongs = true
-			} else if cnt == 1 {
-				// A single referencing child statement: its true home is deeper UNLESS the name is read
-				// in that statement's own head (evaluated in THIS block's scope, so it must be declared
-				// here) or it is used across >=2 of the statement's own child scopes.
-				if statementHeadReferencesName(list[singleIdx], name, memo) {
-					belongs = true
-				} else {
-					refChildren := 0
-					for _, cl := range childStatementLists(list[singleIdx]) {
-						if statementsReferenceName(*cl, name) {
-							refChildren++
-						}
-					}
-					belongs = refChildren >= 2
-				}
-			}
-			if !belongs {
-				continue
-			}
-			relocateDeclarationsByName(block, name)
-			hoisted = append(hoisted, statements.NewDeclareStatement(refByName[name]))
-			memo.invalidate() // the tree just changed; drop stale renders so later names re-render fresh
-		}
-		if len(hoisted) > 0 {
-			*block = append(hoisted, (*block)...)
-			memo.invalidate()
-		}
-	}
-	for _, st := range *block {
-		for _, cl := range childStatementLists(st) {
-			coverUndeclaredGeneratedLocalsPass(cl, memo)
-		}
-	}
+	restoreExplicitLocalDeclarations(block)
+	placeCrossScopeDeclarations(block, nil, true)
 }
 
 // isJavaLangObject reports whether t is exactly java.lang.Object (the supertype that the null-literal
@@ -2920,13 +2741,14 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 	}
 	type nullInitInfo struct {
 		objDeclRefs []*values.JavaRef // Object-typed `Object varN;`/`= null` declaration refs (retype)
-		hasAnyDecl  bool              // any declaration (IsFirst/IsDeclare) for this name exists
+		hasAnyDecl  bool              // this identity has an IsFirst/IsDeclare definition
 		reassignLV  values.JavaValue  // a representative reassignment LeftValue (synthesize a decl from)
 		reassignRef *values.JavaRef   // its unpacked ref (ResetVarType target)
 		rhsTokens   map[string]struct{}
 		rhsType     types.JavaType
 	}
-	infos := map[string]*nullInitInfo{}
+	infos := map[*utils.VariableId]*nullInitInfo{}
+	var ids []*utils.VariableId
 	var collect func([]statements.Statement)
 	collect = func(list []statements.Statement) {
 		for _, st := range list {
@@ -2934,10 +2756,11 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam {
 					name := ref.String(&class_context.ClassContext{})
 					if generatedLocalNameRe.MatchString(name) {
-						in := infos[name]
+						in := infos[ref.Id]
 						if in == nil {
 							in = &nullInitInfo{rhsTokens: map[string]struct{}{}}
-							infos[name] = in
+							infos[ref.Id] = in
+							ids = append(ids, ref.Id)
 						}
 						switch {
 						case as.IsFirst || as.IsDeclare:
@@ -2966,7 +2789,7 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 		}
 	}
 	collect(*sts)
-	// A candidate is a name whose non-null reassignments agree on ONE concrete (non-Object,
+	// A candidate is an identity whose non-null reassignments agree on ONE concrete (non-Object,
 	// non-primitive) reference type S, AND that is either an Object-typed declaration (retype to S) or
 	// has no declaration at all (synthesize `S varN;`). Bail early when nothing qualifies so the common
 	// path renders nothing.
@@ -2999,14 +2822,12 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 		sb.WriteByte('\n')
 	}
 	methodText := sb.String()
-	names := make([]string, 0, len(infos))
-	for n := range infos {
-		names = append(names, n)
-	}
-	sort.Strings(names)
+	// Keep deterministic lexical discovery order for provisional-name ties.
+	sort.SliceStable(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
 	var prepend []statements.Statement
-	for _, name := range names {
-		in := infos[name]
+	for _, id := range ids {
+		name := id.String()
+		in := infos[id]
 		if !candidate(in) {
 			continue
 		}
@@ -3033,7 +2854,8 @@ func narrowNullInitObjectDecl(sts *[]statements.Statement) {
 	}
 }
 
-// widenConcreteDeclToObject is the inverse of narrowNullInitObjectDecl. Kill-switch:
+// widenConcreteDeclToObject collects reaching stores by declaration identity,
+// as does narrowNullInitObjectDecl. A provisional spelling never joins stores. Kill-switch:
 // JDEC_WIDEN_CONCRETE_TO_OBJECT_OFF=1.
 func widenConcreteDeclToObject(sts *[]statements.Statement) {
 	if sts == nil || len(*sts) == 0 {
@@ -3043,7 +2865,8 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 		declRefs    []*values.JavaRef
 		hasObjectRe bool
 	}
-	infos := map[string]*concreteInfo{}
+	infos := map[*utils.VariableId]*concreteInfo{}
+	var ids []*utils.VariableId
 	objectNames := map[string]struct{}{}
 	var collect func([]statements.Statement)
 	collect = func(list []statements.Statement) {
@@ -3052,10 +2875,11 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 				if ref, ok2 := core.UnpackSoltValue(as.LeftValue).(*values.JavaRef); ok2 && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam {
 					name := ref.String(&class_context.ClassContext{})
 					if generatedLocalNameRe.MatchString(name) {
-						in := infos[name]
+						in := infos[ref.Id]
 						if in == nil {
 							in = &concreteInfo{}
-							infos[name] = in
+							infos[ref.Id] = in
+							ids = append(ids, ref.Id)
 						}
 						switch {
 						case as.IsFirst || as.IsDeclare:
@@ -3103,13 +2927,11 @@ func widenConcreteDeclToObject(sts *[]statements.Statement) {
 		sb.WriteByte('\n')
 	}
 	methodText := sb.String()
-	names := make([]string, 0, len(infos))
-	for n := range infos {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		in := infos[name]
+	// Keep deterministic lexical discovery order for provisional-name ties.
+	sort.SliceStable(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	for _, id := range ids {
+		name := id.String()
+		in := infos[id]
 		if !in.hasObjectRe || len(in.declRefs) == 0 {
 			continue
 		}

@@ -5,7 +5,9 @@ package javaclassparser
 // kill-switch: JDEC_COLLECTIONS4_REMAINING_OFF。
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -129,30 +131,21 @@ func TestCollections4IterableUtilsSingletonListCastIsLoadBearing(t *testing.T) {
 }
 
 func TestCollections4MultiValueMapClassCastIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/MultiValueMap.class")
-	if err != nil {
-		t.Fatalf("read MultiValueMap: %v", err)
-	}
-	os.Unsetenv("JDEC_COLLECTIONS4_REMAINING_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	if !strings.Contains(on, "multiValueMap(var0,(Class)(ArrayList.class))") {
-		t.Errorf("ON: expected raw Class cast, got:\n%s", on)
-	}
 
-	t.Setenv("JDEC_COLLECTIONS4_REMAINING_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	if strings.Contains(off, "multiValueMap(var0,(Class)(ArrayList.class))") {
-		t.Errorf("OFF: expected no Class reconstruct, got:\n%s", off)
-	}
-	if !strings.Contains(off, "multiValueMap(var0,ArrayList.class)") {
-		t.Errorf("OFF: expected raw ArrayList.class, got:\n%s", off)
-	}
+	path := "testdata/regression/MultiValueMap.class"
+	desc := "(Ljava/util/Map;)Lorg/apache/commons/collections4/map/MultiValueMap;"
+	raw, _, _ := reviewedFixtureMethod(t, path, "multiValueMap", desc)
+	assertReviewedTypeVarMethod(t, raw, "multiValueMap", desc, "<K:Ljava/lang/Object;V:Ljava/lang/Object;>(Ljava/util/Map<TK;-Ljava/util/Collection<TV;>;>;)Lorg/apache/commons/collections4/map/MultiValueMap<TK;TV;>;")
+	target := "(Ljava/util/Map;Ljava/lang/Class;)Lorg/apache/commons/collections4/map/MultiValueMap;"
+	assertReviewedTypeVarMethod(t, raw, "multiValueMap", target, "<K:Ljava/lang/Object;V:Ljava/lang/Object;C::Ljava/util/Collection<TV;>;>(Ljava/util/Map<TK;-TC;>;Ljava/lang/Class<TC;>;)Lorg/apache/commons/collections4/map/MultiValueMap<TK;TV;>;")
+	assertReviewedTypeVarInvoke(t, path, "multiValueMap", desc, 3, 184, "org/apache/commons/collections4/map/MultiValueMap", "multiValueMap", target)
+	reviewedSeedSources(t, path, "JDEC_COLLECTIONS4_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `multiValueMap\(Map<K, \? super Collection<V>> [^)]*\)`)
+		compact := compactReviewedGenericSource(body)
+		if !strings.Contains(compact, "multiValueMap((Map)(") || !strings.Contains(compact, ",(Class)(ArrayList.class))") || !strings.Contains(compact, "(MultiValueMap<K,V>)(MultiValueMap)") {
+			t.Fatal("lost original erased Map/Class factory tuple or generic result view: " + body)
+		}
+	})
 }
 
 func TestCollections4RangeEntryMapKeyCastIsLoadBearing(t *testing.T) {
@@ -179,40 +172,91 @@ func TestCollections4RangeEntryMapKeyCastIsLoadBearing(t *testing.T) {
 	}
 }
 
+// The former OFF expectation synthesized a RuntimeException which does not
+// occur in this member. Both original switch defaults reach ICONST_0/IRETURN.
+// TestAdversarialSiblingSwitchDefaultEqualityIdentityRoundTrip independently
+// checks fallthrough effects, unchanged receiver fields and thrown identity.
 func TestCollections4Flat3MapContainsValueDefaultIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/Flat3Map.class")
-	if err != nil {
-		t.Fatalf("read Flat3Map: %v", err)
+	const path = "testdata/regression/Flat3Map.class"
+	const descriptor = "(Ljava/lang/Object;)Z"
+	raw, code, _ := reviewedFixtureMethod(t, path, "containsValue", descriptor)
+	decoder := core.NewDecompiler(code.Code, nil)
+	if err := decoder.ParseOpcode(); err != nil {
+		t.Fatal(err)
 	}
-	os.Unsetenv("JDEC_COLLECTIONS4_REMAINING_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	onCV := on
-	if i := strings.Index(on, "public boolean containsValue"); i >= 0 {
-		j := strings.Index(on[i:], "\n\tpublic ")
-		if j > 0 {
-			onCV = on[i : i+j]
+	for _, sw := range []struct {
+		pc       uint16
+		fallback int32
+		targets  [3]int32
+	}{{24, 79, [3]int32{70, 61, 52}}, {86, 151, [3]int32{138, 125, 112}}} {
+		op := decoder.OpcodeByPC(sw.pc)
+		if op == nil || op.Instr.OpCode != core.OP_TABLESWITCH || op.SwitchDefaultOffset != sw.fallback || op.SwitchJmpCase.Len() != 3 {
+			t.Fatal("original size switch/default tuple changed")
+		}
+		for key, target := range sw.targets {
+			actual, ok := op.SwitchJmpCase.Get(key + 1)
+			if !ok || actual != target {
+				t.Fatal("original case fallthrough entry changed")
+			}
 		}
 	}
-	if strings.Contains(onCV, "throw new RuntimeException()") {
-		t.Errorf("ON: containsValue must drop default throw, got:\n%s", onCV)
-	}
-
-	t.Setenv("JDEC_COLLECTIONS4_REMAINING_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	offCV := off
-	if i := strings.Index(off, "public boolean containsValue"); i >= 0 {
-		j := strings.Index(off[i:], "\n\tpublic ")
-		if j > 0 {
-			offCV = off[i : i+j]
+	assertReviewedOpcode(t, code, 79, core.OP_GOTO, 0, 72)
+	assertReviewedOpcode(t, code, 151, core.OP_ICONST_0)
+	assertReviewedOpcode(t, code, 152, core.OP_IRETURN)
+	for _, op := range decoder.Opcodes() {
+		if op.Instr.OpCode == core.OP_NEW || op.Instr.OpCode == core.OP_ATHROW {
+			t.Fatal("original member now allocates or throws; review default contract again")
 		}
 	}
-	if !strings.Contains(offCV, "throw new RuntimeException()") {
-		t.Errorf("OFF: containsValue expected default throw, got:\n%s", offCV)
+	for _, pc := range []uint16{117, 130, 143} {
+		assertReviewedTypeVarInvoke(t, path, "containsValue", descriptor, pc, core.OP_INVOKEVIRTUAL, "java/lang/Object", "equals", descriptor)
 	}
+	assertReviewedTypeVarInvoke(t, path, "containsValue", descriptor, 12, core.OP_INVOKEVIRTUAL, "org/apache/commons/collections4/map/AbstractHashedMap", "containsValue", descriptor)
+	assertReviewedSources(t, raw, "JDEC_COLLECTIONS4_REMAINING_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `public boolean containsValue\(Object (\w+)\)`)
+		needle := requireReviewedPattern(t, body, `public boolean containsValue\(Object (\w+)\)`)[1]
+		if strings.Contains(body, "throw ") || strings.Contains(body, "new RuntimeException") {
+			t.Fatalf("invented exceptional default:\n%s", body)
+		}
+		starts := regexp.MustCompile(`switch\s*\(this\.size\)\s*\{`).FindAllStringIndex(body, -1)
+		if len(starts) != 2 {
+			t.Fatalf("original two size switches lost:\n%s", body)
+		}
+		for index, span := range starts {
+			open := span[1] - 1
+			close := javaMatchBrace(body, open)
+			if close < 0 {
+				t.Fatal("unclosed size switch")
+			}
+			sw := body[open+1 : close]
+			requireReviewedPattern(t, sw, `default:\s*return false;`)
+			positions := make([]int, 3)
+			for slot := 1; slot <= 3; slot++ {
+				label := []string{"", "1", "2", "3"}[slot]
+				marker := "case " + label + ":"
+				positions[slot-1] = strings.Index(sw, marker)
+				if positions[slot-1] < 0 {
+					t.Fatal("original size case lost")
+				}
+				next := len(sw)
+				if slot > 1 {
+					next = strings.Index(sw, "case "+[]string{"", "1", "2"}[slot-1]+":")
+				}
+				arm := sw[positions[slot-1]:next]
+				if index == 0 {
+					requireReviewedPattern(t, arm, `this\.value`+label+`\)\s*==\s*\(null\)`)
+				} else {
+					requireReviewedPattern(t, arm, regexp.QuoteMeta(needle)+`\.equals\(this\.value`+label+`\)`)
+				}
+				requireReviewedPattern(t, arm, `return true;`)
+				if slot > 1 && strings.Contains(arm, "break;") {
+					t.Fatal("original equality fallthrough became break")
+				}
+			}
+			if !(positions[2] < positions[1] && positions[1] < positions[0]) {
+				t.Fatal("original reverse case evaluation order changed")
+			}
+		}
+		requireReviewedPattern(t, body, `return this\.delegateMap\.containsValue\(`+regexp.QuoteMeta(needle)+`\);`)
+	})
 }

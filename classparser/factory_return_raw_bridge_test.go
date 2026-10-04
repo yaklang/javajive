@@ -55,23 +55,46 @@ func TestFixSelectMethodsAmbiguousIsLoadBearing(t *testing.T) {
 	}
 }
 
-func TestFixNeverThrownCNFEIsLoadBearing(t *testing.T) {
-	in := "" +
-		"\ttry{\n" +
-		"\t\treturn ClassUtils.createCompositeInterface(var2,this.classLoader);\n" +
-		"\t}catch(ClassNotFoundException var4){\n" +
-		"\t\treturn null;\n" +
-		"\t}\n"
-	os.Unsetenv("JDEC_CNFE_NEVER_THROWN_OFF")
-	on := fixNeverThrownCNFE(in)
-	if !strings.Contains(on, "Class.forName(\"java.lang.Object\")") {
-		t.Errorf("fix ON: expected Class.forName in try, got:\n%s", on)
+// A checked call already supplies the exception witness. Manufacturing a
+// reflective call to satisfy javac adds an unrelated class-loading effect.
+func TestCheckedClassLoadCatchPreservesOriginalEffects(t *testing.T) {
+	const source = `
+class ReviewedCheckedLoader {
+ final ClassNotFoundException failure=new ClassNotFoundException("sentinel");String trace="";
+ Class<?> resolve(int mode)throws ClassNotFoundException{trace+="L";if(mode==1)throw failure;if(mode==2)throw new IllegalStateException("runtime");return mode==3?null:String.class;}
+}
+public class CheckedLoadEffectsReview {
+ final ReviewedCheckedLoader loader=new ReviewedCheckedLoader();Class<?> cached;
+ Class<?> read(int mode){if(cached!=null)return cached;try{return cached=loader.resolve(mode);}catch(ClassNotFoundException caught){if(caught!=loader.failure)throw new AssertionError("identity");loader.trace+="C";return Object.class;}}
+ static String run(int mode){CheckedLoadEffectsReview c=new CheckedLoadEffectsReview();String out="";try{Class<?> first=c.read(mode);Class<?> second=c.read(0);out=(first==String.class)+":"+(first==Object.class)+":"+(first==null)+":"+(second==first)+":"+(c.cached==second);}catch(RuntimeException e){out=e.getClass().getName()+":"+e.getMessage()+":"+(c.cached==null);}return out+":"+c.loader.trace;}
+ public static void main(String[] args){for(int mode=0;mode<4;mode++)System.out.println(run(mode));}
+}`
+	_, classes := t04CompileRun(t, "8", "CheckedLoadEffectsReview", map[string]string{"CheckedLoadEffectsReview.java": source})
+	resolve := func(name string) ([]byte, bool) { raw, ok := classes[name]; return raw, ok }
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_CNFE_NEVER_THROWN_OFF", setting)
+		for _, mode := range []DecompileMode{Precision, Compatibility, "legacy"} {
+			var generated string
+			var err error
+			if mode == "legacy" {
+				generated, err = DecompileWithResolver(classes["CheckedLoadEffectsReview"], resolve)
+			} else {
+				var result DecompileResult
+				result, err = DecompileWithOptions(classes["CheckedLoadEffectsReview"], DecompileOptions{Mode: mode, TargetSourceVersion: 8, Resolve: resolve})
+				generated = result.Source
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(generated, "Class.forName(") {
+				t.Fatalf("%s/%q gained a reflective effect absent from the authored source:\n%s", mode, setting, generated)
+			}
+			if !strings.Contains(generated, ".resolve(") {
+				t.Fatalf("original checked invocation missing:\n%s", generated)
+			}
+		}
 	}
-	t.Setenv("JDEC_CNFE_NEVER_THROWN_OFF", "1")
-	off := fixNeverThrownCNFE(in)
-	if strings.Contains(off, "Class.forName(\"java.lang.Object\")") {
-		t.Errorf("fix OFF: expected no Class.forName inject, got:\n%s", off)
-	}
+	roundTripGenericFlow(t, "CheckedLoadEffectsReview", source, Precision, Compatibility, "legacy")
 }
 
 func TestImmutableBuilderWitnessIsLoadBearing(t *testing.T) {
@@ -264,84 +287,51 @@ func TestParamFieldRetRawBridgeIsLoadBearing(t *testing.T) {
 	}
 }
 
-// TestUnmodifiableListBridgeIsLoadBearing pins factoryReturnRawBridge on
-// Collections.unmodifiableList(Arrays.asList(Object[])). Kill-switch:
-// JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF. Real hits: guava Ordering.leastOf
-// (List<E extends T>) and Striped.bulkGet (Iterable<L>).
+// Generic return bridges preserve the erased Object[] factory result. The
+// production binding planner supplies them even with the old workaround off.
 func TestUnmodifiableListBridgeIsLoadBearing(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/UnmodifiableListBridgeSeed.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-
-	os.Unsetenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	if !strings.Contains(on, "unmodifiableList") {
-		t.Fatalf("expected unmodifiableList in decompile, got:\n%s", on)
-	}
-	hasListBridge := strings.Contains(on, "(List<E>) (List)") ||
-		strings.Contains(on, "(List<E>)(List)") ||
-		strings.Contains(on, "(java.util.List<E>) (List)") ||
-		strings.Contains(on, "(java.util.List<E>)(List)")
-	hasIterBridge := strings.Contains(on, "(Iterable<T>) (Iterable)") ||
-		strings.Contains(on, "(Iterable<T>)(Iterable)") ||
-		strings.Contains(on, "(java.lang.Iterable<T>) (Iterable)") ||
-		strings.Contains(on, "(java.lang.Iterable<T>)(Iterable)")
-	if !hasListBridge && !hasIterBridge {
-		t.Errorf("fix ON: expected raw List or Iterable bridge around unmodifiableList, got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	if strings.Contains(off, "(List<E>) (List)") || strings.Contains(off, "(List<E>)(List)") ||
-		strings.Contains(off, "(Iterable<T>) (Iterable)") || strings.Contains(off, "(Iterable<T>)(Iterable)") {
-		t.Errorf("fix OFF: expected no raw unmodifiableList bridge, got:\n%s", off)
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF", setting)
+		source, err := Decompile(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(source, "unmodifiableList") || !strings.Contains(source, "(List<E>) (List)") || !strings.Contains(source, "(Iterable<T>) (Iterable)") {
+			t.Fatalf("erased factory result has no generic return witness:\n%s", source)
+		}
 	}
 }
 
-// TestOrderingReverseBridgeIsLoadBearing pins factoryReturnRawBridge on
-// Ordering.natural().reverse() returned as Comparator<? super E>. Kill-switch:
-// JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF. Real hit: guava Sets$DescendingSet.comparator.
+// Preserve the original Comparator CHECKCAST independently of the legacy
+// factory spelling gate. The subtype/no-CHECKCAST case has a separate authored
+// six-mode JVM oracle that verifies the general zero-input factory-chain proof.
 func TestOrderingReverseBridgeIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/OrderingReverseBridgeSeed.class")
+
+	path := "testdata/regression/OrderingReverseBridgeSeed.class"
+	raw, code, _ := reviewedFixtureMethod(t, path, "comparator", "()Ljava/util/Comparator;")
+	assertReviewedTypeVarMethod(t, raw, "comparator", "()Ljava/util/Comparator;", "()Ljava/util/Comparator<-TE;>;")
+	assertReviewedTypeVarInvoke(t, path, "comparator", "()Ljava/util/Comparator;", 14, 184, "OrderingReverseBridgeSeed$Ord", "natural", "()LOrderingReverseBridgeSeed$Ord;")
+	assertReviewedTypeVarInvoke(t, path, "comparator", "()Ljava/util/Comparator;", 17, 182, "OrderingReverseBridgeSeed$Ord", "reverse", "()LOrderingReverseBridgeSeed$Ord;")
+	// This fixture's Ord does not implement Comparator. Its original CHECKCAST
+	// remains a real runtime check even when the old spelling gate is disabled.
+	assertReviewedOpcode(t, code, 20, 192)
+	helper, err := os.ReadFile("testdata/regression/OrderingReverseBridgeSeed$Ord.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-	resolver := func(internalName string) ([]byte, bool) {
-		b, e := os.ReadFile("testdata/regression/" + internalName + ".class")
-		if e != nil {
-			return nil, false
+	assertReviewedClassSignature(t, helper, "<T:Ljava/lang/Object;>Ljava/lang/Object;")
+	assertReviewedTypeVarMethod(t, helper, "natural", "()LOrderingReverseBridgeSeed$Ord;", "<C::Ljava/lang/Comparable;>()LOrderingReverseBridgeSeed$Ord<TC;>;")
+	assertReviewedTypeVarMethod(t, helper, "reverse", "()LOrderingReverseBridgeSeed$Ord;", "<S:TT;>()LOrderingReverseBridgeSeed$Ord<TS;>;")
+	reviewedSeedSources(t, path, "JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF", true, func(source string) {
+		body := reviewedSourceMethod(t, source, `comparator\(\)`)
+		if !strings.Contains(body, "natural().reverse()") || !strings.Contains(compactReviewedGenericSource(body), "(Comparator<?superE>)(Comparator)") {
+			t.Fatal("lost original Comparator check or erased return view: " + body)
 		}
-		return b, true
-	}
-
-	os.Unsetenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF")
-	on, err := DecompileWithResolver(data, resolver)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	if !strings.Contains(on, "reverse()") {
-		t.Fatalf("expected reverse() in decompile, got:\n%s", on)
-	}
-	if !strings.Contains(on, "(Comparator") {
-		t.Errorf("fix ON: expected raw Comparator bridge around reverse(), got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF", "1")
-	off, err := DecompileWithResolver(data, resolver)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	if strings.Contains(off, "(Comparator<? super E>) (Comparator)") ||
-		strings.Contains(off, "(Comparator<? super E>)(Comparator)") {
-		t.Errorf("fix OFF: expected no raw Comparator reverse bridge, got:\n%s", off)
-	}
+	})
 }
 
 func TestFactoryFromOrderingIsLoadBearing(t *testing.T) {

@@ -2,7 +2,7 @@ package core
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"sort"
 	"strings"
 
@@ -18,21 +18,44 @@ type decompileTraceConfig struct {
 	varFold      bool
 	rewriteVar   bool
 	slotVersion  bool
+	ctorArray    bool
 }
 
 func currentTraceConfig() decompileTraceConfig {
+	getenv := jdecenv.Lookup()
 	return decompileTraceConfig{
-		classFilter:  os.Getenv("JDEC_TRACE_CLASS"),
-		methodFilter: os.Getenv("JDEC_TRACE_METHOD"),
-		varTable:     os.Getenv("JDEC_TRACE_VAR_TABLE") != "",
-		varFold:      os.Getenv("JDEC_TRACE_VAR_FOLD") != "",
-		rewriteVar:   os.Getenv("JDEC_TRACE_REWRITE_VAR") != "",
-		slotVersion:  os.Getenv("JDEC_TRACE_SLOT_VERSION") != "",
+		classFilter:  getenv("JDEC_TRACE_CLASS"),
+		methodFilter: getenv("JDEC_TRACE_METHOD"),
+		varTable:     getenv("JDEC_TRACE_VAR_TABLE") != "",
+		varFold:      getenv("JDEC_TRACE_VAR_FOLD") != "",
+		rewriteVar:   getenv("JDEC_TRACE_REWRITE_VAR") != "",
+		slotVersion:  getenv("JDEC_TRACE_SLOT_VERSION") != "",
+		ctorArray:    getenv("JDEC_TRACE_CTOR_ARRAY_INLINE") != "",
 	}
 }
 
+func (d *Decompiler) currentTraceConfig() decompileTraceConfig {
+	if d == nil {
+		return currentTraceConfig()
+	}
+	if d.traceCfgLoaded {
+		return d.traceCfg
+	}
+	d.traceCfg = decompileTraceConfig{
+		classFilter:  d.getenv("JDEC_TRACE_CLASS"),
+		methodFilter: d.getenv("JDEC_TRACE_METHOD"),
+		varTable:     d.getenv("JDEC_TRACE_VAR_TABLE") != "",
+		varFold:      d.getenv("JDEC_TRACE_VAR_FOLD") != "",
+		rewriteVar:   d.getenv("JDEC_TRACE_REWRITE_VAR") != "",
+		slotVersion:  d.getenv("JDEC_TRACE_SLOT_VERSION") != "",
+		ctorArray:    d.getenv("JDEC_TRACE_CTOR_ARRAY_INLINE") != "",
+	}
+	d.traceCfgLoaded = true
+	return d.traceCfg
+}
+
 func (d *Decompiler) traceEnabled(kind string) bool {
-	cfg := currentTraceConfig()
+	cfg := d.currentTraceConfig()
 	switch kind {
 	case "var-table":
 		if !cfg.varTable {
@@ -44,6 +67,10 @@ func (d *Decompiler) traceEnabled(kind string) bool {
 		}
 	case "slot-version":
 		if !cfg.slotVersion {
+			return false
+		}
+	case "ctor-array-inline":
+		if !cfg.ctorArray {
 			return false
 		}
 	default:
@@ -59,14 +86,17 @@ func (d *Decompiler) traceEnabled(kind string) bool {
 }
 
 func TraceRewriteVarEnabled(className, methodName string) bool {
-	cfg := currentTraceConfig()
-	if !cfg.rewriteVar {
+	// Trace is normally disabled. Resolve the ambient request once and read
+	// only the relevant gate before filters; unrelated trace knobs must not
+	// force seven goroutine-stack lookups for every variable visit.
+	getenv := jdecenv.Lookup()
+	if getenv("JDEC_TRACE_REWRITE_VAR") == "" {
 		return false
 	}
-	if cfg.classFilter != "" && !strings.Contains(className, cfg.classFilter) {
+	if filter := getenv("JDEC_TRACE_CLASS"); filter != "" && !strings.Contains(className, filter) {
 		return false
 	}
-	if cfg.methodFilter != "" && !strings.Contains(methodName, cfg.methodFilter) {
+	if filter := getenv("JDEC_TRACE_METHOD"); filter != "" && !strings.Contains(methodName, filter) {
 		return false
 	}
 	return true

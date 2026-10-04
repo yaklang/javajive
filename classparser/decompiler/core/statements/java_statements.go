@@ -2,11 +2,13 @@ package statements
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
+	"reflect"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -99,7 +101,9 @@ func NewConditionStatement(cmp values.JavaValue, op string) *ConditionStatement 
 }
 
 type ReturnStatement struct {
-	JavaValue values.JavaValue
+	JavaValue   values.JavaValue
+	OriginPC    int
+	HasOriginPC bool
 }
 
 // ReplaceVar implements Statement.
@@ -113,7 +117,72 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 	if r.JavaValue == nil {
 		return "return"
 	}
+	if funcCtx != nil {
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && ft.ReturnType != nil {
+			if target, ok := ft.ReturnType.RawType().(*types.JavaPrimer); ok && target.Name == types.JavaBoolean {
+				if view, ok := values.BooleanStackConsumerView(r.JavaValue); ok {
+					return "return " + view.String(funcCtx)
+				}
+				return "return " + values.EmptySlotValuePlaceholder
+			}
+		}
+	}
+	if funcCtx != nil {
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && ft.ReturnType != nil {
+			if call, ok := values.UnpackSoltValue(r.JavaValue).(*values.FunctionCallExpression); ok {
+				if fixedParameterizedFactoryReturn(funcCtx, call) {
+					return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), call.String(funcCtx))
+				}
+				if planned, ok := call.PlanErasedMethodReturn(funcCtx); ok {
+					if ft.ReturnType.String(funcCtx) == "Object" || ft.ReturnType.String(funcCtx) == "java.lang.Object" {
+						return "return " + planned.String(funcCtx)
+					}
+					return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), planned.String(funcCtx))
+				}
+				if _, ret, e := callbinding.Descriptor(funcCtx.CurrentMethodDesc); e == nil {
+					if _, result, e := callbinding.Descriptor(call.Descriptor); e == nil && ret == result {
+						if planned, ok := call.PlanErasedClassResultUse(funcCtx); ok {
+							return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), planned.String(funcCtx))
+						}
+					}
+				}
+				if planned, target, ok := call.PlanErasedDeclaredReturnChain(funcCtx); ok {
+					return renderExistingReturnCast(funcCtx, target.String(funcCtx), planned.String(funcCtx))
+				}
+				if planned, ok := erasedWidenedReturnChain(funcCtx, call); ok {
+					return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), planned.String(funcCtx))
+				}
+				if _, parameterized := types.AsParameterizedType(ft.ReturnType); parameterized {
+					if _, ret, err := callbinding.Descriptor(funcCtx.CurrentMethodDesc); err == nil {
+						if planned, ok := call.PlanErasedResultChain(funcCtx, ret); ok {
+							return renderExistingReturnCast(funcCtx, ft.ReturnType.String(funcCtx), planned.String(funcCtx))
+						}
+					}
+				}
+			}
+		}
+	}
+	if funcCtx != nil {
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && values.IsBooleanStackNarrowing(ft.ReturnType, r.JavaValue) {
+			return "return " + values.NarrowBooleanStackWord(r.JavaValue).String(funcCtx)
+		}
+	}
 	expr := r.JavaValue.String(funcCtx)
+	if funcCtx != nil {
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil {
+			if call, ok := values.UnpackSoltValue(r.JavaValue).(*values.FunctionCallExpression); ok {
+				if planned, ok := call.PlanErasedFormalResult(funcCtx, ft.ReturnType); ok {
+					expr = planned.String(funcCtx)
+				}
+			}
+		}
+	}
+	if target, raw := erasedFactoryReturnCast(funcCtx, r.JavaValue); target != "" {
+		return fmt.Sprintf("return (%s) (%s) (%s)", target, raw, expr)
+	}
+	if target, raw := conditionalGenericReturnBridge(funcCtx, r.JavaValue); target != "" {
+		return fmt.Sprintf("return (%s) (%s) (%s)", target, raw, expr)
+	}
 	// Narrowing cast for char/byte/short return types: bytecode stores char/byte/short
 	// literals as ints (bipush/sipush/iconst), so a method returning char whose body
 	// returns `cond ? 102 : 101` renders int literals that javac rejects ("possible
@@ -121,7 +190,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 	// int and the returned value is int-typed, wrap it in an explicit cast. This is a
 	// pure rendering fix — the recompiled bytecode is behaviorally identical.
 	if cast := narrowingReturnCast(funcCtx, r.JavaValue); cast != "" {
-		return fmt.Sprintf("return (%s) (%s)", cast, expr)
+		return renderExistingReturnCast(funcCtx, cast, expr)
 	}
 	// Type-variable return: when the method's recovered return type is a class-scope type
 	// variable (e.g. T/K/V) but the returned value's static type is the erased bound/Object,
@@ -141,7 +210,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 			if bridge := nestedGenericRawBridge(funcCtx, r.JavaValue, cast); bridge != "" {
 				return fmt.Sprintf("return (%s) (%s) (%s)", cast, bridge, expr)
 			}
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// An instance call on a NON-`this` receiver (a field/local of a jar-internal class) whose recovered
 		// generic return is a WILDCARD parameterization of the SAME erasure as a type-variable-mentioning
@@ -151,7 +220,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		// typeVarReturnCast's own wildcard branch only covers this-receiver same-class calls; this handles
 		// the cross-receiver case via the sibling resolver. See crossRecvWildcardReturnCast.
 		if cast := crossRecvWildcardReturnCast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// A `Class.forName(...)` return into a type-variable-mentioning `Class<...>` declared return: the
 		// JDK signature is `Class<?> forName(String)`, so javac captures the wildcard to CAP#1 and rejects
@@ -159,17 +228,17 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		// `(Class<ObjectInstantiator<T>>)` cast. See classForNameReturnCast (spring objenesis
 		// DelegatingToExoticInstantiator.instantiatorClass).
 		if cast := classForNameReturnCast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// Concrete reference return type with an Object-typed value (erased generic / null-only slot):
 		// emit an explicit downcast so the source recompiles. See objectReturnDowncast.
 		if cast := objectReturnDowncast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// Parameterized return type (`Entry<E>`) whose value erases to the same raw class with an
 		// erased/Object type argument: wrap in an unchecked parameterization cast. See parameterizedReturnCast.
 		if cast := parameterizedReturnCast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// Bounded / concrete parameterized return vs a generic factory that infers Object
 		// (`ImmutableMap.of()`, `ImmutableMap.of(k,v)` with erased keys): a direct
@@ -194,7 +263,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 		// "Comparator<CAP#1> cannot be converted to Comparator<Object>". A wildcard-source same-erasure
 		// cast is an unchecked conversion (legal). See inheritedFieldReturnCast.
 		if cast := inheritedFieldReturnCast(funcCtx, r.JavaValue); cast != "" {
-			return fmt.Sprintf("return (%s) (%s)", cast, expr)
+			return renderExistingReturnCast(funcCtx, cast, expr)
 		}
 		// A method-call value (a synthetic singleton accessor `Cut$AboveAll.access$100()`) whose static
 		// type is a NON-GENERIC jar-internal SUBTYPE returned where the declared return type is a
@@ -260,7 +329,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 // returned into `X<Concrete>` never compiles as-is, a match is always a genuine, safe repair. Kill-switch
 // JDEC_ERASED_GENERIC_CHAIN_RET_BRIDGE_OFF.
 func erasedGenericChainReturnRawBridge(funcCtx *class_context.ClassContext, v values.JavaValue) (string, string) {
-	if funcCtx == nil || v == nil || os.Getenv("JDEC_ERASED_GENERIC_CHAIN_RET_BRIDGE_OFF") != "" {
+	if funcCtx == nil || v == nil || funcCtx.Getenv("JDEC_ERASED_GENERIC_CHAIN_RET_BRIDGE_OFF") != "" {
 		return "", ""
 	}
 	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
@@ -335,7 +404,7 @@ func parameterizedReturnRawBridge(funcCtx *class_context.ClassContext, v values.
 	if funcCtx == nil || v == nil {
 		return "", ""
 	}
-	if os.Getenv("JDEC_PARAM_RETURN_RAW_BRIDGE_OFF") != "" {
+	if funcCtx.Getenv("JDEC_PARAM_RETURN_RAW_BRIDGE_OFF") != "" {
 		return "", ""
 	}
 	if funcCtx.SiblingClassSig == nil {
@@ -388,7 +457,7 @@ func factoryReturnRawBridge(funcCtx *class_context.ClassContext, v values.JavaVa
 	if funcCtx == nil || v == nil {
 		return "", ""
 	}
-	if os.Getenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF") != "" {
+	if funcCtx.Getenv("JDEC_FACTORY_RETURN_RAW_BRIDGE_OFF") != "" {
 		return "", ""
 	}
 	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
@@ -499,7 +568,7 @@ func isGenericFactoryCall(call *values.FunctionCallExpression) bool {
 // vs `JsonSerializer<?>` / raw `JsonSerializer`). Direct conversion is rejected as CAP#1;
 // `(Ret)(Raw) expr` is unchecked. Kill-switch: JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF.
 func wildcardObjectReturnRawBridge(funcCtx *class_context.ClassContext, v values.JavaValue) (string, string) {
-	if funcCtx == nil || v == nil || os.Getenv("JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF") != "" {
+	if funcCtx == nil || v == nil || funcCtx.Getenv("JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF") != "" {
 		return "", ""
 	}
 	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
@@ -571,7 +640,7 @@ func parameterizedFieldReturnRawBridge(funcCtx *class_context.ClassContext, v va
 	if funcCtx == nil || v == nil {
 		return "", ""
 	}
-	if os.Getenv("JDEC_PARAM_FIELD_RET_RAW_BRIDGE_OFF") != "" {
+	if funcCtx.Getenv("JDEC_PARAM_FIELD_RET_RAW_BRIDGE_OFF") != "" {
 		return "", ""
 	}
 	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
@@ -605,7 +674,7 @@ func parameterizedFieldReturnRawBridge(funcCtx *class_context.ClassContext, v va
 // concrete parameterization (the guava `ImmutableMap.of()` / "incompatible bounds" family). Kill-switch
 // JDEC_CLASS_FORNAME_RET_CAST_OFF.
 func classForNameReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) string {
-	if funcCtx == nil || v == nil || os.Getenv("JDEC_CLASS_FORNAME_RET_CAST_OFF") != "" {
+	if funcCtx == nil || v == nil || funcCtx.Getenv("JDEC_CLASS_FORNAME_RET_CAST_OFF") != "" {
 		return ""
 	}
 	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
@@ -659,7 +728,7 @@ func classForNameReturnCast(funcCtx *class_context.ClassContext, v values.JavaVa
 // The wildcard-source same-erasure cast is an unchecked conversion javac accepts. Returns the cast target
 // or "". Kill-switch JDEC_CROSS_RECV_WILDCARD_RET_CAST_OFF.
 func crossRecvWildcardReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) string {
-	if funcCtx == nil || v == nil || os.Getenv("JDEC_CROSS_RECV_WILDCARD_RET_CAST_OFF") != "" {
+	if funcCtx == nil || v == nil || funcCtx.Getenv("JDEC_CROSS_RECV_WILDCARD_RET_CAST_OFF") != "" {
 		return ""
 	}
 	if funcCtx.SiblingClassSig == nil {
@@ -734,7 +803,7 @@ func typeVarLocalDeclName(funcCtx *class_context.ClassContext, left values.JavaV
 	if funcCtx == nil || value == nil || declType == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_TYPEVAR_LOCAL_DECL_OFF") != "" {
+	if funcCtx.Getenv("JDEC_TYPEVAR_LOCAL_DECL_OFF") != "" {
 		return ""
 	}
 	if funcCtx.SiblingClassSig == nil {
@@ -874,7 +943,7 @@ func genericSubtypeReturnRawBridge(funcCtx *class_context.ClassContext, v values
 	if funcCtx == nil || v == nil {
 		return "", ""
 	}
-	if os.Getenv("JDEC_GENERIC_SUBTYPE_RET_BRIDGE_OFF") != "" {
+	if funcCtx.Getenv("JDEC_GENERIC_SUBTYPE_RET_BRIDGE_OFF") != "" {
 		return "", ""
 	}
 	// Only method-call values reach this helper unhandled (New/ternary go through typeVarReturnCast's
@@ -959,13 +1028,13 @@ func nestedGenericRawBridge(funcCtx *class_context.ClassContext, v values.JavaVa
 	// are never touched, and to fields whose declared type carries NON-bare-wildcard top-level args (a bare
 	// `X<?>` converts to `X<C>` by the unchecked conversion the direct cast already allows -- no bridge).
 	// Kill-switch JDEC_SAME_ERASURE_FIELD_RET_BRIDGE_OFF.
-	if os.Getenv("JDEC_SAME_ERASURE_FIELD_RET_BRIDGE_OFF") != "" {
+	if funcCtx.Getenv("JDEC_SAME_ERASURE_FIELD_RET_BRIDGE_OFF") != "" {
 		return ""
 	}
 	var sig string
 	if fieldName := sameClassFieldName(funcCtx, v); fieldName != "" {
 		sig = funcCtx.FieldSignature(fieldName)
-	} else if os.Getenv("JDEC_XCLASS_FIELD_RET_BRIDGE_OFF") == "" {
+	} else if funcCtx.Getenv("JDEC_XCLASS_FIELD_RET_BRIDGE_OFF") == "" {
 		// A CROSS-CLASS static field singleton (`OtherClass.INSTANCE`): its generic Signature lives in the
 		// declaring class, recovered via SiblingFieldSig (the same cross-class field resolver that powers
 		// inherited-field receiver typing). guava Range.rangeLexOrdering `Range$RangeLexOrdering.INSTANCE`.
@@ -1085,7 +1154,7 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 	if funcCtx == nil || v == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_TYPEVAR_RET_CAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_TYPEVAR_RET_CAST_OFF") != "" {
 		return ""
 	}
 	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
@@ -1117,7 +1186,7 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 	// `val` was read Object off a raw GraphConnections.get(). Only fires when at least one non-null arm
 	// is NOT already the type variable (both-arms-T identity is left alone). Kill-switch
 	// JDEC_TERNARY_TYPEVAR_RET_CAST_OFF.
-	if bareTypeVar && os.Getenv("JDEC_TERNARY_TYPEVAR_RET_CAST_OFF") == "" {
+	if bareTypeVar && funcCtx.Getenv("JDEC_TERNARY_TYPEVAR_RET_CAST_OFF") == "" {
 		if tern, ok := values.UnpackSoltValue(v).(*values.TernaryExpression); ok &&
 			ternaryArmNeedsTypeVarCast(tern, retStr, funcCtx) {
 			return retStr
@@ -1180,7 +1249,7 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 			// bare field read converts by unchecked conversion (legal, warning-only), mirroring the source's
 			// @SuppressWarnings -- so suppress the cast. Kill-switch JDEC_TYPEVAR_FIELD_WILDCARD_NOCAST_OFF
 			// restores the legacy always-cast behavior for A/B.
-			if os.Getenv("JDEC_TYPEVAR_FIELD_WILDCARD_NOCAST_OFF") == "" {
+			if funcCtx.Getenv("JDEC_TYPEVAR_FIELD_WILDCARD_NOCAST_OFF") == "" {
 				if fieldType := values.RecoverThisFieldInstantiatedType(funcCtx, v); fieldType != nil {
 					realStr := fieldType.String(funcCtx)
 					if realArgs, okRA := topLevelTypeArgs(realStr); okRA {
@@ -1233,7 +1302,7 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 			// must NOT be cast (the InnerNode over-cast regression). Kill-switch
 			// JDEC_THIS_REPARAM_CAST_OFF restores the legacy "no cast on any same-erasure return this".
 			if erasureName(retStr) == erasureName(raw.String(funcCtx)) {
-				if os.Getenv("JDEC_THIS_REPARAM_CAST_OFF") != "" {
+				if funcCtx.Getenv("JDEC_THIS_REPARAM_CAST_OFF") != "" {
 					return ""
 				}
 				if returnArgsAreClassParams(retStr, funcCtx.ClassTypeParams) {
@@ -1249,7 +1318,7 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 			// value-kind was simply missing here. Reaching this branch already guarantees the return type
 			// mentions a type variable, and a literal can never be `T.class`, so this never over-casts.
 			// Kill-switch JDEC_CLASSLIT_RET_CAST_OFF.
-			if os.Getenv("JDEC_CLASSLIT_RET_CAST_OFF") != "" {
+			if funcCtx.Getenv("JDEC_CLASSLIT_RET_CAST_OFF") != "" {
 				return ""
 			}
 		case *values.NewExpression, *values.TernaryExpression:
@@ -1275,7 +1344,7 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 			// unchecked `(TypeAdapter<T>)` cast. Tightly gated (this-receiver, same-class method, return
 			// is a wildcard parameterization of the SAME erasure) so an ordinary call recovering its OWN
 			// concrete generic signature is never over-cast. Kill-switch JDEC_WILDCARD_RET_CAST_OFF.
-			if os.Getenv("JDEC_WILDCARD_RET_CAST_OFF") != "" {
+			if funcCtx.Getenv("JDEC_WILDCARD_RET_CAST_OFF") != "" {
 				return ""
 			}
 			if uv.IsStatic {
@@ -1318,7 +1387,7 @@ func typeVarReturnCast(funcCtx *class_context.ClassContext, v values.JavaValue) 
 // inconvertible). Requires the cross-class resolver (jar-internal class); JDK / unknown classes are
 // skipped conservatively. Kill-switch JDEC_GENERIC_RET_SUBTYPE_CAST_OFF.
 func genericReturnSubtypeCastNeeded(funcCtx *class_context.ClassContext, jc *types.JavaClass, retStr string) bool {
-	if os.Getenv("JDEC_GENERIC_RET_SUBTYPE_CAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_GENERIC_RET_SUBTYPE_CAST_OFF") != "" {
 		return false
 	}
 	if funcCtx == nil || funcCtx.SiblingClassSig == nil || jc == nil {
@@ -1365,7 +1434,7 @@ var jdkNonGenericParamSubtypes = map[string]bool{
 // class) converts implicitly and is deliberately excluded so no covariant return is over-cast.
 // Kill-switch JDEC_CONCRETE_PARAM_RET_SUBTYPE_RAW_CAST_OFF.
 func concreteParamReturnSubtypeRawCast(funcCtx *class_context.ClassContext, v values.JavaValue) string {
-	if funcCtx == nil || v == nil || os.Getenv("JDEC_CONCRETE_PARAM_RET_SUBTYPE_RAW_CAST_OFF") != "" {
+	if funcCtx == nil || v == nil || funcCtx.Getenv("JDEC_CONCRETE_PARAM_RET_SUBTYPE_RAW_CAST_OFF") != "" {
 		return ""
 	}
 	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
@@ -1489,7 +1558,7 @@ func objectReturnDowncast(funcCtx *class_context.ClassContext, v values.JavaValu
 	if funcCtx == nil || v == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_OBJECT_RET_DOWNCAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_OBJECT_RET_DOWNCAST_OFF") != "" {
 		return ""
 	}
 	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
@@ -1650,7 +1719,7 @@ func parameterizedReturnCast(funcCtx *class_context.ClassContext, v values.JavaV
 	if funcCtx == nil || v == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_PARAM_RETURN_CAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_PARAM_RETURN_CAST_OFF") != "" {
 		return ""
 	}
 	// Only wrap a returned value whose type variable CANNOT be recovered by javac's own return-target
@@ -1744,7 +1813,7 @@ func inheritedFieldReturnCast(funcCtx *class_context.ClassContext, v values.Java
 	if funcCtx == nil || v == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_INHERITED_FIELD_RET_CAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_INHERITED_FIELD_RET_CAST_OFF") != "" {
 		return ""
 	}
 	ft, ok := funcCtx.FunctionType.(*types.JavaFuncType)
@@ -1851,7 +1920,7 @@ func typeVarFieldStoreCast(funcCtx *class_context.ClassContext, left values.Java
 	if funcCtx == nil || left == nil || value == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_NO_TYPEVAR_FIELD_CAST") != "" {
+	if funcCtx.Getenv("JDEC_NO_TYPEVAR_FIELD_CAST") != "" {
 		return ""
 	}
 	if len(funcCtx.FieldTypeVars) == 0 {
@@ -1924,7 +1993,7 @@ func wildcardFieldStoreCast(funcCtx *class_context.ClassContext, left, value val
 	if funcCtx == nil || left == nil || value == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_WILDCARD_FIELD_CAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_WILDCARD_FIELD_CAST_OFF") != "" {
 		return ""
 	}
 	var fieldName string
@@ -2015,7 +2084,7 @@ func parameterizedFieldStoreRawCast(funcCtx *class_context.ClassContext, left, v
 	if funcCtx == nil || left == nil || value == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_PARAM_FIELD_RAW_CAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_PARAM_FIELD_RAW_CAST_OFF") != "" {
 		return ""
 	}
 	var fieldName string
@@ -2047,6 +2116,15 @@ func parameterizedFieldStoreRawCast(funcCtx *class_context.ClassContext, left, v
 	// wildcardFieldStoreCast's job; a bare type-var field is typeVarFieldStoreCast's).
 	if !strings.Contains(fieldTypeStr, "<") || strings.Contains(fieldTypeStr, "?") {
 		return ""
+	}
+	if p, ok := types.AsParameterizedType(ft); ok && !ft.IsArray() {
+		descriptor := "L" + strings.ReplaceAll(p.RawClassName, ".", "/") + ";"
+		// The exact field erasure and factory result coincide. A raw view
+		// suppresses source-only invariant inference without introducing a
+		// narrower JVM check; deferred/poly factory inputs remain excluded.
+		if values.ErasedFactoryReturn(funcCtx, value, descriptor) {
+			return types.NewJavaClass(p.RawClassName).String(funcCtx)
+		}
 	}
 	if lit, ok := values.UnpackSoltValue(value).(*values.JavaLiteral); ok && fmt.Sprint(lit.Data) == "null" {
 		return ""
@@ -2111,7 +2189,7 @@ func wildcardReturnFieldStoreCast(funcCtx *class_context.ClassContext, left, val
 	if funcCtx == nil || left == nil || value == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_WILDCARD_RETURN_FIELD_CAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_WILDCARD_RETURN_FIELD_CAST_OFF") != "" {
 		return ""
 	}
 	if funcCtx.SiblingClassSig == nil {
@@ -2199,7 +2277,7 @@ func subtypeValueFieldStoreCast(funcCtx *class_context.ClassContext, left, value
 	if funcCtx == nil || left == nil || value == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_SUBTYPE_FIELD_STORE_CAST_OFF") != "" || funcCtx.SiblingSuperTypes == nil {
+	if funcCtx.Getenv("JDEC_SUBTYPE_FIELD_STORE_CAST_OFF") != "" || funcCtx.SiblingSuperTypes == nil {
 		return ""
 	}
 	var fieldName string
@@ -2595,6 +2673,10 @@ type AssignStatement struct {
 	JavaValue   values.JavaValue
 	IsDeclare   bool
 	IsFirst     bool
+	OriginPC    int
+	HasOriginPC bool
+	// ReferenceArrayStore is a decoded AASTORE witness, never an inferred cast.
+	ReferenceArrayStore bool
 }
 
 // ReplaceVar implements Statement.
@@ -2645,7 +2727,7 @@ func (a *AssignStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.Varia
 //
 // Kill-switch: JDEC_TYPEVAR_ARRAY_ELEM_STORE_CAST_OFF=1.
 func typeVarArrayElementStoreCast(funcCtx *class_context.ClassContext, member *values.JavaArrayMember, value values.JavaValue) string {
-	if os.Getenv("JDEC_TYPEVAR_ARRAY_ELEM_STORE_CAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_TYPEVAR_ARRAY_ELEM_STORE_CAST_OFF") != "" {
 		return ""
 	}
 	if funcCtx == nil || member == nil || value == nil {
@@ -2776,6 +2858,49 @@ func arrayStoreRHS(member *values.JavaArrayMember, value values.JavaValue, funcC
 	return value.String(funcCtx)
 }
 
+// AASTORE checks the actual array component after evaluating array, index and
+// value. Narrowing the RHS would add a CHECKCAST, change the exception class,
+// and run that check before the null/bounds checks. A widening Object[] view of
+// a proven reference array keeps the original AASTORE and evaluation order.
+func (a *AssignStatement) referenceArrayStoreNeedsObjectView(ctx *class_context.ClassContext) bool {
+	if !a.ReferenceArrayStore || a.ArrayMember == nil || a.ArrayMember.Object == nil || a.JavaValue == nil || values.IsNullLiteral(a.JavaValue) {
+		return false
+	}
+	array := a.ArrayMember.Object.Type()
+	// A solved web may render as T[] while its computational type remains the
+	// first-bound array. Judge source assignability against that declaration;
+	// the Object[] view still performs the original AASTORE at runtime.
+	if ref, ok := values.UnpackSoltValue(a.ArrayMember.Object).(*values.JavaRef); ok && ref.WebDeclType != nil {
+		array = ref.WebDeclType
+	} else if source := values.SourceFieldType(ctx, a.ArrayMember.Object); source != nil {
+		array = source
+	}
+	if array == nil || !array.IsArray() || array.ElementType() == nil {
+		return false
+	}
+	element := array.ElementType()
+	if _, primitive := element.RawType().(*types.JavaPrimer); primitive {
+		return false
+	}
+	valueType := a.JavaValue.Type()
+	if valueType != nil {
+		if _, primitive := valueType.RawType().(*types.JavaPrimer); primitive {
+			return false
+		}
+	}
+	if ctx != nil && typeVarArrayElementStoreCast(ctx, a.ArrayMember, a.JavaValue) != "" {
+		return true
+	}
+	if valueType != nil && reflect.DeepEqual(element.RawType(), valueType.RawType()) {
+		return false
+	}
+	// Erasure equality does not prove invariant type-argument compatibility.
+	if _, generic := types.AsParameterizedType(element); generic {
+		return true
+	}
+	return !isReferenceAssignable(ctx, valueType, element)
+}
+
 // ternaryHasClassLiteralArm reports whether either arm of the ternary is a class literal (`Foo.class`,
 // a JavaClassValue). Such an arm's Type() reports the referenced class rather than java.lang.Class, so
 // the ternary's arm-merge can under-type to the arms' LUB; the declaration path uses this to prefer the
@@ -2802,7 +2927,7 @@ func localDeclType(t types.JavaType) types.JavaType {
 	if t == nil {
 		return t
 	}
-	if os.Getenv("JDEC_MULTICATCH_LOCAL_DECL_OFF") != "" {
+	if jdecenv.Get("JDEC_MULTICATCH_LOCAL_DECL_OFF") != "" {
 		return t
 	}
 	if _, ok := t.RawType().(*types.JavaMultiCatchType); ok {
@@ -2822,6 +2947,9 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if a.JavaValue == nil {
 			return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), values.EmptySlotValuePlaceholder)
 		}
+		if a.referenceArrayStoreNeedsObjectView(funcCtx) {
+			return fmt.Sprintf("((java.lang.Object[]) (%s))[%s] = %s", values.AssignmentOperand(a.ArrayMember.Object, funcCtx), a.ArrayMember.Index.String(funcCtx), a.JavaValue.String(funcCtx))
+		}
 		return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), arrayStoreRHS(a.ArrayMember, a.JavaValue, funcCtx))
 	}
 	if a.LeftValue == nil || a.JavaValue == nil {
@@ -2839,7 +2967,24 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 	// connective or a boolean ternary, NOT a bare ref) is assigned to an int target: javac elided it
 	// because the boolean is already 0/1 on the stack (guava DoubleMath/LongMath, ImmutableSortedMap).
 	rhsVal := values.CoerceIntAssignRHS(a.LeftValue.Type(), a.JavaValue, funcCtx)
+	if values.IsBooleanStackNarrowing(a.LeftValue.Type(), rhsVal) {
+		rhsVal = values.NarrowBooleanStackWord(rhsVal)
+	}
 	rhsStr := rhsVal.String(funcCtx)
+	targetView := a.LeftValue.Type()
+	if ref, ok := a.LeftValue.(*values.JavaRef); ok && ref.WebDeclType != nil {
+		targetView = ref.WebDeclType
+	}
+	if _, field := a.LeftValue.(*values.RefMember); field {
+		if source := values.SourceFieldType(funcCtx, a.LeftValue); source != nil {
+			targetView = source
+		}
+	}
+	rhsVal = values.ErasedFactoryAssignmentView(rhsVal, targetView, funcCtx)
+	rhsStr = rhsVal.String(funcCtx)
+	if values.ScopedErasureView(funcCtx, targetView, rhsVal) {
+		rhsStr = fmt.Sprintf("(%s) (%s)", targetView.String(funcCtx), rhsStr)
+	}
 	// A lambda / method-reference REASSIGNED into a slot whose declared type is the RAW form of the
 	// target functional interface (the slot was first declared from a raw getfield, so it never adopted
 	// the lambda's parameterized type) needs an explicit cast to its own instantiated type, else the
@@ -2866,7 +3011,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// RHS type (Method), so `var2 = determineFactoryConstructor()` assigns Constructor to a
 		// Method local. Prefer the widened ref type. Kill-switch:
 		// JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF=1.
-		if os.Getenv("JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF") == "" && a.LeftValue != nil {
+		if funcCtx.Getenv("JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF") == "" && a.LeftValue != nil {
 			if lt := a.LeftValue.Type(); lt != nil {
 				if rf, ok := types.RawClassFQN(lt); ok && rf == "java.lang.reflect.Executable" {
 					declType = lt
@@ -2882,7 +3027,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// (spring-core cglib Enhancer.generateClass). Guarded to only NARROW toward the ref when the ref
 		// is a subtype of the RHS type, so it never widens away from a precise RHS. Shares the
 		// class-literal kill-switch JDEC_NO_CLASSLIT_SLOT_TYPE.
-		if os.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
+		if funcCtx.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
 			if tern, ok := values.UnpackSoltValue(a.JavaValue).(*values.TernaryExpression); ok && ternaryHasClassLiteralArm(tern) {
 				// The slot ref (LeftValue) is minted from the FRESH arm-merge (class-literal arm counted
 				// as java.lang.Class) and is the authoritative resolved slot type, whereas the ternary's
@@ -2900,7 +3045,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// `c.isPrimitive()`) fail to recompile ("cannot find symbol"). Declare it `Class`; raw Class
 		// is assignment-compatible with `Foo.class` and always recompiles. Kill-switch:
 		// JDEC_NO_CLASSLIT_SLOT_TYPE=1 (shared with the slot-typing guard in stack_simulation.go).
-		if _, ok := values.UnpackSoltValue(a.JavaValue).(*values.JavaClassValue); ok && os.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
+		if _, ok := values.UnpackSoltValue(a.JavaValue).(*values.JavaClassValue); ok && funcCtx.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
 			declType = types.NewJavaClass("java.lang.Class")
 		}
 		// Either side's type can be nil under incomplete simulation; fall back to the other
@@ -2941,7 +3086,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// Declaring `Number var11 = Integer.valueOf(0)` is valid: Integer is-a Number. This mirrors
 		// the int-category widening above but for the boxed-numeric hierarchy. Kill-switch:
 		// JDEC_NUMERIC_DECL_SLOT_TYPE_OFF=1.
-		if os.Getenv("JDEC_NUMERIC_DECL_SLOT_TYPE_OFF") == "" {
+		if funcCtx.Getenv("JDEC_NUMERIC_DECL_SLOT_TYPE_OFF") == "" {
 			if lt := a.LeftValue.Type(); numericSlotWiderThan(lt, declType) {
 				declType = lt
 			}
@@ -2953,7 +3098,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// access receivers); the widening is gated to a variable-copy RHS so a method-call initializer's
 		// declared return type (which downstream member access depends on) is never widened away. Kill-
 		// switch: JDEC_REF_SLOT_LUB_DECL_OFF=1.
-		if os.Getenv("JDEC_REF_SLOT_LUB_DECL_OFF") == "" {
+		if funcCtx.Getenv("JDEC_REF_SLOT_LUB_DECL_OFF") == "" {
 			if lt := a.LeftValue.Type(); refSlotWiderThanLUB(funcCtx, a.JavaValue, lt, declType) {
 				declType = lt
 			}
@@ -3003,42 +3148,42 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// opcode performs, so it is behaviorally identical. Values already typed char/byte/short (and
 		// those carrying an i2c/i2b/i2s cast) report a non-int type, so narrowingInitCast returns ""
 		// and they are untouched. Kill-switch JDEC_NO_NARROW_REASSIGN_CAST=1.
-		if os.Getenv("JDEC_NO_NARROW_REASSIGN_CAST") == "" && a.LeftValue != nil && a.JavaValue != nil {
+		if funcCtx.Getenv("JDEC_NO_NARROW_REASSIGN_CAST") == "" && a.LeftValue != nil && a.JavaValue != nil {
 			if cast := narrowingInitCast(a.LeftValue.Type(), a.JavaValue.Type()); cast != "" {
-				return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+				return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 			}
 		}
 		// Type-variable field store: `this.key = objExpr` where `key` is declared `K` needs an
 		// explicit unchecked `(K)` cast (the field erases to its bound in bytecode). See
 		// typeVarFieldStoreCast.
 		if cast := typeVarFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// Wildcard-parameterized same-class field store: `this.rawType = call()` where rawType is
 		// `Class<? super T>` and the call returns `Class<?>` needs an explicit unchecked
 		// `(Class<? super T>)` cast (gson TypeToken). See wildcardFieldStoreCast.
 		if cast := wildcardFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		if cast := classTypeVarFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// Same-erasure invariant field-store mismatch (`X<B>` value into concrete `X<A>` field): the
 		// source carried a raw `(X)` cast that bytecode erased. See parameterizedFieldStoreRawCast.
 		if cast := parameterizedFieldStoreRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, values.StandaloneFunctionalArms(rhsVal).String(funcCtx))
 		}
 		// Concrete `X<A>` field assigned a raw-rendered call whose RECOVERED instantiated return is a
 		// same-erasure WILDCARD parameterization (`this.comparator = var1.comparator()` -> the callee
 		// truly returns `Comparator<? super K>`): wrap in `(X<A>)`. See wildcardReturnFieldStoreCast.
 		if cast := wildcardReturnFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// Proper-subtype value into a type-variable-parameterized field (`this.successorIterator =
 		// ImmutableSet.of().iterator()` -> field `Iterator<N>`, value a subtype `UnmodifiableIterator`):
 		// wrap in `(X<typevars>)`. See subtypeValueFieldStoreCast.
 		if cast := subtypeValueFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// A LOCAL variable declared as an invariant parameterization mentioning a type variable
 		// (`Class<T> var1`) REASSIGNED from a method call of the SAME erasure whose true generic return
@@ -3047,21 +3192,27 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// `(Class)` cast that bytecode erased. See parameterizedLocalReassignRawCast (objenesis
 		// SerializationInstantiatorHelper / PercSerializationInstantiator).
 		if cast := parameterizedLocalReassignRawCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// A LOCAL / parameter declared as a bare type variable (`T var1`) REASSIGNED from an
 		// erased Object call (`var1 = rawTransformer.transform(var1)`): bytecode dropped the
 		// source's unchecked `(T)` cast. See typeVarLocalReassignCast (commons-collections4
 		// ChainedTransformer / TransformedList$TransformedListIterator).
 		if cast := typeVarLocalReassignCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			expr := rhsVal.String(funcCtx)
+			if call, ok := values.UnpackSoltValue(a.JavaValue).(*values.FunctionCallExpression); ok {
+				if planned, ok := call.PlanErasedFormalResult(funcCtx, a.LeftValue.Type()); ok {
+					expr = planned.String(funcCtx)
+				}
+			}
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, expr)
 		}
 		// A LOCAL / parameter declared as a type-variable array (`T[] var1`) REASSIGNED from
 		// `Array.newInstance` (typed Object / Object[]): bytecode dropped the source's
 		// unchecked `(T[])` cast. See typeVarArrayReassignCast (commons-collections4
 		// AbstractLinkedList.toArray / AbstractMapBag.toArray).
 		if cast := typeVarArrayReassignCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
 		// Ternary with sibling-typed arms assigned to a concrete-typed local: the JVM stored both arms
 		// into the same slot (no checkcast), but javac requires every arm to be assignable to the
@@ -3069,13 +3220,13 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// readObject()` where readObject returns Map, a sibling of List), wrap that arm in an explicit
 		// `(TargetType)` cast so the conditional merges at the target type (fastjson2
 		// JSONPathSegment$CycleNameSegment.eval). Kill-switch: JDEC_TERNARY_ARM_CAST_OFF=1.
-		if os.Getenv("JDEC_TERNARY_ARM_CAST_OFF") == "" {
+		if funcCtx.Getenv("JDEC_TERNARY_ARM_CAST_OFF") == "" {
 			if rendered := ternaryArmIncompatibleCast(funcCtx, a.LeftValue, a.JavaValue); rendered != "" {
 				return fmt.Sprintf("%s = %s", a.LeftValue.String(funcCtx), rendered)
 			}
 		}
 		if raw := wildcardObjectAssignRawBridge(funcCtx, a.LeftValue, a.JavaValue); raw != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), raw, a.JavaValue.String(funcCtx))
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), raw, rhsVal.String(funcCtx))
 		}
 		return assign
 	}
@@ -3094,7 +3245,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 //
 // Kill-switch: JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF.
 func wildcardObjectAssignRawBridge(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
-	if funcCtx == nil || left == nil || value == nil || os.Getenv("JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF") != "" {
+	if funcCtx == nil || left == nil || value == nil || funcCtx.Getenv("JDEC_WILDCARD_OBJECT_RAW_BRIDGE_OFF") != "" {
 		return ""
 	}
 	// Path A: LHS static type is already Foo<Object> vs a wildcard/raw RHS of the same
@@ -3193,7 +3344,7 @@ func sameClassFieldGeneric(funcCtx *class_context.ClassContext, left values.Java
 // var1.getRawClass() / var1._handledType). A raw `(Class)` is an unchecked conversion.
 // Kill-switch: JDEC_CLASS_TV_FIELD_CAST_OFF.
 func classTypeVarFieldStoreCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
-	if funcCtx == nil || left == nil || value == nil || os.Getenv("JDEC_CLASS_TV_FIELD_CAST_OFF") != "" {
+	if funcCtx == nil || left == nil || value == nil || funcCtx.Getenv("JDEC_CLASS_TV_FIELD_CAST_OFF") != "" {
 		return ""
 	}
 	fs := sameClassFieldGeneric(funcCtx, left)
@@ -3297,7 +3448,7 @@ func parameterizedLocalReassignRawCast(funcCtx *class_context.ClassContext, left
 	if funcCtx == nil || left == nil || value == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_PARAM_LOCAL_REASSIGN_RAW_CAST_OFF") != "" {
+	if funcCtx.Getenv("JDEC_PARAM_LOCAL_REASSIGN_RAW_CAST_OFF") != "" {
 		return ""
 	}
 	// LHS must be a genuine local (JavaRef, non-`this`), not a field or synthetic slot.
@@ -3358,7 +3509,7 @@ func typeVarLocalReassignCast(funcCtx *class_context.ClassContext, left, value v
 	if funcCtx == nil || left == nil || value == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_TYPEVAR_LOCAL_REASSIGN_OFF") != "" {
+	if funcCtx.Getenv("JDEC_TYPEVAR_LOCAL_REASSIGN_OFF") != "" {
 		return ""
 	}
 	ref, ok := values.UnpackSoltValue(left).(*values.JavaRef)
@@ -3392,7 +3543,7 @@ func typeVarArrayReassignCast(funcCtx *class_context.ClassContext, left, value v
 	if funcCtx == nil || left == nil || value == nil {
 		return ""
 	}
-	if os.Getenv("JDEC_TYPEVAR_ARRAY_REASSIGN_OFF") != "" {
+	if funcCtx.Getenv("JDEC_TYPEVAR_ARRAY_REASSIGN_OFF") != "" {
 		return ""
 	}
 	ref, ok := values.UnpackSoltValue(left).(*values.JavaRef)
@@ -3700,6 +3851,14 @@ func (a *ExpressionStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.V
 }
 
 func (a *ExpressionStatement) String(funcCtx *class_context.ClassContext) string {
+	if call, ok := values.UnpackSoltValue(a.Expression).(*values.FunctionCallExpression); ok {
+		if planned, ok := call.PlanErasedClassResultUse(funcCtx); ok {
+			return planned.String(funcCtx)
+		}
+		if planned, ok := call.PlanErasedDiscardedMethodInput(funcCtx); ok {
+			return planned.String(funcCtx)
+		}
+	}
 	return a.Expression.String(funcCtx)
 }
 

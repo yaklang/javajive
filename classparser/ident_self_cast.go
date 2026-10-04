@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -10,7 +10,7 @@ import (
 // casts (the type name was the local, not a class). Real casts use a type name
 // distinct from the value (`(Throwable) var1`). Kill-switch: JDEC_IDENT_SELF_CAST_OFF=1.
 func fixIdentSelfCast(body string) string {
-	if os.Getenv("JDEC_IDENT_SELF_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_IDENT_SELF_CAST_OFF") == "1" {
 		return body
 	}
 	from := 0
@@ -66,7 +66,7 @@ func fixIdentSelfCast(body string) string {
 // swallowed the next method and retyped a real int local to Object.
 // Kill-switch: JDEC_MEMBER_BOUND_OFF=1 restores the marker list.
 func nextMemberStart(body string, from int) int {
-	if os.Getenv("JDEC_MEMBER_BOUND_OFF") == "1" {
+	if jdecenv.Get("JDEC_MEMBER_BOUND_OFF") == "1" {
 		return nextMemberStartLegacy(body, from)
 	}
 	i := from

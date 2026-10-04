@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -11,7 +11,7 @@ import (
 // Real hit: xstream XStream.class$ / javac class$ helper.
 // Kill-switch: JDEC_THROW_INITCAUSE_OFF=1.
 func fixThrowInitCauseCast(body string) string {
-	if os.Getenv("JDEC_THROW_INITCAUSE_OFF") == "1" {
+	if jdecenv.Get("JDEC_THROW_INITCAUSE_OFF") == "1" {
 		return body
 	}
 	const needle = "throw new "

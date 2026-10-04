@@ -1,0 +1,1202 @@
+package javaclassparser
+
+import (
+	"fmt"
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
+	"sort"
+	"strings"
+)
+
+type nativeMemberConstructor struct {
+	descriptor, sourceDescriptor, delegateOwner, delegateDescriptor string
+	capturePC, delegatePC                                           int
+	projectedSuper                                                  bool
+}
+type nativeMemberClass struct {
+	object                        *ClassObject
+	owner, name, field            string
+	static                        bool
+	formalCount, outerFormalCount int
+	flags                         uint16
+	constructors                  map[string]*nativeMemberConstructor
+}
+type nativeMemberFamily struct {
+	anonymous *nativeAnonymousFamily
+	owner     string
+	children  map[string]*nativeMemberClass
+	failed    bool
+}
+
+// Source ownership comes from one original self row, never dollar spelling.
+func originalMemberOwner(obj *ClassObject) (owner, name string, flags uint16, valid bool) {
+	if obj == nil {
+		return
+	}
+	count := 0
+	for _, a := range obj.Attributes {
+		if raw, ok := a.(*UnparsedAttribute); ok && raw.Name == "EnclosingMethod" {
+			return "", "", 0, false
+		}
+		if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
+			for _, row := range inner.Classes {
+				if row == nil {
+					return "", "", 0, false
+				}
+				self, known := sourceBridgeClassName(obj, row.InnerClassInfoIndex)
+				if !known {
+					return "", "", 0, false
+				}
+				if self != obj.GetClassName() {
+					continue
+				}
+				count++
+				var ok bool
+				owner, ok = sourceBridgeClassName(obj, row.OuterClassInfoIndex)
+				if !ok {
+					return "", "", 0, false
+				}
+				name, ok = sourceBridgeUTF8(obj, row.InnerNameIndex)
+				if !ok {
+					return "", "", 0, false
+				}
+				flags = row.InnerClassAccessFlags
+			}
+		}
+	}
+	valid = count == 1 && owner != "" && name != "" && class_context.SafeIdentifier(name) == name && obj.GetClassName() == owner+"$"+name
+	return
+}
+
+// A static member's type-variable scope starts at its own declaration. Read
+// the original Signature grammar, including formal bounds; names available in
+// an enclosing dumper are not evidence of lexical binding.
+func nativeMemberTypeScope(obj *ClassObject, inherited map[string]bool, work *workbudget.Budget) bool {
+	signature := func(attrs []AttributeInfo) (string, bool) {
+		result := ""
+		for _, attr := range attrs {
+			if a, ok := attr.(*SignatureAttribute); ok {
+				if result != "" {
+					return "", false
+				}
+				var valid bool
+				result, valid = sourceBridgeUTF8(obj, a.SignatureIndex)
+				if !valid || result == "" || !nativeProofWork(work, int64(len(result))) {
+					return "", false
+				}
+			}
+		}
+		return result, true
+	}
+	check := func(sig string, inherited map[string]bool, declaration bool) ([]string, bool) {
+		if sig == "" {
+			return nil, true
+		}
+		own, refs, ok := types.SignatureTypeVariableReferences(sig)
+		if !ok || !declaration && len(own) != 0 {
+			return nil, false
+		}
+		scope := map[string]bool{}
+		for n := range inherited {
+			scope[n] = true
+		}
+		for _, n := range own {
+			scope[n] = true
+		}
+		for _, n := range refs {
+			if !scope[n] {
+				return nil, false
+			}
+		}
+		return own, true
+	}
+	sig, ok := signature(obj.Attributes)
+	if !ok {
+		return false
+	}
+	own, ok := check(sig, inherited, true)
+	if !ok {
+		return false
+	}
+	classScope := map[string]bool{}
+	for n := range inherited {
+		classScope[n] = true
+	}
+	for _, n := range own {
+		classScope[n] = true
+	}
+	for _, field := range obj.Fields {
+		if field == nil {
+			return false
+		}
+		sig, ok := signature(field.Attributes)
+		scope := classScope
+		if field.AccessFlags&8 != 0 {
+			scope = nil
+		}
+		if !ok {
+			return false
+		}
+		if _, ok := check(sig, scope, false); !ok {
+			return false
+		}
+	}
+	for _, method := range obj.Methods {
+		if method == nil {
+			return false
+		}
+		sig, ok := signature(method.Attributes)
+		scope := classScope
+		if method.AccessFlags&8 != 0 {
+			scope = nil
+		}
+		if !ok {
+			return false
+		}
+		if _, ok := check(sig, scope, true); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// Prove the compiler-recreated enclosing instance for every constructor,
+// including this chains. The original descriptor, Code and IR remain intact.
+func nativeMemberProof(obj *ClassObject, work *workbudget.Budget, providers ...callbinding.Provider) *nativeMemberClass {
+	return nativeMemberProofWithOwner(obj, nil, work, providers...)
+}
+
+func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Budget, providers ...callbinding.Provider) *nativeMemberClass {
+	var provider callbinding.Provider
+	if len(providers) > 0 {
+		provider = providers[0]
+	}
+	owner, name, flags, known := originalMemberOwner(obj)
+	if !known || !nativeMemberVersionMetadata(obj, work) || flags&(0x0200|0x2000|0x4000) != 0 || obj.AccessFlags & ^uint16(0x0431) != 0 {
+		return nil
+	}
+	if !nativeMemberDeprecatedMarkerRepresentable(obj, work) {
+		return nil
+	}
+	formalCount, outerFormalCount := 0, 0
+	for _, a := range obj.Attributes {
+		switch a := a.(type) {
+		case *RuntimeVisibleAnnotationsAttribute:
+			if !nativeAnnotationDependencies([]AttributeInfo{a}, work, func(string) {}) {
+				return nil
+			}
+		case *DeprecatedAttribute:
+			// The original paired encoding was proved above.
+		case *RuntimeVisibleTypeAnnotationsAttribute:
+			return nil
+		case *SignatureAttribute:
+			signature, ok := sourceBridgeUTF8(obj, a.SignatureIndex)
+			if !ok {
+				return nil
+			}
+			formalCount = len(types.ClassFormalTypeParamNames(signature))
+			if flags&8 == 0 && formalCount > 0 {
+				if enclosing == nil || enclosing.GetClassName() != owner {
+					return nil
+				}
+				scope := map[string]bool{}
+				found := false
+				for _, attr := range enclosing.Attributes {
+					if sig, ok := attr.(*SignatureAttribute); ok {
+						if found {
+							return nil
+						}
+						found = true
+						raw, ok := sourceBridgeUTF8(enclosing, sig.SignatureIndex)
+						if !ok || !nativeProofWork(work, int64(len(raw))) {
+							return nil
+						}
+						own, refs, ok := types.SignatureTypeVariableReferences(raw)
+						if !ok {
+							return nil
+						}
+						outerFormalCount = len(own)
+						for _, n := range own {
+							scope[n] = true
+						}
+						for _, n := range refs {
+							if !scope[n] {
+								return nil
+							}
+						}
+					}
+				}
+				if !nativeMemberTypeScope(obj, scope, work) {
+					return nil
+				}
+			}
+		case *UnparsedAttribute:
+			if strings.Contains(a.Name, "Annotation") {
+				return nil
+			}
+		}
+	}
+	if flags&8 != 0 && !nativeMemberTypeScope(obj, nil, work) {
+		return nil
+	}
+	p := &nativeMemberClass{object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}}
+	for _, f := range obj.Fields {
+		if f == nil || !nativeProofWork(work, 1) {
+			return nil
+		}
+		n, nok := sourceBridgeUTF8(obj, f.NameIndex)
+		d, dok := sourceBridgeUTF8(obj, f.DescriptorIndex)
+		if !nok || !dok {
+			return nil
+		}
+		flags, onlySynthetic, known := nativeMemberEffectiveFieldFlags(f, work)
+		if !known {
+			return nil
+		}
+		if p.static {
+			if flags&0x1000 != 0 {
+				return nil
+			}
+			continue
+		}
+		if flags&0x1000 != 0 {
+			if p.field != "" || n != "this$0" || flags != 0x1010 || d != "L"+owner+";" || !onlySynthetic {
+				return nil
+			}
+			p.field = n
+		} else if f.AccessFlags&0x0008 != 0 {
+			return nil
+		}
+	}
+	if !p.static && p.field == "" {
+		return nil
+	}
+	for _, m := range obj.Methods {
+		if m == nil || !nativeProofWork(work, 1) {
+			return nil
+		}
+		n, nok := sourceBridgeUTF8(obj, m.NameIndex)
+		desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
+		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 {
+			return nil
+		}
+		for _, a := range m.Attributes {
+			switch a := a.(type) {
+			case *RuntimeVisibleTypeAnnotationsAttribute:
+				return nil
+			case *RuntimeVisibleParameterAnnotationsAttribute:
+				if !nativeMemberParameterAnnotationsClosed(a, n, desc, !p.static, work) {
+					return nil
+				}
+				for _, attribute := range m.Attributes {
+					if types, ok := attribute.(*TypeAnnotationsAttribute); ok {
+						if types == nil {
+							return nil
+						}
+						for _, annotation := range types.Annotations {
+							if annotation == nil || annotation.TargetType == 0x16 {
+								return nil
+							}
+						}
+					}
+				}
+			case *UnparsedAttribute:
+				if strings.Contains(a.Name, "TypeAnnotations") {
+					return nil
+				}
+			}
+		}
+		if p.static {
+			if n == "<init>" && m.AccessFlags&0x1000 != 0 {
+				return nil
+			}
+			continue
+		}
+		if n != "<init>" {
+			for _, a := range m.Attributes {
+				if code, ok := a.(*CodeAttribute); ok {
+					if !nativeProofWork(work, int64(len(code.Code))) {
+						return nil
+					}
+					d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
+					d.Work = work
+					if d.ParseOpcode() != nil {
+						return nil
+					}
+					for _, op := range d.Opcodes() {
+						if field := constructorMotionMember(obj, op, core.OP_PUTFIELD); field != nil && field.Name == obj.GetClassName() && field.Member == p.field {
+							return nil
+						}
+					}
+				}
+			}
+			continue
+		}
+		ps, ret, e := callbinding.Descriptor(desc)
+		if e != nil || ret != "V" || len(ps) == 0 || ps[0] != "L"+owner+";" || p.constructors[desc] != nil || m.AccessFlags&^uint16(0x0087) != 0 {
+			return nil
+		}
+		seenSignature := false
+		for _, a := range m.Attributes {
+			if sig, ok := a.(*SignatureAttribute); ok {
+				if seenSignature {
+					return nil
+				}
+				seenSignature = true
+				raw, ok := sourceBridgeUTF8(obj, sig.SignatureIndex)
+				if !ok || !nativeProofWork(work, int64(len(raw))) {
+					return nil
+				}
+				_, sourceParams, result := types.ParseMethodSignatureFull(raw, nil)
+				if result == nil || result.String(&class_context.ClassContext{}) != "void" || len(sourceParams) != len(ps)-1 {
+					return nil
+				}
+			}
+		}
+		var code *CodeAttribute
+		for _, a := range m.Attributes {
+			if ca, ok := a.(*CodeAttribute); ok {
+				if code != nil {
+					return nil
+				}
+				code = ca
+			}
+		}
+		if code == nil || code.MaxStack < 2 || int(code.MaxLocals) < nativeMemberParameterWidth(ps)+1 || len(code.Code) > 65535 || !nativeProofWork(work, int64(len(code.Code))) {
+			return nil
+		}
+		d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
+		d.Work = work
+		if d.ParseOpcode() != nil {
+			return nil
+		}
+		ops := constructorMotionOps(d)
+		cp := &nativeMemberConstructor{descriptor: desc, sourceDescriptor: "(" + strings.Join(ps[1:], "") + ")V", capturePC: -1, delegatePC: -1}
+		start := 0
+		if len(ops) >= 3 {
+			if field := constructorMotionMember(obj, ops[2], core.OP_PUTFIELD); field != nil && field.Name == obj.GetClassName() && field.Member == p.field && field.Description == ps[0] && core.GetRetrieveIdx(ops[0]) == 0 && constructorMotionLoad(ops[0], "Ljava/lang/Object;") && core.GetRetrieveIdx(ops[1]) == 1 && constructorMotionLoad(ops[1], ps[0]) {
+				cp.capturePC = int(ops[2].CurrentOffset)
+				start = 3
+			}
+		}
+		// The existing abstract stack proof preserves parameter/literal computations
+		// and identifies the actual uninitialized receiver delegation.
+		next, call := constructorMotionDelegation(obj, ops, start, ps, constructorParameterSlots(ps), provider)
+		if next == 0 || call == nil || call.Member != "<init>" {
+			return nil
+		}
+		cp.delegatePC = int(ops[next-1].CurrentOffset)
+		cp.delegateOwner = call.Name
+		cp.delegateDescriptor = call.Description
+		if cp.capturePC < 0 {
+			if call.Name != obj.GetClassName() {
+				return nil
+			}
+			targets, _, err := callbinding.Descriptor(call.Description)
+			if err != nil || len(targets) == 0 || targets[0] != ps[0] {
+				return nil
+			}
+			if len(ops) < 3 || core.GetRetrieveIdx(ops[1]) != 1 || !constructorMotionLoad(ops[1], ps[0]) {
+				return nil
+			}
+		} else if call.Name != obj.GetSupperClassName() {
+			return nil
+		}
+		for _, h := range code.ExceptionTable {
+			if h == nil || int(h.StartPc) < cp.delegatePC+3 {
+				return nil
+			}
+		}
+		for _, op := range ops {
+			if core.GetStoreIdx(op) == 1 {
+				return nil
+			}
+			if field := constructorMotionMember(obj, op, core.OP_PUTFIELD); field != nil && field.Name == obj.GetClassName() && field.Member == p.field && int(op.CurrentOffset) != cp.capturePC {
+				return nil
+			}
+		}
+		p.constructors[desc] = cp
+	}
+	if p.static {
+		return p
+	}
+	if len(p.constructors) == 0 {
+		return nil
+	}
+	// Memoize completed paths: each this edge is visited once, including a
+	// long chain of overloads. Gray nodes identify cycles without recursion.
+	state := map[string]uint8{}
+	for descriptor := range p.constructors {
+		path := []string{}
+		for state[descriptor] != 2 {
+			if !nativeProofWork(work, 1) || state[descriptor] == 1 {
+				return nil
+			}
+			ctor := p.constructors[descriptor]
+			if ctor == nil {
+				return nil
+			}
+			state[descriptor] = 1
+			path = append(path, descriptor)
+			if ctor.capturePC >= 0 {
+				break
+			}
+			descriptor = ctor.delegateDescriptor
+		}
+		for _, n := range path {
+			state[n] = 2
+		}
+	}
+	return p
+}
+
+func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
+	if c.foldSiblingResolver == nil || !nativeMemberVersionMetadata(c.obj, c.Work) || !nativeSourceBinaryName(c.obj.GetClassName()) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+		return nil
+	}
+	if _, _, _, nested := originalMemberOwner(c.obj); nested {
+		return nil
+	}
+	if _, _, anon := originalAnonymousOwner(c.obj); anon {
+		return nil
+	}
+	if !c.nativeMemberAnnotationTablesRepresentable() {
+		return nil
+	}
+	p := &nativeMemberFamily{owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}}
+	for _, a := range c.obj.Attributes {
+		if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
+			for _, row := range inner.Classes {
+				if row == nil {
+					return nil
+				}
+				owner, known := sourceBridgeClassName(c.obj, row.OuterClassInfoIndex)
+				if !known || owner != p.owner {
+					continue
+				}
+				name, known := sourceBridgeClassName(c.obj, row.InnerClassInfoIndex)
+				if !known || len(p.children) >= 64 {
+					return nil
+				}
+				raw, found := c.foldSiblingResolver(name)
+				if !found {
+					return nil
+				}
+				obj, e := c.parseResolved(raw)
+				if e != nil || obj.GetClassName() != name {
+					return nil
+				}
+				reader := NewClassObjectDumper(obj)
+				reader.options = c.options
+				reader.Work = c.Work
+				reader.foldSiblingResolver = c.foldSiblingResolver
+				reader.declarationResolver = c.declarationResolver
+				child := nativeMemberProofWithOwner(obj, c.obj, c.Work, reader.buildInvocationMetadata())
+				rowName, rowKnown := sourceBridgeUTF8(c.obj, row.InnerNameIndex)
+				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != p.owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags || p.children[name] != nil {
+					return nil
+				}
+				p.children[name] = child
+			}
+		}
+	}
+	if len(p.children) == 0 {
+		return nil
+	}
+	// A joint deeper/local/anonymous ownership plan is required before their
+	// scopes can be moved. This plan handles complete direct member families.
+	metadata := c.buildInvocationMetadata()
+	for _, child := range p.children {
+		if !nativeMemberSiblingSuperClosed(child, p, c.Work, metadata) {
+			return nil
+		}
+		for _, a := range child.object.Attributes {
+			if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
+				for _, row := range inner.Classes {
+					if row == nil {
+						return nil
+					}
+					outer, known := sourceBridgeClassName(child.object, row.OuterClassInfoIndex)
+					if known && p.children[outer] != nil {
+						return nil
+					}
+				}
+			}
+		}
+	}
+	return p
+}
+
+// Source super(...) may omit an enclosing operand only when both original
+// declarations belong to this complete family and the bytecode passes this
+// constructor's unchanged enclosing parameter. A qualified foreign outer or a
+// computed operand needs its own source origin proof and is refused here.
+func nativeMemberSiblingSuperClosed(child *nativeMemberClass, p *nativeMemberFamily, work *workbudget.Budget, metadata callbinding.Provider) bool {
+	seen := map[string]bool{}
+	for node := child; node != nil; node = p.children[node.object.GetSupperClassName()] {
+		name := node.object.GetClassName()
+		if seen[name] || !nativeProofWork(work, 1) {
+			return false
+		}
+		seen[name] = true
+	}
+	parent := p.children[child.object.GetSupperClassName()]
+	if parent == nil || parent.static {
+		return true
+	}
+	if child.static || parent.owner != child.owner {
+		return false
+	}
+	for _, method := range child.object.Methods {
+		name, _ := sourceBridgeUTF8(child.object, method.NameIndex)
+		desc, _ := sourceBridgeUTF8(child.object, method.DescriptorIndex)
+		ctor := child.constructors[desc]
+		if name != "<init>" || ctor == nil || ctor.capturePC < 0 {
+			continue
+		}
+		if ctor.delegateOwner != parent.object.GetClassName() || parent.constructors[ctor.delegateDescriptor] == nil {
+			return false
+		}
+		proved := false
+		for _, attr := range method.Attributes {
+			code, ok := attr.(*CodeAttribute)
+			if !ok {
+				continue
+			}
+			if !nativeProofWork(work, int64(len(code.Code))) {
+				return false
+			}
+			d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(child.object.ConstantPool, i) })
+			d.Work = work
+			if d.ParseOpcode() != nil {
+				return false
+			}
+			ops := constructorMotionOps(d)
+			start := -1
+			for i, op := range ops {
+				if int(op.CurrentOffset) == ctor.capturePC {
+					start = i + 1
+					break
+				}
+			}
+			params, _, err := callbinding.Descriptor(desc)
+
+			if err == nil && start >= 0 {
+				next, call := constructorMotionDelegation(child.object, ops, start, params, constructorParameterSlots(params), metadata, 1)
+				proved = next > 0 && call != nil && call.Name == ctor.delegateOwner && call.Description == ctor.delegateDescriptor && int(ops[next-1].CurrentOffset) == ctor.delegatePC
+			}
+		}
+		if !proved {
+			return false
+		}
+		ctor.projectedSuper = true
+	}
+	return true
+}
+
+func (p *nativeMemberFamily) sourceName(binary string) (string, bool) {
+	binary = strings.ReplaceAll(binary, ".", "/")
+	if child := p.children[binary]; child != nil {
+		return strings.ReplaceAll(child.owner, "/", ".") + "." + child.name, true
+	}
+	return "", false
+}
+
+type nativeMemberAllocation struct {
+	child                    *nativeMemberClass
+	descriptor               string
+	newPC, invokePC, checkPC int
+	slot                     int
+}
+
+func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[string]map[int]*nativeMemberAllocation, bool) {
+	result := map[string]map[int]*nativeMemberAllocation{}
+	for _, m := range c.obj.Methods {
+		name, _ := c.obj.getUtf8(m.NameIndex)
+		desc, _ := c.obj.getUtf8(m.DescriptorIndex)
+		key := name + desc
+		if result[key] != nil {
+			return nil, false
+		}
+		result[key] = map[int]*nativeMemberAllocation{}
+		codeSeen := false
+		for _, a := range m.Attributes {
+			code, ok := a.(*CodeAttribute)
+			if !ok {
+				continue
+			}
+			if codeSeen {
+				return nil, false
+			}
+			codeSeen = true
+			if !nativeProofWork(c.Work, int64(len(code.Code))) {
+				return nil, false
+			}
+			d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(c.obj.ConstantPool, i) })
+			d.Work = c.Work
+			if d.ParseOpcode() != nil {
+				return nil, false
+			}
+			ops := constructorMotionOps(d)
+			for i, op := range ops {
+				if op.Instr.OpCode != core.OP_NEW {
+					continue
+				}
+				owner, known := sourceBridgeClassName(c.obj, core.Convert2bytesToInt(op.Data))
+				child := p.children[owner]
+				if !known || child == nil || child.static {
+					continue
+				}
+				if i+3 >= len(ops) || ops[i+1].Instr.OpCode != core.OP_DUP || !constructorMotionLoad(ops[i+2], "L"+child.owner+";") {
+					return nil, false
+				}
+				plan := &nativeMemberAllocation{child: child, newPC: int(op.CurrentOffset), checkPC: -1, slot: core.GetRetrieveIdx(ops[i+2])}
+				cursor := i + 3
+				if plan.slot != 0 || m.AccessFlags&8 != 0 || c.obj.GetClassName() != child.owner {
+					if cursor+2 >= len(ops) || ops[cursor].Instr.OpCode != core.OP_DUP {
+						return nil, false
+					}
+					if !nativeMemberNullCheck(c.obj, ops[cursor+1]) || ops[cursor+2].Instr.OpCode != core.OP_POP {
+						return nil, false
+					}
+					plan.checkPC = int(ops[cursor+1].CurrentOffset)
+					cursor += 3
+				}
+				// Allocation invokes are found from the original symbolic descriptor; the
+				// simulator independently binds their NEW identity before rendering.
+				for j := cursor; j < len(ops); j++ {
+					if !nativeProofWork(c.Work, 1) {
+						return nil, false
+					}
+					call := constructorMotionMember(c.obj, ops[j], core.OP_INVOKESPECIAL)
+					if call != nil && call.Name == owner && call.Member == "<init>" {
+						if child.constructors[call.Description] == nil {
+							return nil, false
+						}
+						plan.descriptor = call.Description
+						plan.invokePC = int(ops[j].CurrentOffset)
+						if result[key][plan.invokePC] != nil {
+							return nil, false
+						}
+						result[key][plan.invokePC] = plan
+						break
+					}
+					if ops[j].Instr.OpCode == core.OP_NEW || ops[j].Instr.OpCode == core.OP_GOTO || ops[j].Instr.OpCode == core.OP_RETURN || ops[j].Instr.OpCode == core.OP_ARETURN {
+						return nil, false
+					}
+				}
+				if plan.descriptor == "" {
+					return nil, false
+				}
+			}
+			for _, op := range d.Opcodes() {
+				call := constructorMotionMember(c.obj, op, core.OP_INVOKESPECIAL)
+				if call == nil || call.Member != "<init>" || p.children[call.Name] == nil || p.children[call.Name].static {
+					continue
+				}
+				if result[name+desc][int(op.CurrentOffset)] != nil {
+					continue
+				}
+				ctor := p.children[call.Name].constructors[desc]
+				if name == "<init>" && c.obj.GetClassName() == call.Name && ctor != nil && ctor.capturePC < 0 && ctor.delegateDescriptor == call.Description && ctor.delegatePC == int(op.CurrentOffset) {
+					continue
+				}
+				if current := p.children[c.obj.GetClassName()]; name == "<init>" && current != nil {
+					ctor := current.constructors[desc]
+					if ctor != nil && ctor.projectedSuper && ctor.delegateOwner == call.Name && ctor.delegateDescriptor == call.Description && ctor.delegatePC == int(op.CurrentOffset) {
+						continue
+					}
+				}
+				return nil, false
+			}
+		}
+	}
+	return result, true
+}
+
+func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily, work *workbudget.Budget) *class_context.ClassContext {
+	copy := *ctx
+	projected := map[string]callbinding.Class{}
+	copy.InvocationMetadata = func(owner string) (callbinding.Class, bool) {
+		original := ctx.InvocationMetadata
+		if original == nil {
+			return callbinding.Class{}, false
+		}
+		if cl, known := projected[owner]; known {
+			return cl, true
+		}
+		cl, ok := original(owner)
+		if !ok {
+			return cl, false
+		}
+		child := p.children[strings.ReplaceAll(owner, ".", "/")]
+		if child == nil || child.static {
+			return cl, true
+		}
+		if !nativeProofWork(work, int64(len(cl.Methods))) || work != nil && work.CheckAlloc(int64(len(cl.Methods))*96) != nil {
+			p.failed = true
+			return callbinding.Class{}, false
+		}
+		cl.Methods = append([]callbinding.Method(nil), cl.Methods...)
+		for i, m := range cl.Methods {
+			if m.Name == "<init>" {
+				if ctor := child.constructors[m.Desc]; ctor != nil {
+					cl.Methods[i].Desc = ctor.sourceDescriptor
+				}
+			}
+		}
+		projected[owner] = cl
+		return cl, true
+	}
+
+	// Constructor Signature omits the compiler's enclosing parameter. Its
+	// exact descriptor key must move with the proved source descriptor; merely
+	// shortening the call loses generic inference (or binds a different ctor).
+	{
+		type entry struct {
+			signature string
+			methods   map[string]string
+			known     bool
+		}
+		cache := map[string]entry{}
+		copy.SiblingClassSig = func(owner string) (string, map[string]string, bool) {
+			if hit, ok := cache[owner]; ok {
+				return hit.signature, hit.methods, hit.known
+			}
+			if ctx.SiblingClassSig == nil {
+				return "", nil, false
+			}
+			signature, methods, known := ctx.SiblingClassSig(owner)
+			child := p.children[strings.ReplaceAll(owner, ".", "/")]
+			if child == nil || child.static {
+				return signature, methods, known
+			}
+			cl, ok := copy.InvocationMetadata(owner)
+			if !ok || !nativeProofWork(work, int64(len(methods)+len(cl.Methods))) || work != nil && work.CheckAlloc(int64(len(methods)+len(cl.Methods))*96) != nil {
+				p.failed = true
+				return "", nil, false
+			}
+			projected := make(map[string]string, len(methods)+len(cl.Methods))
+			for key, value := range methods {
+				projected[key] = value
+			}
+			for descriptor := range child.constructors {
+				delete(projected, class_context.MethodDescKey("<init>", descriptor))
+			}
+			for _, m := range cl.Methods {
+				if m.Name != "<init>" {
+					continue
+				}
+				projected[class_context.MethodDescKey(m.Name, m.Desc)] = ""
+				if m.Signature == "" {
+					continue
+				}
+				_, params, _ := types.ParseMethodSignatureFull(m.Signature, ctx)
+				descriptorParams, result, err := callbinding.Descriptor(m.Desc)
+				if err != nil || result != "V" || len(params) != len(descriptorParams) {
+					p.failed = true
+					return "", nil, false
+				}
+				projected[class_context.MethodDescKey(m.Name, m.Desc)] = m.Signature
+			}
+			cache[owner] = entry{signature, projected, known}
+			return signature, projected, known
+		}
+	}
+	return &copy
+}
+func (c *ClassObjectDumper) wireNativeMemberSource() {
+	if child := c.nativeMemberCurrent; child != nil {
+		c.FuncCtx.LexicalClassName = child.name
+	}
+	p := c.nativeMemberRoot
+	looked := map[string]bool{}
+	if p == nil && c.nativeMemberLookup != nil {
+		p = &nativeMemberFamily{children: map[string]*nativeMemberClass{}}
+		for _, constant := range c.obj.ConstantPool {
+			if cls, ok := constant.(*ConstantClassInfo); ok && cls != nil {
+				name, known := sourceBridgeUTF8(c.obj, cls.NameIndex)
+				if known {
+					if !looked[name] {
+						looked[name] = true
+						if child := c.nativeMemberLookup(name); child != nil {
+							p.children[name] = child
+						}
+					}
+				}
+			}
+		}
+		c.nativeMemberRoot = p
+	}
+	if p == nil {
+		return
+	}
+	ctx := c.FuncCtx
+	if c.obj.GetClassName() == p.owner || c.nativeMemberCurrent != nil {
+		ctx.LexicalTypeNames = map[string]bool{}
+		for _, child := range p.children {
+			ctx.LexicalTypeNames[child.name] = true
+		}
+	}
+	prior := ctx.DeclarationSourceName
+	ctx.DeclarationSourceName = func(n string) (string, bool) {
+		if source, known := p.sourceName(n); known {
+			return source, true
+		}
+		if c.nativeMemberLookup != nil {
+			key := strings.ReplaceAll(n, ".", "/")
+			if !looked[key] {
+				looked[key] = true
+				if child := c.nativeMemberLookup(key); child != nil {
+					p.children[key] = child
+					return p.sourceName(n)
+				}
+			}
+		}
+		if prior != nil {
+			return prior(n)
+		}
+		return "", false
+	}
+	if len(p.children) == 0 {
+		return
+	}
+	plans, known := c.nativeMemberAllocations(p)
+	if !known {
+		p.failed = true
+		return
+	}
+	c.nativeMemberCalls = plans
+	c.nativeMemberChecks = map[string]map[int]bool{}
+	for method, allocations := range plans {
+		checks := map[int]bool{}
+		for _, plan := range allocations {
+			if plan.checkPC >= 0 {
+				checks[plan.checkPC] = true
+			}
+		}
+		c.nativeMemberChecks[method] = checks
+	}
+	binding := nativeMemberBinding(ctx, p, c.Work)
+	ctx.SourceMemberCandidate = func(owner string) bool {
+		child := p.children[strings.ReplaceAll(owner, ".", "/")]
+		return child != nil && !child.static
+	}
+	ctx.SourceMemberAllocation = func(owner, desc string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
+		fail := func() (string, bool) { p.failed = true; return "", false }
+		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+		if plan == nil || plan.child.object.GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.newPC != newPC || plan.descriptor != desc || len(args) == 0 || !args[0].Receiver && !args[0].Local {
+			return fail()
+		}
+		outer, outerKnown := args[0].Value.(values.JavaValue)
+		if !outerKnown {
+			return fail()
+		}
+		erasure, typeKnown := values.SourceTypeErasure(outer.Type(), ctx)
+		if !typeKnown || erasure != "L"+plan.child.owner+";" {
+			return fail()
+		}
+		ctor := plan.child.constructors[desc]
+		if ctor == nil {
+			return fail()
+		}
+		invoke := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: ctor.sourceDescriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: pc}
+		for _, arg := range args[1:] {
+			v, ok := arg.Value.(values.JavaValue)
+			if !ok {
+				return fail()
+			}
+			invoke.Arguments = append(invoke.Arguments, v)
+		}
+		mt, e := types.ParseMethodDescriptor(ctor.sourceDescriptor)
+		if e != nil {
+			return fail()
+		}
+		invoke.FuncType = mt.FunctionType()
+		allocationBinding := *ctx
+		allocationBinding.InvocationMetadata = binding.InvocationMetadata
+		allocationBinding.SiblingClassSig = binding.SiblingClassSig
+		arguments := invoke.ArgumentStrings(&allocationBinding)
+		sourceName := plan.child.name
+		if plan.child.formalCount > 0 {
+			// Java forbids a raw member beneath a parameterized enclosing
+			// instance (and the reverse). Infer only the member's parameters;
+			// preserve a genuinely raw outer/member pair.
+			typedOuter := plan.child.outerFormalCount == 0 || args[0].Receiver && c.obj.GetClassName() == plan.child.owner
+			if param, ok := outer.Type().RawType().(*types.JavaParameterizedType); ok && len(param.TypeArgs) == plan.child.outerFormalCount {
+				typedOuter = true
+			}
+			if typedOuter {
+				sourceName += "<>"
+			}
+		}
+		if args[0].Receiver && c.obj.GetClassName() == plan.child.owner {
+			return "new " + sourceName + "(" + strings.Join(arguments, ",") + ")", true
+		}
+		return "(" + args[0].Text + ").new " + sourceName + "(" + strings.Join(arguments, ",") + ")", true
+	}
+	if child := c.nativeMemberCurrent; child != nil && !child.static {
+		ctx.SourceMemberDelegation = func(owner, desc string, pc int, args []any) (string, bool) {
+			name := strings.ReplaceAll(owner, ".", "/")
+			targetClass := p.children[name]
+			if targetClass == nil || targetClass.static {
+				return "", false
+			}
+			ctor := child.constructors[ctx.CurrentMethodDesc]
+			keyword := "this"
+			if name != child.object.GetClassName() {
+				if ctor == nil || !ctor.projectedSuper || name != child.object.GetSupperClassName() {
+					return "", false
+				}
+				keyword = "super"
+			}
+			target := targetClass.constructors[desc]
+			if ctor == nil || target == nil || ctor.delegateOwner != name || ctor.delegatePC != pc || ctor.delegateDescriptor != desc || len(args) < 1 {
+				p.failed = true
+				return "", false
+			}
+			call := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: target.sourceDescriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true}
+			for _, arg := range args[1:] {
+				v, ok := arg.(values.JavaValue)
+				if !ok {
+					p.failed = true
+					return "", false
+				}
+				call.Arguments = append(call.Arguments, v)
+			}
+			mt, e := types.ParseMethodDescriptor(target.sourceDescriptor)
+			if e != nil {
+				p.failed = true
+				return "", false
+			}
+			call.FuncType = mt.FunctionType()
+			delegationBinding := *ctx
+			delegationBinding.InvocationMetadata = binding.InvocationMetadata
+			delegationBinding.SiblingClassSig = binding.SiblingClassSig
+			delegationBinding.CurrentMethodDesc = ctor.sourceDescriptor
+			return keyword + "(" + strings.Join(call.ArgumentStrings(&delegationBinding), ",") + ")", true
+		}
+	}
+}
+
+func (c *ClassObjectDumper) prepareNativeMemberConstructor(code *CodeAttribute, body []statements.Statement, params []values.JavaValue, method *MemberInfo) ([]statements.Statement, *nativeMemberConstructor, error) {
+	child := c.nativeMemberCurrent
+	n, _ := c.obj.getUtf8(method.NameIndex)
+	if child == nil || child.static || n != "<init>" {
+		return body, nil, nil
+	}
+	desc, _ := c.obj.getUtf8(method.DescriptorIndex)
+	ctor := child.constructors[desc]
+	if ctor == nil || len(params) < 2 {
+		return nil, nil, fmt.Errorf("unproved member constructor")
+	}
+	outer, ok := params[1].(*values.JavaRef)
+	if !ok || outer.Id == nil || !outer.IsParam || outer.CustomValue != nil || outer.StackVar != nil {
+		return nil, nil, fmt.Errorf("unproved enclosing parameter")
+	}
+	if c.FuncCtx.LocalNames == nil {
+		c.FuncCtx.LocalNames = map[*coreutils.VariableId]string{}
+	}
+	c.FuncCtx.LocalNames[outer.Id] = c.FuncCtx.ShortTypeName(strings.ReplaceAll(child.owner, "/", ".")) + ".this"
+	if ctor.capturePC < 0 {
+		return body, nil, nil
+	}
+	filtered := make([]statements.Statement, 0, len(body))
+	found := false
+	for _, st := range body {
+		if a, ok := st.(*statements.AssignStatement); ok && a != nil {
+			if f, ok := values.UnpackSoltValue(a.LeftValue).(*values.RefMember); ok && f != nil && f.Member == child.field {
+				receiver, ok := values.UnpackSoltValue(f.Object).(*values.JavaRef)
+				if !ok || receiver == nil || !receiver.IsThis || values.UnpackSoltValue(a.JavaValue) != outer || found || a.IsDeclare || a.ArrayMember != nil {
+					return nil, nil, fmt.Errorf("member capture source mismatch")
+				}
+				found = true
+				continue
+			}
+		}
+		filtered = append(filtered, st)
+	}
+	if !found {
+		return nil, nil, fmt.Errorf("missing member capture source")
+	}
+	return filtered, ctor, nil
+}
+func (c *ClassObjectDumper) nativeMemberSkipCheck(st statements.Statement) bool {
+	p := c.nativeMemberRoot
+	if p == nil {
+		return false
+	}
+	expr, ok := st.(*statements.ExpressionStatement)
+	if !ok || expr == nil {
+		return false
+	}
+	call, ok := values.UnpackSoltValue(expr.Expression).(*values.FunctionCallExpression)
+	if !ok || call == nil || !call.HasOriginPC {
+		return false
+	}
+	return c.nativeMemberChecks[c.FuncCtx.FunctionName+c.FuncCtx.CurrentMethodDesc][call.OriginPC]
+}
+func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
+	p := c.nativeMemberRoot
+	if p == nil || c.obj.GetClassName() != p.owner {
+		return "", nil
+	}
+	names := make([]string, 0, len(p.children))
+	for n := range p.children {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var out strings.Builder
+	for _, name := range names {
+		child := p.children[name]
+		sub := NewClassObjectDumper(child.object)
+		sub.options = c.options
+		sub.Work = c.Work
+		sub.foldSiblingResolver = c.foldSiblingResolver
+		sub.declarationResolver = c.declarationResolver
+		sub.nativeMemberRoot = p
+		sub.nativeMemberCurrent = child
+		if !child.static {
+			sub.nativeCaptureFields = map[string]string{child.field: c.FuncCtx.ShortTypeName(strings.ReplaceAll(p.owner, "/", ".")) + ".this"}
+		}
+		sub.nativeCapturedReads = map[string]map[int]string{}
+		sub.nativeOuterContext = c.FuncCtx
+		if !child.static {
+			sub.nativeTypeParams = append([]string(nil), c.FuncCtx.TypeParams...)
+		}
+		for _, m := range child.object.Methods {
+			n, _ := child.object.getUtf8(m.NameIndex)
+			desc, _ := child.object.getUtf8(m.DescriptorIndex)
+			key := n + desc
+			sub.nativeCapturedReads[key] = map[int]string{}
+			for _, a := range m.Attributes {
+				code, ok := a.(*CodeAttribute)
+				if !ok {
+					continue
+				}
+				if !nativeProofWork(c.Work, int64(len(code.Code))) {
+					return "", fmt.Errorf("member code budget")
+				}
+				d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(child.object.ConstantPool, i) })
+				d.Work = c.Work
+				if d.ParseOpcode() != nil {
+					return "", fmt.Errorf("member code parse")
+				}
+				for _, op := range d.Opcodes() {
+					if field := constructorMotionMember(child.object, op, core.OP_GETFIELD); field != nil && field.Name == name && field.Member == child.field {
+						sub.nativeCapturedReads[key][int(op.CurrentOffset)] = child.field
+					}
+				}
+			}
+		}
+		src, e := sub.DumpClass()
+		if e != nil || sub.nativeCaptureFailed || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
+			return "", fmt.Errorf("member body unproved: %v", e)
+		}
+		for _, method := range sub.dumpedMethodsSet {
+			if method != nil && method.checkedEscape {
+				return "", fmt.Errorf("member requires enclosing checked escape helper")
+			}
+		}
+		for _, imp := range javaExtractImports(src) {
+			c.FuncCtx.Import(imp)
+		}
+		if !strings.HasPrefix(src, sub.nativeMemberUnitPrefix) {
+			return "", fmt.Errorf("member compilation unit prefix changed")
+		}
+		out.WriteString("\n")
+		out.WriteString(src[len(sub.nativeMemberUnitPrefix):])
+		out.WriteString("\n")
+	}
+	return out.String(), nil
+}
+
+func nativeMemberParameterWidth(params []string) int {
+	width := len(params)
+	for _, p := range params {
+		if p == "J" || p == "D" {
+			width++
+		}
+	}
+	return width
+}
+
+// Both javac lowerings consume the duplicated qualifier and discard a result.
+// getClass is final on Object; this is the exact platform null-check protocol,
+// not an arbitrary receiver method or a subclass-name heuristic.
+func nativeMemberNullCheck(obj *ClassObject, op *core.OpCode) bool {
+	if call := constructorMotionMember(obj, op, core.OP_INVOKESTATIC); call != nil {
+		return call.Name == "java/util/Objects" && call.Member == "requireNonNull" && call.Description == "(Ljava/lang/Object;)Ljava/lang/Object;"
+	}
+	if call := constructorMotionMember(obj, op, core.OP_INVOKEVIRTUAL); call != nil {
+		return call.Name == "java/lang/Object" && call.Member == "getClass" && call.Description == "()Ljava/lang/Class;"
+	}
+	return false
+}
+
+// Anonymous rows are references, not ownership declarations. A root NEW whose
+// target has an unnamed InnerClasses row still requires its original enclosing
+// identity and complete anonymous allocation proof. Missing bytes/attributes
+// must not turn that target into an unrelated flat type during joint planning.
+func nativeJointAnonymousAllocationsClosed(obj *ClassObject, anonymous *nativeAnonymousFamily, work *workbudget.Budget) bool {
+	if obj == nil {
+		return false
+	}
+	unnamed := map[string]bool{}
+	for _, attr := range obj.Attributes {
+		if table, ok := attr.(*InnerClassesAttribute); ok && table != nil {
+			for _, row := range table.Classes {
+				if row == nil {
+					return false
+				}
+				if row.InnerNameIndex != 0 {
+					continue
+				}
+				name, known := sourceBridgeClassName(obj, row.InnerClassInfoIndex)
+				if !known {
+					return false
+				}
+				unnamed[name] = true
+			}
+		}
+	}
+	if len(unnamed) == 0 {
+		return true
+	}
+	for _, method := range obj.Methods {
+		if method == nil {
+			return false
+		}
+		for _, attr := range method.Attributes {
+			if code, ok := attr.(*CodeAttribute); ok {
+				if !nativeProofWork(work, int64(len(code.Code))) {
+					return false
+				}
+				d := core.NewDecompiler(code.Code, func(int) values.JavaValue { return nil })
+				d.Work = work
+				if d.ParseOpcode() != nil {
+					return false
+				}
+				for _, op := range d.Opcodes() {
+					if op.Instr.OpCode != core.OP_NEW {
+						continue
+					}
+					name, known := sourceBridgeClassName(obj, uint16(core.Convert2bytesToInt(op.Data)))
+					if !known {
+						return false
+					}
+					if unnamed[name] && (anonymous == nil || anonymous.children[name] == nil) {
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
+}

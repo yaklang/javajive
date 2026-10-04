@@ -11,47 +11,18 @@ package javaclassparser
 // kill-switch 置位恢复空体, 证明承重。
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
 
 func TestSynBridgeThisIsLoadBearing(t *testing.T) {
-	sub, err := os.ReadFile("testdata/regression/SynBridgeSeed$Sub.class")
-	if err != nil {
-		t.Fatalf("read SynBridgeSeed$Sub seed: %v", err)
-	}
-	// Resolver for the sibling units (Base / the $1 marker) so the flat unit decompiles fully. The
-	// synthetic-bridge detection itself is descriptor-keyed and resolver-independent.
-	resolver := func(internalName string) ([]byte, bool) {
-		base := internalName[strings.LastIndexByte(internalName, '/')+1:]
-		b, e := os.ReadFile("testdata/regression/" + base + ".class")
-		if e != nil {
-			return nil, false
-		}
-		return b, true
-	}
-
-	// Fix ON (default): the synthetic bridge ctor body carries the explicit `this()` delegation.
-	os.Unsetenv("JDEC_SYN_BRIDGE_THIS_OFF")
-	on, err := DecompileWithResolver(sub, resolver)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !strings.Contains(on, "SynBridgeSeed$1 var1) {") || !bridgeBodyHasThis(on) {
-		t.Errorf("fix ON: expected the synthetic bridge ctor to delegate `this();`, got:\n%s", on)
-	}
-
-	// Fix OFF (kill-switch): the bridge body is left empty -- the exact "has private access" recompile
-	// blocker the fix removes -- proving it is load-bearing.
-	t.Setenv("JDEC_SYN_BRIDGE_THIS_OFF", "1")
-	off, err := DecompileWithResolver(sub, resolver)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if bridgeBodyHasThis(off) {
-		t.Errorf("fix OFF: bridge ctor must NOT carry `this();` (expected empty body), got:\n%s", off)
-	}
+	path := "testdata/regression/SynBridgeSeed$Sub.class"
+	assertReviewedTypeVarInvoke(t, path, "<init>", "(LSynBridgeSeed$1;)V", 1, 183, "SynBridgeSeed$Sub", "<init>", "()V")
+	assertReviewedTypeVarInvoke(t, path, "<init>", "()V", 2, 183, "SynBridgeSeed$Base", "<init>", "(LSynBridgeSeed$1;)V")
+	reviewedSeedSources(t, path, "JDEC_SYN_BRIDGE_THIS_OFF", true, func(source string) {
+		requireReviewedPattern(t, source, `SynBridgeSeed\$Sub\(SynBridgeSeed\$1\s+\w+\)\s*\{\s*this\(\);\s*\}`)
+		requireReviewedPattern(t, source, `SynBridgeSeed\$Sub\(\)\s*\{\s*super\(\(SynBridgeSeed\$1\)\(null\)\);\s*\}`)
+	})
 }
 
 // bridgeBodyHasThis reports whether the synthetic bridge ctor `...SynBridgeSeed$1 var1) {` is followed

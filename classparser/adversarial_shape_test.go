@@ -40,21 +40,99 @@ func assertOrig14Decompile(t *testing.T, seed, onMust, offMust string) {
 }
 
 func TestAdversarialBareIfMissesOldUnique(t *testing.T) {
-	assertOrig14Decompile(t, "testdata/regression/BareIfAdv.class",
-		"if ((var3_1) != (0)){",
-		"if (var3_1){")
+	raw, err := os.ReadFile("testdata/regression/BareIfAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The bytecode iinc proves this counter is numeric. The core must retain
+	// that proof even when compatibility source recovery is disabled. Names
+	// can change when the two numeric slot ranges stop being split as bool/int.
+	for _, disabled := range []string{"", "1"} {
+		t.Setenv("JDEC_ORIG14_REMAINING_OFF", disabled)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(source, "boolean var3") || !strings.Contains(source, "if ((var3) != (0)){") || !strings.Contains(source, "var3++;") {
+			t.Fatalf("counter must stay int with explicit numeric zero test (recovery off=%q):\n%s", disabled, source)
+		}
+	}
 }
 
 func TestAdversarialEmptySyncTrailingElse(t *testing.T) {
-	assertOrig14Decompile(t, "testdata/regression/EmptySyncAdv.class",
-		"synchronized(this){\n\n\t\t\t}\n\t\t\treturn false;",
-		"synchronized(this){\n\n\t\t\t}\n\t\t}")
+	// javap EmptySyncAdv.closeInternal: monitorenter at 24, then iload_1/if/ireturn
+	// with monitorexit on each path. Production must keep those returns INSIDE
+	// the synchronized statement, not after an emptied monitor.
+	raw, err := os.ReadFile("testdata/regression/EmptySyncAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := Decompile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !javaSynchronizedContains(src, "synchronized(this)", "return false;") {
+		t.Fatalf("return false must be inside synchronized(this), not after it:\n%s", src)
+	}
+	if !javaSynchronizedContains(src, "synchronized(this)", "if (var1){") {
+		t.Fatalf("if (var1) must be inside synchronized(this):\n%s", src)
+	}
+}
+
+func javaSynchronizedContains(src, header, inner string) bool {
+	from := 0
+	for from < len(src) {
+		rel := strings.Index(src[from:], header)
+		if rel < 0 {
+			return false
+		}
+		i := from + rel
+		brace := strings.Index(src[i:], "{")
+		if brace < 0 {
+			return false
+		}
+		start := i + brace
+		depth := 0
+		end := -1
+		for j := start; j < len(src); j++ {
+			switch src[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = j
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end > start && strings.Contains(src[start:end+1], inner) {
+			return true
+		}
+		from = start + 1
+	}
+	return false
 }
 
 func TestAdversarialNsmeCatchThisBuild(t *testing.T) {
-	assertOrig14Decompile(t, "testdata/regression/NsmeCatchAdv.class",
-		"ClassNotFoundException | NoSuchMethodException var2",
-		"catch(ClassNotFoundException var2){")
+	raw, err := os.ReadFile("testdata/regression/NsmeCatchAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The original table catches only CNFE. NSME is declared by make() and
+	// propagates; adding it to this catch changes the exception contract.
+	for _, disabled := range []string{"", "1"} {
+		t.Setenv("JDEC_ORIG14_REMAINING_OFF", disabled)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(source, "catch(ClassNotFoundException") || strings.Contains(source, "ClassNotFoundException | NoSuchMethodException") {
+			t.Fatalf("original catch alternatives changed:\n%s", source)
+		}
+	}
 }
 
 // Standalone javac of `boolean acc |= bits.set()` already dumps as boolean; the
@@ -108,9 +186,22 @@ func TestAdversarialBoolOrFoldedEnum(t *testing.T) {
 }
 
 func TestFieldWriterListFuncBareIfIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FieldWriterListFunc.class", "JDEC_ORIG14_REMAINING_OFF",
-		"if ((var6_1) != (0)){",
-		"if (var6_1){")
+	path := "testdata/regression/FieldWriterListFunc.class"
+	raw, code, _ := reviewedFixtureMethod(t, path, "writeValue", "(Lcom/alibaba/fastjson2/JSONWriter;Ljava/lang/Object;)V")
+	assertReviewedTypeVarMethod(t, raw, "writeValue", "(Lcom/alibaba/fastjson2/JSONWriter;Ljava/lang/Object;)V", "(Lcom/alibaba/fastjson2/JSONWriter;TT;)V")
+	assertReviewedOpcode(t, code, 141, 3)
+	assertReviewedOpcode(t, code, 142, 54, 6)
+	assertReviewedOpcode(t, code, 155, 21, 6)
+	assertReviewedOpcode(t, code, 157, 153)
+	assertReviewedTypeVarInvoke(t, path, "writeValue", "(Lcom/alibaba/fastjson2/JSONWriter;Ljava/lang/Object;)V", 161, 182, "com/alibaba/fastjson2/JSONWriter", "writeComma", "()V")
+	reviewedSeedSources(t, path, "JDEC_ORIG14_REMAINING_OFF", false, func(source string) {
+		body := reviewedSourceMethod(t, source, `void\s+writeValue\(`)
+		counter := requireReviewedPattern(t, body, `if\s*\(\((\w+)\)\s*!=\s*\(0\)\)\{\s*\w+\.writeComma\(\);`)[1]
+		requireReviewedPattern(t, body, `int\s+`+counter+`\s*=\s*0;`)
+		if !strings.Contains(body, ".get("+counter+")") || !strings.Contains(body, counter+"++;") {
+			t.Fatal("numeric induction variable lost list indexing or increment")
+		}
+	})
 }
 
 func TestHttp2StreamTrailingElseEmptySyncIsLoadBearing(t *testing.T) {
@@ -119,21 +210,18 @@ func TestHttp2StreamTrailingElseEmptySyncIsLoadBearing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("JDEC_HTTP2_STREAM_SYNC_OFF", "1")
-	os.Unsetenv("JDEC_ORIG14_REMAINING_OFF")
-	on, err := Decompile(raw)
+	src, err := Decompile(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(on, "return false;") {
-		t.Fatalf("ON missing return after empty sync:\n%s", clipForTest(on, "closeInternal"))
+	closeIdx := strings.Index(src, "closeInternal")
+	if closeIdx < 0 {
+		t.Fatalf("missing closeInternal:\n%s", src)
 	}
-	t.Setenv("JDEC_ORIG14_REMAINING_OFF", "1")
-	off, err := Decompile(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical with HTTP2_STREAM_SYNC off")
+	chunk := src[closeIdx:]
+	if !javaSynchronizedContains(chunk, "synchronized(this)", "return false;") &&
+		!javaSynchronizedContains(chunk, "synchronized(this)", "return true;") {
+		t.Fatalf("closeInternal monitor must contain a return (bytecode monitorexit on return paths):\n%s", clipForTest(src, "closeInternal"))
 	}
 }
 

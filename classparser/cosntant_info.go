@@ -26,6 +26,7 @@ const (
 	CONSTANT_Utf8               = 1
 	CONSTANT_MethodHandle       = 15
 	CONSTANT_MethodType         = 16
+	CONSTANT_Dynamic            = 17
 	CONSTANT_InvokeDynamic      = 18
 	CONSTANT_Module             = 19
 	CONSTANT_Package            = 20
@@ -54,48 +55,50 @@ type ConstantInfo interface {
 *
 根据tag创建不同的constant Info
 */
-func newConstantInfo(tag uint8) ConstantInfo {
+func newConstantInfo(tag uint8) (ConstantInfo, error) {
 	switch tag {
 	case CONSTANT_Integer:
-		return &ConstantIntegerInfo{}
+		return &ConstantIntegerInfo{}, nil
 	case CONSTANT_Float:
-		return &ConstantFloatInfo{}
+		return &ConstantFloatInfo{}, nil
 	case CONSTANT_Long:
-		return &ConstantLongInfo{}
+		return &ConstantLongInfo{}, nil
 	case CONSTANT_Double:
-		return &ConstantDoubleInfo{}
+		return &ConstantDoubleInfo{}, nil
 	case CONSTANT_Utf8:
-		return &ConstantUtf8Info{}
+		return &ConstantUtf8Info{}, nil
 	case CONSTANT_String:
-		return &ConstantStringInfo{}
+		return &ConstantStringInfo{}, nil
 	case CONSTANT_Class:
-		return &ConstantClassInfo{}
+		return &ConstantClassInfo{}, nil
 	case CONSTANT_Fieldref:
 		return &ConstantFieldrefInfo{
 			ConstantMemberrefInfo: ConstantMemberrefInfo{},
-		}
+		}, nil
 	case CONSTANT_Methodref:
 		return &ConstantMethodrefInfo{
 			ConstantMemberrefInfo: ConstantMemberrefInfo{},
-		}
+		}, nil
 	case CONSTANT_InterfaceMethodref:
 		return &ConstantInterfaceMethodrefInfo{
 			ConstantMemberrefInfo: ConstantMemberrefInfo{},
-		}
+		}, nil
 	case CONSTANT_NameAndType:
-		return &ConstantNameAndTypeInfo{}
+		return &ConstantNameAndTypeInfo{}, nil
 	case CONSTANT_MethodType:
-		return &ConstantMethodTypeInfo{}
+		return &ConstantMethodTypeInfo{}, nil
 	case CONSTANT_MethodHandle:
-		return &ConstantMethodHandleInfo{}
+		return &ConstantMethodHandleInfo{}, nil
+	case CONSTANT_Dynamic:
+		return &ConstantDynamicInfo{}, nil
 	case CONSTANT_InvokeDynamic:
-		return &ConstantInvokeDynamicInfo{}
+		return &ConstantInvokeDynamicInfo{}, nil
 	case CONSTANT_Module:
-		return &ConstantModuleInfo{}
+		return &ConstantModuleInfo{}, nil
 	case CONSTANT_Package:
-		return &ConstantPackageInfo{}
+		return &ConstantPackageInfo{}, nil
 	default:
-		panic(fmt.Sprintf("java.lang.ClassFormatError: constant pool tag! met 0x%x", tag))
+		return nil, fmt.Errorf("java.lang.ClassFormatError: constant pool tag! met 0x%x", tag)
 	}
 }
 

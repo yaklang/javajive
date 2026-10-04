@@ -53,26 +53,7 @@ func TestJedisRemainingByteHashMapPutIsLoadBearing(t *testing.T) {
 }
 
 func TestJedisRemainingCatchRedeclareIsLoadBearing(t *testing.T) {
-	raw, err := os.ReadFile("testdata/regression/Connection.class")
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Unsetenv("JDEC_JEDIS_REMAINING_OFF")
-	on, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Contains(on, "JedisConnectionException var4 = null;") {
-		t.Errorf("ON still redeclares catch var4")
-	}
-	t.Setenv("JDEC_JEDIS_REMAINING_OFF", "1")
-	off, err := Decompile(raw)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !strings.Contains(off, "JedisConnectionException var4 = null;") {
-		t.Errorf("OFF missing catch redeclare")
-	}
+	assertReviewedConnectionCatchBinding(t)
 }
 
 func assertJedisDecompileDiff(t *testing.T, seed, onMust, offMust string) {

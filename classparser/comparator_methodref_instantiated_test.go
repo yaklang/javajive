@@ -1,13 +1,9 @@
 package javaclassparser
 
-// 承重测试: Comparator 方法引用的实例化类型上行 (kill-switch JDEC_METHODREF_INSTANTIATED_TYPE_OFF)
-//
-// `String::compareTo` 的目标函数式接口是 `Comparator<String>`。字节码 invokedynamic 的
-// instantiatedMethodType 记录 `(String,String)I`, 但 Comparator 原先不在
-// inferLambdaTypeFromInstantiated 的 switch 里, 方法引用值类型停在 RAW `Comparator`。
-// 存进 `Comparator<String>` 字段时 wildcardObjectAssignRawBridge 补 raw `(Comparator)` 造型,
-// javac 拒收 `(Comparator)(String::compareTo)` ("invalid method reference")。
-// 镜像 okhttp3.internal.Util.NATURAL_ORDER。
+// The original Comparator SAM is instantiated as (String,String)I. Preserve
+// that target on its materialized carrier before the field assignment. The
+// still-active diagnostic toggle erases the carrier and remains a negative
+// control, regardless of where the raw field bridge happens to be printed.
 
 import (
 	"os"
@@ -18,29 +14,26 @@ import (
 func TestComparatorMethodRefInstantiatedTypeIsLoadBearing(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/NaturalOrderSeed.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-
-	os.Unsetenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !strings.Contains(on, "String::compareTo") {
-		t.Errorf("fix ON: expected method reference `String::compareTo`, got:\n%s", on)
-	}
-	if strings.Contains(on, "(Comparator) (String::compareTo)") ||
-		strings.Contains(on, "(Comparator)(String::compareTo)") {
-		t.Errorf("fix ON: raw `(Comparator)` wrap must not wrap the method reference, got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if !strings.Contains(off, "(Comparator) (String::compareTo)") &&
-		!strings.Contains(off, "(Comparator)(String::compareTo)") {
-		t.Errorf("fix OFF: expected raw `(Comparator)` wrap around `String::compareTo`, got:\n%s", off)
+	assertReviewedSAMInstantiation(t, data, "(Ljava/lang/Object;Ljava/lang/Object;)I => (Ljava/lang/String;Ljava/lang/String;)I")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF", setting)
+		source, err := Decompile(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		declared := "Comparator<String>"
+		if setting != "" {
+			declared = "Comparator"
+		}
+		carrier := reviewedFunctionalCarrier(t, source, declared, `String::compareTo;`)
+		compact := compactReviewedGenericSource(source)
+		if setting == "" && !strings.Contains(compact, "NATURAL_ORDER="+carrier+";") {
+			t.Fatalf("typed comparator carrier must feed original field: %s", source)
+		}
+		if setting != "" && !strings.Contains(compact, "NATURAL_ORDER=(Comparator)("+carrier+");") {
+			t.Fatalf("active negative control must expose erased comparator carrier: %s", source)
+		}
 	}
 }

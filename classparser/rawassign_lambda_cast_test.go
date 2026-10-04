@@ -1,5 +1,9 @@
 package javaclassparser
 
+// Raw functional reassignments retain their instantiated Collection SAM via
+// a typed carrier or an explicit target. Moving the view into a local must keep
+// that same local's value feeding the original raw assignment and return.
+
 import (
 	"os"
 	"strings"
@@ -17,34 +21,20 @@ import (
 func TestRawAssignLambdaCastIsLoadBearing(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/RawAssignLambdaSeed.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-
-	// Fix ON (default): both the method reference and the lambda carry the parameterized cast.
-	os.Unsetenv("JDEC_LAMBDA_ASSIGN_CAST_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !strings.Contains(on, "(Function<Collection, Collection>)(Collections::unmodifiableCollection)") {
-		t.Errorf("fix ON: expected the method reference to be cast to Function<Collection, Collection>, got:\n%s", on)
-	}
-	// The lambda's parameters are now implicit (JDEC_LAMBDA_IMPLICIT_PARAMS default), so the cast
-	// wraps `(l0) -> ...` rather than the old explicit `(Collection l0) -> ...` form.
-	if !strings.Contains(on, "(Function<Collection, Collection>)((l0) ->") {
-		t.Errorf("fix ON: expected the lambda to be cast to Function<Collection, Collection>, got:\n%s", on)
-	}
-
-	// Fix OFF: the bare (uncastable) method reference / lambda reappear, proving the cast is load-bearing.
-	t.Setenv("JDEC_LAMBDA_ASSIGN_CAST_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if strings.Contains(off, "(Function<Collection, Collection>)(Collections::unmodifiableCollection)") {
-		t.Errorf("fix OFF: expected the bare method reference, but the cast survived (kill-switch not load-bearing):\n%s", off)
-	}
-	if !strings.Contains(off, "= Collections::unmodifiableCollection;") {
-		t.Errorf("fix OFF: expected the bare `= Collections::unmodifiableCollection;`, got:\n%s", off)
+	assertReviewedSAMInstantiation(t, data, "(Ljava/lang/Object;)Ljava/lang/Object; => (Ljava/util/Collection;)Ljava/util/Collection;", "(Ljava/lang/Object;)Ljava/lang/Object; => (Ljava/util/Collection;)Ljava/util/Collection;")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_LAMBDA_ASSIGN_CAST_OFF", setting)
+		source, err := Decompile(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compact := compactReviewedGenericSource(source)
+		carrier := reviewedFunctionalCarrier(t, source, "Function<Collection, Collection>", `Collections::unmodifiableCollection;`)
+		target := reviewedFunctionalCarrier(t, source, "Function", `this.builder;`)
+		if !strings.Contains(compact, target+"="+carrier+";") || !strings.Contains(compact, "return"+target+";") || !strings.Contains(compact, "(Function<Collection,Collection>)((") || !strings.Contains(compact, "Collections.singleton(") || !strings.Contains(compact, ".iterator().next()") {
+			t.Fatalf("switch=%q: both raw reassignments must retain typed SAM inputs and original body: %s", setting, source)
+		}
 	}
 }

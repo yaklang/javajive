@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixMath3RemainingReconstructs repairs leftover commons-math3 tree sites.
 // Kill-switch: JDEC_MATH3_REMAINING_OFF=1.
 func fixMath3RemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_MATH3_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_MATH3_REMAINING_OFF") == "1" {
 		return body
 	}
 	if strings.Contains(body, "T extends RealFieldElement") || strings.Contains(body, "T extends FieldElement") {
@@ -25,7 +25,6 @@ func fixMath3RemainingReconstructs(body string) string {
 			body = strings.ReplaceAll(body, typ+" var", typ+"<T> var")
 			body = strings.ReplaceAll(body, "("+typ+") (", "("+typ+"<T>) (")
 			body = strings.ReplaceAll(body, "("+typ+")(", "("+typ+"<T>)(")
-			body = strings.ReplaceAll(body, "new "+typ+"(", "new "+typ+"<T>(")
 		}
 		body = wrapSizedFieldArrays(body)
 		body = wrapFieldArrayReturningCalls(body)
@@ -83,9 +82,6 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.Replace(body, "var6[var10_1] = var11;", "var6[var10] = var11;", 1)
 		body = strings.Replace(body, "var5[var8] = var5[var10_1];", "var5[var8] = var5[var10];", 1)
 		body = strings.Replace(body, "var5[var10_1] = var12_1;", "var5[var10] = var12_1;", 1)
-	}
-	if strings.Contains(body, "class PoissonDistribution") {
-		body = strings.ReplaceAll(body, "((double)(var25_1))", "((var25_1) ? (1.0D) : (0.0D))")
 	}
 	if strings.Contains(body, "class AVLTree$Node") {
 		body = strings.ReplaceAll(body, "Comparable var1 = this.element;", "T var1 = this.element;")
@@ -149,36 +145,6 @@ func fixMath3RemainingReconstructs(body string) string {
 			"(T)((T)(this.this$0.getStepSize()))",
 			"(T)(this.this$0.getStepSize())")
 	}
-	if strings.Contains(body, "class BetaDistribution$ChengBetaSampler") {
-		body = strings.Replace(body,
-			"double var6 = (var2) + ((1D) / (var5));\n\t\tdo{\n\t\t\tdouble var7",
-			"double var6 = (var2) + ((1D) / (var5));\n\t\tdouble var10 = 0.0;\n\t\tdo{\n\t\t\tdouble var7",
-			1)
-		body = strings.Replace(body,
-			"double var10 = (var2) * (FastMath.exp(var9));",
-			"var10 = (var2) * (FastMath.exp(var9));",
-			1)
-		body = strings.Replace(body,
-			"double var10 = FastMath.min(var10,",
-			"var10 = FastMath.min(var10,",
-			1)
-		body = strings.Replace(body,
-			"double var14;\n\t\tdouble var13 = 0.0;",
-			"double var14 = 0.0;\n\t\tdouble var14_1 = 0.0;\n\t\tdouble var13 = 0.0;",
-			1)
-		body = strings.Replace(body,
-			"var14 = (var2) * (FastMath.exp(var13));",
-			"var14_1 = (var2) * (FastMath.exp(var13));",
-			1)
-		body = strings.Replace(body,
-			"double var14_1 = (var2) * (FastMath.exp(var13));",
-			"var14_1 = (var2) * (FastMath.exp(var13));",
-			1)
-		body = strings.Replace(body,
-			"double var14_1 = FastMath.min(var14_1,",
-			"var14_1 = FastMath.min(var14_1,",
-			1)
-	}
 	if strings.Contains(body, "class ResizableDoubleArray") {
 		filled := "ResizableDoubleArray var2 = this;\n\t\t\t\tsynchronized(this){\n\t\t\t\t\tResizableDoubleArray var3 = ((ResizableDoubleArray)(var1));\n\t\t\t\t\treturn ((this.numElements) == (var3.numElements)) && ((this.startIndex) == (var3.startIndex));\n\t\t\t\t}"
 		body = strings.Replace(body,
@@ -194,12 +160,6 @@ func fixMath3RemainingReconstructs(body string) string {
 		body = strings.Replace(body,
 			"if ((var0) < (-0.4769362762044697D)){\n\n\t\t\t}else{",
 			"if ((var0) < (-0.4769362762044697D)){\n\t\t\t\treturn ((var1) < (0D)) ? ((erfc(-var1)) - (erfc(-var0))) : ((erfc(-var0)) - (erfc(var1)));\n\t\t\t}else{",
-			1)
-	}
-	if strings.Contains(body, "class AdamsNordsieckFieldTransformer") {
-		body = strings.Replace(body,
-			"this.update = new Array2DRowFieldMatrix<T>(var5.solve((FieldMatrix<T>)(new Array2DRowFieldMatrix<T>(var7,false))).getData());",
-			"this.update = new Array2DRowFieldMatrix<T>((T[][])(var5.solve((FieldMatrix<T>)(new Array2DRowFieldMatrix<T>(var7,false))).getData()));",
 			1)
 	}
 	return body

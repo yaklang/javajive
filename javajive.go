@@ -56,6 +56,8 @@ func Decompile(classBytes []byte) (string, error) {
 type DecompileOptions = classparser.DecompileOptions
 type DecompileResult = classparser.DecompileResult
 type DecompileMode = classparser.DecompileMode
+type Limits = classparser.Limits
+type WorkBudget = classparser.WorkBudget
 
 const (
 	Precision     = classparser.Precision

@@ -45,24 +45,25 @@ func TestObjectUsedAsIntRewritesReadLength(t *testing.T) {
 }
 
 func TestWildcardFileFilterThisFirstIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/WildcardFileFilter.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
+	// javap identifies seven same-owner invokespecial <init> delegations.
+	// Every emitted delegation must precede declarations; the String constructor
+	// also retains requireWildcards inside the delegated array argument.
+	assertReviewedConstructorDelegations(t, "testdata/regression/WildcardFileFilter.class", "WildcardFileFilter", "JDEC_COMMONS_IO_REMAINING_OFF", 7,
+		"this(IOCase.SENSITIVE,new String[]{", "requireWildcards")
+}
+
+func TestWildcardThisRepairPreservesDescriptorPin(t *testing.T) {
+	t.Setenv("JDEC_COMMONS_IO_REMAINING_OFF", "")
+	in := "public WildcardFileFilter(String var1) {\n\t\tString[] var2 = new String[1];\n\t\tvar2[0] = ((String)(requireWildcards((Object)(var1))));\n\t\tthis(IOCase.SENSITIVE,var2);\n\t}"
+	out := fixCommonsIoRemainingReconstructs(in)
+	if strings.Contains(out, "this(IOCase.SENSITIVE,var2)") || strings.Count(out, "requireWildcards((Object)(var1))") != 1 {
+		t.Fatalf("lost binding/evaluation or kept prelude: %s", out)
 	}
-	os.Unsetenv("JDEC_COMMONS_IO_REMAINING_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Contains(on, "String[] var2 = new String[1]") && strings.Contains(on, "this(IOCase.SENSITIVE,var2)") {
-		t.Errorf("ON still has this() after locals:\n%s", on)
-	}
-	t.Setenv("JDEC_COMMONS_IO_REMAINING_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !strings.Contains(off, "this(IOCase.SENSITIVE,var2)") {
-		t.Errorf("OFF expected this() after locals, got:\n%s", off)
+}
+
+func TestIORecoveryDoesNotAppendReturnAfterTerminalLoop(t *testing.T) {
+	body := "package org.apache.commons.io;\nclass Probe {\n boolean read() {\n\t\tdo{}while(true);\n\t\t}\n\t}\n\tprivate static boolean contentEquals(Iterator<?> var0, Iterator<?> var1) { return true; }"
+	if got := fixCommonsIoRemainingReconstructs(body); got != body {
+		t.Fatalf("appended an unreachable return:\n%s", got)
 	}
 }

@@ -49,3 +49,7 @@ go.work.sum
 # javac from a throwaway dir (cmd.Dir = outDir), but ignore them in case a manual
 # run from the repo root leaves one behind.
 javac.*.args
+
+# Generated task-pack evidence (not goldens). Override with JAVAJIVE_EVIDENCE_DIR.
+tools/**/evidence/**
+!tools/milestone_ledger/evidence/historical_cli_seeds.json

@@ -213,7 +213,9 @@ var jarSpecs = map[string]jarSpec{
 			"com/google/code/findbugs/annotations/*/annotations-*.jar",
 			"com/github/spotbugs/spotbugs-annotations/*/spotbugs-annotations-*.jar",
 			"org/codehaus/woodstox/stax2-api/*/stax2-api-*.jar",
-			"biz/aQute/bnd/biz.aQute.bnd.annotation/*/biz.aQute.bnd.annotation-*.jar",
+			// log4j 2.23.1 inherits bnd annotation 7.0.0 from logging-parent 10.6.0.
+			// 6.x uses enum elements where this artifact carries String values.
+			"biz/aQute/bnd/biz.aQute.bnd.annotation/7.0.0/biz.aQute.bnd.annotation-7.0.0.jar",
 		},
 	},
 	"protobuf": {
@@ -449,7 +451,9 @@ var jarSpecs = map[string]jarSpec{
 			"commons-logging/commons-logging/1.2/commons-logging-1.2.jar",
 			"org/slf4j/slf4j-api/*/slf4j-api-*.jar",
 			"org/apache/ant/ant/*/ant-*.jar",
-			"org/jdom/jdom/1.*/jdom-1.*.jar",
+			// FreeMarker v2.3.33 builds its legacy JDOM adapter against 1.0b8;
+			// later 1.x changes Text.getParent() from Element to Parent.
+			"jdom/jdom/1.0b8/jdom-1.0b8.jar",
 			"org/dom4j/dom4j/*/dom4j-*.jar",
 			"jaxen/jaxen/*/jaxen-*.jar",
 			"org/python/jython-standalone/*/jython-standalone-*.jar",
@@ -559,8 +563,12 @@ type recompileResult struct {
 // decompileAll decompiles every class entry via the production JarFS path and writes each unit to
 // <root>/<package path>/<SimpleName>.java. Returns the written file paths and the unit/fail counts.
 func decompileAll(t *testing.T, jarPath, root string, maxFiles int) (files []string, units, decompFail int) {
+	return decompileAllWithResolver(t, jarPath, root, maxFiles, nil)
+}
+
+func decompileAllWithResolver(t *testing.T, jarPath, root string, maxFiles int, resolve func(string) ([]byte, bool)) (files []string, units, decompFail int) {
 	t.Helper()
-	jfs, err := classparser.NewJarFSFromLocal(jarPath)
+	jfs, err := classparser.NewJarFSFromLocalWithResolver(jarPath, resolve)
 	if err != nil {
 		t.Fatalf("NewJarFSFromLocal %s: %v", jarPath, err)
 	}

@@ -1,8 +1,6 @@
 package core
 
 import (
-	"os"
-
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
@@ -181,7 +179,7 @@ func (d *Decompiler) parameterWebRefs(webs *slotWeb) map[int]*values.JavaRef {
 // slotWebs returns the cached web partition, computing it on first use. Returns nil when the
 // kill-switch JDEC_LIVEINTERVAL_OFF is set, so all web-driven repairs fall back to the legacy passes.
 func (d *Decompiler) slotWebs() *slotWeb {
-	if os.Getenv("JDEC_LIVEINTERVAL_OFF") != "" {
+	if d.getenv("JDEC_LIVEINTERVAL_OFF") != "" {
 		return nil
 	}
 	if d.cachedSlotWebs == nil {
@@ -207,7 +205,7 @@ func (d *Decompiler) reachingSlotVersionByWeb(load *OpCode, slot int, current *v
 	// VarUid); disjoint live ranges (e.g. try-with-resources `primaryExc`) fall in different webs and
 	// are left untouched, so it cannot merge genuinely-distinct variables. Kill-switch
 	// JDEC_LIVEINTERVAL_WEB_OFF restores the opt-in-off behaviour for A/B delta regression checks.
-	if os.Getenv("JDEC_LIVEINTERVAL_WEB_OFF") != "" {
+	if d.getenv("JDEC_LIVEINTERVAL_WEB_OFF") != "" {
 		return nil
 	}
 	webs := d.slotWebs()
@@ -278,7 +276,7 @@ func (d *Decompiler) reachingStoreOpsByWeb(load *OpCode, slot, loadWeb int, webs
 func (d *Decompiler) reachingSlotStoreContinuationByWeb(store *OpCode, slot int, current *values.JavaRef) *values.JavaRef {
 	// Default ON (kill-switch JDEC_LIVEINTERVAL_WEB_OFF); see reachingSlotVersionByWeb for the empirical
 	// rationale and the current 8-jar tree-inventory A/B that justifies the default flip.
-	if os.Getenv("JDEC_LIVEINTERVAL_WEB_OFF") != "" {
+	if d.getenv("JDEC_LIVEINTERVAL_WEB_OFF") != "" {
 		return nil
 	}
 	webs := d.slotWebs()

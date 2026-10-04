@@ -2,7 +2,7 @@ package types
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -11,9 +11,15 @@ import (
 // JavaParameterizedType represents a parameterized (generic) class type, e.g.
 // BiFunction<Integer, Integer, Integer>. It wraps a raw class name and carries
 // concrete type arguments recovered from the Signature attribute.
+type NestedTypeSegment struct {
+	BinaryName string
+	TypeArgs   []JavaType
+}
+
 type JavaParameterizedType struct {
-	RawClassName string
-	TypeArgs     []JavaType
+	OwnerSegments []NestedTypeSegment
+	RawClassName  string
+	TypeArgs      []JavaType
 }
 
 func NewParameterizedType(rawClassName string, typeArgs []JavaType) JavaType {
@@ -25,6 +31,57 @@ func NewParameterizedType(rawClassName string, typeArgs []JavaType) JavaType {
 
 func (j *JavaParameterizedType) String(funcCtx *class_context.ClassContext) string {
 	base := funcCtx.ShortTypeName(j.RawClassName)
+	if len(j.OwnerSegments) > 1 && funcCtx.DeclarationSourceName != nil {
+		if source, known := funcCtx.DeclarationSourceName(j.RawClassName); known {
+			parts := make([]string, 0, len(j.OwnerSegments))
+			valid := true
+			for i, segment := range j.OwnerSegments {
+				name := funcCtx.ShortTypeName(segment.BinaryName)
+				if i > 0 {
+					parent := j.OwnerSegments[i-1].BinaryName
+					inner, ok := strings.CutPrefix(segment.BinaryName, parent+"$")
+					if !ok || inner == "" || strings.Contains(inner, ".") {
+						valid = false
+						break
+					}
+					name = inner
+				}
+				if len(segment.TypeArgs) > 0 {
+					args := make([]string, len(segment.TypeArgs))
+					for k, arg := range segment.TypeArgs {
+						args[k] = arg.String(funcCtx)
+					}
+					name += "<" + strings.Join(args, ", ") + ">"
+				}
+				parts = append(parts, name)
+			}
+			if valid {
+				expected := j.OwnerSegments[0].BinaryName
+				if original, known := funcCtx.DeclarationSourceName(expected); known {
+					expected = original
+				}
+				for i := 1; i < len(j.OwnerSegments); i++ {
+					inner, _ := strings.CutPrefix(j.OwnerSegments[i].BinaryName, j.OwnerSegments[i-1].BinaryName+"$")
+					expected += "." + inner
+				}
+				if source != expected {
+					valid = false
+				}
+			}
+			if valid {
+				last := j.OwnerSegments[len(j.OwnerSegments)-1]
+				parent := j.OwnerSegments[len(j.OwnerSegments)-2]
+				inner, _ := strings.CutPrefix(last.BinaryName, parent.BinaryName+"$")
+				if strings.HasSuffix(source, "."+inner) {
+					if funcCtx.LexicalClassName == inner && funcCtx.ClassName == j.RawClassName {
+						return parts[len(parts)-1]
+					}
+					return strings.Join(parts, ".")
+				}
+			}
+		}
+	}
+
 	if len(j.TypeArgs) == 0 {
 		return base
 	}
@@ -216,16 +273,67 @@ func InstantiateJDKMethodReturn(rawClass, method string, argc int, typeArgs []Ja
 	if len(typeArgs) == 0 {
 		return nil
 	}
-	for _, ta := range typeArgs {
-		if isWildcardType(ta) {
+	// A producer only depends on the type argument in its return position.  Do
+	// not reject a sound result merely because an unrelated input argument is a
+	// wildcard (Function<? super K, ? extends V>.apply is the common shape).
+	// An upper-bounded result is safely usable as its bound; a lower-bounded or
+	// unbounded result is only known to be Object and therefore stays erased.
+	producerArg := func(index int) JavaType {
+		if index < 0 || index >= len(typeArgs) || typeArgs[index] == nil {
 			return nil
 		}
+		if wildcard, ok := typeArgs[index].(*JavaWildcardType); ok {
+			if wildcard == nil || wildcard.Variant != "extends" || wildcard.Bound == nil {
+				return nil
+			}
+			return wildcard.Bound
+		}
+		if raw, ok := typeArgs[index].RawType().(*JavaWildcardType); ok {
+			if raw == nil || raw.Variant != "extends" || raw.Bound == nil {
+				return nil
+			}
+			return raw.Bound
+		}
+		return typeArgs[index]
 	}
 	switch {
 	case method == "iterator" && argc == 0 && len(typeArgs) == 1 && jdkIterableFamily[rawClass]:
+		// Iterable<? extends E>.iterator() is Iterator<? extends E>, not
+		// Iterator<E>. Preserve the wildcard when T is nested in a generic
+		// result; capture conversion only permits collapsing an upper bound when
+		// the selected argument is the result itself.
 		return NewParameterizedType("java.util.Iterator", []JavaType{typeArgs[0]})
+	case method == "spliterator" && argc == 0 && len(typeArgs) == 1 && jdkIterableFamily[rawClass]:
+		return NewParameterizedType("java.util.Spliterator", []JavaType{typeArgs[0]})
 	case method == "next" && argc == 0 && len(typeArgs) == 1 && jdkIteratorFamily[rawClass]:
-		return typeArgs[0]
+		return producerArg(0)
+	case method == "get" && argc == 0 && rawClass == "java.util.function.Supplier" && len(typeArgs) == 1:
+		return producerArg(0)
+	case method == "call" && argc == 0 && rawClass == "java.util.concurrent.Callable" && len(typeArgs) == 1:
+		return producerArg(0)
+	case method == "apply" && argc == 1 && rawClass == "java.util.function.Function" && len(typeArgs) == 2:
+		return producerArg(1)
+	case method == "apply" && argc == 2 && rawClass == "java.util.function.BiFunction" && len(typeArgs) == 3:
+		return producerArg(2)
+	case method == "apply" && argc == 1 && rawClass == "java.util.function.UnaryOperator" && len(typeArgs) == 1:
+		return producerArg(0)
+	case method == "apply" && argc == 2 && rawClass == "java.util.function.BinaryOperator" && len(typeArgs) == 1:
+		return producerArg(0)
+	case method == "get" && argc == 1 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return producerArg(1)
+	case method == "getOrDefault" && argc == 2 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return producerArg(1)
+	case (method == "put" || method == "putIfAbsent" || method == "replace") && argc == 2 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return producerArg(1)
+	case method == "remove" && argc == 1 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return producerArg(1)
+	case method == "entrySet" && argc == 0 && len(typeArgs) == 2 && jdkMapFamily[rawClass] && !isWildcardType(typeArgs[0]) && !isWildcardType(typeArgs[1]):
+		entry := NewParameterizedType("java.util.Map$Entry", []JavaType{typeArgs[0], typeArgs[1]})
+		return NewParameterizedType("java.util.Set", []JavaType{entry})
+	case method == "keySet" && argc == 0 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return NewParameterizedType("java.util.Set", []JavaType{typeArgs[0]})
+	case method == "values" && argc == 0 && len(typeArgs) == 2 && jdkMapFamily[rawClass]:
+		return NewParameterizedType("java.util.Collection", []JavaType{typeArgs[1]})
 	}
 	return nil
 }
@@ -266,7 +374,7 @@ var jdkSortedMapFamily = map[string]bool{
 // or a method outside the set). The JDK signatures are stable API, so substituting the receiver's
 // type args is sound -- this is the parameter analogue of InstantiateJDKMethodReturn. ntype is the
 // number of receiver type args, used to disambiguate arities.
-func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype int) int {
+func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype int, getenv func(string) string) int {
 	switch rawClass {
 	case "java.util.function.Consumer":
 		if method == "accept" && argc == 1 && ntype == 1 && paramIndex == 0 {
@@ -328,7 +436,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// Only KEY positions resolve to K; NavigableMap's boolean inclusivity flags and the value-typed
 	// get/remove/containsKey(Object) are left as fixed (fall through to -1). Kill-switch
 	// JDEC_SORTED_MAP_KEY_PARAM_OFF.
-	if jdkSortedMapFamily[rawClass] && ntype == 2 && os.Getenv("JDEC_SORTED_MAP_KEY_PARAM_OFF") == "" {
+	if jdkSortedMapFamily[rawClass] && ntype == 2 && getenv("JDEC_SORTED_MAP_KEY_PARAM_OFF") == "" {
 		switch method {
 		case "headMap", "tailMap":
 			// SortedMap.headMap(K) [argc 1]; NavigableMap.headMap(K, boolean) [argc 2, only param0=K].
@@ -360,7 +468,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// descriptor erases E to its bound, so an Object-typed value flows in without the source's `(E)` cast;
 	// guava Iterators$ConcatenatedIterator `this.metaIterators.addFirst(rawDeque.removeLast())`).
 	if (method == "addFirst" || method == "addLast" || method == "offerFirst" || method == "offerLast" || method == "push") &&
-		argc == 1 && ntype == 1 && paramIndex == 0 && jdkDequeFamily[rawClass] && os.Getenv("JDEC_DEQUE_PARAM_OFF") == "" {
+		argc == 1 && ntype == 1 && paramIndex == 0 && jdkDequeFamily[rawClass] && getenv("JDEC_DEQUE_PARAM_OFF") == "" {
 		return 0
 	}
 	// List<E>.set(int, E) / add(int, E): the SECOND parameter is the element type arg (the first is the
@@ -371,7 +479,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// the List sub-family: only List declares 2-arg set/add(int, E); Set/Queue/Deque never do, so a
 	// same-named 2-arg call on them cannot exist in verified bytecode, but the family gate keeps it
 	// provably scoped.
-	if (method == "set" || method == "add") && argc == 2 && ntype == 1 && paramIndex == 1 && jdkListFamily[rawClass] && os.Getenv("JDEC_LIST_SET_PARAM_OFF") == "" {
+	if (method == "set" || method == "add") && argc == 2 && ntype == 1 && paramIndex == 1 && jdkListFamily[rawClass] && getenv("JDEC_LIST_SET_PARAM_OFF") == "" {
 		return 0
 	}
 	// AtomicReference<V>: the V-typed value-parameter methods whose descriptor erases V to Object. The
@@ -387,7 +495,7 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 	// InstantiateJDKMethodParam already returns nil for `AtomicReference<?>`. Kill-switch
 	// JDEC_ATOMIC_REF_PARAM_OFF.
 	if rawClass == "java.util.concurrent.atomic.AtomicReference" && ntype == 1 &&
-		os.Getenv("JDEC_ATOMIC_REF_PARAM_OFF") == "" {
+		getenv("JDEC_ATOMIC_REF_PARAM_OFF") == "" {
 		switch method {
 		case "compareAndSet", "weakCompareAndSet", "weakCompareAndSetPlain":
 			if argc == 2 && (paramIndex == 0 || paramIndex == 1) {
@@ -415,24 +523,123 @@ func jdkMethodParamTypeArgIndex(rawClass, method string, argc, paramIndex, ntype
 // against the generic signature -- rejects it ("BigDecimal/Object cannot be converted to V"). Feeding
 // the instantiated parameter type back lets the existing ArgumentStrings cast logic re-emit the
 // original `(V)` / `(T)` cast (unchecked but behavior-preserving, matching CFR/Fernflower). Returns
-// nil (caller keeps the erased descriptor param) for raw receivers, wildcard type args, or anything
-// outside the table.
+// nil (caller keeps the erased descriptor param) for raw receivers, non-consumer wildcards, or
+// anything outside the table. A selected `? super X` argument is a consumer position and therefore
+// accepts X; X is the source-level cast target erased by the descriptor.
 func InstantiateJDKMethodParam(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) JavaType {
-	if len(typeArgs) == 0 {
-		return nil
+	instantiated, _ := InstantiateJDKMethodParamInfo(rawClass, method, argc, paramIndex, typeArgs)
+	return instantiated
+}
+
+// InstantiateJDKMethodParamInfo is InstantiateJDKMethodParam with provenance for the one case where
+// source rendering needs more than the resulting type: lowerBound is true when the selected receiver
+// argument was `? super X` and the returned type is X. If X is itself parameterized while the argument
+// retains only X's raw erasure, javac capture conversion requires an explicit `(X)` cast even though
+// the raw classes match. Ordinary concrete receiver arguments do not need that same-erasure cast.
+func InstantiateJDKMethodParamInfo(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) (instantiated JavaType, lowerBound bool) {
+	return InstantiateJDKMethodParamInfoWithEnv(rawClass, method, argc, paramIndex, typeArgs, jdecenv.Lookup())
+}
+
+// InstantiateJDKMethodParamInfoWithEnv threads an explicit request policy through
+// the complete JDK leaf resolution. Never rediscover ambient goroutine bindings
+// inside a hierarchy walk; a nested request must not change its caller policy.
+func InstantiateJDKMethodParamInfoWithEnv(rawClass, method string, argc, paramIndex int, typeArgs []JavaType, getenv func(string) string) (instantiated JavaType, lowerBound bool) {
+	if getenv == nil {
+		getenv = jdecenv.Lookup()
 	}
-	idx := jdkMethodParamTypeArgIndex(rawClass, method, argc, paramIndex, len(typeArgs))
+	// This helper is also the leaf reached when the unified hierarchy resolver
+	// walks out of the input jar and hits a JDK declaration. Keep the public
+	// umbrella switch authoritative at that boundary too; otherwise
+	// JDEC_GENERIC_PARAM_INFER_OFF disables direct call-site inference but leaves
+	// inherited JDK fallbacks active (e.g. jar class -> List<String>.add).
+	if getenv("JDEC_GENERIC_PARAM_INFER_OFF") != "" || len(typeArgs) == 0 {
+		return nil, false
+	}
+	idx := jdkMethodParamTypeArgIndex(rawClass, method, argc, paramIndex, len(typeArgs), getenv)
 	if idx < 0 || idx >= len(typeArgs) {
-		return nil
+		return nil, false
 	}
-	// Only the SELECTED type argument must be a denotable (non-wildcard) target. A sibling
+	// Only the SELECTED type argument must be a denotable target. A sibling
 	// wildcard (`Map<E, ? super V>.put`) used to abort the whole method, dropping the
 	// perfectly-denotable `E` key cast (commons-collections4 MapBackedSet.addAll). A wildcard
-	// at idx itself still bails: `(? super V)` is not legal Java.
+	// at idx itself ordinarily bails because `(? extends V)` / `?` have an unnameable capture.
+	// The lower-bounded `? super V` exception is safe for the methods in this table: every mapped
+	// position consumes that type argument, so V is exactly the value type accepted by the capture.
+	// This is the direct-JDK counterpart of ResolveInstantiatedParamType's hierarchy path.
 	if isWildcardType(typeArgs[idx]) {
+		if wildcard, ok := lowerBoundedWildcard(typeArgs[idx]); ok &&
+			getenv("JDEC_GENERIC_SUPERWILDCARD_OFF") == "" {
+			return wildcard.Bound, true
+		}
+		return nil, false
+	}
+	return typeArgs[idx], false
+}
+
+// InstantiateJDKMethodParamType returns a recovered full formal type when a JDK
+// method parameter is derived from receiver type arguments. Most cases are a
+// direct T/K/V and are handled by InstantiateJDKMethodParam. Map's remapping
+// functions carry both K and V in nested functional-interface type arguments;
+// recovering their formal signatures exposes when a materialized lambda kept
+// only the erased types from LambdaMetafactory's instantiated method descriptor.
+func InstantiateJDKMethodParamType(rawClass, method string, argc, paramIndex int, typeArgs []JavaType) JavaType {
+	return InstantiateJDKMethodParamTypeWithEnv(rawClass, method, argc, paramIndex, typeArgs, jdecenv.Lookup())
+}
+
+// InstantiateJDKMethodParamTypeWithEnv is the nested-formal counterpart of
+// InstantiateJDKMethodParamInfoWithEnv and preserves the same explicit policy.
+func InstantiateJDKMethodParamTypeWithEnv(rawClass, method string, argc, paramIndex int, typeArgs []JavaType, getenv func(string) string) JavaType {
+	if getenv == nil {
+		getenv = jdecenv.Lookup()
+	}
+	if getenv("JDEC_GENERIC_PARAM_INFER_OFF") != "" {
 		return nil
 	}
-	return typeArgs[idx]
+	// Consumer-taking JDK declarations are target-typed just like Map's
+	// remapping functions. Their descriptors expose only raw Consumer, while
+	// the receiver fixes the complete source formal. Keep this table bounded to
+	// stable JDK declarations whose sole type parameter is threaded unchanged.
+	if len(typeArgs) == 1 && !isWildcardType(typeArgs[0]) && argc == 1 && paramIndex == 0 {
+		consumer := method == "forEach" && jdkIterableFamily[rawClass] ||
+			method == "forEachRemaining" && jdkIteratorFamily[rawClass] ||
+			rawClass == "java.util.Spliterator" && (method == "tryAdvance" || method == "forEachRemaining")
+		if consumer {
+			return NewParameterizedType("java.util.function.Consumer", []JavaType{
+				&JavaWildcardType{Variant: "super", Bound: typeArgs[0]},
+			})
+		}
+	}
+	if !jdkMapFamily[rawClass] || len(typeArgs) != 2 ||
+		isWildcardType(typeArgs[0]) || isWildcardType(typeArgs[1]) {
+		return nil
+	}
+	if method == "forEach" && argc == 1 && paramIndex == 0 {
+		return NewParameterizedType("java.util.function.BiConsumer", []JavaType{
+			&JavaWildcardType{Variant: "super", Bound: typeArgs[0]},
+			&JavaWildcardType{Variant: "super", Bound: typeArgs[1]},
+		})
+	}
+	if method == "computeIfAbsent" && argc == 2 && paramIndex == 1 {
+		return NewParameterizedType("java.util.function.Function", []JavaType{
+			&JavaWildcardType{Variant: "super", Bound: typeArgs[0]},
+			&JavaWildcardType{Variant: "extends", Bound: typeArgs[1]},
+		})
+	}
+	keyValue := (method == "computeIfPresent" || method == "compute") && argc == 2 && paramIndex == 1 ||
+		method == "replaceAll" && argc == 1 && paramIndex == 0
+	valueValue := method == "merge" && argc == 3 && paramIndex == 2
+	if keyValue || valueValue {
+		first := typeArgs[0]
+		if valueValue {
+			first = typeArgs[1]
+		}
+		return NewParameterizedType("java.util.function.BiFunction", []JavaType{
+			&JavaWildcardType{Variant: "super", Bound: first},
+			&JavaWildcardType{Variant: "super", Bound: typeArgs[1]},
+			&JavaWildcardType{Variant: "extends", Bound: typeArgs[1]},
+		})
+	}
+	return nil
 }
 
 // ParseSignature parses a JVM Signature attribute string and returns the
@@ -485,6 +692,16 @@ func parseSigClassType(sig string) (JavaType, string, bool) {
 	} else {
 		return nil, "", false
 	}
+	// JVMS ClassTypeSignature separates packages with '/' and member-class
+	// suffixes with '.'. An unparameterized enclosing class still ends before
+	// that suffix; consuming it as a package dot loses the binary '$' identity.
+	if dot := strings.IndexByte(rest[:nameEnd], '.'); dot >= 0 {
+		nameEnd = dot
+		hasTypeArgs = false
+	}
+	if nameEnd == 0 {
+		return nil, "", false
+	}
 	rawName := SlashToDot(rest[:nameEnd])
 	rest = rest[nameEnd:]
 	var typeArgs []JavaType
@@ -524,12 +741,14 @@ func parseSigClassType(sig string) (JavaType, string, bool) {
 		}
 		rest = rest[1:]
 	}
+	segments := []NestedTypeSegment{{BinaryName: rawName, TypeArgs: append([]JavaType(nil), typeArgs...)}}
 	for len(rest) > 0 && rest[0] == '.' {
 		innerEnd := 1
 		for innerEnd < len(rest) && rest[innerEnd] != ';' && rest[innerEnd] != '<' && rest[innerEnd] != '.' {
 			innerEnd++
 		}
-		rawName += "$" + rest[1:innerEnd]
+		innerName := rest[1:innerEnd]
+		rawName += "$" + innerName
 		rest = rest[innerEnd:]
 		if len(rest) > 0 && rest[0] == '<' {
 			rest = rest[1:]
@@ -565,16 +784,30 @@ func parseSigClassType(sig string) (JavaType, string, bool) {
 				rest = rest[1:]
 			}
 			typeArgs = innerArgs
+			segments = append(segments, NestedTypeSegment{BinaryName: rawName, TypeArgs: append([]JavaType(nil), innerArgs...)})
+		} else {
+			segments = append(segments, NestedTypeSegment{BinaryName: rawName})
 		}
 	}
 	if len(rest) == 0 || rest[0] != ';' {
 		return nil, "", false
 	}
 	rest = rest[1:]
-	if len(typeArgs) > 0 {
+	hasOwnerArgs := false
+	for _, segment := range segments {
+		hasOwnerArgs = hasOwnerArgs || len(segment.TypeArgs) > 0
+	}
+	// A single class has the same canonical representation as the public
+	// constructor. Owner segments carry additional lexical information only
+	// when the original signature actually contains a member separator.
+	if len(segments) == 1 {
+		segments = nil
+	}
+	if len(typeArgs) > 0 || hasOwnerArgs {
 		return newJavaTypeWrap(&JavaParameterizedType{
-			RawClassName: rawName,
-			TypeArgs:     typeArgs,
+			RawClassName:  rawName,
+			OwnerSegments: segments,
+			TypeArgs:      typeArgs,
 		}), rest, true
 	}
 	return newJavaTypeWrap(&JavaClass{Name: rawName}), rest, true
@@ -1319,15 +1552,23 @@ func MethodFormalTypeParamNames(sig string) []string {
 // the hard-coded JDK table). A type variable is modeled as a bare-named *JavaClass (parseSigType emits
 // `TK;` as JavaClass{Name:"K"}); a name absent from sigma is left untouched (so concrete class names,
 // which never appear as sigma keys, pass through unchanged). Parameterized type args and array element
-// types are rewritten recursively. Wildcards are returned as-is (the resolver skips wildcard receivers
-// upstream). Pure and allocation-light; nil-safe.
+// types and wildcard bounds are rewritten recursively. Receiver-capture gates
+// remain upstream; a wildcard inside a formal such as `Function<? super K,V>`
+// must still bind K when the declaring class is viewed as Super<String,V>.
+// Pure and allocation-light; nil-safe.
 func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 	if t == nil || len(sigma) == 0 {
 		return t
 	}
-	// A bare wildcard does not implement RawType safely (see isWildcardType); leave it untouched.
-	if _, ok := t.(*JavaWildcardType); ok {
-		return t
+	if wildcard, ok := t.(*JavaWildcardType); ok {
+		if wildcard.Bound == nil {
+			return t
+		}
+		bound := SubstituteTypeVars(wildcard.Bound, sigma)
+		if bound == wildcard.Bound {
+			return t
+		}
+		return &JavaWildcardType{Variant: wildcard.Variant, Bound: bound}
 	}
 	raw := t.RawType()
 	switch rt := raw.(type) {
@@ -1337,7 +1578,7 @@ func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 		}
 		return t
 	case *JavaParameterizedType:
-		if len(rt.TypeArgs) == 0 {
+		if len(rt.TypeArgs) == 0 && len(rt.OwnerSegments) == 0 {
 			return t
 		}
 		newArgs := make([]JavaType, len(rt.TypeArgs))
@@ -1349,10 +1590,23 @@ func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 				changed = true
 			}
 		}
+		var segments []NestedTypeSegment
+		if rt.OwnerSegments != nil {
+			segments = make([]NestedTypeSegment, len(rt.OwnerSegments))
+		}
+		for i, segment := range rt.OwnerSegments {
+			segments[i].BinaryName = segment.BinaryName
+			segments[i].TypeArgs = make([]JavaType, len(segment.TypeArgs))
+			for k, arg := range segment.TypeArgs {
+				sub := SubstituteTypeVars(arg, sigma)
+				segments[i].TypeArgs[k] = sub
+				changed = changed || sub != arg
+			}
+		}
 		if !changed {
 			return t
 		}
-		return NewParameterizedType(rt.RawClassName, newArgs)
+		return newJavaTypeWrap(&JavaParameterizedType{RawClassName: rt.RawClassName, TypeArgs: newArgs, OwnerSegments: segments})
 	case *JavaArrayType:
 		elem := rt.JavaType
 		sub := SubstituteTypeVars(elem, sigma)
@@ -1360,6 +1614,15 @@ func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 			return t
 		}
 		return newJavaTypeWrap(&JavaArrayType{JavaType: sub, Dimension: rt.Dimension})
+	case *JavaWildcardType:
+		if rt.Bound == nil {
+			return t
+		}
+		bound := SubstituteTypeVars(rt.Bound, sigma)
+		if bound == rt.Bound {
+			return t
+		}
+		return &JavaWildcardType{Variant: rt.Variant, Bound: bound}
 	default:
 		return t
 	}
@@ -1394,44 +1657,38 @@ func internalToDot(name string) string {
 // (funcCtx.IsTypeParam) or a concrete (dotted) class name. A method-scope `<T>` formal, a leftover
 // FOREIGN bare type variable (un-substituted because the receiver was raw, or a supertype formal not
 // in scope), a wildcard/capture, or a parameterized/array result all yield nil -- emitting `(T)` for a
-// non-in-scope variable would not compile, and the erasure blocker bucket is scalar casts only. JDK /
-// external supertypes (provider miss) yield nil and are left to the JDK table. provider==nil disables
-// the walk. Gated upstream by JDEC_GENERIC_RESOLVE_OFF.
-func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method string, argc, paramIndex int) JavaType {
+// non-in-scope variable would not compile, and the erasure blocker bucket is scalar casts only. A JDK
+// supertype reached after jar-internal substitution is resolved through the bounded JDK declaration
+// table; other external provider misses yield nil. provider==nil disables the walk. Gated upstream by
+// JDEC_GENERIC_RESOLVE_OFF.
+func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method, descriptor string, argc, paramIndex int) JavaType {
 	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" || paramIndex < 0 {
 		return nil
 	}
-	// A lower-bounded `? super X` receiver type arg is a CONSUMER position: a callee param that maps to it
-	// accepts an X, so the erased `Object` argument the source cast to X (the wildcard's lower bound) can be
-	// re-cast (`(E)`). It is therefore allowed through here and resolved to its bound by substituteAndGateParam.
-	// An unbounded `?` or upper-bounded `? extends X` arg captures to an unnameable CAP# with NO denotable
-	// cast target, so those still bail. Kill-switch JDEC_GENERIC_SUPERWILDCARD_OFF restores the blanket bail.
-	superWildcardOff := os.Getenv("JDEC_GENERIC_SUPERWILDCARD_OFF") != ""
-	for _, a := range recvArgs {
-		if !isWildcardType(a) {
-			continue
-		}
-		if _, ok := lowerBoundedWildcard(a); ok && !superWildcardOff {
-			continue
-		}
-		return nil
-	}
+	// Gate the selected formal AFTER substitution. An unrelated producer
+	// argument must not block a consumer: Mapping<? super U, ? extends T>
+	// accepts U through apply(A), regardless of its result B. A formal that
+	// actually depends on an upper/unbounded capture is still rejected below.
 	visited := map[string]bool{}
-	return resolveParamWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, argc, paramIndex, visited)
+	return resolveParamWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, descriptor, argc, paramIndex, visited)
 }
 
 // resolveParamWalk performs the depth-first hierarchy walk for ResolveInstantiatedParamType. sigma maps
 // the CURRENT node's formal type-parameter names to their actual arguments (in terms of the original
 // call site's denotable types). It is rebuilt for each supertype edge by substituting the supertype's
 // type arguments through the current sigma.
-func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method string, argc, paramIndex int, visited map[string]bool) JavaType {
+func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method, descriptor string, argc, paramIndex int, visited map[string]bool) JavaType {
 	if internal == "" || visited[internal] {
 		return nil
 	}
 	visited[internal] = true
 	classSig, methodSigs, ok := provider(internal)
 	if !ok {
-		return nil // JDK / external: not in jar, covered by the InstantiateJDKMethodParam table
+		// A jar-internal hierarchy may terminate at a parameterized JDK
+		// declaration (ProtocolStrings -> List<String>). Reuse the bounded JDK
+		// method table after composing the arguments along the preceding edges.
+		instantiated, _ := InstantiateJDKMethodParamInfoWithEnv(internalToDot(internal), method, argc, paramIndex, args, funcCtx.Getenv)
+		return instantiated
 	}
 	// sigma: this node's formal type params -> actual args (positional; raw receiver -> empty sigma).
 	formals := ClassFormalTypeParamNames(classSig)
@@ -1441,11 +1698,50 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 			sigma[formals[i]] = args[i]
 		}
 	}
+	// A raw generic receiver erases its parameterized supertypes as well.
+	// Following Child<X> -> Parent<X> with an empty substitution otherwise
+	// mistakes the declaration's X for a same-spelled caller type variable.
+	// Non-generic subclasses with fixed generic ancestors still resolve below.
+	if len(formals) > 0 && len(sigma) != len(formals) {
+		return nil
+	}
 	// Most-derived declaration with a generic Signature wins: if THIS class declares (method, argc)
 	// generically, it is the binding declaration -- resolve here and stop (do not let an ancestor's
 	// signature shadow an override).
 	if methodSigs != nil {
-		if msig := methodSigs[class_context.MethodSigKey(method, argc)]; msig != "" {
+		// An exact concrete declaration is authoritative even without a generic
+		// Signature. Do not walk past LazyStringList.add(ByteString) and mistake
+		// it for the inherited List<String>.add(E). buildSiblingClassSig records
+		// exact descriptor keys with an empty value for such declarations.
+		if descriptor != "" {
+			if msig, declared := methodSigs[class_context.MethodDescKey(method, descriptor)]; declared {
+				if msig == "" {
+					return nil
+				}
+				_, params, _ := ParseMethodSignatureFull(msig, funcCtx)
+				if paramIndex < len(params) && params[paramIndex] != nil {
+					return substituteAndGateParam(funcCtx, params[paramIndex], sigma, MethodFormalTypeParamNames(msig))
+				}
+				return nil
+			}
+		}
+		// An arity-only signature can belong to a DIFFERENT overload declared
+		// here while the descriptor-selected method is inherited. For example,
+		// RealFieldElement<T> declares multiply(double), but inherits
+		// FieldElement<T>.multiply(T): using multiply/1 for the latter stops the
+		// walk at the double formal, then an erased Object/FieldElement cast is
+		// invented for the T argument. An exact descriptor always won above;
+		// when a competing descriptor exists, walk to the actual declaration.
+		msig := methodSigs[class_context.MethodSigKey(method, argc)]
+		competingHere := false
+		if msig != "" && descriptor != "" {
+			keys := make(map[string]bool, len(methodSigs))
+			for key := range methodSigs {
+				keys[key] = true
+			}
+			competingHere = class_context.NameHasSameArityOverload(method, descriptor, keys)
+		}
+		if msig != "" && !competingHere {
 			_, params, _ := ParseMethodSignatureFull(msig, funcCtx)
 			if paramIndex < len(params) && params[paramIndex] != nil {
 				if t := substituteAndGateParam(funcCtx, params[paramIndex], sigma, MethodFormalTypeParamNames(msig)); t != nil {
@@ -1465,14 +1761,36 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 	for _, st := range supers {
 		pt, isPT := st.RawType().(*JavaParameterizedType)
 		if !isPT || pt.RawClassName == "" {
-			continue // raw supertype carries no mapping -> cannot substitute, skip this subtree
+			raw, known := RawClassFQN(st)
+			parentSig, _, available := provider(dotToInternal(raw))
+			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
+				if t := resolveParamWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, paramIndex, visited); t != nil {
+					return t
+				}
+			}
+			continue
 		}
 		childArgs := make([]JavaType, len(pt.TypeArgs))
 		for i, ta := range pt.TypeArgs {
 			childArgs[i] = SubstituteTypeVars(ta, sigma)
 		}
-		if t := resolveParamWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, paramIndex, visited); t != nil {
+		if t := resolveParamWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, descriptor, argc, paramIndex, visited); t != nil {
 			return t
+		}
+	}
+	// A class without a Signature attribute can still have raw, non-generic
+	// intermediate supertypes. Their names live in the mandatory class-file
+	// super/interface tables, exposed separately by SiblingSuperTypes. Only use
+	// this fallback when classSig is empty: when a Signature exists it already
+	// carries the authoritative parameterized edges and walking them raw would
+	// discard type arguments.
+	if classSig == "" && funcCtx.SiblingSuperTypes != nil {
+		if rawSupers, found := funcCtx.SiblingSuperTypes(internal); found {
+			for _, raw := range rawSupers {
+				if t := resolveParamWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, paramIndex, visited); t != nil {
+					return t
+				}
+			}
 		}
 	}
 	return nil
@@ -1534,7 +1852,14 @@ func resolveReturnWalk(funcCtx *class_context.ClassContext, provider ClassSigPro
 	for _, st := range supers {
 		pt, isPT := st.RawType().(*JavaParameterizedType)
 		if !isPT || pt.RawClassName == "" {
-			continue // raw supertype carries no mapping -> cannot substitute, skip this subtree
+			raw, known := RawClassFQN(st)
+			parentSig, _, available := provider(dotToInternal(raw))
+			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
+				if t := resolveReturnWalk(funcCtx, provider, dotToInternal(raw), nil, method, argc, visited); t != nil {
+					return t
+				}
+			}
+			continue
 		}
 		childArgs := make([]JavaType, len(pt.TypeArgs))
 		for i, ta := range pt.TypeArgs {
@@ -1553,26 +1878,61 @@ func resolveReturnWalk(funcCtx *class_context.ClassContext, provider ClassSigPro
 // mirrors ResolveInstantiatedReturnType (no denotability gate) but also returns the formal parameter
 // types (substituted), so a caller can detect an UNCHECKED invocation -- a parameterized formal fed a
 // raw argument, whose return javac erases to its erasure (JLS 15.12.2.6). Returns (nil, nil) when the
-// callee is JDK/external or declares no generic Signature for (method, argc) anywhere in the hierarchy.
+// callee declares no recoverable generic Signature for (method, argc) anywhere in the hierarchy. A
+// walk that reaches a stable JDK declaration can return a PARTIAL parameter slice from the bounded
+// JDK table while leaving the return nil; no return type is invented at that external boundary.
 func ResolveInstantiatedSignature(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method string, argc int) ([]JavaType, JavaType) {
 	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" {
 		return nil, nil
 	}
 	visited := map[string]bool{}
-	return resolveSignatureWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, argc, visited)
+	params, ret, _ := resolveSignatureWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, "", argc, visited)
+	return params, ret
+}
+
+// ResolveInstantiatedSignatureExact is the descriptor-keyed form of
+// ResolveInstantiatedSignature. The JVM descriptor identifies an overload
+// uniquely, so this path can retain a generic Signature even when the
+// (name,arity) index is deliberately absent because multiple overloads share
+// that arity. methodFormals reports the callee's own type parameters; a caller
+// using the result as a source declaration target must reject a type that still
+// mentions one of those out-of-scope names.
+func ResolveInstantiatedSignatureExact(funcCtx *class_context.ClassContext, provider ClassSigProvider, recvRaw string, recvArgs []JavaType, method, descriptor string, argc int) (params []JavaType, ret JavaType, methodFormals []string) {
+	if funcCtx == nil || provider == nil || recvRaw == "" || method == "" || descriptor == "" {
+		return nil, nil, nil
+	}
+	visited := map[string]bool{}
+	return resolveSignatureWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, descriptor, argc, visited)
 }
 
 // resolveSignatureWalk performs the depth-first hierarchy walk for ResolveInstantiatedSignature, binding
 // both the callee's PARAMETER types and RETURN type. sigma maps the current node's formal
 // type-parameter names to their actual arguments (in call-site-denotable terms), recomposed per edge.
-func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method string, argc int, visited map[string]bool) ([]JavaType, JavaType) {
+func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method, descriptor string, argc int, visited map[string]bool) ([]JavaType, JavaType, []string) {
 	if internal == "" || visited[internal] {
-		return nil, nil
+		return nil, nil, nil
 	}
 	visited[internal] = true
 	classSig, methodSigs, ok := provider(internal)
 	if !ok {
-		return nil, nil // JDK / external: not in jar
+		// The jar hierarchy may terminate at Map<K,V>/ConcurrentMap<K,V>. The
+		// composed args remain authoritative even though the JDK class bytes are
+		// outside the sibling provider. Recover only the stable full formals in
+		// the bounded JDK table; unknown/fixed positions stay nil and the return
+		// stays nil. This is enough for callers that need to restore a raw bridge
+		// around an erased functional argument.
+		params := make([]JavaType, argc)
+		found := false
+		for i := range params {
+			if p := InstantiateJDKMethodParamTypeWithEnv(internalToDot(internal), method, argc, i, args, funcCtx.Getenv); p != nil {
+				params[i] = p
+				found = true
+			}
+		}
+		if found {
+			return params, nil, nil
+		}
+		return nil, nil, nil
 	}
 	formals := ClassFormalTypeParamNames(classSig)
 	sigma := map[string]JavaType{}
@@ -1582,15 +1942,64 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 		}
 	}
 	if methodSigs != nil {
-		if msig := methodSigs[class_context.MethodSigKey(method, argc)]; msig != "" {
+		// Prefer the exact declaration. An empty descriptor-keyed entry means
+		// this class declares the selected overload without a Signature; that
+		// declaration is authoritative and the walk must not borrow an
+		// ancestor's unrelated generic method.
+		if descriptor != "" {
+			if msig, declared := methodSigs[class_context.MethodDescKey(method, descriptor)]; declared {
+				if len(formals) > 0 && len(args) != len(formals) {
+					return nil, nil, nil
+				}
+				if msig == "" {
+					return resolveSourceBridgeReturn(funcCtx, provider, internal, classSig, sigma, method, descriptor, argc, visited)
+				}
+				if _, params, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
+					// Method formals shadow same-spelled class formals. Never
+					// bind a callee's independent <T> to the receiver's class T.
+					methodSigma := make(map[string]JavaType, len(sigma))
+					for name, typ := range sigma {
+						methodSigma[name] = typ
+					}
+					for _, name := range MethodFormalTypeParamNames(msig) {
+						delete(methodSigma, name)
+					}
+					subParams := make([]JavaType, len(params))
+					for i, p := range params {
+						subParams[i] = SubstituteTypeVars(p, methodSigma)
+					}
+					return subParams, SubstituteTypeVars(ret, methodSigma), MethodFormalTypeParamNames(msig)
+				}
+				return nil, nil, nil
+			}
+		}
+		msig := methodSigs[class_context.MethodSigKey(method, argc)]
+		competingHere := false
+		if msig != "" && descriptor != "" {
+			keys := make(map[string]bool, len(methodSigs))
+			for key := range methodSigs {
+				keys[key] = true
+			}
+			competingHere = class_context.NameHasSameArityOverload(method, descriptor, keys)
+		}
+		if msig != "" && !competingHere {
 			if _, params, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
+				// Method formals shadow same-spelled class formals. Never
+				// bind a callee's independent <T> to the receiver's class T.
+				methodSigma := make(map[string]JavaType, len(sigma))
+				for name, typ := range sigma {
+					methodSigma[name] = typ
+				}
+				for _, name := range MethodFormalTypeParamNames(msig) {
+					delete(methodSigma, name)
+				}
 				subParams := make([]JavaType, len(params))
 				for i, p := range params {
-					subParams[i] = SubstituteTypeVars(p, sigma)
+					subParams[i] = SubstituteTypeVars(p, methodSigma)
 				}
-				return subParams, SubstituteTypeVars(ret, sigma)
+				return subParams, SubstituteTypeVars(ret, methodSigma), MethodFormalTypeParamNames(msig)
 			}
-			return nil, nil
+			return nil, nil, nil
 		}
 	}
 	sup, ifaces := ParseClassSignatureSupers(classSig)
@@ -1602,17 +2011,70 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 	for _, st := range supers {
 		pt, isPT := st.RawType().(*JavaParameterizedType)
 		if !isPT || pt.RawClassName == "" {
+			raw, known := RawClassFQN(st)
+			parentSig, _, available := provider(dotToInternal(raw))
+			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
+				if ps, r, fs := resolveSignatureWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, visited); len(ps) > 0 || r != nil {
+					return ps, r, fs
+				}
+			}
 			continue
 		}
 		childArgs := make([]JavaType, len(pt.TypeArgs))
 		for i, ta := range pt.TypeArgs {
 			childArgs[i] = SubstituteTypeVars(ta, sigma)
 		}
-		if params, ret := resolveSignatureWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, argc, visited); ret != nil {
-			return params, ret
+		if params, ret, methodFormals := resolveSignatureWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, descriptor, argc, visited); len(params) > 0 || ret != nil {
+			return params, ret, methodFormals
 		}
 	}
-	return nil, nil
+	// A non-generic intermediate class can still inherit the selected method
+	// through a raw edge recorded in the mandatory superclass/interface table.
+	if classSig == "" && funcCtx.SiblingSuperTypes != nil {
+		if rawSupers, found := funcCtx.SiblingSuperTypes(internal); found {
+			for _, raw := range rawSupers {
+				if params, ret, methodFormals := resolveSignatureWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, visited); len(params) > 0 || ret != nil {
+					return params, ret, methodFormals
+				}
+			}
+		}
+	}
+	return nil, nil, nil
+}
+
+// The empty exact entry still blocks ordinary inheritance. A separately
+// witnessed omitted bridge can expose its direct parent's source declaration;
+// compose that exact superclass edge rather than searching sibling interfaces
+// or falling back to an arity-only overload. No arguments or runtime casts move.
+func resolveSourceBridgeReturn(ctx *class_context.ClassContext, provider ClassSigProvider, owner, classSig string, sigma map[string]JavaType, method, descriptor string, argc int, visited map[string]bool) ([]JavaType, JavaType, []string) {
+	if ctx.SourceBridgeTarget == nil || argc != 0 || !strings.HasPrefix(descriptor, "()L") || len(sigma) != len(ClassFormalTypeParamNames(classSig)) {
+		return nil, nil, nil
+	}
+	target, proved := ctx.SourceBridgeTarget(owner, method, descriptor)
+	if !proved || target == "" || target == owner {
+		return nil, nil, nil
+	}
+	sup, _ := ParseClassSignatureSupers(classSig)
+	if sup == nil {
+		return nil, nil, nil
+	}
+	raw, known := RawClassFQN(sup)
+	if !known || dotToInternal(raw) != dotToInternal(target) {
+		return nil, nil, nil
+	}
+	var args []JavaType
+	if pt, ok := AsParameterizedType(sup); ok {
+		args = make([]JavaType, len(pt.TypeArgs))
+		for i, t := range pt.TypeArgs {
+			args[i] = SubstituteTypeVars(t, sigma)
+		}
+	} else {
+		parent, _, ok := provider(target)
+		if !ok || len(ClassFormalTypeParamNames(parent)) != 0 {
+			return nil, nil, nil
+		}
+	}
+	return resolveSignatureWalk(ctx, provider, target, args, method, descriptor, argc, visited)
 }
 
 // FieldSigProvider yields a jar-internal class's FIELD generic Signature by binary internal name and
@@ -1681,7 +2143,16 @@ func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSi
 	for _, st := range supers {
 		pt, isPT := st.RawType().(*JavaParameterizedType)
 		if !isPT || pt.RawClassName == "" {
-			continue // raw supertype carries no mapping -> cannot substitute, skip this subtree
+			// A non-generic parent has no substitution to lose. A raw generic
+			// parent remains unresolved: never borrow its unbound names.
+			raw, known := RawClassFQN(st)
+			parentSig, _, available := classProvider(dotToInternal(raw))
+			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
+				if t := resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(raw), nil, fieldName, visited); t != nil {
+					return t
+				}
+			}
+			continue
 		}
 		childArgs := make([]JavaType, len(pt.TypeArgs))
 		for i, ta := range pt.TypeArgs {
@@ -1713,6 +2184,9 @@ func substituteAndGateParam(funcCtx *class_context.ClassContext, param JavaType,
 	// Function<? super F,...>.apply(F) / Collections2$FilteredCollection family. A concrete or out-of-scope
 	// bound is rarer and riskier, so it stays nil.
 	if w, isW := lowerBoundedWildcard(res); isW {
+		if funcCtx.Getenv("JDEC_GENERIC_SUPERWILDCARD_OFF") != "" {
+			return nil
+		}
 		if bjc, okb := w.Bound.RawType().(*JavaClass); okb && funcCtx.IsTypeParam(bjc.Name) {
 			return w.Bound
 		}

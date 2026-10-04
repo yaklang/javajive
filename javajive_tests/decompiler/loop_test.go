@@ -220,7 +220,7 @@ func TestNestedLoop(t *testing.T) {
 	loop2Body.AddNext(loop2)
 	loop2.AddNext(loop1)
 	loop1.AddNext(loop1End)
-	println(utils.DumpNodesToDotExp(startNode))
+	original := snapshotNestedLoopCFG(t, startNode)
 	statementManager := rewriter.NewRootStatementManager(startNode)
 	statementManager.SetId(id)
 	err := statementManager.Rewrite()
@@ -247,24 +247,12 @@ func TestNestedLoop(t *testing.T) {
 		statementsStrs = append(statementsStrs, st.String(&class_context.ClassContext{}))
 	}
 	println(strings.Join(statementsStrs, "\n"))
-	assert.Equal(t, `start
-LOOP_1: do{
-if ("loop1 start"){
-do{
-if ("loop2 start"){
-loop2 body
-continue
-}else{
-continue LOOP_1
+	// The former golden contained an unreachable continue after an infinite inner
+	// loop. Compare reachable effects and every evaluated branch against the raw
+	// CFG instead, so a wrong outer target or missing exit cannot pass by spelling.
+	assertNestedLoopCFGPaths(t, original, core.NodesToStatements(sts))
 }
-}while(true)
-continue
-}else{
-break
-}
-}while(true)
-loop1 end`, strings.Join(statementsStrs, "\n"))
-}
+
 func TestBreakInLoop(t *testing.T) {
 	id := 0
 	newIf := func(name string) *core.Node {

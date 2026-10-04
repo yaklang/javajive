@@ -1,25 +1,20 @@
 package javaclassparser
 
-// 承重测试: 下界通配符 `? super E` 消费者参数的实参造型 (ResolveInstantiatedParamType 放行 `? super X`
-// 接收者实参 + substituteAndGateParam 取其下界为造型目标, kill-switch JDEC_GENERIC_SUPERWILDCARD_OFF)。
-//
-// `sink` 字段声明为 `SuperWildcardSink<? super E>`。调用 `sink.apply(x)` 时形参 T 绑定到捕获的 `? super E`,
-// 这是消费者位置, 接受一个 E。源码把擦除后的 Object 实参造型成 `(E)`, 但泛型擦除把该造型从字节码抹去
-// (字段的 apply 与实参都擦除为 Object, 不发 checkcast), 故反编译器必须重新补 `(E)` 才能重编译, 否则 javac 报
-// "Object cannot be converted to CAP#1 (? super E)"。镜像 guava Collections2$FilteredCollection /
-// Multisets$FilteredMultiset 的 `this.predicate.apply((E) element)`。
-// 旧逻辑在 ResolveInstantiatedParamType 入口对**任意**通配符接收者实参一律 bail, 故造型缺失。
-// kill-switch 置位后恢复一刀切 bail, 造型消失, 证明承重。
+// The original lower-bound consumer invokes apply(Object). An erased receiver
+// view is valid only if it retains that tuple and adds no payload check; an E
+// cast is not the unique valid source spelling. The old wildcard spelling gate
+// is superseded, so both settings must retain the same proven invocation.
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
-// superWildcardArgCastRe matches the `(E)` cast re-synthesized on the Object argument to a
-// `? super E`-typed consumer call, e.g. `this.sink.apply((E)(var1))`.
-var superWildcardArgCastRe = regexp.MustCompile(`apply\(\(E\)\(`)
+// Match the explicit original Object argument view, independent of local names.
+var superWildcardArgCastRe = regexp.MustCompile(`apply\(\(Object\)\([A-Za-z_$][A-Za-z0-9_$]*\)\)`)
 
 func TestSuperWildcardArgCastIsLoadBearing(t *testing.T) {
 	names := []string{"SuperWildcardSink", "SuperWildcardSeed"}
@@ -39,27 +34,28 @@ func TestSuperWildcardArgCastIsLoadBearing(t *testing.T) {
 	}
 	implBytes := bytesByName["SuperWildcardSeed"]
 
-	// Fix ON (default): the `? super E` receiver arg is allowed through the resolver, the apply param
-	// resolves to its lower bound E, and the erased Object argument is cast `(E)`.
-	os.Unsetenv("JDEC_GENERIC_SUPERWILDCARD_OFF")
-	os.Unsetenv("JDEC_GENERIC_RESOLVE_OFF")
+	// Signature and exact invocation evidence constrain the receiver/argument views.
+	assertReviewedGenericField(t, implBytes, "sink", "LSuperWildcardSink;", "LSuperWildcardSink<-TE;>;")
+	assertReviewedTypeVarMethod(t, implBytes, "check", "(Ljava/lang/Object;)Z", "")
+	assertReviewedTypeVarMethod(t, bytesByName["SuperWildcardSink"], "apply", "(Ljava/lang/Object;)Z", "(TT;)Z")
+	assertReviewedTypeVarInvoke(t, "testdata/regression/SuperWildcardSeed.class", "check", "(Ljava/lang/Object;)Z", 5, core.OP_INVOKEINTERFACE, "SuperWildcardSink", "apply", "(Ljava/lang/Object;)Z")
+
+	t.Setenv("JDEC_GENERIC_SUPERWILDCARD_OFF", "")
+	t.Setenv("JDEC_GENERIC_RESOLVE_OFF", "")
 	on, err := DecompileWithResolver(implBytes, resolver)
 	if err != nil {
 		t.Fatalf("decompile (fix ON) failed: %v", err)
 	}
-	if !superWildcardArgCastRe.MatchString(on) {
-		t.Errorf("fix ON: expected `apply((E)(...))` consumer cast, got:\n%s", on)
+	if !superWildcardArgCastRe.MatchString(compactReviewedGenericSource(on)) || !strings.Contains(compactReviewedGenericSource(on), "((SuperWildcardSink)(this.sink)).apply(") {
+		t.Errorf("expected original erased receiver and Object argument consumer view, got:\n%s", on)
 	}
 
-	// Fix OFF (kill-switch): restore the blanket bail on any wildcard receiver arg -> the `(E)` cast
-	// disappears (the exact "Object cannot be converted to CAP#" recompile blocker), proving it is
-	// load-bearing.
 	t.Setenv("JDEC_GENERIC_SUPERWILDCARD_OFF", "1")
 	off, err := DecompileWithResolver(implBytes, resolver)
 	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
+		t.Fatal(err)
 	}
-	if superWildcardArgCastRe.MatchString(off) {
-		t.Errorf("fix OFF: expected the `(E)` consumer cast to disappear (kill-switch not load-bearing), got:\n%s", off)
+	if off != on {
+		t.Fatal("retired wildcard spelling gate must not change the exact erased consumer binding")
 	}
 }

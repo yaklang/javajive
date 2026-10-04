@@ -2,8 +2,8 @@ package values
 
 import (
 	"fmt"
-	"math"
-	"os"
+	"github.com/yaklang/javajive/internal/javaliteral"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -11,8 +11,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
-	"github.com/yaklang/javajive/internal/codec"
-	regexp_utils "github.com/yaklang/javajive/internal/regexp-utils"
 )
 
 type JavaRef struct {
@@ -31,6 +29,9 @@ type JavaRef struct {
 	// WebDeclType is the declaration type solved from all definitions in an
 	// immutable local def-use web. Keep it separate from mutable expression types.
 	WebDeclType types.JavaType
+	// SolvedWebIdentity is immutable evidence from the complete def-use web.
+	// Source naming may change Id, but must not split this proved identity.
+	SolvedWebIdentity *utils.VariableId
 	// nullTypeAdopted records that a null-initialized slot (`T x = null`, Val is the null literal so
 	// IsNullInitialized stays true forever) has ALREADY adopted a concrete reference type via the
 	// AssignVarGuarded null-adopt shortcut. Because ResetVarType only repoints typ and never clears
@@ -61,6 +62,11 @@ func (j *JavaRef) Type() types.JavaType {
 		// from the getVarScope fallback in complex CFG paths). Return Object to
 		// avoid nil pointer dereference downstream.
 		return types.NewJavaClass("java.lang.Object")
+	}
+	if j.IsParam {
+		if _, primitive := j.typ.RawType().(*types.JavaPrimer); primitive {
+			return j.typ.Copy()
+		}
 	}
 	return j.typ
 }
@@ -109,6 +115,11 @@ func (j *JavaRef) String(funcCtx *class_context.ClassContext) string {
 	}
 	if j.StackVar != nil {
 		return j.StackVar.String(funcCtx)
+	}
+	if funcCtx != nil {
+		if name := funcCtx.LocalNames[j.Id]; name != "" {
+			return name
+		}
 	}
 	return j.Id.String()
 }
@@ -160,6 +171,7 @@ func NewJavaArray(class *types.JavaClass, length JavaValue) *JavaArray {
 type JavaLiteral struct {
 	JavaType types.JavaType
 	Data     any
+	Units    []uint16 // lossless; when non-nil, String() uses Units for String/char
 }
 
 // ReplaceVar implements JavaValue.
@@ -167,88 +179,51 @@ func (j *JavaLiteral) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableI
 }
 
 func (j *JavaLiteral) Type() types.JavaType {
+	// A noncanonical JVM int word does not become a Java boolean merely
+	// because an inference consumer requested Z. Retain its numeric category:
+	// branches test nonzero, while Z return/store consumers keep only bit zero.
+	if j.JavaType != nil {
+		if p, ok := j.JavaType.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaBoolean {
+			if word, ok := j.Data.(int); ok && word != 0 && word != 1 {
+				return types.NewJavaPrimer(types.JavaInteger)
+			}
+		}
+	}
 	return j.JavaType
 }
 
-func JavaStringToLiteral(i any) string {
-	data := fmt.Sprint(i)
-	// MatchMIMEType runs full magic-byte sniffing (allocating a csv/bufio reader) and
-	// is only useful to recover a mis-decoded Chinese charset, which by definition needs
-	// non-ASCII bytes. Pure-ASCII literals (the overwhelming majority) can never match a
-	// Chinese charset, so skip the expensive detection -- it was ~4% of all decompiler
-	// allocations. Behavior is unchanged: ASCII already fell through to the quote path.
-	if !isPureASCII(data) {
-		mimeType, _ := codec.MatchMIMEType(data)
-		if mimeType != nil && mimeType.IsChineseCharset() {
-			result, ok := mimeType.TryUTF8Convertor([]byte(data))
-			if ok {
-				return fixJavaStringEscapes(strconv.Quote(string(result)))
-			}
-		}
+func literalPayloadBytes(i any) int {
+	switch v := i.(type) {
+	case string:
+		return len(v)
+	case []byte:
+		return len(v)
+	default:
+		return len(fmt.Sprint(i))
 	}
-	return fixJavaStringEscapes(strconv.Quote(data))
-}
-
-// isPureASCII reports whether s contains only bytes < 0x80.
-func isPureASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
-			return false
-		}
-	}
-	return true
-}
-
-// These regexes are compiled once at package init rather than per call: fixJavaStringEscapes
-// runs for every decompiled string literal, and re-creating the wrappers each time made
-// regexp compilation one of the top decompiler-core allocators (~5% of all bytes). A
-// *regexp.Regexp is safe for concurrent use, so a single shared wrapper serves all (including
-// parallel) decompiles.
-var (
-	reJavaHexEscape  = regexp_utils.NewRegexpWrapper(`(\\+)x[0-9a-fA-F]{2}`)
-	reJavaBellEscape = regexp_utils.NewRegexpWrapper(`(\\+)a`)
-	reJavaVTabEscape = regexp_utils.NewRegexpWrapper(`(\\+)v`)
-)
-
-// fixJavaStringEscapes converts Go-style escapes (emitted by strconv.Quote) that are not
-// valid in Java string literals into Java-compatible "\uXXXX" escapes:
-//   - "\xHH"  -> "\u00HH"   (Java has no \x hex escape)
-//   - "\a"    -> "\u0007"   (Java has no bell escape)
-//   - "\v"    -> "\u000b"   (Java has no vertical-tab escape)
-func fixJavaStringEscapes(raw string) string {
-	results, err := reJavaHexEscape.ReplaceAllStringFunc(raw, func(s string) string {
-		if strings.Count(s, `\`)%2 == 0 {
-			return s
-		}
-		// return \u00xx
-		length := len(s)
-		pre, after := s[:length-3], "u00"+s[length-2:]
-		return pre + after
-	})
-	if err != nil {
-		results = raw
-	}
-	// single-char escapes that Java does not support
-	convertSingle := func(input string, re *regexp_utils.RegexpWrapper, replacement string) string {
-		out, e := re.ReplaceAllStringFunc(input, func(s string) string {
-			if strings.Count(s, `\`)%2 == 0 {
-				return s // even number of backslashes => literal, not an escape
-			}
-			// drop the trailing "\<escChar>" and append the replacement (which carries its own backslash)
-			return s[:len(s)-2] + replacement
-		})
-		if e != nil {
-			return input
-		}
-		return out
-	}
-	results = convertSingle(results, reJavaBellEscape, `\u0007`)
-	results = convertSingle(results, reJavaVTabEscape, `\u000b`)
-	return results
 }
 
 func (j *JavaLiteral) String(funcCtx *class_context.ClassContext) string {
-	typeStr := j.JavaType.String(funcCtx)
+	guard := renderGuarded(funcCtx)
+	if guard {
+		if err := beginValueRender(funcCtx); err != nil {
+			return ""
+		}
+		defer endValueRender(funcCtx)
+		n := literalExactOutputBytes(j, funcCtx)
+		if j.JavaType != nil {
+			ts := j.JavaType.String(funcCtx)
+			if ts == "java.lang.String" || ts == "String" {
+				if err := funcCtx.CheckAlloc(int64(JavaUnitsStringLiteralCap(literalUnitCount(j.Data, j.Units)))); err != nil {
+					return ""
+				}
+			}
+		}
+		if err := funcCtx.PreflightOutput(n); err != nil {
+			return ""
+		}
+	}
+	typeStr := j.Type().String(funcCtx)
 	switch typeStr {
 	case types.NewJavaPrimer(types.JavaBoolean).String(funcCtx):
 		if v, ok := j.Data.(int); ok {
@@ -258,24 +233,24 @@ func (j *JavaLiteral) String(funcCtx *class_context.ClassContext) string {
 			return "true"
 		}
 	case types.NewJavaPrimer(types.JavaLong).String(funcCtx):
-		// long literals need an explicit L suffix in expression position. The field
-		// path adds it separately; without it here, values beyond int range fail to
-		// compile ("integer number too large"), e.g. Long.valueOf(9223372036854775807).
 		s := fmt.Sprint(j.Data)
 		if s != "" && !strings.HasSuffix(s, "L") && !strings.HasSuffix(s, "l") {
 			s += "L"
 		}
 		return s
 	case types.NewJavaPrimer(types.JavaFloat).String(funcCtx):
-		// A bare decimal literal is a double in Java, so a float value must carry an
-		// F suffix or it is a type error (e.g. Float.valueOf(3.14) has no overload).
 		return javaFloatLiteralExpr(j.Data)
 	case types.NewJavaPrimer(types.JavaDouble).String(funcCtx):
-		// The D suffix keeps an integral double (e.g. 1.0 -> "1") from being read as
-		// an int, which would break overloads like Double.valueOf(double).
 		return javaDoubleLiteralExpr(j.Data)
+	case types.NewJavaPrimer(types.JavaChar).String(funcCtx):
+		if u, ok := javaLiteralCharUnit(j); ok {
+			return JavaUnitToCharLiteral(u)
+		}
 	}
 	if typeStr == "java.lang.String" || typeStr == "String" {
+		if j.Units != nil {
+			return JavaUnitsToStringLiteral(j.Units)
+		}
 		return JavaStringToLiteral(j.Data)
 	}
 	return fmt.Sprint(j.Data)
@@ -305,33 +280,15 @@ func javaFloatLiteralExpr(data any) string {
 	if !ok {
 		return fmt.Sprint(data)
 	}
-	switch {
-	case math.IsNaN(f):
-		return "Float.NaN"
-	case math.IsInf(f, 1):
-		return "Float.POSITIVE_INFINITY"
-	case math.IsInf(f, -1):
-		return "Float.NEGATIVE_INFINITY"
-	}
-	return strconv.FormatFloat(f, 'g', -1, 32) + "F"
+	return javaliteral.Float32(float32(f))
 }
 
-// javaDoubleLiteralExpr renders a double constant as a valid Java double literal
-// (with a D suffix), handling NaN/Infinity. Mirrors the field-path renderer.
 func javaDoubleLiteralExpr(data any) string {
 	f, ok := literalToFloat64(data)
 	if !ok {
 		return fmt.Sprint(data)
 	}
-	switch {
-	case math.IsNaN(f):
-		return "Double.NaN"
-	case math.IsInf(f, 1):
-		return "Double.POSITIVE_INFINITY"
-	case math.IsInf(f, -1):
-		return "Double.NEGATIVE_INFINITY"
-	}
-	return strconv.FormatFloat(f, 'g', -1, 64) + "D"
+	return javaliteral.Float64(f)
 }
 
 func NewJavaLiteral(data any, typ types.JavaType) *JavaLiteral {
@@ -343,6 +300,10 @@ func NewJavaLiteral(data any, typ types.JavaType) *JavaLiteral {
 
 type JavaClassValue struct {
 	types.JavaType
+	// An evaluated ldc class literal resolves at this original instruction.
+	// Symbolic class names used only as invocation/type metadata have no PC.
+	OriginPC    int
+	HasOriginPC bool
 }
 
 // ReplaceVar implements JavaValue.
@@ -375,10 +336,16 @@ func NewJavaClassValue(typ types.JavaType) *JavaClassValue {
 }
 
 type JavaClassMember struct {
+	OriginPC    int
+	HasOriginPC bool
 	Name        string
 	Member      string
 	Description string
 	JavaType    types.JavaType
+	// RefKind is the CONSTANT_MethodHandle reference_kind (JVMS 5.4.3.5) when this
+	// member was resolved through a method handle (bootstrap, condy, indy impl).
+	// Zero means the kind was not recovered and must not whitelist-match T17 builtins.
+	RefKind uint8
 }
 
 // ReplaceVar implements JavaValue.
@@ -407,9 +374,11 @@ func NewJavaClassMember(typeName, member string, desc string, typ types.JavaType
 }
 
 type RefMember struct {
-	Member   string
-	Object   JavaValue
-	JavaType types.JavaType
+	OriginPC    int
+	HasOriginPC bool
+	Member      string
+	Object      JavaValue
+	JavaType    types.JavaType
 }
 
 // ReplaceVar implements JavaValue.
@@ -443,6 +412,10 @@ func NewRefMember(object JavaValue, member string, typ types.JavaType) *RefMembe
 type JavaArrayMember struct {
 	Object JavaValue
 	Index  JavaValue
+	// A folded array access may throw. Region proofs use its decoded load/store
+	// PC rather than the PC of a surrounding expression or assignment.
+	OriginPC    int
+	HasOriginPC bool
 }
 
 // ReplaceVar implements JavaValue.
@@ -456,7 +429,14 @@ func (j *JavaArrayMember) Type() types.JavaType {
 	if ot == nil {
 		return nil
 	}
-	return ot.ElementType()
+	element := ot.ElementType()
+	if element == nil {
+		return nil
+	}
+	// A load's inferred value type is a use-site view. Returning the array's
+	// component wrapper lets later local folding mutate the array declaration
+	// and even a CHECKCAST descriptor shared with that array (int[] -> Object[]).
+	return element.Copy()
 }
 func (j *JavaArrayMember) String(funcCtx *class_context.ClassContext) string {
 	obj := AssignmentOperand(j.Object, funcCtx)
@@ -466,7 +446,7 @@ func (j *JavaArrayMember) String(funcCtx *class_context.ClassContext) string {
 	// spring TypeMappedAnnotation.getValue
 	// `(distance != 0 ? resolvedMirrors : resolvedRootMirrors)[index]`.
 	// Kill-switch: JDEC_TERNARY_ARRAY_INDEX_PARENS_OFF.
-	if os.Getenv("JDEC_TERNARY_ARRAY_INDEX_PARENS_OFF") == "" {
+	if funcCtx.Getenv("JDEC_TERNARY_ARRAY_INDEX_PARENS_OFF") == "" {
 		switch UnpackSoltValue(j.Object).(type) {
 		case *TernaryExpression, *JavaExpression:
 			return fmt.Sprintf("(%s)[%v]", obj, j.Index.String(funcCtx))
@@ -497,6 +477,17 @@ func NewJavaArrayMember(object JavaValue, index JavaValue) *JavaArrayMember {
 }
 
 func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
+	if funcCtx != nil && funcCtx.SourceCapturedField != nil {
+		pc := -1
+		if j.HasOriginPC {
+			pc = j.OriginPC
+		}
+		ref, direct := UnpackSoltValue(j.Object).(*JavaRef)
+		if text, known := funcCtx.SourceCapturedField(pc, j.Member, direct && ref != nil && ref.IsThis); known {
+			return text
+		}
+	}
+
 	//if j.Id == 0 {
 	//	return j.Member
 	//}
@@ -506,7 +497,7 @@ func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
 	// Object, then Range.create cannot be applied). FunctionCallExpression already wraps
 	// TernaryExpression receivers; field access did not. Real hit: guava Range.gap/span.
 	// Kill-switch: JDEC_TERNARY_FIELD_RECV_PARENS_OFF.
-	if os.Getenv("JDEC_TERNARY_FIELD_RECV_PARENS_OFF") == "" {
+	if funcCtx.Getenv("JDEC_TERNARY_FIELD_RECV_PARENS_OFF") == "" {
 		switch UnpackSoltValue(j.Object).(type) {
 		case *TernaryExpression, *JavaExpression:
 			return fmt.Sprintf("(%s).%s", obj, class_context.SafeIdentifier(j.Member))
@@ -593,7 +584,7 @@ func TernaryArmRValueType(v JavaValue) types.JavaType {
 	if v == nil {
 		return nil
 	}
-	if os.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
+	if jdecenv.Get("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
 		if _, ok := UnpackSoltValue(v).(*JavaClassValue); ok {
 			return types.NewJavaClass("java.lang.Class")
 		}
@@ -626,7 +617,7 @@ func boolLiteralValue(v JavaValue) (val bool, ok bool) {
 		return false, false
 	}
 	if d, isInt := lit.Data.(int); isInt {
-		if p.Name == types.JavaInteger && d != 0 && d != 1 {
+		if d != 0 && d != 1 {
 			return false, false
 		}
 		if p.Name != types.JavaBoolean && p.Name != types.JavaInteger {
@@ -674,7 +665,7 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 	}
 	and := func(a, b JavaValue) JavaValue { return NewBinaryExpression(a, b, LOGICAL_AND, boolType) }
 	or := func(a, b JavaValue) JavaValue { return NewBinaryExpression(a, b, LOGICAL_OR, boolType) }
-	c := SimplifyConditionValue(t.Condition)
+	c := branchConditionView(t.Condition)
 	var reduced JavaValue
 	defer func() {
 		if reduced != nil {
@@ -701,34 +692,16 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 		reduced = or(notCond(c), tv)
 		return reduced
 	}
-	// Shared-leaf factoring: both arms are boolean non-literals, but a short-circuit predicate often
-	// shares a leaf between the taken arm and the fall-through (the same value appears once as a whole
-	// arm and once as a disjunct/conjunct of the other), e.g. `c ? (A || S) : S` is exactly
-	// `(c && A) || S`. The leaf is matched by pointer identity first (one DAG node) and, since
-	// SimplifyConditionValue may have rebuilt an equivalent value, by rendered equality as a fallback.
-	// This branch is only reached when neither arm is a boolean literal (the common short-circuit
-	// shape hits the literal switch above), so its rendering is not on the hot path.
-	eq := func(a, b JavaValue) bool {
-		if a == nil || b == nil {
-			return false
-		}
-		ua := UnpackSoltValue(a)
-		ub := UnpackSoltValue(b)
-		if ua == ub {
-			return true
-		}
-		switch ua.(type) {
-		case *JavaExpression, *TernaryExpression:
-			return false
-		}
-		switch ub.(type) {
-		case *JavaExpression, *TernaryExpression:
-			return false
-		}
-		return a.String(funcCtx) == b.String(funcCtx)
+	// Factor only the exact same value node. Trailing shared leaves preserve
+	// condition/arm evaluation order. Leading-leaf rules reorder c and S, so
+	// require both to be pure; rendered equality supplies no such proof.
+	eq := func(a, b JavaValue) bool { return a != nil && b != nil && UnpackSoltValue(a) == UnpackSoltValue(b) }
+	if eq(tv, fv) { // c is still evaluated once before the shared arm.
+		reduced = and(or(c, NewJavaLiteral(1, boolType)), tv)
+		return reduced
 	}
 	if orE, isOr := tv.(*JavaExpression); isOr && orE.Op == LOGICAL_OR && len(orE.Values) == 2 {
-		if eq(orE.Values[0], fv) { // c ? (S || A) : S  =>  S || (c && A)
+		if eq(orE.Values[0], fv) && IsPure(c) && IsPure(fv) { // c ? (S || A) : S  =>  S || (c && A)
 			reduced = or(fv, and(c, orE.Values[1]))
 			return reduced
 		}
@@ -738,7 +711,7 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 		}
 	}
 	if andE, isAnd := fv.(*JavaExpression); isAnd && andE.Op == LOGICAL_AND && len(andE.Values) == 2 {
-		if eq(andE.Values[0], tv) { // c ? T : (T && A)  =>  T && (c || A)
+		if eq(andE.Values[0], tv) && IsPure(c) && IsPure(tv) { // c ? T : (T && A)  =>  T && (c || A)
 			reduced = and(tv, or(c, andE.Values[1]))
 			return reduced
 		}
@@ -747,14 +720,38 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 			return reduced
 		}
 	}
+	if andE, ok := tv.(*JavaExpression); ok && andE.Op == LOGICAL_AND && len(andE.Values) == 2 && eq(andE.Values[1], fv) {
+		reduced = and(or(notCond(c), andE.Values[0]), fv)
+		return reduced
+	}
+	if orE, ok := fv.(*JavaExpression); ok && orE.Op == LOGICAL_OR && len(orE.Values) == 2 && eq(orE.Values[1], tv) {
+		reduced = or(and(notCond(c), orE.Values[0]), tv)
+		return reduced
+	}
 	reduced = NewTernaryExpression(c, tv, fv) // irreducible: keep a ternary over the reduced arms
 	return reduced
 }
 
 func (j *TernaryExpression) String(funcCtx *class_context.ClassContext) string {
+	if !boundedDecisionGraph(j, 8192, 256) {
+		return EmptySlotValuePlaceholder
+	}
+	if rendered, ok := renderIntegerDecision(j, funcCtx); ok {
+		return rendered
+	}
 	reduced := boolReduce(j, funcCtx)
+	if !boundedDecisionSource(reduced, 65536) {
+		return EmptySlotValuePlaceholder
+	}
+	// A late Boolean leaf may let reduction prove a canonical predicate even
+	// while this producer retains its computational int type. Keep the source
+	// view consistent with that type; Boolean consumers choose their own view.
+	// Otherwise an IFEQ comparison becomes the invalid `boolean == 0`.
+	if isIntTyped(j) && isBooleanTyped(reduced) {
+		return booleanStackWord(reduced).String(funcCtx)
+	}
 	if rt, ok := reduced.(*TernaryExpression); ok {
-		condition := SimplifyConditionValue(rt.Condition)
+		condition := branchConditionView(rt.Condition)
 		return fmt.Sprintf("(%s) ? (%s) : (%s)", condition.String(funcCtx), rt.TrueValue.String(funcCtx), rt.FalseValue.String(funcCtx))
 	}
 	return reduced.String(funcCtx)
@@ -781,7 +778,7 @@ func ternaryRawString(t *TernaryExpression, funcCtx *class_context.ClassContext)
 	if t == nil {
 		return EmptySlotValuePlaceholder
 	}
-	condition := SimplifyConditionValue(t.Condition)
+	condition := branchConditionView(t.Condition)
 	return fmt.Sprintf("(%s) ? (%s) : (%s)",
 		javaValueRawString(condition, funcCtx),
 		javaValueRawString(t.TrueValue, funcCtx),
@@ -823,7 +820,12 @@ func BoolTernaryCondition(v JavaValue) (JavaValue, bool) {
 	if !tok || !fok || !tv || fv {
 		return nil, false
 	}
-	return t.Condition, true
+	// Extracting cond ? 1 : 0 selects a Boolean consumer, not the source
+	// representation of cond's computational word. A nested materialized
+	// decision can retain int as its producer type. Branch truth tests the
+	// whole word against zero; Z stores/returns instead narrow its low bit.
+	// Keep this conversion local, with one evaluation and no producer retype.
+	return branchConditionView(t.Condition), true
 }
 
 // EmptySlotValuePlaceholder is rendered when a SlotValue has no underlying value,
@@ -870,11 +872,17 @@ func (s *SlotValue) ResetValue(val JavaValue) {
 	if val == nil {
 		return
 	}
+	if ref, ok := val.(*JavaRef); ok && ref != nil && ref.WebDeclType != nil {
+		// A late reaching-definition rebind selects this solved local. The
+		// SlotValue's DFS-era temporary type is not another definition and
+		// must not overwrite the local's complete declaration constraints.
+		return
+	}
 	// Folding changes the expression represented by this slot, not the JVM
-	// descriptor of a call or checkcast. A provisional branch type must not
-	// overwrite either expression's reference type through a shared wrapper.
+	// descriptor of a call, checkcast or allocation. A provisional branch type
+	// must not overwrite the instruction's reference type through a shared wrapper.
 	switch val.(type) {
-	case *FunctionCallExpression, *CastExpression:
+	case *FunctionCallExpression, *CastExpression, *NewExpression:
 		if typ := val.Type(); typ != nil {
 			if _, primitive := typ.RawType().(*types.JavaPrimer); !primitive {
 				return

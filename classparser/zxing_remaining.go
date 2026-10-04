@@ -1,14 +1,16 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
+	"sort"
+	"strconv"
 	"strings"
 )
 
 // fixZxingRemainingReconstructs repairs leftover zxing-core tree sites.
 // Kill-switch: JDEC_ZXING_REMAINING_OFF=1.
 func fixZxingRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_ZXING_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_ZXING_REMAINING_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "com.google.zxing") {
@@ -18,9 +20,7 @@ func fixZxingRemainingReconstructs(body string) string {
 	body = retypeZxingObjectLocals(body)
 	body = retypeIntLocalsUsedAsCodeword(body)
 	body = rewriteIntCombinedLengthAssign(body)
-	body = rewriteLengthIdentUsedAsArray(body)
 	body = retypeZxingIntLocalsByUse(body)
-	body = rewriteSavedExceptionCatchRethrow(body)
 	body = wrapZxingUPCEANChecksumTry(body)
 	body = wrapZxingToStringThrowThrowable(body)
 	body = dropZxingUnreachableAmbiguousContinue(body)
@@ -251,12 +251,6 @@ func fixZxingRemainingReconstructs(body string) string {
 		"var3 = var3.clone().rotate180();",
 		"var3 = var3.clone();\n\t\t\tvar3.rotate180();")
 	body = strings.ReplaceAll(body,
-		"int var10 = 0;\n\t\t\t\tint var11 = 0;\n\t\t\t\tdo{\n\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\tif (((var13 = var8[var11]) != (0))",
-		"int var10 = 0;\n\t\t\t\tint var11 = 0;\n\t\t\t\tint var13 = 0;\n\t\t\t\tdo{\n\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\tif (((var13 = var8[var11]) != (0))")
-	body = strings.ReplaceAll(body,
-		"boolean[] var12 = new boolean[((var4) * (var2)) - (var10)];\n\t\t\t\tint var13 = 0;",
-		"boolean[] var12 = new boolean[((var4) * (var2)) - (var10)];\n\t\t\t\tvar13 = 0;")
-	body = strings.ReplaceAll(body,
 		"if ((var3.find()) && ((var4.start()) == (0))){\n\t\t\tif ((var6 = matchVCardPrefixedField(\"FN\",var2,true,false)) == (null)){\n\t\t\t\tformatNames((Iterable)(var6 = matchVCardPrefixedField(\"N\",var2,true,false)));\n\t\t\t}\n\t\t\tList var5 = matchSingleVCardPrefixedField(\"NICKNAME\",var2,true,false);\n\t\t\tList var6 = var5;",
 		"if ((var3.find()) && ((var4.start()) == (0))){\n\t\t\tList var6 = matchVCardPrefixedField(\"FN\",var2,true,false);\n\t\t\tif ((var6) == (null)){\n\t\t\t\tvar6 = matchVCardPrefixedField(\"N\",var2,true,false);\n\t\t\t\tformatNames((Iterable)(var6));\n\t\t\t}\n\t\t\tList var5 = matchSingleVCardPrefixedField(\"NICKNAME\",var2,true,false);")
 	body = strings.ReplaceAll(body,
@@ -271,15 +265,6 @@ func fixZxingRemainingReconstructs(body string) string {
 	body = strings.ReplaceAll(body,
 		"if ((var12 = patternMatchVariance(var4,CODE_PATTERNS[var10],0.7F)) < (var8)){",
 		"if ((var12 = patternMatchVariance(var4,CODE_PATTERNS[var10],0.7F)) < ((float)(var8))){")
-	body = strings.ReplaceAll(body,
-		"int var11 = 0;\n\t\t\t\t\tdo{\n\t\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\t\tif (((var13 = var8[var11]) != (0))",
-		"int var11 = 0;\n\t\t\t\t\tint var13 = 0;\n\t\t\t\t\tdo{\n\t\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\t\tif (((var13 = var8[var11]) != (0))")
-	body = strings.ReplaceAll(body,
-		"final Codeword getCodewordNearby(int var1) {\n\t\tCodeword var2 = this.getCodeword(var1);",
-		"final Codeword getCodewordNearby(int var1) {\n\t\tint var6 = 0;\n\t\tCodeword var2 = this.getCodeword(var1);")
-	body = strings.ReplaceAll(body,
-		"int var5 = (this.imageRowToCodewordIndex(var1)) + (var4);\n\t\t\t\t\tint var6 = var5;",
-		"int var5 = (this.imageRowToCodewordIndex(var1)) + (var4);\n\t\t\t\t\tvar6 = var5;")
 	body = strings.ReplaceAll(body,
 		"var13 = var7[var11].setRowNumberAsRowIndicatorColumn();",
 		"var7[var11].setRowNumberAsRowIndicatorColumn();\n\t\t\t\t\tvar13 = var7[var11];")
@@ -310,50 +295,6 @@ func fixZxingRemainingReconstructs(body string) string {
 // retypeZxingIntLocalsByUse retypes `int varN = 0` when the slot is clearly a
 // float ratio (distance * layers / distance vs 0.75D, patternMatchVariance)
 // or a String (toString assigned into a CharSequence / generateErrorCorrection).
-// rewriteSavedExceptionCatchRethrow turns `catch (T varN_1) { throw new RuntimeException(varN_1); }`
-// into `varN = varN_1` when the method later `throw varN` (QR Decoder retries after
-// FormatException/ChecksumException by remasking).
-func rewriteSavedExceptionCatchRethrow(body string) string {
-	const needle = "throw new RuntimeException("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		ident, ok, rest := readJavaIdent(body[i+len(needle):])
-		if !ok || !isDecompilerLocal(ident) || !strings.HasPrefix(rest, ");") {
-			from = i + 1
-			continue
-		}
-		us := strings.LastIndex(ident, "_")
-		if us < 0 {
-			from = i + 1
-			continue
-		}
-		saved := ident[:us]
-		if !isDecompilerLocal(saved) {
-			from = i + 1
-			continue
-		}
-		methodEnd := nextZxingMethodStart(body, i)
-		chunk := body[i:methodEnd]
-		if !strings.Contains(chunk, "throw "+saved+";") {
-			from = i + 1
-			continue
-		}
-		line := i
-		for line > 0 && body[line-1] != '\n' {
-			line--
-		}
-		end := i + len(needle) + len(ident) + len(");")
-		repl := body[line:i] + saved + " = " + ident + ";"
-		body = body[:line] + repl + body[end:]
-		from = line + len(repl)
-	}
-}
-
 // wrapZxingUPCEANChecksumTry puts getStandardUPCEANChecksum in try/catch(FormatException)
 // (EAN8/13/UPCE writers) and flattens the nested checkStandard try that leaves an outer
 // catch never-thrown.
@@ -380,48 +321,9 @@ func dropZxingUnreachableAmbiguousContinue(body string) string {
 		"\t\t\t\t}\n\t\t\t}else{\n\t\t\t\tbreak;")
 }
 
-func wrapZxingToStringThrowThrowable(body string) string {
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "String toString(")
-		if rel < 0 {
-			return body
-		}
-		ms := from + rel
-		me := nextZxingMethodStart(body, ms+1)
-		chunk := body[ms:me]
-		fixed := chunk
-		tfrom := 0
-		for {
-			tr := strings.Index(fixed[tfrom:], "throw var")
-			if tr < 0 {
-				break
-			}
-			ti := tfrom + tr
-			ident, ok, rest := readJavaIdent(fixed[ti+len("throw "):])
-			if !ok || !isDecompilerLocal(ident) || !strings.HasPrefix(rest, ";") {
-				tfrom = ti + 1
-				continue
-			}
-			if strings.Contains(fixed[:ti], "Throwable "+ident) || strings.Contains(fixed, "catch(Throwable ") {
-				repl := "throw new RuntimeException(" + ident + ");"
-				fixed = fixed[:ti] + repl + rest[1:]
-				tfrom = ti + len(repl)
-				continue
-			}
-			tfrom = ti + 1
-		}
-		if fixed != chunk {
-			body = body[:ms] + fixed + body[me:]
-			from = ms + len(fixed)
-			continue
-		}
-		from = me
-		if me <= ms {
-			from = ms + 1
-		}
-	}
-}
+// ATHROW preserves throwable identity. A source-only wrapper cannot infer an
+// exception type or cleanup domain; both must come from the typed IR.
+func wrapZxingToStringThrowThrowable(body string) string { return body }
 
 func flattenNestedCheckStandardTry(body string) string {
 	const call = "if (!(UPCEANReader.checkStandardUPCEANChecksum((CharSequence)(var1)))){"
@@ -712,37 +614,6 @@ func rewriteIntCombinedLengthAssign(body string) string {
 	}
 }
 
-func rewriteLengthIdentUsedAsArray(body string) string {
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "int var")
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		ident, ok, rest := readJavaIdent(body[i+len("int "):])
-		if !ok || !isDecompilerLocal(ident) || !strings.HasPrefix(rest, " = var") {
-			from = i + 1
-			continue
-		}
-		arr, ok, rest2 := readJavaIdent(rest[len(" = "):])
-		if !ok || !isDecompilerLocal(arr) || !strings.HasPrefix(rest2, ".length") {
-			from = i + 1
-			continue
-		}
-		methodEnd := nextZxingMethodStart(body, i)
-		chunk := body[i:methodEnd]
-		sub := ident + "["
-		if !strings.Contains(chunk, sub) {
-			from = i + 1
-			continue
-		}
-		replaced := strings.ReplaceAll(chunk, sub, arr+"[")
-		body = body[:i] + replaced + body[methodEnd:]
-		from = i + len(replaced)
-	}
-}
-
 func foldEnumStaticNewIntoConstants(body string) string {
 	kw := "enum "
 	idx := strings.Index(body, kw)
@@ -793,7 +664,12 @@ func foldEnumStaticNewIntoConstants(body string) string {
 		return body
 	}
 	payloads := make(map[string]string, len(consts))
-	for _, c := range consts {
+	var assignments []enumSourceRange
+	var consumedLocals []enumSourceRange
+	blockStart, blockEnd := -1, -1
+	anySpilledArgs := false
+	lastAssignment := -1
+	for i, c := range consts {
 		asg := c + " = new " + name + "("
 		p := strings.Index(body, asg)
 		if p < 0 {
@@ -808,7 +684,62 @@ func foldEnumStaticNewIntoConstants(body string) string {
 		if len(args) < 3 {
 			return body
 		}
-		payloads[c] = strings.Join(args[2:], ",")
+		enumName, err := strconv.Unquote(strings.TrimSpace(args[0]))
+		if err != nil || enumName != c {
+			return body
+		}
+		ordinal, err := strconv.Atoi(strings.TrimSpace(args[1]))
+		if err != nil || ordinal != i {
+			return body
+		}
+		lineStart := strings.LastIndex(body[:p], "\n") + 1
+		if p <= lastAssignment {
+			return body
+		}
+		lastAssignment = p
+		lineEnd := strings.IndexByte(body[p:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(body)
+		} else {
+			lineEnd += p
+		}
+		assignmentEnd := lineEnd
+		if assignmentEnd < len(body) {
+			assignmentEnd++
+		}
+		bs, be, ok := enumClinitBlockBounds(body, p)
+		if !ok || (blockStart >= 0 && (bs != blockStart || be != blockEnd)) {
+			return body
+		}
+		blockStart, blockEnd = bs, be
+		assignmentIndent := enumLineIndent(body, lineStart)
+		payloadArgs := args[2:]
+		expanded, locals, hadLocals, ok := expandEnumClinitDirectArgumentLocals(body, blockStart, blockEnd, lineStart, assignmentIndent, payloadArgs)
+		if !ok {
+			return body
+		}
+		if hadLocals {
+			anySpilledArgs = true
+			consumedLocals = append(consumedLocals, locals...)
+		}
+		payloads[c] = strings.Join(expanded, ",")
+		assignments = append(assignments, enumSourceRange{lineStart, assignmentEnd})
+	}
+	if anySpilledArgs && !enumZxingFoldRegionSafe(body, blockStart, assignments, consumedLocals) {
+		return body
+	}
+	if anySpilledArgs {
+		// Declarations move into enum arguments. Remove each uniquely consumed
+		// spill before replacing the enum constant list so offsets stay stable.
+		sort.Slice(consumedLocals, func(i, j int) bool { return consumedLocals[i].start > consumedLocals[j].start })
+		lastStart := len(body) + 1
+		for _, span := range consumedLocals {
+			if span.start < 0 || span.end > len(body) || span.start >= span.end || span.end > lastStart {
+				return body
+			}
+			body = body[:span.start] + body[span.end:]
+			lastStart = span.start
+		}
 	}
 	var b strings.Builder
 	for i, c := range consts {
@@ -862,5 +793,59 @@ func foldEnumStaticNewIntoConstants(body string) string {
 		}
 		body = body[:line] + body[end:]
 	}
+	// JDK 17+ renders the synthetic enum values array through $values();
+	// after this fold there may be no remaining `= new Enum(...)` for the later
+	// generic enum cleanup to recognize.
+	body = enumValuesAssignRe.ReplaceAllString(body, "")
 	return body
+}
+
+func enumZxingFoldRegionSafe(body string, blockStart int, assignments, consumed []enumSourceRange) bool {
+	if blockStart < 0 || len(assignments) == 0 {
+		return false
+	}
+	assignmentByStart := make(map[int]enumSourceRange, len(assignments))
+	consumedByStart := make(map[int]enumSourceRange, len(consumed))
+	for _, span := range assignments {
+		assignmentByStart[span.start] = span
+	}
+	for _, span := range consumed {
+		consumedByStart[span.start] = span
+	}
+	lineStart := strings.IndexByte(body[blockStart:], '\n')
+	if lineStart < 0 {
+		return false
+	}
+	lineStart += blockStart + 1
+	lastAssignmentEnd := assignments[len(assignments)-1].end
+	assignmentCount, consumedCount := 0, 0
+	for lineStart < lastAssignmentEnd {
+		if span, ok := assignmentByStart[lineStart]; ok {
+			assignmentCount++
+			lineStart = span.end
+			continue
+		}
+		if span, ok := consumedByStart[lineStart]; ok {
+			consumedCount++
+			lineStart = span.end
+			continue
+		}
+		lineEnd := strings.IndexByte(body[lineStart:lastAssignmentEnd], '\n')
+		if lineEnd < 0 {
+			lineEnd = lastAssignmentEnd
+		} else {
+			lineEnd += lineStart
+		}
+		if strings.TrimSpace(body[lineStart:lineEnd]) != "" {
+			// An unconsumed declaration can still affect class initialization
+			// (for example by allocating, failing, or running an initializer).
+			// Keep this rewrite limited to the exact spill-and-constructor shape.
+			return false
+		}
+		if lineEnd == lastAssignmentEnd {
+			break
+		}
+		lineStart = lineEnd + 1
+	}
+	return assignmentCount == len(assignments) && consumedCount == len(consumed)
 }

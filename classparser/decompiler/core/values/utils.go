@@ -59,6 +59,18 @@ func SimplifyConditionValue(condition JavaValue) JavaValue {
 	}
 	return resVal
 }
+
+// branchConditionView is a use-site view of a predicate. JVM branch truth
+// consumes the whole computational int word, unlike a Z storage sink. Late
+// decision folding may expose an int producer here; never retype that producer
+// or narrow its low bit just to satisfy Java's conditional operand syntax.
+func branchConditionView(condition JavaValue) JavaValue {
+	condition = SimplifyConditionValue(condition)
+	if IsBooleanStackNarrowing(types.NewJavaPrimer(types.JavaBoolean), condition) {
+		return NewBinaryExpression(condition, NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger)), NEQ, types.NewJavaPrimer(types.JavaBoolean))
+	}
+	return condition
+}
 func UnpackSoltValue(value JavaValue) JavaValue {
 	if ref, ok := value.(*SlotValue); ok {
 		return UnpackSoltValue(ref.GetValue())

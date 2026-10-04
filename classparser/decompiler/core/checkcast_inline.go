@@ -1,0 +1,217 @@
+package core
+
+import (
+	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+)
+
+// CHECKCAST consumes one reference and produces one reference. Retain it in
+// a call's argument tree when the intervening instructions only build later
+// arguments from locals/constants/casts and value-returning calls wholly above
+// this operand. Java evaluates arguments left to right, so calls in those later
+// argument trees still follow this cast. No store, duplicate, discarded result,
+// allocation or alternative entry may intervene; the handler domain must stay
+// identical. Counting values above the cast identifies the actual consumer and
+// formal parameter, and excludes a cast used as the invocation receiver.
+func (d *Decompiler) canInlineCheckcastArgument(op *OpCode) bool {
+	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || len(op.Target) != 1 || d.constantPoolGetter == nil {
+		return false
+	}
+	consumer, previous := op.Target[0], op
+	later := 0
+	var member *values.JavaClassMember
+	var method *types.JavaFuncType
+	for steps := 0; ; steps++ {
+		if steps >= 64 || consumer == nil || consumer.IsCustom || consumer.Instr == nil ||
+			consumer.IsCatch || consumer.IsTryCatchParent || len(consumer.Source) != 1 || consumer.Source[0] != previous ||
+			consumer.CurrentOffset <= previous.CurrentOffset ||
+			!sameHandlerCoverage(d.handlersAt(op), d.handlersAt(consumer)) {
+			return false
+		}
+		instruction := consumer.Instr.OpCode
+		if instruction == OP_INVOKEVIRTUAL || instruction == OP_INVOKEINTERFACE || instruction == OP_INVOKESTATIC || instruction == OP_INVOKESPECIAL {
+			if len(consumer.Data) < 2 {
+				return false
+			}
+			var ok bool
+			member, ok = d.constantPoolGetter(int(Convert2bytesToInt(consumer.Data))).(*values.JavaClassMember)
+			if !ok || member == nil || member.JavaType == nil {
+				return false
+			}
+			method = member.JavaType.FunctionType()
+			if method == nil {
+				return false
+			}
+			consumed := len(method.ParamTypes)
+			if instruction != OP_INVOKESTATIC {
+				consumed++ // instance receiver, including category-2 arguments as one value each
+			}
+			if consumed > later {
+				break // this invocation reaches the checked operand
+			}
+			// A call wholly above the operand builds a later argument. Void
+			// calls/constructors cannot be nested there without changing their
+			// statement order; only a retained return value is admissible.
+			if member.Member == "<init>" || method.ReturnType == nil {
+				return false
+			}
+			if p, ok := method.ReturnType.RawType().(*types.JavaPrimer); ok && p.Name == types.JavaVoid {
+				return false
+			}
+			later = later - consumed + 1
+		} else {
+			access := LocalAccessOf(instruction)
+			switch {
+			case access.Read && !access.Write && instruction != OP_RET:
+				later++ // each load pushes one value, including category-2 values
+			case instruction == OP_CHECKCAST, instruction == OP_NOP:
+				// The top value stays in place, including repeated casts of the
+				// original argument before any later arguments are pushed.
+			case instruction == OP_ACONST_NULL,
+				instruction >= OP_ICONST_M1 && instruction <= OP_DCONST_1,
+				instruction == OP_BIPUSH, instruction == OP_SIPUSH:
+				later++
+			default:
+				return false
+			}
+		}
+		if len(consumer.Target) != 1 || consumer.Target[0] == nil || consumer.Target[0].CurrentOffset <= consumer.CurrentOffset {
+			return false
+		}
+		previous, consumer = consumer, consumer.Target[0]
+	}
+	if method == nil || len(method.ParamTypes) <= later {
+		return false
+	}
+	// The already-evaluated uninitialized receiver and preceding operands
+	// stay below the cast; constructor allocation is not moved by this rule.
+	if member.Member == "<init>" {
+		if consumer.Instr.OpCode != OP_INVOKESPECIAL || method.ReturnType == nil {
+			return false
+		}
+		ret, ok := method.ReturnType.RawType().(*types.JavaPrimer)
+		if !ok || ret.Name != types.JavaVoid {
+			return false
+		}
+	}
+	last := method.ParamTypes[len(method.ParamTypes)-1-later]
+	if last == nil {
+		return false
+	}
+	_, primitive := last.RawType().(*types.JavaPrimer)
+	return !primitive
+}
+
+// canInlineImmediateZeroArgCheckcast keeps a checked value in its use expression when the
+// immediately following instruction invokes a zero-argument instance method on that exact type.
+// This preserves branch-local evaluation across a CFG merge (for example, a Boolean checkcast in
+// one arm of a ternary) without inventing a local whose definition is scoped to only one arm.
+func (d *Decompiler) canInlineImmediateZeroArgCheckcast(op *OpCode, castType types.JavaType) bool {
+	if d == nil || d.getenv("JDEC_CHECKCAST_IMMEDIATE_INVOKE_OFF") != "" || op == nil || len(op.Target) != 1 {
+		return false
+	}
+	consumer := op.Target[0]
+	if consumer == nil || consumer.IsCustom || consumer.Instr == nil {
+		return false
+	}
+	switch consumer.Instr.OpCode {
+	case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE:
+	default:
+		return false
+	}
+	if d.constantPoolGetter == nil {
+		return false
+	}
+	member, ok := d.constantPoolGetter(int(Convert2bytesToInt(consumer.Data))).(*values.JavaClassMember)
+	if !ok || member == nil || member.JavaType == nil || member.JavaType.FunctionType() == nil || len(member.JavaType.FunctionType().ParamTypes) != 0 {
+		return false
+	}
+	castOwner, ok := types.ClassFQNOf(castType)
+	if !ok || castOwner == "" || strings.ReplaceAll(member.Name, "/", ".") != castOwner {
+		return false
+	}
+	return sameIntSlice(d.handlersAt(op), d.handlersAt(consumer))
+}
+
+func sameIntSlice(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// An immediate CHECKCAST/ATHROW pair is one typed throw expression. Keeping
+// the checked operand on this private stack edge avoids materializing a local
+// that may join unrelated catch variables and lose the cast's declaration type.
+// The check still runs before ATHROW in the same handler domain; in particular
+// a failed cast and a null throw keep their original exception routing.
+func (d *Decompiler) canInlineImmediateCheckcastThrow(op *OpCode) bool {
+	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || op.IsCustom || op.IsCatch || op.IsTryCatchParent || len(op.Target) != 1 {
+		return false
+	}
+	throw := op.Target[0]
+	return throw != nil && throw.Instr != nil && throw.Instr.OpCode == OP_ATHROW &&
+		!throw.IsCustom && !throw.IsCatch && !throw.IsTryCatchParent &&
+		throw.CurrentOffset > op.CurrentOffset && len(throw.Source) == 1 && throw.Source[0] == op &&
+		sameHandlerCoverage(d.handlersAt(op), d.handlersAt(throw))
+}
+
+// A CHECKCAST immediately consumed by GETFIELD is one checked receiver
+// expression. Creating a separate local strands its definition when a guarded
+// field read becomes &&/||/?:. Inline only this single-use stack edge, with the
+// same exception coverage and an exact field-owner witness; do not move an
+// earlier cast stored in a local into a conditional read.
+func (d *Decompiler) canInlineImmediateCheckcastField(op *OpCode, castType types.JavaType) bool {
+	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || len(op.Target) != 1 || d.constantPoolGetter == nil {
+		return false
+	}
+	read := op.Target[0]
+	if read == nil || read.IsCustom || read.Instr == nil || read.Instr.OpCode != OP_GETFIELD || len(read.Data) != 2 || len(read.Source) != 1 || read.Source[0] != op || !sameHandlerCoverage(d.handlersAt(op), d.handlersAt(read)) {
+		return false
+	}
+	member, ok := d.constantPoolGetter(int(Convert2bytesToInt(read.Data))).(*values.JavaClassMember)
+	if !ok || member == nil {
+		return false
+	}
+	owner, ok := types.ClassFQNOf(castType)
+	return ok && owner != "" && strings.ReplaceAll(member.Name, "/", ".") == owner
+}
+
+// CHECKCAST on the top stack value immediately before AASTORE checks the RHS.
+// Keep that cast in the RHS tree: a separate local could evaluate it before
+// an earlier effectful array index. Only further casts/NOPs may intervene;
+// stores, duplication, alternate entries and handler changes reject the fold.
+func (d *Decompiler) canInlineCheckcastArrayStore(op *OpCode, castType types.JavaType) bool {
+	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_CHECKCAST || len(op.stackConsumed) != 1 || castType == nil {
+		return false
+	}
+	if _, primitive := castType.RawType().(*types.JavaPrimer); primitive {
+		return false
+	}
+	previous := op
+	for steps := 0; steps < 8; steps++ {
+		if len(previous.Target) != 1 {
+			return false
+		}
+		next := previous.Target[0]
+		if next == nil || next.Instr == nil || next.IsCustom || next.IsCatch || next.IsTryCatchParent || next.CurrentOffset <= previous.CurrentOffset || len(next.Source) != 1 || next.Source[0] != previous || !sameHandlerCoverage(d.handlersAt(op), d.handlersAt(next)) {
+			return false
+		}
+		switch next.Instr.OpCode {
+		case OP_AASTORE:
+			return true
+		case OP_CHECKCAST, OP_NOP:
+			previous = next
+		default:
+			return false
+		}
+	}
+	return false
+}

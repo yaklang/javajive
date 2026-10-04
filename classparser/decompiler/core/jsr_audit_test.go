@@ -2,7 +2,10 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"testing"
+
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 func TestJSRExpansionUsesRewrittenPCSpace(t *testing.T) {
@@ -55,5 +58,22 @@ func TestJSRFailedExpansionIsTransactional(t *testing.T) {
 		if op != original[i] || op.CurrentOffset != offsets[i] || !bytes.Equal(op.Data, operands[i]) {
 			t.Fatal("failed expansion mutated original opcode")
 		}
+	}
+}
+
+func TestT22JSRCopiesChargedBeforeClone(t *testing.T) {
+	code := []byte{OP_ICONST_0, OP_ISTORE_0, OP_JSR, 0, 14, OP_NOP, OP_JSR, 0, 10, OP_NOP, OP_JSR, 0, 6, OP_NOP, OP_ILOAD_0, OP_IRETURN, OP_ASTORE_1, OP_IINC, 0, 1, OP_RET, 1}
+	d := NewDecompiler(code, nil)
+	if err := d.ParseOpcode(); err != nil {
+		t.Fatal(err)
+	}
+	b := workbudget.New(context.Background(), workbudget.Limits{MaxNodeCopies: 1})
+	d.Work = b
+	err := d.inlineJSRSubroutines()
+	if err == nil {
+		t.Fatal("expected node_copies reject before allocating working copies")
+	}
+	if !workbudget.Is(err) {
+		t.Fatalf("want workbudget error, got %v", err)
 	}
 }

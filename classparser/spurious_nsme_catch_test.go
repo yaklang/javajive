@@ -87,7 +87,7 @@ func TestSpuriousNSMECatchIgnoresSingleArgGetMethod(t *testing.T) {
 	}
 }
 
-func TestRequestWrapperSpuriousNSMEIsLoadBearing(t *testing.T) {
+func TestRequestWrapperKeepsExceptionTableCatchType(t *testing.T) {
 	raw, err := os.ReadFile("testdata/regression/RequestWrapper.class")
 	if err != nil {
 		t.Fatal(err)
@@ -108,11 +108,11 @@ func TestRequestWrapperSpuriousNSMEIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OFF: %v", err)
 	}
-	if !strings.Contains(off, "NoSuchMethodException") {
-		t.Errorf("OFF expected NSME in multicatch")
-	}
-	if on == off {
-		t.Fatal("ON/OFF identical")
+	// The bytecode protects the URI constructor with URISyntaxException only.
+	// getMethod() on RequestLine has a different descriptor from Class.getMethod;
+	// it must not change this catch even when the old pruning workaround is off.
+	if strings.Contains(off, "NoSuchMethodException") || !strings.Contains(off, "catch(URISyntaxException") {
+		t.Errorf("catch differs from the original exception table with pruning disabled:\n%s", off)
 	}
 }
 

@@ -1,9 +1,8 @@
-# Raw-functional-interface reassignment cast (JDEC_LAMBDA_ASSIGN_CAST_OFF): the local is declared RAW
-# `Function var2 = this.builder;` (raw field, no Signature), so a method reference / explicitly-typed
-# lambda REASSIGNED into it must be cast to a parameterized `Function<...>` to bind against the raw SAM,
-# exactly as the javac-visible source does. A bare `var2 = Collections::unmodifiableCollection;` is an
-# "invalid method reference" and a bare `var2 = (Collection l0) -> ...` has "incompatible parameter
-# types in lambda expression". Real hit: fastjson2 ObjectReaderImplList.
-+(Function<Collection, Collection>)(Collections::unmodifiableCollection)
-+(Function<Collection, Collection>)((l0) ->
--/=\s*Collections::unmodifiableCollection;/
+# Original instantiated Collection SAM remains typed when the target local is raw.
+# TestRawAssignLambdaCastIsLoadBearing locks original BootstrapMethods and the
+# carrier-to-assignment-to-return def-use, including both old switch settings.
++/Function<Collection, Collection> \w+ = Collections::unmodifiableCollection;/
++(Function<Collection, Collection>) ((l0) ->
++Collections.singleton(l0.iterator().next())
++/Function \w+ = this.builder;/
+-/Function \w+ = Collections::unmodifiableCollection;/

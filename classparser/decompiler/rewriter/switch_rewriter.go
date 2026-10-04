@@ -2,7 +2,7 @@ package rewriter
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"slices"
 	"sort"
 	"strings"
@@ -163,10 +163,14 @@ func countOtherCasesExitingTo(manager *RewriteManager, switchNode, cand *core.No
 		return 0
 	}
 	cnt := 0
+	seen := map[*core.Node]bool{}
 	for _, s := range caseStarts {
-		if s == nil || s == cand {
+		if s == nil || s == cand || seen[s] {
 			continue
 		}
+		// Grouped labels share one body. Counting that body twice would make
+		// a genuine fall-through target look like a multi-arm exit.
+		seen[s] = true
 		if _, ok := caseBodyExitNodes(manager, switchNode, s)[cand]; ok {
 			cnt++
 		}
@@ -174,10 +178,65 @@ func countOtherCasesExitingTo(manager *RewriteManager, switchNode, cand *core.No
 	return cnt
 }
 
+// A join also used by an empty case can have just ONE other case body: e.g.
+// grouped allowed characters versus a default validation branch. Counting two
+// other bodies misses that loop latch. Raw GOTO entries distinguish an empty
+// case from a real fall-through label, whose body must remain inside switch.
+func switchCaseHasOnlyJumpEntries(node, candidate *core.Node, cases *omap.OrderedMap[switchLabel, *core.Node]) bool {
+	found, onlyJumps := false, true
+	cases.ForEach(func(label switchLabel, target *core.Node) bool {
+		if target == candidate {
+			found = true
+			onlyJumps = onlyJumps && !label.Default && node.SwitchJumpOnlyCases[int(label.Value)]
+		}
+		return true
+	})
+	return found && onlyJumps
+}
+
+// Dominance alone cannot identify a switch continuation also reached by an
+// enclosing if arm. Prove a unique forward boundary shared by distinct case
+// bodies. A label remains a label (real fall-through); terminal returns were
+// already isolated above. Only switch-owned predecessors become break leaves.
+func externalSharedSwitchContinuation(manager *RewriteManager, owner *core.Node, starts []*core.Node) *core.Node {
+	if owner == nil || !owner.HasOriginPC || len(starts) > 256 {
+		return nil
+	}
+	labels := map[*core.Node]bool{}
+	for _, start := range starts {
+		labels[start] = true
+	}
+	counts := map[*core.Node]int{}
+	seen := map[*core.Node]bool{}
+	for _, start := range starts {
+		if start == nil || seen[start] {
+			continue
+		}
+		seen[start] = true
+		for exit := range caseBodyExitNodes(manager, owner, start) {
+			if exit == nil || labels[exit] || IsEndNode(exit) || exit.IsCatchStart || !exit.HasOriginPC || exit.OriginPC <= owner.OriginPC || utils.IsDominate(manager.DominatorMap, owner, exit) {
+				continue
+			}
+			counts[exit]++
+		}
+	}
+	var candidate *core.Node
+	for target, count := range counts {
+		if count >= 2 {
+			if candidate != nil {
+				return nil
+			}
+			candidate = target
+		}
+	}
+	return candidate
+}
+
 func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	if node.SwitchPrepared {
 		return nil
 	}
+	splitExternalSharedSwitchReturns(manager, node)
 	// manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
 	// manager.DumpDominatorTree()
 	middleStatement := node.Statement.(*statements.MiddleStatement)
@@ -253,7 +312,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 		// before that fallback wrongly promotes the default/throw node to the merge.
 		mergeNode = node.SwitchEmptyCaseMergeNode
 	}
-	if mergeNode == nil && os.Getenv("JDEC_SWITCH_EMPTY_CASE_MERGE_OFF") == "" {
+	if mergeNode == nil && jdecenv.Get("JDEC_SWITCH_EMPTY_CASE_MERGE_OFF") == "" {
 		// Empty case whose target is the switch's merge (commons-codec Base64/Base32 EOF switch). The
 		// start node of an empty `case K:` is just `goto merge` in bytecode, so after goto-folding its
 		// start node IS the post-switch merge. The dominator-based search excludes it (it is a case
@@ -271,7 +330,8 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 			if cand == nil {
 				return true
 			}
-			if c := countOtherCasesExitingTo(manager, node, cand, caseStarts); c >= 2 && c > bestCnt {
+			c := countOtherCasesExitingTo(manager, node, cand, caseStarts)
+			if (c >= 2 || (c == 1 && switchCaseHasOnlyJumpEntries(node, cand, caseMap))) && c > bestCnt {
 				best = cand
 				bestCnt = c
 			}
@@ -286,6 +346,9 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 				node.SwitchEmptyCaseMergeNode = best
 			}
 		}
+	}
+	if shared := externalSharedSwitchContinuation(manager, node, startNodes); shared != nil {
+		mergeNode = shared
 	}
 	if mergeNode != nil {
 		allSources := slices.Clone(mergeNode.Source)
@@ -310,7 +373,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 			// switch's OWN case bodies (transitively dominated by the switch node) may break to the
 			// merge; leave external edges intact so control flows naturally into the merge.
 			// Kill-switch: JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF=1 restores the legacy (buggy) behavior.
-			if os.Getenv("JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF") == "" && !utils.IsDominate(manager.DominatorMap, node, source) {
+			if jdecenv.Get("JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF") == "" && !utils.IsDominate(manager.DominatorMap, node, source) {
 				continue
 			}
 			breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
@@ -340,6 +403,66 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	node.SwitchPrepared = true
 	return nil
 }
+
+// A terminal RETURN shared with a path before the switch is not dominated by
+// the switch, so it cannot serve as that switch's ordinary break destination.
+// If its edge is merely discarded, every non-last case falls into the next
+// case. Give each in-region edge a private terminal before collecting case
+// bodies. A pure literal (or null) can also be copied when its exact bytecode
+// return PC and protected-range membership agree. References, invocations and
+// cleanup stay on their original paths. Real case-to-case edges stay intact.
+func splitExternalSharedSwitchReturns(manager *RewriteManager, owner *core.Node) {
+	if manager == nil || owner == nil {
+		return
+	}
+	type edge struct{ source, target *core.Node }
+	var edges []edge
+	core.WalkGraph(owner, func(source *core.Node) ([]*core.Node, error) {
+		if source != owner && !utils.IsDominate(manager.DominatorMap, owner, source) {
+			return nil, nil
+		}
+		for _, target := range source.Next {
+			ret, ok := target.Statement.(*statements.ReturnStatement)
+			if !ok || len(target.Source) < 2 || target.HideNext != nil ||
+				target.IsTryCatch || target.IsCatchStart || target.IsCircle || target.IsInCircle ||
+				len(target.EncodedJumps) != 0 || encodedJumpTo(source, target) ||
+				utils.IsDominate(manager.DominatorMap, owner, target) {
+				continue
+			}
+			if ret.JavaValue != nil {
+				value := values.UnpackSoltValue(ret.JavaValue)
+				_, literal := value.(*values.JavaLiteral)
+				if (!literal && value != values.JavaNull) || !ret.HasOriginPC ||
+					!target.HasOriginPC || ret.OriginPC != target.OriginPC ||
+					!sameProtectedMembership(manager.RootNode, source, target) {
+					continue
+				}
+			}
+			terminal := true
+			for _, next := range target.Next {
+				terminal = terminal && IsEndNode(next)
+			}
+			if terminal {
+				edges = append(edges, edge{source, target})
+			}
+		}
+		return source.Next, nil
+	})
+	for _, e := range edges {
+		// Tail duplication retains the original return's PC witness.
+		copy := *e.target.Statement.(*statements.ReturnStatement)
+		leaf := manager.NewNode(&copy)
+		leaf.OriginPC, leaf.HasOriginPC = e.target.OriginPC, e.target.HasOriginPC
+		for _, next := range e.target.Next {
+			leaf.AddNext(next)
+		}
+		replaceNextInPlace(e.source, e.target, leaf)
+	}
+	if len(edges) > 0 {
+		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+	}
+}
+
 func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	startSwitchNode := node
 	if err := SwitchRewriter1(manager, node); err != nil {
@@ -363,6 +486,12 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	if len(switchData) >= 4 {
 		def := switchData[3].(statements.SwitchDefault)
 		valueToBodyOffset[switchLabel{Default: true}] = int(def.Offset)
+	}
+	// Remove a proved empty default BEFORE grouping labels by target. Otherwise
+	// default becomes the sole owner of the shared body, the explicit labels
+	// become nil aliases, and dropping default later also drops their break.
+	if node.SwitchEmptyDefaultMerge && caseMap.GetMust(switchLabel{Default: true}) == node.MergeNode {
+		caseMap.Delete(switchLabel{Default: true})
 	}
 	caseItems := []*statements.CaseItem{}
 	switchStatement := statements.NewSwitchStatement(data, caseItems)
@@ -389,6 +518,13 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	nodeToVals.ForEach(func(k *core.Node, v []switchLabel) bool {
 		sortSwitchLabels(v)
 		newNodeToVals.Set(k, v)
+		// GOTO removal can coalesce empty cases at different bytecode offsets
+		// into one exit. They are not necessarily adjacent physical labels:
+		// moving their single body to the last label would make earlier ones
+		// fall through into intervening cases. Each keeps its own break.
+		if k == node.MergeNode && (node.SwitchEmptyCaseMerge || node.SwitchEmptyDefaultMerge) {
+			return true
+		}
 		for i, val := range v {
 			if i == len(v)-1 {
 				break
@@ -425,7 +561,10 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		// absorb the merge/tail code into this case and (because no break is emitted) make every case
 		// fall through into `default: throw`. Emit `case K: break;` (empty body + explicit break) so the
 		// matched value is a no-op and control leaves the switch; the merge code is emitted after it.
-		if !caseItem.IsDefault && node.SwitchEmptyCaseMerge && startNode == node.MergeNode {
+		// An empty default and explicit empty cases can share this same exit.
+		// Dropping default is safe, but the explicit labels still need a break
+		// or they would fall through to the next physical case body.
+		if !caseItem.IsDefault && (node.SwitchEmptyCaseMerge || node.SwitchEmptyDefaultMerge) && startNode == node.MergeNode {
 			caseItem.Body = []statements.Statement{statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
 				return "break"
 			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
@@ -495,7 +634,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	// reach the point after the inner switch) and that does NOT fall through to a sibling case must end
 	// with a `break`. The nested-switch + completes-normally guards keep this from emitting unreachable
 	// code after a loop, a return/throw, or a switch all of whose arms return.
-	if os.Getenv("JDEC_SWITCH_NO_BREAK_FIX") == "" {
+	if jdecenv.Get("JDEC_SWITCH_NO_BREAK_FIX") == "" {
 		for idx, ci := range caseItems {
 			if idx == len(caseItems)-1 {
 				continue // the last case exits to the merge naturally; no break needed.

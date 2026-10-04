@@ -16,35 +16,24 @@ import (
 // load-bearing. Requires the resolver so the sibling `Holder` signature is visible. Real hit: spring-core
 // TypeMappedAnnotation.getType() -> this.mapping.getAnnotationType().
 func TestCrossRecvWildcardReturnCastIsLoadBearing(t *testing.T) {
-	outer, err := os.ReadFile("testdata/regression/CrossRecvWildcardSeed.class")
+	data, err := os.ReadFile("testdata/regression/CrossRecvWildcardSeed.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-	resolver := func(internalName string) ([]byte, bool) {
-		b, e := os.ReadFile("testdata/regression/" + internalName + ".class")
-		if e != nil {
-			return nil, false
+	assertReviewedGenericMethod(t, data, "getType", "()Ljava/lang/Class;", "()Ljava/lang/Class<TA;>;")
+	resolver := func(name string) ([]byte, bool) {
+		b, e := os.ReadFile("testdata/regression/" + name + ".class")
+		return b, e == nil
+	}
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_CROSS_RECV_WILDCARD_RET_CAST_OFF", setting)
+		source, err := DecompileWithResolver(data, resolver)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return b, true
-	}
-
-	// Fix ON (default): the `(Class<A>)` cast is present on the getKind() return.
-	os.Unsetenv("JDEC_CROSS_RECV_WILDCARD_RET_CAST_OFF")
-	on, err := DecompileWithResolver(outer, resolver)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !strings.Contains(on, "(Class<A>) (this.holder.getKind())") {
-		t.Errorf("fix ON: expected a `(Class<A>)` cast on the getKind() return, got:\n%s", on)
-	}
-
-	// Fix OFF: the cast disappears (the uncompilable bare return), proving it is load-bearing.
-	t.Setenv("JDEC_CROSS_RECV_WILDCARD_RET_CAST_OFF", "1")
-	off, err := DecompileWithResolver(outer, resolver)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if strings.Contains(off, "(Class<A>) (") {
-		t.Errorf("fix OFF: expected NO `(Class<A>)` cast (kill-switch load-bearing), got:\n%s", off)
+		hasView := strings.Contains(compactReviewedGenericSource(source), "return(Class<A>)(Class)(this.holder.getKind())")
+		if hasView != (setting == "") {
+			t.Fatalf("switch=%q: missing receiver-preserving wildcard return bridge: %s", setting, source)
+		}
 	}
 }

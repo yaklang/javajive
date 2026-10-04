@@ -1,0 +1,7 @@
+{
+  "artifact": "org.eclipse.jdt:ecj:3.37.0",
+  "version": "3.37.0",
+  "filename": "ecj-3.37.0.jar",
+  "sha256": "cde026ff966b48b5e5f148b6f041ceff3cf4f85cf75155f4ec0f40e4ee14b545",
+  "url": "https://repo.maven.apache.org/maven2/org/eclipse/jdt/ecj/3.37.0/ecj-3.37.0.jar"
+}

@@ -71,6 +71,16 @@ func NewExpandedArchiveFileSystemFromLocalWithOptions(path string, recursivePars
 	return NewExpandedZipFSWithOptions(zipFS, zipFS, recursiveParse), nil
 }
 
+// NewExpandedArchiveFileSystemFromLocalWithArchiveOptions opens a local archive
+// with shared ZipFS/ExpandedZipFS archive budgets, path policy, and TargetRelease.
+func NewExpandedArchiveFileSystemFromLocalWithArchiveOptions(path string, recursiveParse bool, opts filesys.ArchiveOptions) (fi.FileSystem, error) {
+	zipFS, err := filesys.NewZipFSFromLocalWithOptions(path, filesys.WithArchiveOptions(opts))
+	if err != nil {
+		return nil, err
+	}
+	return NewExpandedZipFSWithArchiveOptions(zipFS, zipFS, recursiveParse, opts), nil
+}
+
 // NewExpandedLocalFileSystem wraps the OS local filesystem so archive files
 // (.jar/.war/.ear/.par/.zip) behave as directories and .class entries are
 // served as decompiled Java source.

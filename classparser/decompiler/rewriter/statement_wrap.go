@@ -3,7 +3,7 @@ package rewriter
 import (
 	"errors"
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"sort"
 	"strings"
 
@@ -33,6 +33,7 @@ func sortNodesByID(nodes []*core.Node) []*core.Node {
 }
 
 type RewriteManager struct {
+	loopTransfers map[*core.Node]loopTransfer
 	// Method-local allocation keeps synthetic names deterministic across concurrent requests.
 	syntheticCatchVarCounter int
 	currentNodeId            int
@@ -121,34 +122,6 @@ func (s *RewriteManager) RemoveDeadEndAssigns() {
 	}
 }
 
-// isIdentChar reports whether b can appear inside a Java identifier; used for whole-token matching so
-// "var1" never matches inside "var12".
-func isIdentChar(b byte) bool {
-	return b == '_' || b == '$' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
-}
-
-// containsToken reports whether tok appears in s delimited by non-identifier characters (a real
-// reference to the local named tok, not an accidental substring of a longer name).
-func containsToken(s, tok string) bool {
-	if tok == "" {
-		return false
-	}
-	for idx := 0; idx <= len(s)-len(tok); {
-		i := strings.Index(s[idx:], tok)
-		if i < 0 {
-			return false
-		}
-		i += idx
-		before := i == 0 || !isIdentChar(s[i-1])
-		after := i+len(tok) >= len(s) || !isIdentChar(s[i+len(tok)])
-		if before && after {
-			return true
-		}
-		idx = i + 1
-	}
-	return false
-}
-
 // renderValue renders a JavaValue to source text, swallowing any panic from a value type that needs ctx
 // fields unavailable at this stage (returns "" so the caller treats it as "no reference" and declines).
 func renderValue(ctx *class_context.ClassContext, value values.JavaValue) (s string) {
@@ -190,21 +163,27 @@ func followArm(start *core.Node) ([]*core.Node, *core.Node) {
 	return nil, nil
 }
 
-// definedLocals collects the rendered names of locals assigned by the AssignStatement nodes on an arm
-// path. These anchor the true/false mapping in SplitTernaryReturnArms: a value that uses an arm's locals
-// must belong to that arm.
-func definedLocals(ctx *class_context.ClassContext, path []*core.Node) []string {
-	var out []string
+// definedLocals retains SSA/local identity. Temporary names are not unique
+// until RewriteVar; unrelated Date and Collection casts may both render var2.
+func definedLocals(path []*core.Node) []*values.JavaRef {
+	var out []*values.JavaRef
 	for _, n := range path {
 		if as, ok := n.Statement.(*statements.AssignStatement); ok {
-			if ref, ok := as.LeftValue.(*values.JavaRef); ok && ref.Id != nil {
-				if name := renderValue(ctx, ref); name != "" {
-					out = append(out, name)
-				}
+			if ref, ok := as.LeftValue.(*values.JavaRef); ok && ref != nil {
+				out = append(out, ref)
 			}
 		}
 	}
 	return out
+}
+
+func usesLocal(refs map[*values.JavaRef]bool, defined *values.JavaRef) bool {
+	for ref := range refs {
+		if ref == defined || (defined.VarUid != "" && defined.VarUid == ref.VarUid) {
+			return true
+		}
+	}
+	return false
 }
 
 // SplitTernaryReturnArms undoes a value-ternary reconstruction that cannot be linearized: a
@@ -218,8 +197,8 @@ func definedLocals(ctx *class_context.ClassContext, path []*core.Node) []string 
 // `if (cond) return A; <B-stores>; return B;`. It fires only when the arm-to-value mapping is provably
 // correct - verified by which arm's locals each value references, with cross-checks that catch an
 // inverted (negated) condition - and declines otherwise, so an ambiguous shape degrades to the prior
-// stub rather than risking a silently branch-swapped result. ctx is needed only to render values during
-// the reference probe.
+// stub rather than risking a silently branch-swapped result. Dependencies are compared by
+// local identity, without rendering expressions or following references into their definitions.
 func (s *RewriteManager) SplitTernaryReturnArms(ctx *class_context.ClassContext) {
 	handled := map[*core.Node]bool{}
 	for i := 0; i < (1 << 16); i++ {
@@ -275,10 +254,13 @@ func (s *RewriteManager) trySplitTernaryReturn(ctx *class_context.ClassContext, 
 	if !ok || tern.TrueValue == nil || tern.FalseValue == nil {
 		return false
 	}
-	trueVars := definedLocals(ctx, truePath)
-	falseVars := definedLocals(ctx, falsePath)
-	trueValStr := renderValue(ctx, tern.TrueValue)
-	falseValStr := renderValue(ctx, tern.FalseValue)
+	trueVars := definedLocals(truePath)
+	falseVars := definedLocals(falsePath)
+	trueEffects, trueUses := values.InspectValue(tern.TrueValue)
+	falseEffects, falseUses := values.InspectValue(tern.FalseValue)
+	if (trueEffects|falseEffects)&values.EffectOpaque != 0 {
+		return false
+	}
 	// Need at least one arm-local to anchor the mapping; a pure value ternary (no arm stores) is left to
 	// the normal callback collapse.
 	if len(trueVars) == 0 && len(falseVars) == 0 {
@@ -287,12 +269,12 @@ func (s *RewriteManager) trySplitTernaryReturn(ctx *class_context.ClassContext, 
 	// Cross-contamination check (catches an inverted/negated condition): the value paired with one arm by
 	// the if's true/false convention must NOT reference the OTHER arm's locals.
 	for _, d := range trueVars {
-		if containsToken(falseValStr, d) {
+		if usesLocal(falseUses, d) {
 			return false
 		}
 	}
 	for _, d := range falseVars {
-		if containsToken(trueValStr, d) {
+		if usesLocal(trueUses, d) {
 			return false
 		}
 	}
@@ -301,7 +283,7 @@ func (s *RewriteManager) trySplitTernaryReturn(ctx *class_context.ClassContext, 
 	if len(trueVars) > 0 {
 		used := false
 		for _, d := range trueVars {
-			if containsToken(trueValStr, d) {
+			if usesLocal(trueUses, d) {
 				used = true
 				break
 			}
@@ -313,7 +295,7 @@ func (s *RewriteManager) trySplitTernaryReturn(ctx *class_context.ClassContext, 
 	if len(falseVars) > 0 {
 		used := false
 		for _, d := range falseVars {
-			if containsToken(falseValStr, d) {
+			if usesLocal(falseUses, d) {
 				used = true
 				break
 			}
@@ -477,7 +459,7 @@ func (s *RewriteManager) mergeIf() bool {
 				// leaves swapped, truncating every encode). Reset JmpNode + the closures to the freshly
 				// built order so downstream readers see the correct branches. No-op for the common
 				// trueIndex=1 node (the closures already pointed there). Kill-switch: JDEC_MERGEIF_PIN_OFF=1.
-				if os.Getenv("JDEC_MERGEIF_PIN_OFF") == "" && len(parentNode.Next) >= 2 {
+				if jdecenv.Get("JDEC_MERGEIF_PIN_OFF") == "" && len(parentNode.Next) >= 2 {
 					pn := parentNode
 					pn.JmpNode = pn.Next[1]
 					pn.TrueNode = func() *core.Node {
@@ -758,6 +740,18 @@ func (s *RewriteManager) ScanCoreInfo() error {
 	subNodeRoute := NewRootNodeRoute()
 	walkIfStatement(s.RootNode, subNodeRoute)
 	circleNodes = sortNodesByID(utils.NewSet[*core.Node](circleNodes).List())
+	// The route walk above is useful for finding candidate loop heads, but a node can be
+	// revisited by multiple paths through a forward-only diamond.  Only retain candidates
+	// that are members of an actual CFG cycle; otherwise RebuildLoopNode wraps an acyclic
+	// join in `do { ... } while (true)` and drops its forward branch edges.
+	cyclicNodes := cyclicCFGNodes(s.RootNode)
+	actualCircleNodes := circleNodes[:0]
+	for _, node := range circleNodes {
+		if cyclicNodes[node] {
+			actualCircleNodes = append(actualCircleNodes, node)
+		}
+	}
+	circleNodes = actualCircleNodes
 	//for _, node := range circleNodes {
 	//	//mergeNode := funk.Filter(node.Next, func(item *core.Node) bool {
 	//	//	return !node.CircleNodesSet.Has(item)
@@ -1058,6 +1052,47 @@ func (s *RewriteManager) Rewrite() error {
 			continue
 		}
 
+		isTry := slices.Contains(s.TryNodes, node)
+		// Protected retry branches need their loop exits before nested ifs
+		// consume the graph. Other loops retain the existing inner-if order.
+		materializeLoopExits := func(protectedRetryOnly bool) error {
+			if isTry || slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
+				for j := i; j < len(order); j++ {
+					n := order[j]
+					if slices.Contains(s.WhileNode, n) && (loopOwnsRewriteNode(s, n, node) || (protectedRetryOnly && protectedRetryContinuationOwnsRewriteNode(s, n, node)) || (!protectedRetryOnly && s.LoopRegionReducible && len(n.Next) > 0 && searchCircleEndNode(n, n.Next[0], s.DominatorMap, true) == node)) {
+						if protectedRetryOnly && !loopHasProvedProtectedRetry(s, n) {
+							continue
+						}
+						if isTry && (len(n.Next) == 0 || (n.Next[0] != node && !loopHeaderGuardsTry(s, n, node)) || (hasSharedCatchEntry(node) && !loopHasProvedProtectedRetry(s, n))) {
+							continue
+						}
+						if _, ok := loopJmpRewriterRecoed[n]; ok {
+							// An earlier pass can see no normal boundary
+							// until a nested terminal loop has been wrapped.
+							// Materialize newly exposed exits before this
+							// continuation becomes an opaque IfStatement.
+							if protectedRetryOnly || len(n.Next) == 0 || slices.Contains(n.Next, node) || searchCircleEndNode(n, n.Next[0], s.DominatorMap, s.LoopRegionReducible) != node {
+								// A loop that already owns this continuation
+								// needs no second pass. Keep looking for an
+								// enclosing loop whose branch also exits here.
+								continue
+							}
+						}
+						err := LoopJmpRewriter(s, n)
+						if err != nil {
+							return err
+						}
+						loopJmpRewriterRecoed[n] = struct{}{}
+						s.DominatorMap = GenerateDominatorTree(s.RootNode)
+						break
+					}
+				}
+			}
+			return nil
+		}
+		if err := materializeLoopExits(true); err != nil {
+			return err
+		}
 		// Family B (merge-condition inside a container body): TryRewriter (and, in aggressive mode,
 		// IfRewriter) collects its body's statements via a dominator walk WITHOUT recursively
 		// structuring them, so any if-node that lives in the body must be turned into an IfStatement
@@ -1070,7 +1105,6 @@ func (s *RewriteManager) Rewrite() error {
 		// needs it and it is zero-regression). Extending it to if containers regressed passing
 		// methods catastrophically when applied globally (5->318), so it is gated behind aggressive
 		// mode: only a method that already failed conservatively takes the if-container path.
-		isTry := slices.Contains(s.TryNodes, node)
 		isAggrIf := s.Aggressive && slices.Contains(s.IfNodes, node)
 		if isTry || isAggrIf {
 			body := s.containerBodyNodeSet(node)
@@ -1090,26 +1124,8 @@ func (s *RewriteManager) Rewrite() error {
 			s.DominatorMap = GenerateDominatorTree(s.RootNode)
 		}
 
-		// Materialize loop exits before a container consumes its body, including retry try/catch loops.
-		if isTry || slices.Contains(s.IfNodes, node) || slices.Contains(s.SwitchNode, node) || slices.Contains(s.WhileNode, node) {
-			for j := i; j < len(order); j++ {
-				n := order[j]
-				if slices.Contains(s.WhileNode, n) && utils2.IsDominate(s.DominatorMap, n, node) {
-					if isTry && (len(n.Next) == 0 || n.Next[0] != node || hasSharedCatchEntry(node)) {
-						continue
-					}
-					if _, ok := loopJmpRewriterRecoed[n]; ok {
-						break
-					}
-					err := LoopJmpRewriter(s, n)
-					if err != nil {
-						return err
-					}
-					loopJmpRewriterRecoed[n] = struct{}{}
-					s.DominatorMap = GenerateDominatorTree(s.RootNode)
-					break
-				}
-			}
+		if err := materializeLoopExits(false); err != nil {
+			return err
 		}
 		err := nodeToRewriter[node](s, node)
 		if err != nil {

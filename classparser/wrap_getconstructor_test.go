@@ -75,25 +75,22 @@ func TestWrapUncaughtGetConstructorGenericCtorIsLoadBearing(t *testing.T) {
 }
 
 func TestWrapUncaughtGetConstructorDecompileIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/SpringAddDelegateTransformer.class")
+	// The original constructor already protects getConstructor with NSME and
+	// throws CodeGenerationException; disabling a text rewrite must not remove it.
+	raw, err := os.ReadFile("testdata/regression/SpringAddDelegateTransformer.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-	os.Unsetenv("JDEC_WRAP_GETCONSTRUCTOR_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile ON: %v", err)
-	}
-	if !ctorGetConstructorWrapped(on) {
-		t.Errorf("fix ON: expected try/catch around constructor getConstructor, got:\n%s", on)
-	}
-	t.Setenv("JDEC_WRAP_GETCONSTRUCTOR_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile OFF: %v", err)
-	}
-	if ctorGetConstructorWrapped(off) {
-		t.Errorf("fix OFF: expected no wrap around constructor getConstructor, got:\n%s", off)
+	assertReviewedHandlerMultiplicity(t, raw, "JDEC_WRAP_GETCONSTRUCTOR_OFF")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_WRAP_GETCONSTRUCTOR_OFF", setting)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ctorGetConstructorWrapped(source) || !strings.Contains(source, "throw new CodeGenerationException(") {
+			t.Fatalf("switch=%q: original constructor handler lost:\n%s", setting, source)
+		}
 	}
 }
 

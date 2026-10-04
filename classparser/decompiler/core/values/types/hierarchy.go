@@ -1,8 +1,9 @@
 package types
 
 import (
-	"os"
 	"strings"
+
+	"github.com/yaklang/javajive/internal/jdecenv"
 )
 
 // hierarchy.go 是 Phase 2 的类型层级/LUB 设施。反编译器此前完全没有类层级查询: 条件表达式/相位合并
@@ -198,6 +199,14 @@ var throwableRootedTypes = func() map[string]bool {
 // hierarchy table). Used to restrict the exception-catch-slot supertype-arm merge to genuine Throwable
 // types, where widening a merged catch variable to its LUB is always safe (its uses are Throwable-level:
 // instanceof / cast / getMessage / getCause / rethrow).
+// KnownPlatformSuperTypes exposes only the finite canonical platform parent
+// table used by the type solver. It supplies ancestry, never a complete method
+// declaration table; callers must not use it as invocation/member evidence.
+func KnownPlatformSuperTypes(fqn string) ([]string, bool) {
+	parents, known := jdkSuperEdges[fqn]
+	return append([]string(nil), parents...), known
+}
+
 func IsThrowableRooted(fqn string) bool {
 	return throwableRootedTypes[fqn]
 }
@@ -340,21 +349,44 @@ func ReflectExecKind(t JavaType) string {
 // arm is not a known JDK class or when the LUB degrades to Object (avoids widening regressions where
 // the result is later dereferenced for a more specific member). Gated by JDEC_TYPELUB_OFF.
 func commonSuperType(arms []JavaType) JavaType {
-	if os.Getenv("JDEC_TYPELUB_OFF") != "" {
+	return commonSuperTypeVia(arms, nil)
+}
+
+func commonSuperTypeVia(arms []JavaType, provider SuperTypeProvider) JavaType {
+	if jdecenv.Get("JDEC_TYPELUB_OFF") != "" {
 		return nil
+	}
+	if lub, ok, unknown := joinArrayTypes(arms, provider); ok {
+		if unknown || lub == nil || isJavaLangObject(lub) {
+			return nil
+		}
+		return lub
 	}
 	name := ""
 	have := false
 	for _, t := range arms {
+		if isNullType(t) {
+			continue
+		}
 		n, ok := classNameOf(t)
 		if !ok {
-			return nil
+			if n, ok = RawClassFQN(t); !ok {
+				return nil
+			}
 		}
 		if !have {
 			name, have = n, true
 			continue
 		}
+		prev := name
 		name = commonSuperName(name, n)
+		if name == "" && provider != nil {
+			if joined := joinNamedWithProvider(prev, n, provider); joined != "" && joined != "java.lang.Object" {
+				name = joined
+				continue
+			}
+			return nil
+		}
 		if name == "" || name == "java.lang.Object" {
 			return nil
 		}
@@ -365,8 +397,26 @@ func commonSuperType(arms []JavaType) JavaType {
 	return NewJavaClass(name)
 }
 
+func joinNamedWithProvider(a, b string, provider SuperTypeProvider) string {
+	if a == "" || b == "" || provider == nil {
+		return ""
+	}
+	got := BridgedCommonSuperType(NewJavaClass(a), NewJavaClass(b), provider)
+	n, ok := classNameOf(got)
+	if !ok {
+		return ""
+	}
+	return n
+}
+
 // CommonSuperType is the exported two-argument LUB used by phi/ternary type merging outside this
 // package (Phase 1c phi declaration typing). It returns nil when no useful (sub-Object) LUB exists.
 func CommonSuperType(a, b JavaType) JavaType {
 	return commonSuperType([]JavaType{a, b})
+}
+
+// CommonSuperTypeVia is the provider-aware declaration LUB. Unknown hierarchy
+// does not collapse to the first concrete arm.
+func CommonSuperTypeVia(a, b JavaType, provider SuperTypeProvider) JavaType {
+	return commonSuperTypeVia([]JavaType{a, b}, provider)
 }

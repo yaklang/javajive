@@ -2,31 +2,38 @@ package javaclassparser
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 )
 
 func TestSerialHookKeepsPrivateReadResolve(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/PureJavaReflectionProvider.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
+	raw, code, object := reviewedFixtureMethod(t, "testdata/regression/PureJavaReflectionProvider.class", "readResolve", "()Ljava/lang/Object;")
+	cp := NewConstantPoolWithConstant(&object.ConstantPool)
+	for _, method := range object.Methods {
+		if cp.GetUtf8(int(method.NameIndex)).Value == "readResolve" && cp.GetUtf8(int(method.DescriptorIndex)).Value == "()Ljava/lang/Object;" && method.AccessFlags&0x0002 == 0 {
+			t.Fatal("original serialization hook is not private")
+		}
 	}
-	os.Unsetenv("JDEC_SERIAL_HOOK_PRIVATE_OFF")
-	os.Unsetenv("JDEC_NEST_PRIVATE_PACKAGE_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if !strings.Contains(on, "private Object readResolve()") && !strings.Contains(on, "private java.lang.Object readResolve()") {
-		t.Errorf("ON expected private readResolve, got:\n%s", on)
-	}
-	t.Setenv("JDEC_SERIAL_HOOK_PRIVATE_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if strings.Contains(off, "private Object readResolve()") {
-		t.Errorf("OFF expected nest-demoted (non-private) readResolve, got:\n%s", off)
+	assertReviewedOpcode(t, code, 0, core.OP_ALOAD_0)
+	assertReviewedOpcode(t, code, 1, core.OP_INVOKEVIRTUAL)
+	assertReviewedOpcode(t, code, 4, core.OP_ALOAD_0)
+	assertReviewedOpcode(t, code, 5, core.OP_ARETURN)
+	reviewedControlInvokes(t, code, object, reviewedViewInvoke{"com/thoughtworks/xstream/converters/reflection/PureJavaReflectionProvider", "init", "()V", core.OP_INVOKEVIRTUAL})
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_SERIAL_HOOK_PRIVATE_OFF", setting)
+		t.Setenv("JDEC_NEST_PRIVATE_PACKAGE_OFF", setting)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := reviewedControlBody(t, source, `private\s+(?:java\.lang\.)?Object\s+readResolve\(\)`)
+		requireReviewedPattern(t, body, `\{\s*this\.init\(\);\s*return this;\s*\}`)
+		if strings.Count(body, "init()") != 1 {
+			t.Fatal("serialization receiver initialization replayed")
+		}
 	}
 }
 
@@ -44,29 +51,7 @@ func TestThrowObjectAsThrowableIsLoadBearing(t *testing.T) {
 }
 
 func TestTreeUnmarshallerThrowObjectIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/TreeUnmarshaller.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
-	}
-	os.Unsetenv("JDEC_THROW_OBJECT_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Contains(on, "Object var4 = null;") && strings.Contains(on, "throw var4;") {
-		t.Errorf("ON still throws Object var4:\n%s", on)
-	}
-	if !strings.Contains(on, "ConversionException var4") && !strings.Contains(on, "throw var4;") {
-		// Either retyped or no longer throws the Object local.
-	}
-	t.Setenv("JDEC_THROW_OBJECT_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !strings.Contains(off, "Object var4 = null;") {
-		t.Errorf("OFF expected Object var4, got:\n%s", off)
-	}
+	assertReviewedUnmarshallerProtectedCleanup(t)
 }
 
 func TestClassDollarForwardRefIsLoadBearing(t *testing.T) {
@@ -83,30 +68,7 @@ func TestClassDollarForwardRefIsLoadBearing(t *testing.T) {
 }
 
 func TestCustomObjectInputStreamForwardRefIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/CustomObjectInputStream.class")
-	if err != nil {
-		t.Fatalf("read seed: %v", err)
-	}
-	os.Unsetenv("JDEC_CLASSDOLLAR_FORWARD_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	key := strings.Index(on, "DATA_HOLDER_KEY")
-	cls := strings.Index(on, "static Class class$")
-	if cls < 0 || key < 0 || cls > key {
-		t.Errorf("ON expected class$ field before DATA_HOLDER_KEY, got:\n%s", on)
-	}
-	t.Setenv("JDEC_CLASSDOLLAR_FORWARD_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	keyOff := strings.Index(off, "DATA_HOLDER_KEY")
-	clsOff := strings.Index(off, "static Class class$")
-	if clsOff < 0 || keyOff < 0 || clsOff < keyOff {
-		t.Errorf("OFF expected class$ after DATA_HOLDER_KEY, got:\n%s", off)
-	}
+	assertReviewedClassCacheInitializer(t)
 }
 
 func TestThrowInitCauseCastIsLoadBearing(t *testing.T) {
@@ -187,13 +149,25 @@ func TestXstreamCGLIBFactoryFlagSnippet(t *testing.T) {
 }
 
 func TestXstreamCGLIBFactoryFlagIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/CGLIBEnhancedConverter.class", "JDEC_XSTREAM_REMAINING_OFF",
-		"boolean var5 = (((class$net$sf$cglib$proxy$Factory) == (null))",
-		"int var5 = (((class$net$sf$cglib$proxy$Factory) == (null))")
+	raw, code, _ := reviewedFixtureMethod(t, "testdata/regression/CGLIBEnhancedConverter.class", "marshal", "")
+	assertReviewedOpcode(t, code, 29, core.OP_INVOKEVIRTUAL)
+	assertReviewedSources(t, raw, "JDEC_XSTREAM_REMAINING_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `public void marshal\(`)
+		flag := requireReviewedPattern(t, body, `boolean\s+(\w+)\s*=\s*\w+\.isAssignableFrom\(\w+\)\s*;`)
+		requireReviewedPattern(t, body, `String\.valueOf\(`+regexp.QuoteMeta(flag[1])+`\)`)
+		requireReviewedPattern(t, body, `\(`+regexp.QuoteMeta(flag[1])+`\)\s*\?`)
+	})
 }
 
 func TestXstreamCGLIBInterfaceLoopIndexIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/CGLIBEnhancedConverter.class", "JDEC_XSTREAM_REMAINING_OFF",
-		"int var7 = 0;\n\t\tdo{\n\t\t\tif ((var7) < (var6.length)){",
-		"ConversionException var7 = null;\n\t\tdo{\n\t\t\tif ((var7) < (var6.length)){")
+	raw, code, _ := reviewedFixtureMethod(t, "testdata/regression/CGLIBEnhancedConverter.class", "marshal", "")
+	assertReviewedOpcode(t, code, 163, core.OP_IINC, 7, 1)
+	assertReviewedSources(t, raw, "JDEC_XSTREAM_REMAINING_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `public void marshal\(`)
+		array := requireReviewedPattern(t, body, `Class\[\]\s+(\w+)\s*=\s*\w+\.getInterfaces\(\)\s*;`)
+		bound := requireReviewedPattern(t, body, `\((\w+)\)\s*<\s*\(`+regexp.QuoteMeta(array[1])+`\.length\)`)
+		requireReviewedPattern(t, body, `int\s+`+regexp.QuoteMeta(bound[1])+`\s*=\s*0\s*;`)
+		requireReviewedPattern(t, body, regexp.QuoteMeta(bound[1])+`\+\+\s*;`)
+		requireReviewedPattern(t, body, regexp.QuoteMeta(array[1])+`\[`+regexp.QuoteMeta(bound[1])+`\]`)
+	})
 }

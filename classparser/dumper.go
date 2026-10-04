@@ -3,8 +3,9 @@ package javaclassparser
 import (
 	"errors"
 	"fmt"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"io"
-	"math"
+	"maps"
 	"os"
 	"regexp"
 	"runtime/debug"
@@ -15,20 +16,49 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	utils2 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
+	"github.com/yaklang/javajive/classparser/decompiler/rewriter"
 
 	"github.com/samber/lo"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/javaliteral"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type ClassObjectDumper struct {
-	options     DecompileOptions
-	report      *DecompileResult
-	rewriteSeen map[string]bool
+	originalInitializerStatus      map[string]bool
+	originalInitializerStatusReady bool
+	nativeMemberLookup             func(string) *nativeMemberClass
+	nativeMemberCalls              map[string]map[int]*nativeMemberAllocation
+	nativeMemberChecks             map[string]map[int]bool
+	nativeMemberRoot               *nativeMemberFamily
+	nativeMemberCurrent            *nativeMemberClass
+	nativeMemberUnitPrefix         string
+	nativeAnonymousRoot            *nativeAnonymousFamily
+	nativeCaptureFields            map[string]string
+	nativeCapturedReads            map[string]map[int]string
+	nativeTypeParams               []string
+	nativeCaptureFailed            bool
+	nativeCaptureTypes             map[string]types.JavaType
+	nativeOuterContext             *class_context.ClassContext
+
+	options                DecompileOptions
+	report                 *DecompileResult
+	rewriteSeen            map[string]bool
+	Work                   *workbudget.Budget
+	diagTruncated          bool
+	overloadFamilyUnproven bool
+	overloadUnknownSeen    map[string]bool
+	// Set only inside one constructor effect proof after checking the exact
+	// final receiver and its complete original finalizer ancestry.
+	constructorReceiverFinalizerSilent bool
+	// typeAnnosUnsupported is set when a legal type annotation cannot be
+	// placed on a declaration (code-offset/local/inner path).
+	typeAnnosUnsupported bool
 
 	obj           *ClassObject
 	FuncCtx       *class_context.ClassContext
@@ -45,6 +75,12 @@ type ClassObjectDumper struct {
 	// parameter list and renames them to capture placeholders that the invokedynamic call site
 	// resolves to the actual captured values.
 	lambdaCaptureCount map[string]int
+	// lambdaCaptureTypes records the static types at the invokedynamic call site. A synthetic
+	// lambda impl method has no generic Signature and its descriptor erases leading capture
+	// parameters (Function<? super T, R> becomes raw Function). Before simulating that hidden
+	// method, project same-erasure parameterized capture types back onto those parameters so its
+	// body is rendered under the source-level generic contract.
+	lambdaCaptureTypes map[string][]types.JavaType
 	// lambdaLocalSeq hands each inlined lambda body a unique id so its own locals can be renamed
 	// into a private `lv<seq>_<n>` namespace. A lambda arrow body is spliced INLINE into the
 	// enclosing method, and Java forbids a local declared in the lambda body from shadowing a
@@ -67,9 +103,12 @@ type ClassObjectDumper struct {
 	// DISJOINT scopes (safe to share names). Top-level lambdas (depth 1) keep `l<i>`, so the common
 	// case is byte-for-byte unchanged. See DumpMethodWithInitialId. Kill-switch:
 	// JDEC_LAMBDA_PARAM_SCOPE_OFF=1 restores the flat `l<i>` naming.
-	lambdaDepth       int
-	fieldDefaultValue map[string]string
-	dumpedMethodsSet  map[string]*dumpedMethods
+	lambdaDepth                 int
+	fieldDefaultValue           map[string]string
+	interfaceInitializerHelpers []*dumpedMethods
+	constructorBoundaryHelpers  []*dumpedMethods
+	privateNestOwnPlan          *privateNestPlan
+	dumpedMethodsSet            map[string]*dumpedMethods
 	// aggressive marks that the CURRENT method dump is a second attempt for a method whose
 	// conservative decompilation already failed. While set, the decompiler enables higher-risk
 	// reconstruction paths (relaxed structuring, node-duplication, synthetic rebuilds). It is
@@ -92,6 +131,13 @@ type ClassObjectDumper struct {
 	// value through an embedded assignment `(v = m(...)) != null`. Names that are overloaded with
 	// DIFFERENT return types are omitted (ambiguous). Built lazily and cached.
 	methodReturnTypes map[string]string
+	// bootstrapReports accumulates T17 invokedynamic/condy dispatch outcomes across methods.
+	bootstrapReports []core.DispatchResult
+	// recordSkipMethods, when set by TryRecordLayout, suppresses default record members.
+	recordSkipMethods map[string]bool
+	recordSkipFields  map[string]bool
+	recordKeyword     string
+
 	// foldSiblingResolver, when non-nil, resolves a sibling class's raw bytes by its binary internal
 	// name (slash form, e.g. "ev/EnumBody$1"). It is the hook that enables enum constant-body
 	// CROSS-CLASS folding: a constant-specific class body is compiled by javac into a synthetic
@@ -100,9 +146,14 @@ type ClassObjectDumper struct {
 	// this nil, so folding is OFF and per-class output is byte-for-byte unchanged (zero regression by
 	// construction); only the multi-class entry (DecompileWithResolver / jar path) sets it.
 	foldSiblingResolver func(internalName string) ([]byte, bool)
+	// Declaration-only inputs are not members of the flattened output family.
+	declarationResolver func(internalName string) ([]byte, bool)
 }
 
 func (c *ClassObjectDumper) GetConstructorMethodName() string {
+	if c.nativeMemberCurrent != nil {
+		return c.nativeMemberCurrent.name
+	}
 	if c.PackageName == "" {
 		return c.ClassName
 	}
@@ -120,6 +171,7 @@ func NewClassObjectDumper(obj *ClassObject) *ClassObjectDumper {
 		deepStack:          utils.NewStack[int](),
 		lambdaMethods:      map[string][]string{},
 		lambdaCaptureCount: map[string]int{},
+		lambdaCaptureTypes: map[string][]types.JavaType{},
 		fieldDefaultValue:  map[string]string{},
 		dumpedMethodsSet:   map[string]*dumpedMethods{},
 		aggressiveRetried:  map[string]bool{},
@@ -158,7 +210,10 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 // `HikariPool.connectionBag`). Widening those members to package-private is
 // recompile-safe. Kill-switch: JDEC_NEST_PRIVATE_PACKAGE_OFF=1.
 func (c *ClassObjectDumper) nestDemotePrivate() bool {
-	if os.Getenv("JDEC_NEST_PRIVATE_PACKAGE_OFF") == "1" {
+	if c.nativeMemberCurrent != nil || c.nativeMemberRoot != nil && c.nativeMemberRoot.owner == c.obj.GetClassName() {
+		return false
+	}
+	if c.getenv("JDEC_NEST_PRIVATE_PACKAGE_OFF") == "1" {
 		return false
 	}
 	if strings.Contains(c.obj.GetClassName(), "$") {
@@ -232,7 +287,7 @@ func (c *ClassObjectDumper) superIsOwnFormalFlattenedSibling() bool {
 	if !ok || len(data) == 0 {
 		return false
 	}
-	sObj, err := Parse(data)
+	sObj, err := c.parseResolved(data)
 	if err != nil {
 		return false
 	}
@@ -323,7 +378,7 @@ func extractDescriptorClassNames(s string) []string {
 }
 
 func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
-	if os.Getenv("JDEC_SAMEPKG_FQ_OFF") != "" {
+	if c.getenv("JDEC_SAMEPKG_FQ_OFF") != "" {
 		return nil
 	}
 	if c.obj == nil || c.obj.ConstantPoolManager == nil {
@@ -380,16 +435,39 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 			}
 		}
 	}
+	// A zero catch type supplies Throwable even when no CP class references it.
+	for _, method := range c.obj.Methods {
+		for _, attribute := range method.Attributes {
+			if code, ok := attribute.(*CodeAttribute); ok && code != nil {
+				for _, entry := range code.ExceptionTable {
+					if entry.CatchType == 0 {
+						record("java/lang/Throwable")
+					}
+				}
+			}
+		}
+	}
 	out := map[string]bool{}
 	for simple, pkgs := range pkgsBySimple {
-		if _, hasOwn := pkgs[c.PackageName]; !hasOwn {
+		_, hasOwn := pkgs[c.PackageName]
+		_, hasLang := pkgs["java.lang"]
+		// java.lang is imported implicitly. A same-package declaration can
+		// shadow it without appearing in this class's constant pool at all.
+		// Resolve that candidate by original class identity before shortening.
+		if hasLang && c.PackageName != "java.lang" && c.FuncCtx != nil && c.FuncCtx.InvocationMetadata != nil {
+			owner := simple
+			if c.PackageName != "" {
+				owner = strings.ReplaceAll(c.PackageName, ".", "/") + "/" + simple
+			}
+			if decl, known := c.FuncCtx.InvocationMetadata(owner); known && decl.Name == owner {
+				out[simple] = true
+			}
+		}
+		if !hasOwn && !hasLang {
 			continue
 		}
-		for p := range pkgs {
-			if p != c.PackageName && p != "" {
-				out[simple] = true
-				break
-			}
+		if len(pkgs) > 1 {
+			out[simple] = true
 		}
 	}
 	if len(out) == 0 {
@@ -399,6 +477,15 @@ func (c *ClassObjectDumper) computeSamePkgFQNames() map[string]bool {
 }
 
 func (c *ClassObjectDumper) DumpClass() (string, error) {
+	if c.options.EnvSnapshot == nil {
+		// Nested legacy Dump (Dump/Decompile inside DecompileWithOptions) must
+		// push a live-env sentinel and restore the outer snapshot. A top-level
+		// Dump has no outer frame: EnterLive would still bind, forcing every
+		// jdecenv.Get to parse runtime.Stack for goid (CoverUndeclared 70x).
+		if _, ok := jdecenv.Current(); ok {
+			defer jdecenv.EnterLive()()
+		}
+	}
 	// accessFlagsVerbose := c.obj.AccessFlagsVerbose
 	accessFlagsToCode := c.obj.AccessFlagsToCode
 
@@ -444,6 +531,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	c.PackageName = packageName
 	rawClassName := splits[len(splits)-1]
 	className := class_context.SafeIdentifier(rawClassName)
+	if c.nativeMemberCurrent != nil {
+		className = c.nativeMemberCurrent.name
+	}
 	// Nested/local/anonymous classes carry a '$' in their binary name (Outer$Inner). Yak emits each
 	// such class as a STANDALONE top-level unit literally named `Outer$Inner` and writes it to
 	// `Outer$Inner.java` ('$' is a legal Java identifier char), so a `public` modifier IS legal here
@@ -464,7 +554,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "protected", ""))
 		innerFlags, isNested := c.selfInnerClassAccessFlags()
 		switch {
-		case os.Getenv("JDEC_NESTED_PUBLIC_OFF") != "":
+		case c.getenv("JDEC_NESTED_PUBLIC_OFF") != "":
 			// Legacy: strip `public` from every '$'-named class (kept for A/B comparison).
 			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
 		case !isNested:
@@ -481,7 +571,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			if !strings.Contains(accessFlags, "public") {
 				accessFlags = strings.TrimSpace("public " + accessFlags)
 			}
-		case innerFlags&0x0004 == 0x0004 && os.Getenv("JDEC_NESTED_PROTECTED_PUBLIC_OFF") == "":
+		case innerFlags&0x0004 == 0x0004 && c.getenv("JDEC_NESTED_PROTECTED_PUBLIC_OFF") == "":
 			// Genuinely nested AND `protected` per InnerClasses. A protected nested type is reachable
 			// from subclasses in OTHER packages via inheritance (e.g. cglib's
 			// AbstractClassGenerator.Source / .ClassLoaderData, used by subclasses in the beans/proxy/
@@ -499,13 +589,29 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// Package-private nested only (neither ACC_PUBLIC nor ACC_PROTECTED).
 			// Protected with JDEC_NESTED_PROTECTED_PUBLIC_OFF set falls here and
 			// must stay non-public. Kill-switch: JDEC_NESTED_PACKAGE_PUBLIC_OFF=1.
-			if innerFlags&0x0004 == 0 && os.Getenv("JDEC_NESTED_PACKAGE_PUBLIC_OFF") == "" {
+			if innerFlags&0x0004 == 0 && c.getenv("JDEC_NESTED_PACKAGE_PUBLIC_OFF") == "" {
 				if !strings.Contains(accessFlags, "public") {
 					accessFlags = strings.TrimSpace("public " + accessFlags)
 				}
 			} else {
 				accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
 			}
+		}
+	}
+	if child := c.nativeMemberCurrent; child != nil {
+		for _, v := range []string{"public", "private", "protected"} {
+			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, v, ""))
+		}
+		if child.static {
+			accessFlags = "static " + accessFlags
+		}
+		switch {
+		case child.flags&1 != 0:
+			accessFlags = "public " + accessFlags
+		case child.flags&2 != 0:
+			accessFlags = "private " + accessFlags
+		case child.flags&4 != 0:
+			accessFlags = "protected " + accessFlags
 		}
 	}
 	// module-info / package-info are synthetic descriptor pseudo-classes; their internal
@@ -519,21 +625,54 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			sb.WriteString(fmt.Sprintf("package %s;\n\n", packageName))
 		}
 		sb.WriteString(fmt.Sprintf("// decompiled from a synthetic %s descriptor\n", rawClassName))
-		return sb.String(), nil
+		out := sb.String()
+		if err := c.ensureOutput(int64(len(out))); err != nil {
+			return "", err
+		}
+		return out, nil
 	}
 	supperClassName := c.obj.GetSupperClassName()
 	supperClassName = strings.Replace(supperClassName, "/", ".", -1)
+	// Source headers may name a lexical member, while invocation, field and
+	// constructor proofs must retain the original binary declaration identity.
+	identityName := class_context.SafeIdentifier(rawClassName)
 	if packageName == "" {
-		c.ClassName = className
+		c.ClassName = identityName
 	} else {
-		c.ClassName = packageName + "." + className
+		c.ClassName = packageName + "." + identityName
 	}
 	funcCtx := &class_context.ClassContext{
+		Env:             c.getenv,
+		Work:            c.Work,
 		ClassName:       c.ClassName,
 		SupperClassName: supperClassName,
 		PackageName:     c.PackageName,
 	}
+	if outer := c.nativeOuterContext; outer != nil {
+		funcCtx.BuildInLibsMap = outer.BuildInLibsMap
+		funcCtx.KeySet = outer.KeySet
+		funcCtx.SamePkgFQNames = outer.SamePkgFQNames
+	}
 	c.FuncCtx = funcCtx
+	funcCtx.DeclarationSourceName = c.buildDeclarationSourceNames()
+	c.wireNativeAnonymousSource()
+	c.wireNativeMemberSource()
+
+	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
+	c.wirePrivateNestBridges()
+	c.overloadUnknownSeen = map[string]bool{}
+	funcCtx.OnOverloadUnknown = func(owner, name, descriptor string) {
+		c.overloadFamilyUnproven = true
+		key := owner + "\x00" + name + "\x00" + descriptor
+		if c.overloadUnknownSeen[key] {
+			return
+		}
+		c.overloadUnknownSeen[key] = true
+		c.appendDiagnostic(DecompileDiagnostic{
+			Code:    "overload_family_unknown",
+			Message: "invoke " + owner + "." + name + descriptor + " family not proven; binding requires further validation",
+		})
+	}
 	// Wire SiblingSuperTypes BEFORE the class header (`extends` / `implements`) is rendered.
 	// ShortTypeName uses it to decide whether an EXTERNAL nested super must be dotted
 	// (`InputAccessor$Std` -> `InputAccessor.Std`, `ObjectIdGenerators$PropertyGenerator` ->
@@ -548,6 +687,17 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// same-package one). Constant-pool based, so it is independent of body render order. See
 	// ClassContext.SamePkgFQNames. Kill-switch: JDEC_SAMEPKG_FQ_OFF=1.
 	funcCtx.SamePkgFQNames = c.computeSamePkgFQNames()
+	if c.nativeOuterContext != nil {
+		if funcCtx.SamePkgFQNames == nil {
+			funcCtx.SamePkgFQNames = map[string]bool{}
+		}
+		for name := range c.nativeOuterContext.SamePkgFQNames {
+			funcCtx.SamePkgFQNames[name] = true
+		}
+	}
+	if err := c.consultResolverForCancel(); err != nil {
+		return "", err
+	}
 	buildInLib := []string{
 		//c.PackageName + ".*",
 		c.ClassName,
@@ -564,7 +714,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Keyed by the raw dotted class name so it can be matched against each erased supertype below.
 	// Kill-switch: JDEC_GENERIC_SUPERS_OFF=1 restores the erased supertypes.
 	genericSuperByRaw := map[string]string{}
-	if os.Getenv("JDEC_GENERIC_SUPERS_OFF") == "" {
+	if c.getenv("JDEC_GENERIC_SUPERS_OFF") == "" {
 		for _, attr := range c.obj.Attributes {
 			sigAttr, ok := attr.(*SignatureAttribute)
 			if !ok {
@@ -669,7 +819,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				// "cannot find symbol" (spring MergedAnnotationSelector / FirstRunOfPredicate). Kill-switch
 				// JDEC_TYPEPARAM_BOUND_IMPORT_OFF restores the (import-less) throwaway rendering.
 				boundCtx := funcCtx
-				if os.Getenv("JDEC_TYPEPARAM_BOUND_IMPORT_OFF") != "" {
+				if c.getenv("JDEC_TYPEPARAM_BOUND_IMPORT_OFF") != "" {
 					boundCtx = nil
 				}
 				if tp := types.ParseClassSignature(sigStr, boundCtx); tp != "" {
@@ -705,7 +855,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// It is propagated to the render context so statement renderers can recognize type-variable
 	// references (e.g. to emit an unchecked `(T)` cast on an erased return value).
 	classTypeParamNames := types.ClassFormalTypeParamNames(classSigStr)
-	if os.Getenv("JDEC_INNER_TYPEVAR_OFF") == "" && len(classTypeParamNames) == 0 {
+	if c.nativeCaptureFields != nil {
+		classTypeParamNames = append(classTypeParamNames, c.nativeTypeParams...)
+	}
+	if c.nativeCaptureFields == nil && c.getenv("JDEC_INNER_TYPEVAR_OFF") == "" && len(classTypeParamNames) == 0 {
 		seen := map[string]bool{}
 		var free []string
 		addRef := func(n string) {
@@ -741,7 +894,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// ("cannot find symbol: class I"). Scan method-parameter signatures too so such a var is DECLARED
 		// as a formal (`Futures$2<O, I>`), symmetric with how O is recovered. The raw `new Futures$2(...)`
 		// call site is a raw instantiation and unaffected. Kill-switch JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF.
-		if os.Getenv("JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF") == "" {
+		if c.getenv("JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF") == "" {
 			for _, method := range c.obj.Methods {
 				for _, mattr := range method.Attributes {
 					if sa, ok := mattr.(*SignatureAttribute); ok {
@@ -821,7 +974,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// matching the local var already emitted raw. Derived from THIS class's own bytecode only (no sibling
 	// resolver), so it works under single-class decompile too. Kill-switch: JDEC_INNER_RAW_ERASE_OFF.
 	var rawEraseTypeVars map[string]bool
-	if ownFormalNames := types.ClassFormalTypeParamNames(classSigStr); os.Getenv("JDEC_INNER_RAW_ERASE_OFF") == "" {
+	if ownFormalNames := types.ClassFormalTypeParamNames(classSigStr); c.getenv("JDEC_INNER_RAW_ERASE_OFF") == "" && c.nativeCaptureFields == nil {
 		if flags, ok := c.selfInnerClassAccessFlags(); ok && flags&StaticFlag == 0 {
 			own := make(map[string]bool, len(ownFormalNames))
 			for _, n := range ownFormalNames {
@@ -887,12 +1040,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// subclass's override params to match the base restores the override relation. Gated on the
 			// super ACTUALLY being own-formal (so it went through case (a)); a no-own-formal `$` super
 			// declares+renders those vars generically, so erasing here would instead CREATE a clash.
-			if !eraseMethodParams && os.Getenv("JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF") == "" {
+			if !eraseMethodParams && c.getenv("JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF") == "" {
 				if c.superIsOwnFormalFlattenedSibling() {
 					eraseMethodParams = true
 				}
 			}
-			if eraseMethodParams && os.Getenv("JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF") == "" {
+			if eraseMethodParams && c.getenv("JDEC_INNER_RAW_ERASE_METHOD_PARAM_OFF") == "" {
 				for _, method := range c.obj.Methods {
 					for _, mattr := range method.Attributes {
 						if sa, ok := mattr.(*SignatureAttribute); ok {
@@ -921,7 +1074,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// bare undeclared name failed anyway). Runtime-identical, and sibling overrides erase to the same
 	// signature so the override relation is preserved. Kill-switch: JDEC_INNER_STANDALONE_ERASE_OFF.
 	var standaloneEraseTypeVars map[string]string
-	if len(rawEraseTypeVars) > 0 && os.Getenv("JDEC_INNER_STANDALONE_ERASE_OFF") == "" {
+	if len(rawEraseTypeVars) > 0 && c.getenv("JDEC_INNER_STANDALONE_ERASE_OFF") == "" {
 		// A variable this class actually DECLARES (own formal params, or enclosing vars injected onto a
 		// flattened no-own-formal inner class) is in scope and must NOT be standalone-erased: doing so
 		// turns a legitimate `V execute(...)` return into `Object`, breaking the override against the
@@ -954,7 +1107,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// standalone-erased those same names (Itr.output(Object,Object) vs $1.output(K,V)).
 		// Only names that were skipped from StandaloneEraseTypeVars because they are
 		// declared here. Gated on the same kill-switch as standalone erase.
-		if os.Getenv("JDEC_INNER_STANDALONE_ERASE_OFF") == "" && len(rawEraseTypeVars) > 0 {
+		if c.getenv("JDEC_INNER_STANDALONE_ERASE_OFF") == "" && len(rawEraseTypeVars) > 0 {
 			declaredHere := map[string]bool{}
 			for _, n := range classTypeParamNames {
 				declaredHere[n] = true
@@ -978,6 +1131,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// ClassTypeParams is the CLASS-only snapshot (never extended with a method's own `<T>` while
 		// that method renders); it lets typeVarReturnCast recover `this`'s real parameterization.
 		c.FuncCtx.ClassTypeParams = classTypeParamNames
+		if c.nativeMemberCurrent != nil {
+			c.FuncCtx.ClassTypeParams = types.ClassFormalTypeParamNames(classSigStr)
+		}
 		// Record which same-class fields are declared as a bare class-scope type variable (e.g.
 		// `private final K key;`). A store into such a field whose RHS erased to Object/the bound
 		// needs an unchecked `(K)` cast to recompile (see AssignStatement.typeVarFieldStoreCast).
@@ -1049,7 +1205,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// genuine overload ambiguity (a second same-arity overload with a different descriptor). Populated
 		// for every non-<init>/non-<clinit> method. Kill-switch consumer: JDEC_NULL_ARG_CAST_OFF.
 		methodDescriptors := map[string]bool{}
-		recordByDesc := os.Getenv("JDEC_SAMECLASS_DESC_SIG_OFF") == ""
+		recordByDesc := c.getenv("JDEC_SAMECLASS_DESC_SIG_OFF") == ""
 		for _, m := range c.obj.Methods {
 			name, err := c.obj.getUtf8(m.NameIndex)
 			// <init>/<clinit> are NOT recorded: a non-static inner class's constructor Signature OMITS the
@@ -1094,11 +1250,53 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		if len(methodDescriptors) > 0 {
 			c.FuncCtx.MethodDescriptors = methodDescriptors
 		}
+		poolMethodDescriptors := map[string]bool{}
+		for _, info := range c.obj.ConstantPool {
+			var classIdx, natIdx uint16
+			switch m := info.(type) {
+			case *ConstantMethodrefInfo:
+				classIdx, natIdx = m.ClassIndex, m.NameAndTypeIndex
+			case *ConstantInterfaceMethodrefInfo:
+				classIdx, natIdx = m.ClassIndex, m.NameAndTypeIndex
+			default:
+				continue
+			}
+			cls, err := c.obj.getConstantInfo(classIdx)
+			if err != nil {
+				continue
+			}
+			ci, ok := cls.(*ConstantClassInfo)
+			if !ok {
+				continue
+			}
+			owner, err := c.obj.getUtf8(ci.NameIndex)
+			if err != nil || owner == "" {
+				continue
+			}
+			nat, err := c.obj.getConstantInfo(natIdx)
+			if err != nil {
+				continue
+			}
+			ni, ok := nat.(*ConstantNameAndTypeInfo)
+			if !ok {
+				continue
+			}
+			mname, err := c.obj.getUtf8(ni.NameIndex)
+			desc, err2 := c.obj.getUtf8(ni.DescriptorIndex)
+			if err != nil || err2 != nil || mname == "" || desc == "" {
+				continue
+			}
+			ownerDot := strings.ReplaceAll(owner, "/", ".")
+			poolMethodDescriptors[class_context.MethodDescKey(ownerDot+"."+mname, desc)] = true
+		}
+		if len(poolMethodDescriptors) > 0 {
+			c.FuncCtx.PoolMethodDescriptors = poolMethodDescriptors
+		}
 		// Augment with DIRECT-supertype (inherited) generic method signatures so a `this.m(objVal)`
 		// call to an inherited generic method recovers its erased `(K)` argument cast too. Same-class
 		// signatures (already in methodSignatures/methodSigSeen) always win. Kill-switch
 		// JDEC_GENERIC_SUPER_METHOD_OFF.
-		if os.Getenv("JDEC_GENERIC_SUPER_METHOD_OFF") == "" {
+		if c.getenv("JDEC_GENERIC_SUPER_METHOD_OFF") == "" {
 			c.collectInheritedThisMethodSignatures(classSigStr, classTypeParamNames, methodSignatures, methodSigSeen)
 		}
 		if len(methodSignatures) > 0 {
@@ -1112,7 +1310,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// (= call argument) count; recording it would mis-index arguments (guava TreeBasedTable$TreeRow).
 		// Only record when the two counts MATCH (top-level / static-nested constructors). Overloads
 		// colliding on arity are dropped. Kill-switch JDEC_CTOR_WILDCARD_CAST_OFF.
-		if os.Getenv("JDEC_CTOR_WILDCARD_CAST_OFF") == "" {
+		if c.getenv("JDEC_CTOR_WILDCARD_CAST_OFF") == "" {
 			ctorSignatures := map[int]string{}
 			ctorSeen := map[int]bool{}
 			ctorByDesc := map[string]string{}
@@ -1166,6 +1364,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// cases. Only wired on the jar / DecompileWithResolver path (foldSiblingResolver != nil).
 		c.FuncCtx.ClassSig = classSigStr
 		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
+		c.FuncCtx.SourceBridgeTarget = c.buildSourceBridgeTargets()
 		c.FuncCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
 		c.FuncCtx.SiblingClassAccessible = c.buildSiblingClassAccessible()
 		c.FuncCtx.SiblingCtorSig = c.buildSiblingCtorSig()
@@ -1192,13 +1391,32 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			annoStrs = append(annoStrs, res)
 		}
 	}
+	if TryRecordLayout != nil {
+		if layout := TryRecordLayout(c); layout != nil && layout.Keyword != "" {
+			if layout.Components != "" {
+				classTypeParams = layout.Components
+			}
+			if layout.DropExtendsRecord {
+				superStr = ""
+			}
+			c.recordSkipMethods = layout.SkipMethodKeys
+			c.recordSkipFields = layout.SkipFieldNames
+			c.recordKeyword = layout.Keyword
+		}
+	}
 	methods, err := c.DumpMethods()
 	if err != nil {
+		if isRequestWorkError(err) {
+			return "", err
+		}
 		return "", utils.Wrap(err, "DumpMethods failed")
 	}
 	fields, err := c.DumpFields()
 	if err != nil {
 		return "", utils.Wrap(err, "DumpFields failed")
+	}
+	if AfterMembersDumped != nil {
+		AfterMembersDumped(c)
 	}
 	// Enum constant-body cross-class folding: when a multi-class resolver is available, recover each
 	// constant's synthetic `Outer$N` subclass body and inline it as `CONST { ...body... }`. Computed
@@ -1206,8 +1424,15 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// merged into funcCtx ahead of the import-assembly step below. Empty (nil) on the single-class
 	// path, leaving the constant render hook untouched.
 	enumConstantBodies := c.foldEnumConstantBodies(isEnum)
+	// Compute member scopes and merge their imports once before assembly.
+	members, memberErr := c.renderNativeMembers()
+	if memberErr != nil && c.nativeMemberRoot != nil {
+		c.nativeMemberRoot.failed = true
+	}
 	var classKeyword string
-	if !nonClassKeyword {
+	if c.recordKeyword != "" {
+		classKeyword = " " + c.recordKeyword
+	} else if !nonClassKeyword {
 		classKeyword = " class"
 	}
 	// assemble renders the full compilation unit from the current methods/fields. It is a
@@ -1227,10 +1452,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 					enumFields = append(enumFields, field)
 					continue
 				}
-				ordinaryFields = append(ordinaryFields, field.code)
+				ordinaryFields = append(ordinaryFields, field.annotations+field.code)
 			}
 			for idx, enumSimple := range enumFields {
-				constStr := enumSimple.fieldName
+				constStr := enumSimple.annotations + enumSimple.fieldName
 				if args := c.enumConstantArgs(enumSimple.fieldName); args != "" {
 					constStr += "(" + args + ")"
 				}
@@ -1267,6 +1492,8 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				attrsB.WriteString("\n")
 			}
 		}
+		// Owned members already completed their own rendering and recovery.
+		// Keep them outside the enclosing class's source-recovery input.
 		attrs := attrsB.String()
 		result := fmt.Sprintf("%s%s %s%s%s {%s}", accessFlags, classKeyword, className, classTypeParams, superStr, attrs)
 		if len(annoStrs) > 0 {
@@ -1293,15 +1520,26 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		if len(importsStr) > 0 {
 			importsStr += "\n"
 		}
+		if c.nativeMemberCurrent != nil {
+			// Owned declarations keep their original annotation prefix. The
+			// assembler knows the exact unit preamble; no class-keyword search
+			// through annotation values is necessary to extract the declaration.
+			c.nativeMemberUnitPrefix = packageSource + importsStr
+		}
 		return packageSource + importsStr + result
 	}
 
 	full := assemble()
+	if c.Work != nil {
+		if err := c.Work.CheckAlloc(int64(len(full))); err != nil {
+			return "", err
+		}
+	}
 	if c.options.Mode == Precision && c.report != nil {
-		c.report.Diagnostics = append(c.report.Diagnostics, DecompileDiagnostic{Code: "legacy_source_recovery_disabled", Message: "Unproven class-source repairs are disabled. Core structuring and type recovery still require round-trip validation."})
+		c.appendDiagnostic(DecompileDiagnostic{Code: "legacy_source_recovery_disabled", Message: "Unproven class-source repairs are disabled. Core structuring and type recovery still require round-trip validation."})
 	}
 	if c.options.Mode != Precision && EnableDecompileSyntaxValidation && len(full) < 50000 {
-		if err := validateJavaSyntax(full); err != nil {
+		if err := validateJavaSyntax(full); err != nil && !errors.Is(err, ErrSyntaxUnavailable) {
 			// The assembled class is not valid Java. Degrade malformed members (using the real
 			// class header so interface/enum/constructor context is honored) and re-render, so a
 			// single broken method/field cannot make the whole class un-parseable.
@@ -1314,6 +1552,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 		}
 	}
+	c.recordMembers(methods, fields)
 	// Enum-switch ($SwitchMap) cross-class fold (Bug V): rewrite `switch(Outer$N.$SwitchMap$E[sel.
 	// ordinal()])` back to the idiomatic `switch(sel){ case CONST: ... }`. No-op without a resolver
 	// or when JDEC_NO_ENUM_SWITCH_FOLD is set; produces valid Java, so it runs after assembly.
@@ -1363,11 +1602,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Fix try/catch structuring: move exception-throwing calls that are rendered outside a
 	// try block INTO the nearest inner try body. Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
 	full = c.sourceRewrite("fixTryCatchExceptionPlacement", "class_source", full, fixTryCatchExceptionPlacement)
-	// addMissingCatchException performs per-call-site exception-flow analysis: for each reflection
-	// call site (getConstructor etc.) it walks the enclosing try/catch chain and only augments the
-	// nearest catch with NoSuchMethodException if no enclosing catch already handles it (or a
-	// supertype). Kill-switch: JDEC_ADD_MISSING_CATCH_OFF=1.
-	full = c.sourceRewrite("addMissingCatchException", "class_source", full, addMissingCatchException)
+	// Catch types are recovered from the exception table. A call's spelling
+	// does not prove its declaring owner, throws signature, or handler coverage;
+	// guessing here adds exceptions to unrelated catches (e.g. getMethod()).
 	// dedupNestedCatchException removes exception types from an outer catch that are already caught
 	// by a nested try/catch in the try body (javac: "exception X is never thrown in body of
 	// corresponding try statement"). Kill-switch: JDEC_DEDUP_NESTED_CATCH_OFF=1.
@@ -1378,14 +1615,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// wrapReflectionCallInSwitchCase wraps switch-case reflection calls in try/catch. Kill-switch:
 	// JDEC_WRAP_REFLECTION_CASE_OFF=1.
 	full = c.sourceRewrite("wrapReflectionCallInSwitchCase", "class_source", full, wrapReflectionCallInSwitchCase)
-	// addBreakToSwitchCases inserts `break;` for fall-through switch cases. Kill-switch:
-	// JDEC_ADD_SWITCH_BREAK_OFF=1.
-	full = c.sourceRewrite("addBreakToSwitchCases", "class_source", full, addBreakToSwitchCases)
-	// fixSwitchBreakMissingReturn inserts `return null;` after a switch that is the last statement
-	// of its enclosing block in a reference-returning method, when a case exits via `break`
-	// (switch fall-through reconstructed as break: commons-lang3 NumberUtils.createNumber).
-	// Kill-switch: JDEC_FIX_SWITCH_BREAK_RETURN_OFF=1.
-	full = c.sourceRewrite("fixSwitchBreakMissingReturn", "class_source", full, fixSwitchBreakMissingReturn)
+	// Case exits are determined from CFG edges. Source assignments cannot
+	// distinguish a genuine break from an intentional fall-through dependency;
+	// inserting terminators here truncates rolling hash tails and numeric state.
+	// A switch break continues along its CFG successor. Never synthesize a
+	// default return here: block-closing braces do not prove method completion,
+	// and returning null silently truncates nested switches and decode loops.
 	// wrapFieldInitializerReflection converts a field initializer containing a reflection call
 	// (getMethod etc.) that throws a checked exception into a static-block init with try/catch.
 	// Kill-switch: JDEC_WRAP_FIELD_INIT_OFF=1.
@@ -1394,11 +1629,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// try/catch(NoSuchMethodException). Class-gated to AddDelegateTransformer (global wrap
 	// unmasks snakeyaml/fastjson2). Kill-switch: JDEC_WRAP_GETCONSTRUCTOR_OFF=1.
 	full = c.sourceRewrite("wrapUncaughtGetConstructor", "class_source", full, wrapUncaughtGetConstructor)
-	// Drop NoSuchMethodException from a multicatch (or an empty static-clinit
-	// try/catch) when the try body has no getConstructor/getMethod call.
-	// RequestWrapper: `new URI` throws URISyntaxException only; the decompiler
-	// unions NSME onto that catch. Kill-switch: JDEC_SPURIOUS_NSME_CATCH_OFF=1.
-	full = c.sourceRewrite("fixSpuriousNSMECatch", "class_source", full, fixSpuriousNSMECatch)
+	// Preserve the recovered alternatives too. A materialized Class[] can be
+	// declared outside the try, and any callee may declare a checked exception.
+	// Absence of a familiar reflection expression cannot prove a catch redundant.
 	// Drop catch(T) when an earlier catch in the same try already covers T
 	// (multicatch then a second catch(T)). Kill-switch: JDEC_ALREADY_CAUGHT_OFF=1.
 	full = c.sourceRewrite("fixAlreadyCaughtDuplicateCatch", "class_source", full, fixAlreadyCaughtDuplicateCatch)
@@ -1412,11 +1645,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// `ImmutableMap<A,B> f = ImmutableMap.builder()` so builder() does not infer <Object,Object>.
 	// Kill-switch: JDEC_IMMUTABLE_BUILDER_WITNESS_OFF=1.
 	full = c.sourceRewrite("fixImmutableBuilderWitness", "class_source", full, fixImmutableBuilderWitness)
-	// fixNeverThrownCNFE inserts `Class.forName("java.lang.Object")` into a try whose
-	// catch(ClassNotFoundException) would otherwise be "never thrown" (spring
-	// ConfigurableObjectInputStream: forName reconstructed outside the catch's try).
-	// Kill-switch: JDEC_CNFE_NEVER_THROWN_OFF=1.
-	full = c.sourceRewrite("fixNeverThrownCNFE", "class_source", full, fixNeverThrownCNFE)
 	// fixSelectMethodsAmbiguous casts the lambda in MethodIntrospector.selectMethods(Class,
 	// MethodFilter) so javac does not confuse it with the MetadataLookup overload.
 	// Kill-switch: JDEC_SELECTMETHODS_CAST_OFF=1.
@@ -1449,11 +1677,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// MergedAnnotationReadingVisitor.visitAnnotation.
 	// Kill-switch: JDEC_VISITANNOTATION_CONSUMER_CAST_OFF=1.
 	full = c.sourceRewrite("fixVisitAnnotationConsumerCast", "class_source", full, fixVisitAnnotationConsumerCast)
-	// fixValueDifferenceCreateCast wraps Maps$ValueDifferenceImpl.create(...) in a raw
-	// MapDifference$ValueDifference cast so put(K, ValueDifference<V>) does not infer
-	// V from Object,Object. Real hit: guava Maps.doDifference.
-	// Kill-switch: JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF=1.
-	full = c.sourceRewrite("fixValueDifferenceCreateCast", "class_source", full, fixValueDifferenceCreateCast)
 	// Scoped to the exact getUninterruptibly empty-try shape (not a class-wide regex).
 	full = c.sourceRewrite("fixGetUninterruptiblyGetInTry", "class_source", full, fixGetUninterruptiblyGetInTry)
 	// Scoped to the exact drainUninterruptibly empty-try shape: poll() folded out of
@@ -1537,9 +1760,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Object, then `var5.withPrefix` cannot find symbol. Cast to JsonPOJOBuilder$Value.
 	// Kill-switch: JDEC_POJO_BUILDER_VALUE_CAST_OFF=1.
 	full = c.sourceRewrite("fixPOJOBuilderValueCast", "class_source", full, fixPOJOBuilderValueCast)
-	// jackson POJOPropertyBuilder.getField: Class locals assigned before declaration.
-	// Kill-switch: JDEC_GETFIELD_CLASS_HOIST_OFF=1.
-	full = c.sourceRewrite("fixGetFieldClassHoist", "class_source", full, fixGetFieldClassHoist)
+	// Local declarations are placed by VariableId and lexical dominance in
+	// RewriteVar. Reintroducing declarations from printed slot names here
+	// can duplicate a declaration already recovered by that typed pass.
 	full = c.sourceRewrite("fixJacksonRemainingReconstructs", "class_source", full, fixJacksonRemainingReconstructs)
 	// javac 9-13 TWR synthetic `$closeResource(Throwable, AutoCloseable)` invokeinterfaces
 	// AutoCloseable.close() which throws Exception, but the synthetic method does not declare
@@ -1616,7 +1839,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// caffeine leftover unique sites. Kill-switch: JDEC_CAFFEINE_REMAINING_OFF=1.
 	full = c.sourceRewrite("fixCaffeineRemainingReconstructs", "class_source", full, fixCaffeineRemainingReconstructs)
 	// rxjava leftover unique sites. Kill-switch: JDEC_RXJAVA_REMAINING_OFF=1.
-	full = c.sourceRewrite("fixRxjavaRemainingReconstructs", "class_source", full, fixRxjavaRemainingReconstructs)
+	full = c.sourceRewrite("fixRxjavaRemainingReconstructs", "class_source", full, func(source string) string {
+		return fixRxjavaRemainingWithBinding(source, c.FuncCtx.SiblingClassSig != nil)
+	})
 	// commons-math3 leftover unique sites. Kill-switch: JDEC_MATH3_REMAINING_OFF=1.
 	full = c.sourceRewrite("fixMath3RemainingReconstructs", "class_source", full, fixMath3RemainingReconstructs)
 	// assertj leftover unique sites. Kill-switch: JDEC_ASSERTJ_REMAINING_OFF=1.
@@ -1627,6 +1852,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// JDEC_ENUM_CTOR_THIS_FIRST_OFF=1.
 	full = c.sourceRewrite("fixEnumNoArgCtorThisAfterLocals", "class_source", full, fixEnumNoArgCtorThisAfterLocals)
 	full = c.sourceRewrite("fixCtorNPECheckBeforeThis", "class_source", full, fixCtorNPECheckBeforeThis)
+	full = c.sourceRewrite("fixCtorDelegationArgumentSpills", "class_source", full, fixCtorDelegationArgumentSpills)
 	full = c.sourceRewrite("fixEnumClinitIllegalNew", "class_source", full, fixEnumClinitIllegalNew)
 	full = c.sourceRewrite("fixBareNestedImports", "class_source", full, fixBareNestedImports)
 	full = c.sourceRewrite("fixHardjarShapes", "class_source", full, fixHardjarShapes)
@@ -1634,8 +1860,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	full = c.sourceRewrite("fixBoolUsedAsArithOperand", "class_source", full, fixBoolUsedAsArithOperand)
 	// boolean local compared/assigned JVM 0/1. Kill-switch: JDEC_BOOL_ZERO_LITERAL_OFF=1.
 	full = c.sourceRewrite("fixBooleanZeroLiteral", "class_source", full, fixBooleanZeroLiteral)
-	// `if ((bool ||/&&) == (0))`. Kill-switch: JDEC_BOOL_EXPR_CMP_ZERO_OFF=1.
-	full = c.sourceRewrite("fixBooleanExprCmpZero", "class_source", full, fixBooleanExprCmpZero)
 	// `intVar == ((2) != (0))` → `intVar == (2)`. Kill-switch: JDEC_INT_CMP_BOOL_LIT_OFF=1.
 	full = c.sourceRewrite("fixIntCmpBoolMaterializedLiteral", "class_source", full, fixIntCmpBoolMaterializedLiteral)
 	// BoundedInputStream local later assigned CRC32Verifying/CheckedInputStream.
@@ -1706,20 +1930,53 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		full = c.sourceRewrite("fixIdentAsTypeDecl", "class_source", full, fixIdentAsTypeDecl)
 		full = c.sourceRewrite("fixObjectInitCastType", "class_source", full, fixObjectInitCastType)
 	}
+	if members != "" {
+		// Assemble completed lexical declarations only after the enclosing
+		// class's recovery. Its metadata cannot justify edits in a child scope.
+		open := javaIndexTopBrace(full)
+		close := -1
+		if open >= 0 {
+			close = javaMatchBrace(full, open)
+		}
+		if open < 0 || close < 0 || strings.TrimSpace(full[close+1:]) != "" {
+			if c.nativeMemberRoot != nil {
+				c.nativeMemberRoot.failed = true
+			}
+			return "", fmt.Errorf("member source enclosing boundary unproved")
+		}
+		if err := c.ensureOutput(int64(len(full)) + int64(len(members))); err != nil {
+			return "", err
+		}
+		if c.Work != nil && (!nativeProofWork(c.Work, int64(len(full))) || c.Work.CheckAlloc(int64(len(full))+int64(len(members))) != nil) {
+			return "", fmt.Errorf("member source assembly budget")
+		}
+		full = full[:close] + members + full[close:]
+	}
+	if err := c.ensureOutput(int64(len(full))); err != nil {
+		return "", err
+	}
+	if c.Work != nil && c.Work.Err() != nil {
+		return "", c.Work.Err()
+	}
 	return full, nil
 }
 
 type dumpedFields struct {
-	code      string
-	fieldName string
-	modifier  string
-	typeName  string
+	annotations string
+	code        string
+	fieldName   string
+	modifier    string
+	typeName    string
 }
 
 func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 	genuineEnum := c.isGenuineEnum()
 	fields := make([]dumpedFields, 0, len(c.obj.Fields))
 	for _, field := range c.obj.Fields {
+		fieldName, _ := c.obj.getUtf8(field.NameIndex)
+		if _, captured := c.nativeCaptureFields[fieldName]; captured {
+			continue
+		}
 		accessFlagsVerbose, accessCode := getFieldAccessFlagsVerbose(field.AccessFlags)
 		//if len(accessFlagsVerbose) < 1 {
 		//	return nil, utils.Error("fields accessFlagsVerbose is empty")
@@ -1736,6 +1993,9 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 		renderName := class_context.SafeIdentifier(name)
 		// $VALUES is the synthetic array backing values(); javac re-synthesizes it.
 		if genuineEnum && name == "$VALUES" {
+			continue
+		}
+		if c.recordSkipFields[name] {
 			continue
 		}
 		descriptor, err := c.obj.getUtf8(field.DescriptorIndex)
@@ -1765,7 +2025,9 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 		// string is the final field type. Re-running Import/ShortTypeName on that whole
 		// string corrupts parameterized, array, or primitive-array types.
 		lastPacket := fieldType.String(c.FuncCtx)
+		lastPacket = c.applyFieldTypeAnnotations(field, fieldType, lastPacket)
 		valueLiteral := ""
+		annotations := []string{}
 		for _, attr := range field.Attributes {
 			switch ret := attr.(type) {
 			case *ConstantValueAttribute:
@@ -1776,8 +2038,7 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 				}
 				switch constVal := value.(type) {
 				case *ConstantStringInfo:
-					constStr, _ := c.obj.getUtf8(constVal.StringIndex)
-					valueLiteral = values.JavaStringToLiteral(constStr)
+					valueLiteral = javaUtf8IndexToStringLiteral(c.obj, constVal.StringIndex)
 				case *ConstantIntegerInfo:
 					// boolean/char are stored as int constants in the pool; render them
 					// in their declared type so the field initializer type-checks
@@ -1813,12 +2074,28 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 				// Silently ignore unrecognized attributes (RuntimeInvisibleTypeAnnotations,
 				// PermittedSubclasses, Record, NestMembers, etc.) rather than flooding logs.
 			case *RuntimeVisibleAnnotationsAttribute:
+				for _, annotation := range ret.Annotations {
+					if c.fieldAnnotationEmittedByType(field, fieldType, annotation, ret.IsInvisible) {
+						continue
+					}
+					source, err := c.DumpAnnotation(annotation)
+					if err != nil {
+						return nil, err
+					}
+					annotations = append(annotations, source)
+				}
 
 			default:
 				// Silently ignore unknown attribute types on fields.
 			}
 		}
 
+		// ConstantValue initializes only static fields in the JVM. An instance
+		// constant is still stored by <init>; if that store was not safely
+		// lifted, keep the declaration blank and preserve its bytecode position.
+		if valueLiteral != "" && !slices.Contains(accessFlagsVerbose, "static") && c.fieldDefaultValue[name] == "" {
+			valueLiteral = ""
+		}
 		if valueLiteral != "" {
 			fields = append(fields, dumpedFields{
 				code:      fmt.Sprintf("%s %s %s = %s;", accessFlags, lastPacket, renderName, valueLiteral),
@@ -1854,6 +2131,11 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 				modifier:  accessFlags,
 				typeName:  lastPacket,
 			})
+		}
+		if len(annotations) != 0 {
+			// Keep annotations separate from the declaration: enum constants
+			// have a different source spelling but are original field members.
+			fields[len(fields)-1].annotations = strings.Join(annotations, " ") + " "
 		}
 	}
 	return fields, nil
@@ -1900,7 +2182,7 @@ func defaultInitializerForFieldType(typeName string) string {
 // so this never introduces "wrong number of type arguments".
 func (c *ClassObjectDumper) enclosingTypeParamBounds(free []string) map[string]string {
 	res := map[string]string{}
-	if c.foldSiblingResolver == nil || os.Getenv("JDEC_INNER_TYPEVAR_BOUND_OFF") != "" {
+	if c.foldSiblingResolver == nil || c.getenv("JDEC_INNER_TYPEVAR_BOUND_OFF") != "" {
 		return res
 	}
 	freeSet := map[string]bool{}
@@ -1918,7 +2200,7 @@ func (c *ClassObjectDumper) enclosingTypeParamBounds(free []string) map[string]s
 		if !ok || len(data) == 0 {
 			continue
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			continue
 		}
@@ -1985,7 +2267,7 @@ func (c *ClassObjectDumper) enclosingTypeParamErasures(vars map[string]bool) map
 		if !ok || len(data) == 0 {
 			continue
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			continue
 		}
@@ -2053,7 +2335,7 @@ func typeNamesSubset(sub, super_ []string) bool {
 }
 
 func (c *ClassObjectDumper) enclosingFormalTypeParamsForArity() []string {
-	if c.foldSiblingResolver == nil || os.Getenv("JDEC_INNER_ENCLOSING_ARITY_OFF") != "" {
+	if c.foldSiblingResolver == nil || c.getenv("JDEC_INNER_ENCLOSING_ARITY_OFF") != "" {
 		return nil
 	}
 	flags, ok := c.selfInnerClassAccessFlags()
@@ -2071,7 +2353,7 @@ func (c *ClassObjectDumper) enclosingFormalTypeParamsForArity() []string {
 		if !ok || len(data) == 0 {
 			continue
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			continue
 		}
@@ -2167,7 +2449,7 @@ func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr str
 		if !ok || len(data) == 0 {
 			continue // JDK / external supertype not in this jar (covered by InstantiateJDKMethodParam)
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			continue
 		}
@@ -2238,7 +2520,7 @@ func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr str
 	}
 }
 
-// buildSiblingClassSig returns a lazy, cached provider of a jar-internal class's generic signature info
+// buildSiblingClassSig returns a lazy, cached provider of original declaration signature info
 // (class Signature + (name,arity)->method Signature map) keyed by binary internal name, for the unified
 // cross-class generic resolver (types.ResolveInstantiatedParamType, consumed in
 // FunctionCallExpression.resolvedParamType). It reuses the same byte resolver + parse + Signature
@@ -2248,7 +2530,7 @@ func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr str
 // disables the resolver walk (callers fall back to the JDK table / same-class paths). Caching keeps the
 // per-class-dump cost bounded and the result deterministic (a nil cache entry records a confirmed miss).
 func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (string, map[string]string, bool) {
-	if c.foldSiblingResolver == nil {
+	if c.foldSiblingResolver == nil && c.declarationResolver == nil {
 		return nil
 	}
 	type entry struct {
@@ -2257,19 +2539,28 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 		ok         bool
 	}
 	cache := map[string]*entry{}
-	resolver := c.foldSiblingResolver
 	return func(internal string) (string, map[string]string, bool) {
 		if e, hit := cache[internal]; hit {
 			return e.classSig, e.methodSigs, e.ok
 		}
 		e := &entry{}
 		cache[internal] = e
-		data, ok := resolver(internal)
-		if !ok || len(data) == 0 {
-			return "", nil, false // JDK / external: not in jar
+		var data []byte
+		var ok bool
+		if c.foldSiblingResolver != nil {
+			data, ok = c.foldSiblingResolver(internal)
 		}
-		sObj, err := Parse(data)
-		if err != nil {
+		// Dependencies supply declarations for source binding, never ownership
+		// of emitted units. A fixed subclass's source formal can depend on a
+		// generic ancestor outside its archive although the invoke is erased.
+		if !ok && c.declarationResolver != nil {
+			data, ok = c.declarationResolver(internal)
+		}
+		if !ok || len(data) == 0 {
+			return "", nil, false
+		}
+		sObj, err := c.parseResolved(data)
+		if err != nil || sObj == nil || sObj.GetClassName() != internal {
 			return "", nil, false
 		}
 		for _, attr := range sObj.Attributes {
@@ -2280,16 +2571,30 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 				break
 			}
 		}
+		if e.classSig == "" {
+			// No generic Signature still has a real superclass/interface ABI.
+			// Preserve those raw edges; no type arguments are invented.
+			if parent := sObj.GetSupperClassName(); parent != "" {
+				e.classSig = "L" + strings.ReplaceAll(parent, ".", "/") + ";"
+			}
+			for _, iface := range sObj.GetInterfacesName() {
+				e.classSig += "L" + strings.ReplaceAll(iface, ".", "/") + ";"
+			}
+		}
 		methodSigs := map[string]string{}
 		methodSeen := map[string]bool{}
 		for _, m := range sObj.Methods {
 			name, err := sObj.getUtf8(m.NameIndex)
-			if err != nil || name == "" || name == "<init>" || name == "<clinit>" {
+			if err != nil || name == "" || name == "<clinit>" {
 				continue
 			}
 			descriptor, err := sObj.getUtf8(m.DescriptorIndex)
 			if err != nil || descriptor == "" {
 				continue
+			}
+			descKey := class_context.MethodDescKey(name, descriptor)
+			if _, exists := methodSigs[descKey]; !exists {
+				methodSigs[descKey] = ""
 			}
 			for _, attr := range m.Attributes {
 				sigAttr, ok := attr.(*SignatureAttribute)
@@ -2307,7 +2612,17 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 				// whose shared arity key is dropped, leaving calleeParamIsErasedTypeVar unable to see
 				// that the 3rd formal is the type variable K -> the spurious `(Comparable)` cast that
 				// breaks binarySearch's K inference (guava ImmutableRangeMap/ImmutableRangeSet).
-				methodSigs[class_context.MethodDescKey(name, descriptor)] = sigStr
+				if name == "<init>" {
+					// Synthetic captured/outer parameters may be absent from
+					// Signature. Never align constructor arguments by arity
+					// or inherit an ancestor's constructor declaration.
+					_, ps, _ := types.ParseMethodSignatureFull(sigStr, c.FuncCtx)
+					if len(ps) == len(methodParamFieldDescriptors(descriptor)) {
+						methodSigs[descKey] = sigStr
+					}
+					continue
+				}
+				methodSigs[descKey] = sigStr
 				key := class_context.MethodSigKey(name, len(methodParamFieldDescriptors(descriptor)))
 				if methodSeen[key] {
 					// (name, arity) collision (overload): ambiguous, drop so no arity-keyed call binds it.
@@ -2325,8 +2640,7 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 }
 
 // buildSiblingCtorSig returns a lazy, cached provider of a jar-internal class's CONSTRUCTOR generic
-// Signature keyed by DESCRIPTOR argument count. It complements buildSiblingClassSig (which deliberately
-// skips <init>): a `super(...)` call needs the superclass ctor's parameter types WITH type variables
+// Signature keyed by DESCRIPTOR argument count. It complements the exact-descriptor constructor entries in buildSiblingClassSig: a `super(...)` call needs the superclass ctor's parameter types WITH type variables
 // (e.g. `(BaseGraph<TN;>;TN;)V`) to know which arguments feed a bare type-variable parameter, so the
 // erased `(N)` cast can be re-emitted. Only ctors whose Signature parameter count EQUALS the descriptor
 // parameter count are recorded (a non-static inner class's ctor Signature omits the synthetic leading
@@ -2349,7 +2663,7 @@ func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc
 			cache[internal] = e
 			data, ok := resolver(internal)
 			if ok && len(data) > 0 {
-				if sObj, err := Parse(data); err == nil {
+				if sObj, err := c.parseResolved(data); err == nil {
 					ctorSigs := map[int]string{}
 					seen := map[int]bool{}
 					for _, m := range sObj.Methods {
@@ -2418,8 +2732,8 @@ func (c *ClassObjectDumper) buildSiblingCtorSig() func(internalName string, argc
 // current class's FieldSignatures, so `this.<inheritedField>.m(...)` loses the receiver's type
 // arguments. Exposing per-class field Signatures lets types.ResolveInstantiatedFieldType walk the
 // hierarchy and recover the instantiated field type (guava RegularContiguousSet `this.domain` ->
-// `DiscreteDomain<C>`). Only fields carrying a Signature attribute (generic fields) are recorded; a
-// plain-descriptor field yields ok=false (nothing to recover). Returns nil when no cross-class resolver
+// `DiscreteDomain<C>`). Every declared field is recorded: its generic Signature when present, otherwise
+// its descriptor, which also prevents borrowing a shadowed ancestor field. Returns nil when no cross-class resolver
 // is available (single-class decompile). A nil/empty cache entry records a confirmed miss.
 func (c *ClassObjectDumper) buildSiblingFieldSig() func(internalName, fieldName string) (string, bool) {
 	if c.foldSiblingResolver == nil {
@@ -2438,12 +2752,16 @@ func (c *ClassObjectDumper) buildSiblingFieldSig() func(internalName, fieldName 
 			cache[internal] = e
 			data, ok := resolver(internal)
 			if ok && len(data) > 0 {
-				if sObj, err := Parse(data); err == nil {
+				if sObj, err := c.parseResolved(data); err == nil {
 					fieldSigs := map[string]string{}
 					for _, fld := range sObj.Fields {
 						name, err := sObj.getUtf8(fld.NameIndex)
 						if err != nil || name == "" {
 							continue
+						}
+						// A raw redeclaration shadows an inherited generic field too.
+						if descriptor, err := sObj.getUtf8(fld.DescriptorIndex); err == nil {
+							fieldSigs[name] = descriptor
 						}
 						for _, attr := range fld.Attributes {
 							sigAttr, ok := attr.(*SignatureAttribute)
@@ -2538,7 +2856,7 @@ func (c *ClassObjectDumper) buildSiblingSuperTypes() func(internalName string) (
 		if !ok || len(data) == 0 {
 			return nil, false // JDK / external: not in jar
 		}
-		sObj, err := Parse(data)
+		sObj, err := c.parseResolved(data)
 		if err != nil {
 			return nil, false
 		}
@@ -2561,22 +2879,7 @@ func (c *ClassObjectDumper) buildSiblingSuperTypes() func(internalName string) (
 // Java char literal: printable ASCII becomes 'x' (with the four chars that need escaping handled),
 // everything else becomes a '\uXXXX' escape so the result always compiles.
 func javaCharLiteralFromCode(code int) string {
-	switch code {
-	case '\'':
-		return "'\\''"
-	case '\\':
-		return "'\\\\'"
-	case '\n':
-		return "'\\n'"
-	case '\r':
-		return "'\\r'"
-	case '\t':
-		return "'\\t'"
-	}
-	if code >= 0x20 && code <= 0x7e {
-		return fmt.Sprintf("'%c'", rune(code))
-	}
-	return fmt.Sprintf("'\\u%04x'", code&0xffff)
+	return values.JavaUnitToCharLiteral(uint16(code))
 }
 
 // externalNestedEnumSourceName converts an enum-constant annotation value's binary type name
@@ -2593,7 +2896,7 @@ func javaCharLiteralFromCode(code int) string {
 // sibling (keep flat, ok=false); a miss proves it is external (rewrite to dotted). With no resolver
 // (single-class mode) we keep the legacy flat behavior. Kill-switch: JDEC_ANNO_ENUM_NESTED_DOT_OFF=1.
 func (c *ClassObjectDumper) externalNestedEnumSourceName(internal string) (dottedSimple, outerImport string, ok bool) {
-	if os.Getenv("JDEC_ANNO_ENUM_NESTED_DOT_OFF") != "" {
+	if c.getenv("JDEC_ANNO_ENUM_NESTED_DOT_OFF") != "" {
 		return "", "", false
 	}
 	if !strings.Contains(internal, "$") || c.foldSiblingResolver == nil {
@@ -2628,34 +2931,30 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 		constant := element.Value.(ConstantInfo)
 		switch ret := constant.(type) {
 		case *ConstantStringInfo:
-			s, err := c.obj.getUtf8(ret.StringIndex)
-			if err != nil {
-				return "", err
-			}
-			valStr = values.JavaStringToLiteral(s)
+			valStr = javaUtf8IndexToStringLiteral(c.obj, ret.StringIndex)
 		case *ConstantLongInfo:
 			valStr = fmt.Sprintf("%dL", ret.Value)
 		case *ConstantIntegerInfo:
-			if os.Getenv("JDEC_ANNO_LITERAL_OFF") == "" && element.Tag == 'Z' {
+			if c.getenv("JDEC_ANNO_LITERAL_OFF") == "" && element.Tag == 'Z' {
 				if ret.Value == 0 {
 					valStr = "false"
 				} else {
 					valStr = "true"
 				}
-			} else if os.Getenv("JDEC_ANNO_LITERAL_OFF") == "" && element.Tag == 'C' {
+			} else if c.getenv("JDEC_ANNO_LITERAL_OFF") == "" && element.Tag == 'C' {
 				valStr = javaCharLiteralFromCode(int(ret.Value))
 			} else {
 				valStr = fmt.Sprintf("%d", ret.Value)
 			}
 		case *ConstantDoubleInfo:
-			valStr = fmt.Sprintf("%f", ret.Value)
+			valStr = annotationFloatingLiteral(ret.Value, 64)
 		case *ConstantFloatInfo:
-			valStr = fmt.Sprintf("%f", ret.Value)
+			valStr = annotationFloatingLiteral(float64(ret.Value), 32)
 		default:
 			return "", errors.New("parse annotation error, unknown constant type")
 		}
 	case 's':
-		valStr = values.JavaStringToLiteral(element.Value)
+		valStr = javaAnnotationStringLiteral(element.Value)
 	case 'c':
 		descStr, _ := element.Value.(string)
 		classTyp, perr := types.ParseDescriptor(descStr)
@@ -2671,7 +2970,7 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 			// (class) types get imported/short-named. Array types already bypass this branch below.
 			// Kill-switch: JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF restores the old (broken) path.
 			_, isPrimitive := classTyp.RawType().(*types.JavaPrimer)
-			primitiveClassLit := isPrimitive && os.Getenv("JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF") == ""
+			primitiveClassLit := isPrimitive && c.getenv("JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF") == ""
 			if !classTyp.IsArray() && !primitiveClassLit {
 				c.FuncCtx.Import(typeStr)
 				typeStr = c.FuncCtx.ShortTypeName(typeStr)
@@ -2732,7 +3031,7 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 // "" otherwise. Without it javac rejects any use site that omits the element. Kill-switch:
 // JDEC_ANNO_DEFAULT_OFF=1.
 func (c *ClassObjectDumper) annotationElementDefaultClause(method *MemberInfo) string {
-	if method == nil || os.Getenv("JDEC_ANNO_DEFAULT_OFF") != "" {
+	if method == nil || c.getenv("JDEC_ANNO_DEFAULT_OFF") != "" {
 		return ""
 	}
 	for _, attr := range method.Attributes {
@@ -2770,11 +3069,7 @@ func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, e
 			constant := element.Value.(ConstantInfo)
 			switch ret := constant.(type) {
 			case *ConstantStringInfo:
-				s, err := c.obj.getUtf8(ret.StringIndex)
-				if err != nil {
-					return "", err
-				}
-				valStr = values.JavaStringToLiteral(s)
+				valStr = javaUtf8IndexToStringLiteral(c.obj, ret.StringIndex)
 			case *ConstantLongInfo:
 				valStr = fmt.Sprintf("%dL", ret.Value)
 			case *ConstantIntegerInfo:
@@ -2783,26 +3078,26 @@ func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, e
 				// boolean member emits `1`/`0` (javac: "int cannot be converted to boolean") and a char
 				// member emits its code point (`59` instead of `';'`), so the decompiled annotation does
 				// not compile. Render by tag. Kill-switch: JDEC_ANNO_LITERAL_OFF=1 restores raw ints.
-				if os.Getenv("JDEC_ANNO_LITERAL_OFF") == "" && element.Tag == 'Z' {
+				if c.getenv("JDEC_ANNO_LITERAL_OFF") == "" && element.Tag == 'Z' {
 					if ret.Value == 0 {
 						valStr = "false"
 					} else {
 						valStr = "true"
 					}
-				} else if os.Getenv("JDEC_ANNO_LITERAL_OFF") == "" && element.Tag == 'C' {
+				} else if c.getenv("JDEC_ANNO_LITERAL_OFF") == "" && element.Tag == 'C' {
 					valStr = javaCharLiteralFromCode(int(ret.Value))
 				} else {
 					valStr = fmt.Sprintf("%d", ret.Value)
 				}
 			case *ConstantDoubleInfo:
-				valStr = fmt.Sprintf("%f", ret.Value)
+				valStr = annotationFloatingLiteral(ret.Value, 64)
 			case *ConstantFloatInfo:
-				valStr = fmt.Sprintf("%f", ret.Value)
+				valStr = annotationFloatingLiteral(float64(ret.Value), 32)
 			default:
 				return "", errors.New("parse annotation error, unknown constant type")
 			}
 		case 's':
-			valStr = values.JavaStringToLiteral(element.Value) // fmt.Sprintf("\"%s\"", element.Value.(string))
+			valStr = javaAnnotationStringLiteral(element.Value)
 		case 'c':
 			// class element value: the raw value is a field descriptor like
 			// "Lcom/example/Foo;" or "[I"; render it as a Java class literal "Foo.class".
@@ -2818,7 +3113,7 @@ func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, e
 				// mangles keywords ("void" -> "void_") into the uncompilable `void_.class`. See the
 				// twin branch in formatAnnotationElementValue. Kill-switch: JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF.
 				_, isPrimitive := classTyp.RawType().(*types.JavaPrimer)
-				primitiveClassLit := isPrimitive && os.Getenv("JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF") == ""
+				primitiveClassLit := isPrimitive && c.getenv("JDEC_ANNO_PRIMITIVE_CLASSLIT_OFF") == ""
 				if !classTyp.IsArray() && !primitiveClassLit {
 					c.FuncCtx.Import(typeStr)
 					typeStr = c.FuncCtx.ShortTypeName(typeStr)
@@ -2961,7 +3256,7 @@ func mergeNestedSameTypeCatches(funcCtx *class_context.ClassContext, exceptions 
 		if sameType && exc[i] != nil {
 			varName = strings.TrimSpace(exc[i].String(funcCtx))
 			lastStr, lastIdx := lastMeaningfulStmt(bod[i])
-			if lastIdx >= 0 && varName != "" && lastStr == "throw "+varName {
+			if lastIdx >= 0 && varName != "" && lastStr == "throw "+varName && plainCatchRethrowID(bod[i][lastIdx]) == exc[i].Id {
 				rethrows = true
 				throwIdx = lastIdx
 			}
@@ -2971,7 +3266,7 @@ func mergeNestedSameTypeCatches(funcCtx *class_context.ClassContext, exceptions 
 			// handler) must still run. Match any throw statement that mentions the caught
 			// variable name. Canonical: commons-lang3 LockingVisitors `throw Failable.rethrow(t)`.
 			if !rethrows && lastIdx >= 0 && varName != "" &&
-				strings.HasPrefix(lastStr, "throw ") && strings.Contains(lastStr, varName) {
+				strings.HasPrefix(lastStr, "throw ") && lastStr != "throw "+varName && strings.Contains(lastStr, varName) {
 				rethrows = true
 				throwIdx = lastIdx
 			}
@@ -3005,7 +3300,7 @@ func mergeNestedSameTypeCatches(funcCtx *class_context.ClassContext, exceptions 
 			} else {
 				// Plain rethrow: drop the throw, append the second body.
 				merged := append([]statements.Statement{}, bod[i][:throwIdx]...)
-				merged = append(merged, bod[i+1]...)
+				merged = append(merged, bindCleanupParameter(bod[i+1], exc[i+1], exc[i])...)
 				bod[i] = merged
 			}
 			exc = append(exc[:i+1], exc[i+2:]...)
@@ -3036,6 +3331,10 @@ func isUnconditionalTerminalStatement(st statements.Statement, funcCtx *class_co
 		case strings.HasPrefix(t, "break "), strings.HasPrefix(t, "continue "), strings.HasPrefix(t, "throw "):
 			return true
 		}
+	case *statements.SynchronizedStatement:
+		// Releasing the monitor does not add a normal continuation when
+		// every body path returns, throws, or transfers to its lexical owner.
+		return blockTerminates(s.Body, funcCtx)
 	case *statements.DoWhileStatement:
 		// An infinite loop (condition is the constant true) that never breaks back to its own
 		// successor transfers control away forever, so any sibling after it is unreachable.
@@ -3118,6 +3417,8 @@ func stmtTerminates(st statements.Statement, funcCtx *class_context.ClassContext
 		return true
 	case *statements.IfStatement:
 		return ifElseAllArmsTerminate(s, funcCtx)
+	case *statements.SynchronizedStatement:
+		return blockTerminates(s.Body, funcCtx)
 	case *statements.TryCatchStatement:
 		// A try/catch terminates iff the try body terminates and all catch bodies terminate.
 		if !blockTerminates(s.TryBody, funcCtx) {
@@ -3137,28 +3438,20 @@ func stmtTerminates(st statements.Statement, funcCtx *class_context.ClassContext
 		return loopConditionIsConstTrue(s.ConditionValue, funcCtx) &&
 			!loopBodyHasEscapingBreak(s.Body, "", true, funcCtx)
 	case *statements.SwitchStatement:
-		// A switch terminates iff it has a `default` and every fall-through chain terminates.
-		// A fall-through chain starts at a case and continues through empty cases until a
-		// case with a body. The chain terminates iff that body's last statement terminates
-		// (return/throw/break). A `break` terminates the chain (exits the switch). We check
-		// conservatively: the switch must have a default, and the LAST non-empty case body
-		// must terminate (all earlier fall-through chains reach it or their own terminator).
-		hasDefault := false
-		lastNonEmptyTerminates := false
-		foundNonEmpty := false
-		for _, c := range s.Cases {
-			if c.IsDefault {
-				hasDefault = true
+		hasDefault, chainTerminal := false, false
+		for i := len(s.Cases) - 1; i >= 0; i-- {
+			item := s.Cases[i]
+			hasDefault = hasDefault || item.IsDefault
+			if len(item.Body) > 0 {
+				// An unlabeled break completes the switch normally, while
+				// an empty grouped case inherits the following case's flow.
+				chainTerminal = blockTerminates(item.Body, funcCtx) && !loopBodyHasEscapingBreak(item.Body, "", true, funcCtx)
 			}
-			if len(c.Body) > 0 {
-				foundNonEmpty = true
-				lastNonEmptyTerminates = blockTerminates(c.Body, funcCtx)
+			if !chainTerminal {
+				return false
 			}
 		}
-		if !hasDefault || !foundNonEmpty {
-			return false // no default or all-empty → control can fall through past the switch
-		}
-		return lastNonEmptyTerminates
+		return hasDefault
 	}
 	// Check for throw/break/continue via rendered text.
 	if cs, ok := st.(*statements.CustomStatement); ok {
@@ -3235,9 +3528,21 @@ func (c *ClassObjectDumper) DumpMethod(methodName, desc string) (*dumpedMethods,
 }
 
 func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id *utils2.VariableId) (*dumpedMethods, error) {
+	return c.dumpMethodWithInitialId(methodName, desc, id, nil)
+}
+
+func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id *utils2.VariableId, adapter *core.LambdaReferenceAdapter) (*dumpedMethods, error) {
 	traitId := fmt.Sprintf("name:%s,desc:%s", methodName, desc)
+	if adapter != nil {
+		traitId += ",sam:" + adapter.ErasedDescriptor + ",inst:" + adapter.InstantiatedDescriptor
+	}
 	if v, ok := c.dumpedMethodsSet[traitId]; ok {
 		return v, nil
+	}
+	if c.FuncCtx != nil {
+		previousCatchEntries := c.FuncCtx.CatchEntryNames
+		c.FuncCtx.CatchEntryNames = nil
+		defer func() { c.FuncCtx.CatchEntryNames = previousCatchEntries }()
 	}
 	var method *MemberInfo
 	var name, descriptor string
@@ -3301,7 +3606,14 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	_ = abstractMethod
 
 	accessFlags := accessFlagCode
-	if c.nestDemotePrivate() && !isSerializationHookMethod(name) {
+	// A private instance method is a nonvirtual target even on a subclass
+	// receiver. Widening it creates an override relation that the classfile
+	// never had. Constructors and static members do not participate in that
+	// dispatch relation; any inaccessible cross-nest instance call needs a
+	// separate access bridge rather than changing the original declaration.
+	// A proved lexical access family needs the original private constructors;
+	// widening them would prevent javac from regenerating its synthetic bridge.
+	if c.nestDemotePrivate() && !isSerializationHookMethod(name) && (name == "<init>" || method.AccessFlags&StaticFlag != 0) && !(name == "<init>" && c.nativeAnonymousRoot != nil && len(c.nativeAnonymousRoot.bridges) > 0) {
 		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "private", ""))
 	}
 	methodType, err := types.ParseMethodDescriptor(descriptor)
@@ -3341,7 +3653,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				// genuine parse failure, so we fall back to the descriptor as before. Kill-switch
 				// JDEC_METHOD_SIG_RET_OFF restores the legacy sigParams!=nil gate.
 				applicable := sigRet != nil
-				if os.Getenv("JDEC_METHOD_SIG_RET_OFF") != "" {
+				if c.getenv("JDEC_METHOD_SIG_RET_OFF") != "" {
 					applicable = sigParams != nil
 				}
 				if applicable {
@@ -3353,7 +3665,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 							mt.ParamTypes = sigParams
 						}
 						mt.ReturnType = sigRet
-					} else if name == "<init>" && os.Getenv("JDEC_INNER_CTOR_SIG_ALIGN_OFF") == "" &&
+					} else if name == "<init>" && c.getenv("JDEC_INNER_CTOR_SIG_ALIGN_OFF") == "" &&
 						len(sigParams) == len(mt.ParamTypes)-1 && len(mt.ParamTypes) >= 1 &&
 						c.hasOuterThisField() {
 						// Non-static inner class constructor: javac OMITS the synthetic leading this$0
@@ -3370,12 +3682,39 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						mt.ReturnType = sigRet
 					}
 				}
-				if os.Getenv("JDEC_METHOD_TYPEPARAMS_OFF") == "" {
+				if c.getenv("JDEC_METHOD_TYPEPARAMS_OFF") == "" {
 					methodTypeParams = tps
 					methodTypeParamNames = types.MethodFormalTypeParamNames(sigStr)
 				}
 			}
 			break
+		}
+	}
+	// Synthetic lambda methods encode their captured values only in an erased descriptor; unlike
+	// ordinary methods, javac emits no Signature attribute for those hidden parameters. The
+	// invokedynamic call site supplies each capture exactly once and therefore carries the
+	// authoritative static source type. Reapply only parameterized types whose raw class exactly
+	// matches the descriptor parameter. This preserves verifier-level identity while recovering
+	// wildcard/type-variable arguments needed to render the lambda body (for example
+	// Function<? super T,R>.apply((T) value)). An instance lambda's first dynamic capture is its
+	// receiver and maps to `this`, not to a descriptor parameter.
+	if isLambda && c.getenv("JDEC_LAMBDA_CAPTURE_TYPES_OFF") == "" {
+		captureTypes := c.lambdaCaptureTypes[name+descriptor]
+		captureOffset := 0
+		if method.AccessFlags&StaticFlag == 0 && len(captureTypes) > 0 {
+			captureOffset = 1
+		}
+		params := methodType.FunctionType().ParamTypes
+		for paramIndex, captureIndex := 0, captureOffset; paramIndex < len(params) && captureIndex < len(captureTypes); paramIndex, captureIndex = paramIndex+1, captureIndex+1 {
+			captured, ok := types.AsParameterizedType(captureTypes[captureIndex])
+			if !ok || captured == nil || captured.RawClassName == "" || params[paramIndex] == nil || params[paramIndex].IsArray() {
+				continue
+			}
+			descriptorClass, ok := params[paramIndex].RawType().(*types.JavaClass)
+			if !ok || descriptorClass == nil || descriptorClass.Name != captured.RawClassName {
+				continue
+			}
+			params[paramIndex] = captureTypes[captureIndex].Copy()
 		}
 	}
 	// A synthetic access-bridge constructor carries NO Signature attribute, so its parameters stay
@@ -3387,7 +3726,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	// descriptor (byte-faithful) and its (raw) call sites still type-check. This recurs across every
 	// nested class with a private generic ctor reached from its encloser, so the fix is broad.
 	// Kill-switch: JDEC_NO_SYN_BRIDGE_CTOR_RETYPE=1.
-	if name == "<init>" && os.Getenv("JDEC_NO_SYN_BRIDGE_CTOR_RETYPE") == "" &&
+	if name == "<init>" && c.getenv("JDEC_NO_SYN_BRIDGE_CTOR_RETYPE") == "" &&
 		c.isSyntheticAccessBridgeCtor(descriptor, method.AccessFlags) {
 		c.reTypeSyntheticBridgeCtorParams(descriptor, methodType.FunctionType())
 	}
@@ -3403,13 +3742,14 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	// type is a bare method-scope type variable with a parameterized bound (`C var1` where
 	// `<C extends Collection<? super E>>`). Set on entry, restored on exit so it never leaks into sibling
 	// members. Kill-switch JDEC_TYPEVAR_BOUND_RECV_OFF (the consumer that reads it).
-	if c.FuncCtx != nil && os.Getenv("JDEC_TYPEVAR_BOUND_RECV_OFF") == "" {
+	if c.FuncCtx != nil && c.getenv("JDEC_TYPEVAR_BOUND_RECV_OFF") == "" {
 		savedMethodSig := c.FuncCtx.CurrentMethodSig
 		c.FuncCtx.CurrentMethodSig = methodSigStr
 		defer func() { c.FuncCtx.CurrentMethodSig = savedMethodSig }()
 	}
 	c.MethodType = methodType.FunctionType()
 	returnTypeStr := methodType.FunctionType().ReturnType.String(c.FuncCtx)
+	returnTypeStr = c.applyReturnTypeAnnotations(method, methodType.FunctionType().ReturnType, returnTypeStr)
 	code := ""
 	c.Tab()
 	c.CurrentMethod = method
@@ -3426,6 +3766,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	//}
 	//println(name)
 	finalFieldMap := map[string]struct{}{}
+	finalInitializerKeepsStatus := c.originalFieldInitializerStatuses()
 	finalFieldRenderNameToRaw := map[string]string{}
 	classStaticInitializersMustHoist := slices.Contains(c.obj.AccessFlagsVerbose, "interface") || slices.Contains(c.obj.AccessFlagsVerbose, "annotation")
 	for _, field := range c.obj.Fields {
@@ -3440,6 +3781,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	funcCtx.FunctionType = c.MethodType
 	var paramsNewStr string
 	var lambdaParamNames []string
+	var lambdaAdapterPrologue string
 	var exceptions string
 	for _, attribute := range method.Attributes {
 		if exceptionAttr, ok := attribute.(*ExceptionsAttribute); ok {
@@ -3474,7 +3816,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 		// classes, they match the ExceptionsAttribute and no override is needed.
 		// Kill-switch: JDEC_THROWS_SIG_RECOVERY_OFF. Canonical: commons-lang3 DurationUtils.accept
 		// (`throws Throwable` from Exceptions vs `throws T` from Signature `^TT;`).
-		if os.Getenv("JDEC_THROWS_SIG_RECOVERY_OFF") == "" && len(sigThrowsTypes) > 0 {
+		if c.getenv("JDEC_THROWS_SIG_RECOVERY_OFF") == "" && len(sigThrowsTypes) > 0 {
 			hasTypeVar := false
 			for _, th := range sigThrowsTypes {
 				if th == nil {
@@ -3519,6 +3861,25 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			if err != nil {
 				return dumped, utils.Wrap(err, "ParseBytesCode failed")
 			}
+			priorStable := funcCtx.SourceCaptureStable
+			funcCtx.SourceCaptureStable = nil
+			defer func() { funcCtx.SourceCaptureStable = priorStable }()
+			priorConstructorBridge := funcCtx.ConstructorInvokeBridge
+			funcCtx.ConstructorInvokeBridge = nil
+			defer func() { funcCtx.ConstructorInvokeBridge = priorConstructorBridge }()
+			statementList, regeneratedCapture, nativeConstructorErr := c.prepareNativeMemberConstructor(codeAttr, statementList, params, method)
+			if nativeConstructorErr != nil {
+				return nil, nativeConstructorErr
+			}
+			constructorPlan, constructorErr := c.planConstructorSourceBoundary(codeAttr, statementList, params, method, regeneratedCapture)
+			if constructorErr != nil {
+				return nil, constructorErr
+			}
+			needsCheckedEscape, escapeErr := c.methodNeedsCheckedEscape(codeAttr, statementList, method, constructorPlan)
+			if escapeErr != nil {
+				return nil, escapeErr
+			}
+			dumped.checkedEscape = needsCheckedEscape
 			thisRemoved := false
 			if len(params) > 0 {
 				if v, ok := params[0].(*values.JavaRef); ok && v.IsThis {
@@ -3533,6 +3894,12 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			// instance lambda the receiver was captured as the first dynamic arg but is represented by
 			// the impl method's `this` (already stripped above), so its placeholder index is offset.
 			samParams := params
+			if name == "<init>" && c.nativeMemberCurrent != nil && !c.nativeMemberCurrent.static {
+				if len(samParams) < 1 {
+					return nil, fmt.Errorf("missing enclosing parameter")
+				}
+				samParams = samParams[1:]
+			}
 			if isLambda {
 				if n := c.lambdaCaptureCount[name+descriptor]; n > 0 {
 					capArgOffset := 0
@@ -3569,7 +3936,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				// A nested lambda (depth>=2) namespaces its parameters by nesting depth so they cannot
 				// shadow an enclosing lambda parameter; a top-level lambda keeps the flat `l<i>` name so
 				// the overwhelmingly common single-lambda case stays byte-for-byte unchanged.
-				nestScope := c.lambdaDepth >= 2 && os.Getenv("JDEC_LAMBDA_PARAM_SCOPE_OFF") == ""
+				nestScope := c.lambdaDepth >= 2 && c.getenv("JDEC_LAMBDA_PARAM_SCOPE_OFF") == ""
 				for i, val := range samParams {
 					if ref, ok := val.(*values.JavaRef); ok && ref.Id != nil && !ref.IsThis {
 						var name string
@@ -3584,6 +3951,8 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				}
 			}
 			ensureUniqueParameterNames(samParams, funcCtx)
+			c.prepareNativeCaptureBindings(statementList, params)
+			c.prepareNativeLocalShadowing(statementList, params)
 			paramsNewStrList := []string{}
 			// A lambda arrow parameter whose type is a GENERIC class rendered RAW is best emitted WITHOUT
 			// an explicit type: the bytecode only preserves the ERASED impl-method descriptor (e.g.
@@ -3600,7 +3969,15 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			// generic-capable class rendered raw -- and keep the explicit type otherwise (concrete types
 			// like Integer/String help inference and match exactly).
 			// Kill-switch: JDEC_LAMBDA_IMPLICIT_PARAMS_OFF=1 forces explicit-typed lambda parameters.
-			if isLambda && os.Getenv("JDEC_LAMBDA_IMPLICIT_PARAMS_OFF") == "" && c.lambdaParamsShouldBeImplicit(samParams) {
+			if isLambda && adapter != nil {
+				paramsNewStrList, lambdaAdapterPrologue, err = lambdaReferenceAdapterParams(adapter, samParams, funcCtx, c.GetTabString())
+				if err != nil {
+					return dumped, err
+				}
+				if err := c.holdOutput(int64(len(lambdaAdapterPrologue))); err != nil {
+					return dumped, err
+				}
+			} else if isLambda && c.getenv("JDEC_LAMBDA_IMPLICIT_PARAMS_OFF") == "" && c.lambdaParamsShouldBeImplicit(samParams) {
 				// Implicit: emit only the (unique) parameter names, letting Java infer their types.
 				for _, val := range samParams {
 					nm := ""
@@ -3655,6 +4032,10 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				}
 			}
 			c.MethodType = methodType.FunctionType()
+			if !isLambda {
+				paramsNewStrList = c.applyParameterAnnotations(method, name, descriptor, paramsNewStrList)
+				paramsNewStrList = c.applyParamTypeAnnotations(method, name, descriptor, methodType.FunctionType().ParamTypes, paramsNewStrList)
+			}
 			paramsNewStr = strings.Join(paramsNewStrList, ", ")
 
 			// Rename locals whose slot-derived names collide across nested scopes (e.g. two
@@ -3666,6 +4047,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			// assigned across multiple branches must keep its in-body assignments (see
 			// countConstructorFieldAssignments).
 			ctorFieldAssignCount := countConstructorFieldAssignments(statementList, funcCtx.ClassName)
+			instanceHoistCandidates := inertConstructorFieldPrefix(statementList, funcCtx.ClassName)
 
 			// Cross-constructor/<clinit> totals: a final field assigned exactly once HERE may still
 			// be assigned in another overloaded constructor. Hoisting it then double-assigns a final
@@ -3689,12 +4071,12 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			// declaration and there is no place to leave a deferred store — the barrier only applies to
 			// ordinary classes, which can hold blank-final stores in a static block.
 			// Kill-switch: JDEC_NO_CLINIT_HOIST_BARRIER=1 restores the old behavior.
-			clinitHoistBarrierOn := funcCtx.FunctionName == "<clinit>" && !classStaticInitializersMustHoist && os.Getenv("JDEC_NO_CLINIT_HOIST_BARRIER") == ""
+			clinitHoistBarrierOn := funcCtx.FunctionName == "<clinit>" && !classStaticInitializersMustHoist && c.getenv("JDEC_NO_CLINIT_HOIST_BARRIER") == ""
 			staticHoistBarrierHit := false
 			staticHoistAllowedHere := true
 			hoistEventCount := 0
 			statementSet := utils.NewSet[statements.Statement]()
-			statementHasContinuation := map[statements.Statement]bool{}
+			statementHasContinuation := normalStatementContinuations(statementList)
 			var statementToString func(statement statements.Statement) string
 			var statementListToString func(statements []statements.Statement) string
 			statementListToString = func(statementList []statements.Statement) string {
@@ -3702,7 +4084,11 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				defer c.UnTab()
 				var res []string
 				for i, statement := range statementList {
-					statementHasContinuation[statement] = i+1 < len(statementList)
+					if tail, ok := statement.(*statements.ReturnStatement); ok && i > 0 {
+						if region, ok := statementList[i-1].(*statements.TryCatchStatement); ok && rewriter.FinallyConsumesSharedVoidReturn(region, tail) {
+							continue
+						}
+					}
 					if _, ok := statement.(*statements.MiddleStatement); ok {
 						continue
 					}
@@ -3719,7 +4105,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 					// `return;` inside `try{...}` which javac rejected). Restricting to the block tail
 					// avoids enabling any dead trailing siblings. Kill-switch:
 					// JDEC_NO_CLINIT_RETURN_DROP=1. (Bug AC)
-					if funcCtx.FunctionName == "<clinit>" && os.Getenv("JDEC_NO_CLINIT_RETURN_DROP") == "" {
+					if funcCtx.FunctionName == "<clinit>" && c.getenv("JDEC_NO_CLINIT_RETURN_DROP") == "" {
 						if rs, ok := statement.(*statements.ReturnStatement); ok && rs.JavaValue == nil && i == len(statementList)-1 {
 							break
 						}
@@ -3736,6 +4122,12 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				return strings.Join(res, "\n")
 			}
 			statementToString = func(statement statements.Statement) (statementStr string) {
+				if c.Work != nil {
+					if err := c.Work.Enter(workbudget.CounterASTDepth); err != nil {
+						return ""
+					}
+					defer c.Work.Leave(workbudget.CounterASTDepth)
+				}
 				defer func() {
 					if debugMode {
 						log.Info("\n" + statementStr)
@@ -3746,11 +4138,15 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				//}
 				statementSet.Add(statement)
 				switch ret := statement.(type) {
+				case *catchBoundStatement:
+					statementStr = ret.render(funcCtx, func() string {
+						return statementListToString([]statements.Statement{ret.statement})
+					})
 				case *statements.AssignStatement:
 					foundFieldInit := false
 					if ret.LeftValue != nil && ret.JavaValue != nil && funcCtx.FunctionName == "<clinit>" && classStaticInitializersMustHoist {
 						if ref, ok := ret.LeftValue.(*values.JavaRef); ok && !ref.IsThis {
-							if rhs := ret.JavaValue.String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) {
+							if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) {
 								hoistableStaticInitLocals[strings.TrimSpace(ref.String(funcCtx))] = rhs
 								foundFieldInit = true
 								hoistEventCount++
@@ -3761,8 +4157,8 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						obj := core.UnpackSoltValue(v.Object)
 						if v1, ok := obj.(*values.JavaRef); ok && v1.IsThis && (funcCtx.FunctionName == "<init>" || funcCtx.FunctionName == funcCtx.ClassName) {
 							if _, ok := finalFieldMap[v.Member]; ok {
-								if rhs := ret.JavaValue.String(funcCtx); canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
-									(!EnableFieldInitHoistGuard || (ctorFieldAssignCount[v.Member] == 1 && crossCtorStoreOK(fieldStoreTotal, v.Member) && !rhsReadsInstanceField(rhs))) {
+								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[v.Member] &&
+									(!EnableFieldInitHoistGuard || (instanceHoistCandidates[ret] && ctorFieldAssignCount[v.Member] == 1 && crossCtorStoreOK(fieldStoreTotal, v.Member) && !rhsReadsInstanceField(rhs))) {
 									foundFieldInit = true
 									c.fieldDefaultValue[v.Member] = rhs
 								}
@@ -3771,7 +4167,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 					} else if v, ok := ret.LeftValue.(*values.JavaClassMember); ok && ret.JavaValue != nil {
 						if (funcCtx.FunctionName == "<clinit>" && classStaticInitializersMustHoist) || v.Name == funcCtx.ClassName {
 							if _, ok := finalFieldMap[v.Member]; ok {
-								if rhs := ret.JavaValue.String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
+								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[v.Member] &&
 									(!EnableFieldInitHoistGuard || (ctorFieldAssignCount[v.Member] <= 1 && crossCtorStoreOK(fieldStoreTotal, v.Member))) {
 									foundFieldInit = true
 									c.fieldDefaultValue[v.Member] = rhs
@@ -3792,7 +4188,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 									rhs = localInit
 								}
 							}
-							if staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) &&
+							if staticHoistAllowedHere && canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[rawName] &&
 								(!EnableFieldInitHoistGuard || (ctorFieldAssignCount[rawName] <= 1 && crossCtorStoreOK(fieldStoreTotal, rawName))) {
 								foundFieldInit = true
 								c.fieldDefaultValue[rawName] = rhs
@@ -3815,23 +4211,46 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						"%s\n"+
 						c.GetTabString()+"}", arg, statementListToString(ret.Body))
 				case *statements.TryCatchStatement:
+					if layer, ok := rewriter.RecoverCoveredTypedCatchLayer(ret); ok {
+						ret = layer
+					}
+					tryBody, catchExc, catchBodies := ret.TryBody, ret.Exception, ret.CatchBodies
+					finally, haveFinally := rewriter.RecoverCatchAllFinally(ret)
+					if haveFinally {
+						tryBody, catchExc, catchBodies = finally.TryBody, finally.Exceptions, finally.CatchBodies
+					}
 					statementStr = fmt.Sprintf(c.GetTabString()+"try{\n"+
 						"%s\n"+
-						c.GetTabString()+"}", statementListToString(ret.TryBody))
+						c.GetTabString()+"}", statementListToString(tryBody))
 					// Two catch handlers of the SAME type are illegal Java (a try may not declare two
 					// handlers of the same exception type), but they are exactly what bytecode emits for
 					// try-with-resources / try-catch-finally: a Throwable primaryExc-capture handler whose
 					// region is nested inside a Throwable cleanup ("any") handler. Collapse such adjacent
 					// pairs back into one handler so the source recompiles. Kill-switch:
 					// JDEC_NO_CATCH_MERGE=1 restores the raw duplicate-catch output.
-					catchExc := ret.Exception
-					catchBodies := ret.CatchBodies
-					if os.Getenv("JDEC_NO_CATCH_MERGE") == "" {
+					if !haveFinally && c.getenv("JDEC_NO_CATCH_MERGE") == "" {
 						catchExc, catchBodies = mergeNestedSameTypeCatches(funcCtx, catchExc, catchBodies)
 					}
 					for i, body := range catchBodies {
 						excType := normalizeCatchClauseType(catchExc[i].Type().String(funcCtx))
-						bodyStr := statementListToString(body)
+						// Bind only the original handler stack value, never a type
+						// token with the same spelling. Nested handlers restore the
+						// enclosing scope after rendering their own entry values.
+						previousEntries := funcCtx.CatchEntryNames
+						entries := maps.Clone(previousEntries)
+						if entries == nil {
+							entries = map[int]string{}
+						}
+						for originalIndex, originalRef := range ret.Exception {
+							if originalRef == catchExc[i] && originalIndex < len(ret.Handlers) && ret.Handlers[originalIndex].EntryPC >= 0 {
+								entries[ret.Handlers[originalIndex].EntryPC] = catchExc[i].String(funcCtx)
+							}
+						}
+						bodyStr := func() string {
+							funcCtx.CatchEntryNames = entries
+							defer func() { funcCtx.CatchEntryNames = previousEntries }()
+							return statementListToString(body)
+						}()
 						// An empty catch body in a non-void method can cause "missing return
 						// statement" when the catch handler originally had a throw that the
 						// TryRewriter dropped. Add `throw new RuntimeException(<var>)` to make
@@ -3842,7 +4261,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						// Canonical: commons-lang3 NumberUtils.createNumber catch(NumberFormatException).
 						if strings.TrimSpace(bodyStr) == "" &&
 							!statementHasContinuation[statement] &&
-							os.Getenv("JDEC_FIX_EMPTY_CATCH_THROW_OFF") == "" &&
+							c.getenv("JDEC_FIX_EMPTY_CATCH_THROW_OFF") == "" &&
 							methodType.FunctionType().ReturnType != nil &&
 							methodType.FunctionType().ReturnType.String(funcCtx) != "void" {
 							catchVar := catchExc[i].String(funcCtx)
@@ -3853,7 +4272,10 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 							c.GetTabString()+"}", excType, catchExc[i].String(funcCtx), bodyStr)
 					}
 					haveCatch := len(catchBodies) > 0
-					if !haveCatch {
+					if haveFinally {
+						statementStr += fmt.Sprintf("finally{\n%s\n%s}", statementListToString(finally.Cleanup), c.GetTabString())
+					}
+					if !haveCatch && !haveFinally {
 						body := statementListToString(ret.TryBody)
 						if canFlattenNoCatchTry(body) {
 							// A try without catch/finally has no Java-level effect. Some legacy bytecode
@@ -3874,7 +4296,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						"%s\n"+
 						c.GetTabString()+"}", values.SimplifyConditionValue(ret.ConditionValue).String(funcCtx), statementListToString(ret.Body))
 				case *statements.DoWhileStatement:
-					body := normalizeDoWhileBreakGuardSource(statementListToString(statements.NormalizeDoWhileDecrementGuard(ret.Body, funcCtx)))
+					body := statementListToString(statements.NormalizeDoWhileDecrementGuard(ret.Body, funcCtx))
 					statementStr = fmt.Sprintf(c.GetTabString()+"do{\n"+
 						"%s\n"+
 						c.GetTabString()+"} while (%s);", body, values.SimplifyConditionValue(ret.ConditionValue).String(funcCtx))
@@ -3897,18 +4319,13 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						"%s\n"+
 						c.GetTabString()+"}", ret.Value.String(funcCtx), getBody(ret.Cases))
 				case *statements.IfStatement:
-					if isEmptyAssertionsDisabledGuard(ret, funcCtx) {
-						statementStr = ""
-						break
-					}
 					if stmt := buildReturnFromEmptyGuardTernary(ret, funcCtx); stmt != "" {
 						statementStr = c.GetTabString() + stmt + ";"
 						break
 					}
-					// Recover short-circuit boolean returns: when a method returns boolean and the
-					// if-then is empty (or only a `return true`) while the else is `return expr`,
-					// rewrite to `return condition || expr`. This is the simplest case of the
-					// boolean short-circuit DAG where the true arm shares a constant leaf.
+					// Only two explicit value returns can become a boolean expression.
+					// An empty arm falls through to the following statements; it does
+					// not imply a constant true return, even in a boolean method.
 					if isBoolReturnIfElse(ret, funcCtx) {
 						if stmt := buildBoolReturnFromIfElse(ret, funcCtx); stmt != "" {
 							statementStr = c.GetTabString() + stmt + ";"
@@ -3924,6 +4341,14 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 							c.GetTabString()+"}", statementListToString(ret.ElseBody))
 					}
 				case *statements.ReturnStatement:
+					statementStr = c.GetTabString() + statement.String(funcCtx) + ";"
+				case *statements.ExpressionStatement:
+					if isEnumCtor && len(params) >= 2 {
+						if source, ok := enumThisDelegateSource(ret, params[:2], funcCtx); ok {
+							statementStr = c.GetTabString() + source + ";"
+							break
+						}
+					}
 					statementStr = c.GetTabString() + statement.String(funcCtx) + ";"
 				case *statements.ForStatement:
 					datas := []string{}
@@ -3943,19 +4368,76 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			}
 			statementCodes := []string{}
 			supperInvokeStr := ""
+			delegationPC := -1
+			if needsCheckedEscape && name == "<init>" {
+				delegationPC = constructorDelegationPC(statementList)
+				if constructorPlan != nil {
+					delegationPC = constructorPlan.pc
+				}
+			}
+			if needsCheckedEscape && name == "<clinit>" {
+				staticHoistBarrierHit = true
+			}
+			if name == "<clinit>" && classStaticInitializersMustHoist {
+				renderInitializer := statementListToString
+				if needsCheckedEscape {
+					renderInitializer = func(body []statements.Statement) string { return c.wrapCheckedEscapeBody(statementListToString(body)) }
+				}
+				helpers, initErr := c.renderInterfaceInitializers(statementList, codeAttr, funcCtx, renderInitializer)
+				if initErr != nil {
+					return nil, initErr
+				}
+				c.interfaceInitializerHelpers = helpers
+				statementList = nil
+			}
 			for i, statement := range statementList {
+				if c.nativeMemberSkipCheck(statement) {
+					continue
+				}
+				if constructorPlan != nil && constructorPlan.carrier != "" {
+					inPrefix := false
+					for _, prefix := range constructorPlan.prefix {
+						if statement == prefix {
+							inPrefix = true
+							break
+						}
+					}
+					if inPrefix {
+						continue
+					}
+				}
 				if i == len(statementList)-1 && methodType.FunctionType().ReturnType.String(funcCtx) == "void" {
 					if _, ok := statement.(*statements.ReturnStatement); ok {
 						continue
 					}
 				}
 				if v, ok := statement.(*statements.ExpressionStatement); ok {
+					if call, ok := v.Expression.(*values.FunctionCallExpression); ok && constructorPlan != nil && constructorPlan.delegate == call && constructorPlan.carrier != "" {
+						supperInvokeStr = c.GetTabString() + constructorPlan.renderDelegation(funcCtx) + ";\n"
+						continue
+					}
 					if v1, ok := v.Expression.(*values.FunctionCallExpression); ok && v1.IsSupperConstructorInvoke(funcCtx) {
+						supperInvokeStr = fmt.Sprintf("%s\n", statementToString(statement))
+						if constructorPlan != nil && constructorPlan.delegate == v1 {
+							supperInvokeStr = c.GetTabString() + constructorPlan.renderDelegation(funcCtx) + ";\n"
+						}
+						continue
+					}
+					if v1, ok := v.Expression.(*values.FunctionCallExpression); ok && needsCheckedEscape && name == "<init>" && v1.HasOriginPC && v1.OriginPC == delegationPC {
 						supperInvokeStr = fmt.Sprintf("%s\n", statementToString(statement))
 						continue
 					}
 				}
 				if clinitHoistBarrierOn {
+					// A container cannot be wholly lifted merely because one
+					// nested assignment was lifted. Establish the barrier before
+					// rendering its protected/conditional body, preserving both
+					// handler coverage and the order of dependent static fields.
+					switch statement.(type) {
+					case *statements.AssignStatement, *statements.MiddleStatement, *statements.StackAssignStatement:
+					default:
+						staticHoistBarrierHit = true
+					}
 					staticHoistAllowedHere = !staticHoistBarrierHit
 				}
 				hoistBefore := hoistEventCount
@@ -3973,8 +4455,14 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 						}
 					}
 				}
+				if c.Work != nil && c.Work.Err() != nil {
+					return nil, c.Work.Err()
+				}
 				if statementStr == "" {
 					continue
+				}
+				if err := c.holdOutput(int64(len(statementStr) + 1)); err != nil {
+					return nil, err
 				}
 				statementCodes = append(statementCodes, fmt.Sprintf("%s\n", statementStr))
 			}
@@ -3991,11 +4479,25 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				}
 				if c.report != nil {
 					c.report.StubMethods = append(c.report.StubMethods, name+desc)
-					c.report.Diagnostics = append(c.report.Diagnostics, DecompileDiagnostic{Code: "incomplete_control_flow", Method: name + desc, Message: "Artificial terminator inserted by compatibility recovery."})
+					c.appendDiagnostic(DecompileDiagnostic{Code: "incomplete_control_flow", Method: name + desc, Message: "Artificial terminator inserted by compatibility recovery."})
 				}
 				statementCodes = append(statementCodes, fmt.Sprintf("%sthrow new RuntimeException(\"incomplete control flow\");\n", c.GetTabString()))
 			}
-			sourceCode += supperInvokeStr + strings.Join(statementCodes, "")
+			if constructorPlan != nil {
+				c.constructorBoundaryHelpers = append(c.constructorBoundaryHelpers, constructorPlan.helpers...)
+				if len(constructorPlan.helpers) > 0 {
+					dumped.checkedEscape = true
+				}
+			}
+			methodBodyCode := strings.Join(statementCodes, "")
+			if needsCheckedEscape && !(name == "<clinit>" && classStaticInitializersMustHoist) {
+				wrapped := c.wrapCheckedEscapeBody(methodBodyCode)
+				if err := c.holdOutput(int64(len(wrapped) - len(methodBodyCode))); err != nil {
+					return nil, err
+				}
+				methodBodyCode = wrapped
+			}
+			sourceCode += supperInvokeStr + methodBodyCode
 			receiverType := ""
 			if !funcCtx.IsStatic && name != "<clinit>" {
 				receiverType = c.GetConstructorMethodName()
@@ -4007,7 +4509,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				methodReturnTypeStr = mt.ReturnType.String(funcCtx)
 			}
 			sourceCode = c.sourceRewrite("addMissingGeneratedLocalDecls", "method_source", sourceCode, func(body string) string {
-				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr)
+				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr, c.nativeLexicalCaptures())
 			})
 			code = sourceCode
 		}
@@ -4031,7 +4533,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 			// 重写的 Feature... (descriptor [LFeature;) 不再 override-equivalent → 子类报「is not abstract
 			// and does not override」。这里此前漏掉了 ElementType 剥离 (拼接式方法/lambda/stub 路径都对),
 			// 是 fastjson2 JSONPath.set 等抽象 varargs 方法的整族重编译失败根因。
-			if isVarArgs && idx == len(paramTypes)-1 && t.IsArray() && os.Getenv("JDEC_VARARGS_ABSTRACT_FIX_OFF") == "" {
+			if isVarArgs && idx == len(paramTypes)-1 && t.IsArray() && c.getenv("JDEC_VARARGS_ABSTRACT_FIX_OFF") == "" {
 				paramList = append(paramList, fmt.Sprintf("%s... var%d", renderMethodParamType(t.ElementType(), funcCtx), idx))
 			} else if isVarArgs && idx == len(paramTypes)-1 {
 				paramList = append(paramList, fmt.Sprintf("%s... var%d", typeName, idx))
@@ -4039,9 +4541,12 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 				paramList = append(paramList, fmt.Sprintf("%s var%d", typeName, idx))
 			}
 		}
+		paramList = c.applyParameterAnnotations(method, name, descriptor, paramList)
+		paramList = c.applyParamTypeAnnotations(method, name, descriptor, paramTypes, paramList)
 		paramsNewStr = strings.Join(paramList, ", ")
 	}
 	if isLambda {
+		code = lambdaAdapterPrologue + code
 		// A lambda arrow body is spliced inline into the enclosing method. Lift its own locals into a
 		// private `lv<seq>_N` namespace so they never shadow an enclosing local/parameter or a captured
 		// variable (Java: "variable varN is already defined in method"). Nested lambda bodies were
@@ -4059,7 +4564,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 		// ALL-UNUSED case so a body that references a parameter as a specific type keeps its explicit
 		// declaration (no behavioral change, no overload-disambiguation risk).
 		// Kill-switch: JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF=1.
-		if len(lambdaParamNames) > 0 && os.Getenv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF") == "" && !lambdaParamsUsed(code, lambdaParamNames) {
+		if adapter == nil && len(lambdaParamNames) > 0 && c.getenv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF") == "" && !lambdaParamsUsed(code, lambdaParamNames) {
 			paramsNewStr = strings.Join(lambdaParamNames, ", ")
 		}
 		res := fmt.Sprintf("(%s) -> {%s", paramsNewStr, code)
@@ -4113,7 +4618,7 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	// no-arg ctor the bridge actually targets). Restricted to MARKER-ONLY bridges (single param) so an
 	// arg-forwarding bridge `C(int,C$N){ this(x); }` is never mis-rendered as no-arg `this()`. Kill-switch:
 	// JDEC_SYN_BRIDGE_THIS_OFF=1.
-	emitBridgeThisCall := name == "<init>" && strings.TrimSpace(code) == "" && os.Getenv("JDEC_SYN_BRIDGE_THIS_OFF") == "" &&
+	emitBridgeThisCall := name == "<init>" && strings.TrimSpace(code) == "" && c.getenv("JDEC_SYN_BRIDGE_THIS_OFF") == "" &&
 		c.isSyntheticAccessBridgeCtor(descriptor, method.AccessFlags) &&
 		len(methodParamFieldDescriptors(descriptor)) == 1
 	writeBlock := func(buffer io.Writer) {
@@ -4140,6 +4645,18 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	writeMethodTypeParams := func(buffer io.Writer) {
 		if methodTypeParams != "" {
 			methodSourceBuffer.Write([]byte(methodTypeParams + " "))
+		}
+	}
+	c.diagnoseUnplacedTypeAnnos(method)
+	exceptions = c.applyThrowsTypeAnnotations(method, exceptions)
+	methodTypeParams = c.applyTypeParamBoundAnnotations(method, methodTypeParams)
+	if !isLambda && name != "<clinit>" {
+		if rec := c.applyReceiverTypeAnnotation(method, c.GetConstructorMethodName()); rec != "" {
+			if strings.TrimSpace(paramsNewStr) == "" {
+				paramsNewStr = rec
+			} else {
+				paramsNewStr = rec + ", " + paramsNewStr
+			}
 		}
 	}
 	var writerSeq []func(io.Writer)
@@ -4190,9 +4707,10 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 }
 
 type dumpedMethods struct {
-	methodName string
-	code       string
-	bodyCode   string
+	checkedEscape bool
+	methodName    string
+	code          string
+	bodyCode      string
 	// member/descriptor are retained so the post-decompile syntax safety net can rebuild a
 	// stub for a method whose generated body turns out to be un-parseable.
 	member     *MemberInfo
@@ -4312,6 +4830,7 @@ func resolveLocalNameCollisions(params []values.JavaValue, body []statements.Sta
 		}
 	}
 	renameStatementsInScope(body, live)
+	nameMethodDeclarationIdentities(params, body)
 }
 
 // paramDescriptorNarrowType returns the parameter's authoritative descriptor type when that type is a
@@ -4322,7 +4841,7 @@ func resolveLocalNameCollisions(params []values.JavaValue, body []statements.Sta
 // The method descriptor is the ground truth for a primitive parameter's declared type, so we trust it.
 // Kill-switch: JDEC_PARAM_DESC_NARROW_OFF.
 func paramDescriptorNarrowType(descTypes []types.JavaType, idx int, inferred types.JavaType) types.JavaType {
-	if os.Getenv("JDEC_PARAM_DESC_NARROW_OFF") != "" {
+	if jdecenv.Get("JDEC_PARAM_DESC_NARROW_OFF") != "" {
 		return nil
 	}
 	if idx < 0 || idx >= len(descTypes) || descTypes[idx] == nil || inferred == nil {
@@ -4489,7 +5008,7 @@ var lambdaLocalRe = regexp.MustCompile(`\bvar(\d+(?:_\d+)?)\b`)
 // lambda arrow body cannot legally declare a local that shadows an enclosing local/parameter or a
 // captured variable (which resolves to the enclosing `varN`). Kill-switch: JDEC_NO_LAMBDA_LOCAL_RENAME.
 func renameLambdaBodyLocals(body string, seq int) string {
-	if os.Getenv("JDEC_NO_LAMBDA_LOCAL_RENAME") != "" {
+	if jdecenv.Get("JDEC_NO_LAMBDA_LOCAL_RENAME") != "" {
 		return body
 	}
 	prefix := fmt.Sprintf("lv%d_", seq)
@@ -4520,7 +5039,6 @@ var mismatchedDoWhileIndexDeclRe = regexp.MustCompile(`int\s+(var\d+(?:_\d+)?)\s
 // monitorTempAssignRe matches a dead synthetic monitor temp left in the synchronized()
 // argument position, e.g. `var2 = this.lock`, capturing the lock expression itself.
 var monitorTempAssignRe = regexp.MustCompile(`^var\d+ = (.+)$`)
-var doWhileBreakGuardRe = regexp.MustCompile(`^(\s*)if \(([^\n{}]*)\)\{\n\s*break;\n\s*\}else\{`)
 
 // methodReturnTypeByName builds (and caches) a same-class method-name -> rendered-return-type map.
 // Constructors and void methods are skipped; a name overloaded with conflicting return types is
@@ -4562,10 +5080,15 @@ func (c *ClassObjectDumper) methodReturnTypeByName() map[string]string {
 	return m
 }
 
-func addMissingGeneratedLocalDecls(body, params, receiverType string, methodReturnTypes map[string]string, methodReturnType string) string {
+func addMissingGeneratedLocalDecls(body, params, receiverType string, methodReturnTypes map[string]string, methodReturnType string, lexical ...map[string]bool) string {
 	body = repairMismatchedDoWhileIndexDecls(body)
-	returnDeclFix := os.Getenv("JDEC_RETURN_DECL_FIX_OFF") == ""
+	returnDeclFix := jdecenv.Get("JDEC_RETURN_DECL_FIX_OFF") == ""
 	declared := map[string]bool{}
+	for _, names := range lexical {
+		for name := range names {
+			declared[name] = true
+		}
+	}
 	for _, match := range generatedLocalDeclRe.FindAllStringSubmatch(params+"\n"+body, -1) {
 		if len(match) > 1 {
 			// `return varN;` / `throw varN;` match generatedLocalDeclRe's type-identifier alternative
@@ -4604,7 +5127,7 @@ func addMissingGeneratedLocalDecls(body, params, receiverType string, methodRetu
 	// scan each rendered line with it (skipping keyword-led pseudo-types like `return varN;`) so such
 	// generic declarations are recognized. This is purely additive to `declared`: it can only SUPPRESS
 	// a bogus phantom, never inject one. Kill-switch: JDEC_GENERIC_DECL_DETECT_OFF=1.
-	if os.Getenv("JDEC_GENERIC_DECL_DETECT_OFF") == "" {
+	if jdecenv.Get("JDEC_GENERIC_DECL_DETECT_OFF") == "" {
 		for _, ln := range strings.Split(body, "\n") {
 			m := castEscapeDeclLineRe.FindStringSubmatch(ln)
 			if m == nil {
@@ -4666,10 +5189,10 @@ func addMissingGeneratedLocalDecls(body, params, receiverType string, methodRetu
 // method. Canonical case: fastjson2 JSON.copyTo — `String var16;` (line 4351) + `Object var17;`
 // (line 4358, 7 lines apart). Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
 func initProximateSplitSlotDecl(body string) string {
-	if os.Getenv("JDEC_INIT_PROX_SPLIT_OFF") == "1" {
+	if jdecenv.Get("JDEC_INIT_PROX_SPLIT_OFF") == "1" {
 		return body
 	}
-	dbg := os.Getenv("JDEC_INIT_PROX_SPLIT_DBG") == "1"
+	dbg := jdecenv.Get("JDEC_INIT_PROX_SPLIT_DBG") == "1"
 	const maxLines = 10 // max line distance between bare decl and Object dead-store sibling
 	lines := strings.Split(body, "\n")
 	// Pre-collect all Object dead-store declaration line numbers.
@@ -4782,7 +5305,7 @@ func initProximateSplitSlotDecl(body string) string {
 		// load-bearing (the merge is proven load-bearing by that bare form). Do not initialize Object
 		// decls in that mode. Otherwise (default), Object bare decls that are conditionally assigned
 		// and read are real DA errors and must be initialized.
-		skipObject := declType == "Object" && os.Getenv("JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF") == "1"
+		skipObject := declType == "Object" && jdecenv.Get("JDEC_REF_SLOT_NULL_REASSIGN_MERGE_OFF") == "1"
 		if !found && !skipObject && chainLacksFinalElse(lines, i, varN) {
 			found = true
 		}
@@ -4931,7 +5454,7 @@ var methodOrInitBlockRe = regexp.MustCompile(`^\t+(?:public|protected|private|st
 // `String var1` was treated as a lambda capture of getAttributeValue's Method parameter
 // (`final String var1_f1 = var1`). Kill-switch: JDEC_BRACE_SKIP_STRINGS_OFF=1.
 func applyLineBraces(ln string, depth int) (int, bool) {
-	skip := os.Getenv("JDEC_BRACE_SKIP_STRINGS_OFF") != "1"
+	skip := jdecenv.Get("JDEC_BRACE_SKIP_STRINGS_OFF") != "1"
 	inStr, inChar, escaped := false, false, false
 	for i := 0; i < len(ln); i++ {
 		c := ln[i]
@@ -5018,6 +5541,7 @@ var ctorOrMethodRe = regexp.MustCompile(`^\t+(?:(?:public|protected|private)\s+)
 // isMethodOrInitBlockStart reports whether ln opens a method/ctor body OR a static/instance
 // initializer block.
 func isMethodOrInitBlockStart(ln string) bool {
+	ln = leadingTabs(ln) + strings.TrimSpace(maskDeclarationAnnotations(ln))
 	if methodOrInitBlockRe.MatchString(ln) {
 		return true
 	}
@@ -5266,8 +5790,10 @@ func assignTargetIs(ln, name string) bool {
 // and rewrite READS of <name> inside that lambda body to <name>_f. The copy is effectively-final
 // (single assignment), so the capture is legal; each loop iteration captures a fresh value.
 //
-// Detection is method-local (varN name reuse across methods) and depth-aware (only names read at a
-// STRICTLY DEEPER lambda depth than the declaration are captures). Kill-switch:
+// Detection resolves each read to an already visible lexical declaration. The
+// first lambda crossing that declaration's scope owns its snapshot, including
+// reads in nested lambdas. Same-name declarations in sibling scopes are distinct.
+// Kill-switch:
 // JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
 //
 // NOTE: chained-call lambdas (e.g. `flux.concatMap(x -> {...}).doOnTerminate(...)`) have the
@@ -5275,264 +5801,101 @@ func assignTargetIs(ln, name string) bool {
 // Such lambdas are skipped (only non-chained `receiver(args, x -> {...})` forms are handled).
 // Kill-switch: JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
 func fixLambdaLoopCapture(body string) string {
-	if os.Getenv("JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF") == "1" {
+	if jdecenv.Get("JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
-	// declRe matches a local variable declaration (with or without initializer) to recover the
-	// declared type for the final copy. Captures both bare `Type varN;` and `Type varN = init;`.
-	declRe := regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(?:=[^;]*)?;(\s*)$`)
-	// We process per-method so varN reuse across methods does not conflate. Collect method ranges.
 	type methodRange struct{ start, end int }
 	var methods []methodRange
-	{
-		i := 0
-		for i < len(lines) {
-			ln := strings.TrimRight(lines[i], "\r")
-			if isMethodOrInitBlockStart(ln) {
-				if os.Getenv("JDEC_FLC_DBG") == "1" && strings.Contains(ln, "isExtendedMap") {
-					fmt.Fprintf(os.Stderr, "[FLC] found method at L%d: %q\n", i+1, strings.TrimSpace(ln))
-				}
-				depth := 0
-				end := len(lines)
-				for k := i; k < len(lines); k++ {
-					lk := strings.TrimRight(lines[k], "\r")
-					var closed bool
-					depth, closed = applyLineBraces(lk, depth)
-					if closed {
-						end = k + 1
-						break
-					}
-				}
-				methods = append(methods, methodRange{i, end})
-				i = end
-				continue
-			}
+	for i := 0; i < len(lines); {
+		if !isMethodOrInitBlockStart(strings.TrimRight(lines[i], "\r")) {
 			i++
-		}
-	}
-	changed := false
-	for _, mr := range methods {
-		mlines := lines[mr.start:mr.end]
-		depths := lambdaDepthPerLine(mlines)
-		// Collect captured names + their declared type + the lambda-opening line indices that read them.
-		type captureInfo struct {
-			declType string
-			// lambdaOpenSubIdxs: sub-line indices where a `-> {` lambda body begins that reads the name
-			// at a deeper depth than the declaration.
-			lambdaOpenSubIdxs []int
-		}
-		captured := map[string]*captureInfo{}
-		// First pass: for each bare decl, determine if it's captured and record capture sites.
-		for di, ln := range mlines {
-			lnClean := strings.TrimRight(ln, "\r")
-			m := declRe.FindStringSubmatch(lnClean)
-			if m == nil {
-				continue
-			}
-			declType := strings.TrimSpace(m[2])
-			name := m[3]
-			switch declType {
-			case "throw", "return", "new", "if", "else", "for", "while", "do", "switch", "case",
-				"break", "continue", "try", "catch", "finally", "synchronized", "assert":
-				continue
-			}
-			declDepth := depths[di]
-			// Find lambda bodies (-> {) in this method and check whether `name` is read at a deeper depth.
-			nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-			var openIdxs []int
-			for li, lraw := range mlines {
-				lln := strings.TrimRight(lraw, "\r")
-				if depths[li] <= declDepth {
-					continue
-				}
-				// Is there a read of name on this line?
-				readHere := false
-				for _, loc := range nameRe.FindAllStringIndex(lln, -1) {
-					before := lln[:loc[0]]
-					after := lln[loc[1]:]
-					bTrim := strings.TrimRight(before, " \t")
-					aTrim := strings.TrimLeft(after, " \t")
-					if strings.Contains(after, "->") &&
-						len(bTrim) > 0 && (bTrim[len(bTrim)-1] == '(' || bTrim[len(bTrim)-1] == ',') &&
-						(len(aTrim) > 0 && (aTrim[0] == ')' || aTrim[0] == ',')) {
-						continue
-					}
-					lineBefore := strings.TrimSpace(before)
-					if lineBefore != "" {
-						c := lineBefore[len(lineBefore)-1]
-						if (isWordByteDump(c) || c == ']' || c == '>' || c == '?') && !prevTokenIsControlKeyword(lineBefore) {
-							continue
-						}
-					}
-					if strings.HasPrefix(aTrim, "=") && !strings.HasPrefix(aTrim, "==") {
-						continue
-					}
-					readHere = true
-					break
-				}
-				if readHere {
-					// Find the lambda-open line for this depth: the nearest preceding `-> {`.
-					openIdx := -1
-					for k := li; k >= 0; k-- {
-						kl := strings.TrimRight(mlines[k], "\r")
-						if idx := strings.Index(kl, "->"); idx >= 0 {
-							rest := kl[idx:]
-							if strings.Contains(rest, "{") && depths[k] > declDepth {
-								// Only handle lambdas that begin a fresh statement: the previous
-								// non-blank line must end in `;`, `{`, or `}` (a statement boundary).
-								// This avoids multi-line argument lambdas (e.g.
-								// `x.register(a, () -> {\n ... \n}, ...)`) where inserting a copy
-								// before the `-> {` line lands inside the enclosing call's argument
-								// list and breaks structure.
-								if lambdaLineIsStmtStart(mlines, k) {
-									openIdx = k
-								}
-								break
-							}
-						}
-					}
-					if openIdx >= 0 {
-						// dedupe
-						found := false
-						for _, e := range openIdxs {
-							if e == openIdx {
-								found = true
-								break
-							}
-						}
-						if !found {
-							openIdxs = append(openIdxs, openIdx)
-						}
-					}
-				}
-			}
-			if len(openIdxs) > 0 {
-				captured[name] = &captureInfo{declType: declType, lambdaOpenSubIdxs: openIdxs}
-				if os.Getenv("JDEC_FLC_DBG") == "1" {
-					fmt.Fprintf(os.Stderr, "[FLC] captured %s declType=%q openIdxs=%v\n", name, declType, openIdxs)
-				}
-			}
-		}
-		if len(captured) == 0 {
 			continue
 		}
-		// For each capture site, we need to:
-		//  1. insert a final copy line before the lambda-open line, and
-		//  2. rewrite reads of the name inside that lambda body to <name>_f.
-		// We collect insertions and rewrites, then apply them on the GLOBAL lines slice via offsets.
-		// Process capture sites in REVERSE order so earlier insert offsets remain valid.
-		type edit struct {
-			insertAtGlobal int
-			insertIndent   string
-			insertText     string
-			// rewrite within [bodyStartGlobal, bodyEndGlobal): replace word reads name -> fname
-			bodyStartGlobal int
-			bodyEndGlobal   int
-			name            string
-			fname           string
+		depth, end := 0, len(lines)
+		for k := i; k < len(lines); k++ {
+			var closed bool
+			depth, closed = applyLineBraces(lines[k], depth)
+			if closed {
+				end = k + 1
+				break
+			}
 		}
-		var edits []edit
-		copySeq := 0 // per-method counter for unique final-copy names
-		for name, ci := range captured {
-			// For EACH capture site, insert a dedicated final-copy (each lambda body may be in a
-			// different branch/scope, so one copy cannot cover all). The copy is inserted just before
-			// the lambda-open line (in the same scope), and ONLY that lambda body is rewritten.
-			for _, openSub := range ci.lambdaOpenSubIdxs {
-				openGlobal := mr.start + openSub
-				copySeq++
-				fname := fmt.Sprintf("%s_f%d", name, copySeq)
-				openLn := strings.TrimRight(lines[openGlobal], "\r")
-				insIndent := leadingTabs(openLn)
-				// Insertion point: normally the lambda-open line. But when the lambda is a deeply-
-				// nested argument (parenDepth ≥ 2), the `-> {` is mid-statement — inserting there is
-				// syntactically invalid. Walk back to the start of the enclosing statement (the
-				// nearest preceding line at a shallower-or-equal indent following a `;`/`}`/`{`
-				// boundary) and insert there instead.
-				insertAt := openGlobal
-				if arrowIdx := strings.Index(openLn, "->"); arrowIdx >= 0 {
-					parenDepth := 0
-					for i := 0; i < arrowIdx; i++ {
-						switch openLn[i] {
-						case '(':
-							parenDepth++
-						case ')':
-							parenDepth--
-						}
-					}
-					if parenDepth >= 2 {
-						stmtStart := findEnclosingStmtStart(lines, openGlobal, mr.start)
-						if stmtStart >= 0 {
-							insertAt = stmtStart
-							insIndent = leadingTabs(strings.TrimRight(lines[stmtStart], "\r"))
-						}
-					}
-				}
-				// The lambda body starts AFTER the `-> {` line. Find the matching close brace of the
-				// `-> {` block by brace depth.
-				bodyStart := openGlobal + 1
-				bodyEnd := bodyStart
+		methods = append(methods, methodRange{i, end})
+		i = end
+	}
+	// Bottom-up edits keep all unprocessed method coordinates valid.
+	changed := false
+	for mi := len(methods) - 1; mi >= 0; mi-- {
+		mr := methods[mi]
+		mlines := lines[mr.start:mr.end]
+		type readEdit struct {
+			lambdaCaptureRead
+			name string
+		}
+		type insertion struct {
+			line, sequence int
+			text           string
+		}
+		var reads []readEdit
+		var inserts []insertion
+		sequence := 0
+		for _, binding := range lambdaCaptureBindings(mlines) {
+			decl, lambda := binding.declaration, binding.lambda
+			if lambda.end == 0 {
+				continue // An incomplete block cannot prove a bounded capture.
+			}
+			insertAt := lambda.open
+			open := mlines[lambda.open]
+			if arrow := strings.Index(open, "->"); arrow >= 0 {
 				depth := 0
-				started := false
-				for k := openGlobal; k < len(lines); k++ {
-					lk := strings.TrimRight(lines[k], "\r")
-					for b := 0; b < len(lk); b++ {
-						switch lk[b] {
-						case '{':
-							depth++
-							started = true
-						case '}':
-							depth--
-						}
-					}
-					if started && depth <= 0 {
-						bodyEnd = k + 1
-						break
+				for _, c := range open[:arrow] {
+					if c == '(' {
+						depth++
+					} else if c == ')' {
+						depth--
 					}
 				}
-				edits = append(edits, edit{
-					insertAtGlobal:  insertAt,
-					insertIndent:    insIndent,
-					insertText:      insIndent + "final " + ci.declType + " " + fname + " = " + name + ";",
-					bodyStartGlobal: bodyStart,
-					bodyEndGlobal:   bodyEnd,
-					name:            name,
-					fname:           fname,
-				})
-			}
-		}
-		// Phase A: apply ALL body rewrites first (these do not change line count).
-		for _, e := range edits {
-			if e.bodyEndGlobal == 0 {
-				continue // this is an insert-only edit
-			}
-			nameRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(e.name) + `\b`)
-			for k := e.bodyStartGlobal; k < e.bodyEndGlobal && k < len(lines); k++ {
-				ln := strings.TrimRight(lines[k], "\r")
-				if !nameRe.MatchString(ln) {
-					continue
-				}
-				newLn := rewriteLambdaReads(ln, e.name, e.fname)
-				if newLn != ln {
-					lines[k] = newLn
-					changed = true
+				if depth >= 2 {
+					if start := findEnclosingStmtStart(mlines, lambda.open, 0); start >= 0 {
+						insertAt = start
+					}
 				}
 			}
-		}
-		// Phase B: collect insert-only edits, sort by insertAtGlobal DESC, apply (shifts offsets).
-		var inserts []edit
-		for _, e := range edits {
-			if e.insertText != "" {
-				inserts = append(inserts, e)
+			if insertAt <= decl.line {
+				continue // Never read a declaration before its initialization.
+			}
+			sequence++
+			name := fmt.Sprintf("%s_f%d", decl.name, sequence)
+			inserts = append(inserts, insertion{line: insertAt, sequence: sequence,
+				text: leadingTabs(mlines[insertAt]) + "final " + decl.typ + " " + name + " = " + decl.name + ";"})
+			for _, read := range binding.reads {
+				reads = append(reads, readEdit{lambdaCaptureRead: read, name: name})
 			}
 		}
-		sort.Slice(inserts, func(a, b int) bool { return inserts[a].insertAtGlobal > inserts[b].insertAtGlobal })
-		for _, e := range inserts {
-			at := e.insertAtGlobal
-			if at > len(lines) {
-				at = len(lines)
+		// Token offsets refer to the original text. Apply from the right so
+		// each exact declaration-bound read remains at its recorded offset.
+		sort.Slice(reads, func(i, j int) bool {
+			if reads[i].line != reads[j].line {
+				return reads[i].line > reads[j].line
 			}
-			lines = append(lines[:at], append([]string{e.insertText}, lines[at:]...)...)
+			return reads[i].start > reads[j].start
+		})
+		for _, edit := range reads {
+			line := mr.start + edit.line
+			ln := lines[line]
+			lines[line] = ln[:edit.start] + edit.name + ln[edit.end:]
+			changed = true
+		}
+		sort.Slice(inserts, func(i, j int) bool {
+			if inserts[i].line != inserts[j].line {
+				return inserts[i].line > inserts[j].line
+			}
+			return inserts[i].sequence > inserts[j].sequence
+		})
+		for _, edit := range inserts {
+			at := mr.start + edit.line
+			lines = append(lines[:at], append([]string{edit.text}, lines[at:]...)...)
 			changed = true
 		}
 	}
@@ -5541,9 +5904,6 @@ func fixLambdaLoopCapture(body string) string {
 	}
 	return strings.Join(lines, "\n")
 }
-
-// sortEditsDesc sorts edits by insertAtGlobal in descending order.
-// (sort.Slice is used inline instead.)
 
 // findEnclosingStmtStart scans backward from idx (within [methodStart, idx]) to find the first
 // line of the statement containing idx: the nearest preceding line at a shallower-or-equal indent
@@ -5670,7 +6030,7 @@ func rewriteLambdaReads(ln, name, newName string) string {
 // a `}` at the same indent, where that `}` closes a switch block whose last label is `default:` with
 // a throw/return body. Kill-switch: JDEC_RM_UNREACHABLE_BREAK_OFF=1.
 func removeUnreachableSwitchBreak(body string) string {
-	if os.Getenv("JDEC_RM_UNREACHABLE_BREAK_OFF") == "1" {
+	if jdecenv.Get("JDEC_RM_UNREACHABLE_BREAK_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -5753,7 +6113,7 @@ func removeUnreachableSwitchBreak(body string) string {
 // when the line following `default:` (ignoring blank lines) is the switch-closing `}` at the SAME
 // indentation as `default:`. Kill-switch: JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF=1.
 func fixEmptySwitchDefault(body string) string {
-	if os.Getenv("JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF") == "1" {
+	if jdecenv.Get("JDEC_FIX_EMPTY_SWITCH_DEFAULT_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -5800,7 +6160,7 @@ func fixEmptySwitchDefault(body string) string {
 // and replaces `break;` with `return <expr>;` inside the try, then removes the post-loop return.
 // Kill-switch: JDEC_FIX_TRY_BREAK_RETURN_OFF=1. Canonical: commons-lang3 Memoizer.compute.
 func fixTryBreakReturn(body string) string {
-	if os.Getenv("JDEC_FIX_TRY_BREAK_RETURN_OFF") == "1" {
+	if jdecenv.Get("JDEC_FIX_TRY_BREAK_RETURN_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -6008,7 +6368,7 @@ func enclosingReturnsReference(lines []string, idx int) bool {
 // Canonical keep: commons-lang3 NumberUtils.createNumber (catch not followed by continue/break).
 // Canonical remove: gson DateTypeAdapter catch(ParseException) followed by `continue;` in loop.
 func fixLoopCatchThrow(body string) string {
-	if os.Getenv("JDEC_FIX_LOOP_CATCH_THROW_OFF") == "1" {
+	if jdecenv.Get("JDEC_FIX_LOOP_CATCH_THROW_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -6082,7 +6442,7 @@ func fixLoopCatchThrow(body string) string {
 // Canonical: commons-lang3 ExceptionUtils.typeErasure `<R, T extends Throwable> R typeErasure(
 // Throwable throwable) throws T { throw (T) throwable; }`.
 func fixThrowTypeVarCast(body string) string {
-	if os.Getenv("JDEC_FIX_THROW_TYPEVAR_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_FIX_THROW_TYPEVAR_CAST_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -6171,7 +6531,7 @@ func fixThrowTypeVarCast(body string) string {
 // Keep case: fastjson2 ToBoolean (switch close followed by `}else{` → starts with `}`, keep throw).
 // Remove case: commons-lang3 RandomStringUtils (switch close followed by `continue;` → real stmt).
 func fixUnreachableDefaultThrow(body string) string {
-	if os.Getenv("JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF") == "1" {
+	if jdecenv.Get("JDEC_FIX_UNREACHABLE_DEFAULT_THROW_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -6257,7 +6617,7 @@ func fixUnreachableDefaultThrow(body string) string {
 // path. The insertion is reachable only on the not-definitely-returned path, so it never creates
 // an unreachable-statement error. Kill-switch: JDEC_FIX_MISSING_RETURN_OFF=1.
 func fixMissingReturn(body string) string {
-	if os.Getenv("JDEC_FIX_MISSING_RETURN_OFF") == "1" {
+	if jdecenv.Get("JDEC_FIX_MISSING_RETURN_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -6463,129 +6823,6 @@ func fixMissingReturn(body string) string {
 	return strings.Join(lines, "\n")
 }
 
-// fixSwitchBreakMissingReturn inserts `return null;` after a switch that is the last statement of
-// its enclosing block in a reference-returning method, when some case exits via an unlabeled
-// `break`. javac compiled a fall-through (F/f suffix → D/d in commons-lang3 NumberUtils.createNumber)
-// as `goto next-case`; the switch rewriter reconstructed that edge as `break`, so the method ends
-// without a return on that path ("missing return statement"). Inserting `return null;` after the
-// switch completes the break path; cases that already return/throw never reach it. Only fires when
-// the next non-blank line after the switch-closing `}` is a block close (`}` / `}else` / `}catch`),
-// so a switch followed by a real statement (ClassReader's `continue;`) is left alone.
-// Kill-switch: JDEC_FIX_SWITCH_BREAK_RETURN_OFF=1.
-func fixSwitchBreakMissingReturn(body string) string {
-	if os.Getenv("JDEC_FIX_SWITCH_BREAK_RETURN_OFF") == "1" {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	switchRe := regexp.MustCompile(`^(\t+)switch \(.*\)\{\s*$`)
-	breakRe := regexp.MustCompile(`^\t+break;\s*$`)
-	type insertSite struct {
-		at     int
-		indent string
-	}
-	var sites []insertSite
-	for i := 0; i < len(lines); i++ {
-		ln := strings.TrimRight(lines[i], "\r")
-		m := switchRe.FindStringSubmatch(ln)
-		if m == nil {
-			continue
-		}
-		switchIndent := m[1]
-		depth := 0
-		switchEnd := -1
-		for j := i; j < len(lines); j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			for b := 0; b < len(jl); b++ {
-				switch jl[b] {
-				case '{':
-					depth++
-				case '}':
-					depth--
-					if depth == 0 {
-						switchEnd = j
-					}
-				}
-			}
-			if switchEnd >= 0 {
-				break
-			}
-		}
-		if switchEnd < 0 {
-			continue
-		}
-		hasSwitchBreak := false
-		loopDepth := 0
-		nestedSwitchDepth := 0
-		for j := i + 1; j < switchEnd; j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			if switchRe.MatchString(jl) {
-				nestedSwitchDepth++
-				continue
-			}
-			compact := strings.ReplaceAll(strings.TrimSpace(jl), " ", "")
-			if strings.Contains(compact, "do{") {
-				loopDepth++
-			}
-			if nestedSwitchDepth == 0 && loopDepth == 0 && breakRe.MatchString(jl) {
-				hasSwitchBreak = true
-				break
-			}
-			if strings.Contains(compact, "}while(") || strings.HasPrefix(compact, "}while") {
-				if loopDepth > 0 {
-					loopDepth--
-				}
-			}
-			if nestedSwitchDepth > 0 {
-				for _, ch := range jl {
-					switch ch {
-					case '{':
-						nestedSwitchDepth++
-					case '}':
-						nestedSwitchDepth--
-						if nestedSwitchDepth < 0 {
-							nestedSwitchDepth = 0
-						}
-					}
-				}
-			}
-		}
-		if !hasSwitchBreak {
-			continue
-		}
-		next := -1
-		for j := switchEnd + 1; j < len(lines); j++ {
-			if strings.TrimSpace(strings.TrimRight(lines[j], "\r")) == "" {
-				continue
-			}
-			next = j
-			break
-		}
-		if next < 0 {
-			continue
-		}
-		nextTrim := strings.TrimSpace(strings.TrimRight(lines[next], "\r"))
-		if nextTrim != "}" &&
-			!strings.HasPrefix(nextTrim, "}else") && !strings.HasPrefix(nextTrim, "} else") &&
-			!strings.HasPrefix(nextTrim, "}catch") && !strings.HasPrefix(nextTrim, "} catch") &&
-			!strings.HasPrefix(nextTrim, "}finally") && !strings.HasPrefix(nextTrim, "} finally") {
-			continue
-		}
-		if !enclosingReturnsReference(lines, i) {
-			continue
-		}
-		sites = append(sites, insertSite{at: switchEnd, indent: switchIndent})
-	}
-	if len(sites) == 0 {
-		return body
-	}
-	for k := len(sites) - 1; k >= 0; k-- {
-		s := sites[k]
-		retLn := s.indent + "return null;"
-		lines = append(lines[:s.at+1], append([]string{retLn}, lines[s.at+1:]...)...)
-	}
-	return strings.Join(lines, "\n")
-}
-
 // fixTryCatchExceptionPlacement detects the pattern where exception-throwing calls (getDeclaredConstructor,
 // newInstance, etc.) are rendered OUTSIDE a try block, while the catch clause lists those exception types.
 // It moves the calls into the inner try body so javac sees them as caught.
@@ -6607,7 +6844,7 @@ func fixSwitchBreakMissingReturn(body string) string {
 // Fix: move the exception-throwing calls from the if-body into the inner try-body.
 // Kill-switch: JDEC_FIX_TRYCATCH_OFF=1.
 func fixTryCatchExceptionPlacement(body string) string {
-	if os.Getenv("JDEC_FIX_TRYCATCH_OFF") == "1" {
+	if jdecenv.Get("JDEC_FIX_TRYCATCH_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -6869,10 +7106,10 @@ func hasLambdaBoundaryBetween(lines []string, startLine, endLine int) bool {
 // even when an inner try/catch already handled the call site). Kill-switch:
 // JDEC_ADD_MISSING_CATCH_OFF=1.
 func addMissingCatchException(body string) string {
-	if os.Getenv("JDEC_ADD_MISSING_CATCH_OFF") == "1" {
+	if jdecenv.Get("JDEC_ADD_MISSING_CATCH_OFF") == "1" {
 		return body
 	}
-	dbg := os.Getenv("JDEC_ADD_MISSING_CATCH_DBG") == "1"
+	dbg := jdecenv.Get("JDEC_ADD_MISSING_CATCH_DBG") == "1"
 	lines := strings.Split(body, "\n")
 	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
 	callRe := regexp.MustCompile(`\.(getConstructor|getDeclaredConstructor|getMethod|getDeclaredMethod)\(`)
@@ -7092,7 +7329,7 @@ func addMissingCatchException(body string) string {
 // (only if the outer catch has ≥2 types, so it still catches something). Kill-switch:
 // JDEC_DEDUP_NESTED_CATCH_OFF=1.
 func dedupNestedCatchException(body string) string {
-	if os.Getenv("JDEC_DEDUP_NESTED_CATCH_OFF") == "1" {
+	if jdecenv.Get("JDEC_DEDUP_NESTED_CATCH_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -7192,7 +7429,7 @@ func dedupNestedCatchException(body string) string {
 			if inner.catchLine < 0 {
 				continue
 			}
-			if os.Getenv("JDEC_DEDUP_DBG") == "1" {
+			if jdecenv.Get("JDEC_DEDUP_DBG") == "1" {
 				fmt.Fprintf(os.Stderr, "[DEDUP-NESTED] outer try L%d (catch L%d types=%q) → inner try L%d (catch L%d types=%q)\n",
 					outer.tryStart+1, outer.catchLine+1, outer.caughtTypes, inner.tryStart+1, inner.catchLine+1, inner.caughtTypes)
 			}
@@ -7282,7 +7519,7 @@ func dedupNestedCatchException(body string) string {
 // Only wraps `return <expr>.allocateInstance(...);` statements (the common case). Kill-switch:
 // JDEC_WRAP_ALLOCATE_OFF=1.
 func wrapUncaughtThrowingCall(body string) string {
-	if os.Getenv("JDEC_WRAP_ALLOCATE_OFF") == "1" {
+	if jdecenv.Get("JDEC_WRAP_ALLOCATE_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -7343,7 +7580,7 @@ func wrapUncaughtThrowingCall(body string) string {
 // NoSuchMethodException". Real hit: spring cglib AddDelegateTransformer constructor.
 // Kill-switch: JDEC_WRAP_GETCONSTRUCTOR_OFF=1.
 func wrapUncaughtGetConstructor(body string) string {
-	if os.Getenv("JDEC_WRAP_GETCONSTRUCTOR_OFF") == "1" {
+	if jdecenv.Get("JDEC_WRAP_GETCONSTRUCTOR_OFF") == "1" {
 		return body
 	}
 	// Fastjson2 ObjectReaderException's constructor has a later this(...) that the
@@ -7426,7 +7663,7 @@ var immutableBuilderWitnessRe = regexp.MustCompile(
 // `ImmutableMap<A, B> f = ImmutableMap.<A, B>builder()`.
 // Kill-switch: JDEC_IMMUTABLE_BUILDER_WITNESS_OFF=1.
 func fixImmutableBuilderWitness(body string) string {
-	if os.Getenv("JDEC_IMMUTABLE_BUILDER_WITNESS_OFF") == "1" {
+	if jdecenv.Get("JDEC_IMMUTABLE_BUILDER_WITNESS_OFF") == "1" {
 		return body
 	}
 	return immutableBuilderWitnessRe.ReplaceAllStringFunc(body, func(s string) string {
@@ -7438,60 +7675,12 @@ func fixImmutableBuilderWitness(body string) string {
 	})
 }
 
-// fixNeverThrownCNFE inserts `Class.forName("java.lang.Object")` into a try
-// whose catch(ClassNotFoundException) would otherwise be rejected as never thrown. Real hit:
-// spring ConfigurableObjectInputStream.resolveProxyClass, where ClassUtils.forName is
-// reconstructed outside the catch's try. Kill-switch: JDEC_CNFE_NEVER_THROWN_OFF=1.
-func fixNeverThrownCNFE(body string) string {
-	if os.Getenv("JDEC_CNFE_NEVER_THROWN_OFF") == "1" {
-		return body
-	}
-	if !strings.Contains(body, "ClassNotFoundException") {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	var insertAt []int
-	for i, ln := range lines {
-		trim := strings.TrimSpace(ln)
-		if !strings.Contains(trim, "catch(ClassNotFoundException") &&
-			!strings.Contains(trim, "catch (ClassNotFoundException") {
-			continue
-		}
-		tryAt := -1
-		for j := i; j >= 0; j-- {
-			if strings.Contains(lines[j], "try{") || strings.HasSuffix(strings.TrimSpace(lines[j]), "try {") {
-				tryAt = j
-				break
-			}
-		}
-		if tryAt < 0 {
-			continue
-		}
-		chunk := strings.Join(lines[tryAt:i+1], "\n")
-		if strings.Contains(chunk, "forName") || strings.Contains(chunk, "loadClass") ||
-			strings.Contains(chunk, "newInstance") {
-			continue
-		}
-		insertAt = append(insertAt, tryAt)
-	}
-	if len(insertAt) == 0 {
-		return body
-	}
-	for k := len(insertAt) - 1; k >= 0; k-- {
-		at := insertAt[k]
-		ind := leadingTabs(strings.TrimRight(lines[at], "\r")) + "\t"
-		inj := ind + "Class.forName(\"java.lang.Object\");"
-		lines = append(lines[:at+1], append([]string{inj}, lines[at+1:]...)...)
-	}
-	return strings.Join(lines, "\n")
-}
-
 // fixSelectMethodsAmbiguous disambiguates
 // `selectMethods(cls, (l0) -> var1.matches(l0) ? Boolean.TRUE : null)` which is equally
 // applicable to MetadataLookup and MethodFilter. Cast the lambda to MetadataLookup.
 // Kill-switch: JDEC_SELECTMETHODS_CAST_OFF=1.
 func fixSelectMethodsAmbiguous(body string) string {
-	if os.Getenv("JDEC_SELECTMETHODS_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_SELECTMETHODS_CAST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "selectMethods") || !strings.Contains(body, ".matches(") {
@@ -7563,7 +7752,7 @@ const asMapGoodCast = ".asMap((java.util.function.Function<MergedAnnotation<?>, 
 // AbstractMergedAnnotation / AnnotationUtils / TypeMappedAnnotation.
 // Kill-switch: JDEC_ASMAP_FUNCTION_CAST_OFF=1.
 func fixAsMapFunctionRawCast(body string) string {
-	if os.Getenv("JDEC_ASMAP_FUNCTION_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_ASMAP_FUNCTION_CAST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, ".asMap(") || !strings.Contains(body, "(l0) ->") {
@@ -7591,7 +7780,7 @@ func fixAsMapFunctionRawCast(body string) string {
 // FSDirectory getTempFileName loop catch(FileAlreadyExistsException). Kill-switch:
 // JDEC_IOEXCEPTION_NEVER_THROWN_OFF=1.
 func fixNeverThrownIOException(body string) string {
-	if os.Getenv("JDEC_IOEXCEPTION_NEVER_THROWN_OFF") == "1" {
+	if jdecenv.Get("JDEC_IOEXCEPTION_NEVER_THROWN_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "Exception") {
@@ -7762,7 +7951,7 @@ var throwThrowableClassCastRe = regexp.MustCompile(`throw \(\(Throwable\)\(([^;]
 // it in (Throwable) makes javac demand `throws Throwable` while the method declares
 // `throws X`. Kill-switch: JDEC_THROW_CLASS_CAST_DROP_THROWABLE_OFF=1.
 func fixThrowClassCastDropsThrowable(body string) string {
-	if os.Getenv("JDEC_THROW_CLASS_CAST_DROP_THROWABLE_OFF") == "1" {
+	if jdecenv.Get("JDEC_THROW_CLASS_CAST_DROP_THROWABLE_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "throw ((Throwable)") || !strings.Contains(body, ".cast(") {
@@ -7776,7 +7965,7 @@ func fixThrowClassCastDropsThrowable(body string) string {
 // can still call List.stream(). Real hit: spring SpringFactoriesLoader.loadSpringFactories.
 // Kill-switch: JDEC_REPLACEALL_LIST_STREAM_CAST_OFF=1.
 func fixReplaceAllListStreamCast(body string) string {
-	if os.Getenv("JDEC_REPLACEALL_LIST_STREAM_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_REPLACEALL_LIST_STREAM_CAST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "replaceAll") || !strings.Contains(body, "l1.stream()") {
@@ -7794,7 +7983,7 @@ var classMapEntryPutRe = regexp.MustCompile(`(\w+)\.put\((\w+)\.getValue\(\),(\w
 // primitiveTypeToWrapperMap.put(var1.getValue(), var1.getKey()).
 // Kill-switch: JDEC_CLASS_MAP_ENTRY_PUT_CAST_OFF=1.
 func fixClassMapEntryPutCasts(body string) string {
-	if os.Getenv("JDEC_CLASS_MAP_ENTRY_PUT_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_CLASS_MAP_ENTRY_PUT_CAST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, ".put(") || !strings.Contains(body, ".getValue()") ||
@@ -7817,7 +8006,7 @@ var visitAnnotationWrongCastRe = regexp.MustCompile(`visitAnnotation\(([^,]+),\(
 // Real hit: spring MergedAnnotationReadingVisitor.visitAnnotation.
 // Kill-switch: JDEC_VISITANNOTATION_CONSUMER_CAST_OFF=1.
 func fixVisitAnnotationConsumerCast(body string) string {
-	if os.Getenv("JDEC_VISITANNOTATION_CONSUMER_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_VISITANNOTATION_CONSUMER_CAST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "visitAnnotation") || !strings.Contains(body, "(l0) ->") {
@@ -7826,28 +8015,6 @@ func fixVisitAnnotationConsumerCast(body string) string {
 	repl := "visitAnnotation($1,(java.util.function.Consumer)((l0) -> {$2}));"
 	body = visitAnnotationWrongCastRe.ReplaceAllString(body, repl)
 	body = visitAnnotationBareLambdaRe.ReplaceAllString(body, repl)
-	return body
-}
-
-// fixValueDifferenceCreateCast wraps `Maps$ValueDifferenceImpl.create(a,b)` as
-// `(MapDifference$ValueDifference)(Maps$ValueDifferenceImpl.create(a,b))` so a
-// Map.put of the result infers from the cast rather than Object,Object.
-// Kill-switch: JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF=1.
-func fixValueDifferenceCreateCast(body string) string {
-	if os.Getenv("JDEC_VALUE_DIFFERENCE_CREATE_CAST_OFF") == "1" {
-		return body
-	}
-	if !strings.Contains(body, "ValueDifferenceImpl.create") {
-		return body
-	}
-	old := "Maps$ValueDifferenceImpl.create("
-	neu := "(MapDifference$ValueDifference)(Maps$ValueDifferenceImpl.create("
-	if !strings.Contains(body, old) {
-		return body
-	}
-	body = strings.ReplaceAll(body, old, neu)
-	// Close the extra paren after create(var10,var11) — the two-arg form used by doDifference.
-	body = strings.ReplaceAll(body, "ValueDifferenceImpl.create(var10,var11)", "ValueDifferenceImpl.create(var10,var11))")
 	return body
 }
 
@@ -7890,7 +8057,7 @@ const getUnintFixedTryBlock = "\t\ttry{\n" +
 // match so it cannot rewrite unrelated loops in the same class.
 // Kill-switch: JDEC_GETUNINTERRUPTIBLY_GET_IN_TRY_OFF=1.
 func fixGetUninterruptiblyGetInTry(body string) string {
-	if os.Getenv("JDEC_GETUNINTERRUPTIBLY_GET_IN_TRY_OFF") == "1" {
+	if jdecenv.Get("JDEC_GETUNINTERRUPTIBLY_GET_IN_TRY_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "getUninterruptibly") || !strings.Contains(body, getUnintEmptyTryBlock) {
@@ -7925,7 +8092,7 @@ const drainUnintFixedTryBlock = "\t\t\t\t\t\tdo{\n" +
 // empty-try dump (poll folded out of the InterruptedException catch).
 // Kill-switch: JDEC_DRAIN_UNINTERRUPTIBLY_POLL_IN_TRY_OFF=1.
 func fixDrainUninterruptiblyPollInTry(body string) string {
-	if os.Getenv("JDEC_DRAIN_UNINTERRUPTIBLY_POLL_IN_TRY_OFF") == "1" {
+	if jdecenv.Get("JDEC_DRAIN_UNINTERRUPTIBLY_POLL_IN_TRY_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "drainUninterruptibly") || !strings.Contains(body, drainUnintEmptyTryBlock) {
@@ -7938,7 +8105,7 @@ func fixDrainUninterruptiblyPollInTry(body string) string {
 // does not pin T to Cell<?,?,?>. Real hit: guava Tables$TransposeTable.cellIterator.
 // Kill-switch: JDEC_TRANSPOSE_CELL_FUNCTION_CAST_OFF=1.
 func fixTransposeCellFunctionCast(body string) string {
-	if os.Getenv("JDEC_TRANSPOSE_CELL_FUNCTION_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_TRANSPOSE_CELL_FUNCTION_CAST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "TRANSPOSE_CELL") {
@@ -7957,7 +8124,7 @@ func fixTransposeCellFunctionCast(body string) string {
 // Real hit: guava FuturesGetChecked.newWithCause. Kill-switch:
 // JDEC_PREFERSTRINGS_ASLIST_CAST_OFF=1.
 func fixPreferringStringsAsListCast(body string) string {
-	if os.Getenv("JDEC_PREFERSTRINGS_ASLIST_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_PREFERSTRINGS_ASLIST_CAST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "preferringStrings") {
@@ -8036,7 +8203,7 @@ const syncLazyDescendingSetFixed = "public NavigableSet<E> descendingSet() {\n" 
 // after CFG emptied the synchronized block and dropped the return.
 // Kill-switch: JDEC_SYNC_LAZY_NAV_RETURN_OFF=1.
 func fixSyncLazyNavigableReturn(body string) string {
-	if os.Getenv("JDEC_SYNC_LAZY_NAV_RETURN_OFF") == "1" {
+	if jdecenv.Get("JDEC_SYNC_LAZY_NAV_RETURN_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "descendingKeySet") && !strings.Contains(body, "navigableKeySet") &&
@@ -8081,7 +8248,7 @@ const catchingFutureFinally = "var7 = this.doFallback((F)(var3),(X)(var6));\n" +
 // catch(Throwable)+catch(Throwable) into try/catch/finally.
 // Kill-switch: JDEC_CATCHING_FUTURE_FINALLY_OFF=1.
 func fixCatchingFutureFinally(body string) string {
-	if os.Getenv("JDEC_CATCHING_FUTURE_FINALLY_OFF") == "1" {
+	if jdecenv.Get("JDEC_CATCHING_FUTURE_FINALLY_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "doFallback") || !strings.Contains(body, catchingFutureDupCatch) {
@@ -8134,7 +8301,7 @@ const abstractServiceStopFinally = "}catch(Throwable var1_1){\n" +
 // duplicated catch(Throwable) into try/catch/finally.
 // Kill-switch: JDEC_ABSTRACT_SERVICE_FINALLY_OFF=1.
 func fixAbstractServiceFinally(body string) string {
-	if os.Getenv("JDEC_ABSTRACT_SERVICE_FINALLY_OFF") == "1" {
+	if jdecenv.Get("JDEC_ABSTRACT_SERVICE_FINALLY_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "notifyFailed") || !strings.Contains(body, "dispatchListenerEvents") {
@@ -8150,7 +8317,7 @@ func fixAbstractServiceFinally(body string) string {
 // by injecting a never-taken throw and wrapping the folded tryLock/awaitNanos
 // so the checked exception is caught. Kill-switch: JDEC_MONITOR_IE_TRY_OFF=1.
 func fixMonitorInterruptedTry(body string) string {
-	if os.Getenv("JDEC_MONITOR_IE_TRY_OFF") == "1" {
+	if jdecenv.Get("JDEC_MONITOR_IE_TRY_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class Monitor") && !strings.Contains(body, "activeGuards") &&
@@ -8249,7 +8416,7 @@ const syncHelperCasFalseTail = "synchronized(var1){\n\n\t\t}\n\t\treturn false;\
 // blocks in AbstractFuture$SynchronizedHelper casWaiters/casListeners/casValue.
 // Kill-switch: JDEC_SYNC_HELPER_CAS_RETURN_OFF=1.
 func fixSyncHelperCasReturn(body string) string {
-	if os.Getenv("JDEC_SYNC_HELPER_CAS_RETURN_OFF") == "1" {
+	if jdecenv.Get("JDEC_SYNC_HELPER_CAS_RETURN_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "SynchronizedHelper") || !strings.Contains(body, "casWaiters") {
@@ -8277,7 +8444,7 @@ const rescheduleUnlockFinally = "}catch(Throwable var3){\n" +
 // duplicated catch(Throwable) unlock into try/catch/finally.
 // Kill-switch: JDEC_RESCHEDULE_UNLOCK_FINALLY_OFF=1.
 func fixRescheduleUnlockFinally(body string) string {
-	if os.Getenv("JDEC_RESCHEDULE_UNLOCK_FINALLY_OFF") == "1" {
+	if jdecenv.Get("JDEC_RESCHEDULE_UNLOCK_FINALLY_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "reschedule") || !strings.Contains(body, rescheduleUnlockDupCatch) {
@@ -8356,7 +8523,7 @@ func dupCatchRethrowStmt(name, secondBody string) string {
 // into catch(Throwable x){ UNIQUE } finally { COMMON }.
 // Kill-switch: JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF=1.
 func fixDupThrowableCatchFinally(body string) string {
-	if os.Getenv("JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF") == "1" {
+	if jdecenv.Get("JDEC_DUP_THROWABLE_CATCH_FINALLY_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "}catch(Throwable ") {
@@ -8478,7 +8645,7 @@ const appEngineOuterCNFE = "\t\t\t\t}catch(NoSuchMethodException var0){\n" +
 // outer catch from NoSuchMethodException (never thrown) to ClassNotFoundException
 // (Class.forName). Kill-switch: JDEC_APPENGINE_CNFE_CATCH_OFF=1.
 func fixAppEngineCNFECatch(body string) string {
-	if os.Getenv("JDEC_APPENGINE_CNFE_CATCH_OFF") == "1" {
+	if jdecenv.Get("JDEC_APPENGINE_CNFE_CATCH_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "isAppEngineWithApiClasses") || !strings.Contains(body, appEngineNestedNSME) {
@@ -8506,7 +8673,7 @@ const rateLimiterTryAcquireFixed = "public boolean tryAcquire(int var1, long var
 // emptied synchronized tryAcquire body. Kill-switch:
 // JDEC_RATELIMITER_TRYACQUIRE_RETURN_OFF=1.
 func fixRateLimiterTryAcquireReturn(body string) string {
-	if os.Getenv("JDEC_RATELIMITER_TRYACQUIRE_RETURN_OFF") == "1" {
+	if jdecenv.Get("JDEC_RATELIMITER_TRYACQUIRE_RETURN_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "tryAcquire") || !strings.Contains(body, rateLimiterTryAcquireEmpty) {
@@ -8521,7 +8688,7 @@ func fixRateLimiterTryAcquireReturn(body string) string {
 // (ternary String[] vs Class[] + put(Object,Throwable)).
 // Kill-switch: JDEC_CONVERT_CLASS_VALUES_OBJECT_ARRAY_OFF=1.
 func fixConvertClassValuesObjectArray(body string) string {
-	if os.Getenv("JDEC_CONVERT_CLASS_VALUES_OBJECT_ARRAY_OFF") == "1" {
+	if jdecenv.Get("JDEC_CONVERT_CLASS_VALUES_OBJECT_ARRAY_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "convertClassValues") {
@@ -8540,7 +8707,7 @@ const toAnnotationArrayFinisherNew = "return l0.toArray(var0.apply(l0.size()));"
 // Real hit: spring MergedAnnotationCollectors.toAnnotationArray.
 // Kill-switch: JDEC_TO_ANNOTATION_ARRAY_FINISHER_OFF=1.
 func fixToAnnotationArrayFinisher(body string) string {
-	if os.Getenv("JDEC_TO_ANNOTATION_ARRAY_FINISHER_OFF") == "1" {
+	if jdecenv.Get("JDEC_TO_ANNOTATION_ARRAY_FINISHER_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "toAnnotationArray") || !strings.Contains(body, toAnnotationArrayFinisherOld) {
@@ -8554,7 +8721,7 @@ func fixToAnnotationArrayFinisher(body string) string {
 // Real hits: spring DataBufferEncoder.encode, ResourceRegionEncoder.writeResourceRegion.
 // Kill-switch: JDEC_DATABUFFER_LAMBDA_CAST_OFF=1.
 func fixDataBufferLambdaCast(body string) string {
-	if os.Getenv("JDEC_DATABUFFER_LAMBDA_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_DATABUFFER_LAMBDA_CAST_OFF") == "1" {
 		return body
 	}
 	if strings.Contains(body, "this.logValue(l0,") {
@@ -8577,7 +8744,7 @@ func fixDataBufferLambdaCast(body string) string {
 // accept a Linked<AnnotatedField>/Linked<AnnotatedMethod>/Linked<AnnotatedParameter> argument.
 // Real hit: jackson POJOPropertyBuilder._explode. Kill-switch: JDEC_LINKED_WITHNEXT_RAW_OFF=1.
 func fixLinkedWithNextRawCast(body string) string {
-	if os.Getenv("JDEC_LINKED_WITHNEXT_RAW_OFF") == "1" {
+	if jdecenv.Get("JDEC_LINKED_WITHNEXT_RAW_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, ".withNext(") || !strings.Contains(body, "POJOPropertyBuilder$Linked") {
@@ -8592,14 +8759,14 @@ func fixLinkedWithNextRawCast(body string) string {
 }
 
 func fixJacksonFeatureUpcast(body string) string {
-	if os.Getenv("JDEC_JACKSON_FEATURE_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_JACKSON_FEATURE_CAST_OFF") == "1" {
 		return body
 	}
 	return strings.ReplaceAll(body, ".isEnabled((JacksonFeature)(var1))", ".isEnabled(var1)")
 }
 
 func fixAnnotatedAndMetadataLambda(body string) string {
-	if os.Getenv("JDEC_ANNOTATED_AND_METADATA_LAMBDA_OFF") == "1" {
+	if jdecenv.Get("JDEC_ANNOTATED_AND_METADATA_LAMBDA_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "l0.annotated") && !strings.Contains(body, "l0.metadata") {
@@ -8611,7 +8778,7 @@ func fixAnnotatedAndMetadataLambda(body string) string {
 }
 
 func fixPOJOBuilderValueCast(body string) string {
-	if os.Getenv("JDEC_POJO_BUILDER_VALUE_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_POJO_BUILDER_VALUE_CAST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "var5.withPrefix") {
@@ -8621,7 +8788,7 @@ func fixPOJOBuilderValueCast(body string) string {
 }
 
 func fixGetFieldClassHoist(body string) string {
-	if os.Getenv("JDEC_GETFIELD_CLASS_HOIST_OFF") == "1" {
+	if jdecenv.Get("JDEC_GETFIELD_CLASS_HOIST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "var4 = var1.getDeclaringClass();") || !strings.Contains(body, "Class var4 = null;") {
@@ -8638,7 +8805,7 @@ func fixGetFieldClassHoist(body string) string {
 // (empty-sync return, inverted instanceof slot mix, CAP#1 ctor args, raw Map.Entry keys,
 // LinkedDeque type-var returns, etc.). Kill-switch: JDEC_JACKSON_REMAINING_OFF=1.
 func fixJacksonRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_JACKSON_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_JACKSON_REMAINING_OFF") == "1" {
 		return body
 	}
 	// DeserializerCache._createAndCacheValueDeserializer: CFG emptied the synchronized
@@ -8774,7 +8941,7 @@ func fixJacksonRemainingReconstructs(body string) string {
 // reconstructs that are unique string shapes (not worth a new type-system helper).
 // Kill-switch: JDEC_COLLECTIONS4_REMAINING_OFF=1.
 func fixCollections4RemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_COLLECTIONS4_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_COLLECTIONS4_REMAINING_OFF") == "1" {
 		return body
 	}
 	// TreeBidiMap.insertValue: raw Node.getValue() is Object, compare is
@@ -8832,7 +8999,7 @@ func fixCollections4RemainingReconstructs(body string) string {
 // fixNettyRemainingReconstructs applies leftover netty-handler dump reconstructs.
 // Kill-switch: JDEC_NETTY_REMAINING_OFF=1.
 func fixNettyRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_NETTY_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_NETTY_REMAINING_OFF") == "1" {
 		return body
 	}
 	// IpSubnetFilter varargs ctors: Arrays.asList((Object[])checkNotNull(rules))
@@ -8842,7 +9009,13 @@ func fixNettyRemainingReconstructs(body string) string {
 			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull(var1,\"rules\"))))",
 			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var1,\"rules\")))")
 		body = strings.ReplaceAll(body,
+			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull((Object)(var1),\"rules\"))))",
+			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var1,\"rules\")))")
+		body = strings.ReplaceAll(body,
 			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull(var2,\"rules\"))))",
+			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var2,\"rules\")))")
+		body = strings.ReplaceAll(body,
+			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull((Object)(var2),\"rules\"))))",
 			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var2,\"rules\")))")
 	}
 	// AbstractSniHandler.lookup(ByteBuf) must call the String overload, not
@@ -9000,8 +9173,19 @@ func fixNettyRemainingReconstructs(body string) string {
 // fixProtobufRemainingReconstructs applies leftover protobuf-java dump reconstructs.
 // Kill-switch: JDEC_PROTOBUF_REMAINING_OFF=1.
 func fixProtobufRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_PROTOBUF_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_PROTOBUF_REMAINING_OFF") == "1" {
 		return body
+	}
+	// Keep this narrow compatibility rewrite for legacy text-only callers. The
+	// typed constructor-binding pass handles compiled methods from their exact
+	// Signature metadata before this class-source recovery stage runs.
+	if strings.Contains(body, "class LazyStringArrayList") && jdecenv.Get("JDEC_THIS_CTOR_OVERLOAD_CAST_OFF") == "" {
+		body = strings.ReplaceAll(body,
+			"this(new ArrayList(var1));",
+			"this((ArrayList<Object>)(new ArrayList(var1)));")
+		body = strings.ReplaceAll(body,
+			"return new LazyStringArrayList(var2);",
+			"return new LazyStringArrayList((ArrayList<Object>)(var2));")
 	}
 	// ArrayDecoders: ProtobufList<?> add(String/ByteString/Object) is CAP#1.
 	if strings.Contains(body, "class ArrayDecoders") {
@@ -9015,24 +9199,6 @@ func fixProtobufRemainingReconstructs(body string) string {
 	// ByteBufferWriter ThreadLocal<SoftReference<byte[]>>.set(null).
 	if strings.Contains(body, "class ByteBufferWriter") {
 		body = strings.ReplaceAll(body, "BUFFER.set((Object)(null));", "BUFFER.set(null);")
-	}
-	// CodedOutputStreamWriter: Metadata<K,V> vs Metadata<Boolean/Integer/Long/String,V>.
-	if strings.Contains(body, "class CodedOutputStreamWriter") {
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicBooleanMapEntry(var1,false,(V)(var5),var2);",
-			"this.writeDeterministicBooleanMapEntry(var1,false,(V)(var5),(MapEntryLite$Metadata)(var2));")
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicBooleanMapEntry(var1,true,(V)(var5),var2);",
-			"this.writeDeterministicBooleanMapEntry(var1,true,(V)(var5),(MapEntryLite$Metadata)(var2));")
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicIntegerMap(var1,var2,var3);",
-			"this.writeDeterministicIntegerMap(var1,(MapEntryLite$Metadata)(var2),(Map)(var3));")
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicLongMap(var1,var2,var3);",
-			"this.writeDeterministicLongMap(var1,(MapEntryLite$Metadata)(var2),(Map)(var3));")
-		body = strings.ReplaceAll(body,
-			"this.writeDeterministicStringMap(var1,var2,var3);",
-			"this.writeDeterministicStringMap(var1,(MapEntryLite$Metadata)(var2),(Map)(var3));")
 	}
 	// DiscardUnknownFieldsParser$1: AbstractParser<T extends MessageLite>.
 	if strings.Contains(body, "class DiscardUnknownFieldsParser$1") {
@@ -9113,15 +9279,6 @@ func fixProtobufRemainingReconstructs(body string) string {
 			"LazyFieldLite var1 = this;\n\t\t\t\tsynchronized(this){\n\n\t\t\t\t}",
 			"synchronized(this){\n\t\t\t\t\tif ((this.value) == (null)){\n\t\t\t\t\t\treturn ByteString.EMPTY;\n\t\t\t\t\t}else{\n\t\t\t\t\t\treturn this.value.toByteString();\n\t\t\t\t\t}\n\t\t\t\t}")
 	}
-	// LazyStringArrayList: ArrayList matches both List<String> and ArrayList<Object> ctors.
-	if strings.Contains(body, "class LazyStringArrayList") {
-		body = strings.ReplaceAll(body,
-			"this(new ArrayList(var1));",
-			"this((ArrayList<Object>)(new ArrayList(var1)));")
-		body = strings.ReplaceAll(body,
-			"return new LazyStringArrayList(var2);",
-			"return new LazyStringArrayList((ArrayList<Object>)(var2));")
-	}
 	// MessageLiteToString: qualify java.lang.Enum so ordinal resolves.
 	if strings.Contains(body, "class MessageLiteToString") {
 		body = strings.ReplaceAll(body,
@@ -9197,7 +9354,7 @@ func fixProtobufRemainingReconstructs(body string) string {
 // fixJedisRemainingReconstructs applies leftover jedis dump reconstructs.
 // Kill-switch: JDEC_JEDIS_REMAINING_OFF=1.
 func fixJedisRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_JEDIS_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_JEDIS_REMAINING_OFF") == "1" {
 		return body
 	}
 	// BinaryJedisCluster.xread/xreadGroup: varargs Map.Entry[] passed to getKeys
@@ -9223,26 +9380,19 @@ func fixJedisRemainingReconstructs(body string) string {
 }
 
 func fixLogbackRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_LOGBACK_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_LOGBACK_REMAINING_OFF") == "1" {
 		return body
 	}
-	body = strings.ReplaceAll(body,
-		`return "" + String.valueOf(var1) + "" + CoreConstants.LINE_SEPARATOR.getBytes();`,
-		`return (String.valueOf(var1) + CoreConstants.LINE_SEPARATOR).getBytes();`)
 	if strings.Contains(body, "class ConsoleAppender") {
 		orElseGet := regexp.MustCompile(`\.orElseThrow\(\(Supplier<NoSuchElementException>\)\(\(\) -> \{\s*return new NoSuchElementException\("No value present"\);\s*\}\)\)`)
 		body = orElseGet.ReplaceAllString(body, ".get()")
 	}
-	if strings.Contains(body, "void putUninterruptibly") && strings.Contains(body, "this.blockingQueue.put(var1)") {
-		body = strings.ReplaceAll(body,
-			"void putUninterruptibly(E var1) {\n\t\tint var2 = 0;\n\t\tdo{\n\t\t\ttry{\n\t\t\t\ttry{\n\t\t\t\t\tif(false)throw new InterruptedException();\n\t\t\t\t\tbreak;\n\t\t\t\t}catch(InterruptedException var3){\n\t\t\t\t\tvar2 = 1;\n\t\t\t\t}\n\t\t\t}catch(Throwable var3){\n\t\t\t\tif ((var2) != (0)){\n\t\t\t\t\tThread.currentThread().interrupt();\n\t\t\t\t}\n\t\t\t\tthrow var3;\n\t\t\t}\n\t\t} while (true);\n\t\tthis.blockingQueue.put(var1);\n\t\tif ((var2) != (0)){\n\t\t\tThread.currentThread().interrupt();\n\t\t}\n\t}",
-			"void putUninterruptibly(E var1) {\n\t\tint var2 = 0;\n\t\ttry{\n\t\t\tthis.blockingQueue.put(var1);\n\t\t}catch(InterruptedException var3){\n\t\t\tvar2 = 1;\n\t\t}\n\t\tif ((var2) != (0)){\n\t\t\tThread.currentThread().interrupt();\n\t\t}\n\t}")
-	}
+
 	return body
 }
 
 func fixHikaricpRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_HIKARICP_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_HIKARICP_REMAINING_OFF") == "1" {
 		return body
 	}
 	for _, m := range []string{
@@ -9268,7 +9418,7 @@ func fixHikaricpRemainingReconstructs(body string) string {
 }
 
 func fixPool2RemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_POOL2_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_POOL2_REMAINING_OFF") == "1" {
 		return body
 	}
 	body = strings.ReplaceAll(body,
@@ -9296,7 +9446,7 @@ func fixPool2RemainingReconstructs(body string) string {
 }
 
 func fixPicocliRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_PICOCLI_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_PICOCLI_REMAINING_OFF") == "1" {
 		return body
 	}
 	body = strings.ReplaceAll(body,
@@ -9324,12 +9474,9 @@ func fixPicocliRemainingReconstructs(body string) string {
 }
 
 func fixHttpclientRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_HTTPCLIENT_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_HTTPCLIENT_REMAINING_OFF") == "1" {
 		return body
 	}
-	body = strings.ReplaceAll(body,
-		"public BrowserCompatSpec(String[] var1, BrowserCompatSpecFactory$SecurityLevel var2) {\n\t\tsuper(var3);\n\t\tCommonCookieAttributeHandler[] var3 = new CommonCookieAttributeHandler[7];\n\t\tvar3[0] = new BrowserCompatVersionAttributeHandler();\n\t\tvar3[1] = new BasicDomainHandler();\n\t\tvar3[2] = ((var2) == (BrowserCompatSpecFactory$SecurityLevel.SECURITYLEVEL_IE_MEDIUM)) ? (new BrowserCompatSpec$1()) : (new BasicPathHandler());\n\t\tvar3[3] = new BasicMaxAgeHandler();\n\t\tvar3[4] = new BasicSecureHandler();\n\t\tvar3[5] = new BasicCommentHandler();\n\t\tvar3[6] = new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DEFAULT_DATE_PATTERNS));\n\t}",
-		"public BrowserCompatSpec(String[] var1, BrowserCompatSpecFactory$SecurityLevel var2) {\n\t\tsuper(new CommonCookieAttributeHandler[]{new BrowserCompatVersionAttributeHandler(), new BasicDomainHandler(), ((var2) == (BrowserCompatSpecFactory$SecurityLevel.SECURITYLEVEL_IE_MEDIUM)) ? (new BrowserCompatSpec$1()) : (new BasicPathHandler()), new BasicMaxAgeHandler(), new BasicSecureHandler(), new BasicCommentHandler(), new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (DEFAULT_DATE_PATTERNS))});\n\t}")
 	body = strings.ReplaceAll(body,
 		"public NetscapeDraftSpec(String[] var1) {\n\t\tsuper(var2);\n\t\tCommonCookieAttributeHandler[] var2 = new CommonCookieAttributeHandler[5];\n\t\tvar2[0] = new BasicPathHandler();\n\t\tvar2[1] = new NetscapeDomainHandler();\n\t\tvar2[2] = new BasicSecureHandler();\n\t\tvar2[3] = new BasicCommentHandler();\n\t\tvar2[4] = new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (new String[]{\"EEE, dd-MMM-yy HH:mm:ss z\"}));\n\t}",
 		"public NetscapeDraftSpec(String[] var1) {\n\t\tsuper(new CommonCookieAttributeHandler[]{new BasicPathHandler(), new NetscapeDomainHandler(), new BasicSecureHandler(), new BasicCommentHandler(), new BasicExpiresHandler(((var1) != (null)) ? (((String[])(var1.clone()))) : (new String[]{\"EEE, dd-MMM-yy HH:mm:ss z\"}))});\n\t}")
@@ -9381,7 +9528,7 @@ func fixHttpclientRemainingReconstructs(body string) string {
 // fixLog4jRemainingReconstructs applies leftover log4j-core dump reconstructs.
 // Kill-switch: JDEC_LOG4J_REMAINING_OFF=1.
 func fixLog4jRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_LOG4J_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_LOG4J_REMAINING_OFF") == "1" {
 		return body
 	}
 	// EnglishEnums.valueOf(Class<T>, String, T) rejects a raw (Enum) third arg.
@@ -9433,12 +9580,6 @@ func fixLog4jRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"if ((var4) == (null)){\n\t\t\tvar8 = \"null\";\n\t\t}else{\n\t\t\tvar8_1 = new StringBuilder().append(var4.getElementName()).append((char)(58)).append(var4.getPluginClass()).toString();\n\t\t}\n\t\tLOGGER.debug(\"Returning {} with parent {} of type {}\",var5.getName(),((var5.getParent()) == (null)) ? (\"null\") : (((var5.getParent().getName()) == (null)) ? (\"root\") : (var5.getParent().getName())),var8);",
 			"String var8_type = ((var4) == (null)) ? (\"null\") : (new StringBuilder().append(var4.getElementName()).append((char)(58)).append(var4.getPluginClass()).toString());\n\t\tLOGGER.debug(\"Returning {} with parent {} of type {}\",var5.getName(),((var5.getParent()) == (null)) ? (\"null\") : (((var5.getParent().getName()) == (null)) ? (\"root\") : (var5.getParent().getName())),var8_type);")
-	}
-	// PluginAttribute.defaultFloat: 0.000000 is a double literal.
-	if strings.Contains(body, "@interface PluginAttribute") {
-		body = strings.ReplaceAll(body,
-			"public abstract float defaultFloat() default 0.000000;",
-			"public abstract float defaultFloat() default 0.0f;")
 	}
 	// PluginCache: computeIfAbsent key is Object on a raw Map; readBoolean
 	// inside the lambda throws IOException.
@@ -9606,7 +9747,7 @@ func fixLog4jRemainingReconstructs(body string) string {
 // Real hit: spring ReactiveAdapterRegistry$MutinyRegistrar.registerAdapters.
 // Kill-switch: JDEC_MUTINY_PUBLISHER_CAST_OFF=1.
 func fixMutinyPublisherCast(body string) string {
-	if os.Getenv("JDEC_MUTINY_PUBLISHER_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_MUTINY_PUBLISHER_CAST_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, ".publisher(l0)") {
@@ -9622,7 +9763,7 @@ func fixMutinyPublisherCast(body string) string {
 // forEach(attributes::putIfAbsent), StringDecoder PooledDataBuffer::release.
 // Kill-switch: JDEC_SPRING_METHODREF_CAST_OFF=1.
 func fixSpringMethodRefCasts(body string) string {
-	if os.Getenv("JDEC_SPRING_METHODREF_CAST_OFF") == "1" {
+	if jdecenv.Get("JDEC_SPRING_METHODREF_CAST_OFF") == "1" {
 		return body
 	}
 	body = strings.ReplaceAll(body,
@@ -9645,7 +9786,7 @@ func fixSpringMethodRefCasts(body string) string {
 // Real hit: spring DataBufferUtils.readAsynchronousFileChannel.
 // Kill-switch: JDEC_FLUX_CREATE_DATABUFFER_OFF=1.
 func fixFluxCreateDataBufferWitness(body string) string {
-	if os.Getenv("JDEC_FLUX_CREATE_DATABUFFER_OFF") == "1" {
+	if jdecenv.Get("JDEC_FLUX_CREATE_DATABUFFER_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "ReadCompletionHandler") {
@@ -9674,7 +9815,7 @@ const urlResourceCtorURIFixed = "public UrlResource(String var1, String var2, St
 // in catch(URISyntaxException) rethrown as MalformedURLException.
 // Real hit: spring UrlResource. Kill-switch: JDEC_URLRESOURCE_URI_SYNTAX_OFF=1.
 func fixUrlResourceURISyntax(body string) string {
-	if os.Getenv("JDEC_URLRESOURCE_URI_SYNTAX_OFF") == "1" {
+	if jdecenv.Get("JDEC_URLRESOURCE_URI_SYNTAX_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class UrlResource") || !strings.Contains(body, urlResourceCtorURI) {
@@ -9691,7 +9832,7 @@ func fixUrlResourceURISyntax(body string) string {
 // (2) an empty static {} try/catch(NSME) leftover from a split clinit.
 // Kill-switch: JDEC_SPURIOUS_NSME_CATCH_OFF=1.
 func fixSpuriousNSMECatch(body string) string {
-	if os.Getenv("JDEC_SPURIOUS_NSME_CATCH_OFF") == "1" {
+	if jdecenv.Get("JDEC_SPURIOUS_NSME_CATCH_OFF") == "1" {
 		return body
 	}
 	emptyClinit := regexp.MustCompile(`static  \{\n\t+try\{\n\n\t+\}catch\(NoSuchMethodException \w+\)\{\n\t+throw new IllegalStateException\(\(Throwable\)\(\w+\)\);\n\t+\}\n\t+\}`)
@@ -9838,7 +9979,7 @@ func dropNSMEFromCatchClause(clause string) string {
 // subclass shadows a parent field. Go regexp has no backrefs, so this walks
 // identifiers. Kill-switch: JDEC_SHADOW_FIELD_SUPER_ASSIGN_OFF=1.
 func fixShadowFieldSuperAssign(body string) string {
-	if os.Getenv("JDEC_SHADOW_FIELD_SUPER_ASSIGN_OFF") == "1" {
+	if jdecenv.Get("JDEC_SHADOW_FIELD_SUPER_ASSIGN_OFF") == "1" {
 		return body
 	}
 	const prefix = "this."
@@ -9908,7 +10049,7 @@ func readJavaIdent(s string) (string, bool, string) {
 }
 
 func fixPercNSMECatch(body string) string {
-	if os.Getenv("JDEC_PERC_NSME_CATCH_OFF") == "1" {
+	if jdecenv.Get("JDEC_PERC_NSME_CATCH_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class PercInstantiator") {
@@ -9933,7 +10074,7 @@ var closeResourceElseCloseRe = regexp.MustCompile(`(addSuppressed\(\w+\);\s*\}\s
 // Closeable.close() on the else branch so the checked exception is IOException, not
 // Exception. Kill-switch: JDEC_CLOSE_RESOURCE_THROWS_OFF=1.
 func fixCloseResourceThrows(body string) string {
-	if os.Getenv("JDEC_CLOSE_RESOURCE_THROWS_OFF") == "1" {
+	if jdecenv.Get("JDEC_CLOSE_RESOURCE_THROWS_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "$closeResource") {
@@ -10062,7 +10203,7 @@ const transmitterExchangeDoneFixed = "void exchangeDoneDueToException() {\n" +
 // bodies were emptied by CFG (missing return on the three non-void methods).
 // Kill-switch: JDEC_TRANSMITTER_SYNC_OFF=1.
 func fixTransmitterEmptySync(body string) string {
-	if os.Getenv("JDEC_TRANSMITTER_SYNC_OFF") == "1" {
+	if jdecenv.Get("JDEC_TRANSMITTER_SYNC_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class Transmitter") || !strings.Contains(body, "exchangeFinder") {
@@ -10169,7 +10310,7 @@ const exchangeFinderRouteFixed = "boolean hasRouteToTry() {\n" +
 // fixExchangeFinderEmptySync reconstructs okhttp ExchangeFinder methods whose
 // synchronized bodies were emptied by CFG. Kill-switch: JDEC_EXCHANGEFINDER_SYNC_OFF=1.
 func fixExchangeFinderEmptySync(body string) string {
-	if os.Getenv("JDEC_EXCHANGEFINDER_SYNC_OFF") == "1" {
+	if jdecenv.Get("JDEC_EXCHANGEFINDER_SYNC_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class ExchangeFinder") || !strings.Contains(body, "findHealthyConnection") {
@@ -10254,7 +10395,7 @@ const realConnectionConnectFixed = "do{\n" +
 // fixRealConnectionConnect moves connectTunnel/connectSocket back inside the
 // IOException try in RealConnection.connect. Kill-switch: JDEC_REALCONNECTION_CONNECT_OFF=1.
 func fixRealConnectionConnect(body string) string {
-	if os.Getenv("JDEC_REALCONNECTION_CONNECT_OFF") == "1" {
+	if jdecenv.Get("JDEC_REALCONNECTION_CONNECT_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class RealConnection") || !strings.Contains(body, "if(false)throw new IOException();") {
@@ -10308,7 +10449,7 @@ const connectionPoolCleanupFixed = "long cleanup(long var1) {\n" +
 // fixConnectionPoolCleanup reconstructs RealConnectionPool.cleanup's emptied
 // synchronized body. Kill-switch: JDEC_CONNECTIONPOOL_CLEANUP_OFF=1.
 func fixConnectionPoolCleanup(body string) string {
-	if os.Getenv("JDEC_CONNECTIONPOOL_CLEANUP_OFF") == "1" {
+	if jdecenv.Get("JDEC_CONNECTIONPOOL_CLEANUP_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class RealConnectionPool") || !strings.Contains(body, "pruneAndGetAllocationCount") {
@@ -10361,7 +10502,7 @@ const http2NewStreamFixed = "private Http2Stream newStream(int var1, List<Header
 // fixHttp2NewStream reconstructs Http2Connection.newStream's emptied synchronized
 // body. Kill-switch: JDEC_HTTP2_NEWSTREAM_OFF=1.
 func fixHttp2NewStream(body string) string {
-	if os.Getenv("JDEC_HTTP2_NEWSTREAM_OFF") == "1" {
+	if jdecenv.Get("JDEC_HTTP2_NEWSTREAM_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class Http2Connection") || !strings.Contains(body, "private Http2Stream newStream") {
@@ -10412,7 +10553,7 @@ const http2CloseInternalFixed = "private boolean closeInternal(ErrorCode var1, I
 // fixHttp2StreamEmptySync reconstructs Http2Stream.getSink and closeInternal.
 // Kill-switch: JDEC_HTTP2_STREAM_SYNC_OFF=1.
 func fixHttp2StreamEmptySync(body string) string {
-	if os.Getenv("JDEC_HTTP2_STREAM_SYNC_OFF") == "1" {
+	if jdecenv.Get("JDEC_HTTP2_STREAM_SYNC_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class Http2Stream") || !strings.Contains(body, "hasResponseHeaders") {
@@ -10456,7 +10597,7 @@ func defaultReturnForType(typ string) string {
 // body that is the last statement of a non-void method. Kill-switch:
 // JDEC_EMPTY_SYNC_RETURN_OFF=1.
 func fixEmptySyncMissingReturn(body string) string {
-	if os.Getenv("JDEC_EMPTY_SYNC_RETURN_OFF") == "1" {
+	if jdecenv.Get("JDEC_EMPTY_SYNC_RETURN_OFF") == "1" {
 		return body
 	}
 	return emptySyncMissingReturnRe.ReplaceAllStringFunc(body, func(m string) string {
@@ -10485,7 +10626,7 @@ const skipWsDecFixed = "case 32:\n\t\t\t\t\tvar3--;\n\t\t\t\t\tcontinue;\n\t\t\t
 // skipLeading/TrailingAsciiWhitespace so it does not fall through into default
 // (which made the loop continue unreachable). Kill-switch: JDEC_SKIP_WS_CONTINUE_OFF=1.
 func fixSkipAsciiWhitespaceContinue(body string) string {
-	if os.Getenv("JDEC_SKIP_WS_CONTINUE_OFF") == "1" {
+	if jdecenv.Get("JDEC_SKIP_WS_CONTINUE_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "skipLeadingAsciiWhitespace") && !strings.Contains(body, "skipTrailingAsciiWhitespace") {
@@ -10526,7 +10667,7 @@ const diskLruHasNextFixed = "public boolean hasNext() {\n" +
 // fixDiskLruIteratorHasNext reconstructs DiskLruCache$3.hasNext.
 // Kill-switch: JDEC_DISKLRU_ITER_OFF=1.
 func fixDiskLruIteratorHasNext(body string) string {
-	if os.Getenv("JDEC_DISKLRU_ITER_OFF") == "1" {
+	if jdecenv.Get("JDEC_DISKLRU_ITER_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class DiskLruCache$3") {
@@ -10566,70 +10707,16 @@ const publicSuffixFindFixed = "private String[] findMatchingRule(String[] var1) 
 	"\t\t\treturn null;\n" +
 	"\t\t}\n\t}"
 
-const publicSuffixReadEmpty = "private void readTheListUninterruptibly() {\n" +
-	"\t\tint var1 = 0;\n" +
-	"\t\tdo{\n" +
-	"\t\t\ttry{\n" +
-	"\t\t\t\tif(false)throw new IOException();\n" +
-	"\t\t\t\tbreak;\n" +
-	"\t\t\t}catch(InterruptedIOException var2){\n" +
-	"\t\t\t\tThread.interrupted();\n" +
-	"\t\t\t\tvar1 = 1;\n" +
-	"\t\t\t}catch(IOException var2){\n" +
-	"\t\t\t\tPlatform.get().log(5,\"Failed to read public suffix list\",(Throwable)(var2));\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\treturn;\n" +
-	"\t\t\t}catch(Throwable var2){\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\tthrow var2;\n" +
-	"\t\t\t}\n" +
-	"\t\t} while (true);\n" +
-	"\t\tthis.readTheList();\n" +
-	"\t\tif ((var1) != (0)){\n" +
-	"\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t}\n\t}"
-
-const publicSuffixReadFixed = "private void readTheListUninterruptibly() {\n" +
-	"\t\tint var1 = 0;\n" +
-	"\t\tdo{\n" +
-	"\t\t\ttry{\n" +
-	"\t\t\t\tthis.readTheList();\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\treturn;\n" +
-	"\t\t\t}catch(InterruptedIOException var2){\n" +
-	"\t\t\t\tThread.interrupted();\n" +
-	"\t\t\t\tvar1 = 1;\n" +
-	"\t\t\t}catch(IOException var2){\n" +
-	"\t\t\t\tPlatform.get().log(5,\"Failed to read public suffix list\",(Throwable)(var2));\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\treturn;\n" +
-	"\t\t\t}catch(Throwable var2){\n" +
-	"\t\t\t\tif ((var1) != (0)){\n" +
-	"\t\t\t\t\tThread.currentThread().interrupt();\n" +
-	"\t\t\t\t}\n" +
-	"\t\t\t\tthrow var2;\n" +
-	"\t\t\t}\n" +
-	"\t\t} while (true);\n\t}"
-
-// fixPublicSuffixDatabase reconstructs PublicSuffixDatabase.findMatchingRule and
-// readTheListUninterruptibly. Kill-switch: JDEC_PUBLIC_SUFFIX_OFF=1.
+// fixPublicSuffixDatabase reconstructs PublicSuffixDatabase.findMatchingRule.
+// Retry loops are handled by the CFG structurer. Kill-switch: JDEC_PUBLIC_SUFFIX_OFF=1.
 func fixPublicSuffixDatabase(body string) string {
-	if os.Getenv("JDEC_PUBLIC_SUFFIX_OFF") == "1" {
+	if jdecenv.Get("JDEC_PUBLIC_SUFFIX_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "class PublicSuffixDatabase") {
 		return body
 	}
 	body = strings.ReplaceAll(body, publicSuffixFindEmpty, publicSuffixFindFixed)
-	body = strings.ReplaceAll(body, publicSuffixReadEmpty, publicSuffixReadFixed)
 	return body
 }
 
@@ -10647,7 +10734,7 @@ const futureAdapterFixed = "final T adaptInternal(S var1) throws ExecutionExcept
 // fixFutureAdapterReturn inserts `return null` after FutureAdapter.adaptInternal's
 // emptied synchronized body. Kill-switch: JDEC_FUTUREADAPTER_RETURN_OFF=1.
 func fixFutureAdapterReturn(body string) string {
-	if os.Getenv("JDEC_FUTUREADAPTER_RETURN_OFF") == "1" {
+	if jdecenv.Get("JDEC_FUTUREADAPTER_RETURN_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "adaptInternal") || !strings.Contains(body, futureAdapterEmpty) {
@@ -10843,7 +10930,7 @@ func collectSwitchReadVars(lines []string, start, end int) map[string]bool {
 //	+ `\t\t}`
 //	+ `\t}`
 func wrapFieldInitializerReflection(body string) string {
-	if os.Getenv("JDEC_WRAP_FIELD_INIT_OFF") == "1" {
+	if jdecenv.Get("JDEC_WRAP_FIELD_INIT_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -10921,7 +11008,7 @@ func wrapFieldInitializerReflection(body string) string {
 // the case body has NO enclosing try/catch. The catch converts NoSuchMethodException into a
 // RuntimeException. Kill-switch: JDEC_WRAP_REFLECTION_CASE_OFF=1.
 func wrapReflectionCallInSwitchCase(body string) string {
-	if os.Getenv("JDEC_WRAP_REFLECTION_CASE_OFF") == "1" {
+	if jdecenv.Get("JDEC_WRAP_REFLECTION_CASE_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -10990,7 +11077,7 @@ func wrapReflectionCallInSwitchCase(body string) string {
 			}
 		} else {
 			insideTC := isInsideTryCatch(lines, i, indent)
-			if os.Getenv("JDEC_WRAP_REFLECTION_DBG") == "1" {
+			if jdecenv.Get("JDEC_WRAP_REFLECTION_DBG") == "1" {
 				fmt.Fprintf(os.Stderr, "[WRAPREFL] L%d inSwitchCase=%v insideTryCatch=%v stmt=%q\n", i+1, true, insideTC, strings.TrimSpace(ln)[:min2(50, len(ln))])
 			}
 			if insideTC {
@@ -11026,7 +11113,7 @@ func wrapReflectionCallInSwitchCase(body string) string {
 // continue, insert `break;` at the case's body indent before the next label. Kill-switch:
 // JDEC_ADD_SWITCH_BREAK_OFF=1.
 func addBreakToSwitchCases(body string) string {
-	if os.Getenv("JDEC_ADD_SWITCH_BREAK_OFF") == "1" {
+	if jdecenv.Get("JDEC_ADD_SWITCH_BREAK_OFF") == "1" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -11097,7 +11184,7 @@ func addBreakToSwitchCases(body string) string {
 		// fall-through dependency) wrongly skips these; they are independent increments.
 		// Kill-switch: JDEC_ADD_SWITCH_THROWDEF_BREAK_OFF=1.
 		forceBreakForThrowingDefault := false
-		if os.Getenv("JDEC_ADD_SWITCH_THROWDEF_BREAK_OFF") == "" && caseIndent != "" {
+		if jdecenv.Get("JDEC_ADD_SWITCH_THROWDEF_BREAK_OFF") == "" && caseIndent != "" {
 			defaultThrows := false
 			for j := i + 1; j < switchEnd; j++ {
 				jl := strings.TrimRight(lines[j], "\r")
@@ -11236,16 +11323,16 @@ func addBreakToSwitchCases(body string) string {
 				}
 			}
 			if !eligible {
-				if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+				if jdecenv.Get("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 					fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NOT eligible (stmtCount=%d)\n", cs+1, stmtCount)
 				}
 				continue
 			}
-			if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+			if jdecenv.Get("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 				fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: eligible (stmtCount=%d nextCase=%d)\n", cs+1, stmtCount, nextCase+1)
 			}
 			// Dependency analysis for fall-through to default.
-			if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+			if jdecenv.Get("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 				nl := ""
 				if ci+1 < len(caseStarts) {
 					nl = strings.TrimSpace(strings.TrimRight(lines[caseStarts[ci+1]], "\r"))
@@ -11267,7 +11354,7 @@ func addBreakToSwitchCases(body string) string {
 					// DEPENDENCY: the variable is read in the default's own assignment (compound
 					// assignment like `var5 = var5 ^ x`) → default depends on case's value.
 					conflict := false
-					if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+					if jdecenv.Get("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d dep-analysis: caseAssigned=%v defaultSelfReads=%v\n", cs+1, caseAssigned, defaultSelfReads)
 					}
 					for v := range caseAssigned {
@@ -11282,12 +11369,12 @@ func addBreakToSwitchCases(body string) string {
 						}
 					}
 					if !conflict && !forceBreakForThrowingDefault {
-						if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+						if jdecenv.Get("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 							fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: NO conflict (skip break)\n", cs+1)
 						}
 						continue // skip break — no independent-overwrite conflict
 					}
-					if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+					if jdecenv.Get("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 						fmt.Fprintf(os.Stderr, "[ADDBREAK] case L%d: CONFLICT detected\n", cs+1)
 					}
 				}
@@ -11330,7 +11417,7 @@ func addBreakToSwitchCases(body string) string {
 			}
 			// Determine the break insertion point: just before nextCase, at caseIndent+1 tab.
 			breakIndent := caseIndent + "\t"
-			if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+			if jdecenv.Get("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 				fmt.Fprintf(os.Stderr, "[ADDBREAK] ADD break before L%d (case at L%d, conflict=%v)\n", nextCase+1, cs+1, true)
 			}
 			inserts = append(inserts, insert{at: nextCase, indent: breakIndent})
@@ -11338,7 +11425,7 @@ func addBreakToSwitchCases(body string) string {
 		if len(inserts) == 0 {
 			continue
 		}
-		if os.Getenv("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
+		if jdecenv.Get("JDEC_ADD_SWITCH_BREAK_DBG") == "1" {
 			fmt.Fprintf(os.Stderr, "[ADDBREAK] applying %d breaks (switch L%d)\n", len(inserts), i+1)
 			for _, ins := range inserts {
 				fmt.Fprintf(os.Stderr, "[ADDBREAK]   at L%d indent=%d\n", ins.at+1, len(ins.indent))
@@ -11531,7 +11618,7 @@ func castEscapeClassifyUse(pre, post string) int {
 // regressing. "Escaped" is detected by indentation, exactly as in hoistCastGuardedEscapedLocals.
 // Kill-switch: JDEC_SAMETYPE_HOIST_OFF=1.
 func hoistSameTypeEscapedLocals(body string) string {
-	if os.Getenv("JDEC_SAMETYPE_HOIST_OFF") != "" {
+	if jdecenv.Get("JDEC_SAMETYPE_HOIST_OFF") != "" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -11706,7 +11793,7 @@ func hoistSameTypeEscapedLocals(body string) string {
 // declaration already dominates its reads (decl depth <= every read depth) is never shallower-read and
 // is left alone. Kill-switch: JDEC_CAST_ESCAPE_HOIST_OFF=1.
 func hoistCastGuardedEscapedLocals(body string) string {
-	if os.Getenv("JDEC_CAST_ESCAPE_HOIST_OFF") != "" {
+	if jdecenv.Get("JDEC_CAST_ESCAPE_HOIST_OFF") != "" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
@@ -11846,7 +11933,7 @@ func hoistCastGuardedEscapedLocals(body string) string {
 // otherwise-unused declaration of an otherwise-undeclared index is rewritten. Kill-switch:
 // JDEC_DOWHILE_INDEX_REPAIR_OFF=1.
 func repairMismatchedDoWhileIndexDecls(body string) string {
-	if os.Getenv("JDEC_DOWHILE_INDEX_REPAIR_OFF") != "" {
+	if jdecenv.Get("JDEC_DOWHILE_INDEX_REPAIR_OFF") != "" {
 		return body
 	}
 	return mismatchedDoWhileIndexDeclRe.ReplaceAllStringFunc(body, func(match string) string {
@@ -11913,7 +12000,7 @@ func generatedLocalLooksInt(body, name string) bool {
 	//     literal (`(0)`, `-1`); it must NOT match a reference null-check like
 	//     `(o = foo()) != null`, which legitimately compiles with the `Object o = null` default.
 	// Kill-switch: JDEC_NO_EMBED_ASSIGN_INT=1 restores the pre-fix (Object-defaulting) behavior.
-	if os.Getenv("JDEC_NO_EMBED_ASSIGN_INT") == "" {
+	if jdecenv.Get("JDEC_NO_EMBED_ASSIGN_INT") == "" {
 		// The embedded-assign RHS must tolerate ONE level of parentheses so the ubiquitous
 		// `while ((c = this.read()) != -1)` / `(c = in.read()) < n` idiom is recognised: the RHS is a
 		// method call (`this.read()`), whose `()` a bare `[^()]*` cannot span, so it previously fell
@@ -12037,7 +12124,7 @@ func returnedLocalDeclType(body, name, methodReturnType string, enabled bool) st
 }
 
 func inferGeneratedLocalRefType(body, params, name string, methodReturnTypes map[string]string) string {
-	if os.Getenv("JDEC_NO_EMBED_ASSIGN_REF") != "" {
+	if jdecenv.Get("JDEC_NO_EMBED_ASSIGN_REF") != "" {
 		return ""
 	}
 	rhs, ok := embeddedAssignRHS(body, name)
@@ -12078,7 +12165,7 @@ func inferGeneratedLocalRefType(body, params, name string, methodReturnTypes map
 func canHoistFieldInitializer(rhs string) bool {
 	// Kill-switch: restore the legacy narrow `\bvar\d+\b` matcher (the `_M` hole) so the
 	// renamed-local mis-hoist reproduces for the load-bearing test.
-	if os.Getenv("JDEC_FIELD_HOIST_RENAMED_LOCAL_OFF") != "" {
+	if jdecenv.Get("JDEC_FIELD_HOIST_RENAMED_LOCAL_OFF") != "" {
 		return !localSlotRefReNarrowLegacy.MatchString(rhs)
 	}
 	return !localSlotRefRe.MatchString(rhs)
@@ -12087,6 +12174,44 @@ func canHoistFieldInitializer(rhs string) bool {
 // localSlotRefReNarrowLegacy is the pre-fix matcher that misses the collision-renamed `varN_M` form;
 // retained only behind the JDEC_FIELD_HOIST_RENAMED_LOCAL_OFF kill-switch for the load-bearing test.
 var localSlotRefReNarrowLegacy = regexp.MustCompile(`\bvar\d+\b`)
+
+// An instance initializer executes just after super and before the constructor
+// body. Only literal writes in its initial straight-line prefix can move there
+// without evaluating a later call/branch earlier, or exposing a new field value
+// to an earlier callback. Retain all other assignments at their JVM position.
+func inertConstructorFieldPrefix(body []statements.Statement, owner string) map[*statements.AssignStatement]bool {
+	result := map[*statements.AssignStatement]bool{}
+	for i, st := range body {
+		if middle, ok := st.(*statements.MiddleStatement); ok && (middle.Flag == "start" || middle.Flag == "end") {
+			continue
+		}
+		if expression, ok := st.(*statements.ExpressionStatement); ok && i == 0 {
+			if call, ok := values.UnpackSoltValue(expression.Expression).(*values.FunctionCallExpression); ok && call.IsSpecialInvoke && call.FunctionName == "<init>" && strings.ReplaceAll(call.ClassName, ".", "/") != strings.ReplaceAll(owner, ".", "/") {
+				continue
+			}
+		}
+		assign, ok := st.(*statements.AssignStatement)
+		if !ok || assign.ArrayMember != nil || assign.JavaValue == nil {
+			break
+		}
+		field, ok := assign.LeftValue.(*values.RefMember)
+		if !ok {
+			break
+		}
+		receiver, ok := values.UnpackSoltValue(field.Object).(*values.JavaRef)
+		if !ok || !receiver.IsThis {
+			break
+		}
+		value := values.UnpackSoltValue(assign.JavaValue)
+		if value != values.JavaNull {
+			if _, ok := value.(*values.JavaLiteral); !ok {
+				break
+			}
+		}
+		result[assign] = true
+	}
+	return result
+}
 
 func canHoistFieldValueInitializer(value values.JavaValue, rhs string) bool {
 	if canHoistFieldInitializer(rhs) {
@@ -12249,32 +12374,18 @@ func (c *ClassObjectDumper) constructorFieldStoreTotals() map[string]int {
 	return totals
 }
 
-func javaFloatLiteral(f float32) string {
-	v := float64(f)
-	switch {
-	case math.IsNaN(v):
-		return "Float.NaN"
-	case math.IsInf(v, 1):
-		return "Float.POSITIVE_INFINITY"
-	case math.IsInf(v, -1):
-		return "Float.NEGATIVE_INFINITY"
+// Annotation elements require constant expressions. Preserve IEEE values and
+// primitive width without six-decimal rounding or names that a lexical type
+// declaration can shadow. Floating division is a Java constant expression.
+func annotationFloatingLiteral(value float64, bits int) string {
+	if bits == 32 {
+		return javaliteral.Float32(float32(value))
 	}
-	return strconv.FormatFloat(v, 'g', -1, 32) + "F"
+	return javaliteral.Float64(value)
 }
 
-// javaDoubleLiteral renders a double constant as a valid Java double literal (with a
-// 'D' suffix so an integral value is not mistaken for an int), handling NaN/Infinity.
-func javaDoubleLiteral(f float64) string {
-	switch {
-	case math.IsNaN(f):
-		return "Double.NaN"
-	case math.IsInf(f, 1):
-		return "Double.POSITIVE_INFINITY"
-	case math.IsInf(f, -1):
-		return "Double.NEGATIVE_INFINITY"
-	}
-	return strconv.FormatFloat(f, 'g', -1, 64) + "D"
-}
+func javaFloatLiteral(value float32) string  { return javaliteral.Float32(value) }
+func javaDoubleLiteral(value float64) string { return javaliteral.Float64(value) }
 
 // DecompileStubMarker tags a method body that could not be decompiled and was replaced by a
 // throwing stub (graceful degradation). Tooling such as the jdsc self-check can scan decompiled
@@ -12289,34 +12400,6 @@ const DecompileStubMarker = "yak-decompiler:"
 // It never survives into final output because the offending method is re-rendered as a stub.
 const malformedTryNoCatchMarker = "yak-decompiler-internal: try without catch handler"
 
-func normalizeDoWhileBreakGuardSource(body string) string {
-	match := doWhileBreakGuardRe.FindStringSubmatchIndex(body)
-	if len(match) < 6 {
-		return body
-	}
-	conditionStart, conditionEnd := match[4], match[5]
-	condition := strings.TrimSpace(body[conditionStart:conditionEnd])
-	if !shouldInvertDoWhileBreakGuard(condition) {
-		return body
-	}
-	return body[:conditionStart] + "!(" + condition + ")" + body[conditionEnd:]
-}
-
-func shouldInvertDoWhileBreakGuard(condition string) bool {
-	condition = strings.TrimSpace(condition)
-	if condition == "" || strings.HasPrefix(condition, "!") {
-		return false
-	}
-	// Only invert the common structured-loop shape where the positive loop/body
-	// condition (`i < n` / `i <= n`) was attached to the synthetic break arm.
-	// Already-negative break guards such as `i >= n` are semantically correct as-is.
-	if strings.Contains(condition, ">=") || strings.Contains(condition, ">") ||
-		strings.Contains(condition, "==") || strings.Contains(condition, "!=") {
-		return false
-	}
-	return strings.Contains(condition, "<")
-}
-
 func canFlattenNoCatchTry(body string) bool {
 	body = strings.TrimSpace(body)
 	if body == "" {
@@ -12324,8 +12407,7 @@ func canFlattenNoCatchTry(body string) bool {
 	}
 	if strings.Contains(body, malformedTryNoCatchMarker) ||
 		strings.Contains(body, values.EmptySlotValuePlaceholder) ||
-		strings.Contains(body, "= Exception;") ||
-		strings.Contains(body, "= Exception\n") {
+		hasExceptionSentinel(body) {
 		return false
 	}
 	return true
@@ -12370,8 +12452,14 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 	}
 	c.aggressiveRetried[traitId] = true
 
+	rollback := c.snapshotRetryState()
+	committed := false
+	defer func() {
+		if !committed {
+			rollback()
+		}
+	}()
 	savedAggressive := c.aggressive
-	savedEntry, hadEntry := c.dumpedMethodsSet[traitId]
 	c.aggressive = true
 	delete(c.dumpedMethodsSet, traitId)
 	defer func() { c.aggressive = savedAggressive }()
@@ -12383,8 +12471,8 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 		!strings.Contains(res.code, malformedTryNoCatchMarker) &&
 		// A leaked `varN = Exception;` caught-throwable sentinel is broken Java ("cannot find symbol");
 		// reject it so the method keeps its honest stub instead of adopting silently-broken output.
-		(os.Getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") != "" ||
-			(!strings.Contains(res.code, "= Exception;") && !strings.Contains(res.code, "= Exception\n"))) &&
+		(c.getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") != "" ||
+			!hasExceptionSentinel(res.code)) &&
 		// Reject results that are syntactically valid but reference a local before its declaration
 		// (a slot-reuse renaming bug). Adopting such a result would replace an honest stub with
 		// silently-wrong code; keeping the stub upholds the never-emit-broken-code contract until the
@@ -12395,14 +12483,9 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 		// body with a leaked unconditional throw). Such output is valid Java but semantically wrong.
 		!containsEmptyControlBlock(res.bodyCode)
 	if !clean {
-		// Restore the exact pre-retry cache state so downstream rendering is unchanged.
-		if hadEntry {
-			c.dumpedMethodsSet[traitId] = savedEntry
-		} else {
-			delete(c.dumpedMethodsSet, traitId)
-		}
 		return nil
 	}
+	committed = true
 	return res
 }
 
@@ -12414,7 +12497,7 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor, reason string) (stub *dumpedMethods) {
 	if c.report != nil {
 		c.report.StubMethods = append(c.report.StubMethods, name+descriptor)
-		c.report.Diagnostics = append(c.report.Diagnostics, DecompileDiagnostic{Code: "method_stub", Method: name + descriptor, Message: reason})
+		c.appendDiagnostic(DecompileDiagnostic{Code: "method_stub", Method: name + descriptor, Message: reason})
 	}
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -12442,7 +12525,7 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 	// referenced by the generic types are always in scope for the stub. Kill-switch JDEC_STUB_GENERIC_SIG_OFF.
 	paramTypesForRender := ft.ParamTypes
 	returnTypeForRender := ft.ReturnType
-	if os.Getenv("JDEC_STUB_GENERIC_SIG_OFF") == "" {
+	if c.getenv("JDEC_STUB_GENERIC_SIG_OFF") == "" {
 		for _, attr := range method.Attributes {
 			sigAttr, ok := attr.(*SignatureAttribute)
 			if !ok {
@@ -12543,7 +12626,7 @@ func (c *ClassObjectDumper) isSyntheticEnumMethod(name, descriptor string) bool 
 	// from the folded constant bodies on recompile. Identified by a trailing parameter typed as this
 	// enum's OWN anonymous subclass `L<self>$<digits>;` -- a shape impossible to write in source, so the
 	// match is exact. Kill-switch JDEC_NO_ENUM_MARKER_CTOR restores the raw (broken) emission.
-	if name == "<init>" && os.Getenv("JDEC_NO_ENUM_MARKER_CTOR") == "" && c.isEnumMarkerCtorDescriptor(descriptor) {
+	if name == "<init>" && c.getenv("JDEC_NO_ENUM_MARKER_CTOR") == "" && c.isEnumMarkerCtorDescriptor(descriptor) {
 		return true
 	}
 	return false
@@ -12780,6 +12863,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 	genuineEnum := c.isGenuineEnum()
 	var result []*dumpedMethods
 	for _, method := range c.obj.Methods {
+		if err := c.checkWork(); err != nil {
+			return nil, err
+		}
 		name, err := c.obj.getUtf8(method.NameIndex)
 		if err != nil {
 			return nil, utils.Wrapf(err, "getUtf8(%v) failed", method.NameIndex)
@@ -12788,7 +12874,13 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if err != nil {
 			return nil, utils.Wrapf(err, "getUtf8(%v) failed", method.DescriptorIndex)
 		}
+		if c.nativeCaptureFields != nil && c.nativeMemberCurrent == nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
+			continue
+		}
 		if genuineEnum && c.isSyntheticEnumMethod(name, descriptor) {
+			continue
+		}
+		if c.recordSkipMethods[name+descriptor] || c.recordSkipMethods[name] {
 			continue
 		}
 		if v := c.lambdaMethods[name]; slices.Contains(v, descriptor) {
@@ -12836,8 +12928,8 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			}
 			err = utils.Errorf("try-region structuring failed: try without catch handler")
 		}
-		if err == nil && res != nil && os.Getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") == "" &&
-			(strings.Contains(res.code, "= Exception;") || strings.Contains(res.code, "= Exception\n")) {
+		if err == nil && res != nil && c.getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") == "" &&
+			hasExceptionSentinel(res.code) {
 			// A bare `varN = Exception;` is the fingerprint of a try/finally (or synchronized-region)
 			// structuring failure: the handler's caught-throwable stack value could not be bound to a
 			// real local, so it rendered as the bare type name `Exception` -- valid to the ANTLR syntax
@@ -12852,6 +12944,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			err = utils.Errorf("exception-handler structuring failed: caught-throwable sentinel leaked into method body")
 		}
 		if err != nil {
+			if isRequestWorkError(err) {
+				return nil, err
+			}
 			// Gated aggressive retry: this method failed conservative decompilation (error, leaked
 			// empty slot, or malformed try). Re-decompile ONLY this method in aggressive mode and
 			// adopt the result if it now produces a clean body. Whole-class syntax validation still
@@ -12864,13 +12959,15 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			}
 		}
 		if name == "<clinit>" && c.isInterfaceLike() {
-			// Interfaces and annotations cannot declare a source-level static initializer.
-			// DumpMethodWithInitialId has already hoisted any representable final-field
-			// assignments into field initializers; leftover helper-array stores have no legal
-			// method form and must not be emitted only to be dropped by the syntax safety net.
+			if err != nil {
+				c.interfaceInitializerHelpers = c.interfaceInitializerStubs(err)
+			}
 			continue
 		}
 		if err != nil {
+			if isRequestWorkError(err) {
+				return nil, err
+			}
 			// Graceful degradation: an un-decompilable method body must not fail the whole
 			// class. Emit a stub method (correct signature, throwing body) so the rest of
 			// the class still decompiles.
@@ -12896,7 +12993,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			// given types" - the single largest guava `base` recompile blocker via
 			// Platform$JdkPatternCompiler). The empty body implicitly calls super() exactly as the
 			// no-arg target did, so it is semantically faithful. Kill-switch: JDEC_NO_SYN_BRIDGE_CTOR=1.
-			isSynBridgeCtor := name == "<init>" && os.Getenv("JDEC_NO_SYN_BRIDGE_CTOR") == "" &&
+			isSynBridgeCtor := name == "<init>" && c.getenv("JDEC_NO_SYN_BRIDGE_CTOR") == "" &&
 				c.isSyntheticAccessBridgeCtor(descriptor, method.AccessFlags)
 			// A genuinely-declared constructor whose body decompiled to just the implicit super()
 			// must be KEPT unless it is indistinguishable from the constructor javac auto-generates
@@ -12907,7 +13004,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			// ctor (`Foo(int){ super(); }`) deletes a real overload. All are semantic regressions
 			// the syntax safety net cannot catch. Kill-switch: JDEC_NO_KEEP_DECLARED_CTOR=1.
 			keepDeclaredCtor := name == "<init>" && !isSynBridgeCtor &&
-				os.Getenv("JDEC_NO_KEEP_DECLARED_CTOR") == "" &&
+				c.getenv("JDEC_NO_KEEP_DECLARED_CTOR") == "" &&
 				!c.isOmittableDefaultCtor(descriptor, accessFlagsVerbose)
 			if isSynBridgeCtor || keepDeclaredCtor {
 				// keep res as the empty-body constructor (faithful: empty body == implicit super())
@@ -12924,7 +13021,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 					// trivial-return shape is kept; a void body that decompiled to empty but is NOT
 					// backed by a bare return (real content lost) keeps the legacy drop so no half-
 					// decompiled body is emitted as if empty. Kill-switch: JDEC_NO_EMIT_EMPTY_VOID=1.
-					if isVoid && os.Getenv("JDEC_NO_EMIT_EMPTY_VOID") == "" && methodBodyIsTriviallyEmpty(method) {
+					if isVoid && c.getenv("JDEC_NO_EMIT_EMPTY_VOID") == "" && methodBodyIsTriviallyEmpty(method) {
 						// keep res: renders as the faithful empty-body `void f(...) {}`
 					} else {
 						continue
@@ -12948,6 +13045,26 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			res.descriptor = descriptor
 		}
 		result = append(result, res)
+	}
+	if err := c.checkWork(); err != nil {
+		return nil, err
+	}
+	result = append(result, c.interfaceInitializerHelpers...)
+	result = append(result, c.constructorBoundaryHelpers...)
+	privateHelpers, err := c.privateNestHelpers()
+	if err != nil {
+		return nil, err
+	}
+	result = append(result, privateHelpers...)
+	for _, dumped := range c.dumpedMethodsSet {
+		if dumped != nil && dumped.checkedEscape {
+			helper := c.checkedEscapeHelper()
+			if err := c.holdOutput(int64(len(helper.code))); err != nil {
+				return nil, err
+			}
+			result = append(result, helper)
+			break
+		}
 	}
 	return result, nil
 }
@@ -13065,11 +13182,9 @@ func (c *ClassObjectDumper) dumpConstantPool() ([]string, error) {
 	return result, nil
 }
 
-// isBoolReturnIfElse detects the pattern where an if-then-else in a boolean-returning
-// method has an empty (or trivially `return true`) then-body and a boolean return in the
-// else-body. This is the simplest manifestation of the boolean short-circuit DAG where the
-// compiler shared a constant true leaf across both the short-circuit and the fallback.
-// We can recover `return cond || elseReturnExpr` from it.
+// isBoolReturnIfElse proves `if (c) return true; else return v;` before
+// rendering `return c || v`. Fallthrough is a control edge, not a value leaf:
+// treating an empty arm as true skips its continuation and its side effects.
 func isBoolReturnIfElse(ifSt *statements.IfStatement, funcCtx *class_context.ClassContext) bool {
 	// Only applies to boolean-returning methods.
 	if funcCtx.FunctionType == nil {
@@ -13082,26 +13197,19 @@ func isBoolReturnIfElse(ifSt *statements.IfStatement, funcCtx *class_context.Cla
 	if retType != "boolean" {
 		return false
 	}
-	// Then-body must be empty or contain only `return true`.
-	thenIsTrue := len(ifSt.IfBody) == 0
-	if !thenIsTrue && len(ifSt.IfBody) == 1 {
-		if rs, ok := ifSt.IfBody[0].(*statements.ReturnStatement); ok {
-			thenIsTrue = rs.JavaValue != nil && rs.JavaValue.String(funcCtx) == "true"
-		}
-	}
-	if !thenIsTrue {
+	if len(ifSt.IfBody) != 1 || len(ifSt.ElseBody) != 1 {
 		return false
 	}
-	// Else-body must end with a boolean return.
-	if len(ifSt.ElseBody) == 0 {
+	thenReturn, ok := ifSt.IfBody[0].(*statements.ReturnStatement)
+	if !ok || thenReturn.JavaValue == nil {
 		return false
 	}
-	lastElse := ifSt.ElseBody[len(ifSt.ElseBody)-1]
-	rs, ok := lastElse.(*statements.ReturnStatement)
-	if !ok || rs.JavaValue == nil {
+	literal, ok := values.UnpackSoltValue(thenReturn.JavaValue).(*values.JavaLiteral)
+	if !ok || literal.Data != true {
 		return false
 	}
-	return true
+	elseReturn, ok := ifSt.ElseBody[0].(*statements.ReturnStatement)
+	return ok && elseReturn.JavaValue != nil
 }
 
 func buildReturnFromEmptyGuardTernary(ifSt *statements.IfStatement, funcCtx *class_context.ClassContext) string {
@@ -13134,16 +13242,6 @@ func buildReturnFromEmptyGuardTernary(ifSt *statements.IfStatement, funcCtx *cla
 
 func isEffectivelyEmptyBody(body []statements.Statement) bool {
 	return len(meaningfulStatements(body)) == 0
-}
-
-func isEmptyAssertionsDisabledGuard(ifSt *statements.IfStatement, funcCtx *class_context.ClassContext) bool {
-	if ifSt == nil || ifSt.Condition == nil {
-		return false
-	}
-	if !isEffectivelyNoOpBody(ifSt.IfBody) || !isEffectivelyNoOpBody(ifSt.ElseBody) {
-		return false
-	}
-	return strings.Contains(ifSt.Condition.String(funcCtx), "$assertionsDisabled")
 }
 
 func isEffectivelyNoOpBody(body []statements.Statement) bool {
