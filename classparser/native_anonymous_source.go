@@ -17,6 +17,7 @@ import (
 )
 
 type nativeAnonymousClass struct {
+	initializers          []nativeAnonymousInitializer
 	enclosingField        string
 	parentAnonymous       bool
 	capturePCs            map[string]int
@@ -231,6 +232,20 @@ func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, meth
 		outerField = "this$" + strconv.Itoa(depth)
 		c.parentAnonymous = true
 	}
+	// A root instance can anonymously extend its own non-static named member.
+	// The original anonymous enclosing capture and the member SUPER receiver
+	// share exactly slot1; this is an enclosing operand, not a user argument.
+	// Source allocation separately requires the original root THIS operand.
+	if members != nil && owner == members.owner && currentMember == nil && i < len(ops) {
+		parent := members.children[obj.GetSupperClassName()]
+		capture, captured := c.fields[outerField]
+		if parent != nil && !parent.static && parent.owner == owner && captured && capture == 0 &&
+			len(ps) > 0 && ps[0] == "L"+owner+";" && constructorMotionLoad(ops[i], ps[0]) && core.GetRetrieveIdx(ops[i]) == 1 {
+			c.memberSuper = parent
+			c.memberEnclosingReadPC = -1
+			i++
+		}
+	}
 	// javac's enclosing operand for an anonymous subclass of a sibling member
 	// is this member's original capture. The same joint plan proves both
 	// declarations and javac regenerates this exact read before super(...).
@@ -265,7 +280,7 @@ func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, meth
 		c.superParams = append(c.superParams, param)
 		i++
 	}
-	if i+2 != len(ops) || ops[i+1].Instr.OpCode != core.OP_RETURN || len(ops[i+1].Data) != 0 {
+	if i+1 >= len(ops) {
 		return nil
 	}
 	mem := constructorMotionMember(obj, ops[i], core.OP_INVOKESPECIAL)
@@ -389,6 +404,11 @@ func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, meth
 			return nil
 		}
 		next++
+	}
+	var initialized bool
+	c.initializers, initialized = nativeAnonymousInitializerPackets(obj, ops, i+1, c, ps, work)
+	if !initialized || len(c.initializers) > 0 && !nativeAnonymousInitializerStack(c, ps, code) {
+		return nil
 	}
 	return c
 }
@@ -922,6 +942,11 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if body == "" {
 			return fail()
 		}
+		initialization, known := nativeAnonymousInitializerSource(child, bindings, sub.FuncCtx, sub.nativeAnnotationDeclarationResolver(), c.Work)
+		if !known {
+			return fail()
+		}
+		body = initialization + body
 		for _, imp := range javaExtractImports(src) {
 			ctx.Import(imp)
 		}
