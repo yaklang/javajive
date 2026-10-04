@@ -74,7 +74,33 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 	return true
 }
 func nativeMemberStaticBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, child *nativeMemberClass, work *workbudget.Budget) (*nativeMemberAllocation, bool) {
-	if i+2 >= len(ops) || ops[i+1].Instr.OpCode != core.OP_DUP {
+	if child == nil || child.object == nil {
+		return nil, false
+	}
+	plan, ok := nativeBridgeAllocation(obj, ops, i, child.object, child.accessBridges, work)
+	if plan != nil {
+		plan.child = child
+	}
+	return plan, ok
+}
+
+func nativeRootBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, root *ClassObject, bridges map[string]*nativeConstructorAccessBridge, work *workbudget.Budget) (*nativeMemberAllocation, bool) {
+	plan, ok := nativeBridgeAllocation(obj, ops, i, root, bridges, work)
+	if plan != nil {
+		plan.rootObject = root
+	}
+	return plan, ok
+}
+
+// Discovery records the original NEW and constructor call sites. The source
+// renderer independently requires the IR's uninitialized allocation origin;
+// finding a same-owner call alone never establishes receiver identity.
+func nativeBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, target *ClassObject, bridges map[string]*nativeConstructorAccessBridge, work *workbudget.Budget) (*nativeMemberAllocation, bool) {
+	if obj == nil || target == nil || i < 0 || i+2 >= len(ops) || ops[i].Instr.OpCode != core.OP_NEW || ops[i+1].Instr.OpCode != core.OP_DUP {
+		return nil, false
+	}
+	owner, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(ops[i].Data))
+	if !known || owner != target.GetClassName() {
 		return nil, false
 	}
 	for j := i + 2; j < len(ops); j++ {
@@ -83,15 +109,14 @@ func nativeMemberStaticBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i 
 		}
 		op := ops[j]
 		call := constructorMotionMember(obj, op, core.OP_INVOKESPECIAL)
-		if call != nil && call.Member == "<init>" && call.Name == child.object.GetClassName() {
-			bridge := child.accessBridges[call.Description]
-			if bridge == nil {
+		if call != nil && call.Member == "<init>" && call.Name == owner {
+			if bridges[call.Description] == nil {
 				return nil, true
 			}
 			if j == i+2 || ops[j-1].Instr.OpCode != core.OP_ACONST_NULL || len(ops[j-1].Data) != 0 {
 				return nil, false
 			}
-			return &nativeMemberAllocation{child: child, descriptor: call.Description, newPC: int(ops[i].CurrentOffset), invokePC: int(op.CurrentOffset), checkPC: -1, enclosingReadPC: -1}, true
+			return &nativeMemberAllocation{descriptor: call.Description, newPC: int(ops[i].CurrentOffset), invokePC: int(op.CurrentOffset), checkPC: -1, enclosingReadPC: -1}, true
 		}
 		if op.Instr.OpCode == core.OP_NEW || op.Instr.OpCode == core.OP_GOTO || op.Instr.OpCode == core.OP_RETURN || op.Instr.OpCode == core.OP_ARETURN {
 			return nil, false
@@ -143,7 +168,7 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 					return false
 				}
 				plan := allocations[name+desc][int(op.CurrentOffset)]
-				allocation := child != nil && plan != nil && plan.child == child && plan.descriptor == call.Description
+				allocation := plan != nil && plan.allocatedObject() != nil && plan.allocatedObject().GetClassName() == call.Name && plan.descriptor == call.Description && (child != nil && plan.child == child || call.Name == p.owner && plan.rootObject == p.lexicalObjects[p.owner])
 				super := false
 				if caller := p.children[obj.GetClassName()]; caller != nil && name == "<init>" && !caller.static {
 					ctor := caller.constructors[desc]

@@ -203,3 +203,64 @@ func nativeMemberJointBridgeEquivalent(p *nativeMemberFamily, obj *ClassObject, 
 	fresh := reader.nativeConstructorAccessBridges()[desc]
 	return fresh != nil && fresh.method == m && fresh.target == b.target && fresh.marker == b.marker
 }
+
+// Root allocations share the original private descriptor binding, but have no
+// enclosing-instance parameter or lexical member name. Only the proved unused
+// marker is erased, after the original allocation and call PCs have matched.
+func nativeRootBridgeSourceAllocation(plan *nativeMemberAllocation, args []class_context.SourceCaptureOperand, ctx, binding *class_context.ClassContext, p *nativeMemberFamily) (string, bool) {
+	fail := func() (string, bool) {
+		if p != nil {
+			p.failed = true
+		}
+		return "", false
+	}
+	if plan == nil || plan.rootObject == nil || p == nil || p.failed || ctx == nil || binding == nil || plan.rootObject != p.lexicalObjects[p.owner] || binding.InvocationMetadata == nil {
+		return fail()
+	}
+	bridge := p.rootAccessBridges[plan.descriptor]
+	if bridge == nil || len(args) == 0 || !nativeMemberBridgeSourceDummy(args[len(args)-1].Value) {
+		return fail()
+	}
+	owner := strings.ReplaceAll(p.owner, "/", ".")
+	declaration, known := binding.InvocationMetadata(owner)
+	if !known || !declaration.MembersComplete || p.failed {
+		return fail()
+	}
+	count := 0
+	for _, m := range declaration.Methods {
+		if m.Name == "<init>" && m.Desc == bridge.target {
+			count++
+		}
+	}
+	if count != 1 {
+		return fail()
+	}
+	invoke := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: bridge.target, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC}
+	for _, arg := range args[:len(args)-1] {
+		v, ok := arg.Value.(values.JavaValue)
+		if !ok {
+			return fail()
+		}
+		invoke.Arguments = append(invoke.Arguments, v)
+	}
+	mt, err := types.ParseMethodDescriptor(bridge.target)
+	if err != nil || len(mt.FunctionType().ParamTypes) != len(invoke.Arguments) {
+		return fail()
+	}
+	invoke.FuncType = mt.FunctionType()
+	allocationBinding := *ctx
+	allocationBinding.InvocationMetadata = binding.InvocationMetadata
+	allocationBinding.SiblingClassSig = binding.SiblingClassSig
+	arguments := invoke.ArgumentStrings(&allocationBinding)
+	if p.failed {
+		return fail()
+	}
+	name := ctx.ShortTypeName(owner)
+	node := &values.NewExpression{JavaType: types.NewJavaClass(owner), ConstructorCall: invoke}
+	diamond := node.SourceConstructorDiamond(&allocationBinding)
+	source := "new " + name + diamond + "(" + strings.Join(arguments, ",") + ")"
+	if diamond != "" {
+		source = "((" + name + ")(" + source + "))"
+	}
+	return source, true
+}

@@ -38,6 +38,9 @@ type ClassContext struct {
 	LexicalTypeNames       map[string]bool
 	SourceMemberAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	SourceMemberCandidate  func(owner string) bool
+	// Optional descriptor gate runs before operands are rendered. Knowing a
+	// lexical class does not prove projection of each of its constructors.
+	SourceMemberDescriptorCandidate func(owner, descriptor string) bool
 	// Source ownership proofs distinguish value expressions from Java statement expressions.
 	SourcePrivateGetter        func(owner, name, descriptor string, pc int, args []any, statement bool) (string, bool)
 	SourceMemberDelegation     func(owner, descriptor string, pc int, args []any) (string, bool)

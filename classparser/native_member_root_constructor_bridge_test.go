@@ -287,7 +287,7 @@ func TestNativeRootBridgeArchiveRejectsUnclosedOriginalUsers(t *testing.T) {
 	}
 }
 
-func TestNativeRootBridgeAllocationNeedsItsOwnSourceOriginProof(t *testing.T) {
+func TestNativeRootBridgeAllocationUsesItsOwnSourceOriginProof(t *testing.T) {
 	fixture := strings.Replace(nativeRootPrivateConstructorFixture,
 		"Member(Object value){super(value);RootBridgeEffects.trace+=\"M\";}",
 		"Member(Object value){super(value);RootBridgeEffects.trace+=\"M\";} static RootBridgePacket direct(Object v){return new RootBridgePacket(v);}", 1)
@@ -310,9 +310,21 @@ func TestNativeRootBridgeAllocationNeedsItsOwnSourceOriginProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := z.nativeMemberEntry(root)
-	if entry != nil && entry.family != nil {
-		t.Fatal("root allocation must not borrow the initial SUPER origin proof")
+	if entry == nil || entry.family == nil {
+		t.Fatal("original NEW allocation must have independent closure")
 	}
+	p := entry.family
+	member := p.children["RootBridgePacket$Member"].object
+	plans, known := z.nativeMemberReader(member).nativeMemberAllocations(p)
+	if !known || len(plans["direct(Ljava/lang/Object;)LRootBridgePacket;"]) != 1 {
+		t.Fatal("missing original direct allocation origin")
+	}
+	for pc, plan := range plans["direct(Ljava/lang/Object;)LRootBridgePacket;"] {
+		if plan.child != nil || plan.rootObject != p.lexicalObjects[p.owner] || plan.newPC != 0 || plan.invokePC != pc {
+			t.Fatal("root NEW borrowed lexical child/SUPER identity")
+		}
+	}
+
 }
 
 func TestNativeRootAbstractPrivateConstructorBridgeNeedsCompilerProfileProof(t *testing.T) {

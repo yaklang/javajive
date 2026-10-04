@@ -587,7 +587,9 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	// abstract root to package access and removes their bridge/marker classes.
 	// A valid original JVM can retain both. Do not claim binary regeneration
 	// until that declaration kind has an independently matching profile proof.
-	if c.obj.AccessFlags&0x0400 != 0 && len(p.rootAccessBridges) > 0 {
+	// Java source also cannot reproduce a synthetic root or missing ACC_SUPER.
+	// Admit only the proved ordinary root profile (public/final are optional).
+	if len(p.rootAccessBridges) > 0 && (c.obj.AccessFlags & ^uint16(0x0031) != 0 || c.obj.AccessFlags&0x0020 == 0) {
 		return nil
 	}
 	if p.rootAccessBridges == nil || !c.proveNativeRootBridgeDelegations(p) {
@@ -725,11 +727,22 @@ func (p *nativeMemberFamily) sourceName(binary string) (string, bool) {
 
 type nativeMemberAllocation struct {
 	child                    *nativeMemberClass
+	rootObject               *ClassObject
 	descriptor               string
 	newPC, invokePC, checkPC int
 	slot                     int
 	enclosingReadPC          int
 	implicitEnclosing        bool
+}
+
+func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
+	if a == nil {
+		return nil
+	}
+	if a.child != nil {
+		return a.child.object
+	}
+	return a.rootObject
 }
 
 func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[string]map[int]*nativeMemberAllocation, bool) {
@@ -773,6 +786,19 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				}
 				owner, known := sourceBridgeClassName(c.obj, core.Convert2bytesToInt(op.Data))
 				child := p.children[owner]
+				if known && owner == p.owner && len(p.rootAccessBridges) > 0 {
+					plan, ok := nativeRootBridgeAllocation(c.obj, ops, i, p.lexicalObjects[p.owner], p.rootAccessBridges, c.Work)
+					if !ok {
+						return nil, false
+					}
+					if plan != nil {
+						if result[key][plan.invokePC] != nil {
+							return nil, false
+						}
+						result[key][plan.invokePC] = plan
+					}
+					continue
+				}
 				if !known || child == nil {
 					continue
 				}
@@ -1092,8 +1118,20 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	}
 	binding := nativeMemberBinding(ctx, p, c.Work)
 	ctx.SourceMemberCandidate = func(owner string) bool {
-		child := p.children[strings.ReplaceAll(owner, ".", "/")]
+		binary := strings.ReplaceAll(owner, ".", "/")
+		if binary == p.owner {
+			return len(p.rootAccessBridges) > 0
+		}
+		child := p.children[binary]
 		return child != nil && (!child.static || len(child.accessBridges) > 0)
+	}
+	ctx.SourceMemberDescriptorCandidate = func(owner, desc string) bool {
+		binary := strings.ReplaceAll(owner, ".", "/")
+		if binary == p.owner {
+			return p.rootAccessBridges[desc] != nil
+		}
+		child := p.children[binary]
+		return child != nil && (!child.static || child.accessBridges[desc] != nil)
 	}
 	ctx.SourceMemberAllocation = func(owner, desc string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
 		fail := func() (string, bool) { p.failed = true; return "", false }
@@ -1101,8 +1139,11 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		if child := p.children[strings.ReplaceAll(owner, ".", "/")]; child != nil && child.static && child.accessBridges[desc] == nil {
 			return "", false
 		}
-		if plan == nil || plan.child.object.GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.newPC != newPC || plan.descriptor != desc || len(args) == 0 {
+		if plan == nil || plan.allocatedObject() == nil || plan.allocatedObject().GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.newPC != newPC || plan.descriptor != desc || len(args) == 0 {
 			return fail()
+		}
+		if plan.rootObject != nil {
+			return nativeRootBridgeSourceAllocation(plan, args, ctx, binding, p)
 		}
 		if plan.child.static {
 			return nativeMemberStaticBridgeSource(plan, args, ctx, binding, p)

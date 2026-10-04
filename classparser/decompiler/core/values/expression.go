@@ -130,7 +130,7 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 		}
 	}
 
-	if n != nil && !n.IsArray() && n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceMemberAllocation != nil && funcCtx.SourceMemberCandidate != nil && funcCtx.SourceMemberCandidate(n.ConstructorCall.ClassName) && n.HasOriginPC && n.ConstructorCall.HasOriginPC {
+	if n != nil && !n.IsArray() && n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceMemberAllocation != nil && funcCtx.SourceMemberCandidate != nil && funcCtx.SourceMemberCandidate(n.ConstructorCall.ClassName) && (funcCtx.SourceMemberDescriptorCandidate == nil || funcCtx.SourceMemberDescriptorCandidate(n.ConstructorCall.ClassName, n.ConstructorCall.Descriptor)) && n.HasOriginPC && n.ConstructorCall.HasOriginPC {
 		call := n.ConstructorCall
 		args := make([]class_context.SourceCaptureOperand, len(call.Arguments))
 		for i, a := range call.Arguments {
