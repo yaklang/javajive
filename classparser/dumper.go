@@ -37,6 +37,7 @@ type ClassObjectDumper struct {
 	nativeMemberChecks             map[string]map[int]bool
 	nativeMemberRoot               *nativeMemberFamily
 	nativeMemberCurrent            *nativeMemberClass
+	nativeMemberUnitPrefix         string
 	nativeAnonymousRoot            *nativeAnonymousFamily
 	nativeCaptureFields            map[string]string
 	nativeCapturedReads            map[string]map[int]string
@@ -1518,6 +1519,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 		if len(importsStr) > 0 {
 			importsStr += "\n"
+		}
+		if c.nativeMemberCurrent != nil {
+			// Owned declarations keep their original annotation prefix. The
+			// assembler knows the exact unit preamble; no class-keyword search
+			// through annotation values is necessary to extract the declaration.
+			c.nativeMemberUnitPrefix = packageSource + importsStr
 		}
 		return packageSource + importsStr + result
 	}

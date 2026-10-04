@@ -184,7 +184,11 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 	formalCount, outerFormalCount := 0, 0
 	for _, a := range obj.Attributes {
 		switch a := a.(type) {
-		case *RuntimeVisibleAnnotationsAttribute, *RuntimeVisibleTypeAnnotationsAttribute, *DeprecatedAttribute:
+		case *RuntimeVisibleAnnotationsAttribute:
+			if !nativeAnnotationDependencies([]AttributeInfo{a}, work, func(string) {}) {
+				return nil
+			}
+		case *RuntimeVisibleTypeAnnotationsAttribute, *DeprecatedAttribute:
 			return nil
 		case *SignatureAttribute:
 			signature, ok := sourceBridgeUTF8(obj, a.SignatureIndex)
@@ -457,6 +461,9 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {
 		return nil
 	}
+	if !c.nativeMemberAnnotationTablesRepresentable() {
+		return nil
+	}
 	p := &nativeMemberFamily{owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}}
 	for _, a := range c.obj.Attributes {
 		if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
@@ -487,7 +494,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				reader.declarationResolver = c.declarationResolver
 				child := nativeMemberProofWithOwner(obj, c.obj, c.Work, reader.buildInvocationMetadata())
 				rowName, rowKnown := sourceBridgeUTF8(c.obj, row.InnerNameIndex)
-				if child == nil || child.owner != p.owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags || p.children[name] != nil {
+				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != p.owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags || p.children[name] != nil {
 					return nil
 				}
 				p.children[name] = child
@@ -1095,13 +1102,11 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 		for _, imp := range javaExtractImports(src) {
 			c.FuncCtx.Import(imp)
 		}
-		start := strings.Index(src, " class ")
-		if start < 0 {
-			return "", fmt.Errorf("member header absent")
+		if !strings.HasPrefix(src, sub.nativeMemberUnitPrefix) {
+			return "", fmt.Errorf("member compilation unit prefix changed")
 		}
-		headerStart := strings.LastIndex(src[:start], "\n") + 1
 		out.WriteString("\n")
-		out.WriteString(src[headerStart:])
+		out.WriteString(src[len(sub.nativeMemberUnitPrefix):])
 		out.WriteString("\n")
 	}
 	return out.String(), nil
