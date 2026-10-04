@@ -13,7 +13,7 @@ import (
 // source type inside an enclosing unit which emits a flattened binary name.
 func TestNativeEnumMetadataKeepsOwnedFlattenedSourceNames(t *testing.T) {
 	javac, java := t04Tools(t)
-	const source = `class FlattenedEnumTypes {static class Token {int value=17;} @interface Marker {}}
+	const source = `class FlattenedEnumTypes {static class Token {int value=17;} enum Marker {A}}
 enum FlattenedEnumChoice {A{public FlattenedEnumTypes.Token make(){return new FlattenedEnumTypes.Token();}};public abstract FlattenedEnumTypes.Token make();}
 class FlattenedEnumDriver {public static void main(String[]args){System.out.println(FlattenedEnumChoice.A.make().value);}}`
 	for _, layout := range []string{"committed", "unproved"} {
@@ -22,14 +22,14 @@ class FlattenedEnumDriver {public static void main(String[]args){System.out.prin
 				t.Run(debug, func(t *testing.T) {
 					fixture := source
 					if layout == "committed" {
-						fixture = strings.Replace(fixture, " @interface Marker {}", "", 1)
+						fixture = strings.Replace(fixture, " enum Marker {A}", "", 1)
 					}
 					files := nativeCompileDebugClasses(t, fixture, debug)
 					obj, e := Parse(files["FlattenedEnumTypes$Token.class"])
 					if e != nil {
 						t.Fatal(e)
 					}
-					_ = obj // Original annotations make the complete named-family layout unproved.
+					_ = obj // Original nested enums make the complete named-family layout unproved.
 					original := t.TempDir()
 					for name, raw := range files {
 						if e := os.WriteFile(filepath.Join(original, name), raw, 0600); e != nil {

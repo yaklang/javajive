@@ -190,6 +190,10 @@ func nativeMemberProofWithinJointOwner(obj, enclosing *ClassObject, work *workbu
 }
 
 func nativeMemberProofWithLexicalGraph(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, providers ...callbinding.Provider) *nativeMemberClass {
+	return nativeMemberProofWithDeclarations(obj, enclosing, work, bridges, lexical, nil, providers...)
+}
+
+func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, resolve func(string) (*ClassObject, bool), providers ...callbinding.Provider) *nativeMemberClass {
 	expectedCapture := "this$0"
 	if lexical != nil {
 		var known bool
@@ -203,7 +207,7 @@ func nativeMemberProofWithLexicalGraph(obj, enclosing *ClassObject, work *workbu
 		provider = providers[0]
 	}
 	owner, name, flags, known := originalMemberOwner(obj)
-	if !known || !nativeMemberVersionMetadata(obj, work) || !nativeMemberDeclarationKindRepresentable(obj, flags, work) {
+	if !known || !nativeMemberVersionMetadata(obj, work) || !nativeMemberDeclarationKindRepresentable(obj, flags, work, resolve) {
 		return nil
 	}
 	if !nativeMemberDeprecatedMarkerRepresentable(obj, work) {
@@ -514,6 +518,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 		return nil
 	}
 	p := &nativeMemberFamily{owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}}
+	resolveDeclaration := c.nativeAnnotationDeclarationResolver()
 	queue := []*ClassObject{c.obj}
 	for cursor := 0; cursor < len(queue); cursor++ {
 		enclosing := queue[cursor]
@@ -551,7 +556,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				reader.foldSiblingResolver = c.foldSiblingResolver
 				reader.declarationResolver = c.declarationResolver
 				bridges := reader.nativeConstructorAccessBridges()
-				child := nativeMemberProofWithLexicalGraph(obj, enclosing, c.Work, bridges, p.lexicalObjects, reader.buildInvocationMetadata())
+				child := nativeMemberProofWithDeclarations(obj, enclosing, c.Work, bridges, p.lexicalObjects, resolveDeclaration, reader.buildInvocationMetadata())
 				rowName, rowKnown := sourceBridgeUTF8(enclosing, row.InnerNameIndex)
 				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags {
 					return nil

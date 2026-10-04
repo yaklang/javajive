@@ -115,7 +115,7 @@ func nativeAnnotationDeclarationPolicy(definition *ClassObject, c *ClassObjectDu
 					if !ok || enum == nil || enum.TypeName != "Ljava/lang/annotation/ElementType;" {
 						return "", false, false
 					}
-					if enum.ConstName == "TYPE" || enum.ConstName == "TYPE_USE" {
+					if enum.ConstName == "TYPE" || enum.ConstName == "TYPE_USE" || enum.ConstName == "ANNOTATION_TYPE" && c.obj.AccessFlags&0x2000 != 0 {
 						target = true
 					}
 				}

@@ -6,8 +6,14 @@ import "github.com/yaklang/javajive/internal/workbudget"
 // are static scope cuts, with no constructors or synthetic capture fields.
 // Class and InnerClasses flags must describe the same declaration kind before
 // the existing complete-forest, type-scope and source-layout proofs can apply.
-func nativeMemberDeclarationKindRepresentable(obj *ClassObject, flags uint16, work *workbudget.Budget) bool {
-	if obj == nil || flags&(0x2000|0x4000) != 0 {
+func nativeMemberDeclarationKindRepresentable(obj *ClassObject, flags uint16, work *workbudget.Budget, resolvers ...func(string) (*ClassObject, bool)) bool {
+	if obj == nil || flags&0x4000 != 0 {
+		return false
+	}
+	if flags&0x2000 != 0 {
+		return len(resolvers) == 1 && nativeMemberAnnotationDeclaration(obj, flags, work, resolvers[0])
+	}
+	if obj.AccessFlags&0x2000 != 0 {
 		return false
 	}
 	if flags&0x0200 == 0 {
