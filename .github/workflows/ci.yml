@@ -62,8 +62,9 @@ jobs:
           go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
           # Edge cases and the adversarial corpus share the original 5+8 minute
           # source-regression budget within the unchanged fifteen-minute job.
-          # Four isolated serial workers keep environment-changing tests safe;
-          # all discovered tests and every mode remain selected.
+          # Four isolated serial workers keep environment-changing tests safe.
+          # Trusted fixtures use the same pool, avoiding a serial tail.
+          # Every discovered test, mode and all forty fixtures remain selected.
           python3 - <<'PYTHON'
           import concurrent.futures, json, os, pathlib, re, signal, subprocess, sys, time
           binary = str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "adversarial.test")
@@ -77,7 +78,8 @@ jobs:
           deadline = time.monotonic() + 13 * 60
           def run_batch(item):
               index, group = item
-              path = pathlib.Path(f"artifacts/adversarial-tests-{index+1}.jsonl")
+              trusted = group is None
+              path = pathlib.Path("artifacts/trusted-roundtrip.log" if trusted else f"artifacts/adversarial-tests-{index+1}.jsonl")
               remaining = deadline - time.monotonic()
               if remaining <= 0:
                   path.write_text("phase deadline expired before batch started\n")
@@ -86,10 +88,15 @@ jobs:
                          "github.com/yaklang/javajive/classparser", binary,
                          "-test.v=test2json", "-test.count=1", "-test.parallel=1",
                          f"-test.timeout={remaining:.3f}s",
-                         "-test.run=^(" + "|".join(map(re.escape, group)) + ")$"]
+                         "-test.run=^(" + "|".join(map(re.escape, group or [])) + ")$"]
+              if trusted:
+                  command = ["bash", "-ec", "git rev-parse HEAD > artifacts/revision.txt; "
+                             'python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/javajive-probe"; '
+                             'python3 tools/curated_roundtrip/roundtrip.py --adapter "$RUNNER_TEMP/javajive-probe" '
+                             "--out artifacts/roundtrip --allow-trusted-fixture-execution --expected-rows 40"]
               with path.open("w") as output:
                   process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
-                                             cwd="classparser", start_new_session=True)
+                                             cwd="." if trusted else "classparser", start_new_session=True)
                   try:
                       result = process.wait(timeout=max(0, deadline - time.monotonic()))
                   except subprocess.TimeoutExpired:
@@ -102,7 +109,7 @@ jobs:
               return path, result
           failed = False
           with concurrent.futures.ThreadPoolExecutor(max_workers=4) as workers:
-              for path, result in workers.map(run_batch, enumerate(groups)):
+              for path, result in workers.map(run_batch, [(-1, None)] + list(enumerate(groups))):
                   print(f"{path}: exit={result}")
                   if result:
                       failed = True
@@ -115,12 +122,6 @@ jobs:
         run: python3 -m unittest ci.task_t30.test_t30_historical_diagnostics
       - name: Declaration metadata reader regression
         run: python3 -m unittest discover -s classparser -p test_jdk_metadata_catalog_generate.py
-      - name: Recompile and run trusted small Java fixtures
-        run: |
-          mkdir -p artifacts
-          git rev-parse HEAD > artifacts/revision.txt
-          python3 tools/curated_roundtrip/build_adapter.py --out "$RUNNER_TEMP/javajive-probe"
-          python3 tools/curated_roundtrip/roundtrip.py --adapter "$RUNNER_TEMP/javajive-probe" --out artifacts/roundtrip --allow-trusted-fixture-execution --expected-rows 40
       - name: Roundtrip evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
