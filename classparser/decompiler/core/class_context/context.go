@@ -25,6 +25,11 @@ type SourceCaptureOperand struct {
 	Receiver bool
 }
 type ClassContext struct {
+	// RetainImplicitConstructorCalls keeps the original no-arg superclass
+	// invocation and its PC in proof-only decoding. Normal source rendering
+	// may omit this call because javac inserts it, but effect-boundary proofs
+	// must observe the actual initialization instruction.
+	RetainImplicitConstructorCalls bool
 	// QualifiedStaticFields preserves legal qualified reads of own fields in
 	// declaration initializers, including forward/self reads during circular
 	// initialization. It never changes invocation or lexical-owner binding.

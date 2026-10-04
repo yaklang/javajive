@@ -6539,7 +6539,7 @@ func (d *Decompiler) ParseStatement() error {
 						// constructors: allocation and initialization can both throw.
 						v.ConstructorCall = funcCallValue
 						skip = true
-					} else if len(funcCallValue.Arguments) == 0 && funcCallValue.ClassName != funcCtx.ClassName {
+					} else if len(funcCallValue.Arguments) == 0 && funcCallValue.ClassName != funcCtx.ClassName && !funcCtx.RetainImplicitConstructorCalls {
 						// An implicit no-argument super call is inserted by javac.
 						// A this() delegation is not: it executes another constructor
 						// and must retain that initialization and its effects.

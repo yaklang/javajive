@@ -108,7 +108,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 			return nil
 		}
 		switch kind {
-		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_GETSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IDIV, core.OP_LDIV, core.OP_IREM, core.OP_LREM, core.OP_CHECKCAST, core.OP_IALOAD, core.OP_LALOAD, core.OP_FALOAD, core.OP_DALOAD, core.OP_AALOAD, core.OP_BALOAD, core.OP_CALOAD, core.OP_SALOAD, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE, core.OP_MULTIANEWARRAY:
+		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IDIV, core.OP_LDIV, core.OP_IREM, core.OP_LREM, core.OP_CHECKCAST, core.OP_IALOAD, core.OP_LALOAD, core.OP_FALOAD, core.OP_DALOAD, core.OP_AALOAD, core.OP_BALOAD, core.OP_CALOAD, core.OP_SALOAD, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE:
 			return nil
 		}
 		if kind >= core.OP_IFEQ && kind <= core.OP_IF_ACMPNE || kind == core.OP_IFNULL || kind == core.OP_IFNONNULL || kind >= core.OP_IRETURN && kind <= core.OP_ARETURN {
@@ -211,6 +211,8 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	copy.CurrentMethodSig = plan.signature
 	copy.FunctionType = c.MethodType
 	copy.IsStatic = false
+	copy.QualifiedStaticFields = true
+	copy.RetainImplicitConstructorCalls = true
 	c.wireNativeAnonymousSource()
 	_, body, err := ParseBytesCode(c, plan.code, u.NewRootVariableId())
 	if err != nil {
@@ -278,7 +280,7 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	expected := []int{}
 	for _, op := range plan.ops[plan.start:] {
 		k := op.Instr.OpCode
-		if k == core.OP_PUTFIELD || k == core.OP_GETFIELD || k == core.OP_NEW || k == core.OP_NEWARRAY || k == core.OP_ANEWARRAY || k == core.OP_ARRAYLENGTH || k >= core.OP_INVOKEVIRTUAL && k <= core.OP_INVOKEINTERFACE {
+		if k == core.OP_PUTFIELD || k == core.OP_GETFIELD || k == core.OP_GETSTATIC || k == core.OP_NEW || k == core.OP_NEWARRAY || k == core.OP_ANEWARRAY || k == core.OP_MULTIANEWARRAY || k == core.OP_ARRAYLENGTH || k >= core.OP_INVOKEVIRTUAL && k <= core.OP_INVOKEINTERFACE {
 			expected = append(expected, int(op.CurrentOffset))
 		}
 	}
@@ -366,6 +368,19 @@ func nativeAnonymousInitializerExpressionEvents(child *nativeAnonymousClass, pla
 			}
 		}
 		switch x := v.(type) {
+		case *values.JavaClassMember:
+			if !x.HasOriginPC {
+				return false
+			}
+			op := byPC[x.OriginPC]
+			if op == nil {
+				return false
+			}
+			original := constructorMotionMember(child.object, op, core.OP_GETSTATIC)
+			if original == nil || original.Name != x.Name || original.Member != x.Member || original.Description != x.Description || !nativeAnonymousInitializerFieldDeclaration(original, true, resolve, work) {
+				return false
+			}
+			*events = append(*events, x.OriginPC)
 		case *values.RefMember:
 			if !x.HasOriginPC {
 				return false
@@ -422,6 +437,16 @@ func nativeAnonymousInitializerForeignField(field *values.JavaClassMember, recei
 	if !known || strings.ReplaceAll(owner.Name, ".", "/") != field.Name {
 		return false
 	}
+	return nativeAnonymousInitializerFieldDeclaration(field, false, resolve, work)
+}
+
+// A source field read must select the actual symbolic declaring class. Refuse
+// constant variables, which javac can inline and thereby skip initialization,
+// and require each original read PC to remain in the expression event stream.
+func nativeAnonymousInitializerFieldDeclaration(field *values.JavaClassMember, static bool, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+	if field == nil || resolve == nil || class_context.SafeIdentifier(field.Member) != field.Member || !nativeProofWork(work, 1) {
+		return false
+	}
 	object, known := resolve(field.Name)
 	if !known || object == nil || object.GetClassName() != field.Name {
 		return false
@@ -443,7 +468,7 @@ func nativeAnonymousInitializerForeignField(field *values.JavaClassMember, recei
 		}
 		declaration = candidate
 	}
-	if declaration == nil || declaration.AccessFlags&(8|2|0x1000) != 0 || fieldHasConstantValue(declaration) {
+	if declaration == nil || (declaration.AccessFlags&8 != 0) != static || declaration.AccessFlags&(2|0x1000) != 0 || fieldHasConstantValue(declaration) {
 		return false
 	}
 	descriptor, valid := sourceBridgeUTF8(object, declaration.DescriptorIndex)
@@ -451,16 +476,21 @@ func nativeAnonymousInitializerForeignField(field *values.JavaClassMember, recei
 }
 
 func nativeAnonymousInitializerArrayAllocation(object *ClassObject, op *core.OpCode, value *values.NewExpression) bool {
-	if value.ConstructorCall != nil || value.ArgumentsGetter != nil || len(value.Initializer) != 0 || len(value.Length) != 1 {
+	if value.ConstructorCall != nil || value.ArgumentsGetter != nil || len(value.Initializer) != 0 {
 		return false
 	}
-	var element types.JavaType
+	var expected types.JavaType
+	dimensions := 1
 	switch op.Instr.OpCode {
 	case core.OP_NEWARRAY:
 		if len(op.Data) != 1 {
 			return false
 		}
-		element = types.GetPrimerArrayType(int(op.Data[0]))
+		element := types.GetPrimerArrayType(int(op.Data[0]))
+		if element == nil {
+			return false
+		}
+		expected = types.NewJavaArrayType(element)
 	case core.OP_ANEWARRAY:
 		if len(op.Data) != 2 {
 			return false
@@ -469,6 +499,7 @@ func nativeAnonymousInitializerArrayAllocation(object *ClassObject, op *core.OpC
 		if !known {
 			return false
 		}
+		var element types.JavaType
 		if strings.HasPrefix(name, "[") {
 			var err error
 			element, err = types.ParseDescriptor(name)
@@ -478,14 +509,30 @@ func nativeAnonymousInitializerArrayAllocation(object *ClassObject, op *core.OpC
 		} else {
 			element = types.NewJavaClass(name)
 		}
+		expected = types.NewJavaArrayType(element)
+	case core.OP_MULTIANEWARRAY:
+		if len(op.Data) != 3 {
+			return false
+		}
+		name, known := sourceBridgeClassName(object, core.Convert2bytesToInt(op.Data[:2]))
+		if !known || !strings.HasPrefix(name, "[") {
+			return false
+		}
+		var err error
+		expected, err = types.ParseDescriptor(name)
+		if err != nil {
+			return false
+		}
+		dimensions = int(op.Data[2])
+		if dimensions < 1 || dimensions > expected.ArrayDim() {
+			return false
+		}
 	default:
 		return false
 	}
-	if element == nil {
-		return false
-	}
-	expected := types.NewJavaArrayType(element)
-	return nativeAnonymousInitializerSameArrayType(value.Type(), expected)
+	// Every dimension is evaluated before the single allocation instruction.
+	// Zero outer dimensions still evaluate and check negative inner dimensions.
+	return len(value.Length) == dimensions && nativeAnonymousInitializerSameArrayType(value.Type(), expected)
 }
 
 func nativeAnonymousInitializerSameArrayType(actual, expected types.JavaType) bool {

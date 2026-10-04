@@ -76,3 +76,52 @@ func TestNativeAnonymousInitializerArrayTypeKeepsBinaryIdentityAndRank(t *testin
 		})
 	}
 }
+
+func TestNativeAnonymousInitializerMultiArrayRequiresOriginalDimensions(t *testing.T) {
+	files := nativeCompileClasses(t, nativeAnonymousArrayInitializerFixture)
+	for _, variant := range []string{"original", "partial dimensions", "zero dimensions", "too many dimensions", "missing length", "extra length", "rank mismatch", "wrong element", "truncated opcode", "nonarray class"} {
+		t.Run(variant, func(t *testing.T) {
+			obj, e := Parse(append([]byte(nil), files["ArrayInitOwner$1.class"]...))
+			if e != nil {
+				t.Fatal(e)
+			}
+			index := obj.ConstantPoolManager.AddNewClassInfo("[[[I")
+			op := &core.OpCode{Instr: &core.Instruction{OpCode: core.OP_MULTIANEWARRAY}, Data: []byte{byte(index >> 8), byte(index), 3}}
+			typ, e := types.ParseDescriptor("[[[I")
+			if e != nil {
+				t.Fatal(e)
+			}
+			length := values.NewJavaLiteral(2, types.NewJavaPrimer(types.JavaInteger))
+			value := values.NewNewArrayExpression(typ, length, length, length)
+			switch variant {
+			case "partial dimensions":
+				op.Data[2] = 2
+				value.Length = value.Length[:2]
+			case "zero dimensions":
+				op.Data[2] = 0
+				value.Length = nil
+			case "too many dimensions":
+				op.Data[2] = 4
+				value.Length = append(value.Length, length)
+			case "missing length":
+				value.Length = value.Length[:2]
+			case "extra length":
+				value.Length = append(value.Length, length)
+			case "rank mismatch":
+				value.JavaType = types.NewJavaArrayType(typ)
+			case "wrong element":
+				value.JavaType, _ = types.ParseDescriptor("[[[J")
+			case "truncated opcode":
+				op.Data = op.Data[:2]
+			case "nonarray class":
+				index = obj.ConstantPoolManager.AddNewClassInfo("java/lang/Object")
+				op.Data[0] = byte(index >> 8)
+				op.Data[1] = byte(index)
+			}
+			want := variant == "original" || variant == "partial dimensions"
+			if got := nativeAnonymousInitializerArrayAllocation(obj, op, value); got != want {
+				t.Fatalf("accepted=%v", got)
+			}
+		})
+	}
+}
