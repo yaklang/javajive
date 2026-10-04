@@ -1766,10 +1766,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// `l0.annotated` / `l0.metadata` cannot find symbol. Cast to AnnotatedAndMetadata.
 	// Kill-switch: JDEC_ANNOTATED_AND_METADATA_LAMBDA_OFF=1.
 	full = c.sourceRewrite("fixAnnotatedAndMetadataLambda", "class_source", full, fixAnnotatedAndMetadataLambda)
-	// jackson DefaultAccessorNamingStrategy$Provider: findPOJOBuilderConfig returns
-	// Object, then `var5.withPrefix` cannot find symbol. Cast to JsonPOJOBuilder$Value.
-	// Kill-switch: JDEC_POJO_BUILDER_VALUE_CAST_OFF=1.
-	full = c.sourceRewrite("fixPOJOBuilderValueCast", "class_source", full, fixPOJOBuilderValueCast)
 	// Local declarations are placed by VariableId and lexical dominance in
 	// RewriteVar. Reintroducing declarations from printed slot names here
 	// can duplicate a declaration already recovered by that typed pass.
@@ -8791,16 +8787,6 @@ func fixAnnotatedAndMetadataLambda(body string) string {
 	body = strings.ReplaceAll(body, "l0.annotated", "((AnnotatedAndMetadata)(l0)).annotated")
 	body = strings.ReplaceAll(body, "l0.metadata", "((AnnotatedAndMetadata)(l0)).metadata")
 	return body
-}
-
-func fixPOJOBuilderValueCast(body string) string {
-	if jdecenv.Get("JDEC_POJO_BUILDER_VALUE_CAST_OFF") == "1" {
-		return body
-	}
-	if !strings.Contains(body, "var5.withPrefix") {
-		return body
-	}
-	return strings.ReplaceAll(body, "var5.withPrefix", "((JsonPOJOBuilder$Value)(var5)).withPrefix")
 }
 
 func fixGetFieldClassHoist(body string) string {

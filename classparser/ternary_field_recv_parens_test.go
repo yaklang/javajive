@@ -175,17 +175,20 @@ func TestFixAnnotatedAndMetadataLambdaIsLoadBearing(t *testing.T) {
 	}
 }
 
-func TestFixPOJOBuilderValueCastIsLoadBearing(t *testing.T) {
-	in := "return new DefaultAccessorNamingStrategy(var1,var2,((var5) == (null)) ? (this._withPrefix) : (var5.withPrefix),this._getterPrefix,this._isGetterPrefix,this._baseNameValidator);\n"
-	os.Unsetenv("JDEC_POJO_BUILDER_VALUE_CAST_OFF")
-	on := fixPOJOBuilderValueCast(in)
-	if !strings.Contains(on, "((JsonPOJOBuilder$Value)(var5)).withPrefix") {
-		t.Errorf("fix ON: expected JsonPOJOBuilder$Value cast, got:\n%s", on)
-	}
-	t.Setenv("JDEC_POJO_BUILDER_VALUE_CAST_OFF", "1")
-	off := fixPOJOBuilderValueCast(in)
-	if strings.Contains(off, "JsonPOJOBuilder$Value") {
-		t.Errorf("fix OFF: expected no cast, got:\n%s", off)
+func TestNativeAnnotationFieldBindingUsesOriginalDeclarations(t *testing.T) {
+	for _, rename := range []bool{false, true} {
+		t.Run(map[bool]string{false: "original-spelling", true: "renamed-field-and-owner"}[rename], func(t *testing.T) {
+			fixture := nativeAnnotationFieldBindingFixture
+			if rename {
+				fixture = strings.ReplaceAll(fixture, "FieldPacket", "IndependentSignal")
+				fixture = strings.ReplaceAll(fixture, "withPrefix", "arbitraryLabel")
+			}
+			owner, driver := "FieldPacket", "FieldBindingDriver"
+			if rename {
+				owner, driver = "IndependentSignal", "FieldBindingDriver"
+			}
+			testNativePrivateSetterFixture(t, fixture, owner, driver, "typed-field:identity:null:owner\n")
+		})
 	}
 }
 
