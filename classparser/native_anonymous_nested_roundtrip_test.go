@@ -17,7 +17,7 @@ class NestedDriver{public static void main(String[]args)throws Exception{Object 
 
 func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 	javac, java := t04Tools(t)
-	for _, scope := range []string{"static-root", "dollar-root", "instance-root", "static-local", "dollar-local", "instance-local", "depth3", "depth4", "depth3-instance", "depth3-shadow", "depth3-major51", "depth3-multiple"} {
+	for _, scope := range []string{"static-root", "dollar-root", "instance-root", "static-local", "dollar-local", "instance-local", "depth3", "depth4", "depth3-instance", "depth3-shadow", "depth3-major51", "depth3-multiple", "member-static", "member-instance", "member-depth-static", "member-depth-instance"} {
 		fixture := nativeAnonymousNestedFixture
 		if strings.HasPrefix(scope, "depth") {
 			depth := 3
@@ -43,6 +43,9 @@ func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 				fixture = strings.Replace(fixture, "long calc(long n){return n^seed;}", "long calc(long n){return n^seed;}Object echo(Object token){return token;}", 1)
 				fixture = strings.ReplaceAll(fixture, "phase.origin()!=token", "phase.origin()!=token||phase.echo(identity)!=identity")
 			}
+		}
+		if strings.HasPrefix(scope, "member-") {
+			fixture = nativeAnonymousNestedMemberFixture(scope)
 		}
 		rootName := "NestedOwner"
 		if strings.HasPrefix(scope, "dollar-") {
@@ -96,7 +99,7 @@ func TestNativeAnonymousNestedOriginalCaptureRoundTrip(t *testing.T) {
 						z := nativeArchive(t, files)
 						defer z.Close()
 						for n := range files {
-							if !strings.HasPrefix(n, rootName+"$1") {
+							if !strings.HasPrefix(n, rootName+"$") {
 								continue
 							}
 							n = strings.TrimSuffix(n, ".class")
@@ -174,5 +177,30 @@ func nativeAnonymousNestedDepthFixture(depth int) string {
 	fixture = strings.ReplaceAll(fixture, "NestedOwner.make(token,seed)", "NestedOwner.make(token,seed)"+calls)
 	fixture = strings.ReplaceAll(fixture, "NestedOwner.make(identity,7)", "NestedOwner.make(identity,7)"+calls)
 	fixture = strings.ReplaceAll(fixture, "NestedOwner$1$1", child)
+	return fixture
+}
+
+func nativeAnonymousNestedMemberFixture(scope string) string {
+	fixture := nativeAnonymousNestedFixture
+	static := "static "
+	receiver := "Layer.make(token,seed)"
+	if strings.Contains(scope, "instance") {
+		static = ""
+		receiver = "new Layer().make(token,seed)"
+	}
+	fixture = strings.Replace(fixture, "class NestedOwner{static NestedFactory make(", "class NestedOwner{"+static+"NestedFactory make(Object token,long seed){return "+receiver+";}"+static+"class Layer{"+static+"NestedFactory make(", 1)
+	fixture = strings.Replace(fixture, "}};}}\nclass NestedDriver", "}};}}}\nclass NestedDriver", 1)
+	if strings.Contains(scope, "depth") {
+		receiver := "Middle.make(token,seed)"
+		if static == "" {
+			receiver = "new Middle().make(token,seed)"
+		}
+		fixture = strings.Replace(fixture, static+"class Layer{"+static+"NestedFactory make(", static+"class Layer{"+static+"NestedFactory make(Object token,long seed){return "+receiver+";}"+static+"class Middle{"+static+"NestedFactory make(", 1)
+		fixture = strings.Replace(fixture, "}};}}}\nclass NestedDriver", "}};}}}}\nclass NestedDriver", 1)
+	}
+	fixture = strings.Replace(fixture, `Class.forName("NestedOwner$1$1")`, `Class.forName(factory.getClass().getName()+"$1")`, 1)
+	if strings.Contains(scope, "instance") {
+		fixture = strings.ReplaceAll(fixture, "NestedOwner.make(", "new NestedOwner().make(")
+	}
 	return fixture
 }

@@ -20,17 +20,38 @@ type nativeAnonymousForest struct {
 	readPCs           map[string]map[string]map[int]bool
 	anonymousTypes    map[string]bool
 	captureReferences map[string]map[int]*nativeMemberLexicalRead
+	members           *nativeMemberFamily
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
+	forest := c.planNativeAnonymousLexicalForest(nil)
+	if forest == nil {
+		return nil
+	}
+	return forest.groups[forest.root]
+}
+
+func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemberFamily) *nativeAnonymousForest {
 	if c.foldSiblingResolver == nil || !nativeAnonymousForestVersion(c.obj) || !nativeMemberTopLevelEvidence(c.obj, c.Work) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
 		return nil
 	}
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {
 		return nil
 	}
-	forest := &nativeAnonymousForest{root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}}
+	forest := &nativeAnonymousForest{root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}, members: members}
 	queue := []*ClassObject{c.obj}
+	if members != nil {
+		if members.owner != forest.root {
+			return nil
+		}
+		for name, child := range members.children {
+			if !nativeAnonymousForestVersion(child.object) || !nativeProofWork(c.Work, 1) {
+				return nil
+			}
+			forest.objects[name] = child.object
+			queue = append(queue, child.object)
+		}
+	}
 	for cursor := 0; cursor < len(queue); cursor++ {
 		object := queue[cursor]
 		for _, attr := range object.Attributes {
@@ -67,7 +88,7 @@ func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
 		if !has {
 			continue
 		}
-		group := reader.planNativeAnonymousGroup(nil, forest)
+		group := reader.planNativeAnonymousGroup(members, forest)
 		if group == nil {
 			return nil
 		}
@@ -81,7 +102,13 @@ func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
 			queue = append(queue, child.object)
 		}
 	}
-	if len(forest.groups) < 2 {
+	recursive := false
+	for owner := range forest.groups {
+		if forest.units[owner] != nil {
+			recursive = true
+		}
+	}
+	if !recursive {
 		return nil
 	} // ordinary direct families use the established path
 	if !nativeAnonymousForestCaptureReads(forest, c.Work) || !nativeAnonymousForestSymbolClosure(forest, c.Work) {
@@ -93,14 +120,14 @@ func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
 		reader.Work = c.Work
 		reader.foldSiblingResolver = c.foldSiblingResolver
 		reader.declarationResolver = c.declarationResolver
-		if reader.validateNativeAnonymousGroup(group, nil, forest) == nil {
+		if reader.validateNativeAnonymousGroup(group, members, forest) == nil {
 			return nil
 		}
 	}
 	if !nativeAnonymousForestOpcodeClosure(forest, c.Work) {
 		return nil
 	}
-	return forest.groups[forest.root]
+	return forest
 }
 
 func (c *ClassObjectDumper) nativeAnonymousForestHasChildren() (bool, bool) {

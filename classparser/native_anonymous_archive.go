@@ -19,31 +19,13 @@ type nativeAnonymousCacheEntry struct {
 func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 	owner, _, anon := originalAnonymousOwner(cf)
 	if anon {
-		seen := map[string]bool{}
-		for depth := 0; depth < 64; depth++ {
-			if seen[owner] {
-				return nil, false
-			}
-			seen[owner] = true
-			raw, known := z.enumSiblingResolver()(owner)
-			if !known {
-				return nil, false
-			}
-			reader := z.nativeMemberReader(nil)
-			object, err := reader.parseResolved(raw)
-			if err != nil || object.GetClassName() != owner {
-				return nil, false
-			}
-			next, _, nested := originalAnonymousOwner(object)
-			if !nested {
-				break
-			}
-			if depth == 63 {
-				return nil, false
-			}
-			owner = next
+		var known bool
+		owner, known = z.nativeAnonymousOutermostOwner(owner, z.nativeMemberReader(cf))
+		if !known {
+			return nil, false
 		}
 	}
+
 	if !anon {
 		owner = cf.GetClassName()
 		candidate := false
@@ -165,4 +147,30 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 		return []byte(out.source), true
 	}
 	return nil, false
+}
+
+// Parent ownership is an original EnclosingMethod/self-row fact. A cached
+// anonymous leaf and its complete source root must share the same commit key.
+func (z *JarFS) nativeAnonymousOutermostOwner(owner string, reader *ClassObjectDumper) (string, bool) {
+	seen := map[string]bool{}
+	for depth := 0; depth < 64; depth++ {
+		if seen[owner] || !nativeProofWork(reader.Work, 1) {
+			return "", false
+		}
+		seen[owner] = true
+		raw, known := z.enumSiblingResolver()(owner)
+		if !known {
+			return "", false
+		}
+		object, err := reader.parseResolved(raw)
+		if err != nil || object.GetClassName() != owner {
+			return "", false
+		}
+		next, _, anonymous := originalAnonymousOwner(object)
+		if !anonymous {
+			return owner, true
+		}
+		owner = next
+	}
+	return "", false
 }

@@ -209,7 +209,12 @@ func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, meth
 	if members != nil {
 		currentMember = members.children[owner]
 		if currentMember != nil && !currentMember.static {
-			outerField = "this$1"
+			suffix, known := strings.CutPrefix(currentMember.field, "this$")
+			depth, err := strconv.Atoi(suffix)
+			if !known || err != nil || depth < 0 || depth >= 64 {
+				return nil
+			}
+			outerField = "this$" + strconv.Itoa(depth+1)
 		}
 	}
 	if forest != nil && forest.units[owner] != nil {

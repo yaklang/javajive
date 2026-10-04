@@ -35,6 +35,7 @@ type nativeMemberFamily struct {
 	anonymous       *nativeAnonymousFamily
 	anonymousUnits  map[string]*nativeAnonymousFamily
 	memberAnonymous map[string]*nativeAnonymousFamily
+	anonymousForest *nativeAnonymousForest
 	owner           string
 	children        map[string]*nativeMemberClass
 	failed          bool
@@ -1329,7 +1330,7 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 		if e != nil || sub.nativeCaptureFailed || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
 			return "", fmt.Errorf("member body unproved: %v", e)
 		}
-		if group := p.memberAnonymous[name]; group != nil && !group.completeSource(src) {
+		if group := p.memberAnonymous[name]; group != nil && !group.completeOwnSource(src) {
 			ordinals, _ := nativeAnonymousOrdinalsWithinOwner(src, group.owner)
 			return "", fmt.Errorf("member anonymous source layout unproved: %s failed=%v ordinals=%v children=%d", group.owner, group.failed, ordinals, len(group.children))
 		}

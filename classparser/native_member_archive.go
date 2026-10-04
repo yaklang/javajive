@@ -207,19 +207,15 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 	owner, _, _, member := originalMemberOwner(obj)
 	if anonymousOwner, _, anonymous := originalAnonymousOwner(obj); anonymous {
-		owner, member = anonymousOwner, true
-		if raw, found := z.enumSiblingResolver()(owner); found {
-			outer, err := z.nativeMemberReader(obj).parseResolved(raw)
-			if err != nil || outer.GetClassName() != owner {
-				return nil
-			}
-			if root, _, _, named := originalMemberOwner(outer); named {
-				owner = root
-			}
-		} else {
+		reader := z.nativeMemberReader(obj)
+		var known bool
+		owner, known = z.nativeAnonymousOutermostOwner(anonymousOwner, reader)
+		if !known {
 			return nil
 		}
+		member = true
 	}
+
 	if !member {
 		owner = obj.GetClassName()
 	}
@@ -291,40 +287,16 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		if p == nil {
 			return
 		}
-		p.anonymous = d.planNativeAnonymousFamilyWithinMembers(p)
-		p.anonymousUnits = map[string]*nativeAnonymousFamily{}
-		p.memberAnonymous = map[string]*nativeAnonymousFamily{}
-		addAnonymous := func(group *nativeAnonymousFamily) bool {
-			if group == nil {
-				return true
-			}
-			for name := range group.children {
-				if len(p.anonymousUnits) >= 64 || p.anonymousUnits[name] != nil || !nativeProofWork(d.Work, 1) {
-					return false
-				}
-				p.anonymousUnits[name] = group
-			}
-			return true
-		}
-		if !addAnonymous(p.anonymous) {
-			return
-		}
-		for name, child := range p.children {
-			reader := z.nativeMemberReader(child.object)
-			reader.options.EnvSnapshot = snap
-			group := reader.planNativeAnonymousFamilyWithinMembers(p)
-			if !nativeJointAnonymousAllocationsClosed(child.object, group, d.Work) || !addAnonymous(group) {
-				return
-			}
-			p.memberAnonymous[name] = group
-		}
-		if !nativeJointAnonymousAllocationsClosed(root, p.anonymous, d.Work) {
+		if !d.planNativeMemberAnonymousScopes(p) {
 			return
 		}
 		if !nativeMemberJointBridgeMarkersClosed(p, d.Work) {
 			return
 		}
 		index := z.originalMemberIndex()
+		if p.anonymousForest != nil && !nativeAnonymousForestArchiveClosed(p.anonymousForest, index, d.Work) {
+			return
+		}
 		if !index.valid || !nativeMemberPrivateGetterReferencesClosed(p, index, d.Work) || !z.nativeMemberAccessRepresentable(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
 			return
 		}
@@ -442,6 +414,9 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		var src string
 		var e error
 		jdecenv.Run(snap, func() error { src, e = d.DumpClass(); return e })
+		if p.anonymousForest != nil && !p.anonymousForest.scopeSourceComplete(src) {
+			return
+		}
 		if e != nil || p.failed || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {
 			return
 		}
