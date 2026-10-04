@@ -17,6 +17,9 @@ import (
 )
 
 type nativeAnonymousClass struct {
+	enclosingField        string
+	parentAnonymous       bool
+	capturePCs            map[string]int
 	object                *ClassObject
 	descriptor            string
 	method                string
@@ -32,6 +35,7 @@ type nativeAnonymousClass struct {
 	memberEnclosingReadPC int
 }
 type nativeAnonymousFamily struct {
+	forest   *nativeAnonymousForest
 	owner    string
 	children map[string]*nativeAnonymousClass
 	failed   bool
@@ -104,6 +108,10 @@ func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, w
 }
 
 func nativeAnonymousConstructorWithinMembers(obj *ClassObject, owner string, method string, work *workbudget.Budget, members *nativeMemberFamily, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
+	return nativeAnonymousConstructorWithinForest(obj, owner, method, work, members, nil, access...)
+}
+
+func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, method string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
 	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
@@ -122,7 +130,7 @@ func nativeAnonymousConstructorWithinMembers(obj *ClassObject, owner string, met
 	if obj.AccessFlags != 0x0020 {
 		return nil
 	}
-	c := &nativeAnonymousClass{object: obj, fields: map[string]int{}, method: method}
+	c := &nativeAnonymousClass{object: obj, fields: map[string]int{}, capturePCs: map[string]int{}, method: method}
 	prefix := owner + "$"
 	suffix, ok := strings.CutPrefix(obj.GetClassName(), prefix)
 	if !ok {
@@ -189,6 +197,7 @@ func nativeAnonymousConstructorWithinMembers(obj *ClassObject, owner string, met
 			return nil
 		}
 		c.fields[mem.Member] = param
+		c.capturePCs[mem.Member] = int(ops[i+2].CurrentOffset)
 		i += 3
 	}
 	if i >= len(ops) || core.GetRetrieveIdx(ops[i]) != 0 || !constructorMotionLoad(ops[i], "Ljava/lang/Object;") {
@@ -202,6 +211,20 @@ func nativeAnonymousConstructorWithinMembers(obj *ClassObject, owner string, met
 		if currentMember != nil && !currentMember.static {
 			outerField = "this$1"
 		}
+	}
+	if forest != nil && forest.units[owner] != nil {
+		parent := forest.units[owner]
+		depth := 0
+		if parent.enclosingField != "" {
+			var err error
+			depth, err = strconv.Atoi(strings.TrimPrefix(parent.enclosingField, "this$"))
+			if err != nil {
+				return nil
+			}
+			depth++
+		}
+		outerField = "this$" + strconv.Itoa(depth)
+		c.parentAnonymous = true
 	}
 	// javac's enclosing operand for an anonymous subclass of a sibling member
 	// is this member's original capture. The same joint plan proves both
@@ -337,6 +360,12 @@ func nativeAnonymousConstructorWithinMembers(obj *ClassObject, owner string, met
 			}
 		}
 	}
+	if c.parentAnonymous && outer < 0 {
+		return nil
+	}
+	if outer >= 0 {
+		c.enclosingField = outerField
+	}
 	next := 0
 	if outer >= 0 {
 		if outer != next {
@@ -369,17 +398,27 @@ func fieldHasConstantValue(field *MemberInfo) bool {
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
-	return c.planNativeAnonymousFamilyWithinMembers(nil)
+	if existing := c.planNativeAnonymousFamilyWithinMembers(nil); existing != nil {
+		return existing
+	}
+	return c.planNativeAnonymousForest()
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nativeMemberFamily) *nativeAnonymousFamily {
+	p := c.planNativeAnonymousGroup(members, nil)
+	if p == nil {
+		return nil
+	}
+	return c.validateNativeAnonymousGroup(p, members, nil)
+}
+func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily, forest *nativeAnonymousForest) *nativeAnonymousFamily {
 	if c.foldSiblingResolver == nil || isGenuineEnum(c.obj) || c.getenv("JDEC_NATIVE_ANONYMOUS_OFF") != "" || !nativeSourceBinaryName(c.obj.GetClassName()) {
 		return nil
 	}
-	if _, _, anon := originalAnonymousOwner(c.obj); anon {
+	if _, _, anon := originalAnonymousOwner(c.obj); anon && (forest == nil || forest.units[c.obj.GetClassName()] == nil) {
 		return nil
 	}
-	p := &nativeAnonymousFamily{owner: c.obj.GetClassName(), children: map[string]*nativeAnonymousClass{}, bridges: map[string]*nativeConstructorAccessBridge{}}
+	p := &nativeAnonymousFamily{forest: forest, owner: c.obj.GetClassName(), children: map[string]*nativeAnonymousClass{}, bridges: map[string]*nativeConstructorAccessBridge{}}
 	access := c.nativeConstructorAccessBridges()
 	names := map[string]bool{}
 	for _, a := range c.obj.Attributes {
@@ -422,7 +461,7 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 				return nil
 			}
 		}
-		child := nativeAnonymousConstructorWithinMembers(obj, owner, method, c.Work, members, access)
+		child := nativeAnonymousConstructorWithinForest(obj, owner, method, c.Work, members, forest, access)
 		if child == nil {
 			return nil
 		}
@@ -447,6 +486,9 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 			return nil
 		}
 	}
+	return p
+}
+func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamily, members *nativeMemberFamily, forest *nativeAnonymousForest) *nativeAnonymousFamily {
 	allNames := map[string]bool{}
 	for _, a := range c.obj.Attributes {
 		if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
@@ -512,7 +554,7 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 				return nil
 			}
 			for child := range p.children {
-				if strings.Contains(descriptor, "L"+child+";") && !nativeMemberJointBridgeDeclaration(members, sibling, member, child, c.Work) {
+				if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestEnclosingDeclaration(sibling, member, forest, c.Work) && !nativeMemberJointBridgeDeclaration(members, sibling, member, child, c.Work) {
 					return nil
 				}
 			}
@@ -525,14 +567,14 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 					return nil
 				}
 				for child := range p.children {
-					if strings.Contains(desc, "L"+child+";") && !jointBridgeTypes[constantIndex+1] {
+					if strings.Contains(desc, "L"+child+";") && !nativeAnonymousForestConstructorNameType(sibling, constantIndex+1, forest, c.Work) && !nativeAnonymousForestEnclosingNameType(sibling, constantIndex+1, forest, c.Work) && !nativeAnonymousForestCaptureNameType(forest, sibling, constantIndex+1, c.Work) && !jointBridgeTypes[constantIndex+1] {
 						return nil
 					}
 				}
 			}
 			if member := nativeConstantMember(constant); member != nil {
 				owner, known := sourceBridgeClassName(sibling, member.ClassIndex)
-				if !known || p.children[owner] != nil {
+				if !known || p.children[owner] != nil && !nativeAnonymousForestCaptureReference(forest, sibling, constantIndex+1, c.Work) {
 					return nil
 				}
 			}
@@ -572,7 +614,7 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 								return nil
 							}
 							owner, _, anonymous := originalAnonymousOwner(nested)
-							if anonymous && p.children[owner] != nil {
+							if anonymous && p.children[owner] != nil && !nativeAnonymousForestOwnChild(forest, owner, name) {
 								return nil
 							}
 						}
@@ -595,7 +637,7 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 					return nil
 				}
 				for child := range p.children {
-					if strings.Contains(descriptor, "L"+child+";") && !bridgeNameTypes[constantIndex+1] {
+					if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestConstructorNameType(object, constantIndex+1, forest, c.Work) && !nativeAnonymousForestEnclosingNameType(object, constantIndex+1, forest, c.Work) && !nativeAnonymousForestCaptureNameType(forest, object, constantIndex+1, c.Work) && !bridgeNameTypes[constantIndex+1] {
 						return nil
 					}
 				}
@@ -608,7 +650,7 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 			}
 			for child := range p.children {
 				name, _ := object.getUtf8(member.NameIndex)
-				if strings.Contains(descriptor, "L"+child+";") && !p.accessBridgeDescriptor(object, name, descriptor) {
+				if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestEnclosingDeclaration(object, member, forest, c.Work) && !p.accessBridgeDescriptor(object, name, descriptor) {
 					return nil
 				}
 			}
@@ -727,6 +769,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			return text, true
 		}
 	}
+	c.wireNativeAnonymousForestCaptures(ctx)
 	p := c.nativeAnonymousRoot
 	if p == nil {
 		return
@@ -747,6 +790,13 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if child == nil {
 			return "", false
 		}
+		if c.Work != nil {
+			if c.Work.Enter(workbudget.CounterASTDepth) != nil {
+				p.failed = true
+				return "", false
+			}
+			defer c.Work.Leave(workbudget.CounterASTDepth)
+		}
 		fail := func() (string, bool) { p.failed = true; return "", false }
 		if descriptor != child.descriptor || newPC != child.newPC || pc != child.invokePC {
 			return fail()
@@ -765,7 +815,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			if !arg.Local && !arg.Receiver {
 				return fail()
 			}
-			if (field == "this$0" || field == "this$1") && !arg.Receiver {
+			if (field == child.enclosingField) && !arg.Receiver {
 				return fail()
 			}
 			if arg.Receiver {
@@ -792,6 +842,17 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			// Reuse its proved member names; looking up the owner's incomplete
 			// cache entry would recurse, and a flat binary name loses private scope.
 			sub.nativeMemberRoot = c.nativeMemberRoot
+		}
+		if p.forest != nil {
+			sub.nativeAnonymousRoot = p.forest.groups[child.object.GetClassName()]
+			sub.nativeAnonymousForest = p.forest
+			sub.nativeAnonymousBindings = map[string]string{}
+			for key, text := range c.nativeAnonymousBindings {
+				sub.nativeAnonymousBindings[key] = text
+			}
+			for field, text := range bindings {
+				sub.nativeAnonymousBindings[nativeMemberCaptureIndexKey(child.object.GetClassName(), field)] = text
+			}
 		}
 		sub.nativeCaptureFields = bindings
 		sub.nativeCaptureTypes = captureTypes
@@ -847,6 +908,9 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			if method != nil && method.checkedEscape {
 				return fail()
 			}
+		}
+		if group := sub.nativeAnonymousRoot; group != nil && !group.completeOwnSource(src) {
+			return fail()
 		}
 		body := javaClassBodyContent(src)
 		if body == "" {
@@ -914,7 +978,7 @@ func nativeAnonymousOrdinals(source string) ([]int, bool) {
 	return nativeAnonymousOrdinalsWithinOwner(source, "")
 }
 
-func nativeAnonymousOrdinalsWithinOwner(source, owner string) ([]int, bool) {
+func nativeAnonymousOrdinalsWithinOwner(source, owner string, scopes ...map[string]bool) ([]int, bool) {
 	result := []int{}
 	prefix := "jdec-owned-anonymous-ordinal:"
 	for i := 0; i < len(source); {
@@ -960,7 +1024,7 @@ func nativeAnonymousOrdinalsWithinOwner(source, owner string) ([]int, bool) {
 				if e != nil {
 					return nil, false
 				}
-				if scoped && !nativeSourceBinaryName(scope) {
+				if scoped && !nativeSourceBinaryName(scope) || len(scopes) > 0 && (!scoped || !scopes[0][scope]) {
 					return nil, false
 				}
 				if owner == "" || scoped && owner == scope {
@@ -975,6 +1039,16 @@ func nativeAnonymousOrdinalsWithinOwner(source, owner string) ([]int, bool) {
 	return result, true
 }
 func (p *nativeAnonymousFamily) completeSource(source string) bool {
+	if p == nil {
+		return false
+	}
+	if p.forest != nil {
+		return p.forest.scopeSourceComplete(source)
+	}
+	return p.completeOwnSource(source)
+}
+
+func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 	if p == nil || p.failed {
 		return false
 	}
@@ -991,6 +1065,11 @@ func (p *nativeAnonymousFamily) completeSource(source string) bool {
 }
 func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 	result := map[string]bool{}
+	for _, name := range c.nativeAnonymousBindings {
+		if name != "" && class_context.SafeIdentifier(name) == name {
+			result[name] = true
+		}
+	}
 	for _, name := range c.nativeCaptureFields {
 		if name != "" && class_context.SafeIdentifier(name) == name {
 			result[name] = true

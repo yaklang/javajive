@@ -39,6 +39,8 @@ type ClassObjectDumper struct {
 	nativeMemberRoot               *nativeMemberFamily
 	nativeMemberCurrent            *nativeMemberClass
 	nativeMemberUnitPrefix         string
+	nativeAnonymousForest          *nativeAnonymousForest
+	nativeAnonymousBindings        map[string]string
 	nativeAnonymousRoot            *nativeAnonymousFamily
 	nativeCaptureFields            map[string]string
 	nativeCapturedReads            map[string]map[int]string

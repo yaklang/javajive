@@ -18,6 +18,32 @@ type nativeAnonymousCacheEntry struct {
 
 func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 	owner, _, anon := originalAnonymousOwner(cf)
+	if anon {
+		seen := map[string]bool{}
+		for depth := 0; depth < 64; depth++ {
+			if seen[owner] {
+				return nil, false
+			}
+			seen[owner] = true
+			raw, known := z.enumSiblingResolver()(owner)
+			if !known {
+				return nil, false
+			}
+			reader := z.nativeMemberReader(nil)
+			object, err := reader.parseResolved(raw)
+			if err != nil || object.GetClassName() != owner {
+				return nil, false
+			}
+			next, _, nested := originalAnonymousOwner(object)
+			if !nested {
+				break
+			}
+			if depth == 63 {
+				return nil, false
+			}
+			owner = next
+		}
+	}
 	if !anon {
 		owner = cf.GetClassName()
 		candidate := false
@@ -91,6 +117,9 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 		if p == nil {
 			return
 		}
+		if p.forest != nil && !nativeAnonymousForestArchiveClosed(p.forest, z.originalMemberIndex(), d.Work) {
+			return
+		}
 		d.nativeAnonymousRoot = p
 		var source string
 		var err error
@@ -112,6 +141,11 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 		entry.output.folded = map[string]bool{}
 		for name := range p.children {
 			entry.output.folded[name] = true
+		}
+		if p.forest != nil {
+			for name := range p.forest.units {
+				entry.output.folded[name] = true
+			}
 		}
 	})
 	out := entry.output
