@@ -14,6 +14,10 @@ import (
 )
 
 func nativeCompileClasses(t *testing.T, source string) map[string][]byte {
+	return nativeCompileDebugClasses(t, source, "none")
+}
+
+func nativeCompileDebugClasses(t *testing.T, source, debug string) map[string][]byte {
 	t.Helper()
 	javac, _ := t04Tools(t)
 	dir := t.TempDir()
@@ -21,7 +25,7 @@ func nativeCompileClasses(t *testing.T, source string) map[string][]byte {
 	if err := os.WriteFile(file, []byte(source), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command(javac, "-proc:none", "--release", "8", "-g:none", "-d", dir, file).CombinedOutput(); err != nil {
+	if out, err := exec.Command(javac, "-proc:none", "--release", "8", "-g:"+debug, "-d", dir, file).CombinedOutput(); err != nil {
 		t.Fatalf("original: %v\n%s", err, out)
 	}
 	files := map[string][]byte{}

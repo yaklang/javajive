@@ -178,7 +178,7 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 		provider = providers[0]
 	}
 	owner, name, flags, known := originalMemberOwner(obj)
-	if !known || obj.MajorVersion < 49 || obj.MajorVersion > 52 || flags&(0x0200|0x2000|0x4000) != 0 || obj.AccessFlags & ^uint16(0x0431) != 0 {
+	if !known || !nativeMemberVersionMetadata(obj, work) || flags&(0x0200|0x2000|0x4000) != 0 || obj.AccessFlags & ^uint16(0x0431) != 0 {
 		return nil
 	}
 	formalCount, outerFormalCount := 0, 0
@@ -246,14 +246,18 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 		if !nok || !dok {
 			return nil
 		}
+		flags, onlySynthetic, known := nativeMemberEffectiveFieldFlags(f, work)
+		if !known {
+			return nil
+		}
 		if p.static {
-			if f.AccessFlags&0x1000 != 0 {
+			if flags&0x1000 != 0 {
 				return nil
 			}
 			continue
 		}
-		if f.AccessFlags&0x1000 != 0 {
-			if p.field != "" || n != "this$0" || f.AccessFlags != 0x1010 || d != "L"+owner+";" || len(f.Attributes) != 0 {
+		if flags&0x1000 != 0 {
+			if p.field != "" || n != "this$0" || flags != 0x1010 || d != "L"+owner+";" || !onlySynthetic {
 				return nil
 			}
 			p.field = n
@@ -444,7 +448,7 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 }
 
 func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
-	if c.foldSiblingResolver == nil || c.obj.MajorVersion < 49 || c.obj.MajorVersion > 52 || !nativeSourceBinaryName(c.obj.GetClassName()) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+	if c.foldSiblingResolver == nil || !nativeMemberVersionMetadata(c.obj, c.Work) || !nativeSourceBinaryName(c.obj.GetClassName()) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
 		return nil
 	}
 	if _, _, _, nested := originalMemberOwner(c.obj); nested {
