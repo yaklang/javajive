@@ -286,8 +286,11 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		if !nativeJointAnonymousAllocationsClosed(root, p.anonymous, d.Work) {
 			return
 		}
+		if !nativeMemberJointBridgeMarkersClosed(p, d.Work) {
+			return
+		}
 		index := z.originalMemberIndex()
-		if !index.valid || !z.nativeMemberAccessRepresentable(p, index, d.Work) {
+		if !index.valid || !z.nativeMemberAccessRepresentable(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
 			return
 		}
 		objects := map[string]*ClassObject{owner: root}
@@ -321,8 +324,16 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		}
 		for _, object := range objects {
 			reader := z.nativeMemberReader(object)
-			if _, known := reader.nativeMemberAllocations(p); !known {
+			allocations, known := reader.nativeMemberAllocations(p)
+			if !known || !nativeMemberJointBridgeCallersClosed(p, object, allocations, d.Work) {
 				return
+			}
+		}
+		for name, child := range p.children {
+			for descriptor := range child.accessBridges {
+				if p.bridgeCalls[name+descriptor] == 0 {
+					return
+				}
 			}
 		}
 		// Independent direct families have independent commits to ownership. A

@@ -26,6 +26,7 @@ type nativeMemberClass struct {
 	formalCount, outerFormalCount int
 	flags                         uint16
 	constructors                  map[string]*nativeMemberConstructor
+	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
 	anonymous       *nativeAnonymousFamily
@@ -34,6 +35,7 @@ type nativeMemberFamily struct {
 	owner           string
 	children        map[string]*nativeMemberClass
 	failed          bool
+	bridgeCalls     map[string]int
 }
 
 // Source ownership comes from one original self row, never dollar spelling.
@@ -175,6 +177,10 @@ func nativeMemberProof(obj *ClassObject, work *workbudget.Budget, providers ...c
 }
 
 func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Budget, providers ...callbinding.Provider) *nativeMemberClass {
+	return nativeMemberProofWithinJointOwner(obj, enclosing, work, nil, providers...)
+}
+
+func nativeMemberProofWithinJointOwner(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, providers ...callbinding.Provider) *nativeMemberClass {
 	var provider callbinding.Provider
 	if len(providers) > 0 {
 		provider = providers[0]
@@ -247,7 +253,7 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 	if flags&8 != 0 && !nativeMemberTypeScope(obj, nil, work) {
 		return nil
 	}
-	p := &nativeMemberClass{object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}}
+	p := &nativeMemberClass{object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}, accessBridges: bridges}
 	for _, f := range obj.Fields {
 		if f == nil || !nativeProofWork(work, 1) {
 			return nil
@@ -316,7 +322,10 @@ func nativeMemberProofWithOwner(obj, enclosing *ClassObject, work *workbudget.Bu
 		}
 		if p.static {
 			if n == "<init>" && m.AccessFlags&0x1000 != 0 {
-				return nil
+				if bridge := bridges[desc]; bridge == nil || bridge.method != m {
+					return nil
+				}
+				continue
 			}
 			continue
 		}
@@ -499,7 +508,11 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				reader.Work = c.Work
 				reader.foldSiblingResolver = c.foldSiblingResolver
 				reader.declarationResolver = c.declarationResolver
-				child := nativeMemberProofWithOwner(obj, c.obj, c.Work, reader.buildInvocationMetadata())
+				bridges := reader.nativeConstructorAccessBridges()
+				child := nativeMemberProofWithinJointOwner(obj, c.obj, c.Work, bridges, reader.buildInvocationMetadata())
+				if child != nil && !child.static && len(bridges) > 0 {
+					return nil
+				}
 				rowName, rowKnown := sourceBridgeUTF8(c.obj, row.InnerNameIndex)
 				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != p.owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags || p.children[name] != nil {
 					return nil
@@ -654,7 +667,23 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				}
 				owner, known := sourceBridgeClassName(c.obj, core.Convert2bytesToInt(op.Data))
 				child := p.children[owner]
-				if !known || child == nil || child.static {
+				if !known || child == nil {
+					continue
+				}
+				if child.static {
+					if len(child.accessBridges) == 0 {
+						continue
+					}
+					plan, ok := nativeMemberStaticBridgeAllocation(c.obj, ops, i, child, c.Work)
+					if !ok {
+						return nil, false
+					}
+					if plan != nil {
+						if result[key][plan.invokePC] != nil {
+							return nil, false
+						}
+						result[key][plan.invokePC] = plan
+					}
 					continue
 				}
 				if i+3 >= len(ops) || ops[i+1].Instr.OpCode != core.OP_DUP || !constructorMotionLoad(ops[i+2], "L"+child.owner+";") {
@@ -719,7 +748,7 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 			}
 			for _, op := range d.Opcodes() {
 				call := constructorMotionMember(c.obj, op, core.OP_INVOKESPECIAL)
-				if call == nil || call.Member != "<init>" || p.children[call.Name] == nil || p.children[call.Name].static {
+				if call == nil || call.Member != "<init>" || p.children[call.Name] == nil || p.children[call.Name].static && p.children[call.Name].accessBridges[call.Description] == nil {
 					continue
 				}
 				if group := p.anonymousUnits[c.obj.GetClassName()]; group != nil {
@@ -763,7 +792,7 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 			return cl, false
 		}
 		child := p.children[strings.ReplaceAll(owner, ".", "/")]
-		if child == nil || child.static {
+		if child == nil || child.static && len(child.accessBridges) == 0 {
 			return cl, true
 		}
 		if !nativeProofWork(work, int64(len(cl.Methods))) || work != nil && work.CheckAlloc(int64(len(cl.Methods))*96) != nil {
@@ -771,6 +800,14 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 			return callbinding.Class{}, false
 		}
 		cl.Methods = append([]callbinding.Method(nil), cl.Methods...)
+		filtered := cl.Methods[:0]
+		for _, m := range cl.Methods {
+			if m.Name == "<init>" && child.accessBridges[m.Desc] != nil {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		cl.Methods = filtered
 		for i, m := range cl.Methods {
 			if m.Name == "<init>" {
 				if ctor := child.constructors[m.Desc]; ctor != nil {
@@ -913,13 +950,19 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	binding := nativeMemberBinding(ctx, p, c.Work)
 	ctx.SourceMemberCandidate = func(owner string) bool {
 		child := p.children[strings.ReplaceAll(owner, ".", "/")]
-		return child != nil && !child.static
+		return child != nil && (!child.static || len(child.accessBridges) > 0)
 	}
 	ctx.SourceMemberAllocation = func(owner, desc string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
 		fail := func() (string, bool) { p.failed = true; return "", false }
 		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+		if child := p.children[strings.ReplaceAll(owner, ".", "/")]; child != nil && child.static && child.accessBridges[desc] == nil {
+			return "", false
+		}
 		if plan == nil || plan.child.object.GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.newPC != newPC || plan.descriptor != desc || len(args) == 0 {
 			return fail()
+		}
+		if plan.child.static {
+			return nativeMemberStaticBridgeSource(plan, args, ctx, binding, p)
 		}
 		if plan.enclosingReadPC >= 0 {
 			if !nativeMemberLexicalEnclosingOperand(args[0].Value, plan, p, c.obj.GetClassName(), c.nativeMemberBody, c.Work) {

@@ -12884,6 +12884,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if c.nativeCaptureFields != nil && c.nativeMemberCurrent == nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
 			continue
 		}
+		if c.nativeMemberCurrent != nil && name == "<init>" && c.nativeMemberCurrent.accessBridges[descriptor] != nil {
+			continue
+		}
 		if genuineEnum && c.isSyntheticEnumMethod(name, descriptor) {
 			continue
 		}

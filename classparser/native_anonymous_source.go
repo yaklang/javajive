@@ -509,19 +509,20 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 				return nil
 			}
 			for child := range p.children {
-				if strings.Contains(descriptor, "L"+child+";") {
+				if strings.Contains(descriptor, "L"+child+";") && !nativeMemberJointBridgeDeclaration(members, sibling, member, child, c.Work) {
 					return nil
 				}
 			}
 		}
-		for _, constant := range sibling.ConstantPool {
+		jointBridgeTypes := nativeMemberJointBridgeNameTypes(members, sibling, c.Work)
+		for constantIndex, constant := range sibling.ConstantPool {
 			if nt, ok := constant.(*ConstantNameAndTypeInfo); ok {
 				desc, known := sourceBridgeUTF8(sibling, nt.DescriptorIndex)
 				if !known {
 					return nil
 				}
 				for child := range p.children {
-					if strings.Contains(desc, "L"+child+";") {
+					if strings.Contains(desc, "L"+child+";") && !jointBridgeTypes[constantIndex+1] {
 						return nil
 					}
 				}
@@ -576,9 +577,13 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 				}
 			}
 		}
-		bridgeNameTypes := map[int]bool{}
+		bridgeNameTypes := nativeMemberJointBridgeNameTypes(members, object, c.Work)
 		if len(p.bridges) > 0 {
-			bridgeNameTypes = p.accessBridgeNameTypes(object, c.Work)
+			for index, valid := range p.accessBridgeNameTypes(object, c.Work) {
+				if valid {
+					bridgeNameTypes[index] = true
+				}
+			}
 		}
 		for constantIndex, constant := range object.ConstantPool {
 			if nt, ok := constant.(*ConstantNameAndTypeInfo); ok && nt != nil {
