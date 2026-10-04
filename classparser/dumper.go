@@ -3676,8 +3676,8 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						mt.ReturnType = sigRet
 					} else if name == "<init>" && c.getenv("JDEC_INNER_CTOR_SIG_ALIGN_OFF") == "" &&
 						len(sigParams) == len(mt.ParamTypes)-1 && len(mt.ParamTypes) >= 1 &&
-						c.hasOuterThisField() {
-						// Non-static inner class constructor: javac OMITS the synthetic leading this$0
+						(c.nativeMemberConstructorHasEnclosingParameter(descriptor) || c.nativeMemberCurrent == nil && c.hasOuterThisField()) {
+						// Non-static inner class constructor: javac OMITS the synthetic enclosing
 						// parameter from the ctor Signature, so its param count is exactly one less than
 						// the descriptor's. Align the Signature params to the TRAILING descriptor params,
 						// keeping the erased outer-instance param[0], and lift the generic types onto

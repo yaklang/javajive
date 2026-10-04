@@ -200,6 +200,31 @@ func constructorMotionField(obj *ClassObject, member *values.JavaClassMember, ca
 }
 
 func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int, params []string, slots map[int]int, metadata callbinding.Provider, enclosingSlots ...int) (int, *values.JavaClassMember) {
+	return constructorMotionDelegationEnclosing(obj, ops, start, params, slots, metadata, nil, enclosingSlots...)
+}
+
+// A supplied lexical path comes only from the complete original member forest.
+// Preserve a distinct origin through its exact GETFIELD PCs; casts, calls or
+// other computations destroy that origin and cannot justify omission.
+func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, start int, params []string, slots map[int]int, metadata callbinding.Provider, path *nativeMemberLexicalRead, enclosingSlots ...int) (int, *values.JavaClassMember) {
+	reads := map[int]*nativeMemberLexicalRead{}
+	tags := map[int]int{}
+	chain := []*nativeMemberLexicalRead{}
+	for read := path; read != nil; read = read.prior {
+		if len(chain) >= 64 {
+			return 0, nil
+		}
+		chain = append(chain, read)
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		read := chain[i]
+		if reads[read.pc] != nil {
+			return 0, nil
+		}
+		reads[read.pc] = read
+		tags[read.pc] = -2 - (len(chain) - 1 - i)
+	}
+
 	if start < 0 || start >= len(ops) || ops[start] == nil || ops[start].Instr == nil || core.GetRetrieveIdx(ops[start]) != 0 || !constructorMotionLoad(ops[start], "Ljava/lang/Object;") {
 		return 0, nil
 	}
@@ -267,7 +292,13 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 				}
 			}
 			if base == 0 {
-				if len(enclosingSlots) > 0 && (len(enclosingSlots) != 1 || len(origins) == 0 || origins[0] != enclosingSlots[0]) {
+				wanted := 0
+				if path != nil {
+					wanted = tags[path.pc]
+				} else if len(enclosingSlots) == 1 {
+					wanted = enclosingSlots[0]
+				}
+				if (path != nil || len(enclosingSlots) > 0) && (len(enclosingSlots) > 1 || len(origins) == 0 || origins[0] != wanted) {
 					return 0, nil
 				}
 				if member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName() {
@@ -379,14 +410,25 @@ func constructorMotionDelegation(obj *ClassObject, ops []*core.OpCode, start int
 			if err != nil || len(fields) != 1 {
 				return 0, nil
 			}
+			origin := -1
 			if opcode == core.OP_GETFIELD {
 				if len(arguments) == 0 || !widening.assignable(arguments[len(arguments)-1], "L"+member.Name+";") {
 					return 0, nil
 				}
+				if read := reads[int(ops[index].CurrentOffset)]; read != nil {
+					prior := 1
+					if read.prior != nil {
+						prior = tags[read.prior.pc]
+					}
+					if origins[len(origins)-1] != prior || member.Name != read.owner || member.Member != read.field || member.Description != read.descriptor {
+						return 0, nil
+					}
+					origin = tags[read.pc]
+				}
 				arguments = arguments[:len(arguments)-1]
 				origins = origins[:len(origins)-1]
 			}
-			appendArgument(fields[0], -1)
+			appendArgument(fields[0], origin)
 			index++
 			continue
 		}

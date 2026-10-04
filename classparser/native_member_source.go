@@ -18,6 +18,7 @@ type nativeMemberConstructor struct {
 	descriptor, sourceDescriptor, delegateOwner, delegateDescriptor string
 	capturePC, delegatePC                                           int
 	projectedSuper                                                  bool
+	enclosingSuperPath                                              *nativeMemberLexicalRead
 }
 type nativeMemberClass struct {
 	sourceName                    string
@@ -624,7 +625,8 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 
 // Source super(...) may omit an enclosing operand only when both original
 // declarations belong to this complete family and the bytecode passes this
-// constructor's unchanged enclosing parameter. A qualified foreign outer or a
+// constructor's unchanged enclosing parameter or its proved lexical capture
+// path. A qualified foreign outer or a
 // computed operand needs its own source origin proof and is refused here.
 func nativeMemberSiblingSuperClosed(child *nativeMemberClass, p *nativeMemberFamily, work *workbudget.Budget, metadata callbinding.Provider) bool {
 	seen := map[string]bool{}
@@ -639,7 +641,7 @@ func nativeMemberSiblingSuperClosed(child *nativeMemberClass, p *nativeMemberFam
 	if parent == nil || parent.static {
 		return true
 	}
-	if child.static || parent.owner != child.owner {
+	if child.static {
 		return false
 	}
 	for _, method := range child.object.Methods {
@@ -677,11 +679,16 @@ func nativeMemberSiblingSuperClosed(child *nativeMemberClass, p *nativeMemberFam
 			params, _, err := callbinding.Descriptor(desc)
 
 			if err == nil && start >= 0 {
-				next, call := constructorMotionDelegation(child.object, ops, start, params, constructorParameterSlots(params), metadata, 1)
+				path, pathKnown := nativeMemberSuperEnclosingPath(child, parent, p, ops, start, work)
+				if !pathKnown {
+					return false
+				}
+				next, call := constructorMotionDelegationEnclosing(child.object, ops, start, params, constructorParameterSlots(params), metadata, path, 1)
+				ctor.enclosingSuperPath = path
 				proved = next > 0 && call != nil && call.Name == ctor.delegateOwner && call.Description == ctor.delegateDescriptor && int(ops[next-1].CurrentOffset) == ctor.delegatePC
 				if proved && parent.accessBridges[ctor.delegateDescriptor] != nil {
 					// The original private-super bridge carries one unused marker.
-					// Its enclosing operand was independently proved to be slot 1
+					// Its enclosing operand was independently proved from slot 1
 					// by constructorMotionDelegation. Only an adjacent original
 					// ACONST_NULL may be dropped, never an effectful expression.
 					proved = next >= 2 && ops[next-2].Instr.OpCode == core.OP_ACONST_NULL && len(ops[next-2].Data) == 0
@@ -1241,9 +1248,13 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				return "", false
 			}
 			call := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: target.sourceDescriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true}
+			if keyword == "super" && ctor.enclosingSuperPath != nil && !nativeMemberLexicalReadOperand(args[0], ctor.enclosingSuperPath, c.Work, ctx) {
+				p.failed = true
+				return "", false
+			}
 			operands := args[1:]
 			if targetClass.accessBridges[desc] != nil {
-				if keyword != "super" || !nativeMemberSourceEnclosingParameter(args[0], ctx, child.owner) || len(operands) == 0 || !nativeMemberBridgeSourceDummy(operands[len(operands)-1]) {
+				if keyword != "super" || !(ctor.enclosingSuperPath != nil && nativeMemberLexicalReadOperand(args[0], ctor.enclosingSuperPath, c.Work, ctx) || ctor.enclosingSuperPath == nil && nativeMemberSourceEnclosingParameter(args[0], ctx, child.owner)) || len(operands) == 0 || !nativeMemberBridgeSourceDummy(operands[len(operands)-1]) {
 					p.failed = true
 					return "", false
 				}
@@ -1500,4 +1511,20 @@ func nativeJointAnonymousAllocationsClosed(obj *ClassObject, anonymous *nativeAn
 		}
 	}
 	return true
+}
+
+// A committed member plan binds the hidden constructor parameter by its
+// original descriptor and capture proof, irrespective of the field's spelling.
+// Signature parameters omit this one physical parameter even at deeper scopes.
+func (c *ClassObjectDumper) nativeMemberConstructorHasEnclosingParameter(descriptor string) bool {
+	child := c.nativeMemberCurrent
+	if child == nil || child.static || c.nativeMemberRoot == nil || child.object != c.obj || c.nativeMemberRoot.children[c.obj.GetClassName()] != child {
+		return false
+	}
+	ctor := child.constructors[descriptor]
+	if ctor == nil || ctor.descriptor != descriptor || ctor.delegatePC < 0 || ctor.capturePC < 0 && ctor.delegateOwner != child.object.GetClassName() {
+		return false
+	}
+	params, result, err := callbinding.Descriptor(descriptor)
+	return err == nil && result == "V" && len(params) > 0 && params[0] == "L"+child.owner+";" && ctor.sourceDescriptor == "("+strings.Join(params[1:], "")+")V"
 }

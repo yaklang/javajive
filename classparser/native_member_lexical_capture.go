@@ -12,6 +12,8 @@ import (
 type nativeMemberLexicalRead struct {
 	owner, field, descriptor string
 	pc                       int
+	parameterOwner           string
+	basePC                   int
 	prior                    *nativeMemberLexicalRead
 }
 
@@ -88,6 +90,31 @@ func nativeMemberLexicalReads(obj *ClassObject, p *nativeMemberFamily, work *wor
 			if len(reads) > 0 && !thisStable {
 				return nil, false
 			}
+			if name == "<init>" {
+				if child := p.children[obj.GetClassName()]; child != nil {
+					if ctor := child.constructors[desc]; ctor != nil && ctor.enclosingSuperPath != nil {
+						for _, op := range ops {
+							if core.GetStoreIdx(op) == 1 {
+								return nil, false
+							}
+						}
+						for node := ctor.enclosingSuperPath; node != nil; node = node.prior {
+							preceding := node.basePC
+							if node.prior != nil {
+								preceding = node.prior.pc
+							}
+							entry := sort.SearchInts(entries, preceding+1)
+							if entry < len(entries) && entries[entry] <= node.pc {
+								return nil, false
+							}
+							if reads[node.pc] != nil {
+								return nil, false
+							}
+							reads[node.pc] = node
+						}
+					}
+				}
+			}
 			// Every actual read/store of a committed synthetic capture must close.
 			// Merely finding one valid lexical path does not license other receivers.
 			for _, op := range ops {
@@ -132,6 +159,7 @@ func nativeMemberLexicalReadOperand(value any, read *nativeMemberLexicalRead, wo
 		return false
 	}
 	seen := map[values.JavaValue]bool{}
+	parameterOwner := ""
 	for node := read; node != nil; node = node.prior {
 		if !nativeProofWork(work, 1) {
 			return false
@@ -154,10 +182,16 @@ func nativeMemberLexicalReadOperand(value any, read *nativeMemberLexicalRead, wo
 			return false
 		}
 		v = field.Object
+		if node.prior == nil {
+			parameterOwner = node.parameterOwner
+		}
 	}
 	v, ok = nativeMemberEnclosingUnpack(v, work)
 	if !ok {
 		return false
+	}
+	if parameterOwner != "" {
+		return ctx.FunctionName == "<init>" && nativeMemberSourceEnclosingParameter(v, ctx, parameterOwner)
 	}
 	ref, known := v.(*values.JavaRef)
 	return known && ref != nil && ref.IsThis && ref.CustomValue == nil && ref.StackVar == nil
