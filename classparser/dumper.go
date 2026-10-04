@@ -30,6 +30,7 @@ import (
 )
 
 type ClassObjectDumper struct {
+	nativeSourceAssertions         *nativeMemberAssertion
 	originalInitializerStatus      map[string]bool
 	originalInitializerStatusReady bool
 	nativeMemberLookup             func(string) *nativeMemberClass
@@ -1980,7 +1981,7 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 	fields := make([]dumpedFields, 0, len(c.obj.Fields))
 	for _, field := range c.obj.Fields {
 		fieldName, _ := c.obj.getUtf8(field.NameIndex)
-		if c.nativeMemberCurrent != nil && c.nativeMemberCurrent.assertions != nil && fieldName == nativeAssertionField {
+		if c.nativeAssertionProtocol() != nil && fieldName == nativeAssertionField {
 			continue
 		}
 		if _, captured := c.nativeCaptureFields[fieldName]; captured {
@@ -12883,7 +12884,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if err != nil {
 			return nil, utils.Wrapf(err, "getUtf8(%v) failed", method.DescriptorIndex)
 		}
-		if c.nativeMemberCurrent != nil && c.nativeMemberCurrent.assertions != nil && c.nativeMemberCurrent.assertions.initializer == method {
+		if c.nativeAssertionProtocol() != nil && c.nativeAssertionProtocol().initializer == method {
 			continue
 		}
 		if c.nativeCaptureFields != nil && c.nativeMemberCurrent == nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {

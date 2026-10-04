@@ -38,7 +38,7 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		}
 		p.memberAnonymous[name] = group
 	}
-	if direct {
+	if direct && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) {
 		return true
 	}
 	reset()
@@ -84,4 +84,57 @@ func nativeMemberJointAnonymousForestOwner(p *nativeMemberFamily, group *nativeA
 		owner = parent
 	}
 	return false
+}
+
+// A direct anonymous plan proves only its own captures and the separately
+// supported enclosing SUPER operand. Body reads of named enclosing captures
+// require the complete mixed forest, even when anonymous nesting is absent.
+func nativeMemberDirectAnonymousCapturesClosed(p *nativeMemberFamily, work *workbudget.Budget) bool {
+	if p == nil {
+		return false
+	}
+	groups := map[*nativeAnonymousFamily]bool{}
+	for _, group := range p.anonymousUnits {
+		if group == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		if groups[group] {
+			continue
+		}
+		groups[group] = true
+		for _, anonymous := range group.children {
+			if anonymous == nil || anonymous.object == nil {
+				return false
+			}
+			checked := map[string]bool{}
+			for _, constant := range anonymous.object.ConstantPool {
+				if !nativeProofWork(work, 1) {
+					return false
+				}
+				field, ok := constant.(*ConstantFieldrefInfo)
+				if !ok {
+					continue
+				}
+				if field == nil || field.NameAndTypeIndex == 0 || int(field.NameAndTypeIndex) > len(anonymous.object.ConstantPool) {
+					return false
+				}
+				owner, known := sourceBridgeClassName(anonymous.object, field.ClassIndex)
+				nt, valid := anonymous.object.ConstantPool[field.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+				if !known || !valid || nt == nil {
+					return false
+				}
+				name, known := sourceBridgeUTF8(anonymous.object, nt.NameIndex)
+				if !known {
+					return false
+				}
+				if named := p.children[owner]; named != nil && !named.static && name == named.field && !checked[owner] {
+					if !nativeMemberProjectedAnonymousCaptureRead(p, anonymous, owner, work) {
+						return false
+					}
+					checked[owner] = true
+				}
+			}
+		}
+	}
+	return true
 }

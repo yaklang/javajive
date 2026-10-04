@@ -103,15 +103,12 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 			queue = append(queue, child.object)
 		}
 	}
-	recursive := false
-	for owner := range forest.groups {
-		if forest.units[owner] != nil {
-			recursive = true
-		}
-	}
-	if !recursive {
+	// Direct groups already tried the local proof. The complete forest also
+	// proves reads that traverse named enclosing scopes, even without a nested
+	// anonymous child. An empty forest still has nothing to commit.
+	if len(forest.units) == 0 {
 		return nil
-	} // ordinary direct families use the established path
+	}
 	if !nativeAnonymousForestCaptureReads(forest, c.Work) || !nativeAnonymousForestSymbolClosure(forest, c.Work) {
 		return nil
 	}

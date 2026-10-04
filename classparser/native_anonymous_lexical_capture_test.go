@@ -122,7 +122,11 @@ func testNativeAnonymousLexicalCaptureChain(t *testing.T, fixture, leafName stri
 				leafD.nativeAnonymousBindings[nativeMemberCaptureIndexKey(read.owner, read.field)] = "Foreign.this"
 			case "missing named anchor":
 				if named {
-					delete(forest.members.children, read.descriptor[1:len(read.descriptor)-1])
+					if forest.members.children[read.owner] != nil {
+						delete(forest.members.children, read.owner)
+					} else {
+						delete(forest.members.children, read.descriptor[1:len(read.descriptor)-1])
+					}
 				} else {
 					delete(leafD.nativeAnonymousBindings, nativeMemberCaptureIndexKey(read.owner, read.field))
 				}

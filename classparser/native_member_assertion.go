@@ -199,11 +199,11 @@ func (s *nativeAssertStatement) String(ctx *class_context.ClassContext) string {
 // Match the original flag read and exception allocation back to typed source
 // operands. A whole family refuses if any flag read cannot be reconstructed.
 func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []statements.Statement) ([]statements.Statement, error) {
-	child := c.nativeMemberCurrent
-	if child == nil || child.assertions == nil {
+	plan := c.nativeAssertionProtocol()
+	if plan == nil {
 		return body, nil
 	}
-	sites := child.assertions.reads[name+desc]
+	sites := plan.reads[name+desc]
 	if len(sites) == 0 {
 		return body, nil
 	}
@@ -516,4 +516,11 @@ func nativeAssertionFailureGuard(v values.JavaValue, owner string, work *workbud
 		return nil, nil, false
 	}
 	return field, values.NewBinaryExpression(rest, exp.Values[1], values.LOGICAL_AND, types.NewJavaPrimer(types.JavaBoolean)), true
+}
+
+func (c *ClassObjectDumper) nativeAssertionProtocol() *nativeMemberAssertion {
+	if c.nativeMemberCurrent != nil {
+		return c.nativeMemberCurrent.assertions
+	}
+	return c.nativeSourceAssertions
 }

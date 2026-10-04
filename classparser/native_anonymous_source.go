@@ -17,6 +17,7 @@ import (
 )
 
 type nativeAnonymousClass struct {
+	assertions            *nativeMemberAssertion
 	initializers          []nativeAnonymousInitializer
 	enclosingField        string
 	parentAnonymous       bool
@@ -113,6 +114,9 @@ func nativeAnonymousConstructorWithinMembers(obj *ClassObject, owner string, met
 }
 
 func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, method string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
+	return nativeAnonymousConstructorWithinSourceRoot(obj, owner, method, "", work, members, forest, access...)
+}
+func nativeAnonymousConstructorWithinSourceRoot(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
 	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
@@ -132,6 +136,13 @@ func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, meth
 		return nil
 	}
 	c := &nativeAnonymousClass{object: obj, fields: map[string]int{}, capturePCs: map[string]int{}, method: method}
+	if assertionRoot != "" {
+		var known bool
+		c.assertions, known = nativeMemberAssertionProof(obj, assertionRoot, work)
+		if !known {
+			return nil
+		}
+	}
 	prefix := owner + "$"
 	suffix, ok := strings.CutPrefix(obj.GetClassName(), prefix)
 	if !ok {
@@ -146,6 +157,9 @@ func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, meth
 	matches := 0
 	for _, m := range obj.Methods {
 		name, _ := obj.getUtf8(m.NameIndex)
+		if c.assertions != nil && c.assertions.initializer == m {
+			continue
+		}
 		if m.AccessFlags&0x0008 != 0 {
 			return nil
 		}
@@ -353,6 +367,9 @@ func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, meth
 	captureOrder := []int{}
 	for _, f := range obj.Fields {
 		name, _ := obj.getUtf8(f.NameIndex)
+		if c.assertions != nil && name == nativeAssertionField {
+			continue
+		}
 		if index, captured := c.fields[name]; captured {
 			if f.AccessFlags != 0x1010 {
 				return nil
@@ -444,6 +461,14 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 		return nil
 	}
 	p := &nativeAnonymousFamily{forest: forest, owner: c.obj.GetClassName(), children: map[string]*nativeAnonymousClass{}, bridges: map[string]*nativeConstructorAccessBridge{}}
+	assertionRoot := ""
+	if forest != nil && forest.objects[forest.root] != nil && nativeMemberTopLevelEvidence(forest.objects[forest.root], c.Work) {
+		assertionRoot = forest.root
+	} else if members != nil && members.lexicalObjects[members.owner] != nil && nativeMemberTopLevelEvidence(members.lexicalObjects[members.owner], c.Work) {
+		assertionRoot = members.owner
+	} else if nativeMemberTopLevelEvidence(c.obj, c.Work) {
+		assertionRoot = c.obj.GetClassName()
+	}
 	access := c.nativeConstructorAccessBridges()
 	names := map[string]bool{}
 	for _, a := range c.obj.Attributes {
@@ -486,8 +511,8 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 				return nil
 			}
 		}
-		child := nativeAnonymousConstructorWithinForest(obj, owner, method, c.Work, members, forest, access)
-		if child == nil {
+		child := nativeAnonymousConstructorWithinSourceRoot(obj, owner, method, assertionRoot, c.Work, members, forest, access)
+		if child == nil || child.assertions != nil && c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
 			return nil
 		}
 		p.children[name] = child
@@ -858,6 +883,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			}
 		}
 		sub := NewClassObjectDumper(child.object)
+		sub.nativeSourceAssertions = child.assertions
 		sub.options = c.options
 		sub.Work = c.Work
 		sub.foldSiblingResolver = c.foldSiblingResolver
@@ -875,6 +901,16 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			sub.nativeAnonymousBindings = map[string]string{}
 			for key, text := range c.nativeAnonymousBindings {
 				sub.nativeAnonymousBindings[key] = text
+			}
+			if p.forest.members != nil {
+				for owner, member := range p.forest.members.children {
+					if !nativeProofWork(c.Work, 1) {
+						return fail()
+					}
+					if !member.static {
+						sub.nativeAnonymousBindings[nativeMemberCaptureIndexKey(owner, member.field)] = ctx.ShortTypeName(strings.ReplaceAll(member.owner, "/", ".")) + ".this"
+					}
+				}
 			}
 			for field, text := range bindings {
 				sub.nativeAnonymousBindings[nativeMemberCaptureIndexKey(child.object.GetClassName(), field)] = text
