@@ -28,10 +28,12 @@ type nativeMemberClass struct {
 	constructors                  map[string]*nativeMemberConstructor
 }
 type nativeMemberFamily struct {
-	anonymous *nativeAnonymousFamily
-	owner     string
-	children  map[string]*nativeMemberClass
-	failed    bool
+	anonymous       *nativeAnonymousFamily
+	anonymousUnits  map[string]*nativeAnonymousFamily
+	memberAnonymous map[string]*nativeAnonymousFamily
+	owner           string
+	children        map[string]*nativeMemberClass
+	failed          bool
 }
 
 // Source ownership comes from one original self row, never dollar spelling.
@@ -720,6 +722,11 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				if call == nil || call.Member != "<init>" || p.children[call.Name] == nil || p.children[call.Name].static {
 					continue
 				}
+				if group := p.anonymousUnits[c.obj.GetClassName()]; group != nil {
+					if anonymous := group.children[c.obj.GetClassName()]; anonymous != nil && anonymous.memberSuper == p.children[call.Name] && name == "<init>" && desc == anonymous.descriptor && int(op.CurrentOffset) == anonymous.superPC && call.Description == anonymous.superDescriptor {
+						continue
+					}
+				}
 				if result[name+desc][int(op.CurrentOffset)] != nil {
 					continue
 				}
@@ -1089,6 +1096,7 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 		sub.declarationResolver = c.declarationResolver
 		sub.nativeMemberRoot = p
 		sub.nativeMemberCurrent = child
+		sub.nativeAnonymousRoot = p.memberAnonymous[name]
 		if !child.static {
 			sub.nativeCaptureFields = map[string]string{child.field: c.FuncCtx.ShortTypeName(strings.ReplaceAll(p.owner, "/", ".")) + ".this"}
 			var arguments []types.JavaType
@@ -1132,6 +1140,10 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 		src, e := sub.DumpClass()
 		if e != nil || sub.nativeCaptureFailed || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
 			return "", fmt.Errorf("member body unproved: %v", e)
+		}
+		if group := p.memberAnonymous[name]; group != nil && !group.completeSource(src) {
+			ordinals, _ := nativeAnonymousOrdinalsWithinOwner(src, group.owner)
+			return "", fmt.Errorf("member anonymous source layout unproved: %s failed=%v ordinals=%v children=%d", group.owner, group.failed, ordinals, len(group.children))
 		}
 		for _, method := range sub.dumpedMethodsSet {
 			if method != nil && method.checkedEscape {

@@ -6,6 +6,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // A complete, unique NON-generic declaration needs no widening cast for an
@@ -514,7 +515,19 @@ func SourceTypeErasure(t types.JavaType, ctx *class_context.ClassContext) (strin
 		return "[" + element, known
 	}
 	if name, ok := types.RawClassFQN(t); ok && ctx.IsTypeParam(name) {
-		for _, sig := range []string{ctx.CurrentMethodSig, ctx.ClassSig} {
+		if len(ctx.LexicalTypeParamSignatures) > 128 {
+			return "", false
+		}
+		for i := 0; i < 2+len(ctx.LexicalTypeParamSignatures); i++ {
+			sig := ctx.CurrentMethodSig
+			if i == 1 {
+				sig = ctx.ClassSig
+			} else if i >= 2 {
+				sig = ctx.LexicalTypeParamSignatures[i-2]
+			}
+			if len(sig) > 65535 || i >= 2 && ctx.Work != nil && ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(sig))+1) != nil {
+				return "", false
+			}
 			for _, formal := range types.ClassFormalTypeParamNames(sig) {
 				if formal == name {
 					descriptor := erasedInvocationBounds(sig)[name]

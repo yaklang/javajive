@@ -186,6 +186,12 @@ type ClassContext struct {
 	// string (class_context must not import the types package; renderers parse it via
 	// types.FormalTypeParamBounds). Kill-switch consumers: JDEC_TYPEVAR_BOUND_RECV_OFF.
 	CurrentMethodSig string
+	// LexicalTypeParamSignatures retains nearest-first original declarations of
+	// formals inherited from a proved enclosing source scope. It does not alter
+	// ClassSig or method identity; an own declaration still shadows every outer
+	// declaration, even when its bound cannot be proved. Static members start a
+	// new class-formal scope and must not receive these declarations.
+	LexicalTypeParamSignatures []string
 	// RawEraseTypeVars is the set of bare type-variable names that this class REFERENCES but does NOT
 	// declare, and which CANNOT be injected onto its declaration. It is populated only for a flattened
 	// NON-STATIC inner class that has its OWN formal type parameters (e.g. `Iterator<T>`): such a class
@@ -932,6 +938,7 @@ func (f *ClassContext) CloneForRetry() *ClassContext {
 	out.Arguments = append([]string(nil), f.Arguments...)
 	out.TypeParams = append([]string(nil), f.TypeParams...)
 	out.ClassTypeParams = append([]string(nil), f.ClassTypeParams...)
+	out.LexicalTypeParamSignatures = append([]string(nil), f.LexicalTypeParamSignatures...)
 	out.InjectedTypeParamBounds = maps.Clone(f.InjectedTypeParamBounds)
 	out.FieldTypeVars = maps.Clone(f.FieldTypeVars)
 	out.FieldSignatures = maps.Clone(f.FieldSignatures)

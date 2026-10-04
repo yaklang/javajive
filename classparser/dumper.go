@@ -653,6 +653,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		funcCtx.BuildInLibsMap = outer.BuildInLibsMap
 		funcCtx.KeySet = outer.KeySet
 		funcCtx.SamePkgFQNames = outer.SamePkgFQNames
+		if c.nativeMemberCurrent == nil || !c.nativeMemberCurrent.static {
+			funcCtx.LexicalTypeParamSignatures = append([]string{outer.CurrentMethodSig, outer.ClassSig}, outer.LexicalTypeParamSignatures...)
+		}
 	}
 	c.FuncCtx = funcCtx
 	funcCtx.DeclarationSourceName = c.buildDeclarationSourceNames()

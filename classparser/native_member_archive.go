@@ -178,6 +178,20 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 }
 func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 	owner, _, _, member := originalMemberOwner(obj)
+	if anonymousOwner, _, anonymous := originalAnonymousOwner(obj); anonymous {
+		owner, member = anonymousOwner, true
+		if raw, found := z.enumSiblingResolver()(owner); found {
+			outer, err := z.nativeMemberReader(obj).parseResolved(raw)
+			if err != nil || outer.GetClassName() != owner {
+				return nil
+			}
+			if root, _, _, named := originalMemberOwner(outer); named {
+				owner = root
+			}
+		} else {
+			return nil
+		}
+	}
 	if !member {
 		owner = obj.GetClassName()
 	}
@@ -242,7 +256,33 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		if p == nil {
 			return
 		}
-		p.anonymous = d.planNativeAnonymousFamily()
+		p.anonymous = d.planNativeAnonymousFamilyWithinMembers(p)
+		p.anonymousUnits = map[string]*nativeAnonymousFamily{}
+		p.memberAnonymous = map[string]*nativeAnonymousFamily{}
+		addAnonymous := func(group *nativeAnonymousFamily) bool {
+			if group == nil {
+				return true
+			}
+			for name := range group.children {
+				if len(p.anonymousUnits) >= 64 || p.anonymousUnits[name] != nil || !nativeProofWork(d.Work, 1) {
+					return false
+				}
+				p.anonymousUnits[name] = group
+			}
+			return true
+		}
+		if !addAnonymous(p.anonymous) {
+			return
+		}
+		for name, child := range p.children {
+			reader := z.nativeMemberReader(child.object)
+			reader.options.EnvSnapshot = snap
+			group := reader.planNativeAnonymousFamilyWithinMembers(p)
+			if !nativeJointAnonymousAllocationsClosed(child.object, group, d.Work) || !addAnonymous(group) {
+				return
+			}
+			p.memberAnonymous[name] = group
+		}
 		if !nativeJointAnonymousAllocationsClosed(root, p.anonymous, d.Work) {
 			return
 		}
@@ -258,7 +298,10 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 			}
 			for user := range index.captureUsers[n] {
 				if user != n {
-					return
+					group := p.anonymousUnits[user]
+					if group == nil || !nativeMemberProjectedAnonymousCaptureRead(p, group.children[user], n, d.Work) {
+						return
+					}
 				}
 			}
 			for user := range index.constructors[n] {
@@ -320,14 +363,14 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 					return
 				}
 				if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil) {
-					if p.anonymous == nil || anonOwner != owner || p.anonymous.children[n] == nil {
+					if group := p.anonymousUnits[n]; group == nil || group.owner != anonOwner {
 						return
 					}
 				}
 			}
 		}
 		for name, object := range objects {
-			if name == owner || p.children[name] != nil {
+			if name == owner || p.children[name] != nil || p.anonymousUnits[name] != nil {
 				continue
 			}
 			reader := z.nativeMemberReader(object)
@@ -411,6 +454,9 @@ func (z *JarFS) nativeMemberSource(obj *ClassObject) ([]byte, bool) {
 	}
 	if entry.family.children[obj.GetClassName()] != nil {
 		return []byte("// original member body owned by " + entry.family.owner + "; javac regenerates its binary class\n"), true
+	}
+	if group := entry.family.anonymousUnits[obj.GetClassName()]; group != nil {
+		return []byte("// original anonymous body owned by " + group.owner + "; javac regenerates its binary class\n"), true
 	}
 	return nil, false
 }

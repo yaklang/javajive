@@ -94,10 +94,17 @@ func (z *JarFS) nativeMemberAccessRepresentable(p *nativeMemberFamily, index *na
 // closure before publishing the member family; a foreign or deeper declaration
 // has not been moved into this scope and must retain the ordinary access check.
 func nativeMemberJointAnonymousAccess(p *nativeMemberFamily, user string, work *workbudget.Budget) bool {
-	if p == nil || p.anonymous == nil || p.anonymous.failed || p.anonymous.owner != p.owner || !nativeProofWork(work, 1) {
+	if p == nil || !nativeProofWork(work, 1) {
 		return false
 	}
-	child := p.anonymous.children[user]
+	group := p.anonymousUnits[user]
+	if group == nil {
+		group = p.anonymous
+	}
+	if group == nil || group.failed || group.owner != p.owner && p.children[group.owner] == nil {
+		return false
+	}
+	child := group.children[user]
 	if child == nil || child.object == nil {
 		return false
 	}
@@ -111,5 +118,5 @@ func nativeMemberJointAnonymousAccess(p *nativeMemberFamily, user string, work *
 		}
 	}
 	owner, method, anonymous := originalAnonymousOwner(child.object)
-	return anonymous && owner == p.owner && method == child.method
+	return anonymous && owner == group.owner && method == child.method
 }

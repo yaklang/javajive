@@ -28,6 +28,8 @@ type nativeAnonymousClass struct {
 	superPC               int
 	newPC                 int
 	invokePC              int
+	memberSuper           *nativeMemberClass
+	memberEnclosingReadPC int
 }
 type nativeAnonymousFamily struct {
 	owner    string
@@ -98,6 +100,10 @@ func originalAnonymousOwner(obj *ClassObject) (string, string, bool) {
 }
 
 func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, work *workbudget.Budget, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
+	return nativeAnonymousConstructorWithinMembers(obj, owner, method, work, nil, access...)
+}
+
+func nativeAnonymousConstructorWithinMembers(obj *ClassObject, owner string, method string, work *workbudget.Budget, members *nativeMemberFamily, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
 	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
@@ -189,6 +195,30 @@ func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, w
 		return nil
 	}
 	i++
+	outerField := "this$0"
+	currentMember := (*nativeMemberClass)(nil)
+	if members != nil {
+		currentMember = members.children[owner]
+		if currentMember != nil && !currentMember.static {
+			outerField = "this$1"
+		}
+	}
+	// javac's enclosing operand for an anonymous subclass of a sibling member
+	// is this member's original capture. The same joint plan proves both
+	// declarations and javac regenerates this exact read before super(...).
+	if members != nil && currentMember != nil && !currentMember.static && i+1 < len(ops) {
+		parent := members.children[obj.GetSupperClassName()]
+		field := constructorMotionMember(obj, ops[i+1], core.OP_GETFIELD)
+		outerIndex, outerCaptured := c.fields[outerField]
+		if parent != nil && !parent.static && parent.owner == currentMember.owner && parent.owner == members.owner &&
+			len(ps) > 0 && ps[0] == "L"+owner+";" && outerCaptured && outerIndex == 0 &&
+			core.GetRetrieveIdx(ops[i]) == 1 && constructorMotionLoad(ops[i], ps[0]) &&
+			field != nil && field.Name == owner && field.Member == currentMember.field && field.Description == "L"+parent.owner+";" {
+			c.memberSuper = parent
+			c.memberEnclosingReadPC = int(ops[i+1].CurrentOffset)
+			i += 2
+		}
+	}
 	nullTail := false
 	for i < len(ops) {
 		if ops[i].Instr.OpCode == core.OP_INVOKESPECIAL {
@@ -216,6 +246,13 @@ func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, w
 	}
 	c.superDescriptor = mem.Description
 	c.sourceSuperDescriptor = mem.Description
+	if c.memberSuper != nil {
+		ctor := c.memberSuper.constructors[mem.Description]
+		if ctor == nil || c.memberSuper.object.GetClassName() != mem.Name || nullTail {
+			return nil
+		}
+		c.sourceSuperDescriptor = ctor.sourceDescriptor
+	}
 	var bridge *nativeConstructorAccessBridge
 	if nullTail {
 		if mem.Name != owner || len(access) != 1 {
@@ -232,14 +269,24 @@ func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, w
 	if nullTail {
 		extra = 1
 	}
+	if c.memberSuper != nil {
+		extra++
+	}
 	ds, ret, e := callbinding.Descriptor(mem.Description)
 	if e != nil || ret != "V" || len(ds) != len(c.superParams)+extra {
 		return nil
 	}
 	for j, p := range c.superParams {
-		if ps[p] != ds[j] {
+		index := j
+		if c.memberSuper != nil {
+			index++
+		}
+		if ps[p] != ds[index] {
 			return nil
 		}
+	}
+	if c.memberSuper != nil && ds[0] != "L"+c.memberSuper.owner+";" {
+		return nil
 	}
 	// Nothing can silently disappear: every constructor argument is either a
 	// real superclass argument or a compiler capture, and never both.
@@ -267,7 +314,7 @@ func nativeAnonymousConstructor(obj *ClassObject, owner string, method string, w
 			if f.AccessFlags != 0x1010 {
 				return nil
 			}
-			if name == "this$0" {
+			if name == outerField {
 				if outer >= 0 || ps[index] != "L"+owner+";" {
 					return nil
 				}
@@ -322,6 +369,10 @@ func fieldHasConstantValue(field *MemberInfo) bool {
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
+	return c.planNativeAnonymousFamilyWithinMembers(nil)
+}
+
+func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nativeMemberFamily) *nativeAnonymousFamily {
 	if c.foldSiblingResolver == nil || isGenuineEnum(c.obj) || c.getenv("JDEC_NATIVE_ANONYMOUS_OFF") != "" || !nativeSourceBinaryName(c.obj.GetClassName()) {
 		return nil
 	}
@@ -368,14 +419,14 @@ func (c *ClassObjectDumper) planNativeAnonymousFamily() *nativeAnonymousFamily {
 				return nil
 			}
 		}
-		child := nativeAnonymousConstructor(obj, owner, method, c.Work, access)
+		child := nativeAnonymousConstructorWithinMembers(obj, owner, method, c.Work, members, access)
 		if child == nil {
 			return nil
 		}
 		p.children[name] = child
 	}
 	for _, child := range p.children {
-		if child.sourceSuperDescriptor != child.superDescriptor {
+		if child.sourceSuperDescriptor != child.superDescriptor && child.memberSuper == nil {
 			bridge := access[child.superDescriptor]
 			// javac8 regenerates access markers using its first owned anonymous type.
 			marker := p.children[bridge.marker]
@@ -699,8 +750,14 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		bindings := map[string]string{}
 		captureTypes := map[string]types.JavaType{}
 		for field, index := range child.fields {
+			if index < 0 || index >= len(args) {
+				return fail()
+			}
 			arg := args[index]
 			if !arg.Local && !arg.Receiver {
+				return fail()
+			}
+			if (field == "this$0" || field == "this$1") && !arg.Receiver {
 				return fail()
 			}
 			if arg.Receiver {
@@ -820,17 +877,23 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if child.sourceSuperDescriptor != child.superDescriptor {
 			binding = *ctx // The source allocation has the original enclosing private access.
 		}
+		if child.memberSuper != nil {
+			if c.nativeMemberRoot == nil || c.nativeMemberRoot.children[child.memberSuper.object.GetClassName()] != child.memberSuper || !nativeMemberJointAnonymousAccess(c.nativeMemberRoot, child.object.GetClassName(), c.Work) {
+				return fail()
+			}
+			binding = *nativeMemberBinding(ctx, c.nativeMemberRoot, c.Work)
+		}
 		binding.FunctionName = "<init>"
 		binding.CurrentMethodDesc = child.descriptor
 		tuple = invoke.ArgumentStrings(&binding)
-		size := int64(len(body)) + int64(len(parent)) + 80
+		size := int64(len(body)) + int64(len(parent)) + int64(len(p.owner)) + 80
 		for _, argument := range tuple {
 			size += int64(len(argument)) + 1
 		}
 		if ctx.ChargeOutput(size) != nil {
 			return fail()
 		}
-		return fmt.Sprintf("/*jdec-owned-anonymous-ordinal:%d*/new %s(%s) {%s}", child.ordinal, parent, strings.Join(tuple, ","), body), true
+		return fmt.Sprintf("/*jdec-owned-anonymous-ordinal:%d:%s*/new %s(%s) {%s}", child.ordinal, p.owner, parent, strings.Join(tuple, ","), body), true
 	}
 }
 
@@ -840,6 +903,10 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 // Layout is checked on actual emitted comments, skipping literals and other
 // comments. Anonymous numbering is a source-layout property, not just metadata.
 func nativeAnonymousOrdinals(source string) ([]int, bool) {
+	return nativeAnonymousOrdinalsWithinOwner(source, "")
+}
+
+func nativeAnonymousOrdinalsWithinOwner(source, owner string) ([]int, bool) {
 	result := []int{}
 	prefix := "jdec-owned-anonymous-ordinal:"
 	for i := 0; i < len(source); {
@@ -880,11 +947,17 @@ func nativeAnonymousOrdinals(source string) ([]int, bool) {
 			}
 			comment := source[i+2 : i+2+end]
 			if strings.HasPrefix(comment, prefix) {
-				n, e := strconv.Atoi(strings.TrimPrefix(comment, prefix))
+				ordinal, scope, scoped := strings.Cut(strings.TrimPrefix(comment, prefix), ":")
+				n, e := strconv.Atoi(ordinal)
 				if e != nil {
 					return nil, false
 				}
-				result = append(result, n)
+				if scoped && !nativeSourceBinaryName(scope) {
+					return nil, false
+				}
+				if owner == "" || scoped && owner == scope {
+					result = append(result, n)
+				}
 			}
 			i += end + 4
 			continue
@@ -897,7 +970,7 @@ func (p *nativeAnonymousFamily) completeSource(source string) bool {
 	if p == nil || p.failed {
 		return false
 	}
-	ordinals, known := nativeAnonymousOrdinals(source)
+	ordinals, known := nativeAnonymousOrdinalsWithinOwner(source, p.owner)
 	if !known || len(ordinals) != len(p.children) {
 		return false
 	}

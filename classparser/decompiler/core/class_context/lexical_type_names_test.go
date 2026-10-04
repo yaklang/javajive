@@ -18,3 +18,12 @@ func TestLexicalMemberNamesQualifyShadowedExternalTypes(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestEnclosingFormalDeclarationsCloneForRetry(t *testing.T) {
+	ctx := &ClassContext{LexicalTypeParamSignatures: []string{"<T:Ljava/lang/Number;>Ljava/lang/Object;"}}
+	clone := ctx.CloneForRetry()
+	clone.LexicalTypeParamSignatures[0] = "<T:Ljava/lang/String;>Ljava/lang/Object;"
+	if ctx.LexicalTypeParamSignatures[0] != "<T:Ljava/lang/Number;>Ljava/lang/Object;" {
+		t.Fatal("retry changed the original enclosing declaration")
+	}
+}
