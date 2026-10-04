@@ -32,6 +32,7 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
+	sourceDependencies    map[string]string
 	rootAccessBridges     map[string]*nativeConstructorAccessBridge
 	rootBridgeDelegations map[string]*nativeRootBridgeDelegation
 	getters               map[string]*nativeMemberPrivateGetter
@@ -755,6 +756,9 @@ func (p *nativeMemberFamily) sourceName(binary string) (string, bool) {
 		}
 		return name, true
 	}
+	if source := p.sourceDependencies[binary]; source != "" {
+		return source, true
+	}
 	return "", false
 }
 
@@ -780,6 +784,37 @@ func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
 
 func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[string]map[int]*nativeMemberAllocation, bool) {
 	result := map[string]map[int]*nativeMemberAllocation{}
+	for _, constant := range c.obj.ConstantPool {
+		if !nativeProofWork(c.Work, 1) {
+			return nil, false
+		}
+		handle, ok := constant.(*ConstantMethodHandleInfo)
+		if !ok || handle == nil {
+			continue
+		}
+		if handle.ReferenceIndex == 0 || int(handle.ReferenceIndex) > len(c.obj.ConstantPool) {
+			return nil, false
+		}
+		ref := nativeConstantMember(c.obj.ConstantPool[handle.ReferenceIndex-1])
+		if ref == nil || ref.NameAndTypeIndex == 0 || int(ref.NameAndTypeIndex) > len(c.obj.ConstantPool) {
+			return nil, false
+		}
+		nt, ok := c.obj.ConstantPool[ref.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+		if !ok || nt == nil {
+			return nil, false
+		}
+		name, nk := sourceBridgeUTF8(c.obj, nt.NameIndex)
+		desc, dk := sourceBridgeUTF8(c.obj, nt.DescriptorIndex)
+		owner, known := sourceBridgeClassName(c.obj, ref.ClassIndex)
+		if !nk || !dk || !known {
+			return nil, false
+		}
+		if name == "<init>" {
+			if _, method := c.obj.ConstantPool[handle.ReferenceIndex-1].(*ConstantMethodrefInfo); !method || handle.ReferenceKind != 8 || !nativeMemberOriginalConstructorAccess(p, c.obj, owner, desc, c.Work) {
+				return nil, false
+			}
+		}
+	}
 	for _, m := range c.obj.Methods {
 		name, _ := c.obj.getUtf8(m.NameIndex)
 		desc, _ := c.obj.getUtf8(m.DescriptorIndex)
@@ -813,6 +848,8 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				return nil, false
 			}
 			ops := constructorMotionOps(d)
+			var allocationInvocations map[int]nativeMemberAllocationInvocation
+			allocationInvocationsChecked := false
 			for i, op := range ops {
 				if op.Instr.OpCode != core.OP_NEW {
 					continue
@@ -891,7 +928,8 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 						return nil, false
 					}
 					call := constructorMotionMember(c.obj, ops[j], core.OP_INVOKESPECIAL)
-					if call != nil && call.Name == owner && call.Member == "<init>" {
+					invocation, identityKnown := allocationInvocations[plan.newPC]
+					if call != nil && call.Name == owner && call.Member == "<init>" && (!allocationInvocationsChecked || identityKnown && invocation.pc == int(ops[j].CurrentOffset) && invocation.owner == owner && invocation.descriptor == call.Description) {
 						if nativeMemberConstructorForAllocation(child, call.Description) == nil {
 							return nil, false
 						}
@@ -906,7 +944,22 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 						result[key][plan.invokePC] = plan
 						break
 					}
-					if ops[j].Instr.OpCode == core.OP_NEW || ops[j].Instr.OpCode == core.OP_GOTO || ops[j].Instr.OpCode == core.OP_RETURN || ops[j].Instr.OpCode == core.OP_ARETURN {
+					if ops[j].Instr.OpCode == core.OP_NEW {
+						if !allocationInvocationsChecked {
+							var valid bool
+							allocationInvocations, valid = c.nativeMemberAllocationInvocations(m, code)
+							if !valid {
+								return nil, false
+							}
+							allocationInvocationsChecked = true
+						}
+						invocation, known := allocationInvocations[plan.newPC]
+						if !known || invocation.owner != owner {
+							return nil, false
+						}
+						continue
+					}
+					if ops[j].Instr.OpCode == core.OP_GOTO || ops[j].Instr.OpCode == core.OP_RETURN || ops[j].Instr.OpCode == core.OP_ARETURN {
 						return nil, false
 					}
 				}
@@ -916,6 +969,9 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 			}
 			for _, op := range d.Opcodes() {
 				call := constructorMotionMember(c.obj, op, core.OP_INVOKESPECIAL)
+				if call != nil && call.Member == "<init>" && !nativeMemberOriginalConstructorAccess(p, c.obj, call.Name, call.Description, c.Work) {
+					return nil, false
+				}
 				if call == nil || call.Member != "<init>" || p.children[call.Name] == nil || p.children[call.Name].static && p.children[call.Name].accessBridges[call.Description] == nil {
 					continue
 				}
@@ -942,6 +998,47 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 		}
 	}
 	return result, true
+}
+
+// Source lexical ownership is not JVM private access. In the supported
+// pre-nestmate profile, an original private constructor can be invoked only
+// from its declaring class. A sibling uses a separately proved synthetic
+// bridge; giving it a direct source call would erase the original access
+// failure. This also applies to foreign users discovered by the archive index.
+func nativeMemberOriginalConstructorAccess(p *nativeMemberFamily, caller *ClassObject, owner, descriptor string, work *workbudget.Budget) bool {
+	if p == nil || caller == nil {
+		return false
+	}
+	var target *ClassObject
+	if owner == p.owner {
+		target = p.lexicalObjects[owner]
+	} else if child := p.children[owner]; child != nil {
+		target = child.object
+	} else {
+		// A separately committed dependency checks its own indexed callers.
+		return true
+	}
+	if target == nil || target.GetClassName() != owner {
+		return false
+	}
+	var found *MemberInfo
+	for _, m := range target.Methods {
+		if m == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		name, nk := sourceBridgeUTF8(target, m.NameIndex)
+		desc, dk := sourceBridgeUTF8(target, m.DescriptorIndex)
+		if !nk || !dk {
+			return false
+		}
+		if name == "<init>" && desc == descriptor {
+			if found != nil {
+				return false
+			}
+			found = m
+		}
+	}
+	return found != nil && (found.AccessFlags&2 == 0 || caller.GetClassName() == owner)
 }
 
 func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily, work *workbudget.Budget) *class_context.ClassContext {
@@ -1240,7 +1337,9 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			}
 		}
 		source := "new " + sourceName + "(" + strings.Join(arguments, ",") + ")"
-		if !plan.implicitEnclosing && !(args[0].Receiver && c.obj.GetClassName() == plan.child.owner) {
+		if rawThis := nativeMemberConstructorRawThis(p, plan.child, desc, c.obj.GetClassName(), args[0], ctx, c.Work); rawThis != "" {
+			source = rawThis + "." + source
+		} else if !plan.implicitEnclosing && !(args[0].Receiver && c.obj.GetClassName() == plan.child.owner) {
 			source = "(" + args[0].Text + ")." + source
 		}
 		if diamond {

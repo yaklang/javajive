@@ -304,7 +304,18 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 			return
 		}
 		objects := map[string]*ClassObject{owner: root}
-		if len(p.rootAccessBridges) > 0 {
+		rootPrivateConstructor := false
+		for _, method := range root.Methods {
+			if !nativeProofWork(d.Work, 1) || method == nil {
+				return
+			}
+			name, known := sourceBridgeUTF8(root, method.NameIndex)
+			if !known {
+				return
+			}
+			rootPrivateConstructor = rootPrivateConstructor || name == "<init>" && method.AccessFlags&2 != 0
+		}
+		if len(p.rootAccessBridges) > 0 || rootPrivateConstructor {
 			for user := range index.constructors[owner] {
 				if objects[user] != nil {
 					continue
@@ -379,6 +390,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		if strings.Contains(owner, "/") && lexicalNames[packageRoot] {
 			return
 		}
+		staticDependenciesChecked := false
 		for _, object := range append([]*ClassObject{root}, nativeMemberObjects(p)...) {
 			references, known := nativeMemberDependencyNames(object, d.Work)
 			if !known {
@@ -401,9 +413,32 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 				if e != nil {
 					return
 				}
-				otherOwner, _, _, isMember := originalMemberOwner(other)
+				otherOwner, _, otherFlags, isMember := originalMemberOwner(other)
 				if isMember && otherOwner != owner {
-					return
+					// A static member has no hidden enclosing receiver. Its source
+					// name can come from a separate completed original family,
+					// provided resolving families cannot recursively wait on this
+					// unfinished cache entry. Nonstatic cross-family captures still
+					// need a joint ownership proof.
+					if otherFlags&8 == 0 {
+						return
+					}
+					if !staticDependenciesChecked {
+						if !z.nativeMemberDependenciesAcyclic(owner, d.Work) {
+							return
+						}
+						staticDependenciesChecked = true
+					}
+					dependency := z.nativeMemberLookup(n)
+					if dependency == nil || !dependency.static || dependency.object.GetClassName() != n || dependency.sourceName == "" {
+						return
+					}
+					if p.sourceDependencies == nil {
+						p.sourceDependencies = map[string]string{}
+					}
+					// A completed dependency contributes its source name, never
+					// membership in this family's private/constructor access scope.
+					p.sourceDependencies[n] = dependency.sourceName
 				}
 				if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil) {
 					if p.emptyMarkers[n] != nil && anonOwner == owner && nativeMemberEmptyAccessMarker(other, owner, d.Work) {
