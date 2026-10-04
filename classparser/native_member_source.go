@@ -589,7 +589,7 @@ func nativeMemberSiblingSuperClosed(child *nativeMemberClass, p *nativeMemberFam
 		if name != "<init>" || ctor == nil || ctor.capturePC < 0 {
 			continue
 		}
-		if ctor.delegateOwner != parent.object.GetClassName() || parent.constructors[ctor.delegateDescriptor] == nil {
+		if ctor.delegateOwner != parent.object.GetClassName() || nativeMemberConstructorForAllocation(parent, ctor.delegateDescriptor) == nil {
 			return false
 		}
 		proved := false
@@ -619,6 +619,13 @@ func nativeMemberSiblingSuperClosed(child *nativeMemberClass, p *nativeMemberFam
 			if err == nil && start >= 0 {
 				next, call := constructorMotionDelegation(child.object, ops, start, params, constructorParameterSlots(params), metadata, 1)
 				proved = next > 0 && call != nil && call.Name == ctor.delegateOwner && call.Description == ctor.delegateDescriptor && int(ops[next-1].CurrentOffset) == ctor.delegatePC
+				if proved && parent.accessBridges[ctor.delegateDescriptor] != nil {
+					// The original private-super bridge carries one unused marker.
+					// Its enclosing operand was independently proved to be slot 1
+					// by constructorMotionDelegation. Only an adjacent original
+					// ACONST_NULL may be dropped, never an effectful expression.
+					proved = next >= 2 && ops[next-2].Instr.OpCode == core.OP_ACONST_NULL && len(ops[next-2].Data) == 0
+				}
 			}
 		}
 		if !proved {
@@ -1069,13 +1076,21 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				}
 				keyword = "super"
 			}
-			target := targetClass.constructors[desc]
+			target := nativeMemberConstructorForAllocation(targetClass, desc)
 			if ctor == nil || target == nil || ctor.delegateOwner != name || ctor.delegatePC != pc || ctor.delegateDescriptor != desc || len(args) < 1 {
 				p.failed = true
 				return "", false
 			}
 			call := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: target.sourceDescriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true}
-			for _, arg := range args[1:] {
+			operands := args[1:]
+			if targetClass.accessBridges[desc] != nil {
+				if keyword != "super" || !nativeMemberSourceEnclosingParameter(args[0], ctx, child.owner) || len(operands) == 0 || !nativeMemberBridgeSourceDummy(operands[len(operands)-1]) {
+					p.failed = true
+					return "", false
+				}
+				operands = operands[:len(operands)-1]
+			}
+			for _, arg := range operands {
 				v, ok := arg.(values.JavaValue)
 				if !ok {
 					p.failed = true

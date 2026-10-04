@@ -152,7 +152,15 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 					return false
 				}
 				plan := allocations[name+desc][int(op.CurrentOffset)]
-				if plan == nil || plan.child != child || plan.descriptor != call.Description {
+				allocation := plan != nil && plan.child == child && plan.descriptor == call.Description
+				super := false
+				if caller := p.children[obj.GetClassName()]; caller != nil && name == "<init>" && !caller.static {
+					ctor := caller.constructors[desc]
+					super = ctor != nil && ctor.projectedSuper && caller.object.GetSupperClassName() == call.Name && ctor.delegateOwner == call.Name && ctor.delegateDescriptor == call.Description && ctor.delegatePC == int(op.CurrentOffset)
+				}
+				// Only a NEW origin or the independently verified initial
+				// member-super delegation regenerates the private bridge.
+				if !allocation && !super {
 					return false
 				}
 				if p.bridgeCalls == nil {
@@ -397,4 +405,17 @@ func nativeMemberErasedAllocation(p *nativeMemberFamily, child *nativeMemberClas
 		return "", false
 	}
 	return "((" + name + ")(" + source + "))", true
+}
+
+// Source projection may discard only the original constructor's enclosing
+// parameter, registered by prepareNativeMemberConstructor. A nullable value
+// in that parameter remains valid; a literal null or another expression does
+// not acquire the parameter's identity merely by having its erased type.
+func nativeMemberSourceEnclosingParameter(value any, ctx *class_context.ClassContext, owner string) bool {
+	v, ok := value.(values.JavaValue)
+	if !ok || ctx == nil {
+		return false
+	}
+	ref, ok := values.UnpackSoltValue(v).(*values.JavaRef)
+	return ok && ref != nil && ref.Id != nil && ref.IsParam && !ref.IsThis && ref.CustomValue == nil && ref.StackVar == nil && ctx.LocalNames[ref.Id] == ctx.ShortTypeName(strings.ReplaceAll(owner, "/", "."))+".this"
 }
