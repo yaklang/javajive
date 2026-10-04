@@ -4746,7 +4746,10 @@ func (f *FunctionCallExpression) polymorphicSignatureCastType(funcCtx *class_con
 	return rt, true
 }
 
-func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) string {
+// ProvedPrivateFieldAccess applies only the original invocation/ownership proof.
+// Statement context permits a plain assignment, while a value occurrence needs
+// parentheses to preserve its original precedence in a surrounding expression.
+func (f *FunctionCallExpression) ProvedPrivateFieldAccess(funcCtx *class_context.ClassContext, statement bool) (string, bool) {
 	if f != nil && funcCtx != nil && funcCtx.SourcePrivateGetter != nil && f.Kind == InvokeStatic {
 		args := make([]any, len(f.Arguments))
 		for i, a := range f.Arguments {
@@ -4757,10 +4760,18 @@ func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) str
 				return f.OriginPC
 			}
 			return -1
-		}(), args); known {
-			return source
+		}(), args, statement); known {
+			return source, true
 		}
 	}
+	return "", false
+}
+
+func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) string {
+	if source, known := f.ProvedPrivateFieldAccess(funcCtx, false); known {
+		return source
+	}
+
 	if f != nil && funcCtx != nil && funcCtx.SourceMemberDelegation != nil && f.HasOriginPC && f.FunctionName == "<init>" {
 		if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref != nil && ref.IsThis {
 			args := make([]any, len(f.Arguments))

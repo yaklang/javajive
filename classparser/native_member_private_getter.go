@@ -7,15 +7,19 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"strconv"
 	"strings"
 )
 
+// Read and plain-write operations share one original field ordinal. The legacy
+// type name remains internal; setter selects the separately proved write packet.
 type nativeMemberPrivateGetter struct {
 	owner, name, descriptor, field, fieldDescriptor string
 	ordinal                                         int
 	method                                          *MemberInfo
+	setter                                          bool
 }
 
 func nativeMemberPrivateGetterProof(obj *ClassObject, m *MemberInfo, work *workbudget.Budget) *nativeMemberPrivateGetter {
@@ -160,8 +164,9 @@ func nativeMemberCollectPrivateGetters(p *nativeMemberFamily, work *workbudget.B
 	if !needsProjection {
 		return true
 	}
-	ordinals := map[int]bool{}
-	fields := map[string]bool{}
+	ordinals := map[int]string{}
+	fields := map[string]int{}
+	operations := map[string]bool{}
 	for _, obj := range p.lexicalObjects {
 		for _, m := range obj.Methods {
 			name, known := sourceBridgeUTF8(obj, m.NameIndex)
@@ -171,21 +176,32 @@ func nativeMemberCollectPrivateGetters(p *nativeMemberFamily, work *workbudget.B
 			if !strings.HasPrefix(name, "access$") || m.AccessFlags&0x1000 == 0 {
 				continue
 			}
-			getter := nativeMemberPrivateGetterProof(obj, m, work)
-			if getter == nil || ordinals[getter.ordinal] {
+			getter := nativeMemberPrivateAccessProof(obj, m, work)
+			if getter == nil {
 				return false
 			}
 			fieldKey := getter.owner + "\x00" + getter.field + getter.fieldDescriptor
-			if fields[fieldKey] {
+			if prior, known := fields[fieldKey]; known && prior != getter.ordinal {
 				return false
 			}
-			fields[fieldKey] = true
-			ordinals[getter.ordinal] = true
+			if prior, known := ordinals[getter.ordinal]; known && prior != fieldKey {
+				return false
+			}
+			operationKey := fieldKey + "\x00read"
+			if getter.setter {
+				operationKey = fieldKey + "\x00write"
+			}
+			if operations[operationKey] {
+				return false
+			}
+			operations[operationKey] = true
+			fields[fieldKey] = getter.ordinal
+			ordinals[getter.ordinal] = fieldKey
 			p.getters[nativeMemberGetterKey(getter.owner, getter.name, getter.descriptor)] = getter
 		}
 	}
 	for i := 0; i < len(ordinals); i++ {
-		if !ordinals[i*100] {
+		if _, known := ordinals[i*100]; !known {
 			return false
 		}
 	}
@@ -256,12 +272,16 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 		p.failed = true
 		return
 	}
-	ctx.SourcePrivateGetter = func(owner, name, desc string, pc int, args []any) (string, bool) {
+	ctx.SourcePrivateGetter = func(owner, name, desc string, pc int, args []any, statement bool) (string, bool) {
 		getter := p.getters[nativeMemberGetterKey(owner, name, desc)]
 		if getter == nil {
 			return "", false
 		}
-		if sites[ctx.FunctionName+ctx.CurrentMethodDesc][pc] != getter || len(args) != 1 {
+		expectedArgs := 1
+		if getter.setter {
+			expectedArgs = 2
+		}
+		if sites[ctx.FunctionName+ctx.CurrentMethodDesc][pc] != getter || len(args) != expectedArgs {
 			p.failed = true
 			return "", false
 		}
@@ -271,6 +291,34 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 			return "", false
 		}
 		sourceOwner := ctx.ShortTypeName(strings.ReplaceAll(getter.owner, "/", "."))
+		// A source write regenerates the original static accessor: the receiver and
+		// RHS complete before its class initialization and null dereference. Record
+		// its ordinal after both arguments, not before an effectful RHS.
+		if getter.setter {
+			rhs, ok := args[1].(values.JavaValue)
+			if !ok || sourceProofNil(rhs) {
+				p.failed = true
+				return "", false
+			}
+			mt, e := types.ParseMethodDescriptor(getter.descriptor)
+			if e != nil {
+				p.failed = true
+				return "", false
+			}
+			assignment := fmt.Sprintf("((%s)(%s)).%s = ((%s)(%s))/*jdec-owned-getter:%d:%s:%s:put*/", sourceOwner, v.String(ctx), getter.field, mt.FunctionType().ReturnType.String(ctx), rhs.String(ctx), getter.ordinal, getter.owner, getter.field)
+			if statement {
+				return assignment, true
+			}
+			return "(" + assignment + ")", true
+		}
+
+		// A discarded read needs a separately proved statement materialization;
+		// a bare field read is not a Java statement expression. Fail this family
+		// closed rather than silently dropping its dereference/initialization.
+		if statement {
+			p.failed = true
+			return "", false
+		}
 		// A raw view retains the original accessor return erasure. The receiver is
 		// evaluated once. javac regenerates the private GETFIELD accessor (including
 		// its declaring-class initialization) instead of an illegal inner static
@@ -355,9 +403,14 @@ func nativeMemberPrivateGetterSourceClosed(p *nativeMemberFamily, source string,
 	const prefix = "jdec-owned-getter:"
 	expected := map[string]*nativeMemberPrivateGetter{}
 	for _, getter := range p.getters {
-		expected[strconv.Itoa(getter.ordinal)+":"+getter.owner+":"+getter.field] = getter
+		key := strconv.Itoa(getter.ordinal) + ":" + getter.owner + ":" + getter.field
+		if getter.setter {
+			key += ":put"
+		}
+		expected[key] = getter
 	}
 	seen := map[*nativeMemberPrivateGetter]bool{}
+	seenFields := map[string]int{}
 	for i := 0; i < len(source); {
 		ch := source[i]
 		if ch == '\'' || ch == '"' {
@@ -401,9 +454,11 @@ func nativeMemberPrivateGetterSourceClosed(p *nativeMemberFamily, source string,
 					return false
 				}
 				if !seen[getter] {
-					if getter.ordinal != len(seen)*100 {
+					fieldKey := getter.owner + "\x00" + getter.field + getter.fieldDescriptor
+					if prior, known := seenFields[fieldKey]; known && prior != getter.ordinal || !known && getter.ordinal != len(seenFields)*100 {
 						return false
 					}
+					seenFields[fieldKey] = getter.ordinal
 					seen[getter] = true
 				}
 			}

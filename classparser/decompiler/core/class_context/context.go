@@ -34,11 +34,12 @@ type ClassContext struct {
 	// LexicalClassName is the current source member declaration, supplied only
 	// after original ownership proof. Its enclosing parameters are implicit
 	// in a self type, including when an own formal shadows an outer formal.
-	LexicalClassName           string
-	LexicalTypeNames           map[string]bool
-	SourceMemberAllocation     func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
-	SourceMemberCandidate      func(owner string) bool
-	SourcePrivateGetter        func(owner, name, descriptor string, pc int, args []any) (string, bool)
+	LexicalClassName       string
+	LexicalTypeNames       map[string]bool
+	SourceMemberAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceMemberCandidate  func(owner string) bool
+	// Source ownership proofs distinguish value expressions from Java statement expressions.
+	SourcePrivateGetter        func(owner, name, descriptor string, pc int, args []any, statement bool) (string, bool)
 	SourceMemberDelegation     func(owner, descriptor string, pc int, args []any) (string, bool)
 	SourceAnonymousCandidate   func(owner string) bool
 	SourceAnonymousAllocation  func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)

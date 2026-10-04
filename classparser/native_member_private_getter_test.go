@@ -2,6 +2,8 @@ package javaclassparser
 
 import (
 	"context"
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"strings"
 	"testing"
@@ -92,7 +94,7 @@ func TestNativeMemberAnonymousPrivateGetterRequiresClosedArchiveReferences(t *te
 	fixture := strings.Replace(nativeAnonymousNestedContextFixture("member-context-depth"), "final Object token;final long seed;", "private final Object token;private final long seed;", 1)
 	testNativeMemberPrivateGetterArchiveReferences(t, fixture, "NestedOwner", "NestedOwner$Layer$Middle", "NestedOwner$Layer$Middle$1$1", "origin", true)
 }
-func testNativeMemberPrivateGetterArchiveReferences(t *testing.T, fixture, rootName, getterOwner, user, methodName string, anonymous bool) {
+func testNativeMemberPrivateGetterArchiveReferences(t *testing.T, fixture, rootName, getterOwner, user, methodName string, anonymous bool, accessorNames ...string) {
 	files := nativeCompileClasses(t, fixture)
 	for _, variant := range []string{"original", "foreign user", "method handle", "interface reference", "unused getter", "dead reference", "wrong opcode", "own caller", "uncommitted anonymous forest", "foreign anonymous forest", "missing anonymous parent", "failed anonymous group", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
@@ -112,7 +114,13 @@ func testNativeMemberPrivateGetterArchiveReferences(t *testing.T, fixture, rootN
 					index.getterUsers[key][user] = true
 				}
 			}
-			key := nativeMemberGetterKey(getterOwner, "access$000", "(L"+getterOwner+";)Ljava/lang/Object;")
+			accessorName := "access$000"
+			descriptor := "(L" + getterOwner + ";)Ljava/lang/Object;"
+			if len(accessorNames) > 0 {
+				accessorName = accessorNames[0]
+				descriptor = "(L" + getterOwner + ";Ljava/lang/Object;)Ljava/lang/Object;"
+			}
+			key := nativeMemberGetterKey(getterOwner, accessorName, descriptor)
 			var work *workbudget.Budget
 			switch variant {
 			case "foreign user":
@@ -137,12 +145,23 @@ func testNativeMemberPrivateGetterArchiveReferences(t *testing.T, fixture, rootN
 					if n == methodName {
 						for _, a := range m.Attributes {
 							if c, ok := a.(*CodeAttribute); ok {
-								for i, op := range c.Code {
-									if op == 0xb8 {
-										c.Code[i] = 0xb6
+								decoder := core.NewDecompiler(c.Code, func(i int) values.JavaValue { return GetValueFromCP(object.ConstantPool, i) })
+								if e := decoder.ParseOpcode(); e != nil {
+									t.Fatal(e)
+								}
+								found := false
+								for _, op := range decoder.Opcodes() {
+									member := constructorMotionMember(object, op, core.OP_INVOKESTATIC)
+									if member != nil && member.Name == getterOwner && member.Member == accessorName && member.Description == descriptor {
+										c.Code[int(op.CurrentOffset)] = core.OP_INVOKEVIRTUAL
+										found = true
 										break
 									}
 								}
+								if !found {
+									t.Fatal("missing original accessor invoke")
+								}
+
 							}
 						}
 					}
@@ -220,4 +239,8 @@ func TestNativeMemberPrivateGetterRequiresFinalSourceOrdinalOrder(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestNativeMemberPrivateSetterRequiresClosedArchiveReferences(t *testing.T) {
+	testNativeMemberPrivateGetterArchiveReferences(t, nativePrivateSetterFixture, "SetterOwner", "SetterOwner", "SetterOwner$Layer$Leaf", "put", false, "access$002")
 }

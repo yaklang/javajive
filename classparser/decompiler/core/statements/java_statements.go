@@ -3852,6 +3852,9 @@ func (a *ExpressionStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.V
 
 func (a *ExpressionStatement) String(funcCtx *class_context.ClassContext) string {
 	if call, ok := values.UnpackSoltValue(a.Expression).(*values.FunctionCallExpression); ok {
+		if source, known := call.ProvedPrivateFieldAccess(funcCtx, true); known {
+			return source
+		}
 		if planned, ok := call.PlanErasedClassResultUse(funcCtx); ok {
 			return planned.String(funcCtx)
 		}
