@@ -921,8 +921,10 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 					plan.checkPC = int(ops[cursor+1].CurrentOffset)
 					cursor += 3
 				}
-				// Allocation invokes are found from the original symbolic descriptor; the
-				// simulator independently binds their NEW identity before rendering.
+				// Preserve the original operand producers and their effects. A
+				// nested allocation or branch requires the immutable typed frame
+				// proof of this NEW's unique initialization. Rendering independently
+				// checks the same NEW/invoke PCs; nominal owner equality is insufficient.
 				for j := cursor; j < len(ops); j++ {
 					if !nativeProofWork(c.Work, 1) {
 						return nil, false
@@ -944,7 +946,7 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 						result[key][plan.invokePC] = plan
 						break
 					}
-					if ops[j].Instr.OpCode == core.OP_NEW {
+					if ops[j].Instr.OpCode == core.OP_NEW || ops[j].Instr.OpCode == core.OP_GOTO {
 						if !allocationInvocationsChecked {
 							var valid bool
 							allocationInvocations, valid = c.nativeMemberAllocationInvocations(m, code)
@@ -959,7 +961,7 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 						}
 						continue
 					}
-					if ops[j].Instr.OpCode == core.OP_GOTO || ops[j].Instr.OpCode == core.OP_RETURN || ops[j].Instr.OpCode == core.OP_ARETURN {
+					if ops[j].Instr.OpCode == core.OP_RETURN || ops[j].Instr.OpCode == core.OP_ARETURN {
 						return nil, false
 					}
 				}
