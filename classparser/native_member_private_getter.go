@@ -20,6 +20,7 @@ type nativeMemberPrivateGetter struct {
 	ordinal                                         int
 	method                                          *MemberInfo
 	setter                                          bool
+	call                                            *nativeMemberPrivateCall
 }
 
 func nativeMemberPrivateGetterProof(obj *ClassObject, m *MemberInfo, work *workbudget.Budget) *nativeMemberPrivateGetter {
@@ -281,6 +282,9 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 		if getter.setter {
 			expectedArgs = 2
 		}
+		if getter.call != nil {
+			expectedArgs = getter.call.argumentCount
+		}
 		if sites[ctx.FunctionName+ctx.CurrentMethodDesc][pc] != getter || len(args) != expectedArgs {
 			p.failed = true
 			return "", false
@@ -289,6 +293,13 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 		if !ok || sourceProofNil(v) {
 			p.failed = true
 			return "", false
+		}
+		if getter.call != nil {
+			source, known := nativeMemberPrivateCallSource(getter, args, ctx)
+			if !known {
+				p.failed = true
+			}
+			return source, known
 		}
 		sourceOwner := ctx.ShortTypeName(strings.ReplaceAll(getter.owner, "/", "."))
 		// A source write regenerates the original static accessor: the receiver and

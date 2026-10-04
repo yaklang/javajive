@@ -20,6 +20,9 @@ func nativeMemberPrivateAccessProof(obj *ClassObject, m *MemberInfo, work *workb
 	if getter := nativeMemberPrivateGetterProof(obj, m, work); getter != nil {
 		return getter
 	}
+	if call := nativeMemberPrivateCallProof(obj, m, work); call != nil {
+		return call
+	}
 	if obj == nil || m == nil || obj.MinorVersion != 0 || (obj.MajorVersion != 51 && obj.MajorVersion != 52) || m.AccessFlags != 0x1008 || !nativeProofWork(work, 1) {
 		return nil
 	}
