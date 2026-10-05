@@ -1,0 +1,97 @@
+package javaclassparser
+
+import (
+	"crypto/sha256"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/internal/workbudget"
+)
+
+// An effect certificate can be independent of the runtime profile: it used
+// only immutable caller-supplied class bytes and the already modeled bootstrap
+// Object initialization/finalization facts. Other platform bodies or metadata
+// keep the existing full per-profile analysis. The certificate is local to one
+// movement request, so its arguments and moved-storage identities cannot drift.
+type constructorProfileEvidence struct {
+	originals                       map[string][32]byte
+	transcript                      []string
+	eligible, bootstrapUsed, inBody bool
+	inconsistent                    bool
+	rootName, rootSuper             string
+	rootFlags                       uint16
+	finalizerSilent                 bool
+}
+
+func (e *constructorProfileEvidence) original(c *ClassObjectDumper, name string, raw []byte) {
+	if e == nil {
+		return
+	}
+	if !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.Charge(workbudget.CounterReadBytes, int64(len(raw))) != nil {
+		e.eligible = false
+		return
+	}
+	fingerprint := sha256.Sum256(raw)
+	if e.inBody {
+		if len(e.transcript) >= 512 || c.Work != nil && c.Work.CheckAlloc(int64((len(e.transcript)+1)*32+len(e.originals)*96)) != nil {
+			e.eligible = false
+			return
+		}
+		e.transcript = append(e.transcript, name)
+	}
+	if previous, ok := e.originals[name]; ok {
+		if previous != fingerprint {
+			e.eligible = false
+			e.inconsistent = true
+		}
+		return
+	}
+	// Every class comes from an already bounded field/constructor ancestry or
+	// instruction visit. Retained evidence still has its own allocation guard.
+	if len(e.originals) >= 512 || c.Work != nil && c.Work.CheckAlloc(int64((len(e.originals)+1)*96+len(name))) != nil {
+		e.eligible = false
+		return
+	}
+	e.originals[name] = fingerprint
+}
+
+func (e *constructorProfileEvidence) metadata(provider callbinding.Provider) callbinding.Provider {
+	return func(name string) (callbinding.Class, bool) {
+		if name == "java/lang/Object" {
+			e.bootstrapUsed = true
+		} else {
+			e.eligible = false
+		}
+		return provider(name)
+	}
+}
+
+func (e *constructorProfileEvidence) revalidates(c *ClassObjectDumper, previous *constructorProfileEvidence, remaining *int) bool {
+	if previous == nil || !previous.eligible || !previous.bootstrapUsed || !e.eligible || previous.rootName != e.rootName || previous.rootSuper != e.rootSuper || previous.rootFlags != e.rootFlags || previous.finalizerSilent != e.finalizerSilent {
+		return false
+	}
+	count := len(previous.transcript)
+	*remaining -= count + 1
+	if *remaining < 0 || !nativeProofWork(c.Work, int64(count+1)) || c.Work != nil && c.Work.CheckAlloc(int64(count)*16) != nil {
+		return false
+	}
+	// Replay the original provider observation order, including duplicate body
+	// resolutions. The finalizer's earlier read cannot stand for a constructor
+	// lookup that would observe different original bytes.
+	e.inBody = true
+	defer func() { e.inBody = false }()
+	for _, name := range previous.transcript {
+		if _, known := c.foldSiblingResolver(name); !known {
+			e.inconsistent = true
+			return false
+		}
+		if fingerprint, known := e.originals[name]; !known || fingerprint != previous.originals[name] {
+			e.inconsistent = true
+			return false
+		}
+	}
+	if !e.eligible {
+		return false
+	}
+	exceptions, known := exactInvocationExceptions(c.FuncCtx.InvocationMetadata, "java/lang/Object", "<init>", "()V")
+	return known && len(exceptions) == 0 && e.eligible
+}

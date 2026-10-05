@@ -43,36 +43,64 @@ func (p *constructorSelfStorageProof) closed() bool {
 // source must admit the same movement. Actual caller-supplied bytes retain
 // precedence. All attempts share the original bounded proof budget.
 func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descriptor string, writes map[string]bool, arguments ...constructorEffectValue) bool {
+	if c == nil || c.obj == nil {
+		return false
+	}
 	target := c.options.TargetSourceVersion
 	if target == 0 {
 		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
 	}
 	remaining := 512
+	var previous *constructorProfileEvidence
 	prove := func(release int) (bool, bool) {
 		d := *c
 		d.options.TargetSourceVersion = release
+		if !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(256) != nil {
+			return false, false
+		}
+		evidence := &constructorProfileEvidence{originals: map[string][32]byte{}, eligible: true, rootName: c.obj.GetClassName(), rootSuper: c.obj.GetSupperClassName(), rootFlags: c.obj.AccessFlags}
+		d.constructorProfileEvidence = evidence
 		platformUsed := false
 		d.foldSiblingResolver = func(name string) ([]byte, bool) {
 			if c.foldSiblingResolver != nil {
 				if raw, ok := c.foldSiblingResolver(name); ok {
+					evidence.original(&d, name, raw)
 					return raw, true
 				}
 			}
 			if c.declarationResolver != nil {
 				if raw, ok := c.declarationResolver(name); ok {
+					evidence.original(&d, name, raw)
 					return raw, true
 				}
 			}
 			raw, ok := jdkConstructorClassBytes(name, release)
 			platformUsed = platformUsed || ok
+			if ok && name != "java/lang/Object" {
+				evidence.eligible = false
+			}
 			return raw, ok
 		}
 		d.declarationResolver = nil // already consulted before the platform evidence
 		d.FuncCtx = &class_context.ClassContext{}
-		d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
+		d.FuncCtx.InvocationMetadata = evidence.metadata(d.buildInvocationMetadata())
 		d.constructorReceiverFinalizerSilent = d.constructorReceiverCannotObserveFinalization(&remaining)
+		evidence.finalizerSilent = d.constructorReceiverFinalizerSilent
+		if evidence.revalidates(&d, previous, &remaining) {
+			previous = evidence
+			return true, platformUsed
+		}
+		if evidence.inconsistent || remaining < 0 || d.checkWork() != nil {
+			return false, platformUsed
+		}
 		aliases := &constructorSelfStorageProof{}
-		safe := d.constructorChainEffectsWithArguments(owner, descriptor, writes, map[string]bool{}, &remaining, 0, aliases, arguments) && aliases.closed()
+		evidence.transcript = nil
+		evidence.inBody = true
+		safe := d.constructorChainEffectsWithArguments(owner, descriptor, writes, map[string]bool{}, &remaining, 0, aliases, arguments) && aliases.closed() && !evidence.inconsistent
+		evidence.inBody = false
+		if safe {
+			previous = evidence
+		}
 		return safe, platformUsed
 	}
 	if safe, platformUsed := prove(target); !safe {
@@ -129,6 +157,11 @@ func constructorEffectOriginalOperandFree(code *CodeAttribute, op *core.OpCode) 
 
 func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, bool) {
 	if c.obj != nil && owner == c.obj.GetClassName() {
+		// The caller's parsed object is not an authoritative resolver-byte
+		// dependency. Its own constructor body must be reanalyzed per profile.
+		if c.constructorProfileEvidence != nil && c.constructorProfileEvidence.inBody {
+			c.constructorProfileEvidence.eligible = false
+		}
 		return c.obj, true
 	}
 	var raw []byte
