@@ -32,21 +32,22 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
-	registrationLayouts   map[string]*nativeMemberRegistrationScope
-	sourceDependencies    map[string]string
-	rootAccessBridges     map[string]*nativeConstructorAccessBridge
-	rootBridgeDelegations map[string]*nativeRootBridgeDelegation
-	getters               map[string]*nativeMemberPrivateGetter
-	lexicalObjects        map[string]*ClassObject
-	anonymous             *nativeAnonymousFamily
-	anonymousUnits        map[string]*nativeAnonymousFamily
-	memberAnonymous       map[string]*nativeAnonymousFamily
-	anonymousForest       *nativeAnonymousForest
-	owner                 string
-	children              map[string]*nativeMemberClass
-	failed                bool
-	bridgeCalls           map[string]int
-	emptyMarkers          map[string]*ClassObject
+	registrationLayouts    map[string]*nativeMemberRegistrationScope
+	sourceDependencies     map[string]string
+	allocationDependencies map[string]*nativeMemberClass
+	rootAccessBridges      map[string]*nativeConstructorAccessBridge
+	rootBridgeDelegations  map[string]*nativeRootBridgeDelegation
+	getters                map[string]*nativeMemberPrivateGetter
+	lexicalObjects         map[string]*ClassObject
+	anonymous              *nativeAnonymousFamily
+	anonymousUnits         map[string]*nativeAnonymousFamily
+	memberAnonymous        map[string]*nativeAnonymousFamily
+	anonymousForest        *nativeAnonymousForest
+	owner                  string
+	children               map[string]*nativeMemberClass
+	failed                 bool
+	bridgeCalls            map[string]int
+	emptyMarkers           map[string]*ClassObject
 }
 
 // Source ownership comes from one original self row, never dollar spelling.
@@ -763,6 +764,16 @@ func (p *nativeMemberFamily) sourceName(binary string) (string, bool) {
 	return "", false
 }
 
+// A completed foreign declaration contributes constructor metadata solely for
+// projecting a NEW's enclosing operand. It is not a child or lexical owner;
+// getters, capture reads, registration and private bridges still use children.
+func (p *nativeMemberFamily) allocationClass(binary string) *nativeMemberClass {
+	if child := p.children[binary]; child != nil {
+		return child
+	}
+	return p.allocationDependencies[binary]
+}
+
 type nativeMemberAllocation struct {
 	child                    *nativeMemberClass
 	rootObject               *ClassObject
@@ -858,7 +869,7 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 					continue
 				}
 				owner, known := sourceBridgeClassName(c.obj, core.Convert2bytesToInt(op.Data))
-				child := p.children[owner]
+				child := p.allocationClass(owner)
 				if known && owner == p.owner && len(p.rootAccessBridges) > 0 {
 					plan, ok := nativeRootBridgeAllocation(c.obj, ops, i, p.lexicalObjects[p.owner], p.rootAccessBridges, c.Work)
 					if !ok {
@@ -874,6 +885,11 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				}
 				if !known || child == nil {
 					continue
+				}
+				if p.children[owner] == nil && len(child.accessBridges) != 0 {
+					// A foreign dependency does not contribute registration
+					// ordinals or private synthetic constructor ownership.
+					return nil, false
 				}
 				if child.static {
 					if len(child.accessBridges) == 0 {
@@ -980,18 +996,18 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				if call != nil && call.Member == "<init>" && !nativeMemberOriginalConstructorAccess(p, c.obj, call.Name, call.Description, c.Work) {
 					return nil, false
 				}
-				if call == nil || call.Member != "<init>" || p.children[call.Name] == nil || p.children[call.Name].static && p.children[call.Name].accessBridges[call.Description] == nil {
+				if call == nil || call.Member != "<init>" || p.allocationClass(call.Name) == nil || p.allocationClass(call.Name).static && p.allocationClass(call.Name).accessBridges[call.Description] == nil {
 					continue
 				}
 				if group := p.anonymousUnits[c.obj.GetClassName()]; group != nil {
-					if anonymous := group.children[c.obj.GetClassName()]; anonymous != nil && anonymous.memberSuper == p.children[call.Name] && name == "<init>" && desc == anonymous.descriptor && int(op.CurrentOffset) == anonymous.superPC && call.Description == anonymous.superDescriptor {
+					if anonymous := group.children[c.obj.GetClassName()]; anonymous != nil && anonymous.memberSuper == p.allocationClass(call.Name) && name == "<init>" && desc == anonymous.descriptor && int(op.CurrentOffset) == anonymous.superPC && call.Description == anonymous.superDescriptor {
 						continue
 					}
 				}
 				if result[name+desc][int(op.CurrentOffset)] != nil {
 					continue
 				}
-				ctor := p.children[call.Name].constructors[desc]
+				ctor := p.allocationClass(call.Name).constructors[desc]
 				if name == "<init>" && c.obj.GetClassName() == call.Name && ctor != nil && ctor.capturePC < 0 && ctor.delegateDescriptor == call.Description && ctor.delegatePC == int(op.CurrentOffset) {
 					continue
 				}
@@ -1020,7 +1036,7 @@ func nativeMemberOriginalConstructorAccess(p *nativeMemberFamily, caller *ClassO
 	var target *ClassObject
 	if owner == p.owner {
 		target = p.lexicalObjects[owner]
-	} else if child := p.children[owner]; child != nil {
+	} else if child := p.allocationClass(owner); child != nil {
 		target = child.object
 	} else {
 		// A separately committed dependency checks its own indexed callers.
@@ -1065,7 +1081,7 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 			return cl, false
 		}
 		binary := strings.ReplaceAll(owner, ".", "/")
-		child := p.children[binary]
+		child := p.allocationClass(binary)
 		bridges := p.constructorBridges(binary)
 		if (child == nil || child.static) && len(bridges) == 0 {
 			return cl, true
@@ -1112,7 +1128,7 @@ func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily,
 				return "", nil, false
 			}
 			signature, methods, known := ctx.SiblingClassSig(owner)
-			child := p.children[strings.ReplaceAll(owner, ".", "/")]
+			child := p.allocationClass(strings.ReplaceAll(owner, ".", "/"))
 			if child == nil || child.static {
 				return signature, methods, known
 			}
@@ -1271,7 +1287,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		}
 		return "", false
 	}
-	if len(p.children) == 0 {
+	if len(p.children) == 0 && len(p.allocationDependencies) == 0 {
 		return
 	}
 	plans, known := c.nativeMemberAllocations(p)
@@ -1296,7 +1312,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		if binary == p.owner {
 			return len(p.rootAccessBridges) > 0
 		}
-		child := p.children[binary]
+		child := p.allocationClass(binary)
 		return child != nil && (!child.static || len(child.accessBridges) > 0)
 	}
 	ctx.SourceMemberDescriptorCandidate = func(owner, desc string) bool {
@@ -1304,13 +1320,13 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		if binary == p.owner {
 			return p.rootAccessBridges[desc] != nil
 		}
-		child := p.children[binary]
+		child := p.allocationClass(binary)
 		return child != nil && (!child.static || child.accessBridges[desc] != nil)
 	}
 	ctx.SourceMemberAllocation = func(owner, desc string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
 		fail := func() (string, bool) { p.failed = true; return "", false }
 		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
-		if child := p.children[strings.ReplaceAll(owner, ".", "/")]; child != nil && child.static && child.accessBridges[desc] == nil {
+		if child := p.allocationClass(strings.ReplaceAll(owner, ".", "/")); child != nil && child.static && child.accessBridges[desc] == nil {
 			return "", false
 		}
 		if plan == nil || plan.allocatedObject() == nil || plan.allocatedObject().GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.newPC != newPC || plan.descriptor != desc || len(args) == 0 {

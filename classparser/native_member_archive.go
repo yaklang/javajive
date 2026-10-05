@@ -419,12 +419,12 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 				}
 				otherOwner, _, otherFlags, isMember := originalMemberOwner(other)
 				if isMember && otherOwner != owner {
-					// A static member has no hidden enclosing receiver. Its source
-					// name can come from a separate completed original family,
-					// provided resolving families cannot recursively wait on this
-					// unfinished cache entry. Nonstatic cross-family captures still
-					// need a joint ownership proof.
-					if otherFlags&8 == 0 {
+					// Inherited nonstatic declarations also have source names in
+					// an independent ancestor family. This contributes no enclosing
+					// instance, constructor or private-access ownership. General
+					// nonstatic cross-family transactions remain unproved.
+					static := otherFlags&8 != 0
+					if !static && !nativeMemberAncestorDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) {
 						return
 					}
 					if !staticDependenciesChecked {
@@ -434,7 +434,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 						staticDependenciesChecked = true
 					}
 					dependency := z.nativeMemberLookup(n)
-					if dependency == nil || !dependency.static || dependency.object.GetClassName() != n || dependency.sourceName == "" {
+					if dependency == nil || dependency.static != static || dependency.owner != otherOwner || dependency.object.GetClassName() != n || dependency.sourceName == "" {
 						return
 					}
 					if p.sourceDependencies == nil {
@@ -443,6 +443,15 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 					// A completed dependency contributes its source name, never
 					// membership in this family's private/constructor access scope.
 					p.sourceDependencies[n] = dependency.sourceName
+					if !static {
+						// Constructor metadata is a binding view, not lexical
+						// ownership. Allocation proof separately refuses any
+						// foreign private bridge protocol.
+						if p.allocationDependencies == nil {
+							p.allocationDependencies = map[string]*nativeMemberClass{}
+						}
+						p.allocationDependencies[n] = dependency
+					}
 				}
 				if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil) {
 					if p.emptyMarkers[n] != nil && anonOwner == owner && nativeMemberEmptyAccessMarker(other, owner, d.Work) {
@@ -452,6 +461,15 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 						return
 					}
 				}
+			}
+		}
+
+		// Dependencies were unavailable during the initial ownership proof.
+		// Recheck actual allocations with the completed foreign constructor
+		// metadata before any body can publish a projected type spelling.
+		for _, object := range dependencyObjects {
+			if _, known := z.nativeMemberReader(object).nativeMemberAllocations(p); !known {
+				return
 			}
 		}
 		for name, object := range objects {
