@@ -1364,7 +1364,7 @@ func nativeCaptureDeclaration(body []statements.Statement, ref *values.JavaRef, 
 					declaration = assign
 				}
 			}
-			_, children, known := catchSourceChildren(st)
+			_, children, known := nativeSourceNameChildren(st)
 			if !known {
 				valid = false
 				return
@@ -1381,9 +1381,9 @@ func nativeCaptureDeclaration(body []statements.Statement, ref *values.JavaRef, 
 	}
 	remaining = 8192
 	if parameter {
-		return nil, catchParameterUnwritten(body, ref, &remaining)
+		return nil, nativeCaptureParameterUnwritten(body, ref, &remaining)
 	}
-	return declaration, catchParameterUnwritten(body, ref, &remaining, declaration)
+	return declaration, nativeCaptureParameterUnwritten(body, ref, &remaining, declaration)
 }
 func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.Statement, params []values.JavaValue) {
 	p := c.nativeAnonymousRoot
@@ -1526,7 +1526,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 				return
 			}
 			activeStatement[st] = true
-			roots, children, known := catchSourceChildren(st)
+			roots, children, known := nativeSourceNameChildren(st)
 			if !known {
 				p.failed = true
 				delete(activeStatement, st)

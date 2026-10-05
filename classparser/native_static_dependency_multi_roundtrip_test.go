@@ -58,7 +58,7 @@ func testNativeIndependentFamilyFixture(t *testing.T, fixture string, owners []s
 							continue
 						}
 						source, err := z.ReadFile(n)
-						if err != nil || strings.Contains(string(source), DecompileStubMarker) {
+						if err != nil || strings.Contains(string(source), DecompileStubMarker) || strings.Contains(string(source), "// decompile dump failed") {
 							t.Fatalf("source %s:%v\n%s", n, err, source)
 						}
 						name := strings.TrimSuffix(n, ".class") + ".java"

@@ -237,6 +237,17 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 }
 
 func catchParameterUnwritten(body []statements.Statement, ref *values.JavaRef, remaining *int, declaration ...*statements.AssignStatement) bool {
+	return sourceParameterUnwritten(body, ref, remaining, catchSourceChildren, declaration...)
+}
+
+// Stable capture binding asks whether a source declaration is overwritten, not
+// whether an original instruction can move or enter a protected region. Sealed
+// operand-free source leaves participate only in this name/identity traversal;
+// precise rethrow and control proofs retain their stricter statement visitor.
+func nativeCaptureParameterUnwritten(body []statements.Statement, ref *values.JavaRef, remaining *int, declaration ...*statements.AssignStatement) bool {
+	return sourceParameterUnwritten(body, ref, remaining, nativeSourceNameChildren, declaration...)
+}
+func sourceParameterUnwritten(body []statements.Statement, ref *values.JavaRef, remaining *int, childSource func(statements.Statement) ([]values.JavaValue, [][]statements.Statement, bool), declaration ...*statements.AssignStatement) bool {
 	if ref == nil || ref.Id == nil {
 		return false
 	}
@@ -319,7 +330,7 @@ func catchParameterUnwritten(body []statements.Statement, ref *values.JavaRef, r
 					}
 				}
 			}
-			roots, children, known := catchSourceChildren(st)
+			roots, children, known := childSource(st)
 			if !known {
 				return false
 			}
