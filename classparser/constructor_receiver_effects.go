@@ -119,6 +119,14 @@ func (v constructorEffectValue) width() int {
 	return 0
 }
 
+func constructorEffectOriginalOperandFree(code *CodeAttribute, op *core.OpCode) bool {
+	if code == nil || op == nil || op.Instr == nil || op.IsWide || len(op.Data) != 0 {
+		return false
+	}
+	pc := int(op.CurrentOffset)
+	return pc >= 0 && pc < len(code.Code) && int(code.Code[pc]) == op.Instr.OpCode
+}
+
 func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, bool) {
 	if c.obj != nil && owner == c.obj.GetClassName() {
 		return c.obj, true
@@ -198,9 +206,10 @@ func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *val
 	return "", false
 }
 
-// This effect domain admits receiver-independent scalar computation, local
-// aliases, ordinary field access and acyclic conditional control flow. Every
-// feasible abstract path must finish initialization and remain receiver-silent.
+// This effect domain admits receiver-independent computation, local aliases
+// and original field/array effects through conditional control flow. Every
+// normal exit must finish initialization; every reachable path must remain
+// receiver-silent, including abrupt exits and nonterminating cyclic paths.
 // Paths are memoized by PC and exact type/receiver state. Cyclic paths require
 // a closed type/receiver invariant; differing integer facts widen to unknown. A normal
 // Java exception after Object initialization can expose the receiver to a
@@ -515,6 +524,40 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					return false
 				}
 				stack = append(stack, constructorEffectValue{kind: 'L'})
+			case opcode == core.OP_ARRAYLENGTH || opcode >= core.OP_IALOAD && opcode <= core.OP_SALOAD || opcode >= core.OP_IASTORE && opcode <= core.OP_SASTORE:
+				// The original independent array operation keeps its own bounds,
+				// null, component-store and linkage failures. No moved capture can
+				// be observed through it: THIS was not published into any array,
+				// and neither the array operand nor a stored value may be THIS.
+				// Only a closed finalizer licenses a failure after initialization.
+				if !constructorEffectOriginalOperandFree(code, op) || initialized && !c.constructorReceiverFinalizerSilent {
+					return false
+				}
+				store := opcode >= core.OP_IASTORE && opcode <= core.OP_SASTORE
+				kind := byte('I')
+				if opcode != core.OP_ARRAYLENGTH {
+					base := core.OP_IALOAD
+					if store {
+						base = core.OP_IASTORE
+					}
+					kind = []byte{'I', 'J', 'F', 'D', 'L', 'I', 'I', 'I'}[opcode-base]
+					if store {
+						v, ok := pop(kind)
+						if !ok || v.receiver || v.allocation != 0 {
+							return false
+						}
+					}
+					if _, ok := pop('I'); !ok {
+						return false
+					}
+				}
+				array, ok := pop('L')
+				if !ok || array.receiver || array.allocation != 0 {
+					return false
+				}
+				if !store {
+					stack = append(stack, constructorEffectValue{kind: kind})
+				}
 			case opcode == core.OP_ACONST_NULL:
 				stack = append(stack, constructorEffectValue{kind: 'L'})
 			case opcode >= core.OP_ICONST_M1 && opcode <= core.OP_ICONST_5 || opcode == core.OP_BIPUSH || opcode == core.OP_SIPUSH:
@@ -735,7 +778,11 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				kind := []byte{'I', 'J', 'F', 'D'}[(opcode-core.OP_IADD)%4]
 				if kind == 'I' || kind == 'J' {
 					if opcode >= core.OP_IDIV {
-						return false
+						// Division/remainder preserve their original zero-divisor
+						// failure and operand evaluation, as do independent arrays.
+						if !constructorEffectOriginalOperandFree(code, op) || initialized && !c.constructorReceiverFinalizerSilent {
+							return false
+						}
 					}
 				}
 				_, ok := pop(kind)
@@ -829,8 +876,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				// moved store after a failed initialized constructor. Its closed
 				// receiver proof is mandatory then. Null keeps the original NPE;
 				// a distinct initialized throwable keeps its original identity.
-				pc := int(op.CurrentOffset)
-				if op.IsWide || len(op.Data) != 0 || pc < 0 || pc >= len(code.Code) || code.Code[pc] != core.OP_ATHROW || initialized && !c.constructorReceiverFinalizerSilent {
+				if !constructorEffectOriginalOperandFree(code, op) || initialized && !c.constructorReceiverFinalizerSilent {
 					return false
 				}
 				v, ok := pop('L')

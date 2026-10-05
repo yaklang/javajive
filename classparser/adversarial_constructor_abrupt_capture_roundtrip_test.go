@@ -14,8 +14,7 @@ import (
 // The parameter stays unknown to the motion proof. Original parent bytes and
 // driver check both exits, original exception identity, and external effects.
 // Only the original child's synthetic final capture is moved before SUPER.
-func TestAdversarialConstructorUnknownInputAbruptCaptureRoundTrip(t *testing.T) {
-	const fixture = `class AbruptParent {
+const constructorUnknownAbruptCaptureFixture = `class AbruptParent {
  static final java.io.IOException marker=new java.io.IOException("shared");
  static java.io.IOException last;static int trace;final int n;
  AbruptParent(int n)throws java.io.IOException {
@@ -47,14 +46,16 @@ class AbruptDriver {
   }
  }
 }`
+
+func TestAdversarialConstructorUnknownInputAbruptCaptureRoundTrip(t *testing.T) {
 	for _, prefix := range []string{"Abrupt", "Sigma"} {
 		t.Run(prefix, func(t *testing.T) {
-			testConstructorUnknownInputAbruptCaptureRoundTrip(t, strings.ReplaceAll(fixture, "Abrupt", prefix), prefix)
+			testConstructorUnknownInputAbruptCaptureRoundTrip(t, strings.ReplaceAll(constructorUnknownAbruptCaptureFixture, "Abrupt", prefix), prefix)
 		})
 	}
 }
 
-func testConstructorUnknownInputAbruptCaptureRoundTrip(t *testing.T, fixture, prefix string) {
+func testConstructorUnknownInputAbruptCaptureRoundTrip(t *testing.T, fixture, prefix string, expectedOutput ...string) {
 	t.Helper()
 	javac, java := t04Tools(t)
 	child, driver := prefix+"Child", prefix+"Driver"
@@ -132,7 +133,12 @@ func testConstructorUnknownInputAbruptCaptureRoundTrip(t *testing.T, fixture, pr
 				}
 			}
 			oracle := t04RunJava(t, java, original, driver)
-			const expected = "-3:null:false\n-3:null:true\n-2:fresh:false\n-2:fresh:true\n-1:shared:false\n-1:shared:true\n0:ok:false\n0:ok:true\n7:ok:false\n7:ok:true\n70000:ok:false\n70000:ok:true\n"
+			expected := "-3:null:false\n-3:null:true\n-2:fresh:false\n-2:fresh:true\n-1:shared:false\n-1:shared:true\n0:ok:false\n0:ok:true\n7:ok:false\n7:ok:true\n70000:ok:false\n70000:ok:true\n"
+			if len(expectedOutput) == 1 {
+				expected = expectedOutput[0]
+			} else if len(expectedOutput) > 1 {
+				t.Fatal("ambiguous original oracle")
+			}
 			if oracle != expected {
 				t.Fatalf("original oracle=%q", oracle)
 			}
