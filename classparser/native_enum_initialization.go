@@ -11,7 +11,7 @@ import (
 
 type nativeEnumConstantAllocation struct {
 	constant, allocatedClass, descriptor string
-	ordinal, newPC, invokePC             int
+	ordinal, newPC, invokePC, storePC    int
 }
 
 // Source erases the hidden name/ordinal, so they must be the original field's
@@ -82,7 +82,7 @@ func (c *ClassObjectDumper) nativeEnumConstantInitializations() (map[string]nati
 	}
 	// Include the live immutable frame snapshot and its additional lookup maps
 	// in one construction high-water, rather than checking each map separately.
-	allocationBytes := int64(len(code.Code)+1)*int64(int(code.MaxLocals)+int(code.MaxStack)+1)*64 + int64(len(code.Code)+len(obj.Fields)+1)*384
+	allocationBytes := int64(len(code.Code)+1)*int64(int(code.MaxLocals)+int(code.MaxStack)+1)*64 + int64(len(code.Code)+len(obj.Fields)+1)*640
 	if allocationBytes > 64<<20 || c.Work != nil && c.Work.CheckAlloc(allocationBytes) != nil {
 		return fail("initializer allocation budget")
 	}
@@ -200,12 +200,75 @@ func (c *ClassObjectDumper) nativeEnumConstantInitializations() (map[string]nati
 				return fail("constant-specific enclosing identity")
 			}
 		}
-		plan.constant, plan.ordinal = store.Member, ordinal
+		plan.constant, plan.ordinal, plan.storePC = store.Member, ordinal, int(record.PC)
 		result[store.Member] = plan
 		allocationOwners[plan.newPC] = store.Member
 	}
 	if len(result) != len(ordinals) {
 		return fail("missing original constant assignments")
+	}
+	// Java evaluates constant headers in field declaration order. Literal
+	// hidden operands alone cannot prove that relative order: valid bytecode can swap whole NEW/constructor/store packets.
+	ordered := make([]nativeEnumConstantAllocation, len(result))
+	for _, plan := range result {
+		ordered[plan.ordinal] = plan
+	}
+	instructionIndex := map[int]int{}
+	for i, instruction := range ir.Instrs {
+		instructionIndex[int(instruction.PC)] = i
+	}
+	for i, plan := range ordered {
+		if !(plan.newPC < plan.invokePC && plan.invokePC < plan.storePC) {
+			return fail("constant allocation/store order")
+		}
+		if i > 0 {
+			previous := instructionIndex[ordered[i-1].storePC]
+			if previous+1 >= len(ir.Instrs) || int(ir.Instrs[previous+1].PC) != plan.newPC {
+				return fail("constant evaluation order differs from declaration order")
+			}
+		}
+	}
+	// Index each original instruction by its unique constant header. Validate
+	// edges once; a quadratic constants-by-edges walk is unnecessary and exposes
+	// adversarial enums to repeated work even before source rendering.
+	regions := map[uint16]int{}
+	cursor := 0
+	for _, instruction := range ir.Instrs {
+		if !nativeProofWork(c.Work, 1) {
+			return fail("constant region budget")
+		}
+		for cursor < len(ordered) && int(instruction.PC) > ordered[cursor].storePC {
+			cursor++
+		}
+		if cursor < len(ordered) && int(instruction.PC) >= ordered[cursor].newPC {
+			regions[instruction.PC] = cursor
+		}
+	}
+	for _, edge := range ir.Edges {
+		if !nativeProofWork(c.Work, 1) {
+			return fail("constant control-flow budget")
+		}
+		from, to := int(edge.From), int(edge.To)
+		source, inside := regions[uint16(edge.From)]
+		target, enters := regions[uint16(edge.To)]
+		if edge.Kind == core.EdgeException && inside {
+			return fail("handler protects source constant header")
+		}
+		if enters {
+			if !inside || source != target {
+				if to != ordered[target].newPC || target > 0 && from != ordered[target-1].storePC || target == 0 && inside {
+					return fail("control flow enters or repeats constant header")
+				}
+			} else if to <= from {
+				return fail("constant header has a backward edge")
+			}
+		} else if inside && (source != len(ordered)-1 || from != ordered[source].storePC) {
+			return fail("control flow bypasses constant assignment")
+		}
+	}
+
+	if len(ordered) > 0 && !nativeEnumRegionExecutedOnce(ir, uint16(ordered[0].newPC), uint16(ordered[len(ordered)-1].storePC), c.Work) {
+		return fail("constant headers are bypassed, unreachable or repeated")
 	}
 	return result, nil
 }

@@ -532,7 +532,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 	}
 	if isEnum {
-		if _, err := c.nativeEnumConstantInitializations(); err != nil {
+		initializations, err := c.nativeEnumConstantInitializations()
+		if err != nil {
+			return "", err
+		}
+		if err := c.nativeEnumBackingArrayProtocol(initializations); err != nil {
 			return "", err
 		}
 	}
