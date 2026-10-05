@@ -3695,6 +3695,13 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 							mt.ParamTypes = sigParams
 						}
 						mt.ReturnType = sigRet
+					} else if c.nativeEnumConstructorSignatureMatches(method, sigStr, descriptor) && len(sigParams) == len(mt.ParamTypes)-2 {
+						// Signature omits the two compiler-owned enum slots. Match
+						// original erasure before aligning source types onto the
+						// descriptor; the original hidden slots stay unchanged.
+						aligned := slices.Clone(mt.ParamTypes)
+						copy(aligned[2:], sigParams)
+						mt.ParamTypes, mt.ReturnType = aligned, sigRet
 					} else if name == "<init>" && c.getenv("JDEC_INNER_CTOR_SIG_ALIGN_OFF") == "" &&
 						len(sigParams) == len(mt.ParamTypes)-1 && len(mt.ParamTypes) >= 1 &&
 						(c.nativeMemberConstructorHasEnclosingParameter(descriptor) || c.nativeMemberCurrent == nil && c.hasOuterThisField()) {
