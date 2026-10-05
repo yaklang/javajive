@@ -57,8 +57,27 @@ func (z *JarFS) sourceReleaseView(release int) *JarFS {
 // All release views share one retained-source allowance, as well as the
 // archive's work budget. Creating a namespace must not multiply memory limits.
 type sourceOwnershipCache struct {
-	mu    sync.Mutex
-	bytes int64
+	mu              sync.Mutex
+	bytes           int64
+	dependencyBytes int64 // shared across all release views and source policies
+}
+
+func (z *JarFS) reserveOwnershipDependencyMetadata(size int64) bool {
+	if size < 0 || z == nil || z.sourceOwnership == nil {
+		return false
+	}
+	ledger := z.sourceOwnership
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	if size > (16<<20)-ledger.dependencyBytes {
+		return false
+	}
+	total := ledger.dependencyBytes + size
+	if z.archive != nil && z.archive.budget != nil && z.archive.budget.Work().CheckAlloc(total) != nil {
+		return false
+	}
+	ledger.dependencyBytes = total
+	return true
 }
 
 func (z *JarFS) reserveOwnershipSource(size int64) bool {

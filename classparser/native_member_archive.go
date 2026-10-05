@@ -23,9 +23,16 @@ type nativeMemberIndex struct {
 	getterInvalidReferences map[string]bool
 }
 type nativeMemberCacheEntry struct {
-	once   sync.Once
-	family *nativeMemberFamily
-	source string
+	once                   sync.Once
+	planOnce               sync.Once
+	transaction            *nativeMemberTransaction // guarded by nativeMembersMu
+	planKnown              bool                     // published by planOnce; independent of source completion
+	dependenciesOnce       sync.Once
+	dependenciesKnown      bool
+	dependenciesCyclic     bool
+	dependencyParticipants []string // immutable own component; no retained class objects/graph
+	family                 *nativeMemberFamily
+	source                 string
 }
 
 func (z *JarFS) nativeMemberReader(obj *ClassObject) *ClassObjectDumper {
@@ -254,248 +261,27 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 	}
 	policy, _ := json.Marshal(snap)
 	key := owner + "\x00" + string(policy)
-	z.nativeMembersMu.Lock()
-	entry := z.nativeMembersCache[key]
+	entry := z.nativeMemberPolicyEntry(key)
 	if entry == nil {
-		if len(z.nativeMembersCache) >= 512 {
-			z.nativeMembersMu.Unlock()
-			return nil
-		}
-		if z.nativeMembersCache == nil {
-			z.nativeMembersCache = map[string]*nativeMemberCacheEntry{}
-		}
-		entry = &nativeMemberCacheEntry{}
-		z.nativeMembersCache[key] = entry
+		return nil
 	}
-	z.nativeMembersMu.Unlock()
 	entry.once.Do(func() {
-		root := obj
-		if member {
-			raw, known := z.enumSiblingResolver()(owner)
-			if !known {
-				return
-			}
-			var e error
-			root, e = z.nativeMemberReader(obj).parseResolved(raw)
-			if e != nil || root.GetClassName() != owner {
-				return
-			}
-		}
-		d := z.nativeMemberReader(root)
-		d.options.EnvSnapshot = snap
-		p := d.planNativeMemberFamily()
-		if p == nil {
+		var prepared *nativeMemberPrepared
+		entry.planOnce.Do(func() {
+			prepared = z.nativeMemberLocalPlan(obj, owner, snap)
+			entry.planKnown = prepared != nil
+		})
+		if !entry.planKnown {
 			return
 		}
-		if !d.planNativeMemberAnonymousScopes(p) {
+		if prepared == nil {
+			prepared = z.nativeMemberLocalPlan(obj, owner, snap)
+		}
+		result := z.finishNativeMemberFamily(prepared, z.nativeMemberLookup, false)
+		if result == nil {
 			return
 		}
-		if !nativeMemberJointBridgeMarkersClosed(p, d.Work) {
-			return
-		}
-		index := z.originalMemberIndex()
-		if p.anonymousForest != nil && !nativeAnonymousForestArchiveClosed(p.anonymousForest, index, d.Work) {
-			return
-		}
-		if !index.valid || !z.nativeMemberStaticConstantsReferencesClosed(p, index, d.Work) || !nativeMemberPrivateGetterReferencesClosed(p, index, d.Work) || !z.nativeMemberAccessRepresentable(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
-			return
-		}
-		if len(p.rootAccessBridges) > 0 && index.handles[owner] {
-			return
-		}
-		objects := map[string]*ClassObject{owner: root}
-		rootPrivateConstructor := false
-		for _, method := range root.Methods {
-			if !nativeProofWork(d.Work, 1) || method == nil {
-				return
-			}
-			name, known := sourceBridgeUTF8(root, method.NameIndex)
-			if !known {
-				return
-			}
-			rootPrivateConstructor = rootPrivateConstructor || name == "<init>" && method.AccessFlags&2 != 0
-		}
-		if len(p.rootAccessBridges) > 0 || rootPrivateConstructor {
-			for user := range index.constructors[owner] {
-				if objects[user] != nil {
-					continue
-				}
-				raw, known := z.enumSiblingResolver()(user)
-				if !known {
-					return
-				}
-				other, err := d.parseResolved(raw)
-				if err != nil || other.GetClassName() != user {
-					return
-				}
-				objects[user] = other
-			}
-		}
-		for n, child := range p.children {
-			objects[n] = child.object
-			if index.handles[n] {
-				return
-			}
-			for user := range index.captureUsers[nativeMemberCaptureIndexKey(n, child.field)] {
-				if user != n {
-					if named := p.children[user]; named != nil {
-						if _, valid := nativeMemberLexicalReads(named.object, p, d.Work); !valid {
-							return
-						}
-					} else {
-						group := p.anonymousUnits[user]
-						if group == nil || !nativeMemberProjectedAnonymousCaptureRead(p, group.children[user], n, d.Work) {
-							return
-						}
-					}
-				}
-			}
-			for user := range index.constructors[n] {
-				if objects[user] != nil {
-					continue
-				}
-				raw, known := z.enumSiblingResolver()(user)
-				if !known {
-					return
-				}
-				other, e := d.parseResolved(raw)
-				if e != nil || other.GetClassName() != user {
-					return
-				}
-				objects[user] = other
-			}
-		}
-		for _, object := range objects {
-			reader := z.nativeMemberReader(object)
-			allocations, known := reader.nativeMemberAllocations(p)
-			if !known || !nativeMemberJointBridgeCallersClosed(p, object, allocations, d.Work) {
-				return
-			}
-		}
-		for name, bridges := range p.bridgeOwners() {
-			for descriptor := range bridges {
-				if p.bridgeCalls[name+descriptor] == 0 {
-					return
-				}
-			}
-		}
-		// Independent direct families have independent commits to ownership. A
-		// cross-family source scope requires a joint dependency plan, so refuse
-		// a root/body referring to another archive-owned nonstatic member type.
-		lexicalNames := map[string]bool{}
-		for _, child := range p.children {
-			lexicalNames[child.name] = true
-		}
-		packageRoot := strings.SplitN(owner, "/", 2)[0]
-		if strings.Contains(owner, "/") && lexicalNames[packageRoot] {
-			return
-		}
-		staticDependenciesChecked := false
-		dependencyObjects, known := nativeMemberDependencyObjects(root, p, d.Work)
-		if !known {
-			return
-		}
-		for _, object := range dependencyObjects {
-			references, known := nativeMemberDependencyNames(object, d.Work)
-			if !known {
-				return
-			}
-			for _, n := range references {
-				// A default-package class has no qualified spelling to escape a
-				// same-named lexical member declaration. Retain the flat scope.
-				if !strings.Contains(n, "/") && lexicalNames[n] {
-					return
-				}
-				if p.children[n] != nil || n == owner {
-					continue
-				}
-				raw, found := z.enumSiblingResolver()(n)
-				if !found {
-					continue
-				}
-				other, e := d.parseResolved(raw)
-				if e != nil {
-					return
-				}
-				otherOwner, _, otherFlags, isMember := originalMemberOwner(other)
-				if isMember && otherOwner != owner {
-					// Inherited nonstatic declarations also have source names in
-					// an independent ancestor family. This contributes no enclosing
-					// instance, constructor or private-access ownership. General
-					// nonstatic cross-family transactions remain unproved.
-					static := otherFlags&8 != 0
-					if !static && !nativeMemberAncestorDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) {
-						return
-					}
-					if !staticDependenciesChecked {
-						if !z.nativeMemberDependenciesAcyclic(owner, d.Work) {
-							return
-						}
-						staticDependenciesChecked = true
-					}
-					dependency := z.nativeMemberLookup(n)
-					if dependency == nil || dependency.static != static || dependency.owner != otherOwner || dependency.object.GetClassName() != n || dependency.sourceName == "" {
-						return
-					}
-					if p.sourceDependencies == nil {
-						p.sourceDependencies = map[string]string{}
-					}
-					// A completed dependency contributes its source name, never
-					// membership in this family's private/constructor access scope.
-					p.sourceDependencies[n] = dependency.sourceName
-					if !static {
-						// Constructor metadata is a binding view, not lexical
-						// ownership. Allocation proof separately refuses any
-						// foreign private bridge protocol.
-						if p.allocationDependencies == nil {
-							p.allocationDependencies = map[string]*nativeMemberClass{}
-						}
-						p.allocationDependencies[n] = dependency
-					}
-				}
-				if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil) {
-					if p.emptyMarkers[n] != nil && anonOwner == owner && nativeMemberEmptyAccessMarker(other, owner, d.Work) {
-						continue
-					}
-					if group := p.anonymousUnits[n]; group == nil || group.owner != anonOwner {
-						return
-					}
-				}
-			}
-		}
-
-		// Dependencies were unavailable during the initial ownership proof.
-		// Recheck actual allocations with the completed foreign constructor
-		// metadata before any body can publish a projected type spelling.
-		for _, object := range dependencyObjects {
-			if _, known := z.nativeMemberReader(object).nativeMemberAllocations(p); !known {
-				return
-			}
-		}
-		for name, object := range objects {
-			if name == owner || p.children[name] != nil || p.anonymousUnits[name] != nil {
-				continue
-			}
-			reader := z.nativeMemberReader(object)
-			reader.options.EnvSnapshot = snap
-			reader.nativeMemberRoot = p
-			var err error
-			jdecenv.Run(snap, func() error { _, err = reader.DumpClass(); return err })
-			if err != nil || p.failed {
-				return
-			}
-		}
-		d.nativeMemberRoot = p
-		d.nativeAnonymousRoot = p.anonymous
-		var src string
-		var e error
-		jdecenv.Run(snap, func() error { src, e = d.DumpClass(); return e })
-		if p.anonymousForest != nil && !p.anonymousForest.scopeSourceComplete(src) {
-			return
-		}
-		if e != nil || p.failed || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {
-			return
-		}
+		d, p, src := prepared.reader, result.family, result.source
 		if d.Work != nil && d.Work.CheckAlloc(int64(len(src))) != nil {
 			return
 		}
@@ -513,6 +299,42 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		entry.source = src
 	})
 	return entry
+}
+
+func (z *JarFS) nativeMemberPolicyEntry(key string) *nativeMemberCacheEntry {
+	z.nativeMembersMu.Lock()
+	defer z.nativeMembersMu.Unlock()
+	entry := z.nativeMembersCache[key]
+	if entry == nil {
+		if len(z.nativeMembersCache)+len(z.nativeMemberTransactions) >= 512 {
+			return nil
+		}
+		if z.nativeMembersCache == nil {
+			z.nativeMembersCache = map[string]*nativeMemberCacheEntry{}
+		}
+		entry = &nativeMemberCacheEntry{}
+		z.nativeMembersCache[key] = entry
+	}
+	return entry
+}
+
+// Admission is a pure planning phase: it neither follows source cache entries
+// nor reserves/publishes source. Rendering always uses its own fresh mutable
+// plan after another caller has consumed the original admission attempt.
+func (z *JarFS) nativeMemberLocalPlan(obj *ClassObject, owner string, snap map[string]string) *nativeMemberPrepared {
+	root := obj
+	if root == nil || root.GetClassName() != owner {
+		raw, known := z.enumSiblingResolver()(owner)
+		if !known {
+			return nil
+		}
+		var err error
+		root, err = z.nativeMemberReader(obj).parseResolved(raw)
+		if err != nil || root.GetClassName() != owner {
+			return nil
+		}
+	}
+	return z.prepareNativeMemberFamily(root, snap)
 }
 
 // Every body emitted in the joint source unit contributes binding dependencies,
@@ -567,12 +389,18 @@ func (z *JarFS) nativeMemberLookup(name string) *nativeMemberClass {
 	}
 	entry := z.nativeMemberEntry(obj)
 	if entry == nil || entry.family == nil {
+		entry = z.nativeMemberTransactionEntry(obj)
+	}
+	if entry == nil || entry.family == nil {
 		return nil
 	}
 	return entry.family.children[name]
 }
 func (z *JarFS) nativeMemberSource(obj *ClassObject) ([]byte, bool) {
 	entry := z.nativeMemberEntry(obj)
+	if entry == nil || entry.family == nil {
+		entry = z.nativeMemberTransactionEntry(obj)
+	}
 	if entry == nil || entry.family == nil {
 		return nil, false
 	}

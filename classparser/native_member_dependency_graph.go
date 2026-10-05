@@ -7,10 +7,11 @@ import "github.com/yaklang/javajive/internal/workbudget"
 // source dependencies without consulting the cache. A gray DFS edge means the
 // families need a joint transaction; independent source commits cannot prove it.
 // Include descriptor, Signature and annotation edges, not just actual invokes.
-func (z *JarFS) nativeMemberDependenciesAcyclic(root string, work *workbudget.Budget) bool {
+func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudget.Budget) (map[string]map[string]bool, bool) {
 	if z == nil || root == "" || !nativeProofWork(work, 1) {
-		return false
+		return nil, false
 	}
+	graph := map[string]map[string]bool{}
 	objects := map[string]*ClassObject{}
 	var total int64
 	load := func(name string) (*ClassObject, bool) {
@@ -24,7 +25,7 @@ func (z *JarFS) nativeMemberDependenciesAcyclic(root string, work *workbudget.Bu
 		if !known || len(raw) > 2<<20 || int64(len(raw)) > (128<<20)-total {
 			return nil, false
 		}
-		if work != nil && work.CheckAlloc(int64(len(raw))) != nil {
+		if work != nil && work.CheckAlloc(total+int64(len(raw))) != nil {
 			return nil, false
 		}
 		o, err := z.nativeMemberReader(nil).parseResolved(raw)
@@ -64,7 +65,7 @@ func (z *JarFS) nativeMemberDependenciesAcyclic(root string, work *workbudget.Bu
 			return false
 		}
 		if states[owner] == 1 {
-			return false
+			return true
 		}
 		if states[owner] == 2 {
 			return true
@@ -198,6 +199,7 @@ func (z *JarFS) nativeMemberDependenciesAcyclic(root string, work *workbudget.Bu
 				}
 			}
 		}
+		graph[owner] = dependencies
 		for dependency := range dependencies {
 			if !visit(dependency) {
 				return false
@@ -206,5 +208,27 @@ func (z *JarFS) nativeMemberDependenciesAcyclic(root string, work *workbudget.Bu
 		states[owner] = 2
 		return true
 	}
-	return visit(root)
+	if !visit(root) {
+		return nil, false
+	}
+	return graph, true
+}
+
+// The single-family cache still refuses cycles. A source transaction may use
+// the same original graph, but must validate and publish every SCC participant.
+func (z *JarFS) nativeMemberDependenciesAcyclic(root string, work *workbudget.Budget) bool {
+	graph, known := z.nativeMemberOriginalDependencyGraph(root, work)
+	if !known {
+		return false
+	}
+	components, known := nativeMemberSourceComponents(graph, work)
+	if !known {
+		return false
+	}
+	for owner, component := range components {
+		if len(component) != 1 || graph[owner][owner] {
+			return false
+		}
+	}
+	return true
 }
