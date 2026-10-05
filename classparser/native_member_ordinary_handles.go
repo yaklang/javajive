@@ -10,10 +10,11 @@ import (
 // constructor operand. Its original symbolic owner, name, physical descriptor,
 // and invocation kind survive native member regeneration. Require a directly
 // declared, unchanged target; inherited resolution, private/special access,
-// generated bridges/lambda bodies, fields, and constructors keep the existing
-// refusal. This certificate grants no lexical or private lookup privilege.
-func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberIndex, work *workbudget.Budget) bool {
-	if obj == nil || index == nil || !index.valid || !nativeProofWork(work, 1) {
+// generated bridges/lambda bodies, fields, and enclosing constructors keep the existing
+// refusal. A separately proved ordinary static member has no enclosing operand
+// in its public constructor either. This grants no private lookup privilege.
+func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberIndex, work *workbudget.Budget, sourceMembers ...*nativeMemberClass) bool {
+	if obj == nil || index == nil || !index.valid || len(sourceMembers) > 1 || !nativeProofWork(work, 1) {
 		return false
 	}
 	owner := obj.GetClassName()
@@ -24,7 +25,8 @@ func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberInde
 	if len(targets) == 0 || len(targets) > 4096 || len(obj.Methods) > 4096 || !nativeProofWork(work, int64(len(targets)+len(obj.Methods))) || work != nil && work.CheckAlloc(int64(len(targets)+len(obj.Methods))*96) != nil {
 		return false
 	}
-	methods := map[string]*MemberInfo{}
+	type declarationKey struct{ name, descriptor string }
+	methods := map[declarationKey]*MemberInfo{}
 	for _, m := range obj.Methods {
 		if m == nil {
 			return false
@@ -34,20 +36,41 @@ func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberInde
 		if !nok || !dok {
 			return false
 		}
-		key := n + "\x00" + d
+		key := declarationKey{n, d}
 		if methods[key] != nil {
 			return false
 		}
 		methods[key] = m
 	}
+	// Original CPs may repeat the same target. Reuse only immutable physical
+	// binding facts; each occurrence still pays for traversal/cancellation and
+	// every distinct kind/tag/descriptor must close independently. Keys retain
+	// existing metadata strings instead of allocating concatenated copies.
+	closedTargets := map[nativeMemberHandleTarget]bool{}
+	staticSourceChecked, staticSourceClosed := false, false
 	for _, target := range targets {
-		if !nativeProofWork(work, 1) || !target.methodRef || target.kind != 5 && target.kind != 6 || target.name == "" || target.name == "<init>" || target.name == "<clinit>" || class_context.SafeIdentifier(target.name) != target.name {
+		if !nativeProofWork(work, 1) || !target.methodRef {
 			return false
 		}
-		if _, _, err := callbinding.Descriptor(target.descriptor); err != nil {
+		if closedTargets[target] {
+			continue
+		}
+		m := methods[declarationKey{target.name, target.descriptor}]
+		constructor := target.kind == 8 && target.name == "<init>"
+		if constructor {
+			if !staticSourceChecked {
+				staticSourceChecked = true
+				staticSourceClosed = len(sourceMembers) == 1 && nativeMemberStaticConstructorSourceClosed(obj, sourceMembers[0], work)
+			}
+			if !staticSourceClosed || m == nil || m.AccessFlags & ^uint16(0x0081) != 0 || m.AccessFlags&1 == 0 || sourceMembers[0].accessBridges[target.descriptor] != nil {
+				return false
+			}
+		} else if target.kind != 5 && target.kind != 6 || target.name == "" || target.name == "<init>" || target.name == "<clinit>" || class_context.SafeIdentifier(target.name) != target.name {
 			return false
 		}
-		m := methods[target.name+"\x00"+target.descriptor]
+		if _, ret, err := callbinding.Descriptor(target.descriptor); err != nil || constructor && ret != "V" {
+			return false
+		}
 		if m == nil || m.AccessFlags&7 != 1 || m.AccessFlags&(0x0040|0x1000) != 0 || (m.AccessFlags&8 != 0) != (target.kind == 6) {
 			return false
 		}
@@ -60,6 +83,7 @@ func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberInde
 				return false
 			}
 		}
+		closedTargets[target] = true
 	}
 	return true
 }

@@ -1047,6 +1047,12 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 		return nil
 	}
 	if len(outNodes) == 1 {
+		// A private original throw is an abrupt arm, even when it is the
+		// only boundary of an otherwise nonterminating loop. It has no
+		// normal continuation that can be expressed by a generated break.
+		if reducible && originalLoopThrowLeaf(outNodes[0]) && exclusiveTerminalLoopBranch(outNodes[0], circleNode, domTree) {
+			return nil
+		}
 		return outNodes[0]
 	}
 	// Bug O — multi-exit loop: a nested loop that carries a labeled break/continue to an enclosing loop
@@ -1086,7 +1092,8 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 					break
 				}
 			}
-			if !exclusiveTerminalLoopBranch(headerOut[0], circleNode, domTree) || (!normalAlternative && !hasEnclosingLoopContinuation(outNodes, circleNode, domTree)) {
+			privateTerminal := exclusiveTerminalLoopBranch(headerOut[0], circleNode, domTree)
+			if !privateTerminal || (!originalLoopThrowLeaf(headerOut[0]) && !normalAlternative && !hasEnclosingLoopContinuation(outNodes, circleNode, domTree)) {
 				return headerOut[0]
 			}
 		}

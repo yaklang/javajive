@@ -158,14 +158,11 @@ func nativeMemberAssertionProof(obj *ClassObject, outermost string, work *workbu
 					return nil, false
 				}
 				join := int(ops[i+1].CurrentOffset) + int(int16(binary.BigEndian.Uint16(ops[i+1].Data)))
-				if join <= int(ops[i+1].CurrentOffset) || join >= len(code.Code) {
+				if join < 0 || join >= len(code.Code) {
 					return nil, false
 				}
-				if len(sites) >= 256 || !nativeAssertionRegionClosed(decoder, code, ops, int(op.CurrentOffset), join, work) {
-					return nil, false
-				}
-				packet := nativeAssertionBytecodePacket(obj, ops, i, join, work)
-				if packet == nil {
+				packet := nativeAssertionBytecodePacket(obj, ops, i, work)
+				if packet == nil || len(sites) >= 256 || !nativeAssertionRegionClosed(decoder, code, ops, int(op.CurrentOffset), packet.endPC, work) || !nativeAssertionPacketExitsClosed(ops, i, packet.endPC, join, len(code.Code), work) {
 					return nil, false
 				}
 				sites[int(op.CurrentOffset)] = packet
@@ -275,7 +272,11 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 				copy.ElseBody = no
 				out = append(out, &copy)
 			} else {
-				out = append(out, st)
+				mapped, known := nativeAssertionProjectBlocks(st, project)
+				if !known {
+					return nil, false
+				}
+				out = append(out, mapped)
 			}
 			delete(active, st)
 		}
@@ -310,18 +311,22 @@ func nativeAssertionErrorType(t types.JavaType) bool {
 // The original disabled edge bypasses NEW, message evaluation, invokespecial
 // and ATHROW. Match those PCs and the constructor descriptor, not printed text.
 type nativeAssertionPacket struct {
-	newPC, invokePC, throwPC int
-	descriptor               string
+	newPC, invokePC, throwPC, endPC int
+	descriptor                      string
 }
 
-func nativeAssertionBytecodePacket(obj *ClassObject, ops []*core.OpCode, start, join int, work *workbudget.Budget) *nativeAssertionPacket {
+func nativeAssertionBytecodePacket(obj *ClassObject, ops []*core.OpCode, start int, work *workbudget.Budget) *nativeAssertionPacket {
+	// The disabled/success continuation need not physically follow ATHROW:
+	// loop assertions branch backward, and switch arms may jump over another
+	// assertion. Bound the physical failure packet by its first terminal throw,
+	// then independently certify every original exit and incoming edge.
 	end := -1
 	for i := start + 2; i < len(ops); i++ {
-		if !nativeProofWork(work, 1) {
+		if !nativeProofWork(work, 1) || ops[i] == nil || ops[i].Instr == nil {
 			return nil
 		}
-		if int(ops[i].CurrentOffset) == join {
-			end = i
+		if ops[i].Instr.OpCode == core.OP_ATHROW {
+			end = i + 1
 			break
 		}
 	}
@@ -359,7 +364,7 @@ func nativeAssertionBytecodePacket(obj *ClassObject, ops []*core.OpCode, start, 
 	if found < 0 {
 		return nil
 	}
-	return &nativeAssertionPacket{newPC: int(ops[found].CurrentOffset), invokePC: int(ops[end-2].CurrentOffset), throwPC: int(ops[end-1].CurrentOffset), descriptor: invoke.Description}
+	return &nativeAssertionPacket{newPC: int(ops[found].CurrentOffset), invokePC: int(ops[end-2].CurrentOffset), throwPC: int(ops[end-1].CurrentOffset), descriptor: invoke.Description, endPC: int(ops[end-1].CurrentOffset) + 1}
 }
 
 // Enumerate every source edge, rather than memoizing shared values: duplicated
@@ -405,7 +410,9 @@ func nativeAssertionSourceReads(body []statements.Statement, owner string, sites
 				return false
 			}
 			activeS[st] = true
-			roots, children, known := catchSourceChildren(st)
+			// This proves source read identity/absence, not effect motion.
+			// Sealed operand-free transfers cannot hide a flag read.
+			roots, children, known := nativeSourceNameChildren(st)
 			if !known {
 				return false
 			}
