@@ -40,6 +40,8 @@ type ClassObjectDumper struct {
 	nativeMemberChecks             map[string]map[int]bool
 	nativeMemberRoot               *nativeMemberFamily
 	nativeMemberCurrent            *nativeMemberClass
+	nativeRegistrationScope        *nativeMemberRegistrationScope
+	nativeRenderedMemberNames      []string
 	nativeMemberUnitPrefix         string
 	nativeAnonymousForest          *nativeAnonymousForest
 	nativeAnonymousBindings        map[string]string
@@ -1961,12 +1963,18 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 		if p := c.nativeMemberRoot; p != nil && c.obj.GetClassName() == p.owner {
 			var known bool
-			full, known = nativeMemberRegistrationLayout(p, full, members, c.Work)
+			full, known = nativeMemberRegistrationLayout(p, full, members, c.Work, c.nativeRenderedMemberNames)
 			if !known {
 				p.failed = true
 				return "", fmt.Errorf("member accessor registration layout unproved")
 			}
 		} else {
+			if c.nativeMemberRoot != nil && c.nativeMemberCurrent != nil {
+				// Keep the actual completed child boundaries for the root's
+				// shared compiler-registration schedule. No source-name parser
+				// is allowed to infer lexical ownership from dollar spelling.
+				c.nativeRegistrationScope = &nativeMemberRegistrationScope{owner: c.obj.GetClassName(), source: full, members: members, memberOwners: c.nativeRenderedMemberNames}
+			}
 			full = full[:close] + memberSource + full[close:]
 		}
 	}

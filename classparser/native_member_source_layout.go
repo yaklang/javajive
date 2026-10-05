@@ -83,7 +83,7 @@ func nativeMemberLayoutDeclarations(body string) ([]string, bool) {
 	return out, true
 }
 
-func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, members []string, work *workbudget.Budget) (string, bool) {
+func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, members []string, work *workbudget.Budget, memberOwners ...[]string) (string, bool) {
 	open := javaIndexTopBrace(source)
 	close := -1
 	if open >= 0 {
@@ -96,6 +96,12 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 	original := source[:close] + joined + source[close:]
 	if len(p.getters) == 0 || nativeMemberPrivateGetterSourceClosed(p, original, work) {
 		return original, true
+	}
+	if len(p.registrationLayouts) != 0 {
+		if len(memberOwners) != 1 {
+			return "", false
+		}
+		return nativeMemberRegistrationTreeLayout(p, source, members, work, memberOwners[0])
 	}
 	declarations, known := nativeMemberLayoutDeclarations(source[open+1 : close])
 	// A bounded repair search is optional. The unchanged source certificate is

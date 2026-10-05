@@ -32,6 +32,7 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
+	registrationLayouts   map[string]*nativeMemberRegistrationScope
 	sourceDependencies    map[string]string
 	rootAccessBridges     map[string]*nativeConstructorAccessBridge
 	rootBridgeDelegations map[string]*nativeRootBridgeDelegation
@@ -770,6 +771,7 @@ type nativeMemberAllocation struct {
 	slot                     int
 	enclosingReadPC          int
 	implicitEnclosing        bool
+	implicitReceiverClass    string
 }
 
 func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
@@ -784,6 +786,7 @@ func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
 
 func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[string]map[int]*nativeMemberAllocation, bool) {
 	result := map[string]map[int]*nativeMemberAllocation{}
+	originalDeclarations := c.nativeAnnotationDeclarationResolver()
 	for _, constant := range c.obj.ConstantPool {
 		if !nativeProofWork(c.Work, 1) {
 			return nil, false
@@ -911,7 +914,10 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 						}
 					}
 				}
-				if plan.enclosingReadPC < 0 && (plan.slot != 0 || m.AccessFlags&8 != 0 || c.obj.GetClassName() != child.owner) {
+				if plan.enclosingReadPC < 0 && plan.slot == 0 && cursor < len(ops) && ops[cursor].Instr.OpCode != core.OP_DUP && nativeMemberInheritedAllocationThis(c.obj, m, ops, child, originalDeclarations, c.Work) {
+					plan.implicitReceiverClass = c.obj.GetClassName()
+				}
+				if plan.enclosingReadPC < 0 && plan.implicitReceiverClass == "" && (plan.slot != 0 || m.AccessFlags&8 != 0 || c.obj.GetClassName() != child.owner) {
 					if cursor+2 >= len(ops) || ops[cursor].Instr.OpCode != core.OP_DUP {
 						return nil, false
 					}
@@ -1328,7 +1334,8 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			return fail()
 		}
 		erasure, typeKnown := values.SourceTypeErasure(outer.Type(), ctx)
-		if !typeKnown || erasure != "L"+plan.child.owner+";" {
+		inheritedThis := plan.implicitReceiverClass != "" && args[0].Receiver && nativeMemberInheritedAllocationOperand(outer, plan.implicitReceiverClass, ctx, c.Work)
+		if plan.implicitReceiverClass != "" && !inheritedThis || !typeKnown || !inheritedThis && erasure != "L"+plan.child.owner+";" {
 			return fail()
 		}
 		ctor := nativeMemberConstructorForAllocation(plan.child, desc)
@@ -1375,7 +1382,14 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			}
 		}
 		source := "new " + sourceName + "(" + strings.Join(arguments, ",") + ")"
-		if rawThis := nativeMemberConstructorRawThis(p, plan.child, desc, c.obj.GetClassName(), args[0], ctx, c.Work); rawThis != "" {
+		if inheritedThis {
+			// Bind selection to the exact declaring class, even if the subclass
+			// has a same-named member or parameterized inherited view. This is
+			// an original superclass widening, not a runtime CHECKCAST. The
+			// qualifier check is inert because the independently bound THIS is
+			// nonnull; original argument producers retain their order and effects.
+			source = "((" + ctx.ShortTypeName(strings.ReplaceAll(plan.child.owner, "/", ".")) + ")(" + args[0].Text + "))." + source
+		} else if rawThis := nativeMemberConstructorRawThis(p, plan.child, desc, c.obj.GetClassName(), args[0], ctx, c.Work); rawThis != "" {
 			source = rawThis + "." + source
 		} else if !plan.implicitEnclosing && !(args[0].Receiver && c.obj.GetClassName() == plan.child.owner) {
 			source = "(" + args[0].Text + ")." + source
@@ -1513,6 +1527,7 @@ func (c *ClassObjectDumper) nativeMemberSkipCheck(st statements.Statement) bool 
 	return c.nativeMemberChecks[c.FuncCtx.FunctionName+c.FuncCtx.CurrentMethodDesc][call.OriginPC]
 }
 func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
+	c.nativeRenderedMemberNames = nil
 	p := c.nativeMemberRoot
 	if p == nil || c.obj.GetClassName() != p.owner && p.children[c.obj.GetClassName()] == nil {
 		return nil, nil
@@ -1594,7 +1609,20 @@ func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 		if !strings.HasPrefix(src, sub.nativeMemberUnitPrefix) {
 			return nil, fmt.Errorf("member compilation unit prefix changed")
 		}
-		out = append(out, "\n"+src[len(sub.nativeMemberUnitPrefix):]+"\n")
+		declaration := "\n" + src[len(sub.nativeMemberUnitPrefix):] + "\n"
+		if layout := sub.nativeRegistrationScope; layout != nil {
+			if !strings.HasPrefix(layout.source, sub.nativeMemberUnitPrefix) || layout.owner != name {
+				return nil, fmt.Errorf("member registration boundary changed")
+			}
+			layout.source = layout.source[len(sub.nativeMemberUnitPrefix):]
+			layout.declaration = declaration
+			if p.registrationLayouts == nil {
+				p.registrationLayouts = map[string]*nativeMemberRegistrationScope{}
+			}
+			p.registrationLayouts[name] = layout
+		}
+		out = append(out, declaration)
+		c.nativeRenderedMemberNames = append(c.nativeRenderedMemberNames, name)
 	}
 	return out, nil
 }

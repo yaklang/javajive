@@ -94,7 +94,17 @@ func nativeMemberSuperCaptureDeclaration(child *nativeMemberClass, work *workbud
 // establish this widening. Missing ancestors/interfaces/cycles cannot prove
 // that the same enclosing object is valid for the parent's declaration.
 func nativeMemberEnclosingClassWidening(from, to string, p *nativeMemberFamily, work *workbudget.Budget) bool {
-	if p == nil || from == "" || to == "" {
+	if p == nil {
+		return false
+	}
+	return nativeMemberOriginalClassWidening(from, to, func(name string) (*ClassObject, bool) {
+		obj := p.lexicalObjects[name]
+		return obj, obj != nil
+	}, work)
+}
+
+func nativeMemberOriginalClassWidening(from, to string, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+	if resolve == nil || from == "" || to == "" {
 		return false
 	}
 	seen := map[string]bool{}
@@ -103,8 +113,8 @@ func nativeMemberEnclosingClassWidening(from, to string, p *nativeMemberFamily, 
 			return false
 		}
 		seen[from] = true
-		obj := p.lexicalObjects[from]
-		if obj == nil || obj.GetClassName() != from || obj.AccessFlags&0x0200 != 0 {
+		obj, known := resolve(from)
+		if !known || obj == nil || obj.GetClassName() != from || obj.AccessFlags&0x0200 != 0 {
 			return false
 		}
 		if from == to {
