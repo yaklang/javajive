@@ -10,6 +10,19 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+func decodeInvokeDynamicCP(d *core.Decompiler, index int) (name, descriptor string) {
+	if d == nil || index <= 0 || d.ConstantPoolInvokeDynamicInfo == nil {
+		return "", ""
+	}
+	defer func() {
+		if recover() != nil {
+			name, descriptor = "", ""
+		}
+	}()
+	_, name, descriptor = d.ConstantPoolInvokeDynamicInfo(index)
+	return name, descriptor
+}
+
 func decodeCP(d *core.Decompiler, index int) (class, member, desc string, cnst Const) {
 	if d == nil || index <= 0 {
 		return "", "", "", Const{}

@@ -19,38 +19,8 @@ type nativeMemberAllocationInvocation struct {
 // This immutable typed snapshot changes no evaluation, capture or handler.
 // The source renderer must independently match its own NEW/invoke origins.
 func (c *ClassObjectDumper) nativeMemberAllocationInvocations(method *MemberInfo, code *CodeAttribute) (map[int]nativeMemberAllocationInvocation, bool) {
-	if c == nil || c.obj == nil || method == nil || code == nil || len(code.Code) == 0 || len(code.Code) > 65535 {
-		return nil, false
-	}
-	// Bound the frame copies before building a snapshot, in addition to the
-	// shared analysis counter. A failed proof leaves the original flat source.
-	allocation := int64(len(code.Code)+1) * int64(int(code.MaxLocals)+int(code.MaxStack)+1) * 64
-	if allocation > 64<<20 || c.Work != nil && c.Work.CheckAlloc(allocation) != nil {
-		return nil, false
-	}
-	name, nk := sourceBridgeUTF8(c.obj, method.NameIndex)
-	desc, dk := sourceBridgeUTF8(c.obj, method.DescriptorIndex)
-	if !nk || !dk {
-		return nil, false
-	}
-	d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(c.obj.ConstantPool, i) })
-	d.Work = c.Work
-	d.ConstantPoolLiteralGetter = func(i int) values.JavaValue { return GetLiteralFromCP(c.obj.ConstantPool, i) }
-	limits := core.CodeLimits{Present: true, MaxLocals: int(code.MaxLocals), MaxStack: int(code.MaxStack), DirectSuperClass: c.obj.GetSupperClassName()}
-	d.CodeLimits = limits
-	for _, h := range code.ExceptionTable {
-		if h == nil {
-			return nil, false
-		}
-		d.ExceptionTable = append(d.ExceptionTable, &core.ExceptionTableEntry{StartPc: h.StartPc, EndPc: h.EndPc, HandlerPc: h.HandlerPc, CatchType: h.CatchType})
-	}
-	ir, err := methodir.BuildFromBytes(code.Code, d.ExceptionTable, methodir.MethodMeta{Limits: limits, ClassName: c.obj.GetClassName(), Name: name, Descriptor: desc, Bytecode: code.Code, IsStatic: method.AccessFlags&8 != 0}, d)
-	if err != nil {
-		return nil, false
-	}
-	counter := &shadowAnalysisCounter{limit: defaultShadowAnalysisUpdates, budget: c.Work}
-	fn, err := ssabuild.Build(ir, ssabuild.Options{MaxUpdates: defaultShadowAnalysisUpdates, Counter: counter})
-	if err != nil {
+	ir, fn, known := c.nativeOriginalMethodSnapshot(method, code)
+	if !known {
 		return nil, false
 	}
 	result := map[int]nativeMemberAllocationInvocation{}
@@ -85,4 +55,64 @@ func (c *ClassObjectDumper) nativeMemberAllocationInvocations(method *MemberInfo
 		result[pc] = nativeMemberAllocationInvocation{pc: int(record.PC), owner: invoke.Class, descriptor: invoke.Desc}
 	}
 	return result, true
+}
+
+// Shared immutable typed frames and value origins let source proofs ask about
+// operands without mutating the legacy decompiler's locals or inferred types.
+// All callers retain the same frame-allocation and analysis-update bounds.
+func (c *ClassObjectDumper) nativeOriginalMethodSnapshot(method *MemberInfo, code *CodeAttribute) (*methodir.MethodIR, *ssabuild.Function, bool) {
+	if c == nil || c.obj == nil || method == nil || code == nil || len(code.Code) == 0 || len(code.Code) > 65535 {
+		return nil, nil, false
+	}
+	// Bound the frame copies before building a snapshot, in addition to the
+	// shared analysis counter. A failed proof leaves the original flat source.
+	allocation := int64(len(code.Code)+1) * int64(int(code.MaxLocals)+int(code.MaxStack)+1) * 64
+	if allocation > 64<<20 || c.Work != nil && c.Work.CheckAlloc(allocation) != nil {
+		return nil, nil, false
+	}
+	name, nk := sourceBridgeUTF8(c.obj, method.NameIndex)
+	desc, dk := sourceBridgeUTF8(c.obj, method.DescriptorIndex)
+	if !nk || !dk {
+		return nil, nil, false
+	}
+	d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(c.obj.ConstantPool, i) })
+	d.Work = c.Work
+	d.ConstantPoolLiteralGetter = func(i int) values.JavaValue { return GetLiteralFromCP(c.obj.ConstantPool, i) }
+	d.ConstantPoolInvokeDynamicInfo = func(index int) (uint16, string, string) {
+		if index <= 0 || index > len(c.obj.ConstantPool) {
+			return 0, "", ""
+		}
+		dynamic, ok := c.obj.ConstantPool[index-1].(*ConstantInvokeDynamicInfo)
+		if !ok || dynamic == nil || dynamic.NameAndTypeIndex == 0 || int(dynamic.NameAndTypeIndex) > len(c.obj.ConstantPool) {
+			return 0, "", ""
+		}
+		table, ok := c.obj.ConstantPool[dynamic.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+		if !ok || table == nil {
+			return 0, "", ""
+		}
+		name, nk := sourceBridgeUTF8(c.obj, table.NameIndex)
+		descriptor, dk := sourceBridgeUTF8(c.obj, table.DescriptorIndex)
+		if !nk || !dk {
+			return 0, "", ""
+		}
+		return dynamic.BootstrapMethodAttrIndex, name, descriptor
+	}
+	limits := core.CodeLimits{Present: true, MaxLocals: int(code.MaxLocals), MaxStack: int(code.MaxStack), DirectSuperClass: c.obj.GetSupperClassName()}
+	d.CodeLimits = limits
+	for _, h := range code.ExceptionTable {
+		if h == nil {
+			return nil, nil, false
+		}
+		d.ExceptionTable = append(d.ExceptionTable, &core.ExceptionTableEntry{StartPc: h.StartPc, EndPc: h.EndPc, HandlerPc: h.HandlerPc, CatchType: h.CatchType})
+	}
+	ir, err := methodir.BuildFromBytes(code.Code, d.ExceptionTable, methodir.MethodMeta{Limits: limits, ClassName: c.obj.GetClassName(), Name: name, Descriptor: desc, Bytecode: code.Code, IsStatic: method.AccessFlags&8 != 0}, d)
+	if err != nil {
+		return nil, nil, false
+	}
+	counter := &shadowAnalysisCounter{limit: defaultShadowAnalysisUpdates, budget: c.Work}
+	fn, err := ssabuild.Build(ir, ssabuild.Options{MaxUpdates: defaultShadowAnalysisUpdates, Counter: counter})
+	if err != nil {
+		return nil, nil, false
+	}
+	return ir, fn, true
 }

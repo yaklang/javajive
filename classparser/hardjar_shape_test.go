@@ -336,11 +336,11 @@ func TestEnumAssignedStaticFieldJarFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := string(offb)
-	if strings.Contains(off, "static final") && strings.Contains(off, " CURRENT;") && !strings.Contains(off, "\tCURRENT;") {
-		t.Fatalf("OFF already reconstructed CURRENT:\n%s", clipForTest(off, "CURRENT"))
-	}
-	if on == off {
-		t.Fatal("ON and OFF identical")
+	// Ordinary self-typed fields are now classified from original ACC_ENUM and
+	// descriptor identity before optional source-string repairs. Turning those
+	// repairs off must not reintroduce a nonexistent enum constant.
+	if !strings.Contains(off, "public static final AnnotationDescription$RenderingDispatcher CURRENT;") || strings.Contains(off, "\tCURRENT;") {
+		t.Fatalf("OFF lost original ordinary CURRENT declaration:\n%s", clipForTest(off, "CURRENT"))
 	}
 }
 

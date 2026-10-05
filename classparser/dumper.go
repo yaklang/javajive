@@ -66,6 +66,10 @@ type ClassObjectDumper struct {
 	// typeAnnosUnsupported is set when a legal type annotation cannot be
 	// placed on a declaration (code-offset/local/inner path).
 	typeAnnosUnsupported bool
+	// Generated enum factories have no source parameter declarations. Their
+	// executable protocol may be proved while original named parameters still
+	// require compiler metadata configuration; never report that case complete.
+	enumParameterMetadataUnsupported bool
 
 	obj           *ClassObject
 	FuncCtx       *class_context.ClassContext
@@ -525,6 +529,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 
 			nonClassKeyword = true
 			break
+		}
+	}
+	if isEnum {
+		if _, err := c.nativeEnumConstantInitializations(); err != nil {
+			return "", err
 		}
 	}
 
@@ -1462,7 +1471,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			enumFields := make([]dumpedFields, 0, len(fields))
 			ordinaryFields := make([]string, 0, len(fields))
 			for _, field := range fields {
-				if isEnum && field.typeName == className && (field.modifier == "public static final enum" || field.modifier == "public static final") {
+				if isEnum && field.enumConstant {
 					enumFields = append(enumFields, field)
 					continue
 				}
@@ -1988,11 +1997,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 }
 
 type dumpedFields struct {
-	annotations string
-	code        string
-	fieldName   string
-	modifier    string
-	typeName    string
+	enumConstant bool // original ACC_ENUM and physical descriptor, never emitted spelling
+	annotations  string
+	code         string
+	fieldName    string
+	modifier     string
+	typeName     string
 }
 
 func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
@@ -2020,8 +2030,10 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 			return nil, err
 		}
 		renderName := class_context.SafeIdentifier(name)
-		// $VALUES is the synthetic array backing values(); javac re-synthesizes it.
-		if genuineEnum && name == "$VALUES" {
+		// The spelling alone is legal for a user field. Only the original
+		// generated self-array has the compiler's backing-field identity.
+		originalDescriptor, _ := sourceBridgeUTF8(c.obj, field.DescriptorIndex)
+		if genuineEnum && name == "$VALUES" && field.AccessFlags == 0x101a && originalDescriptor == "[L"+c.obj.GetClassName()+";" {
 			continue
 		}
 		if c.recordSkipFields[name] {
@@ -2161,6 +2173,9 @@ func (c *ClassObjectDumper) DumpFields() ([]dumpedFields, error) {
 				typeName:  lastPacket,
 			})
 		}
+		// Declaration identity is invariant under source ownership projection.
+		// A same-typed ordinary alias is not a newly initialized enum constant.
+		fields[len(fields)-1].enumConstant = genuineEnum && field.AccessFlags == 0x4019 && descriptor == "L"+c.obj.GetClassName()+";"
 		if len(annotations) != 0 {
 			// Keep annotations separate from the declaration: enum constants
 			// have a different source spelling but are original field members.
@@ -2952,6 +2967,32 @@ func (c *ClassObjectDumper) externalNestedEnumSourceName(internal string) (dotte
 	return dottedSimple, outerImport, true
 }
 
+// Annotation values and defaults are declaration references, just like a
+// method's return descriptor. Resolve their original enum identity through the
+// same source namespace before applying the legacy external-dependency path.
+// A binary '$' is a legal top-level identifier; never infer lexical ownership
+// by replacing it with a dot. Only a proved declaration binding may do that.
+func (c *ClassObjectDumper) formatAnnotationEnumConstant(value any) (string, error) {
+	enum, ok := value.(*EnumConstValue)
+	if !ok || enum == nil || len(enum.TypeName) <= 2 || enum.TypeName[0] != 'L' || enum.TypeName[len(enum.TypeName)-1] != ';' {
+		return "", fmt.Errorf("parse annotation error, invalid enum constant: %T", value)
+	}
+	internal := enum.TypeName[1 : len(enum.TypeName)-1]
+	qualified := strings.ReplaceAll(internal, "/", ".")
+	if c.FuncCtx.DeclarationSourceName != nil {
+		if source, known := c.FuncCtx.DeclarationSourceName(qualified); known {
+			return source + "." + enum.ConstName, nil
+		}
+	}
+	if dotted, outerImport, known := c.externalNestedEnumSourceName(internal); known {
+		if outerImport != "" {
+			c.FuncCtx.Import(outerImport)
+		}
+		return dotted + "." + enum.ConstName, nil
+	}
+	return c.FuncCtx.ShortTypeName(qualified) + "." + enum.ConstName, nil
+}
+
 // formatAnnotationElementValue renders a single annotation element_value (the right-hand side of an
 // element-value pair, or an AnnotationDefault's default value) into its Java source form. Extracted
 // from DumpAnnotation so the annotation-default renderer (`@interface` element `default <value>`)
@@ -3028,30 +3069,7 @@ func (c *ClassObjectDumper) formatAnnotationElementValue(element *ElementValuePa
 		}
 		valStr = fmt.Sprintf("{%s}", strings.Join(eleList, ", "))
 	case 'e':
-		switch ret := element.Value.(type) {
-		case *EnumConstValue:
-			if len(ret.TypeName) <= 2 {
-				return "", fmt.Errorf("parse annotation error, invalid enum type name: %s", ret.TypeName)
-			}
-			internal := ret.TypeName[1 : len(ret.TypeName)-1]
-			// An EXTERNAL nested enum referenced by its flat binary name (Outer$Inner) is unresolvable
-			// in source; rewrite to the dotted `Outer.Inner` and import the outer class instead.
-			if dotted, outerImport, ok := c.externalNestedEnumSourceName(internal); ok {
-				if outerImport != "" {
-					c.FuncCtx.Import(outerImport)
-				}
-				return dotted + "." + ret.ConstName, nil
-			}
-			fullqualifiedName := strings.Replace(internal, "/", ".", -1)
-			c.FuncCtx.Import(fullqualifiedName)
-			last := strings.LastIndex(fullqualifiedName, ".")
-			if last == -1 {
-				return fullqualifiedName + "." + ret.ConstName, nil
-			}
-			return fullqualifiedName[last+1:] + "." + ret.ConstName, nil
-		default:
-			return "", fmt.Errorf("parse annotation error, unknown tag: %c, ret: %T", element.Tag, ret)
-		}
+		return c.formatAnnotationEnumConstant(element.Value)
 	default:
 		return "", fmt.Errorf("parse annotation error, unknown tag: %c", element.Tag)
 	}
@@ -3179,31 +3197,7 @@ func (c *ClassObjectDumper) DumpAnnotation(anno *AnnotationAttribute) (string, e
 			}
 			valStr = fmt.Sprintf("{%s}", strings.Join(eleList, ", "))
 		case 'e':
-			// fullname
-			switch ret := element.Value.(type) {
-			case *EnumConstValue:
-				if len(ret.TypeName) <= 2 {
-					return "", fmt.Errorf("parse annotation error, invalid enum type name: %s", ret.TypeName)
-				}
-				internal := ret.TypeName[1 : len(ret.TypeName)-1]
-				// An EXTERNAL nested enum referenced by its flat binary name (Outer$Inner) is
-				// unresolvable in source; rewrite to dotted `Outer.Inner` and import the outer class.
-				if dotted, outerImport, ok := c.externalNestedEnumSourceName(internal); ok {
-					if outerImport != "" {
-						c.FuncCtx.Import(outerImport)
-					}
-					return dotted + "." + ret.ConstName, nil
-				}
-				fullqualifiedName := strings.Replace(internal, "/", ".", -1)
-				c.FuncCtx.Import(fullqualifiedName)
-				last := strings.LastIndex(fullqualifiedName, ".")
-				if last == -1 {
-					return fullqualifiedName + "." + ret.ConstName, nil
-				}
-				return fullqualifiedName[last+1:] + "." + ret.ConstName, nil
-			default:
-				return "", fmt.Errorf("parse annotation error, unknown tag: %c, ret: %T", element.Tag, ret)
-			}
+			return c.formatAnnotationEnumConstant(element.Value)
 		default:
 			return "", fmt.Errorf("parse annotation error, unknown tag: %c", element.Tag)
 		}
@@ -12641,20 +12635,10 @@ func (c *ClassObjectDumper) isGenuineEnum() bool {
 	return sup == "java.lang.Enum"
 }
 
-// isSyntheticEnumMethod reports whether a method is one javac auto-generates for every enum
-// (values(), valueOf(String), $values()). These must not be emitted: javac re-synthesizes
-// them, and emitting them yields "method X is already defined".
+// isSyntheticEnumMethod handles the legacy constructor marker only. Generated
+// factories are checked against their original executable protocol separately;
+// their spelling cannot authorize deleting an arbitrary original body.
 func (c *ClassObjectDumper) isSyntheticEnumMethod(name, descriptor string) bool {
-	if name == "$values" {
-		return true
-	}
-	selfDesc := "L" + c.obj.GetClassName() + ";"
-	if name == "values" && descriptor == "()["+selfDesc {
-		return true
-	}
-	if name == "valueOf" && descriptor == "(Ljava/lang/String;)"+selfDesc {
-		return true
-	}
 	// Synthetic "marker" constructor javac emits for enums that have constant-specific bodies:
 	// `<init>(String name, int ordinal, <Enum>$N marker)`. Its sole purpose is to give the constant-body
 	// subclasses an accessible super-ctor; its body just forwards to the real `<init>(String,int)`.
@@ -12926,8 +12910,17 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if p := c.nativeMemberRoot; p != nil && p.getters[nativeMemberGetterKey(c.obj.GetClassName(), name, descriptor)] != nil {
 			continue
 		}
-		if genuineEnum && c.isSyntheticEnumMethod(name, descriptor) {
-			continue
+		if genuineEnum {
+			regenerated, err := nativeEnumRegeneratedMethod(c.obj, method, name, descriptor, c.Work)
+			if err != nil {
+				return nil, err
+			}
+			if regenerated || c.isSyntheticEnumMethod(name, descriptor) {
+				if regenerated {
+					c.noteEnumRegeneratedParameterMetadata(method, name, descriptor)
+				}
+				continue
+			}
 		}
 		if c.recordSkipMethods[name+descriptor] || c.recordSkipMethods[name] {
 			continue

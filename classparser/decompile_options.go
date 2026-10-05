@@ -211,7 +211,7 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 			Message: "external overload family was not fully resolved; reconstructed binding is unverified",
 		})
 	}
-	if len(result.StubMethods) > 0 || d.typeAnnosUnsupported {
+	if len(result.StubMethods) > 0 || d.typeAnnosUnsupported || d.enumParameterMetadataUnsupported {
 		if result.Status == "complete" {
 			result.Status = "partial"
 		}

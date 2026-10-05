@@ -22,6 +22,7 @@ type nativeMemberConstructor struct {
 }
 type nativeMemberClass struct {
 	assertions                    *nativeMemberAssertion
+	enumSynthesis                 *nativeMemberEnumSynthesis
 	sourceName                    string
 	object                        *ClassObject
 	owner, name, field            string
@@ -214,7 +215,11 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		provider = providers[0]
 	}
 	owner, name, flags, known := originalMemberOwner(obj)
-	if !known || !nativeMemberVersionMetadata(obj, work) || !nativeMemberDeclarationKindRepresentable(obj, flags, work, resolve) {
+	var enumSynthesis *nativeMemberEnumSynthesis
+	if flags&0x4000 != 0 {
+		enumSynthesis = nativeMemberEnumSynthesisProof(obj, flags, work)
+	}
+	if !known || !nativeMemberVersionMetadata(obj, work) || !(nativeMemberDeclarationKindRepresentable(obj, flags, work, resolve) || enumSynthesis != nil) {
 		return nil
 	}
 	if !nativeMemberDeprecatedMarkerRepresentable(obj, work) {
@@ -294,7 +299,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 	if flags&8 != 0 && !nativeMemberTypeScope(obj, nil, work) {
 		return nil
 	}
-	p := &nativeMemberClass{object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}, accessBridges: bridges}
+	p := &nativeMemberClass{enumSynthesis: enumSynthesis, object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}, accessBridges: bridges}
 	if lexical != nil && len(lexical) > 0 {
 		outermost := owner
 		for depth := 0; depth < 64; depth++ {
@@ -334,6 +339,9 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 			continue
 		}
 		if p.static {
+			if p.enumSynthesis != nil && p.enumSynthesis.valuesField == f {
+				continue
+			}
 			if flags&0x1000 != 0 {
 				return nil
 			}

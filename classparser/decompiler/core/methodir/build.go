@@ -234,7 +234,7 @@ func copyInstr(n *core.OpCode, d *core.Decompiler) (Instr, error) {
 			in.Class = in.Const.Class
 		}
 	case core.OP_GETFIELD, core.OP_PUTFIELD, core.OP_GETSTATIC, core.OP_PUTSTATIC,
-		core.OP_INVOKEVIRTUAL, core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEINTERFACE, core.OP_INVOKEDYNAMIC,
+		core.OP_INVOKEVIRTUAL, core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEINTERFACE,
 		core.OP_NEW, core.OP_ANEWARRAY, core.OP_CHECKCAST, core.OP_INSTANCEOF, core.OP_MULTIANEWARRAY:
 		in.CPIndex = cpIndex(n)
 		class, member, desc, cnst := decodeCP(d, int(in.CPIndex))
@@ -244,6 +244,12 @@ func copyInstr(n *core.OpCode, d *core.Decompiler) (Instr, error) {
 				in.Class = cnst.Class
 			}
 		}
+	case core.OP_INVOKEDYNAMIC:
+		in.CPIndex = cpIndex(n)
+		// CONSTANT_InvokeDynamic has a NameAndType and no declaring class.
+		// Its call-site descriptor determines the typed stack effect without
+		// executing or pretending to understand the bootstrap implementation.
+		in.Member, in.Desc = decodeInvokeDynamicCP(d, int(in.CPIndex))
 	}
 	if n.Instr.OpCode == core.OP_LOOKUPSWITCH || n.Instr.OpCode == core.OP_TABLESWITCH {
 		if n.SwitchJmpCase != nil {
