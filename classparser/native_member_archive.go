@@ -11,6 +11,12 @@ import (
 	"sync"
 )
 
+type nativeMemberHandleTarget struct {
+	kind             uint8
+	methodRef        bool
+	name, descriptor string
+}
+
 type nativeMemberIndex struct {
 	once                    sync.Once
 	valid                   bool
@@ -18,6 +24,7 @@ type nativeMemberIndex struct {
 	captureUsers            map[string]map[string]bool
 	typeUsers               map[string]map[string]bool
 	handles                 map[string]bool
+	handleTargets           map[string][]nativeMemberHandleTarget
 	getterUsers             map[string]map[string]bool
 	getterHandles           map[string]bool
 	getterInvalidReferences map[string]bool
@@ -56,6 +63,7 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 		idx.captureUsers = map[string]map[string]bool{}
 		idx.typeUsers = map[string]map[string]bool{}
 		idx.handles = map[string]bool{}
+		idx.handleTargets = map[string][]nativeMemberHandleTarget{}
 		idx.getterUsers = map[string]map[string]bool{}
 		idx.getterHandles = map[string]bool{}
 		idx.getterInvalidReferences = map[string]bool{}
@@ -203,6 +211,12 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 				if !nok || !dok {
 					return fmt.Errorf("member handle symbol")
 				}
+				_, methodRef := obj.ConstantPool[handle.ReferenceIndex-1].(*ConstantMethodrefInfo)
+				edges++
+				if edges > 1<<20 || len(idx.handleTargets[owner]) >= 4096 || !nativeProofWork(reader.Work, 1) || reader.Work != nil && reader.Work.CheckAlloc(int64(len(idx.handleTargets[owner])+1)*96) != nil {
+					return fmt.Errorf("member handle target limit")
+				}
+				idx.handleTargets[owner] = append(idx.handleTargets[owner], nativeMemberHandleTarget{kind: handle.ReferenceKind, methodRef: methodRef, name: name, descriptor: desc})
 				idx.getterHandles[nativeMemberGetterKey(owner, name, desc)] = true
 			}
 			return nil

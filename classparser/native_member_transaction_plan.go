@@ -74,7 +74,7 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 	}
 	for n, child := range p.children {
 		objects[n] = child.object
-		if index.handles[n] {
+		if !nativeMemberOrdinaryHandlesClosed(child.object, index, d.Work) {
 			return nil
 		}
 		for user := range index.captureUsers[nativeMemberCaptureIndexKey(n, child.field)] {
