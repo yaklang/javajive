@@ -359,7 +359,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 		for index := start; index < len(ops); index++ {
 			op := ops[index]
 			*remaining--
-			if *remaining < 0 {
+			if *remaining < 0 || !nativeProofWork(c.Work, 1) {
 				return false
 			}
 			// Check before each instruction, including local-load fast paths and
@@ -432,7 +432,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 			switch {
 			case opcode == core.OP_NOP:
 				continue
-			case opcode == core.OP_GETSTATIC:
+			case opcode == core.OP_GETSTATIC || opcode == core.OP_PUTSTATIC:
 				// Class initialization/linkage may fail, but no published THIS
 				// can reside in a static field. Preserve the original operation;
 				// after initialization, failure requires a closed finalizer.
@@ -447,7 +447,22 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				if err != nil || len(fields) != 1 {
 					return false
 				}
-				stack = append(stack, constructorEffectType(fields[0]))
+				if opcode == core.OP_GETSTATIC {
+					stack = append(stack, constructorEffectType(fields[0]))
+				} else {
+					// An independent value may be published in the same original
+					// position. Publishing THIS, including an alias, is forbidden.
+					// The field/linkage failure boundary is unchanged and covered
+					// by the same closed-finalizer requirement as GETSTATIC.
+					pc := int(op.CurrentOffset)
+					if op.IsWide || pc < 0 || pc+3 > len(code.Code) || code.Code[pc] != core.OP_PUTSTATIC || core.Convert2bytesToInt(code.Code[pc+1:pc+3]) != core.Convert2bytesToInt(op.Data) {
+						return false
+					}
+					v, ok := pop(constructorEffectType(fields[0]).kind)
+					if !ok || v.receiver || v.allocation != 0 {
+						return false
+					}
+				}
 			case opcode == core.OP_CHECKCAST || opcode == core.OP_INSTANCEOF:
 				if len(op.Data) != 2 || initialized && !c.constructorReceiverFinalizerSilent {
 					return false
@@ -807,6 +822,19 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					return false
 				}
 				stack = append(stack, constructorEffectValue{kind: 'I'})
+			case opcode == core.OP_ATHROW:
+				// Capture motion preserves this original throw and its operand;
+				// it is an abrupt exit, not a missing normal RETURN. With no
+				// publication/read of THIS, only finalization could expose the
+				// moved store after a failed initialized constructor. Its closed
+				// receiver proof is mandatory then. Null keeps the original NPE;
+				// a distinct initialized throwable keeps its original identity.
+				pc := int(op.CurrentOffset)
+				if op.IsWide || len(op.Data) != 0 || pc < 0 || pc >= len(code.Code) || code.Code[pc] != core.OP_ATHROW || initialized && !c.constructorReceiverFinalizerSilent {
+					return false
+				}
+				v, ok := pop('L')
+				return ok && !v.receiver && v.allocation == 0 && len(stack) == 0
 			case opcode == core.OP_RETURN:
 				return initialized && len(stack) == 0
 			default:
