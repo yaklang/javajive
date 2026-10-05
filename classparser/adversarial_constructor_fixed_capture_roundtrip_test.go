@@ -15,6 +15,11 @@ import (
 // as the oracle. The original Parent and driver stay unchanged in the candidate.
 func TestAdversarialConstructorOriginalFixedCapturePathRoundTrip(t *testing.T) {
 	const f = `class FixedCaptureParent{final int n;FixedCaptureParent(int n){if(n!=7)throw new IllegalArgumentException("input:"+n);this.n=n;}}class FixedCaptureChild extends FixedCaptureParent{final Object value;FixedCaptureChild(Object value){super(7);this.value=value;}}class FixedCaptureDriver{public static void main(String[]args){Object x=new Object();for(Object v:new Object[]{null,x}){FixedCaptureChild c=new FixedCaptureChild(v);if(c.n!=7||c.value!=v)throw new AssertionError("capture");System.out.println("7:"+(c.value==x));}for(int n:new int[]{-1,8})try{new FixedCaptureParent(n);throw new AssertionError("failure lost");}catch(IllegalArgumentException e){System.out.println(e.getMessage());}}}`
+	testConstructorOriginalFixedCapturePathRoundTrip(t, f)
+}
+
+func testConstructorOriginalFixedCapturePathRoundTrip(t *testing.T, f string) {
+	t.Helper()
 	javac, java := t04Tools(t)
 	for _, magic := range []int{0, 7, -129, 70000} {
 		for _, debug := range []string{"none", "source,lines,vars"} {

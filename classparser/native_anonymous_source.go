@@ -118,6 +118,10 @@ func nativeAnonymousConstructorWithinForest(obj *ClassObject, owner string, meth
 	return nativeAnonymousConstructorWithinSourceRoot(obj, owner, method, "", work, members, forest, access...)
 }
 func nativeAnonymousConstructorWithinSourceRoot(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
+	return nativeAnonymousConstructorWithDeclarations(obj, owner, method, assertionRoot, work, members, forest, nil, access...)
+}
+
+func nativeAnonymousConstructorWithDeclarations(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
 	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
@@ -334,12 +338,24 @@ func nativeAnonymousConstructorWithinSourceRoot(obj *ClassObject, owner, method,
 	if e != nil || ret != "V" || len(ds) != len(c.superParams)+extra {
 		return nil
 	}
+	// javac can give the anonymous constructor a more specific physical
+	// parameter than the erased SUPER declaration (e.g. T instantiated with
+	// String). A plain original load is unchanged under reference widening;
+	// narrowing, primitive conversion and unknown hierarchy facts are not.
+	// Keep both descriptors and the actual parameter operands: the source
+	// allocation still performs its independent exact overload/type binding.
+	widening := newConstructorWideningQuery(func(name string) (callbinding.Class, bool) {
+		if metadata == nil || !nativeProofWork(work, 1) {
+			return callbinding.Class{}, false
+		}
+		return metadata(name)
+	})
 	for j, p := range c.superParams {
 		index := j
 		if c.memberSuper != nil {
 			index++
 		}
-		if ps[p] != ds[index] {
+		if !nativeProofWork(work, 1) || !widening.assignable(ps[p], ds[index]) {
 			return nil
 		}
 	}
@@ -475,6 +491,7 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 		assertionRoot = c.obj.GetClassName()
 	}
 	access := c.nativeConstructorAccessBridges()
+	metadata := c.buildInvocationMetadata()
 	names := map[string]bool{}
 	for _, a := range c.obj.Attributes {
 		if inner, ok := a.(*InnerClassesAttribute); ok {
@@ -516,7 +533,7 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 				return nil
 			}
 		}
-		child := nativeAnonymousConstructorWithinSourceRoot(obj, owner, method, assertionRoot, c.Work, members, forest, access)
+		child := nativeAnonymousConstructorWithDeclarations(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, access)
 		if child == nil || child.assertions != nil && c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
 			return nil
 		}

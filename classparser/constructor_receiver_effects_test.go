@@ -82,7 +82,7 @@ func TestAdversarialConstructorReceiverEffectsAliasesStorageAndFailureBoundaries
 			{"EffectBranchDivide", "(I)V", "", false},
 			{"EffectBranchRead", "(I)V", "", true},
 			{"EffectBranchRead", "(I)V", "EffectBranchRead", false},
-			{"EffectLoop", "(I)V", "", false},
+			{"EffectLoop", "(I)V", "", true},
 			{"EffectCompareWide", "(JD)V", "", true}, {"EffectVolatile", "()V", "", false},
 		} {
 			t.Run(debug+"/"+tc.name+"/"+tc.storage, func(t *testing.T) {

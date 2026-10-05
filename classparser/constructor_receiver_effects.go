@@ -201,7 +201,8 @@ func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *val
 // This effect domain admits receiver-independent scalar computation, local
 // aliases, ordinary field access and acyclic conditional control flow. Every
 // feasible abstract path must finish initialization and remain receiver-silent.
-// Paths are memoized by PC and exact type/receiver state; loops fail closed. A normal
+// Paths are memoized by PC and exact type/receiver state. Cyclic paths require
+// a closed type/receiver invariant; differing integer facts widen to unknown. A normal
 // Java exception after Object initialization can expose the receiver to a
 // finalizer, even without an explicit publication. Opaque operations after
 // initialization therefore require the separate closed-finalizer proof; all
@@ -257,10 +258,65 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 	}
 	allocations := map[int]string{}
 	memo := map[string]bool{}
+	cyclicTargets := map[int]bool{}
+	for i, op := range ops {
+		if op == nil || op.Instr == nil {
+			return false
+		}
+		opcode := op.Instr.OpCode
+		if opcode == core.OP_GOTO || opcode == core.OP_GOTO_W || opcode >= core.OP_IFEQ && opcode <= core.OP_IF_ACMPNE || opcode == core.OP_IFNULL || opcode == core.OP_IFNONNULL {
+			if !constructorEffectOriginalBranch(code, op) {
+				return false
+			}
+			branch, ok := target(op)
+			if !ok {
+				return false
+			}
+			if branch <= i {
+				cyclicTargets[branch] = true
+			}
+		}
+	}
+	activeFrames := map[int]*constructorEffectLoopFrame{}
 	var walk func(int, []constructorEffectValue, []constructorEffectValue, bool) bool
 	walk = func(start int, locals, stack []constructorEffectValue, initialized bool) (result bool) {
 		if start < 0 || start >= len(ops) {
 			return false
+		}
+		prior := activeFrames[start]
+		if cyclicTargets[start] {
+			// Retain frames only at original cyclic destinations. Their copies
+			// and joins share the existing 512-unit chain budget, independent
+			// of runtime iteration count; a large frame cannot bypass it.
+			cost := len(locals) + len(stack) + 1
+			*remaining -= cost
+			if *remaining < 0 || !nativeProofWork(c.Work, int64(cost)) || c.Work != nil && c.Work.CheckAlloc(int64(cost)*32) != nil {
+				return false
+			}
+		}
+		if prior != nil {
+			// A reached cycle is checked against an inductive receiver/type
+			// invariant, never accepted merely because its PC was seen. Drop
+			// changed scalar constants and recheck the whole body with both
+			// branch arms; publication/read/failure checks remain unchanged.
+			joined, changed, closed := constructorEffectLoopJoin(prior, locals, stack, initialized)
+			if !closed {
+				return false
+			}
+			if !changed {
+				return true
+			}
+			locals, stack = joined.locals, joined.stack
+		}
+		if cyclicTargets[start] {
+			activeFrames[start] = &constructorEffectLoopFrame{locals: append([]constructorEffectValue(nil), locals...), stack: append([]constructorEffectValue(nil), stack...), initialized: initialized}
+			defer func() {
+				if prior == nil {
+					delete(activeFrames, start)
+				} else {
+					activeFrames[start] = prior
+				}
+			}()
 		}
 		key := strconv.Itoa(start) + ":"
 		state := []byte(key)
@@ -720,7 +776,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					conditions[i] = v
 				}
 				branch, ok := target(op)
-				if !ok || branch <= index {
+				if !ok {
 					return false
 				}
 				if taken, known := constructorKnownIntBranch(opcode, conditions); known {
@@ -734,7 +790,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				return walk(branch, append([]constructorEffectValue(nil), locals...), append([]constructorEffectValue(nil), stack...), initialized) && walk(index+1, locals, stack, initialized)
 			case opcode == core.OP_GOTO || opcode == core.OP_GOTO_W:
 				branch, ok := target(op)
-				if !ok || branch <= index {
+				if !ok {
 					return false
 				}
 				return walk(branch, locals, stack, initialized)

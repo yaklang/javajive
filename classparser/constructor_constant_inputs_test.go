@@ -45,7 +45,7 @@ func TestAdversarialConstructorConstantDomainPreservesUnknownAndObservationPaths
 				{"InputCleared", "(II)V", []constructorEffectValue{known(7), {kind: 'I'}}, false}, {"InputCleared", "(II)V", []constructorEffectValue{known(8), known(7)}, true},
 				{"InputObserve", "(I)V", []constructorEffectValue{known(7)}, false}, {"InputObserve", "(I)V", []constructorEffectValue{known(8)}, true},
 				{"InputPublish", "(I)V", []constructorEffectValue{known(7)}, false}, {"InputPublish", "(I)V", []constructorEffectValue{known(8)}, true}, {"InputPublish", "(I)V", nil, false},
-				{"InputLoop", "(I)V", []constructorEffectValue{known(0)}, true}, {"InputLoop", "(I)V", []constructorEffectValue{known(1)}, false}, {"InputLoop", "(I)V", nil, false}, {"InputArithmetic", "(I)V", []constructorEffectValue{known(7)}, false},
+				{"InputLoop", "(I)V", []constructorEffectValue{known(0)}, true}, {"InputLoop", "(I)V", []constructorEffectValue{known(1)}, true}, {"InputLoop", "(I)V", nil, true}, {"InputArithmetic", "(I)V", []constructorEffectValue{known(7)}, false},
 				{"InputGuard", "(I)V", []constructorEffectValue{{kind: 'L'}}, false}, {"InputGuard", "(I)V", []constructorEffectValue{{kind: 'I', receiver: true}}, false},
 				{"InputGuard", "(I)V", []constructorEffectValue{{kind: 'I', allocation: 1}}, false}, {"InputGuard", "(I)V", []constructorEffectValue{known(7), known(7)}, false},
 				{"java/lang/Object", "()V", []constructorEffectValue{known(7)}, false},
