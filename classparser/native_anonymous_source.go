@@ -800,6 +800,18 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 				return nil
 			}
 			view := c.nativeCaptureTypes[name]
+			shadowed, closed := nativeAnonymousMethodLexicalShadow(c)
+			if !closed {
+				c.nativeCaptureFailed = true
+				return nil
+			}
+			if shadowed {
+				// The captured variable retains its declaration outside this method.
+				// Its same-spelled outer formal cannot name that declaration here.
+				// Keep the authoritative original field descriptor as the IR view;
+				// the source variable still binds to its original lexical declaration.
+				return nil
+			}
 			if c.nativeMemberCurrent != nil && view != nil {
 				// An enclosing formal has a different declaration identity from a
 				// same-spelled current class/method formal. It cannot be named as
@@ -840,7 +852,11 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		return "", false
 	}
 	ctx.SourceBranchSwap = func(left, right string) bool { return nativeAnonymousBranchSwap(p, left, right, c.Work) }
-	ctx.SourceAnonymousCandidate = func(owner string) bool { return p.children[strings.ReplaceAll(owner, ".", "/")] != nil }
+	ctx.SourceAnonymousCandidate = func(owner string) bool {
+		// IR analysis may ask values for provisional text before source-local
+		// identities are proved. Such a query cannot commit or reject ownership.
+		return ctx.SourceCaptureStable != nil && p.children[strings.ReplaceAll(owner, ".", "/")] != nil
+	}
 	ctx.SourceAnonymousAllocation = func(owner, descriptor string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
 		child := p.children[strings.ReplaceAll(owner, ".", "/")]
 		if child == nil {
@@ -927,16 +943,6 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		sub.nativeTypeParams = append([]string(nil), ctx.TypeParams...)
 		sub.nativeCapturedReads = map[string]map[int]string{}
 		for _, m := range child.object.Methods {
-			for _, attribute := range m.Attributes {
-				if signature, ok := attribute.(*SignatureAttribute); ok {
-					text, _ := child.object.getUtf8(signature.SignatureIndex)
-					for _, formal := range types.MethodFormalTypeParamNames(text) {
-						if ctx.IsTypeParam(formal) {
-							return fail()
-						}
-					}
-				}
-			}
 			n, _ := child.object.getUtf8(m.NameIndex)
 			desc, _ := child.object.getUtf8(m.DescriptorIndex)
 			key := n + desc
@@ -1583,4 +1589,57 @@ func nativeSourceBinaryName(name string) bool {
 		}
 	}
 	return true
+}
+
+// Method formals may shadow lexical formals. Their declarations remain intact;
+// only an outer capture's source type spelling must not be rebound to them.
+func nativeAnonymousMethodLexicalShadow(c *ClassObjectDumper) (bool, bool) {
+	if c == nil || c.obj == nil || c.CurrentMethod == nil || c.FuncCtx == nil || c.nativeOuterContext == nil {
+		return false, false
+	}
+	name, nok := sourceBridgeUTF8(c.obj, c.CurrentMethod.NameIndex)
+	descriptor, dok := sourceBridgeUTF8(c.obj, c.CurrentMethod.DescriptorIndex)
+	if !nok || !dok || name != c.FuncCtx.FunctionName || descriptor != c.FuncCtx.CurrentMethodDesc {
+		return false, false
+	}
+	signature := ""
+	seen := false
+	for _, attribute := range c.CurrentMethod.Attributes {
+		if !nativeProofWork(c.Work, 1) {
+			return false, false
+		}
+		if sig, ok := attribute.(*SignatureAttribute); ok {
+			if sig == nil || seen {
+				return false, false
+			}
+			seen = true
+			var known bool
+			signature, known = sourceBridgeUTF8(c.obj, sig.SignatureIndex)
+			if !known {
+				return false, false
+			}
+		}
+	}
+	if !seen {
+		return false, true
+	}
+	return nativeAnonymousSignatureLexicalShadow(signature, c.nativeOuterContext, c.Work)
+}
+
+// Use original Signature metadata rather than the optional renderer's generic
+// hint: disabling bound-receiver rendering cannot disable declaration identity.
+func nativeAnonymousSignatureLexicalShadow(signature string, lexical *class_context.ClassContext, work *workbudget.Budget) (bool, bool) {
+	if lexical == nil || signature == "" || !nativeProofWork(work, int64(len(signature)+1)) {
+		return false, false
+	}
+	formals, _, known := types.SignatureTypeVariableReferences(signature)
+	if !known || !strings.Contains(signature, "(") {
+		return false, false
+	}
+	for _, name := range formals {
+		if lexical.IsTypeParam(name) {
+			return true, true
+		}
+	}
+	return false, true
 }

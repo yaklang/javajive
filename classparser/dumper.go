@@ -3870,13 +3870,16 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			}
 		}
 		if codeAttr, ok := attribute.(*CodeAttribute); ok {
+			// Clear a sibling method's source binding before any IR analysis can
+			// request provisional text. Install this method's proof only after
+			// its complete statement graph and declaration identities are known.
+			priorStable := funcCtx.SourceCaptureStable
+			funcCtx.SourceCaptureStable = nil
+			defer func() { funcCtx.SourceCaptureStable = priorStable }()
 			params, statementList, err := ParseBytesCode(c, codeAttr, id)
 			if err != nil {
 				return dumped, utils.Wrap(err, "ParseBytesCode failed")
 			}
-			priorStable := funcCtx.SourceCaptureStable
-			funcCtx.SourceCaptureStable = nil
-			defer func() { funcCtx.SourceCaptureStable = priorStable }()
 			priorConstructorBridge := funcCtx.ConstructorInvokeBridge
 			funcCtx.ConstructorInvokeBridge = nil
 			defer func() { funcCtx.ConstructorInvokeBridge = priorConstructorBridge }()

@@ -874,7 +874,10 @@ func (f *ClassContext) ShortTypeName(name string) string {
 		}
 	}
 	first := strings.SplitN(dotted, ".", 2)[0]
-	if f.LexicalTypeNames[first] {
+	if f.LexicalTypeNames[first] || f.IsTypeParam(first) {
+		// A qualified class identity and a same-spelled formal are different
+		// declarations. Keep the class qualified where shortening would bind
+		// to the formal; bare type-variable inputs returned above stay bare.
 		return pkg + "." + dotted
 	}
 	if pkg == f.PackageName || pkg == "java.lang" {
