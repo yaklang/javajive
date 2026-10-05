@@ -70,7 +70,8 @@ func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBound
 	if call == nil || next == 0 || int(ops[next-1].CurrentOffset) != p.pc || call.Name != strings.ReplaceAll(p.delegate.ClassName, ".", "/") || call.Description != p.delegate.Descriptor {
 		return false
 	}
-	return c.constructorCaptureChainDoesNotObserve(call.Name, call.Description, writes)
+	facts, _ := constructorOriginalArgumentFacts(c.obj, ops, index, p.pc, params, slots)
+	return c.constructorCaptureChainDoesNotObserve(call.Name, call.Description, writes, facts...)
 }
 
 func constructorParameterSlots(params []string) map[int]int {
@@ -647,10 +648,17 @@ func (c *ClassObjectDumper) constructorChainDoesNotObserve(owner, descriptor str
 }
 
 func (c *ClassObjectDumper) constructorChainEffects(owner, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof) bool {
+	return c.constructorChainEffectsWithArguments(owner, descriptor, writes, active, remaining, depth, aliases, nil)
+}
+
+func (c *ClassObjectDumper) constructorChainEffectsWithArguments(owner, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, arguments []constructorEffectValue) bool {
 	if depth > 16 || *remaining <= 0 {
 		return false
 	}
 	if owner == "java/lang/Object" && descriptor == "()V" {
+		if len(arguments) != 0 {
+			return false
+		}
 		exceptions, known := exactInvocationExceptions(c.FuncCtx.InvocationMetadata, owner, "<init>", descriptor)
 		return known && len(exceptions) == 0
 	}
@@ -697,7 +705,7 @@ func (c *ClassObjectDumper) constructorChainEffects(owner, descriptor string, wr
 	if len(decoder.Opcodes()) > *remaining {
 		return false
 	}
-	return c.constructorReceiverEffectsWithStorage(obj, code, ops, descriptor, writes, active, remaining, depth, aliases)
+	return c.constructorReceiverEffectsWithStorage(obj, code, ops, descriptor, writes, active, remaining, depth, aliases, arguments...)
 }
 
 // Literal operands keep their original values and widths. Class/method-handle/

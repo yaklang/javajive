@@ -18,6 +18,8 @@ import (
 // value loaded from a parameter/field/call cannot acquire an alias to it.
 type constructorEffectValue struct {
 	kind       byte
+	knownInt   bool
+	intWord    int32
 	receiver   bool
 	allocation int // Original NEW PC + 1, until its exact <init> completes.
 }
@@ -40,7 +42,7 @@ func (p *constructorSelfStorageProof) closed() bool {
 // supplied by the catalog, every catalogued runtime capable of running this
 // source must admit the same movement. Actual caller-supplied bytes retain
 // precedence. All attempts share the original bounded proof budget.
-func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descriptor string, writes map[string]bool) bool {
+func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descriptor string, writes map[string]bool, arguments ...constructorEffectValue) bool {
 	target := c.options.TargetSourceVersion
 	if target == 0 {
 		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
@@ -69,7 +71,8 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		d.FuncCtx = &class_context.ClassContext{}
 		d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
 		d.constructorReceiverFinalizerSilent = d.constructorReceiverCannotObserveFinalization(&remaining)
-		safe := d.constructorChainDoesNotObserve(owner, descriptor, writes, map[string]bool{}, &remaining, 0)
+		aliases := &constructorSelfStorageProof{}
+		safe := d.constructorChainEffectsWithArguments(owner, descriptor, writes, map[string]bool{}, &remaining, 0, aliases, arguments) && aliases.closed()
 		return safe, platformUsed
 	}
 	if safe, platformUsed := prove(target); !safe {
@@ -208,7 +211,7 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 	return c.constructorReceiverEffectsWithStorage(obj, code, ops, descriptor, writes, active, remaining, depth, aliases) && aliases.closed()
 }
 
-func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObject, code *CodeAttribute, ops []*core.OpCode, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof) bool {
+func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObject, code *CodeAttribute, ops []*core.OpCode, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, arguments ...constructorEffectValue) bool {
 	params, ret, err := callbinding.Descriptor(descriptor)
 	if err != nil || ret != "V" || code.MaxLocals == 0 {
 		return false
@@ -216,8 +219,17 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 	locals := make([]constructorEffectValue, int(code.MaxLocals))
 	locals[0] = constructorEffectValue{kind: 'L', receiver: true}
 	slot := 1
-	for _, param := range params {
+	if len(arguments) != 0 && len(arguments) != len(params) {
+		return false
+	}
+	for i, param := range params {
 		value := constructorEffectType(param)
+		if len(arguments) > 0 {
+			if arguments[i].kind != value.kind || arguments[i].receiver || arguments[i].allocation != 0 {
+				return false
+			}
+			value = arguments[i]
+		}
 		if value.width() == 0 || slot+value.width() > len(locals) {
 			return false
 		}
@@ -260,6 +272,12 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 		for _, part := range [][]constructorEffectValue{locals, stack} {
 			for _, v := range part {
 				state = append(state, v.kind)
+				if v.knownInt {
+					state = append(state, 1)
+					state = binary.BigEndian.AppendUint32(state, uint32(v.intWord))
+				} else {
+					state = append(state, 0)
+				}
 				state = binary.BigEndian.AppendUint32(state, uint32(v.allocation))
 				if v.receiver {
 					state = append(state, 1)
@@ -308,6 +326,16 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					slot := core.GetRetrieveIdx(op)
 					if slot < 0 || slot >= len(locals) || locals[slot].kind != 'I' {
 						return false
+					}
+					if !op.IsWide && len(op.Data) != 2 || op.IsWide && len(op.Data) != 4 {
+						return false
+					}
+					delta := int32(int8(op.Data[len(op.Data)-1]))
+					if len(op.Data) == 4 {
+						delta = int32(int16(core.Convert2bytesToInt(op.Data[2:])))
+					}
+					if locals[slot].knownInt {
+						locals[slot].intWord += delta
 					}
 					continue
 				}
@@ -419,7 +447,11 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 			case opcode == core.OP_ACONST_NULL:
 				stack = append(stack, constructorEffectValue{kind: 'L'})
 			case opcode >= core.OP_ICONST_M1 && opcode <= core.OP_ICONST_5 || opcode == core.OP_BIPUSH || opcode == core.OP_SIPUSH:
-				stack = append(stack, constructorEffectValue{kind: 'I'})
+				v, known := constructorOriginalIntLiteral(obj, op)
+				if !known {
+					return false
+				}
+				stack = append(stack, v)
 			case opcode >= core.OP_LCONST_0 && opcode <= core.OP_DCONST_1:
 				kind := byte('F')
 				if opcode <= core.OP_LCONST_1 {
@@ -459,7 +491,15 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				if kind == 0 || (opcode == core.OP_LDC2_W) != (kind == 'J' || kind == 'D') {
 					return false
 				}
-				stack = append(stack, constructorEffectValue{kind: kind})
+				v := constructorEffectValue{kind: kind}
+				if kind == 'I' {
+					literal, known := constructorOriginalIntLiteral(obj, op)
+					if !known {
+						return false
+					}
+					v = literal
+				}
+				stack = append(stack, v)
 			case opcode >= core.OP_DUP && opcode <= core.OP_SWAP:
 				if len(op.Data) != 0 {
 					return false
@@ -550,11 +590,13 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				if opcode == core.OP_INVOKEINTERFACE && (words > 255 || int(op.Data[2]) != words) {
 					return false
 				}
+				actuals := make([]constructorEffectValue, len(args))
 				for i := len(args) - 1; i >= 0; i-- {
 					v, ok := pop(constructorEffectType(args[i]).kind)
 					if !ok || v.receiver || v.allocation != 0 {
 						return false
 					}
+					actuals[i] = v
 				}
 				var receiver constructorEffectValue
 				if opcode != core.OP_INVOKESTATIC {
@@ -599,7 +641,7 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 							}
 						}
 					} else {
-						if initialized || opcode != core.OP_INVOKESPECIAL || result != "V" || !receiver.receiver || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) || !c.constructorChainEffects(member.Name, member.Description, writes, active, remaining, depth+1, aliases) {
+						if initialized || opcode != core.OP_INVOKESPECIAL || result != "V" || !receiver.receiver || (member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName()) || !c.constructorChainEffectsWithArguments(member.Name, member.Description, writes, active, remaining, depth+1, aliases, actuals) {
 							return false
 						}
 						initialized = true
@@ -669,14 +711,23 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				if opcode >= core.OP_IF_ACMPEQ && opcode <= core.OP_IF_ACMPNE || opcode == core.OP_IFNULL || opcode == core.OP_IFNONNULL {
 					kind = 'L'
 				}
-				for i := 0; i < count; i++ {
-					if v, ok := pop(kind); !ok || v.allocation != 0 {
+				conditions := make([]constructorEffectValue, count)
+				for i := count - 1; i >= 0; i-- {
+					v, ok := pop(kind)
+					if !ok || v.allocation != 0 {
 						return false
 					}
+					conditions[i] = v
 				}
 				branch, ok := target(op)
 				if !ok || branch <= index {
 					return false
+				}
+				if taken, known := constructorKnownIntBranch(opcode, conditions); known {
+					if taken {
+						return walk(branch, locals, stack, initialized)
+					}
+					return walk(index+1, locals, stack, initialized)
 				}
 				// Each arm owns its aliases and operand stack. A publication or exceptional
 				// operation in even one arm rejects the entire movement proof.
