@@ -10,6 +10,13 @@ import (
 
 func testNativeIndependentFamilyFixture(t *testing.T, fixture string, owners []string, driver, want string, verify ...func(*testing.T, string, []byte, []byte)) {
 	t.Helper()
+	testNativeIndependentMutatedFamilyFixture(t, fixture, owners, driver, want, nil, verify...)
+}
+
+// Mutations operate only on authored class files before the independent JVM
+// oracle runs; the rebuilt family must reproduce that valid original program.
+func testNativeIndependentMutatedFamilyFixture(t *testing.T, fixture string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
 	javac, java := t04Tools(t)
 	owned := func(name string) bool {
 		for _, owner := range owners {
@@ -32,6 +39,9 @@ func testNativeIndependentFamilyFixture(t *testing.T, fixture string, owners []s
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
 			files := nativeCompileDebugClasses(t, fixture, debug)
+			if mutate != nil {
+				mutate(t, files)
+			}
 			original := t.TempDir()
 			for n, raw := range files {
 				write(original, n, raw)

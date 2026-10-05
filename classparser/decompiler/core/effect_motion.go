@@ -1193,12 +1193,21 @@ func (d *Decompiler) opcodeAtOffset(offset int) *OpCode {
 	if d == nil {
 		return nil
 	}
+	// Synthetic control nodes carry a default PC zero too. They are not
+	// original bytecode witnesses, regardless of randomized map iteration.
+	// Multiple real witnesses at a PC (for example an ambiguous clone) also
+	// cannot establish a unique immutable origin.
+	var original *OpCode
 	for op := range d.opcodeToSimulateStack {
-		if op != nil && int(op.CurrentOffset) == offset {
-			return op
+		if op == nil || op.Instr == nil || int(op.CurrentOffset) != offset || op.Instr.OpCode == OP_START || op.Instr.OpCode == OP_END || op.Instr.OpCode == OP_TRY_CATCH {
+			continue
 		}
+		if original != nil {
+			return nil
+		}
+		original = op
 	}
-	return nil
+	return original
 }
 
 // evaluationCompletedBefore proves that a side-effecting child was fully

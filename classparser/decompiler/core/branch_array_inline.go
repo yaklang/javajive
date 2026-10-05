@@ -8,6 +8,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // A handler cannot access an array that exists only on the protected operand
@@ -65,8 +66,14 @@ func (d *Decompiler) privateArrayFillUnobservable(first, last *Node, firstOp, la
 // visible. Registration alone permits no motion; both inlining passes still
 // require a private allocation/store/invocation path and complete use evidence.
 func (d *Decompiler) RegisterNestedBranchArrayCalls() {
+	if d == nil || d.Work != nil && (d.Work.CheckAlloc(int64(len(d.opcodeIdToRef)+len(d.opCodes)+len(d.branchArrayCalls)+len(d.valueTernaryMerges)+1)*128) != nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opcodeIdToRef)+len(d.opCodes)+len(d.branchArrayCalls))) != nil) {
+		return
+	}
 	dupRefs := map[string]bool{}
 	for op, infos := range d.opcodeIdToRef {
+		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(infos))) != nil {
+			return
+		}
 		if op == nil || op.Instr == nil {
 			continue
 		}
@@ -83,46 +90,288 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 	for _, candidate := range d.branchArrayCalls {
 		seenCalls[candidate.call] = true
 	}
-	seen := map[values.JavaValue]bool{}
-	pending := []values.JavaValue{}
-	for root := range d.valueTernaryMerges {
-		pending = append(pending, root)
+	// Traversal provenance is part of the discovery state: a constructor
+	// operand does not confer its source context on a nested ordinary call.
+	type discovery struct {
+		value           values.JavaValue
+		constructorOnly bool
 	}
-	for budget := 512; len(pending) > 0 && budget > 0; budget-- {
-		v := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		if v == nil || seen[v] {
+	seen := map[discovery]bool{}
+	pending := []discovery{}
+	addConstructors := func(roots []values.JavaValue) {
+		for _, root := range roots {
+			pending = append(pending, discovery{root, true})
+		}
+	}
+	// Constructor-owned operands are original invocation roots too.
+	// Ordinary call/field contexts may acquire a generic source view in a later
+	// dumper phase; their erased descriptor alone cannot authorize removing a
+	// declaration. Keep those contexts until a source type-view proof exists.
+	// A branch merge is one discovery path, never an ownership prerequisite.
+	// Registration grants no motion: the same complete single-use, handler,
+	// operand-order and source-reference proof still gates each transfer.
+	for _, op := range d.opCodes {
+		if op != nil && op.Instr != nil && isInvokeOpcode(op.Instr.OpCode) {
+			if call := d.invokeFuncCall[op]; call != nil && call.IsSpecialInvoke && call.FunctionName == "<init>" && call.HasOriginPC && call.OriginPC == int(op.CurrentOffset) {
+				// ParseStatement attaches a fresh constructor node to the original
+				// NEW. Prefer that active source witness to the provisional invoke node.
+				if n, ok := values.UnpackSoltValue(call.Object).(*values.NewExpression); ok && n != nil && sameBranchArrayInvocation(n.ConstructorCall, call) {
+					call = n.ConstructorCall
+				}
+				pending = append(pending, discovery{call, true})
+			}
+		}
+	}
+	// Use the live source graph too: constructor statement construction can
+	// replace a provisional invocation witness after stack simulation. Original
+	// immutable invocation metadata still gates the active source node below.
+	nodeSeen := map[*Node]bool{}
+	nodes := []*Node{d.RootNode}
+	for remaining := 512; len(nodes) > 0 && remaining > 0; remaining-- {
+		n := nodes[len(nodes)-1]
+		nodes = nodes[:len(nodes)-1]
+		if n == nil || nodeSeen[n] {
 			continue
 		}
-		seen[v] = true
-		if call, ok := v.(*values.FunctionCallExpression); ok && !seenCalls[call] {
+		nodeSeen[n] = true
+		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return
+		}
+		switch st := n.Statement.(type) {
+		case *statements.AssignStatement:
+			addConstructors(d.branchArraySourceConstructors(st.JavaValue))
+		case *statements.ReturnStatement:
+			addConstructors(d.branchArraySourceConstructors(st.JavaValue))
+		case *statements.ExpressionStatement:
+			addConstructors(d.branchArraySourceConstructors(st.Expression))
+		case *statements.ConditionStatement:
+			addConstructors(d.branchArraySourceConstructors(st.Condition))
+		}
+		nodes = append(nodes, n.Next...)
+	}
+	for root := range d.valueTernaryMerges {
+		pending = append(pending, discovery{root, false})
+	}
+	for budget := 512; len(pending) > 0 && budget > 0; budget-- {
+		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return
+		}
+		item := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		v := item.value
+		if v == nil || seen[item] {
+			continue
+		}
+		seen[item] = true
+		if n, ok := v.(*values.NewExpression); ok && n != nil && n.ConstructorCall != nil {
+			pending = append(pending, discovery{n.ConstructorCall, item.constructorOnly})
+		}
+		if call, ok := v.(*values.FunctionCallExpression); ok && call != nil && !seenCalls[call] && (!item.constructorOnly || call.IsSpecialInvoke && call.FunctionName == "<init>") {
 			seenCalls[call] = true
+			original := d.opcodeAtOffset(call.OriginPC)
+			if original == nil || !sameBranchArrayInvocation(d.invokeFuncCall[original], call) {
+				continue
+			}
+			if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(call.Arguments))) != nil {
+				return
+			}
 			for i, arg := range call.Arguments {
 				ref, ok := values.UnpackSoltValue(arg).(*values.JavaRef)
 				if !ok || ref == nil || !dupRefs[ref.VarUid] {
 					continue
 				}
-				array, ok := GetRealValue(ref).(*values.NewExpression)
-				if ok && array != nil && array.HasOriginPC {
+				array := d.branchArrayReferenceOrigin(ref)
+				if array != nil {
 					d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call, i, ref, array})
 				}
 			}
 		}
 		if children, known := values.Children(v); known {
-			pending = append(pending, children...)
+			for _, child := range children {
+				pending = append(pending, discovery{child, item.constructorOnly})
+			}
 		}
 	}
+}
+
+// Only NEW owns a completed constructor expression. Walk the known source DAG
+// to find those roots without following JavaRef.Val or assigning ordinary calls
+// a constructor's source type/target context. Unknown/cyclic/excess work yields
+// no discovery rather than a partially inspected tree.
+func (d *Decompiler) branchArraySourceConstructors(root values.JavaValue) []values.JavaValue {
+	if d == nil || d.Work != nil && d.Work.CheckAlloc(512*128) != nil {
+		return nil
+	}
+	remaining := 512
+	path := map[values.JavaValue]bool{}
+	var out []values.JavaValue
+	var walk func(values.JavaValue) bool
+	walk = func(v values.JavaValue) bool {
+		remaining--
+		if remaining < 0 || path[v] || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return false
+		}
+		if v == nil {
+			return true
+		}
+		path[v] = true
+		defer delete(path, v)
+		if n, ok := v.(*values.NewExpression); ok && n != nil && n.ConstructorCall != nil {
+			out = append(out, n.ConstructorCall)
+		}
+		children, known := values.Children(v)
+		if !known {
+			return false
+		}
+		for _, child := range children {
+			if !walk(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if !walk(root) {
+		return nil
+	}
+	return out
+}
+
+// A source NEW outside a conditional argument must still execute before the
+// original condition and allocation. Linear paths are sufficient; across a
+// proved value diamond use the original semantic CFG's dominance relation,
+// including exceptional entries. PC order and endpoint handlers alone are not
+// dominance and cannot establish that a producer ran on every incoming path.
+func (d *Decompiler) branchArrayOriginalPrefixPrecedes(producer, target *OpCode) bool {
+	if d == nil || producer == nil || target == nil || producer.CurrentOffset >= target.CurrentOffset || !sameHandlerCoverage(d.handlersAt(producer), d.handlersAt(target)) {
+		return false
+	}
+	if singleLinearOpcodePathInHandlers(d, producer, target, d.handlersAt(target)) {
+		return true
+	}
+	if d.semanticCFG == nil || d.Work != nil && (d.Work.CheckAlloc(int64(len(d.semanticCFG.Nodes))*128) != nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.semanticCFG.Nodes)+len(d.semanticCFG.Edges))) != nil) {
+		return false
+	}
+	a, b := d.semanticCFG.indexOfNode(producer), d.semanticCFG.indexOfNode(target)
+	return a >= 0 && b >= 0 && d.semanticCFG.GetOrCompute(AnalysisDominators, GraphAnalysisDomain{Roots: []int{0}, IncludeException: true}).Dominates(a, b)
+}
+
+// Condition callbacks have not necessarily filled the source SlotValue yet.
+// Its immutable condition opcode identifies the already-proved value diamond.
+// Transfer only into the one source arm that contains this exact invocation,
+// and require that same original branch entry to dominate the allocation.
+func (d *Decompiler) branchArraySelectedSourceArm(tern *values.TernaryExpression, call *values.FunctionCallExpression, allocation *OpCode) (values.JavaValue, *OpCode) {
+	if d == nil || tern == nil || d.semanticCFG == nil || allocation == nil {
+		return nil, nil
+	}
+	var branch *OpCode
+	for _, op := range d.opCodes {
+		if op != nil && op.Id == tern.ConditionFromOp {
+			if branch != nil {
+				return nil, nil
+			}
+			branch = op
+		}
+	}
+	if branch == nil || branch.Instr == nil || !isConditionalBranchOpcode(branch.Instr.OpCode) || !branch.TernaryChainArm || !d.branchArrayOriginalPrefixPrecedes(branch, allocation) {
+		return nil, nil
+	}
+	yes, yKnown := d.branchArrayCallOccurrences(tern.TrueValue, call)
+	no, nKnown := d.branchArrayCallOccurrences(tern.FalseValue, call)
+	if !yKnown || !nKnown || yes+no != 1 {
+		return nil, nil
+	}
+	var taken, fallthroughEntry *OpCode
+	for _, edge := range d.semanticCFG.Edges {
+		if edge.From != branch {
+			continue
+		}
+		switch edge.Kind {
+		case EdgeTaken:
+			if taken != nil {
+				return nil, nil
+			}
+			taken = edge.To
+		case EdgeFallthrough:
+			if fallthroughEntry != nil {
+				return nil, nil
+			}
+			fallthroughEntry = edge.To
+		case EdgeException:
+		default:
+			return nil, nil
+		}
+	}
+	if taken == nil || fallthroughEntry == nil || taken == fallthroughEntry {
+		return nil, nil
+	}
+	// The value builder uses the inverse jump predicate: source true is
+	// original fallthrough; source false is the original taken edge.
+	arm, entry := tern.TrueValue, fallthroughEntry
+	if no == 1 {
+		arm, entry = tern.FalseValue, taken
+	}
+	a, b := d.semanticCFG.indexOfNode(entry), d.semanticCFG.indexOfNode(allocation)
+	if a < 0 || b < 0 || !d.semanticCFG.GetOrCompute(AnalysisDominators, GraphAnalysisDomain{Roots: []int{0}, IncludeException: true}).Dominates(a, b) {
+		return nil, nil
+	}
+	return arm, branch
+}
+
+// Reference cycles/deep alias chains are unknown, never permission to inline.
+// This discovery does not mutate a reference, assign it a source name or change
+// which original NEW belongs to a later consumer.
+func (d *Decompiler) branchArrayReferenceOrigin(value values.JavaValue) *values.NewExpression {
+	seen := map[values.JavaValue]bool{}
+	for remaining := 512; remaining > 0; remaining-- {
+		if value == nil || seen[value] || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return nil
+		}
+		seen[value] = true
+		switch v := value.(type) {
+		case *values.JavaRef:
+			if v == nil || v.IsParam || v.IsThis || v.CustomValue != nil || v.StackVar != nil {
+				return nil
+			}
+			value = v.Val
+		case *values.SlotValue:
+			if v == nil {
+				return nil
+			}
+			value = v.GetValue()
+		case *values.NewExpression:
+			if v != nil && v.HasOriginPC && v.JavaType != nil && v.JavaType.IsArray() {
+				return v
+			}
+			return nil
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 // Transfer a private branch array to its invocation before condition callbacks
 // flatten the branch graph. A delayed transfer leaves the array definition as
 // a second normal successor of a try node; it must never become a catch body.
 func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
-	if d == nil || d.getenv("JDEC_BRANCH_ARRAY_INLINE_OFF") != "" {
+	if d == nil || len(d.branchArrayCalls) == 0 || d.getenv("JDEC_BRANCH_ARRAY_INLINE_OFF") != "" {
+		return 0
+	}
+	if d.Work != nil && (d.Work.CheckAlloc(int64(len(d.branchArrayCalls))*64) != nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.branchArrayCalls))) != nil) {
 		return 0
 	}
 	changed := 0
-	for _, candidate := range d.branchArrayCalls {
+	// Fold the last operand first. Earlier arrays become adjacent to the same
+	// consumer only if every intervening array definition was safely transferred.
+	// A refused/public later array remains a barrier, never a partial reordering.
+	candidates := slices.Clone(d.branchArrayCalls)
+	slices.SortStableFunc(candidates, func(a, b branchArrayCall) int {
+		if a.array == nil || b.array == nil {
+			return 0
+		}
+		return b.array.OriginPC - a.array.OriginPC
+	})
+	for _, candidate := range candidates {
 		call, ref, array := candidate.call, candidate.ref, candidate.array
 		if call == nil || ref == nil || array == nil || call.FuncType == nil || candidate.argIndex < 0 ||
 			candidate.argIndex >= len(call.Arguments) || candidate.argIndex >= len(call.FuncType.ParamTypes) ||
@@ -141,7 +390,7 @@ func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
 		if !valid || allocation == nil || invocation == nil || !branchArraySinglePath(d, allocation, invocation) {
 			continue
 		}
-		valid = d.branchOperandPrecedesArray(call.Object, allocation)
+		valid = d.branchArrayReceiverPrecedes(call, allocation)
 		for _, earlier := range call.Arguments[:candidate.argIndex] {
 			valid = valid && d.branchOperandPrecedesArray(earlier, allocation)
 		}
@@ -181,7 +430,7 @@ func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
 				definition = node
 			}
 		}
-		if !valid || definition == nil || definition.IsTryCatch || definition.IsCatchStart || len(definition.Next) > 1 {
+		if !valid || definition == nil || definition.IsTryCatch || definition.IsCatchStart || !d.branchArrayImmediateConsumer(definition, call, allocation) {
 			continue
 		}
 		original := call.Arguments[candidate.argIndex]
@@ -211,6 +460,253 @@ func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
 		changed++
 	}
 	return changed
+}
+
+// Source reconstruction may replace a provisional constructor node, but
+// only the original invocation's immutable position/kind/member/descriptor
+// identifies the same evaluation. Printed text and equal parameter counts do
+// not establish that identity.
+func sameBranchArrayInvocation(a, b *values.FunctionCallExpression) bool {
+	return a != nil && b != nil && a.HasOriginPC && b.HasOriginPC && a.OriginPC == b.OriginPC && a.Kind == b.Kind && a.IsSpecialInvoke == b.IsSpecialInvoke && a.IsStatic == b.IsStatic && a.ClassName == b.ClassName && a.FunctionName == b.FunctionName && a.Descriptor == b.Descriptor
+}
+
+// A constructor receiver is an original uninitialized NEW, not the completed
+// object expression (whose arguments include this array). DUP reproduces its
+// stack identity, never a second allocation. Check the original NEW witness and
+// constructor identity instead of treating the completed cyclic tree as a
+// receiver effect or counting DUP as another receiver producer.
+func (d *Decompiler) branchArrayReceiverPrecedes(call *values.FunctionCallExpression, allocation *OpCode) bool {
+	if call == nil {
+		return false
+	}
+	n, ok := values.UnpackSoltValue(call.Object).(*values.NewExpression)
+	if !ok {
+		return d.branchOperandPrecedesArray(call.Object, allocation)
+	}
+	if n == nil || allocation == nil || n.ConstructorCall != call || !n.HasOriginPC || !call.HasOriginPC || !call.IsSpecialInvoke || call.FunctionName != "<init>" {
+		return false
+	}
+	original := d.opcodeAtOffset(n.OriginPC)
+	invoke := d.opcodeAtOffset(call.OriginPC)
+	if original == nil || original.Instr == nil || original.Instr.OpCode != OP_NEW || original.CurrentOffset >= allocation.CurrentOffset || invoke == nil || invoke.Instr == nil || invoke.Instr.OpCode != OP_INVOKESPECIAL || !sameBranchArrayInvocation(d.invokeFuncCall[invoke], call) || !singleLinearOpcodePathInHandlers(d, original, allocation, d.handlersAt(allocation)) {
+		return false
+	}
+	for _, v := range original.stackProduced {
+		if values.UnpackSoltValue(v) == n {
+			return true
+		}
+	}
+	return false
+}
+
+// A private reference and a linear bytecode path prove ownership, not motion.
+// Its definition must now be immediately followed by its unique source consumer;
+// otherwise a void call, publication or another allocation could be crossed.
+// Within that consumer, every expression evaluated before the invocation must
+// already have its original producer before the array. References are uses, not
+// permission to follow another definition's effects into the prospective tree.
+func (d *Decompiler) branchArrayImmediateConsumer(definition *Node, call *values.FunctionCallExpression, allocation *OpCode) bool {
+	if d == nil || definition == nil || call == nil || allocation == nil || len(definition.Next) != 1 || d.Work != nil && d.Work.CheckAlloc(512*128) != nil {
+		return false
+	}
+	consumer := definition.Next[0]
+	if consumer == nil || consumer.IsTryCatch || consumer.IsCatchStart {
+		return false
+	}
+	var root values.JavaValue
+	var prefix []values.JavaValue
+	switch s := consumer.Statement.(type) {
+	case *statements.AssignStatement:
+		// Assignment evaluates an address, not a field/element load. Prove
+		// receiver/index producers without inventing a GETFIELD/AALOAD witness.
+		switch left := values.UnpackSoltValue(s.LeftValue).(type) {
+		case *values.JavaRef:
+		case *values.JavaClassMember: // PUTSTATIC/class initialization remains after its RHS.
+		case *values.RefMember:
+			if left == nil || !d.branchArrayEarlierOperandPrecedes(left.Object, allocation) {
+				return false
+			}
+			prefix = append(prefix, left.Object)
+		default:
+			if s.ArrayMember == nil {
+				return false
+			}
+		}
+		if s.ArrayMember != nil && (!d.branchArrayEarlierOperandPrecedes(s.ArrayMember.Object, allocation) || !d.branchArrayEarlierOperandPrecedes(s.ArrayMember.Index, allocation)) {
+			return false
+		}
+		if s.ArrayMember != nil {
+			prefix = append(prefix, s.ArrayMember.Object, s.ArrayMember.Index)
+		}
+		root = s.JavaValue
+	case *statements.ReturnStatement:
+		root = s.JavaValue
+	case *statements.ExpressionStatement:
+		root = s.Expression
+	case *statements.ConditionStatement:
+		root = s.Condition
+	default:
+		return false
+	}
+	count, known := d.branchArrayCallOccurrences(root, call)
+	if !known || count != 1 {
+		return false
+	}
+	seen := map[values.JavaValue]bool{}
+	remaining := 512
+	var contains func(values.JavaValue) bool
+	contains = func(v values.JavaValue) bool {
+		remaining--
+		if remaining < 0 || v == nil || seen[v] || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return false
+		}
+		seen[v] = true
+		if v == call {
+			return true
+		}
+		var children []values.JavaValue
+		if n, ok := v.(*values.NewExpression); ok {
+			// Allocation/class initialization happens before its constructor arguments.
+			if n == nil || n.ConstructorCall == nil || !n.HasOriginPC {
+				return false
+			}
+			producer := d.opcodeAtOffset(n.OriginPC)
+			if producer == nil || producer.Instr == nil || producer.Instr.OpCode != OP_NEW || producer.CurrentOffset >= allocation.CurrentOffset || !d.branchArrayOriginalPrefixPrecedes(producer, allocation) {
+				return false
+			}
+			// The enclosing NEW must also retain its order relative to an
+			// assignment address or an enclosing call's earlier operands. Proving
+			// only that they precede the array would miss NEW/class-init ordering.
+			for _, earlier := range prefix {
+				if !d.branchArrayEarlierOperandPrecedes(earlier, producer) {
+					return false
+				}
+			}
+			if n.ConstructorCall == call {
+				return true
+			}
+			prefix = append(prefix, n)
+			children = n.ConstructorCall.Arguments
+		} else if tern, ok := v.(*values.TernaryExpression); ok {
+			arm, branch := d.branchArraySelectedSourceArm(tern, call, allocation)
+			if arm == nil || branch == nil {
+				return false
+			}
+			for _, earlier := range prefix {
+				if n, ok := earlier.(*values.NewExpression); ok && n.HasOriginPC {
+					if !d.branchArrayOriginalPrefixPrecedes(d.opcodeAtOffset(n.OriginPC), branch) {
+						return false
+					}
+				} else if !d.branchArrayEarlierOperandPrecedes(earlier, branch) {
+					return false
+				}
+			}
+			return contains(arm)
+		} else {
+			var known bool
+			children, known = values.Children(v)
+			if !known {
+				return false
+			}
+		}
+		for _, child := range children {
+			count, known := d.branchArrayCallOccurrences(child, call)
+			// NewExpression exposes constructor arguments, so the constructor call
+			// identity itself needs an explicit witness below as well.
+			n, isNew := values.UnpackSoltValue(child).(*values.NewExpression)
+			if known && (count > 0 || isNew && n != nil && n.ConstructorCall == call) {
+				return contains(child)
+			}
+			if !known || !d.branchArrayEarlierOperandPrecedes(child, allocation) {
+				return false
+			}
+			prefix = append(prefix, child)
+		}
+		return false
+	}
+	return contains(root)
+}
+
+// A source invocation evaluated before a conditional operand remains earlier
+// on every path to that operand. A linear mutable graph cannot prove this when
+// the conditional creates a diamond. Require the exact original invocation,
+// original produced value identity, same handlers and exceptional dominance.
+func (d *Decompiler) branchArrayEarlierOperandPrecedes(value values.JavaValue, allocation *OpCode) bool {
+	if d.branchOperandPrecedesArray(value, allocation) {
+		return true
+	}
+	if n, ok := values.UnpackSoltValue(value).(*values.NewExpression); ok {
+		if n == nil || !n.HasOriginPC || n.ConstructorCall == nil || !n.ConstructorCall.HasOriginPC {
+			return false
+		}
+		create, invoke := d.opcodeAtOffset(n.OriginPC), d.opcodeAtOffset(n.ConstructorCall.OriginPC)
+		if create == nil || create.Instr == nil || create.Instr.OpCode != OP_NEW || invoke == nil || invoke.Instr == nil || invoke.Instr.OpCode != OP_INVOKESPECIAL || !sameBranchArrayInvocation(d.invokeFuncCall[invoke], n.ConstructorCall) || !d.branchArrayOriginalPrefixPrecedes(create, invoke) || !d.branchArrayOriginalPrefixPrecedes(invoke, allocation) {
+			return false
+		}
+		for _, produced := range create.stackProduced {
+			if values.UnpackSoltValue(produced) == n {
+				return true
+			}
+		}
+		return false
+	}
+	call, ok := values.UnpackSoltValue(value).(*values.FunctionCallExpression)
+	if !ok || call == nil || !call.HasOriginPC {
+		return false
+	}
+	producer := d.opcodeAtOffset(call.OriginPC)
+	if producer == nil || producer.Instr == nil || !isInvokeOpcode(producer.Instr.OpCode) || !sameBranchArrayInvocation(d.invokeFuncCall[producer], call) || !d.branchArrayOriginalPrefixPrecedes(producer, allocation) {
+		return false
+	}
+	for _, produced := range producer.stackProduced {
+		if values.UnpackSoltValue(produced) == call {
+			return true
+		}
+	}
+	return false
+}
+
+// Count the actual source invocation, including the constructor node owned
+// by NEW. Shared occurrences count twice; cycles, opaque trees and exhausted
+// work are unknown. JavaRef is deliberately a leaf, never a hidden definition.
+func (d *Decompiler) branchArrayCallOccurrences(root values.JavaValue, target *values.FunctionCallExpression) (int, bool) {
+	remaining := 512
+	path := map[values.JavaValue]bool{}
+	var walk func(values.JavaValue) (int, bool)
+	walk = func(v values.JavaValue) (int, bool) {
+		remaining--
+		if remaining < 0 || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return 0, false
+		}
+		if v == nil {
+			return 0, true
+		}
+		if path[v] {
+			return 0, false
+		}
+		if v == target {
+			return 1, true
+		}
+		path[v] = true
+		defer delete(path, v)
+		if n, ok := v.(*values.NewExpression); ok && n != nil && n.ConstructorCall == target {
+			return 1, true
+		}
+		children, known := values.Children(v)
+		if !known {
+			return 0, false
+		}
+		count := 0
+		for _, child := range children {
+			n, known := walk(child)
+			if !known {
+				return 0, false
+			}
+			count += n
+		}
+		return count, true
+	}
+	return walk(root)
 }
 
 // Java evaluates a receiver and earlier arguments before this array argument.

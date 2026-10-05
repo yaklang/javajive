@@ -3078,7 +3078,7 @@ func classLiteralArgToClassParam(arg JavaValue, expect *types.JavaClass, funcCtx
 func (f *FunctionCallExpression) ArgumentStrings(funcCtx *class_context.ClassContext) []string {
 	// Varargs spread (type-variable component): reconstruct `m(a, b)` from the javac-materialized
 	// `m(new Object[]{a, b})` so a generic varargs callee's type variable is inferred from the element
-	// types instead of being pinned to Object (see varargsTypeVarSpread). The leading fixed arguments
+	// types under an exact original runtime-component proof. The leading fixed arguments
 	// keep the normal per-argument cast logic; the spread elements render plainly (no synthetic cast --
 	// that is the whole point, letting javac infer the callee's type variable).
 	if elems, fixed, ok := f.varargsTypeVarSpread(funcCtx); ok {
@@ -4694,22 +4694,13 @@ func (f *FunctionCallExpression) HasDescriptorOverloadConflict(funcCtx *class_co
 	return f.calleeHasCompetingOverload(funcCtx)
 }
 
-// varargsTypeVarSpread detects the javac varargs-call idiom on a generic method whose varargs COMPONENT
-// is a TYPE VARIABLE, returning the array literal's element values to spread plus the count of leading
-// fixed (non-varargs) arguments. The bytecode for `m(a, b)` to `<T> R m(T... xs)` materializes a fresh
-// `new Object[]{a, b}` passed as the single trailing array argument; rendering that array faithfully
-// PINS the callee's T to Object (the array's erased element type), which then conflicts with the call's
-// required instantiation (e.g. `UnmodifiableIterator<N> = Iterators.forArray(new Object[]{nodeU,nodeV})`
-// -> "inference variable T has incompatible bounds: Object, N"). Spreading the literal back to `m(a, b)`
-// lets javac infer T from the element types, reproducing the original source (this is what CFR /
-// Vineflower emit). RESTRICTED to the type-variable-component case -- the only one that mis-infers;
-// plain `Object...`/`String...` varargs neither mis-infer nor are safe to spread blindly (a lone array
-// element passed to `Object...` would change meaning) -- and to JAR-INTERNAL callees whose generic
-// Signature is available (SiblingClassSig). SAFE because GENERIC ARRAY CREATION IS ILLEGAL in Java, so
-// a fresh `new Object[]{...}` reaching a type-variable array parameter can only be a varargs pack, never
-// a hand-written array argument to a non-varargs `T[]` parameter. Kill-switch JDEC_VARARGS_SPREAD_OFF.
+// varargsTypeVarSpread recognizes only a positively identified generic varargs
+// declaration. A T[] Signature says nothing about ACC_VARARGS: an ordinary
+// fixed-arity method can legally receive an explicitly allocated reference array.
+// Read the exact descriptor's original flags and Signature together; arity-only
+// maps and missing metadata never grant permission to change call syntax.
 func (f *FunctionCallExpression) varargsTypeVarSpread(funcCtx *class_context.ClassContext) ([]JavaValue, int, bool) {
-	if funcCtx.Getenv("JDEC_VARARGS_SPREAD_OFF") != "" || funcCtx == nil || funcCtx.SiblingClassSig == nil {
+	if f == nil || f.Kind == InvokeDynamic || funcCtx == nil || funcCtx.Getenv("JDEC_VARARGS_SPREAD_OFF") != "" || funcCtx.InvocationMetadata == nil || funcCtx.SiblingClassSig == nil {
 		return nil, 0, false
 	}
 	n := len(f.Arguments)
@@ -4725,13 +4716,30 @@ func (f *FunctionCallExpression) varargsTypeVarSpread(funcCtx *class_context.Cla
 	// Callee's last formal parameter (from its generic Signature) must be a 1-D array whose element is a
 	// type variable declared by the callee method or its declaring class.
 	internal := strings.ReplaceAll(f.ClassName, ".", "/")
-	classSig, methodSigs, ok := funcCtx.SiblingClassSig(internal)
-	if !ok || methodSigs == nil {
+	family, err := callbinding.FamilyOf(callbinding.Witness{Owner: internal, Name: f.FunctionName, Desc: f.Descriptor}, funcCtx.InvocationMetadata)
+	if err != nil || !family.Complete || family.Proof != callbinding.Unique || family.Target == nil || !family.Target.Varargs || family.Target.Bridge || family.Target.Static != f.IsStatic || !f.varargsSpreadHasOneSourceDeclaration(funcCtx, internal) {
 		return nil, 0, false
 	}
-	sig := methodSigs[class_context.MethodSigKey(f.FunctionName, n)]
-	if sig == "" {
+	declaring, classSig, sig := erasedInvocationDeclaration(funcCtx, internal, f.FunctionName, f.Descriptor)
+	if declaring == "" || sig == "" {
 		return nil, 0, false
+	}
+	physical, result, err := callbinding.Descriptor(f.Descriptor)
+	_, signatureParams, signatureResult := types.ParseMethodSignatureFull(sig, funcCtx)
+	bounds := erasedInvocationBounds(classSig)
+	if bounds == nil {
+		bounds = map[string]string{}
+	}
+	for name, bound := range erasedInvocationBounds(sig) {
+		bounds[name] = bound // Method variables shadow class variables.
+	}
+	if err != nil || len(physical) != n || len(signatureParams) != n || erasedMethodType(signatureResult, bounds) != result {
+		return nil, 0, false
+	}
+	for i := range physical {
+		if erasedMethodType(signatureParams[i], bounds) != physical[i] {
+			return nil, 0, false
+		}
 	}
 	_, params, _ := types.ParseMethodSignatureFull(sig, funcCtx)
 	if len(params) != n || params[n-1] == nil || !params[n-1].IsArray() || params[n-1].ArrayDim() != 1 {
@@ -4754,17 +4762,86 @@ func (f *FunctionCallExpression) varargsTypeVarSpread(funcCtx *class_context.Cla
 		}
 	}
 	if !isFormal {
-		for _, tn := range types.ClassFormalTypeParamNames(classSig) {
-			if tn == name {
-				isFormal = true
-				break
-			}
-		}
-	}
-	if !isFormal {
+		// A class variable is fixed by a receiver view, not invocation inference.
 		return nil, 0, false
 	}
+	component := bindingType(ne.ElementType())
+	if len(ne.Initializer) == 0 || erasedMethodType(elem, bounds) != component {
+		return nil, 0, false
+	}
+	// javac allocates a new pack using its inferred type's erasure. Preserve
+	// the original JVM component, not just assignability to the array parameter.
+	// With the declared first bound and every element's source erasure exactly
+	// equal to that component, inference cannot introduce a narrower/different
+	// runtime array. Null, primitive boxing, nested arrays and missing lexical
+	// bounds supply no such proof. Keep the explicit array in those cases.
+	for _, item := range ne.Initializer {
+		if item == nil {
+			return nil, 0, false
+		}
+		view := item.Type()
+		switch value := UnpackSoltValue(item).(type) {
+		case *JavaRef:
+			if value == nil || value.typ == nil || value.CustomValue != nil || value.StackVar != nil {
+				return nil, 0, false
+			}
+			if value.WebDeclType != nil {
+				view = value.WebDeclType
+			}
+		case *JavaLiteral:
+			if value == nil {
+				return nil, 0, false
+			}
+			if _, stringLiteral := value.Data.(string); !stringLiteral || component != "Ljava/lang/String;" {
+				return nil, 0, false
+			}
+		default:
+			// Generic/poly calls and fields can have a source type distinct from
+			// their physical descriptor. Retain their explicit array context.
+			return nil, 0, false
+		}
+		actual, known := SourceTypeErasure(view, funcCtx)
+		if !known || actual != component {
+			return nil, 0, false
+		}
+	}
 	return ne.Initializer, n - 1, true
+}
+
+// Spreading changes source arity. The ordinary same-arity family proof does
+// not exclude a fixed-arity overload with the expanded argument count. Until
+// expanded generic overload resolution is proved, require a complete hierarchy
+// with a single non-bridge descriptor for this source member name.
+func (f *FunctionCallExpression) varargsSpreadHasOneSourceDeclaration(ctx *class_context.ClassContext, owner string) bool {
+	seen := map[string]bool{}
+	pending := []string{owner}
+	scanned := 0
+	for len(pending) > 0 {
+		if len(seen) >= 64 {
+			return false
+		}
+		n := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		c, known := ctx.InvocationMetadata(n)
+		if !known || c.Name != n || !c.MembersComplete || !c.ParentsComplete {
+			return false
+		}
+		scanned += len(c.Methods) + len(c.Parents)
+		if scanned > 4096 {
+			return false
+		}
+		for _, m := range c.Methods {
+			if m.Name == f.FunctionName && !m.Bridge && m.Desc != f.Descriptor {
+				return false
+			}
+		}
+		pending = append(pending, c.Parents...)
+	}
+	return true
 }
 
 // polymorphicSignatureCastType reports the explicit cast a signature-polymorphic MethodHandle call
