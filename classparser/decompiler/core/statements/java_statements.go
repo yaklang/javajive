@@ -167,7 +167,15 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 			return "return " + values.NarrowBooleanStackWord(r.JavaValue).String(funcCtx)
 		}
 	}
-	expr := r.JavaValue.String(funcCtx)
+	value := r.JavaValue
+	if funcCtx != nil {
+		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil {
+			if values.OriginalBooleanStackWord(value) {
+				value = values.CoerceIntAssignRHS(ft.ReturnType, value, funcCtx)
+			}
+		}
+	}
+	expr := value.String(funcCtx)
 	if funcCtx != nil {
 		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil {
 			if call, ok := values.UnpackSoltValue(r.JavaValue).(*values.FunctionCallExpression); ok {
@@ -3759,7 +3767,13 @@ func NewAssignStatement(leftVal, value values.JavaValue, isFirst bool) *AssignSt
 		// The type merge is skipped when either side has no type.
 	}
 
-	if value.Type() != nil && leftVal.Type() != nil {
+	shared := false
+	if ref, ok := values.UnpackSoltValue(value).(*values.JavaRef); ok {
+		_, _, shared = ref.OriginalStackMaterializationWitness(ref.Val)
+	}
+	// DUP shares the producer's computational value across consumers. A Z
+	// store is a consumer-local narrowing view, never a producer type update.
+	if !shared && value.Type() != nil && leftVal.Type() != nil {
 		value.Type().ResetType(leftVal.Type())
 	}
 	return &AssignStatement{

@@ -2,6 +2,7 @@ package values
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -79,15 +80,24 @@ func (c *CastExpression) String(ctx *class_context.ClassContext) string {
 func (c *CastExpression) ReplaceVar(old, new *utils.VariableId) { c.Value.ReplaceVar(old, new) }
 
 type AssignmentExpression struct {
-	Target      JavaValue
-	Value       JavaValue
-	OriginPC    int
-	HasOriginPC bool
-	Render      func(*class_context.ClassContext) string
+	Target                                                           JavaValue
+	Value                                                            JavaValue
+	OriginPC                                                         int
+	HasOriginPC                                                      bool
+	Render                                                           func(*class_context.ClassContext) string
+	originalFieldStore                                               bool
+	originalStorePC                                                  int
+	originalStoreOwner, originalStoreMember, originalStoreDescriptor string
+	originalStoreTarget                                              *RefMember
+	originalStoreValue                                               JavaValue
+	originalStoreRender                                              func(*class_context.ClassContext) string
 }
 
 func (a *AssignmentExpression) Type() types.JavaType { return a.Value.Type() }
 func (a *AssignmentExpression) String(ctx *class_context.ClassContext) string {
+	if a.originalFieldStore && a.originalStoreRender != nil {
+		return a.originalStoreRender(ctx)
+	}
 	if a.Render != nil {
 		return a.Render(ctx)
 	}
@@ -203,4 +213,32 @@ func RenderPrimitiveConversion(value JavaValue, target types.JavaType, ctx *clas
 		}
 	}
 	return fmt.Sprintf("(%s)(%s)", target.String(ctx), operand)
+}
+
+// NewOriginalFieldAssignmentExpression is created only at the original
+// PUTFIELD lowering boundary. Its immutable witness is separate from mutable
+// source naming and the public synthetic-assignment rendering callback.
+func NewOriginalFieldAssignmentExpression(target *RefMember, value JavaValue, member *JavaClassMember, pc int, render func(*class_context.ClassContext) string) *AssignmentExpression {
+	a := NewAssignmentExpression(target, value, pc, render)
+	if target == nil || isNilJavaValue(value) || member == nil || pc < 0 || render == nil {
+		return a
+	}
+	a.originalFieldStore = true
+	a.originalStorePC = pc
+	a.originalStoreOwner, a.originalStoreMember, a.originalStoreDescriptor = member.Name, member.Member, member.Description
+	a.originalStoreTarget, a.originalStoreValue, a.originalStoreRender = target, value, render
+	return a
+}
+func (a *AssignmentExpression) OriginalFieldStoreWitness() (pc int, owner, member, descriptor string, known bool) {
+	if a == nil || !a.originalFieldStore || !a.HasOriginPC || a.OriginPC != a.originalStorePC || a.Target != a.originalStoreTarget || !sameOriginalValueIdentity(a.Value, a.originalStoreValue) || a.originalStoreTarget.Member != a.originalStoreMember {
+		return 0, "", "", "", false
+	}
+	return a.originalStorePC, a.originalStoreOwner, a.originalStoreMember, a.originalStoreDescriptor, true
+}
+
+func sameOriginalValueIdentity(a, b JavaValue) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return reflect.TypeOf(a) == reflect.TypeOf(b) && reflect.TypeOf(a).Comparable() && a == b
 }

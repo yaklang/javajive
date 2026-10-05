@@ -3411,6 +3411,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		if _, ok := UnpackSoltValue(runtimeStackSimulation.Peek()).(*values.JavaRef); !ok {
 			val := runtimeStackSimulation.Pop().(values.JavaValue)
 			ref := runtimeStackSimulation.NewVar(val)
+			ref.MarkOriginalStackMaterialization(int(opcode.CurrentOffset), opcode.Instr.OpCode, val)
 			d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, true})
 			// Record the real source value so the dup statement-parse handler does not rely on
 			// stackConsumed[i] (which is mis-indexed when this is not the top-of-consume operand).
@@ -4353,6 +4354,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		field := values.NewRefMember(v, member.Member, fieldType)
 		field.OriginPC, field.HasOriginPC = int(opcode.CurrentOffset), true
+		field.MarkOriginalFieldRead(member, int(opcode.CurrentOffset))
 		runtimeStackSimulation.Push(field)
 	case OP_GETSTATIC:
 		index := Convert2bytesToInt(opcode.Data)
@@ -4361,6 +4363,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// evaluation, so keep it on a copy rather than overwriting the pool.
 		field := *member
 		field.OriginPC, field.HasOriginPC = int(opcode.CurrentOffset), true
+		field.MarkOriginalFieldRead(member, int(opcode.CurrentOffset))
 		runtimeStackSimulation.Push(&field)
 	case OP_PUTSTATIC:
 		index := Convert2bytesToInt(opcode.Data)
@@ -5403,7 +5406,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			// Keep the field store enumerable and use the same assignment
 			// lowering as a standalone putfield. A CustomValue string hid its
 			// target Signature and bypassed invariant-generic store repair.
-			return values.NewAssignmentExpression(field, storedValue, int(cur.CurrentOffset), func(ctx *class_context.ClassContext) string {
+			return values.NewOriginalFieldAssignmentExpression(field, storedValue, staticVal, int(cur.CurrentOffset), func(ctx *class_context.ClassContext) string {
 				return "(" + statements.NewAssignStatement(field, storedValue, false).String(ctx) + ")"
 			})
 		}
@@ -7267,13 +7270,22 @@ func (d *Decompiler) ParseStatement() error {
 			if lref, okl := nextAssign.LeftValue.(*values.JavaRef); okl && lref != nil {
 				d.EmbeddedAssignDeclRefs = append(d.EmbeddedAssignDeclRefs, lref)
 			}
-			pairs[1].Replace(&values.AssignmentExpression{
+			assignment := &values.AssignmentExpression{
 				Target: nextAssign.LeftValue, Value: val,
 				OriginPC: nextAssign.OriginPC, HasOriginPC: nextAssign.HasOriginPC,
 				Render: func(ctx *class_context.ClassContext) string {
 					return statements.NewAssignStatement(nextAssign.LeftValue, val, false).String(ctx)
 				},
-			})
+			}
+			if field, ok := nextAssign.LeftValue.(*values.RefMember); ok && nextAssign.HasOriginPC {
+				store := d.opcodeAtOffset(nextAssign.OriginPC)
+				if store != nil && !store.IsCustom && store.Instr != nil && store.Instr.OpCode == OP_PUTFIELD && len(store.Data) == 2 {
+					if member, ok := d.constantPoolGetter(int(Convert2bytesToInt(store.Data))).(*values.JavaClassMember); ok {
+						assignment = values.NewOriginalFieldAssignmentExpression(field, val, member, nextAssign.OriginPC, assignment.Render)
+					}
+				}
+			}
+			pairs[1].Replace(assignment)
 
 		}()
 		if len(pairs)-attr[0] == 1 {

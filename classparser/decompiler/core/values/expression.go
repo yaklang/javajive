@@ -5084,7 +5084,7 @@ func CoerceIntAssignRHS(leftType types.JavaType, rhs JavaValue, funcCtx *class_c
 	if isIntTyped(rhs) {
 		return rhs
 	}
-	eligible := IntrinsicBooleanValue(rhs)
+	eligible := OriginalBooleanStackWord(rhs) || IntrinsicBooleanValue(rhs)
 	if !eligible && funcCtx.Getenv("JDEC_BOOL_TO_INT_COERCE_EXPR_OFF") == "" {
 		eligible = structurallyBooleanForIntCoerce(rhs, funcCtx)
 	}

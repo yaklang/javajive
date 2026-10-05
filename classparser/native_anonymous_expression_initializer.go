@@ -8,7 +8,9 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 type nativeAnonymousExpressionInitializer struct {
@@ -205,6 +207,10 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	}
 	originalCtx, originalMethod, originalType := c.FuncCtx, c.CurrentMethod, c.MethodType
 	copy := *originalCtx
+	copy.LocalNames = map[*u.VariableId]string{}
+	for id, name := range originalCtx.LocalNames {
+		copy.LocalNames[id] = name
+	}
 	c.FuncCtx = &copy
 	c.CurrentMethod = plan.method
 	defer func() { c.FuncCtx = originalCtx; c.CurrentMethod = originalMethod; c.MethodType = originalType }()
@@ -225,6 +231,12 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	}
 	post := false
 	stores := map[int]bool{}
+	materialized := map[string]*values.JavaRef{}
+	localNames, closedNames := nativeAnonymousInitializerReservedLocalNames(child.object, &copy, bindings, names, c.Work)
+	if !closedNames {
+		return "", false
+	}
+	localNumber := 0
 	events := []int{}
 	var source strings.Builder
 	source.WriteString("{\n")
@@ -264,6 +276,26 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 		if !ok || assign.IsDeclare || assign.ArrayMember != nil || !assign.HasOriginPC || stores[assign.OriginPC] {
 			return "", false
 		}
+		if ref, local := assign.LeftValue.(*values.JavaRef); local {
+			if !assign.IsFirst || ref.VarUid == "" || materialized[ref.VarUid] != nil || !nativeAnonymousInitializerStackMaterialization(plan, assign, ref, c.Work) {
+				return "", false
+			}
+			if !nativeAnonymousInitializerExpressionEventsWithMaterialized(child, plan, assign.JavaValue, &events, c.nativeAnnotationDeclarationResolver(), c.Work, materialized, c.FuncCtx) {
+				return "", false
+			}
+			materialized[ref.VarUid] = ref
+			for {
+				localNumber++
+				name := "$jdec$stack" + strconv.Itoa(localNumber)
+				if !localNames[name] {
+					copy.LocalNames[ref.Id] = name
+					localNames[name] = true
+					break
+				}
+			}
+			source.WriteString(assign.String(c.FuncCtx) + ";\n")
+			continue
+		}
 		field, ok := assign.LeftValue.(*values.RefMember)
 		if !ok || field.Member != plan.stores[assign.OriginPC] {
 			return "", false
@@ -272,14 +304,24 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 		if !ok || !ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
 			return "", false
 		}
-		if !nativeAnonymousInitializerExpressionEvents(child, plan, assign.JavaValue, &events, c.nativeAnnotationDeclarationResolver(), c.Work, c.FuncCtx) {
+		if !nativeAnonymousInitializerExpressionEventsWithMaterialized(child, plan, assign.JavaValue, &events, c.nativeAnnotationDeclarationResolver(), c.Work, materialized, c.FuncCtx) {
 			return "", false
 		}
 		events = append(events, assign.OriginPC)
 		stores[assign.OriginPC] = true
 		source.WriteString(assign.String(c.FuncCtx) + ";\n")
 	}
-	if !post || len(stores) != len(plan.stores) {
+	if !post {
+		return "", false
+	}
+	// Embedded stores produce values as well as writes. Count every original
+	// store event, including those nested in another field's RHS.
+	for _, pc := range events {
+		if _, isStore := plan.stores[pc]; isStore {
+			stores[pc] = true
+		}
+	}
+	if len(stores) != len(plan.stores) {
 		return "", false
 	}
 	expected := []int{}
@@ -302,6 +344,9 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 }
 
 func nativeAnonymousInitializerExpressionEvents(child *nativeAnonymousClass, plan *nativeAnonymousExpressionInitializer, value values.JavaValue, events *[]int, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, contexts ...*class_context.ClassContext) bool {
+	return nativeAnonymousInitializerExpressionEventsWithMaterialized(child, plan, value, events, resolve, work, nil, contexts...)
+}
+func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAnonymousClass, plan *nativeAnonymousExpressionInitializer, value values.JavaValue, events *[]int, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, materialized map[string]*values.JavaRef, contexts ...*class_context.ClassContext) bool {
 	var ctx *class_context.ClassContext
 	if len(contexts) == 1 {
 		ctx = contexts[0]
@@ -340,7 +385,28 @@ func nativeAnonymousInitializerExpressionEvents(child *nativeAnonymousClass, pla
 		path[v] = true
 		defer delete(path, v)
 		switch x := v.(type) {
+		case *values.AssignmentExpression:
+			if !nativeAnonymousInitializerOriginalStore(child, plan, x, work) {
+				return false
+			}
+			field := x.Target.(*values.RefMember)
+			// A write target is not a GETFIELD read. Evaluate its receiver,
+			// then the checked RHS, then perform the original store exactly once.
+			if !visit(field.Object) || !visit(x.Value) {
+				return false
+			}
+			*events = append(*events, x.OriginPC)
+			return true
 		case *values.JavaRef:
+			if original := materialized[x.VarUid]; nativeAnonymousInitializerMaterializedRead(x, original) {
+				if ctx != nil && x.Id != nil {
+					if ctx.LocalNames == nil {
+						ctx.LocalNames = map[*u.VariableId]string{}
+					}
+					ctx.LocalNames[x.Id] = original.String(ctx)
+				}
+				return true
+			}
 			if !x.IsThis || x.CustomValue != nil || x.StackVar != nil {
 				return false
 			}
@@ -657,4 +723,145 @@ func nativeAnonymousInitializerOriginalCast(object *ClassObject, op *core.OpCode
 		}
 	}
 	return true
+}
+
+func nativeAnonymousInitializerOriginalStore(child *nativeAnonymousClass, plan *nativeAnonymousExpressionInitializer, value *values.AssignmentExpression, work *workbudget.Budget) bool {
+	if child == nil || child.object == nil || plan == nil || value == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	pc, owner, name, descriptor, known := value.OriginalFieldStoreWitness()
+	if !known || plan.stores[pc] != name || owner != child.object.GetClassName() {
+		return false
+	}
+	original := constructorMotionMember(child.object, plan.byPC[pc], core.OP_PUTFIELD)
+	if original == nil || original.Name != owner || original.Member != name || original.Description != descriptor {
+		return false
+	}
+	field, ok := value.Target.(*values.RefMember)
+	if !ok || field == nil || field.Member != name || field.Type() == nil {
+		return false
+	}
+	receiver, ok := values.UnpackSoltValue(field.Object).(*values.JavaRef)
+	if !ok || receiver == nil || !receiver.IsThis || receiver.CustomValue != nil || receiver.StackVar != nil {
+		return false
+	}
+	expected, err := types.ParseDescriptor(descriptor)
+	if err != nil || expected == nil {
+		return false
+	}
+	if expected.IsArray() {
+		return nativeAnonymousInitializerSameArrayType(field.Type(), expected)
+	}
+	switch typ := expected.RawType().(type) {
+	case *types.JavaPrimer:
+		actual, ok := field.Type().RawType().(*types.JavaPrimer)
+		return ok && typ != nil && actual != nil && typ.Name == actual.Name
+	case *types.JavaClass:
+		actual, ok := field.Type().RawType().(*types.JavaClass)
+		return ok && typ != nil && actual != nil && strings.ReplaceAll(typ.Name, ".", "/") == strings.ReplaceAll(actual.Name, ".", "/")
+	}
+	return false
+}
+
+func nativeAnonymousInitializerStackMaterialization(plan *nativeAnonymousExpressionInitializer, assign *statements.AssignStatement, ref *values.JavaRef, work *workbudget.Budget) bool {
+	if plan == nil || assign == nil || ref == nil || !assign.HasOriginPC || !assign.IsFirst || assign.IsDeclare || assign.ArrayMember != nil || assign.LeftValue != ref || !nativeProofWork(work, 1) {
+		return false
+	}
+	pc, kind, known := ref.OriginalStackMaterializationWitness(assign.JavaValue)
+	if !known || pc != assign.OriginPC {
+		return false
+	}
+	op := plan.byPC[pc]
+	if op == nil || op.Instr == nil || op.IsCustom || len(op.Data) != 0 || kind != op.Instr.OpCode {
+		return false
+	}
+	switch kind {
+	case core.OP_DUP, core.OP_DUP_X1, core.OP_DUP_X2, core.OP_DUP2, core.OP_DUP2_X1, core.OP_DUP2_X2:
+		return true
+	}
+	return false
+}
+
+func nativeAnonymousInitializerMaterializedRead(value, original *values.JavaRef) bool {
+	if value == nil || original == nil || value.VarUid == "" || value.VarUid != original.VarUid || value.Id == nil || original.Id == nil || value.Id != original.Id {
+		return false
+	}
+	// A shallow reference clone retains the declaration's source type view.
+	// A separately rebound view could select another overload at a later use.
+	if value.Type().GetJavaTypeRef() != original.Type().GetJavaTypeRef() || (value.WebDeclType == nil) != (original.WebDeclType == nil) {
+		return false
+	}
+	if value.WebDeclType != nil && value.WebDeclType.GetJavaTypeRef() != original.WebDeclType.GetJavaTypeRef() {
+		return false
+	}
+	pc, kind, known := value.OriginalStackMaterializationWitness(original.Val)
+	originalPC, originalKind, originalKnown := original.OriginalStackMaterializationWitness(original.Val)
+	return known && originalKnown && pc == originalPC && kind == originalKind
+}
+
+// Generated locals share the lexical scope of projected capture expressions.
+// Reserve capture/member/type/formal symbols before choosing a fresh name.
+func nativeAnonymousInitializerReservedLocalNames(object *ClassObject, ctx *class_context.ClassContext, bindings map[string]string, fields map[string]bool, work *workbudget.Budget) (map[string]bool, bool) {
+	if object == nil {
+		return nil, false
+	}
+	names := map[string]bool{}
+	valid := true
+	reserve := func(text string) {
+		if !valid || !nativeProofWork(work, int64(len(text)+1)) {
+			valid = false
+			return
+		}
+		names[text] = true
+		names[class_context.SafeIdentifier(text)] = true
+		for _, part := range strings.FieldsFunc(text, func(r rune) bool {
+			// '$' is part of a Java identifier, including the generated names.
+			// Capture bindings can be qualified or parenthesized expressions.
+			return r != '$' && r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		}) {
+			names[part] = true
+			names[class_context.SafeIdentifier(part)] = true
+		}
+	}
+	for name := range fields {
+		reserve(name)
+	}
+	for _, text := range bindings {
+		reserve(text)
+	}
+	for _, constant := range object.ConstantPool {
+		if !nativeProofWork(work, 1) {
+			return nil, false
+		}
+		if c, ok := constant.(*ConstantClassInfo); ok {
+			if c == nil {
+				return nil, false
+			}
+			if name, known := sourceBridgeUTF8(object, c.NameIndex); known {
+				reserve(name)
+			} else {
+				return nil, false
+			}
+		}
+	}
+	if ctx != nil {
+		for _, signature := range append([]string{ctx.ClassSig, ctx.CurrentMethodSig}, ctx.LexicalTypeParamSignatures...) {
+			if !nativeProofWork(work, int64(len(signature)+1)) {
+				return nil, false
+			}
+			formals, _, valid := types.SignatureTypeVariableReferences(signature)
+			if signature != "" && !valid {
+				return nil, false
+			}
+			if valid {
+				for _, name := range formals {
+					reserve(name)
+				}
+			}
+		}
+		for _, name := range ctx.LocalNames {
+			reserve(name)
+		}
+	}
+	return names, valid
 }

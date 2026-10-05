@@ -14,11 +14,14 @@ import (
 )
 
 type JavaRef struct {
-	VarUid      string
-	Id          *utils.VariableId
-	StackVar    JavaValue
-	CustomValue *CustomValue
-	IsThis      bool
+	VarUid                             string
+	Id                                 *utils.VariableId
+	StackVar                           JavaValue
+	CustomValue                        *CustomValue
+	IsThis                             bool
+	originalStackMaterialization       bool
+	originalStackPC, originalStackKind int
+	originalStackValue                 JavaValue
 	// IsParam marks a ref that was seeded from a method parameter (declared at method scope, live
 	// for the whole body). A parameter reassigned with an assignable reference value (`seq = str`
 	// where seq is a CharSequence param and str a String) must stay the SAME variable; splitting it
@@ -336,12 +339,13 @@ func NewJavaClassValue(typ types.JavaType) *JavaClassValue {
 }
 
 type JavaClassMember struct {
-	OriginPC    int
-	HasOriginPC bool
-	Name        string
-	Member      string
-	Description string
-	JavaType    types.JavaType
+	originalFieldRead *originalFieldRead
+	OriginPC          int
+	HasOriginPC       bool
+	Name              string
+	Member            string
+	Description       string
+	JavaType          types.JavaType
 	// RefKind is the CONSTANT_MethodHandle reference_kind (JVMS 5.4.3.5) when this
 	// member was resolved through a method handle (bootstrap, condy, indy impl).
 	// Zero means the kind was not recovered and must not whitelist-match T17 builtins.
@@ -374,11 +378,12 @@ func NewJavaClassMember(typeName, member string, desc string, typ types.JavaType
 }
 
 type RefMember struct {
-	OriginPC    int
-	HasOriginPC bool
-	Member      string
-	Object      JavaValue
-	JavaType    types.JavaType
+	originalFieldRead *originalFieldRead
+	OriginPC          int
+	HasOriginPC       bool
+	Member            string
+	Object            JavaValue
+	JavaType          types.JavaType
 }
 
 // ReplaceVar implements JavaValue.
@@ -910,4 +915,20 @@ func NewSlotValue(val JavaValue, typ types.JavaType) *SlotValue {
 		val:     val,
 		TmpType: typ,
 	}
+}
+
+// MarkOriginalStackMaterialization records a shared stack value at its actual
+// DUP lowering site. It does not authorize local-slot reads or assignments.
+func (r *JavaRef) MarkOriginalStackMaterialization(pc, kind int, value JavaValue) {
+	if r == nil || r.originalStackMaterialization || pc < 0 || isNilJavaValue(value) {
+		return
+	}
+	r.originalStackMaterialization = true
+	r.originalStackPC, r.originalStackKind, r.originalStackValue = pc, kind, value
+}
+func (r *JavaRef) OriginalStackMaterializationWitness(value JavaValue) (pc, kind int, known bool) {
+	if r == nil || !r.originalStackMaterialization || r.IsThis || r.IsParam || r.CustomValue != nil || r.StackVar != nil || !sameOriginalValueIdentity(r.originalStackValue, value) || !sameOriginalValueIdentity(r.originalStackValue, r.Val) {
+		return 0, 0, false
+	}
+	return r.originalStackPC, r.originalStackKind, true
 }
