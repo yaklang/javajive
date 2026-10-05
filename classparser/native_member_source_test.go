@@ -128,7 +128,7 @@ func TestNativeMemberArchiveRequiresCompleteRepresentableFamily(t *testing.T) {
 		{"generic child", `class NativeArchiveOwner{class Child<T>{Child(T n){}}Child<String> make(){return new Child<String>("x");}}`, true},
 		{"joint deeper owner", `class NativeArchiveOwner{class Child{class Deep{}Child(){}}Child make(){return new Child();}}`, true},
 		{"mixed static owner", `class NativeArchiveOwner{static class Static{}class Child{Child(){}}Child make(){return new Child();}}`, true},
-		{"mixed anonymous owner", `class NativeArchiveOwner{class Child{Child(){}}Object make(){return new Child();}Object other(){return new Object(){};}}`, false},
+		{"mixed anonymous owner", `class NativeArchiveOwner{class Child{Child(){}}Object make(){return new Child();}Object other(){return new Object(){};}}`, true},
 		{"member superclass", `class NativeArchiveOwner{class Base{}class Child extends Base{}Object make(){return new Child();}}`, true},
 		{"foreign subclass implicit owner", `class NativeArchiveOwner{class Child{Child(){}}Child make(){return new Child();}}class Sub extends NativeArchiveOwner.Child{Sub(NativeArchiveOwner o){o.super();}}`, false},
 	} {

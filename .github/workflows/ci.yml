@@ -63,7 +63,7 @@ jobs:
           set -o pipefail
           mkdir -p artifacts
           go test ./classparser -c -o "$RUNNER_TEMP/adversarial.test"
-          # Each shard covers about150 parents on the same pinned JDK. Four
+          # Disjoint parent groups run concurrently on the same pinned JDK. Four
           # serial processes per shard isolate environment-changing tests.
           # Exact original parent and nested-policy inventories remain checked;
           # the required summary waits for every shard and the40trusted fixtures.

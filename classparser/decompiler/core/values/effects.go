@@ -51,6 +51,11 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		return nil, true
 	case *JavaLiteral, *JavaClassValue, *JavaClassMember, *types.JavaClass, javaNull:
 		return nil, true
+	case *booleanStackView:
+		if v == nil || isNilJavaValue(v.operand) {
+			return nil, false
+		}
+		return []JavaValue{v.operand}, true
 	case *JavaExpression:
 		return v.Values, true
 	case *JavaArrayMember:
@@ -103,6 +108,8 @@ func isNilJavaValue(value JavaValue) bool {
 		return true
 	}
 	switch v := value.(type) {
+	case *booleanStackView:
+		return v == nil
 	case *JavaRef:
 		return v == nil
 	case *JavaArray:

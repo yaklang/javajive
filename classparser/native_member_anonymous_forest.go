@@ -2,8 +2,9 @@ package javaclassparser
 
 import "github.com/yaklang/javajive/internal/workbudget"
 
-// The existing direct-scope proof remains authoritative. A failed direct plan
-// cannot suppress children; retry only as one complete named/anonymous forest.
+// Direct scope proofs establish capture ownership within each group. Recreating
+// private accessors across named and anonymous scopes additionally needs one
+// complete lexical forest so that every original call has a committed owner.
 func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamily) bool {
 	reset := func() {
 		p.anonymous = nil
@@ -38,7 +39,8 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		}
 		p.memberAnonymous[name] = group
 	}
-	if direct && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) {
+	if direct && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) &&
+		(len(p.getters) == 0 || len(p.anonymousUnits) == 0) {
 		return true
 	}
 	reset()

@@ -163,6 +163,12 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 				if p.constructorBridges(call.Name)[call.Description] == nil {
 					continue
 				}
+				// A source call from the declaring class invokes the private
+				// target directly. It cannot retain this original synthetic
+				// invocation, even if another lexical caller needs that bridge.
+				if obj.GetClassName() == call.Name {
+					return false
+				}
 				// A flat foreign source unit cannot reproduce a Java private lexical call.
 				if obj.GetClassName() != p.owner && p.children[obj.GetClassName()] == nil && p.anonymousUnits[obj.GetClassName()] == nil {
 					return false
@@ -226,7 +232,7 @@ func nativeMemberStaticBridgeSource(plan *nativeMemberAllocation, args []class_c
 	name := ctx.ShortTypeName(invoke.ClassName)
 	node := &values.NewExpression{JavaType: types.NewJavaClass(invoke.ClassName), ConstructorCall: invoke}
 	diamond := node.SourceConstructorDiamond(&allocationBinding)
-	source := "new " + name + diamond + "(" + strings.Join(arguments, ",") + ")"
+	source := "new " + name + diamond + "(" + strings.Join(arguments, ",") + ")" + nativeMemberConstructorRegistration(p, plan.child.object.GetClassName(), plan.descriptor)
 	if diamond != "" {
 		return nativeMemberErasedAllocation(p, plan.child, source)
 	}

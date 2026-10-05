@@ -187,7 +187,7 @@ func nativeRootBridgeSourceDelegation(p *nativeMemberFamily, obj *ClassObject, c
 	if p.failed {
 		return fail()
 	}
-	return "super(" + strings.Join(arguments, ",") + ")", true
+	return "super(" + strings.Join(arguments, ",") + ")" + nativeMemberConstructorRegistration(p, name, descriptor), true
 }
 
 func nativeMemberJointBridgeEquivalent(p *nativeMemberFamily, obj *ClassObject, m *MemberInfo, desc string, work *workbudget.Budget) bool {
@@ -258,7 +258,7 @@ func nativeRootBridgeSourceAllocation(plan *nativeMemberAllocation, args []class
 	name := ctx.ShortTypeName(owner)
 	node := &values.NewExpression{JavaType: types.NewJavaClass(owner), ConstructorCall: invoke}
 	diamond := node.SourceConstructorDiamond(&allocationBinding)
-	source := "new " + name + diamond + "(" + strings.Join(arguments, ",") + ")"
+	source := "new " + name + diamond + "(" + strings.Join(arguments, ",") + ")" + nativeMemberConstructorRegistration(p, p.owner, plan.descriptor)
 	if diamond != "" {
 		source = "((" + name + ")(" + source + "))"
 	}

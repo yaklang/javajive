@@ -13,9 +13,8 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// A legacy private write accessor returns precisely the assigned value. It has
-// no read/modify/write step: admitting compound accessors here would move a
-// field read ahead of the original RHS evaluation.
+// Each original access operation has its own packet proof. A plain write is
+// never a read/modify/write operation, even when its descriptor looks similar.
 func nativeMemberPrivateAccessProof(obj *ClassObject, m *MemberInfo, work *workbudget.Budget) *nativeMemberPrivateGetter {
 	if getter := nativeMemberPrivateGetterProof(obj, m, work); getter != nil {
 		return getter
@@ -23,7 +22,14 @@ func nativeMemberPrivateAccessProof(obj *ClassObject, m *MemberInfo, work *workb
 	if call := nativeMemberPrivateCallProof(obj, m, work); call != nil {
 		return call
 	}
-	if obj == nil || m == nil || obj.MinorVersion != 0 || (obj.MajorVersion != 51 && obj.MajorVersion != 52) || m.AccessFlags != 0x1008 || !nativeProofWork(work, 1) {
+	if setter := nativeMemberPlainSetterProof(obj, m, work); setter != nil {
+		return setter
+	}
+	return nativeMemberPrivateUpdateProof(obj, m, work)
+}
+
+func nativeMemberPlainSetterProof(obj *ClassObject, m *MemberInfo, work *workbudget.Budget) *nativeMemberPrivateGetter {
+	if obj == nil || m == nil || m.AccessFlags != 0x1008 || !nativeAccessorVersion(obj, work) || !nativeProofWork(work, 1) {
 		return nil
 	}
 	name, nok := sourceBridgeUTF8(obj, m.NameIndex)

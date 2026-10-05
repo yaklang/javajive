@@ -1,0 +1,11 @@
+package javaclassparser
+
+import "testing"
+
+const nativeCompoundAccessorFixture = `class CompoundEffects{static String trace="";static int fail;static final RuntimeException failure=new RuntimeException("original");static CompoundOwner receiver(CompoundOwner owner){trace+="R";if(fail==1)throw failure;return owner;}static long right(CompoundOwner owner,long n){trace+="V";if(fail==2)throw failure;if(owner!=null)owner.reset(20);return n;}}
+class CompoundOwner{private volatile long value;void reset(long n){value=n;}class Writer{long add(CompoundOwner owner,long n){return CompoundEffects.receiver(owner).value+=CompoundEffects.right(owner,n);}long post(CompoundOwner owner){return CompoundEffects.receiver(owner).value++;}long pre(CompoundOwner owner){return ++CompoundEffects.receiver(owner).value;}long get(){return value;}}Writer writer(){return new Writer();}}
+class CompoundDriver{public static void main(String[]args){CompoundOwner owner=new CompoundOwner();CompoundOwner.Writer writer=owner.writer();CompoundEffects.trace="";owner.reset(5);long result=writer.add(owner,3);if(result!=23||writer.get()!=23||!CompoundEffects.trace.equals("RV"))throw new AssertionError("read after RHS / once / update result: "+result);int rows=0;for(long n:new long[]{Long.MIN_VALUE,-1,0,1,Long.MAX_VALUE}){owner.reset(n);CompoundEffects.trace="";if(writer.post(owner)!=n||writer.get()!=n+1||!CompoundEffects.trace.equals("R"))throw new AssertionError("post old/new overflow");owner.reset(n);CompoundEffects.trace="";if(writer.pre(owner)!=n+1||writer.get()!=n+1||!CompoundEffects.trace.equals("R"))throw new AssertionError("pre old/new overflow");rows++;}for(int fail:new int[]{0,1,2}){CompoundEffects.fail=fail;CompoundEffects.trace="";try{writer.add(null,1);throw new AssertionError("missing failure");}catch(RuntimeException e){if(fail==0?!(e instanceof NullPointerException):e!=CompoundEffects.failure)throw new AssertionError("failure identity");}if(!CompoundEffects.trace.equals(fail==1?"R":"RV"))throw new AssertionError("null/RHS order");}System.out.println(rows+":compound:accessor:read:write:return:order");}}`
+
+func TestNativeCompoundAccessorRoundTrip(t *testing.T) {
+	testNativePrivateSetterFixture(t, nativeCompoundAccessorFixture, "CompoundOwner", "CompoundDriver", "5:compound:accessor:read:write:return:order\n")
+}

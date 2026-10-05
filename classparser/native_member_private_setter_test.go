@@ -94,8 +94,8 @@ func TestNativePrivateSetterRequiresExactOriginalWriteProtocol(t *testing.T) {
 	}
 }
 
-// A compound accessor evaluates its field read after the caller's RHS has
-// already completed. A source '+=' may read earlier; this proof must refuse it.
+// The plain-setter protocol must continue refusing read/modify/write packets;
+// those require their own original operation and compiler-regeneration proof.
 func TestNativePrivateSetterRefusesCompoundAccess(t *testing.T) {
 	source := strings.Replace(nativePrivateSetterFixture, ".number=SetterEffects.number(n)", ".number+=SetterEffects.number(n)", 1)
 	files := nativeCompileClasses(t, source)
@@ -108,8 +108,8 @@ func TestNativePrivateSetterRefusesCompoundAccess(t *testing.T) {
 		n, _ := sourceBridgeUTF8(obj, m.NameIndex)
 		if n == "access$114" {
 			found = true
-			if nativeMemberPrivateAccessProof(obj, m, nil) != nil {
-				t.Fatal("compound accessor accepted")
+			if nativeMemberPlainSetterProof(obj, m, nil) != nil {
+				t.Fatal("compound accessor accepted as a plain write")
 			}
 		}
 	}

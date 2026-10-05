@@ -10,8 +10,9 @@ import (
 )
 
 type CustomStatement struct {
-	Name string
-	Info any
+	sourceTransferKind string
+	Name               string
+	Info               any
 	// Labeled transfers retain their target separately from the render closure.
 	// A protected-region proof accepts them only while that target is enclosed.
 	LoopTransferKind string
@@ -27,10 +28,19 @@ type CustomStatement struct {
 
 // ReplaceVar implements Statement.
 func (v *CustomStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if v.sourceTransferKind != "" {
+		return
+	}
 	v.replaceVar(oldId, newId)
 }
 
 func (v *CustomStatement) String(funcCtx *class_context.ClassContext) string {
+	if v.sourceTransferKind != "" {
+		if v.LoopTargetLabel == "" {
+			return v.sourceTransferKind
+		}
+		return v.sourceTransferKind + " " + v.LoopTargetLabel
+	}
 	if name, ok := erasedThrowableTypeVariableView(funcCtx, v.ThrownValue); ok {
 		return fmt.Sprintf("throw (%s) (%s)", name, v.ThrownValue.String(funcCtx))
 	}

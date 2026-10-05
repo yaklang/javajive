@@ -6408,6 +6408,11 @@ func (d *Decompiler) ParseStatement() error {
 	if d.semanticCFG != nil && d.semanticCFG.Err != nil {
 		return d.semanticCFG.Err
 	}
+	monitorOwners := d.originalMonitorOwners()
+	monitorReturns, monitorSnapshots, err := d.snapshotOriginalMonitorReturns(monitorOwners)
+	if err != nil {
+		return err
+	}
 	var runCode func(startNode *OpCode) error
 	var parseOpcode func(opcode *OpCode) error
 	parseOpcode = func(opcode *OpCode) error {
@@ -6422,7 +6427,7 @@ func (d *Decompiler) ParseStatement() error {
 			// to a later producer inside the protected region.
 			defer func() {
 				if tryCatchOpcode == opcode {
-					appendNode(statements.NewCustomStatement(func(*class_context.ClassContext) string { return "" }, func(_, _ *utils2.VariableId) {}))
+					appendNode(statements.NewSourceAnchorStatement())
 				}
 			}()
 		}
@@ -6704,6 +6709,9 @@ func (d *Decompiler) ParseStatement() error {
 			appendNode(statements.NewReturnStatement(v))
 		case OP_ARETURN, OP_LRETURN, OP_DRETURN, OP_FRETURN:
 			v := opcode.stackConsumed[0]
+			if snapshot := monitorReturns[opcode]; snapshot != nil {
+				v = snapshot
+			}
 			resetReturnValueTypeSafe(v, funcCtx)
 			appendNode(statements.NewReturnStatement(v))
 		case OP_GETFIELD:
@@ -6763,15 +6771,21 @@ func (d *Decompiler) ParseStatement() error {
 		case OP_MONITORENTER:
 			v := opcode.stackConsumed[0]
 			st := statements.NewMiddleStatement("monitor_enter", v)
+			if owner, known := monitorOwners[opcode]; known {
+				st = statements.NewOriginalMonitorStatement("monitor_enter", v, int(opcode.CurrentOffset), owner)
+			}
 			appendNode(st)
 		case OP_MONITOREXIT:
 			st := statements.NewMiddleStatement("monitor_exit", nil)
+			if owner, known := monitorOwners[opcode]; known {
+				st = statements.NewOriginalMonitorStatement("monitor_exit", nil, int(opcode.CurrentOffset), owner)
+			}
 			appendNode(st)
 		case OP_NOP:
 			if opcode.IsTryCatchParent {
 				// This NOP owns exception-table edges. Retain its structural
 				// node even though it has no JVM value or execution effect.
-				appendNode(statements.NewCustomStatement(func(*class_context.ClassContext) string { return "" }, func(_, _ *utils2.VariableId) {}))
+				appendNode(statements.NewSourceAnchorStatement())
 			}
 			return nil
 		case OP_POP:
@@ -7000,7 +7014,7 @@ func (d *Decompiler) ParseStatement() error {
 				// An edge-materialized phi is emitted after this opcode's
 				// own statement. Preserve both in their original order, e.g.
 				// CHECKCAST's definition followed by the incoming assignment.
-				if d.effectfulStackPhiEdges[op] == nil {
+				if d.effectfulStackPhiEdges[op] == nil && monitorSnapshots[op].Ref == nil {
 					continue
 				}
 			}
@@ -7025,7 +7039,7 @@ func (d *Decompiler) ParseStatement() error {
 					break
 				}
 			}
-			if !allAssign {
+			if !allAssign && !originalMonitorSnapshotChain(chain, primary, idToOpcode[primary.Id], monitorOwners, monitorSnapshots) {
 				continue
 			}
 			// Detach the orphan nodes from whatever the wiring loop hooked them to.

@@ -607,10 +607,10 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 		}
 		child.sourceName = source
 	}
-	if !nativeMemberCollectPrivateGetters(p, c.Work) {
+	p.rootAccessBridges = c.nativeConstructorAccessBridges()
+	if !nativeMemberCollectPrivateGettersResolved(p, c.nativeAnnotationDeclarationResolver(), c.Work) {
 		return nil
 	}
-	p.rootAccessBridges = c.nativeConstructorAccessBridges()
 	// The current source compiler profile promotes private constructors of an
 	// abstract root to package access and removes their bridge/marker classes.
 	// A valid original JVM can retain both. Do not claim binary regeneration
@@ -1177,6 +1177,42 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		if !valid {
 			p.failed = true
 		} else {
+			originalDeclarations := c.nativeAnnotationDeclarationResolver()
+			ctx.SourceLexicalInvocationReceiver = func(value any) (string, bool) {
+				call, ok := value.(*values.FunctionCallExpression)
+				if !ok || call == nil {
+					return "", false
+				}
+				operand, known := nativeMemberEnclosingUnpack(call.Object, c.Work)
+				if !known {
+					return "", false
+				}
+				var read *nativeMemberLexicalRead
+				var child *nativeMemberClass
+				var source string
+				if field, ok := operand.(*values.RefMember); ok && field != nil && field.HasOriginPC {
+					read = reads[ctx.FunctionName+ctx.CurrentMethodDesc][field.OriginPC]
+					if read == nil || !nativeMemberLexicalReadOperand(field, read, c.Work, ctx) {
+						return "", false
+					}
+					child = p.children[read.owner]
+					source, known = ctx.SourceLexicalCapturedField(field, field.OriginPC, field.Member)
+					if !known {
+						return "", false
+					}
+				} else if current := c.nativeMemberCurrent; current != nil && !current.static && ctx.FunctionName == "<init>" && current.constructors[ctx.CurrentMethodDesc] != nil && nativeMemberSourceEnclosingParameter(operand, ctx, current.owner) {
+					child = current
+					read = &nativeMemberLexicalRead{descriptor: "L" + current.owner + ";", parameterOwner: current.owner}
+					source = operand.String(ctx)
+				} else {
+					return "", false
+				}
+				if child == nil || child.outerFormalCount == 0 || !nativeLexicalRawInvocation(c.obj, ctx.FunctionName, ctx.CurrentMethodDesc, call, read, originalDeclarations, c.Work) {
+					return "", false
+				}
+				owner := ctx.ShortTypeName(strings.ReplaceAll(child.owner, "/", "."))
+				return "((" + owner + ")(" + source + "))", true
+			}
 			ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
 				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
 				if read == nil {
@@ -1344,6 +1380,15 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		} else if !plan.implicitEnclosing && !(args[0].Receiver && c.obj.GetClassName() == plan.child.owner) {
 			source = "(" + args[0].Text + ")." + source
 		}
+		if plan.child.accessBridges[desc] != nil {
+			// javac translates constructor arguments before registering the
+			// private constructor, and a qualified enclosing operand after it.
+			// Keep the unproved qualified-access registration order closed.
+			if strings.Contains(args[0].Text, "jdec-owned-getter:") || strings.Contains(args[0].Text, nativeConstructorRegistrationPrefix) {
+				return fail()
+			}
+			source += nativeMemberConstructorRegistration(p, plan.child.object.GetClassName(), desc)
+		}
 		if diamond {
 			return nativeMemberErasedAllocation(p, plan.child, source)
 		}
@@ -1467,10 +1512,10 @@ func (c *ClassObjectDumper) nativeMemberSkipCheck(st statements.Statement) bool 
 	}
 	return c.nativeMemberChecks[c.FuncCtx.FunctionName+c.FuncCtx.CurrentMethodDesc][call.OriginPC]
 }
-func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
+func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 	p := c.nativeMemberRoot
 	if p == nil || c.obj.GetClassName() != p.owner && p.children[c.obj.GetClassName()] == nil {
-		return "", nil
+		return nil, nil
 	}
 	names := make([]string, 0, len(p.children))
 	for n, child := range p.children {
@@ -1479,7 +1524,7 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 		}
 	}
 	sort.Strings(names)
-	var out strings.Builder
+	var out []string
 	for _, name := range names {
 		child := p.children[name]
 		sub := NewClassObjectDumper(child.object)
@@ -1516,12 +1561,12 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 					continue
 				}
 				if !nativeProofWork(c.Work, int64(len(code.Code))) {
-					return "", fmt.Errorf("member code budget")
+					return nil, fmt.Errorf("member code budget")
 				}
 				d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(child.object.ConstantPool, i) })
 				d.Work = c.Work
 				if d.ParseOpcode() != nil {
-					return "", fmt.Errorf("member code parse")
+					return nil, fmt.Errorf("member code parse")
 				}
 				for _, op := range d.Opcodes() {
 					if field := constructorMotionMember(child.object, op, core.OP_GETFIELD); field != nil && field.Name == name && field.Member == child.field {
@@ -1532,28 +1577,26 @@ func (c *ClassObjectDumper) renderNativeMembers() (string, error) {
 		}
 		src, e := sub.DumpClass()
 		if e != nil || sub.nativeCaptureFailed || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || len(sub.interfaceInitializerHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
-			return "", fmt.Errorf("member body unproved: %v", e)
+			return nil, fmt.Errorf("member body unproved: %v", e)
 		}
 		if group := p.memberAnonymous[name]; group != nil && !group.completeOwnSource(src) {
 			ordinals, _ := nativeAnonymousOrdinalsWithinOwner(src, group.owner)
-			return "", fmt.Errorf("member anonymous source layout unproved: %s failed=%v ordinals=%v children=%d", group.owner, group.failed, ordinals, len(group.children))
+			return nil, fmt.Errorf("member anonymous source layout unproved: %s failed=%v ordinals=%v children=%d", group.owner, group.failed, ordinals, len(group.children))
 		}
 		for _, method := range sub.dumpedMethodsSet {
 			if method != nil && method.checkedEscape {
-				return "", fmt.Errorf("member requires enclosing checked escape helper")
+				return nil, fmt.Errorf("member requires enclosing checked escape helper")
 			}
 		}
 		for _, imp := range javaExtractImports(src) {
 			c.FuncCtx.Import(imp)
 		}
 		if !strings.HasPrefix(src, sub.nativeMemberUnitPrefix) {
-			return "", fmt.Errorf("member compilation unit prefix changed")
+			return nil, fmt.Errorf("member compilation unit prefix changed")
 		}
-		out.WriteString("\n")
-		out.WriteString(src[len(sub.nativeMemberUnitPrefix):])
-		out.WriteString("\n")
+		out = append(out, "\n"+src[len(sub.nativeMemberUnitPrefix):]+"\n")
 	}
-	return out.String(), nil
+	return out, nil
 }
 
 func nativeMemberParameterWidth(params []string) int {

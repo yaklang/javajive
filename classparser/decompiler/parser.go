@@ -56,12 +56,21 @@ func ParseBytesCode(decompiler *core.Decompiler) (res []statements.Statement, er
 		allNodes = append(allNodes, node)
 		return node.Next, nil
 	})
+	protectedRegions := []*core.Node{}
+	for _, node := range allNodes {
+		if node.HasProtectedRange {
+			protectedRegions = append(protectedRegions, node)
+		}
+	}
 	slices.Reverse(allNodes)
 	for _, node := range allNodes {
 		if v, ok := node.Statement.(*statements.ConditionStatement); ok {
 			if v.Callback != nil {
 				v.Callback(v.Condition)
 				allNext := slices.Clone(node.Next)
+				if len(allNext) == 1 || len(allNext) == 2 && allNext[0] == allNext[1] {
+					rewriter.RetargetCollapsedConditionBoundary(protectedRegions, node, allNext[0])
+				}
 				for _, nextNode := range allNext {
 					node.RemoveNext(nextNode)
 				}

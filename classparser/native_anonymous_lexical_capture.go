@@ -75,8 +75,33 @@ func nativeAnonymousForestCaptureNameType(forest *nativeAnonymousForest, object 
 	return used
 }
 
-func nativeAnonymousForestVersion(object *ClassObject) bool {
-	return object != nil && object.MinorVersion == 0 && (object.MajorVersion == 51 || object.MajorVersion == 52)
+func nativeAnonymousForestVersion(object *ClassObject, work *workbudget.Budget) bool {
+	if !nativeAccessorVersion(object, work) {
+		return false
+	}
+	if object.MajorVersion >= 52 {
+		return true
+	}
+	// Named and anonymous ownership metadata first became authoritative in
+	// version 49. Before 51 there are no dynamic CP entries, and before 52
+	// static/special interface calls are not valid instructions. Check the
+	// original instruction boundaries too; editing the version grants nothing.
+	for _, m := range object.Methods {
+		if m == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		for _, a := range m.Attributes {
+			if !nativeProofWork(work, 1) {
+				return false
+			}
+			if code, ok := a.(*CodeAttribute); ok {
+				if code == nil || !nativeLegacyForestCode(object, code, work) {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func nativeAnonymousForestCaptureMetadata(child *nativeAnonymousClass, work *workbudget.Budget) bool {

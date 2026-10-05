@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -23,13 +24,27 @@ func nativeCompileDebugClasses(t *testing.T, source, debug string) map[string][]
 
 func nativeCompileReleaseClasses(t *testing.T, source, debug, release string) map[string][]byte {
 	t.Helper()
+	return nativeCompileSourceReleaseClasses(t, map[string]string{"NativeArchiveOwner.java": source}, debug, release)
+}
+
+func nativeCompileSourceReleaseClasses(t *testing.T, sources map[string]string, debug, release string) map[string][]byte {
+	t.Helper()
 	javac, _ := t04Tools(t)
 	dir := t.TempDir()
-	file := filepath.Join(dir, "NativeArchiveOwner.java")
-	if err := os.WriteFile(file, []byte(source), 0600); err != nil {
-		t.Fatal(err)
+	paths := []string{}
+	for name, source := range sources {
+		file := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, file)
 	}
-	if out, err := exec.Command(javac, "-proc:none", "--release", release, "-g:"+debug, "-d", dir, file).CombinedOutput(); err != nil {
+	sort.Strings(paths)
+	args := append([]string{"-proc:none", "--release", release, "-g:" + debug, "-d", dir}, paths...)
+	if out, err := exec.Command(javac, args...).CombinedOutput(); err != nil {
 		t.Fatalf("original: %v\n%s", err, out)
 	}
 	files := map[string][]byte{}

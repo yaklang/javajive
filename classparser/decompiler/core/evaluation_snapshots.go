@@ -1,7 +1,6 @@
 package core
 
 import (
-	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"reflect"
 	"strings"
 
@@ -103,7 +102,10 @@ func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, valu
 			}
 			source := snapshot.Value
 			ref := snapshot.Ref
-			ref.CustomValue = values.NewCustomValue(func(ctx *class_context.ClassContext) string { return source.String(ctx) }, func() types.JavaType { return source.Type() })
+			// Preserve this already-proved adjacent capture as an explicit value
+			// dependency. A forwarding text closure hides its scoped local
+			// binding from namespace and effect visitors.
+			ref.StackVar = source
 		}
 		delete(d.evaluationSnapshots, op)
 		typed := &values.CastExpression{Value: value, TargetType: value.Type().Copy(), Binding: true, OriginPC: int(op.CurrentOffset)}

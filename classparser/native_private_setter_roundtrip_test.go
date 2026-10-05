@@ -69,12 +69,38 @@ func TestNativePrivateSetterAndGetterPreserveOriginalProtocol(t *testing.T) {
 
 func testNativePrivateSetterFixture(t *testing.T, fixture, owner, driver, want string) {
 	t.Helper()
+	testNativePrivateSetterFixtureWithMutation(t, fixture, owner, driver, want, nil)
+}
+
+func testNativePrivateSetterFixtureWithMutation(t *testing.T, fixture, owner, driver, want string, mutate func(*testing.T, map[string][]byte)) {
+	t.Helper()
+	testNativePrivateSetterCompiledFixture(t, owner, driver, want, func(t *testing.T, debug string) map[string][]byte {
+		files := nativeCompileDebugClasses(t, fixture, debug)
+		if mutate != nil {
+			mutate(t, files)
+		}
+		return files
+	})
+}
+
+func testNativePrivateSetterSourceFixture(t *testing.T, sources map[string]string, owner, driver, want string) {
+	t.Helper()
+	testNativePrivateSetterCompiledFixture(t, owner, driver, want, func(t *testing.T, debug string) map[string][]byte {
+		return nativeCompileSourceReleaseClasses(t, sources, debug, "8")
+	})
+}
+
+func testNativePrivateSetterCompiledFixture(t *testing.T, owner, driver, want string, compile func(*testing.T, string) map[string][]byte, verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
 	javac, java := t04Tools(t)
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
-			files := nativeCompileDebugClasses(t, fixture, debug)
+			files := compile(t, debug)
 			original := t.TempDir()
 			for n, raw := range files {
+				if e := os.MkdirAll(filepath.Dir(filepath.Join(original, n)), 0700); e != nil {
+					t.Fatal(e)
+				}
 				if e := os.WriteFile(filepath.Join(original, n), raw, 0600); e != nil {
 					t.Fatal(e)
 				}
@@ -96,6 +122,9 @@ func testNativePrivateSetterFixture(t *testing.T, fixture, owner, driver, want s
 					out := t.TempDir()
 					paths := []string{}
 					for n, raw := range files {
+						if e := os.MkdirAll(filepath.Dir(filepath.Join(out, n)), 0700); e != nil {
+							t.Fatal(e)
+						}
 						if !strings.HasPrefix(n, owner) {
 							if e := os.WriteFile(filepath.Join(out, n), raw, 0600); e != nil {
 								t.Fatal(e)
@@ -107,6 +136,9 @@ func testNativePrivateSetterFixture(t *testing.T, fixture, owner, driver, want s
 							t.Fatalf("source %s:%v\n%s", n, e, source)
 						}
 						path := filepath.Join(out, strings.TrimSuffix(n, ".class")+".java")
+						if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
+							t.Fatal(e)
+						}
 						if e := os.WriteFile(path, source, 0600); e != nil {
 							t.Fatal(e)
 						}
@@ -131,6 +163,9 @@ func testNativePrivateSetterFixture(t *testing.T, fixture, owner, driver, want s
 						}
 						if got := nativeAnonymousAccessorShape(t, raw); got != nativeAnonymousAccessorShape(t, want) {
 							t.Fatalf("accessor ABI %s\n%s\n%s", n, nativeAnonymousAccessorShape(t, want), got)
+						}
+						for _, check := range verify {
+							check(t, n, want, raw)
 						}
 					}
 				})

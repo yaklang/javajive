@@ -23,7 +23,7 @@ type nativeConstructorAccessBridge struct {
 func (c *ClassObjectDumper) nativeConstructorAccessBridges() map[string]*nativeConstructorAccessBridge {
 	result := map[string]*nativeConstructorAccessBridge{}
 	obj := c.obj
-	if obj == nil || (obj.MajorVersion < 51 || obj.MajorVersion > 52 || obj.MinorVersion != 0) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+	if !nativeAccessorVersion(obj, c.Work) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
 		return result
 	}
 	constructors := map[string][]*MemberInfo{}

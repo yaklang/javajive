@@ -391,7 +391,11 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 			return
 		}
 		staticDependenciesChecked := false
-		for _, object := range append([]*ClassObject{root}, nativeMemberObjects(p)...) {
+		dependencyObjects, known := nativeMemberDependencyObjects(root, p, d.Work)
+		if !known {
+			return
+		}
+		for _, object := range dependencyObjects {
 			references, known := nativeMemberDependencyNames(object, d.Work)
 			if !known {
 				return
@@ -492,12 +496,39 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 	})
 	return entry
 }
-func nativeMemberObjects(p *nativeMemberFamily) []*ClassObject {
-	objects := make([]*ClassObject, 0, len(p.children))
-	for _, child := range p.children {
-		objects = append(objects, child.object)
+
+// Every body emitted in the joint source unit contributes binding dependencies,
+// including anonymous declarations whose referenced types occur only in a
+// descriptor or Signature. Reuse the already proved ownership; do not consult
+// the family cache recursively or import an external class into its private nest.
+func nativeMemberDependencyObjects(root *ClassObject, p *nativeMemberFamily, work *workbudget.Budget) ([]*ClassObject, bool) {
+	if root == nil || p == nil || p.failed || root.GetClassName() != p.owner ||
+		len(p.children) > 64 || len(p.anonymousUnits) > 64 ||
+		!nativeProofWork(work, int64(len(p.children)+len(p.anonymousUnits)+1)) ||
+		work != nil && work.CheckAlloc(int64(len(p.children)+len(p.anonymousUnits)+1)*128) != nil {
+		return nil, false
 	}
-	return objects
+	objects := []*ClassObject{root}
+	seen := map[string]bool{p.owner: true}
+	add := func(name string, object *ClassObject) bool {
+		if object == nil || object.GetClassName() != name || seen[name] {
+			return false
+		}
+		seen[name] = true
+		objects = append(objects, object)
+		return true
+	}
+	for name, child := range p.children {
+		if child == nil || !add(name, child.object) {
+			return nil, false
+		}
+	}
+	for name, group := range p.anonymousUnits {
+		if group == nil || group.failed || group.children[name] == nil || !add(name, group.children[name].object) {
+			return nil, false
+		}
+	}
+	return objects, true
 }
 func (z *JarFS) nativeMemberLookup(name string) *nativeMemberClass {
 	name = strings.ReplaceAll(name, ".", "/")

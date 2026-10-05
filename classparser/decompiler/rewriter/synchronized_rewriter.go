@@ -37,7 +37,8 @@ func removeSunkMonitorExit(sts []statements.Statement) ([]statements.Statement, 
 }
 
 func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
-	val := node.Statement.(*statements.MiddleStatement).Data.(values.JavaValue)
+	entry := node.Statement.(*statements.MiddleStatement)
+	val := entry.Data.(values.JavaValue)
 	// Find the TryCatchStatement following the monitor_enter. In rare cases the
 	// monitor_enter may have multiple Next nodes (from CFG restructuring); search
 	// all of them for a try-catch node.
@@ -65,7 +66,16 @@ func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
 	currentNode := tryNode
 	var bodySts, otherBody []statements.Statement
 	foundTop := false
-	for i := 0; i < len(trySt.TryBody); i++ {
+	certified := false
+	if _, owner, known := entry.OriginalMonitor(); known && originalMonitorHandlerClosed(trySt, owner) {
+		var valid bool
+		bodySts, otherBody, valid = originalMonitorSourceBody(trySt.TryBody, owner)
+		if valid {
+			foundTop = true
+			certified = true
+		}
+	}
+	for i := 0; !foundTop && i < len(trySt.TryBody); i++ {
 		if v, ok := trySt.TryBody[i].(*statements.MiddleStatement); ok && v.Flag == "monitor_exit" {
 			bodySts = trySt.TryBody[:i]
 			otherBody = trySt.TryBody[i+1:]
@@ -111,7 +121,11 @@ func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 	next := slices.Clone(currentNode.Next)
 	source := slices.Clone(node.Source)
-	synNode := manager.NewNode(statements.NewSynchronizedStatement(val, bodySts))
+	synchronizedSource := statements.NewSynchronizedStatement(val, bodySts)
+	if certified {
+		synchronizedSource = statements.NewSynchronizedStatementFromMonitor(entry, bodySts)
+	}
+	synNode := manager.NewNode(synchronizedSource)
 	currentN := synNode
 	for _, statement := range otherBody {
 		n := manager.NewNode(statement)

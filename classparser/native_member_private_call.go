@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"encoding/binary"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,14 +13,34 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-type nativeMemberPrivateCall struct{ argumentCount int }
+type nativeMemberPrivateCall struct {
+	argumentCount     int
+	methodFormalCount int
+	static            bool
+	inherited         bool
+	rawGeneric        bool
+}
 
-// A legacy static access bridge forwards each physical parameter once, in
-// order, into one exact private nonvirtual invocation. Checked exceptions are
-// copied from that declaration. No fields, conversions or other effects are
-// part of this packet; generic bridges require a separate binding proof.
+// A private bridge forwards each physical parameter once, in order, into
+// its original owned nonvirtual/static target. No additional field effects,
+// conversions or generic binding guesses are part of this packet.
 func nativeMemberPrivateCallProof(obj *ClassObject, m *MemberInfo, work *workbudget.Budget) *nativeMemberPrivateGetter {
-	if obj == nil || m == nil || obj.MinorVersion != 0 || (obj.MajorVersion != 51 && obj.MajorVersion != 52) || obj.AccessFlags&0x0200 != 0 || m.AccessFlags != 0x1008 || !nativeProofWork(work, 1) {
+	return nativeMemberCallPacketProof(obj, m, nil, work)
+}
+
+func nativeMemberProtectedCallProof(obj *ClassObject, m *MemberInfo, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeMemberPrivateGetter {
+	packet := nativeMemberCallPacketProof(obj, m, resolve, work)
+	if packet == nil || packet.call == nil || !packet.call.inherited {
+		return nil
+	}
+	return packet
+}
+
+// The common packet proof retains physical slots, descriptor widths, return
+// category and the exact checked-exception contract. Only a complete original
+// superclass lookup licenses the separate inherited protected virtual case.
+func nativeMemberCallPacketProof(obj *ClassObject, m *MemberInfo, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeMemberPrivateGetter {
+	if obj == nil || m == nil || m.AccessFlags != 0x1008 || obj.AccessFlags&0x0200 != 0 || !nativeAccessorVersion(obj, work) || !nativeProofWork(work, 1) {
 		return nil
 	}
 	name, nok := sourceBridgeUTF8(obj, m.NameIndex)
@@ -32,7 +51,7 @@ func nativeMemberPrivateCallProof(obj *ClassObject, m *MemberInfo, work *workbud
 		return nil
 	}
 	params, result, e := callbinding.Descriptor(desc)
-	if e != nil || len(params) == 0 || params[0] != "L"+obj.GetClassName()+";" || len(params) > 128 {
+	if e != nil || len(params) > 128 {
 		return nil
 	}
 	var code *CodeAttribute
@@ -64,52 +83,8 @@ func nativeMemberPrivateCallProof(obj *ClassObject, m *MemberInfo, work *workbud
 		return nil
 	}
 
-	seenLines, seenLocals := false, false
-	if len(code.Attributes) > 2 {
+	if !nativeAccessorCodeMetadata(obj, code, params, work) {
 		return nil
-	}
-	for _, attr := range code.Attributes {
-		if !nativeProofWork(work, 1) {
-			return nil
-		}
-		switch a := attr.(type) {
-		case *LineNumberTableAttribute:
-			if a == nil || seenLines || len(a.LineNumberTable) != 1 || a.LineNumberTable[0] == nil || a.LineNumberTable[0].StartPc != 0 {
-				return nil
-			}
-			seenLines = true
-		case *UnparsedAttribute:
-			if a == nil || seenLocals || a.Name != "LocalVariableTable" || len(a.Info) != 2+10*len(params) || !nativeProofWork(work, int64(len(a.Info))) {
-				return nil
-			}
-			u := func(i int) uint16 { return binary.BigEndian.Uint16(a.Info[i : i+2]) }
-			if int(u(0)) != len(params) {
-				return nil
-			}
-			slots := make(map[int]int, len(params))
-			physicalSlot := 0
-			for i, param := range params {
-				slots[physicalSlot] = i
-				physicalSlot++
-				if param == "J" || param == "D" {
-					physicalSlot++
-				}
-			}
-			seen := map[int]bool{}
-			for offset := 2; offset < len(a.Info); offset += 10 {
-				slot := int(u(offset + 8))
-				index, known := slots[slot]
-				n, nk := sourceBridgeUTF8(obj, u(offset+4))
-				ds, dk := sourceBridgeUTF8(obj, u(offset+6))
-				if !known || seen[slot] || u(offset) != 0 || int(u(offset+2)) != len(code.Code) || !nk || !dk || class_context.SafeIdentifier(n) != n || ds != params[index] {
-					return nil
-				}
-				seen[slot] = true
-			}
-			seenLocals = true
-		default:
-			return nil
-		}
 	}
 
 	d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
@@ -131,16 +106,32 @@ func nativeMemberPrivateCallProof(obj *ClassObject, m *MemberInfo, work *workbud
 			slot++
 		}
 	}
-	invoke := constructorMotionMember(obj, ops[len(params)], core.OP_INVOKESPECIAL)
+	// The original invocation kind distinguishes a receiver slot from static
+	// parameters, including the valid zero-argument factory packet.
+	static := ops[len(params)].Instr.OpCode == core.OP_INVOKESTATIC
+	inherited := ops[len(params)].Instr.OpCode == core.OP_INVOKEVIRTUAL
+	if inherited && resolve == nil {
+		return nil
+	}
+	kind, offset := core.OP_INVOKESPECIAL, 1
+	if static {
+		kind, offset = core.OP_INVOKESTATIC, 0
+	} else if len(params) == 0 || params[0] != "L"+obj.GetClassName()+";" {
+		return nil
+	}
+	if inherited {
+		kind = core.OP_INVOKEVIRTUAL
+	}
+	invoke := constructorMotionMember(obj, ops[len(params)], kind)
 	if invoke == nil || invoke.Name != obj.GetClassName() || invoke.Member == "<init>" || class_context.SafeIdentifier(invoke.Member) != invoke.Member {
 		return nil
 	}
 	targetParams, targetResult, e := callbinding.Descriptor(invoke.Description)
-	if e != nil || targetResult != result || len(targetParams) != len(params)-1 {
+	if e != nil || targetResult != result || len(targetParams) != len(params)-offset {
 		return nil
 	}
 	for i, param := range targetParams {
-		if param != params[i+1] {
+		if param != params[i+offset] {
 			return nil
 		}
 	}
@@ -160,31 +151,45 @@ func nativeMemberPrivateCallProof(obj *ClassObject, m *MemberInfo, work *workbud
 	if ops[len(ops)-1].Instr.OpCode != ret || len(ops[len(ops)-1].Data) != 0 {
 		return nil
 	}
-	var target *MemberInfo
-	for _, candidate := range obj.Methods {
-		if candidate == nil || !nativeProofWork(work, 1) {
-			return nil
-		}
-		n, nk := sourceBridgeUTF8(obj, candidate.NameIndex)
-		ds, dk := sourceBridgeUTF8(obj, candidate.DescriptorIndex)
-		if !nk || !dk {
-			return nil
-		}
-		if n == invoke.Member && ds == invoke.Description {
-			if target != nil {
-				return nil
-			}
-			target = candidate
-		}
+	targetOwner, target := nativeMemberCallTarget(obj, invoke.Member, invoke.Description, inherited, resolve, work)
+	if target == nil {
+		return nil
 	}
-	if target == nil || target.AccessFlags&0x0002 == 0 || target.AccessFlags&(0x0008|0x0400|0x1000|0x0040|0x0100) != 0 {
+	if inherited {
+		if static || targetOwner == obj || target.AccessFlags&7 != 4 || target.AccessFlags&(0x0008|0x1000|0x0040) != 0 || nativeBinaryPackage(targetOwner.GetClassName()) == nativeBinaryPackage(obj.GetClassName()) {
+			return nil
+		}
+	} else if target.AccessFlags&0x0002 == 0 || target.AccessFlags&(0x0400|0x1000|0x0040|0x0100) != 0 || (target.AccessFlags&0x0008 != 0) != static {
 		return nil
 	}
 	var targetThrows *ExceptionsAttribute
+	var targetSignature string
+	methodFormalCount := 0
 	for _, a := range target.Attributes {
 		switch a := a.(type) {
 		case *SignatureAttribute:
-			return nil
+			if a == nil || targetSignature != "" {
+				return nil
+			}
+			var known bool
+			targetSignature, known = sourceBridgeUTF8(targetOwner, a.SignatureIndex)
+			if !known || targetSignature == "" {
+				return nil
+			}
+			if inherited {
+				if !nativeMemberRawInheritedCall(obj, targetOwner, targetSignature, invoke.Description, target, work) {
+					return nil
+				}
+			} else if !nativeMemberConcretePrivateCall(targetOwner, targetSignature, invoke.Description, target, work) {
+				if len(targetSignature) > 4096 || !nativeProofWork(work, int64(len(targetSignature))*130+1) || work != nil && work.CheckAlloc(int64(len(targetSignature))*256) != nil {
+					return nil
+				}
+				erased, signatureThrows, formals, known := types.UnboundedMethodErasure(targetSignature)
+				if !known || erased != invoke.Description || !nativeOriginalSignatureThrows(targetOwner, target, signatureThrows, work) {
+					return nil
+				}
+				methodFormalCount = len(formals)
+			}
 		case *ExceptionsAttribute:
 			if a == nil || targetThrows != nil {
 				return nil
@@ -201,13 +206,13 @@ func nativeMemberPrivateCallProof(obj *ClassObject, m *MemberInfo, work *workbud
 		}
 		for i, index := range throws.ExceptionIndexTable {
 			name, nk := sourceBridgeClassName(obj, index)
-			targetName, tk := sourceBridgeClassName(obj, targetThrows.ExceptionIndexTable[i])
+			targetName, tk := sourceBridgeClassName(targetOwner, targetThrows.ExceptionIndexTable[i])
 			if !nk || !tk || name != targetName || !nativeProofWork(work, 1) {
 				return nil
 			}
 		}
 	}
-	return &nativeMemberPrivateGetter{owner: obj.GetClassName(), name: name, descriptor: desc, field: invoke.Member, fieldDescriptor: invoke.Description, ordinal: ordinal, method: m, call: &nativeMemberPrivateCall{argumentCount: len(params)}}
+	return &nativeMemberPrivateGetter{owner: obj.GetClassName(), name: name, descriptor: desc, field: invoke.Member, fieldDescriptor: invoke.Description, ordinal: ordinal, method: m, call: &nativeMemberPrivateCall{argumentCount: len(params), methodFormalCount: methodFormalCount, static: static, inherited: inherited, rawGeneric: targetSignature != ""}}
 }
 
 func nativeMemberPrivateCallSource(getter *nativeMemberPrivateGetter, args []any, ctx *class_context.ClassContext) (string, bool) {
@@ -219,18 +224,60 @@ func nativeMemberPrivateCallSource(getter *nativeMemberPrivateGetter, args []any
 		return "", false
 	}
 	call := &values.FunctionCallExpression{ClassName: getter.owner, FunctionName: getter.field, Descriptor: getter.fieldDescriptor, Kind: values.InvokeVirtual, FuncType: mt.FunctionType()}
-	for _, arg := range args[1:] {
+	offset := 1
+	if getter.call.static {
+		call.IsStatic, call.Kind, offset = true, values.InvokeStatic, 0
+	}
+	for _, arg := range args[offset:] {
 		v, ok := arg.(values.JavaValue)
 		if !ok || sourceProofNil(v) {
 			return "", false
 		}
 		call.Arguments = append(call.Arguments, v)
 	}
-	receiver, ok := args[0].(values.JavaValue)
-	if !ok || sourceProofNil(receiver) {
+	owner := ctx.ShortTypeName(strings.ReplaceAll(getter.owner, "/", "."))
+	var receiver string
+	if getter.call.rawGeneric && strings.ContainsAny(owner, "<>") {
 		return "", false
 	}
-	rendered := call.ArgumentStrings(ctx)
-	owner := ctx.ShortTypeName(strings.ReplaceAll(getter.owner, "/", "."))
-	return "((" + owner + ")(" + receiver.String(ctx) + "))." + getter.field + "(" + strings.Join(rendered, ",") + ")/*jdec-owned-getter:" + strconv.Itoa(getter.ordinal) + ":" + getter.owner + ":" + getter.field + "*/", true
+	if getter.call.inherited && nativeStaticAccessorQualifierShadowed(owner, ctx) {
+		return "", false
+	}
+	if getter.call.static {
+		// An unqualified private method needs its own overload/hierarchy proof;
+		// a hidden class qualifier cannot silently change method binding.
+		if nativeStaticAccessorQualifierShadowed(owner, ctx) {
+			return "", false
+		}
+		receiver = owner
+	} else {
+		v, ok := args[0].(values.JavaValue)
+		if !ok || sourceProofNil(v) {
+			return "", false
+		}
+		receiver = "((" + owner + ")(" + v.String(ctx) + "))"
+	}
+	var rendered []string
+	if getter.call.methodFormalCount > 0 {
+		var known bool
+		rendered, known = call.DescriptorArgumentStrings(ctx)
+		if !known {
+			return "", false
+		}
+	} else {
+		rendered = call.ArgumentStrings(ctx)
+	}
+	receiver, registration := ctx.InvocationReceiverSource(receiver)
+	method := getter.field
+	if getter.call.methodFormalCount > 0 {
+		if getter.call.methodFormalCount > 128 {
+			return "", false
+		}
+		formals := make([]string, getter.call.methodFormalCount)
+		for i := range formals {
+			formals[i] = ctx.ShortTypeName("java.lang.Object")
+		}
+		method = "<" + strings.Join(formals, ",") + ">" + method
+	}
+	return receiver + "." + method + "(" + strings.Join(rendered, ",") + ")" + registration + "/*jdec-owned-getter:" + strconv.Itoa(getter.ordinal) + ":" + getter.owner + ":" + getter.field + "*/", true
 }

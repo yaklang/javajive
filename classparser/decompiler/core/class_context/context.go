@@ -50,14 +50,21 @@ type ClassContext struct {
 	// lexical class does not prove projection of each of its constructors.
 	SourceMemberDescriptorCandidate func(owner, descriptor string) bool
 	// Source ownership proofs distinguish value expressions from Java statement expressions.
+	// SourceInvocationReceiver separates compiler registration comments from a
+	// rendered receiver. javac lowers call arguments before its method select;
+	// Java runtime receiver/argument evaluation remains in the original order.
+	SourceInvocationReceiver   func(source string) (receiver, registration string)
 	SourcePrivateGetter        func(owner, name, descriptor string, pc int, args []any, statement bool) (string, bool)
 	SourceMemberDelegation     func(owner, descriptor string, pc int, args []any) (string, bool)
 	SourceAnonymousCandidate   func(owner string) bool
 	SourceAnonymousAllocation  func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	SourceCapturedField        func(pc int, name string, receiver bool) (string, bool)
 	SourceLexicalCapturedField func(value any, pc int, name string) (string, bool)
-	SourceCaptureStable        func(int, *coreutils.VariableId) bool
-	SourceCapturedFieldType    func(pc int, owner, name, descriptor string) any
+	// Only an original enclosing-read/invocation certificate may keep a raw
+	// receiver when qualified-this would invent generic substitutions.
+	SourceLexicalInvocationReceiver func(call any) (string, bool)
+	SourceCaptureStable             func(int, *coreutils.VariableId) bool
+	SourceCapturedFieldType         func(pc int, owner, name, descriptor string) any
 
 	// LocalNames supplies scoped source bindings by identity. It does not rename
 	// the underlying IR or conflate locals that merely share a JVM slot spelling.

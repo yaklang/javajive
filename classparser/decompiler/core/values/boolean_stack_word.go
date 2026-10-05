@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
@@ -13,12 +14,7 @@ func booleanStackWord(value JavaValue) JavaValue {
 	if condition, ok := boolOperandCondition(value); ok {
 		value = condition
 	}
-	result := NewCustomValue(func(ctx *class_context.ClassContext) string {
-		return fmt.Sprintf("((%s) ? 1 : 0)", value.String(ctx))
-	}, func() types.JavaType { return types.NewJavaPrimer(types.JavaInteger) })
-	result.Flag, result.CapturesKnown, result.Captures = "boolean_stack_word", true, []JavaValue{value}
-	result.ReplaceFunc = value.ReplaceVar
-	return result
+	return &booleanStackView{operand: value, word: true}
 }
 
 // IsBooleanStackNarrowing recognizes the int computational category at a Z
@@ -143,17 +139,52 @@ func narrowBooleanLeaf(value JavaValue) JavaValue {
 	if condition, ok := BoolTernaryCondition(UnpackSoltValue(value)); ok {
 		return condition
 	}
-	result := NewCustomValue(func(ctx *class_context.ClassContext) string {
-		// A later closed-web proof can recover a canonical boolean source
-		// declaration. Its value already is the low bit; applying integer
-		// arithmetic to that source is both unnecessary and ill-typed. Keep
-		// this consumer view live rather than freezing simulation-time type.
-		if isBooleanTyped(value) {
-			return value.String(ctx)
+	return &booleanStackView{operand: value}
+}
+
+// A closed operand view gives source-binding visitors the real dependency.
+// Neither a flag nor a closure's alleged capture list establishes this fact.
+// word converts Z to its computational int; the other view narrows I to Z.
+type booleanStackView struct {
+	operand JavaValue
+	word    bool
+}
+
+func (v *booleanStackView) Type() types.JavaType {
+	if v.word {
+		return types.NewJavaPrimer(types.JavaInteger)
+	}
+	return types.NewJavaPrimer(types.JavaBoolean)
+}
+func (v *booleanStackView) ReplaceVar(oldID, newID *utils.VariableId) {
+	v.operand.ReplaceVar(oldID, newID)
+}
+func (v *booleanStackView) String(ctx *class_context.ClassContext) string {
+	guard := renderGuarded(ctx)
+	if guard {
+		if beginValueRender(ctx) != nil {
+			return ""
 		}
-		return fmt.Sprintf("(((%s) & 1) != 0)", value.String(ctx))
-	}, func() types.JavaType { return types.NewJavaPrimer(types.JavaBoolean) })
-	result.Flag, result.CapturesKnown, result.Captures = "boolean_stack_narrowing", true, []JavaValue{value}
-	result.ReplaceFunc = value.ReplaceVar
-	return result
+		defer endValueRender(ctx)
+	}
+	text := v.operand.String(ctx)
+	if guard && renderRejected(ctx) {
+		return ""
+	}
+	if v.word {
+		text = fmt.Sprintf("((%s) ? 1 : 0)", text)
+	} else if !isBooleanTyped(v.operand) {
+		text = fmt.Sprintf("(((%s) & 1) != 0)", text)
+	}
+	return finishExpressionRender(ctx, guard, text)
+}
+
+// BooleanStackWordOperand exposes only the sealed, original numeric view.
+// An arbitrary CustomValue cannot acquire this proof by changing its Flag.
+func BooleanStackWordOperand(value JavaValue) (JavaValue, bool) {
+	v, ok := value.(*booleanStackView)
+	if !ok || v == nil || !v.word || isNilJavaValue(v.operand) {
+		return nil, false
+	}
+	return v.operand, true
 }

@@ -550,6 +550,22 @@ func sameFinallyCleanup(rows []core.HandlerRange, a, b statements.Statement, exc
 			}
 		}
 		return true
+	case *statements.SynchronizedStatement:
+		y, ok := b.(*statements.SynchronizedStatement)
+		if !ok || x == nil || y == nil {
+			return false
+		}
+		xp, xknown := x.OriginalMonitorEnterPC()
+		yp, yknown := y.OriginalMonitorEnterPC()
+		if !xknown || !yknown || !outside(xp) || !outside(yp) || !sameFinallyEffectValue(rows, x.Argument, y.Argument, excluded, depth) || len(x.Body) != len(y.Body) || len(x.Body) > 16 {
+			return false
+		}
+		for i, st := range x.Body {
+			if !sameFinallyCleanup(rows, st, y.Body[i], excluded, depth+1) {
+				return false
+			}
+		}
+		return true
 	case *statements.CustomStatement:
 		y, ok := b.(*statements.CustomStatement)
 		return ok && x != nil && y != nil && x.ThrownValue != nil && y.ThrownValue != nil && x.HasOriginPC && y.HasOriginPC && outside(x.OriginPC) && outside(y.OriginPC) && sameFinallyEffectValue(rows, x.ThrownValue, y.ThrownValue, excluded, depth)

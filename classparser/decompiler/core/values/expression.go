@@ -292,8 +292,8 @@ func booleanWordConstant(v JavaValue) (JavaValue, bool) {
 // value itself when it is already boolean-typed (a comparison or a nested boolean connective).
 func boolOperandCondition(v JavaValue) (JavaValue, bool) {
 	u := UnpackSoltValue(v)
-	if c, ok := u.(*CustomValue); ok && c.Flag == "boolean_stack_word" && c.CapturesKnown && len(c.Captures) == 1 {
-		return boolOperandCondition(c.Captures[0])
+	if operand, ok := BooleanStackWordOperand(u); ok {
+		return boolOperandCondition(operand)
 	}
 	if cond, ok := BoolTernaryCondition(u); ok {
 		return cond, true
@@ -3098,6 +3098,59 @@ func (f *FunctionCallExpression) ArgumentStrings(funcCtx *class_context.ClassCon
 	return paramStrs
 }
 
+// DescriptorArgumentStrings is the source view of a proved erased invocation.
+// Its physical descriptor, rather than generic inference or varargs spreading,
+// fixes every operand. Casts keep overload selection and array identity; each
+// operand is rendered once. This does not establish the invocation proof itself.
+func (f *FunctionCallExpression) DescriptorArgumentStrings(ctx *class_context.ClassContext) ([]string, bool) {
+	if f == nil || ctx == nil || len(f.Arguments) > 128 {
+		return nil, false
+	}
+	params, _, err := callbinding.Descriptor(f.Descriptor)
+	mt, typeErr := types.ParseMethodDescriptor(f.Descriptor)
+	if err != nil || typeErr != nil || len(params) != len(f.Arguments) {
+		return nil, false
+	}
+	out := make([]string, len(params))
+	for i, arg := range f.Arguments {
+		if isNilJavaValue(arg) {
+			return nil, false
+		}
+		if params[i][0] != 'L' && params[i][0] != '[' {
+			// Method type variables cannot stand for primitive parameters.
+			// Keep the existing computational-word consumer, without adding a
+			// new narrowing at the erased-reference binding boundary.
+			out[i] = f.renderArgAt(i, ctx)
+			continue
+		}
+		target := mt.FunctionType().ParamTypes[i]
+		if cast, known := UnpackSoltValue(arg).(*CastExpression); known && cast != nil && rawDescriptorTypeEqual(cast.TargetType, target, 0) {
+			out[i] = arg.String(ctx)
+			continue
+		}
+		out[i] = "(" + target.String(ctx) + ")(" + arg.String(ctx) + ")"
+	}
+	return out, true
+}
+
+func rawDescriptorTypeEqual(a, b types.JavaType, depth int) bool {
+	if a == nil || b == nil || depth > 255 {
+		return false
+	}
+	switch left := a.RawType().(type) {
+	case *types.JavaClass:
+		right, known := b.RawType().(*types.JavaClass)
+		return known && left != nil && right != nil && strings.ReplaceAll(left.Name, ".", "/") == strings.ReplaceAll(right.Name, ".", "/")
+	case *types.JavaArrayType:
+		right, known := b.RawType().(*types.JavaArrayType)
+		return known && left != nil && right != nil && left.Dimension == right.Dimension && rawDescriptorTypeEqual(left.JavaType, right.JavaType, depth+1)
+	case *types.JavaPrimer:
+		right, known := b.RawType().(*types.JavaPrimer)
+		return known && left != nil && right != nil && left.Name == right.Name
+	}
+	return false
+}
+
 // lambdaArgFunctionalCast returns the functional-interface cast that a lambda / method-reference
 // argument needs when the call's RECEIVER is a generic type used RAW. Calling any method through a
 // raw-typed reference erases the ENTIRE method signature (JLS 4.8), even parts that never mention the
@@ -4801,7 +4854,15 @@ func (f *FunctionCallExpression) String(funcCtx *class_context.ClassContext) str
 	return f.renderCall(funcCtx)
 }
 
-func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext) string {
+func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext) (source string) {
+	if funcCtx.SourceLexicalInvocationReceiver != nil {
+		if receiver, known := funcCtx.SourceLexicalInvocationReceiver(f); known {
+			if args, valid := f.DescriptorArgumentStrings(funcCtx); valid {
+				receiver, events := funcCtx.InvocationReceiverSource(receiver)
+				return receiver + "." + class_context.SafeIdentifier(f.FunctionName) + "(" + strings.Join(args, ",") + ")" + events
+			}
+		}
+	}
 	if bridge, ok := f.constructorCheckedInvokeView(funcCtx); ok {
 		return bridge
 	}
@@ -4833,9 +4894,18 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 			return fmt.Sprintf("super(%s)", strings.Join(paramStrs, ","))
 		}
 	}
+	// Record javac lowering order independently from runtime evaluation. Only
+	// family-certified comments move; receiver tokens still precede arguments.
+	var registration string
+	receiverSource := func(text string) string {
+		receiver, events := funcCtx.InvocationReceiverSource(text)
+		registration += events
+		return receiver
+	}
+	defer func() { source += registration }()
 	functionName := class_context.SafeIdentifier(f.FunctionName)
 	if view := f.optionalGenericThrowsReceiver(funcCtx); view != nil {
-		return fmt.Sprintf("((%s)(%s)).%s(%s)", view.String(funcCtx), f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", view.String(funcCtx), receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	}
 
 	// A non-constructor invokespecial whose receiver is `this` and whose target is a DIFFERENT class
@@ -4861,18 +4931,18 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	// binds to `compare(CAP, CAP)` and rejects the Object arguments; render a raw `((Comparator)(recv))`
 	// receiver cast so it becomes an unchecked, behaviour-preserving `compare(Object, Object)`.
 	if f.comparatorRawReceiverCast(funcCtx) {
-		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass("java.util.Comparator").String(funcCtx), f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass("java.util.Comparator").String(funcCtx), receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	}
 	// A `recv.add(x)`/`recv.offer(x)` on a wildcard `Collection<? super E>` receiver rejects the Object
 	// argument; render a raw `((Collection)(recv))` receiver cast so it becomes an unchecked add(Object).
 	if rawCls := f.collectionAddWildcardReceiverRawCast(funcCtx); rawCls != "" {
-		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass(rawCls).String(funcCtx), f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass(rawCls).String(funcCtx), receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	}
 	// A `recv.apply(x)`/`test(x)`/`accept(x)` on a wildcard single-type-param consumer (e.g.
 	// `Predicate<? super Entry<K,V>>`) rejects the erased argument; render a raw `((Predicate)(recv))`
 	// receiver cast so it becomes an unchecked, behaviour-preserving call.
 	if rawCls := f.wildcardConsumerReceiverRawCast(funcCtx); rawCls != "" {
-		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass(rawCls).String(funcCtx), f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", types.NewJavaClass(rawCls).String(funcCtx), receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	}
 
 	if v, ok := f.Object.(*JavaClassValue); ok {
@@ -4895,7 +4965,7 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 		// A lambda / method reference inlined directly as a call receiver has no target type of
 		// its own - `(() -> x).get()` does not compile. Supply one by casting to the functional
 		// interface the value carries: `((Supplier)(() -> x)).get()`.
-		return fmt.Sprintf("((%s)(%s)).%s(%s)", cv.Type().String(funcCtx), cv.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+		return fmt.Sprintf("((%s)(%s)).%s(%s)", cv.Type().String(funcCtx), receiverSource(cv.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	}
 	// A RAW `new HashMap(typedMap)` used directly as the receiver of a lambda-taking call erases the
 	// method's functional-interface parameter (raw receiver, JLS 4.8), so the lambda's parameters
@@ -4904,14 +4974,14 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 	// source's diamond so javac re-infers the type arguments from the constructor argument.
 	if ne, ok := obj.(*NewExpression); ok {
 		if s := f.newRecvJDKGenericDiamond(ne, funcCtx); s != "" {
-			return fmt.Sprintf("%s.%s(%s)", s, functionName, strings.Join(paramStrs, ","))
+			return fmt.Sprintf("%s.%s(%s)", receiverSource(s), functionName, strings.Join(paramStrs, ","))
 		}
 	}
 	switch obj.(type) {
 	case *JavaExpression, *TernaryExpression, *SlotValue, *AssignmentExpression, *CustomValue:
 		// CustomValue includes T18 concat recipes (`a + b`). Member access binds
 		// tighter than +, so `a + b.getBytes()` is wrong; parenthesize the receiver.
-		return fmt.Sprintf("(%s).%s(%s)", f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+		return fmt.Sprintf("(%s).%s(%s)", receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	default:
 		// A member access on a java.lang.Object-typed local whose bytecode invoke target is a
 		// DIFFERENT concrete reference type (the slot was null-initialized as Object but the JVM store
@@ -4927,10 +4997,10 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 		// JDEC_OBJECT_RECV_INVOKE_CAST_OFF=1.
 		if funcCtx.Getenv("JDEC_OBJECT_RECV_INVOKE_CAST_OFF") == "" {
 			if castCls := f.objectReceiverInvokeCast(funcCtx); castCls != "" {
-				return fmt.Sprintf("((%s)(%s)).%s(%s)", castCls, f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+				return fmt.Sprintf("((%s)(%s)).%s(%s)", castCls, receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 			}
 		}
-		return fmt.Sprintf("%s.%s(%s)", f.Object.String(funcCtx), functionName, strings.Join(paramStrs, ","))
+		return fmt.Sprintf("%s.%s(%s)", receiverSource(f.Object.String(funcCtx)), functionName, strings.Join(paramStrs, ","))
 	}
 }
 

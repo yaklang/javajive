@@ -33,7 +33,7 @@ func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemberFamily) *nativeAnonymousForest {
-	if c.foldSiblingResolver == nil || !nativeAnonymousForestVersion(c.obj) || !nativeMemberTopLevelEvidence(c.obj, c.Work) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+	if c.foldSiblingResolver == nil || !nativeAnonymousForestVersion(c.obj, c.Work) || !nativeMemberTopLevelEvidence(c.obj, c.Work) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
 		return nil
 	}
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {
@@ -46,7 +46,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 			return nil
 		}
 		for name, child := range members.children {
-			if !nativeAnonymousForestVersion(child.object) || !nativeProofWork(c.Work, 1) {
+			if !nativeAnonymousForestVersion(child.object, c.Work) || !nativeProofWork(c.Work, 1) {
 				return nil
 			}
 			forest.objects[name] = child.object
@@ -95,7 +95,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 		}
 		forest.groups[object.GetClassName()] = group
 		for name, child := range group.children {
-			if len(forest.units) >= 64 || forest.units[name] != nil || !nativeProofWork(c.Work, 1) || !nativeAnonymousForestVersion(child.object) || !nativeAnonymousForestCaptureMetadata(child, c.Work) {
+			if len(forest.units) >= 64 || forest.units[name] != nil || !nativeProofWork(c.Work, 1) || !nativeAnonymousForestVersion(child.object, c.Work) || !nativeAnonymousForestCaptureMetadata(child, c.Work) {
 				return nil
 			}
 			forest.units[name] = child
@@ -307,6 +307,9 @@ func nativeAnonymousForestOpcodeClosure(forest *nativeAnonymousForest, work *wor
 						if kind == core.OP_GETFIELD && forest.readPCs[owner][mn+md][int(op.CurrentOffset)] {
 							continue
 						}
+						if kind == core.OP_INVOKEVIRTUAL && nativeAnonymousInheritedCall(forest, object, op, work) {
+							continue
+						}
 						if kind != core.OP_INVOKESPECIAL || symbol.Member != "<init>" || group == nil || group.children[symbol.Name] != child || symbol.Description != child.descriptor || child.invokePC != int(op.CurrentOffset) {
 							return false
 						}
@@ -374,6 +377,7 @@ func nativeAnonymousForestOwnChild(forest *nativeAnonymousForest, parent, name s
 // transfer, never in an ordinary source declaration, dynamic or foreign member.
 func nativeAnonymousForestSymbolClosure(forest *nativeAnonymousForest, work *workbudget.Budget) bool {
 	for _, object := range forest.objects {
+		bridgeNameTypes := nativeMemberJointBridgeNameTypes(forest.members, object, work)
 		for _, member := range append(append([]*MemberInfo{}, object.Fields...), object.Methods...) {
 			if member == nil || !nativeProofWork(work, 1) {
 				return false
@@ -383,7 +387,8 @@ func nativeAnonymousForestSymbolClosure(forest *nativeAnonymousForest, work *wor
 				return false
 			}
 			for name := range forest.units {
-				if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestEnclosingDeclaration(object, member, forest, work) {
+				if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestEnclosingDeclaration(object, member, forest, work) &&
+					!(nativeAnonymousForestBridgeMarker(forest, name) && nativeMemberJointBridgeDeclaration(forest.members, object, member, name, work)) {
 					return false
 				}
 			}
@@ -401,7 +406,8 @@ func nativeAnonymousForestSymbolClosure(forest *nativeAnonymousForest, work *wor
 					return false
 				}
 				for name := range forest.units {
-					if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestConstructorNameType(object, index+1, forest, work) && !nativeAnonymousForestEnclosingNameType(object, index+1, forest, work) && !nativeAnonymousForestCaptureNameType(forest, object, index+1, work) {
+					if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestConstructorNameType(object, index+1, forest, work) && !nativeAnonymousForestEnclosingNameType(object, index+1, forest, work) && !nativeAnonymousForestCaptureNameType(forest, object, index+1, work) &&
+						!(nativeAnonymousForestBridgeMarker(forest, name) && bridgeNameTypes[index+1]) {
 						return false
 					}
 				}
@@ -409,6 +415,21 @@ func nativeAnonymousForestSymbolClosure(forest *nativeAnonymousForest, work *wor
 		}
 	}
 	return true
+}
+
+// javac reuses the first root anonymous class as the unused private-constructor
+// marker. Only the separately proved constructor packet may mention that type;
+// ordinary declarations, method handles and other descriptor uses stay closed.
+func nativeAnonymousForestBridgeMarker(forest *nativeAnonymousForest, name string) bool {
+	if forest == nil || forest.members == nil || forest.members.owner != forest.root {
+		return false
+	}
+	group := forest.groups[forest.root]
+	if group == nil || group.owner != forest.root {
+		return false
+	}
+	child := group.children[name]
+	return child != nil && child.ordinal == 1 && forest.units[name] == child && child.object.GetClassName() == name
 }
 
 func nativeAnonymousForestEnclosingNameType(object *ClassObject, index int, forest *nativeAnonymousForest, work *workbudget.Budget) bool {

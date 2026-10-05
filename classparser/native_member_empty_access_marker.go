@@ -7,7 +7,7 @@ import "github.com/yaklang/javajive/internal/workbudget"
 // Its original EnclosingMethod/self row (not dollar depth) fixes the owner;
 // the exact ordinal is a compiler regeneration obligation of the whole nest.
 func nativeMemberEmptyAccessMarker(obj *ClassObject, owner string, work *workbudget.Budget) bool {
-	if obj == nil || (obj.MajorVersion < 51 || obj.MajorVersion > 52) || obj.MinorVersion != 0 || obj.AccessFlags != 0x1020 || obj.GetSupperClassName() != "java/lang/Object" || len(obj.Interfaces) != 0 || len(obj.Fields) != 0 || len(obj.Methods) != 0 || obj.GetClassName() != owner+"$1" || len(obj.Attributes) > 3 || len(obj.ConstantPool) > 64 {
+	if obj == nil || obj.AccessFlags != 0x1020 || obj.GetSupperClassName() != "java/lang/Object" || len(obj.Interfaces) != 0 || len(obj.Fields) != 0 || len(obj.Methods) != 0 || obj.GetClassName() != owner+"$1" || len(obj.Attributes) > 3 || len(obj.ConstantPool) > 64 || !nativeAccessorVersion(obj, work) {
 		return false
 	}
 	if !nativeProofWork(work, int64(len(obj.Attributes)+len(obj.ConstantPool))) {

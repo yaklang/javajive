@@ -985,8 +985,8 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if group := sub.nativeAnonymousRoot; group != nil && !group.completeOwnSource(src) {
 			return fail()
 		}
-		body := javaClassBodyContent(src)
-		if body == "" {
+		body, bodyKnown := javaClassBodyContentKnown(src)
+		if !bodyKnown {
 			return fail()
 		}
 		initialization, known := nativeAnonymousInitializerSource(child, bindings, sub.FuncCtx, sub.nativeAnnotationDeclarationResolver(), c.Work)
@@ -1146,6 +1146,23 @@ func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 }
 func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 	result := map[string]bool{}
+	if p := c.nativeMemberRoot; p != nil {
+		// Own static fields may be printed without a qualifier. Their original
+		// declarations are field bindings, never missing generated JVM locals.
+		// Reserve the names over actual local IDs as well as the source fallback.
+		for _, field := range c.obj.Fields {
+			if field != nil && field.AccessFlags&8 != 0 {
+				if name, known := sourceBridgeUTF8(c.obj, field.NameIndex); known && class_context.SafeIdentifier(name) == name {
+					result[name] = true
+				}
+			}
+		}
+		for _, getter := range p.getters {
+			if getter.staticField && nativeStaticAccessorQualifierShadowed(c.FuncCtx.ShortTypeName(strings.ReplaceAll(getter.owner, "/", ".")), c.FuncCtx) {
+				result[getter.field] = true
+			}
+		}
+	}
 	for _, name := range c.nativeAnonymousBindings {
 		if name != "" && class_context.SafeIdentifier(name) == name {
 			result[name] = true
@@ -1163,7 +1180,8 @@ func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 // other locals. Both caller parameters and child method parameters may collide
 // with an original val$ name; spelling alone must never merge those identities.
 func (c *ClassObjectDumper) prepareNativeLocalShadowing(body []statements.Statement, params []values.JavaValue) {
-	if c.nativeCaptureFields == nil {
+	reserved := c.nativeLexicalCaptures()
+	if c.nativeCaptureFields == nil && len(reserved) == 0 {
 		return
 	}
 	var protected map[*coreutils.VariableId]bool
@@ -1172,7 +1190,7 @@ func (c *ClassObjectDumper) prepareNativeLocalShadowing(body []statements.Statem
 			protected = map[*coreutils.VariableId]bool{outer.Id: true}
 		}
 	}
-	c.prepareNativeSourceNames(body, params, c.nativeLexicalCaptures(), protected)
+	c.prepareNativeSourceNames(body, params, reserved, protected)
 }
 func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool) {
 	ctx := c.FuncCtx
@@ -1253,7 +1271,7 @@ func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement
 				return
 			}
 			activeStatement[st] = true
-			roots, children, known := catchSourceChildren(st)
+			roots, children, known := nativeSourceNameChildren(st)
 			if !known {
 				valid = false
 				return
@@ -1270,6 +1288,9 @@ func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement
 	walk(body)
 	if !valid {
 		c.nativeCaptureFailed = true
+		if c.nativeMemberRoot != nil {
+			c.nativeMemberRoot.failed = true
+		}
 		if c.nativeAnonymousRoot != nil {
 			c.nativeAnonymousRoot.failed = true
 		}
@@ -1642,4 +1663,24 @@ func nativeAnonymousSignatureLexicalShadow(signature string, lexical *class_cont
 		}
 	}
 	return false, true
+}
+
+// Name binding needs operand dependencies, not permission to move or absorb a
+// control transfer. Unknown text stays opaque even if it prints a familiar word.
+func nativeSourceNameChildren(st statements.Statement) ([]values.JavaValue, [][]statements.Statement, bool) {
+	if anchor, ok := st.(*statements.SourceAnchorStatement); ok {
+		return nil, nil, anchor != nil
+	}
+	if middle, ok := st.(*statements.MiddleStatement); ok && middle != nil && middle.Flag == "monitor_exit" {
+		// The dumper omits middle instructions from Java source. An original
+		// sealed release has no rendered operand; its hidden receiver belongs
+		// to the independent CFG ownership proof, not this namespace visitor.
+		// A flag alone, changed payload, or enter operand cannot borrow this.
+		_, _, known := middle.OriginalMonitor()
+		return nil, nil, known
+	}
+	if leaf, ok := st.(*statements.CustomStatement); ok && leaf.HasSourceTransfer() {
+		return nil, nil, leaf.SourceTransferOnly()
+	}
+	return catchSourceChildren(st)
 }

@@ -36,6 +36,7 @@ type ClassObjectDumper struct {
 	nativeMemberLookup             func(string) *nativeMemberClass
 	nativeMemberCalls              map[string]map[int]*nativeMemberAllocation
 	nativeMemberBody               []statements.Statement
+	nativeSourceNamesReady         bool
 	nativeMemberChecks             map[string]map[int]bool
 	nativeMemberRoot               *nativeMemberFamily
 	nativeMemberCurrent            *nativeMemberClass
@@ -1937,7 +1938,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		full = c.sourceRewrite("fixIdentAsTypeDecl", "class_source", full, fixIdentAsTypeDecl)
 		full = c.sourceRewrite("fixObjectInitCastType", "class_source", full, fixObjectInitCastType)
 	}
-	if members != "" {
+	if len(members) != 0 {
 		// Assemble completed lexical declarations only after the enclosing
 		// class's recovery. Its metadata cannot justify edits in a child scope.
 		open := javaIndexTopBrace(full)
@@ -1951,13 +1952,23 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			}
 			return "", fmt.Errorf("member source enclosing boundary unproved")
 		}
-		if err := c.ensureOutput(int64(len(full)) + int64(len(members))); err != nil {
+		memberSource := strings.Join(members, "")
+		if err := c.ensureOutput(int64(len(full)) + int64(len(memberSource))); err != nil {
 			return "", err
 		}
-		if c.Work != nil && (!nativeProofWork(c.Work, int64(len(full))) || c.Work.CheckAlloc(int64(len(full))+int64(len(members))) != nil) {
+		if c.Work != nil && (!nativeProofWork(c.Work, int64(len(full))) || c.Work.CheckAlloc(int64(len(full))+int64(len(memberSource))) != nil) {
 			return "", fmt.Errorf("member source assembly budget")
 		}
-		full = full[:close] + members + full[close:]
+		if p := c.nativeMemberRoot; p != nil && c.obj.GetClassName() == p.owner {
+			var known bool
+			full, known = nativeMemberRegistrationLayout(p, full, members, c.Work)
+			if !known {
+				p.failed = true
+				return "", fmt.Errorf("member accessor registration layout unproved")
+			}
+		} else {
+			full = full[:close] + memberSource + full[close:]
+		}
 	}
 	if err := c.ensureOutput(int64(len(full))); err != nil {
 		return "", err
@@ -3873,6 +3884,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			// Clear a sibling method's source binding before any IR analysis can
 			// request provisional text. Install this method's proof only after
 			// its complete statement graph and declaration identities are known.
+			priorNamesReady := c.nativeSourceNamesReady
+			c.nativeSourceNamesReady = false
+			defer func() { c.nativeSourceNamesReady = priorNamesReady }()
 			priorStable := funcCtx.SourceCaptureStable
 			funcCtx.SourceCaptureStable = nil
 			defer func() { funcCtx.SourceCaptureStable = priorStable }()
@@ -3972,11 +3986,13 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if assertionErr != nil {
 				return nil, assertionErr
 			}
+			statementList = sourceWithoutDeadLocalStores(statementList, params, c.Work)
 			priorMemberBody := c.nativeMemberBody
 			c.nativeMemberBody = statementList
 			defer func() { c.nativeMemberBody = priorMemberBody }()
 			c.prepareNativeCaptureBindings(statementList, params)
 			c.prepareNativeLocalShadowing(statementList, params)
+			c.nativeSourceNamesReady = !c.nativeCaptureFailed
 			paramsNewStrList := []string{}
 			// A lambda arrow parameter whose type is a GENERIC class rendered RAW is best emitted WITHOUT
 			// an explicit type: the bytecode only preserves the ERASED impl-method descriptor (e.g.

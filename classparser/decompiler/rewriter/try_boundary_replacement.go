@@ -3,6 +3,7 @@ package rewriter
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
 // A protected exclusive-end pointer is a semantic reference, even when its
@@ -18,6 +19,10 @@ func retargetProtectedIfBoundary(regions []*core.Node, original, replacement *co
 	if _, ok := replacement.Statement.(*statements.IfStatement); !ok {
 		return
 	}
+	retargetProtectedSourceBoundary(regions, original, replacement)
+}
+
+func retargetProtectedSourceBoundary(regions []*core.Node, original, replacement *core.Node) {
 	for _, region := range regions {
 		if region == nil || !region.HasProtectedRange {
 			continue
@@ -66,4 +71,83 @@ func retargetProtectedIfBoundary(regions []*core.Node, original, replacement *co
 			region.ProtectedEnd = replacement
 		}
 	}
+}
+
+// RetargetCollapsedConditionBoundary runs at the value-ternary collapse, before
+// the original node loses its normal edges. The one distinct current successor and the
+// original consumer witness identify the replacement; text, PCs or graph IDs
+// alone cannot do so. The common proof also checks every folded effect against
+// every affected typed handler interval and refuses catch-all cleanup domains.
+func RetargetCollapsedConditionBoundary(regions []*core.Node, original, replacement *core.Node) {
+	if len(regions) == 0 || original == nil || replacement == nil || len(original.Next) < 1 || len(original.Next) > 2 {
+		return
+	}
+	for _, next := range original.Next {
+		if next != replacement {
+			return
+		}
+	}
+	condition, ok := original.Statement.(*statements.ConditionStatement)
+	if !ok || condition == nil || condition.Callback == nil || condition.Condition == nil {
+		return
+	}
+	var operand values.JavaValue
+	switch statement := replacement.Statement.(type) {
+	case *statements.AssignStatement:
+		if statement == nil {
+			return
+		}
+		operand = statement.JavaValue
+	case *statements.ExpressionStatement:
+		if statement == nil {
+			return
+		}
+		operand = statement.Expression
+	default:
+		return
+	}
+	if replacement.SourceConditionNode != original {
+		// A reconstructed ternary tree deliberately has no single legacy root
+		// condition ID. Its sealed callback still binds each condition identity
+		// into the immediate consumer expression, including duplicate branch edges
+		// that converge on the same node. Prove one exact condition occurrence.
+		if replacement.SourceConditionNode != nil || !condition.TernaryChainArm || !collapsedTernaryConditionOnce(operand, condition.Condition) {
+			return
+		}
+	}
+	retargetProtectedSourceBoundary(regions, original, replacement)
+}
+
+func collapsedTernaryConditionOnce(root, condition values.JavaValue) bool {
+	remaining, matches := 512, 0
+	active := map[values.JavaValue]bool{}
+	var walk func(values.JavaValue) bool
+	walk = func(value values.JavaValue) bool {
+		remaining--
+		if remaining < 0 || value == nil || active[value] {
+			return false
+		}
+		active[value] = true
+		defer delete(active, value)
+		if ternary, ok := value.(*values.TernaryExpression); ok && ternary != nil && ternary.Condition == condition {
+			matches++
+			if matches > 1 {
+				return false
+			}
+		}
+		children, known := values.Children(value)
+		if !known {
+			return false
+		}
+		for _, child := range children {
+			if child == nil {
+				continue
+			}
+			if !walk(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return walk(root) && matches == 1
 }

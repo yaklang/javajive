@@ -11,7 +11,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
-	utils3 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/utils"
 	"github.com/yaklang/javajive/internal/omap"
@@ -376,10 +375,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 			if jdecenv.Get("JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF") == "" && !utils.IsDominate(manager.DominatorMap, node, source) {
 				continue
 			}
-			breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-				return "break"
-			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-			}))
+			breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
 			// Keep the semantic destination after replacing the edge with a
 			// printable break leaf. Enclosing-loop analysis still needs it.
 			breakNode.HideNext = mergeNode
@@ -565,10 +561,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		// Dropping default is safe, but the explicit labels still need a break
 		// or they would fall through to the next physical case body.
 		if !caseItem.IsDefault && (node.SwitchEmptyCaseMerge || node.SwitchEmptyDefaultMerge) && startNode == node.MergeNode {
-			caseItem.Body = []statements.Statement{statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-				return "break"
-			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-			})}
+			caseItem.Body = []statements.Statement{statements.NewSourceTransferStatement("break", "")}
 			caseItems = append(caseItems, caseItem)
 			continue
 		}
@@ -656,10 +649,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 			if fallsThrough {
 				continue
 			}
-			ci.Body = append(ci.Body, statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-				return "break"
-			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-			}))
+			ci.Body = append(ci.Body, statements.NewSourceTransferStatement("break", ""))
 		}
 	}
 

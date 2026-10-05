@@ -7,7 +7,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
-	utils3 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/classparser/decompiler/utils"
@@ -247,10 +246,7 @@ func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node)
 			// Build a FRESH increment expression reusing the latch's variable ref (so RewriteVar renames
 			// it consistently) but not the latch node itself, then an explicit continue to the header.
 			incrNode := manager.NewNode(values.NewBinaryExpression(incExpr.Values[0], incExpr.Values[1], incExpr.Op, incExpr.Typ))
-			contNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-				return "continue"
-			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-			}))
+			contNode := manager.NewNode(statements.NewSourceTransferStatement("continue", ""))
 			contNode.IsJmp = true
 			replaceNextInPlace(p, latch, incrNode)
 			incrNode.AddNext(contNode)
@@ -302,10 +298,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 				continue
 			}
 			if next == circleNode {
-				continueNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-					return "continue"
-				}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-				}))
+				continueNode := manager.NewNode(statements.NewSourceTransferStatement("continue", ""))
 				continueNode.IsJmp = true
 				continueNode.Statement.(*statements.CustomStatement).Name = "continue"
 				manager.recordLoopTransfer(continueNode, circleNode, "continue", node)
@@ -316,10 +309,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 
 			if false && !utils.IsDominate(manager.DominatorMap, node, next) && node != circleNode {
 				if node != circleNode {
-					breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-						return "break"
-					}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-					}))
+					breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
 					breakNode.HideNext = next
 					breakNode.IsJmp = true
 					node.RemoveNext(next)
@@ -328,10 +318,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 					circleNode.AddNext(next)
 					continue
 				}
-				breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-					return "break"
-				}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-				}))
+				breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
 				breakNode.HideNext = next
 				breakNode.IsJmp = true
 
@@ -345,10 +332,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 							label := manager.NewLoopLabel()
 							loopNode.Label = label
 						}
-						breakNode.Statement = statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-							return "continue " + loopNode.Label
-						}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-						})
+						breakNode.Statement = statements.NewSourceTransferStatement("continue", loopNode.Label)
 					}
 					//} else {
 					//	return nil, errors.New("loop end node conflict")
@@ -362,10 +346,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 								label := manager.NewLoopLabel()
 								loopNode.Label = label
 							}
-							breakNode.Statement = statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-								return "break " + loopNode.Label
-							}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-							})
+							breakNode.Statement = statements.NewSourceTransferStatement("break", loopNode.Label)
 							//ok = true
 							break
 						}
@@ -403,10 +384,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 					if loopNode.Label == "" {
 						loopNode.Label = manager.NewLoopLabel()
 					}
-					breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-						return "break " + loopNode.Label
-					}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-					}))
+					breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", loopNode.Label))
 					breakNode.IsJmp = true
 					// Mirror the plain-break wiring but hand the exit edge to the ENCLOSING loop: the break
 					// leaf flows to the outer loop node, and the outer loop node owns the edge to the shared
@@ -419,7 +397,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 				}
 				// A switch captures an unlabeled break. Preserve the actual loop target
 				// when the exiting edge belongs to a switch nested in this loop.
-				breakText := "break"
+				breakLabel := ""
 				for _, sw := range manager.SwitchNode {
 					if utils.IsDominate(manager.DominatorMap, circleNode, sw) &&
 						(sw == node || utils.IsDominate(manager.DominatorMap, sw, node)) {
@@ -427,19 +405,16 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 						if loop.Label == "" {
 							loop.Label = manager.NewLoopLabel()
 						}
-						breakText += " " + loop.Label
+						breakLabel = loop.Label
 						break
 					}
 				}
-				breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-					return breakText
-				}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-				}))
+				breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", breakLabel))
 				replaceNextInPlace(node, next, breakNode)
 				breakNode.AddNext(circleNode)
 				circleNode.AddNext(next)
 				breakNode.IsJmp = true
-				if breakText == "break" {
+				if breakLabel == "" {
 					breakNode.Statement.(*statements.CustomStatement).Name = "break"
 					manager.recordLoopTransfer(breakNode, circleNode, "break", node)
 				}
@@ -456,14 +431,8 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 							label := manager.NewLoopLabel()
 							loopNode.Label = label
 						}
-						breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-							return "break"
-						}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-						}))
-						breakNode.Statement = statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-							return "continue " + loopNode.Label
-						}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-						})
+						breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
+						breakNode.Statement = statements.NewSourceTransferStatement("continue", loopNode.Label)
 						breakNode.IsJmp = true
 						replaceNextInPlace(node, next, breakNode)
 						breakNode.AddNext(matched[0])
@@ -492,14 +461,8 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 								label := manager.NewLoopLabel()
 								loopNode.Label = label
 							}
-							breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-								return "break"
-							}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-							}))
-							breakNode.Statement = statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-								return "break " + loopNode.Label
-							}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-							})
+							breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
+							breakNode.Statement = statements.NewSourceTransferStatement("break", loopNode.Label)
 							breakNode.IsJmp = true
 							replaceNextInPlace(node, next, breakNode)
 							// The enclosing loop owns its continuation; a jump leaf
@@ -1330,5 +1293,6 @@ func (manager *RewriteManager) qualifyTargetTransfer(node, target *core.Node, ki
 	copy.Name = ""
 	copy.LoopTransferKind, copy.LoopTargetLabel = kind, loop.Label
 	copy.StringFunc = func(*class_context.ClassContext) string { return kind + " " + loop.Label }
+	copy.RetargetSourceTransfer(kind, loop.Label)
 	node.Statement = &copy
 }

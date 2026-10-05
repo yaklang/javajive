@@ -205,15 +205,21 @@ func javaExtractImports(src string) []string {
 // class body), scanning comment/quote aware so braces inside strings, char literals, and comments
 // are ignored.
 func javaClassBodyContent(src string) string {
+	body, _ := javaClassBodyContentKnown(src)
+	return body
+}
+
+// Empty braces form a valid body; a missing/unbalanced boundary does not.
+func javaClassBodyContentKnown(src string) (string, bool) {
 	open := javaIndexTopBrace(src)
 	if open < 0 {
-		return ""
+		return "", false
 	}
 	close := javaMatchBrace(src, open)
-	if close < 0 {
-		return ""
+	if close < 0 || strings.TrimSpace(src[close+1:]) != "" {
+		return "", false
 	}
-	return src[open+1 : close]
+	return src[open+1 : close], true
 }
 
 // javaRemoveConstructors removes every member declaration whose name is the (degraded) subclass

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func testNativeIndependentFamilyFixture(t *testing.T, fixture string, owners []string, driver, want string) {
+func testNativeIndependentFamilyFixture(t *testing.T, fixture string, owners []string, driver, want string, verify ...func(*testing.T, string, []byte, []byte)) {
 	t.Helper()
 	javac, java := t04Tools(t)
 	owned := func(name string) bool {
@@ -81,6 +81,9 @@ func testNativeIndependentFamilyFixture(t *testing.T, fixture string, owners []s
 						}
 						if a, b := nativeBinaryShape(t, raw), nativeBinaryShape(t, got); a != b {
 							t.Fatalf("ABI %s\n%s\n%s", n, a, b)
+						}
+						for _, check := range verify {
+							check(t, n, raw, got)
 						}
 					}
 				})

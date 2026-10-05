@@ -3937,8 +3937,12 @@ const (
 )
 
 type MiddleStatement struct {
-	Data any
-	Flag string
+	monitorKind             string
+	monitorPC, monitorOwner int
+	monitorValue            values.JavaValue
+	monitorKnown            bool
+	Data                    any
+	Flag                    string
 }
 
 // ReplaceVar implements Statement.
@@ -3957,8 +3961,11 @@ func NewMiddleStatement(flag string, d any) *MiddleStatement {
 }
 
 type SynchronizedStatement struct {
-	Argument values.JavaValue
-	Body     []Statement
+	monitorPC    int
+	monitorValue values.JavaValue
+	monitorKnown bool
+	Argument     values.JavaValue
+	Body         []Statement
 }
 
 // ReplaceVar implements Statement.

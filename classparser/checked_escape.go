@@ -163,6 +163,13 @@ func typedAbsorbingHandlers(body []statements.Statement, uncheckedThrows map[int
 						return false
 					}
 				}
+			case *statements.SynchronizedStatement:
+				if x == nil {
+					return false
+				}
+				if _, known := x.OriginalMonitorEnterPC(); !known || !absorbs(x.Body) {
+					return false
+				}
 			case *statements.AssignStatement, *statements.ExpressionStatement, *statements.ReturnStatement, *values.JavaExpression:
 			case *statements.MiddleStatement:
 				if x == nil || x.Data != nil || (x.Flag != "start" && x.Flag != "end") {

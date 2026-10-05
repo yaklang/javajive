@@ -77,12 +77,14 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 						}
 					}
 				case *values.CustomValue:
-					if value != nil && value.Flag == "boolean_stack_word" && value.CapturesKnown {
-						pending = append(pending, value.Captures...)
-					}
+					// Opaque closures cannot prove the source Boolean domain.
 				case *values.JavaExpression:
 					if value != nil && (value.Op == values.AND || value.Op == values.OR || value.Op == values.XOR) {
 						pending = append(pending, value.Values...)
+					}
+				default:
+					if operand, known := values.BooleanStackWordOperand(v); known {
+						pending = append(pending, operand)
 					}
 				}
 			}
@@ -240,8 +242,8 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 				}
 				return false
 			}
-			if c, ok := v.(*values.CustomValue); ok && c.Flag == "boolean_stack_word" && c.CapturesKnown && len(c.Captures) == 1 {
-				return normalized(c.Captures[0], depth+1)
+			if operand, known := values.BooleanStackWordOperand(v); known {
+				return normalized(operand, depth+1)
 			}
 			if e, ok := v.(*values.JavaExpression); ok && len(e.Values) == 2 && (e.Op == values.AND || e.Op == values.OR || e.Op == values.XOR) {
 				return normalized(e.Values[0], depth+1) && normalized(e.Values[1], depth+1)
