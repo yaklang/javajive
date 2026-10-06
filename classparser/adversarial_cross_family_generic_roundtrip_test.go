@@ -23,7 +23,23 @@ func TestAdversarialCrossFamilyGenericOverloadMemberEnclosingSuperclassRoundTrip
 func TestAdversarialCrossFamilyGenericMarkerOverloadMemberEnclosingSuperclassRoundTrip(t *testing.T) {
 	testCrossFamilyGenericEnclosing(t, true, "marker overload")
 }
+func TestAdversarialCrossFamilyGenericThisOverloadMemberEnclosingSuperclassRoundTrip(t *testing.T) {
+	testCrossFamilyGenericEnclosing(t, true, "this overload")
+}
+func TestAdversarialCrossFamilyGenericThisFalseOverloadMemberEnclosingSuperclassRoundTrip(t *testing.T) {
+	testCrossFamilyGenericEnclosing(t, true, "this overload false")
+}
+func TestAdversarialCrossFamilyGenericThisRenamedOverloadMemberEnclosingSuperclassRoundTrip(t *testing.T) {
+	f := crossFamilyGenericEnclosingFixture(true, "this overload")
+	f = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(f, "Binding", "Separate"), "Member", "EnclosingPart"), "Leaf", "CurrentPart")
+	testNativeIndependentFamilyFixture(t, f, []string{"SeparateBase", "SeparateCurrent"}, "SeparateDriver", "6:cross-family:outer:identity:callback\n", nativeLexicalExactSignatures)
+}
 func testCrossFamilyGenericEnclosing(t *testing.T, genericMember bool, variant string) {
+	f := crossFamilyGenericEnclosingFixture(genericMember, variant)
+	testNativeIndependentFamilyFixture(t, f, []string{"BindingBase", "BindingCurrent"}, "BindingDriver", "6:cross-family:outer:identity:callback\n", nativeLexicalExactSignatures)
+}
+
+func crossFamilyGenericEnclosingFixture(genericMember bool, variant string) string {
 	f := strings.Replace(crossFamilyEnclosingFixture, "class BindingBase{", "class BindingBase<B>{", 1)
 	f = strings.Replace(f, "class BindingCurrent extends BindingBase{", "class BindingCurrent<C> extends BindingBase<C>{", 1)
 	f = strings.Replace(f, "final Object observed;final int n;Member(int n)", "final B kept;final Object observed;final int n;Member(B seed,int n)", 1)
@@ -45,6 +61,17 @@ func testCrossFamilyGenericEnclosing(t *testing.T, genericMember bool, variant s
 	}
 
 	switch variant {
+	case "this overload", "this overload false":
+		f = strings.Replace(f, "class Leaf extends Member<String>", "class Leaf extends Member<Object>", 1)
+		f = strings.Replace(f, "super(seed,\"marker\",n);", "super(seed,(Object)\"marker\",n);", 1)
+		f = strings.Replace(f, "Member(B seed,M marker,int n)", "Member(B seed,M marker,int n)throws java.io.IOException{this(seed,marker,n,true);}Member(B seed,String marker,int n,boolean flag)throws java.io.IOException{throw new AssertionError(\"wrong this overload\");}Member(B seed,M marker,int n,boolean flag)", 1)
+		f = strings.Replace(f, `BindingEffects.trace+="P";`, `BindingEffects.trace+=(flag?"T":"F");BindingEffects.trace+="P";`, 1)
+		want := "TP"
+		if variant == "this overload false" {
+			f = strings.Replace(f, "this(seed,marker,n,true);", "this(seed,marker,n,false);", 1)
+			want = "FP"
+		}
+		f = strings.ReplaceAll(f, `.trace.equals("P")`, `.trace.equals("`+want+`")`)
 	case "bounded":
 		f = strings.Replace(f, "class BindingBase<B>", "class BindingBase<B extends CharSequence>", 1)
 		f = strings.Replace(f, "class BindingCurrent<C>", "class BindingCurrent<C extends CharSequence>", 1)
@@ -61,5 +88,5 @@ func testCrossFamilyGenericEnclosing(t *testing.T, genericMember bool, variant s
 	case "overload":
 		f = strings.Replace(f, "Member(B seed,M marker,int n)", "Member(String seed,Object marker,int n)throws java.io.IOException{throw new AssertionError(\"wrong overload\");}Member(B seed,M marker,int n)", 1)
 	}
-	testNativeIndependentFamilyFixture(t, f, []string{"BindingBase", "BindingCurrent"}, "BindingDriver", "6:cross-family:outer:identity:callback\n", nativeLexicalExactSignatures)
+	return f
 }

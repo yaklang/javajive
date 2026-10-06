@@ -240,6 +240,11 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 		origins = append(origins, slot)
 	}
 	allocations := map[string]string{}
+	// ICONST/BIPUSH/SIPUSH/LDC produce computational int words even when
+	// javac's original constructor formal is Z. Preserve a physical literal
+	// witness for canonical boolean words; unknown I parameters cannot borrow
+	// this fact or be narrowed merely because their usual inputs are 0/1.
+	booleanLiterals := map[int]bool{}
 	// Track only newly allocated reference arrays on this operand stack.
 	// Stores must consume that exact allocation origin, an int index and an
 	// assignable reference element; parameter arrays never borrow this proof.
@@ -331,7 +336,8 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			}
 			base := len(arguments) - len(formals)
 			for i := range formals {
-				if !widening.assignable(arguments[base+i], formals[i]) {
+				canonicalBoolean := arguments[base+i] == "I" && formals[i] == "Z" && booleanLiterals[origins[base+i]]
+				if !canonicalBoolean && !widening.assignable(arguments[base+i], formals[i]) {
 					return 0, nil
 				}
 			}
@@ -477,7 +483,14 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			continue
 		}
 		if literal, proved := constructorMotionLiteral(obj, ops[index]); proved {
-			appendArgument(literal, -1)
+			origin := -1
+			if word, known := constructorOriginalIntLiteral(obj, ops[index]); known && word.knownInt && (word.intWord == 0 || word.intWord == 1) {
+				// Disjoint from local slots, lexical-chain and fresh-array
+				// origins for every permitted 65535-byte original Code body.
+				origin = -131072 - index
+				booleanLiterals[origin] = true
+			}
+			appendArgument(literal, origin)
 		} else {
 			slot := core.GetRetrieveIdx(ops[index])
 			parameter, ok := slots[slot]
