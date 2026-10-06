@@ -29,6 +29,16 @@ func (f *JavaClassMember) MarkOriginalFieldRead(member *JavaClassMember, pc int)
 	}
 }
 
+// OriginalStaticFieldRead binds the rendering view to the decoded GETSTATIC
+// witness. A later name/descriptor/origin mutation cannot manufacture this proof.
+func (f *JavaClassMember) OriginalStaticFieldRead(pc int, owner, name, descriptor string) bool {
+	if f == nil || f.originalFieldRead == nil || !f.HasOriginPC || f.RefKind != 0 {
+		return false
+	}
+	w := f.originalFieldRead
+	return f.OriginPC == pc && w.pc == pc && w.owner == owner && w.name == name && w.descriptor == descriptor && f.Name == owner && f.Member == name && f.Description == descriptor
+}
+
 // OriginalBooleanStackWord proves a source Boolean whose JVM value is0/1.
 // A shared DUP value is followed only through its immutable producer witness;
 // arbitrary Boolean-typed locals do not supply evidence. This view adds no

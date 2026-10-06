@@ -31,10 +31,16 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 	if !d.planNativeMemberAnonymousScopes(p) {
 		return nil
 	}
+	if !nativeEnumSwitchOrdinalClosed(p, d.Work) {
+		return nil
+	}
 	if !nativeMemberJointBridgeMarkersClosed(p, d.Work) {
 		return nil
 	}
 	index := z.originalMemberIndex()
+	if !z.nativeEnumSwitchUsersClosed(p, root, index, d.Work) {
+		return nil
+	}
 	if p.anonymousForest != nil && !nativeAnonymousForestArchiveClosed(p.anonymousForest, index, d.Work) {
 		return nil
 	}
@@ -208,6 +214,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 				}
 			}
 			if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil) {
+				if p.enumSwitchTables[n] != nil && anonOwner == owner {
+					continue
+				}
 				if p.emptyMarkers[n] != nil && anonOwner == owner && nativeMemberEmptyAccessMarker(other, owner, d.Work) {
 					continue
 				}
@@ -251,7 +260,7 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	if p.anonymousForest != nil && !p.anonymousForest.scopeSourceComplete(src) {
 		return nil
 	}
-	if e != nil || p.failed || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {
+	if e != nil || p.failed || !nativeEnumSwitchSourceComplete(p, src, d.Work) || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {
 		return nil
 	}
 

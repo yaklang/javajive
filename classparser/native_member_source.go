@@ -33,6 +33,7 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
+	enumSwitchTables       map[string]*nativeEnumSwitchTable
 	registrationLayouts    map[string]*nativeMemberRegistrationScope
 	sourceDependencies     map[string]string
 	allocationDependencies map[string]*nativeMemberClass
@@ -613,7 +614,12 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 			}
 		}
 	}
-	if len(p.children) == 0 {
+	var switchTablesKnown bool
+	p.enumSwitchTables, switchTablesKnown = c.nativeEnumSwitchOwnedTables(p.owner)
+	if !switchTablesKnown {
+		return nil
+	}
+	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 {
 		return nil
 	}
 	for name, child := range p.children {
@@ -1210,6 +1216,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		return
 	}
 	ctx := c.FuncCtx
+	c.wireNativeEnumSwitchSource(p, ctx)
 	c.wireNativeMemberPrivateGetters(p, ctx)
 	if c.nativeMemberCurrent != nil && p.lexicalObjects != nil {
 		reads, valid := nativeMemberLexicalReads(c.obj, p, c.Work)

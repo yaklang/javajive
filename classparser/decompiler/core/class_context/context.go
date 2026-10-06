@@ -43,7 +43,10 @@ type ClassContext struct {
 	LexicalTypeNames map[string]bool
 	// Optional lexical-layout proof may exchange both conditional arms. The
 	// renderer negates the same condition once, preserving evaluation and effects.
-	SourceBranchSwap       func(ifSource, elseSource string) bool
+	SourceBranchSwap func(ifSource, elseSource string) bool
+	// Original bytecode/source binding may replace a proved enum table selector
+	// and all of its labels together. Nil keeps the original integer switch.
+	SourceEnumSwitch       func(selector any, labels []int) (string, map[int]string, bool)
 	SourceMemberAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	SourceMemberCandidate  func(owner string) bool
 	// Optional descriptor gate runs before operands are rendered. Knowing a

@@ -524,6 +524,9 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 		if members != nil && members.emptyMarkers[name] != nil && nativeMemberEmptyAccessMarker(obj, members.owner, c.Work) {
 			continue
 		}
+		if members != nil && members.enumSwitchTables[name] != nil {
+			continue
+		}
 		if !nativeSourceBinaryName(obj.GetSupperClassName()) {
 			return nil
 		}

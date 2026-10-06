@@ -14,6 +14,9 @@ import (
 )
 
 type JavaRef struct {
+	originalParameter                  bool
+	originalParameterSlot              int
+	originalParameterSeed              JavaValue
 	VarUid                             string
 	Id                                 *utils.VariableId
 	StackVar                           JavaValue
@@ -44,6 +47,22 @@ type JavaRef struct {
 	// a further incompatible store is a genuine slot reuse and must mint a fresh variable. See
 	// AssignVarGuarded; kill-switch JDEC_NO_NULL_ADOPT_ONCE.
 	nullTypeAdopted bool
+}
+
+// MarkOriginalParameter binds a descriptor-seeded JVM local to its immutable
+// slot and initial value. Source renaming cannot exchange equal-typed parameters.
+func (j *JavaRef) MarkOriginalParameter(slot int) {
+	if j != nil && !j.originalParameter && slot >= 0 {
+		j.originalParameter = true
+		j.originalParameterSlot = slot
+		j.originalParameterSeed = j.Val
+	}
+}
+func (j *JavaRef) OriginalParameterSlot() (int, bool) {
+	if j == nil || !j.originalParameter || !j.IsParam || j.IsThis || j.CustomValue != nil || j.StackVar != nil || !sameOriginalValueIdentity(j.originalParameterSeed, j.Val) {
+		return 0, false
+	}
+	return j.originalParameterSlot, true
 }
 
 // ReplaceVar implements JavaValue.

@@ -3912,16 +3912,51 @@ func (a *SwitchStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.Varia
 	}
 }
 
+// SourceSelection projects selector and all labels atomically. Without a
+// complete binding certificate the renderer retains the original integer form.
+func (a *SwitchStatement) SourceSelection(ctx *class_context.ClassContext) (string, map[int]string, bool) {
+	if ctx == nil || ctx.SourceEnumSwitch == nil {
+		return "", nil, false
+	}
+	keys := []int{}
+	for _, c := range a.Cases {
+		if !c.IsDefault {
+			keys = append(keys, c.IntValue)
+		}
+	}
+	text, mapping, ok := ctx.SourceEnumSwitch(a.Value, keys)
+	if !ok || text == "" || len(mapping) != len(keys) {
+		return "", nil, false
+	}
+	seen := map[int]bool{}
+	for _, k := range keys {
+		if mapping[k] == "" || seen[k] {
+			return "", nil, false
+		}
+		seen[k] = true
+	}
+	return text, mapping, true
+}
+
 func (a *SwitchStatement) String(funcCtx *class_context.ClassContext) string {
+	selector, names, projected := a.SourceSelection(funcCtx)
 	casesStrs := []string{}
 	for _, c := range a.Cases {
+		body := StatementsString(c.Body, funcCtx)
 		if c.IsDefault {
-			casesStrs = append(casesStrs, fmt.Sprintf("default:\n%s", StatementsString(c.Body, funcCtx)))
+			casesStrs = append(casesStrs, fmt.Sprintf("default:\n%s", body))
 			continue
 		}
-		casesStrs = append(casesStrs, fmt.Sprintf("case %d:\n%s", c.IntValue, StatementsString(c.Body, funcCtx)))
+		label := fmt.Sprintf("%d", c.IntValue)
+		if projected {
+			label = names[c.IntValue]
+		}
+		casesStrs = append(casesStrs, fmt.Sprintf("case %s:\n%s", label, body))
 	}
-	return fmt.Sprintf("switch(%s) {\n%s\n}", a.Value.String(funcCtx), strings.Join(casesStrs, "\n"))
+	if !projected {
+		selector = a.Value.String(funcCtx)
+	}
+	return fmt.Sprintf("switch(%s) {\n%s\n}", selector, strings.Join(casesStrs, "\n"))
 }
 
 func NewSwitchStatement(value values.JavaValue, cases []*CaseItem) *SwitchStatement {

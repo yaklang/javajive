@@ -4750,6 +4750,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			runtimeSim.AssignVar(slotIndex, paramPlaceholder)
 			val := runtimeSim.GetVar(slotIndex)
 			val.IsParam = true
+			val.MarkOriginalParameter(slotIndex)
 			params = append(params, val)
 			if isDouble {
 				slotIndex += 2

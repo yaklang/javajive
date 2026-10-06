@@ -4358,6 +4358,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 						statementStr = fmt.Sprintf("%s%s:\n%s", c.GetTabString(), ret.Label, statementStr)
 					}
 				case *statements.SwitchStatement:
+					selector, names, projected := ret.SourceSelection(funcCtx)
+					if !projected {
+						selector = ret.Value.String(funcCtx)
+					}
 					getBody := func(caseItems []*statements.CaseItem) string {
 						var res []string
 						for _, st := range caseItems {
@@ -4365,13 +4369,17 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 								res = append(res, c.GetTabString()+fmt.Sprintf("default:\n%s", statementListToString(st.Body)))
 								continue
 							}
-							res = append(res, c.GetTabString()+fmt.Sprintf("case %d:\n%s", st.IntValue, statementListToString(st.Body)))
+							label := fmt.Sprintf("%d", st.IntValue)
+							if projected {
+								label = names[st.IntValue]
+							}
+							res = append(res, c.GetTabString()+fmt.Sprintf("case %s:\n%s", label, statementListToString(st.Body)))
 						}
 						return strings.Join(res, "\n")
 					}
 					statementStr = fmt.Sprintf(c.GetTabString()+"switch (%s){\n"+
 						"%s\n"+
-						c.GetTabString()+"}", ret.Value.String(funcCtx), getBody(ret.Cases))
+						c.GetTabString()+"}", selector, getBody(ret.Cases))
 				case *statements.IfStatement:
 					if stmt := buildReturnFromEmptyGuardTernary(ret, funcCtx); stmt != "" {
 						statementStr = c.GetTabString() + stmt + ";"
