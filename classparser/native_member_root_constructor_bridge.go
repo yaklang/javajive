@@ -53,18 +53,24 @@ func nativeRootBridgeDelegationKey(owner, descriptor string) string {
 	return owner + "\x00" + descriptor
 }
 
-// This first capability covers a static named member's initial SUPER call.
+// This capability covers a static named member's initial SUPER call into the
+// root or another owned static member. Static membership does not introduce
+// an enclosing-instance word, but private access still needs the same lexical
+// transaction and original unused-marker certificate as a root constructor.
 // The existing symbolic packet interpreter proves original uninitialized THIS,
 // exact parameter origins and the target descriptor. Arbitrary allocations,
 // anonymous callers and nonstatic captures require their own projection proof.
 func (c *ClassObjectDumper) proveNativeRootBridgeDelegations(p *nativeMemberFamily) bool {
 	p.rootBridgeDelegations = map[string]*nativeRootBridgeDelegation{}
-	if len(p.rootAccessBridges) == 0 {
-		return true
-	}
 	metadata := c.buildInvocationMetadata()
 	for owner, child := range p.children {
-		if !child.static || child.object.GetSupperClassName() != p.owner {
+		targetOwner := child.object.GetSupperClassName()
+		parent := p.children[targetOwner]
+		if !child.static || targetOwner != p.owner && (parent == nil || !parent.static) {
+			continue
+		}
+		bridges := p.constructorBridges(targetOwner)
+		if len(bridges) == 0 {
 			continue
 		}
 		for _, method := range child.object.Methods {
@@ -100,8 +106,8 @@ func (c *ClassObjectDumper) proveNativeRootBridgeDelegations(p *nativeMemberFami
 				if call == nil {
 					continue
 				}
-				bridge := p.rootAccessBridges[call.Description]
-				if call.Name != p.owner || bridge == nil {
+				bridge := bridges[call.Description]
+				if call.Name != targetOwner || bridge == nil {
 					continue
 				}
 				if next < 2 || ops[next-2].Instr.OpCode != core.OP_ACONST_NULL || len(ops[next-2].Data) != 0 {
@@ -120,7 +126,7 @@ func (c *ClassObjectDumper) proveNativeRootBridgeDelegations(p *nativeMemberFami
 				if p.rootBridgeDelegations[key] != nil {
 					return false
 				}
-				p.rootBridgeDelegations[key] = &nativeRootBridgeDelegation{owner: p.owner, descriptor: call.Description, target: bridge.target, pc: int(ops[next-1].CurrentOffset)}
+				p.rootBridgeDelegations[key] = &nativeRootBridgeDelegation{owner: targetOwner, descriptor: call.Description, target: bridge.target, pc: int(ops[next-1].CurrentOffset)}
 			}
 		}
 	}

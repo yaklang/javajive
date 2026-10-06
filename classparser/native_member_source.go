@@ -1085,6 +1085,12 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				if result[name+desc][int(op.CurrentOffset)] != nil {
 					continue
 				}
+				// An initial owned static SUPER is a delegation, not a NEW.
+				// Its separate original THIS/NULL-marker packet certificate
+				// must match before this source-only bridge can be projected.
+				if p.rootBridgeDelegation(c.obj, name, desc, call.Name, call.Description, int(op.CurrentOffset)) != nil {
+					continue
+				}
 				if c.nativeMemberForeignOriginalSuper(p, m, call.Name, call.Description, int(op.CurrentOffset)) {
 					continue
 				}
