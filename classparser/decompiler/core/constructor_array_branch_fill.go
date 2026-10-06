@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -219,15 +220,11 @@ func delegationArrayElementAssignable(value values.JavaValue, target string, met
 		if value.Type() == nil {
 			return false
 		}
-		// String literals use the historical JavaString primer tag, but are
-		// JVM references. Canonicalize that type identity before widening;
-		// treating its literal representation as a primitive rejects a valid
-		// condition arm even when the other arm has the descriptor class.
-		if primer, ok := value.Type().RawType().(*types.JavaPrimer); ok && primer.Name == types.JavaString {
-			return callbinding.Assignable("Ljava/lang/String;", target, metadata)
-		}
-		name, ok := types.ClassFQNOf(value.Type())
-		return ok && callbinding.Assignable("L"+strings.ReplaceAll(name, ".", "/")+";", target, metadata)
+		// An int[] remains a reference; an int remains a scalar. Use the same
+		// bounded descriptor identity as cast binding, including literal String
+		// tags and array rank, instead of guessing from an element/class name.
+		descriptor := values.ReferenceTypeDescriptor(value.Type(), &class_context.ClassContext{InvocationMetadata: metadata})
+		return descriptor != "" && callbinding.Assignable(descriptor, target, metadata)
 	}
 	return visit(value)
 }

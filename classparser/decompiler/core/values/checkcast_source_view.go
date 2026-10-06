@@ -55,6 +55,13 @@ func (c *CastExpression) needsObjectCheckCastView(operand JavaValue, ctx *class_
 	return checkCastDisjoint(source, target, ctx.InvocationMetadata, 0)
 }
 
+// ReferenceTypeDescriptor canonicalizes a known source reference to its JVM
+// descriptor. Arrays keep their rank and primitive/reference component identity;
+// String's legacy literal tag denotes the same class as its parsed descriptor.
+func ReferenceTypeDescriptor(t types.JavaType, ctx *class_context.ClassContext) string {
+	return checkCastReferenceDescriptor(t, ctx, 0)
+}
+
 // Read raw class identity, never a source short-name rendering. Type variables,
 // opaque types and cycles/deep array wrappers do not supply descriptor evidence.
 func checkCastReferenceDescriptor(t types.JavaType, ctx *class_context.ClassContext, depth int) string {
@@ -89,6 +96,11 @@ func checkCastReferenceDescriptor(t types.JavaType, ctx *class_context.ClassCont
 			return ""
 		}
 		name = raw.RawClassName
+	case *types.JavaPrimer:
+		if raw == nil || raw.Name != types.JavaString {
+			return ""
+		}
+		name = "java/lang/String"
 	default:
 		return ""
 	}
