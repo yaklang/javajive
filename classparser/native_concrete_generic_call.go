@@ -28,9 +28,10 @@ func nativeMemberConcretePrivateCall(owner *ClassObject, signature, descriptor s
 // A private instance call on an explicit raw declaring receiver erases its
 // class-owned formals to their original first bounds. This is independent of
 // the caller's (possibly shadowing) lexical variables. Complete original class
-// and method signatures must certify that erasure; method-owned or free outer
-// variables cannot borrow this raw-class rule. No virtual target or source
-// overload is selected by the erasure certificate itself.
+// and method signatures must certify that erasure in their separate lexical
+// scopes. A method formal shadows its class namesake; free outer variables
+// cannot borrow this raw-class rule. Static generic methods stay generic.
+// No virtual target or source overload is selected by the erasure certificate.
 func nativeMemberRawOwnPrivateCall(owner *ClassObject, signature, descriptor string, target *MemberInfo, work *workbudget.Budget) bool {
 	if owner == nil || target == nil || target.AccessFlags&0x000a != 2 || len(signature) > 4096 {
 		return false
@@ -39,7 +40,7 @@ func nativeMemberRawOwnPrivateCall(owner *ClassObject, signature, descriptor str
 	if !known || len(classSignature) > 4096 || !nativeProofWork(work, int64(len(classSignature)+len(signature))*130+1) || work != nil && work.CheckAlloc(int64(len(classSignature)+len(signature))*256) != nil {
 		return false
 	}
-	erased, throws, known := types.EraseClassBoundMethodSignatureWithThrows(classSignature, signature)
+	erased, throws, known := types.EraseRawClassInstanceMethodSignatureWithThrows(classSignature, signature)
 	if !known || erased != descriptor {
 		return false
 	}

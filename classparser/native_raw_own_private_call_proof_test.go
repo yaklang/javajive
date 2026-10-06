@@ -10,7 +10,7 @@ import (
 func TestNativeRawOwnPrivateCallRequiresOriginalDeclaringErasure(t *testing.T) {
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		files := nativeCompileDebugClasses(t, strings.ReplaceAll(rawOwnPrivateCallFixture, "<T extends Number>{", "<T extends Number> implements java.io.Serializable{"), debug)
-		for _, variant := range []string{"original", "same throws", "method formal", "unknown formal", "wrong first bound", "dependent bound", "wrong superclass", "wrong interface", "missing interface", "class named T", "primitive argument", "primitive bound argument", "void array", "wrong descriptor", "duplicate class signature", "nil class signature", "duplicate method signature", "nil method signature", "static target", "public target", "wrong throws", "budget", "memory", "canceled"} {
+		for _, variant := range []string{"original", "same throws", "method formal", "wrong method bound", "unknown method bound", "method cannot repair class scope", "unknown formal", "wrong first bound", "dependent bound", "wrong superclass", "wrong interface", "missing interface", "class named T", "primitive argument", "primitive bound argument", "void array", "wrong descriptor", "duplicate class signature", "nil class signature", "duplicate method signature", "nil method signature", "static target", "public target", "wrong throws", "budget", "memory", "canceled"} {
 			t.Run(debug+"/"+variant, func(t *testing.T) {
 				obj, e := Parse(append([]byte(nil), files["RawOwnCallOwner.class"]...))
 				if e != nil {
@@ -36,6 +36,13 @@ func TestNativeRawOwnPrivateCallRequiresOriginalDeclaringErasure(t *testing.T) {
 					nativeReplaceOriginalSignature(t, obj, target.Attributes, "(Ljava/lang/Object;J)TT;^Ljava/io/IOException;")
 				case "method formal":
 					nativeReplaceOriginalSignature(t, obj, target.Attributes, "<T:Ljava/lang/Number;>(Ljava/lang/Object;J)TT;")
+				case "wrong method bound":
+					nativeReplaceOriginalSignature(t, obj, target.Attributes, "<T:Ljava/lang/CharSequence;>(Ljava/lang/Object;J)TT;")
+				case "unknown method bound":
+					nativeReplaceOriginalSignature(t, obj, target.Attributes, "<U:Ljava/lang/Comparable<TFree;>;>(Ljava/lang/Object;J)TT;")
+				case "method cannot repair class scope":
+					nativeReplaceOriginalSignature(t, obj, obj.Attributes, "<T:Ljava/lang/Number<TU;>;>Ljava/lang/Object;Ljava/io/Serializable;")
+					nativeReplaceOriginalSignature(t, obj, target.Attributes, "<U:Ljava/lang/String;>(Ljava/lang/Object;J)TT;")
 				case "unknown formal":
 					nativeReplaceOriginalSignature(t, obj, target.Attributes, "(Ljava/lang/Object;J)TU;")
 				case "wrong first bound":
@@ -92,7 +99,7 @@ func TestNativeRawOwnPrivateCallRequiresOriginalDeclaringErasure(t *testing.T) {
 					work = workbudget.New(ctx, workbudget.Limits{})
 				}
 				got := nativeMemberPrivateCallProof(obj, bridge, work)
-				want := variant == "original" || variant == "same throws"
+				want := variant == "original" || variant == "same throws" || variant == "method formal"
 				if (got != nil) != want {
 					t.Fatalf("admitted=%v want=%v", got != nil, want)
 				}

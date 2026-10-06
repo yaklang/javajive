@@ -36,54 +36,11 @@ func EraseClassBoundMethodSignatureWithThrows(classSignature, methodSignature st
 			return "", nil, false
 		}
 	}
-	bounds := map[string]string{}
-	referenceSignatures := []string{methodSignature}
-	rest := classSignature[1:]
-	for len(rest) > 0 && rest[0] != '>' {
-		colon := strings.IndexByte(rest, ':')
-		if colon <= 0 {
-			return "", nil, false
-		}
-		name := rest[:colon]
-		rest = rest[colon:]
-		for len(rest) > 0 && rest[0] == ':' {
-			rest = rest[1:]
-			if len(rest) > 0 && rest[0] == ':' {
-				continue
-			}
-			// A concrete first bound has a closed erasure independent of substitutions.
-			// An unknown first bound must not fall through to a later interface bound.
-			if len(rest) == 0 || (rest[0] != 'L' && rest[0] != 'T' && rest[0] != '[') {
-				return "", nil, false
-			}
-			before := rest
-			_, after, ok := parseSigType(rest)
-			if !ok {
-				return "", nil, false
-			}
-			referenceSignatures = append(referenceSignatures, before[:len(before)-len(after)])
-			if bounds[name] == "" {
-				if before[0] != 'L' {
-					return "", nil, false
-				}
-				t := ParseSignature(before[:len(before)-len(after)])
-				raw, known := RawClassFQN(t)
-				if !known || raw == "" {
-					return "", nil, false
-				}
-				bounds[name] = "L" + strings.ReplaceAll(raw, ".", "/") + ";"
-			}
-			rest = after
-		}
-		if bounds[name] == "" {
-			return "", nil, false
-		}
-	}
-	if len(bounds) != len(classFormals) || !strings.HasPrefix(rest, ">") {
+	bounds, referenceSignatures, rest, valid := signatureConcreteFormalBounds(classSignature, classFormals)
+	if !valid {
 		return "", nil, false
 	}
-	rest = rest[1:]
-	referenceSignatures = append(referenceSignatures, rest)
+	referenceSignatures = append(referenceSignatures, methodSignature, rest)
 	// Class signatures have class/interface supers, never method or field grammar.
 	for len(rest) > 0 {
 		if rest[0] != 'L' {
@@ -105,6 +62,137 @@ func EraseClassBoundMethodSignatureWithThrows(classSignature, methodSignature st
 		}
 	}
 	return eraseMethodSignature(methodSignature, bounds)
+}
+
+// EraseRawClassInstanceMethodSignatureWithThrows applies JLS raw member
+// erasure only to instance methods of a generic declaring class. Class and
+// method scopes are checked separately; a method declaration may shadow a
+// class variable, but cannot make a free class-bound variable become valid.
+// Static methods retain their generic type and must not use this API.
+func EraseRawClassInstanceMethodSignatureWithThrows(classSignature, methodSignature string) (string, []string, bool) {
+	classFormals, classRefs, known := SignatureTypeVariableReferences(classSignature)
+	if !known || len(classFormals) == 0 || !strings.HasPrefix(classSignature, "<") {
+		return "", nil, false
+	}
+	bounds, parts, supers, known := signatureConcreteFormalBounds(classSignature, classFormals)
+	if !known {
+		return "", nil, false
+	}
+	for _, ref := range classRefs {
+		if bounds[ref] == "" {
+			return "", nil, false
+		}
+	}
+	rest := supers
+	for len(rest) > 0 {
+		if rest[0] != 'L' {
+			return "", nil, false
+		}
+		_, after, ok := parseSigType(rest)
+		if !ok {
+			return "", nil, false
+		}
+		rest = after
+	}
+	parts = append(parts, supers)
+	for _, part := range parts {
+		if !signatureReferenceArgumentsValid(part, bounds) {
+			return "", nil, false
+		}
+	}
+	methodFormals, methodRefs, known := SignatureTypeVariableReferences(methodSignature)
+	if !known {
+		return "", nil, false
+	}
+	body := methodSignature
+	if len(methodFormals) > 0 {
+		if !strings.HasPrefix(methodSignature, "<") {
+			return "", nil, false
+		}
+		methodBounds, methodParts, tail, ok := signatureConcreteFormalBounds(methodSignature, methodFormals)
+		if !ok {
+			return "", nil, false
+		}
+		for name, bound := range methodBounds {
+			bounds[name] = bound
+		}
+		parts = methodParts
+		body = tail
+	} else {
+		parts = nil
+	}
+	for _, ref := range methodRefs {
+		if bounds[ref] == "" {
+			return "", nil, false
+		}
+	}
+	if !strings.HasPrefix(body, "(") {
+		return "", nil, false
+	}
+	parts = append(parts, body)
+	for _, part := range parts {
+		if !signatureReferenceArgumentsValid(part, bounds) {
+			return "", nil, false
+		}
+	}
+	return eraseMethodSignature(body, bounds)
+}
+
+// First concrete bounds determine erasure; dependent bounds remain unproved.
+// Return every reference-bearing bound separately from formal declarations so
+// its arguments can be validated in the caller's lexical binding environment.
+func signatureConcreteFormalBounds(signature string, formals []string) (map[string]string, []string, string, bool) {
+	bounds := map[string]string{}
+	referenceSignatures := []string{}
+	rest := signature[1:]
+	for len(rest) > 0 && rest[0] != '>' {
+		colon := strings.IndexByte(rest, ':')
+		if colon <= 0 {
+			return nil, nil, "", false
+		}
+		name := rest[:colon]
+		rest = rest[colon:]
+		optionalClassBound := true
+		for len(rest) > 0 && rest[0] == ':' {
+			rest = rest[1:]
+			if optionalClassBound && len(rest) > 0 && rest[0] == ':' {
+				optionalClassBound = false
+				continue
+			}
+			// A concrete first bound has a closed erasure independent of substitutions.
+			// An unknown first bound must not fall through to a later interface bound.
+			optionalClassBound = false
+			if len(rest) == 0 || rest[0] != 'L' {
+				return nil, nil, "", false
+			}
+			before := rest
+			_, after, ok := parseSigType(rest)
+			if !ok {
+				return nil, nil, "", false
+			}
+			referenceSignatures = append(referenceSignatures, before[:len(before)-len(after)])
+			if bounds[name] == "" {
+				if before[0] != 'L' {
+					return nil, nil, "", false
+				}
+				t := ParseSignature(before[:len(before)-len(after)])
+				raw, known := RawClassFQN(t)
+				if !known || raw == "" {
+					return nil, nil, "", false
+				}
+				bounds[name] = "L" + strings.ReplaceAll(raw, ".", "/") + ";"
+			}
+			rest = after
+		}
+		if bounds[name] == "" {
+			return nil, nil, "", false
+		}
+	}
+	if len(bounds) != len(formals) || !strings.HasPrefix(rest, ">") {
+		return nil, nil, "", false
+	}
+	rest = rest[1:]
+	return bounds, referenceSignatures, rest, true
 }
 
 // EraseConcreteMethodSignatureWithThrows admits parameterized types whose
