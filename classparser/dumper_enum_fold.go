@@ -60,6 +60,9 @@ func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) map[string]strin
 	if !isEnum || c.foldSiblingResolver == nil || c.getenv("JDEC_NO_ENUM_FOLD") != "" {
 		return nil
 	}
+	if native, known := c.foldNativeEnumConstantBodies(); known {
+		return native
+	}
 	debug := c.getenv("JDEC_FOLD_DEBUG") != ""
 	enumSimple := c.GetConstructorMethodName()
 	if enumSimple == "" {
@@ -143,6 +146,10 @@ func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple stri
 	if err != nil {
 		return ""
 	}
+	return c.renderFoldedConstantObject(subObj, subSimple)
+}
+
+func (c *ClassObjectDumper) renderFoldedConstantObject(subObj *ClassObject, subSimple string) (result string) {
 	child := NewClassObjectDumper(subObj)
 	child.options = c.options
 	child.Work = c.Work
@@ -154,8 +161,13 @@ func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple stri
 	child.archiveDeclarationResolver = c.foldSiblingResolver
 	child.nativeMemberLookup = c.nativeMemberLookup
 	child.declarationResolver = c.declarationResolver
+	if p := c.nativeMemberRoot; p != nil && p.enumConstants[subObj.GetClassName()] != nil {
+		child.nativeMemberRoot = p
+		child.nativeEnumConstantCurrent = p.enumConstants[subObj.GetClassName()]
+		child.nativeOuterContext = c.FuncCtx
+	}
 	src, err := child.DumpClass()
-	if err != nil || src == "" {
+	if err != nil || src == "" || child.nativeEnumConstantCurrent != nil && (strings.Contains(src, DecompileStubMarker) || len(child.constructorBoundaryHelpers) > 0 || len(child.interfaceInitializerHelpers) > 0 || child.privateNestOwnPlan != nil && len(child.privateNestOwnPlan.bridges) > 0) {
 		return ""
 	}
 	if c.FuncCtx != nil {
@@ -163,13 +175,21 @@ func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple stri
 			c.FuncCtx.Import(imp)
 		}
 	}
-	body := javaClassBodyContent(src)
-	if body == "" {
+	body, known := javaClassBodyContentKnown(src)
+	if !known {
 		return ""
 	}
-	body = javaRemoveConstructors(body, subSimple)
+	native := child.nativeEnumConstantCurrent != nil
+	if !native {
+		body = javaRemoveConstructors(body, subSimple)
+	}
 	body = strings.Trim(body, "\n")
 	if strings.TrimSpace(body) == "" {
+		// A proved empty constant body still creates a distinct runtime class.
+		// Its constructor was erased by the original packet proof, not by text.
+		if native {
+			return " {}"
+		}
 		return ""
 	}
 	// Re-indent every non-empty member line one tab deeper: the standalone subclass renders members

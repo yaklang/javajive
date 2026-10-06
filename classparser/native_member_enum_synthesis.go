@@ -14,7 +14,11 @@ import (
 // Their original code must implement that exact protocol before a member enum
 // can join a lexical ownership plan. An enum flag or a synthetic-looking name
 // alone grants no right to replace a method, backing array or constructor.
-type nativeMemberEnumSynthesis struct{ valuesField *MemberInfo }
+type nativeMemberEnumSynthesis struct {
+	valuesField *MemberInfo
+	constants   map[string]nativeEnumConstantAllocation
+	bodies      map[string]*nativeEnumConstantBody
+}
 
 // javac reserves a generated helper name by adding '$' until no source method
 // already owns it (overloads count too). Compare that naming protocol with the
@@ -353,12 +357,19 @@ func nativeEnumValuesArrayPacket(obj *ClassObject, ops []*core.OpCode, constants
 	return true
 }
 
-// The first profile is a canonical final member enum with zero source ctor
-// parameters. Constant-specific subclasses and noncanonical synthesized code
-// require a separate complete proof; they remain refused, including any fake
-// values/valueOf implementation with the same source spelling.
+// The original canonical profile remains available without sibling declarations.
+// Constant-specific bodies additionally require their original allocation,
+// enclosing identity and pure access-bridge constructor proof. Both profiles
+// independently certify every generated factory and backing-array instruction;
+// an enum flag or matching source spelling cannot replace executable code.
 func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbudget.Budget) *nativeMemberEnumSynthesis {
-	if obj == nil || flags&0x4018 != 0x4018 || flags & ^uint16(0x401f) != 0 || obj.AccessFlags&0x4030 != 0x4030 || obj.AccessFlags & ^uint16(0x4031) != 0 || obj.GetSupperClassName() != "java/lang/Enum" || !nativeProofWork(work, 1) {
+	return nativeMemberEnumSynthesisWithDeclarations(obj, flags, nil, work)
+}
+
+func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeMemberEnumSynthesis {
+	canonical := obj != nil && flags&0x4018 == 0x4018 && flags & ^uint16(0x401f) == 0 && obj.AccessFlags&0x4030 == 0x4030 && obj.AccessFlags & ^uint16(0x4031) == 0
+	constantBodies := obj != nil && resolve != nil && flags&0x4008 == 0x4008 && flags & ^uint16(0x441f) == 0 && obj.AccessFlags&0x4020 == 0x4020 && obj.AccessFlags & ^uint16(0x4431) == 0 && flags&0x410 == obj.AccessFlags&0x410 && flags&0x10 == 0
+	if obj == nil || (!canonical && !constantBodies) || obj.GetSupperClassName() != "java/lang/Enum" || !nativeProofWork(work, 1) {
 		return nil
 	}
 	name := obj.GetClassName()
@@ -398,6 +409,15 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 		return nil
 	}
 	var valuesMethod, valueOf, helper, ctor, initializer *MemberInfo
+	bridges := map[string]*nativeConstructorAccessBridge{}
+	if constantBodies {
+		reader := NewClassObjectDumper(obj)
+		reader.Work = work
+		bridges = reader.nativeConstructorAccessBridges()
+		if bridges == nil {
+			return nil
+		}
+	}
 	constructors := map[string]*MemberInfo{}
 	var constructorOrder []*MemberInfo
 	sourceArguments := false
@@ -426,6 +446,10 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 				return nil
 			}
 			helper = method
+		case n == "<init>" && method.AccessFlags == 0x1000 && constantBodies:
+			if bridge := bridges[d]; bridge == nil || bridge.method != method {
+				return nil
+			}
 		case n == "<init>":
 			params, result, err := callbinding.Descriptor(d)
 			if constructors[d] != nil || len(constructors) >= 64 || (method.AccessFlags != 2 && method.AccessFlags != 0x82) || err != nil || result != "V" || len(params) < 2 || params[0] != "Ljava/lang/String;" || params[1] != "I" || method.AccessFlags&0x80 != 0 && (len(params) == 2 || params[len(params)-1][0] != '[') {
@@ -494,7 +518,9 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 		return nil
 	}
 	cursor := 0
-	if sourceArguments {
+	var allocations map[string]nativeEnumConstantAllocation
+	bodies := map[string]*nativeEnumConstantBody{}
+	if sourceArguments || constantBodies {
 		// Source arguments have variable instruction spans and category widths.
 		// Reuse the immutable typed NEW/invoke/store origin proof; fixed six-op
 		// matching cannot distinguish nested allocations from the enum receiver.
@@ -502,14 +528,29 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 		// declaration order and all control-flow edges, without evaluating values.
 		reader := NewClassObjectDumper(obj)
 		reader.Work = work
-		allocations, err := reader.nativeEnumConstantInitializations()
+		var err error
+		allocations, err = reader.nativeEnumConstantInitializationsWithDeclarations(resolve)
 		if err != nil || len(allocations) != len(constants) {
 			return nil
 		}
 		for ordinal, constant := range constants {
 			plan, exists := allocations[constant]
-			if !exists || plan.ordinal != ordinal || plan.allocatedClass != name || constructors[plan.descriptor] == nil {
+			if !exists || plan.ordinal != ordinal {
 				return nil
+			}
+			if plan.allocatedClass == name {
+				if constructors[plan.descriptor] == nil {
+					return nil
+				}
+			} else {
+				if !constantBodies || bodies[plan.allocatedClass] != nil {
+					return nil
+				}
+				body := nativeEnumConstantBodyProof(obj, plan, len(bodies)+1, bridges, resolve, work)
+				if body == nil {
+					return nil
+				}
+				bodies[plan.allocatedClass] = body
 			}
 			if ordinal == len(constants)-1 {
 				found := false
@@ -569,7 +610,10 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 			}
 		}
 	}
-	return &nativeMemberEnumSynthesis{valuesField: backing}
+	if constantBodies && len(bodies) == 0 {
+		return nil
+	}
+	return &nativeMemberEnumSynthesis{valuesField: backing, constants: allocations, bodies: bodies}
 }
 
 // Parameter names are reflection-visible metadata, unlike Code debug tables.

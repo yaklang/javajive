@@ -170,7 +170,7 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 					return false
 				}
 				// A flat foreign source unit cannot reproduce a Java private lexical call.
-				if obj.GetClassName() != p.owner && p.children[obj.GetClassName()] == nil && p.anonymousUnits[obj.GetClassName()] == nil {
+				if obj.GetClassName() != p.owner && p.children[obj.GetClassName()] == nil && p.anonymousUnits[obj.GetClassName()] == nil && p.enumConstants[obj.GetClassName()] == nil {
 					return false
 				}
 				plan := allocations[name+desc][int(op.CurrentOffset)]
@@ -183,7 +183,8 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 				// Only a NEW origin or the independently verified initial
 				// member-super delegation regenerates the private bridge.
 				rootSuper := p.rootBridgeDelegation(obj, name, desc, call.Name, call.Description, int(op.CurrentOffset)) != nil
-				if !allocation && !super && !rootSuper {
+				constantSuper := nativeEnumConstantSuperOwned(p, obj, name, desc, call.Name, call.Description, int(op.CurrentOffset))
+				if !allocation && !super && !rootSuper && !constantSuper {
 					return false
 				}
 				if p.bridgeCalls == nil {
@@ -259,7 +260,7 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 		if !nativeProofWork(work, 1) {
 			return false
 		}
-		if user != p.owner && p.children[user] == nil && p.anonymousUnits[user] == nil && p.emptyMarkers[user] == nil {
+		if user != p.owner && p.children[user] == nil && p.anonymousUnits[user] == nil && p.emptyMarkers[user] == nil && p.enumConstants[user] == nil {
 			return false
 		}
 		raw, ok := z.enumSiblingResolver()(user)

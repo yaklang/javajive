@@ -51,6 +51,15 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 		return nil
 	}
 	objects := map[string]*ClassObject{owner: root}
+	for name, body := range p.enumConstants {
+		if body == nil || !nativeMemberOrdinaryHandlesClosed(body.object, index, d.Work) {
+			return nil
+		}
+		objects[name] = body.object
+	}
+	if !z.nativeEnumConstantsArchiveClosed(p, index, d.Work) {
+		return nil
+	}
 	rootPrivateConstructor := false
 	for _, method := range root.Methods {
 		if !nativeProofWork(d.Work, 1) || method == nil {
@@ -213,7 +222,10 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 					p.allocationDependencies[n] = dependency
 				}
 			}
-			if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil) {
+			if anonOwner, _, anon := originalAnonymousOwner(other); anon && (anonOwner == owner || p.children[anonOwner] != nil || p.enumConstants[anonOwner] != nil) {
+				if body := p.enumConstants[n]; body != nil && body.owner == anonOwner {
+					continue
+				}
 				if p.enumSwitchTables[n] != nil && anonOwner == owner {
 					continue
 				}
@@ -240,7 +252,7 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 		}
 	}
 	for name, object := range objects {
-		if name == owner || p.children[name] != nil || p.anonymousUnits[name] != nil {
+		if name == owner || p.children[name] != nil || p.anonymousUnits[name] != nil || p.enumConstants[name] != nil {
 			continue
 		}
 		reader := z.nativeMemberReader(object)
@@ -258,6 +270,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	var e error
 	jdecenv.Run(snap, func() error { src, e = d.DumpClass(); return e })
 	if p.anonymousForest != nil && !p.anonymousForest.scopeSourceComplete(src) {
+		return nil
+	}
+	if !nativeEnumConstantsSourceClosed(p) {
 		return nil
 	}
 	if e != nil || p.failed || !nativeEnumSwitchSourceComplete(p, src, d.Work) || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {

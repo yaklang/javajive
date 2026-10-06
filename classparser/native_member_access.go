@@ -97,6 +97,9 @@ func nativeMemberJointAnonymousAccess(p *nativeMemberFamily, user string, work *
 	if p == nil || !nativeProofWork(work, 1) {
 		return false
 	}
+	if body := p.enumConstants[user]; body != nil && p.children[body.owner] != nil && p.children[body.owner].enumSynthesis != nil && p.children[body.owner].enumSynthesis.bodies[user] == body {
+		return true
+	}
 	group := p.anonymousUnits[user]
 	if group == nil {
 		group = p.anonymous

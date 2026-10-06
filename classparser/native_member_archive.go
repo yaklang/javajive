@@ -357,9 +357,9 @@ func (z *JarFS) nativeMemberLocalPlan(obj *ClassObject, owner string, snap map[s
 // the family cache recursively or import an external class into its private nest.
 func nativeMemberDependencyObjects(root *ClassObject, p *nativeMemberFamily, work *workbudget.Budget) ([]*ClassObject, bool) {
 	if root == nil || p == nil || p.failed || root.GetClassName() != p.owner ||
-		len(p.children) > nativeMemberLayoutNodeLimit || len(p.anonymousUnits) > 64 ||
-		!nativeProofWork(work, int64(len(p.children)+len(p.anonymousUnits)+1)) ||
-		work != nil && work.CheckAlloc(int64(len(p.children)+len(p.anonymousUnits)+1)*128) != nil {
+		len(p.children) > nativeMemberLayoutNodeLimit || len(p.anonymousUnits) > 64 || len(p.enumConstants) > 64 ||
+		!nativeProofWork(work, int64(len(p.children)+len(p.anonymousUnits)+len(p.enumConstants)+1)) ||
+		work != nil && work.CheckAlloc(int64(len(p.children)+len(p.anonymousUnits)+len(p.enumConstants)+1)*128) != nil {
 		return nil, false
 	}
 	objects := []*ClassObject{root}
@@ -379,6 +379,11 @@ func nativeMemberDependencyObjects(root *ClassObject, p *nativeMemberFamily, wor
 	}
 	for name, group := range p.anonymousUnits {
 		if group == nil || group.failed || group.children[name] == nil || !add(name, group.children[name].object) {
+			return nil, false
+		}
+	}
+	for name, body := range p.enumConstants {
+		if body == nil || !add(name, body.object) {
 			return nil, false
 		}
 	}
@@ -426,6 +431,9 @@ func (z *JarFS) nativeMemberSource(obj *ClassObject) ([]byte, bool) {
 	}
 	if obj.GetClassName() == entry.family.owner {
 		return []byte(entry.source), true
+	}
+	if entry.family.enumConstants[obj.GetClassName()] != nil {
+		return []byte("// original constant-specific body owned by proved member enum; javac regenerates its binary class\n"), true
 	}
 	if entry.family.children[obj.GetClassName()] != nil {
 		return []byte("// original member body owned by " + entry.family.owner + "; javac regenerates its binary class\n"), true

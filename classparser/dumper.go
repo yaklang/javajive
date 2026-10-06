@@ -38,6 +38,7 @@ type ClassObjectDumper struct {
 	nativeMemberBody               []statements.Statement
 	nativeSourceNamesReady         bool
 	nativeMemberChecks             map[string]map[int]bool
+	nativeEnumConstantCurrent      *nativeEnumConstantBody
 	nativeMemberRoot               *nativeMemberFamily
 	nativeMemberCurrent            *nativeMemberClass
 	nativeRegistrationScope        *nativeMemberRegistrationScope
@@ -226,7 +227,7 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 // `HikariPool.connectionBag`). Widening those members to package-private is
 // recompile-safe. Kill-switch: JDEC_NEST_PRIVATE_PACKAGE_OFF=1.
 func (c *ClassObjectDumper) nestDemotePrivate() bool {
-	if c.nativeMemberCurrent != nil || c.nativeMemberRoot != nil && c.nativeMemberRoot.owner == c.obj.GetClassName() {
+	if c.nativeMemberCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeMemberRoot != nil && c.nativeMemberRoot.owner == c.obj.GetClassName() {
 		return false
 	}
 	if c.getenv("JDEC_NEST_PRIVATE_PACKAGE_OFF") == "1" {
@@ -12914,6 +12915,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		descriptor, err := c.obj.getUtf8(method.DescriptorIndex)
 		if err != nil {
 			return nil, utils.Wrapf(err, "getUtf8(%v) failed", method.DescriptorIndex)
+		}
+		if name == "<init>" && c.nativeEnumConstantCurrent != nil && nativeEnumConstantConstructorOwned(c.nativeMemberRoot, c.obj, descriptor) {
+			continue
 		}
 		if c.nativeAssertionProtocol() != nil && c.nativeAssertionProtocol().initializer == method {
 			continue

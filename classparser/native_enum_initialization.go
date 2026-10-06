@@ -20,6 +20,10 @@ type nativeEnumConstantAllocation struct {
 // contain wide values, nested allocations, local copies and branches: neither
 // textual argument positions nor a same-owner call identifies that allocation.
 func (c *ClassObjectDumper) nativeEnumConstantInitializations() (map[string]nativeEnumConstantAllocation, error) {
+	return c.nativeEnumConstantInitializationsWithDeclarations(nil)
+}
+
+func (c *ClassObjectDumper) nativeEnumConstantInitializationsWithDeclarations(resolve func(string) (*ClassObject, bool)) (map[string]nativeEnumConstantAllocation, error) {
 	fail := func(reason string) (map[string]nativeEnumConstantAllocation, error) {
 		if c.Work != nil && c.Work.Err() != nil {
 			return nil, c.Work.Err()
@@ -146,7 +150,9 @@ func (c *ClassObjectDumper) nativeEnumConstantInitializations() (map[string]nati
 	for _, record := range fn.Instructions {
 		records[record.PC] = record
 	}
-	resolve := c.nativeAnnotationDeclarationResolver()
+	if resolve == nil {
+		resolve = c.nativeAnnotationDeclarationResolver()
+	}
 	for _, record := range fn.Instructions {
 		store, found := ir.InstrByID(methodir.InstrID(record.PC))
 		if !found || store.Opcode != core.OP_PUTSTATIC || store.Class != owner {

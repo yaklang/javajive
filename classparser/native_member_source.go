@@ -33,6 +33,7 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
+	enumConstants          map[string]*nativeEnumConstantBody
 	enumSwitchTables       map[string]*nativeEnumSwitchTable
 	registrationLayouts    map[string]*nativeMemberRegistrationScope
 	sourceDependencies     map[string]string
@@ -218,7 +219,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 	owner, name, flags, known := originalMemberOwner(obj)
 	var enumSynthesis *nativeMemberEnumSynthesis
 	if flags&0x4000 != 0 {
-		enumSynthesis = nativeMemberEnumSynthesisProof(obj, flags, work)
+		enumSynthesis = nativeMemberEnumSynthesisWithDeclarations(obj, flags, resolve, work)
 	}
 	if !known || !nativeMemberVersionMetadata(obj, work) || !(nativeMemberDeclarationKindRepresentable(obj, flags, work, resolve) || enumSynthesis != nil) {
 		return nil
@@ -610,6 +611,18 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				}
 				p.children[name] = child
 				p.lexicalObjects[name] = obj
+				if child.enumSynthesis != nil {
+					if p.enumConstants == nil {
+						p.enumConstants = map[string]*nativeEnumConstantBody{}
+					}
+					for binary, body := range child.enumSynthesis.bodies {
+						if body == nil || p.enumConstants[binary] != nil || p.lexicalObjects[binary] != nil || len(p.enumConstants) >= 64 || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64(len(p.enumConstants)+1)*512) != nil {
+							return nil
+						}
+						p.enumConstants[binary] = body
+						p.lexicalObjects[binary] = body.object
+					}
+				}
 				queue = append(queue, obj)
 			}
 		}
@@ -857,6 +870,9 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 			return nil, false
 		}
 		result[key] = map[int]*nativeMemberAllocation{}
+		if name == "<init>" && nativeEnumConstantConstructorOwned(p, c.obj, desc) {
+			continue
+		}
 		if name == "<init>" && p.constructorBridges(c.obj.GetClassName())[desc] != nil {
 			if !nativeMemberJointBridgeEquivalent(p, c.obj, m, desc, c.Work) {
 				return nil, false
@@ -1285,7 +1301,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			}
 		}
 	}
-	if c.obj.GetClassName() == p.owner || c.nativeMemberCurrent != nil {
+	if c.obj.GetClassName() == p.owner || c.nativeMemberCurrent != nil || c.nativeEnumConstantCurrent != nil {
 		ctx.LexicalTypeNames = map[string]bool{}
 		for _, child := range p.children {
 			ctx.LexicalTypeNames[child.name] = true
@@ -1704,7 +1720,7 @@ func nativeMemberNullCheck(obj *ClassObject, op *core.OpCode) bool {
 // target has an unnamed InnerClasses row still requires its original enclosing
 // identity and complete anonymous allocation proof. Missing bytes/attributes
 // must not turn that target into an unrelated flat type during joint planning.
-func nativeJointAnonymousAllocationsClosed(obj *ClassObject, anonymous *nativeAnonymousFamily, work *workbudget.Budget) bool {
+func nativeJointAnonymousAllocationsClosed(obj *ClassObject, anonymous *nativeAnonymousFamily, work *workbudget.Budget, members ...*nativeMemberFamily) bool {
 	if obj == nil {
 		return false
 	}
@@ -1751,7 +1767,7 @@ func nativeJointAnonymousAllocationsClosed(obj *ClassObject, anonymous *nativeAn
 					if !known {
 						return false
 					}
-					if unnamed[name] && (anonymous == nil || anonymous.children[name] == nil) {
+					if unnamed[name] && (anonymous == nil || anonymous.children[name] == nil) && !(len(members) == 1 && nativeEnumConstantAllocationOwned(members[0], obj, method, int(op.CurrentOffset), name)) {
 						return false
 					}
 				}

@@ -26,7 +26,7 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		return true
 	}
 	p.anonymous = c.planNativeAnonymousFamilyWithinMembers(p)
-	direct := nativeJointAnonymousAllocationsClosed(c.obj, p.anonymous, c.Work) && add(p.anonymous)
+	direct := nativeJointAnonymousAllocationsClosed(c.obj, p.anonymous, c.Work, p) && add(p.anonymous)
 	for name, child := range p.children {
 		reader := NewClassObjectDumper(child.object)
 		reader.Work = c.Work
@@ -34,7 +34,7 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		reader.foldSiblingResolver = c.foldSiblingResolver
 		reader.declarationResolver = c.declarationResolver
 		group := reader.planNativeAnonymousFamilyWithinMembers(p)
-		if !nativeJointAnonymousAllocationsClosed(child.object, group, c.Work) || !add(group) {
+		if !nativeJointAnonymousAllocationsClosed(child.object, group, c.Work, p) || !add(group) {
 			direct = false
 		}
 		p.memberAnonymous[name] = group
