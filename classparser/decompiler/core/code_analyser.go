@@ -5092,18 +5092,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 				typ = types.NewJavaClass("java.lang.Throwable")
 			}
 			handlerPC := int(code.CurrentOffset)
-			exceptionValue := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-				if funcCtx != nil {
-					if name := funcCtx.CatchEntryNames[handlerPC]; name != "" {
-						return name
-					}
-				}
-				return "Exception"
-			}, func() types.JavaType {
-				return typ
-			})
-			exceptionValue.Flag = "exception"
-			exceptionValue.OriginPC, exceptionValue.HasOriginPC = handlerPC, true
+			exceptionValue := values.NewCaughtExceptionValue(handlerPC, typ)
 			runtimeStackSimulation.Push(exceptionValue)
 		}
 		if d.traceEnabled("var-table") {

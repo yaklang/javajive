@@ -1,6 +1,7 @@
 package values
 
 import (
+	"fmt"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -8,6 +9,9 @@ import (
 )
 
 type CustomValue struct {
+	sourceCaught      bool
+	sourceCaughtPC    int
+	sourceCaughtTyped bool
 	// Known captures describe lambda creation, without executing or inspecting
 	// the deferred lambda body. Other custom expressions remain opaque.
 	CapturesKnown  bool
@@ -54,6 +58,9 @@ type CustomValue struct {
 
 // ReplaceVar implements JavaValue.
 func (v *CustomValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if v.sourceCaught {
+		return // The handler-entry name is bound by its original PC, not a local ID.
+	}
 	if v.ReplaceFunc != nil {
 		v.ReplaceFunc(oldId, newId)
 	}
@@ -69,6 +76,24 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 			return ""
 		}
 		defer endValueRender(funcCtx)
+	}
+	if v.sourceCaught {
+		name := "Exception"
+		if funcCtx != nil && funcCtx.CatchEntryNames[v.sourceCaughtPC] != "" {
+			name = funcCtx.CatchEntryNames[v.sourceCaughtPC]
+		}
+		if class_context.SafeIdentifier(name) != name {
+			if funcCtx != nil && funcCtx.Work != nil {
+				funcCtx.Work.FailRender(fmt.Errorf("invalid handler-entry source identifier"))
+			}
+			return ""
+		}
+		if guard {
+			if funcCtx.CheckAlloc(int64(len(name))) != nil || funcCtx.PreflightOutput(int64(len(name))) != nil {
+				return ""
+			}
+		}
+		return name
 	}
 	if v.StringFunc == nil && v.WriteFunc == nil {
 		return ""
@@ -114,6 +139,22 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 		return ""
 	}
 	return s
+}
+
+// A caught value is the JVM-supplied handler-entry stack word. Its source
+// renderer can only read that handler's identifier and has no Java operands.
+// Flag/PC annotations on an arbitrary callback cannot establish this fact.
+func NewCaughtExceptionValue(pc int, typ types.JavaType) *CustomValue {
+	return &CustomValue{sourceCaught: true, sourceCaughtPC: pc, sourceCaughtTyped: typ != nil,
+		Flag: "exception", OriginPC: pc, HasOriginPC: true, TypeFunc: func() types.JavaType { return typ }}
+}
+
+func (v *CustomValue) SourceCaughtExceptionEntry() (int, bool) {
+	if v == nil || !v.sourceCaught || !v.sourceCaughtTyped || v.sourceCaughtPC < 0 || v.sourceCaughtPC > 65535 ||
+		v.Flag != "exception" || !v.HasOriginPC || v.OriginPC != v.sourceCaughtPC {
+		return 0, false
+	}
+	return v.sourceCaughtPC, true
 }
 
 // WithType returns a shallow copy with a replacement type function. Unlike

@@ -91,6 +91,9 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		}
 		return []JavaValue{v.Inner}, true
 	case *CustomValue:
+		if _, known := v.SourceCaughtExceptionEntry(); known {
+			return nil, true
+		}
 		if v.CapturesKnown && (v.Flag == "lambda" || v.Flag == "primitive_cast" || v.Flag == "concat" || v.Flag == "instanceof") {
 			return v.Captures, true
 		}
@@ -202,6 +205,11 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 				effect |= v.Extra
 			}
 		case *CustomValue:
+			if _, known := v.SourceCaughtExceptionEntry(); known {
+				// Dependency completeness does not license moving an implicit
+				// handler-entry word outside its original catch binding.
+				effect |= EffectOpaque
+			}
 			if v.CapturesKnown && v.Flag == "concat" {
 				effect |= EffectCall | EffectThrow
 			}
