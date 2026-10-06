@@ -526,6 +526,11 @@ func constructorInlineNodeValues(statement statements.Statement) ([]values.JavaV
 		return []values.JavaValue{s.Condition}, true
 	case *statements.ReturnStatement:
 		return []values.JavaValue{s.JavaValue}, true
+	case *statements.CustomStatement:
+		if value, known := s.SourceThrowOperand(); known {
+			return []values.JavaValue{value}, true
+		}
+		return nil, false
 	case *statements.StackAssignStatement:
 		return []values.JavaValue{s.JavaValue}, true
 	case *statements.GOTOStatement:

@@ -6701,12 +6701,7 @@ func (d *Decompiler) ParseStatement() error {
 			appendNode(st)
 		case OP_ATHROW:
 			val := opcode.stackConsumed[0]
-			throw := statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-				return fmt.Sprintf("throw %v", val.String(funcCtx))
-			}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-				val.ReplaceVar(oldId, newId)
-			})
-			throw.ThrownValue = val
+			throw := statements.NewThrowStatement(val)
 			appendNode(throw)
 		case OP_IRETURN:
 			v := opcode.stackConsumed[0]

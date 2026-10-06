@@ -13,14 +13,15 @@ import (
 
 type CustomStatement struct {
 	sourceTransferKind string
+	sourceThrow        bool
 	Name               string
 	Info               any
 	// Labeled transfers retain their target separately from the render closure.
 	// A protected-region proof accepts them only while that target is enclosed.
 	LoopTransferKind string
 	LoopTargetLabel  string
-	// ThrownValue retains ATHROW's dependency without changing its rendering.
-	// Region proofs must not infer a thrown operand from an opaque closure.
+	// ThrownValue is the builtin throw's authoritative operand. Legacy custom
+	// statements may annotate it, but that alone cannot certify all dependencies.
 	ThrownValue values.JavaValue
 	OriginPC    int
 	HasOriginPC bool
@@ -31,6 +32,12 @@ type CustomStatement struct {
 // ReplaceVar implements Statement.
 func (v *CustomStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
 	if v.sourceTransferKind != "" {
+		return
+	}
+	if v.sourceThrow {
+		if v.ThrownValue != nil {
+			v.ThrownValue.ReplaceVar(oldId, newId)
+		}
 		return
 	}
 	v.replaceVar(oldId, newId)
@@ -46,7 +53,25 @@ func (v *CustomStatement) String(funcCtx *class_context.ClassContext) string {
 	if name, ok := erasedThrowableTypeVariableView(funcCtx, v.ThrownValue); ok {
 		return fmt.Sprintf("throw (%s) (%s)", name, v.ThrownValue.String(funcCtx))
 	}
+	if v.sourceThrow {
+		return fmt.Sprintf("throw %v", v.ThrownValue.String(funcCtx))
+	}
 	return v.StringFunc(funcCtx)
+}
+
+// A builtin throw has one structured operand shared by rendering and variable
+// rewriting. An opaque render callback cannot certify its dependencies merely
+// by setting ThrownValue. Keep that compatibility field, but grant a complete
+// operand view only to the builtin statement whose renderer reads it directly.
+func NewThrowStatement(value values.JavaValue) *CustomStatement {
+	return &CustomStatement{sourceThrow: true, ThrownValue: value}
+}
+
+func (v *CustomStatement) SourceThrowOperand() (values.JavaValue, bool) {
+	if v == nil || !v.sourceThrow || v.sourceTransferKind != "" || v.ThrownValue == nil {
+		return nil, false
+	}
+	return v.ThrownValue, true
 }
 
 // A throws formal has an erased JVM view. Restoring that formal is harmless
