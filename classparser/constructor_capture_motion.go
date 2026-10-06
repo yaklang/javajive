@@ -250,37 +250,106 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 	// assignable reference element; parameter arrays never borrow this proof.
 	freshArrays := map[int]string{}
 	widening := newConstructorWideningQuery(metadata)
-	index := start + 1
-	for index < len(ops) && index-start <= 512 {
+	// Interpret each reachable forward instruction once, joining complete
+	// operand packets before transfer. THIS remains implicit and uninitialized;
+	// no branch may recover, publish or discard it. Original CFG edges, exact
+	// types and allocation identities govern this proof, not source spelling.
+	frames := map[int]*constructorMotionPacket{}
+	remaining := 512
+	peakWords := 1
+	var originalCode *CodeAttribute
+	emit := func(index int) bool {
+		if index <= start || index >= len(ops) || index-start > 512 {
+			return false
+		}
+		remaining--
+		if originalCode != nil {
+			remaining -= len(arguments) + len(allocations) + len(freshArrays)
+		}
+		if remaining < 0 {
+			return false
+		}
+		frame := &constructorMotionPacket{arguments: arguments, origins: origins, allocations: allocations, arrays: freshArrays}
+		joined, ok := constructorMotionPacketJoin(frames[index], frame, index, booleanLiterals)
+		if !ok {
+			return false
+		}
+		frames[index] = joined
+		return true
+	}
+	if !emit(start + 1) {
+		return 0, nil
+	}
+	transfer := func(index int) (int, *values.JavaClassMember, bool) {
 		if ops[index] == nil || ops[index].Instr == nil {
-			return 0, nil
+			return 0, nil, false
+		}
+		if opcode := ops[index].Instr.OpCode; constructorMotionPacketBranch(opcode) {
+			if originalCode == nil {
+				originalCode = constructorMotionPacketOriginalCode(obj, params, ops)
+			}
+			if originalCode == nil || !constructorEffectOriginalBranch(originalCode, ops[index]) || peakWords > int(originalCode.MaxStack) {
+				return 0, nil, false
+			}
+			destination, known := constructorMotionPacketDestination(ops, index)
+			if !known || destination <= index {
+				// A loop needs an inductive packet invariant; seeing a PC twice
+				// is not a certificate. This forward domain fails closed.
+				return 0, nil, false
+			}
+			if opcode != core.OP_GOTO && opcode != core.OP_GOTO_W {
+				count, reference := 1, false
+				if opcode >= core.OP_IF_ICMPEQ && opcode <= core.OP_IF_ACMPNE {
+					count = 2
+				}
+				if opcode == core.OP_IFNULL || opcode == core.OP_IFNONNULL || opcode == core.OP_IF_ACMPEQ || opcode == core.OP_IF_ACMPNE {
+					reference = true
+				}
+				if len(arguments) < count {
+					return 0, nil, false
+				}
+				base := len(arguments) - count
+				for _, value := range arguments[base:] {
+					if reference {
+						if value != "null" && !callbinding.Reference(value) {
+							return 0, nil, false
+						}
+					} else if constructorEffectType(value).kind != 'I' {
+						return 0, nil, false
+					}
+				}
+				arguments, origins = arguments[:base], origins[:base]
+				if !emit(index + 1) {
+					return 0, nil, false
+				}
+			}
+			return destination, nil, true
 		}
 		if ops[index].Instr.OpCode == core.OP_NEW {
 			if len(ops[index].Data) != 2 {
-				return 0, nil
+				return 0, nil, false
 			}
 			owner, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(ops[index].Data))
 			if !known || strings.HasPrefix(owner, "[") {
-				return 0, nil
+				return 0, nil, false
 			}
 			decl, known := widening.class(owner)
 			if !known || !decl.MembersComplete || decl.IsInterface {
-				return 0, nil
+				return 0, nil, false
 			}
 			token := "@allocation:" + strconv.Itoa(index)
 			allocations[token] = owner
 			appendArgument(token, -1)
-			index++
-			continue
+			return index + 1, nil, true
 		}
 
 		if ops[index].Instr.OpCode == core.OP_ANEWARRAY {
 			if len(ops[index].Data) != 2 || len(arguments) == 0 || arguments[len(arguments)-1] != "I" {
-				return 0, nil
+				return 0, nil, false
 			}
 			component, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(ops[index].Data))
 			if !known {
-				return 0, nil
+				return 0, nil, false
 			}
 			if !strings.HasPrefix(component, "[") {
 				component = "L" + component + ";"
@@ -288,42 +357,39 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			descriptor := "[" + component
 			ps, _, err := callbinding.Descriptor("(" + descriptor + ")V")
 			if err != nil || len(ps) != 1 {
-				return 0, nil
+				return 0, nil, false
 			}
 			arguments = arguments[:len(arguments)-1]
 			origins = origins[:len(origins)-1]
 			origin := -1000 - index
 			freshArrays[origin] = descriptor
 			appendArgument(descriptor, origin)
-			index++
-			continue
+			return index + 1, nil, true
 		}
 		if ops[index].Instr.OpCode == core.OP_AASTORE {
 			if len(ops[index].Data) != 0 || len(arguments) < 3 {
-				return 0, nil
+				return 0, nil, false
 			}
 			base := len(arguments) - 3
 			descriptor, known := freshArrays[origins[base]]
 			if !known || arguments[base] != descriptor || arguments[base+1] != "I" || !callbinding.Reference(descriptor[1:]) || !widening.assignable(arguments[base+2], descriptor[1:]) {
-				return 0, nil
+				return 0, nil, false
 			}
 			arguments = arguments[:base]
 			origins = origins[:base]
-			index++
-			continue
+			return index + 1, nil, true
 		}
 		if ops[index].Instr.OpCode == core.OP_DUP {
 			if len(ops[index].Data) != 0 || len(arguments) == 0 {
-				return 0, nil
+				return 0, nil, false
 			}
 			value := arguments[len(arguments)-1]
 			_, allocated := allocations[value]
 			if !allocated && value != "null" && constructorEffectType(value).width() != 1 {
-				return 0, nil
+				return 0, nil, false
 			}
 			appendArgument(value, origins[len(origins)-1])
-			index++
-			continue
+			return index + 1, nil, true
 		}
 		if opcode := ops[index].Instr.OpCode; opcode == core.OP_I2B || opcode == core.OP_I2S || opcode == core.OP_I2C {
 			// These original instructions truncate/sign-extend an int word;
@@ -331,11 +397,11 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			// their logical result type as well as the JVM int category. Mere
 			// I-to-B/S/C descriptor compatibility would invent a truncation.
 			if ops[index].IsWide || len(ops[index].Data) != 0 || len(arguments) == 0 {
-				return 0, nil
+				return 0, nil, false
 			}
 			last := len(arguments) - 1
 			if actual := arguments[last]; actual != "I" && actual != "B" && actual != "S" && actual != "C" {
-				return 0, nil
+				return 0, nil, false
 			}
 			result := "B"
 			if opcode == core.OP_I2S {
@@ -344,17 +410,16 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 				result = "C"
 			}
 			arguments[last], origins[last] = result, -1
-			index++
-			continue
+			return index + 1, nil, true
 		}
 		if ops[index].Instr.OpCode == core.OP_INVOKESPECIAL {
 			member := constructorMotionMember(obj, ops[index], core.OP_INVOKESPECIAL)
 			if member == nil || member.Member != "<init>" {
-				return 0, nil
+				return 0, nil, false
 			}
 			formals, ret, err := callbinding.Descriptor(member.Description)
 			if err != nil || ret != "V" || len(arguments) < len(formals) {
-				return 0, nil
+				return 0, nil, false
 			}
 			base := len(arguments) - len(formals)
 			for i := range formals {
@@ -365,7 +430,7 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 				actual := arguments[base+i]
 				intView := formals[i] == "I" && (actual == "B" || actual == "S" || actual == "C") && widening.constructor(member)
 				if !canonicalBoolean && !intView && !widening.assignable(actual, formals[i]) {
-					return 0, nil
+					return 0, nil, false
 				}
 			}
 			if base == 0 {
@@ -376,12 +441,12 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 					wanted = enclosingSlots[0]
 				}
 				if (path != nil || len(enclosingSlots) > 0) && (len(enclosingSlots) > 1 || len(origins) == 0 || origins[0] != wanted) {
-					return 0, nil
+					return 0, nil, false
 				}
 				if member.Name != obj.GetClassName() && member.Name != obj.GetSupperClassName() {
-					return 0, nil
+					return 0, nil, false
 				}
-				return index + 1, member
+				return 0, member, true
 			}
 			// A different freshly allocated receiver may be constructed while
 			// THIS remains uninitialized. Its exact NEW-site token cannot be
@@ -389,7 +454,7 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			token := arguments[base-1]
 			allocation, exists := allocations[token]
 			if !exists || allocation != member.Name || !widening.constructor(member) {
-				return 0, nil
+				return 0, nil, false
 			}
 			arguments = arguments[:base-1]
 			origins = origins[:base-1]
@@ -399,31 +464,29 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 				}
 			}
 			delete(allocations, token)
-			index++
-			continue
+			return index + 1, nil, true
 		}
 		if ops[index].Instr.OpCode == core.OP_CHECKCAST {
 			// The original cast is evaluated before Object initialization, so
 			// a cast/linkage failure cannot expose this receiver by finalization.
 			// Only an already receiver-free operand is on this argument stack.
 			if len(ops[index].Data) != 2 || len(arguments) == 0 || arguments[len(arguments)-1] != "null" && !callbinding.Reference(arguments[len(arguments)-1]) {
-				return 0, nil
+				return 0, nil, false
 			}
 			name, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(ops[index].Data))
 			if !known {
-				return 0, nil
+				return 0, nil, false
 			}
 			descriptor := name
 			if !strings.HasPrefix(name, "[") {
 				descriptor = "L" + name + ";"
 			}
 			if ps, _, err := callbinding.Descriptor("(" + descriptor + ")V"); err != nil || len(ps) != 1 {
-				return 0, nil
+				return 0, nil, false
 			}
 			arguments[len(arguments)-1] = descriptor
 			origins[len(origins)-1] = -1
-			index++
-			continue
+			return index + 1, nil, true
 		}
 		if opcode := ops[index].Instr.OpCode; opcode == core.OP_INVOKESTATIC || opcode == core.OP_INVOKEVIRTUAL || opcode == core.OP_INVOKEINTERFACE {
 			// THIS stays outside the argument stack. Original receiver-free
@@ -432,28 +495,28 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			// descriptor, opcode and declared method instead of assuming purity.
 			member := constructorMotionMember(obj, ops[index], opcode)
 			if member == nil || !widening.invocation(member, opcode) {
-				return 0, nil
+				return 0, nil, false
 			}
 			formals, result, err := callbinding.Descriptor(member.Description)
 			if err != nil || len(arguments) < len(formals) {
-				return 0, nil
+				return 0, nil, false
 			}
 			words := 1
 			base := len(arguments) - len(formals)
 			for i, formal := range formals {
 				words += constructorEffectType(formal).width()
 				if !widening.assignable(arguments[base+i], formal) {
-					return 0, nil
+					return 0, nil, false
 				}
 			}
 			if opcode == core.OP_INVOKEINTERFACE && (words > 255 || int(ops[index].Data[2]) != words) {
-				return 0, nil
+				return 0, nil, false
 			}
 			arguments = arguments[:base]
 			origins = origins[:base]
 			if opcode != core.OP_INVOKESTATIC {
 				if len(arguments) == 0 || !widening.assignable(arguments[len(arguments)-1], "L"+member.Name+";") {
-					return 0, nil
+					return 0, nil, false
 				}
 				arguments = arguments[:len(arguments)-1]
 				origins = origins[:len(origins)-1]
@@ -461,17 +524,15 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			if result != "V" {
 				appendArgument(result, -1)
 			}
-			index++
-			continue
+			return index + 1, nil, true
 		}
 		if ops[index].Instr.OpCode == core.OP_ARRAYLENGTH {
 			if len(ops[index].Data) != 0 || len(arguments) == 0 || arguments[len(arguments)-1] != "null" && !strings.HasPrefix(arguments[len(arguments)-1], "[") {
-				return 0, nil
+				return 0, nil, false
 			}
 			arguments[len(arguments)-1] = "I"
 			origins[len(origins)-1] = -1
-			index++
-			continue
+			return index + 1, nil, true
 		}
 		if opcode := ops[index].Instr.OpCode; opcode == core.OP_GETFIELD || opcode == core.OP_GETSTATIC {
 			// Only external references enter the argument stack: the original
@@ -481,16 +542,16 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			// class-initialization failures before the original delegate.
 			member := constructorMotionMember(obj, ops[index], opcode)
 			if member == nil {
-				return 0, nil
+				return 0, nil, false
 			}
 			fields, _, err := callbinding.Descriptor("(" + member.Description + ")V")
 			if err != nil || len(fields) != 1 {
-				return 0, nil
+				return 0, nil, false
 			}
 			origin := -1
 			if opcode == core.OP_GETFIELD {
 				if len(arguments) == 0 || !widening.assignable(arguments[len(arguments)-1], "L"+member.Name+";") {
-					return 0, nil
+					return 0, nil, false
 				}
 				if read := reads[int(ops[index].CurrentOffset)]; read != nil {
 					prior := 1
@@ -498,7 +559,7 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 						prior = tags[read.prior.pc]
 					}
 					if origins[len(origins)-1] != prior || member.Name != read.owner || member.Member != read.field || member.Description != read.descriptor {
-						return 0, nil
+						return 0, nil, false
 					}
 					origin = tags[read.pc]
 				}
@@ -506,8 +567,7 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 				origins = origins[:len(origins)-1]
 			}
 			appendArgument(fields[0], origin)
-			index++
-			continue
+			return index + 1, nil, true
 		}
 		if literal, proved := constructorMotionLiteral(obj, ops[index]); proved {
 			origin := -1
@@ -522,13 +582,55 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			slot := core.GetRetrieveIdx(ops[index])
 			parameter, ok := slots[slot]
 			if !ok || parameter < 0 || parameter >= len(params) || slot == 0 || !constructorMotionLoad(ops[index], params[parameter]) {
-				return 0, nil
+				return 0, nil, false
 			}
 			appendArgument(params[parameter], slot)
 		}
-		index++
+		return index + 1, nil, true
 	}
-	return 0, nil
+	delegateIndex := 0
+	var delegate *values.JavaClassMember
+	for index := start + 1; index < len(ops) && index-start <= 512; index++ {
+		frame := frames[index]
+		if frame == nil {
+			continue
+		}
+		delete(frames, index)
+		arguments, origins = frame.arguments, frame.origins
+		allocations, freshArrays = frame.allocations, frame.arrays
+		words := 1 // original uninitialized THIS held outside this packet
+		for _, value := range arguments {
+			if strings.HasPrefix(value, "@allocation:") || value == "null" {
+				words++
+			} else {
+				words += constructorEffectType(value).width()
+			}
+		}
+		if words > peakWords {
+			peakWords = words
+		}
+		if originalCode != nil && words > int(originalCode.MaxStack) {
+			return 0, nil
+		}
+		next, member, ok := transfer(index)
+		if !ok {
+			return 0, nil
+		}
+		if member != nil {
+			if delegate != nil && (delegateIndex != index || delegate.Name != member.Name || delegate.Description != member.Description) {
+				return 0, nil
+			}
+			delegateIndex, delegate = index, member
+			continue
+		}
+		if !emit(next) {
+			return 0, nil
+		}
+	}
+	if len(frames) != 0 || delegate == nil {
+		return 0, nil
+	}
+	return delegateIndex + 1, delegate
 }
 
 // Conversion proves that the original operand can enter the original formal;
