@@ -178,7 +178,18 @@ func (f *FunctionCallExpression) originalConstructorDescriptorBindingCast(i int,
 		return ""
 	}
 	params, result, err := callbinding.Descriptor(f.Descriptor)
-	if err != nil || result != "V" || len(params) != len(f.Arguments) || i < 0 || i >= len(params) || !callbinding.Reference(params[i]) {
+	if err != nil || result != "V" || len(params) != len(f.Arguments) || i < 0 || i >= len(params) {
+		return ""
+	}
+	actual := ""
+	if arg.Type() != nil {
+		actual = bindingType(arg.Type())
+	}
+	// A source byte/short/char expression still has a JVM int stack word.
+	// Viewing it as int seals the original I overload without introducing
+	// another conversion. The inverse would invent a truncation and is refused.
+	intView := params[i] == "I" && (actual == "B" || actual == "S" || actual == "C")
+	if !callbinding.Reference(params[i]) && !intView {
 		return ""
 	}
 	if cast, ok := UnpackSoltValue(arg).(*CastExpression); ok && bindingType(cast.TargetType) == params[i] {
@@ -186,6 +197,7 @@ func (f *FunctionCallExpression) originalConstructorDescriptorBindingCast(i int,
 		return ""
 	}
 	matched, competitors := 0, 0
+	var selected callbinding.Method
 	for _, method := range table.Methods {
 		if method.Name != "<init>" {
 			continue
@@ -201,12 +213,23 @@ func (f *FunctionCallExpression) originalConstructorDescriptorBindingCast(i int,
 			continue
 		}
 		matched++
-		if method.Generic || method.Signature != "" || method.Varargs || method.Static || method.Bridge {
+		selected = method
+		if method.Varargs || method.Static || method.Bridge {
 			return ""
 		}
 	}
 	if matched != 1 || competitors == 0 {
 		return ""
+	}
+	if selected.Generic || selected.Signature != "" {
+		if !intView || selected.Signature == "" || ctx.SiblingClassSig == nil {
+			return ""
+		}
+		_, signatures, known := ctx.SiblingClassSig(owner)
+		_, sourceParams, sourceResult := types.ParseMethodSignatureFull(selected.Signature, ctx)
+		if !known || signatures[class_context.MethodDescKey("<init>", f.Descriptor)] != selected.Signature || sourceResult == nil || bindingType(sourceResult) != "V" || len(sourceParams) != len(params) || sourceParams[i] == nil || bindingType(sourceParams[i]) != "I" {
+			return ""
+		}
 	}
 	param := f.witnessDescriptorParamType(i)
 	if param == nil {

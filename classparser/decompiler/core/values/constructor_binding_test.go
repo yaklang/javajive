@@ -10,6 +10,71 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+func TestDelegationIntViewPreservesNarrowWordAndOriginalOverload(t *testing.T) {
+	for _, scenario := range []string{"byte", "short", "char", "unknown owner", "incomplete", "no origin", "allocation", "narrow target", "long input", "float input", "boolean input", "boxed input", "generic primitive", "generic missing exact signature", "generic different formal"} {
+		t.Run(scenario, func(t *testing.T) {
+			desc := "(I)V"
+			target := callbinding.Method{Name: "<init>", Desc: desc}
+			table := callbinding.Class{Name: "proof/Parent", MembersComplete: true, Methods: []callbinding.Method{target, {Name: "<init>", Desc: "(B)V"}}}
+			ctx := &class_context.ClassContext{ClassName: "proof.Child", SupperClassName: "proof.Parent", FunctionName: "<init>"}
+			ctx.InvocationMetadata = func(name string) (callbinding.Class, bool) { return table, scenario != "unknown owner" }
+			this := NewJavaRef(nil, nil, types.NewJavaClass("proof.Child"))
+			this.IsThis = true
+			at := types.NewJavaPrimer(types.JavaByte)
+			arg := NewCustomValue(func(*class_context.ClassContext) string { return "once()" }, func() types.JavaType { return at })
+			call := &FunctionCallExpression{ClassName: "proof.Parent", FunctionName: "<init>", Descriptor: desc, Object: this, Arguments: []JavaValue{arg}, Kind: InvokeSpecial, IsSpecialInvoke: true, OriginPC: 9, HasOriginPC: true}
+			want := ""
+			switch scenario {
+			case "byte":
+				want = "int"
+			case "short":
+				at = types.NewJavaPrimer(types.JavaShort)
+				want = "int"
+			case "char":
+				at = types.NewJavaPrimer(types.JavaChar)
+				want = "int"
+			case "incomplete":
+				table.MembersComplete = false
+			case "no origin":
+				call.HasOriginPC = false
+			case "allocation":
+				this.IsThis = false
+			case "narrow target":
+				call.Descriptor = "(B)V"
+			case "long input":
+				at = types.NewJavaPrimer(types.JavaLong)
+			case "float input":
+				at = types.NewJavaPrimer(types.JavaFloat)
+			case "boolean input":
+				at = types.NewJavaPrimer(types.JavaBoolean)
+			case "boxed input":
+				at = types.NewJavaClass("java.lang.Byte")
+			case "generic primitive", "generic missing exact signature", "generic different formal":
+				table.Methods[0].Generic = true
+				table.Methods[0].Signature = "(I)V"
+				methodSigs := map[string]string{class_context.MethodDescKey("<init>", desc): "(I)V"}
+				ctx.SiblingClassSig = func(string) (string, map[string]string, bool) { return "", methodSigs, true }
+				if scenario == "generic primitive" {
+					want = "int"
+				}
+				if scenario == "generic missing exact signature" {
+					delete(methodSigs, class_context.MethodDescKey("<init>", desc))
+				}
+				if scenario == "generic different formal" {
+					table.Methods[0].Signature = "(TT;)V"
+					methodSigs[class_context.MethodDescKey("<init>", desc)] = "(TT;)V"
+				}
+			}
+			if got := call.delegationDescriptorBindingCast(0, arg, ctx); got != want {
+				t.Fatalf("original int view=%q want=%q", got, want)
+			}
+			if want != "" && call.renderProvenArgumentCast(0, want, arg, ctx) != "(int)(once())" {
+				t.Fatal("source int view must evaluate argument once")
+			}
+		})
+	}
+}
+
 func TestGenericDelegationBindingUsesExactInstantiatedFormal(t *testing.T) {
 	for _, variant := range []string{"original", "rival generic elsewhere", "missing class", "wrong class signature", "missing exact target", "wrong target signature", "target method formal", "duplicate target", "narrow actual", "raw super", "wrong super", "unknown actual", "no origin", "allocation", "unknown owner", "incomplete", "no rival", "same formal rival", "arbitrary reference rival", "method generic rival", "unindexed rival", "varargs", "target varargs"} {
 		t.Run(variant, func(t *testing.T) {

@@ -325,6 +325,28 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			index++
 			continue
 		}
+		if opcode := ops[index].Instr.OpCode; opcode == core.OP_I2B || opcode == core.OP_I2S || opcode == core.OP_I2C {
+			// These original instructions truncate/sign-extend an int word;
+			// they cannot throw or expose the uninitialized receiver. Retain
+			// their logical result type as well as the JVM int category. Mere
+			// I-to-B/S/C descriptor compatibility would invent a truncation.
+			if ops[index].IsWide || len(ops[index].Data) != 0 || len(arguments) == 0 {
+				return 0, nil
+			}
+			last := len(arguments) - 1
+			if actual := arguments[last]; actual != "I" && actual != "B" && actual != "S" && actual != "C" {
+				return 0, nil
+			}
+			result := "B"
+			if opcode == core.OP_I2S {
+				result = "S"
+			} else if opcode == core.OP_I2C {
+				result = "C"
+			}
+			arguments[last], origins[last] = result, -1
+			index++
+			continue
+		}
 		if ops[index].Instr.OpCode == core.OP_INVOKESPECIAL {
 			member := constructorMotionMember(obj, ops[index], core.OP_INVOKESPECIAL)
 			if member == nil || member.Member != "<init>" {
@@ -337,7 +359,12 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 			base := len(arguments) - len(formals)
 			for i := range formals {
 				canonicalBoolean := arguments[base+i] == "I" && formals[i] == "Z" && booleanLiterals[origins[base+i]]
-				if !canonicalBoolean && !widening.assignable(arguments[base+i], formals[i]) {
+				// B/S/C already contain their original narrowed word. An I
+				// consumer adds no conversion, but require its exact complete
+				// declaration; source emission must separately pin that overload.
+				actual := arguments[base+i]
+				intView := formals[i] == "I" && (actual == "B" || actual == "S" || actual == "C") && widening.constructor(member)
+				if !canonicalBoolean && !intView && !widening.assignable(actual, formals[i]) {
 					return 0, nil
 				}
 			}

@@ -34,9 +34,16 @@ func TestAdversarialCrossFamilyGenericThisRenamedOverloadMemberEnclosingSupercla
 	f = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(f, "Binding", "Separate"), "Member", "EnclosingPart"), "Leaf", "CurrentPart")
 	testNativeIndependentFamilyFixture(t, f, []string{"SeparateBase", "SeparateCurrent"}, "SeparateDriver", "6:cross-family:outer:identity:callback\n", nativeLexicalExactSignatures)
 }
+func TestAdversarialCrossFamilyGenericIntWordOverloadMemberEnclosingSuperclassRoundTrip(t *testing.T) {
+	testCrossFamilyGenericEnclosing(t, true, "int word overload")
+}
 func testCrossFamilyGenericEnclosing(t *testing.T, genericMember bool, variant string) {
 	f := crossFamilyGenericEnclosingFixture(genericMember, variant)
-	testNativeIndependentFamilyFixture(t, f, []string{"BindingBase", "BindingCurrent"}, "BindingDriver", "6:cross-family:outer:identity:callback\n", nativeLexicalExactSignatures)
+	want := "6:cross-family:outer:identity:callback\n"
+	if variant == "int word overload" {
+		want = "24:cross-family:outer:identity:callback\n"
+	}
+	testNativeIndependentFamilyFixture(t, f, []string{"BindingBase", "BindingCurrent"}, "BindingDriver", want, nativeLexicalExactSignatures)
 }
 
 func crossFamilyGenericEnclosingFixture(genericMember bool, variant string) string {
@@ -61,6 +68,11 @@ func crossFamilyGenericEnclosingFixture(genericMember bool, variant string) stri
 	}
 
 	switch variant {
+	case "int word overload":
+		f = strings.Replace(f, "Member(B seed,M marker,int n)", "Member(B seed,M marker,byte n)throws java.io.IOException{throw new AssertionError(\"wrong byte overload\");}Member(B seed,M marker,int n)", 1)
+		f = strings.Replace(f, "super(seed,\"marker\",n);", "super(seed,\"marker\",(int)(byte)n);", 1)
+		f = strings.Replace(f, "for(int n:new int[]{-1,0,17}){", "for(int originalWord:new int[]{Integer.MIN_VALUE,-65537,-129,-128,-1,0,1,127,128,65535,65536,Integer.MAX_VALUE}){int n=(originalWord<<24)>>24;", 1)
+		f = strings.ReplaceAll(f, "o.build(seed,n)", "o.build(seed,originalWord)")
 	case "this overload", "this overload false":
 		f = strings.Replace(f, "class Leaf extends Member<String>", "class Leaf extends Member<Object>", 1)
 		f = strings.Replace(f, "super(seed,\"marker\",n);", "super(seed,(Object)\"marker\",n);", 1)
