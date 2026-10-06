@@ -35,7 +35,7 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 		return "", false
 	}
 	constructors, known := nativeMemberConstructorRegistrations(p, work)
-	if !known || len(p.registrationLayouts) > 64 {
+	if !known || len(p.registrationLayouts) > nativeMemberLayoutNodeLimit {
 		return "", false
 	}
 	active := map[string]bool{}
@@ -56,11 +56,11 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 			return nil, false
 		}
 		declarations, ok := nativeMemberLayoutDeclarations(scope.source[open+1 : close])
-		if !ok || len(declarations) > 1024 || len(scope.members) > 64 || len(scope.members) != len(scope.memberOwners) {
+		if !ok || len(declarations) > 1024 || len(scope.members) > nativeMemberLayoutNodeLimit || len(scope.members) != len(scope.memberOwners) {
 			return nil, false
 		}
 		nodes += len(declarations) + len(scope.members)
-		if nodes > 1024 || !nativeProofWork(work, int64(len(scope.source))) {
+		if nodes > nativeMemberLayoutNodeLimit || !nativeProofWork(work, int64(len(scope.source))) {
 			return nil, false
 		}
 		tree := &nativeMemberRegistrationTree{header: scope.source[:open+1], footer: scope.source[close:]}
@@ -133,7 +133,7 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 	sort.Strings(ctorKeys)
 	stateBytes := (len(getters) + len(ctorKeys) + 7) / 8
 	originalSize := len(source) + len(strings.Join(members, ""))
-	if work != nil && work.CheckAlloc(int64(originalSize)*4+4096*int64(64+stateBytes)+int64(nodes+1)*int64(2*len(getters)+len(ctorKeys)+1)*64) != nil {
+	if work != nil && work.CheckAlloc(int64(originalSize)*4+4096*int64(64+stateBytes+(nodes+7)/8)+int64(nodes+1)*int64(2*len(getters)+len(ctorKeys)+1)*64) != nil {
 		return "", false
 	}
 	fingerprint := func(order *nativeAccessorOrderState) string {
@@ -153,7 +153,7 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 	}
 	type key struct {
 		cursor   int
-		selected uint64
+		selected string
 		state    string
 	}
 	attempts := 0
@@ -163,15 +163,15 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 	visit = func(tree *nativeMemberRegistrationTree, initial *nativeAccessorOrderState, done continuation) bool {
 		var path []string
 		rejected := map[key]bool{}
-		var search func(int, uint64, *nativeAccessorOrderState) bool
-		search = func(cursor int, selected uint64, order *nativeAccessorOrderState) bool {
+		var search func(int, string, int, *nativeAccessorOrderState) bool
+		search = func(cursor int, selected string, selectedCount int, order *nativeAccessorOrderState) bool {
 			base := len(path)
 			defer func() { path = path[:base] }()
 			for cursor < len(tree.fixed) && len(tree.fixed[cursor].events) == 0 {
 				path = append(path, tree.fixed[cursor].source)
 				cursor++
 			}
-			if cursor == len(tree.fixed) && selected == (uint64(1)<<uint(len(tree.members)))-1 {
+			if cursor == len(tree.fixed) && selectedCount == len(tree.members) {
 				return done(tree.header+strings.Join(path, "")+strings.Join(tree.empty, "")+tree.footer, order)
 			}
 			k := key{cursor: cursor, selected: selected, state: fingerprint(order)}
@@ -183,11 +183,11 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 				exhausted = true
 				return false
 			}
-			try := func(n nativeMemberRegistrationTreeNode, next int, bits uint64) bool {
+			try := func(n nativeMemberRegistrationTreeNode, next int, bits string, count int) bool {
 				resume := func(text string, updated *nativeAccessorOrderState) bool {
 					at := len(path)
 					path = append(path, text)
-					passed := search(next, bits, updated)
+					passed := search(next, bits, count, updated)
 					path = path[:at]
 					return passed
 				}
@@ -204,12 +204,11 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 				updated := order.clone()
 				return updated.apply(n.events) && resume(n.source, updated)
 			}
-			if cursor < len(tree.fixed) && try(tree.fixed[cursor], cursor+1, selected) {
+			if cursor < len(tree.fixed) && try(tree.fixed[cursor], cursor+1, selected, selectedCount) {
 				return true
 			}
 			for i, n := range tree.members {
-				bit := uint64(1) << uint(i)
-				if selected&bit == 0 && try(n, cursor, selected|bit) {
+				if !nativeMemberSelectionContains(selected, i) && try(n, cursor, nativeMemberSelectionAdd(selected, i), selectedCount+1) {
 					return true
 				}
 				if exhausted {
@@ -219,7 +218,7 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 			rejected[k] = true
 			return false
 		}
-		return search(0, 0, initial)
+		return search(0, nativeMemberSelectionEmpty(len(tree.members)), 0, initial)
 	}
 	var result string
 	if !visit(root, newNativeAccessorOrderState(), func(text string, order *nativeAccessorOrderState) bool {

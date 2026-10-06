@@ -106,7 +106,7 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 	declarations, known := nativeMemberLayoutDeclarations(source[open+1 : close])
 	// A bounded repair search is optional. The unchanged source certificate is
 	// always tried first; oversized or ambiguous layouts retain its refusal.
-	if !known || len(declarations) > 1024 || len(members) > 64 {
+	if !known || len(declarations) > nativeMemberLayoutNodeLimit || len(members) > nativeMemberLayoutNodeLimit {
 		return "", false
 	}
 	constructors, known := nativeMemberConstructorRegistrations(p, work)
@@ -142,20 +142,20 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 		return "", false
 	}
 	if work != nil && work.CheckAlloc(
-		int64(len(original))*3+4096*48+
+		int64(len(original))*3+4096*int64(48+(len(movable)+7)/8)+
 			int64(len(fixed)+len(movable)+1)*int64(2*len(p.getters)+len(constructors))*64) != nil {
 		return "", false
 	}
 	type key struct {
 		cursor   int
-		selected uint64
+		selected string
 	}
 	rejected := map[key]bool{}
 	var path []nativeMemberLayoutNode
 	attempts := 0
 	exhausted := false
-	var search func(int, uint64, *nativeAccessorOrderState) bool
-	search = func(cursor int, selected uint64, order *nativeAccessorOrderState) bool {
+	var search func(int, string, int, *nativeAccessorOrderState) bool
+	search = func(cursor int, selected string, selectedCount int, order *nativeAccessorOrderState) bool {
 		// Event-free fixed declarations cannot unlock a different registration state.
 		// Consume them without branching and keep every enclosing declaration ordered.
 		base := len(path)
@@ -164,7 +164,7 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 			cursor++
 		}
 		restore := func() { path = path[:base] }
-		if cursor == len(fixed) && selected == (uint64(1)<<uint(len(movable)))-1 {
+		if cursor == len(fixed) && selectedCount == len(movable) {
 			if len(order.getters) == len(p.getters) && len(order.constructors) == len(constructors) {
 				return true
 			}
@@ -182,7 +182,7 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 			restore()
 			return false
 		}
-		try := func(n nativeMemberLayoutNode, next int, bits uint64) bool {
+		try := func(n nativeMemberLayoutNode, next int, bits string, count int) bool {
 			if !nativeProofWork(work, int64(len(n.events)+len(order.getters)+len(order.constructors))) {
 				exhausted = true
 				return false
@@ -193,7 +193,7 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 			}
 			at := len(path)
 			path = append(path, n)
-			if search(next, bits, copy) {
+			if search(next, bits, count, copy) {
 				return true
 			}
 			path = path[:at]
@@ -202,12 +202,11 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 		// Existing declaration order is preferred. Memoization is valid because the
 		// selected nodes determine the symbol set; every admitted field has its fixed
 		// original ordinal, independent of the path used to reach that set.
-		if cursor < len(fixed) && try(fixed[cursor], cursor+1, selected) {
+		if cursor < len(fixed) && try(fixed[cursor], cursor+1, selected, selectedCount) {
 			return true
 		}
 		for i, n := range movable {
-			bit := uint64(1) << uint(i)
-			if selected&bit == 0 && try(n, cursor, selected|bit) {
+			if !nativeMemberSelectionContains(selected, i) && try(n, cursor, nativeMemberSelectionAdd(selected, i), selectedCount+1) {
 				return true
 			}
 			if exhausted {
@@ -219,7 +218,7 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 		restore()
 		return false
 	}
-	if !search(0, 0, newNativeAccessorOrderState()) {
+	if !search(0, nativeMemberSelectionEmpty(len(movable)), 0, newNativeAccessorOrderState()) {
 		return "", false
 	}
 	var out strings.Builder

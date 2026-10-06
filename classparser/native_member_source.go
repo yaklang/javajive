@@ -579,7 +579,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 					continue
 				}
 				name, known := sourceBridgeClassName(enclosing, row.InnerClassInfoIndex)
-				if !known || len(p.children) >= 64 || p.children[name] != nil || p.lexicalObjects[name] != nil {
+				if !known || len(p.children) >= nativeMemberLayoutNodeLimit || p.children[name] != nil || p.lexicalObjects[name] != nil {
 					return nil
 				}
 				raw, found := c.foldSiblingResolver(name)
@@ -599,6 +599,12 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				child := nativeMemberProofWithDeclarations(obj, enclosing, c.Work, bridges, p.lexicalObjects, resolveDeclaration, reader.buildInvocationMetadata())
 				rowName, rowKnown := sourceBridgeUTF8(enclosing, row.InnerNameIndex)
 				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags {
+					return nil
+				}
+				// Lexical width is not the 64-bit subset representation used by
+				// the old registration solver. Keep the bounded source-node
+				// profile and charge forest storage before retaining each node.
+				if c.Work != nil && c.Work.CheckAlloc(int64(len(p.children)+2)*512) != nil {
 					return nil
 				}
 				p.children[name] = child

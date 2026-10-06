@@ -357,7 +357,7 @@ func (z *JarFS) nativeMemberLocalPlan(obj *ClassObject, owner string, snap map[s
 // the family cache recursively or import an external class into its private nest.
 func nativeMemberDependencyObjects(root *ClassObject, p *nativeMemberFamily, work *workbudget.Budget) ([]*ClassObject, bool) {
 	if root == nil || p == nil || p.failed || root.GetClassName() != p.owner ||
-		len(p.children) > 64 || len(p.anonymousUnits) > 64 ||
+		len(p.children) > nativeMemberLayoutNodeLimit || len(p.anonymousUnits) > 64 ||
 		!nativeProofWork(work, int64(len(p.children)+len(p.anonymousUnits)+1)) ||
 		work != nil && work.CheckAlloc(int64(len(p.children)+len(p.anonymousUnits)+1)*128) != nil {
 		return nil, false
