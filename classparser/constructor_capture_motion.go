@@ -16,7 +16,7 @@ import (
 // follows local aliases and original field identities, rather than requiring
 // every ancestor to have one particular assignment/delegation source shape.
 func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) bool {
-	if p == nil || p.delegate == nil || len(p.prefix) == 0 || len(code.ExceptionTable) != 0 {
+	if p == nil || p.delegate == nil || len(p.prefix) == 0 || !constructorPreludeOutsideHandlers(code, p.pc, decoder, c.Work) {
 		return false
 	}
 	desc, err := c.obj.getUtf8(method.DescriptorIndex)

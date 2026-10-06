@@ -208,7 +208,7 @@ func (c *ClassObjectDumper) planConstructorSourceBoundary(code *CodeAttribute, b
 	// A prefix cannot cross an original exception domain. The bounded carrier
 	// admits straight-line expression effects and original parameter uses only;
 	// local definitions surviving the delegation require a different proof.
-	if len(code.ExceptionTable) != 0 || len(p.delegate.Arguments) == 0 || c.isGenuineEnum() {
+	if !constructorPreludeOutsideHandlers(code, p.pc, decoder, c.Work) || len(p.delegate.Arguments) == 0 || c.isGenuineEnum() {
 		return nil, fmt.Errorf("unsupported protected or zero-argument constructor prefix")
 	}
 	allowed := map[*values.JavaRef]bool{}
@@ -493,7 +493,7 @@ func (c *ClassObjectDumper) planConstructorArgumentBridges(p *constructorSourceB
 		if !needed {
 			continue
 		}
-		if len(code.ExceptionTable) != 0 {
+		if !constructorPreludeOutsideHandlers(code, p.pc, decoder, c.Work) {
 			return fmt.Errorf("protected constructor argument requires its original handler domain")
 		}
 		table, complete := c.FuncCtx.InvocationMetadata(call.ClassName)
