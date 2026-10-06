@@ -123,6 +123,31 @@ func bodyCompletesNormally(body []statements.Statement) bool {
 	return true
 }
 
+// sharedSwitchTailCompletes requires every normally completing tail path to
+// leave a nested switch. Conditional wrapping does not change the destination
+// of javac's coalesced inner/outer break; unrelated fall-through paths do.
+// Abrupt arms need no extra transfer, and empty arms are not exit evidence.
+func sharedSwitchTailCompletes(st statements.Statement) bool {
+	switch s := st.(type) {
+	case *statements.SwitchStatement:
+		return switchCompletesNormally(s)
+	case *statements.IfStatement:
+		normal := false
+		for _, body := range [][]statements.Statement{s.IfBody, s.ElseBody} {
+			if !bodyCompletesNormally(body) {
+				continue
+			}
+			normal = true
+			if len(body) == 0 || !sharedSwitchTailCompletes(body[len(body)-1]) {
+				return false
+			}
+		}
+		return normal
+	default:
+		return false
+	}
+}
+
 // caseBodyExitNodes collects the EXIT targets of the case body rooted at startNode, using the same
 // idom-child walk SwitchRewriter itself uses to delimit a case body: a successor that is an immediate
 // dominator child of the current node belongs to the body, any other successor is an EXIT (a break /
@@ -623,7 +648,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	// that shared point to the inner switch, so the structured inner switch is left without an exit
 	// edge and the outer case has neither a break leaf nor a fall-through edge - it silently falls
 	// through to the next case label. Detect it structurally and repair it: a non-last case whose body
-	// ends in a nested switch that COMPLETES NORMALLY (some arm breaks / falls off, i.e. control can
+	// ends through a nested switch that COMPLETES NORMALLY (some arm breaks / falls off, i.e. control can
 	// reach the point after the inner switch) and that does NOT fall through to a sibling case must end
 	// with a `break`. The nested-switch + completes-normally guards keep this from emitting unreachable
 	// code after a loop, a return/throw, or a switch all of whose arms return.
@@ -635,8 +660,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 			if len(ci.Body) == 0 {
 				continue // empty grouped label (case A: case B:) carries no body to break out of.
 			}
-			innerSwitch, ok := ci.Body[len(ci.Body)-1].(*statements.SwitchStatement)
-			if !ok || !switchCompletesNormally(innerSwitch) {
+			if !sharedSwitchTailCompletes(ci.Body[len(ci.Body)-1]) {
 				continue
 			}
 			fallsThrough := false
