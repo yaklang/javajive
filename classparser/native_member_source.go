@@ -816,6 +816,7 @@ type nativeMemberAllocation struct {
 	enclosingReadPC          int
 	implicitEnclosing        bool
 	implicitReceiverClass    string
+	freshEnclosing           *nativeMemberFreshEnclosing
 }
 
 func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
@@ -943,41 +944,78 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 					}
 					continue
 				}
-				if i+3 >= len(ops) || ops[i+1].Instr.OpCode != core.OP_DUP || !constructorMotionLoad(ops[i+2], "L"+child.owner+";") {
+				if i+3 >= len(ops) || ops[i+1].Instr.OpCode != core.OP_DUP {
 					return nil, false
 				}
-				plan := &nativeMemberAllocation{child: child, newPC: int(op.CurrentOffset), checkPC: -1, enclosingReadPC: -1, slot: core.GetRetrieveIdx(ops[i+2])}
+				plan := &nativeMemberAllocation{child: child, newPC: int(op.CurrentOffset), checkPC: -1, enclosingReadPC: -1, slot: -1}
 				cursor := i + 3
-				// An unqualified sibling allocation reads the current member's
-				// original enclosing capture. This is an origin witness, not
-				// a same-erasure field or an assumption that an outer is nonnull.
-				if current := p.children[c.obj.GetClassName()]; current != nil && !current.static && current.owner == child.owner && m.AccessFlags&8 == 0 && plan.slot == 0 && cursor < len(ops) {
-					field := constructorMotionMember(c.obj, ops[cursor], core.OP_GETFIELD)
-					if field != nil && field.Name == current.object.GetClassName() && field.Member == current.field && field.Description == "L"+child.owner+";" {
-						plan.enclosingReadPC = int(ops[cursor].CurrentOffset)
+				if ops[i+2].Instr.OpCode == core.OP_NEW {
+					if !allocationInvocationsChecked {
+						var valid bool
+						allocationInvocations, valid = c.nativeMemberAllocationInvocations(m, code)
+						if !valid {
+							return nil, false
+						}
+						allocationInvocationsChecked = true
+					}
+					invocation, found := allocationInvocations[plan.newPC]
+					qualifier := invocation.enclosing
+					if !found || invocation.owner != owner || qualifier == nil || qualifier.owner != child.owner || qualifier.newPC != int(ops[i+2].CurrentOffset) {
+						return nil, false
+					}
+					for cursor < len(ops) && int(ops[cursor].CurrentOffset) != qualifier.invokePC {
+						if cursor-i > 512 || !nativeProofWork(c.Work, 1) {
+							return nil, false
+						}
 						cursor++
-						plan.implicitEnclosing = true
-						// Explicit Outer.this.new uses the same capture but retains
-						// the original qualifier check. Do not erase that protocol.
-						if cursor+2 < len(ops) && ops[cursor].Instr.OpCode == core.OP_DUP && nativeMemberNullCheck(c.obj, ops[cursor+1]) && ops[cursor+2].Instr.OpCode == core.OP_POP {
-							plan.checkPC = int(ops[cursor+1].CurrentOffset)
-							cursor += 3
-							plan.implicitEnclosing = false
+					}
+					if cursor == len(ops) {
+						return nil, false
+					}
+					plan.freshEnclosing = qualifier
+					cursor++
+					// A freshly initialized NEW is nonnull. Retain an explicit
+					// qualifier check if the original compiler emitted one.
+					if cursor+2 < len(ops) && ops[cursor].Instr.OpCode == core.OP_DUP && nativeMemberNullCheck(c.obj, ops[cursor+1]) && ops[cursor+2].Instr.OpCode == core.OP_POP {
+						plan.checkPC = int(ops[cursor+1].CurrentOffset)
+						cursor += 3
+					}
+				} else {
+					if !constructorMotionLoad(ops[i+2], "L"+child.owner+";") {
+						return nil, false
+					}
+					plan.slot = core.GetRetrieveIdx(ops[i+2])
+					// An unqualified sibling allocation reads the current member's
+					// original enclosing capture. This is an origin witness, not
+					// a same-erasure field or an assumption that an outer is nonnull.
+					if current := p.children[c.obj.GetClassName()]; current != nil && !current.static && current.owner == child.owner && m.AccessFlags&8 == 0 && plan.slot == 0 && cursor < len(ops) {
+						field := constructorMotionMember(c.obj, ops[cursor], core.OP_GETFIELD)
+						if field != nil && field.Name == current.object.GetClassName() && field.Member == current.field && field.Description == "L"+child.owner+";" {
+							plan.enclosingReadPC = int(ops[cursor].CurrentOffset)
+							cursor++
+							plan.implicitEnclosing = true
+							// Explicit Outer.this.new uses the same capture but retains
+							// the original qualifier check. Do not erase that protocol.
+							if cursor+2 < len(ops) && ops[cursor].Instr.OpCode == core.OP_DUP && nativeMemberNullCheck(c.obj, ops[cursor+1]) && ops[cursor+2].Instr.OpCode == core.OP_POP {
+								plan.checkPC = int(ops[cursor+1].CurrentOffset)
+								cursor += 3
+								plan.implicitEnclosing = false
+							}
 						}
 					}
-				}
-				if plan.enclosingReadPC < 0 && plan.slot == 0 && cursor < len(ops) && ops[cursor].Instr.OpCode != core.OP_DUP && nativeMemberInheritedAllocationThis(c.obj, m, ops, child, originalDeclarations, c.Work) {
-					plan.implicitReceiverClass = c.obj.GetClassName()
-				}
-				if plan.enclosingReadPC < 0 && plan.implicitReceiverClass == "" && (plan.slot != 0 || m.AccessFlags&8 != 0 || c.obj.GetClassName() != child.owner) {
-					if cursor+2 >= len(ops) || ops[cursor].Instr.OpCode != core.OP_DUP {
-						return nil, false
+					if plan.enclosingReadPC < 0 && plan.slot == 0 && cursor < len(ops) && ops[cursor].Instr.OpCode != core.OP_DUP && nativeMemberInheritedAllocationThis(c.obj, m, ops, child, originalDeclarations, c.Work) {
+						plan.implicitReceiverClass = c.obj.GetClassName()
 					}
-					if !nativeMemberNullCheck(c.obj, ops[cursor+1]) || ops[cursor+2].Instr.OpCode != core.OP_POP {
-						return nil, false
+					if plan.enclosingReadPC < 0 && plan.implicitReceiverClass == "" && (plan.slot != 0 || m.AccessFlags&8 != 0 || c.obj.GetClassName() != child.owner) {
+						if cursor+2 >= len(ops) || ops[cursor].Instr.OpCode != core.OP_DUP {
+							return nil, false
+						}
+						if !nativeMemberNullCheck(c.obj, ops[cursor+1]) || ops[cursor+2].Instr.OpCode != core.OP_POP {
+							return nil, false
+						}
+						plan.checkPC = int(ops[cursor+1].CurrentOffset)
+						cursor += 3
 					}
-					plan.checkPC = int(ops[cursor+1].CurrentOffset)
-					cursor += 3
 				}
 				// Preserve the original operand producers and their effects. A
 				// nested allocation or branch requires the immutable typed frame
@@ -1378,7 +1416,11 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		if plan.child.static {
 			return nativeMemberStaticBridgeSource(plan, args, ctx, binding, p)
 		}
-		if plan.enclosingReadPC >= 0 {
+		if plan.freshEnclosing != nil {
+			if !nativeMemberFreshEnclosingOperand(args[0].Value, plan.freshEnclosing, c.Work) {
+				return fail()
+			}
+		} else if plan.enclosingReadPC >= 0 {
 			if !nativeMemberLexicalEnclosingOperand(args[0].Value, plan, p, c.obj.GetClassName(), c.nativeMemberBody, c.Work) {
 				return fail()
 			}

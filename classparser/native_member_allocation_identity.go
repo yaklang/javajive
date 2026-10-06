@@ -12,6 +12,7 @@ import (
 type nativeMemberAllocationInvocation struct {
 	pc                int
 	owner, descriptor string
+	enclosing         *nativeMemberFreshEnclosing
 }
 
 // Nested NEW expressions can have identical nominal owners. Match a call to
@@ -24,6 +25,7 @@ func (c *ClassObjectDumper) nativeMemberAllocationInvocations(method *MemberInfo
 		return nil, false
 	}
 	result := map[int]nativeMemberAllocationInvocation{}
+	fresh := map[int]nativeMemberFreshEnclosing{}
 	for _, record := range fn.Instructions {
 		if !nativeProofWork(c.Work, 1) {
 			return nil, false
@@ -53,6 +55,62 @@ func (c *ClassObjectDumper) nativeMemberAllocationInvocations(method *MemberInfo
 			return nil, false
 		}
 		result[pc] = nativeMemberAllocationInvocation{pc: int(record.PC), owner: invoke.Class, descriptor: invoke.Desc}
+		if len(params) > 0 && index+1 < len(record.Before.Stack) {
+			arg := record.Before.Stack[index+1]
+			origin := record.BeforeOrigins[len(record.Before.Locals)+index+1]
+			// Initialization changes verifier types, not the physical NEW's
+			// origin. A general Ref, phi, field or factory result is not evidence.
+			if arg.Kind == frametransfer.Ref && params[0] == "L"+arg.Class+";" && origin.Kind == ssabuild.OriginInstr {
+				allocation, exists := ir.InstrByID(methodir.InstrID(origin.PC))
+				if exists && allocation.Opcode == core.OP_NEW && allocation.Class == arg.Class {
+					fresh[pc] = nativeMemberFreshEnclosing{newPC: int(origin.PC), owner: arg.Class}
+				}
+			}
+		}
+	}
+	// Prefix counts make every enclosure query constant time. Re-scanning
+	// all control edges for every nested NEW would be quadratic in one method.
+	var entries, exits []int
+	if len(fresh) != 0 {
+		count := len(code.Code) + 2
+		if !nativeProofWork(c.Work, int64(count+len(ir.Edges))) || c.Work != nil && c.Work.CheckAlloc(int64(count)*16) != nil {
+			return nil, false
+		}
+		entries, exits = make([]int, count), make([]int, count)
+		for _, edge := range ir.Edges {
+			from, to := int(edge.From), int(edge.To)
+			if from >= len(code.Code) || to >= len(code.Code) {
+				return nil, false
+			}
+			if edge.Kind != core.EdgeFallthrough {
+				entries[to+1]++
+			}
+			if edge.Kind != core.EdgeFallthrough && edge.Kind != core.EdgeException {
+				exits[from+1]++
+			}
+		}
+		for i := 1; i < count; i++ {
+			entries[i] += entries[i-1]
+			exits[i] += exits[i-1]
+		}
+	}
+	for pc, qualifier := range fresh {
+		if !nativeProofWork(c.Work, 1) {
+			return nil, false
+		}
+		target := result[pc]
+		initialized, exists := result[qualifier.newPC]
+		if !exists || initialized.owner != qualifier.owner || qualifier.newPC <= pc || initialized.pc >= target.pc {
+			continue
+		}
+		// No alternate branch or handler entry may bypass the original inline
+		// allocation/initialization prefix. Original exception exits remain.
+		if entries[initialized.pc+1] != entries[pc+1] || exits[initialized.pc] != exits[pc] {
+			continue
+		}
+		qualifier.invokePC, qualifier.descriptor = initialized.pc, initialized.descriptor
+		target.enclosing = &qualifier
+		result[pc] = target
 	}
 	return result, true
 }
