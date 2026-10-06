@@ -28,6 +28,22 @@ func nativeMemberPrivateAccessProof(obj *ClassObject, m *MemberInfo, work *workb
 	return nativeMemberPrivateUpdateProof(obj, m, work)
 }
 
+// Family eligibility and accessor registration must use the same original
+// packet proof. Otherwise a valid inherited access inside a nonstatic member
+// is rejected before the resolver-aware registration phase can examine it.
+func nativeMemberPrivateAccessProofWithDeclarations(obj *ClassObject, m *MemberInfo, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeMemberPrivateGetter {
+	if p := nativeMemberPrivateAccessProof(obj, m, work); p != nil {
+		return p
+	}
+	if resolve == nil {
+		return nil
+	}
+	if p := nativeMemberProtectedCallProof(obj, m, resolve, work); p != nil {
+		return p
+	}
+	return nativeMemberProtectedFieldProof(obj, m, resolve, work)
+}
+
 func nativeMemberPlainSetterProof(obj *ClassObject, m *MemberInfo, work *workbudget.Budget) *nativeMemberPrivateGetter {
 	if obj == nil || m == nil || m.AccessFlags != 0x1008 || !nativeAccessorVersion(obj, work) || !nativeProofWork(work, 1) {
 		return nil

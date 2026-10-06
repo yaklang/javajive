@@ -365,7 +365,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		}
 		n, nok := sourceBridgeUTF8(obj, m.NameIndex)
 		desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
-		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 && (p.assertions == nil || p.assertions.initializer != m) && (lexical == nil || nativeMemberPrivateAccessProof(obj, m, work) == nil) {
+		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 && (p.assertions == nil || p.assertions.initializer != m) && (lexical == nil || nativeMemberPrivateAccessProofWithDeclarations(obj, m, resolve, work) == nil) {
 			return nil
 		}
 		for _, a := range m.Attributes {

@@ -36,6 +36,17 @@ func nativeMemberInheritedFieldSignature(owner *ClassObject, field *MemberInfo, 
 }
 
 func nativeMemberProtectedStaticFieldProof(obj *ClassObject, m *MemberInfo, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeMemberPrivateGetter {
+	g := nativeMemberProtectedFieldProof(obj, m, resolve, work)
+	if g == nil || !g.staticField {
+		return nil
+	}
+	return g
+}
+
+// The same complete declaration graph proves inherited instance and static
+// reads. GETFIELD retains the original subclass receiver: qualifying through
+// the declaring parent would lose Java's protected receiver restriction.
+func nativeMemberProtectedFieldProof(obj *ClassObject, m *MemberInfo, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeMemberPrivateGetter {
 	if resolve == nil {
 		return nil
 	}

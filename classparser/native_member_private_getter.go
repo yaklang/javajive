@@ -148,18 +148,18 @@ func nativeMemberGetterPacketProof(obj *ClassObject, m *MemberInfo, resolve func
 		}
 	}
 	if !found {
-		if !staticField || resolve == nil {
+		if resolve == nil {
 			return nil
 		}
 		owner, target := nativeMemberInheritedFieldTarget(obj, field.Member, result, resolve, work)
-		if target == nil || owner == nil || owner == obj || target.AccessFlags&7 != 4 || target.AccessFlags&(8|0x1000|0x4000) != 8 || nativeBinaryPackage(owner.GetClassName()) == nativeBinaryPackage(obj.GetClassName()) {
+		if target == nil || owner == nil || owner == obj || target.AccessFlags&7 != 4 || target.AccessFlags&(0x1000|0x4000) != 0 || (target.AccessFlags&8 != 0) != staticField || nativeBinaryPackage(owner.GetClassName()) == nativeBinaryPackage(obj.GetClassName()) {
 			return nil
 		}
 		genericField, found = nativeMemberInheritedFieldSignature(owner, target, result, work)
 		if !found {
 			return nil
 		}
-		return &nativeMemberPrivateGetter{owner: obj.GetClassName(), name: name, descriptor: desc, field: field.Member, fieldDescriptor: result, ordinal: ordinal, method: m, staticField: true, genericField: genericField, inheritedField: true}
+		return &nativeMemberPrivateGetter{owner: obj.GetClassName(), name: name, descriptor: desc, field: field.Member, fieldDescriptor: result, ordinal: ordinal, method: m, staticField: staticField, genericField: genericField, inheritedField: true}
 	}
 	return &nativeMemberPrivateGetter{owner: obj.GetClassName(), name: name, descriptor: desc, field: field.Member, fieldDescriptor: result, ordinal: ordinal, method: m, staticField: staticField, genericField: genericField}
 }
@@ -208,13 +208,7 @@ func nativeMemberCollectPrivateGettersResolved(p *nativeMemberFamily, resolve fu
 			if !strings.HasPrefix(name, "access$") || m.AccessFlags&0x1000 == 0 {
 				continue
 			}
-			getter := nativeMemberPrivateAccessProof(obj, m, work)
-			if getter == nil && resolve != nil {
-				getter = nativeMemberProtectedCallProof(obj, m, resolve, work)
-			}
-			if getter == nil && resolve != nil {
-				getter = nativeMemberProtectedStaticFieldProof(obj, m, resolve, work)
-			}
+			getter := nativeMemberPrivateAccessProofWithDeclarations(obj, m, resolve, work)
 			if getter == nil {
 				return false
 			}
