@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
@@ -169,7 +170,10 @@ func nativeEnumMethodOpsWithParameterNames(obj *ClassObject, method *MemberInfo,
 			}
 			name, known := sourceBridgeUTF8(obj, method.NameIndex)
 			value, closed := sourceBridgeUTF8(obj, signature.SignatureIndex)
-			if constructorSignature || !known || name != "<init>" || !closed || value != "()V" {
+			descriptor, dk := sourceBridgeUTF8(obj, method.DescriptorIndex)
+			reader := NewClassObjectDumper(obj)
+			reader.Work = work
+			if constructorSignature || !known || name != "<init>" || !closed || !dk || !reader.nativeEnumConstructorSignatureMatches(method, value, descriptor) {
 				return nil, false
 			}
 			constructorSignature = true
@@ -177,7 +181,12 @@ func nativeEnumMethodOpsWithParameterNames(obj *ClassObject, method *MemberInfo,
 			name, known := sourceBridgeUTF8(obj, method.NameIndex)
 			count, flags := 1, uint16(0x8000)
 			if name == "<init>" {
-				count, flags = 2, 0x1000
+				descriptor, dk := sourceBridgeUTF8(obj, method.DescriptorIndex)
+				physical, result, err := callbinding.Descriptor(descriptor)
+				if !dk || err != nil || result != "V" || len(physical) < 2 || len(physical) > 255 || physical[0] != "Ljava/lang/String;" || physical[1] != "I" {
+					return nil, false
+				}
+				count, flags = len(physical), 0x1000
 			} else if name != "valueOf" {
 				return nil, false
 			}
@@ -193,7 +202,14 @@ func nativeEnumMethodOpsWithParameterNames(obj *ClassObject, method *MemberInfo,
 						return nil, false
 					}
 				}
-				if uint16(data[2])<<8|uint16(data[3]) != flags {
+				expectedFlags := flags
+				if name == "<init>" && i >= 2 {
+					// Only the compiler's name/ordinal parameters are synthetic.
+					// Unnamed ordinary source parameters retain their physical
+					// entries; names or extra flags need separate source evidence.
+					expectedFlags = 0
+				}
+				if uint16(data[2])<<8|uint16(data[3]) != expectedFlags {
 					return nil, false
 				}
 			}
@@ -382,6 +398,9 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 		return nil
 	}
 	var valuesMethod, valueOf, helper, ctor, initializer *MemberInfo
+	constructors := map[string]*MemberInfo{}
+	var constructorOrder []*MemberInfo
+	sourceArguments := false
 	for _, method := range obj.Methods {
 		if method == nil || !nativeProofWork(work, 1) {
 			return nil
@@ -408,9 +427,13 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 			}
 			helper = method
 		case n == "<init>":
-			if ctor != nil || method.AccessFlags != 2 || d != "(Ljava/lang/String;I)V" {
+			params, result, err := callbinding.Descriptor(d)
+			if constructors[d] != nil || len(constructors) >= 64 || (method.AccessFlags != 2 && method.AccessFlags != 0x82) || err != nil || result != "V" || len(params) < 2 || params[0] != "Ljava/lang/String;" || params[1] != "I" || method.AccessFlags&0x80 != 0 && (len(params) == 2 || params[len(params)-1][0] != '[') {
 				return nil
 			}
+			constructors[d] = method
+			constructorOrder = append(constructorOrder, method)
+			sourceArguments = sourceArguments || len(params) > 2
 			ctor = method
 		case n == "<clinit>":
 			if initializer != nil || method.AccessFlags != 8 || d != "()V" {
@@ -426,7 +449,7 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 	if len(constants) > 0 {
 		initializerStack, arrayStack = 4, 4
 	}
-	if !nativeEnumOriginalFrameCapacity(valuesMethod, 1, 0) || !nativeEnumOriginalFrameCapacity(valueOf, 2, 1) || !nativeEnumOriginalFrameCapacity(ctor, 3, 3) || !nativeEnumOriginalFrameCapacity(initializer, initializerStack, 0) || helper != nil && !nativeEnumOriginalFrameCapacity(helper, arrayStack, 0) {
+	if !nativeEnumOriginalFrameCapacity(valuesMethod, 1, 0) || !nativeEnumOriginalFrameCapacity(valueOf, 2, 1) || !nativeEnumOriginalFrameCapacity(initializer, initializerStack, 0) || helper != nil && !nativeEnumOriginalFrameCapacity(helper, arrayStack, 0) {
 		return nil
 	}
 	if nativeEnumValuesFactoryBacking(obj, valuesMethod, work) != backing || !nativeEnumValueOfFactoryProof(obj, valueOf, work) {
@@ -447,14 +470,21 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 	}
 	// The hidden name/ordinal belong only to the initial Enum super call. Any
 	// later use or overwrite would have no corresponding source-level parameter.
-	ops, known = nativeEnumMethodOps(obj, ctor, work)
-	if !known || len(ops) < 5 || !constructorMotionLoad(ops[0], descriptor) || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[1], "Ljava/lang/String;") || core.GetRetrieveIdx(ops[1]) != 1 || !constructorMotionLoad(ops[2], "I") || core.GetRetrieveIdx(ops[2]) != 2 || !nativeEnumMemberOperand(obj, ops[3], core.OP_INVOKESPECIAL, "java/lang/Enum", "<init>", "(Ljava/lang/String;I)V") {
-		return nil
-	}
-	for _, op := range ops[4:] {
-		load, store := core.GetRetrieveIdx(op), core.GetStoreIdx(op)
-		if load == 1 || load == 2 || store == 1 || store == 2 {
+	for _, original := range constructorOrder {
+		physical, _ := sourceBridgeUTF8(obj, original.DescriptorIndex)
+		params, _, _ := callbinding.Descriptor(physical)
+		if !nativeEnumOriginalFrameCapacity(original, 3, uint16(nativeMemberParameterWidth(params)+1)) {
 			return nil
+		}
+		ops, known = nativeEnumMethodOps(obj, original, work)
+		if !known || len(ops) < 5 || !constructorMotionLoad(ops[0], descriptor) || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[1], "Ljava/lang/String;") || core.GetRetrieveIdx(ops[1]) != 1 || !constructorMotionLoad(ops[2], "I") || core.GetRetrieveIdx(ops[2]) != 2 || !nativeEnumMemberOperand(obj, ops[3], core.OP_INVOKESPECIAL, "java/lang/Enum", "<init>", "(Ljava/lang/String;I)V") {
+			return nil
+		}
+		for _, op := range ops[4:] {
+			load, store := core.GetRetrieveIdx(op), core.GetStoreIdx(op)
+			if load == 1 || load == 2 || store == 1 || store == 2 {
+				return nil
+			}
 		}
 	}
 	// Enum constants precede the backing array and all ordinary source static
@@ -464,20 +494,52 @@ func nativeMemberEnumSynthesisProof(obj *ClassObject, flags uint16, work *workbu
 		return nil
 	}
 	cursor := 0
-	for ordinal, constant := range constants {
-		packet := ops[cursor : cursor+6]
-		index, ok := nativeEnumCPIndex(packet[2])
-		literal := ""
-		if ok && index > 0 && int(index) <= len(obj.ConstantPool) {
-			if str, yes := obj.ConstantPool[index-1].(*ConstantStringInfo); yes && str != nil {
-				literal, _ = sourceBridgeUTF8(obj, str.StringIndex)
-			}
-		}
-		number, nk := nativeEnumOriginalInt(obj, packet[3])
-		if !nativeEnumOpcode(packet[0], core.OP_NEW) || !nativeEnumClassOperand(obj, packet[0], name) || !nativeEnumOpcode(packet[1], core.OP_DUP) || !(nativeEnumOpcode(packet[2], core.OP_LDC) || nativeEnumOpcode(packet[2], core.OP_LDC_W)) || literal != constant || !nk || number != ordinal || !nativeEnumMemberOperand(obj, packet[4], core.OP_INVOKESPECIAL, name, "<init>", "(Ljava/lang/String;I)V") || !nativeEnumMemberOperand(obj, packet[5], core.OP_PUTSTATIC, name, constant, descriptor) {
+	if sourceArguments {
+		// Source arguments have variable instruction spans and category widths.
+		// Reuse the immutable typed NEW/invoke/store origin proof; fixed six-op
+		// matching cannot distinguish nested allocations from the enum receiver.
+		// The same proof checks literal hidden operands, exact original targets,
+		// declaration order and all control-flow edges, without evaluating values.
+		reader := NewClassObjectDumper(obj)
+		reader.Work = work
+		allocations, err := reader.nativeEnumConstantInitializations()
+		if err != nil || len(allocations) != len(constants) {
 			return nil
 		}
-		cursor += 6
+		for ordinal, constant := range constants {
+			plan, exists := allocations[constant]
+			if !exists || plan.ordinal != ordinal || plan.allocatedClass != name || constructors[plan.descriptor] == nil {
+				return nil
+			}
+			if ordinal == len(constants)-1 {
+				found := false
+				for i, op := range ops {
+					if int(op.CurrentOffset) == plan.storePC {
+						cursor, found = i+1, true
+						break
+					}
+				}
+				if !found {
+					return nil
+				}
+			}
+		}
+	} else {
+		for ordinal, constant := range constants {
+			packet := ops[cursor : cursor+6]
+			index, ok := nativeEnumCPIndex(packet[2])
+			literal := ""
+			if ok && index > 0 && int(index) <= len(obj.ConstantPool) {
+				if str, yes := obj.ConstantPool[index-1].(*ConstantStringInfo); yes && str != nil {
+					literal, _ = sourceBridgeUTF8(obj, str.StringIndex)
+				}
+			}
+			number, nk := nativeEnumOriginalInt(obj, packet[3])
+			if !nativeEnumOpcode(packet[0], core.OP_NEW) || !nativeEnumClassOperand(obj, packet[0], name) || !nativeEnumOpcode(packet[1], core.OP_DUP) || !(nativeEnumOpcode(packet[2], core.OP_LDC) || nativeEnumOpcode(packet[2], core.OP_LDC_W)) || literal != constant || !nk || number != ordinal || !nativeEnumMemberOperand(obj, packet[4], core.OP_INVOKESPECIAL, name, "<init>", "(Ljava/lang/String;I)V") || !nativeEnumMemberOperand(obj, packet[5], core.OP_PUTSTATIC, name, constant, descriptor) {
+				return nil
+			}
+			cursor += 6
+		}
 	}
 	if helper != nil {
 		helperName, _ := sourceBridgeUTF8(obj, helper.NameIndex)

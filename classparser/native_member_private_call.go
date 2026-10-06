@@ -180,7 +180,7 @@ func nativeMemberCallPacketProof(obj *ClassObject, m *MemberInfo, resolve func(s
 				if !nativeMemberRawInheritedCall(obj, targetOwner, targetSignature, invoke.Description, target, work) {
 					return nil
 				}
-			} else if !nativeMemberConcretePrivateCall(targetOwner, targetSignature, invoke.Description, target, work) {
+			} else if !nativeMemberConcretePrivateCall(targetOwner, targetSignature, invoke.Description, target, work) && !nativeMemberRawOwnPrivateCall(targetOwner, targetSignature, invoke.Description, target, work) {
 				if len(targetSignature) > 4096 || !nativeProofWork(work, int64(len(targetSignature))*130+1) || work != nil && work.CheckAlloc(int64(len(targetSignature))*256) != nil {
 					return nil
 				}

@@ -37,6 +37,7 @@ func EraseClassBoundMethodSignatureWithThrows(classSignature, methodSignature st
 		}
 	}
 	bounds := map[string]string{}
+	referenceSignatures := []string{methodSignature}
 	rest := classSignature[1:]
 	for len(rest) > 0 && rest[0] != '>' {
 		colon := strings.IndexByte(rest, ':')
@@ -60,6 +61,7 @@ func EraseClassBoundMethodSignatureWithThrows(classSignature, methodSignature st
 			if !ok {
 				return "", nil, false
 			}
+			referenceSignatures = append(referenceSignatures, before[:len(before)-len(after)])
 			if bounds[name] == "" {
 				if before[0] != 'L' {
 					return "", nil, false
@@ -81,6 +83,7 @@ func EraseClassBoundMethodSignatureWithThrows(classSignature, methodSignature st
 		return "", nil, false
 	}
 	rest = rest[1:]
+	referenceSignatures = append(referenceSignatures, rest)
 	// Class signatures have class/interface supers, never method or field grammar.
 	for len(rest) > 0 {
 		if rest[0] != 'L' {
@@ -91,6 +94,15 @@ func EraseClassBoundMethodSignatureWithThrows(classSignature, methodSignature st
 			return "", nil, false
 		}
 		rest = after
+	}
+	// Erasure hides arguments, but it must never license invalid original
+	// reference grammar. Validate bound and superclass arguments only after
+	// all declarations are available, so recursive class bounds retain their
+	// own binder while primitive arguments and void arrays remain invalid.
+	for _, signature := range referenceSignatures {
+		if !signatureReferenceArgumentsValid(signature, bounds) {
+			return "", nil, false
+		}
 	}
 	return eraseMethodSignature(methodSignature, bounds)
 }
