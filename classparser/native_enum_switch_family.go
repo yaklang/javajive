@@ -14,6 +14,7 @@ import (
 func (c *ClassObjectDumper) nativeEnumSwitchOwnedTables(owner string) (map[string]*nativeEnumSwitchTable, bool) {
 	out := map[string]*nativeEnumSwitchTable{}
 	foreignArtifact := false
+	resolve := c.nativeAnnotationDeclarationResolver()
 	for _, a := range c.obj.Attributes {
 		inner, ok := a.(*InnerClassesAttribute)
 		if !ok {
@@ -54,7 +55,7 @@ func (c *ClassObjectDumper) nativeEnumSwitchOwnedTables(owner string) (map[strin
 				continue
 			}
 			table := nativeEnumSwitchTableProof(obj, c.Work)
-			if c.getenv("JDEC_NO_ENUM_SWITCH_FOLD") != "" || table == nil || len(out) > 0 || !nativeEnumSwitchArtifactMetadata(obj, owner, c.Work) {
+			if c.getenv("JDEC_NO_ENUM_SWITCH_FOLD") != "" || table == nil || len(out) > 0 || !nativeEnumSwitchReferencedMetadata(table, owner, resolve, c.Work) {
 				return nil, false
 			}
 			out[name] = table
@@ -64,6 +65,13 @@ func (c *ClassObjectDumper) nativeEnumSwitchOwnedTables(owner string) (map[strin
 }
 
 func nativeEnumSwitchArtifactMetadata(obj *ClassObject, owner string, work *workbudget.Budget) bool {
+	return nativeEnumSwitchMetadataRows(obj, owner, nil, work)
+}
+
+func nativeEnumSwitchMetadataRows(obj *ClassObject, owner string, references map[string]nativeEnumSwitchDeclaration, work *workbudget.Budget) bool {
+	if obj == nil || !nativeProofWork(work, int64(len(references)+1)) {
+		return false
+	}
 	seenInner, seenEnclosing, seenSource := false, false, false
 	for _, a := range obj.Attributes {
 		if !nativeProofWork(work, 1) {
@@ -71,16 +79,34 @@ func nativeEnumSwitchArtifactMetadata(obj *ClassObject, owner string, work *work
 		}
 		switch a := a.(type) {
 		case *InnerClassesAttribute:
-			if a == nil || seenInner || len(a.Classes) != 1 {
+			if a == nil || seenInner || len(a.Classes) != len(references)+1 {
 				return false
 			}
 			seenInner = true
-			row := a.Classes[0]
-			if row == nil || row.OuterClassInfoIndex != 0 || row.InnerNameIndex != 0 || row.InnerClassAccessFlags != 0x1008 {
-				return false
+			seen := map[string]bool{}
+			for _, row := range a.Classes {
+				if row == nil || !nativeProofWork(work, 1) {
+					return false
+				}
+				name, known := sourceBridgeClassName(obj, row.InnerClassInfoIndex)
+				if !known || seen[name] {
+					return false
+				}
+				seen[name] = true
+				if name == obj.GetClassName() {
+					if row.OuterClassInfoIndex != 0 || row.InnerNameIndex != 0 || row.InnerClassAccessFlags != 0x1008 {
+						return false
+					}
+					continue
+				}
+				declaration, exists := references[name]
+				outer, outerKnown := sourceBridgeClassName(obj, row.OuterClassInfoIndex)
+				local, localKnown := sourceBridgeUTF8(obj, row.InnerNameIndex)
+				if !exists || !outerKnown || !localKnown || outer != declaration.owner || local != declaration.name || row.InnerClassAccessFlags != declaration.flags {
+					return false
+				}
 			}
-			name, known := sourceBridgeClassName(obj, row.InnerClassInfoIndex)
-			if !known || name != obj.GetClassName() {
+			if !seen[obj.GetClassName()] {
 				return false
 			}
 		case *UnparsedAttribute:
