@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"maps"
 	"strings"
 )
 
@@ -36,7 +37,10 @@ func (f *FunctionCallExpression) planErasedMethodInputProof(ctx *class_context.C
 	owner := strings.ReplaceAll(f.ClassName, ".", "/")
 	declaring, cs, sig := erasedInvocationDeclaration(ctx, owner, f.FunctionName, f.Descriptor)
 	sig, fixedThrows := invocationFixedThrowsBody(sig)
-	bounds := erasedInvocationBounds(sig)
+	methodBounds := erasedInvocationBounds(sig)
+	// Class bounds participate in receiver inference. They cannot borrow the
+	// separate permission for a method's own overload-constraining variables.
+	bounds := maps.Clone(methodBounds)
 	if declaring == "" || !fixedThrows || (len(bounds) == 0 && (f.IsStatic || !allowGenericResult || len(erasedInvocationBounds(cs)) == 0)) {
 		return nil, false
 	}
@@ -93,6 +97,40 @@ func (f *FunctionCallExpression) planErasedMethodInputProof(ctx *class_context.C
 	if e != nil || !family.Complete || family.Target == nil || family.Target.Bridge || family.Target.Static != f.IsStatic {
 		return nil, false
 	}
+	var formalConstraints map[string][]types.JavaType
+	var bareMethodParams map[int]string
+	if len(methodBounds) > 0 {
+		var valid bool
+		formalConstraints, bareMethodParams, valid = types.FormalBoundConstraints(sig)
+		if !valid {
+			return nil, false
+		}
+	}
+	// JVM erasure records only the first bound. Pinning that bound alone can
+	// make a previously valid intersection-constrained invocation inapplicable.
+	// Retain every constraint only when each view is accessible/nonthrowing and
+	// the complete overload family cannot acquire another applicable target.
+	intersections := map[int][]types.JavaType{}
+	for i, name := range bareMethodParams {
+		constraints := formalConstraints[name]
+		if len(constraints) <= 1 {
+			continue
+		}
+		if i >= len(f.Arguments) || f.Arguments[i] == nil || f.Arguments[i].Type() == nil {
+			return nil, false
+		}
+		seen := map[string]bool{}
+		for ordinal, bound := range constraints {
+			raw, known := types.RawClassFQN(bound)
+			descriptor := "L" + strings.ReplaceAll(raw, ".", "/") + ";"
+			meta, available := ctx.InvocationMetadata(strings.ReplaceAll(raw, ".", "/"))
+			if !known || !available || !meta.Public || ordinal > 0 && !meta.IsInterface || seen[descriptor] || ordinal == 0 && descriptor != ps[i] || !callbinding.Assignable(erasedInvocationArgumentType(f.Arguments[i], descriptor), descriptor, ctx.InvocationMetadata) {
+				return nil, false
+			}
+			seen[descriptor] = true
+			intersections[i] = append(intersections[i], types.NewJavaClass(raw))
+		}
+	}
 	if family.Target.Varargs {
 		last := len(ps) - 1
 		if last < 0 || !strings.HasPrefix(ps[last], "[") || f.Arguments[last] == nil || bindingType(f.Arguments[last].Type()) != ps[last] {
@@ -127,6 +165,19 @@ func (f *FunctionCallExpression) planErasedMethodInputProof(ctx *class_context.C
 		if e != nil || ((m.Varargs || m.Generic) && m.Desc != f.Descriptor && applicable) || (!m.Bridge && strings.Join(p, "") == strings.Join(ps, "") && r != result) {
 			return nil, false
 		}
+		if m.Desc != f.Descriptor && len(intersections) != 0 && len(p) == len(ps) {
+			intersectionApplicable := true
+			for i, parameter := range p {
+				fits := callbinding.Assignable(ps[i], parameter, ctx.InvocationMetadata)
+				for _, constraint := range intersections[i] {
+					fits = fits || callbinding.Assignable(bindingType(constraint), parameter, ctx.InvocationMetadata)
+				}
+				intersectionApplicable = intersectionApplicable && fits
+			}
+			if intersectionApplicable {
+				return nil, false
+			}
+		}
 	}
 	conflict := false
 	for i, arg := range f.Arguments {
@@ -135,6 +186,14 @@ func (f *FunctionCallExpression) planErasedMethodInputProof(ctx *class_context.C
 		}
 		if !callbinding.Assignable(erasedInvocationArgumentType(arg, ps[i]), ps[i], ctx.InvocationMetadata) {
 			return nil, false
+		}
+		// A bare bounded method variable also exposes a source overload
+		// constraint. Its erased descriptor can select the generic operation
+		// while a narrower source operand selects a wrapper (even itself).
+		// Pin the descriptor only after the complete family and nonthrowing
+		// conversions above have been proved; result-use permission is unchanged.
+		if len(family.Methods) > 1 && bareMethodParams[i] != "" && erasedInvocationArgumentType(arg, ps[i]) != ps[i] {
+			conflict = true
 		}
 		if _, nested := types.AsParameterizedType(params[i]); nested && methodTypeMentionsFormal(params[i], bounds) {
 			if _, actual := types.AsParameterizedType(arg.Type()); actual {
@@ -175,7 +234,7 @@ func (f *FunctionCallExpression) planErasedMethodInputProof(ctx *class_context.C
 	for i, p := range ps {
 		if callbinding.Reference(p) {
 			typ, _ := types.ParseDescriptor(p)
-			out.Arguments[i] = &CastExpression{Value: f.Arguments[i], TargetType: typ, Binding: true, OriginPC: f.OriginPC}
+			out.Arguments[i] = &CastExpression{Value: f.Arguments[i], TargetType: typ, Binding: true, OriginPC: f.OriginPC, bindingIntersection: intersections[i]}
 		}
 	}
 	out.bindingPlanned = true

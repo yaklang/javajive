@@ -3894,6 +3894,11 @@ func sameErasureClassName(a, b string) bool {
 // out of ArgumentStrings so the varargs-spread path can reuse it for the leading fixed arguments.
 func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.ClassContext) string {
 	arg := f.Arguments[i]
+	// This view owns the complete original formal constraints. Rendering only
+	// its descriptor head would lose the source applicability proof.
+	if cast, ok := arg.(*CastExpression); ok && cast.Binding && len(cast.bindingIntersection) > 1 {
+		return cast.String(funcCtx)
+	}
 	// The invocation descriptor fixes the computational category even when
 	// its source operand is a proven boolean. Synthetic accessors may have
 	// an I parameter and a Z result; changing that ABI breaks original callers.

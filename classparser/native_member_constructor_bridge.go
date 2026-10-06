@@ -180,11 +180,12 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 					ctor := caller.constructors[desc]
 					super = ctor != nil && ctor.projectedSuper && caller.object.GetSupperClassName() == call.Name && ctor.delegateOwner == call.Name && ctor.delegateDescriptor == call.Description && ctor.delegatePC == int(op.CurrentOffset)
 				}
-				// Only a NEW origin or the independently verified initial
-				// member-super delegation regenerates the private bridge.
+				// Only a NEW origin or an independently verified initial
+				// lexical SUPER delegation regenerates the private bridge.
 				rootSuper := p.rootBridgeDelegation(obj, name, desc, call.Name, call.Description, int(op.CurrentOffset)) != nil
 				constantSuper := nativeEnumConstantSuperOwned(p, obj, name, desc, call.Name, call.Description, int(op.CurrentOffset))
-				if !allocation && !super && !rootSuper && !constantSuper {
+				anonymousSuper := nativeAnonymousBridgeSuperOwned(p, obj, name, desc, call.Name, call.Description, int(op.CurrentOffset), work)
+				if !allocation && !super && !rootSuper && !constantSuper && !anonymousSuper {
 					return false
 				}
 				if p.bridgeCalls == nil {
@@ -445,4 +446,45 @@ func nativeMemberSourceEnclosingParameter(value any, ctx *class_context.ClassCon
 	}
 	ref, ok := values.UnpackSoltValue(v).(*values.JavaRef)
 	return ok && ref != nil && ref.Id != nil && ref.IsParam && !ref.IsThis && ref.CustomValue == nil && ref.StackVar == nil && ctx.LocalNames[ref.Id] == ctx.ShortTypeName(strings.ReplaceAll(owner, "/", "."))+".this"
+}
+
+// The anonymous constructor packet already proves capture stores, the original
+// uninitialized THIS and the exact first SUPER invocation. That same packet can
+// own a private constructor bridge; arbitrary later calls, another declaration
+// instance or a flat terminal sibling cannot borrow this lexical permission.
+func nativeAnonymousBridgeSuperOwned(p *nativeMemberFamily, object *ClassObject, method, descriptor, target, physical string, pc int, work *workbudget.Budget) bool {
+	if p == nil || object == nil || method != "<init>" || !nativeProofWork(work, 1) {
+		return false
+	}
+	group := p.anonymousUnits[object.GetClassName()]
+	if group == nil {
+		return false
+	}
+	unit := group.children[object.GetClassName()]
+	if unit == nil || unit.object != object || unit.descriptor != descriptor || unit.superPC != pc || unit.superDescriptor != physical || object.GetSupperClassName() != target {
+		return false
+	}
+	bridge := p.constructorBridges(target)[physical]
+	if bridge == nil {
+		return false
+	}
+	sourceDescriptor := bridge.target
+	if unit.memberSuper != nil {
+		// A nonstatic member constructor has a physical enclosing-instance
+		// word that its source declaration omits. Compare through the original
+		// member packet; descriptor equality alone conflates these bindings.
+		member := unit.memberSuper
+		if p.children[target] != member || member.object == nil || member.object.GetClassName() != target {
+			return false
+		}
+		constructor := member.constructors[bridge.target]
+		if constructor == nil || constructor.descriptor != bridge.target {
+			return false
+		}
+		sourceDescriptor = constructor.sourceDescriptor
+	}
+	if sourceDescriptor != unit.sourceSuperDescriptor {
+		return false
+	}
+	return group == p.anonymous && group.owner == p.owner || group == p.memberAnonymous[group.owner] || nativeMemberJointAnonymousForestOwner(p, group, work)
 }

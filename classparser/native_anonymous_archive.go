@@ -99,6 +99,12 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 		if p == nil {
 			return
 		}
+		// A partial source transaction changes the prefix's type names while
+		// leaving independent terminal binaries flat. Close physical archive
+		// users before publishing either the prefix or its child suppression.
+		if len(p.standalone) != 0 && !nativeAnonymousPrefixArchiveClosed(p, z.originalMemberIndex(), d.Work) {
+			return
+		}
 		if p.forest != nil && !nativeAnonymousForestArchiveClosed(p.forest, z.originalMemberIndex(), d.Work) {
 			return
 		}

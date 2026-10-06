@@ -277,7 +277,13 @@ func nativeAnonymousForestOpcodeClosure(forest *nativeAnonymousForest, work *wor
 							return false
 						}
 						if forest.anonymousTypes[name] && forest.units[name] == nil {
-							return false
+							// A certified independent tail keeps its original flat
+							// allocation. It contributes no lexical unit, capture
+							// spelling or child suppression to this forest.
+							group := forest.groups[owner]
+							if group == nil || group.owner != owner || group.standalone[name] == nil || group.standalone[name].GetClassName() != name {
+								return false
+							}
 						}
 						if child := forest.units[name]; child != nil {
 							group := forest.groups[owner]

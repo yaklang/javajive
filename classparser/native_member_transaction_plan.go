@@ -54,6 +54,15 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 		return nil
 	}
 	objects := map[string]*ClassObject{owner: root}
+	// Use the exact original objects whose constructor packets were proved.
+	// A fresh parse with the same binary name is not an ownership witness.
+	for name, group := range p.anonymousUnits {
+		unit := group.children[name]
+		if unit == nil || unit.object == nil || unit.object.GetClassName() != name || !nativeProofWork(d.Work, 1) {
+			return nil
+		}
+		objects[name] = unit.object
+	}
 	for binary, local := range p.methodLocals {
 		objects[binary] = local.object
 	}
@@ -239,7 +248,21 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 					continue
 				}
 				if group := p.anonymousUnits[n]; group == nil || group.owner != anonOwner {
-					return nil
+					// A mixed lexical forest can compose an independently
+					// certified flat tail without granting it private scope.
+					// It is deliberately absent from anonymousUnits: those
+					// units alone are regenerated and suppressed by javac.
+					var independent *nativeAnonymousFamily
+					if p.anonymousForest != nil {
+						independent = p.anonymousForest.groups[anonOwner]
+					} else if anonOwner == p.owner {
+						independent = p.anonymous
+					} else {
+						independent = p.memberAnonymous[anonOwner]
+					}
+					if independent == nil || independent.owner != anonOwner || independent.standalone[n] == nil {
+						return nil
+					}
 				}
 			}
 		}

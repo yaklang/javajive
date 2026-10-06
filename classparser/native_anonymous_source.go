@@ -38,11 +38,12 @@ type nativeAnonymousClass struct {
 	memberEnclosingReadPC int
 }
 type nativeAnonymousFamily struct {
-	forest   *nativeAnonymousForest
-	owner    string
-	children map[string]*nativeAnonymousClass
-	failed   bool
-	bridges  map[string]*nativeConstructorAccessBridge
+	forest     *nativeAnonymousForest
+	owner      string
+	children   map[string]*nativeAnonymousClass
+	failed     bool
+	bridges    map[string]*nativeConstructorAccessBridge
+	standalone map[string]*ClassObject
 }
 
 // Anonymous ownership is an original attribute fact; binary spelling only
@@ -122,6 +123,10 @@ func nativeAnonymousConstructorWithinSourceRoot(obj *ClassObject, owner, method,
 }
 
 func nativeAnonymousConstructorWithDeclarations(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
+	return nativeAnonymousConstructorRepresentationProof(obj, owner, method, assertionRoot, work, members, forest, metadata, false, access...)
+}
+
+func nativeAnonymousConstructorRepresentationProof(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, standalone bool, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
 	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
@@ -137,7 +142,7 @@ func nativeAnonymousConstructorWithDeclarations(obj *ClassObject, owner, method,
 			}
 		}
 	}
-	if obj.AccessFlags != 0x0020 {
+	if !standalone && obj.AccessFlags != 0x0020 || standalone && obj.AccessFlags != 0x0030 {
 		return nil
 	}
 	c := &nativeAnonymousClass{object: obj, fields: map[string]int{}, capturePCs: map[string]int{}, method: method}
@@ -308,15 +313,26 @@ func nativeAnonymousConstructorWithDeclarations(obj *ClassObject, owner, method,
 	}
 	c.superDescriptor = mem.Description
 	c.sourceSuperDescriptor = mem.Description
+	var bridge *nativeConstructorAccessBridge
 	if c.memberSuper != nil {
-		ctor := c.memberSuper.constructors[mem.Description]
-		if ctor == nil || c.memberSuper.object.GetClassName() != mem.Name || nullTail {
+		// Project the two independent compiler operands in their original
+		// order: the leading enclosing instance and optional trailing unused
+		// private-access marker. Both are backed by the named parent packet.
+		parent := c.memberSuper
+		target := mem.Description
+		if nullTail {
+			bridge = parent.accessBridges[target]
+			if bridge == nil {
+				return nil
+			}
+			target = bridge.target
+		}
+		ctor := parent.constructors[target]
+		if ctor == nil || ctor.descriptor != target || parent.object.GetClassName() != mem.Name {
 			return nil
 		}
 		c.sourceSuperDescriptor = ctor.sourceDescriptor
-	}
-	var bridge *nativeConstructorAccessBridge
-	if nullTail {
+	} else if nullTail {
 		if mem.Name != owner || len(access) != 1 {
 			return nil
 		}
@@ -481,7 +497,7 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 	if _, _, anon := originalAnonymousOwner(c.obj); anon && (forest == nil || forest.units[c.obj.GetClassName()] == nil) {
 		return nil
 	}
-	p := &nativeAnonymousFamily{forest: forest, owner: c.obj.GetClassName(), children: map[string]*nativeAnonymousClass{}, bridges: map[string]*nativeConstructorAccessBridge{}}
+	p := &nativeAnonymousFamily{forest: forest, owner: c.obj.GetClassName(), children: map[string]*nativeAnonymousClass{}, bridges: map[string]*nativeConstructorAccessBridge{}, standalone: map[string]*ClassObject{}}
 	assertionRoot := ""
 	if forest != nil && forest.objects[forest.root] != nil && nativeMemberTopLevelEvidence(forest.objects[forest.root], c.Work) {
 		assertionRoot = forest.root
@@ -538,9 +554,29 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 		}
 		child := nativeAnonymousConstructorWithDeclarations(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, access)
 		if child == nil || child.assertions != nil && c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
-			return nil
+			p.standalone[name] = obj
+			continue
 		}
 		p.children[name] = child
+	}
+	// javac numbers actual anonymous expressions consecutively. Only the
+	// representable leading prefix can be reconstructed; leaving an earlier
+	// declaration flat would renumber every subsequent anonymous expression.
+	for ordinal := 1; ordinal <= len(names); ordinal++ {
+		name := p.owner + "$" + strconv.Itoa(ordinal)
+		if p.children[name] != nil {
+			continue
+		}
+		for name, child := range p.children {
+			if child.ordinal > ordinal {
+				p.standalone[name] = child.object
+				delete(p.children, name)
+			}
+		}
+		break
+	}
+	if !c.nativeAnonymousStandaloneTailClosed(p, members, forest, metadata, access) {
+		return nil
 	}
 	for _, child := range p.children {
 		if child.sourceSuperDescriptor != child.superDescriptor && child.memberSuper == nil {
@@ -564,6 +600,9 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 	return p
 }
 func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamily, members *nativeMemberFamily, forest *nativeAnonymousForest) *nativeAnonymousFamily {
+	if p == nil || !c.nativeAnonymousStandaloneTailClosed(p, members, forest, c.buildInvocationMetadata(), c.nativeConstructorAccessBridges()) {
+		return nil
+	}
 	allNames := map[string]bool{}
 	for _, a := range c.obj.Attributes {
 		if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
@@ -730,6 +769,13 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 				}
 			}
 		}
+	}
+	// A partial transaction must remain in its original source method. A
+	// method-handle implementation may be lifted into a lambda, where its
+	// parameter words no longer identify the enclosing source captures. That
+	// transfer needs a separate capture-binding certificate before promotion.
+	if len(p.standalone) != 0 && !nativeAnonymousAllocationMethodsStayLexical(c.obj, p, c.Work) {
+		return nil
 	}
 	// Every class has exactly one witnessed allocation in its declared lexical
 	// method. Repeated field initializers across constructors need a distinct plan.
@@ -1069,7 +1115,16 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if ctx.ChargeOutput(size) != nil {
 			return fail()
 		}
-		return fmt.Sprintf("/*jdec-owned-anonymous-ordinal:%d:%s*/new %s(%s) {%s}", child.ordinal, p.owner, parent, strings.Join(tuple, ","), body), true
+		registration := ""
+		if c.nativeMemberRoot != nil && c.nativeMemberRoot.anonymousUnits[child.object.GetClassName()] != nil && c.nativeMemberRoot.constructorBridges(child.object.GetSupperClassName())[child.superDescriptor] != nil {
+			if !nativeAnonymousBridgeSuperOwned(c.nativeMemberRoot, child.object, "<init>", child.descriptor, child.object.GetSupperClassName(), child.superDescriptor, child.superPC, c.Work) {
+				return fail()
+			}
+			// javac registers this private constructor before lowering the
+			// anonymous body. Keep that original event before its getters.
+			registration = nativeMemberConstructorRegistration(c.nativeMemberRoot, child.object.GetSupperClassName(), child.superDescriptor)
+		}
+		return fmt.Sprintf("/*jdec-owned-anonymous-ordinal:%d:%s*/%snew %s(%s) {%s}", child.ordinal, p.owner, registration, parent, strings.Join(tuple, ","), body), true
 	}
 }
 

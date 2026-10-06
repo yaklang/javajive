@@ -17,6 +17,9 @@ var dummyTypeCtx class_context.ClassContext
 type CastExpression struct {
 	// Binding preserves source overload resolution even for an identity conversion.
 	Binding bool
+	// Additional original generic bounds, admitted only by a complete,
+	// nonthrowing overload proof. The JVM view remains TargetType's erasure.
+	bindingIntersection []types.JavaType
 	// Only the original opcode constructor supplies this exact target witness.
 	OriginalCheckCast           bool
 	originalCheckCastDescriptor string
@@ -28,6 +31,21 @@ type CastExpression struct {
 func (c *CastExpression) Type() types.JavaType { return c.TargetType }
 func (c *CastExpression) String(ctx *class_context.ClassContext) string {
 	operand := c.Value
+	if c.Binding && len(c.bindingIntersection) > 1 {
+		names := make([]string, len(c.bindingIntersection))
+		for i, bound := range c.bindingIntersection {
+			raw, _ := types.RawClassFQN(bound)
+			name := types.NewJavaClass(raw).String(ctx)
+			if strings.Contains(raw, ".") {
+				pkg, _ := class_context.SplitPackageClassName(raw)
+				if !strings.HasPrefix(name, pkg+".") {
+					name = pkg + "." + name
+				}
+			}
+			names[i] = name
+		}
+		return fmt.Sprintf("((%s)(%s))", strings.Join(names, " & "), operand.String(ctx))
+	}
 	if c.Binding && c.TargetType != nil {
 		// A descriptor binding is an exact declaring type, independent of the
 		// caller's imported/generic source view. Spell its reference head fully

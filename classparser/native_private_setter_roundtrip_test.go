@@ -92,6 +92,14 @@ func testNativePrivateSetterSourceFixture(t *testing.T, sources map[string]strin
 
 func testNativePrivateSetterCompiledFixture(t *testing.T, owner, driver, want string, compile func(*testing.T, string) map[string][]byte, verify ...func(*testing.T, string, []byte, []byte)) {
 	t.Helper()
+	testNativePrivateSetterCompiledFixtureWithShape(t, owner, driver, want, compile, nil, verify...)
+}
+
+// A fixture with an intentional source representation change supplies its own
+// independent ABI contract. Existing fixtures retain the exact binary/accessor
+// checks; this does not globally normalize a compiler or source regression.
+func testNativePrivateSetterCompiledFixtureWithShape(t *testing.T, owner, driver, want string, compile func(*testing.T, string) map[string][]byte, shape func(*testing.T, string, []byte, []byte), verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
 	javac, java := t04Tools(t)
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
@@ -158,11 +166,15 @@ func testNativePrivateSetterCompiledFixture(t *testing.T, owner, driver, want st
 						if e != nil {
 							t.Fatal(e)
 						}
-						if got := nativeBinaryShape(t, raw); got != nativeBinaryShape(t, want) {
-							t.Fatalf("ABI %s\n%s\n%s", n, nativeBinaryShape(t, want), got)
-						}
-						if got := nativeAnonymousAccessorShape(t, raw); got != nativeAnonymousAccessorShape(t, want) {
-							t.Fatalf("accessor ABI %s\n%s\n%s", n, nativeAnonymousAccessorShape(t, want), got)
+						if shape != nil {
+							shape(t, n, want, raw)
+						} else {
+							if got := nativeBinaryShape(t, raw); got != nativeBinaryShape(t, want) {
+								t.Fatalf("ABI %s\n%s\n%s", n, nativeBinaryShape(t, want), got)
+							}
+							if got := nativeAnonymousAccessorShape(t, raw); got != nativeAnonymousAccessorShape(t, want) {
+								t.Fatalf("accessor ABI %s\n%s\n%s", n, nativeAnonymousAccessorShape(t, want), got)
+							}
 						}
 						for _, check := range verify {
 							check(t, n, want, raw)

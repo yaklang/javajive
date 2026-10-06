@@ -1813,7 +1813,7 @@ func nativeJointAnonymousAllocationsClosed(obj *ClassObject, anonymous *nativeAn
 					if !known {
 						return false
 					}
-					if unnamed[name] && (anonymous == nil || anonymous.children[name] == nil) && !(len(members) == 1 && nativeEnumConstantAllocationOwned(members[0], obj, method, int(op.CurrentOffset), name)) {
+					if unnamed[name] && (anonymous == nil || anonymous.children[name] == nil && anonymous.standalone[name] == nil) && !(len(members) == 1 && nativeEnumConstantAllocationOwned(members[0], obj, method, int(op.CurrentOffset), name)) {
 						return false
 					}
 				}
