@@ -6,11 +6,12 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"strings"
 	"testing"
 )
 
 func TestPrivateDelegationArrayBranchOwnership(t *testing.T) {
-	for _, change := range []string{"proved", "missing allocation PC", "missing store PC", "wrong index", "raw index mismatch", "wrong RHS witness", "foreign element", "unknown hierarchy", "self alias", "wrong parameter", "wrong descriptor", "missing invoke binding", "foreign receiver", "wrong duplicate", "local publication", "field publication", "extra call", "RHS reused", "back edge", "external entry", "handler boundary", "unowned condition", "catch entry", "post delegation reuse", "source-side effect", "effectful earlier argument", "wrong owner", "missing owner context", "this owner"} {
+	for _, change := range []string{"proved", "missing allocation PC", "missing store PC", "wrong index", "raw index mismatch", "wrong RHS witness", "foreign element", "unknown hierarchy", "self alias", "wrong parameter", "wrong descriptor", "missing invoke binding", "foreign receiver", "wrong duplicate", "local publication", "field publication", "extra call", "RHS reused", "back edge", "external entry", "handler boundary", "unowned condition", "catch entry", "post delegation reuse", "source-side effect", "effectful earlier argument", "wrong owner", "missing owner context", "this owner", "literal primer string", "wrapped proved", "wrapped wrong opcode", "wrapped missing producer", "wrapped wrong result identity", "wrapped alternate initialization entry", "wrapped effect after producer", "wrapped reused array", "wrapped incompatible array", "wrapped wrong producer owner", "wrapped missing origin", "wrapped wrong operand order"} {
 		t.Run(change, func(t *testing.T) {
 			integer := types.NewJavaPrimer(types.JavaInteger)
 			literal := func(n int) *values.JavaLiteral { return values.NewJavaLiteral(n, integer) }
@@ -97,8 +98,10 @@ func TestPrivateDelegationArrayBranchOwnership(t *testing.T) {
 				d.opcodeToSimulateStack[op] = nil
 			}
 			origins := map[int]*OpCode{2: dup, 5: store0, 8: branch, 12: store1, 13: invoke}
-			want := change == "proved" || change == "this owner"
+			want := change == "proved" || change == "this owner" || change == "literal primer string" || change == "wrapped proved"
 			switch change {
+			case "literal primer string":
+				items[0].(*values.JavaLiteral).JavaType = types.NewJavaPrimer(types.JavaString)
 			case "wrong owner":
 				call.ClassName = "proof.Foreign"
 			case "missing owner context":
@@ -166,14 +169,62 @@ func TestPrivateDelegationArrayBranchOwnership(t *testing.T) {
 				call.Descriptor = "(Ljava/lang/Object;[Ljava/lang/String;)V"
 				invoke.stackConsumed = []values.JavaValue{ref, earlier, receiver}
 			}
+			consumer := call
+			if strings.HasPrefix(change, "wrapped ") {
+				copy := *call
+				consumer = &copy
+				consumer.Object = nil
+				consumer.ClassName, consumer.FunctionName = "proof.OperandAdapter", "adapt"
+				consumer.Kind, consumer.IsStatic, consumer.IsSpecialInvoke = values.InvokeStatic, true, false
+				consumer.Descriptor = "([Ljava/lang/String;)Ljava/lang/String;"
+				consumer.FuncType = &types.JavaFuncType{ParamTypes: []types.JavaType{arrayType}, ReturnType: types.NewJavaClass("java.lang.String")}
+				invoke.Instr.OpCode = OP_INVOKESTATIC
+				invoke.stackConsumed, invoke.stackProduced = []values.JavaValue{ref}, []values.JavaValue{consumer}
+				initialization := op(14, OP_INVOKESPECIAL)
+				initialization.stackConsumed = []values.JavaValue{consumer, receiver}
+				opLink(invoke, initialization)
+				call.Arguments = []values.JavaValue{consumer}
+				call.Descriptor, call.OriginPC = "(Ljava/lang/String;)V", 14
+				call.FuncType = &types.JavaFuncType{ParamTypes: []types.JavaType{types.NewJavaClass("java.lang.String")}, ReturnType: types.NewJavaPrimer(types.JavaVoid)}
+				origins[callNode.Id] = initialization
+				d.opCodes = append(d.opCodes, initialization)
+				d.invokeFuncCall[invoke], d.invokeFuncCall[initialization] = consumer, call
+				switch change {
+				case "wrapped wrong opcode":
+					invoke.Instr.OpCode = OP_INVOKEVIRTUAL
+				case "wrapped missing producer":
+					delete(d.invokeFuncCall, invoke)
+				case "wrapped wrong result identity":
+					invoke.stackProduced[0] = text("replacement")
+				case "wrapped alternate initialization entry":
+					initialization.Source = append(initialization.Source, op(15, OP_GOTO))
+				case "wrapped effect after producer":
+					invoke.Target = []*OpCode{op(15, OP_INVOKESTATIC)}
+				case "wrapped reused array":
+					consumer.Arguments = []values.JavaValue{ref, ref}
+				case "wrapped incompatible array":
+					consumer.Descriptor = "([Ljava/lang/Object;)Ljava/lang/String;"
+				case "wrapped wrong producer owner":
+					original := *consumer
+					original.ClassName = "proof.ForeignAdapter"
+					d.invokeFuncCall[invoke] = &original
+				case "wrapped missing origin":
+					consumer.HasOriginPC = false
+				case "wrapped wrong operand order":
+					consumer.Arguments = []values.JavaValue{text("head"), ref}
+					consumer.Descriptor = "(Ljava/lang/String;[Ljava/lang/String;)Ljava/lang/String;"
+					consumer.FuncType.ParamTypes = []types.JavaType{types.NewJavaClass("java.lang.String"), arrayType}
+					invoke.stackConsumed = []values.JavaValue{consumer.Arguments[0], ref}
+				}
+			}
 			if got := d.inlinePrivateDelegationBranchArray(origins); got != want {
 				t.Fatalf("accepted=%v want=%v", got, want)
 			}
 			if want {
-				if d.RootNode != callNode || call.Arguments[len(call.Arguments)-1] != array || len(array.Initializer) != 2 || array.Initializer[1] != right || array.EvaluationEndPC != 12 {
+				if d.RootNode != callNode || consumer.Arguments[len(consumer.Arguments)-1] != array || len(array.Initializer) != 2 || array.Initializer[1] != right || array.EvaluationEndPC != 12 {
 					t.Fatal("lost operand identity/order or original store endpoint")
 				}
-			} else if d.RootNode != entry || len(array.Initializer) != 0 || array.HasEvaluationEndPC || call.Arguments[len(call.Arguments)-1] != ref || len(entry.Next) != 1 || entry.Next[0] != storeNodes[0] {
+			} else if d.RootNode != entry || len(array.Initializer) != 0 || array.HasEvaluationEndPC || consumer.Arguments[len(consumer.Arguments)-1] != ref || len(entry.Next) != 1 || entry.Next[0] != storeNodes[0] {
 				t.Fatal("failed plan mutated shared graph or operands")
 			}
 		})

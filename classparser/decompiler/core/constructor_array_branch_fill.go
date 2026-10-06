@@ -117,41 +117,18 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 	if !ok || !receiver.IsThis || len(call.Arguments) == 0 || len(call.Arguments) != len(call.FuncType.ParamTypes) {
 		return false
 	}
-	last := len(call.Arguments) - 1
-	if !delegationArraySameRef(call.Arguments[last], ref) || !sameExactArrayType(array.Type(), call.FuncType.ParamTypes[last]) {
+	consumer, invoke, ok := d.privateDelegationArrayConsumer(call, origins[next.Id], ref, array)
+	if !ok {
 		return false
 	}
-	invoke := origins[next.Id]
+	last := len(consumer.Arguments) - 1
 	allocation := d.opcodeAtOffset(array.OriginPC)
-	if invoke == nil || invoke.Instr == nil || invoke.Instr.OpCode != OP_INVOKESPECIAL || int(invoke.CurrentOffset) != call.OriginPC || allocation == nil || allocation.Instr == nil || allocation.Instr.OpCode != OP_ANEWARRAY {
+	if allocation == nil || allocation.Instr == nil || allocation.Instr.OpCode != OP_ANEWARRAY ||
+		!d.privateDelegationArrayDAG(allocation, invoke, ref, array, stores, items) {
 		return false
 	}
 
-	method, err := types.ParseMethodDescriptor(call.Descriptor)
-	if err != nil || method.FunctionType() == nil || len(method.FunctionType().ParamTypes) != len(call.Arguments) || !sameExactArrayType(array.Type(), method.FunctionType().ParamTypes[last]) || len(invoke.stackConsumed) != len(call.Arguments)+1 {
-		return false
-	}
-	ret, ok := method.FunctionType().ReturnType.RawType().(*types.JavaPrimer)
-	if !ok || ret.Name != types.JavaVoid {
-		return false
-	}
-	decoded := d.invokeFuncCall[invoke]
-	if decoded == nil || decoded.Descriptor != call.Descriptor || decoded.ClassName != call.ClassName || decoded.FunctionName != "<init>" || !delegationArraySameRef(decoded.Object, receiver) {
-		return false
-	}
-	for i, argument := range call.Arguments {
-		if values.UnpackSoltValue(argument) != values.UnpackSoltValue(invoke.stackConsumed[last-i]) {
-			return false
-		}
-	}
-	if !delegationArraySameRef(invoke.stackConsumed[last+1], receiver) {
-		return false
-	}
-	if !d.privateDelegationArrayDAG(allocation, invoke, ref, array, stores, items) {
-		return false
-	}
-
-	for _, arg := range call.Arguments[:last] {
+	for _, arg := range consumer.Arguments[:last] {
 		if !d.branchOperandPrecedesArray(arg, allocation) {
 			return false
 		}
@@ -159,7 +136,7 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 	// Use a private prospective tree. Failed ownership proofs publish nothing.
 	copy := *array
 	copy.Initializer = items
-	args := slices.Clone(call.Arguments)
+	args := slices.Clone(consumer.Arguments)
 	args[last] = &copy
 
 	if !constructorConditionsBelongToPrefixArguments(conditions, origins, args) {
@@ -206,7 +183,7 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 	array.Initializer = items
 	array.EvaluationEndPC = int(stores[len(stores)-1].CurrentOffset)
 	array.HasEvaluationEndPC = true
-	call.Arguments[last] = array
+	consumer.Arguments[last] = array
 	for node := range removed {
 		node.RemoveAllNext()
 		node.RemoveAllSource()
@@ -241,6 +218,13 @@ func delegationArrayElementAssignable(value values.JavaValue, target string, met
 		}
 		if value.Type() == nil {
 			return false
+		}
+		// String literals use the historical JavaString primer tag, but are
+		// JVM references. Canonicalize that type identity before widening;
+		// treating its literal representation as a primitive rejects a valid
+		// condition arm even when the other arm has the descriptor class.
+		if primer, ok := value.Type().RawType().(*types.JavaPrimer); ok && primer.Name == types.JavaString {
+			return callbinding.Assignable("Ljava/lang/String;", target, metadata)
 		}
 		name, ok := types.ClassFQNOf(value.Type())
 		return ok && callbinding.Assignable("L"+strings.ReplaceAll(name, ".", "/")+";", target, metadata)
