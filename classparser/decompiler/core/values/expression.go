@@ -114,6 +114,23 @@ func (n *NewExpression) Type() types.JavaType {
 }
 
 func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
+	if n != nil && !n.IsArray() && n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceMethodLocalCandidate != nil && funcCtx.SourceMethodLocalAllocation != nil && funcCtx.SourceMethodLocalCandidate(n.ConstructorCall.ClassName) && n.HasOriginPC && n.ConstructorCall.HasOriginPC && n.ConstructorCall.Object == n && n.ConstructorCall.Kind == InvokeSpecial && n.ConstructorCall.IsSpecialInvoke && n.ConstructorCall.FunctionName == "<init>" {
+		call := n.ConstructorCall
+		if owner, known := types.RawClassFQN(n.Type()); !known || strings.ReplaceAll(owner, ".", "/") != strings.ReplaceAll(call.ClassName, ".", "/") {
+			return ""
+		}
+		args := make([]class_context.SourceCaptureOperand, len(call.Arguments))
+		for i, arg := range call.Arguments {
+			if arg == nil {
+				return ""
+			}
+			args[i] = class_context.SourceCaptureOperand{Value: arg, Text: arg.String(funcCtx)}
+		}
+		if source, known := funcCtx.SourceMethodLocalAllocation(call.ClassName, call.Descriptor, n.OriginPC, call.OriginPC, args); known {
+			return source
+		}
+	}
+
 	if n != nil && !n.IsArray() && n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceAnonymousAllocation != nil && funcCtx.SourceAnonymousCandidate != nil && funcCtx.SourceAnonymousCandidate(n.ConstructorCall.ClassName) && n.HasOriginPC && n.ConstructorCall.HasOriginPC {
 		call := n.ConstructorCall
 		args := make([]class_context.SourceCaptureOperand, len(call.Arguments))

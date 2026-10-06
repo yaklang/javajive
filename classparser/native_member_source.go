@@ -33,6 +33,7 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
+	methodLocals           map[string]*nativeMethodLocalClass
 	enumConstants          map[string]*nativeEnumConstantBody
 	enumSwitchTables       map[string]*nativeEnumSwitchTable
 	registrationLayouts    map[string]*nativeMemberRegistrationScope
@@ -632,7 +633,10 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if !switchTablesKnown {
 		return nil
 	}
-	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 {
+	if !c.planNativeMethodLocals(p) {
+		return nil
+	}
+	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 {
 		return nil
 	}
 	for name, child := range p.children {

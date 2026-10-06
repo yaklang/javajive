@@ -70,34 +70,60 @@ func EraseClassBoundMethodSignatureWithThrows(classSignature, methodSignature st
 // class variable, but cannot make a free class-bound variable become valid.
 // Static methods retain their generic type and must not use this API.
 func EraseRawClassInstanceMethodSignatureWithThrows(classSignature, methodSignature string) (string, []string, bool) {
-	classFormals, classRefs, known := SignatureTypeVariableReferences(classSignature)
-	if !known || len(classFormals) == 0 || !strings.HasPrefix(classSignature, "<") {
+	formals, _, known := SignatureTypeVariableReferences(classSignature)
+	if !known || len(formals) == 0 || !strings.HasPrefix(classSignature, "<") {
 		return "", nil, false
 	}
-	bounds, parts, supers, known := signatureConcreteFormalBounds(classSignature, classFormals)
-	if !known {
-		return "", nil, false
-	}
-	for _, ref := range classRefs {
-		if bounds[ref] == "" {
+	return EraseLexicalMethodSignatureWithThrows(classSignature, methodSignature)
+}
+
+// EraseLexicalMethodSignatureWithThrows resolves original declaration scopes:
+// class bounds are checked before method formals shadow them. An empty class
+// signature represents a static method's scope, not an invented Object binder.
+// Only concrete first bounds are certified; dependent bounds remain unproved.
+func EraseLexicalMethodSignatureWithThrows(classSignature, methodSignature string) (string, []string, bool) {
+	bounds := map[string]string{}
+	if classSignature != "" {
+		classFormals, classRefs, known := SignatureTypeVariableReferences(classSignature)
+		if !known {
 			return "", nil, false
 		}
-	}
-	rest := supers
-	for len(rest) > 0 {
-		if rest[0] != 'L' {
+		parts := []string{}
+		supers := classSignature
+		if len(classFormals) > 0 {
+			if !strings.HasPrefix(classSignature, "<") {
+				return "", nil, false
+			}
+			var valid bool
+			bounds, parts, supers, valid = signatureConcreteFormalBounds(classSignature, classFormals)
+			if !valid {
+				return "", nil, false
+			}
+		}
+		for _, ref := range classRefs {
+			if bounds[ref] == "" {
+				return "", nil, false
+			}
+		}
+		rest := supers
+		if rest == "" {
 			return "", nil, false
 		}
-		_, after, ok := parseSigType(rest)
-		if !ok {
-			return "", nil, false
+		for len(rest) > 0 {
+			if rest[0] != 'L' {
+				return "", nil, false
+			}
+			_, after, ok := parseSigType(rest)
+			if !ok {
+				return "", nil, false
+			}
+			rest = after
 		}
-		rest = after
-	}
-	parts = append(parts, supers)
-	for _, part := range parts {
-		if !signatureReferenceArgumentsValid(part, bounds) {
-			return "", nil, false
+		parts = append(parts, supers)
+		for _, part := range parts {
+			if !signatureReferenceArgumentsValid(part, bounds) {
+				return "", nil, false
+			}
 		}
 	}
 	methodFormals, methodRefs, known := SignatureTypeVariableReferences(methodSignature)
@@ -105,6 +131,7 @@ func EraseRawClassInstanceMethodSignatureWithThrows(classSignature, methodSignat
 		return "", nil, false
 	}
 	body := methodSignature
+	parts := []string{}
 	if len(methodFormals) > 0 {
 		if !strings.HasPrefix(methodSignature, "<") {
 			return "", nil, false

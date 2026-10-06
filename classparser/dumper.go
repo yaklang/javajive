@@ -40,6 +40,7 @@ type ClassObjectDumper struct {
 	nativeMemberChecks             map[string]map[int]bool
 	nativeEnumConstantCurrent      *nativeEnumConstantBody
 	nativeMemberRoot               *nativeMemberFamily
+	nativeMethodLocalCurrent       *nativeMethodLocalClass
 	nativeMemberCurrent            *nativeMemberClass
 	nativeRegistrationScope        *nativeMemberRegistrationScope
 	nativeRenderedMemberNames      []string
@@ -168,6 +169,9 @@ type ClassObjectDumper struct {
 }
 
 func (c *ClassObjectDumper) GetConstructorMethodName() string {
+	if c.nativeMethodLocalCurrent != nil {
+		return c.nativeMethodLocalCurrent.owner.name
+	}
 	if c.nativeMemberCurrent != nil {
 		return c.nativeMemberCurrent.name
 	}
@@ -227,7 +231,7 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 // `HikariPool.connectionBag`). Widening those members to package-private is
 // recompile-safe. Kill-switch: JDEC_NEST_PRIVATE_PACKAGE_OFF=1.
 func (c *ClassObjectDumper) nestDemotePrivate() bool {
-	if c.nativeMemberCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeMemberRoot != nil && c.nativeMemberRoot.owner == c.obj.GetClassName() {
+	if c.nativeMethodLocalCurrent != nil || c.nativeMemberCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeMemberRoot != nil && c.nativeMemberRoot.owner == c.obj.GetClassName() {
 		return false
 	}
 	if c.getenv("JDEC_NEST_PRIVATE_PACKAGE_OFF") == "1" {
@@ -557,6 +561,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	c.PackageName = packageName
 	rawClassName := splits[len(splits)-1]
 	className := class_context.SafeIdentifier(rawClassName)
+	if c.nativeMethodLocalCurrent != nil {
+		className = c.nativeMethodLocalCurrent.owner.name
+	}
 	if c.nativeMemberCurrent != nil {
 		className = c.nativeMemberCurrent.name
 	}
@@ -640,6 +647,11 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			accessFlags = "protected " + accessFlags
 		}
 	}
+	if c.nativeMethodLocalCurrent != nil {
+		for _, v := range []string{"public", "private", "protected", "static"} {
+			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, v, ""))
+		}
+	}
 	// module-info / package-info are synthetic descriptor pseudo-classes; their internal
 	// name ("module-info" / "package-info") is not a legal Java identifier, so emitting
 	// `class module-info {}` yields un-parseable source. Render a valid minimal compilation
@@ -686,6 +698,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	funcCtx.DeclarationSourceName = c.buildDeclarationSourceNames()
 	c.wireNativeAnonymousSource()
 	c.wireNativeMemberSource()
+	c.wireNativeMethodLocalSource()
 
 	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
 	c.wirePrivateNestBridges()
@@ -3906,6 +3919,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			funcCtx.SourceCaptureStable = nil
 			defer func() { funcCtx.SourceCaptureStable = priorStable }()
 			params, statementList, err := ParseBytesCode(c, codeAttr, id)
+			methodLocalParams := params
 			if err != nil {
 				return dumped, utils.Wrap(err, "ParseBytesCode failed")
 			}
@@ -4006,6 +4020,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			c.nativeMemberBody = statementList
 			defer func() { c.nativeMemberBody = priorMemberBody }()
 			c.prepareNativeCaptureBindings(statementList, params)
+			methodLocalDeclarations, localErr := c.prepareNativeMethodLocalDeclarations(statementList, methodLocalParams)
+			if localErr != nil {
+				return nil, localErr
+			}
 			c.prepareNativeLocalShadowing(statementList, params)
 			c.nativeSourceNamesReady = !c.nativeCaptureFailed
 			paramsNewStrList := []string{}
@@ -4429,6 +4447,12 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				return statementStr
 			}
 			statementCodes := []string{}
+			for _, declaration := range methodLocalDeclarations {
+				if err := c.holdOutput(int64(len(declaration) + 1)); err != nil {
+					return nil, err
+				}
+				statementCodes = append(statementCodes, declaration+"\n")
+			}
 			supperInvokeStr := ""
 			delegationPC := -1
 			if needsCheckedEscape && name == "<init>" {

@@ -238,6 +238,30 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 	}
 
 	if !member {
+		for _, a := range obj.Attributes {
+			if raw, ok := a.(*UnparsedAttribute); ok && raw != nil && raw.Name == "EnclosingMethod" && len(raw.Info) == 4 {
+				localOwner, known := sourceBridgeClassName(obj, uint16(raw.Info[0])<<8|uint16(raw.Info[1]))
+				if !known {
+					return nil
+				}
+				bytes, found := z.enumSiblingResolver()(localOwner)
+				if !found {
+					return nil
+				}
+				reader := z.nativeMemberReader(obj)
+				enclosing, e := reader.parseResolved(bytes)
+				if e != nil {
+					return nil
+				}
+				if _, known := originalMethodLocalOwner(obj, enclosing, reader.Work); known {
+					owner = localOwner
+					member = true
+				}
+				break
+			}
+		}
+	}
+	if !member {
 		owner = obj.GetClassName()
 	}
 	if member {
@@ -256,7 +280,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 						return nil
 					}
 					outer, known := sourceBridgeClassName(obj, row.OuterClassInfoIndex)
-					if known && outer == owner && row.InnerNameIndex != 0 || row.InnerNameIndex == 0 && row.InnerClassAccessFlags == 0x1008 {
+					if known && outer == owner && row.InnerNameIndex != 0 || row.OuterClassInfoIndex == 0 && row.InnerNameIndex != 0 || row.InnerNameIndex == 0 && row.InnerClassAccessFlags == 0x1008 {
 						candidate = true
 					}
 				}
@@ -357,9 +381,9 @@ func (z *JarFS) nativeMemberLocalPlan(obj *ClassObject, owner string, snap map[s
 // the family cache recursively or import an external class into its private nest.
 func nativeMemberDependencyObjects(root *ClassObject, p *nativeMemberFamily, work *workbudget.Budget) ([]*ClassObject, bool) {
 	if root == nil || p == nil || p.failed || root.GetClassName() != p.owner ||
-		len(p.children) > nativeMemberLayoutNodeLimit || len(p.anonymousUnits) > 64 || len(p.enumConstants) > 64 ||
-		!nativeProofWork(work, int64(len(p.children)+len(p.anonymousUnits)+len(p.enumConstants)+1)) ||
-		work != nil && work.CheckAlloc(int64(len(p.children)+len(p.anonymousUnits)+len(p.enumConstants)+1)*128) != nil {
+		len(p.children) > nativeMemberLayoutNodeLimit || len(p.anonymousUnits) > 64 || len(p.enumConstants) > 64 || len(p.methodLocals) > 64 ||
+		!nativeProofWork(work, int64(len(p.children)+len(p.anonymousUnits)+len(p.enumConstants)+len(p.methodLocals)+1)) ||
+		work != nil && work.CheckAlloc(int64(len(p.children)+len(p.anonymousUnits)+len(p.enumConstants)+len(p.methodLocals)+1)*128) != nil {
 		return nil, false
 	}
 	objects := []*ClassObject{root}
@@ -379,6 +403,11 @@ func nativeMemberDependencyObjects(root *ClassObject, p *nativeMemberFamily, wor
 	}
 	for name, group := range p.anonymousUnits {
 		if group == nil || group.failed || group.children[name] == nil || !add(name, group.children[name].object) {
+			return nil, false
+		}
+	}
+	for name, local := range p.methodLocals {
+		if local == nil || !add(name, local.object) {
 			return nil, false
 		}
 	}
@@ -431,6 +460,9 @@ func (z *JarFS) nativeMemberSource(obj *ClassObject) ([]byte, bool) {
 	}
 	if obj.GetClassName() == entry.family.owner {
 		return []byte(entry.source), true
+	}
+	if local := entry.family.methodLocals[obj.GetClassName()]; local != nil && local.source != "" {
+		return []byte("// original method-local declaration regenerated in its proved owning method\n"), true
 	}
 	if entry.family.enumConstants[obj.GetClassName()] != nil {
 		return []byte("// original constant-specific body owned by proved member enum; javac regenerates its binary class\n"), true

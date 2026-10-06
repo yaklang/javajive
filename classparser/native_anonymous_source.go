@@ -853,6 +853,9 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 				c.nativeCaptureFailed = true
 				return "", false
 			}
+			if c.nativeMethodLocalCurrent != nil {
+				text = "(/*jdec-owned-local-capture:" + c.obj.GetClassName() + ":" + field + "*/" + text + ")"
+			}
 			return text, true
 		}
 	}

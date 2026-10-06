@@ -44,6 +44,9 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 	if p.anonymousForest != nil && !nativeAnonymousForestArchiveClosed(p.anonymousForest, index, d.Work) {
 		return nil
 	}
+	if !z.nativeMethodLocalArchiveClosed(p, index) {
+		return nil
+	}
 	if !index.valid || !z.nativeMemberStaticConstantsReferencesClosed(p, index, d.Work) || !nativeMemberPrivateGetterReferencesClosed(p, index, d.Work) || !z.nativeMemberAccessRepresentable(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
 		return nil
 	}
@@ -51,6 +54,9 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 		return nil
 	}
 	objects := map[string]*ClassObject{owner: root}
+	for binary, local := range p.methodLocals {
+		objects[binary] = local.object
+	}
 	for name, body := range p.enumConstants {
 		if body == nil || !nativeMemberOrdinaryHandlesClosed(body.object, index, d.Work) {
 			return nil
@@ -252,7 +258,7 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 		}
 	}
 	for name, object := range objects {
-		if name == owner || p.children[name] != nil || p.anonymousUnits[name] != nil || p.enumConstants[name] != nil {
+		if name == owner || p.children[name] != nil || p.anonymousUnits[name] != nil || p.enumConstants[name] != nil || p.methodLocals[name] != nil {
 			continue
 		}
 		reader := z.nativeMemberReader(object)
@@ -273,6 +279,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 		return nil
 	}
 	if !nativeEnumConstantsSourceClosed(p) {
+		return nil
+	}
+	if !nativeMethodLocalSourceComplete(p) {
 		return nil
 	}
 	if e != nil || p.failed || !nativeEnumSwitchSourceComplete(p, src, d.Work) || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {
