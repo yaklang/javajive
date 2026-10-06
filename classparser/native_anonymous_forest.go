@@ -109,7 +109,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	if len(forest.units) == 0 {
 		return nil
 	}
-	if !nativeAnonymousForestCaptureReads(forest, c.Work) || !nativeAnonymousForestSymbolClosure(forest, c.Work) {
+	if !nativeAnonymousForestCaptureReads(forest, c.Work, c.buildInvocationMetadata()) || !nativeAnonymousForestSymbolClosure(forest, c.Work) {
 		return nil
 	}
 	for owner, group := range forest.groups {

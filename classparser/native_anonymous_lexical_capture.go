@@ -131,7 +131,11 @@ func nativeAnonymousForestCaptureMetadata(child *nativeAnonymousClass, work *wor
 // the same physical chain. Only consecutive original THIS/enclosing-field reads
 // ending at a proved local capture or named lexical THIS qualify. Intermediate
 // anonymous THIS has no Java source spelling and cannot be emitted on its own.
-func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *workbudget.Budget) bool {
+func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *workbudget.Budget, providers ...callbinding.Provider) bool {
+	var metadata callbinding.Provider
+	if len(providers) != 0 {
+		metadata = providers[0]
+	}
 	for owner, object := range forest.objects {
 		forest.reads[owner] = map[string]map[int]*nativeMemberLexicalRead{}
 		forest.readPCs[owner] = map[string]map[int]bool{}
@@ -252,6 +256,26 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 							break
 						}
 						prior, current = read, next
+					}
+				}
+				// Named constructors may supply SUPER's outer object through slot 1.
+				// Compose the same physical constructor proof after THIS discovery;
+				// parameter provenance is retained for the later source/IR check.
+				if name == "<init>" && forest.members != nil {
+					if child := forest.members.children[owner]; child != nil {
+						if ctor := child.constructors[desc]; ctor != nil && ctor.enclosingSuperPath != nil {
+							path, closed := nativeMemberConstructorSuperRead(child, forest.members, desc, ops, entries, work, metadata)
+							if !closed {
+								return false
+							}
+							for node := path; node != nil; node = node.prior {
+								if reads[node.pc] != nil || approved[node.pc] {
+									return false
+								}
+								reads[node.pc], paths[node.pc], approved[node.pc] = node, node, true
+								forest.lexicalThis[owner][key][node.pc] = true
+							}
+						}
 					}
 				}
 				for _, op := range ops {

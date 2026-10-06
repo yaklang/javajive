@@ -2,8 +2,72 @@ package javaclassparser
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/internal/workbudget"
+	"sort"
 )
+
+// A cached source role is not an instruction certificate. Rebuild the slot-1
+// chain from this original constructor, then bind its complete delegation and
+// control-entry boundaries before a mixed forest imports any physical read.
+// In particular this never upgrades an arbitrary parameter to lexical THIS.
+func nativeMemberConstructorSuperRead(child *nativeMemberClass, p *nativeMemberFamily, desc string, ops []*core.OpCode, entries []int, work *workbudget.Budget, metadata callbinding.Provider) (*nativeMemberLexicalRead, bool) {
+	if child == nil || child.object == nil || p == nil || len(ops) > 512 || p.children[child.object.GetClassName()] != child {
+		return nil, false
+	}
+	ctor := child.constructors[desc]
+	parent := p.children[child.object.GetSupperClassName()]
+	if ctor == nil || !ctor.projectedSuper || ctor.descriptor != desc || ctor.enclosingSuperPath == nil || parent == nil || parent.object == nil || ctor.delegateOwner != parent.object.GetClassName() || nativeMemberConstructorForAllocation(parent, ctor.delegateDescriptor) == nil {
+		return nil, false
+	}
+	start := -1
+	for i, op := range ops {
+		if op == nil || op.Instr == nil || !nativeProofWork(work, 1) || core.GetStoreIdx(op) == 1 {
+			return nil, false
+		}
+		if int(op.CurrentOffset) == ctor.capturePC {
+			field := constructorMotionMember(child.object, op, core.OP_PUTFIELD)
+			if start >= 0 || i < 2 || !constructorMotionLoad(ops[i-2], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[i-2]) != 0 || !constructorMotionLoad(ops[i-1], "L"+child.owner+";") || core.GetRetrieveIdx(ops[i-1]) != 1 || field == nil || field.Name != child.object.GetClassName() || field.Member != child.field || field.Description != "L"+child.owner+";" {
+				return nil, false
+			}
+			start = i + 1
+		}
+	}
+	path, known := nativeMemberSuperEnclosingPath(child, parent, p, ops, start, work)
+	if !known || path == nil {
+		return nil, false
+	}
+	actual, cached := path, ctor.enclosingSuperPath
+	for depth := 0; actual != nil; depth++ {
+		if depth >= 64 || !nativeProofWork(work, 1) || cached == nil || actual.owner != cached.owner || actual.field != cached.field || actual.descriptor != cached.descriptor || actual.pc != cached.pc || actual.basePC != cached.basePC || actual.parameterOwner != cached.parameterOwner {
+			return nil, false
+		}
+		preceding := actual.basePC
+		if actual.prior != nil {
+			preceding = actual.prior.pc
+		}
+		entry := sort.SearchInts(entries, preceding+1)
+		if entry < len(entries) && entries[entry] <= actual.pc {
+			return nil, false
+		}
+		actual, cached = actual.prior, cached.prior
+	}
+	if cached != nil {
+		return nil, false
+	}
+	params, result, err := callbinding.Descriptor(desc)
+	if err != nil || result != "V" || len(params) == 0 || params[0] != "L"+child.owner+";" {
+		return nil, false
+	}
+	next, call := constructorMotionDelegationEnclosing(child.object, ops, start, params, constructorParameterSlots(params), metadata, path, 1)
+	if next <= 0 || call == nil || call.Name != ctor.delegateOwner || call.Description != ctor.delegateDescriptor || int(ops[next-1].CurrentOffset) != ctor.delegatePC {
+		return nil, false
+	}
+	if parent.accessBridges[ctor.delegateDescriptor] != nil && (next < 2 || ops[next-2].Instr.OpCode != core.OP_ACONST_NULL || len(ops[next-2].Data) != 0) {
+		return nil, false
+	}
+	return path, true
+}
 
 // Traverse only actual enclosing captures in the jointly committed forest.
 // The first SUPER operand is either the same original slot-1 object through
