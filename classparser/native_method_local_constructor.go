@@ -210,3 +210,35 @@ func nativeMethodLocalConstructorParameters(obj *ClassObject, method *MemberInfo
 	wantParameters := owner.declaration.AccessFlags&8 == 0
 	return obj.MajorVersion == 52 && signatureSeen && parametersSeen == wantParameters
 }
+
+// A pre-Java-8 default local constructor can carry the same verified capture
+// packet without a MethodParameters attribute (introduced in class version52).
+// This is separate from the exact Java-8 metadata profile: current-version
+// missing tables, named arguments and arbitrary attributes retain their refusal.
+// Full physical constructor, scope, original SSA allocation and capture proofs
+// must still succeed before this metadata-only source eligibility is consulted.
+func nativeMethodLocalLegacySourceMetadata(obj *ClassObject, method *MemberInfo, params []string, owner *nativeMethodLocalOwner, work *workbudget.Budget) bool {
+	if obj == nil || method == nil || owner == nil || len(params) == 0 || obj.MinorVersion != 0 || obj.MajorVersion < 49 || obj.MajorVersion >= 52 {
+		return false
+	}
+	signatureSeen := false
+	for _, attribute := range method.Attributes {
+		if !nativeProofWork(work, 1) {
+			return false
+		}
+		switch a := attribute.(type) {
+		case *CodeAttribute:
+		case *SignatureAttribute:
+			if a == nil || signatureSeen {
+				return false
+			}
+			signatureSeen = true
+		default:
+			return false
+		}
+	}
+	// Signature is optional in these legacy files; when present, the physical
+	// checker requires exactly ()V. Only independently proved hidden operands
+	// exist in this default-constructor packet, never explicit source arguments.
+	return nativeMethodLocalConstructorParameters(obj, method, params, owner, false, work)
+}

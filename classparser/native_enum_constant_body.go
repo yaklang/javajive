@@ -14,12 +14,13 @@ import (
 // that constructor forwards every original operand exactly once, without an
 // initializer effect, through the original private enum access bridge.
 type nativeEnumConstantBody struct {
-	object            *ClassObject
-	owner, descriptor string
-	plan              nativeEnumConstantAllocation
-	superDescriptor   string
-	superPC           int
-	rendered          bool
+	object                    *ClassObject
+	owner, descriptor         string
+	plan                      nativeEnumConstantAllocation
+	superDescriptor           string
+	superPC                   int
+	rendered                  bool
+	legacyConstructorMetadata bool
 }
 
 func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocation, bodyOrdinal int, bridges map[string]*nativeConstructorAccessBridge, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeEnumConstantBody {
@@ -30,6 +31,11 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 	if !known || obj == nil || obj.GetClassName() != plan.allocatedClass || obj.AccessFlags != 0x4030 || obj.GetSupperClassName() != parent.GetClassName() || len(obj.Fields) != 0 || len(obj.Interfaces) != 0 || !nativeAccessorVersion(obj, work) {
 		return nil
 	}
+	// MethodParameters was introduced by classfile version 52. Older enum
+	// constant classes also used optional STATIC/FINAL bits in their self row.
+	// Those optional reflection representations do not change the forwarding
+	// packet, its original descriptor, or the runtime final-class constraint.
+	legacyMetadata := obj.MajorVersion >= 49 && obj.MajorVersion < 52 && obj.MinorVersion == 0
 	owner, method, known := originalAnonymousOwner(obj)
 	if !known || owner != parent.GetClassName() || method != "" || obj.GetClassName() != owner+"$"+strconv.Itoa(bodyOrdinal) {
 		return nil
@@ -71,7 +77,9 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 				}
 				if name == obj.GetClassName() {
 					selfRows++
-					if row.OuterClassInfoIndex != 0 || row.InnerNameIndex != 0 || row.InnerClassAccessFlags != 0x4010 {
+					flags := row.InnerClassAccessFlags
+					validFlags := flags == 0x4010 || legacyMetadata && flags&0x4000 != 0 && flags & ^uint16(0x4018) == 0
+					if row.OuterClassInfoIndex != 0 || row.InnerNameIndex != 0 || !validFlags {
 						return nil
 					}
 				}
@@ -157,7 +165,7 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 			return nil
 		}
 	}
-	if !parametersSeen || code == nil || len(code.ExceptionTable) != 0 || len(code.Code) > 512 || !nativeProofWork(work, int64(len(code.Code))) || code.MaxLocals != uint16(nativeMemberParameterWidth(params)+1) || code.MaxStack != uint16(nativeMemberParameterWidth(params)+2) {
+	if (!parametersSeen && !legacyMetadata) || (parametersSeen && legacyMetadata) || code == nil || len(code.ExceptionTable) != 0 || len(code.Code) > 512 || !nativeProofWork(work, int64(len(code.Code))) || code.MaxLocals != uint16(nativeMemberParameterWidth(params)+1) || code.MaxStack != uint16(nativeMemberParameterWidth(params)+2) {
 		return nil
 	}
 	for _, a := range code.Attributes {
@@ -242,7 +250,7 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 	if !ak || !bk || !slices.Equal(a, b) {
 		return nil
 	}
-	return &nativeEnumConstantBody{object: obj, owner: owner, descriptor: plan.descriptor, plan: plan, superDescriptor: bridge.descriptor, superPC: int(call.CurrentOffset)}
+	return &nativeEnumConstantBody{object: obj, owner: owner, descriptor: plan.descriptor, plan: plan, superDescriptor: bridge.descriptor, superPC: int(call.CurrentOffset), legacyConstructorMetadata: legacyMetadata}
 }
 
 func nativeEnumConstantConstructorOwned(p *nativeMemberFamily, obj *ClassObject, descriptor string) bool {
@@ -307,6 +315,9 @@ func (c *ClassObjectDumper) foldNativeEnumConstantBodies() (map[string]string, b
 		}
 		out[name] = rendered
 		body.rendered = true
+		if body.legacyConstructorMetadata {
+			c.appendDiagnostic(DecompileDiagnostic{Code: "enum_constant_legacy_metadata", Method: body.object.GetClassName() + ".<init>" + body.descriptor, Message: "The original pre-Java-8 enum constant constructor packet is proved. Recompilation may add unnamed generated parameter metadata and different STATIC/FINAL bits to its anonymous InnerClasses self row; executable descriptor, final class, forwarding operands and exceptions are preserved."})
+		}
 	}
 	if len(out) != len(current.enumSynthesis.bodies) {
 		p.failed = true

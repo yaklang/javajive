@@ -16,19 +16,20 @@ import (
 )
 
 type nativeMethodLocalClass struct {
-	object           *ClassObject
-	owner            *nativeMethodLocalOwner
-	constructor      *nativeMethodLocalConstructor
-	allocations      map[int]nativeMethodLocalAllocation
-	calls            map[int]bool
-	bindings         map[string]string
-	parameterIDs     map[int]*coreutils.VariableId
-	captureIDs       map[string]*coreutils.VariableId
-	sourceRefs       map[string]*values.JavaRef
-	placement        statements.Statement
-	sourceParameters map[int]*values.JavaRef
-	source           string
-	sourceEmitted    bool
+	object                    *ClassObject
+	owner                     *nativeMethodLocalOwner
+	constructor               *nativeMethodLocalConstructor
+	allocations               map[int]nativeMethodLocalAllocation
+	calls                     map[int]bool
+	bindings                  map[string]string
+	parameterIDs              map[int]*coreutils.VariableId
+	captureIDs                map[string]*coreutils.VariableId
+	sourceRefs                map[string]*values.JavaRef
+	placement                 statements.Statement
+	sourceParameters          map[int]*values.JavaRef
+	source                    string
+	sourceEmitted             bool
+	legacyConstructorMetadata bool
 }
 
 // The compilation unit is not a method owner. Plan each physically verified
@@ -151,10 +152,18 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 			if captureErr != nil {
 				return false
 			}
+
+			legacyMetadata := false
 			for _, method := range local.Methods {
 				name, _ := sourceBridgeUTF8(local, method.NameIndex)
-				if name == "<init>" && !nativeMethodLocalConstructorParameters(local, method, captureParams, owner, true, c.Work) {
-					return false
+				if name != "<init>" {
+					continue
+				}
+				if !nativeMethodLocalConstructorParameters(local, method, captureParams, owner, true, c.Work) {
+					if !nativeMethodLocalLegacySourceMetadata(local, method, captureParams, owner, c.Work) {
+						return false
+					}
+					legacyMetadata = true
 				}
 			}
 			sites, known := c.nativeMethodLocalAllocationFacts(local, owner, constructor, true)
@@ -225,7 +234,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 			if c.Work != nil && c.Work.CheckAlloc(int64(len(p.methodLocals)+1)*1024) != nil {
 				return false
 			}
-			p.methodLocals[binary] = &nativeMethodLocalClass{object: local, owner: owner, constructor: constructor, allocations: sites, calls: map[int]bool{}}
+			p.methodLocals[binary] = &nativeMethodLocalClass{object: local, owner: owner, constructor: constructor, allocations: sites, calls: map[int]bool{}, legacyConstructorMetadata: legacyMetadata}
 			if !nativeMethodLocalCaptureMetadata(c.obj, p.methodLocals[binary], c.Work, p) {
 				return false
 			}
@@ -832,6 +841,9 @@ func (c *ClassObjectDumper) nativeMethodLocalMethodSourceComplete(name, descript
 			return false
 		}
 		local.sourceEmitted = true
+		if local.legacyConstructorMetadata {
+			c.appendDiagnostic(DecompileDiagnostic{Code: "method_local_legacy_metadata", Method: local.object.GetClassName() + ".<init>" + local.constructor.descriptor, Message: "The original pre-Java-8 default constructor and every captured operand are proved. Recompilation may add unnamed generated parameter metadata and an empty source-constructor generic signature; method ownership, executable descriptor, capture slots, allocation identity and live enclosing bindings are preserved."})
+		}
 	}
 	return true
 }
