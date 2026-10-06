@@ -14,6 +14,14 @@ import (
 // with StackOverflowError, even when its entire body has no throwing opcode.
 // No method name participates in this proof.
 func (c *ClassObjectDumper) constructorReceiverReadOnlyMethod(obj *ClassObject, member *values.JavaClassMember, opcode int, writes map[string]bool, remaining *int, arguments ...constructorEffectValue) (constructorEffectValue, bool) {
+	return c.constructorReceiverReadOnlyMethodWithStorage(obj, member, opcode, writes, remaining, nil, arguments...)
+}
+
+// Alias evidence follows the operation which reads the original receiver heap,
+// not the result's computational type. An independent parameter/null return
+// cannot retrieve a self-reference retained in THIS; a reference GETFIELD can.
+// The field read is recorded only after its complete declaration/body proof.
+func (c *ClassObjectDumper) constructorReceiverReadOnlyMethodWithStorage(obj *ClassObject, member *values.JavaClassMember, opcode int, writes map[string]bool, remaining *int, storage *constructorSelfStorageProof, arguments ...constructorEffectValue) (constructorEffectValue, bool) {
 	if obj == nil || member == nil || member.Name != obj.GetClassName() || obj.AccessFlags&0x0200 != 0 || opcode != core.OP_INVOKEVIRTUAL && opcode != core.OP_INVOKESPECIAL {
 		return constructorEffectValue{}, false
 	}
@@ -122,5 +130,9 @@ func (c *ClassObjectDumper) constructorReceiverReadOnlyMethod(obj *ClassObject, 
 		return constructorEffectValue{}, false
 	}
 	identity, known := c.constructorEffectField(obj, field, false, remaining)
-	return value, known && !writes[identity]
+	accepted := known && !writes[identity]
+	if accepted && value.kind == 'L' && storage != nil {
+		storage.referenceRead = true
+	}
+	return value, accepted
 }

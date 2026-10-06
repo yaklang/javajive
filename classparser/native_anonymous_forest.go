@@ -82,7 +82,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 			reader.foldSiblingResolver = c.foldSiblingResolver
 			reader.declarationResolver = c.declarationResolver
 		}
-		has, closed := reader.nativeAnonymousForestHasChildren()
+		has, closed := reader.nativeAnonymousForestHasChildren(members)
 		if !closed {
 			return nil
 		}
@@ -128,7 +128,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	return forest
 }
 
-func (c *ClassObjectDumper) nativeAnonymousForestHasChildren() (bool, bool) {
+func (c *ClassObjectDumper) nativeAnonymousForestHasChildren(members *nativeMemberFamily) (bool, bool) {
 	found := false
 	for _, a := range c.obj.Attributes {
 		if table, ok := a.(*InnerClassesAttribute); ok {
@@ -156,6 +156,15 @@ func (c *ClassObjectDumper) nativeAnonymousForestHasChildren() (bool, bool) {
 				}
 				owner, _, anon := originalAnonymousOwner(object)
 				if anon && owner == c.obj.GetClassName() {
+					// Discovery and grouping must agree on semantic ownership.
+					// A proved private-access marker has no source anonymous
+					// body; the joint constructor bridge regenerates its binary
+					// identity. Revalidate the original object, not a synthetic
+					// flag/name alone, before excluding this compiler artifact.
+					// Real or unknown anonymous objects still require a group.
+					if members != nil && members.emptyMarkers[name] != nil && nativeMemberEmptyAccessMarker(object, members.owner, c.Work) {
+						continue
+					}
 					found = true
 				}
 			}

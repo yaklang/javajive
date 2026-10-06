@@ -757,11 +757,10 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					if !initialized || !c.constructorReceiverFinalizerSilent {
 						return false
 					}
-					value, known := c.constructorReceiverReadOnlyMethod(obj, member, opcode, writes, remaining, actuals...)
+					value, known := c.constructorReceiverReadOnlyMethodWithStorage(obj, member, opcode, writes, remaining, aliases, actuals...)
 					if !known {
 						return false
 					}
-					aliases.referenceRead = aliases.referenceRead || value.kind == 'L'
 					if result != "V" {
 						stack = append(stack, value)
 					}
