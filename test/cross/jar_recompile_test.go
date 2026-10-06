@@ -567,8 +567,14 @@ func decompileAll(t *testing.T, jarPath, root string, maxFiles int) (files []str
 }
 
 func decompileAllWithResolver(t *testing.T, jarPath, root string, maxFiles int, resolve func(string) ([]byte, bool)) (files []string, units, decompFail int) {
+	return decompileAllWithResolverAtSourceVersion(t, jarPath, root, maxFiles, resolve, 0)
+}
+
+func decompileAllWithResolverAtSourceVersion(t *testing.T, jarPath, root string, maxFiles int, resolve func(string) ([]byte, bool), target int) (files []string, units, decompFail int) {
 	t.Helper()
-	jfs, err := classparser.NewJarFSFromLocalWithResolver(jarPath, resolve)
+	// The regeneration proof and javac must use the same source profile.
+	// Higher platform API requirements can exceed the input bytecode version.
+	jfs, err := classparser.NewJarFSFromLocalWithSourceVersion(jarPath, target, resolve)
 	if err != nil {
 		t.Fatalf("NewJarFSFromLocal %s: %v", jarPath, err)
 	}

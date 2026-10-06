@@ -154,7 +154,7 @@ func TestHistoricalJarAudit(t *testing.T) {
 			}
 			cp := withEnvShims(t, strings.Join(input.Deps, string(os.PathListSeparator)))
 			srcRoot := filepath.Join(dir, "sources")
-			files, units, fail := decompileAllWithResolver(t, input.Path, srcRoot, 0, historicalDeclarationResolver(t, input.Deps))
+			files, units, fail := decompileAllWithResolverAtSourceVersion(t, input.Path, srcRoot, 0, historicalDeclarationResolver(t, input.Deps), compileRelease(jarSpecs[name], input.Path))
 			o.SourceUnits = units
 			o.DecompileFailures = fail
 			for _, f := range files {
