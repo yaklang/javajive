@@ -41,8 +41,16 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 	if !ok || n < 1 || n > 128 {
 		return false
 	}
-	component, ok := types.ClassFQNOf(array.Type().ElementType())
-	if !ok || d.FunctionContext.IsTypeParam(component) {
+	componentType := array.Type().ElementType()
+	if name, named := types.ClassFQNOf(componentType); named && d.FunctionContext.IsTypeParam(name) {
+		return false
+	}
+	// ANEWARRAY consumes an immediate reference component, not necessarily
+	// a class: Object[][] has Object[] components. Retain that complete
+	// descriptor so AASTORE assignability does not lose array rank or admit
+	// a scalar primitive under the leaf class of a different array.
+	component := values.ReferenceTypeDescriptor(componentType, d.FunctionContext)
+	if component == "" {
 		return false
 	}
 
@@ -79,7 +87,7 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 			!delegationArraySameRef(op.stackConsumed[2], ref) || values.UnpackSoltValue(op.stackConsumed[0]) != values.UnpackSoltValue(statement.JavaValue) || values.UnpackSoltValue(op.stackConsumed[1]) != values.UnpackSoltValue(statement.ArrayMember.Index) {
 			return false
 		}
-		if !delegationArrayElementAssignable(statement.JavaValue, "L"+strings.ReplaceAll(component, ".", "/")+";", d.FunctionContext.InvocationMetadata) {
+		if !delegationArrayElementAssignable(statement.JavaValue, component, d.FunctionContext.InvocationMetadata) {
 			return false
 		}
 		effect, uses := values.InspectValue(statement.JavaValue)

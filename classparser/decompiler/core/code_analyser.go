@@ -7090,6 +7090,12 @@ func (d *Decompiler) ParseStatement() error {
 	}
 	d.inlineBranchArrayLeaves()
 	d.inlineBranchConstructorArrays()
+	// A private conditional array arm may first need its own completed
+	// initializer folded into a constructor operand. Revisit the outer
+	// delegation packet only after those independently proved leaves are
+	// attached; the same original store/consumer/exception proofs still gate
+	// this transfer. Each phase runs once, without a speculative rewrite loop.
+	d.inlinePrivateDelegationBranchArray(idToOpcode)
 	d.recoverGenericArrayDeclarations(idToOpcode)
 	uidToPairs := omap.NewEmptyOrderedMap[string, []*VarFoldRule]()
 	uidToRef := map[string]*values.JavaRef{}

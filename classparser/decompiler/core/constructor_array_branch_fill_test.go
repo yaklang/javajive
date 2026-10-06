@@ -11,7 +11,7 @@ import (
 )
 
 func TestPrivateDelegationArrayBranchOwnership(t *testing.T) {
-	for _, change := range []string{"proved", "missing allocation PC", "missing store PC", "wrong index", "raw index mismatch", "wrong RHS witness", "foreign element", "unknown hierarchy", "self alias", "wrong parameter", "wrong descriptor", "missing invoke binding", "foreign receiver", "wrong duplicate", "local publication", "field publication", "extra call", "RHS reused", "back edge", "external entry", "handler boundary", "unowned condition", "catch entry", "post delegation reuse", "source-side effect", "effectful earlier argument", "wrong owner", "missing owner context", "this owner", "literal primer string", "wrapped proved", "wrapped wrong opcode", "wrapped missing producer", "wrapped wrong result identity", "wrapped alternate initialization entry", "wrapped effect after producer", "wrapped reused array", "wrapped incompatible array", "wrapped wrong producer owner", "wrapped missing origin", "wrapped wrong operand order"} {
+	for _, change := range []string{"proved", "missing allocation PC", "missing store PC", "wrong index", "raw index mismatch", "wrong RHS witness", "foreign element", "unknown hierarchy", "self alias", "wrong parameter", "wrong descriptor", "missing invoke binding", "foreign receiver", "wrong duplicate", "local publication", "field publication", "extra call", "RHS reused", "back edge", "external entry", "handler boundary", "unowned condition", "catch entry", "post delegation reuse", "source-side effect", "effectful earlier argument", "wrong owner", "missing owner context", "this owner", "literal primer string", "wrapped proved", "wrapped wrong opcode", "wrapped missing producer", "wrapped wrong result identity", "wrapped alternate initialization entry", "wrapped effect after producer", "wrapped reused array", "wrapped incompatible array", "wrapped wrong producer owner", "wrapped missing origin", "wrapped wrong operand order", "nested array component", "nested incompatible component", "nested scalar component", "nested wrong rank"} {
 		t.Run(change, func(t *testing.T) {
 			integer := types.NewJavaPrimer(types.JavaInteger)
 			literal := func(n int) *values.JavaLiteral { return values.NewJavaLiteral(n, integer) }
@@ -98,8 +98,27 @@ func TestPrivateDelegationArrayBranchOwnership(t *testing.T) {
 				d.opcodeToSimulateStack[op] = nil
 			}
 			origins := map[int]*OpCode{2: dup, 5: store0, 8: branch, 12: store1, 13: invoke}
-			want := change == "proved" || change == "this owner" || change == "literal primer string" || change == "wrapped proved"
+			want := change == "proved" || change == "this owner" || change == "literal primer string" || change == "wrapped proved" || change == "nested array component"
 			switch change {
+			case "nested array component", "nested incompatible component", "nested scalar component", "nested wrong rank":
+				arrayType.RawType().(*types.JavaArrayType).Dimension = 2
+				call.Descriptor = "([[Ljava/lang/String;)V"
+				component := types.NewJavaArrayType(types.NewJavaClass("java.lang.String"))
+				switch change {
+				case "nested incompatible component":
+					component = types.NewJavaArrayType(types.NewJavaClass("java.lang.Object"))
+				case "nested scalar component":
+					component = types.NewJavaClass("java.lang.String")
+				case "nested wrong rank":
+					component = types.NewJavaArrayType(component)
+				}
+				item := values.NewJavaRef(utils.NewRootVariableId(), nil, component)
+				item.IsParam = true
+				items[0] = item
+				store0.stackConsumed[0] = item
+				storeNodes[0].Statement.(*statements.AssignStatement).JavaValue = item
+				right.TrueValue = item
+				right.FalseValue = item
 			case "literal primer string":
 				items[0].(*values.JavaLiteral).JavaType = types.NewJavaPrimer(types.JavaString)
 			case "wrong owner":
