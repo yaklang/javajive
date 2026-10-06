@@ -806,7 +806,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 					if child := p.children[n]; known && child != nil {
 						counts[n]++
 						child.newPC = int(op.CurrentOffset)
-						if child.method != "" && child.method != mn+md {
+						if !nativeAnonymousAllocationScope(c.obj, child, mn, md, c.Work) {
 							return nil
 						}
 					}
@@ -816,7 +816,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 						return nil
 					}
 					if child := p.children[member.Name]; child != nil {
-						if member.Description != child.descriptor || child.method != "" && child.method != mn+md {
+						if member.Description != child.descriptor || !nativeAnonymousAllocationScope(c.obj, child, mn, md, c.Work) {
 							return nil
 						}
 						child.invokePC = int(op.CurrentOffset)
@@ -1476,7 +1476,10 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	ctx := c.FuncCtx
 	relevant := false
 	for _, child := range p.children {
-		if child.method == ctx.FunctionName+ctx.CurrentMethodDesc || child.method == "" && (ctx.FunctionName == "<init>" || ctx.FunctionName == "<clinit>") {
+		// Dominance/stability is a body proof, independent of the archive
+		// ownership proof performed before source promotion. Only a physical
+		// implementation crossing a lexical scope needs the extra certificate.
+		if child.method == ctx.FunctionName+ctx.CurrentMethodDesc || child.method == "" && (ctx.FunctionName == "<init>" || ctx.FunctionName == "<clinit>") || nativeAnonymousAllocationScope(c.obj, child, ctx.FunctionName, ctx.CurrentMethodDesc, c.Work) {
 			relevant = true
 		}
 	}
@@ -1487,9 +1490,11 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		ctx.LocalNames = map[*coreutils.VariableId]string{}
 	}
 	parameterIDs := map[*coreutils.VariableId]bool{}
+	parameterDeclarations := map[*coreutils.VariableId]*values.JavaRef{}
 	for _, v := range params {
 		if ref, ok := v.(*values.JavaRef); ok && ref.Id != nil {
 			parameterIDs[ref.Id] = true
+			parameterDeclarations[ref.Id] = ref
 		}
 	}
 	allowed := map[int]map[*coreutils.VariableId]bool{}
@@ -1558,6 +1563,12 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 					if !ok || name == "" || class_context.SafeIdentifier(name) != name {
 						p.failed = true
 						continue
+					}
+					// A rewritten body ref may share the declaration ID but no
+					// longer carry parameter flags. The original declaration,
+					// not a mutable use-site copy, witnesses its captured word.
+					if captureName, known := c.nativeLambdaParameterCaptureName(parameterDeclarations[ref.Id]); known {
+						name = captureName
 					}
 					if old, known := ctx.LocalNames[ref.Id]; known && old != name {
 						p.failed = true

@@ -287,7 +287,7 @@ func nativeAnonymousForestOpcodeClosure(forest *nativeAnonymousForest, work *wor
 						}
 						if child := forest.units[name]; child != nil {
 							group := forest.groups[owner]
-							if group == nil || group.children[name] != child || child.newPC != int(op.CurrentOffset) || child.method != "" && child.method != mn+md {
+							if group == nil || group.children[name] != child || child.newPC != int(op.CurrentOffset) || !nativeAnonymousAllocationScope(object, child, mn, md, work) {
 								return false
 							}
 						}
