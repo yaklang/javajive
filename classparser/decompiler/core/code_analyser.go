@@ -6692,11 +6692,7 @@ func (d *Decompiler) ParseStatement() error {
 			val := opcode.stackConsumed[0]
 			throw := statements.NewThrowStatement(val)
 			appendNode(throw)
-		case OP_IRETURN:
-			v := opcode.stackConsumed[0]
-			resetReturnValueTypeSafe(v, funcCtx)
-			appendNode(statements.NewReturnStatement(v))
-		case OP_ARETURN, OP_LRETURN, OP_DRETURN, OP_FRETURN:
+		case OP_IRETURN, OP_ARETURN, OP_LRETURN, OP_DRETURN, OP_FRETURN:
 			v := opcode.stackConsumed[0]
 			if snapshot := monitorReturns[opcode]; snapshot != nil {
 				v = snapshot

@@ -3,15 +3,16 @@ package core
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// A reference return immediately following a proved release consumes a value
+// A value return immediately following a proved release consumes a value
 // already computed while the monitor was held. Its expression cannot be emitted
 // after release: a field read could observe a later writer, and a call/cast could
 // escape the original monitor's exception domain. Preserve that stack value in
 // a dedicated source temporary before releasing, without moving Java tokens
-// across the monitor. The immutable CFG proves the exact exit/return edge;
+// across the monitor. The immutable CFG proves the closed release corridor to the return;
 // mutable ref.Val and statement spelling do not establish this relationship.
 func (d *Decompiler) snapshotOriginalMonitorReturns(owners map[*OpCode]int) (map[*OpCode]*values.JavaRef, map[*OpCode]EvaluationSnapshot, error) {
 	out := map[*OpCode]*values.JavaRef{}
@@ -25,36 +26,84 @@ func (d *Decompiler) snapshotOriginalMonitorReturns(owners map[*OpCode]int) (map
 			return nil, nil, err
 		}
 	}
-	for _, exit := range g.Nodes {
+	// Trace backwards from the return across a closed release corridor. Nested
+	// synchronized blocks have ALOAD; MONITOREXIT for each enclosing owner:
+	// capture before the FIRST release, not merely the last one.
+	predecessor := func(n *OpCode) *OpCode {
+		if len(g.incoming[n]) != 1 {
+			return nil
+		}
+		edge := g.Edges[g.incoming[n][0]]
+		if edge.Kind != EdgeFallthrough {
+			return nil
+		}
+		from := edge.From
+		normal := 0
+		for _, index := range g.outgoing[from] {
+			if g.Edges[index].Kind != EdgeException {
+				normal++
+			}
+		}
+		if normal != 1 {
+			return nil
+		}
+		return from
+	}
+	ownedRelease := func(n *OpCode) bool {
+		_, known := owners[n]
+		return known && n != nil && !n.IsCustom && n.Instr != nil && n.Instr.OpCode == OP_MONITOREXIT
+	}
+	for _, ret := range g.Nodes {
 		if d.Work != nil {
 			if err := d.Work.Charge(workbudget.CounterGraphScans, 1); err != nil {
 				return nil, nil, err
 			}
 		}
-		if _, known := owners[exit]; !known || exit == nil || exit.IsCustom || exit.Instr == nil || exit.Instr.OpCode != OP_MONITOREXIT {
+		if ret == nil || ret.IsCustom || ret.Instr == nil || len(ret.stackConsumed) != 1 {
 			continue
 		}
-		var ret *OpCode
-		valid := true
-		for _, i := range g.outgoing[exit] {
-			e := g.Edges[i]
-			if e.Kind == EdgeException {
-				continue
+		exit := predecessor(ret)
+		if !ownedRelease(exit) {
+			continue
+		}
+		// Every intermediate edge is unique and every release already has a
+		// proved original acquisition. No call, arithmetic, cast, stack shuffle,
+		// branch or exception entry can be crossed by this plan.
+		for {
+			if d.Work != nil {
+				if err := d.Work.Charge(workbudget.CounterGraphScans, 1); err != nil {
+					return nil, nil, err
+				}
 			}
-			if e.Kind != EdgeFallthrough || ret != nil {
-				valid = false
+			load := predecessor(exit)
+			if load == nil || load.IsCustom || load.Instr == nil || !isReferenceLoadOpcode(load.Instr.OpCode) {
+				exit = nil
 				break
 			}
-			ret = e.To
+			earlier := predecessor(load)
+			if !ownedRelease(earlier) {
+				// An unproved release or a joined release corridor cannot
+				// silently become a snapshot after the inner lock was lost.
+				for _, index := range g.incoming[load] {
+					from := g.Edges[index].From
+					if from != nil && from.Instr != nil && from.Instr.OpCode == OP_MONITOREXIT {
+						exit = nil
+					}
+				}
+				break
+			}
+			exit = earlier
 		}
-		if !valid || ret == nil || ret.IsCustom || ret.Instr == nil || ret.Instr.OpCode != OP_ARETURN || len(ret.stackConsumed) != 1 {
-			continue
-		}
-		// A join/handler must not inherit the snapshot of a different predecessor.
-		if len(g.incoming[ret]) != 1 || g.Edges[g.incoming[ret][0]].From != exit || g.Edges[g.incoming[ret][0]].Kind != EdgeFallthrough {
+		if exit == nil {
 			continue
 		}
 		value := ret.stackConsumed[0]
+		// JVM computational categories, not source spelling, determine the
+		// returned word(s). In particular Z/B/S/C/I all consume an int word;
+		// J/D each consume a category-2 value, not two independent operands.
+		if value == nil || d.FunctionType == nil || !originalMonitorReturnCategory(ret.Instr.OpCode, value.Type(), d.FunctionType.ReturnType) {
+			continue
+		}
 		access := values.InspectAccess(value)
 		if access.Effects == 0 || access.Effects&values.EffectOpaque != 0 {
 			continue
@@ -104,4 +153,32 @@ func originalMonitorSnapshotChain(chain []*Node, primary *Node, op *OpCode, owne
 	}
 	assign, ok := chain[0].Statement.(*statements.AssignStatement)
 	return ok && assign != nil && assign.LeftValue == snapshot.Ref && assign.JavaValue == snapshot.Value && assign.ArrayMember == nil && assign.IsFirst && assign.HasOriginPC && assign.OriginPC == pc
+}
+
+// Match both the operand and declared result to the return instruction. This
+// proves width as well as category; unknown, void and method types cannot grant
+// a snapshot. Reference assignability remains the existing return binder's job.
+func originalMonitorReturnCategory(op int, operand, result types.JavaType) bool {
+	category := func(t types.JavaType) int {
+		if t == nil {
+			return -1
+		}
+		switch raw := t.RawType().(type) {
+		case *types.JavaPrimer:
+			switch raw.Name {
+			case types.JavaBoolean, types.JavaByte, types.JavaShort, types.JavaChar, types.JavaInteger:
+				return OP_IRETURN
+			case types.JavaLong:
+				return OP_LRETURN
+			case types.JavaFloat:
+				return OP_FRETURN
+			case types.JavaDouble:
+				return OP_DRETURN
+			}
+		case *types.JavaClass, *types.JavaArrayType, *types.JavaParameterizedType:
+			return OP_ARETURN
+		}
+		return -1
+	}
+	return op != -1 && category(operand) == op && category(result) == op
 }
