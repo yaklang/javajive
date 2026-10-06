@@ -7,7 +7,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
-	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
 type DoWhileStatement struct {
@@ -31,79 +30,11 @@ func NewDoWhileStatement(condition values.JavaValue, body []Statement) *DoWhileS
 	}
 }
 
-// normalizeDoWhileDecrementGuard detects the bytecode pattern where javac compiles a
-// `while (i-- > 0) { body }` loop (or a for-loop with the decrement folded into the test) as a
-// back-edge whose head is: `iinc i,-1; if (old_i > 0) body else break`. The structuring builds a
-// do-while whose body is [i--; if (i > 0) { body } else { break }]. Because the standalone `i--`
-// runs BEFORE the test, the test sees the *decremented* value and the loop body executes one
-// fewer time than the original (n -> n-1). This is an off-by-one that corrupts algorithms whose
-// iteration count matters (e.g. MD5-crypt B64.b64from24bit base64 packing).
-//
-// Fix: when the body is exactly [decrement-of-v, if(v cmp k, body, [break])], fold the decrement
-// into the test as a POST-decrement so the test evaluates the pre-decrement value (matching the
-// bytecode): `do { if ((v--) cmp k) { body } } while(true)`.
-func NormalizeDoWhileDecrementGuard(body []Statement, funcCtx *class_context.ClassContext) []Statement {
-	if len(body) < 2 {
-		return body
-	}
-	// The leading decrement may appear as a bare JavaExpression or wrapped in an
-	// ExpressionStatement, depending on the statement-list path that produced the body.
-	var decExpr *values.JavaExpression
-	switch v := body[0].(type) {
-	case *ExpressionStatement:
-		decExpr, _ = v.Expression.(*values.JavaExpression)
-	case *values.JavaExpression:
-		decExpr = v
-	}
-	if decExpr == nil {
-		return body
-	}
-	if decExpr.Op != values.DEC || len(decExpr.Values) < 1 {
-		return body
-	}
-	decRef, ok := values.UnpackSoltValue(decExpr.Values[0]).(*values.JavaRef)
-	if !ok || decRef.VarUid == "" {
-		return body
-	}
-	ifs, ok := body[1].(*IfStatement)
-	if !ok || ifs.Condition == nil {
-		return body
-	}
-	// Condition must be a binary comparison whose left operand is the SAME variable as the
-	// decrement, so folding the decrement into it preserves semantics.
-	cond, ok := ifs.Condition.(*values.JavaExpression)
-	if !ok || len(cond.Values) != 2 {
-		return body
-	}
-	condLeftRef, ok := values.UnpackSoltValue(cond.Values[0]).(*values.JavaRef)
-	if !ok || condLeftRef.VarUid != decRef.VarUid {
-		return body
-	}
-	// The if must be a loop guard: else-branch is a plain break.
-	if !isPlainBreakList(ifs.ElseBody, funcCtx) {
-		return body
-	}
-	// Build the post-decrement operand (renders `v--`) and splice it into the condition as the
-	// left operand so the test reads `(v--) cmp k`, evaluating the pre-decrement value like the
-	// bytecode.
-	postDec := values.NewBinaryExpression(decRef, values.NewJavaLiteral(1, types.NewJavaPrimer(types.JavaInteger)), values.DEC, decRef.Type())
-	newCond := values.NewBinaryExpression(postDec, cond.Values[1], cond.Op, cond.Typ)
-	newIf := NewIfStatement(newCond, ifs.IfBody, ifs.ElseBody)
-	out := make([]Statement, 0, len(body))
-	out = append(out, newIf)
-	out = append(out, body[2:]...)
-	return out
-}
-
-func isPlainBreakList(sts []Statement, funcCtx *class_context.ClassContext) bool {
-	if len(sts) != 1 {
-		return false
-	}
-	return isPlainBreakStatement(sts[0], funcCtx)
-}
-
 func (w *DoWhileStatement) String(funcCtx *class_context.ClassContext) string {
-	normalizedBody := NormalizeDoWhileDecrementGuard(w.Body, funcCtx)
+	// Update order was proved from original stack loads in the opcode analyser.
+	// Rendering must not convert a preceding local update into a post-update
+	// based only on the shape of the following loop guard.
+	normalizedBody := w.Body
 	// Branch polarity belongs to the structured condition and its arms.
 	// Comparison spelling alone cannot determine which arm exits the loop.
 	parts := make([]string, 0, len(normalizedBody))
@@ -118,11 +49,6 @@ func (w *DoWhileStatement) String(funcCtx *class_context.ClassContext) string {
 		return fmt.Sprintf("%s: %s", w.Label, s)
 	}
 	return s
-}
-
-func isPlainBreakStatement(st Statement, funcCtx *class_context.ClassContext) bool {
-	_, ok := st.(*CustomStatement)
-	return ok && strings.TrimSpace(st.String(funcCtx)) == "break"
 }
 
 type WhileStatement struct {
