@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestFlattenedSourceFormalsRequireOriginalOwnership(t *testing.T) {
+func TestNativeFlattenedSourceFormalsRequireOriginalOwnership(t *testing.T) {
 	files := nativeCompileDebugClasses(t, `class ProjectedOwner<K,V>{class Range{K key;V value;boolean inRange(K k){return key==k;}}static class StaticRange{Object key;}class OwnRange<X>{X key;}class Level<U>{class Inner{U key;}}}`, "none")
 	for _, row := range []struct {
 		name, target string

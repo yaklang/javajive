@@ -18,6 +18,7 @@ type JavaRef struct {
 	originalLocalPC, originalLocalSlot int
 	originalLocalSeed                  JavaValue
 	originalParameter                  bool
+	originalReceiver                   bool
 	originalParameterSlot              int
 	originalParameterSeed              JavaValue
 	VarUid                             string
@@ -62,10 +63,24 @@ func (j *JavaRef) MarkOriginalParameter(slot int) {
 	}
 }
 func (j *JavaRef) OriginalParameterSlot() (int, bool) {
-	if j == nil || !j.originalParameter || !j.IsParam || j.IsThis || j.CustomValue != nil || j.StackVar != nil || !sameOriginalValueIdentity(j.originalParameterSeed, j.Val) {
+	if j == nil || !j.originalParameter || j.originalReceiver || !j.IsParam || j.IsThis || j.CustomValue != nil || j.StackVar != nil || !sameOriginalValueIdentity(j.originalParameterSeed, j.Val) {
 		return 0, false
 	}
 	return j.originalParameterSlot, true
+}
+
+// OriginalReceiverSlot is the descriptor-seeded implicit instance parameter.
+// A later IsThis flag or equal source name alone cannot create this witness.
+func (j *JavaRef) MarkOriginalReceiver() {
+	if j != nil && j.originalParameter && j.originalParameterSlot == 0 && j.IsParam && j.IsThis && sameOriginalValueIdentity(j.originalParameterSeed, j.Val) {
+		j.originalReceiver = true
+	}
+}
+func (j *JavaRef) OriginalReceiverSlot() (int, bool) {
+	if j == nil || !j.originalReceiver || !j.originalParameter || j.originalParameterSlot != 0 || !j.IsParam || !j.IsThis || j.CustomValue != nil || j.StackVar != nil || !sameOriginalValueIdentity(j.originalParameterSeed, j.Val) {
+		return 0, false
+	}
+	return 0, true
 }
 
 // MarkOriginalLocalDeclaration records the actual local STORE emitted by

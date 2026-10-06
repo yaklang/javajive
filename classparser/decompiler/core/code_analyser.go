@@ -4761,6 +4761,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		d.Params = params
 		if !d.FunctionContext.IsStatic {
 			runtimeSim.GetVar(0).IsThis = true
+			runtimeSim.GetVar(0).MarkOriginalReceiver()
 		}
 		d.BodyStartId = len(params)
 	}

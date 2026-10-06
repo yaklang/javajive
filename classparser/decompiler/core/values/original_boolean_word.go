@@ -39,6 +39,17 @@ func (f *JavaClassMember) OriginalStaticFieldRead(pc int, owner, name, descripto
 	return f.OriginPC == pc && w.pc == pc && w.owner == owner && w.name == name && w.descriptor == descriptor && f.Name == owner && f.Member == name && f.Description == descriptor
 }
 
+// OriginalInstanceFieldRead binds a source field to the decoded GETFIELD.
+// Its receiver needs a separate value certificate; a field name/type is not
+// evidence that a later source receiver denotes the original object.
+func (f *RefMember) OriginalInstanceFieldRead(pc int, owner, name, descriptor string) bool {
+	if f == nil || f.originalFieldRead == nil || !f.HasOriginPC || isNilJavaValue(f.Object) {
+		return false
+	}
+	w := f.originalFieldRead
+	return f.OriginPC == pc && w.pc == pc && w.owner == owner && w.name == name && w.descriptor == descriptor && f.Member == name
+}
+
 // OriginalBooleanStackWord proves a source Boolean whose JVM value is0/1.
 // A shared DUP value is followed only through its immutable producer witness;
 // arbitrary Boolean-typed locals do not supply evidence. This view adds no

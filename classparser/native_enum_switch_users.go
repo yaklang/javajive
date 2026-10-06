@@ -15,6 +15,7 @@ type nativeEnumSwitchUse struct {
 	marker                    string
 	getPC, ordinalPC, arrayPC int
 	parameterSlot             int
+	selector                  *nativeEnumSelectorProducer
 	keys                      map[int]bool
 	rendered                  bool
 }
@@ -22,8 +23,8 @@ type nativeEnumSwitchUse struct {
 // A table is a compiler artifact only if all its original archive users are
 // table reads consumed by proved switches. Escapes, writes, class literals,
 // constructor markers, handles and foreign lexical units are not table uses.
-// The initial producer profile is an unchanged enum parameter; general computed
-// selectors require their own original value/effect proof, not source regexes.
+// Computed selectors require an original ordered stack-producer certificate;
+// an equal enum result type or source spelling cannot license the rewrite.
 func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassObject, index *nativeMemberIndex, work *workbudget.Budget) bool {
 	if p == nil || root == nil {
 		return false
@@ -171,6 +172,7 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 				types := map[int]string{}
 				slot := 0
 				if method.AccessFlags&8 == 0 {
+					types[0] = "L" + object.GetClassName() + ";"
 					slot = 1
 				}
 				for _, param := range params {
@@ -213,28 +215,30 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 							continue
 						}
 						arr := table.tables[member.Member]
-						if arr == nil || i+4 >= len(ops) || !nativeEnumMemberOperand(object, op, core.OP_GETSTATIC, name, member.Member, "[I") || !constructorMotionLoad(ops[i+1], "L"+arr.enum+";") || types[core.GetRetrieveIdx(ops[i+1])] != "L"+arr.enum+";" || !nativeEnumMemberOperand(object, ops[i+2], core.OP_INVOKEVIRTUAL, arr.enum, "ordinal", "()I") || !nativeEnumOpcode(ops[i+3], core.OP_IALOAD) || !nativeEnumOpcode(ops[i+4], core.OP_TABLESWITCH) && !nativeEnumOpcode(ops[i+4], core.OP_LOOKUPSWITCH) {
+						if arr == nil || !nativeEnumMemberOperand(object, op, core.OP_GETSTATIC, name, member.Member, "[I") {
 							return false
 						}
-						paramSlot := core.GetRetrieveIdx(ops[i+1])
-						// Each unchanged-parameter proof scans the complete original method.
-						// Charge repeated scans before visiting instructions.
-						if !nativeProofWork(work, int64(len(ops))) {
+						selector, ordinal, known := nativeEnumSelectorPacket(object, ops, i+1, types, arr.enum, work)
+						if !known {
 							return false
 						}
-						for _, in := range ops {
-							if (in.Instr.OpCode >= core.OP_ISTORE && in.Instr.OpCode <= core.OP_ASTORE_3 || in.Instr.OpCode == core.OP_IINC) && core.GetRetrieveIdx(in) == paramSlot {
-								return false
-							}
+						slots := map[int]bool{}
+						if !nativeEnumSelectorSlots(selector, slots, 0) || !nativeProofWork(work, int64(len(ops))) {
+							return false
+						}
+						// Each leaf must retain the original descriptor seed throughout the
+						// method. Stores to any operand slot invalidate the entire tree.
+						if !nativeEnumSelectorParametersUnchanged(ops, slots) {
+							return false
 						}
 						for _, pc := range entries {
-							if pc > int(op.CurrentOffset) && pc <= int(ops[i+4].CurrentOffset) {
+							if pc > int(op.CurrentOffset) && pc <= int(ops[ordinal+2].CurrentOffset) {
 								return false
 							}
 						}
 						keys := map[int]bool{}
 						valid := true
-						ops[i+4].SwitchJmpCase.ForEach(func(key int, target int32) bool {
+						ops[ordinal+2].SwitchJmpCase.ForEach(func(key int, target int32) bool {
 							if !nativeProofWork(work, 1) || arr.entries[key] == "" {
 								valid = false
 								return false
@@ -251,7 +255,7 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 						if table.uses[owner][mn+md] == nil {
 							table.uses[owner][mn+md] = map[int]*nativeEnumSwitchUse{}
 						}
-						use := &nativeEnumSwitchUse{field: member.Member, getPC: int(op.CurrentOffset), ordinalPC: int(ops[i+2].CurrentOffset), arrayPC: int(ops[i+3].CurrentOffset), parameterSlot: paramSlot, keys: keys}
+						use := &nativeEnumSwitchUse{field: member.Member, getPC: int(op.CurrentOffset), ordinalPC: int(ops[ordinal].CurrentOffset), arrayPC: int(ops[ordinal+1].CurrentOffset), parameterSlot: selector.slot, selector: selector, keys: keys}
 						use.marker = "/*jdec-owned-enum-switch:" + base64.RawURLEncoding.EncodeToString([]byte(owner+"\x00"+mn+md+"\x00"+strconv.Itoa(use.arrayPC))) + "*/"
 						table.uses[owner][mn+md][use.arrayPC] = use
 						count++

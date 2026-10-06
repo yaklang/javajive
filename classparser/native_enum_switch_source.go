@@ -38,12 +38,7 @@ func (c *ClassObjectDumper) wireNativeEnumSwitchSource(p *nativeMemberFamily, ct
 		if !ok || call == nil || !call.HasOriginPC || call.OriginPC != use.ordinalPC || call.IsStatic || call.IsSpecialInvoke || call.Kind != values.InvokeVirtual || call.FunctionName != "ordinal" || call.Descriptor != "()I" || len(call.Arguments) != 0 || strings.ReplaceAll(call.ClassName, ".", "/") != arr.enum || call.Object == nil {
 			return fail()
 		}
-		ref, ok := values.UnpackSoltValue(call.Object).(*values.JavaRef)
-		if !ok {
-			return fail()
-		}
-		slot, original := ref.OriginalParameterSlot()
-		if !original || slot != use.parameterSlot || !nativeProofWork(c.Work, int64(4+len(labels))) || c.Work != nil && c.Work.CheckAlloc(int64(len(labels))*96+int64(len(use.marker))) != nil {
+		if !nativeEnumSelectorSource(use.selector, call.Object, ctx, c.Work, 0) || !nativeProofWork(c.Work, int64(4+len(labels))) || c.Work != nil && c.Work.CheckAlloc(int64(len(labels))*96+int64(len(use.marker))) != nil {
 			return fail()
 		}
 		typ, known := values.SourceTypeErasure(call.Object.Type(), ctx)
