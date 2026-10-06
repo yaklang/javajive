@@ -117,6 +117,9 @@ func constructorMotionPacketOriginalCode(obj *ClassObject, params []string, ops 
 		if name != "<init>" || desc != descriptor {
 			continue
 		}
+		if method.AccessFlags&0x0508 != 0 { // static, native or abstract
+			return nil
+		}
 		matches++
 		for _, attribute := range method.Attributes {
 			if original, ok := attribute.(*CodeAttribute); ok {

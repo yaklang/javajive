@@ -284,6 +284,22 @@ func constructorMotionDelegationEnclosing(obj *ClassObject, ops []*core.OpCode, 
 		if ops[index] == nil || ops[index].Instr == nil {
 			return 0, nil, false
 		}
+		if inputs, result, known := constructorScalarPacketContract(ops[index].Instr.OpCode); known {
+			if originalCode == nil {
+				originalCode = constructorMotionPacketOriginalCode(obj, params, ops)
+			}
+			if originalCode == nil || !constructorEffectOriginalOperandFree(originalCode, ops[index]) || peakWords > int(originalCode.MaxStack) || !constructorScalarPacketOperands(arguments, inputs) {
+				return 0, nil, false
+			}
+			// Original receiver-free scalar computation remains before the
+			// original initialization site, including division by zero. It
+			// cannot expose this uninitialized receiver to a finalizer. Source
+			// emission still preserves its operator, order and target binding.
+			base := len(arguments) - len(inputs)
+			arguments, origins = arguments[:base], origins[:base]
+			appendArgument(result, -1)
+			return index + 1, nil, true
+		}
 		if opcode := ops[index].Instr.OpCode; constructorMotionPacketBranch(opcode) {
 			if originalCode == nil {
 				originalCode = constructorMotionPacketOriginalCode(obj, params, ops)
