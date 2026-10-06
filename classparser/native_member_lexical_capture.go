@@ -6,7 +6,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"sort"
-	"strings"
 )
 
 type nativeMemberLexicalRead struct {
@@ -198,18 +197,6 @@ func nativeMemberLexicalReadOperand(value any, read *nativeMemberLexicalRead, wo
 }
 
 func nativeMemberCaptureIndexKey(owner, field string) string { return owner + "\x00" + field }
-func nativeMemberCaptureIndexName(name string) bool {
-	digits, ok := strings.CutPrefix(name, "this$")
-	if !ok || digits == "" {
-		return false
-	}
-	for _, c := range digits {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
-}
 
 // Validate signed branch displacements and instruction boundaries separately
 // from opcode parsing. Keep dead edges; no reachability assumption can

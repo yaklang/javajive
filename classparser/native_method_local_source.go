@@ -31,13 +31,76 @@ type nativeMethodLocalClass struct {
 	sourceEmitted    bool
 }
 
-// A parameter-only local declaration can be placed at the start of its exact
-// declaring method: parameters dominate that block, and their complete source
-// def-use proof forbids later writes. A future producer capture requires its
-// actual declaration/dominance; it cannot borrow this placement certificate.
+// The compilation unit is not a method owner. Plan each physically verified
+// named declaration separately; owner, method name and descriptor jointly
+// identify the placement scope, even when siblings have identical signatures.
 func (c *ClassObjectDumper) planNativeMethodLocals(p *nativeMemberFamily) bool {
+	if p == nil || c.obj == nil || len(p.children) > nativeMemberLayoutNodeLimit {
+		return false
+	}
 	p.methodLocals = map[string]*nativeMethodLocalClass{}
-	if c.obj.GetClassName() != p.owner {
+	if c.obj.GetClassName() != p.owner || !c.planNativeMethodLocalsForOwner(p) {
+		return false
+	}
+	names := make([]string, 0, len(p.children))
+	for name := range p.children {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		child := p.children[name]
+		if child == nil || child.object == nil || !nativeProofWork(c.Work, 1) {
+			return false
+		}
+		reader := NewClassObjectDumper(child.object)
+		reader.Work = c.Work
+		reader.options = c.options
+		reader.foldSiblingResolver = c.foldSiblingResolver
+		reader.declarationResolver = c.declarationResolver
+		if !reader.planNativeMethodLocalsForOwner(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// A compiler's enclosing field ordinal follows the verified instance-owner
+// chain. Static declarations stop that chain. Binary dollar spelling supplies
+// neither an owner role nor a lexical depth certificate.
+func nativeMethodLocalEnclosingField(p *nativeMemberFamily, owner string, work *workbudget.Budget) (string, bool) {
+	if p == nil || p.owner == "" || p.lexicalObjects[p.owner] == nil || len(p.children) > nativeMemberLayoutNodeLimit {
+		return "", false
+	}
+	depth := 0
+	for steps := 0; steps <= nativeMemberLayoutNodeLimit; steps++ {
+		if !nativeProofWork(work, 1) {
+			return "", false
+		}
+		if owner == p.owner {
+			return fmt.Sprintf("this$%d", depth), true
+		}
+		child := p.children[owner]
+		if child == nil || child.object == nil {
+			return "", false
+		}
+		actual, name, flags, known := originalMemberOwner(child.object)
+		if !known || actual != child.owner || name != child.name || flags != child.flags || child.static != (flags&8 != 0) || child.object.GetClassName() != owner || p.lexicalObjects[owner] != child.object {
+			return "", false
+		}
+		if child.static {
+			return fmt.Sprintf("this$%d", depth), true
+		}
+		depth++
+		owner = child.owner
+	}
+	return "", false
+}
+
+func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily) bool {
+	if p == nil || c.obj == nil {
+		return false
+	}
+	if c.obj.GetClassName() != p.owner && (p.children[c.obj.GetClassName()] == nil || p.children[c.obj.GetClassName()].object != c.obj) {
 		return false
 	}
 	seenMethods := map[string]bool{}
@@ -98,8 +161,11 @@ func (c *ClassObjectDumper) planNativeMethodLocals(p *nativeMemberFamily) bool {
 			if !known {
 				return false
 			}
-			if constructor.enclosingField != "" && constructor.enclosingField != "this$0" {
-				return false
+			if constructor.enclosingField != "" {
+				expected, known := nativeMethodLocalEnclosingField(p, owner.owner, c.Work)
+				if !known || expected != constructor.enclosingField {
+					return false
+				}
 			}
 			for field := range constructor.captures {
 				if field == constructor.enclosingField {
@@ -180,7 +246,7 @@ func (c *ClassObjectDumper) planNativeMethodLocals(p *nativeMemberFamily) bool {
 			if !nativeProofWork(c.Work, 1) {
 				return false
 			}
-			if local.owner.method == name && local.owner.descriptor == desc {
+			if local.owner.owner == c.obj.GetClassName() && local.owner.method == name && local.owner.descriptor == desc {
 				ordinals[local.owner.name]++
 				if ordinals[local.owner.name] != local.owner.ordinal {
 					return false
@@ -217,16 +283,16 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 		return false
 	}
 	for binary, local := range p.methodLocals {
-		if !nativeProofWork(work, 1) || local == nil || local.owner.owner != p.owner || p.lexicalObjects[binary] != local.object || index.handles[binary] {
+		if !nativeProofWork(work, 1) || local == nil || local.owner == nil || local.constructor == nil || p.lexicalObjects[local.owner.owner] == nil || p.lexicalObjects[binary] != local.object || index.handles[binary] {
 			return false
 		}
 		for user := range index.typeUsers[binary] {
-			if !nativeProofWork(work, 1) || user != p.owner && user != binary {
+			if !nativeProofWork(work, 1) || user != p.owner && p.children[user] == nil && user != binary {
 				return false
 			}
 		}
 		for user := range index.constructors[binary] {
-			if !nativeProofWork(work, 1) || user != p.owner {
+			if !nativeProofWork(work, 1) || user != local.owner.owner {
 				return false
 			}
 		}
@@ -238,112 +304,196 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 			}
 		}
 	}
-	// A local declaration cannot be named by a class field or a method header.
-	for _, field := range root.Fields {
-		if field == nil || !nativeProofWork(work, 1) {
+	headerClosed := func(root *ClassObject, attrs []AttributeInfo) bool {
+		// Code annotations belong to the method body, not its declaration
+		// header. Header annotations can otherwise hide a local class literal
+		// solely in UTF8 metadata, without an LDC or erased-descriptor edge.
+		if !nativeProofWork(work, int64(len(attrs))) || work != nil && work.CheckAlloc(int64(len(attrs))*16) != nil {
 			return false
 		}
-		desc, known := sourceBridgeUTF8(root, field.DescriptorIndex)
-		if !known || localType(desc) {
-			return false
-		}
-	}
-	for _, method := range root.Methods {
-		if method == nil || !nativeProofWork(work, 1) {
-			return false
-		}
-		name, named := sourceBridgeUTF8(root, method.NameIndex)
-		desc, typed := sourceBridgeUTF8(root, method.DescriptorIndex)
-		if !named || !typed || localType(desc) {
-			return false
-		}
-		for _, attribute := range method.Attributes {
-			code, ok := attribute.(*CodeAttribute)
-			if !ok {
-				continue
+		headerAttrs := []AttributeInfo{}
+		for _, attr := range attrs {
+			if _, code := attr.(*CodeAttribute); !code {
+				headerAttrs = append(headerAttrs, attr)
 			}
-			if code == nil || !nativeProofWork(work, int64(len(code.Code))) || work != nil && work.CheckAlloc(int64(len(code.Code)+1)*64) != nil {
+		}
+		annotationClosed := true
+		if !nativeAnnotationDependencies(headerAttrs, work, func(name string) {
+			if localType(name) {
+				annotationClosed = false
+			}
+		}) || !annotationClosed {
+			return false
+		}
+		for _, attr := range attrs {
+			if !nativeProofWork(work, 1) {
 				return false
 			}
-			decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(root.ConstantPool, i) })
-			decoder.Work = work
-			if decoder.ParseOpcode() != nil {
-				return false
-			}
-			for _, op := range decoder.Opcodes() {
-				if op == nil || op.Instr == nil || !nativeProofWork(work, 1) {
+			switch a := attr.(type) {
+			case *SignatureAttribute:
+				if a == nil {
 					return false
 				}
-				switch op.Instr.OpCode {
-				case core.OP_NEW, core.OP_CHECKCAST, core.OP_INSTANCEOF, core.OP_ANEWARRAY, core.OP_MULTIANEWARRAY:
-					if len(op.Data) < 2 {
+				signature, known := sourceBridgeUTF8(root, a.SignatureIndex)
+				if !known || !nativeProofWork(work, int64(len(signature))) {
+					return false
+				}
+				names, known := types.SignatureClassReferences(signature)
+				if !known {
+					return false
+				}
+				for _, name := range names {
+					if localType(name) {
 						return false
-					}
-					target, known := sourceBridgeClassName(root, core.Convert2bytesToInt(op.Data[:2]))
-					if !known {
-						return false
-					}
-					if localType(target) {
-						local := p.methodLocals[target]
-						if local == nil || op.Instr.OpCode != core.OP_NEW || name != local.owner.method || desc != local.owner.descriptor {
-							return false
-						}
-						if _, known := local.allocations[int(op.CurrentOffset)]; !known {
-							return false
-						}
-					}
-				case core.OP_LDC, core.OP_LDC_W:
-					at := 0
-					if len(op.Data) == 1 {
-						at = int(op.Data[0])
-					} else if len(op.Data) == 2 {
-						at = int(core.Convert2bytesToInt(op.Data))
-					}
-					if at < 1 || at > len(root.ConstantPool) {
-						return false
-					}
-					if constant, ok := root.ConstantPool[at-1].(*ConstantClassInfo); ok {
-						if constant == nil {
-							return false
-						}
-						target, known := sourceBridgeUTF8(root, constant.NameIndex)
-						if !known || localType(target) {
-							return false
-						}
 					}
 				}
-				switch op.Instr.OpCode {
-				case core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE, core.OP_GETFIELD, core.OP_PUTFIELD, core.OP_GETSTATIC, core.OP_PUTSTATIC:
-					member := constructorMotionMember(root, op, op.Instr.OpCode)
-					if member == nil {
+			case *ExceptionsAttribute:
+				if a == nil {
+					return false
+				}
+				for _, index := range a.ExceptionIndexTable {
+					name, known := sourceBridgeClassName(root, index)
+					if !known || !nativeProofWork(work, 1) || localType(name) {
 						return false
 					}
-					if localType(member.Description) {
+				}
+			}
+		}
+		return true
+	}
+	checkOwner := func(root *ClassObject) bool {
+		if root == nil || p.lexicalObjects[root.GetClassName()] != root {
+			return false
+		}
+		if !headerClosed(root, root.Attributes) {
+			return false
+		}
+		if localType(root.GetSupperClassName()) {
+			return false
+		}
+		for _, index := range root.Interfaces {
+			name, known := sourceBridgeClassName(root, index)
+			if !known || !nativeProofWork(work, 1) || localType(name) {
+				return false
+			}
+		}
+		// A local declaration cannot be named by a class field or a method header.
+		for _, field := range root.Fields {
+			if field == nil || !nativeProofWork(work, 1) {
+				return false
+			}
+			desc, known := sourceBridgeUTF8(root, field.DescriptorIndex)
+			if !known || localType(desc) || !headerClosed(root, field.Attributes) {
+				return false
+			}
+		}
+		for _, method := range root.Methods {
+			if method == nil || !nativeProofWork(work, 1) {
+				return false
+			}
+			name, named := sourceBridgeUTF8(root, method.NameIndex)
+			desc, typed := sourceBridgeUTF8(root, method.DescriptorIndex)
+			if !named || !typed || localType(desc) || !headerClosed(root, method.Attributes) {
+				return false
+			}
+			for _, attribute := range method.Attributes {
+				code, ok := attribute.(*CodeAttribute)
+				if !ok {
+					continue
+				}
+				if code == nil || !nativeProofWork(work, int64(len(code.Code))) || work != nil && work.CheckAlloc(int64(len(code.Code)+1)*64) != nil {
+					return false
+				}
+				decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(root.ConstantPool, i) })
+				decoder.Work = work
+				if decoder.ParseOpcode() != nil {
+					return false
+				}
+				for _, op := range decoder.Opcodes() {
+					if op == nil || op.Instr == nil || !nativeProofWork(work, 1) {
 						return false
 					}
-					if local := p.methodLocals[member.Name]; local != nil {
-						if name != local.owner.method || desc != local.owner.descriptor {
+					switch op.Instr.OpCode {
+					case core.OP_NEW, core.OP_CHECKCAST, core.OP_INSTANCEOF, core.OP_ANEWARRAY, core.OP_MULTIANEWARRAY:
+						if len(op.Data) < 2 {
 							return false
 						}
-						if member.Member == "<init>" {
-							matched := false
-							for _, site := range local.allocations {
-								if !nativeProofWork(work, 1) {
-									return false
-								}
-								if site.invokePC == int(op.CurrentOffset) {
-									matched = true
-								}
+						target, known := sourceBridgeClassName(root, core.Convert2bytesToInt(op.Data[:2]))
+						if !known {
+							return false
+						}
+						if localType(target) {
+							local := p.methodLocals[target]
+							if local == nil || op.Instr.OpCode != core.OP_NEW || root.GetClassName() != local.owner.owner || name != local.owner.method || desc != local.owner.descriptor {
+								return false
 							}
-							if op.Instr.OpCode != core.OP_INVOKESPECIAL || member.Description != local.constructor.descriptor || !matched {
+							if _, known := local.allocations[int(op.CurrentOffset)]; !known {
+								return false
+							}
+						}
+					case core.OP_LDC, core.OP_LDC_W:
+						at := 0
+						if len(op.Data) == 1 {
+							at = int(op.Data[0])
+						} else if len(op.Data) == 2 {
+							at = int(core.Convert2bytesToInt(op.Data))
+						}
+						if at < 1 || at > len(root.ConstantPool) {
+							return false
+						}
+						if constant, ok := root.ConstantPool[at-1].(*ConstantClassInfo); ok {
+							if constant == nil {
+								return false
+							}
+							target, known := sourceBridgeUTF8(root, constant.NameIndex)
+							if !known || localType(target) {
 								return false
 							}
 						}
 					}
+					switch op.Instr.OpCode {
+					case core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE, core.OP_GETFIELD, core.OP_PUTFIELD, core.OP_GETSTATIC, core.OP_PUTSTATIC:
+						member := constructorMotionMember(root, op, op.Instr.OpCode)
+						if member == nil {
+							return false
+						}
+						if localType(member.Description) {
+							return false
+						}
+						if local := p.methodLocals[member.Name]; local != nil {
+							if root.GetClassName() != local.owner.owner || name != local.owner.method || desc != local.owner.descriptor {
+								return false
+							}
+							if member.Member == "<init>" {
+								matched := false
+								for _, site := range local.allocations {
+									if !nativeProofWork(work, 1) {
+										return false
+									}
+									if site.invokePC == int(op.CurrentOffset) {
+										matched = true
+									}
+								}
+								if op.Instr.OpCode != core.OP_INVOKESPECIAL || member.Description != local.constructor.descriptor || !matched {
+									return false
+								}
+							}
+						}
+					}
 				}
 			}
 		}
+		return true
 	}
+	if !checkOwner(root) {
+		return false
+	}
+	for _, child := range p.children {
+		if child == nil || !checkOwner(child.object) {
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -359,7 +509,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 	prior := ctx.DeclarationSourceName
 	ctx.DeclarationSourceName = func(binary string) (string, bool) {
 		local := p.methodLocals[strings.ReplaceAll(binary, ".", "/")]
-		if local != nil && (c.nativeMethodLocalCurrent == local || c.obj.GetClassName() == p.owner && ctx.FunctionName == local.owner.method && ctx.CurrentMethodDesc == local.owner.descriptor) {
+		if local != nil && (c.nativeMethodLocalCurrent == local || c.obj.GetClassName() == local.owner.owner && ctx.FunctionName == local.owner.method && ctx.CurrentMethodDesc == local.owner.descriptor) {
 			return local.owner.name, true
 		}
 		if prior != nil {
@@ -369,7 +519,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 	}
 	ctx.SourceMethodLocalCandidate = func(binary string) bool {
 		local := p.methodLocals[strings.ReplaceAll(binary, ".", "/")]
-		return c.nativeSourceNamesReady && c.obj.GetClassName() == p.owner && local != nil && local.source != "" && ctx.FunctionName == local.owner.method && ctx.CurrentMethodDesc == local.owner.descriptor
+		return c.nativeSourceNamesReady && local != nil && c.obj.GetClassName() == local.owner.owner && local.source != "" && ctx.FunctionName == local.owner.method && ctx.CurrentMethodDesc == local.owner.descriptor
 	}
 	ctx.SourceMethodLocalAllocation = func(binary, descriptor string, newPC, invokePC int, args []class_context.SourceCaptureOperand) (string, bool) {
 		local := p.methodLocals[strings.ReplaceAll(binary, ".", "/")]
@@ -377,6 +527,9 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 			return "", false
 		}
 		fail := func() (string, bool) { p.failed = true; return "", false }
+		if !c.nativeSourceNamesReady || local.owner == nil || local.constructor == nil || local.source == "" || c.obj.GetClassName() != local.owner.owner || ctx.FunctionName != local.owner.method || ctx.CurrentMethodDesc != local.owner.descriptor {
+			return fail()
+		}
 		site, known := local.allocations[newPC]
 		descriptors, _, err := callbinding.Descriptor(descriptor)
 		if !known || descriptor != local.constructor.descriptor || invokePC != site.invokePC || len(site.slots) != len(args) || err != nil || len(descriptors) != len(args) {
@@ -398,8 +551,9 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 					return fail()
 				}
 			} else {
-				ref, ok := values.UnpackSoltValue(v).(*values.JavaRef)
-				if !ok || ref == nil {
+				unpacked, bounded := nativeMemberEnclosingUnpack(v, c.Work)
+				ref, ok := unpacked.(*values.JavaRef)
+				if !bounded || !ok || ref == nil {
 					return fail()
 				}
 				pc, slot, known := ref.OriginalLocalDeclaration(ref.Val)
@@ -411,8 +565,9 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 					return fail()
 				}
 			}
-			ref, known := values.UnpackSoltValue(v).(*values.JavaRef)
-			if !known || ref == nil || local.captureIDs[field] != ref.Id || field != local.constructor.enclosingField && arg.Text != local.bindings[field] {
+			unpacked, bounded := nativeMemberEnclosingUnpack(v, c.Work)
+			ref, known := unpacked.(*values.JavaRef)
+			if !bounded || !known || ref == nil || local.captureIDs[field] != ref.Id || field != local.constructor.enclosingField && arg.Text != local.bindings[field] {
 				return fail()
 			}
 		}
@@ -426,12 +581,12 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 	p := c.nativeMemberRoot
 	ctx := c.FuncCtx
 	c.nativeMethodLocalPlacements = map[statements.Statement][]string{}
-	if p == nil || c.obj.GetClassName() != p.owner {
+	if p == nil {
 		return nil, nil
 	}
 	locals := []*nativeMethodLocalClass{}
 	for _, local := range p.methodLocals {
-		if local.owner.method == ctx.FunctionName && local.owner.descriptor == ctx.CurrentMethodDesc {
+		if local.owner.owner == c.obj.GetClassName() && local.owner.method == ctx.FunctionName && local.owner.descriptor == ctx.CurrentMethodDesc {
 			locals = append(locals, local)
 		}
 	}
@@ -663,14 +818,14 @@ func nativeMethodLocalDeclarationHeader(local *nativeMethodLocalClass, source st
 // declaring-method body after source rewrites; a removed/duplicated local
 // declaration must invalidate the entire source transaction.
 func (c *ClassObjectDumper) nativeMethodLocalMethodSourceComplete(name, descriptor, body string) bool {
-	if c.nativeMemberRoot == nil || c.obj.GetClassName() != c.nativeMemberRoot.owner {
+	if c.nativeMemberRoot == nil {
 		return true
 	}
 	for _, local := range c.nativeMemberRoot.methodLocals {
 		if local == nil || local.owner == nil {
 			return false
 		}
-		if local.owner.method != name || local.owner.descriptor != descriptor {
+		if local.owner.owner != c.obj.GetClassName() || local.owner.method != name || local.owner.descriptor != descriptor {
 			continue
 		}
 		if local.source == "" || !nativeProofWork(c.Work, int64(len(body))) || strings.Count(body, local.source) != 1 {

@@ -68,6 +68,7 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 		idx.getterHandles = map[string]bool{}
 		idx.getterInvalidReferences = map[string]bool{}
 		total, classes, edges := int64(0), 0, 0
+		fieldKeyBytes := int64(0)
 		seenClasses := map[string]bool{}
 		e := fs.WalkDir(z.ZipFS, ".", func(path string, entry fs.DirEntry, e error) error {
 			if e != nil {
@@ -175,10 +176,24 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 						}
 					}
 				case *ConstantFieldrefInfo:
-					if nativeMemberCaptureIndexName(name) {
-						if !record(idx.captureUsers, nativeMemberCaptureIndexKey(owner, name)) {
-							return fmt.Errorf("member index edge limit")
-						}
+					// Index physical field users independently of source spelling.
+					// Capture roles are proved later from original constructor
+					// stores; a val$ capture cannot vanish from archive closure
+					// merely because only this$ spellings were indexed.
+					keyBytes := int64(len(owner)) + int64(len(name)) + 1
+					// Repeated long owner prefixes can make materialized keys much
+					// larger than the class input or its edge count. Charge before
+					// concatenation/map hashing, with a conservative archive cap
+					// even when no caller supplies a request budget.
+					if keyBytes > (128<<20)-fieldKeyBytes || !nativeProofWork(reader.Work, keyBytes) {
+						return fmt.Errorf("member index field-key budget")
+					}
+					fieldKeyBytes += keyBytes
+					if reader.Work != nil && reader.Work.CheckAlloc(fieldKeyBytes+int64(edges+1)*96) != nil {
+						return fmt.Errorf("member index field-key budget")
+					}
+					if !record(idx.captureUsers, nativeMemberCaptureIndexKey(owner, name)) {
+						return fmt.Errorf("member index edge limit")
 					}
 				}
 			}
