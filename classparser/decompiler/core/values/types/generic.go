@@ -1691,7 +1691,7 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 		return instantiated
 	}
 	// sigma: this node's formal type params -> actual args (positional; raw receiver -> empty sigma).
-	formals := ClassFormalTypeParamNames(classSig)
+	formals := instantiatedClassFormals(funcCtx, internal, classSig)
 	sigma := map[string]JavaType{}
 	for i := 0; i < len(formals) && i < len(args); i++ {
 		if args[i] != nil {
@@ -1718,6 +1718,9 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 				if msig == "" {
 					return nil
 				}
+				if !calleeSignatureVariablesBound(msig, sigma) {
+					return nil
+				}
 				_, params, _ := ParseMethodSignatureFull(msig, funcCtx)
 				if paramIndex < len(params) && params[paramIndex] != nil {
 					return substituteAndGateParam(funcCtx, params[paramIndex], sigma, MethodFormalTypeParamNames(msig))
@@ -1742,6 +1745,9 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 			competingHere = class_context.NameHasSameArityOverload(method, descriptor, keys)
 		}
 		if msig != "" && !competingHere {
+			if !calleeSignatureVariablesBound(msig, sigma) {
+				return nil
+			}
 			_, params, _ := ParseMethodSignatureFull(msig, funcCtx)
 			if paramIndex < len(params) && params[paramIndex] != nil {
 				if t := substituteAndGateParam(funcCtx, params[paramIndex], sigma, MethodFormalTypeParamNames(msig)); t != nil {
@@ -1825,7 +1831,7 @@ func resolveReturnWalk(funcCtx *class_context.ClassContext, provider ClassSigPro
 	if !ok {
 		return nil // JDK / external: not in jar
 	}
-	formals := ClassFormalTypeParamNames(classSig)
+	formals := instantiatedClassFormals(funcCtx, internal, classSig)
 	sigma := map[string]JavaType{}
 	for i := 0; i < len(formals) && i < len(args); i++ {
 		if args[i] != nil {
@@ -1836,8 +1842,11 @@ func resolveReturnWalk(funcCtx *class_context.ClassContext, provider ClassSigPro
 	// ancestor's signature shadow it).
 	if methodSigs != nil {
 		if msig := methodSigs[class_context.MethodSigKey(method, argc)]; msig != "" {
+			if !calleeSignatureVariablesBound(msig, sigma) {
+				return nil
+			}
 			if _, _, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
-				return SubstituteTypeVars(ret, sigma)
+				return SubstituteTypeVars(ret, methodDeclarationSubstitution(msig, sigma))
 			}
 			return nil
 		}
@@ -1934,7 +1943,7 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 		}
 		return nil, nil, nil
 	}
-	formals := ClassFormalTypeParamNames(classSig)
+	formals := instantiatedClassFormals(funcCtx, internal, classSig)
 	sigma := map[string]JavaType{}
 	for i := 0; i < len(formals) && i < len(args); i++ {
 		if args[i] != nil {
@@ -1954,16 +1963,13 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 				if msig == "" {
 					return resolveSourceBridgeReturn(funcCtx, provider, internal, classSig, sigma, method, descriptor, argc, visited)
 				}
+				if !calleeSignatureVariablesBound(msig, sigma) {
+					return nil, nil, nil
+				}
 				if _, params, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
 					// Method formals shadow same-spelled class formals. Never
 					// bind a callee's independent <T> to the receiver's class T.
-					methodSigma := make(map[string]JavaType, len(sigma))
-					for name, typ := range sigma {
-						methodSigma[name] = typ
-					}
-					for _, name := range MethodFormalTypeParamNames(msig) {
-						delete(methodSigma, name)
-					}
+					methodSigma := methodDeclarationSubstitution(msig, sigma)
 					subParams := make([]JavaType, len(params))
 					for i, p := range params {
 						subParams[i] = SubstituteTypeVars(p, methodSigma)
@@ -1983,16 +1989,13 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 			competingHere = class_context.NameHasSameArityOverload(method, descriptor, keys)
 		}
 		if msig != "" && !competingHere {
+			if !calleeSignatureVariablesBound(msig, sigma) {
+				return nil, nil, nil
+			}
 			if _, params, ret := ParseMethodSignatureFull(msig, funcCtx); ret != nil {
 				// Method formals shadow same-spelled class formals. Never
 				// bind a callee's independent <T> to the receiver's class T.
-				methodSigma := make(map[string]JavaType, len(sigma))
-				for name, typ := range sigma {
-					methodSigma[name] = typ
-				}
-				for _, name := range MethodFormalTypeParamNames(msig) {
-					delete(methodSigma, name)
-				}
+				methodSigma := methodDeclarationSubstitution(msig, sigma)
 				subParams := make([]JavaType, len(params))
 				for i, p := range params {
 					subParams[i] = SubstituteTypeVars(p, methodSigma)
@@ -2118,7 +2121,7 @@ func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSi
 	if !ok {
 		return nil // JDK / external: not in jar
 	}
-	formals := ClassFormalTypeParamNames(classSig)
+	formals := instantiatedClassFormals(funcCtx, internal, classSig)
 	sigma := map[string]JavaType{}
 	for i := 0; i < len(formals) && i < len(args); i++ {
 		if args[i] != nil {
@@ -2129,6 +2132,9 @@ func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSi
 	// composed type-argument map through it and return (a subclass never re-declares an inherited field's
 	// generic type, so the most-derived declaration on the walk is authoritative).
 	if fsig, ok := fieldProvider(internal, fieldName); ok && fsig != "" {
+		if !calleeSignatureVariablesBound(fsig, sigma) {
+			return nil
+		}
 		if ft := ParseSignature(fsig); ft != nil {
 			return SubstituteTypeVars(ft, sigma)
 		}
@@ -2210,4 +2216,54 @@ func substituteAndGateParam(funcCtx *class_context.ClassContext, param JavaType,
 		return res // concrete (dotted) class -> `(com.foo.Bar)`
 	}
 	return nil // leftover foreign bare type variable -> not denotable
+}
+
+// Unsubstituted declaration variables retain the callee's identity. The
+// caller knowing an equal-spelled name cannot license an inferred type/cast.
+// Method formals are introduced by the actual Signature; class formals must
+// have a real receiver/hierarchy substitution, including inherited variables.
+func calleeSignatureVariablesBound(signature string, sigma map[string]JavaType) bool {
+	own, refs, ok := SignatureTypeVariableReferences(signature)
+	if !ok {
+		return false
+	}
+	declared := map[string]bool{}
+	for _, n := range own {
+		declared[n] = true
+	}
+	for _, n := range refs {
+		if !declared[n] && sigma[n] == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// Receiver arguments bind the declaration actually rendered at this source
+// site. Original Signature has no formals for a member using Outer.K; a
+// verified flat declaration may redeclare K. Never infer that projection from
+// caller spelling or argument count.
+func instantiatedClassFormals(ctx *class_context.ClassContext, internal, signature string) []string {
+	names := ClassFormalTypeParamNames(signature)
+	if len(names) == 0 && ctx != nil && ctx.SiblingSourceClassFormals != nil {
+		if projected, known := ctx.SiblingSourceClassFormals(internal); known {
+			return projected
+		}
+	}
+	return names
+}
+
+func methodDeclarationSubstitution(signature string, receiver map[string]JavaType) map[string]JavaType {
+	own := MethodFormalTypeParamNames(signature)
+	if len(own) == 0 {
+		return receiver
+	}
+	result := make(map[string]JavaType, len(receiver))
+	for name, typ := range receiver {
+		result[name] = typ
+	}
+	for _, name := range own {
+		delete(result, name)
+	}
+	return result
 }

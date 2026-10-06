@@ -140,7 +140,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 				return false
 			}
 			seenMethods[key] = true
-			if _, known := nativeMethodLocalScopeSignature(local, c.obj, owner, c.Work); !known {
+			if _, known := nativeMethodLocalScopeSignature(local, c.obj, owner, c.Work, p); !known {
 				return false
 			}
 			constructor, known := originalMethodLocalDefaultConstructor(local, c.obj, c.Work)
@@ -226,7 +226,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 				return false
 			}
 			p.methodLocals[binary] = &nativeMethodLocalClass{object: local, owner: owner, constructor: constructor, allocations: sites, calls: map[int]bool{}}
-			if !nativeMethodLocalCaptureMetadata(c.obj, p.methodLocals[binary], c.Work) {
+			if !nativeMethodLocalCaptureMetadata(c.obj, p.methodLocals[binary], c.Work, p) {
 				return false
 			}
 			p.lexicalObjects[binary] = local
@@ -547,7 +547,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 				return fail()
 			}
 			if site.slots[i] >= 0 {
-				if !nativeMethodLocalParameterOperand(v, site.slots[i], descriptors[i], ctx, c.Work) {
+				if !nativeMethodLocalParameterOperand(v, site.slots[i], descriptors[i], ctx, c.Work, func(t types.JavaType) (string, bool) { return c.nativeMethodLocalSourceErasure(t, local) }) {
 					return fail()
 				}
 			} else {
@@ -655,7 +655,7 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 				return fail("actual descriptor-seeded parameter missing")
 			}
 			captureDescriptors, _, err := callbinding.Descriptor(local.constructor.descriptor)
-			erased, typed := values.SourceTypeErasure(ref.Type(), ctx)
+			erased, typed := c.nativeMethodLocalSourceErasure(ref.Type(), local)
 			if err != nil || index >= len(captureDescriptors) || !typed || erased != captureDescriptors[index] {
 				return fail("captured declaration changes original field erasure")
 			}
@@ -706,7 +706,7 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		sub.nativeCaptureFields = local.bindings
 		sub.nativeCaptureTypes = map[string]types.JavaType{}
 		lexical := *ctx
-		methodSignature, scoped := nativeMethodLocalScopeSignature(local.object, c.obj, local.owner, c.Work)
+		methodSignature, scoped := nativeMethodLocalScopeSignature(local.object, c.obj, local.owner, c.Work, p)
 		if !scoped {
 			return fail("original lexical generic scope failed")
 		}
@@ -856,55 +856,41 @@ func nativeMethodLocalSourceComplete(p *nativeMemberFamily) bool {
 // A static declaring method cannot inherit class formals; a method formal
 // shadows an equal-spelled class formal. Bind the original Signature before
 // checking the local class's own declarations, never a renderer hint.
-func nativeMethodLocalScopeSignature(local, enclosing *ClassObject, owner *nativeMethodLocalOwner, work *workbudget.Budget) (string, bool) {
-	signature := func(obj *ClassObject, attributes []AttributeInfo) (string, bool) {
-		result := ""
-		seen := false
-		for _, a := range attributes {
-			if !nativeProofWork(work, 1) {
-				return "", false
-			}
-			if sig, ok := a.(*SignatureAttribute); ok {
-				if seen || sig == nil {
-					return "", false
-				}
-				seen = true
-				var known bool
-				result, known = sourceBridgeUTF8(obj, sig.SignatureIndex)
-				if !known || !nativeProofWork(work, int64(len(result))) {
-					return "", false
-				}
-			}
-		}
-		return result, true
+func nativeMethodLocalScopeSignature(local, enclosing *ClassObject, owner *nativeMethodLocalOwner, work *workbudget.Budget, families ...*nativeMemberFamily) (string, bool) {
+	var family *nativeMemberFamily
+	if len(families) > 1 {
+		return "", false
 	}
-	classSig, known := signature(enclosing, enclosing.Attributes)
+	if len(families) == 1 {
+		family = families[0]
+	}
+	classes, known := nativeMethodLocalLexicalSignatures(enclosing, owner, family, work)
 	if !known {
 		return "", false
 	}
-	methodSig, known := signature(enclosing, owner.declaration.Attributes)
+	methodSig, known := nativeMethodLocalOriginalSignature(enclosing, owner.declaration.Attributes, work)
 	if !known {
+		return "", false
+	}
+	signature := methodSig
+	if signature == "" {
+		signature = owner.descriptor
+	}
+	if !nativeMethodLocalBindingBudget(classes, signature, work) {
+		return "", false
+	}
+	erased, _, known := types.EraseLexicalOwnerMethodSignatureWithThrows(classes, signature)
+	if !known || erased != owner.descriptor {
 		return "", false
 	}
 	scope := map[string]bool{}
-	if owner.declaration.AccessFlags&8 == 0 {
-		for _, name := range types.ClassFormalTypeParamNames(classSig) {
+	for _, sig := range classes {
+		for _, name := range types.ClassFormalTypeParamNames(sig) {
 			scope[name] = true
 		}
 	}
-	if methodSig != "" {
-		own, refs, known := types.SignatureTypeVariableReferences(methodSig)
-		if !known {
-			return "", false
-		}
-		for _, name := range own {
-			scope[name] = true
-		}
-		for _, name := range refs {
-			if !scope[name] {
-				return "", false
-			}
-		}
+	for _, name := range types.MethodFormalTypeParamNames(methodSig) {
+		scope[name] = true
 	}
 	return methodSig, nativeMemberTypeScope(local, scope, work)
 }
@@ -991,36 +977,17 @@ func nativeMethodLocalCaptureSourceComplete(local *nativeMethodLocalClass, sourc
 // even when the lexical parameter is a method formal or parameterized type.
 // Preserve that physical ABI; an extra original attribute cannot be silently
 // discarded merely because an arithmetic round trip happens to pass.
-func nativeMethodLocalCaptureMetadata(enclosing *ClassObject, local *nativeMethodLocalClass, work *workbudget.Budget) bool {
+func nativeMethodLocalCaptureMetadata(enclosing *ClassObject, local *nativeMethodLocalClass, work *workbudget.Budget, families ...*nativeMemberFamily) bool {
 	if enclosing == nil || local == nil || local.owner == nil || local.constructor == nil {
 		return false
 	}
-	methodSig, scoped := nativeMethodLocalScopeSignature(local.object, enclosing, local.owner, work)
+	_, scoped := nativeMethodLocalScopeSignature(local.object, enclosing, local.owner, work, families...)
 	if !scoped {
 		return false
 	}
 	_, _, err := callbinding.Descriptor(local.owner.descriptor)
 	if err != nil {
 		return false
-	}
-	if methodSig != "" {
-		classSig := ""
-		for _, a := range enclosing.Attributes {
-			if signature, ok := a.(*SignatureAttribute); ok && local.owner.declaration.AccessFlags&8 == 0 {
-				if signature == nil {
-					return false
-				}
-				var known bool
-				classSig, known = sourceBridgeUTF8(enclosing, signature.SignatureIndex)
-				if !known {
-					return false
-				}
-			}
-		}
-		erased, _, known := types.EraseLexicalMethodSignatureWithThrows(classSig, methodSig)
-		if !known || erased != local.owner.descriptor {
-			return false
-		}
 	}
 	for _, field := range local.object.Fields {
 		if field == nil || !nativeProofWork(work, 1) {

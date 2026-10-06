@@ -6,6 +6,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"strings"
 )
@@ -303,7 +304,7 @@ func (c *ClassObjectDumper) nativeMethodLocalOriginalProducerValue(local *native
 		}
 		for depth := 0; depth < 32; depth++ {
 			if cast, ok := operand.(*values.CastExpression); ok && cast != nil && cast.Binding {
-				erased, known := values.SourceTypeErasure(cast.TargetType, c.FuncCtx)
+				erased, known := c.nativeMethodLocalSourceErasure(cast.TargetType, local)
 				if !known || erased != expect[i] {
 					return false
 				}
@@ -317,7 +318,7 @@ func (c *ClassObjectDumper) nativeMethodLocalOriginalProducerValue(local *native
 			break
 		}
 		ref, known := operand.(*values.JavaRef)
-		if !known || ref == nil || params[o.Slot] == nil || params[o.Slot].Id != ref.Id || typesBySlot[o.Slot] == "" || !nativeMethodLocalParameterOperand(ref, o.Slot, typesBySlot[o.Slot], c.FuncCtx, c.Work) {
+		if !known || ref == nil || params[o.Slot] == nil || params[o.Slot].Id != ref.Id || typesBySlot[o.Slot] == "" || !nativeMethodLocalParameterOperand(ref, o.Slot, typesBySlot[o.Slot], c.FuncCtx, c.Work, func(t types.JavaType) (string, bool) { return c.nativeMethodLocalSourceErasure(t, local) }) {
 			return false
 		}
 	}

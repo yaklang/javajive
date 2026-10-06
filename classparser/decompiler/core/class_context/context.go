@@ -272,6 +272,10 @@ type ClassContext struct {
 	// without class_context importing types. Nil when no cross-class resolver is available (single-class
 	// decompile); set only on the jar / DecompileWithResolver path.
 	SiblingClassSig func(internalName string) (classSig string, methodSigs map[string]string, ok bool)
+	// Flattened source declarations can reintroduce verified enclosing formals.
+	// This projection does not alter the original class Signature. It is absent
+	// for native nested source and dependency-only declarations.
+	SiblingSourceClassFormals func(internalName string) ([]string, bool)
 	// SiblingSuperTypes resolves a jar-internal class's RAW direct supertypes by binary internal name
 	// (slash-separated): its super_class internal name followed by its direct interface internal names
 	// (each slash-form, "" entries omitted). Unlike SiblingClassSig (which reads the generic Signature

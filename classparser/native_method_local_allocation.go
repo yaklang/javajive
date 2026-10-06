@@ -10,6 +10,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/methodir"
 	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -208,7 +209,7 @@ func (c *ClassObjectDumper) nativeMethodLocalAllocationFacts(local *ClassObject,
 // text cannot satisfy a physical parameter certificate. Source stability and
 // membership in the declaring method's actual parameter list are additional
 // obligations for the later placement transaction.
-func nativeMethodLocalParameterOperand(value values.JavaValue, slot int, descriptor string, ctx *class_context.ClassContext, work *workbudget.Budget) bool {
+func nativeMethodLocalParameterOperand(value values.JavaValue, slot int, descriptor string, ctx *class_context.ClassContext, work *workbudget.Budget, erasers ...func(types.JavaType) (string, bool)) bool {
 	if ctx == nil || slot < 0 {
 		return false
 	}
@@ -224,7 +225,16 @@ func nativeMethodLocalParameterOperand(value values.JavaValue, slot int, descrip
 		if !ok || ref == nil || ref.CustomValue != nil || ref.StackVar != nil {
 			return false
 		}
+		if len(erasers) > 1 {
+			return false
+		}
 		erasure, known := values.SourceTypeErasure(ref.Type(), ctx)
+		if len(erasers) == 1 {
+			if erasers[0] == nil {
+				return false
+			}
+			erasure, known = erasers[0](ref.Type())
+		}
 		if !known || erasure != descriptor {
 			return false
 		}

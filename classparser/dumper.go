@@ -902,55 +902,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		classTypeParamNames = append(classTypeParamNames, c.nativeTypeParams...)
 	}
 	if c.nativeCaptureFields == nil && c.getenv("JDEC_INNER_TYPEVAR_OFF") == "" && len(classTypeParamNames) == 0 {
-		seen := map[string]bool{}
-		var free []string
-		addRef := func(n string) {
-			if n == "" || seen[n] {
-				return
-			}
-			seen[n] = true
-			free = append(free, n)
-		}
-		if classSigStr != "" {
-			for _, n := range types.FreeTypeVarRefsInClassSig(classSigStr) {
-				addRef(n)
-			}
-		}
-		for _, field := range c.obj.Fields {
-			for _, fattr := range field.Attributes {
-				if sa, ok := fattr.(*SignatureAttribute); ok {
-					if fs, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && fs != "" {
-						for _, n := range types.TypeVarRefsInFieldSig(fs) {
-							addRef(n)
-						}
-					}
-					break
-				}
-			}
-		}
-		// A flattened class can capture an enclosing type variable it references ONLY in a METHOD
-		// PARAMETER -- never in its supertype or a field. This happens for an anonymous class created
-		// inside a GENERIC METHOD: javac emits the class Signature WITHOUT a formal `<...>` section (it
-		// carries only the free-var refs, e.g. guava `Futures$2` has `Ljava/lang/Object;LFuture<TO;>;` --
-		// no `<O:...>` prefix), so O is recovered above as free from the supertype, but the free `I` in
-		// `private O applyTransformation(I var1)` appears in no supertype/field and stays undeclared
-		// ("cannot find symbol: class I"). Scan method-parameter signatures too so such a var is DECLARED
-		// as a formal (`Futures$2<O, I>`), symmetric with how O is recovered. The raw `new Futures$2(...)`
-		// call site is a raw instantiation and unaffected. Kill-switch JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF.
-		if c.getenv("JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF") == "" {
-			for _, method := range c.obj.Methods {
-				for _, mattr := range method.Attributes {
-					if sa, ok := mattr.(*SignatureAttribute); ok {
-						if ms, err := c.obj.getUtf8(sa.SignatureIndex); err == nil && ms != "" {
-							for _, n := range types.TypeVarRefsInMethodParams(ms) {
-								addRef(n)
-							}
-						}
-						break
-					}
-				}
-			}
-		}
+		free := flattenedFreeTypeVariables(c.obj, classSigStr, c.getenv("JDEC_INNER_METHODPARAM_TYPEVAR_INJECT_OFF") == "")
 		// Variables are emitted in first-seen (supertype-then-field) order. The canonical enclosing order
 		// is NOT recoverable from single-class bytecode (the synthetic this$0 field is erased to the raw
 		// enclosing type with no Signature, and InnerClasses carries only names), so a sibling override
@@ -1407,6 +1359,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// cases. Only wired on the jar / DecompileWithResolver path (foldSiblingResolver != nil).
 		c.FuncCtx.ClassSig = classSigStr
 		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
+		c.FuncCtx.SiblingSourceClassFormals = c.buildSiblingSourceClassFormals()
 		c.FuncCtx.SourceBridgeTarget = c.buildSourceBridgeTargets()
 		c.FuncCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
 		c.FuncCtx.SiblingClassAccessible = c.buildSiblingClassAccessible()
