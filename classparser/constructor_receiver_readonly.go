@@ -8,18 +8,23 @@ import (
 
 // A call on THIS is ordinarily an observation/publication boundary. Admit only
 // an exact own private/final declaration whose complete original body is an
-// bounded return or one nonvolatile field/literal read and return. There is no
+// bounded return or one nonvolatile field/literal/parameter read and return. There is no
 // virtual override, allocation, receiver publication or throwable computation.
 // The caller still needs a closed-finalizer proof: method entry can fail, e.g.
 // with StackOverflowError, even when its entire body has no throwing opcode.
 // No method name participates in this proof.
-func (c *ClassObjectDumper) constructorReceiverReadOnlyMethod(obj *ClassObject, member *values.JavaClassMember, opcode int, writes map[string]bool, remaining *int) (constructorEffectValue, bool) {
+func (c *ClassObjectDumper) constructorReceiverReadOnlyMethod(obj *ClassObject, member *values.JavaClassMember, opcode int, writes map[string]bool, remaining *int, arguments ...constructorEffectValue) (constructorEffectValue, bool) {
 	if obj == nil || member == nil || member.Name != obj.GetClassName() || obj.AccessFlags&0x0200 != 0 || opcode != core.OP_INVOKEVIRTUAL && opcode != core.OP_INVOKESPECIAL {
 		return constructorEffectValue{}, false
 	}
 	params, result, err := callbinding.Descriptor(member.Description)
-	if err != nil || len(params) != 0 {
+	if err != nil || len(params) != len(arguments) || nativeMemberParameterWidth(params) > 254 || !nativeProofWork(c.Work, int64(len(params))) {
 		return constructorEffectValue{}, false
+	}
+	for i, parameter := range params {
+		if arguments[i].kind != constructorEffectType(parameter).kind || arguments[i].receiver || arguments[i].allocation != 0 {
+			return constructorEffectValue{}, false
+		}
 	}
 	var target *MemberInfo
 	for _, method := range obj.Methods {
@@ -48,7 +53,7 @@ func (c *ClassObjectDumper) constructorReceiverReadOnlyMethod(obj *ClassObject, 
 			code = candidate
 		}
 	}
-	if code == nil || len(code.ExceptionTable) != 0 || code.MaxLocals < 1 || len(code.Code) > 16 || !nativeProofWork(c.Work, int64(len(code.Code))) {
+	if code == nil || len(code.ExceptionTable) != 0 || int(code.MaxLocals) < nativeMemberParameterWidth(params)+1 || len(code.Code) > 16 || !nativeProofWork(c.Work, int64(len(code.Code))) {
 		return constructorEffectValue{}, false
 	}
 	decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
@@ -70,6 +75,34 @@ func (c *ClassObjectDumper) constructorReceiverReadOnlyMethod(obj *ClassObject, 
 		return constructorEffectValue{}, false
 	}
 	if len(ops) == 2 {
+		// Bind a physical parameter slot, not its source name or logical index.
+		// The caller proved each actual value receiver-free before method entry;
+		// returning that same value cannot observe or publish the fresh THIS.
+		// Category-2 second words and ALOAD_0 never acquire this certificate.
+		slot := 1
+		for i, parameter := range params {
+			if core.GetRetrieveIdx(ops[0]) == slot && constructorMotionLoad(ops[0], parameter) && arguments[i].kind == value.kind {
+				returned := arguments[i]
+				// JVMS 6.5 IRETURN narrows B/C/S and masks Z at the return
+				// boundary, even without an I2B/I2C/I2S in the original body.
+				// Carrying the input word unchanged can hide a later receiver
+				// publication by pruning the wrong constructor branch.
+				if returned.knownInt {
+					switch result {
+					case "B":
+						returned.intWord = int32(int8(returned.intWord))
+					case "C":
+						returned.intWord = int32(uint16(returned.intWord))
+					case "S":
+						returned.intWord = int32(int16(returned.intWord))
+					case "Z":
+						returned.intWord &= 1
+					}
+				}
+				return returned, true
+			}
+			slot += arguments[i].width()
+		}
 		descriptor, known := constructorMotionLiteral(obj, ops[0])
 		if !known {
 			return constructorEffectValue{}, false

@@ -754,10 +754,10 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					}
 				}
 				if receiver.receiver && member.Member != "<init>" {
-					if !initialized || !c.constructorReceiverFinalizerSilent || len(args) != 0 {
+					if !initialized || !c.constructorReceiverFinalizerSilent {
 						return false
 					}
-					value, known := c.constructorReceiverReadOnlyMethod(obj, member, opcode, writes, remaining)
+					value, known := c.constructorReceiverReadOnlyMethod(obj, member, opcode, writes, remaining, actuals...)
 					if !known {
 						return false
 					}

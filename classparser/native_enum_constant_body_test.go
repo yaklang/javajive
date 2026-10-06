@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"context"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -12,6 +13,8 @@ const nativeEnumConstantPacketFixture = `public class ConstantPacketOwner{public
 // Mutate original compiled packets, not proposed source text. Each distinct
 // counterexample removes a fact needed to erase the compiler constructor or
 // to regenerate the constant class with its original owner and ordinal.
+// Parse retains Code slices into its input: each case must own fresh bytes,
+// otherwise an earlier bad opcode can make an unrelated later guard pass.
 func TestNativeEnumConstantBodyRequiresCompleteOriginalPacket(t *testing.T) {
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		files := nativeCompileSourceReleaseClasses(t, map[string]string{"ConstantPacketOwner.java": nativeEnumConstantPacketFixture}, debug, "8")
@@ -20,7 +23,7 @@ func TestNativeEnumConstantBodyRequiresCompleteOriginalPacket(t *testing.T) {
 			t.Run(debug+"/"+variant, func(t *testing.T) {
 				objects := map[string]*ClassObject{}
 				for path, raw := range files {
-					obj, e := Parse(raw)
+					obj, e := Parse(bytes.Clone(raw))
 					if e != nil {
 						t.Fatal(e)
 					}
@@ -203,7 +206,7 @@ func TestNativeEnumConstantArchiveRejectsUnownedExecutableTypes(t *testing.T) {
 	files := nativeCompileSourceReleaseClasses(t, map[string]string{"ConstantPacketOwner.java": nativeEnumConstantPacketFixture}, "none", "8")
 	originalArchive := nativeArchive(t, files)
 	defer originalArchive.Close()
-	root, e := Parse(files["ConstantPacketOwner.class"])
+	root, e := Parse(bytes.Clone(files["ConstantPacketOwner.class"]))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -213,7 +216,7 @@ func TestNativeEnumConstantArchiveRejectsUnownedExecutableTypes(t *testing.T) {
 	}
 	for _, variant := range []string{"original", "unused class reference", "foreign allocation", "class literal", "array class literal", "cast", "array cast", "instanceof", "array allocation", "multiarray allocation", "typed method", "typed field", "method type", "handle", "wrong call descriptor", "wrong allocation PC", "wrong invocation PC", "nil family", "nil index", "invalid index", "work", "memory", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
-			obj, e := Parse(files["ConstantPacketOwner.class"])
+			obj, e := Parse(bytes.Clone(files["ConstantPacketOwner.class"]))
 			if e != nil {
 				t.Fatal(e)
 			}

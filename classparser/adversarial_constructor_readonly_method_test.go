@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -23,6 +24,8 @@ func TestAdversarialConstructorReadOnlyPrivateFinalCallsPreserveCapture(t *testi
 
 // Mutations change original evidence, rather than teaching the proof a fixture
 // name. Each incomplete, observable or dynamically dispatched body must refuse.
+// Clone before Parse because decoded Code aliases the supplied class bytes;
+// each negative must be refused for its own mutation, not an earlier failure.
 func TestAdversarialConstructorReadOnlyMethodEvidenceBoundaries(t *testing.T) {
 	javac, _ := t04Tools(t)
 	dir := t.TempDir()
@@ -37,9 +40,9 @@ func TestAdversarialConstructorReadOnlyMethodEvidenceBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, variant := range []string{"private", "final", "virtual", "synchronized", "native", "abstract", "static", "wrong owner", "wrong descriptor", "wrong opcode", "duplicate declaration", "missing code", "duplicate code", "wrong return", "extra body", "volatile field", "moved field", "budget"} {
+	for _, variant := range []string{"private", "final", "virtual", "synchronized", "native", "abstract", "static", "wrong owner", "wrong descriptor", "wrong opcode", "duplicate declaration", "missing code", "duplicate code", "wrong return", "harmless nop", "extra body", "volatile field", "moved field", "budget"} {
 		t.Run(variant, func(t *testing.T) {
-			obj, err := Parse(raw)
+			obj, err := Parse(bytes.Clone(raw))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -92,8 +95,16 @@ func TestAdversarialConstructorReadOnlyMethodEvidenceBoundaries(t *testing.T) {
 				target.Attributes = append(target.Attributes, code)
 			case "wrong return":
 				code.Code[len(code.Code)-1] = byte(core.OP_IRETURN)
-			case "extra body":
+			case "harmless nop":
 				code.Code = append([]byte{byte(core.OP_NOP)}, code.Code...)
+			case "extra body":
+				// A real storage effect distinguishes this negative from the
+				// inert NOP removed by the shared original-opcode decoder.
+				if len(code.Code) != 5 || code.Code[1] != byte(core.OP_GETFIELD) {
+					t.Fatalf("unexpected original field read %v", code.Code)
+				}
+				code.Code = append([]byte{byte(core.OP_ALOAD_0), byte(core.OP_LCONST_0), byte(core.OP_PUTFIELD), code.Code[2], code.Code[3]}, code.Code...)
+				code.MaxStack = 3
 			case "volatile field":
 				obj.Fields[0].AccessFlags |= 0x0040
 			case "moved field":
@@ -103,7 +114,7 @@ func TestAdversarialConstructorReadOnlyMethodEvidenceBoundaries(t *testing.T) {
 			}
 			d := &ClassObjectDumper{obj: obj}
 			value, ok := d.constructorReceiverReadOnlyMethod(obj, member, opcode, writes, &remaining)
-			want := variant == "private" || variant == "final"
+			want := variant == "private" || variant == "final" || variant == "harmless nop"
 			if ok != want || ok && value.kind != 'J' {
 				t.Fatalf("accepted=%v value=%+v want %v", ok, value, want)
 			}
@@ -127,7 +138,7 @@ func TestAdversarialConstructorReadOnlyCallStillRequiresClosedFinalizer(t *testi
 		t.Fatal(err)
 	}
 	for _, closed := range []bool{false, true} {
-		obj, err := Parse(raw)
+		obj, err := Parse(bytes.Clone(raw))
 		if err != nil {
 			t.Fatal(err)
 		}
