@@ -22,9 +22,29 @@ import (
 type nativeMethodLocalAllocation struct {
 	newPC, invokePC int
 	slots           []int
+	origins         []ssabuild.Origin
+	stores          map[int]nativeMethodLocalStore
+	producers       map[int]nativeMethodLocalProducerRecord
+}
+
+type nativeMethodLocalProducerRecord struct {
+	instruction methodir.Instr
+	record      ssabuild.InstructionValues
+}
+
+type nativeMethodLocalStore struct {
+	slot   int
+	origin ssabuild.Origin
 }
 
 func (c *ClassObjectDumper) nativeMethodLocalParameterAllocations(local *ClassObject, owner *nativeMethodLocalOwner, constructor *nativeMethodLocalConstructor) (map[int]nativeMethodLocalAllocation, bool) {
+	return c.nativeMethodLocalAllocationFacts(local, owner, constructor, false)
+}
+
+// A produced capture additionally needs an original STORE carrying the exact
+// typed SSA value. Source declaration identity and dominance close separately;
+// no producer is licensed by matching its nominal type or field spelling.
+func (c *ClassObjectDumper) nativeMethodLocalAllocationFacts(local *ClassObject, owner *nativeMethodLocalOwner, constructor *nativeMethodLocalConstructor, produced bool) (map[int]nativeMethodLocalAllocation, bool) {
 	if c == nil || c.obj == nil || local == nil || owner == nil || constructor == nil || owner.owner != c.obj.GetClassName() || owner.declaration == nil {
 		return nil, false
 	}
@@ -79,7 +99,34 @@ func (c *ClassObjectDumper) nativeMethodLocalParameterAllocations(local *ClassOb
 			slot++
 		}
 	}
+	stores := map[int]nativeMethodLocalStore{}
+	producers := map[int]nativeMethodLocalProducerRecord{}
+	firstStore := map[ssabuild.Origin]int{}
+	if produced {
+		for _, record := range fn.Instructions {
+			if !nativeProofWork(c.Work, 1) {
+				return nil, false
+			}
+			ins, found := ir.InstrByID(methodir.InstrID(record.PC))
+			if found {
+				if c.Work != nil && c.Work.CheckAlloc(int64(len(producers)+1)*512+int64(len(stores))*128) != nil {
+					return nil, false
+				}
+				producers[int(record.PC)] = nativeMethodLocalProducerRecord{instruction: ins, record: record}
+			}
+			if found && core.LocalAccessOf(ins.Opcode).Write && len(record.Uses) == 1 && record.Uses[0].Kind == ssabuild.OriginInstr {
+				if c.Work != nil && c.Work.CheckAlloc(int64(len(producers))*512+int64(len(stores)+1)*128) != nil {
+					return nil, false
+				}
+				stores[int(record.PC)] = nativeMethodLocalStore{slot: ins.Local, origin: record.Uses[0]}
+				if old, known := firstStore[record.Uses[0]]; !known || int(record.PC) < old {
+					firstStore[record.Uses[0]] = int(record.PC)
+				}
+			}
+		}
+	}
 	result := map[int]nativeMethodLocalAllocation{}
+	var sharedOrigins []ssabuild.Origin
 	var sharedSlots []int
 	for _, record := range fn.Instructions {
 		if !nativeProofWork(c.Work, 1) {
@@ -105,23 +152,43 @@ func (c *ClassObjectDumper) nativeMethodLocalParameterAllocations(local *ClassOb
 		if _, duplicate := result[int(receiver.NewPC)]; duplicate {
 			return nil, false
 		}
-		if c.Work != nil && c.Work.CheckAlloc(int64(len(result)+1)*int64(len(captureParams)+1)*16) != nil {
+		if c.Work != nil && c.Work.CheckAlloc(int64(len(producers))*512+int64(len(stores))*128+int64(len(result)+1)*int64(len(captureParams)+1)*64) != nil {
 			return nil, false
 		}
-		proof := nativeMethodLocalAllocation{newPC: int(receiver.NewPC), invokePC: int(record.PC), slots: make([]int, len(captureParams))}
+		proof := nativeMethodLocalAllocation{newPC: int(receiver.NewPC), invokePC: int(record.PC), slots: make([]int, len(captureParams)), origins: make([]ssabuild.Origin, len(captureParams)), stores: stores, producers: producers}
 		at := receiverIndex + 1
 		for i, descriptor := range captureParams {
 			if !nativeProofWork(c.Work, 1) || at >= len(record.Before.Stack) {
 				return nil, false
 			}
 			argument := record.BeforeOrigins[len(record.Before.Locals)+at]
-			if argument.Kind != ssabuild.OriginParam || parameterTypes[argument.Slot] != descriptor {
+			if argument.Kind == ssabuild.OriginParam {
+				if parameterTypes[argument.Slot] != descriptor {
+					return nil, false
+				}
+				proof.slots[i] = argument.Slot
+			} else if produced && argument.Kind == ssabuild.OriginInstr {
+				original, known := producers[int(argument.PC)]
+				if !known || original.instruction.Member == "<init>" {
+					return nil, false
+				}
+				switch original.instruction.Opcode {
+				case core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE, core.OP_INVOKESPECIAL:
+				default:
+					return nil, false
+				}
+				pc, stored := firstStore[argument]
+				if !stored || pc >= proof.newPC {
+					return nil, false
+				}
+				proof.slots[i] = -1
+			} else {
 				return nil, false
 			}
+			proof.origins[i] = argument
 			if i == constructor.captures[constructor.enclosingField] && constructor.enclosingField != "" && argument.Slot != 0 {
 				return nil, false
 			}
-			proof.slots[i] = argument.Slot
 			at++
 			if descriptor == "J" || descriptor == "D" {
 				at++
@@ -129,12 +196,13 @@ func (c *ClassObjectDumper) nativeMethodLocalParameterAllocations(local *ClassOb
 		}
 		if sharedSlots != nil {
 			for i, slot := range proof.slots {
-				if slot != sharedSlots[i] {
+				if slot != sharedSlots[i] || proof.origins[i] != sharedOrigins[i] {
 					return nil, false
 				}
 			}
 		} else {
 			sharedSlots = append([]int(nil), proof.slots...)
+			sharedOrigins = append([]ssabuild.Origin(nil), proof.origins...)
 		}
 		result[proof.newPC] = proof
 	}

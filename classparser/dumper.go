@@ -41,6 +41,7 @@ type ClassObjectDumper struct {
 	nativeEnumConstantCurrent      *nativeEnumConstantBody
 	nativeMemberRoot               *nativeMemberFamily
 	nativeMethodLocalCurrent       *nativeMethodLocalClass
+	nativeMethodLocalPlacements    map[statements.Statement][]string
 	nativeMemberCurrent            *nativeMemberClass
 	nativeRegistrationScope        *nativeMemberRegistrationScope
 	nativeRenderedMemberNames      []string
@@ -4547,6 +4548,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				if statementStr == "" {
 					continue
 				}
+				// Only the final top-level assembly owns producer-local placement.
+				// Recursive previews cannot certify or duplicate the declaration.
+				for _, declaration := range c.nativeMethodLocalPlacements[statement] {
+					statementStr = declaration + "\n" + statementStr
+				}
 				if err := c.holdOutput(int64(len(statementStr) + 1)); err != nil {
 					return nil, err
 				}
@@ -4597,6 +4603,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			sourceCode = c.sourceRewrite("addMissingGeneratedLocalDecls", "method_source", sourceCode, func(body string) string {
 				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr, c.nativeLexicalCaptures())
 			})
+			if !c.nativeMethodLocalMethodSourceComplete(name, descriptor, sourceCode) {
+				c.nativeMemberRoot.failed = true
+				return nil, fmt.Errorf("unproved final method-local source emission")
+			}
 			code = sourceCode
 		}
 	}

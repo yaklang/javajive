@@ -14,6 +14,9 @@ import (
 )
 
 type JavaRef struct {
+	originalLocalDeclaration           bool
+	originalLocalPC, originalLocalSlot int
+	originalLocalSeed                  JavaValue
 	originalParameter                  bool
 	originalParameterSlot              int
 	originalParameterSeed              JavaValue
@@ -63,6 +66,24 @@ func (j *JavaRef) OriginalParameterSlot() (int, bool) {
 		return 0, false
 	}
 	return j.originalParameterSlot, true
+}
+
+// MarkOriginalLocalDeclaration records the actual local STORE emitted by
+// bytecode decoding. It identifies a value definition, not a source spelling
+// or a reaching-definition join. Only a stable original seed can retain it.
+func (j *JavaRef) MarkOriginalLocalDeclaration(pc, slot int, seed JavaValue) {
+	if j == nil || j.originalLocalDeclaration || j.IsParam || j.IsThis || pc < 0 || pc > 65535 || slot < 0 || slot > 65535 || isNilJavaValue(seed) || !sameOriginalValueIdentity(seed, j.Val) {
+		return
+	}
+	j.originalLocalDeclaration = true
+	j.originalLocalPC, j.originalLocalSlot, j.originalLocalSeed = pc, slot, seed
+}
+
+func (j *JavaRef) OriginalLocalDeclaration(seed JavaValue) (pc, slot int, known bool) {
+	if j == nil || !j.originalLocalDeclaration || j.IsParam || j.IsThis || j.CustomValue != nil || j.StackVar != nil || !sameOriginalValueIdentity(seed, j.originalLocalSeed) || !sameOriginalValueIdentity(j.Val, j.originalLocalSeed) {
+		return 0, 0, false
+	}
+	return j.originalLocalPC, j.originalLocalSlot, true
 }
 
 // ReplaceVar implements JavaValue.

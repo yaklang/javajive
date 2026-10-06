@@ -1379,7 +1379,12 @@ func nativeCaptureDeclaration(body []statements.Statement, ref *values.JavaRef, 
 			}
 			active[st] = true
 			if assign, ok := st.(*statements.AssignStatement); ok && assign.ArrayMember == nil {
-				if target, ok := values.UnpackSoltValue(assign.LeftValue).(*values.JavaRef); ok && target != nil && target.Id == ref.Id {
+				left, bounded := nativeMemberEnclosingUnpack(assign.LeftValue, work)
+				if !bounded {
+					valid = false
+					return
+				}
+				if target, ok := left.(*values.JavaRef); ok && target != nil && target.Id == ref.Id {
 					if parameter || !(assign.IsDeclare || assign.IsFirst) || declaration != nil {
 						valid = false
 						return

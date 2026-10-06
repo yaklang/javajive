@@ -16,14 +16,19 @@ import (
 )
 
 type nativeMethodLocalClass struct {
-	object       *ClassObject
-	owner        *nativeMethodLocalOwner
-	constructor  *nativeMethodLocalConstructor
-	allocations  map[int]nativeMethodLocalAllocation
-	calls        map[int]bool
-	bindings     map[string]string
-	parameterIDs map[int]*coreutils.VariableId
-	source       string
+	object           *ClassObject
+	owner            *nativeMethodLocalOwner
+	constructor      *nativeMethodLocalConstructor
+	allocations      map[int]nativeMethodLocalAllocation
+	calls            map[int]bool
+	bindings         map[string]string
+	parameterIDs     map[int]*coreutils.VariableId
+	captureIDs       map[string]*coreutils.VariableId
+	sourceRefs       map[string]*values.JavaRef
+	placement        statements.Statement
+	sourceParameters map[int]*values.JavaRef
+	source           string
+	sourceEmitted    bool
 }
 
 // A parameter-only local declaration can be placed at the start of its exact
@@ -89,7 +94,7 @@ func (c *ClassObjectDumper) planNativeMethodLocals(p *nativeMemberFamily) bool {
 					return false
 				}
 			}
-			sites, known := c.nativeMethodLocalParameterAllocations(local, owner, constructor)
+			sites, known := c.nativeMethodLocalAllocationFacts(local, owner, constructor, true)
 			if !known {
 				return false
 			}
@@ -378,24 +383,40 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 			return fail()
 		}
 		for i, arg := range args {
-			v, known := arg.Value.(values.JavaValue)
-			if !known || !nativeMethodLocalParameterOperand(v, site.slots[i], descriptors[i], ctx, c.Work) {
-				return fail()
-			}
-			ref, known := values.UnpackSoltValue(v).(*values.JavaRef)
-			if !known || ref == nil || local.parameterIDs[site.slots[i]] != ref.Id {
-				return fail()
-			}
 			field := ""
 			for name, index := range local.constructor.captures {
 				if index == i {
 					field = name
 				}
 			}
-			if field == "" || field != local.constructor.enclosingField && arg.Text != local.bindings[field] {
+			v, known := arg.Value.(values.JavaValue)
+			if !known || field == "" {
+				return fail()
+			}
+			if site.slots[i] >= 0 {
+				if !nativeMethodLocalParameterOperand(v, site.slots[i], descriptors[i], ctx, c.Work) {
+					return fail()
+				}
+			} else {
+				ref, ok := values.UnpackSoltValue(v).(*values.JavaRef)
+				if !ok || ref == nil {
+					return fail()
+				}
+				pc, slot, known := ref.OriginalLocalDeclaration(ref.Val)
+				store, stored := site.stores[pc]
+				if !known || !stored || store.slot != slot || store.origin != site.origins[i] {
+					return fail()
+				}
+				if !c.nativeMethodLocalOriginalProducerInvocation(local, site, site.origins[i], ref.Val, local.sourceParameters) {
+					return fail()
+				}
+			}
+			ref, known := values.UnpackSoltValue(v).(*values.JavaRef)
+			if !known || ref == nil || local.captureIDs[field] != ref.Id || field != local.constructor.enclosingField && arg.Text != local.bindings[field] {
 				return fail()
 			}
 		}
+
 		local.calls[newPC] = true
 		return "new " + local.owner.name + "()", true
 	}
@@ -404,6 +425,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statements.Statement, params []values.JavaValue) ([]string, error) {
 	p := c.nativeMemberRoot
 	ctx := c.FuncCtx
+	c.nativeMethodLocalPlacements = map[statements.Statement][]string{}
 	if p == nil || c.obj.GetClassName() != p.owner {
 		return nil, nil
 	}
@@ -453,8 +475,17 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		return nil, fmt.Errorf("unproved method-local declaration/capture placement: %s", reason)
 	}
 	for _, local := range locals {
+		local.sourceEmitted = false
 		local.bindings = map[string]string{}
+		local.captureIDs = map[string]*coreutils.VariableId{}
 		local.parameterIDs = map[int]*coreutils.VariableId{}
+		produced, anchor, proved := c.nativeMethodLocalProducerBindings(local, body, bySlot)
+		if !proved {
+			return fail("original producer definition/source placement failed")
+		}
+		local.placement = anchor
+		local.sourceRefs = produced
+		local.sourceParameters = bySlot
 		var site nativeMethodLocalAllocation
 		for _, allocation := range local.allocations {
 			site = allocation
@@ -462,10 +493,22 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		}
 		for field, index := range local.constructor.captures {
 			ref := bySlot[site.slots[index]]
+			if site.slots[index] < 0 {
+				ref = produced[field]
+			}
 			if ref == nil || ref.Id == nil {
 				return fail("actual descriptor-seeded parameter missing")
 			}
-			local.parameterIDs[site.slots[index]] = ref.Id
+			captureDescriptors, _, err := callbinding.Descriptor(local.constructor.descriptor)
+			erased, typed := values.SourceTypeErasure(ref.Type(), ctx)
+			if err != nil || index >= len(captureDescriptors) || !typed || erased != captureDescriptors[index] {
+				return fail("captured declaration changes original field erasure")
+			}
+			local.captureIDs[field] = ref.Id
+			local.sourceRefs[field] = ref
+			if site.slots[index] >= 0 {
+				local.parameterIDs[site.slots[index]] = ref.Id
+			}
 			if field == local.constructor.enclosingField {
 				if !ref.IsThis {
 					return fail("actual enclosing THIS missing")
@@ -521,14 +564,9 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		sub.nativeOuterContext = &lexical
 		sub.nativeTypeParams = append([]string(nil), ctx.TypeParams...)
 		sub.sourceInnerClassBody = true
-		var site nativeMethodLocalAllocation
-		for _, allocation := range local.allocations {
-			site = allocation
-			break
-		}
-		for field, index := range local.constructor.captures {
+		for field := range local.constructor.captures {
 			if field != local.constructor.enclosingField {
-				sub.nativeCaptureTypes[field] = bySlot[site.slots[index]].Type().Copy()
+				sub.nativeCaptureTypes[field] = local.sourceRefs[field].Type().Copy()
 			}
 		}
 		sub.nativeCapturedReads = map[string]map[int]string{}
@@ -584,7 +622,11 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		if e := c.ensureOutput(int64(len(local.source))); e != nil {
 			return nil, e
 		}
-		declarations = append(declarations, local.source)
+		if local.placement == nil {
+			declarations = append(declarations, local.source)
+		} else {
+			c.nativeMethodLocalPlacements[local.placement] = append(c.nativeMethodLocalPlacements[local.placement], local.source)
+		}
 		for _, imp := range javaExtractImports(source) {
 			ctx.Import(imp)
 		}
@@ -617,12 +659,34 @@ func nativeMethodLocalDeclarationHeader(local *nativeMethodLocalClass, source st
 	return header
 }
 
+// Preview rendering is not an emission certificate. Check the assembled exact
+// declaring-method body after source rewrites; a removed/duplicated local
+// declaration must invalidate the entire source transaction.
+func (c *ClassObjectDumper) nativeMethodLocalMethodSourceComplete(name, descriptor, body string) bool {
+	if c.nativeMemberRoot == nil || c.obj.GetClassName() != c.nativeMemberRoot.owner {
+		return true
+	}
+	for _, local := range c.nativeMemberRoot.methodLocals {
+		if local == nil || local.owner == nil {
+			return false
+		}
+		if local.owner.method != name || local.owner.descriptor != descriptor {
+			continue
+		}
+		if local.source == "" || !nativeProofWork(c.Work, int64(len(body))) || strings.Count(body, local.source) != 1 {
+			return false
+		}
+		local.sourceEmitted = true
+	}
+	return true
+}
+
 func nativeMethodLocalSourceComplete(p *nativeMemberFamily) bool {
 	if p == nil || p.failed {
 		return false
 	}
 	for _, local := range p.methodLocals {
-		if local == nil || local.source == "" || len(local.calls) != len(local.allocations) {
+		if local == nil || local.source == "" || !local.sourceEmitted || len(local.calls) != len(local.allocations) {
 			return false
 		}
 		for pc := range local.allocations {
