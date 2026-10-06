@@ -23,28 +23,15 @@ func nativeMemberJointBridgeDeclaration(p *nativeMemberFamily, obj *ClassObject,
 	return nok && dok && name == "<init>" && b != nil && b.marker == marker && nativeMemberJointBridgeEquivalent(p, obj, m, desc, work)
 }
 func nativeMemberJointBridgeNameTypes(p *nativeMemberFamily, obj *ClassObject, work *workbudget.Budget) map[int]bool {
-	out := map[int]bool{}
 	if p == nil {
-		return out
+		return map[int]bool{}
 	}
-	for name, bridges := range p.bridgeOwners() {
-		if child, exists := p.children[name]; exists && child == nil {
+	for _, child := range p.children {
+		if child == nil || !nativeProofWork(work, 1) {
 			return nil
 		}
-		if len(bridges) == 0 {
-			continue
-		}
-		if !nativeProofWork(work, 1) {
-			return nil
-		}
-		proof := &nativeAnonymousFamily{owner: name, bridges: bridges}
-		for index, valid := range proof.accessBridgeNameTypes(obj, work) {
-			if valid {
-				out[index] = true
-			}
-		}
 	}
-	return out
+	return nativeConstructorBridgeNameTypes(obj, p.bridgeOwners(), work)
 }
 func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudget.Budget) bool {
 	if p == nil {

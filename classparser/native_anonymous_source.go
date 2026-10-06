@@ -737,6 +737,9 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 			}
 		}
 		bridgeNameTypes := nativeMemberJointBridgeNameTypes(members, object, c.Work)
+		if bridgeNameTypes == nil {
+			return nil
+		}
 		if len(p.bridges) > 0 {
 			for index, valid := range p.accessBridgeNameTypes(object, c.Work) {
 				if valid {

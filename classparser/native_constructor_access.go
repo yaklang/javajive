@@ -156,6 +156,17 @@ func (p *nativeAnonymousFamily) accessBridgeDescriptor(object *ClassObject, name
 	return p != nil && name == "<init>" && object.GetClassName() == p.owner && p.bridges[descriptor] != nil
 }
 func (p *nativeAnonymousFamily) accessBridgeNameTypes(object *ClassObject, work *workbudget.Budget) map[int]bool {
+	if p == nil {
+		return nil
+	}
+	return nativeConstructorBridgeNameTypes(object, map[string]map[string]*nativeConstructorAccessBridge{p.owner: p.bridges}, work)
+}
+
+// NameAndType is shared constant-pool data, not a declaring owner. Certify all
+// member edges of a candidate tuple against the same original ownership scope.
+// A standalone anonymous family still contributes exactly one owner; a joint
+// named transaction contributes its independently proved bridge owners.
+func nativeConstructorBridgeNameTypes(object *ClassObject, owners map[string]map[string]*nativeConstructorAccessBridge, work *workbudget.Budget) map[int]bool {
 	valid := map[int]bool{}
 	seen := map[int]bool{}
 	references := map[uint16]int{}
@@ -165,6 +176,18 @@ func (p *nativeAnonymousFamily) accessBridgeNameTypes(object *ClassObject, work 
 	if work != nil && work.CheckAlloc(int64(len(object.ConstantPool))*32) != nil {
 		return nil
 	}
+	descriptors := map[string]bool{}
+	for _, bridges := range owners {
+		if !nativeProofWork(work, 1) {
+			return nil
+		}
+		for descriptor, bridge := range bridges {
+			if !nativeProofWork(work, 1) || bridge == nil || bridge.descriptor != descriptor || work != nil && work.CheckAlloc(int64(len(descriptors)+1)*64) != nil {
+				return nil
+			}
+			descriptors[descriptor] = true
+		}
+	}
 	for i, constant := range object.ConstantPool {
 		if !nativeProofWork(work, 1) {
 			return nil
@@ -172,7 +195,7 @@ func (p *nativeAnonymousFamily) accessBridgeNameTypes(object *ClassObject, work 
 		if nt, ok := constant.(*ConstantNameAndTypeInfo); ok && nt != nil {
 			name, nok := sourceBridgeUTF8(object, nt.NameIndex)
 			desc, dok := sourceBridgeUTF8(object, nt.DescriptorIndex)
-			if nok && dok && name == "<init>" && p.bridges[desc] != nil {
+			if nok && dok && name == "<init>" && descriptors[desc] {
 				valid[i+1] = true
 			}
 		}
@@ -188,7 +211,12 @@ func (p *nativeAnonymousFamily) accessBridgeNameTypes(object *ClassObject, work 
 			}
 			owner, known := sourceBridgeClassName(object, ref.ClassIndex)
 			_, ordinary := constant.(*ConstantMethodrefInfo)
-			if !known || !ordinary || owner != p.owner {
+			nt, nknown := object.ConstantPool[index-1].(*ConstantNameAndTypeInfo)
+			descriptor, dknown := "", false
+			if nknown && nt != nil {
+				descriptor, dknown = sourceBridgeUTF8(object, nt.DescriptorIndex)
+			}
+			if !known || !ordinary || !dknown || owners[owner][descriptor] == nil {
 				valid[index] = false
 			}
 			references[uint16(i+1)] = index
@@ -201,14 +229,23 @@ func (p *nativeAnonymousFamily) accessBridgeNameTypes(object *ClassObject, work 
 		}
 		switch x := constant.(type) {
 		case *ConstantMethodHandleInfo:
+			if x == nil {
+				return nil
+			}
 			if index := references[x.ReferenceIndex]; index != 0 {
 				valid[index] = false
 			}
 		case *ConstantInvokeDynamicInfo:
+			if x == nil {
+				return nil
+			}
 			if _, candidate := valid[int(x.NameAndTypeIndex)]; candidate {
 				valid[int(x.NameAndTypeIndex)] = false
 			}
 		case *ConstantDynamicInfo:
+			if x == nil {
+				return nil
+			}
 			if _, candidate := valid[int(x.NameAndTypeIndex)]; candidate {
 				valid[int(x.NameAndTypeIndex)] = false
 			}
