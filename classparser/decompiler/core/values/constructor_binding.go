@@ -28,7 +28,117 @@ func (f *FunctionCallExpression) delegationDescriptorBindingCast(i int, arg Java
 	if owner != strings.ReplaceAll(ctx.ClassName, ".", "/") && owner != strings.ReplaceAll(ctx.SupperClassName, ".", "/") {
 		return ""
 	}
-	return f.originalConstructorDescriptorBindingCast(i, arg, ctx)
+	if cast := f.originalConstructorDescriptorBindingCast(i, arg, ctx); cast != "" {
+		return cast
+	}
+	return f.instantiatedConstructorBindingCast(i, ctx)
+}
+
+// A class-generic constructor is not generally callable through its erased
+// parameters: Parent<String>(T) requires String, not Object. A descriptor cast
+// is valid only when the exact declaration's class formal, instantiated at
+// this/super, has that same erasure and excludes every same-arity rival. This
+// preserves both runtime checks and source overload identity. Independent
+// constructor method formals and incomplete/varargs families remain unproved.
+func (f *FunctionCallExpression) instantiatedConstructorBindingCast(i int, ctx *class_context.ClassContext) string {
+	if ctx.SiblingClassSig == nil {
+		return ""
+	}
+	owner := strings.ReplaceAll(f.ClassName, ".", "/")
+	table, known := ctx.InvocationMetadata(owner)
+	ps, result, err := callbinding.Descriptor(f.Descriptor)
+	if !known || table.Name != owner || !table.MembersComplete || err != nil || result != "V" || len(ps) != len(f.Arguments) || i < 0 || i >= len(ps) || !callbinding.Reference(ps[i]) {
+		return ""
+	}
+	classSig, methods, available := ctx.SiblingClassSig(owner)
+	if !available || classSig != table.Signature {
+		return ""
+	}
+	formals := types.ClassFormalTypeParamNames(classSig)
+	if len(formals) == 0 {
+		return ""
+	}
+	var actual []types.JavaType
+	if owner == strings.ReplaceAll(ctx.ClassName, ".", "/") {
+		for _, name := range formals {
+			if !ctx.IsTypeParam(name) {
+				return ""
+			}
+			actual = append(actual, types.NewJavaClass(name))
+		}
+	} else {
+		super, _ := types.ParseClassSignatureSupers(ctx.ClassSig)
+		pt, parameterized := types.AsParameterizedType(super)
+		if !parameterized || strings.ReplaceAll(pt.RawClassName, ".", "/") != owner {
+			return ""
+		}
+		actual = pt.TypeArgs
+	}
+	if len(actual) != len(formals) {
+		return ""
+	}
+	sigma := map[string]types.JavaType{}
+	for j, name := range formals {
+		sigma[name] = actual[j]
+	}
+	matched, rivals := 0, 0
+	var selected callbinding.Method
+	for _, method := range table.Methods {
+		if method.Name != "<init>" {
+			continue
+		}
+		if method.Desc == f.Descriptor {
+			matched++
+			selected = method
+			continue
+		}
+		other, r, e := callbinding.Descriptor(method.Desc)
+		if e != nil || r != "V" || method.Varargs || method.Static || method.Bridge {
+			return ""
+		}
+		if len(other) != len(ps) {
+			continue
+		}
+		rivals++
+		// A rival may mention another class formal at a different argument.
+		// Its distinguishing formal must still be exactly this reference type;
+		// erasure alone is not evidence for a generic or poly competitor.
+		if method.Generic && method.Signature == "" {
+			return ""
+		}
+		if method.Signature != "" {
+			_, rp, rr := types.ParseMethodSignatureFull(method.Signature, ctx)
+			if len(types.MethodFormalTypeParamNames(method.Signature)) != 0 || methods[class_context.MethodDescKey("<init>", method.Desc)] != method.Signature || rr == nil || len(rp) != len(other) || rp[i] == nil || bindingType(rp[i]) != other[i] {
+				return ""
+			}
+		}
+		if !callbinding.Reference(other[i]) || other[i] == ps[i] || !callbinding.Assignable(other[i], ps[i], ctx.InvocationMetadata) || callbinding.Assignable(ps[i], other[i], ctx.InvocationMetadata) {
+			return ""
+		}
+		if ps[i] != "Ljava/lang/Object;" {
+			// Object's absence of supertypes is a JVM axiom. For any other
+			// bound, a missing hierarchy path is not proof of exclusion.
+			related, complete := checkCastAncestorClosure(callbinding.Name(ps[i]), callbinding.Name(other[i]), ctx.InvocationMetadata)
+			widening, rivalComplete := checkCastAncestorClosure(callbinding.Name(other[i]), callbinding.Name(ps[i]), ctx.InvocationMetadata)
+			if related || !complete || !widening || !rivalComplete {
+				return ""
+			}
+		}
+	}
+	if matched != 1 || rivals == 0 || selected.Static || selected.Bridge || selected.Varargs || selected.Signature == "" || len(types.MethodFormalTypeParamNames(selected.Signature)) != 0 || methods[class_context.MethodDescKey("<init>", f.Descriptor)] != selected.Signature {
+		return ""
+	}
+	_, params, ret := types.ParseMethodSignatureFull(selected.Signature, ctx)
+	if ret == nil || len(params) != len(ps) || params[i] == nil {
+		return ""
+	}
+	name, bare := types.RawClassFQN(params[i])
+	instantiated := sigma[name]
+	erasure, denotable := SourceTypeErasure(instantiated, ctx)
+	if !bare || instantiated == nil || erasedInvocationBounds(classSig)[name] != ps[i] || !denotable || erasure != ps[i] {
+		return ""
+	}
+	return renderWitnessParamType(instantiated, ctx)
 }
 
 // Allocation arguments can also acquire a narrower source view than their

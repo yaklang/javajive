@@ -1015,6 +1015,9 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				if result[name+desc][int(op.CurrentOffset)] != nil {
 					continue
 				}
+				if c.nativeMemberForeignOriginalSuper(p, m, call.Name, call.Description, int(op.CurrentOffset)) {
+					continue
+				}
 				ctor := p.allocationClass(call.Name).constructors[desc]
 				if name == "<init>" && c.obj.GetClassName() == call.Name && ctor != nil && ctor.capturePC < 0 && ctor.delegateDescriptor == call.Description && ctor.delegatePC == int(op.CurrentOffset) {
 					continue
@@ -1440,7 +1443,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	if child := c.nativeMemberCurrent; child != nil && !child.static {
 		ctx.SourceMemberDelegation = func(owner, desc string, pc int, args []any) (string, bool) {
 			name := strings.ReplaceAll(owner, ".", "/")
-			targetClass := p.children[name]
+			targetClass := p.allocationClass(name)
 			if targetClass == nil || targetClass.static {
 				return "", false
 			}
@@ -1457,7 +1460,17 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				p.failed = true
 				return "", false
 			}
-			call := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: target.sourceDescriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true}
+			if p.children[name] == nil && !nativeMemberSourceEnclosingParameter(args[0], ctx, child.owner) {
+				p.failed = true
+				return "", false
+			}
+			// The closed constructor certificate above proves the original
+			// invokespecial receiver and PC. Keep that witness after removing the
+			// enclosing operand, so source overload selection can seal the same
+			// target instead of inferring a narrower constructor from its arguments.
+			receiver := values.NewJavaRef(nil, nil, types.NewJavaClass(ctx.ClassName))
+			receiver.IsThis = true
+			call := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: target.sourceDescriptor, Object: receiver, Kind: values.InvokeSpecial, IsSpecialInvoke: true, OriginPC: pc, HasOriginPC: true}
 			if keyword == "super" && ctor.enclosingSuperPath != nil && !nativeMemberLexicalReadOperand(args[0], ctor.enclosingSuperPath, c.Work, ctx) {
 				p.failed = true
 				return "", false

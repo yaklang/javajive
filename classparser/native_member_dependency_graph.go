@@ -199,6 +199,39 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 				}
 			}
 		}
+
+		// Moving a member declaration also changes the source binding of
+		// indexed foreign SUPER callers. This reverse edge joins those callers
+		// to the same ownership transaction as the parent; a parent cannot
+		// publish a lexical spelling while its child family remains unfinished.
+		index := z.originalMemberIndex()
+		if !index.valid {
+			return false
+		}
+		for _, current := range queue {
+			if _, _, flags, member := originalMemberOwner(current); !member || flags&8 != 0 {
+				continue
+			}
+			for user := range index.constructors[current.GetClassName()] {
+				caller, known := load(user)
+				if !known {
+					return false
+				}
+				if caller.GetSupperClassName() != current.GetClassName() {
+					continue
+				}
+				if _, _, _, member := originalMemberOwner(caller); !member {
+					continue
+				}
+				target, known := outermost(caller)
+				if !known {
+					return false
+				}
+				if target != owner {
+					dependencies[target] = true
+				}
+			}
+		}
 		graph[owner] = dependencies
 		for dependency := range dependencies {
 			if !visit(dependency) {

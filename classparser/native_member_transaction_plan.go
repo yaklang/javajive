@@ -218,6 +218,10 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 		}
 	}
 
+	if !nativeMemberExternalSupersClosed(p, d.buildInvocationMetadata(), d.nativeAnnotationDeclarationResolver(), d.Work) {
+		return nil
+	}
+
 	// Dependencies were unavailable during the initial ownership proof.
 	// Recheck actual allocations with the completed foreign constructor
 	// metadata before any body can publish a projected type spelling.

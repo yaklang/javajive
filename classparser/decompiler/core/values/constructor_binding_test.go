@@ -10,6 +10,144 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
+func TestGenericDelegationBindingUsesExactInstantiatedFormal(t *testing.T) {
+	for _, variant := range []string{"original", "rival generic elsewhere", "missing class", "wrong class signature", "missing exact target", "wrong target signature", "target method formal", "duplicate target", "narrow actual", "raw super", "wrong super", "unknown actual", "no origin", "allocation", "unknown owner", "incomplete", "no rival", "same formal rival", "arbitrary reference rival", "method generic rival", "unindexed rival", "varargs", "target varargs"} {
+		t.Run(variant, func(t *testing.T) {
+			desc, rival := "(Ljava/lang/Object;)V", "(Ljava/lang/String;)V"
+			sig := "<T:Ljava/lang/Object;>Ljava/lang/Object;"
+			methods := map[string]string{class_context.MethodDescKey("<init>", desc): "(TT;)V", class_context.MethodDescKey("<init>", rival): ""}
+			table := callbinding.Class{Name: "proof/Parent", Signature: sig, MembersComplete: true, Methods: []callbinding.Method{{Name: "<init>", Desc: desc, Generic: true, Signature: "(TT;)V"}, {Name: "<init>", Desc: rival}}}
+			ctx := &class_context.ClassContext{ClassName: "proof.Child", SupperClassName: "proof.Parent", ClassSig: "Lproof/Parent<Ljava/lang/Object;>;", FunctionName: "<init>"}
+			ctx.InvocationMetadata = func(name string) (callbinding.Class, bool) {
+				if name == "proof/Parent" {
+					return table, variant != "unknown owner"
+				}
+				return callbinding.Class{}, false
+			}
+			ctx.SiblingClassSig = func(name string) (string, map[string]string, bool) { return sig, methods, variant != "missing class" }
+			receiver := NewJavaRef(nil, nil, types.NewJavaClass("proof.Child"))
+			receiver.IsThis = true
+			arg := NewCustomValue(func(*class_context.ClassContext) string { return "once()" }, func() types.JavaType { return types.NewJavaClass("java.lang.String") })
+			f := &FunctionCallExpression{ClassName: "proof.Parent", FunctionName: "<init>", Descriptor: desc, Object: receiver, Arguments: []JavaValue{arg}, Kind: InvokeSpecial, IsSpecialInvoke: true, OriginPC: 7, HasOriginPC: true}
+			want := ""
+			switch variant {
+			case "original":
+				want = "Object"
+			case "rival generic elsewhere":
+				// Signature presence is not itself disqualifying: its selected
+				// formal is still exactly String, independently of class T.
+				table.Methods[1].Signature = "(Ljava/lang/String;)V"
+				table.Methods[1].Generic = true
+				methods[class_context.MethodDescKey("<init>", rival)] = table.Methods[1].Signature
+				want = "Object"
+			case "wrong class signature":
+				sig = "<X:Ljava/lang/Object;>Ljava/lang/Object;"
+			case "missing exact target":
+				delete(methods, class_context.MethodDescKey("<init>", desc))
+			case "wrong target signature":
+				methods[class_context.MethodDescKey("<init>", desc)] = "(Ljava/lang/String;)V"
+			case "target method formal":
+				table.Methods[0].Signature = "<T:Ljava/lang/Object;>(TT;)V"
+				methods[class_context.MethodDescKey("<init>", desc)] = table.Methods[0].Signature
+			case "duplicate target":
+				table.Methods = append(table.Methods, table.Methods[0])
+			case "narrow actual":
+				ctx.ClassSig = "Lproof/Parent<Ljava/lang/String;>;"
+			case "raw super":
+				ctx.ClassSig = "Lproof/Parent;"
+			case "wrong super":
+				ctx.ClassSig = "Lproof/Other<Ljava/lang/Object;>;"
+			case "unknown actual":
+				ctx.ClassSig = "Lproof/Parent<TX;>;"
+			case "no origin":
+				f.HasOriginPC = false
+			case "allocation":
+				receiver.IsThis = false
+			case "incomplete":
+				table.MembersComplete = false
+			case "no rival":
+				table.Methods = table.Methods[:1]
+			case "same formal rival":
+				table.Methods[1].Desc = desc
+			case "arbitrary reference rival":
+				table.Methods[1].Desc = "(Lproof/Unknown;)V"
+				want = "Object" // Every class reference widens to Object; no hierarchy guess.
+			case "method generic rival":
+				table.Methods[1].Signature = "<X:Ljava/lang/String;>(TX;)V"
+				methods[class_context.MethodDescKey("<init>", rival)] = table.Methods[1].Signature
+			case "unindexed rival":
+				table.Methods[1].Signature = "(Ljava/lang/String;)V"
+			case "varargs":
+				table.Methods[1].Varargs = true
+			case "target varargs":
+				table.Methods[0].Varargs = true
+			}
+			if got := f.delegationDescriptorBindingCast(0, arg, ctx); got != want {
+				t.Fatalf("binding = %q, want %q", got, want)
+			}
+			if want != "" && f.renderProvenArgumentCast(0, want, arg, ctx) != "(Object)(once())" {
+				t.Fatal("binding must retain one evaluation")
+			}
+		})
+	}
+}
+
+func TestGenericDelegationBindingRequiresClosedNonObjectBounds(t *testing.T) {
+	for _, variant := range []string{"closed", "missing bound", "incomplete bound", "missing rival", "wrong bound identity", "cyclic bound", "method formal shadow", "unproved bound"} {
+		t.Run(variant, func(t *testing.T) {
+			desc, rival := "(Lproof/Bound;)V", "(Lproof/Narrow;)V"
+			cs := "<T:Lproof/Bound;>Ljava/lang/Object;"
+			signatures := map[string]string{class_context.MethodDescKey("<init>", desc): "(TT;)V"}
+			meta := map[string]callbinding.Class{
+				"proof/Parent":     {Name: "proof/Parent", Signature: cs, MembersComplete: true, Methods: []callbinding.Method{{Name: "<init>", Desc: desc, Signature: "(TT;)V", Generic: true}, {Name: "<init>", Desc: rival}}},
+				"proof/Bound":      {Name: "proof/Bound", ParentsComplete: true, Parents: []string{"java/lang/Object"}},
+				"proof/Narrow":     {Name: "proof/Narrow", ParentsComplete: true, Parents: []string{"proof/Bound"}},
+				"java/lang/Object": {Name: "java/lang/Object", ParentsComplete: true},
+			}
+			ctx := &class_context.ClassContext{ClassName: "proof.Child", SupperClassName: "proof.Parent", ClassSig: "Lproof/Parent<Lproof/Bound;>;", FunctionName: "<init>"}
+			ctx.InvocationMetadata = func(name string) (callbinding.Class, bool) { c, ok := meta[name]; return c, ok }
+			ctx.SiblingClassSig = func(name string) (string, map[string]string, bool) { return cs, signatures, name == "proof/Parent" }
+			this := NewJavaRef(nil, nil, types.NewJavaClass("proof.Child"))
+			this.IsThis = true
+			arg := NewJavaRef(nil, nil, types.NewJavaClass("proof.Narrow"))
+			call := &FunctionCallExpression{ClassName: "proof.Parent", FunctionName: "<init>", Descriptor: desc, Object: this, Arguments: []JavaValue{arg}, Kind: InvokeSpecial, IsSpecialInvoke: true, OriginPC: 5, HasOriginPC: true}
+			want := ""
+			switch variant {
+			case "closed":
+				want = "Bound"
+			case "missing bound":
+				delete(meta, "proof/Bound")
+			case "missing rival":
+				delete(meta, "proof/Narrow")
+			case "incomplete bound":
+				c := meta["proof/Bound"]
+				c.ParentsComplete = false
+				meta[c.Name] = c
+			case "wrong bound identity":
+				c := meta["proof/Bound"]
+				c.Name = "proof/Other"
+				meta["proof/Bound"] = c
+			case "cyclic bound":
+				c := meta["proof/Bound"]
+				c.Parents = []string{"proof/Narrow"}
+				meta[c.Name] = c
+			case "method formal shadow":
+				ctx.ClassSig = "<C:Lproof/Bound;>Lproof/Parent<TC;>;"
+				ctx.ClassTypeParams = []string{"C"}
+				ctx.CurrentMethodSig = "<C:Ljava/lang/Object;>()V"
+			case "unproved bound":
+				cs = "<T:Lproof/Unknown;>Ljava/lang/Object;"
+				c := meta["proof/Parent"]
+				c.Signature = cs
+				meta[c.Name] = c
+			}
+			if got := call.delegationDescriptorBindingCast(0, arg, ctx); got != want {
+				t.Fatalf("binding = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestDelegationDescriptorBindingRequiresOriginalClosedTarget(t *testing.T) {
 	for _, variant := range []string{"original", "this", "unknown", "wrong identity", "incomplete", "duplicate", "generic target", "signature without generic flag", "varargs target", "allocation", "foreign owner", "no origin", "negative origin", "no rival", "different arity rival", "applicable varargs rival", "explicit target cast", "narrower cast", "malformed rival", "wrong arity", "primitive"} {
 		t.Run(variant, func(t *testing.T) {
