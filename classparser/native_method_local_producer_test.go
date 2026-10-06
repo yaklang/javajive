@@ -21,59 +21,7 @@ func TestNativeMethodLocalProducerRequiresActualInvocationStoreAndPlacement(t *t
 			variants := []string{"original", "renamed", "swapped wide arguments", "wrong owner", "wrong method", "wrong descriptor", "wrong invoke kind", "wrong static flag", "wrong producer PC", "unregistered producer PC", "replaced seed", "wrong STORE PC", "duplicate declaration", "nested declaration", "after allocation", "later write", "deep wrapper", "cyclic statement", "missing allocation", "budget", "canceled"}
 			for _, variant := range variants {
 				t.Run(variant, func(t *testing.T) {
-					root, e := Parse(append([]byte(nil), files["ProducedFactOwner.class"]...))
-					if e != nil {
-						t.Fatal(e)
-					}
-					obj, e := Parse(append([]byte(nil), files["ProducedFactOwner$1Entry.class"]...))
-					if e != nil {
-						t.Fatal(e)
-					}
-					owner, ok := originalMethodLocalOwner(obj, root, nil)
-					if !ok {
-						t.Fatal("original enclosing method")
-					}
-					ctor, ok := originalMethodLocalDefaultConstructor(obj, root, nil)
-					if !ok {
-						t.Fatal("original default constructor")
-					}
-					d := NewClassObjectDumper(root)
-					mt, e := types.ParseMethodDescriptor(owner.descriptor)
-					if e != nil {
-						t.Fatal(e)
-					}
-					d.MethodType = mt.FunctionType()
-					d.CurrentMethod = owner.declaration
-					d.FuncCtx = &class_context.ClassContext{ClassName: root.GetClassName(), FunctionName: owner.method, CurrentMethodDesc: owner.descriptor, FunctionType: mt.FunctionType()}
-					d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
-					var code *CodeAttribute
-					for _, a := range owner.declaration.Attributes {
-						if b, ok := a.(*CodeAttribute); ok {
-							code = b
-						}
-					}
-					if code == nil {
-						t.Fatal("original code")
-					}
-					params, body, e := ParseBytesCode(d, code, coreutils.NewRootVariableId())
-					if e != nil {
-						t.Fatal(e)
-					}
-					slots := map[int]*values.JavaRef{}
-					for _, v := range params {
-						if r, ok := v.(*values.JavaRef); ok {
-							if r.IsThis {
-								slots[0] = r
-							} else if s, ok := r.OriginalParameterSlot(); ok {
-								slots[s] = r
-							}
-						}
-					}
-					sites, ok := d.nativeMethodLocalAllocationFacts(obj, owner, ctor, true)
-					if !ok {
-						t.Fatal("original typed SSA")
-					}
-					local := &nativeMethodLocalClass{object: obj, owner: owner, constructor: ctor, allocations: sites}
+					d, local, slots, body := nativeMethodLocalProducerTestBody(t, files, "ProducedFactOwner")
 					var assign *statements.AssignStatement
 					var call *values.FunctionCallExpression
 					var ref *values.JavaRef
@@ -187,4 +135,64 @@ func TestNativeMethodLocalFinalEmissionCannotBorrowPreviewOrSiblingMethod(t *tes
 			}
 		})
 	}
+}
+
+// Shared test setup uses the actual parser and original snapshot; test variants
+// never manufacture a successful capture certificate from expected constants.
+func nativeMethodLocalProducerTestBody(t *testing.T, files map[string][]byte, rootName string) (*ClassObjectDumper, *nativeMethodLocalClass, map[int]*values.JavaRef, []statements.Statement) {
+	t.Helper()
+	root, e := Parse(append([]byte(nil), files[rootName+".class"]...))
+	if e != nil {
+		t.Fatal(e)
+	}
+	obj, e := Parse(append([]byte(nil), files[rootName+"$1Entry.class"]...))
+	if e != nil {
+		t.Fatal(e)
+	}
+	owner, ok := originalMethodLocalOwner(obj, root, nil)
+	if !ok {
+		t.Fatal("original enclosing method")
+	}
+	ctor, ok := originalMethodLocalDefaultConstructor(obj, root, nil)
+	if !ok {
+		t.Fatal("original default constructor")
+	}
+	d := NewClassObjectDumper(root)
+	mt, e := types.ParseMethodDescriptor(owner.descriptor)
+	if e != nil {
+		t.Fatal(e)
+	}
+	d.MethodType = mt.FunctionType()
+	d.CurrentMethod = owner.declaration
+	d.FuncCtx = &class_context.ClassContext{ClassName: root.GetClassName(), FunctionName: owner.method, CurrentMethodDesc: owner.descriptor, FunctionType: mt.FunctionType()}
+	d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
+	var code *CodeAttribute
+	for _, a := range owner.declaration.Attributes {
+		if b, ok := a.(*CodeAttribute); ok {
+			code = b
+		}
+	}
+	if code == nil {
+		t.Fatal("original code")
+	}
+	params, body, e := ParseBytesCode(d, code, coreutils.NewRootVariableId())
+	if e != nil {
+		t.Fatal(e)
+	}
+	slots := map[int]*values.JavaRef{}
+	for _, v := range params {
+		if r, ok := v.(*values.JavaRef); ok {
+			if r.IsThis {
+				slots[0] = r
+			} else if s, ok := r.OriginalParameterSlot(); ok {
+				slots[s] = r
+			}
+		}
+	}
+	sites, ok := d.nativeMethodLocalAllocationFacts(obj, owner, ctor, true)
+	if !ok {
+		t.Fatal("original typed SSA")
+	}
+	local := &nativeMethodLocalClass{object: obj, owner: owner, constructor: ctor, allocations: sites}
+	return d, local, slots, body
 }

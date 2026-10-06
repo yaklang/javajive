@@ -168,13 +168,7 @@ func (c *ClassObjectDumper) nativeMethodLocalAllocationFacts(local *ClassObject,
 				}
 				proof.slots[i] = argument.Slot
 			} else if produced && argument.Kind == ssabuild.OriginInstr {
-				original, known := producers[int(argument.PC)]
-				if !known || original.instruction.Member == "<init>" {
-					return nil, false
-				}
-				switch original.instruction.Opcode {
-				case core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE, core.OP_INVOKESPECIAL:
-				default:
+				if !nativeMethodLocalProducerShape(producers, argument, c.Work) {
 					return nil, false
 				}
 				pc, stored := firstStore[argument]

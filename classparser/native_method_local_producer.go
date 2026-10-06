@@ -183,6 +183,39 @@ func (c *ClassObjectDumper) nativeMethodLocalProducerBindings(local *nativeMetho
 // not only its pointer or return type. This profile admits parameter/THIS
 // operands; instruction/phi receiver or arguments need their own source proof.
 func (c *ClassObjectDumper) nativeMethodLocalOriginalProducerInvocation(local *nativeMethodLocalClass, site nativeMethodLocalAllocation, origin ssabuild.Origin, value values.JavaValue, params map[int]*values.JavaRef) bool {
+	return c.nativeMethodLocalOriginalProducerValue(local, site, origin, value, params, 0)
+}
+
+// CHECKCAST is an ordered runtime producer, not a source overload/binding cast.
+// Its original target/PC and sole SSA operand must remain in the same expression
+// below the original STORE. Recursion follows a bounded original def-use chain;
+// a phi, literal, heap read or unrelated alias cannot borrow invocation evidence.
+func nativeMethodLocalProducerShape(producers map[int]nativeMethodLocalProducerRecord, origin ssabuild.Origin, work *workbudget.Budget) bool {
+	for depth := 0; depth < 32; depth++ {
+		original, known := producers[int(origin.PC)]
+		if !nativeProofWork(work, 1) || !known || origin.Kind != ssabuild.OriginInstr {
+			return false
+		}
+		switch original.instruction.Opcode {
+		case core.OP_CHECKCAST:
+			if original.instruction.Class == "" || len(original.record.Uses) != 1 {
+				return false
+			}
+			origin = original.record.Uses[0]
+		case core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKESPECIAL, core.OP_INVOKEINTERFACE:
+			return original.instruction.Member != "<init>"
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+func (c *ClassObjectDumper) nativeMethodLocalOriginalProducerValue(local *nativeMethodLocalClass, site nativeMethodLocalAllocation, origin ssabuild.Origin, value values.JavaValue, params map[int]*values.JavaRef, depth int) bool {
+	if depth >= 32 || !nativeProofWork(c.Work, 1) {
+		return false
+	}
+
 	original, known := site.producers[int(origin.PC)]
 	if !known || origin.Kind != ssabuild.OriginInstr {
 		return false
@@ -197,8 +230,23 @@ func (c *ClassObjectDumper) nativeMethodLocalOriginalProducerInvocation(local *n
 		}
 		break
 	}
-	call, known := value.(*values.FunctionCallExpression)
 	ins, record := original.instruction, original.record
+	if ins.Opcode == core.OP_CHECKCAST {
+		cast, known := value.(*values.CastExpression)
+		if !known || cast == nil || len(record.Uses) != 1 {
+			return false
+		}
+		pc, descriptor, known := cast.OriginalCheckCastWitness(c.FuncCtx)
+		expected := ins.Class
+		if !strings.HasPrefix(expected, "[") {
+			expected = "L" + expected + ";"
+		}
+		if !known || pc != int(ins.PC) || descriptor != expected {
+			return false
+		}
+		return c.nativeMethodLocalOriginalProducerValue(local, site, record.Uses[0], cast.Value, params, depth+1)
+	}
+	call, known := value.(*values.FunctionCallExpression)
 	if !known || call == nil || !call.HasOriginPC || call.OriginPC != int(ins.PC) || strings.ReplaceAll(call.ClassName, ".", "/") != ins.Class || call.FunctionName != ins.Member || call.Descriptor != ins.Desc || ins.Member == "<init>" {
 		return false
 	}
