@@ -183,3 +183,75 @@ func TestStaticInterfaceImportRetryDoesNotPoisonOriginalTransaction(t *testing.T
 		t.Fatal("failed retry leaked imports or refusal into original")
 	}
 }
+
+func TestStaticCallImportChecksBothTypeNamespacesAndOwnerKind(t *testing.T) {
+	for _, isInterface := range []bool{false, true} {
+		for _, variant := range []string{"method type parameters", "package type", "method conflict", "wrong owner kind", "missing owner", "value-only shadow", "owned type path"} {
+			t.Run(fmt.Sprint(isInterface)+"/"+variant, func(t *testing.T) {
+				f, declarations := staticImportModelContext()
+				api := declarations["a/Api"]
+				api.IsInterface = isInterface
+				f.TypeParams = []string{"Api", "a"}
+				f.FunctionName, f.CurrentMethodDesc = "m", "(I)I"
+				switch variant {
+				case "package type":
+					f.TypeParams = []string{"Api"}
+					f.LexicalTypeNames = map[string]bool{"a": true}
+				case "method conflict":
+					probe := declarations["probe/Probe"]
+					probe.Methods = []callbinding.Method{{Name: "compute", Desc: "(J)J"}}
+					declarations[probe.Name] = probe
+				case "wrong owner kind":
+					api.IsInterface = !isInterface
+				case "value-only shadow":
+					f.TypeParams = nil
+				case "owned type path":
+					f.TypeParams = nil
+					f.SourceValueNameShadow = nil
+					f.DeclarationSourceName = func(string) (string, bool) { return "Outer.Api", true }
+					f.LexicalTypeNames = map[string]bool{"Outer": true}
+				}
+				declarations["a/Api"] = api
+				if variant == "missing owner" {
+					delete(declarations, "a/Api")
+				}
+				var prefix string
+				if isInterface {
+					prefix = f.StaticInterfaceCallPrefix("a.Api", "compute", "(I)I")
+				} else {
+					prefix = f.StaticClassCallPrefix("a.Api", "compute", "(I)I")
+				}
+				refused := variant == "method conflict" || variant == "wrong owner kind" || variant == "missing owner"
+				if (f.StaticMethodImports.Error() != nil) != refused {
+					t.Fatalf("prefix=%q refusal=%v", prefix, f.StaticMethodImports.Error())
+				}
+				if refused {
+					if f.StaticMethodImports.FailedMethod() != "probe.Probe.m(I)I" || len(f.StaticMethodImports.Imports()) != 0 {
+						t.Fatal("binding refusal must retain original caller and no invented import")
+					}
+					return
+				}
+				want := ""
+				imports := "a.Api.compute"
+				if variant == "owned type path" {
+					want, imports = "Outer.Api.", ""
+				} else if variant == "value-only shadow" && !isInterface {
+					want, imports = "((Api)null).", ""
+				}
+				if prefix != want || strings.Join(f.StaticMethodImports.Imports(), ",") != imports {
+					t.Fatalf("prefix=%q imports=%v want=%q/%q", prefix, f.StaticMethodImports.Imports(), want, imports)
+				}
+			})
+		}
+	}
+}
+
+func TestStaticOwnerWithoutMemberCannotCertifyAnObscuredCastType(t *testing.T) {
+	f, _ := staticImportModelContext()
+	f.TypeParams = []string{"Api", "a"}
+	f.FunctionName, f.CurrentMethodDesc = "m", "()V"
+	f.StaticClassOwner("a.Api")
+	if f.StaticMethodImports.Error() == nil || f.StaticMethodImports.FailedMethod() != "probe.Probe.m()V" {
+		t.Fatal("a typed-null primary still needs a denotable cast type")
+	}
+}

@@ -21,6 +21,10 @@ func (f *ClassContext) staticOwner(name string, classOwner bool) string {
 		return bound
 	}
 	if classOwner {
+		if !f.staticOwnerTypeSyntax(name, bound) {
+			f.failStaticOwner(name, "", "", "class type is obscured in both simple and qualified source syntax")
+			return bound
+		}
 		return "((" + bound + ")null)"
 	}
 	return bound
@@ -30,7 +34,7 @@ func (f *ClassContext) staticOwner(name string, classOwner bool) string {
 // alone therefore does not certify an interface's static invocation owner.
 func (f *ClassContext) staticTypeOwner(name string) (string, bool) {
 	bound := f.ShortTypeName(name)
-	if !f.valueNameShadows(strings.SplitN(bound, ".", 2)[0]) {
+	if f.staticOwnerTypeSyntax(name, bound) && !f.valueNameShadows(strings.SplitN(bound, ".", 2)[0]) {
 		return bound, true
 	}
 	pkg, _ := SplitPackageClassName(name)
@@ -40,11 +44,24 @@ func (f *ClassContext) staticTypeOwner(name string) (string, bool) {
 			qualified = pkg + "." + bound
 		}
 		root := strings.SplitN(qualified, ".", 2)[0]
-		if !f.valueNameShadows(root) && !f.typeNameShadowsPackageRoot(root) {
+		if f.staticOwnerTypeSyntax(name, qualified) && !f.valueNameShadows(root) {
 			return qualified, true
 		}
 	}
 	return bound, false
+}
+
+// A cast ignores value names, but cannot escape a type parameter or a type
+// obscuring the package root. An owned Outer.Member spelling is a type path,
+// not a package path; only the original owner's package prefix needs the
+// package-root check.
+func (f *ClassContext) staticOwnerTypeSyntax(owner, source string) bool {
+	root := strings.SplitN(source, ".", 2)[0]
+	if f.IsTypeParam(root) {
+		return false
+	}
+	pkg, _ := SplitPackageClassName(owner)
+	return pkg == "" || !strings.HasPrefix(source, pkg+".") || !f.typeNameShadowsPackageRoot(root)
 }
 
 func (f *ClassContext) typeNameShadowsPackageRoot(name string) bool {

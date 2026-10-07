@@ -72,6 +72,34 @@ func (f *ClassContext) StaticInterfaceCallPrefix(owner, member, descriptor strin
 	if known {
 		return bound + "."
 	}
+	return f.staticImportCallPrefix(owner, member, descriptor, bound, true)
+}
+
+// A class-only null primary resolves a value-name collision only if its cast
+// type still denotes the original class. If type syntax is also obscured,
+// use the same proved method-namespace import as an interface invocation.
+func (f *ClassContext) StaticClassCallPrefix(owner, member, descriptor string) string {
+	bound, known := f.staticTypeOwner(owner)
+	if known {
+		return bound + "."
+	}
+	if f.staticOwnerTypeSyntax(owner, bound) {
+		return "((" + bound + ")null)."
+	}
+	return f.staticImportCallPrefix(owner, member, descriptor, bound, false)
+}
+
+func (f *ClassContext) failStaticOwner(owner, member, descriptor, reason string) {
+	if f.StaticMethodImports == nil {
+		f.StaticMethodImports = NewStaticMethodImports()
+	}
+	if f.StaticMethodImports.err == nil {
+		f.StaticMethodImports.failedMethod = f.ClassName + "." + f.FunctionName + f.CurrentMethodDesc
+		f.StaticMethodImports.err = fmt.Errorf("source method %s: static owner %s.%s%s cannot be bound: %s", f.StaticMethodImports.failedMethod, owner, member, descriptor, reason)
+	}
+}
+
+func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound string, interfaceOwner bool) string {
 	if f.StaticMethodImports == nil {
 		f.StaticMethodImports = NewStaticMethodImports()
 	}
@@ -79,10 +107,7 @@ func (f *ClassContext) StaticInterfaceCallPrefix(owner, member, descriptor strin
 		return bound + "."
 	}
 	fail := func(reason string) string {
-		if f.StaticMethodImports.err == nil {
-			f.StaticMethodImports.failedMethod = f.ClassName + "." + f.FunctionName + f.CurrentMethodDesc
-			f.StaticMethodImports.err = fmt.Errorf("source method %s: static interface owner %s.%s%s cannot be bound: %s", f.StaticMethodImports.failedMethod, owner, member, descriptor, reason)
-		}
+		f.failStaticOwner(owner, member, descriptor, reason)
 		return bound + "."
 	}
 	if f.InvocationMetadata == nil || SafeIdentifier(member) != member || member == "" {
@@ -97,8 +122,8 @@ func (f *ClassContext) StaticInterfaceCallPrefix(owner, member, descriptor strin
 	}
 	internal := strings.ReplaceAll(owner, ".", "/")
 	declaration, exists := f.InvocationMetadata(internal)
-	if !exists || declaration.Name != internal || !declaration.IsInterface || !declaration.Public || !declaration.MembersComplete || !declaration.ParentsComplete {
-		return fail("incomplete or inaccessible original interface")
+	if !exists || declaration.Name != internal || declaration.IsInterface != interfaceOwner || !declaration.Public || !declaration.MembersComplete || !declaration.ParentsComplete {
+		return fail("incomplete, mismatched or inaccessible original owner")
 	}
 	matches := 0
 	for _, method := range declaration.Methods {
