@@ -32,6 +32,10 @@ func JavaUnitsStringLiteralLen(units []uint16) int {
 	for i := 0; i < len(units); i++ {
 		unit := units[i]
 		if unit == '\\' {
+			if i > 0 && units[i-1] >= 0xD800 && units[i-1] <= 0xDBFF {
+				n += 4 // numeric lexical backslash after a high surrogate
+				continue
+			}
 			n += 2
 			if i+1 < len(units) && units[i+1] == 'u' && sizeUnicodeEscapeTail(units, i+1) {
 				n += 6 // \u0075

@@ -28,6 +28,15 @@ func JavaUnitsToStringLiteral(units []uint16) string {
 	for i := 0; i < len(units); i++ {
 		unit := units[i]
 		if unit == '\\' {
+			// Some javac Unicode readers speculatively decode the word
+			// after a high surrogate, then rewind without restoring escape
+			// eligibility. A numeric lexical escape has no adjacent raw
+			// backslash pair to be reinterpreted. It preserves this word
+			// under both JLS translation and that speculative scanner.
+			if i > 0 && units[i-1] >= 0xD800 && units[i-1] <= 0xDBFF {
+				buf = appendOctal3(buf, '\\')
+				continue
+			}
 			buf = append(buf, '\\', '\\')
 			// A following "u" plus hex digits would be a Unicode escape after a JLS-naive
 			// translator sees the last source backslash. Break it with \u0075 (the produced
