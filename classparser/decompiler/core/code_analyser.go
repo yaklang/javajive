@@ -48,6 +48,9 @@ type Decompiler struct {
 	stackLifetimeCopies    map[values.JavaValue]*values.JavaRef
 	comparisonWordInputs   map[*OpCode][]*statements.AssignStatement
 	effectfulStackPhiEdges map[*OpCode]*statements.AssignStatement
+	stackPhiSources        map[*values.SlotValue]*OpCode
+	stackPhiTypes          map[*values.SlotValue]types.JavaType
+	stackPhiDefinitions    map[*values.JavaRef]*values.SlotValue
 	evaluationSnapshots    map[*OpCode][]EvaluationSnapshot
 	constructorInitialized bool
 	FunctionType           *types.JavaFuncType
@@ -5696,6 +5699,12 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// consume their routing region. Expression reconstruction runs outer-first;
 	// deferring this proof until that walk makes the later edge writes orphaned.
 	loweredStackPhis := map[*OpCode]bool{}
+	d.stackPhiSources = map[*values.SlotValue]*OpCode{}
+	for merge, slot := range ternaryExpMergeNodeSlot {
+		d.stackPhiSources[slot] = merge
+	}
+	d.refineClosedStackPhiDefinitions()
+	defer func() { d.stackPhiSources, d.stackPhiTypes, d.stackPhiDefinitions = nil, nil, nil }()
 	for _, merge := range ternaryExpMergeNode {
 		if root := retainedReferenceJoins[merge]; root != nil {
 			if d.retainedReferenceJoinRoot(merge, []*OpCode{root}) == nil || !d.lowerClosedStackPhi(merge, []*OpCode{root}, ternaryExpMergeNodeSlot[merge], false) {
@@ -5810,7 +5819,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 						tt.Condition = value
 					}
 				}
-				ternaryExpMergeNodeSlot[code].ResetValue(rootTern)
+				d.resetClosedStackPhiValue(ternaryExpMergeNodeSlot[code], rootTern)
 				if d.valueTernaryMerges == nil {
 					d.valueTernaryMerges = map[*values.TernaryExpression]*OpCode{}
 				}
@@ -5997,7 +6006,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 						t.Condition = value
 					}
 				}
-				ternaryExpMergeNodeSlot[code].ResetValue(rootTern)
+				d.resetClosedStackPhiValue(ternaryExpMergeNodeSlot[code], rootTern)
 				code.conditionOpId = 0
 				continue
 			}
@@ -6054,7 +6063,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 					trueFalseValuePair = []values.JavaValue{falseRouteEnd.StackEntry.value, trueRouteEnd.StackEntry.value}
 					ternaryValue := values.NewTernaryExpression(conditionSlotForIfNode(opCode), trueRouteEnd.StackEntry.value, falseRouteEnd.StackEntry.value)
 					code.conditionOpId = opCode.Id
-					ternaryExpMergeNodeSlot[code].ResetValue(ternaryValue)
+					d.resetClosedStackPhiValue(ternaryExpMergeNodeSlot[code], ternaryValue)
 					ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
 						ternaryValue.Condition = value
 					}
@@ -6094,7 +6103,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 							ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
 								newValue.Condition = value
 							}
-							ternaryExpMergeNodeSlot[code].ResetValue(newValue)
+							d.resetClosedStackPhiValue(ternaryExpMergeNodeSlot[code], newValue)
 							code.conditionOpId = 0
 						}
 					}
@@ -6130,7 +6139,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 							ifNodeToConditionCallback[opCode] = func(value values.JavaValue) {
 								newValue.Condition = value
 							}
-							ternaryExpMergeNodeSlot[code].ResetValue(newValue)
+							d.resetClosedStackPhiValue(ternaryExpMergeNodeSlot[code], newValue)
 							code.conditionOpId = 0
 						}
 					}

@@ -145,11 +145,11 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 			}
 		}
 		incomingValues[pred] = v
-		incomingType := v.Type()
-		if primitive, ok := incomingType.RawType().(*types.JavaPrimer); ok && primitive.Name == types.JavaString {
-			incomingType = types.NewJavaClass("java.lang.String")
+		incomingType, valid := d.closedStackPhiValueType(v, provider)
+		if !valid {
+			return false
 		}
-		if values.IsNullLiteral(v) {
+		if incomingType == nil {
 			continue
 		}
 		if typ == nil {
