@@ -76,6 +76,11 @@ type ClassContext struct {
 	LocalNames map[*coreutils.VariableId]string
 	// Positive declaration evidence for visible source value names.
 	SourceValueNameShadow func(string) bool
+	// Static imports are shared by every declaration in one source unit. A
+	// failed binding cannot publish a source unit that silently selects a decoy.
+	StaticMethodImports   *StaticMethodImports
+	SourceLexicalParent   *ClassContext
+	staticImportScopeMemo map[string]bool
 	// CatchEntryNames binds original handler stack values by their exact entry PC.
 	// It is scoped to rendering this method/handler, separate from type names.
 	CatchEntryNames map[int]string
@@ -1008,6 +1013,8 @@ func (f *ClassContext) CloneForRetry() *ClassContext {
 	out.ForceParamEraseTypeVars = maps.Clone(f.ForceParamEraseTypeVars)
 	out.SamePkgFQNames = maps.Clone(f.SamePkgFQNames)
 	out.LexicalTypeNames = maps.Clone(f.LexicalTypeNames)
+	out.StaticMethodImports = f.StaticMethodImports.Clone()
+	out.staticImportScopeMemo = maps.Clone(f.staticImportScopeMemo)
 	out.BuildInLibsMap = f.BuildInLibsMap.Copy()
 	if out.BuildInLibsMap != nil {
 		out.BuildInLibsMap.ForEach(func(k string, v []string) bool { out.BuildInLibsMap.Set(k, append([]string(nil), v...)); return true })

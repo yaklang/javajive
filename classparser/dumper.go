@@ -681,13 +681,16 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		c.ClassName = packageName + "." + identityName
 	}
 	funcCtx := &class_context.ClassContext{
-		Env:             c.getenv,
-		Work:            c.Work,
-		ClassName:       c.ClassName,
-		SupperClassName: supperClassName,
-		PackageName:     c.PackageName,
+		Env:                 c.getenv,
+		Work:                c.Work,
+		ClassName:           c.ClassName,
+		SupperClassName:     supperClassName,
+		PackageName:         c.PackageName,
+		StaticMethodImports: class_context.NewStaticMethodImports(),
 	}
 	if outer := c.nativeOuterContext; outer != nil {
+		funcCtx.StaticMethodImports = outer.StaticMethodImports
+		funcCtx.SourceLexicalParent = outer
 		funcCtx.BuildInLibsMap = outer.BuildInLibsMap
 		funcCtx.KeySet = outer.KeySet
 		funcCtx.SamePkgFQNames = outer.SamePkgFQNames
@@ -1514,6 +1517,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// So emit the (already correct) import string verbatim.
 			importsStr += fmt.Sprintf("import %s;\n", s)
 		}
+		for _, s := range funcCtx.StaticMethodImports.Imports() {
+			importsStr += fmt.Sprintf("import static %s;\n", s)
+		}
 		if len(importsStr) > 0 {
 			importsStr += "\n"
 		}
@@ -1527,6 +1533,21 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 
 	full := assemble()
+	if err := funcCtx.StaticMethodImports.Error(); err != nil {
+		if c.Work != nil && c.Work.Err() != nil {
+			return "", c.Work.Err()
+		}
+		c.appendDiagnostic(DecompileDiagnostic{Code: "static_owner_binding_unknown", Method: funcCtx.StaticMethodImports.FailedMethod(), Message: err.Error()})
+		// Assembly is rejected as a whole: no declaration was published with
+		// an accepted source witness, even if an unrelated method was printable.
+		if c.report != nil {
+			for i := range c.report.Members {
+				c.report.Members[i].State = "unsupported"
+				c.report.Members[i].Evidence = "source unit rejected because invocation owner binding was unproved"
+			}
+		}
+		return "", err
+	}
 	if c.Work != nil {
 		if err := c.Work.CheckAlloc(int64(len(full))); err != nil {
 			return "", err

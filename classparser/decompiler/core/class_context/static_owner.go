@@ -16,9 +16,22 @@ func (f *ClassContext) StaticInterfaceOwner(name string) string {
 }
 
 func (f *ClassContext) staticOwner(name string, classOwner bool) string {
+	bound, known := f.staticTypeOwner(name)
+	if known {
+		return bound
+	}
+	if classOwner {
+		return "((" + bound + ")null)"
+	}
+	return bound
+}
+
+// A method select reclassifies its first identifier as a value. Type syntax
+// alone therefore does not certify an interface's static invocation owner.
+func (f *ClassContext) staticTypeOwner(name string) (string, bool) {
 	bound := f.ShortTypeName(name)
 	if !f.valueNameShadows(strings.SplitN(bound, ".", 2)[0]) {
-		return bound
+		return bound, true
 	}
 	pkg, _ := SplitPackageClassName(name)
 	if pkg != "" {
@@ -28,15 +41,10 @@ func (f *ClassContext) staticOwner(name string, classOwner bool) string {
 		}
 		root := strings.SplitN(qualified, ".", 2)[0]
 		if !f.valueNameShadows(root) && !f.typeNameShadowsPackageRoot(root) {
-			return qualified
+			return qualified, true
 		}
 	}
-	if classOwner {
-		return "((" + bound + ")null)"
-	}
-	// An interface static method cannot use a value primary. Keep that
-	// restriction; never turn it into a null invocation on an interface.
-	return bound
+	return bound, false
 }
 
 func (f *ClassContext) typeNameShadowsPackageRoot(name string) bool {

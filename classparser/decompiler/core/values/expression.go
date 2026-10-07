@@ -5079,7 +5079,7 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 				case MethodOwnerClass:
 					owner = funcCtx.StaticClassOwner(classType.Name)
 				case MethodOwnerInterface:
-					owner = funcCtx.StaticInterfaceOwner(classType.Name)
+					return fmt.Sprintf("%s%s(%s)", funcCtx.StaticInterfaceCallPrefix(classType.Name, f.FunctionName, f.Descriptor), functionName, strings.Join(paramStrs, ","))
 				}
 			}
 			return fmt.Sprintf("%s.%s(%s)", owner, functionName, strings.Join(paramStrs, ","))
