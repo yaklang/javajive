@@ -278,6 +278,31 @@ func nativeAnonymousConstructorRepresentationProof(obj *ClassObject, owner, meth
 			}
 		}
 	}
+	// A captured word passed to SUPER is not by itself an enclosing-instance
+	// certificate. Original InnerClasses metadata distinguishes a nonstatic
+	// member superclass from an ordinary constructor argument. Without the
+	// complete named-parent proof, never fall back to the ordinary SUPER path.
+	if c.memberSuper == nil {
+		for _, attribute := range obj.Attributes {
+			if table, ok := attribute.(*InnerClassesAttribute); ok {
+				if table == nil {
+					return nil
+				}
+				for _, row := range table.Classes {
+					if row == nil || !nativeProofWork(work, 1) {
+						return nil
+					}
+					name, known := sourceBridgeClassName(obj, row.InnerClassInfoIndex)
+					if !known {
+						return nil
+					}
+					if name == obj.GetSupperClassName() && row.OuterClassInfoIndex != 0 && row.InnerClassAccessFlags&8 == 0 {
+						return nil
+					}
+				}
+			}
+		}
+	}
 	nullTail := false
 	for i < len(ops) {
 		if ops[i].Instr.OpCode == core.OP_INVOKESPECIAL {
