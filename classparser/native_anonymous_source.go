@@ -1602,6 +1602,9 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 						continue
 					}
 					declaration, stable := nativeCaptureDeclaration(body, ref, parameterIDs[ref.Id], c.Work)
+					if !stable && !parameterIDs[ref.Id] {
+						declaration, stable = nativeCaptureJoinedDeclaration(body, ref, alloc, c.Work)
+					}
 					captureParams, _, err := callbinding.Descriptor(child.descriptor)
 					if err != nil || index >= len(captureParams) {
 						p.failed = true
