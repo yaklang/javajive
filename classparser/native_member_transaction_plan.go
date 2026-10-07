@@ -18,6 +18,17 @@ type nativeMemberPrepared struct {
 }
 
 func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]string) *nativeMemberPrepared {
+	prepared := z.prepareNativeMemberFamilyUnpublished(root, snap)
+	if prepared == nil || !z.nativeMemberAccessRepresentable(prepared.family, z.originalMemberIndex(), prepared.reader.Work) {
+		return nil
+	}
+	return prepared
+}
+
+// A local plan is not a source accessibility certificate. Keep every original
+// ownership/allocation proof, but let an atomic dependency transaction establish
+// its lexical peers before checking the original protected type users.
+func (z *JarFS) prepareNativeMemberFamilyUnpublished(root *ClassObject, snap map[string]string) *nativeMemberPrepared {
 	if root == nil {
 		return nil
 	}
@@ -47,7 +58,7 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 	if !z.nativeMethodLocalArchiveClosed(p, index) {
 		return nil
 	}
-	if !index.valid || !z.nativeMemberStaticConstantsReferencesClosed(p, index, d.Work) || !nativeMemberPrivateGetterReferencesClosed(p, index, d.Work) || !z.nativeMemberAccessRepresentable(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
+	if !index.valid || !z.nativeMemberStaticConstantsReferencesClosed(p, index, d.Work) || !nativeMemberPrivateGetterReferencesClosed(p, index, d.Work) || !z.nativeMemberJointBridgeReferencesClosed(p, index, d.Work) {
 		return nil
 	}
 	if len(p.rootAccessBridges) > 0 && index.handles[owner] {
@@ -158,12 +169,15 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 	return &nativeMemberPrepared{root: root, reader: d, family: p, objects: objects, snapshot: snap}
 }
 
-func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup func(string) *nativeMemberClass, dependencyGraphClosed bool) *nativeMemberCacheEntry {
-	if prepared == nil || lookup == nil {
+func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup func(string) *nativeMemberClass, dependencyGraphClosed bool, peers ...map[string]*nativeMemberPrepared) *nativeMemberCacheEntry {
+	if prepared == nil || lookup == nil || len(peers) != 0 && !dependencyGraphClosed {
 		return nil
 	}
 	root, d, p, objects, snap := prepared.root, prepared.reader, prepared.family, prepared.objects, prepared.snapshot
 	owner := p.owner
+	if !z.nativeMemberAccessRepresentable(p, z.originalMemberIndex(), d.Work, peers...) {
+		return nil
+	}
 	// Independent direct families have independent commits to ownership. A
 	// cross-family source scope requires a joint dependency plan, so refuse
 	// a root/body referring to another archive-owned nonstatic member type.

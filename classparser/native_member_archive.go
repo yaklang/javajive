@@ -388,7 +388,7 @@ func (z *JarFS) nativeMemberLocalPlan(obj *ClassObject, owner string, snap map[s
 			return nil
 		}
 	}
-	return z.prepareNativeMemberFamily(root, snap)
+	return z.prepareNativeMemberFamilyUnpublished(root, snap)
 }
 
 // Every body emitted in the joint source unit contributes binding dependencies,

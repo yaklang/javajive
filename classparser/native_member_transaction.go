@@ -174,7 +174,7 @@ func (z *JarFS) buildNativeMemberTransaction(participants []string, snap map[str
 		if err != nil || root.GetClassName() != name || !nativeMemberTopLevelEvidence(root, work) {
 			return nil
 		}
-		plan := z.prepareNativeMemberFamily(root, snap)
+		plan := z.prepareNativeMemberFamilyUnpublished(root, snap)
 		if plan == nil {
 			return nil
 		}
@@ -194,7 +194,7 @@ func (z *JarFS) buildNativeMemberTransaction(participants []string, snap map[str
 	results := map[string]*nativeMemberCacheEntry{}
 	var bytes int64
 	for _, name := range participants {
-		result := z.finishNativeMemberFamily(prepared[name], lookup, true)
+		result := z.finishNativeMemberFamily(prepared[name], lookup, true, prepared)
 		if result == nil || int64(len(result.source)) > (16<<20)-bytes {
 			return nil
 		}
