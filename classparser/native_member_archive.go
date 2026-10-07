@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"github.com/yaklang/javajive/internal/mutf8"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"io/fs"
 	"strings"
@@ -507,6 +508,7 @@ func nativeMemberDependencyNames(obj *ClassObject, work *workbudget.Budget) ([]s
 	names := []string{}
 	seen := map[string]bool{}
 	signatures := map[string]bool{}
+	validatedDescriptors := map[uint16]bool{}
 	add := func(n string) {
 		n = strings.ReplaceAll(n, ".", "/")
 		if !seen[n] {
@@ -531,8 +533,70 @@ func nativeMemberDependencyNames(obj *ClassObject, work *workbudget.Budget) ([]s
 		}
 		return true
 	}
+	// Runtime descriptors have no generic nesting. Validate their exact JVM
+	// grammar (including dimensions/parameter words), then scan reference leaves
+	// iteratively. The Signature parser's generic depth cap is a separate domain.
+	descriptor := func(index uint16, methodOnly bool) bool {
+		text, known := sourceBridgeUTF8(obj, index)
+		if !known || methodOnly && !strings.HasPrefix(text, "(") {
+			return false
+		}
+		if validatedDescriptors[index] {
+			return true
+		}
+		utf := obj.ConstantPool[index-1].(*ConstantUtf8Info)
+		units := utf.semanticUnits()
+		if !nativeProofWork(work, int64(len(units))+int64(len(text))) || work != nil && work.CheckAlloc(int64(len(validatedDescriptors)+1)*16) != nil {
+			return false
+		}
+		var err error
+		if strings.HasPrefix(text, "(") {
+			err = mutf8.ValidateMethodDescriptor(units)
+		} else {
+			err = mutf8.ValidateFieldDescriptor(units)
+		}
+		if err != nil {
+			return false
+		}
+		for i := 0; i < len(text); i++ {
+			if text[i] != 'L' {
+				continue
+			}
+			end := strings.IndexByte(text[i+1:], ';')
+			if end <= 0 {
+				return false
+			}
+			add(text[i+1 : i+1+end])
+			i += end + 1
+		}
+		validatedDescriptors[index] = true
+		return true
+	}
 	for _, constant := range obj.ConstantPool {
 		if !nativeProofWork(work, 1) {
+			return nil, false
+		}
+		// Member and bootstrap descriptors do not require a CONSTANT_Class
+		// entry for their argument/result types. They contribute the same
+		// original binding edges as declarations; a UTF8 string with similar
+		// spelling does not. This also closes MethodType bootstrap operands.
+		var descriptorIndex uint16
+		hasDescriptor, methodOnly := false, false
+		switch constant := constant.(type) {
+		case *ConstantNameAndTypeInfo:
+			if constant == nil {
+				return nil, false
+			}
+			descriptorIndex = constant.DescriptorIndex
+			hasDescriptor = true
+		case *ConstantMethodTypeInfo:
+			if constant == nil {
+				return nil, false
+			}
+			descriptorIndex = constant.DescriptorIndex
+			hasDescriptor, methodOnly = true, true
+		}
+		if hasDescriptor && !descriptor(descriptorIndex, methodOnly) {
 			return nil, false
 		}
 		if cls, ok := constant.(*ConstantClassInfo); ok && cls != nil {
@@ -541,7 +605,7 @@ func nativeMemberDependencyNames(obj *ClassObject, work *workbudget.Budget) ([]s
 				return nil, false
 			}
 			if strings.HasPrefix(n, "[") {
-				if !signature(n) {
+				if !descriptor(cls.NameIndex, false) {
 					return nil, false
 				}
 			} else {
@@ -557,8 +621,7 @@ func nativeMemberDependencyNames(obj *ClassObject, work *workbudget.Budget) ([]s
 		if member == nil || !nativeProofWork(work, 1) {
 			return nil, false
 		}
-		desc, known := sourceBridgeUTF8(obj, member.DescriptorIndex)
-		if !known || !signature(desc) {
+		if !descriptor(member.DescriptorIndex, false) {
 			return nil, false
 		}
 		if !nativeAnnotationDependencies(member.Attributes, work, add) {
