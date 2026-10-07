@@ -10,7 +10,7 @@ import (
 
 func TestNativeAnonymousMemberSuperEnclosingRequiresOriginalParameterPath(t *testing.T) {
 	files := nativeCompileClasses(t, anonymousNestedPrivateMemberSuperFixture())
-	for _, variant := range []string{"original", "missing forest", "foreign members", "missing unit", "copied unit", "foreign object", "wrong descriptor", "wrong base pc", "wrong read pc", "wrong read field", "wrong parameter role", "missing capture", "wrong capture parameter", "wrong capture pc", "changed capture store", "changed parameter load", "missing named parent", "wrong delegation pc", "wrong delegation descriptor", "control entry", "budget", "canceled"} {
+	for _, variant := range []string{"original", "missing forest", "foreign members", "foreign root", "foreign forest root", "missing unit", "copied unit", "foreign object", "wrong descriptor", "wrong base pc", "wrong read pc", "wrong read field", "wrong parameter role", "missing capture", "wrong capture parameter", "wrong capture pc", "changed capture store", "changed parameter load", "missing named parent", "wrong delegation pc", "wrong delegation descriptor", "control entry", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
@@ -60,6 +60,10 @@ func TestNativeAnonymousMemberSuperEnclosingRequiresOriginalParameterPath(t *tes
 				f = nil
 			case "foreign members":
 				f.members = &nativeMemberFamily{}
+			case "foreign root":
+				p.owner = "Foreign"
+			case "foreign forest root":
+				f.root = "Foreign"
 			case "missing unit":
 				delete(f.units, unit.object.GetClassName())
 			case "copied unit":

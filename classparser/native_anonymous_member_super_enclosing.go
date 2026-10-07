@@ -13,6 +13,17 @@ func nativeAnonymousMemberSuperEnclosingPath(object *ClassObject, owner string, 
 	if object == nil || members == nil || members.failed || parent == nil || parent.static || parent.object == nil || members.children[parent.object.GetClassName()] != parent || start < 0 || start >= len(ops) || !constructorMotionLoad(ops[start], "L"+owner+";") || core.GetRetrieveIdx(ops[start]) != 1 {
 		return nil, start, false
 	}
+	root := members.lexicalObjects[members.owner]
+	if root == nil || root.GetClassName() != members.owner || !nativeMemberTopLevelEvidence(root, work) {
+		return nil, start, false
+	}
+	declaring, _, _, known := originalMemberOwner(parent.object)
+	if !known || declaring != parent.owner {
+		return nil, start, false
+	}
+	if forest != nil && (forest.members != members || forest.root != members.owner || forest.objects[members.owner] != root) {
+		return nil, start, false
+	}
 	var path *nativeMemberLexicalRead
 	current := owner
 	seen := map[string]bool{}
