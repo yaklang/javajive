@@ -17,6 +17,14 @@ import (
 // driver stay intact. The original JVM must pass the independent numeric and
 // effect oracle before the generated class is run in a classpath of its own.
 func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.T) {
+	testAdversarialPrimitiveStackValues(t, true)
+}
+
+func TestAdversarialPrimitiveStackValuesPreserveEvaluationAndWrites(t *testing.T) {
+	testAdversarialPrimitiveStackValues(t, false)
+}
+
+func testAdversarialPrimitiveStackValues(t *testing.T, comparisonWords bool) {
 	javac, java := requireJDK(t)
 	fs := []uint32{0, 0x80000000, 1, 0x80000001, 0x007fffff, 0x00800000, 0x3f800000, 0xbf800000, 0x7f7fffff, 0xff7fffff, 0x7f800000, 0xff800000, 0x7fc00000, 0x7fc01234, 0xffc01234, 0x3f800001}
 	ds := []uint64{0, 0x8000000000000000, 1, 0x8000000000000001, 0x000fffffffffffff, 0x0010000000000000, 0x3ff0000000000000, 0xbff0000000000000, 0x7fefffffffffffff, 0xffefffffffffffff, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000000, 0x7ff8000000001234, 0xfff8000000001234, 0x3ff0000000000001}
@@ -55,7 +63,11 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 		fmt.Fprintf(&driver, "0x%016xL", uint64(b))
 	}
 	driver.WriteString("};\n")
-	for _, kind := range []string{"fl", "fg", "dl", "dg", "l"} {
+	kinds := []string{"fl", "fg", "dl", "dg", "l"}
+	if !comparisonWords {
+		kinds = []string{"fl", "dl", "l"}
+	}
+	for _, kind := range kinds {
 		typ, table, field, opcode, pair := "float", "fs", "vf", byte(0x95), []byte{0x62, 0x8b}
 		if kind[0] == 'd' {
 			typ, table, field, opcode, pair = "double", "ds", "vd", 0x97, []byte{0x63, 0x8e}
@@ -66,7 +78,7 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 		if kind == "fg" || kind == "dg" {
 			opcode++
 		}
-		for _, layout := range []string{"direct", "stored", "reused", "dup", "nonzero", "branch", "zero", "caught", "finally", "volatile", "handler-boundary"} {
+		for _, layout := range []string{"direct", "stored", "reused", "dup", "nonzero", "branch", "zero", "caught", "finally", "volatile", "handler-boundary", "array", "loop", "joined", "narrow", "zero-after-dup", "local-write", "alias-write", "nested-right", "right-store"} {
 			name := fmt.Sprintf("m%d", len(specs))
 			specs = append(specs, spec{name, opcode, pair})
 			word := "(int)(left(a)+right(b))"
@@ -88,6 +100,24 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 				body = "if(" + word + "<0)return 91;return 97;"
 			case "handler-boundary":
 				body = typ + " x=left(a);try{return(int)(x+right(b));}catch(RuntimeException e){trace=trace*10+3;return e==ERROR?107:109;}"
+			case "array":
+				body = "int[] r=new int[2];r[0]=" + word + ";r[1]=r[0]+5;return r[0]*31+r[1];"
+			case "loop":
+				body = "int r=0;for(int k=0;k<2;k++){int x=" + word + ";r=r*10+x;}return r;"
+			case "joined":
+				body = "int x;if(fail==0){x=" + word + ";}else{x=31;}return x*3;"
+			case "narrow":
+				body = "return(byte)" + word + ";"
+			case "zero-after-dup":
+				body = "int x;if((x=" + word + ")<0)return x*7;return x*11;"
+			case "local-write":
+				body = "return(int)(a+(a=right(b)));"
+			case "alias-write":
+				body = typ + "[] v=new " + typ + "[]{a};return(int)(v[0]+(v[0]=right(b)));"
+			case "nested-right":
+				body = "return(int)(left(a)+right(right(b)));"
+			case "right-store":
+				body = "return(int)(left(a)+(b=right(b)));"
 			case "caught":
 				body = "try{return " + word + ";}catch(RuntimeException e){trace=trace*10+3;return e==ERROR?107:109;}"
 			case "finally":
@@ -128,6 +158,26 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 							result = 1
 						}
 					}
+					if !comparisonWords {
+						if typ == "long" {
+							result = int(int32(ls[i] + ls[j]))
+						} else {
+							sum := float64(math.Float32frombits(fs[i]) + math.Float32frombits(fs[j]))
+							if typ == "double" {
+								sum = math.Float64frombits(ds[i]) + math.Float64frombits(ds[j])
+							}
+							switch {
+							case math.IsNaN(sum):
+								result = 0
+							case sum >= math.MaxInt32:
+								result = math.MaxInt32
+							case sum <= math.MinInt32:
+								result = math.MinInt32
+							default:
+								result = int(int32(sum))
+							}
+						}
+					}
 					output := result
 					switch layout {
 					case "stored":
@@ -143,6 +193,19 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 						} else if result == -1 {
 							output = 72
 						}
+					case "array":
+						output = result*32 + 5
+					case "loop":
+						output = result * 11
+					case "joined":
+						output = result * 3
+					case "narrow":
+						output = int(int8(result))
+					case "zero-after-dup":
+						output = result * 11
+						if result < 0 {
+							output = result * 7
+						}
 					case "zero":
 						output = 97
 						if result < 0 {
@@ -156,6 +219,7 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 							output = 43
 						}
 					}
+					output = int(int32(output)) // Java int arithmetic wraps modulo 2^32.
 					for fail := 0; fail < 3; fail++ {
 						trace := 12
 						out := fmt.Sprint(output)
@@ -163,7 +227,7 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 						if fail == 1 {
 							trace = 1
 						}
-						if layout == "volatile" {
+						if layout == "volatile" || layout == "local-write" || layout == "alias-write" {
 							trace = 2
 							abrupt = fail == 2
 						}
@@ -174,6 +238,14 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 								trace = trace*10 + 3
 							}
 						}
+						if layout == "joined" && fail > 0 {
+							out = "93"
+							trace = 0
+						} else if layout == "nested-right" && fail == 0 {
+							trace = 122
+						} else if layout == "loop" && fail == 0 {
+							trace = 1212
+						}
 						if layout == "finally" {
 							trace = trace*10 + 4
 						}
@@ -183,7 +255,7 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 						} else if typ == "long" {
 							heap = "63"
 						}
-						if fail == 1 && layout != "volatile" {
+						if fail == 1 && layout != "volatile" && layout != "local-write" && layout != "alias-write" || layout == "joined" && fail > 0 {
 							heap = fmt.Sprintf("%x", fs[i])
 							if typ == "double" {
 								heap = fmt.Sprintf("%x", ds[i])
@@ -255,7 +327,9 @@ func TestAdversarialComparisonWordsPreserveNumericCategoryAndEffects(t *testing.
 							if bytes.Count(c.Code, s.pair) != 1 {
 								t.Fatalf("unique sum/cast boundary %s: %x", name, c.Code)
 							}
-							c.Code = bytes.Replace(c.Code, s.pair, []byte{s.opcode, 0}, 1)
+							if comparisonWords {
+								c.Code = bytes.Replace(c.Code, s.pair, []byte{s.opcode, 0}, 1)
+							}
 							patched++
 							found = true
 						}

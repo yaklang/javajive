@@ -43,6 +43,8 @@ type branchArrayCall struct {
 }
 
 type Decompiler struct {
+	stackValueProducers    map[values.JavaValue]*OpCode
+	stackLifetimeCopies    map[values.JavaValue]*values.JavaRef
 	comparisonWordInputs   map[*OpCode][]*statements.AssignStatement
 	effectfulStackPhiEdges map[*OpCode]*statements.AssignStatement
 	evaluationSnapshots    map[*OpCode][]EvaluationSnapshot
@@ -5077,6 +5079,12 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		sim := NewStackSimulationProxy(runtimeStackSimulation, func(value values.JavaValue) {
 			runtimeStackSimulation.Push(value)
 			code.stackProduced = append(code.stackProduced, value)
+			if d.stackValueProducers == nil {
+				d.stackValueProducers = map[values.JavaValue]*OpCode{}
+			}
+			if value != nil && d.stackValueProducers[value] == nil {
+				d.stackValueProducers[value] = code
+			}
 		}, func() values.JavaValue {
 			val := runtimeStackSimulation.Pop()
 			code.stackConsumed = append(code.stackConsumed, val)
@@ -5113,6 +5121,9 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		runtimeStackSimulation.varTable = varTable
 		err := d.calcOpcodeStackInfo(sim, code)
 		if err != nil {
+			return nil, err
+		}
+		if err := d.preserveStackAcrossWrite(runtimeStackSimulation, code); err != nil {
 			return nil, err
 		}
 		if d.traceEnabled("var-table") {
