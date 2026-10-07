@@ -159,3 +159,15 @@ func TestAdversarialSourceTargetPreservesGenericAccessorErasureRoundTrip(t *test
 	fixture = strings.Replace(fixture, `System.out.println("accessor:argument:init:receiver-failure");`, `Object token=new Object();DormantAccessOwner<Object> value=new DormantAccessOwner<Object>(token);if(DormantAccessOwner.Reader.read(value,null)!=token)throw new AssertionError("generic accessor identity/erasure");System.out.println("accessor:generic:erasure:identity:initialization");`, 1)
 	testSourceTargetOriginalFamilyFixture(t, fixture, "DormantAccessOwner", "DormantAccessDriver", "accessor:generic:erasure:identity:initialization\n")
 }
+
+func TestAdversarialPreNestmateSourceVersionsPreserveObservableCaptureRoundTrip(t *testing.T) {
+	for _, release := range []string{"9", "10"} {
+		t.Run(release, func(t *testing.T) {
+			target, err := strconv.Atoi(release)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testSourceTargetReleaseFamilyFixture(t, sourceTargetCaptureFixture, "SourceCaptureOwner", "CaptureDriver", "20:source-target:capture:observation:publication:exception\n", release, []int{target, 11})
+		})
+	}
+}

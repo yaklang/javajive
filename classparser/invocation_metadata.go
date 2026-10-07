@@ -42,6 +42,11 @@ func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
 				return v, true
 			}
 			v := callbinding.Class{Name: n, Public: true, MembersComplete: true, ParentsComplete: true}
+			// Object's public no-argument constructor is a language-defined
+			// root delegation with no declared checked exception. Its absence
+			// from this existing root namespace made a valid implicit super()
+			// look like an unknown declaration outside catalogued profiles.
+			v.Methods = append(v.Methods, callbinding.Method{Name: "<init>", Desc: "()V", Public: true, ExceptionsKnown: true})
 			for _, m := range []struct {
 				name, desc string
 				public     bool

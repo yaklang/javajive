@@ -11,8 +11,11 @@ import (
 // Do not infer local/anonymous ownership without EnclosingMethod, or reinterpret
 // later classfile features that a pre-49 JVM may ignore/reject.
 func nativeMemberVersionMetadata(obj *ClassObject, work *workbudget.Budget) bool {
-	if obj == nil || obj.MajorVersion < 45 || obj.MajorVersion > 52 {
+	if obj == nil || obj.MajorVersion < 45 || obj.MajorVersion > 54 {
 		return false
+	}
+	if obj.MajorVersion >= 53 {
+		return nativeAccessorVersion(obj, work)
 	}
 	if obj.MajorVersion >= 49 {
 		return true

@@ -6,8 +6,10 @@ import "github.com/yaklang/javajive/internal/workbudget"
 // straight accessor grammars have no version-dependent execution steps, but
 // unused later constant-pool tags still make a pre-51 class invalid. A version
 // edit alone must never manufacture evidence for a modern classfile feature.
+// Versions53/54 still use this pre-nestmate field/accessor protocol. Module
+// namespaces and version55 dynamic constants are outside these grammars.
 func nativeAccessorVersion(obj *ClassObject, work *workbudget.Budget) bool {
-	if obj == nil || obj.MinorVersion != 0 || obj.MajorVersion < 49 || obj.MajorVersion > 52 {
+	if obj == nil || obj.MinorVersion != 0 || obj.MajorVersion < 49 || obj.MajorVersion > 54 {
 		return false
 	}
 	for _, constant := range obj.ConstantPool {

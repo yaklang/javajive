@@ -18,11 +18,11 @@ func TestNativeAccessorVersionRequiresLegalFeatureNamespace(t *testing.T) {
 		{"MethodHandle", &ConstantMethodHandleInfo{}, 51}, {"MethodType", &ConstantMethodTypeInfo{}, 51}, {"InvokeDynamic", &ConstantInvokeDynamicInfo{}, 51},
 		{"Dynamic", &ConstantDynamicInfo{}, 55}, {"Module", &ConstantModuleInfo{}, 53}, {"Package", &ConstantPackageInfo{}, 53},
 	}
-	for _, major := range []uint16{48, 49, 50, 51, 52, 53, 55} {
+	for _, major := range []uint16{48, 49, 50, 51, 52, 53, 54, 55} {
 		for _, c := range constants {
 			t.Run(fmt.Sprintf("%d/%s", major, c.name), func(t *testing.T) {
 				obj := &ClassObject{MajorVersion: major, ConstantPool: []ConstantInfo{c.value}}
-				want := major >= 49 && major <= 52 && major >= c.minimum
+				want := major >= 49 && major <= 54 && major >= c.minimum && c.minimum < 53
 				if got := nativeAccessorVersion(obj, nil); got != want {
 					t.Fatalf("format feature admitted=%v want=%v", got, want)
 				}
