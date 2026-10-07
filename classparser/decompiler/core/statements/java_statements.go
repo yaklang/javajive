@@ -91,7 +91,7 @@ func NewConditionStatement(cmp values.JavaValue, op string) *ConditionStatement 
 			}
 		}
 		return &ConditionStatement{
-			Condition: values.NewBinaryExpression(v.JavaValue1, v.JavaValue2, op, types.NewJavaPrimer(types.JavaBoolean)),
+			Condition: v.Predicate(op),
 		}
 	} else {
 		return &ConditionStatement{

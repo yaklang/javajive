@@ -3958,7 +3958,11 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 	case OP_LCMP, OP_DCMPG, OP_DCMPL, OP_FCMPG, OP_FCMPL:
 		var1 := runtimeStackSimulation.Pop().(values.JavaValue)
 		var2 := runtimeStackSimulation.Pop().(values.JavaValue)
-		runtimeStackSimulation.Push(values.NewJavaCompare(var2, var1))
+		if opcode.Instr.OpCode == OP_LCMP {
+			runtimeStackSimulation.Push(values.NewJavaCompare(var2, var1))
+		} else {
+			runtimeStackSimulation.Push(values.NewJavaFloatingCompare(var2, var1, opcode.Instr.OpCode == OP_FCMPL || opcode.Instr.OpCode == OP_DCMPL))
+		}
 	case OP_LSUB, OP_ISUB, OP_DSUB, OP_FSUB, OP_LADD, OP_IADD, OP_FADD, OP_DADD, OP_IREM, OP_FREM, OP_LREM, OP_DREM, OP_IDIV, OP_FDIV, OP_DDIV, OP_LDIV, OP_IMUL, OP_DMUL, OP_FMUL, OP_LMUL, OP_LAND, OP_LOR, OP_LXOR, OP_ISHR, OP_ISHL, OP_LSHL, OP_LSHR, OP_IUSHR, OP_LUSHR, OP_IOR, OP_IAND, OP_IXOR:
 		var op string
 		switch opcode.Instr.OpCode {

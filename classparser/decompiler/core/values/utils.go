@@ -50,7 +50,7 @@ func SimplifyConditionValue(condition JavaValue) JavaValue {
 					return v1.Values[0]
 				} else {
 					reverseOp, err := GetNotOpWithError(v1.Op)
-					if err == nil {
+					if err == nil && comparisonComplementIsTotal(v1) {
 						resVal = NewBinaryExpression(v1.Values[0], v1.Values[1], reverseOp, types.NewJavaPrimer(types.JavaBoolean))
 					}
 				}
@@ -58,6 +58,33 @@ func SimplifyConditionValue(condition JavaValue) JavaValue {
 		}
 	}
 	return resVal
+}
+
+// Equality and inequality partition every Java operand domain. Relational
+// complements only partition ordered primitive domains: NaN satisfies neither
+// x<y nor x>=y. Unknown operands must retain their explicit Boolean negation.
+func comparisonComplementIsTotal(expr *JavaExpression) bool {
+	if len(expr.Values) != 2 {
+		return false
+	}
+	if expr.Op == EQ || expr.Op == NEQ {
+		return true
+	}
+	for _, v := range expr.Values {
+		if v == nil || v.Type() == nil {
+			return false
+		}
+		p, ok := v.Type().RawType().(*types.JavaPrimer)
+		if !ok {
+			return false
+		}
+		switch p.Name {
+		case types.JavaByte, types.JavaShort, types.JavaChar, types.JavaInteger, types.JavaLong:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // branchConditionView is a use-site view of a predicate. JVM branch truth

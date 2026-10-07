@@ -10,6 +10,9 @@ import (
 
 type JavaCompare struct {
 	JavaValue1, JavaValue2 JavaValue
+	// Original fcmp/dcmp result for an unordered pair: -1 for cmpl, +1
+	// for cmpg. Zero belongs to ordinary ordered/reference comparisons.
+	unorderedResult int8
 }
 
 // ReplaceVar implements JavaValue.
@@ -31,6 +34,46 @@ func NewJavaCompare(v1, v2 JavaValue) *JavaCompare {
 		JavaValue1: v1,
 		JavaValue2: v2,
 	}
+}
+
+// NewJavaFloatingCompare retains the instruction's unordered result rather than
+// inferring it from the subsequently selected branch. Both operands are still
+// evaluated exactly once, in their original left-to-right order.
+func NewJavaFloatingCompare(v1, v2 JavaValue, unorderedLow bool) *JavaCompare {
+	c := NewJavaCompare(v1, v2)
+	c.unorderedResult = 1
+	if unorderedLow {
+		c.unorderedResult = -1
+	}
+	return c
+}
+
+// Predicate lowers a comparison of the JVM three-way result against zero. A
+// float relation is false on NaN; its integer-opcode complement need not be.
+// Use an explicit Boolean complement when unordered input satisfies the branch.
+// This avoids re-evaluation through a separate isNaN test or a ternary compare.
+func (j *JavaCompare) Predicate(op string) JavaValue {
+	negate := false
+	if j.unorderedResult < 0 {
+		switch op {
+		case LT:
+			op, negate = GTE, true
+		case LTE:
+			op, negate = GT, true
+		}
+	} else if j.unorderedResult > 0 {
+		switch op {
+		case GT:
+			op, negate = LTE, true
+		case GTE:
+			op, negate = LT, true
+		}
+	}
+	result := JavaValue(NewBinaryExpression(j.JavaValue1, j.JavaValue2, op, types.NewJavaPrimer(types.JavaBoolean)))
+	if negate {
+		result = NewUnaryExpression(result, Not, types.NewJavaPrimer(types.JavaBoolean))
+	}
+	return result
 }
 
 type LambdaFuncRef struct {
