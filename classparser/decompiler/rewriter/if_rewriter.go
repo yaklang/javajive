@@ -76,6 +76,15 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 		endNodes = NodeDeduplication(endNodes)
 		hasNext := false
 		for _, node := range endNodes {
+			// Abrupt method exits have no normal successor. They cannot
+			// disprove that the remaining paths join the opposite arm.
+			terminal := isMethodExitTerminator(node)
+			for _, next := range node.Next {
+				terminal = terminal && IsEndNode(next)
+			}
+			if terminal {
+				continue
+			}
 			for _, n := range node.Next {
 				if encodedJumpTo(node, n) {
 					continue

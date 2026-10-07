@@ -321,6 +321,15 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	if len(endNodes) == 1 {
 		mergeNode = endNodes[0]
 	}
+	// An enclosing condition can bypass this switch to its unmatched-value
+	// continuation. That exact shared CFG edge is still a normal switch exit,
+	// even when all explicit cases return and none contributes a break edge.
+	// Keep the common expression after the condition; do not copy its effects
+	// into a default arm or let dominance-based collection discard it.
+	if def := caseMap.GetMust(switchLabel{Default: true}); externalConditionalSwitchDefault(manager, node, def) {
+		mergeNode = def
+		node.SwitchEmptyDefaultMerge = true
+	}
 	// Bug K: an EMPTY `default` whose target is the switch's natural exit/merge point. When no
 	// dominated non-start node was found as the merge (endNodes empty), the default's target node may
 	// itself BE the post-switch merge: every case body `break`s (goto) to it and the default/no-match
@@ -454,6 +463,25 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	node.MergeNode = mergeNode
 	node.SwitchPrepared = true
 	return nil
+}
+
+func externalConditionalSwitchDefault(manager *RewriteManager, owner, target *core.Node) bool {
+	if manager == nil || owner == nil || target == nil || !owner.HasOriginPC || !target.HasOriginPC || target.OriginPC <= owner.OriginPC ||
+		target.HideNext != nil || target.IsCatchStart || target.IsTryCatch || target.IsCircle || target.IsInCircle ||
+		len(target.EncodedJumps) != 0 || utils.IsDominate(manager.DominatorMap, owner, target) ||
+		!sameProtectedMembership(manager.RootNode, owner, target) {
+		return false
+	}
+	for _, source := range target.Source {
+		if _, condition := source.Statement.(*statements.ConditionStatement); !condition || !utils.IsDominate(manager.DominatorMap, source, owner) || encodedJumpTo(source, target) {
+			continue
+		}
+		left, right := ifBranchNodes(source)
+		if left != right && (left == target || right == target) {
+			return true
+		}
+	}
+	return false
 }
 
 // A terminal RETURN shared with a path before the switch is not dominated by
