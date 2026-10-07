@@ -3755,6 +3755,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	}
 	c.MethodType = methodType.FunctionType()
 	returnTypeStr := methodType.FunctionType().ReturnType.String(c.FuncCtx)
+	if lexical, known := c.nativeMemberImplicitFactoryResultSource(method, methodType.FunctionType().ReturnType); known {
+		returnTypeStr = lexical
+	}
 	returnTypeStr = c.applyReturnTypeAnnotations(method, methodType.FunctionType().ReturnType, returnTypeStr)
 	code := ""
 	c.Tab()

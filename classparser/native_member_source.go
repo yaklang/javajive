@@ -384,7 +384,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		}
 		n, nok := sourceBridgeUTF8(obj, m.NameIndex)
 		desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
-		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 && (p.assertions == nil || p.assertions.initializer != m) && (lexical == nil || nativeMemberPrivateAccessProofWithDeclarations(obj, m, resolve, work) == nil) {
+		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 && (p.assertions == nil || p.assertions.initializer != m) && (lexical == nil || nativeMemberPrivateAccessProofWithDeclarations(obj, m, resolve, work, lexical) == nil) {
 			return nil
 		}
 		for _, a := range m.Attributes {
@@ -619,6 +619,9 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				reader.foldSiblingResolver = c.foldSiblingResolver
 				reader.declarationResolver = c.declarationResolver
 				bridges := reader.originalNativeConstructorAccessBridges()
+				// Retain this exact parsed declaration before proving its lexical
+				// method scope. A failed child aborts the entire family transaction.
+				p.lexicalObjects[name] = obj
 				child := nativeMemberProofWithDeclarations(obj, enclosing, c.Work, bridges, p.lexicalObjects, resolveDeclaration, reader.buildInvocationMetadata())
 				rowName, rowKnown := sourceBridgeUTF8(enclosing, row.InnerNameIndex)
 				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags {

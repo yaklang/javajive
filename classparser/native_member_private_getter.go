@@ -208,7 +208,7 @@ func nativeMemberCollectPrivateGettersResolved(p *nativeMemberFamily, resolve fu
 			if !strings.HasPrefix(name, "access$") || m.AccessFlags&0x1000 == 0 {
 				continue
 			}
-			getter := nativeMemberPrivateAccessProofWithDeclarations(obj, m, resolve, work)
+			getter := nativeMemberPrivateAccessProofWithDeclarations(obj, m, resolve, work, p.lexicalObjects)
 			if getter == nil {
 				return false
 			}

@@ -19,6 +19,7 @@ type nativeMemberPrivateCall struct {
 	static            bool
 	inherited         bool
 	rawGeneric        bool
+	rawLexicalOwner   []string
 }
 
 // A private bridge forwards each physical parameter once, in order, into
@@ -39,7 +40,7 @@ func nativeMemberProtectedCallProof(obj *ClassObject, m *MemberInfo, resolve fun
 // The common packet proof retains physical slots, descriptor widths, return
 // category and the exact checked-exception contract. Only a complete original
 // superclass lookup licenses the separate inherited protected virtual case.
-func nativeMemberCallPacketProof(obj *ClassObject, m *MemberInfo, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeMemberPrivateGetter {
+func nativeMemberCallPacketProof(obj *ClassObject, m *MemberInfo, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, lexical ...map[string]*ClassObject) *nativeMemberPrivateGetter {
 	if obj == nil || m == nil || m.AccessFlags != 0x1008 || obj.AccessFlags&0x0200 != 0 || !nativeAccessorVersion(obj, work) || !nativeProofWork(work, 1) {
 		return nil
 	}
@@ -165,6 +166,7 @@ func nativeMemberCallPacketProof(obj *ClassObject, m *MemberInfo, resolve func(s
 	var targetThrows *ExceptionsAttribute
 	var targetSignature string
 	methodFormalCount := 0
+	var rawLexicalOwner []string
 	for _, a := range target.Attributes {
 		switch a := a.(type) {
 		case *SignatureAttribute:
@@ -181,6 +183,13 @@ func nativeMemberCallPacketProof(obj *ClassObject, m *MemberInfo, resolve func(s
 					return nil
 				}
 			} else if !nativeMemberConcretePrivateCall(targetOwner, targetSignature, invoke.Description, target, work) && !nativeMemberRawOwnPrivateCall(targetOwner, targetSignature, invoke.Description, target, work) {
+				if len(lexical) == 1 && !static {
+					var proved bool
+					rawLexicalOwner, proved = nativeMemberRawLexicalPrivateCall(targetOwner, targetSignature, invoke.Description, target, lexical[0], work)
+					if proved {
+						continue
+					}
+				}
 				if len(targetSignature) > 4096 || !nativeProofWork(work, int64(len(targetSignature))*130+1) || work != nil && work.CheckAlloc(int64(len(targetSignature))*256) != nil {
 					return nil
 				}
@@ -212,7 +221,7 @@ func nativeMemberCallPacketProof(obj *ClassObject, m *MemberInfo, resolve func(s
 			}
 		}
 	}
-	return &nativeMemberPrivateGetter{owner: obj.GetClassName(), name: name, descriptor: desc, field: invoke.Member, fieldDescriptor: invoke.Description, ordinal: ordinal, method: m, call: &nativeMemberPrivateCall{argumentCount: len(params), methodFormalCount: methodFormalCount, static: static, inherited: inherited, rawGeneric: targetSignature != ""}}
+	return &nativeMemberPrivateGetter{owner: obj.GetClassName(), name: name, descriptor: desc, field: invoke.Member, fieldDescriptor: invoke.Description, ordinal: ordinal, method: m, call: &nativeMemberPrivateCall{argumentCount: len(params), methodFormalCount: methodFormalCount, static: static, inherited: inherited, rawGeneric: targetSignature != "", rawLexicalOwner: rawLexicalOwner}}
 }
 
 func nativeMemberPrivateCallSource(getter *nativeMemberPrivateGetter, args []any, ctx *class_context.ClassContext) (string, bool) {
@@ -236,11 +245,17 @@ func nativeMemberPrivateCallSource(getter *nativeMemberPrivateGetter, args []any
 		call.Arguments = append(call.Arguments, v)
 	}
 	owner := ctx.ShortTypeName(strings.ReplaceAll(getter.owner, "/", "."))
+	if len(getter.call.rawLexicalOwner) > 0 {
+		owner = ctx.ShortTypeName(strings.ReplaceAll(getter.call.rawLexicalOwner[0], "/", "."))
+		for _, member := range getter.call.rawLexicalOwner[1:] {
+			owner += "." + member
+		}
+	}
 	var receiver string
 	if getter.call.rawGeneric && strings.ContainsAny(owner, "<>") {
 		return "", false
 	}
-	if getter.call.inherited && nativeStaticAccessorQualifierShadowed(owner, ctx) {
+	if (getter.call.inherited || len(getter.call.rawLexicalOwner) > 0) && nativeStaticAccessorQualifierShadowed(owner, ctx) {
 		return "", false
 	}
 	if getter.call.static {
