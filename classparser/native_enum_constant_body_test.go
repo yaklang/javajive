@@ -194,7 +194,10 @@ func TestNativeEnumConstantBodyRequiresCompleteOriginalPacket(t *testing.T) {
 					work = workbudget.New(ctx, workbudget.Limits{})
 				}
 				got := nativeEnumConstantBodyProof(parent, plan, ordinal, bridges, resolve, work)
-				if (got != nil) != (variant == "original" || variant == "harmless nop") {
+				if variant == "missing parameters" && got != nil && !got.legacyConstructorMetadata {
+					t.Fatal("optional parameter metadata regeneration difference not reported")
+				}
+				if (got != nil) != (variant == "original" || variant == "harmless nop" || variant == "missing parameters") {
 					t.Fatalf("constant constructor admission=%v", got != nil)
 				}
 			})

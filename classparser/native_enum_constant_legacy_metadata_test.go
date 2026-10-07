@@ -102,7 +102,7 @@ func TestNativeLegacyEnumConstantMetadataRequiresOriginalExecutablePacket(t *tes
 				work.Charge(workbudget.CounterGraphScans, 1)
 			}
 			got := nativeEnumConstantBodyProof(parent, plan, 1, bridges, resolve, work)
-			want := variant == "original" || variant == "old final row" || variant == "old static row" || variant == "old static final row"
+			want := variant == "original" || variant == "current missing parameters" || variant == "old final row" || variant == "old static row" || variant == "old static final row"
 			if (got != nil) != want {
 				t.Fatalf("accepted=%v", got != nil)
 			}

@@ -21,6 +21,7 @@ type nativeEnumConstantBody struct {
 	superPC                   int
 	rendered                  bool
 	legacyConstructorMetadata bool
+	assertions                *nativeMemberAssertion
 }
 
 func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAllocation, bodyOrdinal int, bridges map[string]*nativeConstructorAccessBridge, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) *nativeEnumConstantBody {
@@ -28,17 +29,31 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 		return nil
 	}
 	obj, known := resolve(plan.allocatedClass)
-	if !known || obj == nil || obj.GetClassName() != plan.allocatedClass || obj.AccessFlags != 0x4030 || obj.GetSupperClassName() != parent.GetClassName() || len(obj.Fields) != 0 || len(obj.Interfaces) != 0 || !nativeAccessorVersion(obj, work) {
+	if !known || obj == nil || obj.GetClassName() != plan.allocatedClass || obj.AccessFlags != 0x4030 || obj.GetSupperClassName() != parent.GetClassName() || len(obj.Fields) > 1 || len(obj.Interfaces) != 0 || !nativeAccessorVersion(obj, work) {
 		return nil
 	}
-	// MethodParameters was introduced by classfile version 52. Older enum
-	// constant classes also used optional STATIC/FINAL bits in their self row.
-	// Those optional reflection representations do not change the forwarding
-	// packet, its original descriptor, or the runtime final-class constraint.
-	legacyMetadata := obj.MajorVersion >= 49 && obj.MajorVersion < 52 && obj.MinorVersion == 0
+	// MethodParameters is optional, including on Java 8. The supported
+	// pre-nestmate enum profile also permits STATIC/FINAL self-row metadata:
+	// classfile ACC_FINAL and the absence of captures prove runtime finality
+	// and ownership independently. Report regeneration metadata differences;
+	// preserve every original executable forwarding operand and exception.
+	legacyMetadata := obj.MajorVersion >= 49 && obj.MajorVersion <= 52 && obj.MinorVersion == 0
+	selfMetadataDifferent := false
 	owner, method, known := originalAnonymousOwner(obj)
 	if !known || owner != parent.GetClassName() || method != "" || obj.GetClassName() != owner+"$"+strconv.Itoa(bodyOrdinal) {
 		return nil
+	}
+	var assertions *nativeMemberAssertion
+	if len(obj.Fields) != 0 {
+		statusOwner, known := nativeEnumAssertionStatusOwner(parent, resolve, work)
+		if !known {
+			return nil
+		}
+		var valid bool
+		assertions, valid = nativeMemberAssertionProof(obj, statusOwner, work)
+		if !valid || assertions == nil || !assertions.pureInitializer {
+			return nil
+		}
 	}
 	selfRows, innerTables, enclosing, source := 0, 0, 0, 0
 	for _, a := range obj.Attributes {
@@ -79,6 +94,7 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 					selfRows++
 					flags := row.InnerClassAccessFlags
 					validFlags := flags == 0x4010 || legacyMetadata && flags&0x4000 != 0 && flags & ^uint16(0x4018) == 0
+					selfMetadataDifferent = flags != 0x4010
 					if row.OuterClassInfoIndex != 0 || row.InnerNameIndex != 0 || !validFlags {
 						return nil
 					}
@@ -115,6 +131,9 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 			return nil
 		}
 		if name == "<clinit>" {
+			if assertions != nil && assertions.initializer == m {
+				continue
+			}
 			return nil
 		}
 		if name == "<init>" {
@@ -165,7 +184,7 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 			return nil
 		}
 	}
-	if (!parametersSeen && !legacyMetadata) || (parametersSeen && legacyMetadata) || code == nil || len(code.ExceptionTable) != 0 || len(code.Code) > 512 || !nativeProofWork(work, int64(len(code.Code))) || code.MaxLocals != uint16(nativeMemberParameterWidth(params)+1) || code.MaxStack != uint16(nativeMemberParameterWidth(params)+2) {
+	if (!parametersSeen && !legacyMetadata) || (parametersSeen && obj.MajorVersion < 52) || code == nil || len(code.ExceptionTable) != 0 || len(code.Code) > 512 || !nativeProofWork(work, int64(len(code.Code))) || code.MaxLocals != uint16(nativeMemberParameterWidth(params)+1) || code.MaxStack != uint16(nativeMemberParameterWidth(params)+2) {
 		return nil
 	}
 	for _, a := range code.Attributes {
@@ -250,7 +269,7 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 	if !ak || !bk || !slices.Equal(a, b) {
 		return nil
 	}
-	return &nativeEnumConstantBody{object: obj, owner: owner, descriptor: plan.descriptor, plan: plan, superDescriptor: bridge.descriptor, superPC: int(call.CurrentOffset), legacyConstructorMetadata: legacyMetadata}
+	return &nativeEnumConstantBody{object: obj, owner: owner, descriptor: plan.descriptor, plan: plan, superDescriptor: bridge.descriptor, superPC: int(call.CurrentOffset), legacyConstructorMetadata: legacyMetadata && (!parametersSeen || selfMetadataDifferent), assertions: assertions}
 }
 
 func nativeEnumConstantConstructorOwned(p *nativeMemberFamily, obj *ClassObject, descriptor string) bool {
@@ -316,7 +335,7 @@ func (c *ClassObjectDumper) foldNativeEnumConstantBodies() (map[string]string, b
 		out[name] = rendered
 		body.rendered = true
 		if body.legacyConstructorMetadata {
-			c.appendDiagnostic(DecompileDiagnostic{Code: "enum_constant_legacy_metadata", Method: body.object.GetClassName() + ".<init>" + body.descriptor, Message: "The original pre-Java-8 enum constant constructor packet is proved. Recompilation may add unnamed generated parameter metadata and different STATIC/FINAL bits to its anonymous InnerClasses self row; executable descriptor, final class, forwarding operands and exceptions are preserved."})
+			c.appendDiagnostic(DecompileDiagnostic{Code: "enum_constant_legacy_metadata", Method: body.object.GetClassName() + ".<init>" + body.descriptor, Message: "The original pre-nestmate enum constant constructor packet is proved. Recompilation may add unnamed generated parameter metadata and different STATIC/FINAL bits to its anonymous InnerClasses self row; executable descriptor, final class, forwarding operands and exceptions are preserved."})
 		}
 	}
 	if len(out) != len(current.enumSynthesis.bodies) {
@@ -443,7 +462,7 @@ func (z *JarFS) nativeEnumConstantsArchiveClosed(p *nativeMemberFamily, index *n
 				// javac may use the constant subclass as the symbolic owner of a
 				// nonprivate inherited enum field. It is still this exact receiver and
 				// the original enum declaration, never a foreign anonymous source type.
-				if user != target || !nativeEnumConstantInheritedField(p, target, name, desc, work) {
+				if user != target || !(nativeEnumConstantInheritedField(p, target, name, desc, work) || nativeEnumConstantAssertionFieldOwned(p, target, name, desc, work)) {
 					return false
 				}
 				continue
@@ -539,4 +558,15 @@ func nativeEnumConstantInheritedField(p *nativeMemberFamily, bodyName, name, des
 		}
 	}
 	return count == 1
+}
+
+// The only newly source-owned field is the independently certified assertion
+// flag of this exact constant body. Its full read/write and handle closure has
+// already been checked on original code; foreign field users remain refused.
+func nativeEnumConstantAssertionFieldOwned(p *nativeMemberFamily, owner, name, descriptor string, work *workbudget.Budget) bool {
+	if p == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	body := p.enumConstants[owner]
+	return body != nil && body.object != nil && body.object.GetClassName() == owner && body.assertions != nil && body.assertions.pureInitializer && body.assertions.initializer != nil && name == nativeAssertionField && descriptor == "Z"
 }

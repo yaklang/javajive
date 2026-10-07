@@ -551,6 +551,9 @@ func nativeAssertionFailureGuard(v values.JavaValue, owner string, work *workbud
 }
 
 func (c *ClassObjectDumper) nativeAssertionProtocol() *nativeMemberAssertion {
+	if c.nativeEnumConstantCurrent != nil {
+		return c.nativeEnumConstantCurrent.assertions
+	}
 	if c.nativeMemberCurrent != nil {
 		return c.nativeMemberCurrent.assertions
 	}
