@@ -179,12 +179,21 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 		}
 		return roots, nil, true
 	case *statements.AssignStatement:
+		// An element store has a distinct lvalue packet. Its absent local
+		// LeftValue is structural, not an unknown operand. Visit the actual
+		// array/index and RHS so hidden writes still invalidate stability.
+		if x.ArrayMember != nil {
+			if x.IsDeclare || x.LeftValue != nil || sourceProofNil(x.ArrayMember.Object) || sourceProofNil(x.ArrayMember.Index) || sourceProofNil(x.JavaValue) {
+				return nil, nil, false
+			}
+			return []values.JavaValue{x.ArrayMember, x.JavaValue}, nil, true
+		}
+		if sourceProofNil(x.LeftValue) {
+			return nil, nil, false
+		}
 		roots := []values.JavaValue{x.LeftValue}
 		if x.JavaValue != nil {
 			roots = append(roots, x.JavaValue)
-		}
-		if x.ArrayMember != nil {
-			roots = append(roots, x.ArrayMember)
 		}
 		return roots, nil, true
 	case *statements.ExpressionStatement:
