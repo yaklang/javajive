@@ -87,7 +87,19 @@ func erasedThrowableTypeVariableView(ctx *class_context.ClassContext, value valu
 	if !ok {
 		return "", false
 	}
-	if len(ctx.CurrentMethodSig) > 4096 || ctx.Work != nil && (ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(ctx.CurrentMethodSig))*130+1) != nil || ctx.Work.CheckAlloc(int64(len(ctx.CurrentMethodSig))*256) != nil) {
+	if len(ctx.CurrentMethodSig) > 4096 || ctx.Work != nil && ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(ctx.CurrentMethodSig))+1) != nil {
+		return "", false
+	}
+	// A restored throws formal requires a TypeVariableSignature after '^'.
+	// Most generic methods have no such throws clause. Inspecting its bytes
+	// first avoids constructing and rendering every unrelated bound each time
+	// a throw is queried by control-flow analysis or source emission. This is
+	// only a necessary grammar condition: candidates still undergo the full
+	// signature, exact-erasure and original-hierarchy proof below.
+	if !strings.Contains(ctx.CurrentMethodSig, "^T") {
+		return "", false
+	}
+	if ctx.Work != nil && (ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(ctx.CurrentMethodSig))*130+1) != nil || ctx.Work.CheckAlloc(int64(len(ctx.CurrentMethodSig))*256) != nil) {
 		return "", false
 	}
 	_, _, result, throws := types.ParseMethodSignatureFullWithThrows(ctx.CurrentMethodSig, ctx)
