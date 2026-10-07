@@ -171,3 +171,16 @@ func TestAdversarialPreNestmateSourceVersionsPreserveObservableCaptureRoundTrip(
 		})
 	}
 }
+
+func TestAdversarialPreNestmatePrivateBridgePreservesObservableCaptureRoundTrip(t *testing.T) {
+	fixture := strings.Replace(sourceTargetCaptureFixture, "public Child(int", "private Child(int", 1)
+	for _, release := range []string{"9", "10"} {
+		t.Run(release, func(t *testing.T) {
+			target, err := strconv.Atoi(release)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testSourceTargetReleaseFamilyFixture(t, fixture, "SourceCaptureOwner", "CaptureDriver", "20:source-target:capture:observation:publication:exception\n", release, []int{target, 11})
+		})
+	}
+}
