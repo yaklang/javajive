@@ -538,14 +538,71 @@ func nativeAnonymousBridgeSuperOwned(p *nativeMemberFamily, object *ClassObject,
 		if p.children[target] != member || member.object == nil || member.object.GetClassName() != target {
 			return false
 		}
-		constructor := member.constructors[bridge.target]
-		if constructor == nil || constructor.descriptor != bridge.target {
+		var known bool
+		sourceDescriptor, known = nativeMemberBridgeTargetSourceDescriptor(member, bridge, work)
+		if !known {
 			return false
 		}
-		sourceDescriptor = constructor.sourceDescriptor
 	}
 	if sourceDescriptor != unit.sourceSuperDescriptor {
 		return false
 	}
 	return group == p.anonymous && group.owner == p.owner || group == p.memberAnonymous[group.owner] || nativeMemberJointAnonymousForestOwner(p, group, work)
+}
+
+// A bridge drops one unused trailing marker. A nonstatic member additionally
+// drops the enclosing word through its original constructor packet. A static
+// member has no such word and deliberately has no enclosing-constructor map;
+// its unchanged private target must remain uniquely present beside the exact
+// synthetic bridge declaration in the original parsed object.
+func nativeMemberBridgeTargetSourceDescriptor(member *nativeMemberClass, bridge *nativeConstructorAccessBridge, work *workbudget.Budget) (string, bool) {
+	if member == nil || member.object == nil || bridge == nil || member.accessBridges[bridge.descriptor] != bridge {
+		return "", false
+	}
+	if !member.static {
+		constructor := member.constructors[bridge.target]
+		if constructor == nil || constructor.descriptor != bridge.target {
+			return "", false
+		}
+		return constructor.sourceDescriptor, true
+	}
+	targets, bridges := 0, 0
+	for _, method := range member.object.Methods {
+		if method == nil || !nativeProofWork(work, 1) {
+			return "", false
+		}
+		name, nk := sourceBridgeUTF8(member.object, method.NameIndex)
+		desc, dk := sourceBridgeUTF8(member.object, method.DescriptorIndex)
+		if !nk || !dk {
+			return "", false
+		}
+		if method == bridge.method {
+			if name != "<init>" || desc != bridge.descriptor || method.AccessFlags != 0x1000 {
+				return "", false
+			}
+			bridges++
+		}
+		if name == "<init>" && desc == bridge.target {
+			if method.AccessFlags != 2 && method.AccessFlags != 0x0082 {
+				return "", false
+			}
+			codes := 0
+			for _, attribute := range method.Attributes {
+				if !nativeProofWork(work, 1) {
+					return "", false
+				}
+				if code, ok := attribute.(*CodeAttribute); ok {
+					if code == nil {
+						return "", false
+					}
+					codes++
+				}
+			}
+			if codes != 1 {
+				return "", false
+			}
+			targets++
+		}
+	}
+	return bridge.target, targets == 1 && bridges == 1
 }

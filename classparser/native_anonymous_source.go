@@ -341,6 +341,15 @@ func nativeAnonymousConstructorWithFlags(obj *ClassObject, owner, method, assert
 	}
 	c.superDescriptor = mem.Description
 	c.sourceSuperDescriptor = mem.Description
+	if c.memberSuper == nil && nullTail && members != nil {
+		// A static named parent has no lexical enclosing operand, but its
+		// private access bridge belongs to the same complete member family.
+		// Record that parent so the physical marker projects through its
+		// independently proved constructor instead of the root's bridge map.
+		if parent := members.children[mem.Name]; parent != nil && parent.static {
+			c.memberSuper = parent
+		}
+	}
 	var bridge *nativeConstructorAccessBridge
 	if c.memberSuper != nil {
 		// Project the two independent compiler operands in their original
@@ -355,11 +364,22 @@ func nativeAnonymousConstructorWithFlags(obj *ClassObject, owner, method, assert
 			}
 			target = bridge.target
 		}
-		ctor := parent.constructors[target]
-		if ctor == nil || ctor.descriptor != target || parent.object.GetClassName() != mem.Name {
+		if parent.object == nil || parent.object.GetClassName() != mem.Name {
 			return nil
 		}
-		c.sourceSuperDescriptor = ctor.sourceDescriptor
+		if parent.static {
+			var known bool
+			c.sourceSuperDescriptor, known = nativeMemberBridgeTargetSourceDescriptor(parent, bridge, work)
+			if !known {
+				return nil
+			}
+		} else {
+			ctor := parent.constructors[target]
+			if ctor == nil || ctor.descriptor != target {
+				return nil
+			}
+			c.sourceSuperDescriptor = ctor.sourceDescriptor
+		}
 	} else if nullTail {
 		if mem.Name != owner || len(access) != 1 {
 			return nil
@@ -375,7 +395,7 @@ func nativeAnonymousConstructorWithFlags(obj *ClassObject, owner, method, assert
 	if nullTail {
 		extra = 1
 	}
-	if c.memberSuper != nil {
+	if c.memberSuper != nil && !c.memberSuper.static {
 		extra++
 	}
 	ds, ret, e := callbinding.Descriptor(mem.Description)
@@ -396,14 +416,14 @@ func nativeAnonymousConstructorWithFlags(obj *ClassObject, owner, method, assert
 	})
 	for j, p := range c.superParams {
 		index := j
-		if c.memberSuper != nil {
+		if c.memberSuper != nil && !c.memberSuper.static {
 			index++
 		}
 		if !nativeProofWork(work, 1) || !widening.assignable(ps[p], ds[index]) {
 			return nil
 		}
 	}
-	if c.memberSuper != nil && ds[0] != "L"+c.memberSuper.owner+";" {
+	if c.memberSuper != nil && !c.memberSuper.static && ds[0] != "L"+c.memberSuper.owner+";" {
 		return nil
 	}
 	// Physical parameter identity is independent of its uses. The same unchanged
