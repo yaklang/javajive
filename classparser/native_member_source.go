@@ -1320,6 +1320,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		return
 	}
 	ctx := c.FuncCtx
+	ctx.SiblingLexicalTypeOwners = c.nativeMemberTypeOwners(p)
 	c.wireNativeEnumSwitchSource(p, ctx)
 	c.wireNativeMemberPrivateGetters(p, ctx)
 	if c.nativeMemberCurrent != nil && p.lexicalObjects != nil {

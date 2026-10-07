@@ -1670,14 +1670,14 @@ func ResolveInstantiatedParamType(funcCtx *class_context.ClassContext, provider 
 	// accepts U through apply(A), regardless of its result B. A formal that
 	// actually depends on an upper/unbounded capture is still rejected below.
 	visited := map[string]bool{}
-	return resolveParamWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, descriptor, argc, paramIndex, visited)
+	return resolveParamWalk(funcCtx, provider, dotToInternal(recvRaw), recvArgs, method, descriptor, argc, paramIndex, visited, nil)
 }
 
 // resolveParamWalk performs the depth-first hierarchy walk for ResolveInstantiatedParamType. sigma maps
 // the CURRENT node's formal type-parameter names to their actual arguments (in terms of the original
 // call site's denotable types). It is rebuilt for each supertype edge by substituting the supertype's
 // type arguments through the current sigma.
-func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method, descriptor string, argc, paramIndex int, visited map[string]bool) JavaType {
+func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProvider, internal string, args []JavaType, method, descriptor string, argc, paramIndex int, visited map[string]bool, lexical map[string]JavaType) JavaType {
 	if internal == "" || visited[internal] {
 		return nil
 	}
@@ -1693,16 +1693,24 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 	// sigma: this node's formal type params -> actual args (positional; raw receiver -> empty sigma).
 	formals := instantiatedClassFormals(funcCtx, internal, classSig)
 	sigma := map[string]JavaType{}
+	for name, typ := range lexical {
+		sigma[name] = typ
+	}
+	for _, name := range formals {
+		delete(sigma, name)
+	}
+	bound := 0
 	for i := 0; i < len(formals) && i < len(args); i++ {
 		if args[i] != nil {
 			sigma[formals[i]] = args[i]
+			bound++
 		}
 	}
 	// A raw generic receiver erases its parameterized supertypes as well.
 	// Following Child<X> -> Parent<X> with an empty substitution otherwise
 	// mistakes the declaration's X for a same-spelled caller type variable.
 	// Non-generic subclasses with fixed generic ancestors still resolve below.
-	if len(formals) > 0 && len(sigma) != len(formals) {
+	if len(formals) > 0 && bound != len(formals) {
 		return nil
 	}
 	// Most-derived declaration with a generic Signature wins: if THIS class declares (method, argc)
@@ -1770,7 +1778,7 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 			raw, known := RawClassFQN(st)
 			parentSig, _, available := provider(dotToInternal(raw))
 			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
-				if t := resolveParamWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, paramIndex, visited); t != nil {
+				if t := resolveParamWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, paramIndex, visited, nil); t != nil {
 					return t
 				}
 			}
@@ -1780,7 +1788,7 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 		for i, ta := range pt.TypeArgs {
 			childArgs[i] = SubstituteTypeVars(ta, sigma)
 		}
-		if t := resolveParamWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, descriptor, argc, paramIndex, visited); t != nil {
+		if t := resolveParamWalk(funcCtx, provider, dotToInternal(pt.RawClassName), childArgs, method, descriptor, argc, paramIndex, visited, nil); t != nil {
 			return t
 		}
 	}
@@ -1793,7 +1801,7 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 	if classSig == "" && funcCtx.SiblingSuperTypes != nil {
 		if rawSupers, found := funcCtx.SiblingSuperTypes(internal); found {
 			for _, raw := range rawSupers {
-				if t := resolveParamWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, paramIndex, visited); t != nil {
+				if t := resolveParamWalk(funcCtx, provider, dotToInternal(raw), nil, method, descriptor, argc, paramIndex, visited, nil); t != nil {
 					return t
 				}
 			}

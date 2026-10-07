@@ -276,6 +276,9 @@ type ClassContext struct {
 	// This projection does not alter the original class Signature. It is absent
 	// for native nested source and dependency-only declarations.
 	SiblingSourceClassFormals func(internalName string) ([]string, bool)
+	// Original nonstatic source ownership, from outermost scope to the member.
+	// This is absent for flattened declarations and stops at static boundaries.
+	SiblingLexicalTypeOwners func(internalName string) ([]string, bool)
 	// SiblingSuperTypes resolves a jar-internal class's RAW direct supertypes by binary internal name
 	// (slash-separated): its super_class internal name followed by its direct interface internal names
 	// (each slash-form, "" entries omitted). Unlike SiblingClassSig (which reads the generic Signature

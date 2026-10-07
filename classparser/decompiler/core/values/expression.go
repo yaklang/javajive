@@ -2041,6 +2041,13 @@ func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context
 		}
 		return types.ResolveInstantiatedParamType(funcCtx, funcCtx.SiblingClassSig, pt.RawClassName, pt.TypeArgs, f.FunctionName, f.Descriptor, len(f.Arguments), i)
 	}
+	// Preserve the enclosing arguments of Outer<K>.Member: they are not
+	// part of the leaf's TypeArgs. Only original native ownership grants this.
+	if receiver := f.lexicalParameterizedReceiver(funcCtx); receiver != nil {
+		if param := types.ResolveLexicalReceiverParamType(funcCtx, funcCtx.SiblingClassSig, receiver, f.FunctionName, f.Descriptor, len(f.Arguments), i); param != nil {
+			return param
+		}
+	}
 	var recvRaw string
 	var recvArgs []types.JavaType
 	if ref, ok := UnpackSoltValue(f.Object).(*JavaRef); ok && ref.IsThis {
