@@ -1089,7 +1089,10 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		for _, index := range child.superParams {
 			text, typ := args[index].Text, originalTypes.FunctionType().ParamTypes[index]
 			if operand, ok := args[index].Value.(values.JavaValue); ok && operand.Type() != nil {
-				typ = operand.Type().Copy()
+				typ = nativeAnonymousArgumentSourceType(operand, ctx, c.Work)
+				if typ == nil {
+					return fail()
+				}
 				if literal, ok := values.UnpackSoltValue(operand).(*values.JavaLiteral); ok {
 					copy := *literal
 					copy.JavaType = typ
