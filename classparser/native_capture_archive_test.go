@@ -145,7 +145,7 @@ func TestNativeAnonymousOwnershipAndConstructorRefusals(t *testing.T) {
 		{"plain capture", `class NativeArchiveOwner {static Runnable make(final Object x){return new Runnable(){public void run(){if(x==null)throw new IllegalArgumentException();}};}}`, true},
 		{"post-super initialization", `class NativeArchiveOwner {static Runnable make(final Object x){return new Runnable(){final Object y=x;public void run(){if(y==null)throw new IllegalArgumentException();}};}}`, false},
 		{"nested member owner", `class NativeArchiveOwner {static Runnable make(){return new Runnable(){class Nested{int read(){return 1;}}public void run(){new Nested().read();}};}}`, false},
-		{"nested anonymous owner", `class NativeArchiveOwner {static Runnable make(){return new Runnable(){public void run(){new Runnable(){public void run(){}}.run();}};}}`, false},
+		{"nested owned anonymous declared call", `class NativeArchiveOwner {static Runnable make(){return new Runnable(){public void run(){new Runnable(){public void run(){}}.run();}};}}`, true},
 		{"lexical formal shadow", `class NativeArchiveOwner {static <E> Object make(final java.util.List<E> x){return new Object(){<E> Object get(){return x.get(0);}};}}`, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
