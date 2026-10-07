@@ -228,7 +228,13 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 	if flags&0x4000 != 0 {
 		enumSynthesis = nativeMemberEnumSynthesisWithDeclarations(obj, flags, resolve, work)
 	}
-	if !known || !nativeMemberVersionMetadata(obj, work) || !(nativeMemberDeclarationKindRepresentable(obj, flags, work, resolve) || enumSynthesis != nil) {
+	kind := false
+	if flags&0x2000 != 0 {
+		kind = nativeMemberAnnotationDeclaration(obj, flags, work, resolve, provider)
+	} else {
+		kind = nativeMemberDeclarationKindRepresentable(obj, flags, work, resolve)
+	}
+	if !known || !nativeMemberVersionMetadata(obj, work) || !(kind || enumSynthesis != nil) {
 		return nil
 	}
 	if !nativeMemberDeprecatedMarkerRepresentable(obj, work) {

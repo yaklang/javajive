@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
@@ -57,7 +58,7 @@ func (c *ClassObjectDumper) nativeAnnotationDeclarationResolver() func(string) (
 // In particular an element dependency graph must be acyclic, and element
 // names cannot override Object/Annotation public or protected declarations.
 // Use original metadata for both facts rather than a list of familiar names.
-func nativeMemberAnnotationDeclaration(obj *ClassObject, flags uint16, work *workbudget.Budget, resolve func(string) (*ClassObject, bool)) bool {
+func nativeMemberAnnotationDeclaration(obj *ClassObject, flags uint16, work *workbudget.Budget, resolve func(string) (*ClassObject, bool), metadata ...callbinding.Provider) bool {
 	if resolve == nil || flags&0x2608 != 0x2608 || flags & ^uint16(0x260f) != 0 {
 		return false
 	}
@@ -184,7 +185,7 @@ func nativeMemberAnnotationDeclaration(obj *ClassObject, flags uint16, work *wor
 					return false
 				case *AnnotationDefaultAttribute:
 					defaults++
-					if defaults > 1 || !nativeAnnotationDefaultMatches(desc[2:], a.DefaultValue, work, resolve) {
+					if defaults > 1 || !nativeAnnotationDefaultMatches(desc[2:], a.DefaultValue, work, resolve, metadata...) {
 						return false
 					}
 				case *SignatureAttribute:
@@ -193,9 +194,16 @@ func nativeMemberAnnotationDeclaration(obj *ClassObject, flags uint16, work *wor
 						return false
 					}
 					sig, ok := sourceBridgeUTF8(def, a.SignatureIndex)
-					// Wildcard Class elements need no lexical type variables. More
-					// constrained class-literal bounds require a separate proof.
-					if !ok || (desc != "()Ljava/lang/Class;" || sig != "()Ljava/lang/Class<*>;") && (desc != "()[Ljava/lang/Class;" || sig != "()[Ljava/lang/Class<*>;") {
+					var value *ElementValuePairAttribute
+					for _, attribute := range method.Attributes {
+						if !nativeProofWork(work, 1) {
+							return false
+						}
+						if def, present := attribute.(*AnnotationDefaultAttribute); present && def != nil {
+							value = def.DefaultValue
+						}
+					}
+					if !ok || !nativeAnnotationClassSignatureMatches(desc[2:], sig, value, work, resolve, metadata...) {
 						return false
 					}
 				}
@@ -209,7 +217,7 @@ func nativeMemberAnnotationDeclaration(obj *ClassObject, flags uint16, work *wor
 
 // A printable tag is not proof that a default belongs to its element's type.
 // Validate the original typed value graph before javac recreates its metadata.
-func nativeAnnotationDefaultMatches(desc string, value *ElementValuePairAttribute, work *workbudget.Budget, resolve func(string) (*ClassObject, bool)) bool {
+func nativeAnnotationDefaultMatches(desc string, value *ElementValuePairAttribute, work *workbudget.Budget, resolve func(string) (*ClassObject, bool), metadata ...callbinding.Provider) bool {
 	nodes := 0
 	var matches func(string, *ElementValuePairAttribute, int) bool
 	matches = func(desc string, v *ElementValuePairAttribute, depth int) bool {
@@ -302,6 +310,7 @@ func nativeAnnotationDefaultMatches(desc string, value *ElementValuePairAttribut
 			return false
 		}
 		members := map[string]string{}
+		signatures := map[string]string{}
 		required := map[string]bool{}
 		for _, method := range definition.Methods {
 			if method == nil || !nativeProofWork(work, 1) {
@@ -317,14 +326,30 @@ func nativeAnnotationDefaultMatches(desc string, value *ElementValuePairAttribut
 			}
 			members[name], required[name] = typ[2:], true
 			for _, attr := range method.Attributes {
+				if !nativeProofWork(work, 1) {
+					return false
+				}
 				if a, ok := attr.(*AnnotationDefaultAttribute); ok && a != nil {
 					required[name] = false
+				}
+				if a, ok := attr.(*SignatureAttribute); ok {
+					if a == nil || signatures[name] != "" {
+						return false
+					}
+					var known bool
+					signatures[name], known = sourceBridgeUTF8(definition, a.SignatureIndex)
+					if !known {
+						return false
+					}
 				}
 			}
 		}
 		seen := map[string]bool{}
 		for _, pair := range annotation.ElementValuePairs {
 			if pair == nil || seen[pair.Name] || members[pair.Name] == "" || !matches(members[pair.Name], pair, depth+1) {
+				return false
+			}
+			if signature := signatures[pair.Name]; signature != "" && !nativeAnnotationClassSignatureMatches(members[pair.Name], signature, pair, work, resolve, metadata...) {
 				return false
 			}
 			seen[pair.Name] = true
