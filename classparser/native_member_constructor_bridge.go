@@ -90,6 +90,12 @@ func nativeBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, target 
 	if obj == nil || target == nil || i < 0 || i+2 >= len(ops) || ops[i].Instr.OpCode != core.OP_NEW || ops[i+1].Instr.OpCode != core.OP_DUP {
 		return nil, false
 	}
+	// NEW fails before evaluating the constructor arguments for an abstract or
+	// interface target. A successful source allocation cannot preserve that
+	// ordering. SUPER delegation to an abstract parent uses a separate proof.
+	if target.AccessFlags&0x0600 != 0 {
+		return nil, false
+	}
 	owner, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(ops[i].Data))
 	if !known || owner != target.GetClassName() {
 		return nil, false

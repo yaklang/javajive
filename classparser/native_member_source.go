@@ -676,13 +676,14 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if !c.planNativeMemberAccessorCompilerProfile(p) {
 		return nil
 	}
-	// The current source compiler profile promotes private constructors of an
-	// abstract root to package access and removes their bridge/marker classes.
-	// A valid original JVM can retain both. Do not claim binary regeneration
-	// until that declaration kind has an independently matching profile proof.
-	// Java source also cannot reproduce a synthetic root or missing ACC_SUPER.
-	// Admit only the proved ordinary root profile (public/final are optional).
-	if len(p.rootAccessBridges) > 0 && (c.obj.AccessFlags & ^uint16(0x0031) != 0 || c.obj.AccessFlags&0x0020 == 0) {
+	// A public abstract source root keeps its private constructors and generated
+	// access bridges. A package-private abstract root has a different compiler
+	// access profile, so it still needs a separate proof. Synthetic/interface
+	// roots, missing ACC_SUPER, and abstract+final cannot use either source form.
+	flags := c.obj.AccessFlags
+	ordinaryRoot := flags & ^uint16(0x0031) == 0 && flags&0x0020 != 0
+	publicAbstractRoot := flags == 0x0421
+	if len(p.rootAccessBridges) > 0 && !ordinaryRoot && !publicAbstractRoot {
 		return nil
 	}
 	if p.rootAccessBridges == nil || !c.proveNativeRootBridgeDelegations(p) {
