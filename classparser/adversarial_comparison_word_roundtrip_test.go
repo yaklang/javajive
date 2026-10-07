@@ -78,7 +78,7 @@ func testAdversarialPrimitiveStackValues(t *testing.T, comparisonWords bool) {
 		if kind == "fg" || kind == "dg" {
 			opcode++
 		}
-		for _, layout := range []string{"direct", "stored", "reused", "dup", "nonzero", "branch", "zero", "caught", "finally", "volatile", "handler-boundary", "array", "loop", "joined", "narrow", "zero-after-dup", "local-write", "alias-write", "nested-right", "right-store"} {
+		for _, layout := range []string{"direct", "stored", "reused", "dup", "nonzero", "branch", "zero", "caught", "finally", "volatile", "handler-boundary", "array", "loop", "joined", "narrow", "zero-after-dup", "local-write", "alias-write", "nested-right", "right-store", "conditional-write", "conditional-write-reverse", "conditional-write-both"} {
 			name := fmt.Sprintf("m%d", len(specs))
 			specs = append(specs, spec{name, opcode, pair})
 			word := "(int)(left(a)+right(b))"
@@ -118,6 +118,12 @@ func testAdversarialPrimitiveStackValues(t *testing.T, comparisonWords bool) {
 				body = "return(int)(left(a)+right(right(b)));"
 			case "right-store":
 				body = "return(int)(left(a)+(b=right(b)));"
+			case "conditional-write":
+				body = "return(int)(a+(fail==0?(a=right(b)):b));"
+			case "conditional-write-reverse":
+				body = "return(int)(a+(fail==0?b:(a=right(b))));"
+			case "conditional-write-both":
+				body = "return(int)(a+(fail==0?(a=right(b)):(a=left(b))));"
 			case "caught":
 				body = "try{return " + word + ";}catch(RuntimeException e){trace=trace*10+3;return e==ERROR?107:109;}"
 			case "finally":
@@ -238,6 +244,31 @@ func testAdversarialPrimitiveStackValues(t *testing.T, comparisonWords bool) {
 								trace = trace*10 + 3
 							}
 						}
+						if layout == "conditional-write" {
+							trace = 2
+							out = fmt.Sprint(output)
+							if fail > 0 {
+								trace = 0
+							}
+						}
+						if layout == "conditional-write-reverse" {
+							trace, out = 0, fmt.Sprint(output)
+							if fail > 0 {
+								trace = 2
+							}
+							if fail == 2 {
+								out = "E"
+							}
+						}
+						if layout == "conditional-write-both" {
+							trace, out = 2, fmt.Sprint(output)
+							if fail > 0 {
+								trace = 1
+							}
+							if fail == 1 {
+								out = "E"
+							}
+						}
 						if layout == "joined" && fail > 0 {
 							out = "93"
 							trace = 0
@@ -255,7 +286,7 @@ func testAdversarialPrimitiveStackValues(t *testing.T, comparisonWords bool) {
 						} else if typ == "long" {
 							heap = "63"
 						}
-						if fail == 1 && layout != "volatile" && layout != "local-write" && layout != "alias-write" || layout == "joined" && fail > 0 {
+						if fail == 1 && layout != "volatile" && layout != "local-write" && layout != "alias-write" && layout != "conditional-write-reverse" || (layout == "joined" || layout == "conditional-write" || layout == "conditional-write-both") && fail > 0 || layout == "conditional-write-reverse" && fail == 0 {
 							heap = fmt.Sprintf("%x", fs[i])
 							if typ == "double" {
 								heap = fmt.Sprintf("%x", ds[i])

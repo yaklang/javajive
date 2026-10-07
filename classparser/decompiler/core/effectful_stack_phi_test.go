@@ -199,3 +199,48 @@ func TestClosedBooleanStackPhiCopiesOnlyProvenIntConstants(t *testing.T) {
 		})
 	}
 }
+
+func TestClosedStackPhiPrefixUsesValueIdentityAndCertifiedCopies(t *testing.T) {
+	typ := types.NewJavaPrimer(types.JavaDouble)
+	original := values.NewSlotValue(values.NewJavaRef(utils.NewRootVariableId(), nil, typ), typ)
+	saved := values.NewJavaRef(utils.NewRootVariableId(), original, typ)
+	other := values.NewSlotValue(values.NewJavaRef(utils.NewRootVariableId(), nil, typ), typ)
+	choices := []values.JavaValue{original, saved, other}
+	d := &Decompiler{stackLifetimeCopies: map[values.JavaValue]*values.JavaRef{original: saved}}
+	cases := 0
+	for depth := 0; depth <= 4; depth++ {
+		limit := 1
+		for i := 0; i < depth; i++ {
+			limit *= 3
+		}
+		for left := 0; left < limit; left++ {
+			for right := 0; right < limit; right++ {
+				a, b := NewEmptyStackEntry(), NewEmptyStackEntry()
+				x, y := left, right
+				want := true
+				for i := 0; i < depth; i++ {
+					u, v := x%3, y%3
+					x /= 3
+					y /= 3
+					want = want && (u == v || (u < 2 && v < 2))
+					a = newStackItem(a, choices[u])
+					b = newStackItem(b, choices[v])
+				}
+				if got := d.sameStackLifetimePrefix(a, b); got != want {
+					t.Fatalf("depth%d symbols%d,%d got%v want%v", depth, left, right, got, want)
+				}
+				cases++
+			}
+		}
+	}
+	for depth := 511; depth <= 513; depth++ {
+		a := NewEmptyStackEntry()
+		for i := 0; i < depth; i++ {
+			a = newStackItem(a, original)
+		}
+		if d.sameStackLifetimePrefix(a, a) != (depth <= 512) {
+			t.Fatal("prefix work bound", depth)
+		}
+	}
+	t.Logf("independent symbolic prefix states=%d", cases)
+}

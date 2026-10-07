@@ -10,8 +10,8 @@ import (
 // A conditional value with a discarded invocation or field store in an arm is a sequence,
 // not a Java conditional expression. Keep the original statement CFG and
 // materialize the value on each incoming edge. The bounded proof below accepts
-// only a closed, forward region with a single stack word at its exit; handler
-// joins and joins with values below that word need separate lowering.
+// only a closed, forward region with one selected word above an unchanged stack
+// prefix. Handler joins and changing prefixes require separate lowering.
 func (d *Decompiler) lowerEffectfulStackPhi(merge *OpCode, conditions []*OpCode, slot *values.SlotValue) bool {
 	return d.lowerClosedStackPhi(merge, conditions, slot, true)
 }
@@ -61,8 +61,8 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 				}
 			}
 		}
-		if n.Instr.OpCode == OP_PUTFIELD || n.Instr.OpCode == OP_PUTSTATIC {
-			// Keep the field store on its original selected arm, before its
+		if stackLifetimeWrite(n.Instr.OpCode) {
+			// Keep every local/field/array write on its selected arm, before its
 			// retained stack value is cast or consumed. Reconstructing only
 			// the value can hoist the store or lose its producer entirely.
 			effect = true
@@ -97,7 +97,7 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 	}
 	for _, pred := range merge.Source {
 		if !region[pred] || len(pred.Target) != 1 || pred.Target[0] != merge || pred.StackEntry == nil ||
-			pred.StackEntry.depth != 1 || pred.StackEntry.value == nil || pred.StackEntry.value.Type() == nil {
+			!d.sameStackLifetimePrefix(root.StackEntry, pred.StackEntry.parent) || pred.StackEntry.value == nil || pred.StackEntry.value.Type() == nil {
 			return false
 		}
 		v := pred.StackEntry.value
@@ -185,4 +185,30 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 	}
 	slot.ResetValue(ref)
 	return true
+}
+
+// The selected top word may have older operands below it. Those operands must
+// be exactly the original prefix at the branch, rather than a second phi. A
+// lifetime copy is the same already evaluated word; equal source text or equal
+// local names do not prove equality. Neither stack is changed by this proof.
+func (d *Decompiler) sameStackLifetimePrefix(first, second *StackItem) bool {
+	for steps := 0; steps <= 512; steps++ {
+		firstEmpty := first == nil || first.parent == nil
+		secondEmpty := second == nil || second.parent == nil
+		if firstEmpty || secondEmpty {
+			return firstEmpty && secondEmpty
+		}
+		a, b := first.value, second.value
+		if saved := d.stackLifetimeCopies[a]; saved != nil {
+			a = saved
+		}
+		if saved := d.stackLifetimeCopies[b]; saved != nil {
+			b = saved
+		}
+		if a == nil || b == nil || a != b {
+			return false
+		}
+		first, second = first.parent, second.parent
+	}
+	return false
 }

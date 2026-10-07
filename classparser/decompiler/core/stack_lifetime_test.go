@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -11,8 +12,8 @@ import (
 )
 
 // Enumerate finite graphs from an independent adjacency matrix. The oracle
-// enumerates all routes, then checks single entry/exit and ordered PCs on that
-// route; it does not walk the production predecessor chain. This certifies
+// enumerates routes from every graph entry to the write and checks producer
+// membership; it does not walk the production predecessor closure. This certifies
 // placement, not arbitrary JVM equivalence (the original-first banks do that
 // for their tested values, stores, exceptions and effects).
 func TestBoundedStackLifetimeProducerPlacementModel(t *testing.T) {
@@ -31,7 +32,7 @@ func TestBoundedStackLifetimeProducerPlacementModel(t *testing.T) {
 				pcs := []int{a, b, c, dpc}
 				for mask := 0; mask < 64; mask++ {
 					adj := [4][4]bool{}
-					in, out := [4]int{}, [4]int{}
+					in := [4]int{}
 					nodes := make([]*OpCode, 4)
 					for i := range nodes {
 						nodes[i] = &OpCode{Instr: InstrInfos[OP_NOP], CurrentOffset: uint16(pcs[i] + 10)}
@@ -40,7 +41,6 @@ func TestBoundedStackLifetimeProducerPlacementModel(t *testing.T) {
 						if mask&(1<<bit) != 0 {
 							adj[p[0]][p[1]] = true
 							in[p[1]]++
-							out[p[0]]++
 							nodes[p[0]].Target = append(nodes[p[0]].Target, nodes[p[1]])
 							nodes[p[1]].Source = append(nodes[p[1]].Source, nodes[p[0]])
 						}
@@ -61,12 +61,24 @@ func TestBoundedStackLifetimeProducerPlacementModel(t *testing.T) {
 									}
 								}
 							}
-							visit(source, nil)
-							want := len(routes) == 1
-							if want {
-								for i := 1; i < len(routes[0]); i++ {
-									prev, n := routes[0][i-1], routes[0][i]
-									want = want && in[n] == 1 && out[prev] == 1 && pcs[prev] < pcs[n]
+							for entry := 0; entry < 4; entry++ {
+								if in[entry] == 0 {
+									visit(entry, nil)
+								}
+							}
+							want := source == target || len(routes) > 0
+							if source != target {
+								for _, route := range routes {
+									found := false
+									for _, n := range route {
+										if n == source {
+											found = true
+										}
+										if found && pcs[n] < pcs[source] {
+											want = false
+										}
+									}
+									want = want && found
 								}
 							}
 							decoder := &Decompiler{}
@@ -178,9 +190,18 @@ func TestStackLifetimePlanRefusesMissingPathAndCancellationAtomically(t *testing
 			cancel()
 			d.Work = workbudget.New(ctx, workbudget.Limits{})
 		case "budget":
+			middle := &OpCode{Instr: InstrInfos[OP_NOP], CurrentOffset: 15, Source: []*OpCode{producer}, Target: []*OpCode{write}}
+			producer.Target = []*OpCode{middle}
+			write.Source = []*OpCode{middle}
 			d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
 		}
 		err := d.preserveStackAcrossWrite(sim, write)
+		if fault == "budget" || fault == "canceled" {
+			var classified *workbudget.Error
+			if !errors.As(err, &classified) {
+				t.Fatal("lost structured budget/cancel classification", fault, err)
+			}
+		}
 		// An unregistered/unknown producer is outside this proof domain; it cannot
 		// authorize a copy. Malformed known paths and exhausted budgets refuse.
 		if fault != "missing producer instruction" && err == nil {
@@ -192,5 +213,158 @@ func TestStackLifetimePlanRefusesMissingPathAndCancellationAtomically(t *testing
 		if err != nil && sim.stackEntry != old {
 			t.Fatal("failed plan mutated shared stack", fault)
 		}
+	}
+}
+
+func TestStackLifetimeUseViewsKeepEarlierConsumersAndEvidenceSeparate(t *testing.T) {
+	for _, reject := range []bool{false, true} {
+		typ := types.NewJavaPrimer(types.JavaFloat)
+		local := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+		original := values.NewSlotValue(local, typ)
+		producer := &OpCode{Instr: InstrInfos[OP_FLOAD_0], CurrentOffset: 10}
+		write := &OpCode{Instr: InstrInfos[OP_FSTORE_0], CurrentOffset: 20, Source: []*OpCode{producer}}
+		producer.Target = []*OpCode{write}
+		d := &Decompiler{stackValueProducers: map[values.JavaValue]*OpCode{original: producer}}
+		early, err := d.stackLifetimeUseView(original)
+		if err != nil || early == original {
+			t.Fatal("consumer lacks private view", err)
+		}
+		sim := NewStackSimulation(NewEmptyStackEntry(), nil, utils.NewRootVariableId())
+		sim.Push(original)
+		predecessor := sim.stackEntry
+		if reject {
+			write.Source = append(write.Source, &OpCode{Instr: InstrInfos[OP_NOP], CurrentOffset: 15})
+		}
+		err = d.preserveStackAcrossWrite(sim, write)
+		if reject {
+			if err == nil || early.(*values.SlotValue).GetValue() != original || len(d.evaluationSnapshots) != 0 {
+				t.Fatal("failed plan changed an earlier use")
+			}
+		} else {
+			saved := d.stackLifetimeCopies[original]
+			late, e := d.stackLifetimeUseView(original)
+			if e != nil || saved == nil || early.(*values.SlotValue).GetValue() != saved || late != saved || d.evaluationSnapshots[producer][0].Value != original {
+				t.Fatal("earlier/later consumer or snapshot RHS changed", e)
+			}
+		}
+		if predecessor.value != original || original.GetValue() != local {
+			t.Fatal("immutable predecessor/source evidence changed")
+		}
+	}
+}
+
+func TestStackLifetimePureReadsCommuteOnlyWithUnrelatedWrites(t *testing.T) {
+	for _, writeKind := range []int{OP_FSTORE_0, OP_FSTORE_1, OP_PUTSTATIC, OP_FASTORE} {
+		for _, observable := range []bool{false, true} {
+			typ := types.NewJavaPrimer(types.JavaFloat)
+			local := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			var value values.JavaValue = values.NewSlotValue(local, typ)
+			if observable {
+				value = values.TagEffects(value, values.EffectThrow)
+			}
+			producer := &OpCode{Instr: InstrInfos[OP_FLOAD_0], CurrentOffset: 10}
+			write := &OpCode{Instr: InstrInfos[writeKind], CurrentOffset: 20, Source: []*OpCode{producer}}
+			producer.Target = []*OpCode{write}
+			d := &Decompiler{stackValueProducers: map[values.JavaValue]*OpCode{value: producer}}
+			sim := NewStackSimulation(NewEmptyStackEntry(), nil, utils.NewRootVariableId())
+			sim.Push(value)
+			if err := d.preserveStackAcrossWrite(sim, write); err != nil {
+				t.Fatal(err)
+			}
+			want := observable || writeKind == OP_FSTORE_0
+			if got := len(d.evaluationSnapshots) != 0; got != want {
+				t.Fatalf("write%d observable%v copied%v want%v", writeKind, observable, got, want)
+			}
+		}
+	}
+	typ := types.NewJavaPrimer(types.JavaInteger)
+	value := values.TagEffects(values.NewJavaLiteral(3, typ), values.EffectWriteMemory)
+	write := &OpCode{Instr: InstrInfos[OP_IINC], CurrentOffset: 10}
+	d := &Decompiler{stackValueProducers: map[values.JavaValue]*OpCode{value: write}}
+	sim := NewStackSimulation(NewEmptyStackEntry(), nil, utils.NewRootVariableId())
+	sim.Push(value)
+	if err := d.preserveStackAcrossWrite(sim, write); err != nil || len(d.evaluationSnapshots) != 0 {
+		t.Fatal("writer's own output recaptured before its consumer", err)
+	}
+}
+
+func TestStackLifetimeDominanceRetainsLoopsAndRejectsUnknownEntries(t *testing.T) {
+	for _, kind := range []string{"closed loop", "alternate entry", "unreachable producer", "duplicate predecessor", "duplicate target", "edge bound"} {
+		p := &OpCode{Instr: InstrInfos[OP_FLOAD_0], CurrentOffset: 1}
+		a := &OpCode{Instr: InstrInfos[OP_NOP], CurrentOffset: 2}
+		b := &OpCode{Instr: InstrInfos[OP_NOP], CurrentOffset: 3}
+		w := &OpCode{Instr: InstrInfos[OP_FSTORE_0], CurrentOffset: 4}
+		p.Target = []*OpCode{a}
+		a.Source = []*OpCode{p, b}
+		a.Target = []*OpCode{b, w}
+		b.Source = []*OpCode{a}
+		b.Target = []*OpCode{a}
+		w.Source = []*OpCode{a}
+		switch kind {
+		case "alternate entry":
+			a.Source = append(a.Source, &OpCode{Instr: InstrInfos[OP_NOP], CurrentOffset: 2, Target: []*OpCode{a}})
+		case "unreachable producer":
+			a.Source = []*OpCode{b}
+		case "duplicate predecessor":
+			a.Source = append(a.Source, p)
+		case "duplicate target":
+			p.Target = append(p.Target, a)
+		case "edge bound":
+			for i := 0; i < 8193; i++ {
+				p.Target = append(p.Target, b)
+			}
+		}
+		if got := (&Decompiler{}).stackLifetimeProducerPath(p, w); got != (kind == "closed loop") {
+			t.Fatalf("%s: %v", kind, got)
+		}
+	}
+}
+
+func TestStackLifetimeConstructorWitnessNeedsExactOriginalProducer(t *testing.T) {
+	for _, fault := range []string{"valid", "different value", "different origin", "missing operand", "duplicate snapshot", "missing produced word", "unregistered producer", "different copy", "parameter", "this"} {
+		typ := types.NewJavaPrimer(types.JavaFloat)
+		value := values.NewCustomValue(nil, func() types.JavaType { return typ })
+		p := &OpCode{Instr: InstrInfos[OP_INVOKESTATIC], CurrentOffset: 10, stackProduced: []values.JavaValue{value}}
+		ref := values.NewJavaRef(utils.NewRootVariableId(), value, typ)
+		d := &Decompiler{stackValueProducers: map[values.JavaValue]*OpCode{value: p}, stackLifetimeCopies: map[values.JavaValue]*values.JavaRef{value: ref}, evaluationSnapshots: map[*OpCode][]EvaluationSnapshot{p: {{Ref: ref, Value: value, OriginPC: 10, Operand: true}}}}
+		switch fault {
+		case "different value":
+			d.evaluationSnapshots[p][0].Value = values.NewJavaLiteral(3, typ)
+		case "different origin":
+			d.evaluationSnapshots[p][0].OriginPC++
+		case "missing operand":
+			d.evaluationSnapshots[p][0].Operand = false
+		case "duplicate snapshot":
+			d.evaluationSnapshots[p] = append(d.evaluationSnapshots[p], d.evaluationSnapshots[p][0])
+		case "missing produced word":
+			p.stackProduced = nil
+		case "unregistered producer":
+			d.stackValueProducers = nil
+		case "different copy":
+			d.stackLifetimeCopies[value] = values.NewJavaRef(utils.NewRootVariableId(), value, typ)
+		case "parameter":
+			ref.IsParam = true
+		case "this":
+			ref.IsThis = true
+		}
+		if got := d.stackLifetimeSnapshotProducer(value, ref, p); got != (fault == "valid") {
+			t.Fatalf("%s: %v", fault, got)
+		}
+	}
+}
+
+func TestStackLifetimeUseViewBudgetDoesNotPublishOrReturnNilOperand(t *testing.T) {
+	typ := types.NewJavaPrimer(types.JavaFloat)
+	original := values.NewSlotValue(values.NewJavaRef(utils.NewRootVariableId(), nil, typ), typ)
+	p := &OpCode{Instr: InstrInfos[OP_FLOAD_0], CurrentOffset: 1}
+	d := &Decompiler{stackValueProducers: map[values.JavaValue]*OpCode{original: p}, Work: workbudget.New(nil, workbudget.Limits{MaxNodeCopies: 1})}
+	if _, err := d.stackLifetimeUseView(original); err != nil {
+		t.Fatal(err)
+	}
+	prior := d.stackLifetimeUseViews[original][0]
+	got, err := d.stackLifetimeUseView(original)
+	var classified *workbudget.Error
+	if got != original || !errors.As(err, &classified) || len(d.stackLifetimeUseViews[original]) != 1 || prior.GetValue() != original {
+		t.Fatal("failed view allocation changed IR/diagnostic or produced nil operand", err)
 	}
 }

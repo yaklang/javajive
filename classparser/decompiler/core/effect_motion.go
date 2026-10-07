@@ -838,7 +838,8 @@ func (d *Decompiler) canInlineDelegationValueProof(value values.JavaValue, ref *
 	stackProducer := isDupFamily(sourceOp.Instr.OpCode) || sourceOp.Instr.OpCode == OP_CHECKCAST
 	parameterRead := isLocalLoadOpcode(sourceOp.Instr.OpCode) && ref.IsParam && values.IsPure(value)
 	arrayProducer := arraySpill != nil && d.opcodeProducesLocal(sourceOp, ref)
-	if !stackProducer && !parameterRead && !arrayProducer {
+	lifetimeProducer := d.stackLifetimeSnapshotProducer(value, ref, sourceOp)
+	if !stackProducer && !parameterRead && !arrayProducer && !lifetimeProducer {
 		return false
 	}
 	if stackProducer && !d.opcodeProducesLocal(sourceOp, ref) {
@@ -851,6 +852,9 @@ func (d *Decompiler) canInlineDelegationValueProof(value values.JavaValue, ref *
 		receiver, ok := values.UnpackSoltValue(call.Object).(*values.JavaRef)
 		if !ok || receiver == nil || !receiver.IsThis || sourceOp.CurrentOffset > targetOp.CurrentOffset ||
 			!sameHandlerCoverage(d.handlersAt(sourceOp), d.handlersAt(targetOp)) {
+			continue
+		}
+		if lifetimeProducer && !singleLinearOpcodePathInHandlers(d, sourceOp, targetOp, d.handlersAt(sourceOp)) {
 			continue
 		}
 		if arraySpill != nil {

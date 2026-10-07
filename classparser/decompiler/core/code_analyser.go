@@ -44,6 +44,7 @@ type branchArrayCall struct {
 
 type Decompiler struct {
 	stackValueProducers    map[values.JavaValue]*OpCode
+	stackLifetimeUseViews  map[values.JavaValue][]*values.SlotValue
 	stackLifetimeCopies    map[values.JavaValue]*values.JavaRef
 	comparisonWordInputs   map[*OpCode][]*statements.AssignStatement
 	effectfulStackPhiEdges map[*OpCode]*statements.AssignStatement
@@ -5076,6 +5077,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		}
 		opcodeToSim[code] = runtimeStackSimulation
 
+		var lifetimeUseErr error
 		sim := NewStackSimulationProxy(runtimeStackSimulation, func(value values.JavaValue) {
 			runtimeStackSimulation.Push(value)
 			code.stackProduced = append(code.stackProduced, value)
@@ -5087,6 +5089,17 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 			}
 		}, func() values.JavaValue {
 			val := runtimeStackSimulation.Pop()
+			// A consumer owns a source view of an already evaluated stack word.
+			// Later DFS arms can require a copy even after this consumer was
+			// visited. Keep the immutable predecessor evidence separate from
+			// that view; stack permutations still move the original word.
+			if !isDupFamily(code.Instr.OpCode) && code.Instr.OpCode != OP_SWAP {
+				var err error
+				val, err = d.stackLifetimeUseView(val)
+				if err != nil {
+					lifetimeUseErr = err
+				}
+			}
 			code.stackConsumed = append(code.stackConsumed, val)
 			return val
 		})
@@ -5122,6 +5135,9 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 		err := d.calcOpcodeStackInfo(sim, code)
 		if err != nil {
 			return nil, err
+		}
+		if lifetimeUseErr != nil {
+			return nil, lifetimeUseErr
 		}
 		if err := d.preserveStackAcrossWrite(runtimeStackSimulation, code); err != nil {
 			return nil, err
