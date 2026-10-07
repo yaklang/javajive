@@ -29,6 +29,7 @@ type nativeAnonymousClass struct {
 	ordinal               int
 	fields                map[string]int
 	superParams           []int
+	sharedParameterRoles  bool
 	superDescriptor       string
 	sourceSuperDescriptor string
 	superPC               int
@@ -369,8 +370,12 @@ func nativeAnonymousConstructorRepresentationProof(obj *ClassObject, owner, meth
 	if c.memberSuper != nil && ds[0] != "L"+c.memberSuper.owner+";" {
 		return nil
 	}
-	// Nothing can silently disappear: every constructor argument is either a
-	// real superclass argument or a compiler capture, and never both.
+	// Physical parameter identity is independent of its uses. The same unchanged
+	// word may be stored in one capture and passed once to SUPER. A capture's
+	// source operand is subsequently required to be stable at this allocation;
+	// emitting both roles therefore cannot evaluate an effectful value twice.
+	// Every physical parameter still needs an original witnessed role, and two
+	// capture fields or repeated SUPER arguments need a separate capability.
 	used := map[int]bool{}
 	for _, p := range c.fields {
 		if used[p] {
@@ -378,10 +383,15 @@ func nativeAnonymousConstructorRepresentationProof(obj *ClassObject, owner, meth
 		}
 		used[p] = true
 	}
+	superUsed := map[int]bool{}
 	for _, p := range c.superParams {
-		if used[p] {
+		if superUsed[p] {
 			return nil
 		}
+		if used[p] {
+			c.sharedParameterRoles = true
+		}
+		superUsed[p] = true
 		used[p] = true
 	}
 	if len(used) != len(ps) {
@@ -428,23 +438,36 @@ func nativeAnonymousConstructorRepresentationProof(obj *ClassObject, owner, meth
 		c.enclosingField = outerField
 	}
 	next := 0
+	ordered := map[int]bool{}
 	if outer >= 0 {
 		if outer != next {
 			return nil
 		}
 		next++
+		ordered[outer] = true
 	}
 	for _, index := range c.superParams {
+		if ordered[index] {
+			continue
+		}
 		if index != next {
 			return nil
 		}
 		next++
+		ordered[index] = true
 	}
 	for _, index := range captureOrder {
+		if ordered[index] {
+			continue
+		}
 		if index != next {
 			return nil
 		}
 		next++
+		ordered[index] = true
+	}
+	if next != len(ps) || c.sharedParameterRoles && !nativeAnonymousInitializerStack(c, ps, code) {
+		return nil
 	}
 	var initialized bool
 	c.initializers, initialized = nativeAnonymousInitializerPackets(obj, ops, i+1, c, ps, work)
@@ -1136,6 +1159,9 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			// javac registers this private constructor before lowering the
 			// anonymous body. Keep that original event before its getters.
 			registration = nativeMemberConstructorRegistration(c.nativeMemberRoot, child.object.GetSupperClassName(), child.superDescriptor)
+		}
+		if child.sharedParameterRoles {
+			c.appendDiagnostic(DecompileDiagnostic{Code: "anonymous_shared_parameter_metadata", Method: child.object.GetClassName() + ".<init>" + child.descriptor, Message: "The original constructor reuses an unchanged physical parameter for a proved capture store and SUPER argument. Both source uses read the same stable local or enclosing receiver. Recompilation may generate separate hidden capture parameters, changing this anonymous constructor's physical descriptor and parameter metadata; executable values, capture-before-SUPER order and source overload binding are preserved."})
 		}
 		return fmt.Sprintf("/*jdec-owned-anonymous-ordinal:%d:%s*/%snew %s(%s) {%s}", child.ordinal, p.owner, registration, parent, strings.Join(tuple, ","), body), true
 	}
