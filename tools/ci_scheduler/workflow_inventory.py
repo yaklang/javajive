@@ -46,10 +46,10 @@ def required_coverage_snapshot(repo_root: Path) -> dict[str, Any]:
     }
 
 
-# The pull-request CI stays a single fast algorithm-regression gate. Full task
+# Four source shards feed one required algorithm-regression summary. Full task
 # contracts, platform builds, and historical-JAR audits remain available through
 # the explicit task-gates / extended / untrusted-oracle workflows.
-BASELINE_CI_JOBS = ("regression",)
+BASELINE_CI_JOBS = ("source", "regression")
 
 
 def action_pins(workflow: Path) -> list[dict[str, Any]]:

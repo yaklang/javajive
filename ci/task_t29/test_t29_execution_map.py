@@ -76,12 +76,23 @@ class TestExecutionEventMapping(unittest.TestCase):
     def test_pr_ci_stays_a_single_fast_algorithm_gate(self) -> None:
         snap = required_coverage_snapshot(ROOT)
         self.assertEqual(snap["jobs"]["ci.yml"], list(BASELINE_CI_JOBS))
-        self.assertEqual(snap["jobs"]["ci.yml"], ["regression"])
+        self.assertEqual(snap["jobs"]["ci.yml"], ["source", "regression"])
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Algorithm regression", workflow)
         self.assertRegex(workflow, r"(?m)^\s+timeout-minutes:\s+(?:[1-9]|1[0-5])\s*$")
         self.assertNotIn("go test ./...", workflow)
         self.assertNotIn("./test/cross", workflow)
+
+    def test_ci_summary_requires_every_source_shard(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        source, summary = workflow.split("  regression:\n", 1)
+        self.assertRegex(source, r"shard:\s*\[0,\s*1,\s*2,\s*3\]")
+        self.assertIn('SOURCE_SHARDS: "4"', source)
+        self.assertIn("fail-fast: false", source)
+        self.assertIn("needs: [source]", summary)
+        self.assertIn("if: always()", summary)
+        self.assertIn("SOURCE_RESULT: ${{ needs.source.result }}", summary)
+        self.assertIn('test "$SOURCE_RESULT" = success', summary)
 
     def test_slow_contracts_remain_manual_and_discoverable(self) -> None:
         workflows = ROOT / ".github" / "workflows"

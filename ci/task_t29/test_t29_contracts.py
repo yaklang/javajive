@@ -241,7 +241,7 @@ class T29Contracts(unittest.TestCase):
         self.assertEqual(missing["reason"], "missing_case")
         snap = required_coverage_snapshot(ROOT)
         self.assertEqual(snap["jobs"]["ci.yml"], list(BASELINE_CI_JOBS))
-        self.assertEqual(snap["jobs"]["ci.yml"], ["regression"])
+        self.assertEqual(snap["jobs"]["ci.yml"], ["source", "regression"])
         pr_ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Algorithm regression", pr_ci)
         self.assertRegex(pr_ci, r"(?m)^\s+timeout-minutes:\s+(?:[1-9]|1[0-5])\s*$")
