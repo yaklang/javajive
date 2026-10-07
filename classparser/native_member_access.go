@@ -74,6 +74,14 @@ func (z *JarFS) nativeMemberAccessRepresentable(p *nativeMemberFamily, index *na
 			if user == p.owner || p.children[user] != nil || nativeMemberJointAnonymousAccess(p, user, work) {
 				continue
 			}
+			if local := p.methodLocals[user]; local != nil {
+				if local.object != nil && local.object.GetClassName() == user {
+					if _, known := nativeMemberJointMethodLocalOwner(p, local.object, work); known {
+						continue
+					}
+				}
+				return false
+			}
 			if child.flags&2 != 0 {
 				return false
 			}

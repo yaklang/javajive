@@ -18,6 +18,22 @@ type nativeMemberLexicalRead struct {
 	prior                    *nativeMemberLexicalRead
 }
 
+// A traversal edge is not a source declaration role. Named members and
+// method-local classes supply different original witnesses for its first hop.
+type nativeMemberLexicalCursor struct {
+	object       *ClassObject
+	owner, field string
+	static       bool
+	member       *nativeMemberClass
+}
+
+func nativeMemberLexicalCursorForMember(child *nativeMemberClass) *nativeMemberLexicalCursor {
+	if child == nil {
+		return nil
+	}
+	return &nativeMemberLexicalCursor{object: child.object, owner: child.owner, field: child.field, static: child.static, member: child}
+}
+
 // Only a consecutive original ALOAD_0 / enclosing-field chain represents
 // qualified lexical THIS. A foreign receiver, mutable alias or computed value
 // cannot borrow the source spelling. Traversing a nullable intermediate owner
@@ -25,6 +41,20 @@ type nativeMemberLexicalRead struct {
 func nativeMemberLexicalReads(obj *ClassObject, p *nativeMemberFamily, work *workbudget.Budget) (map[string]map[int]*nativeMemberLexicalRead, bool) {
 	if obj == nil || p == nil {
 		return nil, false
+	}
+	// The first hop of a local THIS chain is its independently verified
+	// enclosing capture. Keep this transient cursor out of the member map:
+	// it grants no member declaration, constructor or foreign access role.
+	initial := nativeMemberLexicalCursorForMember(p.children[obj.GetClassName()])
+	if p.methodLocals[obj.GetClassName()] != nil {
+		owner, known := nativeMemberJointMethodLocalOwner(p, obj, work)
+		if !known {
+			return nil, false
+		}
+		local := p.methodLocals[obj.GetClassName()]
+		if local.constructor.enclosingField != "" {
+			initial = &nativeMemberLexicalCursor{object: obj, owner: owner.owner, field: local.constructor.enclosingField}
+		}
 	}
 	result := map[string]map[int]*nativeMemberLexicalRead{}
 	for _, m := range obj.Methods {
@@ -82,7 +112,7 @@ func nativeMemberLexicalReads(obj *ClassObject, p *nativeMemberFamily, work *wor
 				if m.AccessFlags&8 != 0 || !constructorMotionLoad(op, "Ljava/lang/Object;") {
 					continue
 				}
-				current := child
+				current := initial
 				parameterOwner := ""
 				switch core.GetRetrieveIdx(op) {
 				case 0:
@@ -90,7 +120,7 @@ func nativeMemberLexicalReads(obj *ClassObject, p *nativeMemberFamily, work *wor
 					if enclosingConstructor == nil || int(op.CurrentOffset) <= enclosingConstructor.delegatePC {
 						continue
 					}
-					current = p.children[child.owner]
+					current = nativeMemberLexicalCursorForMember(p.children[child.owner])
 					parameterOwner = child.owner
 				default:
 					continue
@@ -100,7 +130,7 @@ func nativeMemberLexicalReads(obj *ClassObject, p *nativeMemberFamily, work *wor
 					if !nativeProofWork(work, 1) {
 						return nil, false
 					}
-					if parameterOwner != "" && !nativeMemberSuperCaptureDeclaration(current, work) {
+					if parameterOwner != "" && (current.member == nil || !nativeMemberSuperCaptureDeclaration(current.member, work)) {
 						return nil, false
 					}
 					field := constructorMotionMember(obj, ops[j], core.OP_GETFIELD)
@@ -124,7 +154,7 @@ func nativeMemberLexicalReads(obj *ClassObject, p *nativeMemberFamily, work *wor
 					}
 					reads[read.pc] = read
 					prior = read
-					current = p.children[current.owner]
+					current = nativeMemberLexicalCursorForMember(p.children[current.owner])
 				}
 			}
 			if len(reads) > 0 && !thisStable {
@@ -164,14 +194,36 @@ func nativeMemberLexicalReads(obj *ClassObject, p *nativeMemberFamily, work *wor
 					field = constructorMotionMember(obj, op, core.OP_PUTFIELD)
 					write = field != nil
 				}
+				static := false
 				if field == nil {
+					field = constructorMotionMember(obj, op, core.OP_GETSTATIC)
+					if field == nil {
+						field = constructorMotionMember(obj, op, core.OP_PUTSTATIC)
+					}
+					static = field != nil
+				}
+				if field == nil {
+					continue
+				}
+				if local := p.methodLocals[obj.GetClassName()]; local != nil && field.Name == obj.GetClassName() && field.Member == local.constructor.enclosingField {
+					if static || field.Description != "L"+local.owner.owner+";" {
+						return nil, false
+					}
+					pc := int(op.CurrentOffset)
+					if write {
+						if name != "<init>" || desc != local.constructor.descriptor || local.constructor.capturePCs[field.Member] != pc {
+							return nil, false
+						}
+					} else if reads[pc] == nil {
+						return nil, false
+					}
 					continue
 				}
 				target := p.children[field.Name]
 				if target == nil || target.static || field.Member != target.field {
 					continue
 				}
-				if field.Description != "L"+target.owner+";" {
+				if static || field.Description != "L"+target.owner+";" {
 					return nil, false
 				}
 				pc := int(op.CurrentOffset)

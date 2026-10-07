@@ -124,6 +124,10 @@ func (z *JarFS) prepareNativeMemberFamilyUnpublished(root *ClassObject, snap map
 					if _, valid := nativeMemberLexicalReads(named.object, p, d.Work); !valid {
 						return nil
 					}
+				} else if local := p.methodLocals[user]; local != nil {
+					if _, valid := nativeMemberLexicalReads(local.object, p, d.Work); !valid {
+						return nil
+					}
 				} else {
 					group := p.anonymousUnits[user]
 					if group == nil || !nativeMemberProjectedAnonymousCaptureRead(p, group.children[user], n, d.Work) {

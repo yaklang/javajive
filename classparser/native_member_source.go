@@ -1333,7 +1333,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	ctx.SiblingLexicalTypeOwners = c.nativeMemberTypeOwners(p)
 	c.wireNativeEnumSwitchSource(p, ctx)
 	c.wireNativeMemberPrivateGetters(p, ctx)
-	if c.nativeMemberCurrent != nil && p.lexicalObjects != nil {
+	if (c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil) && p.lexicalObjects != nil {
 		reads, valid := nativeMemberLexicalReads(c.obj, p, c.Work)
 		if !valid {
 			p.failed = true
@@ -1393,6 +1393,12 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				}
 				owner := p.children[read.owner]
 				if owner == nil {
+					// The local's first hop retains the existing exact capture
+					// binding/placement hook. Only later named-owner hops are
+					// projected here, with the complete operand chain above.
+					if local := c.nativeMethodLocalCurrent; local != nil && read.prior == nil && read.owner == c.obj.GetClassName() && read.field == local.constructor.enclosingField {
+						return "", false
+					}
 					p.failed = true
 					return "", false
 				}
