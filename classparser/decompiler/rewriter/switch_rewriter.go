@@ -34,7 +34,43 @@ func renderHead(st statements.Statement) string {
 // the only abrupt-completion leaf that makes its enclosing switch "complete normally" (control reaches
 // the statement after the switch); continue/return/throw transfer control elsewhere.
 func isBreakStatement(st statements.Statement) bool {
-	return renderHead(st) == "break"
+	return st != nil && strings.TrimSpace(st.String(&class_context.ClassContext{})) == "break"
+}
+
+// Unlike conservative loop-pruning queries, switch completion needs a break
+// owned by this exact lexical switch. Inner loops/switches capture bare breaks;
+// labelled transfers leave some other construct. Conditionals, monitors and
+// catch regions introduce no break owner of their own.
+func switchBodyHasOwnedBreak(body []statements.Statement) bool {
+	for _, st := range body {
+		switch s := st.(type) {
+		case *statements.CustomStatement:
+			if isBreakStatement(s) {
+				return true
+			}
+		case *statements.IfStatement:
+			if switchBodyHasOwnedBreak(s.IfBody) || switchBodyHasOwnedBreak(s.ElseBody) {
+				return true
+			}
+		case *statements.TryCatchStatement:
+			if switchBodyHasOwnedBreak(s.TryBody) {
+				return true
+			}
+			for _, branch := range s.CatchBodies {
+				if switchBodyHasOwnedBreak(branch) {
+					return true
+				}
+			}
+		case *statements.SynchronizedStatement:
+			if switchBodyHasOwnedBreak(s.Body) {
+				return true
+			}
+		}
+		if !statementCompletesNormally(st) {
+			break
+		}
+	}
+	return false
 }
 
 // isTerminatorStatement reports whether st abruptly completes (does not fall off its end into the
@@ -70,9 +106,8 @@ func switchCompletesNormally(sw *statements.SwitchStatement) bool {
 		return true // an unmatched value falls through past the switch.
 	}
 	for i, c := range sw.Cases {
-		if subtreeHasBreak(c.Body) {
+		if switchBodyHasOwnedBreak(c.Body) {
 			// A nested conditional can break before the arm's final return.
-			// Counting inner-loop breaks too is conservative: retain the tail.
 			return true
 		}
 		if len(c.Body) == 0 {
@@ -81,11 +116,7 @@ func switchCompletesNormally(sw *statements.SwitchStatement) bool {
 			}
 			continue // a grouped label uses the following nonempty body.
 		}
-		last := c.Body[len(c.Body)-1]
-		if isBreakStatement(last) {
-			return true
-		}
-		if i == len(sw.Cases)-1 && statementCompletesNormally(last) {
+		if i == len(sw.Cases)-1 && bodyCompletesNormally(c.Body) {
 			return true // Earlier bodies fall through to the next label, not out of the switch.
 		}
 	}
