@@ -326,7 +326,11 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 			}
 		}
 		var valid bool
-		p.assertions, valid = nativeMemberAssertionProof(obj, outermost, work)
+		if enumSynthesis != nil && enumSynthesis.assertions != nil {
+			p.assertions, valid = enumSynthesis.assertions, enumSynthesis.assertions.statusOwner == outermost
+		} else {
+			p.assertions, valid = nativeMemberAssertionProof(obj, outermost, work)
+		}
 		if !valid {
 			return nil
 		}

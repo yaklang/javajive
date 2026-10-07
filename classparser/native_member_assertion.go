@@ -15,13 +15,20 @@ import (
 const nativeAssertionField = "$assertionsDisabled"
 
 type nativeMemberAssertion struct {
-	initializer *MemberInfo
-	reads       map[string]map[int]*nativeAssertionPacket
+	initializer                                          *MemberInfo
+	pureInitializer                                      bool
+	initializerEndPC, initializerStorePC, statusInvokePC int
+	statusOwner                                          string
+	reads                                                map[string]map[int]*nativeAssertionPacket
 }
 
 // Source assert regenerates a field and initializer. Establish their physical
 // compiler profile first; arbitrary synthetic fields are not source assertions.
 func nativeMemberAssertionProof(obj *ClassObject, outermost string, work *workbudget.Budget) (*nativeMemberAssertion, bool) {
+	return nativeMemberAssertionProofMode(obj, outermost, work, false)
+}
+
+func nativeMemberAssertionProofMode(obj *ClassObject, outermost string, work *workbudget.Budget, allowSuffix bool) (*nativeMemberAssertion, bool) {
 	if obj == nil || outermost == "" || !nativeProofWork(work, 1) {
 		return nil, false
 	}
@@ -120,7 +127,7 @@ func nativeMemberAssertionProof(obj *ClassObject, outermost string, work *workbu
 		}
 		ops := constructorMotionOps(decoder)
 		if name == "<clinit>" {
-			if plan.initializer != nil || m.AccessFlags != 8 || ds != "()V" || len(m.Attributes) != 1 || code.MaxLocals != 0 || code.MaxStack != 1 || len(code.ExceptionTable) != 0 || len(ops) != 8 {
+			if plan.initializer != nil || m.AccessFlags != 8 || ds != "()V" || len(m.Attributes) != 1 || code.MaxStack < 1 || len(ops) < 8 || (!allowSuffix && (code.MaxLocals != 0 || code.MaxStack != 1 || len(code.ExceptionTable) != 0 || len(ops) != 8)) {
 				return nil, false
 			}
 			cp := ops[0]
@@ -141,14 +148,25 @@ func nativeMemberAssertionProof(obj *ClassObject, outermost string, work *workbu
 			if !ok || owner != outermost || invoke == nil || invoke.Name != "java/lang/Class" || invoke.Member != "desiredAssertionStatus" || invoke.Description != "()Z" || ops[2].Instr.OpCode != core.OP_IFNE || !branch(ops[2], int(ops[5].CurrentOffset)) || ops[3].Instr.OpCode != core.OP_ICONST_1 || ops[4].Instr.OpCode != core.OP_GOTO || !branch(ops[4], int(ops[6].CurrentOffset)) || ops[5].Instr.OpCode != core.OP_ICONST_0 {
 				return nil, false
 			}
-			if store == nil || store.Name != obj.GetClassName() || store.Member != nativeAssertionField || store.Description != "Z" || ops[7].Instr.OpCode != core.OP_RETURN {
+			if store == nil || store.Name != obj.GetClassName() || store.Member != nativeAssertionField || store.Description != "Z" || !allowSuffix && ops[7].Instr.OpCode != core.OP_RETURN {
+				return nil, false
+			}
+			end := int(ops[7].CurrentOffset)
+			if allowSuffix && !nativeAssertionInitializerPrefixClosed(decoder, code, ops, end, work) {
 				return nil, false
 			}
 			plan.initializer = m
-			continue
+			plan.pureInitializer = len(ops) == 8 && ops[7].Instr.OpCode == core.OP_RETURN
+			plan.initializerEndPC, plan.initializerStorePC, plan.statusInvokePC, plan.statusOwner = end, int(ops[6].CurrentOffset), int(ops[1].CurrentOffset), outermost
+			if plan.pureInitializer {
+				continue
+			}
 		}
 		sites := map[int]*nativeAssertionPacket{}
 		for i, op := range ops {
+			if name == "<clinit>" && i < 7 {
+				continue
+			}
 			for _, kind := range []int{core.OP_GETSTATIC, core.OP_PUTSTATIC, core.OP_GETFIELD, core.OP_PUTFIELD} {
 				field := constructorMotionMember(obj, op, kind)
 				if field == nil || field.Name != obj.GetClassName() || field.Member != nativeAssertionField {
@@ -199,6 +217,13 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 	plan := c.nativeAssertionProtocol()
 	if plan == nil {
 		return body, nil
+	}
+	if plan.initializer != nil && !plan.pureInitializer && name == "<clinit>" && desc == "()V" {
+		var valid bool
+		body, valid = c.projectNativeAssertionInitializer(body, plan)
+		if !valid {
+			return nil, fmt.Errorf("assertion initialization source occurrence unproved")
+		}
 	}
 	sites := plan.reads[name+desc]
 	if len(sites) == 0 {

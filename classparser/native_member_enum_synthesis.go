@@ -15,6 +15,7 @@ import (
 // can join a lexical ownership plan. An enum flag or a synthetic-looking name
 // alone grants no right to replace a method, backing array or constructor.
 type nativeMemberEnumSynthesis struct {
+	assertions  *nativeMemberAssertion
 	valuesField *MemberInfo
 	constants   map[string]nativeEnumConstantAllocation
 	bodies      map[string]*nativeEnumConstantBody
@@ -372,6 +373,10 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 	if obj == nil || (!canonical && !constantBodies) || obj.GetSupperClassName() != "java/lang/Enum" || !nativeProofWork(work, 1) {
 		return nil
 	}
+	assertions, valid := nativeEnumAssertionInitialization(obj, resolve, work)
+	if !valid {
+		return nil
+	}
 	name := obj.GetClassName()
 	descriptor := "L" + name + ";"
 	array := "[" + descriptor
@@ -391,6 +396,9 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 				return nil
 			}
 			constants = append(constants, n)
+		}
+		if assertions != nil && n == nativeAssertionField {
+			continue // Independently certified assertion flag, separate from the backing array.
 		}
 		if field.AccessFlags&0x1000 != 0 {
 			if backing != nil || field.AccessFlags != 0x101a || d != array || len(field.Attributes) != 0 {
@@ -518,6 +526,12 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 		return nil
 	}
 	cursor := 0
+	if assertions != nil {
+		if len(ops) <= 7 || int(ops[7].CurrentOffset) != assertions.initializerEndPC {
+			return nil
+		}
+		cursor = 7
+	}
 	var allocations map[string]nativeEnumConstantAllocation
 	bodies := map[string]*nativeEnumConstantBody{}
 	if sourceArguments || constantBodies {
@@ -535,7 +549,7 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 		}
 		for ordinal, constant := range constants {
 			plan, exists := allocations[constant]
-			if !exists || plan.ordinal != ordinal {
+			if !exists || plan.ordinal != ordinal || assertions != nil && ordinal == 0 && (cursor >= len(ops) || plan.newPC != int(ops[cursor].CurrentOffset)) {
 				return nil
 			}
 			if plan.allocatedClass == name {
@@ -567,6 +581,9 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 		}
 	} else {
 		for ordinal, constant := range constants {
+			if cursor+6 > len(ops) {
+				return nil
+			}
 			packet := ops[cursor : cursor+6]
 			index, ok := nativeEnumCPIndex(packet[2])
 			literal := ""
@@ -613,7 +630,7 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 	if constantBodies && len(bodies) == 0 {
 		return nil
 	}
-	return &nativeMemberEnumSynthesis{valuesField: backing, constants: allocations, bodies: bodies}
+	return &nativeMemberEnumSynthesis{assertions: assertions, valuesField: backing, constants: allocations, bodies: bodies}
 }
 
 // Parameter names are reflection-visible metadata, unlike Code debug tables.

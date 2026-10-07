@@ -12906,7 +12906,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if name == "<init>" && c.nativeEnumConstantCurrent != nil && nativeEnumConstantConstructorOwned(c.nativeMemberRoot, c.obj, descriptor) {
 			continue
 		}
-		if c.nativeAssertionProtocol() != nil && c.nativeAssertionProtocol().initializer == method {
+		if c.nativeAssertionProtocol() != nil && c.nativeAssertionProtocol().initializer == method && c.nativeAssertionProtocol().pureInitializer {
 			continue
 		}
 		if c.nativeCaptureFields != nil && c.nativeMemberCurrent == nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
