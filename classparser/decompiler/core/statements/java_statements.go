@@ -2369,13 +2369,35 @@ func subtypeValueFieldStoreCast(funcCtx *class_context.ClassContext, left, value
 	return fieldTypeStr
 }
 
-// erasureName strips a generic type string down to its raw/erased name: "Predicate<T>" -> "Predicate",
-// "Map<K, V>" -> "Map", "CopyOnWriteHashMap$InnerNode<K, V>" -> "CopyOnWriteHashMap$InnerNode".
+// erasureName removes generic argument lists from every source-type segment.
+// A member's erasure remains the member: Outer<T>.Entry<U> -> Outer.Entry.
+// Truncating at the first '<' instead casts a method result to its unrelated
+// enclosing class. Malformed nesting has no usable raw view.
 func erasureName(s string) string {
-	if i := strings.IndexByte(s, '<'); i >= 0 {
-		s = s[:i]
+	if len(s) > 65535 {
+		return ""
 	}
-	return strings.TrimSpace(s)
+	var raw strings.Builder
+	depth := 0
+	for _, ch := range s {
+		switch ch {
+		case '<':
+			depth++
+		case '>':
+			if depth == 0 {
+				return ""
+			}
+			depth--
+		default:
+			if depth == 0 {
+				raw.WriteRune(ch)
+			}
+		}
+	}
+	if depth != 0 {
+		return ""
+	}
+	return strings.TrimSpace(raw.String())
 }
 
 // isObjectParameterized reports whether a rendered type is a parameterization whose type
