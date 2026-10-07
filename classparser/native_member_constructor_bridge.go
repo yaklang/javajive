@@ -260,6 +260,16 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 		if err != nil || obj.GetClassName() != user {
 			return false
 		}
+		// A marker can also be a real anonymous enclosing scope. Compose
+		// its committed forest proof with the bridge proof on the same
+		// original object; a freshly parsed name alone grants no scope.
+		forest := p.anonymousForest
+		if forest != nil && forest.members == p && forest.objects[user] != nil &&
+			(user == p.owner || p.children[user] != nil || nativeMemberJointAnonymousAccess(p, user, work)) {
+			obj = forest.objects[user]
+		} else {
+			forest = nil
+		}
 		if !nativeMemberBridgeMarkerAttributesClosed(obj, markers, work) {
 			return false
 		}
@@ -274,7 +284,11 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 					return false
 				}
 				for marker := range markers {
-					if strings.Contains(desc, "L"+marker+";") && !allowed[i+1] {
+					if strings.Contains(desc, "L"+marker+";") && !allowed[i+1] &&
+						!(forest != nil && forest.units[marker] != nil &&
+							(nativeAnonymousForestConstructorNameType(obj, i+1, forest, work) ||
+								nativeAnonymousForestEnclosingNameType(obj, i+1, forest, work) ||
+								nativeAnonymousForestCaptureNameType(forest, obj, i+1, work))) {
 						return false
 					}
 				}
@@ -286,7 +300,8 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 				return false
 			}
 			for marker := range markers {
-				if strings.Contains(desc, "L"+marker+";") && !nativeMemberJointBridgeDeclaration(p, obj, member, marker, work) {
+				if strings.Contains(desc, "L"+marker+";") && !nativeMemberJointBridgeDeclaration(p, obj, member, marker, work) &&
+					!(forest != nil && forest.units[marker] != nil && nativeAnonymousForestEnclosingDeclaration(obj, member, forest, work)) {
 					return false
 				}
 			}

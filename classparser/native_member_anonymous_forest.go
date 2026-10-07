@@ -1,6 +1,10 @@
 package javaclassparser
 
-import "github.com/yaklang/javajive/internal/workbudget"
+import (
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/internal/workbudget"
+)
 
 // Direct scope proofs establish capture ownership within each group. Recreating
 // private accessors across named and anonymous scopes additionally needs one
@@ -39,7 +43,11 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		}
 		p.memberAnonymous[name] = group
 	}
-	if direct && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) &&
+	allocationForest, allocationKnown := c.nativeMemberAnonymousAllocationsRequireLexicalForest(p)
+	if !allocationKnown {
+		return false
+	}
+	if direct && !allocationForest && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) &&
 		(len(p.getters) == 0 || len(p.anonymousUnits) == 0) {
 		return true
 	}
@@ -60,6 +68,72 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		}
 	}
 	return true
+}
+
+// A direct anonymous scope has no certificate for the enclosing operand of a
+// named member created in its body. Such an allocation joins two source scopes
+// and needs the same complete lexical forest as a private accessor or a read
+// of another scope's capture. Discover this dependency from original NEWs.
+func (c *ClassObjectDumper) nativeMemberAnonymousAllocationsRequireLexicalForest(p *nativeMemberFamily) (bool, bool) {
+	work := c.Work
+	if p == nil || !nativeProofWork(work, 1) {
+		return false, false
+	}
+	for name, group := range p.anonymousUnits {
+		if group == nil || group.children[name] == nil || group.children[name].object == nil || !nativeProofWork(work, 1) {
+			return false, false
+		}
+		object := group.children[name].object
+		reader := NewClassObjectDumper(object)
+		reader.Work = work
+		reader.foldSiblingResolver = c.foldSiblingResolver
+		// A nested anonymous source scope can carry this same dependency.
+		// Discover the original ownership edge before selecting a direct plan;
+		// looking only at the first group's NEWs would miss its child's body.
+		if nested, known := reader.nativeAnonymousForestHasChildren(p); !known {
+			return false, false
+		} else if nested {
+			return true, true
+		}
+		for _, method := range object.Methods {
+			if method == nil || !nativeProofWork(work, 1) {
+				return false, false
+			}
+			for _, attribute := range method.Attributes {
+				code, ok := attribute.(*CodeAttribute)
+				if !ok {
+					continue
+				}
+				if code == nil || !nativeProofWork(work, int64(len(code.Code))) {
+					return false, false
+				}
+				decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(object.ConstantPool, i) })
+				decoder.Work = work
+				if decoder.ParseOpcode() != nil {
+					return false, false
+				}
+				for _, op := range decoder.Opcodes() {
+					if op == nil || op.Instr == nil || !nativeProofWork(work, 1) {
+						return false, false
+					}
+					if op.Instr.OpCode != core.OP_NEW {
+						continue
+					}
+					if len(op.Data) != 2 {
+						return false, false
+					}
+					owner, known := sourceBridgeClassName(object, core.Convert2bytesToInt(op.Data))
+					if !known {
+						return false, false
+					}
+					if child := p.children[owner]; child != nil && !child.static {
+						return true, true
+					}
+				}
+			}
+		}
+	}
+	return false, true
 }
 
 func nativeMemberJointAnonymousForestOwner(p *nativeMemberFamily, group *nativeAnonymousFamily, work *workbudget.Budget) bool {

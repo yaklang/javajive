@@ -829,6 +829,8 @@ type nativeMemberAllocation struct {
 	implicitEnclosing        bool
 	implicitReceiverClass    string
 	freshEnclosing           *nativeMemberFreshEnclosing
+	anonymousEnclosingRead   *nativeMemberLexicalRead
+	anonymousEnclosingMethod string
 }
 
 func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
@@ -997,6 +999,31 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 						return nil, false
 					}
 					plan.slot = core.GetRetrieveIdx(ops[i+2])
+					// An anonymous body also has an enclosing instance. Reuse only
+					// the committed forest's original lexical THIS chain, not a
+					// same-typed field or a captured foreign outer object.
+					if plan.slot == 0 && m.AccessFlags&8 == 0 {
+						for end := cursor; end < len(ops); end++ {
+							field := constructorMotionMember(c.obj, ops[end], core.OP_GETFIELD)
+							if field == nil || !nativeProofWork(c.Work, 1) {
+								break
+							}
+							pc := int(ops[end].CurrentOffset)
+							read := nativeMemberAnonymousAllocationEnclosingRead(p, c.obj, key, pc, child.owner, c.Work)
+							if read == nil {
+								continue
+							}
+							plan.enclosingReadPC, plan.implicitEnclosing = pc, true
+							plan.anonymousEnclosingRead, plan.anonymousEnclosingMethod = read, key
+							cursor = end + 1
+							if cursor+2 < len(ops) && ops[cursor].Instr.OpCode == core.OP_DUP && nativeMemberNullCheck(c.obj, ops[cursor+1]) && ops[cursor+2].Instr.OpCode == core.OP_POP {
+								plan.checkPC = int(ops[cursor+1].CurrentOffset)
+								cursor += 3
+								plan.implicitEnclosing = false
+							}
+							break
+						}
+					}
 					// An unqualified sibling allocation reads the current member's
 					// original enclosing capture. This is an origin witness, not
 					// a same-erasure field or an assumption that an outer is nonnull.

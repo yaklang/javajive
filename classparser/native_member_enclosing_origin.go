@@ -16,7 +16,13 @@ func nativeMemberLexicalEnclosingOperand(value any, plan *nativeMemberAllocation
 		return false
 	}
 	child := family.children[current]
-	if child == nil || child.object == nil || child.object.GetClassName() != current || child.static || child.owner != plan.child.owner {
+	anonymousRead := plan.anonymousEnclosingRead
+	if anonymousRead != nil {
+		forest := family.anonymousForest
+		if forest == nil || forest.units[current] == nil || nativeMemberAnonymousAllocationEnclosingRead(family, forest.units[current].object, plan.anonymousEnclosingMethod, plan.enclosingReadPC, plan.child.owner, work) != anonymousRead {
+			return false
+		}
+	} else if child == nil || child.object == nil || child.object.GetClassName() != current || child.static || child.owner != plan.child.owner {
 		return false
 	}
 	operand, ok := value.(values.JavaValue)
@@ -43,6 +49,9 @@ func nativeMemberLexicalEnclosingOperand(value any, plan *nativeMemberAllocation
 			return false
 		}
 	}
+	if anonymousRead != nil {
+		return nativeMemberLexicalReadOperand(operand, anonymousRead, work)
+	}
 	field, ok := operand.(*values.RefMember)
 	if !ok || field == nil || !field.HasOriginPC || field.OriginPC != plan.enclosingReadPC || field.Member != child.field {
 		return false
@@ -53,6 +62,34 @@ func nativeMemberLexicalEnclosingOperand(value any, plan *nativeMemberAllocation
 	}
 	receiver, ok := object.(*values.JavaRef)
 	return ok && receiver != nil && receiver.IsThis && receiver.CustomValue == nil && receiver.StackVar == nil
+}
+
+// The complete anonymous forest already certifies original receiver stability,
+// control-entry boundaries and every capture field in the dereference chain.
+// Keep the exact object, method and read occurrence when composing that proof
+// with a named member allocation. Descriptor equality alone grants no scope.
+func nativeMemberAnonymousAllocationEnclosingRead(p *nativeMemberFamily, object *ClassObject, method string, pc int, owner string, work *workbudget.Budget) *nativeMemberLexicalRead {
+	if p == nil || p.failed || object == nil || !nativeProofWork(work, 4) {
+		return nil
+	}
+	forest := p.anonymousForest
+	current := object.GetClassName()
+	group := p.anonymousUnits[current]
+	if forest == nil || forest.members != p || group == nil || group.failed || group.forest != forest || forest.groups[group.owner] != group || forest.objects[current] != object || group.children[current] == nil || group.children[current] != forest.units[current] || group.children[current].object != object {
+		return nil
+	}
+	read := forest.reads[current][method][pc]
+	if read == nil || read.pc != pc || read.descriptor != "L"+owner+";" || !forest.lexicalThis[current][method][pc] {
+		return nil
+	}
+	seen := map[*nativeMemberLexicalRead]bool{}
+	for node := read; node != nil; node = node.prior {
+		if len(seen) >= 64 || seen[node] || node.parameterOwner != "" || !nativeProofWork(work, 1) {
+			return nil
+		}
+		seen[node] = true
+	}
+	return read
 }
 
 // A unique declaration in another branch, a later declaration, or a declaration
