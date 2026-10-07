@@ -161,7 +161,13 @@ func nativeMemberJointBridgeCallersClosed(p *nativeMemberFamily, obj *ClassObjec
 				}
 				// A flat foreign source unit cannot reproduce a Java private lexical call.
 				if obj.GetClassName() != p.owner && p.children[obj.GetClassName()] == nil && p.anonymousUnits[obj.GetClassName()] == nil && p.enumConstants[obj.GetClassName()] == nil {
-					return false
+					// A named method-local belongs to its proved EnclosingMethod
+					// scope. It remains a distinct declaration role; the exact
+					// local object, capture packet and lexical owner chain must
+					// close before its original NEW can use this private bridge.
+					if _, known := nativeMemberJointMethodLocalOwner(p, obj, work); !known {
+						return false
+					}
 				}
 				plan := allocations[name+desc][int(op.CurrentOffset)]
 				allocation := plan != nil && plan.allocatedObject() != nil && plan.allocatedObject().GetClassName() == call.Name && plan.descriptor == call.Description && (child != nil && plan.child == child || call.Name == p.owner && plan.rootObject == p.lexicalObjects[p.owner])
@@ -251,7 +257,17 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 		if !nativeProofWork(work, 1) {
 			return false
 		}
-		if user != p.owner && p.children[user] == nil && p.anonymousUnits[user] == nil && p.emptyMarkers[user] == nil && p.enumConstants[user] == nil && !nativeMemberJointSwitchTableMarker(p, user, work) {
+		var localObject *ClassObject
+		if local := p.methodLocals[user]; local != nil {
+			if local.object == nil || local.object.GetClassName() != user {
+				return false
+			}
+			if _, known := nativeMemberJointMethodLocalOwner(p, local.object, work); !known {
+				return false
+			}
+			localObject = local.object
+		}
+		if user != p.owner && p.children[user] == nil && p.anonymousUnits[user] == nil && p.emptyMarkers[user] == nil && p.enumConstants[user] == nil && localObject == nil && !nativeMemberJointSwitchTableMarker(p, user, work) {
 			return false
 		}
 		raw, ok := z.enumSiblingResolver()(user)
@@ -262,6 +278,12 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 		obj, err := reader.parseResolved(raw)
 		if err != nil || obj.GetClassName() != user {
 			return false
+		}
+		// Inspect marker uses on the very original local object whose scope
+		// and capture packet were proved. All ordinary symbolic/declaration
+		// and opcode restrictions below still apply to this participant.
+		if localObject != nil {
+			obj = localObject
 		}
 		// A marker can also be a real anonymous enclosing scope. Compose
 		// its committed forest proof with the bridge proof on the same
