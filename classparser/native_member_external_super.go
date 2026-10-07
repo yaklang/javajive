@@ -31,6 +31,15 @@ func nativeMemberExternalSupersClosed(p *nativeMemberFamily, metadata callbindin
 		if child.static || parent.object == nil || parent.owner == child.owner || len(parent.accessBridges) != 0 || !nativeMemberOriginalClassWidening(child.owner, parent.owner, resolve, work) {
 			return false
 		}
+		// An owned access bridge delegates to THIS, not the foreign parent.
+		// Reconstruct its original unused-marker packet before excluding it
+		// from the SUPER inventory. This supplies no foreign private access.
+		var originalBridges map[string]*nativeConstructorAccessBridge
+		if len(child.accessBridges) != 0 {
+			reader := NewClassObjectDumper(child.object)
+			reader.Work = work
+			originalBridges = reader.originalNativeConstructorAccessBridges()
+		}
 		for _, method := range child.object.Methods {
 			if method == nil || !nativeProofWork(work, 1) {
 				return false
@@ -41,6 +50,13 @@ func nativeMemberExternalSupersClosed(p *nativeMemberFamily, metadata callbindin
 				return false
 			}
 			if name != "<init>" {
+				continue
+			}
+			if bridge := child.accessBridges[desc]; bridge != nil {
+				original := originalBridges[desc]
+				if original == nil || *original != *bridge || original.method != method {
+					return false
+				}
 				continue
 			}
 			ctor := child.constructors[desc]
@@ -145,7 +161,11 @@ func (c *ClassObjectDumper) nativeMemberForeignOriginalSuper(p *nativeMemberFami
 	if !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(512) != nil {
 		return false
 	}
-	child := nativeMemberProofWithDeclarations(c.obj, root, c.Work, nil, map[string]*ClassObject{enclosing: root}, resolve, c.buildInvocationMetadata())
+	// A foreign indexed caller may itself have a private constructor access
+	// bridge. Its own original packet belongs only to this temporary physical
+	// class proof; never import it into the parent's lexical/bridge ownership.
+	bridges := c.originalNativeConstructorAccessBridges()
+	child := nativeMemberProofWithDeclarations(c.obj, root, c.Work, bridges, map[string]*ClassObject{enclosing: root}, resolve, c.buildInvocationMetadata())
 	if child == nil || child.static {
 		return false
 	}
