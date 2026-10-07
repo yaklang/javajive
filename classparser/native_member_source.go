@@ -939,6 +939,17 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				if known && owner == p.owner && len(p.rootAccessBridges) > 0 {
 					plan, ok := nativeRootBridgeAllocation(c.obj, ops, i, p.lexicalObjects[p.owner], p.rootAccessBridges, c.Work)
 					if !ok {
+						if !allocationInvocationsChecked {
+							var valid bool
+							allocationInvocations, valid = c.nativeMemberAllocationInvocations(m, code)
+							if !valid {
+								return nil, false
+							}
+							allocationInvocationsChecked = true
+						}
+						plan, ok = nativeRootBridgeAllocation(c.obj, ops, i, p.lexicalObjects[p.owner], p.rootAccessBridges, c.Work, allocationInvocations)
+					}
+					if !ok {
 						return nil, false
 					}
 					if plan != nil {
@@ -962,6 +973,17 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 						continue
 					}
 					plan, ok := nativeMemberStaticBridgeAllocation(c.obj, ops, i, child, c.Work)
+					if !ok {
+						if !allocationInvocationsChecked {
+							var valid bool
+							allocationInvocations, valid = c.nativeMemberAllocationInvocations(m, code)
+							if !valid {
+								return nil, false
+							}
+							allocationInvocationsChecked = true
+						}
+						plan, ok = nativeMemberStaticBridgeAllocation(c.obj, ops, i, child, c.Work, allocationInvocations)
+					}
 					if !ok {
 						return nil, false
 					}

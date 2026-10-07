@@ -6,6 +6,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
+	"sort"
 	"strings"
 )
 
@@ -63,19 +64,19 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 	}
 	return true
 }
-func nativeMemberStaticBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, child *nativeMemberClass, work *workbudget.Budget) (*nativeMemberAllocation, bool) {
+func nativeMemberStaticBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, child *nativeMemberClass, work *workbudget.Budget, origins ...map[int]nativeMemberAllocationInvocation) (*nativeMemberAllocation, bool) {
 	if child == nil || child.object == nil {
 		return nil, false
 	}
-	plan, ok := nativeBridgeAllocation(obj, ops, i, child.object, child.accessBridges, work)
+	plan, ok := nativeBridgeAllocation(obj, ops, i, child.object, child.accessBridges, work, origins...)
 	if plan != nil {
 		plan.child = child
 	}
 	return plan, ok
 }
 
-func nativeRootBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, root *ClassObject, bridges map[string]*nativeConstructorAccessBridge, work *workbudget.Budget) (*nativeMemberAllocation, bool) {
-	plan, ok := nativeBridgeAllocation(obj, ops, i, root, bridges, work)
+func nativeRootBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, root *ClassObject, bridges map[string]*nativeConstructorAccessBridge, work *workbudget.Budget, origins ...map[int]nativeMemberAllocationInvocation) (*nativeMemberAllocation, bool) {
+	plan, ok := nativeBridgeAllocation(obj, ops, i, root, bridges, work, origins...)
 	if plan != nil {
 		plan.rootObject = root
 	}
@@ -85,13 +86,40 @@ func nativeRootBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, roo
 // Discovery records the original NEW and constructor call sites. The source
 // renderer independently requires the IR's uninitialized allocation origin;
 // finding a same-owner call alone never establishes receiver identity.
-func nativeBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, target *ClassObject, bridges map[string]*nativeConstructorAccessBridge, work *workbudget.Budget) (*nativeMemberAllocation, bool) {
+func nativeBridgeAllocation(obj *ClassObject, ops []*core.OpCode, i int, target *ClassObject, bridges map[string]*nativeConstructorAccessBridge, work *workbudget.Budget, origins ...map[int]nativeMemberAllocationInvocation) (*nativeMemberAllocation, bool) {
 	if obj == nil || target == nil || i < 0 || i+2 >= len(ops) || ops[i].Instr.OpCode != core.OP_NEW || ops[i+1].Instr.OpCode != core.OP_DUP {
 		return nil, false
 	}
 	owner, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(ops[i].Data))
 	if !known || owner != target.GetClassName() {
 		return nil, false
+	}
+	if len(origins) > 0 {
+		// A nested NEW may initialize another object with this same nominal
+		// owner. Only the immutable verifier type and SSA origin identify the
+		// matching receiver. The source hook independently seals both PCs.
+		if len(origins) != 1 || !nativeProofWork(work, 1) {
+			return nil, false
+		}
+		invocation, found := origins[0][int(ops[i].CurrentOffset)]
+		if !found || invocation.owner != owner || invocation.pc <= int(ops[i+1].CurrentOffset) {
+			return nil, false
+		}
+		j := sort.Search(len(ops), func(j int) bool { return int(ops[j].CurrentOffset) >= invocation.pc })
+		if j >= len(ops) || int(ops[j].CurrentOffset) != invocation.pc {
+			return nil, false
+		}
+		call := constructorMotionMember(obj, ops[j], core.OP_INVOKESPECIAL)
+		if call == nil || call.Member != "<init>" || call.Name != owner || call.Description != invocation.descriptor {
+			return nil, false
+		}
+		if bridges[call.Description] == nil {
+			return nil, true
+		}
+		if j <= i+2 || ops[j-1].Instr.OpCode != core.OP_ACONST_NULL || len(ops[j-1].Data) != 0 {
+			return nil, false
+		}
+		return &nativeMemberAllocation{descriptor: call.Description, newPC: int(ops[i].CurrentOffset), invokePC: invocation.pc, checkPC: -1, enclosingReadPC: -1}, true
 	}
 	for j := i + 2; j < len(ops); j++ {
 		if !nativeProofWork(work, 1) {
