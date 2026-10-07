@@ -1,6 +1,9 @@
 package javaclassparser
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,6 +23,45 @@ func TestAdversarialCachedSiblingReferencePhiRoundTrip(t *testing.T) {
 
 	const oracle = "false:0:11:true:CL\nfalse:1:23:true:CR\nfalse:2:true:true:C\ntrue:0:23:true:CR\ntrue:1:11:true:CL\ntrue:2:true:true:C\n"
 	testSourceTargetReleaseFamilyFixture(t, cachedSiblingPhiFixture, "CachedPhiOwner", "CachedPhiDriver", oracle, "8", []int{8})
+}
+
+func TestAdversarialCachedReferencePhiKeepsBothPublicModes(t *testing.T) {
+	javac, java := t04Tools(t)
+	const oracle = "false:0:11:true:CL\nfalse:1:23:true:CR\nfalse:2:true:true:C\ntrue:0:23:true:CR\ntrue:1:11:true:CL\ntrue:2:true:true:C\n"
+	for _, debug := range []string{"none", "source,lines,vars"} {
+		t.Run(debug, func(t *testing.T) {
+			files := nativeCompileDebugClasses(t, cachedSiblingPhiFixture, debug)
+			original := t.TempDir()
+			for name, raw := range files {
+				if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := t04RunJava(t, java, original, "CachedPhiDriver"); got != oracle {
+				t.Fatalf("original %q", got)
+			}
+			resolve := resolverFromClasses(classMapFromDir(t, original))
+			for _, mode := range []DecompileMode{Precision, Compatibility} {
+				t.Run(string(mode), func(t *testing.T) {
+					result, err := DecompileWithOptions(files["CachedPhiOwner.class"], DecompileOptions{Mode: mode, Resolve: resolve, TargetSourceVersion: 8})
+					if err != nil || len(result.StubMethods) != 0 {
+						t.Fatalf("%v %+v\n%s", err, result.Diagnostics, result.Source)
+					}
+					rebuilt := t.TempDir()
+					src := filepath.Join(rebuilt, "CachedPhiOwner.java")
+					if err := os.WriteFile(src, []byte(result.Source), 0600); err != nil {
+						t.Fatal(err)
+					}
+					if log, err := exec.Command(javac, "-proc:none", "--release", "8", "-cp", original, "-d", rebuilt, src).CombinedOutput(); err != nil {
+						t.Fatalf("compile:%v\n%s\n%s", err, log, result.Source)
+					}
+					if got := t04RunJava(t, java, rebuilt+string(os.PathListSeparator)+original, "CachedPhiDriver"); got != oracle {
+						t.Fatalf("got %q want %q", got, oracle)
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestAdversarialCachedReferencePhiUsesDeclaredNominalFamilies(t *testing.T) {

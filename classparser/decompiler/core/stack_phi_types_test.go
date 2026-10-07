@@ -150,6 +150,16 @@ func TestClosedStackPhiTypeQueryRejectsIncompleteEvidence(t *testing.T) {
 	}
 }
 
+func TestClosedStackPhiTypeQueryChargesGrowthWithoutReservingUnusedCapacity(t *testing.T) {
+	d := &Decompiler{Work: workbudget.New(context.Background(), workbudget.Limits{MaxOutputBytes: 256})}
+	leaf := phiTypeLeaf("phi.Left")
+	typ, valid := d.closedStackPhiValueType(leaf, phiTypeHierarchy)
+	name, _ := types.RawClassFQN(typ)
+	if !valid || name != "phi.Left" {
+		t.Fatalf("compact query must fit a 2KiB intermediate budget without reserving all 512 nodes: %s/%v (%v)", name, valid, d.Work.Check())
+	}
+}
+
 func phiDefinitionDecompiler() (*Decompiler, *values.JavaRef, *values.SlotValue, *OpCode) {
 	d := &Decompiler{stackPhiSources: map[*values.SlotValue]*OpCode{}, FunctionContext: &class_context.ClassContext{SiblingSuperTypes: phiTypeHierarchy}}
 	seed := phiTypeSlot(d, phiTypeLeaf("phi.Left"), phiTypeLeaf("phi.Right"))

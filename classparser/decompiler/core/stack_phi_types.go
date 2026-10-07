@@ -13,9 +13,6 @@ import (
 // instruction descriptor types or expression/slot caches. Shared joins are
 // memoized; incomplete or cyclic evidence fails before any edge is published.
 func (d *Decompiler) closedStackPhiValueType(value values.JavaValue, provider types.SuperTypeProvider) (types.JavaType, bool) {
-	if d.Work.CheckAlloc(512*128) != nil {
-		return nil, false
-	}
 	memo := map[values.JavaValue]types.JavaType{}
 	active := map[values.JavaValue]bool{}
 	var solve func(values.JavaValue, int) (types.JavaType, bool)
@@ -39,6 +36,11 @@ func (d *Decompiler) closedStackPhiValueType(value values.JavaValue, provider ty
 			return typ, true
 		}
 		if len(memo)+len(active) >= 512 {
+			return nil, false
+		}
+		// Account for actual map growth, including the transient active/memo
+		// overlap on return. A single leaf does not allocate the 512-node cap.
+		if d.Work.CheckAlloc(512+int64(len(memo)+len(active)+2)*128) != nil {
 			return nil, false
 		}
 		active[v] = true
