@@ -1,6 +1,10 @@
 package javaclassparser
 
-import "github.com/yaklang/javajive/internal/workbudget"
+import (
+	"encoding/binary"
+
+	"github.com/yaklang/javajive/internal/workbudget"
+)
 
 // Version 55 adds nest-based private access. A syntax profile is deliberately
 // separate from access permission: publication requires the entire reciprocal
@@ -47,8 +51,8 @@ func nativeModernNestVersion(object *ClassObject, work *workbudget.Budget) bool 
 }
 
 // Read actual input bytes; version edits, dollar spelling, or a one-way host
-// assertion do not grant private access. This first profile owns named and
-// anonymous declarations only, with a bounded, acyclic original lexical path.
+// assertion do not grant private access. Named, method-local and anonymous
+// declarations each need their own original bounded lexical ownership proof.
 func (c *ClassObjectDumper) nativeModernNestOriginalScope() (map[string]*ClassObject, bool) {
 	if c.obj == nil {
 		return nil, false
@@ -105,6 +109,9 @@ func (c *ClassObjectDumper) nativeModernNestOriginalScope() (map[string]*ClassOb
 			if !known {
 				owner, _, known = originalAnonymousOwner(object)
 			}
+			if !known {
+				owner, known = nativeModernNestMethodLocalOwner(object, objects, c.Work)
+			}
 			if !known || owner == current || objects[owner] == nil {
 				return nil, false
 			}
@@ -112,6 +119,37 @@ func (c *ClassObjectDumper) nativeModernNestOriginalScope() (map[string]*ClassOb
 		}
 	}
 	return objects, true
+}
+
+// EnclosingMethod's class index locates a candidate, not an ownership token.
+// The local-role proof must also corroborate the exact original declaration,
+// descriptor, self row and the parent's reciprocal registration row.
+func nativeModernNestMethodLocalOwner(object *ClassObject, objects map[string]*ClassObject, work *workbudget.Budget) (string, bool) {
+	if object == nil {
+		return "", false
+	}
+	for _, attribute := range object.Attributes {
+		if !nativeProofWork(work, 1) {
+			return "", false
+		}
+		raw, ok := attribute.(*UnparsedAttribute)
+		if !ok || raw == nil || raw.Name != "EnclosingMethod" {
+			continue
+		}
+		if raw.Length != 4 || len(raw.Info) != 4 {
+			return "", false
+		}
+		name, known := sourceBridgeClassName(object, binary.BigEndian.Uint16(raw.Info))
+		if !known || objects[name] == nil {
+			return "", false
+		}
+		owner, known := originalMethodLocalOwner(object, objects[name], work)
+		if !known || owner.owner != name {
+			return "", false
+		}
+		return name, true
+	}
+	return "", false
 }
 
 // Every original nest member must be present in the committed source scopes.

@@ -14,7 +14,10 @@ func modernNestTestObjects(t *testing.T, files map[string][]byte) map[string]*Cl
 	t.Helper()
 	objects := map[string]*ClassObject{}
 	for name, raw := range files {
-		object, err := Parse(raw)
+		// Unparsed attribute payloads borrow the input buffer. Each mutation
+		// control needs independent bytes; otherwise one rejected input can
+		// contaminate every later control and make unrelated proofs look safe.
+		object, err := Parse(append([]byte(nil), raw...))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}

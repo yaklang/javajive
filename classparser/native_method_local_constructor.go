@@ -159,7 +159,8 @@ func originalMethodLocalDefaultConstructor(obj, enclosing *ClassObject, work *wo
 // mandated enclosing and synthetic captured arguments. A named parameter or
 // unrelated attribute needs a different compiler profile, not silent erasure.
 // The physical protocol certificate can accept an older absent table; source
-// eligibility separately requires the tables our Java-8 compiler regenerates.
+// eligibility separately requires the source compiler's hidden-parameter
+// protocol within an independently proved input feature namespace.
 func nativeMethodLocalConstructorParameters(obj *ClassObject, method *MemberInfo, params []string, owner *nativeMethodLocalOwner, source bool, work *workbudget.Budget) bool {
 	signatureSeen, parametersSeen := false, false
 	for _, a := range method.Attributes {
@@ -208,7 +209,10 @@ func nativeMethodLocalConstructorParameters(obj *ClassObject, method *MemberInfo
 	// enclosing instance is mandated. A static local has only capture arguments
 	// and no table. Both are actual compiler protocols, not optional flag loss.
 	wantParameters := owner.declaration.AccessFlags&8 == 0
-	return obj.MajorVersion == 52 && signatureSeen && parametersSeen == wantParameters
+	// This hidden-parameter protocol is unchanged in the independently proved
+	// post-52 input namespaces. Nest membership is only local syntax evidence
+	// here; the complete lexical/nest source transaction must still close.
+	return obj.MajorVersion >= 52 && nativeAccessorVersion(obj, work) && signatureSeen && parametersSeen == wantParameters
 }
 
 // A pre-Java-8 default local constructor can carry the same verified capture

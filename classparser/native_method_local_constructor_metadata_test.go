@@ -8,10 +8,21 @@ import (
 )
 
 func TestNativeMethodLocalConstructorMetadataKeepsGeneratedFlags(t *testing.T) {
+	testNativeMethodLocalConstructorMetadataProfile(t, "8")
+}
+
+func TestNativePostJava8MethodLocalConstructorMetadataKeepsGeneratedFlags(t *testing.T) {
+	for _, release := range []string{"9", "10", "11"} {
+		t.Run(release, func(t *testing.T) { testNativeMethodLocalConstructorMetadataProfile(t, release) })
+	}
+}
+
+func testNativeMethodLocalConstructorMetadataProfile(t *testing.T, release string) {
+	t.Helper()
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
-			files := nativeCompileDebugClasses(t, `class LocalMetaOwner{Object make(final long n){class Entry{long get(){return n;}}return new Entry();}static Object stat(final long n){class Node{long get(){return n;}}return new Node();}}`, debug)
-			for _, variant := range []string{"original", "static actual absent table", "table length", "table count", "named hidden parameter", "enclosing synthetic instead of mandated", "capture mandated instead of synthetic", "duplicate table", "missing table", "missing signature", "duplicate signature", "wrong signature", "unknown attribute", "older class version", "budget", "canceled"} {
+			files := nativeCompileReleaseClasses(t, `class LocalMetaOwner{Object make(final long n){class Entry{long get(){return n;}}return new Entry();}static Object stat(final long n){class Node{long get(){return n;}}return new Node();}}`, debug, release)
+			for _, variant := range []string{"original", "static actual absent table", "table length", "table count", "named hidden parameter", "enclosing synthetic instead of mandated", "capture mandated instead of synthetic", "duplicate table", "missing table", "missing signature", "duplicate signature", "wrong signature", "unknown attribute", "older class version", "future namespace", "budget", "canceled"} {
 				t.Run(variant, func(t *testing.T) {
 					root, e := Parse(append([]byte(nil), files["LocalMetaOwner.class"]...))
 					if e != nil {
@@ -87,6 +98,8 @@ func TestNativeMethodLocalConstructorMetadataKeepsGeneratedFlags(t *testing.T) {
 						ctor.Attributes = append(ctor.Attributes, &UnparsedAttribute{Name: "Opaque", Length: 0})
 					case "older class version":
 						obj.MajorVersion = 51
+					case "future namespace":
+						obj.MajorVersion = 56
 					case "budget":
 						work = workbudget.New(nil, workbudget.Limits{MaxRequestWork: 1})
 					case "canceled":
