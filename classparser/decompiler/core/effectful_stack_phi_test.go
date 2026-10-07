@@ -244,3 +244,54 @@ func TestClosedStackPhiPrefixUsesValueIdentityAndCertifiedCopies(t *testing.T) {
 	}
 	t.Logf("independent symbolic prefix states=%d", cases)
 }
+
+func TestClosedStackPhiPrimitivePrefixRequiresIdentityAndReferenceProof(t *testing.T) {
+	for _, scenario := range []string{"primitive", "changed prefix", "reference selected", "private initializer", "escaping array"} {
+		t.Run(scenario, func(t *testing.T) {
+			typ := types.NewJavaPrimer(types.JavaInteger)
+			older := values.NewSlotValue(values.NewJavaRef(utils.NewRootVariableId(), nil, typ), typ)
+			prefix := newStackItem(NewEmptyStackEntry(), older)
+			root := &OpCode{CurrentOffset: 1, Instr: InstrInfos[OP_IFEQ], StackEntry: prefix}
+			write := &OpCode{CurrentOffset: 5, Instr: InstrInfos[OP_ISTORE_0], Source: []*OpCode{root}}
+			left := &OpCode{CurrentOffset: 10, Instr: InstrInfos[OP_GOTO], Source: []*OpCode{write}}
+			right := &OpCode{CurrentOffset: 20, Instr: InstrInfos[OP_ICONST_0], Source: []*OpCode{root}}
+			merge := &OpCode{CurrentOffset: 30, Instr: InstrInfos[OP_IADD], Source: []*OpCode{left, right}}
+			root.Target = []*OpCode{write, right}
+			write.Target = []*OpCode{left}
+			left.Target = []*OpCode{merge}
+			right.Target = []*OpCode{merge}
+			var first, second values.JavaValue = values.NewJavaLiteral(1, typ), values.NewJavaLiteral(2, typ)
+			if scenario == "reference selected" {
+				first = values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("p.Node"))
+				second = first
+			}
+			if scenario == "private initializer" || scenario == "escaping array" {
+				write.Instr = InstrInfos[OP_IASTORE]
+				var array values.JavaValue = values.NewNewExpression(types.NewJavaArrayType(typ))
+				if scenario == "escaping array" {
+					array = values.NewJavaRef(utils.NewRootVariableId(), nil, array.Type())
+					array.(*values.JavaRef).IsParam = true
+				}
+				write.stackConsumed = []values.JavaValue{first, values.NewJavaLiteral(0, typ), array}
+			}
+			left.StackEntry = newStackItem(prefix, first)
+			right.StackEntry = newStackItem(prefix, second)
+			if scenario == "changed prefix" {
+				right.StackEntry = newStackItem(newStackItem(NewEmptyStackEntry(), values.NewSlotValue(older.GetValue(), typ)), second)
+			}
+			slot := values.NewSlotValue(first, first.Type())
+			d := &Decompiler{opcodeToSimulateStack: map[*OpCode]*StackSimulationImpl{merge: NewStackSimulation(NewEmptyStackEntry(), nil, utils.NewRootVariableId())}}
+			got := d.lowerEffectfulStackPhi(merge, []*OpCode{root}, slot)
+			want := scenario == "primitive" || scenario == "escaping array"
+			if got != want {
+				t.Fatalf("lowered=%v want=%v", got, want)
+			}
+			if !want && (slot.GetValue() != first || len(d.effectfulStackPhiEdges) != 0) {
+				t.Fatal("rejected proposal published edges")
+			}
+			if root.StackEntry != prefix || prefix.value != older {
+				t.Fatal("original prefix changed")
+			}
+		})
+	}
+}

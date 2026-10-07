@@ -202,7 +202,7 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 			if v == nil || depth > 32 {
 				return false
 			}
-			original := v
+			original := values.OriginalStackLifetimeUse(v)
 			v = safeSeedOperand(v)
 			if v == nil {
 				return false
@@ -297,7 +297,7 @@ func (d *Decompiler) restoreNormalizedBooleanWebs() {
 					continue
 				}
 				if len(members) > 1 {
-					snapshot, ok := v.(*values.SlotValue)
+					snapshot, ok := values.OriginalStackLifetimeUse(v).(*values.SlotValue)
 					if !ok || !loadViews[snapshot] {
 						valid = false
 						continue

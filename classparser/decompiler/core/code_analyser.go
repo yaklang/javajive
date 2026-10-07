@@ -1877,6 +1877,7 @@ func (d *Decompiler) findStoreDefiningRef(ref *values.JavaRef) *OpCode {
 // UnpackSoltValue (which recurses past the SlotValue to the inner ref); it needs the SlotValue layer
 // itself to confirm the value was a slot-load copy rather than an inline ref.
 func slotValueJavaRef(v values.JavaValue) (*values.JavaRef, bool) {
+	v = values.OriginalStackLifetimeUse(v)
 	sv, ok := v.(*values.SlotValue)
 	if !ok || sv == nil {
 		return nil, false
@@ -5198,30 +5199,8 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 	// DoubleMetaphone.conditionC0's `... || contains(value, idx, n, "X", "Y")`) forces the principled
 	// shared-leaf builder to bail, dropping into the legacy combiner which mis-wires the leading
 	// condition and emits a missing-return method (Bug AK). Kill-switch: JDEC_ARRAYINIT_TERNARY_OFF=1.
-	isInlineArrayInitStore := func(cur *OpCode) bool {
-		if d.getenv("JDEC_ARRAYINIT_TERNARY_OFF") != "" {
-			return false
-		}
-		switch cur.Instr.OpCode {
-		case OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
-		default:
-			return false
-		}
-		if len(cur.stackConsumed) < 3 {
-			return false
-		}
-		ref := cur.stackConsumed[2]
-		if ref == nil {
-			return false
-		}
-		if _, ok := UnpackSoltValue(ref).(*values.NewExpression); ok {
-			return true
-		}
-		if _, ok := GetRealValue(ref).(*values.NewExpression); ok {
-			return true
-		}
-		return false
-	}
+	isInlineArrayInitStore := d.isInlineArrayInitStore
+
 	// A value-merge leaf may be the temporary created for OP_CHECKCAST. Keeping that
 	// ref in the ternary can strand its definition inside one branch; RewriteVar then
 	// hoists an uninitialized declaration and the merged expression reads null or an

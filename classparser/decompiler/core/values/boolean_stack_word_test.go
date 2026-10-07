@@ -149,3 +149,47 @@ func TestLateBooleanWebKeepsConstantViewAndNumericInvocationABI(t *testing.T) {
 		t.Fatal(text)
 	}
 }
+
+func TestStackLifetimeConsumerViewsFollowOriginalLoadTypeAndBinding(t *testing.T) {
+	ctx := &class_context.ClassContext{}
+	integer := types.NewJavaPrimer(types.JavaInteger)
+	first := NewJavaRef(utils.NewRootVariableId(), nil, integer)
+	first.Id.SetName("word")
+	original := NewSlotValue(first, integer)
+	view := NewStackLifetimeUseView(original)
+	if view.TmpType != nil || OriginalStackLifetimeUse(view) != original {
+		t.Fatal("consumer invented a type or lost the original load")
+	}
+	solved := NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaBoolean))
+	solved.Id.SetName("flag")
+	solved.WebDeclType = solved.Type().Copy()
+	original.ResetValue(solved)
+	consumer, ok := BooleanStackConsumerView(view)
+	if !ok || consumer.String(ctx) != "flag" || first.Type().String(ctx) != "int" {
+		t.Fatal("late binding changed original alias or inserted numeric conversion")
+	}
+	saved := NewJavaRef(utils.NewRootVariableId(), nil, integer.Copy())
+	view.ResetValue(saved)
+	if OriginalStackLifetimeUse(view) != saved || saved.Type().String(ctx) != "int" {
+		t.Fatal("immutable copy adopted a consumer type")
+	}
+	consumer, ok = BooleanStackConsumerView(view)
+	if !ok || !strings.Contains(consumer.String(ctx), "& 1") {
+		t.Fatal("noncanonical numeric word lost low-bit narrowing")
+	}
+	var deep JavaValue = original
+	for i := 0; i < 31; i++ {
+		deep = NewStackLifetimeUseView(deep)
+	}
+	if OriginalStackLifetimeUse(deep) != original {
+		t.Fatal("bounded forwarding did not retain original slot")
+	}
+	deep = NewStackLifetimeUseView(deep)
+	if OriginalStackLifetimeUse(deep) != nil {
+		t.Fatal("forwarding bound exceeded")
+	}
+	ordinary := NewSlotValue(original, integer)
+	if OriginalStackLifetimeUse(ordinary) != ordinary {
+		t.Fatal("ordinary alias acquired forwarding proof")
+	}
+}

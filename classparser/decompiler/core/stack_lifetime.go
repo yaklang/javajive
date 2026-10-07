@@ -137,7 +137,7 @@ func (d *Decompiler) stackLifetimeUseView(value values.JavaValue) (values.JavaVa
 	if err := d.chargeNodeCopies(1); err != nil {
 		return value, err
 	}
-	view := values.NewSlotValue(value, value.Type())
+	view := values.NewStackLifetimeUseView(value)
 	if d.stackLifetimeUseViews == nil {
 		d.stackLifetimeUseViews = map[values.JavaValue][]*values.SlotValue{}
 	}

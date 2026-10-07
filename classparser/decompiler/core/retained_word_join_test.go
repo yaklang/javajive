@@ -83,6 +83,18 @@ func TestRetainedReferenceJoinRequiresOriginalClosedSnapshot(t *testing.T) {
 			if root.StackEntry != rootVal || left.StackEntry != leftVal || right.StackEntry != rightVal || len(d.effectfulStackPhiEdges) != 0 || len(d.disFoldRef) != 0 {
 				t.Fatal("proof mutated original graph")
 			}
+			if want {
+				d.opcodeToSimulateStack = map[*OpCode]*StackSimulationImpl{merge: NewStackSimulation(NewEmptyStackEntry(), nil, utils.NewRootVariableId())}
+				slot := values.NewSlotValue(left.StackEntry.value, left.StackEntry.value.Type())
+				if !d.lowerClosedStackPhi(merge, []*OpCode{root}, slot, false) {
+					t.Fatal("certified retained word was mistaken for an unchanged prefix")
+				}
+				for _, pred := range []*OpCode{left, right} {
+					if d.effectfulStackPhiEdges[pred] == nil || d.effectfulStackPhiEdges[pred].JavaValue != pred.StackEntry.value {
+						t.Fatal("original incoming edge value lost")
+					}
+				}
+			}
 		})
 	}
 }

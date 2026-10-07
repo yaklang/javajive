@@ -904,8 +904,9 @@ func BoolTernaryCondition(v JavaValue) (JavaValue, bool) {
 const EmptySlotValuePlaceholder = "empty slot value"
 
 type SlotValue struct {
-	val     JavaValue
-	TmpType types.JavaType
+	val              JavaValue
+	TmpType          types.JavaType
+	stackLifetimeUse bool
 }
 
 // ReplaceVar implements JavaValue.
@@ -970,6 +971,37 @@ func NewSlotValue(val JavaValue, typ types.JavaType) *SlotValue {
 		val:     val,
 		TmpType: typ,
 	}
+}
+
+// NewStackLifetimeUseView keeps one rendered consumer distinct from shared
+// stack evidence. It carries no independent type constraint: solving the
+// original local web must remain visible through this forwarding layer.
+func NewStackLifetimeUseView(value JavaValue) *SlotValue {
+	return &SlotValue{val: value, stackLifetimeUse: true}
+}
+
+// StackLifetimeUseOperand recognizes only that private forwarding layer.
+// Its presence is not an evaluation or motion certificate.
+func StackLifetimeUseOperand(value JavaValue) (JavaValue, bool) {
+	s, ok := value.(*SlotValue)
+	if !ok || s == nil || !s.stackLifetimeUse {
+		return nil, false
+	}
+	return s.val, true
+}
+
+// OriginalStackLifetimeUse strips bounded forwarding layers without unwrapping
+// the original load slot. A redirected immutable copy remains a JavaRef and
+// cannot acquire the old load slot's identity from this operation.
+func OriginalStackLifetimeUse(value JavaValue) JavaValue {
+	for steps := 0; steps < 32; steps++ {
+		original, view := StackLifetimeUseOperand(value)
+		if !view {
+			return value
+		}
+		value = original
+	}
+	return nil
 }
 
 // MarkOriginalStackMaterialization records a shared stack value at its actual

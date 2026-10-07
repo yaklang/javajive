@@ -61,7 +61,7 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 				}
 			}
 		}
-		if stackLifetimeWrite(n.Instr.OpCode) {
+		if stackLifetimeWrite(n.Instr.OpCode) && !d.isInlineArrayInitStore(n) {
 			// Keep every local/field/array write on its selected arm, before its
 			// retained stack value is cast or consumed. Reconstructing only
 			// the value can hoist the store or lose its producer entirely.
@@ -95,12 +95,30 @@ func (d *Decompiler) lowerClosedStackPhi(merge *OpCode, conditions []*OpCode, sl
 	if d.FunctionContext != nil {
 		provider = d.FunctionContext.SiblingSuperTypes
 	}
+	prefix := root.StackEntry
+	// In the retained-reference case the fork's one word is consumed by
+	// each arm and replaced by the selected result. It is not an unchanged
+	// prefix. Only the original closed snapshot certificate permits this
+	// interpretation; equal fork/join heights alone are insufficient.
+	if prefix != nil && prefix.depth == 1 && d.retainedReferenceJoinRoot(merge, []*OpCode{root}) == root {
+		prefix = prefix.parent
+	}
 	for _, pred := range merge.Source {
 		if !region[pred] || len(pred.Target) != 1 || pred.Target[0] != merge || pred.StackEntry == nil ||
-			!d.sameStackLifetimePrefix(root.StackEntry, pred.StackEntry.parent) || pred.StackEntry.value == nil || pred.StackEntry.value.Type() == nil {
+			!d.sameStackLifetimePrefix(prefix, pred.StackEntry.parent) || pred.StackEntry.value == nil || pred.StackEntry.value.Type() == nil {
 			return false
 		}
 		v := pred.StackEntry.value
+		if prefix != nil && prefix.parent != nil {
+			// The unchanged-prefix extension owns primitive words and their
+			// lifetime copies. Reference joins above older operands need a
+			// separate alias/allocation and nested routing certificate; value
+			// identity alone cannot authorize that statement transformation.
+			primitive, ok := v.Type().RawType().(*types.JavaPrimer)
+			if !ok || primitive.Name == types.JavaString || primitive.Name == types.JavaVoid {
+				return false
+			}
+		}
 		if booleanTarget {
 			actual, primitive := v.Type().RawType().(*types.JavaPrimer)
 			if !primitive || (actual.Name != types.JavaInteger && actual.Name != types.JavaBoolean) {
@@ -209,6 +227,34 @@ func (d *Decompiler) sameStackLifetimePrefix(first, second *StackItem) bool {
 			return false
 		}
 		first, second = first.parent, second.parent
+	}
+	return false
+}
+
+// This recognizes a value-planning candidate, not permission to remove stores.
+// The later private array fill/ownership proof must certify all uses, element
+// order and handler coverage before any initializer statements disappear.
+func (d *Decompiler) isInlineArrayInitStore(cur *OpCode) bool {
+	if d.getenv("JDEC_ARRAYINIT_TERNARY_OFF") != "" {
+		return false
+	}
+	switch cur.Instr.OpCode {
+	case OP_AASTORE, OP_IASTORE, OP_BASTORE, OP_CASTORE, OP_FASTORE, OP_LASTORE, OP_DASTORE, OP_SASTORE:
+	default:
+		return false
+	}
+	if len(cur.stackConsumed) < 3 {
+		return false
+	}
+	ref := cur.stackConsumed[2]
+	if ref == nil {
+		return false
+	}
+	if _, ok := UnpackSoltValue(ref).(*values.NewExpression); ok {
+		return true
+	}
+	if _, ok := GetRealValue(ref).(*values.NewExpression); ok {
+		return true
 	}
 	return false
 }
