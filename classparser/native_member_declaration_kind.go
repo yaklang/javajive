@@ -63,7 +63,9 @@ func nativeMemberDeclarationKindRepresentable(obj *ClassObject, flags uint16, wo
 				return false
 			}
 		case 0x0001, 0x0009:
-			if obj.MajorVersion != 52 || codeCount != 1 {
+			// Default and static methods remain legal after their introduction
+			// in Java 8. Admit only versions with a proven original namespace.
+			if obj.MajorVersion < 52 || !nativeAccessorVersion(obj, work) || codeCount != 1 {
 				return false
 			}
 		default:
