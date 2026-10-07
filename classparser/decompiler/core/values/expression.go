@@ -5216,7 +5216,7 @@ func structurallyBooleanForIntCoerce(v JavaValue, funcCtx *class_context.ClassCo
 	}
 	switch t := u.(type) {
 	case *JavaCompare:
-		return true
+		return isBooleanTyped(t)
 	case *JavaExpression, *FunctionCallExpression:
 		return isBooleanTyped(u)
 	case *TernaryExpression:

@@ -43,6 +43,7 @@ type branchArrayCall struct {
 }
 
 type Decompiler struct {
+	comparisonWordInputs   map[*OpCode][]*statements.AssignStatement
 	effectfulStackPhiEdges map[*OpCode]*statements.AssignStatement
 	evaluationSnapshots    map[*OpCode][]EvaluationSnapshot
 	constructorInitialized bool
@@ -3956,12 +3957,17 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		member.OriginPC, member.HasOriginPC = int(opcode.CurrentOffset), true
 		statements.NewArrayMemberAssignStatement(member, value)
 	case OP_LCMP, OP_DCMPG, OP_DCMPL, OP_FCMPG, OP_FCMPL:
-		var1 := runtimeStackSimulation.Pop().(values.JavaValue)
-		var2 := runtimeStackSimulation.Pop().(values.JavaValue)
-		if opcode.Instr.OpCode == OP_LCMP {
-			runtimeStackSimulation.Push(values.NewJavaCompare(var2, var1))
+		right := runtimeStackSimulation.Pop().(values.JavaValue)
+		left := runtimeStackSimulation.Pop().(values.JavaValue)
+		if comparisonHasDirectZeroBranch(opcode) {
+			if opcode.Instr.OpCode == OP_LCMP {
+				runtimeStackSimulation.Push(values.NewJavaCompare(left, right))
+			} else {
+				runtimeStackSimulation.Push(values.NewJavaFloatingCompare(left, right, opcode.Instr.OpCode == OP_FCMPL || opcode.Instr.OpCode == OP_DCMPL))
+			}
 		} else {
-			runtimeStackSimulation.Push(values.NewJavaFloatingCompare(var2, var1, opcode.Instr.OpCode == OP_FCMPL || opcode.Instr.OpCode == OP_DCMPL))
+			left, right = d.comparisonWordOperands(runtimeStackSimulation, opcode, left, right)
+			runtimeStackSimulation.Push(values.NewJavaComparisonWord(left, right, opcode.Instr.OpCode == OP_FCMPG || opcode.Instr.OpCode == OP_DCMPG))
 		}
 	case OP_LSUB, OP_ISUB, OP_DSUB, OP_FSUB, OP_LADD, OP_IADD, OP_FADD, OP_DADD, OP_IREM, OP_FREM, OP_LREM, OP_DREM, OP_IDIV, OP_FDIV, OP_DDIV, OP_LDIV, OP_IMUL, OP_DMUL, OP_FMUL, OP_LMUL, OP_LAND, OP_LOR, OP_LXOR, OP_ISHR, OP_ISHL, OP_LSHL, OP_LSHR, OP_IUSHR, OP_LUSHR, OP_IOR, OP_IAND, OP_IXOR:
 		var op string
@@ -6625,6 +6631,10 @@ func (d *Decompiler) ParseStatement() error {
 			}
 		case OP_RETURN:
 			appendNode(statements.NewReturnStatement(nil))
+		case OP_LCMP, OP_DCMPG, OP_DCMPL, OP_FCMPG, OP_FCMPL:
+			for _, input := range d.comparisonWordInputs[opcode] {
+				appendNode(input)
+			}
 		case OP_IF_ACMPEQ, OP_IF_ACMPNE, OP_IF_ICMPLT, OP_IF_ICMPGE, OP_IF_ICMPGT, OP_IF_ICMPNE, OP_IF_ICMPEQ, OP_IF_ICMPLE:
 			op := GetNotOp(opcode)
 			rv := opcode.stackConsumed[0]
@@ -6976,8 +6986,10 @@ func (d *Decompiler) ParseStatement() error {
 	// renamed by RewriteVar and collides with the primary temp -- the gson JsonReader
 	// `int[] var1 = this.pathIndices; var1[var1] = var1[var1] + 1` bug. Splice the orphaned same-id
 	// nodes back in, in emission order, ahead of the primary: preds -> orphan... -> primary -> succ.
-	// Strictly gated to dup-family opcodes whose extra nodes are plain temp assignments, so the common
-	// single-materialization dup (group size 1) and every non-dup opcode are untouched.
+	// Stack-operation and comparison-word input packets retain every temporary
+	// assignment in emission order. Other opcodes require their independently
+	// witnessed incoming-edge or monitor snapshot packet; single-node packets
+	// are untouched.
 	// Kill-switch: JDEC_DUP_MULTI_TEMP_SPLICE_OFF=1 restores the legacy drop.
 	if d.getenv("JDEC_DUP_MULTI_TEMP_SPLICE_OFF") == "" {
 		idGroups := map[int][]*Node{}
@@ -6998,7 +7010,7 @@ func (d *Decompiler) ParseStatement() error {
 				continue
 			}
 			switch op.Instr.OpCode {
-			case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2, OP_INVOKEDYNAMIC:
+			case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2, OP_INVOKEDYNAMIC, OP_LCMP, OP_FCMPL, OP_FCMPG, OP_DCMPL, OP_DCMPG:
 			default:
 				// An edge-materialized phi is emitted after this opcode's
 				// own statement. Preserve both in their original order, e.g.

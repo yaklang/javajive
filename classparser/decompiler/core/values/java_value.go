@@ -973,7 +973,8 @@ func NewSlotValue(val JavaValue, typ types.JavaType) *SlotValue {
 }
 
 // MarkOriginalStackMaterialization records a shared stack value at its actual
-// DUP lowering site. It does not authorize local-slot reads or assignments.
+// stack-operation or comparison lowering site. It does not authorize arbitrary
+// local-slot reads or assignments.
 func (r *JavaRef) MarkOriginalStackMaterialization(pc, kind int, value JavaValue) {
 	if r == nil || r.originalStackMaterialization || pc < 0 || isNilJavaValue(value) {
 		return
