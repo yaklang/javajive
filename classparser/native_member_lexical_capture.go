@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -12,6 +13,7 @@ type nativeMemberLexicalRead struct {
 	owner, field, descriptor string
 	pc                       int
 	parameterOwner           string
+	parameterDescriptor      string // post-delegation parameter-origin certificate
 	basePC                   int
 	prior                    *nativeMemberLexicalRead
 }
@@ -52,19 +54,53 @@ func nativeMemberLexicalReads(obj *ClassObject, p *nativeMemberFamily, work *wor
 			}
 			ops := constructorMotionOps(decoder)
 			thisStable := true
+			parameterStable := true
 			for _, op := range ops {
 				if core.GetStoreIdx(op) == 0 {
 					thisStable = false
 				}
+				if core.GetStoreIdx(op) == 1 {
+					parameterStable = false
+				}
+			}
+			// javac may keep using the original enclosing parameter in the
+			// constructor body instead of rereading THIS's synthetic field.
+			// It is the same lexical origin only for this exact proved physical
+			// constructor, after its original delegation, without slot writes.
+			// Pre-delegation reads keep their separate SUPER packet proof below.
+			child := p.children[obj.GetClassName()]
+			var enclosingConstructor *nativeMemberConstructor
+			if name == "<init>" && m.AccessFlags&8 == 0 && child != nil && !child.static && child.object == obj && parameterStable {
+				params, ret, err := callbinding.Descriptor(desc)
+				if err == nil && ret == "V" && len(params) > 0 && params[0] == "L"+child.owner+";" && nativeMemberSuperCaptureDeclaration(child, work) {
+					if ctor := child.constructors[desc]; ctor != nil && ctor.capturePC >= 0 && ctor.delegatePC > ctor.capturePC {
+						enclosingConstructor = ctor
+					}
+				}
 			}
 			for i, op := range ops {
-				if m.AccessFlags&8 != 0 || core.GetRetrieveIdx(op) != 0 || !constructorMotionLoad(op, "Ljava/lang/Object;") {
+				if m.AccessFlags&8 != 0 || !constructorMotionLoad(op, "Ljava/lang/Object;") {
 					continue
 				}
-				current := p.children[obj.GetClassName()]
+				current := child
+				parameterOwner := ""
+				switch core.GetRetrieveIdx(op) {
+				case 0:
+				case 1:
+					if enclosingConstructor == nil || int(op.CurrentOffset) <= enclosingConstructor.delegatePC {
+						continue
+					}
+					current = p.children[child.owner]
+					parameterOwner = child.owner
+				default:
+					continue
+				}
 				var prior *nativeMemberLexicalRead
 				for j := i + 1; j < len(ops) && current != nil && !current.static; j++ {
 					if !nativeProofWork(work, 1) {
+						return nil, false
+					}
+					if parameterOwner != "" && !nativeMemberSuperCaptureDeclaration(current, work) {
 						return nil, false
 					}
 					field := constructorMotionMember(obj, ops[j], core.OP_GETFIELD)
@@ -78,6 +114,11 @@ func nativeMemberLexicalReads(obj *ClassObject, p *nativeMemberFamily, work *wor
 						break
 					}
 					read := &nativeMemberLexicalRead{owner: field.Name, field: field.Member, descriptor: field.Description, pc: int(ops[j].CurrentOffset), prior: prior}
+					if prior == nil && parameterOwner != "" {
+						read.parameterOwner = parameterOwner
+						read.parameterDescriptor = desc
+						read.basePC = int(op.CurrentOffset)
+					}
 					if reads[read.pc] != nil {
 						return nil, false
 					}
@@ -159,6 +200,7 @@ func nativeMemberLexicalReadOperand(value any, read *nativeMemberLexicalRead, wo
 	}
 	seen := map[values.JavaValue]bool{}
 	parameterOwner := ""
+	parameterDescriptor := ""
 	for node := read; node != nil; node = node.prior {
 		if !nativeProofWork(work, 1) {
 			return false
@@ -183,6 +225,7 @@ func nativeMemberLexicalReadOperand(value any, read *nativeMemberLexicalRead, wo
 		v = field.Object
 		if node.prior == nil {
 			parameterOwner = node.parameterOwner
+			parameterDescriptor = node.parameterDescriptor
 		}
 	}
 	v, ok = nativeMemberEnclosingUnpack(v, work)
@@ -190,6 +233,16 @@ func nativeMemberLexicalReadOperand(value any, read *nativeMemberLexicalRead, wo
 		return false
 	}
 	if parameterOwner != "" {
+		if parameterDescriptor != "" {
+			ref, known := v.(*values.JavaRef)
+			if !known || ctx == nil || ctx.CurrentMethodDesc != parameterDescriptor {
+				return false
+			}
+			slot, original := ref.OriginalParameterSlot()
+			if !original || slot != 1 {
+				return false
+			}
+		}
 		return ctx.FunctionName == "<init>" && nativeMemberSourceEnclosingParameter(v, ctx, parameterOwner)
 	}
 	ref, known := v.(*values.JavaRef)
