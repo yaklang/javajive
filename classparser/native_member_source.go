@@ -33,6 +33,7 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
+	modernNestObjects      map[string]*ClassObject
 	methodLocals           map[string]*nativeMethodLocalClass
 	enumConstants          map[string]*nativeEnumConstantBody
 	enumSwitchTables       map[string]*nativeEnumSwitchTable
@@ -565,7 +566,11 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if !nativeMemberTopLevelEvidence(c.obj, c.Work) {
 		return nil
 	}
-	p := &nativeMemberFamily{owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, retainEmptyMarkers: c.options.TargetSourceVersion >= 11}
+	modernNest, nestKnown := c.nativeModernNestOriginalScope()
+	if !nestKnown {
+		return nil
+	}
+	p := &nativeMemberFamily{modernNestObjects: modernNest, owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, retainEmptyMarkers: c.options.TargetSourceVersion >= 11}
 	resolveDeclaration := c.nativeAnnotationDeclarationResolver()
 	queue := []*ClassObject{c.obj}
 	for cursor := 0; cursor < len(queue); cursor++ {
@@ -1184,7 +1189,7 @@ func nativeMemberOriginalConstructorAccess(p *nativeMemberFamily, caller *ClassO
 			found = m
 		}
 	}
-	return found != nil && (found.AccessFlags&2 == 0 || caller.GetClassName() == owner)
+	return found != nil && (found.AccessFlags&2 == 0 || caller.GetClassName() == owner || nativeModernNestPrivateConstructorAccess(p, caller, target, work))
 }
 
 func nativeMemberBinding(ctx *class_context.ClassContext, p *nativeMemberFamily, work *workbudget.Budget) *class_context.ClassContext {

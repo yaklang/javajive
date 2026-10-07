@@ -594,6 +594,19 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 	if p == nil || !c.nativeAnonymousStandaloneTailClosed(p, members, forest, c.buildInvocationMetadata(), c.originalNativeConstructorAccessBridges()) {
 		return nil
 	}
+	if c.obj.MajorVersion >= 55 && members == nil && forest == nil {
+		modernNest, known := c.nativeModernNestOriginalScope()
+		if !known {
+			return nil
+		}
+		source := map[string]*ClassObject{c.obj.GetClassName(): c.obj}
+		for name, child := range p.children {
+			source[name] = child.object
+		}
+		if !nativeModernNestSourceScopeClosed(modernNest, source, c.Work) {
+			return nil
+		}
+	}
 	allNames := map[string]bool{}
 	for _, a := range c.obj.Attributes {
 		if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {

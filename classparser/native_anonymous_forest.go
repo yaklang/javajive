@@ -39,6 +39,10 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {
 		return nil
 	}
+	modernNest, nestKnown := c.nativeModernNestOriginalScope()
+	if !nestKnown {
+		return nil
+	}
 	forest := &nativeAnonymousForest{root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}, members: members, lexicalThis: map[string]map[string]map[int]bool{}}
 	queue := []*ClassObject{c.obj}
 	if members != nil {
@@ -123,6 +127,9 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 		}
 	}
 	if !nativeAnonymousForestOpcodeClosure(forest, c.Work) {
+		return nil
+	}
+	if !nativeModernNestSourceScopeClosed(modernNest, forest.objects, c.Work) {
 		return nil
 	}
 	return forest

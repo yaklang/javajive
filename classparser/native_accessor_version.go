@@ -9,7 +9,10 @@ import "github.com/yaklang/javajive/internal/workbudget"
 // Versions53/54 still use this pre-nestmate field/accessor protocol. Module
 // namespaces and version55 dynamic constants are outside these grammars.
 func nativeAccessorVersion(obj *ClassObject, work *workbudget.Budget) bool {
-	if obj == nil || obj.MinorVersion != 0 || obj.MajorVersion < 49 || obj.MajorVersion > 54 {
+	if obj == nil || obj.MinorVersion != 0 || obj.MajorVersion < 49 || obj.MajorVersion > 55 {
+		return false
+	}
+	if obj.MajorVersion == 55 && !nativeModernNestVersion(obj, work) {
 		return false
 	}
 	for _, constant := range obj.ConstantPool {

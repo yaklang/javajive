@@ -151,6 +151,10 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 		}
 	}
 
+	if !nativeModernNestSourceScopeClosed(p.modernNestObjects, objects, d.Work) {
+		return nil
+	}
+
 	return &nativeMemberPrepared{root: root, reader: d, family: p, objects: objects, snapshot: snap}
 }
 
