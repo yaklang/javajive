@@ -278,6 +278,21 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 						}
 					}
 				}
+				if name == "<init>" {
+					if unit := forest.units[owner]; unit != nil && unit.memberEnclosingPath != nil {
+						path, closed := nativeAnonymousMemberSuperRead(unit, forest, desc, ops, entries, work)
+						if !closed {
+							return false
+						}
+						for node := path; node != nil; node = node.prior {
+							if reads[node.pc] != nil || approved[node.pc] {
+								return false
+							}
+							reads[node.pc], paths[node.pc], approved[node.pc] = node, node, true
+							forest.lexicalThis[owner][key][node.pc] = true
+						}
+					}
+				}
 				for _, op := range ops {
 					for _, kind := range []int{core.OP_GETFIELD, core.OP_PUTFIELD, core.OP_GETSTATIC, core.OP_PUTSTATIC} {
 						field := constructorMotionMember(object, op, kind)

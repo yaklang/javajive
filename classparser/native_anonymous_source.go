@@ -36,6 +36,7 @@ type nativeAnonymousClass struct {
 	invokePC              int
 	memberSuper           *nativeMemberClass
 	memberEnclosingReadPC int
+	memberEnclosingPath   *nativeMemberLexicalRead
 }
 type nativeAnonymousFamily struct {
 	forest     *nativeAnonymousForest
@@ -256,34 +257,24 @@ func nativeAnonymousConstructorRepresentationProof(obj *ClassObject, owner, meth
 		outerField = "this$" + strconv.Itoa(depth)
 		c.parentAnonymous = true
 	}
-	// A root instance can anonymously extend its own non-static named member.
-	// The original anonymous enclosing capture and the member SUPER receiver
-	// share exactly slot1; this is an enclosing operand, not a user argument.
-	// Source allocation separately requires the original root THIS operand.
-	if members != nil && owner == members.owner && currentMember == nil && i < len(ops) {
+	// The anonymous constructor passes its unchanged enclosing word (slot 1)
+	// through the original lexical capture graph to the named member SUPER.
+	// Source nesting, class inheritance and ordinary captured values are
+	// different relations; only the first relation can omit this operand.
+	if members != nil && i < len(ops) {
 		parent := members.children[obj.GetSupperClassName()]
 		capture, captured := c.fields[outerField]
-		if parent != nil && !parent.static && parent.owner == owner && captured && capture == 0 &&
-			len(ps) > 0 && ps[0] == "L"+owner+";" && constructorMotionLoad(ops[i], ps[0]) && core.GetRetrieveIdx(ops[i]) == 1 {
-			c.memberSuper = parent
-			c.memberEnclosingReadPC = -1
-			i++
-		}
-	}
-	// javac's enclosing operand for an anonymous subclass of a sibling member
-	// is this member's original capture. The same joint plan proves both
-	// declarations and javac regenerates this exact read before super(...).
-	if members != nil && currentMember != nil && !currentMember.static && i+1 < len(ops) {
-		parent := members.children[obj.GetSupperClassName()]
-		field := constructorMotionMember(obj, ops[i+1], core.OP_GETFIELD)
-		outerIndex, outerCaptured := c.fields[outerField]
-		if parent != nil && !parent.static && parent.owner == currentMember.owner && parent.owner == members.owner &&
-			len(ps) > 0 && ps[0] == "L"+owner+";" && outerCaptured && outerIndex == 0 &&
-			core.GetRetrieveIdx(ops[i]) == 1 && constructorMotionLoad(ops[i], ps[0]) &&
-			field != nil && field.Name == owner && field.Member == currentMember.field && field.Description == "L"+parent.owner+";" {
-			c.memberSuper = parent
-			c.memberEnclosingReadPC = int(ops[i+1].CurrentOffset)
-			i += 2
+		if parent != nil && !parent.static && captured && capture == 0 &&
+			len(ps) > 0 && ps[0] == "L"+owner+";" {
+			path, next, known := nativeAnonymousMemberSuperEnclosingPath(obj, owner, parent, members, forest, ops, i, work)
+			if known {
+				c.memberSuper, c.memberEnclosingPath = parent, path
+				c.memberEnclosingReadPC = -1
+				if path != nil {
+					c.memberEnclosingReadPC = path.pc
+				}
+				i = next
+			}
 		}
 	}
 	nullTail := false
