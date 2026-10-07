@@ -204,6 +204,7 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 					if !closed {
 						return false
 					}
+					var parameterFlow *nativeEnumParameterFlow
 					for i, op := range ops {
 						if (op.Instr.OpCode == core.OP_LDC || op.Instr.OpCode == core.OP_LDC_W || op.Instr.OpCode == core.OP_NEW || op.Instr.OpCode == core.OP_CHECKCAST || op.Instr.OpCode == core.OP_INSTANCEOF || op.Instr.OpCode == core.OP_ANEWARRAY || op.Instr.OpCode == core.OP_MULTIANEWARRAY) && len(op.Data) > 0 {
 							idx := uint16(op.Data[0])
@@ -230,10 +231,16 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 						if !nativeEnumSelectorSlots(selector, slots, 0) || !nativeProofWork(work, int64(len(ops))) {
 							return false
 						}
-						// Each leaf must retain the original descriptor seed throughout the
-						// method. Stores to any operand slot invalidate the entire tree.
+						// An unchanged method needs no additional graph. Otherwise
+						// prove the entry seed at each original leaf read, including
+						// all paths that return to it after a later store.
 						if !nativeEnumSelectorParametersUnchanged(ops, slots) {
-							return false
+							if parameterFlow == nil {
+								parameterFlow = nativeEnumParameterOriginalFlow(d, code, work)
+							}
+							if !parameterFlow.selector(selector, work, 0) {
+								return false
+							}
 						}
 						for _, pc := range entries {
 							if pc > int(op.CurrentOffset) && pc <= int(ops[ordinal+2].CurrentOffset) {
