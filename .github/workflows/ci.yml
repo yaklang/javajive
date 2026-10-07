@@ -20,7 +20,7 @@ jobs:
   source:
     name: Source algorithm regression (${{ matrix.shard }})
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -103,7 +103,10 @@ jobs:
           (evidence / "source-shard-selection.json").write_text(json.dumps({
               "shard": shard, "shards": count, "all_parents": names, "all_scopes": scopes,
               "parents": ordinary, "scopes": selected_scopes}, indent=2))
-          deadline = time.monotonic() + 13 * 60
+          # Keep all batches/coverage mandatory. Leave measured runner
+          # variance headroom above the ~13m source phase; the 20m job
+          # limit also includes tool setup and binary compilation.
+          deadline = time.monotonic() + 18 * 60
           def run_batch(item):
               index, group = item
               path = evidence / f"adversarial-tests-{index+1}.jsonl"
