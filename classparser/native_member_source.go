@@ -1580,6 +1580,12 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	}
 	if child := c.nativeMemberCurrent; child != nil && !child.static {
 		ctx.SourceMemberDelegation = func(owner, desc string, pc int, args []any) (string, bool) {
+			// A nonstatic caller may invoke a private root/static constructor.
+			// Its own enclosing capture was separately proved and regenerated;
+			// the target packet drops only the original unused marker.
+			if source, known := nativeRootBridgeSourceDelegation(p, c.obj, ctx, binding, owner, desc, pc, args); known {
+				return source, true
+			}
 			name := strings.ReplaceAll(owner, ".", "/")
 			targetClass := p.allocationClass(name)
 			if targetClass == nil || targetClass.static {

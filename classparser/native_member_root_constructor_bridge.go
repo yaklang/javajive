@@ -45,6 +45,7 @@ func (p *nativeMemberFamily) bridgeOwners() map[string]map[string]*nativeConstru
 }
 
 type nativeRootBridgeDelegation struct {
+	caller                    *ClassObject
 	owner, descriptor, target string
 	pc                        int
 }
@@ -53,25 +54,40 @@ func nativeRootBridgeDelegationKey(owner, descriptor string) string {
 	return owner + "\x00" + descriptor
 }
 
-// This capability covers a static named member's initial SUPER call into the
-// root or another owned static member. Static membership does not introduce
-// an enclosing-instance word, but private access still needs the same lexical
+// This capability covers a named member's initial SUPER call into the root
+// or another owned static member. The target has no enclosing-instance word.
+// A nonstatic caller separately proves its original capture before delegating;
+// neither that caller capture nor lexical access changes the target packet.
+// Private access still needs the same lexical
 // transaction and original unused-marker certificate as a root constructor.
 // The existing symbolic packet interpreter proves original uninitialized THIS,
 // exact parameter origins and the target descriptor. Arbitrary allocations,
-// anonymous callers and nonstatic captures require their own projection proof.
+// anonymous callers and nonstatic target captures require their own proof.
 func (c *ClassObjectDumper) proveNativeRootBridgeDelegations(p *nativeMemberFamily) bool {
 	p.rootBridgeDelegations = map[string]*nativeRootBridgeDelegation{}
 	metadata := c.buildInvocationMetadata()
 	for owner, child := range p.children {
 		targetOwner := child.object.GetSupperClassName()
 		parent := p.children[targetOwner]
-		if !child.static || targetOwner != p.owner && (parent == nil || !parent.static) {
+		if targetOwner != p.owner && (parent == nil || !parent.static) {
 			continue
 		}
 		bridges := p.constructorBridges(targetOwner)
 		if len(bridges) == 0 {
 			continue
+		}
+		var original *nativeMemberClass
+		if !child.static {
+			// Reconstruct the capture and constructor from the original named
+			// declaration graph. A cached capture PC or source role alone cannot
+			// turn an ordinary parameter into this caller's lexical enclosing word.
+			if p.lexicalObjects[owner] != child.object || p.lexicalObjects[child.owner] == nil {
+				return false
+			}
+			original = nativeMemberProofWithDeclarations(child.object, p.lexicalObjects[child.owner], c.Work, child.accessBridges, p.lexicalObjects, c.nativeAnnotationDeclarationResolver(), metadata)
+			if original == nil || original.static || original.owner != child.owner || original.name != child.name || original.flags != child.flags || original.field != child.field {
+				return false
+			}
 		}
 		for _, method := range child.object.Methods {
 			name, nok := sourceBridgeUTF8(child.object, method.NameIndex)
@@ -102,7 +118,29 @@ func (c *ClassObjectDumper) proveNativeRootBridgeDelegations(p *nativeMemberFami
 					return false
 				}
 				ops := constructorMotionOps(d)
-				next, call := constructorMotionDelegation(child.object, ops, 0, params, constructorParameterSlots(params), metadata)
+				start := 0
+				if original != nil {
+					actual, cached := original.constructors[desc], child.constructors[desc]
+					if actual == nil || cached == nil || actual.descriptor != cached.descriptor || actual.sourceDescriptor != cached.sourceDescriptor || actual.capturePC != cached.capturePC || actual.delegatePC != cached.delegatePC || actual.delegateOwner != cached.delegateOwner || actual.delegateDescriptor != cached.delegateDescriptor {
+						return false
+					}
+					if actual.capturePC < 0 {
+						// A THIS chain keeps its own physical enclosing argument;
+						// only its terminal constructor records a SUPER capability.
+						continue
+					}
+					start = -1
+					for i, op := range ops {
+						if int(op.CurrentOffset) == actual.capturePC {
+							start = i + 1
+							break
+						}
+					}
+					if start < 0 {
+						return false
+					}
+				}
+				next, call := constructorMotionDelegation(child.object, ops, start, params, constructorParameterSlots(params), metadata)
 				if call == nil {
 					continue
 				}
@@ -126,7 +164,7 @@ func (c *ClassObjectDumper) proveNativeRootBridgeDelegations(p *nativeMemberFami
 				if p.rootBridgeDelegations[key] != nil {
 					return false
 				}
-				p.rootBridgeDelegations[key] = &nativeRootBridgeDelegation{owner: targetOwner, descriptor: call.Description, target: bridge.target, pc: int(ops[next-1].CurrentOffset)}
+				p.rootBridgeDelegations[key] = &nativeRootBridgeDelegation{caller: child.object, owner: targetOwner, descriptor: call.Description, target: bridge.target, pc: int(ops[next-1].CurrentOffset)}
 			}
 		}
 	}
@@ -138,7 +176,7 @@ func (p *nativeMemberFamily) rootBridgeDelegation(obj *ClassObject, name, descri
 		return nil
 	}
 	plan := p.rootBridgeDelegations[nativeRootBridgeDelegationKey(obj.GetClassName(), descriptor)]
-	if plan == nil || plan.owner != targetOwner || plan.descriptor != targetDescriptor || plan.pc != pc {
+	if plan == nil || plan.caller != obj || plan.owner != targetOwner || plan.descriptor != targetDescriptor || plan.pc != pc {
 		return nil
 	}
 	return plan
