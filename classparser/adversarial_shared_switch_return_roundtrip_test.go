@@ -30,3 +30,13 @@ func TestAdversarialConditionalSwitchSharedTerminalReturnRoundTrip(t *testing.T)
 		})
 	}
 }
+
+func TestAdversarialConditionalSwitchSharedReturnWithAlternateEffectsRoundTrip(t *testing.T) {
+	fixture := strings.Replace(sharedSwitchReturnFixture, "}}\n  return make", "}}else{trace+=\"E\";}\n  return make", 1)
+	fixture = strings.Replace(fixture, `effects=op==45?"CPRM":"CRM"`, `effects=op==45?"CPRM":"CERM"`, 1)
+	for _, owner := range []string{"UnarySharedTail", "RenamedUnaryTail"} {
+		t.Run(owner, func(t *testing.T) {
+			testNativePrivateSetterFixture(t, strings.ReplaceAll(fixture, "UnarySharedTail", owner), owner, "UnarySharedDriver", "72:shared-switch:terminal-return:effects\n")
+		})
+	}
+}

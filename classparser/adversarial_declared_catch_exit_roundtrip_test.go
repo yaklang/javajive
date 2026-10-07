@@ -23,7 +23,7 @@ func TestAdversarialDeclaredCheckedCatchExitNeedsNoInheritedHelperRoundTrip(t *t
 	testSourceTargetReleaseFamilyFixture(t, declaredCatchExitFixture, "DeclaredCatchOwner", "DeclaredCatchDriver", "5:declared-catch:identity:once\n", "8", []int{8, 16})
 }
 
-func TestDeclaredCheckedCatchExitWithoutDeclarationStillRequiresHelperNamespace(t *testing.T) {
+func TestNativeDeclaredCheckedCatchExitWithoutDeclarationStillRequiresHelperNamespace(t *testing.T) {
 	files := nativeCompileClasses(t, declaredCatchExitFixture)
 	obj, err := Parse(files["DeclaredCatchOwner.class"])
 	if err != nil {

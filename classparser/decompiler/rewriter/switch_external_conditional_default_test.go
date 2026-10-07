@@ -8,7 +8,7 @@ import (
 )
 
 func TestSharedSwitchDefaultRequiresExactEnclosingConditionalExit(t *testing.T) {
-	for _, variant := range []string{"original", "same protection", "different protection", "missing owner pc", "missing target pc", "back edge", "owned default", "foreign condition", "hidden", "encoded", "loop", "catch", "try anchor", "ordinary predecessor"} {
+	for _, variant := range []string{"original", "same protection", "effect before shared exit", "certified return", "unproved return", "competing normal exit", "oversized boundary", "different protection", "missing owner pc", "missing target pc", "back edge", "owned default", "foreign condition", "hidden", "encoded", "loop", "catch", "try anchor", "ordinary predecessor"} {
 		t.Run(variant, func(t *testing.T) {
 			root := jumpTestNode("root")
 			condition := core.NewNode(&statements.ConditionStatement{})
@@ -21,6 +21,28 @@ func TestSharedSwitchDefaultRequiresExactEnclosingConditionalExit(t *testing.T) 
 			condition.AddNext(target)
 			owner.AddNext(target)
 			switch variant {
+			case "effect before shared exit":
+				pre := jumpTestNode("alternateEffect()")
+				condition.ReplaceNextSliceKeepOrder(target, []*core.Node{pre})
+				pre.AddNext(target)
+			case "certified return", "unproved return":
+				ret := core.NewNode(&statements.ReturnStatement{OriginPC: 20, HasOriginPC: variant == "certified return"})
+				ret.OriginPC, ret.HasOriginPC = 20, true
+				owner.AddNext(ret)
+				ret.AddNext(core.NewNode(&statements.MiddleStatement{Flag: "end"}))
+			case "competing normal exit":
+				competitor := jumpTestNode("otherContinuation()")
+				condition.AddNext(competitor)
+				owner.AddNext(competitor)
+			case "oversized boundary":
+				owner.RemoveNext(target)
+				cursor := owner
+				for i := 0; i < 257; i++ {
+					next := jumpTestNode("effect()")
+					cursor.AddNext(next)
+					cursor = next
+				}
+				cursor.AddNext(target)
 			case "same protection", "different protection":
 				root.HasProtectedRange = true
 				root.ProtectedStartPC, root.ProtectedEndPC = 5, 40
@@ -52,10 +74,10 @@ func TestSharedSwitchDefaultRequiresExactEnclosingConditionalExit(t *testing.T) 
 			}
 			manager := NewRootStatementManager(root)
 			manager.DominatorMap = GenerateDominatorTree(root)
-			if got := externalConditionalSwitchDefault(manager, owner, target); got != (variant == "original" || variant == "same protection") {
+			if got := externalSharedSwitchDefaultContinuation(manager, owner, target); got != (variant == "original" || variant == "same protection" || variant == "effect before shared exit" || variant == "certified return") {
 				t.Fatalf("shared default certificate=%v", got)
 			}
-			if condition.Next[0] != owner || owner.Next[0] != target {
+			if condition.Next[0] != owner || (variant != "oversized boundary" && owner.Next[0] != target) {
 				t.Fatal("certificate changed the original graph")
 			}
 		})

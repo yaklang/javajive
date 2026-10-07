@@ -326,7 +326,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	// even when all explicit cases return and none contributes a break edge.
 	// Keep the common expression after the condition; do not copy its effects
 	// into a default arm or let dominance-based collection discard it.
-	if def := caseMap.GetMust(switchLabel{Default: true}); externalConditionalSwitchDefault(manager, node, def) {
+	if def := caseMap.GetMust(switchLabel{Default: true}); externalSharedSwitchDefaultContinuation(manager, node, def) {
 		mergeNode = def
 		node.SwitchEmptyDefaultMerge = true
 	}
@@ -465,23 +465,95 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	return nil
 }
 
-func externalConditionalSwitchDefault(manager *RewriteManager, owner, target *core.Node) bool {
+func externalSharedSwitchDefaultContinuation(manager *RewriteManager, owner, target *core.Node) bool {
 	if manager == nil || owner == nil || target == nil || !owner.HasOriginPC || !target.HasOriginPC || target.OriginPC <= owner.OriginPC ||
 		target.HideNext != nil || target.IsCatchStart || target.IsTryCatch || target.IsCircle || target.IsInCircle ||
 		len(target.EncodedJumps) != 0 || utils.IsDominate(manager.DominatorMap, owner, target) ||
 		!sameProtectedMembership(manager.RootNode, owner, target) {
 		return false
 	}
-	for _, source := range target.Source {
-		if _, condition := source.Statement.(*statements.ConditionStatement); !condition || !utils.IsDominate(manager.DominatorMap, source, owner) || encodedJumpTo(source, target) {
+	external := false
+	for _, predecessor := range target.Source {
+		if predecessor == owner || utils.IsDominate(manager.DominatorMap, owner, predecessor) {
 			continue
 		}
-		left, right := ifBranchNodes(source)
-		if left != right && (left == target || right == target) {
-			return true
+		if encodedJumpTo(predecessor, target) {
+			return false
+		}
+		// Both paths still belong to a common enclosing condition. Walk
+		// original predecessors without moving the alternate arm's effects.
+		ancestors := []*core.Node{predecessor}
+		seen := map[*core.Node]bool{}
+		owned := false
+		for len(ancestors) != 0 && len(seen) < 256 {
+			if len(ancestors) > 1024 {
+				return false
+			}
+			n := ancestors[len(ancestors)-1]
+			ancestors = ancestors[:len(ancestors)-1]
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			if _, conditional := n.Statement.(*statements.ConditionStatement); conditional &&
+				utils.IsDominate(manager.DominatorMap, n, owner) && utils.IsDominate(manager.DominatorMap, n, predecessor) && utils.IsDominate(manager.DominatorMap, n, target) {
+				owned = true
+				break
+			}
+			ancestors = append(ancestors, n.Source...)
+		}
+		if !owned {
+			return false
+		}
+		external = true
+	}
+	if !external {
+		return false
+	}
+	// Certify the whole normal-exit boundary rather than requiring the outer
+	// conditional to jump here directly. Its other arm may perform effects
+	// before reaching this same original expression. Every switch-owned path
+	// must either reach this boundary or terminate the method; no competing
+	// normal destination, loop transfer or hidden cleanup can be factored out.
+	queue := []*core.Node{owner}
+	seen := map[*core.Node]bool{}
+	for len(queue) != 0 {
+		if len(queue) > 1024 {
+			return false
+		}
+		source := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if seen[source] {
+			continue
+		}
+		if len(seen) >= 256 || source.HideNext != nil || len(source.EncodedJumps) != 0 || source.IsCatchStart || source.IsTryCatch || source.IsCircle || source.IsInCircle {
+			return false
+		}
+		seen[source] = true
+		terminal := false
+		switch st := source.Statement.(type) {
+		case *statements.ReturnStatement:
+			terminal = st.HasOriginPC && source.HasOriginPC && st.OriginPC == source.OriginPC
+		case *statements.CustomStatement:
+			terminal = st.ThrownValue != nil && st.HasOriginPC && source.HasOriginPC && st.OriginPC == source.OriginPC
+		}
+		for _, next := range source.Next {
+			if next == target {
+				if terminal {
+					return false
+				}
+				continue
+			}
+			if terminal && IsEndNode(next) {
+				continue
+			}
+			if terminal || !utils.IsDominate(manager.DominatorMap, owner, next) || IsEndNode(next) {
+				return false
+			}
+			queue = append(queue, next)
 		}
 	}
-	return false
+	return true
 }
 
 // A terminal RETURN shared with a path before the switch is not dominated by
