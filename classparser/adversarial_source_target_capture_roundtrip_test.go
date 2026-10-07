@@ -1,0 +1,113 @@
+package javaclassparser
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// Source version changes private access lowering; it does not change Java's
+// enclosing-instance initialization before an observable superclass call.
+const sourceTargetCaptureFixture = `class SourceCaptureOwner {
+ final Object token; SourceCaptureOwner(Object t){token=t;}
+ public class Child extends CaptureObserver { public Child(int n){super(n);} Object enclosing(){return SourceCaptureOwner.this;} }
+ Object member(int n){return new Child(n);}
+ Object anonymous(int n){return new CaptureObserver(n){Object enclosing(){return SourceCaptureOwner.this;}};}
+}
+abstract class CaptureObserver {
+ final Object observed; final int word;
+ CaptureObserver(int n){CaptureEffects.trace+="P";observed=enclosing();word=n;CaptureEffects.published=this;if(CaptureEffects.fail)throw CaptureEffects.error;}
+ abstract Object enclosing();
+}
+class CaptureEffects {static boolean fail;static Object published;static String trace;static final RuntimeException error=new RuntimeException("identity");}
+class CaptureDriver {public static void main(String[]args)throws Exception{int rows=0;for(int n:new int[]{Integer.MIN_VALUE,-1,0,1,Integer.MAX_VALUE})for(boolean fail:new boolean[]{false,true})for(boolean anon:new boolean[]{false,true}){Object token=new Object();SourceCaptureOwner owner=new SourceCaptureOwner(token);CaptureEffects.trace="";CaptureEffects.fail=fail;CaptureEffects.published=null;try{CaptureObserver value=(CaptureObserver)(anon?owner.anonymous(n):owner.member(n));if(fail||value.enclosing()!=owner||value.observed!=owner||value.word!=n||CaptureEffects.published!=value||!CaptureEffects.trace.equals("P"))throw new AssertionError("capture/word/effect/identity");}catch(RuntimeException e){CaptureObserver value=(CaptureObserver)CaptureEffects.published;if(!fail||e!=CaptureEffects.error||value==null||value.enclosing()!=owner||value.observed!=owner||value.word!=n||!CaptureEffects.trace.equals("P"))throw new AssertionError("publication/exception/order",e);}rows++;}System.out.println(rows+":source-target:capture:observation:publication:exception");}}`
+
+func TestAdversarialSourceTargetPreservesObservableCaptureRoundTrip(t *testing.T) {
+	testSourceTargetOriginalFamilyFixture(t, sourceTargetCaptureFixture, "SourceCaptureOwner", "CaptureDriver", "20:source-target:capture:observation:publication:exception\n")
+}
+
+func TestAdversarialSourceTargetPrivateBridgePreservesObservableCaptureRoundTrip(t *testing.T) {
+	fixture := strings.Replace(sourceTargetCaptureFixture, "public Child(int", "private Child(int", 1)
+	testSourceTargetOriginalFamilyFixture(t, fixture, "SourceCaptureOwner", "CaptureDriver", "20:source-target:capture:observation:publication:exception\n")
+}
+
+func TestAdversarialSourceTargetEmptyMarkerPreservesNestedAnonymousRoundTrip(t *testing.T) {
+	testSourceTargetOriginalFamilyFixture(t, nativeEmptyArtifactForestFixture, "ArtifactForestOwner", "ArtifactForestDriver", "125:marker:named:anonymous:overflow\n")
+}
+
+func testSourceTargetOriginalFamilyFixture(t *testing.T, fixture, originalOwner, driver, expected string) {
+	t.Helper()
+	javac, java := t04Tools(t)
+	for _, owner := range []string{originalOwner, "Alternate" + originalOwner} {
+		for _, debug := range []string{"none", "source,lines,vars"} {
+			t.Run(owner+"/"+debug, func(t *testing.T) {
+				files := nativeCompileSourceReleaseClasses(t, map[string]string{owner + ".java": strings.ReplaceAll(fixture, originalOwner, owner)}, debug, "8")
+				original := t.TempDir()
+				for name, raw := range files {
+					if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				want := t04RunJava(t, java, original, driver)
+				if want != expected {
+					t.Fatal(want)
+				}
+				for _, target := range []int{8, 11} {
+					for _, policy := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+						t.Run(strconv.Itoa(target)+"/"+policy, func(t *testing.T) {
+							if policy == "no-source-rewrites" {
+								t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")
+							}
+							if policy == "no-core-cleanups" {
+								t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
+							}
+							archive := filepath.Join(t.TempDir(), "original.jar")
+							if err := os.WriteFile(archive, t23Zip(t, files), 0600); err != nil {
+								t.Fatal(err)
+							}
+							z, err := NewJarFSFromLocalWithSourceVersion(archive, target, nil)
+							if err != nil {
+								t.Fatal(err)
+							}
+							defer z.Close()
+							out := t.TempDir()
+							var sources []string
+							for name, raw := range files {
+								if !strings.HasPrefix(name, owner) {
+									if err := os.WriteFile(filepath.Join(out, name), raw, 0600); err != nil {
+										t.Fatal(err)
+									}
+									continue
+								}
+								src, err := z.ReadFile(name)
+								if err != nil || strings.Contains(string(src), DecompileStubMarker) {
+									t.Fatalf("source %s:%v\n%s", name, err, src)
+								}
+								path := filepath.Join(out, strings.TrimSuffix(name, ".class")+".java")
+								if err := os.WriteFile(path, src, 0600); err != nil {
+									t.Fatal(err)
+								}
+								sources = append(sources, path)
+							}
+							args := append([]string{"-proc:none", "--release", strconv.Itoa(target), "-cp", out, "-d", out}, sources...)
+							if log, err := exec.Command(javac, args...).CombinedOutput(); err != nil {
+								t.Fatalf("compile:%v\n%s", err, log)
+							}
+							if got := t04RunJava(t, java, out, driver); got != want {
+								t.Fatalf("got %q expected %q", got, want)
+							}
+							for name := range files {
+								if _, err := os.Stat(filepath.Join(out, name)); err != nil {
+									t.Fatalf("original class disappeared:%s:%v", name, err)
+								}
+							}
+						})
+					}
+				}
+			})
+		}
+	}
+}

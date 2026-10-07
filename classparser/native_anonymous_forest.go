@@ -33,7 +33,7 @@ func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemberFamily) *nativeAnonymousForest {
-	if c.foldSiblingResolver == nil || !nativeAnonymousForestVersion(c.obj, c.Work) || !nativeMemberTopLevelEvidence(c.obj, c.Work) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+	if c.foldSiblingResolver == nil || !nativeAnonymousForestVersion(c.obj, c.Work) || !nativeMemberTopLevelEvidence(c.obj, c.Work) {
 		return nil
 	}
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {

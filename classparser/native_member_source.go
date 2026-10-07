@@ -52,6 +52,9 @@ type nativeMemberFamily struct {
 	failed                 bool
 	bridgeCalls            map[string]int
 	emptyMarkers           map[string]*ClassObject
+	// Newer compilers use nestmates and need not emit an unused access marker.
+	// Keep its original class as a separate source unit instead of consuming it.
+	retainEmptyMarkers bool
 }
 
 // Source ownership comes from one original self row, never dollar spelling.
@@ -545,7 +548,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 }
 
 func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
-	if c.foldSiblingResolver == nil || !nativeMemberVersionMetadata(c.obj, c.Work) || !nativeSourceBinaryName(c.obj.GetClassName()) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+	if c.foldSiblingResolver == nil || !nativeMemberVersionMetadata(c.obj, c.Work) || !nativeSourceBinaryName(c.obj.GetClassName()) {
 		return nil
 	}
 	if _, _, _, nested := originalMemberOwner(c.obj); nested {
@@ -560,7 +563,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if !nativeMemberTopLevelEvidence(c.obj, c.Work) {
 		return nil
 	}
-	p := &nativeMemberFamily{owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}}
+	p := &nativeMemberFamily{owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, retainEmptyMarkers: c.options.TargetSourceVersion >= 11}
 	resolveDeclaration := c.nativeAnnotationDeclarationResolver()
 	queue := []*ClassObject{c.obj}
 	for cursor := 0; cursor < len(queue); cursor++ {
@@ -598,7 +601,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 				reader.Work = c.Work
 				reader.foldSiblingResolver = c.foldSiblingResolver
 				reader.declarationResolver = c.declarationResolver
-				bridges := reader.nativeConstructorAccessBridges()
+				bridges := reader.originalNativeConstructorAccessBridges()
 				child := nativeMemberProofWithDeclarations(obj, enclosing, c.Work, bridges, p.lexicalObjects, resolveDeclaration, reader.buildInvocationMetadata())
 				rowName, rowKnown := sourceBridgeUTF8(enclosing, row.InnerNameIndex)
 				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags {
@@ -646,7 +649,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 		}
 		child.sourceName = source
 	}
-	p.rootAccessBridges = c.nativeConstructorAccessBridges()
+	p.rootAccessBridges = c.originalNativeConstructorAccessBridges()
 	if !nativeMemberCollectPrivateGettersResolved(p, c.nativeAnnotationDeclarationResolver(), c.Work) {
 		return nil
 	}

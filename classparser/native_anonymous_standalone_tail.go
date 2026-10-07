@@ -14,7 +14,7 @@ import (
 // ownership and original constructor packet are independently representable,
 // and no symbolic dependency borrows a now-unnameable prefix type.
 func (c *ClassObjectDumper) nativeAnonymousStandaloneTailClosed(p *nativeAnonymousFamily, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, access map[string]*nativeConstructorAccessBridge) bool {
-	if p == nil || c.obj == nil || p.owner != c.obj.GetClassName() || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+	if p == nil || c.obj == nil || p.owner != c.obj.GetClassName() {
 		return false
 	}
 	if len(p.standalone) != 0 && !nativeAnonymousForestVersion(c.obj, c.Work) {

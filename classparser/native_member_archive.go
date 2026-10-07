@@ -487,6 +487,9 @@ func (z *JarFS) nativeMemberSource(obj *ClassObject) ([]byte, bool) {
 		return []byte("// original member body owned by " + entry.family.owner + "; javac regenerates its binary class\n"), true
 	}
 	if entry.family.emptyMarkers[obj.GetClassName()] != nil {
+		if entry.family.retainEmptyMarkers {
+			return nil, false
+		}
 		return []byte("// original private-constructor marker body owned by " + entry.family.owner + "; javac regenerates its binary class\n"), true
 	}
 	if entry.family.enumSwitchTables[obj.GetClassName()] != nil {

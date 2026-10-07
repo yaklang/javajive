@@ -21,9 +21,18 @@ type nativeConstructorAccessBridge struct {
 }
 
 func (c *ClassObjectDumper) nativeConstructorAccessBridges() map[string]*nativeConstructorAccessBridge {
+	if c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+		return map[string]*nativeConstructorAccessBridge{}
+	}
+	return c.originalNativeConstructorAccessBridges()
+}
+
+// Original descriptor evidence is independent of the compiler used to emit
+// source. Callers must separately prove that compiler's regeneration behavior.
+func (c *ClassObjectDumper) originalNativeConstructorAccessBridges() map[string]*nativeConstructorAccessBridge {
 	result := map[string]*nativeConstructorAccessBridge{}
 	obj := c.obj
-	if !nativeAccessorVersion(obj, c.Work) || c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
+	if !nativeAccessorVersion(obj, c.Work) {
 		return result
 	}
 	constructors := map[string][]*MemberInfo{}

@@ -506,7 +506,7 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 	} else if nativeMemberTopLevelEvidence(c.obj, c.Work) {
 		assertionRoot = c.obj.GetClassName()
 	}
-	access := c.nativeConstructorAccessBridges()
+	access := c.originalNativeConstructorAccessBridges()
 	metadata := c.buildInvocationMetadata()
 	names := map[string]bool{}
 	for _, a := range c.obj.Attributes {
@@ -600,7 +600,7 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 	return p
 }
 func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamily, members *nativeMemberFamily, forest *nativeAnonymousForest) *nativeAnonymousFamily {
-	if p == nil || !c.nativeAnonymousStandaloneTailClosed(p, members, forest, c.buildInvocationMetadata(), c.nativeConstructorAccessBridges()) {
+	if p == nil || !c.nativeAnonymousStandaloneTailClosed(p, members, forest, c.buildInvocationMetadata(), c.originalNativeConstructorAccessBridges()) {
 		return nil
 	}
 	allNames := map[string]bool{}
