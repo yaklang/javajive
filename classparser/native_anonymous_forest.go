@@ -322,7 +322,7 @@ func nativeAnonymousForestOpcodeClosure(forest *nativeAnonymousForest, work *wor
 						if kind == core.OP_GETFIELD && forest.readPCs[owner][mn+md][int(op.CurrentOffset)] {
 							continue
 						}
-						if kind == core.OP_INVOKEVIRTUAL && nativeAnonymousInheritedCall(forest, object, op, work) {
+						if kind == core.OP_INVOKEVIRTUAL && (nativeAnonymousInheritedCall(forest, object, op, work) || nativeAnonymousDeclaredCall(forest, object, mn+md, op, work)) {
 							continue
 						}
 						if kind != core.OP_INVOKESPECIAL || symbol.Member != "<init>" || group == nil || group.children[symbol.Name] != child || symbol.Description != child.descriptor || child.invokePC != int(op.CurrentOffset) {
