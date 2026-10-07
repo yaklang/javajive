@@ -26,7 +26,7 @@ func TestNativeSourceTransactionAtomicFailureAndReadOrder(t *testing.T) {
 					input["CycleScopeB$Value.class"] = input["CycleScopeA$Value.class"]
 				case "unrepresentable participant":
 					object, _ := Parse(input["CycleScopeB.class"])
-					object.MajorVersion = 53
+					object.MajorVersion = 55
 					input["CycleScopeB.class"] = object.Bytes()
 				}
 				z := nativeArchive(t, input)

@@ -13,14 +13,14 @@ func TestNativeLegacyForestFormatRejectsUnprovedFeatures(t *testing.T) {
 		`interface VersionInterface{default int value(){return 7;}}class VersionOwner implements VersionInterface{int call(){return VersionInterface.super.value();}}`,
 	} {
 		files := nativeCompileClasses(t, source)
-		for _, major := range []uint16{48, 49, 50, 51, 52, 53} {
+		for _, major := range []uint16{48, 49, 50, 51, 52, 53, 54, 55} {
 			t.Run(fmt.Sprint(major, source), func(t *testing.T) {
 				obj, e := Parse(files["VersionOwner.class"])
 				if e != nil {
 					t.Fatal(e)
 				}
 				obj.MajorVersion = major
-				if got := nativeAnonymousForestVersion(obj, nil); got != (major == 52) {
+				if got := nativeAnonymousForestVersion(obj, nil); got != (major >= 52 && major <= 54) {
 					t.Fatalf("pre52 interface static/special opcode admitted=%v", got)
 				}
 			})

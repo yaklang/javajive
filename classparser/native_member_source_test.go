@@ -14,7 +14,7 @@ const nativeMemberProofFixture = `class NativeArchiveOwner {class Child {Child()
 
 func TestNativeMemberProofRequiresOriginalCaptureAndConstructorGraph(t *testing.T) {
 	files := nativeCompileClasses(t, nativeMemberProofFixture)
-	for _, scenario := range []string{"original", "major53", "static", "duplicate ownership", "missing ownership", "wrong enclosing type", "capture flags", "duplicate capture", "class annotation", "method type annotation", "missing code", "duplicate code", "duplicate constructor", "wrong capture receiver", "wrong capture parameter", "small stack", "small locals", "handler before delegate", "this cycle", "mutated enclosing parameter", "extra capture store", "budget", "canceled"} {
+	for _, scenario := range []string{"original", "major55", "static", "duplicate ownership", "missing ownership", "wrong enclosing type", "capture flags", "duplicate capture", "class annotation", "method type annotation", "missing code", "duplicate code", "duplicate constructor", "wrong capture receiver", "wrong capture parameter", "small stack", "small locals", "handler before delegate", "this cycle", "mutated enclosing parameter", "extra capture store", "budget", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {
 			obj, e := Parse(append([]byte(nil), files["NativeArchiveOwner$Child.class"]...))
 			if e != nil {
@@ -54,8 +54,8 @@ func TestNativeMemberProofRequiresOriginalCaptureAndConstructorGraph(t *testing.
 			}
 			var work *workbudget.Budget
 			switch scenario {
-			case "major53":
-				obj.MajorVersion = 53
+			case "major55":
+				obj.MajorVersion = 55
 			case "static":
 				table.Classes[0].InnerClassAccessFlags |= 8
 			case "duplicate ownership":

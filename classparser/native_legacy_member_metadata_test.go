@@ -9,7 +9,7 @@ import (
 
 func TestNativeLegacyMemberMetadataRejectsUnprovedModernFeatures(t *testing.T) {
 	files := nativeCompileClasses(t, nativeMemberProofFixture)
-	for _, scenario := range []string{"original48", "original45", "unknown minor45", "unknown minor48", "major44", "major53", "class signature", "class annotation", "modern constant", "field signature", "method parameters", "method synthetic", "method bridge", "method varargs", "stack map", "opaque debug", "bad debug length", "class literal ldc", "interface static call", "invokedynamic", "budget", "canceled"} {
+	for _, scenario := range []string{"original48", "original45", "unknown minor45", "unknown minor48", "major44", "major55", "class signature", "class annotation", "modern constant", "field signature", "method parameters", "method synthetic", "method bridge", "method varargs", "stack map", "opaque debug", "bad debug length", "class literal ldc", "interface static call", "invokedynamic", "budget", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {
 			obj, err := Parse(files["NativeArchiveOwner$Child.class"])
 			if err != nil {
@@ -46,8 +46,8 @@ func TestNativeLegacyMemberMetadataRejectsUnprovedModernFeatures(t *testing.T) {
 				obj.MinorVersion = 1
 			case "major44":
 				obj.MajorVersion = 44
-			case "major53":
-				obj.MajorVersion = 53
+			case "major55":
+				obj.MajorVersion = 55
 			case "class signature":
 				obj.Attributes = append(obj.Attributes, &SignatureAttribute{})
 			case "class annotation":

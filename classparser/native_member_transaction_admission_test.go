@@ -24,7 +24,7 @@ func TestNativeSourceTransactionRequiresOriginalLocalAdmissionBeforeDiscovery(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	child.MajorVersion = 53 // independently unrepresentable by the original member profile
+	child.MajorVersion = 55 // nestmate-era source ownership remains independently unproved
 	files["AdmissionOwner$Child.class"] = child.Bytes()
 	for _, concurrent := range []bool{false, true} {
 		t.Run(map[bool]string{false: "sequential", true: "concurrent"}[concurrent], func(t *testing.T) {

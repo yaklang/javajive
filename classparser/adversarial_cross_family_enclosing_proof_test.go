@@ -146,7 +146,7 @@ func TestAdversarialCrossFamilyEnclosingSourcePublishesBothFamiliesAtomically(t 
 				}
 				if variant == "unfinished child family" {
 					obj, _ := Parse(input["BindingCurrent.class"])
-					obj.MajorVersion = 53
+					obj.MajorVersion = 55
 					input["BindingCurrent.class"] = obj.Bytes()
 				}
 				if variant == "missing child" {
