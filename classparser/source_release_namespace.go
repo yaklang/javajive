@@ -42,6 +42,7 @@ func (z *JarFS) sourceReleaseView(release int) *JarFS {
 	}
 	view := NewJarFSWithOptions(zip, z.recursiveParse)
 	view.targetSourceVersion = z.targetSourceVersion
+	view.sourceCompiler = z.sourceCompiler
 	view.archive = z.archive.clone()
 	if view.archive != nil {
 		view.archive.targetRelease = release

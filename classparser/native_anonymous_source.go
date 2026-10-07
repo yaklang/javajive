@@ -129,6 +129,17 @@ func nativeAnonymousConstructorWithDeclarations(obj *ClassObject, owner, method,
 }
 
 func nativeAnonymousConstructorRepresentationProof(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, standalone bool, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
+	flags := uint16(0x0020)
+	if !standalone && !nativeAnonymousSelfAccessFlags(obj, 0, work) {
+		return nil
+	}
+	if standalone {
+		flags = 0x0030
+	}
+	return nativeAnonymousConstructorWithFlags(obj, owner, method, assertionRoot, work, members, forest, metadata, flags, access...)
+}
+
+func nativeAnonymousConstructorWithFlags(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, flags uint16, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
 	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
@@ -144,7 +155,7 @@ func nativeAnonymousConstructorRepresentationProof(obj *ClassObject, owner, meth
 			}
 		}
 	}
-	if !standalone && obj.AccessFlags != 0x0020 || standalone && obj.AccessFlags != 0x0030 {
+	if obj.AccessFlags != flags {
 		return nil
 	}
 	c := &nativeAnonymousClass{object: obj, fields: map[string]int{}, capturePCs: map[string]int{}, method: method}
@@ -591,7 +602,7 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 				return nil
 			}
 		}
-		child := nativeAnonymousConstructorWithDeclarations(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, access)
+		child := c.nativeAnonymousConstructorForCompiler(obj, owner, method, assertionRoot, members, forest, metadata, access)
 		if child == nil || child.assertions != nil && c.options.TargetSourceVersion != 0 && c.options.TargetSourceVersion != 8 {
 			p.standalone[name] = obj
 			continue

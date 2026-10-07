@@ -85,7 +85,7 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 				return
 			}
 		}
-		d := NewClassObjectDumper(object)
+		d := z.nativeMemberReader(object)
 		d.foldSiblingResolver = z.enumSiblingResolver()
 		d.declarationResolver = z.declarationResolver
 		d.nativeMemberLookup = z.nativeMemberLookup

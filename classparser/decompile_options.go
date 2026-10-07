@@ -15,6 +15,30 @@ import (
 // equivalent. Compatibility retains that pipeline and reports each applied rule.
 type DecompileMode string
 
+// SourceCompilerProfile names the compiler lowering whose anonymous-class and
+// access-bridge metadata must be regenerated. A language --release alone does
+// not distinguish a native javac8 compiler from modern javac --release 8.
+type SourceCompilerProfile string
+
+const (
+	ModernJavac  SourceCompilerProfile = "modern-javac"
+	NativeJavac8 SourceCompilerProfile = "javac8"
+)
+
+func (p SourceCompilerProfile) validate(sourceVersion int) error {
+	switch p {
+	case "", ModernJavac:
+		return nil
+	case NativeJavac8:
+		if sourceVersion == 8 {
+			return nil
+		}
+		return fmt.Errorf("javac8 compiler profile requires explicit source version 8")
+	default:
+		return fmt.Errorf("unknown source compiler profile %q", p)
+	}
+}
+
 const (
 	Precision     DecompileMode = "precision"
 	Compatibility DecompileMode = "compatibility"
@@ -55,6 +79,11 @@ type DecompileOptions struct {
 	// as the latest known Java semantics.
 	TargetSourceVersion int
 
+	// SourceCompiler selects metadata regeneration, not a runtime or a
+	// Multi-Release namespace. Empty retains modern javac behavior. javac8
+	// requires TargetSourceVersion=8 and an actual javac8 rebuild oracle.
+	SourceCompiler SourceCompilerProfile
+
 	// EnableShadowIR builds a read-only MethodIR snapshot after SemanticCFG.
 	// The old printer remains the default source path. Default false.
 	EnableShadowIR bool
@@ -91,12 +120,13 @@ type DecompileResult struct {
 // EffectiveConfig is the request-local snapshot of policy actually used.
 // complete does not mean compile, JVM verify, or behavioral equivalence.
 type EffectiveConfig struct {
-	Mode               DecompileMode `json:"mode"`
-	MaxAnalysisUpdates int           `json:"max_analysis_updates"`
-	TargetRelease      int           `json:"target_release"`
-	Limits             Limits        `json:"limits"`
-	Env                []string      `json:"env,omitempty"`
-	Resolver           bool          `json:"resolver"`
+	Mode               DecompileMode         `json:"mode"`
+	MaxAnalysisUpdates int                   `json:"max_analysis_updates"`
+	TargetRelease      int                   `json:"target_release"`
+	Limits             Limits                `json:"limits"`
+	Env                []string              `json:"env,omitempty"`
+	Resolver           bool                  `json:"resolver"`
+	SourceCompiler     SourceCompilerProfile `json:"source_compiler,omitempty"`
 }
 
 // DecompileWithOptions provides an explicit policy and degradation evidence.
@@ -119,6 +149,9 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 	}
 	if options.Mode != Precision && options.Mode != Compatibility {
 		return result, nil, fmt.Errorf("unknown decompile mode %q", options.Mode)
+	}
+	if err := options.SourceCompiler.validate(options.TargetSourceVersion); err != nil {
+		return result, nil, err
 	}
 	defer func() {
 		if v := recover(); v != nil {

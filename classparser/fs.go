@@ -21,6 +21,7 @@ import (
 type JarFS struct {
 	// Immutable compilation profile, distinct from Multi-Release lookup.
 	targetSourceVersion      int
+	sourceCompiler           SourceCompilerProfile
 	sourceOwnership          *sourceOwnershipCache
 	releaseViewsMu           sync.Mutex
 	releaseViews             map[int]*JarFS
@@ -61,8 +62,18 @@ func NewJarFSFromLocalWithResolver(path string, resolve func(string) ([]byte, bo
 // compilers do not regenerate Java8 access bridges and their marker classes.
 // This is independent of which Multi-Release archive entries are selected.
 func NewJarFSFromLocalWithSourceVersion(path string, target int, resolve func(string) ([]byte, bool)) (*JarFS, error) {
+	return NewJarFSFromLocalWithCompilerProfile(path, target, "", resolve)
+}
+
+// NewJarFSFromLocalWithCompilerProfile fixes the source language and compiler
+// lowering for the filesystem's lifetime. It does not select a JDK executable;
+// callers must rebuild using the chosen compiler profile.
+func NewJarFSFromLocalWithCompilerProfile(path string, target int, compiler SourceCompilerProfile, resolve func(string) ([]byte, bool)) (*JarFS, error) {
 	if target != 0 && (target < 8 || target > 21) {
 		return nil, fmt.Errorf("unsupported target source version %d", target)
+	}
+	if err := compiler.validate(target); err != nil {
+		return nil, err
 	}
 	zipFS, err := filesys.NewZipFSFromLocal(path)
 	if err != nil {
@@ -70,6 +81,7 @@ func NewJarFSFromLocalWithSourceVersion(path string, target int, resolve func(st
 	}
 	z := NewJarFS(zipFS)
 	z.targetSourceVersion = target
+	z.sourceCompiler = compiler
 	z.declarationResolver = resolve
 	return z, nil
 }
@@ -147,6 +159,7 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 	// non-enum, non-switch class is rendered byte-for-byte identically to the bare Dump().
 	d := NewClassObjectDumper(cf)
 	d.options.TargetSourceVersion = z.targetSourceVersion
+	d.options.SourceCompiler = z.sourceCompiler
 	if path.Clean(name) == cf.GetClassName()+".class" {
 		d.nativeMemberLookup = z.nativeMemberLookup
 	}
@@ -346,6 +359,7 @@ func (z *JarFS) getNestedJarFS(jarPath string) (*filesys.UnifiedFS, error) {
 	// 嵌套的jar也继承递归解析设置与共享预算
 	nestedJarFS := NewJarFSWithOptions(nestedZipFS, z.recursiveParse)
 	nestedJarFS.targetSourceVersion = z.targetSourceVersion
+	nestedJarFS.sourceCompiler = z.sourceCompiler
 	nestedJarFS.declarationResolver = z.declarationResolver
 	if z.archive != nil && z.archive.active {
 		nestedJarFS.archive = z.archive.nestedState()

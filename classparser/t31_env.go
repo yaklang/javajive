@@ -76,5 +76,6 @@ func effectiveConfigOf(options DecompileOptions) *EffectiveConfig {
 		Limits:             options.Limits,
 		Env:                snapshotDigest(options.EnvSnapshot),
 		Resolver:           options.Resolve != nil,
+		SourceCompiler:     options.SourceCompiler,
 	}
 }
