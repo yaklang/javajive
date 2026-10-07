@@ -69,7 +69,9 @@ func GetValueFromCP(pool []ConstantInfo, index int) values.JavaValue {
 		return convertMemberInfo(ret)
 	case *ConstantInterfaceMethodrefInfo:
 		memberInfo := ret.ConstantMemberrefInfo
-		return convertMemberInfo(&memberInfo)
+		value := convertMemberInfo(&memberInfo).(*values.JavaClassMember)
+		value.MethodOwnerKind = values.MethodOwnerInterface
+		return value
 	case *ConstantFieldrefInfo:
 		classInfo := indexFromPool(int(ret.ClassIndex)).(*ConstantClassInfo)
 		nameInfo := indexFromPool(int(classInfo.NameIndex)).(*ConstantUtf8Info)
@@ -98,6 +100,7 @@ func GetValueFromCP(pool []ConstantInfo, index int) values.JavaValue {
 			log.Errorf("parse descriptor failed:%s", descInfo.Value)
 		}
 		classIns := values.NewJavaClassMember(typeName, refNameInfo.Value, descInfo.Value, typ)
+		classIns.MethodOwnerKind = values.MethodOwnerClass
 		return classIns
 	case *ConstantClassInfo:
 		nameInfo := indexFromPool(int(ret.NameIndex)).(*ConstantUtf8Info)

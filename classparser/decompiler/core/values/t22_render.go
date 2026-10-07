@@ -58,6 +58,10 @@ func literalExactOutputBytes(j *JavaLiteral, funcCtx *class_context.ClassContext
 			s += "L"
 		}
 		return int64(len(s))
+	case types.NewJavaPrimer(types.JavaFloat).String(funcCtx):
+		return int64(len(javaFloatLiteralExpr(j.Data, funcCtx)))
+	case types.NewJavaPrimer(types.JavaDouble).String(funcCtx):
+		return int64(len(javaDoubleLiteralExpr(j.Data, funcCtx)))
 	case types.NewJavaPrimer(types.JavaChar).String(funcCtx):
 		if u, ok := javaLiteralCharUnit(j); ok {
 			return int64(JavaUnitCharLiteralLen(u))

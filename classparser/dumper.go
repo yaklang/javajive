@@ -702,6 +702,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	c.wireNativeMethodLocalSource()
 
 	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
+	funcCtx.SourceValueNameShadow = c.buildSourceValueNameShadow()
 	c.wirePrivateNestBridges()
 	c.overloadUnknownSeen = map[string]bool{}
 	funcCtx.OnOverloadUnknown = func(owner, name, descriptor string) {

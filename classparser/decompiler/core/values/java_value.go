@@ -297,9 +297,9 @@ func (j *JavaLiteral) String(funcCtx *class_context.ClassContext) string {
 		}
 		return s
 	case types.NewJavaPrimer(types.JavaFloat).String(funcCtx):
-		return javaFloatLiteralExpr(j.Data)
+		return javaFloatLiteralExpr(j.Data, funcCtx)
 	case types.NewJavaPrimer(types.JavaDouble).String(funcCtx):
-		return javaDoubleLiteralExpr(j.Data)
+		return javaDoubleLiteralExpr(j.Data, funcCtx)
 	case types.NewJavaPrimer(types.JavaChar).String(funcCtx):
 		if u, ok := javaLiteralCharUnit(j); ok {
 			return JavaUnitToCharLiteral(u)
@@ -331,22 +331,34 @@ func literalToFloat64(data any) (float64, bool) {
 	return 0, false
 }
 
-// javaFloatLiteralExpr renders a float constant as a valid Java float literal (with
-// an F suffix), handling NaN/Infinity. Mirrors the field-path renderer in dumper.go.
-func javaFloatLiteralExpr(data any) string {
+// Runtime operands can need a bit reinterpretation to preserve a NaN payload;
+// ConstantValue declarations and annotations use a separate constant renderer.
+func javaFloatLiteralExpr(data any, funcCtx *class_context.ClassContext) string {
+	if value, ok := data.(float32); ok {
+		// A float32 -> float64 -> float32 conversion can quiet a signaling
+		// word before the source renderer has recorded the original bits.
+		return javaliteral.RuntimeFloat32(value, literalTypeName(funcCtx))
+	}
 	f, ok := literalToFloat64(data)
 	if !ok {
 		return fmt.Sprint(data)
 	}
-	return javaliteral.Float32(float32(f))
+	return javaliteral.RuntimeFloat32(float32(f), literalTypeName(funcCtx))
 }
 
-func javaDoubleLiteralExpr(data any) string {
+func javaDoubleLiteralExpr(data any, funcCtx *class_context.ClassContext) string {
 	f, ok := literalToFloat64(data)
 	if !ok {
 		return fmt.Sprint(data)
 	}
-	return javaliteral.Float64(f)
+	return javaliteral.RuntimeFloat64(f, literalTypeName(funcCtx))
+}
+
+func literalTypeName(ctx *class_context.ClassContext) func(string) string {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.StaticClassOwner
 }
 
 func NewJavaLiteral(data any, typ types.JavaType) *JavaLiteral {
@@ -393,7 +405,19 @@ func NewJavaClassValue(typ types.JavaType) *JavaClassValue {
 	}
 }
 
+// MethodOwnerKind records the original CP method-reference category. A
+// Methodref requires a class owner; an InterfaceMethodref requires an interface.
+// Synthetic members with no original category remain unknown.
+type MethodOwnerKind uint8
+
+const (
+	MethodOwnerUnknown MethodOwnerKind = iota
+	MethodOwnerClass
+	MethodOwnerInterface
+)
+
 type JavaClassMember struct {
+	MethodOwnerKind   MethodOwnerKind
 	originalFieldRead *originalFieldRead
 	OriginPC          int
 	HasOriginPC       bool

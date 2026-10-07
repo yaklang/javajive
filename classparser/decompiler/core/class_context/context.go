@@ -74,6 +74,8 @@ type ClassContext struct {
 	// LocalNames supplies scoped source bindings by identity. It does not rename
 	// the underlying IR or conflate locals that merely share a JVM slot spelling.
 	LocalNames map[*coreutils.VariableId]string
+	// Positive declaration evidence for visible source value names.
+	SourceValueNameShadow func(string) bool
 	// CatchEntryNames binds original handler stack values by their exact entry PC.
 	// It is scoped to rendering this method/handler, separate from type names.
 	CatchEntryNames map[int]string
@@ -907,6 +909,18 @@ func (f *ClassContext) ShortTypeName(name string) string {
 		// clashing set is precomputed from the constant pool by the dumper (render-order independent).
 		if f.SamePkgFQNames != nil && f.SamePkgFQNames[className] {
 			return pkg + "." + dotted
+		}
+		// Runtime lowering can introduce a platform owner absent from the
+		// original CP. Check its declaration identity too, rather than relying
+		// on the precomputed inventory of original type references.
+		if pkg == "java.lang" && f.InvocationMetadata != nil {
+			own := className
+			if f.PackageName != "" {
+				own = strings.ReplaceAll(f.PackageName, ".", "/") + "/" + className
+			}
+			if declaration, known := f.InvocationMetadata(own); known && declaration.Name == own {
+				return pkg + "." + dotted
+			}
 		}
 		return dotted
 	}

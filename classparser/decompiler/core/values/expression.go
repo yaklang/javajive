@@ -872,13 +872,14 @@ type InvokeWitness struct {
 }
 
 type FunctionCallExpression struct {
-	bindingPlanned bool
-	IsStatic       bool
-	Object         JavaValue
-	FunctionName   string
-	ClassName      string
-	Arguments      []JavaValue
-	FuncType       *types.JavaFuncType
+	MethodOwnerKind MethodOwnerKind
+	bindingPlanned  bool
+	IsStatic        bool
+	Object          JavaValue
+	FunctionName    string
+	ClassName       string
+	Arguments       []JavaValue
+	FuncType        *types.JavaFuncType
 	// SourceReturnType records declaration evidence for use-site erasure views.
 	// It never changes Type(): the caller may deliberately store the result raw.
 	SourceReturnType types.JavaType
@@ -5063,7 +5064,25 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 			// name (Integer.parseInt(...)). JavaClassValue.String() now yields the Class-object
 			// literal form `Integer.class`, which is correct for value/instance-receiver positions
 			// but wrong here, so bypass it via Type().
-			return fmt.Sprintf("%s.%s(%s)", v.Type().String(funcCtx), functionName, strings.Join(paramStrs, ","))
+			owner := v.Type().String(funcCtx)
+			if classType, ok := v.Type().RawType().(*types.JavaClass); ok {
+				kind := f.MethodOwnerKind
+				if kind == MethodOwnerUnknown && funcCtx.InvocationMetadata != nil {
+					if declaration, known := funcCtx.InvocationMetadata(strings.ReplaceAll(classType.Name, ".", "/")); known {
+						kind = MethodOwnerClass
+						if declaration.IsInterface {
+							kind = MethodOwnerInterface
+						}
+					}
+				}
+				switch kind {
+				case MethodOwnerClass:
+					owner = funcCtx.StaticClassOwner(classType.Name)
+				case MethodOwnerInterface:
+					owner = funcCtx.StaticInterfaceOwner(classType.Name)
+				}
+			}
+			return fmt.Sprintf("%s.%s(%s)", owner, functionName, strings.Join(paramStrs, ","))
 		}
 	}
 	obj := UnpackSoltValue(f.Object)
@@ -5309,11 +5328,12 @@ func CoerceBooleanAssignRHS(leftType types.JavaType, rhs JavaValue, funcCtx *cla
 
 func NewFunctionCallExpression(object JavaValue, methodMember *JavaClassMember, funcType *types.JavaFuncType) *FunctionCallExpression {
 	return &FunctionCallExpression{
-		FuncType:     funcType,
-		Object:       object,
-		FunctionName: methodMember.Member,
-		ClassName:    methodMember.Name,
-		Descriptor:   methodMember.Description,
-		TypeEnv:      jdecenv.Lookup(),
+		FuncType:        funcType,
+		MethodOwnerKind: methodMember.MethodOwnerKind,
+		Object:          object,
+		FunctionName:    methodMember.Member,
+		ClassName:       methodMember.Name,
+		Descriptor:      methodMember.Description,
+		TypeEnv:         jdecenv.Lookup(),
 	}
 }
