@@ -12,7 +12,7 @@ import (
 // as executed Java positives or as additional toolchain coverage.
 func TestNativeAnonymousCompilerProfileRequiresExactOriginalMethodAndMetadata(t *testing.T) {
 	files := nativeCompileSourceReleaseClasses(t, map[string]string{"CompilerModel.java": `class CompilerModel{static CompilerModelParent make(final long word){return new CompilerModelParent(word){long get(){return word;}};}}class CompilerModelParent{CompilerModelParent(long word){}long get(){return 0;}}`}, "none", "8")
-	for _, variant := range []string{"legacy model", "default compiler", "modern compiler", "modern flags with legacy self row", "unknown compiler", "wrong source", "wrong major", "preview", "wrong class flags", "wrong self flags", "duplicate self", "wrong owner identity", "own method not static", "instance without enclosing capture", "missing method", "duplicate method", "missing enclosing", "constructor exceptions", "work budget", "cancelled"} {
+	for _, variant := range []string{"legacy model", "legacy major51 model", "older major model", "newer major model", "owner preview", "default compiler", "modern compiler", "modern flags with legacy self row", "unknown compiler", "wrong source", "wrong major", "preview", "wrong class flags", "wrong self flags", "duplicate self", "wrong owner identity", "own method not static", "instance without enclosing capture", "missing method", "duplicate method", "missing enclosing", "constructor exceptions", "work budget", "cancelled"} {
 		t.Run(variant, func(t *testing.T) {
 			owner, _ := Parse(append([]byte(nil), files["CompilerModel.class"]...))
 			obj, _ := Parse(append([]byte(nil), files["CompilerModel$1.class"]...))
@@ -33,6 +33,14 @@ func TestNativeAnonymousCompilerProfileRequiresExactOriginalMethodAndMetadata(t 
 			reader.foldSiblingResolver = func(name string) ([]byte, bool) { b, ok := files[name+".class"]; return b, ok }
 			method := "make(J)LCompilerModelParent;"
 			switch variant {
+			case "legacy major51 model":
+				owner.MajorVersion, obj.MajorVersion = 51, 51
+			case "older major model":
+				owner.MajorVersion, obj.MajorVersion = 50, 50
+			case "newer major model":
+				owner.MajorVersion, obj.MajorVersion = 53, 53
+			case "owner preview":
+				owner.MinorVersion = 65535
 			case "default compiler":
 				reader.options.SourceCompiler = ""
 			case "modern compiler":
@@ -94,7 +102,7 @@ func TestNativeAnonymousCompilerProfileRequiresExactOriginalMethodAndMetadata(t 
 				reader.Work = workbudget.New(ctx, workbudget.Limits{})
 			}
 			packet := reader.nativeAnonymousConstructorForCompiler(obj, "CompilerModel", method, "", nil, nil, reader.buildInvocationMetadata(), nil)
-			if (packet != nil) != (variant == "legacy model") {
+			if (packet != nil) != (variant == "legacy model" || variant == "legacy major51 model") {
 				t.Fatal("compiler choice cannot replace original ownership/staticness/metadata evidence")
 			}
 		})

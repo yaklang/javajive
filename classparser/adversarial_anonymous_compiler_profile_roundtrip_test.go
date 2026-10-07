@@ -9,8 +9,9 @@ import (
 	"testing"
 )
 
-// Authored originals, compiled by two real toolchains. No bytecode metadata is
-// patched or normalized. Candidate classpath excludes every original target.
+// Authored originals, compiled by two real toolchains at Java7/8 source levels.
+// No bytecode metadata is patched or normalized. Candidate classpath excludes
+// every original target.
 func TestAdversarialAnonymousCompilerProfilesRetainOriginalMetadata(t *testing.T) {
 	modern, java := t04Tools(t)
 	legacy := os.Getenv("JAVA8_JAVAC")
@@ -23,13 +24,14 @@ func TestAdversarialAnonymousCompilerProfilesRetainOriginalMetadata(t *testing.T
 			t.Fatalf("native javac8 oracle required: %v %s", err, version)
 		}
 	}
-	for _, compiler := range []string{"modern_release8", "native8"} {
+	for _, compiler := range []string{"modern_release8", "native8", "native7"} {
 		for _, debug := range []string{"none", "source,lines,vars"} {
 			for _, static := range []bool{false, true} {
 				for _, checked := range []bool{false, true} {
 					label := fmt.Sprintf("%s/%s/static=%t/checked=%t", compiler, debug, static, checked)
 					t.Run(label, func(t *testing.T) {
-						if compiler == "native8" && legacy == "" {
+						native := strings.HasPrefix(compiler, "native")
+						if native && legacy == "" {
 							t.Skip("JAVA8_JAVAC is required for the independent native javac8 oracle")
 						}
 						modifier, throws := "", ""
@@ -58,9 +60,13 @@ public static void main(String[] args)throws Exception{ProfileTarget owner=new P
 						}
 						javac := modern
 						args := []string{"-proc:none", "--release", "8"}
-						if compiler == "native8" {
+						if native {
 							javac = legacy
-							args = []string{"-proc:none", "-source", "8", "-target", "8"}
+							sourceLevel := "8"
+							if compiler == "native7" {
+								sourceLevel = "7"
+							}
+							args = []string{"-proc:none", "-source", sourceLevel, "-target", sourceLevel}
 						}
 						args = append(args, "-g:"+debug, "-d", original, filepath.Join(original, "ProfileParent.java"), filepath.Join(original, "ProfileTarget.java"), filepath.Join(original, "ProfileDriver.java"))
 						if out, err := exec.Command(javac, args...).CombinedOutput(); err != nil {
@@ -86,8 +92,24 @@ public static void main(String[] args)throws Exception{ProfileTarget owner=new P
 							}
 						}
 						compilerProfile := ModernJavac
-						if compiler == "native8" {
+						if native {
 							compilerProfile = NativeJavac8
+						}
+						// Independently compiled Java7 inputs use major51. The selected
+						// rebuild still uses Java8; metadata and observations, rather
+						// than equal class-file versions, form the source contract.
+						for _, name := range []string{"ProfileTarget.class", "ProfileTarget$1.class"} {
+							cf, err := Parse(files[name])
+							if err != nil {
+								t.Fatal(err)
+							}
+							major := uint16(52)
+							if compiler == "native7" {
+								major = 51
+							}
+							if cf.MajorVersion != major || cf.MinorVersion != 0 {
+								t.Fatalf("actual original compiler profile %s: %d.%d", name, cf.MajorVersion, cf.MinorVersion)
+							}
 						}
 						jar := filepath.Join(t.TempDir(), "authored.jar")
 						if err := os.WriteFile(jar, t23Zip(t, files), 0600); err != nil {
@@ -120,7 +142,7 @@ public static void main(String[] args)throws Exception{ProfileTarget owner=new P
 							paths = append(paths, path)
 						}
 						candidateArgs := []string{"-proc:none", "--release", "8"}
-						if compiler == "native8" {
+						if native {
 							candidateArgs = []string{"-proc:none", "-source", "8", "-target", "8"}
 						}
 						candidateArgs = append(candidateArgs, "-g:"+debug, "-cp", rebuilt, "-d", rebuilt)

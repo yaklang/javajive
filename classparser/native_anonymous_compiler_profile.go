@@ -47,9 +47,12 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 	if c.options.SourceCompiler != NativeJavac8 {
 		return nativeAnonymousConstructorWithDeclarations(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, access)
 	}
-	// This first legacy domain has an exact original owning method, rather
-	// than guessing staticness from an absent outer capture or dollar spelling.
-	if c.options.TargetSourceVersion != 8 || c.obj == nil || obj == nil || c.obj.GetClassName() != owner || c.obj.MajorVersion != 52 || obj.MajorVersion != 52 || c.obj.MinorVersion != 0 || obj.MinorVersion != 0 || method == "" {
+	// Native javac8 emits the same anonymous ownership/capture profile when
+	// its input source is Java7 or Java8. The selected output remains Java8.
+	// Admit only the independently compiled major51/52 domains, with matching
+	// original owner/child versions. Version membership does not replace the
+	// exact owning method, self row, constructor and capture proofs below.
+	if c.options.TargetSourceVersion != 8 || c.obj == nil || obj == nil || c.obj.GetClassName() != owner || (c.obj.MajorVersion != 51 && c.obj.MajorVersion != 52) || obj.MajorVersion != c.obj.MajorVersion || c.obj.MinorVersion != 0 || obj.MinorVersion != 0 || method == "" {
 		return nil
 	}
 	originalOwner, originalMethod, known := originalAnonymousOwner(obj)
