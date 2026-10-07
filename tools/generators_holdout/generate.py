@@ -16,7 +16,7 @@ from .identity import CompilerIdentity, InfraError, compile_sources, java_comman
 FAMILIES = ("loop", "switch", "exception", "stack")
 SAMPLES_PER_FAMILY = 100
 GENERATOR_SEED = 20260921
-GENERATOR_VERSION = "t28-sourcegen-v1"
+GENERATOR_VERSION = "t28-sourcegen-v2-runtime-stack"
 
 
 @dataclass(frozen=True)
@@ -156,13 +156,18 @@ def _one(family: str, index: int, rng: random.Random, seed: int) -> Sample:
     # stack / nested expression
     depth = rng.randint(2, 6)
     nums = [rng.randint(1, 9) for _ in range(depth + 1)]
-    expr = str(nums[0])
+    # Literals alone become one constant instruction after javac folding.
+    # Parameters keep each operation live in the original method's bytecode;
+    # the no-argument entry remains available to existing corpus runners.
+    expr = "p0"
+    oracle_expr = str(nums[0])
     value = nums[0]
     ops = []
-    for n in nums[1:]:
+    for position, n in enumerate(nums[1:], 1):
         op = rng.choice(["+", "-", "*"])
         ops.append(op)
-        expr = f"({expr} {op} {n})"
+        expr = f"({expr} {op} p{position})"
+        oracle_expr = f"({oracle_expr} {op} {n})"
         if op == "+":
             value = value + n
         elif op == "-":
@@ -170,15 +175,20 @@ def _one(family: str, index: int, rng: random.Random, seed: int) -> Sample:
         else:
             value = value * n
     src = f"""public class {name} {{
-  public static int run() {{
+  private static int calculate({', '.join(f'int p{i}' for i in range(len(nums)))}) {{
     return {expr};
+  }}
+  public static int run() {{
+    return calculate({', '.join(map(str, nums))});
   }}
   public static void main(String[] args) {{
     System.out.println(run());
   }}
 }}
 """
-    return Sample(family, index, name, src, {"expr": expr, "depth": depth}, f"{value}\n", seed)
+    return Sample(family, index, name, src,
+                  {"expr": expr, "oracle_expr": oracle_expr, "depth": depth,
+                   "operands": nums, "operators": ops}, f"{value}\n", seed)
 
 
 def write_sources(samples: Iterable[Sample], directory: Path) -> list[Path]:

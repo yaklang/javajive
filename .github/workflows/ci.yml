@@ -230,6 +230,8 @@ jobs:
           cp -R "$evidence/." artifacts/
       - name: Curated algorithm round-trip contracts
         run: python3 -m unittest tools.curated_roundtrip.test_roundtrip
+      - name: Runtime arithmetic corpus and public-mode regression
+        run: python3 -m unittest ci.task_t28.test_runtime_stack_generation
       - name: Historical diagnostic-key regression
         run: python3 -m unittest ci.task_t30.test_t30_historical_diagnostics
       - name: Declaration metadata reader regression
