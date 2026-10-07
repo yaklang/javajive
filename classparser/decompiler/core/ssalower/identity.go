@@ -360,9 +360,22 @@ func (r *ValueRegistry) sequentializeWithCounter(copies []Copy, counter ssabuild
 		}
 		d, dok := r.Info[c.Dst]
 		s, sok := r.Info[c.Src]
-		if !dok || !sok || d.Width <= 0 || d.Width != s.Width {
+		if !dok || !sok || !d.Type.Computational() || !s.Type.Computational() || d.Width != d.Type.Width() || s.Width != s.Type.Width() || d.Width != s.Width {
 			return nil, fmt.Errorf("invalid_input: copy %d <- %d lacks compatible logical widths", c.Dst, c.Src)
 		}
+		// A slot category is not a value type: int/float/reference and
+		// long/double pairs share widths but require different JVM operations.
+		// A copy performs no numeric conversion or initialization. Null may
+		// enter an initialized reference; a distinct NEW identity may not.
+		compatible := d.Type.Kind == s.Type.Kind || d.Type.Kind == frametransfer.Ref && s.Type.Kind == frametransfer.Null
+		if d.Type.Kind == frametransfer.UninitNew {
+			compatible = d.Type.DropValue().Equal(s.Type.DropValue())
+		}
+		if !compatible {
+			return nil, fmt.Errorf("invalid_input: copy %d <- %d changes computational category or uninitialized identity", c.Dst, c.Src)
+		}
+		// Reference-class assignability remains a separate SSA/type proof.
+		// This registry has no hierarchy resolver and must not invent one.
 	}
 
 	var freshErr error
