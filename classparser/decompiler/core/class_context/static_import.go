@@ -138,7 +138,10 @@ func (f *ClassContext) staticImportCallPrefix(owner, member, descriptor, bound s
 	if pkg == "" || isAnonymousOrLocalBinaryName(cls) {
 		return fail("owner has no importable qualified source name")
 	}
-	if f.nestedTypeShouldDot(pkg, cls) {
+	// The dotting policy describes how an existing binary nesting separator
+	// is rendered. It also returns true for top-level external/platform types;
+	// that answer must not turn a non-nested owner into an invalid conversion.
+	if strings.Contains(cls, "$") && f.nestedTypeShouldDot(pkg, cls) {
 		var valid bool
 		cls, valid = binaryNestedNameToSource(cls)
 		if !valid {

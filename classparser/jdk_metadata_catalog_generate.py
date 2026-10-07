@@ -140,7 +140,7 @@ class PlatformArchives:
 def profile(release, archive, prefix, jdk_version, modules=()):
     with PlatformArchives([archive, *modules]) as source:
         classes, provenance = {}, {}
-        roots = ['java/lang/Object', 'java/lang/String', 'java/lang/Runnable', 'java/io/FilterInputStream', 'java/util/Map',
+        roots = ['java/lang/Object', 'java/lang/String', 'java/lang/Float', 'java/lang/Runnable', 'java/io/FilterInputStream', 'java/util/Map',
                  'java/util/Optional', 'java/util/Collections', 'java/util/Arrays',
                  'java/util/Iterator', 'java/util/EnumMap', 'java/util/List',
                  'java/util/Set', 'java/util/Collection', 'java/util/Stack', 'java/util/stream/Stream',

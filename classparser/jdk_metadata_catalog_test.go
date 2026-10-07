@@ -68,6 +68,32 @@ func TestJDKInvocationCatalogCompleteProfiles(t *testing.T) {
 	}
 }
 
+func TestJDKCatalogRawBitIntrinsicsHaveExactCompleteDeclarations(t *testing.T) {
+	for _, release := range []int{8, 9, 11, 16, 17, 21} {
+		for _, target := range []struct{ owner, member, descriptor string }{
+			{"java/lang/Float", "intBitsToFloat", "(I)F"},
+			{"java/lang/Double", "longBitsToDouble", "(J)D"},
+		} {
+			cls, known := jdkInvocationMetadata(target.owner, release)
+			if !known || cls.Name != target.owner || !cls.Public || cls.IsInterface || !cls.MembersComplete || !cls.ParentsComplete {
+				t.Fatalf("incomplete raw-bit owner %d/%s", release, target.owner)
+			}
+			matches := 0
+			for _, method := range cls.Methods {
+				if method.Name == target.member && method.Desc == target.descriptor {
+					if !method.Public || !method.Static || method.Bridge || !method.ExceptionsKnown || len(method.Exceptions) != 0 {
+						t.Fatalf("invalid intrinsic declaration %d/%s: %+v", release, target.owner, method)
+					}
+					matches++
+				}
+			}
+			if matches != 1 {
+				t.Fatalf("missing or duplicate exact intrinsic %d/%s %d", release, target.owner, matches)
+			}
+		}
+	}
+}
+
 func TestJDKCatalogExactCheckedDeclarationsAndChannels(t *testing.T) {
 	for _, release := range []int{8, 9, 11, 16, 17, 21} {
 		provider := func(name string) (callbinding.Class, bool) { return jdkInvocationMetadata(name, release) }

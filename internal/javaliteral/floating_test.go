@@ -128,3 +128,52 @@ func TestRuntimeSpecialConstantsDoNotAcquireTypeDependencies(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeNaNCallBindingPreservesDescriptorAndIntegerWord(t *testing.T) {
+	for _, width := range []int{32, 64} {
+		for sign := uint64(0); sign < 2; sign++ {
+			for sample := uint64(0); sample < 1024; sample++ {
+				word := uint64(0x7fc00000) | (sample*0x10531)&0x003fffff
+				owner, member, descriptor := "java.lang.Float", "intBitsToFloat", "(I)F"
+				if width == 64 {
+					word = 0x7ff8000000000000 | (sample*0x123456781)&0x0007ffffffffffff
+					owner, member, descriptor = "java.lang.Double", "longBitsToDouble", "(J)D"
+				}
+				word |= sign << uint(width-1)
+				canonical, calls := sign == 0 && sample == 0, 0
+				prefix := "bound."
+				if sample&1 != 0 {
+					prefix = "" // A proved static import needs no owner expression.
+				}
+				bind := func(o, m, d string) string {
+					calls++
+					if o != owner || m != member || d != descriptor {
+						t.Fatalf("changed exact target: %s.%s%s", o, m, d)
+					}
+					return prefix
+				}
+				var text string
+				if width == 32 {
+					text = RuntimeFloat32Call(math.Float32frombits(uint32(word)), bind)
+				} else {
+					text = RuntimeFloat64Call(math.Float64frombits(word), bind)
+				}
+				if canonical {
+					if calls != 0 || !strings.Contains(text, "/0.0") {
+						t.Fatal("canonical word acquired a new invocation", text)
+					}
+					continue
+				}
+				start := prefix + member + "(0x"
+				if calls != 1 || !strings.HasPrefix(text, start) {
+					t.Fatal("intrinsic binding was bypassed or duplicated", text, calls)
+				}
+				hex := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(text, start), ")"), "L")
+				got, err := strconv.ParseUint(hex, 16, width)
+				if err != nil || got != word {
+					t.Fatalf("raw word changed: %#x -> %q", word, text)
+				}
+			}
+		}
+	}
+}

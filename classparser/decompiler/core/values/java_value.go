@@ -337,13 +337,13 @@ func javaFloatLiteralExpr(data any, funcCtx *class_context.ClassContext) string 
 	if value, ok := data.(float32); ok {
 		// A float32 -> float64 -> float32 conversion can quiet a signaling
 		// word before the source renderer has recorded the original bits.
-		return javaliteral.RuntimeFloat32(value, literalTypeName(funcCtx))
+		return javaliteral.RuntimeFloat32Call(value, literalStaticCallPrefix(funcCtx))
 	}
 	f, ok := literalToFloat64(data)
 	if !ok {
 		return fmt.Sprint(data)
 	}
-	return javaliteral.RuntimeFloat32(float32(f), literalTypeName(funcCtx))
+	return javaliteral.RuntimeFloat32Call(float32(f), literalStaticCallPrefix(funcCtx))
 }
 
 func javaDoubleLiteralExpr(data any, funcCtx *class_context.ClassContext) string {
@@ -351,14 +351,14 @@ func javaDoubleLiteralExpr(data any, funcCtx *class_context.ClassContext) string
 	if !ok {
 		return fmt.Sprint(data)
 	}
-	return javaliteral.RuntimeFloat64(f, literalTypeName(funcCtx))
+	return javaliteral.RuntimeFloat64Call(f, literalStaticCallPrefix(funcCtx))
 }
 
-func literalTypeName(ctx *class_context.ClassContext) func(string) string {
+func literalStaticCallPrefix(ctx *class_context.ClassContext) func(string, string, string) string {
 	if ctx == nil {
 		return nil
 	}
-	return ctx.StaticClassOwner
+	return ctx.StaticClassCallPrefix
 }
 
 func NewJavaLiteral(data any, typ types.JavaType) *JavaLiteral {

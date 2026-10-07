@@ -255,3 +255,31 @@ func TestStaticOwnerWithoutMemberCannotCertifyAnObscuredCastType(t *testing.T) {
 		t.Fatal("a typed-null primary still needs a denotable cast type")
 	}
 }
+
+func TestStaticImportTopLevelOwnerRemainsImportableUnderNestingPolicy(t *testing.T) {
+	for _, owner := range []string{"a.Api", "java.lang.Api"} {
+		for _, isInterface := range []bool{false, true} {
+			t.Run(fmt.Sprint(owner, "/", isInterface), func(t *testing.T) {
+				f, declarations := staticImportModelContext()
+				api := declarations["a/Api"]
+				api.Name, api.IsInterface = strings.ReplaceAll(owner, ".", "/"), isInterface
+				declarations[api.Name] = api
+				f.TypeParams = []string{"Api", strings.SplitN(owner, ".", 2)[0]}
+				f.SiblingSuperTypes = func(string) ([]string, bool) { return nil, false }
+				pkg, cls := SplitPackageClassName(owner)
+				if !f.nestedTypeShouldDot(pkg, cls) {
+					t.Fatal("model must select external/platform nesting policy")
+				}
+				var prefix string
+				if isInterface {
+					prefix = f.StaticInterfaceCallPrefix(owner, "compute", "(I)I")
+				} else {
+					prefix = f.StaticClassCallPrefix(owner, "compute", "(I)I")
+				}
+				if prefix != "" || f.StaticMethodImports.Error() != nil || strings.Join(f.StaticMethodImports.Imports(), ",") != owner+".compute" {
+					t.Fatalf("top-level import prefix=%q imports=%v error=%v", prefix, f.StaticMethodImports.Imports(), f.StaticMethodImports.Error())
+				}
+			})
+		}
+	}
+}

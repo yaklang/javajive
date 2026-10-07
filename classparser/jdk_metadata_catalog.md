@@ -8,7 +8,7 @@ name and descriptor. It is not a whitelist of
 method names presumed unique. For example, Map.get/merge remain generic, whereas
 String.valueOf remains a competing overload family.
 
-Roots include Object, String, Map, Record where available, and the standard
+Roots include Object, String, Float, Map, Record where available, and the standard
 collection, stream, functional, I/O, channel, reflection, concurrency and TLS
 extension APIs listed in the generator, including XML, JavaBeans, naming and SQL
 namespaces. On modular JDKs the generator indexes the original JMOD classfiles
@@ -20,6 +20,12 @@ identity for generic binding proofs. Reference types in root
 method descriptors are included for source denotability, together with their full
 ancestors. Other classes remain unavailable; no open-world completeness is claimed.
 No method execution, reflection, or host JDK lookup occurs during decompilation.
+
+Float's complete declarations and descriptor type closure are also retained
+for newly introduced raw-bit conversion expressions. Those expressions use
+the same exact static-call and source-namespace binding as original calls;
+they do not assume that a wrapper's simple or qualified name is available
+inside a method's type-parameter scope. Double already occurs in the catalog.
 
 ## Exact source-target profiles
 
