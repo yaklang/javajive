@@ -1622,7 +1622,15 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			delegationBinding.InvocationMetadata = binding.InvocationMetadata
 			delegationBinding.SiblingClassSig = binding.SiblingClassSig
 			delegationBinding.CurrentMethodDesc = ctor.sourceDescriptor
-			return keyword + "(" + strings.Join(call.ArgumentStrings(&delegationBinding), ",") + ")", true
+			source := keyword + "(" + strings.Join(call.ArgumentStrings(&delegationBinding), ",") + ")"
+			if targetClass.accessBridges[desc] != nil {
+				// This proved nonstatic SUPER bridge accesses a private
+				// constructor just like an owned allocation. Legacy javac
+				// registers it after the argument subtree, before body field
+				// accessors. Omitting the event loses a real symbol ordinal.
+				source += nativeMemberConstructorRegistration(p, name, desc)
+			}
+			return source, true
 		}
 	}
 }
