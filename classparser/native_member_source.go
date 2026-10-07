@@ -42,6 +42,8 @@ type nativeMemberFamily struct {
 	rootAccessBridges      map[string]*nativeConstructorAccessBridge
 	rootBridgeDelegations  map[string]*nativeRootBridgeDelegation
 	getters                map[string]*nativeMemberPrivateGetter
+	retainedAccessors      map[string]*nativeMemberPrivateGetter
+	nestmateAccessors      bool
 	lexicalObjects         map[string]*ClassObject
 	anonymous              *nativeAnonymousFamily
 	anonymousUnits         map[string]*nativeAnonymousFamily
@@ -651,6 +653,9 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	}
 	p.rootAccessBridges = c.originalNativeConstructorAccessBridges()
 	if !nativeMemberCollectPrivateGettersResolved(p, c.nativeAnnotationDeclarationResolver(), c.Work) {
+		return nil
+	}
+	if !c.planNativeMemberAccessorCompilerProfile(p) {
 		return nil
 	}
 	// The current source compiler profile promotes private constructors of an

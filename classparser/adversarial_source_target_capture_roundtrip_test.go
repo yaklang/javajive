@@ -39,12 +39,16 @@ func TestAdversarialSourceTargetEmptyMarkerPreservesNestedAnonymousRoundTrip(t *
 }
 
 func testSourceTargetOriginalFamilyFixture(t *testing.T, fixture, originalOwner, driver, expected string) {
+	testSourceTargetReleaseFamilyFixture(t, fixture, originalOwner, driver, expected, "8", []int{8, 11})
+}
+
+func testSourceTargetReleaseFamilyFixture(t *testing.T, fixture, originalOwner, driver, expected, inputRelease string, targets []int) {
 	t.Helper()
 	javac, java := t04Tools(t)
 	for _, owner := range []string{originalOwner, "Alternate" + originalOwner} {
 		for _, debug := range []string{"none", "source,lines,vars"} {
 			t.Run(owner+"/"+debug, func(t *testing.T) {
-				files := nativeCompileSourceReleaseClasses(t, map[string]string{owner + ".java": strings.ReplaceAll(fixture, originalOwner, owner)}, debug, "8")
+				files := nativeCompileSourceReleaseClasses(t, map[string]string{owner + ".java": strings.ReplaceAll(fixture, originalOwner, owner)}, debug, inputRelease)
 				original := t.TempDir()
 				for name, raw := range files {
 					if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {
@@ -55,7 +59,7 @@ func testSourceTargetOriginalFamilyFixture(t *testing.T, fixture, originalOwner,
 				if want != expected {
 					t.Fatal(want)
 				}
-				for _, target := range []int{8, 11} {
+				for _, target := range targets {
 					for _, policy := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
 						t.Run(strconv.Itoa(target)+"/"+policy, func(t *testing.T) {
 							if policy == "no-source-rewrites" {
@@ -110,4 +114,48 @@ func testSourceTargetOriginalFamilyFixture(t *testing.T, fixture, originalOwner,
 			})
 		}
 	}
+}
+
+const sourceTargetGetterInitFixture = `class DormantAccessEffects{static String trace="";static Object init(){trace+="I";return new Object();}static Object arg(){trace+="A";return new Object();}}
+class DormantAccessOwner{static final Object trigger=DormantAccessEffects.init();private Object token;static class Reader{static Object read(DormantAccessOwner value,Object ignored){return value.token;}}}
+class DormantAccessDriver{public static void main(String[]args)throws Exception{Class.forName("DormantAccessOwner$Reader");if(!DormantAccessEffects.trace.equals(""))throw new AssertionError("eager init");try{DormantAccessOwner.Reader.read(null,DormantAccessEffects.arg());throw new AssertionError("no NPE");}catch(NullPointerException expected){if(!DormantAccessEffects.trace.equals("AI"))throw new AssertionError("class init before receiver failure:"+DormantAccessEffects.trace);}System.out.println("accessor:argument:init:receiver-failure");}}`
+
+func TestAdversarialSourceTargetPreservesAccessorClassInitializationRoundTrip(t *testing.T) {
+	testSourceTargetOriginalFamilyFixture(t, sourceTargetGetterInitFixture, "DormantAccessOwner", "DormantAccessDriver", "accessor:argument:init:receiver-failure\n")
+}
+
+func TestAdversarialSourceTargetPreservesWriteUpdateAndCallInitializationRoundTrip(t *testing.T) {
+	for _, operation := range []string{"write", "update", "call"} {
+		t.Run(operation, func(t *testing.T) {
+			fixture := sourceTargetGetterInitFixture
+			switch operation {
+			case "write":
+				fixture = strings.Replace(fixture, "return value.token;", "return value.token=ignored;", 1)
+			case "update":
+				fixture = strings.Replace(fixture, "private Object token;", "private int token;", 1)
+				fixture = strings.Replace(fixture, "return value.token;", "return value.token++;", 1)
+			case "call":
+				fixture = strings.Replace(fixture, "private Object token;", `private Object token;private Object touch(Object ignored){DormantAccessEffects.trace+="B";return token;}`, 1)
+				fixture = strings.Replace(fixture, "return value.token;", "return value.touch(ignored);", 1)
+			}
+			testSourceTargetReleaseFamilyFixture(t, fixture, "DormantAccessOwner", "DormantAccessDriver", "accessor:argument:init:receiver-failure\n", "8", []int{8, 11, 16})
+		})
+	}
+}
+
+func TestAdversarialSourceTargetPreservesFailedAccessorInitializationRoundTrip(t *testing.T) {
+	fixture := strings.Replace(sourceTargetGetterInitFixture, `static Object init(){trace+="I";return new Object();}`, `static final RuntimeException failure=new RuntimeException("identity");static Object init(){trace+="I";throw failure;}`, 1)
+	start := strings.Index(fixture, "class DormantAccessDriver")
+	if start < 0 {
+		t.Fatal("fixture driver missing")
+	}
+	fixture = fixture[:start] + `class DormantAccessDriver{public static void main(String[]args)throws Exception{Class.forName("DormantAccessOwner$Reader");if(!DormantAccessEffects.trace.equals(""))throw new AssertionError("eager init");for(int i=0;i<2;i++){try{DormantAccessOwner.Reader.read(null,DormantAccessEffects.arg());throw new AssertionError("missing initialization failure");}catch(ExceptionInInitializerError e){if(i!=0||e.getCause()!=DormantAccessEffects.failure)throw new AssertionError("initialization failure identity",e);}catch(NoClassDefFoundError e){if(i!=1)throw new AssertionError("erroneous class",e);}if(!DormantAccessEffects.trace.equals(i==0?"AI":"AIA"))throw new AssertionError("argument/init/failure order:"+DormantAccessEffects.trace);}System.out.println("accessor:argument:failed-init:identity:no-retry");}}`
+	testSourceTargetOriginalFamilyFixture(t, fixture, "DormantAccessOwner", "DormantAccessDriver", "accessor:argument:failed-init:identity:no-retry\n")
+}
+func TestAdversarialSourceTargetPreservesGenericAccessorErasureRoundTrip(t *testing.T) {
+	fixture := strings.Replace(sourceTargetGetterInitFixture, "class DormantAccessOwner{", "class DormantAccessOwner<T>{", 1)
+	fixture = strings.Replace(fixture, "private Object token;", "private T token;DormantAccessOwner(T t){token=t;}", 1)
+	fixture = strings.Replace(fixture, "DormantAccessOwner value,", "DormantAccessOwner<?> value,", 1)
+	fixture = strings.Replace(fixture, `System.out.println("accessor:argument:init:receiver-failure");`, `Object token=new Object();DormantAccessOwner<Object> value=new DormantAccessOwner<Object>(token);if(DormantAccessOwner.Reader.read(value,null)!=token)throw new AssertionError("generic accessor identity/erasure");System.out.println("accessor:generic:erasure:identity:initialization");`, 1)
+	testSourceTargetOriginalFamilyFixture(t, fixture, "DormantAccessOwner", "DormantAccessDriver", "accessor:generic:erasure:identity:initialization\n")
 }

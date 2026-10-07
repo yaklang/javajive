@@ -289,7 +289,12 @@ func nativeMemberGetterCallSites(obj *ClassObject, p *nativeMemberFamily, work *
 					call = nil
 				}
 				if call != nil {
-					if getter := p.getters[nativeMemberGetterKey(call.Name, call.Member, call.Description)]; getter != nil {
+					key := nativeMemberGetterKey(call.Name, call.Member, call.Description)
+					getter := p.getters[key]
+					if getter == nil {
+						getter = p.retainedAccessors[key]
+					}
+					if getter != nil {
 						// An own-class call would no longer require javac's private accessor.
 						// Its class-init/stack-frame protocol needs a separate source proof.
 						if obj.GetClassName() == getter.owner || op.Instr.OpCode != core.OP_INVOKESTATIC {
@@ -302,6 +307,84 @@ func nativeMemberGetterCallSites(obj *ClassObject, p *nativeMemberFamily, work *
 		}
 	}
 	return out, true
+}
+
+// A nestmate compiler lowers a private field access directly; it does not
+// regenerate the original INVOKESTATIC accessor. That invocation initializes
+// its declaring class after evaluating arguments and before a null dereference
+// or field update. Keep its proved original method and call rather than moving
+// initialization into an unrelated source operation. Synthetic flags may differ
+// in source, but the descriptor, receiver, argument and exception order do not.
+func (c *ClassObjectDumper) planNativeMemberAccessorCompilerProfile(p *nativeMemberFamily) bool {
+	if p == nil {
+		return false
+	}
+	target := c.options.TargetSourceVersion
+	if target == 0 {
+		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
+	}
+	if target < 11 || len(p.getters) == 0 {
+		return true
+	}
+	retained := map[string]*nativeMemberPrivateGetter{}
+	projected := map[string]*nativeMemberPrivateGetter{}
+	for key, accessor := range p.getters {
+		if accessor == nil || !nativeProofWork(c.Work, 1) {
+			return false
+		}
+		if accessor.owner != p.owner {
+			child := p.children[accessor.owner]
+			// Static method declarations in an inner class are source-legal only
+			// from Java16. A compiler-generated method is not that source proof.
+			if child == nil {
+				return false
+			}
+			if !child.static && target < 16 {
+				// There is no legal source declaration for this static accessor.
+				// Direct nestmate access is equivalent only when removing its
+				// owner initialization cannot remove effects or failure. Unknown
+				// ancestors and default-interface initialization are not inert.
+				if !nativeMemberAccessorInitializationInert(p, accessor.owner, c.Work) {
+					return false
+				}
+				projected[key] = accessor
+				continue
+			}
+		}
+		retained[key] = accessor
+	}
+	p.retainedAccessors, p.getters = retained, projected
+	p.nestmateAccessors = true
+	return true
+}
+
+func nativeMemberAccessorInitializationInert(p *nativeMemberFamily, owner string, work *workbudget.Budget) bool {
+	if p == nil || p.failed {
+		return false
+	}
+	seen := map[string]bool{}
+	for owner != "java/lang/Object" {
+		obj := p.lexicalObjects[owner]
+		if obj == nil || obj.GetClassName() != owner || seen[owner] || len(seen) >= 256 || len(obj.Interfaces) != 0 || !nativeProofWork(work, 1) {
+			return false
+		}
+		seen[owner] = true
+		for _, method := range obj.Methods {
+			if method == nil || !nativeProofWork(work, 1) {
+				return false
+			}
+			name, known := sourceBridgeUTF8(obj, method.NameIndex)
+			if !known || name == "<clinit>" {
+				return false
+			}
+		}
+		var known bool
+		owner, known = sourceBridgeClassName(obj, obj.SuperClass)
+		if !known {
+			return false
+		}
+	}
+	return len(seen) != 0
 }
 
 func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily, ctx *class_context.ClassContext) {
@@ -319,7 +402,7 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 			return receiver, registration
 		}
 	}
-	if len(p.getters) == 0 {
+	if len(p.getters) == 0 && len(p.retainedAccessors) == 0 {
 		return
 	}
 	sites, known := nativeMemberGetterCallSites(c.obj, p, c.Work)
@@ -330,7 +413,17 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 	resolve := c.nativeAnnotationDeclarationResolver()
 	lexicalStatic := map[*nativeMemberPrivateGetter]bool{}
 	ctx.SourcePrivateGetter = func(owner, name, desc string, pc int, args []any, statement bool) (string, bool) {
-		getter := p.getters[nativeMemberGetterKey(owner, name, desc)]
+		key := nativeMemberGetterKey(owner, name, desc)
+		if retained := p.retainedAccessors[key]; retained != nil {
+			params, _, err := callbinding.Descriptor(desc)
+			if err != nil || len(params) != len(args) || sites[ctx.FunctionName+ctx.CurrentMethodDesc][pc] != retained {
+				p.failed = true
+			}
+			// Ordinary invocation rendering retains the original descriptor and
+			// evaluates operands outside the declaring class's initialization.
+			return "", false
+		}
+		getter := p.getters[key]
 		if getter == nil {
 			return "", false
 		}
@@ -550,6 +643,25 @@ func nativeMemberPrivateGetterSourceClosed(p *nativeMemberFamily, source string,
 	events, known := nativeMemberAccessorEvents(p, source, constructors, work)
 	if !known {
 		return false
+	}
+	if p.nestmateAccessors {
+		// No synthetic ordinal is generated by this compiler profile. Keep
+		// original call-site/reference closure and require every projected
+		// packet in the final source, without reordering declarations to
+		// reproduce an accessor registration sequence that no longer exists.
+		getters := map[*nativeMemberPrivateGetter]bool{}
+		seenConstructors := map[string]bool{}
+		for _, event := range events {
+			if event.getter != nil {
+				if getters[event.getter] && nativeMemberAccessorClonedSymbol(event.getter) {
+					return false
+				}
+				getters[event.getter] = true
+			} else {
+				seenConstructors[event.constructor] = true
+			}
+		}
+		return len(getters) == len(p.getters) && len(seenConstructors) == len(constructors)
 	}
 	state := newNativeAccessorOrderState()
 	if !state.apply(events) {
