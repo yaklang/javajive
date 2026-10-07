@@ -49,6 +49,9 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 			if marker := p.emptyMarkers[bridge.marker]; marker != nil && nativeMemberEmptyAccessMarker(marker, p.owner, work) {
 				continue
 			}
+			if nativeMemberJointSwitchTableMarker(p, bridge.marker, work) {
+				continue
+			}
 			if p.anonymous == nil {
 				return false
 			}
@@ -248,7 +251,7 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 		if !nativeProofWork(work, 1) {
 			return false
 		}
-		if user != p.owner && p.children[user] == nil && p.anonymousUnits[user] == nil && p.emptyMarkers[user] == nil && p.enumConstants[user] == nil {
+		if user != p.owner && p.children[user] == nil && p.anonymousUnits[user] == nil && p.emptyMarkers[user] == nil && p.enumConstants[user] == nil && !nativeMemberJointSwitchTableMarker(p, user, work) {
 			return false
 		}
 		raw, ok := z.enumSiblingResolver()(user)

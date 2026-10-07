@@ -97,7 +97,7 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 					return false
 				}
 				desc, ok := sourceBridgeUTF8(object, member.DescriptorIndex)
-				if !ok || strings.Contains(desc, "L"+name+";") {
+				if !ok || strings.Contains(desc, "L"+name+";") && !(nativeMemberJointSwitchTableMarker(p, name, work) && nativeMemberJointBridgeDeclaration(p, object, member, name, work)) {
 					return false
 				}
 				for _, a := range member.Attributes {
@@ -112,7 +112,11 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 					}
 				}
 			}
-			for _, constant := range object.ConstantPool {
+			bridgeNameTypes := nativeMemberJointBridgeNameTypes(p, object, work)
+			if bridgeNameTypes == nil {
+				return false
+			}
+			for constantIndex, constant := range object.ConstantPool {
 				if !nativeProofWork(work, 1) {
 					return false
 				}
@@ -121,7 +125,7 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 						return false
 					}
 					desc, known := sourceBridgeUTF8(object, nt.DescriptorIndex)
-					if !known || strings.Contains(desc, "L"+name+";") {
+					if !known || strings.Contains(desc, "L"+name+";") && !(bridgeNameTypes[constantIndex+1] && nativeMemberJointSwitchTableMarker(p, name, work)) {
 						return false
 					}
 				}
