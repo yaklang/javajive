@@ -6,22 +6,37 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
+// Graph discovery and one source transaction have different resource domains.
+// A wide acyclic dependency graph contains many independent commits; it must
+// not inherit the small bound for families committed atomically in one SCC.
+const (
+	nativeMemberDependencyNodeLimit      = nativeMemberLayoutNodeLimit
+	nativeMemberDependencyEdgeLimit      = 8192
+	nativeMemberDependencyComponentLimit = 64
+)
+
 // Original declaration dependency cycles are transactions, not permission to
 // share private access. Components identify the families whose source commits
 // must succeed together; an incomplete graph cannot establish a component.
 func nativeMemberSourceComponents(graph map[string]map[string]bool, work *workbudget.Budget) (map[string][]string, bool) {
-	if len(graph) == 0 || len(graph) > 64 || !nativeProofWork(work, int64(len(graph))) {
+	if len(graph) == 0 || len(graph) > nativeMemberDependencyNodeLimit || !nativeProofWork(work, int64(len(graph))) {
 		return nil, false
 	}
 	var owners []string
 	var nameBytes int64
+	edgesSeen := 0
 	for owner, edges := range graph {
-		if owner == "" || len(edges) > 64 {
+		if owner == "" || len(edges) > nativeMemberDependencyNodeLimit {
 			return nil, false
 		}
 		owners = append(owners, owner)
 		nameBytes += int64(len(owner))
 		for target, present := range edges {
+			edgesSeen++
+			nameBytes += int64(len(target)) + 32
+			if edgesSeen > nativeMemberDependencyEdgeLimit || !nativeProofWork(work, 1) {
+				return nil, false
+			}
 			if _, exists := graph[target]; !exists || !present {
 				return nil, false
 			}
@@ -75,6 +90,9 @@ func nativeMemberSourceComponents(graph map[string]map[string]bool, work *workbu
 				if last == owner {
 					break
 				}
+			}
+			if len(component) > nativeMemberDependencyComponentLimit {
+				return false
 			}
 			sort.Strings(component)
 			for _, name := range component {

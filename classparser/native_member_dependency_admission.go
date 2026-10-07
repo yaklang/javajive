@@ -34,7 +34,7 @@ func (z *JarFS) nativeMemberDependencyAdmission(owner string, work *workbudget.B
 			return
 		}
 		participants := components[owner]
-		if len(participants) == 0 || len(participants) > 64 {
+		if len(participants) == 0 || len(participants) > nativeMemberDependencyComponentLimit {
 			return
 		}
 		bytes := nativeMemberDependencyRetainedBytes(participants)

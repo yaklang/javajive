@@ -51,7 +51,7 @@ func TestNativeSourceComponentsAgainstExhaustiveReachability(t *testing.T) {
 }
 
 func TestNativeSourceComponentsRefuseIncompleteOrUnboundedGraph(t *testing.T) {
-	for _, variant := range []string{"original", "empty", "unknown target", "false edge", "empty owner", "too many", "budget", "memory", "canceled"} {
+	for _, variant := range []string{"original", "empty", "unknown target", "false edge", "empty owner", "too many", "too large transaction", "budget", "memory", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			graph := map[string]map[string]bool{"A": {"B": true}, "B": {"A": true}}
 			var work *workbudget.Budget
@@ -65,8 +65,13 @@ func TestNativeSourceComponentsRefuseIncompleteOrUnboundedGraph(t *testing.T) {
 			case "empty owner":
 				graph[""] = nil
 			case "too many":
-				for i := 0; i < 65; i++ {
+				for i := 0; i <= nativeMemberDependencyNodeLimit; i++ {
 					graph[string(rune(0x100+i))] = nil
+				}
+			case "too large transaction":
+				graph = map[string]map[string]bool{}
+				for i := 0; i < 65; i++ {
+					graph[string(rune(0x100+i))] = map[string]bool{string(rune(0x100 + (i+1)%65)): true}
 				}
 			case "budget":
 				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})

@@ -14,6 +14,7 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 	graph := map[string]map[string]bool{}
 	objects := map[string]*ClassObject{}
 	var total int64
+	graphEdges := 0
 	load := func(name string) (*ClassObject, bool) {
 		if o := objects[name]; o != nil {
 			return o, true
@@ -70,7 +71,7 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 		if states[owner] == 2 {
 			return true
 		}
-		if len(states) >= 64 {
+		if len(states) >= nativeMemberDependencyNodeLimit {
 			return false
 		}
 		states[owner] = 1
@@ -231,6 +232,10 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 					dependencies[target] = true
 				}
 			}
+		}
+		graphEdges += len(dependencies)
+		if graphEdges > nativeMemberDependencyEdgeLimit || work != nil && work.CheckAlloc(total+int64(len(states))*512+int64(graphEdges)*128) != nil {
+			return false
 		}
 		graph[owner] = dependencies
 		for dependency := range dependencies {
