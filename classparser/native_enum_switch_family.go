@@ -138,13 +138,12 @@ func nativeEnumSwitchOrdinalClosed(p *nativeMemberFamily, work *workbudget.Budge
 		return false
 	}
 	if len(p.enumSwitchTables) > 0 {
-		if len(p.emptyMarkers) > 0 || len(p.rootAccessBridges) > 0 {
+		// A constructor can reuse the first real anonymous class as its
+		// unused access marker. That consumes no additional source ordinal.
+		// Prove that shared original role; an independent empty marker still
+		// needs a different compiler numbering protocol and is not admitted.
+		if len(p.emptyMarkers) > 0 || !nativeMemberJointBridgeMarkersClosed(p, work) {
 			return false
-		}
-		for _, child := range p.children {
-			if len(child.accessBridges) > 0 {
-				return false
-			}
 		}
 	}
 	for name, table := range p.enumSwitchTables {

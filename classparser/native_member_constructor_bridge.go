@@ -53,7 +53,7 @@ func nativeMemberJointBridgeMarkersClosed(p *nativeMemberFamily, work *workbudge
 				return false
 			}
 			marker := p.anonymous.children[bridge.marker]
-			if marker == nil || marker.ordinal != 1 || p.anonymous.owner != p.owner || marker.object.GetClassName() != bridge.marker {
+			if marker == nil || marker.object == nil || marker.ordinal != 1 || p.anonymous.owner != p.owner || marker.object.GetClassName() != bridge.marker {
 				return false
 			}
 		}

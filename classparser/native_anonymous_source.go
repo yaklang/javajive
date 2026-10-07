@@ -764,6 +764,9 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 				}
 			}
 		}
+		// Root declarations can use the same original anonymous constructor
+		// marker as siblings. Compose the joint declaration certificate here
+		// too; an anonymous name in an arbitrary descriptor remains unproved.
 		for _, member := range append(append([]*MemberInfo{}, object.Fields...), object.Methods...) {
 			descriptor, known := sourceBridgeUTF8(object, member.DescriptorIndex)
 			if !known {
@@ -771,7 +774,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 			}
 			for child := range p.children {
 				name, _ := object.getUtf8(member.NameIndex)
-				if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestEnclosingDeclaration(object, member, forest, c.Work) && !p.accessBridgeDescriptor(object, name, descriptor) {
+				if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestEnclosingDeclaration(object, member, forest, c.Work) && !p.accessBridgeDescriptor(object, name, descriptor) && !nativeMemberJointBridgeDeclaration(members, object, member, child, c.Work) {
 					return nil
 				}
 			}
