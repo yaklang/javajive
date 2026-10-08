@@ -12,7 +12,7 @@ import (
 )
 
 func TestConditionalGenericAssignmentRequiresEveryOriginalErasureAndFixedResult(t *testing.T) {
-	for _, scenario := range []string{"proved", "reverse", "nested null", "missing metadata", "incomplete parents", "foreign identity", "unrelated result", "narrowing", "missing declaration", "missing method", "method formal", "wrong signature erasure", "bridge", "static", "special", "missing origin", "poly input", "wildcard target", "array target", "wrong field descriptor", "missing field signature", "no hidden generic result", "missing arm", "depth", "nodes", "budget", "canceled", "disabled"} {
+	for _, scenario := range []string{"proved", "reverse", "nested null", "direct class formal", "inferred formal subtype", "ordinary class named formal", "method formal shadows class", "different formal bound", "unbounded formal", "formal bound chain", "formal array", "missing metadata", "incomplete parents", "foreign identity", "unrelated result", "narrowing", "missing declaration", "missing method", "method formal", "wrong signature erasure", "bridge", "static", "special", "missing origin", "poly input", "wildcard target", "array target", "wrong field descriptor", "missing field signature", "no hidden generic result", "missing arm", "depth", "nodes", "budget", "canceled", "disabled"} {
 		t.Run(scenario, func(t *testing.T) {
 			desc := "()Lproof/Product;"
 			meta := map[string]callbinding.Class{
@@ -21,10 +21,11 @@ func TestConditionalGenericAssignmentRequiresEveryOriginalErasureAndFixedResult(
 				"proof/Lookup":   {Name: "proof/Lookup", MembersComplete: true, ParentsComplete: true, IsInterface: true},
 			}
 			methodSig := "()Lproof/Product<TE;>;"
+			classSig := "<E:Ljava/lang/Object;>Ljava/lang/Object;"
 			ctx := &class_context.ClassContext{ClassName: "proof.Owner", FieldSignatures: map[string]string{"registry": "Lproof/Lookup<Lproof/Entry;>;"}}
 			ctx.InvocationMetadata = func(n string) (callbinding.Class, bool) { c, ok := meta[n]; return c, ok }
 			ctx.SiblingClassSig = func(n string) (string, map[string]string, bool) {
-				return "<E:Ljava/lang/Object;>Ljava/lang/Object;", map[string]string{class_context.MethodDescKey("finish", desc): methodSig}, n == "proof/Producer"
+				return classSig, map[string]string{class_context.MethodDescKey("finish", desc): methodSig}, n == "proof/Producer"
 			}
 			self := ternaryCastTestRef("self", "proof.Owner")
 			self.IsThis = true
@@ -38,6 +39,32 @@ func TestConditionalGenericAssignmentRequiresEveryOriginalErasureAndFixedResult(
 				rhs = values.NewTernaryExpression(condition, call, arm)
 			case "nested null":
 				rhs = values.NewTernaryExpression(condition, rhs, values.NewJavaLiteral("null", types.NewJavaClass("java.lang.Object")))
+			case "direct class formal", "inferred formal subtype", "ordinary class named formal", "method formal shadows class", "different formal bound", "unbounded formal", "formal bound chain", "formal array":
+				classSig = "<E:Ljava/lang/Object;R:Lproof/Product<TE;>;>Ljava/lang/Object;"
+				methodSig = "()TR;"
+				switch scenario {
+				case "inferred formal subtype":
+					// The physical return is Lookup while the receiver's recovered
+					// substitution is Product. Descriptor evidence must control it.
+					desc = "()Lproof/Lookup;"
+					call.Descriptor = desc
+					c := meta["proof/Producer"]
+					c.Methods[0].Desc = desc
+					meta["proof/Producer"] = c
+					classSig = "<E:Ljava/lang/Object;R:Lproof/Lookup<TE;>;>Ljava/lang/Object;"
+				case "ordinary class named formal":
+					methodSig = "()LR;"
+				case "method formal shadows class":
+					methodSig = "<R:Lproof/Product<TE;>;>()TR;"
+				case "different formal bound":
+					classSig = "<E:Ljava/lang/Object;R:Lproof/Lookup<TE;>;>Ljava/lang/Object;"
+				case "unbounded formal":
+					classSig = "<E:Ljava/lang/Object;R:Ljava/lang/Object;>Ljava/lang/Object;"
+				case "formal bound chain":
+					classSig = "<E:Ljava/lang/Object;R:TE;>Ljava/lang/Object;"
+				case "formal array":
+					methodSig = "()[TR;"
+				}
 			case "missing metadata":
 				delete(meta, "proof/Product")
 			case "incomplete parents":
@@ -116,7 +143,7 @@ func TestConditionalGenericAssignmentRequiresEveryOriginalErasureAndFixedResult(
 				}
 			}
 			before := call.Witness()
-			want := scenario == "proved" || scenario == "reverse" || scenario == "nested null"
+			want := scenario == "proved" || scenario == "reverse" || scenario == "nested null" || scenario == "direct class formal" || scenario == "inferred formal subtype"
 			got := conditionalGenericAssignmentBridge(ctx, left, rhs)
 			if (got != "") != want {
 				t.Fatalf("bridge=%q expected=%v", got, want)

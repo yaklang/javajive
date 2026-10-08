@@ -11,13 +11,30 @@ import (
 // 1,200 branch/payload combinations per debug/policy variant. Factory and step
 // counts expose eager evaluation; polluted raw payloads expose new/lost checks.
 func TestAdversarialConditionalGenericAssignmentHundredStructureBank(t *testing.T) {
+	testAdversarialConditionalGenericAssignmentBank(t, false)
+}
+
+func TestAdversarialClassFormalConditionalAssignmentHundredStructureBank(t *testing.T) {
+	testAdversarialConditionalGenericAssignmentBank(t, true)
+}
+
+// Cross both original return declarations with the same independent selection,
+// identity, count and failure model. Debug/policy variants are not structures.
+func testAdversarialConditionalGenericAssignmentBank(t *testing.T, classFormal bool) {
+	t.Helper()
 	var owner, checks strings.Builder
 	owner.WriteString(`interface BankLookup<E>{E lookup();}
 class BankEntry{final int value;BankEntry(int n){value=n;}}
 class BankProduct<E> implements BankLookup<E>{final E value;BankProduct(E e){value=e;}public E lookup(){return value;}}
-class BankProducer<E>{static int factories,steps;E value;static <E>BankProducer<E> create(){factories++;return new BankProducer<E>();}BankProducer<E> register(E v){value=v;return this;}BankProducer<E> step(){steps++;return this;}BankProduct<E> build(){return new BankProduct<E>(value);}}
-public class ConditionalBankOwner{
 `)
+	if classFormal {
+		owner.WriteString(`class BankProducer<E,R extends BankLookup<E>>{static int factories,steps;R result;static <E>BankProducer<E,BankProduct<E>> create(){factories++;return new BankProducer<E,BankProduct<E>>();}BankProducer<E,R> register(E v){result=(R)new BankProduct<E>(v);return this;}BankProducer<E,R> step(){steps++;return this;}R build(){return result;}}
+`)
+	} else {
+		owner.WriteString(`class BankProducer<E>{static int factories,steps;E value;static <E>BankProducer<E> create(){factories++;return new BankProducer<E>();}BankProducer<E> register(E v){value=v;return this;}BankProducer<E> step(){steps++;return this;}BankProduct<E> build(){return new BankProduct<E>(value);}}
+`)
+	}
+	owner.WriteString("public class ConditionalBankOwner{\n")
 	for i := 0; i < 100; i++ {
 		fmt.Fprintf(&owner, "private final BankLookup<BankEntry> r%d;public BankLookup<BankEntry> registry%d(){return r%d;}public BankEntry get%d(){return r%d.lookup();}\n", i, i, i, i, i)
 	}

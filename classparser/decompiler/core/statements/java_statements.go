@@ -3011,6 +3011,13 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		}
 	}
 	rhsVal = values.ErasedFactoryAssignmentView(rhsVal, targetView, funcCtx)
+	if ref, local := a.LeftValue.(*values.JavaRef); local && !ref.IsThis && ref.StackVar == nil && ref.CustomValue == nil {
+		if call, direct := values.UnpackSoltValue(rhsVal).(*values.FunctionCallExpression); direct {
+			if planned, known := call.PlanErasedWidenedLocalResult(funcCtx, targetView); known {
+				rhsVal = planned
+			}
+		}
+	}
 	rhsStr = rhsVal.String(funcCtx)
 	if values.ScopedErasureView(funcCtx, targetView, rhsVal) {
 		rhsStr = fmt.Sprintf("(%s) (%s)", targetView.String(funcCtx), rhsStr)

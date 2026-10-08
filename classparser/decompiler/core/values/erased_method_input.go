@@ -379,15 +379,27 @@ func ErasedFixedInstanceResult(ctx *class_context.ClassContext, f *FunctionCallE
 	}
 	_, cs, sig := erasedInvocationDeclaration(ctx, owner, f.FunctionName, f.Descriptor)
 	body, fixedThrows := invocationFixedThrowsBody(sig)
-	if !fixedThrows || !strings.HasPrefix(body, "()") || len(erasedInvocationBounds(cs)) == 0 {
+	bounds := erasedInvocationBounds(cs)
+	if !fixedThrows || !strings.HasPrefix(body, "()") || len(bounds) == 0 {
 		return false
 	}
 	_, params, typ := types.ParseMethodSignatureFull(body, ctx)
-	if len(params) != 0 || erasedMethodType(typ, erasedInvocationBounds(cs)) != result {
+	if len(params) != 0 || erasedMethodType(typ, bounds) != result {
 		return false
 	}
-	_, parameterized := types.AsParameterizedType(typ)
-	return parameterized && methodTypeMentionsFormal(typ, erasedInvocationBounds(cs))
+	if _, parameterized := types.AsParameterizedType(typ); parameterized {
+		return methodTypeMentionsFormal(typ, bounds)
+	}
+	// TR; is a declaration-owned class formal, while LR; is a named
+	// class even if a formal has the same spelling. Do not conflate them
+	// through the legacy inferred type representation. Arrays and method
+	// formals require separate use evidence and remain refused here.
+	for formal, erasure := range bounds {
+		if body == "()T"+formal+";" {
+			return erasure == result
+		}
+	}
+	return false
 }
 
 // Return lowering supplies the exact result erasure, and adds its unchecked

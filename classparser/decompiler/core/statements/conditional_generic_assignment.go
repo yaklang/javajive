@@ -65,6 +65,18 @@ func conditionalGenericAssignmentBridge(ctx *class_context.ClassContext, left, v
 		if values.IsNullLiteral(v) {
 			return true
 		}
+		if call, ok := v.(*values.FunctionCallExpression); ok {
+			// Inferred receiver arguments may give the source call a proper
+			// subtype. Its physical result, not that recovered type, is the
+			// original PUTFIELD operand. The fixed declaration proof also
+			// binds a class formal's original erasure before any adaptation.
+			_, result, err := callbinding.Descriptor(call.Descriptor)
+			if err != nil || !callbinding.Assignable(result, descriptor, bounded.InvocationMetadata) || !values.ErasedFixedInstanceResult(&bounded, call, result) {
+				return false
+			}
+			hiddenGenericResult = true
+			return true
+		}
 		raw, ok := types.RawClassFQN(values.TernaryArmRValueType(v))
 		if !ok || !callbinding.Assignable("L"+strings.ReplaceAll(raw, ".", "/")+";", descriptor, bounded.InvocationMetadata) {
 			return false
@@ -73,13 +85,6 @@ func conditionalGenericAssignmentBridge(ctx *class_context.ClassContext, left, v
 		case *values.JavaRef:
 			return leaf.StackVar == nil && leaf.CustomValue == nil
 		case *values.RefMember, *values.JavaClassMember:
-			return true
-		case *values.FunctionCallExpression:
-			produced := "L" + strings.ReplaceAll(raw, ".", "/") + ";"
-			if !values.ErasedFixedInstanceResult(&bounded, leaf, produced) {
-				return false
-			}
-			hiddenGenericResult = true
 			return true
 		default:
 			return false
