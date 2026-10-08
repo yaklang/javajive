@@ -89,12 +89,19 @@ func TestNativeMemberPrivateSuperBridgeRequiresOriginalOperands(t *testing.T) {
 }
 
 func TestNativeMemberPrivateSuperSourceKeepsEnclosingParameterIdentity(t *testing.T) {
-	for _, variant := range []string{"original nullable parameter", "literal null", "foreign parameter", "ordinary local", "this", "opaque", "stack alias", "wrong owner", "nil context"} {
+	for _, variant := range []string{"original nullable parameter", "literal null", "foreign parameter", "ordinary local", "this", "opaque", "stack alias", "wrong owner", "nil context", "missing original parameter", "wrong physical slot", "changed original seed", "copied public identity"} {
 		t.Run(variant, func(t *testing.T) {
 			id := &utils.VariableId{}
 			ctx := &class_context.ClassContext{ClassName: "SuperOwner$Child", LocalNames: map[*utils.VariableId]string{id: "SuperOwner.this"}}
 			ref := values.NewJavaRef(id, values.JavaNull, types.NewJavaClass("SuperOwner"))
 			ref.IsParam = true
+			if variant != "missing original parameter" {
+				slot := 1
+				if variant == "wrong physical slot" {
+					slot = 2
+				}
+				ref.MarkOriginalParameter(slot)
+			}
 			var value any = ref
 			owner := "SuperOwner"
 			switch variant {
@@ -114,6 +121,12 @@ func TestNativeMemberPrivateSuperSourceKeepsEnclosingParameterIdentity(t *testin
 				owner = "ForeignOwner"
 			case "nil context":
 				ctx = nil
+			case "changed original seed":
+				ref.Val = values.NewJavaLiteral("null", types.NewJavaClass(owner))
+			case "copied public identity":
+				other := values.NewJavaRef(id, values.JavaNull, types.NewJavaClass(owner))
+				other.IsParam = true
+				value = other
 			}
 			if got := nativeMemberSourceEnclosingParameter(value, ctx, owner); got != (variant == "original nullable parameter") {
 				t.Fatalf("enclosing parameter %v", got)

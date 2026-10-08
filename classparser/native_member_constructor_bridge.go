@@ -506,7 +506,14 @@ func nativeMemberSourceEnclosingParameter(value any, ctx *class_context.ClassCon
 		return false
 	}
 	ref, ok := values.UnpackSoltValue(v).(*values.JavaRef)
-	return ok && ref != nil && ref.Id != nil && ref.IsParam && !ref.IsThis && ref.CustomValue == nil && ref.StackVar == nil && ctx.LocalNames[ref.Id] == ctx.ShortTypeName(strings.ReplaceAll(owner, "/", "."))+".this"
+	if !ok || ref == nil || ref.Id == nil {
+		return false
+	}
+	// Every nonstatic member constructor's physical enclosing word is
+	// descriptor-seeded slot 1. A source name or public variable ID cannot
+	// turn another parameter, a replacement seed or an ordinary local into it.
+	slot, original := ref.OriginalParameterSlot()
+	return original && slot == 1 && ctx.LocalNames[ref.Id] == ctx.ShortTypeName(strings.ReplaceAll(owner, "/", "."))+".this"
 }
 
 // The anonymous constructor packet already proves capture stores, the original

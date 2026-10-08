@@ -147,7 +147,10 @@ func TestNativeAnonymousOwnershipAndConstructorRefusals(t *testing.T) {
 		// initializer proof. The corresponding independent round trip checks
 		// y's identity, modifiers, enclosing metadata and null exception.
 		{"post-super initialization", `class NativeArchiveOwner {static Runnable make(final Object x){return new Runnable(){final Object y=x;public void run(){if(y==null)throw new IllegalArgumentException();}};}}`, true},
-		{"nested member owner", `class NativeArchiveOwner {static Runnable make(){return new Runnable(){class Nested{int read(){return 1;}}public void run(){new Nested().read();}};}}`, false},
+		// Mixed source scopes now close the original declaration proof. The
+		// independent AnonymousNamedOwner round trip also observes Nested.read,
+		// declaring/enclosing metadata and both non-null/null physical outers.
+		{"nested member owner", anonymousNamedOwnerFixture, true},
 		{"nested owned anonymous declared call", `class NativeArchiveOwner {static Runnable make(){return new Runnable(){public void run(){new Runnable(){public void run(){}}.run();}};}}`, true},
 		{"lexical formal shadow", `class NativeArchiveOwner {static <E> Object make(final java.util.List<E> x){return new Object(){<E> Object get(){return x.get(0);}};}}`, true},
 	} {

@@ -7,82 +7,55 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// An otherwise empty named plan can be the root of a mixed lexical family.
-// Discover this need through original anonymous ownership, without granting
-// any child a source role. The subsequent joint constructor, symbol, archive
-// and final-source proofs still decide whether the family can be published.
-func (c *ClassObjectDumper) nativeMemberHasAnonymousNamedDeclarations() bool {
+// An otherwise empty named plan can still bind the declarations used by its
+// anonymous source scopes. Discover an actual original enclosing-method edge;
+// no arbitrary reference row or binary-name suffix grants a source role. The
+// joint constructor, symbol, archive and final-source proofs decide publication.
+func (c *ClassObjectDumper) nativeMemberHasAnonymousDeclarations() bool {
 	if c.foldSiblingResolver == nil || c.obj == nil {
 		return false
 	}
-	queue := []*ClassObject{c.obj}
-	seen := map[string]bool{c.obj.GetClassName(): true}
-	resolved := map[string]*ClassObject{c.obj.GetClassName(): c.obj}
-	for cursor := 0; cursor < len(queue); cursor++ {
-		parent := queue[cursor]
-		for _, attribute := range parent.Attributes {
-			table, ok := attribute.(*InnerClassesAttribute)
-			if !ok {
-				continue
-			}
-			if table == nil {
+	resolved := map[string]bool{}
+	for _, attribute := range c.obj.Attributes {
+		table, ok := attribute.(*InnerClassesAttribute)
+		if !ok {
+			continue
+		}
+		if table == nil {
+			return false
+		}
+		for _, row := range table.Classes {
+			if row == nil || !nativeProofWork(c.Work, 1) {
 				return false
 			}
-			for _, row := range table.Classes {
-				if row == nil || !nativeProofWork(c.Work, 1) {
-					return false
-				}
-				if row.InnerNameIndex != 0 {
-					continue
-				}
-				name, known := sourceBridgeClassName(parent, row.InnerClassInfoIndex)
-				if !known || seen[name] {
-					continue
-				}
-				object := resolved[name]
-				if object == nil {
-					if len(resolved) >= 64 || c.Work != nil && c.Work.CheckAlloc(int64(len(resolved)+1)*512) != nil {
-						return false
-					}
-					raw, known := c.foldSiblingResolver(name)
-					if !known {
-						return false
-					}
-					var err error
-					object, err = c.parseResolved(raw)
-					if err != nil || object.GetClassName() != name {
-						return false
-					}
-					resolved[name] = object
-				}
-				owner, method, anonymous := originalAnonymousOwner(object)
-				if !anonymous || owner != parent.GetClassName() {
-					continue
-				}
-				seen[name] = true
-				if _, known := nativeAnonymousOriginalContext(parent, object, method, c.Work); !known {
-					return false
-				}
-				for _, attribute := range object.Attributes {
-					if inner, ok := attribute.(*InnerClassesAttribute); ok {
-						if inner == nil {
-							return false
-						}
-						for _, declaration := range inner.Classes {
-							if declaration == nil || !nativeProofWork(c.Work, 1) {
-								return false
-							}
-							if declaration.InnerNameIndex != 0 && declaration.OuterClassInfoIndex != 0 {
-								outer, known := sourceBridgeClassName(object, declaration.OuterClassInfoIndex)
-								if known && outer == name {
-									return true
-								}
-							}
-						}
-					}
-				}
-				queue = append(queue, object)
+			if row.InnerNameIndex != 0 {
+				continue
 			}
+			name, known := sourceBridgeClassName(c.obj, row.InnerClassInfoIndex)
+			if !known {
+				return false
+			}
+			if resolved[name] {
+				continue
+			}
+			if len(resolved) >= 64 || c.Work != nil && c.Work.CheckAlloc(int64(len(resolved)+1)*512) != nil {
+				return false
+			}
+			resolved[name] = true
+			raw, known := c.foldSiblingResolver(name)
+			if !known {
+				return false
+			}
+			object, err := c.parseResolved(raw)
+			if err != nil || object.GetClassName() != name {
+				return false
+			}
+			owner, method, anonymous := originalAnonymousOwner(object)
+			if !anonymous || owner != c.obj.GetClassName() {
+				continue
+			}
+			_, known = nativeAnonymousOriginalContext(c.obj, object, method, c.Work)
+			return known
 		}
 	}
 	return false

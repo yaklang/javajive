@@ -676,7 +676,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if !c.planNativeMethodLocals(p) {
 		return nil
 	}
-	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 && !c.nativeMemberHasAnonymousNamedDeclarations() {
+	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 && !c.nativeMemberHasAnonymousDeclarations() {
 		return nil
 	}
 	for name, child := range p.children {

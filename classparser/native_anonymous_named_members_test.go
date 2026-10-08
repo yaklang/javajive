@@ -336,7 +336,7 @@ func TestNativeAnonymousNamedEmptyRootAdmissionIsIndependentOfReadOrder(t *testi
 
 func TestNativeAnonymousNamedSuperSourceRequiresOriginalEnclosingOperand(t *testing.T) {
 	files := nativeCompileClasses(t, anonymousMemberSuperIdentityFixture)
-	for _, variant := range []string{"original", "effectful outer", "null outer", "foreign parameter", "THIS receiver", "missing binding", "wrong PC"} {
+	for _, variant := range []string{"original", "effectful outer", "null outer", "foreign parameter", "THIS receiver", "missing binding", "wrong PC", "missing original parameter", "wrong physical slot", "changed original seed", "copied public identity"} {
 		t.Run(variant, func(t *testing.T) {
 			archive := nativeArchive(t, files)
 			defer archive.Close()
@@ -358,6 +358,13 @@ func TestNativeAnonymousNamedSuperSourceRequiresOriginalEnclosingOperand(t *test
 			ctx := &class_context.ClassContext{ClassName: child.object.GetClassName(), LocalNames: map[*utils.VariableId]string{id: "OriginalNamespace$1.this"}}
 			outer := values.NewJavaRef(id, nil, types.NewJavaClass(child.owner))
 			outer.IsParam = true
+			if variant != "missing original parameter" {
+				slot := 1
+				if variant == "wrong physical slot" {
+					slot = 2
+				}
+				outer.MarkOriginalParameter(slot)
+			}
 			reader := archive.nativeMemberReader(child.object)
 			reader.FuncCtx = ctx
 			reader.nativeMemberRoot, reader.nativeMemberCurrent = family, child
@@ -380,6 +387,12 @@ func TestNativeAnonymousNamedSuperSourceRequiresOriginalEnclosingOperand(t *test
 				ctx.LocalNames = nil
 			case "wrong PC":
 				pc++
+			case "changed original seed":
+				outer.Val = values.JavaNull
+			case "copied public identity":
+				ref := values.NewJavaRef(id, nil, types.NewJavaClass(child.owner))
+				ref.IsParam = true
+				args[0] = ref
 			}
 			if source, known := ctx.SourceMemberDelegation(ctor.delegateOwner, ctor.delegateDescriptor, pc, args); known != (variant == "original") {
 				t.Fatalf("hidden SUPER enclosing operand %q admitted=%v", source, known)

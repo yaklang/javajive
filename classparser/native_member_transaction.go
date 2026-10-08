@@ -56,7 +56,7 @@ func (z *JarFS) nativeMemberTransactionOwner(obj *ClassObject) (string, bool) {
 				}
 			}
 		}
-		if !candidate {
+		if !candidate && !z.nativeMemberReader(obj).nativeMemberHasAnonymousDeclarations() {
 			return "", false
 		}
 	}
