@@ -366,9 +366,21 @@ func TestNativeMemberDescriptorOnlyDependencyUsesAcceptedScope(t *testing.T) {
 	}
 	files["NativeArchiveOwner.class"] = obj.Bytes()
 	z := nativeArchive(t, files)
+	defer z.Close()
+	entry := z.nativeMemberEntry(obj)
+	if entry == nil || entry.family == nil {
+		t.Fatal("proved descriptor-only declaration dependency did not complete")
+	}
+	p := entry.family
+	if p.children["NativeArchiveOwner$Child"] == nil || p.sourceDependencies["OtherOwner$Child"] != "OtherOwner.Child" || p.children["OtherOwner$Child"] != nil || p.lexicalObjects["OtherOwner$Child"] != nil || len(p.constructorBridges("OtherOwner$Child")) != 0 {
+		t.Fatal("descriptor-only name imported foreign lexical or private ownership")
+	}
 	child, e := z.ReadFile("NativeArchiveOwner$Child.class")
-	if e != nil || strings.Contains(string(child), "original member body owned by") {
-		t.Fatalf("joint dependency incorrectly owned %v %s", e, child)
+	// The exact original-field/Signature fixture also passes independent
+	// original-first JVM/ABI/null-enclosing round trips in the adversarial bank.
+	// Both complete families now retain their own children independently.
+	if e != nil || !strings.Contains(string(child), "original member body owned by NativeArchiveOwner;") {
+		t.Fatalf("own member declaration was not retained %v %s", e, child)
 	}
 	second, e := z.ReadFile("OtherOwner$Child.class")
 	if e != nil || !strings.Contains(string(second), "original member body owned by") {

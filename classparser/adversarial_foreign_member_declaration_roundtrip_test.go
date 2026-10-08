@@ -104,3 +104,47 @@ public class DeclarationDriver { public static void main(String[] args) { int ro
 		return nativeCompileSourceReleaseClasses(t, map[string]string{"declaration/provider/Namespace.java": owner, "declaration/consumer/Reader.java": consumer, "declaration/consumer/DeclarationDriver.java": driver}, debug, "8")
 	}, []string{"declaration/provider/Namespace", "declaration/consumer/Reader"}, "declaration.consumer.DeclarationDriver", "3:public:separate:namespace\n", nil, nativeLexicalExactSignatures)
 }
+
+func TestAdversarialIndependentDeclarationFromDescriptorAndNestedBoundRoundTrip(t *testing.T) {
+	// Keep the exact declarations from the former descriptor-only refusal.
+	// Only the original root's redundant foreign InnerClasses row is omitted;
+	// its descriptors, Signature and bytecode remain the independent input.
+	const fixture = `class NativeArchiveOwner<T extends java.util.List<OtherOwner.Child>>{OtherOwner.Child field;java.util.List<OtherOwner.Child> generic;class Child{Child(){}}Child make(){return new Child();}}class OtherOwner{class Child{Child(){}}Child make(){return new Child();}}
+class DescriptorDeclarationDriver{public static void main(String[]args)throws Exception{int rows=0;
+ for(int iteration=0;iteration<3;iteration++){OtherOwner declaring=new OtherOwner();OtherOwner.Child foreign=declaring.make();NativeArchiveOwner<java.util.ArrayList<OtherOwner.Child>> reader=new NativeArchiveOwner<>();
+  for(OtherOwner.Child value:new OtherOwner.Child[]{null,foreign,declaring.make()}){reader.field=value;reader.generic=java.util.Arrays.asList(value,null,foreign);NativeArchiveOwner<java.util.ArrayList<OtherOwner.Child>>.Child own=reader.make();
+   if(reader.field!=value||reader.generic.get(0)!=value||reader.generic.get(2)!=foreign||own.getClass().getDeclaringClass()!=NativeArchiveOwner.class||foreign.getClass().getDeclaringClass()!=OtherOwner.class||!NativeArchiveOwner.class.getTypeParameters()[0].getBounds()[0].getTypeName().equals("java.util.List<OtherOwner$Child>")||!NativeArchiveOwner.class.getDeclaredField("generic").getGenericType().getTypeName().equals("java.util.List<OtherOwner$Child>"))throw new AssertionError("descriptor/bound/independent declaration");rows++;
+  }
+ }
+ java.lang.reflect.Constructor<?> ctor=OtherOwner.Child.class.getDeclaredConstructor(OtherOwner.class);ctor.setAccessible(true);Object nullable=ctor.newInstance(new Object[]{null});java.lang.reflect.Field capture=OtherOwner.Child.class.getDeclaredField("this$0");capture.setAccessible(true);if(!capture.isSynthetic()||capture.get(nullable)!=null)throw new AssertionError("original nullable enclosing constructor");
+ System.out.println(rows+":descriptor:bound:independent:declaration");}}
+`
+	testNativeIndependentMutatedFamilyFixture(t, fixture, []string{"NativeArchiveOwner", "OtherOwner"}, "DescriptorDeclarationDriver", "9:descriptor:bound:independent:declaration\n", func(t *testing.T, files map[string][]byte) {
+		root, err := Parse(files["NativeArchiveOwner.class"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed := 0
+		for _, attribute := range root.Attributes {
+			if table, ok := attribute.(*InnerClassesAttribute); ok {
+				var kept []*InnerClassInfo
+				for _, row := range table.Classes {
+					name, known := sourceBridgeClassName(root, row.InnerClassInfoIndex)
+					if !known {
+						t.Fatal("original root declaration row")
+					}
+					if name == "OtherOwner$Child" {
+						removed++
+						continue
+					}
+					kept = append(kept, row)
+				}
+				table.Classes, table.NumberOfClasses, table.AttrLen = kept, uint16(len(kept)), uint32(2+8*len(kept))
+			}
+		}
+		if removed != 1 {
+			t.Fatalf("redundant root declaration row count=%d", removed)
+		}
+		files["NativeArchiveOwner.class"] = root.Bytes()
+	}, nativeLexicalExactSignatures)
+}
