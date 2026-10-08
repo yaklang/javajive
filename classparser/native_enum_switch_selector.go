@@ -11,19 +11,22 @@ import (
 )
 
 // A selector certificate is an ordered tree of original stack producers, not
-// an inference from the enum result type. Every leaf identifies an unchanged
-// descriptor parameter; every call retains its original invocation and operand
-// order. No DUP, STORE, phi, allocation, or unsupported producer can disappear
-// into this tree. javac's switch table read remains before this entire tree.
+// an inference from the enum result type. A leaf identifies an unchanged
+// descriptor parameter or a typed original LOAD with one reaching STORE;
+// every call retains its original invocation and operand order. No DUP, STORE,
+// phi, allocation, or unsupported producer can disappear into this tree.
+// A local producer stays in its original declaration before the table read;
+// javac's switch table read remains before this entire selector tree.
 type nativeEnumSelectorProducer struct {
 	opcode                            int
 	pc, slot                          int
 	owner, member, descriptor, result string
 	operands                          []*nativeEnumSelectorProducer
+	local                             *nativeEnumLocalRead
 }
 
-func nativeEnumSelectorPacket(obj *ClassObject, ops []*core.OpCode, start int, params map[int]string, enum string, work *workbudget.Budget) (*nativeEnumSelectorProducer, int, bool) {
-	if start < 0 || start >= len(ops) || !nativeProofWork(work, 64) || work != nil && work.CheckAlloc(64*1024) != nil {
+func nativeEnumSelectorPacket(obj *ClassObject, ops []*core.OpCode, start int, params map[int]string, enum string, work *workbudget.Budget, locals ...map[int]*nativeEnumLocalRead) (*nativeEnumSelectorProducer, int, bool) {
+	if len(locals) > 1 || start < 0 || start >= len(ops) || !nativeProofWork(work, 64) || work != nil && work.CheckAlloc(64*1024) != nil {
 		return nil, 0, false
 	}
 	stack := make([]*nativeEnumSelectorProducer, 0, 16)
@@ -39,6 +42,13 @@ func nativeEnumSelectorPacket(obj *ClassObject, ops []*core.OpCode, start int, p
 		if descriptor := params[slot]; descriptor != "" && constructorMotionLoad(op, descriptor) {
 			stack = append(stack, &nativeEnumSelectorProducer{opcode: op.Instr.OpCode, pc: int(op.CurrentOffset), slot: slot, result: descriptor})
 			continue
+		}
+		if len(locals) == 1 && params[slot] == "" {
+			read := locals[0][int(op.CurrentOffset)]
+			if read != nil && read.pc == int(op.CurrentOffset) && read.slot == slot && read.opcode == op.Instr.OpCode && read.storePC >= 0 && read.descriptor != "" && constructorMotionLoad(op, read.descriptor) {
+				stack = append(stack, &nativeEnumSelectorProducer{opcode: op.Instr.OpCode, pc: int(op.CurrentOffset), slot: slot, result: read.descriptor, local: read})
+				continue
+			}
 		}
 		opcode := op.Instr.OpCode
 		if opcode == core.OP_GETFIELD || opcode == core.OP_GETSTATIC {
@@ -129,6 +139,11 @@ func nativeEnumSelectorSource(original *nativeEnumSelectorProducer, value values
 		ref, ok := v.(*values.JavaRef)
 		if !ok {
 			return false
+		}
+		if original.local != nil {
+			read := original.local
+			pc, slot, known := ref.OriginalLocalDeclaration(ref.Val)
+			return ref.Id != nil && known && pc == read.storePC && slot == read.slot && read.pc == original.pc && read.opcode == original.opcode && read.slot == original.slot && read.descriptor == original.result
 		}
 		slot, known := ref.OriginalParameterSlot()
 		if original.slot == 0 && !known {

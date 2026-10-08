@@ -14,6 +14,7 @@ type nativeEnumParameterFlow struct {
 	entry *core.OpCode
 	byPC  map[int]*core.OpCode
 	edges map[*core.OpCode][]core.SemanticEdge
+	code  *CodeAttribute
 }
 
 func nativeEnumParameterOriginalFlow(d *core.Decompiler, code *CodeAttribute, work *workbudget.Budget) *nativeEnumParameterFlow {
@@ -31,7 +32,7 @@ func nativeEnumParameterOriginalFlow(d *core.Decompiler, code *CodeAttribute, wo
 	if err != nil || g == nil || g.Err != nil || len(g.Nodes) == 0 || len(g.Nodes) > 8192 || !nativeProofWork(work, int64(len(g.Nodes)+len(g.Edges))) || work != nil && work.CheckAlloc(int64(len(g.Nodes))*128+int64(len(g.Edges))*64) != nil {
 		return nil
 	}
-	flow := &nativeEnumParameterFlow{entry: g.Nodes[0], byPC: map[int]*core.OpCode{}, edges: map[*core.OpCode][]core.SemanticEdge{}}
+	flow := &nativeEnumParameterFlow{entry: g.Nodes[0], byPC: map[int]*core.OpCode{}, edges: map[*core.OpCode][]core.SemanticEdge{}, code: code}
 	for _, op := range g.Nodes {
 		if op == nil || op.Instr == nil || flow.byPC[int(op.CurrentOffset)] != nil {
 			return nil
@@ -111,8 +112,15 @@ func (f *nativeEnumParameterFlow) selector(node *nativeEnumSelectorProducer, wor
 	if f == nil || node == nil || depth >= 32 || !nativeProofWork(work, 1) {
 		return false
 	}
-	if node.owner == "" && !f.parameterAt(node, work) {
-		return false
+	if node.owner == "" {
+		if node.local != nil {
+			pc, known := f.reachingStore(node, work)
+			if !known || pc != node.local.storePC {
+				return false
+			}
+		} else if !f.parameterAt(node, work) {
+			return false
+		}
 	}
 	for _, operand := range node.operands {
 		if !f.selector(operand, work, depth+1) {

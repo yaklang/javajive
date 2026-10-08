@@ -205,6 +205,8 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 						return false
 					}
 					var parameterFlow *nativeEnumParameterFlow
+					var localReads map[int]*nativeEnumLocalRead
+					localsChecked := false
 					for i, op := range ops {
 						if (op.Instr.OpCode == core.OP_LDC || op.Instr.OpCode == core.OP_LDC_W || op.Instr.OpCode == core.OP_NEW || op.Instr.OpCode == core.OP_CHECKCAST || op.Instr.OpCode == core.OP_INSTANCEOF || op.Instr.OpCode == core.OP_ANEWARRAY || op.Instr.OpCode == core.OP_MULTIANEWARRAY) && len(op.Data) > 0 {
 							idx := uint16(op.Data[0])
@@ -224,6 +226,22 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 							return false
 						}
 						selector, ordinal, known := nativeEnumSelectorPacket(object, ops, i+1, types, arr.enum, work)
+						if !known {
+							if parameterFlow == nil {
+								parameterFlow = nativeEnumParameterOriginalFlow(d, code, work)
+							}
+							if !localsChecked {
+								reader := z.nativeMemberReader(object)
+								reader.Work = work
+								var proved bool
+								localReads, proved = reader.nativeEnumLocalSelectorReads(method, code, parameterFlow, types)
+								if !proved {
+									return false
+								}
+								localsChecked = true
+							}
+							selector, ordinal, known = nativeEnumSelectorPacket(object, ops, i+1, types, arr.enum, work, localReads)
+						}
 						if !known {
 							return false
 						}
