@@ -36,6 +36,7 @@ type ClassObjectDumper struct {
 	nativeMemberLookup             func(string) *nativeMemberClass
 	nativeMemberCalls              map[string]map[int]*nativeMemberAllocation
 	nativeMemberBody               []statements.Statement
+	nativeConstructorEnclosing     *values.JavaRef
 	nativeSourceNamesReady         bool
 	nativeMemberChecks             map[string]map[int]bool
 	nativeEnumConstantCurrent      *nativeEnumConstantBody
@@ -3916,6 +3917,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			}
 		}
 		if codeAttr, ok := attribute.(*CodeAttribute); ok {
+			priorEnclosing := c.nativeConstructorEnclosing
+			c.nativeConstructorEnclosing = nil
+			defer func() { c.nativeConstructorEnclosing = priorEnclosing }()
 			// Clear a sibling method's source binding before any IR analysis can
 			// request provisional text. Install this method's proof only after
 			// its complete statement graph and declaration identities are known.

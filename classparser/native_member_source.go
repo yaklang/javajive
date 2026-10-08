@@ -857,6 +857,7 @@ type nativeMemberAllocation struct {
 	enclosingReadPC          int
 	implicitEnclosing        bool
 	implicitReceiverClass    string
+	enclosingParameter       *nativeMemberEnclosingParameter
 	freshEnclosing           *nativeMemberFreshEnclosing
 	anonymousEnclosingRead   *nativeMemberLexicalRead
 	anonymousEnclosingMethod string
@@ -1096,7 +1097,13 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 					if plan.enclosingReadPC < 0 && plan.slot == 0 && cursor < len(ops) && ops[cursor].Instr.OpCode != core.OP_DUP && nativeMemberInheritedAllocationThis(c.obj, m, ops, child, originalDeclarations, c.Work) {
 						plan.implicitReceiverClass = c.obj.GetClassName()
 					}
-					if plan.enclosingReadPC < 0 && plan.implicitReceiverClass == "" && (plan.slot != 0 || m.AccessFlags&8 != 0 || c.obj.GetClassName() != child.owner) {
+					if plan.enclosingReadPC < 0 && cursor < len(ops) && ops[cursor].Instr.OpCode != core.OP_DUP {
+						plan.enclosingParameter = nativeMemberConstructorEnclosingParameter(c.obj, m, code, ops, i, p.children[c.obj.GetClassName()], child, c.Work)
+						if plan.enclosingParameter != nil {
+							plan.implicitEnclosing = true
+						}
+					}
+					if plan.enclosingReadPC < 0 && plan.implicitReceiverClass == "" && plan.enclosingParameter == nil && (plan.slot != 0 || m.AccessFlags&8 != 0 || c.obj.GetClassName() != child.owner) {
 						if cursor+2 >= len(ops) || ops[cursor].Instr.OpCode != core.OP_DUP {
 							return nil, false
 						}
@@ -1527,6 +1534,10 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			if !nativeMemberLexicalEnclosingOperand(args[0].Value, plan, p, c.obj.GetClassName(), c.nativeMemberBody, c.Work) {
 				return fail()
 			}
+		} else if plan.enclosingParameter != nil {
+			if !c.nativeMemberConstructorEnclosingOperand(args[0].Value, plan.enclosingParameter, ctx) {
+				return fail()
+			}
 		} else if !args[0].Receiver && !args[0].Local {
 			return fail()
 		}
@@ -1568,6 +1579,13 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		allocationBinding.SiblingClassSig = binding.SiblingClassSig
 		arguments := invoke.ArgumentStrings(&allocationBinding)
 		sourceName := plan.child.name
+		if plan.enclosingParameter != nil {
+			var nameKnown bool
+			sourceName, nameKnown = c.nativeMemberEnclosingParameterAllocationName(plan, p, ctx)
+			if !nameKnown {
+				return fail()
+			}
+		}
 		diamond := false
 		if plan.child.formalCount > 0 {
 			// Java forbids a raw member beneath a parameterized enclosing
@@ -1709,6 +1727,7 @@ func (c *ClassObjectDumper) prepareNativeMemberConstructor(code *CodeAttribute, 
 	if !ok || outer.Id == nil || !outer.IsParam || outer.CustomValue != nil || outer.StackVar != nil {
 		return nil, nil, fmt.Errorf("unproved enclosing parameter")
 	}
+	c.nativeConstructorEnclosing = outer
 	if c.FuncCtx.LocalNames == nil {
 		c.FuncCtx.LocalNames = map[*coreutils.VariableId]string{}
 	}
