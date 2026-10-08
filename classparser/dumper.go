@@ -96,7 +96,8 @@ type ClassObjectDumper struct {
 	// parameters (Function<? super T, R> becomes raw Function). Before simulating that hidden
 	// method, project same-erasure parameterized capture types back onto those parameters so its
 	// body is rendered under the source-level generic contract.
-	lambdaCaptureTypes map[string][]types.JavaType
+	lambdaCaptureTypes       map[string][]types.JavaType
+	nativeLambdaLocalSources map[string]*nativeLambdaLocalCaptureSource
 	// lambdaLocalSeq hands each inlined lambda body a unique id so its own locals can be renamed
 	// into a private `lv<seq>_<n>` namespace. A lambda arrow body is spliced INLINE into the
 	// enclosing method, and Java forbids a local declared in the lambda body from shadowing a

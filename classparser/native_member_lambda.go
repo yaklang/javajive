@@ -45,6 +45,9 @@ func nativeMemberLambdaImplementation(child *nativeMemberClass, method *MemberIn
 	}
 	name, nok := sourceBridgeUTF8(child.object, method.NameIndex)
 	desc, dok := sourceBridgeUTF8(child.object, method.DescriptorIndex)
+	if child.lambdaContext.localCaptures == nil {
+		child.lambdaContext.localCaptures = map[string]*nativeLambdaLocalCaptureSite{}
+	}
 	if !nok || !dok || !nativeLambdaImplementationScope(child.object, name, desc, "", false, work, child.lambdaContext) {
 		return false
 	}
@@ -143,6 +146,9 @@ func nativeMemberLambdaSourceClosed(child *nativeMemberClass, dumper *ClassObjec
 		if !nok || !dok || !slices.Contains(dumper.lambdaMethods[name], desc) || body == nil || body.member != method || body.bodyCode == "stub" || body.checkedEscape || strings.Contains(body.code, DecompileStubMarker) {
 			return false
 		}
+		if site := child.lambdaContext.localCaptures[name+desc]; site != nil && !nativeLambdaLocalCaptureSourceClosed(site, dumper.nativeLambdaLocalSources[name+desc], work) {
+			return false
+		}
 	}
 	return true
 }
@@ -151,8 +157,9 @@ func nativeMemberLambdaSourceClosed(child *nativeMemberClass, dumper *ClassObjec
 // reference-shaped factory return. Keep a bounded, unambiguous erased SAM;
 // intersection/covariant multi-descriptor families require their own proof.
 type nativeLambdaImplementationContext struct {
-	resolve  func(string) (*ClassObject, bool)
-	metadata callbinding.Provider
+	resolve       func(string) (*ClassObject, bool)
+	metadata      callbinding.Provider
+	localCaptures map[string]*nativeLambdaLocalCaptureSite
 }
 
 func nativeLambdaFunctionalTarget(descriptor, name, sam string, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {

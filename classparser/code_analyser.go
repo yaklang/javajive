@@ -207,6 +207,9 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
 	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter) (string, error) {
+		if !dumper.recordNativeLambdaLocalCaptureSource(name, desc, codeAttr, captured) {
+			return "", fmt.Errorf("original lambda local capture source is not closed")
+		}
 		dumper.lambdaMethods[name] = append(dumper.lambdaMethods[name], desc)
 		dumper.lambdaCaptureCount[name+desc] = len(captured)
 		capturedTypes := make([]types.JavaType, len(captured))

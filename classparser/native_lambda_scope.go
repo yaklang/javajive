@@ -234,6 +234,7 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 	}
 	sites := 0
 	implBodies := 0
+	var localSite *nativeLambdaLocalCaptureSite
 	for _, m := range object.Methods {
 		n, _ := sourceBridgeUTF8(object, m.NameIndex)
 		md, _ := sourceBridgeUTF8(object, m.DescriptorIndex)
@@ -354,16 +355,49 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 				}
 				used := map[int]bool{}
 				start := i - len(captures)
+				if len(captures) > 64 || work != nil && work.CheckAlloc(int64(len(captures))*192+512) != nil {
+					return false
+				}
+				operands := make([]*nativeEnumSelectorProducer, len(captures))
+				var localReads map[int]*nativeEnumLocalRead
+				hasLocal := false
 				for j, p := range captures {
 					load := ops[start+j]
 					slot := core.GetRetrieveIdx(load)
-					if slots[slot] != p || !constructorMotionLoad(load, p) || j == 0 && impl.AccessFlags&StaticFlag == 0 && slot != 0 {
+					if !constructorMotionLoad(load, p) || j == 0 && impl.AccessFlags&StaticFlag == 0 && slot != 0 {
 						return false
 					}
-					used[slot] = true
-					if p == "J" || p == "D" {
-						used[slot+1] = true
+					operand := &nativeEnumSelectorProducer{opcode: load.Instr.OpCode, pc: int(load.CurrentOffset), slot: slot, result: p}
+					if slots[slot] != p {
+						if slots[slot] != "" || context.localCaptures == nil {
+							return false
+						}
+						if localReads == nil {
+							flow := nativeEnumParameterOriginalFlow(decoder, code, work)
+							if flow == nil {
+								return false
+							}
+							reader := NewClassObjectDumper(object)
+							reader.Work = work
+							var known bool
+							localReads, known = reader.nativeTypedLocalReads(m, code, flow, slots, true)
+							if !known {
+								return false
+							}
+						}
+						read := localReads[int(load.CurrentOffset)]
+						if read == nil || read.slot != slot || read.descriptor != p || !nativeLambdaLocalSingleStore(ops, read, work) {
+							return false
+						}
+						operand.local = read
+						hasLocal = true
+					} else {
+						used[slot] = true
+						if p == "J" || p == "D" {
+							used[slot+1] = true
+						}
 					}
+					operands[j] = operand
 				}
 				entry := sort.SearchInts(entries, int(ops[start].CurrentOffset)+1)
 				if entry < len(entries) && entries[entry] <= int(op.CurrentOffset) {
@@ -372,9 +406,21 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 				if !nativeEnumSelectorParametersUnchanged(ops, used) {
 					return false
 				}
+				if hasLocal {
+					if localSite != nil {
+						return false
+					}
+					localSite = &nativeLambdaLocalCaptureSite{method: m, code: code, pc: int(op.CurrentOffset), operands: operands}
+				}
 				sites++
 			}
 		}
 	}
-	return sites == 1 && implBodies == 1
+	if sites != 1 || implBodies != 1 {
+		return false
+	}
+	if localSite != nil {
+		context.localCaptures[name+desc] = localSite
+	}
+	return true
 }

@@ -31,6 +31,7 @@ func (d *Decompiler) snapshotDynamicOperands(op *OpCode, sim StackSimulation, ar
 	// JVM stack-pop order is reversed; source evaluation order must be restored.
 	for i := len(args) - 1; i >= 0; i-- {
 		ref := sim.NewVar(args[i])
+		ref.MarkOriginalDynamicOperand(int(op.CurrentOffset), len(args)-1-i, args[i])
 		ref.ResetVarType(ref.Type().Copy())
 		var expected types.JavaType
 		if len(parameters) == len(args) {

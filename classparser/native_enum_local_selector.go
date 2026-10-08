@@ -103,6 +103,13 @@ func (f *nativeEnumParameterFlow) reachingStore(read *nativeEnumSelectorProducer
 // tables or a later consumer. Source publication separately requires that very
 // decoded STORE declaration and its unchanged seed; no producer is inlined.
 func (c *ClassObjectDumper) nativeEnumLocalSelectorReads(method *MemberInfo, code *CodeAttribute, flow *nativeEnumParameterFlow, params map[int]string) (map[int]*nativeEnumLocalRead, bool) {
+	return c.nativeTypedLocalReads(method, code, flow, params, false)
+}
+
+// The same original STORE/LOAD identity proof admits canonical computational
+// words for local captures. Verifier int is not a narrow source descriptor:
+// Z/B/C/S still require a separate range/declaration certificate.
+func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *CodeAttribute, flow *nativeEnumParameterFlow, params map[int]string, primitiveWords bool) (map[int]*nativeEnumLocalRead, bool) {
 	if c == nil || c.obj == nil || method == nil || code == nil || flow == nil || flow.code != code || len(c.obj.Methods) > 65535 || len(method.Attributes) > 65535 {
 		return nil, false
 	}
@@ -174,17 +181,38 @@ func (c *ClassObjectDumper) nativeEnumLocalSelectorReads(method *MemberInfo, cod
 		}
 		access := core.LocalAccessOf(instruction.Opcode)
 		slot := instruction.Local
-		if !access.Read || access.Write || access.Width != 1 || slot < 0 || params[slot] != "" || slot >= len(record.Before.Locals) || len(record.BeforeOrigins) != len(record.Before.Locals)+len(record.Before.Stack) {
+		if !access.Read || access.Write || access.Width < 1 || access.Width > 2 || slot < 0 || params[slot] != "" || slot >= len(record.Before.Locals) || len(record.BeforeOrigins) != len(record.Before.Locals)+len(record.Before.Stack) {
 			continue
 		}
 		word := record.Before.Locals[slot]
 		origin := record.BeforeOrigins[slot]
-		if word.Kind != frametransfer.Ref || word.Class == "" || (origin.Kind != ssabuild.OriginInstr && origin.Kind != ssabuild.OriginParam) {
+		if origin.Kind != ssabuild.OriginInstr && origin.Kind != ssabuild.OriginParam {
 			continue
 		}
-		descriptor := word.Class
-		if !strings.HasPrefix(descriptor, "[") {
-			descriptor = "L" + descriptor + ";"
+		descriptor := ""
+		if word.Kind == frametransfer.Ref && word.Class != "" {
+			descriptor = word.Class
+			if !strings.HasPrefix(descriptor, "[") {
+				descriptor = "L" + descriptor + ";"
+			}
+		} else if primitiveWords {
+			switch word.Kind {
+			case frametransfer.Int:
+				descriptor = "I"
+			case frametransfer.Float:
+				descriptor = "F"
+			case frametransfer.Long:
+				descriptor = "J"
+			case frametransfer.Double:
+				descriptor = "D"
+			}
+		}
+		width := word.Width()
+		if descriptor == "" || access.Width != width || slot+width > len(record.Before.Locals) {
+			continue
+		}
+		if width == 2 && (record.Before.Locals[slot+1].Kind != frametransfer.TailOf(word).Kind || record.BeforeOrigins[slot+1] != origin) {
+			continue
 		}
 		_, parsed, err := callbinding.Descriptor("()" + descriptor)
 		if err != nil || parsed != descriptor {
@@ -197,13 +225,19 @@ func (c *ClassObjectDumper) nativeEnumLocalSelectorReads(method *MemberInfo, cod
 		}
 		stored, found := records[storePC]
 		store, storeKnown := ir.InstrByID(methodir.InstrID(storePC))
-		if !found || !storeKnown || !core.LocalAccessOf(store.Opcode).Write || store.Local != slot || len(stored.Uses) != 1 || stored.Uses[0] != origin || len(stored.Before.Stack) == 0 || len(stored.BeforeOrigins) != len(stored.Before.Locals)+len(stored.Before.Stack) {
+		if !found || !storeKnown || !core.LocalAccessOf(store.Opcode).Write || store.Local != slot || len(stored.Uses) != 1 || stored.Uses[0] != origin || len(stored.Before.Stack) < width || len(stored.BeforeOrigins) != len(stored.Before.Locals)+len(stored.Before.Stack) {
 			continue
 		}
-		// An initialized reference, not a wide/primitive word or an allocation
-		// still awaiting its original constructor, must reach this exact store.
-		value := stored.Before.Stack[len(stored.Before.Stack)-1]
-		if value.Kind != frametransfer.Ref || value.Class != word.Class || core.LocalAccessOf(store.Opcode).Width != 1 || stored.BeforeOrigins[len(stored.BeforeOrigins)-1] != origin {
+		// The initialized reference or complete computational word reaches
+		// this STORE and LOAD unchanged. Both halves of category-2 values
+		// must retain their type and identical origin; tails are never values.
+		stackIndex := len(stored.Before.Stack) - width
+		value := stored.Before.Stack[stackIndex]
+		originIndex := len(stored.Before.Locals) + stackIndex
+		if value.Kind != word.Kind || value.Class != word.Class || core.LocalAccessOf(store.Opcode).Width != width || stored.BeforeOrigins[originIndex] != origin {
+			continue
+		}
+		if width == 2 && (stored.Before.Stack[stackIndex+1].Kind != frametransfer.TailOf(value).Kind || stored.BeforeOrigins[originIndex+1] != origin) {
 			continue
 		}
 		if c.Work != nil && c.Work.CheckAlloc(int64(len(result)+1)*128) != nil {
