@@ -11,24 +11,38 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// InnerClasses catalogs can retain foreign class constants with no remaining
-// source use. Only source transactions may omit those standalone constants;
-// the archive index still records the complete original constant pool. Scan
-// all original code, including unreachable instructions, in one pass rather
-// than rescanning it for each class name. Every verifier-frame class word is
-// retained too; unknown structural metadata preserves every class constant.
+// A constant-pool catalog can retain symbols with no remaining source use.
+// Source transactions follow typed roots in original declarations, code and
+// metadata; the immutable archive index keeps the complete original pool.
+// Scan all code, including unreachable instructions, once. Verifier-frame
+// class words remain roots; opaque structural metadata keeps the whole pool.
 func nativeMemberSourceBindingNames(object *ClassObject, work *workbudget.Budget) ([]string, bool) {
 	if object == nil || len(object.ConstantPool) > 65534 || len(object.Fields) > 65535 || len(object.Methods) > 65535 || !nativeMemberDeclarationMetadataBounded(object, work) || work != nil && work.CheckAlloc(int64(len(object.ConstantPool))*32) != nil {
 		return nil, false
 	}
 	mask := map[uint16]bool{}
+	symbolicMask := map[uint16]bool{}
+	constants := []uint16{}
 	keepAll := false
 	debugNames := map[string]bool{}
+	require := func(index uint16, tags ...uint8) bool {
+		if !nativeProofWork(work, 1) || object.checkCPIndex(index, false, "source symbolic dependency", tags...) != nil {
+			return false
+		}
+		if !symbolicMask[index] {
+			if work != nil && work.CheckAlloc(int64(len(symbolicMask)+1)*32+int64(len(object.ConstantPool))*32) != nil {
+				return false
+			}
+			symbolicMask[index] = true
+			constants = append(constants, index)
+		}
+		return true
+	}
 	retain := func(index uint16, optional bool) bool {
 		if index == 0 && optional {
 			return true
 		}
-		if !nativeProofWork(work, 1) || object.checkCPIndex(index, false, "source class dependency", CONSTANT_Class) != nil {
+		if !require(index, CONSTANT_Class) {
 			return false
 		}
 		mask[index] = true
@@ -54,10 +68,6 @@ func nativeMemberSourceBindingNames(object *ClassObject, work *workbudget.Budget
 				return nil, false
 			}
 		}
-		// Unused symbolic member references stay conservative obligations too.
-		if member := nativeConstantMember(constant); member != nil && !retain(member.ClassIndex, false) {
-			return nil, false
-		}
 	}
 	var attributes func([]AttributeInfo, int) bool
 	attributes = func(list []AttributeInfo, depth int) bool {
@@ -74,8 +84,11 @@ func nativeMemberSourceBindingNames(object *ClassObject, work *workbudget.Budget
 					if method == nil || len(method.BootstrapArguments) > 65535 || !nativeProofWork(work, int64(len(method.BootstrapArguments))+1) {
 						return false
 					}
+					if !require(method.BootstrapMethodRef, CONSTANT_MethodHandle) {
+						return false
+					}
 					for _, index := range method.BootstrapArguments {
-						if object.checkCPIndex(index, false, "bootstrap class dependency", CONSTANT_String, CONSTANT_Class, CONSTANT_Integer, CONSTANT_Long, CONSTANT_Float, CONSTANT_Double, CONSTANT_MethodHandle, CONSTANT_MethodType, CONSTANT_Dynamic) != nil {
+						if !require(index, CONSTANT_String, CONSTANT_Class, CONSTANT_Integer, CONSTANT_Long, CONSTANT_Float, CONSTANT_Double, CONSTANT_MethodHandle, CONSTANT_MethodType, CONSTANT_Dynamic) {
 							return false
 						}
 						if _, isClass := object.ConstantPool[index-1].(*ConstantClassInfo); isClass && !retain(index, false) {
@@ -134,6 +147,36 @@ func nativeMemberSourceBindingNames(object *ClassObject, work *workbudget.Budget
 							return false
 						}
 						index, classOperand = binary.BigEndian.Uint16(op.Data[:2]), true
+					case core.OP_GETSTATIC, core.OP_PUTSTATIC, core.OP_GETFIELD, core.OP_PUTFIELD, core.OP_INVOKEVIRTUAL, core.OP_INVOKESPECIAL, core.OP_INVOKESTATIC:
+						if len(op.Data) != 2 {
+							return false
+						}
+						index = binary.BigEndian.Uint16(op.Data)
+						if op.Instr.OpCode <= core.OP_PUTFIELD {
+							if !require(index, CONSTANT_Fieldref) {
+								return false
+							}
+						} else if op.Instr.OpCode == core.OP_INVOKEVIRTUAL {
+							if !require(index, CONSTANT_Methodref) {
+								return false
+							}
+						} else if !require(index, CONSTANT_Methodref, CONSTANT_InterfaceMethodref) {
+							return false
+						}
+						continue
+					case core.OP_INVOKEINTERFACE, core.OP_INVOKEDYNAMIC:
+						if len(op.Data) != 4 {
+							return false
+						}
+						index = binary.BigEndian.Uint16(op.Data[:2])
+						if op.Instr.OpCode == core.OP_INVOKEINTERFACE {
+							if !require(index, CONSTANT_InterfaceMethodref) {
+								return false
+							}
+						} else if !require(index, CONSTANT_InvokeDynamic) {
+							return false
+						}
+						continue
 					default:
 						continue
 					}
@@ -144,10 +187,10 @@ func nativeMemberSourceBindingNames(object *ClassObject, work *workbudget.Budget
 						continue
 					}
 					if op.Instr.OpCode == core.OP_LDC2_W {
-						if object.checkCPIndex(index, false, "source ldc2 dependency", CONSTANT_Long, CONSTANT_Double, CONSTANT_Dynamic) != nil {
+						if !require(index, CONSTANT_Long, CONSTANT_Double, CONSTANT_Dynamic) {
 							return false
 						}
-					} else if object.checkCPIndex(index, false, "source ldc dependency", CONSTANT_Integer, CONSTANT_Float, CONSTANT_String, CONSTANT_Class, CONSTANT_MethodType, CONSTANT_MethodHandle, CONSTANT_Dynamic) != nil {
+					} else if !require(index, CONSTANT_Integer, CONSTANT_Float, CONSTANT_String, CONSTANT_Class, CONSTANT_MethodType, CONSTANT_MethodHandle, CONSTANT_Dynamic) {
 						return false
 					} else if _, isClass := object.ConstantPool[index-1].(*ConstantClassInfo); isClass && !retain(index, false) {
 						return false
@@ -162,6 +205,9 @@ func nativeMemberSourceBindingNames(object *ClassObject, work *workbudget.Budget
 					if len(a.Info) != 4 || !retain(binary.BigEndian.Uint16(a.Info[:2]), false) {
 						return false
 					}
+					if index := binary.BigEndian.Uint16(a.Info[2:]); index != 0 && !require(index, CONSTANT_NameAndType) {
+						return false
+					}
 				case "LocalVariableTable", "LocalVariableTypeTable":
 					if len(a.Info) < 2 || len(a.Info) != 2+10*int(binary.BigEndian.Uint16(a.Info[:2])) {
 						return false
@@ -172,10 +218,22 @@ func nativeMemberSourceBindingNames(object *ClassObject, work *workbudget.Budget
 						if !known || !nativeProofWork(work, int64(len(text))) {
 							return false
 						}
-						if a.Name == "LocalVariableTable" && mutf8.ValidateFieldDescriptor(object.ConstantPool[index-1].(*ConstantUtf8Info).semanticUnits()) != nil {
-							return false
+						var refs []string
+						if a.Name == "LocalVariableTable" {
+							// A local runtime descriptor has a flat, independently
+							// bounded array grammar. Generic signature depth is not
+							// a bound on its (up to 255) array dimensions.
+							if mutf8.ValidateFieldDescriptor(object.ConstantPool[index-1].(*ConstantUtf8Info).semanticUnits()) != nil {
+								return false
+							}
+							if start := strings.IndexByte(text, 'L'); start >= 0 {
+								// Validated field grammar has exactly one reference
+								// leaf, at the end, after any array dimensions.
+								refs = []string{text[start+1 : len(text)-1]}
+							}
+						} else {
+							refs, known = types.SignatureClassReferences(text)
 						}
-						refs, known := types.SignatureClassReferences(text)
 						if !known || work != nil && work.CheckAlloc(int64(len(debugNames)+len(refs))*96+int64(len(object.ConstantPool))*32) != nil {
 							return false
 						}
@@ -215,8 +273,41 @@ func nativeMemberSourceBindingNames(object *ClassObject, work *workbudget.Budget
 	}
 	if keepAll {
 		mask = nil
+		symbolicMask = nil
+	} else {
+		// Follow only original syntactic roots. The immutable archive index
+		// still validates and records unused symbols; they cannot license a
+		// source expression or a source-family transaction dependency.
+		for cursor := 0; cursor < len(constants); cursor++ {
+			index := constants[cursor]
+			constant := object.ConstantPool[index-1]
+			if member := nativeConstantMember(constant); member != nil {
+				if !retain(member.ClassIndex, false) || !require(member.NameAndTypeIndex, CONSTANT_NameAndType) {
+					return nil, false
+				}
+				continue
+			}
+			switch c := constant.(type) {
+			case *ConstantClassInfo:
+				if c == nil || !retain(index, false) {
+					return nil, false
+				}
+			case *ConstantMethodHandleInfo:
+				if c == nil || !require(c.ReferenceIndex, CONSTANT_Fieldref, CONSTANT_Methodref, CONSTANT_InterfaceMethodref) {
+					return nil, false
+				}
+			case *ConstantInvokeDynamicInfo:
+				if c == nil || !require(c.NameAndTypeIndex, CONSTANT_NameAndType) {
+					return nil, false
+				}
+			case *ConstantDynamicInfo:
+				if c == nil || !require(c.NameAndTypeIndex, CONSTANT_NameAndType) {
+					return nil, false
+				}
+			}
+		}
 	}
-	names, known := nativeMemberDependencyNamesWithClassMask(object, "", mask, work)
+	names, known := nativeMemberDependencyNamesWithConstantMasks(object, "", mask, symbolicMask, work)
 	if !known {
 		return nil, false
 	}

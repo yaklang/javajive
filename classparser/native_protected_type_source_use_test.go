@@ -65,7 +65,9 @@ func TestNativeProtectedTypeSourceUseKeepsEveryConsumerKind(t *testing.T) {
 			case "interface":
 				object.Interfaces = []uint16{class}
 			case "bootstrap class":
-				object.Attributes = append(object.Attributes, &BootstrapMethodsAttribute{BootstrapMethods: []*BootstrapMethod{{BootstrapArguments: []uint16{class}}}})
+				ref := uint16(pool.AddNewMethodInfo("foreign/Bootstrap", "bootstrap", "()Ljava/lang/Object;"))
+				handle := uint16(pool.AppendConstantInfo(&ConstantMethodHandleInfo{ReferenceKind: 6, ReferenceIndex: ref}))
+				object.Attributes = append(object.Attributes, &BootstrapMethodsAttribute{BootstrapMethods: []*BootstrapMethod{{BootstrapMethodRef: handle, BootstrapArguments: []uint16{class}}}})
 			case "enclosing method":
 				object.Attributes = append(object.Attributes, &UnparsedAttribute{Name: "EnclosingMethod", Info: []byte{byte(class >> 8), byte(class), 0, 0}})
 			case "throws":
@@ -179,6 +181,11 @@ func TestNativeProtectedTypeSourceUseKeepsEveryConsumerKind(t *testing.T) {
 			if scenario == "stack map conservative" {
 				// The bulk scanner can prove this zero-entry frame table has
 				// no class operand; the older access query stays conservative.
+				sourceUsed = false
+			}
+			if scenario == "unused name-and-type" || scenario == "unused method type" || scenario == "unused member owner" {
+				// The original index/access query keeps these symbolic words.
+				// An unused symbol is not an actual source-expression root.
 				sourceUsed = false
 			}
 			names, closed := nativeMemberSourceBindingNames(object, sourceWork)

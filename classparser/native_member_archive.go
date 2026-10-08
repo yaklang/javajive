@@ -517,14 +517,20 @@ func nativeMemberDependencyNamesWithoutStandaloneClass(obj *ClassObject, omitted
 	return nativeMemberDependencyNamesWithClassMask(obj, omitted, nil, work)
 }
 
-// A nil mask preserves the immutable archive/index overapproximation. A source
-// transaction supplies the original syntactic consumers of standalone class
-// constants; descriptor, Signature and annotation edges are never masked.
+// A nil mask preserves the immutable archive/index overapproximation. Source
+// transactions may restrict standalone class constants to original consumers.
+// Declarations, generic signatures and annotations remain unconditional roots.
 func nativeMemberDependencyNamesWithClassMask(obj *ClassObject, omitted string, classMask map[uint16]bool, work *workbudget.Budget) ([]string, bool) {
+	return nativeMemberDependencyNamesWithConstantMasks(obj, omitted, classMask, nil, work)
+}
+
+func nativeMemberDependencyNamesWithConstantMasks(obj *ClassObject, omitted string, classMask, symbolicMask map[uint16]bool, work *workbudget.Budget) ([]string, bool) {
 	names := []string{}
 	seen := map[string]bool{}
 	signatures := map[string]bool{}
-	validatedDescriptors := map[uint16]bool{}
+	validatedDescriptors := map[uint16][]string{}
+	requiredDescriptors := map[uint16]bool{}
+	descriptorReferences := int64(0)
 	add := func(n string) {
 		n = strings.ReplaceAll(n, ".", "/")
 		if !seen[n] {
@@ -552,12 +558,21 @@ func nativeMemberDependencyNamesWithClassMask(obj *ClassObject, omitted string, 
 	// Runtime descriptors have no generic nesting. Validate their exact JVM
 	// grammar (including dimensions/parameter words), then scan reference leaves
 	// iteratively. The Signature parser's generic depth cap is a separate domain.
-	descriptor := func(index uint16, methodOnly bool) bool {
+	descriptor := func(index uint16, methodOnly, required bool) bool {
 		text, known := sourceBridgeUTF8(obj, index)
 		if !known || methodOnly && !strings.HasPrefix(text, "(") {
 			return false
 		}
-		if validatedDescriptors[index] {
+		if refs, validated := validatedDescriptors[index]; validated {
+			if required && !requiredDescriptors[index] {
+				if !nativeProofWork(work, int64(len(refs))) {
+					return false
+				}
+				for _, name := range refs {
+					add(name)
+				}
+				requiredDescriptors[index] = true
+			}
 			return true
 		}
 		utf := obj.ConstantPool[index-1].(*ConstantUtf8Info)
@@ -574,6 +589,7 @@ func nativeMemberDependencyNamesWithClassMask(obj *ClassObject, omitted string, 
 		if err != nil {
 			return false
 		}
+		var refs []string
 		for i := 0; i < len(text); i++ {
 			if text[i] != 'L' {
 				continue
@@ -582,20 +598,30 @@ func nativeMemberDependencyNamesWithClassMask(obj *ClassObject, omitted string, 
 			if end <= 0 {
 				return false
 			}
-			add(text[i+1 : i+1+end])
+			if work != nil && work.CheckAlloc((descriptorReferences+int64(len(refs))+1)*32+int64(len(validatedDescriptors)+1)*32) != nil {
+				return false
+			}
+			refs = append(refs, text[i+1:i+1+end])
 			i += end + 1
 		}
-		validatedDescriptors[index] = true
+		descriptorReferences += int64(len(refs))
+		validatedDescriptors[index] = refs
+		if required {
+			for _, name := range refs {
+				add(name)
+			}
+			requiredDescriptors[index] = true
+		}
 		return true
 	}
 	for index, constant := range obj.ConstantPool {
 		if !nativeProofWork(work, 1) {
 			return nil, false
 		}
-		// Member and bootstrap descriptors do not require a CONSTANT_Class
-		// entry for their argument/result types. They contribute the same
-		// original binding edges as declarations; a UTF8 string with similar
-		// spelling does not. This also closes MethodType bootstrap operands.
+		// Member and bootstrap descriptors can contain UTF8-only reference
+		// types. Validate every symbol, even unused ones, but contribute its
+		// binding edges only when an original consumer roots that symbol.
+		// Declarations below contribute edges independently of this mask.
 		var descriptorIndex uint16
 		hasDescriptor, methodOnly := false, false
 		switch constant := constant.(type) {
@@ -612,7 +638,7 @@ func nativeMemberDependencyNamesWithClassMask(obj *ClassObject, omitted string, 
 			descriptorIndex = constant.DescriptorIndex
 			hasDescriptor, methodOnly = true, true
 		}
-		if hasDescriptor && !descriptor(descriptorIndex, methodOnly) {
+		if hasDescriptor && !descriptor(descriptorIndex, methodOnly, symbolicMask == nil || symbolicMask[uint16(index+1)]) {
 			return nil, false
 		}
 		if cls, ok := constant.(*ConstantClassInfo); ok && cls != nil {
@@ -621,7 +647,7 @@ func nativeMemberDependencyNamesWithClassMask(obj *ClassObject, omitted string, 
 				return nil, false
 			}
 			if strings.HasPrefix(n, "[") {
-				if !descriptor(cls.NameIndex, false) {
+				if !descriptor(cls.NameIndex, false, true) {
 					return nil, false
 				}
 			} else {
@@ -639,7 +665,7 @@ func nativeMemberDependencyNamesWithClassMask(obj *ClassObject, omitted string, 
 		if member == nil || !nativeProofWork(work, 1) {
 			return nil, false
 		}
-		if !descriptor(member.DescriptorIndex, false) {
+		if !descriptor(member.DescriptorIndex, false, true) {
 			return nil, false
 		}
 		if !nativeAnnotationDependencies(member.Attributes, work, add) {
