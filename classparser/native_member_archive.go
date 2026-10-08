@@ -514,6 +514,13 @@ func nativeMemberDependencyNames(obj *ClassObject, work *workbudget.Budget) ([]s
 // Java source use. Keep every descriptor, Signature and annotation dependency;
 // the caller separately checks actual class operands and member owners.
 func nativeMemberDependencyNamesWithoutStandaloneClass(obj *ClassObject, omitted string, work *workbudget.Budget) ([]string, bool) {
+	return nativeMemberDependencyNamesWithClassMask(obj, omitted, nil, work)
+}
+
+// A nil mask preserves the immutable archive/index overapproximation. A source
+// transaction supplies the original syntactic consumers of standalone class
+// constants; descriptor, Signature and annotation edges are never masked.
+func nativeMemberDependencyNamesWithClassMask(obj *ClassObject, omitted string, classMask map[uint16]bool, work *workbudget.Budget) ([]string, bool) {
 	names := []string{}
 	seen := map[string]bool{}
 	signatures := map[string]bool{}
@@ -581,7 +588,7 @@ func nativeMemberDependencyNamesWithoutStandaloneClass(obj *ClassObject, omitted
 		validatedDescriptors[index] = true
 		return true
 	}
-	for _, constant := range obj.ConstantPool {
+	for index, constant := range obj.ConstantPool {
 		if !nativeProofWork(work, 1) {
 			return nil, false
 		}
@@ -618,7 +625,7 @@ func nativeMemberDependencyNamesWithoutStandaloneClass(obj *ClassObject, omitted
 					return nil, false
 				}
 			} else {
-				if n != omitted {
+				if n != omitted && (classMask == nil || classMask[uint16(index+1)]) {
 					add(n)
 				}
 			}

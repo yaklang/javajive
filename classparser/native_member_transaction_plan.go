@@ -202,7 +202,7 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 		return nil
 	}
 	for _, object := range dependencyObjects {
-		references, known := nativeMemberDependencyNames(object, d.Work)
+		references, known := nativeMemberSourceBindingNames(object, d.Work)
 		if !known {
 			return nil
 		}

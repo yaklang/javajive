@@ -170,7 +170,7 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 		}
 		dependencies := map[string]bool{}
 		for _, current := range queue {
-			names, known := nativeMemberDependencyNames(current, work)
+			names, known := nativeMemberSourceBindingNames(current, work)
 			if !known {
 				return false
 			}

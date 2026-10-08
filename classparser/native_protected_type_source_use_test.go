@@ -15,7 +15,7 @@ import (
 func TestNativeProtectedTypeSourceUseKeepsEveryConsumerKind(t *testing.T) {
 	files := nativeCompileClasses(t, `class SourceUseRoot{static void unused(){}}`)
 	const target = "foreign/Declaring$Entry"
-	for _, scenario := range []string{"metadata only", "unrelated utf8", "unrelated class", "array class", "field", "method parameter", "method return", "generic field", "generic class", "unused name-and-type", "unused method type", "unused member owner", "superclass", "interface", "bootstrap class", "enclosing method", "throws", "catch", "annotation", "code type annotation", "local descriptor", "local generic", "stack map conservative", "ldc", "ldc_w", "new", "anewarray", "checkcast", "instanceof", "unreachable new", "multianewarray", "malformed local", "wrong local utf8", "wrong class operand", "zero class operand", "wrong wide ldc", "truncated instruction", "nil code", "nil bootstrap", "unknown annotation", "unknown structural attribute", "unknown code attribute", "budget", "memory", "canceled"} {
+	for _, scenario := range []string{"metadata only", "unrelated utf8", "unrelated class", "array class", "field", "method parameter", "method return", "generic field", "generic class", "unused name-and-type", "unused method type", "unused member owner", "superclass", "interface", "bootstrap class", "enclosing method", "throws", "catch", "annotation", "code type annotation", "local descriptor", "local generic", "stack map conservative", "stack map class", "ldc", "ldc_w", "new", "anewarray", "checkcast", "instanceof", "unreachable new", "multianewarray", "malformed local", "wrong local utf8", "wrong class operand", "zero class operand", "wrong wide ldc", "truncated instruction", "nil code", "nil bootstrap", "unknown annotation", "unknown structural attribute", "unknown code attribute", "budget", "memory", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {
 			object, err := Parse(files["SourceUseRoot.class"])
 			if err != nil {
@@ -97,6 +97,8 @@ func TestNativeProtectedTypeSourceUseKeepsEveryConsumerKind(t *testing.T) {
 				code.Attributes = []AttributeInfo{&UnparsedAttribute{Name: name, Info: info}}
 			case "stack map conservative":
 				code.Attributes = []AttributeInfo{&UnparsedAttribute{Name: "StackMapTable", Info: []byte{0, 0}}}
+			case "stack map class":
+				code.Attributes = []AttributeInfo{&UnparsedAttribute{Name: "StackMapTable", Info: []byte{0, 1, 64, 7, byte(class >> 8), byte(class)}}}
 			case "ldc":
 				code.Code = []byte{core.OP_LDC, byte(class), core.OP_POP, core.OP_RETURN}
 			case "ldc_w":
@@ -155,6 +157,37 @@ func TestNativeProtectedTypeSourceUseKeepsEveryConsumerKind(t *testing.T) {
 			used, known := nativeProtectedTypeRequiresSourceAccess(object, target, work)
 			if used != wantUsed || known != wantKnown {
 				t.Fatalf("source obligation=(%v,%v), want (%v,%v)", used, known, wantUsed, wantKnown)
+			}
+			// The same independent JVMS consumer witnesses constrain the bulk
+			// source-transaction closure. Opaque metadata is retained in full
+			// there; a protected-access proof must instead refuse to admit it.
+			var sourceWork *workbudget.Budget
+			switch scenario {
+			case "budget":
+				sourceWork = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "memory":
+				sourceWork = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				sourceWork = workbudget.New(ctx, workbudget.Limits{})
+			}
+			sourceUsed, sourceKnown := wantUsed, wantKnown
+			if scenario == "unknown structural attribute" || scenario == "unknown code attribute" {
+				sourceUsed, sourceKnown = true, true
+			}
+			if scenario == "stack map conservative" {
+				// The bulk scanner can prove this zero-entry frame table has
+				// no class operand; the older access query stays conservative.
+				sourceUsed = false
+			}
+			names, closed := nativeMemberSourceBindingNames(object, sourceWork)
+			found := false
+			for _, name := range names {
+				found = found || name == target
+			}
+			if closed != sourceKnown || found != sourceUsed {
+				t.Fatalf("bulk source obligation=(%v,%v), want (%v,%v)", found, closed, sourceUsed, sourceKnown)
 			}
 			if scenario == "metadata only" {
 				names, known := nativeMemberDependencyNames(object, nil)
