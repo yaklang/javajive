@@ -98,13 +98,18 @@ func TestT13LoopPhiObservationRejectsSameArityWrongCarriedValue(t *testing.T) {
 }
 
 func executeObservedSSAValues(fn *Function, code []byte, n int) (int64, error) {
+	return executeObservedSSAParameters(fn, code, map[int]int64{0: int64(n)})
+}
+
+func executeObservedSSAParameters(fn *Function, code []byte, parameters map[int]int64) (int64, error) {
 	env := map[ValueID]int64{}
 	for _, v := range fn.Values {
 		if v.Origin.Kind == OriginParam {
-			if v.Origin.Slot != 0 {
+			value, known := parameters[v.Origin.Slot]
+			if !known {
 				return 0, fmt.Errorf("unexpected param")
 			}
-			env[v.ID] = int64(n)
+			env[v.ID] = value
 		}
 	}
 	records := map[int]InstructionValues{}
@@ -191,6 +196,22 @@ func executeObservedSSAValues(fn *Function, code []byte, n int) (int64, error) {
 			}
 			next = pc + 3
 			if uses[0] < uses[1] {
+				next = pc + int(int16(binary.BigEndian.Uint16(code[pc+1:pc+3])))
+			}
+		case op == core.OP_IF_ICMPGE:
+			if len(uses) != 2 {
+				return 0, fmt.Errorf("branch uses")
+			}
+			next = pc + 3
+			if uses[0] >= uses[1] {
+				next = pc + int(int16(binary.BigEndian.Uint16(code[pc+1:pc+3])))
+			}
+		case op == core.OP_IFEQ:
+			if len(uses) != 1 {
+				return 0, fmt.Errorf("branch uses")
+			}
+			next = pc + 3
+			if uses[0] == 0 {
 				next = pc + int(int16(binary.BigEndian.Uint16(code[pc+1:pc+3])))
 			}
 		case op == core.OP_IRETURN || op == core.OP_LRETURN:

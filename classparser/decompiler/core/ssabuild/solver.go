@@ -96,12 +96,14 @@ func Build(ir *methodir.MethodIR, opt Options) (*Function, error) {
 		b := ir.Blocks[bi]
 		var joined *frametransfer.Frame
 		var origins []Origin
+		contributors := 0
 		for _, e := range incoming[bid] {
 			fr, available := ef.normal[e.ID]
 			if !available {
 				continue
 			} // absence is unreachable, never TOP
 			og := ef.orig[e.ID]
+			contributors++
 			if err := charge(ctr, uint64(1+len(og))); err != nil {
 				return nil, err
 			}
@@ -118,15 +120,20 @@ func Build(ir *methodir.MethodIR, opt Options) (*Function, error) {
 			if len(origins) != len(og) {
 				return nil, fmt.Errorf("invalid_input: origin join shape mismatch")
 			}
-			for i := range origins {
-				if origins[i] != og[i] {
-					origins[i] = Origin{Kind: OriginPhi, PC: b.FirstPC, Slot: i, Aux: int(bid)}
-				}
-			}
 			*joined = j
 		}
 		if joined == nil {
 			continue
+		}
+		// A join is a stable equation while its predecessor equations are
+		// being solved. Collapsing equal operands here can make copying
+		// cycles alternate between an upstream phi and this join forever.
+		// Reachable predecessors only accumulate. Allocate one structural
+		// identity per joined word; simplify redundant equations afterward.
+		if contributors > 1 {
+			for i := range origins {
+				origins[i] = Origin{Kind: OriginPhi, PC: b.FirstPC, Slot: i, Aux: int(bid)}
+			}
 		}
 		// TOP is a reachable unavailable local, and a wide pair is one SSA value.
 		normalizeOrigins(*joined, origins)
@@ -209,6 +216,9 @@ func Build(ir *methodir.MethodIR, opt Options) (*Function, error) {
 		fn.EdgeStates[id] = EdgeState{Frame: fr.Clone(), Origins: append([]Origin(nil), ef.orig[id]...)}
 	}
 	if err := assignPhis(fn, ef, ctr); err != nil {
+		return nil, err
+	}
+	if err := simplifyPhiCopies(fn, ctr); err != nil {
 		return nil, err
 	}
 	if err := bindValues(fn, ctr); err != nil {
@@ -405,9 +415,6 @@ func assignPhis(fn *Function, ef edgeFrames, ctr WorkCounter) error {
 				continue
 			}
 			var ops []PhiOperand
-			seen := map[string]Origin{}
-			diff := false
-			var first Origin
 			for _, e := range preds {
 				if err := charge(ctr, 1); err != nil {
 					return err
@@ -428,14 +435,8 @@ func assignPhis(fn *Function, ef edgeFrames, ctr WorkCounter) error {
 					return fmt.Errorf("invalid_input: missing reachable phi origin at %d", idx)
 				}
 				ops = append(ops, PhiOperand{Edge: e.ID, Origin: o})
-				if len(seen) == 0 {
-					first = o
-				} else if first.Key() != o.Key() {
-					diff = true
-				}
-				seen[o.Key()] = o
 			}
-			if !diff {
+			if b.InOrig[i] != (Origin{Kind: OriginPhi, PC: b.First, Slot: i, Aux: int(b.ID)}) {
 				continue
 			}
 			sort.Slice(ops, func(i, j int) bool { return ops[i].Edge.String() < ops[j].Edge.String() })
