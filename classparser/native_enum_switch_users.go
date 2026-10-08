@@ -53,9 +53,9 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 				return false
 			}
 		}
-		// One enum dependency has one initialization boundary. Multiple tables
-		// require a separate source-order certificate for distinct enum initializers.
-		if len(table.tables) != 1 {
+		// Every table shares this helper's initialization boundary. Final source
+		// admission separately proves their complete physical initialization order.
+		if !nativeEnumSwitchInitializationClosed(table, work) {
 			return false
 		}
 		for _, arr := range table.tables {

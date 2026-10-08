@@ -14,6 +14,8 @@ type nativeEnumSwitchTable struct {
 	object *ClassObject
 	tables map[string]*nativeEnumSwitchArray
 	uses   map[string]map[string]map[int]*nativeEnumSwitchUse
+	// Physical <clinit> order, rather than field declaration or map order.
+	initializationOrder []string
 }
 type nativeEnumSwitchArray struct {
 	enum    string
@@ -101,6 +103,7 @@ func nativeEnumSwitchTableProof(obj *ClassObject, work *workbudget.Budget) *nati
 		}
 		table := &nativeEnumSwitchArray{enum: call.Name, entries: map[int]string{}}
 		packet.tables[store.Member] = table
+		packet.initializationOrder = append(packet.initializationOrder, store.Member)
 		constants := map[string]bool{}
 		cursor += 4
 		for cursor < len(ops)-1 && nativeEnumOpcode(ops[cursor], core.OP_GETSTATIC) {
@@ -134,4 +137,19 @@ func nativeEnumSwitchTableProof(obj *ClassObject, work *workbudget.Budget) *nati
 		return nil
 	}
 	return packet
+}
+
+func nativeEnumSwitchInitializationClosed(table *nativeEnumSwitchTable, work *workbudget.Budget) bool {
+	if table == nil || len(table.tables) == 0 || len(table.tables) > 16 || len(table.initializationOrder) != len(table.tables) || !nativeProofWork(work, int64(len(table.tables))) {
+		return false
+	}
+	fields, enums := map[string]bool{}, map[string]bool{}
+	for _, field := range table.initializationOrder {
+		arr := table.tables[field]
+		if field == "" || fields[field] || arr == nil || arr.enum == "" || enums[arr.enum] || len(arr.entries) == 0 {
+			return false
+		}
+		fields[field], enums[arr.enum] = true, true
+	}
+	return true
 }

@@ -3244,6 +3244,9 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if cast := typeVarArrayReassignCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
 			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
 		}
+		if raw := conditionalGenericAssignmentBridge(funcCtx, a.LeftValue, a.JavaValue); raw != "" {
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), raw, rhsVal.String(funcCtx))
+		}
 		// Ternary with sibling-typed arms assigned to a concrete-typed local: the JVM stored both arms
 		// into the same slot (no checkcast), but javac requires every arm to be assignable to the
 		// declared type. When one arm is NOT assignable (e.g. `List var8 = cond ? readArray() :
@@ -3326,14 +3329,21 @@ func wildcardObjectAssignRawBridge(funcCtx *class_context.ClassContext, left, va
 // sameClassFieldGeneric returns the rendered generic type of a same-class field store
 // (`this._mapDeserializer` / `var7._fields`) from FieldSignatures, or "".
 func sameClassFieldGeneric(funcCtx *class_context.ClassContext, left values.JavaValue) string {
+	if ft := sameClassFieldGenericType(funcCtx, left); ft != nil {
+		return ft.String(funcCtx)
+	}
+	return ""
+}
+
+func sameClassFieldGenericType(funcCtx *class_context.ClassContext, left values.JavaValue) types.JavaType {
 	if funcCtx == nil || left == nil {
-		return ""
+		return nil
 	}
 	fieldName := ""
 	switch lv := left.(type) {
 	case *values.RefMember:
 		if lv == nil || lv.Object == nil {
-			return ""
+			return nil
 		}
 		fieldName = class_context.SafeIdentifier(lv.Member)
 		if ref, ok := values.UnpackSoltValue(lv.Object).(*values.JavaRef); ok && ref.IsThis {
@@ -3341,32 +3351,32 @@ func sameClassFieldGeneric(funcCtx *class_context.ClassContext, left values.Java
 		}
 		ot := lv.Object.Type()
 		if ot == nil {
-			return ""
+			return nil
 		}
 		fqn, ok := types.ClassFQNOf(ot)
 		if !ok || !sameDottedClass(fqn, funcCtx.ClassName) {
-			return ""
+			return nil
 		}
 	case *values.JavaClassMember:
 		if lv.Name != funcCtx.ClassName {
-			return ""
+			return nil
 		}
 		fieldName = class_context.SafeIdentifier(lv.Member)
 	default:
-		return ""
+		return nil
 	}
 	if fieldName == "" {
-		return ""
+		return nil
 	}
 	sig := funcCtx.FieldSignature(fieldName)
 	if sig == "" {
-		return ""
+		return nil
 	}
 	ft := types.ParseSignature(sig)
 	if ft == nil {
-		return ""
+		return nil
 	}
-	return ft.String(funcCtx)
+	return ft
 }
 
 // classTypeVarFieldStoreCast wraps a store into `Class<T>` (T a class type variable) when
@@ -3712,8 +3722,11 @@ func isReferenceAssignable(funcCtx *class_context.ClassContext, from, to types.J
 	if _, isPrim := to.RawType().(*types.JavaPrimer); isPrim {
 		return false
 	}
-	fromF, fok := types.ClassFQNOf(from)
-	toF, tok := types.ClassFQNOf(to)
+	// This question is reference erasure assignability. A parameterized arm
+	// still has its original class identity; lack of a scalar JavaClass node
+	// cannot prove it incompatible and move an erased cast to the other arm.
+	fromF, fok := types.RawClassFQN(from)
+	toF, tok := types.RawClassFQN(to)
 	if !fok || !tok {
 		return false
 	}

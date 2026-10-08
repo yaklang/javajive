@@ -89,26 +89,19 @@ func nativeEnumSwitchSourceComplete(p *nativeMemberFamily, source string, work *
 	return len(markers) == len(expected)
 }
 
-// javac numbers a table by the first lexical occurrence of its own cases.
-// A same-named case in another enum switch cannot prove this table's key order.
-// Bind each ownership comment to a selector and collect only that switch's
-// direct labels; nested switch bodies and ordinary blocks have distinct scopes.
+// javac lowers a switch's children before registering its own enum cases.
+// It then prepends each table initializer, reversing the tables' registration
+// order. Prove both orders from owned switches; an equal label in another enum,
+// a comment, or an ordinary block contributes neither certificate.
 func nativeEnumSwitchCaseRegistrationClosed(table *nativeEnumSwitchTable, source string, work *workbudget.Budget) bool {
-	if table == nil || len(table.tables) != 1 || !nativeProofWork(work, int64(len(source))) || work != nil && work.CheckAlloc(int64(len(source))*32+65536) != nil {
-		return false
-	}
-	var arr *nativeEnumSwitchArray
-	for _, a := range table.tables {
-		arr = a
-	}
-	if arr == nil {
+	if !nativeEnumSwitchInitializationClosed(table, work) || !nativeProofWork(work, int64(len(source))) || work != nil && work.CheckAlloc(int64(len(source))*32+65536) != nil {
 		return false
 	}
 	uses := map[string]*nativeEnumSwitchUse{}
 	for _, methods := range table.uses {
 		for _, method := range methods {
 			for _, use := range method {
-				if use == nil || use.marker == "" || uses[use.marker] != nil {
+				if use == nil || use.marker == "" || table.tables[use.field] == nil || uses[use.marker] != nil {
 					return false
 				}
 				uses[use.marker] = use
@@ -118,15 +111,22 @@ func nativeEnumSwitchCaseRegistrationClosed(table *nativeEnumSwitchTable, source
 	if len(uses) == 0 {
 		return false
 	}
-	// Empty stack entries represent scopes that do not own this table.
-	stack := []string{}
+	// A switch registers on leaving its body: nested switches have already
+	// registered by then. Empty markers represent unrelated lexical scopes.
+	type scope struct {
+		marker string
+		cases  []string
+	}
+	stack := []scope{}
 	openings := map[int]string{}
 	bound := map[string]bool{}
 	labels := map[string]map[string]bool{}
 	allowedLabels := map[string]map[string]bool{}
-	seen := map[string]bool{}
+	registered := map[string]map[string]bool{}
+	fieldOrder := []string{}
 
 	for marker, use := range uses {
+		arr := table.tables[use.field]
 		allowedLabels[marker] = map[string]bool{}
 		for key := range use.keys {
 			name := arr.entries[key]
@@ -135,6 +135,31 @@ func nativeEnumSwitchCaseRegistrationClosed(table *nativeEnumSwitchTable, source
 			}
 			allowedLabels[marker][name] = true
 		}
+	}
+	register := func(s scope) bool {
+		if s.marker == "" {
+			return true
+		}
+		use := uses[s.marker]
+		arr := table.tables[use.field]
+		seen := registered[use.field]
+		if seen == nil {
+			seen = map[string]bool{}
+			registered[use.field] = seen
+			fieldOrder = append(fieldOrder, use.field)
+		}
+		for _, name := range s.cases {
+			if !nativeProofWork(work, 1) {
+				return false
+			}
+			if !seen[name] {
+				if name != arr.entries[len(seen)+1] {
+					return false
+				}
+				seen[name] = true
+			}
+		}
+		return true
 	}
 	state, depth := scanNormal, 0
 	keyword := func(i int, word string) bool {
@@ -183,17 +208,18 @@ func nativeEnumSwitchCaseRegistrationClosed(table *nativeEnumSwitchTable, source
 		}
 		switch source[i] {
 		case '{':
-			stack = append(stack, openings[i])
+			stack = append(stack, scope{marker: openings[i]})
 		case '}':
-			if len(stack) == 0 {
+			if len(stack) == 0 || !register(stack[len(stack)-1]) {
 				return false
 			}
 			stack = stack[:len(stack)-1]
 		}
-		if !keyword(i, "case") || len(stack) == 0 || stack[len(stack)-1] == "" {
+		if !keyword(i, "case") || len(stack) == 0 || stack[len(stack)-1].marker == "" {
 			continue
 		}
-		marker := stack[len(stack)-1]
+		current := &stack[len(stack)-1]
+		marker := current.marker
 		end := i + 4
 		for end < len(source) && source[end] != ':' && source[end] != '{' && source[end] != '}' {
 			end++
@@ -206,16 +232,16 @@ func nativeEnumSwitchCaseRegistrationClosed(table *nativeEnumSwitchTable, source
 			return false
 		}
 		labels[marker][name] = true
-		if !seen[name] {
-			if name != arr.entries[len(seen)+1] {
-				return false
-			}
-			seen[name] = true
-		}
+		current.cases = append(current.cases, name)
 		i = end
 	}
-	if len(stack) != 0 || state != scanNormal && state != scanLineComment || len(bound) != len(uses) || len(seen) != len(arr.entries) {
+	if len(stack) != 0 || state != scanNormal && state != scanLineComment || len(bound) != len(uses) || len(fieldOrder) != len(table.initializationOrder) {
 		return false
+	}
+	for i, field := range table.initializationOrder {
+		if field != fieldOrder[len(fieldOrder)-1-i] || len(registered[field]) != len(table.tables[field].entries) {
+			return false
+		}
 	}
 	for marker, use := range uses {
 		if len(labels[marker]) != len(use.keys) {

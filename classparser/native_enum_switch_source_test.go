@@ -114,8 +114,8 @@ func TestNativeEnumSwitchSourceRequiresOriginalOperandAndCompleteCases(t *testin
 
 func TestNativeEnumSwitchSourceRegistrationCannotBorrowQuotedOrDuplicateProofs(t *testing.T) {
 	arr := &nativeEnumSwitchArray{enum: "EnumType", entries: map[int]string{1: "SECOND", 2: "FIRST"}}
-	use := &nativeEnumSwitchUse{rendered: true, keys: map[int]bool{1: true, 2: true}, marker: "/*jdec-owned-enum-switch:proof*/"}
-	table := &nativeEnumSwitchTable{tables: map[string]*nativeEnumSwitchArray{"field": arr}, uses: map[string]map[string]map[int]*nativeEnumSwitchUse{"Owner": {"run()V": {7: use}}}}
+	use := &nativeEnumSwitchUse{field: "field", rendered: true, keys: map[int]bool{1: true, 2: true}, marker: "/*jdec-owned-enum-switch:proof*/"}
+	table := &nativeEnumSwitchTable{tables: map[string]*nativeEnumSwitchArray{"field": arr}, initializationOrder: []string{"field"}, uses: map[string]map[string]map[int]*nativeEnumSwitchUse{"Owner": {"run()V": {7: use}}}}
 	p := &nativeMemberFamily{enumSwitchTables: map[string]*nativeEnumSwitchTable{"helper": table}}
 	good := `switch(value/*jdec-owned-enum-switch:proof*/){case SECOND:break;case FIRST:break;default:break;}`
 	for _, tc := range []struct {

@@ -359,6 +359,37 @@ func ErasedFactoryReturn(ctx *class_context.ClassContext, v JavaValue, result st
 	return true
 }
 
+// ErasedFixedInstanceResult identifies a standalone, fixed zero-input result.
+// Its generic arguments belong to the already evaluated receiver, never to
+// method formals or deferred arguments. A consumer may use the original raw
+// result erasure after separately proving a nonthrowing widening to its target.
+func ErasedFixedInstanceResult(ctx *class_context.ClassContext, f *FunctionCallExpression, result string) bool {
+	if ctx == nil || ctx.InvocationMetadata == nil || f == nil || f.IsStatic || f.IsSpecialInvoke ||
+		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface) || f.Object == nil || len(f.Arguments) != 0 || !f.HasOriginPC {
+		return false
+	}
+	ps, ret, err := callbinding.Descriptor(f.Descriptor)
+	if err != nil || len(ps) != 0 || ret != result || !strings.HasPrefix(ret, "L") {
+		return false
+	}
+	owner := strings.ReplaceAll(f.ClassName, ".", "/")
+	family, err := callbinding.FamilyOf(callbinding.Witness{Owner: owner, Name: f.FunctionName, Desc: f.Descriptor}, ctx.InvocationMetadata)
+	if err != nil || !family.Complete || family.Proof != callbinding.Unique || family.Target == nil || family.Target.Static || family.Target.Bridge || family.Target.Varargs {
+		return false
+	}
+	_, cs, sig := erasedInvocationDeclaration(ctx, owner, f.FunctionName, f.Descriptor)
+	body, fixedThrows := invocationFixedThrowsBody(sig)
+	if !fixedThrows || !strings.HasPrefix(body, "()") || len(erasedInvocationBounds(cs)) == 0 {
+		return false
+	}
+	_, params, typ := types.ParseMethodSignatureFull(body, ctx)
+	if len(params) != 0 || erasedMethodType(typ, erasedInvocationBounds(cs)) != result {
+		return false
+	}
+	_, parameterized := types.AsParameterizedType(typ)
+	return parameterized && methodTypeMentionsFormal(typ, erasedInvocationBounds(cs))
+}
+
 // Return lowering supplies the exact result erasure, and adds its unchecked
 // generic view outside the call. This permission never flows into arguments.
 func (f *FunctionCallExpression) PlanErasedMethodReturn(ctx *class_context.ClassContext) (*FunctionCallExpression, bool) {

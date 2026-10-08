@@ -3814,7 +3814,7 @@ func sourceDenotableJavaType(typ types.JavaType, funcCtx *class_context.ClassCon
 		return false
 	}
 	if wildcard, ok := typ.(*types.JavaWildcardType); ok {
-		return wildcard.Bound == nil || sourceDenotableJavaType(wildcard.Bound, funcCtx)
+		return sourceDenotableWildcard(wildcard, funcCtx)
 	}
 	switch raw := typ.RawType().(type) {
 	case *types.JavaClass:
@@ -3835,11 +3835,31 @@ func sourceDenotableJavaType(typ types.JavaType, funcCtx *class_context.ClassCon
 	case *types.JavaArrayType:
 		return raw != nil && sourceDenotableJavaType(raw.JavaType, funcCtx)
 	case *types.JavaWildcardType:
-		return raw != nil && (raw.Bound == nil || sourceDenotableJavaType(raw.Bound, funcCtx))
+		return sourceDenotableWildcard(raw, funcCtx)
 	case *types.JavaPrimer:
 		return true
 	}
 	return false
+}
+
+// Capture variables are not wildcard syntax. Substituting a receiver's ? for
+// T in ? super T does not produce the legal source type "? super ?". Keep the
+// original erased functional target when that capture has no denotable proof;
+// neither flattening bounds nor inventing a payload cast establishes one.
+func sourceDenotableWildcard(wildcard *types.JavaWildcardType, ctx *class_context.ClassContext) bool {
+	if wildcard == nil {
+		return false
+	}
+	if wildcard.Bound == nil {
+		return wildcard.Variant == ""
+	}
+	if wildcard.Variant != "extends" && wildcard.Variant != "super" || types.IsWildcardType(wildcard.Bound) {
+		return false
+	}
+	if _, primitive := wildcard.Bound.RawType().(*types.JavaPrimer); primitive {
+		return false
+	}
+	return sourceDenotableJavaType(wildcard.Bound, ctx)
 }
 
 func functionalTypeVariablesErased(actual, formal *types.JavaParameterizedType, funcCtx *class_context.ClassContext) bool {

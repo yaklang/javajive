@@ -16,8 +16,9 @@ import (
 // This keeps preceding calls, field stores and abrupt completion in order;
 // hoisting only the allocating assignment would not do so.
 //
-// This certificate covers one physical constructor. Common prefixes copied
-// across constructors need a separate all-constructor equivalence proof. The
+// This certificate covers one physical initializing constructor, including
+// overloads proved to reach it through THIS delegation. Common prefixes copied
+// across super-delegating constructors need a separate equivalence proof. The
 // prefix may use THIS and fields, but no constructor parameter or local whose
 // declaration would cross the new source scope.
 func (c *ClassObjectDumper) nativeAnonymousOwnerInitializerPrefix(body []statements.Statement) (int, error) {
@@ -59,7 +60,13 @@ func (c *ClassObjectDumper) nativeAnonymousOwnerInitializerPrefix(body []stateme
 		}
 	}
 	if constructors != 1 {
-		return fail()
+		initializing, closed := c.nativeAnonymousInitializerDelegation(required)
+		if !closed {
+			return fail()
+		}
+		if !initializing {
+			return 0, nil
+		}
 	}
 	remaining := 4096
 	active := map[values.JavaValue]bool{}
