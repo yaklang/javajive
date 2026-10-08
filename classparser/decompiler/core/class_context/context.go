@@ -41,6 +41,10 @@ type ClassContext struct {
 	// in a self type, including when an own formal shadows an outer formal.
 	LexicalClassName string
 	LexicalTypeNames map[string]bool
+	// SourceClassDenotable reports original lexical ownership evidence. An
+	// anonymous runtime class has no Java declaration name, even when package
+	// access permits its JVM name. Nil/unknown preserves ordinary inference.
+	SourceClassDenotable func(binaryName string) (denotable, known bool)
 	// Optional lexical-layout proof may exchange both conditional arms. The
 	// renderer negates the same condition once, preserving evaluation and effects.
 	SourceBranchSwap func(ifSource, elseSource string) bool

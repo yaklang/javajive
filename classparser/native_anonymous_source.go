@@ -949,6 +949,22 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 
 func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 	ctx := c.FuncCtx
+	if forest := c.nativeAnonymousForest; forest != nil {
+		prior := ctx.SourceClassDenotable
+		ctx.SourceClassDenotable = func(name string) (bool, bool) {
+			name = strings.ReplaceAll(name, ".", "/")
+			if child := forest.units[name]; child != nil && child.object != nil && child.object.GetClassName() == name && forest.objects[name] == child.object {
+				owner, method, anonymous := originalAnonymousOwner(child.object)
+				if group := forest.groups[owner]; anonymous && group != nil && group.owner == owner && group.forest == forest && group.children[name] == child && method == child.method && nativeProofWork(c.Work, 1) {
+					return false, true
+				}
+			}
+			if prior != nil {
+				return prior(name)
+			}
+			return false, false
+		}
+	}
 	if c.nativeCaptureFields != nil {
 		ctx.SourceCapturedFieldType = func(pc int, owner, name, descriptor string) any {
 			if owner != c.obj.GetClassName() || c.nativeCapturedReads[ctx.FunctionName+ctx.CurrentMethodDesc][pc] != name {

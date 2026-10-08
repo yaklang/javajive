@@ -136,6 +136,11 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 		return types.IsReferenceSubtypeBridged(a, b, provider)
 	}
 	accessible := func(n string) bool {
+		if check := d.FunctionContext.SourceClassDenotable; check != nil {
+			if denotable, known := check(strings.ReplaceAll(n, ".", "/")); known && !denotable {
+				return false
+			}
+		}
 		if check := d.FunctionContext.SiblingClassAccessible; check != nil {
 			if allowed, known := check(strings.ReplaceAll(n, ".", "/")); known {
 				return allowed
@@ -154,6 +159,12 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 	for _, candidate := range bounds {
 		n, _ := types.RawClassFQN(candidate)
 		if !accessible(n) {
+			continue
+		}
+		// A denotable declaration must accept every definition as well as
+		// satisfy every consumer. Widening the solved definition type is safe;
+		// a consumer alone cannot justify a narrowing cast or a new check.
+		if !isSubtype(name, n) {
 			continue
 		}
 		valid := true
