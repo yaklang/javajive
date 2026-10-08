@@ -8,7 +8,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func TestAnonymousDenotabilityRequiresOriginalCompleteLexicalRole(t *testing.T) {
+func TestNativeAnonymousDenotabilityRequiresOriginalCompleteLexicalRole(t *testing.T) {
 	files := nativeCompileSourceReleaseClasses(t, map[string]string{"EnumForestOwner.java": anonymousThisAliasFixture}, "none", "8")
 	for _, variant := range []string{"original", "named owner", "missing unit", "foreign object", "missing object", "missing group", "wrong group owner", "foreign forest", "foreign child", "wrong method", "aliased binary key", "missing original self row", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
