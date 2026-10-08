@@ -11,6 +11,19 @@ import (
 // still complete its source transaction. No field, enclosing instance, private
 // constructor, accessor or registration ordinal becomes owned by the caller.
 func nativeMemberIndependentDeclarationDependency(root, member *ClassObject, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+	if root == nil || member == nil || !nativeMemberDeclarationMetadataBounded(root, work) || !nativeMemberDeclarationMetadataBounded(member, work) {
+		return false
+	}
+	owner, _, flags, named := originalMemberOwner(member)
+	if !named || flags&8 != 0 || owner == root.GetClassName() {
+		return false
+	}
+	return nativeMemberOriginalDeclarationPath(root, member, resolve, work)
+}
+
+// Validate every named declaration edge, including a root's own member.
+// Whether a caller may import an independent dependency is a separate rule.
+func nativeMemberOriginalDeclarationPath(root, member *ClassObject, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
 	if root == nil || member == nil || resolve == nil || !nativeMemberDeclarationMetadataBounded(root, work) || !nativeMemberDeclarationMetadataBounded(member, work) || !nativeMemberTopLevelEvidence(root, work) {
 		return false
 	}
@@ -21,10 +34,6 @@ func nativeMemberIndependentDeclarationDependency(root, member *ClassObject, res
 		return ""
 	}
 	rootPackage := pkg(root.GetClassName())
-	owner, _, flags, named := originalMemberOwner(member)
-	if !named || flags&8 != 0 || owner == root.GetClassName() {
-		return false
-	}
 	seen := map[string]bool{}
 	for node := member; node != nil; {
 		name := node.GetClassName()

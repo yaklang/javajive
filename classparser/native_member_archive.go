@@ -507,6 +507,13 @@ func (z *JarFS) nativeMemberSource(obj *ClassObject) ([]byte, bool) {
 // Scope dependencies also occur only in field/method descriptors or Signature
 // bounds. A CONSTANT_Class-only closure misses those source type bindings.
 func nativeMemberDependencyNames(obj *ClassObject, work *workbudget.Budget) ([]string, bool) {
+	return nativeMemberDependencyNamesWithoutStandaloneClass(obj, "", work)
+}
+
+// A protected type's redundant CONSTANT_Class/InnerClasses entry is not a
+// Java source use. Keep every descriptor, Signature and annotation dependency;
+// the caller separately checks actual class operands and member owners.
+func nativeMemberDependencyNamesWithoutStandaloneClass(obj *ClassObject, omitted string, work *workbudget.Budget) ([]string, bool) {
 	names := []string{}
 	seen := map[string]bool{}
 	signatures := map[string]bool{}
@@ -611,7 +618,9 @@ func nativeMemberDependencyNames(obj *ClassObject, work *workbudget.Budget) ([]s
 					return nil, false
 				}
 			} else {
-				add(n)
+				if n != omitted {
+					add(n)
+				}
 			}
 		}
 	}

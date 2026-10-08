@@ -153,7 +153,10 @@ func (c *ClassObjectDumper) nativeMemberForeignOriginalSuper(p *nativeMemberFami
 		return false
 	}
 	enclosing, _, _, member := originalMemberOwner(c.obj)
-	if !member || enclosing == p.owner {
+	if !member {
+		return c.nativeAnonymousForeignOriginalSuper(parent, method, descriptor, pc)
+	}
+	if enclosing == p.owner {
 		return false
 	}
 	resolve := c.nativeAnnotationDeclarationResolver()

@@ -88,8 +88,19 @@ func (z *JarFS) nativeMemberAccessRepresentable(p *nativeMemberFamily, index *na
 			if pkg(user) == pkg(p.owner) {
 				continue
 			}
-			if child.flags&4 == 0 || !subclass(user) && !nativeMemberJointProtectedTypeAccess(user, peers, work, subclass) {
+			if child.flags&4 == 0 {
 				return false
+			}
+			if !subclass(user) && !nativeMemberJointProtectedTypeAccess(user, peers, work, subclass) {
+				raw, found := z.enumSiblingResolver()(user)
+				if !found {
+					return false
+				}
+				object, err := z.nativeMemberReader(nil).parseResolved(raw)
+				used, known := nativeProtectedTypeRequiresSourceAccess(object, name, work)
+				if err != nil || object == nil || object.GetClassName() != user || !known || used {
+					return false
+				}
 			}
 		}
 	}
@@ -149,45 +160,17 @@ func nativeMemberJointProtectedTypeAccess(user string, peers []map[string]*nativ
 		}
 		child := peer.family.children[user]
 		if child == nil {
+			if nativeMemberJointAnonymousAccess(peer.family, user, work) && nativeMemberJointAnonymousProtectedTypeAccess(peer, user, work, subclass) {
+				return true
+			}
 			continue
 		}
-		current := user
-		var chain []*nativeMemberClass
-		seen := map[string]bool{}
-		for current != owner {
-			if len(seen) >= 64 || seen[current] || !nativeProofWork(work, 1) {
-				return false
-			}
-			seen[current] = true
-			node := peer.family.children[current]
-			if node == nil || node.object == nil || node.object.GetClassName() != current || peer.family.lexicalObjects[current] != node.object || peer.objects[current] != node.object {
-				return false
-			}
-			parent, name, flags, known := originalMemberOwner(node.object)
-			if !known || parent != node.owner || name != node.name || flags != node.flags || peer.family.lexicalObjects[parent] == nil {
-				return false
-			}
-			chain = append(chain, node)
-			current = parent
-		}
-		if work != nil && work.CheckAlloc(int64(len(chain))*128) != nil {
+		seen, known := nativeMemberJointNamedScope(peer, user, work)
+		if !known {
 			return false
 		}
-		spelling := strings.ReplaceAll(owner, "/", ".")
-		for i := len(chain) - 1; i >= 0; i-- {
-			if !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(len(spelling)+len(chain[i].name)+1)+int64(len(chain))*128) != nil {
-				return false
-			}
-			spelling += "." + chain[i].name
-			if chain[i].sourceName != spelling {
-				return false
-			}
-		}
-		if !nativeMemberTopLevelEvidence(peer.root, work) {
-			return false
-		}
-		// Check each independently witnessed enclosing declaration, not just
-		// the physical user class's own superclass. Complete the chain first.
+		// Check independently witnessed declarations after completing the
+		// whole lexical chain and its source spellings.
 		for node := range seen {
 			if subclass(node) {
 				return true
@@ -196,4 +179,103 @@ func nativeMemberJointProtectedTypeAccess(user string, peers []map[string]*nativ
 		return subclass(owner)
 	}
 	return false
+}
+
+func nativeMemberJointNamedScope(peer *nativeMemberPrepared, user string, work *workbudget.Budget) (map[string]bool, bool) {
+	if peer == nil || peer.family == nil || peer.family.failed || peer.root == nil {
+		return nil, false
+	}
+	owner := peer.family.owner
+	if peer.root.GetClassName() != owner || peer.family.lexicalObjects[owner] != peer.root || peer.objects[owner] != peer.root {
+		return nil, false
+	}
+	current := user
+	var chain []*nativeMemberClass
+	seen := map[string]bool{}
+	for current != owner {
+		if len(seen) >= 64 || seen[current] || !nativeProofWork(work, 1) {
+			return nil, false
+		}
+		seen[current] = true
+		node := peer.family.children[current]
+		if node == nil || node.object == nil || node.object.GetClassName() != current || peer.family.lexicalObjects[current] != node.object || peer.objects[current] != node.object {
+			return nil, false
+		}
+		parent, name, flags, known := originalMemberOwner(node.object)
+		if !known || parent != node.owner || name != node.name || flags != node.flags || peer.family.lexicalObjects[parent] == nil {
+			return nil, false
+		}
+		chain = append(chain, node)
+		current = parent
+	}
+	if work != nil && work.CheckAlloc(int64(len(chain))*128) != nil {
+		return nil, false
+	}
+	spelling := strings.ReplaceAll(owner, "/", ".")
+	for i := len(chain) - 1; i >= 0; i-- {
+		if !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(len(spelling)+len(chain[i].name)+1)+int64(len(chain))*128) != nil {
+			return nil, false
+		}
+		spelling += "." + chain[i].name
+		if chain[i].sourceName != spelling {
+			return nil, false
+		}
+	}
+	if !nativeMemberTopLevelEvidence(peer.root, work) {
+		return nil, false
+	}
+	return seen, true
+}
+
+// Anonymous THIS is unnameable, but its original class ancestry can grant
+// protected type access to nested source declarations. Every mixed enclosing
+// edge must belong to this same prepared atomic source transaction; no flat
+// foreign class or metadata-only root reference receives that scope.
+func nativeMemberJointAnonymousProtectedTypeAccess(peer *nativeMemberPrepared, user string, work *workbudget.Budget, subclass func(string) bool) bool {
+	if peer == nil || peer.family == nil || peer.family.failed || peer.root == nil || peer.root.GetClassName() != peer.family.owner || subclass == nil {
+		return false
+	}
+	p := peer.family
+	seen := map[string]bool{}
+	current := user
+	for current != p.owner {
+		if len(seen) >= 64 || seen[current] || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(len(seen)+1)*128) != nil {
+			return false
+		}
+		seen[current] = true
+		object := peer.objects[current]
+		if object == nil || object.GetClassName() != current {
+			return false
+		}
+		if child := p.children[current]; child != nil {
+			if _, known := nativeMemberJointNamedScope(peer, current, work); !known {
+				return false
+			}
+			owner, name, flags, known := originalMemberOwner(object)
+			if child.object != object || p.lexicalObjects[current] != object || !known || owner != child.owner || name != child.name || flags != child.flags {
+				return false
+			}
+			current = owner
+			continue
+		}
+		group := p.anonymousUnits[current]
+		if group == nil || !nativeMemberJointAnonymousAccess(p, current, work) {
+			return false
+		}
+		unit := group.children[current]
+		owner, method, known := originalAnonymousOwner(object)
+		if unit == nil || unit.object != object || !known || owner != group.owner || method != unit.method {
+			return false
+		}
+		current = owner
+	}
+	if peer.objects[p.owner] != peer.root || p.lexicalObjects[p.owner] != peer.root || !nativeMemberTopLevelEvidence(peer.root, work) {
+		return false
+	}
+	for scope := range seen {
+		if subclass(scope) {
+			return true
+		}
+	}
+	return subclass(p.owner)
 }

@@ -46,6 +46,9 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 	if c == nil || c.options.SourceCompiler.validate(c.options.TargetSourceVersion) != nil {
 		return nil
 	}
+	if members != nil && !c.prepareNativeAnonymousForeignMemberSuper(obj, owner, members, forest) {
+		return nil
+	}
 	if c.options.SourceCompiler != NativeJavac8 {
 		packet := nativeAnonymousConstructorWithDeclarations(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, access)
 		if packet != nil {

@@ -49,7 +49,11 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 			seen[name] = true
 			parent, _, _, member := originalMemberOwner(o)
 			if !member {
-				return name, nativeMemberTopLevelEvidence(o, work)
+				var anonymous bool
+				parent, _, anonymous = originalAnonymousOwner(o)
+				if !anonymous {
+					return name, nativeMemberTopLevelEvidence(o, work)
+				}
 			}
 			var known bool
 			o, known = load(parent)
@@ -222,7 +226,9 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 					continue
 				}
 				if _, _, _, member := originalMemberOwner(caller); !member {
-					continue
+					if _, _, anonymous := originalAnonymousOwner(caller); !anonymous {
+						continue
+					}
 				}
 				target, known := outermost(caller)
 				if !known {

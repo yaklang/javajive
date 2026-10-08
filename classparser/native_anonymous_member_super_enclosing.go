@@ -10,7 +10,7 @@ import (
 // Walk only committed original enclosing captures. A same-typed field, foreign
 // receiver or computed parameter is not the lexical enclosing instance.
 func nativeAnonymousMemberSuperEnclosingPath(object *ClassObject, owner string, parent *nativeMemberClass, members *nativeMemberFamily, forest *nativeAnonymousForest, ops []*core.OpCode, start int, work *workbudget.Budget) (*nativeMemberLexicalRead, int, bool) {
-	if object == nil || members == nil || members.failed || parent == nil || parent.static || parent.object == nil || members.children[parent.object.GetClassName()] != parent || start < 0 || start >= len(ops) || !constructorMotionLoad(ops[start], "L"+owner+";") || core.GetRetrieveIdx(ops[start]) != 1 {
+	if object == nil || members == nil || members.failed || parent == nil || parent.static || parent.object == nil || members.anonymousSuperClass(parent.object.GetClassName()) != parent || start < 0 || start >= len(ops) || !constructorMotionLoad(ops[start], "L"+owner+";") || core.GetRetrieveIdx(ops[start]) != 1 {
 		return nil, start, false
 	}
 	root := members.lexicalObjects[members.owner]
@@ -29,6 +29,13 @@ func nativeAnonymousMemberSuperEnclosingPath(object *ClassObject, owner string, 
 	seen := map[string]bool{}
 	next := start + 1
 	for current != parent.owner {
+		// An inherited member's declaring outer is a superclass of the
+		// original enclosing object. Widening changes no physical operand:
+		// it must terminate this exact slot-1/capture path, never introduce
+		// a qualified NEW, cast, null check or independently captured value.
+		if members.children[parent.object.GetClassName()] != parent && nativeMemberOriginalClassWidening(current, parent.owner, members.anonymousSuperResolver, work) {
+			break
+		}
 		if len(seen) >= 64 || seen[current] || next >= len(ops) || !nativeProofWork(work, 1) {
 			return nil, start, false
 		}
@@ -71,7 +78,7 @@ func nativeAnonymousMemberSuperEnclosingPath(object *ClassObject, owner string, 
 		current = enclosing
 		next++
 	}
-	if members.lexicalObjects[parent.owner] == nil || members.lexicalObjects[parent.owner].GetClassName() != parent.owner {
+	if members.children[parent.object.GetClassName()] == parent && (members.lexicalObjects[parent.owner] == nil || members.lexicalObjects[parent.owner].GetClassName() != parent.owner) {
 		return nil, start, false
 	}
 	return path, next, true

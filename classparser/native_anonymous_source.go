@@ -279,7 +279,7 @@ func nativeAnonymousConstructorWithRoles(obj *ClassObject, owner, method, assert
 	// Source nesting, class inheritance and ordinary captured values are
 	// different relations; only the first relation can omit this operand.
 	if members != nil && i < len(ops) {
-		parent := members.children[obj.GetSupperClassName()]
+		parent := members.anonymousSuperClass(obj.GetSupperClassName())
 		capture, captured := c.fields[outerField]
 		if parent != nil && !parent.static && captured && capture == 0 &&
 			len(ps) > 0 && ps[0] == "L"+owner+";" {
@@ -361,6 +361,11 @@ func nativeAnonymousConstructorWithRoles(obj *ClassObject, owner, method, assert
 		// order: the leading enclosing instance and optional trailing unused
 		// private-access marker. Both are backed by the named parent packet.
 		parent := c.memberSuper
+		// A foreign declaration supplies no private bridge or constructor
+		// privilege. Its source transaction is committed independently.
+		if members != nil && members.children[mem.Name] != parent && !nativeAnonymousForeignSuperConstructorAccessible(parent, owner, mem.Description, work) {
+			return nil
+		}
 		target := mem.Description
 		if nullTail {
 			bridge = parent.accessBridges[target]
@@ -1235,10 +1240,14 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			binding = *ctx // The source allocation has the original enclosing private access.
 		}
 		if child.memberSuper != nil {
-			if c.nativeMemberRoot == nil || c.nativeMemberRoot.children[child.memberSuper.object.GetClassName()] != child.memberSuper || !nativeMemberJointAnonymousAccess(c.nativeMemberRoot, child.object.GetClassName(), c.Work) {
+			if c.nativeMemberRoot == nil || c.nativeMemberRoot.allocationClass(child.memberSuper.object.GetClassName()) != child.memberSuper || !nativeMemberJointAnonymousAccess(c.nativeMemberRoot, child.object.GetClassName(), c.Work) {
 				return fail()
 			}
-			binding = *nativeMemberBinding(ctx, c.nativeMemberRoot, c.Work)
+			// This is the original anonymous constructor's SUPER binding.
+			// Its instantiated superclass Signature supplies the leaf and
+			// enclosing arguments; the allocation caller's unrelated extends
+			// clause must never stand in for that declaration environment.
+			binding = *nativeMemberBinding(sub.FuncCtx, c.nativeMemberRoot, c.Work)
 		}
 		binding.FunctionName = "<init>"
 		binding.CurrentMethodDesc = child.descriptor

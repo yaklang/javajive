@@ -42,21 +42,26 @@ type nativeMemberFamily struct {
 	registrationLayouts    map[string]*nativeMemberRegistrationScope
 	sourceDependencies     map[string]string
 	allocationDependencies map[string]*nativeMemberClass
-	rootAccessBridges      map[string]*nativeConstructorAccessBridge
-	rootBridgeDelegations  map[string]*nativeRootBridgeDelegation
-	getters                map[string]*nativeMemberPrivateGetter
-	retainedAccessors      map[string]*nativeMemberPrivateGetter
-	nestmateAccessors      bool
-	lexicalObjects         map[string]*ClassObject
-	anonymous              *nativeAnonymousFamily
-	anonymousUnits         map[string]*nativeAnonymousFamily
-	memberAnonymous        map[string]*nativeAnonymousFamily
-	anonymousForest        *nativeAnonymousForest
-	owner                  string
-	children               map[string]*nativeMemberClass
-	failed                 bool
-	bridgeCalls            map[string]int
-	emptyMarkers           map[string]*ClassObject
+	// Original constructor packets used while anonymous scopes are planned.
+	// They have no source/private ownership and must match a separately
+	// completed dependency before rendering can consume them.
+	pendingAnonymousSuperDependencies map[string]*nativeMemberClass
+	anonymousSuperResolver            func(string) (*ClassObject, bool)
+	rootAccessBridges                 map[string]*nativeConstructorAccessBridge
+	rootBridgeDelegations             map[string]*nativeRootBridgeDelegation
+	getters                           map[string]*nativeMemberPrivateGetter
+	retainedAccessors                 map[string]*nativeMemberPrivateGetter
+	nestmateAccessors                 bool
+	lexicalObjects                    map[string]*ClassObject
+	anonymous                         *nativeAnonymousFamily
+	anonymousUnits                    map[string]*nativeAnonymousFamily
+	memberAnonymous                   map[string]*nativeAnonymousFamily
+	anonymousForest                   *nativeAnonymousForest
+	owner                             string
+	children                          map[string]*nativeMemberClass
+	failed                            bool
+	bridgeCalls                       map[string]int
+	emptyMarkers                      map[string]*ClassObject
 	// Newer compilers use nestmates and need not emit an unused access marker.
 	// Keep its original class as a separate source unit instead of consuming it.
 	retainEmptyMarkers bool

@@ -228,7 +228,7 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 				// Inherited and independently accessible member declarations
 				// can both contribute names. Neither contributes ownership.
 				static := otherFlags&8 != 0
-				if !static && !nativeMemberAncestorDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeMemberIndependentDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) {
+				if !static && !nativeMemberAncestorDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeMemberIndependentDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeAnonymousForeignSuperDeclarationUse(p, other, d.Work) {
 					return nil
 				}
 				if !staticDependenciesChecked {
@@ -292,6 +292,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	}
 
 	if !nativeMemberExternalSupersClosed(p, d.buildInvocationMetadata(), d.nativeAnnotationDeclarationResolver(), d.Work) {
+		return nil
+	}
+	if !nativeAnonymousForeignSupersCommitted(p, d.Work) {
 		return nil
 	}
 
