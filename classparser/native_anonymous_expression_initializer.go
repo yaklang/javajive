@@ -21,6 +21,9 @@ type nativeAnonymousExpressionInitializer struct {
 	stores    map[int]string
 	signature string
 	byPC      map[int]*core.OpCode
+	branches  map[int]*core.OpCode // exact reference producer PC -> null branch
+	armValues map[int][2]int       // original fallthrough / target result producer
+	events    []int                // structured original event stream
 }
 
 // Keep the entire original post-SUPER computation at its original position.
@@ -104,16 +107,17 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 			}
 			continue
 		}
-		// This capability admits expression packets, not local declarations or
-		// control flow. The original synthetic captures are read through GETFIELD.
+		// This capability admits expression packets and separately certified
+		// diamonds, not arbitrary control flow or local declarations. The
+		// original synthetic captures are read through GETFIELD.
 		if slot := core.GetRetrieveIdx(op); slot >= 0 && (slot != 0 || !constructorMotionLoad(op, "Ljava/lang/Object;")) {
 			return nil
 		}
 		switch kind {
-		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IDIV, core.OP_LDIV, core.OP_IREM, core.OP_LREM, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE:
+		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IDIV, core.OP_LDIV, core.OP_IREM, core.OP_LREM, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE:
 			return nil
 		}
-		if kind >= core.OP_IFEQ && kind <= core.OP_IF_ACMPNE || kind == core.OP_IFNULL || kind == core.OP_IFNONNULL || kind >= core.OP_IRETURN && kind <= core.OP_ARETURN {
+		if kind >= core.OP_IFEQ && kind <= core.OP_IF_ACMPNE || kind >= core.OP_IRETURN && kind <= core.OP_ARETURN {
 			return nil
 		}
 		if kind == core.OP_LDC || kind == core.OP_LDC_W || kind == core.OP_LDC2_W {
@@ -178,6 +182,11 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 		// expressed by Java definite-assignment rules, so keep them refused.
 		used[f.Member] = true
 		plan.stores[pc] = f.Member
+	}
+	var closed bool
+	plan.events, plan.branches, plan.armValues, closed = nativeAnonymousInitializerControlEvents(obj, ops, start, work)
+	if !closed {
+		return nil
 	}
 	d := NewClassObjectDumper(obj)
 	d.Work = work
@@ -324,13 +333,7 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	if len(stores) != len(plan.stores) {
 		return "", false
 	}
-	expected := []int{}
-	for _, op := range plan.ops[plan.start:] {
-		k := op.Instr.OpCode
-		if k == core.OP_PUTFIELD || k == core.OP_GETFIELD || k == core.OP_GETSTATIC || k == core.OP_NEW || k == core.OP_NEWARRAY || k == core.OP_ANEWARRAY || k == core.OP_MULTIANEWARRAY || k == core.OP_ARRAYLENGTH || k == core.OP_CHECKCAST || k >= core.OP_IALOAD && k <= core.OP_SALOAD || k >= core.OP_INVOKEVIRTUAL && k <= core.OP_INVOKEINTERFACE {
-			expected = append(expected, int(op.CurrentOffset))
-		}
-	}
+	expected := plan.events
 	if len(expected) != len(events) {
 		return "", false
 	}
@@ -385,6 +388,30 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 		path[v] = true
 		defer delete(path, v)
 		switch x := v.(type) {
+		case *values.TernaryExpression:
+			branch, fallthroughTrue := nativeAnonymousInitializerSourceBranch(plan, x.Condition)
+			if branch == nil || !visit(x.Condition) {
+				return false
+			}
+			pc := int(branch.CurrentOffset)
+			yes, no := x.TrueValue, x.FalseValue
+			if !fallthroughTrue {
+				yes, no = no, yes
+			}
+			arms, known := plan.armValues[pc]
+			if !known || !nativeAnonymousInitializerArmValue(yes, arms[0]) || !nativeAnonymousInitializerArmValue(no, arms[1]) {
+				return false
+			}
+			*events = append(*events, nativeAnonymousInitializerBranchToken(pc, 0))
+			if !visit(yes) {
+				return false
+			}
+			*events = append(*events, nativeAnonymousInitializerBranchToken(pc, 1))
+			if !visit(no) {
+				return false
+			}
+			*events = append(*events, nativeAnonymousInitializerBranchToken(pc, 2))
+			return true
 		case *values.AssignmentExpression:
 			if !nativeAnonymousInitializerOriginalStore(child, plan, x, work) {
 				return false
