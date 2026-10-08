@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/yaklang/javajive/internal/workbudget"
 	"reflect"
 	"strings"
 
@@ -46,6 +47,16 @@ func (d *Decompiler) referenceUseConstraints() map[*values.JavaRef][]types.JavaT
 				if call != nil {
 					if target := call.FunctionalTargetParamType(i, d.FunctionContext); target != nil {
 						typ = target
+					}
+					if d.traceEnabled("var-fold") {
+						d.tracef("var-fold", "invoke use pc=%d owner=%s name=%s argument=%d bound=%s", op.CurrentOffset, call.ClassName, call.FunctionName, i, typ.String(d.FunctionContext))
+						argumentTypes := []string{}
+						for _, argument := range call.Arguments {
+							if argument != nil && argument.Type() != nil {
+								argumentTypes = append(argumentTypes, argument.Type().String(d.FunctionContext))
+							}
+						}
+						d.tracef("var-fold", "invoke witnesses pc=%d receiver=%T arguments=%v", op.CurrentOffset, call.Object, argumentTypes)
 					}
 				}
 				add(stack[len(params)-1-i], typ)
@@ -156,16 +167,34 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 	if compatible {
 		return joined
 	}
+	definitions, completeDefinitions := d.originalReferenceWebDefinitions(stores)
 	for _, candidate := range bounds {
 		n, _ := types.RawClassFQN(candidate)
 		if !accessible(n) {
 			continue
 		}
 		// A denotable declaration must accept every definition as well as
-		// satisfy every consumer. Widening the solved definition type is safe;
-		// a consumer alone cannot justify a narrowing cast or a new check.
+		// satisfy every consumer. The representative join may have lost an
+		// incomparable interface; in that case inspect all original definitions.
+		// A consumer alone never justifies a narrowing cast or a new check.
 		if !isSubtype(name, n) {
-			continue
+			if !completeDefinitions {
+				continue
+			}
+			acceptsEveryDefinition := true
+			for _, definition := range definitions {
+				dn, known := types.RawClassFQN(definition)
+				// Erasure alone cannot prove invariant generic arguments. Poly
+				// expressions have their separate target-typing proof above.
+				_, parameterized := types.AsParameterizedType(candidate)
+				if !known || !isSubtype(dn, n) || parameterized && !reflect.DeepEqual(definition.RawType(), candidate.RawType()) {
+					acceptsEveryDefinition = false
+					break
+				}
+			}
+			if !acceptsEveryDefinition {
+				continue
+			}
 		}
 		valid := true
 		for _, bound := range bounds {
@@ -180,6 +209,41 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 		}
 	}
 	return joined
+}
+
+// A representative LUB need not retain every shared interface. Recover the
+// definition side of the constraints from the original store RHS DAGs before
+// considering a consumer type. Recursive copies add no constraint; incomplete
+// stores, values and unanchored recurrences never prove a declaration.
+func (d *Decompiler) originalReferenceWebDefinitions(stores []*OpCode) ([]types.JavaType, bool) {
+	self := map[*values.JavaRef]bool{}
+	if len(stores) > 65536 {
+		return nil, false
+	}
+	var roots []values.JavaValue
+	for _, store := range stores {
+		if store == nil || len(store.stackConsumed) != 1 || len(d.opcodeIdToRef[store]) != 1 {
+			return nil, false
+		}
+		ref, ok := d.opcodeIdToRef[store][0][0].(*values.JavaRef)
+		if !ok || ref == nil {
+			return nil, false
+		}
+		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return nil, false
+		}
+		self[ref] = true
+		roots = append(roots, store.stackConsumed[0])
+	}
+	// One shared visitation state preserves DAG complexity across stores and
+	// charges the request budget once per original value identity.
+	definitions := webDefinitionTypeLeaves(roots, self, d.Work)
+	for _, typ := range definitions {
+		if typ == nil {
+			return nil, false
+		}
+	}
+	return definitions, len(definitions) > 0
 }
 
 func (d *Decompiler) uniqueParameterizedUseConstraint(rawName string, stores []*OpCode, uses map[*values.JavaRef][]types.JavaType) types.JavaType {

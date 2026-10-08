@@ -137,6 +137,44 @@ class PlatformArchives:
                 'sha256': hashlib.sha256(raw).hexdigest(), 'major': major}
 
 
+def original_reference_hierarchy(declarations_by_name, source_entries, archive_name):
+    """Original public java/javax types in the primary archive and their parents.
+    This is hierarchy evidence only, never a complete member declaration table.
+    """
+    names = {n for n, c in declarations_by_name.items()
+             if n.startswith(('java/', 'javax/')) and c['Public']
+             and source_entries[n]['archive'] == archive_name}
+    pending = sorted(names)
+    while pending:
+        name = pending.pop()
+        for parent in declarations_by_name[name]['Parents']:
+            if parent not in declarations_by_name:
+                raise ValueError('missing reference ancestor ' + parent)
+            if parent not in names:
+                names.add(parent)
+                pending.append(parent)
+    # A closed cyclic graph is still invalid inheritance evidence. Kahn's
+    # algorithm validates the full selected namespace without recursive depth.
+    pending_count = {n: len(set(declarations_by_name[n]['Parents'])) for n in names}
+    children = {n: [] for n in names}
+    for n in names:
+        for parent in set(declarations_by_name[n]['Parents']):
+            children[parent].append(n)
+    ready = [n for n, count in pending_count.items() if count == 0]
+    visited = 0
+    while ready:
+        parent = ready.pop()
+        visited += 1
+        for child in children[parent]:
+            pending_count[child] -= 1
+            if pending_count[child] == 0:
+                ready.append(child)
+    if visited != len(names):
+        raise ValueError('cyclic reference hierarchy')
+    return ({n: declarations_by_name[n]['Parents'] for n in sorted(names)},
+            {n: source_entries[n] for n in sorted(names)})
+
+
 def profile(release, archive, prefix, jdk_version, modules=()):
     with PlatformArchives([archive, *modules]) as source:
         classes, provenance = {}, {}
@@ -231,12 +269,16 @@ def profile(release, archive, prefix, jdk_version, modules=()):
                     ancestors.add(parent)
                     pending.append(parent)
         exception_names = sorted(ancestors)
+        reference_parents, reference_provenance = original_reference_hierarchy(
+            declarations_by_name, source_entries, Path(archive).name)
         return {'release': release, 'jdk_version': jdk_version,
                 'archive_sha256': hashlib.sha256(Path(archive).read_bytes()).hexdigest(),
                 'archives': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                              for p in source.archives},
                 'classes': {k: classes[k] for k in sorted(classes)},
                 'provenance': {k: provenance[k] for k in sorted(provenance)},
+                'reference_hierarchy': reference_parents,
+                'reference_provenance': reference_provenance,
                 'throwable_hierarchy': {name: declarations_by_name[name]['Parents'] for name in exception_names},
                 'throwable_provenance': {name: source_entries[name] for name in exception_names}}
 
@@ -256,14 +298,15 @@ def main():
         if not files:
             raise ValueError('Missing JDK version provenance')
         return {p.name: p.read_text(encoding='utf-8').strip() for p in files}
-    profiles = [profile(8, args.jdk8 / 'jre/lib/rt.jar', '', version(args.jdk8))]
+    profiles = [profile(8, args.jdk8 / 'jre/lib/rt.jar', '', version(args.jdk8),
+                        [args.jdk8 / 'jre/lib' / n for n in ('jce.jar', 'jsse.jar')])]
     for release, home in ((9, args.jdk9), (11, args.jdk11), (16, args.jdk16), (17, args.jdk17), (21, args.jdk21)):
         if home is not None:
             archives = sorted((home / 'jmods').glob('*.jmod'))
             base = home / 'jmods/java.base.jmod'
             profiles.append(profile(release, base, 'classes/', version(home),
                                     [p for p in archives if p != base]))
-    result = {'schema': 2, 'roots': ['Object/String/Map/Record and standard collection, stream, functional, I/O, channel, reflection, concurrency, TLS, XML, JavaBeans, naming and SQL APIs; see generator roots'],
+    result = {'schema': 3, 'roots': ['Object/String/Map/Record and standard collection, stream, functional, I/O, channel, reflection, concurrency, TLS, XML, JavaBeans, naming and SQL APIs; see generator roots'],
               'profiles': profiles}
     args.out.write_text(json.dumps(result, sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
 

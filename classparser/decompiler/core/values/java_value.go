@@ -397,7 +397,14 @@ func (j *JavaClassValue) String(funcCtx *class_context.ClassContext) string {
 }
 
 func (j *JavaClassValue) Type() types.JavaType {
-	return j.JavaType
+	// The referenced type is the intrinsic payload of an ldc class literal or
+	// a symbolic invocation owner. A receiving local has type java.lang.Class;
+	// assignment inference cannot change Foo.class into Class.class. Return an
+	// independent view just as NEW and invocation descriptors do.
+	if j == nil || j.JavaType == nil {
+		return nil
+	}
+	return j.JavaType.Copy()
 }
 func NewJavaClassValue(typ types.JavaType) *JavaClassValue {
 	return &JavaClassValue{

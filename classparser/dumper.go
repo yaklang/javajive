@@ -2879,27 +2879,51 @@ func (c *ClassObjectDumper) buildSiblingClassAccessible() func(string) (bool, bo
 }
 
 func (c *ClassObjectDumper) buildSiblingSuperTypes() func(internalName string) ([]string, bool) {
-	if c.foldSiblingResolver == nil {
-		return nil
+	metadata := c.buildInvocationMetadata()
+	target := c.options.TargetSourceVersion
+	if target == 0 {
+		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
 	}
 	type entry struct {
 		supers []string
 		ok     bool
 	}
 	cache := map[string]*entry{}
-	resolver := c.foldSiblingResolver
 	return func(internal string) ([]string, bool) {
 		if e, hit := cache[internal]; hit {
 			return e.supers, e.ok
 		}
 		e := &entry{}
 		cache[internal] = e
-		data, ok := resolver(internal)
-		if !ok || len(data) == 0 {
-			return nil, false // JDK / external: not in jar
+		var data []byte
+		var ok bool
+		if c.foldSiblingResolver != nil {
+			data, ok = c.foldSiblingResolver(internal)
+		}
+		if !ok && c.archiveDeclarationResolver != nil {
+			data, ok = c.archiveDeclarationResolver(internal)
+		}
+		if !ok && c.declarationResolver != nil {
+			data, ok = c.declarationResolver(internal)
+		}
+		if !ok {
+			if parents, known := jdkReferenceSupertypes(internal, target); known {
+				e.supers, e.ok = parents, true
+				return e.supers, true
+			}
+			// Original dependency and platform declarations constrain a local's
+			// type even when those classes do not own emitted source units.
+			// Reuse the release-selected declaration provider; a CP reference
+			// or a missing parent table cannot certify an inheritance edge.
+			if declaration, known := metadata(internal); known && declaration.ParentsComplete {
+				e.supers = append([]string(nil), declaration.Parents...)
+				e.ok = true
+				return e.supers, true
+			}
+			return nil, false
 		}
 		sObj, err := c.parseResolved(data)
-		if err != nil {
+		if err != nil || sObj == nil || sObj.GetClassName() != internal {
 			return nil, false
 		}
 		var supers []string

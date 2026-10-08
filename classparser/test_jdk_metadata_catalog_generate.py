@@ -3,7 +3,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from jdk_metadata_catalog_generate import declarations, PlatformArchives
+from jdk_metadata_catalog_generate import declarations, PlatformArchives, original_reference_hierarchy
 
 
 class PlatformArchiveTest(unittest.TestCase):
@@ -63,6 +63,28 @@ class CatalogDeclarationTest(unittest.TestCase):
         for attr in (b"",bytes.fromhex("0001"),bytes.fromhex("00000000")):
             with self.subTest(attr=attr),self.assertRaises(ValueError):
                 declarations(self.fixture(attr))
+
+
+class OriginalReferenceHierarchyTests(unittest.TestCase):
+    def test_public_api_roots_and_exact_closed_original_parents(self):
+        entries = {
+            'java/lang/Object': {'Parents': [], 'Public': True},
+            'java/util/OriginalApi': {'Parents': ['internal/OriginalParent'], 'Public': True},
+            'internal/OriginalParent': {'Parents': ['java/lang/Object'], 'Public': False},
+            'internal/UnusedImplementation': {'Parents': ['java/lang/Object'], 'Public': True},
+            'javax/OtherModuleApi': {'Parents': ['java/lang/Object'], 'Public': True},
+        }
+        origins = {n: {'archive': 'primary.jmod' if n != 'javax/OtherModuleApi' else 'other.jmod'} for n in entries}
+        parents, provenance = original_reference_hierarchy(entries, origins, 'primary.jmod')
+        self.assertEqual(set(parents), {'java/lang/Object', 'java/util/OriginalApi', 'internal/OriginalParent'})
+        self.assertEqual(parents['java/util/OriginalApi'], ['internal/OriginalParent'])
+        self.assertEqual(provenance, {n: origins[n] for n in parents})
+        entries['internal/OriginalParent']['Parents'] = ['java/util/OriginalApi']
+        with self.assertRaisesRegex(ValueError, 'cyclic reference hierarchy'):
+            original_reference_hierarchy(entries, origins, 'primary.jmod')
+        del entries['internal/OriginalParent']
+        with self.assertRaisesRegex(ValueError, 'missing reference ancestor'):
+            original_reference_hierarchy(entries, origins, 'primary.jmod')
 
 
 if __name__ == "__main__":

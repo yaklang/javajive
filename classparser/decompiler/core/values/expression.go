@@ -1060,12 +1060,17 @@ func (f *FunctionCallExpression) receiverParamTypeArgsQuery(funcCtx *class_conte
 	// call site. A super.m()/overloaded miss yields "" and is skipped. Kill-switch:
 	// JDEC_GENERIC_PARAM_RECV_METHOD_OFF.
 	if jdecFlag(funcCtx, "JDEC_GENERIC_PARAM_RECV_METHOD_OFF") == "" {
-		if inner, ok := UnpackSoltValue(f.Object).(*FunctionCallExpression); ok && !inner.IsStatic && inner.Object != nil {
+		// Method argument witnesses depend on the exact original declaration,
+		// not whether invocation consumes an instance receiver. Static factories
+		// use the same substitution proof; the legacy THIS paths remain below.
+		if inner, ok := UnpackSoltValue(f.Object).(*FunctionCallExpression); ok {
 			if ret := inner.inferredGenericMethodReturnQuery(funcCtx, query); ret != nil {
 				if pt, ok := types.AsParameterizedType(ret); ok {
 					return pt.RawClassName, pt.TypeArgs
 				}
 			}
+		}
+		if inner, ok := UnpackSoltValue(f.Object).(*FunctionCallExpression); ok && !inner.IsStatic && inner.Object != nil {
 			if iref, ok := UnpackSoltValue(inner.Object).(*JavaRef); ok && iref.IsThis {
 				if sig := funcCtx.MethodSignatureByDesc(inner.FunctionName, inner.Descriptor); sig != "" {
 					if _, _, ret := types.ParseMethodSignatureFull(sig, funcCtx); ret != nil {
@@ -3727,9 +3732,10 @@ func (f *FunctionCallExpression) resolvedFunctionalFormalType(i int, funcCtx *cl
 		recvRaw, recvArgs = f.receiverParamTypeArgs(funcCtx)
 	}
 
-	if jdecFlag(funcCtx, "JDEC_FUNCTIONAL_ERASURE_RESOLVE_OFF") == "" && recvRaw != "" && funcCtx.SiblingClassSig != nil {
+	if jdecFlag(funcCtx, "JDEC_FUNCTIONAL_ERASURE_RESOLVE_OFF") == "" && recvRaw != "" {
+		evidence := func(n string) (string, map[string]string, bool) { return invocationSignatureEvidence(funcCtx, n) }
 		params, _, methodFormals := types.ResolveInstantiatedSignatureExact(
-			funcCtx, funcCtx.SiblingClassSig, recvRaw, recvArgs,
+			funcCtx, evidence, recvRaw, recvArgs,
 			f.FunctionName, f.Descriptor, len(f.Arguments),
 		)
 		if i < len(params) && params[i] != nil && !javaTypeMentionsNames(params[i], methodFormals) {

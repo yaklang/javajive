@@ -1726,6 +1726,9 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 				if msig == "" {
 					return nil
 				}
+				if len(lexical) > 0 && !lexicalMethodDescriptorMatches(funcCtx, provider, internal, msig, descriptor) {
+					return nil
+				}
 				if !calleeSignatureVariablesBound(msig, sigma) {
 					return nil
 				}
@@ -1753,6 +1756,9 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 			competingHere = class_context.NameHasSameArityOverload(method, descriptor, keys)
 		}
 		if msig != "" && !competingHere {
+			if len(lexical) > 0 && !lexicalMethodDescriptorMatches(funcCtx, provider, internal, msig, descriptor) {
+				return nil
+			}
 			if !calleeSignatureVariablesBound(msig, sigma) {
 				return nil
 			}
@@ -1773,6 +1779,16 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 	}
 	supers = append(supers, ifaces...)
 	for _, st := range supers {
+		if substituted, ok := AsParameterizedType(SubstituteTypeVars(st, sigma)); ok && len(substituted.OwnerSegments) > 1 {
+			leaf, owners, _, valid := lexicalReceiverBindings(funcCtx, provider, substituted)
+			if valid {
+				if t := resolveParamWalk(funcCtx, provider, dotToInternal(substituted.RawClassName), leaf, method, descriptor, argc, paramIndex, visited, owners); t != nil {
+					return t
+				}
+			}
+			continue
+		}
+
 		pt, isPT := st.RawType().(*JavaParameterizedType)
 		if !isPT || pt.RawClassName == "" {
 			raw, known := RawClassFQN(st)

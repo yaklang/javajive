@@ -1,6 +1,7 @@
 package values
 
 import (
+	"github.com/yaklang/javajive/internal/workbudget"
 	"reflect"
 	"strings"
 
@@ -100,8 +101,8 @@ func (f *FunctionCallExpression) genericMethodSignatureQuery(ctx *class_context.
 		if sameErasureClassName(f.ClassName, ctx.ClassName) {
 			sig = ctx.MethodSignatureByDesc(f.FunctionName, f.Descriptor)
 		}
-		if sig == "" && ctx.SiblingClassSig != nil {
-			_, methods, _ := ctx.SiblingClassSig(strings.ReplaceAll(f.ClassName, ".", "/"))
+		if sig == "" {
+			_, methods, _ := invocationSignatureEvidence(ctx, strings.ReplaceAll(f.ClassName, ".", "/"))
 			sig = methods[class_context.MethodDescKey(f.FunctionName, f.Descriptor)]
 		}
 		if sig != "" {
@@ -120,10 +121,10 @@ func (f *FunctionCallExpression) genericMethodSignatureQuery(ctx *class_context.
 	// Most calls (StringBuilder.append, for example) have no method Signature.
 	// Traversing the same inner chain once for a speculative generic wrapper
 	// and again for ordinary receiver recovery causes exponential work.
-	if ctx.SiblingClassSig == nil {
+	if ctx.SiblingClassSig == nil && ctx.InvocationMetadata == nil {
 		return nil, nil, nil
 	}
-	ownerSig, ownerMethods, known := ctx.SiblingClassSig(strings.ReplaceAll(f.ClassName, ".", "/"))
+	ownerSig, ownerMethods, known := invocationSignatureEvidence(ctx, strings.ReplaceAll(f.ClassName, ".", "/"))
 	if !known {
 		return nil, nil, nil
 	}
@@ -137,11 +138,11 @@ func (f *FunctionCallExpression) genericMethodSignatureQuery(ctx *class_context.
 		}
 	}
 	raw, args := f.receiverParamTypeArgsQuery(ctx, query)
-	if raw == "" && f.Object != nil && ctx.SiblingClassSig != nil {
+	if raw == "" && f.Object != nil {
 		// A non-generic owner can still declare generic methods. Its exact
 		// descriptor is sufficient; a raw GENERIC owner must remain erased.
 		if owner, ok := types.RawClassFQN(f.Object.Type()); ok {
-			if sig, _, known := ctx.SiblingClassSig(strings.ReplaceAll(owner, ".", "/")); known && len(types.ClassFormalTypeParamNames(sig)) == 0 {
+			if sig, _, known := invocationSignatureEvidence(ctx, strings.ReplaceAll(owner, ".", "/")); known && len(types.ClassFormalTypeParamNames(sig)) == 0 {
 				raw = owner
 			}
 		}
@@ -152,7 +153,8 @@ func (f *FunctionCallExpression) genericMethodSignatureQuery(ctx *class_context.
 			args = append(args, types.NewJavaClass(name))
 		}
 	}
-	return types.ResolveInstantiatedSignatureExact(ctx, ctx.SiblingClassSig, raw, args, f.FunctionName, f.Descriptor, len(f.Arguments))
+	evidence := func(n string) (string, map[string]string, bool) { return invocationSignatureEvidence(ctx, n) }
+	return types.ResolveInstantiatedSignatureExact(ctx, evidence, raw, args, f.FunctionName, f.Descriptor, len(f.Arguments))
 }
 
 func methodVariableSet(names []string) map[string]bool {
@@ -192,8 +194,8 @@ func (f *FunctionCallExpression) RetainFunctionalReturnSignature(ctx *class_cont
 		!sourceDenotableJavaType(ret, ctx) {
 		return
 	}
-	if f.IsStatic && ctx.SiblingClassSig != nil {
-		ownerSig, _, _ := ctx.SiblingClassSig(strings.ReplaceAll(f.ClassName, ".", "/"))
+	if f.IsStatic {
+		ownerSig, _, _ := invocationSignatureEvidence(ctx, strings.ReplaceAll(f.ClassName, ".", "/"))
 		if javaTypeMentionsNames(ret, types.ClassFormalTypeParamNames(ownerSig)) {
 			return
 		}
@@ -214,7 +216,8 @@ func (f *FunctionCallExpression) RetainFunctionalReturnSignature(ctx *class_cont
 }
 
 // inferredGenericMethodReturn instantiates a generic wrapper's return using
-// matching parameterized arguments. Erased arguments cannot supply evidence.
+// matching parameterized arguments. Erased words supply no binding, but may agree
+// with an independently bound source cast having exactly the original erasure.
 func (f *FunctionCallExpression) inferredGenericMethodReturn(ctx *class_context.ClassContext) types.JavaType {
 	return f.inferredGenericMethodReturnQuery(ctx, newReceiverTypeQuery())
 }
@@ -229,8 +232,8 @@ func (f *FunctionCallExpression) inferredGenericMethodReturnQuery(ctx *class_con
 	// that speculation before recursively resolving the receiver: a raw fluent
 	// chain would otherwise solve each prefix here and again in receiver recovery,
 	// giving exponential work while ultimately returning the same unknown result.
-	if ctx.SiblingClassSig != nil && f.Descriptor != "" {
-		_, methods, known := ctx.SiblingClassSig(strings.ReplaceAll(f.ClassName, ".", "/"))
+	if f.Descriptor != "" {
+		_, methods, known := invocationSignatureEvidence(ctx, strings.ReplaceAll(f.ClassName, ".", "/"))
 		if sig, declared := methods[class_context.MethodDescKey(f.FunctionName, f.Descriptor)]; known && declared && len(types.MethodFormalTypeParamNames(sig)) == 0 {
 			return nil
 		}
@@ -241,14 +244,32 @@ func (f *FunctionCallExpression) inferredGenericMethodReturnQuery(ctx *class_con
 	}
 	bindings := map[string]types.JavaType{}
 	variables := methodVariableSet(formals)
+	// Solve invariant container/array constraints before erased bare variables,
+	// independently of their order in the selected original descriptor.
 	for i, p := range params {
 		if !javaTypeMentionsNames(p, formals) {
 			continue
 		}
-		if !bindMethodTypeArguments(p, f.Arguments[i].Type(), variables, bindings) {
+		if _, bare := bareMethodVariable(p, variables); bare {
+			continue
+		}
+		if f.Arguments[i] == nil || !bindMethodTypeArguments(p, f.Arguments[i].Type(), variables, bindings) {
 			return nil
 		}
 	}
+	for i, p := range params {
+		name, bare := bareMethodVariable(p, variables)
+		if !bare {
+			continue
+		}
+		if f.Arguments[i] == nil {
+			return nil
+		}
+		if !bindMethodTypeArguments(p, f.Arguments[i].Type(), variables, bindings) && !f.erasedCallerArgumentAgrees(i, bindings[name], ctx) {
+			return nil
+		}
+	}
+
 	for _, name := range formals {
 		if javaTypeMentionsNames(ret, []string{name}) && bindings[name] == nil {
 			return nil
@@ -259,6 +280,56 @@ func (f *FunctionCallExpression) inferredGenericMethodReturnQuery(ctx *class_con
 		return nil
 	}
 	return result
+}
+
+func bareMethodVariable(t types.JavaType, variables map[string]bool) (string, bool) {
+	if t == nil {
+		return "", false
+	}
+	c, ok := t.RawType().(*types.JavaClass)
+	if ok && c != nil && variables[c.Name] {
+		return c.Name, true
+	}
+	return "", false
+}
+
+// Agreement with an already planned source cast, not new inference. The same
+// caller variable must be selected by the renderer's original witnesses. Both
+// argument and target erasures must equal the exact original invoke word, so
+// no payload narrowing or new CHECKCAST is introduced. Callee and caller bound
+// scopes remain separate; contradictory or missing declarations refuse proof.
+func (f *FunctionCallExpression) erasedCallerArgumentAgrees(i int, bound types.JavaType, ctx *class_context.ClassContext) bool {
+	if f == nil || ctx == nil || bound == nil || i < 0 || i >= len(f.Arguments) || f.Arguments[i] == nil {
+		return false
+	}
+	caller, ok := bound.RawType().(*types.JavaClass)
+	if !ok || caller == nil || !ctx.IsTypeParam(caller.Name) {
+		return false
+	}
+	planned := f.genericMethodWitnessArgParamType(i, ctx)
+	if planned == nil || !reflect.DeepEqual(planned.RawType(), bound.RawType()) {
+		return false
+	}
+	owner, methods, known := invocationSignatureEvidence(ctx, strings.ReplaceAll(f.ClassName, ".", "/"))
+	signature := methods[class_context.MethodDescKey(f.FunctionName, f.Descriptor)]
+	if sameErasureClassName(f.ClassName, ctx.ClassName) {
+		owner, signature, known = ctx.ClassSig, ctx.MethodSignatureByDesc(f.FunctionName, f.Descriptor), true
+	}
+	if !known || signature == "" || len(owner)+len(signature) > 65535 || ctx.Work != nil && ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(owner)+len(signature))+1) != nil {
+		return false
+	}
+	erased, _, valid := types.EraseLexicalOwnerMethodSignatureWithThrows([]string{owner}, signature)
+	if !valid || erased != f.Descriptor {
+		return false
+	}
+	descriptor, err := types.ParseMethodDescriptor(f.Descriptor)
+	if err != nil || descriptor.FunctionType() == nil || len(descriptor.FunctionType().ParamTypes) != len(f.Arguments) {
+		return false
+	}
+	expected := bindingType(descriptor.FunctionType().ParamTypes[i])
+	source, sourceOK := SourceTypeErasure(bound, ctx)
+	actual, actualOK := SourceTypeErasure(f.Arguments[i].Type(), ctx)
+	return expected != "" && sourceOK && actualOK && source == expected && actual == expected
 }
 
 // FunctionalReturnArgumentTargets propagates an invariant result target back

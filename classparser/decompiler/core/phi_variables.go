@@ -7,6 +7,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // unifyReferenceWebs lowers reference joins to one source variable AFTER every
@@ -575,6 +576,14 @@ func joinWebTypes(a, b types.JavaType, provider types.SuperTypeProvider) types.J
 // type of `x != null ? x : new T()` includes the provisional Object type of x;
 // only the concrete arm and the web's other definitions constrain the solution.
 func webDefinitionTypes(value values.JavaValue, self map[*values.JavaRef]bool) []types.JavaType {
+	return webDefinitionTypesWithBudget(value, self, nil)
+}
+
+func webDefinitionTypesWithBudget(value values.JavaValue, self map[*values.JavaRef]bool, work *workbudget.Budget) []types.JavaType {
+	return webDefinitionTypeLeaves([]values.JavaValue{value}, self, work)
+}
+
+func webDefinitionTypeLeaves(roots []values.JavaValue, self map[*values.JavaRef]bool, work *workbudget.Budget) []types.JavaType {
 	// A shared decision value is a DAG, not its exponentially expanded source
 	// tree. Each leaf identity contributes its static constraint once; equal
 	// types do not unify distinct definitions. Keep true-before-false discovery
@@ -583,7 +592,10 @@ func webDefinitionTypes(value values.JavaValue, self map[*values.JavaRef]bool) [
 		value values.JavaValue
 		exit  bool
 	}
-	stack := []frame{{value: value}}
+	var stack []frame
+	for i := len(roots) - 1; i >= 0; i-- {
+		stack = append(stack, frame{value: roots[i]})
+	}
 	state := map[values.JavaValue]uint8{}
 	var result []types.JavaType
 	for len(stack) > 0 {
@@ -603,7 +615,7 @@ func webDefinitionTypes(value values.JavaValue, self map[*values.JavaRef]bool) [
 		if state[v] == 2 {
 			continue
 		}
-		if len(state) >= 65536 {
+		if len(state) >= 65536 || work != nil && work.Charge(workbudget.CounterGraphScans, 1) != nil {
 			return []types.JavaType{nil}
 		}
 		state[v] = 1

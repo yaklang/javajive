@@ -374,3 +374,71 @@ func TestJDKInvocationCatalogStackErasure(t *testing.T) {
 		}
 	}
 }
+
+func TestInvocationMetadataReferenceCatalogRequiresOriginalClosedProfilesAndNeverClaimsMembers(t *testing.T) {
+	var document struct {
+		Schema   int `json:"schema"`
+		Profiles []struct {
+			Release    int                 `json:"release"`
+			Parents    map[string][]string `json:"reference_hierarchy"`
+			Provenance map[string]struct {
+				SHA256  string `json:"sha256"`
+				Major   int    `json:"major"`
+				Archive string `json:"archive"`
+				Entry   string `json:"entry"`
+			} `json:"reference_provenance"`
+		} `json:"profiles"`
+	}
+	if e := json.Unmarshal(jdkInvocationCatalogJSON, &document); e != nil {
+		t.Fatal(e)
+	}
+	if document.Schema != 3 || len(document.Profiles) != 6 {
+		t.Fatal("exact hierarchy profiles required")
+	}
+	for _, profile := range document.Profiles {
+		if len(profile.Parents) != len(profile.Provenance) || len(profile.Parents) == 0 {
+			t.Fatal("missing original class provenance")
+		}
+		for n, parents := range profile.Parents {
+			origin, known := profile.Provenance[n]
+			digest, e := hex.DecodeString(origin.SHA256)
+			if !known || e != nil || len(digest) != 32 || origin.Major < 45 || origin.Major > profile.Release+44 || origin.Archive == "" || origin.Entry == "" {
+				t.Fatal("invalid original provenance", n)
+			}
+			got, known := jdkReferenceSupertypes(n, profile.Release)
+			if !known || len(got) != len(parents) {
+				t.Fatal("missing exact platform declaration", n)
+			}
+			for i, parent := range parents {
+				if got[i] != parent {
+					t.Fatal("parent identity changed", n)
+				}
+				if _, known := profile.Parents[parent]; !known {
+					t.Fatal("missing closed original ancestor", n, parent)
+				}
+			}
+			if len(got) > 0 {
+				got[0] = "mutated"
+				again, _ := jdkReferenceSupertypes(n, profile.Release)
+				if again[0] != parents[0] {
+					t.Fatal("shared hierarchy exposed to request mutation")
+				}
+			}
+		}
+		p, known := jdkReferenceSupertypes("java/security/SecureRandom", profile.Release)
+		if !known || len(p) != 1 || p[0] != "java/util/Random" {
+			t.Fatal("original platform inheritance lost")
+		}
+		if _, known := jdkInvocationMetadata("java/security/SecureRandom", profile.Release); known {
+			t.Fatal("ancestry evidence was promoted to a complete member table")
+		}
+	}
+	for _, release := range []int{0, 7, 10, 15, 18, 22} {
+		if _, known := jdkReferenceSupertypes("java/security/SecureRandom", release); known {
+			t.Fatal("substituted a different platform profile")
+		}
+	}
+	if _, known := jdkReferenceSupertypes("java/security/UnknownOriginal", 8); known {
+		t.Fatal("invented a platform declaration")
+	}
+}
