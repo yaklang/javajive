@@ -3,10 +3,32 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from jdk_metadata_catalog_generate import declarations, PlatformArchives, original_reference_hierarchy
+from jdk_metadata_catalog_generate import declarations, PlatformArchives, original_reference_hierarchy, functional_roots
 
 
 class PlatformArchiveTest(unittest.TestCase):
+    def test_functional_inventory_uses_exact_original_public_interfaces(self):
+        def fixture(name, flags):
+            u2 = lambda v: struct.pack('>H', v)
+            utf = lambda s: b'\x01' + u2(len(s)) + s.encode('ascii')
+            pool = utf(name) + b'\x07' + u2(1) + utf('java/lang/Object') + b'\x07' + u2(3)
+            return bytes.fromhex('cafebabe00000034') + u2(5) + pool + u2(flags) + u2(2) + u2(4) + u2(0)*4
+        for prefix in ('', 'classes/'):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'original.zip'
+                with zipfile.ZipFile(path, 'w') as archive:
+                    for name, flags in [('java/util/function/Original', 0x0601),
+                                        ('java/util/function/Concrete', 0x0021),
+                                        ('java/util/function/Private', 0x0600),
+                                        ('other/Original', 0x0601)]:
+                        archive.writestr(prefix + name + '.class', fixture(name, flags))
+                with PlatformArchives([path]) as source:
+                    self.assertEqual(functional_roots(source, prefix), ['java/util/function/Original'])
+                with zipfile.ZipFile(path, 'a') as archive:
+                    archive.writestr(prefix + 'java/util/function/Lie.class', fixture('other/Actual', 0x0601))
+                with PlatformArchives([path]) as source, self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                    functional_roots(source, prefix)
+
     def test_exact_cross_module_lookup_and_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = [Path(directory) / name for name in ('java.base.jmod', 'java.xml.jmod')]

@@ -175,6 +175,25 @@ def original_reference_hierarchy(declarations_by_name, source_entries, archive_n
             {n: source_entries[n] for n in sorted(names)})
 
 
+def functional_roots(source, prefix):
+    """Index the complete public java.util.function interface namespace.
+
+    Selection is an offline metadata inventory, not a functional-method rule.
+    Abstract/default/static declarations and parents still come from original
+    classfiles, and production separately resolves the full interface DAG.
+    """
+    roots = []
+    for entry in source.namelist():
+        if not entry.startswith(prefix + 'java/util/function/') or not entry.endswith('.class'):
+            continue
+        cls, _ = declarations(source.read(entry))
+        if cls['Name'] + '.class' != entry[len(prefix):]:
+            raise ValueError('functional classfile identity mismatch ' + entry)
+        if cls['Public'] and cls['IsInterface']:
+            roots.append(cls['Name'])
+    return sorted(roots)
+
+
 def profile(release, archive, prefix, jdk_version, modules=()):
     with PlatformArchives([archive, *modules]) as source:
         classes, provenance = {}, {}
@@ -209,6 +228,7 @@ def profile(release, archive, prefix, jdk_version, modules=()):
                  'org/xml/sax/ext/LexicalHandler', 'org/xml/sax/XMLReader']
         if release >= 16:
             roots.append('java/lang/Record')
+        roots = sorted(set(roots + functional_roots(source, prefix)))
         pending = list(roots)
         while pending:
             name = pending.pop(0)

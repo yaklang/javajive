@@ -21,6 +21,14 @@ method descriptors are included for source denotability, together with their ful
 ancestors. Other classes remain unavailable; no open-world completeness is claimed.
 No method execution, reflection, or host JDK lookup occurs during decompilation.
 
+The generator also discovers the complete public-interface namespace under
+`java/util/function/` in each original platform archive: all 43 interfaces in
+each supported snapshot, with exact entry/class identity and access flags.
+Primitive SAM descriptors, default/static methods, generic signatures and their
+parent closure come from those classfiles. The original declaration bundle
+retains the same bytes and provenance. This covers primitive functional targets
+without guessing a SAM signature from its name or borrowing another release.
+
 Float's complete declarations and descriptor type closure are also retained
 for newly introduced raw-bit conversion expressions. Those expressions use
 the same exact static-call and source-namespace binding as original calls;
