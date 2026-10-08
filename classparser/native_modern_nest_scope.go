@@ -13,6 +13,18 @@ func nativeModernNestVersion(object *ClassObject, work *workbudget.Budget) bool 
 	if object == nil || object.MajorVersion != 55 || object.MinorVersion != 0 {
 		return false
 	}
+	return nativeModernNestAttributes(object, work)
+}
+
+// The NestHost/NestMembers format is unchanged across the stable Java11--21
+// classfile versions. The legacy accessor grammar keeps its version55 domain;
+// source scope admission separately checks reciprocal ownership and excludes
+// CP features that its call/declaration proofs cannot interpret.
+func nativeModernSourceNestVersion(object *ClassObject, work *workbudget.Budget) bool {
+	return object != nil && object.MajorVersion >= 55 && object.MajorVersion <= 65 && object.MinorVersion == 0 && nativeModernNestAttributes(object, work) && nativeAccessorConstantNamespace(object, work)
+}
+
+func nativeModernNestAttributes(object *ClassObject, work *workbudget.Budget) bool {
 	own, known := sourceBridgeClassName(object, object.ThisClass)
 	if !known || !nativeSourceBinaryName(own) {
 		return false
@@ -64,7 +76,7 @@ func (c *ClassObjectDumper) nativeModernNestOriginalScope() (map[string]*ClassOb
 	if target == 0 {
 		target = int(c.obj.MajorVersion) - 44
 	}
-	if target < 11 || !nativeAccessorVersion(c.obj, c.Work) || !nativeMemberTopLevelEvidence(c.obj, c.Work) || hasOriginalNestAttribute(c.obj, "NestHost") || c.foldSiblingResolver == nil {
+	if target < 11 || !nativeModernSourceNestVersion(c.obj, c.Work) || !nativeMemberTopLevelEvidence(c.obj, c.Work) || hasOriginalNestAttribute(c.obj, "NestHost") || c.foldSiblingResolver == nil {
 		return nil, false
 	}
 	host := c.obj.GetClassName()
@@ -85,7 +97,7 @@ func (c *ClassObjectDumper) nativeModernNestOriginalScope() (map[string]*ClassOb
 			return nil, false
 		}
 		object, err := c.parseResolved(raw)
-		if err != nil || object.GetClassName() != name || !nativeAccessorVersion(object, c.Work) || hasOriginalNestAttribute(object, "NestMembers") {
+		if err != nil || object.GetClassName() != name || !nativeModernSourceNestVersion(object, c.Work) || hasOriginalNestAttribute(object, "NestMembers") {
 			return nil, false
 		}
 		enclosing, known := originalNestAttribute(object, "NestHost")
@@ -179,7 +191,7 @@ func nativeModernNestSourceScopeClosed(original, source map[string]*ClassObject,
 	}
 	for name := range original {
 		object := source[name]
-		if object == nil || object.GetClassName() != name || !nativeModernNestVersion(object, work) {
+		if object == nil || object.GetClassName() != name || !nativeModernSourceNestVersion(object, work) {
 			return false
 		}
 		if name == host {

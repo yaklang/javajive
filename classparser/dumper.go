@@ -4100,6 +4100,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			// countConstructorFieldAssignments).
 			ctorFieldAssignCount := countConstructorFieldAssignments(statementList, funcCtx.ClassName)
 			instanceHoistCandidates := inertConstructorFieldPrefix(statementList, funcCtx.ClassName)
+			initializerPrefix, initializerErr := c.nativeAnonymousOwnerInitializerPrefix(statementList)
+			if initializerErr != nil {
+				return nil, initializerErr
+			}
 
 			// Cross-constructor/<clinit> totals: a final field assigned exactly once HERE may still
 			// be assigned in another overloaded constructor. Hoisting it then double-assigns a final
@@ -4208,7 +4212,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					if v, ok := ret.LeftValue.(*values.RefMember); ok && ret.JavaValue != nil {
 						obj := core.UnpackSoltValue(v.Object)
 						if v1, ok := obj.(*values.JavaRef); ok && v1.IsThis && (funcCtx.FunctionName == "<init>" || funcCtx.FunctionName == funcCtx.ClassName) {
-							if _, ok := finalFieldMap[v.Member]; ok {
+							if _, ok := finalFieldMap[v.Member]; ok && initializerPrefix == 0 {
 								if rhs := values.ErasedFactoryAssignmentView(ret.JavaValue, values.SourceFieldType(funcCtx, ret.LeftValue), funcCtx).String(funcCtx); canHoistFieldValueInitializer(ret.JavaValue, rhs) && finalInitializerKeepsStatus[v.Member] &&
 									(!EnableFieldInitHoistGuard || (instanceHoistCandidates[ret] && ctorFieldAssignCount[v.Member] == 1 && crossCtorStoreOK(fieldStoreTotal, v.Member) && !rhsReadsInstanceField(rhs))) {
 									foundFieldInit = true
@@ -4526,6 +4530,13 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				if statementStr == "" {
 					continue
 				}
+				if i < initializerPrefix {
+					if err := c.holdOutput(int64(len(statementStr) + 1)); err != nil {
+						return nil, err
+					}
+					dumped.initializerCode += statementStr + "\n"
+					continue
+				}
 				// Only the final top-level assembly owns producer-local placement.
 				// Recursive previews cannot certify or duplicate the declaration.
 				for _, declaration := range c.nativeMethodLocalPlacements[statement] {
@@ -4560,6 +4571,16 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				}
 			}
 			methodBodyCode := strings.Join(statementCodes, "")
+			if dumped.initializerCode != "" {
+				if constructorPlan != nil && (constructorPlan.carrier != "" || len(constructorPlan.prefix) != 0) || needsCheckedEscape {
+					c.nativeAnonymousRoot.failed = true
+					return nil, fmt.Errorf("unproved constructor boundary for original instance initializer")
+				}
+				if err := c.holdOutput(int64(len(c.GetTabString()) + 4)); err != nil {
+					return nil, err
+				}
+				dumped.initializerCode = "{\n" + dumped.initializerCode + c.GetTabString() + "}\n"
+			}
 			if needsCheckedEscape && !(name == "<clinit>" && classStaticInitializersMustHoist) {
 				wrapped := c.wrapCheckedEscapeBody(methodBodyCode)
 				if err := c.holdOutput(int64(len(wrapped) - len(methodBodyCode))); err != nil {
@@ -4781,10 +4802,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 }
 
 type dumpedMethods struct {
-	checkedEscape bool
-	methodName    string
-	code          string
-	bodyCode      string
+	initializerCode string
+	checkedEscape   bool
+	methodName      string
+	code            string
+	bodyCode        string
 	// member/descriptor are retained so the post-decompile syntax safety net can rebuild a
 	// stub for a method whose generated body turns out to be un-parseable.
 	member     *MemberInfo
@@ -13084,7 +13106,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			keepDeclaredCtor := name == "<init>" && !isSynBridgeCtor &&
 				c.getenv("JDEC_NO_KEEP_DECLARED_CTOR") == "" &&
 				!c.isOmittableDefaultCtor(descriptor, accessFlagsVerbose)
-			if isSynBridgeCtor || keepDeclaredCtor {
+			if isSynBridgeCtor || keepDeclaredCtor || res.initializerCode != "" {
 				// keep res as the empty-body constructor (faithful: empty body == implicit super())
 			} else if !slices.Contains(accessFlagsVerbose, "abstract") && !slices.Contains(accessFlagsVerbose, "annotation") && !slices.Contains(accessFlagsVerbose, "interface") && !slices.Contains(accessFlagsVerbose, "enum") {
 				methodType, perr := types.ParseMethodDescriptor(descriptor)
@@ -13121,6 +13143,9 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		}
 		if res.descriptor == "" {
 			res.descriptor = descriptor
+		}
+		if res.initializerCode != "" {
+			result = append(result, &dumpedMethods{methodName: "<initializer>", code: res.initializerCode, bodyCode: res.initializerCode})
 		}
 		result = append(result, res)
 	}

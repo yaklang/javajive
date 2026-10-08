@@ -15,6 +15,13 @@ func nativeAccessorVersion(obj *ClassObject, work *workbudget.Budget) bool {
 	if obj.MajorVersion == 55 && !nativeModernNestVersion(obj, work) {
 		return false
 	}
+	return nativeAccessorConstantNamespace(obj, work)
+}
+
+func nativeAccessorConstantNamespace(obj *ClassObject, work *workbudget.Budget) bool {
+	if obj == nil {
+		return false
+	}
 	for _, constant := range obj.ConstantPool {
 		if constant != nil && sourceProofNil(constant) {
 			return false

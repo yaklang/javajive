@@ -21,6 +21,7 @@ type nativeAnonymousClass struct {
 	initializers          []nativeAnonymousInitializer
 	expressionInitializer *nativeAnonymousExpressionInitializer
 	enclosingField        string
+	unusedEnclosing       bool
 	parentAnonymous       bool
 	capturePCs            map[string]int
 	object                *ClassObject
@@ -140,6 +141,10 @@ func nativeAnonymousConstructorRepresentationProof(obj *ClassObject, owner, meth
 }
 
 func nativeAnonymousConstructorWithFlags(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, flags uint16, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
+	return nativeAnonymousConstructorWithRoles(obj, owner, method, assertionRoot, work, members, forest, metadata, flags, false, access...)
+}
+
+func nativeAnonymousConstructorWithRoles(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, flags uint16, omitUnusedEnclosing bool, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
 	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
@@ -450,6 +455,21 @@ func nativeAnonymousConstructorWithFlags(obj *ClassObject, owner, method, assert
 		superUsed[p] = true
 		used[p] = true
 	}
+	if omitUnusedEnclosing && len(ps) > 0 && ps[0] == "L"+owner+";" && !used[0] && len(used)+1 == len(ps) {
+		// A lexical enclosing word remains a physical constructor parameter
+		// after javac omits its unused field. It must be completely unread and
+		// unwritten, not merely absent from the capture-store prefix.
+		for _, op := range ops {
+			if !nativeProofWork(work, 1) || core.GetRetrieveIdx(op) == 1 {
+				return nil
+			}
+		}
+		if !nativeEnumSelectorParametersUnchanged(ops, map[int]bool{1: true}) {
+			return nil
+		}
+		c.unusedEnclosing = true
+		used[0] = true
+	}
 	if len(used) != len(ps) {
 		return nil
 	}
@@ -487,7 +507,7 @@ func nativeAnonymousConstructorWithFlags(obj *ClassObject, owner, method, assert
 			}
 		}
 	}
-	if c.parentAnonymous && outer < 0 {
+	if c.parentAnonymous && outer < 0 && !c.unusedEnclosing {
 		return nil
 	}
 	if outer >= 0 {
@@ -495,6 +515,10 @@ func nativeAnonymousConstructorWithFlags(obj *ClassObject, owner, method, assert
 	}
 	next := 0
 	ordered := map[int]bool{}
+	if c.unusedEnclosing {
+		next = 1
+		ordered[0] = true
+	}
 	if outer >= 0 {
 		if outer != next {
 			return nil
@@ -1053,6 +1077,9 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		}
 		bindings := map[string]string{}
 		captureTypes := map[string]types.JavaType{}
+		if child.unusedEnclosing && (len(args) == 0 || !args[0].Receiver) {
+			return fail()
+		}
 		for field, index := range child.fields {
 			if index < 0 || index >= len(args) {
 				return fail()

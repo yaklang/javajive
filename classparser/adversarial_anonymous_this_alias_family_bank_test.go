@@ -48,13 +48,17 @@ func TestAdversarialAnonymousThisAliasFamilyBank(t *testing.T) {
 						previous = name
 					}
 					fmt.Fprintf(&source, "return new %s(){public Object token(){return %s.token();}public Api next(){return %s;}public long score(){return pick(%s,n);}};}};}", parent, previous, previous, previous)
-					fmt.Fprintf(&source, `static void verify(){Object sentinel=new Object();int rows=0;for(Object token:new Object[]{null,sentinel,"text"})for(long n:new long[]{Long.MIN_VALUE,-1,0,Long.MAX_VALUE}){Api first=%s,second=first.next();if(first.token()!=token||second.token()!=token||second.next()!=first||first.score()!=n||second.score()!=n+31)throw new AssertionError("identity/value/overload");if(!first.getClass().isAnonymousClass()||!second.getClass().isAnonymousClass()||first.getClass().getEnclosingClass()!=%s.class||second.getClass().getEnclosingClass()!=first.getClass()||!second.getClass().getEnclosingMethod().getName().equals("next"))throw new AssertionError("lexical ownership");rows++;}`, factory, owner)
+					source.WriteString("}")
+					var check strings.Builder
+					fmt.Fprintf(&check, "class AliasCheck%d{", families-1)
+					fmt.Fprintf(&check, `static void verify(){Object sentinel=new Object();int rows=0;for(Object token:new Object[]{null,sentinel,"text"})for(long n:new long[]{Long.MIN_VALUE,-1,0,Long.MAX_VALUE}){%s.Api first=%s,second=first.next();if(first.token()!=token||second.token()!=token||second.next()!=first||first.score()!=n||second.score()!=n+31)throw new AssertionError("identity/value/overload");if(!first.getClass().isAnonymousClass()||!second.getClass().isAnonymousClass()||first.getClass().getEnclosingClass()!=%s.class||second.getClass().getEnclosingClass()!=first.getClass()||!second.getClass().getEnclosingMethod().getName().equals("next"))throw new AssertionError("lexical ownership");rows++;}`, owner, factory, owner)
 					if enumeration {
-						source.WriteString(`if(Kind.A.score()!=17||Kind.B.score()!=31||!Kind.A.getClass().isAnonymousClass()||Kind.A.getClass().getSuperclass()!=Kind.class)throw new AssertionError("enum role");`)
+						check.WriteString(strings.ReplaceAll(`if(Kind.A.score()!=17||Kind.B.score()!=31||!Kind.A.getClass().isAnonymousClass()||Kind.A.getClass().getSuperclass()!=Kind.class)throw new AssertionError("enum role");`, "Kind", owner+".Kind"))
 					}
-					source.WriteString(`if(rows!=12)throw new AssertionError("rows");}}`)
+					check.WriteString(`if(rows!=12)throw new AssertionError("rows");}}`)
 					sources[owner+".java"] = source.String()
-					fmt.Fprintf(&calls, "%s.verify();", owner)
+					sources[fmt.Sprintf("AliasCheck%d.java", families-1)] = check.String()
+					fmt.Fprintf(&calls, "AliasCheck%d.verify();", families-1)
 				}
 			}
 		}
