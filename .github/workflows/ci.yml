@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -66,8 +66,8 @@ jobs:
       - name: Source algorithm regression tests
         env:
           SOURCE_SHARD: ${{ matrix.shard }}
-          SOURCE_SHARDS: "4"
-          EDGE_TEST_PATTERN: '^Test(Native|ScopedClassNameBinding|CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)'
+          SOURCE_SHARDS: "6"
+          EDGE_TEST_PATTERN: '^Test(Native|ConstructorFinalizerSeal|ScopedClassNameBinding|CheckedEscape|CheckedConstructor|BindingPlan|CtorArrayThisSpillsRoundTrip|CtorArrayThisSpillPreservesEarlierArgumentOrder|CtorDelegationNestedArrayTempRoundTrip|CtorDelegationArgumentSpills|SuperDelegationTrailingArgumentSpills|SuperDelegationSpillAcrossSafePostSuperPrelude|ConditionalThisCtorCheckcastRoundTrip|TernaryCheckcastInvocationReceiverRoundTrip|CtorNPECheckBeforeThis|EnumArrayConstructorArgsRoundTrip|EnumClinit|ZxingEnum|GenericNull|GenericFieldElementOpsRoundTrip|GenericFunctionalValueKeepsErasedCallDescriptor|MaterializedBiFunctionErasureRoundTrip|SameClassBiFunctionTypeVariablesRoundTrip|SameClassFunctionAndSupplierErasureRoundTrip|SiblingClassFunctionalErasureRoundTrip|ChainedSiblingReturnFunctionalErasureRoundTrip|LowerBoundedFunctionalArgumentsRoundTrip|CapturedLowerBoundedFunctionalArgumentsRoundTrip|CapturedParameterizedLowerBoundRoundTrip|LambdaCaptureCopiesStayInsideGenericMethod|ClassCacheTernaryStoreRoundTrip|MapCacheTernaryLocalRoundTrip|ImmediateZeroArgCheckcastInvoke|NonConditionalForkDiamond|InheritedJDK|InvocationMetadata|JDKListNull|MemberLedger|MethodReferenceKeepsPolyTargetTypeRoundTrip|DirectoryStreamFilterKeepsInstantiatedMethodRefTypeRoundTrip|T04ExternalOverloadBindingRoundTrip|LogbackPutUninterruptibly|ProtobufRemainingReconstructs|ProtobufLazyStringArrayListThis|PublicSuffixDatabase|ThisCtorOverloadCast|GenericVarargsConstructorArrayRoundTrip|ShiftedThisCtorGenericArrayRoundTrip|ConditionalArrayCloneStoreRoundTrip|ToListSingleCallableCast|JacksonRemainingMapEntryDeserializerCast|JoinStreamCtorCast|RawGenericReceiver|SyntaxObservation|RetryRollback|ShadowBuilder|ShadowIRRunsFrameSSAAndLowering|T11_C01|Sentinels|Request|R06|T04|T05|T06|T07|T08|T18|T19|T27|TaskT20|TernaryCheckcastMergeRoundTrip|SelfCastNullMergeRoundTrip|ShortCircuitVarargsArraysRoundTrip|SharedFalseTargetFallthroughRoundTrip)'
         run: |
           set -o pipefail
           mkdir -p artifacts
@@ -93,7 +93,7 @@ jobs:
           if heavy not in names or not scopes or len(scopes) != len(set(scopes)):
               raise SystemExit("incomplete nested-capture scope inventory")
           shard, count = int(os.environ["SOURCE_SHARD"]), int(os.environ["SOURCE_SHARDS"])
-          if count != 4 or not 0 <= shard < count:
+          if count != 6 or not 0 <= shard < count:
               raise SystemExit("invalid source regression shard")
           all_ordinary = [name for name in names if name != heavy]
           # Measured costs affect placement only. The binary's complete test
