@@ -59,10 +59,11 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 			return false
 		}
 		for _, arr := range table.tables {
-			// Current javac lowers same-unit enum declarations directly through
-			// ordinal(), so a legacy producer's helper would not be regenerated.
-			// Only a separately emitted enum declaration licenses this protocol.
-			if own[arr.enum] != nil {
+			// Modern javac bypasses the helper for a same-unit enum. Native
+			// javac8 regenerates it, but only the explicitly selected compiler
+			// profile can promise that lowering. This does not replace the
+			// original enum, complete table, user or source-registration proofs.
+			if enum := own[arr.enum]; enum != nil && !z.nativeEnumSwitchOwnUnitCompiler(root, enum, table, work) {
 				return false
 			}
 			raw, found := z.enumSiblingResolver()(arr.enum)
@@ -297,4 +298,16 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 		}
 	}
 	return true
+}
+
+func (z *JarFS) nativeEnumSwitchOwnUnitCompiler(root, enum *ClassObject, table *nativeEnumSwitchTable, work *workbudget.Budget) bool {
+	if z == nil || root == nil || enum == nil || table == nil || table.object == nil || !nativeProofWork(work, 1) || z.sourceCompiler != NativeJavac8 || z.targetSourceVersion != 8 {
+		return false
+	}
+	// Independently compiled Java7/8 originals share this native lowering.
+	// Mixed versions and preview/unknown variants have no regeneration proof.
+	if (root.MajorVersion != 51 && root.MajorVersion != 52) || root.MinorVersion != 0 || enum.MajorVersion != root.MajorVersion || enum.MinorVersion != 0 || table.object.MajorVersion != root.MajorVersion || table.object.MinorVersion != 0 {
+		return false
+	}
+	return enum.AccessFlags&0x4000 != 0
 }
