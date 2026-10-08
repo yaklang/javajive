@@ -109,7 +109,7 @@ func TestNativeAncestorDeclarationAliasKeepsIndependentPrivateScope(t *testing.T
 	}
 }
 
-func TestNativeNonAncestorNonstaticDependencyStillRequiresJointOwnership(t *testing.T) {
+func TestNativeNonAncestorNonstaticDependencyKeepsIndependentOwnership(t *testing.T) {
 	f := strings.Replace(nativeInheritedDependencyFixture, "class DependencyDerived extends DependencyBase", "class DependencyDerived", 1)
 	f = strings.Replace(f, "final Value value;DependencyDerived(Value value)", "final DependencyBase.Value value;DependencyDerived(DependencyBase.Value value)", 1)
 	f = strings.Replace(f, "Object read(Value value)", "Object read(DependencyBase.Value value)", 1)
@@ -127,7 +127,12 @@ func TestNativeNonAncestorNonstaticDependencyStillRequiresJointOwnership(t *test
 	z := nativeArchive(t, files)
 	defer z.Close()
 	obj, _ := Parse(files["DependencyDerived.class"])
-	if entry := z.nativeMemberEntry(obj); entry != nil && entry.family != nil {
-		t.Fatal("unproved unrelated enclosing-family transaction admitted")
+	entry := z.nativeMemberEntry(obj)
+	if entry == nil || entry.family == nil {
+		t.Fatal("proved independent declaration dependency did not close")
+	}
+	p := entry.family
+	if p.sourceDependencies["DependencyBase$Value"] != "DependencyBase.Value" || p.children["DependencyBase$Value"] != nil || p.lexicalObjects["DependencyBase$Value"] != nil || len(p.constructorBridges("DependencyBase$Value")) != 0 {
+		t.Fatal("foreign declaration spelling imported private or lexical ownership")
 	}
 }

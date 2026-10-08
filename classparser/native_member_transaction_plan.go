@@ -185,9 +185,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	if !z.nativeMemberAccessRepresentable(p, z.originalMemberIndex(), d.Work, peers...) {
 		return nil
 	}
-	// Independent direct families have independent commits to ownership. A
-	// cross-family source scope requires a joint dependency plan, so refuse
-	// a root/body referring to another archive-owned nonstatic member type.
+	// Independent direct families have independent commits to ownership.
+	// Complete dependencies contribute declaration and constructor binding
+	// views; their private/lexical ownership stays in their own transaction.
 	lexicalNames := map[string]bool{}
 	for _, child := range p.children {
 		lexicalNames[child.name] = true
@@ -225,12 +225,10 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 			}
 			otherOwner, _, otherFlags, isMember := originalMemberOwner(other)
 			if isMember && otherOwner != owner {
-				// Inherited nonstatic declarations also have source names in
-				// an independent ancestor family. This contributes no enclosing
-				// instance, constructor or private-access ownership. General
-				// nonstatic cross-family transactions remain unproved.
+				// Inherited and independently accessible member declarations
+				// can both contribute names. Neither contributes ownership.
 				static := otherFlags&8 != 0
-				if !static && !nativeMemberAncestorDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) {
+				if !static && !nativeMemberAncestorDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeMemberIndependentDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) {
 					return nil
 				}
 				if !staticDependenciesChecked {
