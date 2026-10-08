@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Iterable
 
 
@@ -33,6 +34,21 @@ class Shard:
 
     def to_dict(self) -> dict[str, Any]:
         return {"index": self.index, "items": list(self.items), "duration_ns": self.duration_ns}
+
+
+def source_parent_shards(names: Iterable[str], seconds: dict[str, float], count: int) -> list[Shard]:
+    """Duration hints change placement only; the discovered inventory is authoritative.
+
+    New tests receive a positive default and stale hints cannot add tests.
+    A small floor spreads tests whose measured duration rounded to zero.
+    """
+    items = []
+    for name in names:
+        duration = seconds.get(name, 1.0)
+        if isinstance(duration, bool) or not isinstance(duration, (float, int)) or not math.isfinite(duration) or duration < 0:
+            raise ShardError(f"{name}: invalid duration hint")
+        items.append(TestItem(name, max(50_000_000, round(duration * 1_000_000_000))))
+    return shard_items(items, count)
 
 
 def expand_manifest(items: Iterable[TestItem]) -> list[str]:
