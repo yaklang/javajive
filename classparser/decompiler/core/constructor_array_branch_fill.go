@@ -9,6 +9,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // A delegation array can contain already recovered value diamonds. Their
@@ -20,7 +21,60 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 	if d == nil || d.RootNode == nil || d.FunctionContext == nil || d.FunctionContext.FunctionName != "<init>" || d.getenv("JDEC_CTOR_ARRAY_ARG_INLINE_OFF") != "" {
 		return false
 	}
-	entry, prefix, conditions, ok := constructorArrayEntry(d.RootNode)
+	nodes, reachable, known := d.privateDelegationArraySourceGraph()
+	if !known {
+		return false
+	}
+	for _, root := range nodes {
+		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return false
+		}
+		if root != d.RootNode {
+			assign, known := root.Statement.(*statements.AssignStatement)
+			if !known || assign.ArrayMember != nil {
+				continue
+			}
+			array, known := values.UnpackSoltValue(assign.JavaValue).(*values.NewExpression)
+			if !known || array == nil || !array.IsArray() || !array.HasOriginPC || array.HasEvaluationEndPC {
+				continue
+			}
+		}
+		if d.inlinePrivateDelegationBranchArrayAt(root, origins, nodes, reachable) {
+			return true
+		}
+	}
+	return false
+}
+
+// Bound and charge discovery before adding another node or edge. The same
+// immutable source view is used by every candidate and by its outside-use proof.
+func (d *Decompiler) privateDelegationArraySourceGraph() ([]*Node, map[*Node]bool, bool) {
+	nodes := []*Node{d.RootNode}
+	reachable := map[*Node]bool{d.RootNode: true}
+	for index := 0; index < len(nodes); index++ {
+		node := nodes[index]
+		if node == nil || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return nil, nil, false
+		}
+		for _, next := range node.Next {
+			if next == nil || d.Work != nil && d.Work.Charge(workbudget.CounterGraphEdges, 1) != nil {
+				return nil, nil, false
+			}
+			if reachable[next] {
+				continue
+			}
+			if len(nodes) >= 4096 || d.Work != nil && d.Work.CheckAlloc(int64(len(nodes)+1)*128) != nil {
+				return nil, nil, false
+			}
+			reachable[next] = true
+			nodes = append(nodes, next)
+		}
+	}
+	return nodes, reachable, true
+}
+
+func (d *Decompiler) inlinePrivateDelegationBranchArrayAt(root *Node, origins map[int]*OpCode, nodes []*Node, reachable map[*Node]bool) bool {
+	entry, prefix, conditions, ok := constructorArrayEntry(root)
 	if !ok {
 		return false
 	}
@@ -105,7 +159,25 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 		next = store.Next[0]
 	}
 
-	// The last store must lead immediately to the one original delegation.
+	// Later operands may have their own completed DUP array materializations.
+	// Retain their original argument positions in the same source packet; a
+	// general local definition or observable statement is not admitted here.
+	var laterArrays []delegationArrayMaterialization
+	for len(laterArrays) < 128 {
+		assignment, known := next.Statement.(*statements.AssignStatement)
+		if !known || assignment.ArrayMember != nil {
+			break
+		}
+		later, known := values.UnpackSoltValue(assignment.JavaValue).(*values.NewExpression)
+		local, localKnown := values.UnpackSoltValue(assignment.LeftValue).(*values.JavaRef)
+		if !known || !localKnown || !later.IsArray() || !later.HasEvaluationEndPC || local.IsParam || local.IsThis || len(next.Next) != 1 || removed[next] || next.IsTryCatch || next.IsCatchStart {
+			return false
+		}
+		laterArrays = append(laterArrays, delegationArrayMaterialization{node: next, array: later, ref: local})
+		removed[next] = true
+		next = next.Next[0]
+	}
+	// The completed packet must end at the one original delegation.
 	expr, ok := next.Statement.(*statements.ExpressionStatement)
 	if !ok {
 		return false
@@ -126,18 +198,25 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 	if !ok || !receiver.IsThis || len(call.Arguments) == 0 || len(call.Arguments) != len(call.FuncType.ParamTypes) {
 		return false
 	}
-	consumer, invoke, ok := d.privateDelegationArrayConsumer(call, origins[next.Id], ref, array)
+	consumer, invoke, argument, ok := d.privateDelegationArrayConsumer(call, origins[next.Id], ref, array)
 	if !ok {
 		return false
 	}
-	last := len(consumer.Arguments) - 1
+	args := slices.Clone(consumer.Arguments)
+	for _, later := range laterArrays {
+		index := delegationArrayArgument(consumer.Arguments, later.ref)
+		if index <= argument || !d.privateDelegationCompletedArray(later, consumer, invoke, index, origins) {
+			return false
+		}
+		args[index] = later.array
+	}
 	allocation := d.opcodeAtOffset(array.OriginPC)
 	if allocation == nil || allocation.Instr == nil || allocation.Instr.OpCode != OP_ANEWARRAY ||
-		!d.privateDelegationArrayDAG(allocation, invoke, ref, array, stores, items) {
+		!d.privateArrayValueDAG(allocation, invoke, ref, array, stores, items, len(consumer.Arguments)-1-argument, nil, args[argument+1:]...) {
 		return false
 	}
 
-	for _, arg := range consumer.Arguments[:last] {
+	for _, arg := range consumer.Arguments[:argument] {
 		if !d.branchOperandPrecedesArray(arg, allocation) {
 			return false
 		}
@@ -145,24 +224,18 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 	// Use a private prospective tree. Failed ownership proofs publish nothing.
 	copy := *array
 	copy.Initializer = items
-	args := slices.Clone(consumer.Arguments)
-	args[last] = &copy
+	args[argument] = &copy
 
 	if !constructorConditionsBelongToPrefixArguments(conditions, origins, args) {
 		return false
 	}
 
-	nodes, _ := guardGraph(d.RootNode)
-	reachable := map[*Node]bool{}
-	for _, node := range nodes {
-		reachable[node] = true
-	}
 	for node := range removed {
 		if node.IsCatchStart || node.IsTryCatch {
 			return false
 		}
 		for _, source := range node.Source {
-			if reachable[source] && !removed[source] {
+			if reachable[source] && !removed[source] && node != root {
 				return false
 			}
 		}
@@ -184,6 +257,11 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 			if valueMentionsLocal(v, ref) {
 				return false
 			}
+			for _, later := range laterArrays {
+				if valueMentionsLocal(v, later.ref) {
+					return false
+				}
+			}
 		}
 	}
 	// One allocation, every original store and every conditional value now belong
@@ -192,17 +270,42 @@ func (d *Decompiler) inlinePrivateDelegationBranchArray(origins map[int]*OpCode)
 	array.Initializer = items
 	array.EvaluationEndPC = int(stores[len(stores)-1].CurrentOffset)
 	array.HasEvaluationEndPC = true
-	consumer.Arguments[last] = array
+	args[argument] = array
+	consumer.Arguments = args
+	// Retain any earlier source statement, such as a named member's physical
+	// enclosing capture. Only the private array region is replaced. Every
+	// outside source edge must enter its first node, just as the original
+	// operand DAG permits outside bytecode edges only at its allocation.
+	for _, source := range slices.Clone(root.Source) {
+		if removed[source] {
+			continue
+		}
+		source.ReplaceNextSliceKeepOrder(root, []*Node{next})
+		source.ReplaceSwitchTarget(root, next)
+		if source.JmpNode == root {
+			source.JmpNode = next
+		}
+	}
 	for node := range removed {
 		node.RemoveAllNext()
 		node.RemoveAllSource()
 	}
-	d.RootNode = next
+	if d.RootNode == root {
+		d.RootNode = next
+	}
 	if d.varUserMap != nil {
 		d.varUserMap.Delete(ref)
 	}
 	if ref.Id != nil {
 		ref.Id.Delete()
+	}
+	for _, later := range laterArrays {
+		if d.varUserMap != nil {
+			d.varUserMap.Delete(later.ref)
+		}
+		if later.ref.Id != nil {
+			later.ref.Id.Delete()
+		}
 	}
 	return true
 }
@@ -247,7 +350,7 @@ func (d *Decompiler) privateDelegationArrayDAG(allocation, invoke *OpCode, ref *
 // An initialized stack-only array can end at an invocation operand or at its
 // original indexed read. The latter retains the index as the final effect
 // interval, after all element stores and before the unchanged load/checks.
-func (d *Decompiler) privateArrayValueDAG(allocation, invoke *OpCode, ref *values.JavaRef, array *values.NewExpression, stores []*OpCode, items []values.JavaValue, useIndex int, indexValue values.JavaValue) bool {
+func (d *Decompiler) privateArrayValueDAG(allocation, invoke *OpCode, ref *values.JavaRef, array *values.NewExpression, stores []*OpCode, items []values.JavaValue, useIndex int, indexValue values.JavaValue, trailing ...values.JavaValue) bool {
 	if allocation == nil || invoke == nil || allocation.CurrentOffset >= invoke.CurrentOffset || len(allocation.stackProduced) != 1 || values.UnpackSoltValue(allocation.stackProduced[0]) != array {
 		return false
 	}
@@ -270,7 +373,7 @@ func (d *Decompiler) privateArrayValueDAG(allocation, invoke *OpCode, ref *value
 	domain := d.handlersAt(allocation)
 	var visit func(*OpCode, int) bool
 	visit = func(op *OpCode, filled int) bool {
-		if op == nil || op.Instr == nil || op.CurrentOffset < allocation.CurrentOffset || op.CurrentOffset > invoke.CurrentOffset || active[op] || len(state) >= 1024 || !sameHandlerCoverage(domain, d.handlersAt(op)) {
+		if op == nil || op.Instr == nil || op.CurrentOffset < allocation.CurrentOffset || op.CurrentOffset > invoke.CurrentOffset || active[op] || len(state) >= 1024 || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil || !sameHandlerCoverage(domain, d.handlersAt(op)) {
 			return false
 		}
 		if previous, seen := state[op]; seen {
@@ -295,7 +398,7 @@ func (d *Decompiler) privateArrayValueDAG(allocation, invoke *OpCode, ref *value
 			return false
 		}
 		for _, next := range op.Target {
-			if next == nil || next.CurrentOffset <= op.CurrentOffset || !visit(next, filled) {
+			if next == nil || d.Work != nil && d.Work.Charge(workbudget.CounterGraphEdges, 1) != nil || next.CurrentOffset <= op.CurrentOffset || !visit(next, filled) {
 				return false
 			}
 		}
@@ -314,17 +417,40 @@ func (d *Decompiler) privateArrayValueDAG(allocation, invoke *OpCode, ref *value
 			}
 		}
 	}
-	effectValues, effectEnds := items, stores
-	if indexValue != nil {
-		effectValues = append(slices.Clone(items), indexValue)
-		effectEnds = append(slices.Clone(stores), invoke)
+	effectValues := slices.Clone(items)
+	effectEnds := make([]int, 0, len(stores)+len(trailing)+1)
+	for _, store := range stores {
+		effectEnds = append(effectEnds, int(store.CurrentOffset))
 	}
-	if !delegationArrayEffectSites(effectValues, effectEnds, state, allocation, invoke, d.invokeFuncCall) {
+	if indexValue != nil {
+		if len(trailing) != 0 {
+			return false
+		}
+		effectValues = append(effectValues, indexValue)
+		effectEnds = append(effectEnds, int(invoke.CurrentOffset))
+	}
+	inclusiveFrom := len(effectValues)
+	if len(trailing) != 0 {
+		if len(effectEnds) == 0 {
+			return false
+		}
+		lower := effectEnds[len(effectEnds)-1]
+		for _, value := range trailing {
+			end, known := d.delegationArrayTrailingEnd(value, lower, invoke)
+			if !known {
+				return false
+			}
+			effectValues = append(effectValues, value)
+			effectEnds = append(effectEnds, end)
+			lower = end
+		}
+	}
+	if !delegationArrayEffectWindows(effectValues, effectEnds, inclusiveFrom, state, allocation, invoke, d.invokeFuncCall) {
 		return false
 	}
 	uses := 0
 	for _, op := range d.opCodes {
-		if op == nil || op.Instr == nil {
+		if op == nil || op.Instr == nil || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
 			return false
 		}
 		for index, value := range op.stackConsumed {
@@ -353,6 +479,17 @@ func delegationArraySameRef(value values.JavaValue, ref *values.JavaRef) bool {
 // one-for-one with the original private DAG. In particular, a discarded call
 // or a reused producer cannot silently disappear into an apparently equal RHS.
 func delegationArrayEffectSites(items []values.JavaValue, stores []*OpCode, sites map[*OpCode]int, allocation, invoke *OpCode, decoded map[*OpCode]*values.FunctionCallExpression) bool {
+	ends := make([]int, 0, len(stores))
+	for _, store := range stores {
+		if store == nil {
+			return false
+		}
+		ends = append(ends, int(store.CurrentOffset))
+	}
+	return delegationArrayEffectWindows(items, ends, len(items), sites, allocation, invoke, decoded)
+}
+
+func delegationArrayEffectWindows(items []values.JavaValue, ends []int, inclusiveFrom int, sites map[*OpCode]int, allocation, invoke *OpCode, decoded map[*OpCode]*values.FunctionCallExpression) bool {
 	calls := map[int]*values.FunctionCallExpression{}
 	news := map[int]*values.NewExpression{}
 	path := map[values.JavaValue]bool{}
@@ -401,15 +538,18 @@ func delegationArrayEffectSites(items []values.JavaValue, stores []*OpCode, site
 		}
 		return true
 	}
-	if len(stores) != len(items) {
+	if len(ends) != len(items) {
 		return false
 	}
 	for index, item := range items {
-		upper = int(stores[index].CurrentOffset)
+		upper = ends[index]
+		if index >= inclusiveFrom {
+			upper++
+		}
 		if !visit(item) {
 			return false
 		}
-		lower = upper
+		lower = ends[index]
 	}
 	for op := range sites {
 		if op == allocation || op == invoke {

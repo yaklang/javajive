@@ -1,17 +1,19 @@
 package core
 
 import (
+	"context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"strings"
 	"testing"
 )
 
 func TestPrivateDelegationArrayBranchOwnership(t *testing.T) {
-	for _, change := range []string{"proved", "missing allocation PC", "missing store PC", "wrong index", "raw index mismatch", "wrong RHS witness", "foreign element", "unknown hierarchy", "self alias", "wrong parameter", "wrong descriptor", "missing invoke binding", "foreign receiver", "wrong duplicate", "local publication", "field publication", "extra call", "RHS reused", "back edge", "external entry", "handler boundary", "unowned condition", "catch entry", "post delegation reuse", "source-side effect", "effectful earlier argument", "wrong owner", "missing owner context", "this owner", "literal primer string", "wrapped proved", "wrapped wrong opcode", "wrapped missing producer", "wrapped wrong result identity", "wrapped alternate initialization entry", "wrapped effect after producer", "wrapped reused array", "wrapped incompatible array", "wrapped wrong producer owner", "wrapped missing origin", "wrapped wrong operand order", "nested array component", "nested incompatible component", "nested scalar component", "nested wrong rank"} {
+	for _, change := range []string{"proved", "retained source prefix", "missing allocation PC", "missing store PC", "wrong index", "raw index mismatch", "wrong RHS witness", "foreign element", "unknown hierarchy", "self alias", "wrong parameter", "wrong descriptor", "missing invoke binding", "foreign receiver", "wrong duplicate", "local publication", "field publication", "extra call", "RHS reused", "back edge", "external entry", "handler boundary", "unowned condition", "catch entry", "post delegation reuse", "source-side effect", "effectful earlier argument", "wrong owner", "missing owner context", "this owner", "literal primer string", "wrapped proved", "wrapped wrong opcode", "wrapped missing producer", "wrapped wrong result identity", "wrapped alternate initialization entry", "wrapped effect after producer", "wrapped reused array", "wrapped incompatible array", "wrapped wrong producer owner", "wrapped missing origin", "wrapped wrong operand order", "nested array component", "nested incompatible component", "nested scalar component", "nested wrong rank"} {
 		t.Run(change, func(t *testing.T) {
 			integer := types.NewJavaPrimer(types.JavaInteger)
 			literal := func(n int) *values.JavaLiteral { return values.NewJavaLiteral(n, integer) }
@@ -98,8 +100,15 @@ func TestPrivateDelegationArrayBranchOwnership(t *testing.T) {
 				d.opcodeToSimulateStack[op] = nil
 			}
 			origins := map[int]*OpCode{2: dup, 5: store0, 8: branch, 12: store1, 13: invoke}
-			want := change == "proved" || change == "this owner" || change == "literal primer string" || change == "wrapped proved" || change == "nested array component"
+			var retainedPrefix *Node
+			want := change == "retained source prefix" || change == "proved" || change == "this owner" || change == "literal primer string" || change == "wrapped proved" || change == "nested array component"
 			switch change {
+			case "retained source prefix":
+				// This source statement precedes the region and must survive
+				// unchanged. It is not treated as movable scaffolding.
+				retainedPrefix = NewNode(statements.NewExpressionStatement(values.NewJavaLiteral("retained", types.NewJavaClass("java.lang.String"))))
+				link(retainedPrefix, entry)
+				d.RootNode = retainedPrefix
 			case "nested array component", "nested incompatible component", "nested scalar component", "nested wrong rank":
 				arrayType.RawType().(*types.JavaArrayType).Dimension = 2
 				call.Descriptor = "([[Ljava/lang/String;)V"
@@ -240,7 +249,14 @@ func TestPrivateDelegationArrayBranchOwnership(t *testing.T) {
 				t.Fatalf("accepted=%v want=%v", got, want)
 			}
 			if want {
-				if d.RootNode != callNode || consumer.Arguments[len(consumer.Arguments)-1] != array || len(array.Initializer) != 2 || array.Initializer[1] != right || array.EvaluationEndPC != 12 {
+				expectedRoot := callNode
+				if retainedPrefix != nil {
+					expectedRoot = retainedPrefix
+					if len(retainedPrefix.Next) != 1 || retainedPrefix.Next[0] != callNode || len(callNode.Source) != 1 || callNode.Source[0] != retainedPrefix {
+						t.Fatal("retained prefix lost its source edge")
+					}
+				}
+				if d.RootNode != expectedRoot || consumer.Arguments[len(consumer.Arguments)-1] != array || len(array.Initializer) != 2 || array.Initializer[1] != right || array.EvaluationEndPC != 12 {
 					t.Fatal("lost operand identity/order or original store endpoint")
 				}
 			} else if d.RootNode != entry || len(array.Initializer) != 0 || array.HasEvaluationEndPC || consumer.Arguments[len(consumer.Arguments)-1] != ref || len(entry.Next) != 1 || entry.Next[0] != storeNodes[0] {
@@ -267,6 +283,47 @@ func TestDelegationArrayElementProofIsBounded(t *testing.T) {
 	}
 	if delegationArrayElementAssignable(cycle, "Ljava/lang/String;", nil) {
 		t.Fatal("unbounded tree must fail closed")
+	}
+}
+
+func TestPrivateDelegationArraySourceDiscoveryIsBounded(t *testing.T) {
+	for _, scenario := range []string{"original", "scan limit", "edge limit", "allocation limit", "canceled", "oversized graph", "missing target"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := NewNode(statements.NewGOTOStatement())
+			tail := root
+			count := 8
+			if scenario == "oversized graph" {
+				count = 4097
+			}
+			for i := 1; i < count; i++ {
+				next := NewNode(statements.NewGOTOStatement())
+				tail.AddNext(next)
+				next.AddSource(tail)
+				tail = next
+			}
+			d := &Decompiler{RootNode: root}
+			switch scenario {
+			case "scan limit":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "edge limit":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphEdges: 1})
+			case "allocation limit":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				d.Work = workbudget.New(ctx, workbudget.Limits{})
+			case "missing target":
+				root.Next = append(root.Next, nil)
+			}
+			nodes, live, known := d.privateDelegationArraySourceGraph()
+			if known != (scenario == "original") || known && (len(nodes) != count || !live[tail]) {
+				t.Fatalf("bounded graph discovery=%v count=%d", known, len(nodes))
+			}
+			if d.RootNode != root || scenario != "missing target" && len(root.Next) != 1 {
+				t.Fatal("source discovery published a graph change")
+			}
+		})
 	}
 }
 

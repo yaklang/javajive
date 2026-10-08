@@ -266,12 +266,20 @@ func Transfer(in Frame, instr Instr) (out Frame, exceptionFrame *Frame, err erro
 		}
 		cls := instr.Class
 		if cls == "" {
-			cls = "java/lang/Object"
+			terr = unsupportedf("anewarray without component class")
+			break
 		}
-		if len(cls) > 0 && cls[0] != '[' {
-			cls = "[L" + cls + ";"
+		if cls[0] != '[' {
+			cls = "L" + cls + ";"
 		}
-		terr = out.push(RefOf(cls))
+		// The CP class is the component, not the resulting array class.
+		// This adds one rank even when the component is itself an array.
+		array, used, err := parseField("[" + cls)
+		if err != nil || used != len(cls)+1 {
+			terr = invalidf("anewarray component descriptor")
+			break
+		}
+		terr = out.push(array)
 	case core.OP_ARRAYLENGTH:
 		if _, err := out.popKind(Ref); err != nil {
 			terr = err
@@ -419,10 +427,20 @@ func arrayLoad(f *Frame, elem Kind) error {
 	if _, err := f.popKind(Int); err != nil {
 		return err
 	}
-	if _, err := f.popKind(Ref); err != nil {
+	array, err := f.popKind(Ref)
+	if err != nil {
 		return err
 	}
 	if elem == Ref {
+		if array.Kind == Ref && len(array.Class) > 0 && array.Class[0] == '[' {
+			component, used, err := parseField(array.Class[1:])
+			if err != nil || used != len(array.Class)-1 || component.Kind != Ref {
+				return invalidf("aaload requires a reference array component")
+			}
+			return f.push(component)
+		}
+		// An imprecise merged reference (or null's unreachable normal
+		// edge) carries no component identity. Keep the conservative view.
 		return f.push(RefOf("java/lang/Object"))
 	}
 	return f.push(T(elem))

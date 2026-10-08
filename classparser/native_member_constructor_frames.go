@@ -20,8 +20,12 @@ import (
 // stack throughout a bounded forward argument region. No local definition,
 // extra receiver alias, field write, handler or escaping control edge can borrow
 // this certificate. A NEW inside an argument is distinct from uninitialized THIS.
-func nativeMemberFrameDelegation(obj *ClassObject, method *MemberInfo, code *CodeAttribute, ops []*core.OpCode, start int, work *workbudget.Budget) (int, *values.JavaClassMember) {
-	if obj == nil || method == nil || code == nil || start != 0 && start != 3 || start >= len(ops) || ops[start] == nil || ops[start].Instr == nil || core.GetRetrieveIdx(ops[start]) != 0 || !constructorMotionLoad(ops[start], "Ljava/lang/Object;") {
+func nativeMemberFrameDelegation(obj *ClassObject, method *MemberInfo, code *CodeAttribute, ops []*core.OpCode, start int, work *workbudget.Budget, enclosingPaths ...*nativeMemberLexicalRead) (int, *values.JavaClassMember) {
+	return nativeMemberFrameDelegationWithMetadata(obj, method, code, ops, start, work, nil, enclosingPaths...)
+}
+
+func nativeMemberFrameDelegationWithMetadata(obj *ClassObject, method *MemberInfo, code *CodeAttribute, ops []*core.OpCode, start int, work *workbudget.Budget, metadata callbinding.Provider, enclosingPaths ...*nativeMemberLexicalRead) (int, *values.JavaClassMember) {
+	if obj == nil || method == nil || code == nil || len(enclosingPaths) > 1 || len(enclosingPaths) == 1 && start != 3 || start != 0 && start != 3 || start >= len(ops) || ops[start] == nil || ops[start].Instr == nil || core.GetRetrieveIdx(ops[start]) != 0 || !constructorMotionLoad(ops[start], "Ljava/lang/Object;") {
 		return 0, nil
 	}
 	matches, codes := 0, 0
@@ -109,6 +113,14 @@ func nativeMemberFrameDelegation(obj *ClassObject, method *MemberInfo, code *Cod
 	if delegate == nil || int(delegate.PC) <= int(ops[start].CurrentOffset) {
 		return 0, nil
 	}
+	// Projection of a nonstatic SUPER enclosing operand is a separate
+	// identity claim. Its declaring-class widening/access/lexical scope is
+	// still proved by the caller. A nil path means the unchanged slot-1 word;
+	// a path means the exact original consecutive capture reads, never a
+	// compatible ordinary argument, cast, call result or merged substitute.
+	if len(enclosingPaths) == 1 && (delegate.Class != obj.GetSupperClassName() || !nativeMemberFrameEnclosingOrigin(ir, frames, enclosing, enclosingPaths[0], work)) {
+		return 0, nil
+	}
 	// An exception-table domain is relevant even when its current prefix has
 	// no throwing opcode. Do not let an omitted exceptional CFG edge bypass
 	// the same pre-delegation handler guard used by the source boundary.
@@ -124,6 +136,7 @@ func nativeMemberFrameDelegation(obj *ClassObject, method *MemberInfo, code *Cod
 		return 0, nil
 	}
 	startPC := int(ops[start].CurrentOffset)
+	var widening *constructorWideningQuery
 	for _, record := range frames.Instructions {
 		pc := int(record.PC)
 		if pc <= startPC || pc > int(delegate.PC) {
@@ -140,6 +153,44 @@ func nativeMemberFrameDelegation(obj *ClassObject, method *MemberInfo, code *Cod
 		for _, local := range record.Before.Locals[1:] {
 			if local.Kind == frametransfer.UninitThis {
 				return 0, nil
+			}
+		}
+		original, known := ir.InstrByID(methodir.InstrID(record.PC))
+		if !known {
+			return 0, nil
+		}
+		if original.Opcode == core.OP_AASTORE {
+			// JVM computational references permit a covariance failure at
+			// AASTORE. A source initializer needs a separate assignment proof;
+			// inserting a cast would change its exception class and timing.
+			if widening == nil {
+				widening = newConstructorWideningQuery(func(name string) (callbinding.Class, bool) {
+					if metadata == nil || !nativeProofWork(work, 1) {
+						return callbinding.Class{}, false
+					}
+					return metadata(name)
+				})
+			}
+			stack := record.Before.Stack
+			if len(stack) < 3 {
+				return 0, nil
+			}
+			array, index, value := stack[len(stack)-3], stack[len(stack)-2], stack[len(stack)-1]
+			if !nativeMemberFrameArrayStoreAssignable(array, index, value, widening, work) {
+				component, known := nativeMemberFrameArrayStoreComponent(array, index, work)
+				if !known || value.Kind != frametransfer.Ref {
+					return 0, nil
+				}
+				if words == nil {
+					words = newNativeConstructorFrameWords(obj, method, ir, frames, work)
+				}
+				// A coarse verifier join may lose a legal common superclass.
+				// Prove every reaching original producer; do not pick one arm
+				// or reinterpret computational Object as an assignment cast.
+				origin := record.BeforeOrigins[len(record.BeforeOrigins)-1]
+				if words == nil || !words.reference(origin, component, widening, frames) {
+					return 0, nil
+				}
 			}
 		}
 	}
@@ -168,4 +219,78 @@ func nativeMemberFrameDelegation(obj *ClassObject, method *MemberInfo, code *Cod
 		}
 	}
 	return 0, nil
+}
+
+func nativeMemberFrameArrayStoreAssignable(array, index, value frametransfer.Type, widening *constructorWideningQuery, work *workbudget.Budget) bool {
+	component, known := nativeMemberFrameArrayStoreComponent(array, index, work)
+	if widening == nil || !known || !nativeProofWork(work, int64(len(value.Class)+1)) {
+		return false
+	}
+	if value.Kind == frametransfer.Null {
+		return true
+	}
+	if value.Kind != frametransfer.Ref || value.Class == "" {
+		return false
+	}
+	actual := value.Class
+	if actual[0] != '[' {
+		actual = "L" + actual + ";"
+	}
+	params, result, err := callbinding.Descriptor("(" + actual + ")V")
+	return err == nil && result == "V" && len(params) == 1 && widening.assignable(actual, component)
+}
+
+func nativeMemberFrameArrayStoreComponent(array, index frametransfer.Type, work *workbudget.Budget) (string, bool) {
+	if array.Kind != frametransfer.Ref || index.Kind != frametransfer.Int || len(array.Class) < 2 || array.Class[0] != '[' || !nativeProofWork(work, int64(len(array.Class)+1)) {
+		return "", false
+	}
+	component := array.Class[1:]
+	params, result, err := callbinding.Descriptor("(" + component + ")V")
+	return component, err == nil && result == "V" && len(params) == 1 && callbinding.Reference(component)
+}
+
+func nativeMemberFrameEnclosingOrigin(ir *methodir.MethodIR, frames *ssabuild.Function, origin ssabuild.Origin, path *nativeMemberLexicalRead, work *workbudget.Budget) bool {
+	parameter := ssabuild.Origin{Kind: ssabuild.OriginParam, Slot: 1}
+	if path == nil {
+		return origin == parameter && nativeProofWork(work, 1)
+	}
+	if ir == nil || frames == nil {
+		return false
+	}
+	seen := map[*nativeMemberLexicalRead]bool{}
+	for read := path; read != nil; read = read.prior {
+		if seen[read] || len(seen) >= 64 || read.pc < 0 || read.pc > 65535 || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(len(seen)+1)*128) != nil || origin != (ssabuild.Origin{Kind: ssabuild.OriginInstr, PC: uint16(read.pc)}) {
+			return false
+		}
+		seen[read] = true
+		field, known := ir.InstrByID(methodir.InstrID(read.pc))
+		if !known || field.Opcode != core.OP_GETFIELD || field.Class != read.owner || field.Member != read.field || field.Desc != read.descriptor {
+			return false
+		}
+		found := false
+		for _, record := range frames.Instructions {
+			if !nativeProofWork(work, 1) {
+				return false
+			}
+			if int(record.PC) != read.pc {
+				continue
+			}
+			if found || len(record.Uses) != 1 {
+				return false
+			}
+			found, origin = true, record.Uses[0]
+		}
+		if !found {
+			return false
+		}
+		if read.prior == nil {
+			base, known := ir.InstrByID(methodir.InstrID(read.basePC))
+			params, result, err := callbinding.Descriptor(ir.Descriptor)
+			return origin == parameter && read.basePC >= 0 && read.basePC < read.pc && known && base.Local == 1 && constructorMotionLoad(&core.OpCode{Instr: core.InstrInfos[base.Opcode]}, "Ljava/lang/Object;") && err == nil && result == "V" && len(params) > 0 && params[0] == "L"+read.parameterOwner+";"
+		}
+		if read.prior.pc >= read.pc {
+			return false
+		}
+	}
+	return false
 }

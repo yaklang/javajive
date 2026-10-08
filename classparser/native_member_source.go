@@ -495,7 +495,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		if next == 0 || call == nil {
 			// A named lexical capture is regenerated before the original
 			// delegation; no capture is moved across these operand effects.
-			next, call = nativeMemberFrameDelegation(obj, m, code, ops, start, work)
+			next, call = nativeMemberFrameDelegationWithMetadata(obj, m, code, ops, start, work, provider)
 		}
 		if next == 0 || call == nil || call.Member != "<init>" {
 			return nil
@@ -782,6 +782,9 @@ func nativeMemberSiblingSuperClosed(child *nativeMemberClass, p *nativeMemberFam
 					return false
 				}
 				next, call := constructorMotionDelegationEnclosing(child.object, ops, start, params, constructorParameterSlots(params), metadata, path, 1)
+				if next == 0 || call == nil {
+					next, call = nativeMemberFrameDelegationWithMetadata(child.object, method, code, ops, start, work, metadata, path)
+				}
 				ctor.enclosingSuperPath = path
 				proved = next > 0 && call != nil && call.Name == ctor.delegateOwner && call.Description == ctor.delegateDescriptor && int(ops[next-1].CurrentOffset) == ctor.delegatePC
 				if proved && parent.accessBridges[ctor.delegateDescriptor] != nil {

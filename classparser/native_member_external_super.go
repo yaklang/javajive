@@ -119,6 +119,9 @@ func nativeMemberExternalSupersClosed(p *nativeMemberFamily, metadata callbindin
 					return false
 				}
 				next, call := constructorMotionDelegationEnclosing(child.object, ops, start, params, constructorParameterSlots(params), metadata, nil, 1)
+				if next == 0 || call == nil {
+					next, call = nativeMemberFrameDelegationWithMetadata(child.object, method, code, ops, start, work, metadata, nil)
+				}
 				if next > 0 && call != nil && call.Name == ctor.delegateOwner && call.Description == ctor.delegateDescriptor && int(ops[next-1].CurrentOffset) == ctor.delegatePC {
 					proved = true
 				}
