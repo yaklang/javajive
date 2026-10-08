@@ -13205,7 +13205,11 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 			break
 		}
 	}
-	return result, nil
+	ordered, known := c.nativeAnonymousMethodOrder(result)
+	if !known {
+		return nil, fmt.Errorf("original anonymous method registration order unproved")
+	}
+	return ordered, nil
 }
 
 func (c *ClassObjectDumper) isInterfaceLike() bool {
