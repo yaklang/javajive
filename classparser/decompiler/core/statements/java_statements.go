@@ -3000,7 +3000,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 	if values.IsBooleanStackNarrowing(a.LeftValue.Type(), rhsVal) {
 		rhsVal = values.NarrowBooleanStackWord(rhsVal)
 	}
-	rhsStr := rhsVal.String(funcCtx)
+	rhsStr := ""
 	targetView := a.LeftValue.Type()
 	if ref, ok := a.LeftValue.(*values.JavaRef); ok && ref.WebDeclType != nil {
 		targetView = ref.WebDeclType
@@ -3010,16 +3010,20 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 			targetView = source
 		}
 	}
-	rhsVal = values.ErasedFactoryAssignmentView(rhsVal, targetView, funcCtx)
-	if ref, local := a.LeftValue.(*values.JavaRef); local && !ref.IsThis && ref.StackVar == nil && ref.CustomValue == nil {
+	if !a.IsFirst {
+		rhsVal = values.ErasedFactoryAssignmentView(rhsVal, targetView, funcCtx)
+	}
+	if ref, local := a.LeftValue.(*values.JavaRef); !a.IsFirst && local && !ref.IsThis && ref.StackVar == nil && ref.CustomValue == nil {
 		if call, direct := values.UnpackSoltValue(rhsVal).(*values.FunctionCallExpression); direct {
 			if planned, known := call.PlanErasedWidenedLocalResult(funcCtx, targetView); known {
 				rhsVal = planned
 			}
 		}
 	}
-	rhsStr = rhsVal.String(funcCtx)
-	if values.ScopedErasureView(funcCtx, targetView, rhsVal) {
+	if !a.IsFirst {
+		rhsStr = rhsVal.String(funcCtx)
+	}
+	if !a.IsFirst && values.ScopedErasureView(funcCtx, targetView, rhsVal) {
 		rhsStr = fmt.Sprintf("(%s) (%s)", targetView.String(funcCtx), rhsStr)
 	}
 	// A lambda / method-reference REASSIGNED into a slot whose declared type is the RAW form of the
@@ -3145,7 +3149,44 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if ref, ok := a.LeftValue.(*values.JavaRef); ok && ref.WebDeclType != nil {
 			declType = ref.WebDeclType
 		}
-		if target := declType.String(funcCtx); funcCtx.IsTypeParam(target) && !values.IsNullLiteral(values.UnpackSoltValue(a.JavaValue)) {
+		inferredFormalResult := false
+		if ref, local := a.LeftValue.(*values.JavaRef); local && !ref.IsThis && ref.WebDeclType == nil && ref.StackVar == nil && ref.CustomValue == nil {
+			if call, direct := values.UnpackSoltValue(rhsVal).(*values.FunctionCallExpression); direct {
+				if source := call.SourceFormalLocalResult(funcCtx, declType); source != nil {
+					declType = source
+					inferredFormalResult = true
+				}
+			}
+		}
+		// Instantiated generic returns are also source consumers. Recover this
+		// declaration before permitting an erased invocation view; doing so only
+		// after rendering would turn Object x = rawCall() into T x = rawCall().
+		if ref, local := a.LeftValue.(*values.JavaRef); local && ref.WebDeclType == nil {
+			if tv := typeVarLocalDeclName(funcCtx, a.LeftValue, a.JavaValue, declType); tv != "" {
+				declType = types.NewJavaClass(tv)
+				inferredFormalResult = true
+			}
+		}
+		// A first store's emitted declaration can be more precise than its
+		// computational slot or an early generic inference view. Seal any raw
+		// invocation adaptation against this final source consumer, after the
+		// whole-web declaration has been selected. A temporary Object slot must
+		// not grant result-erasure permission to a declaration that becomes T.
+		rhsVal = values.ErasedFactoryAssignmentView(rhsVal, declType, funcCtx)
+		if ref, local := a.LeftValue.(*values.JavaRef); local && !ref.IsThis && ref.StackVar == nil && ref.CustomValue == nil {
+			if call, direct := values.UnpackSoltValue(rhsVal).(*values.FunctionCallExpression); direct {
+				if planned, known := call.PlanErasedWidenedLocalResult(funcCtx, declType); known {
+					rhsVal = planned
+				}
+			}
+		}
+		rhsStr = rhsVal.String(funcCtx)
+		scopedResult := !inferredFormalResult && values.ScopedErasureView(funcCtx, declType, rhsVal)
+		if scopedResult {
+			rhsStr = fmt.Sprintf("(%s) (%s)", declType.String(funcCtx), rhsStr)
+		}
+		assign = fmt.Sprintf("%s = %s", a.LeftValue.String(funcCtx), rhsStr)
+		if target := declType.String(funcCtx); !inferredFormalResult && !scopedResult && funcCtx.IsTypeParam(target) && !values.IsNullLiteral(values.UnpackSoltValue(a.JavaValue)) {
 			needsCast := a.JavaValue.Type().String(funcCtx) != target
 			if ternary, ok := values.UnpackSoltValue(a.JavaValue).(*values.TernaryExpression); ok {
 				needsCast = needsCast || ternaryArmNeedsTypeVarCast(ternary, target, funcCtx)
@@ -3162,13 +3203,6 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if cast := narrowingInitCast(a.LeftValue.Type(), declType); cast != "" {
 			assign = fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, a.JavaValue.String(funcCtx))
 			declType = a.LeftValue.Type()
-		}
-		// A local whose initializer is a jar-internal generic call returning a bare type variable T (but
-		// erased to T's bound in the descriptor) must be declared at T, not the erased bound, or later
-		// T-typed uses fail to compile. javac re-derives the RHS as T, so no RHS cast is needed. See
-		// typeVarLocalDeclName (guava Cut$AboveValue: `C var3 = domain.next(...)`).
-		if tv := typeVarLocalDeclName(funcCtx, a.LeftValue, a.JavaValue, declType); tv != "" {
-			return tv + " " + assign
 		}
 		return declType.String(funcCtx) + " " + assign
 	} else {

@@ -1,12 +1,64 @@
 package javaclassparser
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 )
+
+func TestAdversarialPlatformInterfaceDeclarationsUsePinnedOriginalFlags(t *testing.T) {
+	var catalog struct {
+		Profiles []struct {
+			Release       int
+			ArchiveSHA256 string `json:"archive_sha256"`
+			Archives      map[string]string
+			Classes       map[string]struct {
+				IsInterface bool
+				Parents     []string
+			}
+			Provenance map[string]struct {
+				Archive string
+				SHA256  string
+			}
+		}
+	}
+	if err := json.Unmarshal(jdkInvocationCatalogJSON, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	for _, profile := range catalog.Profiles {
+		count := 0
+		for name, decl := range profile.Classes {
+			provenance := profile.Provenance[name]
+			if !decl.IsInterface || profile.Archives[provenance.Archive] != profile.ArchiveSHA256 {
+				continue
+			}
+			raw, known := jdkConstructorClassBytes(name, profile.Release)
+			if !known {
+				t.Fatalf("missing pinned original %d/%s", profile.Release, name)
+			}
+			if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != provenance.SHA256 {
+				t.Fatalf("interface bytes differ from pinned catalog %d/%s: %s", profile.Release, name, got)
+			}
+			obj, err := Parse(raw)
+			if err != nil || obj.GetClassName() != name || obj.AccessFlags&0x0200 == 0 || int(obj.MajorVersion) != profile.Release+44 {
+				t.Fatalf("wrong original interface %d/%s: %v", profile.Release, name, err)
+			}
+			for _, parent := range obj.GetInterfacesName() {
+				if _, known := jdkConstructorClassBytes(parent, profile.Release); !known {
+					t.Fatalf("missing original interface parent %d/%s", profile.Release, parent)
+				}
+			}
+			count++
+		}
+		if count == 0 {
+			t.Fatal("empty interface profile", profile.Release)
+		}
+	}
+}
 
 func TestAdversarialPlatformConstructorCodeIdentityAndEffectProof(t *testing.T) {
 	// Read every retained class, independently check its original identity and

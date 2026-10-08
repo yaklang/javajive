@@ -21,6 +21,8 @@ type nativeMemberConstructor struct {
 	enclosingSuperPath                                              *nativeMemberLexicalRead
 }
 type nativeMemberClass struct {
+	lambdaContext                 nativeLambdaImplementationContext
+	lambdaImplementations         map[*MemberInfo]bool
 	assertions                    *nativeMemberAssertion
 	enumSynthesis                 *nativeMemberEnumSynthesis
 	sourceName                    string
@@ -314,7 +316,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 	if flags&8 != 0 && !nativeMemberTypeScope(obj, nil, work) {
 		return nil
 	}
-	p := &nativeMemberClass{enumSynthesis: enumSynthesis, object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}, accessBridges: bridges}
+	p := &nativeMemberClass{lambdaContext: nativeLambdaImplementationContext{resolve: resolve, metadata: provider}, enumSynthesis: enumSynthesis, object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}, accessBridges: bridges}
 	if lexical != nil && len(lexical) > 0 {
 		outermost := owner
 		for depth := 0; depth < 64; depth++ {
@@ -384,7 +386,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		}
 		n, nok := sourceBridgeUTF8(obj, m.NameIndex)
 		desc, dok := sourceBridgeUTF8(obj, m.DescriptorIndex)
-		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 && (p.assertions == nil || p.assertions.initializer != m) && (lexical == nil || nativeMemberPrivateAccessProofWithDeclarations(obj, m, resolve, work, lexical) == nil) {
+		if !nok || !dok || !p.static && m.AccessFlags&0x0008 != 0 && (p.assertions == nil || p.assertions.initializer != m) && (lexical == nil || nativeMemberPrivateAccessProofWithDeclarations(obj, m, resolve, work, lexical) == nil) && !nativeMemberLambdaImplementation(p, m, work) {
 			return nil
 		}
 		for _, a := range m.Attributes {
@@ -1814,7 +1816,7 @@ func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 			}
 		}
 		src, e := sub.DumpClass()
-		if e != nil || sub.nativeCaptureFailed || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || len(sub.interfaceInitializerHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
+		if e != nil || sub.nativeCaptureFailed || !nativeMemberLambdaSourceClosed(child, sub, c.Work) || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || len(sub.interfaceInitializerHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
 			return nil, fmt.Errorf("member body unproved: %v", e)
 		}
 		if group := p.memberAnonymous[name]; group != nil && !group.completeOwnSource(src) {

@@ -118,6 +118,9 @@ func (z *JarFS) prepareNativeMemberFamilyUnpublished(root *ClassObject, snap map
 		if !nativeMemberOrdinaryHandlesClosed(child.object, index, d.Work, child) {
 			return nil
 		}
+		if !z.nativeMemberLambdaArchiveClosed(child, index, d.Work) {
+			return nil
+		}
 		for user := range index.captureUsers[nativeMemberCaptureIndexKey(n, child.field)] {
 			if user != n {
 				if named := p.children[user]; named != nil {

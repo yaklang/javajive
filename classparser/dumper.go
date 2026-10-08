@@ -3620,6 +3620,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	if method == nil {
 		return dumped, fmt.Errorf("method %s not found", methodName)
 	}
+	// Recursive lambda bodies bypass DumpMethods' declaration bookkeeping.
+	// Retain the actual original target for the eventual source-consumption
+	// certificate as well as for ordinary declarations.
+	dumped.member = method
 
 	var isLambda bool
 	if v := c.lambdaMethods[name]; slices.Contains(v, descriptor) {

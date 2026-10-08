@@ -28,6 +28,42 @@ func nativeAnonymousAllocationScope(object *ClassObject, child *nativeAnonymousC
 	if child.method == name+desc {
 		return true
 	}
+	return nativeLambdaImplementationScope(object, name, desc, child.method, true, work)
+}
+
+// The implementation's source ownership is an original metafactory use, rather
+// than a private/synthetic flag or a spelling. A named member has no imposed
+// EnclosingMethod scope; anonymous allocations additionally require that scope
+// and at least one unchanged capture. Both paths retain physical descriptors.
+func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical string, requireCapture bool, work *workbudget.Budget, contexts ...nativeLambdaImplementationContext) bool {
+	if len(contexts) > 1 || object == nil || len(object.Methods) > 4096 || len(object.ConstantPool) > 65535 || !nativeProofWork(work, int64(len(object.Methods)+len(object.ConstantPool))) {
+		return false
+	}
+	var context nativeLambdaImplementationContext
+	if len(contexts) == 1 {
+		context = contexts[0]
+		if context.resolve == nil {
+			return false
+		}
+	}
+	widening := newConstructorWideningQuery(context.metadata)
+	bytes := 0
+	for _, m := range object.Methods {
+		if m == nil {
+			return false
+		}
+		for _, attr := range m.Attributes {
+			if code, ok := attr.(*CodeAttribute); ok {
+				if code == nil || len(code.Code) > (1<<20)-bytes {
+					return false
+				}
+				bytes += len(code.Code)
+			}
+		}
+	}
+	if work != nil && work.CheckAlloc(int64(bytes)*32+int64(len(object.ConstantPool))*32) != nil {
+		return false
+	}
 	// Compatibility with the existing body emitter; never a scope certificate.
 	if !strings.HasPrefix(name, "lambda$") {
 		return false
@@ -117,8 +153,12 @@ func nativeAnonymousAllocationScope(object *ClassObject, child *nativeAnonymousC
 		return false
 	}
 	allowed := map[int][]string{}
+	erased := map[int]string{}
 	for index, site := range boot.BootstrapMethods {
 		if !nativeProofWork(work, 1) || site == nil {
+			return false
+		}
+		if handles[site.BootstrapMethodRef] {
 			return false
 		}
 		uses := 0
@@ -151,22 +191,46 @@ func nativeAnonymousAllocationScope(object *ClassObject, child *nativeAnonymousC
 		}
 		s, sk := sourceBridgeUTF8(object, sam.DescriptorIndex)
 		in, ink := sourceBridgeUTF8(object, inst.DescriptorIndex)
-		sp, _, se := callbinding.Descriptor(s)
+		sp, sr, se := callbinding.Descriptor(s)
 		ip, ir, ie := callbinding.Descriptor(in)
 		if !sk || !ink || se != nil || ie != nil || len(sp) != len(ip) || ir != result || len(params) < len(ip) || !slices.Equal(params[len(params)-len(ip):], ip) {
+			return false
+		}
+		// Metafactory's instantiated signature specializes erased reference
+		// positions. Primitive positions cannot silently change width or kind.
+		for i := range sp {
+			if sp[i] != ip[i] && (!callbinding.Reference(sp[i]) || !callbinding.Reference(ip[i]) || !widening.assignable(ip[i], sp[i])) {
+				return false
+			}
+		}
+		if sr != ir && (!callbinding.Reference(sr) || !callbinding.Reference(ir) || !widening.assignable(ir, sr)) {
 			return false
 		}
 		captures := slices.Clone(params[:len(params)-len(ip)])
 		if impl.AccessFlags&StaticFlag == 0 {
 			captures = append([]string{"L" + object.GetClassName() + ";"}, captures...)
 		}
-		if len(captures) == 0 {
+		if requireCapture && len(captures) == 0 {
 			return false
 		}
 		allowed[index] = captures
+		erased[index] = s
 	}
 	if len(allowed) != 1 {
 		return false
+	}
+	for _, cp := range object.ConstantPool {
+		if !nativeProofWork(work, 1) {
+			return false
+		}
+		if dynamic, ok := cp.(*ConstantDynamicInfo); ok {
+			if dynamic == nil {
+				return false
+			}
+			if _, consumed := allowed[int(dynamic.BootstrapMethodAttrIndex)]; consumed {
+				return false
+			}
+		}
 	}
 	sites := 0
 	implBodies := 0
@@ -217,6 +281,22 @@ func nativeAnonymousAllocationScope(object *ClassObject, child *nativeAnonymousC
 				if !nativeProofWork(work, 1) {
 					return false
 				}
+				if op == nil || op.Instr == nil {
+					return false
+				}
+				if op.Instr.OpCode == core.OP_LDC || op.Instr.OpCode == core.OP_LDC_W || op.Instr.OpCode == core.OP_LDC2_W {
+					index := uint16(0)
+					if len(op.Data) == 1 {
+						index = uint16(op.Data[0])
+					} else if len(op.Data) == 2 {
+						index = core.Convert2bytesToInt(op.Data)
+					} else {
+						return false
+					}
+					if handles[index] {
+						return false
+					}
+				}
 				for _, kind := range []int{core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE, core.OP_INVOKESPECIAL} {
 					ref := constructorMotionMember(object, op, kind)
 					if ref != nil && ref.Name == object.GetClassName() && ref.Member == name && ref.Description == desc {
@@ -233,11 +313,11 @@ func nativeAnonymousAllocationScope(object *ClassObject, child *nativeAnonymousC
 				if !ok || dynamic == nil {
 					return false
 				}
-				captures := allowed[int(dynamic.BootstrapMethodAttrIndex)]
-				if captures == nil {
+				captures, belongs := allowed[int(dynamic.BootstrapMethodAttrIndex)]
+				if !belongs {
 					continue
 				}
-				if n+md != child.method || i < len(captures) {
+				if lexical != "" && n+md != lexical || i < len(captures) {
 					return false
 				}
 				nt, ok := constant(dynamic.NameAndTypeIndex).(*ConstantNameAndTypeInfo)
@@ -248,6 +328,12 @@ func nativeAnonymousAllocationScope(object *ClassObject, child *nativeAnonymousC
 				dp, dr, e := callbinding.Descriptor(ds)
 				if !known || e != nil || !callbinding.Reference(dr) || !slices.Equal(dp, captures) {
 					return false
+				}
+				if len(contexts) == 1 {
+					samName, known := sourceBridgeUTF8(object, nt.NameIndex)
+					if !known || !nativeLambdaFunctionalTarget(dr, samName, erased[int(dynamic.BootstrapMethodAttrIndex)], context.resolve, work) {
+						return false
+					}
 				}
 				fp, _, e := callbinding.Descriptor(md)
 				if e != nil {
