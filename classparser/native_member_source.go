@@ -26,6 +26,7 @@ type nativeMemberClass struct {
 	assertions                    *nativeMemberAssertion
 	enumSynthesis                 *nativeMemberEnumSynthesis
 	sourceName                    string
+	sourceAnonymousOwner          string
 	object                        *ClassObject
 	owner, name, field            string
 	static                        bool
@@ -331,7 +332,11 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 			}
 			next, _, _, nested := originalMemberOwner(o)
 			if !nested {
-				break
+				if parent, _, anonymous := originalAnonymousOwner(o); anonymous {
+					next, nested = parent, true
+				} else {
+					break
+				}
 			}
 			outermost = next
 			if depth == 63 {
@@ -671,7 +676,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if !c.planNativeMethodLocals(p) {
 		return nil
 	}
-	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 {
+	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 && !c.nativeMemberHasAnonymousNamedDeclarations() {
 		return nil
 	}
 	for name, child := range p.children {
@@ -832,8 +837,16 @@ func (p *nativeMemberFamily) sourceName(binary string) (string, bool) {
 			owner = parent.owner
 		}
 		name := strings.ReplaceAll(owner, "/", ".")
+		if object := p.lexicalObjects[owner]; object != nil {
+			if _, _, anonymous := originalAnonymousOwner(object); anonymous {
+				name = ""
+			}
+		}
 		for i := len(parts) - 1; i >= 0; i-- {
-			name += "." + parts[i]
+			if name != "" {
+				name += "."
+			}
+			name += parts[i]
 		}
 		return name, true
 	}
@@ -1462,6 +1475,10 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	}
 	prior := ctx.DeclarationSourceName
 	ctx.DeclarationSourceName = func(n string) (string, bool) {
+		if anchor := p.anonymousNamedAnchor(n); anchor != "" && (p.lexicalObjects[c.obj.GetClassName()] != c.obj || !p.anonymousNamedScopeContains(anchor, c.obj.GetClassName())) {
+			p.failed = true
+			return "", false
+		}
 		if source, known := p.sourceName(n); known {
 			return source, true
 		}
@@ -1677,13 +1694,18 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			receiver := values.NewJavaRef(nil, nil, types.NewJavaClass(ctx.ClassName))
 			receiver.IsThis = true
 			call := &values.FunctionCallExpression{ClassName: owner, FunctionName: "<init>", Descriptor: target.sourceDescriptor, Object: receiver, Kind: values.InvokeSpecial, IsSpecialInvoke: true, OriginPC: pc, HasOriginPC: true}
-			if keyword == "super" && ctor.enclosingSuperPath != nil && !nativeMemberLexicalReadOperand(args[0], ctor.enclosingSuperPath, c.Work, ctx) {
+			// Dropping a physical enclosing operand needs its original source
+			// origin even when both constructors belong to this family. A
+			// descriptor and invocation PC cannot license a null, effectful or
+			// unrelated word in place of the unchanged enclosing parameter.
+			enclosingKnown := ctor.enclosingSuperPath == nil && nativeMemberSourceEnclosingParameter(args[0], ctx, child.owner) || keyword == "super" && ctor.enclosingSuperPath != nil && nativeMemberLexicalReadOperand(args[0], ctor.enclosingSuperPath, c.Work, ctx)
+			if !enclosingKnown {
 				p.failed = true
 				return "", false
 			}
 			operands := args[1:]
 			if targetClass.accessBridges[desc] != nil {
-				if keyword != "super" || !(ctor.enclosingSuperPath != nil && nativeMemberLexicalReadOperand(args[0], ctor.enclosingSuperPath, c.Work, ctx) || ctor.enclosingSuperPath == nil && nativeMemberSourceEnclosingParameter(args[0], ctx, child.owner)) || len(operands) == 0 || !nativeMemberBridgeSourceDummy(operands[len(operands)-1]) {
+				if keyword != "super" || len(operands) == 0 || !nativeMemberBridgeSourceDummy(operands[len(operands)-1]) {
 					p.failed = true
 					return "", false
 				}
@@ -1781,7 +1803,7 @@ func (c *ClassObjectDumper) nativeMemberSkipCheck(st statements.Statement) bool 
 func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 	c.nativeRenderedMemberNames = nil
 	p := c.nativeMemberRoot
-	if p == nil || c.obj.GetClassName() != p.owner && p.children[c.obj.GetClassName()] == nil {
+	if p == nil || c.obj.GetClassName() != p.owner && p.children[c.obj.GetClassName()] == nil && (p.anonymousForest == nil || p.anonymousForest.units[c.obj.GetClassName()] == nil || p.anonymousForest.units[c.obj.GetClassName()].object != c.obj) {
 		return nil, nil
 	}
 	names := make([]string, 0, len(p.children))

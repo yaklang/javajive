@@ -305,7 +305,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 				}
 			}
 		}
-		if !candidate {
+		if !candidate && !z.nativeMemberReader(obj).nativeMemberHasAnonymousNamedDeclarations() {
 			return nil
 		}
 	}

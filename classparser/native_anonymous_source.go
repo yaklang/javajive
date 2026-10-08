@@ -825,7 +825,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 					}
 					if row.OuterClassInfoIndex != 0 {
 						outer, known := sourceBridgeClassName(object, row.OuterClassInfoIndex)
-						if !known || p.children[outer] != nil {
+						if !known || p.children[outer] != nil && !nativeAnonymousForestNamedRow(forest, object, row) {
 							return nil
 						}
 					}
@@ -1135,7 +1135,27 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 						return fail()
 					}
 					if !member.static {
-						sub.nativeAnonymousBindings[nativeMemberCaptureIndexKey(owner, member.field)] = ctx.ShortTypeName(strings.ReplaceAll(member.owner, "/", ".")) + ".this"
+						// Bind a lexical THIS in the actual expression's scope.
+						// Its parent renderer may be outside a named declaration
+						// owned by this anonymous object. Anonymous THIS itself
+						// has no spelling: proved hidden SUPER operands are
+						// consumed by delegation, never rendered as a qualifier.
+						if p.forest.units[member.owner] != nil {
+							continue
+						}
+						anchor := p.forest.members.anonymousNamedAnchor(member.owner)
+						if anchor != "" {
+							if !p.forest.members.anonymousNamedScopeContains(anchor, child.object.GetClassName()) {
+								continue
+							}
+							source, known := p.forest.members.sourceName(member.owner)
+							if !known {
+								return fail()
+							}
+							sub.nativeAnonymousBindings[nativeMemberCaptureIndexKey(owner, member.field)] = source + ".this"
+						} else {
+							sub.nativeAnonymousBindings[nativeMemberCaptureIndexKey(owner, member.field)] = ctx.ShortTypeName(strings.ReplaceAll(member.owner, "/", ".")) + ".this"
+						}
 					}
 				}
 			}

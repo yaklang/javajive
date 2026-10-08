@@ -24,6 +24,18 @@ func nativeMemberLexicalAncestors(enclosing *ClassObject, objects map[string]*Cl
 		out = append(out, node)
 		owner, _, flags, member := originalMemberOwner(node)
 		if !member {
+			if parent, method, anonymous := originalAnonymousOwner(node); anonymous {
+				original := objects[parent]
+				static, known := nativeAnonymousOriginalContext(original, node, method, work)
+				if !known {
+					return nil, false
+				}
+				if static {
+					return out, true
+				}
+				node = original
+				continue
+			}
 			if !nativeMemberTopLevelEvidence(node, work) {
 				return nil, false
 			}
@@ -48,7 +60,19 @@ func nativeMemberLexicalCaptureField(enclosing *ClassObject, objects map[string]
 	depth := 0
 	for _, node := range ancestors {
 		_, _, flags, member := originalMemberOwner(node)
-		if !member || flags&8 != 0 {
+		if !member {
+			parent, method, anonymous := originalAnonymousOwner(node)
+			if !anonymous {
+				break
+			}
+			static, known := nativeAnonymousOriginalContext(objects[parent], node, method, work)
+			if !known {
+				return "", false
+			}
+			if static {
+				break
+			}
+		} else if flags&8 != 0 {
 			break
 		}
 		depth++
@@ -67,6 +91,55 @@ func nativeMemberLexicalTypeScope(enclosing *ClassObject, objects map[string]*Cl
 	// separately by the original ClassContext lexical signatures.
 	for i := len(ancestors) - 1; i >= 0; i-- {
 		obj := ancestors[i]
+		if owner, method, anonymous := originalAnonymousOwner(obj); anonymous && method != "" {
+			parent := objects[owner]
+			if parent == nil || parent.GetClassName() != owner {
+				return nil, false
+			}
+			matches := 0
+			for _, declaration := range parent.Methods {
+				if declaration == nil || !nativeProofWork(work, 1) {
+					return nil, false
+				}
+				name, nk := sourceBridgeUTF8(parent, declaration.NameIndex)
+				desc, dk := sourceBridgeUTF8(parent, declaration.DescriptorIndex)
+				if !nk || !dk {
+					return nil, false
+				}
+				if name+desc != method {
+					continue
+				}
+				matches++
+				if declaration.AccessFlags&8 != 0 {
+					scope = map[string]bool{}
+				}
+				seenSignature := false
+				for _, attr := range declaration.Attributes {
+					if signature, ok := attr.(*SignatureAttribute); ok {
+						if signature == nil || seenSignature {
+							return nil, false
+						}
+						seenSignature = true
+						raw, known := sourceBridgeUTF8(parent, signature.SignatureIndex)
+						own, refs, valid := types.SignatureTypeVariableReferences(raw)
+						if !known || !valid || !nativeProofWork(work, int64(len(raw))) {
+							return nil, false
+						}
+						for _, formal := range own {
+							scope[formal] = true
+						}
+						for _, formal := range refs {
+							if !scope[formal] {
+								return nil, false
+							}
+						}
+					}
+				}
+			}
+			if matches != 1 {
+				return nil, false
+			}
+		}
 		sig := ""
 		found := false
 		for _, a := range obj.Attributes {
@@ -118,7 +191,13 @@ func (z *JarFS) nativeMemberOutermostNamedOwner(owner string, work *workbudget.B
 		}
 		next, _, _, member := originalMemberOwner(obj)
 		if !member {
-			return owner, nativeMemberTopLevelEvidence(obj, work)
+			if enclosing, _, anonymous := originalAnonymousOwner(obj); anonymous {
+				// This is discovery only. Suppression still requires the same
+				// completed mixed-family source transaction at the top-level root.
+				next = enclosing
+			} else {
+				return owner, nativeMemberTopLevelEvidence(obj, work)
+			}
 		}
 		owner = next
 	}

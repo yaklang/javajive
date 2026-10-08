@@ -105,6 +105,13 @@ func nativeMemberSuperEnclosingPath(child, parent *nativeMemberClass, p *nativeM
 		if i >= len(ops) || len(seen) >= 64 || seen[owner] || !nativeProofWork(work, 1) {
 			return nil, false
 		}
+		// Every lexical dereference produces another original enclosing
+		// object. That object may already be a subclass of the SUPER's
+		// declaring owner. Widening after a read preserves the same word;
+		// it does not require or invent another synthetic capture edge.
+		if path != nil && ops[i] != nil && ops[i].Instr != nil && ops[i].Instr.OpCode != core.OP_GETFIELD && nativeMemberEnclosingClassWidening(owner, parent.owner, p, work) {
+			return path, true
+		}
 		seen[owner] = true
 		current := p.children[owner]
 		if current == nil || current.static || current.object == nil || current.object.GetClassName() != owner {

@@ -12,7 +12,7 @@ import (
 )
 
 func nativeAnonymousForestCaptureReference(forest *nativeAnonymousForest, object *ClassObject, index int, work *workbudget.Budget) bool {
-	if forest == nil || object == nil || forest.objects[object.GetClassName()] == nil || index < 1 || index > len(object.ConstantPool) {
+	if forest == nil || object == nil || forest.objects[object.GetClassName()] != object || index < 1 || index > len(object.ConstantPool) {
 		return false
 	}
 	field, ok := object.ConstantPool[index-1].(*ConstantFieldrefInfo)
@@ -20,7 +20,7 @@ func nativeAnonymousForestCaptureReference(forest *nativeAnonymousForest, object
 		return false
 	}
 	owner, known := sourceBridgeClassName(object, field.ClassIndex)
-	if !known || forest.units[owner] == nil {
+	if !known {
 		return false
 	}
 	if field.NameAndTypeIndex < 1 || int(field.NameAndTypeIndex) > len(object.ConstantPool) {
@@ -34,12 +34,23 @@ func nativeAnonymousForestCaptureReference(forest *nativeAnonymousForest, object
 	if !known {
 		return false
 	}
-	if _, captured := forest.units[owner].fields[name]; !captured {
-		return false
-	}
 	desc, known := sourceBridgeUTF8(object, nt.DescriptorIndex)
 	if !known {
 		return false
+	}
+	if unit := forest.units[owner]; unit != nil {
+		if _, captured := unit.fields[name]; !captured {
+			return false
+		}
+	} else {
+		// A mixed lexical chain can cross a named capture before reaching
+		// its anonymous owner. Admit only the same original declaration;
+		// the per-reference certificate below still requires every physical
+		// GETFIELD use to have a proved THIS or constructor-parameter origin.
+		child := nativeAnonymousForestNamedChild(forest, forest.objects[owner])
+		if child == nil || name != child.field || desc != "L"+child.owner+";" || !nativeMemberSuperCaptureDeclaration(child, work) {
+			return false
+		}
 	}
 	read := forest.captureReferences[object.GetClassName()][index]
 	return read != nil && read.owner == owner && read.field == name && read.descriptor == desc
@@ -314,6 +325,17 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 									}
 								} else if kind != core.OP_GETFIELD || !stable || !approved[pc] {
 									return false
+								} else {
+									if len(op.Data) != 2 || paths[pc] == nil {
+										return false
+									}
+									index := int(binary.BigEndian.Uint16(op.Data))
+									read := paths[pc]
+									prior := forest.captureReferences[owner][index]
+									if prior != nil && (prior.owner != read.owner || prior.field != read.field || prior.descriptor != read.descriptor) {
+										return false
+									}
+									forest.captureReferences[owner][index] = read
 								}
 							}
 						}

@@ -44,6 +44,46 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 		return nil
 	}
 	forest := &nativeAnonymousForest{root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}, members: members, lexicalThis: map[string]map[string]map[int]bool{}}
+	committed := false
+	if members != nil {
+		originalChildren, originalObjects := members.children, members.lexicalObjects
+		if c.Work != nil && c.Work.CheckAlloc(int64(len(originalChildren)+len(originalObjects)+2)*512) != nil {
+			return nil
+		}
+		originalStates := map[*nativeMemberClass]nativeMemberClass{}
+		originalConstructors := map[*nativeMemberConstructor]nativeMemberConstructor{}
+		for _, child := range originalChildren {
+			if child == nil || !nativeProofWork(c.Work, 1) {
+				return nil
+			}
+			originalStates[child] = *child
+			for _, ctor := range child.constructors {
+				if ctor == nil || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64(len(originalChildren)+len(originalObjects)+len(originalConstructors)+3)*512) != nil {
+					return nil
+				}
+				originalConstructors[ctor] = *ctor
+			}
+		}
+		members.children = map[string]*nativeMemberClass{}
+		members.lexicalObjects = map[string]*ClassObject{}
+		for name, child := range originalChildren {
+			members.children[name] = child
+		}
+		for name, object := range originalObjects {
+			members.lexicalObjects[name] = object
+		}
+		defer func() {
+			if !committed {
+				members.children, members.lexicalObjects = originalChildren, originalObjects
+				for child, state := range originalStates {
+					*child = state
+				}
+				for ctor, state := range originalConstructors {
+					*ctor = state
+				}
+			}
+		}()
+	}
 	queue := []*ClassObject{c.obj}
 	if members != nil {
 		if members.owner != forest.root {
@@ -72,6 +112,11 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	}
 	for cursor := 0; cursor < len(queue); cursor++ {
 		object := queue[cursor]
+		named, closed := c.nativeAnonymousForestNamedMembers(forest, object)
+		if !closed {
+			return nil
+		}
+		queue = append(queue, named...)
 		for _, attr := range object.Attributes {
 			if table, ok := attr.(*InnerClassesAttribute); ok {
 				if table == nil {
@@ -117,6 +162,12 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 			}
 			forest.units[name] = child
 			forest.objects[name] = child.object
+			if members != nil {
+				if members.lexicalObjects[name] != nil {
+					return nil
+				}
+				members.lexicalObjects[name] = child.object
+			}
 			queue = append(queue, child.object)
 		}
 	}
@@ -125,6 +176,16 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	// anonymous child. An empty forest still has nothing to commit.
 	if len(forest.units) == 0 {
 		return nil
+	}
+	if members != nil {
+		for name, child := range members.children {
+			source, known := members.sourceName(name)
+			if !known || !nativeMemberSiblingSuperClosed(child, members, c.Work, c.buildInvocationMetadata()) {
+				return nil
+			}
+			child.sourceName = source
+			child.sourceAnonymousOwner = members.anonymousNamedAnchor(name)
+		}
 	}
 	if !nativeAnonymousForestCaptureReads(forest, c.Work, c.buildInvocationMetadata()) || !nativeAnonymousForestSymbolClosure(forest, c.Work) {
 		return nil
@@ -145,6 +206,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	if !nativeModernNestSourceScopeClosed(modernNest, forest.objects, c.Work) {
 		return nil
 	}
+	committed = true
 	return forest
 }
 
@@ -203,6 +265,9 @@ func (c *ClassObjectDumper) nativeAnonymousForestHasChildren(members *nativeMemb
 // Only an exact owned child constructor can license its anonymous-parent type
 // in a CP descriptor. Handles/dynamic/interface reuse of the same NT is refused.
 func nativeAnonymousForestConstructorNameType(object *ClassObject, index int, forest *nativeAnonymousForest, work *workbudget.Budget) bool {
+	if nativeAnonymousForestNamedEnclosingNameType(forest, object, index, work) {
+		return true
+	}
 	if forest == nil || object == nil || index <= 0 || index > len(object.ConstantPool) {
 		return false
 	}
@@ -251,6 +316,9 @@ func nativeAnonymousForestConstructorNameType(object *ClassObject, index int, fo
 }
 
 func nativeAnonymousForestEnclosingDeclaration(object *ClassObject, member *MemberInfo, forest *nativeAnonymousForest, work *workbudget.Budget) bool {
+	if nativeAnonymousForestNamedEnclosingDeclaration(forest, object, member, work) {
+		return true
+	}
 	if forest == nil || object == nil || member == nil || !nativeProofWork(work, 1) {
 		return false
 	}
@@ -477,6 +545,9 @@ func nativeAnonymousForestBridgeMarker(forest *nativeAnonymousForest, name strin
 }
 
 func nativeAnonymousForestEnclosingNameType(object *ClassObject, index int, forest *nativeAnonymousForest, work *workbudget.Budget) bool {
+	if nativeAnonymousForestNamedEnclosingNameType(forest, object, index, work) {
+		return true
+	}
 	if forest == nil || object == nil || index <= 0 || index > len(object.ConstantPool) {
 		return false
 	}
