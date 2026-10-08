@@ -23,13 +23,36 @@ type nativeConstructorFrameWords struct {
 }
 
 func newNativeConstructorFrameWords(obj *ClassObject, method *MemberInfo, ir *methodir.MethodIR, frames *ssabuild.Function, work *workbudget.Budget) *nativeConstructorFrameWords {
+	if obj == nil || method == nil {
+		return nil
+	}
 	descriptor, known := sourceBridgeUTF8(obj, method.DescriptorIndex)
-	params, result, err := callbinding.Descriptor(descriptor)
-	if !known || err != nil || result != "V" || !nativeProofWork(work, int64(len(frames.Phis)+len(params))) || work != nil && work.CheckAlloc(int64(len(frames.Phis)+len(params)+1)*128) != nil {
+	_, result, err := callbinding.Descriptor(descriptor)
+	if !known || err != nil || result != "V" || method.AccessFlags&StaticFlag != 0 {
+		return nil
+	}
+	return newNativeMethodFrameWords(obj, method, ir, frames, work)
+}
+
+// The producer graph is shared by constructor operands and local captures.
+// Parameter slots come from the original method descriptor and static flag;
+// source names and the verifier's conservative reference join are not types.
+func newNativeMethodFrameWords(obj *ClassObject, method *MemberInfo, ir *methodir.MethodIR, frames *ssabuild.Function, work *workbudget.Budget) *nativeConstructorFrameWords {
+	if obj == nil || method == nil || ir == nil || frames == nil {
+		return nil
+	}
+	descriptor, known := sourceBridgeUTF8(obj, method.DescriptorIndex)
+	params, _, err := callbinding.Descriptor(descriptor)
+	if !known || err != nil || !nativeProofWork(work, int64(len(frames.Phis)+len(params))) || work != nil && work.CheckAlloc(int64(len(frames.Phis)+len(params)+1)*128) != nil {
 		return nil
 	}
 	p := &nativeConstructorFrameWords{ir: ir, params: map[int]string{}, phis: map[ssabuild.Origin][]ssabuild.Origin{}, active: map[ssabuild.Origin]bool{}, remaining: 512, work: work}
-	for slot, i := 1, 0; i < len(params); i++ {
+	slot := 0
+	if method.AccessFlags&StaticFlag == 0 {
+		p.params[0] = "L" + obj.GetClassName() + ";"
+		slot = 1
+	}
+	for i := 0; i < len(params); i++ {
 		p.params[slot] = params[i]
 		if params[i] == "J" || params[i] == "D" {
 			slot += 2

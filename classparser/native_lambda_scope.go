@@ -362,6 +362,16 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 				var localReads map[int]*nativeEnumLocalRead
 				var localFlow *nativeEnumParameterFlow
 				hasLocal := false
+				referenceDomain := nativeLocalReferenceDomain{descriptors: map[int]string{}, metadata: context.metadata}
+				for j, descriptor := range captures {
+					load := ops[start+j]
+					if !constructorMotionLoad(load, descriptor) {
+						return false
+					}
+					if callbinding.Reference(descriptor) {
+						referenceDomain.descriptors[int(load.CurrentOffset)] = descriptor
+					}
+				}
 				for j, p := range captures {
 					load := ops[start+j]
 					slot := core.GetRetrieveIdx(load)
@@ -381,7 +391,7 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 							reader := NewClassObjectDumper(object)
 							reader.Work = work
 							var known bool
-							localReads, known = reader.nativeTypedLocalReads(m, code, localFlow, slots, true)
+							localReads, known = reader.nativeTypedLocalReads(m, code, localFlow, slots, true, referenceDomain)
 							if !known {
 								return false
 							}

@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -156,5 +157,48 @@ func nativeLambdaLocalCaptureValue(operand *nativeEnumSelectorProducer, value va
 	}
 	location, position, known := ref.OriginalDynamicOperandWitness(ref.Val)
 	erasure, typed := values.SourceTypeErasure(ref.Type(), ctx)
-	return known && location == pc && position == index && typed && erasure == operand.result && nativeEnumSelectorSource(operand, ref.Val, ctx, work, 0)
+	if known && location == pc && position == index && typed && erasure == operand.result && nativeEnumSelectorSource(operand, ref.Val, ctx, work, 0) {
+		return true
+	}
+	return known && location == pc && position == index && typed && nativeLambdaReferenceSingleStoreSource(operand, ref, ctx, work)
+}
+
+// A narrower source declaration can initialize the original reference capture
+// without a conversion expression. Keep the actual single STORE/seed and
+// dynamic snapshot witnesses, and prove every source assignment separately.
+func nativeLambdaReferenceSingleStoreSource(operand *nativeEnumSelectorProducer, snapshot *values.JavaRef, ctx *class_context.ClassContext, work *workbudget.Budget) bool {
+	if operand == nil || operand.local == nil || snapshot == nil || ctx == nil || operand.owner != "" || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(64*128+512) != nil {
+		return false
+	}
+	read := operand.local
+	if !read.referenceAssignable || read.storePC < 0 || len(read.storePCs) != 0 || read.pc != operand.pc || read.opcode != operand.opcode || read.slot != operand.slot || read.descriptor != operand.result {
+		return false
+	}
+	v, known := nativeMemberEnclosingUnpack(snapshot.Val, work)
+	ref, ok := v.(*values.JavaRef)
+	if !known || !ok || ref == nil || ref.Id == nil || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
+		return false
+	}
+	pc, slot, sealed := ref.OriginalLocalDeclaration(ref.Val)
+	if !sealed || pc != read.storePC || slot != read.slot {
+		return false
+	}
+	widening := newConstructorWideningQuery(ctx.InvocationMetadata)
+	assignable := func(actual, formal string) bool {
+		return callbinding.Reference(actual) && callbinding.Reference(formal) && nativeProofWork(work, int64(len(actual)+len(formal))) && widening.assignable(actual, formal)
+	}
+	localType, localKnown := values.SourceTypeErasure(ref.Type(), ctx)
+	snapshotType, snapshotKnown := values.SourceTypeErasure(snapshot.Type(), ctx)
+	if !localKnown || !snapshotKnown || !assignable(localType, snapshotType) || !assignable(snapshotType, operand.result) {
+		return false
+	}
+	seed, known := nativeMemberEnclosingUnpack(ref.Val, work)
+	if !known || sourceProofNil(seed) {
+		return false
+	}
+	if seed == values.JavaNull || values.IsNullLiteral(seed) {
+		return true
+	}
+	seedType, seedKnown := values.SourceTypeErasure(seed.Type(), ctx)
+	return seedKnown && assignable(seedType, localType) && assignable(seedType, operand.result)
 }

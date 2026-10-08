@@ -193,6 +193,13 @@ func (d *Decompiler) unifyReferenceWebs() {
 				ref.ResetVarType(joined.Copy())
 				ref.WebDeclType = joined.Copy()
 			}
+			if param == nil && len(refs) > 1 && len(refs) <= 64 && (d.Work == nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(refs))) == nil && d.Work.CheckAlloc(int64(len(d.opCodes))*128+int64(len(refs))*8) == nil) {
+				members := make([]*values.JavaRef, 0, len(refs))
+				for ref := range refs {
+					members = append(members, ref)
+				}
+				values.MarkOriginalLocalWeb(members)
+			}
 			if len(refs) > 1 || param != nil {
 				for i, store := range stores {
 					d.opcodeIdToRef[store][0][1] = i == 0 && param == nil

@@ -18,6 +18,14 @@ type nativeEnumLocalRead struct {
 	// Multiple original definitions belong only to the lambda capture proof.
 	// Enum selector publication still requires the single storePC witness.
 	storePCs []int
+	// Only the original lambda descriptor may select a reference domain.
+	// Every reaching producer must separately prove assignment to it.
+	referenceAssignable bool
+}
+
+type nativeLocalReferenceDomain struct {
+	descriptors map[int]string // original capture LOAD PC -> factory descriptor
+	metadata    callbinding.Provider
 }
 
 // Walk backward from this LOAD, stopping at the first overlapping normal
@@ -140,8 +148,8 @@ func (c *ClassObjectDumper) nativeEnumLocalSelectorReads(method *MemberInfo, cod
 // The same original STORE/LOAD identity proof admits canonical computational
 // words for local captures. Verifier int is not a narrow source descriptor:
 // Z/B/C/S still require a separate range/declaration certificate.
-func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *CodeAttribute, flow *nativeEnumParameterFlow, params map[int]string, primitiveWords bool) (map[int]*nativeEnumLocalRead, bool) {
-	if c == nil || c.obj == nil || method == nil || code == nil || flow == nil || flow.code != code || len(c.obj.Methods) > 65535 || len(method.Attributes) > 65535 {
+func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *CodeAttribute, flow *nativeEnumParameterFlow, params map[int]string, primitiveWords bool, domains ...nativeLocalReferenceDomain) (map[int]*nativeEnumLocalRead, bool) {
+	if len(domains) > 1 || len(domains) == 1 && (!primitiveWords || len(domains[0].descriptors) > 64) || c == nil || c.obj == nil || method == nil || code == nil || flow == nil || flow.code != code || len(c.obj.Methods) > 65535 || len(method.Attributes) > 65535 {
 		return nil, false
 	}
 	matches, bodies := 0, 0
@@ -205,6 +213,11 @@ func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *Code
 		records[int(record.PC)] = record
 	}
 	result := map[int]*nativeEnumLocalRead{}
+	var referenceWords *nativeConstructorFrameWords
+	var widening *constructorWideningQuery
+	if len(domains) == 1 && len(domains[0].descriptors) > 0 {
+		widening = newConstructorWideningQuery(domains[0].metadata)
+	}
 	for _, record := range frames.Instructions {
 		instruction, found := ir.InstrByID(methodir.InstrID(record.PC))
 		if !found || !nativeProofWork(c.Work, 1) {
@@ -244,6 +257,11 @@ func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *Code
 			}
 		}
 		width := word.Width()
+		referenceAssignable := false
+		if len(domains) == 1 && word.Kind == frametransfer.Ref && callbinding.Reference(domains[0].descriptors[int(record.PC)]) {
+			descriptor = domains[0].descriptors[int(record.PC)]
+			referenceAssignable = true
+		}
 		if descriptor == "" || access.Width != width || slot+width > len(record.Before.Locals) {
 			continue
 		}
@@ -275,9 +293,25 @@ func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *Code
 			originIndex := len(stored.Before.Locals) + stackIndex
 			storedOrigin := stored.Uses[0]
 			typedNull := primitiveWords && word.Kind == frametransfer.Ref && value.Kind == frametransfer.Null && width == 1
-			if !typedNull && (value.Kind != word.Kind || value.Class != word.Class) || core.LocalAccessOf(store.Opcode).Width != width || stored.BeforeOrigins[originIndex] != storedOrigin || storedOrigin.Kind != ssabuild.OriginInstr && storedOrigin.Kind != ssabuild.OriginParam && storedOrigin.Kind != ssabuild.OriginPhi {
+			if !typedNull && (value.Kind != word.Kind || !referenceAssignable && value.Class != word.Class) || core.LocalAccessOf(store.Opcode).Width != width || stored.BeforeOrigins[originIndex] != storedOrigin || storedOrigin.Kind != ssabuild.OriginInstr && storedOrigin.Kind != ssabuild.OriginParam && storedOrigin.Kind != ssabuild.OriginPhi {
 				valid = false
 				break
+			}
+			// Exact initialized frame descriptors retain the older admission,
+			// including producers outside the hierarchy proof's opcode domain.
+			// Only a widened reference requires the bounded all-origin graph.
+			actual := value.Class
+			if value.Kind == frametransfer.Ref && actual != "" && actual[0] != '[' {
+				actual = "L" + actual + ";"
+			}
+			if referenceAssignable && !typedNull && actual != descriptor {
+				if referenceWords == nil {
+					referenceWords = newNativeMethodFrameWords(c.obj, method, ir, frames, c.Work)
+				}
+				if referenceWords == nil || !referenceWords.reference(storedOrigin, descriptor, widening, frames) {
+					valid = false
+					break
+				}
 			}
 			if width == 2 && (stored.Before.Stack[stackIndex+1].Kind != frametransfer.TailOf(value).Kind || stored.BeforeOrigins[originIndex+1] != storedOrigin) {
 				valid = false
@@ -295,7 +329,7 @@ func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *Code
 		if len(storePCs) > 1 {
 			storePC, multiple = -1, storePCs
 		}
-		result[int(record.PC)] = &nativeEnumLocalRead{pc: int(record.PC), opcode: instruction.Opcode, slot: slot, storePC: storePC, descriptor: descriptor, storePCs: multiple}
+		result[int(record.PC)] = &nativeEnumLocalRead{pc: int(record.PC), opcode: instruction.Opcode, slot: slot, storePC: storePC, descriptor: descriptor, storePCs: multiple, referenceAssignable: referenceAssignable}
 	}
 	return result, true
 }

@@ -20,6 +20,13 @@ func nativeLambdaJoinedLocalSource(operand *nativeEnumSelectorProducer, captured
 	if operand.owner != "" || read.storePC != -1 || read.pc != operand.pc || read.opcode != operand.opcode || read.slot != operand.slot || read.descriptor != operand.result {
 		return false
 	}
+	var widening *constructorWideningQuery
+	if read.referenceAssignable && ctx != nil {
+		widening = newConstructorWideningQuery(ctx.InvocationMetadata)
+	}
+	assignable := func(actual, formal string) bool {
+		return actual == formal || widening != nil && callbinding.Reference(actual) && callbinding.Reference(formal) && nativeProofWork(work, int64(len(actual)+len(formal))) && widening.assignable(actual, formal)
+	}
 	v, known := nativeMemberEnclosingUnpack(captured, work)
 	snapshot, ok := v.(*values.JavaRef)
 	if !known || !ok || snapshot == nil {
@@ -27,18 +34,20 @@ func nativeLambdaJoinedLocalSource(operand *nativeEnumSelectorProducer, captured
 	}
 	location, position, sealed := snapshot.OriginalDynamicOperandWitness(snapshot.Val)
 	erasure, typed := values.SourceTypeErasure(snapshot.Type(), ctx)
-	if !sealed || location != pc || position != index || !typed || erasure != operand.result {
+	if !sealed || location != pc || position != index || !typed || !assignable(erasure, operand.result) {
 		return false
 	}
+	snapshotDescriptor := erasure
 	v, known = nativeMemberEnclosingUnpack(snapshot.Val, work)
 	ref, ok := v.(*values.JavaRef)
 	if !known || !ok || ref == nil || ref.Id == nil || ref.IsThis || ref.IsParam || ref.StackVar != nil || ref.CustomValue != nil {
 		return false
 	}
 	erasure, typed = values.SourceTypeErasure(ref.Type(), ctx)
-	if !typed || erasure != operand.result {
+	if !typed || !assignable(erasure, snapshotDescriptor) || !assignable(erasure, operand.result) {
 		return false
 	}
+	localDescriptor := erasure
 	expected, seen := map[int]bool{}, map[int]bool{}
 	for _, storePC := range operand.local.storePCs {
 		if storePC < 0 || storePC > 65535 || expected[storePC] {
@@ -60,7 +69,8 @@ func nativeLambdaJoinedLocalSource(operand *nativeEnumSelectorProducer, captured
 	}
 	store := func(a *statements.AssignStatement) bool {
 		storePC, slot, sealed := a.OriginalLocalStore()
-		if !sealed || a.LeftValue != ref || slot != operand.local.slot || !expected[storePC] || seen[storePC] {
+		left, isRef := a.LeftValue.(*values.JavaRef)
+		if !sealed || !isRef || left != ref && !(read.referenceAssignable && ref.SameOriginalLocalWeb(left)) || slot != operand.local.slot || !expected[storePC] || seen[storePC] {
 			return false
 		}
 		seed, known := nativeMemberEnclosingUnpack(a.JavaValue, work)
@@ -75,7 +85,7 @@ func nativeLambdaJoinedLocalSource(operand *nativeEnumSelectorProducer, captured
 			return true
 		}
 		descriptor, typed := values.SourceTypeErasure(a.JavaValue.Type(), ctx)
-		if !typed || descriptor != operand.result {
+		if !typed || !assignable(descriptor, localDescriptor) || !assignable(descriptor, operand.result) {
 			return false
 		}
 		seen[storePC] = true

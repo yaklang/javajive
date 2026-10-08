@@ -15,6 +15,7 @@ import (
 
 type JavaRef struct {
 	originalDynamicOperand             *originalDynamicOperand
+	originalLocalWeb                   *originalLocalWeb
 	originalLocalDeclaration           bool
 	originalLocalPC, originalLocalSlot int
 	originalLocalSeed                  JavaValue

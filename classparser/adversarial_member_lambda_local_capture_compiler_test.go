@@ -22,6 +22,9 @@ func TestAdversarialMemberLambdaLocalCaptureNativeCompilerProtocol(t *testing.T)
 		{"primitive", memberLambdaPrimitiveCaptureFixture, "WordCaptureOwner", "WordCaptureDriver", "8004:word:local:capture:bits:order:identity\n"},
 		{"selected word", memberLambdaConditionalCaptureFixture, "JoinedCaptureOwner", "JoinedCaptureDriver", "52:conditional:local:lambda:choice:lazy:identity\n"},
 		{"branch wide stores", strings.Replace(memberLambdaConditionalWideFixture(), "final long value=choose?JoinedCaptureEffects.left(seed):JoinedCaptureEffects.right(seed);", "final long value;if(choose){value=JoinedCaptureEffects.left(seed);}else{value=JoinedCaptureEffects.right(seed);}", 1), "JoinedCaptureOwner", "JoinedCaptureDriver", "52:conditional:local:lambda:choice:lazy:identity\n"},
+		{"polymorphic branches", memberLambdaPolymorphicCaptureFixture, "PolyCaptureOwner", "PolyCaptureDriver", "32:polymorphic:lambda:capture:identity:failure\n"},
+		{"interface branches", memberLambdaInterfaceCaptureFixture(), "PolyCaptureOwner", "PolyCaptureDriver", "32:polymorphic:lambda:capture:identity:failure\n"},
+		{"covariant arrays", memberLambdaPolymorphicArrayCaptureFixture, "ArrayCaptureOwner", "ArrayCaptureDriver", "32:polymorphic:array:capture:identity:failure\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			compile := func(debug string) map[string][]byte {
