@@ -1,6 +1,7 @@
 # Keep required PR feedback fast and attributable: one pinned JDK 21 runtime,
 # algorithm invariants under the race detector, and small production-path
-# counterexamples. Cross-JDK and full historical-corpus checks remain manual.
+# counterexamples. A javac8 compiler covers its small source-protocol fixtures;
+# JVM execution stays on JDK 21. Full historical-corpus checks remain manual.
 name: CI
 on:
   push:
@@ -33,6 +34,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '8'
+      - name: Retain compiler for javac8 protocol fixtures
+        run: echo "JAVA8_JAVAC=${JAVA8_JAVAC:-$JAVA_HOME/bin/javac}" >> "$GITHUB_ENV"
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
           distribution: temurin
