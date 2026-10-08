@@ -1480,7 +1480,10 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		}
 		return "", false
 	}
-	if len(p.children) == 0 && len(p.allocationDependencies) == 0 {
+	// A root-only family can still contain private constructor bridges used
+	// from its anonymous bodies. Those allocations need the same original
+	// NEW/invokespecial identity and descriptor projection as named members.
+	if len(p.children) == 0 && len(p.allocationDependencies) == 0 && len(p.rootAccessBridges) == 0 {
 		return
 	}
 	plans, known := c.nativeMemberAllocations(p)
