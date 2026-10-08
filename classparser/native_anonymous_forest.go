@@ -56,6 +56,19 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 			forest.objects[name] = child.object
 			queue = append(queue, child.object)
 		}
+		// Enum bodies participate in the same source closure (including
+		// private-constructor marker descriptors). Their allocations already
+		// have a distinct enum certificate; include their original objects for
+		// symbol/opcode/user closure without inventing an expression group.
+		for name, body := range members.enumConstants {
+			if body == nil || body.object == nil || members.lexicalObjects[name] != body.object || !nativeEnumConstantConstructorOwned(members, body.object, body.descriptor) || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64(len(forest.objects)+1)*512) != nil {
+				return nil
+			}
+			if forest.objects[name] != nil {
+				return nil
+			}
+			forest.objects[name] = body.object
+		}
 	}
 	for cursor := 0; cursor < len(queue); cursor++ {
 		object := queue[cursor]
@@ -172,6 +185,13 @@ func (c *ClassObjectDumper) nativeAnonymousForestHasChildren(members *nativeMemb
 					if members != nil && members.emptyMarkers[name] != nil && nativeMemberEmptyAccessMarker(object, members.owner, c.Work) {
 						continue
 					}
+					// Constant-specific enum classes also have unnamed rows and
+					// EnclosingMethod metadata. Their source role belongs to the
+					// independently proved enum allocation, not to an anonymous
+					// expression group. Discovery must preserve that single owner.
+					if c.nativeMemberEnumConstantAnonymousRole(members, object) {
+						continue
+					}
 					found = true
 				}
 			}
@@ -283,10 +303,12 @@ func nativeAnonymousForestOpcodeClosure(forest *nativeAnonymousForest, work *wor
 						if !known {
 							return false
 						}
-						if forest.anonymousTypes[name] && forest.units[name] == nil {
+						if forest.anonymousTypes[name] && forest.units[name] == nil && !nativeEnumConstantAllocationOwned(forest.members, object, method, int(op.CurrentOffset), name) {
 							// A certified independent tail keeps its original flat
 							// allocation. It contributes no lexical unit, capture
-							// spelling or child suppression to this forest.
+							// spelling or child suppression to this forest. Enum
+							// bodies instead use their separately sealed <clinit>
+							// allocation above; no other NEW inherits that role.
 							group := forest.groups[owner]
 							if group == nil || group.owner != owner || group.standalone[name] == nil || group.standalone[name].GetClassName() != name {
 								return false

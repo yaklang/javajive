@@ -279,6 +279,51 @@ func nativeEnumConstantConstructorOwned(p *nativeMemberFamily, obj *ClassObject,
 	body := p.enumConstants[obj.GetClassName()]
 	return body != nil && body.object == obj && body.descriptor == descriptor && p.children[body.owner] != nil && p.children[body.owner].enumSynthesis != nil && p.children[body.owner].enumSynthesis.bodies[obj.GetClassName()] == body
 }
+
+// A discovery read is separately parsed. Recheck it against the enum's sealed
+// allocation/constructor certificate before excluding it from expression
+// discovery. An unnamed row, enum flag or matching binary name alone cannot
+// supply this role, and an unknown enum body remains a discovery obligation.
+func (c *ClassObjectDumper) nativeMemberEnumConstantAnonymousRole(p *nativeMemberFamily, object *ClassObject) bool {
+	if c == nil || p == nil || object == nil || !nativeProofWork(c.Work, 1) {
+		return false
+	}
+	name := object.GetClassName()
+	body := p.enumConstants[name]
+	if body == nil || body.object == nil || object.MajorVersion != body.object.MajorVersion || object.MinorVersion != body.object.MinorVersion || p.lexicalObjects[name] != body.object || !nativeEnumConstantConstructorOwned(p, body.object, body.descriptor) {
+		return false
+	}
+	parent := p.children[body.owner]
+	if parent.object == nil || !isGenuineEnum(parent.object) || body.plan.allocatedClass != name || body.plan.descriptor != body.descriptor {
+		return false
+	}
+	if original, found := parent.enumSynthesis.constants[body.plan.constant]; !found || original != body.plan {
+		return false
+	}
+	ordinal, err := strconv.Atoi(strings.TrimPrefix(name, body.owner+"$"))
+	if err != nil || ordinal <= 0 {
+		return false
+	}
+	resolve := func(binary string) (*ClassObject, bool) {
+		if binary == name {
+			return object, true
+		}
+		if original := p.lexicalObjects[binary]; original != nil {
+			return original, true
+		}
+		if c.foldSiblingResolver == nil {
+			return nil, false
+		}
+		raw, known := c.foldSiblingResolver(binary)
+		if !known {
+			return nil, false
+		}
+		parsed, err := c.parseResolved(raw)
+		return parsed, err == nil && parsed != nil && parsed.GetClassName() == binary
+	}
+	proof := nativeEnumConstantBodyProof(parent.object, body.plan, ordinal, parent.accessBridges, resolve, c.Work)
+	return proof != nil && proof.owner == body.owner && proof.descriptor == body.descriptor && proof.superDescriptor == body.superDescriptor && proof.superPC == body.superPC
+}
 func nativeEnumConstantSuperOwned(p *nativeMemberFamily, obj *ClassObject, name, descriptor, target, physical string, pc int) bool {
 	if name != "<init>" || !nativeEnumConstantConstructorOwned(p, obj, descriptor) {
 		return false
