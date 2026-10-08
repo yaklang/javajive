@@ -509,7 +509,13 @@ func (d *Decompiler) branchArrayImmediateConsumer(definition *Node, call *values
 	if d == nil || definition == nil || call == nil || allocation == nil || len(definition.Next) != 1 || d.Work != nil && d.Work.CheckAlloc(512*128) != nil {
 		return false
 	}
-	consumer := definition.Next[0]
+	return d.branchArraySourceConsumer(definition.Next[0], call, allocation)
+}
+
+func (d *Decompiler) branchArraySourceConsumer(consumer *Node, call *values.FunctionCallExpression, allocation *OpCode) bool {
+	if d == nil || call == nil || allocation == nil {
+		return false
+	}
 	if consumer == nil || consumer.IsTryCatch || consumer.IsCatchStart {
 		return false
 	}

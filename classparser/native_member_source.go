@@ -492,6 +492,11 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		// The existing abstract stack proof preserves parameter/literal computations
 		// and identifies the actual uninitialized receiver delegation.
 		next, call := constructorMotionDelegation(obj, ops, start, ps, constructorParameterSlots(ps), provider)
+		if next == 0 || call == nil {
+			// A named lexical capture is regenerated before the original
+			// delegation; no capture is moved across these operand effects.
+			next, call = nativeMemberFrameDelegation(obj, m, code, ops, start, work)
+		}
 		if next == 0 || call == nil || call.Member != "<init>" {
 			return nil
 		}

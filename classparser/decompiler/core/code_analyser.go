@@ -7103,6 +7103,7 @@ func (d *Decompiler) ParseStatement() error {
 	for d.inlineNestedArrayInitializers(idToOpcode) {
 		MiscRewriter(d.RootNode, d.delRefUserAttr, allowArrayEffects)
 	}
+	d.inlinePrivateArrayReceiverReads(idToOpcode)
 	d.inlineBranchArrayLeaves()
 	d.inlineBranchConstructorArrays()
 	// A private conditional array arm may first need its own completed

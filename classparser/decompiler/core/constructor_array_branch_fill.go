@@ -241,6 +241,13 @@ func delegationArrayElementAssignable(value values.JavaValue, target string, met
 // invokespecial. The array lives solely on the operand stack: no local/field
 // publication, alias, partial-fill observation or changed exception domain.
 func (d *Decompiler) privateDelegationArrayDAG(allocation, invoke *OpCode, ref *values.JavaRef, array *values.NewExpression, stores []*OpCode, items []values.JavaValue) bool {
+	return d.privateArrayValueDAG(allocation, invoke, ref, array, stores, items, 0, nil)
+}
+
+// An initialized stack-only array can end at an invocation operand or at its
+// original indexed read. The latter retains the index as the final effect
+// interval, after all element stores and before the unchanged load/checks.
+func (d *Decompiler) privateArrayValueDAG(allocation, invoke *OpCode, ref *values.JavaRef, array *values.NewExpression, stores []*OpCode, items []values.JavaValue, useIndex int, indexValue values.JavaValue) bool {
 	if allocation == nil || invoke == nil || allocation.CurrentOffset >= invoke.CurrentOffset || len(allocation.stackProduced) != 1 || values.UnpackSoltValue(allocation.stackProduced[0]) != array {
 		return false
 	}
@@ -307,7 +314,12 @@ func (d *Decompiler) privateDelegationArrayDAG(allocation, invoke *OpCode, ref *
 			}
 		}
 	}
-	if !delegationArrayEffectSites(items, stores, state, allocation, invoke, d.invokeFuncCall) {
+	effectValues, effectEnds := items, stores
+	if indexValue != nil {
+		effectValues = append(slices.Clone(items), indexValue)
+		effectEnds = append(slices.Clone(stores), invoke)
+	}
+	if !delegationArrayEffectSites(effectValues, effectEnds, state, allocation, invoke, d.invokeFuncCall) {
 		return false
 	}
 	uses := 0
@@ -319,7 +331,7 @@ func (d *Decompiler) privateDelegationArrayDAG(allocation, invoke *OpCode, ref *
 			if !delegationArraySameRef(value, ref) {
 				continue
 			}
-			if op == invoke && index == 0 {
+			if op == invoke && index == useIndex {
 				uses++
 				continue
 			}
