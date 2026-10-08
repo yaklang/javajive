@@ -1,6 +1,8 @@
 package values
 
 import (
+	"strings"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
@@ -10,6 +12,13 @@ import (
 type originalFieldRead struct {
 	pc                      int
 	owner, name, descriptor string
+}
+
+// CP names are internal (pkg/Owner$Member); the source IR uses dotted package
+// names. They denote the same symbolic owner. Dollar signs remain significant:
+// a nested class must never alias a package or a different lexical declaration.
+func sameOriginalFieldOwner(left, right string) bool {
+	return strings.ReplaceAll(left, ".", "/") == strings.ReplaceAll(right, ".", "/")
 }
 
 func originalRead(member *JavaClassMember, pc int) *originalFieldRead {
@@ -36,7 +45,7 @@ func (f *JavaClassMember) OriginalStaticFieldRead(pc int, owner, name, descripto
 		return false
 	}
 	w := f.originalFieldRead
-	return f.OriginPC == pc && w.pc == pc && w.owner == owner && w.name == name && w.descriptor == descriptor && f.Name == owner && f.Member == name && f.Description == descriptor
+	return f.OriginPC == pc && w.pc == pc && sameOriginalFieldOwner(w.owner, owner) && w.name == name && w.descriptor == descriptor && sameOriginalFieldOwner(f.Name, owner) && f.Member == name && f.Description == descriptor
 }
 
 // OriginalInstanceFieldRead binds a source field to the decoded GETFIELD.
@@ -47,7 +56,7 @@ func (f *RefMember) OriginalInstanceFieldRead(pc int, owner, name, descriptor st
 		return false
 	}
 	w := f.originalFieldRead
-	return f.OriginPC == pc && w.pc == pc && w.owner == owner && w.name == name && w.descriptor == descriptor && f.Member == name
+	return f.OriginPC == pc && w.pc == pc && sameOriginalFieldOwner(w.owner, owner) && w.name == name && w.descriptor == descriptor && f.Member == name
 }
 
 // OriginalBooleanStackWord proves a source Boolean whose JVM value is0/1.
