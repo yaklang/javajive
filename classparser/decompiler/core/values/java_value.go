@@ -449,12 +449,7 @@ func (j *JavaClassMember) Type() types.JavaType {
 }
 
 func (j *JavaClassMember) String(funcCtx *class_context.ClassContext) string {
-	if j.Name == funcCtx.ClassName && !funcCtx.QualifiedStaticFields {
-		return class_context.SafeIdentifier(j.Member)
-	}
-	//name := funcCtx.ShortTypeName(j.Name)
-	name := funcCtx.ShortTypeName(j.Name)
-	return fmt.Sprintf("%s.%s", name, class_context.SafeIdentifier(j.Member))
+	return funcCtx.StaticFieldSelection(j.Name, j.Member)
 }
 func NewJavaClassMember(typeName, member string, desc string, typ types.JavaType) *JavaClassMember {
 	return &JavaClassMember{

@@ -180,47 +180,31 @@ class StaticConstantDriver {public static void main(String[]args){StaticConstant
 	}
 }
 
+// The original bytecode resolves GETSTATIC through its symbolic type, even
+// when an unrelated value field has that type's spelling. An exact, effectless
+// null primary now expresses that binding, so verify this former refusal with
+// the unchanged independent JVM driver and the full original binary shape.
 func TestNativeAnonymousInitializerStaticReadRefusesValueNameRebinding(t *testing.T) {
 	fixture := strings.Replace(nativeAnonymousStaticReadFixture, "int before=", "Object reserve;int before=", 1)
-	_, java := t04Tools(t)
-	for _, debug := range []string{"none", "source,lines,vars"} {
-		t.Run(debug, func(t *testing.T) {
-			files := nativeCompileDebugClasses(t, fixture, debug)
-			child, e := Parse(append([]byte(nil), files["StaticReadOwner$1.class"]...))
-			if e != nil {
-				t.Fatal(e)
+	testNativePrivateSetterFixtureWithMutation(t, fixture, "StaticReadOwner", "StaticReadDriver", "4:static:clinit:volatile:order:identity\n", func(t *testing.T, files map[string][]byte) {
+		child, err := Parse(append([]byte(nil), files["StaticReadOwner$1.class"]...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := 0
+		for _, field := range child.Fields {
+			name, known := sourceBridgeUTF8(child, field.NameIndex)
+			if !known {
+				t.Fatal("original field name")
 			}
-			changed := 0
-			for _, f := range child.Fields {
-				n, _ := sourceBridgeUTF8(child, f.NameIndex)
-				if n == "reserve" {
-					f.NameIndex = uint16(child.ConstantPoolManager.AddUtf8Info("StaticReadHolder"))
-					changed++
-				}
+			if name == "reserve" {
+				field.NameIndex = uint16(child.ConstantPoolManager.AddUtf8Info("StaticReadHolder"))
+				changed++
 			}
-			if changed != 1 {
-				t.Fatal("one unused original field")
-			}
-			files["StaticReadOwner$1.class"] = child.Bytes()
-			dir := t.TempDir()
-			for n, raw := range files {
-				if e := os.WriteFile(filepath.Join(dir, n), raw, 0600); e != nil {
-					t.Fatal(e)
-				}
-			}
-			if got := t04RunJava(t, java, dir, "StaticReadDriver"); got != "4:static:clinit:volatile:order:identity\n" {
-				t.Fatalf("valid original GETSTATIC unchanged=%q", got)
-			}
-			root, e := Parse(files["StaticReadOwner.class"])
-			if e != nil {
-				t.Fatal(e)
-			}
-			archive := nativeArchive(t, files)
-			defer archive.Close()
-			entry := archive.nativeMemberEntry(root)
-			if entry != nil && entry.family != nil {
-				t.Fatal("type-qualified static read rebound to original anonymous value field")
-			}
-		})
-	}
+		}
+		if changed != 1 {
+			t.Fatal("one unused original field")
+		}
+		files["StaticReadOwner$1.class"] = child.Bytes()
+	})
 }
