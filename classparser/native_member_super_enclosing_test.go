@@ -162,13 +162,22 @@ func TestNativeMemberSuperEnclosingPathRequiresOriginalForest(t *testing.T) {
 }
 
 func TestNativeMemberSuperEnclosingIRRequiresOriginalPathIdentity(t *testing.T) {
-	for _, variant := range []string{"original", "wrong field PC", "missing PC", "foreign member", "wrong type", "foreign receiver", "not parameter", "wrong lexical alias", "opaque base", "cycle", "wrong method", "budget", "canceled"} {
+	for _, variant := range []string{"original", "wrong field PC", "missing PC", "foreign member", "wrong type", "foreign receiver", "not parameter", "wrong lexical alias", "opaque base", "cycle", "wrong method", "budget", "canceled", "missing original parameter", "wrong physical slot", "changed original seed", "copied public identity"} {
 		t.Run(variant, func(t *testing.T) {
 			owner := "IndependentRoot$Layer"
 			ctx := &class_context.ClassContext{FunctionName: "<init>"}
 			ctx.LocalNames = map[*utils.VariableId]string{}
 			ref := values.NewJavaRef(&utils.VariableId{}, nil, types.NewJavaClass(owner))
 			ref.IsParam = true
+			// Model the actual first physical enclosing constructor parameter,
+			// including its decoder witness rather than a printed alias alone.
+			if variant != "missing original parameter" {
+				slot := 1
+				if variant == "wrong physical slot" {
+					slot = 2
+				}
+				ref.MarkOriginalParameter(slot)
+			}
 			ctx.LocalNames[ref.Id] = ctx.ShortTypeName(owner) + ".this"
 			read := &nativeMemberLexicalRead{owner: owner, field: "this$0", descriptor: "LIndependentRoot;", pc: 19, parameterOwner: owner}
 			field := values.NewRefMember(ref, read.field, types.NewJavaClass("IndependentRoot"))
@@ -198,6 +207,12 @@ func TestNativeMemberSuperEnclosingIRRequiresOriginalPathIdentity(t *testing.T) 
 				field.Object = field
 			case "wrong method":
 				ctx.FunctionName = "ordinary"
+			case "changed original seed":
+				ref.Val = values.JavaNull
+			case "copied public identity":
+				other := values.NewJavaRef(ref.Id, nil, ref.Type())
+				other.IsParam = true
+				field.Object = other
 			case "budget":
 				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
 			case "canceled":

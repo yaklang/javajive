@@ -180,7 +180,7 @@ func TestNativeMemberPrivateSuperCallerRequiresProvedDelegation(t *testing.T) {
 
 func TestNativeMemberPrivateSuperSourceRequiresOriginalPCAndPureDummy(t *testing.T) {
 	files := nativeCompileClasses(t, nativeMemberPrivateSuperBridgeFixture)
-	for _, variant := range []string{"original", "wrong PC", "foreign descriptor", "foreign owner", "effectful outer", "non-null dummy", "computed dummy", "missing dummy"} {
+	for _, variant := range []string{"original", "wrong PC", "foreign descriptor", "foreign owner", "effectful outer", "non-null dummy", "computed dummy", "missing dummy", "missing original parameter", "wrong physical slot", "changed original seed", "copied public identity"} {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
@@ -199,6 +199,15 @@ func TestNativeMemberPrivateSuperSourceRequiresOriginalPCAndPureDummy(t *testing
 			ctx := &class_context.ClassContext{ClassName: child.object.GetClassName(), LocalNames: map[*utils.VariableId]string{id: "SuperOwner.this"}}
 			outer := values.NewJavaRef(id, nil, types.NewJavaClass("SuperOwner"))
 			outer.IsParam = true
+			// The independently compiled child descriptor starts with the
+			// hidden enclosing word; reproduce its decoder's private witness.
+			if variant != "missing original parameter" {
+				slot := 1
+				if variant == "wrong physical slot" {
+					slot = 2
+				}
+				outer.MarkOriginalParameter(slot)
+			}
 			reader := z.nativeMemberReader(child.object)
 			ctx.InvocationMetadata = reader.buildInvocationMetadata()
 			reader.FuncCtx = ctx
@@ -225,6 +234,12 @@ func TestNativeMemberPrivateSuperSourceRequiresOriginalPCAndPureDummy(t *testing
 				args[3] = opaque
 			case "missing dummy":
 				args = args[:3]
+			case "changed original seed":
+				outer.Val = values.JavaNull
+			case "copied public identity":
+				other := values.NewJavaRef(id, nil, outer.Type())
+				other.IsParam = true
+				args[0] = other
 			}
 			source, known := ctx.SourceMemberDelegation(owner, desc, pc, args)
 			if known != (variant == "original") {
