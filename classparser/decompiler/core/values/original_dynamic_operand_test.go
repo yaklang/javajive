@@ -72,3 +72,44 @@ func TestOriginalDynamicOperandWitnessRequiresOriginalSnapshotAndDeclaration(t *
 		})
 	}
 }
+
+func TestOriginalDynamicOperandDeclarationRequiresTheSamePrivateWitness(t *testing.T) {
+	for _, variant := range []string{"original", "logical clone", "renamed", "equal public fields", "foreign same factory", "split ID", "changed seed", "changed UID", "unwitnessed", "nil"} {
+		t.Run(variant, func(t *testing.T) {
+			typ := types.NewJavaPrimer(types.JavaLong)
+			seed := NewJavaLiteral(int64(17), typ)
+			snapshot := NewJavaRef(utils.NewRootVariableId(), seed, typ)
+			snapshot.MarkOriginalDynamicOperand(12, 2, seed)
+			snapshot.MarkOriginalDynamicOperandDeclaration(12, seed)
+			copy := *snapshot
+			declaration := &copy
+			switch variant {
+			case "original":
+				declaration = snapshot
+			case "renamed":
+				snapshot.Id.SetName("renamed")
+			case "equal public fields", "foreign same factory":
+				declaration = NewJavaRef(snapshot.Id, seed, typ)
+				declaration.VarUid = snapshot.VarUid
+				if variant == "foreign same factory" {
+					declaration.MarkOriginalDynamicOperand(12, 2, seed)
+					declaration.MarkOriginalDynamicOperandDeclaration(12, seed)
+				}
+			case "split ID":
+				declaration.Id = utils.NewRootVariableId()
+			case "changed seed":
+				declaration.Val = NewJavaLiteral(int64(17), typ)
+			case "changed UID":
+				declaration.VarUid += "other"
+			case "unwitnessed":
+				declaration.originalDynamicOperand = nil
+			case "nil":
+				declaration = nil
+			}
+			want := variant == "original" || variant == "logical clone" || variant == "renamed"
+			if declaration.OriginalDynamicOperandDeclarationOf(snapshot, seed) != want {
+				t.Fatal("source declaration borrowed another snapshot")
+			}
+		})
+	}
+}

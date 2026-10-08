@@ -20,6 +20,8 @@ func TestAdversarialMemberLambdaLocalCaptureNativeCompilerProtocol(t *testing.T)
 	for _, tc := range []struct{ name, fixture, owner, driver, want string }{
 		{"reference", memberLambdaLocalCaptureFixture, "LocalCaptureOwner", "LocalCaptureDriver", "51:local:lambda:capture:snapshot:mutation:lazy:failure\n"},
 		{"primitive", memberLambdaPrimitiveCaptureFixture, "WordCaptureOwner", "WordCaptureDriver", "8004:word:local:capture:bits:order:identity\n"},
+		{"selected word", memberLambdaConditionalCaptureFixture, "JoinedCaptureOwner", "JoinedCaptureDriver", "52:conditional:local:lambda:choice:lazy:identity\n"},
+		{"branch wide stores", strings.Replace(memberLambdaConditionalWideFixture(), "final long value=choose?JoinedCaptureEffects.left(seed):JoinedCaptureEffects.right(seed);", "final long value;if(choose){value=JoinedCaptureEffects.left(seed);}else{value=JoinedCaptureEffects.right(seed);}", 1), "JoinedCaptureOwner", "JoinedCaptureDriver", "52:conditional:local:lambda:choice:lazy:identity\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			compile := func(debug string) map[string][]byte {

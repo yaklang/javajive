@@ -29,3 +29,15 @@ func (r *JavaRef) OriginalDynamicOperandWitness(seed JavaValue) (pc, index int, 
 	}
 	return r.originalDynamicOperand.pc, r.originalDynamicOperand.index, true
 }
+
+// Statement construction copies the logical snapshot ref. Require the same
+// private original operand witness and current source binding, rather than
+// pointer equality with the earlier stack-simulation copy or name equality.
+func (r *JavaRef) OriginalDynamicOperandDeclarationOf(snapshot *JavaRef, seed JavaValue) bool {
+	if r == nil || snapshot == nil || r.Id == nil || r.Id != snapshot.Id || r.originalDynamicOperand == nil || r.originalDynamicOperand != snapshot.originalDynamicOperand {
+		return false
+	}
+	_, _, declared := r.OriginalDynamicOperandWitness(seed)
+	_, _, captured := snapshot.OriginalDynamicOperandWitness(snapshot.Val)
+	return declared && captured
+}

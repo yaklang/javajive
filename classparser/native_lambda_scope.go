@@ -360,6 +360,7 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 				}
 				operands := make([]*nativeEnumSelectorProducer, len(captures))
 				var localReads map[int]*nativeEnumLocalRead
+				var localFlow *nativeEnumParameterFlow
 				hasLocal := false
 				for j, p := range captures {
 					load := ops[start+j]
@@ -373,20 +374,20 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 							return false
 						}
 						if localReads == nil {
-							flow := nativeEnumParameterOriginalFlow(decoder, code, work)
-							if flow == nil {
+							localFlow = nativeEnumParameterOriginalFlow(decoder, code, work)
+							if localFlow == nil {
 								return false
 							}
 							reader := NewClassObjectDumper(object)
 							reader.Work = work
 							var known bool
-							localReads, known = reader.nativeTypedLocalReads(m, code, flow, slots, true)
+							localReads, known = reader.nativeTypedLocalReads(m, code, localFlow, slots, true)
 							if !known {
 								return false
 							}
 						}
 						read := localReads[int(load.CurrentOffset)]
-						if read == nil || read.slot != slot || read.descriptor != p || !nativeLambdaLocalSingleStore(ops, read, work) {
+						if read == nil || read.slot != slot || read.descriptor != p || !nativeLambdaLocalDefinitionsClosed(ops, read, work) && !nativeLambdaLocalDefinitionWebClosed(localFlow, ops, read, work) {
 							return false
 						}
 						operand.local = read

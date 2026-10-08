@@ -127,6 +127,16 @@ func TestNativeEnumLocalSelectorReachingStoreBoundedModel(t *testing.T) {
 									}
 								}
 								read := &nativeEnumSelectorProducer{pc: readIndex, opcode: core.OP_ALOAD, slot: 2, result: "Ljava/lang/Object;"}
+								storePCs, closed := flow.reachingStores(read, nil)
+								wantClosed := len(frontier) > 0 && !frontier[-1]
+								if closed != wantClosed || closed && len(storePCs) != len(frontier) {
+									t.Fatalf("complete frontier=%v/%v want=%v graph=%d exception=%d", storePCs, closed, frontier, mask, variant)
+								}
+								for _, pc := range storePCs {
+									if !frontier[pc] {
+										t.Fatal("frontier contains a nonreaching original STORE")
+									}
+								}
 								pc, got := flow.reachingStore(read, nil)
 								if got != want || got && pc != wantPC {
 									t.Fatalf("n=%d graph=%d exception=%d read=%d first=%d second=%d/%+v result=(%d,%v) want=(%d,%v)", n, mask, variant, readIndex, first, second, other, pc, got, wantPC, want)

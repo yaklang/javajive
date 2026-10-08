@@ -5,12 +5,76 @@ import (
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
+
+func TestNativeLambdaLocalCapturePhiMustRetainOneOriginalStore(t *testing.T) {
+	files := nativeCompileClasses(t, `class TypedPhiCaptureWords {
+ static int integer(boolean choose,int first,int second){int local=choose?first:second;return local;}
+ static long wide(boolean choose,long first,long second){long local=choose?first:second;return local;}
+ static float fractional(boolean choose,float first,float second){float local=choose?first:second;return local;}
+ static double precise(boolean choose,double first,double second){double local=choose?first:second;return local;}
+ static Object reference(boolean choose,Object first,Object second){Object local=choose?first:second;return local;}
+}`)
+	object, err := Parse(files["TypedPhiCaptureWords.class"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range object.Methods {
+		name, _ := sourceBridgeUTF8(object, method.NameIndex)
+		if name == "<init>" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			descriptor, _ := sourceBridgeUTF8(object, method.DescriptorIndex)
+			arguments, result, err := callbinding.Descriptor(descriptor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			params := map[int]string{}
+			slot := 0
+			for _, argument := range arguments {
+				params[slot] = argument
+				slot++
+				if argument == "J" || argument == "D" {
+					slot++
+				}
+			}
+			for _, attribute := range method.Attributes {
+				code, ok := attribute.(*CodeAttribute)
+				if !ok {
+					continue
+				}
+				decoder := core.NewDecompiler(code.Code, nil)
+				if err := decoder.ParseOpcode(); err != nil {
+					t.Fatal(err)
+				}
+				flow := nativeEnumParameterOriginalFlow(decoder, code, nil)
+				reader := NewClassObjectDumper(object)
+				reads, known := reader.nativeTypedLocalReads(method, code, flow, params, true)
+				if !known || len(reads) != 1 {
+					t.Fatalf("one original STORE for the selected word: known=%v reads=%v", known, reads)
+				}
+				for _, read := range reads {
+					if read.descriptor != result || !nativeLambdaLocalSingleStore(constructorMotionOps(decoder), read, nil) {
+						t.Fatal("lost original typed STORE/LOAD")
+					}
+				}
+				// The older enum admission is intentionally unchanged: phi
+				// source publication there requires a different certificate.
+				older, known := reader.nativeEnumLocalSelectorReads(method, code, flow, params)
+				if !known || len(older) != 0 {
+					t.Fatal("lambda proof broadened enum selector admission")
+				}
+			}
+		})
+	}
+}
 
 // Instruction-only cases isolate word interval writes; they do not claim JVM
 // verifier validity. Actual verifier frames and source bindings are separate.

@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -14,6 +15,9 @@ import (
 type nativeEnumLocalRead struct {
 	pc, opcode, slot, storePC int
 	descriptor                string
+	// Multiple original definitions belong only to the lambda capture proof.
+	// Enum selector publication still requires the single storePC witness.
+	storePCs []int
 }
 
 // Walk backward from this LOAD, stopping at the first overlapping normal
@@ -22,12 +26,34 @@ type nativeEnumLocalRead struct {
 // a write, or two distinct frontier writes, cannot certify one declaration.
 // Unlike a physical prefix scan, this handles disjoint exits and backedges.
 func (f *nativeEnumParameterFlow) reachingStore(read *nativeEnumSelectorProducer, work *workbudget.Budget) (int, bool) {
-	if f == nil || f.entry == nil || len(f.byPC) > 8192 || read == nil || read.owner != "" || read.slot < 0 || read.slot > 65535 || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(len(f.byPC))*192) != nil {
+	stores, known := f.reachingStores(read, work)
+	if !known || len(stores) != 1 {
 		return 0, false
 	}
+	return stores[0], true
+}
+
+// Complete last-writer frontier, with no uninitialized entry predecessor.
+// This proves original definitions, not their final source declaration.
+func (f *nativeEnumParameterFlow) reachingStores(read *nativeEnumSelectorProducer, work *workbudget.Budget) ([]int, bool) {
+	return f.reachingLocalStores(read, work, false)
+}
+
+func (f *nativeEnumParameterFlow) reachingLocalStores(read *nativeEnumSelectorProducer, work *workbudget.Budget, readWrite bool) ([]int, bool) {
+	if f == nil || f.entry == nil || len(f.byPC) > 8192 || read == nil || read.owner != "" || read.slot < 0 || read.slot > 65535 || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(len(f.byPC))*192) != nil {
+		return nil, false
+	}
 	at := f.byPC[read.pc]
-	if at == nil || at.Instr == nil || at.Instr.OpCode != read.opcode || core.GetRetrieveIdx(at) != read.slot || !constructorMotionLoad(at, read.result) {
-		return 0, false
+	if at == nil || at.Instr == nil || at.Instr.OpCode != read.opcode {
+		return nil, false
+	}
+	if readWrite {
+		access := core.LocalAccessOf(at.Instr.OpCode)
+		if !access.Read || !access.Write || access.Width != 1 || at.Instr.OpCode != core.OP_IINC || core.GetStoreIdx(at) != read.slot {
+			return nil, false
+		}
+	} else if core.GetRetrieveIdx(at) != read.slot || !constructorMotionLoad(at, read.result) {
+		return nil, false
 	}
 	width := 1
 	if read.result == "J" || read.result == "D" {
@@ -41,15 +67,15 @@ func (f *nativeEnumParameterFlow) reachingStore(read *nativeEnumSelectorProducer
 		from := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
 		if from == nil || from.Instr == nil || f.byPC[int(from.CurrentOffset)] != from || !nativeProofWork(work, 1) {
-			return 0, false
+			return nil, false
 		}
 		for _, edge := range f.edges[from] {
 			if edge.From != from || edge.To == nil || edge.To.Instr == nil || f.byPC[int(edge.To.CurrentOffset)] != edge.To || !nativeProofWork(work, 1) {
-				return 0, false
+				return nil, false
 			}
 			edgeCount++
 			if work != nil && work.CheckAlloc(int64(len(f.byPC))*192+edgeCount*64) != nil {
-				return 0, false
+				return nil, false
 			}
 			reverse[edge.To] = append(reverse[edge.To], edge)
 			if !reachable[edge.To] {
@@ -59,33 +85,33 @@ func (f *nativeEnumParameterFlow) reachingStore(read *nativeEnumSelectorProducer
 		}
 	}
 	if !reachable[at] {
-		return 0, false
+		return nil, false
 	}
 	seen := map[*core.OpCode]bool{at: true}
 	pending = []*core.OpCode{at}
-	store := -1
+	stores := map[int]bool{}
 	for len(pending) > 0 {
 		current := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
 		if current == f.entry || !nativeProofWork(work, 1) {
-			return 0, false
+			return nil, false
 		}
 		for _, edge := range reverse[current] {
 			if !nativeProofWork(work, 1) {
-				return 0, false
+				return nil, false
 			}
 			access := core.LocalAccessOf(edge.From.Instr.OpCode)
 			if access.Write && edge.Kind != core.EdgeException {
 				slot := core.GetStoreIdx(edge.From)
 				if slot < 0 || access.Width < 1 || access.Width > 2 {
-					return 0, false
+					return nil, false
 				}
 				if slot < read.slot+width && read.slot < slot+access.Width {
 					pc := int(edge.From.CurrentOffset)
-					if store >= 0 && store != pc {
-						return 0, false
+					stores[pc] = true
+					if len(stores) > 64 {
+						return nil, false
 					}
-					store = pc
 					continue
 				}
 			}
@@ -95,7 +121,12 @@ func (f *nativeEnumParameterFlow) reachingStore(read *nativeEnumSelectorProducer
 			}
 		}
 	}
-	return store, store >= 0
+	result := make([]int, 0, len(stores))
+	for pc := range stores {
+		result = append(result, pc)
+	}
+	sort.Ints(result)
+	return result, len(result) > 0
 }
 
 // Original typed frames give the computational reference and value origin at
@@ -186,7 +217,12 @@ func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *Code
 		}
 		word := record.Before.Locals[slot]
 		origin := record.BeforeOrigins[slot]
-		if origin.Kind != ssabuild.OriginInstr && origin.Kind != ssabuild.OriginParam {
+		// A lambda word can join stack producers before one STORE, or join
+		// several original STOREs. The complete last-writer frontier and every
+		// STORE's initialized typed word are checked below. Source publication
+		// separately requires the retained definition and path certificate.
+		// Enum selector publication keeps its older single-origin boundary.
+		if origin.Kind != ssabuild.OriginInstr && origin.Kind != ssabuild.OriginParam && !(primitiveWords && origin.Kind == ssabuild.OriginPhi) {
 			continue
 		}
 		descriptor := ""
@@ -219,31 +255,47 @@ func (c *ClassObjectDumper) nativeTypedLocalReads(method *MemberInfo, code *Code
 			continue
 		}
 		read := &nativeEnumSelectorProducer{opcode: instruction.Opcode, pc: int(record.PC), slot: slot, result: descriptor}
-		storePC, known := flow.reachingStore(read, c.Work)
-		if !known {
+		storePCs, known := flow.reachingStores(read, c.Work)
+		if !known || !primitiveWords && len(storePCs) != 1 {
 			continue
 		}
-		stored, found := records[storePC]
-		store, storeKnown := ir.InstrByID(methodir.InstrID(storePC))
-		if !found || !storeKnown || !core.LocalAccessOf(store.Opcode).Write || store.Local != slot || len(stored.Uses) != 1 || stored.Uses[0] != origin || len(stored.Before.Stack) < width || len(stored.BeforeOrigins) != len(stored.Before.Locals)+len(stored.Before.Stack) {
-			continue
+		valid := true
+		for _, storePC := range storePCs {
+			stored, found := records[storePC]
+			store, storeKnown := ir.InstrByID(methodir.InstrID(storePC))
+			if !found || !storeKnown || !core.LocalAccessOf(store.Opcode).Write || store.Local != slot || len(stored.Uses) != 1 || len(storePCs) == 1 && stored.Uses[0] != origin || len(stored.Before.Stack) < width || len(stored.BeforeOrigins) != len(stored.Before.Locals)+len(stored.Before.Stack) {
+				valid = false
+				break
+			}
+			// Each STORE consumes a complete initialized computational word.
+			// Category-2 halves must carry its identical origin; tails are not
+			// values. Equal types do not identify different branch producers.
+			stackIndex := len(stored.Before.Stack) - width
+			value := stored.Before.Stack[stackIndex]
+			originIndex := len(stored.Before.Locals) + stackIndex
+			storedOrigin := stored.Uses[0]
+			typedNull := primitiveWords && word.Kind == frametransfer.Ref && value.Kind == frametransfer.Null && width == 1
+			if !typedNull && (value.Kind != word.Kind || value.Class != word.Class) || core.LocalAccessOf(store.Opcode).Width != width || stored.BeforeOrigins[originIndex] != storedOrigin || storedOrigin.Kind != ssabuild.OriginInstr && storedOrigin.Kind != ssabuild.OriginParam && storedOrigin.Kind != ssabuild.OriginPhi {
+				valid = false
+				break
+			}
+			if width == 2 && (stored.Before.Stack[stackIndex+1].Kind != frametransfer.TailOf(value).Kind || stored.BeforeOrigins[originIndex+1] != storedOrigin) {
+				valid = false
+				break
+			}
 		}
-		// The initialized reference or complete computational word reaches
-		// this STORE and LOAD unchanged. Both halves of category-2 values
-		// must retain their type and identical origin; tails are never values.
-		stackIndex := len(stored.Before.Stack) - width
-		value := stored.Before.Stack[stackIndex]
-		originIndex := len(stored.Before.Locals) + stackIndex
-		if value.Kind != word.Kind || value.Class != word.Class || core.LocalAccessOf(store.Opcode).Width != width || stored.BeforeOrigins[originIndex] != origin {
-			continue
-		}
-		if width == 2 && (stored.Before.Stack[stackIndex+1].Kind != frametransfer.TailOf(value).Kind || stored.BeforeOrigins[originIndex+1] != origin) {
+		if !valid {
 			continue
 		}
 		if c.Work != nil && c.Work.CheckAlloc(int64(len(result)+1)*128) != nil {
 			return nil, false
 		}
-		result[int(record.PC)] = &nativeEnumLocalRead{pc: int(record.PC), opcode: instruction.Opcode, slot: slot, storePC: storePC, descriptor: descriptor}
+		storePC := storePCs[0]
+		var multiple []int
+		if len(storePCs) > 1 {
+			storePC, multiple = -1, storePCs
+		}
+		result[int(record.PC)] = &nativeEnumLocalRead{pc: int(record.PC), opcode: instruction.Opcode, slot: slot, storePC: storePC, descriptor: descriptor, storePCs: multiple}
 	}
 	return result, true
 }

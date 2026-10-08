@@ -6382,6 +6382,9 @@ func (d *Decompiler) ParseStatement() error {
 			v.OriginPC = int(opcode.CurrentOffset)
 			v.HasOriginPC = true
 			if v1, ok := v.LeftValue.(*values.JavaRef); ok {
+				if node.HasOriginPC && v.ArrayMember == nil && LocalAccessOf(opcode.Instr.OpCode).Write {
+					v.MarkOriginalLocalStore(node.OriginPC, GetStoreIdx(opcode))
+				}
 				if node.HasOriginPC && v.ArrayMember == nil && (v.IsDeclare || v.IsFirst) && opcode.Instr.OpCode == OP_INVOKEDYNAMIC {
 					v1.MarkOriginalDynamicOperandDeclaration(node.OriginPC, v.JavaValue)
 				}
@@ -6419,6 +6422,7 @@ func (d *Decompiler) ParseStatement() error {
 	d.restoreScopedReferenceWebs()
 	d.propagateNullOnlyLocalLoads()
 	d.refreshReferenceOperandSnapshotTypes()
+	d.partitionSharedDynamicCaptureWebs()
 	d.unifyNumericExitWebs()
 	d.restoreNormalizedBooleanWebs()
 	d.restoreExceptionDeclarationSeeds()

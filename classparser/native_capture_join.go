@@ -17,9 +17,35 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 	if ref == nil || ref.Id == nil || ref.IsThis || allocation == nil || allocation.ConstructorCall == nil || !allocation.HasOriginPC || !allocation.ConstructorCall.HasOriginPC || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(4096*128) != nil {
 		return nil, false
 	}
+	captured := false
+	for _, arg := range allocation.ConstructorCall.Arguments {
+		v, known := nativeMemberEnclosingUnpack(arg, work)
+		if !known || sourceProofNil(v) {
+			return nil, false
+		}
+		r, ok := v.(*values.JavaRef)
+		if ok && r.Id == nil {
+			return nil, false
+		}
+		captured = captured || ok && r.Id == ref.Id
+	}
+	if !captured {
+		return nil, false
+	}
+	return nativeCaptureJoinedSource(body, ref, work, func(v values.JavaValue) bool { return v == allocation }, nil, nil)
+}
+
+// The same definite-assignment transfer proves a blank local at either an
+// original constructor capture or an original dynamic operand declaration.
+// A lambda additionally checks each physical STORE's retained source witness.
+func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef, work *workbudget.Budget, captureValue func(values.JavaValue) bool, captureStatement func(statements.Statement) bool, store func(*statements.AssignStatement) bool) (*statements.AssignStatement, bool) {
+	if ref == nil || ref.Id == nil || ref.IsThis || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(4096*128) != nil {
+		return nil, false
+	}
 	const absent, blank, initialized uint8 = 1, 2, 4
 	var declaration *statements.AssignStatement
 	writes, captures, remaining := 0, 0, 4096
+	loopDepth := 0
 	activeValues := map[values.JavaValue]bool{}
 	activeStatements := map[statements.Statement]bool{}
 	enter := func() bool {
@@ -39,17 +65,6 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 		r, ok := v.(*values.JavaRef)
 		return ok && r.Id == ref.Id, !ok || r.Id != nil
 	}
-	captured := false
-	for _, arg := range allocation.ConstructorCall.Arguments {
-		matched, known := same(arg)
-		if !known {
-			return nil, false
-		}
-		captured = captured || matched
-	}
-	if !captured {
-		return nil, false
-	}
 	var value func(values.JavaValue, uint8) bool
 	value = func(v values.JavaValue, state uint8) bool {
 		if sourceProofNil(v) || activeValues[v] || !enter() {
@@ -58,6 +73,12 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 		defer leave()
 		activeValues[v] = true
 		defer delete(activeValues, v)
+		if captureValue != nil && captureValue(v) {
+			captures++
+			if captures != 1 || state != initialized {
+				return false
+			}
+		}
 		if r, ok := v.(*values.JavaRef); ok && (r.Id == nil || r.Id == ref.Id) {
 			return r.Id != nil && state == initialized && r.CustomValue == nil && r.StackVar == nil
 		}
@@ -72,13 +93,6 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 					return false
 				}
 				if matched, known := same(x.Values[0]); !known || matched {
-					return false
-				}
-			}
-		case *values.NewExpression:
-			if x == allocation {
-				captures++
-				if captures != 1 || state != initialized {
 					return false
 				}
 			}
@@ -105,6 +119,27 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 		return true
 	}
 	var walk func([]statements.Statement, uint8) (uint8, bool)
+	// A preinitialized capture remains initialized through an unrelated loop.
+	// A declaration scoped inside the loop is a fresh local each iteration and
+	// does not escape its body. A blank declaration outside the loop cannot be
+	// repeatedly assigned and claim effective finality. This extension belongs
+	// only to the separately witnessed lambda snapshot, not allocation motion.
+	loopBody := func(list []statements.Statement, state uint8) bool {
+		if captureStatement == nil || state != absent && state != initialized {
+			return false
+		}
+		beforeDeclaration, beforeWrites := declaration, writes
+		loopDepth++
+		after, known := walk(list, state)
+		loopDepth--
+		if !known {
+			return false
+		}
+		if state == initialized {
+			return (after == initialized || after == 0) && writes == beforeWrites && declaration == beforeDeclaration
+		}
+		return beforeDeclaration == nil && (after == absent || after == initialized || after == 0)
+	}
 	walk = func(list []statements.Statement, state uint8) (uint8, bool) {
 		if !enter() {
 			return 0, false
@@ -134,6 +169,9 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 						if assign.IsDeclare || assign.IsFirst || declaration == nil || state != blank || sourceProofNil(assign.JavaValue) || !value(assign.JavaValue, state) {
 							return 0, false
 						}
+						if store != nil && !store(assign) {
+							return 0, false
+						}
 						writes++
 						state = initialized
 					}
@@ -147,12 +185,21 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 				// opaque callback's effects or abrupt completion behavior.
 				operand, sealed := custom.SourceThrowOperand()
 				roots, children, known = []values.JavaValue{operand}, nil, sealed
+				if captureStatement != nil && loopDepth > 0 && custom.SourceTransferOnly() {
+					roots, children, known = nil, nil, true
+				}
 			}
 			if !known {
 				return 0, false
 			}
 			for _, root := range roots {
 				if !value(root, state) {
+					return 0, false
+				}
+			}
+			if captureStatement != nil && captureStatement(st) {
+				captures++
+				if captures != 1 || state != initialized {
 					return 0, false
 				}
 			}
@@ -168,7 +215,9 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 				state = 0 // Abrupt predecessors do not reach the next join.
 			case *statements.CustomStatement:
 				if _, sealed := x.SourceThrowOperand(); !sealed {
-					return 0, false // Unproved break/continue targets cannot close a join.
+					if captureStatement == nil || loopDepth == 0 || !x.SourceTransferOnly() {
+						return 0, false // Unproved transfers cannot close a join.
+					}
 				}
 				state = 0
 			case *statements.SynchronizedStatement:
@@ -177,8 +226,35 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 				if !valid {
 					return 0, false
 				}
+			case *statements.WhileStatement:
+				if !loopBody(x.Body, state) {
+					return 0, false
+				}
+			case *statements.DoWhileStatement:
+				if !loopBody(x.Body, state) {
+					return 0, false
+				}
+			case *statements.ForStatement:
+				for _, header := range []statements.Statement{x.InitVar, x.Condition} {
+					if !sourceProofNil(header) {
+						var valid bool
+						state, valid = walk([]statements.Statement{header}, state)
+						if !valid {
+							return 0, false
+						}
+					}
+				}
+				if !loopBody(x.SubStatements, state) {
+					return 0, false
+				}
+				if !sourceProofNil(x.EndExp) {
+					after, valid := walk([]statements.Statement{x.EndExp}, state)
+					if !valid || after != state {
+						return 0, false
+					}
+				}
 			default:
-				// Loop, switch and exception edges need their own flow transfer
+				// Switch and exception edges need their own flow transfer
 				// model. They cannot certify this new multi-write declaration.
 				if len(children) != 0 {
 					return 0, false
