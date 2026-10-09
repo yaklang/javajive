@@ -14,6 +14,7 @@ type nativeMethodLocalConstructor struct {
 	descriptor, delegateOwner string
 	delegateDescriptor        string
 	delegateParams            []int
+	delegateCasts             []string
 	delegatePC                int
 	enclosingField            string
 	captures                  map[string]int
@@ -152,6 +153,26 @@ func originalMethodLocalCaptureConstructor(obj, enclosing *ClassObject, work *wo
 		}
 		plan.delegateParams = append(plan.delegateParams, param)
 		cursor++
+		cast := ""
+		if cursor < len(ops) && ops[cursor].Instr.OpCode == core.OP_CHECKCAST {
+			op := ops[cursor]
+			if !callbinding.Reference(params[param]) || op.IsWide || len(op.Data) != 2 || !nativeProofWork(work, 1) {
+				return nil, false
+			}
+			name, known := sourceBridgeClassName(obj, uint16(core.Convert2bytesToInt(op.Data)))
+			if !known {
+				return nil, false
+			}
+			cast = name
+			if !callbinding.Reference(cast) {
+				cast = "L" + cast + ";"
+			}
+			if _, _, err := callbinding.Descriptor("(" + cast + ")V"); err != nil {
+				return nil, false
+			}
+			cursor++
+		}
+		plan.delegateCasts = append(plan.delegateCasts, cast)
 	}
 	if cursor+2 != len(ops) || ops[cursor+1].Instr.OpCode != core.OP_RETURN {
 		return nil, false
@@ -165,7 +186,15 @@ func originalMethodLocalCaptureConstructor(obj, enclosing *ClassObject, work *wo
 		return nil, false
 	}
 	for i, param := range plan.delegateParams {
-		if params[param] != targetParams[i] {
+		// javac retains some array widening CHECKCASTs. Source re-emits the
+		// same exact formal cast; a different intermediate cast is not erased.
+		if plan.delegateCasts[i] != "" && plan.delegateCasts[i] != targetParams[i] {
+			return nil, false
+		}
+		// Reference operands keep the same JVM word through a widening
+		// invocation. The physical packet does not prove assignability: the
+		// source transaction must close the original declaration hierarchy.
+		if params[param] != targetParams[i] && !(callbinding.Reference(params[param]) && callbinding.Reference(targetParams[i])) {
 			return nil, false
 		}
 	}
@@ -194,11 +223,11 @@ func originalMethodLocalCaptureConstructor(obj, enclosing *ClassObject, work *wo
 // A cached source plan cannot replace original bytecode identity. Every scope
 // consumer revalidates both hidden stores and the complete delegation packet.
 func sameOriginalMethodLocalConstructor(actual, cached *nativeMethodLocalConstructor, work *workbudget.Budget) bool {
-	if actual == nil || cached == nil || actual.descriptor != cached.descriptor || actual.delegateOwner != cached.delegateOwner || actual.delegatePC != cached.delegatePC || actual.delegateDescriptor != cached.delegateDescriptor || len(actual.delegateParams) != len(cached.delegateParams) || actual.enclosingField != cached.enclosingField || len(actual.captures) != len(cached.captures) || len(actual.capturePCs) != len(cached.capturePCs) {
+	if actual == nil || cached == nil || len(actual.delegateCasts) != len(actual.delegateParams) || actual.descriptor != cached.descriptor || actual.delegateOwner != cached.delegateOwner || actual.delegatePC != cached.delegatePC || actual.delegateDescriptor != cached.delegateDescriptor || len(actual.delegateParams) != len(cached.delegateParams) || len(actual.delegateCasts) != len(cached.delegateCasts) || actual.enclosingField != cached.enclosingField || len(actual.captures) != len(cached.captures) || len(actual.capturePCs) != len(cached.capturePCs) {
 		return false
 	}
 	for i, param := range actual.delegateParams {
-		if !nativeProofWork(work, 1) || cached.delegateParams[i] != param {
+		if !nativeProofWork(work, 1) || cached.delegateParams[i] != param || actual.delegateCasts[i] != cached.delegateCasts[i] {
 			return false
 		}
 	}

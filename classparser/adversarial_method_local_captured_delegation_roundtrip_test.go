@@ -17,13 +17,24 @@ func TestAdversarialMethodLocalCapturedDelegationNativeCompiler(t *testing.T) {
 	if err != nil || !strings.Contains(string(version), "javac 1.8.") {
 		t.Fatal("native compiler identity", err, string(version))
 	}
-	for _, layout := range []string{"instance", "static"} {
+	for _, layout := range []string{"instance", "static", "reference object", "reference matrix"} {
 		t.Run(layout, func(t *testing.T) {
 			fixture := localCapturedDelegationFixture
 			if layout == "static" {
 				fixture = strings.ReplaceAll(fixture, "Object make(final int n,", "static Object make(final int n,")
 				fixture = strings.ReplaceAll(fixture, "return DelegationOwner.this;", "return null;")
 				fixture = strings.ReplaceAll(fixture, ".invoke(b)!=owner", ".invoke(b)!=null")
+			}
+			if layout == "reference object" || layout == "reference matrix" {
+				actual, formal, token, candidates := "String", "Object", `new String("same")`, `new String[]{null,token}`
+				if layout == "reference matrix" {
+					actual, formal, token, candidates = "String[][]", "Object[]", `new String[][]{{"row"}}`, `new String[][][]{null,token}`
+					fixture = strings.ReplaceAll(fixture, "Object t)", "Object[] t)")
+				}
+				fixture = strings.ReplaceAll(fixture, "final Object token", "final "+actual+" token")
+				fixture = strings.ReplaceAll(fixture, "super(n,word,token)", "super(n,word,("+formal+")token)")
+				fixture = strings.ReplaceAll(fixture, "Object token=new Object()", actual+" token="+token)
+				fixture = strings.ReplaceAll(fixture, "Object value:new Object[]{null,token}", actual+" value:"+candidates)
 			}
 			compile := func(debug string) map[string][]byte {
 				root := t.TempDir()
@@ -155,6 +166,40 @@ func TestAdversarialMethodLocalCapturedDelegationIndependentGenericParent(t *tes
 					fixture = strings.ReplaceAll(fixture, "class Entry extends DelegationBase{", "class Entry extends DelegationBase<Integer>{")
 				}
 				testNativeIndependentFamilyFixture(t, strings.ReplaceAll(fixture, "Delegation", prefix), []string{prefix + "Owner"}, prefix+"Driver", "18:local:delegation\n", nativeLexicalExactSignatures)
+			})
+		}
+	}
+}
+
+func TestAdversarialMethodLocalCapturedDelegationReferenceWidening(t *testing.T) {
+	for _, prefix := range []string{"Widen", "DifferentReference"} {
+		for _, kind := range []string{"string object", "string interface", "reference array object", "reference matrix object array", "primitive matrix object array", "primitive array cloneable", "reference array serializable", "leaf superclass", "leaf interface"} {
+			t.Run(prefix+"/"+kind, func(t *testing.T) {
+				actual, formal, other, values := "String", "Object", "CharSequence", `new String[]{null,new String("same"),new String("same"),""}`
+				switch kind {
+				case "string interface":
+					formal, other = "CharSequence", "String"
+				case "reference array object":
+					actual, values = "String[]", `new String[][]{null,new String[0],new String[]{null,"value"},new String[]{new String("value")}}`
+				case "reference matrix object array":
+					actual, formal, other, values = "String[][]", "Object[]", "String[][]", `new String[][][]{null,new String[0][],new String[][]{{null,"value"}},new String[][]{null}}`
+				case "primitive matrix object array":
+					actual, formal, other, values = "int[][]", "Object[]", "int[][]", `new int[][][]{null,new int[0][],new int[][]{{Integer.MIN_VALUE,Integer.MAX_VALUE}},new int[][]{null}}`
+				case "primitive array cloneable":
+					actual, formal, other, values = "int[]", "Cloneable", "int[]", `new int[][]{null,new int[0],new int[]{Integer.MIN_VALUE,Integer.MAX_VALUE},new int[]{0}}`
+				case "reference array serializable":
+					actual, formal, other, values = "String[]", "java.io.Serializable", "String[]", `new String[][]{null,new String[0],new String[]{null,"value"},new String[]{new String("value")}}`
+				case "leaf superclass":
+					actual, formal, other, values = "WidenLeaf", "WidenRoot", "WidenLeaf", `new WidenLeaf[]{null,new WidenLeaf(),new WidenLeaf(),null}`
+				case "leaf interface":
+					actual, formal, other, values = "WidenLeaf", "WidenMarker", "WidenLeaf", `new WidenLeaf[]{null,new WidenLeaf(),new WidenLeaf(),null}`
+				}
+				fixture := `interface WidenMarker{}class WidenRoot implements WidenMarker{}class WidenMiddle extends WidenRoot{}class WidenLeaf extends WidenMiddle{}
+class WidenParent{final Object seen;WidenParent(FORMAL x){seen=capture();if(seen!=x)throw new AssertionError("original widened capture before SUPER");}WidenParent(OTHER x){throw new AssertionError("wrong overload");}Object capture(){return null;}}
+class WidenOwner{Object make(final ACTUAL x){class Entry extends WidenParent{Entry(){super((FORMAL)x);}Object capture(){return x;}}return new Entry();}}
+class WidenDriver{public static void main(String[]args){WidenOwner owner=new WidenOwner();int n=0;for(ACTUAL s:VALUES){WidenParent v=(WidenParent)owner.make(s);if(v.seen!=s||v.capture()!=s)throw new AssertionError("capture reference identity");n++;}System.out.println(n+":widen:reference");}}`
+				fixture = strings.NewReplacer("FORMAL", formal, "OTHER", other, "ACTUAL", actual, "VALUES", values).Replace(fixture)
+				testNativeIndependentFamilyFixture(t, strings.ReplaceAll(fixture, "Widen", prefix), []string{prefix + "Owner"}, prefix+"Driver", "4:widen:reference\n", nativeLexicalExactSignatures)
 			})
 		}
 	}

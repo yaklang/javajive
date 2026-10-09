@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
@@ -159,6 +160,20 @@ func (c *ClassObjectDumper) nativeMethodLocalDelegationSource(method *MemberInfo
 	if err != nil || len(mt.FunctionType().ParamTypes) != len(ctor.delegateParams) {
 		return nil, fmt.Errorf("invalid local delegation source descriptor")
 	}
+	physicalParams, _, err := callbinding.Descriptor(ctor.descriptor)
+	if err != nil {
+		return nil, fmt.Errorf("invalid original local capture descriptor")
+	}
+	targetParams, _, err := callbinding.Descriptor(ctor.delegateDescriptor)
+	if err != nil {
+		return nil, fmt.Errorf("invalid original local parent descriptor")
+	}
+	widening := c.nativeMethodLocalDelegationWideningQuery()
+	for i, param := range ctor.delegateParams {
+		if !c.nativeMethodLocalDelegationArgumentAssignable(widening, physicalParams[param], targetParams[i]) {
+			return nil, fmt.Errorf("local captured delegation requires original reference widening")
+		}
+	}
 	args := make([]string, len(ctor.delegateParams))
 	outputSize := int64(len(local.owner.name) + 16)
 	for i, param := range ctor.delegateParams {
@@ -179,4 +194,44 @@ func (c *ClassObjectDumper) nativeMethodLocalDelegationSource(method *MemberInfo
 		return nil, err
 	}
 	return &dumpedMethods{methodName: "<init>", code: code, bodyCode: body, member: method, descriptor: descriptor}, nil
+}
+
+// A fresh declaration provider uses the original archive hierarchy and the
+// pinned platform declaration catalog. Constructor bytecode is a purpose-built
+// subset, not the complete platform type graph. Do not borrow the caller's
+// possibly stale invocation cache for a new source binding proof.
+func (c *ClassObjectDumper) nativeMethodLocalDelegationWideningQuery() *constructorWideningQuery {
+	original := c.buildInvocationMetadata()
+	return newConstructorWideningQuery(func(name string) (callbinding.Class, bool) {
+		if !nativeProofWork(c.Work, 1) {
+			return callbinding.Class{}, false
+		}
+		declaration, known := original(name)
+		if !known || declaration.Name != name || !declaration.ParentsComplete || len(declaration.Parents) > 63 || !nativeProofWork(c.Work, int64(len(declaration.Parents))) {
+			return callbinding.Class{}, false
+		}
+		if c.Work != nil && c.Work.CheckAlloc(int64(len(declaration.Parents)+1)*64) != nil {
+			return callbinding.Class{}, false
+		}
+		for _, parent := range declaration.Parents {
+			if !nativeSourceBinaryName(parent) {
+				return callbinding.Class{}, false
+			}
+		}
+		return callbinding.Class{Name: name, Parents: append([]string(nil), declaration.Parents...), ParentsComplete: true}, true
+	})
+}
+
+func (c *ClassObjectDumper) nativeMethodLocalDelegationArgumentAssignable(q *constructorWideningQuery, actual, formal string) bool {
+	if q == nil || !nativeProofWork(c.Work, int64(len(actual)+len(formal))) {
+		return false
+	}
+	// An edge merely naming an absent non-root type cannot close source binding.
+	endpoint := strings.TrimLeft(formal, "[")
+	if actual != formal && callbinding.Reference(endpoint) && endpoint != "Ljava/lang/Object;" {
+		if _, known := q.class(callbinding.Name(endpoint)); !known {
+			return false
+		}
+	}
+	return q.assignable(actual, formal)
 }

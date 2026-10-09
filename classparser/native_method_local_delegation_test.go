@@ -418,7 +418,7 @@ func TestAdversarialMethodLocalDelegationCachedPacketCannotReplaceOriginal(t *te
 	if !known {
 		t.Fatal("original packet")
 	}
-	for _, kind := range []string{"original", "owner", "descriptor", "pc", "omitted word", "swapped words", "capture slot", "capture pc", "extra capture pc", "budget"} {
+	for _, kind := range []string{"original", "owner", "descriptor", "pc", "omitted word", "swapped words", "cast count", "both cast counts", "cast identity", "capture slot", "capture pc", "extra capture pc", "budget"} {
 		t.Run(kind, func(t *testing.T) {
 			cached, _ := originalMethodLocalSourceConstructor(child, owner, nil)
 			var work *workbudget.Budget
@@ -433,6 +433,10 @@ func TestAdversarialMethodLocalDelegationCachedPacketCannotReplaceOriginal(t *te
 				cached.delegateParams = cached.delegateParams[:2]
 			case "swapped words":
 				cached.delegateParams[0], cached.delegateParams[1] = cached.delegateParams[1], cached.delegateParams[0]
+			case "cast count":
+				cached.delegateCasts = nil
+			case "cast identity":
+				cached.delegateCasts[0] = "LWrong;"
 			case "capture slot":
 				cached.captures["val$n"]++
 			case "capture pc":
@@ -442,8 +446,164 @@ func TestAdversarialMethodLocalDelegationCachedPacketCannotReplaceOriginal(t *te
 			case "budget":
 				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
 			}
-			if got := sameOriginalMethodLocalConstructor(actual, cached, work); got != (kind == "original") {
+			corroboration := actual
+			if kind == "both cast counts" {
+				copy := *actual
+				copy.delegateCasts = nil
+				corroboration = &copy
+				cached.delegateCasts = nil
+			}
+			if got := sameOriginalMethodLocalConstructor(corroboration, cached, work); got != (kind == "original") {
 				t.Fatal("cached packet corroboration", got, cached)
+			}
+		})
+	}
+}
+
+func TestAdversarialMethodLocalDelegationWideningUsesFreshOriginalHierarchy(t *testing.T) {
+	files := nativeCompileClasses(t, `interface HierarchyMarker{}class HierarchyRoot implements HierarchyMarker{}class HierarchyMiddle extends HierarchyRoot{}class HierarchyLeaf extends HierarchyMiddle{}class HierarchyOwner{}`)
+	for _, kind := range []string{"original", "identity", "object", "interface", "reference covariance", "primitive matrix covariance", "array marker", "narrowing", "primitive", "array narrowing", "primitive array narrowing", "missing actual", "missing endpoint", "wrong identity", "cycle", "stale provider cannot invent edge", "stale provider cannot remove edge", "budget", "memory", "canceled"} {
+		t.Run(kind, func(t *testing.T) {
+			root, err := Parse(bytes.Clone(files["HierarchyOwner.class"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			data := map[string][]byte{}
+			for n, b := range files {
+				data[n] = bytes.Clone(b)
+			}
+			d := NewClassObjectDumper(root)
+			d.FuncCtx = &class_context.ClassContext{}
+			actual, formal := "LHierarchyLeaf;", "LHierarchyRoot;"
+			want := true
+			switch kind {
+			case "identity":
+				formal = actual
+			case "object":
+				formal = "Ljava/lang/Object;"
+			case "interface":
+				formal = "LHierarchyMarker;"
+			case "reference covariance":
+				actual, formal = "[[LHierarchyLeaf;", "[[LHierarchyRoot;"
+			case "primitive matrix covariance":
+				actual, formal = "[[I", "[Ljava/lang/Object;"
+			case "array marker":
+				actual, formal = "[I", "Ljava/lang/Cloneable;"
+			case "narrowing":
+				actual, formal, want = "LHierarchyRoot;", "LHierarchyLeaf;", false
+			case "primitive":
+				actual, formal, want = "I", "J", false
+			case "array narrowing":
+				actual, formal, want = "[Ljava/lang/Object;", "[Ljava/lang/String;", false
+			case "primitive array narrowing":
+				actual, formal, want = "[I", "[J", false
+			case "missing actual":
+				delete(data, "HierarchyLeaf.class")
+				want = false
+			case "missing endpoint":
+				delete(data, "HierarchyRoot.class")
+				want = false
+			case "wrong identity":
+				data["HierarchyLeaf.class"] = bytes.Clone(data["HierarchyRoot.class"])
+				want = false
+			case "cycle":
+				leaf, err := Parse(bytes.Clone(data["HierarchyLeaf.class"]))
+				if err != nil {
+					t.Fatal(err)
+				}
+				leaf.SuperClass = leaf.ThisClass
+				data["HierarchyLeaf.class"] = leaf.Bytes()
+				want = false
+			case "stale provider cannot invent edge":
+				actual, formal, want = "LHierarchyRoot;", "LHierarchyLeaf;", false
+				d.FuncCtx.InvocationMetadata = func(n string) (callbinding.Class, bool) {
+					return callbinding.Class{Name: n, Parents: []string{"HierarchyLeaf"}, ParentsComplete: true}, true
+				}
+			case "stale provider cannot remove edge":
+				d.FuncCtx.InvocationMetadata = func(string) (callbinding.Class, bool) { return callbinding.Class{}, false }
+			case "budget":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+				want = false
+			case "memory":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+				want = false
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				d.Work = workbudget.New(ctx, workbudget.Limits{})
+				want = false
+			}
+			d.foldSiblingResolver = func(n string) ([]byte, bool) { b, ok := data[n+".class"]; return bytes.Clone(b), ok }
+			if got := d.nativeMethodLocalDelegationArgumentAssignable(d.nativeMethodLocalDelegationWideningQuery(), actual, formal); got != want {
+				t.Fatal("original reference conversion", kind, got, want)
+			}
+		})
+	}
+}
+
+func TestAdversarialMethodLocalDelegationCastPacketRetainsOriginalTarget(t *testing.T) {
+	files := nativeCompileClasses(t, `class CastParent{CastParent(Object[]x){}}class CastOwner{Object make(final String[][]x){class Entry extends CastParent{Entry(){super((Object[])x);}Object capture(){return x;}}return new Entry();}}`)
+	for _, kind := range []string{"original", "different cast", "duplicate cast", "cast calculation", "default certificate"} {
+		t.Run(kind, func(t *testing.T) {
+			child, err := Parse(bytes.Clone(files["CastOwner$1Entry.class"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, err := Parse(bytes.Clone(files["CastOwner.class"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var code *CodeAttribute
+			for _, m := range child.Methods {
+				if n, _ := sourceBridgeUTF8(child, m.NameIndex); n == "<init>" {
+					for _, a := range m.Attributes {
+						if c, ok := a.(*CodeAttribute); ok {
+							code = c
+						}
+					}
+				}
+			}
+			if code == nil {
+				t.Fatal("original constructor")
+			}
+			d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(child.ConstantPool, i) })
+			if err := d.ParseOpcode(); err != nil {
+				t.Fatal(err)
+			}
+			pc := -1
+			for _, op := range constructorMotionOps(d) {
+				if op.Instr.OpCode == core.OP_CHECKCAST {
+					if pc >= 0 {
+						t.Fatal("ambiguous cast")
+					}
+					pc = int(op.CurrentOffset)
+				}
+			}
+			if pc < 0 {
+				t.Fatal("original array widening cast")
+			}
+			switch kind {
+			case "different cast":
+				index := child.ConstantPoolManager.AddNewClassInfo("[[Ljava/lang/String;")
+				code.Code[pc+1], code.Code[pc+2] = byte(index>>8), byte(index)
+			case "duplicate cast":
+				code.Code = append(append(append([]byte{}, code.Code[:pc]...), code.Code[pc:pc+3]...), code.Code[pc:]...)
+			case "cast calculation":
+				code.Code[pc] = byte(core.OP_INSTANCEOF)
+			}
+			if kind == "default certificate" {
+				if _, known := originalMethodLocalDefaultConstructor(child, owner, nil); known {
+					t.Fatal("explicit cast packet cannot become default constructor")
+				}
+				return
+			}
+			packet, known := originalMethodLocalSourceConstructor(child, owner, nil)
+			if kind == "original" {
+				if !known || len(packet.delegateCasts) != 1 || packet.delegateCasts[0] != "[Ljava/lang/Object;" {
+					t.Fatal("original complete cast packet", packet, known)
+				}
+			} else if known {
+				t.Fatal("altered cast packet admitted", kind, packet)
 			}
 		})
 	}
