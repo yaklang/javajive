@@ -117,7 +117,23 @@ func nativeBinaryShape(t *testing.T, raw []byte) string {
 	for _, field := range obj.Fields {
 		n, _ := obj.getUtf8(field.NameIndex)
 		d, _ := obj.getUtf8(field.DescriptorIndex)
-		rows = append(rows, fmt.Sprintf("F %s %s %x", n, d, field.AccessFlags))
+		// ABI observes isSynthetic, not which equivalent classfile encoding
+		// supplied it. Keep this oracle independent of production normalization.
+		flags := field.AccessFlags
+		markers := 0
+		for _, attribute := range field.Attributes {
+			if marker, ok := attribute.(*SyntheticAttribute); ok {
+				if marker == nil || marker.AttrLen != 0 {
+					t.Fatal("malformed Synthetic field evidence")
+				}
+				markers++
+				flags |= 0x1000
+			}
+		}
+		if markers > 1 {
+			t.Fatal("duplicate Synthetic field evidence")
+		}
+		rows = append(rows, fmt.Sprintf("F %s %s %x", n, d, flags))
 	}
 	for _, method := range obj.Methods {
 		n, _ := obj.getUtf8(method.NameIndex)

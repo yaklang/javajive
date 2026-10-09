@@ -134,6 +134,11 @@ func TestAdversarialConstructorClosedMethodCannotSubstituteOpenDispatch(t *testi
 
 func testIndependentFlatClosedCalleeFamily(t *testing.T, fixture, prefix, expected string, owners []string) {
 	t.Helper()
+	testIndependentFlatMutatedClosedCalleeFamily(t, fixture, prefix, expected, owners, nil)
+}
+
+func testIndependentFlatMutatedClosedCalleeFamily(t *testing.T, fixture, prefix, expected string, owners []string, mutate func(*testing.T, map[string][]byte)) {
+	t.Helper()
 	javac, java := t04Tools(t)
 	owned := map[string]bool{}
 	for _, owner := range owners {
@@ -148,6 +153,9 @@ func testIndependentFlatClosedCalleeFamily(t *testing.T, fixture, prefix, expect
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
 			files := nativeCompileDebugClasses(t, fixture, debug)
+			if mutate != nil {
+				mutate(t, files)
+			}
 			original := t.TempDir()
 			var names []string
 			for name, raw := range files {

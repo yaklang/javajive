@@ -233,7 +233,7 @@ func nativeAnonymousConstructorWithRoles(obj *ClassObject, owner, method, assert
 		}
 		slot := core.GetRetrieveIdx(ops[i+1])
 		param, known := slots[slot]
-		if core.GetRetrieveIdx(ops[i]) != 0 || !constructorMotionLoad(ops[i], "Ljava/lang/Object;") || !known || !constructorMotionLoad(ops[i+1], ps[param]) || mem.Name != obj.GetClassName() || mem.Description != ps[param] || !constructorMotionField(obj, mem, true) {
+		if core.GetRetrieveIdx(ops[i]) != 0 || !constructorMotionLoad(ops[i], "Ljava/lang/Object;") || !known || !constructorMotionLoad(ops[i+1], ps[param]) || mem.Name != obj.GetClassName() || mem.Description != ps[param] || !constructorMotionField(obj, mem, true, work) {
 			return nil
 		}
 		if _, dup := c.fields[mem.Member]; dup {

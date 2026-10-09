@@ -8,6 +8,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // A flattened inner class cannot write captures before super in Java source.
@@ -54,7 +55,7 @@ func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBound
 		}
 		slot := core.GetRetrieveIdx(ops[index+1])
 		member := constructorMotionMember(c.obj, ops[index+2], core.OP_PUTFIELD)
-		if core.GetRetrieveIdx(ops[index]) != 0 || !constructorMotionLoad(ops[index], "Ljava/lang/Object;") || refs[slot] == nil || !constructorMotionLoad(ops[index+1], params[slots[slot]]) || values.UnpackSoltValue(assign.JavaValue) != refs[slot] || member == nil || member.Name != c.obj.GetClassName() || member.Member != field.Member || member.Description != params[slots[slot]] || !constructorMotionField(c.obj, member, true) {
+		if core.GetRetrieveIdx(ops[index]) != 0 || !constructorMotionLoad(ops[index], "Ljava/lang/Object;") || refs[slot] == nil || !constructorMotionLoad(ops[index+1], params[slots[slot]]) || values.UnpackSoltValue(assign.JavaValue) != refs[slot] || member == nil || member.Name != c.obj.GetClassName() || member.Member != field.Member || member.Description != params[slots[slot]] || !constructorMotionField(c.obj, member, true, c.Work) {
 			return false
 		}
 		key := member.Name + "\x00" + member.Member + "\x00" + member.Description
@@ -178,19 +179,26 @@ func constructorMotionLoad(op *core.OpCode, descriptor string) bool {
 	return opcode == core.OP_ILOAD+category || opcode >= core.OP_ILOAD_0+category*4 && opcode < core.OP_ILOAD_0+category*4+4
 }
 
-func constructorMotionField(obj *ClassObject, member *values.JavaClassMember, capture bool) bool {
-	if member == nil || member.Name != obj.GetClassName() {
+func constructorMotionField(obj *ClassObject, member *values.JavaClassMember, capture bool, work *workbudget.Budget) bool {
+	if obj == nil || member == nil || member.Name != obj.GetClassName() {
 		return false
 	}
 	count := 0
 	for _, field := range obj.Fields {
+		if field == nil || !nativeProofWork(work, 1) {
+			return false
+		}
 		name, _ := obj.getUtf8(field.NameIndex)
 		desc, _ := obj.getUtf8(field.DescriptorIndex)
 		if name != member.Member || desc != member.Description {
 			continue
 		}
 		count++
-		if field.AccessFlags&(0x0008|0x0040) != 0 || capture && field.AccessFlags&(0x0010|0x1000) != (0x0010|0x1000) {
+		// Original Synthetic attributes and ACC_SYNTHETIC identify the same
+		// JVM storage. Normalize evidence without changing parsed metadata;
+		// malformed or duplicate markers cannot certify capture movement.
+		flags, _, known := nativeMemberEffectiveFieldFlags(field, work)
+		if !known || flags&(0x0008|0x0040) != 0 || capture && flags&(0x0010|0x1000) != (0x0010|0x1000) {
 			return false
 		}
 		// The movement proof concerns the erased, original field storage and

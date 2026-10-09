@@ -107,7 +107,7 @@ func originalMethodLocalDefaultConstructor(obj, enclosing *ClassObject, work *wo
 		}
 		slot := core.GetRetrieveIdx(ops[cursor+1])
 		param, found := slots[slot]
-		if !nativeProofWork(work, 3) || !constructorMotionLoad(ops[cursor], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[cursor]) != 0 || !found || !constructorMotionLoad(ops[cursor+1], params[param]) || field.Name != obj.GetClassName() || field.Description != params[param] || !constructorMotionField(obj, field, true) || used[param] {
+		if !nativeProofWork(work, 3) || !constructorMotionLoad(ops[cursor], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[cursor]) != 0 || !found || !constructorMotionLoad(ops[cursor+1], params[param]) || field.Name != obj.GetClassName() || field.Description != params[param] || !constructorMotionField(obj, field, true, work) || used[param] {
 			return nil, false
 		}
 		if _, duplicate := plan.captures[field.Member]; duplicate {
