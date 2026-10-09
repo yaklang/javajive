@@ -235,6 +235,7 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 	sites := 0
 	implBodies := 0
 	var localSite *nativeLambdaLocalCaptureSite
+	var factories []*nativeLambdaLocalCaptureSite
 	for _, m := range object.Methods {
 		n, _ := sourceBridgeUTF8(object, m.NameIndex)
 		md, _ := sourceBridgeUTF8(object, m.DescriptorIndex)
@@ -446,21 +447,28 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 				if !nativeEnumSelectorParametersUnchanged(ops, used) {
 					return false
 				}
+				factory := &nativeLambdaLocalCaptureSite{method: m, code: code, pc: int(op.CurrentOffset), operands: operands}
 				if hasLocal {
-					if localSite != nil {
-						return false
-					}
-					localSite = &nativeLambdaLocalCaptureSite{method: m, code: code, pc: int(op.CurrentOffset), operands: operands}
+					localSite = factory
 				}
+				if sites >= 64 || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(sites+1)*128) != nil {
+					return false
+				}
+				factories = append(factories, factory)
 				sites++
 			}
 		}
 	}
-	if sites != 1 || implBodies != 1 {
+	if sites == 0 || implBodies != 1 || sites != 1 && context.factorySites == nil {
 		return false
 	}
-	if localSite != nil {
+	// Allocation-scope callers without source certificates retain their unique
+	// lexical site rule. Only the member renderer can close multiple factories.
+	if sites == 1 && localSite != nil {
 		context.localCaptures[name+desc] = localSite
+	}
+	if context.factorySites != nil {
+		context.factorySites[name+desc] = factories
 	}
 	return true
 }

@@ -45,6 +45,9 @@ func nativeMemberLambdaImplementation(child *nativeMemberClass, method *MemberIn
 	}
 	name, nok := sourceBridgeUTF8(child.object, method.NameIndex)
 	desc, dok := sourceBridgeUTF8(child.object, method.DescriptorIndex)
+	if child.lambdaContext.factorySites == nil {
+		child.lambdaContext.factorySites = map[string][]*nativeLambdaLocalCaptureSite{}
+	}
 	if child.lambdaContext.localCaptures == nil {
 		child.lambdaContext.localCaptures = map[string]*nativeLambdaLocalCaptureSite{}
 	}
@@ -142,6 +145,13 @@ func nativeMemberLambdaSourceClosed(child *nativeMemberClass, dumper *ClassObjec
 		}
 		name, nok := sourceBridgeUTF8(child.object, method.NameIndex)
 		desc, dok := sourceBridgeUTF8(child.object, method.DescriptorIndex)
+		factories := child.lambdaContext.factorySites[name+desc]
+		if len(factories) > 1 {
+			if !nok || !dok || !slices.Contains(dumper.lambdaMethods[name], desc) || !nativeLambdaFactorySourcesClosed(method, factories, dumper, work) {
+				return false
+			}
+			continue
+		}
 		body := dumper.dumpedMethodsSet[fmt.Sprintf("name:%s,desc:%s", name, desc)]
 		if !nok || !dok || !slices.Contains(dumper.lambdaMethods[name], desc) || body == nil || body.member != method || body.bodyCode == "stub" || body.checkedEscape || strings.Contains(body.code, DecompileStubMarker) {
 			return false
@@ -160,6 +170,9 @@ type nativeLambdaImplementationContext struct {
 	resolve       func(string) (*ClassObject, bool)
 	metadata      callbinding.Provider
 	localCaptures map[string]*nativeLambdaLocalCaptureSite
+	// Multiple physical factories are one implementation, but not one source
+	// capture environment. All sites must be consumed independently.
+	factorySites map[string][]*nativeLambdaLocalCaptureSite
 	// Only a completed original anonymous constructor packet may replace a
 	// hidden captured field by its enclosing effectively-final declaration.
 	anonymousCaptures *nativeAnonymousClass

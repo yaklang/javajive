@@ -69,6 +69,9 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	if d == nil || d.FunctionContext == nil {
 		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "lambda reconstruction requires decompiler context", resultType)
 	}
+	previousOrigin := d.lambdaFactoryOrigin
+	d.lambdaFactoryOrigin = &req.OriginPC
+	defer func() { d.lambdaFactoryOrigin = previousOrigin }()
 	// The existing complete declaration proof can target marker lambdas. A
 	// descriptor-only partial target would cast a separately-created lambda,
 	// losing the marker at its creation site. Preserve the existing poly form.
@@ -247,7 +250,7 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 			}
 		}
 	}
-	methodStr, err := dumpLambdaWithReferenceAdapter(d, impl, captured, resultType, static)
+	methodStr, err := dumpLambdaWithReferenceAdapter(d, impl, captured, resultType, static, req.OriginPC)
 	if err != nil {
 		return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", impl.Name, impl.Member, err)
 	}

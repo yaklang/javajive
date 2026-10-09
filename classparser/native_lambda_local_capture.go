@@ -16,13 +16,14 @@ type nativeLambdaLocalCaptureSite struct {
 	operands []*nativeEnumSelectorProducer
 }
 type nativeLambdaLocalCaptureSource struct {
-	method       *MemberInfo
-	code         *CodeAttribute
-	factoryPC    int
-	hasFactoryPC bool
-	context      class_context.ClassContext
-	values       []values.JavaValue
-	body         []statements.Statement
+	method             *MemberInfo
+	code               *CodeAttribute
+	factoryPC          int
+	hasFactoryPC       bool
+	context            class_context.ClassContext
+	values             []values.JavaValue
+	body               []statements.Statement
+	implementationBody *dumpedMethods
 }
 
 // Java captures an effectively-final local reference once at the factory
@@ -87,6 +88,20 @@ func nativeLambdaLocalDefinitionsClosed(ops []*core.OpCode, read *nativeEnumLoca
 func (c *ClassObjectDumper) recordNativeLambdaLocalCaptureBody(method *MemberInfo, code *CodeAttribute, body []statements.Statement) bool {
 	if c == nil || len(c.nativeLambdaLocalSources) > 4096 {
 		return false
+	}
+	if len(c.nativeLambdaFactorySources) > 4096 {
+		return false
+	}
+	for _, record := range c.nativeLambdaFactorySources {
+		if !nativeProofWork(c.Work, 1) || record == nil {
+			return false
+		}
+		if record.method == method && record.code == code {
+			if record.body != nil || len(body) > 8192 || c.Work != nil && c.Work.CheckAlloc(int64(len(body))*16) != nil {
+				return false
+			}
+			record.body = append([]statements.Statement(nil), body...)
+		}
 	}
 	for _, record := range c.nativeLambdaLocalSources {
 		if !nativeProofWork(c.Work, 1) || record == nil {

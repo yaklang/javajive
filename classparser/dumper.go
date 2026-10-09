@@ -99,8 +99,10 @@ type ClassObjectDumper struct {
 	// parameters (Function<? super T, R> becomes raw Function). Before simulating that hidden
 	// method, project same-erasure parameterized capture types back onto those parameters so its
 	// body is rendered under the source-level generic contract.
-	lambdaCaptureTypes       map[string][]types.JavaType
-	nativeLambdaLocalSources map[string]*nativeLambdaLocalCaptureSource
+	lambdaCaptureTypes         map[string][]types.JavaType
+	nativeLambdaLocalSources   map[string]*nativeLambdaLocalCaptureSource
+	nativeLambdaFactorySources map[*nativeLambdaLocalCaptureSite]*nativeLambdaLocalCaptureSource
+	nativeLambdaBodySite       *nativeLambdaLocalCaptureSite
 	// lambdaLocalSeq hands each inlined lambda body a unique id so its own locals can be renamed
 	// into a private `lv<seq>_<n>` namespace. A lambda arrow body is spliced INLINE into the
 	// enclosing method, and Java forbids a local declared in the lambda body from shadowing a
@@ -3635,6 +3637,11 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 
 func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id *utils2.VariableId, adapter *core.LambdaReferenceAdapter) (*dumpedMethods, error) {
 	traitId := fmt.Sprintf("name:%s,desc:%s", methodName, desc)
+	if site := c.nativeLambdaBodySite; site != nil {
+		// Identical erased helpers can be rendered with distinct source capture
+		// types and binders. Never reuse a body from another physical factory.
+		traitId += fmt.Sprintf(",factory:%p:%p:%d", site.method, site.code, site.pc)
+	}
 	if adapter != nil {
 		traitId += ",sam:" + adapter.ErasedDescriptor + ",inst:" + adapter.InstantiatedDescriptor
 	}

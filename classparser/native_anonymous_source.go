@@ -593,6 +593,7 @@ func nativeAnonymousConstructorRolesWithLambdas(obj *ClassObject, owner, method,
 		// constructor and capture declarations above establish this context.
 		context := lambda.lambdaContext
 		context.localCaptures = nil
+		context.factorySites = nil
 		context.anonymousCaptures = c
 		view := &nativeMemberClass{object: obj, lambdaContext: context}
 		for _, implementation := range lambdaMethods {

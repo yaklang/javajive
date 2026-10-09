@@ -95,6 +95,7 @@ func nativeAnonymousLambdaHandlesClosed(child *nativeAnonymousClass, index *nati
 	// target in this handle closure, with an empty local-capture proof cache.
 	context := view.lambdaContext
 	context.localCaptures = nil
+	context.factorySites = nil
 	fresh := &nativeMemberClass{object: child.object, lambdaContext: context}
 	for _, target := range targets {
 		if !nativeProofWork(work, 1) || target.referencer != owner || !target.methodRef || target.kind != 6 {

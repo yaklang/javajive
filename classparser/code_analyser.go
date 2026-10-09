@@ -206,8 +206,9 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 	parser := core.NewDecompiler(codeAttr.Code, func(id int) values.JavaValue {
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
-	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter) (string, error) {
-		if !dumper.recordNativeLambdaLocalCaptureSource(name, desc, codeAttr, captured) {
+	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int, hasPC bool) (string, error) {
+		site, closed := dumper.recordNativeLambdaFactorySource(name, desc, codeAttr, captured, pc, hasPC)
+		if !closed {
 			return "", fmt.Errorf("original lambda local capture source is not closed")
 		}
 		dumper.lambdaMethods[name] = append(dumper.lambdaMethods[name], desc)
@@ -251,16 +252,27 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 				dumper.CurrentMethod = savedCurrentMethod
 			}()
 		}
+		previousSite := dumper.nativeLambdaBodySite
+		dumper.nativeLambdaBodySite = site
+		defer func() { dumper.nativeLambdaBodySite = previousSite }()
 		dumped, err := dumper.dumpMethodWithInitialId(name, desc, id, adapter)
 		if err != nil {
 			return "", err
 		}
+		if site != nil {
+			dumper.nativeLambdaFactorySources[site].implementationBody = dumped
+		}
 		return dumped.code, nil
 	}
 	parser.DumpClassLambdaMethod = func(name, desc string, id *utils.VariableId, captured []values.JavaValue) (string, error) {
-		return dumpLambda(name, desc, id, captured, nil)
+		return dumpLambda(name, desc, id, captured, nil, 0, false)
 	}
-	parser.DumpClassLambdaMethodWithAdapter = dumpLambda
+	parser.DumpClassLambdaMethodWithAdapter = func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter) (string, error) {
+		return dumpLambda(name, desc, id, captured, adapter, 0, false)
+	}
+	parser.DumpClassLambdaMethodAtOrigin = func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int) (string, error) {
+		return dumpLambda(name, desc, id, captured, adapter, pc, true)
+	}
 	parser.BaseVarId = id
 	parser.Aggressive = dumper.aggressive
 	parser.FunctionContext = dumper.FuncCtx

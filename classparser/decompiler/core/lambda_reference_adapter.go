@@ -16,14 +16,20 @@ type LambdaReferenceAdapter struct {
 	InstantiatedDescriptor string
 }
 
-func dumpLambdaWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember, captured []values.JavaValue, raw types.JavaType, static []values.JavaValue) (string, error) {
-	if len(static) >= 3 && d.DumpClassLambdaMethodWithAdapter != nil && !d.blockPartialFunctionalTarget {
+func dumpLambdaWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember, captured []values.JavaValue, raw types.JavaType, static []values.JavaValue, origin ...int) (string, error) {
+	var adapter *LambdaReferenceAdapter
+	if len(static) >= 3 && !d.blockPartialFunctionalTarget {
 		erased, actual := t19MethodTypeDesc(static[0]), t19MethodTypeDesc(static[2])
 		unbox := UnboxingLambdaAdapterProven(impl.Description, erased, actual, len(captured), impl.RefKind)
 		if unbox || (inferDeclaredLambdaTarget(d, raw, static[0], static[2]) == nil && ReferenceLambdaAdapterProven(impl.Description, erased, actual, len(captured), impl.RefKind)) {
-			return d.DumpClassLambdaMethodWithAdapter(impl.Member, impl.Description, utils.NewRootVariableId(), captured,
-				&LambdaReferenceAdapter{ErasedDescriptor: erased, InstantiatedDescriptor: actual})
+			adapter = &LambdaReferenceAdapter{ErasedDescriptor: erased, InstantiatedDescriptor: actual}
 		}
+	}
+	if len(origin) == 1 && d.DumpClassLambdaMethodAtOrigin != nil {
+		return d.DumpClassLambdaMethodAtOrigin(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter, origin[0])
+	}
+	if adapter != nil && d.DumpClassLambdaMethodWithAdapter != nil {
+		return d.DumpClassLambdaMethodWithAdapter(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter)
 	}
 	return d.DumpClassLambdaMethod(impl.Member, impl.Description, utils.NewRootVariableId(), captured)
 }
