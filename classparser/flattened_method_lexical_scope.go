@@ -191,7 +191,11 @@ func (c *ClassObjectDumper) flattenedLocalOwnerRows(child, parent *ClassObject) 
 							return false
 						}
 					}
-					if count != 1 || row.OuterClassInfoIndex != 0 || row.InnerClassAccessFlags&StaticFlag != 0 {
+					// Older javac emits ACC_STATIC here for anonymous classes
+					// in static contexts. This binary-row flag is corroborated
+					// across both tables, but it does not establish a lexical
+					// scope cut. The exact original enclosing method above does.
+					if count != 1 || row.OuterClassInfoIndex != 0 {
 						return false
 					}
 					if corroborate {

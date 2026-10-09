@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"strings"
@@ -16,11 +17,11 @@ func TestAdversarialFlattenedMethodFormalsRequireOriginalFullDeclaration(t *test
 	files := nativeCompileClasses(t, fixture)
 	for _, kind := range []string{"original", "missing owner", "foreign owner", "missing method", "duplicate method", "duplicate method signature", "bad method grammar", "wrong signature erasure", "wrong descriptor", "bad CP kind", "duplicate EnclosingMethod", "missing EnclosingMethod", "bad attribute length", "bad attribute packet", "pre49 version", "missing self row", "duplicate self row", "foreign outer row", "static self row", "missing owner row", "duplicate owner row", "wrong owner row flags", "budget", "memory", "canceled"} {
 		t.Run(kind, func(t *testing.T) {
-			child, e := Parse(files["ErasureCaptureOwner$1.class"])
+			child, e := Parse(bytes.Clone(files["ErasureCaptureOwner$1.class"]))
 			if e != nil {
 				t.Fatal(e)
 			}
-			parent, e := Parse(files["ErasureCaptureOwner.class"])
+			parent, e := Parse(bytes.Clone(files["ErasureCaptureOwner.class"]))
 			if e != nil {
 				t.Fatal(e)
 			}

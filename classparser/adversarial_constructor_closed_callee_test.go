@@ -139,6 +139,13 @@ func testIndependentFlatClosedCalleeFamily(t *testing.T, fixture, prefix, expect
 
 func testIndependentFlatMutatedClosedCalleeFamily(t *testing.T, fixture, prefix, expected string, owners []string, mutate func(*testing.T, map[string][]byte)) {
 	t.Helper()
+	testIndependentFlatCompilerClosedCalleeFamily(t, func(debug string) map[string][]byte {
+		return nativeCompileDebugClasses(t, fixture, debug)
+	}, prefix, expected, owners, mutate)
+}
+
+func testIndependentFlatCompilerClosedCalleeFamily(t *testing.T, compile func(string) map[string][]byte, prefix, expected string, owners []string, mutate func(*testing.T, map[string][]byte)) {
+	t.Helper()
 	javac, java := t04Tools(t)
 	owned := map[string]bool{}
 	for _, owner := range owners {
@@ -152,7 +159,7 @@ func testIndependentFlatMutatedClosedCalleeFamily(t *testing.T, fixture, prefix,
 	}
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
-			files := nativeCompileDebugClasses(t, fixture, debug)
+			files := compile(debug)
 			if mutate != nil {
 				mutate(t, files)
 			}
