@@ -61,7 +61,24 @@ func (c *ClassObjectDumper) constructorReceiverClosedMethod(obj *ClassObject, me
 			code = candidate
 		}
 	}
-	if code == nil || int(code.MaxLocals) < nativeMemberParameterWidth(params)+1 || len(code.Code) > *remaining || !nativeProofWork(c.Work, int64(len(code.Code))) || c.Work != nil && c.Work.CheckAlloc((int64(code.MaxLocals)+int64(code.MaxStack))*32) != nil {
+	if code == nil || int(code.MaxLocals) < nativeMemberParameterWidth(params)+1 {
+		return constructorEffectValue{}, false
+	}
+	evidence := c.constructorProfileEvidence
+	memoKey, memoEligible := c.constructorClosedBodyKey(obj, target, code, arguments, writes, active, remaining, depth)
+	var epoch uint64
+	if memoEligible {
+		epoch = evidence.observationEpoch
+		if prior, known := evidence.closedBodies[memoKey]; known && prior.providerEpoch == evidence.providerEpoch {
+			aliases.selfStored = aliases.selfStored || prior.selfStored
+			aliases.referenceRead = aliases.referenceRead || prior.referenceRead
+			if !aliases.closed() {
+				return constructorEffectValue{}, false
+			}
+			return constructorEffectType(result), true
+		}
+	}
+	if len(code.Code) > *remaining || !nativeProofWork(c.Work, int64(len(code.Code))) || c.Work != nil && c.Work.CheckAlloc((int64(code.MaxLocals)+int64(code.MaxStack))*32) != nil {
 		return constructorEffectValue{}, false
 	}
 	decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
@@ -72,6 +89,21 @@ func (c *ClassObjectDumper) constructorReceiverClosedMethod(obj *ClassObject, me
 	ops := constructorMotionOps(decoder)
 	if len(ops) > *remaining || !c.constructorReceiverBodyEffectsWithStorage(obj, code, ops, member.Description, writes, active, remaining, depth, aliases, true, arguments...) || !aliases.closed() {
 		return constructorEffectValue{}, false
+	}
+	if memoEligible && evidence.eligible && !evidence.inconsistent && evidence.observationEpoch == epoch {
+		retained := int64(128 + len(memoKey.operands))
+		if _, existing := evidence.closedBodies[memoKey]; existing {
+			retained = 0
+		}
+		*remaining--
+		if *remaining < 0 || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(evidence.parsedRetention+evidence.bodyRetention+retained) != nil {
+			return constructorEffectValue{}, false
+		}
+		if evidence.closedBodies == nil {
+			evidence.closedBodies = map[constructorClosedBodyKey]constructorClosedBodyMemo{}
+		}
+		evidence.bodyRetention += retained
+		evidence.closedBodies[memoKey] = constructorClosedBodyMemo{providerEpoch: evidence.providerEpoch, selfStored: aliases.selfStored, referenceRead: aliases.referenceRead}
 	}
 	return constructorEffectType(result), true
 }

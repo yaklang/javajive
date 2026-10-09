@@ -1,7 +1,9 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"encoding/binary"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"sort"
 	"strings"
 
@@ -61,7 +63,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		d.constructorProfileEvidence = evidence
 		platformUsed := false
 		d.foldSiblingResolver = func(name string) ([]byte, bool) {
-			evidence.observed()
+			evidence.providerObserved()
 			if c.foldSiblingResolver != nil {
 				if raw, ok := c.foldSiblingResolver(name); ok {
 					evidence.original(&d, name, raw)
@@ -182,8 +184,51 @@ func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, 
 	if !ok {
 		return nil, false
 	}
+	e := c.constructorProfileEvidence
+	certified := false
+	if e != nil && e.inBody && e.eligible && !e.inconsistent {
+		_, certified = e.originals[owner]
+	}
+	var retained, itemsBefore int64
+	if certified {
+		// Own the provider snapshot. A later callback cannot mutate this parsed
+		// body's byte slices through a buffer returned by an earlier lookup.
+		var err error
+		retained, err = workbudget.CheckedProduct(int64(len(raw)), 4)
+		max := int64(^uint64(0) >> 1)
+		if err != nil || e.parsedRetention > max-e.bodyRetention || retained > max-e.parsedRetention-e.bodyRetention {
+			return nil, false
+		}
+		if !nativeProofWork(c.Work, 1) || c.Work != nil && (c.Work.Charge(workbudget.CounterReadBytes, int64(len(raw))) != nil || c.Work.CheckAlloc(e.parsedRetention+e.bodyRetention+retained) != nil) {
+			return nil, false
+		}
+		raw = bytes.Clone(raw)
+		itemsBefore = c.Work.Used(workbudget.CounterParseItems)
+	}
 	obj, err := c.parseResolved(raw)
-	return obj, err == nil && obj != nil && obj.GetClassName() == owner
+	if err != nil || obj == nil || obj.GetClassName() != owner {
+		return nil, false
+	}
+	if certified {
+		// Parser items are already a logical work bound (not a general heap quota).
+		// Include their retained metadata and the owned bytes cumulatively in the
+		// existing intermediate-allocation guard, rather than one class at a time.
+		metadata, err := workbudget.CheckedProduct(c.Work.Used(workbudget.CounterParseItems)-itemsBefore, 128)
+		if err != nil || retained > int64(^uint64(0)>>1)-metadata-32 {
+			return nil, false
+		}
+		retained += metadata + 32
+		if e.parsedRetention > int64(^uint64(0)>>1)-retained-e.bodyRetention || c.Work != nil && c.Work.CheckAlloc(e.parsedRetention+retained+e.bodyRetention) != nil {
+			return nil, false
+		}
+		if e.parsedOriginals == nil {
+			e.parsedOriginals = map[*ClassObject]bool{}
+		}
+		e.parsedOriginals[obj] = true
+		e.parsedRetention += retained
+	}
+
+	return obj, true
 }
 
 // A Fieldref may name a subclass while resolving to an ancestor's field. Bind

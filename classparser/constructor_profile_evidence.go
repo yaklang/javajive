@@ -24,7 +24,10 @@ type constructorProfileEvidence struct {
 	rootName, rootSuper             string
 	rootFlags                       uint16
 	finalizerSilent                 bool
-	observationEpoch                uint64
+	observationEpoch, providerEpoch uint64
+	parsedOriginals                 map[*ClassObject]bool
+	closedBodies                    map[constructorClosedBodyKey]constructorClosedBodyMemo
+	parsedRetention, bodyRetention  int64
 }
 
 // A local path proof can be reused without replay only while no external
@@ -33,6 +36,17 @@ type constructorProfileEvidence struct {
 func (e *constructorProfileEvidence) observed() {
 	e.observationEpoch++
 	if e.observationEpoch == 0 {
+		e.eligible, e.inconsistent = false, true
+	}
+}
+
+// Root-absence queries are internal reads whose binding is checked on every
+// call. Provider/metadata callbacks can also mutate parsed metadata borrowed
+// from their original bytes, so body certificates have a separate epoch.
+func (e *constructorProfileEvidence) providerObserved() {
+	e.observed()
+	e.providerEpoch++
+	if e.providerEpoch == 0 {
 		e.eligible, e.inconsistent = false, true
 	}
 }
@@ -82,7 +96,7 @@ func (e *constructorProfileEvidence) record(c *ClassObjectDumper, observation co
 
 func (e *constructorProfileEvidence) metadata(provider callbinding.Provider) callbinding.Provider {
 	return func(name string) (callbinding.Class, bool) {
-		e.observed()
+		e.providerObserved()
 		if name == "java/lang/Object" {
 			e.bootstrapUsed = true
 		} else {
