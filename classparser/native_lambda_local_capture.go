@@ -16,11 +16,13 @@ type nativeLambdaLocalCaptureSite struct {
 	operands []*nativeEnumSelectorProducer
 }
 type nativeLambdaLocalCaptureSource struct {
-	method  *MemberInfo
-	code    *CodeAttribute
-	context class_context.ClassContext
-	values  []values.JavaValue
-	body    []statements.Statement
+	method       *MemberInfo
+	code         *CodeAttribute
+	factoryPC    int
+	hasFactoryPC bool
+	context      class_context.ClassContext
+	values       []values.JavaValue
+	body         []statements.Statement
 }
 
 // Java captures an effectively-final local reference once at the factory
@@ -107,17 +109,21 @@ func (c *ClassObjectDumper) recordNativeLambdaLocalCaptureSource(name, desc stri
 	if c == nil {
 		return false
 	}
-	if c.nativeMemberCurrent == nil {
+	current := c.nativeMemberCurrent
+	if current == nil {
+		current = c.nativeAnonymousLambdaCurrent
+	}
+	if current == nil {
 		return true
 	}
-	site := c.nativeMemberCurrent.lambdaContext.localCaptures[name+desc]
+	site := current.lambdaContext.localCaptures[name+desc]
 	if site == nil {
 		return true
 	}
-	if c.nativeMemberCurrent.object != c.obj || c.FuncCtx == nil || c.CurrentMethod != site.method || code != site.code || c.nativeLambdaLocalSources[name+desc] != nil || len(captured) != len(site.operands) || !nativeProofWork(c.Work, int64(len(captured))) || c.Work != nil && c.Work.CheckAlloc(int64(len(captured))*64+512) != nil {
+	if current.object != c.obj || c.FuncCtx == nil || c.CurrentMethod != site.method || code != site.code || c.nativeLambdaLocalSources[name+desc] != nil || len(captured) != len(site.operands) || !nativeProofWork(c.Work, int64(len(captured))) || c.Work != nil && c.Work.CheckAlloc(int64(len(captured))*64+512) != nil {
 		return false
 	}
-	record := &nativeLambdaLocalCaptureSource{method: c.CurrentMethod, code: code, context: *c.FuncCtx, values: append([]values.JavaValue(nil), captured...)}
+	record := &nativeLambdaLocalCaptureSource{method: c.CurrentMethod, code: code, factoryPC: site.pc, hasFactoryPC: true, context: *c.FuncCtx, values: append([]values.JavaValue(nil), captured...)}
 	// Stack simulation requests this body before the enclosing method builds
 	// its STORE declaration nodes. Keep the actual operands now; the family's
 	// publication certificate checks them only after that full render.
@@ -133,6 +139,12 @@ func nativeLambdaLocalCaptureSourceClosed(site *nativeLambdaLocalCaptureSite, so
 		return false
 	}
 	for i, operand := range site.operands {
+		if operand != nil && operand.opcode == core.OP_GETFIELD && operand.owner != "" {
+			if !source.hasFactoryPC || source.factoryPC != site.pc || !nativeAnonymousLambdaCaptureSource(operand, source.values[i], site.pc, i, &source.context, work) {
+				return false
+			}
+			continue
+		}
 		if operand != nil && operand.local != nil && len(operand.local.storePCs) > 1 {
 			if !nativeLambdaJoinedLocalSource(operand, source.values[i], site.pc, i, source.body, &source.context, work) {
 				return false

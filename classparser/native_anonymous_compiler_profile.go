@@ -49,8 +49,9 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 	if members != nil && !c.prepareNativeAnonymousForeignMemberSuper(obj, owner, members, forest) {
 		return nil
 	}
+	lambda := &nativeMemberClass{object: obj, lambdaContext: nativeLambdaImplementationContext{resolve: c.nativeAnnotationDeclarationResolver(), metadata: metadata}}
 	if c.options.SourceCompiler != NativeJavac8 {
-		packet := nativeAnonymousConstructorWithDeclarations(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, access)
+		packet := nativeAnonymousConstructorRepresentationWithLambdas(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, false, lambda, access)
 		if packet != nil {
 			// Moving an older stored capture to a modern source target can
 			// erase the field even though the physical constructor survives.
@@ -74,7 +75,7 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 		if !known || static || !nativeAnonymousNonserializable(obj, metadata, c.Work) {
 			return nil
 		}
-		return nativeAnonymousConstructorWithRoles(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, 0x0020, true, access)
+		return nativeAnonymousConstructorRolesWithLambdas(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, 0x0020, true, lambda, access)
 	}
 	// Native javac8 emits the same anonymous ownership/capture profile when
 	// its input source is Java7 or Java8. The selected output remains Java8.
@@ -117,7 +118,7 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 			}
 		}
 	}
-	packet := nativeAnonymousConstructorWithFlags(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, expected, access)
+	packet := nativeAnonymousConstructorRolesWithLambdas(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, expected, false, lambda, access)
 	if packet == nil || static != (packet.enclosingField == "") {
 		return nil
 	}

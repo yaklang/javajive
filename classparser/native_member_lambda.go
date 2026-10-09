@@ -160,6 +160,9 @@ type nativeLambdaImplementationContext struct {
 	resolve       func(string) (*ClassObject, bool)
 	metadata      callbinding.Provider
 	localCaptures map[string]*nativeLambdaLocalCaptureSite
+	// Only a completed original anonymous constructor packet may replace a
+	// hidden captured field by its enclosing effectively-final declaration.
+	anonymousCaptures *nativeAnonymousClass
 }
 
 func nativeLambdaFunctionalTarget(descriptor, name, sam string, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {

@@ -79,6 +79,9 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 		if unit == nil || unit.object == nil || unit.object.GetClassName() != name || !nativeProofWork(d.Work, 1) {
 			return nil
 		}
+		if !z.nativeAnonymousLambdaChildArchiveClosed(unit, index, d.Work) {
+			return nil
+		}
 		objects[name] = unit.object
 	}
 	for binary, local := range p.methodLocals {

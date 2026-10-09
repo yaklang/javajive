@@ -181,9 +181,14 @@ func nativeAnonymousPrefixArchiveClosed(p *nativeAnonymousFamily, index *nativeM
 	if p == nil || index == nil || !index.valid {
 		return false
 	}
-	for name := range p.children {
-		if !nativeProofWork(work, 1) || index.handles[name] {
+	for name, child := range p.children {
+		if !nativeProofWork(work, 1) {
 			return false
+		}
+		if index.handles[name] || child != nil && child.lambdaImplementation != nil {
+			if child == nil || child.object == nil || child.object.GetClassName() != name || !nativeAnonymousLambdaHandlesClosed(child, index, work) {
+				return false
+			}
 		}
 		for user := range index.typeUsers[name] {
 			if !nativeProofWork(work, 1) || user != p.owner && p.children[user] == nil {

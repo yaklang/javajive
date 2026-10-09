@@ -126,6 +126,11 @@ func (z *JarFS) nativeAnonymousSourceTransaction(cf *ClassObject, independent bo
 		if p == nil {
 			return
 		}
+		for _, child := range p.children {
+			if child.lambdaImplementation != nil && !z.nativeAnonymousLambdaChildArchiveClosed(child, z.originalMemberIndex(), d.Work) {
+				return
+			}
+		}
 		// A partial source transaction changes the prefix's type names while
 		// leaving independent terminal binaries flat. Close physical archive
 		// users before publishing either the prefix or its child suppression.

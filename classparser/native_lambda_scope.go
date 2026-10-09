@@ -354,17 +354,41 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 					}
 				}
 				used := map[int]bool{}
-				start := i - len(captures)
 				if len(captures) > 64 || work != nil && work.CheckAlloc(int64(len(captures))*192+512) != nil {
 					return false
 				}
 				operands := make([]*nativeEnumSelectorProducer, len(captures))
+				// A hidden anonymous capture is read as THIS/GETFIELD, not one
+				// parameter LOAD. Partition the actual stack producers backwards
+				// without guessing from equal descriptors or variable spelling.
+				loads := make([]int, len(captures))
+				start := i
+				for j := len(captures) - 1; j >= 0; j-- {
+					if start == 0 {
+						return false
+					}
+					start--
+					loads[j] = start
+					var field *nativeEnumSelectorProducer
+					if m.AccessFlags&StaticFlag == 0 && !(j == 0 && impl.AccessFlags&StaticFlag == 0) {
+						field = nativeAnonymousLambdaCaptureField(object, context.anonymousCaptures, ops, start, captures[j], work)
+					}
+					if field != nil {
+						operands[j] = field
+						start--
+					} else if !constructorMotionLoad(ops[start], captures[j]) {
+						return false
+					}
+				}
 				var localReads map[int]*nativeEnumLocalRead
 				var localFlow *nativeEnumParameterFlow
 				hasLocal := false
 				referenceDomain := nativeLocalReferenceDomain{descriptors: map[int]string{}, metadata: context.metadata}
 				for j, descriptor := range captures {
-					load := ops[start+j]
+					if operands[j] != nil {
+						continue
+					}
+					load := ops[loads[j]]
 					if !constructorMotionLoad(load, descriptor) {
 						return false
 					}
@@ -373,7 +397,12 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 					}
 				}
 				for j, p := range captures {
-					load := ops[start+j]
+					if operands[j] != nil {
+						used[0] = true
+						hasLocal = true // Requires the same post-render operand proof.
+						continue
+					}
+					load := ops[loads[j]]
 					slot := core.GetRetrieveIdx(load)
 					if !constructorMotionLoad(load, p) || j == 0 && impl.AccessFlags&StaticFlag == 0 && slot != 0 {
 						return false

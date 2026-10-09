@@ -438,8 +438,13 @@ func nativeAnonymousForestArchiveClosed(forest *nativeAnonymousForest, index *na
 		return false
 	}
 	for name, child := range forest.units {
-		if !nativeProofWork(work, 1) || index.handles[name] {
+		if !nativeProofWork(work, 1) {
 			return false
+		}
+		if index.handles[name] || child != nil && child.lambdaImplementation != nil {
+			if child == nil || child.object == nil || child.object.GetClassName() != name || !nativeAnonymousLambdaHandlesClosed(child, index, work) {
+				return false
+			}
 		}
 		for user := range index.typeUsers[name] {
 			if forest.objects[user] == nil {

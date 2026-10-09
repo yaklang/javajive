@@ -46,6 +46,7 @@ type ClassObjectDumper struct {
 	nativeMethodLocalCurrent       *nativeMethodLocalClass
 	nativeMethodLocalPlacements    map[statements.Statement][]string
 	nativeMemberCurrent            *nativeMemberClass
+	nativeAnonymousLambdaCurrent   *nativeMemberClass
 	nativeRegistrationScope        *nativeMemberRegistrationScope
 	nativeRenderedMemberNames      []string
 	nativeMemberUnitPrefix         string
