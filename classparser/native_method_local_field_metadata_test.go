@@ -10,7 +10,7 @@ func TestNativeMethodLocalHiddenFieldsRetainActualErasedMetadata(t *testing.T) {
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
 			files := nativeCompileDebugClasses(t, `class LocalFieldOwner<T extends Number>{<T extends CharSequence> Object make(final T token,final java.util.List<String> items,final long seed){class Entry {Object token(){return token;}Object items(){return items;}long get(){return seed;}}return new Entry();} static <T extends CharSequence> Object stat(final T token){class Node {Object get(){return token;}}return new Node();}}`, debug)
-			for _, variant := range []string{"original", "static original", "extra capture Signature", "enclosing Signature", "unknown attribute", "duplicate field Signature", "inconsistent method erasure", "invalid free method type", "budget", "canceled"} {
+			for _, variant := range []string{"original", "static original", "capture Synthetic attribute", "capture both encodings", "enclosing Synthetic attribute", "duplicate Synthetic", "nonempty Synthetic", "nil Synthetic", "Synthetic plus Signature", "extra capture Signature", "enclosing Signature", "unknown attribute", "duplicate field Signature", "inconsistent method erasure", "invalid free method type", "budget", "canceled"} {
 				t.Run(variant, func(t *testing.T) {
 					root, e := Parse(files["LocalFieldOwner.class"])
 					if e != nil {
@@ -61,6 +61,26 @@ func TestNativeMethodLocalHiddenFieldsRetainActualErasedMetadata(t *testing.T) {
 					}
 					var work *workbudget.Budget
 					switch variant {
+					case "capture Synthetic attribute":
+						capture.AccessFlags &^= 0x1000
+						capture.Attributes = append(capture.Attributes, &SyntheticAttribute{})
+					case "capture both encodings":
+						capture.Attributes = append(capture.Attributes, &SyntheticAttribute{})
+					case "enclosing Synthetic attribute":
+						if enclosing == nil {
+							t.Fatal("missing original enclosing capture")
+						}
+						enclosing.AccessFlags &^= 0x1000
+						enclosing.Attributes = append(enclosing.Attributes, &SyntheticAttribute{})
+					case "duplicate Synthetic":
+						capture.Attributes = append(capture.Attributes, &SyntheticAttribute{}, &SyntheticAttribute{})
+					case "nonempty Synthetic":
+						capture.Attributes = append(capture.Attributes, &SyntheticAttribute{AttrLen: 1})
+					case "nil Synthetic":
+						capture.Attributes = append(capture.Attributes, (*SyntheticAttribute)(nil))
+					case "Synthetic plus Signature":
+						capture.Attributes = append(capture.Attributes, &SyntheticAttribute{})
+						addSig(capture)
 					case "extra capture Signature":
 						addSig(capture)
 					case "enclosing Signature":
@@ -91,7 +111,7 @@ func TestNativeMethodLocalHiddenFieldsRetainActualErasedMetadata(t *testing.T) {
 						cancel()
 						work = workbudget.New(ctx, workbudget.Limits{})
 					}
-					if got := nativeMethodLocalCaptureMetadata(root, local, work); got != (variant == "original" || variant == "static original") {
+					if got := nativeMethodLocalCaptureMetadata(root, local, work); got != (variant == "original" || variant == "static original" || variant == "capture Synthetic attribute" || variant == "capture both encodings" || variant == "enclosing Synthetic attribute") {
 						t.Fatalf("hidden field metadata accepted %v", got)
 					}
 				})

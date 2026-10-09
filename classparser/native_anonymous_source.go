@@ -481,12 +481,16 @@ func nativeAnonymousConstructorWithRoles(obj *ClassObject, owner, method, assert
 	outer := -1
 	captureOrder := []int{}
 	for _, f := range obj.Fields {
+		flags, _, known := nativeMemberEffectiveFieldFlags(f, work)
+		if !known {
+			return nil
+		}
 		name, _ := obj.getUtf8(f.NameIndex)
 		if c.assertions != nil && name == nativeAssertionField {
 			continue
 		}
 		if index, captured := c.fields[name]; captured {
-			if f.AccessFlags != 0x1010 {
+			if flags != 0x1010 {
 				return nil
 			}
 			if name == outerField {
@@ -502,10 +506,10 @@ func nativeAnonymousConstructorWithRoles(obj *ClassObject, owner, method, assert
 				captureOrder = append(captureOrder, index)
 			}
 		}
-		if f.AccessFlags&0x0008 != 0 && (f.AccessFlags&0x0010 == 0 || !fieldHasConstantValue(f)) {
+		if flags&0x0008 != 0 && (flags&0x0010 == 0 || !fieldHasConstantValue(f)) {
 			return nil
 		}
-		if f.AccessFlags&0x1000 != 0 && f.AccessFlags&0x0008 == 0 {
+		if flags&0x1000 != 0 && flags&0x0008 == 0 {
 			n, _ := obj.getUtf8(f.NameIndex)
 			if _, known := c.fields[n]; !known {
 				return nil

@@ -1008,7 +1008,10 @@ func nativeMethodLocalCaptureMetadata(enclosing *ClassObject, local *nativeMetho
 		name, named := sourceBridgeUTF8(local.object, field.NameIndex)
 		descriptor, typed := sourceBridgeUTF8(local.object, field.DescriptorIndex)
 		_, found := local.constructor.captures[name]
-		if !named || !typed || descriptor == "" || !found || len(field.Attributes) != 0 {
+		// An empty Synthetic marker regenerates as the equivalent flag.
+		// Other hidden-field metadata still needs a separate source proof.
+		flags, onlySynthetic, flagsKnown := nativeMemberEffectiveFieldFlags(field, work)
+		if !named || !typed || descriptor == "" || !found || !flagsKnown || flags != 0x1010 || !onlySynthetic {
 			return false
 		}
 	}

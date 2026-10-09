@@ -143,7 +143,8 @@ func originalMethodLocalDefaultConstructor(obj, enclosing *ClassObject, work *wo
 		name, named := sourceBridgeUTF8(obj, f.NameIndex)
 		descriptor, typed := sourceBridgeUTF8(obj, f.DescriptorIndex)
 		param, captured := plan.captures[name]
-		if !named || !typed || !captured || f.AccessFlags != 0x1010 || param >= len(params) || descriptor != params[param] {
+		flags, _, flagsKnown := nativeMemberEffectiveFieldFlags(f, work)
+		if !named || !typed || !captured || !flagsKnown || flags != 0x1010 || param >= len(params) || descriptor != params[param] {
 			return nil, false
 		}
 		fields++

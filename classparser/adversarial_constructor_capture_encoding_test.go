@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,6 +161,85 @@ func TestNativeCaptureABIProjectionPreservesSyntheticAndStorage(t *testing.T) {
 			got := nativeBinaryShape(t, obj.Bytes())
 			if equal := got == want; equal != (kind == "attribute" || kind == "both") {
 				t.Fatalf("ABI equivalent=%v\n%s\n%s", equal, want, got)
+			}
+		})
+	}
+}
+
+func TestNativeAnonymousAndMethodLocalSyntheticAttributeCaptures(t *testing.T) {
+	const anonymous = `return new CaptureMotionBase(n){Object capture(){return token;}Object owner(){return CaptureMotionOwner.this;}long wide(){return wide;}};`
+	var expected strings.Builder
+	for _, identity := range []bool{false, true} {
+		for _, wide := range []int64{-1 << 63, 0, 1<<63 - 1} {
+			for _, number := range []int{-2, 0, 2} {
+				fmt.Fprintf(&expected, "%d:%d:%t\n", number, wide, identity)
+			}
+		}
+	}
+	for _, style := range []string{"anonymous", "method-local"} {
+		for _, prefix := range []string{"CaptureMotion", "AttributeScope"} {
+			for _, encoding := range []string{"attribute", "both"} {
+				t.Run(style+"/"+prefix+"/"+encoding, func(t *testing.T) {
+					fixture := strings.Replace(captureMotionFixture, "public class CaptureMotionDriver", "class CaptureMotionDriver", 1)
+					unit := prefix + "Owner$1"
+					if style == "method-local" {
+						fixture = defaultMethodLocalCaptureEncodingFixture
+						unit = prefix + "Owner$1Local"
+					} else if !strings.Contains(fixture, anonymous) {
+						t.Fatal("missing authored anonymous body")
+					}
+					fixture = strings.ReplaceAll(fixture, "CaptureMotion", prefix)
+					mutate := func(t *testing.T, files map[string][]byte) {
+						originalCaptureEncoding(t, files, unit, encoding == "both")
+					}
+					testNativeIndependentMutatedFamilyFixture(t, fixture, []string{prefix + "Owner"}, prefix+"Driver", expected.String(), mutate, nativeLexicalExactSignatures)
+				})
+			}
+		}
+	}
+}
+
+// The default local constructor regenerates captures and Object() only.
+// Its original JVM driver checks the lexical receiver, every category and
+// Synthetic reflection, independently of the field-normalization code.
+const defaultMethodLocalCaptureEncodingFixture = `
+interface CaptureMotionView {int number();long wide();Object capture();Object owner();}
+class CaptureMotionOwner {CaptureMotionView make(final Object token,final long wide,final int n){class Local implements CaptureMotionView {public int number(){return n;}public long wide(){return wide;}public Object capture(){return token;}public Object owner(){return CaptureMotionOwner.this;}}return new Local();}}
+class CaptureMotionDriver {public static void main(String[]args)throws Exception{CaptureMotionOwner owner=new CaptureMotionOwner();Object token=new Object();for(Object value:new Object[]{null,token})for(long wide:new long[]{Long.MIN_VALUE,0,Long.MAX_VALUE})for(int n:new int[]{-2,0,2}){CaptureMotionView result=owner.make(value,wide,n);if(result.number()!=n||result.wide()!=wide||result.capture()!=value||result.owner()!=owner)throw new AssertionError("local category and identity");for(java.lang.reflect.Field f:result.getClass().getDeclaredFields())if(!f.isSynthetic()||!java.lang.reflect.Modifier.isFinal(f.getModifiers()))throw new AssertionError("local original synthetic reflection");System.out.println(n+":"+wide+":"+(value==token));}}}
+`
+
+func TestNativeSyntheticEncodingCannotLicenseExplicitLocalSuperArguments(t *testing.T) {
+	const anonymous = `return new CaptureMotionBase(n){Object capture(){return token;}Object owner(){return CaptureMotionOwner.this;}long wide(){return wide;}};`
+	const local = `class Local extends CaptureMotionBase{Local(){super(n);}Object capture(){return token;}Object owner(){return CaptureMotionOwner.this;}long wide(){return wide;}}return new Local();`
+	_, java := t04Tools(t)
+	for _, encoding := range []string{"flag", "attribute", "both"} {
+		t.Run(encoding, func(t *testing.T) {
+			fixture := strings.Replace(captureMotionFixture, "public class CaptureMotionDriver", "class CaptureMotionDriver", 1)
+			fixture = strings.Replace(fixture, anonymous, local, 1)
+			files := nativeCompileDebugClasses(t, fixture, "none")
+			if encoding != "flag" {
+				originalCaptureEncoding(t, files, "CaptureMotionOwner$1Local", encoding == "both")
+			}
+			original := t.TempDir()
+			for name, raw := range files {
+				if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			output := t04RunJava(t, java, original, "CaptureMotionDriver")
+			if len(strings.Split(strings.TrimSpace(output), "\n")) != 18 {
+				t.Fatal("original explicit-super oracle", output)
+			}
+			root, err := Parse(files["CaptureMotionOwner.class"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			child, err := Parse(files["CaptureMotionOwner$1Local.class"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if proof, known := originalMethodLocalDefaultConstructor(child, root, nil); known || proof != nil {
+				t.Fatal("default capture normalization licensed unproved explicit parent arguments")
 			}
 		})
 	}
