@@ -2706,8 +2706,9 @@ type AssignStatement struct {
 	OriginPC    int
 	HasOriginPC bool
 	// ReferenceArrayStore is a decoded AASTORE witness, never an inferred cast.
-	ReferenceArrayStore bool
-	originalLocalStore  *originalLocalStore
+	ReferenceArrayStore   bool
+	originalLocalStore    *originalLocalStore
+	originalInstanceStore *originalInstanceStore
 }
 
 // ReplaceVar implements Statement.

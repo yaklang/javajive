@@ -6394,6 +6394,11 @@ func (d *Decompiler) ParseStatement() error {
 		if v, ok := statement.(*statements.AssignStatement); ok {
 			v.OriginPC = int(opcode.CurrentOffset)
 			v.HasOriginPC = true
+			if node.HasOriginPC && opcode.Instr.OpCode == OP_PUTFIELD && len(opcode.Data) == 2 {
+				if member, known := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassMember); known {
+					v.MarkOriginalInstanceFieldStore(member, node.OriginPC)
+				}
+			}
 			if v1, ok := v.LeftValue.(*values.JavaRef); ok {
 				if node.HasOriginPC && v.ArrayMember == nil && LocalAccessOf(opcode.Instr.OpCode).Write {
 					v.MarkOriginalLocalStore(node.OriginPC, GetStoreIdx(opcode))

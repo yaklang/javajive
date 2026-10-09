@@ -3,6 +3,8 @@ package javaclassparser
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/frametransfer"
+	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	u "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -167,8 +169,17 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 			continue
 		}
 		f := constructorMotionMember(obj, op, kind)
-		if f == nil || f.Name != obj.GetClassName() {
+		if f == nil {
 			return nil
+		}
+		if f.Name != obj.GetClassName() {
+			if len(f.Description) != 1 || !strings.Contains("ZBCSIJFD", f.Description) || class_context.SafeIdentifier(f.Member) != f.Member {
+				return nil
+			}
+			// The original foreign write is a separate ordered statement.
+			// Its access, operands and descriptor close only on the retained AST.
+			plan.stores[pc] = f.Member
+			continue
 		}
 		if _, captured := child.fields[f.Member]; captured {
 			return nil
@@ -196,6 +207,9 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 	}
 	d := NewClassObjectDumper(obj)
 	d.Work = work
+	if !nativeAnonymousInitializerForeignStoreFrames(d, plan) {
+		return nil
+	}
 	if _, valid := d.nativeMemberAllocationInvocations(plan.method, code); !valid {
 		return nil
 	}
@@ -319,6 +333,23 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 		field, ok := assign.LeftValue.(*values.RefMember)
 		if !ok || field.Member != plan.stores[assign.OriginPC] {
 			return "", false
+		}
+		original := constructorMotionMember(child.object, plan.byPC[assign.OriginPC], core.OP_PUTFIELD)
+		if original == nil {
+			return "", false
+		}
+		if original.Name != child.object.GetClassName() {
+			pc, owner, name, desc, witness := assign.OriginalInstanceFieldStore()
+			if !witness || pc != assign.OriginPC || owner != original.Name || name != original.Member || desc != original.Description || !nativeAnonymousInitializerForeignStoreField(child, original, field, c.nativeAnnotationDeclarationResolver(), c.Work) {
+				return "", false
+			}
+			if !nativeAnonymousInitializerExpressionEventsWithMaterialized(child, plan, field.Object, &events, c.nativeAnnotationDeclarationResolver(), c.Work, materialized, c.FuncCtx) || !nativeAnonymousInitializerExpressionEventsWithMaterialized(child, plan, assign.JavaValue, &events, c.nativeAnnotationDeclarationResolver(), c.Work, materialized, c.FuncCtx) {
+				return "", false
+			}
+			events = append(events, assign.OriginPC)
+			stores[assign.OriginPC] = true
+			source.WriteString(assign.String(c.FuncCtx) + ";\n")
+			continue
 		}
 		ref, ok := values.UnpackSoltValue(field.Object).(*values.JavaRef)
 		if !ok || !ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
@@ -987,4 +1018,124 @@ func nativeAnonymousInitializerReservedLocalNames(object *ClassObject, ctx *clas
 		}
 	}
 	return names, valid
+}
+
+// A foreign primitive field store needs actual writable declaration/access
+// evidence and the exact receiver erasure. Reference/generic stores need an
+// additional source assignment-conversion proof and remain outside this capability.
+func nativeAnonymousInitializerForeignStoreField(child *nativeAnonymousClass, field *values.JavaClassMember, target *values.RefMember, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+	if child == nil || child.object == nil || field == nil || target == nil || target.Member != field.Member || target.Type() == nil || resolve == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	// A primitive descriptor is exactly one grammar token. Reject reference,
+	// array and malformed lengths before allocating/parsing any type view.
+	if len(field.Description) != 1 {
+		return false
+	}
+	// Parsing the fixed primitive descriptor allocates a type view. Charge
+	// its conservative constant upper bound before creating it.
+	if work != nil && work.CheckAlloc(128) != nil {
+		return false
+	}
+	expected, err := types.ParseDescriptor(field.Description)
+	if err != nil || expected == nil {
+		return false
+	}
+	primitive, ok := expected.RawType().(*types.JavaPrimer)
+	actual, known := target.Type().RawType().(*types.JavaPrimer)
+	if !ok || !known || primitive == nil || actual == nil || primitive.Name == types.JavaString || primitive.Name == types.JavaVoid || primitive.Name != actual.Name {
+		return false
+	}
+	if !nativeAnonymousInitializerForeignField(field, target.Object, resolve, work) {
+		return false
+	}
+	object, known := resolve(field.Name)
+	if !known || object == nil {
+		return false
+	}
+	if object.AccessFlags&1 == 0 && nativeBinaryPackage(object.GetClassName()) != nativeBinaryPackage(child.object.GetClassName()) {
+		return false
+	}
+	for _, declaration := range object.Fields {
+		if declaration == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		name, known := sourceBridgeUTF8(object, declaration.NameIndex)
+		if !known {
+			return false
+		}
+		if name != field.Member {
+			continue
+		}
+		if declaration.AccessFlags&(2|8|0x10|0x1000) != 0 || fieldHasConstantValue(declaration) {
+			return false
+		}
+		if declaration.AccessFlags&1 == 0 && nativeBinaryPackage(object.GetClassName()) != nativeBinaryPackage(child.object.GetClassName()) {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// Before admitting a foreign write, prove its decoded receiver has the exact
+// symbolic owner. Category-only frame validity cannot detect a forged Fieldref
+// on THIS. Narrow computational ints also need their original source-word proof.
+func nativeAnonymousInitializerForeignStoreFrames(d *ClassObjectDumper, plan *nativeAnonymousExpressionInitializer) bool {
+	if d == nil || d.obj == nil || plan == nil || !nativeProofWork(d.Work, 1) || d.Work != nil && d.Work.CheckAlloc(int64(len(plan.stores))*64) != nil {
+		return false
+	}
+	foreign := map[int]*values.JavaClassMember{}
+	for pc := range plan.stores {
+		field := constructorMotionMember(d.obj, plan.byPC[pc], core.OP_PUTFIELD)
+		if field == nil {
+			return false
+		}
+		if field.Name != d.obj.GetClassName() {
+			foreign[pc] = field
+		}
+	}
+	if len(foreign) == 0 {
+		return true
+	}
+	ir, frames, known := d.nativeOriginalMethodSnapshot(plan.method, plan.code)
+	if !known {
+		return false
+	}
+	words := newNativeConstructorFrameWords(d.obj, plan.method, ir, frames, d.Work)
+	if words == nil {
+		return false
+	}
+	for _, record := range frames.Instructions {
+		if !nativeProofWork(d.Work, 1) {
+			return false
+		}
+		field, exists := foreign[int(record.PC)]
+		if !exists {
+			continue
+		}
+		width := nativeMemberParameterWidth([]string{field.Description})
+		index := len(record.Before.Stack) - width - 1
+		if index < 0 || len(record.BeforeOrigins) != len(record.Before.Locals)+len(record.Before.Stack) {
+			return false
+		}
+		receiver := record.Before.Stack[index]
+		origin := record.BeforeOrigins[len(record.Before.Locals)+index]
+		if receiver.Kind != frametransfer.Ref || receiver.Class != field.Name || origin.Kind == ssabuild.OriginParam && origin.Slot == 0 {
+			return false
+		}
+		switch field.Description {
+		case "Z", "B", "C", "S":
+			value := record.Before.Stack[index+1]
+			origin := record.BeforeOrigins[len(record.Before.Locals)+index+1]
+			if !words.argument(value, origin, field.Description) {
+				return false
+			}
+		case "I", "J", "F", "D":
+		default:
+			return false
+		}
+		delete(foreign, int(record.PC))
+	}
+	return len(foreign) == 0
 }
