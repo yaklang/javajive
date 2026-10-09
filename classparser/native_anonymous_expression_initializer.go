@@ -114,7 +114,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 			return nil
 		}
 		switch kind {
-		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IDIV, core.OP_LDIV, core.OP_IREM, core.OP_LREM, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE:
+		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE:
 			return nil
 		}
 		if kind >= core.OP_IFEQ && kind <= core.OP_IF_ACMPNE || kind >= core.OP_IRETURN && kind <= core.OP_ARETURN {
@@ -470,6 +470,28 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 			}
 		}
 		switch x := v.(type) {
+		case *values.JavaExpression:
+			if x.HasIntegerTrapOrigin() || x.Op == values.DIV || x.Op == values.REM {
+				pc, operator, descriptor, original := x.OriginalIntegerTrap()
+				if original {
+					op := byPC[pc]
+					if op == nil || op.Instr == nil || len(op.Data) != 0 || !nativeAnonymousInitializerIntegerTrapOpcode(op.Instr.OpCode, operator, descriptor) {
+						return false
+					}
+					*events = append(*events, pc)
+				} else {
+					// Floating division/remainder has no integer-zero trap. A
+					// missing integer witness must never become an empty event.
+					typ := x.Type()
+					if x.HasIntegerTrapOrigin() || typ == nil {
+						return false
+					}
+					primitive, known := typ.RawType().(*types.JavaPrimer)
+					if !known || primitive == nil || primitive.Name != types.JavaFloat && primitive.Name != types.JavaDouble {
+						return false
+					}
+				}
+			}
 		case *values.JavaClassMember:
 			if !x.HasOriginPC {
 				return false

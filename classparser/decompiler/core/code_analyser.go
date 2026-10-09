@@ -4030,7 +4030,14 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			OP_LSHL, OP_LSHR, OP_LUSHR:
 			resultType = types.NewJavaPrimer(types.JavaLong)
 		}
-		runtimeStackSimulation.Push(values.NewBinaryExpression(var1, var2, op, resultType))
+		var expression values.JavaValue
+		switch opcode.Instr.OpCode {
+		case OP_IDIV, OP_IREM, OP_LDIV, OP_LREM:
+			expression = values.NewOriginalIntegerTrapExpression(var1, var2, op, resultType, int(opcode.CurrentOffset))
+		default:
+			expression = values.NewBinaryExpression(var1, var2, op, resultType)
+		}
+		runtimeStackSimulation.Push(expression)
 	case OP_I2B, OP_I2C, OP_I2D, OP_I2F, OP_I2L, OP_I2S, OP_L2D, OP_L2F, OP_L2I, OP_F2D, OP_F2I, OP_F2L, OP_D2F, OP_D2I, OP_D2L:
 		var typ types.JavaType
 		switch opcode.Instr.OpCode {

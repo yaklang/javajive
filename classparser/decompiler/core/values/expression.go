@@ -238,9 +238,10 @@ func (n *NewExpression) genericCtorDiamond(funcCtx *class_context.ClassContext) 
 }
 
 type JavaExpression struct {
-	Values []JavaValue
-	Op     string
-	Typ    types.JavaType
+	originalIntegerTrap *originalIntegerTrap
+	Values              []JavaValue
+	Op                  string
+	Typ                 types.JavaType
 }
 
 // ReplaceVar implements JavaValue.

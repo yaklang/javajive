@@ -14,7 +14,7 @@ import (
 func nativeAnonymousInitializerBranchToken(pc, part int) int { return -(pc*3 + part + 1) }
 
 func nativeAnonymousInitializerEvent(kind int) bool {
-	return kind == core.OP_PUTFIELD || kind == core.OP_GETFIELD || kind == core.OP_GETSTATIC || kind == core.OP_NEW || kind == core.OP_NEWARRAY || kind == core.OP_ANEWARRAY || kind == core.OP_MULTIANEWARRAY || kind == core.OP_ARRAYLENGTH || kind == core.OP_CHECKCAST || kind >= core.OP_IALOAD && kind <= core.OP_SALOAD || kind >= core.OP_INVOKEVIRTUAL && kind <= core.OP_INVOKEINTERFACE
+	return nativeAnonymousInitializerIntegerTrap(kind) || kind == core.OP_PUTFIELD || kind == core.OP_GETFIELD || kind == core.OP_GETSTATIC || kind == core.OP_NEW || kind == core.OP_NEWARRAY || kind == core.OP_ANEWARRAY || kind == core.OP_MULTIANEWARRAY || kind == core.OP_ARRAYLENGTH || kind == core.OP_CHECKCAST || kind >= core.OP_IALOAD && kind <= core.OP_SALOAD || kind >= core.OP_INVOKEVIRTUAL && kind <= core.OP_INVOKEINTERFACE
 }
 
 // Admit only forward, successive null-test expression diamonds. Each
@@ -181,4 +181,24 @@ func nativeAnonymousInitializerSourceBranch(plan *nativeAnonymousExpressionIniti
 		return nil, false
 	}
 	return branch, (branch.Instr.OpCode == core.OP_IFNONNULL) == (expression.Op == values.EQ)
+}
+
+// Integer zero-divisor traps occur after both operand evaluations and before
+// the following original event. Floating division/remainder is a different
+// JVM operation and must not borrow this abrupt-completion certificate.
+func nativeAnonymousInitializerIntegerTrap(kind int) bool {
+	return kind == core.OP_IDIV || kind == core.OP_IREM || kind == core.OP_LDIV || kind == core.OP_LREM
+}
+func nativeAnonymousInitializerIntegerTrapOpcode(kind int, operator, descriptor string) bool {
+	switch kind {
+	case core.OP_IDIV:
+		return operator == values.DIV && descriptor == "I"
+	case core.OP_IREM:
+		return operator == values.REM && descriptor == "I"
+	case core.OP_LDIV:
+		return operator == values.DIV && descriptor == "J"
+	case core.OP_LREM:
+		return operator == values.REM && descriptor == "J"
+	}
+	return false
 }
