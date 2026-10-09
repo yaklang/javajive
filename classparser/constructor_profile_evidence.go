@@ -27,6 +27,7 @@ type constructorProfileEvidence struct {
 	observationEpoch, providerEpoch uint64
 	parsedOriginals                 map[*ClassObject]bool
 	closedBodies                    map[constructorClosedBodyKey]constructorClosedBodyMemo
+	ownMethods                      map[*ClassObject]map[constructorOwnMethodSignature]*MemberInfo
 	parsedRetention, bodyRetention  int64
 }
 

@@ -31,25 +31,8 @@ func (c *ClassObjectDumper) constructorReceiverClosedMethod(obj *ClassObject, me
 	}
 	active[key] = true
 	defer delete(active, key)
-	var target *MemberInfo
-	for _, method := range obj.Methods {
-		*remaining--
-		if *remaining < 0 || method == nil || !nativeProofWork(c.Work, 1) {
-			return constructorEffectValue{}, false
-		}
-		name, nameErr := obj.getUtf8(method.NameIndex)
-		desc, descErr := obj.getUtf8(method.DescriptorIndex)
-		if nameErr != nil || descErr != nil || name == "" {
-			return constructorEffectValue{}, false
-		}
-		if name == member.Member && desc == member.Description {
-			if target != nil {
-				return constructorEffectValue{}, false
-			}
-			target = method
-		}
-	}
-	if target == nil || target.AccessFlags&(0x0008|0x0020|0x0100|0x0400) != 0 || !c.constructorReceiverMethodDispatchClosed(obj, target, member, opcode, remaining) {
+	target, found := c.constructorReceiverOwnMethod(obj, member.Member, member.Description, remaining)
+	if !found || target == nil || target.AccessFlags&(0x0008|0x0020|0x0100|0x0400) != 0 || !c.constructorReceiverMethodDispatchClosed(obj, target, member, opcode, remaining) {
 		return constructorEffectValue{}, false
 	}
 	var code *CodeAttribute
