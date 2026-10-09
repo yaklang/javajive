@@ -81,13 +81,10 @@ func (c *ClassObjectDumper) flattenedMethodLexicalScopes() ([]types.LexicalTypeS
 			static := false
 			methodSig, descriptor := "", ""
 			if index == 0 {
-				// Initializer ownership needs bytecode evidence to distinguish the
-				// instance scope from the static scope; the attribute alone cannot.
-				_, lexical, anonymous := originalAnonymousOwner(obj)
-				if !anonymous || lexical != "" {
-					return nil, true, false
-				}
-				static, valid = nativeAnonymousOriginalContext(parent, obj, lexical, c.Work)
+				// An instance initializer is copied into every non-delegating
+				// constructor. Type scope needs consistent original contexts,
+				// not the single-placement certificate for a native source body.
+				static, valid = originalInitializerTypeScopeStatic(parent, obj, c.Work)
 				if !valid {
 					return nil, true, false
 				}
