@@ -2129,15 +2129,26 @@ func ResolveInstantiatedFieldType(funcCtx *class_context.ClassContext, classProv
 		return nil
 	}
 	visited := map[string]bool{}
-	return resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(recvRaw), recvArgs, fieldName, visited)
+	return resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(recvRaw), recvArgs, fieldName, visited, "")
+}
+
+// ResolveInstantiatedFieldTypeWithErasure validates the original declaration before
+// substituting receiver arguments. Box<String>.value has source type String but
+// declaration erasure Object: checking erasure AFTER substitution loses that fact.
+// Missing/dependent declaring bounds and malformed Signatures stay unproved.
+func ResolveInstantiatedFieldTypeWithErasure(ctx *class_context.ClassContext, classes ClassSigProvider, fields FieldSigProvider, raw string, args []JavaType, name, descriptor string) JavaType {
+	if ctx == nil || classes == nil || fields == nil || raw == "" || name == "" || descriptor == "" {
+		return nil
+	}
+	return resolveFieldWalk(ctx, classes, fields, dotToInternal(raw), args, name, map[string]bool{}, descriptor)
 }
 
 // resolveFieldWalk performs the depth-first hierarchy walk for ResolveInstantiatedFieldType. sigma maps
 // the CURRENT node's formal type-parameter names to their actual arguments (in call-site-denotable
 // terms), recomposed per supertype edge. The field, if declared at THIS node with a generic Signature,
 // binds and is returned substituted; otherwise the parameterized supertypes are ascended.
-func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSigProvider, fieldProvider FieldSigProvider, internal string, args []JavaType, fieldName string, visited map[string]bool) JavaType {
-	if internal == "" || visited[internal] {
+func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSigProvider, fieldProvider FieldSigProvider, internal string, args []JavaType, fieldName string, visited map[string]bool, expectedErasure string) JavaType {
+	if internal == "" || visited[internal] || (expectedErasure != "" && len(visited) >= 64) {
 		return nil
 	}
 	visited[internal] = true
@@ -2146,6 +2157,16 @@ func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSi
 		return nil // JDK / external: not in jar
 	}
 	formals := instantiatedClassFormals(funcCtx, internal, classSig)
+	if expectedErasure != "" {
+		if len(formals) != len(args) {
+			return nil
+		}
+		for _, arg := range args {
+			if arg == nil {
+				return nil
+			}
+		}
+	}
 	sigma := map[string]JavaType{}
 	for i := 0; i < len(formals) && i < len(args); i++ {
 		if args[i] != nil {
@@ -2156,6 +2177,12 @@ func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSi
 	// composed type-argument map through it and return (a subclass never re-declares an inherited field's
 	// generic type, so the most-derived declaration on the walk is authoritative).
 	if fsig, ok := fieldProvider(internal, fieldName); ok && fsig != "" {
+		if expectedErasure != "" {
+			descriptor, _, valid := EraseLexicalMethodSignatureWithThrows(classSig, "("+fsig+")V")
+			if !valid || descriptor != "("+expectedErasure+")V" {
+				return nil
+			}
+		}
 		if !calleeSignatureVariablesBound(fsig, sigma) {
 			return nil
 		}
@@ -2178,7 +2205,7 @@ func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSi
 			raw, known := RawClassFQN(st)
 			parentSig, _, available := classProvider(dotToInternal(raw))
 			if known && available && len(ClassFormalTypeParamNames(parentSig)) == 0 {
-				if t := resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(raw), nil, fieldName, visited); t != nil {
+				if t := resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(raw), nil, fieldName, visited, expectedErasure); t != nil {
 					return t
 				}
 			}
@@ -2188,7 +2215,7 @@ func resolveFieldWalk(funcCtx *class_context.ClassContext, classProvider ClassSi
 		for i, ta := range pt.TypeArgs {
 			childArgs[i] = SubstituteTypeVars(ta, sigma)
 		}
-		if t := resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(pt.RawClassName), childArgs, fieldName, visited); t != nil {
+		if t := resolveFieldWalk(funcCtx, classProvider, fieldProvider, dotToInternal(pt.RawClassName), childArgs, fieldName, visited, expectedErasure); t != nil {
 			return t
 		}
 	}

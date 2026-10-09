@@ -146,7 +146,13 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 				continue
 			}
 			field := fields[f.Member]
-			if field == nil || field.AccessFlags&8 != 0 || class_context.SafeIdentifier(f.Member) != f.Member {
+			if field == nil {
+				// A JVM Fieldref may name this class while resolution selects an
+				// inherited declaration. Defer that complete declaration/hiding
+				// proof to the retained source receiver, like a foreign read.
+				continue
+			}
+			if field.AccessFlags&8 != 0 || class_context.SafeIdentifier(f.Member) != f.Member {
 				return nil
 			}
 			descriptor, known := sourceBridgeUTF8(obj, field.DescriptorIndex)
@@ -527,6 +533,20 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 				if !ok || !r.IsThis {
 					return false
 				}
+				declared := false
+				for _, field := range child.object.Fields {
+					if field == nil || !nativeProofWork(work, 1) {
+						return false
+					}
+					name, known := sourceBridgeUTF8(child.object, field.NameIndex)
+					if !known {
+						return false
+					}
+					declared = declared || name == f.Member
+				}
+				if !declared && !nativeAnonymousInitializerInheritedField(child, f, x, resolve, work) {
+					return false
+				}
 			} else if !nativeAnonymousInitializerForeignField(f, x.Object, resolve, work) {
 				return false
 			}
@@ -565,6 +585,55 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 		return true
 	}
 	return visit(value)
+}
+
+// JVM resolution uses name+descriptor, while Java field hiding uses name. The
+// shared bounded ancestor/interface solver requires both to reach the same
+// original declaration. A direct THIS is necessary for the protected receiver
+// rule; an arbitrary alias or a cast cannot borrow this source permission.
+func nativeAnonymousInitializerInheritedField(child *nativeAnonymousClass, field *values.JavaClassMember, value *values.RefMember, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+	if child == nil || child.object == nil || field == nil || value == nil || resolve == nil || field.Name != child.object.GetClassName() || field.Member != value.Member || class_context.SafeIdentifier(field.Member) != field.Member || !nativeProofWork(work, 1) {
+		return false
+	}
+	if !value.OriginalInstanceFieldRead(value.OriginPC, field.Name, field.Member, field.Description) {
+		return false
+	}
+	receiver, known := values.UnpackSoltValue(value.Object).(*values.JavaRef)
+	if !known || receiver == nil || !receiver.IsThis || receiver.CustomValue != nil || receiver.StackVar != nil {
+		return false
+	}
+	receiverName, known := types.RawClassFQN(receiver.Type())
+	if !known || strings.ReplaceAll(receiverName, ".", "/") != child.object.GetClassName() || value.Type() == nil {
+		return false
+	}
+	expected, err := types.ParseDescriptor(field.Description)
+	if err != nil || expected == nil {
+		return false
+	}
+	if expected.IsArray() {
+		if !nativeAnonymousInitializerSameArrayType(value.Type(), expected) {
+			return false
+		}
+	} else if actual, ok := value.Type().RawType().(*types.JavaPrimer); ok {
+		primitive, known := expected.RawType().(*types.JavaPrimer)
+		if !known || actual == nil || primitive == nil || actual.Name != primitive.Name {
+			return false
+		}
+	} else {
+		actualName, actualKnown := types.RawClassFQN(value.Type())
+		expectedName, expectedKnown := types.RawClassFQN(expected)
+		if !actualKnown || !expectedKnown || strings.ReplaceAll(actualName, ".", "/") != strings.ReplaceAll(expectedName, ".", "/") {
+			return false
+		}
+	}
+	owner, declaration := nativeMemberInheritedFieldTarget(child.object, field.Member, field.Description, resolve, work)
+	if owner == nil || declaration == nil || owner == child.object || declaration.AccessFlags&(2|8|0x1000) != 0 || fieldHasConstantValue(declaration) {
+		return false
+	}
+	if declaration.AccessFlags&(1|4) == 0 && nativeBinaryPackage(owner.GetClassName()) != nativeBinaryPackage(child.object.GetClassName()) {
+		return false
+	}
+	return true
 }
 
 // Source field selection uses the receiver's static type. Keep it equal to the

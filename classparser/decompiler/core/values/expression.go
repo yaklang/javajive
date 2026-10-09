@@ -3951,6 +3951,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		raw := f.witnessDescriptorParamType(i).String(funcCtx)
 		return fmt.Sprintf("(%s)(%s)(%s)", cast, raw, arg.String(funcCtx))
 	}
+	if target := f.instantiatedFieldOverloadCast(i, funcCtx); target != "" {
+		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
+	}
 	if target := f.covariantOverloadResultCast(i, funcCtx); target != "" {
 		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
 	}
