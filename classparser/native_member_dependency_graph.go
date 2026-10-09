@@ -214,6 +214,40 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 			return false
 		}
 		for _, current := range queue {
+			declaringOwner, _, access, named := originalMemberOwner(current)
+			if named && access&4 != 0 {
+				// A flattened foreign nested declaration can lose the protected
+				// type scope of its enclosing subclass. Restoring this member
+				// therefore depends on restoring that caller's lexical family.
+				// This edge schedules a joint proof, never grants accessibility:
+				// finish still checks every original peer and the complete scope.
+				for user := range index.typeUsers[current.GetClassName()] {
+					if !nativeProofWork(work, 1) {
+						return false
+					}
+					if owned[user] || nativeBinaryPackage(user) == nativeBinaryPackage(declaringOwner) {
+						continue
+					}
+					caller, known := load(user)
+					if !known {
+						return false
+					}
+					used, known := nativeProtectedTypeRequiresSourceAccess(caller, current.GetClassName(), work)
+					if !known {
+						return false
+					}
+					if !used || nativeMemberOriginalClassWidening(user, declaringOwner, load, work) {
+						continue
+					}
+					target, known := outermost(caller)
+					if !known {
+						return false
+					}
+					if target != owner {
+						dependencies[target] = true
+					}
+				}
+			}
 			if _, _, flags, member := originalMemberOwner(current); !member || flags&8 != 0 {
 				continue
 			}

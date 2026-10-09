@@ -136,3 +136,115 @@ func TestNativeNonAncestorNonstaticDependencyKeepsIndependentOwnership(t *testin
 		t.Fatal("foreign declaration spelling imported private or lexical ownership")
 	}
 }
+
+func TestNativeInheritedDeclarationContextRequiresPreparedOriginalScope(t *testing.T) {
+	files := nativeCompileSourceReleaseClasses(t, nativeInheritedContextSources("deep"), "none", "8")
+	for _, variant := range []string{"original", "nil prepared", "nil object", "nil member", "nil resolver", "failed family", "wrong root identity", "missing object", "copied object", "missing lexical object", "wrong source spelling", "wrong cached owner", "duplicate owner row", "unrelated enclosing class", "interface enclosing class", "missing ancestor", "wrong ancestor identity", "private member", "static member", "budget", "memory", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			z := nativeArchive(t, files)
+			defer z.Close()
+			root, err := Parse(append([]byte(nil), files["use/Owner.class"]...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared := z.prepareNativeMemberFamilyUnpublished(root, nil)
+			if prepared == nil {
+				t.Fatal("valid authored family did not prepare")
+			}
+			object := prepared.objects["use/Owner$Worker$Reader"]
+			member, err := Parse(append([]byte(nil), files["base/Parent$Value.class"]...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalResolve := prepared.reader.nativeAnnotationDeclarationResolver()
+			objects := prepared.objects
+			resolve := func(name string) (*ClassObject, bool) {
+				if obj := objects[name]; obj != nil {
+					return obj, true
+				}
+				return originalResolve(name)
+			}
+			worker := prepared.family.children["use/Owner$Worker"]
+			var work *workbudget.Budget
+			switch variant {
+			case "nil prepared":
+				prepared = nil
+			case "nil object":
+				object = nil
+			case "nil member":
+				member = nil
+			case "nil resolver":
+				resolve = nil
+			case "failed family":
+				prepared.family.failed = true
+			case "wrong root identity":
+				prepared.objects[prepared.family.owner] = object
+			case "missing object":
+				delete(prepared.objects, object.GetClassName())
+			case "copied object":
+				copy := *object
+				object = &copy
+			case "missing lexical object":
+				delete(prepared.family.lexicalObjects, worker.object.GetClassName())
+			case "wrong source spelling":
+				worker.sourceName = "use.Unrelated.Worker"
+			case "wrong cached owner":
+				worker.owner = worker.object.GetClassName()
+			case "duplicate owner row":
+				for _, attr := range worker.object.Attributes {
+					if table, ok := attr.(*InnerClassesAttribute); ok {
+						for _, row := range table.Classes {
+							name, _ := sourceBridgeClassName(worker.object, row.InnerClassInfoIndex)
+							if name == worker.object.GetClassName() {
+								copy := *row
+								table.Classes = append(table.Classes, &copy)
+								break
+							}
+						}
+					}
+				}
+			case "unrelated enclosing class":
+				worker.object.SuperClass = 0
+			case "interface enclosing class":
+				worker.object.AccessFlags |= 0x0200
+			case "missing ancestor", "wrong ancestor identity":
+				original := resolve
+				resolve = func(name string) (*ClassObject, bool) {
+					if name == "base/Parent" {
+						if variant == "missing ancestor" {
+							return nil, false
+						}
+						return root, true
+					}
+					return original(name)
+				}
+			case "private member", "static member":
+				for _, attr := range member.Attributes {
+					if table, ok := attr.(*InnerClassesAttribute); ok {
+						for _, row := range table.Classes {
+							name, _ := sourceBridgeClassName(member, row.InnerClassInfoIndex)
+							if name == member.GetClassName() {
+								if variant == "private member" {
+									row.InnerClassAccessFlags = 2
+								} else {
+									row.InnerClassAccessFlags |= 8
+								}
+							}
+						}
+					}
+				}
+			case "budget":
+				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "memory":
+				work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			if got := nativeMemberLexicalAncestorDeclarationDependency(prepared, object, member, resolve, work); got != (variant == "original") {
+				t.Fatalf("original lexical type scope admitted=%v", got)
+			}
+		})
+	}
+}

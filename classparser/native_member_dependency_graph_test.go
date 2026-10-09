@@ -122,3 +122,36 @@ func TestNativeStaticDependencyAliasesDoNotGrantFamilyMembership(t *testing.T) {
 		t.Fatal("external alias imported into private lexical ownership")
 	}
 }
+
+func TestNativeProtectedTypeLexicalConsumersJoinOriginalSourceTransaction(t *testing.T) {
+	for _, shape := range []string{"direct", "deep", "shadow"} {
+		files := nativeCompileSourceReleaseClasses(t, nativeInheritedContextSources(shape), "none", "8")
+		for _, root := range []string{"base/Parent", "use/Owner"} {
+			t.Run(shape+"/"+root, func(t *testing.T) {
+				z := nativeArchive(t, files)
+				defer z.Close()
+				graph, known := z.nativeMemberOriginalDependencyGraph(root, nil)
+				if !known {
+					t.Fatal("original dependency graph unavailable")
+				}
+				// Direct subclasses already have the protected type scope while flat.
+				// A deeper lexical consumer needs its enclosing subclass restored jointly.
+				if got := graph["base/Parent"]["use/Owner"]; got != (shape == "deep") {
+					t.Fatalf("reverse protected lexical dependency=%v graph=%v", got, graph)
+				}
+				if root == "use/Owner" || shape == "deep" {
+					if !graph["use/Owner"]["base/Parent"] {
+						t.Fatal("referencing family lost original declaration dependency")
+					}
+				}
+				components, known := nativeMemberSourceComponents(graph, nil)
+				if !known {
+					t.Fatal("original source components unavailable")
+				}
+				if got := len(components[root]) > 1; got != (shape == "deep") {
+					t.Fatalf("joint lexical transaction=%v", got)
+				}
+			})
+		}
+	}
+}

@@ -32,3 +32,38 @@ func nativeMemberAncestorDeclarationDependency(root, member *ClassObject, resolv
 	// identity, cycle, missing metadata and shared work/memory/cancel guards.
 	return nativeMemberOriginalClassWidening(root.GetClassName(), owner, resolve, work)
 }
+
+// Type accessibility belongs to the referencing declaration and its proved
+// lexical enclosing declarations, not just the compilation unit's root. A
+// nested subclass can inherit a protected member type even when its outer root
+// is unrelated; declarations nested inside that subclass share its type scope.
+// Consult only original ancestry and the already prepared named scope chain.
+// This contributes a type spelling, never foreign private/constructor ownership.
+func nativeMemberLexicalAncestorDeclarationDependency(prepared *nativeMemberPrepared, object, member *ClassObject, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+	if prepared == nil || prepared.root == nil || prepared.family == nil || prepared.family.failed || object == nil || prepared.objects[object.GetClassName()] != object || prepared.objects[prepared.family.owner] != prepared.root || prepared.root.GetClassName() != prepared.family.owner || !nativeProofWork(work, 1) {
+		return false
+	}
+	if nativeMemberAncestorDeclarationDependency(object, member, resolve, work) || object != prepared.root && nativeMemberAncestorDeclarationDependency(prepared.root, member, resolve, work) {
+		return true
+	}
+	if prepared.family.children[object.GetClassName()] == nil {
+		return false
+	}
+	scopes, known := nativeMemberJointNamedScope(prepared, object.GetClassName(), work)
+	if !known {
+		return false
+	}
+	// Walk nearest-to-farthest in lexical order, not map iteration order, so
+	// the shared proof budget has deterministic behavior.
+	for name := prepared.family.children[object.GetClassName()].owner; name != prepared.family.owner; {
+		node := prepared.family.children[name]
+		if !scopes[name] || node == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		if nativeMemberAncestorDeclarationDependency(prepared.objects[name], member, resolve, work) {
+			return true
+		}
+		name = node.owner
+	}
+	return false
+}
