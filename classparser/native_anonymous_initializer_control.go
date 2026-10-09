@@ -53,6 +53,12 @@ func nativeAnonymousInitializerControlEvents(obj *ClassObject, ops []*core.OpCod
 		}
 		op := ops[index]
 		kind := op.Instr.OpCode
+		// ACONST_NULL has one fixed reference value and no read, invocation or
+		// abrupt completion. It still occupies an exact chosen-arm producer
+		// position; the source closure must match that position to Java null.
+		if kind == core.OP_ACONST_NULL && len(op.Data) == 0 {
+			return int(op.CurrentOffset), true
+		}
 		member := constructorMotionMember(obj, op, kind)
 		if member == nil {
 			return 0, false
@@ -86,9 +92,9 @@ func nativeAnonymousInitializerControlEvents(obj *ClassObject, ops []*core.OpCod
 				if !known || join <= other || join > end {
 					return false
 				}
-				// The arm's selected value must itself retain an original producer
-				// identity. An empty effect stream cannot certify two different
-				// constants or an arithmetic result; keep those capabilities closed.
+				// The arm's selected value must retain its original producer
+				// identity or the separately checked fixed null value. An empty
+				// effect stream alone cannot certify other constants/arithmetic.
 				left, leftKnown := resultProducer(other - 2)
 				right, rightKnown := resultProducer(join - 1)
 				if !leftKnown || !rightKnown || depth != 0 {
@@ -153,6 +159,27 @@ func nativeAnonymousInitializerArmValue(value values.JavaValue, pc int) bool {
 		return x.ConstructorCall != nil && x.ConstructorCall.HasOriginPC && x.ConstructorCall.OriginPC == pc
 	}
 	return false
+}
+
+func nativeAnonymousInitializerArmSourceValue(plan *nativeAnonymousExpressionInitializer, value values.JavaValue, pc int) bool {
+	if plan == nil {
+		return false
+	}
+	op := plan.byPC[pc]
+	if op == nil || op.Instr == nil || int(op.CurrentOffset) != pc {
+		return false
+	}
+	if op.Instr.OpCode == core.OP_ACONST_NULL {
+		// Null's reference identity is exact; a literal spelling "null", a
+		// call, cast or arithmetic node cannot substitute for this producer.
+		literal, known := values.UnpackSoltValue(value).(*values.JavaLiteral)
+		if !known || len(op.Data) != 0 {
+			return false
+		}
+		original, known := literal.OriginalNullPC()
+		return known && original == pc
+	}
+	return nativeAnonymousInitializerArmValue(value, pc)
 }
 
 // Identify the original consumed reference by its producer PC, never by a

@@ -229,9 +229,10 @@ func NewJavaArray(class *types.JavaClass, length JavaValue) *JavaArray {
 }
 
 type JavaLiteral struct {
-	JavaType types.JavaType
-	Data     any
-	Units    []uint16 // lossless; when non-nil, String() uses Units for String/char
+	originalNull *originalNull
+	JavaType     types.JavaType
+	Data         any
+	Units        []uint16 // lossless; when non-nil, String() uses Units for String/char
 }
 
 // ReplaceVar implements JavaValue.

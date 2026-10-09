@@ -3512,7 +3512,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(loadVarBySlot(slot))
 		////return mkRetrieve(variableFactory);
 	case OP_ACONST_NULL:
-		runtimeStackSimulation.Push(values.NewJavaLiteral("null", types.NewJavaClass("java.lang.Object")))
+		runtimeStackSimulation.Push(values.NewOriginalNullLiteral(int(opcode.CurrentOffset)))
 	case OP_ICONST_M1:
 		runtimeStackSimulation.Push(values.NewJavaLiteral(-1, types.NewJavaPrimer(types.JavaInteger)))
 	case OP_ICONST_0:

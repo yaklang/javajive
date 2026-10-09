@@ -234,6 +234,11 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	copy.QualifiedStaticFields = true
 	copy.RetainImplicitConstructorCalls = true
 	c.wireNativeAnonymousSource()
+	// These callbacks close over their context pointer. Copying the ordinary
+	// method's callbacks keeps its identity even after the initializer's method
+	// fields change. Rebind the original member/call-site proofs to this actual
+	// constructor context before rendering any private access in its RHS.
+	c.wireNativeMemberSource()
 	_, body, err := ParseBytesCode(c, plan.code, u.NewRootVariableId())
 	if err != nil {
 		return "", false
@@ -399,7 +404,7 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 				yes, no = no, yes
 			}
 			arms, known := plan.armValues[pc]
-			if !known || !nativeAnonymousInitializerArmValue(yes, arms[0]) || !nativeAnonymousInitializerArmValue(no, arms[1]) {
+			if !known || !nativeAnonymousInitializerArmSourceValue(plan, yes, arms[0]) || !nativeAnonymousInitializerArmSourceValue(plan, no, arms[1]) {
 				return false
 			}
 			*events = append(*events, nativeAnonymousInitializerBranchToken(pc, 0))
