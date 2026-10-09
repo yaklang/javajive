@@ -1,0 +1,114 @@
+package javaclassparser
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestAdversarialMethodLocalCapturedDelegationNativeCompiler(t *testing.T) {
+	javac := os.Getenv("JAVA8_JAVAC")
+	if javac == "" {
+		t.Skip("real javac8 original/rebuild oracle requires JAVA8_JAVAC")
+	}
+	version, err := exec.Command(javac, "-version").CombinedOutput()
+	if err != nil || !strings.Contains(string(version), "javac 1.8.") {
+		t.Fatal("native compiler identity", err, string(version))
+	}
+	for _, layout := range []string{"instance", "static"} {
+		t.Run(layout, func(t *testing.T) {
+			fixture := localCapturedDelegationFixture
+			if layout == "static" {
+				fixture = strings.ReplaceAll(fixture, "Object make(final int n,", "static Object make(final int n,")
+				fixture = strings.ReplaceAll(fixture, "return DelegationOwner.this;", "return null;")
+				fixture = strings.ReplaceAll(fixture, ".invoke(b)!=owner", ".invoke(b)!=null")
+			}
+			compile := func(debug string) map[string][]byte {
+				root := t.TempDir()
+				path := filepath.Join(root, "DelegationOwner.java")
+				if err := os.WriteFile(path, []byte(fixture), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if log, err := exec.Command(javac, "-proc:none", "-source", "8", "-target", "8", "-g:"+debug, "-d", root, path).CombinedOutput(); err != nil {
+					t.Fatal("authored original compile", err, string(log))
+				}
+				entries, err := os.ReadDir(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files := map[string][]byte{}
+				for _, entry := range entries {
+					if strings.HasSuffix(entry.Name(), ".class") {
+						b, err := os.ReadFile(filepath.Join(root, entry.Name()))
+						if err != nil {
+							t.Fatal(err)
+						}
+						files[entry.Name()] = b
+					}
+				}
+				return files
+			}
+			testNativeIndependentCompilerFamilyFixture(t, compile, NativeJavac8, javac, []string{"DelegationOwner"}, "DelegationDriver", "18:local:delegation\n", nil, nativeLexicalExactSignatures)
+		})
+	}
+}
+
+const localCapturedDelegationFixture = `class DelegationBase{final int number;final long seen;final Object seenToken;DelegationBase(int a,long b,Object t){number=a;seen=b;seenToken=capture();if(t!=seenToken)throw new AssertionError("pre-super capture");}Object capture(){return null;}}
+class DelegationOwner{Object make(final int n,final long word,final Object token){class Entry extends DelegationBase{Entry(){super(n,word,token);}Object capture(){return token;}long get(){return word;}int n(){return n;}Object owner(){return DelegationOwner.this;}}return new Entry();}}
+class DelegationDriver{public static void main(String[]args)throws Exception{DelegationOwner owner=new DelegationOwner();Object token=new Object();int rows=0;for(int n:new int[]{Integer.MIN_VALUE,0,Integer.MAX_VALUE})for(long word:new long[]{Long.MIN_VALUE,0,Long.MAX_VALUE})for(Object value:new Object[]{null,token}){DelegationBase b=(DelegationBase)owner.make(n,word,value);if(b.number!=n||b.seen!=word||b.seenToken!=value||b.capture()!=value)throw new AssertionError("bound super args and capture");Object get=b.getClass().getDeclaredMethod("get").invoke(b);if(((Long)get).longValue()!=word||b.getClass().getDeclaredMethod("owner").invoke(b)!=owner)throw new AssertionError("wide and enclosing");rows++;}System.out.println(rows+":local:delegation");}}`
+
+func TestAdversarialMethodLocalCapturedDelegationOriginalIdentity(t *testing.T) {
+	for _, prefix := range []string{"Delegation", "SeparateLocal"} {
+		for _, layout := range []string{"instance", "static", "repeated word", "enclosing word"} {
+			t.Run(prefix+"/"+layout, func(t *testing.T) {
+				f := localCapturedDelegationFixture
+				if layout == "static" {
+					f = strings.ReplaceAll(f, "Object make(final int n,", "static Object make(final int n,")
+					f = strings.ReplaceAll(f, "return DelegationOwner.this;", "return null;")
+					f = strings.ReplaceAll(f, ".invoke(b)!=owner", ".invoke(b)!=null")
+				}
+				if layout == "repeated word" {
+					f = strings.ReplaceAll(f, "DelegationBase(int a,long b,Object t)", "DelegationBase(int a,long b,Object t,int again)")
+					f = strings.ReplaceAll(f, "seen=b;seenToken", "if(again!=a)throw new AssertionError(\"same captured word\");seen=b;seenToken")
+					f = strings.ReplaceAll(f, "super(n,word,token)", "super(n,word,token,n)")
+				}
+				if layout == "enclosing word" {
+					f = strings.ReplaceAll(f, "DelegationBase(int a,long b,Object t)", "DelegationBase(DelegationOwner expected,int a,long b,Object t)")
+					f = strings.ReplaceAll(f, "number=a;seen=b;", "if(enclosing()!=expected)throw new AssertionError(\"pre-super enclosing word\");number=a;seen=b;")
+					f = strings.ReplaceAll(f, "Object capture(){return null;}", "Object enclosing(){return null;}Object capture(){return null;}")
+					f = strings.ReplaceAll(f, "super(n,word,token)", "super(DelegationOwner.this,n,word,token)")
+					f = strings.ReplaceAll(f, "Object owner(){return DelegationOwner.this;}", "Object enclosing(){return DelegationOwner.this;}Object owner(){return DelegationOwner.this;}")
+				}
+				f = strings.ReplaceAll(f, "Delegation", prefix)
+				testNativeIndependentFamilyFixture(t, f, []string{prefix + "Owner"}, prefix+"Driver", "18:local:delegation\n", nativeLexicalExactSignatures)
+			})
+		}
+	}
+}
+
+// The parent, effect recorder and caller stay original. Its virtual callbacks
+// observe captures before either successful initialization or an abrupt exit.
+func TestAdversarialMethodLocalCapturedDelegationKeepsOriginalAbruptEffects(t *testing.T) {
+	const fixture = `class LocalAbruptEffects{static final RuntimeException failure=new RuntimeException("original");static Object seen;static int calls;}
+class LocalAbruptBase{LocalAbruptBase(int n,Object expected){LocalAbruptEffects.calls++;LocalAbruptEffects.seen=capture();if(LocalAbruptEffects.seen!=expected)throw new AssertionError("early capture");if(n<0)throw LocalAbruptEffects.failure;}Object capture(){return null;}}
+class LocalAbruptOwner{Object make(final int n,final Object token){class Entry extends LocalAbruptBase{Entry(){super(n,token);}Object capture(){return token;}}return new Entry();}}
+class LocalAbruptDriver{public static void main(String[]args){LocalAbruptOwner owner=new LocalAbruptOwner();Object marker=new Object();int rows=0;for(int n:new int[]{Integer.MIN_VALUE,-1,0,1,Integer.MAX_VALUE})for(Object value:new Object[]{null,marker}){int before=LocalAbruptEffects.calls;try{LocalAbruptBase b=(LocalAbruptBase)owner.make(n,value);if(n<0||b.capture()!=value)throw new AssertionError("normal exit");}catch(RuntimeException failure){if(n>=0||failure!=LocalAbruptEffects.failure)throw new AssertionError("abrupt identity");}if(LocalAbruptEffects.seen!=value||LocalAbruptEffects.calls!=before+1)throw new AssertionError("partial effects");rows++;}System.out.println(rows+":local:abrupt");}}`
+	for _, prefix := range []string{"LocalAbrupt", "SeparateAbrupt"} {
+		t.Run(prefix, func(t *testing.T) {
+			testNativeIndependentFamilyFixture(t, strings.ReplaceAll(fixture, "LocalAbrupt", prefix), []string{prefix + "Owner"}, prefix+"Driver", "10:local:abrupt\n", nativeLexicalExactSignatures)
+		})
+	}
+}
+
+func TestAdversarialMethodLocalCapturedDelegationSeparatesEqualTypedWords(t *testing.T) {
+	const fixture = `class WordBindingBase{final Object left,right;final long wide;WordBindingBase(Object l,Object r,long w){left=left();right=right();wide=w;if(left!=l||right!=r)throw new AssertionError("independent super words");}Object left(){return null;}Object right(){return null;}}
+class WordBindingOwner{Object make(final Object first,final Object second,final long word){class Entry extends WordBindingBase{Entry(){super(second,first,word);}Object left(){return second;}Object right(){return first;}}return new Entry();}}
+class WordBindingDriver{public static void main(String[]args){WordBindingOwner owner=new WordBindingOwner();Object a=new Object(),b=new Object();int rows=0;for(Object first:new Object[]{null,a,b})for(Object second:new Object[]{null,a,b})for(long word:new long[]{Long.MIN_VALUE,0,Long.MAX_VALUE}){WordBindingBase value=(WordBindingBase)owner.make(first,second,word);if(value.left!=second||value.right!=first||value.wide!=word)throw new AssertionError("source capture binding");rows++;}System.out.println(rows+":local:separate-words");}}`
+	for _, prefix := range []string{"WordBinding", "IndependentWords"} {
+		t.Run(prefix, func(t *testing.T) {
+			testNativeIndependentFamilyFixture(t, strings.ReplaceAll(fixture, "WordBinding", prefix), []string{prefix + "Owner"}, prefix+"Driver", "27:local:separate-words\n", nativeLexicalExactSignatures)
+		})
+	}
+}

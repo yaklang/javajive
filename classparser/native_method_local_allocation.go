@@ -55,16 +55,9 @@ func (c *ClassObjectDumper) nativeMethodLocalAllocationFacts(local *ClassObject,
 	if !known || physical.method != owner.method || physical.descriptor != owner.descriptor || physical.name != owner.name || physical.ordinal != owner.ordinal || physical.declaration != owner.declaration {
 		return nil, false
 	}
-	actual, known := originalMethodLocalDefaultConstructor(local, c.obj, c.Work)
-	if !known || actual.descriptor != constructor.descriptor || actual.delegatePC != constructor.delegatePC || actual.delegateOwner != constructor.delegateOwner || actual.enclosingField != constructor.enclosingField || len(actual.captures) != len(constructor.captures) {
+	actual, known := originalMethodLocalSourceConstructor(local, c.obj, c.Work)
+	if !known || !sameOriginalMethodLocalConstructor(actual, constructor, c.Work) {
 		return nil, false
-	}
-	for field, index := range actual.captures {
-		cachedIndex, cached := constructor.captures[field]
-		cachedPC, cachedSite := constructor.capturePCs[field]
-		if !nativeProofWork(c.Work, 1) || !cached || !cachedSite || cachedIndex != index || cachedPC != actual.capturePCs[field] {
-			return nil, false
-		}
 	}
 	var code *CodeAttribute
 	for _, attribute := range owner.declaration.Attributes {

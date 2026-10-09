@@ -13029,6 +13029,14 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if c.nativeAssertionProtocol() != nil && c.nativeAssertionProtocol().initializer == method && c.nativeAssertionProtocol().pureInitializer {
 			continue
 		}
+		if local := c.nativeMethodLocalCurrent; local != nil && name == "<init>" && len(local.constructor.delegateParams) != 0 {
+			delegation, err := c.nativeMethodLocalDelegationSource(method)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, delegation)
+			continue
+		}
 		if c.nativeCaptureFields != nil && c.nativeMemberCurrent == nil && name == "<init>" || c.nativeAnonymousRoot != nil && c.nativeAnonymousRoot.accessBridgeDescriptor(c.obj, name, descriptor) {
 			continue
 		}

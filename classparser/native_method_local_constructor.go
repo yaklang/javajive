@@ -12,6 +12,8 @@ import (
 // source declaration's placement or private users; they must close jointly.
 type nativeMethodLocalConstructor struct {
 	descriptor, delegateOwner string
+	delegateDescriptor        string
+	delegateParams            []int
 	delegatePC                int
 	enclosingField            string
 	captures                  map[string]int
@@ -19,6 +21,18 @@ type nativeMethodLocalConstructor struct {
 }
 
 func originalMethodLocalDefaultConstructor(obj, enclosing *ClassObject, work *workbudget.Budget) (*nativeMethodLocalConstructor, bool) {
+	return originalMethodLocalCaptureConstructor(obj, enclosing, work, false)
+}
+
+// Explicit no-source-argument constructors may pass original captured words to
+// SUPER. They require an emitted source constructor, never a default-constructor
+// license. Allocation identity, source capture stability and target declaration
+// binding remain separate certificates.
+func originalMethodLocalSourceConstructor(obj, enclosing *ClassObject, work *workbudget.Budget) (*nativeMethodLocalConstructor, bool) {
+	return originalMethodLocalCaptureConstructor(obj, enclosing, work, true)
+}
+
+func originalMethodLocalCaptureConstructor(obj, enclosing *ClassObject, work *workbudget.Budget, capturedDelegation bool) (*nativeMethodLocalConstructor, bool) {
 	owner, known := originalMethodLocalOwner(obj, enclosing, work)
 	if !known || obj.AccessFlags != 0x20 && obj.AccessFlags != 0x30 {
 		return nil, false
@@ -125,16 +139,38 @@ func originalMethodLocalDefaultConstructor(obj, enclosing *ClassObject, work *wo
 		cursor += 3
 	}
 	// No explicit user argument, overwritten capture or residual initializer is
-	// silently discarded. The source default constructor must regenerate every
-	// actual parameter/store and the same no-argument parent call before return.
-	if len(used) != len(params) || owner.declaration.AccessFlags&8 == 0 && plan.enclosingField == "" || cursor+3 != len(ops) || !constructorMotionLoad(ops[cursor], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[cursor]) != 0 {
+	// silently discarded. Every physical argument must regenerate as a captured
+	// declaration; a nonempty parent packet needs the explicit source certificate.
+	if len(used) != len(params) || owner.declaration.AccessFlags&8 == 0 && plan.enclosingField == "" || cursor >= len(ops) || !constructorMotionLoad(ops[cursor], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[cursor]) != 0 {
 		return nil, false
 	}
-	delegate := constructorMotionMember(obj, ops[cursor+1], core.OP_INVOKESPECIAL)
-	if delegate == nil || delegate.Name != plan.delegateOwner || delegate.Member != "<init>" || delegate.Description != "()V" || ops[cursor+2].Instr.OpCode != core.OP_RETURN {
+	cursor++
+	for cursor < len(ops) && ops[cursor].Instr.OpCode != core.OP_INVOKESPECIAL {
+		param, found := slots[core.GetRetrieveIdx(ops[cursor])]
+		if !capturedDelegation || !nativeProofWork(work, 1) || !found || !used[param] || !constructorMotionLoad(ops[cursor], params[param]) {
+			return nil, false
+		}
+		plan.delegateParams = append(plan.delegateParams, param)
+		cursor++
+	}
+	if cursor+2 != len(ops) || ops[cursor+1].Instr.OpCode != core.OP_RETURN {
 		return nil, false
 	}
-	plan.delegatePC = int(ops[cursor+1].CurrentOffset)
+	delegate := constructorMotionMember(obj, ops[cursor], core.OP_INVOKESPECIAL)
+	if delegate == nil || delegate.Name != plan.delegateOwner || delegate.Member != "<init>" {
+		return nil, false
+	}
+	targetParams, targetResult, err := callbinding.Descriptor(delegate.Description)
+	if err != nil || targetResult != "V" || len(targetParams) != len(plan.delegateParams) {
+		return nil, false
+	}
+	for i, param := range plan.delegateParams {
+		if params[param] != targetParams[i] {
+			return nil, false
+		}
+	}
+	plan.delegateDescriptor = delegate.Description
+	plan.delegatePC = int(ops[cursor].CurrentOffset)
 	fields := 0
 	for _, f := range obj.Fields {
 		if f == nil || !nativeProofWork(work, 1) {
@@ -153,6 +189,27 @@ func originalMethodLocalDefaultConstructor(obj, enclosing *ClassObject, work *wo
 		return nil, false
 	}
 	return plan, true
+}
+
+// A cached source plan cannot replace original bytecode identity. Every scope
+// consumer revalidates both hidden stores and the complete delegation packet.
+func sameOriginalMethodLocalConstructor(actual, cached *nativeMethodLocalConstructor, work *workbudget.Budget) bool {
+	if actual == nil || cached == nil || actual.descriptor != cached.descriptor || actual.delegateOwner != cached.delegateOwner || actual.delegatePC != cached.delegatePC || actual.delegateDescriptor != cached.delegateDescriptor || len(actual.delegateParams) != len(cached.delegateParams) || actual.enclosingField != cached.enclosingField || len(actual.captures) != len(cached.captures) || len(actual.capturePCs) != len(cached.capturePCs) {
+		return false
+	}
+	for i, param := range actual.delegateParams {
+		if !nativeProofWork(work, 1) || cached.delegateParams[i] != param {
+			return false
+		}
+	}
+	for field, param := range actual.captures {
+		index, found := cached.captures[field]
+		pc, stored := cached.capturePCs[field]
+		if !nativeProofWork(work, 1) || !found || !stored || index != param || pc != actual.capturePCs[field] {
+			return false
+		}
+	}
+	return true
 }
 
 // Captured/default constructors have no source parameters. Their original
@@ -214,6 +271,38 @@ func nativeMethodLocalConstructorParameters(obj *ClassObject, method *MemberInfo
 	// post-52 input namespaces. Nest membership is only local syntax evidence
 	// here; the complete lexical/nest source transaction must still close.
 	return obj.MajorVersion >= 52 && nativeAccessorVersion(obj, work) && signatureSeen && parametersSeen == wantParameters
+}
+
+// Physical capture words and source compiler metadata are separate proofs.
+// javac8 omits MethodParameters even for a mandated enclosing instance;
+// modern javac emits that table. Only a selected, matching original/target
+// compiler domain may regenerate the absent-table protocol without a drift.
+func (c *ClassObjectDumper) nativeMethodLocalConstructorSourceMetadata(obj *ClassObject, method *MemberInfo, params []string, owner *nativeMethodLocalOwner) bool {
+	if c.options.SourceCompiler != NativeJavac8 {
+		return nativeMethodLocalConstructorParameters(obj, method, params, owner, true, c.Work)
+	}
+	if c.options.TargetSourceVersion != 8 || c.obj == nil || obj == nil || owner == nil || c.obj.MajorVersion != 52 || obj.MajorVersion != c.obj.MajorVersion || obj.MinorVersion != 0 || c.obj.MinorVersion != 0 {
+		return false
+	}
+	original, known := originalMethodLocalOwner(obj, c.obj, c.Work)
+	if !known || *original != *owner || !nativeMethodLocalConstructorParameters(obj, method, params, owner, false, c.Work) {
+		return false
+	}
+	signature := false
+	for _, attr := range method.Attributes {
+		if !nativeProofWork(c.Work, 1) {
+			return false
+		}
+		switch a := attr.(type) {
+		case *UnparsedAttribute:
+			// The physical checker above admits only MethodParameters here.
+			// An existing table cannot be preserved by this compiler protocol.
+			return false
+		case *SignatureAttribute:
+			signature = a != nil
+		}
+	}
+	return signature == (len(params) != 0)
 }
 
 // A pre-Java-8 default local constructor can carry the same verified capture

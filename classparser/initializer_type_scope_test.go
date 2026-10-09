@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"testing"
@@ -14,11 +15,11 @@ func TestAdversarialInitializerTypeScopeRequiresConsistentOriginalContexts(t *te
 	files := nativeCompileClasses(t, initializerTypeScopeFixture)
 	for _, kind := range []string{"two constructors", "one constructor", "missing metadata", "duplicate metadata", "bad packet", "wrong owner", "method context", "old version", "missing target constructor", "duplicate target constructor", "duplicate owner method", "duplicate code", "nil code", "bad code", "foreign new", "wrong invocation descriptor", "ordinary method context", "static constructor", "mixed contexts", "bad static initializer descriptor", "no creation", "budget", "memory", "canceled"} {
 		t.Run(kind, func(t *testing.T) {
-			owner, err := Parse(files["InitializerScopeOwner.class"])
+			owner, err := Parse(bytes.Clone(files["InitializerScopeOwner.class"]))
 			if err != nil {
 				t.Fatal(err)
 			}
-			child, err := Parse(files["InitializerScopeOwner$1.class"])
+			child, err := Parse(bytes.Clone(files["InitializerScopeOwner$1.class"]))
 			if err != nil {
 				t.Fatal(err)
 			}

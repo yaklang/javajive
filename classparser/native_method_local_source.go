@@ -144,7 +144,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 			if _, known := nativeMethodLocalScopeSignature(local, c.obj, owner, c.Work, p); !known {
 				return false
 			}
-			constructor, known := originalMethodLocalDefaultConstructor(local, c.obj, c.Work)
+			constructor, known := originalMethodLocalSourceConstructor(local, c.obj, c.Work)
 			if !known {
 				return false
 			}
@@ -159,7 +159,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 				if name != "<init>" {
 					continue
 				}
-				if !nativeMethodLocalConstructorParameters(local, method, captureParams, owner, true, c.Work) {
+				if !c.nativeMethodLocalConstructorSourceMetadata(local, method, captureParams, owner) {
 					if !nativeMethodLocalLegacySourceMetadata(local, method, captureParams, owner, c.Work) {
 						return false
 					}
@@ -760,7 +760,10 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 			}
 		}
 		source, e := sub.DumpClass()
-		if e != nil || sub.nativeCaptureFailed || p.failed || len(sub.constructorBoundaryHelpers) != 0 || strings.Contains(source, DecompileStubMarker) {
+		if e != nil {
+			return fail("rendered local body: " + e.Error())
+		}
+		if sub.nativeCaptureFailed || p.failed || len(sub.constructorBoundaryHelpers) != 0 || strings.Contains(source, DecompileStubMarker) {
 			return fail("rendered body or joint scope failed")
 		}
 		for _, method := range sub.dumpedMethodsSet {

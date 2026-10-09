@@ -47,17 +47,10 @@ func nativeMemberJointMethodLocalOwner(p *nativeMemberFamily, obj *ClassObject, 
 	if !known || *owner != *local.owner {
 		return nil, false
 	}
-	actual, known := originalMethodLocalDefaultConstructor(obj, enclosing, work)
+	actual, known := originalMethodLocalSourceConstructor(obj, enclosing, work)
 	cached := local.constructor
-	if !known || actual.descriptor != cached.descriptor || actual.delegateOwner != cached.delegateOwner || actual.delegatePC != cached.delegatePC || actual.enclosingField != cached.enclosingField || len(actual.captures) != len(cached.captures) || len(actual.capturePCs) != len(cached.capturePCs) {
+	if !known || !sameOriginalMethodLocalConstructor(actual, cached, work) {
 		return nil, false
-	}
-	for field, param := range actual.captures {
-		index, found := cached.captures[field]
-		pc, stored := cached.capturePCs[field]
-		if !nativeProofWork(work, 1) || !found || !stored || index != param || pc != actual.capturePCs[field] {
-			return nil, false
-		}
 	}
 	if actual.enclosingField != "" {
 		field, known := nativeMethodLocalEnclosingField(p, owner.owner, work)
