@@ -17,8 +17,22 @@ type nativeAnonymousCacheEntry struct {
 }
 
 func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
+	if source, known := z.nativeAnonymousSourceTransaction(cf, false); known {
+		return source, true
+	}
+	return z.nativeAnonymousSourceTransaction(cf, true)
+}
+
+func (z *JarFS) nativeAnonymousSourceTransaction(cf *ClassObject, independent bool) ([]byte, bool) {
 	owner, _, anon := originalAnonymousOwner(cf)
-	if anon {
+	if independent {
+		if !anon {
+			return nil, false
+		}
+		if cf.AccessFlags == 0x0030 {
+			owner = cf.GetClassName()
+		}
+	} else if anon {
 		var known bool
 		owner, known = z.nativeAnonymousOutermostOwner(owner, z.nativeMemberReader(cf))
 		if !known {
@@ -51,6 +65,9 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 	}
 	policy, _ := json.Marshal(snap)
 	key := owner + "\x00" + string(policy)
+	if independent {
+		key = "independent\x00" + key
+	}
 	// Bounds include failed proofs and policy variants. Never evict an accepted
 	// family while this filesystem is live: its child suppression depends on it.
 	z.nativeAnonymousMu.Lock()
@@ -95,14 +112,24 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 			d.options.TargetRelease = z.archive.targetRelease
 		}
 		d.options.EnvSnapshot = snap
-		p := d.planNativeAnonymousFamily()
+		var p *nativeAnonymousFamily
+		if independent {
+			root := d.originalNativeAnonymousIndependentRoot()
+			if root == nil {
+				return
+			}
+			p = d.planNativeAnonymousOwnedGroup(nil, nil, root)
+			p = d.validateNativeAnonymousGroup(p, nil, nil)
+		} else {
+			p = d.planNativeAnonymousFamily()
+		}
 		if p == nil {
 			return
 		}
 		// A partial source transaction changes the prefix's type names while
 		// leaving independent terminal binaries flat. Close physical archive
 		// users before publishing either the prefix or its child suppression.
-		if len(p.standalone) != 0 && !nativeAnonymousPrefixArchiveClosed(p, z.originalMemberIndex(), d.Work) {
+		if (independent || len(p.standalone) != 0) && !nativeAnonymousPrefixArchiveClosed(p, z.originalMemberIndex(), d.Work) {
 			return
 		}
 		if p.forest != nil && !nativeAnonymousForestArchiveClosed(p.forest, z.originalMemberIndex(), d.Work) {
@@ -112,7 +139,7 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 		var source string
 		var err error
 		jdecenv.Run(snap, func() error { source, err = d.DumpClass(); return err })
-		if err != nil || !p.completeSource(source) {
+		if err != nil || !p.completeSource(source) || independent && (strings.Contains(source, DecompileStubMarker) || strings.Contains(source, "// decompile dump failed")) {
 			return
 		}
 		if !z.reserveOwnershipSource(int64(len(source))) {
@@ -149,7 +176,7 @@ func (z *JarFS) nativeAnonymousSource(cf *ClassObject) ([]byte, bool) {
 	if anon && out.folded[cf.GetClassName()] {
 		return []byte("// " + strings.ReplaceAll(cf.GetClassName(), "/", ".") + ": original anonymous body owned by " + strings.ReplaceAll(owner, "/", ".") + "; javac regenerates its binary class\n"), true
 	}
-	if !anon {
+	if !anon || independent && cf.GetClassName() == owner {
 		return []byte(out.source), true
 	}
 	return nil, false

@@ -41,12 +41,13 @@ type nativeAnonymousClass struct {
 	memberEnclosingPath   *nativeMemberLexicalRead
 }
 type nativeAnonymousFamily struct {
-	forest     *nativeAnonymousForest
-	owner      string
-	children   map[string]*nativeAnonymousClass
-	failed     bool
-	bridges    map[string]*nativeConstructorAccessBridge
-	standalone map[string]*ClassObject
+	independentRoot *nativeAnonymousIndependentRoot
+	forest          *nativeAnonymousForest
+	owner           string
+	children        map[string]*nativeAnonymousClass
+	failed          bool
+	bridges         map[string]*nativeConstructorAccessBridge
+	standalone      map[string]*ClassObject
 }
 
 // Anonymous ownership is an original attribute fact; binary spelling only
@@ -594,13 +595,17 @@ func (c *ClassObjectDumper) planNativeAnonymousFamilyWithinMembers(members *nati
 	return c.validateNativeAnonymousGroup(p, members, nil)
 }
 func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily, forest *nativeAnonymousForest) *nativeAnonymousFamily {
+	return c.planNativeAnonymousOwnedGroup(members, forest, nil)
+}
+
+func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberFamily, forest *nativeAnonymousForest, root *nativeAnonymousIndependentRoot) *nativeAnonymousFamily {
 	if c.foldSiblingResolver == nil || isGenuineEnum(c.obj) || c.getenv("JDEC_NATIVE_ANONYMOUS_OFF") != "" || !nativeSourceBinaryName(c.obj.GetClassName()) {
 		return nil
 	}
-	if _, _, anon := originalAnonymousOwner(c.obj); anon && (forest == nil || forest.units[c.obj.GetClassName()] == nil) {
+	if _, _, anon := originalAnonymousOwner(c.obj); anon && (forest == nil || forest.units[c.obj.GetClassName()] == nil) && !root.validFor(c) {
 		return nil
 	}
-	p := &nativeAnonymousFamily{forest: forest, owner: c.obj.GetClassName(), children: map[string]*nativeAnonymousClass{}, bridges: map[string]*nativeConstructorAccessBridge{}, standalone: map[string]*ClassObject{}}
+	p := &nativeAnonymousFamily{independentRoot: root, forest: forest, owner: c.obj.GetClassName(), children: map[string]*nativeAnonymousClass{}, bridges: map[string]*nativeConstructorAccessBridge{}, standalone: map[string]*ClassObject{}}
 	assertionRoot := ""
 	if forest != nil && forest.objects[forest.root] != nil && nativeMemberTopLevelEvidence(forest.objects[forest.root], c.Work) {
 		assertionRoot = forest.root
@@ -703,7 +708,7 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 	return p
 }
 func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamily, members *nativeMemberFamily, forest *nativeAnonymousForest) *nativeAnonymousFamily {
-	if p == nil || !c.nativeAnonymousStandaloneTailClosed(p, members, forest, c.buildInvocationMetadata(), c.originalNativeConstructorAccessBridges()) {
+	if p == nil || p.independentRoot != nil && !p.independentRoot.validFor(c) || !c.nativeAnonymousStandaloneTailClosed(p, members, forest, c.buildInvocationMetadata(), c.originalNativeConstructorAccessBridges()) {
 		return nil
 	}
 	if c.obj.MajorVersion >= 55 && members == nil && forest == nil {
