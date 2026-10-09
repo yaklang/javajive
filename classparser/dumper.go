@@ -885,10 +885,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// This was the single largest remaining guava recompile blocker (~2000 undeclared type-variable
 	// errors across the Multimap/Table/cache inner-class families). Recover the variables this unit
 	// actually USES by scanning its own supertype + field signatures for TypeVariableSignature references
-	// and declaring them on the flattened class. Those positions can only reference class- or
-	// enclosing-class-level variables (never method-level ones), so this never clashes with a method's
-	// own `<T>`. Bounds default to Object, matching the common unbounded enclosing variable; a bounded
-	// enclosing variable used in a bound-requiring position is a known residual. Kill-switch:
+	// and declaring them on the flattened class. For local/anonymous declarations these positions can also reference
+	// enclosing METHOD formals. Original EnclosingMethod ownership and full descriptors establish their
+	// lexical binding, including Object-bound shadowing, static cuts and bound dependencies. Only class
+	// declarations without a method scope use the older enclosing-class projection. Kill-switch:
 	// JDEC_INNER_TYPEVAR_OFF=1.
 	//
 	// RESTRICTED to classes that declare NO formal type parameters of their own. For such a
@@ -926,7 +926,13 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// is exactly what a singly-nested reference carries), adopt that full ordered set so declaration
 		// and reference arities AND order agree. The `free ⊆ encl` guard keeps deeper-nesting and
 		// method-level residuals on the existing usage-based path. Kill-switch JDEC_INNER_ENCLOSING_ARITY_OFF.
-		if encl := c.enclosingFormalTypeParamsForArity(); len(encl) > 0 && typeNamesSubset(free, encl) {
+		projected, methodBounds, _, methodScope, projectionErr := c.projectFlattenedMethodFormals(free)
+		if projectionErr != nil {
+			return "", projectionErr
+		}
+		if methodScope {
+			free = projected
+		} else if encl := c.enclosingFormalTypeParamsForArity(); len(encl) > 0 && typeNamesSubset(free, encl) {
 			free = encl
 		}
 		if len(free) > 0 {
@@ -936,7 +942,13 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// bounds of type-variable C". Bounds default to bare names when no enclosing bound is found
 			// (single-class decompile, Object bound, or a bound referencing an out-of-scope variable).
 			// Kill-switch JDEC_INNER_TYPEVAR_BOUND_OFF restores the bare-name behavior.
-			bounds := c.enclosingTypeParamBounds(free)
+			bounds := methodBounds
+			if !methodScope {
+				bounds = c.enclosingTypeParamBounds(free)
+			}
+			if c.getenv("JDEC_INNER_TYPEVAR_BOUND_OFF") != "" {
+				bounds = nil
+			}
 			decls := make([]string, len(free))
 			for i, n := range free {
 				if clause, ok := bounds[n]; ok && clause != "" {
@@ -1086,7 +1098,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		for _, n := range classTypeParamNames {
 			declared[n] = true
 		}
-		bounds := c.enclosingTypeParamErasures(rawEraseTypeVars)
+		bounds, err := c.enclosingTypeParamErasures(rawEraseTypeVars)
+		if err != nil {
+			return "", err
+		}
 		standaloneEraseTypeVars = make(map[string]string, len(rawEraseTypeVars))
 		for name := range rawEraseTypeVars {
 			if declared[name] {
@@ -1114,7 +1129,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 				declaredHere[n] = true
 			}
 			force := map[string]string{}
-			bounds := c.enclosingTypeParamErasures(rawEraseTypeVars)
+			bounds, err := c.enclosingTypeParamErasures(rawEraseTypeVars)
+			if err != nil {
+				return "", err
+			}
 			for name := range rawEraseTypeVars {
 				if !declaredHere[name] {
 					continue
@@ -2227,6 +2245,7 @@ func (c *ClassObjectDumper) enclosingTypeParamBounds(free []string) map[string]s
 		return res
 	}
 	freeSet := map[string]bool{}
+	seen := map[string]bool{}
 	for _, n := range free {
 		freeSet[n] = true
 	}
@@ -2257,7 +2276,13 @@ func (c *ClassObjectDumper) enclosingTypeParamBounds(free []string) map[string]s
 		if sig == "" {
 			continue
 		}
-		for name, b := range types.ClassFormalTypeParamBounds(sig, c.FuncCtx) {
+		bounds := types.ClassFormalTypeParamBounds(sig, c.FuncCtx)
+		for _, name := range types.ClassFormalTypeParamNames(sig) {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			b := bounds[name]
 			if !freeSet[name] {
 				continue
 			}
@@ -2291,10 +2316,22 @@ func (c *ClassObjectDumper) enclosingTypeParamBounds(free []string) map[string]s
 // since it cannot declare the variable. Walks the binary-name `$` chain via foldSiblingResolver; the
 // nearest enclosing scope that binds a name wins (type-variable shadowing). Returns an empty map with no
 // resolver (single-class decompile), so the caller defaults every requested name to java.lang.Object.
-func (c *ClassObjectDumper) enclosingTypeParamErasures(vars map[string]bool) map[string]string {
+func (c *ClassObjectDumper) enclosingTypeParamErasures(vars map[string]bool) (map[string]string, error) {
 	res := map[string]string{}
 	if c.foldSiblingResolver == nil || len(vars) == 0 {
-		return res
+		return res, nil
+	}
+	names := make([]string, 0, len(vars))
+	for name := range vars {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	methodErasures, methodScope, err := c.erasedFlattenedMethodFormals(names)
+	if err != nil {
+		return nil, err
+	}
+	if methodScope {
+		return methodErasures, nil
 	}
 	seen := map[string]bool{}
 	binName := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")
@@ -2338,7 +2375,7 @@ func (c *ClassObjectDumper) enclosingTypeParamErasures(vars map[string]bool) map
 			}
 		}
 	}
-	return res
+	return res, nil
 }
 
 // enclosingFormalTypeParamsForArity recovers the formal type-parameter NAMES of the NEAREST generic
@@ -2379,8 +2416,8 @@ func (c *ClassObjectDumper) enclosingFormalTypeParamsForArity() []string {
 	if c.foldSiblingResolver == nil || c.getenv("JDEC_INNER_ENCLOSING_ARITY_OFF") != "" {
 		return nil
 	}
-	flags, ok := c.selfInnerClassAccessFlags()
-	if !ok || flags&StaticFlag != 0 {
+	_, _, flags, member := originalMemberOwner(c.obj)
+	if !member || flags&StaticFlag != 0 {
 		return nil
 	}
 	binName := strings.ReplaceAll(c.obj.GetClassName(), ".", "/")

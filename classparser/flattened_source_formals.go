@@ -132,7 +132,21 @@ func flattenedFreeTypeVariables(obj *ClassObject, signature string, methodParame
 				if s, ok := a.(*SignatureAttribute); ok {
 					raw, e := obj.getUtf8(s.SignatureIndex)
 					if e == nil {
-						add(types.TypeVarRefsInMethodParams(raw))
+						// Returns, throws and method-formal bounds can capture an
+						// enclosing formal even without a parameter or field use.
+						// A method's own declarations shadow those enclosing names.
+						own, refs, valid := types.SignatureTypeVariableReferences(raw)
+						if valid {
+							declared := map[string]bool{}
+							for _, n := range own {
+								declared[n] = true
+							}
+							for _, n := range refs {
+								if !declared[n] {
+									add([]string{n})
+								}
+							}
+						}
 					}
 					break
 				}

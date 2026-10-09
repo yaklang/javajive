@@ -1,6 +1,107 @@
 package types
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+)
+
+// LexicalTypeScope is one original declaration in outer-to-inner order. A
+// method carries its physical descriptor; callers prove ownership and static
+// cuts before supplying the stack. Method scopes can occur between classes.
+type LexicalTypeScope struct {
+	Signature  string
+	Method     bool
+	Descriptor string
+}
+
+type lexicalFormal struct {
+	first, signature, name string
+	environment            map[string]*lexicalFormal
+	erased                 string
+	visiting               bool
+}
+
+// LexicalTypeParameterErasures needs no source rebinding of hidden formals:
+// the concrete erased descriptor remains representable even when a bound's
+// source name has been shadowed in the final lexical environment.
+func LexicalTypeParameterErasures(scopes []LexicalTypeScope, requested []string) (map[string]string, bool) {
+	if len(requested) > 512 {
+		return nil, false
+	}
+	result := map[string]string{}
+	known := true
+	_, _, valid := eraseLexicalTypeScopes(scopes, func(scope map[string]*lexicalFormal) {
+		for _, n := range requested {
+			f := scope[n]
+			if f == nil {
+				known = false
+				break
+			}
+			result[n] = f.erased
+		}
+	})
+	if !known || !valid {
+		return nil, false
+	}
+	return result, true
+}
+
+// ProjectLexicalTypeParameters closes requested formals over their bound
+// dependencies. Object-bound declarations still shadow outer declarations.
+// A bound referring to a hidden, differently bound declaration cannot be
+// represented by reusing its spelling and is rejected rather than rebound.
+func ProjectLexicalTypeParameters(scopes []LexicalTypeScope, requested []string, ctx *class_context.ClassContext) ([]string, map[string]string, map[string]string, bool) {
+	if len(requested) > 512 {
+		return nil, nil, nil, false
+	}
+	var names []string
+	clauses, erasures := map[string]string{}, map[string]string{}
+	projected := false
+	_, _, valid := eraseLexicalTypeScopes(scopes, func(scope map[string]*lexicalFormal) {
+		seen := map[string]bool{}
+		boundCache := map[string]map[string]TypeParamBound{}
+		var visit func(string) bool
+		visit = func(name string) bool {
+			f := scope[name]
+			if f == nil {
+				return false
+			}
+			if seen[name] {
+				return true
+			}
+			seen[name] = true
+			names = append(names, name)
+			bounds, cached := boundCache[f.signature]
+			if !cached {
+				bounds = ClassFormalTypeParamBounds(f.signature, ctx)
+				boundCache[f.signature] = bounds
+			}
+			bound := bounds[f.name]
+			for _, ref := range bound.Refs {
+				if f.environment[ref] != scope[ref] || !visit(ref) {
+					return false
+				}
+			}
+			if bound.Clause != "" {
+				clauses[name] = bound.Clause
+			}
+			erasures[name] = f.erased
+			return true
+		}
+		projected = true
+		for _, name := range requested {
+			if !visit(name) {
+				projected = false
+				break
+			}
+		}
+	})
+	if !valid || !projected {
+		return nil, nil, nil, false
+	}
+	return names, clauses, erasures, true
+}
 
 // EraseLexicalOwnerMethodSignatureWithThrows resolves an outer-to-inner stack
 // of original class signatures, followed by the original method signature.
@@ -20,19 +121,33 @@ func LexicalOwnerTypeVariableErasure(classes []string, method, name string) (str
 }
 
 func eraseLexicalOwnerMethodSignature(classes []string, method string, accept func(map[string]string)) (string, []string, bool) {
-	if len(classes) > 64 || len(method) > 65535 {
+	if len(classes) > 64 {
 		return "", nil, false
 	}
-	type formal struct {
-		first       string
-		environment map[string]*formal
-		erased      string
-		visiting    bool
+	scopes := make([]LexicalTypeScope, 0, len(classes)+1)
+	for _, s := range classes {
+		scopes = append(scopes, LexicalTypeScope{Signature: s})
 	}
-	scope := map[string]*formal{}
-	retained, declarations := len(method), 0
-	var erase func(*formal, int) (string, bool)
-	erase = func(f *formal, depth int) (string, bool) {
+	scopes = append(scopes, LexicalTypeScope{Signature: method, Method: true})
+	return eraseLexicalTypeScopes(scopes, func(scope map[string]*lexicalFormal) {
+		if accept != nil {
+			bounds := map[string]string{}
+			for n, f := range scope {
+				bounds[n] = f.erased
+			}
+			accept(bounds)
+		}
+	})
+}
+
+func eraseLexicalTypeScopes(scopes []LexicalTypeScope, accept func(map[string]*lexicalFormal)) (string, []string, bool) {
+	if len(scopes) > 129 {
+		return "", nil, false
+	}
+	scope := map[string]*lexicalFormal{}
+	retained, declarations := 0, 0
+	var erase func(*lexicalFormal, int) (string, bool)
+	erase = func(f *lexicalFormal, depth int) (string, bool) {
 		if f == nil || depth > 128 || f.visiting {
 			return "", false
 		}
@@ -72,7 +187,7 @@ func eraseLexicalOwnerMethodSignature(classes []string, method string, accept fu
 		if !ok {
 			return "", nil, false
 		}
-		next := make(map[string]*formal, len(scope)+len(names))
+		next := make(map[string]*lexicalFormal, len(scope)+len(names))
 		for n, f := range scope {
 			next[n] = f
 		}
@@ -81,7 +196,7 @@ func eraseLexicalOwnerMethodSignature(classes []string, method string, accept fu
 			return "", nil, false
 		}
 		for _, n := range names {
-			next[n] = &formal{environment: next}
+			next[n] = &lexicalFormal{environment: next, signature: signature, name: n}
 		}
 		rest := signature
 		parts := []string{}
@@ -171,25 +286,34 @@ func eraseLexicalOwnerMethodSignature(classes []string, method string, accept fu
 		scope = next
 		return rest, bounds, true
 	}
-	for _, s := range classes {
+	descriptor := ""
+	var throws []string
+	for _, declaration := range scopes {
+		s := declaration.Signature
+		if len(s) > 65535 {
+			return "", nil, false
+		}
 		retained += len(s)
 		if retained > 1<<20 {
 			return "", nil, false
 		}
-		if s == "" {
+		if s == "" && !declaration.Method {
 			continue
 		}
-		if _, _, ok := extend(s, false); !ok {
+		body, bounds, ok := extend(s, declaration.Method)
+		if !ok {
 			return "", nil, false
 		}
+		if declaration.Method {
+			var valid bool
+			descriptor, throws, valid = eraseMethodSignature(body, bounds)
+			if !valid || declaration.Descriptor != "" && descriptor != declaration.Descriptor {
+				return "", nil, false
+			}
+		}
 	}
-	body, bounds, ok := extend(method, true)
-	if !ok {
-		return "", nil, false
+	if accept != nil {
+		accept(scope)
 	}
-	descriptor, throws, valid := eraseMethodSignature(body, bounds)
-	if valid && accept != nil {
-		accept(bounds)
-	}
-	return descriptor, throws, valid
+	return descriptor, throws, true
 }
