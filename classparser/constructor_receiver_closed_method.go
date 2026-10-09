@@ -8,8 +8,8 @@ import (
 
 // A closed instance call is not necessarily read-only. It can modify storage
 // distinct from the captures being moved, provided its entire original body
-// satisfies the constructor's receiver-effect invariant. Prove an exact own
-// private/final declaration, then analyze it with the already initialized THIS.
+// satisfies the constructor's receiver-effect invariant. Prove closed dispatch
+// to an exact own declaration, then analyze it with initialized THIS.
 // Open dispatch, monitors, native bodies, handlers and recursive call cycles
 // require separate proofs. No member name or library identity grants admission.
 func (c *ClassObjectDumper) constructorReceiverClosedMethod(obj *ClassObject, member *values.JavaClassMember, opcode int, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, arguments ...constructorEffectValue) (constructorEffectValue, bool) {
@@ -49,7 +49,7 @@ func (c *ClassObjectDumper) constructorReceiverClosedMethod(obj *ClassObject, me
 			target = method
 		}
 	}
-	if target == nil || target.AccessFlags&(0x0002|0x0010) == 0 || target.AccessFlags&(0x0008|0x0020|0x0100|0x0400) != 0 {
+	if target == nil || target.AccessFlags&(0x0008|0x0020|0x0100|0x0400) != 0 || !c.constructorReceiverMethodDispatchClosed(obj, target, member, opcode, remaining) {
 		return constructorEffectValue{}, false
 	}
 	var code *CodeAttribute

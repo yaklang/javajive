@@ -12,9 +12,13 @@ import (
 // Object initialization/finalization facts. Other platform bodies or metadata
 // keep the existing full per-profile analysis. The certificate is local to one
 // movement request, so its arguments and moved-storage identities cannot drift.
+type constructorProfileObservation struct {
+	className, absentRootMethod, methodDescriptor string
+}
+
 type constructorProfileEvidence struct {
 	originals                       map[string][32]byte
-	transcript                      []string
+	transcript                      []constructorProfileObservation
 	eligible, bootstrapUsed, inBody bool
 	inconsistent                    bool
 	rootName, rootSuper             string
@@ -32,11 +36,9 @@ func (e *constructorProfileEvidence) original(c *ClassObjectDumper, name string,
 	}
 	fingerprint := sha256.Sum256(raw)
 	if e.inBody {
-		if len(e.transcript) >= 512 || c.Work != nil && c.Work.CheckAlloc(int64((len(e.transcript)+1)*32+len(e.originals)*96)) != nil {
-			e.eligible = false
+		if !e.record(c, constructorProfileObservation{className: name}) {
 			return
 		}
-		e.transcript = append(e.transcript, name)
 	}
 	if previous, ok := e.originals[name]; ok {
 		if previous != fingerprint {
@@ -52,6 +54,18 @@ func (e *constructorProfileEvidence) original(c *ClassObjectDumper, name string,
 		return
 	}
 	e.originals[name] = fingerprint
+}
+
+// Preserve the relative order of resolver reads and root method-table queries.
+// A provider can change either observation; a name/super/flags-only certificate
+// cannot stand for a mutable caller method-table observation.
+func (e *constructorProfileEvidence) record(c *ClassObjectDumper, observation constructorProfileObservation) bool {
+	if len(e.transcript) >= 512 || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64((len(e.transcript)+1)*64+len(e.originals)*96+len(observation.className)+len(observation.absentRootMethod)+len(observation.methodDescriptor))) != nil {
+		e.eligible = false
+		return false
+	}
+	e.transcript = append(e.transcript, observation)
+	return true
 }
 
 func (e *constructorProfileEvidence) metadata(provider callbinding.Provider) callbinding.Provider {
@@ -79,7 +93,15 @@ func (e *constructorProfileEvidence) revalidates(c *ClassObjectDumper, previous 
 	// lookup that would observe different original bytes.
 	e.inBody = true
 	defer func() { e.inBody = false }()
-	for _, name := range previous.transcript {
+	for _, observation := range previous.transcript {
+		if observation.absentRootMethod != "" {
+			if observation.className != "" || c.obj == nil || c.obj.GetClassName() != e.rootName || c.obj.GetSupperClassName() != e.rootSuper || c.obj.AccessFlags != e.rootFlags || !constructorReceiverRootMethodAbsent(c.obj, observation.absentRootMethod, observation.methodDescriptor, remaining, c.Work) || !e.record(c, observation) {
+				e.inconsistent = true
+				return false
+			}
+			continue
+		}
+		name := observation.className
 		if _, known := c.foldSiblingResolver(name); !known {
 			e.inconsistent = true
 			return false

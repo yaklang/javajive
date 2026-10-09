@@ -7,7 +7,7 @@ import (
 )
 
 // A call on THIS is ordinarily an observation/publication boundary. Admit only
-// an exact own private/final declaration whose complete original body is an
+// an exact own declaration with proved closed dispatch whose original body is an
 // bounded return or one nonvolatile field/literal/parameter read and return. There is no
 // virtual override, allocation, receiver publication or throwable computation.
 // The caller still needs a closed-finalizer proof: method entry can fail, e.g.
@@ -49,7 +49,7 @@ func (c *ClassObjectDumper) constructorReceiverReadOnlyMethodWithStorage(obj *Cl
 			target = method
 		}
 	}
-	if target == nil || target.AccessFlags&(0x0002|0x0010) == 0 || target.AccessFlags&(0x0008|0x0020|0x0100|0x0400) != 0 {
+	if target == nil || target.AccessFlags&(0x0008|0x0020|0x0100|0x0400) != 0 || !c.constructorReceiverMethodDispatchClosed(obj, target, member, opcode, remaining) {
 		return constructorEffectValue{}, false
 	}
 	var code *CodeAttribute
