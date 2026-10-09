@@ -106,6 +106,9 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 		return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
 	}
 
+	if val := methodRefCheckedInput(d, req, static, impl, resultType); val != nil {
+		return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
+	}
 	val := t19MethodRef(req, d, static, impl, req.DynamicArgs, resultType)
 	return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
 }
