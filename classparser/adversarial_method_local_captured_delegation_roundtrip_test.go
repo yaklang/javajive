@@ -59,6 +59,27 @@ const localCapturedDelegationFixture = `class DelegationBase{final int number;fi
 class DelegationOwner{Object make(final int n,final long word,final Object token){class Entry extends DelegationBase{Entry(){super(n,word,token);}Object capture(){return token;}long get(){return word;}int n(){return n;}Object owner(){return DelegationOwner.this;}}return new Entry();}}
 class DelegationDriver{public static void main(String[]args)throws Exception{DelegationOwner owner=new DelegationOwner();Object token=new Object();int rows=0;for(int n:new int[]{Integer.MIN_VALUE,0,Integer.MAX_VALUE})for(long word:new long[]{Long.MIN_VALUE,0,Long.MAX_VALUE})for(Object value:new Object[]{null,token}){DelegationBase b=(DelegationBase)owner.make(n,word,value);if(b.number!=n||b.seen!=word||b.seenToken!=value||b.capture()!=value)throw new AssertionError("bound super args and capture");Object get=b.getClass().getDeclaredMethod("get").invoke(b);if(((Long)get).longValue()!=word||b.getClass().getDeclaredMethod("owner").invoke(b)!=owner)throw new AssertionError("wide and enclosing");rows++;}System.out.println(rows+":local:delegation");}}`
 
+func TestAdversarialMethodLocalCapturedDelegationAbstractParent(t *testing.T) {
+	fixture := strings.ReplaceAll(localCapturedDelegationFixture, "class DelegationBase", "abstract class DelegationBase")
+	fixture = strings.ReplaceAll(fixture, "Object capture(){return null;}", "abstract Object capture();")
+	for _, prefix := range []string{"Delegation", "AbstractLocal"} {
+		t.Run(prefix, func(t *testing.T) {
+			testNativeIndependentFamilyFixture(t, strings.ReplaceAll(fixture, "Delegation", prefix), []string{prefix + "Owner"}, prefix+"Driver", "18:local:delegation\n", nativeLexicalExactSignatures)
+		})
+	}
+}
+
+func TestAdversarialMethodLocalCapturedDelegationKeepsFloatingWords(t *testing.T) {
+	const fixture = `class FloatingWordsBase{final int floatWord;final long doubleWord;FloatingWordsBase(float f,double d){floatWord=Float.floatToRawIntBits(readFloat());doubleWord=Double.doubleToRawLongBits(readDouble());if(floatWord!=Float.floatToRawIntBits(f)||doubleWord!=Double.doubleToRawLongBits(d))throw new AssertionError("pre-super floating words");}float readFloat(){return 0;}double readDouble(){return 0;}}
+class FloatingWordsOwner{Object make(final float f,final double d){class Entry extends FloatingWordsBase{Entry(){super(f,d);}float readFloat(){return f;}double readDouble(){return d;}}return new Entry();}}
+class FloatingWordsDriver{public static void main(String[]args){FloatingWordsOwner owner=new FloatingWordsOwner();int rows=0;for(int f:new int[]{0,0x80000000,0x3f800000,0x7f800000,0xff800000,0x7fc00001,0xffc54321})for(long d:new long[]{0L,0x8000000000000000L,0x3ff0000000000000L,0x7ff0000000000000L,0xfff0000000000000L,0x7ff8000000000001L,0xfff8123456789abcL}){FloatingWordsBase value=(FloatingWordsBase)owner.make(Float.intBitsToFloat(f),Double.longBitsToDouble(d));if(value.floatWord!=f||value.doubleWord!=d||Float.floatToRawIntBits(value.readFloat())!=f||Double.doubleToRawLongBits(value.readDouble())!=d)throw new AssertionError("raw floating word transfer");rows++;}System.out.println(rows+":local:floating:words");}}`
+	for _, prefix := range []string{"FloatingWords", "SeparateIEEE"} {
+		t.Run(prefix, func(t *testing.T) {
+			testNativeIndependentFamilyFixture(t, strings.ReplaceAll(fixture, "FloatingWords", prefix), []string{prefix + "Owner"}, prefix+"Driver", "49:local:floating:words\n", nativeLexicalExactSignatures)
+		})
+	}
+}
+
 func TestAdversarialMethodLocalCapturedDelegationOriginalIdentity(t *testing.T) {
 	for _, prefix := range []string{"Delegation", "SeparateLocal"} {
 		for _, layout := range []string{"instance", "static", "repeated word", "enclosing word"} {

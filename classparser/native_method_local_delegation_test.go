@@ -234,7 +234,7 @@ func TestAdversarialMethodLocalDelegationRequiresOriginalHiddenWords(t *testing.
 
 func TestAdversarialMethodLocalDelegationSourceRequiresClosedBinding(t *testing.T) {
 	files := nativeCompileClasses(t, localCapturedDelegationFixture)
-	for _, kind := range []string{"original", "missing context", "missing transaction", "missing parent", "bad parent bytes", "duplicate parent constructor", "private constructor", "abstract parent", "generic parent", "generic constructor", "checked exception", "unknown exceptions", "shadowed captured name", "ancestry cycle", "missing ancestor", "missing binding", "different declaration", "missing original owner", "wrong physical descriptor", "budget", "output budget", "canceled"} {
+	for _, kind := range []string{"original", "missing context", "missing transaction", "missing parent", "bad parent bytes", "duplicate parent constructor", "private constructor", "abstract parent", "interface parent", "generic parent", "generic constructor", "checked exception", "unknown exceptions", "shadowed captured name", "ancestry cycle", "missing ancestor", "missing binding", "different declaration", "missing original owner", "wrong physical descriptor", "budget", "output budget", "canceled"} {
 		t.Run(kind, func(t *testing.T) {
 			parse := func(name string) *ClassObject {
 				o, err := Parse(bytes.Clone(files[name+".class"]))
@@ -301,6 +301,8 @@ func TestAdversarialMethodLocalDelegationSourceRequiresClosedBinding(t *testing.
 				super.AccessFlags = 2
 			case "abstract parent":
 				parent.AccessFlags |= 0x0400
+			case "interface parent":
+				parent.AccessFlags |= 0x0200
 			case "generic parent":
 				parent.Attributes = append(parent.Attributes, &SignatureAttribute{SignatureIndex: uint16(parent.ConstantPoolManager.AddUtf8Info("<T:Ljava/lang/Object;>Ljava/lang/Object;"))})
 			case "generic constructor":
@@ -333,7 +335,7 @@ func TestAdversarialMethodLocalDelegationSourceRequiresClosedBinding(t *testing.
 				d.Work = workbudget.New(ctx, workbudget.Limits{})
 			}
 			source, err := d.nativeMethodLocalDelegationSource(method)
-			if kind == "original" {
+			if kind == "original" || kind == "abstract parent" {
 				if err != nil || source == nil || !strings.Contains(source.bodyCode, "super(") {
 					t.Fatal("original source transaction", err, source)
 				}

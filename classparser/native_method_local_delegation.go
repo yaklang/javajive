@@ -27,7 +27,11 @@ func (c *ClassObjectDumper) nativeMethodLocalDelegationSource(method *MemberInfo
 		return nil, fmt.Errorf("local constructor delegation identity mismatch")
 	}
 	target, known := c.constructorMotionClass(ctor.delegateOwner)
-	if !known || target.AccessFlags&0x0600 != 0 {
+	// This allocation constructs the concrete local subclass, not its parent.
+	// An abstract class still has a source-invocable constructor; interfaces do
+	// not. Original constructor access, descriptor and exception proofs below
+	// remain necessary regardless of the parent's abstract methods.
+	if !known || target.AccessFlags&0x0200 != 0 {
 		return nil, fmt.Errorf("unresolved original local parent declaration")
 	}
 	// A nonstatic member parent needs a qualified enclosing-instance SUPER
