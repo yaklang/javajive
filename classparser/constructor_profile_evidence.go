@@ -24,6 +24,17 @@ type constructorProfileEvidence struct {
 	rootName, rootSuper             string
 	rootFlags                       uint16
 	finalizerSilent                 bool
+	observationEpoch                uint64
+}
+
+// A local path proof can be reused without replay only while no external
+// observation has intervened. Count attempts as well as successful reads:
+// even a missing-class provider may change caller-owned metadata.
+func (e *constructorProfileEvidence) observed() {
+	e.observationEpoch++
+	if e.observationEpoch == 0 {
+		e.eligible, e.inconsistent = false, true
+	}
 }
 
 func (e *constructorProfileEvidence) original(c *ClassObjectDumper, name string, raw []byte) {
@@ -60,6 +71,7 @@ func (e *constructorProfileEvidence) original(c *ClassObjectDumper, name string,
 // A provider can change either observation; a name/super/flags-only certificate
 // cannot stand for a mutable caller method-table observation.
 func (e *constructorProfileEvidence) record(c *ClassObjectDumper, observation constructorProfileObservation) bool {
+	e.observed()
 	if len(e.transcript) >= 512 || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64((len(e.transcript)+1)*64+len(e.originals)*96+len(observation.className)+len(observation.absentRootMethod)+len(observation.methodDescriptor))) != nil {
 		e.eligible = false
 		return false
@@ -70,6 +82,7 @@ func (e *constructorProfileEvidence) record(c *ClassObjectDumper, observation co
 
 func (e *constructorProfileEvidence) metadata(provider callbinding.Provider) callbinding.Provider {
 	return func(name string) (callbinding.Class, bool) {
+		e.observed()
 		if name == "java/lang/Object" {
 			e.bootstrapUsed = true
 		} else {

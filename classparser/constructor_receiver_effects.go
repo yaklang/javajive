@@ -3,7 +3,6 @@ package javaclassparser
 import (
 	"encoding/binary"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -62,6 +61,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		d.constructorProfileEvidence = evidence
 		platformUsed := false
 		d.foldSiblingResolver = func(name string) ([]byte, bool) {
+			evidence.observed()
 			if c.foldSiblingResolver != nil {
 				if raw, ok := c.foldSiblingResolver(name); ok {
 					evidence.original(&d, name, raw)
@@ -313,7 +313,21 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 		return index, ok
 	}
 	allocations := map[int]string{}
-	memo := map[string]bool{}
+	memo := map[string]constructorEffectPathMemo{}
+	// Only linear exceptional suffixes acquire a liveness projection. General
+	// branches/cycles keep their original exact-frame memo and loop invariant.
+	linearMasks := map[int][]bool{}
+	linearMemo := map[string]uint64{}
+	if evidence := c.constructorProfileEvidence; evidence != nil && evidence.inBody && evidence.eligible {
+		for _, start := range handlers {
+			if _, seen := linearMasks[start]; !seen {
+				if c.Work != nil && c.Work.CheckAlloc(int64(len(linearMasks)+1)*32) != nil {
+					return false
+				}
+				linearMasks[start] = constructorLinearHandlerLiveness(ops, start, len(locals), handlers, remaining, c.Work)
+			}
+		}
+	}
 	cyclicTargets := map[int]bool{}
 	for i, op := range ops {
 		if op == nil || op.Instr == nil {
@@ -379,36 +393,22 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				}
 			}()
 		}
-		key := strconv.Itoa(start) + ":"
-		state := []byte(key)
-		if initialized {
-			state = append(state, 1)
-		} else {
-			state = append(state, 0)
+		key := constructorEffectFrameKey(start, locals, stack, initialized, nil, 0)
+		evidence := c.constructorProfileEvidence
+		var epoch uint64
+		if evidence != nil {
+			epoch = evidence.observationEpoch
 		}
-		for _, part := range [][]constructorEffectValue{locals, stack} {
-			for _, v := range part {
-				state = append(state, v.kind)
-				if v.knownInt {
-					state = append(state, 1)
-					state = binary.BigEndian.AppendUint32(state, uint32(v.intWord))
-				} else {
-					state = append(state, 0)
-				}
-				state = binary.BigEndian.AppendUint32(state, uint32(v.allocation))
-				if v.receiver {
-					state = append(state, 1)
-				} else {
-					state = append(state, 0)
-				}
-			}
-			state = append(state, 255)
+		if prior, known := memo[key]; known && (!prior.result || prior.stable && prior.epoch == epoch) {
+			return prior.result
 		}
-		key = string(state)
-		if prior, known := memo[key]; known {
-			return prior
-		}
-		defer func() { memo[key] = result }()
+		defer func() {
+			// An exact-frame shortcut must not hide provider observations
+			// either. A body that queried metadata is repeated; a proof that
+			// made no such query is reusable only at the same epoch.
+			stable := evidence == nil || evidence.observationEpoch == epoch && !evidence.inconsistent
+			memo[key] = constructorEffectPathMemo{result: result, stable: stable, epoch: epoch}
+		}()
 		pop := func(kind byte) (constructorEffectValue, bool) {
 			if len(stack) == 0 {
 				return constructorEffectValue{}, false
@@ -437,11 +437,6 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 			}
 			opcode := op.Instr.OpCode
 			if handler, covered := handlers[index]; covered {
-				cost := len(locals) + 2
-				*remaining -= cost
-				if *remaining < 0 || !nativeProofWork(c.Work, int64(cost)) || c.Work != nil && c.Work.CheckAlloc(int64(cost)*32) != nil {
-					return false
-				}
 				failedAllocation := 0
 				if opcode == core.OP_INVOKESPECIAL {
 					member := constructorMotionMember(obj, op, opcode)
@@ -457,9 +452,47 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 						failedAllocation = stack[receiverIndex].allocation
 					}
 				}
-				incoming := constructorEffectExceptionLocals(locals, failedAllocation)
-				if !walk(handler, incoming, []constructorEffectValue{{kind: 'L'}}, initialized) {
-					return false
+				evidence := c.constructorProfileEvidence
+				projected := ""
+				var epoch uint64
+				if live := linearMasks[handler]; live != nil && evidence != nil && evidence.inBody && evidence.eligible && !evidence.inconsistent {
+					cost := len(locals) + 2
+					if !nativeProofWork(c.Work, int64(cost)) || c.Work != nil && c.Work.CheckAlloc(int64(cost)*24) != nil {
+						return false
+					}
+					projected = constructorEffectFrameKey(handler, locals, []constructorEffectValue{{kind: 'L'}}, initialized, live, failedAllocation)
+					epoch = evidence.observationEpoch
+				}
+				previous, known := linearMemo[projected]
+				if projected != "" && known && previous == epoch {
+					// Reuse the already checked exception frame without copying
+					// locals or walking the same cleanup again. Wide shapes,
+					// initialized state and the Throwable operand remain exact.
+					*remaining--
+					if *remaining < 0 || !nativeProofWork(c.Work, 1) {
+						return false
+					}
+				} else {
+					cost := len(locals) + 2
+					*remaining -= cost
+					if *remaining < 0 || !nativeProofWork(c.Work, int64(cost)) || c.Work != nil && c.Work.CheckAlloc(int64(cost)*32) != nil {
+						return false
+					}
+					incoming := constructorEffectExceptionLocals(locals, failedAllocation)
+					if !walk(handler, incoming, []constructorEffectValue{{kind: 'L'}}, initialized) {
+						return false
+					}
+					// The first proof performs every original operation. A provider
+					// attempt, metadata call or root absence query within it (or
+					// since it) forbids reuse. Storage aliases stay monotone and
+					// shared with that first proof; no simulated locals change.
+					if projected != "" && evidence.eligible && !evidence.inconsistent && evidence.observationEpoch == epoch {
+						*remaining--
+						if *remaining < 0 || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64(len(linearMemo)+1)*64+int64(len(projected))) != nil {
+							return false
+						}
+						linearMemo[projected] = epoch
+					}
 				}
 			}
 			access := core.LocalAccessOf(opcode)
