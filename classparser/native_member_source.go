@@ -36,6 +36,7 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
+	independentRoot        *nativeMemberIndependentRoot
 	modernNestObjects      map[string]*ClassObject
 	methodLocals           map[string]*nativeMethodLocalClass
 	enumConstants          map[string]*nativeEnumConstantBody
@@ -323,7 +324,11 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		return nil
 	}
 	p := &nativeMemberClass{lambdaContext: nativeLambdaImplementationContext{resolve: resolve, metadata: provider}, enumSynthesis: enumSynthesis, object: obj, owner: owner, name: name, static: flags&8 != 0, formalCount: formalCount, outerFormalCount: outerFormalCount, flags: flags, constructors: map[string]*nativeMemberConstructor{}, accessBridges: bridges}
-	if lexical != nil && len(lexical) > 0 {
+	// An absent assertion packet has no assertion-status owner to reconstruct.
+	// Do not demand unowned ancestors merely to prove absence. A present or
+	// malformed packet still follows the complete original lexical chain.
+	noAssertions, absenceKnown := nativeMemberAssertionProof(obj, owner, work)
+	if lexical != nil && len(lexical) > 0 && (noAssertions != nil || !absenceKnown) {
 		outermost := owner
 		for depth := 0; depth < 64; depth++ {
 			o := lexical[outermost]
@@ -578,10 +583,18 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 }
 
 func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
+	return c.planNativeMemberFamilyFromRoot(nil)
+}
+
+func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMemberIndependentRoot) *nativeMemberFamily {
 	if c.foldSiblingResolver == nil || !nativeMemberVersionMetadata(c.obj, c.Work) || !nativeSourceBinaryName(c.obj.GetClassName()) {
 		return nil
 	}
-	if _, _, _, nested := originalMemberOwner(c.obj); nested {
+	if independent == nil {
+		if _, _, _, nested := originalMemberOwner(c.obj); nested {
+			return nil
+		}
+	} else if !independent.validFor(c) {
 		return nil
 	}
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {
@@ -590,14 +603,14 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 	if !c.nativeMemberAnnotationTablesRepresentable() {
 		return nil
 	}
-	if !nativeMemberTopLevelEvidence(c.obj, c.Work) {
+	if independent == nil && !nativeMemberTopLevelEvidence(c.obj, c.Work) {
 		return nil
 	}
 	modernNest, nestKnown := c.nativeModernNestOriginalScope()
 	if !nestKnown {
 		return nil
 	}
-	p := &nativeMemberFamily{modernNestObjects: modernNest, owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, retainEmptyMarkers: c.options.TargetSourceVersion >= 11}
+	p := &nativeMemberFamily{independentRoot: independent, modernNestObjects: modernNest, owner: c.obj.GetClassName(), children: map[string]*nativeMemberClass{}, lexicalObjects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, retainEmptyMarkers: c.options.TargetSourceVersion >= 11}
 	resolveDeclaration := c.nativeAnnotationDeclarationResolver()
 	queue := []*ClassObject{c.obj}
 	for cursor := 0; cursor < len(queue); cursor++ {
@@ -729,6 +742,9 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 		if !nativeMemberSiblingSuperClosed(child, p, c.Work, metadata) {
 			return nil
 		}
+	}
+	if independent != nil && !independent.familyClosed(p, c.Work) {
+		return nil
 	}
 	return p
 }

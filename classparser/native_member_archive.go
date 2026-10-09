@@ -438,6 +438,14 @@ func nativeMemberDependencyObjects(root *ClassObject, p *nativeMemberFamily, wor
 	return objects, true
 }
 func (z *JarFS) nativeMemberLookup(name string) *nativeMemberClass {
+	return z.nativeMemberLookupMode(name, true)
+}
+
+func (z *JarFS) nativeMemberStandardLookup(name string) *nativeMemberClass {
+	return z.nativeMemberLookupMode(name, false)
+}
+
+func (z *JarFS) nativeMemberLookupMode(name string, independent bool) *nativeMemberClass {
 	name = strings.ReplaceAll(name, ".", "/")
 	if !strings.Contains(name, "$") {
 		return nil
@@ -458,8 +466,14 @@ func (z *JarFS) nativeMemberLookup(name string) *nativeMemberClass {
 	if entry == nil || entry.family == nil {
 		entry = z.nativeMemberTransactionEntry(obj)
 	}
+	if (entry == nil || entry.family == nil) && independent {
+		entry = z.nativeMemberIndependentEntry(obj)
+	}
 	if entry == nil || entry.family == nil {
 		return nil
+	}
+	if root := entry.family.independentRoot; root != nil && name == entry.family.owner {
+		return root.declaration
 	}
 	return entry.family.children[name]
 }
@@ -467,6 +481,9 @@ func (z *JarFS) nativeMemberSource(obj *ClassObject) ([]byte, bool) {
 	entry := z.nativeMemberEntry(obj)
 	if entry == nil || entry.family == nil {
 		entry = z.nativeMemberTransactionEntry(obj)
+	}
+	if entry == nil || entry.family == nil {
+		entry = z.nativeMemberIndependentEntry(obj)
 	}
 	if entry == nil || entry.family == nil {
 		return nil, false

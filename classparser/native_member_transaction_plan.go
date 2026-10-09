@@ -29,14 +29,21 @@ func (z *JarFS) prepareNativeMemberFamily(root *ClassObject, snap map[string]str
 // ownership/allocation proof, but let an atomic dependency transaction establish
 // its lexical peers before checking the original protected type users.
 func (z *JarFS) prepareNativeMemberFamilyUnpublished(root *ClassObject, snap map[string]string) *nativeMemberPrepared {
+	return z.prepareNativeMemberFamilyFromRoot(root, snap, nil)
+}
+
+func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[string]string, independent *nativeMemberIndependentRoot) *nativeMemberPrepared {
 	if root == nil {
 		return nil
 	}
 	owner := root.GetClassName()
 	d := z.nativeMemberReader(root)
 	d.options.EnvSnapshot = snap
-	p := d.planNativeMemberFamily()
+	p := d.planNativeMemberFamilyFromRoot(independent)
 	if p == nil {
+		return nil
+	}
+	if independent != nil && !independent.familyClosed(p, d.Work) {
 		return nil
 	}
 	if !d.planNativeMemberAnonymousScopes(p) {
@@ -182,6 +189,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	}
 	root, d, p, objects, snap := prepared.root, prepared.reader, prepared.family, prepared.objects, prepared.snapshot
 	owner := p.owner
+	if p.independentRoot != nil && (!p.independentRoot.validFor(d) || !p.independentRoot.familyClosed(p, d.Work)) {
+		return nil
+	}
 	if !z.nativeMemberAccessRepresentable(p, z.originalMemberIndex(), d.Work, peers...) {
 		return nil
 	}

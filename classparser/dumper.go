@@ -30,6 +30,8 @@ import (
 )
 
 type ClassObjectDumper struct {
+	sourceDeclarationAccess        uint16
+	sourceDeclarationAccessKnown   bool
 	nativeSourceAssertions         *nativeMemberAssertion
 	originalInitializerStatus      map[string]bool
 	originalInitializerStatusReady bool
@@ -655,6 +657,21 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, v, ""))
 		}
 	}
+	// An omitted empty constructor inherits the declaration we actually emit,
+	// not the original ClassFile visibility. Flattening may project that
+	// visibility; preserve an explicit constructor when its ABI differs.
+	c.sourceDeclarationAccess = 0
+	for _, modifier := range strings.Fields(accessFlags) {
+		switch modifier {
+		case "public":
+			c.sourceDeclarationAccess |= 1
+		case "private":
+			c.sourceDeclarationAccess |= 2
+		case "protected":
+			c.sourceDeclarationAccess |= 4
+		}
+	}
+	c.sourceDeclarationAccessKnown = true
 	// module-info / package-info are synthetic descriptor pseudo-classes; their internal
 	// name ("module-info" / "package-info") is not a legal Java identifier, so emitting
 	// `class module-info {}` yields un-parseable source. Render a valid minimal compilation
@@ -13311,18 +13328,31 @@ func (c *ClassObjectDumper) isOmittableDefaultCtor(descriptor string, ctorAccess
 		return false
 	}
 	ctorCount := 0
+	var sole *MemberInfo
 	for _, m := range c.obj.Methods {
 		if n, _ := c.obj.getUtf8(m.NameIndex); n == "<init>" {
 			ctorCount++
+			sole = m
 		}
 	}
 	if ctorCount != 1 {
 		return false
 	}
+	// An implicit constructor cannot borrow an explicit declaration's
+	// annotations, generic formals or thrown-type metadata. Retain the
+	// declaration whenever there is more than its ordinary Code attribute.
+	for _, attr := range sole.Attributes {
+		if _, code := attr.(*CodeAttribute); !code {
+			return false
+		}
+	}
 	if slices.Contains(ctorAccessVerbose, "protected") || slices.Contains(ctorAccessVerbose, "private") {
 		return false
 	}
-	return slices.Contains(c.obj.AccessFlagsVerbose, "public") == slices.Contains(ctorAccessVerbose, "public")
+	if !c.sourceDeclarationAccessKnown {
+		return false
+	}
+	return (c.sourceDeclarationAccess&7 == 1) == slices.Contains(ctorAccessVerbose, "public")
 }
 
 func isIgnorableAssertionOnlyClinit(code string) bool {
