@@ -880,10 +880,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					if !initialized || !c.constructorReceiverFinalizerSilent {
 						return false
 					}
-					value, known := c.constructorReceiverReadOnlyMethodWithStorage(obj, member, opcode, writes, remaining, aliases, actuals...)
-					if !known {
-						value, known = c.constructorReceiverClosedMethod(obj, member, opcode, writes, active, remaining, depth+1, aliases, actuals...)
-					}
+					value, known := c.constructorReceiverMethodWithStorage(obj, member, opcode, writes, active, remaining, depth+1, aliases, actuals...)
 					if !known {
 						return false
 					}

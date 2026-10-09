@@ -115,7 +115,7 @@ func TestAdversarialConstructorClosedBodyMemoRechecksBindingObservationsAndStora
 			if accepted != want {
 				t.Fatalf("accepted=%v want=%v first=%d second=%d", accepted, want, first, second)
 			}
-			if variant == "same" || variant == "root query" {
+			if variant == "same" || variant == "root query" || variant == "active set" || variant == "depth" {
 				if second >= first {
 					t.Fatalf("same no-callback body was not reused: %d >= %d", second, first)
 				}

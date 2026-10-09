@@ -25,6 +25,7 @@ type constructorProfileEvidence struct {
 	rootFlags                       uint16
 	finalizerSilent                 bool
 	observationEpoch, providerEpoch uint64
+	closedCallEpoch                 uint64
 	parsedOriginals                 map[*ClassObject]bool
 	closedBodies                    map[constructorClosedBodyKey]constructorClosedBodyMemo
 	ownMethods                      map[*ClassObject]map[constructorOwnMethodSignature]*MemberInfo

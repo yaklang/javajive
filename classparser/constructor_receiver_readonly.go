@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // A call on THIS is ordinarily an observation/publication boundary. Admit only
@@ -22,32 +23,85 @@ func (c *ClassObjectDumper) constructorReceiverReadOnlyMethod(obj *ClassObject, 
 // cannot retrieve a self-reference retained in THIS; a reference GETFIELD can.
 // The field read is recorded only after its complete declaration/body proof.
 func (c *ClassObjectDumper) constructorReceiverReadOnlyMethodWithStorage(obj *ClassObject, member *values.JavaClassMember, opcode int, writes map[string]bool, remaining *int, storage *constructorSelfStorageProof, arguments ...constructorEffectValue) (constructorEffectValue, bool) {
-	if obj == nil || member == nil || member.Name != obj.GetClassName() || obj.AccessFlags&0x0200 != 0 || opcode != core.OP_INVOKEVIRTUAL && opcode != core.OP_INVOKESPECIAL {
+	binding, known := c.constructorReceiverBindMethod(obj, member, opcode, remaining, arguments...)
+	if !known {
 		return constructorEffectValue{}, false
+	}
+	return c.constructorReceiverReadOnlyBoundMethod(obj, binding, writes, remaining, storage, arguments...)
+}
+
+type constructorReceiverMethodBinding struct {
+	parameters []string
+	result     string
+	target     *MemberInfo
+	code       *CodeAttribute
+}
+
+func (c *ClassObjectDumper) constructorReceiverBindMethod(obj *ClassObject, member *values.JavaClassMember, opcode int, remaining *int, arguments ...constructorEffectValue) (*constructorReceiverMethodBinding, bool) {
+	if c == nil || remaining == nil || obj == nil || member == nil || member.Name != obj.GetClassName() || obj.AccessFlags&0x0200 != 0 || opcode != core.OP_INVOKEVIRTUAL && opcode != core.OP_INVOKESPECIAL {
+		return nil, false
 	}
 	params, result, err := callbinding.Descriptor(member.Description)
 	if err != nil || len(params) != len(arguments) || nativeMemberParameterWidth(params) > 254 || !nativeProofWork(c.Work, int64(len(params))) {
-		return constructorEffectValue{}, false
+		return nil, false
 	}
 	for i, parameter := range params {
 		if arguments[i].kind != constructorEffectType(parameter).kind || arguments[i].receiver || arguments[i].allocation != 0 {
-			return constructorEffectValue{}, false
+			return nil, false
 		}
 	}
 	target, found := c.constructorReceiverOwnMethod(obj, member.Member, member.Description, remaining)
 	if !found || target == nil || target.AccessFlags&(0x0008|0x0020|0x0100|0x0400) != 0 || !c.constructorReceiverMethodDispatchClosed(obj, target, member, opcode, remaining) {
-		return constructorEffectValue{}, false
+		return nil, false
 	}
 	var code *CodeAttribute
 	for _, attribute := range target.Attributes {
 		if candidate, ok := attribute.(*CodeAttribute); ok {
-			if code != nil {
-				return constructorEffectValue{}, false
+			if candidate == nil || code != nil {
+				return nil, false
 			}
 			code = candidate
 		}
 	}
-	if code == nil || len(code.ExceptionTable) != 0 || int(code.MaxLocals) < nativeMemberParameterWidth(params)+1 || len(code.Code) > 16 || !nativeProofWork(c.Work, int64(len(code.Code))) {
+	if code == nil || int(code.MaxLocals) < nativeMemberParameterWidth(params)+1 {
+		return nil, false
+	}
+	return &constructorReceiverMethodBinding{params, result, target, code}, true
+}
+
+// The readonly and general effect languages share one exact binding. Reuse that
+// binding only inside this synchronous attempt, on a fresh owned original and
+// with no intervening external or root-table observation. Otherwise the general
+// proof repeats its original binding, including mutable root dispatch queries.
+func (c *ClassObjectDumper) constructorReceiverMethodWithStorage(obj *ClassObject, member *values.JavaClassMember, opcode int, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, arguments ...constructorEffectValue) (constructorEffectValue, bool) {
+	binding, known := c.constructorReceiverBindMethod(obj, member, opcode, remaining, arguments...)
+	if !known {
+		return constructorEffectValue{}, false
+	}
+	e := c.constructorProfileEvidence
+	var epoch uint64
+	if e != nil {
+		epoch = e.observationEpoch
+	}
+	value, accepted := c.constructorReceiverReadOnlyBoundMethod(obj, binding, writes, remaining, aliases, arguments...)
+	if accepted {
+		return value, true
+	}
+	if e == nil || !e.inBody || !e.eligible || e.inconsistent || obj == c.obj || !e.parsedOriginals[obj] || e.observationEpoch != epoch {
+		binding = nil
+	}
+	return c.constructorReceiverClosedMethodWithBinding(obj, member, opcode, writes, active, remaining, depth, aliases, binding, arguments...)
+}
+
+func (c *ClassObjectDumper) constructorReceiverReadOnlyBoundMethod(obj *ClassObject, binding *constructorReceiverMethodBinding, writes map[string]bool, remaining *int, storage *constructorSelfStorageProof, arguments ...constructorEffectValue) (constructorEffectValue, bool) {
+	params, result, code := binding.parameters, binding.result, binding.code
+	if len(code.ExceptionTable) != 0 || len(code.Code) > 16 {
+		return constructorEffectValue{}, false
+	}
+	if result == "V" {
+		return constructorEffectValue{}, constructorReadOnlyVoidBody(code.Code, remaining, c.Work)
+	}
+	if !nativeProofWork(c.Work, int64(len(code.Code))) {
 		return constructorEffectValue{}, false
 	}
 	decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
@@ -59,9 +113,6 @@ func (c *ClassObjectDumper) constructorReceiverReadOnlyMethodWithStorage(obj *Cl
 	*remaining -= len(ops)
 	if *remaining < 0 {
 		return constructorEffectValue{}, false
-	}
-	if result == "V" {
-		return constructorEffectValue{}, len(ops) == 1 && ops[0].Instr.OpCode == core.OP_RETURN && len(ops[0].Data) == 0
 	}
 	value := constructorEffectType(result)
 	returnOpcode := map[byte]int{'I': core.OP_IRETURN, 'J': core.OP_LRETURN, 'F': core.OP_FRETURN, 'D': core.OP_DRETURN, 'L': core.OP_ARETURN}[value.kind]
@@ -121,4 +172,39 @@ func (c *ClassObjectDumper) constructorReceiverReadOnlyMethodWithStorage(obj *Cl
 		storage.referenceRead = true
 	}
 	return value, accepted
+}
+
+// The readonly void language is NOP* RETURN NOP*, with the same 16-byte
+// bound as the general readonly proof. Its two one-byte opcodes need no
+// constant-pool or operand decoding. Reject the first forbidden instruction
+// rather than decoding an entire mutating/calling body before rejecting it.
+// NOPs remain transparent to the shared instruction cap, as in motionOps;
+// every inspected byte still charges the request's native work budget.
+func constructorReadOnlyVoidBody(code []byte, remaining *int, work *workbudget.Budget) bool {
+	if remaining == nil || len(code) > 16 {
+		return false
+	}
+	returned := false
+	for _, opcode := range code {
+		if !nativeProofWork(work, 1) {
+			return false
+		}
+		if int(opcode) == core.OP_NOP {
+			continue
+		}
+		*remaining--
+		if *remaining < 0 {
+			return false
+		}
+		switch int(opcode) {
+		case core.OP_RETURN:
+			if returned {
+				return false
+			}
+			returned = true
+		default:
+			return false
+		}
+	}
+	return returned
 }
