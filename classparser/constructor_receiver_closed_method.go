@@ -10,8 +10,8 @@ import (
 // distinct from the captures being moved, provided its entire original body
 // satisfies the constructor's receiver-effect invariant. Prove closed dispatch
 // to an exact own declaration, then analyze it with initialized THIS.
-// Open dispatch, monitors, native bodies, handlers and recursive call cycles
-// require separate proofs. No member name or library identity grants admission.
+// Open dispatch, monitors, native bodies, typed handlers and recursive call
+// cycles require separate proofs. Catch-all edges use original input locals. No member name or library identity grants admission.
 func (c *ClassObjectDumper) constructorReceiverClosedMethod(obj *ClassObject, member *values.JavaClassMember, opcode int, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, arguments ...constructorEffectValue) (constructorEffectValue, bool) {
 	if c == nil || !c.constructorReceiverFinalizerSilent || obj == nil || member == nil || aliases == nil || active == nil || remaining == nil || depth > 16 || *remaining <= 0 || obj.AccessFlags&0x0200 != 0 || member.Name != obj.GetClassName() || member.Member == "" || member.Member == "<init>" || member.Member == "<clinit>" || opcode != core.OP_INVOKEVIRTUAL && opcode != core.OP_INVOKESPECIAL {
 		return constructorEffectValue{}, false
@@ -61,7 +61,7 @@ func (c *ClassObjectDumper) constructorReceiverClosedMethod(obj *ClassObject, me
 			code = candidate
 		}
 	}
-	if code == nil || len(code.ExceptionTable) != 0 || int(code.MaxLocals) < nativeMemberParameterWidth(params)+1 || len(code.Code) > *remaining || !nativeProofWork(c.Work, int64(len(code.Code))) || c.Work != nil && c.Work.CheckAlloc((int64(code.MaxLocals)+int64(code.MaxStack))*32) != nil {
+	if code == nil || int(code.MaxLocals) < nativeMemberParameterWidth(params)+1 || len(code.Code) > *remaining || !nativeProofWork(c.Work, int64(len(code.Code))) || c.Work != nil && c.Work.CheckAlloc((int64(code.MaxLocals)+int64(code.MaxStack))*32) != nil {
 		return constructorEffectValue{}, false
 	}
 	decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })

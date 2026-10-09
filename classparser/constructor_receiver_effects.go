@@ -295,6 +295,10 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 			offsets[int(op.CurrentOffset)] = index
 		}
 	}
+	handlers, closedHandlers := constructorReceiverCatchAllHandlerTargets(code, ops, remaining, c.Work)
+	if !closedHandlers || len(code.ExceptionTable) > 0 && (!initializedAtEntry || !c.constructorReceiverFinalizerSilent) {
+		return false
+	}
 	target := func(op *core.OpCode) (int, bool) {
 		delta := 0
 		if len(op.Data) == 2 {
@@ -327,6 +331,11 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 			if branch <= i {
 				cyclicTargets[branch] = true
 			}
+		}
+	}
+	for from, to := range handlers {
+		if to <= from {
+			cyclicTargets[to] = true
 		}
 	}
 	activeFrames := map[int]*constructorEffectLoopFrame{}
@@ -427,6 +436,32 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				return false
 			}
 			opcode := op.Instr.OpCode
+			if handler, covered := handlers[index]; covered {
+				cost := len(locals) + 2
+				*remaining -= cost
+				if *remaining < 0 || !nativeProofWork(c.Work, int64(cost)) || c.Work != nil && c.Work.CheckAlloc(int64(cost)*32) != nil {
+					return false
+				}
+				failedAllocation := 0
+				if opcode == core.OP_INVOKESPECIAL {
+					member := constructorMotionMember(obj, op, opcode)
+					if member == nil {
+						return false
+					}
+					if member.Member == "<init>" {
+						args, _, err := callbinding.Descriptor(member.Description)
+						receiverIndex := len(stack) - len(args) - 1
+						if err != nil || receiverIndex < 0 {
+							return false
+						}
+						failedAllocation = stack[receiverIndex].allocation
+					}
+				}
+				incoming := constructorEffectExceptionLocals(locals, failedAllocation)
+				if !walk(handler, incoming, []constructorEffectValue{{kind: 'L'}}, initialized) {
+					return false
+				}
+			}
 			access := core.LocalAccessOf(opcode)
 			if access.Read || access.Write {
 				kind := byte(0)

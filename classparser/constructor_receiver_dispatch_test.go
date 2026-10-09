@@ -15,7 +15,7 @@ const receiverDispatchFixture = `class DispatchBase{int word;public int change(i
 class DispatchMiddle extends DispatchBase{long change(long n){return n;}}
 final class DispatchLeaf extends DispatchMiddle{}`
 
-func TestConstructorReceiverDispatchNeedsExactFinalClassAndUnshadowedAncestry(t *testing.T) {
+func TestAdversarialConstructorReceiverDispatchNeedsExactFinalClassAndUnshadowedAncestry(t *testing.T) {
 	files := nativeCompileClasses(t, receiverDispatchFixture)
 	for _, variant := range []string{"original", "own final receiver", "private entry", "final entry", "matching bridge", "matching middle method", "matching private method", "matching static method", "nonfinal receiver", "interface receiver", "abstract receiver", "missing receiver", "missing ancestor", "malformed ancestor", "wrong ancestor identity", "ancestry cycle", "unrelated owner", "different root object", "nil declaration", "duplicate unrelated declaration", "invalid physical parameter width", "wrong name encoding", "wrong descriptor encoding", "malformed descriptor", "wrong opcode", "budget", "work", "memory", "cancelled"} {
 		t.Run(variant, func(t *testing.T) {
@@ -135,7 +135,7 @@ func TestConstructorReceiverDispatchNeedsExactFinalClassAndUnshadowedAncestry(t 
 // Caller-owned method tables need their own ordered certificate observation.
 // Name/super/flags equality cannot replace the absence query after a shadow is
 // introduced into the same original root object.
-func TestConstructorReceiverDispatchRechecksMutableRootMethodTables(t *testing.T) {
+func TestAdversarialConstructorReceiverDispatchRechecksMutableRootMethodTables(t *testing.T) {
 	files := nativeCompileClasses(t, receiverDispatchFixture)
 	root, _ := Parse(bytes.Clone(files["DispatchLeaf.class"]))
 	base, _ := Parse(bytes.Clone(files["DispatchBase.class"]))
