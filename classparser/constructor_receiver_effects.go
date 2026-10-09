@@ -255,8 +255,18 @@ func (c *ClassObjectDumper) constructorReceiverEffects(obj *ClassObject, code *C
 }
 
 func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObject, code *CodeAttribute, ops []*core.OpCode, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, arguments ...constructorEffectValue) bool {
+	return c.constructorReceiverBodyEffectsWithStorage(obj, code, ops, descriptor, writes, active, remaining, depth, aliases, false, arguments...)
+}
+
+// Constructors enter with an uninitialized receiver; a proved exact instance
+// callee enters with the same initialized receiver. Both phases use the same
+// field identities, monotone alias facts, loop invariants and shared budget.
+// Callee returns are checked for publication, but deliberately carry no new
+// scalar constants back to the caller. This prevents branch pruning from
+// concealing effects on another return path or at a narrow JVM return boundary.
+func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *ClassObject, code *CodeAttribute, ops []*core.OpCode, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, initializedAtEntry bool, arguments ...constructorEffectValue) bool {
 	params, ret, err := callbinding.Descriptor(descriptor)
-	if err != nil || ret != "V" || code.MaxLocals == 0 {
+	if err != nil || !initializedAtEntry && ret != "V" || code.MaxLocals == 0 {
 		return false
 	}
 	locals := make([]constructorEffectValue, int(code.MaxLocals))
@@ -759,6 +769,9 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 					}
 					value, known := c.constructorReceiverReadOnlyMethodWithStorage(obj, member, opcode, writes, remaining, aliases, actuals...)
 					if !known {
+						value, known = c.constructorReceiverClosedMethod(obj, member, opcode, writes, active, remaining, depth+1, aliases, actuals...)
+					}
+					if !known {
 						return false
 					}
 					if result != "V" {
@@ -913,15 +926,22 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 				}
 				v, ok := pop('L')
 				return ok && !v.receiver && v.allocation == 0 && len(stack) == 0
+			case opcode >= core.OP_IRETURN && opcode <= core.OP_ARETURN:
+				kind := []byte{'I', 'J', 'F', 'D', 'L'}[opcode-core.OP_IRETURN]
+				if !initializedAtEntry || !initialized || ret == "V" || constructorEffectType(ret).kind != kind || !constructorEffectOriginalOperandFree(code, op) {
+					return false
+				}
+				value, ok := pop(kind)
+				return ok && !value.receiver && value.allocation == 0 && len(stack) == 0
 			case opcode == core.OP_RETURN:
-				return initialized && len(stack) == 0
+				return initialized && ret == "V" && len(stack) == 0 && constructorEffectOriginalOperandFree(code, op)
 			default:
 				return false
 			}
 		}
 		return false
 	}
-	return walk(0, locals, nil, false)
+	return walk(0, locals, nil, initializedAtEntry)
 }
 
 // JVM dup forms copy an exact one/two-word top packet below an exact
