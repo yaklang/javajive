@@ -35,17 +35,33 @@ func (c *ClassObjectDumper) nativeMethodLocalDelegationSource(method *MemberInfo
 		return nil, fmt.Errorf("unresolved original local parent declaration")
 	}
 	// A nonstatic member parent needs a qualified enclosing-instance SUPER
-	// certificate. A generic parent/constructor needs instantiated source types,
-	// rather than erased casts guessed from its executable descriptor.
+	// certificate. A generic constructor needs instantiated source parameter
+	// types rather than erased casts guessed from its executable descriptor.
 	if _, _, flags, member := originalMemberOwner(target); member && flags&8 == 0 {
 		return nil, fmt.Errorf("local parent needs original enclosing-instance binding")
 	}
-	for _, a := range target.Attributes {
-		if !nativeProofWork(c.Work, 1) {
-			return nil, c.Work.Err()
+	// Class formals cannot change a constructor's source parameters when that
+	// exact constructor has no Signature (proved below). Validate the parent's
+	// declaration, but do not require irrelevant instantiation for its arguments.
+	parentSignature, valid := nativeMethodLocalOriginalSignature(target, target.Attributes, c.Work)
+	if !valid {
+		return nil, fmt.Errorf("invalid local parent class signature")
+	}
+	if parentSignature != "" {
+		if _, valid := types.LexicalTypeParameterErasures([]types.LexicalTypeScope{{Signature: parentSignature}}, nil); !valid {
+			return nil, fmt.Errorf("local parent needs closed original generic scope")
 		}
-		if _, generic := a.(*SignatureAttribute); generic {
-			return nil, fmt.Errorf("local parent needs instantiated generic binding")
+		parent, interfaces := types.ParseClassSignatureSupers(parentSignature)
+		raw, known := types.RawClassFQN(parent)
+		if !known || strings.ReplaceAll(raw, ".", "/") != target.GetSupperClassName() || len(interfaces) != len(target.Interfaces) {
+			return nil, fmt.Errorf("local parent signature changes physical hierarchy")
+		}
+		for i, typ := range interfaces {
+			raw, known := types.RawClassFQN(typ)
+			physical, resolved := sourceBridgeClassName(target, target.Interfaces[i])
+			if !known || !resolved || strings.ReplaceAll(raw, ".", "/") != physical || !nativeProofWork(c.Work, 1) {
+				return nil, fmt.Errorf("local parent signature changes physical interface")
+			}
 		}
 	}
 	matches := 0
@@ -65,9 +81,19 @@ func (c *ClassObjectDumper) nativeMethodLocalDelegationSource(method *MemberInfo
 		if m.AccessFlags&(0x0002|0x0008|0x0100|0x0400) != 0 || m.AccessFlags&0x0005 == 0 && nativeAnonymousCallPackage(target.GetClassName()) != nativeAnonymousCallPackage(c.obj.GetClassName()) {
 			return nil, fmt.Errorf("local parent constructor is not source-accessible")
 		}
+		seenExceptions := false
 		for _, a := range m.Attributes {
 			if !nativeProofWork(c.Work, 1) {
 				return nil, c.Work.Err()
+			}
+			// A cached invocation provider cannot license a newly resolved
+			// constructor with different throws. Close the actual declaration
+			// as well as the provider before emitting a no-throws constructor.
+			if throws, ok := a.(*ExceptionsAttribute); ok {
+				if throws == nil || seenExceptions || len(throws.ExceptionIndexTable) != 0 {
+					return nil, fmt.Errorf("local parent requires a separate checked-exception source proof")
+				}
+				seenExceptions = true
 			}
 			if _, generic := a.(*SignatureAttribute); generic {
 				return nil, fmt.Errorf("local parent constructor needs instantiated generic binding")

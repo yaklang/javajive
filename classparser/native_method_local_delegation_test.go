@@ -234,7 +234,7 @@ func TestAdversarialMethodLocalDelegationRequiresOriginalHiddenWords(t *testing.
 
 func TestAdversarialMethodLocalDelegationSourceRequiresClosedBinding(t *testing.T) {
 	files := nativeCompileClasses(t, localCapturedDelegationFixture)
-	for _, kind := range []string{"original", "missing context", "missing transaction", "missing parent", "bad parent bytes", "duplicate parent constructor", "private constructor", "abstract parent", "interface parent", "generic parent", "generic constructor", "checked exception", "unknown exceptions", "shadowed captured name", "ancestry cycle", "missing ancestor", "missing binding", "different declaration", "missing original owner", "wrong physical descriptor", "budget", "output budget", "canceled"} {
+	for _, kind := range []string{"original", "missing context", "missing transaction", "missing parent", "bad parent bytes", "duplicate parent constructor", "private constructor", "abstract parent", "interface parent", "generic parent", "malformed generic parent", "free parent bound", "cyclic parent bound", "wrong generic parent hierarchy", "wrong generic parent interface", "duplicate parent signature", "invalid parent signature index", "generic constructor", "empty exceptions", "duplicate empty exceptions", "checked exception", "unknown exceptions", "shadowed captured name", "ancestry cycle", "missing ancestor", "missing binding", "different declaration", "missing original owner", "wrong physical descriptor", "budget", "output budget", "canceled"} {
 		t.Run(kind, func(t *testing.T) {
 			parse := func(name string) *ClassObject {
 				o, err := Parse(bytes.Clone(files[name+".class"]))
@@ -272,6 +272,8 @@ func TestAdversarialMethodLocalDelegationSourceRequiresClosedBinding(t *testing.
 				ref := values.NewJavaRef(coreutils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.Object"))
 				local.bindings[field], local.captureIDs[field], local.sourceRefs[field] = binding, ref.Id, ref
 			}
+			parent.ConstantPoolManager.AddUtf8Info("Signature")
+			parent.ConstantPoolManager.AddUtf8Info("Exceptions")
 			d := NewClassObjectDumper(child)
 			d.nativeMethodLocalCurrent = local
 			d.nativeMemberRoot = &nativeMemberFamily{lexicalObjects: map[string]*ClassObject{owner.GetClassName(): owner}}
@@ -290,6 +292,15 @@ func TestAdversarialMethodLocalDelegationSourceRequiresClosedBinding(t *testing.
 			}
 			d.FuncCtx = &class_context.ClassContext{}
 			d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
+			if kind == "checked exception" {
+				// First retain the readable no-throws parent declaration, then
+				// change resolver bytes below. This is a genuinely inconsistent
+				// cached provider, not simply a newly populated exception cache.
+				exceptions, known := exactInvocationExceptions(d.FuncCtx.InvocationMetadata, parent.GetClassName(), "<init>", ctor.delegateDescriptor)
+				if !known || len(exceptions) != 0 {
+					t.Fatal("original no-throws provider must be cached", exceptions, known)
+				}
+			}
 			switch kind {
 			case "missing context":
 				d.FuncCtx = nil
@@ -304,11 +315,39 @@ func TestAdversarialMethodLocalDelegationSourceRequiresClosedBinding(t *testing.
 			case "interface parent":
 				parent.AccessFlags |= 0x0200
 			case "generic parent":
-				parent.Attributes = append(parent.Attributes, &SignatureAttribute{SignatureIndex: uint16(parent.ConstantPoolManager.AddUtf8Info("<T:Ljava/lang/Object;>Ljava/lang/Object;"))})
+				parent.Attributes = append(parent.Attributes, &SignatureAttribute{Type: "Signature", AttrLen: 2, SignatureIndex: uint16(parent.ConstantPoolManager.AddUtf8Info("<T:Ljava/lang/Object;>Ljava/lang/Object;"))})
+			case "malformed generic parent", "free parent bound", "cyclic parent bound", "wrong generic parent hierarchy", "wrong generic parent interface", "duplicate parent signature", "invalid parent signature index":
+				sig := "<T:Ljava/lang/Object;>Ljava/lang/Object;"
+				switch kind {
+				case "malformed generic parent":
+					sig += "x"
+				case "free parent bound":
+					sig = "<T:TU;>Ljava/lang/Object;"
+				case "cyclic parent bound":
+					sig = "<T:TT;>Ljava/lang/Object;"
+				case "wrong generic parent hierarchy":
+					sig = "<T:Ljava/lang/Object;>Ljava/lang/Number;"
+				case "wrong generic parent interface":
+					sig += "Ljava/io/Serializable;"
+				}
+				a := &SignatureAttribute{Type: "Signature", AttrLen: 2, SignatureIndex: uint16(parent.ConstantPoolManager.AddUtf8Info(sig))}
+				if kind == "invalid parent signature index" {
+					a.SignatureIndex = 65535
+				}
+				parent.Attributes = append(parent.Attributes, a)
+				if kind == "duplicate parent signature" {
+					parent.Attributes = append(parent.Attributes, a)
+				}
 			case "generic constructor":
-				super.Attributes = append(super.Attributes, &SignatureAttribute{SignatureIndex: uint16(parent.ConstantPoolManager.AddUtf8Info("<T:Ljava/lang/Object;>(IJLjava/lang/Object;)V"))})
+				super.Attributes = append(super.Attributes, &SignatureAttribute{Type: "Signature", AttrLen: 2, SignatureIndex: uint16(parent.ConstantPoolManager.AddUtf8Info("<T:Ljava/lang/Object;>(IJLjava/lang/Object;)V"))})
+			case "empty exceptions", "duplicate empty exceptions":
+				a := &ExceptionsAttribute{AttrLen: 2}
+				super.Attributes = append(super.Attributes, a)
+				if kind == "duplicate empty exceptions" {
+					super.Attributes = append(super.Attributes, a)
+				}
 			case "checked exception":
-				super.Attributes = append(super.Attributes, &ExceptionsAttribute{ExceptionIndexTable: []uint16{uint16(parent.ConstantPoolManager.AddNewClassInfo("java/io/IOException"))}})
+				super.Attributes = append(super.Attributes, &ExceptionsAttribute{AttrLen: 4, ExceptionIndexTable: []uint16{uint16(parent.ConstantPoolManager.AddNewClassInfo("java/io/IOException"))}})
 			case "unknown exceptions":
 				d.FuncCtx.InvocationMetadata = nil
 			case "shadowed captured name":
@@ -334,8 +373,27 @@ func TestAdversarialMethodLocalDelegationSourceRequiresClosedBinding(t *testing.
 				cancel()
 				d.Work = workbudget.New(ctx, workbudget.Limits{})
 			}
+			// These variants must reach the intended proof, not accidentally pass
+			// because a hand-written attribute cannot be serialized and parsed.
+			expectedProof := map[string]string{
+				"malformed generic parent":       "closed original generic scope",
+				"free parent bound":              "closed original generic scope",
+				"cyclic parent bound":            "closed original generic scope",
+				"wrong generic parent hierarchy": "changes physical hierarchy",
+				"wrong generic parent interface": "changes physical hierarchy",
+				"generic constructor":            "needs instantiated generic binding",
+				"checked exception":              "separate checked-exception source proof",
+			}
+			if expectedProof[kind] != "" || kind == "generic parent" || kind == "empty exceptions" {
+				if _, parseErr := Parse(bytes.Clone(parent.Bytes())); parseErr != nil {
+					t.Fatal("control must have readable original parent metadata", kind, parseErr)
+				}
+			}
 			source, err := d.nativeMethodLocalDelegationSource(method)
-			if kind == "original" || kind == "abstract parent" {
+			if want := expectedProof[kind]; want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
+				t.Fatal("wrong refusal proof", kind, want, err)
+			}
+			if kind == "original" || kind == "abstract parent" || kind == "generic parent" || kind == "empty exceptions" {
 				if err != nil || source == nil || !strings.Contains(source.bodyCode, "super(") {
 					t.Fatal("original source transaction", err, source)
 				}

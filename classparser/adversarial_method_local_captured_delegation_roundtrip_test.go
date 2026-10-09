@@ -133,3 +133,29 @@ class WordBindingDriver{public static void main(String[]args){WordBindingOwner o
 		})
 	}
 }
+
+// Parent class formals do not participate in a constructor whose source
+// parameters have no Signature. The original callback must still see captures.
+func TestAdversarialMethodLocalCapturedDelegationIndependentGenericParent(t *testing.T) {
+	for _, prefix := range []string{"Delegation", "IndependentParent"} {
+		for _, layout := range []string{"raw", "concrete", "method formal", "bounded class formal", "generic hierarchy"} {
+			t.Run(prefix+"/"+layout, func(t *testing.T) {
+				fixture := strings.ReplaceAll(localCapturedDelegationFixture, "class DelegationBase{", "class DelegationBase<T>{")
+				switch layout {
+				case "concrete":
+					fixture = strings.ReplaceAll(fixture, "class Entry extends DelegationBase{", "class Entry extends DelegationBase<String>{")
+				case "method formal":
+					fixture = strings.ReplaceAll(fixture, "Object make(final int n,", "<U> Object make(final int n,")
+					fixture = strings.ReplaceAll(fixture, "class Entry extends DelegationBase{", "class Entry extends DelegationBase<U>{")
+				case "generic hierarchy":
+					fixture = "class DelegationAncestor<U>{}" + strings.ReplaceAll(fixture, "class DelegationBase<T>{", "class DelegationBase<T> extends DelegationAncestor<T> implements java.io.Serializable,java.lang.Cloneable{")
+					fixture = strings.ReplaceAll(fixture, "class Entry extends DelegationBase{", "class Entry extends DelegationBase<String>{")
+				case "bounded class formal":
+					fixture = strings.ReplaceAll(fixture, "class DelegationBase<T>{", "class DelegationBase<T extends Number & Comparable<T>>{")
+					fixture = strings.ReplaceAll(fixture, "class Entry extends DelegationBase{", "class Entry extends DelegationBase<Integer>{")
+				}
+				testNativeIndependentFamilyFixture(t, strings.ReplaceAll(fixture, "Delegation", prefix), []string{prefix + "Owner"}, prefix+"Driver", "18:local:delegation\n", nativeLexicalExactSignatures)
+			})
+		}
+	}
+}
