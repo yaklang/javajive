@@ -269,6 +269,26 @@ func nativeAnonymousStandaloneInitializerAllocation(owner, child *ClassObject, w
 	return initializers == 1 && allocations == 1 && invocations == 1
 }
 
+// The exact initializer-tail representation keeps a final anonymous binary as
+// an independent declaration. This header exception is not a visibility policy
+// for every anonymous flat unit: other units may be referenced by source in a
+// different package and still require the existing public projection.
+func (c *ClassObjectDumper) nativeAnonymousIndependentInitializerHeader() bool {
+	if c == nil || c.obj == nil || c.obj.AccessFlags != 0x30 || !nativeAnonymousForestVersion(c.obj, c.Work) {
+		return false
+	}
+	owner, method, original := originalAnonymousOwner(c.obj)
+	if !original || method != "" || c.foldSiblingResolver == nil || !nativeProofWork(c.Work, 1) {
+		return false
+	}
+	raw, known := c.foldSiblingResolver(owner)
+	if !known {
+		return false
+	}
+	parent, err := c.parseResolved(raw)
+	return err == nil && parent != nil && parent.GetClassName() == owner && nativeAnonymousStandaloneInitializerAllocation(parent, c.obj, c.Work)
+}
+
 // The standalone certificate proves no dependence on the prefix. The archive
 // index must separately exclude external type users and handles: a class not
 // mentioned by the owner's InnerClasses table cannot borrow unnameable types.

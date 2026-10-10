@@ -21,15 +21,11 @@ func ScopedErasureView(ctx *class_context.ClassContext, target types.JavaType, v
 	if !known || !ctx.IsTypeParam(name) || ctx.RawEraseTypeVar(name) || bindingType(target) == bindingType(value.Type()) || IsNullLiteral(UnpackSoltValue(value)) {
 		return false
 	}
-	for _, sig := range []string{ctx.CurrentMethodSig, ctx.ClassSig} {
-		for _, formal := range types.ClassFormalTypeParamNames(sig) {
-			if formal == name {
-				bounds := erasedInvocationBounds(sig)
-				return bounds[name] != "" && erasedMethodType(target, bounds) == bindingType(value.Type())
-			}
-		}
-	}
-	return false
+	// SourceTypeErasure walks original lexical declarations nearest-first,
+	// including enclosing class formals of a regenerated member. It retains
+	// shadowing and rejects unknown/dependent bounds rather than using Object.
+	erased, known := SourceTypeErasure(target, ctx)
+	return known && erased == bindingType(value.Type())
 }
 
 // SourceFieldType composes field/array access Signatures with the receiver's

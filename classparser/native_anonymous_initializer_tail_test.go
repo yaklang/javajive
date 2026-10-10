@@ -96,3 +96,54 @@ func TestNativeAnonymousInitializerTailRequiresPhysicalStaticAllocation(t *testi
 		})
 	}
 }
+
+func TestNativeAnonymousInitializerHeaderRequiresProvedIndependentScope(t *testing.T) {
+	files := nativeCompileIndependentRootFixture(t, "StaticTailOwner", nativeMemberStaticTailFixture, "none", "7")
+	for _, variant := range []string{"original", "public class", "nonfinal", "modern metadata", "unknown owner", "wrong owner", "instance allocation", "no resolver", "nil dumper", "budget", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			owner, err := Parse(append([]byte(nil), files["StaticTailOwner.class"]...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			child, err := Parse(append([]byte(nil), files["StaticTailOwner$1.class"]...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := &ClassObjectDumper{obj: child}
+			known := true
+			c.foldSiblingResolver = func(name string) ([]byte, bool) { return owner.Bytes(), known && name == "StaticTailOwner" }
+			switch variant {
+			case "public class":
+				child.AccessFlags |= 1
+			case "nonfinal":
+				child.AccessFlags &^= 0x10
+			case "modern metadata":
+				child.MajorVersion = 65
+			case "unknown owner":
+				known = false
+			case "wrong owner":
+				owner.ThisClass = uint16(NewConstantPoolWithConstant(&owner.ConstantPool).AddNewClassInfo("ForeignInitializer"))
+			case "instance allocation":
+				for _, m := range owner.Methods {
+					name, _ := sourceBridgeUTF8(owner, m.NameIndex)
+					if name == "<clinit>" {
+						m.AccessFlags = 0
+					}
+				}
+			case "no resolver":
+				c.foldSiblingResolver = nil
+			case "nil dumper":
+				c = nil
+			case "budget":
+				c.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				c.Work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			if got := c.nativeAnonymousIndependentInitializerHeader(); got != (variant == "original") {
+				t.Fatalf("original header policy=%v", got)
+			}
+		})
+	}
+}

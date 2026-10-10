@@ -596,7 +596,6 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// so always drop it.
 		accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "protected", ""))
 		innerFlags, isNested := c.selfInnerClassAccessFlags()
-		_, _, originalAnonymous := originalAnonymousOwner(c.obj)
 		switch {
 		case c.getenv("JDEC_NESTED_PUBLIC_OFF") != "":
 			// Legacy: strip `public` from every '$'-named class (kept for A/B comparison).
@@ -608,10 +607,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// (ACC_PUBLIC for a public class). Keep them verbatim. The old code assumed every '$' name was
 			// nested, failed the InnerClasses lookup, and wrongly stripped `public`, making the class
 			// inaccessible across packages ("$Gson$Preconditions is not public in com.google.gson.internal").
-		case originalAnonymous:
-			// Anonymous declarations have no named-member visibility to widen.
-			// A retained flat unit keeps the original ClassFile access instead
-			// of inventing ACC_PUBLIC from its unnamed InnerClasses row.
+		case c.nativeAnonymousIndependentInitializerHeader():
+			// A proved independent initializer tail keeps its ClassFile
+			// visibility. Other flat anonymous units retain their existing
+			// accessibility policy for references from separate source units.
 			if c.obj.AccessFlags&1 == 0 {
 				accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
 			}
