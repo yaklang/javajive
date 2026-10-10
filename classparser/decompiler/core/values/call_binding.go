@@ -119,6 +119,12 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 		if args[i].Type == desc {
 			continue
 		}
+		if IsNullLiteral(UnpackSoltValue(f.Arguments[i])) && jdecFlag(ctx, "JDEC_NULL_ARG_CAST_OFF") != "" {
+			// The scoped policy owns null descriptor pins in both planning and
+			// rendering. A planner-created Binding cast must not bypass the
+			// request snapshot's explicit opt-out in witnessDescriptorArgCast.
+			continue
+		}
 		t, e := types.ParseDescriptor(desc)
 		if e != nil {
 			return nil, false

@@ -39,6 +39,38 @@ func TestUniqueStaticCallDoesNotNameInaccessibleAncestor(t *testing.T) {
 	}
 }
 
+func TestStaticNullCallRespectsScopedCastPolicy(t *testing.T) {
+	t.Setenv("JDEC_NULL_ARG_CAST_OFF", "1")
+	for _, variant := range []string{"closed default snapshot", "explicit disabled snapshot"} {
+		t.Run(variant, func(t *testing.T) {
+			ctx := &class_context.ClassContext{Env: func(key string) string {
+				if variant == "explicit disabled snapshot" && key == "JDEC_NULL_ARG_CAST_OFF" {
+					return "1"
+				}
+				return ""
+			}, InvocationMetadata: func(name string) (callbinding.Class, bool) {
+				if name != "policy/Factory" {
+					return callbinding.Class{}, false
+				}
+				return callbinding.Class{Name: name, Public: true, MembersComplete: true, ParentsComplete: true, Methods: []callbinding.Method{{Name: "read", Desc: "(Ljava/lang/Object;)Ljava/lang/String;", Public: true, Static: true}, {Name: "read", Desc: "(Ljava/lang/String;)Ljava/lang/String;", Public: true, Static: true}}}, true
+			}}
+			desc := "(Ljava/lang/Object;)Ljava/lang/String;"
+			mt, e := types.ParseMethodDescriptor(desc)
+			if e != nil {
+				t.Fatal(e)
+			}
+			call := &FunctionCallExpression{ClassName: "policy.Factory", Object: NewJavaClassValue(types.NewJavaClass("policy.Factory")), FunctionName: "read", Descriptor: desc, IsStatic: true, Kind: InvokeStatic, FuncType: mt.FunctionType(), Arguments: []JavaValue{NewJavaLiteral("null", types.NewJavaClass("java.lang.Object"))}}
+			want := "Factory.read((Object)(null))"
+			if variant == "explicit disabled snapshot" {
+				want = "Factory.read(null)"
+			}
+			if got := call.String(ctx); got != want {
+				t.Fatalf("request-scoped null descriptor pin %q want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestStaticImplicitWideningRequiresCompleteExactSelection(t *testing.T) {
 	for _, variant := range []string{"unique", "competing", "missing parent", "incomplete members", "incomplete parents", "missing owner", "wrong owner identity", "nonpublic owner", "nonpublic method", "generic", "varargs", "bridge", "instance target", "virtual call", "inconsistent static flag", "special call", "covariant hiding", "different descriptor", "hierarchy cycle"} {
 		t.Run(variant, func(t *testing.T) {
