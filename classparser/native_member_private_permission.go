@@ -90,6 +90,13 @@ func nativeMemberPrivatePermissionClosed(p *nativeMemberFamily, resolve func(str
 			if !private[key(field, ref.Member, ref.Description)] {
 				return true
 			}
+			// JVM constructors do not inherit. A constructor reference outside
+			// this source packet cannot resolve to any emitted private member,
+			// even when its name and descriptor match a private constructor here.
+			// Do not require unrelated library metadata for that disjoint case.
+			if !field && ref.Member == "<init>" && p.lexicalObjects[ref.Name] == nil {
+				return true
+			}
 			owner, member, known := nativePrivatePermissionTarget(ref.Name, ref.Member, ref.Description, field, original, work)
 			if !known {
 				return false

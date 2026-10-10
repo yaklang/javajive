@@ -1558,6 +1558,8 @@
     "TestNativeMemberPrivateGetterRequiresFinalSourceOrdinalOrder": 0,
     "TestNativeMemberPrivateGetterRequiresPureOriginalDeclaration": 0.69,
     "TestNativeMemberPrivatePermissionChecksUsedBootstrapHandles": 0.44,
+    "TestNativeMemberPrivatePermissionEmittedConstructorStillRequiresPermission": 0.96,
+    "TestNativeMemberPrivatePermissionExternalConstructorOwnership": 2.13,
     "TestNativeMemberPrivatePermissionRejectsOriginalIllegalAccess": 6.03,
     "TestNativeMemberPrivatePermissionUsesOriginalUsedSymbols": 0.44,
     "TestNativeMemberPrivateProducerKeepsNonvirtualBinding": 6.61,

@@ -209,3 +209,89 @@ func TestNativeMemberPrivatePermissionChecksUsedBootstrapHandles(t *testing.T) {
 		})
 	}
 }
+
+// A constructor is selected only from its symbolic owner. The emitted private
+// no-argument constructor must not turn unrelated Object/AssertionError
+// constructors into unproved lexical-private accesses. The supplier also uses
+// an actual REF_newInvokeSpecial bootstrap argument, not an unused pool entry.
+func TestNativeMemberPrivatePermissionExternalConstructorOwnership(t *testing.T) {
+	for _, release := range []string{"8", "11"} {
+		for _, debug := range []string{"none", "source,lines,vars"} {
+			t.Run("release="+release+"/"+debug, func(t *testing.T) {
+				files := nativeCompileSourceReleaseClasses(t, map[string]string{"IsolatedPermissionOwner.java": `class IsolatedPermissionOwner{private IsolatedPermissionOwner(){}static class Child{static Object run(){return new AssertionError();}static java.util.function.Supplier<Object> maker(){return AssertionError::new;}}}class ExternalPermissionDriver{public static void main(String[]a){System.out.println(IsolatedPermissionOwner.Child.run().getClass().getName()+":"+IsolatedPermissionOwner.Child.maker().get().getClass().getName());}}`}, debug, release)
+				original := t.TempDir()
+				for name, raw := range files {
+					if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				_, java := t04Tools(t)
+				if got := t04RunJava(t, java, original, "ExternalPermissionDriver"); got != "java.lang.AssertionError:java.lang.AssertionError\n" {
+					t.Fatal(got)
+				}
+				objects := modernNestTestObjects(t, files)
+				delete(objects, "ExternalPermissionDriver")
+				child := objects["IsolatedPermissionOwner$Child"]
+				usedConstructorHandle := false
+				for _, attr := range child.Attributes {
+					if boot, ok := attr.(*BootstrapMethodsAttribute); ok {
+						for _, site := range boot.BootstrapMethods {
+							for _, index := range site.BootstrapArguments {
+								if handle, ok := child.ConstantPool[index-1].(*ConstantMethodHandleInfo); ok && handle.ReferenceKind == 8 {
+									ref := constructorMotionMember(child, &core.OpCode{Instr: &core.Instruction{OpCode: core.OP_INVOKESPECIAL}, Data: []byte{byte(handle.ReferenceIndex >> 8), byte(handle.ReferenceIndex)}}, core.OP_INVOKESPECIAL)
+									usedConstructorHandle = usedConstructorHandle || ref != nil && ref.Name == "java/lang/AssertionError" && ref.Member == "<init>" && ref.Description == "()V"
+								}
+							}
+						}
+					}
+				}
+				if !usedConstructorHandle {
+					t.Fatal("fixture did not retain its used REF_newInvokeSpecial bootstrap argument")
+				}
+				p := &nativeMemberFamily{owner: "IsolatedPermissionOwner", lexicalObjects: objects, modernNestObjects: objects}
+				requested := []string{}
+				resolve := func(name string) (*ClassObject, bool) { requested = append(requested, name); return nil, false }
+				if !nativeMemberPrivatePermissionClosed(p, resolve, nil) {
+					t.Fatalf("unrelated external constructor treated as emitted private member; lookup=%v", requested)
+				}
+				if len(requested) != 0 {
+					t.Fatalf("constructor owner identity did not exclude unrelated external metadata: %v", requested)
+				}
+			})
+		}
+	}
+}
+
+func TestNativeMemberPrivatePermissionEmittedConstructorStillRequiresPermission(t *testing.T) {
+	for _, debug := range []string{"none", "source,lines,vars"} {
+		t.Run(debug, func(t *testing.T) {
+			files := nativeCompileSourceReleaseClasses(t, map[string]string{"PrivateConstructorOwner.java": `class PrivateConstructorOwner{private PrivateConstructorOwner(){}static class Child{static Object make(){return new PrivateConstructorOwner();}}}class PrivateConstructorDriver{public static void main(String[]a){try{PrivateConstructorOwner.Child.make();throw new AssertionError("missing illegal access");}catch(IllegalAccessError expected){System.out.println("original-illegal-constructor-access");}}}`}, debug, "11")
+			objects := modernNestTestObjects(t, files)
+			delete(objects, "PrivateConstructorDriver")
+			p := &nativeMemberFamily{owner: "PrivateConstructorOwner", lexicalObjects: objects, modernNestObjects: objects}
+			resolve := func(name string) (*ClassObject, bool) { o := objects[name]; return o, o != nil }
+			if !nativeMemberPrivatePermissionClosed(p, resolve, nil) {
+				t.Fatal("original constructor nest permission rejected")
+			}
+			for name, object := range objects {
+				modernNestTestRemoveAttribute(object, "NestHost")
+				modernNestTestRemoveAttribute(object, "NestMembers")
+				object.MajorVersion = 52
+				files[name+".class"] = object.Bytes()
+			}
+			original := t.TempDir()
+			for name, raw := range files {
+				if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, java := t04Tools(t)
+			if got := t04RunJava(t, java, original, "PrivateConstructorDriver"); got != "original-illegal-constructor-access\n" {
+				t.Fatal(got)
+			}
+			if nativeMemberPrivatePermissionClosed(p, resolve, nil) {
+				t.Fatal("emitted private constructor lost original permission check")
+			}
+		})
+	}
+}
