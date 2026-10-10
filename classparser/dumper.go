@@ -4099,6 +4099,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				return nil, assertionErr
 			}
 			statementList = sourceWithoutDeadLocalStores(statementList, params, c.Work)
+			if projected, closed := c.prepareNativeCaptureIdentitySnapshots(statementList, params); closed {
+				statementList = projected
+			} else {
+				return nil, fmt.Errorf("original capture identity snapshots are not closed")
+			}
 			if !c.recordNativeLambdaLocalCaptureBody(method, codeAttr, statementList) {
 				return nil, fmt.Errorf("original lambda local capture body is not closed")
 			}
