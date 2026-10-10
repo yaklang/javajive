@@ -37,6 +37,13 @@ func (z *JarFS) nativeEnumSwitchSourceUsersClosed(p *nativeMemberFamily, root *C
 }
 
 func (z *JarFS) nativeEnumSwitchUsers(p *nativeMemberFamily, root *ClassObject, index *nativeMemberIndex, work *workbudget.Budget, sourceStorage bool) bool {
+	if p != nil {
+		for _, table := range p.enumSwitchTables {
+			if table != nil {
+				table.usersClosedRoot = nil
+			}
+		}
+	}
 	if p == nil || root == nil {
 		return false
 	}
@@ -311,6 +318,9 @@ func (z *JarFS) nativeEnumSwitchUsers(p *nativeMemberFamily, root *ClassObject, 
 		if count == 0 {
 			return false
 		}
+	}
+	for _, table := range p.enumSwitchTables {
+		table.usersClosedRoot = root
 	}
 	return true
 }
