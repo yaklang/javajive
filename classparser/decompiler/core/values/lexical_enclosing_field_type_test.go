@@ -108,7 +108,7 @@ func TestSourceFieldTypeRecoversLexicalArrayFormalsWithoutNarrowing(t *testing.T
 			}
 			before := field.Type().String(ctx)
 			got := SourceFieldType(ctx, field)
-			if (got != nil) != (change == "original") {
+			if (got != nil) != (change == "original" || change == "dependent bound") {
 				t.Fatalf("source array=%v", got)
 			}
 			if got != nil && got.String(ctx) != "K[][]" {

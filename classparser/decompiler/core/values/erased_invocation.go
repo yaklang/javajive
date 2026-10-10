@@ -512,8 +512,8 @@ func invocationSignatureEvidence(ctx *class_context.ClassContext, name string) (
 }
 
 // SourceTypeErasure requires a denotable caller type with an exact JVM erasure.
-// A lexical method formal shadows a class formal. Unknown/dependent bounds
-// remain unproved; they must never default to Object.
+// A lexical method formal shadows a class formal. Dependent bounds need the
+// complete original declaration environment; unknown binders never default to Object.
 func SourceTypeErasure(t types.JavaType, ctx *class_context.ClassContext) (string, bool) {
 	if t == nil || ctx == nil {
 		return "", false
@@ -539,7 +539,10 @@ func SourceTypeErasure(t types.JavaType, ctx *class_context.ClassContext) (strin
 			for _, formal := range types.ClassFormalTypeParamNames(sig) {
 				if formal == name {
 					descriptor := erasedInvocationBounds(sig)[name]
-					return descriptor, descriptor != ""
+					if descriptor != "" {
+						return descriptor, true
+					}
+					return sourceLexicalDependentTypeErasure(name, ctx)
 				}
 			}
 		}
@@ -547,4 +550,37 @@ func SourceTypeErasure(t types.JavaType, ctx *class_context.ClassContext) (strin
 	}
 	descriptor := bindingType(t)
 	return descriptor, descriptor != ""
+}
+
+// Reopen declaration environments for a dependent first bound. An unknown
+// binder or a cyclic dependency is not an Object-bound variable.
+func sourceLexicalDependentTypeErasure(name string, ctx *class_context.ClassContext) (string, bool) {
+	scopes := make([]types.LexicalTypeScope, 0, len(ctx.LexicalTypeParamSignatures)+2)
+	for i := len(ctx.LexicalTypeParamSignatures) - 1; i >= 0; i-- {
+		sig := ctx.LexicalTypeParamSignatures[i]
+		if sig != "" {
+			scopes = append(scopes, types.LexicalTypeScope{Signature: sig, Method: strings.Contains(sig, "(")})
+		}
+	}
+	if ctx.ClassSig != "" {
+		scopes = append(scopes, types.LexicalTypeScope{Signature: ctx.ClassSig})
+	}
+	if ctx.CurrentMethodSig != "" {
+		scopes = append(scopes, types.LexicalTypeScope{Signature: ctx.CurrentMethodSig, Method: true, Descriptor: ctx.CurrentMethodDesc})
+	}
+	retained := 0
+	for _, s := range scopes {
+		if len(s.Signature) > 65535 {
+			return "", false
+		}
+		retained += len(s.Signature)
+		if retained > 1<<20 {
+			return "", false
+		}
+	}
+	if ctx.Work != nil && (ctx.Work.CheckAlloc(int64(retained)*256+int64(len(scopes))*128) != nil || ctx.Work.Charge(workbudget.CounterGraphScans, int64(retained)*130+1) != nil) {
+		return "", false
+	}
+	erased, known := types.LexicalTypeParameterErasures(scopes, []string{name})
+	return erased[name], known && erased[name] != ""
 }

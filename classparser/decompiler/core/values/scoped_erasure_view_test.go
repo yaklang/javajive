@@ -21,7 +21,7 @@ func TestScopedErasureViewRequiresLexicalExactBound(t *testing.T) {
 		{"method shadows", "<T:Ljava/lang/Object;>()V", "<T:Ljava/lang/Number;>Ljava/lang/Object;", "T", "java.lang.Number", false},
 		{"method bound", "<T:Ljava/lang/Object;>()V", "<T:Ljava/lang/Number;>Ljava/lang/Object;", "T", "java.lang.Object", true},
 		{"unknown formal", "", "<U:Ljava/lang/Number;>Ljava/lang/Object;", "T", "java.lang.Number", false},
-		{"dependent bound", "", "<T:TU;U:Ljava/lang/Number;>Ljava/lang/Object;", "T", "java.lang.Number", false},
+		{"dependent bound", "", "<T:TU;U:Ljava/lang/Number;>Ljava/lang/Object;", "T", "java.lang.Number", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := &class_context.ClassContext{ClassSig: c.class, CurrentMethodSig: c.method, TypeParams: []string{"T"}}
@@ -90,7 +90,7 @@ func TestScopedErasureViewRetainsNearestOriginalEnclosingBound(t *testing.T) {
 					ctx.Work = workbudget.New(c, workbudget.Limits{})
 				}
 				v := NewJavaRef(utils.NewRootVariableId(), nil, actual)
-				if got := ScopedErasureView(ctx, target, v); got != (variant == "original") {
+				if got := ScopedErasureView(ctx, target, v); got != (variant == "original" || variant == "dependent") {
 					t.Fatalf("erasure view=%v", got)
 				}
 			})

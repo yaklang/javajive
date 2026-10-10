@@ -8,7 +8,7 @@ import (
 // ScopedErasureView supplies a source type-variable view only when its lexical
 // first bound is exactly the operand's existing erasure. This does not add a
 // narrower payload check. Method declarations shadow class declarations, and
-// unresolved/dependent bounds fail closed.
+// unresolved bounds fail closed; dependent bounds require complete declarations.
 func ScopedErasureView(ctx *class_context.ClassContext, target types.JavaType, value JavaValue) bool {
 	if ctx == nil || target == nil || value == nil || value.Type() == nil || ctx.Getenv("JDEC_SCOPED_ERASURE_VIEW_OFF") != "" {
 		return false
@@ -23,7 +23,7 @@ func ScopedErasureView(ctx *class_context.ClassContext, target types.JavaType, v
 	}
 	// SourceTypeErasure walks original lexical declarations nearest-first,
 	// including enclosing class formals of a regenerated member. It retains
-	// shadowing and rejects unknown/dependent bounds rather than using Object.
+	// shadowing and proves dependent bounds without defaulting unknowns to Object.
 	erased, known := SourceTypeErasure(target, ctx)
 	return known && erased == bindingType(value.Type())
 }
