@@ -23,6 +23,7 @@ type nativeEnumSelectorProducer struct {
 	owner, member, descriptor, result string
 	operands                          []*nativeEnumSelectorProducer
 	local                             *nativeEnumLocalRead
+	storage                           *nativeEnumParameterStorage
 }
 
 func nativeEnumSelectorPacket(obj *ClassObject, ops []*core.OpCode, start int, params map[int]string, enum string, work *workbudget.Budget, locals ...map[int]*nativeEnumLocalRead) (*nativeEnumSelectorProducer, int, bool) {
@@ -144,6 +145,11 @@ func nativeEnumSelectorSource(original *nativeEnumSelectorProducer, value values
 			read := original.local
 			pc, slot, known := ref.OriginalLocalDeclaration(ref.Val)
 			return ref.Id != nil && known && pc == read.storePC && slot == read.slot && read.pc == original.pc && read.opcode == original.opcode && read.slot == original.slot && read.descriptor == original.result
+		}
+		if original.storage != nil {
+			storage := original.storage
+			slot, sealed := ref.OriginalParameterSlot()
+			return sealed && slot == original.slot && storage.validated && storage.bound == ref && storage.slot == slot && storage.descriptor == original.result
 		}
 		slot, known := ref.OriginalParameterSlot()
 		if original.slot == 0 && !known {

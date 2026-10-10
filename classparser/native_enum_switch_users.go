@@ -26,6 +26,17 @@ type nativeEnumSwitchUse struct {
 // Computed selectors require an original ordered stack-producer certificate;
 // an equal enum result type or source spelling cannot license the rewrite.
 func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassObject, index *nativeMemberIndex, work *workbudget.Budget) bool {
+	return z.nativeEnumSwitchUsers(p, root, index, work, false)
+}
+
+// Source admission can use a distinct typed-storage certificate only when the
+// complete source transaction will discharge every retained parameter writer.
+// The standalone entry-value proof must still reject a clobbered parameter.
+func (z *JarFS) nativeEnumSwitchSourceUsersClosed(p *nativeMemberFamily, root *ClassObject, index *nativeMemberIndex, work *workbudget.Budget) bool {
+	return z.nativeEnumSwitchUsers(p, root, index, work, true)
+}
+
+func (z *JarFS) nativeEnumSwitchUsers(p *nativeMemberFamily, root *ClassObject, index *nativeMemberIndex, work *workbudget.Budget, sourceStorage bool) bool {
 	if p == nil || root == nil {
 		return false
 	}
@@ -258,7 +269,11 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 								parameterFlow = nativeEnumParameterOriginalFlow(d, code, work)
 							}
 							if !parameterFlow.selector(selector, work, 0) {
-								return false
+								reader := z.nativeMemberReader(object)
+								reader.Work = work
+								if !sourceStorage || !reader.nativeEnumSelectorStorageFlow(method, code, selector, parameterFlow, 0) {
+									return false
+								}
 							}
 						}
 						for _, pc := range entries {

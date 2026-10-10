@@ -2706,9 +2706,10 @@ type AssignStatement struct {
 	OriginPC    int
 	HasOriginPC bool
 	// ReferenceArrayStore is a decoded AASTORE witness, never an inferred cast.
-	ReferenceArrayStore   bool
-	originalLocalStore    *originalLocalStore
-	originalInstanceStore *originalInstanceStore
+	ReferenceArrayStore    bool
+	originalLocalStore     *originalLocalStore
+	originalParameterStore *originalParameterStore
+	originalInstanceStore  *originalInstanceStore
 }
 
 // ReplaceVar implements Statement.
@@ -2968,7 +2969,14 @@ func localDeclType(t types.JavaType) types.JavaType {
 	return t
 }
 
-func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
+func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source string) {
+	defer func() {
+		if source != "" && funcCtx != nil && funcCtx.SourceParameterStore != nil {
+			if marker, known := funcCtx.SourceParameterStore(a); known {
+				source += marker
+			}
+		}
+	}()
 	if a.IsDeclare {
 		if a.LeftValue == nil {
 			return values.EmptySlotValuePlaceholder

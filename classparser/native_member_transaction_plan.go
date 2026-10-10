@@ -56,7 +56,7 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 		return nil
 	}
 	index := z.originalMemberIndex()
-	if !z.nativeEnumSwitchUsersClosed(p, root, index, d.Work) {
+	if !z.nativeEnumSwitchSourceUsersClosed(p, root, index, d.Work) {
 		return nil
 	}
 	if p.anonymousForest != nil && !nativeAnonymousForestArchiveClosed(p.anonymousForest, index, d.Work) {

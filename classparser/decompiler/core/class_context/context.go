@@ -51,6 +51,7 @@ type ClassContext struct {
 	// Original bytecode/source binding may replace a proved enum table selector
 	// and all of its labels together. Nil keeps the original integer switch.
 	SourceEnumSwitch            func(selector any, labels []int) (string, map[int]string, bool)
+	SourceParameterStore        func(assignment any) (string, bool)
 	SourceMemberAllocation      func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	SourceMemberCandidate       func(owner string) bool
 	SourceMethodLocalCandidate  func(owner string) bool
