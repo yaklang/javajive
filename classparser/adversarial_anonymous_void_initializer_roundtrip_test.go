@@ -25,7 +25,7 @@ class OrderedVoidDriver {public static void main(String[]args){int rows=0;for(bo
 func TestAdversarialOrderedVoidInitializerKeepsOriginalCallOrder(t *testing.T) {
 	for _, rename := range []string{"original", "renamed"} {
 		t.Run(rename, func(t *testing.T) {
-			for _, shape := range []string{"void-only", "mixed-field", "virtual-call", "long-words"} {
+			for _, shape := range []string{"void-only", "mixed-field", "virtual-call", "long-words", "repeated-call", "argument-effects"} {
 				t.Run(shape, func(t *testing.T) {
 					source, owner := orderedVoidInitializerFixture, "OrderedVoidOwner"
 					if shape == "mixed-field" {
@@ -47,6 +47,19 @@ func TestAdversarialOrderedVoidInitializerKeepsOriginalCallOrder(t *testing.T) {
 						source = strings.ReplaceAll(source, "Cell cell,int n", "Cell cell,long n")
 						source = strings.ReplaceAll(source, "private int number", "private long number")
 						source = strings.Replace(source, "for(int n:new int[]{Integer.MIN_VALUE,-1,0,Integer.MAX_VALUE})", "for(long n:new long[]{Long.MIN_VALUE,-1L,0L,Long.MAX_VALUE})", 1)
+					}
+
+					if shape == "repeated-call" {
+						source = strings.Replace(source, "OrderedVoidEffects.finish();}public int get()", "OrderedVoidEffects.finish();OrderedVoidEffects.finish();}public int get()", 1)
+						source = strings.Replace(source, "!OrderedVoidEffects.trace.equals(\"CD\")||", "!OrderedVoidEffects.trace.equals(\"CDD\")||", 1)
+					}
+					if shape == "argument-effects" {
+						source = strings.Replace(source, "static void finish(){", "static OrderedVoidCell receiver(OrderedVoidCell c){trace+=\"R\";if(fail==1)throw error;return c;}static int number(int n){trace+=\"V\";if(fail==2)throw error;return n;}static void finish(){", 1)
+						source = strings.Replace(source, "OrderedVoidEffects.observe(this,cell,number);", "OrderedVoidEffects.observe(this,OrderedVoidEffects.receiver(cell),OrderedVoidEffects.number(number));", 1)
+						source = strings.Replace(source, "!OrderedVoidEffects.trace.equals(\"CD\")||", "!OrderedVoidEffects.trace.equals(\"RVCD\")||", 1)
+						source = strings.Replace(source, "if(fail==1||!empty&&fail==2?", "if(fail!=0?", 1)
+						source = strings.Replace(source, "!empty&&fail==2?\"CD\":\"C\"", "fail==1?\"R\":fail==2?\"RV\":\"RVC\"", 1)
+						source = strings.Replace(source, "cell.length!=(fail==2?n:17)", "cell.length!=17", 1)
 					}
 					if rename == "renamed" {
 						source = strings.NewReplacer("OrderedVoidOwner", "ExecutionEnvelope", "observe", "inspect", "length", "extent").Replace(source)
