@@ -168,6 +168,9 @@ func (p *handlerLayerProof) statement(statement statements.Statement, covered fu
 			return finallyPureLocal(local) && (x.JavaValue == nil || finallyCoveredValue(x.JavaValue, covered))
 		}
 		return finallyCoveredAssignment(x, covered)
+	case *statements.SourceAssertionStatement:
+		condition, call, pc, known := x.SourceAssertionProtocol()
+		return known && covered(pc) && finallyCoveredValue(condition, covered) && finallyCoveredValue(call, covered)
 	case *statements.ExpressionStatement:
 		return x != nil && finallyCoveredValue(x.Expression, covered)
 	case *statements.IfStatement:

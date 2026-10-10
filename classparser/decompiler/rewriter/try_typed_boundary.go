@@ -112,6 +112,8 @@ func typedHandlerTerminatesInCollectedRegion(entry *core.Node, dom map[*core.Nod
 			terminal = true
 		case *statements.CustomStatement:
 			terminal = st.ThrownValue != nil && st.HasOriginPC && st.LoopTransferKind == ""
+		case *statements.IfStatement:
+			terminal = len(n.EncodedJumps) == 0 && typedStructuredHandlerTerminates(st)
 		}
 		if terminal {
 			for _, next := range n.Next {
@@ -133,4 +135,33 @@ func typedHandlerTerminatesInCollectedRegion(entry *core.Node, dom map[*core.Nod
 		return true
 	}
 	return visit(entry)
+}
+
+// Structuring an if replaces its terminal branch nodes with one source node.
+// Its lack of normal successors is a terminal only when both complete source
+// arms terminate. Otherwise an empty arm, retry transfer or shared fallback
+// must retain the collector's existing dominance/ownership requirements.
+func typedStructuredHandlerTerminates(branch *statements.IfStatement) bool {
+	proof := handlerLayerProof{remaining: 512, active: map[statements.Statement]bool{}}
+	if !proof.block([]statements.Statement{branch}, func(pc int) bool { return pc >= 0 }, 0) {
+		return false
+	}
+	var terminates func(statements.Statement, int) bool
+	terminates = func(st statements.Statement, depth int) bool {
+		if depth > 24 {
+			return false
+		}
+		switch x := st.(type) {
+		case *statements.ReturnStatement:
+			return x != nil && x.HasOriginPC
+		case *statements.CustomStatement:
+			_, sealed := x.SourceThrowOperand()
+			return sealed && x.HasOriginPC && x.LoopTransferKind == ""
+		case *statements.IfStatement:
+			return x != nil && len(x.IfBody) > 0 && len(x.ElseBody) > 0 &&
+				terminates(x.IfBody[len(x.IfBody)-1], depth+1) && terminates(x.ElseBody[len(x.ElseBody)-1], depth+1)
+		}
+		return false
+	}
+	return terminates(branch, 0)
 }
