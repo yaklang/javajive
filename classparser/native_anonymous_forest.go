@@ -200,7 +200,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 			return nil
 		}
 	}
-	if !nativeAnonymousForestOpcodeClosure(forest, c.Work) {
+	if !nativeAnonymousForestOpcodeClosure(forest, c.Work, c.nativeAnnotationDeclarationResolver()) {
 		return nil
 	}
 	if !nativeModernNestSourceScopeClosed(modernNest, forest.objects, c.Work) {
@@ -338,7 +338,7 @@ func nativeAnonymousForestEnclosingDeclaration(object *ClassObject, member *Memb
 	return known && name == child.enclosingField && member.AccessFlags == 0x1010 && desc == "L"+owner+";"
 }
 
-func nativeAnonymousForestOpcodeClosure(forest *nativeAnonymousForest, work *workbudget.Budget) bool {
+func nativeAnonymousForestOpcodeClosure(forest *nativeAnonymousForest, work *workbudget.Budget, resolvers ...func(string) (*ClassObject, bool)) bool {
 	for owner, object := range forest.objects {
 		for _, method := range object.Methods {
 			if method == nil {
@@ -419,7 +419,7 @@ func nativeAnonymousForestOpcodeClosure(forest *nativeAnonymousForest, work *wor
 						if kind == core.OP_GETFIELD && forest.readPCs[owner][mn+md][int(op.CurrentOffset)] {
 							continue
 						}
-						if kind == core.OP_INVOKEVIRTUAL && (nativeAnonymousInheritedCall(forest, object, op, work) || nativeAnonymousDeclaredCall(forest, object, mn+md, op, work)) {
+						if kind == core.OP_INVOKEVIRTUAL && (nativeAnonymousInheritedCall(forest, object, op, work, resolvers...) || nativeAnonymousDeclaredCall(forest, object, mn+md, op, work)) {
 							continue
 						}
 						if kind != core.OP_INVOKESPECIAL || symbol.Member != "<init>" || group == nil || group.children[symbol.Name] != child || symbol.Description != child.descriptor || child.invokePC != int(op.CurrentOffset) {

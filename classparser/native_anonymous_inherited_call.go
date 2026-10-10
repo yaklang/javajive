@@ -5,15 +5,19 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/internal/workbudget"
+	"slices"
 	"strings"
 )
 
 // A javac method reference may name the anonymous allocation class even when
 // the called method is inherited. Source regenerates the anonymous receiver;
-// no spelling of its binary class is needed for a zero-argument virtual call.
+// no spelling of its binary class is needed for a virtual call. Match the
+// original parameter family at each ancestor, rather than treating arity as
+// evidence for source ownership. Argument conversion/binding is still proved
+// separately by the source invocation machinery.
 // Prove the original class-method lookup, rather than allowing arbitrary calls
 // into suppressed classes. Unknown/interface/generic lookup remains refused.
-func nativeAnonymousInheritedCall(forest *nativeAnonymousForest, caller *ClassObject, op *core.OpCode, work *workbudget.Budget) bool {
+func nativeAnonymousInheritedCall(forest *nativeAnonymousForest, caller *ClassObject, op *core.OpCode, work *workbudget.Budget, resolvers ...func(string) (*ClassObject, bool)) bool {
 	if forest == nil || caller == nil || op == nil || op.Instr == nil || op.Instr.OpCode != core.OP_INVOKEVIRTUAL || len(op.Data) != 2 {
 		return false
 	}
@@ -33,8 +37,11 @@ func nativeAnonymousInheritedCall(forest *nativeAnonymousForest, caller *ClassOb
 	if child == nil || child.object == nil {
 		return false
 	}
+	if !nativeProofWork(work, int64(len(symbol.Description))+1) || work != nil && work.CheckAlloc(int64(len(symbol.Description))*64+128) != nil {
+		return false
+	}
 	params, _, err := callbinding.Descriptor(symbol.Description)
-	if err != nil || len(params) != 0 {
+	if err != nil {
 		return false
 	}
 	seen := map[string]bool{}
@@ -64,11 +71,14 @@ func nativeAnonymousInheritedCall(forest *nativeAnonymousForest, caller *ClassOb
 			if !known {
 				return false
 			}
+			if !nativeProofWork(work, int64(len(md))+1) || work != nil && work.CheckAlloc(int64(len(md))*64+128) != nil {
+				return false
+			}
 			ps, _, err := callbinding.Descriptor(md)
 			if err != nil {
 				return false
 			}
-			if len(ps) != 0 {
+			if !slices.Equal(ps, params) {
 				continue
 			}
 			// Return-only alternatives/bridges cannot establish the source binding.
@@ -78,7 +88,7 @@ func nativeAnonymousInheritedCall(forest *nativeAnonymousForest, caller *ClassOb
 			target = m
 		}
 		if target != nil {
-			if current == child.object || target.AccessFlags&(0x0002|0x0008|0x1000|0x0040|0x0400) != 0 {
+			if current == child.object || target.AccessFlags&(0x0002|0x0008|0x1000|0x0040|0x0080|0x0400) != 0 {
 				return false
 			}
 			if target.AccessFlags&0x0001 == 0 && (target.AccessFlags&0x0004 != 0 || nativeAnonymousCallPackage(name) != nativeAnonymousCallPackage(caller.GetClassName())) {
@@ -106,6 +116,16 @@ func nativeAnonymousInheritedCall(forest *nativeAnonymousForest, caller *ClassOb
 		}
 		parent := current.GetSupperClassName()
 		current = forest.objects[parent]
+		if current == nil && len(resolvers) == 1 && resolvers[0] != nil {
+			// An original superclass declaration need not be one of the source
+			// scopes emitted by this forest. Resolve its declaration separately;
+			// never promote it into the forest's owned object namespace.
+			var known bool
+			current, known = resolvers[0](parent)
+			if !known || current == nil || current.GetClassName() != parent {
+				return false
+			}
+		}
 	}
 	return false
 }
