@@ -240,6 +240,9 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	if !nativeModernNestSourceScopeClosed(modernNest, forest.objects, c.Work) {
 		return nil
 	}
+	if !nativeMemberPrivatePermissionClosed(&nativeMemberFamily{owner: forest.root, lexicalObjects: forest.objects, modernNestObjects: modernNest}, forest.resolve, c.Work) {
+		return nil
+	}
 	committed = true
 	return forest
 }

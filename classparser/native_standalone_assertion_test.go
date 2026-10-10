@@ -95,3 +95,40 @@ func TestNativeStandaloneAssertionDoesNotPublishPartialSource(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeStandaloneAssertionFallbackDistinguishesDependencyView(t *testing.T) {
+	files := nativeCompileClasses(t, `class AssertionReader{void check(){assert false;}DependencyOwner.Value make(){return new DependencyOwner.Value();}}class DependencyOwner{static class Value{}}`)
+	z := nativeArchive(t, files)
+	defer z.Close()
+	obj, err := Parse(files["AssertionReader.class"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := z.nativeMemberReader(obj)
+	d.nativeMemberLookup = z.nativeMemberLookup
+	// Actual archive lookup proves the dependency separately. Rendering this
+	// reader installs an ownerless view containing its type name, not ownership.
+	if child := d.nativeMemberLookup("DependencyOwner$Value"); child == nil {
+		t.Fatal("dependency certificate absent")
+	}
+	if _, err := d.DumpClass(); err != nil {
+		t.Fatal(err)
+	}
+	if d.nativeMemberRoot == nil || d.nativeMemberRoot.owner != "" || d.nativeStandaloneAssertion == nil {
+		t.Fatal("expected original standalone packet and dependency-only view")
+	}
+	before := d.nativeMemberRoot
+	source, err := d.retryWithoutStandaloneAssertion()
+	if err != nil || !strings.Contains(source, "DependencyOwner.Value") || strings.Contains(source, "DependencyOwner$Value") || !strings.Contains(source, nativeAssertionField) {
+		t.Fatalf("flat fallback lost original declaration or dependency binding: %v\n%s", err, source)
+	}
+	if d.nativeMemberRoot != before || before.owner != "" {
+		t.Fatal("retry mutated dependency ownership")
+	}
+	// A real publication packet still rejects atomically; it may not retain
+	// the projected children while retrying only the assertion owner as flat.
+	d.nativeMemberRoot = &nativeMemberFamily{owner: "AssertionReader", lexicalObjects: map[string]*ClassObject{"AssertionReader": obj}}
+	if _, err := d.retryWithoutStandaloneAssertion(); err == nil {
+		t.Fatal("partial lexical source transaction retried as flat")
+	}
+}

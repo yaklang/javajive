@@ -83,7 +83,10 @@ func (c *ClassObjectDumper) retryWithoutStandaloneAssertion() (string, error) {
 	// A lexical transaction must reject its entire source certificate. Its
 	// archive fallback creates a separate flat dumper; retaining half a family
 	// here would discard its original ownership and registration schedule.
-	if c.nativeMemberRoot != nil || c.nativeAnonymousRoot != nil {
+	// wireNativeMemberSource also installs a read-only dependency lookup view.
+	// Its empty owner is not a source publication transaction: rejecting that
+	// view would turn a normal flat fallback into a missing top-level class.
+	if c.nativeMemberRoot != nil && c.nativeMemberRoot.owner != "" || c.nativeAnonymousRoot != nil {
 		return "", fmt.Errorf("top-level assertion source closure unproved")
 	}
 	if c.report != nil && c.nativeStandaloneAssertion.report != nil {
@@ -92,6 +95,7 @@ func (c *ClassObjectDumper) retryWithoutStandaloneAssertion() (string, error) {
 	d := NewClassObjectDumper(c.obj)
 	d.options, d.report, d.Work = c.options, c.report, c.Work
 	d.foldSiblingResolver, d.declarationResolver = c.foldSiblingResolver, c.declarationResolver
+	d.nativeMemberLookup = c.nativeMemberLookup
 	d.sourceDeclarationAccess, d.sourceDeclarationAccessKnown = c.sourceDeclarationAccess, c.sourceDeclarationAccessKnown
 	d.nativeStandaloneAssertionOff = true
 	return d.DumpClass()
