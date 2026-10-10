@@ -311,6 +311,9 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 	if !ok || len(seen) != len(sites) {
 		return nil, fmt.Errorf("source assertion protocol unproved")
 	}
+	if state := c.nativeStandaloneAssertion; state != nil && state.packet == plan {
+		state.consumed[name+desc] = true
+	}
 	return projected, nil
 }
 func nativeAssertionConstructorDescriptor(desc string) ([]string, string, bool) {

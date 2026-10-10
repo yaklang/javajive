@@ -33,6 +33,8 @@ type ClassObjectDumper struct {
 	sourceDeclarationAccess        uint16
 	sourceDeclarationAccessKnown   bool
 	nativeSourceAssertions         *nativeMemberAssertion
+	nativeStandaloneAssertion      *nativeStandaloneAssertion
+	nativeStandaloneAssertionOff   bool
 	originalInitializerStatus      map[string]bool
 	originalInitializerStatusReady bool
 	nativeMemberLookup             func(string) *nativeMemberClass
@@ -1453,6 +1455,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			c.recordKeyword = layout.Keyword
 		}
 	}
+	c.prepareNativeStandaloneAssertion()
 	methods, err := c.DumpMethods()
 	if err != nil {
 		if isRequestWorkError(err) {
@@ -2036,6 +2039,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	if c.Work != nil && c.Work.Err() != nil {
 		return "", c.Work.Err()
+	}
+	if !c.nativeStandaloneAssertionClosed(full) {
+		if c.Work != nil && c.Work.Err() != nil {
+			return "", c.Work.Err()
+		}
+		return c.retryWithoutStandaloneAssertion()
 	}
 	return full, nil
 }
