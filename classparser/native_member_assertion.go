@@ -213,12 +213,15 @@ func (s *nativeAssertStatement) String(ctx *class_context.ClassContext) string {
 
 // Match the original flag read and exception allocation back to typed source
 // operands. A whole family refuses if any flag read cannot be reconstructed.
-func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []statements.Statement) ([]statements.Statement, error) {
+func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []statements.Statement) (result []statements.Statement, projectionErr error) {
 	plan := c.nativeAssertionProtocol()
 	if plan == nil {
 		return body, nil
 	}
 	if plan.initializer != nil && !plan.pureInitializer && name == "<clinit>" && desc == "()V" {
+		// The initializer certificate belongs to this rendering occurrence, not
+		// to the shared immutable packet or an earlier successful projection.
+		c.nativeAssertionInitProjection = nil
 		if state := c.nativeStandaloneAssertion; state != nil && state.packet == plan {
 			state.initializerProjected = false
 		}
@@ -227,9 +230,16 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 		if !valid {
 			return nil, fmt.Errorf("assertion initialization source occurrence unproved")
 		}
-		if state := c.nativeStandaloneAssertion; state != nil && state.packet == plan {
-			state.initializerProjected = true
-		}
+		// Commit only after the remaining assertion sites also close. A failed
+		// read projection cannot reuse this initializer's successful prefix.
+		defer func() {
+			if projectionErr == nil {
+				c.nativeAssertionInitProjection = plan
+				if state := c.nativeStandaloneAssertion; state != nil && state.packet == plan {
+					state.initializerProjected = true
+				}
+			}
+		}()
 	}
 	sites := plan.reads[name+desc]
 	if len(sites) == 0 {

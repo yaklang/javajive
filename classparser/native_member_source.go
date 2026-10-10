@@ -327,7 +327,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 	// An absent assertion packet has no assertion-status owner to reconstruct.
 	// Do not demand unowned ancestors merely to prove absence. A present or
 	// malformed packet still follows the complete original lexical chain.
-	noAssertions, absenceKnown := nativeMemberAssertionProof(obj, owner, work)
+	noAssertions, absenceKnown := nativeMemberAssertionProofMode(obj, owner, work, true)
 	if lexical != nil && len(lexical) > 0 && (noAssertions != nil || !absenceKnown) {
 		outermost := owner
 		for depth := 0; depth < 64; depth++ {
@@ -352,7 +352,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		if enumSynthesis != nil && enumSynthesis.assertions != nil {
 			p.assertions, valid = enumSynthesis.assertions, enumSynthesis.assertions.statusOwner == outermost
 		} else {
-			p.assertions, valid = nativeMemberAssertionProof(obj, outermost, work)
+			p.assertions, valid = nativeMemberAssertionProofMode(obj, outermost, work, true)
 		}
 		if !valid {
 			return nil

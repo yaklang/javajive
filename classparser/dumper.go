@@ -33,6 +33,7 @@ type ClassObjectDumper struct {
 	sourceDeclarationAccess        uint16
 	sourceDeclarationAccessKnown   bool
 	nativeSourceAssertions         *nativeMemberAssertion
+	nativeAssertionInitProjection  *nativeMemberAssertion
 	nativeStandaloneAssertion      *nativeStandaloneAssertion
 	nativeStandaloneAssertionOff   bool
 	originalInitializerStatus      map[string]bool
@@ -2039,6 +2040,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	if c.Work != nil && c.Work.Err() != nil {
 		return "", c.Work.Err()
+	}
+	if packet := c.nativeAssertionProtocol(); packet != nil && c.nativeStandaloneAssertion == nil && !packet.pureInitializer && c.nativeAssertionInitProjection != packet {
+		return "", fmt.Errorf("assertion initializer source projection incomplete")
 	}
 	if !c.nativeStandaloneAssertionClosed(full) {
 		if c.Work != nil && c.Work.Err() != nil {
