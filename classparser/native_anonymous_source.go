@@ -1449,6 +1449,15 @@ func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 }
 func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 	result := map[string]bool{}
+	if f := c.nativeAnonymousForest; f != nil {
+		for _, method := range f.consumers[c.obj.GetClassName()] {
+			for _, consumer := range method {
+				if consumer != nil && consumer.getter == nil && consumer.declaredField != nil {
+					result[consumer.name] = true
+				}
+			}
+		}
+	}
 	if p := c.nativeMemberRoot; p != nil {
 		// Own static fields may be printed without a qualifier. Their original
 		// declarations are field bindings, never missing generated JVM locals.
