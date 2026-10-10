@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/frametransfer"
 	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
@@ -104,7 +105,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 		plan.byPC[pc] = op
 		kind := op.Instr.OpCode
 		if kind == core.OP_RETURN {
-			if i != len(ops)-1 || len(plan.stores) == 0 {
+			if i != len(ops)-1 {
 				return nil
 			}
 			continue
@@ -306,6 +307,15 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 			}
 			continue
 		}
+
+		if statement, ok := s.(*statements.ExpressionStatement); ok {
+			if !nativeAnonymousInitializerVoidStatement(child, plan, statement, &events, c.nativeAnnotationDeclarationResolver(), c.Work, materialized, c.FuncCtx) {
+				return "", false
+			}
+			source.WriteString(statement.String(c.FuncCtx) + ";\n")
+			continue
+		}
+
 		assign, ok := s.(*statements.AssignStatement)
 		if !ok || assign.IsDeclare || assign.ArrayMember != nil || !assign.HasOriginPC || stores[assign.OriginPC] {
 			return "", false
@@ -1138,4 +1148,38 @@ func nativeAnonymousInitializerForeignStoreFrames(d *ClassObjectDumper, plan *na
 		delete(foreign, int(record.PC))
 	}
 	return len(foreign) == 0
+}
+
+// A void invocation has no stack result to forward. Retain only a direct,
+// original invoke statement, with its exact call and ordered operand events.
+func nativeAnonymousInitializerVoidStatement(child *nativeAnonymousClass, plan *nativeAnonymousExpressionInitializer, statement *statements.ExpressionStatement, events *[]int, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, materialized map[string]*values.JavaRef, ctx *class_context.ClassContext) bool {
+	if child == nil || child.object == nil || plan == nil || statement == nil || events == nil {
+		return false
+	}
+	call, known := statement.Expression.(*values.FunctionCallExpression)
+	if !known || call == nil || call.FunctionName == "<init>" || !strings.HasSuffix(call.Descriptor, ")V") {
+		return false
+	}
+	if call.FuncType == nil || call.FuncType.ReturnType == nil || call.IsStatic != (call.Kind == values.InvokeStatic) || !nativeProofWork(work, int64(len(call.Descriptor))+1) || work != nil && work.CheckAlloc(int64(len(call.Descriptor))*32) != nil {
+		return false
+	}
+	params, result, err := callbinding.Descriptor(call.Descriptor)
+	if err != nil || result != "V" || len(params) != len(call.Arguments) || len(params) != len(call.FuncType.ParamTypes) {
+		return false
+	}
+	primitive, known := call.FuncType.ReturnType.RawType().(*types.JavaPrimer)
+	if !known || primitive == nil || primitive.Name != types.JavaVoid {
+		return false
+	}
+	if call.IsStatic {
+		owner, known := call.Object.(*values.JavaClassValue)
+		if !known || owner == nil || owner.HasOriginPC {
+			return false
+		}
+		name, known := types.RawClassFQN(owner.Type())
+		if !known || strings.ReplaceAll(name, ".", "/") != strings.ReplaceAll(call.ClassName, ".", "/") {
+			return false
+		}
+	}
+	return nativeAnonymousInitializerExpressionEventsWithMaterialized(child, plan, call, events, resolve, work, materialized, ctx)
 }
