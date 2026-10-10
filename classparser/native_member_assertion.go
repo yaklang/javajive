@@ -219,10 +219,16 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 		return body, nil
 	}
 	if plan.initializer != nil && !plan.pureInitializer && name == "<clinit>" && desc == "()V" {
+		if state := c.nativeStandaloneAssertion; state != nil && state.packet == plan {
+			state.initializerProjected = false
+		}
 		var valid bool
 		body, valid = c.projectNativeAssertionInitializer(body, plan)
 		if !valid {
 			return nil, fmt.Errorf("assertion initialization source occurrence unproved")
+		}
+		if state := c.nativeStandaloneAssertion; state != nil && state.packet == plan {
+			state.initializerProjected = true
 		}
 	}
 	sites := plan.reads[name+desc]

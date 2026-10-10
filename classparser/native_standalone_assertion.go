@@ -14,9 +14,10 @@ import (
 // has a complete typed source projection. Failure retries the untouched flat
 // representation in a fresh dumper; no partially projected cache is reused.
 type nativeStandaloneAssertion struct {
-	packet   *nativeMemberAssertion
-	consumed map[string]bool
-	report   *DecompileResult
+	packet               *nativeMemberAssertion
+	consumed             map[string]bool
+	initializerProjected bool
+	report               *DecompileResult
 }
 
 func (c *ClassObjectDumper) prepareNativeStandaloneAssertion() {
@@ -38,8 +39,11 @@ func (c *ClassObjectDumper) prepareNativeStandaloneAssertion() {
 	if !present || !nativeMemberTopLevelEvidence(c.obj, c.Work) {
 		return
 	}
-	packet, known := nativeMemberAssertionProof(c.obj, c.obj.GetClassName(), c.Work)
-	if !known || packet == nil || !packet.pureInitializer {
+	// javac installs its flag before ordinary static initialization. The
+	// bounded prefix proof excludes incoming edges/handlers and later writes;
+	// the source projection must remove only that proved first assignment.
+	packet, known := nativeMemberAssertionProofMode(c.obj, c.obj.GetClassName(), c.Work, true)
+	if !known || packet == nil {
 		return
 	}
 	// Lambda and bridge bodies are not ordinary source declarations. Their
@@ -69,6 +73,9 @@ func (c *ClassObjectDumper) nativeStandaloneAssertionClosed(source string) bool 
 		return true
 	}
 	if strings.Contains(source, DecompileStubMarker) || strings.Contains(source, values.EmptySlotValuePlaceholder) {
+		return false
+	}
+	if state.packet.initializer != nil && !state.packet.pureInitializer && !state.initializerProjected {
 		return false
 	}
 	for method, reads := range state.packet.reads {

@@ -1882,7 +1882,10 @@
     "TestThisCtorOverloadCastIsLoadBearing": 1.17,
     "TestToListSingleCallableCastIsLoadBearing": 0.03,
     "TestZxingEnumArraySpillFoldRejectsReorderedOrEffectfulShapes": 0,
-    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.67
+    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.67,
+    "TestAdversarialStandaloneAssertionMixedInitializationRoundTrip": 33.77,
+    "TestAdversarialStandaloneAssertionMixedInitializationNativeCompiler": 12.79,
+    "TestNativeStandaloneAssertionMixedInitializerClearsFailedRecheck": 0.45
   },
   "source_runs": [
     37850493191,
