@@ -15,7 +15,7 @@ import (
 
 func TestNativeAnonymousInheritedFieldReopensOriginalBinding(t *testing.T) {
 	files := nativeCompileClasses(t, hierarchyQualifiedAnonymousFixture)
-	variants := []string{"original", "foreign object", "copied field", "wrong declaration owner", "private field", "static field", "generic field", "wrong consumer PC", "wrong field PC", "wrong owner", "wrong descriptor", "changed opcode", "methodref tag", "shadow field", "captured shadow", "unknown parent", "wrong receiver", "missing original receiver", "wrong operand PC", "opaque operand", "missing field witness", "wrong field witness", "budget", "memory", "canceled"}
+	variants := []string{"original", "foreign object", "copied field", "wrong declaration owner", "private field", "static field", "synthetic field", "capture role", "generic field", "wrong consumer PC", "wrong field PC", "wrong owner", "wrong descriptor", "changed opcode", "methodref tag", "shadow field", "captured shadow", "unknown parent", "wrong receiver", "missing original receiver", "wrong operand PC", "opaque operand", "missing field witness", "wrong field witness", "budget", "memory", "canceled"}
 	for _, variant := range variants {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
@@ -104,6 +104,10 @@ func TestNativeAnonymousInheritedFieldReopensOriginalBinding(t *testing.T) {
 				c.declaredField.AccessFlags |= 2
 			case "static field":
 				c.declaredField.AccessFlags |= 8
+			case "synthetic field":
+				c.declaredField.AccessFlags |= 0x1000
+			case "capture role":
+				f.units[c.owner].fields[c.name] = 1
 			case "generic field":
 				c.declaredField.Attributes = append(c.declaredField.Attributes, &SignatureAttribute{})
 			case "wrong consumer PC":

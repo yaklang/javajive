@@ -51,7 +51,7 @@ func nativeAnonymousLexicalFieldDeclaration(root *ClassObject, name, descriptor 
 				continue
 			}
 			d, known := sourceBridgeUTF8(obj, field.DescriptorIndex)
-			if !known || d != descriptor || found.field != nil {
+			if !known || d != descriptor || found.field != nil || field.AccessFlags&(0x1000|0x4000) != 0 {
 				return declaration{}, false
 			}
 			for _, attr := range field.Attributes {

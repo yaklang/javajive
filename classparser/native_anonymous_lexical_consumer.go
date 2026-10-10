@@ -150,6 +150,11 @@ func nativeAnonymousLexicalConsumerProof(f *nativeAnonymousForest, caller *Class
 		if !physical || ref == nil || symbol == nil || symbol.Name != target || class_context.SafeIdentifier(symbol.Member) != symbol.Member {
 			return nil
 		}
+		// Capture fields are original receiver-path producers. They are not
+		// Java source declarations, even when their binary name is printable.
+		if _, captured := f.units[target].fields[symbol.Member]; captured {
+			return nil
+		}
 		decl, field, known := nativeAnonymousLexicalFieldDeclaration(f.objects[target], symbol.Member, symbol.Description, resolve, work)
 		if !known || field.AccessFlags&(0x0002|0x0008) != 0 || field.AccessFlags&(0x0001|0x0004) == 0 && nativeAnonymousCallPackage(decl.GetClassName()) != nativeAnonymousCallPackage(caller.GetClassName()) || !nativeAnonymousLexicalConsumerLookup(f, caller.GetClassName(), target, symbol.Member, true, resolve, work) {
 			return nil
