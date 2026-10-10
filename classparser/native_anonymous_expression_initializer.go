@@ -124,6 +124,9 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 			return nil
 		}
 		if kind == core.OP_LDC || kind == core.OP_LDC_W || kind == core.OP_LDC2_W {
+			if _, classLiteral := nativeAnonymousInitializerClassLiteralDescriptor(obj, op, work); classLiteral {
+				continue
+			}
 			descriptor, valid := constructorMotionLiteral(obj, op)
 			if !valid {
 				return nil
@@ -510,6 +513,13 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 			} else if !nativeAnonymousInitializerArrayAllocation(child.object, op, x) {
 				return false
 			}
+		case *values.FunctionCallExpression:
+			// A static invocation owner is rendering metadata, not an evaluated
+			// operand. It cannot retain a class-literal linkage event that the
+			// renderer would discard when it prints the bare owner name.
+			if owner, known := x.Object.(*values.JavaClassValue); known && owner != nil && owner.HasOriginPC && (x.IsStatic || x.Kind == values.InvokeStatic) {
+				return false
+			}
 		}
 
 		children, known := values.Children(v)
@@ -543,6 +553,18 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 						return false
 					}
 				}
+			}
+		case *values.JavaClassValue:
+			if x.HasOriginPC {
+				op := byPC[x.OriginPC]
+				if op == nil || int(op.CurrentOffset) != x.OriginPC {
+					return false
+				}
+				descriptor, known := nativeAnonymousInitializerClassLiteralDescriptor(child.object, op, work)
+				if !known || !nativeAnonymousInitializerConcreteClassSubject(x.JavaType, work, 0) || values.ReferenceTypeDescriptor(x.JavaType, nil) != descriptor {
+					return false
+				}
+				*events = append(*events, x.OriginPC)
 			}
 		case *values.JavaClassMember:
 			if !x.HasOriginPC {
@@ -1182,4 +1204,65 @@ func nativeAnonymousInitializerVoidStatement(child *nativeAnonymousClass, plan *
 		}
 	}
 	return nativeAnonymousInitializerExpressionEventsWithMaterialized(child, plan, call, events, resolve, work, materialized, ctx)
+}
+
+// A class constant is resolved at its physical LDC, without initializing the
+// referenced class. It is an observable linkage event, not a primitive literal.
+func nativeAnonymousInitializerClassLiteralDescriptor(obj *ClassObject, op *core.OpCode, work *workbudget.Budget) (string, bool) {
+	if obj == nil || obj.MajorVersion < 49 || op == nil || op.Instr == nil || !nativeProofWork(work, 1) {
+		return "", false
+	}
+	index := 0
+	switch {
+	case op.Instr.OpCode == core.OP_LDC && len(op.Data) == 1:
+		index = int(op.Data[0])
+	case op.Instr.OpCode == core.OP_LDC_W && len(op.Data) == 2:
+		index = int(core.Convert2bytesToInt(op.Data))
+	default:
+		return "", false
+	}
+	name, known := sourceBridgeClassName(obj, uint16(index))
+	if !known || !nativeProofWork(work, int64(len(name))+1) || work != nil && work.CheckAlloc(int64(len(name))*32+128) != nil {
+		return "", false
+	}
+	descriptor := name
+	component := name
+	if strings.HasPrefix(name, "[") {
+		rank := len(name) - len(strings.TrimLeft(name, "["))
+		if rank > 255 {
+			return "", false
+		}
+		component = name[rank:]
+		if len(component) == 1 {
+			if !strings.Contains("BCDFIJSZ", component) {
+				return "", false
+			}
+		} else {
+			if len(component) < 3 || component[0] != 'L' || component[len(component)-1] != ';' || !nativeSourceBinaryName(component[1:len(component)-1]) {
+				return "", false
+			}
+		}
+	} else {
+		if !nativeSourceBinaryName(name) {
+			return "", false
+		}
+		descriptor = "L" + name + ";"
+	}
+	params, result, err := callbinding.Descriptor("(" + descriptor + ")V")
+	return descriptor, err == nil && result == "V" && len(params) == 1 && params[0] == descriptor
+}
+func nativeAnonymousInitializerConcreteClassSubject(typ types.JavaType, work *workbudget.Budget, depth int) bool {
+	if typ == nil || depth > 255 || !nativeProofWork(work, 1) {
+		return false
+	}
+	switch t := typ.RawType().(type) {
+	case *types.JavaClass:
+		return t != nil
+	case *types.JavaArrayType:
+		return t != nil && t.Dimension > 0 && t.Dimension <= 255-depth && nativeAnonymousInitializerConcreteClassSubject(t.JavaType, work, depth+t.Dimension)
+	case *types.JavaPrimer:
+		return t != nil && depth > 0 && strings.Contains("|boolean|byte|char|short|int|long|float|double|", "|"+t.Name+"|")
+	default:
+		return false
+	}
 }

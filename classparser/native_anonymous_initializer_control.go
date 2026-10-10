@@ -137,7 +137,8 @@ func nativeAnonymousInitializerControlEvents(obj *ClassObject, ops []*core.OpCod
 			if kind == core.OP_GOTO || kind == core.OP_GOTO_W || kind >= core.OP_IFEQ && kind <= core.OP_IF_ACMPNE || kind == core.OP_RETURN && i != len(ops)-1 {
 				return false
 			}
-			if nativeAnonymousInitializerEvent(kind) {
+			_, classLiteral := nativeAnonymousInitializerClassLiteralDescriptor(obj, op, work)
+			if nativeAnonymousInitializerEvent(kind) || classLiteral {
 				events = append(events, pc)
 			}
 		}
