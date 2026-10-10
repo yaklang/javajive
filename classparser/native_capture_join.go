@@ -165,6 +165,16 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 							return 0, false
 						}
 						declaration, state = assign, blank
+					} else if (assign.IsDeclare || assign.IsFirst) && declaration == nil && state == absent && !sourceProofNil(assign.JavaValue) {
+						// A singly initialized declaration has the same flow state
+						// as a blank declaration followed by its sole assignment.
+						// Read the initializer before making the binder available;
+						// self reads/captures and later writes remain forbidden.
+						if !value(assign.JavaValue, state) || store != nil && !store(assign) {
+							return 0, false
+						}
+						declaration, state = assign, initialized
+						writes++
 					} else {
 						if assign.IsDeclare || assign.IsFirst || declaration == nil || state != blank || sourceProofNil(assign.JavaValue) || !value(assign.JavaValue, state) {
 							return 0, false

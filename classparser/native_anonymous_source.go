@@ -1791,6 +1791,11 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 						}
 					}
 					erasure, known := values.SourceTypeErasure(declaredType, ctx)
+					if known && erasure != captureParams[index] && !parameterIDs[ref.Id] && visible[ref.Id] && stable && declaration != nil &&
+						c.nativeCaptureWidenedDeclaration(body, ref, declaration, child, alloc, field, erasure, captureParams[index]) {
+						declaredType = ref.WebDeclType
+						erasure, known = values.SourceTypeErasure(declaredType, ctx)
+					}
 					if !known || erasure != captureParams[index] {
 						p.failed = true
 						continue
