@@ -4075,6 +4075,13 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	// Witness-based conversion: pin javac overload resolution to the bytecode
 	// descriptor (null vs String.valueOf(Object) vs valueOf(char[]); array vs Object).
 	// Specialized helpers above already returned if they fired.
+	if IsNullLiteral(UnpackSoltValue(arg)) && f.staticCallHasUniqueErasedBinding(funcCtx) {
+		// A complete unique non-generic static target also accepts untyped null.
+		// Its formal may be inaccessible to this source unit; naming that type
+		// would reject a valid original call. Competing/unknown families retain
+		// the descriptor pin below, including String.valueOf(Object).
+		return arg.String(funcCtx)
+	}
 	if cast := f.witnessDescriptorArgCast(i, arg, funcCtx); cast != "" {
 		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}

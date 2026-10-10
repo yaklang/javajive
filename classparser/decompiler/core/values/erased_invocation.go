@@ -14,14 +14,22 @@ import (
 // views: even with one overload, a raw Iterable cast can control inference
 // between Iterable<E> and Consumer<? super E>. Unknown is not Unique.
 func (f *FunctionCallExpression) unprovenWideningArgCast(actual, formal types.JavaType, ctx *class_context.ClassContext) bool {
-	if f == nil || ctx == nil || f.IsStatic || f.IsSpecialInvoke || f.FunctionName == "<init>" ||
-		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface) || actual == nil || formal == nil ||
+	if f == nil || ctx == nil || f.IsSpecialInvoke || f.FunctionName == "<init>" ||
+		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface && f.Kind != InvokeStatic) || actual == nil || formal == nil ||
 		!callbinding.Reference(bindingType(actual)) || !callbinding.Reference(bindingType(formal)) ||
 		!provenOverloadWidening(witnessRawClassName(actual), witnessRawClassName(formal), ctx) {
 		return false
 	}
 	if ctx.InvocationMetadata == nil {
 		return false
+	}
+	if f.IsStatic || f.Kind == InvokeStatic {
+		for _, arg := range f.Arguments {
+			if arg == nil || isWitnessLambdaArg(UnpackSoltValue(arg)) {
+				return false
+			}
+		}
+		return f.staticCallHasUniqueErasedBinding(ctx)
 	}
 	family, err := callbinding.FamilyOf(callbinding.Witness{Owner: strings.ReplaceAll(f.ClassName, ".", "/"), Name: f.FunctionName, Desc: f.Descriptor}, ctx.InvocationMetadata)
 	return err == nil && family.Complete && family.Proof == callbinding.Unique && family.Target != nil && !family.Target.Generic
