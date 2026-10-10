@@ -20,12 +20,15 @@ func (z *JarFS) nativeMemberIndependentInvocationsClosed(prepared *nativeMemberP
 	if p.independentRoot == nil {
 		return true
 	}
-	if len(prepared.objects) == 0 || len(prepared.objects) > 4096 || !nativeProofWork(d.Work, 1) ||
-		d.Work != nil && d.Work.CheckAlloc(int64(len(prepared.objects))*512) != nil {
+	if len(p.lexicalObjects) == 0 || len(p.lexicalObjects) > 4096 || !nativeProofWork(d.Work, 1) ||
+		d.Work != nil && d.Work.CheckAlloc(int64(len(p.lexicalObjects))*512) != nil {
 		return false
 	}
-	names := make([]string, 0, len(prepared.objects))
-	for name := range prepared.objects {
+	// prepared.objects also contains external constructor users whose original
+	// instructions validate allocation closure. They are not emitted here and
+	// must not acquire (or be required to supply) this family's source scope.
+	names := make([]string, 0, len(p.lexicalObjects))
+	for name := range p.lexicalObjects {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -33,8 +36,8 @@ func (z *JarFS) nativeMemberIndependentInvocationsClosed(prepared *nativeMemberP
 	missing := map[string]bool{}
 	var total int64
 	for _, name := range names {
-		obj := prepared.objects[name]
-		if obj == nil || obj.GetClassName() != name || p.lexicalObjects[name] != obj || !nativeProofWork(d.Work, 1) {
+		obj := p.lexicalObjects[name]
+		if obj == nil || obj.GetClassName() != name || prepared.objects[name] != obj || !nativeProofWork(d.Work, 1) {
 			return false
 		}
 		for _, method := range obj.Methods {

@@ -1335,6 +1335,8 @@
     "TestNativeIndependentLeafCannotBorrowForeignSyntheticAccess": 1.62,
     "TestNativeIndependentLeafGraphKeepsSourceBoundaries": 1.47,
     "TestNativeIndependentLeafSourceReadOrderAndConcurrency": 0.65,
+    "TestNativeIndependentSourceAccessDoesNotClaimConstructorClients": 0.42,
+    "TestNativeIndependentSourceExternalConstructorClientsRoundTrip": 3.9,
     "TestNativeIndependentStaticHeaderRequiresOwnProvedBoundary": 0.7,
     "TestNativeIndependentStaticLeafChainClosesOwnDeclaration": 0.48,
     "TestNativeIndependentStaticLeafChainNativeCompiler": 3.7,
