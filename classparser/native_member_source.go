@@ -1451,6 +1451,14 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				owner := ctx.ShortTypeName(strings.ReplaceAll(child.owner, "/", "."))
 				return "((" + owner + ")(" + source + "))", true
 			}
+			// Type recovery runs during analysis as well as after source parameter
+			// preparation. A failed query is absence of evidence, not a failed
+			// committed projection. Reopen the same physical path without rendering
+			// an operand or mutating the family's transaction state.
+			ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
+				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+				return read != nil && name == read.field && p.children[read.owner] != nil && nativeMemberLexicalReadOperand(value, read, c.Work, ctx)
+			}
 			ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
 				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
 				if read == nil {

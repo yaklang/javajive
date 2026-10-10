@@ -10,7 +10,7 @@ import (
 )
 
 func TestLexicalEnclosingFieldTypeRequiresOriginalInstanceAndDeclaration(t *testing.T) {
-	for _, change := range []string{"original", "no PC", "no projection", "wrong operand", "wrong PC", "wrong field", "unknown declaration", "changed bounds", "raw outer", "no parent", "foreign type", "unnamed source", "method shadow", "member shadow", "missing formal", "cyclic context", "duplicate class", "too deep", "work", "memory", "cancelled"} {
+	for _, change := range []string{"original", "no PC", "no projection", "no type proof", "wrong operand", "wrong PC", "wrong field", "unknown declaration", "changed bounds", "raw outer", "no parent", "foreign type", "unnamed source", "method shadow", "member shadow", "missing formal", "cyclic context", "duplicate class", "too deep", "work", "memory", "cancelled"} {
 		t.Run(change, func(t *testing.T) {
 			sig := "<K:Ljava/lang/Number;>Ljava/lang/Object;"
 			outer := &class_context.ClassContext{ClassName: "scope.Owner", ClassSig: sig}
@@ -20,6 +20,7 @@ func TestLexicalEnclosingFieldTypeRequiresOriginalInstanceAndDeclaration(t *test
 			ctx.SourceLexicalCapturedField = func(v any, pc int, name string) (string, bool) {
 				return "Owner.this", v == field && pc == 7 && name == "capture"
 			}
+			ctx.SourceLexicalCapturedFieldType = func(v any, pc int, name string) bool { return v == field && pc == 7 && name == "capture" }
 			ctx.SiblingClassSig = func(name string) (string, map[string]string, bool) {
 				return sig, nil, name == "scope/Owner" && change != "unknown declaration"
 			}
@@ -28,8 +29,10 @@ func TestLexicalEnclosingFieldTypeRequiresOriginalInstanceAndDeclaration(t *test
 				field.HasOriginPC = false
 			case "no projection":
 				ctx.SourceLexicalCapturedField = nil
+			case "no type proof":
+				ctx.SourceLexicalCapturedFieldType = nil
 			case "wrong operand":
-				ctx.SourceLexicalCapturedField = func(any, int, string) (string, bool) { return "", false }
+				ctx.SourceLexicalCapturedFieldType = func(any, int, string) bool { return false }
 			case "wrong PC":
 				field.OriginPC++
 			case "wrong field":
@@ -115,5 +118,33 @@ func TestSourceFieldTypeRecoversLexicalArrayFormalsWithoutNarrowing(t *testing.T
 				t.Fatal("shared computational type changed")
 			}
 		})
+	}
+}
+
+// No speculative type query may call the renderer's committing projection.
+// Unavailable early evidence can become available after parameter preparation;
+// the original operand identity and read packet remain required both times.
+func TestLexicalFieldTypeQueryDoesNotCommitSourceProjection(t *testing.T) {
+	sig := "<T:Ljava/lang/Number;>Ljava/lang/Object;"
+	outer := &class_context.ClassContext{ClassName: "scope.Owner", ClassSig: sig}
+	ctx := &class_context.ClassContext{ClassName: "scope.Owner$Reader", ClassSig: "Ljava/lang/Object;", LexicalClassName: "Reader", TypeParams: []string{"T"}, SourceLexicalParent: outer}
+	field := NewRefMember(&JavaRef{IsThis: true}, "capture", types.NewJavaClass("scope.Owner"))
+	field.OriginPC, field.HasOriginPC = 7, true
+	ctx.SiblingClassSig = func(name string) (string, map[string]string, bool) { return sig, nil, name == "scope/Owner" }
+	commits := 0
+	ctx.SourceLexicalCapturedField = func(any, int, string) (string, bool) { commits++; return "", false }
+	prepared := false
+	ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
+		return prepared && value == field && pc == 7 && name == "capture"
+	}
+	if recoverLexicalEnclosingFieldReceiver(ctx, field) != nil {
+		t.Fatal("unprepared projection acquired a type")
+	}
+	prepared = true
+	if recoverLexicalEnclosingFieldReceiver(ctx, field) == nil {
+		t.Fatal("prepared original read lost its type")
+	}
+	if commits != 0 {
+		t.Fatal("type query committed a source projection", commits)
 	}
 }

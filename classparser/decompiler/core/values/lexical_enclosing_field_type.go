@@ -11,9 +11,10 @@ import (
 // The bytecode enclosing field is raw, but a certified qualified-this operand
 // denotes its actual lexical instance. Recover arguments from that instance's
 // original declaration, never from a foreign receiver or an equal-spelled
-// caller formal. The projection callback reopens the whole physical read path.
+// caller formal. The read-only type callback reopens the whole physical read
+// path; a speculative query cannot commit or reject a source transaction.
 func recoverLexicalEnclosingFieldReceiver(ctx *class_context.ClassContext, field *RefMember) types.JavaType {
-	if ctx == nil || field == nil || !field.HasOriginPC || ctx.SourceLexicalCapturedField == nil || ctx.SiblingClassSig == nil || ctx.LexicalClassName == "" {
+	if ctx == nil || field == nil || !field.HasOriginPC || ctx.SourceLexicalCapturedField == nil || ctx.SourceLexicalCapturedFieldType == nil || ctx.SiblingClassSig == nil || ctx.LexicalClassName == "" {
 		return nil
 	}
 	raw, known := types.RawClassFQN(field.Type())
@@ -23,7 +24,7 @@ func recoverLexicalEnclosingFieldReceiver(ctx *class_context.ClassContext, field
 	if ctx.Work != nil && ctx.Work.CheckAlloc(64*96) != nil {
 		return nil
 	}
-	if _, proved := ctx.SourceLexicalCapturedField(field, field.OriginPC, field.Member); !proved {
+	if !ctx.SourceLexicalCapturedFieldType(field, field.OriginPC, field.Member) {
 		return nil
 	}
 	shadowed := map[string]bool{}

@@ -1380,6 +1380,8 @@
     "TestNativeLegacyForestMixedScopesRoundTrip": 59.07,
     "TestNativeLegacyMemberCaptureAndSyntheticReflection": 42.87,
     "TestNativeLegacyMemberMetadataRejectsUnprovedModernFeatures": 0.45,
+    "TestNativeLexicalConstructorQueriesNativeCompiler": 7.4,
+    "TestNativeLexicalConstructorTypeQueriesKeepSourceTransaction": 20.5,
     "TestNativeLexicalGenericArrayStoresKeepOriginalChecks": 15.42,
     "TestNativeLexicalPrivateCallRequiresNameableRawOwner": 0,
     "TestNativeLexicalPrivateCallRequiresOriginalScopeAndPacket": 1.87,
