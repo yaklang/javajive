@@ -119,13 +119,16 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 		return true
 	}
 	var walk func([]statements.Statement, uint8) (uint8, bool)
-	// A preinitialized capture remains initialized through an unrelated loop.
-	// A declaration scoped inside the loop is a fresh local each iteration and
-	// does not escape its body. A blank declaration outside the loop cannot be
-	// repeatedly assigned and claim effective finality. This extension belongs
-	// only to the separately witnessed lambda snapshot, not allocation motion.
+	// A declaration scoped inside the loop is a fresh local each iteration.
+	// Its initializer alternatives may join before the original allocation:
+	// effective finality counts writes per iteration, not across iterations.
+	// Reset that binder to absent at the loop boundary, so no use outside its
+	// body can borrow its initialization. A blank outer declaration cannot be
+	// repeatedly assigned and claim effective finality. The existing lambda
+	// snapshot additionally admits a preinitialized, unwritten outer binder.
+	// This is a source binding proof; no allocation or producer is moved.
 	loopBody := func(list []statements.Statement, state uint8) bool {
-		if captureStatement == nil || state != absent && state != initialized {
+		if state != absent && (captureStatement == nil || state != initialized) || captureStatement == nil && captureValue == nil {
 			return false
 		}
 		beforeDeclaration, beforeWrites := declaration, writes
@@ -195,7 +198,7 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 				// opaque callback's effects or abrupt completion behavior.
 				operand, sealed := custom.SourceThrowOperand()
 				roots, children, known = []values.JavaValue{operand}, nil, sealed
-				if captureStatement != nil && loopDepth > 0 && custom.SourceTransferOnly() {
+				if (captureStatement != nil || captureValue != nil) && loopDepth > 0 && custom.SourceTransferOnly() {
 					roots, children, known = nil, nil, true
 				}
 			}
@@ -225,7 +228,7 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 				state = 0 // Abrupt predecessors do not reach the next join.
 			case *statements.CustomStatement:
 				if _, sealed := x.SourceThrowOperand(); !sealed {
-					if captureStatement == nil || loopDepth == 0 || !x.SourceTransferOnly() {
+					if captureStatement == nil && captureValue == nil || loopDepth == 0 || !x.SourceTransferOnly() {
 						return 0, false // Unproved transfers cannot close a join.
 					}
 				}
