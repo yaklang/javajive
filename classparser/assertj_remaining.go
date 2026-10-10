@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixAssertjRemainingReconstructs repairs leftover assertj-core tree sites.
 // Kill-switch: JDEC_ASSERTJ_REMAINING_OFF=1.
 func fixAssertjRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_ASSERTJ_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_ASSERTJ_REMAINING_OFF") == "1" {
 		return body
 	}
 	if !strings.Contains(body, "assertj") {
@@ -74,9 +74,10 @@ func fixAssertjRemainingReconstructs(body string) string {
 	body = strings.ReplaceAll(body, "var1.apply(l0)", "((Function)(var1)).apply(l0)")
 	body = strings.ReplaceAll(body, ".filter(var1).collect", ".filter((Predicate)(var1)).collect")
 	body = strings.ReplaceAll(body, ".being(var1)", ".being((Condition)(var1))")
-	body = strings.ReplaceAll(body, "var2.matches(l0)", "((Condition)(var2)).matches(l0)")
-	body = strings.ReplaceAll(body, "var2::matches", "(l0) -> ((Condition)(var2)).matches(l0)")
-	body = strings.ReplaceAll(body, "var3.matches(((Map.Entry)", "((Condition)(var3)).matches(((Map.Entry)")
+	// Invocation owners and selected overloads come from bytecode. The
+	// spelling "matches" is not evidence that a receiver is a Condition;
+	// inserting that cast can silently select matches(Object) instead of
+	// a distinct matches(String), and can also corrupt string literals.
 
 	body = wrapReturnCallWithCast(body, "CACHE.findOrInsert", "Class")
 
@@ -111,14 +112,8 @@ func fixAssertjRemainingReconstructs(body string) string {
 			"}catch(IllegalAccessException | InvocationTargetException | InstantiationException var3){",
 			"}catch(IllegalAccessException | InvocationTargetException | InstantiationException | NoSuchMethodException var3){")
 	}
-	if strings.Contains(body, "isMultiValueMapAdapterInstance") {
-		body = strings.ReplaceAll(body,
-			"private static <K, V> Map<K, V> clone(Map<K, V> var0) throws NoSuchMethodException {",
-			"private static <K, V> Map<K, V> clone(Map<K, V> var0) {")
-		body = strings.ReplaceAll(body,
-			"}catch(IllegalAccessException | InvocationTargetException | InstantiationException var1_1){",
-			"}catch(IllegalAccessException | InvocationTargetException | InstantiationException | NoSuchMethodException var1_1){")
-	}
+	// Exceptions attributes and handler tables own the checked-exception contract.
+	// Never move a declared exception into a catch based on source-name matches.
 	if strings.Contains(body, "Function<Map.Entry") {
 		body = strings.ReplaceAll(body,
 			"return failsRequirements((Consumer)(var3),l0);",

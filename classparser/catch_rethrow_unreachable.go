@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
@@ -12,7 +12,7 @@ import (
 // JUnit38ClassRunner.getAnnotations). javac rejects the leftover return as
 // "unreachable statement". Kill-switch: JDEC_CATCH_RETHROW_UNREACHABLE_RETURN_OFF=1.
 func fixCatchRethrowUnreachableReturn(body string) string {
-	if os.Getenv("JDEC_CATCH_RETHROW_UNREACHABLE_RETURN_OFF") == "1" {
+	if jdecenv.Get("JDEC_CATCH_RETHROW_UNREACHABLE_RETURN_OFF") == "1" {
 		return body
 	}
 	from := 0

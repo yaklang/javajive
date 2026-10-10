@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"regexp"
 	"strings"
 )
@@ -9,7 +9,16 @@ import (
 // fixRxjavaRemainingReconstructs repairs leftover rxjava tree sites.
 // Kill-switch: JDEC_RXJAVA_REMAINING_OFF=1.
 func fixRxjavaRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_RXJAVA_REMAINING_OFF") == "1" {
+	return fixRxjavaRemainingWithBinding(body, false)
+}
+
+// Declaration-aware dumps resolve call arguments from the receiver's original
+// hierarchy and Signature. A later whole-class textual guess has no authority
+// to replace that result, including a confirmed metadata miss. Single-class
+// legacy callers retain their compatibility recovery until they can supply the
+// same declaration context; this flag is not evidence that every call resolved.
+func fixRxjavaRemainingWithBinding(body string, declarationBinding bool) string {
+	if jdecenv.Get("JDEC_RXJAVA_REMAINING_OFF") == "1" {
 		return body
 	}
 	// Functions.ArrayNFunc: Object[] elements vs BiFunction/FunctionN type params.
@@ -86,11 +95,14 @@ func fixRxjavaRemainingReconstructs(body string) string {
 			"var4.add((V)(this.valueSelector.apply(var2)));",
 			1)
 	}
-	body = retypeRxjavaProcessorLocals(body)
+	// Local type arguments must come from declaration/use constraints. A
+	// class-wide source-name guess can constrain unrelated raw consumers.
 	body = stripRxjavaObjectSentinels(body)
 	body = castRxjavaFunctionApply(body)
 	body = castRxjavaDownstreamOnNext(body)
-	body = castRxjavaLooseOnNextLocals(body)
+	if !declarationBinding {
+		body = castRxjavaLooseOnNextLocals(body)
+	}
 	if strings.Contains(body, "TimeInterval") {
 		body = strings.ReplaceAll(body, "new Timed(", "new Timed<T>(")
 		body = strings.ReplaceAll(body, "new Timed<T><T>(", "new Timed<T>(")
@@ -125,12 +137,6 @@ func fixRxjavaRemainingReconstructs(body string) string {
 		".flatMapPublisher(FlowableInternalHelper.zipIterable(var1))",
 		".flatMapPublisher((Function)(FlowableInternalHelper.zipIterable(var1)))")
 	if strings.Contains(body, "class FlowablePublish$PublishSubscriber") {
-		body = strings.Replace(body, "var14 = var5.poll();", "var14_1 = var5.poll();", 1)
-		body = strings.Replace(body, "var14 = null;", "var14_1 = null;", 1)
-		body = strings.Replace(body,
-			"if (this.checkTerminated(var4,(var14) == (null)))",
-			"if (this.checkTerminated(var4,(var14_1) == (null)))",
-			1)
 		body = replaceDuplicateEmptyLoopLabel(body)
 	}
 	// The compatibility declarations parameterize GroupJoin's Unicast receivers.
@@ -159,73 +165,6 @@ func fixRxjavaRemainingReconstructs(body string) string {
 		"BehaviorSubject(T var1) {\n\t\tthis();\n\t\tthis.value.lazySet(ObjectHelper.requireNonNull(var1,\"defaultValue is null\"));\n\t}",
 		1)
 	return body
-}
-
-// retypeRxjavaProcessorLocals adds the class-appropriate type argument to raw
-// UnicastProcessor/Subject/ConnectableFlowable locals. Blind `<T>` is wrong for
-// GroupJoin (TRight), RepeatWhen (Object), MulticastFlowable (U) and
-// SchedulerWhen (Flowable<Completable>).
-func retypeRxjavaProcessorLocals(body string) string {
-	if strings.Contains(body, "class SchedulerWhen") {
-		body = strings.Replace(body,
-			"final FlowableProcessor<Flowable<Completable>> workerProcessor = UnicastProcessor.create().toSerialized();",
-			"final FlowableProcessor<Flowable<Completable>> workerProcessor = UnicastProcessor.<Flowable<Completable>>create().toSerialized();",
-			1)
-		body = strings.ReplaceAll(body, "FlowableProcessor<T> var", "FlowableProcessor<SchedulerWhen$ScheduledAction> var")
-		body = strings.ReplaceAll(body, "FlowableProcessor var", "FlowableProcessor<SchedulerWhen$ScheduledAction> var")
-		body = strings.Replace(body,
-			"FlowableProcessor<SchedulerWhen$ScheduledAction> var2 = UnicastProcessor.create().toSerialized();",
-			"FlowableProcessor<SchedulerWhen$ScheduledAction> var2 = UnicastProcessor.<SchedulerWhen$ScheduledAction>create().toSerialized();",
-			1)
-		return body
-	}
-	uni := rxUnicastTypeArg(body)
-	if uni != "" {
-		body = strings.ReplaceAll(body, "UnicastProcessor<T> var", "UnicastProcessor<"+uni+"> var")
-		body = strings.ReplaceAll(body, "UnicastProcessor var", "UnicastProcessor<"+uni+"> var")
-		body = strings.ReplaceAll(body, "UnicastSubject<T> var", "UnicastSubject<"+uni+"> var")
-		body = strings.ReplaceAll(body, "UnicastSubject var", "UnicastSubject<"+uni+"> var")
-		body = strings.ReplaceAll(body, "FlowableProcessor<T> var", "FlowableProcessor<"+uni+"> var")
-		body = strings.ReplaceAll(body, "FlowableProcessor var", "FlowableProcessor<"+uni+"> var")
-	}
-	if rxClassHasTypeVar(body, "U") {
-		body = strings.ReplaceAll(body, "ConnectableFlowable var", "ConnectableFlowable<U> var")
-		body = strings.ReplaceAll(body, "ConnectableObservable var", "ConnectableObservable<U> var")
-	}
-	if rxClassHasTypeVar(body, "T") {
-		body = strings.ReplaceAll(body, "PublishSubject var", "PublishSubject<T> var")
-		body = strings.ReplaceAll(body, "FlowablePublishMulticast$MulticastProcessor var", "FlowablePublishMulticast$MulticastProcessor<T> var")
-	}
-	if strings.Contains(body, "Function<? super Observable<Object>") || strings.Contains(body, "Function<? super Flowable<Object>") {
-		body = strings.ReplaceAll(body, "Subject var", "Subject<Object> var")
-	}
-	if strings.Contains(body, "Function<? super Observable<Throwable>") || strings.Contains(body, "Function<? super Flowable<Throwable>") {
-		body = strings.ReplaceAll(body, "Subject var", "Subject<Throwable> var")
-		body = strings.ReplaceAll(body, "Subject<T> var", "Subject<Throwable> var")
-	}
-	body = strings.ReplaceAll(body,
-		"FlowableProcessor<Throwable> var3 = UnicastProcessor.create(8).toSerialized();",
-		"FlowableProcessor<Throwable> var3 = UnicastProcessor.<Throwable>create(8).toSerialized();")
-	body = strings.ReplaceAll(body,
-		"Subject<Throwable> var2 = PublishSubject.create().toSerialized();",
-		"Subject<Throwable> var2 = PublishSubject.<Throwable>create().toSerialized();")
-	return body
-}
-
-func rxUnicastTypeArg(body string) string {
-	if strings.Contains(body, "Function<? super Flowable<Throwable>") || strings.Contains(body, "Function<? super Observable<Throwable>") {
-		return "Throwable"
-	}
-	if strings.Contains(body, "Function<? super Flowable<Object>") || strings.Contains(body, "Function<? super Observable<Object>") {
-		return "Object"
-	}
-	if rxClassHasTypeVar(body, "TRight") {
-		return "TRight"
-	}
-	if rxClassHasTypeVar(body, "T") {
-		return "T"
-	}
-	return ""
 }
 
 func rxClassHasTypeVar(body, name string) bool {

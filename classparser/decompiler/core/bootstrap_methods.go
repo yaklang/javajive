@@ -2,13 +2,15 @@ package core
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
+	"reflect"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type BuildinBootstrapMethod func(d *Decompiler, sim StackSimulation, typ types.JavaType, args ...values.JavaValue) (values.JavaValue, error)
@@ -19,6 +21,52 @@ type BuildinBootstrapMethod func(d *Decompiler, sim StackSimulation, typ types.J
 // surrounding concat `+` would capture only its left operand. A ternary (`c ? a : b`) is likewise
 // lower precedence than `+`. Atomic operands (variables, literals, field/array accesses, method
 // calls, casts, unary ops) need no extra parentheses.
+func replaceConcatRecipeHole(recipe, replacement string) string {
+	for _, hole := range []string{"\u0001", `\001`, `\u0001`} {
+		if strings.Contains(recipe, hole) {
+			return strings.Replace(recipe, hole, replacement, 1)
+		}
+	}
+	return recipe
+}
+
+func concatArgString(arg values.JavaValue, funcCtx *class_context.ClassContext) string {
+	if arg == nil {
+		return "null"
+	}
+	s := arg.String(funcCtx)
+	if concatArgNeedsParens(arg) {
+		return "(" + s + ")"
+	}
+	return s
+}
+
+func renderConcatFromUnits(units []uint16, args []values.JavaValue, funcCtx *class_context.ClassContext) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	ai := 0
+	for _, u := range units {
+		if u == 1 && ai < len(args) {
+			b.WriteString(`" + `)
+			b.WriteString(concatArgString(args[ai], funcCtx))
+			b.WriteString(` + "`)
+			ai++
+			continue
+		}
+		piece := values.JavaUnitsToStringLiteral([]uint16{u})
+		if len(piece) >= 2 {
+			b.WriteString(piece[1 : len(piece)-1])
+		}
+	}
+	b.WriteByte('"')
+	s := b.String()
+	s = strings.ReplaceAll(s, `"" + `, "")
+	if strings.HasSuffix(s, ` + ""`) {
+		s = strings.TrimSuffix(s, ` + ""`)
+	}
+	return s
+}
+
 func concatArgNeedsParens(v values.JavaValue) bool {
 	switch e := values.UnpackSoltValue(v).(type) {
 	case *values.JavaExpression:
@@ -34,29 +82,21 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 	"java.lang.invoke.StringConcatFactory.makeConcatWithConstants": func(args1 ...values.JavaValue) BuildinBootstrapMethod {
 		return func(d *Decompiler, sim StackSimulation, typ types.JavaType, args2 ...values.JavaValue) (values.JavaValue, error) {
 			return values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-				str1 := args1[0].String(funcCtx)
-
+				ordered := make([]values.JavaValue, 0, len(args2))
 				for i := 0; i < len(args2); i++ {
 					idx := len(args2) - 1 - i
 					if idx < 0 || idx >= len(args2) {
 						break
 					}
-					arg := args2[idx]
-					newStr := arg.String(funcCtx)
-					// String concatenation `+` binds tighter than the bitwise/shift/relational/
-					// logical operators, so an interpolated sub-expression such as `n & 0xff`
-					// (which renders as `(n) & (255)`) would reparse as `("prefix" + n) & 255`
-					// once spliced after a `+`, yielding `String & int` - a compile error. Wrap any
-					// binary/ternary concat argument in parentheses so it stays a single operand of
-					// the concatenation. Atomic args (variables, literals, calls, casts) are left
-					// alone to keep the common output unchanged.
-					if concatArgNeedsParens(arg) {
-						newStr = "(" + newStr + ")"
-					}
-					tag := `\u0001`
-					str1 = strings.Replace(str1, tag, `" + `+newStr+` + "`, 1)
+					ordered = append(ordered, args2[idx])
 				}
-
+				if lit, ok := values.UnpackSoltValue(args1[0]).(*values.JavaLiteral); ok && lit != nil && lit.Units != nil {
+					return renderConcatFromUnits(lit.Units, ordered, funcCtx)
+				}
+				str1 := args1[0].String(funcCtx)
+				for _, arg := range ordered {
+					str1 = replaceConcatRecipeHole(str1, `" + `+concatArgString(arg, funcCtx)+` + "`)
+				}
 				if strings.HasSuffix(str1, ` + ""`) {
 					str1 = strings.TrimSuffix(str1, ` + ""`)
 				}
@@ -108,6 +148,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				for i := range args2 {
 					captured[i] = args2[len(args2)-1-i]
 				}
+				captured = lambdaCaptureDescriptorViews(classMember, captured)
 				// A captured value is a live snapshot of an enclosing local (a JavaRef into some JVM
 				// slot). It renders LAZILY (below), so its name must track the SAME variable-id
 				// rewrites that RewriteVar applies to every other tree reference AFTER stack
@@ -127,7 +168,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// apply -- structurally inert for lambdas whose captures are never rewritten.
 				// Kill-switch: JDEC_LAMBDA_CAPTURE_REBIND_OFF=1 restores the (broken) nil ReplaceFunc.
 				var lambdaReplace func(oldId *utils.VariableId, newId *utils.VariableId)
-				if os.Getenv("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
+				if jdecenv.Get("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
 					lambdaReplace = func(oldId *utils.VariableId, newId *utils.VariableId) {
 						for _, ca := range captured {
 							if ca != nil {
@@ -140,7 +181,11 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// parameters (var0, var1, ...) never collide with the enclosing method's locals.
 				// Captured values are resolved via LCAP placeholders, which are independent of
 				// the id chain, so a fresh root is safe.
-				methodStr, err := d.DumpClassLambdaMethod(member, classMember.Description, utils.NewRootVariableId(), len(captured))
+				var factoryOrigin []int
+				if d.lambdaFactoryOrigin != nil {
+					factoryOrigin = []int{*d.lambdaFactoryOrigin}
+				}
+				methodStr, err := dumpLambdaWithReferenceAdapter(d, classMember, captured, typ, args1, factoryOrigin...)
 				if err != nil {
 					return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", classMember.Name, member, err)
 				}
@@ -153,25 +198,21 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// ("bad return type in lambda expression: Object cannot be converted to T"). Re-emit the cast.
 				// Kill-switch: JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF=1.
 				var retTypevarCast string
-				if os.Getenv("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") == "" {
+				if jdecenv.Get("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") == "" {
 					var instantiatedMT values.JavaValue
 					if len(args1) >= 3 {
 						instantiatedMT = args1[2]
 					}
-					retTypevarCast = lambdaReturnPositionTypevar(typ, instantiatedMT)
+					fiRawName := lambdaReturnPositionTypevar(typ, instantiatedMT)
+					// StreamingCustomValue may be rendered after DumpMethod has restored the
+					// enclosing method signature. Resolve the concrete type-variable target while
+					// the invokedynamic is still being decoded under that method's context.
+					retTypevarCast = resolveLambdaReturnTypevar(d.FunctionContext, fiRawName)
 				}
-				cv := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-					s := methodStr
-					for i, ca := range captured {
-						s = strings.ReplaceAll(s, fmt.Sprintf("\x00LCAP%d\x00", i), ca.String(funcCtx))
-					}
-					if retTypevarCast != "" {
-						castTarget := resolveLambdaReturnTypevar(funcCtx, retTypevarCast)
-						if castTarget != "" {
-							s = injectLambdaReturnCast(s, castTarget)
-						}
-					}
-					return s
+				var cv *values.CustomValue
+				cv = values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
+					target, rawBridge := t19LambdaReturnCastStrings(funcCtx, cv, retTypevarCast)
+					return t19WriteLambdaBodyWithBridge(funcCtx, out, methodStr, captured, target, rawBridge)
 				}, func() types.JavaType {
 					return typ
 				}, lambdaReplace)
@@ -185,11 +226,14 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				// the lambda VALUE's type, not the stack simulation's slot type, so it doesn't
 				// interfere with slot reuse.
 				if len(args1) >= 3 {
-					if upgradedType := inferLambdaTypeFromInstantiated(typ, args1[2]); upgradedType != nil {
+					cv.InstantiatedMtdDesc = t19MethodTypeDesc(args1[2])
+					if upgradedType := inferDeclaredLambdaTarget(d, typ, args1[0], args1[2]); upgradedType != nil {
 						lambdaType := upgradedType
-						cv = values.NewCustomValue(cv.StringFunc, func() types.JavaType {
-							return lambdaType
-						}, lambdaReplace)
+						if inferLambdaTypeFromInstantiated(typ, args1[2]) == nil || (!d.blockPartialFunctionalTarget && instantiatedSAMErasesGenericArguments(args1[2], d.FunctionContext)) {
+							cv = retainErasedFunctionalValue(cv, typ, lambdaType)
+						} else {
+							cv = cv.WithType(func() types.JavaType { return lambdaType })
+						}
 						cv.Flag = "lambda"
 						cv.NoOuterCapture = len(captured) == 0
 					}
@@ -214,10 +258,17 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// ListStr,Map,MapMultiValueType} `var = Collections::synchronized*/unmodifiable*` (25
 			// "invalid method reference" sites). Kill-switch: JDEC_METHODREF_INSTANTIATED_TYPE_OFF=1.
 			refType := typ
-			if os.Getenv("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(args1) >= 3 {
-				if up := inferLambdaTypeFromInstantiated(typ, args1[2]); up != nil {
-					refType = up
+			var declaredTarget types.JavaType
+			if jdecenv.Get("JDEC_METHODREF_INSTANTIATED_TYPE_OFF") == "" && len(args1) >= 3 {
+				if up := inferDeclaredLambdaTarget(d, typ, args1[0], args1[2]); up != nil {
+					if inferLambdaTypeFromInstantiated(typ, args1[2]) == nil {
+						declaredTarget = up
+					} else {
+						refType = up
+					}
 				}
+				refType = methodRefReceiverType(d.FunctionContext, refType, classMember, args1[2], len(capturedArgs))
+				capturedArgs = methodRefErasedReceiver(d.FunctionContext, classMember, args1[2], capturedArgs)
 			}
 			// Forward ReplaceVar to captured values for the SAME reason as the inlined-lambda branch:
 			// a bound instance method reference `receiver::method` renders its captured receiver
@@ -225,7 +276,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 			// (disjoint-slot splitting etc.) or it renders a stale slot name. Kill-switch shared
 			// with the lambda branch: JDEC_LAMBDA_CAPTURE_REBIND_OFF=1.
 			var refReplace func(oldId *utils.VariableId, newId *utils.VariableId)
-			if os.Getenv("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
+			if jdecenv.Get("JDEC_LAMBDA_CAPTURE_REBIND_OFF") == "" {
 				refReplace = func(oldId *utils.VariableId, newId *utils.VariableId) {
 					for _, ca := range capturedArgs {
 						if ca != nil {
@@ -242,7 +293,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					// and produced `ClassName::new_`, an "invalid method reference" (javac then resolves a
 					// method literally named `new_`, which does not exist). Kill-switch
 					// JDEC_CTOR_METHODREF_FIX_OFF restores the legacy (broken) sanitized form.
-					if os.Getenv("JDEC_CTOR_METHODREF_FIX_OFF") == "" {
+					if jdecenv.Get("JDEC_CTOR_METHODREF_FIX_OFF") == "" {
 						return funcCtx.ShortTypeName(implClassName) + "::new"
 					}
 					refMember = "new"
@@ -272,7 +323,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 					}
 				}
 			}
-			return refVal, nil
+			return retainErasedFunctionalValue(refVal, typ, declaredTarget), nil
 		}
 	},
 	"defaultBootstrapMethod": func(args ...values.JavaValue) BuildinBootstrapMethod {
@@ -415,6 +466,9 @@ func init() {
 // descriptor (e.g. "(Ljava/lang/Integer;Ljava/lang/Integer;)Ljava/lang/Integer;").
 // Only standard JDK functional interfaces are upgraded (exact FQN match).
 func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodType values.JavaValue) types.JavaType {
+	if rawType == nil {
+		return nil
+	}
 	var desc string
 	if cv, ok := instantiatedMethodType.(*values.CustomValue); ok {
 		s := cv.String(&class_context.ClassContext{})
@@ -444,6 +498,26 @@ func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodT
 
 	typeArgs := []types.JavaType{}
 	switch rawName {
+	case "java.util.function.BinaryOperator", "java.util.function.UnaryOperator":
+		// These standard declarations repeat one variable at every SAM input
+		// and result. A single descriptor equality class establishes its erased
+		// argument; conflicting occurrences supply no instantiation proof.
+		arity := 1
+		if rawName == "java.util.function.BinaryOperator" {
+			arity = 2
+		}
+		if len(mtParams) != arity || mtRet == nil {
+			return nil
+		}
+		for _, input := range mtParams {
+			if !reflect.DeepEqual(input.RawType(), mtRet.RawType()) {
+				return nil
+			}
+		}
+		if _, primitive := mtRet.RawType().(*types.JavaPrimer); primitive {
+			return nil
+		}
+		typeArgs = append(typeArgs, mtRet)
 	case "java.util.function.BiFunction":
 		if len(mtParams) >= 2 {
 			typeArgs = append(typeArgs, mtParams[0], mtParams[1])
@@ -480,8 +554,17 @@ func inferLambdaTypeFromInstantiated(rawType types.JavaType, instantiatedMethodT
 		if len(mtParams) >= 1 {
 			typeArgs = append(typeArgs, mtParams[0])
 		}
+	case "java.nio.file.DirectoryStream$Filter":
+		// Filter<T>.accept(T) has an instantiated `(T)Z` SAM descriptor. Keeping
+		// that T on method references such as `predicate::test` is required: a raw
+		// Filter target asks javac to adapt the method to `accept(Object)`.
+		if len(mtParams) == 1 {
+			if ret, ok := mtRet.RawType().(*types.JavaPrimer); ok && ret.Name == types.JavaBoolean {
+				typeArgs = append(typeArgs, mtParams[0])
+			}
+		}
 	default:
-		return nil
+		return inferPrimitiveFunctionalType(rawName, mt.FunctionType())
 	}
 
 	if len(typeArgs) == 0 {
@@ -505,9 +588,9 @@ var lambdaFIReturnPosition = map[string]int{
 
 // lambdaReturnPositionTypevar returns the FI's raw class name when the lambda is a JDK
 // Supplier/Function/BiFunction whose instantiatedMethodType return type is Object (erased) -- the
-// necessary precondition for a return-position type-variable cast. The actual type variable name
-// is resolved later from the enclosing method's Signature (see resolveLambdaReturnTypevar), since
-// the lambda value carries only the erased/instantiated type, not the enclosing method's type vars.
+// necessary precondition for a return-position type-variable cast. The caller resolves the actual
+// type-variable name immediately from the enclosing method's Signature (see
+// resolveLambdaReturnTypevar), since the lambda value carries only the erased/instantiated type.
 // Returns "" when no cast applies (non-Object return, or an FI whose SAM returns void).
 func lambdaReturnPositionTypevar(rawType types.JavaType, instantiatedMethodType values.JavaValue) string {
 	if rawType == nil {
@@ -605,6 +688,16 @@ func resolveLambdaReturnTypevar(funcCtx *class_context.ClassContext, fiRawName s
 	if ta == nil {
 		return ""
 	}
+	// A function return target is commonly covariant (`Function<? super T, ? extends R>`).
+	// The ground target type used for lambda compatibility has R in the SAM return position;
+	// recover that upper bound before looking for a type variable. A lower-bounded or unbounded
+	// wildcard does not provide an exact return target and is deliberately left unresolved.
+	if wildcard, ok := ta.(*types.JavaWildcardType); ok {
+		if wildcard.Variant != "extends" || wildcard.Bound == nil {
+			return ""
+		}
+		ta = wildcard.Bound
+	}
 	// A bare type variable parses as a *JavaClass whose Name is a single identifier (no dot), e.g. "T".
 	// A concrete class arg (Object/String/...) has a dotted FQN and binds directly, so no cast.
 	if jc, ok := ta.RawType().(*types.JavaClass); ok && jc != nil && !strings.Contains(jc.Name, ".") {
@@ -632,26 +725,196 @@ func resolveLambdaReturnTypevar(funcCtx *class_context.ClassContext, fiRawName s
 // the terminating `;`. A bare `return;` (void) is left untouched. Returns the body unchanged if no
 // return site matches. Kill-switch: JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF.
 func injectLambdaReturnCast(body, typevar string) string {
-	idx := strings.LastIndex(body, "return ")
-	if idx < 0 {
+	return injectLambdaReturnCastWithBridge(body, typevar, "")
+}
+
+func injectLambdaReturnCastWithBridge(body, target, rawBridge string) string {
+	spans := lambdaReturnCastSpans(body, target)
+	if len(spans) == 0 {
 		return body
 	}
-	exprStart := idx + len("return ")
-	// Skip leading whitespace of the return expression; remember how many bytes we trimmed so the
-	// tail splice stays byte-aligned.
-	skipped := 0
-	for exprStart+skipped < len(body) && (body[exprStart+skipped] == ' ' || body[exprStart+skipped] == '\t') {
-		skipped++
+	bridge := ""
+	if rawBridge != "" {
+		bridge = "(" + rawBridge + ") "
 	}
-	rest := body[exprStart+skipped:]
-	if strings.HasPrefix(rest, ";") {
-		return body // void return; nothing to cast
+	var out strings.Builder
+	extra := 0
+	for range spans {
+		extra += len(target) + len(rawBridge) + 9
 	}
-	end := strings.IndexByte(rest, ';')
-	if end < 0 {
-		return body
+	out.Grow(len(body) + extra)
+	cursor := 0
+	for _, span := range spans {
+		out.WriteString(body[cursor:span.start])
+		expr := strings.TrimSpace(body[span.start:span.end])
+		out.WriteString("(" + target + ") " + bridge + "(" + expr + ")")
+		cursor = span.end
 	}
-	expr := strings.TrimSpace(rest[:end])
-	castStmt := "(" + typevar + ") (" + expr + ");"
-	return body[:exprStart] + castStmt + body[exprStart+skipped+end+1:]
+	out.WriteString(body[cursor:])
+	return out.String()
+}
+
+type lambdaReturnSpan struct {
+	start int
+	end   int // excludes the terminating semicolon
+}
+
+// lambdaReturnCastSpans finds every value-return belonging to the current
+// lambda, including returns nested in if/try blocks, while excluding returns in
+// a nested block lambda. Generated lambda bodies can have several control-flow
+// exits; casting only the final textual return leaves earlier paths ill-typed.
+func lambdaReturnCastSpans(body, target string) []lambdaReturnSpan {
+	nestedStarts := nestedLambdaBlockStarts(body)
+	braceNested := make([]bool, 0, 8)
+	nestedDepth := 0
+	var spans []lambdaReturnSpan
+	for i := 0; i < len(body); {
+		next, token := nextJavaCodeByte(body, i)
+		if next != i {
+			i = next
+			continue
+		}
+		switch token {
+		case '{':
+			nested := nestedStarts[i]
+			braceNested = append(braceNested, nested)
+			if nested {
+				nestedDepth++
+			}
+			i++
+			continue
+		case '}':
+			if n := len(braceNested); n > 0 {
+				if braceNested[n-1] {
+					nestedDepth--
+				}
+				braceNested = braceNested[:n-1]
+			}
+			i++
+			continue
+		}
+		if nestedDepth == 0 && strings.HasPrefix(body[i:], "return") &&
+			(i == 0 || !javaIdentByte(body[i-1])) &&
+			(i+len("return") == len(body) || !javaIdentByte(body[i+len("return")])) {
+			start := i + len("return")
+			for start < len(body) && (body[start] == ' ' || body[start] == '\t' || body[start] == '\r' || body[start] == '\n') {
+				start++
+			}
+			end := lambdaReturnSemicolon(body, start)
+			if end >= start {
+				expr := strings.TrimSpace(body[start:end])
+				if expr != "" && !strings.HasPrefix(expr, "("+target+")") {
+					spans = append(spans, lambdaReturnSpan{start: start, end: end})
+				}
+				i = end + 1
+				continue
+			}
+		}
+		i++
+	}
+	return spans
+}
+
+// nestedLambdaBlockStarts returns the opening braces belonging to nested block
+// lambdas. The first arrow is the body currently being rewritten; later arrows
+// are child lambdas whose return statements have a different SAM target.
+func nestedLambdaBlockStarts(body string) map[int]bool {
+	starts := map[int]bool{}
+	arrows := 0
+	for i := 0; i+1 < len(body); {
+		next, token := nextJavaCodeByte(body, i)
+		if next != i {
+			i = next
+			continue
+		}
+		if token == '-' && body[i+1] == '>' {
+			arrows++
+			j := i + 2
+			for j < len(body) && (body[j] == ' ' || body[j] == '\t' || body[j] == '\r' || body[j] == '\n') {
+				j++
+			}
+			if arrows > 1 && j < len(body) && body[j] == '{' {
+				starts[j] = true
+			}
+			i += 2
+			continue
+		}
+		i++
+	}
+	return starts
+}
+
+// nextJavaCodeByte skips one complete string, character literal, or comment;
+// otherwise it returns the current byte as Java code.
+func nextJavaCodeByte(body string, i int) (int, byte) {
+	if i >= len(body) {
+		return i, 0
+	}
+	if body[i] == '/' && i+1 < len(body) {
+		switch body[i+1] {
+		case '/':
+			if end := strings.IndexByte(body[i+2:], '\n'); end >= 0 {
+				return i + 2 + end + 1, 0
+			}
+			return len(body), 0
+		case '*':
+			if end := strings.Index(body[i+2:], "*/"); end >= 0 {
+				return i + 2 + end + 2, 0
+			}
+			return len(body), 0
+		}
+	}
+	if body[i] == '"' || body[i] == '\'' {
+		quote := body[i]
+		for j := i + 1; j < len(body); j++ {
+			if body[j] == '\\' {
+				j++
+				continue
+			}
+			if body[j] == quote {
+				return j + 1, 0
+			}
+		}
+		return len(body), 0
+	}
+	return i, body[i]
+}
+
+func lambdaReturnSemicolon(body string, start int) int {
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < len(body); {
+		next, token := nextJavaCodeByte(body, i)
+		if next != i {
+			i = next
+			continue
+		}
+		switch token {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			if brace > 0 {
+				brace--
+			} else {
+				return -1
+			}
+		case ';':
+			if paren == 0 && bracket == 0 && brace == 0 {
+				return i
+			}
+		}
+		i++
+	}
+	return -1
+}
+
+func javaIdentByte(b byte) bool {
+	return b == '_' || b == '$' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }

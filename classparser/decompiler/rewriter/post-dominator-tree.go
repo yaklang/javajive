@@ -31,7 +31,6 @@ import (
 // TestGeneratePostDominatorEquivalence.
 func GeneratePostDominatorMap(rootNode *core.Node) map[*core.Node]*core.Node {
 	nodes := []*core.Node{}
-	succMap := make(map[*core.Node][]*core.Node)
 	err := core.WalkGraph[*core.Node](rootNode, func(node *core.Node) ([]*core.Node, error) {
 		nodes = append(nodes, node)
 		return node.Next, nil
@@ -56,7 +55,6 @@ func GeneratePostDominatorMap(rootNode *core.Node) map[*core.Node]*core.Node {
 				succIds[i] = append(succIds[i], sid)
 			}
 		}
-		succMap[nd] = nd.Next
 	}
 
 	// Virtual sink gets id n. Exit nodes (no reachable successor) flow into it.

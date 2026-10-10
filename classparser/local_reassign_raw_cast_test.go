@@ -2,40 +2,30 @@ package javaclassparser
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-// TestLocalReassignRawCastIsLoadBearing pins parameterizedLocalReassignRawCast. The seed declares its
-// local at the METHOD return's wildcard type `Class<? super T>`, but the decompiler re-types the slot at
-// the invariant `Class<T>` (from the initial `= type` store), then reassigns `result = result.getSuperclass()`.
-// getSuperclass() returns `Class<? super T>` (captured), NOT assignable to the invariant `Class<T>`, so a
-// bare reassignment fails "Class<CAP#1> cannot be converted to Class<T>". The fix re-inserts the source's
-// raw `(Class)` cast. With the kill-switch the cast disappears. Real hit: objenesis
-// SerializationInstantiatorHelper / PercSerializationInstantiator.
+// The writable Class local can use its original erasure and convert only on
+// return. Require the same-local chain rather than a redundant cast per store.
 func TestLocalReassignRawCastIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/LocalReassignRawSeed.class")
+	raw, err := os.ReadFile("testdata/regression/LocalReassignRawSeed.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-
-	// Fix ON (default): the raw `(Class)` cast is present on the getSuperclass() reassignment.
-	os.Unsetenv("JDEC_PARAM_LOCAL_REASSIGN_RAW_CAST_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !strings.Contains(on, "(Class) (") || !strings.Contains(on, ".getSuperclass()") {
-		t.Errorf("fix ON: expected a raw `(Class)` cast on the getSuperclass() reassignment, got:\n%s", on)
-	}
-
-	// Fix OFF: the cast disappears (the uncompilable bare reassignment), proving it is load-bearing.
-	t.Setenv("JDEC_PARAM_LOCAL_REASSIGN_RAW_CAST_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if strings.Contains(off, "(Class) (") {
-		t.Errorf("fix OFF: expected NO raw `(Class)` cast (kill-switch load-bearing), got:\n%s", off)
+	assertReviewedTypeVarMethod(t, raw, "nonSerializableSuper", "(Ljava/lang/Class;)Ljava/lang/Class;", "<T:Ljava/lang/Object;>(Ljava/lang/Class<TT;>;)Ljava/lang/Class<-TT;>;")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_PARAM_LOCAL_REASSIGN_RAW_CAST_OFF", setting)
+		source, err := Decompile(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		local := requireReviewedPattern(t, source, `Class\s+(\w+)\s*=\s*\w+\s*;`)[1]
+		requireReviewedPattern(t, source, regexp.QuoteMeta(local)+`\s*=\s*`+regexp.QuoteMeta(local)+`\.getSuperclass\(\)\s*;`)
+		if !strings.Contains(compactReviewedGenericSource(source), "return(Class<?superT>)(Class)("+local+");") {
+			t.Fatalf("erased local lost generic return view:\n%s", source)
+		}
+		requireReviewedPattern(t, source, `Serializable\.class\.isAssignableFrom\(`+regexp.QuoteMeta(local)+`\)`)
 	}
 }

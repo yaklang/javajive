@@ -1,0 +1,151 @@
+package javaclassparser
+
+import (
+	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+)
+
+// buildInvocationMetadata reads declaration tables, not just referenced CP entries.
+// Accessibility here is relative to the output compilation unit's package.
+func (c *ClassObjectDumper) buildInvocationMetadata() callbinding.Provider {
+	cache := map[string]callbinding.Class{}
+	misses := map[string]bool{}
+	target := c.options.TargetSourceVersion
+	if target == 0 {
+		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
+	}
+	fallback := func(n string) (callbinding.Class, bool) {
+		if v, ok := jdkInvocationMetadata(n, target); ok {
+			cache[n] = v
+			return v, true
+		}
+		if v, ok := jdkThrowableAncestry(n, target); ok {
+			cache[n] = v
+			return v, true
+		}
+		misses[n] = true
+		return callbinding.Class{}, false
+	}
+	return func(n string) (callbinding.Class, bool) {
+		n = strings.ReplaceAll(n, ".", "/")
+		if v, ok := cache[n]; ok {
+			return v, true
+		}
+		if misses[n] {
+			return callbinding.Class{}, false
+		}
+		if n == "java/lang/Object" {
+			if v, ok := jdkInvocationMetadata(n, target); ok {
+				cache[n] = v
+				return v, true
+			}
+			v := callbinding.Class{Name: n, Public: true, MembersComplete: true, ParentsComplete: true}
+			// Object's public no-argument constructor is a language-defined
+			// root delegation with no declared checked exception. Its absence
+			// from this existing root namespace made a valid implicit super()
+			// look like an unknown declaration outside catalogued profiles.
+			v.Methods = append(v.Methods, callbinding.Method{Name: "<init>", Desc: "()V", Public: true, ExceptionsKnown: true})
+			for _, m := range []struct {
+				name, desc string
+				public     bool
+			}{
+				{"getClass", "()Ljava/lang/Class;", true}, {"hashCode", "()I", true},
+				{"equals", "(Ljava/lang/Object;)Z", true}, {"toString", "()Ljava/lang/String;", true},
+				{"notify", "()V", true}, {"notifyAll", "()V", true}, {"wait", "()V", true},
+				{"wait", "(J)V", true}, {"wait", "(JI)V", true}, {"clone", "()Ljava/lang/Object;", false}, {"finalize", "()V", false},
+			} {
+				v.Methods = append(v.Methods, callbinding.Method{Name: m.name, Desc: m.desc, Public: m.public, Generic: m.name == "getClass"})
+			}
+			cache[n] = v
+			return v, true
+		}
+		obj := c.obj
+		if obj.GetClassName() != n {
+			var data []byte
+			var ok bool
+			if c.foldSiblingResolver != nil {
+				data, ok = c.foldSiblingResolver(n)
+			}
+			if !ok && c.archiveDeclarationResolver != nil {
+				data, ok = c.archiveDeclarationResolver(n)
+			}
+			if !ok && c.declarationResolver != nil {
+				data, ok = c.declarationResolver(n)
+			}
+			if !ok {
+				data, ok = jdkConstructorClassBytes(n, target)
+			}
+			if !ok {
+				return fallback(n)
+			}
+			var err error
+			obj, err = c.parseResolved(data)
+			if err != nil || obj.GetClassName() != n {
+				misses[n] = true
+				return callbinding.Class{}, false
+			}
+		}
+		pkg := ""
+		if i := strings.LastIndexByte(n, '/'); i >= 0 {
+			pkg = strings.ReplaceAll(n[:i], "/", ".")
+		}
+		samePackage := pkg == c.PackageName
+		v := callbinding.Class{Name: n, Public: obj.AccessFlags&1 != 0 || samePackage, MembersComplete: true, ParentsComplete: true, IsInterface: obj.AccessFlags&0x200 != 0, Final: obj.AccessFlags&0x10 != 0}
+		// Method Signatures alone cannot describe an instantiated parent:
+		// preserve the class formal parameters and generic inheritance edges.
+		// Losing them turns Iterable<T> into a falsely non-generic declaration
+		// and can suppress a required erased invocation view.
+		seenSignature := false
+		for _, attribute := range obj.Attributes {
+			if signature, ok := attribute.(*SignatureAttribute); ok {
+				var err error
+				if seenSignature || signature == nil {
+					misses[n] = true
+					return callbinding.Class{}, false
+				}
+				v.Signature, err = obj.getUtf8(signature.SignatureIndex)
+				if err != nil {
+					misses[n] = true
+					return callbinding.Class{}, false
+				}
+				seenSignature = true
+			}
+		}
+		if sup := obj.GetSupperClassName(); sup != "" {
+			v.Parents = append(v.Parents, sup)
+		}
+		v.Parents = append(v.Parents, obj.GetInterfacesName()...)
+		for _, m := range obj.Methods {
+			name, e := obj.getUtf8(m.NameIndex)
+			if e != nil {
+				v.MembersComplete = false
+				continue
+			}
+			desc, e := obj.getUtf8(m.DescriptorIndex)
+			if e != nil {
+				v.MembersComplete = false
+				continue
+			}
+			if name == "<clinit>" {
+				continue
+			}
+			x := callbinding.Method{Name: name, Desc: desc, Public: m.AccessFlags&1 != 0 || (samePackage && m.AccessFlags&2 == 0), Static: m.AccessFlags&8 != 0, Varargs: m.AccessFlags&0x80 != 0, Bridge: m.AccessFlags&0x40 != 0}
+			x.Exceptions, x.ExceptionsKnown = originalMethodExceptions(obj, m)
+			for _, a := range m.Attributes {
+				if signature, ok := a.(*SignatureAttribute); ok {
+					x.Generic = true
+					var err error
+					x.Signature, err = obj.getUtf8(signature.SignatureIndex)
+					if err != nil {
+						v.MembersComplete = false
+					}
+				}
+			}
+			v.Methods = append(v.Methods, x)
+		}
+		cache[n] = v
+		return v, true
+	}
+}

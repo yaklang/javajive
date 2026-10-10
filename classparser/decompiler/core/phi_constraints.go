@@ -1,9 +1,12 @@
 package core
 
 import (
+	"github.com/yaklang/javajive/internal/workbudget"
+	"reflect"
+	"strings"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
-	"strings"
 )
 
 // Descriptors supply upper bounds on the source declaration. In particular,
@@ -29,10 +32,33 @@ func (d *Decompiler) referenceUseConstraints() map[*values.JavaRef][]types.JavaT
 		case OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE, OP_INVOKESTATIC, OP_INVOKESPECIAL:
 			member := d.GetMethodFromPool(int(Convert2bytesToInt(op.Data[:2])))
 			params := member.JavaType.FunctionType().ParamTypes
+			call := d.invokeFuncCall[op]
 			if len(stack) < len(params) {
 				continue
 			}
 			for i, typ := range params {
+				// A lambda or method reference is a Java poly expression. Its
+				// invokedynamic descriptor records only the functional
+				// interface erasure; the selected callee Signature supplies the
+				// source target. Record that target as use evidence so a
+				// materialized local web is declared with the same generic type
+				// javac used. FunctionalTargetParamType verifies the exact JVM
+				// descriptor, generic erasure and source denotability.
+				if call != nil {
+					if target := call.FunctionalTargetParamType(i, d.FunctionContext); target != nil {
+						typ = target
+					}
+					if d.traceEnabled("var-fold") {
+						d.tracef("var-fold", "invoke use pc=%d owner=%s name=%s argument=%d bound=%s", op.CurrentOffset, call.ClassName, call.FunctionName, i, typ.String(d.FunctionContext))
+						argumentTypes := []string{}
+						for _, argument := range call.Arguments {
+							if argument != nil && argument.Type() != nil {
+								argumentTypes = append(argumentTypes, argument.Type().String(d.FunctionContext))
+							}
+						}
+						d.tracef("var-fold", "invoke witnesses pc=%d receiver=%T arguments=%v", op.CurrentOffset, call.Object, argumentTypes)
+					}
+				}
 				add(stack[len(params)-1-i], typ)
 			}
 			if op.Instr.OpCode != OP_INVOKESTATIC && len(stack) > len(params) {
@@ -45,6 +71,14 @@ func (d *Decompiler) referenceUseConstraints() map[*values.JavaRef][]types.JavaT
 		case OP_ARETURN:
 			if len(stack) > 0 && d.FunctionType != nil {
 				add(stack[0], d.FunctionType.ReturnType)
+				if call := polyReturnedCall(stack[0]); call != nil {
+					targets := call.FunctionalReturnArgumentTargets(d.FunctionType.ReturnType, d.FunctionContext)
+					for i, arg := range call.Arguments {
+						if target := targets[i]; target != nil {
+							add(arg, target)
+						}
+					}
+				}
 			}
 		case OP_AASTORE:
 			if len(stack) > 2 && stack[2].Type().IsArray() {
@@ -59,6 +93,17 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 	name, ok := types.RawClassFQN(joined)
 	if !ok {
 		return joined
+	}
+	// A lambda/method-reference is a Java poly expression: Function<Object,
+	// Object> in the instantiated classfile descriptor is not its source
+	// declaration type.  When all definitions in the web are poly expressions
+	// and every parameterized use with the same erasure agrees, the use target
+	// is authoritative.  This is the same target-typing rule javac applied at
+	// the original assignment (not a best-effort generic cast).
+	if d.getenv("JDEC_GENERIC_USE_CONSTRAINT_OFF") == "" {
+		if target := d.uniqueParameterizedUseConstraint(name, stores, uses); target != nil && webHasOnlyPolyFunctionalDefinitions(stores) {
+			return target.Copy()
+		}
 	}
 	var bounds []types.JavaType
 	seen := map[string]bool{}
@@ -102,6 +147,11 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 		return types.IsReferenceSubtypeBridged(a, b, provider)
 	}
 	accessible := func(n string) bool {
+		if check := d.FunctionContext.SourceClassDenotable; check != nil {
+			if denotable, known := check(strings.ReplaceAll(n, ".", "/")); known && !denotable {
+				return false
+			}
+		}
 		if check := d.FunctionContext.SiblingClassAccessible; check != nil {
 			if allowed, known := check(strings.ReplaceAll(n, ".", "/")); known {
 				return allowed
@@ -117,10 +167,34 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 	if compatible {
 		return joined
 	}
+	definitions, completeDefinitions := d.originalReferenceWebDefinitions(stores)
 	for _, candidate := range bounds {
 		n, _ := types.RawClassFQN(candidate)
 		if !accessible(n) {
 			continue
+		}
+		// A denotable declaration must accept every definition as well as
+		// satisfy every consumer. The representative join may have lost an
+		// incomparable interface; in that case inspect all original definitions.
+		// A consumer alone never justifies a narrowing cast or a new check.
+		if !isSubtype(name, n) {
+			if !completeDefinitions {
+				continue
+			}
+			acceptsEveryDefinition := true
+			for _, definition := range definitions {
+				dn, known := types.RawClassFQN(definition)
+				// Erasure alone cannot prove invariant generic arguments. Poly
+				// expressions have their separate target-typing proof above.
+				_, parameterized := types.AsParameterizedType(candidate)
+				if !known || !isSubtype(dn, n) || parameterized && !reflect.DeepEqual(definition.RawType(), candidate.RawType()) {
+					acceptsEveryDefinition = false
+					break
+				}
+			}
+			if !acceptsEveryDefinition {
+				continue
+			}
 		}
 		valid := true
 		for _, bound := range bounds {
@@ -135,4 +209,111 @@ func (d *Decompiler) constrainWebDeclaration(joined types.JavaType, stores []*Op
 		}
 	}
 	return joined
+}
+
+// A representative LUB need not retain every shared interface. Recover the
+// definition side of the constraints from the original store RHS DAGs before
+// considering a consumer type. Recursive copies add no constraint; incomplete
+// stores, values and unanchored recurrences never prove a declaration.
+func (d *Decompiler) originalReferenceWebDefinitions(stores []*OpCode) ([]types.JavaType, bool) {
+	self := map[*values.JavaRef]bool{}
+	if len(stores) > 65536 {
+		return nil, false
+	}
+	var roots []values.JavaValue
+	for _, store := range stores {
+		if store == nil || len(store.stackConsumed) != 1 || len(d.opcodeIdToRef[store]) != 1 {
+			return nil, false
+		}
+		ref, ok := d.opcodeIdToRef[store][0][0].(*values.JavaRef)
+		if !ok || ref == nil {
+			return nil, false
+		}
+		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+			return nil, false
+		}
+		self[ref] = true
+		roots = append(roots, store.stackConsumed[0])
+	}
+	// One shared visitation state preserves DAG complexity across stores and
+	// charges the request budget once per original value identity.
+	definitions := webDefinitionTypeLeaves(roots, self, d.Work)
+	for _, typ := range definitions {
+		if typ == nil {
+			return nil, false
+		}
+	}
+	return definitions, len(definitions) > 0
+}
+
+func (d *Decompiler) uniqueParameterizedUseConstraint(rawName string, stores []*OpCode, uses map[*values.JavaRef][]types.JavaType) types.JavaType {
+	var target types.JavaType
+	for _, store := range stores {
+		if store == nil {
+			continue
+		}
+		for _, info := range d.opcodeIdToRef[store] {
+			ref, ok := info[0].(*values.JavaRef)
+			if !ok || ref == nil {
+				continue
+			}
+			candidate, conflict := uniqueParameterizedConstraint(rawName, uses[ref])
+			if conflict {
+				return nil
+			}
+			if candidate == nil {
+				continue
+			}
+			if target == nil {
+				target = candidate
+				continue
+			}
+			if !reflect.DeepEqual(target.RawType(), candidate.RawType()) {
+				return nil
+			}
+		}
+	}
+	return target
+}
+
+func uniqueParameterizedConstraint(rawName string, constraints []types.JavaType) (target types.JavaType, conflict bool) {
+	for _, constraint := range constraints {
+		useRaw, ok := types.RawClassFQN(constraint)
+		if !ok || useRaw != rawName {
+			continue
+		}
+		if _, ok := types.AsParameterizedType(constraint); !ok {
+			continue
+		}
+		if target == nil {
+			target = constraint
+			continue
+		}
+		if !reflect.DeepEqual(target.RawType(), constraint.RawType()) {
+			// A single value consumed at incompatible generic targets was
+			// necessarily raw in source; preserve erasure instead of guessing.
+			return nil, true
+		}
+	}
+	return target, false
+}
+
+// A returned invocation may have been materialized to preserve evaluation order.
+func polyReturnedCall(value values.JavaValue) *values.FunctionCallExpression {
+	seen := map[*values.JavaRef]bool{}
+	for value != nil {
+		switch v := values.UnpackSoltValue(value).(type) {
+		case *values.FunctionCallExpression:
+			return v
+		case *values.JavaRef:
+			if seen[v] {
+				return nil
+			}
+			seen[v] = true
+			value = v.Val
+		default:
+			return nil
+		}
+	}
+	return nil
 }

@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixJavassistRemainingReconstructs repairs leftover javassist tree sites.
 // Kill-switch: JDEC_JAVASSIST_REMAINING_OFF=1.
 func fixJavassistRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_JAVASSIST_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_JAVASSIST_REMAINING_OFF") == "1" {
 		return body
 	}
 	// Lex.get: Object-typed copy of lookAheadTokens; Token.tokenId is the field.

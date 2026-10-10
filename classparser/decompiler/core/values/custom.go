@@ -1,18 +1,27 @@
 package values
 
 import (
+	"fmt"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type CustomValue struct {
+	sourceCaught      bool
+	sourceCaughtPC    int
+	sourceCaughtTyped bool
 	// Known captures describe lambda creation, without executing or inspecting
 	// the deferred lambda body. Other custom expressions remain opaque.
 	CapturesKnown  bool
 	Captures       []JavaValue
 	Flag           string
 	NoOuterCapture bool
+	// Lambda creation is eager even though its body is deferred. Keep the
+	// invokedynamic location for argument motion and exception-region proofs.
+	OriginPC    int
+	HasOriginPC bool
 	// IsMethodRef distinguishes a method reference (`Type::method`, `receiver::method`, `Type::new`)
 	// from an inlined lambda body (`(x) -> ...`). Both carry Flag=="lambda" (so receiver/call-site
 	// functional-interface cast logic fires for both), but a method reference binds NATURALLY to a
@@ -33,13 +42,25 @@ type CustomValue struct {
 	// this descriptor -- re-targets the SAM so the method ref binds. Set only on the bootstrap method-ref
 	// branch; consumed by ctorRawFISAMMethodRefCast (renderArgAt). Empty/unused for lambdas and non-FI uses.
 	InstantiatedMtdDesc string
-	StringFunc          func(funcCtx *class_context.ClassContext) string
-	TypeFunc            func() types.JavaType
-	ReplaceFunc         func(oldId *utils.VariableId, newId *utils.VariableId)
+	// LambdaReturnTarget is a source-level SAM return target recovered after
+	// invokedynamic decoding from a later assignment/invocation use. The lambda
+	// writer consults it lazily because Java target typing is solved after the
+	// body was reconstructed. LambdaReturnRawBridge requests an intermediate
+	// cast to the target erasure for invariant generic mismatches such as
+	// CompletableFuture<Object> -> CompletableFuture<V>.
+	LambdaReturnTarget    types.JavaType
+	LambdaReturnRawBridge bool
+	StringFunc            func(funcCtx *class_context.ClassContext) string
+	WriteFunc             func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error
+	TypeFunc              func() types.JavaType
+	ReplaceFunc           func(oldId *utils.VariableId, newId *utils.VariableId)
 }
 
 // ReplaceVar implements JavaValue.
 func (v *CustomValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if v.sourceCaught {
+		return // The handler-entry name is bound by its original PC, not a local ID.
+	}
 	if v.ReplaceFunc != nil {
 		v.ReplaceFunc(oldId, newId)
 	}
@@ -49,8 +70,109 @@ func (v *CustomValue) Type() types.JavaType {
 	return v.TypeFunc()
 }
 func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
-	return v.StringFunc(funcCtx)
+	guard := renderGuarded(funcCtx)
+	if guard {
+		if err := beginValueRender(funcCtx); err != nil {
+			return ""
+		}
+		defer endValueRender(funcCtx)
+	}
+	if v.sourceCaught {
+		name := "Exception"
+		if funcCtx != nil && funcCtx.CatchEntryNames[v.sourceCaughtPC] != "" {
+			name = funcCtx.CatchEntryNames[v.sourceCaughtPC]
+		}
+		if class_context.SafeIdentifier(name) != name {
+			if funcCtx != nil && funcCtx.Work != nil {
+				funcCtx.Work.FailRender(fmt.Errorf("invalid handler-entry source identifier"))
+			}
+			return ""
+		}
+		if guard {
+			if funcCtx.CheckAlloc(int64(len(name))) != nil || funcCtx.PreflightOutput(int64(len(name))) != nil {
+				return ""
+			}
+		}
+		return name
+	}
+	if v.StringFunc == nil && v.WriteFunc == nil {
+		return ""
+	}
+	if guard {
+		if err := funcCtx.Work.Check(); err != nil {
+			return ""
+		}
+	}
+	if guard && funcCtx.Work.HasOutputLimit() && v.WriteFunc == nil {
+		funcCtx.Work.RejectUnboundedRender()
+		return ""
+	}
+	if v.WriteFunc != nil {
+		out := workbudget.NewWriter(nil)
+		if guard {
+			out = workbudget.NewWriter(funcCtx.Work)
+			out.SetBase(funcCtx.OutputHeld)
+		}
+		if err := v.WriteFunc(funcCtx, out); err != nil {
+			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() == nil {
+				funcCtx.Work.FailRender(err)
+			}
+			return ""
+		}
+		if guard && renderRejected(funcCtx) {
+			return ""
+		}
+		return out.String()
+	}
+	s := v.StringFunc(funcCtx)
+	if renderRejected(funcCtx) {
+		return ""
+	}
+	if !guard {
+		return s
+	}
+	n := int64(len(s))
+	if err := funcCtx.CheckAlloc(n); err != nil {
+		return ""
+	}
+	if err := funcCtx.PreflightOutput(n); err != nil {
+		return ""
+	}
+	return s
 }
+
+// A caught value is the JVM-supplied handler-entry stack word. Its source
+// renderer can only read that handler's identifier and has no Java operands.
+// Flag/PC annotations on an arbitrary callback cannot establish this fact.
+func NewCaughtExceptionValue(pc int, typ types.JavaType) *CustomValue {
+	return &CustomValue{sourceCaught: true, sourceCaughtPC: pc, sourceCaughtTyped: typ != nil,
+		Flag: "exception", OriginPC: pc, HasOriginPC: true, TypeFunc: func() types.JavaType { return typ }}
+}
+
+func (v *CustomValue) SourceCaughtExceptionEntry() (int, bool) {
+	if v == nil || !v.sourceCaught || !v.sourceCaughtTyped || v.sourceCaughtPC < 0 || v.sourceCaughtPC > 65535 ||
+		v.Flag != "exception" || !v.HasOriginPC || v.OriginPC != v.sourceCaughtPC {
+		return 0, false
+	}
+	return v.sourceCaughtPC, true
+}
+
+// WithType returns a shallow copy with a replacement type function. Unlike
+// reconstructing a CustomValue from StringFunc, it preserves a bounded writer
+// and the capture/replace metadata.
+func (v *CustomValue) WithType(typeFunc func() types.JavaType) *CustomValue {
+	if v == nil {
+		return nil
+	}
+	copy := *v
+	copy.TypeFunc = typeFunc
+	return &copy
+}
+
+// NewCustomValue is the compatibility constructor for an opaque string
+// callback. It remains usable with unlimited output or AST-depth-only budgets,
+// but an explicit output cap rejects it before callback execution. Renderers
+// that can include class-file-controlled text should use NewStreamingCustomValue.
 func NewCustomValue(stringFun func(funcCtx *class_context.ClassContext) string, typeFunc func() types.JavaType, replaceFunc ...func(oldId *utils.VariableId, newId *utils.VariableId)) *CustomValue {
 	var rf func(oldId *utils.VariableId, newId *utils.VariableId)
 	if len(replaceFunc) > 0 {
@@ -58,6 +180,21 @@ func NewCustomValue(stringFun func(funcCtx *class_context.ClassContext) string, 
 	}
 	return &CustomValue{
 		StringFunc:  stringFun,
+		TypeFunc:    typeFunc,
+		ReplaceFunc: rf,
+	}
+}
+
+// NewStreamingCustomValue creates a CustomValue whose output is charged before
+// each append when request output limits are enabled. Prefer it for any
+// callback that can incorporate class-file-controlled text or child values.
+func NewStreamingCustomValue(writeFun func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error, typeFunc func() types.JavaType, replaceFunc ...func(oldId *utils.VariableId, newId *utils.VariableId)) *CustomValue {
+	var rf func(oldId *utils.VariableId, newId *utils.VariableId)
+	if len(replaceFunc) > 0 {
+		rf = replaceFunc[0]
+	}
+	return &CustomValue{
+		WriteFunc:   writeFun,
 		TypeFunc:    typeFunc,
 		ReplaceFunc: rf,
 	}

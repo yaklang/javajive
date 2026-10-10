@@ -714,9 +714,10 @@ func TestDecompileSyntaxRegression(t *testing.T) {
 		{
 			file: "mybatis_plus_ktupdatewrapper_lambda_name.class",
 			desc: "Kotlin synthetic lambda method names may contain JVM-only characters such as '-' " +
-				"(set$lambda-0). Method declarations and method references must be rendered with a safe Java identifier instead of dropping the method.",
+				"(set$lambda-0). javap: REF_invokeStatic KtUpdateWrapper.set$lambda-0; " +
+				"unbound Class::method is the handle, not a bound KProperty receiver.",
 			mustContain: []string{
-				"var2::set$lambda_0",
+				"KtUpdateWrapper::set$lambda_0",
 				"private static final void set$lambda_0",
 				"formatParam(var1,var2)",
 			},
@@ -833,7 +834,7 @@ func TestDecompileSyntaxRegression(t *testing.T) {
 			desc: "OkHttp Kotlin Headers.Companion.of(Map) has a null-check throw arm that leaves a duplicated value on a terminal athrow path. " +
 				"Mismatched candidate if-merge stack sizes must fall back to ordinary merge handling instead of stubbing the method.",
 			mustContain: []string{
-				"public final Headers of(Map<String, String> var1)",
+				"public final Headers of(@NotNull() Map<String, String> var1)",
 				"Iterator var6 = var4.entrySet().iterator()",
 				"String var10 = ((String)(var8.getKey()))",
 				"return new Headers(var2,(DefaultConstructorMarker)(null))",
@@ -881,7 +882,7 @@ func TestDecompileSyntaxRegression(t *testing.T) {
 				"must be seeded from the consumed comparison operands.",
 			mustContain: []string{
 				"public final class _Utf8Kt",
-				"public static final String commonToUtf8String(byte[] var0, int var1, int var2)",
+				"public static final String commonToUtf8String(@NotNull() byte[] var0, int var1, int var2)",
 				"return new String(var3,var8_1,var6)",
 			},
 			mustNotContain: []string{
@@ -896,7 +897,7 @@ func TestDecompileSyntaxRegression(t *testing.T) {
 			mustContain: []string{
 				"public final class RealBufferedSource implements BufferedSource",
 				"public long indexOf(byte var1, long var2, long var3)",
-				"public boolean rangeEquals(long var1, ByteString var2, int var3, int var4)",
+				"public boolean rangeEquals(long var1, @NotNull() ByteString var2, int var3, int var4)",
 			},
 			mustNotContain: []string{
 				"yak-decompiler",

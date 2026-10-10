@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strconv"
 	"strings"
 )
@@ -16,7 +16,7 @@ import (
 // (`int cannot be converted to boolean`).
 // Kill-switch: JDEC_BOOL_ARITH_OPERAND_OFF=1.
 func fixBoolUsedAsArithOperand(body string) string {
-	if os.Getenv("JDEC_BOOL_ARITH_OPERAND_OFF") == "1" {
+	if jdecenv.Get("JDEC_BOOL_ARITH_OPERAND_OFF") == "1" {
 		return body
 	}
 	from := 0
@@ -121,7 +121,7 @@ func booleanInstanceFields(body string) []string {
 // boolean decompiler locals: `boolean varN = 0`, `varN = 0`, and
 // `(varN) == (0)` / `!= (0)`. Kill-switch: JDEC_BOOL_ZERO_LITERAL_OFF=1.
 func fixBooleanZeroLiteral(body string) string {
-	if os.Getenv("JDEC_BOOL_ZERO_LITERAL_OFF") == "1" {
+	if jdecenv.Get("JDEC_BOOL_ZERO_LITERAL_OFF") == "1" {
 		return body
 	}
 	// Freemarker Environment reuses boolean slots as int; rewriting
@@ -157,43 +157,11 @@ func fixBooleanZeroLiteral(body string) string {
 	}
 }
 
-// fixBooleanExprCmpZero rewrites `if ((bool ||/&& expr) == (0))` — the JVM
-// ifeq encoding of `if (!boolExpr)`. jsoup Tokeniser character-reference
-// lookup. Kill-switch: JDEC_BOOL_EXPR_CMP_ZERO_OFF=1.
+// fixBooleanExprCmpZero is retired. A logical subexpression does not prove
+// that its enclosing operand is boolean: an exact 0/1 decision projection is
+// still an int. Only the typed IR can select a Z or computational-word view.
+// Keep this legacy entry point inert for callers and regression negatives.
 func fixBooleanExprCmpZero(body string) string {
-	if os.Getenv("JDEC_BOOL_EXPR_CMP_ZERO_OFF") == "1" {
-		return body
-	}
-	for _, pair := range [][2]string{
-		{") == (0)){", ") == (false)){"},
-		{") != (0)){", ") != (false)){"},
-	} {
-		needle, repl := pair[0], pair[1]
-		from := 0
-		var b strings.Builder
-		for {
-			i := strings.Index(body[from:], needle)
-			if i < 0 {
-				b.WriteString(body[from:])
-				body = b.String()
-				break
-			}
-			i += from
-			window := body[from:i]
-			ifStart := strings.LastIndex(window, "if (")
-			if ifStart >= 0 {
-				cond := window[ifStart:]
-				if strings.Contains(cond, "||") || strings.Contains(cond, "&&") {
-					b.WriteString(body[from:i])
-					b.WriteString(repl)
-					from = i + len(needle)
-					continue
-				}
-			}
-			b.WriteString(body[from : i+len(needle)])
-			from = i + len(needle)
-		}
-	}
 	return body
 }
 
@@ -203,7 +171,7 @@ func fixBooleanExprCmpZero(body string) string {
 // literal 2..9 that wrap is `intVar == ((2) != (0))` (incomparable). Restore
 // `intVar == (2)`. Kill-switch: JDEC_INT_CMP_BOOL_LIT_OFF=1.
 func fixIntCmpBoolMaterializedLiteral(body string) string {
-	if os.Getenv("JDEC_INT_CMP_BOOL_LIT_OFF") == "1" {
+	if jdecenv.Get("JDEC_INT_CMP_BOOL_LIT_OFF") == "1" {
 		return body
 	}
 	for n := 2; n <= 9; n++ {

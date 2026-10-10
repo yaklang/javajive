@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 )
 
 func TestOrig14BloomFilterBoolOrSnippet(t *testing.T) {
@@ -97,15 +99,23 @@ func TestOkhttpCloseResourceNonPrivateIsLoadBearing(t *testing.T) {
 }
 
 func TestJacksonRecordAccessorNSMEIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/JDK14Util$RecordAccessor.class", "JDEC_JACKSON_REMAINING_OFF",
-		"catch(ClassNotFoundException | NoSuchMethodException var1)",
-		"Class var1 = Class.forName(\"java.lang.reflect.RecordComponent\");")
+	raw, err := os.ReadFile("testdata/regression/JDK14Util$RecordAccessor.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the original broad Exception handlers, including the initialization
+	// failure channel. A guessed CNFE/NSME union excludes other reflective errors.
+	assertOriginalCatchContract(t, raw, "JDEC_JACKSON_REMAINING_OFF")
 }
 
 func TestLog4jCompositeMergeStrategyNSMEIsLoadBearing(t *testing.T) {
-	assertOrig14Decompile(t, "testdata/regression/NsmeCatchAdv.class",
-		"ClassNotFoundException | NoSuchMethodException var2",
-		"catch(ClassNotFoundException var2){")
+	raw, err := os.ReadFile("testdata/regression/NsmeCatchAdv.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This fixture wraps only CNFE. NSME propagates as declared by make(); widening
+	// its handler would incorrectly wrap a missing constructor.
+	assertOriginalCatchContract(t, raw, "JDEC_ORIG14_REMAINING_OFF")
 }
 
 func TestNettyWildcardAddressHolderIsLoadBearing(t *testing.T) {
@@ -115,7 +125,54 @@ func TestNettyWildcardAddressHolderIsLoadBearing(t *testing.T) {
 }
 
 func TestJSONReaderUTF16BoolExprNeIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/JSONReaderUTF16.class", "JDEC_BOOL_EXPR_CMP_ZERO_OFF",
-		") != (false)){",
-		") != (0)){")
+	const path = "testdata/regression/JSONReaderUTF16.class"
+	raw, code, object := reviewedFixtureMethod(t, path, "skipValue", "()V")
+	for _, op := range []struct {
+		pc     uint16
+		opcode int
+		data   []byte
+	}{
+		{491, core.OP_GETFIELD, nil}, {494, core.OP_BIPUSH, []byte{45}}, {496, core.OP_IF_ICMPEQ, []byte{0, 12}},
+		{500, core.OP_GETFIELD, nil}, {503, core.OP_BIPUSH, []byte{43}}, {505, core.OP_IF_ICMPNE, []byte{0, 7}},
+		{508, core.OP_ICONST_1, nil}, {512, core.OP_ICONST_0, nil}, {513, core.OP_ISTORE_1, nil}, {514, core.OP_ILOAD_1, nil}, {515, core.OP_IFEQ, []byte{0, 68}},
+	} {
+		assertReviewedOpcode(t, code, op.pc, op.opcode, op.data...)
+	}
+	decoder := core.NewDecompiler(code.Code, nil)
+	if err := decoder.ParseOpcode(); err != nil {
+		t.Fatal(err)
+	}
+	for _, pc := range []uint16{491, 500} {
+		op := decoder.OpcodeByPC(pc)
+		index := int(op.Data[0])<<8 | int(op.Data[1])
+		field, ok := object.ConstantPoolManager.IndexInfo(index).(*ConstantFieldrefInfo)
+		if !ok {
+			t.Fatal("original character member is not a field")
+		}
+		name, descriptor := getNameAndType(object.ConstantPool, field.NameAndTypeIndex)
+		if object.ConstantPoolManager.GetClassName(int(field.ClassIndex)) != "com/alibaba/fastjson2/JSONReaderUTF16" || name != "ch" || descriptor != "C" {
+			t.Fatal("original sign predicate field tuple changed")
+		}
+	}
+	// The original char comparisons produce a canonical word; the consumer is
+	// IFEQ, not a boolean-return narrowing. Independent six-mode word/effect
+	// oracles above cover both representations without this historical JVM.
+	assertReviewedSources(t, raw, "JDEC_BOOL_EXPR_CMP_ZERO_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `public final void skipValue\(`)
+		_, end, ok := reviewedCanonicalPredicateIf(body, "this.ch==45||this.ch==43", true)
+		if !ok {
+			t.Fatalf("original sign predicate lost a valid canonical-word consumer:\n%s", body)
+		}
+		if !strings.Contains(body[end:], "this.ch = this.chars[this.offset++];") {
+			t.Fatal("sign branch lost original single character advance")
+		}
+	})
+}
+
+func TestOrig14KeepsWrapperExceptionAlternatives(t *testing.T) {
+	t.Setenv("JDEC_ORIG14_REMAINING_OFF", "")
+	in := "try{\nClass[] params=new Class[1];\nparams[0]=String.class;\nthis.getMethod(owner,\"read\",params,false).invoke(value,new Object[0]);\n}catch(IllegalAccessException var7){\nthrow new RuntimeException(var7);\n}"
+	if got := fixOrig14RemainderReconstructs(in); got != in {
+		t.Fatalf("invented checked exception: %s", got)
+	}
 }

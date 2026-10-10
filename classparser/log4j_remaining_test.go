@@ -2,7 +2,7 @@ package javaclassparser
 
 // 承重测试: log4j-core 剩余 dump 重构 (EnglishEnums.valueOf Enum 擦除,
 // PrivateConfig filter 过载, LoggerContext putIfAbsent, OutputStream 三元 LUB,
-// PluginAttribute float 字面量, MarkerManager 嵌套 import, ClockFactory Supplier,
+// MarkerManager 嵌套 import, ClockFactory Supplier,
 // FixedTimeZoneFormat this() 等). kill-switch: JDEC_LOG4J_REMAINING_OFF.
 
 import (
@@ -30,7 +30,7 @@ func TestLog4jRemainingReconstructsAreLoadBearing(t *testing.T) {
 		"		NullOutputStream var4 = ((var0) == (null)) ? (var3) : (var0);",
 		"}",
 		"public @interface PluginAttribute {",
-		"	public abstract float defaultFloat() default 0.000000;",
+		"	public abstract float defaultFloat() default 0F;",
 		"}",
 		"abstract class MarkerMixIn {",
 		"import MarkerManager.Log4jMarker;",
@@ -139,7 +139,7 @@ func TestLog4jRemainingReconstructsAreLoadBearing(t *testing.T) {
 		"var5.filter(this.logger,var1,var2,(Object)(var3),var4)",
 		"putIfAbsent(var1,var2,var3)",
 		"OutputStream var3 = ((var0) == (null))",
-		"float defaultFloat() default 0.0f;",
+		"float defaultFloat() default 0F;",
 		"import org.apache.logging.log4j.MarkerManager.Log4jMarker;",
 		"import org.apache.logging.log4j.message.ThreadDumpMessage.ThreadInfoFactory;",
 		"HashMap<String, Supplier<Clock>> var0 = new HashMap();",
@@ -203,6 +203,11 @@ func TestLog4jEnglishEnumsValueOfIsLoadBearing(t *testing.T) {
 	}
 }
 
+// The generic annotation constant renderer now owns primitive width and bits.
+// The old class-name substitution is retired: disabling unrelated legacy
+// rewrites must preserve the valid float default. Independent reflection of
+// rebuilt defaults, precision and exceptional values is covered by
+// TestAdversarialAnnotationNumericConstantsPreserveBits.
 func TestLog4jPluginAttributeFloatDefaultIsLoadBearing(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/Log4jPluginAttribute.class")
 	if err != nil {
@@ -213,8 +218,8 @@ func TestLog4jPluginAttributeFloatDefaultIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile ON: %v", err)
 	}
-	if !strings.Contains(on, "float defaultFloat() default 0.0f;") {
-		t.Errorf("ON: expected 0.0f float default, got:\n%s", on)
+	if !strings.Contains(on, "float defaultFloat() default 0F;") {
+		t.Errorf("ON: expected typed zero float default, got:\n%s", on)
 	}
 
 	t.Setenv("JDEC_LOG4J_REMAINING_OFF", "1")
@@ -222,7 +227,10 @@ func TestLog4jPluginAttributeFloatDefaultIsLoadBearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decompile OFF: %v", err)
 	}
-	if !strings.Contains(off, "float defaultFloat() default 0.000000;") {
-		t.Errorf("OFF: expected double 0.000000 default, got:\n%s", off)
+	if !strings.Contains(off, "float defaultFloat() default 0F;") {
+		t.Errorf("OFF: generic float renderer must retain typed zero default, got:\n%s", off)
+	}
+	if on != off {
+		t.Fatal("retired class-name patch still changes an annotation declaration")
 	}
 }

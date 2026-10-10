@@ -1,0 +1,52 @@
+[
+  {
+    "case": "checkcast",
+    "main": "Main",
+    "release": 17
+  },
+  {
+    "case": "effects",
+    "main": "Main",
+    "release": 17
+  },
+  {
+    "case": "generic",
+    "main": "Main",
+    "release": 17
+  },
+  {
+    "case": "handler",
+    "main": "Main",
+    "release": 17
+  },
+  {
+    "case": "interface",
+    "main": "Main",
+    "release": 17
+  },
+  {
+    "case": "markers",
+    "main": "Main",
+    "release": 17
+  },
+  {
+    "case": "metadata",
+    "main": "Main",
+    "release": 17
+  },
+  {
+    "case": "phis",
+    "main": "Main",
+    "release": 17
+  },
+  {
+    "case": "unicode",
+    "main": "Main",
+    "release": 17
+  },
+  {
+    "case": "virtual",
+    "main": "Main",
+    "release": 17
+  }
+]

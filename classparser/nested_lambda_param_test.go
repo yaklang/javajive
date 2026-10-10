@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -16,37 +15,34 @@ import (
 // nested lambda's parameters are namespaced by depth (`l2_0`); with the kill-switch OFF the flat name
 // reappears and the same identifier is declared twice inside one method.
 func TestNestedLambdaParamScopeIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/NestedLambdaParamSeed.class")
+	raw := reviewedRemainingSAMRaw(t, "NestedLambdaParamSeed")
+	assertReviewedTypeVarMethod(t, raw, "nested", "(Ljava/lang/String;)Ljava/util/function/Predicate;", "(Ljava/lang/String;)Ljava/util/function/Predicate<Ljava/lang/String;>;")
+	assertReviewedSeedSAM(t, raw, "(Ljava/lang/Object;)Z", "(Ljava/lang/String;)Z")
+	t.Setenv("JDEC_LAMBDA_PARAM_SCOPE_OFF", "")
+	source, err := Decompile(raw)
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-
-	// Fix ON (default): the nested lambda parameter is depth-namespaced.
-	os.Unsetenv("JDEC_LAMBDA_PARAM_SCOPE_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
+	body := reviewedSourceMethod(t, source, `Predicate<String>\s+nested\(`)
+	lambdas := regexp.MustCompile(`Predicate<String>\s+\w+\s*=\s*\((\w+)\)\s*->`).FindAllStringSubmatch(body, -1)
+	if len(lambdas) != 2 || lambdas[0][1] == lambdas[1][1] {
+		t.Fatal("nested lambda has colliding lexical parameter identities")
 	}
-	if !strings.Contains(on, "l2_0") {
-		t.Errorf("fix ON: expected depth-namespaced nested lambda param `l2_0`, got:\n%s", on)
+	outer, inner := lambdas[0][1], lambdas[1][1]
+	alias := requireReviewedPattern(t, body, `String\s+(\w+)\s*=\s*`+regexp.QuoteMeta(outer)+`;`)[1]
+	captured := requireReviewedPattern(t, body, `final\s+String\s+(\w+)\s*=\s*`+regexp.QuoteMeta(alias)+`;`)[1]
+	requireReviewedPattern(t, body, regexp.QuoteMeta(captured)+`\.equals\(`+regexp.QuoteMeta(inner)+`\)`)
+	if !strings.Contains(body, inner+".startsWith(") {
+		t.Fatal("inner SAM argument lost string binding")
 	}
-	// In the `nested` method the outer param `l0` and the inner param must be DISTINCT and both present.
-	if !strings.Contains(on, "l0.equals(l2_0)") {
-		t.Errorf("fix ON: expected inner body to reference both outer `l0` and inner `l2_0`, got:\n%s", on)
-	}
-
-	// Fix OFF: the inner lambda falls back to the flat `l0`, colliding with the outer `l0`.
 	t.Setenv("JDEC_LAMBDA_PARAM_SCOPE_OFF", "1")
-	off, err := Decompile(data)
+	off, err := Decompile(raw)
 	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
+		t.Fatal(err)
 	}
-	if strings.Contains(off, "l2_0") {
-		t.Errorf("fix OFF: expected NO depth-namespaced `l2_0` (kill-switch not load-bearing), got:\n%s", off)
-	}
-	// The `nested` method now declares two `l0` lambda parameters in the same scope (the defect).
-	nestedDoubleL0 := regexp.MustCompile(`\(l0\) -> \{[\s\S]*\(l0\) -> \{`)
-	if !nestedDoubleL0.MatchString(off) {
-		t.Errorf("fix OFF: expected the flat `l0` to reappear on both nested lambdas, got:\n%s", off)
+	bad := reviewedSourceMethod(t, off, `Predicate<String>\s+nested\(`)
+	collisions := regexp.MustCompile(`Predicate<String>\s+\w+\s*=\s*\((\w+)\)\s*->`).FindAllStringSubmatch(bad, -1)
+	if len(collisions) != 2 || collisions[0][1] != collisions[1][1] {
+		t.Fatal("active OFF control lost original nested lexical shadowing counterexample")
 	}
 }

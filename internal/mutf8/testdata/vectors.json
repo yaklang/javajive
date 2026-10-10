@@ -1,0 +1,22 @@
+{
+  "format": "MUTF-8 bytes -> UTF-16 code units; fixture expectations, not production decoder",
+  "valid": [
+    {"name": "ASCII", "hex": "415a", "units": [65, 90]},
+    {"name": "NUL", "hex": "c080", "units": [0]},
+    {"name": "surrogate_pair", "hex": "eda0bdedb880", "units": [55357, 56832]},
+    {"name": "lone_high", "hex": "eda080", "units": [55296]},
+    {"name": "lone_low", "hex": "edb080", "units": [56320]},
+    {"name": "UFFFF", "hex": "efbfbf", "units": [65535]}
+  ],
+  "invalid": [
+    {"hex": "00", "expected": "decoding_error"},
+    {"hex": "80", "expected": "decoding_error"},
+    {"hex": "c0", "expected": "decoding_error"},
+    {"hex": "e1", "expected": "decoding_error"},
+    {"hex": "e180", "expected": "decoding_error"},
+    {"hex": "f09f9880", "expected": "decoding_error"},
+    {"hex": "c181", "expected": "decoding_error"},
+    {"hex": "e08080", "expected": "decoding_error"},
+    {"hex": "eda0", "expected": "decoding_error"}
+  ]
+}

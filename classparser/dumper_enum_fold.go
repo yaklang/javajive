@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"os"
 	"strings"
 
 	"github.com/yaklang/javajive/internal/log"
@@ -58,10 +57,13 @@ func isSyntheticEnumConstantSubclass(cf *ClassObject) bool {
 // the enclosing unit's import block (assembled after this) carries them. Returns nil (no folding) on
 // the single-class path, for non-enums, or when JDEC_NO_ENUM_FOLD is set (load-bearing kill-switch).
 func (c *ClassObjectDumper) foldEnumConstantBodies(isEnum bool) map[string]string {
-	if !isEnum || c.foldSiblingResolver == nil || os.Getenv("JDEC_NO_ENUM_FOLD") != "" {
+	if !isEnum || c.foldSiblingResolver == nil || c.getenv("JDEC_NO_ENUM_FOLD") != "" {
 		return nil
 	}
-	debug := os.Getenv("JDEC_FOLD_DEBUG") != ""
+	if native, known := c.foldNativeEnumConstantBodies(); known {
+		return native
+	}
+	debug := c.getenv("JDEC_FOLD_DEBUG") != ""
 	enumSimple := c.GetConstructorMethodName()
 	if enumSimple == "" {
 		return nil
@@ -140,12 +142,32 @@ func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple stri
 			result = ""
 		}
 	}()
-	subObj, err := Parse(data)
+	subObj, err := c.parseResolved(data)
 	if err != nil {
 		return ""
 	}
-	src, err := subObj.Dump()
-	if err != nil || src == "" {
+	return c.renderFoldedConstantObject(subObj, subSimple)
+}
+
+func (c *ClassObjectDumper) renderFoldedConstantObject(subObj *ClassObject, subSimple string) (result string) {
+	child := NewClassObjectDumper(subObj)
+	child.options = c.options
+	child.Work = c.Work
+	child.report = c.report
+	child.sourceInnerClassBody = true
+	// Keep original declaration lookup without enabling recursive source folding.
+	// The constant-specific subclass still inherits from the original enum and
+	// calls original sibling declarations after its members change source scope.
+	child.archiveDeclarationResolver = c.foldSiblingResolver
+	child.nativeMemberLookup = c.nativeMemberLookup
+	child.declarationResolver = c.declarationResolver
+	if p := c.nativeMemberRoot; p != nil && p.enumConstants[subObj.GetClassName()] != nil {
+		child.nativeMemberRoot = p
+		child.nativeEnumConstantCurrent = p.enumConstants[subObj.GetClassName()]
+		child.nativeOuterContext = c.FuncCtx
+	}
+	src, err := child.DumpClass()
+	if err != nil || src == "" || child.nativeEnumConstantCurrent != nil && (strings.Contains(src, DecompileStubMarker) || len(child.constructorBoundaryHelpers) > 0 || len(child.interfaceInitializerHelpers) > 0 || child.privateNestOwnPlan != nil && len(child.privateNestOwnPlan.bridges) > 0) {
 		return ""
 	}
 	if c.FuncCtx != nil {
@@ -153,13 +175,21 @@ func (c *ClassObjectDumper) renderFoldedConstantBody(data []byte, subSimple stri
 			c.FuncCtx.Import(imp)
 		}
 	}
-	body := javaClassBodyContent(src)
-	if body == "" {
+	body, known := javaClassBodyContentKnown(src)
+	if !known {
 		return ""
 	}
-	body = javaRemoveConstructors(body, subSimple)
+	native := child.nativeEnumConstantCurrent != nil
+	if !native {
+		body = javaRemoveConstructors(body, subSimple)
+	}
 	body = strings.Trim(body, "\n")
 	if strings.TrimSpace(body) == "" {
+		// A proved empty constant body still creates a distinct runtime class.
+		// Its constructor was erased by the original packet proof, not by text.
+		if native {
+			return " {}"
+		}
 		return ""
 	}
 	// Re-indent every non-empty member line one tab deeper: the standalone subclass renders members
@@ -195,15 +225,21 @@ func javaExtractImports(src string) []string {
 // class body), scanning comment/quote aware so braces inside strings, char literals, and comments
 // are ignored.
 func javaClassBodyContent(src string) string {
+	body, _ := javaClassBodyContentKnown(src)
+	return body
+}
+
+// Empty braces form a valid body; a missing/unbalanced boundary does not.
+func javaClassBodyContentKnown(src string) (string, bool) {
 	open := javaIndexTopBrace(src)
 	if open < 0 {
-		return ""
+		return "", false
 	}
 	close := javaMatchBrace(src, open)
-	if close < 0 {
-		return ""
+	if close < 0 || strings.TrimSpace(src[close+1:]) != "" {
+		return "", false
 	}
-	return src[open+1 : close]
+	return src[open+1 : close], true
 }
 
 // javaRemoveConstructors removes every member declaration whose name is the (degraded) subclass
@@ -280,10 +316,25 @@ func isJavaIdentChar(b byte) bool {
 func javaIndexTopBrace(src string) int {
 	st := scanNormal
 	depth := 0
+	parentheses := 0
 	for i := 0; i < len(src); i++ {
 		st = scanAdvance(src, &i, st, &depth)
-		if st == scanNormal && i < len(src) && src[i] == '{' {
-			return i
+		if st == scanNormal && i < len(src) {
+			switch src[i] {
+			case '(':
+				parentheses++
+			case ')':
+				parentheses--
+				if parentheses < 0 {
+					return -1
+				}
+			case '{':
+				// Annotation array values are inside their argument list,
+				// and therefore cannot be the enclosing class body.
+				if parentheses == 0 {
+					return i
+				}
+			}
 		}
 	}
 	return -1

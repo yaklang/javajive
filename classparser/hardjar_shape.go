@@ -1,7 +1,7 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"regexp"
 	"strings"
 )
@@ -11,7 +11,7 @@ import (
 // class-name unique. Kill-switch: JDEC_HARDJAR_SHAPE_OFF=1.
 
 func hardjarShapeOff() bool {
-	return os.Getenv("JDEC_HARDJAR_SHAPE_OFF") == "1"
+	return jdecenv.Get("JDEC_HARDJAR_SHAPE_OFF") == "1"
 }
 
 func fixHardjarShapes(body string) string {
@@ -35,29 +35,30 @@ func fixHardjarCodeShapes(body string) string {
 	body = fixObjectInitCastType(body)
 	body = fixTernaryParamReturnArms(body)
 	body = fixEnumAssignedStaticField(body)
-	body = fixIntUsedAsMonitor(body)
+	// Monitor and numeric locals can have related generated names. Their
+	// types come from the IR; a source-name prefix cannot prove identity.
 	body = fixCallSiteDupLocals(body)
 	body = fixForNameAddAnnoClass(body)
 	body = fixCachedFieldReturn(body)
 	body = fixStringCastToClass(body)
-	body = fixConvertNumberClassArg(body)
 	body = fixRawRemoveIfMethodRef(body)
 	body = wrapStreamReturnRawCast(body)
 	body = wrapIntrospectionExceptionCalls(body)
 	body = wrapThrowTargetException(body)
 	body = wrapStmtObjectMethodAssign(body)
-	body = wrapCallSiteMethodBodies(body)
 	body = wrapObjectTypeVarArgs(body)
 	body = wrapGetNoOutputObjectArgs(body)
 	body = wrapErasedFieldAsTypeVar(body, ".output")
 	body = wrapNullSentinelTernary(body)
 	body = wrapEmptyIteratorTernaryArm(body)
-	body = retypeTernarySiblingLocal(body)
+	// Allocation joins use the hierarchy proved by the IR. A shared binary-name
+	// prefix only describes lexical nesting; it cannot prove a common base type.
 	body = retypeTernaryThisFieldsToImportedLUB(body)
 	body = wrapTernaryAssignElseCast(body)
 	body = fixErasedZeroArgInnerCast(body)
 	body = wrapObjectTypeVarArgs(body)
-	body = unwrapCollectionArraysAsList(body)
+	// Raw argument casts may pin erased overloads and generic inference.
+	// Arrays.asList syntax alone cannot prove that removing one is safe.
 	body = unwrapCollectionNewCtor(body)
 	body = unwrapCollectionBeforeLambda(body)
 	body = wrapCompoundListOfAsList(body)
@@ -74,7 +75,7 @@ func fixHardjarCodeShapes(body string) string {
 	body = unwrapObjectNullCast(body)
 	body = wrapBangOnStringLocal(body)
 	body = retypeInstanceThenNewSibling(body)
-	body = retypeMixedDollarNewAssign(body)
+	// Lexical nesting does not establish assignability or a method result type.
 	body = wrapComputeIfAbsentLambdaArg(body)
 	body = wrapArraySortLambdaElem(body)
 	body = fixBlankFinalTryCatchAssign(body)
@@ -86,8 +87,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = unwrapEnumArrayIndexCast(body)
 	body = rewriteClassLocalCmpZero(body)
 	body = wrapTypeVarReturnRawCast(body)
-	body = wrapRawListArgFromListExtendsOverload(body)
-	body = retypeFunctionObjectLambdaToTypeVar(body)
+	// Preserve raw List casts: a name-only source scan cannot establish the
+	// selected overload, receiver owner, or scope of a callee type parameter.
 	body = wrapCollectionStreamMethodRef(body)
 	body = wrapCollectionLocalStreamMethodRef(body)
 	body = wrapEntryGetKeyPutArg(body)
@@ -117,10 +118,12 @@ func fixHardjarCodeShapes(body string) string {
 	body = wrapWildcardArrayCompareValues(body)
 	body = wrapComparingIntDocAsScoreDoc(body)
 	body = wrapComputeIntValueLambda(body)
-	body = hoistIdentAssignedBeforeDecl(body)
+	// Declaration placement is proved on VariableId identities in the IR.
+	// A catch parameter assignment and a later, unrelated local may share a
+	// printed name; source text cannot prove that either declaration escapes.
 	body = retypeObjectUsedAsIntArray(body)
 	body = rewriteInvokeExactSelfToHandle(body)
-	body = retypeExecCatchWaitToInterrupted(body)
+	// Exception-table catch types are semantic facts, not guesses from calls.
 	body = retypeMixedNewToCamelLUB(body)
 	body = unwrapAsListEnumArray(body)
 	body = wrapUnmodifiableAsListRaw(body)
@@ -130,7 +133,8 @@ func fixHardjarCodeShapes(body string) string {
 	body = retypeObjectArrayFromResolveClass(body)
 	body = wrapCatchBodyGetDeclaredMethod(body)
 	body = swapRethrowThrowableBeforeSpecificCatch(body)
-	body = fillMissingReturnAfterLabeledBreak(body)
+	// Returns come from the bytecode CFG. A builder seen earlier in a method
+	// does not authorize inventing a return after another, nested loop.
 	body = fillEmptySynchronizedBlock(body)
 	body = wrapReflectiveCatchBody(body)
 	body = rewriteSelfInitDeclToPrevSameType(body)
@@ -841,33 +845,6 @@ func intUsedAsReference(chunk, ident string) bool {
 	return strings.Contains(chunk, ident+" = new ")
 }
 
-// fixIntUsedAsMonitor retypes `int varN = 0` to `Object varN = null` when the
-// same member uses it as a synchronized monitor. An int cannot be a monitor;
-// ConstructorResolver dumps a lock object in an int slot.
-func fixIntUsedAsMonitor(body string) string {
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "int var")
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		ident, ok, rest := readJavaIdent(body[i+len("int "):])
-		if !ok || !isDecompilerLocal(ident) || !strings.HasPrefix(rest, " = 0;") {
-			from = i + 1
-			continue
-		}
-		end := nextMemberStart(body, i)
-		chunk := body[i:end]
-		if strings.Contains(chunk, "synchronized("+ident) {
-			body = body[:i] + "Object " + ident + " = null;" + rest[len(" = 0;"):]
-			from = i + len("Object "+ident+" = null;")
-			continue
-		}
-		from = i + 1
-	}
-}
-
 // fixDupLocalDecls drops `Type varN = varN;` self-init duplicates and renames
 // a later declaration of the same ident with a different type, rewriting
 // following uses until the next declaration. GroovyDynamicElementReader.
@@ -1203,7 +1180,7 @@ func charSeqNullParam(chunk, ident string) string {
 func fixObjectRetypedFromCast(body string) string {
 	from := 0
 	for {
-		rel := strings.Index(body[from:], "Object var")
+		rel := objectLocalDeclarationIndex(body[from:])
 		if rel < 0 {
 			return body
 		}
@@ -2066,7 +2043,7 @@ func fixForNameAddAnnoClass(body string) string {
 func fixCachedFieldReturn(body string) string {
 	from := 0
 	for {
-		rel := strings.Index(body[from:], "Object var")
+		rel := objectLocalDeclarationIndex(body[from:])
 		if rel < 0 {
 			return body
 		}
@@ -2246,40 +2223,6 @@ func identDeclaredString(chunk, ident string) bool {
 		}
 	}
 	return false
-}
-
-// fixConvertNumberClassArg wraps the Class target of convertNumberToTargetClass
-// as raw `(Class)`. Class<T> is not Class<T extends Number>.
-func fixConvertNumberClassArg(body string) string {
-	needle := "convertNumberToTargetClass("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		open := i + len("convertNumberToTargetClass")
-		close := matchingCloseParen(body, open)
-		if close < 0 {
-			from = i + 1
-			continue
-		}
-		args := body[open+1 : close]
-		comma := indexCommaAtDepth0(args)
-		if comma < 0 {
-			from = close
-			continue
-		}
-		second := strings.TrimSpace(args[comma+1:])
-		if second == "" || strings.HasPrefix(second, "(Class)") || strings.HasPrefix(second, "((Class") {
-			from = close
-			continue
-		}
-		neu := needle + args[:comma+1] + "(Class)(" + second + ")"
-		body = body[:i] + neu + body[close:]
-		from = i + len(neu)
-	}
 }
 
 func indexCommaAtDepth0(s string) int {
@@ -2637,65 +2580,6 @@ func wrapIntroCallsInMember(chunk string, names map[string]bool) string {
 // `throw (Exception)(ident.getTargetException())` when the nearby if tested
 // `instanceof Exception`. InvocationTargetException.getTargetException returns
 // Throwable; throwing it from a method that throws Exception is illegal.
-// wrapCallSiteMethodBodies wraps the body of a method that calls
-// `$getCallSiteArray()` in `try { ... } catch (Throwable t) { throw new
-// RuntimeException(t); }`. CallSite.call throws Throwable; adding
-// `throws Throwable` would break GroovyObject.invokeMethod.
-func wrapCallSiteMethodBodies(body string) string {
-	if !strings.Contains(body, "$getCallSiteArray()") {
-		return body
-	}
-	from := 0
-	for {
-		rel := strings.Index(body[from:], "\n\t")
-		if rel < 0 {
-			return body
-		}
-		mstart := from + rel
-		if mstart+2 >= len(body) || body[mstart+2] == '\t' || body[mstart+2] == '\n' || body[mstart+2] == ' ' || body[mstart+2] == '/' {
-			from = mstart + 2
-			continue
-		}
-		braceRel := strings.Index(body[mstart:], "{")
-		if braceRel < 0 {
-			from = mstart + 2
-			continue
-		}
-		open := mstart + braceRel
-		sig := body[mstart:open]
-		if strings.Contains(sig, "$getCallSiteArray") {
-			from = open + 1
-			continue
-		}
-		close := matchingCloseBrace(body, open)
-		if close < 0 {
-			from = open + 1
-			continue
-		}
-		chunk := body[mstart : close+1]
-		if !strings.Contains(chunk, "$getCallSiteArray()") {
-			from = close + 1
-			continue
-		}
-		if strings.Contains(chunk, "catch (Throwable") || strings.Contains(chunk, "catch(Throwable") {
-			from = close + 1
-			continue
-		}
-		inner := body[open+1 : close]
-		head := inner
-		if len(head) > 120 {
-			head = head[:120]
-		}
-		if strings.Contains(head, "super(") {
-			from = close + 1
-			continue
-		}
-		wrapped := "{\n\t\ttry {" + inner + "\t\t} catch (Throwable _t) {\n\t\t\tthrow new RuntimeException(_t);\n\t\t}\n\t}"
-		body = body[:open] + wrapped + body[close+1:]
-		from = open + len(wrapped)
-	}
-}
-
 func wrapThrowTargetException(body string) string {
 	if hardjarShapeOff() {
 		return body
@@ -3386,7 +3270,7 @@ func isTypeVarName(s string) bool {
 func wrapObjectTypeVarArgs(body string) string {
 	from := 0
 	for {
-		rel := strings.Index(body[from:], "Object var")
+		rel := objectLocalDeclarationIndex(body[from:])
 		if rel < 0 {
 			return body
 		}
@@ -3577,38 +3461,98 @@ func methodParamTypeVar(body string, pos int, ident string) string {
 	if brace < 0 {
 		return ""
 	}
-	sig := head[:brace]
-	p := strings.LastIndex(sig, "(")
-	if p < 0 {
+	params := methodParamList(head[:brace])
+	if params == "" {
 		return ""
 	}
-	close := matchingCloseParen(sig, p)
+	needle := " " + ident
+	from := 0
+	for {
+		rel := strings.Index(params[from:], needle)
+		if rel < 0 {
+			return ""
+		}
+		idx := from + rel
+		after := idx + len(needle)
+		if after < len(params) && isJavaIdentChar(params[after]) {
+			from = idx + 1
+			continue
+		}
+		if paramIdentInsideAnnotation(params, idx) {
+			from = idx + 1
+			continue
+		}
+		typ := paramTypeBefore(params, idx)
+		if isTypeVarName(typ) {
+			return typ
+		}
+		from = idx + 1
+	}
+}
+
+// methodParamList returns the argument list of a method header, using the
+// closing ')' before `{` / `throws` so parameter annotations like
+// `@MaybeNull()` do not steal LastIndex('(').
+func methodParamList(sig string) string {
+	sig = strings.TrimSpace(sig)
+	if i := strings.LastIndex(sig, " throws "); i >= 0 {
+		sig = strings.TrimSpace(sig[:i])
+	}
+	close := strings.LastIndexByte(sig, ')')
 	if close < 0 {
 		return ""
 	}
-	params := sig[p+1 : close]
-	needle := " " + ident
-	idx := strings.Index(params, needle)
-	if idx < 0 {
+	open := matchingOpenParen(sig, close)
+	if open < 0 {
 		return ""
 	}
-	after := idx + len(needle)
-	if after < len(params) && isJavaIdentChar(params[after]) {
-		return ""
+	return sig[open+1 : close]
+}
+
+func paramIdentInsideAnnotation(params string, identStart int) bool {
+	depth := 0
+	for i := identStart - 1; i >= 0; i-- {
+		switch params[i] {
+		case ')':
+			depth++
+		case '(':
+			if depth > 0 {
+				depth--
+				continue
+			}
+			j := i
+			for j > 0 && (params[j-1] == ' ' || params[j-1] == '\t') {
+				j--
+			}
+			k := j
+			for k > 0 && isJavaIdentChar(params[k-1]) {
+				k--
+			}
+			if k > 0 && params[k-1] == '@' {
+				return true
+			}
+			return false
+		}
 	}
-	typeEnd := idx
-	for typeEnd > 0 && params[typeEnd-1] == ' ' {
+	return false
+}
+
+func paramTypeBefore(params string, identStart int) string {
+	typeEnd := identStart
+	for typeEnd > 0 && (params[typeEnd-1] == ' ' || params[typeEnd-1] == '\t') {
 		typeEnd--
+	}
+	if typeEnd >= 3 && params[typeEnd-3:typeEnd] == "..." {
+		typeEnd -= 3
+		for typeEnd > 0 && (params[typeEnd-1] == ' ' || params[typeEnd-1] == '\t') {
+			typeEnd--
+		}
 	}
 	typeStart := typeEnd
 	for typeStart > 0 && isJavaIdentChar(params[typeStart-1]) {
 		typeStart--
 	}
-	typ := params[typeStart:typeEnd]
-	if isTypeVarName(typ) {
-		return typ
-	}
-	return ""
+	return params[typeStart:typeEnd]
 }
 
 func wrapEmptyIteratorTernaryArm(body string) string {
@@ -3874,7 +3818,7 @@ func wrapErasedFieldAsTypeVar(body, field string) string {
 func wrapGetNoOutputObjectArgs(body string) string {
 	from := 0
 	for {
-		rel := strings.Index(body[from:], "Object var")
+		rel := objectLocalDeclarationIndex(body[from:])
 		if rel < 0 {
 			return body
 		}
@@ -4047,31 +3991,6 @@ func commonDollarPrefix(a, b string) string {
 		return ""
 	}
 	return strings.Join(as[:i], "$")
-}
-
-// unwrapCollectionArraysAsList drops a raw `(Collection)(Arrays.asList(...))`
-// wrapper. The raw Collection matches every Collection<...> overload equally
-// ("reference is ambiguous"); Arrays.asList(T[]) infers List<T> and picks one.
-func unwrapCollectionArraysAsList(body string) string {
-	needle := "(Collection)(Arrays.asList("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		asList := i + len("(Collection)(")
-		open := i + len(needle) - 1
-		close := matchingCloseParen(body, open)
-		if close < 0 || close+1 >= len(body) || body[close+1] != ')' {
-			from = i + 1
-			continue
-		}
-		inner := body[asList : close+1]
-		body = body[:i] + inner + body[close+2:]
-		from = i + len(inner)
-	}
 }
 
 // unwrapCollectionNewCtor drops `(Collection)(new Type(...))` so a concrete
@@ -4890,9 +4809,9 @@ func retypeAssignedNullToClass(body, search, prefix, init string) string {
 			continue
 		}
 		typ := uniqueAssignTargetClassType(member, ident)
-		if typ == "" || strings.Contains(typ, ".") {
-			typ = receiverTypeOfNullCmpAssign(member, ident)
-		}
+		// The receiver's type is not evidence for a call's result type:
+		// Node.getValue(), for example, returns Object, not Node.
+		// Require an actual typed assignment use of the result.
 		if typ == "" || strings.Contains(typ, ".") {
 			from = i + 1
 			continue
@@ -5923,39 +5842,6 @@ func assignComparedToNull(chunk, ident string) bool {
 	return false
 }
 
-func receiverTypeOfNullCmpAssign(chunk, ident string) string {
-	for _, needle := range []string{"(" + ident + " = ", "(" + ident + "="} {
-		from := 0
-		for {
-			rel := strings.Index(chunk[from:], needle)
-			if rel < 0 {
-				break
-			}
-			i := from + rel
-			rhs := chunk[i+len(needle):]
-			recv, ok, rest := readJavaIdent(rhs)
-			if !ok || recv == ident || !strings.HasPrefix(rest, ".") {
-				from = i + 1
-				continue
-			}
-			window := rhs
-			if len(window) > 240 {
-				window = window[:240]
-			}
-			if !strings.Contains(window, ") != (null)") && !strings.Contains(window, ") == (null)") {
-				from = i + 1
-				continue
-			}
-			typ := identDeclaredClassType(chunk, recv)
-			if typ != "" && !strings.Contains(typ, ".") {
-				return typ
-			}
-			from = i + 1
-		}
-	}
-	return ""
-}
-
 func uniqueAddElemType(chunk, ident string) string {
 	seen := ""
 	from := 0
@@ -6327,119 +6213,6 @@ func matcherIterableElemType(body string) string {
 		return ""
 	}
 	return typ
-}
-
-func wrapRawListArgFromListExtendsOverload(body string) string {
-	needle := "((List)("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		innerOpen := i + len("((List)")
-		if innerOpen >= len(body) || body[innerOpen] != '(' {
-			from = i + 1
-			continue
-		}
-		innerClose := matchingCloseParen(body, innerOpen)
-		if innerClose < 0 || innerClose+1 >= len(body) || body[innerClose+1] != ')' {
-			from = i + 1
-			continue
-		}
-		if strings.Contains(body[i:innerClose+2], "List<? extends ") {
-			from = innerClose
-			continue
-		}
-		dot := strings.LastIndex(body[:i], ".")
-		if dot < 0 || i-dot > 160 {
-			from = i + 1
-			continue
-		}
-		nameStart := dot + 1
-		for nameStart < i && (body[nameStart] == ' ' || body[nameStart] == '\t') {
-			nameStart++
-		}
-		name, ok2, afterName := readJavaIdent(body[nameStart:])
-		if !ok2 || !strings.HasPrefix(strings.TrimLeft(afterName, " \t"), "(") {
-			from = i + 1
-			continue
-		}
-		mid := strings.TrimSpace(body[dot+1 : i])
-		if mid != name && mid != name+"(" {
-			from = i + 1
-			continue
-		}
-		elem := listExtendsOverloadElem(body, name)
-		if elem == "" && name == "withParameters" && strings.Contains(body[innerOpen:innerClose+1], "CompoundList.of(") {
-			elem = "Type"
-		}
-		if elem == "" || strings.Contains(elem, ".") {
-			from = i + 1
-			continue
-		}
-		inner := body[innerOpen : innerClose+1]
-		wrap := "((List<? extends " + elem + ">)" + inner + ")"
-		body = body[:i] + wrap + body[innerClose+2:]
-		from = i + len(wrap)
-	}
-}
-
-func listExtendsOverloadElem(body, name string) string {
-	needle := name + "(List<? extends "
-	idx := strings.Index(body, needle)
-	if idx < 0 {
-		return ""
-	}
-	typ, ok, rest := readDottedType(body[idx+len(needle):])
-	if !ok || typ == "" {
-		return ""
-	}
-	rest = strings.TrimLeft(rest, " \t")
-	if !strings.HasPrefix(rest, ">") {
-		return ""
-	}
-	if isStmtKeyword(lastDottedIdent(typ)) || isDecompilerLocal(lastDottedIdent(typ)) {
-		return ""
-	}
-	return typ
-}
-
-func retypeFunctionObjectLambdaToTypeVar(body string) string {
-	needle := "(Function<Object, "
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		tv := enclosingTypeVar(body, i)
-		if !isTypeVarName(tv) {
-			from = i + 1
-			continue
-		}
-		rest := body[i+len(needle):]
-		ret, ok, after := readDottedType(rest)
-		if !ok || ret == "" {
-			from = i + 1
-			continue
-		}
-		after = strings.TrimLeft(after, " \t")
-		if !strings.HasPrefix(after, ">") {
-			from = i + 1
-			continue
-		}
-		old := "(Function<Object, " + ret + ">"
-		neu := "(Function<" + tv + ", " + ret + ">"
-		if !strings.HasPrefix(body[i:], old) {
-			from = i + 1
-			continue
-		}
-		body = body[:i] + neu + body[i+len(old):]
-		from = i + len(neu)
-	}
 }
 
 func wrapCollectionStreamMethodRef(body string) string {
@@ -8070,8 +7843,11 @@ func wrapClassForNameAsRawClass(body string) string {
 			from = i + 1
 			continue
 		}
-		after := body[close+1:]
-		if strings.HasPrefix(after, ".getMethod") || strings.HasPrefix(after, ".getDeclaredMethod") || strings.HasPrefix(after, ".getField") || strings.HasPrefix(after, ".getDeclaredField") {
+		after := strings.TrimLeft(body[close+1:], " \t\r\n")
+		// A cast inserted inside a postfix receiver changes the expression's
+		// result type: (Class)(lookup()).getConstructor() casts the constructor,
+		// not lookup(). Leave every member/index receiver to structural rendering.
+		if strings.HasPrefix(after, ".") || strings.HasPrefix(after, "[") {
 			from = close + 1
 			continue
 		}
@@ -8750,33 +8526,6 @@ func uniqueMethodHandleIdent(member string) string {
 		return ""
 	}
 	return ident
-}
-
-func retypeExecCatchWaitToInterrupted(body string) string {
-	needle := "}catch(ExecutionException "
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		i := from + rel
-		start := prevMemberStart(body, i)
-		tryPos := strings.LastIndex(body[:i], "try{")
-		if tryPos < 0 || tryPos < start {
-			from = i + 1
-			continue
-		}
-		tryBody := body[tryPos:i]
-		if !strings.Contains(tryBody, ".wait()") {
-			from = i + 1
-			continue
-		}
-		old := "}catch(ExecutionException "
-		neu := "}catch(InterruptedException "
-		body = body[:i] + neu + body[i+len(old):]
-		from = i + len(neu)
-	}
 }
 
 func retypeMixedNewToCamelLUB(body string) string {
@@ -9932,5 +9681,22 @@ func retypeObjectArrayFromResolveClass(body string) string {
 		neu := "((" + typ + "[])("
 		body = body[:i] + neu + body[i+len(old):]
 		from = i + len(neu)
+	}
+}
+
+// Declaration scanning must match a complete type token. PooledObject and
+// arbitrary user class names ending in Object do not denote java.lang.Object.
+func objectLocalDeclarationIndex(text string) int {
+	from := 0
+	for {
+		rel := strings.Index(text[from:], "Object var")
+		if rel < 0 {
+			return -1
+		}
+		at := from + rel
+		if at == 0 || !isJavaIdentChar(text[at-1]) {
+			return at
+		}
+		from = at + len("Object")
 	}
 }

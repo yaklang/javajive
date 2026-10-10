@@ -1,7 +1,7 @@
 package core
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -123,7 +123,7 @@ func slotDeclType(val values.JavaValue) types.JavaType {
 	if val == nil {
 		return nil
 	}
-	if os.Getenv("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
+	if jdecenv.Get("JDEC_NO_CLASSLIT_SLOT_TYPE") == "" {
 		if _, ok := values.UnpackSoltValue(val).(*values.JavaClassValue); ok {
 			return types.NewJavaClass("java.lang.Class")
 		}
@@ -158,7 +158,7 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		// strings, so the raw-generic / equal-type gates above miss. Tight FQN gate: current is
 		// Executable and val is Method or Constructor. Kill-switch:
 		// JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF=1.
-		if os.Getenv("JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF") == "" {
+		if jdecenv.Get("JDEC_REF_SLOT_EXECUTABLE_ARM_MERGE_OFF") == "" {
 			if types.ReflectExecKind(ref.Type()) == "Executable" {
 				switch types.ReflectExecKind(typ) {
 				case "Method", "Constructor":
@@ -178,7 +178,7 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		// Strictly gated to "exactly one side raw, identical erasure": two genuinely different
 		// parameterizations (`List<String>` vs `List<Integer>`) are BOTH parameterized, fail this gate,
 		// and still split. Kill-switch: JDEC_RAW_GENERIC_SLOT_MERGE_OFF=1.
-		if os.Getenv("JDEC_RAW_GENERIC_SLOT_MERGE_OFF") == "" {
+		if jdecenv.Get("JDEC_RAW_GENERIC_SLOT_MERGE_OFF") == "" {
 			if refParam, valParam, erasedEqual := classifyRawGenericPair(ref.Type(), typ, ctx); erasedEqual && refParam != valParam {
 				if !refParam && valParam {
 					ref.ResetVarType(typ)
@@ -209,10 +209,10 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		// Once committed, the incompatible store is a genuine slot reuse and falls through to minting a
 		// fresh, block-scoped variable. Kill-switch: JDEC_NO_NULL_ADOPT_ONCE=1.
 		if ref.IsNullInitialized() && !blockNullAdopt &&
-			(os.Getenv("JDEC_NO_NULL_ADOPT_ONCE") != "" || !ref.NullTypeAdopted()) {
+			(jdecenv.Get("JDEC_NO_NULL_ADOPT_ONCE") != "" || !ref.NullTypeAdopted()) {
 			if _, isPrim := typ.RawType().(*types.JavaPrimer); !isPrim {
 				ref.ResetVarType(typ)
-				if os.Getenv("JDEC_NO_NULL_ADOPT_ONCE") == "" {
+				if jdecenv.Get("JDEC_NO_NULL_ADOPT_ONCE") == "" {
 					ref.MarkNullTypeAdopted()
 				}
 				return ref, false
@@ -231,7 +231,7 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		// declared type T. Restricted to a strict JDK/known subtype relation (CommonSuperType(T, val) ==
 		// T), so an unrelated-type reuse still splits. Kill-switch: JDEC_NULL_ADOPTED_SUBTYPE_REASSIGN_OFF=1.
 		if ref.IsNullInitialized() && ref.NullTypeAdopted() && !blockNullAdopt &&
-			os.Getenv("JDEC_NULL_ADOPTED_SUBTYPE_REASSIGN_OFF") == "" {
+			jdecenv.Get("JDEC_NULL_ADOPTED_SUBTYPE_REASSIGN_OFF") == "" {
 			if _, isPrim := typ.RawType().(*types.JavaPrimer); !isPrim {
 				if ct := ref.Type(); ct != nil {
 					cx := &class_context.ClassContext{}
@@ -251,7 +251,7 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		// the parameter as one variable (its broader declared type still accepts the subtype). Limit
 		// to proven assignment-compatible references: optimized bytecode also reuses dead
 		// parameter slots for unrelated reference types (e.g. Gradle wrapper captures). Kill-switch: JDEC_PARAM_REASSIGN_SPLIT=1.
-		if ref.IsParam && !ref.IsThis && os.Getenv("JDEC_PARAM_REASSIGN_SPLIT") == "" {
+		if ref.IsParam && !ref.IsThis && jdecenv.Get("JDEC_PARAM_REASSIGN_SPLIT") == "" {
 			if (values.IsNullLiteral(values.UnpackSoltValue(val)) && parameterAcceptsReference(types.NewJavaClass("java.lang.Object"), ref.Type(), funcCtx)) || parameterAcceptsReference(ref.Type(), typ, funcCtx) {
 				return ref, false
 			}
@@ -270,7 +270,7 @@ func (s *StackSimulationImpl) AssignVarGuarded(slot int, val values.JavaValue, b
 		// Same-slot int-category locals never have overlapping live ranges (the verifier would force
 		// distinct slots), so merging is always safe to compile. Kill-switch:
 		// JDEC_INTCAT_REASSIGN_SPLIT=1.
-		if isIntCategoryNumeric(ref.Type()) && isIntCategoryNumeric(typ) && os.Getenv("JDEC_INTCAT_REASSIGN_SPLIT") == "" {
+		if isIntCategoryNumeric(ref.Type()) && isIntCategoryNumeric(typ) && jdecenv.Get("JDEC_INTCAT_REASSIGN_SPLIT") == "" {
 			if p, okp := ref.Type().RawType().(*types.JavaPrimer); okp && p.Name != types.JavaInteger {
 				ref.ResetVarType(types.NewJavaPrimer(types.JavaInteger))
 			}

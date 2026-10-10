@@ -1,14 +1,30 @@
 package javaclassparser
 
 import (
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 )
 
 func TestCharacterSetECIEnumFoldIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/CharacterSetECI.class", "JDEC_ZXING_REMAINING_OFF",
-		"Cp437(new int[]{0,2},new String[0])",
-		"Cp437 = new CharacterSetECI(")
+	raw, code, object := reviewedFixtureMethod(t, "testdata/regression/CharacterSetECI.class", "<clinit>", "")
+	assertReviewedOpcode(t, code, 12, core.OP_ICONST_0)
+	assertReviewedOpcode(t, code, 13, core.OP_IASTORE)
+	assertReviewedOpcode(t, code, 16, core.OP_ICONST_2)
+	assertReviewedOpcode(t, code, 17, core.OP_IASTORE)
+	if object.AccessFlags&0x4000 == 0 {
+		t.Fatal("original declaration no longer is an enum")
+	}
+	assertReviewedSources(t, raw, "JDEC_ZXING_REMAINING_OFF", func(source string) {
+		requireReviewedPattern(t, source, `public enum CharacterSetECI\b`)
+		// Spaces around the comma have no bearing on the two alias values.
+		requireReviewedPattern(t, source, `Cp437\(new int\[\]\{\s*0\s*,\s*2\s*\}\s*,\s*new String\[0\]\)`)
+		if strings.Contains(source, "Cp437 = new CharacterSetECI(") {
+			t.Fatal("enum constant escaped into illegal explicit construction")
+		}
+	})
 }
 
 func TestMultiFormatReaderPreservesAssignmentArrayLength(t *testing.T) {
@@ -58,15 +74,34 @@ func TestAztecDetectorBullsEyeFloatIsLoadBearing(t *testing.T) {
 }
 
 func TestPDF417GenerateBarcodeLogicStringSlotIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/PDF417.class", "JDEC_ZXING_REMAINING_OFF",
-		"String var16 = null;",
-		"int var16 = 0;")
+	raw, code, _ := reviewedFixtureMethod(t, "testdata/regression/PDF417.class", "generateBarcodeLogic", "")
+	assertReviewedOpcode(t, code, 166, core.OP_INVOKEVIRTUAL)
+	assertReviewedSources(t, raw, "JDEC_ZXING_REMAINING_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `public void generateBarcodeLogic\(`)
+		// The StringBuilder result is both an error-correction input and the
+		// later barcode payload, independent of shifted temporary numbering.
+		stored := requireReviewedPattern(t, body, `generateErrorCorrection\(\(CharSequence\)\((\w+)\s*=\s*\w+\.toString\(\)\)`)
+		requireReviewedPattern(t, body, `String\s+`+regexp.QuoteMeta(stored[1])+`\s*=\s*null\s*;`)
+		requireReviewedPattern(t, body, `\.append\(`+regexp.QuoteMeta(stored[1])+`\)`)
+	})
 }
 
 func TestQRDecoderSavedExceptionCatchIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/QRDecoder.class", "JDEC_ZXING_REMAINING_OFF",
-		"var4 = var4_1;",
-		"throw new RuntimeException(var4_1);")
+	raw, code, _ := reviewedFixtureMethod(t, "testdata/regression/QRDecoder.class", "decode", "(Lcom/google/zxing/common/BitMatrix;Ljava/util/Map;)Lcom/google/zxing/common/DecoderResult;")
+	assertReviewedOpcode(t, code, 22, core.OP_ASTORE, 4)
+	assertReviewedOpcode(t, code, 27, core.OP_ASTORE, 5)
+	assertReviewedOpcode(t, code, 83, core.OP_ATHROW)
+	assertReviewedOpcode(t, code, 86, core.OP_ATHROW)
+	assertReviewedSources(t, raw, "JDEC_ZXING_REMAINING_OFF", func(source string) {
+		body := reviewedSourceMethod(t, source, `public DecoderResult decode\(BitMatrix \w+, Map<`)
+		for _, exception := range []string{"FormatException", "ChecksumException"} {
+			caught := requireReviewedPattern(t, body, `catch\(`+exception+`\s+(\w+)\)\s*\{\s*(\w+)\s*=\s*(\w+)\s*;`)
+			if caught[1] != caught[3] {
+				t.Fatalf("%s saved a value other than its catch object:\n%s", exception, body)
+			}
+			requireReviewedPattern(t, body, `throw\s+`+regexp.QuoteMeta(caught[2])+`\s*;`)
+		}
+	})
 }
 
 func TestEAN13WriterChecksumTryIsLoadBearing(t *testing.T) {
@@ -81,15 +116,13 @@ func TestPDF417MacroBlockSwitchBreaksAreLoadBearing(t *testing.T) {
 }
 
 func TestDetectionResultToStringThrowRuntimeIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/DetectionResult.class", "JDEC_ZXING_REMAINING_OFF",
-		"throw new RuntimeException(var5);",
-		"throw var5;")
+	// The old golden demanded a newly allocated wrapper. Original ATHROW and
+	// try-with-resources cleanup instead require the same throwable identity.
+	assertReviewedThrowableResource(t, "testdata/regression/DetectionResult.class", "JDEC_ZXING_REMAINING_OFF", `public String toString\(\)`, 211, 242)
 }
 
 func TestPDF417ScanningDecoderToStringThrowRuntimeIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/PDF417ScanningDecoder.class", "JDEC_ZXING_REMAINING_OFF",
-		"throw new RuntimeException(var3);",
-		"throw var3;")
+	assertReviewedThrowableResource(t, "testdata/regression/PDF417ScanningDecoder.class", "JDEC_ZXING_REMAINING_OFF", `public static String toString\(BarcodeValue\[\]\[\]`, 151, 182)
 }
 
 func TestZxingSnippetBullsEyeAndPDF417(t *testing.T) {
@@ -128,5 +161,22 @@ func TestZxingSnippetBullsEyeAndPDF417(t *testing.T) {
 	}
 	if !strings.Contains(out6, "default:") {
 		t.Fatalf("flatten ate switch default:\n%s", out6)
+	}
+}
+
+// Declaration placement belongs to the identity-based IR pass. A library source
+// rewrite must not manufacture another declaration after that pass has run.
+func TestZxingRecoveryPreservesEmbeddedAssignmentDeclaration(t *testing.T) {
+	body := "package com.google.zxing.aztec.decoder;\nclass Probe {\nvoid scan() {\n\t\t\ttry{\n\t\t\t\tint var13 = 0;\n\t\t\t\tint var10 = 0;\n\t\t\t\tint var11 = 0;\n\t\t\t\tdo{\n\t\t\t\t\tif ((var11) < (var4)){\n\t\t\t\t\t\tif (((var13 = var8[var11]) != (0)){}\n} } } } }"
+	if got := fixZxingRemainingReconstructs(body); got != body {
+		t.Fatalf("source recovery changed an existing declaration:\n%s", got)
+	}
+}
+
+func TestZxingRecoveryPreservesNearbyDeclarationPlacement(t *testing.T) {
+	body := "package com.google.zxing.pdf417.decoder;\nclass Probe {\nfinal Codeword getCodewordNearby(int var1) {\n\t\tCodeword var2 = this.getCodeword(var1);\n\t\tint var6;\n\t\tint var5 = (this.imageRowToCodewordIndex(var1)) + (var4);\n\t\t\t\t\tvar6 = var5;\n}\n}"
+	got := fixZxingRemainingReconstructs(body)
+	if got != body {
+		t.Fatalf("text recovery changed IR declaration placement:\n%s", got)
 	}
 }

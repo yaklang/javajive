@@ -1,0 +1,101 @@
+package core
+
+import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+)
+
+// Array ownership ends at its original consuming invocation, which can be a
+// producer of the delegation argument. A static producer directly followed by
+// initialization keeps its complete operand packet on the original JVM stack:
+// replacing only its uniquely consumed array operand changes no evaluation
+// position. The caller separately proves both earlier and later argument
+// intervals. Do not infer this relationship from names or printed expressions.
+func (d *Decompiler) privateDelegationArrayConsumer(delegate *values.FunctionCallExpression, initialization *OpCode, ref *values.JavaRef, array *values.NewExpression) (*values.FunctionCallExpression, *OpCode, int, bool) {
+	if delegate == nil || initialization == nil || initialization.Instr == nil || initialization.Instr.OpCode != OP_INVOKESPECIAL ||
+		!delegate.HasOriginPC || int(initialization.CurrentOffset) != delegate.OriginPC || delegate.FuncType == nil ||
+		len(delegate.Arguments) == 0 || len(delegate.Arguments) != len(delegate.FuncType.ParamTypes) {
+		return nil, nil, -1, false
+	}
+	method, err := types.ParseMethodDescriptor(delegate.Descriptor)
+	if err != nil || method.FunctionType() == nil || len(method.FunctionType().ParamTypes) != len(delegate.Arguments) {
+		return nil, nil, -1, false
+	}
+	ret, ok := method.FunctionType().ReturnType.RawType().(*types.JavaPrimer)
+	if !ok || ret.Name != types.JavaVoid || !d.delegationArrayCallOperands(delegate, initialization) {
+		return nil, nil, -1, false
+	}
+	// The private operand DAG below proves one use at the exact consumer
+	// raw operand and rejects every other original stack consumption. Avoid
+	// a second, potentially expanding traversal of the shared source tree.
+	consumer, invoke := delegate, initialization
+	argument := delegationArrayArgument(delegate.Arguments, ref)
+	if argument < 0 {
+		// A different operand after this producer requires a larger packet
+		// proof. This case admits just one result immediately consumed by the
+		// original initialization, without a source statement or branch gap.
+		if len(delegate.Arguments) != 1 {
+			return nil, nil, -1, false
+		}
+		consumer, ok = values.UnpackSoltValue(delegate.Arguments[0]).(*values.FunctionCallExpression)
+		if !ok || consumer == nil || !consumer.IsStatic || consumer.Kind != values.InvokeStatic ||
+			consumer.FunctionName == "<init>" || !consumer.HasOriginPC || consumer.FuncType == nil || len(consumer.Arguments) == 0 {
+			return nil, nil, -1, false
+		}
+		invoke = d.opcodeAtOffset(consumer.OriginPC)
+		if invoke == nil || invoke.Instr == nil || invoke.Instr.OpCode != OP_INVOKESTATIC ||
+			len(invoke.Target) != 1 || invoke.Target[0] != initialization || len(initialization.Source) != 1 || initialization.Source[0] != invoke ||
+			len(invoke.stackProduced) != 1 || values.UnpackSoltValue(invoke.stackProduced[0]) != consumer ||
+			!d.delegationArrayCallOperands(consumer, invoke) {
+			return nil, nil, -1, false
+		}
+		argument = delegationArrayArgument(consumer.Arguments, ref)
+	}
+	method, err = types.ParseMethodDescriptor(consumer.Descriptor)
+	if err != nil || method.FunctionType() == nil || len(method.FunctionType().ParamTypes) != len(consumer.Arguments) ||
+		len(consumer.FuncType.ParamTypes) != len(consumer.Arguments) || argument < 0 ||
+		!sameExactArrayType(array.Type(), consumer.FuncType.ParamTypes[argument]) || !sameExactArrayType(array.Type(), method.FunctionType().ParamTypes[argument]) {
+		return nil, nil, -1, false
+	}
+	return consumer, invoke, argument, true
+}
+
+func delegationArrayArgument(arguments []values.JavaValue, ref *values.JavaRef) int {
+	index := -1
+	for i, argument := range arguments {
+		if delegationArraySameRef(argument, ref) {
+			if index >= 0 {
+				return -1
+			}
+			index = i
+		}
+	}
+	return index
+}
+
+// Reconstructed calls retain the exact decoded original operand identities.
+// Static calls have no receiver word; delegation has the original THIS word.
+func (d *Decompiler) delegationArrayCallOperands(call *values.FunctionCallExpression, op *OpCode) bool {
+	decoded := d.invokeFuncCall[op]
+	if decoded == nil || call == nil || decoded.Descriptor != call.Descriptor || decoded.ClassName != call.ClassName ||
+		decoded.FunctionName != call.FunctionName || decoded.Kind != call.Kind || decoded.IsStatic != call.IsStatic ||
+		values.UnpackSoltValue(decoded.Object) != values.UnpackSoltValue(call.Object) {
+		return false
+	}
+	words := len(call.Arguments)
+	if !call.IsStatic {
+		words++
+	}
+	if len(op.stackConsumed) != words {
+		return false
+	}
+	for i, argument := range call.Arguments {
+		if values.UnpackSoltValue(argument) != values.UnpackSoltValue(op.stackConsumed[len(call.Arguments)-1-i]) {
+			return false
+		}
+	}
+	if !call.IsStatic && values.UnpackSoltValue(op.stackConsumed[len(call.Arguments)]) != values.UnpackSoltValue(call.Object) {
+		return false
+	}
+	return true
+}

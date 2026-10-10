@@ -14,34 +14,10 @@ func TestFlowableMapOnNextUCastIsLoadBearing(t *testing.T) {
 		"this.downstream.onNext(var2)")
 }
 
-func TestWindowUnicastProcessorTypeIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FlowableWindow$WindowExactSubscriber.class", "JDEC_RXJAVA_REMAINING_OFF",
-		"UnicastProcessor<T> var3 = this.window",
-		"UnicastProcessor var3 = this.window")
-}
-
 func TestOpenHashSetKeysLocalTArrayIsLoadBearing(t *testing.T) {
 	assertKillSwitchDecompile(t, "testdata/regression/OpenHashSet.class", "JDEC_RXJAVA_REMAINING_OFF",
 		"T[] var2 = this.keys",
 		"Object[] var2 = this.keys")
-}
-
-func TestRepeatWhenProcessorObjectNotTIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FlowableRepeatWhen.class", "JDEC_RXJAVA_REMAINING_OFF",
-		"FlowableProcessor<Object> var3",
-		"FlowableProcessor var3")
-}
-
-func TestSchedulerWhenProcessorNotTIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/SchedulerWhen.class", "JDEC_RXJAVA_REMAINING_OFF",
-		"FlowableProcessor<SchedulerWhen$ScheduledAction> var2",
-		"FlowableProcessor var2")
-}
-
-func TestMulticastFlowableConnectableUIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FlowableReplay$MulticastFlowable.class", "JDEC_RXJAVA_REMAINING_OFF",
-		"ConnectableFlowable<U> var2",
-		"ConnectableFlowable var2")
 }
 
 func TestSwitchMapCancelledRawSentinelIsLoadBearing(t *testing.T) {
@@ -57,6 +33,9 @@ func TestRxThreadFactoryThreadLubIsLoadBearing(t *testing.T) {
 }
 
 func TestToListSingleCallableCastIsLoadBearing(t *testing.T) {
+	// This test owns the legacy RxJava source rewrite; the typed constructor
+	// binding pass has its own end-to-end test and kill switch.
+	t.Setenv("JDEC_THIS_CTOR_OVERLOAD_CAST_OFF", "1")
 	assertKillSwitchDecompile(t, "testdata/regression/FlowableToListSingle.class", "JDEC_RXJAVA_REMAINING_OFF",
 		"this(var1,(Callable)(ArrayListSupplier.asCallable()))",
 		"this(var1,ArrayListSupplier.asCallable())")
@@ -80,28 +59,10 @@ func TestDematerializeGetValueRCastIsLoadBearing(t *testing.T) {
 		"this.downstream.onNext(var2.getValue())")
 }
 
-func TestGroupJoinUnicastTRightIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FlowableGroupJoin$GroupJoinSubscription.class", "JDEC_RXJAVA_REMAINING_OFF",
-		"UnicastProcessor<TRight> var10",
-		"UnicastProcessor var10")
-}
-
 func TestScalarXMapZHelperApplyTCastIsLoadBearing(t *testing.T) {
 	assertKillSwitchDecompile(t, "testdata/regression/ScalarXMapZHelper.class", "JDEC_RXJAVA_REMAINING_OFF",
 		"var1.apply((T)(var5))",
 		"var1.apply(var5)")
-}
-
-func TestRetryWhenProcessorThrowableWitnessIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/FlowableRetryWhen.class", "JDEC_RXJAVA_REMAINING_OFF",
-		"UnicastProcessor.<Throwable>create(8).toSerialized()",
-		"UnicastProcessor.create(8).toSerialized()")
-}
-
-func TestObservableRetryWhenSubjectThrowableWitnessIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/ObservableRetryWhen.class", "JDEC_RXJAVA_REMAINING_OFF",
-		"PublishSubject.<Throwable>create().toSerialized()",
-		"PublishSubject.create().toSerialized()")
 }
 
 func TestParallelDispatcherDropsUnreachableClearIsLoadBearing(t *testing.T) {
@@ -114,4 +75,23 @@ func TestBehaviorProcessorDefaultCtorThisIsLoadBearing(t *testing.T) {
 	assertKillSwitchDecompile(t, "testdata/regression/BehaviorProcessor.class", "JDEC_RXJAVA_REMAINING_OFF",
 		"BehaviorProcessor(T var1) {\n\t\tthis();\n\t\tthis.value.lazySet",
 		"BehaviorProcessor(T var1) {\n\t\tthis.value.lazySet")
+}
+
+func TestRxRecoveryPreservesDisjointQueueAndCounterIdentities(t *testing.T) {
+	body := "package io.reactivex;\nclass FlowablePublish$PublishSubscriber {\n void scan() {Object var14;long var14_1=2;var14 = var5.poll();var14 = null;if (this.checkTerminated(var4,(var14) == (null))) return;} }"
+	if got := fixRxjavaRemainingReconstructs(body); got != body {
+		t.Fatalf("rewrote queue stores to an unrelated counter:\n%s", got)
+	}
+}
+
+// A class formal does not establish a local's type argument. In particular,
+// a raw subject accepting an erased Iterator.next must not acquire TRight from
+// another member of the class. The core binding proof owns declaration views.
+func TestRxRemainingKeepsUnprovedLocalArguments(t *testing.T) {
+	for _, name := range []string{"GroupJoin$GroupJoinDisposable<TRight>", "SchedulerWhen<T>", "FlowableRepeatWhen<T>", "MulticastFlowable<U>", "Window<T>"} {
+		body := "class " + name + " { void run() { UnicastSubject var10 = create(); var10.onNext(values.next()); FlowableProcessor var3 = create(); ConnectableFlowable var2 = create(); } }"
+		if got := fixRxjavaRemainingReconstructs(body); got != body {
+			t.Fatalf("unproved class-wide substitution for %s:\n%s", name, got)
+		}
+	}
 }

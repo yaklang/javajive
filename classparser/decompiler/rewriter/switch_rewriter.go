@@ -2,7 +2,7 @@ package rewriter
 
 import (
 	"fmt"
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"slices"
 	"sort"
 	"strings"
@@ -11,7 +11,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
-	utils3 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/utils"
 	"github.com/yaklang/javajive/internal/omap"
@@ -35,7 +34,43 @@ func renderHead(st statements.Statement) string {
 // the only abrupt-completion leaf that makes its enclosing switch "complete normally" (control reaches
 // the statement after the switch); continue/return/throw transfer control elsewhere.
 func isBreakStatement(st statements.Statement) bool {
-	return renderHead(st) == "break"
+	return st != nil && strings.TrimSpace(st.String(&class_context.ClassContext{})) == "break"
+}
+
+// Unlike conservative loop-pruning queries, switch completion needs a break
+// owned by this exact lexical switch. Inner loops/switches capture bare breaks;
+// labelled transfers leave some other construct. Conditionals, monitors and
+// catch regions introduce no break owner of their own.
+func switchBodyHasOwnedBreak(body []statements.Statement) bool {
+	for _, st := range body {
+		switch s := st.(type) {
+		case *statements.CustomStatement:
+			if isBreakStatement(s) {
+				return true
+			}
+		case *statements.IfStatement:
+			if switchBodyHasOwnedBreak(s.IfBody) || switchBodyHasOwnedBreak(s.ElseBody) {
+				return true
+			}
+		case *statements.TryCatchStatement:
+			if switchBodyHasOwnedBreak(s.TryBody) {
+				return true
+			}
+			for _, branch := range s.CatchBodies {
+				if switchBodyHasOwnedBreak(branch) {
+					return true
+				}
+			}
+		case *statements.SynchronizedStatement:
+			if switchBodyHasOwnedBreak(s.Body) {
+				return true
+			}
+		}
+		if !statementCompletesNormally(st) {
+			break
+		}
+	}
+	return false
 }
 
 // isTerminatorStatement reports whether st abruptly completes (does not fall off its end into the
@@ -71,9 +106,8 @@ func switchCompletesNormally(sw *statements.SwitchStatement) bool {
 		return true // an unmatched value falls through past the switch.
 	}
 	for i, c := range sw.Cases {
-		if subtreeHasBreak(c.Body) {
+		if switchBodyHasOwnedBreak(c.Body) {
 			// A nested conditional can break before the arm's final return.
-			// Counting inner-loop breaks too is conservative: retain the tail.
 			return true
 		}
 		if len(c.Body) == 0 {
@@ -82,11 +116,7 @@ func switchCompletesNormally(sw *statements.SwitchStatement) bool {
 			}
 			continue // a grouped label uses the following nonempty body.
 		}
-		last := c.Body[len(c.Body)-1]
-		if isBreakStatement(last) {
-			return true
-		}
-		if i == len(sw.Cases)-1 && statementCompletesNormally(last) {
+		if i == len(sw.Cases)-1 && bodyCompletesNormally(c.Body) {
 			return true // Earlier bodies fall through to the next label, not out of the switch.
 		}
 	}
@@ -122,6 +152,31 @@ func bodyCompletesNormally(body []statements.Statement) bool {
 		}
 	}
 	return true
+}
+
+// sharedSwitchTailCompletes requires every normally completing tail path to
+// leave a nested switch. Conditional wrapping does not change the destination
+// of javac's coalesced inner/outer break; unrelated fall-through paths do.
+// Abrupt arms need no extra transfer, and empty arms are not exit evidence.
+func sharedSwitchTailCompletes(st statements.Statement) bool {
+	switch s := st.(type) {
+	case *statements.SwitchStatement:
+		return switchCompletesNormally(s)
+	case *statements.IfStatement:
+		normal := false
+		for _, body := range [][]statements.Statement{s.IfBody, s.ElseBody} {
+			if !bodyCompletesNormally(body) {
+				continue
+			}
+			normal = true
+			if len(body) == 0 || !sharedSwitchTailCompletes(body[len(body)-1]) {
+				return false
+			}
+		}
+		return normal
+	default:
+		return false
+	}
 }
 
 // caseBodyExitNodes collects the EXIT targets of the case body rooted at startNode, using the same
@@ -163,10 +218,14 @@ func countOtherCasesExitingTo(manager *RewriteManager, switchNode, cand *core.No
 		return 0
 	}
 	cnt := 0
+	seen := map[*core.Node]bool{}
 	for _, s := range caseStarts {
-		if s == nil || s == cand {
+		if s == nil || s == cand || seen[s] {
 			continue
 		}
+		// Grouped labels share one body. Counting that body twice would make
+		// a genuine fall-through target look like a multi-arm exit.
+		seen[s] = true
 		if _, ok := caseBodyExitNodes(manager, switchNode, s)[cand]; ok {
 			cnt++
 		}
@@ -174,10 +233,65 @@ func countOtherCasesExitingTo(manager *RewriteManager, switchNode, cand *core.No
 	return cnt
 }
 
+// A join also used by an empty case can have just ONE other case body: e.g.
+// grouped allowed characters versus a default validation branch. Counting two
+// other bodies misses that loop latch. Raw GOTO entries distinguish an empty
+// case from a real fall-through label, whose body must remain inside switch.
+func switchCaseHasOnlyJumpEntries(node, candidate *core.Node, cases *omap.OrderedMap[switchLabel, *core.Node]) bool {
+	found, onlyJumps := false, true
+	cases.ForEach(func(label switchLabel, target *core.Node) bool {
+		if target == candidate {
+			found = true
+			onlyJumps = onlyJumps && !label.Default && node.SwitchJumpOnlyCases[int(label.Value)]
+		}
+		return true
+	})
+	return found && onlyJumps
+}
+
+// Dominance alone cannot identify a switch continuation also reached by an
+// enclosing if arm. Prove a unique forward boundary shared by distinct case
+// bodies. A label remains a label (real fall-through); terminal returns were
+// already isolated above. Only switch-owned predecessors become break leaves.
+func externalSharedSwitchContinuation(manager *RewriteManager, owner *core.Node, starts []*core.Node) *core.Node {
+	if owner == nil || !owner.HasOriginPC || len(starts) > 256 {
+		return nil
+	}
+	labels := map[*core.Node]bool{}
+	for _, start := range starts {
+		labels[start] = true
+	}
+	counts := map[*core.Node]int{}
+	seen := map[*core.Node]bool{}
+	for _, start := range starts {
+		if start == nil || seen[start] {
+			continue
+		}
+		seen[start] = true
+		for exit := range caseBodyExitNodes(manager, owner, start) {
+			if exit == nil || labels[exit] || IsEndNode(exit) || exit.IsCatchStart || !exit.HasOriginPC || exit.OriginPC <= owner.OriginPC || utils.IsDominate(manager.DominatorMap, owner, exit) {
+				continue
+			}
+			counts[exit]++
+		}
+	}
+	var candidate *core.Node
+	for target, count := range counts {
+		if count >= 2 {
+			if candidate != nil {
+				return nil
+			}
+			candidate = target
+		}
+	}
+	return candidate
+}
+
 func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	if node.SwitchPrepared {
 		return nil
 	}
+	splitExternalSharedSwitchReturns(manager, node)
 	// manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
 	// manager.DumpDominatorTree()
 	middleStatement := node.Statement.(*statements.MiddleStatement)
@@ -206,6 +320,15 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	var mergeNode *core.Node
 	if len(endNodes) == 1 {
 		mergeNode = endNodes[0]
+	}
+	// An enclosing condition can bypass this switch to its unmatched-value
+	// continuation. That exact shared CFG edge is still a normal switch exit,
+	// even when all explicit cases return and none contributes a break edge.
+	// Keep the common expression after the condition; do not copy its effects
+	// into a default arm or let dominance-based collection discard it.
+	if def := caseMap.GetMust(switchLabel{Default: true}); externalSharedSwitchDefaultContinuation(manager, node, def) {
+		mergeNode = def
+		node.SwitchEmptyDefaultMerge = true
 	}
 	// Bug K: an EMPTY `default` whose target is the switch's natural exit/merge point. When no
 	// dominated non-start node was found as the merge (endNodes empty), the default's target node may
@@ -253,7 +376,7 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 		// before that fallback wrongly promotes the default/throw node to the merge.
 		mergeNode = node.SwitchEmptyCaseMergeNode
 	}
-	if mergeNode == nil && os.Getenv("JDEC_SWITCH_EMPTY_CASE_MERGE_OFF") == "" {
+	if mergeNode == nil && jdecenv.Get("JDEC_SWITCH_EMPTY_CASE_MERGE_OFF") == "" {
 		// Empty case whose target is the switch's merge (commons-codec Base64/Base32 EOF switch). The
 		// start node of an empty `case K:` is just `goto merge` in bytecode, so after goto-folding its
 		// start node IS the post-switch merge. The dominator-based search excludes it (it is a case
@@ -271,7 +394,8 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 			if cand == nil {
 				return true
 			}
-			if c := countOtherCasesExitingTo(manager, node, cand, caseStarts); c >= 2 && c > bestCnt {
+			c := countOtherCasesExitingTo(manager, node, cand, caseStarts)
+			if (c >= 2 || (c == 1 && switchCaseHasOnlyJumpEntries(node, cand, caseMap))) && c > bestCnt {
 				best = cand
 				bestCnt = c
 			}
@@ -286,6 +410,9 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 				node.SwitchEmptyCaseMergeNode = best
 			}
 		}
+	}
+	if shared := externalSharedSwitchContinuation(manager, node, startNodes); shared != nil {
+		mergeNode = shared
 	}
 	if mergeNode != nil {
 		allSources := slices.Clone(mergeNode.Source)
@@ -310,13 +437,10 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 			// switch's OWN case bodies (transitively dominated by the switch node) may break to the
 			// merge; leave external edges intact so control flows naturally into the merge.
 			// Kill-switch: JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF=1 restores the legacy (buggy) behavior.
-			if os.Getenv("JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF") == "" && !utils.IsDominate(manager.DominatorMap, node, source) {
+			if jdecenv.Get("JDEC_SWITCH_NONDOM_MERGE_BREAK_OFF") == "" && !utils.IsDominate(manager.DominatorMap, node, source) {
 				continue
 			}
-			breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-				return "break"
-			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-			}))
+			breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
 			// Keep the semantic destination after replacing the edge with a
 			// printable break leaf. Enclosing-loop analysis still needs it.
 			breakNode.HideNext = mergeNode
@@ -340,6 +464,157 @@ func SwitchRewriter1(manager *RewriteManager, node *core.Node) error {
 	node.SwitchPrepared = true
 	return nil
 }
+
+func externalSharedSwitchDefaultContinuation(manager *RewriteManager, owner, target *core.Node) bool {
+	if manager == nil || owner == nil || target == nil || !owner.HasOriginPC || !target.HasOriginPC || target.OriginPC <= owner.OriginPC ||
+		target.HideNext != nil || target.IsCatchStart || target.IsTryCatch || target.IsCircle || target.IsInCircle ||
+		len(target.EncodedJumps) != 0 || utils.IsDominate(manager.DominatorMap, owner, target) ||
+		!sameProtectedMembership(manager.RootNode, owner, target) {
+		return false
+	}
+	external := false
+	for _, predecessor := range target.Source {
+		if predecessor == owner || utils.IsDominate(manager.DominatorMap, owner, predecessor) {
+			continue
+		}
+		if encodedJumpTo(predecessor, target) {
+			return false
+		}
+		// Both paths still belong to a common enclosing condition. Walk
+		// original predecessors without moving the alternate arm's effects.
+		ancestors := []*core.Node{predecessor}
+		seen := map[*core.Node]bool{}
+		owned := false
+		for len(ancestors) != 0 && len(seen) < 256 {
+			if len(ancestors) > 1024 {
+				return false
+			}
+			n := ancestors[len(ancestors)-1]
+			ancestors = ancestors[:len(ancestors)-1]
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			if _, conditional := n.Statement.(*statements.ConditionStatement); conditional &&
+				utils.IsDominate(manager.DominatorMap, n, owner) && utils.IsDominate(manager.DominatorMap, n, predecessor) && utils.IsDominate(manager.DominatorMap, n, target) {
+				owned = true
+				break
+			}
+			ancestors = append(ancestors, n.Source...)
+		}
+		if !owned {
+			return false
+		}
+		external = true
+	}
+	if !external {
+		return false
+	}
+	// Certify the whole normal-exit boundary rather than requiring the outer
+	// conditional to jump here directly. Its other arm may perform effects
+	// before reaching this same original expression. Every switch-owned path
+	// must either reach this boundary or terminate the method; no competing
+	// normal destination, loop transfer or hidden cleanup can be factored out.
+	queue := []*core.Node{owner}
+	seen := map[*core.Node]bool{}
+	for len(queue) != 0 {
+		if len(queue) > 1024 {
+			return false
+		}
+		source := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if seen[source] {
+			continue
+		}
+		if len(seen) >= 256 || source.HideNext != nil || len(source.EncodedJumps) != 0 || source.IsCatchStart || source.IsTryCatch || source.IsCircle || source.IsInCircle {
+			return false
+		}
+		seen[source] = true
+		terminal := false
+		switch st := source.Statement.(type) {
+		case *statements.ReturnStatement:
+			terminal = st.HasOriginPC && source.HasOriginPC && st.OriginPC == source.OriginPC
+		case *statements.CustomStatement:
+			terminal = st.ThrownValue != nil && st.HasOriginPC && source.HasOriginPC && st.OriginPC == source.OriginPC
+		}
+		for _, next := range source.Next {
+			if next == target {
+				if terminal {
+					return false
+				}
+				continue
+			}
+			if terminal && IsEndNode(next) {
+				continue
+			}
+			if terminal || !utils.IsDominate(manager.DominatorMap, owner, next) || IsEndNode(next) {
+				return false
+			}
+			queue = append(queue, next)
+		}
+	}
+	return true
+}
+
+// A terminal RETURN shared with a path before the switch is not dominated by
+// the switch, so it cannot serve as that switch's ordinary break destination.
+// If its edge is merely discarded, every non-last case falls into the next
+// case. Give each in-region edge a private terminal before collecting case
+// bodies. A pure literal (or null) can also be copied when its exact bytecode
+// return PC and protected-range membership agree. References, invocations and
+// cleanup stay on their original paths. Real case-to-case edges stay intact.
+func splitExternalSharedSwitchReturns(manager *RewriteManager, owner *core.Node) {
+	if manager == nil || owner == nil {
+		return
+	}
+	type edge struct{ source, target *core.Node }
+	var edges []edge
+	core.WalkGraph(owner, func(source *core.Node) ([]*core.Node, error) {
+		if source != owner && !utils.IsDominate(manager.DominatorMap, owner, source) {
+			return nil, nil
+		}
+		for _, target := range source.Next {
+			ret, ok := target.Statement.(*statements.ReturnStatement)
+			if !ok || len(target.Source) < 2 || target.HideNext != nil ||
+				target.IsTryCatch || target.IsCatchStart || target.IsCircle || target.IsInCircle ||
+				len(target.EncodedJumps) != 0 || encodedJumpTo(source, target) ||
+				utils.IsDominate(manager.DominatorMap, owner, target) {
+				continue
+			}
+			if ret.JavaValue != nil {
+				value := values.UnpackSoltValue(ret.JavaValue)
+				_, literal := value.(*values.JavaLiteral)
+				if (!literal && value != values.JavaNull) || !ret.HasOriginPC ||
+					!target.HasOriginPC || ret.OriginPC != target.OriginPC ||
+					!sameProtectedMembership(manager.RootNode, source, target) {
+					continue
+				}
+			}
+			terminal := true
+			for _, next := range target.Next {
+				terminal = terminal && IsEndNode(next)
+			}
+			if terminal {
+				edges = append(edges, edge{source, target})
+			}
+		}
+		return source.Next, nil
+	})
+	for _, e := range edges {
+		// Tail duplication retains the original return's PC witness.
+		copy := *e.target.Statement.(*statements.ReturnStatement)
+		leaf := manager.NewNode(&copy)
+		leaf.OriginPC, leaf.HasOriginPC = e.target.OriginPC, e.target.HasOriginPC
+		for _, next := range e.target.Next {
+			leaf.AddNext(next)
+		}
+		replaceNextInPlace(e.source, e.target, leaf)
+	}
+	if len(edges) > 0 {
+		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+	}
+}
+
 func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	startSwitchNode := node
 	if err := SwitchRewriter1(manager, node); err != nil {
@@ -363,6 +638,12 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	if len(switchData) >= 4 {
 		def := switchData[3].(statements.SwitchDefault)
 		valueToBodyOffset[switchLabel{Default: true}] = int(def.Offset)
+	}
+	// Remove a proved empty default BEFORE grouping labels by target. Otherwise
+	// default becomes the sole owner of the shared body, the explicit labels
+	// become nil aliases, and dropping default later also drops their break.
+	if node.SwitchEmptyDefaultMerge && caseMap.GetMust(switchLabel{Default: true}) == node.MergeNode {
+		caseMap.Delete(switchLabel{Default: true})
 	}
 	caseItems := []*statements.CaseItem{}
 	switchStatement := statements.NewSwitchStatement(data, caseItems)
@@ -389,6 +670,13 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	nodeToVals.ForEach(func(k *core.Node, v []switchLabel) bool {
 		sortSwitchLabels(v)
 		newNodeToVals.Set(k, v)
+		// GOTO removal can coalesce empty cases at different bytecode offsets
+		// into one exit. They are not necessarily adjacent physical labels:
+		// moving their single body to the last label would make earlier ones
+		// fall through into intervening cases. Each keeps its own break.
+		if k == node.MergeNode && (node.SwitchEmptyCaseMerge || node.SwitchEmptyDefaultMerge) {
+			return true
+		}
 		for i, val := range v {
 			if i == len(v)-1 {
 				break
@@ -425,11 +713,11 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 		// absorb the merge/tail code into this case and (because no break is emitted) make every case
 		// fall through into `default: throw`. Emit `case K: break;` (empty body + explicit break) so the
 		// matched value is a no-op and control leaves the switch; the merge code is emitted after it.
-		if !caseItem.IsDefault && node.SwitchEmptyCaseMerge && startNode == node.MergeNode {
-			caseItem.Body = []statements.Statement{statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-				return "break"
-			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-			})}
+		// An empty default and explicit empty cases can share this same exit.
+		// Dropping default is safe, but the explicit labels still need a break
+		// or they would fall through to the next physical case body.
+		if !caseItem.IsDefault && (node.SwitchEmptyCaseMerge || node.SwitchEmptyDefaultMerge) && startNode == node.MergeNode {
+			caseItem.Body = []statements.Statement{statements.NewSourceTransferStatement("break", "")}
 			caseItems = append(caseItems, caseItem)
 			continue
 		}
@@ -491,11 +779,11 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 	// that shared point to the inner switch, so the structured inner switch is left without an exit
 	// edge and the outer case has neither a break leaf nor a fall-through edge - it silently falls
 	// through to the next case label. Detect it structurally and repair it: a non-last case whose body
-	// ends in a nested switch that COMPLETES NORMALLY (some arm breaks / falls off, i.e. control can
+	// ends through a nested switch that COMPLETES NORMALLY (some arm breaks / falls off, i.e. control can
 	// reach the point after the inner switch) and that does NOT fall through to a sibling case must end
 	// with a `break`. The nested-switch + completes-normally guards keep this from emitting unreachable
 	// code after a loop, a return/throw, or a switch all of whose arms return.
-	if os.Getenv("JDEC_SWITCH_NO_BREAK_FIX") == "" {
+	if jdecenv.Get("JDEC_SWITCH_NO_BREAK_FIX") == "" {
 		for idx, ci := range caseItems {
 			if idx == len(caseItems)-1 {
 				continue // the last case exits to the merge naturally; no break needed.
@@ -503,8 +791,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 			if len(ci.Body) == 0 {
 				continue // empty grouped label (case A: case B:) carries no body to break out of.
 			}
-			innerSwitch, ok := ci.Body[len(ci.Body)-1].(*statements.SwitchStatement)
-			if !ok || !switchCompletesNormally(innerSwitch) {
+			if !sharedSwitchTailCompletes(ci.Body[len(ci.Body)-1]) {
 				continue
 			}
 			fallsThrough := false
@@ -517,10 +804,7 @@ func SwitchRewriter(manager *RewriteManager, node *core.Node) error {
 			if fallsThrough {
 				continue
 			}
-			ci.Body = append(ci.Body, statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-				return "break"
-			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-			}))
+			ci.Body = append(ci.Body, statements.NewSourceTransferStatement("break", ""))
 		}
 	}
 

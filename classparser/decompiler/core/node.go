@@ -12,13 +12,25 @@ type Node struct {
 	SwitchCases    *omap.OrderedMap[int, *Node]
 	SwitchDefault  *Node
 	SwitchPrepared bool
+	// A raw case entry containing only GOTO is an empty transfer, rather than
+	// an ordinary label sharing the body reached after goto removal. Keep this
+	// witness by label while the target node changes during CFG rewrites.
+	SwitchJumpOnlyCases map[int]bool
 
-	Id                  int
-	LoopBreak           bool
-	Statement           statements.Statement
-	Source              []*Node
-	HideNext            *Node
-	Next                []*Node
+	Id int
+	// Origin survives renumbering/statement rewrites. Synthetic wrappers have
+	// no witness and cannot establish an exception-table boundary by ID order.
+	OriginPC    int
+	HasOriginPC bool
+	LoopBreak   bool
+	Statement   statements.Statement
+	Source      []*Node
+	HideNext    *Node
+	Next        []*Node
+	// EncodedJumps marks Next edges already expressed by break/continue in a
+	// structured body's statements, with no normal fall-through to that target.
+	// Keep these edges for loop analysis, but not for normal branch joins.
+	EncodedJumps        map[*Node]bool
 	IsJmp               bool
 	IsDel               bool
 	TrueNode, FalseNode func() *Node
@@ -50,7 +62,13 @@ type Node struct {
 	// the second run would corrupt MergeNode to the default/throw node. Reused on re-entry.
 	SwitchEmptyCaseMergeNode *Node
 	// ProtectedEnd is the exclusive bytecode boundary of a synthetic try region.
-	ProtectedEnd           *Node
+	ProtectedEnd                     *Node
+	ProtectedStartPC, ProtectedEndPC int
+	HasProtectedRange                bool
+	// Half-open rows for the sole shared handler; gaps remain unprotected.
+	SharedProtectedRanges []HandlerRange
+	// On a try: at least one handler spans other protected starts. On a
+	// catch entry: this specific handler spans other protected starts.
 	SharedProtectedHandler bool
 	IsTryCatch             bool
 	// IsCatchStart marks a node that is the entry of an exception handler (catch / finally-desugar)
@@ -60,6 +78,7 @@ type Node struct {
 	// leading exception-store assignment, so the body-content heuristic alone mis-classified it as the
 	// try body and produced a malformed try with no catch handler.
 	IsCatchStart        bool
+	CatchHandler        *statements.CatchHandler
 	TryNodeId           int
 	CatchNodeInfo       []*CatchNode
 	IsDoWhile           bool
@@ -106,6 +125,7 @@ func (n *Node) ReplaceNext(node1, node2 *Node) {
 	}
 }
 func (n *Node) RemoveNext(node *Node) {
+	delete(n.EncodedJumps, node)
 	for i, next := range n.Next {
 		if next == node {
 			n.Next = append(n.Next[:i], n.Next[i+1:]...)
@@ -174,6 +194,10 @@ func (n *Node) ReplaceNextSliceKeepOrder(oldNode *Node, news []*Node) {
 		}
 		if same {
 			n.ReplaceSwitchTarget(oldNode, news[0])
+		} else {
+			for _, target := range news {
+				delete(n.EncodedJumps, target)
+			}
 		}
 	}
 	for i, s := range oldNode.Source {
@@ -201,6 +225,14 @@ func (n *Node) ReplaceNextSliceKeepOrder(oldNode *Node, news []*Node) {
 		}
 	}
 	n.Next = newNext
+	// Splitting an edge has no single target identity to preserve. Do not
+	// leave markers referring to removed nodes (or infer abruptness for the
+	// newly exposed successors without a proof).
+	for target := range n.EncodedJumps {
+		if !slices.Contains(newNext, target) {
+			delete(n.EncodedJumps, target)
+		}
+	}
 	for _, nn := range news {
 		found := false
 		for _, s := range nn.Source {
@@ -283,6 +315,16 @@ func NewNode(statement statements.Statement) *Node {
 
 // ReplaceSwitchTarget keeps semantic label identity independent of successor order.
 func (n *Node) ReplaceSwitchTarget(old, target *Node) {
+	if old != target && slices.Contains(n.Next, old) {
+		abrupt := n.EncodedJumps[old]
+		delete(n.EncodedJumps, old)
+		// Coalescing an abrupt edge with a normal edge is a mixed target.
+		if target != nil && abrupt && (!slices.Contains(n.Next, target) || n.EncodedJumps[target]) {
+			n.EncodedJumps[target] = true
+		} else {
+			delete(n.EncodedJumps, target)
+		}
+	}
 	// Conditional branches also pin their target by identity before temporary
 	// folding. Replacing a value producer must retain that identity even when
 	// the successor slice is rebuilt in a different order.

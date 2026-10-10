@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "artifacts": {
-    "biz/aQute/bnd/biz.aQute.bnd.annotation/6.4.0/biz.aQute.bnd.annotation-6.4.0.jar": "91414126bb430aa5448a177540e4f1e513f27ba7cac43b8f23ce6f99f4e9da3d",
+    "biz/aQute/bnd/biz.aQute.bnd.annotation/7.0.0/biz.aQute.bnd.annotation-7.0.0.jar": "a0090390963dd2092f8abb6d76092bab1696494d2e31b127f5b1b2bf29c08638",
     "cglib/cglib/2.2.2/cglib-2.2.2.jar": "a93e4485d274277177480c4afe6ddd8355cda1cacfe356c134e25d65193935fd",
     "ch/qos/logback/logback-core/1.4.14/logback-core-1.4.14.jar": "f8c2f05f42530b1852739507c1792f0080167850ed8f396444c6913d6617a293",
     "com/aayushatharva/brotli4j/brotli4j/1.16.0/brotli4j-1.16.0.jar": "285a0b96150649db6fd9d8a0a22ea98fc2b8a558fc924b21836a59550975485e",
@@ -84,6 +84,7 @@
     "javax/validation/validation-api/2.0.1.Final/validation-api-2.0.1.Final.jar": "9873b46df1833c9ee8f5bc1ff6853375115dadd8897bcb5a0dffb5848835ee6c",
     "javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.jar": "88b955a0df57880a26a74708bc34f74dcaf8ebf4e78843a28b50eae945732b06",
     "jaxen/jaxen/1.2.0/jaxen-1.2.0.jar": "70feef9dd75ad064def05a3ce8975aeba515ee7d1be146d12199c8828a64174c",
+    "jdom/jdom/1.0b8/jdom-1.0b8.jar": "51e9c63418bec30ccea45ec8fbebc270966b09f3a9642894e353607c80c1d404",
     "joda-time/joda-time/2.10.13/joda-time-2.10.13.jar": "669f73ff76cb50e11c9eaffb170f8a2d1665fe56c3ecaae8e32085b0470bd7f3",
     "junit/junit/4.12/junit-4.12.jar": "59721f0805e223d84b90677887d9ff567dc534d7c502ca903c0c2b17f05c116a",
     "junit/junit/4.13.2/junit-4.13.2.jar": "8e495b634469d64fb8acfa3495a065cbacc8a0fff55ce1e31007be4c16dc57d3",
@@ -260,7 +261,7 @@
         "commons-logging/commons-logging/1.2/commons-logging-1.2.jar",
         "org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar",
         "org/apache/ant/ant/1.10.13/ant-1.10.13.jar",
-        "org/jdom/jdom/1.1.3/jdom-1.1.3.jar",
+        "jdom/jdom/1.0b8/jdom-1.0b8.jar",
         "org/dom4j/dom4j/2.1.4/dom4j-2.1.4.jar",
         "jaxen/jaxen/1.2.0/jaxen-1.2.0.jar",
         "org/python/jython-standalone/2.7.3/jython-standalone-2.7.3.jar",
@@ -381,7 +382,7 @@
         "com/google/code/findbugs/annotations/3.0.1/annotations-3.0.1.jar",
         "com/github/spotbugs/spotbugs-annotations/4.8.3/spotbugs-annotations-4.8.3.jar",
         "org/codehaus/woodstox/stax2-api/4.2.1/stax2-api-4.2.1.jar",
-        "biz/aQute/bnd/biz.aQute.bnd.annotation/6.4.0/biz.aQute.bnd.annotation-6.4.0.jar"
+        "biz/aQute/bnd/biz.aQute.bnd.annotation/7.0.0/biz.aQute.bnd.annotation-7.0.0.jar"
       ]
     },
     "logback": {

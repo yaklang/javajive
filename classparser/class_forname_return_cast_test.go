@@ -15,26 +15,20 @@ import (
 func TestClassForNameReturnCastIsLoadBearing(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/ClassForNameRetSeed.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-
-	// Fix ON (default): the `(Class<...>)` cast is present on the Class.forName() return.
-	os.Unsetenv("JDEC_CLASS_FORNAME_RET_CAST_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !strings.Contains(on, "<T>>) (Class.forName(") {
-		t.Errorf("fix ON: expected a `(Class<...<T>>)` cast on the Class.forName() return, got:\n%s", on)
-	}
-
-	// Fix OFF: the cast disappears (the uncompilable bare return), proving it is load-bearing.
-	t.Setenv("JDEC_CLASS_FORNAME_RET_CAST_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if strings.Contains(off, ">) (Class.forName(") {
-		t.Errorf("fix OFF: expected NO cast on the Class.forName() return (kill-switch load-bearing), got:\n%s", off)
+	assertReviewedGenericMethod(t, data, "load", "(Ljava/lang/String;)Ljava/lang/Class;", "(Ljava/lang/String;)Ljava/lang/Class<LClassForNameRetSeed$Wrapper<TT;>;>;")
+	// The active switch remains a negative control for return binding.
+	// A same-erasure raw bridge keeps the wildcard producer compilable without a new runtime check.
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_CLASS_FORNAME_RET_CAST_OFF", setting)
+		source, err := Decompile(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hasView := strings.Contains(compactReviewedGenericSource(source), "return(Class<ClassForNameRetSeed$Wrapper<T>>)(Class)(Class.forName(")
+		if hasView != (setting == "") {
+			t.Fatalf("switch=%q: missing declared generic view and same-erasure bridge: %s", setting, source)
+		}
 	}
 }

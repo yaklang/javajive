@@ -1,0 +1,1 @@
+public class ParamAnnotation { public static void f(@Deprecated String s) {} public static void main(String[] a) throws Exception { System.out.println(ParamAnnotation.class.getDeclaredMethod("f", String.class).getParameterAnnotations()[0].length); } }

@@ -1,18 +1,110 @@
 package class_context
 
 import (
-	"os"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
+	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/yaklang/javajive/internal/funk"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/log"
 	"github.com/yaklang/javajive/internal/omap"
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
+// SourceCaptureOperand carries rendering evidence, never executable class bytes.
+type SourceCaptureOperand struct {
+	Value    any
+	Text     string
+	Local    bool
+	Receiver bool
+}
 type ClassContext struct {
+	// RetainImplicitConstructorCalls keeps the original no-arg superclass
+	// invocation and its PC in proof-only decoding. Normal source rendering
+	// may omit this call because javac inserts it, but effect-boundary proofs
+	// must observe the actual initialization instruction.
+	RetainImplicitConstructorCalls bool
+	// QualifiedStaticFields preserves legal qualified reads of own fields in
+	// declaration initializers, including forward/self reads during circular
+	// initialization. It never changes invocation or lexical-owner binding.
+	QualifiedStaticFields bool
+	// Lexical member declarations shadow imported, same-package and java.lang
+	// simple type names. Bind external types explicitly in their actual scope.
+	// LexicalClassName is the current source member declaration, supplied only
+	// after original ownership proof. Its enclosing parameters are implicit
+	// in a self type, including when an own formal shadows an outer formal.
+	LexicalClassName string
+	LexicalTypeNames map[string]bool
+	// SourceClassDenotable reports original lexical ownership evidence. An
+	// anonymous runtime class has no Java declaration name, even when package
+	// access permits its JVM name. Nil/unknown preserves ordinary inference.
+	SourceClassDenotable func(binaryName string) (denotable, known bool)
+	// Optional lexical-layout proof may exchange both conditional arms. The
+	// renderer negates the same condition once, preserving evaluation and effects.
+	SourceBranchSwap func(ifSource, elseSource string) bool
+	// Original bytecode/source binding may replace a proved enum table selector
+	// and all of its labels together. Nil keeps the original integer switch.
+	SourceEnumSwitch            func(selector any, labels []int) (string, map[int]string, bool)
+	SourceMemberAllocation      func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceMemberCandidate       func(owner string) bool
+	SourceMethodLocalCandidate  func(owner string) bool
+	SourceMethodLocalAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	// Optional descriptor gate runs before operands are rendered. Knowing a
+	// lexical class does not prove projection of each of its constructors.
+	SourceMemberDescriptorCandidate func(owner, descriptor string) bool
+	// Source ownership proofs distinguish value expressions from Java statement expressions.
+	// SourceInvocationReceiver separates compiler registration comments from a
+	// rendered receiver. javac lowers call arguments before its method select;
+	// Java runtime receiver/argument evaluation remains in the original order.
+	SourceInvocationReceiver   func(source string) (receiver, registration string)
+	SourcePrivateGetter        func(owner, name, descriptor string, pc int, args []any, statement bool) (string, bool)
+	SourceMemberDelegation     func(owner, descriptor string, pc int, args []any) (string, bool)
+	SourceAnonymousCandidate   func(owner string) bool
+	SourceAnonymousAllocation  func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceCapturedField        func(pc int, name string, receiver bool) (string, bool)
+	SourceLexicalCapturedField func(value any, pc int, name string) (string, bool)
+	// Only an original enclosing-read/invocation certificate may keep a raw
+	// receiver when qualified-this would invent generic substitutions.
+	SourceLexicalInvocationReceiver func(call any) (string, bool)
+	SourceCaptureStable             func(int, *coreutils.VariableId) bool
+	SourceCapturedFieldType         func(pc int, owner, name, descriptor string) any
+
+	// LocalNames supplies scoped source bindings by identity. It does not rename
+	// the underlying IR or conflate locals that merely share a JVM slot spelling.
+	LocalNames map[*coreutils.VariableId]string
+	// Positive declaration evidence for visible source value names.
+	SourceValueNameShadow func(string) bool
+	// Static imports are shared by every declaration in one source unit. A
+	// failed binding cannot publish a source unit that silently selects a decoy.
+	StaticMethodImports   *StaticMethodImports
+	SourceLexicalParent   *ClassContext
+	staticImportScopeMemo map[string]bool
+	// CatchEntryNames binds original handler stack values by their exact entry PC.
+	// It is scoped to rendering this method/handler, separate from type names.
+	CatchEntryNames map[int]string
+	// InvocationMetadata supplies complete member and parent tables, never CP-only guesses.
+	InvocationMetadata callbinding.Provider
+	// PrivateNestBridge returns a source access bridge only for a witnessed
+	// original private nestmate invocation. It never widens the target method.
+	PrivateNestBridge func(owner, name, descriptor string, kind uint8, pc int) (string, bool)
+	// ConstructorInvokeBridge is scoped to a proved pre-initialization source
+	// boundary. The receiver and arguments remain evaluated at the caller.
+	ConstructorInvokeBridge func(owner, name, descriptor string, kind uint8, pc int) (string, bool)
+	// Env looks up JDEC_* flags for this request. Nil falls back to jdecenv.Get.
+	Env func(string) string
+	// Work is the request budget used to cap source construction before allocation.
+	Work *workbudget.Budget
+	// OutputHeld is retained source bytes already committed in this request's
+	// current assembly (statement/method pieces kept for the final compilation
+	// unit). It is not intermediate concat fragments.
+	OutputHeld int64
+
 	ClassName    string
 	FunctionName string
 	// CurrentMethodDesc is the raw JVM descriptor of the method currently being
@@ -97,6 +189,10 @@ type ClassContext struct {
 	// vs readField(Object,String,boolean) are visible. Empty on the single-class path. Kill-switch consumer:
 	// JDEC_NULL_ARG_CAST_OFF.
 	MethodDescriptors map[string]bool
+	// PoolMethodDescriptors records invoke targets from this class's constant pool as
+	// MethodDescKey(owner.name, descriptor) with owner in dot form.
+	PoolMethodDescriptors map[string]bool
+	sameArityOverloadMemo map[string]bool
 	// ConstructorSignatures maps a same-class constructor's argument count to its raw generic Signature
 	// string (e.g. 1 -> `(Ljava/util/Comparator<-TK;>;)V`). A `this(...)` self-call loses the source's
 	// unchecked wildcard cast on an argument whose parameter is a wildcard parameterization mentioning a
@@ -131,6 +227,12 @@ type ClassContext struct {
 	// string (class_context must not import the types package; renderers parse it via
 	// types.FormalTypeParamBounds). Kill-switch consumers: JDEC_TYPEVAR_BOUND_RECV_OFF.
 	CurrentMethodSig string
+	// LexicalTypeParamSignatures retains nearest-first original declarations of
+	// formals inherited from a proved enclosing source scope. It does not alter
+	// ClassSig or method identity; an own declaration still shadows every outer
+	// declaration, even when its bound cannot be proved. Static members start a
+	// new class-formal scope and must not receive these declarations.
+	LexicalTypeParamSignatures []string
 	// RawEraseTypeVars is the set of bare type-variable names that this class REFERENCES but does NOT
 	// declare, and which CANNOT be injected onto its declaration. It is populated only for a flattened
 	// NON-STATIC inner class that has its OWN formal type parameters (e.g. `Iterator<T>`): such a class
@@ -181,6 +283,13 @@ type ClassContext struct {
 	// without class_context importing types. Nil when no cross-class resolver is available (single-class
 	// decompile); set only on the jar / DecompileWithResolver path.
 	SiblingClassSig func(internalName string) (classSig string, methodSigs map[string]string, ok bool)
+	// Flattened source declarations can reintroduce verified enclosing formals.
+	// This projection does not alter the original class Signature. It is absent
+	// for native nested source and dependency-only declarations.
+	SiblingSourceClassFormals func(internalName string) ([]string, bool)
+	// Original nonstatic source ownership, from outermost scope to the member.
+	// This is absent for flattened declarations and stops at static boundaries.
+	SiblingLexicalTypeOwners func(internalName string) ([]string, bool)
 	// SiblingSuperTypes resolves a jar-internal class's RAW direct supertypes by binary internal name
 	// (slash-separated): its super_class internal name followed by its direct interface internal names
 	// (each slash-form, "" entries omitted). Unlike SiblingClassSig (which reads the generic Signature
@@ -197,6 +306,9 @@ type ClassContext struct {
 	// SiblingClassAccessible checks whether a flattened class can be named in
 	// this class's package. Unknown external types return known=false.
 	SiblingClassAccessible func(internalName string) (accessible, known bool)
+	// Named nested dependency types retain their original source ownership.
+	// This callback supplies a full source name proved from InnerClasses bytes.
+	DeclarationSourceName func(binaryName string) (sourceName string, known bool)
 	// SiblingCtorSig resolves a jar-internal class's CONSTRUCTOR generic Signature by binary internal name
 	// (slash-form) and DESCRIPTOR argument count. It returns the raw `<init>` Signature string (e.g.
 	// `(Lcom/google/common/graph/BaseGraph<TN;>;TN;)V` for IncidentEdgeSet) or ok=false for JDK/external
@@ -237,6 +349,85 @@ type ClassContext struct {
 	// for the overwhelming majority of classes (no cross-package simple-name clash), so a strict no-op
 	// there. Kill-switch: JDEC_SAMEPKG_FQ_OFF=1 (dumper leaves this nil).
 	SamePkgFQNames map[string]bool
+	// OnOverloadUnknown records invoke sites whose competing-overload family could
+	// not be proven (no same-class/sibling/CP/JDK-family table). It is evidence of
+	// missing proof, not a license to invent or drop casts.
+	OnOverloadUnknown func(owner, name, descriptor string)
+	// OverloadFamilyUnproven is set when an invocation's overload family could not
+	// be proven complete, so reconstructed overload selection remains unverified.
+	OverloadFamilyUnproven bool
+	// SourceBridgeTarget proves an omitted receiver-only accessibility bridge
+	// forwards the same descriptor to its direct superclass. This affects only
+	// source return-type lookup; original declarations and invoke witnesses stay.
+	SourceBridgeTarget func(owner, name, descriptor string) (string, bool)
+}
+
+// Getenv returns a request-local JDEC_* value. Missing snapshot keys are unset.
+// Explicit Env (dumper/decompiler policy) wins; otherwise the nested jdecenv stack.
+func (f *ClassContext) Getenv(key string) string {
+	if f != nil && f.Env != nil {
+		return f.Env(key)
+	}
+	return jdecenv.Get(key)
+}
+
+// PreflightOutput rejects a construction fragment of n bytes if it cannot fit
+// in MaxOutputBytes together with OutputHeld, or if the derived intermediate
+// cap would be exceeded. It does not increment output_bytes.
+func (f *ClassContext) PreflightOutput(n int64) error {
+	if f == nil || f.Work == nil || !f.Work.RenderGuarded() {
+		return nil
+	}
+	if err := f.Work.Check(); err != nil {
+		return err
+	}
+	if n <= 0 {
+		return nil
+	}
+	held := f.OutputHeld
+	if held < 0 {
+		held = 0
+	}
+	if held > math.MaxInt64-n {
+		return f.Work.CheckOutput(math.MaxInt64)
+	}
+	if err := f.Work.CheckOutput(held + n); err != nil {
+		return err
+	}
+	return f.Work.CheckAlloc(n)
+}
+
+// ChargeOutput is the construction-site hook: cancel, remaining emitted cap,
+// and intermediate cap. It does not accumulate output_bytes.
+func (f *ClassContext) ChargeOutput(n int64) error {
+	return f.PreflightOutput(n)
+}
+
+// CheckAlloc bounds a single intermediate allocation.
+func (f *ClassContext) CheckAlloc(n int64) error {
+	if f == nil || f.Work == nil || !f.Work.RenderGuarded() {
+		return nil
+	}
+	return f.Work.CheckAlloc(n)
+}
+
+// HoldOutput commits n retained bytes into OutputHeld after they are kept for
+// the final source.
+func (f *ClassContext) HoldOutput(n int64) error {
+	if f == nil {
+		return nil
+	}
+	if err := f.PreflightOutput(n); err != nil {
+		return err
+	}
+	if n > 0 {
+		if f.OutputHeld > math.MaxInt64-n {
+			f.OutputHeld = math.MaxInt64
+		} else {
+			f.OutputHeld += n
+		}
+	}
+	return nil
 }
 
 // FieldSignature returns the raw generic Signature string of a same-class parameterized field, or ""
@@ -303,23 +494,72 @@ func methodSigKey(name string, argc int) string {
 // Returns false when only one same-arity overload exists (no ambiguity) or when MethodDescriptors is
 // unset (single-class path, no sibling info).
 func (f *ClassContext) HasOverloadedSameArity(name, descriptor string) bool {
-	if f == nil || name == "" || descriptor == "" || f.MethodDescriptors == nil {
+	if f == nil {
 		return false
 	}
+	key := name + "\x00" + descriptor
+	if f.sameArityOverloadMemo != nil {
+		if v, ok := f.sameArityOverloadMemo[key]; ok {
+			return v
+		}
+	} else {
+		f.sameArityOverloadMemo = map[string]bool{}
+	}
+	v := nameHasSameArityOverload(name, descriptor, f.MethodDescriptors)
+	f.sameArityOverloadMemo[key] = v
+	return v
+}
+
+// PoolHasSameArityOverload is a memoized NameHasSameArityOverload over PoolMethodDescriptors.
+func (f *ClassContext) PoolHasSameArityOverload(qualified, descriptor string) bool {
+	if f == nil || f.PoolMethodDescriptors == nil {
+		return false
+	}
+	key := "pool\x00" + qualified + "\x00" + descriptor
+	if f.sameArityOverloadMemo != nil {
+		if v, ok := f.sameArityOverloadMemo[key]; ok {
+			return v
+		}
+	} else {
+		f.sameArityOverloadMemo = map[string]bool{}
+	}
+	v := nameHasSameArityOverload(qualified, descriptor, f.PoolMethodDescriptors)
+	f.sameArityOverloadMemo[key] = v
+	return v
+}
+
+// NameHasSameArityOverload reports whether `keys` contain a different
+// same-arity descriptor for `name` than `descriptor`.
+func NameHasSameArityOverload(name, descriptor string, keys map[string]bool) bool {
+	if name == "" || descriptor == "" || keys == nil {
+		return false
+	}
+	return nameHasSameArityOverload(name, descriptor, keys)
+}
+
+func nameHasSameArityOverload(name, descriptor string, keys map[string]bool) bool {
 	argc := descriptorArgc(descriptor)
-	for k := range f.MethodDescriptors {
+	for k := range keys {
 		if len(k) <= len(name) || k[:len(name)] != name {
+			continue
+		}
+		if k[len(name)] != '(' {
 			continue
 		}
 		otherDesc := k[len(name):]
 		if otherDesc == descriptor {
-			continue // same method
+			continue
 		}
 		if descriptorArgc(otherDesc) == argc {
 			return true
 		}
 	}
 	return false
+}
+
+// DescriptorArgc counts parameter field descriptors in a JVM method descriptor.
+func DescriptorArgc(descriptor string) int {
+	return descriptorArgc(descriptor)
 }
 
 // descriptorArgc counts the number of parameter field descriptors in a JVM method descriptor string
@@ -499,10 +739,10 @@ func (f *ClassContext) GetAllImported() []string {
 					continue
 				}
 				src, dotOK := binaryNestedNameToSource(className)
-				if !dotOK && os.Getenv("JDEC_DOLLAR_FLAT_IMPORT_OFF") != "" {
+				if !dotOK && f.Getenv("JDEC_DOLLAR_FLAT_IMPORT_OFF") != "" {
 					continue
 				}
-				stdlibOrLegacy := f.nestedTypeShouldDot(pkg, className) || os.Getenv("JDEC_NESTED_FLAT_IMPORT_OFF") != ""
+				stdlibOrLegacy := f.nestedTypeShouldDot(pkg, className) || f.Getenv("JDEC_NESTED_FLAT_IMPORT_OFF") != ""
 				// stdlib nested types import the OUTER class (the reference uses the dotted Outer.Inner
 				// spelling); this only applies when the name is dot-splittable (dotOK). A '$'-leading flat
 				// unit (dotOK==false) keeps its flat name so the import matches the flat reference.
@@ -532,6 +772,11 @@ func (f *ClassContext) GetAllImported() []string {
 	return imports
 }
 func (f *ClassContext) Import(name string) {
+	if f.DeclarationSourceName != nil {
+		if _, known := f.DeclarationSourceName(name); known {
+			return
+		}
+	}
 	if f.KeySet == nil {
 		f.KeySet = utils.NewSet[string]()
 	}
@@ -581,7 +826,7 @@ func (f *ClassContext) nestedTypeShouldDot(pkg, className string) bool {
 	if isStdlibNestedDottedPackage(pkg) {
 		return true
 	}
-	if f == nil || f.SiblingSuperTypes == nil || os.Getenv("JDEC_EXTERNAL_NESTED_DOT_OFF") != "" {
+	if f == nil || f.SiblingSuperTypes == nil || f.Getenv("JDEC_EXTERNAL_NESTED_DOT_OFF") != "" {
 		return false
 	}
 	// Same-package nested types are (almost always) Yak's own flat units; never dot them.
@@ -633,6 +878,11 @@ func isStdlibNestedDottedPackage(pkg string) bool {
 }
 
 func (f *ClassContext) ShortTypeName(name string) string {
+	if f.DeclarationSourceName != nil {
+		if source, known := f.DeclarationSourceName(name); known {
+			return source
+		}
+	}
 	pkg, className := SplitPackageClassName(name)
 	className = SafeIdentifier(className)
 	if pkg == "" {
@@ -648,10 +898,17 @@ func (f *ClassContext) ShortTypeName(name string) string {
 	// safe. The import statement still carries the OUTER class (see GetAllImported). Kill-switch:
 	// JDEC_STDLIB_NESTED_DOT_OFF=1 restores the legacy flat spelling.
 	dotted := className
-	if strings.Contains(className, "$") && os.Getenv("JDEC_STDLIB_NESTED_DOT_OFF") == "" && f.nestedTypeShouldDot(pkg, className) {
+	if strings.Contains(className, "$") && f.Getenv("JDEC_STDLIB_NESTED_DOT_OFF") == "" && f.nestedTypeShouldDot(pkg, className) {
 		if src, ok := binaryNestedNameToSource(className); ok {
 			dotted = src
 		}
+	}
+	first := strings.SplitN(dotted, ".", 2)[0]
+	if f.LexicalTypeNames[first] || f.IsTypeParam(first) {
+		// A qualified class identity and a same-spelled formal are different
+		// declarations. Keep the class qualified where shortening would bind
+		// to the formal; bare type-variable inputs returned above stay bare.
+		return pkg + "." + dotted
 	}
 	if pkg == f.PackageName || pkg == "java.lang" {
 		// A same-package (or java.lang) type is normally reachable by its bare simple name with no
@@ -659,8 +916,20 @@ func (f *ClassContext) ShortTypeName(name string) string {
 		// that type gets a single-type-import which SHADOWS the same-package/java.lang one, so the bare
 		// name would bind to the wrong type. In that case emit the fully-qualified name instead. The
 		// clashing set is precomputed from the constant pool by the dumper (render-order independent).
-		if pkg == f.PackageName && f.SamePkgFQNames != nil && f.SamePkgFQNames[className] {
+		if f.SamePkgFQNames != nil && f.SamePkgFQNames[className] {
 			return pkg + "." + dotted
+		}
+		// Runtime lowering can introduce a platform owner absent from the
+		// original CP. Check its declaration identity too, rather than relying
+		// on the precomputed inventory of original type references.
+		if pkg == "java.lang" && f.InvocationMetadata != nil {
+			own := className
+			if f.PackageName != "" {
+				own = strings.ReplaceAll(f.PackageName, ".", "/") + "/" + className
+			}
+			if declaration, known := f.InvocationMetadata(own); known && declaration.Name == own {
+				return pkg + "." + dotted
+			}
 		}
 		return dotted
 	}
@@ -720,4 +989,42 @@ func SplitPackageClassName(s string) (string, string) {
 	}
 	log.Errorf("split package name and class name failed: %v", s)
 	return "", ""
+}
+
+// CloneForRetry isolates mutable source-rendering state. Resolver functions and the
+// monotonic request budget are shared intentionally.
+func (f *ClassContext) CloneForRetry() *ClassContext {
+	if f == nil {
+		return nil
+	}
+	out := *f
+	out.Arguments = append([]string(nil), f.Arguments...)
+	out.TypeParams = append([]string(nil), f.TypeParams...)
+	out.ClassTypeParams = append([]string(nil), f.ClassTypeParams...)
+	out.LexicalTypeParamSignatures = append([]string(nil), f.LexicalTypeParamSignatures...)
+	out.InjectedTypeParamBounds = maps.Clone(f.InjectedTypeParamBounds)
+	out.FieldTypeVars = maps.Clone(f.FieldTypeVars)
+	out.FieldSignatures = maps.Clone(f.FieldSignatures)
+	out.MethodSignatures = maps.Clone(f.MethodSignatures)
+	out.MethodSignaturesByDesc = maps.Clone(f.MethodSignaturesByDesc)
+	out.MethodDescriptors = maps.Clone(f.MethodDescriptors)
+	out.PoolMethodDescriptors = maps.Clone(f.PoolMethodDescriptors)
+	out.sameArityOverloadMemo = maps.Clone(f.sameArityOverloadMemo)
+	out.ConstructorSignatures = maps.Clone(f.ConstructorSignatures)
+	out.ConstructorSignaturesByDesc = maps.Clone(f.ConstructorSignaturesByDesc)
+	out.RawEraseTypeVars = maps.Clone(f.RawEraseTypeVars)
+	out.StandaloneEraseTypeVars = maps.Clone(f.StandaloneEraseTypeVars)
+	out.ForceParamEraseTypeVars = maps.Clone(f.ForceParamEraseTypeVars)
+	out.SamePkgFQNames = maps.Clone(f.SamePkgFQNames)
+	out.LexicalTypeNames = maps.Clone(f.LexicalTypeNames)
+	out.StaticMethodImports = f.StaticMethodImports.Clone()
+	out.staticImportScopeMemo = maps.Clone(f.staticImportScopeMemo)
+	out.BuildInLibsMap = f.BuildInLibsMap.Copy()
+	if out.BuildInLibsMap != nil {
+		out.BuildInLibsMap.ForEach(func(k string, v []string) bool { out.BuildInLibsMap.Set(k, append([]string(nil), v...)); return true })
+	}
+	if f.KeySet != nil {
+		out.KeySet = utils.NewSet[string](f.KeySet.List())
+	}
+	return &out
 }

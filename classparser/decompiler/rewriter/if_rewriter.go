@@ -5,6 +5,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	utils2 "github.com/yaklang/javajive/classparser/decompiler/utils"
 	"github.com/yaklang/javajive/internal/utils"
 )
@@ -31,6 +32,9 @@ func ifBranchNodes(ifNode *core.Node) (trueNode, falseNode *core.Node) {
 }
 
 func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
+	splitSharedFallthroughExpression(manager, ifNode)
+	splitSharedLiteralPhiStores(manager, ifNode)
+	splitSharedTerminalLeaves(manager, ifNode)
 	err := CalcEnd(manager.DominatorMap, ifNode)
 	if err != nil {
 		return err
@@ -72,7 +76,19 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 		endNodes = NodeDeduplication(endNodes)
 		hasNext := false
 		for _, node := range endNodes {
+			// Abrupt method exits have no normal successor. They cannot
+			// disprove that the remaining paths join the opposite arm.
+			terminal := isMethodExitTerminator(node)
+			for _, next := range node.Next {
+				terminal = terminal && IsEndNode(next)
+			}
+			if terminal {
+				continue
+			}
 			for _, n := range node.Next {
+				if encodedJumpTo(node, n) {
+					continue
+				}
 				hasNext = true
 				if n != node2 {
 					return false
@@ -123,7 +139,9 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	ifStatement.Condition = condition
 	ifBodyNodes := []*core.Node{}
 	copyIfBody := false
-	if IsEndNode(ifNode.MergeNode) && len(trueNode.Source) > 1 && len(falseNode.Source) > 1 {
+	// Normal-join extraction above can remove either arm: that path is now a
+	// shared continuation, not a second body eligible for shared-body copying.
+	if trueNode != nil && falseNode != nil && IsEndNode(ifNode.MergeNode) && len(trueNode.Source) > 1 && len(falseNode.Source) > 1 {
 		copyIfBody = true
 		trueNode.RemoveSource(ifStatementNode)
 	}
@@ -177,8 +195,125 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	for _, node := range NodeDeduplication(endNodes) {
 		ifStatementNode.AddNext(node)
 	}
+	markEncodedJumps(ifStatementNode, ifBodyNodes)
+	retargetProtectedIfBoundary(manager.TryNodes, ifNode, ifStatementNode)
 
 	return nil
+}
+
+// A shared expression followed by the opposite successor is a conditional
+// edge block, not that condition's unconditional continuation. Its other
+// incoming edge prevents dominance-based body collection from owning it.
+// Split only this edge, retaining one execution on each original path. No
+// allocation, invocation or exception is moved across the condition.
+func splitSharedFallthroughExpression(manager *RewriteManager, condition *core.Node) {
+	left, right := ifBranchNodes(condition)
+	if left == nil || right == nil || left == right {
+		return
+	}
+	for _, pair := range [][2]*core.Node{{left, right}, {right, left}} {
+		target, continuation := pair[0], pair[1]
+		st, ok := target.Statement.(*statements.ExpressionStatement)
+		if !ok || st.Expression == nil || len(target.Source) < 2 || len(target.Next) != 1 ||
+			target.Next[0] != continuation || target.HideNext != nil || target.IsTryCatch ||
+			target.IsCatchStart || target.IsCircle || target.IsInCircle || target.LoopBreak ||
+			len(target.EncodedJumps) != 0 || encodedJumpTo(condition, target) ||
+			utils2.IsDominate(manager.DominatorMap, condition, target) ||
+			!sameProtectedMembership(manager.RootNode, condition, target) {
+			continue
+		}
+		copy := *st
+		edge := manager.NewNode(&copy)
+		edge.OriginPC, edge.HasOriginPC = target.OriginPC, target.HasOriginPC
+		edge.AddNext(continuation)
+		replaceNextInPlace(condition, target, edge)
+		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+		return
+	}
+}
+
+func sameProtectedMembership(root, a, b *core.Node) bool {
+	if !a.HasOriginPC || !b.HasOriginPC {
+		return false
+	}
+	valid := true
+	core.WalkGraph[*core.Node](root, func(node *core.Node) ([]*core.Node, error) {
+		// IsTryCatch marks the pre-region anchor used during parsing. The
+		// actual synthetic protected owner is MiddleTryStart and carries the
+		// half-open range; reading the anchor as that owner loses the witness.
+		middle, isMiddle := node.Statement.(*statements.MiddleStatement)
+		if node.HasProtectedRange || (isMiddle && middle.Flag == statements.MiddleTryStart) {
+			if !node.HasProtectedRange {
+				valid = false
+				return nil, nil
+			}
+			contains := func(pc int) bool {
+				if len(node.SharedProtectedRanges) == 0 {
+					return pc >= node.ProtectedStartPC && pc < node.ProtectedEndPC
+				}
+				for _, row := range node.SharedProtectedRanges {
+					if pc >= int(row.StartPc) && pc < int(row.EndPc) {
+						return true
+					}
+				}
+				return false
+			}
+			valid = valid && contains(a.OriginPC) == contains(b.OriginPC)
+		}
+		return node.Next, nil
+	})
+	return valid
+}
+
+// Shared terminal leaves are not necessarily dominated by an inner condition.
+// Split its selected edge before collecting dominated regions, or an abrupt
+// arm can disappear. Preserve the ATHROW operand and original PC; its expression
+// is still evaluated once on the selected path. Opaque custom statements and
+// nonliteral value returns remain outside this narrowly proved transformation.
+func splitSharedTerminalLeaves(manager *RewriteManager, condition *core.Node) {
+	changed := false
+	for _, target := range slices.Clone(condition.Next) {
+		var terminalCopy statements.Statement
+		switch st := target.Statement.(type) {
+		case *statements.ReturnStatement:
+			value := values.UnpackSoltValue(st.JavaValue)
+			_, literal := value.(*values.JavaLiteral)
+			literal = literal || value == values.JavaNull
+			if st.JavaValue == nil || (literal && st.HasOriginPC && target.HasOriginPC &&
+				st.OriginPC == target.OriginPC && sameProtectedMembership(manager.RootNode, condition, target)) {
+				copy := *st
+				terminalCopy = &copy
+			}
+		case *statements.CustomStatement:
+			if st.ThrownValue != nil && st.HasOriginPC {
+				copy := *st
+				terminalCopy = &copy
+			}
+		}
+		if terminalCopy == nil || len(target.Source) < 2 || target.HideNext != nil ||
+			target.IsTryCatch || target.IsCatchStart || target.IsCircle || target.IsInCircle ||
+			len(target.EncodedJumps) != 0 || encodedJumpTo(condition, target) ||
+			utils2.IsDominate(manager.DominatorMap, condition, target) {
+			continue
+		}
+		terminal := true
+		for _, next := range target.Next {
+			terminal = terminal && IsEndNode(next)
+		}
+		if !terminal {
+			continue
+		}
+		leaf := manager.NewNode(terminalCopy)
+		leaf.OriginPC, leaf.HasOriginPC = target.OriginPC, target.HasOriginPC
+		for _, next := range target.Next {
+			leaf.AddNext(next)
+		}
+		replaceNextInPlace(condition, target, leaf)
+		changed = true
+	}
+	if changed {
+		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
+	}
 }
 
 func CalcEnd1(domTree map[*core.Node][]*core.Node, ifNode *core.Node) error {

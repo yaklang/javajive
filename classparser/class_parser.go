@@ -1,10 +1,16 @@
 package javaclassparser
 
-import "github.com/yaklang/javajive/internal/utils"
+import (
+	"fmt"
+
+	"github.com/yaklang/javajive/internal/utils"
+)
 
 type ClassParser struct {
-	reader   *ClassReader
-	classObj *ClassObject
+	reader    *ClassReader
+	classObj  *ClassObject
+	attrCtx   attrContext
+	annoDepth int
 }
 
 func NewClassParser(data []byte) *ClassParser {
@@ -34,31 +40,88 @@ type ExceptionsAttribute struct {
 
 func (self *ExceptionsAttribute) readInfo(cp *ClassParser) {
 	self.ExceptionIndexTable = cp.reader.readUint16s()
+	if cp.reader.Err() != nil {
+		return
+	}
+	for i, idx := range self.ExceptionIndexTable {
+		if err := cp.classObj.checkCPIndex(idx, false, fmt.Sprintf("exception_index_table[%d]", i), CONSTANT_Class); err != nil {
+			cp.reader.fail(ParseCodeCPIndex, err.Error())
+			return
+		}
+	}
 }
 
 func (this *ClassParser) Parse() (*ClassObject, error) {
-	var err error
-	err = this.parseAndCheckMagic()
+	this.reader.SetStage("magic", "magic")
+	if err := this.parseAndCheckMagic(); err != nil {
+		return nil, err
+	}
+	this.reader.SetStage("version", "minor_major")
+	if err := this.readAndCheckVersion(); err != nil {
+		return nil, err
+	}
+	this.reader.SetStage("constant_pool", "count")
+	if err := this.readConstantPool(); err != nil {
+		return nil, err
+	}
+	this.reader.SetStage("class", "access_flags")
+	this.classObj.AccessFlags = this.reader.readUint16()
+	this.classObj.AccessFlagsVerbose, this.classObj.AccessFlagsToCode = getClassAccessFlagsVerbose(this.classObj.AccessFlags)
+	this.reader.SetStage("class", "this_class")
+	this.classObj.ThisClass = this.reader.readUint16()
+	this.reader.SetStage("class", "super_class")
+	this.classObj.SuperClass = this.reader.readUint16()
+	this.reader.SetStage("class", "interfaces")
+	this.classObj.Interfaces = this.reader.readUint16s()
+	if err := this.reader.Err(); err != nil {
+		return nil, err
+	}
+	if err := this.classObj.checkClassHeadCPRefs(); err != nil {
+		return nil, err
+	}
+	this.reader.SetStage("fields", "count")
+	this.attrCtx = attrCtxField
+	fields, err := this.readMembers()
 	if err != nil {
 		return nil, err
 	}
-	err = this.readAndCheckVersion()
-	err = this.readConstantPool()
-	this.classObj.AccessFlags = this.reader.readUint16()
-	this.classObj.AccessFlagsVerbose, this.classObj.AccessFlagsToCode = getClassAccessFlagsVerbose(this.classObj.AccessFlags)
-	this.classObj.ThisClass = this.reader.readUint16()
-	this.classObj.SuperClass = this.reader.readUint16()
-	this.classObj.Interfaces = this.reader.readUint16s()
-	this.classObj.Fields, err = this.readMembers()
-	this.classObj.Methods, err = this.readMembers()
+	this.classObj.Fields = fields
+	this.reader.SetStage("methods", "count")
+	this.attrCtx = attrCtxMethod
+	methods, err := this.readMembers()
+	if err != nil {
+		return nil, err
+	}
+	this.classObj.Methods = methods
+	this.reader.SetStage("class_attributes", "count")
+	this.attrCtx = attrCtxClass
 	this.classObj.Attributes = this.readAttributes()
+	if err := this.reader.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateTypeAnnotationPaths(this.classObj); err != nil {
+		return nil, err
+	}
+	if this.reader.Remaining() > 0 {
+		this.reader.SetStage("trailing", "eof")
+		return nil, this.reader.fail(ParseCodeTrailingBytes, fmt.Sprintf("%d trailing bytes", this.reader.Remaining()))
+	}
 	return this.classObj, nil
 }
 func (this *ClassParser) readMembers() ([]*MemberInfo, error) {
 	memberCount := this.reader.readUint16()
+	if err := this.reader.Err(); err != nil {
+		return nil, err
+	}
+	if !this.reader.reserve(int64(memberCount), 8) {
+		return nil, this.reader.Err()
+	}
 	members := make([]*MemberInfo, memberCount)
 	for i := range members {
 		members[i] = this.readMember()
+		if err := this.reader.Err(); err != nil {
+			return nil, err
+		}
 	}
 	return members, nil
 }
@@ -72,21 +135,58 @@ func (this *ClassParser) readMember() *MemberInfo {
 }
 func (this *ClassParser) readAttributes() []AttributeInfo {
 	attributesCount := this.reader.readUint16()
+	if err := this.reader.Err(); err != nil {
+		return nil
+	}
+	seen := map[string]int{}
+	if !this.reader.reserve(int64(attributesCount), 6) {
+		return nil
+	}
 	attributes := make([]AttributeInfo, attributesCount)
 	for i := range attributes {
-		attributes[i] = this.readAttribute()
+		attributes[i] = this.readAttribute(seen)
+		if err := this.reader.Err(); err != nil {
+			return attributes[:i+1]
+		}
 	}
 	return attributes
 }
-func (this *ClassParser) readAttribute() AttributeInfo {
+func (this *ClassParser) readAttribute(seen map[string]int) AttributeInfo {
+	this.reader.SetStage("attribute", "name_index")
 	attributeNameIndex := this.reader.readUint16()
+	if err := this.reader.Err(); err != nil {
+		return &UnparsedAttribute{}
+	}
 	attrName, err := this.classObj.getUtf8(attributeNameIndex)
 	if err != nil {
-		panic(utils.Errorf("Parse Attribute error: %v", err))
+		this.reader.fail(ParseCodeCPIndex, fmt.Sprintf("Parse Attribute error: %v", err))
+		return &UnparsedAttribute{}
 	}
+	this.reader.SetStage("attribute", "length")
 	attrLen := this.reader.readUint32()
+	if err := this.reader.Err(); err != nil {
+		return &UnparsedAttribute{Name: attrName}
+	}
+	if !attrAllowedIn(attrName, this.attrCtx) {
+		this.reader.fail(ParseCodeAttrPlacement, fmt.Sprintf("attribute %s is not valid on %s", attrName, this.attrCtx))
+		_ = this.reader.Subreader(attrLen)
+		return &UnparsedAttribute{Name: attrName, Length: attrLen}
+	}
+	if seen != nil {
+		seen[attrName]++
+		if attrMustBeUnique(attrName) && seen[attrName] > 1 {
+			this.reader.fail(ParseCodeAttrDuplicate, fmt.Sprintf("duplicate attribute %s on %s", attrName, this.attrCtx))
+			_ = this.reader.Subreader(attrLen)
+			return &UnparsedAttribute{Name: attrName, Length: attrLen}
+		}
+	}
+	parent := this.reader
+	sub := parent.Subreader(attrLen)
+	this.reader = sub
 	attrInfo := newAttributeInfo(attrName, attrLen)
 	attrInfo.readInfo(this)
+	this.reader = parent
+	requireKnownAttrExactEnd(sub, attrInfo, attrName)
 	return attrInfo
 }
 
@@ -97,8 +197,11 @@ func (this *ClassParser) parseAndCheckMagic() (err error) {
 		}
 	}()
 	magic := this.reader.readUint32()
+	if err := this.reader.Err(); err != nil {
+		return err
+	}
 	if magic != 0xCAFEBABE {
-		return utils.Error("java.lang.ClassFormatError: Magic error")
+		return this.reader.fail(ParseCodeBadMagic, "java.lang.ClassFormatError: Magic error")
 	}
 	this.classObj.Magic = magic
 	return nil
@@ -106,24 +209,35 @@ func (this *ClassParser) parseAndCheckMagic() (err error) {
 func (this *ClassParser) readAndCheckVersion() error {
 	this.classObj.MinorVersion = this.reader.readUint16()
 	this.classObj.MajorVersion = this.reader.readUint16()
-	switch this.classObj.MajorVersion {
-	case 45:
-		return nil
-	case 46, 47, 48, 49, 50, 51, 52:
-		if this.classObj.MinorVersion == 0 {
-			return nil
-		}
+	if err := this.reader.Err(); err != nil {
+		return err
 	}
-	return utils.Error("java.lang.UnsupportedClassVersionError!")
+	// Unknown / future versions are a capability boundary, not a corrupt
+	// classfile. Continue parsing so callers can report unsupported rather
+	// than invalid_input. Do not fail Parse for unknown major/minor.
+	return nil
 }
 func (this *ClassParser) readConstantPool() error {
-	cpCount := int(this.reader.readUint16())
+	cpCountU := this.reader.readUint16()
+	if err := this.reader.Err(); err != nil {
+		return err
+	}
+	if cpCountU < 1 {
+		return this.reader.fail(ParseCodeCPCount, "constant_pool_count must be >= 1")
+	}
+	cpCount := int(cpCountU)
+	if !this.reader.reserve(int64(cpCount-1), 1) {
+		return this.reader.Err()
+	}
 	cp := make([]ConstantInfo, cpCount-1)
 
 	//索引从1开始，这里用了 <cpCount 说明index是从1到cpCount-1 及上文的1 ~ n-1
 	for i := 0; i < cpCount-1; i++ {
 		constantInfo, err := this.readConstantInfo()
 		if err != nil {
+			return err
+		}
+		if err := this.reader.Err(); err != nil {
 			return err
 		}
 		cp[i] = constantInfo
@@ -133,12 +247,25 @@ func (this *ClassParser) readConstantPool() error {
 			i++
 		}
 	}
+	if err := this.reader.Err(); err != nil {
+		return err
+	}
 	this.classObj.ConstantPool = cp
 	return nil
 }
 func (this *ClassParser) readConstantInfo() (ConstantInfo, error) {
+	this.reader.SetStage("constant_pool", "tag")
 	tag := this.reader.readUint8()
-	c := newConstantInfo(tag)
+	if err := this.reader.Err(); err != nil {
+		return nil, err
+	}
+	c, err := newConstantInfo(tag)
+	if err != nil {
+		return nil, this.reader.fail(ParseCodeCPTag, err.Error())
+	}
 	c.readInfo(this)
+	if err := this.reader.Err(); err != nil {
+		return nil, err
+	}
 	return c, nil
 }

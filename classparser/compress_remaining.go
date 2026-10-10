@@ -1,14 +1,14 @@
 package javaclassparser
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 	"strings"
 )
 
 // fixCompressRemainingReconstructs repairs leftover commons-compress tree sites.
 // Kill-switch: JDEC_COMPRESS_REMAINING_OFF=1.
 func fixCompressRemainingReconstructs(body string) string {
-	if os.Getenv("JDEC_COMPRESS_REMAINING_OFF") == "1" {
+	if jdecenv.Get("JDEC_COMPRESS_REMAINING_OFF") == "1" {
 		return body
 	}
 	// DumpArchiveInputStream: raw PriorityQueue makes comparator args Object.

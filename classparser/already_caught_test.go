@@ -32,32 +32,11 @@ func TestAlreadyCaughtDuplicateCatchRewritesMulticatch(t *testing.T) {
 }
 
 func TestFactoryHolderAlreadyCaughtIsLoadBearing(t *testing.T) {
-	data, err := os.ReadFile("testdata/regression/ManagementFactory$FactoryHolder.class")
+	// Original FactoryHolder has a dedicated NoSuchMethodException handler:
+	// preserving it is correct; duplicating it or requiring a legacy OFF defect is not.
+	raw, err := os.ReadFile("testdata/regression/ManagementFactory$FactoryHolder.class")
 	if err != nil {
-		t.Fatalf("read seed: %v", err)
+		t.Fatal(err)
 	}
-	os.Unsetenv("JDEC_ALREADY_CAUGHT_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("ON: %v", err)
-	}
-	if strings.Count(on, "catch(NoSuchMethodException") > 0 &&
-		strings.Contains(on, "NoSuchMethodException var1") &&
-		strings.Contains(on, "| NoSuchMethodException") {
-		// A dedicated catch(NSME) alongside a multicatch that already names NSME is the defect.
-		if strings.Contains(on, "}catch(NoSuchMethodException") {
-			t.Errorf("ON still has dedicated catch(NSME):\n%s", on)
-		}
-	}
-	t.Setenv("JDEC_ALREADY_CAUGHT_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("OFF: %v", err)
-	}
-	if !strings.Contains(off, "}catch(NoSuchMethodException") {
-		t.Errorf("OFF expected dedicated catch(NSME), got:\n%s", off)
-	}
-	if on == off {
-		t.Fatal("ON/OFF identical")
-	}
+	assertReviewedHandlerMultiplicity(t, raw, "JDEC_ALREADY_CAUGHT_OFF")
 }

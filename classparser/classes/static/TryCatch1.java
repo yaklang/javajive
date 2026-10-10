@@ -5,10 +5,10 @@ import java.io.FileInputStream;
 
 public class TryCatch1 {
 	public static void main(String[] var0) {
-		FileInputStream var1 = null;
+try {
 		System.out.println(2);
 		try{
-			var1 = new FileInputStream(new File(""));
+			FileInputStream var1 = new FileInputStream(new File(""));
 			try{
 				System.out.println(1);
 			}catch(Throwable var2){
@@ -23,5 +23,10 @@ public class TryCatch1 {
 		}catch(Exception var1_1){
 			var1_1.printStackTrace();
 		}
+
+} catch (java.lang.Throwable jdec$escape$0) {
+throw jdec$rethrow$0(jdec$escape$0);
+}
 	}
+	private static <E extends java.lang.Throwable> java.lang.RuntimeException jdec$rethrow$0(java.lang.Throwable failure) throws E {throw (E) failure;}
 }

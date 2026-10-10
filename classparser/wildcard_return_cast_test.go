@@ -10,13 +10,15 @@ package javaclassparser
 // kill-switch JDEC_WILDCARD_RET_CAST_OFF 置位后回退到裸 `return this.helper();`, 证明承重。
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"os"
 	"regexp"
 	"testing"
 )
 
-// wildcardRetCastRe matches the recovered unchecked cast on the wildcard-returning sibling call.
-var wildcardRetCastRe = regexp.MustCompile(`return \(List<T>\) \(this\.helper\(\)\)`)
+// The raw same-erasure bridge permits the invariant parameterized return
+// without allocating a replacement collection or checking its payload.
+var wildcardRetCastRe = regexp.MustCompile(`return \(List<T>\) \(List\) \(this\.helper\(\)\)`)
 
 // wildcardRetBareRe matches the bare (uncast) return of the sibling call (the OFF / legacy emission).
 var wildcardRetBareRe = regexp.MustCompile(`return this\.helper\(\);`)
@@ -28,13 +30,17 @@ func TestWildcardReturnCastIsLoadBearing(t *testing.T) {
 	}
 
 	// Fix ON (default): the wildcard-returning sibling call gets the recovered `(List<T>)` cast.
-	os.Unsetenv("JDEC_WILDCARD_RET_CAST_OFF")
+	assertReviewedTypeVarMethod(t, data, "helper", "()Ljava/util/List;", "()Ljava/util/List<*>;")
+	assertReviewedTypeVarMethod(t, data, "create", "(I)Ljava/util/List;", "<T:Ljava/lang/Object;>(I)Ljava/util/List<TT;>;")
+	assertReviewedTypeVarInvoke(t, "testdata/regression/WildcardRetSeed.class", "create", "(I)Ljava/util/List;", 7, core.OP_INVOKEVIRTUAL, "WildcardRetSeed", "helper", "()Ljava/util/List;")
+
+	t.Setenv("JDEC_WILDCARD_RET_CAST_OFF", "")
 	on, err := Decompile(data)
 	if err != nil {
 		t.Fatalf("decompile (fix ON) failed: %v", err)
 	}
 	if !wildcardRetCastRe.MatchString(on) {
-		t.Errorf("fix ON: expected recovered cast `return (List<T>) (this.helper())`, got:\n%s", on)
+		t.Errorf("fix ON: expected same-erasure raw bridge on the wildcard sibling result, got:\n%s", on)
 	}
 
 	// Fix OFF (kill-switch): the cast disappears and create() falls back to the bare sibling return,

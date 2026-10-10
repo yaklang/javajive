@@ -23,37 +23,22 @@ import (
 func TestParamReturnCastIsLoadBearing(t *testing.T) {
 	data, err := os.ReadFile("testdata/regression/ParamRetCastSeed.class")
 	if err != nil {
-		t.Fatalf("read ParamRetCastSeed seed: %v", err)
+		t.Fatal(err)
 	}
-
-	// Fix ON (default): the unchecked parameterization cast is emitted so the return recompiles.
-	// Two shapes: (1) unbounded bare type-var target `ParamRetCastBox<E>` from an Object-pinned call;
-	// (2) WILDCARD target `ParamRetCastBox<? super E>` from a `ParamRetCastBox<?>` field (the guava
-	// TypeToken `return of(bound)` shape).
-	os.Unsetenv("JDEC_PARAM_RETURN_CAST_OFF")
-	on, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix ON) failed: %v", err)
-	}
-	if !strings.Contains(on, "(ParamRetCastBox<E>) (box(this.raw,1))") {
-		t.Errorf("fix ON: expected parameterized return cast `(ParamRetCastBox<E>) (box(this.raw,1))`, got:\n%s", on)
-	}
-	if !strings.Contains(on, "(ParamRetCastBox<? super E>) (rawBox(this.raw))") {
-		t.Errorf("fix ON: expected wildcard return cast `(ParamRetCastBox<? super E>) (rawBox(this.raw))`, got:\n%s", on)
-	}
-
-	// Fix OFF (kill-switch): both casts disappear -- the exact "inference variable E has incompatible
-	// bounds" / "X<?> cannot be converted to X<? super E>" recompile blockers the fix removes -- proving
-	// it is load-bearing.
-	t.Setenv("JDEC_PARAM_RETURN_CAST_OFF", "1")
-	off, err := Decompile(data)
-	if err != nil {
-		t.Fatalf("decompile (fix OFF) failed: %v", err)
-	}
-	if strings.Contains(off, "(ParamRetCastBox<E>) (box(this.raw,1))") {
-		t.Errorf("fix OFF: expected the unbounded-var cast to disappear (kill-switch not load-bearing), got:\n%s", off)
-	}
-	if strings.Contains(off, "(ParamRetCastBox<? super E>) (rawBox(this.raw))") {
-		t.Errorf("fix OFF: expected the wildcard cast to disappear (kill-switch not load-bearing), got:\n%s", off)
+	assertReviewedGenericMethod(t, data, "box", "(Ljava/lang/Object;I)LParamRetCastBox;", "<T:Ljava/lang/Object;>(TT;I)LParamRetCastBox<TT;>;")
+	assertReviewedGenericMethod(t, data, "make", "()LParamRetCastBox;", "()LParamRetCastBox<TE;>;")
+	assertReviewedGenericMethod(t, data, "makeSuper", "()LParamRetCastBox;", "()LParamRetCastBox<-TE;>;")
+	for _, setting := range []string{"", "1"} {
+		t.Setenv("JDEC_PARAM_RETURN_CAST_OFF", setting)
+		source, err := Decompile(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compact := compactReviewedGenericSource(source)
+		for _, required := range []string{"return(ParamRetCastBox<E>)(ParamRetCastBox)(box(this.raw,1))", "return(ParamRetCastBox<?superE>)(ParamRetCastBox)(rawBox(this.raw))"} {
+			if strings.Contains(compact, required) != (setting == "") {
+				t.Fatalf("switch=%q: missing exact generic return binding %s: %s", setting, required, source)
+			}
+		}
 	}
 }

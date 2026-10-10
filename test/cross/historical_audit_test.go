@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,7 +154,7 @@ func TestHistoricalJarAudit(t *testing.T) {
 			}
 			cp := withEnvShims(t, strings.Join(input.Deps, string(os.PathListSeparator)))
 			srcRoot := filepath.Join(dir, "sources")
-			files, units, fail := decompileAll(t, input.Path, srcRoot, 0)
+			files, units, fail := decompileAllWithResolverAtSourceVersion(t, input.Path, srcRoot, 0, historicalDeclarationResolver(t, input.Deps), compileRelease(jarSpecs[name], input.Path))
 			o.SourceUnits = units
 			o.DecompileFailures = fail
 			for _, f := range files {
@@ -315,4 +316,50 @@ func historicalTreeCompile(t *testing.T, files []string, classpath, outDir strin
 		raw += run(versioned[n], n, filepath.Join(outDir, "META-INF", "versions", strconv.Itoa(n)), cp, mrSrc)
 	}
 	return strings.Count(raw, ": error:"), raw, passes
+}
+
+// Use the same pinned dependency declarations for decompilation and javac.
+// Dependencies never become target source units, and first classpath occurrence
+// wins. This only reads original class bytes inside the audit worker.
+func historicalDeclarationResolver(t *testing.T, dependencies []string) func(string) ([]byte, bool) {
+	t.Helper()
+	entries := map[string]*zip.File{}
+	for _, path := range dependencies {
+		archive, err := zip.OpenReader(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := archive.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		for _, entry := range archive.File {
+			if strings.HasSuffix(entry.Name, ".class") || strings.HasSuffix(entry.Name, ".raw") {
+				name := strings.TrimSuffix(strings.TrimSuffix(entry.Name, ".class"), ".raw")
+				if entries[name] == nil {
+					entries[name] = entry
+				}
+			}
+		}
+	}
+	return func(name string) ([]byte, bool) {
+		entry := entries[name]
+		if entry == nil {
+			return nil, false
+		}
+		r, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(r)
+		closeErr := r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		return b, true
+	}
 }

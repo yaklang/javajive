@@ -1,13 +1,12 @@
 package rewriter
 
 import (
-	"os"
+	"github.com/yaklang/javajive/internal/jdecenv"
 
 	"github.com/samber/lo"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
-	utils3 "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/classparser/decompiler/utils"
@@ -20,10 +19,88 @@ type LoopStatement struct {
 	BodyStart *core.Node
 }
 
+// Executing a loop also dominates its normal continuation. That does not make
+// the continuation part of its body. When choosing which loop must materialize
+// jumps before an if/try is consumed, use body membership as well as dominance;
+// otherwise an already processed inner loop hides the pending enclosing loop.
+func loopOwnsRewriteNode(manager *RewriteManager, loop, node *core.Node) bool {
+	if loop == node {
+		return true
+	}
+	if len(loop.Next) == 0 || !utils.IsDominate(manager.DominatorMap, loop, node) {
+		return false
+	}
+	if !manager.LoopRegionReducible || circleElementSet(loop, loop.Next[0], manager.DominatorMap, true).Has(node) {
+		return true
+	}
+	// A successful break arm need not reach any backedge. Its private exit
+	// prefix still belongs to this loop until the normal boundary. Structure
+	// those transfers before an if on that prefix becomes an opaque container.
+	boundary := searchCircleEndNode(loop, loop.Next[0], manager.DominatorMap, true)
+	if boundary == nil || boundary == node {
+		return false
+	}
+	seen := map[*core.Node]bool{}
+	pending := []*core.Node{loop.Next[0]}
+	for len(pending) > 0 {
+		current := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if current == nil || current == boundary || current == loop || seen[current] {
+			continue
+		}
+		if len(seen) >= 512 {
+			return false
+		}
+		seen[current] = true
+		if current == node {
+			return true
+		}
+		pending = append(pending, current.Next...)
+	}
+	return false
+}
+
+// A bounded retry loop has a condition between its wrapper and try body.
+// Structure its successful break before TryRewriter consumes that body; doing
+// so afterwards loses the normal exit and incorrectly retries on success.
+// Require the other header edge to be the proved loop exit, not another body
+// branch. Shared catch entries remain excluded by the caller.
+func loopHeaderGuardsTry(manager *RewriteManager, loop, tr *core.Node) bool {
+	if manager == nil || loop == nil || tr == nil || len(loop.Next) != 1 {
+		return false
+	}
+	header := loop.Next[0]
+	if _, ok := header.Statement.(*statements.ConditionStatement); !ok || len(header.Next) != 2 {
+		return false
+	}
+	var other *core.Node
+	if header.Next[0] == tr {
+		other = header.Next[1]
+	} else if header.Next[1] == tr {
+		other = header.Next[0]
+	} else {
+		return false
+	}
+	return other != tr && other == searchCircleEndNode(loop, header, manager.DominatorMap, manager.LoopRegionReducible)
+}
+
 func RebuildLoopNode(manager *RewriteManager) error {
 	for _, node := range manager.CircleEntryPoint {
 		doWhileSt := statements.NewDoWhileStatement(values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), nil)
 		doWhileNode := manager.NewNode(doWhileSt)
+		// A try entry can coincide with a natural loop header. If its catches
+		// never retry, the protected region encloses the loop and its normal
+		// continuation; wrapping the try itself would move that continuation
+		// outside the exception table.
+		if normal, backedges := protectedTryLoopHeader(manager, node); normal != nil {
+			for _, source := range backedges {
+				replaceNextInPlace(source, node, doWhileNode)
+			}
+			replaceNextInPlace(node, normal, doWhileNode)
+			doWhileNode.AddNext(normal)
+			manager.WhileNode = append(manager.WhileNode, doWhileNode)
+			continue
+		}
 		// Redirect every edge `source -> circleNode` to `source -> doWhileNode` while preserving the
 		// edge's index in source.Next. The previous remove-all-source + AddSource approach appended
 		// the redirected edge to the end of source.Next; for a bottom-tested loop the loop-condition
@@ -66,7 +143,7 @@ func replaceNextInPlace(node, oldNext, newNext *core.Node) {
 // `break` (which would only leave the innermost loop) into a labeled `break LOOP_n` when the exit
 // actually lies outside an enclosing loop. Setting JDEC_NO_LOOP_BREAK_LABEL_FIX is the kill-switch.
 func outermostEnclosingLoopWithExit(manager *RewriteManager, preWhileNodes []*core.Node, preWhileNodeEnds map[*core.Node]*core.Node, circleNode, exitNode *core.Node) *core.Node {
-	if os.Getenv("JDEC_NO_LOOP_BREAK_LABEL_FIX") != "" {
+	if jdecenv.Get("JDEC_NO_LOOP_BREAK_LABEL_FIX") != "" {
 		return nil
 	}
 	var best *core.Node
@@ -127,7 +204,7 @@ func asLatchIncExpr(n *core.Node) (*values.JavaExpression, bool) {
 // single-continue loop (handled by IfRewriter branch inversion) and loops without a separable step
 // latch are byte-for-byte unchanged. Kill-switch: JDEC_SPLIT_CONTINUE_LATCH_OFF=1.
 func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node) {
-	if os.Getenv("JDEC_SPLIT_CONTINUE_LATCH_OFF") != "" {
+	if jdecenv.Get("JDEC_SPLIT_CONTINUE_LATCH_OFF") != "" {
 		return
 	}
 	for _, latch := range slices.Clone(circleNode.Source) {
@@ -169,10 +246,7 @@ func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node)
 			// Build a FRESH increment expression reusing the latch's variable ref (so RewriteVar renames
 			// it consistently) but not the latch node itself, then an explicit continue to the header.
 			incrNode := manager.NewNode(values.NewBinaryExpression(incExpr.Values[0], incExpr.Values[1], incExpr.Op, incExpr.Typ))
-			contNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-				return "continue"
-			}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-			}))
+			contNode := manager.NewNode(statements.NewSourceTransferStatement("continue", ""))
 			contNode.IsJmp = true
 			replaceNextInPlace(p, latch, incrNode)
 			incrNode.AddNext(contNode)
@@ -184,6 +258,7 @@ func convertSplitContinueToLatch(manager *RewriteManager, circleNode *core.Node)
 func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 	convertSplitContinueToLatch(manager, circleNode)
 	loopEnd := searchCircleEndNode(circleNode, circleNode.Next[0], manager.DominatorMap, manager.LoopRegionReducible)
+
 	preWhileNodes := utils.NodeFilter(manager.WhileNode, func(node *core.Node) bool {
 		return utils.IsDominate(manager.DominatorMap, node, circleNode)
 	})
@@ -193,6 +268,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 	}
 	checkNode := func(node *core.Node) ([]*core.Node, error) {
 		if node.IsJmp {
+			manager.qualifyLoopTransfer(node, circleNode)
 			return nil, nil
 		}
 		if _, ok := node.Statement.(*statements.IfStatement); ok {
@@ -209,18 +285,23 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 			// must not rewrite that edge into a break/continue: doing so deletes the handler from the
 			// enclosing try node's successor list, so the later TryRewriter can no longer wrap the loop
 			// body in try/catch - the handler is emitted as dangling post-loop code and the
-			// caught-exception placeholder leaks as a bare `Exception` token (Bug U, observed on a
-			// try-with-resources whose body is a loop). Leave the edge intact and do NOT descend into the
-			// handler (it is not loop body). Kill-switch: JDEC_LOOP_KEEP_CATCH_EDGE_OFF=1.
-			if next.IsCatchStart && os.Getenv("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
+			// caught-exception placeholder leaks as a bare `Exception` token. Keep that entry edge;
+			// traverse the handler's normal flow only when this loop dominates its entry.
+			// Kill-switch: JDEC_LOOP_KEEP_CATCH_EDGE_OFF=1.
+			if next.IsCatchStart && jdecenv.Get("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
+				// Keep the exceptional entry edge intact, but a handler entered
+				// only from inside this loop still owns normal break/continue
+				// edges. Materialize those before a catch/if consumes its body.
+				if utils.IsDominate(manager.DominatorMap, circleNode, next) {
+					nextList = append(nextList, next)
+				}
 				continue
 			}
 			if next == circleNode {
-				continueNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-					return "continue"
-				}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-				}))
+				continueNode := manager.NewNode(statements.NewSourceTransferStatement("continue", ""))
 				continueNode.IsJmp = true
+				continueNode.Statement.(*statements.CustomStatement).Name = "continue"
+				manager.recordLoopTransfer(continueNode, circleNode, "continue", node)
 				replaceNextInPlace(node, next, continueNode)
 				continueNode.AddNext(next)
 				continue
@@ -228,10 +309,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 
 			if false && !utils.IsDominate(manager.DominatorMap, node, next) && node != circleNode {
 				if node != circleNode {
-					breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-						return "break"
-					}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-					}))
+					breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
 					breakNode.HideNext = next
 					breakNode.IsJmp = true
 					node.RemoveNext(next)
@@ -240,10 +318,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 					circleNode.AddNext(next)
 					continue
 				}
-				breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-					return "break"
-				}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-				}))
+				breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
 				breakNode.HideNext = next
 				breakNode.IsJmp = true
 
@@ -257,10 +332,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 							label := manager.NewLoopLabel()
 							loopNode.Label = label
 						}
-						breakNode.Statement = statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-							return "continue " + loopNode.Label
-						}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-						})
+						breakNode.Statement = statements.NewSourceTransferStatement("continue", loopNode.Label)
 					}
 					//} else {
 					//	return nil, errors.New("loop end node conflict")
@@ -274,10 +346,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 								label := manager.NewLoopLabel()
 								loopNode.Label = label
 							}
-							breakNode.Statement = statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-								return "break " + loopNode.Label
-							}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-							})
+							breakNode.Statement = statements.NewSourceTransferStatement("break", loopNode.Label)
 							//ok = true
 							break
 						}
@@ -315,10 +384,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 					if loopNode.Label == "" {
 						loopNode.Label = manager.NewLoopLabel()
 					}
-					breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-						return "break " + loopNode.Label
-					}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-					}))
+					breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", loopNode.Label))
 					breakNode.IsJmp = true
 					// Mirror the plain-break wiring but hand the exit edge to the ENCLOSING loop: the break
 					// leaf flows to the outer loop node, and the outer loop node owns the edge to the shared
@@ -331,7 +397,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 				}
 				// A switch captures an unlabeled break. Preserve the actual loop target
 				// when the exiting edge belongs to a switch nested in this loop.
-				breakText := "break"
+				breakLabel := ""
 				for _, sw := range manager.SwitchNode {
 					if utils.IsDominate(manager.DominatorMap, circleNode, sw) &&
 						(sw == node || utils.IsDominate(manager.DominatorMap, sw, node)) {
@@ -339,18 +405,19 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 						if loop.Label == "" {
 							loop.Label = manager.NewLoopLabel()
 						}
-						breakText += " " + loop.Label
+						breakLabel = loop.Label
 						break
 					}
 				}
-				breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-					return breakText
-				}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-				}))
+				breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", breakLabel))
 				replaceNextInPlace(node, next, breakNode)
 				breakNode.AddNext(circleNode)
 				circleNode.AddNext(next)
 				breakNode.IsJmp = true
+				if breakLabel == "" {
+					breakNode.Statement.(*statements.CustomStatement).Name = "break"
+					manager.recordLoopTransfer(breakNode, circleNode, "break", node)
+				}
 				continue
 			}
 			if node != circleNode {
@@ -364,14 +431,8 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 							label := manager.NewLoopLabel()
 							loopNode.Label = label
 						}
-						breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-							return "break"
-						}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-						}))
-						breakNode.Statement = statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-							return "continue " + loopNode.Label
-						}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-						})
+						breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
+						breakNode.Statement = statements.NewSourceTransferStatement("continue", loopNode.Label)
 						breakNode.IsJmp = true
 						replaceNextInPlace(node, next, breakNode)
 						breakNode.AddNext(matched[0])
@@ -389,7 +450,7 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 						// before it) was dropped, leaving the inner loop spinning forever. Relax the guard for
 						// reducible methods (preWhileNodeEnds is only populated for genuine enclosing loops, so
 						// non-enclosing while-nodes still cannot match). Irreducible methods keep the guard.
-						relaxLabelGuard := manager.LoopRegionReducible && os.Getenv("JDEC_NO_LOOP_BREAK_LABEL_FIX") == ""
+						relaxLabelGuard := manager.LoopRegionReducible && jdecenv.Get("JDEC_NO_LOOP_BREAK_LABEL_FIX") == ""
 						if len(n.Next) < 2 && !relaxLabelGuard {
 							continue
 						}
@@ -400,17 +461,16 @@ func LoopJmpRewriter(manager *RewriteManager, circleNode *core.Node) error {
 								label := manager.NewLoopLabel()
 								loopNode.Label = label
 							}
-							breakNode := manager.NewNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-								return "break"
-							}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-							}))
-							breakNode.Statement = statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-								return "break " + loopNode.Label
-							}, func(oldId *utils3.VariableId, newId *utils3.VariableId) {
-							})
+							breakNode := manager.NewNode(statements.NewSourceTransferStatement("break", ""))
+							breakNode.Statement = statements.NewSourceTransferStatement("break", loopNode.Label)
 							breakNode.IsJmp = true
 							replaceNextInPlace(node, next, breakNode)
-							breakNode.AddNext(endNode)
+							// The enclosing loop owns its continuation; a jump leaf
+							// alone is consumed by the inner branch collector. Keep
+							// the original exit as analysis metadata, without adding
+							// a synthetic back edge that would absorb the outer body.
+							breakNode.HideNext = endNode
+							n.AddNext(endNode)
 							break
 						}
 					}
@@ -444,6 +504,7 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 	circleNode.RemoveNext(loopStart)
 
 	body := []statements.Statement{}
+	bodyNodes := []*core.Node{}
 	endNodes := []*core.Node{}
 	circleSet := getCircleElementSet(circleNode, loopStart, manager.DominatorMap)
 	err := core.WalkGraph[*core.Node](loopStart, func(node *core.Node) ([]*core.Node, error) {
@@ -457,6 +518,7 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 			return nil, nil
 		}
 		body = append(body, node.Statement)
+		bodyNodes = append(bodyNodes, node)
 		var next []*core.Node
 		for _, n := range node.Next {
 			if slices.Contains(manager.DominatorMap[node], n) {
@@ -488,6 +550,11 @@ func LoopRewriter(manager *RewriteManager, node *core.Node) error {
 	for _, c := range NodeDeduplication(endNodes) {
 		loopNode.AddNext(c)
 	}
+	// An encoded transfer to an enclosing loop remains abrupt after wrapping
+	// this loop. Its own break, however, completes the wrapper normally: the
+	// old circle node carries that ordinary continuation and must participate
+	// in the classification too.
+	markEncodedJumps(loopNode, append(bodyNodes, circleNode))
 	return nil
 }
 func getCircleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*core.Node][]*core.Node) *utils2.Set[*core.Node] {
@@ -537,32 +604,33 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		}
 	}
 	sources := allSources
-	if excludePreHeader && os.Getenv("JDEC_NO_LOOP_BACKEDGE_DOM_FILTER") == "" {
+	if excludePreHeader && jdecenv.Get("JDEC_NO_LOOP_BACKEDGE_DOM_FILTER") == "" {
 		// Drop forward pre-header entry edges. The caller only sets excludePreHeader for a method whose
 		// ORIGINAL CFG is reducible (see RewriteManager.LoopRegionReducible), so a forward, non-dominated
 		// predecessor is a genuine pre-header rather than an alternate entry of an irreducible tangle.
-		// circleNode is the freshly-built do-while node (Id 0); loopStart is the ORIGINAL header and still
-		// carries its bytecode Id, so a real back edge is a BACKWARD jump (source.Id >= loopStart.Id) or a
-		// dominated tail, while a pre-header is a FORWARD non-dominated edge.
+		// Node IDs are allocation order, not bytecode order. A preceding loop
+		// wrapper can have a larger ID than this header without being a back
+		// edge. Require dominance even for synthetic predecessors; otherwise
+		// reverse reachability leaks through the pre-header into an outer loop.
 		var kept []*core.Node
 		for _, n := range allSources {
-			if n.Id >= loopStart.Id || utils.IsDominate(domTree, circleNode, n) {
+			if utils.IsDominate(domTree, circleNode, n) {
 				kept = append(kept, n)
 			}
 		}
-		if len(kept) > 0 {
-			sources = kept
-		}
+		sources = kept
 	}
 	finalSet = reverseBFSStopAt(sources, reverseAdj, circleNode)
+
 	// A retry may return to the header only through its catch. The synthetic
 	// try node represents exceptional edges at region entry, so reverse reachability
 	// alone omits the successful protected path. Include that path up to the
 	// exception table's exclusive end; otherwise the first protected store is
 	// mistaken for the loop exit and moved outside the handler.
 	for _, tr := range finalSet.List() {
+
 		end := tr.ProtectedEnd
-		if end == nil || hasSharedCatchEntry(tr) {
+		if end == nil {
 			continue
 		}
 		for seen := map[*core.Node]bool{}; end != nil && !seen[end]; {
@@ -572,13 +640,14 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 			}
 			end = end.Next[0]
 		}
-		hasRetry := false
-		for _, next := range tr.Next {
-			if next.IsCatchStart && finalSet.Has(next) {
-				hasRetry = true
-			}
+		if !hasPrivateRetryHandler(tr, finalSet) {
+			continue
 		}
-		if !hasRetry {
+		if path, boundary := protectedRetryBranchPrefix(tr, circleNode); boundary != nil {
+			tr.ProtectedEnd = boundary
+			for _, n := range path {
+				finalSet.Add(n)
+			}
 			continue
 		}
 		var path []*core.Node
@@ -587,6 +656,11 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		var visit func(*core.Node)
 		visit = func(n *core.Node) {
 			if n == end {
+				// The return PC is outside the protected interval, but folded
+				// operand calls can still belong entirely to this private try.
+				if protectedRetryFoldedReturn(tr, n) {
+					path = append(path, n)
+				}
 				reachedEnd = true
 				return
 			}
@@ -604,6 +678,17 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 				visit(next)
 			}
 		}
+		if !reachedEnd {
+			// Boolean/if reduction can remove the old exclusive-end node.
+			// Re-establish only a private straight-line protected prefix from
+			// original PC witnesses, then retain its current boundary for later
+			// break/continue materialization. IDs and dangling pointers are not
+			// evidence that a throwing store lies outside the retry's try.
+			if prefix, boundary := protectedRetryPrefix(tr, circleNode); boundary != nil {
+				tr.ProtectedEnd = boundary
+				path, reachedEnd = prefix, true
+			}
+		}
 		if reachedEnd {
 			for _, n := range path {
 				finalSet.Add(n)
@@ -611,6 +696,214 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 		}
 	}
 	return finalSet
+}
+
+func protectedRetryPrefix(tr, header *core.Node) ([]*core.Node, *core.Node) {
+	if tr == nil || !tr.HasProtectedRange || tr.ProtectedStartPC < 0 || tr.ProtectedEndPC <= tr.ProtectedStartPC {
+		return nil, nil
+	}
+	var first *core.Node
+	for _, next := range tr.Next {
+		if next != nil && !next.IsCatchStart {
+			if first != nil {
+				return nil, nil
+			}
+			first = next
+		}
+	}
+	var prefix []*core.Node
+	previous, pc := tr, tr.ProtectedStartPC-1
+	for current := first; len(prefix) < 32; {
+		if current == nil || current == header || current.IsCatchStart || current.IsJmp || !current.HasOriginPC || current.OriginPC <= pc {
+			return nil, nil
+		}
+		if current.OriginPC >= tr.ProtectedEndPC {
+			if len(prefix) != 0 {
+				return prefix, current
+			}
+			return nil, nil
+		}
+		if current.OriginPC < tr.ProtectedStartPC || len(current.Source) != 1 || current.Source[0] != previous || len(current.Next) != 1 {
+			return nil, nil
+		}
+		switch current.Statement.(type) {
+		case *statements.AssignStatement, *statements.ExpressionStatement:
+		default:
+			return nil, nil
+		}
+		prefix = append(prefix, current)
+		previous, pc, current = current, current.OriginPC, current.Next[0]
+	}
+	return nil, nil
+}
+
+// A private retry can leave the protected range from several conditional
+// branches. Reverse reachability from its catch misses those successful paths.
+// Prove the entire acyclic protected subgraph by original PCs, including each
+// branch and its operands' statement, and require every normal exit to reach
+// the same unprotected continuation. No foreign entry, nested container,
+// unwitnessed statement, back edge or unresolved exit is admitted.
+func protectedRetryBranchPrefix(tr, header *core.Node) ([]*core.Node, *core.Node) {
+	if tr == nil || !tr.HasProtectedRange || tr.ProtectedStartPC < 0 || tr.ProtectedEndPC <= tr.ProtectedStartPC {
+		return nil, nil
+	}
+	ranges := tr.SharedProtectedRanges
+	endPC := tr.ProtectedEndPC
+	if tr.SharedProtectedHandler {
+		if len(ranges) < 2 || len(ranges) > 32 {
+			return nil, nil
+		}
+		handler, catchType := ranges[0].HandlerPc, ranges[0].CatchType
+		previousEnd := tr.ProtectedStartPC
+		for _, row := range ranges {
+			if row.HandlerPc != handler || row.CatchType != catchType || int(row.StartPc) < previousEnd || row.EndPc <= row.StartPc {
+				return nil, nil
+			}
+			previousEnd = int(row.EndPc)
+		}
+		if int(ranges[0].StartPc) != tr.ProtectedStartPC {
+			return nil, nil
+		}
+		endPC = previousEnd
+	}
+	covered := func(pc int) bool {
+		if !tr.SharedProtectedHandler {
+			return pc >= tr.ProtectedStartPC && pc < endPC
+		}
+		for _, row := range ranges {
+			if pc >= int(row.StartPc) && pc < int(row.EndPc) {
+				return true
+			}
+		}
+		return false
+	}
+	var first *core.Node
+	for _, next := range tr.Next {
+		if next != nil && !next.IsCatchStart {
+			if first != nil {
+				return nil, nil
+			}
+			first = next
+		}
+	}
+
+	state := map[*core.Node]int{}
+	var path []*core.Node
+	var boundary *core.Node
+	var visit func(*core.Node) bool
+	visit = func(n *core.Node) bool {
+		if n == nil || n == header || n.IsCatchStart || n.IsJmp || !n.HasOriginPC {
+			return false
+		}
+		if n.OriginPC >= endPC {
+			seen := map[*core.Node]bool{}
+			for {
+				if _, jump := n.Statement.(*statements.GOTOStatement); !jump {
+					break
+				}
+				if seen[n] || len(n.Next) != 1 {
+					return false
+				}
+				seen[n] = true
+				n = n.Next[0]
+				if n == nil || n == header || n.IsCatchStart || !n.HasOriginPC || n.OriginPC < endPC {
+					return false
+				}
+			}
+			if boundary != nil && boundary != n {
+				return false
+			}
+			boundary = n
+			return true
+		}
+		if n.OriginPC < tr.ProtectedStartPC || state[n] == 1 || len(state) >= 32 {
+			return false
+		}
+		if state[n] == 2 {
+			return true
+		}
+		if !covered(n.OriginPC) {
+			if _, transfer := n.Statement.(*statements.GOTOStatement); !transfer {
+				return false
+			}
+		}
+		switch n.Statement.(type) {
+		case *statements.ConditionStatement:
+			if len(n.Next) != 2 {
+				return false
+			}
+		case *statements.AssignStatement, *statements.ExpressionStatement, *statements.GOTOStatement:
+			if len(n.Next) != 1 {
+				return false
+			}
+		default:
+			return false
+		}
+		state[n] = 1
+		path = append(path, n)
+		for _, next := range n.Next {
+			if !visit(next) {
+				return false
+			}
+		}
+		state[n] = 2
+		return true
+	}
+	if !visit(first) || boundary == nil || len(path) == 0 {
+		return nil, nil
+	}
+	for _, n := range path {
+		for _, source := range n.Source {
+			if source != tr && state[source] != 2 {
+				return nil, nil
+			}
+		}
+	}
+
+	return path, boundary
+}
+
+func hasPrivateRetryHandler(tr *core.Node, body *utils2.Set[*core.Node]) bool {
+	for _, next := range tr.Next {
+		if next != nil && next.IsCatchStart && body.Has(next) {
+			// A shared finally cleanup may coexist with a private retry catch;
+			// a retry handler with alternate entries cannot prove this region.
+			if !hasSharedCatchEntry(tr) || (!next.SharedProtectedHandler &&
+				len(next.Source) == 1 && next.Source[0] == tr) {
+				return true
+			}
+			if len(next.Source) == 1 && next.Source[0] == tr {
+				if _, boundary := protectedRetryBranchPrefix(tr, nil); boundary != nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func protectedRetryContinuations(body *utils2.Set[*core.Node], header *core.Node) map[*core.Node]bool {
+	exits := map[*core.Node]bool{}
+	for _, tr := range body.List() {
+		if !hasPrivateRetryHandler(tr, body) {
+			continue
+		}
+		prefix, boundary := protectedRetryPrefix(tr, header)
+		if branch, exit := protectedRetryBranchPrefix(tr, header); exit != nil {
+			prefix, boundary = branch, exit
+		}
+		if boundary == nil || body.Has(boundary) {
+			continue
+		}
+		complete := true
+		for _, node := range prefix {
+			complete = complete && body.Has(node)
+		}
+		if complete {
+			exits[boundary] = true
+		}
+	}
+	return exits
 }
 
 func loopAnalysisSuccessors(node *core.Node) []*core.Node {
@@ -742,7 +1035,7 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 				// a non-terminating do-while(true) with the post-loop continuation absorbed into the body
 				// (Bug U second form: try-with-resources + finally whose body is a loop). Exclude handler
 				// edges so the tight fall-out exit is found. Kill-switch: JDEC_LOOP_KEEP_CATCH_EDGE_OFF=1.
-				if n.IsCatchStart && os.Getenv("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
+				if n.IsCatchStart && jdecenv.Get("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
 					continue
 				}
 				outNodes = append(outNodes, n)
@@ -754,6 +1047,12 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 		return nil
 	}
 	if len(outNodes) == 1 {
+		// A private original throw is an abrupt arm, even when it is the
+		// only boundary of an otherwise nonterminating loop. It has no
+		// normal continuation that can be expressed by a generated break.
+		if reducible && originalLoopThrowLeaf(outNodes[0]) && exclusiveTerminalLoopBranch(outNodes[0], circleNode, domTree) {
+			return nil
+		}
 		return outNodes[0]
 	}
 	// Bug O — multi-exit loop: a nested loop that carries a labeled break/continue to an enclosing loop
@@ -766,35 +1065,96 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 	// exit, and the remaining out-edges are then correctly classified as labeled break/continue by
 	// LoopJmpRewriter. Gated on a reducible method (the header is well-defined) and only when there is
 	// genuine multi-exit ambiguity, so single-exit loops are byte-for-byte unchanged.
-	if reducible && os.Getenv("JDEC_NO_LOOP_HEADER_EXIT") == "" {
+	if reducible && jdecenv.Get("JDEC_NO_LOOP_HEADER_EXIT") == "" {
 		var headerOut []*core.Node
 		for _, n := range loopStart.Next {
+			if n.IsCatchStart && jdecenv.Get("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {
+				continue
+			}
 			if !elementSet.Has(n) {
 				headerOut = append(headerOut, n)
 			}
 		}
+		// A successful nested search may return directly at its header's
+		// false edge, while mismatch continues an outer loop through its
+		// step. Keep that terminal arm inline; the step is the actual normal
+		// continuation. Picking the return loses the outer-continue edge.
 		if len(NodeDeduplication(headerOut)) == 1 {
-			return headerOut[0]
+			// A throwing header guard is an inline terminal arm when a
+			// successful body exits to a shared normal continuation. Choosing
+			// the throw as the loop boundary lifts the remaining candidate
+			// checks (and their back edges) outside the loop.
+			normalAlternative := false
+			throwingHeader := terminalRegionOnlyThrows(headerOut[0])
+			for _, out := range outNodes {
+				if throwingHeader && out != headerOut[0] && !IsEndNode(out) && !exclusiveTerminalLoopBranch(out, circleNode, domTree) && loopExitCannotResumeOwner(out, circleNode) {
+					normalAlternative = true
+					break
+				}
+			}
+			privateTerminal := exclusiveTerminalLoopBranch(headerOut[0], circleNode, domTree)
+			if !privateTerminal || (!originalLoopThrowLeaf(headerOut[0]) && !normalAlternative && !hasEnclosingLoopContinuation(outNodes, circleNode, domTree)) {
+				return headerOut[0]
+			}
 		}
 	}
-	if len(outNodes) > 1 {
-		edgeSet := utils2.NewSet[*core.Node]()
-		core.WalkGraph[*core.Node](outNodes[0], func(node *core.Node) ([]*core.Node, error) {
-			edgeSet.Add(node)
-			return loopAnalysisSuccessors(node), nil
-		})
-		var mergeNode *core.Node
-		core.WalkGraph[*core.Node](outNodes[1], func(node *core.Node) ([]*core.Node, error) {
-			if edgeSet.Has(node) {
-				mergeNode = node
-				return nil, nil
+	// Early returns and terminal switch bodies are inline alternatives to a
+	// loop continuation. Requiring a continuation to post-dominate them loses
+	// ordinary breaks whenever a loop can also return early. Conversely, a
+	// terminal case shared by fall-through labels must remain inside switch,
+	// rather than becoming an enclosing-loop break that skips its effects.
+	inlineCases := map[*core.Node]bool{}
+	for _, sw := range elementSet.List() {
+		middle, ok := sw.Statement.(*statements.MiddleStatement)
+		if !ok || middle.Flag != statements.MiddleSwitch {
+			continue
+		}
+		data, ok := middle.Data.([]any)
+		if !ok {
+			continue
+		}
+		cases, err := switchCaseNodes(data, sw)
+		if err != nil {
+			continue
+		}
+		for _, target := range cases.Values() {
+			if target == sw.MergeNode && (sw.SwitchEmptyCaseMerge || sw.SwitchEmptyDefaultMerge) {
+				continue
 			}
-			return loopAnalysisSuccessors(node), nil
-		})
-		return mergeNode
+			if !switchCaseHasOnlyJumpEntries(sw, target, cases) {
+				inlineCases[target] = true
+			}
+		}
 	}
-
-	return nil
+	var continuations []*core.Node
+	protectedExits := map[*core.Node]bool{}
+	if reducible {
+		protectedExits = protectedRetryContinuations(elementSet, circleNode)
+	}
+	for _, out := range outNodes {
+		if inlineCases[out] || IsEndNode(out) {
+			continue
+		}
+		// A return shared by distinct branches can itself be the normal
+		// continuation. A single-path return is already an inline terminal.
+		// A retry catch's back edge is exceptional; the successful protected
+		// prefix falls out normally at the exception table's exclusive end.
+		// Its sole return may contain a downstream call outside that handler.
+		// Keeping it as an inline early return absorbs that call into the try
+		// and retries downstream exceptions. Only the private PC-proved path
+		// may override the ordinary terminal-arm rule.
+		if exclusiveTerminalLoopBranch(out, circleNode, domTree) && !protectedExits[out] {
+			continue
+		}
+		continuations = append(continuations, out)
+	}
+	if len(continuations) == 0 {
+		return nil
+	}
+	if len(continuations) == 1 {
+		return continuations[0]
+	}
+	return commonLoopExit(continuations)
 }
 
 // Shared handler entries describe split protected intervals, not one lexical
@@ -809,4 +1169,137 @@ func hasSharedCatchEntry(node *core.Node) bool {
 		}
 	}
 	return false
+}
+
+func loopHasProvedProtectedRetry(manager *RewriteManager, loop *core.Node) bool {
+	if len(loop.Next) == 0 {
+		return false
+	}
+	body := circleElementSet(loop, loop.Next[0], manager.DominatorMap, true)
+	for _, tr := range body.List() {
+		if hasPrivateRetryHandler(tr, body) {
+			if _, boundary := protectedRetryBranchPrefix(tr, loop); boundary != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// A private retry's successful continuation can be structured before its try.
+// Materialize that loop's exit before an if at this boundary consumes it; the
+// continuation is outside the cyclic body but still owns the incoming exit.
+func protectedRetryContinuationOwnsRewriteNode(manager *RewriteManager, loop, node *core.Node) bool {
+	if loop == nil || node == nil || len(loop.Next) != 1 {
+		return false
+	}
+	body := circleElementSet(loop, loop.Next[0], manager.DominatorMap, true)
+	return protectedRetryContinuations(body, loop)[node]
+}
+
+func protectedTryLoopHeader(manager *RewriteManager, node *core.Node) (*core.Node, []*core.Node) {
+	if manager == nil || node == nil || !manager.LoopRegionReducible || !node.HasProtectedRange || node.ProtectedEndPC <= node.ProtectedStartPC {
+		return nil, nil
+	}
+	middle, ok := node.Statement.(*statements.MiddleStatement)
+	if !ok || middle.Flag != statements.MiddleTryStart {
+		return nil, nil
+	}
+	var normal *core.Node
+	handlers := []*core.Node{}
+	for _, next := range node.Next {
+		if next.IsCatchStart {
+			handlers = append(handlers, next)
+		} else if normal == nil {
+			normal = next
+		} else {
+			return nil, nil
+		}
+	}
+	if normal == nil || len(handlers) == 0 {
+		return nil, nil
+	}
+	// A bounded walk proves that no handler reaches the loop header. Retrying
+	// catches require the existing per-iteration try layout instead.
+	seen := map[*core.Node]bool{}
+	queue := append([]*core.Node{}, handlers...)
+	for len(queue) > 0 {
+		n := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if n == node {
+			return nil, nil
+		}
+		if n == nil || seen[n] {
+			continue
+		}
+		seen[n] = true
+		if len(seen) > 512 {
+			return nil, nil
+		}
+		queue = append(queue, n.Next...)
+	}
+	var backedges []*core.Node
+	for _, source := range node.Source {
+		if utils.IsDominate(manager.DominatorMap, node, source) {
+			backedges = append(backedges, source)
+		}
+	}
+	if len(backedges) == 0 {
+		return nil, nil
+	}
+	return normal, backedges
+}
+
+// Loop passes can materialize an outer transfer before discovering its lexical
+// placement inside an inner loop. Preserve the target identity at creation;
+// a later inner pass qualifies that same transfer instead of interpreting its
+// printed break/continue as an exit of the innermost loop.
+type loopTransfer struct {
+	target *core.Node
+	kind   string
+}
+
+func (manager *RewriteManager) recordLoopTransfer(node, target *core.Node, kind string, sources ...*core.Node) {
+	if manager.loopTransfers == nil {
+		manager.loopTransfers = map[*core.Node]loopTransfer{}
+	}
+	manager.loopTransfers[node] = loopTransfer{target, kind}
+	if len(sources) == 1 {
+		// Qualify before a container captures the statement pointer. An
+		// enclosing-header transfer keeps that exact destination even when
+		// a preceding inner loop also dominates its continuation.
+		for _, inner := range manager.WhileNode {
+			if inner != target && utils.IsDominate(manager.DominatorMap, target, inner) && utils.IsDominate(manager.DominatorMap, inner, sources[0]) {
+				manager.qualifyTargetTransfer(node, target, kind)
+				break
+			}
+		}
+	}
+
+}
+func (manager *RewriteManager) qualifyLoopTransfer(node, current *core.Node) {
+	transfer, ok := manager.loopTransfers[node]
+	if !ok || transfer.target == current || !utils.IsDominate(manager.DominatorMap, transfer.target, current) || !utils.IsDominate(manager.DominatorMap, current, node) {
+		return
+	}
+	manager.qualifyTargetTransfer(node, transfer.target, transfer.kind)
+}
+func (manager *RewriteManager) qualifyTargetTransfer(node, target *core.Node, kind string) {
+	loop, ok := target.Statement.(*statements.DoWhileStatement)
+	if !ok || loop == nil {
+		return
+	}
+	original, ok := node.Statement.(*statements.CustomStatement)
+	if !ok || original == nil || original.ThrownValue != nil {
+		return
+	}
+	if loop.Label == "" {
+		loop.Label = manager.NewLoopLabel()
+	}
+	copy := *original
+	copy.Name = ""
+	copy.LoopTransferKind, copy.LoopTargetLabel = kind, loop.Label
+	copy.StringFunc = func(*class_context.ClassContext) string { return kind + " " + loop.Label }
+	copy.RetargetSourceTransfer(kind, loop.Label)
+	node.Statement = &copy
 }

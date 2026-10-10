@@ -1,0 +1,241 @@
+package javaclassparser
+
+import (
+	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/frametransfer"
+	"github.com/yaklang/javajive/classparser/decompiler/core/methodir"
+	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
+)
+
+// An allocation certificate binds every original hidden constructor argument
+// to an immutable declaring-method parameter slot. Equal nominal types or
+// source names do not identify captured values. This initial profile refuses
+// producer/phi captures until their source declarations and dominance close.
+// Neither this proof nor the metadata/default-constructor proofs license a
+// source local class or private access without a complete source transaction.
+type nativeMethodLocalAllocation struct {
+	newPC, invokePC int
+	slots           []int
+	origins         []ssabuild.Origin
+	stores          map[int]nativeMethodLocalStore
+	producers       map[int]nativeMethodLocalProducerRecord
+}
+
+type nativeMethodLocalProducerRecord struct {
+	instruction methodir.Instr
+	record      ssabuild.InstructionValues
+}
+
+type nativeMethodLocalStore struct {
+	slot   int
+	origin ssabuild.Origin
+}
+
+func (c *ClassObjectDumper) nativeMethodLocalParameterAllocations(local *ClassObject, owner *nativeMethodLocalOwner, constructor *nativeMethodLocalConstructor) (map[int]nativeMethodLocalAllocation, bool) {
+	return c.nativeMethodLocalAllocationFacts(local, owner, constructor, false)
+}
+
+// A produced capture additionally needs an original STORE carrying the exact
+// typed SSA value. Source declaration identity and dominance close separately;
+// no producer is licensed by matching its nominal type or field spelling.
+func (c *ClassObjectDumper) nativeMethodLocalAllocationFacts(local *ClassObject, owner *nativeMethodLocalOwner, constructor *nativeMethodLocalConstructor, produced bool) (map[int]nativeMethodLocalAllocation, bool) {
+	if c == nil || c.obj == nil || local == nil || owner == nil || constructor == nil || owner.owner != c.obj.GetClassName() || owner.declaration == nil {
+		return nil, false
+	}
+	// Revalidate physical ownership at the boundary, rather than trusting a
+	// cached pointer whose attributes or constructor packet may have changed.
+	physical, known := originalMethodLocalOwner(local, c.obj, c.Work)
+	if !known || physical.method != owner.method || physical.descriptor != owner.descriptor || physical.name != owner.name || physical.ordinal != owner.ordinal || physical.declaration != owner.declaration {
+		return nil, false
+	}
+	actual, known := originalMethodLocalSourceConstructor(local, c.obj, c.Work)
+	if !known || !sameOriginalMethodLocalConstructor(actual, constructor, c.Work) {
+		return nil, false
+	}
+	var code *CodeAttribute
+	for _, attribute := range owner.declaration.Attributes {
+		if body, ok := attribute.(*CodeAttribute); ok {
+			if body == nil || code != nil {
+				return nil, false
+			}
+			code = body
+		}
+	}
+	if code == nil {
+		return nil, false
+	}
+	ir, fn, known := c.nativeOriginalMethodSnapshot(owner.declaration, code)
+	if !known {
+		return nil, false
+	}
+	methodParams, _, err := callbinding.Descriptor(owner.descriptor)
+	captureParams, ret, capErr := callbinding.Descriptor(constructor.descriptor)
+	if err != nil || capErr != nil || ret != "V" {
+		return nil, false
+	}
+	parameterTypes := map[int]string{}
+	slot := 0
+	if owner.declaration.AccessFlags&8 == 0 {
+		parameterTypes[0] = "L" + owner.owner + ";"
+		slot = 1
+	}
+	for _, descriptor := range methodParams {
+		parameterTypes[slot] = descriptor
+		slot++
+		if descriptor == "J" || descriptor == "D" {
+			slot++
+		}
+	}
+	stores := map[int]nativeMethodLocalStore{}
+	producers := map[int]nativeMethodLocalProducerRecord{}
+	firstStore := map[ssabuild.Origin]int{}
+	if produced {
+		for _, record := range fn.Instructions {
+			if !nativeProofWork(c.Work, 1) {
+				return nil, false
+			}
+			ins, found := ir.InstrByID(methodir.InstrID(record.PC))
+			if found {
+				if c.Work != nil && c.Work.CheckAlloc(int64(len(producers)+1)*512+int64(len(stores))*128) != nil {
+					return nil, false
+				}
+				producers[int(record.PC)] = nativeMethodLocalProducerRecord{instruction: ins, record: record}
+			}
+			if found && core.LocalAccessOf(ins.Opcode).Write && len(record.Uses) == 1 && record.Uses[0].Kind == ssabuild.OriginInstr {
+				if c.Work != nil && c.Work.CheckAlloc(int64(len(producers))*512+int64(len(stores)+1)*128) != nil {
+					return nil, false
+				}
+				stores[int(record.PC)] = nativeMethodLocalStore{slot: ins.Local, origin: record.Uses[0]}
+				if old, known := firstStore[record.Uses[0]]; !known || int(record.PC) < old {
+					firstStore[record.Uses[0]] = int(record.PC)
+				}
+			}
+		}
+	}
+	result := map[int]nativeMethodLocalAllocation{}
+	var sharedOrigins []ssabuild.Origin
+	var sharedSlots []int
+	for _, record := range fn.Instructions {
+		if !nativeProofWork(c.Work, 1) {
+			return nil, false
+		}
+		instruction, exists := ir.InstrByID(methodir.InstrID(record.PC))
+		if !exists || instruction.Opcode != core.OP_INVOKESPECIAL || instruction.Class != local.GetClassName() || instruction.Member != "<init>" {
+			continue
+		}
+		if instruction.Desc != constructor.descriptor || len(record.BeforeOrigins) != len(record.Before.Locals)+len(record.Before.Stack) {
+			return nil, false
+		}
+		receiverIndex := len(record.Before.Stack) - nativeMemberParameterWidth(captureParams) - 1
+		if receiverIndex < 0 {
+			return nil, false
+		}
+		receiver := record.Before.Stack[receiverIndex]
+		origin := record.BeforeOrigins[len(record.Before.Locals)+receiverIndex]
+		allocation, exists := ir.InstrByID(methodir.InstrID(receiver.NewPC))
+		if receiver.Kind != frametransfer.UninitNew || receiver.Class != local.GetClassName() || origin.Kind != ssabuild.OriginInstr || origin.PC != receiver.NewPC || !exists || allocation.Opcode != core.OP_NEW || allocation.Class != local.GetClassName() {
+			return nil, false
+		}
+		if _, duplicate := result[int(receiver.NewPC)]; duplicate {
+			return nil, false
+		}
+		if c.Work != nil && c.Work.CheckAlloc(int64(len(producers))*512+int64(len(stores))*128+int64(len(result)+1)*int64(len(captureParams)+1)*64) != nil {
+			return nil, false
+		}
+		proof := nativeMethodLocalAllocation{newPC: int(receiver.NewPC), invokePC: int(record.PC), slots: make([]int, len(captureParams)), origins: make([]ssabuild.Origin, len(captureParams)), stores: stores, producers: producers}
+		at := receiverIndex + 1
+		for i, descriptor := range captureParams {
+			if !nativeProofWork(c.Work, 1) || at >= len(record.Before.Stack) {
+				return nil, false
+			}
+			argument := record.BeforeOrigins[len(record.Before.Locals)+at]
+			if argument.Kind == ssabuild.OriginParam {
+				if parameterTypes[argument.Slot] != descriptor {
+					return nil, false
+				}
+				proof.slots[i] = argument.Slot
+			} else if produced && argument.Kind == ssabuild.OriginInstr {
+				if !nativeMethodLocalProducerShape(producers, argument, c.Work) {
+					return nil, false
+				}
+				pc, stored := firstStore[argument]
+				if !stored || pc >= proof.newPC {
+					return nil, false
+				}
+				proof.slots[i] = -1
+			} else {
+				return nil, false
+			}
+			proof.origins[i] = argument
+			if i == constructor.captures[constructor.enclosingField] && constructor.enclosingField != "" && argument.Slot != 0 {
+				return nil, false
+			}
+			at++
+			if descriptor == "J" || descriptor == "D" {
+				at++
+			}
+		}
+		if sharedSlots != nil {
+			for i, slot := range proof.slots {
+				if slot != sharedSlots[i] || proof.origins[i] != sharedOrigins[i] {
+					return nil, false
+				}
+			}
+		} else {
+			sharedSlots = append([]int(nil), proof.slots...)
+			sharedOrigins = append([]ssabuild.Origin(nil), proof.origins...)
+		}
+		result[proof.newPC] = proof
+	}
+	return result, len(result) > 0
+}
+
+// The source operand must name the same descriptor-seeded parameter. Mutable
+// replacement values, equal-typed swapped parameters and arbitrary this-like
+// text cannot satisfy a physical parameter certificate. Source stability and
+// membership in the declaring method's actual parameter list are additional
+// obligations for the later placement transaction.
+func nativeMethodLocalParameterOperand(value values.JavaValue, slot int, descriptor string, ctx *class_context.ClassContext, work *workbudget.Budget, erasers ...func(types.JavaType) (string, bool)) bool {
+	if ctx == nil || slot < 0 {
+		return false
+	}
+	for depth := 0; depth < 32; depth++ {
+		if sourceProofNil(value) || !nativeProofWork(work, 1) {
+			return false
+		}
+		if wrapped, ok := value.(*values.SlotValue); ok {
+			value = wrapped.GetValue()
+			continue
+		}
+		ref, ok := value.(*values.JavaRef)
+		if !ok || ref == nil || ref.CustomValue != nil || ref.StackVar != nil {
+			return false
+		}
+		if len(erasers) > 1 {
+			return false
+		}
+		erasure, known := values.SourceTypeErasure(ref.Type(), ctx)
+		if len(erasers) == 1 {
+			if erasers[0] == nil {
+				return false
+			}
+			erasure, known = erasers[0](ref.Type())
+		}
+		if !known || erasure != descriptor {
+			return false
+		}
+		if slot == 0 && !ctx.IsStatic {
+			return ref.IsThis && descriptor == "L"+strings.ReplaceAll(ctx.ClassName, ".", "/")+";"
+		}
+		actual, known := ref.OriginalParameterSlot()
+		return known && actual == slot
+	}
+	return false
+}

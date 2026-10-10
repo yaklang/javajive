@@ -16,8 +16,9 @@ import (
 	"testing"
 )
 
-// thisReparamCastRe matches the recovered unchecked cast on the cast() reparameterization method.
-var thisReparamCastRe = regexp.MustCompile(`return \(ThisReparamSeed<N1>\) \(this\)`)
+// The raw same-erasure bridge adds no payload check; the outer view restores
+// the method-local parameterization without changing this object identity.
+var thisReparamCastRe = regexp.MustCompile(`return \(ThisReparamSeed<N1>\) \(ThisReparamSeed\) \(this\)`)
 
 // thisReparamBareRe matches the bare (uncast) `return this;` body (the OFF / legacy emission of cast()).
 var thisReparamBareRe = regexp.MustCompile(`ThisReparamSeed<N1> cast\(\) \{\s*return this;`)
@@ -34,13 +35,15 @@ func TestThisReparamReturnCastIsLoadBearing(t *testing.T) {
 
 	// Fix ON (default): the reparameterizing cast() recovers the unchecked `(ThisReparamSeed<N1>)`
 	// cast, while the identity self() stays uncast.
-	os.Unsetenv("JDEC_THIS_REPARAM_CAST_OFF")
+	assertReviewedTypeVarMethod(t, data, "cast", "()LThisReparamSeed;", "<N1:TN;>()LThisReparamSeed<TN1;>;")
+	assertReviewedTypeVarMethod(t, data, "self", "()LThisReparamSeed;", "()LThisReparamSeed<TN;>;")
+	t.Setenv("JDEC_THIS_REPARAM_CAST_OFF", "")
 	on, err := Decompile(data)
 	if err != nil {
 		t.Fatalf("decompile (fix ON) failed: %v", err)
 	}
 	if !thisReparamCastRe.MatchString(on) {
-		t.Errorf("fix ON: expected recovered cast `return (ThisReparamSeed<N1>) (this)` on cast(), got:\n%s", on)
+		t.Errorf("fix ON: expected same-erasure raw bridge for the reparameterized return on cast(), got:\n%s", on)
 	}
 	if !thisReparamSelfRe.MatchString(on) {
 		t.Errorf("fix ON: identity self() must stay uncast `return this;`, got:\n%s", on)

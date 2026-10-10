@@ -100,30 +100,18 @@ func TestLeakedTryLockFinallyIsLoadBearing(t *testing.T) {
 	}
 }
 
-func TestCatchReturnExceptionSentinelIsLoadBearing(t *testing.T) {
-	in := "" +
-		"\t\t}catch(Throwable var3){\n" +
-		"\t\t\tString var3_1 = null;\n" +
-		"\t\t\tif (var1.isInstance(var3)){\n" +
-		"\t\t\t\treturn (T) (Exception);\n" +
-		"\t\t\t}else{\n" +
-		"\t\t\t\tvar3_1 = formatClass((Class)(var1));\n" +
-		"\t\t\t}\n" +
-		"\t\t}\n"
-
-	os.Unsetenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF")
-	on := fixLeakedExceptionSentinel(in)
-	if strings.Contains(on, "(Exception)") {
-		t.Errorf("fix ON: leaked (Exception) survived:\n%s", on)
-	}
-	if !strings.Contains(on, "return (T) (var3);") {
-		t.Errorf("fix ON: expected return (T) (var3), got:\n%s", on)
-	}
-
-	t.Setenv("JDEC_LEAKED_EXCEPTION_SENTINEL_OFF", "1")
-	off := fixLeakedExceptionSentinel(in)
-	if !strings.Contains(off, "return (T) (Exception);") {
-		t.Errorf("fix OFF: expected leaked sentinel to remain, got:\n%s", off)
+// A printed Exception token cannot identify a caught value. Actual handler
+// values bind by decoded entry PC; text fallback must preserve the type namespace.
+func TestCatchSentinelFallbackDoesNotRebindTypeNamespace(t *testing.T) {
+	for _, in := range []string{
+		"catch(Exception caught){throw new RuntimeException((Exception)(caught));}",
+		"catch(Throwable caught){return (Exception)(caught);}",
+		"catch(Throwable caught){return (T)(Exception);}",
+		"catch(Exception caught){throw new RuntimeException(\"(Exception)\");}",
+	} {
+		if got := fixLeakedExceptionSentinel(in); got != in {
+			t.Fatalf("fallback guessed a type/value binding: %s", got)
+		}
 	}
 }
 

@@ -1,11 +1,14 @@
 package javaclassparser
 
 import (
+	"fmt"
 	"io/ioutil"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/yaklang/javajive/internal/codec"
 	"github.com/yaklang/javajive/internal/utils"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 type ClassObject struct {
@@ -141,7 +144,7 @@ func (this *ClassObject) SetClassName(name string) error {
 	if !ok {
 		return utils.Errorf("index %d is not ConstantUtf8Info", this.ThisClass)
 	}
-	oldName.Value = name
+	oldName.SetString(name)
 	return nil
 }
 
@@ -161,7 +164,7 @@ func (this *ClassObject) SetSourceFileName(name string) error {
 	if !ok {
 		return utils.Errorf("index %d is not ConstantUtf8Info", index)
 	}
-	oldSourceFileName.Value = name
+	oldSourceFileName.SetString(name)
 	return nil
 }
 
@@ -185,7 +188,7 @@ func (this *ClassObject) SetMethodName(old, name string) error {
 	if !ok {
 		return utils.Errorf("index %d is not ConstantUtf8Info", index)
 	}
-	oldMethodName.Value = name
+	oldMethodName.SetString(name)
 	return nil
 }
 
@@ -200,6 +203,28 @@ func (this *ClassObject) findUtf8IndexFromPool(v string) int {
 	}
 	return -1
 }
+func (this *ClassObject) getUtf8Units(index uint16) ([]uint16, error) {
+	utf8Info, err := this.getConstantInfo(index)
+	if err != nil {
+		return nil, err
+	}
+	switch ret := utf8Info.(type) {
+	case *ConstantUtf8Info:
+		su := ret.semanticUnits()
+		out := make([]uint16, len(su))
+		copy(out, su)
+		return out, nil
+	case *ConstantStringInfo:
+		return this.getUtf8Units(ret.StringIndex)
+	default:
+		s, err := this.getUtf8(index)
+		if err != nil {
+			return nil, err
+		}
+		return utf16.Encode([]rune(s)), nil
+	}
+}
+
 func (this *ClassObject) getUtf8(index uint16) (string, error) {
 	utf8Info, err := this.getConstantInfo(index)
 	if err != nil {
@@ -236,11 +261,18 @@ func (this *ClassObject) getUtf8(index uint16) (string, error) {
 	return "", utils.Errorf("index %d is not utf8", index)
 }
 func (this *ClassObject) getConstantInfo(index uint16) (ConstantInfo, error) {
-	index -= 1
-	if len(this.ConstantPool) <= int(index) {
-		return nil, utils.Error("Invalid constant pool index!")
+	if index == 0 {
+		return nil, &ClassParseError{Code: ParseCodeCPIndex, Stage: "constant_pool", Field: "index", Msg: "CP index 0 is not a valid reference"}
 	}
-	return this.ConstantPool[index], nil
+	i := int(index) - 1
+	if i < 0 || i >= len(this.ConstantPool) {
+		return nil, &ClassParseError{Code: ParseCodeCPIndex, Stage: "constant_pool", Field: "index", Msg: fmt.Sprintf("Invalid constant pool index %d", index)}
+	}
+	info := this.ConstantPool[i]
+	if info == nil {
+		return nil, &ClassParseError{Code: ParseCodeCPIndex, Stage: "constant_pool", Field: "index", Msg: fmt.Sprintf("CP index %d is an unusable long/double slot", index)}
+	}
+	return info, nil
 }
 func ParseFromBCEL(data string) (cf *ClassObject, err error) {
 	bytes, err := Bcel2bytes(data)
@@ -267,6 +299,20 @@ func ParseFromFile(path string) (cf *ClassObject, err error) {
 	return Parse(bytes)
 }
 func Parse(classData []byte) (cf *ClassObject, err error) {
+	return ParseWithBudget(classData, nil)
+}
+
+// ParseWithBudget shares cancellation, input, read and allocation work with the
+// enclosing decompile/archive request. Standalone Parse keeps legacy defaults.
+func ParseWithBudget(classData []byte, work *workbudget.Budget) (cf *ClassObject, err error) {
+	reader, err := NewClassReaderWithBudget(classData, work)
+	if err != nil {
+		return nil, err
+	}
+	return parseWithReader(reader)
+}
+
+func parseWithReader(reader *ClassReader) (cf *ClassObject, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			var ok bool
@@ -275,11 +321,23 @@ func Parse(classData []byte) (cf *ClassObject, err error) {
 			if !ok {
 				e = utils.Errorf("%v", r)
 			}
-			err = utils.Errorf("parse class error: %v", e)
+			err = fmt.Errorf("parse class error: %w", e)
 		}
 	}()
-	cp := NewClassParser(classData)
-	return cp.Parse()
+	cp := &ClassParser{reader: reader, classObj: NewClassObject()}
+	obj, err := cp.Parse()
+	if err != nil {
+		return nil, err
+	}
+	if obj != nil {
+		if err := obj.CheckUtf8UseSites(); err != nil {
+			return nil, err
+		}
+	}
+	if err := reader.work.CheckContext(reader.context); err != nil {
+		return nil, err
+	}
+	return obj, nil
 }
 
 func Decompile(i []byte) (string, error) {

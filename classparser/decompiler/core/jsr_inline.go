@@ -57,7 +57,7 @@ type branchTarget struct {
 // inlineJSRSubroutines rewrites d.opCodes (and d.ExceptionTable) to remove jsr/ret when the
 // method uses the canonical javac finally-subroutine pattern. It is a no-op (and never errors)
 // otherwise; jsr/ret left in place are rejected downstream exactly as before.
-func (d *Decompiler) inlineJSRSubroutines() {
+func (d *Decompiler) inlineJSRSubroutines() error {
 	defer func() {
 		// Any unexpected shape that slips past validation must not crash the whole decompile;
 		// fall back to the untouched opcode list (-> existing stub).
@@ -65,7 +65,7 @@ func (d *Decompiler) inlineJSRSubroutines() {
 	}()
 
 	if jsrInlineDisabled {
-		return
+		return nil
 	}
 	ops := d.opCodes
 	hasJSR := false
@@ -76,11 +76,14 @@ func (d *Decompiler) inlineJSRSubroutines() {
 		}
 	}
 	if !hasJSR {
-		return
+		return nil
 	}
 	// Work on private opcode copies: even a late exception-PC validation failure
 	// must leave the original method intact. Inline innermost subroutines first;
 	// each successful round removes at least one return-address local.
+	if err := d.chargeNodeCopies(len(ops)); err != nil {
+		return err
+	}
 	work := *d
 	work.opCodes = make([]*OpCode, len(ops))
 	for i, op := range ops {
@@ -90,7 +93,10 @@ func (d *Decompiler) inlineJSRSubroutines() {
 	}
 	for round := 0; round < len(ops); round++ {
 		if !work.tryInlineJSR(work.opCodes) {
-			return
+			if d.Work != nil {
+				return d.Work.Err()
+			}
+			return nil
 		}
 		remaining := false
 		for _, op := range work.opCodes {
@@ -107,9 +113,10 @@ func (d *Decompiler) inlineJSRSubroutines() {
 			d.opcodeIndexToOffset = work.opcodeIndexToOffset
 			d.CurrentId = work.CurrentId
 			d.RootOpCode = work.RootOpCode
-			return
+			return nil
 		}
 	}
+	return nil
 }
 
 func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
@@ -293,6 +300,9 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 			var firstEmitted *OpCode
 			for k := sub.entryIdx + 1; k <= sub.retIdx-1; k++ {
 				src := ops[k]
+				if err := d.chargeNodeCopies(1); err != nil {
+					return false
+				}
 				c := &OpCode{Instr: src.Instr, IsWide: src.IsWide}
 				if len(src.Data) > 0 {
 					c.Data = append([]byte(nil), src.Data...)
@@ -304,6 +314,9 @@ func (d *Decompiler) tryInlineJSR(ops []*OpCode) bool {
 				}
 			}
 			// The tail goto replaces `ret`: jumping to the original ret == returning to caller.
+			if err := d.chargeNodeCopies(1); err != nil {
+				return false
+			}
 			tail := &OpCode{Instr: InstrInfos[OP_GOTO], Data: []byte{0, 0}}
 			cloneMap[ops[sub.retIdx]] = tail
 			newOps = append(newOps, tail)
