@@ -1,6 +1,6 @@
 {
   "fallback_local_multiplier": 1.5007374631268435,
-  "fallback_revision": "d6bf8aca9b707791cbdea5fed501b48bdd04e034",
+  "fallback_revision": "aa9321d447f0eaafcd330da67bc145478dfade38",
   "measured_checkout_heads": [
     "8f3a843a53c2716671919ddecb0dfff51121aec7",
     "9c94287899bfb2f7cff6eeb713212ab570e46649",
@@ -15,6 +15,7 @@
     "TestAdversarialAnnotationInitializerDollarNameCollisionRoundTrip": 4.19,
     "TestAdversarialAnnotationInitializerRoundTrip": 5.08,
     "TestAdversarialAnnotationNumericConstantsPreserveBits": 14.36,
+    "TestAdversarialAnonymousBoundLambdaKeepsDelayedReceiver": 60.09,
     "TestAdversarialAnonymousClassLiteralDirectStoreAndVirtualReceiver": 17.91,
     "TestAdversarialAnonymousClassLiteralInitializerKeepsLinkagePhase": 10.14,
     "TestAdversarialAnonymousClassLiteralInitializerKeepsOriginalSubject": 64.46,
@@ -973,6 +974,9 @@
     "TestNativeAnonymousAssertionRenamedScopeRoundTrip": 8.41,
     "TestNativeAnonymousAssertionStructuredBlocksRoundTrip": 113.21,
     "TestNativeAnonymousBodyDistinguishesEmptyFromUnknown": 0,
+    "TestNativeAnonymousBoundLambdaFactoryRequiresOriginalReceiverOwnership": 1.321,
+    "TestNativeAnonymousBoundLambdaHandleCannotBorrowCachedInvocationKind": 1.171,
+    "TestNativeAnonymousBoundLambdaSourceCannotSubstituteParameterForReceiver": 1.306,
     "TestNativeAnonymousBranchLayoutNeedsClosedOrdinalIntervals": 0,
     "TestNativeAnonymousCacheKeepsArchiveEntryAndPolicyIdentity": 1.82,
     "TestNativeAnonymousCaptureAfterMonitorBranchRoundTrip": 8.55,

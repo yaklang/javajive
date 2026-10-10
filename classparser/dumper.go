@@ -239,7 +239,9 @@ func (c *ClassObjectDumper) selfInnerClassAccessFlags() (uint16, bool) {
 // `HikariPool.connectionBag`). Widening those members to package-private is
 // recompile-safe. Kill-switch: JDEC_NEST_PRIVATE_PACKAGE_OFF=1.
 func (c *ClassObjectDumper) nestDemotePrivate() bool {
-	if c.nativeMethodLocalCurrent != nil || c.nativeMemberCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeMemberRoot != nil && c.nativeMemberRoot.owner == c.obj.GetClassName() {
+	// A capture view is emitted within a proved original lexical declaration.
+	// It has no flattened-sibling access gap to justify widening private fields.
+	if c.nativeCaptureFields != nil || c.nativeMethodLocalCurrent != nil || c.nativeMemberCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeMemberRoot != nil && c.nativeMemberRoot.owner == c.obj.GetClassName() {
 		return false
 	}
 	if c.getenv("JDEC_NEST_PRIVATE_PACKAGE_OFF") == "1" {

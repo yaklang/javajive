@@ -434,6 +434,11 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 						hasLocal = true
 					} else {
 						used[slot] = true
+						// A bound anonymous receiver needs the same retained
+						// source-operand proof as a captured field or local.
+						if j == 0 && impl.AccessFlags&StaticFlag == 0 && context.anonymousCaptures != nil {
+							hasLocal = true
+						}
 						if p == "J" || p == "D" {
 							used[slot+1] = true
 						}

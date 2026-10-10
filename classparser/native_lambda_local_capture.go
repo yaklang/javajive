@@ -154,6 +154,12 @@ func nativeLambdaLocalCaptureSourceClosed(site *nativeLambdaLocalCaptureSite, so
 		return false
 	}
 	for i, operand := range site.operands {
+		// Slot zero in an original instance method is the implicit receiver,
+		// not an ordinary parameter with the same erased type. A snapshot may
+		// carry that receiver only with its original dynamic operand witness.
+		if operand != nil && operand.owner == "" && operand.local == nil && operand.slot == 0 && site.method.AccessFlags&StaticFlag == 0 && !nativeLambdaOriginalReceiverSource(source.values[i], site.pc, i, work) {
+			return false
+		}
 		if operand != nil && operand.opcode == core.OP_GETFIELD && operand.owner != "" {
 			if !source.hasFactoryPC || source.factoryPC != site.pc || !nativeAnonymousLambdaCaptureSource(operand, source.values[i], site.pc, i, &source.context, work) {
 				return false
@@ -171,6 +177,34 @@ func nativeLambdaLocalCaptureSourceClosed(site *nativeLambdaLocalCaptureSite, so
 		}
 	}
 	return true
+}
+
+func nativeLambdaOriginalReceiverSource(value values.JavaValue, pc, index int, work *workbudget.Budget) bool {
+	for depth := 0; depth < 32; depth++ {
+		v, known := nativeMemberEnclosingUnpack(value, work)
+		if !known {
+			return false
+		}
+		if cast, ok := v.(*values.CastExpression); ok && cast != nil && cast.Binding {
+			// The ordinary operand proof separately checks the exact target
+			// erasure. A runtime conversion cannot carry a receiver witness.
+			value = cast.Value
+			continue
+		}
+		ref, ok := v.(*values.JavaRef)
+		if !ok || ref == nil {
+			return false
+		}
+		if slot, sealed := ref.OriginalReceiverSlot(); sealed {
+			return slot == 0
+		}
+		position, ordinal, sealed := ref.OriginalDynamicOperandWitness(ref.Val)
+		if !sealed || position != pc || ordinal != index {
+			return false
+		}
+		value = ref.Val
+	}
+	return false
 }
 
 func nativeLambdaLocalCaptureValue(operand *nativeEnumSelectorProducer, value values.JavaValue, pc, index int, ctx *class_context.ClassContext, work *workbudget.Budget) bool {

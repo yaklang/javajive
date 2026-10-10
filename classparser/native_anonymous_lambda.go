@@ -58,8 +58,9 @@ func nativeAnonymousLambdaCaptureField(object *ClassObject, captures *nativeAnon
 }
 
 // Regenerating an anonymous body does not license arbitrary handles to its
-// unnameable type. The only new handle domain is its own already proved static
-// metafactory implementation. Foreign references and ordinary method/field or
+// unnameable type. A handle may target only its own already proved metafactory
+// implementation, with the invocation kind required by its original flags.
+// Foreign references and ordinary method/field or
 // constructor handles keep the existing refusal.
 func nativeAnonymousLambdaHandlesClosed(child *nativeAnonymousClass, index *nativeMemberIndex, work *workbudget.Budget) bool {
 	if child == nil || child.object == nil || index == nil || !index.valid || !nativeProofWork(work, 1) {
@@ -90,6 +91,51 @@ func nativeAnonymousLambdaHandlesClosed(child *nativeAnonymousClass, index *nati
 		}
 		methods[key] = method
 	}
+	// The archive index is a summary, not a replacement for the current
+	// physical handle kind. In particular virtual and special bound handles
+	// cannot exchange their original provenance through a cached target.
+	if !nativeProofWork(work, int64(len(child.object.ConstantPool))) || work != nil && work.CheckAlloc(int64(len(targets)+1)*224) != nil {
+		return false
+	}
+	originalTargets := map[nativeMemberHandleTarget]bool{}
+	for _, constant := range child.object.ConstantPool {
+		handle, ok := constant.(*ConstantMethodHandleInfo)
+		if !ok {
+			continue
+		}
+		if handle == nil || handle.ReferenceIndex == 0 || int(handle.ReferenceIndex) > len(child.object.ConstantPool) {
+			return false
+		}
+		reference := child.object.ConstantPool[handle.ReferenceIndex-1]
+		member := nativeConstantMember(reference)
+		if member == nil {
+			return false
+		}
+		declaration, known := sourceBridgeClassName(child.object, member.ClassIndex)
+		if !known {
+			return false
+		}
+		if declaration != owner {
+			continue
+		}
+		if member.NameAndTypeIndex == 0 || int(member.NameAndTypeIndex) > len(child.object.ConstantPool) || len(originalTargets) >= 4096 {
+			return false
+		}
+		nt, ok := child.object.ConstantPool[member.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
+		if !ok || nt == nil {
+			return false
+		}
+		name, nk := sourceBridgeUTF8(child.object, nt.NameIndex)
+		desc, dk := sourceBridgeUTF8(child.object, nt.DescriptorIndex)
+		if !nk || !dk {
+			return false
+		}
+		_, methodRef := reference.(*ConstantMethodrefInfo)
+		originalTargets[nativeMemberHandleTarget{kind: handle.ReferenceKind, methodRef: methodRef, name: name, descriptor: desc, referencer: owner}] = true
+		if len(originalTargets) > len(targets) {
+			return false
+		}
+	}
 	// A cached planning permission cannot replace the current original
 	// flags, code, bootstrap and SAM declaration. Reprove once per distinct
 	// target in this handle closure, with an empty local-capture proof cache.
@@ -97,16 +143,18 @@ func nativeAnonymousLambdaHandlesClosed(child *nativeAnonymousClass, index *nati
 	context.localCaptures = nil
 	context.factorySites = nil
 	fresh := &nativeMemberClass{object: child.object, lambdaContext: context}
+	seenTargets := map[nativeMemberHandleTarget]bool{}
 	for _, target := range targets {
-		if !nativeProofWork(work, 1) || target.referencer != owner || !target.methodRef || target.kind != 6 {
+		if !nativeProofWork(work, 1) || target.referencer != owner || !target.methodRef || !originalTargets[target] {
 			return false
 		}
 		method := methods[[2]string{target.name, target.descriptor}]
-		if method == nil || !nativeMemberLambdaImplementation(fresh, method, work) {
+		if method == nil || method.AccessFlags&StaticFlag != 0 && target.kind != 6 || method.AccessFlags&StaticFlag == 0 && target.kind != 5 && target.kind != 7 || !nativeMemberLambdaImplementation(fresh, method, work) {
 			return false
 		}
+		seenTargets[target] = true
 	}
-	return true
+	return len(seenTargets) == len(originalTargets)
 }
 
 func (z *JarFS) nativeAnonymousLambdaChildArchiveClosed(child *nativeAnonymousClass, index *nativeMemberIndex, work *workbudget.Budget) bool {

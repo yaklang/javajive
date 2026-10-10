@@ -523,7 +523,7 @@ func nativeAnonymousForestSymbolClosure(forest *nativeAnonymousForest, work *wor
 					return false
 				}
 				for name := range forest.units {
-					if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestConstructorNameType(object, index+1, forest, work) && !nativeAnonymousForestEnclosingNameType(object, index+1, forest, work) && !nativeAnonymousForestCaptureNameType(forest, object, index+1, work) &&
+					if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestConstructorNameType(object, index+1, forest, work) && !nativeAnonymousForestEnclosingNameType(object, index+1, forest, work) && !nativeAnonymousForestCaptureNameType(forest, object, index+1, work) && !nativeAnonymousForestLambdaNameType(forest, object, index+1, work) &&
 						!(nativeAnonymousForestBridgeMarker(forest, name) && bridgeNameTypes[index+1]) {
 						return false
 					}
