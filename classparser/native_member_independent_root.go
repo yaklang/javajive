@@ -214,9 +214,17 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 	}
 	entry.once.Do(func() {
 		prepared := z.prepareNativeMemberFamilyFromRoot(root, snap, certificate)
-		// This source scope cannot recursively claim another independent scope or
-		// import metadata-only ancestors through a dependency transaction.
-		result := z.finishNativeMemberFamily(prepared, z.nativeMemberStandardLookup, false)
+		// Closed leaf layouts may compose completed declaration views only after
+		// the original source-boundary graph proves acyclicity. Other layouts
+		// retain their standard lookup and cannot claim another independent scope.
+		lookup := z.nativeMemberStandardLookup
+		if prepared != nil {
+			f := prepared.family
+			if len(f.children) == 0 && len(f.methodLocals) == 0 && len(f.enumConstants) == 0 && len(f.enumSwitchTables) == 0 && len(f.anonymousUnits) == 0 && f.anonymous == nil && f.anonymousForest == nil {
+				lookup = z.nativeMemberLookup
+			}
+		}
+		result := z.finishNativeMemberFamily(prepared, lookup, false)
 		if result == nil {
 			return
 		}

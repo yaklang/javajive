@@ -195,6 +195,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	if p.independentRoot != nil && (!p.independentRoot.validFor(d) || !p.independentRoot.familyClosed(p, d.Work)) {
 		return nil
 	}
+	if !z.nativeMemberIndependentInvocationsClosed(prepared) {
+		return nil
+	}
 	if !z.nativeMemberAccessRepresentable(p, z.originalMemberIndex(), d.Work, peers...) {
 		return nil
 	}
