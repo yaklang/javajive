@@ -1735,7 +1735,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		}
 	}
 	allowed := map[int]map[*coreutils.VariableId]bool{}
-	assigned := map[string]*coreutils.VariableId{}
+	names := &nativeCaptureNameBindings{}
 	remaining := 16384
 	activeValue := map[values.JavaValue]bool{}
 	activeStatement := map[statements.Statement]bool{}
@@ -1814,12 +1814,11 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 						p.failed = true
 						continue
 					}
-					if old := assigned[name]; old != nil && old != ref.Id {
+					if !names.bind(name, ref.Id, visible, c.Work) {
 						p.failed = true
 						continue
 					}
 					ctx.LocalNames[ref.Id] = name
-					assigned[name] = ref.Id
 					site[ref.Id] = true
 				}
 			}
@@ -1893,9 +1892,11 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	walk(body, visible)
 	reserved := map[string]bool{}
 	protected := map[*coreutils.VariableId]bool{}
-	for name, id := range assigned {
+	for name, bindings := range names.bindings {
 		reserved[name] = true
-		protected[id] = true
+		for id := range bindings {
+			protected[id] = true
+		}
 	}
 	c.prepareNativeSourceNames(body, params, reserved, protected)
 	ctx.SourceCaptureStable = func(pc int, id *coreutils.VariableId) bool { return allowed[pc][id] }
