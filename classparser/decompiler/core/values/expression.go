@@ -4996,7 +4996,11 @@ func (f *FunctionCallExpression) renderCall(funcCtx *class_context.ClassContext)
 		if receiver, known := funcCtx.SourceLexicalInvocationReceiver(f); known {
 			if args, valid := f.DescriptorArgumentStrings(funcCtx); valid {
 				receiver, events := funcCtx.InvocationReceiverSource(receiver)
-				return receiver + "." + class_context.SafeIdentifier(f.FunctionName) + "(" + strings.Join(args, ",") + ")" + events
+				// A certified empty receiver denotes an unqualified lexical call.
+				if receiver != "" {
+					receiver += "."
+				}
+				return receiver + class_context.SafeIdentifier(f.FunctionName) + "(" + strings.Join(args, ",") + ")" + events
 			}
 		}
 	}

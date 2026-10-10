@@ -5,6 +5,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"slices"
+	"strings"
 )
 
 // A concrete anonymous allocation exposes its own source declarations without
@@ -27,7 +28,14 @@ func nativeAnonymousDeclaredCall(forest *nativeAnonymousForest, caller *ClassObj
 	}
 	child := forest.units[symbol.Name]
 	group := forest.groups[caller.GetClassName()]
-	if child == nil || child.object == nil || forest.objects[symbol.Name] != child.object || group == nil || group.failed || group.forest != forest || group.children[symbol.Name] != child || child.method != method || int(op.CurrentOffset) <= child.invokePC {
+	if child == nil || child.object == nil || forest.objects[symbol.Name] != child.object || group == nil || group.failed || group.forest != forest || group.children[symbol.Name] != child || int(op.CurrentOffset) <= child.invokePC {
+		return false
+	}
+	// EnclosingMethod names the lexical source method; a NEW in its
+	// independently witnessed lambda implementation has a different physical
+	// method key. Reuse the original allocation-scope certificate for both.
+	cut := strings.IndexByte(method, '(')
+	if cut <= 0 || !nativeAnonymousAllocationScope(caller, child, method[:cut], method[cut:], work) {
 		return false
 	}
 	params, _, err := callbinding.Descriptor(symbol.Description)

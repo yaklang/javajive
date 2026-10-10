@@ -22,6 +22,8 @@ type nativeAnonymousForest struct {
 	captureReferences map[string]map[int]*nativeMemberLexicalRead
 	members           *nativeMemberFamily
 	lexicalThis       map[string]map[string]map[int]bool
+	consumers         map[string]map[string]map[int]*nativeAnonymousLexicalConsumer
+	resolve           func(string) (*ClassObject, bool)
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
@@ -43,10 +45,11 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	if !nestKnown {
 		return nil
 	}
-	forest := &nativeAnonymousForest{root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}, members: members, lexicalThis: map[string]map[string]map[int]bool{}}
+	forest := &nativeAnonymousForest{root: c.obj.GetClassName(), groups: map[string]*nativeAnonymousFamily{}, units: map[string]*nativeAnonymousClass{}, objects: map[string]*ClassObject{c.obj.GetClassName(): c.obj}, reads: map[string]map[string]map[int]*nativeMemberLexicalRead{}, readPCs: map[string]map[string]map[int]bool{}, anonymousTypes: map[string]bool{}, captureReferences: map[string]map[int]*nativeMemberLexicalRead{}, members: members, resolve: c.nativeAnnotationDeclarationResolver(), consumers: map[string]map[string]map[int]*nativeAnonymousLexicalConsumer{}, lexicalThis: map[string]map[string]map[int]bool{}}
 	committed := false
 	if members != nil {
 		originalChildren, originalObjects := members.children, members.lexicalObjects
+		originalGetters, originalRetained, originalNestmate := members.getters, members.retainedAccessors, members.nestmateAccessors
 		if c.Work != nil && c.Work.CheckAlloc(int64(len(originalChildren)+len(originalObjects)+2)*512) != nil {
 			return nil
 		}
@@ -75,6 +78,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 		defer func() {
 			if !committed {
 				members.children, members.lexicalObjects = originalChildren, originalObjects
+				members.getters, members.retainedAccessors, members.nestmateAccessors = originalGetters, originalRetained, originalNestmate
 				for child, state := range originalStates {
 					*child = state
 				}
@@ -185,6 +189,31 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 			}
 			child.sourceName = source
 			child.sourceAnonymousOwner = members.anonymousNamedAnchor(name)
+		}
+	}
+	// Named participants were registered before discovering anonymous units.
+	// Rebuild the complete accessor order only when an additional original
+	// anonymous accessor is present; keep retained/nestmate profiles intact.
+	if members != nil {
+		needsAccessors := false
+		for _, unit := range forest.units {
+			for _, method := range unit.object.Methods {
+				if method == nil || !nativeProofWork(c.Work, 1) {
+					return nil
+				}
+				if method.AccessFlags&0x1008 == 0x1008 {
+					name, ok := sourceBridgeUTF8(unit.object, method.NameIndex)
+					if !ok {
+						return nil
+					}
+					if strings.HasPrefix(name, "access$") {
+						needsAccessors = true
+					}
+				}
+			}
+		}
+		if needsAccessors && (!nativeMemberCollectPrivateGettersResolved(members, c.nativeAnnotationDeclarationResolver(), c.Work) || !c.planNativeMemberAccessorCompilerProfile(members)) {
+			return nil
 		}
 	}
 	if !nativeAnonymousForestCaptureReads(forest, c.Work, c.buildInvocationMetadata()) || !nativeAnonymousForestSymbolClosure(forest, c.Work) {
@@ -419,6 +448,9 @@ func nativeAnonymousForestOpcodeClosure(forest *nativeAnonymousForest, work *wor
 						if kind == core.OP_GETFIELD && forest.readPCs[owner][mn+md][int(op.CurrentOffset)] {
 							continue
 						}
+						if consumer := forest.consumers[owner][mn+md][int(op.CurrentOffset)]; consumer != nil && consumer.kind == kind && consumer.owner == symbol.Name && consumer.name == symbol.Member && consumer.descriptor == symbol.Description {
+							continue
+						}
 						if kind == core.OP_INVOKEVIRTUAL && (nativeAnonymousInheritedCall(forest, object, op, work, resolvers...) || nativeAnonymousDeclaredCall(forest, object, mn+md, op, work)) {
 							continue
 						}
@@ -504,7 +536,7 @@ func nativeAnonymousForestSymbolClosure(forest *nativeAnonymousForest, work *wor
 				return false
 			}
 			for name := range forest.units {
-				if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestEnclosingDeclaration(object, member, forest, work) &&
+				if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestEnclosingDeclaration(object, member, forest, work) && !nativeAnonymousAccessorDeclaration(forest, object, member, work) &&
 					!(nativeAnonymousForestBridgeMarker(forest, name) && nativeMemberJointBridgeDeclaration(forest.members, object, member, name, work)) {
 					return false
 				}
@@ -523,7 +555,7 @@ func nativeAnonymousForestSymbolClosure(forest *nativeAnonymousForest, work *wor
 					return false
 				}
 				for name := range forest.units {
-					if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestConstructorNameType(object, index+1, forest, work) && !nativeAnonymousForestEnclosingNameType(object, index+1, forest, work) && !nativeAnonymousForestCaptureNameType(forest, object, index+1, work) && !nativeAnonymousForestLambdaNameType(forest, object, index+1, work) &&
+					if strings.Contains(descriptor, "L"+name+";") && !nativeAnonymousForestConstructorNameType(object, index+1, forest, work) && !nativeAnonymousForestEnclosingNameType(object, index+1, forest, work) && !nativeAnonymousForestCaptureNameType(forest, object, index+1, work) && !nativeAnonymousForestLambdaNameType(forest, object, index+1, work) && !nativeAnonymousAccessorNameType(forest, object, index+1, work) &&
 						!(nativeAnonymousForestBridgeMarker(forest, name) && bridgeNameTypes[index+1]) {
 						return false
 					}

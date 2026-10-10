@@ -201,6 +201,11 @@ func nativeAnonymousConstructorRolesWithLambdas(obj *ClassObject, owner, method,
 		if c.assertions != nil && c.assertions.initializer == m {
 			continue
 		}
+		// An accessor is a separate original packet role; it never receives
+		// metafactory permission. Complete forest/source closure is still required.
+		if members != nil && lambda != nil && nativeMemberPrivateAccessProofWithDeclarations(obj, m, lambda.lambdaContext.resolve, work, members.lexicalObjects) != nil {
+			continue
+		}
 		if m.AccessFlags&0x0008 != 0 || m.AccessFlags&0x1002 == 0x1002 {
 			// Anonymous source cannot declare an ordinary static method in
 			// Java 8. Both static and bound private synthetic targets are
@@ -795,9 +800,16 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 		if !found {
 			continue
 		}
-		sibling, err := c.parseResolved(raw)
-		if err != nil || sibling.GetClassName() != name {
-			return nil
+		var sibling *ClassObject
+		if forest != nil {
+			sibling = forest.objects[name]
+		}
+		if sibling == nil {
+			var err error
+			sibling, err = c.parseResolved(raw)
+			if err != nil || sibling.GetClassName() != name {
+				return nil
+			}
 		}
 		for _, attribute := range sibling.Attributes {
 			if inner, ok := attribute.(*InnerClassesAttribute); ok && inner != nil {
@@ -825,7 +837,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 				return nil
 			}
 			for child := range p.children {
-				if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestEnclosingDeclaration(sibling, member, forest, c.Work) && !nativeMemberJointBridgeDeclaration(members, sibling, member, child, c.Work) {
+				if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestEnclosingDeclaration(sibling, member, forest, c.Work) && !nativeAnonymousAccessorDeclaration(forest, sibling, member, c.Work) && !nativeMemberJointBridgeDeclaration(members, sibling, member, child, c.Work) {
 					return nil
 				}
 			}
@@ -838,7 +850,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 					return nil
 				}
 				for child := range p.children {
-					if strings.Contains(desc, "L"+child+";") && !nativeAnonymousForestConstructorNameType(sibling, constantIndex+1, forest, c.Work) && !nativeAnonymousForestEnclosingNameType(sibling, constantIndex+1, forest, c.Work) && !nativeAnonymousForestCaptureNameType(forest, sibling, constantIndex+1, c.Work) && !jointBridgeTypes[constantIndex+1] {
+					if strings.Contains(desc, "L"+child+";") && !nativeAnonymousForestConstructorNameType(sibling, constantIndex+1, forest, c.Work) && !nativeAnonymousForestEnclosingNameType(sibling, constantIndex+1, forest, c.Work) && !nativeAnonymousForestCaptureNameType(forest, sibling, constantIndex+1, c.Work) && !nativeAnonymousAccessorNameType(forest, sibling, constantIndex+1, c.Work) && !jointBridgeTypes[constantIndex+1] {
 						return nil
 					}
 				}
@@ -911,7 +923,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 					return nil
 				}
 				for child := range p.children {
-					if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestConstructorNameType(object, constantIndex+1, forest, c.Work) && !nativeAnonymousForestEnclosingNameType(object, constantIndex+1, forest, c.Work) && !nativeAnonymousForestCaptureNameType(forest, object, constantIndex+1, c.Work) && !nativeAnonymousForestLambdaNameType(forest, object, constantIndex+1, c.Work) && !bridgeNameTypes[constantIndex+1] {
+					if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestConstructorNameType(object, constantIndex+1, forest, c.Work) && !nativeAnonymousForestEnclosingNameType(object, constantIndex+1, forest, c.Work) && !nativeAnonymousForestCaptureNameType(forest, object, constantIndex+1, c.Work) && !nativeAnonymousForestLambdaNameType(forest, object, constantIndex+1, c.Work) && !nativeAnonymousAccessorNameType(forest, object, constantIndex+1, c.Work) && !bridgeNameTypes[constantIndex+1] {
 						return nil
 					}
 				}
@@ -927,7 +939,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 			}
 			for child := range p.children {
 				name, _ := object.getUtf8(member.NameIndex)
-				if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestEnclosingDeclaration(object, member, forest, c.Work) && !p.accessBridgeDescriptor(object, name, descriptor) && !nativeMemberJointBridgeDeclaration(members, object, member, child, c.Work) {
+				if strings.Contains(descriptor, "L"+child+";") && !nativeAnonymousForestEnclosingDeclaration(object, member, forest, c.Work) && !nativeAnonymousAccessorDeclaration(forest, object, member, c.Work) && !p.accessBridgeDescriptor(object, name, descriptor) && !nativeMemberJointBridgeDeclaration(members, object, member, child, c.Work) {
 					return nil
 				}
 			}
@@ -1449,6 +1461,9 @@ func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 			}
 		}
 		for _, getter := range p.getters {
+			if c.nativeAnonymousForest != nil && c.nativeAnonymousForest.units[getter.owner] != nil {
+				result[getter.field] = true
+			}
 			if getter.staticField && nativeStaticAccessorQualifierShadowed(c.FuncCtx.ShortTypeName(strings.ReplaceAll(getter.owner, "/", ".")), c.FuncCtx) {
 				result[getter.field] = true
 			}

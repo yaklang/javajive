@@ -427,7 +427,10 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 		if getter == nil {
 			return "", false
 		}
-		sourceOwner := ctx.ShortTypeName(strings.ReplaceAll(getter.owner, "/", "."))
+		sourceOwner := ""
+		if c.nativeAnonymousForest == nil || c.nativeAnonymousForest.units[getter.owner] == nil {
+			sourceOwner = ctx.ShortTypeName(strings.ReplaceAll(getter.owner, "/", "."))
+		}
 		unqualified := getter.staticField && nativeStaticAccessorQualifierShadowed(sourceOwner, ctx)
 		// Provisional IR rendering cannot commit a lexical binding before this
 		// method has reserved its actual parameter/local declaration identities.
@@ -556,6 +559,14 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 			return readView("(" + sourceOwner + "/*jdec-owned-getter:" + strconv.Itoa(getter.ordinal) + ":" + getter.owner + ":" + getter.field + "*/." + getter.field + ")")
 		}
 
+		if f := c.nativeAnonymousForest; f != nil && f.units[getter.owner] != nil {
+			consumer := f.consumers[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+			if consumer == nil || consumer.getter != getter || !nativeAnonymousLexicalConsumerSourceClosed(c, consumer, ctx, c.Work) || !nativeAnonymousLexicalConsumerOperand(v, consumer, ctx, c.Work) {
+				p.failed = true
+				return "", false
+			}
+			return readView("(/*jdec-owned-getter:" + strconv.Itoa(getter.ordinal) + ":" + getter.owner + ":" + getter.field + "*/" + getter.field + ")")
+		}
 		// A raw view retains the original accessor return erasure. The receiver is
 		// evaluated once. javac regenerates the private GETFIELD accessor (including
 		// its declaring-class initialization) instead of an illegal inner static
