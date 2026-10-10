@@ -689,7 +689,10 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 	if !c.planNativeMethodLocals(p) {
 		return nil
 	}
-	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 && !c.nativeMemberHasAnonymousDeclarations() {
+	// An ordinary empty root needs no family projection. A separately proved
+	// static boundary still needs a completed declaration even without children:
+	// foreign families use that declaration to bind their original SUPER type.
+	if independent == nil && len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 && !c.nativeMemberHasAnonymousDeclarations() {
 		return nil
 	}
 	for name, child := range p.children {

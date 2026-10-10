@@ -607,9 +607,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// (ACC_PUBLIC for a public class). Keep them verbatim. The old code assumed every '$' name was
 			// nested, failed the InnerClasses lookup, and wrongly stripped `public`, making the class
 			// inaccessible across packages ("$Gson$Preconditions is not public in com.google.gson.internal").
-		case c.nativeAnonymousIndependentInitializerHeader():
-			// A proved independent initializer tail keeps its ClassFile
-			// visibility. Other flat anonymous units retain their existing
+		case c.nativeAnonymousIndependentInitializerHeader() || c.nativeMemberIndependentSourceHeader():
+			// Proved independent initializer tails and static source roots
+			// keep their ClassFile visibility. Other flat units retain their
 			// accessibility policy for references from separate source units.
 			if c.obj.AccessFlags&1 == 0 {
 				accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))

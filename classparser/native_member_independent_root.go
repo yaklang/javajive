@@ -239,3 +239,14 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 	})
 	return entry
 }
+
+// A proved independent static boundary retains its original ClassFile
+// visibility. Its physical outer remains metadata, so the broad flat-unit
+// visibility policy must not widen this separately proved source scope.
+func (c *ClassObjectDumper) nativeMemberIndependentSourceHeader() bool {
+	if c == nil || c.obj == nil || c.nativeMemberCurrent != nil || c.nativeMemberRoot == nil {
+		return false
+	}
+	p := c.nativeMemberRoot
+	return p.owner == c.obj.GetClassName() && p.independentRoot != nil && p.independentRoot.validFor(c) && p.independentRoot.familyClosed(p, c.Work)
+}
