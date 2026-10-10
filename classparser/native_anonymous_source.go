@@ -738,7 +738,7 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 			p.bridges[bridge.descriptor] = bridge
 		}
 	}
-	if len(p.children) == 0 {
+	if len(p.children) == 0 && (members == nil || len(p.standalone) == 0) {
 		return nil
 	}
 	for i := 1; i <= len(p.children); i++ {

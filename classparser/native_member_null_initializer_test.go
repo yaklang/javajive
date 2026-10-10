@@ -14,7 +14,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func TestInterfaceInitializerOriginalNullIsNonconstant(t *testing.T) {
+func TestNativeInterfaceInitializerOriginalNullIsNonconstant(t *testing.T) {
 	for _, descriptor := range []string{"Ljava/lang/String;", "Ljava/lang/Object;", "[Ljava/lang/String;", "I", "J", "Z"} {
 		t.Run(descriptor, func(t *testing.T) {
 			if got := interfaceInitializerNonconstant(values.NewOriginalNullLiteral(0), descriptor); got != (len(descriptor) > 1) {
@@ -43,7 +43,7 @@ func TestInterfaceInitializerOriginalNullIsNonconstant(t *testing.T) {
 	}
 }
 
-func TestInterfaceInitializerOwnReadRequiresOriginalPartition(t *testing.T) {
+func TestNativeInterfaceInitializerOwnReadRequiresOriginalPartition(t *testing.T) {
 	files := nativeCompileClasses(t, `class NullReadOwner{interface Contract{String early=Contract.later;String later=null;}}`)
 	variants := []string{"original", "no code", "missing witness", "wrong owner", "wrong name", "wrong descriptor", "wrong PC", "handle alias", "after store", "missing partition", "too many writes", "ConstantValue", "mutable declaration", "duplicate declaration", "wrong opcode", "wrong CP tag", "budget", "canceled"}
 	for _, variant := range variants {
