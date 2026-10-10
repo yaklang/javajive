@@ -13,7 +13,7 @@ import (
 // select an emitted private declaration. Legacy accessor calls remain legal:
 // their package method calls and the private operations inside the declaring
 // class are checked separately. Unused constant-pool entries are not accesses.
-func nativeMemberPrivatePermissionClosed(p *nativeMemberFamily, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+func nativeMemberPrivatePermissionClosed(p *nativeMemberFamily, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, fallbackParents ...func(string) ([]string, bool)) bool {
 	if p == nil || p.failed || resolve == nil || len(p.lexicalObjects) == 0 || len(p.lexicalObjects) > 4096 || !nativeProofWork(work, 1) {
 		return false
 	}
@@ -99,7 +99,7 @@ func nativeMemberPrivatePermissionClosed(p *nativeMemberFamily, resolve func(str
 			}
 			owner, member, known := nativePrivatePermissionTarget(ref.Name, ref.Member, ref.Description, field, original, work)
 			if !known {
-				return false
+				return len(fallbackParents) == 1 && nativePrivatePermissionDisjointAncestry(ref.Name, p.lexicalObjects, original, fallbackParents[0], work)
 			}
 			if member == nil || member.AccessFlags&2 == 0 || p.lexicalObjects[owner.GetClassName()] != owner {
 				return true

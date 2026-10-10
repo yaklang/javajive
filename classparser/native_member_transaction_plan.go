@@ -182,7 +182,7 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	if !nativeModernNestSourceScopeClosed(p.modernNestObjects, objects, d.Work) {
 		return nil
 	}
-	if !nativeMemberPrivatePermissionClosed(p, d.nativeAnnotationDeclarationResolver(), d.Work) {
+	if !nativeMemberPrivatePermissionClosed(p, d.nativeAnnotationDeclarationResolver(), d.Work, d.nativePrivatePermissionPlatformParents()) {
 		return nil
 	}
 
