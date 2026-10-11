@@ -711,6 +711,8 @@
     "TestAdversarialNestedFactoryArrayTypeRoundTrip": 3.77,
     "TestAdversarialNestedFallbackProtectedArrayRoundTrip": 3.46,
     "TestAdversarialNestedFunctionalErasureRoundTrip": 4.47,
+    "TestAdversarialNestedIteratorCaptureOriginalJavac8": 48.473805,
+    "TestAdversarialNestedIteratorCaptureProducer": 60.959937,
     "TestAdversarialNestedLoopHandlerReentryRoundTrip": 5.92,
     "TestAdversarialNestedMatchingRuleBreakRoundTrip": 8,
     "TestAdversarialNestedMethodLocalCheckedProducerRoundTrip": 36.7,

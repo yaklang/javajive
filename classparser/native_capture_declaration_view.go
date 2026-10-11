@@ -74,25 +74,39 @@ func (c *ClassObjectDumper) nativeCaptureWidenedDeclaration(body []statements.St
 			return false
 		}
 	}
-	// A nested declaration additionally needs its complete source-owner route;
-	// classfile package visibility alone cannot establish that spelling here.
-	resolve := c.nativeAnnotationDeclarationResolver()
-	definition, known := resolve(target.Name)
-	if !known || definition == nil || definition.GetClassName() != target.Name || !nativeMemberTopLevelEvidence(definition, c.Work) ||
-		definition.AccessFlags&1 == 0 && nativeBinaryPackage(target.Name) != nativeBinaryPackage(c.obj.GetClassName()) {
-		return false
-	}
 	typ, err := types.ParseDescriptor(expected)
 	if err != nil || typ == nil {
 		return false
 	}
 	if len(formals) != 0 {
-		// Erasing a generic capture loses overload and bridge binding. Only an
-		// already owned anonymous producer can supply its exact original parent
-		// instantiation; arbitrary factories and guessed type arguments cannot.
 		var proved bool
-		typ, proved = c.nativeCapturedAnonymousParentType(declaration, actual, expected, target, definition, bounded)
+		// A selected factory can supply a full invariant source result even
+		// though its computational Type() deliberately remains descriptor-raw.
+		// Project that result through original generic inheritance edges; never
+		// erase arguments merely because the capture field records an erasure.
+		if call, ok := declaration.JavaValue.(*values.FunctionCallExpression); ok && target.Public && !strings.Contains(target.Name, "$") {
+			if source := call.SourceInvocationResultType(c.FuncCtx); source != nil {
+				typ, proved = types.ProjectInstantiatedSupertype(c.FuncCtx, source, target.Name, bounded)
+			}
+		}
 		if !proved {
+			resolve := c.nativeAnnotationDeclarationResolver()
+			definition, known := resolve(target.Name)
+			if !known || definition == nil || definition.GetClassName() != target.Name || !nativeMemberTopLevelEvidence(definition, c.Work) ||
+				definition.AccessFlags&1 == 0 && nativeBinaryPackage(target.Name) != nativeBinaryPackage(c.obj.GetClassName()) {
+				return false
+			}
+			typ, proved = c.nativeCapturedAnonymousParentType(declaration, actual, expected, target, definition, bounded)
+		}
+		if !proved {
+			return false
+		}
+	} else {
+		// A non-public or nested declaration still needs its original source
+		// ownership/access route, rather than a same-name metadata table.
+		resolve := c.nativeAnnotationDeclarationResolver()
+		definition, known := resolve(target.Name)
+		if !known || definition == nil || definition.GetClassName() != target.Name || !nativeMemberTopLevelEvidence(definition, c.Work) || definition.AccessFlags&1 == 0 && nativeBinaryPackage(target.Name) != nativeBinaryPackage(c.obj.GetClassName()) {
 			return false
 		}
 	}
