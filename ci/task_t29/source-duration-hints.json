@@ -478,6 +478,8 @@
     "TestAdversarialForeignSuperWithOwnPrivateBridgeRoundTrip": 79.61,
     "TestAdversarialFormatterStringSlotReuseRoundTrip": 6.32,
     "TestAdversarialFunctionalCaptureTargetsPreserveValuesAndBindingRoundTrip": 10.3,
+    "TestAdversarialGenericArrayDeclarationResultKeepsOriginalUse": 40.36,
+    "TestAdversarialGenericArrayDeclarationResultOriginalJavac8": 32.84,
     "TestAdversarialGenericArrayDeclarationRoundTrip": 5.96,
     "TestAdversarialGenericArrayMutationRoundTrip": 4.57,
     "TestAdversarialGenericArrayWebStoreRoundTrip": 2.66,

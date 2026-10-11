@@ -22,8 +22,15 @@ func (f *FunctionCallExpression) instantiatedMethodResultOverloadCast(i int, ctx
 		return ""
 	}
 	params, _, err := callbinding.Descriptor(f.Descriptor)
-	if err != nil || len(params) != len(f.Arguments) || !ErasedFixedInstanceResult(ctx, inner, params[i]) {
+	if err != nil || len(params) != len(f.Arguments) {
 		return ""
+	}
+	rank := 0
+	if !ErasedFixedInstanceResult(ctx, inner, params[i]) {
+		if !erasedFixedInstanceArrayResultForOverload(ctx, inner, params[i]) {
+			return ""
+		}
+		rank = len(params[i]) - len(strings.TrimLeft(params[i], "["))
 	}
 	receiver, ok := types.AsParameterizedType(recoverParameterizedFieldReceiver(ctx, inner.Object))
 	if !ok || receiver == nil {
@@ -45,17 +52,29 @@ func (f *FunctionCallExpression) instantiatedMethodResultOverloadCast(i int, ctx
 		return ""
 	}
 	for j, formal := range formals {
-		if body != "()T"+formal+";" {
+		if body != "()"+strings.Repeat("[", rank)+"T"+formal+";" {
 			continue
 		}
 		source := receiver.TypeArgs[j]
 		if source == nil || types.IsWildcardType(source) || !sourceDenotableJavaType(source, ctx) {
 			return ""
 		}
+		// Generic instantiations are reference types even when the producer
+		// adds an array rank. Wrapping an invalid primitive argument must not
+		// turn it into apparently valid reference evidence.
 		actual, known := SourceTypeErasure(source, ctx)
 		if !known || !callbinding.Reference(actual) {
 			return ""
 		}
+		if ctx.Work != nil && (ctx.Work.CheckAlloc(int64(rank)*32) != nil || ctx.Work.Charge(workbudget.CounterGraphScans, int64(rank)) != nil) {
+			return ""
+		}
+		for dimension := 0; dimension < rank; dimension++ {
+			source = types.NewJavaArrayType(source)
+		}
+		// Array erasure retains each original dimension and erases only the
+		// element. Reuse its proved erasure instead of rewalking the binder.
+		actual = strings.Repeat("[", rank) + actual
 		views, known := invocationSourceFormalViews(source, ctx)
 		if !known {
 			return ""

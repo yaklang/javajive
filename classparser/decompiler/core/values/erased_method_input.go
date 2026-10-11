@@ -364,12 +364,22 @@ func ErasedFactoryReturn(ctx *class_context.ClassContext, v JavaValue, result st
 // method formals or deferred arguments. A consumer may use the original raw
 // result erasure after separately proving a nonthrowing widening to its target.
 func ErasedFixedInstanceResult(ctx *class_context.ClassContext, f *FunctionCallExpression, result string) bool {
+	return erasedFixedInstanceResultForUse(ctx, f, result, false)
+}
+
+// Array results acquire permission only at the separately proved overload use.
+// Other erased-result consumers keep their existing, non-array domain.
+func erasedFixedInstanceArrayResultForOverload(ctx *class_context.ClassContext, f *FunctionCallExpression, result string) bool {
+	return erasedFixedInstanceResultForUse(ctx, f, result, true)
+}
+
+func erasedFixedInstanceResultForUse(ctx *class_context.ClassContext, f *FunctionCallExpression, result string, arrayUse bool) bool {
 	if ctx == nil || ctx.InvocationMetadata == nil || f == nil || f.IsStatic || f.IsSpecialInvoke ||
 		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface) || f.Object == nil || len(f.Arguments) != 0 || !f.HasOriginPC || f.OriginPC < 0 || f.OriginPC > 65535 {
 		return false
 	}
 	ps, ret, err := callbinding.Descriptor(f.Descriptor)
-	if err != nil || len(ps) != 0 || ret != result || !strings.HasPrefix(ret, "L") {
+	if err != nil || len(ps) != 0 || ret != result || !strings.HasPrefix(ret, "L") && !(arrayUse && strings.HasPrefix(ret, "[")) {
 		return false
 	}
 	owner := strings.ReplaceAll(f.ClassName, ".", "/")
@@ -389,6 +399,22 @@ func ErasedFixedInstanceResult(ctx *class_context.ClassContext, f *FunctionCallE
 	}
 	_, params, typ := types.ParseMethodSignatureFull(body, ctx)
 	if len(params) != 0 || erasedMethodType(typ, bounds) != result {
+		return false
+	}
+	if arrayUse {
+		// The original Signature must be exactly an array of one class formal,
+		// and the original descriptor must retain that rank and first erasure.
+		// A named class, method formal or parameterized array is a different proof.
+		rank := len(result) - len(strings.TrimLeft(result, "["))
+		if rank == 0 || rank > 255 || typ == nil || !typ.IsArray() {
+			return false
+		}
+		prefix := strings.Repeat("[", rank)
+		for formal, erasure := range bounds {
+			if body == "()"+prefix+"T"+formal+";" {
+				return prefix+erasure == result
+			}
+		}
 		return false
 	}
 	if _, parameterized := types.AsParameterizedType(typ); parameterized {
