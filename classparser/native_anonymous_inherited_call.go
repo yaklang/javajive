@@ -88,7 +88,17 @@ func nativeAnonymousInheritedCall(forest *nativeAnonymousForest, caller *ClassOb
 			target = m
 		}
 		if target != nil {
-			if current == child.object || target.AccessFlags&(0x0002|0x0008|0x1000|0x0040|0x0080|0x0400) != 0 {
+			if current == child.object || target.AccessFlags&(0x0002|0x0008|0x1000|0x0040|0x0400) != 0 {
+				return false
+			}
+			// ACC_VARARGS is a source declaration property, not a different
+			// JVM lookup or permission to expand an argument. The exact physical
+			// descriptor above still selects this inherited class declaration.
+			// Java also admits an ellipsis method in fixed-arity phases
+			// (JLS 15.12.2.2/3). Keep its final array slot and let the existing
+			// invocation binder independently preserve arguments/overloads;
+			// this ownership proof never grants array spreading permission.
+			if target.AccessFlags&0x0080 != 0 && (len(params) == 0 || !strings.HasPrefix(params[len(params)-1], "[")) {
 				return false
 			}
 			if target.AccessFlags&0x0001 == 0 && (target.AccessFlags&0x0004 != 0 || nativeAnonymousCallPackage(name) != nativeAnonymousCallPackage(caller.GetClassName())) {
