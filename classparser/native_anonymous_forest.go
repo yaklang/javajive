@@ -302,6 +302,9 @@ func (c *ClassObjectDumper) nativeAnonymousForestHasChildren(members *nativeMemb
 // Only an exact owned child constructor can license its anonymous-parent type
 // in a CP descriptor. Handles/dynamic/interface reuse of the same NT is refused.
 func nativeAnonymousForestConstructorNameType(object *ClassObject, index int, forest *nativeAnonymousForest, work *workbudget.Budget) bool {
+	if nativeAnonymousForestSharedConstructorNameType(object, index, forest, work) {
+		return true
+	}
 	if nativeAnonymousForestNamedEnclosingNameType(forest, object, index, work) {
 		return true
 	}
