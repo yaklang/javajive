@@ -1458,9 +1458,13 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			// preparation. A failed query is absence of evidence, not a failed
 			// committed projection. Reopen the same physical path without rendering
 			// an operand or mutating the family's transaction state.
+			priorType := ctx.SourceLexicalCapturedFieldType
 			ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
 				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
-				return read != nil && name == read.field && p.children[read.owner] != nil && nativeMemberLexicalReadOperand(value, read, c.Work, ctx)
+				if read == nil || p.children[read.owner] == nil {
+					return priorType != nil && priorType(value, pc, name)
+				}
+				return name == read.field && nativeMemberLexicalReadOperand(value, read, c.Work, ctx)
 			}
 			ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
 				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]

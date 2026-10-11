@@ -257,6 +257,10 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	copy.IsStatic = false
 	copy.QualifiedStaticFields = true
 	copy.RetainImplicitConstructorCalls = true
+	// A copied callback still closes over the previous method context. Do
+	// not let its PC map lend evidence to this constructor; both anonymous
+	// and named capture queries are reopened below in the new scope.
+	copy.SourceLexicalCapturedFieldType = nil
 	c.wireNativeAnonymousSource()
 	// These callbacks close over their context pointer. Copying the ordinary
 	// method's callbacks keeps its identity even after the initializer's method
@@ -610,7 +614,7 @@ func nativeAnonymousInitializerExpressionEventsWithMaterialized(child *nativeAno
 				if !declared && !nativeAnonymousInitializerInheritedField(child, f, x, resolve, work) {
 					return false
 				}
-			} else if !nativeAnonymousInitializerForeignField(f, x.Object, resolve, work) {
+			} else if !nativeAnonymousInitializerForeignField(f, x.Object, resolve, work) && !nativeAnonymousInitializerLexicalCaptureField(f, x, ctx) {
 				return false
 			}
 			*events = append(*events, x.OriginPC)
@@ -1265,4 +1269,14 @@ func nativeAnonymousInitializerConcreteClassSubject(typ types.JavaType, work *wo
 	default:
 		return false
 	}
+}
+
+// A sealed lexical capture is rendered as its original stable local/enclosing
+// binding, not as a foreign synthetic field access. Keep the original read PC
+// in the event certificate and require the same read-only operand-path proof
+// as rendering; a name or raw owner is insufficient.
+func nativeAnonymousInitializerLexicalCaptureField(original *values.JavaClassMember, field *values.RefMember, ctx *class_context.ClassContext) bool {
+	return original != nil && field != nil && ctx != nil && ctx.SourceLexicalCapturedField != nil && ctx.SourceLexicalCapturedFieldType != nil && field.HasOriginPC &&
+		field.OriginalInstanceFieldRead(field.OriginPC, original.Name, original.Member, original.Description) &&
+		ctx.SourceLexicalCapturedFieldType(field, field.OriginPC, field.Member)
 }

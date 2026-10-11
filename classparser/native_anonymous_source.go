@@ -1286,7 +1286,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if child.expressionInitializer != nil {
 			initialization, known = sub.nativeAnonymousExpressionInitializerSource(child, bindings)
 		}
-		if !known {
+		if !known || sub.nativeCaptureFailed {
 			return fail()
 		}
 		body = initialization + body
