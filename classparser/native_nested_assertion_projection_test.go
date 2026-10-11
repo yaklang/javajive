@@ -14,7 +14,7 @@ import (
 // flag reads and opaque leaves must never gain permission from the new shape.
 func TestNativeNestedAssertionProjectionRequiresOriginalClosedPacket(t *testing.T) {
 	files := nativeCompileDebugClasses(t, nativeMemberAssertionFixture, "none")
-	for _, variant := range []string{"nested", "deep", "direct", "inner else", "outer else", "shared return", "different return", "missing return origin", "return value", "unproved return join", "extra effect", "empty arm", "nil arm", "opaque leaf", "cycle", "depth", "wrong flag origin", "duplicate flag", "wrong throw origin", "missing throw origin", "wrong new origin", "wrong invoke origin", "wrong descriptor", "wrong call owner", "wrong call kind", "wrong allocation owner", "budget", "canceled"} {
+	for _, variant := range []string{"nested", "deep", "direct", "prefix", "two prefixes", "nested prefixes", "prefix OR", "prefix eager", "nil prefix", "cyclic prefix", "prefix duplicate flag", "inner else", "outer else", "shared return", "different return", "missing return origin", "return value", "unproved return join", "extra effect", "empty arm", "nil arm", "opaque leaf", "cycle", "depth", "wrong flag origin", "duplicate flag", "wrong throw origin", "missing throw origin", "wrong new origin", "wrong invoke origin", "wrong descriptor", "wrong call owner", "wrong call kind", "wrong allocation owner", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			obj, e := Parse(files["MemberAssertionOwner$Child.class"])
 			if e != nil {
@@ -46,6 +46,32 @@ func TestNativeNestedAssertionProjectionRequiresOriginalClosedPacket(t *testing.
 			outer := &statements.IfStatement{Condition: values.NewUnaryExpression(flag, values.Not, boolType), IfBody: []statements.Statement{inner}}
 			var work *workbudget.Budget
 			switch variant {
+			case "prefix", "two prefixes", "nested prefixes", "prefix OR", "prefix eager", "nil prefix", "cyclic prefix", "prefix duplicate flag":
+				prefix := values.JavaValue(values.NewJavaLiteral(true, boolType))
+				op := values.LOGICAL_AND
+				switch variant {
+				case "two prefixes":
+					prefix = values.NewBinaryExpression(prefix, values.NewJavaLiteral(false, boolType), values.LOGICAL_AND, boolType)
+				case "nested prefixes":
+					outer.Condition = values.NewBinaryExpression(prefix, outer.Condition, values.LOGICAL_AND, boolType)
+				case "prefix OR":
+					op = values.LOGICAL_OR
+				case "prefix eager":
+					op = values.AND
+				case "nil prefix":
+					prefix = nil
+				case "cyclic prefix":
+					x := values.NewBinaryExpression(prefix, prefix, values.LOGICAL_AND, boolType)
+					x.Values[0] = x
+					prefix = x
+				case "prefix duplicate flag":
+					prefix = values.NewUnaryExpression(flag, values.Not, boolType)
+				}
+				if prefix == nil {
+					outer.Condition = &values.JavaExpression{Op: op, Values: []values.JavaValue{nil, outer.Condition}, Typ: boolType}
+				} else {
+					outer.Condition = values.NewBinaryExpression(prefix, outer.Condition, op, boolType)
+				}
 			case "deep":
 				outer.IfBody = []statements.Statement{&statements.IfStatement{Condition: values.NewJavaLiteral(true, boolType), IfBody: []statements.Statement{inner}}}
 			case "direct":
@@ -117,7 +143,7 @@ func TestNativeNestedAssertionProjectionRequiresOriginalClosedPacket(t *testing.
 			d.nativeSourceAssertions = plan
 			d.Work = work
 			projected, e := d.prepareNativeAssertions("check", "(ZLjava/lang/Object;)V", []statements.Statement{outer})
-			want := variant == "nested" || variant == "deep" || variant == "direct" || variant == "shared return"
+			want := variant == "nested" || variant == "deep" || variant == "direct" || variant == "shared return" || variant == "prefix" || variant == "two prefixes" || variant == "nested prefixes"
 			if (e == nil) != want {
 				t.Fatalf("projection=%v want=%t", e, want)
 			}
@@ -129,7 +155,15 @@ func TestNativeNestedAssertionProjectionRequiresOriginalClosedPacket(t *testing.
 				if len(projected) != count {
 					t.Fatal("original statement placement")
 				}
-				if _, ok := projected[0].(*nativeAssertStatement); !ok {
+				leaf := projected[0]
+				if variant == "prefix" || variant == "two prefixes" || variant == "nested prefixes" {
+					guard, ok := leaf.(*statements.IfStatement)
+					if !ok || guard.Condition == nil || len(guard.IfBody) != 1 || len(guard.ElseBody) != 0 {
+						t.Fatal("prefix is not retained outside assertion")
+					}
+					leaf = guard.IfBody[0]
+				}
+				if _, ok := leaf.(*nativeAssertStatement); !ok {
 					t.Fatal("compiler assertion not reconstructed")
 				}
 			}

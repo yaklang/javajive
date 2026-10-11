@@ -248,7 +248,7 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 				if !known {
 					return nil, false
 				}
-				field, failure, guardKnown := nativeAssertionFailureGuard(cond, types.SlashToDot(c.obj.GetClassName()), c.Work, 64)
+				field, prefix, failure, guardKnown := nativeAssertionOrderedGuard(cond, types.SlashToDot(c.obj.GetClassName()), c.Work, 64)
 				if guardKnown && len(branch.IfBody) == 1 {
 					packet, exists := sites[field.OriginPC]
 					thrown, orderedFailure, ok := nativeAssertionFailureArm(branch, failure, packet, c.Work)
@@ -275,7 +275,13 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 						return nil, false
 					}
 					seen[field.OriginPC] = true
-					out = append(out, assertion)
+					if prefix == nil {
+						out = append(out, assertion)
+					} else {
+						// The outer predicate executes even with assertions disabled.
+						// Keep it outside the source assert, before its condition/message.
+						out = append(out, statements.NewIfStatement(prefix, []statements.Statement{assertion}, nil))
+					}
 					continuation, ok := project(branch.ElseBody)
 					if !ok {
 						return nil, false
