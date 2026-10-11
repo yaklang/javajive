@@ -2,7 +2,6 @@ package rewriter
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
-	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/utils"
 )
 
@@ -18,7 +17,10 @@ func ownedSharedLoopExit(exits []*core.Node, owner *core.Node, dom map[*core.Nod
 	if join == nil || join == owner || join.IsCatchStart || join.HasProtectedRange || IsEndNode(join) || len(join.EncodedJumps) != 0 {
 		return nil
 	}
-	if _, loop := join.Statement.(*statements.DoWhileStatement); loop && utils.IsDominate(dom, join, owner) {
+	// A dominating join resumes an enclosing region through a back edge.
+	// Its identity does not depend on whether that region has already been
+	// rewritten into a loop statement. It cannot become an ordinary break.
+	if utils.IsDominate(dom, join, owner) {
 		return nil
 	}
 	state := map[*core.Node]uint8{}

@@ -75,3 +75,48 @@ func TestLoopOwnedSharedContinuationKeepsExitSpecificEffects(t *testing.T) {
 		})
 	}
 }
+
+// Region ownership is a graph property. The same enclosing continuation must
+// stay a back edge before and after the outer loop is structurally rewritten.
+func TestLoopSharedExitRejectsDominatingContinuationBeforeStructure(t *testing.T) {
+	for _, shape := range []string{"ordinary", "condition", "structured-loop"} {
+		for _, forward := range []bool{false, true} {
+			name := shape + "/ancestor"
+			if forward {
+				name = shape + "/forward"
+			}
+			t.Run(name, func(t *testing.T) {
+				entry := core.NewNode(&statements.MiddleStatement{})
+				join := core.NewNode(&statements.MiddleStatement{})
+				owner := core.NewNode(statements.NewDoWhileStatement(nil, nil))
+				header := core.NewNode(&statements.ConditionStatement{})
+				left := core.NewNode(&statements.MiddleStatement{})
+				right := core.NewNode(&statements.MiddleStatement{})
+				if shape == "condition" {
+					join.Statement = &statements.ConditionStatement{}
+				}
+				if shape == "structured-loop" {
+					join.Statement = statements.NewDoWhileStatement(nil, nil)
+				}
+				owner.AddNext(header)
+				header.AddNext(left)
+				header.AddNext(right)
+				left.AddNext(join)
+				right.AddNext(join)
+				want := join
+				if forward {
+					entry.AddNext(owner)
+					join.AddNext(core.NewNode(&statements.ReturnStatement{}))
+				} else {
+					entry.AddNext(join)
+					join.AddNext(owner)
+					join.AddNext(core.NewNode(&statements.ReturnStatement{}))
+					want = nil
+				}
+				if got := ownedSharedLoopExit([]*core.Node{left, right}, owner, GenerateDominatorTree(entry)); got != want {
+					t.Fatalf("continuation=%p want=%p", got, want)
+				}
+			})
+		}
+	}
+}

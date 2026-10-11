@@ -857,6 +857,8 @@
     "TestAdversarialSharedEffectAfterArrayGuardsRoundTrip": 4.55,
     "TestAdversarialSharedEffectAfterEffectfulArrayGuardsRoundTrip": 5.38,
     "TestAdversarialSharedLiteralReturnAfterAssignedGuardRoundTrip": 4.01,
+    "TestAdversarialSharedLoopExitEnclosingContinueOriginalJavac8": 12.53,
+    "TestAdversarialSharedLoopExitRetainsEnclosingContinue": 15.27,
     "TestAdversarialSharedPrimitiveAndNullReturnsRoundTrip": 4.62,
     "TestAdversarialSiblingSwitchDefaultEqualityIdentityRoundTrip": 6.27,
     "TestAdversarialSiblingSwitchSharedLiteralDefaultRoundTrip": 5.35,
