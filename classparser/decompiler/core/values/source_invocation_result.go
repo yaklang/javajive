@@ -196,6 +196,21 @@ func (f *FunctionCallExpression) SourceInvocationResultType(ctx *class_context.C
 			return nil
 		}
 		for i, param := range parameters {
+			// An actual argument may implement the selected parameter through
+			// instantiated inheritance (Collection<X> -> Iterable<X>). Compose
+			// every original parent path before matching method variables. This
+			// proof-only reference never changes an operand or inserts a cast;
+			// raw, incomplete and conflicting hierarchies supply no witness.
+			if pattern, parameterized := types.AsParameterizedType(param); parameterized && javaTypeMentionsNames(param, formals) {
+				actual := proof.Arguments[i].Type()
+				if raw, known := types.RawClassFQN(actual); known && !sameErasureClassName(raw, pattern.RawClassName) {
+					projected, proved := types.ProjectInstantiatedSupertype(&bounded, actual, pattern.RawClassName, bounded.InvocationMetadata)
+					if !proved || !shape(projected, 0) {
+						return nil
+					}
+					proof.Arguments[i] = NewJavaRef(utils.NewRootVariableId(), nil, projected)
+				}
+			}
 			if javaTypeMentionsNames(param, formals) && !bindMethodTypeArguments(param, proof.Arguments[i].Type(), variables, bindings) {
 				return nil
 			}
