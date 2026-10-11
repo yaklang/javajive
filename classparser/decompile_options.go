@@ -267,9 +267,12 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 		rule = wrapped
 	}
 	changed := source
-	if phase == "method_source" && c.nativeAnonymousRoot != nil {
+	// Inline anonymous members have already completed recovery under their
+	// original method context. Neither caller nor class recovery may borrow a
+	// different method's declarations to reinterpret that lexical scope.
+	if (phase == "method_source" || phase == "class_source") && c.nativeAnonymousRoot != nil {
 		if nativeProofWork(c.Work, int64(len(source))) {
-			changed = nativeRewriteEnclosingMethod(source, rule)
+			changed = nativeRewriteEnclosingScope(source, rule)
 		}
 	} else {
 		changed = rule(source)

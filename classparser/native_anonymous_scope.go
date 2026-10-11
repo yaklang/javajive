@@ -6,11 +6,11 @@ import (
 )
 
 // Anonymous members have already been rendered in their own method contexts.
-// An enclosing method recovery must not interpret their local declarations as
-// declarations or assignments of the caller. Retain each member fragment as an
-// opaque comment for that recovery, then restore it byte-for-byte. Allocation
+// Enclosing method and class recovery must not reinterpret their declarations
+// using a caller's or sibling method's bindings. Retain each member fragment as
+// an opaque comment for that recovery, then restore it byte-for-byte. Allocation
 // arguments remain visible, since they do belong to the caller's scope.
-func nativeRewriteEnclosingMethod(source string, rule func(string) string) string {
+func nativeRewriteEnclosingScope(source string, rule func(string) string) string {
 	const prefix = "/*jdec-owned-anonymous-ordinal:"
 	type fragment struct{ token, body string }
 	fragments := []fragment{}
