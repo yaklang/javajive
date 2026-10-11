@@ -4,9 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
-	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
-	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -183,6 +181,8 @@ func nativeMemberAssertionProofMode(obj *ClassObject, outermost string, work *wo
 				if packet == nil || len(sites) >= 256 || !nativeAssertionRegionClosed(decoder, code, ops, int(op.CurrentOffset), packet.endPC, work) || !nativeAssertionPacketExitsClosed(ops, i, packet.endPC, join, len(code.Code), work) {
 					return nil, false
 				}
+				packet.joinPC = join
+				packet.voidReturnJoin = code.Code[join] == core.OP_RETURN
 				sites[int(op.CurrentOffset)] = packet
 				reads++
 			}
@@ -192,38 +192,37 @@ func nativeMemberAssertionProofMode(obj *ClassObject, outermost string, work *wo
 	return plan, plan.initializer != nil && reads > 0
 }
 
-type nativeAssertStatement struct {
-	condition, message values.JavaValue
-	messageCall        *values.FunctionCallExpression
-}
-
-func (s *nativeAssertStatement) ReplaceVar(old, new *coreutils.VariableId) {
-	s.condition.ReplaceVar(old, new)
-	if s.message != nil {
-		s.message.ReplaceVar(old, new)
-	}
-}
-func (s *nativeAssertStatement) String(ctx *class_context.ClassContext) string {
-	text := "assert " + values.SimplifyConditionValue(s.condition).String(ctx)
-	if s.message != nil {
-		text += " : " + s.messageCall.ArgumentStrings(ctx)[0]
-	}
-	return text
-}
+type nativeAssertStatement = statements.SourceAssertionStatement
 
 // Match the original flag read and exception allocation back to typed source
 // operands. A whole family refuses if any flag read cannot be reconstructed.
-func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []statements.Statement) ([]statements.Statement, error) {
+func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []statements.Statement) (result []statements.Statement, projectionErr error) {
 	plan := c.nativeAssertionProtocol()
 	if plan == nil {
 		return body, nil
 	}
 	if plan.initializer != nil && !plan.pureInitializer && name == "<clinit>" && desc == "()V" {
+		// The initializer certificate belongs to this rendering occurrence, not
+		// to the shared immutable packet or an earlier successful projection.
+		c.nativeAssertionInitProjection = nil
+		if state := c.nativeStandaloneAssertion; state != nil && state.packet == plan {
+			state.initializerProjected = false
+		}
 		var valid bool
 		body, valid = c.projectNativeAssertionInitializer(body, plan)
 		if !valid {
 			return nil, fmt.Errorf("assertion initialization source occurrence unproved")
 		}
+		// Commit only after the remaining assertion sites also close. A failed
+		// read projection cannot reuse this initializer's successful prefix.
+		defer func() {
+			if projectionErr == nil {
+				c.nativeAssertionInitProjection = plan
+				if state := c.nativeStandaloneAssertion; state != nil && state.packet == plan {
+					state.initializerProjected = true
+				}
+			}
+		}()
 	}
 	sites := plan.reads[name+desc]
 	if len(sites) == 0 {
@@ -252,10 +251,11 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 				field, failure, guardKnown := nativeAssertionFailureGuard(cond, types.SlashToDot(c.obj.GetClassName()), c.Work, 64)
 				if guardKnown && len(branch.IfBody) == 1 {
 					packet, exists := sites[field.OriginPC]
-					thrown, ok := branch.IfBody[0].(*statements.CustomStatement)
+					thrown, orderedFailure, ok := nativeAssertionFailureArm(branch, failure, packet, c.Work)
 					if !exists || seen[field.OriginPC] || !ok || thrown == nil || !thrown.HasOriginPC || thrown.OriginPC != packet.throwPC {
 						return nil, false
 					}
+					failure = orderedFailure
 					v, valid := nativeMemberEnclosingUnpack(thrown.ThrownValue, c.Work)
 					allocation, ok := v.(*values.NewExpression)
 					if !valid || !ok || allocation == nil || allocation.Type() == nil || !nativeAssertionErrorType(allocation.Type()) || !allocation.HasOriginPC || allocation.OriginPC != packet.newPC {
@@ -270,9 +270,9 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 					if err || ret != "V" || len(call.Arguments) != len(args) || len(args) > 1 {
 						return nil, false
 					}
-					assertion := &nativeAssertStatement{condition: values.NewUnaryExpression(failure, values.Not, types.NewJavaPrimer(types.JavaBoolean)), messageCall: call}
-					if len(args) == 1 {
-						assertion.message = call.Arguments[0]
+					assertion, sealed := statements.NewSourceAssertionStatement(values.NewUnaryExpression(failure, values.Not, types.NewJavaPrimer(types.JavaBoolean)), call, packet.throwPC)
+					if !sealed {
+						return nil, false
 					}
 					seen[field.OriginPC] = true
 					out = append(out, assertion)
@@ -311,6 +311,9 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 	if !ok || len(seen) != len(sites) {
 		return nil, fmt.Errorf("source assertion protocol unproved")
 	}
+	if state := c.nativeStandaloneAssertion; state != nil && state.packet == plan {
+		state.consumed[name+desc] = true
+	}
 	return projected, nil
 }
 func nativeAssertionConstructorDescriptor(desc string) ([]string, string, bool) {
@@ -338,6 +341,8 @@ func nativeAssertionErrorType(t types.JavaType) bool {
 type nativeAssertionPacket struct {
 	newPC, invokePC, throwPC, endPC int
 	descriptor                      string
+	joinPC                          int
+	voidReturnJoin                  bool
 }
 
 func nativeAssertionBytecodePacket(obj *ClassObject, ops []*core.OpCode, start int, work *workbudget.Budget) *nativeAssertionPacket {

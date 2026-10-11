@@ -56,7 +56,7 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 		return nil
 	}
 	index := z.originalMemberIndex()
-	if !z.nativeEnumSwitchUsersClosed(p, root, index, d.Work) {
+	if !z.nativeEnumSwitchSourceUsersClosed(p, root, index, d.Work) {
 		return nil
 	}
 	if p.anonymousForest != nil && !nativeAnonymousForestArchiveClosed(p.anonymousForest, index, d.Work) {
@@ -182,6 +182,9 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	if !nativeModernNestSourceScopeClosed(p.modernNestObjects, objects, d.Work) {
 		return nil
 	}
+	if !nativeMemberPrivatePermissionClosed(p, d.nativeAnnotationDeclarationResolver(), d.Work, d.nativePrivatePermissionPlatformParents()) {
+		return nil
+	}
 
 	return &nativeMemberPrepared{root: root, reader: d, family: p, objects: objects, snapshot: snap}
 }
@@ -193,6 +196,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	root, d, p, objects, snap := prepared.root, prepared.reader, prepared.family, prepared.objects, prepared.snapshot
 	owner := p.owner
 	if p.independentRoot != nil && (!p.independentRoot.validFor(d) || !p.independentRoot.familyClosed(p, d.Work)) {
+		return nil
+	}
+	if !z.nativeMemberIndependentInvocationsClosed(prepared) {
 		return nil
 	}
 	if !z.nativeMemberAccessRepresentable(p, z.originalMemberIndex(), d.Work, peers...) {

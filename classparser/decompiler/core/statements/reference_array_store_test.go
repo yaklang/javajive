@@ -83,3 +83,22 @@ func TestReferenceArrayStoreUsesDeclaredWebView(t *testing.T) {
 		t.Fatal("shared view changed")
 	}
 }
+
+func TestReferenceArrayStorePartialLexicalArrayKeepsPhysicalStore(t *testing.T) {
+	for _, witness := range []bool{false, true} {
+		ctx := &class_context.ClassContext{ClassName: "scope.Reader", ClassSig: "Ljava/lang/Object;", TypeParams: []string{"K"}, LexicalTypeParamSignatures: []string{"<K:Ljava/lang/Number;>Ljava/lang/Object;"}, FieldTypeVars: map[string]string{"rows": "K[][]"}}
+		this := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("scope.Reader"))
+		this.IsThis = true
+		rows := values.NewRefMember(this, "rows", types.NewJavaArrayType(types.NewJavaArrayType(types.NewJavaClass("java.lang.Number"))))
+		index := values.NewCustomValue(func(*class_context.ClassContext) string { return "index()" }, func() types.JavaType { return types.NewJavaPrimer(types.JavaInteger) })
+		value := values.NewCustomValue(func(*class_context.ClassContext) string { return "row()" }, func() types.JavaType { return types.NewJavaArrayType(types.NewJavaClass("java.lang.Number")) })
+		st := NewArrayMemberAssignStatement(values.NewJavaArrayMember(rows, index), value)
+		st.ReferenceArrayStore = witness
+		if st.referenceArrayStoreNeedsObjectView(ctx) != witness {
+			t.Fatal("source/physical store mismatch")
+		}
+		if witness && st.String(ctx) != "((java.lang.Object[]) (this.rows))[index()] = row()" {
+			t.Fatal(st.String(ctx))
+		}
+	}
+}

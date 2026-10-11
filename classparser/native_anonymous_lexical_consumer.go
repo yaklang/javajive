@@ -17,6 +17,8 @@ import (
 type nativeAnonymousLexicalConsumer struct {
 	read                    *nativeMemberLexicalRead
 	getter                  *nativeMemberPrivateGetter
+	declaredField           *MemberInfo
+	declarationOwner        string
 	owner, name, descriptor string
 	kind, pc                int
 }
@@ -142,6 +144,23 @@ func nativeAnonymousLexicalConsumerProof(f *nativeAnonymousForest, caller *Class
 	if index < 1 || index > len(caller.ConstantPool) {
 		return nil
 	}
+	if op.Instr.OpCode == core.OP_GETFIELD {
+		ref, physical := caller.ConstantPool[index-1].(*ConstantFieldrefInfo)
+		symbol := constructorMotionMember(caller, op, core.OP_GETFIELD)
+		if !physical || ref == nil || symbol == nil || symbol.Name != target || class_context.SafeIdentifier(symbol.Member) != symbol.Member {
+			return nil
+		}
+		// Capture fields are original receiver-path producers. They are not
+		// Java source declarations, even when their binary name is printable.
+		if _, captured := f.units[target].fields[symbol.Member]; captured {
+			return nil
+		}
+		decl, field, known := nativeAnonymousLexicalFieldDeclaration(f.objects[target], symbol.Member, symbol.Description, resolve, work)
+		if !known || field.AccessFlags&(0x0002|0x0008) != 0 || field.AccessFlags&(0x0001|0x0004) == 0 && nativeAnonymousCallPackage(decl.GetClassName()) != nativeAnonymousCallPackage(caller.GetClassName()) || !nativeAnonymousLexicalConsumerLookup(f, caller.GetClassName(), target, symbol.Member, true, resolve, work) {
+			return nil
+		}
+		return &nativeAnonymousLexicalConsumer{read: read, declaredField: field, declarationOwner: decl.GetClassName(), owner: target, name: symbol.Member, descriptor: symbol.Description, kind: core.OP_GETFIELD, pc: int(op.CurrentOffset)}
+	}
 	if ref, ok := caller.ConstantPool[index-1].(*ConstantMethodrefInfo); !ok || ref == nil {
 		return nil
 	}
@@ -153,10 +172,17 @@ func nativeAnonymousLexicalConsumerProof(f *nativeAnonymousForest, caller *Class
 	c := &nativeAnonymousLexicalConsumer{read: read, owner: target, name: symbol.Member, descriptor: symbol.Description, kind: kind, pc: int(op.CurrentOffset)}
 	if kind == core.OP_INVOKESTATIC && f.members != nil {
 		g := f.members.getters[nativeMemberGetterKey(target, symbol.Member, symbol.Description)]
-		if g == nil || !nativeAnonymousAccessorDeclaration(f, f.objects[target], g.method, work) || g.staticField || g.setter || g.update != nil || g.call != nil || g.inheritedField || !nativeAnonymousLexicalConsumerLookup(f, caller.GetClassName(), target, g.field, true, resolve, work) {
+		if g == nil || !nativeAnonymousAccessorDeclaration(f, f.objects[target], g.method, work) || g.staticField || g.setter || g.update != nil || g.call != nil || !nativeAnonymousLexicalConsumerLookup(f, caller.GetClassName(), target, g.field, true, resolve, work) {
 			return nil
 		}
 		c.getter = g
+		if g.inheritedField {
+			decl, field, known := nativeAnonymousLexicalFieldDeclaration(f.objects[target], g.field, g.fieldDescriptor, resolve, work)
+			if !known {
+				return nil
+			}
+			c.declaredField, c.declarationOwner = field, decl.GetClassName()
+		}
 		return c
 	}
 	if kind != core.OP_INVOKEVIRTUAL || symbol.Member == "<init>" || symbol.Member == "<clinit>" {
@@ -218,9 +244,28 @@ func nativeAnonymousAccessorDeclaration(f *nativeAnonymousForest, o *ClassObject
 	if g != nil && class_context.SafeIdentifier(g.field) != g.field {
 		return false
 	}
-	fresh := nativeMemberPrivateGetterProof(o, m, work)
-	if g == nil || g.method != m || fresh == nil || fresh.staticField || g.setter || g.update != nil || g.call != nil || g.inheritedField || g.owner != fresh.owner || g.name != fresh.name || g.descriptor != fresh.descriptor || g.field != fresh.field || g.fieldDescriptor != fresh.fieldDescriptor || g.ordinal != fresh.ordinal || g.staticField != fresh.staticField || g.genericField != fresh.genericField {
+	fresh := nativeMemberGetterPacketProof(o, m, f.resolve, work)
+	if g == nil || g.method != m || fresh == nil || fresh.staticField || g.setter || g.update != nil || g.call != nil || g.inheritedField != fresh.inheritedField || g.owner != fresh.owner || g.name != fresh.name || g.descriptor != fresh.descriptor || g.field != fresh.field || g.fieldDescriptor != fresh.fieldDescriptor || g.ordinal != fresh.ordinal || g.staticField != fresh.staticField || g.genericField != fresh.genericField {
 		return false
+	}
+	if g.inheritedField {
+		// The accessor packet and Java's lexical field lookup must agree on
+		// one known, non-generic declaration. Recheck its actual CP field tag:
+		// a Methodref with identical text is not a GETFIELD certificate.
+		if _, _, known := nativeAnonymousLexicalFieldDeclaration(o, g.field, g.fieldDescriptor, f.resolve, work); !known {
+			return false
+		}
+		for _, attr := range m.Attributes {
+			if code, ok := attr.(*CodeAttribute); ok {
+				index := int(code.Code[2])<<8 | int(code.Code[3])
+				if index < 1 || index > len(o.ConstantPool) {
+					return false
+				}
+				if ref, ok := o.ConstantPool[index-1].(*ConstantFieldrefInfo); !ok || ref == nil {
+					return false
+				}
+			}
+		}
 	}
 	ps, result, err := callbinding.Descriptor(d)
 	if err != nil {
@@ -417,7 +462,7 @@ func nativeAnonymousLexicalConsumerSourceClosed(d *ClassObjectDumper, c *nativeA
 			return false
 		}
 		fresh := nativeAnonymousLexicalConsumerProof(d.nativeAnonymousForest, d.obj, c.read, c.owner, op, d.nativeAnonymousForest.resolve, work)
-		return fresh != nil && fresh.getter == c.getter && fresh.owner == c.owner && fresh.name == c.name && fresh.descriptor == c.descriptor && fresh.kind == c.kind && fresh.pc == c.pc
+		return fresh != nil && fresh.getter == c.getter && fresh.declaredField == c.declaredField && fresh.declarationOwner == c.declarationOwner && fresh.owner == c.owner && fresh.name == c.name && fresh.descriptor == c.descriptor && fresh.kind == c.kind && fresh.pc == c.pc
 	}
 	return false
 }
@@ -432,7 +477,7 @@ func (d *ClassObjectDumper) wireNativeAnonymousLexicalConsumers(ctx *class_conte
 		call, ok := v.(*values.FunctionCallExpression)
 		if ok && call != nil && call.HasOriginPC {
 			c := f.consumers[d.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][call.OriginPC]
-			if c != nil && c.getter == nil {
+			if c != nil && c.getter == nil && c.declaredField == nil {
 				if !nativeAnonymousLexicalConsumerSourceClosed(d, c, ctx, d.Work) || call.ClassName != c.owner || call.FunctionName != c.name || call.Descriptor != c.descriptor || call.Kind != values.InvokeVirtual || len(call.Arguments) != 0 || !nativeAnonymousLexicalConsumerOperand(call.Object, c, ctx, d.Work) {
 					d.nativeCaptureFailed = true
 					return "", false

@@ -223,6 +223,11 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 			if x == nil || (x.Op != values.INC && x.Op != values.DEC) || !finallyCoveredValue(x, covered) {
 				return nil, false, false
 			}
+		case *statements.SourceAssertionStatement:
+			condition, call, pc, known := x.SourceAssertionProtocol()
+			if !known || !covered(pc) || !finallyCoveredValue(condition, covered) || !finallyCoveredValue(call, covered) {
+				return nil, false, false
+			}
 		case *statements.ExpressionStatement:
 			if x == nil || !finallyCoveredValue(x.Expression, covered) {
 				return nil, false, false

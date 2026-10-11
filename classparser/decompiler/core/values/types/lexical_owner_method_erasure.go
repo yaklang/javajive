@@ -112,6 +112,19 @@ func EraseLexicalOwnerMethodSignatureWithThrows(classes []string, method string)
 	return eraseLexicalOwnerMethodSignature(classes, method, nil)
 }
 
+// EraseLexicalScopedMethodSignatureWithThrows preserves enclosing method scopes
+// interleaved with class declarations. The caller owns the original lexical
+// path and static cuts; every enclosing physical method descriptor is checked.
+func EraseLexicalScopedMethodSignatureWithThrows(scopes []LexicalTypeScope, method string) (string, []string, bool) {
+	if len(scopes) >= 129 {
+		return "", nil, false
+	}
+	declarations := make([]LexicalTypeScope, 0, len(scopes)+1)
+	declarations = append(declarations, scopes...)
+	declarations = append(declarations, LexicalTypeScope{Signature: method, Method: true})
+	return eraseLexicalTypeScopes(declarations, nil)
+}
+
 // LexicalOwnerTypeVariableErasure retains the same original declaration stack
 // and validates the complete method before exposing any binding erasure.
 func LexicalOwnerTypeVariableErasure(classes []string, method, name string) (string, string, bool) {

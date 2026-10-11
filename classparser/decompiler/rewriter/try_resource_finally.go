@@ -172,6 +172,11 @@ func resourceWritesLocal(input []statements.Statement, ref *values.JavaRef) bool
 			if x.ThrownValue != nil && resourceWritesValue(x.ThrownValue, ref) {
 				return true
 			}
+		case *statements.SourceAssertionStatement:
+			condition, call, _, known := x.SourceAssertionProtocol()
+			if !known || resourceWritesValue(condition, ref) || resourceWritesValue(call, ref) {
+				return true
+			}
 		case *statements.IfStatement:
 			if resourceWritesValue(x.Condition, ref) {
 				return true
@@ -230,6 +235,11 @@ func resourceWritesValue(root values.JavaValue, ref *values.JavaRef) bool {
 			if x.ConstructorCall != nil {
 				queue = append(queue, x.ConstructorCall.Arguments...)
 			}
+		case *values.TernaryExpression:
+			if x == nil {
+				return true
+			}
+			queue = append(queue, x.Condition, x.TrueValue, x.FalseValue)
 		case *values.CastExpression:
 			queue = append(queue, x.Value)
 		case *values.JavaExpression:

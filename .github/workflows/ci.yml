@@ -78,7 +78,7 @@ jobs:
           # the required summary waits for every shard and the40trusted fixtures.
           python3 - <<'PYTHON'
           import concurrent.futures, json, os, pathlib, re, shutil, signal, subprocess, sys, time
-          from tools.ci_scheduler.shard import source_parent_shards
+          from tools.ci_scheduler.shard import source_parent_batches, source_parent_shards
           binary = str(pathlib.Path(os.environ["RUNNER_TEMP"]) / "adversarial.test")
           names = sorted(set(line for line in subprocess.check_output(
               [binary, "-test.list", "^TestAdversarial|" + os.environ["EDGE_TEST_PATTERN"]], text=True, cwd="classparser").splitlines()
@@ -106,7 +106,9 @@ jobs:
           if not ordinary or not selected_scopes:
               raise SystemExit("empty source regression shard")
           groups = [{"scopes": selected_scopes[index:index+5]} for index in range(0, len(selected_scopes), 5)]
-          groups += [{"parents": lane.items} for lane in selected_lanes]
+          # Keep each parent atomic, but let idle workers take another bounded
+          # batch instead of waiting on one underestimated, fixed lane.
+          groups += [{"parents": batch.items} for batch in source_parent_batches(ordinary, hints)]
           if sorted(name for group in groups for name in group.get("parents", [])) != sorted(ordinary):
               raise SystemExit("source parent inventory mismatch")
           # Concurrent evidence must not mutate the source fingerprint checked

@@ -173,11 +173,11 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 	}
 	switch x := st.(type) {
 	case *nativeAssertStatement:
-		roots := []values.JavaValue{x.condition}
-		if x.message != nil {
-			roots = append(roots, x.message)
+		condition, call, _, known := x.SourceAssertionProtocol()
+		if !known {
+			return nil, nil, false
 		}
-		return roots, nil, true
+		return []values.JavaValue{condition, call}, nil, true
 	case *statements.AssignStatement:
 		// An element store has a distinct lvalue packet. Its absent local
 		// LeftValue is structural, not an unknown operand. Visit the actual

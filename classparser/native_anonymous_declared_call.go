@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"slices"
 	"strings"
@@ -10,7 +11,7 @@ import (
 
 // A concrete anonymous allocation exposes its own source declarations without
 // spelling its suppressed binary name. Require the original owned allocation
-// and exact non-generic declaration; unrelated/inherited lookup stays separate.
+// and exact declaration binding without method inference; unrelated/inherited lookup stays separate.
 func nativeAnonymousDeclaredCall(forest *nativeAnonymousForest, caller *ClassObject, method string, op *core.OpCode, work *workbudget.Budget) bool {
 	if forest == nil || caller == nil || forest.objects[caller.GetClassName()] != caller || op == nil || op.Instr == nil || op.Instr.OpCode != core.OP_INVOKEVIRTUAL || len(op.Data) != 2 || !nativeProofWork(work, 1) {
 		return false
@@ -69,11 +70,46 @@ func nativeAnonymousDeclaredCall(forest *nativeAnonymousForest, caller *ClassObj
 			return false
 		}
 		for _, a := range decl.Attributes {
-			if _, generic := a.(*SignatureAttribute); generic {
+			if _, generic := a.(*SignatureAttribute); generic && !nativeAnonymousLexicalZeroArgCall(forest, child.object, decl, desc, work) {
 				return false
 			}
 		}
 		target = decl
 	}
 	return target != nil
+}
+
+// A zero-argument concrete allocation has no parameter inference or argument
+// overload conversion. Class/enclosing-method variables in its return type
+// are declaration bindings, not generic method binders. Reopen those original
+// scopes and require exact descriptor erasure; competing return/bridge targets
+// are still refused by the full original declared-family scan above.
+func nativeAnonymousLexicalZeroArgCall(forest *nativeAnonymousForest, owner *ClassObject, target *MemberInfo, descriptor string, work *workbudget.Budget) bool {
+	args, _, err := callbinding.Descriptor(descriptor)
+	if forest == nil || owner == nil || target == nil || err != nil || len(args) != 0 || forest.objects[owner.GetClassName()] != owner {
+		return false
+	}
+	signature, known := nativeMethodLocalOriginalSignature(owner, target.Attributes, work)
+	formals, _, valid := types.SignatureTypeVariableReferences(signature)
+	if !known || !valid || len(formals) != 0 {
+		return false
+	}
+	reader := NewClassObjectDumper(owner)
+	reader.Work = work
+	scopes, method, known := reader.flattenedMethodLexicalScopesResolved(func(name string) (*ClassObject, bool) {
+		object := forest.objects[name]
+		return object, object != nil && object.GetClassName() == name && nativeProofWork(work, 1)
+	})
+	if !known || !method {
+		return false
+	}
+	signatures := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		signatures = append(signatures, scope.Signature)
+	}
+	if !nativeMethodLocalBindingBudget(signatures, signature, work) {
+		return false
+	}
+	erased, throws, known := types.EraseLexicalScopedMethodSignatureWithThrows(scopes, signature)
+	return known && erased == descriptor && nativeOriginalSignatureThrows(owner, target, throws, work)
 }

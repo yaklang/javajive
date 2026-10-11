@@ -47,7 +47,9 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 	if !allocationKnown {
 		return false
 	}
-	if direct && !allocationForest && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) &&
+	// Independent boundaries commit their entire anonymous source forest. A
+	// direct group alone cannot route subsequent child reads to that boundary.
+	if direct && !allocationForest && (p.independentRoot == nil || len(p.anonymousUnits) == 0) && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) &&
 		(len(p.getters) == 0 || len(p.anonymousUnits) == 0) {
 		return true
 	}

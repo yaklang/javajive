@@ -42,6 +42,12 @@ func recoverParameterizedFieldReceiver(ctx *class_context.ClassContext, value Ja
 		if own := RecoverThisFieldInstantiatedType(ctx, field); own != nil {
 			return own
 		}
+		if own := recoverThisTypeVariableField(ctx, field); own != nil {
+			return own
+		}
+		if lexical := recoverLexicalEnclosingFieldReceiver(ctx, field); lexical != nil {
+			return lexical
+		}
 		if ctx.SiblingClassSig == nil || ctx.SiblingFieldSig == nil {
 			return nil
 		}
@@ -72,4 +78,30 @@ func recoverParameterizedFieldReceiver(ctx *class_context.ClassContext, value Ja
 		return recovered
 	}
 	return recover(value, 0)
+}
+
+// Bare/array field formals are recorded separately from parameterized object
+// Signatures. In a member their declaration may belong to an enclosing class;
+// an empty member ClassSig cannot supply or erase that binder by itself.
+func recoverThisTypeVariableField(ctx *class_context.ClassContext, field *RefMember) types.JavaType {
+	ref, known := UnpackSoltValue(field.Object).(*JavaRef)
+	if !known || ref == nil || !ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
+		return nil
+	}
+	decl := ctx.FieldTypeVar(class_context.SafeIdentifier(field.Member))
+	name := strings.TrimSuffix(decl, strings.Repeat("[]", strings.Count(decl, "[]")))
+	if name == "" || !ctx.IsTypeParam(name) {
+		return nil
+	}
+	for _, shadow := range types.MethodFormalTypeParamNames(ctx.CurrentMethodSig) {
+		if name == shadow {
+			return nil
+		}
+	}
+	target := types.ParseSignature(strings.Repeat("[", strings.Count(decl, "[]")) + "T" + name + ";")
+	erased, valid := SourceTypeErasure(target, ctx)
+	if !valid || erased != bindingType(field.Type()) {
+		return nil
+	}
+	return target
 }

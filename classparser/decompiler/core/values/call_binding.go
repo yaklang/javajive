@@ -60,7 +60,7 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 		if _, ok := UnpackSoltValue(a).(*JavaClassValue); ok {
 			at = "Ljava/lang/Class;"
 		}
-		if lit, ok := UnpackSoltValue(a).(*JavaLiteral); ok && lit.Data == nil {
+		if lit, ok := UnpackSoltValue(a).(*JavaLiteral); ok && (lit.Data == nil || IsNullLiteral(lit)) {
 			at = "null"
 		}
 		poly := false
@@ -85,6 +85,18 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 	if f.rawReceiverHasUniqueErasedBinding(ctx, owner, ps, args) {
 		return nil, false
 	}
+	if f.staticCallHasUniqueErasedBinding(ctx) {
+		assignable := true
+		for i, arg := range args {
+			if arg.Poly || !callbinding.Assignable(arg.Type, ps[i], ctx.InvocationMetadata) {
+				assignable = false
+				break
+			}
+		}
+		if assignable {
+			return nil, false
+		}
+	}
 	plan := callbinding.Build(callbinding.Witness{Owner: owner, Name: f.FunctionName, Desc: f.Descriptor, Kind: kind, PC: f.OriginPC}, recv, args, ctx.InvocationMetadata)
 	if !plan.Supported {
 		// Existing generic target-typing paths own these calls. They must not be
@@ -107,6 +119,12 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 		if args[i].Type == desc {
 			continue
 		}
+		if IsNullLiteral(UnpackSoltValue(f.Arguments[i])) && jdecFlag(ctx, "JDEC_NULL_ARG_CAST_OFF") != "" {
+			// The scoped policy owns null descriptor pins in both planning and
+			// rendering. A planner-created Binding cast must not bypass the
+			// request snapshot's explicit opt-out in witnessDescriptorArgCast.
+			continue
+		}
 		t, e := types.ParseDescriptor(desc)
 		if e != nil {
 			return nil, false
@@ -115,6 +133,33 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 	}
 	out.bindingPlanned = true
 	return out, true
+}
+
+// An implicit widening conversion need not name the formal parameter type.
+// This matters when a public static API accepts a package-private ancestor of
+// a public argument. Prove the complete fixed-arity source selection first:
+// Unique compares parameters, so also require the full descriptor to exclude
+// static hiding with a covariant return and different JVM target.
+func (f *FunctionCallExpression) staticCallHasUniqueErasedBinding(ctx *class_context.ClassContext) bool {
+	if f == nil || ctx == nil || ctx.InvocationMetadata == nil || !f.IsStatic || f.Kind != InvokeStatic ||
+		f.IsSpecialInvoke || f.FunctionName == "<init>" {
+		return false
+	}
+	owner := strings.ReplaceAll(f.ClassName, ".", "/")
+	meta, known := ctx.InvocationMetadata(owner)
+	if !known || meta.Name != owner || !meta.Public {
+		return false
+	}
+	family, err := callbinding.FamilyOf(callbinding.Witness{Owner: owner, Name: f.FunctionName, Desc: f.Descriptor, Kind: callbinding.Static}, ctx.InvocationMetadata)
+	if err != nil || !family.Complete || family.Proof != callbinding.Unique || family.Target == nil {
+		return false
+	}
+	for _, method := range family.Methods {
+		if method.Desc != f.Descriptor || !method.Public || !method.Static || method.Generic || method.Varargs || method.Bridge {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *FunctionCallExpression) rawReceiverHasUniqueErasedBinding(ctx *class_context.ClassContext, owner string, params []string, args []callbinding.Argument) bool {

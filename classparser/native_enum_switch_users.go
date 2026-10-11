@@ -26,6 +26,24 @@ type nativeEnumSwitchUse struct {
 // Computed selectors require an original ordered stack-producer certificate;
 // an equal enum result type or source spelling cannot license the rewrite.
 func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassObject, index *nativeMemberIndex, work *workbudget.Budget) bool {
+	return z.nativeEnumSwitchUsers(p, root, index, work, false)
+}
+
+// Source admission can use a distinct typed-storage certificate only when the
+// complete source transaction will discharge every retained parameter writer.
+// The standalone entry-value proof must still reject a clobbered parameter.
+func (z *JarFS) nativeEnumSwitchSourceUsersClosed(p *nativeMemberFamily, root *ClassObject, index *nativeMemberIndex, work *workbudget.Budget) bool {
+	return z.nativeEnumSwitchUsers(p, root, index, work, true)
+}
+
+func (z *JarFS) nativeEnumSwitchUsers(p *nativeMemberFamily, root *ClassObject, index *nativeMemberIndex, work *workbudget.Budget, sourceStorage bool) bool {
+	if p != nil {
+		for _, table := range p.enumSwitchTables {
+			if table != nil {
+				table.usersClosedRoot = nil
+			}
+		}
+	}
 	if p == nil || root == nil {
 		return false
 	}
@@ -71,7 +89,23 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 				return false
 			}
 			enum, e := z.nativeMemberReader(root).parseResolved(raw)
-			if e != nil || enum.GetClassName() != arr.enum || nativeMemberEnumSynthesisProof(enum, 0x4019, work) == nil {
+			if e != nil || enum.GetClassName() != arr.enum {
+				return false
+			}
+			if original := own[arr.enum]; original != nil {
+				// A same-unit declaration can have constant-specific subclasses
+				// and abstract methods. Its original member flags, not a final
+				// enum template, determine the compiler's synthesis protocol.
+				// Reprove the emitted packet; a cached plan cannot license changes
+				// to its factories, declaration or constant-body constructors.
+				// A canonical enum may itself be the top-level source owner.
+				// Preserve that original protocol; only the distinct member/body
+				// protocol needs a proved enclosing declaration and siblings.
+				if nativeMemberEnumSynthesisProof(original, 0x4019, work) == nil && !z.nativeEnumSwitchOwnedDeclaration(p, original, own, work) {
+					return false
+				}
+				enum = original
+			} else if nativeMemberEnumSynthesisProof(enum, 0x4019, work) == nil {
 				return false
 			}
 			constants := map[string]bool{}
@@ -258,7 +292,11 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 								parameterFlow = nativeEnumParameterOriginalFlow(d, code, work)
 							}
 							if !parameterFlow.selector(selector, work, 0) {
-								return false
+								reader := z.nativeMemberReader(object)
+								reader.Work = work
+								if !sourceStorage || !reader.nativeEnumSelectorStorageFlow(method, code, selector, parameterFlow, 0) {
+									return false
+								}
 							}
 						}
 						for _, pc := range entries {
@@ -294,6 +332,43 @@ func (z *JarFS) nativeEnumSwitchUsersClosed(p *nativeMemberFamily, root *ClassOb
 			}
 		}
 		if count == 0 {
+			return false
+		}
+	}
+	for _, table := range p.enumSwitchTables {
+		table.usersClosedRoot = root
+	}
+	return true
+}
+
+func (z *JarFS) nativeEnumSwitchOwnedDeclaration(p *nativeMemberFamily, enum *ClassObject, own map[string]*ClassObject, work *workbudget.Budget) bool {
+	if z == nil || p == nil || p.failed || enum == nil || own[p.owner] == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	member := p.children[enum.GetClassName()]
+	owner, name, flags, known := originalMemberOwner(enum)
+	if !known || member == nil || member.object != enum || member.enumSynthesis == nil || member.owner != owner || member.name != name || member.flags != flags || own[enum.GetClassName()] != enum || own[owner] == nil || own[owner].GetClassName() != owner {
+		return false
+	}
+	reader := z.nativeMemberReader(enum)
+	reader.Work = work
+	declarations := reader.nativeAnnotationDeclarationResolver()
+	resolve := func(binary string) (*ClassObject, bool) {
+		if !nativeProofWork(work, 1) {
+			return nil, false
+		}
+		if object, present := own[binary]; present {
+			return object, object != nil && object.GetClassName() == binary
+		}
+		return declarations(binary)
+	}
+	proof := nativeMemberEnumSynthesisWithDeclarations(enum, flags, resolve, work)
+	if proof == nil {
+		return false
+	}
+	for binary, body := range proof.bodies {
+		original := p.enumConstants[binary]
+		if !nativeProofWork(work, 1) || body == nil || original == nil || body.object != original.object || own[binary] != body.object {
 			return false
 		}
 	}

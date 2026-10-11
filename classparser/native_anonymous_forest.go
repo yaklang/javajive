@@ -35,7 +35,12 @@ func (c *ClassObjectDumper) planNativeAnonymousForest() *nativeAnonymousFamily {
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemberFamily) *nativeAnonymousForest {
-	if c.foldSiblingResolver == nil || !nativeAnonymousForestVersion(c.obj, c.Work) || !nativeMemberTopLevelEvidence(c.obj, c.Work) {
+	if c.foldSiblingResolver == nil || !nativeAnonymousForestVersion(c.obj, c.Work) {
+		return nil
+	}
+	// A certified static cut is a source boundary with its own lexical scope.
+	// Its physical outer supplies original metadata, never this forest's members.
+	if !nativeMemberTopLevelEvidence(c.obj, c.Work) && (members == nil || members.owner != c.obj.GetClassName() || members.independentRoot == nil || !members.independentRoot.validFor(c) || !members.independentRoot.familyClosed(members, c.Work)) {
 		return nil
 	}
 	if _, _, anon := originalAnonymousOwner(c.obj); anon {
@@ -233,6 +238,9 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 		return nil
 	}
 	if !nativeModernNestSourceScopeClosed(modernNest, forest.objects, c.Work) {
+		return nil
+	}
+	if !nativeMemberPrivatePermissionClosed(&nativeMemberFamily{owner: forest.root, lexicalObjects: forest.objects, modernNestObjects: modernNest}, forest.resolve, c.Work, c.nativePrivatePermissionPlatformParents()) {
 		return nil
 	}
 	committed = true

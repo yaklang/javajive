@@ -233,8 +233,8 @@ func (f *FunctionCallExpression) inferredGenericMethodReturnQuery(ctx *class_con
 	// chain would otherwise solve each prefix here and again in receiver recovery,
 	// giving exponential work while ultimately returning the same unknown result.
 	if f.Descriptor != "" {
-		_, methods, known := invocationSignatureEvidence(ctx, strings.ReplaceAll(f.ClassName, ".", "/"))
-		if sig, declared := methods[class_context.MethodDescKey(f.FunctionName, f.Descriptor)]; known && declared && len(types.MethodFormalTypeParamNames(sig)) == 0 {
+		_, sig, declared, known := invocationDeclarationSignature(ctx, strings.ReplaceAll(f.ClassName, ".", "/"), f.FunctionName, f.Descriptor)
+		if known && declared && len(types.MethodFormalTypeParamNames(sig)) == 0 {
 			return nil
 		}
 	}

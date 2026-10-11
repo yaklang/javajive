@@ -33,6 +33,9 @@ type ClassObjectDumper struct {
 	sourceDeclarationAccess        uint16
 	sourceDeclarationAccessKnown   bool
 	nativeSourceAssertions         *nativeMemberAssertion
+	nativeAssertionInitProjection  *nativeMemberAssertion
+	nativeStandaloneAssertion      *nativeStandaloneAssertion
+	nativeStandaloneAssertionOff   bool
 	originalInitializerStatus      map[string]bool
 	originalInitializerStatusReady bool
 	nativeMemberLookup             func(string) *nativeMemberClass
@@ -607,6 +610,13 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// (ACC_PUBLIC for a public class). Keep them verbatim. The old code assumed every '$' name was
 			// nested, failed the InnerClasses lookup, and wrongly stripped `public`, making the class
 			// inaccessible across packages ("$Gson$Preconditions is not public in com.google.gson.internal").
+		case c.nativeAnonymousIndependentInitializerHeader() || c.nativeMemberIndependentSourceHeader():
+			// Proved independent initializer tails and static source roots
+			// keep their ClassFile visibility. Other flat units retain their
+			// accessibility policy for references from separate source units.
+			if c.obj.AccessFlags&1 == 0 {
+				accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
+			}
 		case innerFlags&0x0001 == 0x0001:
 			// Genuinely nested AND public per InnerClasses: a public nested type's top-level access_flags
 			// omit ACC_PUBLIC (real visibility lives in InnerClasses, which is what javap consults), so
@@ -1446,6 +1456,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			c.recordKeyword = layout.Keyword
 		}
 	}
+	c.prepareNativeStandaloneAssertion()
 	methods, err := c.DumpMethods()
 	if err != nil {
 		if isRequestWorkError(err) {
@@ -2029,6 +2040,15 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	if c.Work != nil && c.Work.Err() != nil {
 		return "", c.Work.Err()
+	}
+	if packet := c.nativeAssertionProtocol(); packet != nil && c.nativeStandaloneAssertion == nil && !packet.pureInitializer && c.nativeAssertionInitProjection != packet {
+		return "", fmt.Errorf("assertion initializer source projection incomplete")
+	}
+	if !c.nativeStandaloneAssertionClosed(full) {
+		if c.Work != nil && c.Work.Err() != nil {
+			return "", c.Work.Err()
+		}
+		return c.retryWithoutStandaloneAssertion()
 	}
 	return full, nil
 }
@@ -4092,6 +4112,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				return nil, assertionErr
 			}
 			statementList = sourceWithoutDeadLocalStores(statementList, params, c.Work)
+			if projected, closed := c.prepareNativeCaptureIdentitySnapshots(statementList, params); closed {
+				statementList = projected
+			} else {
+				return nil, fmt.Errorf("original capture identity snapshots are not closed")
+			}
 			if !c.recordNativeLambdaLocalCaptureBody(method, codeAttr, statementList) {
 				return nil, fmt.Errorf("original lambda local capture body is not closed")
 			}

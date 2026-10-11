@@ -23,6 +23,14 @@ func renderHead(st statements.Statement) string {
 	if st == nil {
 		return ""
 	}
+	// The builtin throw's sealed renderer always starts with this keyword.
+	// Classifying its control flow must not render its operand: that can emit
+	// an entire anonymous class and repeat invocation proofs during CFG scans.
+	if custom, ok := st.(*statements.CustomStatement); ok {
+		if _, known := custom.SourceThrowOperand(); known {
+			return "throw"
+		}
+	}
 	s := strings.TrimSpace(st.String(&class_context.ClassContext{}))
 	if idx := strings.IndexAny(s, " \t\n;"); idx >= 0 {
 		s = s[:idx]

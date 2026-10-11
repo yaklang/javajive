@@ -327,7 +327,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 	// An absent assertion packet has no assertion-status owner to reconstruct.
 	// Do not demand unowned ancestors merely to prove absence. A present or
 	// malformed packet still follows the complete original lexical chain.
-	noAssertions, absenceKnown := nativeMemberAssertionProof(obj, owner, work)
+	noAssertions, absenceKnown := nativeMemberAssertionProofMode(obj, owner, work, true)
 	if lexical != nil && len(lexical) > 0 && (noAssertions != nil || !absenceKnown) {
 		outermost := owner
 		for depth := 0; depth < 64; depth++ {
@@ -352,7 +352,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		if enumSynthesis != nil && enumSynthesis.assertions != nil {
 			p.assertions, valid = enumSynthesis.assertions, enumSynthesis.assertions.statusOwner == outermost
 		} else {
-			p.assertions, valid = nativeMemberAssertionProof(obj, outermost, work)
+			p.assertions, valid = nativeMemberAssertionProofMode(obj, outermost, work, true)
 		}
 		if !valid {
 			return nil
@@ -689,7 +689,10 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 	if !c.planNativeMethodLocals(p) {
 		return nil
 	}
-	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 && !c.nativeMemberHasAnonymousDeclarations() {
+	// An ordinary empty root needs no family projection. A separately proved
+	// static boundary still needs a completed declaration even without children:
+	// foreign families use that declaration to bind their original SUPER type.
+	if independent == nil && len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 && !c.nativeMemberHasAnonymousDeclarations() {
 		return nil
 	}
 	for name, child := range p.children {
@@ -1450,6 +1453,14 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				}
 				owner := ctx.ShortTypeName(strings.ReplaceAll(child.owner, "/", "."))
 				return "((" + owner + ")(" + source + "))", true
+			}
+			// Type recovery runs during analysis as well as after source parameter
+			// preparation. A failed query is absence of evidence, not a failed
+			// committed projection. Reopen the same physical path without rendering
+			// an operand or mutating the family's transaction state.
+			ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
+				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+				return read != nil && name == read.field && p.children[read.owner] != nil && nativeMemberLexicalReadOperand(value, read, c.Work, ctx)
 			}
 			ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
 				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]

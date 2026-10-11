@@ -434,6 +434,15 @@ func (c *ClassObjectDumper) wireNativeAnonymousForestCaptures(ctx *class_context
 		}
 	}
 	ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
+		consumer := forest.consumers[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+		if consumer != nil && consumer.kind == core.OP_GETFIELD && consumer.declaredField != nil {
+			field, valid := value.(*values.RefMember)
+			if !valid || field == nil || name != consumer.name || !field.OriginalInstanceFieldRead(pc, consumer.owner, consumer.name, consumer.descriptor) || !nativeAnonymousLexicalConsumerSourceClosed(c, consumer, ctx, c.Work) || !nativeAnonymousLexicalConsumerOperand(field.Object, consumer, ctx, c.Work) {
+				c.nativeCaptureFailed = true
+				return "", false
+			}
+			return consumer.name, true
+		}
 		read := forest.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
 		if read != nil {
 			text, known := c.nativeAnonymousBindings[nativeMemberCaptureIndexKey(read.owner, read.field)]

@@ -16,8 +16,13 @@ import (
 // A nested declaration/phi requires a lexical block/dominance certificate of its
 // own; equal source text or an equal type cannot move its computation outward.
 func (c *ClassObjectDumper) nativeMethodLocalProducerBindings(local *nativeMethodLocalClass, body []statements.Statement, params map[int]*values.JavaRef) (map[string]*values.JavaRef, statements.Statement, bool) {
-	if local == nil || local.constructor == nil || len(local.allocations) == 0 {
+	if local == nil || local.constructor == nil {
 		return nil, nil, false
+	}
+	if len(local.allocations) == 0 {
+		// A type-only declaration has no hidden values to bind or move. Its
+		// original lexical users close in the archive transaction separately.
+		return map[string]*values.JavaRef{}, nil, local.constructor.descriptor == "()V" && len(local.constructor.captures) == 0 && len(local.typeConsumers) > 0
 	}
 	var site nativeMethodLocalAllocation
 	for _, s := range local.allocations {

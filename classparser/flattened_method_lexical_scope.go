@@ -17,7 +17,6 @@ func (c *ClassObjectDumper) flattenedMethodLexicalScopes() ([]types.LexicalTypeS
 	if c.foldSiblingResolver == nil {
 		return nil, false, true
 	}
-	seen := map[string]bool{}
 	resolve := func(name string) (*ClassObject, bool) {
 		if !nativeProofWork(c.Work, 1) {
 			return nil, false
@@ -29,6 +28,17 @@ func (c *ClassObjectDumper) flattenedMethodLexicalScopes() ([]types.LexicalTypeS
 		obj, err := c.parseResolved(b)
 		return obj, err == nil && obj != nil && obj.GetClassName() == name
 	}
+	return c.flattenedMethodLexicalScopesResolved(resolve)
+}
+
+// The same immutable original ownership walk serves archive reads and a jointly
+// prepared forest. A prepared scope supplies objects directly and does not need
+// to serialize/reparse them merely to recover their declaration bindings.
+func (c *ClassObjectDumper) flattenedMethodLexicalScopesResolved(resolve func(string) (*ClassObject, bool)) ([]types.LexicalTypeScope, bool, bool) {
+	if resolve == nil {
+		return nil, false, false
+	}
+	seen := map[string]bool{}
 	var walk func(*ClassObject, int) ([]types.LexicalTypeScope, bool, bool)
 	walk = func(obj *ClassObject, depth int) ([]types.LexicalTypeScope, bool, bool) {
 		if obj == nil || depth >= 64 || seen[obj.GetClassName()] || !nativeProofWork(c.Work, 1) {

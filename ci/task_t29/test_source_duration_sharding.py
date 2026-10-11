@@ -3,7 +3,7 @@
 import math
 import unittest
 
-from tools.ci_scheduler.shard import ShardError, source_parent_shards
+from tools.ci_scheduler.shard import ShardError, source_parent_batches, source_parent_shards
 
 
 class SourceDurationSharding(unittest.TestCase):
@@ -35,6 +35,45 @@ class SourceDurationSharding(unittest.TestCase):
         for names, count in [([], 1), (["TestA"], 0), (["TestA"], 2)]:
             with self.subTest(names=names, count=count), self.assertRaises(ShardError):
                 source_parent_shards(names, {}, count)
+
+    def test_batches_conserve_inventory_and_bound_cost_and_parent_count(self):
+        names = [f"Test{i:03d}" for i in range(100)] + ["TestOversized", "TestUnknown"]
+        hints = {name: (i % 9) for i, name in enumerate(names[:100])}
+        hints.update(TestOversized=201, TestStale=9999)
+        batches = source_parent_batches(names, hints, max_seconds=30, max_parents=7)
+        self.assertEqual(batches, source_parent_batches(reversed(names), hints, max_seconds=30, max_parents=7))
+        self.assertCountEqual([name for batch in batches for name in batch.items], names)
+        self.assertTrue(all(0 < len(batch.items) <= 7 for batch in batches))
+        for batch in batches:
+            if batch.duration_ns > 30_000_000_000:
+                self.assertEqual(batch.items, ["TestOversized"])
+        self.assertEqual(batches[0].items, ["TestOversized"])
+
+    def test_cost_drift_does_not_pin_the_rest_of_a_large_lane(self):
+        names = [f"Test{i:02d}" for i in range(16)]
+        hints = dict.fromkeys(names, 30)
+        actual = hints | {names[0]: 150}
+        def finish(groups):
+            workers = [0] * 4
+            for group in groups:
+                index = min(range(4), key=lambda i: (workers[i], i))
+                workers[index] += sum(actual[name] for name in group.items)
+            return max(workers)
+        lanes = source_parent_shards(names, hints, 4)
+        batches = source_parent_batches(names, hints, max_seconds=30)
+        self.assertEqual(finish(lanes), 240)
+        self.assertEqual(finish(batches), 150)
+
+    def test_batch_inputs_fail_closed(self):
+        for names, hints in [([], {}), (["TestA", "TestA"], {}), (["TestA"], {"TestA": math.nan})]:
+            with self.subTest(names=names), self.assertRaises(ShardError):
+                source_parent_batches(names, hints)
+        for limit in [0, -1, math.inf, math.nan, True, "3"]:
+            with self.subTest(limit=limit), self.assertRaises(ShardError):
+                source_parent_batches(["TestA"], {}, max_seconds=limit)
+        for count in [0, -1, True, 1.5]:
+            with self.subTest(count=count), self.assertRaises(ShardError):
+                source_parent_batches(["TestA"], {}, max_parents=count)
 
 
 if __name__ == "__main__":

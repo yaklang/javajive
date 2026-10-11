@@ -294,7 +294,7 @@ func (c *ClassObjectDumper) nativeMemberEnumConstantAnonymousRole(p *nativeMembe
 		return false
 	}
 	parent := p.children[body.owner]
-	if parent.object == nil || !isGenuineEnum(parent.object) || body.plan.allocatedClass != name || body.plan.descriptor != body.descriptor {
+	if parent == nil || parent.object == nil || parent.enumSynthesis == nil || !isGenuineEnum(parent.object) || body.plan.allocatedClass != name || body.plan.descriptor != body.descriptor {
 		return false
 	}
 	if original, found := parent.enumSynthesis.constants[body.plan.constant]; !found || original != body.plan {
@@ -377,7 +377,16 @@ func (c *ClassObjectDumper) foldNativeEnumConstantBodies() (map[string]string, b
 			p.failed = true
 			return nil, true
 		}
-		out[name] = rendered
+		// The erased constant-specific constructor still registers the original
+		// private enum constructor before javac lowers the constant body. Retain
+		// that proved event in the source schedule, just as for an ordinary
+		// anonymous subclass; argument expressions precede this body fragment.
+		registration, known := c.nativeEnumConstantConstructorRegistration(body)
+		if !known {
+			p.failed = true
+			return nil, true
+		}
+		out[name] = registration + rendered
 		body.rendered = true
 		if body.legacyConstructorMetadata {
 			c.appendDiagnostic(DecompileDiagnostic{Code: "enum_constant_legacy_metadata", Method: body.object.GetClassName() + ".<init>" + body.descriptor, Message: "The original pre-nestmate enum constant constructor packet is proved. Recompilation may add unnamed generated parameter metadata and different STATIC/FINAL bits to its anonymous InnerClasses self row; executable descriptor, final class, forwarding operands and exceptions are preserved."})
@@ -388,6 +397,23 @@ func (c *ClassObjectDumper) foldNativeEnumConstantBodies() (map[string]string, b
 		return nil, true
 	}
 	return out, true
+}
+
+func (c *ClassObjectDumper) nativeEnumConstantConstructorRegistration(body *nativeEnumConstantBody) (string, bool) {
+	if c == nil || body == nil || body.object == nil {
+		return "", false
+	}
+	p, current := c.nativeMemberRoot, c.nativeMemberCurrent
+	if p == nil || p.failed || p.enumConstants[body.object.GetClassName()] != body || current == nil || current != p.children[body.owner] || current.object == nil || current.object.GetClassName() != body.owner ||
+		!c.nativeMemberEnumConstantAnonymousRole(p, body.object) {
+		return "", false
+	}
+	bridge := current.accessBridges[body.superDescriptor]
+	if bridge == nil || !nativeMemberJointBridgeEquivalent(p, current.object, bridge.method, body.superDescriptor, c.Work) {
+		return "", false
+	}
+	registration := nativeMemberConstructorRegistration(p, body.owner, body.superDescriptor)
+	return registration, registration != "" && !p.failed
 }
 
 // Constant classes have no Java source name. Their original references must

@@ -51,6 +51,7 @@ type nativeAnonymousFamily struct {
 	failed          bool
 	bridges         map[string]*nativeConstructorAccessBridge
 	standalone      map[string]*ClassObject
+	enumPrefix      int
 }
 
 // Anonymous ownership is an original attribute fact; binary spelling only
@@ -640,7 +641,11 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberFamily, forest *nativeAnonymousForest, root *nativeAnonymousIndependentRoot) *nativeAnonymousFamily {
-	if c.foldSiblingResolver == nil || isGenuineEnum(c.obj) || c.getenv("JDEC_NATIVE_ANONYMOUS_OFF") != "" || !nativeSourceBinaryName(c.obj.GetClassName()) {
+	if c.foldSiblingResolver == nil || c.getenv("JDEC_NATIVE_ANONYMOUS_OFF") != "" || !nativeSourceBinaryName(c.obj.GetClassName()) {
+		return nil
+	}
+	enumPrefix, enumKnown := c.nativeAnonymousEnumConstantPrefix(members)
+	if !enumKnown {
 		return nil
 	}
 	if _, _, anon := originalAnonymousOwner(c.obj); anon && (forest == nil || forest.units[c.obj.GetClassName()] == nil) && !root.validFor(c) {
@@ -673,6 +678,7 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 	if len(names) > 64 {
 		return nil
 	}
+	p.enumPrefix = enumPrefix
 	for name := range names {
 		raw, known := c.foldSiblingResolver(name)
 		if !known {
@@ -690,6 +696,9 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 			continue
 		}
 		if members != nil && members.enumSwitchTables[name] != nil {
+			continue
+		}
+		if c.nativeMemberEnumConstantAnonymousRole(members, obj) {
 			continue
 		}
 		if !nativeSourceBinaryName(obj.GetSupperClassName()) {
@@ -711,7 +720,7 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 	// javac numbers actual anonymous expressions consecutively. Only the
 	// representable leading prefix can be reconstructed; leaving an earlier
 	// declaration flat would renumber every subsequent anonymous expression.
-	for ordinal := 1; ordinal <= len(names); ordinal++ {
+	for ordinal := p.enumPrefix + 1; ordinal <= len(names); ordinal++ {
 		name := p.owner + "$" + strconv.Itoa(ordinal)
 		if p.children[name] != nil {
 			continue
@@ -738,11 +747,11 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 			p.bridges[bridge.descriptor] = bridge
 		}
 	}
-	if len(p.children) == 0 {
+	if len(p.children) == 0 && (members == nil || len(p.standalone) == 0) {
 		return nil
 	}
 	for i := 1; i <= len(p.children); i++ {
-		if p.children[p.owner+"$"+strconv.Itoa(i)] == nil {
+		if p.children[p.owner+"$"+strconv.Itoa(p.enumPrefix+i)] == nil {
 			return nil
 		}
 	}
@@ -1441,7 +1450,7 @@ func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 		return false
 	}
 	for i, n := range ordinals {
-		if n != i+1 {
+		if n != p.enumPrefix+i+1 {
 			return false
 		}
 	}
@@ -1449,6 +1458,15 @@ func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 }
 func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 	result := map[string]bool{}
+	if f := c.nativeAnonymousForest; f != nil {
+		for _, method := range f.consumers[c.obj.GetClassName()] {
+			for _, consumer := range method {
+				if consumer != nil && consumer.getter == nil && consumer.declaredField != nil {
+					result[consumer.name] = true
+				}
+			}
+		}
+	}
 	if p := c.nativeMemberRoot; p != nil {
 		// Own static fields may be printed without a qualifier. Their original
 		// declarations are field bindings, never missing generated JVM locals.
@@ -1726,7 +1744,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		}
 	}
 	allowed := map[int]map[*coreutils.VariableId]bool{}
-	assigned := map[string]*coreutils.VariableId{}
+	names := &nativeCaptureNameBindings{}
 	remaining := 16384
 	activeValue := map[values.JavaValue]bool{}
 	activeStatement := map[statements.Statement]bool{}
@@ -1782,6 +1800,11 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 						}
 					}
 					erasure, known := values.SourceTypeErasure(declaredType, ctx)
+					if known && erasure != captureParams[index] && !parameterIDs[ref.Id] && visible[ref.Id] && stable && declaration != nil &&
+						c.nativeCaptureWidenedDeclaration(body, ref, declaration, child, alloc, field, erasure, captureParams[index]) {
+						declaredType = ref.WebDeclType
+						erasure, known = values.SourceTypeErasure(declaredType, ctx)
+					}
 					if !known || erasure != captureParams[index] {
 						p.failed = true
 						continue
@@ -1805,12 +1828,11 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 						p.failed = true
 						continue
 					}
-					if old := assigned[name]; old != nil && old != ref.Id {
+					if !names.bind(name, ref.Id, visible, c.Work) {
 						p.failed = true
 						continue
 					}
 					ctx.LocalNames[ref.Id] = name
-					assigned[name] = ref.Id
 					site[ref.Id] = true
 				}
 			}
@@ -1884,9 +1906,11 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	walk(body, visible)
 	reserved := map[string]bool{}
 	protected := map[*coreutils.VariableId]bool{}
-	for name, id := range assigned {
+	for name, bindings := range names.bindings {
 		reserved[name] = true
-		protected[id] = true
+		for id := range bindings {
+			protected[id] = true
+		}
 	}
 	c.prepareNativeSourceNames(body, params, reserved, protected)
 	ctx.SourceCaptureStable = func(pc int, id *coreutils.VariableId) bool { return allowed[pc][id] }

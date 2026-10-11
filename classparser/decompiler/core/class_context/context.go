@@ -51,6 +51,7 @@ type ClassContext struct {
 	// Original bytecode/source binding may replace a proved enum table selector
 	// and all of its labels together. Nil keeps the original integer switch.
 	SourceEnumSwitch            func(selector any, labels []int) (string, map[int]string, bool)
+	SourceParameterStore        func(assignment any) (string, bool)
 	SourceMemberAllocation      func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	SourceMemberCandidate       func(owner string) bool
 	SourceMethodLocalCandidate  func(owner string) bool
@@ -69,6 +70,10 @@ type ClassContext struct {
 	SourceAnonymousAllocation  func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	SourceCapturedField        func(pc int, name string, receiver bool) (string, bool)
 	SourceLexicalCapturedField func(value any, pc int, name string) (string, bool)
+	// A speculative type query can precede constructor source preparation.
+	// Its proof may be unavailable, but it must never commit a projection or
+	// invalidate the family. Rendering retains the separate committing hook.
+	SourceLexicalCapturedFieldType func(value any, pc int, name string) bool
 	// Only an original enclosing-read/invocation certificate may keep a raw
 	// receiver when qualified-this would invent generic substitutions.
 	SourceLexicalInvocationReceiver func(call any) (string, bool)
