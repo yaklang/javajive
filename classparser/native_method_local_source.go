@@ -20,6 +20,7 @@ type nativeMethodLocalClass struct {
 	owner                     *nativeMethodLocalOwner
 	constructor               *nativeMethodLocalConstructor
 	allocations               map[int]nativeMethodLocalAllocation
+	typeConsumers             map[int]string
 	calls                     map[int]bool
 	bindings                  map[string]string
 	parameterIDs              map[int]*coreutils.VariableId
@@ -30,6 +31,8 @@ type nativeMethodLocalClass struct {
 	source                    string
 	sourceEmitted             bool
 	legacyConstructorMetadata bool
+	sourceCompiler            SourceCompilerProfile
+	targetSourceVersion       int
 }
 
 // The compilation unit is not a method owner. Plan each physically verified
@@ -167,8 +170,12 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 				}
 			}
 			sites, known := c.nativeMethodLocalAllocationFacts(local, owner, constructor, true)
+			var consumers map[int]string
 			if !known {
-				return false
+				consumers, known = c.nativeMethodLocalTypeConsumerFacts(local, owner, constructor)
+				if !known {
+					return false
+				}
 			}
 			if constructor.enclosingField != "" {
 				expected, known := nativeMethodLocalEnclosingField(p, owner.owner, c.Work)
@@ -234,7 +241,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 			if c.Work != nil && c.Work.CheckAlloc(int64(len(p.methodLocals)+1)*1024) != nil {
 				return false
 			}
-			p.methodLocals[binary] = &nativeMethodLocalClass{object: local, owner: owner, constructor: constructor, allocations: sites, calls: map[int]bool{}, legacyConstructorMetadata: legacyMetadata}
+			p.methodLocals[binary] = &nativeMethodLocalClass{object: local, owner: owner, constructor: constructor, allocations: sites, typeConsumers: consumers, calls: map[int]bool{}, legacyConstructorMetadata: legacyMetadata, sourceCompiler: c.options.SourceCompiler, targetSourceVersion: c.options.TargetSourceVersion}
 			if !nativeMethodLocalCaptureMetadata(c.obj, p.methodLocals[binary], c.Work, p) {
 				return false
 			}
@@ -296,12 +303,12 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 			return false
 		}
 		for user := range index.typeUsers[binary] {
-			if !nativeProofWork(work, 1) || user != p.owner && p.children[user] == nil && user != binary {
+			if !nativeProofWork(work, 1) || user != p.owner && p.children[user] == nil && user != binary && !nativeMethodLocalAnonymousSubtype(local, p, user, work) {
 				return false
 			}
 		}
 		for user := range index.constructors[binary] {
-			if !nativeProofWork(work, 1) || user != local.owner.owner {
+			if !nativeProofWork(work, 1) || user != local.owner.owner && !nativeMethodLocalAnonymousSubtype(local, p, user, work) {
 				return false
 			}
 		}
@@ -352,7 +359,7 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 					return false
 				}
 				for _, name := range names {
-					if localType(name) {
+					if localType(name) && !nativeMethodLocalAnonymousSubtype(p.methodLocals[name], p, root.GetClassName(), work) {
 						return false
 					}
 				}
@@ -377,7 +384,7 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 		if !headerClosed(root, root.Attributes) {
 			return false
 		}
-		if localType(root.GetSupperClassName()) {
+		if localType(root.GetSupperClassName()) && !nativeMethodLocalAnonymousSubtype(p.methodLocals[root.GetSupperClassName()], p, root.GetClassName(), work) {
 			return false
 		}
 		for _, index := range root.Interfaces {
@@ -455,8 +462,14 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 								return false
 							}
 							target, known := sourceBridgeUTF8(root, constant.NameIndex)
-							if !known || localType(target) {
+							if !known {
 								return false
+							}
+							if localType(target) {
+								local := p.methodLocals[target]
+								if local == nil || root.GetClassName() != local.owner.owner || name != local.owner.method || desc != local.owner.descriptor || local.typeConsumers[int(op.CurrentOffset)] != target {
+									return false
+								}
 							}
 						}
 					}
@@ -606,6 +619,11 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		first := func(l *nativeMethodLocalClass) int {
 			pc := 65536
 			for p := range l.allocations {
+				if p < pc {
+					pc = p
+				}
+			}
+			for p := range l.typeConsumers {
 				if p < pc {
 					pc = p
 				}

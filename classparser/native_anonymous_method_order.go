@@ -50,7 +50,7 @@ func (c *ClassObjectDumper) nativeAnonymousMethodOrder(methods []*dumpedMethods)
 			continue
 		}
 		for j, ordinal := range ordinals {
-			if ordinal <= 0 || ordinal > len(group.children) || seen[ordinal] || j > 0 && ordinal != ordinals[j-1]+1 {
+			if ordinal <= group.enumPrefix || ordinal > group.enumPrefix+len(group.children) || seen[ordinal] || j > 0 && ordinal != ordinals[j-1]+1 {
 				return nil, false
 			}
 			proved := false

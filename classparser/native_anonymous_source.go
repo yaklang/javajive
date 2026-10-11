@@ -51,6 +51,7 @@ type nativeAnonymousFamily struct {
 	failed          bool
 	bridges         map[string]*nativeConstructorAccessBridge
 	standalone      map[string]*ClassObject
+	enumPrefix      int
 }
 
 // Anonymous ownership is an original attribute fact; binary spelling only
@@ -640,7 +641,11 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberFamily, forest *nativeAnonymousForest, root *nativeAnonymousIndependentRoot) *nativeAnonymousFamily {
-	if c.foldSiblingResolver == nil || isGenuineEnum(c.obj) || c.getenv("JDEC_NATIVE_ANONYMOUS_OFF") != "" || !nativeSourceBinaryName(c.obj.GetClassName()) {
+	if c.foldSiblingResolver == nil || c.getenv("JDEC_NATIVE_ANONYMOUS_OFF") != "" || !nativeSourceBinaryName(c.obj.GetClassName()) {
+		return nil
+	}
+	enumPrefix, enumKnown := c.nativeAnonymousEnumConstantPrefix(members)
+	if !enumKnown {
 		return nil
 	}
 	if _, _, anon := originalAnonymousOwner(c.obj); anon && (forest == nil || forest.units[c.obj.GetClassName()] == nil) && !root.validFor(c) {
@@ -673,6 +678,7 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 	if len(names) > 64 {
 		return nil
 	}
+	p.enumPrefix = enumPrefix
 	for name := range names {
 		raw, known := c.foldSiblingResolver(name)
 		if !known {
@@ -690,6 +696,9 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 			continue
 		}
 		if members != nil && members.enumSwitchTables[name] != nil {
+			continue
+		}
+		if c.nativeMemberEnumConstantAnonymousRole(members, obj) {
 			continue
 		}
 		if !nativeSourceBinaryName(obj.GetSupperClassName()) {
@@ -711,7 +720,7 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 	// javac numbers actual anonymous expressions consecutively. Only the
 	// representable leading prefix can be reconstructed; leaving an earlier
 	// declaration flat would renumber every subsequent anonymous expression.
-	for ordinal := 1; ordinal <= len(names); ordinal++ {
+	for ordinal := p.enumPrefix + 1; ordinal <= len(names); ordinal++ {
 		name := p.owner + "$" + strconv.Itoa(ordinal)
 		if p.children[name] != nil {
 			continue
@@ -742,7 +751,7 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 		return nil
 	}
 	for i := 1; i <= len(p.children); i++ {
-		if p.children[p.owner+"$"+strconv.Itoa(i)] == nil {
+		if p.children[p.owner+"$"+strconv.Itoa(p.enumPrefix+i)] == nil {
 			return nil
 		}
 	}
@@ -1441,7 +1450,7 @@ func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 		return false
 	}
 	for i, n := range ordinals {
-		if n != i+1 {
+		if n != p.enumPrefix+i+1 {
 			return false
 		}
 	}

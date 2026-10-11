@@ -294,7 +294,7 @@ func (c *ClassObjectDumper) nativeMemberEnumConstantAnonymousRole(p *nativeMembe
 		return false
 	}
 	parent := p.children[body.owner]
-	if parent.object == nil || !isGenuineEnum(parent.object) || body.plan.allocatedClass != name || body.plan.descriptor != body.descriptor {
+	if parent == nil || parent.object == nil || parent.enumSynthesis == nil || !isGenuineEnum(parent.object) || body.plan.allocatedClass != name || body.plan.descriptor != body.descriptor {
 		return false
 	}
 	if original, found := parent.enumSynthesis.constants[body.plan.constant]; !found || original != body.plan {

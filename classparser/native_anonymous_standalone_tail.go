@@ -41,7 +41,7 @@ func (c *ClassObjectDumper) nativeAnonymousStandaloneTailClosed(p *nativeAnonymo
 		}
 		suffix, known := strings.CutPrefix(name, p.owner+"$")
 		ordinal, e := strconv.Atoi(suffix)
-		if !known || e != nil || strconv.Itoa(ordinal) != suffix || ordinal <= len(p.children) {
+		if !known || e != nil || strconv.Itoa(ordinal) != suffix || ordinal <= p.enumPrefix+len(p.children) {
 			return false
 		}
 		matches := 0

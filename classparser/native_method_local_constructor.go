@@ -341,7 +341,7 @@ func (c *ClassObjectDumper) nativeMethodLocalConstructorSourceMetadata(obj *Clas
 // Full physical constructor, scope, original SSA allocation and capture proofs
 // must still succeed before this metadata-only source eligibility is consulted.
 func nativeMethodLocalLegacySourceMetadata(obj *ClassObject, method *MemberInfo, params []string, owner *nativeMethodLocalOwner, work *workbudget.Budget) bool {
-	if obj == nil || method == nil || owner == nil || len(params) == 0 || obj.MinorVersion != 0 || obj.MajorVersion < 49 || obj.MajorVersion >= 52 {
+	if obj == nil || method == nil || owner == nil || obj.MinorVersion != 0 || obj.MajorVersion < 49 || obj.MajorVersion >= 52 {
 		return false
 	}
 	signatureSeen := false
@@ -363,5 +363,5 @@ func nativeMethodLocalLegacySourceMetadata(obj *ClassObject, method *MemberInfo,
 	// Signature is optional in these legacy files; when present, the physical
 	// checker requires exactly ()V. Only independently proved hidden operands
 	// exist in this default-constructor packet, never explicit source arguments.
-	return nativeMethodLocalConstructorParameters(obj, method, params, owner, false, work)
+	return (len(params) != 0 || !signatureSeen) && nativeMethodLocalConstructorParameters(obj, method, params, owner, false, work)
 }
