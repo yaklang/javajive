@@ -33,6 +33,9 @@ type constructorEffectValue struct {
 type constructorSelfStorageProof struct {
 	selfStored    bool
 	referenceRead bool
+	// Only a complete capture-motion constructor proof owns the fresh receiver.
+	// A selected method query supplies no allocation/nonpublication evidence.
+	freshReceiver bool
 }
 
 func (p *constructorSelfStorageProof) closed() bool {
@@ -95,7 +98,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		if evidence.inconsistent || remaining < 0 || d.checkWork() != nil {
 			return false, platformUsed
 		}
-		aliases := &constructorSelfStorageProof{}
+		aliases := &constructorSelfStorageProof{freshReceiver: true}
 		evidence.transcript = nil
 		evidence.inBody = true
 		safe := d.constructorChainEffectsWithArguments(owner, descriptor, writes, map[string]bool{}, &remaining, 0, aliases, arguments) && aliases.closed() && !evidence.inconsistent
@@ -234,7 +237,7 @@ func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, 
 // A Fieldref may name a subclass while resolving to an ancestor's field. Bind
 // the symbolic owner first, then search its original declaration hierarchy.
 // Parent and child fields named this$0 must remain different storage locations.
-func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *values.JavaClassMember, put bool, remaining *int) (string, bool) {
+func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *values.JavaClassMember, put bool, remaining *int, storage *constructorSelfStorageProof) (string, bool) {
 	if member == nil {
 		return "", false
 	}
@@ -278,7 +281,7 @@ func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *val
 				// also needs closed finalizer dispatch; an open finalizer could
 				// observe the early capture. Keep static storage and invalid
 				// final+volatile declarations outside this receiver domain.
-				unobserved := flags&0x0040 == 0 || flags&0x0010 == 0 && c.constructorReceiverFinalizerSilent
+				unobserved := flags&0x0040 == 0 || flags&0x0010 == 0 && storage != nil && storage.freshReceiver && c.constructorReceiverFinalizerSilent
 				return name + "\x00" + member.Member + "\x00" + member.Description, matches == 1 && flags&0x0008 == 0 && unobserved && accessible && writable
 			}
 		}
@@ -840,7 +843,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					continue
 				}
 				aliases.selfStored = aliases.selfStored || stored.receiver
-				field, known := c.constructorEffectField(obj, member, opcode == core.OP_PUTFIELD, remaining)
+				field, known := c.constructorEffectField(obj, member, opcode == core.OP_PUTFIELD, remaining, aliases)
 				if !known || writes[field] {
 					return false
 				}

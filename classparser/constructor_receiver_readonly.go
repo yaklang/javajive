@@ -166,7 +166,7 @@ func (c *ClassObjectDumper) constructorReceiverReadOnlyBoundMethod(obj *ClassObj
 	if field == nil || constructorEffectType(field.Description).kind != value.kind {
 		return constructorEffectValue{}, false
 	}
-	identity, known := c.constructorEffectField(obj, field, false, remaining)
+	identity, known := c.constructorEffectField(obj, field, false, remaining, storage)
 	accepted := known && !writes[identity]
 	if accepted && value.kind == 'L' && storage != nil {
 		storage.referenceRead = true

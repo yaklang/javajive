@@ -48,6 +48,7 @@ func (c *ClassObjectDumper) constructorReceiverClosedMethodWithBinding(obj *Clas
 
 	leafKey, memoEligible := c.constructorClosedBodyKey(obj, target, code, arguments, writes, nil, remaining, 0)
 	leafKey.leaf = true
+	leafKey.freshReceiver = aliases.freshReceiver
 	memoKey := leafKey
 	var epoch, entries uint64
 	if memoEligible {

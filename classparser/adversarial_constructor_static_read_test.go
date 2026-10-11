@@ -268,3 +268,30 @@ func TestAdversarialConstructorVolatileOracleRejectsCompiledSemanticMutants(t *t
 		})
 	}
 }
+
+func TestAdversarialConstructorVolatileMethodMemoCannotBorrowFreshReceiverScope(t *testing.T) {
+	source := strings.Replace(closedMethodEvidenceFixture, "int word;", "volatile int word;", 1)
+	if source == closedMethodEvidenceFixture {
+		t.Fatal("original volatile declaration not selected")
+	}
+	files := nativeCompileClasses(t, source+"class ClosedBodyMemoChild extends ClosedMethodEvidence{}")
+	c, object := closedBodyMemoDomain(t, files)
+	member := &values.JavaClassMember{Name: object.GetClassName(), Member: "change", Description: "(I)I"}
+	invoke := func(fresh bool) bool {
+		remaining := 512
+		_, accepted := c.constructorReceiverClosedMethod(object, member, core.OP_INVOKESPECIAL, map[string]bool{}, map[string]bool{}, &remaining, 0, &constructorSelfStorageProof{freshReceiver: fresh}, constructorEffectValue{kind: 'I'})
+		return accepted
+	}
+	if invoke(false) {
+		t.Fatal("method-only cold proof granted fresh receiver permission")
+	}
+	if !invoke(true) || len(c.constructorProfileEvidence.closedBodies) != 1 {
+		t.Fatal("original fresh-receiver body did not establish a certificate")
+	}
+	if invoke(false) {
+		t.Fatal("method-only query borrowed constructor nonpublication evidence")
+	}
+	if !invoke(true) {
+		t.Fatal("same original constructor scope lost its reusable certificate")
+	}
+}
