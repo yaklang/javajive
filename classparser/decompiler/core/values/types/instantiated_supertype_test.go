@@ -10,7 +10,7 @@ import (
 )
 
 func TestInstantiatedSupertypeRequiresConsistentCompleteHierarchy(t *testing.T) {
-	for _, mode := range []string{"single edge", "two edges", "diamond", "conflicting diamond", "missing class", "wrong name", "incomplete parents", "wrong physical edge", "duplicate physical edge", "free formal", "raw generic", "wrong arity", "wildcard", "primitive argument", "cyclic type", "typed nil type", "deep type", "owner segments", "malformed Signature", "cycle", "unrelated", "work", "memory", "canceled"} {
+	for _, mode := range []string{"single edge", "two edges", "interface physical superclass", "duplicate interface superclass", "diamond", "conflicting diamond", "missing class", "wrong name", "incomplete parents", "wrong physical edge", "duplicate physical edge", "free formal", "raw generic", "wrong arity", "wildcard", "primitive argument", "cyclic type", "typed nil type", "deep type", "owner segments", "malformed Signature", "cycle", "unrelated", "work", "memory", "canceled"} {
 		t.Run(mode, func(t *testing.T) {
 			metadata := map[string]callbinding.Class{
 				"x/Leaf":           {Name: "x/Leaf", Signature: "<X:Ljava/lang/Object;>Ljava/lang/Object;Lx/Target<TX;>;", Parents: []string{"java/lang/Object", "x/Target"}, ParentsComplete: true},
@@ -21,10 +21,18 @@ func TestInstantiatedSupertypeRequiresConsistentCompleteHierarchy(t *testing.T) 
 			source := NewParameterizedType("x.Leaf", []JavaType{NewJavaArrayType(NewJavaClass("java.lang.String"))})
 			change := metadata["x/Leaf"]
 			switch mode {
-			case "two edges":
+			case "two edges", "interface physical superclass", "duplicate interface superclass":
 				change.Signature = "<X:Ljava/lang/Object;>Ljava/lang/Object;Lx/Middle<TX;>;"
 				change.Parents = []string{"java/lang/Object", "x/Middle"}
 				metadata["x/Middle"] = callbinding.Class{Name: "x/Middle", Signature: "<M:Ljava/lang/Object;>Ljava/lang/Object;Lx/Target<TM;>;", Parents: []string{"x/Target"}, ParentsComplete: true, IsInterface: true}
+				if mode != "two edges" {
+					m := metadata["x/Middle"]
+					m.Parents = append(m.Parents, "java/lang/Object")
+					if mode == "duplicate interface superclass" {
+						m.Parents = append(m.Parents, "java/lang/Object")
+					}
+					metadata[m.Name] = m
+				}
 			case "diamond", "conflicting diamond":
 				change.Signature = "<X:Ljava/lang/Object;>Ljava/lang/Object;Lx/Left<TX;>;Lx/Right<TX;>;"
 				change.Parents = []string{"java/lang/Object", "x/Left", "x/Right"}
@@ -91,7 +99,7 @@ func TestInstantiatedSupertypeRequiresConsistentCompleteHierarchy(t *testing.T) 
 			}
 			metadata["x/Leaf"] = change
 			got, ok := ProjectInstantiatedSupertype(ctx, source, "x/Target", func(n string) (callbinding.Class, bool) { m, k := metadata[n]; return m, k })
-			want := mode == "single edge" || mode == "two edges" || mode == "diamond"
+			want := mode == "single edge" || mode == "two edges" || mode == "interface physical superclass" || mode == "diamond"
 			if ok != want {
 				t.Fatalf("projection=%v want=%v", ok, want)
 			}

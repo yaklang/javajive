@@ -89,6 +89,9 @@ func (c *ClassObjectDumper) nativeCaptureWidenedDeclaration(body []statements.St
 				typ, proved = types.ProjectInstantiatedSupertype(c.FuncCtx, source, target.Name, bounded)
 			}
 		}
+		if !proved && target.Public && !strings.Contains(target.Name, "$") {
+			typ, proved = c.nativeCapturedRawAllocationType(declaration, actual, expected, bounded)
+		}
 		if !proved {
 			resolve := c.nativeAnnotationDeclarationResolver()
 			definition, known := resolve(target.Name)

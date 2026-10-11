@@ -14,6 +14,25 @@ import (
 // checked, including diamonds: conflicting instantiations grant no source view.
 // Raw generic owners and enclosing-owner segments require separate evidence.
 func ProjectInstantiatedSupertype(ctx *class_context.ClassContext, source JavaType, target string, provider callbinding.Provider) (JavaType, bool) {
+	return projectOriginalSupertype(ctx, source, target, provider, false)
+}
+
+// ProjectRawAllocationSupertype follows JLS 4.8: a raw generic class has the
+// erasures of its declared supertypes. A non-generic intermediate declaration
+// retains its own instantiated edges. Callers must independently prove an
+// original ordinary NEW whose source view has no type arguments; this API does
+// not make an arbitrary unresolved reference raw or erase a solved view.
+func ProjectRawAllocationSupertype(ctx *class_context.ClassContext, source JavaType, target string, provider callbinding.Provider) (JavaType, bool) {
+	if source == nil || reflect.ValueOf(source).Kind() == reflect.Pointer && reflect.ValueOf(source).IsNil() {
+		return nil, false
+	}
+	if _, parameterized := AsParameterizedType(source); parameterized {
+		return nil, false
+	}
+	return projectOriginalSupertype(ctx, source, target, provider, true)
+}
+
+func projectOriginalSupertype(ctx *class_context.ClassContext, source JavaType, target string, provider callbinding.Provider, allowRaw bool) (JavaType, bool) {
 	if ctx == nil || source == nil || target == "" || provider == nil {
 		return nil, false
 	}
@@ -61,7 +80,9 @@ func ProjectInstantiatedSupertype(ctx *class_context.ClassContext, source JavaTy
 			return false
 		}
 		name, args := "", []JavaType(nil)
+		parameterized := false
 		if p, ok := AsParameterizedType(view); ok {
+			parameterized = true
 			if len(p.OwnerSegments) > 1 {
 				return false
 			}
@@ -82,6 +103,24 @@ func ProjectInstantiatedSupertype(ctx *class_context.ClassContext, source JavaTy
 		if ctx.Work != nil && (ctx.Work.CheckAlloc(int64(len(meta.Signature)+len(args)*64)) != nil || ctx.Work.Charge(workbudget.CounterGraphEdges, int64(len(meta.Signature)+len(meta.Parents))) != nil) {
 			return false
 		}
+		// A JVM interface's super_class is Object; it is not a source
+		// superinterface. Providers may expose either physical or semantic
+		// edges. Normalize that one implicit edge without losing duplicates.
+		parents := meta.Parents
+		if meta.IsInterface {
+			parents = make([]string, 0, len(meta.Parents))
+			object := false
+			for _, parent := range meta.Parents {
+				if parent == "java/lang/Object" {
+					if object {
+						return false
+					}
+					object = true
+					continue
+				}
+				parents = append(parents, parent)
+			}
+		}
 		depthSig := 0
 		for _, ch := range meta.Signature {
 			if ch == '<' {
@@ -101,11 +140,15 @@ func ProjectInstantiatedSupertype(ctx *class_context.ClassContext, source JavaTy
 			return false
 		}
 		formals := ClassFormalTypeParamNames(meta.Signature)
-		if len(formals) != len(args) {
+		rawView := allowRaw && !parameterized && len(formals) != 0
+		if len(formals) != len(args) && !rawView {
 			return false
 		}
 		sigma := map[string]JavaType{}
 		for i, n := range formals {
+			if rawView {
+				continue
+			}
 			if args[i] == nil || IsWildcardType(args[i]) {
 				return false
 			}
@@ -117,7 +160,13 @@ func ProjectInstantiatedSupertype(ctx *class_context.ClassContext, source JavaTy
 				return false
 			}
 			for _, n := range refs {
-				if sigma[n] == nil {
+				declared := false
+				if rawView {
+					for _, formal := range formals {
+						declared = declared || formal == n
+					}
+				}
+				if sigma[n] == nil && !declared {
 					return false
 				}
 			}
@@ -130,7 +179,7 @@ func ProjectInstantiatedSupertype(ctx *class_context.ClassContext, source JavaTy
 			return true
 		}
 		if meta.Signature == "" {
-			for _, p := range meta.Parents {
+			for _, p := range parents {
 				if !walk(NewJavaClass(internalToDot(p)), depth+1) {
 					return false
 				}
@@ -147,11 +196,11 @@ func ProjectInstantiatedSupertype(ctx *class_context.ClassContext, source JavaTy
 			}
 			edges = interfaces
 		}
-		if len(edges) != len(meta.Parents) {
+		if len(edges) != len(parents) {
 			return false
 		}
 		physical := map[string]bool{}
-		for _, p := range meta.Parents {
+		for _, p := range parents {
 			if physical[p] {
 				return false
 			}
@@ -163,7 +212,11 @@ func ProjectInstantiatedSupertype(ctx *class_context.ClassContext, source JavaTy
 				return false
 			}
 			delete(physical, dotToInternal(raw))
-			if !walk(SubstituteTypeVars(edge, sigma), depth+1) {
+			projected := SubstituteTypeVars(edge, sigma)
+			if rawView {
+				projected = NewJavaClass(internalToDot(raw))
+			}
+			if !walk(projected, depth+1) {
 				return false
 			}
 		}
