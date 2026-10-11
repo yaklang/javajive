@@ -71,8 +71,12 @@ type ClassContext struct {
 	// Read-only original anonymous parent Signature; querying this certificate may
 	// not render a body, publish a declaration, or commit a capture failure.
 	SourceAnonymousParentSignature func(owner, descriptor, sourceOwner, methodName, methodDesc string, newPC, pc int) (string, bool)
-	SourceCapturedField            func(pc int, name string, receiver bool) (string, bool)
-	SourceLexicalCapturedField     func(value any, pc int, name string) (string, bool)
+	// A read-only local producer certificate returns an invocation proof view.
+	// It must bind the original STORE, unchanged producer and whole-body write
+	// exclusion in this exact source method; it never evaluates the producer.
+	SourceLocalInvocation      func(value any, sourceOwner, methodName, methodDesc string) (any, bool)
+	SourceCapturedField        func(pc int, name string, receiver bool) (string, bool)
+	SourceLexicalCapturedField func(value any, pc int, name string) (string, bool)
 	// A speculative type query can precede constructor source preparation.
 	// Its proof may be unavailable, but it must never commit a projection or
 	// invalidate the family. Rendering retains the separate committing hook.

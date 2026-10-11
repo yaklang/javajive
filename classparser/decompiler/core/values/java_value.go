@@ -19,6 +19,7 @@ type JavaRef struct {
 	originalLocalDeclaration           bool
 	originalLocalPC, originalLocalSlot int
 	originalLocalSeed                  JavaValue
+	originalDeclarationAliases         *originalDeclarationAliases
 	originalParameter                  bool
 	originalReceiver                   bool
 	originalParameterSlot              int
@@ -94,6 +95,7 @@ func (j *JavaRef) MarkOriginalLocalDeclaration(pc, slot int, seed JavaValue) {
 	}
 	j.originalLocalDeclaration = true
 	j.originalLocalPC, j.originalLocalSlot, j.originalLocalSeed = pc, slot, seed
+	j.originalDeclarationAliases = &originalDeclarationAliases{members: map[*JavaRef]string{j: j.VarUid}}
 }
 
 func (j *JavaRef) OriginalLocalDeclaration(seed JavaValue) (pc, slot int, known bool) {

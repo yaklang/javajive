@@ -831,10 +831,10 @@ func rewriteVar(scope *Scope, className, methodName string) int {
 					oldId := v.Id
 					newId := utils.NewRootVariableId()
 					idReplaceMap[oldId] = newId
-					newRef := *v
+					newRef := v.CloneForSourceDeclaration()
 					newRef.Id = newId
 					newRef.Id.SetName(fmt.Sprintf("var%d", scope.nowId))
-					statement.LeftValue = &newRef
+					statement.LeftValue = newRef
 					if newRef.SolvedWebIdentity != nil {
 						scope.solvedWebNames[newRef.SolvedWebIdentity] = newId
 					}

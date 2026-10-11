@@ -200,6 +200,16 @@ func (f *FunctionCallExpression) SourceInvocationResultType(ctx *class_context.C
 				}
 			} else {
 				view = SourceFieldType(&bounded, arg)
+				if view == nil && bounded.SourceLocalInvocation != nil {
+					producer, certified := bounded.SourceLocalInvocation(UnpackSoltValue(arg), bounded.ClassName, bounded.FunctionName, bounded.CurrentMethodDesc)
+					if call, known := producer.(*FunctionCallExpression); certified && known && call != nil && graph(call, 0) {
+						// One original producer supplies this local's witness. Do not
+						// follow speculative local chains or let a callback recurse.
+						localScope := bounded
+						localScope.SourceLocalInvocation = nil
+						view = call.SourceInvocationResultType(&localScope)
+					}
+				}
 			}
 			if view != nil {
 				// The original anonymous parent is a supertype constraint view,

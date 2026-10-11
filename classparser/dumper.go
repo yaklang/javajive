@@ -4123,6 +4123,18 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			priorMemberBody := c.nativeMemberBody
 			c.nativeMemberBody = statementList
 			defer func() { c.nativeMemberBody = priorMemberBody }()
+			priorLocalInvocation := funcCtx.SourceLocalInvocation
+			funcCtx.SourceLocalInvocation = func(value any, sourceOwner, methodName, methodDesc string) (any, bool) {
+				if sourceOwner != funcCtx.ClassName || methodName != name || methodDesc != descriptor {
+					return nil, false
+				}
+				ref, known := value.(*values.JavaRef)
+				if !known {
+					return nil, false
+				}
+				return c.nativeSourceLocalInvocation(funcCtx, method, codeAttr, statementList, methodLocalParams, ref)
+			}
+			defer func() { funcCtx.SourceLocalInvocation = priorLocalInvocation }()
 			c.prepareNativeCaptureBindings(statementList, params)
 			methodLocalDeclarations, localErr := c.prepareNativeMethodLocalDeclarations(statementList, methodLocalParams)
 			if localErr != nil {
