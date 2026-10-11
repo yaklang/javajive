@@ -356,6 +356,12 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 		vs = append(vs, piece)
 	}
 	if len(vs) == 1 {
+		if j.Op == INC {
+			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("++(%s)", vs[0]))
+		}
+		if j.Op == DEC {
+			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("--(%s)", vs[0]))
+		}
 		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("%s(%s)", j.Op, vs[0]))
 	}
 	switch j.Op {

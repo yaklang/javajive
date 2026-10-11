@@ -3509,7 +3509,19 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			slot = GetRetrieveIdx(opcode)
 		}
 
-		runtimeStackSimulation.Push(loadVarBySlot(slot))
+		loaded := loadVarBySlot(slot)
+		if len(opcode.Source) == 1 {
+			update := opcode.Source[0]
+			if delta, closed := d.immediateLocalPreUpdate(update, opcode, loaded); closed {
+				op := INC
+				if delta == -1 {
+					op = values.DEC
+				}
+				loaded = values.NewUnaryExpression(loaded, op, loaded.Type())
+				update.IincFoldedToPreOp = true
+			}
+		}
+		runtimeStackSimulation.Push(loaded)
 		////return mkRetrieve(variableFactory);
 	case OP_ACONST_NULL:
 		runtimeStackSimulation.Push(values.NewOriginalNullLiteral(int(opcode.CurrentOffset)))
@@ -4678,8 +4690,8 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// REPLACES the live value, suppressing the standalone statement. Without this the
 		// standalone `i++` is emitted BEFORE the consuming statement and the consumer then reads
 		// the incremented value (`i++; a[i] = v` instead of `a[i++] = v`), silently changing
-		// semantics. Pre-increment compiles to `iinc X; iload X` (no live load at iinc time), so it
-		// is intentionally left alone and correctly stays `i = i + 1; ... use i`.
+		// semantics. A prefix update with no live old value is handled at its
+		// private adjacent ILOAD, after that load resolves its original binding.
 		if (inc == 1 || inc == -1) && ref != nil && runtimeStackSimulation.Size() > 0 {
 			if topRef, ok := UnpackSoltValue(runtimeStackSimulation.Peek()).(*values.JavaRef); ok && topRef.VarUid == ref.VarUid {
 				runtimeStackSimulation.Pop()
@@ -6855,7 +6867,7 @@ func (d *Decompiler) ParseStatement() error {
 			// (`a[i++] = v`, `int j = i++`, `return i++`): the side effect now rides inside the
 			// consuming expression, so emitting the standalone statement here would double-apply
 			// and mis-order the increment (the historical `i++; a[i] = v` semantic bug).
-			if opcode.IincFoldedToPostOp {
+			if opcode.IincFoldedToPostOp || opcode.IincFoldedToPreOp {
 				return nil
 			}
 			// The iinc increment is a SIGNED constant. Reading it unsigned turns `i--`

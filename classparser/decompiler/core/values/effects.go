@@ -176,7 +176,7 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 			}
 		case *JavaExpression:
 			switch v.Op {
-			case "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
+			case INC, DEC, "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
 				effect |= EffectWriteMemory
 			case "/", "%":
 				effect |= EffectThrow
