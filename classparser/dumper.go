@@ -4545,12 +4545,18 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					datas = append(datas, ret.EndExp.String(funcCtx))
 					var lines []string
 					for _, subStatement := range ret.SubStatements {
-						lines = append(lines, c.GetTabString()+"\t"+subStatement.String(funcCtx)+";")
+						lines = append(lines, statementToString(subStatement))
 					}
 					s := fmt.Sprintf("%sfor(%s; %s; %s) {\n%s\n%s}", c.GetTabString(), datas[0], datas[1], datas[2], strings.Join(lines, "\n"), c.GetTabString())
 					statementStr = s
 				default:
 					statementStr = c.GetTabString() + statement.String(funcCtx) + ";"
+				}
+				// Attach a local declaration to its exact lexical statement,
+				// including nested blocks. Rendering previews do not certify
+				// emission; the assembled original method is checked separately.
+				if declarations := c.nativeMethodLocalPlacements[statement]; len(declarations) != 0 {
+					statementStr = strings.Join(declarations, "\n") + "\n" + statementStr
 				}
 				return statementStr
 			}
@@ -4661,11 +4667,6 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					}
 					dumped.initializerCode += statementStr + "\n"
 					continue
-				}
-				// Only the final top-level assembly owns producer-local placement.
-				// Recursive previews cannot certify or duplicate the declaration.
-				for _, declaration := range c.nativeMethodLocalPlacements[statement] {
-					statementStr = declaration + "\n" + statementStr
 				}
 				if err := c.holdOutput(int64(len(statementStr) + 1)); err != nil {
 					return nil, err
