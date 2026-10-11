@@ -64,12 +64,13 @@ func (c *ClassObjectDumper) nativeCaptureWidenedDeclaration(body []statements.St
 		return v, known && v.Name == name && v.ParentsComplete
 	}
 	target, known := bounded(callbinding.Name(expected))
-	if !known || len(types.ClassFormalTypeParamNames(target.Signature)) != 0 || !callbinding.Assignable(actual, expected, bounded) {
+	if !known || !callbinding.Assignable(actual, expected, bounded) {
 		return false
 	}
+	formals := types.ClassFormalTypeParamNames(target.Signature)
 	if target.Signature != "" {
 		own, references, valid := types.SignatureTypeVariableReferences(target.Signature)
-		if !valid || len(own) != 0 || len(references) != 0 {
+		if !valid || len(own) == 0 && len(references) != 0 {
 			return false
 		}
 	}
@@ -84,6 +85,16 @@ func (c *ClassObjectDumper) nativeCaptureWidenedDeclaration(body []statements.St
 	typ, err := types.ParseDescriptor(expected)
 	if err != nil || typ == nil {
 		return false
+	}
+	if len(formals) != 0 {
+		// Erasing a generic capture loses overload and bridge binding. Only an
+		// already owned anonymous producer can supply its exact original parent
+		// instantiation; arbitrary factories and guessed type arguments cannot.
+		var proved bool
+		typ, proved = c.nativeCapturedAnonymousParentType(declaration, actual, expected, target, definition, bounded)
+		if !proved {
+			return false
+		}
 	}
 	refs := map[*values.JavaRef]bool{}
 	activeValues := map[values.JavaValue]bool{}
