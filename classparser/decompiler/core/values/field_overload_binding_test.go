@@ -124,6 +124,9 @@ func TestGenericFieldOverloadPreservesOriginalDescriptorOnlyWithBindingEvidence(
 				methods[1].Desc = "(Ljava/lang/Number;)Ljava/lang/Object;"
 			}
 			ctx.InvocationMetadata = func(n string) (callbinding.Class, bool) {
+				if n == "java/lang/Object" || n == "java/lang/String" {
+					return callbinding.Class{Name: n, MembersComplete: true, ParentsComplete: true, Public: true}, true
+				}
 				return callbinding.Class{Name: n, MembersComplete: true, ParentsComplete: true, Public: true, Methods: methods}, n == "sample/Calls"
 			}
 			if scenario == "no invocation metadata" {

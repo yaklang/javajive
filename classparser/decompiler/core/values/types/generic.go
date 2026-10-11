@@ -1063,6 +1063,7 @@ func ClassFormalTypeParamBounds(sig string, funcCtx *class_context.ClassContext)
 		rest = rest[colonIdx:]
 		var bounds []string
 		var refs []string
+		soleObject := false
 		for len(rest) > 0 && rest[0] == ':' {
 			rest = rest[1:]
 			if len(rest) > 0 && (rest[0] == ':' || rest[0] == '>') {
@@ -1079,10 +1080,14 @@ func ClassFormalTypeParamBounds(sig string, funcCtx *class_context.ClassContext)
 			scanTypeVarRefs(consumed, &refs)
 			rest = remaining
 			rendered := boundType.String(funcCtx)
-			if rendered == "Object" || rendered == "java.lang.Object" {
-				continue
-			}
+			raw, known := RawClassFQN(boundType)
+			soleObject = len(bounds) == 0 && known && raw == "java.lang.Object"
 			bounds = append(bounds, rendered)
+		}
+		// Object is elidable only as the sole bound. Its first position in an
+		// intersection determines erasure even though it adds no subtype fact.
+		if soleObject && len(bounds) == 1 {
+			bounds = nil
 		}
 		if len(bounds) > 0 {
 			out[name] = TypeParamBound{Clause: strings.Join(bounds, " & "), Refs: refs}
@@ -1419,6 +1424,7 @@ func parseFormalTypeParams(sig string, funcCtx *class_context.ClassContext) stri
 		typeParamName := rest[:colonIdx]
 		rest = rest[colonIdx:]
 		var bounds []string
+		soleObject := false
 		for len(rest) > 0 && rest[0] == ':' {
 			rest = rest[1:]
 			if len(rest) > 0 && (rest[0] == ':' || rest[0] == '>') {
@@ -1430,11 +1436,12 @@ func parseFormalTypeParams(sig string, funcCtx *class_context.ClassContext) stri
 			}
 			rest = remaining
 			rendered := boundType.String(funcCtx)
-			if rendered == "Object" || rendered == "java.lang.Object" {
-				// A `<T extends Object>` bound is always redundant; drop it for the canonical `<T>`.
-				continue
-			}
+			raw, known := RawClassFQN(boundType)
+			soleObject = len(bounds) == 0 && known && raw == "java.lang.Object"
 			bounds = append(bounds, rendered)
+		}
+		if soleObject && len(bounds) == 1 {
+			bounds = nil
 		}
 		if len(bounds) > 0 {
 			params = append(params, fmt.Sprintf("%s extends %s", typeParamName, strings.Join(bounds, " & ")))

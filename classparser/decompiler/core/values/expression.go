@@ -3954,6 +3954,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	if target := f.instantiatedFieldOverloadCast(i, funcCtx); target != "" {
 		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
 	}
+	if target := f.instantiatedMethodResultOverloadCast(i, funcCtx); target != "" {
+		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
+	}
 	if target := f.covariantOverloadResultCast(i, funcCtx); target != "" {
 		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
 	}

@@ -365,7 +365,7 @@ func ErasedFactoryReturn(ctx *class_context.ClassContext, v JavaValue, result st
 // result erasure after separately proving a nonthrowing widening to its target.
 func ErasedFixedInstanceResult(ctx *class_context.ClassContext, f *FunctionCallExpression, result string) bool {
 	if ctx == nil || ctx.InvocationMetadata == nil || f == nil || f.IsStatic || f.IsSpecialInvoke ||
-		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface) || f.Object == nil || len(f.Arguments) != 0 || !f.HasOriginPC {
+		(f.Kind != InvokeVirtual && f.Kind != InvokeInterface) || f.Object == nil || len(f.Arguments) != 0 || !f.HasOriginPC || f.OriginPC < 0 || f.OriginPC > 65535 {
 		return false
 	}
 	ps, ret, err := callbinding.Descriptor(f.Descriptor)
@@ -373,7 +373,11 @@ func ErasedFixedInstanceResult(ctx *class_context.ClassContext, f *FunctionCallE
 		return false
 	}
 	owner := strings.ReplaceAll(f.ClassName, ".", "/")
-	family, err := callbinding.FamilyOf(callbinding.Witness{Owner: owner, Name: f.FunctionName, Desc: f.Descriptor}, ctx.InvocationMetadata)
+	kind := callbinding.Virtual
+	if f.Kind == InvokeInterface {
+		kind = callbinding.Interface
+	}
+	family, err := callbinding.FamilyOf(callbinding.Witness{Owner: owner, Name: f.FunctionName, Desc: f.Descriptor, Kind: kind}, ctx.InvocationMetadata)
 	if err != nil || !family.Complete || family.Proof != callbinding.Unique || family.Target == nil || family.Target.Static || family.Target.Bridge || family.Target.Varargs {
 		return false
 	}
