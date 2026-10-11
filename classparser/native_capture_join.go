@@ -124,11 +124,12 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 	// effective finality counts writes per iteration, not across iterations.
 	// Reset that binder to absent at the loop boundary, so no use outside its
 	// body can borrow its initialization. A blank outer declaration cannot be
-	// repeatedly assigned and claim effective finality. The existing lambda
-	// snapshot additionally admits a preinitialized, unwritten outer binder.
+	// repeatedly assigned and claim effective finality. A preinitialized outer
+	// binder is stable for either checkpoint only when the complete loop body
+	// leaves that same declaration initialized and performs no further writes.
 	// This is a source binding proof; no allocation or producer is moved.
 	loopBody := func(list []statements.Statement, state uint8) bool {
-		if state != absent && (captureStatement == nil || state != initialized) || captureStatement == nil && captureValue == nil {
+		if state != absent && state != initialized || captureStatement == nil && captureValue == nil {
 			return false
 		}
 		beforeDeclaration, beforeWrites := declaration, writes
