@@ -6,7 +6,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
 
-// The source type of an anonymous creation comes from its original header,
+// The instantiated parent view comes from the original anonymous header,
 // in its proved lexical scope. A numeric binary name or mutable rendered name
 // cannot substitute for original ownership and exact allocation instructions.
 // This query neither emits source nor changes any family/capture state.

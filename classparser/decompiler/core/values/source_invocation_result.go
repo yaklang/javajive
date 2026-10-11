@@ -172,6 +172,9 @@ func (f *FunctionCallExpression) SourceInvocationResultType(ctx *class_context.C
 	}
 	parameters, ret, formals := f.genericMethodSignature(&bounded)
 	if len(formals) != 0 {
+		if len(parameters) != len(f.Arguments) {
+			return nil
+		}
 		// Argument-witness inference observes source types rather than the
 		// intentionally erased computational types of nested invocations. The
 		// temporary refs belong only to this proof; original operands stay put.
@@ -184,12 +187,23 @@ func (f *FunctionCallExpression) SourceInvocationResultType(ctx *class_context.C
 			} else if allocation, ok := UnpackSoltValue(arg).(*NewExpression); ok {
 				view = sourceAnonymousArgumentType(&bounded, allocation)
 				anonymous = view != nil
+				if anonymous {
+					if !javaTypeMentionsNames(parameters[i], formals) {
+						view, anonymous = nil, false
+					} else if _, parameterized := types.AsParameterizedType(parameters[i]); !parameterized {
+						// A parent constrains a corresponding parameterized formal
+						// (JLS 18.2.3), but is not the anonymous subtype itself.
+						// Bare inference variables need a separate lower-bound
+						// solver; replacing their witness with a parent is unsound.
+						return nil
+					}
+				}
 			} else {
 				view = SourceFieldType(&bounded, arg)
 			}
 			if view != nil {
-				// A sealed anonymous creation has its declared parent source
-				// type, while the JVM value retains the anonymous class erasure.
+				// The original anonymous parent is a supertype constraint view,
+				// while the JVM value retains the anonymous class erasure.
 				// All other views must retain their original computational word.
 				if erased, known := SourceTypeErasure(view, &bounded); !known || !anonymous && erased != bindingType(arg.Type()) {
 					return nil

@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// A Java anonymous creation expression has its declared parent source type;
-// its computational anonymous binary name is not a raw generic argument.
+// An anonymous creation constrains a parameterized formal through its declared
+// parent; its computational binary name supplies no generic parent arguments.
 func anonymousFactoryArgumentSources(shape string) (string, map[string]string) {
 	owner, sources := factorySupertypeCaptureSources(shape)
 	sources[owner+".java"] = strings.Replace(sources[owner+".java"], "CopyFactory.copy(input)", "CopyFactory.transform(input,new CopyFactory.Mapper<N,N>(){public N apply(N value){return value;}})", 1)

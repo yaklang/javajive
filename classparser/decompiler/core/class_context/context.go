@@ -68,7 +68,7 @@ type ClassContext struct {
 	SourceMemberDelegation    func(owner, descriptor string, pc int, args []any) (string, bool)
 	SourceAnonymousCandidate  func(owner string) bool
 	SourceAnonymousAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
-	// Read-only original anonymous creation type; querying this certificate may
+	// Read-only original anonymous parent Signature; querying this certificate may
 	// not render a body, publish a declaration, or commit a capture failure.
 	SourceAnonymousParentSignature func(owner, descriptor, sourceOwner, methodName, methodDesc string, newPC, pc int) (string, bool)
 	SourceCapturedField            func(pc int, name string, receiver bool) (string, bool)
