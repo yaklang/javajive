@@ -252,8 +252,8 @@ jobs:
         run: python3 -m unittest discover -s ci/task_t29
       - name: Historical diagnostic-key regression
         run: python3 -m unittest ci.task_t30.test_t30_historical_diagnostics
-      - name: Declaration metadata reader regression
-        run: python3 -m unittest discover -s classparser -p test_jdk_metadata_catalog_generate.py
+      - name: Platform declaration and original-code generator regression
+        run: python3 -m unittest discover -s classparser -p 'test_jdk*generate.py'
       - name: Roundtrip evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
