@@ -584,3 +584,30 @@ func sourceLexicalDependentTypeErasure(name string, ctx *class_context.ClassCont
 	erased, known := types.LexicalTypeParameterErasures(scopes, []string{name})
 	return erased[name], known && erased[name] != ""
 }
+
+// Project only the selected declaration. The sibling scope has the same
+// precedence and completeness requirements as the full evidence table.
+func invocationDeclarationSignature(ctx *class_context.ClassContext, name, method, descriptor string) (classSig, signature string, declared, known bool) {
+	if ctx == nil {
+		return "", "", false, false
+	}
+	if ctx.SiblingClassSig != nil {
+		if cs, methods, ok := ctx.SiblingClassSig(name); ok {
+			sig, exists := methods[class_context.MethodDescKey(method, descriptor)]
+			return cs, sig, exists, true
+		}
+	}
+	if ctx.InvocationMetadata == nil {
+		return "", "", false, false
+	}
+	meta, ok := ctx.InvocationMetadata(name)
+	if !ok || meta.Name != name || !meta.MembersComplete || !meta.ParentsComplete {
+		return "", "", false, false
+	}
+	for _, row := range meta.Methods {
+		if row.Name == method && row.Desc == descriptor {
+			signature, declared = row.Signature, true
+		}
+	}
+	return meta.Signature, signature, declared, true
+}
