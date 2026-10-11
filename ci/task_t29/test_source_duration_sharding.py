@@ -7,6 +7,26 @@ from tools.ci_scheduler.shard import ShardError, source_parent_batches, source_p
 
 
 class SourceDurationSharding(unittest.TestCase):
+    def test_more_runners_conserve_every_parent_and_nested_scope(self):
+        names = [f"Test{i:04d}" for i in range(1930)]
+        hints = {name: (120 if i % 7 == 0 else 10) for i, name in enumerate(names)}
+        scopes = [f"scope{i}" for i in range(35)]
+        for count in (6, 8):
+            with self.subTest(runners=count):
+                lanes = source_parent_shards(names, hints, count * 4)
+                parents, selected_scopes = [], []
+                for shard in range(count):
+                    ordinary = [name for lane in lanes[shard*4:(shard+1)*4] for name in lane.items]
+                    batches = source_parent_batches(ordinary, hints)
+                    parents.extend(name for batch in batches for name in batch.items)
+                    selected_scopes.extend(scopes[shard::count])
+                    self.assertTrue(ordinary)
+                    self.assertTrue(scopes[shard::count])
+                self.assertCountEqual(parents, names)
+                self.assertCountEqual(selected_scopes, scopes)
+                self.assertEqual(len(set(parents)), len(parents))
+                self.assertEqual(len(set(selected_scopes)), len(selected_scopes))
+
     def test_expensive_parents_do_not_accumulate_in_alphabetical_shards(self):
         names = [f"Test{i:03d}" for i in range(128)]
         hints = {name: (120 if i % 4 == 1 else 1) for i, name in enumerate(names)}
