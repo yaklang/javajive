@@ -29,8 +29,9 @@ type constructorCodeDocument struct {
 // the original constructor's effects, field identity and all paths. Public
 // platform annotation declarations also retain their original Retention/Target
 // attributes; their presence is evidence, not permission to rewrite a use.
-// Catalogued interfaces from each pinned primary archive retain their original
-// abstract/default/static declarations for functional-target ownership proofs.
+// Indexed declarations from each pinned primary archive retain their original
+// code and ancestry. Interfaces retain abstract/default/static declarations for
+// functional-target ownership proofs; class membership grants no effect permission.
 //
 //go:embed jdk_constructor_code.zip
 var jdkConstructorCodeZIP []byte

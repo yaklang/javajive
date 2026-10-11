@@ -272,7 +272,14 @@ func (c *ClassObjectDumper) constructorEffectField(obj *ClassObject, member *val
 				// private ancestor access needs a separate nestmate proof.
 				accessible := name == caller || flags&0x0001 != 0 || flags&0x0004 != 0 || flags&0x0002 == 0 && pkg(name) == pkg(caller)
 				writable := !put || flags&0x0010 == 0 || name == caller
-				return name + "\x00" + member.Member + "\x00" + member.Description, matches == 1 && flags&(0x0008|0x0040) == 0 && accessible && writable
+				// The original volatile access stays in place. THIS has not
+				// escaped on any admitted path, so another thread cannot access
+				// this storage while captures move past it. Abrupt completion
+				// also needs closed finalizer dispatch; an open finalizer could
+				// observe the early capture. Keep static storage and invalid
+				// final+volatile declarations outside this receiver domain.
+				unobserved := flags&0x0040 == 0 || flags&0x0010 == 0 && c.constructorReceiverFinalizerSilent
+				return name + "\x00" + member.Member + "\x00" + member.Description, matches == 1 && flags&0x0008 == 0 && unobserved && accessible && writable
 			}
 		}
 		var ok bool
