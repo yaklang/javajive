@@ -11,6 +11,8 @@ import (
 // An adjacent private IINC -> ILOAD edge has no intervening evaluation.
 // Preserve its updated result as a prefix operation rather than a separate
 // statement: conditional consumers must retain the original evaluation domain.
+// All signed IINC operands have the same int-word addition semantics; unit
+// increments merely have a shorter source spelling.
 // No alternate load entry, handler change, reused binding or post-op occurrence
 // grants this permission. The decoder's exact signed operand determines the op.
 func (d *Decompiler) immediateLocalPreUpdate(update, load *OpCode, loaded values.JavaValue) (int, bool) {
@@ -45,7 +47,7 @@ func (d *Decompiler) immediateLocalPreUpdate(update, load *OpCode, loaded values
 		}
 		slot, delta = int(update.Data[0]), int(int8(update.Data[1]))
 	}
-	if delta != 1 && delta != -1 || int(load.CurrentOffset) != int(update.CurrentOffset)+width || GetRetrieveIdx(load) != slot || !sameHandlerCoverage(d.handlersAt(update), d.handlersAt(load)) {
+	if int(load.CurrentOffset) != int(update.CurrentOffset)+width || GetRetrieveIdx(load) != slot || !sameHandlerCoverage(d.handlersAt(update), d.handlersAt(load)) {
 		return 0, false
 	}
 	// loadVarBySlot supplies one enumerable slot around the resolved reference.

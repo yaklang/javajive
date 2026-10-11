@@ -3513,11 +3513,21 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		if len(opcode.Source) == 1 {
 			update := opcode.Source[0]
 			if delta, closed := d.immediateLocalPreUpdate(update, opcode, loaded); closed {
-				op := INC
-				if delta == -1 {
-					op = values.DEC
+				if delta == 1 || delta == -1 {
+					op := INC
+					if delta == -1 {
+						op = values.DEC
+					}
+					loaded = values.NewUnaryExpression(loaded, op, loaded.Type())
+				} else {
+					// IINC reads and writes this exact int binding and yields the
+					// updated word to its private successor. Keep an enumerable
+					// assignment, including delta zero, in the consumer's domain.
+					// Only a local is admitted, so repeating its source spelling
+					// as the assignment target introduces no receiver evaluation.
+					rhs := values.NewBinaryExpression(loaded, values.NewJavaLiteral(delta, loaded.Type()), ADD, loaded.Type())
+					loaded = values.NewAssignmentExpression(loaded, rhs, int(update.CurrentOffset), nil)
 				}
-				loaded = values.NewUnaryExpression(loaded, op, loaded.Type())
 				update.IincFoldedToPreOp = true
 			}
 		}

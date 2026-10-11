@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -98,9 +100,9 @@ func TestLocalPreUpdateRequiresPrivateOriginalEdgeAndBinding(t *testing.T) {
 				load.Instr.OpCode = OP_ILOAD
 				load.Data = []byte{1, 2}
 			case "nonunit delta":
-				update.Data[1] = 2
+				update.Data[1], want, delta = 2, true, 2
 			case "zero delta":
-				update.Data[1] = 0
+				update.Data[1], want, delta = 0, true, 0
 			case "budget":
 				d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
 				_ = d.Work.Charge(workbudget.CounterGraphScans, 1)
@@ -112,6 +114,46 @@ func TestLocalPreUpdateRequiresPrivateOriginalEdgeAndBinding(t *testing.T) {
 			gotDelta, got := d.immediateLocalPreUpdate(update, load, loaded)
 			if got != want || got && gotDelta != delta {
 				t.Fatalf("permission=%t delta=%d want=%t delta=%d", got, gotDelta, want, delta)
+			}
+		})
+	}
+}
+
+// Exercise every byte operand and the signed-wide boundaries independently of
+// source rewriting. Neither operand width nor zero addition changes ownership.
+func TestLocalPreUpdateRetainsSignedByteAndWideDeltas(t *testing.T) {
+	for _, wide := range []bool{false, true} {
+		deltas := []int{}
+		slots := []int{1, 255}
+		if wide {
+			deltas = []int{-32768, -32767, -129, -128, -1, 0, 1, 2, 127, 128, 255, 256, 32766, 32767}
+			slots = []int{1, 255, 256, 4095}
+		} else {
+			for n := -128; n <= 127; n++ {
+				deltas = append(deltas, n)
+			}
+		}
+		t.Run(fmt.Sprintf("wide=%t", wide), func(t *testing.T) {
+			for _, slot := range slots {
+				for _, delta := range deltas {
+					ref := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
+					update := &OpCode{Instr: &Instruction{OpCode: OP_IINC}, CurrentOffset: 10, Data: []byte{byte(slot), byte(delta)}, Ref: ref}
+					load := &OpCode{Instr: &Instruction{OpCode: OP_ILOAD}, CurrentOffset: 13, Data: []byte{byte(slot)}, Source: []*OpCode{update}}
+					if wide {
+						update.IsWide = true
+						update.Data = make([]byte, 4)
+						binary.BigEndian.PutUint16(update.Data, uint16(slot))
+						binary.BigEndian.PutUint16(update.Data[2:], uint16(int16(delta)))
+						load.CurrentOffset = 16
+						load.IsWide = true
+						load.Data = make([]byte, 2)
+						binary.BigEndian.PutUint16(load.Data, uint16(slot))
+					}
+					update.Target = []*OpCode{load}
+					if got, ok := (&Decompiler{}).immediateLocalPreUpdate(update, load, values.NewSlotValue(ref, ref.Type())); !ok || got != delta {
+						t.Fatalf("slot=%d delta=%d got=%d allowed=%t", slot, delta, got, ok)
+					}
+				}
 			}
 		})
 	}
