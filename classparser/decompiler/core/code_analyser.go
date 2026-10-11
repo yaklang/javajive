@@ -3573,6 +3573,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// would become 65526; sign-extend through int16 before widening to int.
 		runtimeStackSimulation.Push(values.NewJavaLiteral(int(int16(Convert2bytesToInt(opcode.Data))), types.NewJavaPrimer(types.JavaInteger)))
 	case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
+		opcode.LocalStoreFoldedToPostOp = false
 		slot := GetStoreIdx(opcode)
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		d.slotStoreValue[opcode] = value
@@ -3894,6 +3895,16 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		d.slotStoreTrace[slot] = slotStoreTraceInfo{offset: opcode.CurrentOffset, ref: ref}
 		statements.NewAssignStatement(ref, value, isFirst)
 		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
+		if !isFirst && runtimeStackSimulation.Size() > 0 {
+			if op, proved := d.immediateLocalPostUpdate(opcode, ref, runtimeStackSimulation.Peek()); proved {
+				post := values.NewBinaryExpression(ref, values.NewJavaLiteral(1, ref.Type()), op, ref.Type())
+				runtimeStackSimulation.ReplaceTop(post)
+				// This is the semantic replacement's producer. STORE still
+				// has no decoded push in stackProduced or extra consumed word.
+				d.stackValueProducers[post] = opcode
+				opcode.LocalStoreFoldedToPostOp = true
+			}
+		}
 		// Record the creator of each freshly-minted ref so the boolean-copy merge can recover it
 		// deterministically (opcodeIdToRef iteration is unordered and several stores can reuse a ref).
 		if isFirst && ref != nil {
@@ -6508,7 +6519,7 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		switch opcode.Instr.OpCode {
 		case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
-			if protectedStores[opcode] {
+			if protectedStores[opcode] || opcode.LocalStoreFoldedToPostOp {
 				break
 			}
 			refInfos := d.opcodeIdToRef[opcode]

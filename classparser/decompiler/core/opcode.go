@@ -68,6 +68,9 @@ type OpCode struct {
 	// A private adjacent ILOAD can consume the updated value as ++x/--x.
 	// Mark only after resolving that load to the same original local binding.
 	IincFoldedToPreOp bool
+	// The original scalar load/dup/update/store protocol has its old word
+	// represented by one postfix expression in the consumer's execution domain.
+	LocalStoreFoldedToPostOp bool
 }
 type CatchNode struct {
 	ExceptionTypeIndex uint16
