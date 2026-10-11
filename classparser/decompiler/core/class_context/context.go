@@ -63,13 +63,16 @@ type ClassContext struct {
 	// SourceInvocationReceiver separates compiler registration comments from a
 	// rendered receiver. javac lowers call arguments before its method select;
 	// Java runtime receiver/argument evaluation remains in the original order.
-	SourceInvocationReceiver   func(source string) (receiver, registration string)
-	SourcePrivateGetter        func(owner, name, descriptor string, pc int, args []any, statement bool) (string, bool)
-	SourceMemberDelegation     func(owner, descriptor string, pc int, args []any) (string, bool)
-	SourceAnonymousCandidate   func(owner string) bool
-	SourceAnonymousAllocation  func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
-	SourceCapturedField        func(pc int, name string, receiver bool) (string, bool)
-	SourceLexicalCapturedField func(value any, pc int, name string) (string, bool)
+	SourceInvocationReceiver  func(source string) (receiver, registration string)
+	SourcePrivateGetter       func(owner, name, descriptor string, pc int, args []any, statement bool) (string, bool)
+	SourceMemberDelegation    func(owner, descriptor string, pc int, args []any) (string, bool)
+	SourceAnonymousCandidate  func(owner string) bool
+	SourceAnonymousAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	// Read-only original anonymous creation type; querying this certificate may
+	// not render a body, publish a declaration, or commit a capture failure.
+	SourceAnonymousParentSignature func(owner, descriptor, sourceOwner, methodName, methodDesc string, newPC, pc int) (string, bool)
+	SourceCapturedField            func(pc int, name string, receiver bool) (string, bool)
+	SourceLexicalCapturedField     func(value any, pc int, name string) (string, bool)
 	// A speculative type query can precede constructor source preparation.
 	// Its proof may be unavailable, but it must never commit a projection or
 	// invalidate the family. Rendering retains the separate committing hook.

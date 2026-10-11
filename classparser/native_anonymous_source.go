@@ -1121,6 +1121,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		return "", false
 	}
 	ctx.SourceBranchSwap = func(left, right string) bool { return nativeAnonymousBranchSwap(p, left, right, c.Work) }
+	ctx.SourceAnonymousParentSignature = c.nativeAnonymousArgumentParentSignature
 	ctx.SourceAnonymousCandidate = func(owner string) bool {
 		// IR analysis may ask values for provisional text before source-local
 		// identities are proved. Such a query cannot commit or reject ownership.

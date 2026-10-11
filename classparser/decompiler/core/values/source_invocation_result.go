@@ -178,13 +178,20 @@ func (f *FunctionCallExpression) SourceInvocationResultType(ctx *class_context.C
 		proof := f.Clone()
 		for i, arg := range f.Arguments {
 			var view types.JavaType
+			anonymous := false
 			if inner, ok := UnpackSoltValue(arg).(*FunctionCallExpression); ok {
 				view = inner.SourceInvocationResultType(&bounded)
+			} else if allocation, ok := UnpackSoltValue(arg).(*NewExpression); ok {
+				view = sourceAnonymousArgumentType(&bounded, allocation)
+				anonymous = view != nil
 			} else {
 				view = SourceFieldType(&bounded, arg)
 			}
 			if view != nil {
-				if erased, known := SourceTypeErasure(view, &bounded); !known || erased != bindingType(arg.Type()) {
+				// A sealed anonymous creation has its declared parent source
+				// type, while the JVM value retains the anonymous class erasure.
+				// All other views must retain their original computational word.
+				if erased, known := SourceTypeErasure(view, &bounded); !known || !anonymous && erased != bindingType(arg.Type()) {
 					return nil
 				}
 				proof.Arguments[i] = NewJavaRef(utils.NewRootVariableId(), nil, view)
