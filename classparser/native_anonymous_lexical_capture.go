@@ -258,6 +258,14 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 							break
 						}
 						read := &nativeMemberLexicalRead{owner: field.Name, field: field.Member, descriptor: field.Description, pc: int(ops[j].CurrentOffset), prior: prior}
+						if next != "" && forest.units[next] != nil && stable {
+							for _, consumer := range nativeAnonymousPrivateArgumentConsumers(forest, object, method, code, ops, read, next, metadata, work) {
+								forest.consumers[owner][key][consumer.pc] = consumer
+								for node := read; node != nil; node = node.prior {
+									approved[node.pc], paths[node.pc] = true, node
+								}
+							}
+						}
 						if next != "" && forest.units[next] != nil && j+1 < len(ops) && stable {
 							entry := sort.SearchInts(entries, int(ops[j].CurrentOffset)+1)
 							if entry >= len(entries) || entries[entry] > int(ops[j+1].CurrentOffset) {

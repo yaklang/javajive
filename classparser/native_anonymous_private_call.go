@@ -11,8 +11,8 @@ import (
 // An anonymous receiver cannot be named by casting to its binary class name.
 // A lexical call needs its own certificate, rather than the field-read one:
 // re-prove the original nonvirtual bridge, complete target declaration and
-// physical receiver descriptor. Arguments/generic/inherited/static packets
-// need their corresponding source binding proof and are not granted here.
+// physical receiver descriptor. Operand/source binding is a separate proof;
+// generic/inherited/static packets are not granted here.
 func nativeAnonymousPrivateCallAccessorDeclaration(f *nativeAnonymousForest, obj *ClassObject, method *MemberInfo, work *workbudget.Budget) bool {
 	if f == nil || f.members == nil || obj == nil || method == nil ||
 		f.objects[obj.GetClassName()] != obj || f.units[obj.GetClassName()] == nil ||
@@ -36,18 +36,28 @@ func nativeAnonymousPrivateCallAccessorDeclaration(f *nativeAnonymousForest, obj
 		fresh.call.methodFormalCount != g.call.methodFormalCount || fresh.call.static != g.call.static ||
 		fresh.call.inherited != g.call.inherited || fresh.call.rawGeneric != g.call.rawGeneric ||
 		len(fresh.call.rawLexicalOwner) != 0 || len(g.call.rawLexicalOwner) != 0 ||
-		g.call.argumentCount != 1 || g.call.methodFormalCount != 0 || g.call.static || g.call.inherited || g.call.rawGeneric {
+		g.call.argumentCount < 1 || g.call.argumentCount > 128 || g.call.methodFormalCount != 0 || g.call.static || g.call.inherited || g.call.rawGeneric {
 		return false
 	}
 	parameters, result, err := callbinding.Descriptor(desc)
 	targetParameters, targetResult, targetErr := callbinding.Descriptor(g.fieldDescriptor)
-	if err != nil || targetErr != nil || len(parameters) != 1 || parameters[0] != "L"+obj.GetClassName()+";" ||
-		len(targetParameters) != 0 || result != targetResult {
+	if err != nil || targetErr != nil || len(parameters) != g.call.argumentCount || parameters[0] != "L"+obj.GetClassName()+";" ||
+		len(targetParameters)+1 != len(parameters) || result != targetResult {
 		return false
+	}
+	for i, parameter := range targetParameters {
+		if parameters[i+1] != parameter {
+			return false
+		}
 	}
 	for owned := range f.units {
 		if !nativeProofWork(work, int64(len(result))+1) || strings.Contains(result, "L"+owned+";") {
 			return false
+		}
+		for i, parameter := range parameters {
+			if !nativeProofWork(work, int64(len(parameter))+1) || i > 0 && strings.Contains(parameter, "L"+owned+";") {
+				return false
+			}
 		}
 	}
 	return true

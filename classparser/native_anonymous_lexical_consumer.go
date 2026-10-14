@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"sort"
@@ -21,6 +22,7 @@ type nativeAnonymousLexicalConsumer struct {
 	declarationOwner        string
 	owner, name, descriptor string
 	kind, pc                int
+	argumentOrigins         []ssabuild.Origin
 }
 
 func nativeAnonymousLexicalParent(f *nativeAnonymousForest, owner string) (string, bool) {
@@ -302,7 +304,7 @@ func nativeAnonymousAccessorNameType(f *nativeAnonymousForest, o *ClassObject, i
 		return false
 	}
 	ps, _, err := callbinding.Descriptor(desc)
-	if err != nil || len(ps) != 1 || !strings.HasPrefix(ps[0], "L") || !strings.HasSuffix(ps[0], ";") {
+	if err != nil || len(ps) < 1 || len(ps) > 128 || !strings.HasPrefix(ps[0], "L") || !strings.HasSuffix(ps[0], ";") {
 		return false
 	}
 	owner := ps[0][1 : len(ps[0])-1]
@@ -449,6 +451,50 @@ func nativeAnonymousLexicalConsumerSourceClosed(d *ClassObjectDumper, c *nativeA
 		}
 		if i < len(path)+1 || op.Instr.OpCode != c.kind {
 			return false
+		}
+		if c.getter != nil && c.getter.call != nil && c.getter.call.argumentCount > 1 {
+			ir, fn, valid := d.nativeOriginalMethodSnapshot(method, code)
+			records, indexed := nativeAnonymousArgumentRecords(fn, work)
+			arguments, receiver := nativeAnonymousArgumentReceiver(ir, records, c.pc, c.read, work)
+			if !valid || !indexed || !receiver || len(arguments) != len(c.argumentOrigins) || !nativeAnonymousArgumentFrameTypes(d.obj, method, ir, fn, records[c.pc], c.descriptor, ctx.InvocationMetadata, work) {
+				return false
+			}
+			for j, argument := range arguments {
+				if argument != c.argumentOrigins[j] {
+					return false
+				}
+			}
+			// The receiver's contiguous THIS path precedes the argument DAG;
+			// branch/handler entries may not enter the middle of this packet.
+			first := path[len(path)-1].pc
+			start := sort.Search(len(ops), func(j int) bool { return int(ops[j].CurrentOffset) >= first })
+			if start == 0 || start >= len(ops) || int(ops[start].CurrentOffset) != first {
+				return false
+			}
+			// SSA's symbolic decoder is not a physical CP-category proof.
+			// Recheck the complete receiver path, including reads which do not
+			// occur in any argument tree (for example a plain parameter argument).
+			for j, read := range path {
+				index := start + len(path) - 1 - j
+				if index >= i {
+					return false
+				}
+				producer := ops[index]
+				symbol := constructorMotionMember(d.obj, producer, core.OP_GETFIELD)
+				if symbol == nil || int(producer.CurrentOffset) != read.pc || symbol.Name != read.owner || symbol.Member != read.field || symbol.Description != read.descriptor {
+					return false
+				}
+			}
+			load := ops[start-1]
+			if core.GetRetrieveIdx(load) != 0 || !constructorMotionLoad(load, "Ljava/lang/Object;") {
+				return false
+			}
+			entry := sort.SearchInts(entries, int(load.CurrentOffset)+1)
+			if entry < len(entries) && entries[entry] <= c.pc {
+				return false
+			}
+			fresh := nativeAnonymousLexicalConsumerProof(f, d.obj, c.read, c.owner, op, f.resolve, work)
+			return fresh != nil && fresh.getter == c.getter && fresh.owner == c.owner && fresh.name == c.name && fresh.descriptor == c.descriptor && fresh.kind == c.kind
 		}
 		for j, r := range path {
 			producer := ops[i-1-j]
