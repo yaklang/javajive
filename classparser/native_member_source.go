@@ -703,7 +703,7 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 		child.sourceName = source
 	}
 	p.rootAccessBridges = c.originalNativeConstructorAccessBridges()
-	if !nativeMemberCollectPrivateGettersResolved(p, c.nativeAnnotationDeclarationResolver(), c.Work) {
+	if !nativeMemberCollectPrivateGettersPhase(p, c.nativeAnnotationDeclarationResolver(), c.Work, false) {
 		return nil
 	}
 	if !c.planNativeMemberAccessorCompilerProfile(p) {

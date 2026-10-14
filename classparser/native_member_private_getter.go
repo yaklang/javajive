@@ -170,6 +170,13 @@ func nativeMemberCollectPrivateGetters(p *nativeMemberFamily, work *workbudget.B
 	return nativeMemberCollectPrivateGettersResolved(p, nil, work)
 }
 func nativeMemberCollectPrivateGettersResolved(p *nativeMemberFamily, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+	return nativeMemberCollectPrivateGettersPhase(p, resolve, work, true)
+}
+
+// Named declarations establish packet identity before anonymous ownership can
+// be planned. Shared symbol ordinals become a closure claim only after that
+// forest is complete; every packet and duplicate-symbol check still runs here.
+func nativeMemberCollectPrivateGettersPhase(p *nativeMemberFamily, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, complete bool) bool {
 	p.getters = map[string]*nativeMemberPrivateGetter{}
 	needsProjection := false
 	for _, object := range p.lexicalObjects {
@@ -234,15 +241,41 @@ func nativeMemberCollectPrivateGettersResolved(p *nativeMemberFamily, resolve fu
 			p.getters[nativeMemberGetterKey(getter.owner, getter.name, getter.descriptor)] = getter
 		}
 	}
+	if !complete {
+		return true
+	}
+	return nativeMemberAccessorRegistrationsClosed(p, work)
+}
+
+func nativeMemberAccessorRegistrationsClosed(p *nativeMemberFamily, work *workbudget.Budget) bool {
+	if p == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	if len(p.getters) == 0 {
+		return true
+	}
+	if work != nil && work.CheckAlloc(int64(len(p.getters))*128+128) != nil {
+		return false
+	}
+	ordinals := map[int]string{}
+	for _, getter := range p.getters {
+		if getter == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		symbol := nativeMemberAccessorSymbolKey(getter)
+		if prior, known := ordinals[getter.ordinal]; known && prior != symbol {
+			return false
+		}
+		ordinals[getter.ordinal] = symbol
+	}
 	constructors, known := nativeMemberConstructorRegistrations(p, work)
 	if !known {
 		return false
 	}
-	// javac's shared accessed-symbol sequence also contains private
-	// constructors, which have no access$NNN method. Every intervening event
-	// still has to be regenerated at its actual source site below.
+	// The sequence includes private constructors without access$ methods.
+	// No incomplete anonymous scope can reserve an unexplained ordinal.
 	for ordinal := range ordinals {
-		if ordinal/100 >= len(ordinals)+len(constructors) {
+		if !nativeProofWork(work, 1) || ordinal/100 >= len(ordinals)+len(constructors) {
 			return false
 		}
 	}
