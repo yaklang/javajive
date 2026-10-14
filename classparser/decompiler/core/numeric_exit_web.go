@@ -15,7 +15,7 @@ import (
 // category needs a finite constant-domain proof excluding boolean values.
 // Entry parameters, incomplete definitions and mixed domains remain excluded.
 func (d *Decompiler) unifyNumericExitWebs() {
-	webs := d.slotWebs()
+	webs := d.localUpdateSourceWebs()
 	if webs == nil {
 		return
 	}
