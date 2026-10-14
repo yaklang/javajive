@@ -50,20 +50,23 @@ type nativeMemberFamily struct {
 	pendingAnonymousSuperDependencies map[string]*nativeMemberClass
 	anonymousSuperResolver            func(string) (*ClassObject, bool)
 	rootAccessBridges                 map[string]*nativeConstructorAccessBridge
-	rootBridgeDelegations             map[string]*nativeRootBridgeDelegation
-	getters                           map[string]*nativeMemberPrivateGetter
-	retainedAccessors                 map[string]*nativeMemberPrivateGetter
-	nestmateAccessors                 bool
-	lexicalObjects                    map[string]*ClassObject
-	anonymous                         *nativeAnonymousFamily
-	anonymousUnits                    map[string]*nativeAnonymousFamily
-	memberAnonymous                   map[string]*nativeAnonymousFamily
-	anonymousForest                   *nativeAnonymousForest
-	owner                             string
-	children                          map[string]*nativeMemberClass
-	failed                            bool
-	bridgeCalls                       map[string]int
-	emptyMarkers                      map[string]*ClassObject
+	// Only a receipt for unchanged root method handles and consumed lambda
+	// bodies; it confers no member-class or private-constructor ownership.
+	rootHandleSource      *nativeMemberClass
+	rootBridgeDelegations map[string]*nativeRootBridgeDelegation
+	getters               map[string]*nativeMemberPrivateGetter
+	retainedAccessors     map[string]*nativeMemberPrivateGetter
+	nestmateAccessors     bool
+	lexicalObjects        map[string]*ClassObject
+	anonymous             *nativeAnonymousFamily
+	anonymousUnits        map[string]*nativeAnonymousFamily
+	memberAnonymous       map[string]*nativeAnonymousFamily
+	anonymousForest       *nativeAnonymousForest
+	owner                 string
+	children              map[string]*nativeMemberClass
+	failed                bool
+	bridgeCalls           map[string]int
+	emptyMarkers          map[string]*ClassObject
 	// Newer compilers use nestmates and need not emit an unused access marker.
 	// Keep its original class as a separate source unit instead of consuming it.
 	retainEmptyMarkers bool

@@ -74,7 +74,14 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 		return nil
 	}
 	if len(p.rootAccessBridges) > 0 && index.handles[owner] {
-		return nil
+		// Constructor bridges change a physical constructor protocol. Other
+		// handles can survive only with unchanged original method bindings.
+		// A lambda additionally needs exclusive bootstrap use, archive closure,
+		// and a later receipt from this exact root's rendered implementation.
+		p.rootHandleSource = &nativeMemberClass{object: root, lambdaContext: nativeLambdaImplementationContext{resolve: d.nativeAnnotationDeclarationResolver(), metadata: d.buildInvocationMetadata()}}
+		if !nativeRootBridgeMethodHandlesClosed(root, index, p.rootHandleSource, d.Work) || !z.nativeMemberLambdaArchiveClosed(p.rootHandleSource, index, d.Work) {
+			return nil
+		}
 	}
 	objects := map[string]*ClassObject{owner: root}
 	// Use the exact original objects whose constructor packets were proved.
@@ -348,6 +355,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	var src string
 	var e error
 	jdecenv.Run(snap, func() error { src, e = d.DumpClass(); return e })
+	if p.rootHandleSource != nil && !nativeMemberLambdaSourceClosed(p.rootHandleSource, d, d.Work) {
+		return nil
+	}
 	if p.anonymousForest != nil && !p.anonymousForest.scopeSourceComplete(src) {
 		return nil
 	}
