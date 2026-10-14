@@ -171,7 +171,7 @@ func (c *ClassObjectDumper) nativeMemberForeignOriginalSuper(p *nativeMemberFami
 	// bridge. Its own original packet belongs only to this temporary physical
 	// class proof; never import it into the parent's lexical/bridge ownership.
 	bridges := c.originalNativeConstructorAccessBridges()
-	child := nativeMemberProofWithDeclarations(c.obj, root, c.Work, bridges, map[string]*ClassObject{enclosing: root}, resolve, c.buildInvocationMetadata())
+	child := c.proveNativeMemberDeclaration(c.obj, root, bridges, map[string]*ClassObject{enclosing: root}, resolve)
 	if child == nil || child.static {
 		return false
 	}
@@ -180,5 +180,5 @@ func (c *ClassObjectDumper) nativeMemberForeignOriginalSuper(p *nativeMemberFami
 		return false
 	}
 	view := &nativeMemberFamily{children: map[string]*nativeMemberClass{c.obj.GetClassName(): child}, allocationDependencies: map[string]*nativeMemberClass{owner: parent}}
-	return nativeMemberExternalSupersClosed(view, c.buildInvocationMetadata(), resolve, c.Work)
+	return nativeMemberExternalSupersClosed(view, c.nativeConstructorOperandMetadata(c.buildInvocationMetadata()), resolve, c.Work)
 }

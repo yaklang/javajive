@@ -124,7 +124,7 @@ func (c *ClassObjectDumper) nativeAnonymousForestNamedMembers(forest *nativeAnon
 			reader.options, reader.Work = c.options, c.Work
 			reader.foldSiblingResolver, reader.declarationResolver = c.foldSiblingResolver, c.declarationResolver
 			p.lexicalObjects[name] = object
-			child := nativeMemberProofWithDeclarations(object, enclosing, c.Work, reader.originalNativeConstructorAccessBridges(), p.lexicalObjects, c.nativeAnnotationDeclarationResolver(), reader.buildInvocationMetadata())
+			child := reader.proveNativeMemberDeclaration(object, enclosing, reader.originalNativeConstructorAccessBridges(), p.lexicalObjects, c.nativeAnnotationDeclarationResolver())
 			simple, known := sourceBridgeUTF8(enclosing, row.InnerNameIndex)
 			if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || !known || child.owner != owner || child.name != simple || child.flags != row.InnerClassAccessFlags {
 				return nil, false

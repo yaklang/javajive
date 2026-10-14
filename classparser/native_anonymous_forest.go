@@ -189,7 +189,7 @@ func (c *ClassObjectDumper) planNativeAnonymousLexicalForest(members *nativeMemb
 	if members != nil {
 		for name, child := range members.children {
 			source, known := members.sourceName(name)
-			if !known || !nativeMemberSiblingSuperClosed(child, members, c.Work, c.buildInvocationMetadata()) {
+			if !known || !nativeMemberSiblingSuperClosed(child, members, c.Work, c.nativeConstructorOperandMetadata(c.buildInvocationMetadata())) {
 				return nil
 			}
 			child.sourceName = source

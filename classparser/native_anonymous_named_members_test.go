@@ -336,7 +336,7 @@ func TestNativeAnonymousNamedEmptyRootAdmissionIsIndependentOfReadOrder(t *testi
 
 func TestNativeAnonymousNamedSuperSourceRequiresOriginalEnclosingOperand(t *testing.T) {
 	files := nativeCompileClasses(t, anonymousMemberSuperIdentityFixture)
-	for _, variant := range []string{"original", "effectful outer", "null outer", "foreign parameter", "THIS receiver", "missing binding", "wrong PC", "missing original parameter", "wrong physical slot", "changed original seed", "copied public identity"} {
+	for _, variant := range []string{"original", "provisional pending binding", "effectful outer", "null outer", "foreign parameter", "THIS receiver", "missing binding", "wrong PC", "missing original parameter", "wrong physical slot", "changed original seed", "copied public identity"} {
 		t.Run(variant, func(t *testing.T) {
 			archive := nativeArchive(t, files)
 			defer archive.Close()
@@ -368,10 +368,21 @@ func TestNativeAnonymousNamedSuperSourceRequiresOriginalEnclosingOperand(t *test
 			reader := archive.nativeMemberReader(child.object)
 			reader.FuncCtx = ctx
 			reader.nativeMemberRoot, reader.nativeMemberCurrent = family, child
+			reader.nativeSourceNamesReady = true
 			reader.wireNativeMemberSource()
 			ctx.FunctionName, ctx.CurrentMethodDesc = "<init>", ctor.descriptor
 			args := []any{outer, values.NewJavaLiteral("null", types.NewJavaClass("java.lang.Object"))}
 			pc := ctor.delegatePC
+			if variant == "provisional pending binding" {
+				saved := ctx.LocalNames
+				ctx.LocalNames = nil
+				reader.nativeSourceNamesReady = false
+				if source, known := ctx.SourceMemberDelegation(ctor.delegateOwner, ctor.delegateDescriptor, ctor.delegatePC, args); known || family.failed {
+					t.Fatalf("provisional projection changed family state: %q known=%v", source, known)
+				}
+				ctx.LocalNames = saved
+				reader.nativeSourceNamesReady = true
+			}
 			switch variant {
 			case "effectful outer":
 				args[0] = values.NewCustomValue(func(*class_context.ClassContext) string { panic("removed enclosing operand must never render") }, func() types.JavaType { return types.NewJavaClass(child.owner) })
@@ -394,7 +405,7 @@ func TestNativeAnonymousNamedSuperSourceRequiresOriginalEnclosingOperand(t *test
 				ref.IsParam = true
 				args[0] = ref
 			}
-			if source, known := ctx.SourceMemberDelegation(ctor.delegateOwner, ctor.delegateDescriptor, pc, args); known != (variant == "original") {
+			if source, known := ctx.SourceMemberDelegation(ctor.delegateOwner, ctor.delegateDescriptor, pc, args); known != (variant == "original" || variant == "provisional pending binding") {
 				t.Fatalf("hidden SUPER enclosing operand %q admitted=%v", source, known)
 			}
 		})

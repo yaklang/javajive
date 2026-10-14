@@ -315,7 +315,7 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 		}
 	}
 
-	if !nativeMemberExternalSupersClosed(p, d.buildInvocationMetadata(), d.nativeAnnotationDeclarationResolver(), d.Work) {
+	if !nativeMemberExternalSupersClosed(p, d.nativeConstructorOperandMetadata(d.buildInvocationMetadata()), d.nativeAnnotationDeclarationResolver(), d.Work) {
 		return nil
 	}
 	if !nativeAnonymousForeignSupersCommitted(p, d.Work) {

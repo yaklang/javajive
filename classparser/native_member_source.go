@@ -220,6 +220,14 @@ func nativeMemberProofWithLexicalGraph(obj, enclosing *ClassObject, work *workbu
 }
 
 func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, resolve func(string) (*ClassObject, bool), providers ...callbinding.Provider) *nativeMemberClass {
+	var provider callbinding.Provider
+	if len(providers) > 0 {
+		provider = providers[0]
+	}
+	return nativeMemberProofWithMetadata(obj, enclosing, work, bridges, lexical, resolve, provider, provider)
+}
+
+func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, resolve func(string) (*ClassObject, bool), provider, operands callbinding.Provider) *nativeMemberClass {
 	expectedCapture := "this$0"
 	if lexical != nil {
 		var known bool
@@ -227,10 +235,6 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		if !known {
 			return nil
 		}
-	}
-	var provider callbinding.Provider
-	if len(providers) > 0 {
-		provider = providers[0]
 	}
 	owner, name, flags, known := originalMemberOwner(obj)
 	var enumSynthesis *nativeMemberEnumSynthesis
@@ -508,11 +512,11 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		}
 		// The existing abstract stack proof preserves parameter/literal computations
 		// and identifies the actual uninitialized receiver delegation.
-		next, call := constructorMotionDelegation(obj, ops, start, ps, constructorParameterSlots(ps), provider)
+		next, call := constructorMotionDelegation(obj, ops, start, ps, constructorParameterSlots(ps), operands)
 		if next == 0 || call == nil {
 			// A named lexical capture is regenerated before the original
 			// delegation; no capture is moved across these operand effects.
-			next, call = nativeMemberFrameDelegationWithMetadata(obj, m, code, ops, start, work, provider)
+			next, call = nativeMemberFrameDelegationWithMetadata(obj, m, code, ops, start, work, operands)
 		}
 		if next == 0 || call == nil || call.Member != "<init>" {
 			return nil
@@ -652,7 +656,7 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 				// Retain this exact parsed declaration before proving its lexical
 				// method scope. A failed child aborts the entire family transaction.
 				p.lexicalObjects[name] = obj
-				child := nativeMemberProofWithDeclarations(obj, enclosing, c.Work, bridges, p.lexicalObjects, resolveDeclaration, reader.buildInvocationMetadata())
+				child := reader.proveNativeMemberDeclaration(obj, enclosing, bridges, p.lexicalObjects, resolveDeclaration)
 				rowName, rowKnown := sourceBridgeUTF8(enclosing, row.InnerNameIndex)
 				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags {
 					return nil
@@ -740,7 +744,7 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 	}
 	// The complete original named forest is committed together. Local and
 	// anonymous scopes still require their separately proved joint plans.
-	metadata := c.buildInvocationMetadata()
+	metadata := c.nativeConstructorOperandMetadata(c.buildInvocationMetadata())
 	for _, child := range p.children {
 		if !nativeMemberSiblingSuperClosed(child, p, c.Work, metadata) {
 			return nil
@@ -1699,6 +1703,11 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			name := strings.ReplaceAll(owner, ".", "/")
 			targetClass := p.allocationClass(name)
 			if targetClass == nil || targetClass.static {
+				return "", false
+			}
+			// Source names are registered after provisional IR rendering.
+			// Retain the physical operands until that binding phase.
+			if !c.nativeSourceNamesReady {
 				return "", false
 			}
 			ctor := child.constructors[ctx.CurrentMethodDesc]

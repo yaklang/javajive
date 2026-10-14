@@ -85,7 +85,7 @@ func (c *ClassObjectDumper) originalNativeMemberIndependentRoot() *nativeMemberI
 	if rows != 1 {
 		return nil
 	}
-	declaration := nativeMemberProofWithDeclarations(obj, outer, c.Work, c.originalNativeConstructorAccessBridges(), nil, c.nativeAnnotationDeclarationResolver(), c.buildInvocationMetadata())
+	declaration := c.proveNativeMemberDeclaration(obj, outer, c.originalNativeConstructorAccessBridges(), nil, c.nativeAnnotationDeclarationResolver())
 	if declaration == nil || !declaration.static || declaration.owner != owner || declaration.name != name || declaration.flags != flags {
 		return nil
 	}
