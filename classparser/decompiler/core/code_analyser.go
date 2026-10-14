@@ -3529,6 +3529,11 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 					loaded = values.NewAssignmentExpression(loaded, rhs, int(update.CurrentOffset), nil)
 				}
 				update.IincFoldedToPreOp = true
+			} else if op, proved := d.immediateLocalTypedReloadUpdate(opcode, loaded); proved {
+				ref := values.UnpackSoltValue(loaded).(*values.JavaRef)
+				loaded = values.NewUnaryExpression(loaded, op, loaded.Type())
+				d.disFoldRef = append(d.disFoldRef, ref)
+				update.LocalStoreFoldedToTypedPreOp = true
 			}
 		}
 		runtimeStackSimulation.Push(loaded)
@@ -3574,6 +3579,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(values.NewJavaLiteral(int(int16(Convert2bytesToInt(opcode.Data))), types.NewJavaPrimer(types.JavaInteger)))
 	case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
 		opcode.LocalStoreFoldedToPostOp = false
+		opcode.LocalStoreFoldedToTypedPreOp = false
 		slot := GetStoreIdx(opcode)
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		d.slotStoreValue[opcode] = value
@@ -3897,12 +3903,22 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
 		if !isFirst && runtimeStackSimulation.Size() > 0 {
 			if op, proved := d.immediateLocalPostUpdate(opcode, ref, runtimeStackSimulation.Peek()); proved {
-				post := values.NewBinaryExpression(ref, values.NewJavaLiteral(1, ref.Type()), op, ref.Type())
+				// Keep the original load's enumerable target: later source binding
+				// reconciliation must update this write as well as ordinary reads.
+				post := values.NewBinaryExpression(runtimeStackSimulation.Peek(), values.NewJavaLiteral(1, ref.Type()), op, ref.Type())
+				d.disFoldRef = append(d.disFoldRef, ref)
 				runtimeStackSimulation.ReplaceTop(post)
 				// This is the semantic replacement's producer. STORE still
 				// has no decoded push in stackProduced or extra consumed word.
 				d.stackValueProducers[post] = opcode
 				opcode.LocalStoreFoldedToPostOp = true
+			} else if duplicate, target, op, proved := d.immediateLocalTypedPreUpdate(opcode, ref, runtimeStackSimulation.Peek(), value); proved {
+				pre := values.NewUnaryExpression(target, op, ref.Type())
+				d.disFoldRef = append(d.disFoldRef, ref)
+				runtimeStackSimulation.ReplaceTop(pre)
+				d.stackValueProducers[pre] = opcode
+				opcode.LocalStoreFoldedToTypedPreOp = true
+				duplicate.LocalUpdateDupFolded = true
 			}
 		}
 		// Record the creator of each freshly-minted ref so the boolean-copy merge can recover it
@@ -4462,6 +4478,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(v1)
 		runtimeStackSimulation.Push(v2)
 	case OP_DUP:
+		opcode.LocalUpdateDupFolded = false
 		// The uninitialized reference in NEW; DUP; invokespecial belongs to
 		// one constructor expression. A DUP AFTER that constructor instead
 		// shares the initialized object's identity (e.g. (x = new T()).mutate()).
@@ -4509,6 +4526,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(v1)
 		adduser(1)
 	case OP_DUP2:
+		opcode.LocalUpdateDupFolded = false
 		// dup2 duplicates the top two category-1 slots (or one category-2 value). Each duplicated
 		// value must carry its OWN ref-fold callback. The previous code kept a single shared addUser
 		// (overwritten to the LAST converted value), so when both pushes reused it, the deeper value's
@@ -6519,7 +6537,7 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		switch opcode.Instr.OpCode {
 		case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
-			if protectedStores[opcode] || opcode.LocalStoreFoldedToPostOp {
+			if protectedStores[opcode] || opcode.LocalStoreFoldedToPostOp || opcode.LocalStoreFoldedToTypedPreOp {
 				break
 			}
 			refInfos := d.opcodeIdToRef[opcode]
@@ -6812,6 +6830,9 @@ func (d *Decompiler) ParseStatement() error {
 				appendNode(assignSt)
 			}
 		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
+			if opcode.LocalUpdateDupFolded {
+				break
+			}
 			refInfos := d.opcodeIdToRef[opcode]
 			convertedVals := d.dupConvertedRefValue[opcode]
 			for i, refInfo := range refInfos {

@@ -46,33 +46,9 @@ func (d *Decompiler) immediateLocalPostUpdate(store *OpCode, ref *values.JavaRef
 	if protocol.narrow != 0 {
 		n++
 	}
-	path := make([]*OpCode, n)
-	path[n-1] = store
-	for i := n - 1; i > 0; i-- {
-		node := path[i]
-		if node == nil || len(node.Source) != 1 {
-			return "", false
-		}
-		path[i-1] = node.Source[0]
-	}
-	var handlers []int
-	for i, node := range path {
-		if node == nil || node.Instr == nil || node.IsCustom || node.IsCatch || node.IsTryCatchParent || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1+int64(len(d.ExceptionTable))) != nil {
-			return "", false
-		}
-		coverage := d.handlersAt(node)
-		if i == 0 {
-			handlers = coverage
-			continue
-		}
-		if !sameHandlerCoverage(handlers, coverage) {
-			return "", false
-		}
-		prev := path[i-1]
-		width, valid := localPostInstructionWidth(prev)
-		if !valid || len(prev.Target) != 1 || prev.Target[0] != node || int(prev.CurrentOffset)+width != int(node.CurrentOffset) {
-			return "", false
-		}
+	path, closed := d.localUpdatePrivatePath(store, n)
+	if !closed {
+		return "", false
 	}
 	load := path[0]
 	if !localPostAccess(load, protocol.load, true) || !localPostAccess(store, protocol.store, false) || GetRetrieveIdx(load) != GetStoreIdx(store) || path[2].Instr.OpCode != protocol.one {
@@ -144,4 +120,40 @@ func localPostInstructionWidth(node *OpCode) (int, bool) {
 		return 1, len(node.Data) == 0
 	}
 	return 1, !node.IsWide && len(node.Data) == 0
+}
+
+// Both result variants share the same bounded, original private-edge proof.
+func (d *Decompiler) localUpdatePrivatePath(store *OpCode, n int) ([]*OpCode, bool) {
+	if d == nil || store == nil || n < 5 || n > 6 {
+		return nil, false
+	}
+	path := make([]*OpCode, n)
+	path[n-1] = store
+	for i := n - 1; i > 0; i-- {
+		node := path[i]
+		if node == nil || len(node.Source) != 1 {
+			return nil, false
+		}
+		path[i-1] = node.Source[0]
+	}
+	var handlers []int
+	for i, node := range path {
+		if node == nil || node.Instr == nil || node.IsCustom || node.IsCatch || node.IsTryCatchParent || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1+int64(len(d.ExceptionTable))) != nil {
+			return nil, false
+		}
+		coverage := d.handlersAt(node)
+		if i == 0 {
+			handlers = coverage
+			continue
+		}
+		if !sameHandlerCoverage(handlers, coverage) {
+			return nil, false
+		}
+		prev := path[i-1]
+		width, valid := localPostInstructionWidth(prev)
+		if !valid || len(prev.Target) != 1 || prev.Target[0] != node || int(prev.CurrentOffset)+width != int(node.CurrentOffset) {
+			return nil, false
+		}
+	}
+	return path, true
 }

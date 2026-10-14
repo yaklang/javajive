@@ -70,7 +70,10 @@ type OpCode struct {
 	IincFoldedToPreOp bool
 	// The original scalar load/dup/update/store protocol has its old word
 	// represented by one postfix expression in the consumer's execution domain.
-	LocalStoreFoldedToPostOp bool
+	LocalStoreFoldedToPostOp     bool
+	LocalStoreFoldedToTypedPreOp bool
+	// A proved prefix update consumes this DUP's one numeric materialization.
+	LocalUpdateDupFolded bool
 }
 type CatchNode struct {
 	ExceptionTypeIndex uint16
