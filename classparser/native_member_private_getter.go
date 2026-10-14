@@ -507,6 +507,17 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 			}
 		}
 		if getter.call != nil {
+			if f := c.nativeAnonymousForest; f != nil && f.units[getter.owner] != nil {
+				consumer := f.consumers[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+				if consumer == nil || consumer.getter != getter || len(args) != 1 ||
+					!nativeAnonymousPrivateCallAccessorDeclaration(f, f.objects[getter.owner], getter.method, c.Work) ||
+					!nativeAnonymousLexicalConsumerSourceClosed(c, consumer, ctx, c.Work) ||
+					!nativeAnonymousLexicalConsumerOperand(v, consumer, ctx, c.Work) {
+					p.failed = true
+					return "", false
+				}
+				return fmt.Sprintf("%s()/*jdec-owned-getter:%d:%s:%s*/", getter.field, getter.ordinal, getter.owner, getter.field), true
+			}
 			source, known := nativeMemberPrivateCallSource(getter, args, ctx)
 			if !known {
 				p.failed = true

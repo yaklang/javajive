@@ -1480,6 +1480,12 @@ func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 			}
 		}
 		for _, getter := range p.getters {
+			// A local/capture can share a method's name: name() performs
+			// method lookup, while name performs variable/field lookup.
+			// Reserve lexical field reads, not separately proved call symbols.
+			if getter.call != nil {
+				continue
+			}
 			if c.nativeAnonymousForest != nil && c.nativeAnonymousForest.units[getter.owner] != nil {
 				result[getter.field] = true
 			}

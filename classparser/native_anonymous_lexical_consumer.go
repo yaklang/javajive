@@ -172,7 +172,7 @@ func nativeAnonymousLexicalConsumerProof(f *nativeAnonymousForest, caller *Class
 	c := &nativeAnonymousLexicalConsumer{read: read, owner: target, name: symbol.Member, descriptor: symbol.Description, kind: kind, pc: int(op.CurrentOffset)}
 	if kind == core.OP_INVOKESTATIC && f.members != nil {
 		g := f.members.getters[nativeMemberGetterKey(target, symbol.Member, symbol.Description)]
-		if g == nil || !nativeAnonymousAccessorDeclaration(f, f.objects[target], g.method, work) || g.staticField || g.setter || g.update != nil || g.call != nil || !nativeAnonymousLexicalConsumerLookup(f, caller.GetClassName(), target, g.field, true, resolve, work) {
+		if g == nil || !nativeAnonymousAccessorDeclaration(f, f.objects[target], g.method, work) || g.staticField || g.setter || g.update != nil || !nativeAnonymousLexicalConsumerLookup(f, caller.GetClassName(), target, g.field, g.call == nil, resolve, work) {
 			return nil
 		}
 		c.getter = g
@@ -229,6 +229,10 @@ func nativeAnonymousLexicalConsumerProof(f *nativeAnonymousForest, caller *Class
 }
 
 func nativeAnonymousAccessorDeclaration(f *nativeAnonymousForest, o *ClassObject, m *MemberInfo, work *workbudget.Budget) bool {
+	return nativeAnonymousFieldAccessorDeclaration(f, o, m, work) || nativeAnonymousPrivateCallAccessorDeclaration(f, o, m, work)
+}
+
+func nativeAnonymousFieldAccessorDeclaration(f *nativeAnonymousForest, o *ClassObject, m *MemberInfo, work *workbudget.Budget) bool {
 	if work != nil && work.CheckAlloc(512) != nil {
 		return false
 	}
