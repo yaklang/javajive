@@ -354,29 +354,66 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 		}
 
 		for _, current := range queue {
-			reader := z.nativeMemberReader(current)
-			reader.Work = work
-			external := reader.nativeAnnotationDeclarationResolver()
-			hierarchyLoad := func(name string) (*ClassObject, bool) {
-				if _, found := z.enumSiblingResolver()(name); found {
-					return load(name)
+			// Only archive declarations define source-cache query targets. Stop at
+			// an external boundary and cover every matching archive symbol; do not
+			// let an absent or changing external provider invalidate unrelated roots.
+			scan, known := nativeMemberOriginalAccessorAncestorScan(current, func(n string) (*ClassObject, bool) {
+				if _, present := z.enumSiblingResolver()(n); present {
+					// A present but invalid or over-budget archive declaration
+					// is not an external boundary. Preserve that hard refusal.
+					o, _ := load(n)
+					return o, true
 				}
-				return external(name)
-			}
-			ancestors, known := nativeMemberOriginalAccessorAncestors(current, hierarchyLoad, work)
+				return nil, false
+			}, work)
 			if !known {
 				return false
 			}
-			for _, ancestor := range ancestors {
-				if _, found := z.enumSiblingResolver()(ancestor.object.GetClassName()); !found {
-					continue
-				}
-				target, known := outermost(ancestor.object)
+			addAncestor := func(o *ClassObject) bool {
+				target, known := outermost(o)
 				if !known {
 					return false
 				}
 				if target != owner {
 					dependencies[target] = true
+				}
+				return true
+			}
+			for _, m := range scan.matches {
+				if !addAncestor(m.object) {
+					return false
+				}
+			}
+			if scan.incomplete {
+				index := z.originalMemberIndex()
+				if index == nil || !index.valid {
+					return false
+				}
+				for symbol := range scan.symbols {
+					if !nativeProofWork(work, int64(len(symbol))+1) {
+						return false
+					}
+					for candidate := range index.accessorDeclarations[symbol] {
+						if !nativeProofWork(work, 1) {
+							return false
+						}
+						if candidate == current.GetClassName() {
+							continue
+						}
+						o, known := load(candidate)
+						if !known {
+							return false
+						}
+						// A valid superclass chain cannot enter a final class or an
+						// interface. This excludes impossible candidates without
+						// guessing anything about the unavailable external header.
+						if o.AccessFlags&(0x0010|0x0200) != 0 {
+							continue
+						}
+						if !addAncestor(o) {
+							return false
+						}
+					}
 				}
 			}
 		}

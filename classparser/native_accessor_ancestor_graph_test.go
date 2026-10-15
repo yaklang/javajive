@@ -91,6 +91,27 @@ func TestNativeAccessorAncestorGraphRequiresOriginalHierarchy(t *testing.T) {
 				if !known || len(g) != 1 || len(g["q/LeaseA"]) != 0 {
 					t.Fatalf("non-source/mismatched symbol manufactured dependency:%v %v", g, known)
 				}
+			case "missing intermediate":
+				// Scheduling must cover every possible archive ancestor at an
+				// external boundary. This is not evidence that source flags close.
+				if !known || !g["q/LeaseA"]["q/LeaseParent"] || !g["q/LeaseParent"]["q/LeaseA"] {
+					t.Fatalf("potential ancestor source cycle missing:%v %v", g, known)
+				}
+				o, e := Parse(files["q/LeaseA.class"])
+				if e != nil {
+					t.Fatal(e)
+				}
+				load := func(n string) (*ClassObject, bool) {
+					raw, ok := files[n+".class"]
+					if !ok {
+						return nil, false
+					}
+					p, e := Parse(raw)
+					return p, e == nil
+				}
+				if _, closed := nativeMemberOriginalAccessorAncestors(o, load, nil); closed {
+					t.Fatal("a conservative graph certified unavailable source flags")
+				}
 			default:
 				if known {
 					t.Fatalf("incomplete hierarchy or work budget accepted:%v", g)

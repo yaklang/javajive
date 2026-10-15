@@ -17,7 +17,7 @@ const accessorAncestorCycleSource = `package q;
 class LeaseParent extends p.LeaseBase{public static class BuilderBase{public Object read(){return LeaseParent.value;}}public static class Link{public LeaseA.Marker peer;}}
 class LeaseMiddle extends LeaseParent{}
 class LeaseA extends LeaseMiddle{public static class Marker{}public static class Builder{public Object read(){return LeaseA.value;}}}
-class LeaseDriver{public static void main(String[]args)throws Exception{String[]cp=System.getProperty("java.class.path").split(java.io.File.pathSeparator);java.io.File target=new java.io.File(cp[0]).getCanonicalFile(),original=new java.io.File(cp[cp.length-1]).getCanonicalFile();boolean source=args.length>0&&args[0].equals("source");for(Class<?> c:new Class<?>[]{LeaseA.class,LeaseParent.class,LeaseMiddle.class,p.LeaseBase.class,LeaseDriver.class}){java.io.File expected=c==LeaseA.class||source&&(c==LeaseParent.class||c==LeaseMiddle.class)?target:original;if(!new java.io.File(c.getProtectionDomain().getCodeSource().getLocation().toURI()).getCanonicalFile().equals(expected))throw new AssertionError("wrong binary/source origin "+c);}
+class LeaseDriver{public static void main(String[]args)throws Exception{String[]cp=System.getProperty("java.class.path").split(java.io.File.pathSeparator);java.io.File target=new java.io.File(cp[0]).getCanonicalFile(),original=new java.io.File(cp[cp.length-1]).getCanonicalFile();boolean external=args.length>0&&args[0].equals("external intermediate");boolean source=external||args.length>0&&args[0].equals("source");for(Class<?> c:new Class<?>[]{LeaseA.class,LeaseParent.class,LeaseMiddle.class,p.LeaseBase.class,LeaseDriver.class}){java.io.File expected=c==LeaseA.class||source&&(c==LeaseParent.class||!external&&c==LeaseMiddle.class)?target:original;if(!new java.io.File(c.getProtectionDomain().getCodeSource().getLocation().toURI()).getCanonicalFile().equals(expected))throw new AssertionError("wrong binary/source origin "+c);}
 if(LeaseA.Marker.class.getDeclaringClass()!=LeaseA.class||LeaseA.Builder.class.getDeclaringClass()!=LeaseA.class||LeaseParent.Link.class.getDeclaringClass()!=LeaseParent.class||!LeaseA.class.getDeclaredMethod("access$000").isSynthetic()||!LeaseParent.class.getDeclaredMethod("access$000").isSynthetic())throw new AssertionError("native source ownership/accessor flags");LeaseParent.Link link=new LeaseParent.Link();link.peer=new LeaseA.Marker();if(link.peer.getClass()!=LeaseA.Marker.class)throw new AssertionError("joint source type binding");for(Object v:new Object[]{null,new Object()}){p.LeaseBase.set(v);if(new LeaseA.Builder().read()!=v||new LeaseParent.BuilderBase().read()!=v)throw new AssertionError("original inherited field identity");}System.out.println("source:binary:ancestor:cycle:native-flags:identity");}}`
 
 func TestNativeAccessorAncestorSourceCycleAndBinaryViews(t *testing.T) {
@@ -43,11 +43,11 @@ func TestNativeAccessorAncestorSourceCycleAndBinaryViews(t *testing.T) {
 					}
 				}
 				run(original, "source")
-				for _, world := range []string{"source", "binary"} {
+				for _, world := range []string{"source", "binary", "external intermediate"} {
 					t.Run(world, func(t *testing.T) {
 						input := map[string][]byte{}
 						for n, raw := range files {
-							if world == "source" || n == "q/"+prefix+"A.class" || strings.HasPrefix(n, "q/"+prefix+"A$") {
+							if (world == "source" || world == "external intermediate" && n != "q/"+prefix+"Middle.class") || n == "q/"+prefix+"A.class" || strings.HasPrefix(n, "q/"+prefix+"A$") {
 								input[n] = raw
 							}
 						}
@@ -70,7 +70,7 @@ func TestNativeAccessorAncestorSourceCycleAndBinaryViews(t *testing.T) {
 								defer wg.Done()
 								<-start
 								n := "q/" + prefix + "A"
-								if world == "source" && i%2 != 0 {
+								if world != "binary" && i%2 != 0 {
 									n = "q/" + prefix + "Parent"
 								}
 								source, e := z.ReadFile(n + ".class")
@@ -94,7 +94,7 @@ func TestNativeAccessorAncestorSourceCycleAndBinaryViews(t *testing.T) {
 						if t.Failed() {
 							return
 						}
-						if world == "source" {
+						if world != "binary" {
 							raw, _ := Parse(files["q/"+prefix+"A.class"])
 							a := z.nativeMemberTransactionEntry(raw)
 							raw, _ = Parse(files["q/"+prefix+"Parent.class"])
@@ -112,7 +112,7 @@ func TestNativeAccessorAncestorSourceCycleAndBinaryViews(t *testing.T) {
 						out := t.TempDir()
 						var sources []string
 						for n := range input {
-							if !(n == "q/"+prefix+"A.class" || strings.HasPrefix(n, "q/"+prefix+"A$") || world == "source" && (n == "q/"+prefix+"Parent.class" || strings.HasPrefix(n, "q/"+prefix+"Parent$") || n == "q/"+prefix+"Middle.class")) {
+							if !(n == "q/"+prefix+"A.class" || strings.HasPrefix(n, "q/"+prefix+"A$") || world != "binary" && (n == "q/"+prefix+"Parent.class" || strings.HasPrefix(n, "q/"+prefix+"Parent$") || n == "q/"+prefix+"Middle.class")) {
 								continue
 							}
 							source, e := z.ReadFile(n)

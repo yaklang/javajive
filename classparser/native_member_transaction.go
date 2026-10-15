@@ -72,6 +72,12 @@ func (z *JarFS) nativeMemberTransactionEntry(obj *ClassObject) *nativeMemberCach
 	identity, _ := json.Marshal(participants)
 	key := string(identity) + "\x00" + string(policy)
 	z.nativeMembersMu.Lock()
+	for _, name := range participants {
+		if entry := z.nativeMembersCache[name+"\x00"+string(policy)]; entry != nil && entry.flatSourceCommitted {
+			z.nativeMembersMu.Unlock()
+			return nil
+		}
+	}
 	transaction := z.nativeMemberTransactions[key]
 	if transaction == nil {
 		missing := 0

@@ -67,13 +67,27 @@ func (z *JarFS) completedFlatStaticDeclaration(prepared *nativeMemberPrepared, o
 		entry = z.nativeMemberEntry(outer)
 		return nil
 	})
-	// Only a completed local-plan refusal at the physical top is terminal.
-	// A failed finish, missing cache entry or incomplete transaction is not.
+	// A local-plan refusal is terminal. A completed ordinary finish refusal
+	// can also commit a flat layout when its cached dependency graph is acyclic.
+	// Missing entries and potentially recoverable transactions remain unproved.
 	// Transactions require that same local plan to succeed. Any subsequent
 	// independent direct static root still uses its physical binary spelling;
 	// nested independent cuts are excluded by the top-level evidence above.
-	if entry == nil || entry.planKnown || entry.family != nil {
+	if entry == nil || entry.family != nil {
 		return ""
+	}
+	pinFinishedRefusal := entry.planKnown
+	if pinFinishedRefusal {
+		// A completed ordinary finish is terminal for a top-level owner only
+		// when no dependency transaction can subsequently choose lexical source.
+		var cyclic, known bool
+		jdecenv.Run(prepared.snapshot, func() error {
+			_, cyclic, known = z.nativeMemberDependencyAdmission(owner, d.Work, prepared.snapshot)
+			return nil
+		})
+		if !known || cyclic {
+			return ""
+		}
 	}
 	// No foreign family completed, so its indexed constructor-access proof
 	// cannot be assumed. A declaration spelling is not a private-access grant.
@@ -85,6 +99,15 @@ func (z *JarFS) completedFlatStaticDeclaration(prepared *nativeMemberPrepared, o
 	}
 	if d.Work != nil && d.Work.CheckAlloc(int64(len(prepared.family.sourceDependencies)+1)*128+int64(len(original.GetClassName()))*2) != nil {
 		return ""
+	}
+	if pinFinishedRefusal {
+		z.nativeMembersMu.Lock()
+		if entry.transaction != nil {
+			z.nativeMembersMu.Unlock()
+			return ""
+		}
+		entry.flatSourceCommitted = true
+		z.nativeMembersMu.Unlock()
 	}
 	return strings.ReplaceAll(original.GetClassName(), "/", ".")
 }
