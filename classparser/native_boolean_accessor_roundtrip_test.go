@@ -22,46 +22,52 @@ func TestNativeBooleanAccessorRenamedRoundTrip(t *testing.T) {
 // JVM boolean consumers narrow bit zero, not nonzero. These valid authored
 // classfiles pass noncanonical int words directly to the original Z bridge.
 func TestNativeBooleanAccessorNoncanonicalWordsRoundTrip(t *testing.T) {
-	testNativePrivateSetterFixtureWithMutation(t, nativeBooleanAccessorFixture, "BoolAccessOwner", "BoolAccessDriver", "2:boolean:accessor:store:result:order\n", func(t *testing.T, files map[string][]byte) {
-		obj, e := Parse(files["BoolAccessOwner$Writer.class"])
-		if e != nil {
-			t.Fatal(e)
+	testNativePrivateSetterFixtureWithMutation(t, nativeBooleanAccessorFixture, "BoolAccessOwner", "BoolAccessDriver", "2:boolean:accessor:store:result:order\n", mutateNativeBooleanAccessorNoncanonicalWords)
+}
+
+func mutateNativeBooleanAccessorNoncanonicalWords(t *testing.T, files map[string][]byte) {
+	mutateNativeBooleanAccessorNoncanonicalWordsForOwner(t, files, "BoolAccessOwner")
+}
+
+func mutateNativeBooleanAccessorNoncanonicalWordsForOwner(t *testing.T, files map[string][]byte, owner string) {
+	obj, e := Parse(files[owner+"$Writer.class"])
+	if e != nil {
+		t.Fatal(e)
+	}
+	changed := 0
+	for _, m := range obj.Methods {
+		name, _ := sourceBridgeUTF8(obj, m.NameIndex)
+		if name != "literal" && name != "clear" {
+			continue
 		}
-		changed := 0
-		for _, m := range obj.Methods {
-			name, _ := sourceBridgeUTF8(obj, m.NameIndex)
-			if name != "literal" && name != "clear" {
+		for _, a := range m.Attributes {
+			c, ok := a.(*CodeAttribute)
+			if !ok {
 				continue
 			}
-			for _, a := range m.Attributes {
-				c, ok := a.(*CodeAttribute)
-				if !ok {
-					continue
-				}
-				d := core.NewDecompiler(c.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
-				if e := d.ParseOpcode(); e != nil {
-					t.Fatal(e)
-				}
-				matches := 0
-				for _, op := range d.Opcodes() {
-					want, to := core.OP_ICONST_1, core.OP_ICONST_3
-					if name == "clear" {
-						want, to = core.OP_ICONST_0, core.OP_ICONST_2
-					}
-					if op.Instr.OpCode == want {
-						c.Code[int(op.CurrentOffset)] = byte(to)
-						matches++
-					}
-				}
-				if matches != 1 {
-					t.Fatalf("original %s literal count=%d", name, matches)
-				}
-				changed++
+			d := core.NewDecompiler(c.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
+			if e := d.ParseOpcode(); e != nil {
+				t.Fatal(e)
 			}
+			matches := 0
+			for _, op := range d.Opcodes() {
+				want, to := core.OP_ICONST_1, core.OP_ICONST_3
+				if name == "clear" {
+					want, to = core.OP_ICONST_0, core.OP_ICONST_2
+				}
+				if op.Instr.OpCode == want {
+					c.Code[int(op.CurrentOffset)] = byte(to)
+					matches++
+				}
+			}
+			if matches != 1 {
+				t.Fatalf("original %s literal count=%d", name, matches)
+			}
+			changed++
 		}
-		if changed != 2 {
-			t.Fatal("both original Z consumer packets required")
-		}
-		files["BoolAccessOwner$Writer.class"] = obj.Bytes()
-	})
+	}
+	if changed != 2 {
+		t.Fatal("both original Z consumer packets required")
+	}
+	files[owner+"$Writer.class"] = obj.Bytes()
 }

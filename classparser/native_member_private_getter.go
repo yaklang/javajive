@@ -536,12 +536,38 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 			}
 			return source, known
 		}
+		// The accessor result has its original descriptor erasure. Merely spelling
+		// the source field can reintroduce generic arguments (especially for static
+		// fields of nongeneric owners) and change downstream overload/inference.
+		// A same-erasure reference view keeps the field access/registration intact.
+		// Apply it to the assignment operand itself: casting an enclosing generic
+		// call result cannot undo argument constraints already inferred from it.
+		readView := func(source string) (string, bool) {
+			if !getter.genericField || !strings.HasPrefix(getter.fieldDescriptor, "L") && !strings.HasPrefix(getter.fieldDescriptor, "[") {
+				return source, true
+			}
+			typ, e := types.ParseDescriptor(getter.fieldDescriptor)
+			if e != nil {
+				p.failed = true
+				return "", false
+			}
+			spelling := typ.String(ctx)
+			if nativeStaticAccessorQualifierShadowed(strings.TrimRight(spelling, "[]"), ctx) {
+				p.failed = true
+				return "", false
+			}
+			return "((" + spelling + ")(" + source + "))", true
+		}
 		// A source write regenerates the original static accessor: the receiver and
 		// RHS complete before its class initialization and null dereference. javac
 		// registers the source LHS field before lowering RHS accessors; the
 		// marker records that compiler order without moving runtime evaluation.
 		if getter.setter {
-			rhs, ok := args[1].(values.JavaValue)
+			rhsIndex := 1
+			if getter.staticField {
+				rhsIndex = 0
+			}
+			rhs, ok := args[rhsIndex].(values.JavaValue)
 			if !ok || sourceProofNil(rhs) {
 				p.failed = true
 				return "", false
@@ -565,11 +591,20 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 			} else {
 				value = "((" + mt.FunctionType().ReturnType.String(ctx) + ")(" + rhs.String(ctx) + "))"
 			}
-			assignment := fmt.Sprintf("((%s)(%s)).%s/*jdec-owned-getter:%d:%s:%s:put*/ = %s", sourceOwner, v.String(ctx), getter.field, getter.ordinal, getter.owner, getter.field, value)
+			member := ""
+			if getter.staticField {
+				member = getter.field
+				if !unqualified {
+					member = sourceOwner + "." + member
+				}
+			} else {
+				member = fmt.Sprintf("((%s)(%s)).%s", sourceOwner, v.String(ctx), getter.field)
+			}
+			assignment := fmt.Sprintf("%s/*jdec-owned-getter:%d:%s:%s:put*/ = %s", member, getter.ordinal, getter.owner, getter.field, value)
 			if statement {
 				return assignment, true
 			}
-			return "(" + assignment + ")", true
+			return readView("(" + assignment + ")")
 		}
 
 		// A discarded read needs a separately proved statement materialization;
@@ -578,26 +613,6 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 		if statement {
 			p.failed = true
 			return "", false
-		}
-		// The accessor result has its original descriptor erasure. Merely spelling
-		// the source field can reintroduce generic arguments (especially for static
-		// fields of nongeneric owners) and change downstream overload/inference.
-		// A same-erasure reference view keeps the field access/registration intact.
-		readView := func(source string) (string, bool) {
-			if !getter.genericField || !strings.HasPrefix(getter.fieldDescriptor, "L") && !strings.HasPrefix(getter.fieldDescriptor, "[") {
-				return source, true
-			}
-			typ, e := types.ParseDescriptor(getter.fieldDescriptor)
-			if e != nil {
-				p.failed = true
-				return "", false
-			}
-			spelling := typ.String(ctx)
-			if nativeStaticAccessorQualifierShadowed(strings.TrimRight(spelling, "[]"), ctx) {
-				p.failed = true
-				return "", false
-			}
-			return "((" + spelling + ")(" + source + "))", true
 		}
 		// A static field access performs declaring-class initialization at the same
 		// point as the original zero-argument INVOKESTATIC access bridge.
