@@ -148,6 +148,16 @@ func typedAbsorbingHandlers(body []statements.Statement, permittedThrows map[int
 			}
 			switch x := statement.(type) {
 			case *statements.CustomStatement:
+				// A sealed break/continue has no value or invocation operand and
+				// cannot rethrow this handler's incoming exception. Its target
+				// binding belongs to the control-flow proof; catch containment
+				// does not require that the transfer exit the surrounding loop.
+				// Opaque text and legacy Name/LoopTransferKind annotations do
+				// not grant this capability. Other decoded effects and throws
+				// remain checked independently at their original bytecode PCs.
+				if x.SourceTransferOnly() {
+					continue
+				}
 				if x == nil || x.ThrownValue == nil || !x.HasOriginPC || !permittedThrows[x.OriginPC] {
 					return false
 				}
