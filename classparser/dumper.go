@@ -1624,10 +1624,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 	}
 	c.recordMembers(methods, fields)
-	// Enum-switch ($SwitchMap) cross-class fold (Bug V): rewrite `switch(Outer$N.$SwitchMap$E[sel.
-	// ordinal()])` back to the idiomatic `switch(sel){ case CONST: ... }`. No-op without a resolver
-	// or when JDEC_NO_ENUM_SWITCH_FOLD is set; produces valid Java, so it runs after assembly.
-	full = c.foldEnumSwitchMaps(full)
+	// Enum-switch projection belongs to the certified original statement
+	// protocol. Unproved mapping arrays and integer dispatch remain intact:
+	// source spelling cannot establish initializer effects, artifact ownership
+	// or the compiler's numbered-helper namespace.
 	// fixLambdaLoopCapture runs FIRST: it inserts final-copies for loop-reassigned captured vars
 	// and rewrites lambda-body reads to the copy. After this, the original variable is no longer
 	// read inside the lambda, so initProximateSplitSlotDecl (next) can safely default-initialize it
