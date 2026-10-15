@@ -408,8 +408,24 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 		}
 	}
 	activeFrames := map[int]*constructorEffectLoopFrame{}
-	receiverTypeBodyChecked, receiverTypeBodyOriginal := false, false
-	var receiverTypeBodyEpoch uint64
+	bodyChecked, bodyOriginal := false, false
+	var bodyEpoch uint64
+	// Each new alias/call-site fact uses one complete original body receipt.
+	// Resolver observations invalidate it, including callbacks in other callees.
+	originalBody := func() bool {
+		evidence := c.constructorProfileEvidence
+		if evidence != nil && evidence.inconsistent {
+			return false
+		}
+		if !bodyChecked || evidence == nil || bodyEpoch != evidence.observationEpoch {
+			bodyChecked = true
+			bodyOriginal = c.constructorReceiverTypeBodyOriginal(obj, code, ops, remaining)
+			if evidence != nil {
+				bodyEpoch = evidence.observationEpoch
+			}
+		}
+		return bodyOriginal
+	}
 	var walk func(int, []constructorEffectValue, []constructorEffectValue, bool) bool
 	walk = func(start int, locals, stack []constructorEffectValue, initialized bool) (result bool) {
 		if start < 0 || start >= len(ops) {
@@ -657,18 +673,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					// instanceof consumes that token and yields only a scalar.
 					// Bind the entire input view once: a mutable local-load or
 					// branch packet cannot manufacture receiver provenance.
-					evidence := c.constructorProfileEvidence
-					if evidence != nil && evidence.inconsistent {
-						return false
-					}
-					if !receiverTypeBodyChecked || evidence == nil || receiverTypeBodyEpoch != evidence.observationEpoch {
-						receiverTypeBodyChecked = true
-						receiverTypeBodyOriginal = c.constructorReceiverTypeBodyOriginal(obj, code, ops, remaining)
-						if evidence != nil {
-							receiverTypeBodyEpoch = evidence.observationEpoch
-						}
-					}
-					if !receiverTypeBodyOriginal {
+					if !originalBody() {
 						return false
 					}
 				}
@@ -676,6 +681,28 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					v = constructorEffectValue{kind: 'I'}
 				}
 				stack = append(stack, v)
+			case opcode == core.OP_INVOKEDYNAMIC:
+				// This is an opaque invocation, not a lambda-specific exemption. Keep
+				// bootstrap/linkage/call effects and failure timing in their original place.
+				// An unpublished fresh THIS cannot alias its result unless passed in; reject
+				// receiver/uninitialized arguments, and retain the finalization boundary.
+				descriptor, known := c.constructorReceiverDynamicDescriptor(obj, code, op, remaining)
+				if !known || initialized && !c.constructorReceiverFinalizerSilent || !originalBody() {
+					return false
+				}
+				args, result, err := callbinding.Descriptor(descriptor)
+				if err != nil {
+					return false
+				}
+				for i := len(args) - 1; i >= 0; i-- {
+					value, ok := pop(constructorEffectType(args[i]).kind)
+					if !ok || value.receiver || value.allocation != 0 {
+						return false
+					}
+				}
+				if result != "V" {
+					stack = append(stack, constructorEffectType(result))
+				}
 			case opcode == core.OP_NEW:
 				// A distinct allocation is not THIS. Preserve its identity through
 				// DUP/local aliases until its original constructor initializes all
