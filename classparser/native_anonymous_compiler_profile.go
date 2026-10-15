@@ -78,11 +78,15 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 		return nativeAnonymousConstructorRolesWithLambdas(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, 0x0020, true, lambda, access)
 	}
 	// Native javac8 emits the same anonymous ownership/capture profile when
-	// its input source is Java7 or Java8. The selected output remains Java8.
-	// Admit only the independently compiled major51/52 domains, with matching
-	// original owner/child versions. Version membership does not replace the
-	// exact owning method, self row, constructor and capture proofs below.
-	if c.options.TargetSourceVersion != 8 || c.obj == nil || obj == nil || c.obj.GetClassName() != owner || (c.obj.MajorVersion != 51 && c.obj.MajorVersion != 52) || obj.MajorVersion != c.obj.MajorVersion || c.obj.MinorVersion != 0 || obj.MinorVersion != 0 {
+	// its input source is Java5 through Java8. The selected output remains Java8.
+	// Older inputs must also close their physical classfile-feature domain; a
+	// changed version word cannot make future CP tags or opcodes into legacy
+	// evidence. All owning-method, self-row, constructor and capture proofs below
+	// remain necessary, as does successful final source consumption.
+	if c.options.TargetSourceVersion != 8 || c.obj == nil || obj == nil || c.obj.GetClassName() != owner || c.obj.MajorVersion < 49 || c.obj.MajorVersion > 52 || obj.MajorVersion != c.obj.MajorVersion || c.obj.MinorVersion != 0 || obj.MinorVersion != 0 {
+		return nil
+	}
+	if c.obj.MajorVersion < 51 && (!nativeAnonymousLegacyInputFeatures(c.obj, c.Work) || !nativeAnonymousLegacyInputFeatures(obj, c.Work)) {
 		return nil
 	}
 	originalOwner, originalMethod, known := originalAnonymousOwner(obj)
@@ -121,6 +125,9 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 	packet := nativeAnonymousConstructorRolesWithLambdas(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, expected, false, lambda, access)
 	if packet == nil || static != (packet.enclosingField == "") {
 		return nil
+	}
+	if c.obj.MajorVersion < 51 {
+		packet.legacyInputMajor = c.obj.MajorVersion
 	}
 	return packet
 }

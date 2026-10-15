@@ -17,6 +17,9 @@ import (
 )
 
 type nativeAnonymousClass struct {
+	// Nonzero only for the separately proved Java5/6 native-javac domain.
+	// Reopen that domain before consuming this plan as anonymous source.
+	legacyInputMajor uint16
 	// This view carries only original lambda implementation evidence. It
 	// supplies no named membership, constructor or foreign private scope.
 	lambdaImplementation  *nativeMemberClass
@@ -1140,6 +1143,9 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			defer c.Work.Leave(workbudget.CounterASTDepth)
 		}
 		fail := func() (string, bool) { p.failed = true; return "", false }
+		if !nativeAnonymousLegacySourceFeatures(c, child) {
+			return fail()
+		}
 		if descriptor != child.descriptor || newPC != child.newPC || pc != child.invokePC {
 			return fail()
 		}
