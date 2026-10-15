@@ -1,6 +1,9 @@
 {
   "fallback_local_multiplier": 1.5007374631268435,
   "fallback_revision": "b31c258c9a03ec3d9b3da8f682103aad77ec1f0f",
+  "latest_measured_ci_run": 38757308797,
+  "local_followup_revision": "415a0ebc3f33200c2be962abefc7392be628e540",
+  "local_followup_roots": 8,
   "measured_checkout_heads": [
     "8f3a843a53c2716671919ddecb0dfff51121aec7",
     "9c94287899bfb2f7cff6eeb713212ab570e46649",
@@ -14,7 +17,7 @@
     "b34bcf4b502cb2cd02272bc94a676740a13a0c2a",
     "cab79dc98a0fa19a46ca2466edb597c25a62a040"
   ],
-  "measured_completed_parents": 2123,
+  "measured_completed_parents": 2131,
   "seconds": {
     "TestAdversarialAliasPreservesEvaluationRoundTrip": 4.08,
     "TestAdversarialAllocationIdentitySurvivesMutatingCallRoundTrip": 4.24,
@@ -498,6 +501,7 @@
     "TestAdversarialFixedGenericFieldReceiverRoundTrip": 5.41,
     "TestAdversarialFixedNestedWildcardConstructorRoundTrip": 5.26,
     "TestAdversarialFixedSubclassGenericReturnInputRoundTrip": 2.82,
+    "TestAdversarialFlatStaticAncestorKeepsOriginalAccessorsAndEffects": 34.262,
     "TestAdversarialFlattenedLexicalReceiverBindingRoundTrip": 11.98,
     "TestAdversarialFlattenedMethodBoundDependencyRoundTrip": 125.16,
     "TestAdversarialFlattenedMethodFormalDescriptorRoundTrip": 38.76,
@@ -1073,6 +1077,13 @@
     "TestMemberLedgerProductionDetectsUnconsumedSynthetic": 0.72,
     "TestMethodReferenceKeepsPolyTargetTypeRoundTrip": 3.99,
     "TestNativeAccessBridgeRejectsIndirectOrForeignSymbolicUses": 0.6,
+    "TestNativeAccessorAncestorBridgeExemptionKeepsHierarchyEvidence": 0.495,
+    "TestNativeAccessorAncestorBridgeOriginalJavac8Dispatch": 4.382,
+    "TestNativeAccessorAncestorBridgePreservesErasedInterfaceDispatch": 21.175,
+    "TestNativeAccessorAncestorGraphRequiresOriginalHierarchy": 0.9,
+    "TestNativeAccessorAncestorPeersRequirePolicyAndScope": 1.141,
+    "TestNativeAccessorAncestorSourceChoicesStaySeparate": 2.641,
+    "TestNativeAccessorAncestorSourceCycleAndBinaryViews": 11.526,
     "TestNativeAccessorAnonymousConstructorMarkerRenamedRoundTrip": 8.58,
     "TestNativeAccessorAnonymousConstructorMarkerRoundTrip": 8.08,
     "TestNativeAccessorAnonymousMarkerRequiresExactBridgeSymbol": 1.1,
@@ -2147,6 +2158,5 @@
     38535059502,
     38567531875,
     38757308797
-  ],
-  "latest_measured_ci_run": 38757308797
+  ]
 }
