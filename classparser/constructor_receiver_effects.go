@@ -813,10 +813,22 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				case *ConstantStringInfo, *ConstantClassInfo:
 					kind = 'L'
 				}
-				if _, class := obj.ConstantPool[cp-1].(*ConstantClassInfo); class && initialized {
-					// A missing class can fail linkage after Object initialization.
-					// Do not move captures past that potentially finalizable failure.
-					return false
+				if _, class := obj.ConstantPool[cp-1].(*ConstantClassInfo); class {
+					// Resolution yields a receiver-free Class mirror; it does not
+					// initialize the named class or promise successful linkage.
+					// A linkage failure after Object initialization has the same
+					// closed-finalizer boundary as other opaque operations.
+					name, known := sourceBridgeClassName(obj, uint16(cp))
+					if !known || obj.MajorVersion < 49 || len(name) > 65535 || !nativeProofWork(c.Work, int64(len(name))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(name))*8+128) != nil || !originalBody() || initialized && !c.constructorReceiverFinalizerSilent {
+						return false
+					}
+					typeName := name
+					if !strings.HasPrefix(typeName, "[") {
+						typeName = "L" + typeName + ";"
+					}
+					if parameters, _, err := callbinding.Descriptor("(" + typeName + ")V"); err != nil || len(parameters) != 1 || !callbinding.Reference(parameters[0]) {
+						return false
+					}
 				}
 				if kind == 0 || (opcode == core.OP_LDC2_W) != (kind == 'J' || kind == 'D') {
 					return false

@@ -56,11 +56,19 @@ func TestAdversarialConstructorReceiverTypeViewsKeepOriginalCaptureAndFailure(t 
 
 func testConstructorReceiverTypeViewFixture(t *testing.T, fixture, prefix string, expectedOutput ...string) {
 	t.Helper()
+	testConstructorReceiverTypeViewMutatedFixture(t, fixture, prefix, nil, expectedOutput...)
+}
+
+func testConstructorReceiverTypeViewMutatedFixture(t *testing.T, fixture, prefix string, mutate func(*testing.T, map[string][]byte), expectedOutput ...string) {
+	t.Helper()
 	javac, java := t04Tools(t)
 	child, driver := prefix+"Child", prefix+"Driver"
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
 			files := nativeCompileDebugClasses(t, fixture, debug)
+			if mutate != nil {
+				mutate(t, files)
+			}
 			obj, err := Parse(files[child+".class"])
 			if err != nil {
 				t.Fatal(err)
