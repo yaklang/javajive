@@ -5,14 +5,23 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// Physical slots can be reused by earlier disjoint lifetimes. Admit a branch
+// Physical slots can be reused by earlier disjoint lifetimes. Admit a captured
 // definition web only if every original overlapping read has a closed frontier
 // and none joins a captured definition with another lifetime. IINC's input and
 // new definition participate together; wide interiors cannot borrow this proof.
 // Final source publication still checks every retained captured STORE and its
 // snapshot. This is not permission to treat equal types as equal values.
 func nativeLambdaLocalDefinitionWebClosed(flow *nativeEnumParameterFlow, ops []*core.OpCode, read *nativeEnumLocalRead, work *workbudget.Budget) bool {
-	if flow == nil || read == nil || read.storePC != -1 || len(read.storePCs) < 2 || len(read.storePCs) > 64 || len(ops) > 8192 || work != nil && work.CheckAlloc(int64(len(ops))*256+8192) != nil {
+	if flow == nil || read == nil || read.slot < 0 || len(read.storePCs) > 64 || len(ops) > 8192 || work != nil && work.CheckAlloc(int64(len(ops))*256+8192) != nil {
+		return false
+	}
+	frontier := read.storePCs
+	if len(frontier) == 0 {
+		if read.storePC < 0 {
+			return false
+		}
+		frontier = []int{read.storePC}
+	} else if read.storePC != -1 || len(frontier) < 2 {
 		return false
 	}
 	width := 1
@@ -20,7 +29,7 @@ func nativeLambdaLocalDefinitionWebClosed(flow *nativeEnumParameterFlow, ops []*
 		width = 2
 	}
 	expected, found := map[int]bool{}, map[int]bool{}
-	for _, pc := range read.storePCs {
+	for _, pc := range frontier {
 		if pc < 0 || pc > 65535 || expected[pc] {
 			return false
 		}
