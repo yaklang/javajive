@@ -1993,8 +1993,9 @@ func typeVarFieldStoreCast(funcCtx *class_context.ClassContext, left values.Java
 // carries only the erased descriptor (raw `Class`), so JavaJive cannot see the conflict, but javac uses
 // getRawType's real signature `Class<?>` -> captures to `Class<CAP#1>`, not assignable to
 // `Class<? super T>`; the source carried an unchecked `(Class<? super T>)` cast. The cast is unchecked
-// but behavior-preserving (the field erases to its raw bound at runtime) and always legal because the
-// value erases to the field's own raw type. Tightly gated to a wildcard-bearing, type-var-mentioning
+// but nested invariant arguments can still make that DIRECT cast illegal in source, despite equal
+// erasures. Rendering can first restore a separately proved erased store view. This helper is gated
+// to a wildcard-bearing, type-var-mentioning
 // same-class field so a fully-concrete or non-type-var generic field is never over-cast. Kill-switch
 // JDEC_WILDCARD_FIELD_CAST_OFF.
 func wildcardFieldStoreCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
@@ -3244,7 +3245,12 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source st
 		// `Class<? super T>` and the call returns `Class<?>` needs an explicit unchecked
 		// `(Class<? super T>)` cast (gson TypeToken). See wildcardFieldStoreCast.
 		if cast := wildcardFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
+			raw := a.wildcardFieldStoreErasure(funcCtx, rhsVal)
+			expression := rhsVal.String(funcCtx)
+			if raw != "" {
+				expression = fmt.Sprintf("(%s) (%s)", raw, expression)
+			}
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, expression)
 		}
 		if cast := classTypeVarFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
 			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))

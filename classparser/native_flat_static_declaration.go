@@ -75,6 +75,14 @@ func (z *JarFS) completedFlatStaticDeclaration(prepared *nativeMemberPrepared, o
 	if entry == nil || entry.planKnown || entry.family != nil {
 		return ""
 	}
+	// No foreign family completed, so its indexed constructor-access proof
+	// cannot be assumed. A declaration spelling is not a private-access grant.
+	if !z.flatStaticOriginalConstructorAccessClosed(prepared, original) {
+		return ""
+	}
+	if !nativeMemberFlatAncestorAccessorNamesClosed(prepared, outer) {
+		return ""
+	}
 	if d.Work != nil && d.Work.CheckAlloc(int64(len(prepared.family.sourceDependencies)+1)*128+int64(len(original.GetClassName()))*2) != nil {
 		return ""
 	}

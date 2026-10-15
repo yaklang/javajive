@@ -245,52 +245,8 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 	return idx
 }
 func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
-	owner, _, _, member := originalMemberOwner(obj)
-	if anonymousOwner, _, anonymous := originalAnonymousOwner(obj); anonymous {
-		reader := z.nativeMemberReader(obj)
-		var known bool
-		owner, known = z.nativeAnonymousOutermostOwner(anonymousOwner, reader)
-		if !known {
-			return nil
-		}
-		member = true
-	}
-
-	if !member {
-		for _, a := range obj.Attributes {
-			if raw, ok := a.(*UnparsedAttribute); ok && raw != nil && raw.Name == "EnclosingMethod" && len(raw.Info) == 4 {
-				localOwner, known := sourceBridgeClassName(obj, uint16(raw.Info[0])<<8|uint16(raw.Info[1]))
-				if !known {
-					return nil
-				}
-				bytes, found := z.enumSiblingResolver()(localOwner)
-				if !found {
-					return nil
-				}
-				reader := z.nativeMemberReader(obj)
-				enclosing, e := reader.parseResolved(bytes)
-				if e != nil {
-					return nil
-				}
-				if _, known := originalMethodLocalOwner(obj, enclosing, reader.Work); known {
-					owner = localOwner
-					member = true
-				}
-				break
-			}
-		}
-	}
-	if !member {
-		owner = obj.GetClassName()
-	}
-	if member {
-		var known bool
-		owner, known = z.nativeMemberOutermostNamedOwner(owner, z.nativeMemberReader(obj).Work)
-		if !known {
-			return nil
-		}
-	}
-	if !member && !z.nativeMemberRootCandidate(obj) {
+	owner, known := z.nativeMemberOriginalSourceOwner(obj)
+	if !known {
 		return nil
 	}
 	snap, bound := jdecenv.Current()

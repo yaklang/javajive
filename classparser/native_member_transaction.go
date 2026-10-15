@@ -17,35 +17,7 @@ type nativeMemberTransaction struct {
 // Original self rows select the physical outermost source owner. Declaration
 // spelling and cache state never substitute for this archive identity.
 func (z *JarFS) nativeMemberTransactionOwner(obj *ClassObject) (string, bool) {
-	if z == nil || obj == nil {
-		return "", false
-	}
-	owner, _, _, member := originalMemberOwner(obj)
-	if anonymousOwner, _, anonymous := originalAnonymousOwner(obj); anonymous {
-		reader := z.nativeMemberReader(obj)
-		var known bool
-		owner, known = z.nativeAnonymousOutermostOwner(anonymousOwner, reader)
-		if !known {
-			return "", false
-		}
-		member = true
-	}
-
-	if !member {
-		owner = obj.GetClassName()
-	}
-	if member {
-		var known bool
-		owner, known = z.nativeMemberOutermostNamedOwner(owner, z.nativeMemberReader(obj).Work)
-		if !known {
-			return "", false
-		}
-	}
-	if !member && !z.nativeMemberRootCandidate(obj) {
-		return "", false
-	}
-
-	return owner, true
+	return z.nativeMemberOriginalSourceOwner(obj)
 }
 
 // An SCC is one source publication transaction with separate lexical plans.
