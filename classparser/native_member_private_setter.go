@@ -113,7 +113,7 @@ func nativeMemberPlainSetterProof(obj *ClassObject, m *MemberInfo, work *workbud
 				slot := u(offset + 8)
 				n, nok := sourceBridgeUTF8(obj, u(offset+4))
 				d, dok := sourceBridgeUTF8(obj, u(offset+6))
-				if slot > 1 || seen[slot] || u(offset) != 0 || u(offset+2) != 7 || !nok || !dok || class_context.SafeIdentifier(n) != n || d != args[slot] {
+				if slot > 1 || seen[slot] || u(offset) != 0 || u(offset+2) != 7 || !nok || !dok || !class_context.PreservesJava8Identifier(n) || d != args[slot] {
 					return nil
 				}
 				seen[slot] = true
@@ -133,7 +133,7 @@ func nativeMemberPlainSetterProof(obj *ClassObject, m *MemberInfo, work *workbud
 		return nil
 	}
 	field := constructorMotionMember(obj, ops[3], core.OP_PUTFIELD)
-	if field == nil || field.Name != obj.GetClassName() || field.Description != result || class_context.SafeIdentifier(field.Member) != field.Member {
+	if field == nil || field.Name != obj.GetClassName() || field.Description != result || !class_context.PreservesJava8Identifier(field.Member) {
 		return nil
 	}
 	found := false

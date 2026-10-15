@@ -136,7 +136,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 			if !known {
 				continue
 			}
-			if owner.method == "<init>" || !nativeMemberVersionMetadata(local, c.Work) || local.AccessFlags&0x10 != owner.flags&0x10 || owner.flags & ^uint16(0x10) != 0 || len(p.methodLocals) >= 64 || p.methodLocals[binary] != nil {
+			if owner.method == "<init>" || !nativeMemberVersionMetadata(local, c.Work) || !nativeDeclarationNamesCompatible(local, c.Work) || local.AccessFlags&0x10 != owner.flags&0x10 || owner.flags & ^uint16(0x10) != 0 || len(p.methodLocals) >= 64 || p.methodLocals[binary] != nil {
 				return false
 			}
 			key := owner.method + owner.descriptor + "\x00" + owner.name
@@ -188,7 +188,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 					continue
 				}
 				name, known := strings.CutPrefix(field, "val$")
-				if !known || name == "" || class_context.SafeIdentifier(name) != name {
+				if !known || name == "" || !class_context.PreservesJava8Identifier(name) {
 					return false
 				}
 			}

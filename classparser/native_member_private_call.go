@@ -124,7 +124,7 @@ func nativeMemberCallPacketProof(obj *ClassObject, m *MemberInfo, resolve func(s
 		kind = core.OP_INVOKEVIRTUAL
 	}
 	invoke := constructorMotionMember(obj, ops[len(params)], kind)
-	if invoke == nil || invoke.Name != obj.GetClassName() || invoke.Member == "<init>" || class_context.SafeIdentifier(invoke.Member) != invoke.Member {
+	if invoke == nil || invoke.Name != obj.GetClassName() || invoke.Member == "<init>" || !class_context.PreservesJava8Identifier(invoke.Member) {
 		return nil
 	}
 	targetParams, targetResult, e := callbinding.Descriptor(invoke.Description)

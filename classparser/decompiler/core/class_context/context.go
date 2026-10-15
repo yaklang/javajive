@@ -696,18 +696,25 @@ var javaKeywords = map[string]struct{}{
 	"true": {}, "false": {}, "null": {}, "_": {},
 }
 
+// Java identifiers use Unicode character categories. ASCII-only mangling
+// changes otherwise legal JVM member names and breaks linking to original
+// producer classes. Ignorable code points are excluded from the stable-name
+// view: javac removes them before interning, so preserving them as text would
+// not preserve the original symbol. This does not allocate collision-free
+// aliases for names that are not directly representable in Java source.
 func SafeIdentifier(name string) string {
 	if name == "" {
-		return "_"
+		return "__"
 	}
 	var b strings.Builder
 	for i, r := range name {
-		valid := r == '_' || r == '$' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9')
+		bits := java21IdentifierBits(r)
+		valid := bits&1 != 0 || i > 0 && bits&2 != 0
 		if valid {
 			b.WriteRune(r)
 			continue
 		}
-		if i == 0 && r >= '0' && r <= '9' {
+		if i == 0 && bits&2 != 0 {
 			b.WriteByte('_')
 			b.WriteRune(r)
 			continue
@@ -1042,4 +1049,21 @@ func (f *ClassContext) CloneForRetry() *ClassContext {
 		out.KeySet = utils.NewSet[string](f.KeySet.List())
 	}
 	return &out
+}
+
+// PreservesJava8Identifier is a source-certificate check, not a naming repair.
+// Native Java8 reconstruction needs the original name to survive both rendering
+// and the Java8 compiler alphabet. A renderer accepting a newer Unicode letter
+// does not establish compatibility with that older compiler protocol.
+func PreservesJava8Identifier(name string) bool {
+	if name == "" || SafeIdentifier(name) != name {
+		return false
+	}
+	for i, r := range name {
+		bits := java8IdentifierBits(r)
+		if i == 0 && bits&1 == 0 || i > 0 && bits&2 == 0 {
+			return false
+		}
+	}
+	return true
 }

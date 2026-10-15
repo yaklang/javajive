@@ -46,7 +46,7 @@ func nativeAccessorCodeMetadata(obj *ClassObject, code *CodeAttribute, params []
 				index, known := slots[slot]
 				n, nk := sourceBridgeUTF8(obj, u(offset+4))
 				ds, dk := sourceBridgeUTF8(obj, u(offset+6))
-				if !known || seen[slot] || u(offset) != 0 || int(u(offset+2)) != len(code.Code) || !nk || !dk || class_context.SafeIdentifier(n) != n || ds != params[index] {
+				if !known || seen[slot] || u(offset) != 0 || int(u(offset+2)) != len(code.Code) || !nk || !dk || !class_context.PreservesJava8Identifier(n) || ds != params[index] {
 					return false
 				}
 				seen[slot] = true

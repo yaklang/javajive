@@ -149,7 +149,7 @@ func nativeAnonymousLexicalConsumerProof(f *nativeAnonymousForest, caller *Class
 	if op.Instr.OpCode == core.OP_GETFIELD {
 		ref, physical := caller.ConstantPool[index-1].(*ConstantFieldrefInfo)
 		symbol := constructorMotionMember(caller, op, core.OP_GETFIELD)
-		if !physical || ref == nil || symbol == nil || symbol.Name != target || class_context.SafeIdentifier(symbol.Member) != symbol.Member {
+		if !physical || ref == nil || symbol == nil || symbol.Name != target || !class_context.PreservesJava8Identifier(symbol.Member) {
 			return nil
 		}
 		// Capture fields are original receiver-path producers. They are not
@@ -168,7 +168,7 @@ func nativeAnonymousLexicalConsumerProof(f *nativeAnonymousForest, caller *Class
 	}
 	kind := op.Instr.OpCode
 	symbol := constructorMotionMember(caller, op, kind)
-	if symbol == nil || symbol.Name != target || class_context.SafeIdentifier(symbol.Member) != symbol.Member {
+	if symbol == nil || symbol.Name != target || !class_context.PreservesJava8Identifier(symbol.Member) {
 		return nil
 	}
 	c := &nativeAnonymousLexicalConsumer{read: read, owner: target, name: symbol.Member, descriptor: symbol.Description, kind: kind, pc: int(op.CurrentOffset)}
@@ -247,7 +247,7 @@ func nativeAnonymousFieldAccessorDeclaration(f *nativeAnonymousForest, o *ClassO
 		return false
 	}
 	g := f.members.getters[nativeMemberGetterKey(o.GetClassName(), n, d)]
-	if g != nil && class_context.SafeIdentifier(g.field) != g.field {
+	if g != nil && !class_context.PreservesJava8Identifier(g.field) {
 		return false
 	}
 	fresh := nativeMemberGetterPacketProof(o, m, f.resolve, work)

@@ -1461,6 +1461,14 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 	}
 	c.prepareNativeStandaloneAssertion()
+	// Check the actual declaration at publication as well as during planning.
+	// Dependency-only views have no source ownership and retain ordinary
+	// rendering; a native certificate cannot borrow its broader alphabet.
+	nativeNames := c.nativeMemberRoot != nil && c.nativeMemberRoot.owner != "" || c.nativeAnonymousRoot != nil ||
+		c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeCaptureFields != nil || c.nativeStandaloneAssertion != nil
+	if nativeNames && !nativeDeclarationNamesCompatible(c.obj, c.Work) {
+		return "", fmt.Errorf("native declaration names are not representable by the source compiler protocol")
+	}
 	methods, err := c.DumpMethods()
 	if err != nil {
 		if isRequestWorkError(err) {

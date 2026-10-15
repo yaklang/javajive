@@ -36,7 +36,7 @@ func (c *ClassObjectDumper) prepareNativeStandaloneAssertion() {
 		}
 		present = present || name == nativeAssertionField
 	}
-	if !present || !nativeMemberTopLevelEvidence(c.obj, c.Work) {
+	if !present || !nativeMemberTopLevelEvidence(c.obj, c.Work) || !nativeDeclarationNamesCompatible(c.obj, c.Work) {
 		return
 	}
 	// javac installs its flag before ordinary static initialization. The

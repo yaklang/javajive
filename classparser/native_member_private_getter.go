@@ -78,7 +78,7 @@ func nativeMemberGetterPacketProof(obj *ClassObject, m *MemberInfo, resolve func
 			u := func(offset int) uint16 { return binary.BigEndian.Uint16(a.Info[offset : offset+2]) }
 			n, nok := sourceBridgeUTF8(obj, u(6))
 			d, dok := sourceBridgeUTF8(obj, u(8))
-			if u(0) != 1 || u(2) != 0 || u(4) != 5 || u(10) != 0 || !nok || !dok || class_context.SafeIdentifier(n) != n || d != "L"+obj.GetClassName()+";" {
+			if u(0) != 1 || u(2) != 0 || u(4) != 5 || u(10) != 0 || !nok || !dok || !class_context.PreservesJava8Identifier(n) || d != "L"+obj.GetClassName()+";" {
 				return nil
 			}
 			seenLocals = true
@@ -100,7 +100,7 @@ func nativeMemberGetterPacketProof(obj *ClassObject, m *MemberInfo, resolve func
 		fieldOp = core.OP_GETSTATIC
 	}
 	field := constructorMotionMember(obj, ops[len(args)], fieldOp)
-	if field == nil || field.Name != obj.GetClassName() || field.Description != result || class_context.SafeIdentifier(field.Member) != field.Member {
+	if field == nil || field.Name != obj.GetClassName() || field.Description != result || !class_context.PreservesJava8Identifier(field.Member) {
 		return nil
 	}
 	expected := core.OP_ARETURN

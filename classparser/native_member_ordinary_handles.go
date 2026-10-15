@@ -83,7 +83,7 @@ func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberInde
 			if !staticSourceClosed || m == nil || m.AccessFlags & ^uint16(0x0081) != 0 || m.AccessFlags&1 == 0 || sourceMembers[0].accessBridges[target.descriptor] != nil {
 				return false
 			}
-		} else if target.kind != 5 && target.kind != 6 || target.name == "" || target.name == "<init>" || target.name == "<clinit>" || class_context.SafeIdentifier(target.name) != target.name {
+		} else if target.kind != 5 && target.kind != 6 || target.name == "" || target.name == "<init>" || target.name == "<clinit>" || !class_context.PreservesJava8Identifier(target.name) {
 			return false
 		}
 		if _, ret, err := callbinding.Descriptor(target.descriptor); err != nil || constructor && ret != "V" {

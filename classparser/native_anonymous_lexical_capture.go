@@ -509,7 +509,7 @@ func (c *ClassObjectDumper) nativeAnonymousLexicalCaptureReadSource(read *native
 	}
 
 	text, known := c.nativeAnonymousBindings[nativeMemberCaptureIndexKey(read.owner, read.field)]
-	validText := known && class_context.SafeIdentifier(text) == text
+	validText := known && class_context.PreservesJava8Identifier(text)
 	if forest.lexicalThis[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] {
 		validText = false
 		lexicalOwner := ""

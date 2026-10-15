@@ -26,7 +26,7 @@ func nativeAnonymousPrivateCallAccessorDeclaration(f *nativeAnonymousForest, obj
 	}
 	g := f.members.getters[nativeMemberGetterKey(obj.GetClassName(), name, desc)]
 	if g == nil || g.method != method || g.call == nil || g.setter || g.update != nil ||
-		g.staticField || g.genericField || g.inheritedField || class_context.SafeIdentifier(g.field) != g.field {
+		g.staticField || g.genericField || g.inheritedField || !class_context.PreservesJava8Identifier(g.field) {
 		return false
 	}
 	fresh := nativeMemberCallPacketProof(obj, method, f.resolve, work, f.objects)

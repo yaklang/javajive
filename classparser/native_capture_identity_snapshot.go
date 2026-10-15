@@ -183,7 +183,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureIdentitySnapshots(body []stateme
 				return body, false
 			}
 			name, named := strings.CutPrefix(field, "val$")
-			if !named || name == "" || class_context.SafeIdentifier(name) != name || indices[index] != "" {
+			if !named || name == "" || !class_context.PreservesJava8Identifier(name) || indices[index] != "" {
 				return body, false
 			}
 			parameters, _, err := callbinding.Descriptor(call.Descriptor)

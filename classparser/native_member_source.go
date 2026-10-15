@@ -108,7 +108,7 @@ func originalMemberOwner(obj *ClassObject) (owner, name string, flags uint16, va
 			}
 		}
 	}
-	valid = count == 1 && owner != "" && name != "" && class_context.SafeIdentifier(name) == name && obj.GetClassName() == owner+"$"+name
+	valid = count == 1 && owner != "" && name != "" && class_context.PreservesJava8Identifier(name) && obj.GetClassName() == owner+"$"+name
 	return
 }
 
@@ -250,7 +250,7 @@ func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget
 	} else {
 		kind = nativeMemberDeclarationKindRepresentable(obj, flags, work, resolve)
 	}
-	if !known || !nativeMemberVersionMetadata(obj, work) || !(kind || enumSynthesis != nil) {
+	if !known || !nativeMemberVersionMetadata(obj, work) || !nativeDeclarationNamesCompatible(obj, work) || !(kind || enumSynthesis != nil) {
 		return nil
 	}
 	if !nativeMemberDeprecatedMarkerRepresentable(obj, work) {
@@ -594,7 +594,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 }
 
 func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMemberIndependentRoot) *nativeMemberFamily {
-	if c.foldSiblingResolver == nil || !nativeMemberVersionMetadata(c.obj, c.Work) || !nativeSourceBinaryName(c.obj.GetClassName()) {
+	if c.foldSiblingResolver == nil || !nativeMemberVersionMetadata(c.obj, c.Work) || !nativeSourceBinaryName(c.obj.GetClassName()) || !nativeDeclarationNamesCompatible(c.obj, c.Work) {
 		return nil
 	}
 	if independent == nil {

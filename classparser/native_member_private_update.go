@@ -109,7 +109,7 @@ func nativeMemberPrivateUpdateProof(obj *ClassObject, m *MemberInfo, work *workb
 		return nil
 	}
 	field := constructorMotionMember(obj, ops[2], core.OP_GETFIELD)
-	if field == nil || field.Name != obj.GetClassName() || field.Description != result || class_context.SafeIdentifier(field.Member) != field.Member {
+	if field == nil || field.Name != obj.GetClassName() || field.Description != result || !class_context.PreservesJava8Identifier(field.Member) {
 		return nil
 	}
 	index := 3

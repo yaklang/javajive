@@ -27,7 +27,7 @@ func nativeMemberInterfaceHandleSourceClosed(obj *ClassObject, member *nativeMem
 	}
 	originalName, nk := sourceBridgeUTF8(obj, method.NameIndex)
 	descriptor, dk := sourceBridgeUTF8(obj, method.DescriptorIndex)
-	if !nk || !dk || originalName != target.name || descriptor != target.descriptor || originalName == "<init>" || originalName == "<clinit>" || class_context.SafeIdentifier(originalName) != originalName {
+	if !nk || !dk || originalName != target.name || descriptor != target.descriptor || originalName == "<init>" || originalName == "<clinit>" || !class_context.PreservesJava8Identifier(originalName) {
 		return false
 	}
 	if _, _, err := callbinding.Descriptor(descriptor); err != nil {

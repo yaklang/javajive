@@ -29,7 +29,7 @@ func nativeEnumConstantBodyProof(parent *ClassObject, plan nativeEnumConstantAll
 		return nil
 	}
 	obj, known := resolve(plan.allocatedClass)
-	if !known || obj == nil || obj.GetClassName() != plan.allocatedClass || obj.AccessFlags != 0x4030 || obj.GetSupperClassName() != parent.GetClassName() || len(obj.Fields) > 1 || len(obj.Interfaces) != 0 || !nativeAccessorVersion(obj, work) {
+	if !known || obj == nil || obj.GetClassName() != plan.allocatedClass || obj.AccessFlags != 0x4030 || obj.GetSupperClassName() != parent.GetClassName() || len(obj.Fields) > 1 || len(obj.Interfaces) != 0 || !nativeAccessorVersion(obj, work) || !nativeDeclarationNamesCompatible(obj, work) {
 		return nil
 	}
 	// MethodParameters is optional, including on Java 8. The supported

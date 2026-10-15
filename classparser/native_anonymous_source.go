@@ -161,7 +161,7 @@ func nativeAnonymousConstructorWithRoles(obj *ClassObject, owner, method, assert
 }
 
 func nativeAnonymousConstructorRolesWithLambdas(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, flags uint16, omitUnusedEnclosing bool, lambda *nativeMemberClass, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
-	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
+	if obj == nil || !nativeDeclarationNamesCompatible(obj, work) || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
 	// These class-level declarations cannot be moved into an anonymous body.
@@ -531,7 +531,7 @@ func nativeAnonymousConstructorRolesWithLambdas(obj *ClassObject, owner, method,
 				outer = index
 			} else {
 				local, known := strings.CutPrefix(name, "val$")
-				if !known || local == "" || class_context.SafeIdentifier(local) != local {
+				if !known || local == "" || !class_context.PreservesJava8Identifier(local) {
 					return nil
 				}
 				captureOrder = append(captureOrder, index)
@@ -1480,7 +1480,7 @@ func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 		// Reserve the names over actual local IDs as well as the source fallback.
 		for _, field := range c.obj.Fields {
 			if field != nil && field.AccessFlags&8 != 0 {
-				if name, known := sourceBridgeUTF8(c.obj, field.NameIndex); known && class_context.SafeIdentifier(name) == name {
+				if name, known := sourceBridgeUTF8(c.obj, field.NameIndex); known && class_context.PreservesJava8Identifier(name) {
 					result[name] = true
 				}
 			}
@@ -1501,12 +1501,12 @@ func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 		}
 	}
 	for _, name := range c.nativeAnonymousBindings {
-		if name != "" && class_context.SafeIdentifier(name) == name {
+		if name != "" && class_context.PreservesJava8Identifier(name) {
 			result[name] = true
 		}
 	}
 	for _, name := range c.nativeCaptureFields {
-		if name != "" && class_context.SafeIdentifier(name) == name {
+		if name != "" && class_context.PreservesJava8Identifier(name) {
 			result[name] = true
 		}
 	}
@@ -1827,7 +1827,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 						continue
 					}
 					name, ok := strings.CutPrefix(field, "val$")
-					if !ok || name == "" || class_context.SafeIdentifier(name) != name {
+					if !ok || name == "" || !class_context.PreservesJava8Identifier(name) {
 						p.failed = true
 						continue
 					}
@@ -1967,7 +1967,7 @@ func nativeSourceBinaryName(name string) bool {
 		return false
 	}
 	for _, component := range strings.Split(name, "/") {
-		if component == "" || class_context.SafeIdentifier(component) != component {
+		if component == "" || !class_context.PreservesJava8Identifier(component) {
 			return false
 		}
 	}
