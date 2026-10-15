@@ -12,8 +12,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 )
 
 // Manual data generation, not a CI download/install step. The input describes
@@ -46,14 +44,17 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 		Profiles []struct {
 			Release       int
 			ArchiveSHA256 string `json:"archive_sha256"`
+			Classes       map[string]json.RawMessage
 		}
 	}
 	if err = json.Unmarshal(jdkInvocationCatalogJSON, &declared); err != nil {
 		t.Fatal(err)
 	}
 	expected := map[int]string{}
+	declarationRoots := map[int]map[string]json.RawMessage{}
 	for _, p := range declared.Profiles {
 		expected[p.Release] = p.ArchiveSHA256
+		declarationRoots[p.Release] = p.Classes
 	}
 	if len(input.Profiles) != len(expected) {
 		t.Fatal("generation must cover each exact declaration profile")
@@ -151,73 +152,13 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 			originals[name] = raw
 			objects[name] = obj
 		}
-		resolver := func(name string) ([]byte, bool) { raw, ok := originals[name]; return raw, ok }
 		selected := map[string]bool{}
 		names := make([]string, 0, len(objects))
 		for name := range objects {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		for _, name := range names {
-			obj := objects[name]
-			// Bound the index to standard platform API namespaces, as with
-			// the declaration catalog. Vendor/internal implementation APIs are
-			// not extension-point roots; original ancestor bytes are retained.
-			if !strings.HasPrefix(name, "java/") && !strings.HasPrefix(name, "javax/") {
-				continue
-			}
-			// Declaration annotation policy also needs original classfiles:
-			// Retention/Target cannot be guessed from an annotation's name.
-			// These entries carry metadata, never a constructor-silence fact.
-			if obj.AccessFlags&0x2001 == 0x2001 {
-				selected[name] = true
-				continue
-			}
-			// An external source subclass cannot extend a final/non-public
-			// platform class. Retain usable extension points, then their full
-			// ancestry below; internal implementation constructors are not roots.
-			if obj.AccessFlags&0x0001 == 0 || obj.AccessFlags&0x0010 != 0 {
-				continue
-			}
-			d := &ClassObjectDumper{obj: obj, foldSiblingResolver: resolver, FuncCtx: &class_context.ClassContext{}}
-			d.options.TargetSourceVersion = profile.Release
-			d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
-			for _, method := range obj.Methods {
-				n, _ := obj.getUtf8(method.NameIndex)
-				desc, _ := obj.getUtf8(method.DescriptorIndex)
-				if n != "<init>" || method.AccessFlags&(0x0001|0x0004) == 0 {
-					continue
-				}
-				remaining := 512
-				if d.constructorChainDoesNotObserve(name, desc, map[string]bool{}, map[string]bool{}, &remaining, 0) {
-					selected[name] = true
-					break
-				}
-			}
-		}
-		// Preserve original ancestry declarations, including interfaces with no
-		// constructor. They are evidence for access/member completeness, not a
-		// claim that every constructor they contain can commute with captures.
-		pending := []string{}
-		for name := range selected {
-			pending = append(pending, name)
-		}
-		for len(pending) > 0 {
-			name := pending[0]
-			pending = pending[1:]
-			obj := objects[name]
-			parents := append([]string{obj.GetSupperClassName()}, obj.GetInterfacesName()...)
-			for _, parent := range parents {
-				if parent == "" || selected[parent] {
-					continue
-				}
-				if objects[parent] == nil {
-					t.Fatal("missing original ancestor", parent)
-				}
-				selected[parent] = true
-				pending = append(pending, parent)
-			}
-		}
+		selected = nativePlatformDeclarationIndexClasses(objects, declarationRoots[profile.Release])
 		p := constructorCodeProfile{Release: profile.Release, ArchiveSHA256: expected[profile.Release], Classes: map[string]string{}}
 		for _, name := range names {
 			if !selected[name] {
@@ -255,4 +196,63 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("original constructor evidence archive: %d bytes", out.Len())
+}
+
+// Source metadata coverage is separate from constructor observation. All
+// platform extension points and complete invocation-catalog declarations need
+// original flags and members, including APIs with observing constructors.
+// An unavailable primary-archive ancestor cannot be guessed.
+func nativePlatformDeclarationIndexClasses(objects map[string]*ClassObject, catalogDeclarations map[string]json.RawMessage) map[string]bool {
+	selected := map[string]bool{}
+	ancestry := map[string]uint8{}
+	var closed func(string) bool
+	closed = func(name string) bool {
+		if state := ancestry[name]; state != 0 {
+			return state == 2
+		}
+		obj := objects[name]
+		if obj == nil || obj.GetClassName() != name {
+			return false
+		}
+		ancestry[name] = 1
+		for _, parent := range append([]string{obj.GetSupperClassName()}, obj.GetInterfacesName()...) {
+			if parent != "" && !closed(parent) {
+				ancestry[name] = 3
+				return false
+			}
+		}
+		ancestry[name] = 2
+		return true
+	}
+	for name := range objects {
+		obj := objects[name]
+		if obj == nil {
+			continue
+		}
+		_, catalog := catalogDeclarations[name]
+		platformAPI := (strings.HasPrefix(name, "java/") || strings.HasPrefix(name, "javax/")) && obj.AccessFlags&1 != 0 && obj.AccessFlags&0x0010 == 0
+		if (catalog || platformAPI) && closed(name) {
+			selected[name] = true
+		}
+	}
+
+	// Every selected root has a closed original ancestry. Retain those exact
+	// declarations as metadata as well, including nonpublic superclass and
+	// interface definitions; their presence grants no source accessibility.
+	pending := make([]string, 0, len(selected))
+	for name := range selected {
+		pending = append(pending, name)
+	}
+	for len(pending) != 0 {
+		name := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		obj := objects[name]
+		for _, parent := range append([]string{obj.GetSupperClassName()}, obj.GetInterfacesName()...) {
+			if parent != "" && !selected[parent] {
+				selected[parent] = true
+				pending = append(pending, parent)
+			}
+		}
+	}
+	return selected
 }

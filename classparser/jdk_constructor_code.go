@@ -32,6 +32,9 @@ type constructorCodeDocument struct {
 // Indexed declarations from each pinned primary archive retain their original
 // code and ancestry. Interfaces retain abstract/default/static declarations for
 // functional-target ownership proofs; class membership grants no effect permission.
+// Public extensible APIs with complete original ancestry are retained even
+// when their constructors observe THIS. Independent declaration/reference
+// provenance pins every indexed class; code membership is never an effect proof.
 //
 //go:embed jdk_constructor_code.zip
 var jdkConstructorCodeZIP []byte
@@ -76,14 +79,31 @@ func jdkConstructorClassBytes(name string, release int) ([]byte, bool) {
 			Profiles []struct {
 				Release       int
 				ArchiveSHA256 string `json:"archive_sha256"`
+				Archives      map[string]string
+				Provenance    map[string]struct{ Archive, SHA256 string }
+				References    map[string]struct{ Archive, SHA256 string } `json:"reference_provenance"`
 			}
 		}
 		if json.Unmarshal(jdkInvocationCatalogJSON, &declarations) != nil {
 			return
 		}
 		expected := map[int]string{}
+		originalClasses := map[int]map[string]string{}
 		for _, p := range declarations.Profiles {
 			expected[p.Release] = p.ArchiveSHA256
+			originals := map[string]string{}
+			for _, source := range []map[string]struct{ Archive, SHA256 string }{p.Provenance, p.References} {
+				for name, record := range source {
+					if p.Archives[record.Archive] != p.ArchiveSHA256 {
+						continue
+					}
+					if prior := originals[name]; prior != "" && prior != record.SHA256 {
+						return
+					}
+					originals[name] = record.SHA256
+				}
+			}
+			originalClasses[p.Release] = originals
 		}
 		if len(document.Profiles) != len(expected) {
 			return
@@ -98,7 +118,7 @@ func jdkConstructorClassBytes(name string, release int) ([]byte, bool) {
 			for name, hash := range profile.Classes {
 				digest, err := hex.DecodeString(hash)
 				entry := files[fmt.Sprintf("%d/%s.class", profile.Release, name)]
-				if err != nil || len(digest) != 32 || entry == nil || entry.UncompressedSize64 > 2<<20 {
+				if err != nil || len(digest) != 32 || entry == nil || entry.UncompressedSize64 > 2<<20 || originalClasses[profile.Release][name] != hash {
 					return
 				}
 				table[name] = entry
