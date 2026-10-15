@@ -1,6 +1,10 @@
 package javaclassparser
 
-import "github.com/yaklang/javajive/internal/workbudget"
+import (
+	"encoding/binary"
+
+	"github.com/yaklang/javajive/internal/workbudget"
+)
 
 // Family cache entries publish source only after all ownership/binding proofs.
 // Before consulting another unfinished-capable entry, discover its original
@@ -36,6 +40,42 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 		total += int64(len(raw))
 		objects[name] = o
 		return o, true
+	}
+
+	// A named method-local declaration has no OuterClassInfoIndex. Its body is
+	// nevertheless emitted in its enclosing source family. Use the same exact
+	// EnclosingMethod and reciprocal InnerClasses proof as source planning;
+	// neither a binary-name prefix nor an unrelated foreign row creates an edge.
+	// Loading stays in this bounded original-byte graph, never a source cache.
+	localParent := func(object *ClassObject) (*ClassObject, bool) {
+		if object == nil {
+			return nil, false
+		}
+		for _, a := range object.Attributes {
+			if !nativeProofWork(work, 1) {
+				return nil, false
+			}
+			raw, ok := a.(*UnparsedAttribute)
+			if !ok || raw == nil || raw.Name != "EnclosingMethod" {
+				continue
+			}
+			if len(raw.Info) != 4 {
+				return nil, false
+			}
+			name, known := sourceBridgeClassName(object, binary.BigEndian.Uint16(raw.Info[:2]))
+			if !known {
+				return nil, false
+			}
+			parent, known := load(name)
+			if !known {
+				return nil, false
+			}
+			if _, known = originalMethodLocalOwner(object, parent, work); !known {
+				return nil, false
+			}
+			return parent, true
+		}
+		return nil, false
 	}
 
 	// Only an independently certified leaf query selects declaration boundaries.
@@ -135,7 +175,11 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 				var anonymous bool
 				parent, _, anonymous = originalAnonymousOwner(o)
 				if !anonymous {
-					return name, nativeMemberTopLevelEvidence(o, work)
+					enclosing, local := localParent(o)
+					if !local {
+						return name, nativeMemberTopLevelEvidence(o, work)
+					}
+					parent = enclosing.GetClassName()
 				}
 			}
 			var known bool
@@ -187,6 +231,27 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 						return false
 					}
 					if row.InnerNameIndex != 0 {
+						if row.OuterClassInfoIndex == 0 {
+							// Scan every body that source planning may render. In
+							// particular, an invocation used only inside a local
+							// method need not occur in its enclosing class's CP.
+							if _, found := z.enumSiblingResolver()(name); !found {
+								continue
+							}
+							child, known := load(name)
+							if !known {
+								return false
+							}
+							if _, local := originalMethodLocalOwner(child, current, work); !local {
+								continue
+							}
+							if owned[name] || len(queue) >= 256 {
+								return false
+							}
+							owned[name] = true
+							queue = append(queue, child)
+							continue
+						}
 						parent, known := sourceBridgeClassName(current, row.OuterClassInfoIndex)
 						if !known {
 							continue
@@ -344,7 +409,9 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 				}
 				if _, _, _, member := originalMemberOwner(caller); !member {
 					if _, _, anonymous := originalAnonymousOwner(caller); !anonymous {
-						continue
+						if _, local := localParent(caller); !local {
+							continue
+						}
 					}
 				}
 				target, known := outermost(caller)
