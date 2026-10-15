@@ -8,7 +8,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func TestFlatStaticDeclarationKeepsOriginalConstructorAccessBoundaries(t *testing.T) {
+func TestNativeFlatStaticDeclarationKeepsOriginalConstructorAccessBoundaries(t *testing.T) {
 	const source = `class FlatConstructScope{static class Value{Value(){}private Value(int n){}static Value own(){return new Value();}static java.util.function.Supplier<Value> ownHandle(){return Value::new;}}}
  class FlatConstructCaller{Object create(){return new FlatConstructScope.Value();}}
  class FlatConstructOwner{static class Member{}FlatConstructScope.Value pass(FlatConstructScope.Value value){return value;}}`

@@ -7,7 +7,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func TestFlatAncestorAccessorNamesRequireSourceFlagCompatibility(t *testing.T) {
+func TestNativeFlatAncestorAccessorNamesRequireSourceFlagCompatibility(t *testing.T) {
 	files := nativeCompileSourceReleaseClasses(t, nativeProtectedStaticFieldSources("ProtectedFieldOwner"), "none", "8")
 	for _, variant := range []string{"distinct name", "different erased type", "different parameter type", "unrelated flat class", "retained invocation", "ordinary ancestor", "synthetic ancestor", "private ancestor", "bridge ancestor", "nil flat", "nil prepared", "nil getter", "nil method", "bad name CP", "bad descriptor CP", "malformed descriptor", "missing owner", "wrong owner identity", "unknown parent", "wrong parent identity", "cyclic hierarchy", "work", "memory", "canceled"} {
 		t.Run(variant, func(t *testing.T) {

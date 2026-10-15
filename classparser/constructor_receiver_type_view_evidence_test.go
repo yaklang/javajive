@@ -10,7 +10,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func TestConstructorReceiverTypeViewsRequireOriginalInitializedBody(t *testing.T) {
+func TestNativeConstructorReceiverTypeViewsRequireOriginalInitializedBody(t *testing.T) {
 	files := nativeCompileClasses(t, `interface TypeEvidenceMarker {}
  class TypeEvidence {int result;TypeEvidence(Object input){Object alias=(TypeEvidenceMarker)this;result=alias==this?3:5;}}
  class TypeEvidenceIndependent {int result;TypeEvidenceIndependent(Object input){Object alias=(TypeEvidenceMarker)input;result=3;}}`)
@@ -117,7 +117,7 @@ func TestConstructorReceiverTypeViewsRequireOriginalInitializedBody(t *testing.T
 
 // A resolver callback can change caller-owned inputs between two type views.
 // A receipt from before that observation must not certify the later view.
-func TestConstructorReceiverTypeViewsRecheckAcrossProviderObservations(t *testing.T) {
+func TestNativeConstructorReceiverTypeViewsRecheckAcrossProviderObservations(t *testing.T) {
 	files := nativeCompileClasses(t, `interface TypeEpochMarker {}
  class TypeEpochParent {int state;}
  class TypeEpoch extends TypeEpochParent {void run(){Object first=(TypeEpochMarker)this;state=1;Object second=(TypeEpochMarker)this;}}`)

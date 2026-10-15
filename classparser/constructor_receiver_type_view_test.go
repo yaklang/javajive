@@ -4,7 +4,7 @@ import "testing"
 
 // Type tests observe the runtime type, not the fields whose stores move. A
 // checked view must retain THIS on every alias so later effects stay checked.
-func TestConstructorReceiverTypeViewsPreserveCaptureObservation(t *testing.T) {
+func TestNativeConstructorReceiverTypeViewsPreserveCaptureObservation(t *testing.T) {
 	const source = `interface ViewMarker {}
  class ViewInstanceBase {int result;ViewInstanceBase(int n){result=this instanceof ViewMarker?n:-n;}}
  final class ViewInstanceChild extends ViewInstanceBase implements ViewMarker {Object capture;ViewInstanceChild(int n){super(n);}}
