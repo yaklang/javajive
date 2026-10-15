@@ -563,6 +563,22 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 		// registers the source LHS field before lowering RHS accessors; the
 		// marker records that compiler order without moving runtime evaluation.
 		if getter.setter {
+			anonymous := c.nativeAnonymousForest != nil && c.nativeAnonymousForest.units[getter.owner] != nil
+			var lexicalRHS string
+			if anonymous {
+				f := c.nativeAnonymousForest
+				consumer := f.consumers[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+				if getter.staticField || consumer == nil || consumer.getter != getter || !nativeAnonymousFieldAccessorDeclaration(f, f.objects[getter.owner], getter.method, c.Work) || !nativeAnonymousLexicalConsumerSourceClosed(c, consumer, ctx, c.Work) || !nativeAnonymousLexicalConsumerOperand(v, consumer, ctx, c.Work) {
+					p.failed = true
+					return "", false
+				}
+				rendered, known := nativeAnonymousPrivateArgumentsSource(c, consumer, args, ctx)
+				if !known || len(rendered) != 1 {
+					p.failed = true
+					return "", false
+				}
+				lexicalRHS = rendered[0]
+			}
 			rhsIndex := 1
 			if getter.staticField {
 				rhsIndex = 0
@@ -588,11 +604,15 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 					return "", false
 				}
 				value = view.String(ctx)
+			} else if anonymous {
+				value = lexicalRHS
 			} else {
 				value = "((" + mt.FunctionType().ReturnType.String(ctx) + ")(" + rhs.String(ctx) + "))"
 			}
 			member := ""
-			if getter.staticField {
+			if anonymous {
+				member = getter.field
+			} else if getter.staticField {
 				member = getter.field
 				if !unqualified {
 					member = sourceOwner + "." + member

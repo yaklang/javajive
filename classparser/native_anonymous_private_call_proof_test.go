@@ -16,7 +16,7 @@ import (
 func TestNativeAnonymousPrivateCallDeclarationRequiresOriginalNonvirtualPacket(t *testing.T) {
 	source := strings.NewReplacer("BODY", "return seed+first;", "OVERLOAD", "", "EFFECTS", "false", "EXPECTED", "seed+owner.firstValue()", "SEEDS", "0,1", "SUPPLIER", "java.util.function.IntSupplier", "METHOD", "getAsInt", "TYPE", "int", "FIRST", "7", "LAST", "13", "CHANGED", "17").Replace(anonymousPrivateCallFixture)
 	files := nativeCompileSourceReleaseClasses(t, map[string]string{"PrivateCallOwner.java": source}, "none", "8")
-	for _, variant := range []string{"original", "nil forest", "copied owner", "copied method", "foreign unit", "missing packet", "wrong owner", "wrong target", "wrong descriptor", "wrong ordinal", "changed code", "wrong CP kind", "wrong receiver descriptor", "extra argument", "method formal", "static call", "inherited call", "generic result", "invented lexical owner", "public target", "static target", "duplicate target", "target signature", "budget", "memory", "canceled"} {
+	for _, variant := range []string{"original", "nil forest", "copied owner", "copied method", "removed physical method", "duplicated physical method", "copied physical method", "foreign unit", "missing packet", "wrong owner", "wrong target", "wrong descriptor", "wrong ordinal", "changed code", "wrong CP kind", "wrong receiver descriptor", "extra argument", "method formal", "static call", "inherited call", "generic result", "invented lexical owner", "public target", "static target", "duplicate target", "target signature", "budget", "memory", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
@@ -61,6 +61,22 @@ func TestNativeAnonymousPrivateCallDeclarationRequiresOriginalNonvirtualPacket(t
 			switch variant {
 			case "nil forest":
 				f = nil
+			case "removed physical method":
+				for i, v := range obj.Methods {
+					if v == method {
+						obj.Methods = append(obj.Methods[:i], obj.Methods[i+1:]...)
+						break
+					}
+				}
+			case "duplicated physical method":
+				obj.Methods = append(obj.Methods, method)
+			case "copied physical method":
+				for i, v := range obj.Methods {
+					if v == method {
+						x := *v
+						obj.Methods[i] = &x
+					}
+				}
 			case "copied owner":
 				copy := *obj
 				obj = &copy

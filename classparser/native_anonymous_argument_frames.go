@@ -26,7 +26,7 @@ func nativeAnonymousPrivateArgumentConsumers(f *nativeAnonymousForest, obj *Clas
 		symbol := constructorMotionMember(obj, op, core.OP_INVOKESTATIC)
 		if symbol != nil && symbol.Name == target {
 			g := f.members.getters[nativeMemberGetterKey(target, symbol.Member, symbol.Description)]
-			if g != nil && g.call != nil && g.call.argumentCount > 1 {
+			if nativeAnonymousAccessorArgumentCount(g) > 1 {
 				eligible = true
 				break
 			}
@@ -58,11 +58,11 @@ func nativeAnonymousPrivateArgumentConsumers(f *nativeAnonymousForest, obj *Clas
 			continue
 		}
 		g := f.members.getters[nativeMemberGetterKey(target, symbol.Member, symbol.Description)]
-		if g == nil || g.call == nil || g.call.argumentCount <= 1 {
+		if nativeAnonymousAccessorArgumentCount(g) <= 1 {
 			continue
 		}
 		arguments, known := nativeAnonymousArgumentReceiver(ir, records, int(op.CurrentOffset), read, work)
-		if !known || len(arguments)+1 != g.call.argumentCount || !nativeAnonymousArgumentFrameTypes(obj, method, ir, fn, records[int(op.CurrentOffset)], symbol.Description, metadata, work) {
+		if !known || len(arguments)+1 != nativeAnonymousAccessorArgumentCount(g) || !nativeAnonymousArgumentFrameTypes(obj, method, ir, fn, records[int(op.CurrentOffset)], symbol.Description, metadata, work) {
 			continue
 		}
 		consumer := nativeAnonymousLexicalConsumerProof(f, obj, read, target, op, f.resolve, work)

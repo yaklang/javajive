@@ -1865,6 +1865,24 @@ func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 		sub.foldSiblingResolver = c.foldSiblingResolver
 		sub.declarationResolver = c.declarationResolver
 		sub.nativeMemberRoot = p
+		// A named child rendered inside this same anonymous transaction keeps
+		// its original mixed lexical forest. Flat or foreign declarations gain
+		// no anonymous scope merely by sharing a binary-name prefix.
+		// This shares lookup context, not access permission. Every unnamed
+		// receiver consumer separately reopens its original enclosing chain.
+		if c.nativeAnonymousForest != nil && c.nativeAnonymousForest.members == p && c.nativeAnonymousForest.objects[child.object.GetClassName()] == child.object {
+			if c.Work != nil && c.Work.CheckAlloc(int64(len(c.nativeAnonymousBindings)+1)*128) != nil {
+				return nil, fmt.Errorf("anonymous named lexical bindings exceed work budget")
+			}
+			sub.nativeAnonymousForest = c.nativeAnonymousForest
+			sub.nativeAnonymousBindings = map[string]string{}
+			for field, source := range c.nativeAnonymousBindings {
+				if !nativeProofWork(c.Work, 1) {
+					return nil, fmt.Errorf("anonymous named lexical binding work exhausted")
+				}
+				sub.nativeAnonymousBindings[field] = source
+			}
+		}
 		sub.nativeMemberCurrent = child
 		sub.nativeAnonymousRoot = p.memberAnonymous[name]
 		if !child.static {

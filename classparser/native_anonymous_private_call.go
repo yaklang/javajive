@@ -21,7 +21,7 @@ func nativeAnonymousPrivateCallAccessorDeclaration(f *nativeAnonymousForest, obj
 	}
 	name, nameKnown := sourceBridgeUTF8(obj, method.NameIndex)
 	desc, descKnown := sourceBridgeUTF8(obj, method.DescriptorIndex)
-	if !nameKnown || !descKnown {
+	if !nameKnown || !descKnown || !nativeAnonymousAccessorPhysicalMethod(obj, method, name, desc, work) {
 		return false
 	}
 	g := f.members.getters[nativeMemberGetterKey(obj.GetClassName(), name, desc)]

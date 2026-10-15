@@ -174,7 +174,7 @@ func nativeAnonymousLexicalConsumerProof(f *nativeAnonymousForest, caller *Class
 	c := &nativeAnonymousLexicalConsumer{read: read, owner: target, name: symbol.Member, descriptor: symbol.Description, kind: kind, pc: int(op.CurrentOffset)}
 	if kind == core.OP_INVOKESTATIC && f.members != nil {
 		g := f.members.getters[nativeMemberGetterKey(target, symbol.Member, symbol.Description)]
-		if g == nil || !nativeAnonymousAccessorDeclaration(f, f.objects[target], g.method, work) || g.staticField || g.setter || g.update != nil || !nativeAnonymousLexicalConsumerLookup(f, caller.GetClassName(), target, g.field, g.call == nil, resolve, work) {
+		if g == nil || !nativeAnonymousAccessorDeclaration(f, f.objects[target], g.method, work) || g.staticField || g.update != nil || !nativeAnonymousLexicalConsumerLookup(f, caller.GetClassName(), target, g.field, g.call == nil, resolve, work) {
 			return nil
 		}
 		c.getter = g
@@ -243,15 +243,22 @@ func nativeAnonymousFieldAccessorDeclaration(f *nativeAnonymousForest, o *ClassO
 	}
 	n, nk := sourceBridgeUTF8(o, m.NameIndex)
 	d, dk := sourceBridgeUTF8(o, m.DescriptorIndex)
-	if !nk || !dk {
+	if !nk || !dk || len(o.Methods) > 65535 {
 		return false
 	}
+	if !nativeAnonymousAccessorPhysicalMethod(o, m, n, d, work) {
+		return false
+	}
+
 	g := f.members.getters[nativeMemberGetterKey(o.GetClassName(), n, d)]
 	if g != nil && !class_context.PreservesJava8Identifier(g.field) {
 		return false
 	}
 	fresh := nativeMemberGetterPacketProof(o, m, f.resolve, work)
-	if g == nil || g.method != m || fresh == nil || fresh.staticField || g.setter || g.update != nil || g.call != nil || g.inheritedField != fresh.inheritedField || g.owner != fresh.owner || g.name != fresh.name || g.descriptor != fresh.descriptor || g.field != fresh.field || g.fieldDescriptor != fresh.fieldDescriptor || g.ordinal != fresh.ordinal || g.staticField != fresh.staticField || g.genericField != fresh.genericField {
+	if g != nil && g.setter {
+		fresh = nativeMemberSetterPacketProof(o, m, f.resolve, work)
+	}
+	if g == nil || g.method != m || fresh == nil || fresh.staticField || fresh.setter != g.setter || g.setter && g.genericField || g.update != nil || g.call != nil || g.inheritedField != fresh.inheritedField || g.owner != fresh.owner || g.name != fresh.name || g.descriptor != fresh.descriptor || g.field != fresh.field || g.fieldDescriptor != fresh.fieldDescriptor || g.ordinal != fresh.ordinal || g.staticField != fresh.staticField || g.genericField != fresh.genericField {
 		return false
 	}
 	if g.inheritedField {
@@ -263,7 +270,11 @@ func nativeAnonymousFieldAccessorDeclaration(f *nativeAnonymousForest, o *ClassO
 		}
 		for _, attr := range m.Attributes {
 			if code, ok := attr.(*CodeAttribute); ok {
-				index := int(code.Code[2])<<8 | int(code.Code[3])
+				offset := 2
+				if g.setter {
+					offset = 4
+				}
+				index := int(code.Code[offset])<<8 | int(code.Code[offset+1])
 				if index < 1 || index > len(o.ConstantPool) {
 					return false
 				}
@@ -393,7 +404,7 @@ func nativeAnonymousLexicalConsumerSourceClosed(d *ClassObjectDumper, c *nativeA
 		return false
 	}
 	f := d.nativeAnonymousForest
-	if f.members == nil || f.members.anonymousForest != f || !nativeMemberJointAnonymousAccess(f.members, d.obj.GetClassName(), work) {
+	if f.members == nil || f.members.anonymousForest != f || !nativeAnonymousConsumerSourceScope(f, d.obj, work) {
 		return false
 	}
 	var method *MemberInfo
@@ -452,7 +463,7 @@ func nativeAnonymousLexicalConsumerSourceClosed(d *ClassObjectDumper, c *nativeA
 		if i < len(path)+1 || op.Instr.OpCode != c.kind {
 			return false
 		}
-		if c.getter != nil && c.getter.call != nil && c.getter.call.argumentCount > 1 {
+		if nativeAnonymousAccessorArgumentCount(c.getter) > 1 {
 			ir, fn, valid := d.nativeOriginalMethodSnapshot(method, code)
 			records, indexed := nativeAnonymousArgumentRecords(fn, work)
 			arguments, receiver := nativeAnonymousArgumentReceiver(ir, records, c.pc, c.read, work)
@@ -540,4 +551,80 @@ func (d *ClassObjectDumper) wireNativeAnonymousLexicalConsumers(ctx *class_conte
 		}
 		return "", false
 	}
+}
+
+// Both a private call and a plain field write keep the unnamed receiver below
+// their original operands. Static and updating field packets remain separate.
+func nativeAnonymousAccessorArgumentCount(g *nativeMemberPrivateGetter) int {
+	if g == nil || g.staticField {
+		return 0
+	}
+	if g.setter {
+		return 2
+	}
+	if g.call != nil {
+		return g.call.argumentCount
+	}
+	return 1
+}
+
+// An exact named enclosing chain inherits the same committed anonymous source
+// scope. No foreign, static, changed or missing declaration can borrow it.
+func nativeAnonymousConsumerSourceScope(f *nativeAnonymousForest, object *ClassObject, work *workbudget.Budget) bool {
+	if f == nil || f.members == nil || f.members.failed || f.members.anonymousForest != f || object == nil || f.objects[object.GetClassName()] != object {
+		return false
+	}
+	p := f.members
+	current := object.GetClassName()
+	seen := map[string]bool{}
+	for len(seen) < 64 && !seen[current] {
+		if !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(len(seen)+1)*128) != nil {
+			return false
+		}
+		seen[current] = true
+		obj := f.objects[current]
+		if obj == nil || obj.GetClassName() != current || p.lexicalObjects[current] != obj {
+			return false
+		}
+		if unit := f.units[current]; unit != nil {
+			group := p.anonymousUnits[current]
+			return unit.object == obj && group != nil && group.children[current] == unit && nativeMemberJointAnonymousAccess(p, current, work)
+		}
+		child := p.children[current]
+		if child == nil || child.object != obj || child.static {
+			return false
+		}
+		owner, name, flags, known := originalMemberOwner(obj)
+		if !known || owner != child.owner || name != child.name || flags != child.flags {
+			return false
+		}
+		current = owner
+	}
+	return false
+}
+
+// A cached operation packet cannot stand in for its physical original method
+// declaration. Both field and call consumers reopen identity and uniqueness.
+func nativeAnonymousAccessorPhysicalMethod(o *ClassObject, m *MemberInfo, name, desc string, work *workbudget.Budget) bool {
+	if o == nil || m == nil || len(o.Methods) > 65535 {
+		return false
+	}
+	matches := 0
+	for _, declared := range o.Methods {
+		if declared == nil {
+			return false
+		}
+		n, nk := sourceBridgeUTF8(o, declared.NameIndex)
+		d, dk := sourceBridgeUTF8(o, declared.DescriptorIndex)
+		if !nk || !dk || !nativeProofWork(work, int64(len(n)+len(d))+1) {
+			return false
+		}
+		if n == name && d == desc {
+			if declared != m {
+				return false
+			}
+			matches++
+		}
+	}
+	return matches == 1
 }

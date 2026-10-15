@@ -140,14 +140,18 @@ func (p *nativeAnonymousArgumentTree) operand(v values.JavaValue, origin ssabuil
 }
 
 func nativeAnonymousPrivateArgumentsSource(d *ClassObjectDumper, c *nativeAnonymousLexicalConsumer, args []any, ctx *class_context.ClassContext) ([]string, bool) {
-	if d == nil || c == nil || c.getter == nil || c.getter.call == nil || ctx == nil || len(args) != c.getter.call.argumentCount || len(args)-1 != len(c.argumentOrigins) {
+	if d == nil || c == nil || c.getter == nil || (!c.getter.setter && c.getter.call == nil) || nativeAnonymousAccessorArgumentCount(c.getter) < 1 || ctx == nil || len(args) != nativeAnonymousAccessorArgumentCount(c.getter) || len(args)-1 != len(c.argumentOrigins) {
 		return nil, false
 	}
-	mt, err := types.ParseMethodDescriptor(c.getter.fieldDescriptor)
+	descriptor := c.getter.fieldDescriptor
+	if c.getter.setter {
+		descriptor = "(" + c.getter.fieldDescriptor + ")" + c.getter.fieldDescriptor
+	}
+	mt, err := types.ParseMethodDescriptor(descriptor)
 	if err != nil {
 		return nil, false
 	}
-	call := &values.FunctionCallExpression{Descriptor: c.getter.fieldDescriptor, FuncType: mt.FunctionType()}
+	call := &values.FunctionCallExpression{Descriptor: descriptor, FuncType: mt.FunctionType()}
 	if len(args) == 1 {
 		return call.DescriptorArgumentStrings(ctx)
 	}
