@@ -2,8 +2,8 @@
   "fallback_local_multiplier": 1.5007374631268435,
   "fallback_revision": "b31c258c9a03ec3d9b3da8f682103aad77ec1f0f",
   "latest_measured_ci_run": 38757308797,
-  "local_followup_revision": "38ffd2481e8316b97415656cda9f4a2aed2e8c05",
-  "local_followup_roots": 7,
+  "local_followup_revision": "986b98f82f320911384152b891c315d76bd13508",
+  "local_followup_roots": 1,
   "measured_checkout_heads": [
     "8f3a843a53c2716671919ddecb0dfff51121aec7",
     "9c94287899bfb2f7cff6eeb713212ab570e46649",
@@ -1622,6 +1622,7 @@
     "TestNativeInheritedAllocationEmissionNeedsExactThisIdentity": 0.05,
     "TestNativeInheritedAllocationRequiresOriginalStableReceiver": 1.03,
     "TestNativeInheritedDeclarationContextRequiresPreparedOriginalScope": 0.24,
+    "TestNativeInheritedFieldSignatureRequiresReferenceGrammar": 0.465229,
     "TestNativeInheritedIndependentFamilyAllocationGenericRoundTrip": 9.29,
     "TestNativeInheritedIndependentFamilyAllocationPackagedRoundTrip": 9.09,
     "TestNativeInheritedIndependentFamilyAllocationQualifiedNullRoundTrip": 9.26,

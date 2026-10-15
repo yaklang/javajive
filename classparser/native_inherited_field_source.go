@@ -38,7 +38,10 @@ func nativeMemberInheritedFieldSourceSignature(root, owner *ClassObject, field *
 	}
 	sig, known := nativeMethodLocalOriginalSignature(owner, field.Attributes, work)
 	classSig, ck := nativeMethodLocalOriginalSignature(owner, owner.Attributes, work)
-	if !known || !ck || sig == "" || len(sig) > 4096 || len(classSig) > 4096 || !nativeProofWork(work, int64(len(sig)+len(classSig))*130+1) || work != nil && work.CheckAlloc(int64(len(sig)+len(classSig))*256) != nil {
+	// FieldSignature uses reference-type grammar (JVMS 4.7.9.1). Reusing
+	// method-parameter erasure must not admit a bare primitive Signature.
+	referenceSignature := sig != "" && (sig[0] == 'L' || sig[0] == '[' || sig[0] == 'T')
+	if !known || !ck || !referenceSignature || len(sig) > 4096 || len(classSig) > 4096 || !nativeProofWork(work, int64(len(sig)+len(classSig))*130+1) || work != nil && work.CheckAlloc(int64(len(sig)+len(classSig))*256) != nil {
 		return false, false
 	}
 	physical := 0
