@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"strings"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -44,6 +45,70 @@ func enumThisDelegateSource(statement *statements.ExpressionStatement, synthetic
 		}
 	}
 	args := call.ArgumentStrings(ctx)
+	if len(args) != len(call.Arguments) {
+		return "", false
+	}
+	// Enum constructor Signatures omit the two implicit parameters. Therefore
+	// a Signature attribute does not, by itself, mean generic source arguments.
+	// Keep the exact original payload declaration when pinning the this overload;
+	// otherwise this((Object)null) silently becomes this((String)null).
+	sourceParams := params[2:]
+	signature := ctx.ConstructorSignatureByDesc(call.Descriptor)
+	if ctx.InvocationMetadata != nil {
+		owner := strings.ReplaceAll(call.ClassName, ".", "/")
+		if declaration, known := ctx.InvocationMetadata(owner); known && declaration.Name == owner {
+			matches := 0
+			for _, constructor := range declaration.Methods {
+				if constructor.Name != "<init>" || constructor.Desc != call.Descriptor {
+					continue
+				}
+				matches++
+				if constructor.Signature != "" {
+					if signature != "" && signature != constructor.Signature {
+						return "", false
+					}
+					signature = constructor.Signature
+				}
+			}
+			if matches != 1 {
+				return "", false
+			}
+		}
+	}
+	if signature != "" {
+		if len(types.MethodFormalTypeParamNames(signature)) != 0 {
+			// Preserve the established raw enum renderer. This is not a new
+			// family certificate: nativeEnumConstructorHiddenGraph separately
+			// refuses delegation whose target needs method-bound inference.
+			return "this(" + strings.Join(args[2:], ",") + ")", true
+		}
+		physical, _, err := callbinding.Descriptor(call.Descriptor)
+		erased, _, known := types.EraseConcreteMethodSignatureWithThrows(signature)
+		if err != nil || !known || erased != "("+strings.Join(physical[2:], "")+")V" {
+			return "", false
+		}
+		_, declared, result := types.ParseMethodSignatureFull(signature, ctx)
+		if result == nil || result.String(ctx) != "void" || len(declared) != len(sourceParams) {
+			return "", false
+		}
+		sourceParams = declared
+	}
+	for i, target := range sourceParams {
+		if target == nil {
+			return "", false
+		}
+		if _, primitive := params[i+2].RawType().(*types.JavaPrimer); primitive {
+			continue
+		}
+		raw, source := params[i+2].String(ctx), target.String(ctx)
+		operand := args[i+2] // Render each original operand once, including source receipts.
+		if source != raw {
+			// Preserve parameterized targets without an illegal direct cast
+			// between invariant arguments; both views have the original erasure.
+			operand = "(" + raw + ")(" + operand + ")"
+		}
+		args[i+2] = "(" + source + ")(" + operand + ")"
+	}
 	return "this(" + strings.Join(args[2:], ",") + ")", true
 }
 

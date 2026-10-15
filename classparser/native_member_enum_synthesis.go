@@ -500,24 +500,8 @@ func nativeMemberEnumSynthesisWithDeclarations(obj *ClassObject, flags uint16, r
 			return nil
 		}
 	}
-	// The hidden name/ordinal belong only to the initial Enum super call. Any
-	// later use or overwrite would have no corresponding source-level parameter.
-	for _, original := range constructorOrder {
-		physical, _ := sourceBridgeUTF8(obj, original.DescriptorIndex)
-		params, _, _ := callbinding.Descriptor(physical)
-		if !nativeEnumOriginalFrameCapacity(original, 3, uint16(nativeMemberParameterWidth(params)+1)) {
-			return nil
-		}
-		ops, known = nativeEnumMethodOps(obj, original, work)
-		if !known || len(ops) < 5 || !constructorMotionLoad(ops[0], descriptor) || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[1], "Ljava/lang/String;") || core.GetRetrieveIdx(ops[1]) != 1 || !constructorMotionLoad(ops[2], "I") || core.GetRetrieveIdx(ops[2]) != 2 || !nativeEnumMemberOperand(obj, ops[3], core.OP_INVOKESPECIAL, "java/lang/Enum", "<init>", "(Ljava/lang/String;I)V") {
-			return nil
-		}
-		for _, op := range ops[4:] {
-			load, store := core.GetRetrieveIdx(op), core.GetStoreIdx(op)
-			if load == 1 || load == 2 || store == 1 || store == 2 {
-				return nil
-			}
-		}
+	if !nativeEnumConstructorHiddenGraph(obj, constructorOrder, constructors, work) {
+		return nil
 	}
 	// Enum constants precede the backing array and all ordinary source static
 	// initialization. Their hidden operands are original literal name and ordinal.
