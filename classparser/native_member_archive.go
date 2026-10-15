@@ -290,24 +290,8 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 			return nil
 		}
 	}
-	if !member {
-		candidate := false
-		for _, a := range obj.Attributes {
-			if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
-				for _, row := range inner.Classes {
-					if row == nil {
-						return nil
-					}
-					outer, known := sourceBridgeClassName(obj, row.OuterClassInfoIndex)
-					if known && outer == owner && row.InnerNameIndex != 0 || row.OuterClassInfoIndex == 0 && row.InnerNameIndex != 0 || row.InnerNameIndex == 0 && row.InnerClassAccessFlags == 0x1008 {
-						candidate = true
-					}
-				}
-			}
-		}
-		if !candidate && !z.nativeMemberReader(obj).nativeMemberHasAnonymousDeclarations() {
-			return nil
-		}
+	if !member && !z.nativeMemberRootCandidate(obj) {
+		return nil
 	}
 	snap, bound := jdecenv.Current()
 	if !bound || snap == nil {
@@ -356,6 +340,33 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		entry.source = src
 	})
 	return entry
+}
+
+// Root admission is shared by ordinary and transactional source planning.
+// A compiler enum table has an unnamed synthetic InnerClasses row; omitting
+// that role in only one path lets a helper select a transaction its root
+// cannot subsequently read. Admission grants no ownership: the original
+// family, dependency, final-source and ordinal proofs still have to close.
+func (z *JarFS) nativeMemberRootCandidate(obj *ClassObject) bool {
+	if z == nil || obj == nil {
+		return false
+	}
+	owner := obj.GetClassName()
+	candidate := false
+	for _, attribute := range obj.Attributes {
+		if inner, ok := attribute.(*InnerClassesAttribute); ok && inner != nil {
+			for _, row := range inner.Classes {
+				if row == nil {
+					return false
+				}
+				outer, known := sourceBridgeClassName(obj, row.OuterClassInfoIndex)
+				if known && outer == owner && row.InnerNameIndex != 0 || row.OuterClassInfoIndex == 0 && row.InnerNameIndex != 0 || row.InnerNameIndex == 0 && row.InnerClassAccessFlags == 0x1008 {
+					candidate = true
+				}
+			}
+		}
+	}
+	return candidate || z.nativeMemberReader(obj).nativeMemberHasAnonymousDeclarations()
 }
 
 func (z *JarFS) nativeMemberPolicyEntry(key string) *nativeMemberCacheEntry {

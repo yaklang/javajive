@@ -53,10 +53,22 @@ func typedTryNormalBoundary(region, start *core.Node, successors []*core.Node, d
 	if candidate == nil || candidate.IsCatchStart {
 		return nil
 	}
-	// A control transfer is not a movable continuation. Following its GOTO
-	// and detaching a RETURN also destroys an enclosing retry loop's break.
+	// A generated transfer is not a method continuation. A physical RETURN
+	// can be retained outside this try only with its exact original node/PC;
+	// the complete operand effect-domain proof below remains necessary.
 	switch candidate.Statement.(type) {
 	case *statements.AssignStatement, *statements.ExpressionStatement:
+	case *statements.ReturnStatement:
+		ret := candidate.Statement.(*statements.ReturnStatement)
+		if ret == nil || !ret.HasOriginPC || !candidate.HasOriginPC || ret.OriginPC != candidate.OriginPC ||
+			ret.OriginPC < region.ProtectedEndPC || len(candidate.EncodedJumps) != 0 {
+			return nil
+		}
+		for _, next := range candidate.Next {
+			if !IsEndNode(next) {
+				return nil
+			}
+		}
 	default:
 		return nil
 	}

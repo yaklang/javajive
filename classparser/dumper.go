@@ -520,6 +520,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			defer jdecenv.EnterLive()()
 		}
 	}
+	if source, committed, err := c.standaloneEnumSwitchSource(); committed || err != nil {
+		return source, err
+	}
 	// accessFlagsVerbose := c.obj.AccessFlagsVerbose
 	accessFlagsToCode := c.obj.AccessFlagsToCode
 
@@ -1706,9 +1709,8 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Drop catch(T) when an earlier catch in the same try already covers T
 	// (multicatch then a second catch(T)). Kill-switch: JDEC_ALREADY_CAUGHT_OFF=1.
 	full = c.sourceRewrite("fixAlreadyCaughtDuplicateCatch", "class_source", full, fixAlreadyCaughtDuplicateCatch)
-	// Empty a wrapUncaught RuntimeException rethrow catch when a return follows
-	// (otherwise unreachable). Kill-switch: JDEC_CATCH_RETHROW_UNREACHABLE_RETURN_OFF=1.
-	full = c.sourceRewrite("fixCatchRethrowUnreachableReturn", "class_source", full, fixCatchRethrowUnreachableReturn)
+	// Handler completion comes from the original CFG. A following return does
+	// not prove that a user-written wrapping throw was a synthesized repair.
 	// Subclass field `this.f = this.f` is getfield Super.f; putfield This.f.
 	// Kill-switch: JDEC_SHADOW_FIELD_SUPER_ASSIGN_OFF=1.
 	full = c.sourceRewrite("fixShadowFieldSuperAssign", "class_source", full, fixShadowFieldSuperAssign)

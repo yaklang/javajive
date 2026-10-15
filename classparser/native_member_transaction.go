@@ -41,24 +41,8 @@ func (z *JarFS) nativeMemberTransactionOwner(obj *ClassObject) (string, bool) {
 			return "", false
 		}
 	}
-	if !member {
-		candidate := false
-		for _, a := range obj.Attributes {
-			if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
-				for _, row := range inner.Classes {
-					if row == nil {
-						return "", false
-					}
-					outer, known := sourceBridgeClassName(obj, row.OuterClassInfoIndex)
-					if known && outer == owner && row.InnerNameIndex != 0 {
-						candidate = true
-					}
-				}
-			}
-		}
-		if !candidate && !z.nativeMemberReader(obj).nativeMemberHasAnonymousDeclarations() {
-			return "", false
-		}
+	if !member && !z.nativeMemberRootCandidate(obj) {
+		return "", false
 	}
 
 	return owner, true

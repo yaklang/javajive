@@ -206,6 +206,9 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 		}
 		if stopAt == nil && !cleanupRegion && !next[i].IsCatchStart {
 			stopAt = typedTryNormalBoundary(node, next[i], next, manager.DominatorMap)
+			if stopAt == nil {
+				stopAt = typedLoopTryNormalBoundary(manager, node, next[i])
+			}
 		}
 		body, err := getBody(next[i], stopAt)
 		if err != nil {

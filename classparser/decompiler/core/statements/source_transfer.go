@@ -19,6 +19,15 @@ func (s *CustomStatement) SourceTransferOnly() bool {
 	return s != nil && s.ThrownValue == nil && validSourceTransfer(s.sourceTransferKind, s.LoopTargetLabel)
 }
 
+// SourceTransferProtocol exposes the sealed control leaf without interpreting
+// its legacy Name, render closure or public annotations as a target proof.
+func (s *CustomStatement) SourceTransferProtocol() (kind, label string, known bool) {
+	if !s.SourceTransferOnly() {
+		return "", "", false
+	}
+	return s.sourceTransferKind, s.LoopTargetLabel, true
+}
+
 // An invalidated structured leaf must not fall back to an opaque text or Name
 // convention. Its source-binding certificate has to be revalidated as a whole.
 func (s *CustomStatement) HasSourceTransfer() bool {

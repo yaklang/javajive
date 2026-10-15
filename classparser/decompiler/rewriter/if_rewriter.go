@@ -39,6 +39,9 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	if err != nil {
 		return err
 	}
+	// A dominated successor can already be outside an enclosing try. Keep
+	// its original boundary live before either arm consumes that successor.
+	protectedStops := typedProtectedIfCollectionStops(manager, ifNode)
 	trueNode, falseNode := ifBranchNodes(ifNode)
 	//ifNode.RemoveAllNext()
 	if trueNode == falseNode {
@@ -113,6 +116,10 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 			return sts, nil
 		}
 		err := core.WalkGraph[*core.Node](bodyStartNode, func(node *core.Node) ([]*core.Node, error) {
+			if protectedStops[node] {
+				endNodes = append(endNodes, node)
+				return nil, nil
+			}
 			err := manager.CheckVisitedNode(node)
 			if err != nil {
 				// Node was already visited (shared merge point). Skip it instead
@@ -180,13 +187,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	// a stub. The early-exit terminator is not a real continuation (it ends its path), so drop it -
 	// but only when at least one genuine fall-through remains, so an if that fully terminates the
 	// method (every exit is a return) is left with its terminal Next rather than no successor at all.
-	hasFallThrough := false
-	for _, n := range endNodes {
-		if !isMethodExitTerminator(n) {
-			hasFallThrough = true
-			break
-		}
-	}
+	hasFallThrough := ifHasNormalFallthrough(endNodes, ifBodyNodes)
 	if hasFallThrough {
 		endNodes = utils2.NodeFilter(endNodes, func(node *core.Node) bool {
 			return !isMethodExitTerminator(node)
@@ -199,6 +200,21 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 	retargetProtectedIfBoundary(manager.TryNodes, ifNode, ifStatementNode)
 
 	return nil
+}
+
+// A loop edge already expressed by continue/break is an abrupt exit, just
+// like a method return. It must not cause the other arm's return continuation
+// to disappear. A target with even one ordinary incoming edge remains a
+// genuine fall-through; use the same edge classification as the final node.
+func ifHasNormalFallthrough(ends, body []*core.Node) bool {
+	view := &core.Node{Next: NodeDeduplication(ends)}
+	markEncodedJumps(view, body)
+	for _, end := range view.Next {
+		if !isMethodExitTerminator(end) && !view.EncodedJumps[end] {
+			return true
+		}
+	}
+	return false
 }
 
 // A shared expression followed by the opposite successor is a conditional
