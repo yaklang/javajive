@@ -408,6 +408,8 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 		}
 	}
 	activeFrames := map[int]*constructorEffectLoopFrame{}
+	receiverTypeBodyChecked, receiverTypeBodyOriginal := false, false
+	var receiverTypeBodyEpoch uint64
 	var walk func(int, []constructorEffectValue, []constructorEffectValue, bool) bool
 	walk = func(start int, locals, stack []constructorEffectValue, initialized bool) (result bool) {
 		if start < 0 || start >= len(ops) {
@@ -646,8 +648,29 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					return false
 				}
 				v, ok := pop('L')
-				if !ok || v.receiver || v.allocation != 0 {
+				if !ok || v.allocation != 0 || v.receiver && !initialized {
 					return false
+				}
+				if v.receiver {
+					// A checked view keeps the same receiver token. It cannot
+					// hide a later capture read, overwrite or publication. An
+					// instanceof consumes that token and yields only a scalar.
+					// Bind the entire input view once: a mutable local-load or
+					// branch packet cannot manufacture receiver provenance.
+					evidence := c.constructorProfileEvidence
+					if evidence != nil && evidence.inconsistent {
+						return false
+					}
+					if !receiverTypeBodyChecked || evidence == nil || receiverTypeBodyEpoch != evidence.observationEpoch {
+						receiverTypeBodyChecked = true
+						receiverTypeBodyOriginal = c.constructorReceiverTypeBodyOriginal(obj, code, ops, remaining)
+						if evidence != nil {
+							receiverTypeBodyEpoch = evidence.observationEpoch
+						}
+					}
+					if !receiverTypeBodyOriginal {
+						return false
+					}
 				}
 				if opcode == core.OP_INSTANCEOF {
 					v = constructorEffectValue{kind: 'I'}
