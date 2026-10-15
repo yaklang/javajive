@@ -116,7 +116,7 @@ func IfRewriter(manager *RewriteManager, ifNode *core.Node) error {
 			return sts, nil
 		}
 		err := core.WalkGraph[*core.Node](bodyStartNode, func(node *core.Node) ([]*core.Node, error) {
-			if protectedStops[node] {
+			if protectedStops[node] && !protectedArmCanOwnReturn(node) {
 				endNodes = append(endNodes, node)
 				return nil, nil
 			}
