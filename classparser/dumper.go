@@ -5393,8 +5393,8 @@ func addMissingGeneratedLocalDecls(body, params, receiverType string, methodRetu
 	}
 	missing := []string{}
 	seen := map[string]bool{}
-	for _, name := range generatedLocalRefRe.FindAllString(body, -1) {
-		if (name != "var0" || receiverType == "") && declared[name] || seen[name] {
+	for _, name := range generatedLocalVariableCandidates(body) {
+		if declared[name] || seen[name] {
 			continue
 		}
 		seen[name] = true
