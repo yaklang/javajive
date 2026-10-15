@@ -353,6 +353,34 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 			}
 		}
 
+		for _, current := range queue {
+			reader := z.nativeMemberReader(current)
+			reader.Work = work
+			external := reader.nativeAnnotationDeclarationResolver()
+			hierarchyLoad := func(name string) (*ClassObject, bool) {
+				if _, found := z.enumSiblingResolver()(name); found {
+					return load(name)
+				}
+				return external(name)
+			}
+			ancestors, known := nativeMemberOriginalAccessorAncestors(current, hierarchyLoad, work)
+			if !known {
+				return false
+			}
+			for _, ancestor := range ancestors {
+				if _, found := z.enumSiblingResolver()(ancestor.object.GetClassName()); !found {
+					continue
+				}
+				target, known := outermost(ancestor.object)
+				if !known {
+					return false
+				}
+				if target != owner {
+					dependencies[target] = true
+				}
+			}
+		}
+
 		// Moving a member declaration also changes the source binding of
 		// indexed foreign SUPER callers. This reverse edge joins those callers
 		// to the same ownership transaction as the parent; a parent cannot

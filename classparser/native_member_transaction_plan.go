@@ -216,6 +216,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	if !z.nativeMemberAccessRepresentable(p, z.originalMemberIndex(), d.Work, peers...) {
 		return nil
 	}
+	if len(p.getters) > 0 && !z.nativeMemberAccessorAncestorFlagsClosed(prepared, dependencyGraphClosed, peers...) {
+		return nil
+	}
 	// Independent direct families have independent commits to ownership.
 	// Complete dependencies contribute declaration and constructor binding
 	// views; their private/lexical ownership stays in their own transaction.
