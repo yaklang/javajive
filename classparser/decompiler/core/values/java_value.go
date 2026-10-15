@@ -464,12 +464,13 @@ func NewJavaClassMember(typeName, member string, desc string, typ types.JavaType
 }
 
 type RefMember struct {
-	originalFieldRead *originalFieldRead
-	OriginPC          int
-	HasOriginPC       bool
-	Member            string
-	Object            JavaValue
-	JavaType          types.JavaType
+	originalFieldRead  *originalFieldRead
+	originalFieldWrite *originalFieldRead
+	OriginPC           int
+	HasOriginPC        bool
+	Member             string
+	Object             JavaValue
+	JavaType           types.JavaType
 }
 
 // ReplaceVar implements JavaValue.
@@ -591,6 +592,9 @@ func (j *RefMember) String(funcCtx *class_context.ClassContext) string {
 	//if j.Id == 0 {
 	//	return j.Member
 	//}
+	if receiver := j.sourceFieldReceiver(funcCtx); receiver != nil {
+		return fmt.Sprintf("%s.%s", receiver.String(funcCtx), class_context.SafeIdentifier(j.Member))
+	}
 	obj := AssignmentOperand(j.Object, funcCtx)
 	// A ternary used as a field receiver MUST be parenthesized: `?:` binds looser than `.`,
 	// so `(cond) ? (a) : (b).field` parses as `(cond) ? (a) : ((b).field)` (Range vs Cut →

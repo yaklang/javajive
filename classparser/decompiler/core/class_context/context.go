@@ -2,6 +2,7 @@ package class_context
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/fieldbinding"
 	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"maps"
 	"math"
@@ -102,6 +103,8 @@ type ClassContext struct {
 	CatchEntryNames map[int]string
 	// InvocationMetadata supplies complete member and parent tables, never CP-only guesses.
 	InvocationMetadata callbinding.Provider
+	// OriginalFieldDeclarations is a separate complete, lazy declaration view.
+	OriginalFieldDeclarations fieldbinding.Provider
 	// PrivateNestBridge returns a source access bridge only for a witnessed
 	// original private nestmate invocation. It never widens the target method.
 	PrivateNestBridge func(owner, name, descriptor string, kind uint8, pc int) (string, bool)
