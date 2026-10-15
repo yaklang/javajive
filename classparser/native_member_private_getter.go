@@ -155,7 +155,7 @@ func nativeMemberGetterPacketProof(obj *ClassObject, m *MemberInfo, resolve func
 		if target == nil || owner == nil || owner == obj || target.AccessFlags&7 != 4 || target.AccessFlags&(0x1000|0x4000) != 0 || (target.AccessFlags&8 != 0) != staticField || nativeBinaryPackage(owner.GetClassName()) == nativeBinaryPackage(obj.GetClassName()) {
 			return nil
 		}
-		genericField, found = nativeMemberInheritedFieldSignature(owner, target, result, work)
+		genericField, found = nativeMemberInheritedFieldSourceSignature(obj, owner, target, result, resolve, work)
 		if !found {
 			return nil
 		}

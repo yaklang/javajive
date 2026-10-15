@@ -211,7 +211,7 @@ func nativeMemberSetterPacketProof(obj *ClassObject, m *MemberInfo, resolve func
 			return nil
 		}
 		var known bool
-		generic, known = nativeMemberInheritedFieldSignature(owner, target, result, work)
+		generic, known = nativeMemberInheritedFieldSourceSignature(obj, owner, target, result, resolve, work)
 		if !known {
 			return nil
 		}
