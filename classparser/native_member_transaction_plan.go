@@ -272,6 +272,15 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 					staticDependenciesChecked = true
 				}
 				dependency := lookup(n)
+				if dependency == nil && static {
+					if source := z.completedFlatStaticDeclaration(prepared, other, peers...); source != "" {
+						if p.sourceDependencies == nil {
+							p.sourceDependencies = map[string]string{}
+						}
+						p.sourceDependencies[n] = source
+						continue
+					}
+				}
 				if dependency == nil || dependency.static != static || dependency.owner != otherOwner || dependency.object.GetClassName() != n || dependency.sourceName == "" {
 					return nil
 				}

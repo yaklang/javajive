@@ -4748,8 +4748,15 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if mt := methodType.FunctionType(); mt != nil && mt.ReturnType != nil {
 				methodReturnTypeStr = mt.ReturnType.String(funcCtx)
 			}
+			// Typed declarations remain authoritative even when a printed type
+			// contains Unicode or syntax the legacy source scanner cannot parse.
+			// This barrier grants no permission to synthesize values or bindings.
+			declarationBarriers, declarationErr := rewriter.DeclarationInsertionBarriers(statementList, funcCtx, c.Work)
+			if declarationErr != nil {
+				return nil, declarationErr
+			}
 			sourceCode = c.sourceRewrite("addMissingGeneratedLocalDecls", "method_source", sourceCode, func(body string) string {
-				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr, c.nativeLexicalCaptures())
+				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr, c.nativeLexicalCaptures(), declarationBarriers)
 			})
 			if !c.nativeMethodLocalMethodSourceComplete(name, descriptor, sourceCode) {
 				c.nativeMemberRoot.failed = true

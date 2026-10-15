@@ -139,6 +139,10 @@ func (z *JarFS) loadNativeMemberTransaction(transaction *nativeMemberTransaction
 
 func (z *JarFS) buildNativeMemberTransaction(participants []string, snap map[string]string) map[string]*nativeMemberCacheEntry {
 	work := z.nativeMemberReader(nil).Work
+	policy, err := json.Marshal(snap)
+	if err != nil {
+		return nil
+	}
 
 	prepared := map[string]*nativeMemberPrepared{}
 	var inputBytes int64
@@ -158,7 +162,26 @@ func (z *JarFS) buildNativeMemberTransaction(participants []string, snap map[str
 		if err != nil || root.GetClassName() != name || !nativeMemberTopLevelEvidence(root, work) {
 			return nil
 		}
-		plan := z.prepareNativeMemberFamilyUnpublished(root, snap)
+		// Every participant shares the same immutable local admission used by
+		// ordinary reads. Replanning a previously refused participant here could
+		// change a flat declaration into a lexical one after another unit had
+		// already bound its source name. Fresh rendering plans remain private;
+		// only the admission result is shared across the two publication paths.
+		entry := z.nativeMemberPolicyEntry(name + "\x00" + string(policy))
+		if entry == nil {
+			return nil
+		}
+		var plan *nativeMemberPrepared
+		entry.planOnce.Do(func() {
+			plan = z.prepareNativeMemberFamilyUnpublished(root, snap)
+			entry.planKnown = plan != nil
+		})
+		if !entry.planKnown {
+			return nil
+		}
+		if plan == nil {
+			plan = z.prepareNativeMemberFamilyUnpublished(root, snap)
+		}
 		if plan == nil {
 			return nil
 		}
