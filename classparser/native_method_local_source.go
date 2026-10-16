@@ -781,7 +781,7 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		if e != nil {
 			return fail("rendered local body: " + e.Error())
 		}
-		if sub.nativeCaptureFailed || p.failed || len(sub.constructorBoundaryHelpers) != 0 || strings.Contains(source, DecompileStubMarker) {
+		if sub.nativeCaptureFailed || p.failed || len(sub.constructorBoundaryHelpers) != 0 || sub.sourceDegraded {
 			return fail("rendered body or joint scope failed")
 		}
 		for _, method := range sub.dumpedMethodsSet {

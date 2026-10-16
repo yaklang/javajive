@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/internal/utils"
 	"maps"
 	"slices"
@@ -11,6 +12,10 @@ import (
 func (c *ClassObjectDumper) snapshotRetryState() func() {
 	saved := *c
 	originalContext := c.FuncCtx
+	var originalRenderState *class_context.SourceRenderState
+	if originalContext != nil {
+		originalRenderState = originalContext.SourceRendering
+	}
 	saved.FuncCtx = c.FuncCtx.CloneForRetry()
 	saved.rewriteSeen = maps.Clone(c.rewriteSeen)
 	saved.overloadUnknownSeen = maps.Clone(c.overloadUnknownSeen)
@@ -57,6 +62,10 @@ func (c *ClassObjectDumper) snapshotRetryState() func() {
 		*c = saved
 		if originalContext != nil {
 			*originalContext = *saved.FuncCtx
+			if originalRenderState != nil && saved.FuncCtx.SourceRendering != nil {
+				*originalRenderState = *saved.FuncCtx.SourceRendering
+				originalContext.SourceRendering = originalRenderState
+			}
 			c.FuncCtx = originalContext
 		}
 		if c.report != nil {

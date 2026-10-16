@@ -1960,7 +1960,7 @@ func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 			}
 		}
 		src, e := sub.DumpClass()
-		if e != nil || sub.nativeCaptureFailed || !nativeMemberLambdaSourceClosed(child, sub, c.Work) || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || len(sub.interfaceInitializerHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
+		if e != nil || sub.nativeCaptureFailed || !nativeMemberLambdaSourceClosed(child, sub, c.Work) || sub.sourceDegraded || len(sub.constructorBoundaryHelpers) > 0 || len(sub.interfaceInitializerHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
 			return nil, fmt.Errorf("member body unproved: %v", e)
 		}
 		if group := p.memberAnonymous[name]; group != nil && !group.completeOwnSource(src) {

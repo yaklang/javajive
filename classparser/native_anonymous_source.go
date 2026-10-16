@@ -1271,7 +1271,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			}
 		}
 		src, e := sub.DumpClass()
-		if e != nil || sub.nativeCaptureFailed || child.lambdaImplementation != nil && !nativeMemberLambdaSourceClosed(child.lambdaImplementation, sub, c.Work) || len(sub.constructorBoundaryHelpers) != 0 ||
+		if e != nil || sub.sourceDegraded || sub.nativeCaptureFailed || child.lambdaImplementation != nil && !nativeMemberLambdaSourceClosed(child.lambdaImplementation, sub, c.Work) || len(sub.constructorBoundaryHelpers) != 0 ||
 			sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
 			return fail()
 		}

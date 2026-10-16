@@ -124,7 +124,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 				if view, ok := values.BooleanStackConsumerView(r.JavaValue); ok {
 					return "return " + view.String(funcCtx)
 				}
-				return "return " + values.EmptySlotValuePlaceholder
+				return "return " + values.IncompleteSourceValue(funcCtx)
 			}
 		}
 	}
@@ -2995,13 +2995,13 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source st
 	}()
 	if a.IsDeclare {
 		if a.LeftValue == nil {
-			return values.EmptySlotValuePlaceholder
+			return values.IncompleteSourceValue(funcCtx)
 		}
 		return fmt.Sprintf("%s %s", localDeclType(a.LeftValue.Type()).String(funcCtx), a.LeftValue.String(funcCtx))
 	}
 	if a.ArrayMember != nil {
 		if a.JavaValue == nil {
-			return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), values.EmptySlotValuePlaceholder)
+			return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), values.IncompleteSourceValue(funcCtx))
 		}
 		if a.referenceArrayStoreNeedsObjectView(funcCtx) {
 			return fmt.Sprintf("((java.lang.Object[]) (%s))[%s] = %s", values.AssignmentOperand(a.ArrayMember.Object, funcCtx), a.ArrayMember.Index.String(funcCtx), a.JavaValue.String(funcCtx))
@@ -3009,8 +3009,8 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source st
 		return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), arrayStoreRHS(a.ArrayMember, a.JavaValue, funcCtx))
 	}
 	if a.LeftValue == nil || a.JavaValue == nil {
-		left := values.EmptySlotValuePlaceholder
-		right := values.EmptySlotValuePlaceholder
+		left := values.IncompleteSourceValue(funcCtx)
+		right := values.IncompleteSourceValue(funcCtx)
 		if a.LeftValue != nil {
 			left = a.LeftValue.String(funcCtx)
 		}
@@ -3126,7 +3126,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source st
 		if declType == nil {
 			// No recoverable declared type. Emit the placeholder so the dumper's safety net
 			// degrades this method cleanly instead of crashing.
-			return values.EmptySlotValuePlaceholder + " " + assign
+			return values.IncompleteSourceValue(funcCtx) + " " + assign
 		}
 		if _, ok := declType.RawType().(*types.JavaMultiCatchType); ok {
 			// A multi-catch union type is legal only inside `catch (A | B e)`. If the exception

@@ -2,9 +2,6 @@ package javaclassparser
 
 import (
 	"fmt"
-	"strings"
-
-	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
 // A flat top-level declaration still owns its assertion-status protocol.
@@ -72,7 +69,7 @@ func (c *ClassObjectDumper) nativeStandaloneAssertionClosed(source string) bool 
 	if state == nil {
 		return true
 	}
-	if strings.Contains(source, DecompileStubMarker) || strings.Contains(source, values.EmptySlotValuePlaceholder) {
+	if c.sourceDegraded {
 		return false
 	}
 	if state.packet.initializer != nil && !state.packet.pureInitializer && !state.initializerProjected {

@@ -1,7 +1,5 @@
 package javaclassparser
 
-import "strings"
-
 // A resolver-backed class request can regenerate its own compiler table when
 // the entire declaration/initializer/ordinal and original switch operands are
 // representable in this one source unit. This is not an archive certificate:
@@ -87,7 +85,7 @@ func (c *ClassObjectDumper) standaloneEnumSwitchSource() (string, bool, error) {
 	d.nativeMemberRoot = p
 	source, err := d.DumpClass()
 	if err != nil || p.failed || !nativeEnumSwitchSourceComplete(p, source, d.Work) ||
-		!nativeMemberPrivateGetterSourceClosed(p, source, d.Work) || strings.Contains(source, DecompileStubMarker) {
+		!nativeMemberPrivateGetterSourceClosed(p, source, d.Work) || d.sourceDegraded {
 		return "", false, c.checkWork()
 	}
 	if c.report != nil {

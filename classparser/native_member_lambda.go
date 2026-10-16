@@ -3,7 +3,6 @@ package javaclassparser
 import (
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -153,7 +152,7 @@ func nativeMemberLambdaSourceClosed(child *nativeMemberClass, dumper *ClassObjec
 			continue
 		}
 		body := dumper.dumpedMethodsSet[fmt.Sprintf("name:%s,desc:%s", name, desc)]
-		if !nok || !dok || !slices.Contains(dumper.lambdaMethods[name], desc) || body == nil || body.member != method || body.bodyCode == "stub" || body.checkedEscape || strings.Contains(body.code, DecompileStubMarker) {
+		if !nok || !dok || !slices.Contains(dumper.lambdaMethods[name], desc) || body == nil || body.member != method || body.isStub || body.incompleteValue || body.malformedTry || body.checkedEscape {
 			return false
 		}
 		if site := child.lambdaContext.localCaptures[name+desc]; site != nil && !nativeLambdaLocalCaptureSourceClosed(site, dumper.nativeLambdaLocalSources[name+desc], work) {

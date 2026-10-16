@@ -167,7 +167,7 @@ func (c *ClassObjectDumper) renderFoldedConstantObject(subObj *ClassObject, subS
 		child.nativeOuterContext = c.FuncCtx
 	}
 	src, err := child.DumpClass()
-	if err != nil || src == "" || child.nativeEnumConstantCurrent != nil && (strings.Contains(src, DecompileStubMarker) || len(child.constructorBoundaryHelpers) > 0 || len(child.interfaceInitializerHelpers) > 0 || child.privateNestOwnPlan != nil && len(child.privateNestOwnPlan.bridges) > 0) {
+	if err != nil || src == "" || child.nativeEnumConstantCurrent != nil && (child.sourceDegraded || len(child.constructorBoundaryHelpers) > 0 || len(child.interfaceInitializerHelpers) > 0 || child.privateNestOwnPlan != nil && len(child.privateNestOwnPlan.bridges) > 0) {
 		return ""
 	}
 	if c.FuncCtx != nil {

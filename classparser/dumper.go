@@ -64,11 +64,13 @@ type ClassObjectDumper struct {
 	nativeCaptureTypes             map[string]types.JavaType
 	nativeOuterContext             *class_context.ClassContext
 
-	options                DecompileOptions
-	report                 *DecompileResult
-	rewriteSeen            map[string]bool
-	Work                   *workbudget.Budget
-	diagTruncated          bool
+	options       DecompileOptions
+	report        *DecompileResult
+	rewriteSeen   map[string]bool
+	Work          *workbudget.Budget
+	diagTruncated bool
+	// Set by actual degraded output, never by scanning user literals/comments.
+	sourceDegraded         bool
 	overloadFamilyUnproven bool
 	overloadUnknownSeen    map[string]bool
 	// Set only inside one constructor effect proof after checking the exact
@@ -3680,6 +3682,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		traitId += ",sam:" + adapter.ErasedDescriptor + ",inst:" + adapter.InstantiatedDescriptor
 	}
 	if v, ok := c.dumpedMethodsSet[traitId]; ok {
+		if c.FuncCtx != nil && c.FuncCtx.SourceRendering != nil && v != nil {
+			c.FuncCtx.SourceRendering.IncompleteValue = c.FuncCtx.SourceRendering.IncompleteValue || v.incompleteValue
+			c.FuncCtx.SourceRendering.MalformedTry = c.FuncCtx.SourceRendering.MalformedTry || v.malformedTry
+		}
 		return v, nil
 	}
 	if c.FuncCtx != nil {
@@ -3691,6 +3697,21 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	var name, descriptor string
 	var err error
 	var dumped = &dumpedMethods{}
+	if c.FuncCtx != nil {
+		context := c.FuncCtx
+		prior := context.SourceRendering
+		state := &class_context.SourceRenderState{}
+		context.SourceRendering = state
+		defer func() {
+			dumped.incompleteValue = state.IncompleteValue
+			dumped.malformedTry = dumped.malformedTry || state.MalformedTry
+			if prior != nil {
+				prior.IncompleteValue = prior.IncompleteValue || dumped.incompleteValue
+				prior.MalformedTry = prior.MalformedTry || dumped.malformedTry
+			}
+			context.SourceRendering = prior
+		}()
+	}
 
 	debugMode := false
 	defer func() {
@@ -4483,7 +4504,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					}
 					if !haveCatch && !haveFinally {
 						body := statementListToString(ret.TryBody)
-						if canFlattenNoCatchTry(body) {
+						if canFlattenNoCatchTry(body, dumped.malformedTry, funcCtx.SourceRendering) {
 							// A try without catch/finally has no Java-level effect. Some legacy bytecode
 							// patterns (for example an EOFException edge inside a loop with an enclosing
 							// IOException handler) can lose the inner handler during CFG structuring while
@@ -4494,6 +4515,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 							// A try with no catch/finally is malformed (structuring failed). Emit the
 							// internal marker so the method degrades to a stub rather than leaking the
 							// broken body that produced this bare try.
+							dumped.malformedTry = true
 							statementStr += "catch(Exception e) { throw e; /* " + malformedTryNoCatchMarker + " */ }"
 						}
 					}
@@ -4960,6 +4982,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 }
 
 type dumpedMethods struct {
+	incompleteValue bool
+	malformedTry    bool
+	isStub          bool
 	initializerCode string
 	checkedEscape   bool
 	methodName      string
@@ -12644,13 +12669,12 @@ const DecompileStubMarker = "yak-decompiler:"
 // It never survives into final output because the offending method is re-rendered as a stub.
 const malformedTryNoCatchMarker = "yak-decompiler-internal: try without catch handler"
 
-func canFlattenNoCatchTry(body string) bool {
+func canFlattenNoCatchTry(body string, malformed bool, state *class_context.SourceRenderState) bool {
 	body = strings.TrimSpace(body)
 	if body == "" {
 		return false
 	}
-	if strings.Contains(body, malformedTryNoCatchMarker) ||
-		strings.Contains(body, values.EmptySlotValuePlaceholder) ||
+	if malformed || state != nil && (state.IncompleteValue || state.MalformedTry) ||
 		hasExceptionSentinel(body) {
 		return false
 	}
@@ -12711,8 +12735,7 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 	res, err := c.safeDumpMethod(name, descriptor)
 	applyLeakedExceptionSentinel(res)
 	clean := err == nil && res != nil &&
-		!strings.Contains(res.code, values.EmptySlotValuePlaceholder) &&
-		!strings.Contains(res.code, malformedTryNoCatchMarker) &&
+		!res.incompleteValue && !res.malformedTry && !res.isStub &&
 		// A leaked `varN = Exception;` caught-throwable sentinel is broken Java ("cannot find symbol");
 		// reject it so the method keeps its honest stub instead of adopting silently-broken output.
 		(c.getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") != "" ||
@@ -12739,6 +12762,7 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 // degrades gracefully instead of failing the entire class. Returns nil when even the
 // signature cannot be derived, in which case the caller should drop the method.
 func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor, reason string) (stub *dumpedMethods) {
+	c.sourceDegraded = true
 	if c.report != nil {
 		c.report.StubMethods = append(c.report.StubMethods, name+descriptor)
 		c.appendDiagnostic(DecompileDiagnostic{Code: "method_stub", Method: name + descriptor, Message: reason})
@@ -12835,7 +12859,7 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 			src = fmt.Sprintf("%s%s %s(%s)%s", prefix, returnTypeForRender.String(funcCtx), name, paramsStr, throwBody)
 		}
 	}
-	return &dumpedMethods{methodName: name, code: src, bodyCode: "stub"}
+	return &dumpedMethods{methodName: name, code: src, bodyCode: "stub", isStub: true}
 }
 
 // isGenuineEnum reports whether this class is a real `enum` declaration (ACC_ENUM and a
@@ -13175,7 +13199,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if err == nil && res != nil && name == "<clinit>" && c.isInterfaceLike() && isIgnorableAssertionOnlyClinit(res.code) {
 			continue
 		}
-		if err == nil && res != nil && strings.Contains(res.code, values.EmptySlotValuePlaceholder) {
+		if err == nil && res != nil && res.incompleteValue {
 			// The decompiled body leaked an internal placeholder ("empty slot value"),
 			// which means the stack simulation was incomplete and the emitted source is
 			// not valid Java. Degrade to a stub instead of producing un-compilable code.
@@ -13185,7 +13209,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 				log.Errorf("DEBUG_EMPTYSLOT method %s%s:\n%s", name, descriptor, res.code)
 			}
 		}
-		if err == nil && res != nil && strings.Contains(res.code, malformedTryNoCatchMarker) {
+		if err == nil && res != nil && res.malformedTry {
 			// The try-region structuring failed and produced a try with no catch handler,
 			// which means the body is semantically corrupted (e.g. the caught-exception
 			// placeholder leaked into the try). Degrade to a stub.

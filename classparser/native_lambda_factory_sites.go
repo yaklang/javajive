@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -86,7 +85,7 @@ func nativeLambdaFactorySourcesClosed(method *MemberInfo, factories []*nativeLam
 			return false
 		}
 		body := source.implementationBody
-		if body == nil || seenBodies[body] || body.member != method || body.bodyCode == "stub" || body.checkedEscape || strings.Contains(body.code, DecompileStubMarker) {
+		if body == nil || seenBodies[body] || body.member != method || body.isStub || body.incompleteValue || body.malformedTry || body.checkedEscape {
 			return false
 		}
 		seenBodies[body] = true

@@ -838,14 +838,14 @@ func boolReduceMemo(v JavaValue, funcCtx *class_context.ClassContext, memo map[*
 
 func (j *TernaryExpression) String(funcCtx *class_context.ClassContext) string {
 	if !boundedDecisionGraph(j, 8192, 256) {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	if rendered, ok := renderIntegerDecision(j, funcCtx); ok {
 		return rendered
 	}
 	reduced := boolReduce(j, funcCtx)
 	if !boundedDecisionSource(reduced, 65536) {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	// A late Boolean leaf may let reduction prove a canonical predicate even
 	// while this producer retains its computational int type. Keep the source
@@ -880,7 +880,7 @@ func ternaryTooLarge(v JavaValue, limit int) bool {
 
 func ternaryRawString(t *TernaryExpression, funcCtx *class_context.ClassContext) string {
 	if t == nil {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	condition := branchConditionView(t.Condition)
 	return fmt.Sprintf("(%s) ? (%s) : (%s)",
@@ -892,7 +892,7 @@ func ternaryRawString(t *TernaryExpression, funcCtx *class_context.ClassContext)
 
 func javaValueRawString(value JavaValue, funcCtx *class_context.ClassContext) string {
 	if value == nil {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	if t, ok := UnpackSoltValue(value).(*TernaryExpression); ok {
 		return ternaryRawString(t, funcCtx)
@@ -934,8 +934,8 @@ func BoolTernaryCondition(v JavaValue) (JavaValue, bool) {
 
 // EmptySlotValuePlaceholder is rendered when a SlotValue has no underlying value,
 // which means the stack simulation produced an incomplete result for the method.
-// It is not valid Java; the dumper detects this marker and degrades the affected
-// method to a stub instead of emitting un-compilable source.
+// It is debug text only. IncompleteSourceValue separately records the renderer
+// failure; an identical literal in the original program is ordinary data.
 const EmptySlotValuePlaceholder = "empty slot value"
 
 type SlotValue struct {
@@ -962,7 +962,7 @@ func (s *SlotValue) Type() types.JavaType {
 }
 func (s *SlotValue) String(funcCtx *class_context.ClassContext) string {
 	if s.val == nil {
-		return EmptySlotValuePlaceholder
+		return IncompleteSourceValue(funcCtx)
 	}
 	return s.val.String(funcCtx)
 }

@@ -26,6 +26,7 @@ type SourceCaptureOperand struct {
 	Receiver bool
 }
 type ClassContext struct {
+	SourceRendering *SourceRenderState
 	// RetainImplicitConstructorCalls keeps the original no-arg superclass
 	// invocation and its PC in proof-only decoding. Normal source rendering
 	// may omit this call because javac inserts it, but effect-boundary proofs
@@ -1023,6 +1024,10 @@ func (f *ClassContext) CloneForRetry() *ClassContext {
 		return nil
 	}
 	out := *f
+	if f.SourceRendering != nil {
+		state := *f.SourceRendering
+		out.SourceRendering = &state
+	}
 	out.Arguments = append([]string(nil), f.Arguments...)
 	out.TypeParams = append([]string(nil), f.TypeParams...)
 	out.ClassTypeParams = append([]string(nil), f.ClassTypeParams...)
