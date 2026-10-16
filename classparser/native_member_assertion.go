@@ -303,7 +303,7 @@ func (c *ClassObjectDumper) prepareNativeAssertions(name, desc string, body []st
 				copy.ElseBody = no
 				out = append(out, &copy)
 			} else {
-				mapped, known := nativeAssertionProjectBlocks(st, project)
+				mapped, known := nativeProjectStructuredBlocks(st, project)
 				if !known {
 					return nil, false
 				}

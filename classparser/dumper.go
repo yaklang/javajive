@@ -39,6 +39,7 @@ type ClassObjectDumper struct {
 	originalInitializerStatus      map[string]bool
 	originalInitializerStatusReady bool
 	nativeMemberLookup             func(string) *nativeMemberClass
+	nativeFreshCaller              *nativeFreshCallerIdentity
 	nativeMemberCalls              map[string]map[int]*nativeMemberAllocation
 	nativeMemberBody               []statements.Statement
 	nativeConstructorEnclosing     *values.JavaRef

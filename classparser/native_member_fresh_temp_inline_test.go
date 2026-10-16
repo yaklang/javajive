@@ -22,7 +22,7 @@ func TestNativeFreshTemporaryRestorationRequiresOriginalPacketAndUniqueUse(t *te
 	}
 	source := `class FreshTemporaryPacket {class Branch {Branch(int n){}class Leaf {Leaf(int n){}}} Object make(int n){return new Branch(n).new Leaf(n);}}`
 	files := nativePrivateEnumCompile(t, source, "FreshTemporaryPacket", "none")
-	variants := []string{"original", "slot wrappers", "receiver call", "local result", "bad fresh NEW", "no fresh NEW", "bad fresh init", "bad fresh descriptor", "fresh alias", "fresh factory", "fresh type", "fresh call receiver", "no declaration", "parameter declaration", "THIS declaration", "opaque declaration", "bad check PC", "no check PC", "bad check owner", "bad check descriptor", "check arguments", "check static", "check special", "wrong check ref", "bad target NEW", "no target NEW", "bad target init", "no target init", "bad target owner", "bad target descriptor", "target not special", "target different receiver", "wrong enclosing ref", "effectful prefix", "conditional prefix", "intervening effect", "extra use", "reassignment", "duplicate target site", "opaque value", "cycle", "wrapper depth", "oversize AST", "missing declaration owner", "duplicate constructor", "synthetic constructor", "synthetic constructor attribute", "constructor argument count", "qualifier field argument", "qualifier call argument", "qualifier lambda argument", "work", "memory", "canceled", "preview", "failed family", "wrong method", "foreign context", "copied caller", "detached target", "target argument count"}
+	variants := []string{"original", "static first", "nested static first", "known qualifier effect", "late budget", "static later", "evaluated static qualifier", "LDC static qualifier", "wrong static qualifier", "missing static origin", "mismatched static kind", "static special", "empty static arguments", "nested scope", "nested extra use", "nested opaque sibling", "nested shared target", "handler scope", "switch scope", "slot wrappers", "receiver call", "local result", "bad fresh NEW", "no fresh NEW", "bad fresh init", "bad fresh descriptor", "fresh alias", "fresh factory", "fresh type", "fresh call receiver", "no declaration", "parameter declaration", "THIS declaration", "opaque declaration", "bad check PC", "no check PC", "bad check owner", "bad check descriptor", "check arguments", "check static", "check special", "wrong check ref", "bad target NEW", "no target NEW", "bad target init", "no target init", "bad target owner", "bad target descriptor", "target not special", "target different receiver", "wrong enclosing ref", "effectful prefix", "conditional prefix", "intervening effect", "extra use", "reassignment", "duplicate target site", "opaque value", "cycle", "wrapper depth", "oversize AST", "missing declaration owner", "duplicate constructor", "synthetic constructor", "synthetic constructor attribute", "constructor argument count", "qualifier field argument", "qualifier call argument", "qualifier lambda argument", "work", "memory", "canceled", "preview", "failed family", "wrong method", "foreign context", "copied caller", "detached target", "target argument count"}
 	for _, variant := range variants {
 		t.Run(variant, func(t *testing.T) {
 			z := nativeArchive(t, files)
@@ -66,10 +66,54 @@ func TestNativeFreshTemporaryRestorationRequiresOriginalPacketAndUniqueUse(t *te
 			ctor := &values.FunctionCallExpression{Object: target, ClassName: plan.child.object.GetClassName(), FunctionName: "<init>", Descriptor: plan.descriptor, Kind: values.InvokeSpecial, IsSpecialInvoke: true, HasOriginPC: true, OriginPC: plan.invokePC, Arguments: []values.JavaValue{ref, arg}}
 			target.ConstructorCall = ctor
 			body := []statements.Statement{decl, &statements.ExpressionStatement{Expression: check}, &statements.ReturnStatement{JavaValue: target}}
+			originalReturn := body[2]
 			opaque := func() *values.CustomValue {
 				return values.NewCustomValue(func(*class_context.ClassContext) string { t.Fatal("must not format for proof"); return "" }, func() types.JavaType { return fresh.Type() })
 			}
 			switch variant {
+			case "static first", "nested static first", "known qualifier effect", "static later", "evaluated static qualifier", "LDC static qualifier", "wrong static qualifier", "missing static origin", "mismatched static kind", "static special", "empty static arguments":
+				wrap := func(v values.JavaValue) *values.FunctionCallExpression {
+					return &values.FunctionCallExpression{ClassName: "probe.Wrapper", FunctionName: "wrap", Descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;", Object: values.NewJavaClassValue(types.NewJavaClass("probe.Wrapper")), IsStatic: true, Kind: values.InvokeStatic, HasOriginPC: true, OriginPC: 123, Arguments: []values.JavaValue{v}}
+				}
+				call := wrap(target)
+				switch variant {
+				case "nested static first":
+					call = wrap(call)
+				case "known qualifier effect":
+					call.Object = &values.FunctionCallExpression{ClassName: "probe.Producer", FunctionName: "owner", Descriptor: "()Lprobe/Wrapper;", Object: values.NewJavaClassValue(types.NewJavaClass("probe.Producer")), IsStatic: true, Kind: values.InvokeStatic, HasOriginPC: true, OriginPC: 122}
+				case "static later":
+					call.Arguments = []values.JavaValue{arg, target}
+				case "evaluated static qualifier":
+					call.Object = opaque()
+				case "LDC static qualifier":
+					call.Object.(*values.JavaClassValue).HasOriginPC = true
+				case "wrong static qualifier":
+					call.Object = values.NewJavaClassValue(types.NewJavaClass("probe.Other"))
+				case "missing static origin":
+					call.HasOriginPC = false
+				case "mismatched static kind":
+					call.Kind = values.InvokeVirtual
+				case "static special":
+					call.IsSpecialInvoke = true
+				case "empty static arguments":
+					call.Arguments = nil
+				}
+				body[2] = &statements.ReturnStatement{JavaValue: call}
+			case "nested scope", "nested extra use", "nested opaque sibling", "nested shared target":
+				branch := &statements.IfStatement{Condition: values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), IfBody: body}
+				body = []statements.Statement{branch}
+				switch variant {
+				case "nested extra use":
+					body = append(body, &statements.ExpressionStatement{Expression: ref})
+				case "nested opaque sibling":
+					body = append(body, &statements.ExpressionStatement{Expression: opaque()})
+				case "nested shared target":
+					branch.ElseBody = []statements.Statement{&statements.ReturnStatement{JavaValue: target}}
+				}
+			case "handler scope":
+				body = []statements.Statement{&statements.TryCatchStatement{TryBody: body, Handlers: []statements.CatchHandler{{EntryPC: 400, ProtectedRanges: [][2]int{{0, 399}}}}}}
+			case "switch scope":
+				body = []statements.Statement{&statements.SwitchStatement{Value: values.NewJavaLiteral(0, types.NewJavaPrimer(types.JavaInteger)), Cases: []*statements.CaseItem{{Body: body}}}}
 			case "slot wrappers":
 				decl.LeftValue = values.NewSlotValue(ref, ref.Type())
 				check.Object = values.NewSlotValue(ref, ref.Type())
@@ -226,12 +270,49 @@ func TestNativeFreshTemporaryRestorationRequiresOriginalPacketAndUniqueUse(t *te
 			case "wrong method":
 				d.FuncCtx.FunctionName = "other"
 			}
+			if variant == "late budget" {
+				complete := workbudget.New(nil, workbudget.Limits{})
+				d.Work = complete
+				successful := d.recoverNativeFreshEnclosingTemps(body)
+				if len(successful) != 1 || ctor.Arguments[0] != fresh || complete.Err() != nil {
+					t.Fatal("unlimited control")
+				}
+				used := complete.Used(workbudget.CounterGraphScans)
+				if used <= 1 {
+					t.Fatal("missing work witness")
+				}
+				ctor.Arguments[0] = ref
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: used - 1})
+			}
 			before := append([]values.JavaValue(nil), ctor.Arguments...)
 			got := d.recoverNativeFreshEnclosingTemps(body)
-			want := variant == "original" || variant == "slot wrappers" || variant == "receiver call" || variant == "local result"
+			if variant == "late budget" && d.Work.Err() == nil {
+				t.Fatal("late work exhaustion not observed")
+			}
+			want := variant == "static first" || variant == "nested static first" || variant == "nested scope" || variant == "handler scope" || variant == "switch scope" || variant == "original" || variant == "slot wrappers" || variant == "receiver call" || variant == "local result"
 			if want {
-				if len(got) != 1 || got[0] != body[2] || ctor.Arguments[0] != decl.JavaValue {
+				if len(got) != 1 || ctor.Arguments[0] != decl.JavaValue || (variant != "nested scope" && variant != "handler scope" && variant != "switch scope" && got[0] != body[2]) {
 					t.Fatalf("original packet not restored: length=%d", len(got))
+				}
+				switch variant {
+				case "nested scope":
+					original := body[0].(*statements.IfStatement)
+					copy := got[0].(*statements.IfStatement)
+					if copy == original || copy.Condition != original.Condition || len(original.IfBody) != 3 || len(copy.IfBody) != 1 || copy.IfBody[0] != originalReturn {
+						t.Fatal("branch boundary or original graph changed")
+					}
+				case "handler scope":
+					original := body[0].(*statements.TryCatchStatement)
+					copy := got[0].(*statements.TryCatchStatement)
+					if copy == original || len(original.TryBody) != 3 || len(copy.TryBody) != 1 || copy.TryBody[0] != originalReturn || copy.Handlers[0].EntryPC != 400 || copy.Handlers[0].ProtectedRanges[0] != [2]int{0, 399} {
+						t.Fatal("original handler metadata or body changed")
+					}
+				case "switch scope":
+					original := body[0].(*statements.SwitchStatement)
+					copy := got[0].(*statements.SwitchStatement)
+					if copy == original || copy.Value != original.Value || len(original.Cases[0].Body) != 3 || len(copy.Cases[0].Body) != 1 || copy.Cases[0].Body[0] != originalReturn {
+						t.Fatal("switch boundary or original graph changed")
+					}
 				}
 				if ctor.Arguments[1] != arg || freshCall.Arguments[1] != arg {
 					t.Fatal("argument identity changed")

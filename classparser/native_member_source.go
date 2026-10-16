@@ -1547,6 +1547,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		return
 	}
 	c.nativeMemberCalls = plans
+	c.nativeFreshCaller = nativeFreshBindCaller(c.obj, p, c.Work)
 	c.nativeMemberChecks = map[string]map[int]bool{}
 	for method, allocations := range plans {
 		checks := map[int]bool{}

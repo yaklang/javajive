@@ -11,14 +11,17 @@ import (
 )
 
 type nativeFreshTempCandidate struct {
-	decl, check int
-	ref         *values.JavaRef
-	value       values.JavaValue
-	target      *values.NewExpression
+	decl   *statements.AssignStatement
+	check  *statements.ExpressionStatement
+	ref    *values.JavaRef
+	value  values.JavaValue
+	target *values.NewExpression
 }
 
 // Only the evaluation-leading receiver spine may absorb a preceding producer.
-// Constructor arguments, conditions and other evaluated prefixes remain closed.
+// A symbolic static qualifier has no evaluated receiver, so its first
+// argument is also leading. Constructor arguments, later static arguments,
+// evaluated qualifiers and conditions remain closed.
 func nativeFreshLeadingAllocation(s statements.Statement, work *workbudget.Budget) *values.NewExpression {
 	var v values.JavaValue
 	switch s := s.(type) {
@@ -45,9 +48,24 @@ func nativeFreshLeadingAllocation(s statements.Statement, work *workbudget.Budge
 			return x
 		case *values.FunctionCallExpression:
 			if x.IsStatic || x.Kind == values.InvokeStatic {
-				return nil
+				if !x.IsStatic || x.Kind != values.InvokeStatic || x.IsSpecialInvoke || !x.HasOriginPC || len(x.Arguments) == 0 {
+					return nil
+				}
+				qualifier, known := x.Object.(*values.JavaClassValue)
+				if !known || qualifier == nil || qualifier.HasOriginPC || qualifier.JavaType == nil {
+					return nil
+				}
+				owner, known := qualifier.JavaType.RawType().(*types.JavaClass)
+				if !known || owner == nil || owner.Name == "" || x.ClassName == "" || qualifier.JavaType.IsArray() || !nativeProofWork(work, int64(len(owner.Name)+len(x.ClassName)+1)) || work != nil && work.CheckAlloc(int64(len(owner.Name)+len(x.ClassName))*2) != nil {
+					return nil
+				}
+				if strings.ReplaceAll(owner.Name, ".", "/") != strings.ReplaceAll(x.ClassName, ".", "/") {
+					return nil
+				}
+				v = x.Arguments[0]
+			} else {
+				v = x.Object
 			}
-			v = x.Object
 		case *values.CastExpression:
 			v = x.Value
 		default:
@@ -67,88 +85,106 @@ func (c *ClassObjectDumper) recoverNativeFreshEnclosingTemps(body []statements.S
 	if c == nil || c.obj == nil || c.FuncCtx == nil || c.nativeMemberRoot == nil || c.nativeMemberRoot.owner == "" || c.nativeMemberRoot.failed {
 		return body
 	}
-	if c.nativeMemberRoot.lexicalObjects[c.obj.GetClassName()] != c.obj || strings.ReplaceAll(c.FuncCtx.ClassName, ".", "/") != c.obj.GetClassName() {
+	if !c.nativeFreshCallerClosed() || strings.ReplaceAll(c.FuncCtx.ClassName, ".", "/") != c.obj.GetClassName() {
 		return body
 	}
 	plans := c.nativeMemberCalls[c.FuncCtx.FunctionName+c.FuncCtx.CurrentMethodDesc]
 	if len(plans) == 0 {
 		return body
 	}
-	var candidates []nativeFreshTempCandidate
-	for i := 0; i+2 < len(body); i++ {
-		if !nativeProofWork(c.Work, 1) {
-			return body
-		}
-		a, ok := body[i].(*statements.AssignStatement)
-		if !ok || a.ArrayMember != nil || !(a.IsFirst || a.IsDeclare) {
-			continue
-		}
-		left, bounded := nativeMemberEnclosingUnpack(a.LeftValue, c.Work)
-		if !bounded {
-			continue
-		}
-		ref, ok := left.(*values.JavaRef)
-		if !ok || ref == nil || ref.Id == nil || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
-			continue
-		}
-		check, ok := body[i+1].(*statements.ExpressionStatement)
-		if !ok {
-			continue
-		}
-		cv, bounded := nativeMemberEnclosingUnpack(check.Expression, c.Work)
-		if !bounded {
-			continue
-		}
-		call, ok := cv.(*values.FunctionCallExpression)
-		if !ok || !call.HasOriginPC || call.IsStatic || call.Kind != values.InvokeVirtual || strings.ReplaceAll(call.ClassName, ".", "/") != "java/lang/Object" || call.FunctionName != "getClass" || call.Descriptor != "()Ljava/lang/Class;" || len(call.Arguments) != 0 {
-			continue
-		}
-		rv, bounded := nativeMemberEnclosingUnpack(call.Object, c.Work)
-		if !bounded {
-			continue
-		}
-		receiver, ok := rv.(*values.JavaRef)
-		if !ok || receiver == nil || receiver.Id != ref.Id || receiver.CustomValue != nil || receiver.StackVar != nil {
-			continue
-		}
-		target := nativeFreshLeadingAllocation(body[i+2], c.Work)
-		if target == nil || target.ConstructorCall == nil || !target.HasOriginPC {
-			continue
-		}
-		ctor := target.ConstructorCall
-		if target.Type() == nil || target.IsArray() || ctor.FunctionName != "<init>" || ctor.Kind != values.InvokeSpecial || !ctor.IsSpecialInvoke || ctor.IsStatic || ctor.Object != target {
-			continue
-		}
-		targetOwner, targetKnown := types.RawClassFQN(target.Type())
-		if !targetKnown || strings.ReplaceAll(targetOwner, ".", "/") != strings.ReplaceAll(ctor.ClassName, ".", "/") {
-			continue
-		}
-		plan := plans[ctor.OriginPC]
-		if !ctor.HasOriginPC || plan == nil || plan.freshEnclosing == nil || plan.child == nil || plan.child.object == nil || plan.child.static || c.nativeMemberRoot.lexicalObjects[plan.child.object.GetClassName()] != plan.child.object || plan.rootObject != nil || target.OriginPC != plan.newPC || ctor.Descriptor != plan.descriptor || strings.ReplaceAll(ctor.ClassName, ".", "/") != plan.child.object.GetClassName() || len(ctor.Arguments) == 0 || call.OriginPC != plan.checkPC {
-			continue
-		}
-		targetType, err := types.ParseMethodDescriptor(ctor.Descriptor)
-		if err != nil || len(targetType.FunctionType().ParamTypes) != len(ctor.Arguments) {
-			continue
-		}
-		av, bounded := nativeMemberEnclosingUnpack(ctor.Arguments[0], c.Work)
-		if !bounded {
-			continue
-		}
-		argument, ok := av.(*values.JavaRef)
-		if !ok || argument == nil || argument.Id != ref.Id || argument.CustomValue != nil || argument.StackVar != nil || !nativeMemberFreshEnclosingOperand(a.JavaValue, plan.freshEnclosing, c.Work) {
-			continue
-		}
-		if c.Work != nil && c.Work.CheckAlloc(int64(len(candidates)+1)*192+int64(len(body))*16) != nil {
-			return body
-		}
-		if !c.nativeFreshQualifierHasNoRegistration(a.JavaValue, plan.freshEnclosing) {
-			continue
-		}
-		candidates = append(candidates, nativeFreshTempCandidate{i, i + 1, ref, a.JavaValue, target})
-	}
-	if len(candidates) == 0 {
+	hasFresh := false
+	if !nativeProofWork(c.Work, int64(len(plans))) {
 		return body
+	}
+	for _, plan := range plans {
+		if plan != nil && plan.freshEnclosing != nil {
+			hasFresh = true
+			break
+		}
+	}
+	if !hasFresh {
+		return body
+	}
+	var candidates []nativeFreshTempCandidate
+	discoveredEntries := 0
+	discover := func(body []statements.Statement) bool {
+		if len(body) > 8192-discoveredEntries {
+			return false
+		}
+		discoveredEntries += len(body)
+		for i := 0; i+2 < len(body); i++ {
+			if !nativeProofWork(c.Work, 1) {
+				return false
+			}
+			a, ok := body[i].(*statements.AssignStatement)
+			if !ok || a.ArrayMember != nil || !(a.IsFirst || a.IsDeclare) {
+				continue
+			}
+			left, bounded := nativeMemberEnclosingUnpack(a.LeftValue, c.Work)
+			if !bounded {
+				continue
+			}
+			ref, ok := left.(*values.JavaRef)
+			if !ok || ref == nil || ref.Id == nil || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
+				continue
+			}
+			check, ok := body[i+1].(*statements.ExpressionStatement)
+			if !ok {
+				continue
+			}
+			cv, bounded := nativeMemberEnclosingUnpack(check.Expression, c.Work)
+			if !bounded {
+				continue
+			}
+			call, ok := cv.(*values.FunctionCallExpression)
+			if !ok || !call.HasOriginPC || call.IsStatic || call.Kind != values.InvokeVirtual || strings.ReplaceAll(call.ClassName, ".", "/") != "java/lang/Object" || call.FunctionName != "getClass" || call.Descriptor != "()Ljava/lang/Class;" || len(call.Arguments) != 0 {
+				continue
+			}
+			rv, bounded := nativeMemberEnclosingUnpack(call.Object, c.Work)
+			if !bounded {
+				continue
+			}
+			receiver, ok := rv.(*values.JavaRef)
+			if !ok || receiver == nil || receiver.Id != ref.Id || receiver.CustomValue != nil || receiver.StackVar != nil {
+				continue
+			}
+			target := nativeFreshLeadingAllocation(body[i+2], c.Work)
+			if target == nil || target.ConstructorCall == nil || !target.HasOriginPC {
+				continue
+			}
+			ctor := target.ConstructorCall
+			if target.Type() == nil || target.IsArray() || ctor.FunctionName != "<init>" || ctor.Kind != values.InvokeSpecial || !ctor.IsSpecialInvoke || ctor.IsStatic || ctor.Object != target {
+				continue
+			}
+			targetOwner, targetKnown := types.RawClassFQN(target.Type())
+			if !targetKnown || strings.ReplaceAll(targetOwner, ".", "/") != strings.ReplaceAll(ctor.ClassName, ".", "/") {
+				continue
+			}
+			plan := plans[ctor.OriginPC]
+			if !ctor.HasOriginPC || plan == nil || plan.freshEnclosing == nil || plan.child == nil || plan.child.object == nil || plan.child.static || c.nativeMemberRoot.lexicalObjects[plan.child.object.GetClassName()] != plan.child.object || plan.rootObject != nil || target.OriginPC != plan.newPC || ctor.Descriptor != plan.descriptor || strings.ReplaceAll(ctor.ClassName, ".", "/") != plan.child.object.GetClassName() || len(ctor.Arguments) == 0 || call.OriginPC != plan.checkPC {
+				continue
+			}
+			targetType, err := types.ParseMethodDescriptor(ctor.Descriptor)
+			if err != nil || len(targetType.FunctionType().ParamTypes) != len(ctor.Arguments) {
+				continue
+			}
+			av, bounded := nativeMemberEnclosingUnpack(ctor.Arguments[0], c.Work)
+			if !bounded {
+				continue
+			}
+			argument, ok := av.(*values.JavaRef)
+			if !ok || argument == nil || argument.Id != ref.Id || argument.CustomValue != nil || argument.StackVar != nil || !nativeMemberFreshEnclosingOperand(a.JavaValue, plan.freshEnclosing, c.Work) {
+				continue
+			}
+			if c.Work != nil && c.Work.CheckAlloc(int64(len(candidates)+1)*192+int64(len(body))*16) != nil {
+				return false
+			}
+			if !c.nativeFreshQualifierHasNoRegistration(a.JavaValue, plan.freshEnclosing) {
+				continue
+			}
+			candidates = append(candidates, nativeFreshTempCandidate{a, check, ref, a.JavaValue, target})
+		}
+		return true
 	}
 	uses := map[*u.VariableId]int{}
 	sites := map[int]int{}
@@ -188,6 +224,9 @@ func (c *ClassObjectDumper) recoverNativeFreshEnclosingTemps(body []statements.S
 	}
 	var walk func([]statements.Statement) bool
 	walk = func(ss []statements.Statement) bool {
+		if !discover(ss) {
+			return false
+		}
 		for _, s := range ss {
 			if !step() || sourceProofNil(s) || activeS[s] {
 				return false
@@ -214,24 +253,50 @@ func (c *ClassObjectDumper) recoverNativeFreshEnclosingTemps(body []statements.S
 	if !walk(body) {
 		return body
 	}
-	removed := map[int]bool{}
+	if len(candidates) == 0 {
+		return body
+	}
+	removed := map[statements.Statement]bool{}
+	var accepted []nativeFreshTempCandidate
 	for _, x := range candidates {
 		if uses[x.ref.Id] != 3 || sites[x.target.ConstructorCall.OriginPC] != 1 {
 			continue
 		}
-		x.target.ConstructorCall.Arguments[0] = x.value
-		removed[x.decl] = true
-		removed[x.check] = true
+		removed[x.decl], removed[x.check] = true, true
+		accepted = append(accepted, x)
 		uses[x.ref.Id] = 0
 	}
-	if len(removed) == 0 {
+	if len(accepted) == 0 {
 		return body
 	}
-	out := make([]statements.Statement, 0, len(body)-len(removed))
-	for i, s := range body {
-		if !removed[i] {
-			out = append(out, s)
+	// Rebuild containers before mutating a single constructor argument. The
+	// complete method census above, not a per-block count, licenses each removal.
+	projectedSteps := 0
+	var project func([]statements.Statement) ([]statements.Statement, bool)
+	project = func(list []statements.Statement) ([]statements.Statement, bool) {
+		out := make([]statements.Statement, 0, len(list))
+		for _, st := range list {
+			projectedSteps++
+			if projectedSteps > 8192 || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64(projectedSteps)*256+int64(len(candidates))*192) != nil {
+				return nil, false
+			}
+			if removed[st] {
+				continue
+			}
+			mapped, known := nativeProjectStructuredBlocks(st, project)
+			if !known {
+				return nil, false
+			}
+			out = append(out, mapped)
 		}
+		return out, true
+	}
+	out, closed := project(body)
+	if !closed {
+		return body
+	}
+	for _, x := range accepted {
+		x.target.ConstructorCall.Arguments[0] = x.value
 	}
 	return out
 }

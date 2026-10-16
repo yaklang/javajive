@@ -2,16 +2,23 @@ package javaclassparser
 
 import "github.com/yaklang/javajive/classparser/decompiler/core/statements"
 
-// Assertion projection changes the proved flag/throw packet in place. Every
-// structured child block participates, without moving loop headers, monitors,
-// handler ranges, labels, switch discriminants, or any original effect. Copies
-// retain control/exception evidence and leave the original source graph intact.
-// The callback owns the shared cycle, work, and original-site uniqueness proof.
-func nativeAssertionProjectBlocks(st statements.Statement, project func([]statements.Statement) ([]statements.Statement, bool)) (statements.Statement, bool) {
+// Copy structured child lists while preserving headers, monitors, handler
+// ranges, labels and selectors. The caller owns the complete cycle, work and
+// original-site proof, and commits value changes only after projection closes.
+func nativeProjectStructuredBlocks(st statements.Statement, project func([]statements.Statement) ([]statements.Statement, bool)) (statements.Statement, bool) {
 	if sourceProofNil(st) || project == nil {
 		return nil, false
 	}
 	switch x := st.(type) {
+	case *statements.IfStatement:
+		copy := *x
+		yes, known := project(x.IfBody)
+		if !known {
+			return nil, false
+		}
+		no, known := project(x.ElseBody)
+		copy.IfBody, copy.ElseBody = yes, no
+		return &copy, known
 	case *statements.WhileStatement:
 		copy := *x
 		body, ok := project(x.Body)
@@ -65,7 +72,6 @@ func nativeAssertionProjectBlocks(st statements.Statement, project func([]statem
 		}
 		return &copy, true
 	default:
-		// If statements are projected by the caller's original assertion matcher.
 		// New structured types must be explicitly copied before their children can
 		// be rewritten; silently treating them as leaves would lose original sites.
 		_, children, known := nativeSourceNameChildren(st)
