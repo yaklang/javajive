@@ -7,19 +7,27 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// nativeMemberInheritedFieldSourceSignature first retains the concrete declaration proof.
-// For class-formal instance storage it additionally proves the source view used
-// by the accessor: ((RawOwner) receiver).field must have the declaration erasure.
-// JLS 4.8 erases the supertypes of a raw generic class. A nongeneric class is
-// never raw, so its parameterized superclass starts a fresh source view. Merely
-// knowing that the original field erases to Object would admit Base<String>
-// writes and introduce a cast that the original accessor never performed.
-//
-// This proof adds no static or anonymous-owner projection. Bounded
-// generic parents and member-type owner arguments need separate substitution
-// proofs. Failure leaves the existing accessor proof closed.
-func nativeMemberInheritedFieldSourceSignature(root, owner *ClassObject, field *MemberInfo, descriptor string, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) (bool, bool) {
-	if root == nil || owner == nil || field == nil {
+// A read may use the declaration erasure even when a superclass fixes the
+// source field type (Base<String>.field -> Object). Its consumer must retain
+// the explicit field-descriptor view before overload resolution or inference.
+// A write needs the stronger raw-storage view: casting its RHS to the source
+// instantiation would add a CHECKCAST absent from the original accessor.
+type nativeInheritedFieldUse uint8
+
+const (
+	nativeInheritedFieldErasedRead nativeInheritedFieldUse = iota + 1
+	nativeInheritedFieldRawWrite
+)
+
+// nativeMemberInheritedFieldSourceSignature proves the original declaration,
+// physical field identity and source superclass path for a specific use.
+// JLS 4.8 erases the supertypes of a raw generic class; nongeneric classes start
+// a fresh source view. Only reads can cross a fixed parameterization, and only
+// with the descriptor-erasure projection applied by the getter renderer.
+// Static/anonymous owners, bounded-parent substitution and member-type owner
+// arguments retain their existing conservative boundaries.
+func nativeMemberInheritedFieldSourceSignature(root, owner *ClassObject, field *MemberInfo, descriptor string, use nativeInheritedFieldUse, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) (bool, bool) {
+	if (use != nativeInheritedFieldErasedRead && use != nativeInheritedFieldRawWrite) || root == nil || owner == nil || field == nil {
 		return false, false
 	}
 	if generic, known := nativeMemberInheritedFieldSignature(owner, field, descriptor, work); known {
@@ -128,7 +136,7 @@ func nativeMemberInheritedFieldSourceSignature(root, owner *ClassObject, field *
 			}
 		}
 		if current.GetClassName() == owner.GetClassName() {
-			if current != owner || !raw {
+			if current != owner || use == nativeInheritedFieldRawWrite && !raw {
 				return false, false
 			}
 			return true, true

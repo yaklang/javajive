@@ -36,22 +36,24 @@ func TestNativeRawFieldSourceHierarchyBoundaries(t *testing.T) {
 		{"raw_generic_middle", "", "p.Mid", `package p;public class Mid<U> extends Base<U>{}`, true},
 		{"nongeneric_raw_middle", "", "p.Mid", `package p;public class Mid extends Base{}`, true},
 	} {
-		t.Run(row.name, func(t *testing.T) {
-			files := nativeCompileSourceReleaseClasses(t, map[string]string{"p/Base.java": `package p;public class Base<T>{protected T payload;}`, "p/Mid.java": row.mid, "q/FieldOwner.java": "package q;public class FieldOwner" + row.formals + " extends " + row.parent + "{}"}, "none", "8")
-			objects := map[string]*ClassObject{}
-			for n, b := range files {
-				o, e := Parse(b)
-				if e != nil {
-					t.Fatal(e)
+		for _, use := range []nativeInheritedFieldUse{nativeInheritedFieldErasedRead, nativeInheritedFieldRawWrite} {
+			t.Run(fmt.Sprintf("%s/use%d", row.name, use), func(t *testing.T) {
+				files := nativeCompileSourceReleaseClasses(t, map[string]string{"p/Base.java": `package p;public class Base<T>{protected T payload;}`, "p/Mid.java": row.mid, "q/FieldOwner.java": "package q;public class FieldOwner" + row.formals + " extends " + row.parent + "{}"}, "none", "8")
+				objects := map[string]*ClassObject{}
+				for n, b := range files {
+					o, e := Parse(b)
+					if e != nil {
+						t.Fatal(e)
+					}
+					objects[n[:len(n)-6]] = o
 				}
-				objects[n[:len(n)-6]] = o
-			}
-			root, owner := objects["q/FieldOwner"], objects["p/Base"]
-			resolve := func(n string) (*ClassObject, bool) { o, ok := objects[n]; return o, ok }
-			generic, known := nativeMemberInheritedFieldSourceSignature(root, owner, owner.Fields[0], "Ljava/lang/Object;", resolve, nil)
-			if known != row.want || known && !generic {
-				t.Fatalf("generic=%v known=%v want=%v", generic, known, row.want)
-			}
-		})
+				root, owner := objects["q/FieldOwner"], objects["p/Base"]
+				resolve := func(n string) (*ClassObject, bool) { o, ok := objects[n]; return o, ok }
+				generic, known := nativeMemberInheritedFieldSourceSignature(root, owner, owner.Fields[0], "Ljava/lang/Object;", use, resolve, nil)
+				if known != (row.want || use == nativeInheritedFieldErasedRead) || known && !generic {
+					t.Fatalf("generic=%v known=%v want=%v", generic, known, row.want)
+				}
+			})
+		}
 	}
 }
