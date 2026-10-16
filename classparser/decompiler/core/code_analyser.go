@@ -6682,11 +6682,7 @@ func (d *Decompiler) ParseStatement() error {
 								}
 								user.CurrentOpcode = opcode
 							}
-							appendNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-								return assignSt.String(funcCtx)
-							}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-								assignSt.ReplaceVar(oldId, newId)
-							}))
+							appendNode(statements.NewSourceAssignmentForward(assignSt.(*statements.AssignStatement)))
 						}
 					}
 				} else {

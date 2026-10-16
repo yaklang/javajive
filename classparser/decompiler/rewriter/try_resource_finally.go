@@ -2,9 +2,7 @@ package rewriter
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
-	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
-	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
@@ -133,8 +131,7 @@ func recoverPrimaryResourceFinally(tr *statements.TryCatchStatement) (*FinallyRe
 	// javac precise rethrow requires the unchanged catch parameter. The removed
 	// alias has exactly one assignment and one abrupt use, both in this handler.
 	caught := tr.Exception[0]
-	sameThrow := statements.NewCustomStatement(func(ctx *class_context.ClassContext) string { return "throw " + caught.String(ctx) }, func(old, new *utils.VariableId) { caught.ReplaceVar(old, new) })
-	sameThrow.ThrownValue = caught
+	sameThrow := statements.NewThrowStatement(caught)
 	sameThrow.HasOriginPC = true
 	sameThrow.OriginPC = thrown.OriginPC
 	return &FinallyRegion{TryBody: tryBody, Exceptions: tr.Exception[:1], CatchBodies: [][]statements.Statement{{capture, sameThrow}}, Cleanup: []statements.Statement{cleanup}}, true

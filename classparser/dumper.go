@@ -3464,6 +3464,15 @@ func isUnconditionalTerminalStatement(st statements.Statement, funcCtx *class_co
 	case *statements.ReturnStatement:
 		return true
 	case *statements.CustomStatement:
+		if _, known := s.SourceAssignmentForward(); known {
+			return false
+		}
+		if _, known := s.SourceThrowOperand(); known {
+			return true
+		}
+		if _, _, known := s.SourceTransferProtocol(); known {
+			return true
+		}
 		t := strings.TrimSpace(s.String(funcCtx))
 		switch {
 		case t == "break", t == "continue", t == "return":
@@ -3618,6 +3627,18 @@ func loopBodyHasEscapingBreak(body []statements.Statement, loopLabel string, dir
 	for _, st := range body {
 		switch s := st.(type) {
 		case *statements.CustomStatement:
+			if _, known := s.SourceAssignmentForward(); known {
+				continue
+			}
+			if _, known := s.SourceThrowOperand(); known {
+				continue
+			}
+			if kind, label, known := s.SourceTransferProtocol(); known {
+				if kind == "break" && (label == "" && directlyInLoop || label != "" && label == loopLabel) {
+					return true
+				}
+				continue
+			}
 			t := strings.TrimSpace(s.String(funcCtx))
 			if directlyInLoop && t == "break" {
 				return true

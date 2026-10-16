@@ -16,7 +16,7 @@ func validSourceTransfer(kind, label string) bool {
 	return (kind == "break" || kind == "continue") && (label == "" || class_context.SafeIdentifier(label) == label)
 }
 func (s *CustomStatement) SourceTransferOnly() bool {
-	return s != nil && s.ThrownValue == nil && validSourceTransfer(s.sourceTransferKind, s.LoopTargetLabel)
+	return s != nil && s.sourceAssignment == nil && !s.sourceThrow && s.ThrownValue == nil && validSourceTransfer(s.sourceTransferKind, s.LoopTargetLabel)
 }
 
 // SourceTransferProtocol exposes the sealed control leaf without interpreting
