@@ -1842,6 +1842,10 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 						name = captureName
 					}
 					if old, known := ctx.LocalNames[ref.Id]; known && old != name {
+						if c.nativeCaptureEnclosingParameter(child, field, ref, parameterDeclarations[ref.Id]) {
+							site[ref.Id] = true
+							continue
+						}
 						p.failed = true
 						continue
 					}

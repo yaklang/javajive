@@ -2224,7 +2224,10 @@
     "TestAdversarialVisibilityBridgeLexicalCallNativeCompiler": 3.89,
     "TestAdversarialVisibilityBridgeEffects": 19.57,
     "TestAdversarialVisibilityBridgeEffectsNativeCompiler": 12.06,
-    "TestSourceBridgeForwarderRequiresCompleteOriginalProtocol": 0.43
+    "TestNativeSourceBridgeForwarderRequiresCompleteOriginalProtocol": 0.43,
+    "TestAdversarialEnclosingParameterCapture": 32.52,
+    "TestAdversarialEnclosingParameterCaptureNativeCompiler": 19.9,
+    "TestNativeEnclosingParameterCaptureRequiresOriginalBinding": 1.01
   },
   "source_runs": [
     37850493191,

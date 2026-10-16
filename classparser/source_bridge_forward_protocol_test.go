@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestSourceBridgeForwarderRequiresCompleteOriginalProtocol(t *testing.T) {
+func TestNativeSourceBridgeForwarderRequiresCompleteOriginalProtocol(t *testing.T) {
 	source := `class HiddenProtocolParent<E extends Comparable<E>> {
  public boolean accept(E value){return value!=null;}
  public long wide(long a,double b,E[] values,int n,float f){return a+(long)b+n+(long)f;}
