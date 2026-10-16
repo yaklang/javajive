@@ -2232,7 +2232,10 @@
     "TestAdversarialAnonymousConstructorArgumentContextNativeCompiler": 32.97,
     "TestNativeAnonymousConstructorArgumentRequiresOriginalFrames": 1.48,
     "TestAdversarialAnonymousOriginalNullOperands": 95.6,
-    "TestNativeAnonymousNullOperandRequiresOriginalProducer": 0.57
+    "TestNativeAnonymousNullOperandRequiresOriginalProducer": 0.57,
+    "TestNativeCheckedHandlerLoopClausesKeepPhysicalExceptionCoverage": 4.41,
+    "TestNativeCheckedHandlerContainersPreserveThrowProof": 0.02,
+    "TestAdversarialCheckedHandlerStructuredLoops": 53.04
   },
   "source_runs": [
     37850493191,

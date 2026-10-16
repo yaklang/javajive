@@ -174,6 +174,31 @@ func typedAbsorbingHandlers(body []statements.Statement, permittedThrows map[int
 						return false
 					}
 				}
+			// These containers add no explicit throw. Validate every statement
+			// position, including for init/update and every switch arm. Actual
+			// callee exceptions and ATHROW PCs are checked against raw handler
+			// ranges independently below; this is not an effect waiver.
+			case *statements.WhileStatement:
+				if x == nil || x.ConditionValue == nil || !absorbs(x.Body) {
+					return false
+				}
+			case *statements.DoWhileStatement:
+				if x == nil || x.ConditionValue == nil || !absorbs(x.Body) {
+					return false
+				}
+			case *statements.ForStatement:
+				if x == nil || x.Condition == nil || !absorbs([]statements.Statement{x.InitVar, x.EndExp}) || !absorbs(x.SubStatements) {
+					return false
+				}
+			case *statements.SwitchStatement:
+				if x == nil || x.Value == nil {
+					return false
+				}
+				for _, arm := range x.Cases {
+					if arm == nil || !absorbs(arm.Body) {
+						return false
+					}
+				}
 			case *statements.SynchronizedStatement:
 				if x == nil {
 					return false
