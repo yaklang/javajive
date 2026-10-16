@@ -31,6 +31,7 @@ func TestNativeRootAllocationSourceRequiresIndependentOriginalIdentity(t *testin
 			d.nativeMemberCurrent = child
 			d.FuncCtx = &class_context.ClassContext{ClassName: child.object.GetClassName(), InvocationMetadata: d.buildInvocationMetadata()}
 			d.wireNativeMemberSource()
+			d.nativeSourceNamesReady = true
 			ctx := d.FuncCtx
 			ctx.FunctionName = "direct"
 			ctx.CurrentMethodDesc = "(Ljava/lang/Object;)LRootBridgePacket;"

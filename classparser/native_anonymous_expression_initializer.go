@@ -238,6 +238,9 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	if err != nil {
 		return "", false
 	}
+	priorReady := c.nativeSourceNamesReady
+	c.nativeSourceNamesReady = false
+	defer func() { c.nativeSourceNamesReady = priorReady }()
 	originalCtx, originalMethod, originalType := c.FuncCtx, c.CurrentMethod, c.MethodType
 	copy := *originalCtx
 	copy.LocalNames = map[*u.VariableId]string{}
@@ -271,6 +274,7 @@ func (c *ClassObjectDumper) nativeAnonymousExpressionInitializerSource(child *na
 	if err != nil {
 		return "", false
 	}
+	c.nativeSourceNamesReady = !c.nativeCaptureFailed
 	post := false
 	stores := map[int]bool{}
 	materialized := map[string]*values.JavaRef{}

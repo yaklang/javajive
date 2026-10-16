@@ -4131,6 +4131,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if !c.recordNativeLambdaLocalCaptureBody(method, codeAttr, statementList) {
 				return nil, fmt.Errorf("original lambda local capture body is not closed")
 			}
+			statementList = c.recoverNativeFreshEnclosingTemps(statementList)
 			priorMemberBody := c.nativeMemberBody
 			c.nativeMemberBody = statementList
 			defer func() { c.nativeMemberBody = priorMemberBody }()

@@ -2212,7 +2212,12 @@
     "TestWrapUncaughtGetConstructorSkipsReturn": 0.05,
     "TestWrapUncaughtGetConstructorSkipsThisCall": 0.05,
     "TestZxingEnumArraySpillFoldRejectsReorderedOrEffectfulShapes": 0,
-    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.05
+    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.05,
+    "TestNativeFreshTemporaryRestorationRequiresOriginalPacketAndUniqueUse": 0.66,
+    "TestAdversarialFreshEnclosingMixedInitializer": 20.79,
+    "TestAdversarialFreshEnclosingMixedInitializerNativeCompiler": 15.26,
+    "TestAdversarialFreshEnclosingTemporaryEffects": 8.61,
+    "TestAdversarialFreshEnclosingTemporaryEffectsNativeCompiler": 6.89
   },
   "source_runs": [
     37850493191,

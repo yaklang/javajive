@@ -1575,6 +1575,12 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		return child != nil && (!child.static || child.accessBridges[desc] != nil)
 	}
 	ctx.SourceMemberAllocation = func(owner, desc string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
+		// Parse/analysis previews may still contain SSA temporaries for original
+		// allocation packets. Only the final bound source graph may commit a
+		// family failure; the exact original operand proof below stays strict.
+		if !c.nativeSourceNamesReady {
+			return "", false
+		}
 		fail := func() (string, bool) { p.failed = true; return "", false }
 		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
 		if child := p.allocationClass(strings.ReplaceAll(owner, ".", "/")); child != nil && child.static && child.accessBridges[desc] == nil {
