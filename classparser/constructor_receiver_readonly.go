@@ -46,7 +46,7 @@ func (c *ClassObjectDumper) constructorReceiverBindMethod(obj *ClassObject, memb
 		return nil, false
 	}
 	for i, parameter := range params {
-		if arguments[i].kind != constructorEffectType(parameter).kind || arguments[i].receiver || arguments[i].allocation != 0 {
+		if arguments[i].kind != constructorEffectType(parameter).kind || arguments[i].reachesReceiver() || arguments[i].allocation != 0 {
 			return nil, false
 		}
 	}

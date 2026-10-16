@@ -29,7 +29,7 @@ func TestAdversarialConstructorLargeClosedEffectsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestConstructorLargeEffectProofRemainsBounded(t *testing.T) {
+func TestNativeConstructorLargeEffectProofRemainsBounded(t *testing.T) {
 	files := nativeCompileClasses(t, `class BoundedEffectParent{BoundedEffectParent(){}}final class BoundedEffectChild extends BoundedEffectParent{}`)
 	for _, variant := range []string{"small", "large original body", "graph budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {

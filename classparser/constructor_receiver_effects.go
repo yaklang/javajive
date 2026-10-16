@@ -14,25 +14,29 @@ import (
 )
 
 // Values are logical JVM values, including category-2 width. Only the newly
-// allocated receiver can carry receiver=true: publishing it into any other
-// object, static field or opaque call is rejected. Therefore a receiver-free
-// value loaded from a parameter/field/call cannot acquire an alias to it.
+// allocated receiver can carry receiver=true. A confined initialized object can
+// instead retain a reference to it; that reachability never grants THIS's type,
+// dispatch or initialization permissions. Neither kind may escape.
 type constructorEffectValue struct {
-	kind       byte
-	knownInt   bool
-	intWord    int32
-	receiver   bool
-	allocation int // Original NEW PC + 1, until its exact <init> completes.
+	kind            byte
+	knownInt        bool
+	intWord         int32
+	receiver        bool
+	retainsReceiver bool
+	allocation      int // Original NEW PC + 1, until its exact <init> completes.
 }
 
-// Stores of THIS into THIS's own nonvolatile storage do not publish it. Until
-// a field-sensitive heap proof exists, reject their combination with any
+func (v constructorEffectValue) reachesReceiver() bool { return v.receiver || v.retainsReceiver }
+
+// Stores of THIS into THIS's own nonvolatile storage, or a proved fresh holder,
+// do not publish it. Until a field-sensitive heap proof exists, reject their combination with any
 // reference-valued read from THIS anywhere in the constructor chain. Facts are
 // monotone across all branches and recursive delegations: a different branch
 // or parent cannot hide a potentially receiver-valued alias behind a plain L.
 type constructorSelfStorageProof struct {
-	selfStored    bool
-	referenceRead bool
+	selfStored      bool
+	referenceRead   bool
+	confinedCapture bool
 	// Only a complete capture-motion constructor proof owns the fresh receiver.
 	// A selected method query supplies no allocation/nonpublication evidence.
 	freshReceiver bool
@@ -61,6 +65,17 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
 	}
 	remaining := constructorReceiverProofFuel
+	root := c.obj
+	rootBefore, rootKnown := constructorConfinedRootSnapshot(root)
+	usedConfined := false
+	rootClosed := func() bool {
+		if !usedConfined {
+			return true
+		}
+		current, known := constructorConfinedRootSnapshot(c.obj)
+		return rootKnown && known && c.obj == root && nativeProofWork(c.Work, int64(len(rootBefore))+int64(len(current))) &&
+			(c.Work == nil || c.Work.CheckAlloc(int64(len(rootBefore))+int64(len(current))) == nil) && bytes.Equal(rootBefore, current)
+	}
 	var previous *constructorProfileEvidence
 	prove := func(release int) (bool, bool) {
 		d := *c
@@ -108,6 +123,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		evidence.transcript = nil
 		evidence.inBody = true
 		safe := d.constructorChainEffectsWithArguments(owner, descriptor, writes, map[string]bool{}, &remaining, 0, aliases, arguments) && aliases.closed() && !evidence.inconsistent
+		usedConfined = usedConfined || aliases.confinedCapture
 		evidence.inBody = false
 		if safe {
 			previous = evidence
@@ -117,7 +133,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 	if safe, platformUsed := prove(target); !safe {
 		return false
 	} else if !platformUsed {
-		return true
+		return rootClosed()
 	}
 	// Metadata initialization above also initializes the supported release set.
 	releases := []int{}
@@ -132,7 +148,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 			return false
 		}
 	}
-	return true
+	return rootClosed()
 }
 
 func constructorEffectType(desc string) constructorEffectValue {
@@ -167,7 +183,16 @@ func constructorEffectOriginalOperandFree(code *CodeAttribute, op *core.OpCode) 
 }
 
 func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, bool) {
+	return c.constructorMotionClassWithSnapshot(owner, false)
+}
+
+func (c *ClassObjectDumper) constructorMotionClassWithSnapshot(owner string, snapshot bool) (*ClassObject, bool) {
 	if c.obj != nil && owner == c.obj.GetClassName() {
+		if snapshot {
+			// The caller owns this parsed tree; it is not a private resolver
+			// snapshot and cannot certify a new confined allocation.
+			return nil, false
+		}
 		// The caller's parsed object is not an authoritative resolver-byte
 		// dependency. Its own constructor body must be reanalyzed per profile.
 		if c.constructorProfileEvidence != nil && c.constructorProfileEvidence.inBody {
@@ -198,17 +223,24 @@ func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, 
 	if e != nil && e.inBody && e.eligible && !e.inconsistent {
 		_, certified = e.originals[owner]
 	}
-	var retained, itemsBefore int64
-	if certified {
+	var retained, itemsBefore, priorRetention int64
+	if e != nil {
+		if e.parsedRetention > int64(^uint64(0)>>1)-e.bodyRetention {
+			return nil, false
+		}
+		priorRetention = e.parsedRetention + e.bodyRetention
+	}
+	owned := certified || snapshot
+	if owned {
 		// Own the provider snapshot. A later callback cannot mutate this parsed
 		// body's byte slices through a buffer returned by an earlier lookup.
 		var err error
 		retained, err = workbudget.CheckedProduct(int64(len(raw)), 4)
 		max := int64(^uint64(0) >> 1)
-		if err != nil || e.parsedRetention > max-e.bodyRetention || retained > max-e.parsedRetention-e.bodyRetention {
+		if err != nil || retained > max-priorRetention {
 			return nil, false
 		}
-		if !nativeProofWork(c.Work, 1) || c.Work != nil && (c.Work.Charge(workbudget.CounterReadBytes, int64(len(raw))) != nil || c.Work.CheckAlloc(e.parsedRetention+e.bodyRetention+retained) != nil) {
+		if !nativeProofWork(c.Work, 1) || c.Work != nil && (c.Work.Charge(workbudget.CounterReadBytes, int64(len(raw))) != nil || c.Work.CheckAlloc(priorRetention+retained) != nil) {
 			return nil, false
 		}
 		raw = bytes.Clone(raw)
@@ -218,7 +250,7 @@ func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, 
 	if err != nil || obj == nil || obj.GetClassName() != owner {
 		return nil, false
 	}
-	if certified {
+	if owned {
 		// Parser items are already a logical work bound (not a general heap quota).
 		// Include their retained metadata and the owned bytes cumulatively in the
 		// existing intermediate-allocation guard, rather than one class at a time.
@@ -227,9 +259,11 @@ func (c *ClassObjectDumper) constructorMotionClass(owner string) (*ClassObject, 
 			return nil, false
 		}
 		retained += metadata + 32
-		if e.parsedRetention > int64(^uint64(0)>>1)-retained-e.bodyRetention || c.Work != nil && c.Work.CheckAlloc(e.parsedRetention+retained+e.bodyRetention) != nil {
+		if retained > int64(^uint64(0)>>1)-priorRetention || c.Work != nil && c.Work.CheckAlloc(priorRetention+retained) != nil {
 			return nil, false
 		}
+	}
+	if certified {
 		if e.parsedOriginals == nil {
 			e.parsedOriginals = map[*ClassObject]bool{}
 		}
@@ -339,7 +373,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 	for i, param := range params {
 		value := constructorEffectType(param)
 		if len(arguments) > 0 {
-			if arguments[i].kind != value.kind || arguments[i].receiver || arguments[i].allocation != 0 {
+			if arguments[i].kind != value.kind || arguments[i].reachesReceiver() || arguments[i].allocation != 0 {
 				return false
 			}
 			value = arguments[i]
@@ -658,7 +692,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 						return false
 					}
 					v, ok := pop(constructorEffectType(fields[0]).kind)
-					if !ok || v.receiver || v.allocation != 0 {
+					if !ok || v.reachesReceiver() || v.allocation != 0 {
 						return false
 					}
 				}
@@ -670,7 +704,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					return false
 				}
 				v, ok := pop('L')
-				if !ok || v.allocation != 0 || v.receiver && !initialized {
+				if !ok || v.allocation != 0 || v.retainsReceiver || v.receiver && !initialized {
 					return false
 				}
 				if v.receiver {
@@ -702,7 +736,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				}
 				for i := len(args) - 1; i >= 0; i-- {
 					value, ok := pop(constructorEffectType(args[i]).kind)
-					if !ok || value.receiver || value.allocation != 0 {
+					if !ok || value.reachesReceiver() || value.allocation != 0 {
 						return false
 					}
 				}
@@ -765,7 +799,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					kind = []byte{'I', 'J', 'F', 'D', 'L', 'I', 'I', 'I'}[opcode-base]
 					if store {
 						v, ok := pop(kind)
-						if !ok || v.receiver || v.allocation != 0 {
+						if !ok || v.reachesReceiver() || v.allocation != 0 {
 							return false
 						}
 					}
@@ -774,7 +808,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					}
 				}
 				array, ok := pop('L')
-				if !ok || array.receiver || array.allocation != 0 {
+				if !ok || array.reachesReceiver() || array.allocation != 0 {
 					return false
 				}
 				if !store {
@@ -887,14 +921,14 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					if !ok {
 						return false
 					}
-					if value.allocation != 0 || value.receiver && !initialized {
+					if value.allocation != 0 || value.reachesReceiver() && !initialized {
 						// Uninitialized THIS is not a legal stored reference value.
 						return false
 					}
 					stored = value
 				}
 				receiver, ok := pop('L')
-				if !ok || receiver.allocation != 0 {
+				if !ok || receiver.allocation != 0 || receiver.retainsReceiver {
 					return false
 				}
 				if !receiver.receiver {
@@ -902,7 +936,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					// input or initialized allocation cannot hide an alias to it.
 					// Keep the original field operation and failure timing; after
 					// Object initialization, failure needs the closed finalizer.
-					if stored.receiver || initialized && !c.constructorReceiverFinalizerSilent {
+					if stored.reachesReceiver() || initialized && !c.constructorReceiverFinalizerSilent {
 						return false
 					}
 					if opcode == core.OP_GETFIELD {
@@ -910,7 +944,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					}
 					continue
 				}
-				aliases.selfStored = aliases.selfStored || stored.receiver
+				aliases.selfStored = aliases.selfStored || stored.reachesReceiver()
 				field, known := c.constructorEffectField(obj, member, opcode == core.OP_PUTFIELD, remaining, aliases)
 				if !known || writes[field] {
 					return false
@@ -941,7 +975,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				actuals := make([]constructorEffectValue, len(args))
 				for i := len(args) - 1; i >= 0; i-- {
 					v, ok := pop(constructorEffectType(args[i]).kind)
-					if !ok || v.receiver || v.allocation != 0 {
+					if !ok || v.allocation != 0 {
 						return false
 					}
 					actuals[i] = v
@@ -954,6 +988,14 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 						return false
 					}
 				}
+				taintedArgs := false
+				for _, v := range actuals {
+					taintedArgs = taintedArgs || v.reachesReceiver()
+				}
+				if receiver.retainsReceiver || taintedArgs && (!initialized || receiver.allocation == 0 || opcode != core.OP_INVOKESPECIAL || member.Member != "<init>") {
+					return false
+				}
+
 				if receiver.receiver && member.Member != "<init>" {
 					if !initialized || !c.constructorReceiverFinalizerSilent {
 						return false
@@ -975,16 +1017,28 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 						if opcode != core.OP_INVOKESPECIAL || result != "V" || member.Name != allocations[receiver.allocation] {
 							return false
 						}
+						retained := false
+						if taintedArgs {
+							var known bool
+							retained, known = c.constructorConfinedCapture(member, actuals, remaining)
+							if !known {
+								return false
+							}
+							aliases.confinedCapture = true
+							aliases.selfStored = aliases.selfStored || retained
+						}
 						// JVM initialization changes every alias of THIS allocation,
 						// without changing the enclosing receiver's initialized state.
 						for i := range locals {
 							if locals[i].allocation == receiver.allocation {
 								locals[i].allocation = 0
+								locals[i].retainsReceiver = retained
 							}
 						}
 						for i := range stack {
 							if stack[i].allocation == receiver.allocation {
 								stack[i].allocation = 0
+								stack[i].retainsReceiver = retained
 							}
 						}
 					} else {
@@ -1113,14 +1167,14 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					return false
 				}
 				v, ok := pop('L')
-				return ok && !v.receiver && v.allocation == 0 && len(stack) == 0
+				return ok && !v.reachesReceiver() && v.allocation == 0 && len(stack) == 0
 			case opcode >= core.OP_IRETURN && opcode <= core.OP_ARETURN:
 				kind := []byte{'I', 'J', 'F', 'D', 'L'}[opcode-core.OP_IRETURN]
 				if !initializedAtEntry || !initialized || ret == "V" || constructorEffectType(ret).kind != kind || !constructorEffectOriginalOperandFree(code, op) {
 					return false
 				}
 				value, ok := pop(kind)
-				return ok && !value.receiver && value.allocation == 0 && len(stack) == 0
+				return ok && !value.reachesReceiver() && value.allocation == 0 && len(stack) == 0
 			case opcode == core.OP_RETURN:
 				return initialized && ret == "V" && len(stack) == 0 && constructorEffectOriginalOperandFree(code, op)
 			default:
