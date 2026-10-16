@@ -285,6 +285,14 @@ func (c *ClassObjectDumper) nativeAnonymousForestHasChildren(members *nativeMemb
 					if members != nil && members.emptyMarkers[name] != nil && nativeMemberEmptyAccessMarker(object, members.owner, c.Work) {
 						continue
 					}
+					if members != nil {
+						if _, table := members.enumSwitchTables[name]; table {
+							if !c.nativeMemberEnumSwitchAnonymousRole(members, object) {
+								return false, false
+							}
+							continue
+						}
+					}
 					// Constant-specific enum classes also have unnamed rows and
 					// EnclosingMethod metadata. Their source role belongs to the
 					// independently proved enum allocation, not to an anonymous

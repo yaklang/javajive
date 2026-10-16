@@ -698,8 +698,13 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 		if members != nil && members.emptyMarkers[name] != nil && nativeMemberEmptyAccessMarker(obj, members.owner, c.Work) {
 			continue
 		}
-		if members != nil && members.enumSwitchTables[name] != nil {
-			continue
+		if members != nil {
+			if _, table := members.enumSwitchTables[name]; table {
+				if !c.nativeMemberEnumSwitchAnonymousRole(members, obj) {
+					return nil
+				}
+				continue
+			}
 		}
 		if c.nativeMemberEnumConstantAnonymousRole(members, obj) {
 			continue
