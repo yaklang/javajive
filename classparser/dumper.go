@@ -4464,6 +4464,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					}
 					tryBody, catchExc, catchBodies := ret.TryBody, ret.Exception, ret.CatchBodies
 					finally, haveFinally := rewriter.RecoverCatchAllFinally(ret)
+					if haveFinally && finally.Continuation != nil && statementHasContinuation[statement] {
+						// A method-local terminal projection cannot consume an
+						// independently owned enclosing continuation or loop edge.
+						haveFinally = false
+					}
 					if haveFinally {
 						tryBody, catchExc, catchBodies = finally.TryBody, finally.Exceptions, finally.CatchBodies
 					}
@@ -4522,6 +4527,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					haveCatch := len(catchBodies) > 0
 					if haveFinally {
 						statementStr += fmt.Sprintf("finally{\n%s\n%s}", statementListToString(finally.Cleanup), c.GetTabString())
+					}
+					if haveFinally && finally.Continuation != nil {
+						statementStr += "\n" + statementListToString([]statements.Statement{finally.Continuation})
 					}
 					if !haveCatch && !haveFinally {
 						body := statementListToString(ret.TryBody)

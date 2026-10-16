@@ -507,6 +507,9 @@ func checkedEscapeThrownTypes(body []statements.Statement, provider callbinding.
 				continue
 			}
 			if view, ok := rewriter.RecoverCatchAllFinally(st); ok {
+				if view.Continuation != nil {
+					queue = append(queue, view.Continuation)
+				}
 				queue = append(queue, view.TryBody...)
 				queue = append(queue, view.Cleanup...)
 				for _, handler := range view.CatchBodies {

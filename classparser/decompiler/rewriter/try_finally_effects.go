@@ -151,6 +151,14 @@ func sameFinallyEffectTree(rows []core.HandlerRange, a, b values.JavaValue, excl
 			}
 		}
 		return true
+	case *values.CustomValue:
+		y, ok := b.(*values.CustomValue)
+		if !ok {
+			return false
+		}
+		xarg, xtarget, _, xknown := x.SourcePrimitiveConversion()
+		yarg, ytarget, _, yknown := y.SourcePrimitiveConversion()
+		return xknown && yknown && xtarget == ytarget && totalPrimitiveConversionOperand(xarg) && totalPrimitiveConversionOperand(yarg) && same(xarg, yarg)
 	case *values.CastExpression:
 		y, ok := b.(*values.CastExpression)
 		return ok && x != nil && y != nil && typeSame(x.TargetType, y.TargetType) && x.Binding == y.Binding && outside(x.OriginPC, !x.Binding) && outside(y.OriginPC, !y.Binding) && same(x.Value, y.Value)
@@ -159,6 +167,14 @@ func sameFinallyEffectTree(rows []core.HandlerRange, a, b values.JavaValue, excl
 }
 
 func finallyCoveredAssignment(x *statements.AssignStatement, covered func(int) bool) bool {
+	if x != nil && x.IsDeclare {
+		// A declaration inserted for a local join is a source binder, not
+		// a JVM evaluation. Do not invent a PC or an initialization value.
+		// Every actual store still follows the original effect-domain proof.
+		ref, known := x.LeftValue.(*values.JavaRef)
+		return known && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam && ref.CustomValue == nil && ref.StackVar == nil && ref.Type() != nil &&
+			!x.IsFirst && x.JavaValue == nil && x.ArrayMember == nil
+	}
 	if x == nil || x.ArrayMember != nil || !x.HasOriginPC || !covered(x.OriginPC) || !finallyCoveredValue(x.JavaValue, covered) {
 		return false
 	}
@@ -174,7 +190,8 @@ func finallyCoveredAssignment(x *statements.AssignStatement, covered func(int) b
 }
 
 // CFG rendering can absorb the synthetic rethrow into the fall-through arm
-// of a terminal cleanup condition. Separate only that exact primary rethrow;
+// of a terminal cleanup condition. Retain the cleanup prefix of the completion
+// arm and separate only its exact primary rethrow;
 // the other arm must itself be an abrupt cleanup throw. Its identity remains.
 func finallyHandlerCleanup(body []statements.Statement, primary *values.JavaRef, rows [][2]int) ([]statements.Statement, bool) {
 	if len(body) == 0 || primary == nil {
@@ -198,17 +215,22 @@ func finallyHandlerCleanup(body []statements.Statement, primary *values.JavaRef,
 		if !first {
 			arm, other = other, arm
 		}
-		if len(arm) != 1 || !outsideThrow(arm[0], primary) || len(other) == 0 {
+		if len(arm) == 0 || !outsideThrow(arm[len(arm)-1], primary) || len(other) == 0 {
 			continue
+		}
+		if len(arm) > 1 {
+			if _, sealed := arm[len(arm)-1].(*statements.CustomStatement).SourceThrowOperand(); !sealed {
+				continue
+			}
 		}
 		thrown, ok := other[len(other)-1].(*statements.CustomStatement)
 		if !ok || thrown == nil || thrown.ThrownValue == nil || !thrown.HasOriginPC || thrown.OriginPC < 0 || finallyContains(rows, thrown.OriginPC) || sameTryLocal(thrown.ThrownValue, primary) {
 			continue
 		}
 		if first {
-			clone.IfBody = nil
+			clone.IfBody = arm[:len(arm)-1]
 		} else {
-			clone.ElseBody = nil
+			clone.ElseBody = arm[:len(arm)-1]
 		}
 		out := append([]statements.Statement{}, body[:last]...)
 		return append(out, &clone), true
@@ -216,7 +238,7 @@ func finallyHandlerCleanup(body []statements.Statement, primary *values.JavaRef,
 	return nil, false
 }
 
-// A normal return may occupy the empty completion arm of that same copied
+// A normal return may follow the completion arm of that same copied
 // conditional cleanup. Lift only its inert local/literal return, after proving
 // the rest of the candidate is exactly the canonical cleanup effect tree.
 func finallyConditionalReturn(candidate, cleanup statements.Statement, rows []core.HandlerRange, excluded []*values.JavaRef) (statements.Statement, *statements.ReturnStatement) {
@@ -233,10 +255,10 @@ func finallyConditionalReturn(candidate, cleanup statements.Statement, rows []co
 		if !first {
 			arm, witness, other = finallyWithoutEnd(x.ElseBody), finallyWithoutEnd(y.ElseBody), finallyWithoutEnd(y.IfBody)
 		}
-		if len(arm) != 1 || len(witness) != 0 || len(other) == 0 {
+		if len(arm) != len(witness)+1 || len(other) == 0 {
 			continue
 		}
-		ret, ok := arm[0].(*statements.ReturnStatement)
+		ret, ok := arm[len(arm)-1].(*statements.ReturnStatement)
 		if !ok || ret == nil || !ret.HasOriginPC || ret.OriginPC < 0 || (ret.JavaValue != nil && !finallyPureLocal(ret.JavaValue)) {
 			continue
 		}
@@ -251,13 +273,30 @@ func finallyConditionalReturn(candidate, cleanup statements.Statement, rows []co
 		}
 		clone := *x
 		if first {
-			clone.IfBody = nil
+			clone.IfBody = arm[:len(arm)-1]
 		} else {
-			clone.ElseBody = nil
+			clone.ElseBody = arm[:len(arm)-1]
 		}
 		if sameFinallyCleanup(rows, &clone, y, excluded, 0) {
 			return &clone, ret
 		}
 	}
 	return candidate, nil
+}
+
+// Source boolean represents a proved JVM int-category 0/1 word. The sealed
+// conversion renderer explicitly recreates that word before the numeric cast.
+func totalPrimitiveConversionOperand(v values.JavaValue) bool {
+	if v == nil || v.Type() == nil {
+		return false
+	}
+	p, ok := v.Type().RawType().(*types.JavaPrimer)
+	if !ok || p == nil {
+		return false
+	}
+	switch p.Name {
+	case types.JavaBoolean, types.JavaByte, types.JavaChar, types.JavaShort, types.JavaInteger, types.JavaLong, types.JavaFloat, types.JavaDouble:
+		return true
+	}
+	return false
 }

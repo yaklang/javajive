@@ -9,6 +9,7 @@ import (
 )
 
 type CustomValue struct {
+	sourcePrimitive   *sourcePrimitiveConversion
 	sourceCaught      bool
 	sourceCaughtPC    int
 	sourceCaughtTyped bool
@@ -58,6 +59,10 @@ type CustomValue struct {
 
 // ReplaceVar implements JavaValue.
 func (v *CustomValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if v.sourcePrimitive != nil {
+		v.sourcePrimitive.operand.ReplaceVar(oldId, newId)
+		return
+	}
 	if v.sourceCaught {
 		return // The handler-entry name is bound by its original PC, not a local ID.
 	}
@@ -67,6 +72,9 @@ func (v *CustomValue) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableI
 }
 
 func (v *CustomValue) Type() types.JavaType {
+	if v.sourcePrimitive != nil {
+		return types.NewJavaPrimer(v.sourcePrimitive.target)
+	}
 	return v.TypeFunc()
 }
 func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
@@ -94,6 +102,10 @@ func (v *CustomValue) String(funcCtx *class_context.ClassContext) string {
 			}
 		}
 		return name
+	}
+	if v.sourcePrimitive != nil {
+		role := v.sourcePrimitive
+		return finishExpressionRender(funcCtx, guard, RenderPrimitiveConversion(role.operand, types.NewJavaPrimer(role.target), funcCtx))
 	}
 	if v.StringFunc == nil && v.WriteFunc == nil {
 		return ""

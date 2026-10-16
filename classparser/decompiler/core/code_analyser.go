@@ -4122,27 +4122,10 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			typ = types.NewJavaPrimer(types.JavaLong)
 		}
 		arg := runtimeStackSimulation.Pop().(values.JavaValue)
-		cast := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			// Parenthesize the operand so the (unary) cast keeps the right precedence
-			// when the operand is a lower-precedence expression: without it,
-			// `(long)a * b` parses as `((long)a) * b` instead of `(long)(a * b)`,
-			// causing "possible lossy conversion" recompile failures. The extra parens
-			// are always valid Java.
-			return values.RenderPrimitiveConversion(arg, typ, funcCtx)
-		}, func() types.JavaType {
-			return typ
-		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-			// Propagate variable renames into the cast operand. Without this, a later rewriteVar
-			// rename (e.g. a depth-collision rename of the operand's variable) updates the operand's
-			// other occurrences but not this primitive-cast expression, so a `(int)(varN)` cast keeps
-			// a stale name and references an undeclared variable (guava UnsignedLongs.toString:
-			// `(int) rem` printed the old name `var5` after rem was renamed `var4_1`). CHECKCAST
-			// already does this; the numeric conversions must too.
-			arg.ReplaceVar(oldId, newId)
-		})
-		cast.Flag = "primitive_cast"
-		cast.CapturesKnown = true
-		cast.Captures = []values.JavaValue{arg}
+		cast := values.NewOriginalPrimitiveConversion(arg, typ, int(opcode.CurrentOffset))
+		if cast == nil {
+			return fmt.Errorf("invalid primitive conversion at PC %d", opcode.CurrentOffset)
+		}
 		runtimeStackSimulation.Push(cast)
 	case OP_INSTANCEOF:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()

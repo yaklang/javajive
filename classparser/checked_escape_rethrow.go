@@ -58,6 +58,9 @@ func (c *ClassObjectDumper) preciseCatchRethrows(body []statements.Statement, co
 			}
 			if tr, ok := st.(*statements.TryCatchStatement); ok {
 				if view, proved := rewriter.RecoverCatchAllFinally(tr); proved {
+					if view.Continuation != nil && !walk([]statements.Statement{view.Continuation}, scope) {
+						return false
+					}
 					if !walk(view.TryBody, scope) || !walk(view.Cleanup, scope) {
 						return false
 					}

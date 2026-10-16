@@ -91,6 +91,9 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		}
 		return []JavaValue{v.Inner}, true
 	case *CustomValue:
+		if operand, _, _, known := v.SourcePrimitiveConversion(); known {
+			return []JavaValue{operand}, true
+		}
 		if _, known := v.SourceCaughtExceptionEntry(); known {
 			return nil, true
 		}

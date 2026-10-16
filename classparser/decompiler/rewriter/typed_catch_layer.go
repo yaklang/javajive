@@ -270,6 +270,13 @@ func (p *typedCatchCoverage) value(v values.JavaValue, depth int) bool {
 	case *values.JavaClassMember:
 		return x != nil && x.HasOriginPC && p.covered(x.OriginPC)
 	case *values.CustomValue:
+		if operand, _, _, original := x.SourcePrimitiveConversion(); original {
+			if !totalPrimitiveConversionOperand(operand) {
+				return false
+			}
+			children = []values.JavaValue{operand}
+			break
+		}
 		// JVM numeric conversions are total. The closure remains opaque unless
 		// its decoder-owned category, complete single capture and both numeric
 		// types establish that only the captured operand can throw.
