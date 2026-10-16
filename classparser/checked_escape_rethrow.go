@@ -172,6 +172,11 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 		return nil, nil, false
 	}
 	switch x := st.(type) {
+	case *statements.SourceAnchorStatement:
+		// This leaf renders no operand and cannot assign a catch binding. Its
+		// owning JVM operation still participates in the independent raw-PC
+		// exception/delegation check; this is only a source-name traversal.
+		return nil, nil, true
 	case *nativeAssertStatement:
 		condition, call, _, known := x.SourceAssertionProtocol()
 		if !known {
