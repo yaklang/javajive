@@ -194,7 +194,12 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 		return s
 	}
 	var args string
-	if n.ArgumentsGetter != nil {
+	// A retained invocation is the structural constructor operand list. Render
+	// it in this consumer's context: the legacy getter may close over an older
+	// source scope, whose ownership callbacks are not valid for this query.
+	if n.ConstructorCall != nil {
+		args = n.ConstructorCall.ArgumentString(funcCtx)
+	} else if n.ArgumentsGetter != nil {
 		args = n.ArgumentsGetter()
 	}
 	name := n.JavaType.String(funcCtx)
