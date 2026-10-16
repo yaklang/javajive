@@ -11,7 +11,7 @@ class SourceDurationSharding(unittest.TestCase):
         names = [f"Test{i:04d}" for i in range(1930)]
         hints = {name: (120 if i % 7 == 0 else 10) for i, name in enumerate(names)}
         scopes = [f"scope{i}" for i in range(35)]
-        for count in (6, 8):
+        for count in (6, 8, 10):
             with self.subTest(runners=count):
                 lanes = source_parent_shards(names, hints, count * 4)
                 parents, selected_scopes = [], []
