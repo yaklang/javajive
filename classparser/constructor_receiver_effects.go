@@ -20,6 +20,7 @@ import (
 type constructorEffectValue struct {
 	kind            byte
 	knownInt        bool
+	knownNull       bool
 	intWord         int32
 	receiver        bool
 	retainsReceiver bool
@@ -373,7 +374,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 	for i, param := range params {
 		value := constructorEffectType(param)
 		if len(arguments) > 0 {
-			if arguments[i].kind != value.kind || arguments[i].reachesReceiver() || arguments[i].allocation != 0 {
+			if !constructorValidNullFact(arguments[i]) || arguments[i].kind != value.kind || arguments[i].reachesReceiver() || arguments[i].allocation != 0 {
 				return false
 			}
 			value = arguments[i]
@@ -815,7 +816,10 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					stack = append(stack, constructorEffectValue{kind: kind})
 				}
 			case opcode == core.OP_ACONST_NULL:
-				stack = append(stack, constructorEffectValue{kind: 'L'})
+				if !constructorEffectOriginalOperandFree(code, op) {
+					return false
+				}
+				stack = append(stack, constructorEffectValue{kind: 'L', knownNull: true})
 			case opcode >= core.OP_ICONST_M1 && opcode <= core.OP_ICONST_5 || opcode == core.OP_BIPUSH || opcode == core.OP_SIPUSH:
 				v, known := constructorOriginalIntLiteral(obj, op)
 				if !known {
@@ -1127,6 +1131,12 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				branch, ok := target(op)
 				if !ok {
 					return false
+				}
+				if taken, known := constructorKnownNullBranch(opcode, conditions); known {
+					if taken {
+						return walk(branch, locals, stack, initialized)
+					}
+					return walk(index+1, locals, stack, initialized)
 				}
 				if taken, known := constructorKnownIntBranch(opcode, conditions); known {
 					if taken {

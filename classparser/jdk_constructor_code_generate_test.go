@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -25,8 +27,9 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 		t.Skip("explicit original archive generation input required")
 	}
 	var input struct {
-		Out      string
-		Profiles []struct {
+		Out           string
+		OutReferences string
+		Profiles      []struct {
 			Release       int
 			Path, Prefix  string
 			ArchiveSHA256 string `json:"archive_sha256"`
@@ -61,6 +64,7 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 	}
 	seenProfiles := map[int]bool{}
 	document := constructorCodeDocument{Schema: 1}
+	originalReferences := map[int]map[string]any{}
 	var out bytes.Buffer
 	writer := zip.NewWriter(&out)
 	for _, profile := range input.Profiles {
@@ -159,6 +163,7 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 		}
 		sort.Strings(names)
 		selected = nativePlatformDeclarationIndexClasses(objects, declarationRoots[profile.Release])
+		originalReferences[profile.Release] = map[string]any{}
 		p := constructorCodeProfile{Release: profile.Release, ArchiveSHA256: expected[profile.Release], Classes: map[string]string{}}
 		for _, name := range names {
 			if !selected[name] {
@@ -167,6 +172,7 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 			raw := originals[name]
 			hash := sha256.Sum256(raw)
 			p.Classes[name] = hex.EncodeToString(hash[:])
+			originalReferences[profile.Release][name] = map[string]any{"archive": filepath.Base(profile.Path), "entry": profile.Prefix + name + ".class", "sha256": p.Classes[name], "major": objects[name].MajorVersion, "parents": append([]string{objects[name].GetSupperClassName()}, objects[name].GetInterfacesName()...)}
 			entry, err := writer.Create(fmt.Sprintf("%d/%s.class", profile.Release, name))
 			if err != nil {
 				t.Fatal(err)
@@ -194,6 +200,15 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 	}
 	if err = os.WriteFile(input.Out, out.Bytes(), 0600); err != nil {
 		t.Fatal(err)
+	}
+	if input.OutReferences != "" {
+		data, err := json.Marshal(originalReferences)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(input.OutReferences, data, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Logf("original constructor evidence archive: %d bytes", out.Len())
 }
@@ -247,12 +262,51 @@ func nativePlatformDeclarationIndexClasses(objects map[string]*ClassObject, cata
 		name := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
 		obj := objects[name]
-		for _, parent := range append([]string{obj.GetSupperClassName()}, obj.GetInterfacesName()...) {
-			if parent != "" && !selected[parent] {
+		dependencies := append([]string{obj.GetSupperClassName()}, obj.GetInterfacesName()...)
+		dependencies = append(dependencies, nativePlatformCopyFactoryClasses(obj)...)
+		for _, parent := range dependencies {
+			if parent != "" && !selected[parent] && closed(parent) {
 				selected[parent] = true
 				pending = append(pending, parent)
 			}
 		}
 	}
 	return selected
+}
+
+// A private allocation returned by an original static factory needs original
+// constructor bytes too. This is offline indexing, not an effect certificate:
+// callbacks/publication remain independently rejected by the runtime proof.
+func nativePlatformCopyFactoryClasses(object *ClassObject) []string {
+	var result []string
+	for _, method := range object.Methods {
+		if method == nil || method.AccessFlags&0x0008 == 0 || method.AccessFlags&(0x0100|0x0400) != 0 {
+			continue
+		}
+		var code *CodeAttribute
+		count := 0
+		for _, attribute := range method.Attributes {
+			if body, ok := attribute.(*CodeAttribute); ok {
+				code = body
+				count++
+			}
+		}
+		if count != 1 || code == nil {
+			continue
+		}
+		decoder := core.NewDecompiler(code.Code, nil)
+		if decoder.ParseOpcode() != nil {
+			continue
+		}
+		ops := constructorMotionOps(decoder)
+		if len(ops) < 4 || ops[0].Instr.OpCode != core.OP_NEW || ops[1].Instr.OpCode != core.OP_DUP || ops[len(ops)-1].Instr.OpCode != core.OP_ARETURN || len(ops[0].Data) != 2 {
+			continue
+		}
+		name, known := sourceBridgeClassName(object, core.Convert2bytesToInt(ops[0].Data))
+		callee := constructorMotionMember(object, ops[len(ops)-2], core.OP_INVOKESPECIAL)
+		if known && callee != nil && callee.Member == "<init>" && callee.Name == name {
+			result = append(result, name)
+		}
+	}
+	return result
 }

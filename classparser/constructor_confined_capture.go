@@ -29,11 +29,28 @@ func constructorConfinedRootSnapshot(object *ClassObject) (raw []byte, known boo
 // later calls, field reads and publication cannot borrow THIS permissions.
 // The caller separately proves the original receiver's finalization boundary.
 func (c *ClassObjectDumper) constructorConfinedCapture(member *values.JavaClassMember, actuals []constructorEffectValue, remaining *int) (bool, bool) {
-	if c == nil || member == nil || member.Member != "<init>" || len(member.Description) > 65535 || !c.constructorReceiverFinalizerSilent || remaining == nil || *remaining <= 0 || !nativeProofWork(c.Work, int64(len(member.Description))+1) {
+	return c.constructorConfinedCaptureChain(member, actuals, remaining, map[string]bool{}, 0, true)
+}
+func (c *ClassObjectDumper) constructorConfinedCaptureChain(member *values.JavaClassMember, actuals []constructorEffectValue, remaining *int, active map[string]bool, depth int, allocation bool) (bool, bool) {
+	if depth > 16 || c == nil || member == nil || member.Member != "<init>" || len(member.Description) > 65535 || !c.constructorReceiverFinalizerSilent || remaining == nil || *remaining <= 0 || !nativeProofWork(c.Work, int64(len(member.Description))+1) {
 		return false, false
 	}
+	key := member.Name + "\x00" + member.Description
+	if active[key] {
+		return false, false
+	}
+	active[key] = true
+	defer delete(active, key)
+	if member.Name == "java/lang/Object" && member.Description == "()V" {
+		if c.FuncCtx != nil {
+			exceptions, known := exactInvocationExceptions(c.FuncCtx.InvocationMetadata, member.Name, "<init>", "()V")
+			return false, known && len(exceptions) == 0 && len(actuals) == 0
+		}
+		exceptions, known := exactInvocationExceptions(c.buildInvocationMetadata(), member.Name, "<init>", "()V")
+		return false, known && len(exceptions) == 0 && len(actuals) == 0
+	}
 	object, known := c.constructorMotionClassWithSnapshot(member.Name, true)
-	if !known || object == nil || object.GetClassName() != member.Name || object.GetSupperClassName() != "java/lang/Object" || object.AccessFlags&(0x0200|0x0400|0x2000|0x4000|0x8000) != 0 {
+	if !known || object == nil || object.GetClassName() != member.Name || object.AccessFlags&(0x0200|0x2000|0x4000|0x8000) != 0 || allocation && object.AccessFlags&0x0400 != 0 {
 		return false, false
 	}
 	params, result, err := callbinding.Descriptor(member.Description)
@@ -42,7 +59,7 @@ func (c *ClassObjectDumper) constructorConfinedCapture(member *values.JavaClassM
 	}
 	for i, param := range params {
 		value := actuals[i]
-		if value.kind != constructorEffectType(param).kind || value.allocation != 0 || value.reachesReceiver() && value.kind != 'L' || value.receiver && value.retainsReceiver {
+		if !constructorValidNullFact(value) || value.kind != constructorEffectType(param).kind || value.allocation != 0 || value.reachesReceiver() && value.kind != 'L' || value.receiver && value.retainsReceiver {
 			return false, false
 		}
 	}
@@ -95,35 +112,5 @@ func (c *ClassObjectDumper) constructorConfinedCapture(member *values.JavaClassM
 	if len(ops) < 3 || !constructorEffectOriginalOperandFree(code, ops[len(ops)-1]) || ops[len(ops)-1].Instr.OpCode != core.OP_RETURN {
 		return false, false
 	}
-	slots := constructorParameterSlots(params)
-	initialized, retained := false, false
-	for i := 0; i < len(ops)-1; {
-		*remaining--
-		if *remaining < 0 || !nativeProofWork(c.Work, 1) || core.GetRetrieveIdx(ops[i]) != 0 || !constructorMotionLoad(ops[i], "Ljava/lang/Object;") {
-			return false, false
-		}
-		if i+1 < len(ops)-1 {
-			delegate := constructorMotionMember(object, ops[i+1], core.OP_INVOKESPECIAL)
-			if delegate != nil && delegate.Name == "java/lang/Object" && delegate.Member == "<init>" && delegate.Description == "()V" {
-				if initialized {
-					return false, false
-				}
-				initialized = true
-				i += 2
-				continue
-			}
-		}
-		if i+2 >= len(ops)-1 {
-			return false, false
-		}
-		slot := core.GetRetrieveIdx(ops[i+1])
-		index, parameter := slots[slot]
-		field := constructorMotionMember(object, ops[i+2], core.OP_PUTFIELD)
-		if !parameter || slot <= 0 || index >= len(actuals) || actuals[index].allocation != 0 || actuals[index].kind != constructorEffectType(params[index]).kind || !constructorMotionLoad(ops[i+1], params[index]) || int(code.MaxStack) < 1+actuals[index].width() || field == nil || field.Name != member.Name || field.Description != params[index] || !constructorMotionField(object, field, false, c.Work) {
-			return false, false
-		}
-		retained = retained || actuals[index].reachesReceiver()
-		i += 3
-	}
-	return retained, initialized
+	return c.constructorConfinedCaptureBody(object, code, ops, params, actuals, remaining, active, depth)
 }
