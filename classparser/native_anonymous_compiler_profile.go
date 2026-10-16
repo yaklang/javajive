@@ -123,9 +123,17 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 		}
 	}
 	packet := nativeAnonymousConstructorRolesWithLambdas(obj, owner, method, assertionRoot, c.Work, members, forest, metadata, expected, false, lambda, access)
-	if packet == nil || static != (packet.enclosingField == "") {
+	if packet == nil {
 		return nil
 	}
+	if static != (packet.enclosingField == "") {
+		// Class modifiers follow the owning method. Availability of its THIS is
+		// separate: explicit constructor-invocation arguments precede initialization.
+		if static || packet.enclosingField != "" || !c.nativeAnonymousConstructorArgument(obj, method) {
+			return nil
+		}
+	}
+
 	if c.obj.MajorVersion < 51 {
 		packet.legacyInputMajor = c.obj.MajorVersion
 	}

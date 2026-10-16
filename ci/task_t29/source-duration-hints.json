@@ -2227,7 +2227,10 @@
     "TestNativeSourceBridgeForwarderRequiresCompleteOriginalProtocol": 0.43,
     "TestAdversarialEnclosingParameterCapture": 32.52,
     "TestAdversarialEnclosingParameterCaptureNativeCompiler": 19.9,
-    "TestNativeEnclosingParameterCaptureRequiresOriginalBinding": 1.01
+    "TestNativeEnclosingParameterCaptureRequiresOriginalBinding": 1.01,
+    "TestAdversarialAnonymousConstructorArgumentContext": 39.78,
+    "TestAdversarialAnonymousConstructorArgumentContextNativeCompiler": 32.97,
+    "TestNativeAnonymousConstructorArgumentRequiresOriginalFrames": 1.48
   },
   "source_runs": [
     37850493191,
