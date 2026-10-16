@@ -193,7 +193,7 @@ func nativeMemberCallPacketProof(obj *ClassObject, m *MemberInfo, resolve func(s
 				if len(targetSignature) > 4096 || !nativeProofWork(work, int64(len(targetSignature))*130+1) || work != nil && work.CheckAlloc(int64(len(targetSignature))*256) != nil {
 					return nil
 				}
-				erased, signatureThrows, formals, known := types.UnboundedMethodErasure(targetSignature)
+				erased, signatureThrows, formals, known := types.ObjectWitnessMethodErasure(targetSignature)
 				if !known || erased != invoke.Description || !nativeOriginalSignatureThrows(targetOwner, target, signatureThrows, work) {
 					return nil
 				}
