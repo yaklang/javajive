@@ -1365,7 +1365,11 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if child.sharedParameterRoles {
 			c.appendDiagnostic(DecompileDiagnostic{Code: "anonymous_shared_parameter_metadata", Method: child.object.GetClassName() + ".<init>" + child.descriptor, Message: "The original constructor reuses an unchanged physical parameter for a proved capture store and SUPER argument. Both source uses read the same stable local or enclosing receiver. Recompilation may generate separate hidden capture parameters, changing this anonymous constructor's physical descriptor and parameter metadata; executable values, capture-before-SUPER order and source overload binding are preserved."})
 		}
-		return fmt.Sprintf("/*jdec-owned-anonymous-ordinal:%d:%s*/%snew %s(%s) {%s}", child.ordinal, p.owner, registration, parent, strings.Join(tuple, ","), body), true
+		// javac visits constructor arguments before entering this anonymous
+		// declaration. Its ordinal event therefore follows the argument subtree
+		// and precedes the body. A prefix before NEW reverses nested argument
+		// registrations even when all runtime evaluations are unchanged.
+		return fmt.Sprintf("%snew %s(%s) /*jdec-owned-anonymous-ordinal:%d:%s*/ {%s}", registration, parent, strings.Join(tuple, ","), child.ordinal, p.owner, body), true
 	}
 }
 

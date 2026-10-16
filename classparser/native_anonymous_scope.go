@@ -24,12 +24,22 @@ func nativeRewriteEnclosingScope(source string, rule func(string) string) string
 				return source
 			}
 			start := i + end + 2
-			if !strings.HasPrefix(source[start:], "new ") {
+			for start < len(source) && strings.ContainsRune(" \t\r\n\f", rune(source[start])) {
+				start++
+			}
+			// Registration follows constructor arguments, immediately before
+			// the anonymous body. Keep the older prefix form readable for
+			// fragments already carrying that ownership witness.
+			bodyMarker := start < len(source) && source[start] == '{'
+			if !bodyMarker && !strings.HasPrefix(source[start:], "new ") {
 				return source
 			}
 			depth, sawArgs, open := 0, false, -1
 			innerState := scanNormal
-			for j := start; j < len(source); j++ {
+			if bodyMarker {
+				open = start
+			}
+			for j := start; open < 0 && j < len(source); j++ {
 				innerState = scanAdvance(source, &j, innerState, &ignored)
 				if innerState != scanNormal || j >= len(source) {
 					continue
