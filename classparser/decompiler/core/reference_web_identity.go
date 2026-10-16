@@ -4,7 +4,6 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
-	"reflect"
 )
 
 // A simulator ref can span disjoint reaching-definition webs. Solving its type
@@ -19,6 +18,7 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 	}
 	groups := map[int][]*OpCode{}
 	owners := map[*values.JavaRef]map[int]bool{}
+	firstOwner := map[*values.JavaRef]int{}
 	order := []int{}
 	complete := map[int]bool{}
 	for _, op := range d.opCodes {
@@ -46,6 +46,7 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 		}
 		if owners[ref] == nil {
 			owners[ref] = map[int]bool{}
+			firstOwner[ref] = w
 		}
 		owners[ref][w] = true
 	}
@@ -73,8 +74,11 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 		seedType := first.Type()
 		singletonConflict := false
 		if len(stores) == 1 {
-			// Disjoint single-definition webs still require distinct identities
-			// when the simulator reused a narrower local from an earlier web.
+			// A later disjoint single-definition web owns a distinct lifetime,
+			// even when its type is identical to the earlier variable's type.
+			// Otherwise two independent locals become one mutable source binder,
+			// preventing a fresh loop-local value from being captured faithfully.
+			// Keep the first web's identity and rebind only this later web.
 			// Use the actual defining operand, including any original CHECKCAST,
 			// instead of adding a check to make that stale declaration compile.
 			value := stores[0].stackConsumed[0]
@@ -88,7 +92,7 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 				definedType = types.NewJavaClass("java.lang.Class")
 			}
 			if len(owners[first]) > 1 && value != nil && values.UnpackSoltValue(value) != values.JavaNull && !values.IsNullLiteral(values.UnpackSoltValue(value)) &&
-				definedType != nil && seedType != nil && !reflect.DeepEqual(seedType.RawType(), definedType.RawType()) {
+				definedType != nil && seedType != nil && firstOwner[first] != w {
 				seedType = definedType
 				singletonConflict = true
 			}

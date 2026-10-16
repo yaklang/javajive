@@ -98,12 +98,55 @@ func TestSingletonReferenceWebUsesItsOwnDefinitionType(t *testing.T) {
 			}
 			d.partitionSharedReferenceWebs()
 			got := d.opcodeIdToRef[b][0][0].(*values.JavaRef)
-			if (got != old) != (scenario == "narrow stale owner") {
+			partitioned := scenario == "narrow stale owner" || scenario == "same type" || scenario == "class literal"
+			if (got != old) != partitioned {
 				t.Fatalf("partitioned=%v", got != old)
 			}
-			if scenario == "narrow stale owner" && (got.Type().String(&class_context.ClassContext{}) != "Object" || slot.GetValue() != got || d.opcodeIdToRef[a][0][0] != old || got.Val != nil) {
+			wantType := "Class"
+			if scenario == "narrow stale owner" {
+				wantType = "Object"
+			}
+			if partitioned && (got.Type().String(&class_context.ClassContext{}) != wantType || slot.GetValue() != got || d.opcodeIdToRef[a][0][0] != old || got.Val != nil || got.Id == old.Id || got.SolvedWebIdentity == nil) {
 				t.Fatal("lost definition/web ownership")
 			}
 		})
+	}
+}
+
+func TestSameTypedReferenceWebsRetainIndependentDefinitionAndUseIdentities(t *testing.T) {
+	typ := types.NewJavaClass("java.lang.String")
+	original := values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
+	stores := []*OpCode{op(OP_ASTORE_1, 1), op(OP_ASTORE_1, 3), op(OP_ASTORE_1, 5)}
+	loads := []*OpCode{op(OP_ALOAD_1, 2), op(OP_ALOAD_1, 4), op(OP_ALOAD_1, 6)}
+	webs := &slotWeb{webOf: map[*OpCode]int{}, entryWeb: map[int]int{}}
+	d := &Decompiler{cachedSlotWebs: webs, opcodeIdToRef: map[*OpCode][][2]any{}, varUserMap: omap.NewEmptyOrderedMap[*values.JavaRef, []*VarFoldRule]()}
+	observed := []values.JavaValue{original, original, original}
+	var pairs []*VarFoldRule
+	for i := range stores {
+		stores[i].stackConsumed = []values.JavaValue{values.NewJavaLiteral(string(rune('a'+i)), typ)}
+		loads[i].stackProduced = []values.JavaValue{values.NewSlotValue(original, typ)}
+		webs.webOf[stores[i]], webs.webOf[loads[i]] = i, i
+		d.opCodes = append(d.opCodes, stores[i], loads[i])
+		d.opcodeIdToRef[stores[i]] = [][2]any{{original, i == 0}}
+		index := i
+		pairs = append(pairs, &VarFoldRule{CurrentOpcode: loads[i], Replace: func(v values.JavaValue) { observed[index] = v }})
+	}
+	opaque := &VarFoldRule{}
+	d.varUserMap.Set(original, append(pairs, opaque))
+	d.partitionSharedReferenceWebs()
+	seen := map[*utils.VariableId]bool{}
+	for i := range stores {
+		ref := d.opcodeIdToRef[stores[i]][0][0].(*values.JavaRef)
+		if seen[ref.Id] || ref.Type().String(&class_context.ClassContext{}) != "String" || loads[i].stackProduced[0].(*values.SlotValue).GetValue() != ref || observed[i] != ref {
+			t.Fatal("disjoint definition/load/callback lifetimes were merged")
+		}
+		seen[ref.Id] = true
+		if (ref == original) != (i == 0) || i > 0 && (ref.Val != nil || ref.SolvedWebIdentity != ref.Id) {
+			t.Fatal("first owner or later isolated identity changed")
+		}
+	}
+	retained, _ := d.varUserMap.Get(original)
+	if len(retained) != 2 || retained[0] != pairs[0] || retained[1] != opaque || len(d.disFoldRef) != 2 {
+		t.Fatal("foreign or opaque folding rules moved with another lifetime")
 	}
 }
