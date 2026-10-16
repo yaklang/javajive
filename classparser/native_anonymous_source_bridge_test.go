@@ -15,7 +15,7 @@ func TestNativeAnonymousZeroArgSourceBridgeOriginalProof(t *testing.T) {
 		"p/Source.java":      `package p;public interface Source<T>{T fetch();}`,
 		"q/BridgeOwner.java": `package q;public class BridgeOwner implements p.Source<String>{public String fetch(){return "value";}}`,
 	}, "none", "8")
-	for _, variant := range []string{"original", "owner name CP tag", "interface name CP tag", "cyclic interface name", "nonbridge", "nonsynthetic", "nonpublic", "static bridge", "synchronized bridge", "final target", "static target", "copied target", "removed bridge", "duplicate bridge", "duplicate target", "nil method", "no code", "duplicate code", "signature bridge", "nil attribute", "wrong stack", "wrong locals", "exception handler", "wrong receiver", "extra effect", "special dispatch", "wrong return", "zero member", "wrong member tag", "wrong owner", "wrong target name", "wrong target descriptor", "malformed target descriptor", "target signature", "target exception", "interface exception", "no resolve", "unknown interface", "wrong interface identity", "not interface", "interface has parent", "raw source", "wrong physical edge", "wrong class header", "duplicate owner signature", "wrong instantiation", "free source formal", "bounded interface", "wrong interface erasure", "duplicate interface signature", "method inference", "wrong method signature erasure", "wrong interface return", "extra abstract overload", "extra default declaration", "unknown Object", "inherited same name", "graph budget", "memory budget", "canceled"} {
+	for _, variant := range []string{"original", "unrelated bridge", "owner name CP tag", "interface name CP tag", "cyclic interface name", "nonbridge", "nonsynthetic", "nonpublic", "static bridge", "synchronized bridge", "final target", "static target", "copied target", "removed bridge", "duplicate bridge", "duplicate target", "nil method", "no code", "duplicate code", "signature bridge", "nil attribute", "wrong stack", "wrong locals", "exception handler", "wrong receiver", "extra effect", "special dispatch", "wrong return", "zero member", "wrong member tag", "wrong owner", "wrong target name", "wrong target descriptor", "malformed target descriptor", "target signature", "target exception", "interface exception", "no resolve", "unknown interface", "wrong interface identity", "not interface", "interface has parent", "raw source", "wrong physical edge", "wrong class header", "duplicate owner signature", "wrong instantiation", "free source formal", "bounded interface", "wrong interface erasure", "duplicate interface signature", "method inference", "wrong method signature erasure", "wrong interface return", "extra abstract overload", "extra default declaration", "unknown Object", "inherited same name", "graph budget", "memory budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			objects := map[string]*ClassObject{}
 			for n, b := range files {
@@ -68,6 +68,10 @@ func TestNativeAnonymousZeroArgSourceBridgeOriginalProof(t *testing.T) {
 			nt := owner.ConstantPool[ref.NameAndTypeIndex-1].(*ConstantNameAndTypeInfo)
 			var work *workbudget.Budget
 			switch variant {
+			case "unrelated bridge":
+				copy := *bridge
+				copy.NameIndex = uint16(pool.AddUtf8Info("unrelated"))
+				owner.Methods = append(owner.Methods, &copy)
 			case "owner name CP tag":
 				owner.ConstantPool = append(owner.ConstantPool, &ConstantStringInfo{StringIndex: owner.ThisClass})
 				owner.ThisClass = uint16(len(owner.ConstantPool))

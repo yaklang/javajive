@@ -31,7 +31,7 @@ func testNativeAnonymousCovariantSourceCalls(t *testing.T, native bool) {
 				if compiler == "" {
 					t.Skip("JAVA8_JAVAC required for independent compiler")
 				}
-				testNativeIndependentCompilerFamilyFixture(t, func(debug string) map[string][]byte { return fieldOwnerCompileJava8Sources(t, sources, debug) }, NativeJavac8, compiler, []string{"q/SourceOwner"}, "q.SourceDriver", want, nil, nativeLexicalExactSignatures, func(t *testing.T, n string, a, b []byte) {
+				testNativeIndependentCompilerFamilyFixture(t, func(debug string) map[string][]byte { return fieldOwnerCompileJava8Sources(t, sources, debug) }, NativeJavac8, compiler, []string{"q/SourceOwner"}, "q.SourceDriver", want, nil, nativeLexicalExactSignatures, nativeCovariantBridgeABI, func(t *testing.T, n string, a, b []byte) {
 					if nativeAnonymousAccessorShape(t, a) != nativeAnonymousAccessorShape(t, b) {
 						t.Fatalf("accessor ABI changed %s", n)
 					}
@@ -40,7 +40,7 @@ func testNativeAnonymousCovariantSourceCalls(t *testing.T, native bool) {
 			}
 			testNativePrivateSetterCompiledFixtureWithPolicies(t, "q/SourceOwner", "q.SourceDriver", want, func(t *testing.T, debug string) map[string][]byte {
 				return nativeCompileSourceReleaseClasses(t, sources, debug, "8")
-			}, nil, []string{"normal", "no-source-rewrites", "no-core-cleanups"}, nativeLexicalExactSignatures)
+			}, nil, []string{"normal", "no-source-rewrites", "no-core-cleanups"}, nativeLexicalExactSignatures, nativeCovariantBridgeABI)
 		})
 	}
 }

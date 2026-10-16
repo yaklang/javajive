@@ -65,7 +65,7 @@ func TestAdversarialAnonymousCovariantBoxedAndArrayCalls(t *testing.T) {
 						}
 						testNativePrivateSetterCompiledFixtureWithPolicies(t, "q/"+prefix+"Owner", "q."+prefix+"Driver", fmt.Sprintf("%d:typed:anonymous:storage:identity:order\n", count), func(t *testing.T, debug string) map[string][]byte {
 							return nativeCompileSourceReleaseClasses(t, ss, debug, "8")
-						}, nil, []string{"normal", "no-source-rewrites", "no-core-cleanups"})
+						}, nil, []string{"normal", "no-source-rewrites", "no-core-cleanups"}, nativeLexicalExactSignatures, nativeCovariantBridgeABI)
 					})
 				}
 			}

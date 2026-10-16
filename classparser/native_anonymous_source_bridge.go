@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
-	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"strings"
@@ -87,6 +86,9 @@ func nativeAnonymousZeroArgSourceBridge(f *nativeAnonymousForest, owner *ClassOb
 			return false
 		}
 		symbols[mn+"\x00"+md] = true
+		if m.AccessFlags&0x40 != 0 && m != bridge {
+			return false
+		}
 		if m == target {
 			physicalTarget++
 		}
@@ -219,7 +221,7 @@ func nativeAnonymousZeroArgSourceBridge(f *nativeAnonymousForest, owner *ClassOb
 			return false
 		}
 		actual := types.SubstituteTypeVars(result, sigma)
-		if actual == nil || values.ReferenceTypeDescriptor(actual, nil) != ret {
+		if actual == nil || !nativeAnonymousBridgeReturnSubstitutable(actual, ret, f.resolve, work) {
 			return false
 		}
 	}
