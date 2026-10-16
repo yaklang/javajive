@@ -38,6 +38,12 @@ type constructorSelfStorageProof struct {
 	freshReceiver bool
 }
 
+// Shared across the complete receiver chain and all runtime profiles. Charge
+// instructions, frame copies and binding queries, never runtime iterations.
+// Compositions of several closed methods need more than a leaf-sized allowance;
+// this finite cap complements the request's graph/allocation/deadline limits.
+const constructorReceiverProofFuel = 4096
+
 func (p *constructorSelfStorageProof) closed() bool {
 	return p != nil && !(p.selfStored && p.referenceRead)
 }
@@ -54,7 +60,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 	if target == 0 {
 		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
 	}
-	remaining := 512
+	remaining := constructorReceiverProofFuel
 	var previous *constructorProfileEvidence
 	prove := func(release int) (bool, bool) {
 		d := *c
@@ -434,7 +440,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 		prior := activeFrames[start]
 		if cyclicTargets[start] {
 			// Retain frames only at original cyclic destinations. Their copies
-			// and joins share the existing 512-unit chain budget, independent
+			// and joins share the finite receiver-chain budget, independent
 			// of runtime iteration count; a large frame cannot bypass it.
 			cost := len(locals) + len(stack) + 1
 			*remaining -= cost

@@ -66,7 +66,7 @@ func (c *ClassObjectDumper) constructorReceiverMethodDispatchClosed(obj *ClassOb
 // Reject any matching declaration rather than approximate package/protected
 // overriding or ignore private/static/bridge shadows. Different complete JVM
 // descriptors remain separate methods. This same original query is replayed
-// by the runtime certificate and shares the movement request's 512-unit cap.
+// by the runtime certificate and shares the movement request's finite cap.
 func constructorReceiverRootMethodAbsent(object *ClassObject, name, descriptor string, remaining *int, work *workbudget.Budget) bool {
 	if object == nil || remaining == nil || name == "" {
 		return false
