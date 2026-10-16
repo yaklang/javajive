@@ -2230,7 +2230,9 @@
     "TestNativeEnclosingParameterCaptureRequiresOriginalBinding": 1.01,
     "TestAdversarialAnonymousConstructorArgumentContext": 39.78,
     "TestAdversarialAnonymousConstructorArgumentContextNativeCompiler": 32.97,
-    "TestNativeAnonymousConstructorArgumentRequiresOriginalFrames": 1.48
+    "TestNativeAnonymousConstructorArgumentRequiresOriginalFrames": 1.48,
+    "TestAdversarialAnonymousOriginalNullOperands": 95.6,
+    "TestNativeAnonymousNullOperandRequiresOriginalProducer": 0.57
   },
   "source_runs": [
     37850493191,

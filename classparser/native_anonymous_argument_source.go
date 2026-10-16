@@ -59,6 +59,22 @@ func (p *nativeAnonymousArgumentTree) operand(v values.JavaValue, origin ssabuil
 	if !valid || record == nil {
 		return false
 	}
+	// Null is a leaf only with the sealed original value at this exact
+	// instruction. Keep it in the ordering/closure proof, including when
+	// it is the operand of a retained original CHECKCAST.
+	if ins.Opcode == core.OP_ACONST_NULL {
+		literal, ok := v.(*values.JavaLiteral)
+		if !ok || literal == nil {
+			return false
+		}
+		original, known := literal.OriginalNullPC()
+		if !known || original != pc || len(ins.Data) != 0 || len(record.Uses) != 0 {
+			return false
+		}
+		p.seen[pc] = true
+		p.order = append(p.order, pc)
+		return true
+	}
 	if ins.Opcode == core.OP_CHECKCAST {
 		if p.obj == nil || ins.CPIndex == 0 || int(ins.CPIndex) > len(p.obj.ConstantPool) {
 			return false
