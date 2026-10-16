@@ -234,7 +234,10 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Core algorithm and resource-guard tests (race)
-        run: go test ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv -race -count=1 -timeout=3m
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          go test -json ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv -race -count=1 -timeout=3m | tee artifacts/core-algorithm-tests.jsonl
       - name: Trusted original and rebuilt algorithm round trips
         run: |
           evidence="$RUNNER_TEMP/algorithm-regression-evidence"
