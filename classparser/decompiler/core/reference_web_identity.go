@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"reflect"
 )
 
 // A simulator ref can span disjoint reaching-definition webs. Solving its type
@@ -15,6 +16,20 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 	webs := d.slotWebs()
 	if webs == nil {
 		return
+	}
+	// Dynamic operands already own a declaration/snapshot protocol at their
+	// original factory PC. Its forwarding operand is distinct from the LOAD's
+	// produced SlotValue. Do not add a same-type binding split while that
+	// consumer still owns the original declaration relation.
+	snapshotOwned := map[*utils.VariableId]bool{}
+	for _, snapshots := range d.evaluationSnapshots {
+		for _, snapshot := range snapshots {
+			if snapshot.Operand {
+				if ref, ok := dynamicCaptureSeed(snapshot.Value).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
+					snapshotOwned[ref.Id] = true
+				}
+			}
+		}
 	}
 	groups := map[int][]*OpCode{}
 	owners := map[*values.JavaRef]map[int]bool{}
@@ -91,8 +106,15 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 				// produces a java.lang.Class reference on the operand stack.
 				definedType = types.NewJavaClass("java.lang.Class")
 			}
+			// Duplicated catch/finally paths can have separate computational
+			// definitions but still require a shared pending-exception source
+			// binder. Until those source constraints are represented explicitly,
+			// the new equal-type lifetime permission requires no raw handlers.
+			// Preserve the existing different-type partition independently.
+			differentType := definedType != nil && seedType != nil && !reflect.DeepEqual(seedType.RawType(), definedType.RawType())
+			separateLifetime := firstOwner[first] != w && len(d.ExceptionTable) == 0 && !snapshotOwned[first.Id]
 			if len(owners[first]) > 1 && value != nil && values.UnpackSoltValue(value) != values.JavaNull && !values.IsNullLiteral(values.UnpackSoltValue(value)) &&
-				definedType != nil && seedType != nil && firstOwner[first] != w {
+				definedType != nil && seedType != nil && (differentType || separateLifetime) {
 				seedType = definedType
 				singletonConflict = true
 			}

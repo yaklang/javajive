@@ -70,7 +70,7 @@ func TestReferenceWebPartitionRebindsOnlyCompleteOwnedLoads(t *testing.T) {
 }
 
 func TestSingletonReferenceWebUsesItsOwnDefinitionType(t *testing.T) {
-	for _, scenario := range []string{"narrow stale owner", "same type", "null", "missing value", "entry", "unshared", "class literal"} {
+	for _, scenario := range []string{"narrow stale owner", "same type", "same type with handlers", "narrow owner with handlers", "dynamic operand owns binding", "dynamic result", "foreign dynamic operand", "null", "missing value", "entry", "unshared", "class literal"} {
 		t.Run(scenario, func(t *testing.T) {
 			cls := types.NewJavaClass("java.lang.Class")
 			obj := types.NewJavaClass("java.lang.Object")
@@ -85,6 +85,18 @@ func TestSingletonReferenceWebUsesItsOwnDefinitionType(t *testing.T) {
 			switch scenario {
 			case "same type":
 				b.stackConsumed = a.stackConsumed
+			case "same type with handlers":
+				b.stackConsumed = a.stackConsumed
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 0, EndPc: 2, HandlerPc: 2}}
+			case "narrow owner with handlers":
+				d.ExceptionTable = []*ExceptionTableEntry{{StartPc: 0, EndPc: 2, HandlerPc: 2}}
+			case "dynamic operand owns binding", "dynamic result", "foreign dynamic operand":
+				b.stackConsumed = a.stackConsumed
+				seed := *old // A source binding can have a distinct use-site copy.
+				if scenario == "foreign dynamic operand" {
+					seed.Id = utils.NewRootVariableId()
+				}
+				d.evaluationSnapshots = map[*OpCode][]EvaluationSnapshot{op(OP_INVOKEDYNAMIC, 4): {{Value: values.NewSlotValue(&seed, cls), Operand: scenario != "dynamic result"}}}
 			case "class literal":
 				b.stackConsumed = []values.JavaValue{values.NewJavaClassValue(types.NewJavaClass("java.util.ArrayList"))}
 			case "null":
@@ -98,12 +110,12 @@ func TestSingletonReferenceWebUsesItsOwnDefinitionType(t *testing.T) {
 			}
 			d.partitionSharedReferenceWebs()
 			got := d.opcodeIdToRef[b][0][0].(*values.JavaRef)
-			partitioned := scenario == "narrow stale owner" || scenario == "same type" || scenario == "class literal"
+			partitioned := scenario == "narrow stale owner" || scenario == "narrow owner with handlers" || scenario == "same type" || scenario == "class literal" || scenario == "dynamic result" || scenario == "foreign dynamic operand"
 			if (got != old) != partitioned {
 				t.Fatalf("partitioned=%v", got != old)
 			}
 			wantType := "Class"
-			if scenario == "narrow stale owner" {
+			if scenario == "narrow stale owner" || scenario == "narrow owner with handlers" {
 				wantType = "Object"
 			}
 			if partitioned && (got.Type().String(&class_context.ClassContext{}) != wantType || slot.GetValue() != got || d.opcodeIdToRef[a][0][0] != old || got.Val != nil || got.Id == old.Id || got.SolvedWebIdentity == nil) {
