@@ -152,7 +152,9 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 		args := make([]class_context.SourceCaptureOperand, len(call.Arguments))
 		for i, a := range call.Arguments {
 			args[i].Value = a
-			args[i].Text = a.String(funcCtx)
+			if i != 0 || funcCtx.SourceMemberImplicitEnclosing == nil || !funcCtx.SourceMemberImplicitEnclosing(call.ClassName, call.Descriptor, n.OriginPC, call.OriginPC, a) {
+				args[i].Text = a.String(funcCtx)
+			}
 			if ref, ok := UnpackSoltValue(a).(*JavaRef); ok && ref != nil && ref.Id != nil && ref.CustomValue == nil && ref.StackVar == nil {
 				args[i].Receiver = ref.IsThis
 				args[i].Local = !ref.IsThis

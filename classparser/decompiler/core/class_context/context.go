@@ -51,12 +51,15 @@ type ClassContext struct {
 	SourceBranchSwap func(ifSource, elseSource string) bool
 	// Original bytecode/source binding may replace a proved enum table selector
 	// and all of its labels together. Nil keeps the original integer switch.
-	SourceEnumSwitch            func(selector any, labels []int) (string, map[int]string, bool)
-	SourceParameterStore        func(assignment any) (string, bool)
-	SourceMemberAllocation      func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
-	SourceMemberCandidate       func(owner string) bool
-	SourceMethodLocalCandidate  func(owner string) bool
-	SourceMethodLocalAllocation func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceEnumSwitch     func(selector any, labels []int) (string, map[int]string, bool)
+	SourceParameterStore func(assignment any) (string, bool)
+	// Read-only, exact original member NEW proof; only its enclosing operand
+	// may be implicit and thus have no stand-alone source expression.
+	SourceMemberImplicitEnclosing func(owner, descriptor string, newPC, pc int, value any) bool
+	SourceMemberAllocation        func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
+	SourceMemberCandidate         func(owner string) bool
+	SourceMethodLocalCandidate    func(owner string) bool
+	SourceMethodLocalAllocation   func(owner, descriptor string, newPC, pc int, args []SourceCaptureOperand) (string, bool)
 	// Optional descriptor gate runs before operands are rendered. Knowing a
 	// lexical class does not prove projection of each of its constructors.
 	SourceMemberDescriptorCandidate func(owner, descriptor string) bool

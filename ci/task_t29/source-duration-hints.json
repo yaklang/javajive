@@ -4,8 +4,8 @@
   "latest_measured_ci_head": "f77efedf32a355b42dbeafd9be1940ae39b8d871",
   "latest_measured_ci_run": 38895351809,
   "latest_measured_completed_parents": 2146,
-  "local_followup_revision": "fc03601ca0b0535dfc074bc317c13ba0df97aaeb",
-  "local_followup_roots": 7,
+  "local_followup_revision": "c07f33a1758bcf4f889bca5a071a73333ee26194+member-enclosing",
+  "local_followup_roots": 3,
   "measured_checkout_heads": [
     "8f3a843a53c2716671919ddecb0dfff51121aec7",
     "9c94287899bfb2f7cff6eeb713212ab570e46649",
@@ -2246,7 +2246,10 @@
     "TestWrapUncaughtGetConstructorSkipsReturn": 0.05,
     "TestWrapUncaughtGetConstructorSkipsThisCall": 0.05,
     "TestZxingEnumArraySpillFoldRejectsReorderedOrEffectfulShapes": 0.01,
-    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.6
+    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.6,
+    "TestNativeAnonymousMemberOuterRequiresExactConsumer": 3.35,
+    "TestNativeAnonymousMemberOuterRoundTrip": 37.26,
+    "TestNativeAnonymousMemberOuterNativeRoundTrip": 29.71
   },
   "source_runs": [
     37850493191,

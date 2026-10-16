@@ -905,6 +905,7 @@ type nativeMemberAllocation struct {
 	freshEnclosing           *nativeMemberFreshEnclosing
 	anonymousEnclosingRead   *nativeMemberLexicalRead
 	anonymousEnclosingMethod string
+	anonymousMemberEnclosing *nativeAnonymousMemberEnclosing
 }
 
 func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
@@ -1105,6 +1106,14 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 								break
 							}
 							pc := int(ops[end].CurrentOffset)
+							receipt := nativeAnonymousMemberEnclosingReceipt(p, c.obj, key, plan.newPC, child, c.Work)
+							if receipt != nil && receipt.read.pc == pc {
+								plan.enclosingReadPC, plan.implicitEnclosing = pc, true
+								plan.anonymousEnclosingRead, plan.anonymousEnclosingMethod = receipt.read, key
+								plan.anonymousMemberEnclosing = receipt
+								cursor = end + 1
+								break
+							}
 							read := nativeMemberAnonymousAllocationEnclosingRead(p, c.obj, key, pc, child.owner, c.Work)
 							if read == nil {
 								continue
@@ -1467,13 +1476,24 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			// an operand or mutating the family's transaction state.
 			priorType := ctx.SourceLexicalCapturedFieldType
 			ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
+				if f := c.nativeAnonymousForest; f != nil && f.members == p && f.objects[c.obj.GetClassName()] == c.obj && f.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != nil {
+					return priorType != nil && priorType(value, pc, name)
+				}
 				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
 				if read == nil || p.children[read.owner] == nil {
 					return priorType != nil && priorType(value, pc, name)
 				}
 				return name == read.field && nativeMemberLexicalReadOperand(value, read, c.Work, ctx)
 			}
+			priorCapture := ctx.SourceLexicalCapturedField
 			ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
+				if f := c.nativeAnonymousForest; f != nil && f.members == p && f.objects[c.obj.GetClassName()] == c.obj && f.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != nil {
+					if priorCapture == nil {
+						p.failed = true
+						return "", false
+					}
+					return priorCapture(value, pc, name)
+				}
 				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
 				if read == nil {
 					if field, ok := value.(*values.RefMember); ok && field != nil && !sourceProofNil(field.Object) {
@@ -1574,6 +1594,13 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		}
 		child := p.allocationClass(binary)
 		return child != nil && (!child.static || child.accessBridges[desc] != nil)
+	}
+	ctx.SourceMemberImplicitEnclosing = func(owner, desc string, newPC, pc int, value any) bool {
+		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+		if plan == nil || plan.anonymousMemberEnclosing == nil || plan.child == nil || plan.child.object.GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.descriptor != desc || plan.newPC != newPC {
+			return false
+		}
+		return nativeMemberLexicalEnclosingOperand(value, plan, p, c.obj.GetClassName(), c.nativeMemberBody, c.Work)
 	}
 	ctx.SourceMemberAllocation = func(owner, desc string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
 		// Parse/analysis previews may still contain SSA temporaries for original

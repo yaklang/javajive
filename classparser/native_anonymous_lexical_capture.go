@@ -152,11 +152,13 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 		}
 		forest.consumers = map[string]map[string]map[int]*nativeAnonymousLexicalConsumer{}
 	}
+	forest.memberEnclosing = map[string]map[string]map[int]*nativeAnonymousMemberEnclosing{}
 	var metadata callbinding.Provider
 	if len(providers) != 0 {
 		metadata = providers[0]
 	}
 	for owner, object := range forest.objects {
+		forest.memberEnclosing[owner] = map[string]map[int]*nativeAnonymousMemberEnclosing{}
 		forest.reads[owner] = map[string]map[int]*nativeMemberLexicalRead{}
 		forest.consumers[owner] = map[string]map[int]*nativeAnonymousLexicalConsumer{}
 		forest.readPCs[owner] = map[string]map[int]bool{}
@@ -172,6 +174,7 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 				return false
 			}
 			key := name + desc
+			forest.memberEnclosing[owner][key] = map[int]*nativeAnonymousMemberEnclosing{}
 			reads := map[int]*nativeMemberLexicalRead{}
 			approved := map[int]bool{}
 			paths := map[int]*nativeMemberLexicalRead{}
@@ -249,7 +252,7 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 							if field.Description != "L"+child.owner+";" {
 								return false
 							}
-							lexicalOwner, lexical, next = child.owner, true, child.owner
+							lexicalOwner, lexical, next = child.owner, forest.units[child.owner] == nil, child.owner
 						} else {
 							break
 						}
@@ -259,6 +262,10 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 						}
 						read := &nativeMemberLexicalRead{owner: field.Name, field: field.Member, descriptor: field.Description, pc: int(ops[j].CurrentOffset), prior: prior}
 						if next != "" && forest.units[next] != nil && stable {
+							if receipt := nativeAnonymousMemberEnclosingProof(forest, object, method, code, ops, read, next, work); receipt != nil {
+								forest.memberEnclosing[owner][key][receipt.newPC] = receipt
+								approved[read.pc], paths[read.pc] = true, read
+							}
 							for _, consumer := range nativeAnonymousPrivateArgumentConsumers(forest, object, method, code, ops, read, next, metadata, work) {
 								forest.consumers[owner][key][consumer.pc] = consumer
 								for node := read; node != nil; node = node.prior {

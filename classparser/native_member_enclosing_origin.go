@@ -17,7 +17,12 @@ func nativeMemberLexicalEnclosingOperand(value any, plan *nativeMemberAllocation
 	}
 	child := family.children[current]
 	anonymousRead := plan.anonymousEnclosingRead
-	if anonymousRead != nil {
+	if plan.anonymousMemberEnclosing != nil {
+		forest := family.anonymousForest
+		if forest == nil || nativeAnonymousMemberEnclosingReceipt(family, forest.objects[current], plan.anonymousEnclosingMethod, plan.newPC, plan.child, work) != plan.anonymousMemberEnclosing {
+			return false
+		}
+	} else if anonymousRead != nil {
 		forest := family.anonymousForest
 		if forest == nil || forest.units[current] == nil || nativeMemberAnonymousAllocationEnclosingRead(family, forest.units[current].object, plan.anonymousEnclosingMethod, plan.enclosingReadPC, plan.child.owner, work) != anonymousRead {
 			return false

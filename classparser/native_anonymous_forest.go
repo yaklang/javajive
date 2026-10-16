@@ -23,6 +23,7 @@ type nativeAnonymousForest struct {
 	members           *nativeMemberFamily
 	lexicalThis       map[string]map[string]map[int]bool
 	consumers         map[string]map[string]map[int]*nativeAnonymousLexicalConsumer
+	memberEnclosing   map[string]map[string]map[int]*nativeAnonymousMemberEnclosing
 	resolve           func(string) (*ClassObject, bool)
 }
 
