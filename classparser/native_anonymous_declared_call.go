@@ -11,7 +11,9 @@ import (
 
 // A concrete anonymous allocation exposes its own source declarations without
 // spelling its suppressed binary name. Require the original owned allocation
-// and exact declaration binding without method inference; unrelated/inherited lookup stays separate.
+// and exact declaration binding without method inference. Only an independently
+// proved compiler forwarder/override is excluded from the source overload set;
+// unrelated/inherited lookup stays separate.
 func nativeAnonymousDeclaredCall(forest *nativeAnonymousForest, caller *ClassObject, method string, op *core.OpCode, work *workbudget.Budget) bool {
 	if forest == nil || caller == nil || forest.objects[caller.GetClassName()] != caller || op == nil || op.Instr == nil || op.Instr.OpCode != core.OP_INVOKEVIRTUAL || len(op.Data) != 2 || !nativeProofWork(work, 1) {
 		return false
@@ -44,6 +46,7 @@ func nativeAnonymousDeclaredCall(forest *nativeAnonymousForest, caller *ClassObj
 		return false
 	}
 	var target *MemberInfo
+	var bridge *MemberInfo
 	for _, decl := range child.object.Methods {
 		if decl == nil || !nativeProofWork(work, 1) {
 			return false
@@ -66,6 +69,13 @@ func nativeAnonymousDeclaredCall(forest *nativeAnonymousForest, caller *ClassObj
 		if !slices.Equal(params, args) {
 			continue
 		}
+		if decl.AccessFlags == 0x1041 {
+			if bridge != nil {
+				return false
+			}
+			bridge = decl
+			continue
+		}
 		if target != nil || desc != symbol.Description || decl.AccessFlags&(0x0002|0x0008|0x0040|0x0100|0x0400|0x1000) != 0 {
 			return false
 		}
@@ -76,13 +86,19 @@ func nativeAnonymousDeclaredCall(forest *nativeAnonymousForest, caller *ClassObj
 		}
 		target = decl
 	}
-	return target != nil
+	if target == nil {
+		return false
+	}
+	if bridge != nil && !nativeAnonymousZeroArgSourceBridge(forest, child.object, target, bridge, work) {
+		return false
+	}
+	return true
 }
 
 // A zero-argument concrete allocation has no parameter inference or argument
 // overload conversion. Class/enclosing-method variables in its return type
 // are declaration bindings, not generic method binders. Reopen those original
-// scopes and require exact descriptor erasure; competing return/bridge targets
+// scopes and require exact descriptor erasure; distinct source return alternatives
 // are still refused by the full original declared-family scan above.
 func nativeAnonymousLexicalZeroArgCall(forest *nativeAnonymousForest, owner *ClassObject, target *MemberInfo, descriptor string, work *workbudget.Budget) bool {
 	args, _, err := callbinding.Descriptor(descriptor)
