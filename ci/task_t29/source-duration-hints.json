@@ -2217,7 +2217,9 @@
     "TestAdversarialFreshEnclosingMixedInitializer": 20.79,
     "TestAdversarialFreshEnclosingMixedInitializerNativeCompiler": 15.26,
     "TestAdversarialFreshEnclosingTemporaryEffects": 8.61,
-    "TestAdversarialFreshEnclosingTemporaryEffectsNativeCompiler": 6.89
+    "TestAdversarialFreshEnclosingTemporaryEffectsNativeCompiler": 6.89,
+    "TestAdversarialZeroInputFactoryWidening": 32.77,
+    "TestAdversarialZeroInputFactoryWideningNativeCompiler": 24.16
   },
   "source_runs": [
     37850493191,

@@ -3,6 +3,7 @@ package statements
 import (
 	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"reflect"
 	"strings"
 
@@ -1636,36 +1637,50 @@ func topLevelTypeArgs(s string) ([]string, bool) {
 	return args, true
 }
 
-// typeVarIsUnbounded reports whether name is a type variable in scope whose SOLE bound is Object (the
-// canonical bare `<E>`). It looks in the enclosing method's formal type parameters first (which shadow
-// the class's), then the class's. ClassFormalTypeParamBounds omits any variable whose only bound is
-// Object, so "declared here AND absent from the bounds map" == unbounded. A bounded variable
-// (`C extends Comparable`), or one not declared in either scope, returns false -- used to gate an
-// unchecked `X<Object>` -> `X<E>` parameterization cast, which is only legal for unbounded E.
-func typeVarIsUnbounded(name string, funcCtx *class_context.ClassContext) bool {
-	if funcCtx == nil || name == "" {
+// typeVarIsUnbounded checks the nearest original method, class or enclosing
+// declaration before consulting a legacy flattened header. Only a sole Object
+// bound permits this unchecked invariant cast. A first Object bound followed
+// by interfaces is still constrained. Query bounds in a detached formatting
+// context so type recovery cannot import or commit source declaration names.
+func typeVarIsUnbounded(name string, ctx *class_context.ClassContext) bool {
+	if ctx == nil || name == "" || len(ctx.LexicalTypeParamSignatures) > 128 {
 		return false
 	}
-	for _, n := range types.MethodFormalTypeParamNames(funcCtx.CurrentMethodSig) {
-		if n == name {
-			_, bounded := types.ClassFormalTypeParamBounds(funcCtx.CurrentMethodSig, funcCtx)[name]
-			return !bounded
-		}
+	if ctx.Work != nil && ctx.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+		return false
 	}
-	for _, n := range types.ClassFormalTypeParamNames(funcCtx.ClassSig) {
-		if n == name {
-			_, bounded := types.ClassFormalTypeParamBounds(funcCtx.ClassSig, funcCtx)[name]
-			return !bounded
+	// Preserve declaration identity, including own method/class shadowing.
+	// Empty enclosing method signatures contribute no binders. An unresolved
+	// declaration must not be treated as the legacy bare injected header.
+	for i := 0; i < 2+len(ctx.LexicalTypeParamSignatures); i++ {
+		sig := ctx.CurrentMethodSig
+		if i == 1 {
+			sig = ctx.ClassSig
+		} else if i >= 2 {
+			sig = ctx.LexicalTypeParamSignatures[i-2]
 		}
-	}
-	// Injected (flattened inner-class) type variable: not declared in ClassSig, but in scope via
-	// TypeParams. Its boundedness lives in InjectedTypeParamBounds (only non-Object bounds are recorded,
-	// mirroring the rendered header), so "in scope AND absent from that map" == the rendered bare `<E>`.
-	if funcCtx.IsTypeParam(name) {
-		if _, bounded := funcCtx.InjectedTypeParamBounds[name]; bounded {
+		if sig == "" {
+			continue
+		}
+		if len(sig) > 65535 || ctx.Work != nil && (ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(sig))+1) != nil || ctx.Work.CheckAlloc(int64(len(sig))*64) != nil) {
 			return false
 		}
-		return true
+		formals, _, valid := types.SignatureTypeVariableReferences(sig)
+		if !valid {
+			return false
+		}
+		for _, formal := range formals {
+			if formal == name {
+				_, bounded := types.ClassFormalTypeParamBounds(sig, nil)[name]
+				return !bounded
+			}
+		}
+	}
+	// A flattened class may genuinely declare an injected bare formal. Original
+	// lexical declarations above take precedence over this rendered-header view.
+	if ctx.IsTypeParam(name) {
+		_, bounded := ctx.InjectedTypeParamBounds[name]
+		return !bounded
 	}
 	return false
 }
