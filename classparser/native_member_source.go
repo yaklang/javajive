@@ -1674,6 +1674,9 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		allocationBinding := *ctx
 		allocationBinding.InvocationMetadata = binding.InvocationMetadata
 		allocationBinding.SiblingClassSig = binding.SiblingClassSig
+		if plan.implicitEnclosing || args[0].Receiver && c.obj.GetClassName() == plan.child.owner {
+			invoke.Arguments = nativeMemberLexicalConstructorArguments(p, plan.child, desc, c.obj.GetClassName(), invoke.Arguments, &allocationBinding, c.Work)
+		}
 		arguments := invoke.ArgumentStrings(&allocationBinding)
 		sourceName := plan.child.name
 		if plan.enclosingParameter != nil {
