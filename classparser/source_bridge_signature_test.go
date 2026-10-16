@@ -27,6 +27,10 @@ public class SourceBridgeChild<T> extends SourceBridgeParent<T>{}`
 	if err != nil {
 		t.Fatal(err)
 	}
+	parentRaw, err := os.ReadFile(filepath.Join(dir, "SourceBridgeParent.class"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, scenario := range []string{"proved", "not bridge", "not synthetic", "not public", "static", "synchronized", "native", "abstract", "extra final", "extra private", "extra protected", "no code", "duplicate code", "signature", "handler", "receiver", "virtual", "return", "extra instruction", "stack", "locals", "bad member", "bad name/type", "wrong name", "wrong descriptor", "self owner", "wrong parent", "duplicate declaration", "method name CP tag", "method descriptor CP tag", "callee name CP tag", "callee descriptor CP tag", "owner name CP tag", "parent name CP tag", "cyclic method name", "cyclic callee name"} {
 		t.Run(scenario, func(t *testing.T) {
 			obj, err := Parse(append([]byte(nil), raw...))
@@ -130,6 +134,7 @@ public class SourceBridgeChild<T> extends SourceBridgeParent<T>{}`
 				obj.Methods = append(obj.Methods, method)
 			}
 			dumper := &ClassObjectDumper{obj: obj}
+			dumper.foldSiblingResolver = func(n string) ([]byte, bool) { return parentRaw, n == "SourceBridgeParent" }
 			get := dumper.buildSourceBridgeTargets()
 			target, proved := get("SourceBridgeChild", "items", "()Ljava/util/List;")
 			if proved != (scenario == "proved") || proved && target != "SourceBridgeParent" {

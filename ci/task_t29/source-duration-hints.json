@@ -2219,7 +2219,12 @@
     "TestAdversarialFreshEnclosingTemporaryEffects": 8.61,
     "TestAdversarialFreshEnclosingTemporaryEffectsNativeCompiler": 6.89,
     "TestAdversarialZeroInputFactoryWidening": 32.77,
-    "TestAdversarialZeroInputFactoryWideningNativeCompiler": 24.16
+    "TestAdversarialZeroInputFactoryWideningNativeCompiler": 24.16,
+    "TestAdversarialVisibilityBridgeLexicalCall": 7.02,
+    "TestAdversarialVisibilityBridgeLexicalCallNativeCompiler": 3.89,
+    "TestAdversarialVisibilityBridgeEffects": 19.57,
+    "TestAdversarialVisibilityBridgeEffectsNativeCompiler": 12.06,
+    "TestSourceBridgeForwarderRequiresCompleteOriginalProtocol": 0.43
   },
   "source_runs": [
     37850493191,

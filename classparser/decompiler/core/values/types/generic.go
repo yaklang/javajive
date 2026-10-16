@@ -1731,6 +1731,10 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 		if descriptor != "" {
 			if msig, declared := methodSigs[class_context.MethodDescKey(method, descriptor)]; declared {
 				if msig == "" {
+					params, _, formals := resolveSourceBridgeSignature(funcCtx, provider, internal, classSig, sigma, method, descriptor, argc, visited)
+					if len(params) == argc && paramIndex < len(params) && params[paramIndex] != nil {
+						return substituteAndGateParam(funcCtx, params[paramIndex], nil, formals)
+					}
 					return nil
 				}
 				if len(lexical) > 0 && !lexicalMethodDescriptorMatches(funcCtx, provider, internal, msig, descriptor) {
@@ -1992,7 +1996,7 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 					return nil, nil, nil
 				}
 				if msig == "" {
-					return resolveSourceBridgeReturn(funcCtx, provider, internal, classSig, sigma, method, descriptor, argc, visited)
+					return resolveSourceBridgeSignature(funcCtx, provider, internal, classSig, sigma, method, descriptor, argc, visited)
 				}
 				if !calleeSignatureVariablesBound(msig, sigma) {
 					return nil, nil, nil
@@ -2079,9 +2083,14 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 // The empty exact entry still blocks ordinary inheritance. A separately
 // witnessed omitted bridge can expose its direct parent's source declaration;
 // compose that exact superclass edge rather than searching sibling interfaces
-// or falling back to an arity-only overload. No arguments or runtime casts move.
-func resolveSourceBridgeReturn(ctx *class_context.ClassContext, provider ClassSigProvider, owner, classSig string, sigma map[string]JavaType, method, descriptor string, argc int, visited map[string]bool) ([]JavaType, JavaType, []string) {
-	if ctx.SourceBridgeTarget == nil || argc != 0 || !strings.HasPrefix(descriptor, "()L") || len(sigma) != len(ClassFormalTypeParamNames(classSig)) {
+// or falling back to an arity-only overload. The callback certifies the exact
+// argument loads and invokespecial/return protocol; no runtime cast is added.
+func resolveSourceBridgeSignature(ctx *class_context.ClassContext, provider ClassSigProvider, owner, classSig string, sigma map[string]JavaType, method, descriptor string, argc int, visited map[string]bool) ([]JavaType, JavaType, []string) {
+	if ctx.SourceBridgeTarget == nil || len(sigma) != len(ClassFormalTypeParamNames(classSig)) {
+		return nil, nil, nil
+	}
+	mt, err := ParseMethodDescriptor(descriptor)
+	if err != nil || mt.FunctionType() == nil || len(mt.FunctionType().ParamTypes) != argc {
 		return nil, nil, nil
 	}
 	target, proved := ctx.SourceBridgeTarget(owner, method, descriptor)
@@ -2098,6 +2107,9 @@ func resolveSourceBridgeReturn(ctx *class_context.ClassContext, provider ClassSi
 	}
 	var args []JavaType
 	if pt, ok := AsParameterizedType(sup); ok {
+		if len(pt.OwnerSegments) > 1 {
+			return nil, nil, nil
+		}
 		args = make([]JavaType, len(pt.TypeArgs))
 		for i, t := range pt.TypeArgs {
 			args[i] = SubstituteTypeVars(t, sigma)
@@ -2108,7 +2120,26 @@ func resolveSourceBridgeReturn(ctx *class_context.ClassContext, provider ClassSi
 			return nil, nil, nil
 		}
 	}
-	return resolveSignatureWalk(ctx, provider, target, args, method, descriptor, argc, visited)
+	params, result, formals := resolveSignatureWalk(ctx, provider, target, args, method, descriptor, argc, visited)
+	if len(params) != argc || len(formals) != 0 {
+		return nil, nil, nil
+	}
+	// A new source formal view must not narrow an original JVM input. This is
+	// distinct from the return-only query: a substituted String or Number for
+	// an Object input would otherwise insert a new payload CHECKCAST.
+	for i, param := range params {
+		actual, ak := sourceBridgeParameterErasure(ctx, param, 0)
+		original, ok := sourceBridgeParameterErasure(nil, mt.FunctionType().ParamTypes[i], 0)
+		if !ak || !ok || actual != original {
+			return nil, nil, nil
+		}
+	}
+	actual, ak := sourceBridgeParameterErasure(ctx, result, 0)
+	original, ok := sourceBridgeParameterErasure(nil, mt.FunctionType().ReturnType, 0)
+	if !ak || !ok || actual != original {
+		return nil, nil, nil
+	}
+	return params, result, formals
 }
 
 // FieldSigProvider yields a jar-internal class's FIELD generic Signature by binary internal name and
