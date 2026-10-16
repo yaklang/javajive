@@ -1,7 +1,6 @@
 package javaclassparser
 
 import (
-
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -85,7 +84,7 @@ func nativeLambdaFactorySourcesClosed(method *MemberInfo, factories []*nativeLam
 			return false
 		}
 		body := source.implementationBody
-		if body == nil || seenBodies[body] || body.member != method || body.isStub || body.incompleteValue || body.malformedTry || body.checkedEscape {
+		if body.sourceReconstructionFailed() || seenBodies[body] || body.member != method || body.checkedEscape {
 			return false
 		}
 		seenBodies[body] = true

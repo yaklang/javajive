@@ -69,7 +69,7 @@ func (c *ClassObjectDumper) nativeStandaloneAssertionClosed(source string) bool 
 	if state == nil {
 		return true
 	}
-	if c.sourceDegraded {
+	if c.sourceDegraded || legacySourceHasFailureMarker(source) {
 		return false
 	}
 	if state.packet.initializer != nil && !state.packet.pureInitializer && !state.initializerProjected {

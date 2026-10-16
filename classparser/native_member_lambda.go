@@ -152,7 +152,7 @@ func nativeMemberLambdaSourceClosed(child *nativeMemberClass, dumper *ClassObjec
 			continue
 		}
 		body := dumper.dumpedMethodsSet[fmt.Sprintf("name:%s,desc:%s", name, desc)]
-		if !nok || !dok || !slices.Contains(dumper.lambdaMethods[name], desc) || body == nil || body.member != method || body.isStub || body.incompleteValue || body.malformedTry || body.checkedEscape {
+		if !nok || !dok || !slices.Contains(dumper.lambdaMethods[name], desc) || body.sourceReconstructionFailed() || body.member != method || body.checkedEscape {
 			return false
 		}
 		if site := child.lambdaContext.localCaptures[name+desc]; site != nil && !nativeLambdaLocalCaptureSourceClosed(site, dumper.nativeLambdaLocalSources[name+desc], work) {
