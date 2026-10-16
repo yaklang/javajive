@@ -170,6 +170,9 @@ jobs:
                   if row.get("Test") and row.get("Action") in ("pass", "fail", "skip"):
                       terminal.append(row)
           parents = [row for row in terminal if "/" not in row["Test"]]
+          for row in terminal:
+              if row["Action"] == "fail":
+                  print("SOURCE_TEST_FAILED: " + row["Test"])
           leaves = [row for row in terminal if row["Test"].startswith(heavy+"/") and row["Test"].count("/") == 3]
           expected = {heavy+"/"+scope+"/"+debug+"/"+policy for scope in selected_scopes
                       for debug in ("none", "source,lines,vars")

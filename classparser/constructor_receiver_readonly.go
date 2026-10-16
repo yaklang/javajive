@@ -74,6 +74,9 @@ func (c *ClassObjectDumper) constructorReceiverBindMethod(obj *ClassObject, memb
 // with no intervening external or root-table observation. Otherwise the general
 // proof repeats its original binding, including mutable root dispatch queries.
 func (c *ClassObjectDumper) constructorReceiverMethodWithStorage(obj *ClassObject, member *values.JavaClassMember, opcode int, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, arguments ...constructorEffectValue) (constructorEffectValue, bool) {
+	if len(arguments) == 0 && c.constructorReceiverRuntimeClass(obj, member, opcode, remaining, aliases) {
+		return constructorEffectValue{kind: 'L'}, true
+	}
 	binding, known := c.constructorReceiverBindMethod(obj, member, opcode, remaining, arguments...)
 	if !known {
 		return constructorEffectValue{}, false
