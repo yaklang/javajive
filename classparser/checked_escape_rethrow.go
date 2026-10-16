@@ -92,7 +92,7 @@ func (c *ClassObjectDumper) preciseCatchRethrows(body []statements.Statement, co
 					}
 				}
 			} else {
-				_, children, known := catchSourceChildren(st)
+				_, children, known := preciseCatchBindingChildren(st)
 				if !known {
 					return false
 				}
@@ -165,6 +165,17 @@ func sourceProofNil(node any) bool {
 	return node == nil || reflect.ValueOf(node).Kind() == reflect.Ptr && reflect.ValueOf(node).IsNil()
 }
 
+// A source anchor has no Java local operand and cannot write a catch binding.
+// This permission belongs only to precise rethrow/name stability. The original
+// owning JVM instruction can have effects (for example an implicit super call),
+// so effect/control consumers keep using the stricter catchSourceChildren.
+func preciseCatchBindingChildren(st statements.Statement) ([]values.JavaValue, [][]statements.Statement, bool) {
+	if anchor, ok := st.(*statements.SourceAnchorStatement); ok {
+		return nil, nil, anchor != nil
+	}
+	return catchSourceChildren(st)
+}
+
 // Enumerate source children, including loop headers and switch discriminants.
 // Opaque closures cannot establish that a catch variable is effectively final.
 func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]statements.Statement, bool) {
@@ -172,11 +183,6 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 		return nil, nil, false
 	}
 	switch x := st.(type) {
-	case *statements.SourceAnchorStatement:
-		// This leaf renders no operand and cannot assign a catch binding. Its
-		// owning JVM operation still participates in the independent raw-PC
-		// exception/delegation check; this is only a source-name traversal.
-		return nil, nil, true
 	case *nativeAssertStatement:
 		condition, call, _, known := x.SourceAssertionProtocol()
 		if !known {
@@ -251,7 +257,7 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 }
 
 func catchParameterUnwritten(body []statements.Statement, ref *values.JavaRef, remaining *int, declaration ...*statements.AssignStatement) bool {
-	return sourceParameterUnwritten(body, ref, remaining, catchSourceChildren, declaration...)
+	return sourceParameterUnwritten(body, ref, remaining, preciseCatchBindingChildren, declaration...)
 }
 
 // Stable capture binding asks whether a source declaration is overwritten, not

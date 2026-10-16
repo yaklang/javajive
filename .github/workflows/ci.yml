@@ -147,6 +147,11 @@ jobs:
                       except ProcessLookupError:
                           pass
                       process.wait()
+                      output.write("SOURCE_PHASE_DEADLINE_EXPIRED: " +
+                                   json.dumps({"batch": index + 1,
+                                               "parents": (group or {}).get("parents", [heavy]),
+                                               "scopes": (group or {}).get("scopes", [])}) + "\n")
+                      output.flush()
                       result = 1
               return path, result
           failed = False
