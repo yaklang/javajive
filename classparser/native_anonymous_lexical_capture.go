@@ -444,13 +444,18 @@ func (c *ClassObjectDumper) wireNativeAnonymousForestCaptures(ctx *class_context
 	priorType := ctx.SourceLexicalCapturedFieldType
 	ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
 		read := forest.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
-		// Qualified-this spelling belongs to rendering. Its existing named
-		// owner proof handles speculative type queries without calling a
-		// declaration-name/import renderer. Plain captured locals need no
-		// source formatting to reopen their physical read path.
-		if read != nil && !forest.lexicalThis[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] {
-			_, known := c.nativeAnonymousLexicalCaptureReadSource(read, value, pc, name, ctx)
-			return known
+		// Qualified THIS reopens original declaration roles and physical
+		// capture paths without formatting a qualifier or changing imports.
+		// Plain captured locals additionally retain their lexical binding.
+		if read != nil {
+			if forest.lexicalThis[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] {
+				if c.nativeAnonymousLexicalThisRead(read, value, pc, name, ctx) {
+					return true
+				}
+			} else {
+				_, known := c.nativeAnonymousLexicalCaptureReadSource(read, value, pc, name, ctx)
+				return known
+			}
 		}
 		return priorType != nil && priorType(value, pc, name)
 	}
