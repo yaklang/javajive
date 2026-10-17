@@ -3175,6 +3175,13 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source st
 		if ref, ok := a.LeftValue.(*values.JavaRef); ok && ref.WebDeclType != nil {
 			declType = ref.WebDeclType
 		}
+		// A resolved Boolean local consumes the computational int through the
+		// same Z view already selected above. Its declaration must describe
+		// that consumer, rather than the unconverted producer's int type.
+		// A whole-web declaration remains authoritative.
+		if ref, local := a.LeftValue.(*values.JavaRef); local && ref.WebDeclType == nil && values.IsBooleanStackNarrowing(ref.Type(), a.JavaValue) {
+			declType = ref.Type()
+		}
 		inferredFormalResult := false
 		if ref, local := a.LeftValue.(*values.JavaRef); local && !ref.IsThis && ref.WebDeclType == nil && ref.StackVar == nil && ref.CustomValue == nil {
 			if call, direct := values.UnpackSoltValue(rhsVal).(*values.FunctionCallExpression); direct {
