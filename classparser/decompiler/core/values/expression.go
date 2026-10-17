@@ -1100,7 +1100,7 @@ func (f *FunctionCallExpression) receiverParamTypeArgsQuery(funcCtx *class_conte
 				if funcCtx.SiblingClassSig != nil && funcCtx.ClassName != "" && len(funcCtx.ClassTypeParams) > 0 {
 					recvArgs := make([]types.JavaType, len(funcCtx.ClassTypeParams))
 					for i, p := range funcCtx.ClassTypeParams {
-						recvArgs[i] = types.NewJavaClass(p)
+						recvArgs[i] = types.NewJavaTypeVariable(p)
 					}
 					_, ret, _ := types.ResolveInstantiatedSignatureExact(funcCtx, funcCtx.SiblingClassSig, funcCtx.ClassName, recvArgs, inner.FunctionName, inner.Descriptor, len(inner.Arguments))
 					if pt, ok := types.AsParameterizedType(ret); ok {
@@ -1207,7 +1207,7 @@ func RecoverThisFieldInstantiatedType(funcCtx *class_context.ClassContext, field
 		{
 			recvArgs := make([]types.JavaType, len(formals))
 			for i, n := range formals {
-				recvArgs[i] = types.NewJavaClass(n)
+				recvArgs[i] = types.NewJavaTypeVariable(n)
 			}
 			return types.ResolveInstantiatedFieldType(funcCtx, funcCtx.SiblingClassSig, funcCtx.SiblingFieldSig, funcCtx.ClassName, recvArgs, fieldName)
 		}
@@ -1316,7 +1316,7 @@ func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_
 					}
 					if len(formals) == 1 {
 						return types.NewParameterizedType("java.lang.Class", []types.JavaType{
-							types.NewJavaClass(formals[0]),
+							types.NewJavaTypeVariable(formals[0]),
 						})
 					}
 				}
@@ -2083,7 +2083,7 @@ func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context
 		recvRaw = funcCtx.ClassName
 		recvArgs = make([]types.JavaType, len(formals))
 		for idx, n := range formals {
-			recvArgs[idx] = types.NewJavaClass(n)
+			recvArgs[idx] = types.NewJavaTypeVariable(n)
 		}
 	} else {
 		// Non-`this` receiver: recover its raw class + actual type args from the receiver value's
@@ -3740,7 +3740,7 @@ func (f *FunctionCallExpression) resolvedFunctionalFormalType(i int, funcCtx *cl
 		formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
 		recvArgs = make([]types.JavaType, len(formals))
 		for i, name := range formals {
-			recvArgs[i] = types.NewJavaClass(name)
+			recvArgs[i] = types.NewJavaTypeVariable(name)
 		}
 	} else {
 		recvRaw, recvArgs = f.receiverParamTypeArgs(funcCtx)

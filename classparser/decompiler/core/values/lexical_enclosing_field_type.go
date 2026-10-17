@@ -66,7 +66,7 @@ func recoverLexicalEnclosingFieldReceiver(ctx *class_context.ClassContext, field
 	}
 	args := []types.JavaType{}
 	for _, name := range types.ClassFormalTypeParamNames(selected.ClassSig) {
-		args = append(args, types.NewJavaClass(name))
+		args = append(args, types.NewJavaTypeVariable(name))
 	}
 	return types.NewParameterizedType(raw, args)
 }

@@ -1997,7 +1997,7 @@ func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 			sub.nativeCaptureFields = map[string]string{child.field: c.FuncCtx.ShortTypeName(strings.ReplaceAll(child.owner, "/", ".")) + ".this"}
 			var arguments []types.JavaType
 			for _, formal := range c.FuncCtx.ClassTypeParams {
-				arguments = append(arguments, types.NewJavaClass(formal))
+				arguments = append(arguments, types.NewJavaTypeVariable(formal))
 			}
 			if len(arguments) > 0 {
 				sub.nativeCaptureTypes = map[string]types.JavaType{child.field: types.NewParameterizedType(strings.ReplaceAll(child.owner, "/", "."), arguments)}

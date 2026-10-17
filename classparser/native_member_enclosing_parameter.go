@@ -134,7 +134,7 @@ func (c *ClassObjectDumper) nativeMemberEnclosingParameterAllocationName(plan *n
 		if !nativeProofWork(c.Work, 1) {
 			return "", false
 		}
-		args[i] = types.NewJavaClass(formal)
+		args[i] = types.NewJavaTypeVariable(formal)
 	}
 	view := types.NewParameterizedType(strings.ReplaceAll(plan.child.owner, "/", "."), args)
 	if !nativeMemberEnclosingTypeDenotable(c, view) {

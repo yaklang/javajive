@@ -149,7 +149,7 @@ func (c *ClassObjectDumper) nativeSourceLocalInvocation(ctx *class_context.Class
 				return nil, false
 			}
 		}
-		args[i] = types.NewJavaClass(formal)
+		args[i] = types.NewJavaTypeVariable(formal)
 	}
 	view := this.Type().Copy()
 	if len(args) != 0 {

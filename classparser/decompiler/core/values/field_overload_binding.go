@@ -41,7 +41,7 @@ func (f *FunctionCallExpression) instantiatedFieldOverloadCast(i int, ctx *class
 			return ""
 		}
 		for _, formal := range types.ClassFormalTypeParamNames(ctx.ClassSig) {
-			args = append(args, types.NewJavaClass(formal))
+			args = append(args, types.NewJavaTypeVariable(formal))
 		}
 	} else if receiver, parameterized := types.AsParameterizedType(recoverParameterizedFieldReceiver(ctx, field.Object)); parameterized {
 		raw, args, known = receiver.RawClassName, receiver.TypeArgs, true

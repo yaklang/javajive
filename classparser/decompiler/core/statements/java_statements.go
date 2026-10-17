@@ -853,7 +853,7 @@ func typeVarLocalDeclName(funcCtx *class_context.ClassContext, left values.JavaV
 		recvRaw = funcCtx.ClassName
 		recvArgs = make([]types.JavaType, len(funcCtx.ClassTypeParams))
 		for i, p := range funcCtx.ClassTypeParams {
-			recvArgs[i] = types.NewJavaClass(p)
+			recvArgs[i] = types.NewJavaTypeVariable(p)
 		}
 	} else {
 		return ""
@@ -3196,7 +3196,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source st
 		// after rendering would turn Object x = rawCall() into T x = rawCall().
 		if ref, local := a.LeftValue.(*values.JavaRef); local && ref.WebDeclType == nil {
 			if tv := typeVarLocalDeclName(funcCtx, a.LeftValue, a.JavaValue, declType); tv != "" {
-				declType = types.NewJavaClass(tv)
+				declType = types.NewJavaTypeVariable(tv)
 				inferredFormalResult = true
 			}
 		}

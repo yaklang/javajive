@@ -78,6 +78,19 @@ func TestLexicalEnclosingFieldTypeRequiresOriginalInstanceAndDeclaration(t *test
 			if got != nil && got.String(ctx) != "Owner<K>" {
 				t.Fatal(got.String(ctx))
 			}
+			if got != nil {
+				receiver, ok := types.AsParameterizedType(got)
+				if !ok || len(receiver.TypeArgs) != 1 {
+					t.Fatal("original parameterized receiver")
+				}
+				if name, variable := types.TypeVariableName(receiver.TypeArgs[0].Copy()); !variable || name != "K" {
+					t.Fatal("original class formal lost its variable role", name, variable)
+				}
+				instantiated := types.SubstituteTypeVars(got, map[string]types.JavaType{"K": types.NewJavaClass("java.lang.Number")})
+				if instantiated.String(ctx) != "Owner<Number>" {
+					t.Fatal("original variable became a same-spelled class", instantiated)
+				}
+			}
 		})
 	}
 }

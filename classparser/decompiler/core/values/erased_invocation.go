@@ -224,7 +224,7 @@ func (f *FunctionCallExpression) planErasedInvocationProof(ctx *class_context.Cl
 				if !known || !ctx.IsTypeParam(name) {
 					return nil, false
 				}
-				args = append(args, types.NewJavaClass(name))
+				args = append(args, types.NewJavaTypeVariable(name))
 			}
 		}
 	}
