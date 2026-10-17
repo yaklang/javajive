@@ -1,12 +1,29 @@
 package javaclassparser
 
 import (
-	"strings"
-
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
+
+// A root's constructor bridge does not make the root a lexical member. Its
+// lambda implementation view still owns factory/source receipts, independently
+// of the member and anonymous views used while rendering nested declarations.
+func (c *ClassObjectDumper) nativeLambdaSourceView() *nativeMemberClass {
+	if c == nil {
+		return nil
+	}
+	if c.nativeMemberCurrent != nil {
+		return c.nativeMemberCurrent
+	}
+	if c.nativeAnonymousLambdaCurrent != nil {
+		return c.nativeAnonymousLambdaCurrent
+	}
+	if p := c.nativeMemberRoot; p != nil && c.obj != nil && p.owner == c.obj.GetClassName() && p.rootHandleSource != nil && p.rootHandleSource.object == c.obj {
+		return p.rootHandleSource
+	}
+	return nil
+}
 
 // The implementation signature is not a factory identity. In particular javac
 // can deduplicate a hidden-field capture and a method-parameter capture into
@@ -15,10 +32,7 @@ func (c *ClassObjectDumper) recordNativeLambdaFactorySource(name, desc string, c
 	if c == nil {
 		return nil, false
 	}
-	current := c.nativeMemberCurrent
-	if current == nil {
-		current = c.nativeAnonymousLambdaCurrent
-	}
+	current := c.nativeLambdaSourceView()
 	if current == nil || len(current.lambdaContext.factorySites[name+desc]) <= 1 {
 		return nil, c.recordNativeLambdaLocalCaptureSource(name, desc, code, captured)
 	}
@@ -70,7 +84,7 @@ func nativeLambdaFactorySourcesClosed(method *MemberInfo, factories []*nativeLam
 			return false
 		}
 		body := source.implementationBody
-		if body == nil || seenBodies[body] || body.member != method || body.bodyCode == "stub" || body.checkedEscape || strings.Contains(body.code, DecompileStubMarker) {
+		if body.sourceReconstructionFailed() || seenBodies[body] || body.member != method || body.checkedEscape {
 			return false
 		}
 		seenBodies[body] = true

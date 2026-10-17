@@ -95,9 +95,19 @@ func constructorEffectFrameKey(start int, locals, stack []constructorEffectValue
 				}
 			}
 			state = append(state, v.kind)
+			if v.retainsReceiver {
+				state = append(state, 1)
+			} else {
+				state = append(state, 0)
+			}
 			if v.knownInt {
 				state = append(state, 1)
 				state = binary.BigEndian.AppendUint32(state, uint32(v.intWord))
+			} else {
+				state = append(state, 0)
+			}
+			if v.knownNull {
+				state = append(state, 1)
 			} else {
 				state = append(state, 0)
 			}

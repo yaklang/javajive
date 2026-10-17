@@ -33,9 +33,13 @@ type ClassObjectDumper struct {
 	sourceDeclarationAccess        uint16
 	sourceDeclarationAccessKnown   bool
 	nativeSourceAssertions         *nativeMemberAssertion
+	nativeAssertionInitProjection  *nativeMemberAssertion
+	nativeStandaloneAssertion      *nativeStandaloneAssertion
+	nativeStandaloneAssertionOff   bool
 	originalInitializerStatus      map[string]bool
 	originalInitializerStatusReady bool
 	nativeMemberLookup             func(string) *nativeMemberClass
+	nativeFreshCaller              *nativeFreshCallerIdentity
 	nativeMemberCalls              map[string]map[int]*nativeMemberAllocation
 	nativeMemberBody               []statements.Statement
 	nativeConstructorEnclosing     *values.JavaRef
@@ -60,17 +64,20 @@ type ClassObjectDumper struct {
 	nativeCaptureTypes             map[string]types.JavaType
 	nativeOuterContext             *class_context.ClassContext
 
-	options                DecompileOptions
-	report                 *DecompileResult
-	rewriteSeen            map[string]bool
-	Work                   *workbudget.Budget
-	diagTruncated          bool
+	options       DecompileOptions
+	report        *DecompileResult
+	rewriteSeen   map[string]bool
+	Work          *workbudget.Budget
+	diagTruncated bool
+	// Set by actual degraded output, never by scanning user literals/comments.
+	sourceDegraded         bool
 	overloadFamilyUnproven bool
 	overloadUnknownSeen    map[string]bool
 	// Set only inside one constructor effect proof after checking the exact
 	// final receiver and its complete original finalizer ancestry.
 	constructorReceiverFinalizerSilent bool
 	constructorProfileEvidence         *constructorProfileEvidence
+	constructorMotionRefusal           **RecoveryMotionRefusal
 	// typeAnnosUnsupported is set when a legal type annotation cannot be
 	// placed on a declaration (code-offset/local/inner path).
 	typeAnnosUnsupported bool
@@ -99,10 +106,13 @@ type ClassObjectDumper struct {
 	// parameters (Function<? super T, R> becomes raw Function). Before simulating that hidden
 	// method, project same-erasure parameterized capture types back onto those parameters so its
 	// body is rendered under the source-level generic contract.
-	lambdaCaptureTypes         map[string][]types.JavaType
-	nativeLambdaLocalSources   map[string]*nativeLambdaLocalCaptureSource
-	nativeLambdaFactorySources map[*nativeLambdaLocalCaptureSite]*nativeLambdaLocalCaptureSource
-	nativeLambdaBodySite       *nativeLambdaLocalCaptureSite
+	lambdaCaptureTypes                map[string][]types.JavaType
+	nativeLambdaLocalSources          map[string]*nativeLambdaLocalCaptureSource
+	nativeLambdaFactorySources        map[*nativeLambdaLocalCaptureSite]*nativeLambdaLocalCaptureSource
+	nativeLambdaBodySite              *nativeLambdaLocalCaptureSite
+	nativeLambdaCaptureParameterNames map[*MemberInfo][]nativeLambdaCaptureNameDemand
+	nativeLambdaFactoryParameterNames map[*MemberInfo]map[string]bool
+	nativeLambdaBodyCapturedValues    []values.JavaValue
 	// lambdaLocalSeq hands each inlined lambda body a unique id so its own locals can be renamed
 	// into a private `lv<seq>_<n>` namespace. A lambda arrow body is spliced INLINE into the
 	// enclosing method, and Java forbids a local declared in the lambda body from shadowing a
@@ -517,6 +527,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			defer jdecenv.EnterLive()()
 		}
 	}
+	if source, committed, err := c.standaloneEnumSwitchSource(); committed || err != nil {
+		return source, err
+	}
 	// accessFlagsVerbose := c.obj.AccessFlagsVerbose
 	accessFlagsToCode := c.obj.AccessFlagsToCode
 
@@ -607,6 +620,13 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// (ACC_PUBLIC for a public class). Keep them verbatim. The old code assumed every '$' name was
 			// nested, failed the InnerClasses lookup, and wrongly stripped `public`, making the class
 			// inaccessible across packages ("$Gson$Preconditions is not public in com.google.gson.internal").
+		case c.nativeAnonymousIndependentInitializerHeader() || c.nativeMemberIndependentSourceHeader():
+			// Proved independent initializer tails and static source roots
+			// keep their ClassFile visibility. Other flat units retain their
+			// accessibility policy for references from separate source units.
+			if c.obj.AccessFlags&1 == 0 {
+				accessFlags = strings.TrimSpace(strings.ReplaceAll(accessFlags, "public", ""))
+			}
 		case innerFlags&0x0001 == 0x0001:
 			// Genuinely nested AND public per InnerClasses: a public nested type's top-level access_flags
 			// omit ACC_PUBLIC (real visibility lives in InnerClasses, which is what javap consults), so
@@ -729,6 +749,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	c.wireNativeMethodLocalSource()
 
 	funcCtx.InvocationMetadata = c.buildInvocationMetadata()
+	funcCtx.OriginalFieldDeclarations = c.buildFieldBindingMetadata()
 	funcCtx.SourceValueNameShadow = c.buildSourceValueNameShadow()
 	c.wirePrivateNestBridges()
 	c.overloadUnknownSeen = map[string]bool{}
@@ -1446,6 +1467,15 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			c.recordKeyword = layout.Keyword
 		}
 	}
+	c.prepareNativeStandaloneAssertion()
+	// Check the actual declaration at publication as well as during planning.
+	// Dependency-only views have no source ownership and retain ordinary
+	// rendering; a native certificate cannot borrow its broader alphabet.
+	nativeNames := c.nativeMemberRoot != nil && c.nativeMemberRoot.owner != "" || c.nativeAnonymousRoot != nil ||
+		c.nativeMemberCurrent != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeCaptureFields != nil || c.nativeStandaloneAssertion != nil
+	if nativeNames && !nativeDeclarationNamesCompatible(c.obj, c.Work) {
+		return "", fmt.Errorf("native declaration names are not representable by the source compiler protocol")
+	}
 	methods, err := c.DumpMethods()
 	if err != nil {
 		if isRequestWorkError(err) {
@@ -1613,10 +1643,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 	}
 	c.recordMembers(methods, fields)
-	// Enum-switch ($SwitchMap) cross-class fold (Bug V): rewrite `switch(Outer$N.$SwitchMap$E[sel.
-	// ordinal()])` back to the idiomatic `switch(sel){ case CONST: ... }`. No-op without a resolver
-	// or when JDEC_NO_ENUM_SWITCH_FOLD is set; produces valid Java, so it runs after assembly.
-	full = c.foldEnumSwitchMaps(full)
+	// Enum-switch projection belongs to the certified original statement
+	// protocol. Unproved mapping arrays and integer dispatch remain intact:
+	// source spelling cannot establish initializer effects, artifact ownership
+	// or the compiler's numbered-helper namespace.
 	// fixLambdaLoopCapture runs FIRST: it inserts final-copies for loop-reassigned captured vars
 	// and rewrites lambda-body reads to the copy. After this, the original variable is no longer
 	// read inside the lambda, so initProximateSplitSlotDecl (next) can safely default-initialize it
@@ -1695,9 +1725,8 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Drop catch(T) when an earlier catch in the same try already covers T
 	// (multicatch then a second catch(T)). Kill-switch: JDEC_ALREADY_CAUGHT_OFF=1.
 	full = c.sourceRewrite("fixAlreadyCaughtDuplicateCatch", "class_source", full, fixAlreadyCaughtDuplicateCatch)
-	// Empty a wrapUncaught RuntimeException rethrow catch when a return follows
-	// (otherwise unreachable). Kill-switch: JDEC_CATCH_RETHROW_UNREACHABLE_RETURN_OFF=1.
-	full = c.sourceRewrite("fixCatchRethrowUnreachableReturn", "class_source", full, fixCatchRethrowUnreachableReturn)
+	// Handler completion comes from the original CFG. A following return does
+	// not prove that a user-written wrapping throw was a synthesized repair.
 	// Subclass field `this.f = this.f` is getfield Super.f; putfield This.f.
 	// Kill-switch: JDEC_SHADOW_FIELD_SUPER_ASSIGN_OFF=1.
 	full = c.sourceRewrite("fixShadowFieldSuperAssign", "class_source", full, fixShadowFieldSuperAssign)
@@ -2029,6 +2058,15 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	if c.Work != nil && c.Work.Err() != nil {
 		return "", c.Work.Err()
+	}
+	if packet := c.nativeAssertionProtocol(); packet != nil && c.nativeStandaloneAssertion == nil && !packet.pureInitializer && c.nativeAssertionInitProjection != packet {
+		return "", fmt.Errorf("assertion initializer source projection incomplete")
+	}
+	if !c.nativeStandaloneAssertionClosed(full) {
+		if c.Work != nil && c.Work.Err() != nil {
+			return "", c.Work.Err()
+		}
+		return c.retryWithoutStandaloneAssertion()
 	}
 	return full, nil
 }
@@ -3430,6 +3468,15 @@ func isUnconditionalTerminalStatement(st statements.Statement, funcCtx *class_co
 	case *statements.ReturnStatement:
 		return true
 	case *statements.CustomStatement:
+		if _, known := s.SourceAssignmentForward(); known {
+			return false
+		}
+		if _, known := s.SourceThrowOperand(); known {
+			return true
+		}
+		if _, _, known := s.SourceTransferProtocol(); known {
+			return true
+		}
 		t := strings.TrimSpace(s.String(funcCtx))
 		switch {
 		case t == "break", t == "continue", t == "return":
@@ -3584,6 +3631,18 @@ func loopBodyHasEscapingBreak(body []statements.Statement, loopLabel string, dir
 	for _, st := range body {
 		switch s := st.(type) {
 		case *statements.CustomStatement:
+			if _, known := s.SourceAssignmentForward(); known {
+				continue
+			}
+			if _, known := s.SourceThrowOperand(); known {
+				continue
+			}
+			if kind, label, known := s.SourceTransferProtocol(); known {
+				if kind == "break" && (label == "" && directlyInLoop || label != "" && label == loopLabel) {
+					return true
+				}
+				continue
+			}
 			t := strings.TrimSpace(s.String(funcCtx))
 			if directlyInLoop && t == "break" {
 				return true
@@ -3648,6 +3707,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		traitId += ",sam:" + adapter.ErasedDescriptor + ",inst:" + adapter.InstantiatedDescriptor
 	}
 	if v, ok := c.dumpedMethodsSet[traitId]; ok {
+		if c.FuncCtx != nil && c.FuncCtx.SourceRendering != nil && v != nil {
+			c.FuncCtx.SourceRendering.IncompleteValue = c.FuncCtx.SourceRendering.IncompleteValue || v.incompleteValue
+			c.FuncCtx.SourceRendering.MalformedTry = c.FuncCtx.SourceRendering.MalformedTry || v.malformedTry
+		}
 		return v, nil
 	}
 	if c.FuncCtx != nil {
@@ -3659,6 +3722,21 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	var name, descriptor string
 	var err error
 	var dumped = &dumpedMethods{}
+	if c.FuncCtx != nil {
+		context := c.FuncCtx
+		prior := context.SourceRendering
+		state := &class_context.SourceRenderState{}
+		context.SourceRendering = state
+		defer func() {
+			dumped.incompleteValue = state.IncompleteValue
+			dumped.malformedTry = dumped.malformedTry || state.MalformedTry
+			if prior != nil {
+				prior.IncompleteValue = prior.IncompleteValue || dumped.incompleteValue
+				prior.MalformedTry = prior.MalformedTry || dumped.malformedTry
+			}
+			context.SourceRendering = prior
+		}()
+	}
 
 	debugMode := false
 	defer func() {
@@ -3906,8 +3984,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	funcCtx.FunctionType = c.MethodType
 	var paramsNewStr string
 	var lambdaParamNames []string
+	var lambdaMethodLocalNamespace bool
 	var lambdaAdapterPrologue string
 	var exceptions string
+	var renderedConstructorPlan *constructorSourceBoundary
+	var renderedConstructorReceipt *constructorInvocationThrowsReceipt
 	for _, attribute := range method.Attributes {
 		if exceptionAttr, ok := attribute.(*ExceptionsAttribute); ok {
 			exceptions = " throws "
@@ -4014,6 +4095,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if escapeErr != nil {
 				return nil, escapeErr
 			}
+			renderedConstructorPlan = constructorPlan
+			if constructorPlan != nil {
+				renderedConstructorReceipt = constructorPlan.throwsReceipt
+			}
 			dumped.checkedEscape = needsCheckedEscape
 			thisRemoved := false
 			if len(params) > 0 {
@@ -4092,18 +4177,60 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				return nil, assertionErr
 			}
 			statementList = sourceWithoutDeadLocalStores(statementList, params, c.Work)
+			if projected, closed := c.prepareNativeCaptureIdentitySnapshots(statementList, params); closed {
+				statementList = projected
+			} else {
+				return nil, fmt.Errorf("original capture identity snapshots are not closed")
+			}
 			if !c.recordNativeLambdaLocalCaptureBody(method, codeAttr, statementList) {
 				return nil, fmt.Errorf("original lambda local capture body is not closed")
 			}
+			statementList = c.recoverNativeFreshEnclosingTemps(statementList)
 			priorMemberBody := c.nativeMemberBody
 			c.nativeMemberBody = statementList
 			defer func() { c.nativeMemberBody = priorMemberBody }()
+			priorLocalInvocation := funcCtx.SourceLocalInvocation
+			funcCtx.SourceLocalInvocation = func(value any, sourceOwner, methodName, methodDesc string) (any, bool) {
+				if sourceOwner != funcCtx.ClassName || methodName != name || methodDesc != descriptor {
+					return nil, false
+				}
+				ref, known := value.(*values.JavaRef)
+				if !known {
+					return nil, false
+				}
+				return c.nativeSourceLocalInvocation(funcCtx, method, codeAttr, statementList, methodLocalParams, ref)
+			}
+			defer func() { funcCtx.SourceLocalInvocation = priorLocalInvocation }()
 			c.prepareNativeCaptureBindings(statementList, params)
 			methodLocalDeclarations, localErr := c.prepareNativeMethodLocalDeclarations(statementList, methodLocalParams)
 			if localErr != nil {
 				return nil, localErr
 			}
 			c.prepareNativeLocalShadowing(statementList, params)
+			// Capture planning can constrain a SAM binder after its initial name.
+			// Refresh the header from those same declaration IDs after all binding decisions.
+			if isLambda {
+				lambdaMethodLocalNamespace = c.prepareNativeLambdaMethodLocalNamespace(statementList, params)
+				lambdaParamNames = nil
+				for _, v := range samParams {
+					if ref, ok := v.(*values.JavaRef); ok && ref != nil && ref.Id != nil && !ref.IsThis {
+						lambdaParamNames = append(lambdaParamNames, ref.String(funcCtx))
+					}
+				}
+			}
+			if lambdaMethodLocalNamespace && c.nativeCaptureFailed {
+				return nil, fmt.Errorf("unproved lambda/local declaration namespace")
+			}
+			if !isLambda {
+				priorArguments := funcCtx.Arguments
+				defer func() { funcCtx.Arguments = priorArguments }()
+				var storageKnown bool
+				samParams, statementList, storageKnown = c.prepareFinalParameterStorage(method, descriptor, codeAttr, samParams, statementList, len(methodLocalDeclarations) != 0)
+				if !storageKnown {
+					return nil, fmt.Errorf("unproved final parameter definition/storage separation")
+				}
+				c.nativeMemberBody = statementList
+			}
 			c.nativeSourceNamesReady = !c.nativeCaptureFailed
 			paramsNewStrList := []string{}
 			// A lambda arrow parameter whose type is a GENERIC class rendered RAW is best emitted WITHOUT
@@ -4187,6 +4314,14 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if !isLambda {
 				paramsNewStrList = c.applyParameterAnnotations(method, name, descriptor, paramsNewStrList)
 				paramsNewStrList = c.applyParamTypeAnnotations(method, name, descriptor, methodType.FunctionType().ParamTypes, paramsNewStrList)
+				var known bool
+				paramsNewStrList, known = c.applyOriginalSourceParameterFinality(method, descriptor, paramsNewStrList)
+				if !known {
+					return nil, fmt.Errorf("unproved original parameter metadata")
+				}
+			}
+			if renderedConstructorReceipt != nil && !renderedConstructorReceipt.bindSourceParameters(constructorPlan, samParams, funcCtx) {
+				return nil, fmt.Errorf("unproved constructor invocation parameter source binding")
 			}
 			paramsNewStr = strings.Join(paramsNewStrList, ", ")
 
@@ -4372,6 +4507,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					}
 					tryBody, catchExc, catchBodies := ret.TryBody, ret.Exception, ret.CatchBodies
 					finally, haveFinally := rewriter.RecoverCatchAllFinally(ret)
+					if haveFinally && finally.Continuation != nil && statementHasContinuation[statement] {
+						// A method-local terminal projection cannot consume an
+						// independently owned enclosing continuation or loop edge.
+						haveFinally = false
+					}
 					if haveFinally {
 						tryBody, catchExc, catchBodies = finally.TryBody, finally.Exceptions, finally.CatchBodies
 					}
@@ -4431,9 +4571,12 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					if haveFinally {
 						statementStr += fmt.Sprintf("finally{\n%s\n%s}", statementListToString(finally.Cleanup), c.GetTabString())
 					}
+					if haveFinally && finally.Continuation != nil {
+						statementStr += "\n" + statementListToString([]statements.Statement{finally.Continuation})
+					}
 					if !haveCatch && !haveFinally {
 						body := statementListToString(ret.TryBody)
-						if canFlattenNoCatchTry(body) {
+						if canFlattenNoCatchTry(body, dumped.malformedTry, funcCtx.SourceRendering) {
 							// A try without catch/finally has no Java-level effect. Some legacy bytecode
 							// patterns (for example an EOFException edge inside a loop with an enclosing
 							// IOException handler) can lose the inner handler during CFG structuring while
@@ -4444,6 +4587,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 							// A try with no catch/finally is malformed (structuring failed). Emit the
 							// internal marker so the method degrades to a stub rather than leaking the
 							// broken body that produced this bare try.
+							dumped.malformedTry = true
 							statementStr += "catch(Exception e) { throw e; /* " + malformedTryNoCatchMarker + " */ }"
 						}
 					}
@@ -4520,12 +4664,18 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					datas = append(datas, ret.EndExp.String(funcCtx))
 					var lines []string
 					for _, subStatement := range ret.SubStatements {
-						lines = append(lines, c.GetTabString()+"\t"+subStatement.String(funcCtx)+";")
+						lines = append(lines, statementToString(subStatement))
 					}
 					s := fmt.Sprintf("%sfor(%s; %s; %s) {\n%s\n%s}", c.GetTabString(), datas[0], datas[1], datas[2], strings.Join(lines, "\n"), c.GetTabString())
 					statementStr = s
 				default:
 					statementStr = c.GetTabString() + statement.String(funcCtx) + ";"
+				}
+				// Attach a local declaration to its exact lexical statement,
+				// including nested blocks. Rendering previews do not certify
+				// emission; the assembled original method is checked separately.
+				if declarations := c.nativeMethodLocalPlacements[statement]; len(declarations) != 0 {
+					statementStr = strings.Join(declarations, "\n") + "\n" + statementStr
 				}
 				return statementStr
 			}
@@ -4537,6 +4687,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				statementCodes = append(statementCodes, declaration+"\n")
 			}
 			supperInvokeStr := ""
+			enumThisHeader := false
 			delegationPC := -1
 			if needsCheckedEscape && name == "<init>" {
 				delegationPC = constructorDelegationPC(statementList)
@@ -4581,14 +4732,41 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					}
 				}
 				if v, ok := statement.(*statements.ExpressionStatement); ok {
-					if call, ok := v.Expression.(*values.FunctionCallExpression); ok && constructorPlan != nil && constructorPlan.delegate == call && constructorPlan.carrier != "" {
-						supperInvokeStr = c.GetTabString() + constructorPlan.renderDelegation(funcCtx) + ";\n"
+					// Enum THIS delegates have two implicit physical parameters.
+					// Preserve their original identity-based projection when moving
+					// the header ahead of source-only local declarations.
+					if isEnumCtor && len(params) >= 2 {
+						if source, known := enumThisDelegateSource(v, params[:2], funcCtx); known {
+							supperInvokeStr = c.GetTabString() + source + ";\n"
+							enumThisHeader = true
+							continue
+						}
+					}
+					// Ordinary THIS and SUPER are source constructor headers. Local
+					// declarations have no runtime effect, but Java still forbids
+					// placing them before the original initialization delegate.
+					if call, ok := values.UnpackSoltValue(v.Expression).(*values.FunctionCallExpression); ok && constructorPlan != nil && constructorPlan.delegate == call {
+						delegationSource, err := constructorPlan.renderDelegation(funcCtx)
+						if err != nil {
+							return nil, err
+						}
+						if renderedConstructorReceipt != nil && !renderedConstructorReceipt.claimHeader(constructorPlan, call, call.OriginPC, delegationSource, funcCtx) {
+							return nil, fmt.Errorf("unconsumed constructor invocation throws source binding")
+						}
+						supperInvokeStr = c.GetTabString() + delegationSource + ";\n"
 						continue
 					}
 					if v1, ok := v.Expression.(*values.FunctionCallExpression); ok && v1.IsSupperConstructorInvoke(funcCtx) {
 						supperInvokeStr = fmt.Sprintf("%s\n", statementToString(statement))
 						if constructorPlan != nil && constructorPlan.delegate == v1 {
-							supperInvokeStr = c.GetTabString() + constructorPlan.renderDelegation(funcCtx) + ";\n"
+							delegationSource, err := constructorPlan.renderDelegation(funcCtx)
+							if err != nil {
+								return nil, err
+							}
+							if renderedConstructorReceipt != nil && !renderedConstructorReceipt.claimHeader(constructorPlan, v1, v1.OriginPC, delegationSource, funcCtx) {
+								return nil, fmt.Errorf("unconsumed constructor invocation throws source binding")
+							}
+							supperInvokeStr = c.GetTabString() + delegationSource + ";\n"
 						}
 						continue
 					}
@@ -4637,20 +4815,15 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					dumped.initializerCode += statementStr + "\n"
 					continue
 				}
-				// Only the final top-level assembly owns producer-local placement.
-				// Recursive previews cannot certify or duplicate the declaration.
-				for _, declaration := range c.nativeMethodLocalPlacements[statement] {
-					statementStr = declaration + "\n" + statementStr
-				}
 				if err := c.holdOutput(int64(len(statementStr) + 1)); err != nil {
 					return nil, err
 				}
 				statementCodes = append(statementCodes, fmt.Sprintf("%s\n", statementStr))
 			}
 
-			if isEnumCtor {
-				// The only super() call in an enum constructor is the synthetic
-				// super(name, ordinal); enum constructors cannot call super explicitly.
+			if isEnumCtor && !enumThisHeader {
+				// Java supplies Enum's synthetic SUPER(name, ordinal), while an
+				// original THIS delegate remains an explicit source header.
 				supperInvokeStr = ""
 			}
 			if name != "<init>" && name != "<clinit>" &&
@@ -4699,12 +4872,22 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if mt := methodType.FunctionType(); mt != nil && mt.ReturnType != nil {
 				methodReturnTypeStr = mt.ReturnType.String(funcCtx)
 			}
+			// Typed declarations remain authoritative even when a printed type
+			// contains Unicode or syntax the legacy source scanner cannot parse.
+			// This barrier grants no permission to synthesize values or bindings.
+			declarationBarriers, declarationErr := rewriter.DeclarationInsertionBarriers(statementList, funcCtx, c.Work)
+			if declarationErr != nil {
+				return nil, declarationErr
+			}
 			sourceCode = c.sourceRewrite("addMissingGeneratedLocalDecls", "method_source", sourceCode, func(body string) string {
-				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr, c.nativeLexicalCaptures())
+				return addMissingGeneratedLocalDecls(body, paramsNewStr, receiverType, c.methodReturnTypeByName(), methodReturnTypeStr, c.nativeLexicalCaptures(), declarationBarriers)
 			})
 			if !c.nativeMethodLocalMethodSourceComplete(name, descriptor, sourceCode) {
 				c.nativeMemberRoot.failed = true
 				return nil, fmt.Errorf("unproved final method-local source emission")
+			}
+			if renderedConstructorReceipt != nil && !renderedConstructorReceipt.confirmEmission(constructorPlan, funcCtx, sourceCode, c.GetTabString()) {
+				return nil, fmt.Errorf("unproved final constructor invocation throws source emission")
 			}
 			code = sourceCode
 		}
@@ -4738,6 +4921,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		}
 		paramList = c.applyParameterAnnotations(method, name, descriptor, paramList)
 		paramList = c.applyParamTypeAnnotations(method, name, descriptor, paramTypes, paramList)
+		var known bool
+		paramList, known = c.applyOriginalSourceParameterFinality(method, descriptor, paramList)
+		if !known {
+			return nil, fmt.Errorf("unproved original abstract parameter metadata")
+		}
 		paramsNewStr = strings.Join(paramList, ", ")
 	}
 	if isLambda {
@@ -4747,8 +4935,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		// variable (Java: "variable varN is already defined in method"). Nested lambda bodies were
 		// dumped earlier and already carry their own `lv<innerseq>` names, so this outer rewrite (which
 		// only matches `varN`) leaves them untouched.
-		c.lambdaLocalSeq++
-		code = renameLambdaBodyLocals(code, c.lambdaLocalSeq)
+		if !lambdaMethodLocalNamespace {
+			c.lambdaLocalSeq++
+			code = renameLambdaBodyLocals(code, c.lambdaLocalSeq)
+		}
 		// When EVERY lambda parameter is unused in the body, render them WITHOUT explicit types
 		// (implicit `(l0, l1) -> ...`). An explicit parameter type recovered from the impl-method
 		// descriptor clashes with a RAW functional-interface target (fastjson2
@@ -4759,7 +4949,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		// ALL-UNUSED case so a body that references a parameter as a specific type keeps its explicit
 		// declaration (no behavioral change, no overload-disambiguation risk).
 		// Kill-switch: JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF=1.
-		if adapter == nil && len(lambdaParamNames) > 0 && c.getenv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF") == "" && !lambdaParamsUsed(code, lambdaParamNames) {
+		if adapter == nil && !lambdaMethodLocalNamespace && len(lambdaParamNames) > 0 && c.getenv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF") == "" && !lambdaParamsUsed(code, lambdaParamNames) {
 			paramsNewStr = strings.Join(lambdaParamNames, ", ")
 		}
 		res := fmt.Sprintf("(%s) -> {%s", paramsNewStr, code)
@@ -4794,12 +4984,21 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			methodSourceBuffer.Write([]byte(class_context.SafeIdentifier(name)))
 		}
 	}
-	writeArguments := func(buffer io.Writer) {
-		if name == "<init>" && exceptions == "" {
-			if extra := c.superCtorCheckedThrows(); extra != "" {
+	if name == "<init>" {
+		if renderedConstructorReceipt != nil && (renderedConstructorPlan == nil || renderedConstructorPlan.throwsReceipt != renderedConstructorReceipt || !renderedConstructorReceipt.consumed(funcCtx)) {
+			return nil, fmt.Errorf("stale constructor invocation throws source binding")
+		}
+		if exceptions == "" {
+			extra, err := c.superCtorCheckedThrows(renderedConstructorPlan)
+			if err != nil {
+				return nil, err
+			}
+			if extra != "" {
 				exceptions = " throws " + extra
 			}
 		}
+	}
+	writeArguments := func(buffer io.Writer) {
 		methodSourceBuffer.Write([]byte(fmt.Sprintf("(%s)%s", paramsNewStr, exceptions)))
 	}
 	// A synthetic access-bridge constructor `C(C$N marker)` whose body decompiled to empty bridges the
@@ -4902,6 +5101,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 }
 
 type dumpedMethods struct {
+	incompleteValue bool
+	malformedTry    bool
+	isStub          bool
 	initializerCode string
 	checkedEscape   bool
 	methodName      string
@@ -5337,8 +5539,8 @@ func addMissingGeneratedLocalDecls(body, params, receiverType string, methodRetu
 	}
 	missing := []string{}
 	seen := map[string]bool{}
-	for _, name := range generatedLocalRefRe.FindAllString(body, -1) {
-		if (name != "var0" || receiverType == "") && declared[name] || seen[name] {
+	for _, name := range generatedLocalVariableCandidates(body) {
+		if declared[name] || seen[name] {
 			continue
 		}
 		seen[name] = true
@@ -12586,13 +12788,12 @@ const DecompileStubMarker = "yak-decompiler:"
 // It never survives into final output because the offending method is re-rendered as a stub.
 const malformedTryNoCatchMarker = "yak-decompiler-internal: try without catch handler"
 
-func canFlattenNoCatchTry(body string) bool {
+func canFlattenNoCatchTry(body string, malformed bool, state *class_context.SourceRenderState) bool {
 	body = strings.TrimSpace(body)
 	if body == "" {
 		return false
 	}
-	if strings.Contains(body, malformedTryNoCatchMarker) ||
-		strings.Contains(body, values.EmptySlotValuePlaceholder) ||
+	if malformed || state != nil && (state.IncompleteValue || state.MalformedTry) ||
 		hasExceptionSentinel(body) {
 		return false
 	}
@@ -12653,8 +12854,7 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 	res, err := c.safeDumpMethod(name, descriptor)
 	applyLeakedExceptionSentinel(res)
 	clean := err == nil && res != nil &&
-		!strings.Contains(res.code, values.EmptySlotValuePlaceholder) &&
-		!strings.Contains(res.code, malformedTryNoCatchMarker) &&
+		!res.incompleteValue && !res.malformedTry && !res.isStub &&
 		// A leaked `varN = Exception;` caught-throwable sentinel is broken Java ("cannot find symbol");
 		// reject it so the method keeps its honest stub instead of adopting silently-broken output.
 		(c.getenv("JDEC_EXCEPTION_SENTINEL_DEGRADE_OFF") != "" ||
@@ -12681,6 +12881,7 @@ func (c *ClassObjectDumper) aggressiveRedumpMethod(name, descriptor string) *dum
 // degrades gracefully instead of failing the entire class. Returns nil when even the
 // signature cannot be derived, in which case the caller should drop the method.
 func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor, reason string) (stub *dumpedMethods) {
+	c.sourceDegraded = true
 	if c.report != nil {
 		c.report.StubMethods = append(c.report.StubMethods, name+descriptor)
 		c.appendDiagnostic(DecompileDiagnostic{Code: "method_stub", Method: name + descriptor, Message: reason})
@@ -12777,7 +12978,7 @@ func (c *ClassObjectDumper) dumpStubMethod(method *MemberInfo, name, descriptor,
 			src = fmt.Sprintf("%s%s %s(%s)%s", prefix, returnTypeForRender.String(funcCtx), name, paramsStr, throwBody)
 		}
 	}
-	return &dumpedMethods{methodName: name, code: src, bodyCode: "stub"}
+	return &dumpedMethods{methodName: name, code: src, bodyCode: "stub", isStub: true}
 }
 
 // isGenuineEnum reports whether this class is a real `enum` declaration (ACC_ENUM and a
@@ -13117,7 +13318,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if err == nil && res != nil && name == "<clinit>" && c.isInterfaceLike() && isIgnorableAssertionOnlyClinit(res.code) {
 			continue
 		}
-		if err == nil && res != nil && strings.Contains(res.code, values.EmptySlotValuePlaceholder) {
+		if err == nil && res != nil && res.incompleteValue {
 			// The decompiled body leaked an internal placeholder ("empty slot value"),
 			// which means the stack simulation was incomplete and the emitted source is
 			// not valid Java. Degrade to a stub instead of producing un-compilable code.
@@ -13127,7 +13328,7 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 				log.Errorf("DEBUG_EMPTYSLOT method %s%s:\n%s", name, descriptor, res.code)
 			}
 		}
-		if err == nil && res != nil && strings.Contains(res.code, malformedTryNoCatchMarker) {
+		if err == nil && res != nil && res.malformedTry {
 			// The try-region structuring failed and produced a try with no catch handler,
 			// which means the body is semantically corrupted (e.g. the caught-exception
 			// placeholder leaked into the try). Degrade to a stub.

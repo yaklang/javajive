@@ -1066,6 +1066,12 @@ func searchCircleEndNode(circleNode *core.Node, loopStart *core.Node, domTree ma
 	// LoopJmpRewriter. Gated on a reducible method (the header is well-defined) and only when there is
 	// genuine multi-exit ambiguity, so single-exit loops are byte-for-byte unchanged.
 	if reducible && jdecenv.Get("JDEC_NO_LOOP_HEADER_EXIT") == "" {
+		// Exit-specific effects precede a shared continuation. The
+		// header's first effect is not the loop boundary: lifting it after
+		// the loop imposes that effect on the other successful exit too.
+		if shared := ownedSharedLoopExit(outNodes, circleNode, domTree); shared != nil {
+			return shared
+		}
 		var headerOut []*core.Node
 		for _, n := range loopStart.Next {
 			if n.IsCatchStart && jdecenv.Get("JDEC_LOOP_KEEP_CATCH_EDGE_OFF") == "" {

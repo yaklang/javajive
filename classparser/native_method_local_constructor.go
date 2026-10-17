@@ -299,7 +299,15 @@ func nativeMethodLocalConstructorParameters(obj *ClassObject, method *MemberInfo
 	// This hidden-parameter protocol is unchanged in the independently proved
 	// post-52 input namespaces. Nest membership is only local syntax evidence
 	// here; the complete lexical/nest source transaction must still close.
-	return obj.MajorVersion >= 52 && nativeAccessorVersion(obj, work) && signatureSeen && parametersSeen == wantParameters
+	// ClassWriter compares the source method type with its erasure. The
+	// mandated enclosing instance is added only to the external descriptor;
+	// it does not by itself create a Signature attribute. Lowered ordinary
+	// captures do change that method type and require the original ()V view.
+	wantSignature := len(params) > 0
+	if wantParameters {
+		wantSignature = len(params) > 1
+	}
+	return obj.MajorVersion >= 52 && nativeAccessorVersion(obj, work) && signatureSeen == wantSignature && parametersSeen == wantParameters
 }
 
 // Physical capture words and source compiler metadata are separate proofs.
@@ -331,7 +339,11 @@ func (c *ClassObjectDumper) nativeMethodLocalConstructorSourceMetadata(obj *Clas
 			signature = a != nil
 		}
 	}
-	return signature == (len(params) != 0)
+	ordinaryCaptures := len(params)
+	if owner.declaration.AccessFlags&8 == 0 {
+		ordinaryCaptures--
+	}
+	return ordinaryCaptures >= 0 && signature == (ordinaryCaptures != 0)
 }
 
 // A pre-Java-8 default local constructor can carry the same verified capture
@@ -341,7 +353,7 @@ func (c *ClassObjectDumper) nativeMethodLocalConstructorSourceMetadata(obj *Clas
 // Full physical constructor, scope, original SSA allocation and capture proofs
 // must still succeed before this metadata-only source eligibility is consulted.
 func nativeMethodLocalLegacySourceMetadata(obj *ClassObject, method *MemberInfo, params []string, owner *nativeMethodLocalOwner, work *workbudget.Budget) bool {
-	if obj == nil || method == nil || owner == nil || len(params) == 0 || obj.MinorVersion != 0 || obj.MajorVersion < 49 || obj.MajorVersion >= 52 {
+	if obj == nil || method == nil || owner == nil || obj.MinorVersion != 0 || obj.MajorVersion < 49 || obj.MajorVersion >= 52 {
 		return false
 	}
 	signatureSeen := false
@@ -363,5 +375,5 @@ func nativeMethodLocalLegacySourceMetadata(obj *ClassObject, method *MemberInfo,
 	// Signature is optional in these legacy files; when present, the physical
 	// checker requires exactly ()V. Only independently proved hidden operands
 	// exist in this default-constructor packet, never explicit source arguments.
-	return nativeMethodLocalConstructorParameters(obj, method, params, owner, false, work)
+	return (len(params) != 0 || !signatureSeen) && nativeMethodLocalConstructorParameters(obj, method, params, owner, false, work)
 }

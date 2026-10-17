@@ -3509,7 +3509,34 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			slot = GetRetrieveIdx(opcode)
 		}
 
-		runtimeStackSimulation.Push(loadVarBySlot(slot))
+		loaded := loadVarBySlot(slot)
+		if len(opcode.Source) == 1 {
+			update := opcode.Source[0]
+			if delta, closed := d.immediateLocalPreUpdate(update, opcode, loaded); closed {
+				if delta == 1 || delta == -1 {
+					op := INC
+					if delta == -1 {
+						op = values.DEC
+					}
+					loaded = values.NewUnaryExpression(loaded, op, loaded.Type())
+				} else {
+					// IINC reads and writes this exact int binding and yields the
+					// updated word to its private successor. Keep an enumerable
+					// assignment, including delta zero, in the consumer's domain.
+					// Only a local is admitted, so repeating its source spelling
+					// as the assignment target introduces no receiver evaluation.
+					rhs := values.NewBinaryExpression(loaded, values.NewJavaLiteral(delta, loaded.Type()), ADD, loaded.Type())
+					loaded = values.NewAssignmentExpression(loaded, rhs, int(update.CurrentOffset), nil)
+				}
+				update.IincFoldedToPreOp = true
+			} else if op, proved := d.immediateLocalTypedReloadUpdate(opcode, loaded); proved {
+				ref := values.UnpackSoltValue(loaded).(*values.JavaRef)
+				loaded = values.NewUnaryExpression(loaded, op, loaded.Type())
+				d.disFoldRef = append(d.disFoldRef, ref)
+				update.LocalStoreFoldedToTypedPreOp = true
+			}
+		}
+		runtimeStackSimulation.Push(loaded)
 		////return mkRetrieve(variableFactory);
 	case OP_ACONST_NULL:
 		runtimeStackSimulation.Push(values.NewOriginalNullLiteral(int(opcode.CurrentOffset)))
@@ -3551,6 +3578,8 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// would become 65526; sign-extend through int16 before widening to int.
 		runtimeStackSimulation.Push(values.NewJavaLiteral(int(int16(Convert2bytesToInt(opcode.Data))), types.NewJavaPrimer(types.JavaInteger)))
 	case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
+		opcode.LocalStoreFoldedToPostOp = false
+		opcode.LocalStoreFoldedToTypedPreOp = false
 		slot := GetStoreIdx(opcode)
 		value := runtimeStackSimulation.Pop().(values.JavaValue)
 		d.slotStoreValue[opcode] = value
@@ -3872,6 +3901,26 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		d.slotStoreTrace[slot] = slotStoreTraceInfo{offset: opcode.CurrentOffset, ref: ref}
 		statements.NewAssignStatement(ref, value, isFirst)
 		d.opcodeIdToRef[opcode] = append(d.opcodeIdToRef[opcode], [2]any{ref, isFirst})
+		if !isFirst && runtimeStackSimulation.Size() > 0 {
+			if op, proved := d.immediateLocalPostUpdate(opcode, ref, runtimeStackSimulation.Peek()); proved {
+				// Keep the original load's enumerable target: later source binding
+				// reconciliation must update this write as well as ordinary reads.
+				post := values.NewBinaryExpression(runtimeStackSimulation.Peek(), values.NewJavaLiteral(1, ref.Type()), op, ref.Type())
+				d.disFoldRef = append(d.disFoldRef, ref)
+				runtimeStackSimulation.ReplaceTop(post)
+				// This is the semantic replacement's producer. STORE still
+				// has no decoded push in stackProduced or extra consumed word.
+				d.stackValueProducers[post] = opcode
+				opcode.LocalStoreFoldedToPostOp = true
+			} else if duplicate, target, op, proved := d.immediateLocalTypedPreUpdate(opcode, ref, runtimeStackSimulation.Peek(), value); proved {
+				pre := values.NewUnaryExpression(target, op, ref.Type())
+				d.disFoldRef = append(d.disFoldRef, ref)
+				runtimeStackSimulation.ReplaceTop(pre)
+				d.stackValueProducers[pre] = opcode
+				opcode.LocalStoreFoldedToTypedPreOp = true
+				duplicate.LocalUpdateDupFolded = true
+			}
+		}
 		// Record the creator of each freshly-minted ref so the boolean-copy merge can recover it
 		// deterministically (opcodeIdToRef iteration is unordered and several stores can reuse a ref).
 		if isFirst && ref != nil {
@@ -4073,27 +4122,10 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			typ = types.NewJavaPrimer(types.JavaLong)
 		}
 		arg := runtimeStackSimulation.Pop().(values.JavaValue)
-		cast := values.NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			// Parenthesize the operand so the (unary) cast keeps the right precedence
-			// when the operand is a lower-precedence expression: without it,
-			// `(long)a * b` parses as `((long)a) * b` instead of `(long)(a * b)`,
-			// causing "possible lossy conversion" recompile failures. The extra parens
-			// are always valid Java.
-			return values.RenderPrimitiveConversion(arg, typ, funcCtx)
-		}, func() types.JavaType {
-			return typ
-		}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-			// Propagate variable renames into the cast operand. Without this, a later rewriteVar
-			// rename (e.g. a depth-collision rename of the operand's variable) updates the operand's
-			// other occurrences but not this primitive-cast expression, so a `(int)(varN)` cast keeps
-			// a stale name and references an undeclared variable (guava UnsignedLongs.toString:
-			// `(int) rem` printed the old name `var5` after rem was renamed `var4_1`). CHECKCAST
-			// already does this; the numeric conversions must too.
-			arg.ReplaceVar(oldId, newId)
-		})
-		cast.Flag = "primitive_cast"
-		cast.CapturesKnown = true
-		cast.Captures = []values.JavaValue{arg}
+		cast := values.NewOriginalPrimitiveConversion(arg, typ, int(opcode.CurrentOffset))
+		if cast == nil {
+			return fmt.Errorf("invalid primitive conversion at PC %d", opcode.CurrentOffset)
+		}
 		runtimeStackSimulation.Push(cast)
 	case OP_INSTANCEOF:
 		classInfo := d.constantPoolGetter(int(Convert2bytesToInt(opcode.Data))).(*values.JavaClassValue).Type()
@@ -4429,6 +4461,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(v1)
 		runtimeStackSimulation.Push(v2)
 	case OP_DUP:
+		opcode.LocalUpdateDupFolded = false
 		// The uninitialized reference in NEW; DUP; invokespecial belongs to
 		// one constructor expression. A DUP AFTER that constructor instead
 		// shares the initialized object's identity (e.g. (x = new T()).mutate()).
@@ -4476,6 +4509,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(v1)
 		adduser(1)
 	case OP_DUP2:
+		opcode.LocalUpdateDupFolded = false
 		// dup2 duplicates the top two category-1 slots (or one category-2 value). Each duplicated
 		// value must carry its OWN ref-fold callback. The previous code kept a single shared addUser
 		// (overwritten to the LAST converted value), so when both pushes reused it, the deeper value's
@@ -4678,8 +4712,8 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		// REPLACES the live value, suppressing the standalone statement. Without this the
 		// standalone `i++` is emitted BEFORE the consuming statement and the consumer then reads
 		// the incremented value (`i++; a[i] = v` instead of `a[i++] = v`), silently changing
-		// semantics. Pre-increment compiles to `iinc X; iload X` (no live load at iinc time), so it
-		// is intentionally left alone and correctly stays `i = i + 1; ... use i`.
+		// semantics. A prefix update with no live old value is handled at its
+		// private adjacent ILOAD, after that load resolves its original binding.
 		if (inc == 1 || inc == -1) && ref != nil && runtimeStackSimulation.Size() > 0 {
 			if topRef, ok := UnpackSoltValue(runtimeStackSimulation.Peek()).(*values.JavaRef); ok && topRef.VarUid == ref.VarUid {
 				runtimeStackSimulation.Pop()
@@ -6402,6 +6436,7 @@ func (d *Decompiler) ParseStatement() error {
 			if v1, ok := v.LeftValue.(*values.JavaRef); ok {
 				if node.HasOriginPC && v.ArrayMember == nil && LocalAccessOf(opcode.Instr.OpCode).Write {
 					v.MarkOriginalLocalStore(node.OriginPC, GetStoreIdx(opcode))
+					v.MarkOriginalParameterStore(node.OriginPC, GetStoreIdx(opcode))
 				}
 				if node.HasOriginPC && v.ArrayMember == nil && (v.IsDeclare || v.IsFirst) && opcode.Instr.OpCode == OP_INVOKEDYNAMIC {
 					v1.MarkOriginalDynamicOperandDeclaration(node.OriginPC, v.JavaValue)
@@ -6442,6 +6477,7 @@ func (d *Decompiler) ParseStatement() error {
 	d.refreshReferenceOperandSnapshotTypes()
 	d.partitionSharedDynamicCaptureWebs()
 	d.unifyNumericExitWebs()
+	d.restoreNumericConditionalWebs()
 	d.restoreNormalizedBooleanWebs()
 	d.restoreExceptionDeclarationSeeds()
 	d.restoreOptionalSupplierDefinitionViews()
@@ -6485,7 +6521,7 @@ func (d *Decompiler) ParseStatement() error {
 		}
 		switch opcode.Instr.OpCode {
 		case OP_ISTORE, OP_ASTORE, OP_LSTORE, OP_DSTORE, OP_FSTORE, OP_ISTORE_0, OP_ASTORE_0, OP_LSTORE_0, OP_DSTORE_0, OP_FSTORE_0, OP_ISTORE_1, OP_ASTORE_1, OP_LSTORE_1, OP_DSTORE_1, OP_FSTORE_1, OP_ISTORE_2, OP_ASTORE_2, OP_LSTORE_2, OP_DSTORE_2, OP_FSTORE_2, OP_ISTORE_3, OP_ASTORE_3, OP_LSTORE_3, OP_DSTORE_3, OP_FSTORE_3:
-			if protectedStores[opcode] {
+			if protectedStores[opcode] || opcode.LocalStoreFoldedToPostOp || opcode.LocalStoreFoldedToTypedPreOp {
 				break
 			}
 			refInfos := d.opcodeIdToRef[opcode]
@@ -6630,11 +6666,7 @@ func (d *Decompiler) ParseStatement() error {
 								}
 								user.CurrentOpcode = opcode
 							}
-							appendNode(statements.NewCustomStatement(func(funcCtx *class_context.ClassContext) string {
-								return assignSt.String(funcCtx)
-							}, func(oldId *utils2.VariableId, newId *utils2.VariableId) {
-								assignSt.ReplaceVar(oldId, newId)
-							}))
+							appendNode(statements.NewSourceAssignmentForward(assignSt.(*statements.AssignStatement)))
 						}
 					}
 				} else {
@@ -6778,6 +6810,9 @@ func (d *Decompiler) ParseStatement() error {
 				appendNode(assignSt)
 			}
 		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
+			if opcode.LocalUpdateDupFolded {
+				break
+			}
 			refInfos := d.opcodeIdToRef[opcode]
 			convertedVals := d.dupConvertedRefValue[opcode]
 			for i, refInfo := range refInfos {
@@ -6854,7 +6889,7 @@ func (d *Decompiler) ParseStatement() error {
 			// (`a[i++] = v`, `int j = i++`, `return i++`): the side effect now rides inside the
 			// consuming expression, so emitting the standalone statement here would double-apply
 			// and mis-order the increment (the historical `i++; a[i] = v` semantic bug).
-			if opcode.IincFoldedToPostOp {
+			if opcode.IincFoldedToPostOp || opcode.IincFoldedToPreOp {
 				return nil
 			}
 			// The iinc increment is a SIGNED constant. Reading it unsigned turns `i--`

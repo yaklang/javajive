@@ -78,7 +78,7 @@ func nativeMemberGetterPacketProof(obj *ClassObject, m *MemberInfo, resolve func
 			u := func(offset int) uint16 { return binary.BigEndian.Uint16(a.Info[offset : offset+2]) }
 			n, nok := sourceBridgeUTF8(obj, u(6))
 			d, dok := sourceBridgeUTF8(obj, u(8))
-			if u(0) != 1 || u(2) != 0 || u(4) != 5 || u(10) != 0 || !nok || !dok || class_context.SafeIdentifier(n) != n || d != "L"+obj.GetClassName()+";" {
+			if u(0) != 1 || u(2) != 0 || u(4) != 5 || u(10) != 0 || !nok || !dok || !class_context.PreservesJava8Identifier(n) || d != "L"+obj.GetClassName()+";" {
 				return nil
 			}
 			seenLocals = true
@@ -100,7 +100,7 @@ func nativeMemberGetterPacketProof(obj *ClassObject, m *MemberInfo, resolve func
 		fieldOp = core.OP_GETSTATIC
 	}
 	field := constructorMotionMember(obj, ops[len(args)], fieldOp)
-	if field == nil || field.Name != obj.GetClassName() || field.Description != result || class_context.SafeIdentifier(field.Member) != field.Member {
+	if field == nil || field.Name != obj.GetClassName() || field.Description != result || !class_context.PreservesJava8Identifier(field.Member) {
 		return nil
 	}
 	expected := core.OP_ARETURN
@@ -155,7 +155,7 @@ func nativeMemberGetterPacketProof(obj *ClassObject, m *MemberInfo, resolve func
 		if target == nil || owner == nil || owner == obj || target.AccessFlags&7 != 4 || target.AccessFlags&(0x1000|0x4000) != 0 || (target.AccessFlags&8 != 0) != staticField || nativeBinaryPackage(owner.GetClassName()) == nativeBinaryPackage(obj.GetClassName()) {
 			return nil
 		}
-		genericField, found = nativeMemberInheritedFieldSignature(owner, target, result, work)
+		genericField, found = nativeMemberInheritedFieldSourceSignature(obj, owner, target, result, nativeInheritedFieldErasedRead, resolve, work)
 		if !found {
 			return nil
 		}
@@ -170,6 +170,13 @@ func nativeMemberCollectPrivateGetters(p *nativeMemberFamily, work *workbudget.B
 	return nativeMemberCollectPrivateGettersResolved(p, nil, work)
 }
 func nativeMemberCollectPrivateGettersResolved(p *nativeMemberFamily, resolve func(string) (*ClassObject, bool), work *workbudget.Budget) bool {
+	return nativeMemberCollectPrivateGettersPhase(p, resolve, work, true)
+}
+
+// Named declarations establish packet identity before anonymous ownership can
+// be planned. Shared symbol ordinals become a closure claim only after that
+// forest is complete; every packet and duplicate-symbol check still runs here.
+func nativeMemberCollectPrivateGettersPhase(p *nativeMemberFamily, resolve func(string) (*ClassObject, bool), work *workbudget.Budget, complete bool) bool {
 	p.getters = map[string]*nativeMemberPrivateGetter{}
 	needsProjection := false
 	for _, object := range p.lexicalObjects {
@@ -234,15 +241,41 @@ func nativeMemberCollectPrivateGettersResolved(p *nativeMemberFamily, resolve fu
 			p.getters[nativeMemberGetterKey(getter.owner, getter.name, getter.descriptor)] = getter
 		}
 	}
+	if !complete {
+		return true
+	}
+	return nativeMemberAccessorRegistrationsClosed(p, work)
+}
+
+func nativeMemberAccessorRegistrationsClosed(p *nativeMemberFamily, work *workbudget.Budget) bool {
+	if p == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	if len(p.getters) == 0 {
+		return true
+	}
+	if work != nil && work.CheckAlloc(int64(len(p.getters))*128+128) != nil {
+		return false
+	}
+	ordinals := map[int]string{}
+	for _, getter := range p.getters {
+		if getter == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		symbol := nativeMemberAccessorSymbolKey(getter)
+		if prior, known := ordinals[getter.ordinal]; known && prior != symbol {
+			return false
+		}
+		ordinals[getter.ordinal] = symbol
+	}
 	constructors, known := nativeMemberConstructorRegistrations(p, work)
 	if !known {
 		return false
 	}
-	// javac's shared accessed-symbol sequence also contains private
-	// constructors, which have no access$NNN method. Every intervening event
-	// still has to be regenerated at its actual source site below.
+	// The sequence includes private constructors without access$ methods.
+	// No incomplete anonymous scope can reserve an unexplained ordinal.
 	for ordinal := range ordinals {
-		if ordinal/100 >= len(ordinals)+len(constructors) {
+		if !nativeProofWork(work, 1) || ordinal/100 >= len(ordinals)+len(constructors) {
 			return false
 		}
 	}
@@ -474,6 +507,22 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 			}
 		}
 		if getter.call != nil {
+			if f := c.nativeAnonymousForest; f != nil && f.units[getter.owner] != nil {
+				consumer := f.consumers[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+				if consumer == nil || consumer.getter != getter ||
+					!nativeAnonymousPrivateCallAccessorDeclaration(f, f.objects[getter.owner], getter.method, c.Work) ||
+					!nativeAnonymousLexicalConsumerSourceClosed(c, consumer, ctx, c.Work) ||
+					!nativeAnonymousLexicalConsumerOperand(v, consumer, ctx, c.Work) {
+					p.failed = true
+					return "", false
+				}
+				rendered, known := nativeAnonymousPrivateArgumentsSource(c, consumer, args, ctx)
+				if !known {
+					p.failed = true
+					return "", false
+				}
+				return fmt.Sprintf("%s(%s)/*jdec-owned-getter:%d:%s:%s*/", getter.field, strings.Join(rendered, ", "), getter.ordinal, getter.owner, getter.field), true
+			}
 			source, known := nativeMemberPrivateCallSource(getter, args, ctx)
 			if !known {
 				p.failed = true
@@ -487,12 +536,54 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 			}
 			return source, known
 		}
+		// The accessor result has its original descriptor erasure. Merely spelling
+		// the source field can reintroduce generic arguments (especially for static
+		// fields of nongeneric owners) and change downstream overload/inference.
+		// A same-erasure reference view keeps the field access/registration intact.
+		// Apply it to the assignment operand itself: casting an enclosing generic
+		// call result cannot undo argument constraints already inferred from it.
+		readView := func(source string) (string, bool) {
+			if !getter.genericField || !strings.HasPrefix(getter.fieldDescriptor, "L") && !strings.HasPrefix(getter.fieldDescriptor, "[") {
+				return source, true
+			}
+			typ, e := types.ParseDescriptor(getter.fieldDescriptor)
+			if e != nil {
+				p.failed = true
+				return "", false
+			}
+			spelling := typ.String(ctx)
+			if nativeStaticAccessorQualifierShadowed(strings.TrimRight(spelling, "[]"), ctx) {
+				p.failed = true
+				return "", false
+			}
+			return "((" + spelling + ")(" + source + "))", true
+		}
 		// A source write regenerates the original static accessor: the receiver and
 		// RHS complete before its class initialization and null dereference. javac
 		// registers the source LHS field before lowering RHS accessors; the
 		// marker records that compiler order without moving runtime evaluation.
 		if getter.setter {
-			rhs, ok := args[1].(values.JavaValue)
+			anonymous := c.nativeAnonymousForest != nil && c.nativeAnonymousForest.units[getter.owner] != nil
+			var lexicalRHS string
+			if anonymous {
+				f := c.nativeAnonymousForest
+				consumer := f.consumers[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+				if getter.staticField || consumer == nil || consumer.getter != getter || !nativeAnonymousFieldAccessorDeclaration(f, f.objects[getter.owner], getter.method, c.Work) || !nativeAnonymousLexicalConsumerSourceClosed(c, consumer, ctx, c.Work) || !nativeAnonymousLexicalConsumerOperand(v, consumer, ctx, c.Work) {
+					p.failed = true
+					return "", false
+				}
+				rendered, known := nativeAnonymousPrivateArgumentsSource(c, consumer, args, ctx)
+				if !known || len(rendered) != 1 {
+					p.failed = true
+					return "", false
+				}
+				lexicalRHS = rendered[0]
+			}
+			rhsIndex := 1
+			if getter.staticField {
+				rhsIndex = 0
+			}
+			rhs, ok := args[rhsIndex].(values.JavaValue)
 			if !ok || sourceProofNil(rhs) {
 				p.failed = true
 				return "", false
@@ -513,14 +604,27 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 					return "", false
 				}
 				value = view.String(ctx)
+			} else if anonymous {
+				value = lexicalRHS
 			} else {
 				value = "((" + mt.FunctionType().ReturnType.String(ctx) + ")(" + rhs.String(ctx) + "))"
 			}
-			assignment := fmt.Sprintf("((%s)(%s)).%s/*jdec-owned-getter:%d:%s:%s:put*/ = %s", sourceOwner, v.String(ctx), getter.field, getter.ordinal, getter.owner, getter.field, value)
+			member := ""
+			if anonymous {
+				member = getter.field
+			} else if getter.staticField {
+				member = getter.field
+				if !unqualified {
+					member = sourceOwner + "." + member
+				}
+			} else {
+				member = fmt.Sprintf("((%s)(%s)).%s", sourceOwner, v.String(ctx), getter.field)
+			}
+			assignment := fmt.Sprintf("%s/*jdec-owned-getter:%d:%s:%s:put*/ = %s", member, getter.ordinal, getter.owner, getter.field, value)
 			if statement {
 				return assignment, true
 			}
-			return "(" + assignment + ")", true
+			return readView("(" + assignment + ")")
 		}
 
 		// A discarded read needs a separately proved statement materialization;
@@ -529,26 +633,6 @@ func (c *ClassObjectDumper) wireNativeMemberPrivateGetters(p *nativeMemberFamily
 		if statement {
 			p.failed = true
 			return "", false
-		}
-		// The accessor result has its original descriptor erasure. Merely spelling
-		// the source field can reintroduce generic arguments (especially for static
-		// fields of nongeneric owners) and change downstream overload/inference.
-		// A same-erasure reference view keeps the field access/registration intact.
-		readView := func(source string) (string, bool) {
-			if !getter.genericField || !strings.HasPrefix(getter.fieldDescriptor, "L") && !strings.HasPrefix(getter.fieldDescriptor, "[") {
-				return source, true
-			}
-			typ, e := types.ParseDescriptor(getter.fieldDescriptor)
-			if e != nil {
-				p.failed = true
-				return "", false
-			}
-			spelling := typ.String(ctx)
-			if nativeStaticAccessorQualifierShadowed(strings.TrimRight(spelling, "[]"), ctx) {
-				p.failed = true
-				return "", false
-			}
-			return "((" + spelling + ")(" + source + "))", true
 		}
 		// A static field access performs declaring-class initialization at the same
 		// point as the original zero-argument INVOKESTATIC access bridge.

@@ -152,11 +152,25 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 		}
 		forest.consumers = map[string]map[string]map[int]*nativeAnonymousLexicalConsumer{}
 	}
+	forest.memberEnclosing = map[string]map[string]map[int]*nativeAnonymousMemberEnclosing{}
 	var metadata callbinding.Provider
 	if len(providers) != 0 {
 		metadata = providers[0]
 	}
+	localRoles := map[string]*nativeMethodLocalClass{}
+	if forest.members != nil {
+		for owner, local := range forest.members.methodLocals {
+			if local == nil || local.object == nil || forest.objects[owner] != local.object {
+				return false
+			}
+			if _, valid := nativeMemberJointMethodLocalOwner(forest.members, local.object, work); !valid {
+				return false
+			}
+			localRoles[owner] = local
+		}
+	}
 	for owner, object := range forest.objects {
+		forest.memberEnclosing[owner] = map[string]map[int]*nativeAnonymousMemberEnclosing{}
 		forest.reads[owner] = map[string]map[int]*nativeMemberLexicalRead{}
 		forest.consumers[owner] = map[string]map[int]*nativeAnonymousLexicalConsumer{}
 		forest.readPCs[owner] = map[string]map[int]bool{}
@@ -172,6 +186,7 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 				return false
 			}
 			key := name + desc
+			forest.memberEnclosing[owner][key] = map[int]*nativeAnonymousMemberEnclosing{}
 			reads := map[int]*nativeMemberLexicalRead{}
 			approved := map[int]bool{}
 			paths := map[int]*nativeMemberLexicalRead{}
@@ -236,10 +251,25 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 								}
 								next = parent
 								if !child.parentAnonymous {
-									lexicalOwner, lexical = parent, parent == forest.root && forest.objects[parent] != nil || forest.members != nil && forest.members.children[parent] != nil
+									lexicalOwner, lexical = parent, parent == forest.root && forest.objects[parent] != nil || forest.members != nil && forest.members.children[parent] != nil || localRoles[parent] != nil
 								}
 							} else if prior != nil && !strings.HasPrefix(field.Member, "val$") {
 								return false
+							}
+						} else if local := localRoles[current]; local != nil {
+							parameter, captured := local.constructor.captures[field.Member]
+							ps, _, bad := callbinding.Descriptor(local.constructor.descriptor)
+							if !captured {
+								break
+							}
+							if bad != nil || parameter < 0 || parameter >= len(ps) || field.Description != ps[parameter] {
+								return false
+							}
+							if field.Member == local.constructor.enclosingField {
+								next = local.owner.owner
+								lexicalOwner, lexical = next, forest.objects[next] != nil
+							} else if prior == nil {
+								break
 							}
 						} else if forest.members != nil {
 							child := forest.members.children[current]
@@ -249,7 +279,7 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 							if field.Description != "L"+child.owner+";" {
 								return false
 							}
-							lexicalOwner, lexical, next = child.owner, true, child.owner
+							lexicalOwner, lexical, next = child.owner, forest.units[child.owner] == nil, child.owner
 						} else {
 							break
 						}
@@ -258,6 +288,18 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 							break
 						}
 						read := &nativeMemberLexicalRead{owner: field.Name, field: field.Member, descriptor: field.Description, pc: int(ops[j].CurrentOffset), prior: prior}
+						if next != "" && forest.units[next] != nil && stable {
+							if receipt := nativeAnonymousMemberEnclosingProof(forest, object, method, code, ops, read, next, work); receipt != nil {
+								forest.memberEnclosing[owner][key][receipt.newPC] = receipt
+								approved[read.pc], paths[read.pc] = true, read
+							}
+							for _, consumer := range nativeAnonymousPrivateArgumentConsumers(forest, object, method, code, ops, read, next, metadata, work) {
+								forest.consumers[owner][key][consumer.pc] = consumer
+								for node := read; node != nil; node = node.prior {
+									approved[node.pc], paths[node.pc] = true, node
+								}
+							}
+						}
 						if next != "" && forest.units[next] != nil && j+1 < len(ops) && stable {
 							entry := sort.SearchInts(entries, int(ops[j].CurrentOffset)+1)
 							if entry >= len(entries) || entries[entry] > int(ops[j+1].CurrentOffset) {
@@ -363,6 +405,43 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 								}
 							}
 						}
+						if local := localRoles[field.Name]; local != nil {
+							parameter, captured := local.constructor.captures[field.Member]
+							if captured {
+								ps, _, bad := callbinding.Descriptor(local.constructor.descriptor)
+								if bad != nil || parameter < 0 || parameter >= len(ps) || field.Description != ps[parameter] {
+									return false
+								}
+								pc := int(op.CurrentOffset)
+								switch kind {
+								case core.OP_PUTFIELD:
+									if owner != field.Name || name != "<init>" || desc != local.constructor.descriptor || local.constructor.capturePCs[field.Member] != pc {
+										return false
+									}
+								case core.OP_GETFIELD:
+									if !stable {
+										return false
+									}
+									if approved[pc] {
+										if len(op.Data) != 2 || paths[pc] == nil {
+											return false
+										}
+										index := int(binary.BigEndian.Uint16(op.Data))
+										read := paths[pc]
+										prior := forest.captureReferences[owner][index]
+										if prior != nil && (prior.owner != read.owner || prior.field != read.field || prior.descriptor != read.descriptor) {
+											return false
+										}
+										forest.captureReferences[owner][index] = read
+									} else if owner != field.Name {
+										return false
+									}
+								default:
+									return false
+								}
+								continue
+							}
+						}
 						child := forest.units[field.Name]
 						if child == nil {
 							continue
@@ -433,34 +512,41 @@ func (c *ClassObjectDumper) wireNativeAnonymousForestCaptures(ctx *class_context
 			}
 		}
 	}
-	ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
+	priorType := ctx.SourceLexicalCapturedFieldType
+	ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
 		read := forest.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+		// Qualified THIS reopens original declaration roles and physical
+		// capture paths without formatting a qualifier or changing imports.
+		// Plain captured locals additionally retain their lexical binding.
 		if read != nil {
-			text, known := c.nativeAnonymousBindings[nativeMemberCaptureIndexKey(read.owner, read.field)]
-			validText := known && class_context.SafeIdentifier(text) == text
 			if forest.lexicalThis[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] {
-				validText = false
-				lexicalOwner := ""
-				if child := forest.units[read.owner]; child != nil && !child.parentAnonymous {
-					owner, _, original := originalAnonymousOwner(child.object)
-					if original && read.field == child.enclosingField && (owner == forest.root && forest.objects[owner] != nil || forest.members != nil && forest.members.children[owner] != nil) {
-						lexicalOwner = owner
-					}
-				} else if forest.members != nil {
-					if named := forest.members.children[read.owner]; named != nil && !named.static && read.field == named.field {
-						lexicalOwner = named.owner
-					}
+				if c.nativeAnonymousLexicalThisRead(read, value, pc, name, ctx) {
+					return true
 				}
-				if lexicalOwner != "" && read.descriptor == "L"+lexicalOwner+";" {
-					validText = known && text == ctx.ShortTypeName(strings.ReplaceAll(lexicalOwner, "/", "."))+".this"
-				}
-
+			} else {
+				_, known := c.nativeAnonymousLexicalCaptureReadSource(read, value, pc, name, ctx)
+				return known
 			}
-			if !validText || name != read.field || !nativeMemberLexicalReadOperand(value, read, c.Work, ctx) {
+		}
+		return priorType != nil && priorType(value, pc, name)
+	}
+	ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
+		consumer := forest.consumers[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+		if consumer != nil && consumer.kind == core.OP_GETFIELD && consumer.declaredField != nil {
+			field, valid := value.(*values.RefMember)
+			if !valid || field == nil || name != consumer.name || !field.OriginalInstanceFieldRead(pc, consumer.owner, consumer.name, consumer.descriptor) || !nativeAnonymousLexicalConsumerSourceClosed(c, consumer, ctx, c.Work) || !nativeAnonymousLexicalConsumerOperand(field.Object, consumer, ctx, c.Work) {
 				c.nativeCaptureFailed = true
 				return "", false
 			}
-			return text, true
+			return consumer.name, true
+		}
+		read := forest.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+		if read != nil {
+			text, known := c.nativeAnonymousLexicalCaptureReadSource(read, value, pc, name, ctx)
+			if !known {
+				c.nativeCaptureFailed = true
+			}
+			return text, known
 		}
 		field, valid := value.(*values.RefMember)
 		if !valid || field == nil || sourceProofNil(field.Object) {
@@ -484,4 +570,48 @@ func (c *ClassObjectDumper) wireNativeAnonymousForestCaptures(ctx *class_context
 		}
 		return "", false
 	}
+}
+
+// Reopen the sealed physical lexical path without committing failure state.
+// Queries use the plain-local path above, which does not render a type name;
+// the committed renderer also uses the original qualified-this spelling.
+func (c *ClassObjectDumper) nativeAnonymousLexicalCaptureReadSource(read *nativeMemberLexicalRead, value any, pc int, name string, ctx *class_context.ClassContext) (string, bool) {
+	if c == nil || c.obj == nil || ctx == nil || read == nil || c.nativeAnonymousForest == nil {
+		return "", false
+	}
+	forest := c.nativeAnonymousForest
+	if forest.objects[c.obj.GetClassName()] != c.obj || forest.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != read {
+		return "", false
+	}
+
+	if local := forest.locals[read.owner]; local != nil {
+		if forest.members == nil || forest.members.methodLocals[read.owner] != local || c.nativeMemberRoot != forest.members {
+			return "", false
+		}
+		return c.nativeMethodLocalAnonymousCaptureSource(local, value, pc, name, ctx)
+	}
+	text, known := c.nativeAnonymousBindings[nativeMemberCaptureIndexKey(read.owner, read.field)]
+	validText := known && class_context.PreservesJava8Identifier(text)
+	if forest.lexicalThis[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] {
+		validText = false
+		lexicalOwner := ""
+		if child := forest.units[read.owner]; child != nil && !child.parentAnonymous {
+			owner, _, original := originalAnonymousOwner(child.object)
+			if original && read.field == child.enclosingField && (owner == forest.root && forest.objects[owner] != nil || forest.members != nil && forest.members.children[owner] != nil) {
+				lexicalOwner = owner
+			}
+		} else if forest.members != nil {
+			if named := forest.members.children[read.owner]; named != nil && !named.static && read.field == named.field {
+				lexicalOwner = named.owner
+			}
+		}
+		if lexicalOwner != "" && read.descriptor == "L"+lexicalOwner+";" {
+			validText = known && text == ctx.ShortTypeName(strings.ReplaceAll(lexicalOwner, "/", "."))+".this"
+		}
+
+	}
+	if !validText || name != read.field || !nativeMemberLexicalReadOperand(value, read, c.Work, ctx) {
+		return "", false
+	}
+	return text, true
 }

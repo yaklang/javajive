@@ -17,6 +17,9 @@ import (
 )
 
 type nativeAnonymousClass struct {
+	// Nonzero only for the separately proved Java5/6 native-javac domain.
+	// Reopen that domain before consuming this plan as anonymous source.
+	legacyInputMajor uint16
 	// This view carries only original lambda implementation evidence. It
 	// supplies no named membership, constructor or foreign private scope.
 	lambdaImplementation  *nativeMemberClass
@@ -51,6 +54,7 @@ type nativeAnonymousFamily struct {
 	failed          bool
 	bridges         map[string]*nativeConstructorAccessBridge
 	standalone      map[string]*ClassObject
+	enumPrefix      int
 }
 
 // Anonymous ownership is an original attribute fact; binary spelling only
@@ -157,7 +161,7 @@ func nativeAnonymousConstructorWithRoles(obj *ClassObject, owner, method, assert
 }
 
 func nativeAnonymousConstructorRolesWithLambdas(obj *ClassObject, owner, method, assertionRoot string, work *workbudget.Budget, members *nativeMemberFamily, forest *nativeAnonymousForest, metadata callbinding.Provider, flags uint16, omitUnusedEnclosing bool, lambda *nativeMemberClass, access ...map[string]*nativeConstructorAccessBridge) *nativeAnonymousClass {
-	if obj == nil || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
+	if obj == nil || !nativeDeclarationNamesCompatible(obj, work) || obj.AccessFlags&(0x0200|0x0400|0x4000) != 0 || len(obj.Interfaces) > 1 || len(obj.Interfaces) == 1 && obj.GetSupperClassName() != "java/lang/Object" {
 		return nil
 	}
 	// These class-level declarations cannot be moved into an anonymous body.
@@ -282,6 +286,20 @@ func nativeAnonymousConstructorRolesWithLambdas(obj *ClassObject, owner, method,
 			suffix, known := strings.CutPrefix(currentMember.field, "this$")
 			depth, err := strconv.Atoi(suffix)
 			if !known || err != nil || depth < 0 || depth >= 64 {
+				return nil
+			}
+			outerField = "this$" + strconv.Itoa(depth+1)
+		}
+	}
+	if members != nil && members.methodLocals[owner] != nil {
+		local := members.methodLocals[owner]
+		if _, known := nativeMemberJointMethodLocalOwner(members, local.object, work); !known {
+			return nil
+		}
+		if local.constructor.enclosingField != "" {
+			suffix, known := strings.CutPrefix(local.constructor.enclosingField, "this$")
+			depth, bad := strconv.Atoi(suffix)
+			if !known || bad != nil || depth < 0 || depth >= 64 {
 				return nil
 			}
 			outerField = "this$" + strconv.Itoa(depth+1)
@@ -527,7 +545,7 @@ func nativeAnonymousConstructorRolesWithLambdas(obj *ClassObject, owner, method,
 				outer = index
 			} else {
 				local, known := strings.CutPrefix(name, "val$")
-				if !known || local == "" || class_context.SafeIdentifier(local) != local {
+				if !known || local == "" || !class_context.PreservesJava8Identifier(local) {
 					return nil
 				}
 				captureOrder = append(captureOrder, index)
@@ -640,7 +658,11 @@ func (c *ClassObjectDumper) planNativeAnonymousGroup(members *nativeMemberFamily
 }
 
 func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberFamily, forest *nativeAnonymousForest, root *nativeAnonymousIndependentRoot) *nativeAnonymousFamily {
-	if c.foldSiblingResolver == nil || isGenuineEnum(c.obj) || c.getenv("JDEC_NATIVE_ANONYMOUS_OFF") != "" || !nativeSourceBinaryName(c.obj.GetClassName()) {
+	if c.foldSiblingResolver == nil || c.getenv("JDEC_NATIVE_ANONYMOUS_OFF") != "" || !nativeSourceBinaryName(c.obj.GetClassName()) {
+		return nil
+	}
+	enumPrefix, enumKnown := c.nativeAnonymousEnumConstantPrefix(members)
+	if !enumKnown {
 		return nil
 	}
 	if _, _, anon := originalAnonymousOwner(c.obj); anon && (forest == nil || forest.units[c.obj.GetClassName()] == nil) && !root.validFor(c) {
@@ -673,6 +695,7 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 	if len(names) > 64 {
 		return nil
 	}
+	p.enumPrefix = enumPrefix
 	for name := range names {
 		raw, known := c.foldSiblingResolver(name)
 		if !known {
@@ -689,7 +712,15 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 		if members != nil && members.emptyMarkers[name] != nil && nativeMemberEmptyAccessMarker(obj, members.owner, c.Work) {
 			continue
 		}
-		if members != nil && members.enumSwitchTables[name] != nil {
+		if members != nil {
+			if _, table := members.enumSwitchTables[name]; table {
+				if !c.nativeMemberEnumSwitchAnonymousRole(members, obj) {
+					return nil
+				}
+				continue
+			}
+		}
+		if c.nativeMemberEnumConstantAnonymousRole(members, obj) {
 			continue
 		}
 		if !nativeSourceBinaryName(obj.GetSupperClassName()) {
@@ -711,7 +742,7 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 	// javac numbers actual anonymous expressions consecutively. Only the
 	// representable leading prefix can be reconstructed; leaving an earlier
 	// declaration flat would renumber every subsequent anonymous expression.
-	for ordinal := 1; ordinal <= len(names); ordinal++ {
+	for ordinal := p.enumPrefix + 1; ordinal <= len(names); ordinal++ {
 		name := p.owner + "$" + strconv.Itoa(ordinal)
 		if p.children[name] != nil {
 			continue
@@ -738,11 +769,11 @@ func (c *ClassObjectDumper) planNativeAnonymousOwnedGroup(members *nativeMemberF
 			p.bridges[bridge.descriptor] = bridge
 		}
 	}
-	if len(p.children) == 0 {
+	if len(p.children) == 0 && (members == nil || len(p.standalone) == 0) {
 		return nil
 	}
 	for i := 1; i <= len(p.children); i++ {
-		if p.children[p.owner+"$"+strconv.Itoa(i)] == nil {
+		if p.children[p.owner+"$"+strconv.Itoa(p.enumPrefix+i)] == nil {
 			return nil
 		}
 	}
@@ -1034,6 +1065,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 }
 
 func (c *ClassObjectDumper) wireNativeAnonymousSource() {
+	defer c.wireNativeMethodLocalAnonymousCaptures()
 	ctx := c.FuncCtx
 	if forest := c.nativeAnonymousForest; forest != nil {
 		prior := ctx.SourceClassDenotable
@@ -1112,6 +1144,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		return "", false
 	}
 	ctx.SourceBranchSwap = func(left, right string) bool { return nativeAnonymousBranchSwap(p, left, right, c.Work) }
+	ctx.SourceAnonymousParentSignature = c.nativeAnonymousArgumentParentSignature
 	ctx.SourceAnonymousCandidate = func(owner string) bool {
 		// IR analysis may ask values for provisional text before source-local
 		// identities are proved. Such a query cannot commit or reject ownership.
@@ -1130,6 +1163,9 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			defer c.Work.Leave(workbudget.CounterASTDepth)
 		}
 		fail := func() (string, bool) { p.failed = true; return "", false }
+		if !nativeAnonymousLegacySourceFeatures(c, child) {
+			return fail()
+		}
 		if descriptor != child.descriptor || newPC != child.newPC || pc != child.invokePC {
 			return fail()
 		}
@@ -1255,7 +1291,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 			}
 		}
 		src, e := sub.DumpClass()
-		if e != nil || sub.nativeCaptureFailed || child.lambdaImplementation != nil && !nativeMemberLambdaSourceClosed(child.lambdaImplementation, sub, c.Work) || len(sub.constructorBoundaryHelpers) != 0 ||
+		if e != nil || sub.sourceDegraded || sub.nativeCaptureFailed || child.lambdaImplementation != nil && !nativeMemberLambdaSourceClosed(child.lambdaImplementation, sub, c.Work) || len(sub.constructorBoundaryHelpers) != 0 ||
 			sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
 			return fail()
 		}
@@ -1277,7 +1313,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if child.expressionInitializer != nil {
 			initialization, known = sub.nativeAnonymousExpressionInitializerSource(child, bindings)
 		}
-		if !known {
+		if !known || sub.nativeCaptureFailed || !sub.nativeMethodLocalAnonymousInputsUnchanged() {
 			return fail()
 		}
 		body = initialization + body
@@ -1349,7 +1385,11 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if child.sharedParameterRoles {
 			c.appendDiagnostic(DecompileDiagnostic{Code: "anonymous_shared_parameter_metadata", Method: child.object.GetClassName() + ".<init>" + child.descriptor, Message: "The original constructor reuses an unchanged physical parameter for a proved capture store and SUPER argument. Both source uses read the same stable local or enclosing receiver. Recompilation may generate separate hidden capture parameters, changing this anonymous constructor's physical descriptor and parameter metadata; executable values, capture-before-SUPER order and source overload binding are preserved."})
 		}
-		return fmt.Sprintf("/*jdec-owned-anonymous-ordinal:%d:%s*/%snew %s(%s) {%s}", child.ordinal, p.owner, registration, parent, strings.Join(tuple, ","), body), true
+		// javac visits constructor arguments before entering this anonymous
+		// declaration. Its ordinal event therefore follows the argument subtree
+		// and precedes the body. A prefix before NEW reverses nested argument
+		// registrations even when all runtime evaluations are unchanged.
+		return fmt.Sprintf("%snew %s(%s) /*jdec-owned-anonymous-ordinal:%d:%s*/ {%s}", registration, parent, strings.Join(tuple, ","), child.ordinal, p.owner, body), true
 	}
 }
 
@@ -1441,7 +1481,7 @@ func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 		return false
 	}
 	for i, n := range ordinals {
-		if n != i+1 {
+		if n != p.enumPrefix+i+1 {
 			return false
 		}
 	}
@@ -1449,18 +1489,36 @@ func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 }
 func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 	result := map[string]bool{}
+	for name := range c.nativeLambdaFactoryParameterNames[c.CurrentMethod] {
+		result[name] = true
+	}
+	if f := c.nativeAnonymousForest; f != nil {
+		for _, method := range f.consumers[c.obj.GetClassName()] {
+			for _, consumer := range method {
+				if consumer != nil && consumer.getter == nil && consumer.declaredField != nil {
+					result[consumer.name] = true
+				}
+			}
+		}
+	}
 	if p := c.nativeMemberRoot; p != nil {
 		// Own static fields may be printed without a qualifier. Their original
 		// declarations are field bindings, never missing generated JVM locals.
 		// Reserve the names over actual local IDs as well as the source fallback.
 		for _, field := range c.obj.Fields {
 			if field != nil && field.AccessFlags&8 != 0 {
-				if name, known := sourceBridgeUTF8(c.obj, field.NameIndex); known && class_context.SafeIdentifier(name) == name {
+				if name, known := sourceBridgeUTF8(c.obj, field.NameIndex); known && class_context.PreservesJava8Identifier(name) {
 					result[name] = true
 				}
 			}
 		}
 		for _, getter := range p.getters {
+			// A local/capture can share a method's name: name() performs
+			// method lookup, while name performs variable/field lookup.
+			// Reserve lexical field reads, not separately proved call symbols.
+			if getter.call != nil {
+				continue
+			}
 			if c.nativeAnonymousForest != nil && c.nativeAnonymousForest.units[getter.owner] != nil {
 				result[getter.field] = true
 			}
@@ -1470,12 +1528,12 @@ func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 		}
 	}
 	for _, name := range c.nativeAnonymousBindings {
-		if name != "" && class_context.SafeIdentifier(name) == name {
+		if name != "" && class_context.PreservesJava8Identifier(name) {
 			result[name] = true
 		}
 	}
 	for _, name := range c.nativeCaptureFields {
-		if name != "" && class_context.SafeIdentifier(name) == name {
+		if name != "" && class_context.PreservesJava8Identifier(name) {
 			result[name] = true
 		}
 	}
@@ -1499,6 +1557,10 @@ func (c *ClassObjectDumper) prepareNativeLocalShadowing(body []statements.Statem
 	c.prepareNativeSourceNames(body, params, reserved, protected)
 }
 func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool) {
+	c.prepareNativeSourceNamesInNamespace(body, params, reserved, protected, "")
+}
+
+func (c *ClassObjectDumper) prepareNativeSourceNamesInNamespace(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool, namespace string) {
 	ctx := c.FuncCtx
 	if ctx.LocalNames == nil {
 		ctx.LocalNames = map[*coreutils.VariableId]string{}
@@ -1604,8 +1666,12 @@ func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement
 	}
 	for _, ref := range refs {
 		current := ref.String(ctx)
-		if reserved[current] && !protected[ref.Id] {
+		generated := namespace != "" && lambdaLocalRe.FindString(current) == current && current != ""
+		if (reserved[current] || generated) && !protected[ref.Id] {
 			candidate := "jdec$local$" + current
+			if generated {
+				candidate = namespace + current
+			}
 			for occupied[candidate] {
 				candidate += "$"
 			}
@@ -1698,12 +1764,33 @@ func nativeCaptureDeclaration(body []statements.Statement, ref *values.JavaRef, 
 }
 func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.Statement, params []values.JavaValue) {
 	p := c.nativeAnonymousRoot
-	if p == nil {
+	// Named local classes inside a lambda can constrain the factory's binder
+	// without an anonymous family. Apply only the existing identity/name proof;
+	// absence of that family grants no allocation or ownership permission.
+	if p == nil && len(c.nativeLambdaCaptureParameterNames[c.CurrentMethod]) == 0 && len(c.nativeLambdaFactoryParameterNames[c.CurrentMethod]) == 0 {
 		return
 	}
+	var captureChildren map[string]*nativeAnonymousClass
+	if p != nil {
+		captureChildren = p.children
+	}
+	fail := func() {
+		if p != nil {
+			p.failed = true
+			return
+		}
+		c.nativeCaptureFailed = true
+		if c.nativeMemberRoot != nil {
+			c.nativeMemberRoot.failed = true
+		}
+	}
 	ctx := c.FuncCtx
+	if ctx == nil {
+		fail()
+		return
+	}
 	relevant := false
-	for _, child := range p.children {
+	for _, child := range captureChildren {
 		// Dominance/stability is a body proof, independent of the archive
 		// ownership proof performed before source promotion. Only a physical
 		// implementation crossing a lexical scope needs the extra certificate.
@@ -1711,7 +1798,10 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 			relevant = true
 		}
 	}
-	if !relevant {
+	// Native javac8 can record an anonymous class's physical lambda method
+	// as EnclosingMethod. Its factory still owns the captured source snapshot,
+	// even when that factory contains no direct anonymous NEW instruction.
+	if !relevant && len(c.nativeLambdaCaptureParameterNames[c.CurrentMethod]) == 0 && len(c.nativeLambdaFactoryParameterNames[c.CurrentMethod]) == 0 {
 		return
 	}
 	if ctx.LocalNames == nil {
@@ -1726,7 +1816,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		}
 	}
 	allowed := map[int]map[*coreutils.VariableId]bool{}
-	assigned := map[string]*coreutils.VariableId{}
+	names := &nativeCaptureNameBindings{}
 	remaining := 16384
 	activeValue := map[values.JavaValue]bool{}
 	activeStatement := map[statements.Statement]bool{}
@@ -1734,32 +1824,36 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	value = func(v values.JavaValue, visible map[*coreutils.VariableId]bool) {
 		if c.Work != nil {
 			if c.Work.Enter(workbudget.CounterASTDepth) != nil {
-				p.failed = true
+				fail()
 				return
 			}
 			defer c.Work.Leave(workbudget.CounterASTDepth)
 		}
 		remaining--
 		if remaining < 0 || !nativeProofWork(c.Work, 1) || sourceProofNil(v) || activeValue[v] {
-			p.failed = true
+			fail()
 			return
 		}
 		activeValue[v] = true
 		defer delete(activeValue, v)
+		if !c.bindNativeLambdaCaptureParameterNames(v, body, parameterIDs, visible, names) {
+			fail()
+			return
+		}
 		if alloc, ok := v.(*values.NewExpression); ok && alloc.ConstructorCall != nil {
 			call := alloc.ConstructorCall
-			child := p.children[strings.ReplaceAll(call.ClassName, ".", "/")]
+			child := captureChildren[strings.ReplaceAll(call.ClassName, ".", "/")]
 			if child != nil {
 				site := map[*coreutils.VariableId]bool{}
 				allowed[call.OriginPC] = site
 				for field, index := range child.fields {
 					if index >= len(call.Arguments) {
-						p.failed = true
+						fail()
 						continue
 					}
 					ref, ok := values.UnpackSoltValue(call.Arguments[index]).(*values.JavaRef)
 					if !ok || ref == nil || ref.Id == nil {
-						p.failed = true
+						fail()
 						continue
 					}
 					if ref.IsThis {
@@ -1771,7 +1865,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 					}
 					captureParams, _, err := callbinding.Descriptor(child.descriptor)
 					if err != nil || index >= len(captureParams) {
-						p.failed = true
+						fail()
 						continue
 					}
 					declaredType := ref.Type()
@@ -1782,35 +1876,47 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 						}
 					}
 					erasure, known := values.SourceTypeErasure(declaredType, ctx)
+					if known && erasure != captureParams[index] && !parameterIDs[ref.Id] && visible[ref.Id] && stable && declaration != nil &&
+						c.nativeCaptureWidenedDeclaration(body, ref, declaration, child, alloc, field, erasure, captureParams[index]) {
+						declaredType = ref.WebDeclType
+						erasure, known = values.SourceTypeErasure(declaredType, ctx)
+					}
 					if !known || erasure != captureParams[index] {
-						p.failed = true
+						fail()
 						continue
 					}
 					if !visible[ref.Id] || !stable {
-						p.failed = true
+						fail()
 						continue
 					}
 					name, ok := strings.CutPrefix(field, "val$")
-					if !ok || name == "" || class_context.SafeIdentifier(name) != name {
-						p.failed = true
+					if !ok || name == "" || !class_context.PreservesJava8Identifier(name) {
+						fail()
 						continue
 					}
 					// A rewritten body ref may share the declaration ID but no
 					// longer carry parameter flags. The original declaration,
 					// not a mutable use-site copy, witnesses its captured word.
 					if captureName, known := c.nativeLambdaParameterCaptureName(parameterDeclarations[ref.Id]); known {
+						if !c.recordNativeLambdaCaptureParameterName(parameterDeclarations[ref.Id], name) {
+							fail()
+							continue
+						}
 						name = captureName
 					}
 					if old, known := ctx.LocalNames[ref.Id]; known && old != name {
-						p.failed = true
+						if c.nativeCaptureEnclosingParameter(child, field, ref, parameterDeclarations[ref.Id]) {
+							site[ref.Id] = true
+							continue
+						}
+						fail()
 						continue
 					}
-					if old := assigned[name]; old != nil && old != ref.Id {
-						p.failed = true
+					if !names.bind(name, ref.Id, visible, c.Work) {
+						fail()
 						continue
 					}
 					ctx.LocalNames[ref.Id] = name
-					assigned[name] = ref.Id
 					site[ref.Id] = true
 				}
 			}
@@ -1828,7 +1934,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		}
 		children, known := values.Children(v)
 		if !known {
-			p.failed = true
+			fail()
 			return
 		}
 		for _, v := range children {
@@ -1839,7 +1945,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	walk = func(ss []statements.Statement, visible map[*coreutils.VariableId]bool) {
 		if c.Work != nil {
 			if c.Work.Enter(workbudget.CounterASTDepth) != nil {
-				p.failed = true
+				fail()
 				return
 			}
 			defer c.Work.Leave(workbudget.CounterASTDepth)
@@ -1847,13 +1953,13 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		for _, st := range ss {
 			remaining--
 			if remaining < 0 || !nativeProofWork(c.Work, 1) || sourceProofNil(st) || activeStatement[st] {
-				p.failed = true
+				fail()
 				return
 			}
 			activeStatement[st] = true
 			roots, children, known := nativeSourceNameChildren(st)
 			if !known {
-				p.failed = true
+				fail()
 				delete(activeStatement, st)
 				continue
 			}
@@ -1883,13 +1989,20 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	}
 	walk(body, visible)
 	reserved := map[string]bool{}
-	protected := map[*coreutils.VariableId]bool{}
-	for name, id := range assigned {
+	for name := range c.nativeLambdaFactoryParameterNames[c.CurrentMethod] {
 		reserved[name] = true
-		protected[id] = true
+	}
+	protected := map[*coreutils.VariableId]bool{}
+	for name, bindings := range names.bindings {
+		reserved[name] = true
+		for id := range bindings {
+			protected[id] = true
+		}
 	}
 	c.prepareNativeSourceNames(body, params, reserved, protected)
-	ctx.SourceCaptureStable = func(pc int, id *coreutils.VariableId) bool { return allowed[pc][id] }
+	if p != nil {
+		ctx.SourceCaptureStable = func(pc int, id *coreutils.VariableId) bool { return allowed[pc][id] }
+	}
 }
 
 func descriptorPrimitiveName(descriptor string) string {
@@ -1930,7 +2043,7 @@ func nativeSourceBinaryName(name string) bool {
 		return false
 	}
 	for _, component := range strings.Split(name, "/") {
-		if component == "" || class_context.SafeIdentifier(component) != component {
+		if component == "" || !class_context.PreservesJava8Identifier(component) {
 			return false
 		}
 	}

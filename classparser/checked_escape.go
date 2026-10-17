@@ -148,6 +148,16 @@ func typedAbsorbingHandlers(body []statements.Statement, permittedThrows map[int
 			}
 			switch x := statement.(type) {
 			case *statements.CustomStatement:
+				// A sealed break/continue has no value or invocation operand and
+				// cannot rethrow this handler's incoming exception. Its target
+				// binding belongs to the control-flow proof; catch containment
+				// does not require that the transfer exit the surrounding loop.
+				// Opaque text and legacy Name/LoopTransferKind annotations do
+				// not grant this capability. Other decoded effects and throws
+				// remain checked independently at their original bytecode PCs.
+				if x.SourceTransferOnly() {
+					continue
+				}
 				if x == nil || x.ThrownValue == nil || !x.HasOriginPC || !permittedThrows[x.OriginPC] {
 					return false
 				}
@@ -161,6 +171,31 @@ func typedAbsorbingHandlers(body []statements.Statement, permittedThrows map[int
 				}
 				for _, arm := range x.CatchBodies {
 					if !absorbs(arm) {
+						return false
+					}
+				}
+			// These containers add no explicit throw. Validate every statement
+			// position, including for init/update and every switch arm. Actual
+			// callee exceptions and ATHROW PCs are checked against raw handler
+			// ranges independently below; this is not an effect waiver.
+			case *statements.WhileStatement:
+				if x == nil || x.ConditionValue == nil || !absorbs(x.Body) {
+					return false
+				}
+			case *statements.DoWhileStatement:
+				if x == nil || x.ConditionValue == nil || !absorbs(x.Body) {
+					return false
+				}
+			case *statements.ForStatement:
+				if x == nil || x.Condition == nil || !absorbs([]statements.Statement{x.InitVar, x.EndExp}) || !absorbs(x.SubStatements) {
+					return false
+				}
+			case *statements.SwitchStatement:
+				if x == nil || x.Value == nil {
+					return false
+				}
+				for _, arm := range x.Cases {
+					if arm == nil || !absorbs(arm.Body) {
 						return false
 					}
 				}
@@ -326,6 +361,8 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 			continue
 		}
 		var exceptions []string
+		invocationAllowed := declared
+		needsDelegateSourceThrows := false
 		if op.Instr.OpCode == core.OP_ATHROW {
 			// An invocation is not required for a checked object to escape.
 			// Pair the typed operand with the actual decoded ATHROW PC.
@@ -352,13 +389,37 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 			if !known {
 				continue
 			}
+			if sourcePlan != nil && sourcePlan.delegate != nil && int(op.CurrentOffset) == sourcePlan.pc {
+				receipt, admission := c.constructorInvocationThrowsAdmission(code, method, member, int(op.CurrentOffset), sourcePlan)
+				switch admission {
+				case constructorThrowsRefused:
+					return false, fmt.Errorf("generic constructor invocation lacks original source throws binding")
+				case constructorThrowsProved:
+					sourcePlan.throwsReceipt = receipt
+					exceptions = receipt.exceptions
+				}
+				needsDelegateSourceThrows = true
+			}
 		}
 		for _, exception := range exceptions {
 			if originalExceptionUnchecked(exception, provider) {
 				continue
 			}
+			// Source throws coverage is an obligation only for a potentially
+			// checked exception. A known empty or all-unchecked declaration
+			// needs no caller Signature projection; native member constructors
+			// may have logical Signature ports unlike their physical descriptor.
+			// Unknown ancestry remains potentially checked and requires proof.
+			if needsDelegateSourceThrows {
+				concrete, sourceKnown := c.constructorDelegationSourceThrows(method, declared)
+				if !sourceKnown {
+					return false, fmt.Errorf("constructor delegation requires original source throws metadata")
+				}
+				invocationAllowed = concrete
+				needsDelegateSourceThrows = false
+			}
 			covered := false
-			for _, allowed := range declared {
+			for _, allowed := range invocationAllowed {
 				covered = covered || originalExceptionCovered(exception, allowed, provider)
 			}
 			if covered {
@@ -397,6 +458,81 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 		}
 	}
 	return false, nil
+}
+
+// Project the original source throws positions without asking their unrelated
+// parameter/owner types to erase to the physical constructor ports. Native
+// member constructors recover those ports through their own source proof. This
+// projection grants only concrete throws coverage; formal upper bounds validate
+// Exceptions identity and never become additional source throws declarations.
+func (c *ClassObjectDumper) constructorDelegationSourceThrows(method *MemberInfo, declared []string) ([]string, bool) {
+	if c == nil || c.obj == nil || c.FuncCtx == nil || method == nil || len(declared) > 128 {
+		return nil, false
+	}
+	methodSig, methodKnown := c.constructorThrowsOriginalSignature(method.Attributes)
+	classSig, classKnown := c.constructorThrowsOriginalSignature(c.obj.Attributes)
+	if !methodKnown || !classKnown || len(methodSig)+len(classSig) > 16384 || !nativeProofWork(c.Work, int64(len(methodSig)+len(classSig))*4+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(methodSig)+len(classSig))*16+4096) != nil {
+		return nil, false
+	}
+	if methodSig == "" {
+		return declared, true
+	}
+	methodFormals, _, valid := types.SignatureTypeVariableReferences(methodSig)
+	if !valid || len(methodFormals) > 128 {
+		return nil, false
+	}
+	classFormals := []string{}
+	if classSig != "" {
+		classFormals, _, valid = types.SignatureTypeVariableReferences(classSig)
+		if !valid || len(classFormals) > 128 {
+			return nil, false
+		}
+	}
+	_, _, result, thrown := types.ParseMethodSignatureFullWithThrows(methodSig, &class_context.ClassContext{})
+	if result == nil {
+		return nil, false
+	}
+	// The actual header writer uses Exceptions when Signature omits throws.
+	if len(thrown) == 0 {
+		return declared, true
+	}
+	if len(thrown) != len(declared) {
+		return nil, false
+	}
+	var concrete []string
+	for i, exception := range thrown {
+		if !nativeProofWork(c.Work, 1) {
+			return nil, false
+		}
+		if name, formal := types.TypeVariableName(exception); formal {
+			// A method declaration shadows the same class formal. Resolve only
+			// that declaration's original first bound, not enclosing references
+			// elsewhere in the class Signature or any rendered type name.
+			scope, formals := classSig, classFormals
+			if slices.Contains(methodFormals, name) {
+				scope, formals = methodSig, methodFormals
+			}
+			if !slices.Contains(formals, name) || !nativeProofWork(c.Work, int64(len(scope))+1) {
+				return nil, false
+			}
+			bounds, known := types.FormalTypeBounds(scope)
+			if !known || len(bounds[name]) == 0 {
+				return nil, false
+			}
+			bound := bounds[name][0]
+			raw, known := types.RawClassFQN(bound)
+			if !known || !constructorInvocationThrowsSimpleType(bound, false) || strings.ReplaceAll(raw, ".", "/") != declared[i] {
+				return nil, false
+			}
+			continue
+		}
+		raw, known := types.RawClassFQN(exception)
+		if !known || !constructorInvocationThrowsSimpleType(exception, false) || strings.ReplaceAll(raw, ".", "/") != declared[i] {
+			return nil, false
+		}
+		concrete = append(concrete, declared[i])
+	}
+	return concrete, true
 }
 
 func checkedEscapeThrowableType(name string, provider callbinding.Provider) bool {
@@ -472,6 +608,9 @@ func checkedEscapeThrownTypes(body []statements.Statement, provider callbinding.
 				continue
 			}
 			if view, ok := rewriter.RecoverCatchAllFinally(st); ok {
+				if view.Continuation != nil {
+					queue = append(queue, view.Continuation)
+				}
 				queue = append(queue, view.TryBody...)
 				queue = append(queue, view.Cleanup...)
 				for _, handler := range view.CatchBodies {

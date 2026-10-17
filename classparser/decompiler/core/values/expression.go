@@ -152,7 +152,9 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 		args := make([]class_context.SourceCaptureOperand, len(call.Arguments))
 		for i, a := range call.Arguments {
 			args[i].Value = a
-			args[i].Text = a.String(funcCtx)
+			if i != 0 || funcCtx.SourceMemberImplicitEnclosing == nil || !funcCtx.SourceMemberImplicitEnclosing(call.ClassName, call.Descriptor, n.OriginPC, call.OriginPC, a) {
+				args[i].Text = a.String(funcCtx)
+			}
 			if ref, ok := UnpackSoltValue(a).(*JavaRef); ok && ref != nil && ref.Id != nil && ref.CustomValue == nil && ref.StackVar == nil {
 				args[i].Receiver = ref.IsThis
 				args[i].Local = !ref.IsThis
@@ -194,7 +196,12 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 		return s
 	}
 	var args string
-	if n.ArgumentsGetter != nil {
+	// A retained invocation is the structural constructor operand list. Render
+	// it in this consumer's context: the legacy getter may close over an older
+	// source scope, whose ownership callbacks are not valid for this query.
+	if n.ConstructorCall != nil {
+		args = n.ConstructorCall.ArgumentString(funcCtx)
+	} else if n.ArgumentsGetter != nil {
 		args = n.ArgumentsGetter()
 	}
 	name := n.JavaType.String(funcCtx)
@@ -356,6 +363,12 @@ func (j *JavaExpression) String(funcCtx *class_context.ClassContext) string {
 		vs = append(vs, piece)
 	}
 	if len(vs) == 1 {
+		if j.Op == INC {
+			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("++(%s)", vs[0]))
+		}
+		if j.Op == DEC {
+			return finishExpressionRender(funcCtx, guard, fmt.Sprintf("--(%s)", vs[0]))
+		}
 		return finishExpressionRender(funcCtx, guard, fmt.Sprintf("%s(%s)", j.Op, vs[0]))
 	}
 	switch j.Op {
@@ -1087,7 +1100,7 @@ func (f *FunctionCallExpression) receiverParamTypeArgsQuery(funcCtx *class_conte
 				if funcCtx.SiblingClassSig != nil && funcCtx.ClassName != "" && len(funcCtx.ClassTypeParams) > 0 {
 					recvArgs := make([]types.JavaType, len(funcCtx.ClassTypeParams))
 					for i, p := range funcCtx.ClassTypeParams {
-						recvArgs[i] = types.NewJavaClass(p)
+						recvArgs[i] = types.NewJavaTypeVariable(p)
 					}
 					_, ret, _ := types.ResolveInstantiatedSignatureExact(funcCtx, funcCtx.SiblingClassSig, funcCtx.ClassName, recvArgs, inner.FunctionName, inner.Descriptor, len(inner.Arguments))
 					if pt, ok := types.AsParameterizedType(ret); ok {
@@ -1194,7 +1207,7 @@ func RecoverThisFieldInstantiatedType(funcCtx *class_context.ClassContext, field
 		{
 			recvArgs := make([]types.JavaType, len(formals))
 			for i, n := range formals {
-				recvArgs[i] = types.NewJavaClass(n)
+				recvArgs[i] = types.NewJavaTypeVariable(n)
 			}
 			return types.ResolveInstantiatedFieldType(funcCtx, funcCtx.SiblingClassSig, funcCtx.SiblingFieldSig, funcCtx.ClassName, recvArgs, fieldName)
 		}
@@ -1303,7 +1316,7 @@ func (f *FunctionCallExpression) sameClassMethodParamType(i int, funcCtx *class_
 					}
 					if len(formals) == 1 {
 						return types.NewParameterizedType("java.lang.Class", []types.JavaType{
-							types.NewJavaClass(formals[0]),
+							types.NewJavaTypeVariable(formals[0]),
 						})
 					}
 				}
@@ -2070,7 +2083,7 @@ func (f *FunctionCallExpression) resolvedParamType(i int, funcCtx *class_context
 		recvRaw = funcCtx.ClassName
 		recvArgs = make([]types.JavaType, len(formals))
 		for idx, n := range formals {
-			recvArgs[idx] = types.NewJavaClass(n)
+			recvArgs[idx] = types.NewJavaTypeVariable(n)
 		}
 	} else {
 		// Non-`this` receiver: recover its raw class + actual type args from the receiver value's
@@ -3727,7 +3740,7 @@ func (f *FunctionCallExpression) resolvedFunctionalFormalType(i int, funcCtx *cl
 		formals := types.ClassFormalTypeParamNames(funcCtx.ClassSig)
 		recvArgs = make([]types.JavaType, len(formals))
 		for i, name := range formals {
-			recvArgs[i] = types.NewJavaClass(name)
+			recvArgs[i] = types.NewJavaTypeVariable(name)
 		}
 	} else {
 		recvRaw, recvArgs = f.receiverParamTypeArgs(funcCtx)
@@ -3954,6 +3967,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	if target := f.instantiatedFieldOverloadCast(i, funcCtx); target != "" {
 		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
 	}
+	if target := f.instantiatedMethodResultOverloadCast(i, funcCtx); target != "" {
+		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
+	}
 	if target := f.covariantOverloadResultCast(i, funcCtx); target != "" {
 		return f.renderProvenArgumentCast(i, target, arg, funcCtx)
 	}
@@ -4075,6 +4091,13 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 	// Witness-based conversion: pin javac overload resolution to the bytecode
 	// descriptor (null vs String.valueOf(Object) vs valueOf(char[]); array vs Object).
 	// Specialized helpers above already returned if they fired.
+	if IsNullLiteral(UnpackSoltValue(arg)) && f.staticCallHasUniqueErasedBinding(funcCtx) {
+		// A complete unique non-generic static target also accepts untyped null.
+		// Its formal may be inaccessible to this source unit; naming that type
+		// would reject a valid original call. Competing/unknown families retain
+		// the descriptor pin below, including String.valueOf(Object).
+		return arg.String(funcCtx)
+	}
 	if cast := f.witnessDescriptorArgCast(i, arg, funcCtx); cast != "" {
 		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}

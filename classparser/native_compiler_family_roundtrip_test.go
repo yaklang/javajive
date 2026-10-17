@@ -10,6 +10,14 @@ import (
 
 func testNativeIndependentCompilerFamilyFixture(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), verify ...func(*testing.T, string, []byte, []byte)) {
 	t.Helper()
+	testNativeIndependentCompilerFamilyWithArchive(t, compile, profile, javac, owners, driver, want, mutate, nil, verify...)
+}
+
+// A separate original archive boundary lets binary callers exercise linkage
+// without requiring their own bodies to be reconstructed as source. Existing
+// fixtures retain their entire original archive when the factory is nil.
+func testNativeIndependentCompilerFamilyWithArchive(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), archive func(*testing.T, map[string][]byte) *JarFS, verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
 	_, java := t04Tools(t)
 	owned := func(name string) bool {
 		for _, owner := range owners {
@@ -52,7 +60,9 @@ func testNativeIndependentCompilerFamilyFixture(t *testing.T, compile func(strin
 						t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
 					}
 					var z *JarFS
-					if profile == ModernJavac {
+					if archive != nil {
+						z = archive(t, files)
+					} else if profile == ModernJavac {
 						z = nativeArchive(t, files)
 					} else {
 						jar := filepath.Join(t.TempDir(), "authored.jar")

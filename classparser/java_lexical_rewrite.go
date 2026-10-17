@@ -9,6 +9,12 @@ import (
 // Markers retain lexical category, and a collision-free prefix is chosen from the
 // input. This is a containment boundary for legacy rules, not a Java parser.
 func rewriteJavaCode(source string, rewrite func(string) string) string {
+	return rewriteJavaSourceSegments(source, rewrite, true)
+}
+
+// Legacy diagnostic comments remain signals at source-only boundaries, while
+// identical text in Java literals is data. Code rewrites still shield comments.
+func rewriteJavaSourceSegments(source string, rewrite func(string) string, protectComments bool) string {
 	prefix := "__JDEC_PROTECTED_"
 	for strings.Contains(source, prefix) {
 		prefix = "_" + prefix
@@ -73,6 +79,10 @@ func rewriteJavaCode(source string, rewrite func(string) string) string {
 		default:
 			out.WriteByte(source[i])
 			i++
+			continue
+		}
+		if !protectComments && (kind == "line" || kind == "block") {
+			out.WriteString(source[start:i])
 			continue
 		}
 		marker := fmt.Sprintf("%s%d__", prefix, len(spans))

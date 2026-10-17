@@ -153,10 +153,9 @@ func (z *JarFS) decompileClassBytes(name string, data []byte) []byte {
 			return source
 		}
 	}
-	// Always supply the sibling resolver so cross-class folds can reach sibling bytes: enum
-	// constant-body folding (gated inside DumpClass by isEnum + JDEC_NO_ENUM_FOLD) and enum-switch
-	// $SwitchMap folding (gated by a `$SwitchMap$` presence check + JDEC_NO_ENUM_SWITCH_FOLD). A
-	// non-enum, non-switch class is rendered byte-for-byte identically to the bare Dump().
+	// Supply original sibling bytes for certified source ownership and enum
+	// constant-body reconstruction. Enum-switch syntax requires its original
+	// typed protocol; a mapping-looking source fragment grants no permission.
 	d := NewClassObjectDumper(cf)
 	d.options.TargetSourceVersion = z.targetSourceVersion
 	d.options.SourceCompiler = z.sourceCompiler

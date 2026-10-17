@@ -81,6 +81,10 @@ func constructorOriginalArgumentFacts(obj *ClassObject, ops []*core.OpCode, star
 			}
 			return facts, true
 		}
+		if op.Instr.OpCode == core.OP_ACONST_NULL && !op.IsWide && len(op.Data) == 0 {
+			facts = append(facts, constructorEffectValue{kind: 'L', knownNull: true})
+			continue
+		}
 		if literal, known := constructorOriginalIntLiteral(obj, op); known {
 			facts = append(facts, literal)
 			continue

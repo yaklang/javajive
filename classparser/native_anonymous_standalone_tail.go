@@ -4,7 +4,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
@@ -25,12 +27,21 @@ func (c *ClassObjectDumper) nativeAnonymousStandaloneTailClosed(p *nativeAnonymo
 			return false
 		}
 		owner, method, known := originalAnonymousOwner(object)
-		if !known || owner != p.owner || method == "" {
+		if !known || owner != p.owner {
 			return false
+		}
+		lexicalMethod := method
+		if lexicalMethod == "" {
+			// method_index=0 denotes an initializer, not necessarily a static
+			// one. Establish the actual allocation in the original clinit.
+			if !nativeAnonymousStandaloneInitializerAllocation(c.obj, object, c.Work) {
+				return false
+			}
+			lexicalMethod = "<clinit>()V"
 		}
 		suffix, known := strings.CutPrefix(name, p.owner+"$")
 		ordinal, e := strconv.Atoi(suffix)
-		if !known || e != nil || strconv.Itoa(ordinal) != suffix || ordinal <= len(p.children) {
+		if !known || e != nil || strconv.Itoa(ordinal) != suffix || ordinal <= p.enumPrefix+len(p.children) {
 			return false
 		}
 		matches := 0
@@ -43,7 +54,7 @@ func (c *ClassObjectDumper) nativeAnonymousStandaloneTailClosed(p *nativeAnonymo
 			if !nk || !dk || !nativeProofWork(c.Work, 1) {
 				return false
 			}
-			if n+d == method {
+			if n+d == lexicalMethod {
 				if declaration.AccessFlags&8 == 0 {
 					return false
 				}
@@ -172,6 +183,110 @@ func (c *ClassObjectDumper) nativeAnonymousStandaloneTailClosed(p *nativeAnonymo
 		}
 	}
 	return true
+}
+
+// The no-argument independent tail has no enclosing word to bind. A single
+// physical NEW/DUP/INVOKESPECIAL packet in the original static initializer
+// supplies that source scope; zero EnclosingMethod metadata alone does not.
+// Any allocation/constructor use from another method remains outside this
+// certificate. Effects and handler coverage stay in the original method.
+func nativeAnonymousStandaloneInitializerAllocation(owner, child *ClassObject, work *workbudget.Budget) bool {
+	if owner == nil || child == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	parent, method, known := originalAnonymousOwner(child)
+	if !known || parent != owner.GetClassName() || method != "" {
+		return false
+	}
+	allocations, invocations, initializers := 0, 0, 0
+	for _, declaration := range owner.Methods {
+		if declaration == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		name, knownName := sourceBridgeUTF8(owner, declaration.NameIndex)
+		descriptor, knownDescriptor := sourceBridgeUTF8(owner, declaration.DescriptorIndex)
+		if !knownName || !knownDescriptor {
+			return false
+		}
+		initializer := name == "<clinit>" && descriptor == "()V" && declaration.AccessFlags == 8
+		if name == "<clinit>" {
+			if !initializer {
+				return false
+			}
+			initializers++
+		}
+		codes := 0
+		for _, attribute := range declaration.Attributes {
+			code, ok := attribute.(*CodeAttribute)
+			if !ok {
+				continue
+			}
+			codes++
+			if code == nil || codes > 1 || !nativeProofWork(work, int64(len(code.Code))) {
+				return false
+			}
+			decoder := core.NewDecompiler(code.Code, func(index int) values.JavaValue { return GetValueFromCP(owner.ConstantPool, index) })
+			decoder.Work = work
+			if decoder.ParseOpcode() != nil {
+				return false
+			}
+			ops := constructorMotionOps(decoder)
+			for i, op := range ops {
+				if !nativeProofWork(work, 1) {
+					return false
+				}
+				if op.Instr.OpCode == core.OP_NEW {
+					if len(op.Data) != 2 {
+						return false
+					}
+					target, known := sourceBridgeClassName(owner, core.Convert2bytesToInt(op.Data))
+					if !known {
+						return false
+					}
+					if target == child.GetClassName() {
+						if !initializer || i+2 >= len(ops) || ops[i+1].Instr.OpCode != core.OP_DUP {
+							return false
+						}
+						call := constructorMotionMember(owner, ops[i+2], core.OP_INVOKESPECIAL)
+						if call == nil || call.Name != target || call.Member != "<init>" || call.Description != "()V" {
+							return false
+						}
+						allocations++
+					}
+				}
+				if call := constructorMotionMember(owner, op, core.OP_INVOKESPECIAL); call != nil && call.Name == child.GetClassName() && call.Member == "<init>" {
+					if !initializer || call.Description != "()V" {
+						return false
+					}
+					invocations++
+				}
+			}
+		}
+		if initializer && codes != 1 {
+			return false
+		}
+	}
+	return initializers == 1 && allocations == 1 && invocations == 1
+}
+
+// The exact initializer-tail representation keeps a final anonymous binary as
+// an independent declaration. This header exception is not a visibility policy
+// for every anonymous flat unit: other units may be referenced by source in a
+// different package and still require the existing public projection.
+func (c *ClassObjectDumper) nativeAnonymousIndependentInitializerHeader() bool {
+	if c == nil || c.obj == nil || c.obj.AccessFlags != 0x30 || !nativeAnonymousForestVersion(c.obj, c.Work) {
+		return false
+	}
+	owner, method, original := originalAnonymousOwner(c.obj)
+	if !original || method != "" || c.foldSiblingResolver == nil || !nativeProofWork(c.Work, 1) {
+		return false
+	}
+	raw, known := c.foldSiblingResolver(owner)
+	if !known {
+		return false
+	}
+	parent, err := c.parseResolved(raw)
+	return err == nil && parent != nil && parent.GetClassName() == owner && nativeAnonymousStandaloneInitializerAllocation(parent, c.obj, c.Work)
 }
 
 // The standalone certificate proves no dependence on the prefix. The archive

@@ -14,6 +14,7 @@ import (
 type CustomStatement struct {
 	sourceTransferKind string
 	sourceThrow        bool
+	sourceAssignment   *AssignStatement
 	Name               string
 	Info               any
 	// Labeled transfers retain their target separately from the render closure.
@@ -31,6 +32,10 @@ type CustomStatement struct {
 
 // ReplaceVar implements Statement.
 func (v *CustomStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.VariableId) {
+	if v.sourceAssignment != nil {
+		v.sourceAssignment.ReplaceVar(oldId, newId)
+		return
+	}
 	if v.sourceTransferKind != "" {
 		return
 	}
@@ -44,6 +49,9 @@ func (v *CustomStatement) ReplaceVar(oldId *utils.VariableId, newId *utils.Varia
 }
 
 func (v *CustomStatement) String(funcCtx *class_context.ClassContext) string {
+	if v.sourceAssignment != nil {
+		return v.sourceAssignment.String(funcCtx)
+	}
 	if v.sourceTransferKind != "" {
 		if v.LoopTargetLabel == "" {
 			return v.sourceTransferKind
@@ -59,6 +67,28 @@ func (v *CustomStatement) String(funcCtx *class_context.ClassContext) string {
 	return v.StringFunc(funcCtx)
 }
 
+// A constructor invocation completes the allocation's original assignment at
+// a later opcode. Retain that exact assignment rather than hiding it in a text
+// closure: assignment may throw, but is never a break/continue/return leaf.
+// This grants no operand/effect/ownership certificate to its producer.
+func NewSourceAssignmentForward(assignment *AssignStatement) *CustomStatement {
+	if assignment == nil {
+		return nil
+	}
+	// Retain the legacy callbacks for callers inspecting the compatibility
+	// fields. Non-nil function identity also keeps distinct forwarded sites
+	// unequal under reflect.DeepEqual, just like the former opaque wrappers.
+	// The sealed renderer/renamer above use the retained IR directly.
+	return &CustomStatement{sourceAssignment: assignment, StringFunc: assignment.String, replaceVar: assignment.ReplaceVar}
+}
+
+func (v *CustomStatement) SourceAssignmentForward() (*AssignStatement, bool) {
+	if v == nil || v.sourceAssignment == nil || v.sourceThrow || v.sourceTransferKind != "" {
+		return nil, false
+	}
+	return v.sourceAssignment, true
+}
+
 // A builtin throw has one structured operand shared by rendering and variable
 // rewriting. An opaque render callback cannot certify its dependencies merely
 // by setting ThrownValue. Keep that compatibility field, but grant a complete
@@ -68,7 +98,7 @@ func NewThrowStatement(value values.JavaValue) *CustomStatement {
 }
 
 func (v *CustomStatement) SourceThrowOperand() (values.JavaValue, bool) {
-	if v == nil || !v.sourceThrow || v.sourceTransferKind != "" || v.ThrownValue == nil {
+	if v == nil || !v.sourceThrow || v.sourceAssignment != nil || v.sourceTransferKind != "" || v.ThrownValue == nil {
 		return nil, false
 	}
 	return v.ThrownValue, true

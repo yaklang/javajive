@@ -18,6 +18,7 @@ import (
 // Prefix effects are either kept behind a proved inert Object initialization or
 // evaluated in the first delegation argument, before any effect of the callee.
 type constructorSourceBoundary struct {
+	throwsReceipt  *constructorInvocationThrowsReceipt
 	pc             int
 	delegate       *values.FunctionCallExpression
 	prefix         []statements.Statement
@@ -554,12 +555,18 @@ func (c *ClassObjectDumper) planConstructorArgumentBridges(p *constructorSourceB
 	return nil
 }
 
-func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassContext) string {
+func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassContext) (string, error) {
 	if p == nil || p.delegate == nil {
-		return ""
+		return "", nil
+	}
+	if p.throwsReceipt != nil {
+		if p.throwsReceipt.plan != p {
+			return "", fmt.Errorf("foreign constructor invocation throws source receipt")
+		}
+		return p.throwsReceipt.render(ctx)
 	}
 	if p.carrier == "" {
-		return p.delegate.String(ctx)
+		return p.delegate.String(ctx), nil
 	}
 	args := p.delegate.ArgumentStrings(ctx)
 	inputs := make([]string, len(p.params))
@@ -575,5 +582,5 @@ func (p *constructorSourceBoundary) renderDelegation(ctx *class_context.ClassCon
 	if strings.ReplaceAll(p.delegate.ClassName, ".", "/") == strings.ReplaceAll(ctx.ClassName, ".", "/") {
 		target = "this"
 	}
-	return target + "(" + strings.Join(args, ",") + ")"
+	return target + "(" + strings.Join(args, ",") + ")", nil
 }

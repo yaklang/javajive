@@ -91,6 +91,9 @@ func TestNumericWebRepairDoesNotReplaceConsistentIdentity(t *testing.T) {
 			if repaired && slot.GetValue() != d.opcodeIdToRef[a][0][0] {
 				t.Fatal("stale load retained")
 			}
+			if name == "consistent" && (ref.SolvedWebIdentity != ref.Id || d.opcodeIdToRef[b][0][0] != ref || slot.GetValue() != ref) {
+				t.Fatal("a closed numeric web still needs stable source identity without rebuilding its consistent simulator refs")
+			}
 		})
 	}
 }

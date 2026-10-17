@@ -17,7 +17,7 @@ import (
 // Actual original-first programs separately exercise the production decoder,
 // branch structurer, declaration placement and compiler/JVM observations.
 func TestNativeLambdaJoinedCaptureRequiresEveryRetainedOriginalDefinition(t *testing.T) {
-	variants := []string{"original", "source rename", "logical source ID rename", "nested arms", "loop scoped", "loop scoped break", "loop scoped continue", "initialized unrelated loop", "reference null", "primitive null", "loop capture escapes", "loop uninitialized condition", "loop reassign", "transfer outside loop", "missing predecessor", "same path twice", "write after capture", "swapped RHS", "wrong original PC", "wrong original slot", "missing witness", "different ref", "different UID", "missing frontier", "extra frontier", "duplicate frontier", "missing declaration", "branch declaration", "duplicate declaration", "missing snapshot", "duplicate snapshot", "wrong factory", "wrong operand", "wrong source type", "changed snapshot seed", "wrong original read", "wrong original descriptor", "parameter", "custom", "loop write", "caught write", "opaque effect", "work", "memory", "depth", "canceled"}
+	variants := []string{"original", "source declaration clone", "shallow declaration copy", "copied declaration ID", "clone changed RHS", "source rename", "logical source ID rename", "nested arms", "loop scoped", "loop scoped break", "loop scoped continue", "initialized unrelated loop", "reference null", "primitive null", "loop capture escapes", "loop uninitialized condition", "loop reassign", "transfer outside loop", "missing predecessor", "same path twice", "write after capture", "swapped RHS", "wrong original PC", "wrong original slot", "missing witness", "different ref", "different UID", "missing frontier", "extra frontier", "duplicate frontier", "missing declaration", "branch declaration", "duplicate declaration", "missing snapshot", "duplicate snapshot", "wrong factory", "wrong operand", "wrong source type", "changed snapshot seed", "wrong original read", "wrong original descriptor", "parameter", "custom", "loop write", "caught write", "opaque effect", "work", "memory", "depth", "canceled"}
 	for _, variant := range variants {
 		t.Run(variant, func(t *testing.T) {
 			var typ types.JavaType = types.NewJavaPrimer(types.JavaLong)
@@ -44,7 +44,24 @@ func TestNativeLambdaJoinedCaptureRequiresEveryRetainedOriginalDefinition(t *tes
 			operand := &nativeEnumSelectorProducer{pc: 30, opcode: core.OP_LLOAD_3, slot: 3, result: "J", local: &nativeEnumLocalRead{pc: 30, opcode: core.OP_LLOAD_3, slot: 3, storePC: -1, descriptor: "J", storePCs: []int{11, 19}}}
 			pc, index := 31, 0
 			var work *workbudget.Budget
-			want := variant == "original" || variant == "source rename" || variant == "logical source ID rename" || variant == "nested arms" || variant == "loop scoped" || variant == "loop scoped break" || variant == "loop scoped continue" || variant == "initialized unrelated loop" || variant == "reference null"
+			want := variant == "original" || variant == "source declaration clone" || variant == "source rename" || variant == "logical source ID rename" || variant == "nested arms" || variant == "loop scoped" || variant == "loop scoped break" || variant == "loop scoped continue" || variant == "initialized unrelated loop" || variant == "reference null"
+			if variant == "source declaration clone" || variant == "shallow declaration copy" || variant == "copied declaration ID" || variant == "clone changed RHS" {
+				ref.Val = left.JavaValue
+				ref.MarkOriginalLocalDeclaration(11, 3, left.JavaValue)
+				left.LeftValue = ref.CloneForSourceDeclaration()
+				switch variant {
+				case "shallow declaration copy":
+					copy := *ref
+					left.LeftValue = &copy
+				case "copied declaration ID":
+					copy := values.NewJavaRef(ref.Id, ref.Val, typ)
+					copy.VarUid = ref.VarUid
+					copy.MarkOriginalLocalDeclaration(11, 3, ref.Val)
+					left.LeftValue = copy
+				case "clone changed RHS":
+					left.JavaValue = values.NewJavaLiteral(int64(17), typ)
+				}
+			}
 			switch variant {
 			case "loop scoped", "loop scoped break", "loop scoped continue":
 				loop := &statements.WhileStatement{ConditionValue: condition, Body: body[:3]}

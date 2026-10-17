@@ -16,6 +16,8 @@ type FinallyRegion struct {
 	Exceptions  []*values.JavaRef
 	CatchBodies [][]statements.Statement
 	Cleanup     []statements.Statement
+	// Continuation is evaluated only after cleanup completes normally.
+	Continuation *statements.CustomStatement
 }
 
 // RecoverCatchAllFinally recognizes javac's duplicated cleanup using raw
@@ -26,6 +28,9 @@ type FinallyRegion struct {
 // incorrectly. Both changes must be proved together, before any tree changes.
 // Unknown control flow, opaque effects and region gaps fail closed.
 func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, bool) {
+	if resource, ok := recoverTypedResourceFinally(tr); ok {
+		return resource, true
+	}
 	if resource, ok := recoverPrimaryResourceFinally(tr); ok {
 		return resource, true
 	}
@@ -53,11 +58,11 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 		}
 	}
 	body := finallyWithoutEnd(tr.CatchBodies[last])
-	if len(body) < 2 || len(body) > 9 || tr.Exception[last] == nil {
+	if len(body) == 0 || len(body) > 9 || tr.Exception[last] == nil {
 		return nil, false
 	}
 	cleanup, ok := finallyHandlerCleanup(body, tr.Exception[last], h.ProtectedRanges)
-	if !ok {
+	if !ok || len(cleanup) == 0 {
 		return nil, false
 	}
 	excluded := append([]*values.JavaRef{}, tr.Exception...)
@@ -102,7 +107,7 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 			return nil, false
 		}
 	}
-	p := finallyProof{cleanup: cleanup, rows: rows, excluded: excluded, remaining: 256}
+	p := finallyProof{cleanup: cleanup, rows: rows, excluded: excluded, remaining: 256, allowContinuation: true}
 	// The try arm is protected by every typed catch, whereas catch bodies are
 	// protected only by the raw catch-all. Preserve that distinction for folded
 	// calls and casts, not just the PC of their enclosing statement.
@@ -125,6 +130,12 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 			return nil, false
 		}
 		result.CatchBodies = append(result.CatchBodies, rewritten)
+	}
+	if p.continuation != nil {
+		if p.normalWithoutContinuation {
+			return nil, false
+		}
+		result.Continuation = p.continuation
 	}
 	return result, true
 }
@@ -157,17 +168,44 @@ type finallyProof struct {
 	loopDepth    int
 	loopLabels   []string
 	cleanupMatch func(statements.Statement, statements.Statement) bool
+	// Only a caller that renders Continuation may remove it from a child.
+	// Resource-tail queries also use this proof and do not own that exit.
+	allowContinuation bool
+	continuation      *statements.CustomStatement
+	// Every normal completion must carry the same original continuation.
+	// A different arm falling through cannot acquire that arm's throw.
+	normalWithoutContinuation bool
 }
 
 func (p *finallyProof) block(input []statements.Statement, mustExit bool, covered func(int) bool) ([]statements.Statement, bool, bool) {
 	body := finallyWithoutEnd(input)
 	end := len(body)
 	var ret *statements.ReturnStatement
+	liftedContinuation := false
 	if end > 0 && len(p.cleanup) > 0 {
 		if normalized, lifted := finallyConditionalReturn(body[end-1], p.cleanup[len(p.cleanup)-1], p.rows, p.excluded); lifted != nil {
 			body = append([]statements.Statement{}, body...)
 			body[end-1] = normalized
 			ret = lifted
+		}
+	}
+
+	if p.allowContinuation && end > 0 && ret == nil && len(p.cleanup) > 0 {
+		normalized, after := finallyFlatThrowContinuation(body, p.cleanup, p.rows, p.excluded)
+		if after == nil {
+			if last, continuation := finallyConditionalThrowContinuation(body[end-1], p.cleanup[len(p.cleanup)-1], p.rows, p.excluded); continuation != nil {
+				normalized = append([]statements.Statement{}, body...)
+				normalized[end-1], after = last, continuation
+			}
+		}
+		if after != nil {
+			if p.continuation != nil && (p.continuation.OriginPC != after.OriginPC || p.continuation.ThrownValue != after.ThrownValue) {
+				return nil, false, false
+			}
+			p.continuation = after
+			liftedContinuation = true
+			body = normalized
+			end = len(body)
 		}
 	}
 	if end > 0 {
@@ -204,6 +242,9 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 			if ret != nil {
 				prefix = append(prefix, ret)
 			}
+			if ret == nil && !liftedContinuation {
+				p.normalWithoutContinuation = true
+			}
 			return prefix, ret != nil, true
 		}
 	}
@@ -221,6 +262,11 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 		switch x := st.(type) {
 		case *values.JavaExpression:
 			if x == nil || (x.Op != values.INC && x.Op != values.DEC) || !finallyCoveredValue(x, covered) {
+				return nil, false, false
+			}
+		case *statements.SourceAssertionStatement:
+			condition, call, pc, known := x.SourceAssertionProtocol()
+			if !known || !covered(pc) || !finallyCoveredValue(condition, covered) || !finallyCoveredValue(call, covered) {
 				return nil, false, false
 			}
 		case *statements.ExpressionStatement:
@@ -278,6 +324,10 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 				return nil, false, false
 			}
 			st = &clone
+		case *statements.SwitchStatement:
+			if !p.internalSwitchCovered(x, covered) {
+				return nil, false, false
+			}
 		case *statements.TryCatchStatement:
 			if x == nil || len(x.Exception) == 0 || len(x.Exception) != len(x.CatchBodies) || len(x.Handlers) != len(x.Exception) {
 				return nil, false, false
@@ -469,6 +519,13 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		case *values.JavaClassMember:
 			return x != nil && x.HasOriginPC && covered(x.OriginPC) && x.Name != "" && x.Member != "" && x.Description != ""
 		case *values.CustomValue:
+			if operand, _, _, original := x.SourcePrimitiveConversion(); original {
+				if !totalPrimitiveConversionOperand(operand) {
+					return false
+				}
+				children = []values.JavaValue{operand}
+				break
+			}
 			if x == nil || x.Flag != "instanceof" || !x.CapturesKnown || len(x.Captures) != 1 || !x.HasOriginPC || !covered(x.OriginPC) {
 				return false
 			}

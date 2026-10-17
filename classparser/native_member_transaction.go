@@ -17,51 +17,7 @@ type nativeMemberTransaction struct {
 // Original self rows select the physical outermost source owner. Declaration
 // spelling and cache state never substitute for this archive identity.
 func (z *JarFS) nativeMemberTransactionOwner(obj *ClassObject) (string, bool) {
-	if z == nil || obj == nil {
-		return "", false
-	}
-	owner, _, _, member := originalMemberOwner(obj)
-	if anonymousOwner, _, anonymous := originalAnonymousOwner(obj); anonymous {
-		reader := z.nativeMemberReader(obj)
-		var known bool
-		owner, known = z.nativeAnonymousOutermostOwner(anonymousOwner, reader)
-		if !known {
-			return "", false
-		}
-		member = true
-	}
-
-	if !member {
-		owner = obj.GetClassName()
-	}
-	if member {
-		var known bool
-		owner, known = z.nativeMemberOutermostNamedOwner(owner, z.nativeMemberReader(obj).Work)
-		if !known {
-			return "", false
-		}
-	}
-	if !member {
-		candidate := false
-		for _, a := range obj.Attributes {
-			if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
-				for _, row := range inner.Classes {
-					if row == nil {
-						return "", false
-					}
-					outer, known := sourceBridgeClassName(obj, row.OuterClassInfoIndex)
-					if known && outer == owner && row.InnerNameIndex != 0 {
-						candidate = true
-					}
-				}
-			}
-		}
-		if !candidate && !z.nativeMemberReader(obj).nativeMemberHasAnonymousDeclarations() {
-			return "", false
-		}
-	}
-
-	return owner, true
+	return z.nativeMemberOriginalSourceOwner(obj)
 }
 
 // An SCC is one source publication transaction with separate lexical plans.
@@ -101,7 +57,7 @@ func (z *JarFS) nativeMemberTransactionEntry(obj *ClassObject) *nativeMemberCach
 	if standalone == nil {
 		return nil
 	}
-	standalone.planOnce.Do(func() { standalone.planKnown = z.nativeMemberLocalPlan(obj, owner, snap) != nil })
+	z.admitNativeMemberLocal(standalone, obj, owner, snap)
 	if !standalone.planKnown {
 		return nil
 	}
@@ -116,6 +72,12 @@ func (z *JarFS) nativeMemberTransactionEntry(obj *ClassObject) *nativeMemberCach
 	identity, _ := json.Marshal(participants)
 	key := string(identity) + "\x00" + string(policy)
 	z.nativeMembersMu.Lock()
+	for _, name := range participants {
+		if entry := z.nativeMembersCache[name+"\x00"+string(policy)]; entry != nil && entry.flatSourceCommitted {
+			z.nativeMembersMu.Unlock()
+			return nil
+		}
+	}
 	transaction := z.nativeMemberTransactions[key]
 	if transaction == nil {
 		missing := 0
@@ -155,6 +117,10 @@ func (z *JarFS) loadNativeMemberTransaction(transaction *nativeMemberTransaction
 
 func (z *JarFS) buildNativeMemberTransaction(participants []string, snap map[string]string) map[string]*nativeMemberCacheEntry {
 	work := z.nativeMemberReader(nil).Work
+	policy, err := json.Marshal(snap)
+	if err != nil {
+		return nil
+	}
 
 	prepared := map[string]*nativeMemberPrepared{}
 	var inputBytes int64
@@ -174,7 +140,22 @@ func (z *JarFS) buildNativeMemberTransaction(participants []string, snap map[str
 		if err != nil || root.GetClassName() != name || !nativeMemberTopLevelEvidence(root, work) {
 			return nil
 		}
-		plan := z.prepareNativeMemberFamilyUnpublished(root, snap)
+		// Every participant shares the same immutable local admission used by
+		// ordinary reads. Replanning a previously refused participant here could
+		// change a flat declaration into a lexical one after another unit had
+		// already bound its source name. Fresh rendering plans remain private;
+		// only the admission result is shared across the two publication paths.
+		entry := z.nativeMemberPolicyEntry(name + "\x00" + string(policy))
+		if entry == nil {
+			return nil
+		}
+		plan := z.admitNativeMemberLocal(entry, root, name, snap)
+		if !entry.planKnown {
+			return nil
+		}
+		if plan == nil {
+			plan = z.prepareNativeMemberFamilyUnpublished(root, snap)
+		}
 		if plan == nil {
 			return nil
 		}

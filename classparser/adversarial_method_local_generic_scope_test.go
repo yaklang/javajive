@@ -19,3 +19,11 @@ class GenericLocalScopeDriver {public static void main(String[] args){int count=
 		})
 	}
 }
+
+func TestAdversarialModernLambdaLocalGenericScope(t *testing.T) {
+	const source = `
+ class GenericTransport {static <T extends Number> java.util.function.Function<T,java.util.function.Supplier<T>> bind(java.util.function.Supplier<T> alias){return input->{class Local implements java.util.function.Supplier<T>{public T get(){T value=alias.get();return value==null?input:value;}}return new Local();};}}
+ class GenericDriver {public static void main(String[]args)throws Exception{final int[] calls={0};final Integer left=Integer.valueOf(10001),right=Integer.valueOf(10002),supplied=Integer.valueOf(10003);java.util.function.Function<Integer,java.util.function.Supplier<Integer>> f=GenericTransport.bind(()->(++calls[0]%2==1)?null:supplied);java.util.function.Supplier<Integer>a=f.apply(left),b=f.apply(right);if(calls[0]!=0)throw new AssertionError("eager activation");if(a.get()!=left||b.get()!=supplied||b.get()!=right||a.get()!=supplied||calls[0]!=4)throw new AssertionError("generic argument or supplier identity");Class<?> local=a.getClass();java.lang.reflect.Method method=local.getEnclosingMethod();if(method==null||!method.getName().equals("bind")||method.getTypeParameters().length!=1||method.getTypeParameters()[0].getBounds()[0]!=Number.class)throw new AssertionError("generic lexical method");java.lang.reflect.Type face=local.getGenericInterfaces()[0];if(!(face instanceof java.lang.reflect.ParameterizedType))throw new AssertionError("generic interface");java.lang.reflect.Type formal=((java.lang.reflect.ParameterizedType)face).getActualTypeArguments()[0];if(!(formal instanceof java.lang.reflect.TypeVariable)||!((java.lang.reflect.TypeVariable<?>)formal).getGenericDeclaration().equals(method))throw new AssertionError("original type binder");System.out.println("4:generic:lexical:activation:identity");}}
+ `
+	testNativeIndependentFamilyFixture(t, source, []string{"GenericTransport"}, "GenericDriver", "4:generic:lexical:activation:identity\n", nativeLexicalExactSignatures)
+}

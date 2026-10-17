@@ -9,8 +9,8 @@ import (
 // Walk authoritative named-member edges, never dollar-delimited binary names.
 // A static declaration starts a new instance/type-variable scope. The bound
 // and cycle check apply equally to malformed archives and ordinary input.
-func nativeMemberLexicalAncestors(enclosing *ClassObject, objects map[string]*ClassObject, work *workbudget.Budget) ([]*ClassObject, bool) {
-	if enclosing == nil {
+func nativeMemberLexicalAncestors(enclosing *ClassObject, objects map[string]*ClassObject, work *workbudget.Budget, families ...*nativeMemberFamily) ([]*ClassObject, bool) {
+	if enclosing == nil || len(families) > 1 {
 		return nil, false
 	}
 	var out []*ClassObject
@@ -24,6 +24,20 @@ func nativeMemberLexicalAncestors(enclosing *ClassObject, objects map[string]*Cl
 		out = append(out, node)
 		owner, _, flags, member := originalMemberOwner(node)
 		if !member {
+			if len(families) == 1 && families[0] != nil && families[0].methodLocals[name] != nil {
+				// A named method-local class has a lexical method edge, not a
+				// named-member edge. Only the joint original declaration and
+				// constructor packet license crossing it in this type query.
+				owner, known := nativeMemberJointMethodLocalOwner(families[0], node, work)
+				if !known || owner.declaration == nil || objects[owner.owner] != families[0].lexicalObjects[owner.owner] {
+					return nil, false
+				}
+				if owner.declaration.AccessFlags&8 != 0 {
+					return out, true
+				}
+				node = objects[owner.owner]
+				continue
+			}
 			if parent, method, anonymous := originalAnonymousOwner(node); anonymous {
 				original := objects[parent]
 				static, known := nativeAnonymousOriginalContext(original, node, method, work)
@@ -195,6 +209,8 @@ func (z *JarFS) nativeMemberOutermostNamedOwner(owner string, work *workbudget.B
 				// This is discovery only. Suppression still requires the same
 				// completed mixed-family source transaction at the top-level root.
 				next = enclosing
+			} else if localParent, localKnown := z.nativeMemberOriginalLocalParent(obj, work); localKnown {
+				next = localParent
 			} else {
 				return owner, nativeMemberTopLevelEvidence(obj, work)
 			}
@@ -234,4 +250,35 @@ func nativeMemberTopLevelEvidence(obj *ClassObject, work *workbudget.Budget) boo
 		}
 	}
 	return true
+}
+
+func (z *JarFS) nativeMemberOriginalLocalParent(obj *ClassObject, work *workbudget.Budget) (string, bool) {
+	if obj == nil {
+		return "", false
+	}
+	for _, a := range obj.Attributes {
+		if !nativeProofWork(work, 1) {
+			return "", false
+		}
+		if e, ok := a.(*UnparsedAttribute); ok && e != nil && e.Name == "EnclosingMethod" && len(e.Info) == 4 {
+			owner, ok := sourceBridgeClassName(obj, uint16(e.Info[0])<<8|uint16(e.Info[1]))
+			if !ok {
+				return "", false
+			}
+			raw, ok := z.enumSiblingResolver()(owner)
+			if !ok {
+				return "", false
+			}
+			parent, err := z.nativeMemberReader(obj).parseResolved(raw)
+			if err != nil || parent.GetClassName() != owner {
+				return "", false
+			}
+			local, ok := originalMethodLocalOwner(obj, parent, work)
+			if !ok || local.owner != owner {
+				return "", false
+			}
+			return owner, true
+		}
+	}
+	return "", false
 }

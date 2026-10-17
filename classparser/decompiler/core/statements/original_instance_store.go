@@ -28,6 +28,7 @@ func (a *AssignStatement) MarkOriginalInstanceFieldStore(member *values.JavaClas
 		return
 	}
 	a.originalInstanceStore = &originalInstanceStore{pc, strings.ReplaceAll(member.Name, ".", "/"), member.Member, member.Description, field, receiver, rhs}
+	field.MarkOriginalFieldWrite(member, pc)
 }
 
 func (a *AssignStatement) OriginalInstanceFieldStore() (pc int, owner, member, descriptor string, known bool) {

@@ -91,6 +91,9 @@ func Children(value JavaValue) ([]JavaValue, bool) {
 		}
 		return []JavaValue{v.Inner}, true
 	case *CustomValue:
+		if operand, _, _, known := v.SourcePrimitiveConversion(); known {
+			return []JavaValue{operand}, true
+		}
 		if _, known := v.SourceCaughtExceptionEntry(); known {
 			return nil, true
 		}
@@ -176,7 +179,7 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 			}
 		case *JavaExpression:
 			switch v.Op {
-			case "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
+			case INC, DEC, "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
 				effect |= EffectWriteMemory
 			case "/", "%":
 				effect |= EffectThrow

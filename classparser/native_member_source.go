@@ -50,20 +50,23 @@ type nativeMemberFamily struct {
 	pendingAnonymousSuperDependencies map[string]*nativeMemberClass
 	anonymousSuperResolver            func(string) (*ClassObject, bool)
 	rootAccessBridges                 map[string]*nativeConstructorAccessBridge
-	rootBridgeDelegations             map[string]*nativeRootBridgeDelegation
-	getters                           map[string]*nativeMemberPrivateGetter
-	retainedAccessors                 map[string]*nativeMemberPrivateGetter
-	nestmateAccessors                 bool
-	lexicalObjects                    map[string]*ClassObject
-	anonymous                         *nativeAnonymousFamily
-	anonymousUnits                    map[string]*nativeAnonymousFamily
-	memberAnonymous                   map[string]*nativeAnonymousFamily
-	anonymousForest                   *nativeAnonymousForest
-	owner                             string
-	children                          map[string]*nativeMemberClass
-	failed                            bool
-	bridgeCalls                       map[string]int
-	emptyMarkers                      map[string]*ClassObject
+	// Only a receipt for unchanged root method handles and consumed lambda
+	// bodies; it confers no member-class or private-constructor ownership.
+	rootHandleSource      *nativeMemberClass
+	rootBridgeDelegations map[string]*nativeRootBridgeDelegation
+	getters               map[string]*nativeMemberPrivateGetter
+	retainedAccessors     map[string]*nativeMemberPrivateGetter
+	nestmateAccessors     bool
+	lexicalObjects        map[string]*ClassObject
+	anonymous             *nativeAnonymousFamily
+	anonymousUnits        map[string]*nativeAnonymousFamily
+	memberAnonymous       map[string]*nativeAnonymousFamily
+	anonymousForest       *nativeAnonymousForest
+	owner                 string
+	children              map[string]*nativeMemberClass
+	failed                bool
+	bridgeCalls           map[string]int
+	emptyMarkers          map[string]*ClassObject
 	// Newer compilers use nestmates and need not emit an unused access marker.
 	// Keep its original class as a separate source unit instead of consuming it.
 	retainEmptyMarkers bool
@@ -105,7 +108,7 @@ func originalMemberOwner(obj *ClassObject) (owner, name string, flags uint16, va
 			}
 		}
 	}
-	valid = count == 1 && owner != "" && name != "" && class_context.SafeIdentifier(name) == name && obj.GetClassName() == owner+"$"+name
+	valid = count == 1 && owner != "" && name != "" && class_context.PreservesJava8Identifier(name) && obj.GetClassName() == owner+"$"+name
 	return
 }
 
@@ -220,6 +223,14 @@ func nativeMemberProofWithLexicalGraph(obj, enclosing *ClassObject, work *workbu
 }
 
 func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, resolve func(string) (*ClassObject, bool), providers ...callbinding.Provider) *nativeMemberClass {
+	var provider callbinding.Provider
+	if len(providers) > 0 {
+		provider = providers[0]
+	}
+	return nativeMemberProofWithMetadata(obj, enclosing, work, bridges, lexical, resolve, provider, provider)
+}
+
+func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, resolve func(string) (*ClassObject, bool), provider, operands callbinding.Provider) *nativeMemberClass {
 	expectedCapture := "this$0"
 	if lexical != nil {
 		var known bool
@@ -227,10 +238,6 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		if !known {
 			return nil
 		}
-	}
-	var provider callbinding.Provider
-	if len(providers) > 0 {
-		provider = providers[0]
 	}
 	owner, name, flags, known := originalMemberOwner(obj)
 	var enumSynthesis *nativeMemberEnumSynthesis
@@ -243,7 +250,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 	} else {
 		kind = nativeMemberDeclarationKindRepresentable(obj, flags, work, resolve)
 	}
-	if !known || !nativeMemberVersionMetadata(obj, work) || !(kind || enumSynthesis != nil) {
+	if !known || !nativeMemberVersionMetadata(obj, work) || !nativeDeclarationNamesCompatible(obj, work) || !(kind || enumSynthesis != nil) {
 		return nil
 	}
 	if !nativeMemberDeprecatedMarkerRepresentable(obj, work) {
@@ -327,7 +334,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 	// An absent assertion packet has no assertion-status owner to reconstruct.
 	// Do not demand unowned ancestors merely to prove absence. A present or
 	// malformed packet still follows the complete original lexical chain.
-	noAssertions, absenceKnown := nativeMemberAssertionProof(obj, owner, work)
+	noAssertions, absenceKnown := nativeMemberAssertionProofMode(obj, owner, work, true)
 	if lexical != nil && len(lexical) > 0 && (noAssertions != nil || !absenceKnown) {
 		outermost := owner
 		for depth := 0; depth < 64; depth++ {
@@ -352,7 +359,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		if enumSynthesis != nil && enumSynthesis.assertions != nil {
 			p.assertions, valid = enumSynthesis.assertions, enumSynthesis.assertions.statusOwner == outermost
 		} else {
-			p.assertions, valid = nativeMemberAssertionProof(obj, outermost, work)
+			p.assertions, valid = nativeMemberAssertionProofMode(obj, outermost, work, true)
 		}
 		if !valid {
 			return nil
@@ -508,11 +515,11 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 		}
 		// The existing abstract stack proof preserves parameter/literal computations
 		// and identifies the actual uninitialized receiver delegation.
-		next, call := constructorMotionDelegation(obj, ops, start, ps, constructorParameterSlots(ps), provider)
+		next, call := constructorMotionDelegation(obj, ops, start, ps, constructorParameterSlots(ps), operands)
 		if next == 0 || call == nil {
 			// A named lexical capture is regenerated before the original
 			// delegation; no capture is moved across these operand effects.
-			next, call = nativeMemberFrameDelegationWithMetadata(obj, m, code, ops, start, work, provider)
+			next, call = nativeMemberFrameDelegationWithMetadata(obj, m, code, ops, start, work, operands)
 		}
 		if next == 0 || call == nil || call.Member != "<init>" {
 			return nil
@@ -587,7 +594,7 @@ func (c *ClassObjectDumper) planNativeMemberFamily() *nativeMemberFamily {
 }
 
 func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMemberIndependentRoot) *nativeMemberFamily {
-	if c.foldSiblingResolver == nil || !nativeMemberVersionMetadata(c.obj, c.Work) || !nativeSourceBinaryName(c.obj.GetClassName()) {
+	if c.foldSiblingResolver == nil || !nativeMemberVersionMetadata(c.obj, c.Work) || !nativeSourceBinaryName(c.obj.GetClassName()) || !nativeDeclarationNamesCompatible(c.obj, c.Work) {
 		return nil
 	}
 	if independent == nil {
@@ -652,7 +659,7 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 				// Retain this exact parsed declaration before proving its lexical
 				// method scope. A failed child aborts the entire family transaction.
 				p.lexicalObjects[name] = obj
-				child := nativeMemberProofWithDeclarations(obj, enclosing, c.Work, bridges, p.lexicalObjects, resolveDeclaration, reader.buildInvocationMetadata())
+				child := reader.proveNativeMemberDeclaration(obj, enclosing, bridges, p.lexicalObjects, resolveDeclaration)
 				rowName, rowKnown := sourceBridgeUTF8(enclosing, row.InnerNameIndex)
 				if child == nil || !reader.nativeMemberAnnotationTablesRepresentable() || child.owner != owner || !rowKnown || rowName != child.name || row.InnerClassAccessFlags != child.flags {
 					return nil
@@ -689,7 +696,10 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 	if !c.planNativeMethodLocals(p) {
 		return nil
 	}
-	if len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 && !c.nativeMemberHasAnonymousDeclarations() {
+	// An ordinary empty root needs no family projection. A separately proved
+	// static boundary still needs a completed declaration even without children:
+	// foreign families use that declaration to bind their original SUPER type.
+	if independent == nil && len(p.children) == 0 && len(p.enumSwitchTables) == 0 && len(p.methodLocals) == 0 && !c.nativeMemberHasAnonymousDeclarations() {
 		return nil
 	}
 	for name, child := range p.children {
@@ -700,7 +710,7 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 		child.sourceName = source
 	}
 	p.rootAccessBridges = c.originalNativeConstructorAccessBridges()
-	if !nativeMemberCollectPrivateGettersResolved(p, c.nativeAnnotationDeclarationResolver(), c.Work) {
+	if !nativeMemberCollectPrivateGettersPhase(p, c.nativeAnnotationDeclarationResolver(), c.Work, false) {
 		return nil
 	}
 	if !c.planNativeMemberAccessorCompilerProfile(p) {
@@ -737,7 +747,7 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 	}
 	// The complete original named forest is committed together. Local and
 	// anonymous scopes still require their separately proved joint plans.
-	metadata := c.buildInvocationMetadata()
+	metadata := c.nativeConstructorOperandMetadata(c.buildInvocationMetadata())
 	for _, child := range p.children {
 		if !nativeMemberSiblingSuperClosed(child, p, c.Work, metadata) {
 			return nil
@@ -895,6 +905,8 @@ type nativeMemberAllocation struct {
 	freshEnclosing           *nativeMemberFreshEnclosing
 	anonymousEnclosingRead   *nativeMemberLexicalRead
 	anonymousEnclosingMethod string
+	anonymousMemberEnclosing *nativeAnonymousMemberEnclosing
+	methodLocalEnclosing     *nativeMethodLocalMemberEnclosing
 }
 
 func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
@@ -909,6 +921,14 @@ func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
 
 func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[string]map[int]*nativeMemberAllocation, bool) {
 	result := map[string]map[int]*nativeMemberAllocation{}
+	var localReads map[string]map[int]*nativeMemberLexicalRead
+	if p.methodLocals[c.obj.GetClassName()] != nil {
+		var valid bool
+		localReads, valid = nativeMemberLexicalReads(c.obj, p, c.Work)
+		if !valid {
+			return nil, false
+		}
+	}
 	originalDeclarations := c.nativeAnnotationDeclarationResolver()
 	for _, constant := range c.obj.ConstantPool {
 		if !nativeProofWork(c.Work, 1) {
@@ -977,6 +997,7 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				return nil, false
 			}
 			ops := constructorMotionOps(d)
+			foreignBindings := c.nativeMemberForeignAnonymousPhysicalBindings(p, m)
 			var allocationInvocations map[int]nativeMemberAllocationInvocation
 			allocationInvocationsChecked := false
 			for i, op := range ops {
@@ -985,6 +1006,12 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				}
 				owner, known := sourceBridgeClassName(c.obj, core.Convert2bytesToInt(op.Data))
 				child := p.allocationClass(owner)
+				if foreignBindings != nil && foreignBindings.allocations[int(op.CurrentOffset)] {
+					if !foreignBindings.scope.unchanged() {
+						return nil, false
+					}
+					continue
+				}
 				if known && owner == p.owner && len(p.rootAccessBridges) > 0 {
 					plan, ok := nativeRootBridgeAllocation(c.obj, ops, i, p.lexicalObjects[p.owner], p.rootAccessBridges, c.Work)
 					if !ok {
@@ -1095,6 +1122,36 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 								break
 							}
 							pc := int(ops[end].CurrentOffset)
+							if read := localReads[key][pc]; read != nil && read.descriptor == "L"+child.owner+";" {
+								oldest := read
+								for oldest.prior != nil {
+									oldest = oldest.prior
+								}
+								if oldest.pc != int(ops[cursor].CurrentOffset) {
+									return nil, false
+								}
+								proof := nativeMethodLocalMemberEnclosingProof(p, c.obj, key, plan.newPC, read, child, c.Work)
+								if proof == nil {
+									return nil, false
+								}
+								plan.enclosingReadPC, plan.implicitEnclosing = pc, true
+								plan.methodLocalEnclosing = proof
+								cursor = end + 1
+								if cursor+2 < len(ops) && ops[cursor].Instr.OpCode == core.OP_DUP && nativeMemberNullCheck(c.obj, ops[cursor+1]) && ops[cursor+2].Instr.OpCode == core.OP_POP {
+									plan.checkPC = int(ops[cursor+1].CurrentOffset)
+									cursor += 3
+									plan.implicitEnclosing = false
+								}
+								break
+							}
+							receipt := nativeAnonymousMemberEnclosingReceipt(p, c.obj, key, plan.newPC, child, c.Work)
+							if receipt != nil && receipt.read.pc == pc {
+								plan.enclosingReadPC, plan.implicitEnclosing = pc, true
+								plan.anonymousEnclosingRead, plan.anonymousEnclosingMethod = receipt.read, key
+								plan.anonymousMemberEnclosing = receipt
+								cursor = end + 1
+								break
+							}
 							read := nativeMemberAnonymousAllocationEnclosingRead(p, c.obj, key, pc, child.owner, c.Work)
 							if read == nil {
 								continue
@@ -1167,6 +1224,10 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 						}
 						plan.descriptor = call.Description
 						plan.invokePC = int(ops[j].CurrentOffset)
+						if proof := plan.methodLocalEnclosing; proof != nil {
+							proof.invokePC, proof.descriptor = plan.invokePC, plan.descriptor
+							proof.checkPC = plan.checkPC
+						}
 						if result[key][plan.invokePC] != nil {
 							return nil, false
 						}
@@ -1200,6 +1261,14 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				call := constructorMotionMember(c.obj, op, core.OP_INVOKESPECIAL)
 				if call != nil && call.Member == "<init>" && !nativeMemberOriginalConstructorAccess(p, c.obj, call.Name, call.Description, c.Work) {
 					return nil, false
+				}
+				if call != nil && foreignBindings != nil {
+					if binding, known := foreignBindings.invocations[int(op.CurrentOffset)]; known {
+						if binding.owner != call.Name || binding.descriptor != call.Description || !foreignBindings.scope.unchanged() {
+							return nil, false
+						}
+						continue
+					}
 				}
 				if call == nil || call.Member != "<init>" || p.allocationClass(call.Name) == nil || p.allocationClass(call.Name).static && p.allocationClass(call.Name).accessBridges[call.Description] == nil {
 					continue
@@ -1451,7 +1520,33 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				owner := ctx.ShortTypeName(strings.ReplaceAll(child.owner, "/", "."))
 				return "((" + owner + ")(" + source + "))", true
 			}
+			// Type recovery runs during analysis as well as after source parameter
+			// preparation. A failed query is absence of evidence, not a failed
+			// committed projection. Reopen the same physical path without rendering
+			// an operand or mutating the family's transaction state.
+			// Forest participation does not replace the declaration's own
+			// named/local THIS certificate. Only reads outside this reader's
+			// original scope belong to the forest's foreign-capture protocol.
+			priorType := ctx.SourceLexicalCapturedFieldType
+			ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
+				if f := c.nativeAnonymousForest; f != nil && f.members == p && f.objects[c.obj.GetClassName()] == c.obj && f.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != nil && reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc] == nil {
+					return priorType != nil && priorType(value, pc, name)
+				}
+				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+				if read == nil || p.children[read.owner] == nil {
+					return priorType != nil && priorType(value, pc, name)
+				}
+				return name == read.field && nativeMemberLexicalReadOperand(value, read, c.Work, ctx)
+			}
+			priorCapture := ctx.SourceLexicalCapturedField
 			ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
+				if f := c.nativeAnonymousForest; f != nil && f.members == p && f.objects[c.obj.GetClassName()] == c.obj && f.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != nil && reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc] == nil {
+					if priorCapture == nil {
+						p.failed = true
+						return "", false
+					}
+					return priorCapture(value, pc, name)
+				}
 				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
 				if read == nil {
 					if field, ok := value.(*values.RefMember); ok && field != nil && !sourceProofNil(field.Object) {
@@ -1470,10 +1565,17 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				}
 				owner := p.children[read.owner]
 				if owner == nil {
-					// The local's first hop retains the existing exact capture
-					// binding/placement hook. Only later named-owner hops are
-					// projected here, with the complete operand chain above.
+					// The local's first hop denotes the original factory THIS.
+					// Its source spelling must also bind inside the local, where
+					// a new formal can hide the factory's qualified owner name.
 					if local := c.nativeMethodLocalCurrent; local != nil && read.prior == nil && read.owner == c.obj.GetClassName() && read.field == local.constructor.enclosingField {
+						scope := c.nativeMethodLocalTypeScope(p, local, ctx)
+						if scope != nil {
+							if name, known := scope.sourceName(local.owner.owner); known {
+								return name + ".this", true
+							}
+						}
+						p.failed = true
 						return "", false
 					}
 					p.failed = true
@@ -1494,6 +1596,19 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		if anchor := p.anonymousNamedAnchor(n); anchor != "" && (p.lexicalObjects[c.obj.GetClassName()] != c.obj || !p.anonymousNamedScopeContains(anchor, c.obj.GetClassName())) {
 			p.failed = true
 			return "", false
+		}
+		if local := c.nativeMethodLocalCurrent; local != nil {
+			binary := strings.ReplaceAll(n, ".", "/")
+			if binary == p.owner || p.children[binary] != nil {
+				scope := c.nativeMethodLocalTypeScope(p, local, ctx)
+				if scope != nil {
+					if name, known := scope.sourceName(binary); known {
+						return name, true
+					}
+				}
+				p.failed = true
+				return "", false
+			}
 		}
 		if source, known := p.sourceName(n); known {
 			return source, true
@@ -1525,6 +1640,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		return
 	}
 	c.nativeMemberCalls = plans
+	c.nativeFreshCaller = nativeFreshBindCaller(c.obj, p, c.Work)
 	c.nativeMemberChecks = map[string]map[int]bool{}
 	for method, allocations := range plans {
 		checks := map[int]bool{}
@@ -1552,7 +1668,20 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		child := p.allocationClass(binary)
 		return child != nil && (!child.static || child.accessBridges[desc] != nil)
 	}
+	ctx.SourceMemberImplicitEnclosing = func(owner, desc string, newPC, pc int, value any) bool {
+		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+		if plan == nil || plan.anonymousMemberEnclosing == nil && plan.methodLocalEnclosing == nil || plan.child == nil || plan.child.object.GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.descriptor != desc || plan.newPC != newPC {
+			return false
+		}
+		return nativeMemberLexicalEnclosingOperand(value, plan, p, c.obj.GetClassName(), c.nativeMemberBody, c.Work)
+	}
 	ctx.SourceMemberAllocation = func(owner, desc string, newPC, pc int, args []class_context.SourceCaptureOperand) (string, bool) {
+		// Parse/analysis previews may still contain SSA temporaries for original
+		// allocation packets. Only the final bound source graph may commit a
+		// family failure; the exact original operand proof below stays strict.
+		if !c.nativeSourceNamesReady {
+			return "", false
+		}
 		fail := func() (string, bool) { p.failed = true; return "", false }
 		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
 		if child := p.allocationClass(strings.ReplaceAll(owner, ".", "/")); child != nil && child.static && child.accessBridges[desc] == nil {
@@ -1587,6 +1716,11 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			return fail()
 		}
 		erasure, typeKnown := values.SourceTypeErasure(outer.Type(), ctx)
+		if proof := plan.methodLocalEnclosing; proof != nil {
+			// The original GETFIELD packet proves a physical class descriptor.
+			// A same-spelled source formal does not erase that class to its bound.
+			erasure, typeKnown = proof.read.descriptor, true
+		}
 		inheritedThis := plan.implicitReceiverClass != "" && args[0].Receiver && nativeMemberInheritedAllocationOperand(outer, plan.implicitReceiverClass, ctx, c.Work)
 		if plan.implicitReceiverClass != "" && !inheritedThis || !typeKnown || !inheritedThis && erasure != "L"+plan.child.owner+";" {
 			return fail()
@@ -1618,8 +1752,22 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		allocationBinding := *ctx
 		allocationBinding.InvocationMetadata = binding.InvocationMetadata
 		allocationBinding.SiblingClassSig = binding.SiblingClassSig
+		if plan.implicitEnclosing || plan.methodLocalEnclosing != nil || args[0].Receiver && c.obj.GetClassName() == plan.child.owner {
+			invoke.Arguments = nativeMemberLexicalConstructorArguments(p, plan.child, desc, c.obj.GetClassName(), invoke.Arguments, &allocationBinding, c.Work)
+		}
 		arguments := invoke.ArgumentStrings(&allocationBinding)
 		sourceName := plan.child.name
+		if plan.methodLocalEnclosing != nil {
+			var nameKnown bool
+			var enclosingName string
+			sourceName, enclosingName, nameKnown = c.nativeMethodLocalMemberAllocationNames(plan, p, ctx)
+			if !nameKnown {
+				return fail()
+			}
+			if enclosingName != "" {
+				args[0].Text = enclosingName
+			}
+		}
 		if plan.enclosingParameter != nil {
 			var nameKnown bool
 			sourceName, nameKnown = c.nativeMemberEnclosingParameterAllocationName(plan, p, ctx)
@@ -1684,6 +1832,11 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			name := strings.ReplaceAll(owner, ".", "/")
 			targetClass := p.allocationClass(name)
 			if targetClass == nil || targetClass.static {
+				return "", false
+			}
+			// Source names are registered after provisional IR rendering.
+			// Retain the physical operands until that binding phase.
+			if !c.nativeSourceNamesReady {
 				return "", false
 			}
 			ctor := child.constructors[ctx.CurrentMethodDesc]
@@ -1838,13 +1991,31 @@ func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 		sub.foldSiblingResolver = c.foldSiblingResolver
 		sub.declarationResolver = c.declarationResolver
 		sub.nativeMemberRoot = p
+		// A named child rendered inside this same anonymous transaction keeps
+		// its original mixed lexical forest. Flat or foreign declarations gain
+		// no anonymous scope merely by sharing a binary-name prefix.
+		// This shares lookup context, not access permission. Every unnamed
+		// receiver consumer separately reopens its original enclosing chain.
+		if c.nativeAnonymousForest != nil && c.nativeAnonymousForest.members == p && c.nativeAnonymousForest.objects[child.object.GetClassName()] == child.object {
+			if c.Work != nil && c.Work.CheckAlloc(int64(len(c.nativeAnonymousBindings)+1)*128) != nil {
+				return nil, fmt.Errorf("anonymous named lexical bindings exceed work budget")
+			}
+			sub.nativeAnonymousForest = c.nativeAnonymousForest
+			sub.nativeAnonymousBindings = map[string]string{}
+			for field, source := range c.nativeAnonymousBindings {
+				if !nativeProofWork(c.Work, 1) {
+					return nil, fmt.Errorf("anonymous named lexical binding work exhausted")
+				}
+				sub.nativeAnonymousBindings[field] = source
+			}
+		}
 		sub.nativeMemberCurrent = child
 		sub.nativeAnonymousRoot = p.memberAnonymous[name]
 		if !child.static {
 			sub.nativeCaptureFields = map[string]string{child.field: c.FuncCtx.ShortTypeName(strings.ReplaceAll(child.owner, "/", ".")) + ".this"}
 			var arguments []types.JavaType
 			for _, formal := range c.FuncCtx.ClassTypeParams {
-				arguments = append(arguments, types.NewJavaClass(formal))
+				arguments = append(arguments, types.NewJavaTypeVariable(formal))
 			}
 			if len(arguments) > 0 {
 				sub.nativeCaptureTypes = map[string]types.JavaType{child.field: types.NewParameterizedType(strings.ReplaceAll(child.owner, "/", "."), arguments)}
@@ -1881,7 +2052,7 @@ func (c *ClassObjectDumper) renderNativeMembers() ([]string, error) {
 			}
 		}
 		src, e := sub.DumpClass()
-		if e != nil || sub.nativeCaptureFailed || !nativeMemberLambdaSourceClosed(child, sub, c.Work) || strings.Contains(src, DecompileStubMarker) || len(sub.constructorBoundaryHelpers) > 0 || len(sub.interfaceInitializerHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
+		if e != nil || sub.nativeCaptureFailed || !nativeMemberLambdaSourceClosed(child, sub, c.Work) || sub.sourceDegraded || len(sub.constructorBoundaryHelpers) > 0 || len(sub.interfaceInitializerHelpers) > 0 || sub.privateNestOwnPlan != nil && len(sub.privateNestOwnPlan.bridges) != 0 {
 			return nil, fmt.Errorf("member body unproved: %v", e)
 		}
 		if group := p.memberAnonymous[name]; group != nil && !group.completeOwnSource(src) {

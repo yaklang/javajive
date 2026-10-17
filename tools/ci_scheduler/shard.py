@@ -36,7 +36,7 @@ class Shard:
         return {"index": self.index, "items": list(self.items), "duration_ns": self.duration_ns}
 
 
-def source_parent_shards(names: Iterable[str], seconds: dict[str, float], count: int) -> list[Shard]:
+def _source_parent_items(names: Iterable[str], seconds: dict[str, float]) -> list[TestItem]:
     """Duration hints change placement only; the discovered inventory is authoritative.
 
     New tests receive a positive default and stale hints cannot add tests.
@@ -48,7 +48,48 @@ def source_parent_shards(names: Iterable[str], seconds: dict[str, float], count:
         if isinstance(duration, bool) or not isinstance(duration, (float, int)) or not math.isfinite(duration) or duration < 0:
             raise ShardError(f"{name}: invalid duration hint")
         items.append(TestItem(name, max(50_000_000, round(duration * 1_000_000_000))))
-    return shard_items(items, count)
+    expand_manifest(items)
+    if not items:
+        raise ShardError("empty inventory")
+    return items
+
+
+def source_parent_shards(names: Iterable[str], seconds: dict[str, float], count: int) -> list[Shard]:
+    return shard_items(_source_parent_items(names, seconds), count)
+
+
+def source_parent_batches(
+    names: Iterable[str], seconds: dict[str, float], *,
+    max_seconds: float = 150, max_parents: int = 16,
+) -> list[Shard]:
+    """Bound queue granularity without splitting a parent or trusting cost hints.
+
+    A parent exceeding the target runs alone. Short batches let a free worker
+    take more work when another parent's real duration exceeds its estimate.
+    Limits affect scheduling only: every discovered parent remains mandatory.
+    """
+    if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)) or not math.isfinite(max_seconds) or max_seconds <= 0:
+        raise ShardError("max_seconds must be positive and finite")
+    if isinstance(max_parents, bool) or not isinstance(max_parents, int) or max_parents < 1:
+        raise ShardError("max_parents must be a positive integer")
+    items = _source_parent_items(names, seconds)
+    limit = max(1, round(max_seconds * 1_000_000_000))
+    batches: list[Shard] = []
+    for item in sorted(items, key=lambda item: (-item.duration_ns, item.name)):
+        batch = next((batch for batch in batches
+                      if len(batch.items) < max_parents and batch.duration_ns + item.duration_ns <= limit), None)
+        if batch is None:
+            batch = Shard(index=len(batches))
+            batches.append(batch)
+        batch.items.append(item.name)
+        batch.duration_ns += item.duration_ns
+    batches.sort(key=lambda batch: (-batch.duration_ns, sorted(batch.items)))
+    for index, batch in enumerate(batches):
+        batch.index = index
+        batch.items.sort()
+    if sorted(name for batch in batches for name in batch.items) != sorted(item.name for item in items):
+        raise ShardError("batch inventory not conserved")
+    return batches
 
 
 def expand_manifest(items: Iterable[TestItem]) -> list[str]:

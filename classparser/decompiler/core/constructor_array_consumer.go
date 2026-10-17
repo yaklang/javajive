@@ -1,6 +1,10 @@
 package core
 
 import (
+	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
@@ -54,10 +58,29 @@ func (d *Decompiler) privateDelegationArrayConsumer(delegate *values.FunctionCal
 	method, err = types.ParseMethodDescriptor(consumer.Descriptor)
 	if err != nil || method.FunctionType() == nil || len(method.FunctionType().ParamTypes) != len(consumer.Arguments) ||
 		len(consumer.FuncType.ParamTypes) != len(consumer.Arguments) || argument < 0 ||
-		!sameExactArrayType(array.Type(), consumer.FuncType.ParamTypes[argument]) || !sameExactArrayType(array.Type(), method.FunctionType().ParamTypes[argument]) {
+		!d.delegationArrayFormalAccepts(array.Type(), consumer.FuncType.ParamTypes[argument], method.FunctionType().ParamTypes[argument]) {
 		return nil, nil, -1, false
 	}
 	return consumer, invoke, argument, true
+}
+
+// Allocation identity is independent of the consuming formal. A String[] can
+// reach Object[]/Object without changing its runtime array class. First seal
+// the source formal to the original descriptor, then prove reference widening;
+// retain the allocation's complete component/rank in the initializer copy.
+func (d *Decompiler) delegationArrayFormalAccepts(allocated, sourceFormal, physicalFormal types.JavaType) bool {
+	ctx := d.FunctionContext
+	if ctx == nil {
+		ctx = &class_context.ClassContext{}
+	}
+	actual := values.ReferenceTypeDescriptor(allocated, ctx)
+	source := values.ReferenceTypeDescriptor(sourceFormal, ctx)
+	physical := values.ReferenceTypeDescriptor(physicalFormal, ctx)
+	if actual == "" || !strings.HasPrefix(actual, "[") || physical == "" || source != physical {
+		return false
+	}
+	metadata := callbinding.WithReferenceAncestry(ctx.InvocationMetadata, ctx.SiblingSuperTypes, d.Work)
+	return callbinding.Assignable(actual, physical, metadata)
 }
 
 func delegationArrayArgument(arguments []values.JavaValue, ref *values.JavaRef) int {
@@ -90,7 +113,8 @@ func (d *Decompiler) delegationArrayCallOperands(call *values.FunctionCallExpres
 		return false
 	}
 	for i, argument := range call.Arguments {
-		if values.UnpackSoltValue(argument) != values.UnpackSoltValue(op.stackConsumed[len(call.Arguments)-1-i]) {
+		raw := values.UnpackSoltValue(op.stackConsumed[len(call.Arguments)-1-i])
+		if values.UnpackSoltValue(argument) != raw && !d.delegationArrayCompletedOperand(call, op, i, argument, raw) {
 			return false
 		}
 	}
@@ -98,4 +122,25 @@ func (d *Decompiler) delegationArrayCallOperands(call *values.FunctionCallExpres
 		return false
 	}
 	return true
+}
+
+// Earlier initializer folding can replace another operand's DUP reference by
+// its completed array. Reopen that exact allocation/store/use packet instead
+// of treating either a different pointer or an arbitrary source tree as an
+// original operand. This query changes neither the stack nor the call.
+func (d *Decompiler) delegationArrayCompletedOperand(call *values.FunctionCallExpression, sink *OpCode, argument int, source, raw values.JavaValue) bool {
+	array, arrayKnown := values.UnpackSoltValue(source).(*values.NewExpression)
+	ref, refKnown := values.UnpackSoltValue(raw).(*values.JavaRef)
+	if !arrayKnown || !refKnown || array == nil || ref == nil || !array.IsArray() || !array.HasOriginPC || !array.HasEvaluationEndPC || call == nil || call.FuncType == nil || argument < 0 || argument >= len(call.Arguments) || argument >= len(call.FuncType.ParamTypes) {
+		return false
+	}
+	method, err := types.ParseMethodDescriptor(call.Descriptor)
+	if err != nil || method.FunctionType() == nil || argument >= len(method.FunctionType().ParamTypes) || !d.delegationArrayFormalAccepts(array.Type(), call.FuncType.ParamTypes[argument], method.FunctionType().ParamTypes[argument]) {
+		return false
+	}
+	allocation := d.opcodeAtOffset(array.OriginPC)
+	if allocation == nil || len(allocation.Target) != 1 {
+		return false
+	}
+	return d.privateCompletedArrayAtUse(array, ref, allocation.Target[0], sink, len(call.Arguments)-1-argument, map[*values.NewExpression]bool{}, 0)
 }

@@ -11,7 +11,8 @@ import (
 // and invocation kind survive native member regeneration. Require a directly
 // declared, unchanged target; inherited resolution, private/special access,
 // generated bridges/lambda bodies, fields, and enclosing constructors keep the existing
-// refusal. A separately proved ordinary static member has no enclosing operand
+// refusal. Member interfaces use a separate declaration/tag/erasure proof below.
+// A separately proved ordinary static member has no enclosing operand
 // in its public constructor either. This grants no private lookup privilege.
 func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberIndex, work *workbudget.Budget, sourceMembers ...*nativeMemberClass) bool {
 	if obj == nil || index == nil || !index.valid || len(sourceMembers) > 1 || !nativeProofWork(work, 1) {
@@ -49,13 +50,23 @@ func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberInde
 	closedTargets := map[nativeMemberHandleTarget]bool{}
 	staticSourceChecked, staticSourceClosed := false, false
 	for _, target := range targets {
-		if !nativeProofWork(work, 1) || !target.methodRef {
+		if !nativeProofWork(work, 1) {
 			return false
 		}
 		if closedTargets[target] {
 			continue
 		}
 		m := methods[declarationKey{target.name, target.descriptor}]
+		if target.kind == 9 {
+			if target.methodRef || len(sourceMembers) != 1 || !nativeMemberInterfaceHandleSourceClosed(obj, sourceMembers[0], m, target, work) {
+				return false
+			}
+			closedTargets[target] = true
+			continue
+		}
+		if !target.methodRef {
+			return false
+		}
 		if len(sourceMembers) == 1 && target.referencer == owner && sourceMembers[0] != nil && sourceMembers[0].object == obj && nativeMemberLambdaImplementation(sourceMembers[0], m, work) {
 			if (m.AccessFlags&8 != 0 && target.kind == 6) || (m.AccessFlags&8 == 0 && (target.kind == 5 || target.kind == 7)) {
 				closedTargets[target] = true
@@ -72,7 +83,7 @@ func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberInde
 			if !staticSourceClosed || m == nil || m.AccessFlags & ^uint16(0x0081) != 0 || m.AccessFlags&1 == 0 || sourceMembers[0].accessBridges[target.descriptor] != nil {
 				return false
 			}
-		} else if target.kind != 5 && target.kind != 6 || target.name == "" || target.name == "<init>" || target.name == "<clinit>" || class_context.SafeIdentifier(target.name) != target.name {
+		} else if target.kind != 5 && target.kind != 6 || target.name == "" || target.name == "<init>" || target.name == "<clinit>" || !class_context.PreservesJava8Identifier(target.name) {
 			return false
 		}
 		if _, ret, err := callbinding.Descriptor(target.descriptor); err != nil || constructor && ret != "V" {

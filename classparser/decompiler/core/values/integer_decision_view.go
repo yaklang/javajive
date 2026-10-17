@@ -168,7 +168,7 @@ func renderIntegerDecision(root *TernaryExpression, ctx *class_context.ClassCont
 		return "", false
 	}
 	if !boundedDecisionSource(pred, 65536) {
-		return EmptySlotValuePlaceholder, true
+		return IncompleteSourceValue(ctx), true
 	}
 	if root.Type().RawType().(*types.JavaPrimer).Name == types.JavaBoolean {
 		if first == last && first == 0 {

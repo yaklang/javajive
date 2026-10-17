@@ -3,6 +3,7 @@ package statements
 import (
 	"fmt"
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"github.com/yaklang/javajive/internal/workbudget"
 	"reflect"
 	"strings"
 
@@ -123,7 +124,7 @@ func (r *ReturnStatement) String(funcCtx *class_context.ClassContext) string {
 				if view, ok := values.BooleanStackConsumerView(r.JavaValue); ok {
 					return "return " + view.String(funcCtx)
 				}
-				return "return " + values.EmptySlotValuePlaceholder
+				return "return " + values.IncompleteSourceValue(funcCtx)
 			}
 		}
 	}
@@ -852,7 +853,7 @@ func typeVarLocalDeclName(funcCtx *class_context.ClassContext, left values.JavaV
 		recvRaw = funcCtx.ClassName
 		recvArgs = make([]types.JavaType, len(funcCtx.ClassTypeParams))
 		for i, p := range funcCtx.ClassTypeParams {
-			recvArgs[i] = types.NewJavaClass(p)
+			recvArgs[i] = types.NewJavaTypeVariable(p)
 		}
 	} else {
 		return ""
@@ -1636,36 +1637,50 @@ func topLevelTypeArgs(s string) ([]string, bool) {
 	return args, true
 }
 
-// typeVarIsUnbounded reports whether name is a type variable in scope whose SOLE bound is Object (the
-// canonical bare `<E>`). It looks in the enclosing method's formal type parameters first (which shadow
-// the class's), then the class's. ClassFormalTypeParamBounds omits any variable whose only bound is
-// Object, so "declared here AND absent from the bounds map" == unbounded. A bounded variable
-// (`C extends Comparable`), or one not declared in either scope, returns false -- used to gate an
-// unchecked `X<Object>` -> `X<E>` parameterization cast, which is only legal for unbounded E.
-func typeVarIsUnbounded(name string, funcCtx *class_context.ClassContext) bool {
-	if funcCtx == nil || name == "" {
+// typeVarIsUnbounded checks the nearest original method, class or enclosing
+// declaration before consulting a legacy flattened header. Only a sole Object
+// bound permits this unchecked invariant cast. A first Object bound followed
+// by interfaces is still constrained. Query bounds in a detached formatting
+// context so type recovery cannot import or commit source declaration names.
+func typeVarIsUnbounded(name string, ctx *class_context.ClassContext) bool {
+	if ctx == nil || name == "" || len(ctx.LexicalTypeParamSignatures) > 128 {
 		return false
 	}
-	for _, n := range types.MethodFormalTypeParamNames(funcCtx.CurrentMethodSig) {
-		if n == name {
-			_, bounded := types.ClassFormalTypeParamBounds(funcCtx.CurrentMethodSig, funcCtx)[name]
-			return !bounded
-		}
+	if ctx.Work != nil && ctx.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+		return false
 	}
-	for _, n := range types.ClassFormalTypeParamNames(funcCtx.ClassSig) {
-		if n == name {
-			_, bounded := types.ClassFormalTypeParamBounds(funcCtx.ClassSig, funcCtx)[name]
-			return !bounded
+	// Preserve declaration identity, including own method/class shadowing.
+	// Empty enclosing method signatures contribute no binders. An unresolved
+	// declaration must not be treated as the legacy bare injected header.
+	for i := 0; i < 2+len(ctx.LexicalTypeParamSignatures); i++ {
+		sig := ctx.CurrentMethodSig
+		if i == 1 {
+			sig = ctx.ClassSig
+		} else if i >= 2 {
+			sig = ctx.LexicalTypeParamSignatures[i-2]
 		}
-	}
-	// Injected (flattened inner-class) type variable: not declared in ClassSig, but in scope via
-	// TypeParams. Its boundedness lives in InjectedTypeParamBounds (only non-Object bounds are recorded,
-	// mirroring the rendered header), so "in scope AND absent from that map" == the rendered bare `<E>`.
-	if funcCtx.IsTypeParam(name) {
-		if _, bounded := funcCtx.InjectedTypeParamBounds[name]; bounded {
+		if sig == "" {
+			continue
+		}
+		if len(sig) > 65535 || ctx.Work != nil && (ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(sig))+1) != nil || ctx.Work.CheckAlloc(int64(len(sig))*64) != nil) {
 			return false
 		}
-		return true
+		formals, _, valid := types.SignatureTypeVariableReferences(sig)
+		if !valid {
+			return false
+		}
+		for _, formal := range formals {
+			if formal == name {
+				_, bounded := types.ClassFormalTypeParamBounds(sig, nil)[name]
+				return !bounded
+			}
+		}
+	}
+	// A flattened class may genuinely declare an injected bare formal. Original
+	// lexical declarations above take precedence over this rendered-header view.
+	if ctx.IsTypeParam(name) {
+		_, bounded := ctx.InjectedTypeParamBounds[name]
+		return !bounded
 	}
 	return false
 }
@@ -1993,8 +2008,9 @@ func typeVarFieldStoreCast(funcCtx *class_context.ClassContext, left values.Java
 // carries only the erased descriptor (raw `Class`), so JavaJive cannot see the conflict, but javac uses
 // getRawType's real signature `Class<?>` -> captures to `Class<CAP#1>`, not assignable to
 // `Class<? super T>`; the source carried an unchecked `(Class<? super T>)` cast. The cast is unchecked
-// but behavior-preserving (the field erases to its raw bound at runtime) and always legal because the
-// value erases to the field's own raw type. Tightly gated to a wildcard-bearing, type-var-mentioning
+// but nested invariant arguments can still make that DIRECT cast illegal in source, despite equal
+// erasures. Rendering can first restore a separately proved erased store view. This helper is gated
+// to a wildcard-bearing, type-var-mentioning
 // same-class field so a fully-concrete or non-type-var generic field is never over-cast. Kill-switch
 // JDEC_WILDCARD_FIELD_CAST_OFF.
 func wildcardFieldStoreCast(funcCtx *class_context.ClassContext, left, value values.JavaValue) string {
@@ -2706,9 +2722,10 @@ type AssignStatement struct {
 	OriginPC    int
 	HasOriginPC bool
 	// ReferenceArrayStore is a decoded AASTORE witness, never an inferred cast.
-	ReferenceArrayStore   bool
-	originalLocalStore    *originalLocalStore
-	originalInstanceStore *originalInstanceStore
+	ReferenceArrayStore    bool
+	originalLocalStore     *originalLocalStore
+	originalParameterStore *originalParameterStore
+	originalInstanceStore  *originalInstanceStore
 }
 
 // ReplaceVar implements Statement.
@@ -2968,16 +2985,23 @@ func localDeclType(t types.JavaType) types.JavaType {
 	return t
 }
 
-func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
+func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source string) {
+	defer func() {
+		if source != "" && funcCtx != nil && funcCtx.SourceParameterStore != nil {
+			if marker, known := funcCtx.SourceParameterStore(a); known {
+				source += marker
+			}
+		}
+	}()
 	if a.IsDeclare {
 		if a.LeftValue == nil {
-			return values.EmptySlotValuePlaceholder
+			return values.IncompleteSourceValue(funcCtx)
 		}
 		return fmt.Sprintf("%s %s", localDeclType(a.LeftValue.Type()).String(funcCtx), a.LeftValue.String(funcCtx))
 	}
 	if a.ArrayMember != nil {
 		if a.JavaValue == nil {
-			return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), values.EmptySlotValuePlaceholder)
+			return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), values.IncompleteSourceValue(funcCtx))
 		}
 		if a.referenceArrayStoreNeedsObjectView(funcCtx) {
 			return fmt.Sprintf("((java.lang.Object[]) (%s))[%s] = %s", values.AssignmentOperand(a.ArrayMember.Object, funcCtx), a.ArrayMember.Index.String(funcCtx), a.JavaValue.String(funcCtx))
@@ -2985,8 +3009,8 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		return fmt.Sprintf("%s = %s", a.ArrayMember.String(funcCtx), arrayStoreRHS(a.ArrayMember, a.JavaValue, funcCtx))
 	}
 	if a.LeftValue == nil || a.JavaValue == nil {
-		left := values.EmptySlotValuePlaceholder
-		right := values.EmptySlotValuePlaceholder
+		left := values.IncompleteSourceValue(funcCtx)
+		right := values.IncompleteSourceValue(funcCtx)
 		if a.LeftValue != nil {
 			left = a.LeftValue.String(funcCtx)
 		}
@@ -3102,7 +3126,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if declType == nil {
 			// No recoverable declared type. Emit the placeholder so the dumper's safety net
 			// degrades this method cleanly instead of crashing.
-			return values.EmptySlotValuePlaceholder + " " + assign
+			return values.IncompleteSourceValue(funcCtx) + " " + assign
 		}
 		if _, ok := declType.RawType().(*types.JavaMultiCatchType); ok {
 			// A multi-catch union type is legal only inside `catch (A | B e)`. If the exception
@@ -3151,6 +3175,13 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		if ref, ok := a.LeftValue.(*values.JavaRef); ok && ref.WebDeclType != nil {
 			declType = ref.WebDeclType
 		}
+		// A resolved Boolean local consumes the computational int through the
+		// same Z view already selected above. Its declaration must describe
+		// that consumer, rather than the unconverted producer's int type.
+		// A whole-web declaration remains authoritative.
+		if ref, local := a.LeftValue.(*values.JavaRef); local && ref.WebDeclType == nil && values.IsBooleanStackNarrowing(ref.Type(), a.JavaValue) {
+			declType = ref.Type()
+		}
 		inferredFormalResult := false
 		if ref, local := a.LeftValue.(*values.JavaRef); local && !ref.IsThis && ref.WebDeclType == nil && ref.StackVar == nil && ref.CustomValue == nil {
 			if call, direct := values.UnpackSoltValue(rhsVal).(*values.FunctionCallExpression); direct {
@@ -3165,7 +3196,7 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// after rendering would turn Object x = rawCall() into T x = rawCall().
 		if ref, local := a.LeftValue.(*values.JavaRef); local && ref.WebDeclType == nil {
 			if tv := typeVarLocalDeclName(funcCtx, a.LeftValue, a.JavaValue, declType); tv != "" {
-				declType = types.NewJavaClass(tv)
+				declType = types.NewJavaTypeVariable(tv)
 				inferredFormalResult = true
 			}
 		}
@@ -3236,7 +3267,12 @@ func (a *AssignStatement) String(funcCtx *class_context.ClassContext) string {
 		// `Class<? super T>` and the call returns `Class<?>` needs an explicit unchecked
 		// `(Class<? super T>)` cast (gson TypeToken). See wildcardFieldStoreCast.
 		if cast := wildcardFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
-			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))
+			raw := a.wildcardFieldStoreErasure(funcCtx, rhsVal)
+			expression := rhsVal.String(funcCtx)
+			if raw != "" {
+				expression = fmt.Sprintf("(%s) (%s)", raw, expression)
+			}
+			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, expression)
 		}
 		if cast := classTypeVarFieldStoreCast(funcCtx, a.LeftValue, a.JavaValue); cast != "" {
 			return fmt.Sprintf("%s = (%s) (%s)", a.LeftValue.String(funcCtx), cast, rhsVal.String(funcCtx))

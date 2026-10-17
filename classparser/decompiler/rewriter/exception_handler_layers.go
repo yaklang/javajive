@@ -135,6 +135,10 @@ func handlerIntervalCovered(ranges [][2]int, interval [2]int) bool {
 type handlerLayerProof struct {
 	remaining int
 	active    map[statements.Statement]bool
+	// Ordinary exception-domain queries do not admit control transfers.
+	// A caller with a separate CFG target certificate may validate one exact
+	// sealed leaf; no string spelling or public Name grants this permission.
+	transfer func(*statements.CustomStatement) bool
 }
 
 func (p *handlerLayerProof) block(body []statements.Statement, covered func(int) bool, depth int) bool {
@@ -168,6 +172,9 @@ func (p *handlerLayerProof) statement(statement statements.Statement, covered fu
 			return finallyPureLocal(local) && (x.JavaValue == nil || finallyCoveredValue(x.JavaValue, covered))
 		}
 		return finallyCoveredAssignment(x, covered)
+	case *statements.SourceAssertionStatement:
+		condition, call, pc, known := x.SourceAssertionProtocol()
+		return known && covered(pc) && finallyCoveredValue(condition, covered) && finallyCoveredValue(call, covered)
 	case *statements.ExpressionStatement:
 		return x != nil && finallyCoveredValue(x.Expression, covered)
 	case *statements.IfStatement:
@@ -201,6 +208,9 @@ func (p *handlerLayerProof) statement(statement statements.Statement, covered fu
 	case *statements.CustomStatement:
 		if x == nil {
 			return false
+		}
+		if x.HasSourceTransfer() {
+			return p.transfer != nil && x.SourceTransferOnly() && p.transfer(x)
 		}
 		if x.Name == "end" && x.ThrownValue == nil {
 			return true

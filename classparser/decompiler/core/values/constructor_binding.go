@@ -64,7 +64,7 @@ func (f *FunctionCallExpression) instantiatedConstructorBindingCast(i int, ctx *
 			if !ctx.IsTypeParam(name) {
 				return ""
 			}
-			actual = append(actual, types.NewJavaClass(name))
+			actual = append(actual, types.NewJavaTypeVariable(name))
 		}
 	} else {
 		super, _ := types.ParseClassSignatureSupers(ctx.ClassSig)

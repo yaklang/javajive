@@ -49,6 +49,11 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	if !d.planNativeMemberAnonymousScopes(p) {
 		return nil
 	}
+	// Ordinal completeness is a post-forest invariant. It grants no source
+	// access by itself; the following archive and permission proofs still run.
+	if !nativeMemberAccessorRegistrationsClosed(p, d.Work) {
+		return nil
+	}
 	if !nativeEnumSwitchOrdinalClosed(p, d.Work) {
 		return nil
 	}
@@ -56,7 +61,7 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 		return nil
 	}
 	index := z.originalMemberIndex()
-	if !z.nativeEnumSwitchUsersClosed(p, root, index, d.Work) {
+	if !z.nativeEnumSwitchSourceUsersClosed(p, root, index, d.Work) {
 		return nil
 	}
 	if p.anonymousForest != nil && !nativeAnonymousForestArchiveClosed(p.anonymousForest, index, d.Work) {
@@ -69,7 +74,14 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 		return nil
 	}
 	if len(p.rootAccessBridges) > 0 && index.handles[owner] {
-		return nil
+		// Constructor bridges change a physical constructor protocol. Other
+		// handles can survive only with unchanged original method bindings.
+		// A lambda additionally needs exclusive bootstrap use, archive closure,
+		// and a later receipt from this exact root's rendered implementation.
+		p.rootHandleSource = &nativeMemberClass{object: root, lambdaContext: nativeLambdaImplementationContext{resolve: d.nativeAnnotationDeclarationResolver(), metadata: d.buildInvocationMetadata()}}
+		if !nativeRootBridgeMethodHandlesClosed(root, index, p.rootHandleSource, d.Work) || !z.nativeMemberLambdaArchiveClosed(p.rootHandleSource, index, d.Work) {
+			return nil
+		}
 	}
 	objects := map[string]*ClassObject{owner: root}
 	// Use the exact original objects whose constructor packets were proved.
@@ -182,6 +194,9 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	if !nativeModernNestSourceScopeClosed(p.modernNestObjects, objects, d.Work) {
 		return nil
 	}
+	if !nativeMemberPrivatePermissionClosed(p, d.nativeAnnotationDeclarationResolver(), d.Work, d.nativePrivatePermissionPlatformParents()) {
+		return nil
+	}
 
 	return &nativeMemberPrepared{root: root, reader: d, family: p, objects: objects, snapshot: snap}
 }
@@ -195,7 +210,13 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	if p.independentRoot != nil && (!p.independentRoot.validFor(d) || !p.independentRoot.familyClosed(p, d.Work)) {
 		return nil
 	}
+	if !z.nativeMemberIndependentInvocationsClosed(prepared) {
+		return nil
+	}
 	if !z.nativeMemberAccessRepresentable(p, z.originalMemberIndex(), d.Work, peers...) {
+		return nil
+	}
+	if len(p.getters) > 0 && !z.nativeMemberAccessorAncestorFlagsClosed(prepared, dependencyGraphClosed, peers...) {
 		return nil
 	}
 	// Independent direct families have independent commits to ownership.
@@ -244,6 +265,18 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 				if !static && !nativeMemberLexicalAncestorDeclarationDependency(prepared, object, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeMemberIndependentDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeAnonymousForeignSuperDeclarationUse(p, other, d.Work) {
 					return nil
 				}
+				// A terminal local refusal owns no source completion to wait on.
+				// Its separately proved static declaration can keep the physical
+				// spelling even if unrelated original type edges form a cycle.
+				if static {
+					if source := z.terminalFlatStaticDeclaration(prepared, other, peers...); source != "" {
+						if p.sourceDependencies == nil {
+							p.sourceDependencies = map[string]string{}
+						}
+						p.sourceDependencies[n] = source
+						continue
+					}
+				}
 				if !staticDependenciesChecked {
 					if !dependencyGraphClosed {
 						_, cyclic, known := z.nativeMemberDependencyAdmission(owner, d.Work, snap)
@@ -254,6 +287,15 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 					staticDependenciesChecked = true
 				}
 				dependency := lookup(n)
+				if dependency == nil && static {
+					if source := z.completedFlatStaticDeclaration(prepared, other, peers...); source != "" {
+						if p.sourceDependencies == nil {
+							p.sourceDependencies = map[string]string{}
+						}
+						p.sourceDependencies[n] = source
+						continue
+					}
+				}
 				if dependency == nil || dependency.static != static || dependency.owner != otherOwner || dependency.object.GetClassName() != n || dependency.sourceName == "" {
 					return nil
 				}
@@ -304,7 +346,7 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 		}
 	}
 
-	if !nativeMemberExternalSupersClosed(p, d.buildInvocationMetadata(), d.nativeAnnotationDeclarationResolver(), d.Work) {
+	if !nativeMemberExternalSupersClosed(p, d.nativeConstructorOperandMetadata(d.buildInvocationMetadata()), d.nativeAnnotationDeclarationResolver(), d.Work) {
 		return nil
 	}
 	if !nativeAnonymousForeignSupersCommitted(p, d.Work) {
@@ -337,6 +379,9 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	var src string
 	var e error
 	jdecenv.Run(snap, func() error { src, e = d.DumpClass(); return e })
+	if p.rootHandleSource != nil && !nativeMemberLambdaSourceClosed(p.rootHandleSource, d, d.Work) {
+		return nil
+	}
 	if p.anonymousForest != nil && !p.anonymousForest.scopeSourceComplete(src) {
 		return nil
 	}
@@ -346,7 +391,7 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 	if !nativeMethodLocalSourceComplete(p) {
 		return nil
 	}
-	if e != nil || p.failed || !nativeEnumSwitchSourceComplete(p, src, d.Work) || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || strings.Contains(src, DecompileStubMarker) || p.anonymous != nil && !p.anonymous.completeSource(src) {
+	if e != nil || p.failed || !nativeEnumSwitchSourceComplete(p, src, d.Work) || !nativeMemberPrivateGetterSourceClosed(p, src, d.Work) || d.sourceDegraded || p.anonymous != nil && !p.anonymous.completeSource(src) {
 		return nil
 	}
 

@@ -7,13 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 )
 
 // Manual data generation, not a CI download/install step. The input describes
@@ -27,8 +27,9 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 		t.Skip("explicit original archive generation input required")
 	}
 	var input struct {
-		Out      string
-		Profiles []struct {
+		Out           string
+		OutReferences string
+		Profiles      []struct {
 			Release       int
 			Path, Prefix  string
 			ArchiveSHA256 string `json:"archive_sha256"`
@@ -46,20 +47,24 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 		Profiles []struct {
 			Release       int
 			ArchiveSHA256 string `json:"archive_sha256"`
+			Classes       map[string]json.RawMessage
 		}
 	}
 	if err = json.Unmarshal(jdkInvocationCatalogJSON, &declared); err != nil {
 		t.Fatal(err)
 	}
 	expected := map[int]string{}
+	declarationRoots := map[int]map[string]json.RawMessage{}
 	for _, p := range declared.Profiles {
 		expected[p.Release] = p.ArchiveSHA256
+		declarationRoots[p.Release] = p.Classes
 	}
 	if len(input.Profiles) != len(expected) {
 		t.Fatal("generation must cover each exact declaration profile")
 	}
 	seenProfiles := map[int]bool{}
 	document := constructorCodeDocument{Schema: 1}
+	originalReferences := map[int]map[string]any{}
 	var out bytes.Buffer
 	writer := zip.NewWriter(&out)
 	for _, profile := range input.Profiles {
@@ -151,73 +156,14 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 			originals[name] = raw
 			objects[name] = obj
 		}
-		resolver := func(name string) ([]byte, bool) { raw, ok := originals[name]; return raw, ok }
 		selected := map[string]bool{}
 		names := make([]string, 0, len(objects))
 		for name := range objects {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		for _, name := range names {
-			obj := objects[name]
-			// Bound the index to standard platform API namespaces, as with
-			// the declaration catalog. Vendor/internal implementation APIs are
-			// not extension-point roots; original ancestor bytes are retained.
-			if !strings.HasPrefix(name, "java/") && !strings.HasPrefix(name, "javax/") {
-				continue
-			}
-			// Declaration annotation policy also needs original classfiles:
-			// Retention/Target cannot be guessed from an annotation's name.
-			// These entries carry metadata, never a constructor-silence fact.
-			if obj.AccessFlags&0x2001 == 0x2001 {
-				selected[name] = true
-				continue
-			}
-			// An external source subclass cannot extend a final/non-public
-			// platform class. Retain usable extension points, then their full
-			// ancestry below; internal implementation constructors are not roots.
-			if obj.AccessFlags&0x0001 == 0 || obj.AccessFlags&0x0010 != 0 {
-				continue
-			}
-			d := &ClassObjectDumper{obj: obj, foldSiblingResolver: resolver, FuncCtx: &class_context.ClassContext{}}
-			d.options.TargetSourceVersion = profile.Release
-			d.FuncCtx.InvocationMetadata = d.buildInvocationMetadata()
-			for _, method := range obj.Methods {
-				n, _ := obj.getUtf8(method.NameIndex)
-				desc, _ := obj.getUtf8(method.DescriptorIndex)
-				if n != "<init>" || method.AccessFlags&(0x0001|0x0004) == 0 {
-					continue
-				}
-				remaining := 512
-				if d.constructorChainDoesNotObserve(name, desc, map[string]bool{}, map[string]bool{}, &remaining, 0) {
-					selected[name] = true
-					break
-				}
-			}
-		}
-		// Preserve original ancestry declarations, including interfaces with no
-		// constructor. They are evidence for access/member completeness, not a
-		// claim that every constructor they contain can commute with captures.
-		pending := []string{}
-		for name := range selected {
-			pending = append(pending, name)
-		}
-		for len(pending) > 0 {
-			name := pending[0]
-			pending = pending[1:]
-			obj := objects[name]
-			parents := append([]string{obj.GetSupperClassName()}, obj.GetInterfacesName()...)
-			for _, parent := range parents {
-				if parent == "" || selected[parent] {
-					continue
-				}
-				if objects[parent] == nil {
-					t.Fatal("missing original ancestor", parent)
-				}
-				selected[parent] = true
-				pending = append(pending, parent)
-			}
-		}
+		selected = nativePlatformDeclarationIndexClasses(objects, declarationRoots[profile.Release])
+		originalReferences[profile.Release] = map[string]any{}
 		p := constructorCodeProfile{Release: profile.Release, ArchiveSHA256: expected[profile.Release], Classes: map[string]string{}}
 		for _, name := range names {
 			if !selected[name] {
@@ -226,6 +172,7 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 			raw := originals[name]
 			hash := sha256.Sum256(raw)
 			p.Classes[name] = hex.EncodeToString(hash[:])
+			originalReferences[profile.Release][name] = map[string]any{"archive": filepath.Base(profile.Path), "entry": profile.Prefix + name + ".class", "sha256": p.Classes[name], "major": objects[name].MajorVersion, "parents": append([]string{objects[name].GetSupperClassName()}, objects[name].GetInterfacesName()...)}
 			entry, err := writer.Create(fmt.Sprintf("%d/%s.class", profile.Release, name))
 			if err != nil {
 				t.Fatal(err)
@@ -254,5 +201,112 @@ func TestGenerateJDKConstructorCodeArchive(t *testing.T) {
 	if err = os.WriteFile(input.Out, out.Bytes(), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if input.OutReferences != "" {
+		data, err := json.Marshal(originalReferences)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(input.OutReferences, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Logf("original constructor evidence archive: %d bytes", out.Len())
+}
+
+// Source metadata coverage is separate from constructor observation. All
+// platform extension points and complete invocation-catalog declarations need
+// original flags and members, including APIs with observing constructors.
+// An unavailable primary-archive ancestor cannot be guessed.
+func nativePlatformDeclarationIndexClasses(objects map[string]*ClassObject, catalogDeclarations map[string]json.RawMessage) map[string]bool {
+	selected := map[string]bool{}
+	ancestry := map[string]uint8{}
+	var closed func(string) bool
+	closed = func(name string) bool {
+		if state := ancestry[name]; state != 0 {
+			return state == 2
+		}
+		obj := objects[name]
+		if obj == nil || obj.GetClassName() != name {
+			return false
+		}
+		ancestry[name] = 1
+		for _, parent := range append([]string{obj.GetSupperClassName()}, obj.GetInterfacesName()...) {
+			if parent != "" && !closed(parent) {
+				ancestry[name] = 3
+				return false
+			}
+		}
+		ancestry[name] = 2
+		return true
+	}
+	for name := range objects {
+		obj := objects[name]
+		if obj == nil {
+			continue
+		}
+		_, catalog := catalogDeclarations[name]
+		platformAPI := (strings.HasPrefix(name, "java/") || strings.HasPrefix(name, "javax/")) && obj.AccessFlags&1 != 0 && obj.AccessFlags&0x0010 == 0
+		if (catalog || platformAPI) && closed(name) {
+			selected[name] = true
+		}
+	}
+
+	// Every selected root has a closed original ancestry. Retain those exact
+	// declarations as metadata as well, including nonpublic superclass and
+	// interface definitions; their presence grants no source accessibility.
+	pending := make([]string, 0, len(selected))
+	for name := range selected {
+		pending = append(pending, name)
+	}
+	for len(pending) != 0 {
+		name := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		obj := objects[name]
+		dependencies := append([]string{obj.GetSupperClassName()}, obj.GetInterfacesName()...)
+		dependencies = append(dependencies, nativePlatformCopyFactoryClasses(obj)...)
+		for _, parent := range dependencies {
+			if parent != "" && !selected[parent] && closed(parent) {
+				selected[parent] = true
+				pending = append(pending, parent)
+			}
+		}
+	}
+	return selected
+}
+
+// A private allocation returned by an original static factory needs original
+// constructor bytes too. This is offline indexing, not an effect certificate:
+// callbacks/publication remain independently rejected by the runtime proof.
+func nativePlatformCopyFactoryClasses(object *ClassObject) []string {
+	var result []string
+	for _, method := range object.Methods {
+		if method == nil || method.AccessFlags&0x0008 == 0 || method.AccessFlags&(0x0100|0x0400) != 0 {
+			continue
+		}
+		var code *CodeAttribute
+		count := 0
+		for _, attribute := range method.Attributes {
+			if body, ok := attribute.(*CodeAttribute); ok {
+				code = body
+				count++
+			}
+		}
+		if count != 1 || code == nil {
+			continue
+		}
+		decoder := core.NewDecompiler(code.Code, nil)
+		if decoder.ParseOpcode() != nil {
+			continue
+		}
+		ops := constructorMotionOps(decoder)
+		if len(ops) < 4 || ops[0].Instr.OpCode != core.OP_NEW || ops[1].Instr.OpCode != core.OP_DUP || ops[len(ops)-1].Instr.OpCode != core.OP_ARETURN || len(ops[0].Data) != 2 {
+			continue
+		}
+		name, known := sourceBridgeClassName(object, core.Convert2bytesToInt(ops[0].Data))
+		callee := constructorMotionMember(object, ops[len(ops)-2], core.OP_INVOKESPECIAL)
+		if known && callee != nil && callee.Member == "<init>" && callee.Name == name {
+			result = append(result, name)
+		}
+	}
+	return result
 }

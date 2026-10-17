@@ -58,6 +58,9 @@ func (c *ClassObjectDumper) preciseCatchRethrows(body []statements.Statement, co
 			}
 			if tr, ok := st.(*statements.TryCatchStatement); ok {
 				if view, proved := rewriter.RecoverCatchAllFinally(tr); proved {
+					if view.Continuation != nil && !walk([]statements.Statement{view.Continuation}, scope) {
+						return false
+					}
 					if !walk(view.TryBody, scope) || !walk(view.Cleanup, scope) {
 						return false
 					}
@@ -92,7 +95,7 @@ func (c *ClassObjectDumper) preciseCatchRethrows(body []statements.Statement, co
 					}
 				}
 			} else {
-				_, children, known := catchSourceChildren(st)
+				_, children, known := preciseCatchBindingChildren(st)
 				if !known {
 					return false
 				}
@@ -165,6 +168,17 @@ func sourceProofNil(node any) bool {
 	return node == nil || reflect.ValueOf(node).Kind() == reflect.Ptr && reflect.ValueOf(node).IsNil()
 }
 
+// A source anchor has no Java local operand and cannot write a catch binding.
+// This permission belongs only to precise rethrow/name stability. The original
+// owning JVM instruction can have effects (for example an implicit super call),
+// so effect/control consumers keep using the stricter catchSourceChildren.
+func preciseCatchBindingChildren(st statements.Statement) ([]values.JavaValue, [][]statements.Statement, bool) {
+	if anchor, ok := st.(*statements.SourceAnchorStatement); ok {
+		return nil, nil, anchor != nil
+	}
+	return catchSourceChildren(st)
+}
+
 // Enumerate source children, including loop headers and switch discriminants.
 // Opaque closures cannot establish that a catch variable is effectively final.
 func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]statements.Statement, bool) {
@@ -173,11 +187,11 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 	}
 	switch x := st.(type) {
 	case *nativeAssertStatement:
-		roots := []values.JavaValue{x.condition}
-		if x.message != nil {
-			roots = append(roots, x.message)
+		condition, call, _, known := x.SourceAssertionProtocol()
+		if !known {
+			return nil, nil, false
 		}
-		return roots, nil, true
+		return []values.JavaValue{condition, call}, nil, true
 	case *statements.AssignStatement:
 		// An element store has a distinct lvalue packet. Its absent local
 		// LeftValue is structural, not an unknown operand. Visit the actual
@@ -246,7 +260,7 @@ func catchSourceChildren(st statements.Statement) ([]values.JavaValue, [][]state
 }
 
 func catchParameterUnwritten(body []statements.Statement, ref *values.JavaRef, remaining *int, declaration ...*statements.AssignStatement) bool {
-	return sourceParameterUnwritten(body, ref, remaining, catchSourceChildren, declaration...)
+	return sourceParameterUnwritten(body, ref, remaining, preciseCatchBindingChildren, declaration...)
 }
 
 // Stable capture binding asks whether a source declaration is overwritten, not

@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/mutf8"
@@ -27,6 +28,7 @@ type nativeMemberIndex struct {
 	typeUsers               map[string]map[string]bool
 	handles                 map[string]bool
 	handleTargets           map[string][]nativeMemberHandleTarget
+	accessorDeclarations    map[string]map[string]bool
 	getterUsers             map[string]map[string]bool
 	getterHandles           map[string]bool
 	getterInvalidReferences map[string]bool
@@ -35,6 +37,8 @@ type nativeMemberCacheEntry struct {
 	once                   sync.Once
 	planOnce               sync.Once
 	transaction            *nativeMemberTransaction // guarded by nativeMembersMu
+	flatSourceCommitted    bool                     // guarded by nativeMembersMu; declaration layout is monotone within policy
+	originalPlanRefusal    bool                     // planOnce: actual bounded local refusal, never a bare cached false
 	planKnown              bool                     // published by planOnce; independent of source completion
 	dependenciesOnce       sync.Once
 	dependenciesKnown      bool
@@ -69,10 +73,11 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 		idx.handles = map[string]bool{}
 		idx.handleTargets = map[string][]nativeMemberHandleTarget{}
 		idx.getterUsers = map[string]map[string]bool{}
+		idx.accessorDeclarations = map[string]map[string]bool{}
 		idx.getterHandles = map[string]bool{}
 		idx.getterInvalidReferences = map[string]bool{}
 		total, classes, edges := int64(0), 0, 0
-		fieldKeyBytes := int64(0)
+		memberKeyBytes := int64(0)
 		seenClasses := map[string]bool{}
 		e := fs.WalkDir(z.ZipFS, ".", func(path string, entry fs.DirEntry, e error) error {
 			if e != nil {
@@ -130,6 +135,42 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 				}
 				table[owner][referencer] = true
 				return true
+			}
+			for _, method := range obj.Methods {
+				if method == nil || !nativeProofWork(reader.Work, 1) {
+					return fmt.Errorf("accessor declaration metadata")
+				}
+				n, nk := sourceBridgeUTF8(obj, method.NameIndex)
+				if !nk {
+					return fmt.Errorf("accessor declaration name")
+				}
+				if !strings.HasPrefix(n, "access$") {
+					continue
+				}
+				d, dk := sourceBridgeUTF8(obj, method.DescriptorIndex)
+				if !dk || len(n) > 65535 || len(d) > 65535 || !nativeProofWork(reader.Work, int64(len(n)+len(d))+1) {
+					return fmt.Errorf("accessor declaration type")
+				}
+				if reader.Work != nil && reader.Work.CheckAlloc(memberKeyBytes+int64(edges+1)*96+int64(len(d))*32+128) != nil {
+					return fmt.Errorf("member index accessor descriptor budget")
+				}
+				if _, _, e := callbinding.Descriptor(d); e != nil {
+					return e
+				}
+				if method.AccessFlags&0x0040 != 0 {
+					continue
+				}
+				retained := int64(len(n)+len(d)+len(referencer)) + 128
+				if retained > (128<<20)-memberKeyBytes || !nativeProofWork(reader.Work, retained) {
+					return fmt.Errorf("accessor declaration storage")
+				}
+				memberKeyBytes += retained
+				if reader.Work != nil && reader.Work.CheckAlloc(memberKeyBytes+int64(edges+1)*96) != nil {
+					return fmt.Errorf("accessor declaration memory")
+				}
+				if !record(idx.accessorDeclarations, n+"\x00"+d) {
+					return fmt.Errorf("accessor declaration edge limit")
+				}
 			}
 			references, closed := nativeMemberDependencyNames(obj, reader.Work)
 			if !closed {
@@ -189,11 +230,11 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 					// larger than the class input or its edge count. Charge before
 					// concatenation/map hashing, with a conservative archive cap
 					// even when no caller supplies a request budget.
-					if keyBytes > (128<<20)-fieldKeyBytes || !nativeProofWork(reader.Work, keyBytes) {
+					if keyBytes > (128<<20)-memberKeyBytes || !nativeProofWork(reader.Work, keyBytes) {
 						return fmt.Errorf("member index field-key budget")
 					}
-					fieldKeyBytes += keyBytes
-					if reader.Work != nil && reader.Work.CheckAlloc(fieldKeyBytes+int64(edges+1)*96) != nil {
+					memberKeyBytes += keyBytes
+					if reader.Work != nil && reader.Work.CheckAlloc(memberKeyBytes+int64(edges+1)*96) != nil {
 						return fmt.Errorf("member index field-key budget")
 					}
 					if !record(idx.captureUsers, nativeMemberCaptureIndexKey(owner, name)) {
@@ -245,69 +286,9 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 	return idx
 }
 func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
-	owner, _, _, member := originalMemberOwner(obj)
-	if anonymousOwner, _, anonymous := originalAnonymousOwner(obj); anonymous {
-		reader := z.nativeMemberReader(obj)
-		var known bool
-		owner, known = z.nativeAnonymousOutermostOwner(anonymousOwner, reader)
-		if !known {
-			return nil
-		}
-		member = true
-	}
-
-	if !member {
-		for _, a := range obj.Attributes {
-			if raw, ok := a.(*UnparsedAttribute); ok && raw != nil && raw.Name == "EnclosingMethod" && len(raw.Info) == 4 {
-				localOwner, known := sourceBridgeClassName(obj, uint16(raw.Info[0])<<8|uint16(raw.Info[1]))
-				if !known {
-					return nil
-				}
-				bytes, found := z.enumSiblingResolver()(localOwner)
-				if !found {
-					return nil
-				}
-				reader := z.nativeMemberReader(obj)
-				enclosing, e := reader.parseResolved(bytes)
-				if e != nil {
-					return nil
-				}
-				if _, known := originalMethodLocalOwner(obj, enclosing, reader.Work); known {
-					owner = localOwner
-					member = true
-				}
-				break
-			}
-		}
-	}
-	if !member {
-		owner = obj.GetClassName()
-	}
-	if member {
-		var known bool
-		owner, known = z.nativeMemberOutermostNamedOwner(owner, z.nativeMemberReader(obj).Work)
-		if !known {
-			return nil
-		}
-	}
-	if !member {
-		candidate := false
-		for _, a := range obj.Attributes {
-			if inner, ok := a.(*InnerClassesAttribute); ok && inner != nil {
-				for _, row := range inner.Classes {
-					if row == nil {
-						return nil
-					}
-					outer, known := sourceBridgeClassName(obj, row.OuterClassInfoIndex)
-					if known && outer == owner && row.InnerNameIndex != 0 || row.OuterClassInfoIndex == 0 && row.InnerNameIndex != 0 || row.InnerNameIndex == 0 && row.InnerClassAccessFlags == 0x1008 {
-						candidate = true
-					}
-				}
-			}
-		}
-		if !candidate && !z.nativeMemberReader(obj).nativeMemberHasAnonymousDeclarations() {
-			return nil
-		}
+	owner, known := z.nativeMemberOriginalSourceOwner(obj)
+	if !known {
+		return nil
 	}
 	snap, bound := jdecenv.Current()
 	if !bound || snap == nil {
@@ -323,11 +304,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		return nil
 	}
 	entry.once.Do(func() {
-		var prepared *nativeMemberPrepared
-		entry.planOnce.Do(func() {
-			prepared = z.nativeMemberLocalPlan(obj, owner, snap)
-			entry.planKnown = prepared != nil
-		})
+		prepared := z.admitNativeMemberLocal(entry, obj, owner, snap)
 		if !entry.planKnown {
 			return
 		}
@@ -358,6 +335,33 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 	return entry
 }
 
+// Root admission is shared by ordinary and transactional source planning.
+// A compiler enum table has an unnamed synthetic InnerClasses row; omitting
+// that role in only one path lets a helper select a transaction its root
+// cannot subsequently read. Admission grants no ownership: the original
+// family, dependency, final-source and ordinal proofs still have to close.
+func (z *JarFS) nativeMemberRootCandidate(obj *ClassObject) bool {
+	if z == nil || obj == nil {
+		return false
+	}
+	owner := obj.GetClassName()
+	candidate := false
+	for _, attribute := range obj.Attributes {
+		if inner, ok := attribute.(*InnerClassesAttribute); ok && inner != nil {
+			for _, row := range inner.Classes {
+				if row == nil {
+					return false
+				}
+				outer, known := sourceBridgeClassName(obj, row.OuterClassInfoIndex)
+				if known && outer == owner && row.InnerNameIndex != 0 || row.OuterClassInfoIndex == 0 && row.InnerNameIndex != 0 || row.InnerNameIndex == 0 && row.InnerClassAccessFlags == 0x1008 {
+					candidate = true
+				}
+			}
+		}
+	}
+	return candidate || z.nativeMemberReader(obj).nativeMemberHasAnonymousDeclarations()
+}
+
 func (z *JarFS) nativeMemberPolicyEntry(key string) *nativeMemberCacheEntry {
 	z.nativeMembersMu.Lock()
 	defer z.nativeMembersMu.Unlock()
@@ -378,6 +382,24 @@ func (z *JarFS) nativeMemberPolicyEntry(key string) *nativeMemberCacheEntry {
 // Admission is a pure planning phase: it neither follows source cache entries
 // nor reserves/publishes source. Rendering always uses its own fresh mutable
 // plan after another caller has consumed the original admission attempt.
+// A bare failed cache decision is not affirmative evidence of a physical
+// declaration layout. Record an actual original local-plan refusal separately,
+// with resource failures remaining unproved. The same once synchronizes this
+// fact across ordinary reads, transactions and declaration-only queries.
+func (z *JarFS) admitNativeMemberLocal(entry *nativeMemberCacheEntry, obj *ClassObject, owner string, snap map[string]string) *nativeMemberPrepared {
+	if z == nil || entry == nil {
+		return nil
+	}
+	var plan *nativeMemberPrepared
+	entry.planOnce.Do(func() {
+		plan = z.nativeMemberLocalPlan(obj, owner, snap)
+		entry.planKnown = plan != nil
+		work := z.nativeMemberReader(obj).Work
+		entry.originalPlanRefusal = plan == nil && (work == nil || work.Check() == nil)
+	})
+	return plan
+}
+
 func (z *JarFS) nativeMemberLocalPlan(obj *ClassObject, owner string, snap map[string]string) *nativeMemberPrepared {
 	root := obj
 	if root == nil || root.GetClassName() != owner {

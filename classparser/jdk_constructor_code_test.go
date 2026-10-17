@@ -64,7 +64,15 @@ func TestAdversarialPlatformConstructorCodeIdentityAndEffectProof(t *testing.T) 
 	// Read every retained class, independently check its original identity and
 	// version, and require closed original ancestry. Hash verification happens
 	// inside the lookup, with archives bound to the declaration catalog.
-	var declared struct{ Profiles []struct{ Release int } }
+	var declared struct {
+		Profiles []struct {
+			Release       int
+			ArchiveSHA256 string `json:"archive_sha256"`
+			Archives      map[string]string
+			Provenance    map[string]struct{ Archive, SHA256 string }
+			References    map[string]struct{ Archive, SHA256 string } `json:"reference_provenance"`
+		}
+	}
 	if err := json.Unmarshal(jdkInvocationCatalogJSON, &declared); err != nil {
 		t.Fatal(err)
 	}
@@ -77,10 +85,24 @@ func TestAdversarialPlatformConstructorCodeIdentityAndEffectProof(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
+		originals := map[string]string{}
+		for _, source := range []map[string]struct{ Archive, SHA256 string }{profile.Provenance, profile.References} {
+			for name, record := range source {
+				if profile.Archives[record.Archive] == profile.ArchiveSHA256 {
+					if prior := originals[name]; prior != "" && prior != record.SHA256 {
+						t.Fatal("conflicting independent original provenance", name)
+					}
+					originals[name] = record.SHA256
+				}
+			}
+		}
 		for name := range jdkConstructorCode.entries[profile.Release] {
 			data, ok := jdkConstructorClassBytes(name, profile.Release)
 			if !ok {
 				t.Fatal("original hash mismatch", name)
+			}
+			if got := fmt.Sprintf("%x", sha256.Sum256(data)); originals[name] == "" || got != originals[name] {
+				t.Fatal("indexed bytes differ from independent original declaration/reference hash", profile.Release, name)
 			}
 			c, err := Parse(data)
 			if err != nil || c.GetClassName() != name || int(c.MajorVersion) != profile.Release+44 {
@@ -103,6 +125,7 @@ func TestAdversarialPlatformConstructorCodeIdentityAndEffectProof(t *testing.T) 
 		}{
 			{"java/util/AbstractList", "()V", true}, {"java/io/InputStream", "()V", true},
 			{"java/util/HashMap", "()V", true}, {"java/util/HashMap", "(I)V", false},
+			{"java/io/ObjectInputStream", "(Ljava/io/InputStream;)V", false},
 		} {
 			if _, ok := jdkConstructorClassBytes(tc.owner, profile.Release); !ok {
 				t.Fatal("negative must exercise real retained code", tc.owner)

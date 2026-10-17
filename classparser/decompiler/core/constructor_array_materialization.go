@@ -17,18 +17,18 @@ type delegationArrayMaterialization struct {
 // sequential stores, one invocation use, no publication or other aliases.
 func (d *Decompiler) privateDelegationCompletedArray(c delegationArrayMaterialization, call *values.FunctionCallExpression, invoke *OpCode, argument int, origins map[int]*OpCode) bool {
 	array, ref := c.array, c.ref
-	if array == nil || ref == nil || c.node == nil || call == nil || call.FuncType == nil || invoke == nil || argument < 0 || argument >= len(call.Arguments) || argument >= len(call.FuncType.ParamTypes) || !sameExactArrayType(array.Type(), call.FuncType.ParamTypes[argument]) {
+	if array == nil || ref == nil || c.node == nil || call == nil || call.FuncType == nil || invoke == nil || argument < 0 || argument >= len(call.Arguments) || argument >= len(call.FuncType.ParamTypes) {
 		return false
 	}
 	method, err := types.ParseMethodDescriptor(call.Descriptor)
-	if err != nil || method.FunctionType() == nil || argument >= len(method.FunctionType().ParamTypes) || !sameExactArrayType(array.Type(), method.FunctionType().ParamTypes[argument]) {
+	if err != nil || method.FunctionType() == nil || argument >= len(method.FunctionType().ParamTypes) || !d.delegationArrayFormalAccepts(array.Type(), call.FuncType.ParamTypes[argument], method.FunctionType().ParamTypes[argument]) {
 		return false
 	}
 	return d.privateCompletedArrayAtUse(array, ref, origins[c.node.Id], invoke, len(call.Arguments)-1-argument, map[*values.NewExpression]bool{}, 0)
 }
 
 func (d *Decompiler) privateCompletedArrayAtUse(array *values.NewExpression, ref *values.JavaRef, dup, sink *OpCode, useIndex int, active map[*values.NewExpression]bool, depth int) bool {
-	if array == nil || ref == nil || ref.IsParam || ref.IsThis || sink == nil || active[array] || depth >= 16 || !array.HasOriginPC || !array.HasEvaluationEndPC || len(array.Length) != 1 || len(array.Initializer) == 0 || len(array.Initializer) > 128 || array.EvaluationEndPC >= int(sink.CurrentOffset) || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
+	if array == nil || ref == nil || !sameExactArrayType(array.Type(), ref.Type()) || ref.IsParam || ref.IsThis || sink == nil || active[array] || depth >= 16 || !array.HasOriginPC || !array.HasEvaluationEndPC || len(array.Length) != 1 || len(array.Initializer) == 0 || len(array.Initializer) > 128 || array.EvaluationEndPC >= int(sink.CurrentOffset) || d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, 1) != nil {
 		return false
 	}
 	active[array] = true
@@ -38,7 +38,7 @@ func (d *Decompiler) privateCompletedArrayAtUse(array *values.NewExpression, ref
 		return false
 	}
 	allocation := d.opcodeAtOffset(array.OriginPC)
-	if allocation == nil || allocation.Instr == nil || allocation.Instr.OpCode != OP_ANEWARRAY && allocation.Instr.OpCode != OP_NEWARRAY || len(allocation.Target) != 1 || allocation.Target[0] != dup || dup == nil || dup.Instr == nil || dup.Instr.OpCode != OP_DUP || len(dup.stackConsumed) != 1 || values.UnpackSoltValue(dup.stackConsumed[0]) != array || len(dup.stackProduced) != 2 || !delegationArraySameRef(dup.stackProduced[0], ref) || !delegationArraySameRef(dup.stackProduced[1], ref) {
+	if allocation == nil || allocation.Instr == nil || allocation.Instr.OpCode != OP_ANEWARRAY && allocation.Instr.OpCode != OP_NEWARRAY || len(allocation.stackProduced) != 1 || values.UnpackSoltValue(allocation.stackProduced[0]) != array || len(allocation.Target) != 1 || allocation.Target[0] != dup || dup == nil || dup.Instr == nil || dup.Instr.OpCode != OP_DUP || len(dup.stackConsumed) != 1 || values.UnpackSoltValue(dup.stackConsumed[0]) != array || len(dup.stackProduced) != 2 || !delegationArraySameRef(dup.stackProduced[0], ref) || !delegationArraySameRef(dup.stackProduced[1], ref) {
 		return false
 	}
 	stores, uses := 0, 0

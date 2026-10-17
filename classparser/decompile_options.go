@@ -87,6 +87,10 @@ type DecompileOptions struct {
 	// EnableShadowIR builds a read-only MethodIR snapshot after SemanticCFG.
 	// The old printer remains the default source path. Default false.
 	EnableShadowIR bool
+
+	// EnableRecoveryEvidence records bounded, request-local observations of
+	// existing recovery rules. It grants no additional rewrite permission.
+	EnableRecoveryEvidence bool
 }
 
 type DecompileDiagnostic struct {
@@ -102,19 +106,22 @@ type RewriteRecord struct {
 	AfterHash  string `json:"after_hash"`
 }
 type DecompileResult struct {
-	Members         []MemberRecord           `json:"members"`
-	Shadow          []core.ShadowObservation `json:"shadow"`
-	Syntax          ValidationObservation    `json:"syntax"`
-	Source          string                   `json:"source"`
-	Mode            DecompileMode            `json:"mode"`
-	InputHash       string                   `json:"input_hash"`
-	Status          string                   `json:"status"`
-	StubMethods     []string                 `json:"stub_methods"`
-	RulesApplied    []RewriteRecord          `json:"rules_applied"`
-	Diagnostics     []DecompileDiagnostic    `json:"diagnostics"`
-	EffectiveConfig *EffectiveConfig         `json:"effective_config,omitempty"`
-	ShadowIRHash    string                   `json:"shadow_ir_hash,omitempty"`
-	ShadowIRVersion uint64                   `json:"shadow_ir_version,omitempty"`
+	Members                   []MemberRecord                  `json:"members"`
+	Shadow                    []core.ShadowObservation        `json:"shadow"`
+	Syntax                    ValidationObservation           `json:"syntax"`
+	Source                    string                          `json:"source"`
+	Mode                      DecompileMode                   `json:"mode"`
+	InputHash                 string                          `json:"input_hash"`
+	Status                    string                          `json:"status"`
+	StubMethods               []string                        `json:"stub_methods"`
+	RulesApplied              []RewriteRecord                 `json:"rules_applied"`
+	Diagnostics               []DecompileDiagnostic           `json:"diagnostics"`
+	EffectiveConfig           *EffectiveConfig                `json:"effective_config,omitempty"`
+	ShadowIRHash              string                          `json:"shadow_ir_hash,omitempty"`
+	ShadowIRVersion           uint64                          `json:"shadow_ir_version,omitempty"`
+	RecoveryEvidence          []RecoveryObligationObservation `json:"recovery_evidence,omitempty"`
+	RecoveryEvidenceEnabled   bool                            `json:"recovery_evidence_enabled,omitempty"`
+	RecoveryEvidenceTruncated bool                            `json:"recovery_evidence_truncated,omitempty"`
 }
 
 // EffectiveConfig is the request-local snapshot of policy actually used.
@@ -143,9 +150,10 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		options.Mode = Precision
 	}
 	result = DecompileResult{
-		Mode:            options.Mode,
-		Status:          "invalid_input",
-		EffectiveConfig: effectiveConfigOf(options),
+		Mode:                    options.Mode,
+		Status:                  "invalid_input",
+		EffectiveConfig:         effectiveConfigOf(options),
+		RecoveryEvidenceEnabled: options.EnableRecoveryEvidence,
 	}
 	if options.Mode != Precision && options.Mode != Compatibility {
 		return result, nil, fmt.Errorf("unknown decompile mode %q", options.Mode)
@@ -267,9 +275,36 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 		rule = wrapped
 	}
 	changed := source
-	if phase == "method_source" && c.nativeAnonymousRoot != nil {
-		if nativeProofWork(c.Work, int64(len(source))) {
-			changed = nativeRewriteEnclosingMethod(source, rule)
+	// Inline anonymous members have already completed recovery under their
+	// original method context. Neither caller nor class recovery may borrow a
+	// different method's declarations to reinterpret that lexical scope.
+	lexicalPhase := phase == "method_source" || phase == "class_source"
+	declarations := []string{}
+	retained := int64(0)
+	if lexicalPhase && c.nativeMemberRoot != nil {
+		for _, local := range c.nativeMemberRoot.methodLocals {
+			if local == nil || local.owner == nil || !nativeProofWork(c.Work, 1) {
+				return source
+			}
+			if local.source == "" || local.object == c.obj {
+				continue
+			}
+			if phase == "method_source" && (c.obj == nil || c.FuncCtx == nil || local.owner.owner != c.obj.GetClassName() || local.executionOwner().method != c.FuncCtx.FunctionName || local.executionOwner().descriptor != c.FuncCtx.CurrentMethodDesc) {
+				continue
+			}
+			retained += int64(len(local.source))
+			if retained > 1<<20 || len(declarations) >= nativeMemberLayoutNodeLimit {
+				return source
+			}
+			declarations = append(declarations, local.source)
+		}
+	}
+	if lexicalPhase && (c.nativeAnonymousRoot != nil || c.nativeAnonymousForest != nil || len(declarations) > 0) {
+		// Bound both the lexical scan and its comparisons to owned fragments
+		// before allocating/formatting. Protection never licenses a rewrite.
+		scanWork, err := workbudget.CheckedProduct(int64(len(source)), int64(len(declarations)+1))
+		if err == nil && nativeProofWork(c.Work, scanWork+retained+1) && (c.Work == nil || c.Work.CheckAlloc(int64(len(source))*4+retained+int64(len(declarations))*128) == nil) {
+			changed = nativeRewriteEnclosingScope(source, rule, declarations...)
 		}
 	} else {
 		changed = rule(source)

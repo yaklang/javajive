@@ -1,6 +1,10 @@
 package javaclassparser
 
-import "github.com/yaklang/javajive/internal/workbudget"
+import (
+	"encoding/binary"
+
+	"github.com/yaklang/javajive/internal/workbudget"
+)
 
 // Family cache entries publish source only after all ownership/binding proofs.
 // Before consulting another unfinished-capable entry, discover its original
@@ -37,12 +41,131 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 		objects[name] = o
 		return o, true
 	}
+
+	// A named method-local declaration has no OuterClassInfoIndex. Its body is
+	// nevertheless emitted in its enclosing source family. Use the same exact
+	// EnclosingMethod and reciprocal InnerClasses proof as source planning;
+	// neither a binary-name prefix nor an unrelated foreign row creates an edge.
+	// Loading stays in this bounded original-byte graph, never a source cache.
+	localParent := func(object *ClassObject) (*ClassObject, bool) {
+		if object == nil {
+			return nil, false
+		}
+		for _, a := range object.Attributes {
+			if !nativeProofWork(work, 1) {
+				return nil, false
+			}
+			raw, ok := a.(*UnparsedAttribute)
+			if !ok || raw == nil || raw.Name != "EnclosingMethod" {
+				continue
+			}
+			if len(raw.Info) != 4 {
+				return nil, false
+			}
+			name, known := sourceBridgeClassName(object, binary.BigEndian.Uint16(raw.Info[:2]))
+			if !known {
+				return nil, false
+			}
+			parent, known := load(name)
+			if !known {
+				return nil, false
+			}
+			if _, known = originalMethodLocalOwner(object, parent, work); !known {
+				return nil, false
+			}
+			return parent, true
+		}
+		return nil, false
+	}
+
+	// Only an independently certified leaf query selects declaration boundaries.
+	// Ordinary whole-family graphs retain their physical source ownership.
+	leafProof := map[string]uint8{}
+	independentLeaf := func(o *ClassObject) bool {
+		if o == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		name := o.GetClassName()
+		if state := leafProof[name]; state != 0 {
+			return state == 2
+		}
+		leafProof[name] = 1
+		parent, _, _, member := originalMemberOwner(o)
+		if !member {
+			return false
+		}
+		if _, known := load(parent); !known {
+			return false
+		}
+		d := z.nativeMemberReader(o)
+		d.Work = work
+		if d.originalNativeMemberIndependentRoot() == nil {
+			return false
+		}
+		// The actual independent entry chooses the outermost static cut. A nearer
+		// leaf cannot become a separate graph node while that cut owns it.
+		enclosing, known := load(parent)
+		if !known {
+			return false
+		}
+		seen := map[string]bool{}
+		for {
+			outerName := enclosing.GetClassName()
+			if len(seen) >= 64 || seen[outerName] || !nativeProofWork(work, 1) {
+				return false
+			}
+			seen[outerName] = true
+			next, _, flags, member := originalMemberOwner(enclosing)
+			if !member {
+				if !nativeMemberTopLevelEvidence(enclosing, work) {
+					return false
+				}
+				break
+			}
+			if flags&8 != 0 {
+				return false
+			}
+			enclosing, known = load(next)
+			if !known {
+				return false
+			}
+		}
+
+		for _, a := range o.Attributes {
+			table, ok := a.(*InnerClassesAttribute)
+			if !ok {
+				continue
+			}
+			if table == nil {
+				return false
+			}
+			for _, row := range table.Classes {
+				if row == nil || !nativeProofWork(work, 1) || row.InnerNameIndex == 0 || row.OuterClassInfoIndex == 0 {
+					return false
+				}
+				owner, known := sourceBridgeClassName(o, row.OuterClassInfoIndex)
+				if !known || owner == name {
+					return false
+				}
+			}
+		}
+		leafProof[name] = 2
+		return true
+	}
+	rootObject, rootKnown := load(root)
+	if !rootKnown {
+		return nil, false
+	}
+	leafMode := independentLeaf(rootObject)
 	// Missing external classes are external edges; missing an owned declaration
 	// after original InnerClasses/EnclosingMethod establishes ownership is not.
 	outermost := func(o *ClassObject) (string, bool) {
 		seen := map[string]bool{}
 		for len(seen) < 64 {
 			name := o.GetClassName()
+			if leafMode && independentLeaf(o) {
+				return name, true
+			}
 			if seen[name] || !nativeProofWork(work, 1) {
 				return "", false
 			}
@@ -52,7 +175,11 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 				var anonymous bool
 				parent, _, anonymous = originalAnonymousOwner(o)
 				if !anonymous {
-					return name, nativeMemberTopLevelEvidence(o, work)
+					enclosing, local := localParent(o)
+					if !local {
+						return name, nativeMemberTopLevelEvidence(o, work)
+					}
+					parent = enclosing.GetClassName()
 				}
 			}
 			var known bool
@@ -80,7 +207,7 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 		}
 		states[owner] = 1
 		object, known := load(owner)
-		if !known || !nativeMemberTopLevelEvidence(object, work) {
+		if !known || !nativeMemberTopLevelEvidence(object, work) && !(leafMode && independentLeaf(object)) {
 			return false
 		}
 		queue := []*ClassObject{object}
@@ -104,6 +231,27 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 						return false
 					}
 					if row.InnerNameIndex != 0 {
+						if row.OuterClassInfoIndex == 0 {
+							// Scan every body that source planning may render. In
+							// particular, an invocation used only inside a local
+							// method need not occur in its enclosing class's CP.
+							if _, found := z.enumSiblingResolver()(name); !found {
+								continue
+							}
+							child, known := load(name)
+							if !known {
+								return false
+							}
+							if _, local := originalMethodLocalOwner(child, current, work); !local {
+								continue
+							}
+							if owned[name] || len(queue) >= 256 {
+								return false
+							}
+							owned[name] = true
+							queue = append(queue, child)
+							continue
+						}
 						parent, known := sourceBridgeClassName(current, row.OuterClassInfoIndex)
 						if !known {
 							continue
@@ -205,6 +353,71 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 			}
 		}
 
+		for _, current := range queue {
+			// Only archive declarations define source-cache query targets. Stop at
+			// an external boundary and cover every matching archive symbol; do not
+			// let an absent or changing external provider invalidate unrelated roots.
+			scan, known := nativeMemberOriginalAccessorAncestorScan(current, func(n string) (*ClassObject, bool) {
+				if _, present := z.enumSiblingResolver()(n); present {
+					// A present but invalid or over-budget archive declaration
+					// is not an external boundary. Preserve that hard refusal.
+					o, _ := load(n)
+					return o, true
+				}
+				return nil, false
+			}, work)
+			if !known {
+				return false
+			}
+			addAncestor := func(o *ClassObject) bool {
+				target, known := outermost(o)
+				if !known {
+					return false
+				}
+				if target != owner {
+					dependencies[target] = true
+				}
+				return true
+			}
+			for _, m := range scan.matches {
+				if !addAncestor(m.object) {
+					return false
+				}
+			}
+			if scan.incomplete {
+				index := z.originalMemberIndex()
+				if index == nil || !index.valid {
+					return false
+				}
+				for symbol := range scan.symbols {
+					if !nativeProofWork(work, int64(len(symbol))+1) {
+						return false
+					}
+					for candidate := range index.accessorDeclarations[symbol] {
+						if !nativeProofWork(work, 1) {
+							return false
+						}
+						if candidate == current.GetClassName() {
+							continue
+						}
+						o, known := load(candidate)
+						if !known {
+							return false
+						}
+						// A valid superclass chain cannot enter a final class or an
+						// interface. This excludes impossible candidates without
+						// guessing anything about the unavailable external header.
+						if o.AccessFlags&(0x0010|0x0200) != 0 {
+							continue
+						}
+						if !addAncestor(o) {
+							return false
+						}
+					}
+				}
+			}
+		}
+
 		// Moving a member declaration also changes the source binding of
 		// indexed foreign SUPER callers. This reverse edge joins those callers
 		// to the same ownership transaction as the parent; a parent cannot
@@ -261,7 +474,9 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 				}
 				if _, _, _, member := originalMemberOwner(caller); !member {
 					if _, _, anonymous := originalAnonymousOwner(caller); !anonymous {
-						continue
+						if _, local := localParent(caller); !local {
+							continue
+						}
 					}
 				}
 				target, known := outermost(caller)

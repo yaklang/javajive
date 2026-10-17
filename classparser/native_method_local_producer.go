@@ -11,13 +11,17 @@ import (
 	"strings"
 )
 
-// The first producer profile uses actual top-level declarations. The declaration
-// stays after every captured definition and before every original allocation.
-// A nested declaration/phi requires a lexical block/dominance certificate of its
-// own; equal source text or an equal type cannot move its computation outward.
-func (c *ClassObjectDumper) nativeMethodLocalProducerBindings(local *nativeMethodLocalClass, body []statements.Statement, params map[int]*values.JavaRef) (map[string]*values.JavaRef, statements.Statement, bool) {
-	if local == nil || local.constructor == nil || len(local.allocations) == 0 {
+// Within one proved lexical block the declaration stays after every captured
+// definition and before every original allocation. Whole-method write exclusion
+// remains separate; a sibling block cannot borrow this producer or its anchor.
+func (c *ClassObjectDumper) nativeMethodLocalProducerBindingsInBlock(local *nativeMethodLocalClass, body, wholeBody []statements.Statement, params map[int]*values.JavaRef) (map[string]*values.JavaRef, statements.Statement, bool) {
+	if local == nil || local.constructor == nil {
 		return nil, nil, false
+	}
+	if len(local.allocations) == 0 {
+		// A type-only declaration has no hidden values to bind or move. Its
+		// original lexical users close in the archive transaction separately.
+		return map[string]*values.JavaRef{}, nil, local.constructor.descriptor == "()V" && len(local.constructor.captures) == 0 && len(local.typeConsumers) > 0
 	}
 	var site nativeMethodLocalAllocation
 	for _, s := range local.allocations {
@@ -59,7 +63,7 @@ func (c *ClassObjectDumper) nativeMethodLocalProducerBindings(local *nativeMetho
 			if !c.nativeMethodLocalOriginalProducerInvocation(local, site, site.origins[index], assign.JavaValue, params) {
 				return nil, nil, false
 			}
-			declaration, stable := nativeCaptureDeclaration(body, ref, false, c.Work)
+			declaration, stable := nativeCaptureDeclaration(wholeBody, ref, false, c.Work)
 			if !stable || declaration != assign || found != nil {
 				return nil, nil, false
 			}
@@ -104,7 +108,7 @@ func (c *ClassObjectDumper) nativeMethodLocalProducerBindings(local *nativeMetho
 			if !n.HasOriginPC || position <= last {
 				return false
 			}
-			if _, known := local.allocations[n.OriginPC]; !known {
+			if _, known := local.allocations[n.OriginPC]; !known || seen[n.OriginPC] {
 				return false
 			}
 			seen[n.OriginPC] = true
@@ -232,6 +236,14 @@ func (c *ClassObjectDumper) nativeMethodLocalOriginalProducerValue(local *native
 		break
 	}
 	ins, record := original.instruction, original.record
+	if ins.Opcode == core.OP_GETFIELD {
+		field, known := value.(*values.RefMember)
+		if !known || field == nil || len(record.Uses) != 1 || !field.OriginalInstanceFieldRead(int(ins.PC), ins.Class, ins.Member, ins.Desc) {
+			return false
+		}
+		erased, typed := c.nativeMethodLocalSourceErasure(field.Type(), local)
+		return typed && erased == ins.Desc && c.nativeMethodLocalProducerOperand(local, site, record.Uses[0], field.Object, params, "L"+ins.Class+";", depth+1)
+	}
 	if ins.Opcode == core.OP_CHECKCAST {
 		cast, known := value.(*values.CastExpression)
 		if !known || cast == nil || len(record.Uses) != 1 {
@@ -268,23 +280,6 @@ func (c *ClassObjectDumper) nativeMethodLocalOriginalProducerValue(local *native
 	if err != nil || call.Kind != kind || call.IsStatic != static || call.IsSpecialInvoke != (kind == values.InvokeSpecial) || len(call.Arguments) != len(descriptors) {
 		return false
 	}
-	methodParams, _, err := callbinding.Descriptor(local.owner.descriptor)
-	if err != nil {
-		return false
-	}
-	typesBySlot := map[int]string{}
-	slot := 0
-	if local.owner.declaration.AccessFlags&8 == 0 {
-		typesBySlot[0] = "L" + local.owner.owner + ";"
-		slot = 1
-	}
-	for _, d := range methodParams {
-		typesBySlot[slot] = d
-		slot++
-		if d == "J" || d == "D" {
-			slot++
-		}
-	}
 	operands := call.Arguments
 	expect := append([]string(nil), descriptors...)
 	if !static {
@@ -295,32 +290,69 @@ func (c *ClassObjectDumper) nativeMethodLocalOriginalProducerValue(local *native
 		return false
 	}
 	for i, operand := range operands {
-		if !nativeProofWork(c.Work, 1) {
-			return false
-		}
-		o := record.Uses[i]
-		if o.Kind != ssabuild.OriginParam {
-			return false
-		}
-		for depth := 0; depth < 32; depth++ {
-			if cast, ok := operand.(*values.CastExpression); ok && cast != nil && cast.Binding {
-				erased, known := c.nativeMethodLocalSourceErasure(cast.TargetType, local)
-				if !known || erased != expect[i] {
-					return false
-				}
-				operand = cast.Value
-				continue
-			}
-			if wrapped, ok := operand.(*values.SlotValue); ok && wrapped != nil {
-				operand = wrapped.GetValue()
-				continue
-			}
-			break
-		}
-		ref, known := operand.(*values.JavaRef)
-		if !known || ref == nil || params[o.Slot] == nil || params[o.Slot].Id != ref.Id || typesBySlot[o.Slot] == "" || !nativeMethodLocalParameterOperand(ref, o.Slot, typesBySlot[o.Slot], c.FuncCtx, c.Work, func(t types.JavaType) (string, bool) { return c.nativeMethodLocalSourceErasure(t, local) }) {
+		if !c.nativeMethodLocalProducerOperand(local, site, record.Uses[i], operand, params, expect[i], depth+1) {
 			return false
 		}
 	}
 	return true
+}
+
+// A receiver/argument follows the same original def-use graph as the captured
+// producer. A field read requires its sealed GETFIELD identity and unchanged
+// receiver; matching a name or type cannot authorize a replacement receiver.
+// Runtime reads stay in the original expression and are never lifted/repeated.
+func (c *ClassObjectDumper) nativeMethodLocalProducerOperand(local *nativeMethodLocalClass, site nativeMethodLocalAllocation, origin ssabuild.Origin, operand values.JavaValue, params map[int]*values.JavaRef, expected string, depth int) bool {
+	if depth >= 32 || local == nil || local.owner == nil || local.executionOwner().declaration == nil || !nativeProofWork(c.Work, 1) {
+		return false
+	}
+	for i := 0; i < 32; i++ {
+		if cast, ok := operand.(*values.CastExpression); ok && cast != nil && cast.Binding {
+			erased, known := c.nativeMethodLocalSourceErasure(cast.TargetType, local)
+			if !known || erased != expected {
+				return false
+			}
+			operand = cast.Value
+			continue
+		}
+		if wrapped, ok := operand.(*values.SlotValue); ok && wrapped != nil {
+			operand = wrapped.GetValue()
+			continue
+		}
+		break
+	}
+	if origin.Kind == ssabuild.OriginInstr {
+		return c.nativeMethodLocalOriginalProducerValue(local, site, origin, operand, params, depth+1)
+	}
+	if origin.Kind != ssabuild.OriginParam {
+		return false
+	}
+	descriptors, _, err := callbinding.Descriptor(local.executionOwner().descriptor)
+	if err != nil {
+		return false
+	}
+	descriptor := ""
+	slot := 0
+	if local.executionOwner().declaration.AccessFlags&8 == 0 {
+		if origin.Slot == 0 {
+			descriptor = "L" + local.owner.owner + ";"
+		}
+		slot = 1
+	}
+	for _, d := range descriptors {
+		if slot == origin.Slot {
+			descriptor = d
+		}
+		slot++
+		if d == "J" || d == "D" {
+			slot++
+		}
+	}
+	ref, known := operand.(*values.JavaRef)
+	if known && ref != nil && origin.Slot == 0 && local.executionOwner().declaration.AccessFlags&8 == 0 {
+		actual, seeded := ref.OriginalReceiverSlot()
+		if !seeded || actual != 0 {
+			return false
+		}
+	}
+	return known && ref != nil && params[origin.Slot] != nil && params[origin.Slot].Id == ref.Id && descriptor != "" && nativeMethodLocalParameterOperand(ref, origin.Slot, descriptor, c.FuncCtx, c.Work, func(t types.JavaType) (string, bool) { return c.nativeMethodLocalSourceErasure(t, local) })
 }

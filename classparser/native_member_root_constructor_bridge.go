@@ -84,7 +84,7 @@ func (c *ClassObjectDumper) proveNativeRootBridgeDelegations(p *nativeMemberFami
 			if p.lexicalObjects[owner] != child.object || p.lexicalObjects[child.owner] == nil {
 				return false
 			}
-			original = nativeMemberProofWithDeclarations(child.object, p.lexicalObjects[child.owner], c.Work, child.accessBridges, p.lexicalObjects, c.nativeAnnotationDeclarationResolver(), metadata)
+			original = c.proveNativeMemberDeclaration(child.object, p.lexicalObjects[child.owner], child.accessBridges, p.lexicalObjects, c.nativeAnnotationDeclarationResolver())
 			if original == nil || original.static || original.owner != child.owner || original.name != child.name || original.flags != child.flags || original.field != child.field {
 				return false
 			}

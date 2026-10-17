@@ -347,7 +347,8 @@ func (z *JarFS) nativeMemberJointBridgeReferencesClosed(p *nativeMemberFamily, i
 						!(forest != nil && forest.units[marker] != nil &&
 							(nativeAnonymousForestConstructorNameType(obj, i+1, forest, work) ||
 								nativeAnonymousForestEnclosingNameType(obj, i+1, forest, work) ||
-								nativeAnonymousForestCaptureNameType(forest, obj, i+1, work))) {
+								nativeAnonymousForestCaptureNameType(forest, obj, i+1, work) ||
+								nativeAnonymousForestLambdaNameType(forest, obj, i+1, work))) {
 						return false
 					}
 				}

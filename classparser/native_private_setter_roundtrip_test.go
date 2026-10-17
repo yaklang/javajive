@@ -100,6 +100,24 @@ func testNativePrivateSetterCompiledFixture(t *testing.T, owner, driver, want st
 // checks; this does not globally normalize a compiler or source regression.
 func testNativePrivateSetterCompiledFixtureWithShape(t *testing.T, owner, driver, want string, compile func(*testing.T, string) map[string][]byte, shape func(*testing.T, string, []byte, []byte), verify ...func(*testing.T, string, []byte, []byte)) {
 	t.Helper()
+	testNativePrivateSetterCompiledFixtureWithPolicies(t, owner, driver, want, compile, shape, []string{"normal", "no-source-rewrites", "no-core-cleanups"}, verify...)
+}
+
+func testNativePrivateSetterFixtureDefaultPolicy(t *testing.T, fixture, owner, driver, want string, mutate func(*testing.T, map[string][]byte)) {
+	t.Helper()
+	testNativePrivateSetterCompiledFixtureWithPolicies(t, owner, driver, want, func(t *testing.T, debug string) map[string][]byte {
+		files := nativeCompileDebugClasses(t, fixture, debug)
+		if mutate != nil {
+			mutate(t, files)
+		}
+		return files
+	}, nil, []string{"normal"})
+}
+
+// New fixtures use the actual default compiler policy. Existing callers keep
+// their legacy policy-alias cases; aliases are not distinct disabled passes.
+func testNativePrivateSetterCompiledFixtureWithPolicies(t *testing.T, owner, driver, want string, compile func(*testing.T, string) map[string][]byte, shape func(*testing.T, string, []byte, []byte), policies []string, verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
 	javac, java := t04Tools(t)
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
@@ -117,7 +135,7 @@ func testNativePrivateSetterCompiledFixtureWithShape(t *testing.T, owner, driver
 			if oracle != want {
 				t.Fatalf("original JVM=%q", oracle)
 			}
-			for _, policy := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+			for _, policy := range policies {
 				t.Run(policy, func(t *testing.T) {
 					if policy == "no-source-rewrites" {
 						t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")

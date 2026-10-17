@@ -27,7 +27,11 @@ type lambdaCaptureBinding struct {
 	reads       []lambdaCaptureRead
 }
 
-var lambdaCaptureDeclarationRe = regexp.MustCompile(`^(\t+)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(?:=[^;]*)?;(\s*)$`)
+// Whitespace is not a scope witness. Checked-escape wrapping and local
+// declaration lifting can place a declaration at column zero, while its
+// capturing lambda retains its original indentation. The brace tree below
+// supplies visibility and declaration identity in every layout.
+var lambdaCaptureDeclarationRe = regexp.MustCompile(`^([ \t]*)([A-Za-z_$][\w$.<>\[\]?, ]*?)\s+((?:var|lv)\d+(?:_\d+)*)\s*(?:=[^;]*)?;(\s*)$`)
 
 // lambdaCaptureCodeLines preserves source offsets while hiding literals and
 // comments. They are neither lexical scopes nor variable reads. Block comments

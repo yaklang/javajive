@@ -14,7 +14,7 @@ import (
 // This certificate covers closed, unparameterized reference/array bounds. A
 // parameterized bound needs its own generic hierarchy proof and remains refused.
 func nativeAnnotationClassSignatureMatches(desc, signature string, value *ElementValuePairAttribute, work *workbudget.Budget, resolve func(string) (*ClassObject, bool), metadata ...callbinding.Provider) bool {
-	if !nativeProofWork(work, int64(len(signature))) || resolve == nil {
+	if !nativeProofWork(work, int64(len(signature))) || resolve == nil || len(metadata) > 1 {
 		return false
 	}
 	array := desc == "[Ljava/lang/Class;"
@@ -85,40 +85,7 @@ func nativeAnnotationClassSignatureMatches(desc, signature string, value *Elemen
 			if visited > 256 || !nativeProofWork(work, 1) {
 				return callbinding.Class{}, false
 			}
-			obj, known := resolve(name)
-			if !known {
-				if len(metadata) != 1 || metadata[0] == nil {
-					return callbinding.Class{}, false
-				}
-				declaration, found := metadata[0](name)
-				if !found || declaration.Name != name || !declaration.ParentsComplete || len(declaration.Parents) > 256 {
-					return callbinding.Class{}, false
-				}
-				for _, parent := range declaration.Parents {
-					if !nativeSourceBinaryName(parent) || !nativeProofWork(work, 1) {
-						return callbinding.Class{}, false
-					}
-				}
-				return declaration, true
-			}
-			if obj == nil || obj.GetClassName() != name || len(obj.Interfaces) > 256 {
-				return callbinding.Class{}, false
-			}
-			parents := []string{}
-			if parent := obj.GetSupperClassName(); parent != "" {
-				if !nativeSourceBinaryName(parent) {
-					return callbinding.Class{}, false
-				}
-				parents = append(parents, parent)
-			}
-			for _, index := range obj.Interfaces {
-				parent, known := sourceBridgeClassName(obj, index)
-				if !known || !nativeSourceBinaryName(parent) || !nativeProofWork(work, 1) {
-					return callbinding.Class{}, false
-				}
-				parents = append(parents, parent)
-			}
-			return callbinding.Class{Name: name, Parents: parents, ParentsComplete: true}, true
+			return nativeAnnotationOriginalDeclaration(name, work, resolve, metadata...)
 		}
 		return callbinding.Assignable(actual, formal, provider) && visited <= 256 && nativeProofWork(work, 1)
 	}
@@ -160,13 +127,78 @@ func nativeAnnotationClosedReference(desc string, work *workbudget.Budget, resol
 	if len(element) < 3 || element[0] != 'L' || element[len(element)-1] != ';' || !nativeSourceBinaryName(element[1:len(element)-1]) {
 		return false
 	}
-	obj, known := resolve(element[1 : len(element)-1])
-	if known {
-		return obj != nil && obj.GetClassName() == element[1:len(element)-1]
+	_, known := nativeAnnotationOriginalDeclaration(element[1:len(element)-1], work, resolve, metadata...)
+	return known
+}
+
+// Physical declarations and an explicitly supplied metadata view must agree.
+// Acquiring more original platform code must not bypass a caller's incomplete
+// or contradictory evidence. Metadata-only platform views retain their bounded
+// fallback; two available sources corroborate rather than replace each other.
+func nativeAnnotationOriginalDeclaration(name string, work *workbudget.Budget, resolve func(string) (*ClassObject, bool), metadata ...callbinding.Provider) (callbinding.Class, bool) {
+	if resolve == nil || len(metadata) > 1 || !nativeProofWork(work, 1) {
+		return callbinding.Class{}, false
 	}
-	if len(metadata) != 1 || metadata[0] == nil {
-		return false
+	var declaration callbinding.Class
+	if len(metadata) == 1 {
+		if metadata[0] == nil {
+			return callbinding.Class{}, false
+		}
+		var known bool
+		declaration, known = metadata[0](name)
+		if !known || declaration.Name != name || !declaration.ParentsComplete || len(declaration.Parents) > 256 {
+			return callbinding.Class{}, false
+		}
+		seen := map[string]bool{}
+		for _, parent := range declaration.Parents {
+			if !nativeSourceBinaryName(parent) || seen[parent] || !nativeProofWork(work, 1) {
+				return callbinding.Class{}, false
+			}
+			seen[parent] = true
+		}
 	}
-	declaration, found := metadata[0](element[1 : len(element)-1])
-	return found && declaration.Name == element[1:len(element)-1] && declaration.ParentsComplete && nativeProofWork(work, 1)
+	obj, known := resolve(name)
+	if !known {
+		return declaration, len(metadata) == 1
+	}
+	if obj == nil || obj.GetClassName() != name || len(obj.Interfaces) > 256 {
+		return callbinding.Class{}, false
+	}
+	parents := []string{}
+	if parent := obj.GetSupperClassName(); parent != "" && !(obj.AccessFlags&0x0200 != 0 && parent == "java/lang/Object") {
+		if !nativeSourceBinaryName(parent) {
+			return callbinding.Class{}, false
+		}
+		parents = append(parents, parent)
+	}
+	seen := map[string]bool{}
+	for _, parent := range parents {
+		seen[parent] = true
+	}
+	for _, index := range obj.Interfaces {
+		parent, known := sourceBridgeClassName(obj, index)
+		if !known || !nativeSourceBinaryName(parent) || seen[parent] || !nativeProofWork(work, 1) {
+			return callbinding.Class{}, false
+		}
+		parents = append(parents, parent)
+		seen[parent] = true
+	}
+	if len(metadata) == 1 {
+		count := 0
+		for _, parent := range declaration.Parents {
+			// Class-file interfaces name Object as their superclass. Providers
+			// may omit that implicit edge and list only superinterfaces.
+			if obj.AccessFlags&0x0200 != 0 && parent == "java/lang/Object" {
+				continue
+			}
+			count++
+			if !seen[parent] {
+				return callbinding.Class{}, false
+			}
+		}
+		if count != len(parents) {
+			return callbinding.Class{}, false
+		}
+	}
+	return callbinding.Class{Name: name, Parents: parents, ParentsComplete: true}, true
 }

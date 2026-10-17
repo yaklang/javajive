@@ -28,7 +28,7 @@ func InspectAccess(value JavaValue) Access {
 			target = x.Target
 		case *JavaExpression:
 			switch x.Op {
-			case "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
+			case INC, DEC, "++", "--", "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
 				if len(x.Values) > 0 {
 					target = x.Values[0]
 				}

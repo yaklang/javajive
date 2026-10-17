@@ -10,9 +10,11 @@ import (
 // These are metadata refusal models. The adjacent round-trip bank uses actual
 // native javac8 originals and an actual selected compiler; models do not count
 // as executed Java positives or as additional toolchain coverage.
+// The major50 model now closes a separately tested Java5/6 feature domain;
+// version membership alone still cannot replace ownership or compiler roles.
 func TestNativeAnonymousCompilerProfileRequiresExactOriginalMethodAndMetadata(t *testing.T) {
 	files := nativeCompileSourceReleaseClasses(t, map[string]string{"CompilerModel.java": `class CompilerModel{static CompilerModelParent make(final long word){return new CompilerModelParent(word){long get(){return word;}};}}class CompilerModelParent{CompilerModelParent(long word){}long get(){return 0;}}`}, "none", "8")
-	for _, variant := range []string{"legacy model", "legacy major51 model", "older major model", "newer major model", "owner preview", "default compiler", "modern compiler", "modern flags with legacy self row", "unknown compiler", "wrong source", "wrong major", "preview", "wrong class flags", "wrong self flags", "duplicate self", "wrong owner identity", "own method not static", "instance without enclosing capture", "missing method", "duplicate method", "missing enclosing", "constructor exceptions", "work budget", "cancelled"} {
+	for _, variant := range []string{"legacy model", "legacy major51 model", "legacy major50 model", "newer major model", "owner preview", "default compiler", "modern compiler", "modern flags with legacy self row", "unknown compiler", "wrong source", "wrong major", "preview", "wrong class flags", "wrong self flags", "duplicate self", "wrong owner identity", "own method not static", "instance without enclosing capture", "missing method", "duplicate method", "missing enclosing", "constructor exceptions", "work budget", "cancelled"} {
 		t.Run(variant, func(t *testing.T) {
 			owner, _ := Parse(append([]byte(nil), files["CompilerModel.class"]...))
 			obj, _ := Parse(append([]byte(nil), files["CompilerModel$1.class"]...))
@@ -35,7 +37,7 @@ func TestNativeAnonymousCompilerProfileRequiresExactOriginalMethodAndMetadata(t 
 			switch variant {
 			case "legacy major51 model":
 				owner.MajorVersion, obj.MajorVersion = 51, 51
-			case "older major model":
+			case "legacy major50 model":
 				owner.MajorVersion, obj.MajorVersion = 50, 50
 			case "newer major model":
 				owner.MajorVersion, obj.MajorVersion = 53, 53
@@ -102,7 +104,7 @@ func TestNativeAnonymousCompilerProfileRequiresExactOriginalMethodAndMetadata(t 
 				reader.Work = workbudget.New(ctx, workbudget.Limits{})
 			}
 			packet := reader.nativeAnonymousConstructorForCompiler(obj, "CompilerModel", method, "", nil, nil, reader.buildInvocationMetadata(), nil)
-			if (packet != nil) != (variant == "legacy model" || variant == "legacy major51 model") {
+			if (packet != nil) != (variant == "legacy model" || variant == "legacy major51 model" || variant == "legacy major50 model") {
 				t.Fatal("compiler choice cannot replace original ownership/staticness/metadata evidence")
 			}
 		})

@@ -124,10 +124,7 @@ func (c *ClassObjectDumper) recordNativeLambdaLocalCaptureSource(name, desc stri
 	if c == nil {
 		return false
 	}
-	current := c.nativeMemberCurrent
-	if current == nil {
-		current = c.nativeAnonymousLambdaCurrent
-	}
+	current := c.nativeLambdaSourceView()
 	if current == nil {
 		return true
 	}
@@ -173,7 +170,9 @@ func nativeLambdaLocalCaptureSourceClosed(site *nativeLambdaLocalCaptureSite, so
 			continue
 		}
 		if !nativeLambdaLocalCaptureValue(operand, source.values[i], site.pc, i, &source.context, work) {
-			return false
+			if source.factoryPC != site.pc || !nativeLambdaReusedLocalSource(operand, source, i, work) {
+				return false
+			}
 		}
 	}
 	return true

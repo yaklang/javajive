@@ -119,13 +119,17 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 		return true
 	}
 	var walk func([]statements.Statement, uint8) (uint8, bool)
-	// A preinitialized capture remains initialized through an unrelated loop.
-	// A declaration scoped inside the loop is a fresh local each iteration and
-	// does not escape its body. A blank declaration outside the loop cannot be
-	// repeatedly assigned and claim effective finality. This extension belongs
-	// only to the separately witnessed lambda snapshot, not allocation motion.
+	// A declaration scoped inside the loop is a fresh local each iteration.
+	// Its initializer alternatives may join before the original allocation:
+	// effective finality counts writes per iteration, not across iterations.
+	// Reset that binder to absent at the loop boundary, so no use outside its
+	// body can borrow its initialization. A blank outer declaration cannot be
+	// repeatedly assigned and claim effective finality. A preinitialized outer
+	// binder is stable for either checkpoint only when the complete loop body
+	// leaves that same declaration initialized and performs no further writes.
+	// This is a source binding proof; no allocation or producer is moved.
 	loopBody := func(list []statements.Statement, state uint8) bool {
-		if captureStatement == nil || state != absent && state != initialized {
+		if state != absent && state != initialized || captureStatement == nil && captureValue == nil {
 			return false
 		}
 		beforeDeclaration, beforeWrites := declaration, writes
@@ -165,6 +169,16 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 							return 0, false
 						}
 						declaration, state = assign, blank
+					} else if (assign.IsDeclare || assign.IsFirst) && declaration == nil && state == absent && !sourceProofNil(assign.JavaValue) {
+						// A singly initialized declaration has the same flow state
+						// as a blank declaration followed by its sole assignment.
+						// Read the initializer before making the binder available;
+						// self reads/captures and later writes remain forbidden.
+						if !value(assign.JavaValue, state) || store != nil && !store(assign) {
+							return 0, false
+						}
+						declaration, state = assign, initialized
+						writes++
 					} else {
 						if assign.IsDeclare || assign.IsFirst || declaration == nil || state != blank || sourceProofNil(assign.JavaValue) || !value(assign.JavaValue, state) {
 							return 0, false
@@ -185,7 +199,7 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 				// opaque callback's effects or abrupt completion behavior.
 				operand, sealed := custom.SourceThrowOperand()
 				roots, children, known = []values.JavaValue{operand}, nil, sealed
-				if captureStatement != nil && loopDepth > 0 && custom.SourceTransferOnly() {
+				if (captureStatement != nil || captureValue != nil) && loopDepth > 0 && custom.SourceTransferOnly() {
 					roots, children, known = nil, nil, true
 				}
 			}
@@ -215,7 +229,7 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 				state = 0 // Abrupt predecessors do not reach the next join.
 			case *statements.CustomStatement:
 				if _, sealed := x.SourceThrowOperand(); !sealed {
-					if captureStatement == nil || loopDepth == 0 || !x.SourceTransferOnly() {
+					if captureStatement == nil && captureValue == nil || loopDepth == 0 || !x.SourceTransferOnly() {
 						return 0, false // Unproved transfers cannot close a join.
 					}
 				}
@@ -226,6 +240,48 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 				if !valid {
 					return 0, false
 				}
+			case *statements.TryCatchStatement:
+				// A handler may be entered before or after any protected
+				// assignment. Use the lattice's conservative upper bound,
+				// never the try's normal exit state. This intentionally
+				// refuses handler reads/writes of the captured binder until
+				// a more precise exceptional reaching-definition proof exists.
+				// A normally completing handler keeps that uncertainty; only
+				// proved return/throw paths disappear from the following join.
+				if len(x.CatchBodies) == 0 || len(x.CatchBodies) > 64 || len(x.Exception) != len(x.CatchBodies) || len(x.Handlers) != len(x.CatchBodies) || !nativeProofWork(work, int64(len(x.Handlers))) {
+					return 0, false
+				}
+				for i, handler := range x.Handlers {
+					caught := x.Exception[i]
+					if caught == nil || caught.Id == nil || caught.Id == ref.Id || caught.IsParam || caught.IsThis || caught.CustomValue != nil || caught.StackVar != nil || handler.CatchAll || handler.EntryPC < 0 || handler.EntryPC > 65535 || len(handler.ProtectedRanges) == 0 || len(handler.ProtectedRanges) > 4096 || !nativeProofWork(work, int64(len(handler.ProtectedRanges))) {
+						return 0, false
+					}
+					for _, span := range handler.ProtectedRanges {
+						if span[0] < 0 || span[0] >= span[1] || span[1] > 65536 {
+							return 0, false
+						}
+					}
+				}
+				// Catch-all/finally needs pending abrupt-completion states;
+				// it cannot be interpreted as an ordinary typed catch here.
+				beforeDeclaration := declaration
+				normal, valid := walk(x.TryBody, state)
+				if !valid {
+					return 0, false
+				}
+				if beforeDeclaration == nil && declaration != nil {
+					// A declaration introduced inside the protected block has
+					// no source scope at the following outer checkpoint.
+					normal = absent
+				}
+				for _, handler := range x.CatchBodies {
+					caught, valid := walk(handler, absent|blank|initialized)
+					if !valid {
+						return 0, false
+					}
+					normal |= caught
+				}
+				state = normal
 			case *statements.WhileStatement:
 				if !loopBody(x.Body, state) {
 					return 0, false
@@ -254,8 +310,7 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 					}
 				}
 			default:
-				// Switch and exception edges need their own flow transfer
-				// model. They cannot certify this new multi-write declaration.
+				// Switch edges need their own multi-entry transfer model.
 				if len(children) != 0 {
 					return 0, false
 				}

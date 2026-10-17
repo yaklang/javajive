@@ -153,7 +153,7 @@ func nativeMemberAnnotationDeclaration(obj *ClassObject, flags uint16, work *wor
 			}
 			n, nk := sourceBridgeUTF8(def, method.NameIndex)
 			desc, dk := sourceBridgeUTF8(def, method.DescriptorIndex)
-			if !nk || !dk || seen[n] || forbidden[n] || n == "<init>" || n != "<clinit>" && class_context.SafeIdentifier(n) != n {
+			if !nk || !dk || seen[n] || forbidden[n] || n == "<init>" || n != "<clinit>" && !class_context.PreservesJava8Identifier(n) {
 				return false
 			}
 			seen[n] = true
@@ -290,7 +290,7 @@ func nativeAnnotationDefaultMatches(desc string, value *ElementValuePairAttribut
 		}
 		if definition.AccessFlags&0x4000 != 0 {
 			e, ok := v.Value.(*EnumConstValue)
-			if v.Tag != 'e' || !ok || e == nil || e.TypeName != desc || class_context.SafeIdentifier(e.ConstName) != e.ConstName {
+			if v.Tag != 'e' || !ok || e == nil || e.TypeName != desc || !class_context.PreservesJava8Identifier(e.ConstName) {
 				return false
 			}
 			for _, field := range definition.Fields {

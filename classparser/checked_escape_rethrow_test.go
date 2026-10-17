@@ -27,9 +27,9 @@ func TestCheckedEscapePreciseRethrowRequiresUnchangedOriginalCatchBinding(t *tes
 		t.Fatalf("compile %v\n%s", e, out)
 	}
 	raw := readClassBytes(t, dir, "CatchProofMetadata")
-	for _, variant := range []string{"original unchanged parameter", "different printed name same ID", "same printed name different ID", "parameter reassigned", "copied ref writes parameter", "folded assignment", "for header assignment", "while condition assignment", "switch arm assignment", "lambda captured assignment", "alias rethrow", "cast rethrow", "decoded entry value", "wrong decoded entry", "missing entry origin", "missing handler metadata", "wrong handler entry", "catch type mismatch", "missing catch ID", "method parameter is not catch binding", "missing throw origin", "conflicting copy of throw PC", "opaque closure", "value cycle", "statement cycle", "proof budget", "reassigned same-ID nested catch"} {
+	for _, variant := range []string{"original unchanged parameter", "anchor before catch", "anchor in handler", "anchor before reassignment", "nil anchor", "opaque anchor spelling", "different printed name same ID", "same printed name different ID", "parameter reassigned", "copied ref writes parameter", "folded assignment", "for header assignment", "while condition assignment", "switch arm assignment", "lambda captured assignment", "alias rethrow", "cast rethrow", "decoded entry value", "wrong decoded entry", "missing entry origin", "missing handler metadata", "wrong handler entry", "catch type mismatch", "missing catch ID", "method parameter is not catch binding", "missing throw origin", "conflicting copy of throw PC", "opaque closure", "value cycle", "statement cycle", "proof budget", "reassigned same-ID nested catch"} {
 		t.Run(variant, func(t *testing.T) {
-			obj, e := Parse(raw)
+			obj, e := Parse(append([]byte(nil), raw...))
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -71,6 +71,17 @@ func TestCheckedEscapePreciseRethrowRequiresUnchangedOriginalCatchBinding(t *tes
 			body := []statements.Statement{tr}
 			assign := statements.NewAssignStatement(caught, values.JavaNull, false)
 			switch variant {
+			case "anchor before catch":
+				body = append([]statements.Statement{statements.NewSourceAnchorStatement()}, body...)
+			case "anchor in handler":
+				tr.CatchBodies[0] = append([]statements.Statement{statements.NewSourceAnchorStatement()}, tr.CatchBodies[0]...)
+			case "anchor before reassignment":
+				tr.CatchBodies[0] = []statements.Statement{statements.NewSourceAnchorStatement(), assign, thrown}
+			case "nil anchor":
+				body = append([]statements.Statement{(*statements.SourceAnchorStatement)(nil)}, body...)
+			case "opaque anchor spelling":
+				body = append([]statements.Statement{&statements.MiddleStatement{Flag: "source_anchor", Data: thrown}}, body...)
+
 			case "different printed name same ID":
 				copy := *caught
 				copy.VarUid = "different"
@@ -141,13 +152,13 @@ func TestCheckedEscapePreciseRethrowRequiresUnchangedOriginalCatchBinding(t *tes
 				tr.CatchBodies = [][]statements.Statement{{&inner}}
 			}
 			got := d.preciseCatchRethrows(body, code)
-			want := variant == "original unchanged parameter" || variant == "different printed name same ID" || variant == "decoded entry value"
+			want := variant == "anchor before catch" || variant == "anchor in handler" || variant == "original unchanged parameter" || variant == "different printed name same ID" || variant == "decoded entry value"
 			if got[throwPC] != want {
 				t.Fatalf("precise=%v want%v map=%v", got[throwPC], want, got)
 			}
 			// Removing redundant broad classification must not suppress the original
 			// checked invoke, even when its declaration is absent from caller throws.
-			if variant == "original unchanged parameter" {
+			if variant == "original unchanged parameter" || variant == "anchor before catch" || variant == "anchor in handler" {
 				var attrs []AttributeInfo
 				for _, a := range method.Attributes {
 					if _, checked := a.(*ExceptionsAttribute); !checked {

@@ -46,7 +46,7 @@ func nativeAnonymousArgumentSourceType(operand values.JavaValue, ctx *class_cont
 		if !nativeProofWork(work, 1) {
 			return nil
 		}
-		args[i] = types.NewJavaClass(name)
+		args[i] = types.NewJavaTypeVariable(name)
 	}
 	return types.NewParameterizedType(raw, args)
 }

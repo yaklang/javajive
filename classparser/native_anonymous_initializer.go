@@ -93,7 +93,7 @@ func nativeAnonymousInitializerPackets(obj *ClassObject, ops []*core.OpCode, sta
 			return nil, false
 		}
 		field := fields[store.Member]
-		if field == nil || field.AccessFlags&(0x0008|0x1000) != 0 || class_context.SafeIdentifier(store.Member) != store.Member {
+		if field == nil || field.AccessFlags&(0x0008|0x1000) != 0 || !class_context.PreservesJava8Identifier(store.Member) {
 			return nil, false
 		}
 		if _, captured := child.fields[store.Member]; captured {

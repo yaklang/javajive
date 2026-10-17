@@ -17,8 +17,23 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 	if webs == nil {
 		return
 	}
+	// Dynamic operands already own a declaration/snapshot protocol at their
+	// original factory PC. Its forwarding operand is distinct from the LOAD's
+	// produced SlotValue. Do not add a same-type binding split while that
+	// consumer still owns the original declaration relation.
+	snapshotOwned := map[*utils.VariableId]bool{}
+	for _, snapshots := range d.evaluationSnapshots {
+		for _, snapshot := range snapshots {
+			if snapshot.Operand {
+				if ref, ok := dynamicCaptureSeed(snapshot.Value).(*values.JavaRef); ok && ref != nil && ref.Id != nil {
+					snapshotOwned[ref.Id] = true
+				}
+			}
+		}
+	}
 	groups := map[int][]*OpCode{}
 	owners := map[*values.JavaRef]map[int]bool{}
+	firstOwner := map[*values.JavaRef]int{}
 	order := []int{}
 	complete := map[int]bool{}
 	for _, op := range d.opCodes {
@@ -46,6 +61,7 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 		}
 		if owners[ref] == nil {
 			owners[ref] = map[int]bool{}
+			firstOwner[ref] = w
 		}
 		owners[ref][w] = true
 	}
@@ -73,8 +89,11 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 		seedType := first.Type()
 		singletonConflict := false
 		if len(stores) == 1 {
-			// Disjoint single-definition webs still require distinct identities
-			// when the simulator reused a narrower local from an earlier web.
+			// A later disjoint single-definition web owns a distinct lifetime,
+			// even when its type is identical to the earlier variable's type.
+			// Otherwise two independent locals become one mutable source binder,
+			// preventing a fresh loop-local value from being captured faithfully.
+			// Keep the first web's identity and rebind only this later web.
 			// Use the actual defining operand, including any original CHECKCAST,
 			// instead of adding a check to make that stale declaration compile.
 			value := stores[0].stackConsumed[0]
@@ -87,8 +106,15 @@ func (d *Decompiler) partitionSharedReferenceWebs() {
 				// produces a java.lang.Class reference on the operand stack.
 				definedType = types.NewJavaClass("java.lang.Class")
 			}
+			// Duplicated catch/finally paths can have separate computational
+			// definitions but still require a shared pending-exception source
+			// binder. Until those source constraints are represented explicitly,
+			// the new equal-type lifetime permission requires no raw handlers.
+			// Preserve the existing different-type partition independently.
+			differentType := definedType != nil && seedType != nil && !reflect.DeepEqual(seedType.RawType(), definedType.RawType())
+			separateLifetime := firstOwner[first] != w && len(d.ExceptionTable) == 0 && !snapshotOwned[first.Id]
 			if len(owners[first]) > 1 && value != nil && values.UnpackSoltValue(value) != values.JavaNull && !values.IsNullLiteral(values.UnpackSoltValue(value)) &&
-				definedType != nil && seedType != nil && !reflect.DeepEqual(seedType.RawType(), definedType.RawType()) {
+				definedType != nil && seedType != nil && (differentType || separateLifetime) {
 				seedType = definedType
 				singletonConflict = true
 			}

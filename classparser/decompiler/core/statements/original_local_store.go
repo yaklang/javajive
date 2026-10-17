@@ -55,9 +55,11 @@ func (a *AssignStatement) OriginalLocalStore() (pc, slot int, known bool) {
 	w := a.originalLocalStore
 	ref, ok := a.LeftValue.(*values.JavaRef)
 	seed := originalStoreSeed(a.JavaValue)
-	// Declaration placement can replace Id while preserving this exact logical
-	// ref and immutable VarUid. Names and Id equality confer no STORE witness.
-	if !ok || ref != w.ref || ref.Id == nil || ref.VarUid != w.uid || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || a.OriginPC != w.pc || seed == nil || seed != w.seed {
+	// Declaration placement can replace Id or explicitly clone the decoded
+	// declaration. Only its sealed alias cohort can retain that target; a
+	// shallow copy or equal public ID/UID confers no STORE witness. Every STORE
+	// still retains its own exact RHS rather than the declaration's first seed.
+	if !ok || ref != w.ref && !ref.SameOriginalLocalDeclaration(w.ref) || ref.Id == nil || ref.VarUid != w.uid || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || a.OriginPC != w.pc || seed == nil || seed != w.seed {
 		return 0, 0, false
 	}
 	return w.pc, w.slot, true

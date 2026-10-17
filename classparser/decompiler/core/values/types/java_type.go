@@ -65,6 +65,9 @@ func NewJavaArrayType(typ JavaType) JavaType {
 type JavaClass struct {
 	Name string
 	JavaType
+	// A Signature T-reference denotes a formal, not a same-spelled class.
+	// Keep that declaration role when the type is copied or used in an array.
+	signatureVariable bool
 }
 
 // ReplaceVar implements values.JavaValue.
@@ -87,9 +90,32 @@ func (j *JavaClass) String(funcCtx *class_context.ClassContext) string {
 	if repl, ok := funcCtx.StandaloneEraseTypeVar(j.Name); ok {
 		return funcCtx.ShortTypeName(repl)
 	}
+	if j.signatureVariable {
+		return class_context.SafeIdentifier(j.Name)
+	}
 	name := funcCtx.ShortTypeName(j.Name)
 	return fmt.Sprintf("%s", name)
 }
+
+// NewJavaTypeVariable retains an explicitly known formal-reference role.
+// Its actual declaring scope and erasure still require the original signatures.
+func NewJavaTypeVariable(name string) JavaType {
+	return newJavaTypeWrap(&JavaClass{Name: name, signatureVariable: true})
+}
+
+// TypeVariableName reports an explicitly modeled variable reference. It does
+// not infer variable identity from spelling or the caller's visible names.
+func TypeVariableName(t JavaType) (string, bool) {
+	if t == nil {
+		return "", false
+	}
+	ref, ok := t.RawType().(*JavaClass)
+	if !ok || ref == nil || !ref.signatureVariable {
+		return "", false
+	}
+	return ref.Name, true
+}
+
 func NewJavaClass(typeName string) JavaType {
 	if strings.HasPrefix(typeName, "[") {
 		t, err := ParseDescriptor(typeName)

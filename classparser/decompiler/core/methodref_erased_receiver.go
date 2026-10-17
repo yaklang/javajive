@@ -41,7 +41,7 @@ func methodRefErasedReceiver(ctx *class_context.ClassContext, impl *values.JavaC
 		if ref, yes := values.UnpackSoltValue(captured[0]).(*values.JavaRef); yes && methodRefCopiesThis(ref) {
 			args := make([]types.JavaType, len(formals))
 			for i, name := range formals {
-				args[i] = types.NewJavaClass(name)
+				args[i] = types.NewJavaTypeVariable(name)
 			}
 			receiver, _ = types.AsParameterizedType(types.NewParameterizedType(owner, args))
 			ok = true

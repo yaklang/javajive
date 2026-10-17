@@ -35,8 +35,13 @@ func (j *JavaParameterizedType) String(funcCtx *class_context.ClassContext) stri
 		if source, known := funcCtx.DeclarationSourceName(j.RawClassName); known {
 			parts := make([]string, 0, len(j.OwnerSegments))
 			valid := true
+			explicitOwner := false
+			rootSpelling := ""
 			for i, segment := range j.OwnerSegments {
 				name := funcCtx.ShortTypeName(segment.BinaryName)
+				if i == 0 {
+					rootSpelling = name
+				}
 				if i > 0 {
 					parent := j.OwnerSegments[i-1].BinaryName
 					inner, ok := strings.CutPrefix(segment.BinaryName, parent+"$")
@@ -57,23 +62,31 @@ func (j *JavaParameterizedType) String(funcCtx *class_context.ClassContext) stri
 			}
 			if valid {
 				expected := j.OwnerSegments[0].BinaryName
+				rootBound := false
 				if original, known := funcCtx.DeclarationSourceName(expected); known {
 					expected = original
+					rootBound = original != "" && original == rootSpelling
 				}
 				for i := 1; i < len(j.OwnerSegments); i++ {
 					inner, _ := strings.CutPrefix(j.OwnerSegments[i].BinaryName, j.OwnerSegments[i-1].BinaryName+"$")
 					expected += "." + inner
 				}
+				// A registered lexical name may omit an enclosing prefix. Keep
+				// each original owner's arguments on that owner, rather than
+				// treating the short child name as a flat generic declaration.
+				// Only complete path components and a stable registered root
+				// justify this spelling; flat dollar names retain the old view.
 				if source != expected {
-					valid = false
+					valid = rootBound && source != "" && strings.HasSuffix(expected, "."+source)
+					explicitOwner = valid
 				}
 			}
 			if valid {
 				last := j.OwnerSegments[len(j.OwnerSegments)-1]
 				parent := j.OwnerSegments[len(j.OwnerSegments)-2]
 				inner, _ := strings.CutPrefix(last.BinaryName, parent.BinaryName+"$")
-				if strings.HasSuffix(source, "."+inner) {
-					if funcCtx.LexicalClassName == inner && funcCtx.ClassName == j.RawClassName {
+				if source == inner || strings.HasSuffix(source, "."+inner) {
+					if !explicitOwner && funcCtx.LexicalClassName == inner && funcCtx.ClassName == j.RawClassName {
 						return parts[len(parts)-1]
 					}
 					return strings.Join(parts, ".")
@@ -666,7 +679,7 @@ func parseSigType(sig string) (JavaType, string, bool) {
 		if end < 0 {
 			return nil, "", false
 		}
-		return newJavaTypeWrap(&JavaClass{Name: sig[1:end]}), sig[end+1:], true
+		return NewJavaTypeVariable(sig[1:end]), sig[end+1:], true
 	case '[':
 		elem, rest, ok := parseSigType(sig[1:])
 		if !ok {
@@ -1063,6 +1076,7 @@ func ClassFormalTypeParamBounds(sig string, funcCtx *class_context.ClassContext)
 		rest = rest[colonIdx:]
 		var bounds []string
 		var refs []string
+		soleObject := false
 		for len(rest) > 0 && rest[0] == ':' {
 			rest = rest[1:]
 			if len(rest) > 0 && (rest[0] == ':' || rest[0] == '>') {
@@ -1079,10 +1093,14 @@ func ClassFormalTypeParamBounds(sig string, funcCtx *class_context.ClassContext)
 			scanTypeVarRefs(consumed, &refs)
 			rest = remaining
 			rendered := boundType.String(funcCtx)
-			if rendered == "Object" || rendered == "java.lang.Object" {
-				continue
-			}
+			raw, known := RawClassFQN(boundType)
+			soleObject = len(bounds) == 0 && known && raw == "java.lang.Object"
 			bounds = append(bounds, rendered)
+		}
+		// Object is elidable only as the sole bound. Its first position in an
+		// intersection determines erasure even though it adds no subtype fact.
+		if soleObject && len(bounds) == 1 {
+			bounds = nil
 		}
 		if len(bounds) > 0 {
 			out[name] = TypeParamBound{Clause: strings.Join(bounds, " & "), Refs: refs}
@@ -1419,6 +1437,7 @@ func parseFormalTypeParams(sig string, funcCtx *class_context.ClassContext) stri
 		typeParamName := rest[:colonIdx]
 		rest = rest[colonIdx:]
 		var bounds []string
+		soleObject := false
 		for len(rest) > 0 && rest[0] == ':' {
 			rest = rest[1:]
 			if len(rest) > 0 && (rest[0] == ':' || rest[0] == '>') {
@@ -1430,11 +1449,12 @@ func parseFormalTypeParams(sig string, funcCtx *class_context.ClassContext) stri
 			}
 			rest = remaining
 			rendered := boundType.String(funcCtx)
-			if rendered == "Object" || rendered == "java.lang.Object" {
-				// A `<T extends Object>` bound is always redundant; drop it for the canonical `<T>`.
-				continue
-			}
+			raw, known := RawClassFQN(boundType)
+			soleObject = len(bounds) == 0 && known && raw == "java.lang.Object"
 			bounds = append(bounds, rendered)
+		}
+		if soleObject && len(bounds) == 1 {
+			bounds = nil
 		}
 		if len(bounds) > 0 {
 			params = append(params, fmt.Sprintf("%s extends %s", typeParamName, strings.Join(bounds, " & ")))
@@ -1545,17 +1565,12 @@ func MethodFormalTypeParamNames(sig string) []string {
 	return ClassFormalTypeParamNames(sig)
 }
 
-// SubstituteTypeVars returns a copy of t with every type-variable reference replaced per the
-// substitution sigma (e.g. {K: String, V: Integer}). It is the generic-substitution primitive that
-// lets a callee's parsed signature -- written in terms of the DECLARING class's type variables -- be
-// instantiated at a call site with the receiver's actual type arguments (the root-cause analogue of
-// the hard-coded JDK table). A type variable is modeled as a bare-named *JavaClass (parseSigType emits
-// `TK;` as JavaClass{Name:"K"}); a name absent from sigma is left untouched (so concrete class names,
-// which never appear as sigma keys, pass through unchanged). Parameterized type args and array element
-// types and wildcard bounds are rewritten recursively. Receiver-capture gates
-// remain upstream; a wildcard inside a formal such as `Function<? super K,V>`
-// must still bind K when the declaring class is viewed as Super<String,V>.
-// Pure and allocation-light; nil-safe.
+// SubstituteTypeVars instantiates explicit formal references in the declaring
+// scope. A concrete class never becomes a variable because its binary name is
+// also a substitution key. Parameterized arguments, nested owner arguments,
+// arrays and wildcard bounds preserve this distinction recursively. Lexical
+// scope and receiver-capture evidence remain the caller's responsibility.
+// Pure and nil-safe; unchanged nodes retain their original identity.
 func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 	if t == nil || len(sigma) == 0 {
 		return t
@@ -1573,8 +1588,10 @@ func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 	raw := t.RawType()
 	switch rt := raw.(type) {
 	case *JavaClass:
-		if repl, ok := sigma[rt.Name]; ok && repl != nil {
-			return repl
+		if rt.signatureVariable {
+			if repl, ok := sigma[rt.Name]; ok && repl != nil {
+				return repl
+			}
 		}
 		return t
 	case *JavaParameterizedType:
@@ -1724,6 +1741,10 @@ func resolveParamWalk(funcCtx *class_context.ClassContext, provider ClassSigProv
 		if descriptor != "" {
 			if msig, declared := methodSigs[class_context.MethodDescKey(method, descriptor)]; declared {
 				if msig == "" {
+					params, _, formals := resolveSourceBridgeSignature(funcCtx, provider, internal, classSig, sigma, method, descriptor, argc, visited)
+					if len(params) == argc && paramIndex < len(params) && params[paramIndex] != nil {
+						return substituteAndGateParam(funcCtx, params[paramIndex], nil, formals)
+					}
 					return nil
 				}
 				if len(lexical) > 0 && !lexicalMethodDescriptorMatches(funcCtx, provider, internal, msig, descriptor) {
@@ -1985,7 +2006,7 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 					return nil, nil, nil
 				}
 				if msig == "" {
-					return resolveSourceBridgeReturn(funcCtx, provider, internal, classSig, sigma, method, descriptor, argc, visited)
+					return resolveSourceBridgeSignature(funcCtx, provider, internal, classSig, sigma, method, descriptor, argc, visited)
 				}
 				if !calleeSignatureVariablesBound(msig, sigma) {
 					return nil, nil, nil
@@ -2072,9 +2093,14 @@ func resolveSignatureWalk(funcCtx *class_context.ClassContext, provider ClassSig
 // The empty exact entry still blocks ordinary inheritance. A separately
 // witnessed omitted bridge can expose its direct parent's source declaration;
 // compose that exact superclass edge rather than searching sibling interfaces
-// or falling back to an arity-only overload. No arguments or runtime casts move.
-func resolveSourceBridgeReturn(ctx *class_context.ClassContext, provider ClassSigProvider, owner, classSig string, sigma map[string]JavaType, method, descriptor string, argc int, visited map[string]bool) ([]JavaType, JavaType, []string) {
-	if ctx.SourceBridgeTarget == nil || argc != 0 || !strings.HasPrefix(descriptor, "()L") || len(sigma) != len(ClassFormalTypeParamNames(classSig)) {
+// or falling back to an arity-only overload. The callback certifies the exact
+// argument loads and invokespecial/return protocol; no runtime cast is added.
+func resolveSourceBridgeSignature(ctx *class_context.ClassContext, provider ClassSigProvider, owner, classSig string, sigma map[string]JavaType, method, descriptor string, argc int, visited map[string]bool) ([]JavaType, JavaType, []string) {
+	if ctx.SourceBridgeTarget == nil || len(sigma) != len(ClassFormalTypeParamNames(classSig)) {
+		return nil, nil, nil
+	}
+	mt, err := ParseMethodDescriptor(descriptor)
+	if err != nil || mt.FunctionType() == nil || len(mt.FunctionType().ParamTypes) != argc {
 		return nil, nil, nil
 	}
 	target, proved := ctx.SourceBridgeTarget(owner, method, descriptor)
@@ -2091,6 +2117,9 @@ func resolveSourceBridgeReturn(ctx *class_context.ClassContext, provider ClassSi
 	}
 	var args []JavaType
 	if pt, ok := AsParameterizedType(sup); ok {
+		if len(pt.OwnerSegments) > 1 {
+			return nil, nil, nil
+		}
 		args = make([]JavaType, len(pt.TypeArgs))
 		for i, t := range pt.TypeArgs {
 			args[i] = SubstituteTypeVars(t, sigma)
@@ -2101,7 +2130,26 @@ func resolveSourceBridgeReturn(ctx *class_context.ClassContext, provider ClassSi
 			return nil, nil, nil
 		}
 	}
-	return resolveSignatureWalk(ctx, provider, target, args, method, descriptor, argc, visited)
+	params, result, formals := resolveSignatureWalk(ctx, provider, target, args, method, descriptor, argc, visited)
+	if len(params) != argc || len(formals) != 0 {
+		return nil, nil, nil
+	}
+	// A new source formal view must not narrow an original JVM input. This is
+	// distinct from the return-only query: a substituted String or Number for
+	// an Object input would otherwise insert a new payload CHECKCAST.
+	for i, param := range params {
+		actual, ak := sourceBridgeParameterErasure(ctx, param, 0)
+		original, ok := sourceBridgeParameterErasure(nil, mt.FunctionType().ParamTypes[i], 0)
+		if !ak || !ok || actual != original {
+			return nil, nil, nil
+		}
+	}
+	actual, ak := sourceBridgeParameterErasure(ctx, result, 0)
+	original, ok := sourceBridgeParameterErasure(nil, mt.FunctionType().ReturnType, 0)
+	if !ak || !ok || actual != original {
+		return nil, nil, nil
+	}
+	return params, result, formals
 }
 
 // FieldSigProvider yields a jar-internal class's FIELD generic Signature by binary internal name and

@@ -17,23 +17,35 @@ import (
 // follows local aliases and original field identities, rather than requiring
 // every ancestor to have one particular assignment/delegation source shape.
 func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) bool {
-	if p == nil || p.delegate == nil || len(p.prefix) == 0 || !constructorPreludeOutsideHandlers(code, p.pc, decoder, c.Work) {
-		return false
+	decision := c.constructorCaptureMotionDecision(p, code, method, decoder)
+	c.observeConstructorMotion(decision, p, code, method)
+	return decision.state == RecoveryRuleProved
+}
+
+// Keep the compatibility bool above while preserving the semantic gate that
+// refused this candidate. These are sufficient-rule failures, not demonstrated
+// runtime counterexamples or a claim that every source candidate has failed.
+func (c *ClassObjectDumper) constructorCaptureMotionDecision(p *constructorSourceBoundary, code *CodeAttribute, method *MemberInfo, decoder *core.Decompiler) constructorMotionDecision {
+	if p == nil || p.delegate == nil || len(p.prefix) == 0 {
+		return constructorMotionDecision{state: RecoveryNotApplicable, obligation: "motion.capture_prefix"}
+	}
+	if !constructorPreludeOutsideHandlers(code, p.pc, decoder, c.Work) {
+		return unprovedConstructorMotion("motion.exception_domain")
 	}
 	desc, err := c.obj.getUtf8(method.DescriptorIndex)
 	if err != nil {
-		return false
+		return unprovedConstructorMotion("identity.constructor_descriptor")
 	}
 	params, _, err := callbinding.Descriptor(desc)
 	if err != nil || len(params) != len(p.params) {
-		return false
+		return unprovedConstructorMotion("binding.parameter_ports")
 	}
 	slots := constructorParameterSlots(params)
 	refs := map[int]*values.JavaRef{}
 	for slot, index := range slots {
 		ref, ok := p.params[index].(*values.JavaRef)
 		if !ok || ref == nil || !ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
-			return false
+			return unprovedConstructorMotion("binding.parameter_values")
 		}
 		refs[slot] = ref
 	}
@@ -43,24 +55,24 @@ func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBound
 	for _, statement := range p.prefix {
 		assign, ok := statement.(*statements.AssignStatement)
 		if !ok || assign == nil || assign.IsDeclare || assign.ArrayMember != nil || index+2 >= len(ops) {
-			return false
+			return unprovedConstructorMotion("motion.original_capture_store")
 		}
 		field, ok := values.UnpackSoltValue(assign.LeftValue).(*values.RefMember)
 		if !ok || field == nil {
-			return false
+			return unprovedConstructorMotion("motion.original_capture_store")
 		}
 		receiver, ok := values.UnpackSoltValue(field.Object).(*values.JavaRef)
 		if !ok || receiver == nil || !receiver.IsThis {
-			return false
+			return unprovedConstructorMotion("motion.receiver_identity")
 		}
 		slot := core.GetRetrieveIdx(ops[index+1])
 		member := constructorMotionMember(c.obj, ops[index+2], core.OP_PUTFIELD)
 		if core.GetRetrieveIdx(ops[index]) != 0 || !constructorMotionLoad(ops[index], "Ljava/lang/Object;") || refs[slot] == nil || !constructorMotionLoad(ops[index+1], params[slots[slot]]) || values.UnpackSoltValue(assign.JavaValue) != refs[slot] || member == nil || member.Name != c.obj.GetClassName() || member.Member != field.Member || member.Description != params[slots[slot]] || !constructorMotionField(c.obj, member, true, c.Work) {
-			return false
+			return unprovedConstructorMotion("motion.original_capture_store")
 		}
 		key := member.Name + "\x00" + member.Member + "\x00" + member.Description
 		if writes[key] {
-			return false
+			return unprovedConstructorMotion("motion.distinct_field_stores")
 		}
 		writes[key] = true
 		index += 3
@@ -69,10 +81,22 @@ func (c *ClassObjectDumper) constructorCapturesCommute(p *constructorSourceBound
 	// before initialization. None can observe an early capture on this receiver.
 	next, call := constructorMotionDelegation(c.obj, ops, index, params, slots, c.FuncCtx.InvocationMetadata)
 	if call == nil || next == 0 || int(ops[next-1].CurrentOffset) != p.pc || call.Name != strings.ReplaceAll(p.delegate.ClassName, ".", "/") || call.Description != p.delegate.Descriptor {
-		return false
+		return unprovedConstructorMotion("initialization.original_delegation")
 	}
 	facts, _ := constructorOriginalArgumentFacts(c.obj, ops, index, p.pc, params, slots)
-	return c.constructorCaptureChainDoesNotObserve(call.Name, call.Description, writes, facts...)
+	previous := c.constructorMotionRefusal
+	var refusal *RecoveryMotionRefusal
+	c.constructorMotionRefusal = nil
+	if c.options.EnableRecoveryEvidence && c.report != nil && len(c.report.RecoveryEvidence) < maxRecoveryObservations {
+		c.constructorMotionRefusal = &refusal
+	}
+	defer func() { c.constructorMotionRefusal = previous }()
+	if !c.constructorCaptureChainDoesNotObserve(call.Name, call.Description, writes, facts...) {
+		decision := unprovedConstructorMotion("motion.constructor_chain_observation")
+		decision.refusal = refusal
+		return decision
+	}
+	return constructorMotionDecision{state: RecoveryRuleProved, obligation: "motion.capture_store_motion"}
 }
 
 func constructorParameterSlots(params []string) map[int]int {

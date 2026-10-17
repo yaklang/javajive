@@ -23,6 +23,20 @@ func renderHead(st statements.Statement) string {
 	if st == nil {
 		return ""
 	}
+	// The builtin throw's sealed renderer always starts with this keyword.
+	// Classifying its control flow must not render its operand: that can emit
+	// an entire anonymous class and repeat invocation proofs during CFG scans.
+	if custom, ok := st.(*statements.CustomStatement); ok {
+		if _, known := custom.SourceAssignmentForward(); known {
+			return ""
+		}
+		if kind, _, known := custom.SourceTransferProtocol(); known {
+			return kind
+		}
+		if _, known := custom.SourceThrowOperand(); known {
+			return "throw"
+		}
+	}
 	s := strings.TrimSpace(st.String(&class_context.ClassContext{}))
 	if idx := strings.IndexAny(s, " \t\n;"); idx >= 0 {
 		s = s[:idx]
@@ -34,6 +48,17 @@ func renderHead(st statements.Statement) string {
 // the only abrupt-completion leaf that makes its enclosing switch "complete normally" (control reaches
 // the statement after the switch); continue/return/throw transfer control elsewhere.
 func isBreakStatement(st statements.Statement) bool {
+	if custom, ok := st.(*statements.CustomStatement); ok {
+		if _, known := custom.SourceAssignmentForward(); known {
+			return false
+		}
+		if _, known := custom.SourceThrowOperand(); known {
+			return false
+		}
+		if kind, label, known := custom.SourceTransferProtocol(); known {
+			return kind == "break" && label == ""
+		}
+	}
 	return st != nil && strings.TrimSpace(st.String(&class_context.ClassContext{})) == "break"
 }
 

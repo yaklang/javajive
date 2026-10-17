@@ -144,7 +144,7 @@ func (z *JarFS) nativeAnonymousSourceTransaction(cf *ClassObject, independent bo
 		var source string
 		var err error
 		jdecenv.Run(snap, func() error { source, err = d.DumpClass(); return err })
-		if err != nil || !p.completeSource(source) || independent && (strings.Contains(source, DecompileStubMarker) || strings.Contains(source, "// decompile dump failed")) {
+		if err != nil || !p.completeSource(source) || d.sourceDegraded {
 			return
 		}
 		if !z.reserveOwnershipSource(int64(len(source))) {

@@ -55,3 +55,54 @@ func TestFormalBoundConstraintsRetainSignatureResourceLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestFormalTypeBoundsKeepClassAndMethodOrderedIntersections(t *testing.T) {
+	for _, tail := range []string{"Ljava/lang/Object;", "(TT;)TT;"} {
+		for _, bounds := range []string{"Ljava/lang/Object;:Ljava/lang/CharSequence;", "Ljava/lang/Object;:Ljava/io/Serializable;:Ljava/lang/CharSequence;", ":Ljava/lang/CharSequence;"} {
+			signature := "<T:" + bounds + ">" + tail
+			t.Run(signature, func(t *testing.T) {
+				constraints, valid := FormalTypeBounds(signature)
+				if !valid || len(constraints["T"]) != strings.Count(bounds, ";") {
+					t.Fatalf("ordered bounds=%v valid=%v", constraints, valid)
+				}
+				first, known := RawClassFQN(constraints["T"][0])
+				want := "java.lang.Object"
+				if strings.HasPrefix(bounds, ":") {
+					want = "java.lang.CharSequence"
+				}
+				if !known || first != want {
+					t.Fatalf("first bound=%q want=%q", first, want)
+				}
+			})
+		}
+	}
+	for _, signature := range []string{"<T:TU;>Ljava/lang/Object;", "<T:Ljava/lang/Object;T:Ljava/lang/Object;>Ljava/lang/Object;", "<T:[Ljava/lang/Object;>Ljava/lang/Object;", "<T:Ljava/lang/Object;>Ljava/lang/Object;garbage", strings.Repeat("x", 65536)} {
+		if _, valid := FormalTypeBounds(signature); valid {
+			t.Fatalf("invalid signature admitted: %.80s", signature)
+		}
+	}
+}
+
+func TestFormalSourceBoundsDoNotEraseFirstObjectInIntersection(t *testing.T) {
+	for _, fixture := range []struct{ signature, want string }{
+		{"<T:Ljava/lang/Object;>", "<T>"},
+		{"<T:Ljava/lang/Object;:Ljava/lang/CharSequence;>", "<T extends Object & CharSequence>"},
+		{"<T:Ljava/lang/Object;:Ljava/io/Serializable;:Ljava/lang/CharSequence;>", "<T extends Object & Serializable & CharSequence>"},
+		{"<T::Ljava/lang/CharSequence;>", "<T extends CharSequence>"},
+		{"<T:Lprobe/Object;>", "<T extends Object>"},
+	} {
+		t.Run(fixture.signature, func(t *testing.T) {
+			if got := ParseMethodSignatureTypeParams(fixture.signature + "(TT;)TT;"); got != fixture.want {
+				t.Fatalf("method header=%q want=%q", got, fixture.want)
+			}
+			bounds := ClassFormalTypeParamBounds(fixture.signature+"Ljava/lang/Object;", nil)
+			clause := ""
+			if b, exists := bounds["T"]; exists {
+				clause = " extends " + b.Clause
+			}
+			if got := "<T" + clause + ">"; got != fixture.want {
+				t.Fatalf("redeclared class bound=%q want=%q", got, fixture.want)
+			}
+		})
+	}
+}

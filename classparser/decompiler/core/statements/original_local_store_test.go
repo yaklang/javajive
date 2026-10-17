@@ -1,6 +1,7 @@
 package statements
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -9,7 +10,7 @@ import (
 )
 
 func TestOriginalLocalStoreRetainsEachLogicalBindingAndRHS(t *testing.T) {
-	for _, variant := range []string{"original", "null sentinel", "typed null literal", "source rename", "source ID placement", "statement clone", "repeated mark", "unwitnessed", "different RHS", "reset slot RHS", "different ref", "same ID other ref", "wrong UID", "missing ID", "parameter", "receiver", "custom", "stack alias", "changed PC", "no origin", "array store", "deep forwarding"} {
+	for _, variant := range []string{"original", "null sentinel", "typed null literal", "source rename", "source ID placement", "statement clone", "repeated mark", "declaration source clone", "declaration shallow copy", "declaration changed seed", "declaration changed source seed", "declaration changed ID", "declaration changed UID", "unwitnessed", "different RHS", "reset slot RHS", "different ref", "same ID other ref", "wrong UID", "missing ID", "parameter", "receiver", "custom", "stack alias", "changed PC", "no origin", "array store", "deep forwarding"} {
 		t.Run(variant, func(t *testing.T) {
 			typ := types.NewJavaPrimer(types.JavaLong)
 			var seed values.JavaValue = values.NewJavaLiteral(int64(17), typ)
@@ -25,7 +26,26 @@ func TestOriginalLocalStoreRetainsEachLogicalBindingAndRHS(t *testing.T) {
 			if variant != "unwitnessed" {
 				a.MarkOriginalLocalStore(11, 3)
 			}
-			want := variant == "original" || variant == "null sentinel" || variant == "typed null literal" || variant == "source rename" || variant == "source ID placement" || variant == "statement clone" || variant == "repeated mark"
+			want := variant == "original" || variant == "null sentinel" || variant == "typed null literal" || variant == "source rename" || variant == "source ID placement" || variant == "statement clone" || variant == "repeated mark" || variant == "declaration source clone"
+			if strings.HasPrefix(variant, "declaration ") {
+				ref.Val = seed
+				ref.MarkOriginalLocalDeclaration(11, 3, seed)
+				clone := ref.CloneForSourceDeclaration()
+				a.LeftValue = clone
+				switch variant {
+				case "declaration shallow copy":
+					copy := *ref
+					a.LeftValue = &copy
+				case "declaration changed seed":
+					clone.Val = values.JavaNull
+				case "declaration changed source seed":
+					ref.Val = values.JavaNull
+				case "declaration changed ID":
+					clone.Id = utils.NewRootVariableId()
+				case "declaration changed UID":
+					clone.VarUid += "foreign"
+				}
+			}
 			switch variant {
 			case "source rename":
 				ref.Id.SetName("other")

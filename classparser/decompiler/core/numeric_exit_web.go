@@ -15,7 +15,7 @@ import (
 // category needs a finite constant-domain proof excluding boolean values.
 // Entry parameters, incomplete definitions and mixed domains remain excluded.
 func (d *Decompiler) unifyNumericExitWebs() {
-	webs := d.slotWebs()
+	webs := d.localUpdateSourceWebs()
 	if webs == nil {
 		return
 	}
@@ -143,6 +143,13 @@ func (d *Decompiler) unifyNumericExitWebs() {
 			}
 		}
 		if !needsRepair {
+			// The complete web can be simulated consistently yet cross
+			// sibling source scopes. Preserve that solved identity through
+			// declaration placement as well: otherwise an else-arm STORE
+			// can be renamed into a different local and the joined LOAD
+			// silently observes the default value. Keep the existing refs,
+			// producers and immutable reaching partition intact.
+			firstRef.SolvedWebIdentity = firstRef.Id
 			continue
 		}
 		d.bindProvedPrimitiveWeb(webs, web, stores, kind)
