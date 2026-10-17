@@ -87,6 +87,10 @@ type DecompileOptions struct {
 	// EnableShadowIR builds a read-only MethodIR snapshot after SemanticCFG.
 	// The old printer remains the default source path. Default false.
 	EnableShadowIR bool
+
+	// EnableRecoveryEvidence records bounded, request-local observations of
+	// existing recovery rules. It grants no additional rewrite permission.
+	EnableRecoveryEvidence bool
 }
 
 type DecompileDiagnostic struct {
@@ -102,19 +106,22 @@ type RewriteRecord struct {
 	AfterHash  string `json:"after_hash"`
 }
 type DecompileResult struct {
-	Members         []MemberRecord           `json:"members"`
-	Shadow          []core.ShadowObservation `json:"shadow"`
-	Syntax          ValidationObservation    `json:"syntax"`
-	Source          string                   `json:"source"`
-	Mode            DecompileMode            `json:"mode"`
-	InputHash       string                   `json:"input_hash"`
-	Status          string                   `json:"status"`
-	StubMethods     []string                 `json:"stub_methods"`
-	RulesApplied    []RewriteRecord          `json:"rules_applied"`
-	Diagnostics     []DecompileDiagnostic    `json:"diagnostics"`
-	EffectiveConfig *EffectiveConfig         `json:"effective_config,omitempty"`
-	ShadowIRHash    string                   `json:"shadow_ir_hash,omitempty"`
-	ShadowIRVersion uint64                   `json:"shadow_ir_version,omitempty"`
+	Members                   []MemberRecord                  `json:"members"`
+	Shadow                    []core.ShadowObservation        `json:"shadow"`
+	Syntax                    ValidationObservation           `json:"syntax"`
+	Source                    string                          `json:"source"`
+	Mode                      DecompileMode                   `json:"mode"`
+	InputHash                 string                          `json:"input_hash"`
+	Status                    string                          `json:"status"`
+	StubMethods               []string                        `json:"stub_methods"`
+	RulesApplied              []RewriteRecord                 `json:"rules_applied"`
+	Diagnostics               []DecompileDiagnostic           `json:"diagnostics"`
+	EffectiveConfig           *EffectiveConfig                `json:"effective_config,omitempty"`
+	ShadowIRHash              string                          `json:"shadow_ir_hash,omitempty"`
+	ShadowIRVersion           uint64                          `json:"shadow_ir_version,omitempty"`
+	RecoveryEvidence          []RecoveryObligationObservation `json:"recovery_evidence,omitempty"`
+	RecoveryEvidenceEnabled   bool                            `json:"recovery_evidence_enabled,omitempty"`
+	RecoveryEvidenceTruncated bool                            `json:"recovery_evidence_truncated,omitempty"`
 }
 
 // EffectiveConfig is the request-local snapshot of policy actually used.
@@ -143,9 +150,10 @@ func decompileWithBudget(data []byte, options DecompileOptions) (result Decompil
 		options.Mode = Precision
 	}
 	result = DecompileResult{
-		Mode:            options.Mode,
-		Status:          "invalid_input",
-		EffectiveConfig: effectiveConfigOf(options),
+		Mode:                    options.Mode,
+		Status:                  "invalid_input",
+		EffectiveConfig:         effectiveConfigOf(options),
+		RecoveryEvidenceEnabled: options.EnableRecoveryEvidence,
 	}
 	if options.Mode != Precision && options.Mode != Compatibility {
 		return result, nil, fmt.Errorf("unknown decompile mode %q", options.Mode)

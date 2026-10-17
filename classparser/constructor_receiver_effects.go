@@ -670,7 +670,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				// Class initialization/linkage may fail, but no published THIS
 				// can reside in a static field. Preserve the original operation;
 				// after initialization, failure requires a closed finalizer.
-				if initialized && !c.constructorReceiverFinalizerSilent {
+				if !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 					return false
 				}
 				member := constructorMotionMember(obj, op, opcode)
@@ -698,7 +698,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					}
 				}
 			case opcode == core.OP_CHECKCAST || opcode == core.OP_INSTANCEOF:
-				if len(op.Data) != 2 || initialized && !c.constructorReceiverFinalizerSilent {
+				if len(op.Data) != 2 || !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 					return false
 				}
 				if _, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(op.Data)); !known {
@@ -727,11 +727,11 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				// bootstrap/linkage/call effects and failure timing in their original place.
 				// An unpublished fresh THIS cannot alias its result unless passed in; reject
 				// receiver/uninitialized arguments, and retain the finalization boundary.
-				descriptor, known := c.constructorReceiverDynamicDescriptor(obj, code, op, remaining)
-				if !known || initialized && !c.constructorReceiverFinalizerSilent || !originalBody() {
+				dynamicDescriptor, known := c.constructorReceiverDynamicDescriptor(obj, code, op, remaining)
+				if !known || !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) || !originalBody() {
 					return false
 				}
-				args, result, err := callbinding.Descriptor(descriptor)
+				args, result, err := callbinding.Descriptor(dynamicDescriptor)
 				if err != nil {
 					return false
 				}
@@ -748,7 +748,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				// A distinct allocation is not THIS. Preserve its identity through
 				// DUP/local aliases until its original constructor initializes all
 				// those aliases. Failure still needs the caller's finalizer proof.
-				if len(op.Data) != 2 || initialized && !c.constructorReceiverFinalizerSilent {
+				if len(op.Data) != 2 || !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 					return false
 				}
 				owner, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(op.Data))
@@ -762,7 +762,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				// Allocation and array-component linkage can fail, including
 				// OOME. This is the same failure boundary as a receiver-free call;
 				// the allocation never receives THIS or changes effect order.
-				if initialized && !c.constructorReceiverFinalizerSilent {
+				if !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 					return false
 				}
 				if opcode == core.OP_NEWARRAY {
@@ -787,7 +787,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				// be observed through it: THIS was not published into any array,
 				// and neither the array operand nor a stored value may be THIS.
 				// Only a closed finalizer licenses a failure after initialization.
-				if !constructorEffectOriginalOperandFree(code, op) || initialized && !c.constructorReceiverFinalizerSilent {
+				if !constructorEffectOriginalOperandFree(code, op) || !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 					return false
 				}
 				store := opcode >= core.OP_IASTORE && opcode <= core.OP_SASTORE
@@ -863,7 +863,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					// A linkage failure after Object initialization has the same
 					// closed-finalizer boundary as other opaque operations.
 					name, known := sourceBridgeClassName(obj, uint16(cp))
-					if !known || obj.MajorVersion < 49 || len(name) > 65535 || !nativeProofWork(c.Work, int64(len(name))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(name))*8+128) != nil || !originalBody() || initialized && !c.constructorReceiverFinalizerSilent {
+					if !known || obj.MajorVersion < 49 || len(name) > 65535 || !nativeProofWork(c.Work, int64(len(name))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(name))*8+128) != nil || !originalBody() || !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 						return false
 					}
 					typeName := name
@@ -940,7 +940,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					// input or initialized allocation cannot hide an alias to it.
 					// Keep the original field operation and failure timing; after
 					// Object initialization, failure needs the closed finalizer.
-					if stored.reachesReceiver() || initialized && !c.constructorReceiverFinalizerSilent {
+					if stored.reachesReceiver() || !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 						return false
 					}
 					if opcode == core.OP_GETFIELD {
@@ -1013,7 +1013,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					}
 					continue
 				}
-				if initialized && !c.constructorReceiverFinalizerSilent {
+				if !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 					return false
 				}
 				if member.Member == "<init>" {
@@ -1071,7 +1071,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					if opcode >= core.OP_IDIV {
 						// Division/remainder preserve their original zero-divisor
 						// failure and operand evaluation, as do independent arrays.
-						if !constructorEffectOriginalOperandFree(code, op) || initialized && !c.constructorReceiverFinalizerSilent {
+						if !constructorEffectOriginalOperandFree(code, op) || !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 							return false
 						}
 					}
@@ -1173,7 +1173,7 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				// moved store after a failed initialized constructor. Its closed
 				// receiver proof is mandatory then. Null keeps the original NPE;
 				// a distinct initialized throwable keeps its original identity.
-				if !constructorEffectOriginalOperandFree(code, op) || initialized && !c.constructorReceiverFinalizerSilent {
+				if !constructorEffectOriginalOperandFree(code, op) || !c.constructorExitObservationProved(initialized, obj, code, descriptor, int(op.CurrentOffset)) {
 					return false
 				}
 				v, ok := pop('L')
