@@ -90,7 +90,18 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 	}
 
 	samN := t19SAMParamCount(static)
-	if t19ShouldInline(d, impl, len(capturedEval), samN) {
+	declaration := d.originalLambdaDeclaration(impl)
+	if declaration == LambdaDeclarationOrdinary && !t19OrdinaryMethodReferenceShape(impl, len(capturedEval), samN) {
+		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "ordinary implementation partial application has no proven source representation", resultType)
+	}
+	inline := t19ShouldInline(d, impl, len(capturedEval), samN)
+	if inline && declaration != LambdaDeclarationSyntheticBody {
+		if declaration != LambdaDeclarationOrdinary {
+			return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "lambda source body requires original synthetic declaration metadata", resultType)
+		}
+		inline = false
+	}
+	if inline {
 		f := buildinBootstrapMethods["java.lang.invoke.LambdaMetafactory.metafactory"]
 		if strings.HasPrefix(impl.Member, "lambda$") {
 			if f == nil {
@@ -170,8 +181,9 @@ func t19MethodTypeDesc(v values.JavaValue) string {
 	return ""
 }
 
-// t19ShouldInline decides lambda-body inlining from handle identity (kind, owner, name, desc)
-// plus capture/SAM arity. `lambda$` is only a hint for same-class synthetic bodies.
+// t19ShouldInline selects a candidate from handle identity and arity. The
+// adapter separately requires original synthetic-declaration evidence before
+// invoking a source-body renderer; this heuristic grants no such permission.
 func t19ShouldInline(d *Decompiler, impl *values.JavaClassMember, captured, samN int) bool {
 	if d == nil || d.FunctionContext == nil || impl == nil {
 		return false

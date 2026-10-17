@@ -89,19 +89,22 @@ type Decompiler struct {
 	// receiver and arguments were bound at phase-1 time when opcodeIdToRef was incomplete). The
 	// phase-1-post pass rebindIncompatibleInvokeArgs walks this map to rebind incompatible
 	// receivers/arguments using the now-complete opcodeIdToRef. Populated in the phase-1 invoke handler.
-	invokeFuncCall                   map[*OpCode]*values.FunctionCallExpression
-	bytecodes                        []byte
-	opcodeCodeLength                 int // PC space of the current opcode list, including jsr expansion
-	opCodes                          []*OpCode
-	RootOpCode                       *OpCode
-	RootNode                         *Node
-	constantPoolGetter               func(id int) values.JavaValue
-	ConstantPoolLiteralGetter        func(constantPoolGetterid int) values.JavaValue
-	ConstantPoolInvokeDynamicInfo    func(id int) (uint16, string, string)
-	offsetToOpcodeIndex              map[uint16]int
-	opcodeIndexToOffset              map[int]uint16
-	ExceptionTable                   []*ExceptionTableEntry
-	BootstrapMethods                 []*BootstrapMethod
+	invokeFuncCall                map[*OpCode]*values.FunctionCallExpression
+	bytecodes                     []byte
+	opcodeCodeLength              int // PC space of the current opcode list, including jsr expansion
+	opCodes                       []*OpCode
+	RootOpCode                    *OpCode
+	RootNode                      *Node
+	constantPoolGetter            func(id int) values.JavaValue
+	ConstantPoolLiteralGetter     func(constantPoolGetterid int) values.JavaValue
+	ConstantPoolInvokeDynamicInfo func(id int) (uint16, string, string)
+	offsetToOpcodeIndex           map[uint16]int
+	opcodeIndexToOffset           map[int]uint16
+	ExceptionTable                []*ExceptionTableEntry
+	BootstrapMethods              []*BootstrapMethod
+	// Original declaration metadata qualifies source-body rendering. A source
+	// request or a method-name convention cannot provide that permission.
+	OriginalLambdaDeclaration        func(owner, name, descriptor string) LambdaOriginalDeclaration
 	DumpClassLambdaMethod            func(name, desc string, id *utils2.VariableId, captured []values.JavaValue) (string, error)
 	DumpClassLambdaMethodWithAdapter func(name, desc string, id *utils2.VariableId, captured []values.JavaValue, adapter *LambdaReferenceAdapter) (string, error)
 	// The PC is supplied by the original invokedynamic request, never inferred

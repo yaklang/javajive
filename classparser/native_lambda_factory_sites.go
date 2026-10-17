@@ -84,7 +84,7 @@ func nativeLambdaFactorySourcesClosed(method *MemberInfo, factories []*nativeLam
 			return false
 		}
 		body := source.implementationBody
-		if body.sourceReconstructionFailed() || seenBodies[body] || body.member != method || body.checkedEscape {
+		if !dumper.lambdaMethodSourcePacketClosed(method, body, work) || body.sourceReconstructionFailed() || seenBodies[body] || body.member != method || body.checkedEscape || body.sourceRequest.captureCount != len(site.operands) {
 			return false
 		}
 		seenBodies[body] = true

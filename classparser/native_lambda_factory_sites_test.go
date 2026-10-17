@@ -170,7 +170,9 @@ func TestNativeSharedLambdaSourceClosesEveryOriginalEnvironment(t *testing.T) {
 				lambda.OriginPC = site.pc
 				lambda.CapturesKnown = true
 				lambda.Captures = []values.JavaValue{capture}
-				d.nativeLambdaFactorySources[site] = &nativeLambdaLocalCaptureSource{method: site.method, code: site.code, factoryPC: site.pc, hasFactoryPC: true, values: lambda.Captures, body: []statements.Statement{&statements.ReturnStatement{JavaValue: lambda}}, implementationBody: &dumpedMethods{member: method, code: "return LCAP0;", bodyCode: "return LCAP0;"}}
+				body := &dumpedMethods{member: method, code: "return LCAP0;", bodyCode: "return LCAP0;"}
+				registerMethodSourceBodyFixture(t, d, name, desc, len(site.operands), body)
+				d.nativeLambdaFactorySources[site] = &nativeLambdaLocalCaptureSource{method: site.method, code: site.code, factoryPC: site.pc, hasFactoryPC: true, values: lambda.Captures, body: []statements.Statement{&statements.ReturnStatement{JavaValue: lambda}}, implementationBody: body}
 			}
 			source := d.nativeLambdaFactorySources[factories[0]]
 			var work *workbudget.Budget

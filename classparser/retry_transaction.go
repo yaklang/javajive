@@ -42,6 +42,38 @@ func (c *ClassObjectDumper) snapshotRetryState() func() {
 			saved.dumpedMethodsSet[k] = &vCopy
 		}
 	}
+	saved.lambdaMethodSourceBodies = maps.Clone(c.lambdaMethodSourceBodies)
+	for member, receipt := range saved.lambdaMethodSourceBodies {
+		if receipt != nil {
+			copy := *receipt
+			if body := saved.dumpedMethodsSet[copy.key]; body != nil {
+				copy.body = body
+			}
+			saved.lambdaMethodSourceBodies[member] = &copy
+		}
+	}
+	saved.nativeLambdaFactorySources = maps.Clone(c.nativeLambdaFactorySources)
+	for site, source := range saved.nativeLambdaFactorySources {
+		if source != nil {
+			copy := *source
+			copy.values, copy.body = slices.Clone(source.values), slices.Clone(source.body)
+			if source.implementationBody != nil {
+				copy.implementationBody = saved.dumpedMethodsSet[source.implementationBody.sourceCacheKey]
+			}
+			saved.nativeLambdaFactorySources[site] = &copy
+		}
+	}
+	saved.nativeLambdaLocalSources = maps.Clone(c.nativeLambdaLocalSources)
+	for key, source := range saved.nativeLambdaLocalSources {
+		if source != nil {
+			copy := *source
+			copy.values, copy.body = slices.Clone(source.values), slices.Clone(source.body)
+			if source.implementationBody != nil {
+				copy.implementationBody = saved.dumpedMethodsSet[source.implementationBody.sourceCacheKey]
+			}
+			saved.nativeLambdaLocalSources[key] = &copy
+		}
+	}
 	saved.deepStack = utils.NewStack[int]()
 	if c.deepStack != nil {
 		xs := c.deepStack.Values()
@@ -59,7 +91,13 @@ func (c *ClassObjectDumper) snapshotRetryState() func() {
 		report.RulesApplied = slices.Clone(report.RulesApplied)
 	}
 	return func() {
+		spentRequestSerial := c.methodSourceRequestSerial
 		*c = saved
+		// Actual callback identities and their finite capacity are spent work,
+		// even when the retry restores every failed cache and source index.
+		if spentRequestSerial > c.methodSourceRequestSerial {
+			c.methodSourceRequestSerial = spentRequestSerial
+		}
 		if originalContext != nil {
 			*originalContext = *saved.FuncCtx
 			if originalRenderState != nil && saved.FuncCtx.SourceRendering != nil {

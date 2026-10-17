@@ -30,6 +30,8 @@ import (
 )
 
 type ClassObjectDumper struct {
+	methodSourceRequestSerial      uint64
+	lambdaMethodSourceBodies       map[*MemberInfo]*lambdaMethodSourceReceipt
 	sourceDeclarationAccess        uint16
 	sourceDeclarationAccessKnown   bool
 	nativeSourceAssertions         *nativeMemberAssertion
@@ -3696,8 +3698,17 @@ func (c *ClassObjectDumper) DumpMethodWithInitialId(methodName, desc string, id 
 	return c.dumpMethodWithInitialId(methodName, desc, id, nil)
 }
 
-func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id *utils2.VariableId, adapter *core.LambdaReferenceAdapter) (*dumpedMethods, error) {
+func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string, id *utils2.VariableId, adapter *core.LambdaReferenceAdapter, request methodSourceRequest) (renderedMethod *dumpedMethods, renderErr error) {
+	if !request.valid() {
+		return nil, fmt.Errorf("invalid method source request")
+	}
+	if request.role == methodSourceLambdaBody && (c == nil || c.obj == nil || c.originalLambdaDeclaration(c.obj.GetClassName(), methodName, desc) != core.LambdaDeclarationSyntheticBody) {
+		return nil, fmt.Errorf("lambda source body is not an eligible original synthetic declaration")
+	}
 	traitId := fmt.Sprintf("name:%s,desc:%s", methodName, desc)
+	if request.role == methodSourceLambdaBody {
+		traitId += fmt.Sprintf(",source:lambda-body,captures:%d,request:%d", request.captureCount, request.serial)
+	}
 	if site := c.nativeLambdaBodySite; site != nil {
 		// Identical erased helpers can be rendered with distinct source capture
 		// types and binders. Never reuse a body from another physical factory.
@@ -3707,12 +3718,38 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		traitId += ",sam:" + adapter.ErasedDescriptor + ",inst:" + adapter.InstantiatedDescriptor
 	}
 	if v, ok := c.dumpedMethodsSet[traitId]; ok {
+		if v != nil && !c.methodParameterNameCacheClosed(v.parameterNameStamp) {
+			return nil, fmt.Errorf("cached original parameter-name source packet is stale")
+		}
 		if c.FuncCtx != nil && c.FuncCtx.SourceRendering != nil && v != nil {
 			c.FuncCtx.SourceRendering.IncompleteValue = c.FuncCtx.SourceRendering.IncompleteValue || v.incompleteValue
 			c.FuncCtx.SourceRendering.MalformedTry = c.FuncCtx.SourceRendering.MalformedTry || v.malformedTry
 		}
 		return v, nil
 	}
+	consumption, consumptionKnown := c.snapshotLambdaSourceConsumption()
+	if !consumptionKnown {
+		return nil, fmt.Errorf("lambda source consumption snapshot exceeds budget")
+	}
+	var ownedCacheEntry *dumpedMethods
+	// Keep in-progress recursion, but a failed invocation owns no reusable
+	// source packet. Nested calls may have completed other cache entries.
+	defer func() {
+		failure := recover()
+		if renderErr == nil && failure == nil && ownedCacheEntry != nil && !c.methodParameterNameCacheClosed(ownedCacheEntry.parameterNameStamp) {
+			renderErr = fmt.Errorf("original parameter-name source packet changed while rendering")
+			renderedMethod = nil
+		}
+		if renderErr != nil || failure != nil || ownedCacheEntry != nil && ownedCacheEntry.sourceReconstructionFailed() {
+			c.restoreLambdaSourceConsumption(consumption)
+			if ownedCacheEntry != nil && c.dumpedMethodsSet[traitId] == ownedCacheEntry {
+				delete(c.dumpedMethodsSet, traitId)
+			}
+		}
+		if failure != nil {
+			panic(failure)
+		}
+	}()
 	if c.FuncCtx != nil {
 		previousCatchEntries := c.FuncCtx.CatchEntryNames
 		c.FuncCtx.CatchEntryNames = nil
@@ -3722,6 +3759,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	var name, descriptor string
 	var err error
 	var dumped = &dumpedMethods{}
+	dumped.sourceRequest = request
+	dumped.sourceDumper = c
+	dumped.sourceObject = c.obj
+	dumped.sourceCacheKey = traitId
 	if c.FuncCtx != nil {
 		context := c.FuncCtx
 		prior := context.SourceRendering
@@ -3747,6 +3788,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	}()
 
 	c.dumpedMethodsSet[traitId] = dumped
+	ownedCacheEntry = dumped
 	for _, info := range c.obj.Methods {
 		name, err = c.obj.getUtf8(info.NameIndex)
 		if err != nil {
@@ -3769,10 +3811,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	// certificate as well as for ordinary declarations.
 	dumped.member = method
 
-	var isLambda bool
-	if v := c.lambdaMethods[name]; slices.Contains(v, descriptor) {
-		isLambda = true
-	}
+	isLambda := request.role == methodSourceLambdaBody
 	// Track lexical lambda nesting so nested-lambda parameters get collision-free names (see
 	// c.lambdaDepth). The increment must bracket ParseBytesCode below, because an inner lambda's arrow
 	// is materialised eagerly during the outer lambda's bytecode parse.
@@ -3983,6 +4022,36 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	annoStrs := []string{}
 	funcCtx.FunctionType = c.MethodType
 	var paramsNewStr string
+	var originalParameterNames []string
+	if !isLambda {
+		// A SAM header is a different source declaration from the physical
+		// implementation method, including nonsynthetic implementations.
+		var parameterNamesKnown bool
+		originalParameterNames, parameterNamesKnown = c.originalOrdinaryMethodParameterNames(method, descriptor)
+		if !parameterNamesKnown {
+			return nil, fmt.Errorf("unproved original ordinary parameter names")
+		}
+	}
+	if !isLambda {
+		var stampKnown bool
+		dumped.parameterNameStamp, stampKnown = c.newMethodParameterNameCacheStamp(method, descriptor, originalParameterNames)
+		if !stampKnown {
+			return nil, fmt.Errorf("original parameter-name source packet cannot be stamped")
+		}
+	}
+	if originalParameterNames != nil {
+		previousArguments := funcCtx.Arguments
+		previousLocalNames := funcCtx.LocalNames
+		if c.Work != nil && c.Work.CheckAlloc(int64(len(previousArguments)+len(originalParameterNames))*16+int64(len(previousLocalNames))*64) != nil {
+			return nil, fmt.Errorf("original parameter namespace exceeds budget")
+		}
+		funcCtx.Arguments = append(slices.Clone(previousArguments), originalParameterNames...)
+		funcCtx.LocalNames = maps.Clone(previousLocalNames)
+		defer func() {
+			funcCtx.Arguments = previousArguments
+			funcCtx.LocalNames = previousLocalNames
+		}()
+	}
 	var lambdaParamNames []string
 	var lambdaMethodLocalNamespace bool
 	var lambdaAdapterPrologue string
@@ -4121,7 +4190,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				samParams = samParams[1:]
 			}
 			if isLambda {
-				if n := c.lambdaCaptureCount[name+descriptor]; n > 0 {
+				if n := request.captureCount; n > 0 {
 					capArgOffset := 0
 					if thisRemoved {
 						capArgOffset = 1
@@ -4144,6 +4213,14 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			isEnumCtor := name == "<init>" && c.isGenuineEnum()
 			if isEnumCtor && len(samParams) >= 2 {
 				samParams = samParams[2:]
+			}
+			var parameterNameBinding *ordinaryMethodParameterNameBinding
+			if !isLambda {
+				var namesBound bool
+				parameterNameBinding, namesBound = c.bindOrdinaryMethodParameterNames(method, descriptor, originalParameterNames, samParams)
+				if !namesBound {
+					return nil, fmt.Errorf("unproved original parameter entry identities")
+				}
 			}
 			// A lambda body is emitted as an arrow expression `(Type p0, Type p1) -> ...`
 			// inline in the enclosing method, so Java requires its parameter names to be unique
@@ -4206,7 +4283,12 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if localErr != nil {
 				return nil, localErr
 			}
-			c.prepareNativeLocalShadowing(statementList, params)
+			if !c.prepareOrdinaryMethodParameterNamespace(parameterNameBinding, statementList, params) {
+				return nil, fmt.Errorf("unproved original parameter namespace")
+			}
+			if isLambda && !c.prepareLambdaEnclosingParameterNamespace(statementList, samParams) {
+				return nil, fmt.Errorf("unproved enclosing parameter/lambda namespace")
+			}
 			// Capture planning can constrain a SAM binder after its initial name.
 			// Refresh the header from those same declaration IDs after all binding decisions.
 			if isLambda {
@@ -4230,6 +4312,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					return nil, fmt.Errorf("unproved final parameter definition/storage separation")
 				}
 				c.nativeMemberBody = statementList
+			}
+			if !c.ordinaryMethodParameterNamesClosed(parameterNameBinding, samParams) {
+				return nil, fmt.Errorf("original parameter names changed in source namespace")
 			}
 			c.nativeSourceNamesReady = !c.nativeCaptureFailed
 			paramsNewStrList := []string{}
@@ -4327,7 +4412,14 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 
 			// Rename locals whose slot-derived names collide across nested scopes (e.g. two
 			// nested catch parameters both named var4) so the emitted Java is re-compilable.
-			resolveLocalNameCollisions(params, statementList)
+			if parameterNameBinding != nil {
+				resolveLocalNameCollisions(samParams, statementList)
+			} else {
+				resolveLocalNameCollisions(params, statementList)
+			}
+			if !c.ordinaryMethodParameterNamesClosed(parameterNameBinding, samParams) {
+				return nil, fmt.Errorf("original parameter declaration names are not closed")
+			}
 
 			// Per-constructor/<clinit> count of field assignments. A final field is only safe to
 			// lift into a field initializer when assigned exactly once in this body; a blank final
@@ -4898,6 +4990,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		paramList := []string{}
 		// fetch from method type
 		paramTypes := methodType.FunctionType().ParamTypes
+		parameterNameIDs, namesKnown := c.abstractMethodParameterNameIDs(originalParameterNames, len(paramTypes))
+		if !namesKnown {
+			return nil, fmt.Errorf("unproved original abstract parameter names")
+		}
 		// Abstract method parameters now standalone-erase undeclarable enclosing type vars
 		// (Itr.output(K,V) -> output(Object,Object)) so the flattened unit compiles. Matching
 		// no-own-formal sibling overrides force-erase the same names via ForceParamEraseTypeVars
@@ -4912,11 +5008,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			// and does not override」。这里此前漏掉了 ElementType 剥离 (拼接式方法/lambda/stub 路径都对),
 			// 是 fastjson2 JSONPath.set 等抽象 varargs 方法的整族重编译失败根因。
 			if isVarArgs && idx == len(paramTypes)-1 && t.IsArray() && c.getenv("JDEC_VARARGS_ABSTRACT_FIX_OFF") == "" {
-				paramList = append(paramList, fmt.Sprintf("%s... var%d", renderMethodParamType(t.ElementType(), funcCtx), idx))
+				paramList = append(paramList, fmt.Sprintf("%s... %s", renderMethodParamType(t.ElementType(), funcCtx), parameterNameIDs[idx].String()))
 			} else if isVarArgs && idx == len(paramTypes)-1 {
-				paramList = append(paramList, fmt.Sprintf("%s... var%d", typeName, idx))
+				paramList = append(paramList, fmt.Sprintf("%s... %s", typeName, parameterNameIDs[idx].String()))
 			} else {
-				paramList = append(paramList, fmt.Sprintf("%s var%d", typeName, idx))
+				paramList = append(paramList, fmt.Sprintf("%s %s", typeName, parameterNameIDs[idx].String()))
 			}
 		}
 		paramList = c.applyParameterAnnotations(method, name, descriptor, paramList)
@@ -5101,14 +5197,19 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 }
 
 type dumpedMethods struct {
-	incompleteValue bool
-	malformedTry    bool
-	isStub          bool
-	initializerCode string
-	checkedEscape   bool
-	methodName      string
-	code            string
-	bodyCode        string
+	parameterNameStamp *methodParameterNameCacheStamp
+	sourceRequest      methodSourceRequest
+	sourceDumper       *ClassObjectDumper
+	sourceObject       *ClassObject
+	sourceCacheKey     string
+	incompleteValue    bool
+	malformedTry       bool
+	isStub             bool
+	initializerCode    string
+	checkedEscape      bool
+	methodName         string
+	code               string
+	bodyCode           string
 	// member/descriptor are retained so the post-decompile syntax safety net can rebuild a
 	// stub for a method whose generated body turns out to be un-parseable.
 	member     *MemberInfo
@@ -13292,7 +13393,10 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if c.recordSkipMethods[name+descriptor] || c.recordSkipMethods[name] {
 			continue
 		}
-		if v := c.lambdaMethods[name]; slices.Contains(v, descriptor) {
+		// A lambda-body request does not consume an ordinary physical
+		// declaration. Only compiler-owned synthetic implementations are
+		// regenerated by the arrow expression.
+		if v := c.lambdaMethods[name]; isSyntheticMethod(method.AccessFlags) && slices.Contains(v, descriptor) {
 			continue
 		}
 		// Synthetic lambda bodies (javac emits "lambda$...") must never be dumped as

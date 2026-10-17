@@ -1488,6 +1488,9 @@ func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 	return true
 }
 func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
+	return c.nativeLexicalCaptureNames(true)
+}
+func (c *ClassObjectDumper) nativeLexicalCaptureNames(ownStaticFields bool) map[string]bool {
 	result := map[string]bool{}
 	for name := range c.nativeLambdaFactoryParameterNames[c.CurrentMethod] {
 		result[name] = true
@@ -1505,10 +1508,12 @@ func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 		// Own static fields may be printed without a qualifier. Their original
 		// declarations are field bindings, never missing generated JVM locals.
 		// Reserve the names over actual local IDs as well as the source fallback.
-		for _, field := range c.obj.Fields {
-			if field != nil && field.AccessFlags&8 != 0 {
-				if name, known := sourceBridgeUTF8(c.obj, field.NameIndex); known && class_context.PreservesJava8Identifier(name) {
-					result[name] = true
+		if ownStaticFields {
+			for _, field := range c.obj.Fields {
+				if field != nil && field.AccessFlags&8 != 0 {
+					if name, known := sourceBridgeUTF8(c.obj, field.NameIndex); known && class_context.PreservesJava8Identifier(name) {
+						result[name] = true
+					}
 				}
 			}
 		}

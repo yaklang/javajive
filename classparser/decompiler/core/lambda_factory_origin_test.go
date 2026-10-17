@@ -12,6 +12,12 @@ import (
 
 func TestLambdaFactoryOriginIsExplicitAndZeroIsNotMissing(t *testing.T) {
 	d := &Decompiler{}
+	d.OriginalLambdaDeclaration = func(owner, name, descriptor string) LambdaOriginalDeclaration {
+		if owner == "Owner" && name == "lambda$body$0" && descriptor == "()Ljava/lang/Object;" {
+			return LambdaDeclarationSyntheticBody
+		}
+		return LambdaDeclarationUnknown
+	}
 	member := values.NewJavaClassMember("Owner", "lambda$body$0", "()Ljava/lang/Object;", types.NewJavaClass("java.lang.Object"))
 	legacy, actual := 0, 0
 	d.DumpClassLambdaMethod = func(name, desc string, id *utils.VariableId, captured []values.JavaValue) (string, error) {
@@ -37,6 +43,12 @@ func TestLambdaSyntheticBootstrapKeepsScopedOriginalFactoryOrigin(t *testing.T) 
 	for _, pc := range []int{0, 37} {
 		for _, fail := range []bool{false, true} {
 			d := &Decompiler{FunctionContext: &class_context.ClassContext{ClassName: "Sample"}}
+			d.OriginalLambdaDeclaration = func(owner, name, descriptor string) LambdaOriginalDeclaration {
+				if owner == "Sample" && name == "lambda$main$0" && descriptor == "(I)I" {
+					return LambdaDeclarationSyntheticBody
+				}
+				return LambdaDeclarationUnknown
+			}
 			previous := 91
 			d.lambdaFactoryOrigin = &previous
 			calls := 0

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -17,6 +18,9 @@ type LambdaReferenceAdapter struct {
 }
 
 func dumpLambdaWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember, captured []values.JavaValue, raw types.JavaType, static []values.JavaValue, origin ...int) (string, error) {
+	if d.originalLambdaDeclaration(impl) != LambdaDeclarationSyntheticBody {
+		return "", fmt.Errorf("lambda source body requires original synthetic declaration metadata")
+	}
 	var adapter *LambdaReferenceAdapter
 	if len(static) >= 3 && !d.blockPartialFunctionalTarget {
 		erased, actual := t19MethodTypeDesc(static[0]), t19MethodTypeDesc(static[2])

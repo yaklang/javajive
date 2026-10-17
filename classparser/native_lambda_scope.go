@@ -286,24 +286,8 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 				if op == nil || op.Instr == nil {
 					return false
 				}
-				if op.Instr.OpCode == core.OP_LDC || op.Instr.OpCode == core.OP_LDC_W || op.Instr.OpCode == core.OP_LDC2_W {
-					index := uint16(0)
-					if len(op.Data) == 1 {
-						index = uint16(op.Data[0])
-					} else if len(op.Data) == 2 {
-						index = core.Convert2bytesToInt(op.Data)
-					} else {
-						return false
-					}
-					if handles[index] {
-						return false
-					}
-				}
-				for _, kind := range []int{core.OP_INVOKESTATIC, core.OP_INVOKEVIRTUAL, core.OP_INVOKEINTERFACE, core.OP_INVOKESPECIAL} {
-					ref := constructorMotionMember(object, op, kind)
-					if ref != nil && ref.Name == object.GetClassName() && ref.Member == name && ref.Description == desc {
-						return false
-					}
+				if !nativeLambdaExclusiveOpcodeUse(object, object.GetClassName(), name, desc, handles, op) {
+					return false
 				}
 				if op.Instr.OpCode != core.OP_INVOKEDYNAMIC {
 					continue

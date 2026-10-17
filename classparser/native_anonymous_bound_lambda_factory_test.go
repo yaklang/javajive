@@ -2,7 +2,6 @@ package javaclassparser
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
@@ -72,7 +71,7 @@ func TestNativeAnonymousBoundLambdaSourceCannotSubstituteParameterForReceiver(t 
 			dumper := NewClassObjectDumper(packet.object)
 			dumper.lambdaMethods[name] = []string{desc}
 			body := &dumpedMethods{member: implementation, code: "return this.current;", bodyCode: "return this.current;"}
-			dumper.dumpedMethodsSet[fmt.Sprintf("name:%s,desc:%s", name, desc)] = body
+			registerMethodSourceBodyFixture(t, dumper, name, desc, 1, body)
 			dumper.nativeLambdaLocalSources = map[string]*nativeLambdaLocalCaptureSource{name + desc: source}
 			switch variant {
 			case "static slot zero":

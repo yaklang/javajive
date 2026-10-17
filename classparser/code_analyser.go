@@ -206,7 +206,11 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 	parser := core.NewDecompiler(codeAttr.Code, func(id int) values.JavaValue {
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
+	parser.OriginalLambdaDeclaration = dumper.originalLambdaDeclaration
 	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int, hasPC bool) (string, error) {
+		if dumper.originalLambdaDeclaration(dumper.obj.GetClassName(), name, desc) != core.LambdaDeclarationSyntheticBody {
+			return "", fmt.Errorf("lambda source body is not an eligible original synthetic declaration")
+		}
 		site, closed := dumper.recordNativeLambdaFactorySource(name, desc, codeAttr, captured, pc, hasPC)
 		if !closed {
 			return "", fmt.Errorf("original lambda local capture source is not closed")
@@ -258,9 +262,16 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 		previousSite := dumper.nativeLambdaBodySite
 		dumper.nativeLambdaBodySite = site
 		defer func() { dumper.nativeLambdaBodySite = previousSite }()
-		dumped, err := dumper.dumpMethodWithInitialId(name, desc, id, adapter)
+		request, known := dumper.newLambdaMethodSourceRequest(len(captured))
+		if !known {
+			return "", fmt.Errorf("lambda source request exceeds budget")
+		}
+		dumped, err := dumper.dumpMethodWithSourceRequest(name, desc, id, adapter, request)
 		if err != nil {
 			return "", err
+		}
+		if !dumper.recordLambdaMethodSourceBody(name, desc, request, dumped) {
+			return "", fmt.Errorf("successful lambda source body receipt is not closed")
 		}
 		if site != nil {
 			dumper.nativeLambdaFactorySources[site].implementationBody = dumped

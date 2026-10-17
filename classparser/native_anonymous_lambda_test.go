@@ -2,7 +2,6 @@ package javaclassparser
 
 import (
 	"context"
-	"fmt"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -140,7 +139,7 @@ func TestNativeAnonymousLambdaCapturedSourceCannotSubstituteSameTypedProducer(t 
 			dumper := NewClassObjectDumper(p.object)
 			dumper.lambdaMethods[name] = []string{desc}
 			body := &dumpedMethods{member: method, code: "return capture;", bodyCode: "return capture;"}
-			dumper.dumpedMethodsSet[fmt.Sprintf("name:%s,desc:%s", name, desc)] = body
+			registerMethodSourceBodyFixture(t, dumper, name, desc, 1, body)
 			dumper.nativeLambdaLocalSources = map[string]*nativeLambdaLocalCaptureSource{name + desc: source}
 			switch variant {
 			case "wrong read pc":

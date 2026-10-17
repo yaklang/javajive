@@ -2,7 +2,6 @@ package javaclassparser
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,9 +78,8 @@ func TestNativeRootBridgeLambdaRequiresArchiveAndConsumedSource(t *testing.T) {
 				t.Fatal("original archive closure")
 			}
 			body := &dumpedMethods{member: method, code: "return 3;", bodyCode: "return 3;"}
-			key := fmt.Sprintf("name:%s,desc:%s", name, desc)
+			key := registerMethodSourceBodyFixture(t, d, name, desc, 0, body)
 			d.lambdaMethods[name] = []string{desc}
-			d.dumpedMethodsSet[key] = body
 			switch variant {
 			case "missing consumption":
 				delete(d.lambdaMethods, name)
