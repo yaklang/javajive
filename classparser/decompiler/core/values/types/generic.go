@@ -666,7 +666,7 @@ func parseSigType(sig string) (JavaType, string, bool) {
 		if end < 0 {
 			return nil, "", false
 		}
-		return newJavaTypeWrap(&JavaClass{Name: sig[1:end]}), sig[end+1:], true
+		return NewJavaTypeVariable(sig[1:end]), sig[end+1:], true
 	case '[':
 		elem, rest, ok := parseSigType(sig[1:])
 		if !ok {
@@ -1552,17 +1552,12 @@ func MethodFormalTypeParamNames(sig string) []string {
 	return ClassFormalTypeParamNames(sig)
 }
 
-// SubstituteTypeVars returns a copy of t with every type-variable reference replaced per the
-// substitution sigma (e.g. {K: String, V: Integer}). It is the generic-substitution primitive that
-// lets a callee's parsed signature -- written in terms of the DECLARING class's type variables -- be
-// instantiated at a call site with the receiver's actual type arguments (the root-cause analogue of
-// the hard-coded JDK table). A type variable is modeled as a bare-named *JavaClass (parseSigType emits
-// `TK;` as JavaClass{Name:"K"}); a name absent from sigma is left untouched (so concrete class names,
-// which never appear as sigma keys, pass through unchanged). Parameterized type args and array element
-// types and wildcard bounds are rewritten recursively. Receiver-capture gates
-// remain upstream; a wildcard inside a formal such as `Function<? super K,V>`
-// must still bind K when the declaring class is viewed as Super<String,V>.
-// Pure and allocation-light; nil-safe.
+// SubstituteTypeVars instantiates explicit formal references in the declaring
+// scope. A concrete class never becomes a variable because its binary name is
+// also a substitution key. Parameterized arguments, nested owner arguments,
+// arrays and wildcard bounds preserve this distinction recursively. Lexical
+// scope and receiver-capture evidence remain the caller's responsibility.
+// Pure and nil-safe; unchanged nodes retain their original identity.
 func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 	if t == nil || len(sigma) == 0 {
 		return t
@@ -1580,8 +1575,10 @@ func SubstituteTypeVars(t JavaType, sigma map[string]JavaType) JavaType {
 	raw := t.RawType()
 	switch rt := raw.(type) {
 	case *JavaClass:
-		if repl, ok := sigma[rt.Name]; ok && repl != nil {
-			return repl
+		if rt.signatureVariable {
+			if repl, ok := sigma[rt.Name]; ok && repl != nil {
+				return repl
+			}
 		}
 		return t
 	case *JavaParameterizedType:

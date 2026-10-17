@@ -326,11 +326,11 @@ func (d *Decompiler) genericArrayProjectionTypes(factory, projection *values.Fun
 	mapperVar := genericArrayUnboundedFormal(mapperSig, false)
 	_, mapperParams, mapperReturn := types.ParseMethodSignatureFull(mapperSig, nil)
 	mapperType, ok := types.AsParameterizedType(mapperReturn)
-	if mapperVar == "" || !ok || len(mapperParams) != 0 || len(mapperType.TypeArgs) != 2 || !reflect.DeepEqual(mapperType.TypeArgs[0].RawType(), types.NewJavaClass(mapperVar).RawType()) || !reflect.DeepEqual(mapperType.TypeArgs[1].RawType(), types.NewJavaClass(mapperVar).RawType()) {
+	if mapperVar == "" || !ok || len(mapperParams) != 0 || len(mapperType.TypeArgs) != 2 || !reflect.DeepEqual(mapperType.TypeArgs[0].RawType(), types.NewJavaTypeVariable(mapperVar).RawType()) || !reflect.DeepEqual(mapperType.TypeArgs[1].RawType(), types.NewJavaTypeVariable(mapperVar).RawType()) {
 		return false
 	}
 	pattern := types.ParseSignature("L" + strings.ReplaceAll(mapperType.RawClassName, ".", "/") + "<-T" + classVar + ";+L" + strings.ReplaceAll(input.RawClassName, ".", "/") + "<+T" + projectionVar + ";>;>;")
-	if pattern == nil || !reflect.DeepEqual(params[0].RawType(), pattern.RawType()) || !reflect.DeepEqual(ret.RawType(), types.NewParameterizedType(factory.ClassName, []types.JavaType{types.NewJavaClass(projectionVar)}).RawType()) {
+	if pattern == nil || !reflect.DeepEqual(params[0].RawType(), pattern.RawType()) || !reflect.DeepEqual(ret.RawType(), types.NewParameterizedType(factory.ClassName, []types.JavaType{types.NewJavaTypeVariable(projectionVar)}).RawType()) {
 		return false
 	}
 	// Extra primitive arguments (e.g. delay-error/concurrency) cannot add any

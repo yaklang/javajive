@@ -194,3 +194,30 @@ func TestGenericReceiverChainDoesNotRepeatSpeculativeInference(t *testing.T) {
 		t.Fatalf("repeated generic lookup on non-generic chain: %d", queries)
 	}
 }
+
+// A method formal and a concrete class may have the same binary spelling.
+// Only the Signature T-reference is an inference variable, including beneath
+// arrays, invariant type arguments and wildcard bounds.
+func TestGenericMethodWitnessRequiresVariableRole(t *testing.T) {
+	for _, row := range []struct {
+		name, pattern, actual string
+		want, bound           bool
+	}{
+		{"formal", "TT;", "Ljava/lang/String;", true, true},
+		{"literal different", "LT;", "Ljava/lang/String;", false, false},
+		{"literal same", "LT;", "LT;", true, false},
+		{"formal array", "[TT;", "[Ljava/lang/String;", true, true},
+		{"literal array", "[LT;", "[Ljava/lang/String;", false, false},
+		{"formal argument", "Ljava/util/List<TT;>;", "Ljava/util/List<Ljava/lang/String;>;", true, true},
+		{"literal argument", "Ljava/util/List<LT;>;", "Ljava/util/List<Ljava/lang/String;>;", false, false},
+		{"literal wildcard bound", "Ljava/util/List<+LT;>;", "Ljava/util/List<+Ljava/lang/String;>;", false, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			bindings := map[string]types.JavaType{}
+			got := bindMethodTypeArguments(types.ParseSignature(row.pattern), types.ParseSignature(row.actual), map[string]bool{"T": true}, bindings)
+			if got != row.want || (bindings["T"] != nil) != row.bound {
+				t.Fatalf("witness=%v bindings=%v", got, bindings)
+			}
+		})
+	}
+}

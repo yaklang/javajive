@@ -74,9 +74,13 @@ func TestNestedOwnerSubstitutionKeepsEveryLexicalSegment(t *testing.T) {
 
 func TestOrdinaryParameterizedSignaturesKeepCanonicalRepresentation(t *testing.T) {
 	original := ParseSignature("Lp/Box<TT;>;")
-	want := NewParameterizedType("p.Box", []JavaType{NewJavaClass("T")})
+	want := NewParameterizedType("p.Box", []JavaType{NewJavaTypeVariable("T")})
 	if !reflect.DeepEqual(original.RawType(), want.RawType()) {
 		t.Fatal("ordinary signature acquired lexical owner metadata")
+	}
+	literalClass := ParseSignature("Lp/Box<LT;>;")
+	if literalClass == nil || reflect.DeepEqual(original.RawType(), literalClass.RawType()) {
+		t.Fatal("a literal class cannot become a same-spelled formal reference")
 	}
 	substituted := SubstituteTypeVars(original, map[string]JavaType{"T": NewJavaClass("java.lang.String")})
 	expected := NewParameterizedType("p.Box", []JavaType{NewJavaClass("java.lang.String")})

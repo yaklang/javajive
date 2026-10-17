@@ -319,3 +319,41 @@ func TestGenericArrayFactoryRequiresCompleteInferencePath(t *testing.T) {
 		})
 	}
 }
+
+func TestGenericArrayInferenceDistinguishesFormalFromSameSpelledClass(t *testing.T) {
+	for _, mode := range []string{"formal", "literal mapper input", "literal mapper output", "literal projection result"} {
+		t.Run(mode, func(t *testing.T) {
+			d, array, local, _, nodes := genericArrayProofFixture()
+			original := d.FunctionContext.SiblingClassSig
+			d.FunctionContext.SiblingClassSig = func(owner string) (string, map[string]string, bool) {
+				class, methods, known := original(owner)
+				copy := map[string]string{}
+				for key, value := range methods {
+					copy[key] = value
+				}
+				mapperKey := class_context.MethodDescKey("identity", "()Lexample/Mapper;")
+				projectionKey := class_context.MethodDescKey("flatten", "(Lexample/Mapper;)Lexample/Sequence;")
+				if owner == "example/Functions" {
+					switch mode {
+					case "literal mapper input":
+						copy[mapperKey] = "<V:Ljava/lang/Object;>()Lexample/Mapper<LV;TV;>;"
+					case "literal mapper output":
+						copy[mapperKey] = "<V:Ljava/lang/Object;>()Lexample/Mapper<TV;LV;>;"
+					}
+				}
+				if owner == "example/Sequence" && mode == "literal projection result" {
+					copy[projectionKey] = "<R:Ljava/lang/Object;>(Lexample/Mapper<-TE;+Lexample/Input<+TR;>;>;)Lexample/Sequence<LR;>;"
+				}
+				return class, copy, known
+			}
+			d.recoverGenericArrayDeclarations(nodes)
+			recovered := local.WebDeclType != nil
+			if recovered != (mode == "formal") {
+				t.Fatalf("inference recovered=%v", recovered)
+			}
+			if _, generic := types.AsParameterizedType(array.ElementType()); generic {
+				t.Fatal("allocation must remain reifiable")
+			}
+		})
+	}
+}

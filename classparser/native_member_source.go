@@ -906,6 +906,7 @@ type nativeMemberAllocation struct {
 	anonymousEnclosingRead   *nativeMemberLexicalRead
 	anonymousEnclosingMethod string
 	anonymousMemberEnclosing *nativeAnonymousMemberEnclosing
+	methodLocalEnclosing     *nativeMethodLocalMemberEnclosing
 }
 
 func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
@@ -920,6 +921,14 @@ func (a *nativeMemberAllocation) allocatedObject() *ClassObject {
 
 func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[string]map[int]*nativeMemberAllocation, bool) {
 	result := map[string]map[int]*nativeMemberAllocation{}
+	var localReads map[string]map[int]*nativeMemberLexicalRead
+	if p.methodLocals[c.obj.GetClassName()] != nil {
+		var valid bool
+		localReads, valid = nativeMemberLexicalReads(c.obj, p, c.Work)
+		if !valid {
+			return nil, false
+		}
+	}
 	originalDeclarations := c.nativeAnnotationDeclarationResolver()
 	for _, constant := range c.obj.ConstantPool {
 		if !nativeProofWork(c.Work, 1) {
@@ -1106,6 +1115,28 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 								break
 							}
 							pc := int(ops[end].CurrentOffset)
+							if read := localReads[key][pc]; read != nil && read.descriptor == "L"+child.owner+";" {
+								oldest := read
+								for oldest.prior != nil {
+									oldest = oldest.prior
+								}
+								if oldest.pc != int(ops[cursor].CurrentOffset) {
+									return nil, false
+								}
+								proof := nativeMethodLocalMemberEnclosingProof(p, c.obj, key, plan.newPC, read, child, c.Work)
+								if proof == nil {
+									return nil, false
+								}
+								plan.enclosingReadPC, plan.implicitEnclosing = pc, true
+								plan.methodLocalEnclosing = proof
+								cursor = end + 1
+								if cursor+2 < len(ops) && ops[cursor].Instr.OpCode == core.OP_DUP && nativeMemberNullCheck(c.obj, ops[cursor+1]) && ops[cursor+2].Instr.OpCode == core.OP_POP {
+									plan.checkPC = int(ops[cursor+1].CurrentOffset)
+									cursor += 3
+									plan.implicitEnclosing = false
+								}
+								break
+							}
 							receipt := nativeAnonymousMemberEnclosingReceipt(p, c.obj, key, plan.newPC, child, c.Work)
 							if receipt != nil && receipt.read.pc == pc {
 								plan.enclosingReadPC, plan.implicitEnclosing = pc, true
@@ -1186,6 +1217,10 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 						}
 						plan.descriptor = call.Description
 						plan.invokePC = int(ops[j].CurrentOffset)
+						if proof := plan.methodLocalEnclosing; proof != nil {
+							proof.invokePC, proof.descriptor = plan.invokePC, plan.descriptor
+							proof.checkPC = plan.checkPC
+						}
 						if result[key][plan.invokePC] != nil {
 							return nil, false
 						}
@@ -1512,10 +1547,17 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 				}
 				owner := p.children[read.owner]
 				if owner == nil {
-					// The local's first hop retains the existing exact capture
-					// binding/placement hook. Only later named-owner hops are
-					// projected here, with the complete operand chain above.
+					// The local's first hop denotes the original factory THIS.
+					// Its source spelling must also bind inside the local, where
+					// a new formal can hide the factory's qualified owner name.
 					if local := c.nativeMethodLocalCurrent; local != nil && read.prior == nil && read.owner == c.obj.GetClassName() && read.field == local.constructor.enclosingField {
+						scope := c.nativeMethodLocalTypeScope(p, local, ctx)
+						if scope != nil {
+							if name, known := scope.sourceName(local.owner.owner); known {
+								return name + ".this", true
+							}
+						}
+						p.failed = true
 						return "", false
 					}
 					p.failed = true
@@ -1536,6 +1578,19 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		if anchor := p.anonymousNamedAnchor(n); anchor != "" && (p.lexicalObjects[c.obj.GetClassName()] != c.obj || !p.anonymousNamedScopeContains(anchor, c.obj.GetClassName())) {
 			p.failed = true
 			return "", false
+		}
+		if local := c.nativeMethodLocalCurrent; local != nil {
+			binary := strings.ReplaceAll(n, ".", "/")
+			if binary == p.owner || p.children[binary] != nil {
+				scope := c.nativeMethodLocalTypeScope(p, local, ctx)
+				if scope != nil {
+					if name, known := scope.sourceName(binary); known {
+						return name, true
+					}
+				}
+				p.failed = true
+				return "", false
+			}
 		}
 		if source, known := p.sourceName(n); known {
 			return source, true
@@ -1597,7 +1652,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	}
 	ctx.SourceMemberImplicitEnclosing = func(owner, desc string, newPC, pc int, value any) bool {
 		plan := plans[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
-		if plan == nil || plan.anonymousMemberEnclosing == nil || plan.child == nil || plan.child.object.GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.descriptor != desc || plan.newPC != newPC {
+		if plan == nil || plan.anonymousMemberEnclosing == nil && plan.methodLocalEnclosing == nil || plan.child == nil || plan.child.object.GetClassName() != strings.ReplaceAll(owner, ".", "/") || plan.descriptor != desc || plan.newPC != newPC {
 			return false
 		}
 		return nativeMemberLexicalEnclosingOperand(value, plan, p, c.obj.GetClassName(), c.nativeMemberBody, c.Work)
@@ -1643,6 +1698,11 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			return fail()
 		}
 		erasure, typeKnown := values.SourceTypeErasure(outer.Type(), ctx)
+		if proof := plan.methodLocalEnclosing; proof != nil {
+			// The original GETFIELD packet proves a physical class descriptor.
+			// A same-spelled source formal does not erase that class to its bound.
+			erasure, typeKnown = proof.read.descriptor, true
+		}
 		inheritedThis := plan.implicitReceiverClass != "" && args[0].Receiver && nativeMemberInheritedAllocationOperand(outer, plan.implicitReceiverClass, ctx, c.Work)
 		if plan.implicitReceiverClass != "" && !inheritedThis || !typeKnown || !inheritedThis && erasure != "L"+plan.child.owner+";" {
 			return fail()
@@ -1679,6 +1739,17 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 		}
 		arguments := invoke.ArgumentStrings(&allocationBinding)
 		sourceName := plan.child.name
+		if plan.methodLocalEnclosing != nil {
+			var nameKnown bool
+			var enclosingName string
+			sourceName, enclosingName, nameKnown = c.nativeMethodLocalMemberAllocationNames(plan, p, ctx)
+			if !nameKnown {
+				return fail()
+			}
+			if enclosingName != "" {
+				args[0].Text = enclosingName
+			}
+		}
 		if plan.enclosingParameter != nil {
 			var nameKnown bool
 			sourceName, nameKnown = c.nativeMemberEnclosingParameterAllocationName(plan, p, ctx)
