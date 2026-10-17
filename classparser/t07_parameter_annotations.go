@@ -229,7 +229,10 @@ func (c *ClassObjectDumper) originalSourceParameterFinality(method *MemberInfo, 
 	if table == nil {
 		return nil, true
 	}
-	if c.obj.MajorVersion < 52 || table.Length != uint32(len(table.Info)) || len(table.Info) != 1+4*len(physical) || int(table.Info[0]) != len(physical) || !nativeProofWork(c.Work, int64(len(table.Info))) || c.Work != nil && c.Work.CheckAlloc(int64(len(physical))*64) != nil {
+	// A newer producer can attach this table to an older instruction subset.
+	// The supported VM reads it independently of classfile major, so retain
+	// its observable declaration flags after validating the actual packet.
+	if c.obj.MajorVersion < 45 || table.Length != uint32(len(table.Info)) || len(table.Info) != 1+4*len(physical) || int(table.Info[0]) != len(physical) || !nativeProofWork(c.Work, int64(len(table.Info))) || c.Work != nil && c.Work.CheckAlloc(int64(len(physical))*64) != nil {
 		return nil, false
 	}
 	final := map[int]bool{}

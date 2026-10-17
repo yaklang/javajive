@@ -17,7 +17,7 @@ import (
 
 func TestAdversarialFinalParameterDefinitionRefusalIsAtomic(t *testing.T) {
 	files := nativeCompileDebugClasses(t, `class GuardFinalOwner{static int read(int left,int right){try{left++;return left/right;}catch(ArithmeticException expected){return left;}}}`, "source,lines,vars")
-	for _, scenario := range []string{"depth", "work", "canceled", "mixed alias", "duplicate header identity", "duplicate code", "duplicate table", "nil unparsed", "flags", "length", "count", "name cp out of range", "name cp kind"} {
+	for _, scenario := range []string{"depth", "work", "canceled", "mixed alias", "duplicate header identity", "duplicate code", "duplicate table", "nil unparsed", "flags", "length", "count", "name cp out of range", "name cp kind", "invalid class version"} {
 		t.Run(scenario, func(t *testing.T) {
 			obj, err := Parse(files["GuardFinalOwner.class"])
 			if err != nil {
@@ -82,6 +82,8 @@ func TestAdversarialFinalParameterDefinitionRefusalIsAtomic(t *testing.T) {
 				table.Length++
 			case "count":
 				table.Info[0]--
+			case "invalid class version":
+				obj.MajorVersion = 0
 			case "name cp out of range":
 				table.Info[1], table.Info[2] = 0xff, 0xff
 			case "name cp kind":
