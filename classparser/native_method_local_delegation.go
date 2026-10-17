@@ -41,9 +41,9 @@ func (c *ClassObjectDumper) nativeMethodLocalDelegationSource(method *MemberInfo
 	if _, _, flags, member := originalMemberOwner(target); member && flags&8 == 0 {
 		return nil, fmt.Errorf("local parent needs original enclosing-instance binding")
 	}
-	// Class formals cannot change a constructor's source parameters when that
-	// exact constructor has no Signature (proved below). Validate the parent's
-	// declaration, but do not require irrelevant instantiation for its arguments.
+	// Validate the original parent hierarchy before interpreting constructor
+	// signatures. A constructor Signature additionally requires the exact
+	// instantiation and executable-erasure proof below.
 	parentSignature, valid := nativeMethodLocalOriginalSignature(target, target.Attributes, c.Work)
 	if !valid {
 		return nil, fmt.Errorf("invalid local parent class signature")
@@ -66,6 +66,7 @@ func (c *ClassObjectDumper) nativeMethodLocalDelegationSource(method *MemberInfo
 		}
 	}
 	matches := 0
+	var genericParams []types.JavaType
 	for _, m := range target.Methods {
 		if m == nil || !nativeProofWork(c.Work, 1) {
 			return nil, fmt.Errorf("unproved original local parent method table")
@@ -96,8 +97,12 @@ func (c *ClassObjectDumper) nativeMethodLocalDelegationSource(method *MemberInfo
 				}
 				seenExceptions = true
 			}
-			if _, generic := a.(*SignatureAttribute); generic {
-				return nil, fmt.Errorf("local parent constructor needs instantiated generic binding")
+			if _, generic := a.(*SignatureAttribute); generic && genericParams == nil {
+				var proved bool
+				genericParams, proved = c.nativeMethodLocalGenericDelegationParameters(target, m, parentSignature)
+				if !proved {
+					return nil, fmt.Errorf("local parent constructor needs instantiated generic binding")
+				}
 			}
 		}
 	}
@@ -187,6 +192,14 @@ func (c *ClassObjectDumper) nativeMethodLocalDelegationSource(method *MemberInfo
 			return nil, err
 		}
 		args[i] = "(" + typeName + ")(" + "/*jdec-owned-local-capture:" + c.obj.GetClassName() + ":" + field + "*/" + local.bindings[field] + ")"
+		if genericParams != nil {
+			instantiatedName := genericParams[i].String(c.FuncCtx)
+			outputSize += int64(len(instantiatedName) + 4)
+			if err := c.ensureOutput(outputSize); err != nil {
+				return nil, err
+			}
+			args[i] = "(" + instantiatedName + ")(" + args[i] + ")"
+		}
 	}
 	body := "super(" + strings.Join(args, ",") + ");"
 	code := local.owner.name + "() {" + body + "}"

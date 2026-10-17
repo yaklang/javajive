@@ -8,6 +8,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -15,7 +16,7 @@ import (
 // only a complete original anonymous THIS/enclosing-field/local-capture chain.
 // It retains every original code/PC edge and refuses all writes/foreign bases.
 func (c *ClassObjectDumper) nativeMethodLocalAnonymousCaptureUser(p *nativeMemberFamily, local *nativeMethodLocalClass, user, field string, work *workbudget.Budget) bool {
-	if c == nil || p == nil || local == nil || local.object == nil || local.constructor == nil || field == local.constructor.enclosingField {
+	if c == nil || p == nil || local == nil || local.object == nil || local.constructor == nil {
 		return false
 	}
 	links, actualLocal, known := c.nativeMethodLocalAnonymousOriginalPath(p, user, work)
@@ -303,6 +304,20 @@ func (c *ClassObjectDumper) wireNativeMethodLocalAnonymousCaptures() {
 			return
 		}
 		if field == local.constructor.enclosingField {
+			qualified, ok := c.nativeMethodLocalAnonymousEnclosingName(local, ctx)
+			if !ok {
+				c.nativeCaptureFailed = true
+				return
+			}
+			// The sealed THIS value is a declaration identity. Its source
+			// type path is selected and proved in the consuming lexical scope.
+			text = qualified
+			key := nativeMemberCaptureIndexKey(local.object.GetClassName(), field)
+			if old, exists := c.nativeAnonymousBindings[key]; exists && old != text {
+				c.nativeCaptureFailed = true
+				return
+			}
+			c.nativeAnonymousBindings[key] = text
 			continue
 		}
 		if !class_context.PreservesJava8Identifier(text) {
@@ -604,8 +619,23 @@ func (c *ClassObjectDumper) nativeMethodLocalAnonymousCaptureSource(local *nativ
 	}
 	text, ok := local.bindings[name]
 	ref := local.sourceRefs[name]
-	originalName, compilerName := strings.CutPrefix(name, "val$")
-	if !ok || text == "" || !compilerName || text != originalName || ref == nil || ref.Id == nil || local.captureIDs[name] != ref.Id || c.nativeAnonymousBindings[nativeMemberCaptureIndexKey(local.object.GetClassName(), name)] != text {
+	if !ok || text == "" || ref == nil || ref.Id == nil || local.captureIDs[name] != ref.Id {
+		return "", false
+	}
+	if name == local.constructor.enclosingField {
+		qualified, known := c.nativeMethodLocalAnonymousEnclosingName(local, ctx)
+		if !known {
+			return "", false
+		}
+		text = qualified
+	} else {
+		originalName, compilerName := strings.CutPrefix(name, "val$")
+		if !compilerName || text != originalName {
+			return "", false
+		}
+	}
+
+	if c.nativeAnonymousBindings[nativeMemberCaptureIndexKey(local.object.GetClassName(), name)] != text {
 		return "", false
 	}
 	current := false
@@ -624,4 +654,246 @@ func (c *ClassObjectDumper) nativeMethodLocalAnonymousCaptureSource(local *nativ
 		return "", false
 	}
 	return "(/*jdec-owned-local-capture:" + local.object.GetClassName() + ":" + name + "*/" + text + ")", true
+}
+
+// A qualified enclosing instance is a storage projection, not a non-null fact.
+// The original field chain still executes for null reflective hidden ports.
+func (c *ClassObjectDumper) nativeMethodLocalAnonymousEnclosingName(local *nativeMethodLocalClass, ctx *class_context.ClassContext) (string, bool) {
+	if c == nil || c.obj == nil || ctx == nil || local == nil || local.object == nil || local.owner == nil || local.constructor == nil || local.constructor.enclosingField == "" || c.nativeMemberRoot == nil {
+		return "", false
+	}
+	p := c.nativeMemberRoot
+	links, actual, known := c.nativeMethodLocalAnonymousOriginalPath(p, c.obj.GetClassName(), c.Work)
+	if !known || actual != local {
+		return "", false
+	}
+	field := local.constructor.enclosingField
+	ref := local.sourceRefs[field]
+	text := local.bindings[field]
+	if ref == nil || ref.Id == nil || local.captureIDs[field] != ref.Id || !ref.IsThis {
+		return "", false
+	}
+	slot, sealed := ref.OriginalReceiverSlot()
+	if !sealed || slot != 0 {
+		return "", false
+	}
+	erased, known := values.SourceTypeErasure(ref.Type(), ctx)
+	if !known || erased != "L"+local.owner.owner+";" {
+		return "", false
+	}
+	qualifier, spelled := strings.CutSuffix(text, ".this")
+	if !spelled {
+		return "", false
+	}
+	declarations := []*ClassObject{}
+	names := []string{}
+	for current, depth := local.owner.owner, 0; ; depth++ {
+		if depth >= 64 || !nativeProofWork(c.Work, 1) {
+			return "", false
+		}
+		object := p.lexicalObjects[current]
+		if object == nil {
+			return "", false
+		}
+		declarations = append(declarations, object)
+		if current == p.owner {
+			simple := current
+			if slash := strings.LastIndex(simple, "/"); slash >= 0 {
+				simple = simple[slash+1:]
+			}
+			names = append(names, simple)
+			break
+		}
+		named := p.children[current]
+		if named == nil || named.object != object {
+			return "", false
+		}
+		names = append(names, named.name)
+		current = named.owner
+	}
+	// Accept a factory spelling only when its entire path is the actual
+	// original declaring chain. A package-qualified factory binder is not a
+	// license to guess how a package prefix binds inside this descendant.
+	// Render the same owner through its enclosing root declaration instead;
+	// the namespace proof below closes that new source path independently.
+	spellingBytes := int64(len(p.owner) + len(text) + len(names)*2)
+	for _, part := range names {
+		spellingBytes += int64(len(part))
+	}
+	if spellingBytes > 1<<20 || !nativeProofWork(c.Work, spellingBytes+1) || c.Work != nil && c.Work.CheckAlloc(spellingBytes*4) != nil {
+		return "", false
+	}
+	canonicalParts := make([]string, len(names))
+	for i := range names {
+		canonicalParts[len(names)-1-i] = names[i]
+	}
+	originalParts := append([]string(nil), canonicalParts...)
+	originalParts[0] = strings.ReplaceAll(p.owner, "/", ".")
+	canonical := strings.Join(canonicalParts, ".")
+	if qualifier == strings.Join(originalParts, ".") {
+		qualifier = canonical
+		text = canonical + ".this"
+	}
+	anchor := -1
+	for end := range names {
+		parts := []string{}
+		for at := end; at >= 0; at-- {
+			parts = append(parts, names[at])
+		}
+		if strings.Join(parts, ".") == qualifier {
+			anchor = end
+			break
+		}
+	}
+	if anchor < 0 {
+		return "", false
+	}
+	name := names[anchor]
+	if !class_context.PreservesJava8Identifier(name) || ctx.LexicalTypeNames[name] {
+		return "", false
+	}
+	for _, other := range p.methodLocals {
+		if other == nil || other.owner == nil || !nativeProofWork(c.Work, 1) {
+			return "", false
+		}
+		if other != local && other.owner.owner == local.owner.owner && other.owner.method == local.owner.method && other.owner.descriptor == local.owner.descriptor && other.owner.name == name {
+			return "", false
+		}
+	}
+	for _, formal := range ctx.TypeParams {
+		if !nativeProofWork(c.Work, 1) || formal == name {
+			return "", false
+		}
+	}
+	for _, attribute := range local.owner.declaration.Attributes {
+		if sig, ok := attribute.(*SignatureAttribute); ok {
+			raw, known := sourceBridgeUTF8(p.lexicalObjects[local.owner.owner], sig.SignatureIndex)
+			if !known {
+				return "", false
+			}
+			formals, _, known := types.SignatureTypeVariableReferences(raw)
+			if !known {
+				return "", false
+			}
+			for _, formal := range formals {
+				if formal == name {
+					return "", false
+				}
+			}
+		}
+	}
+	scope := []*ClassObject{}
+	for _, link := range links {
+		scope = append(scope, link.object)
+	}
+	scope = append(scope, local.object)
+	scope = append(scope, declarations[:anchor+1]...)
+	for _, object := range scope {
+		for _, attribute := range object.Attributes {
+			if sig, ok := attribute.(*SignatureAttribute); ok {
+				raw, known := sourceBridgeUTF8(object, sig.SignatureIndex)
+				if !known {
+					return "", false
+				}
+				formals, _, known := types.SignatureTypeVariableReferences(raw)
+				if !known {
+					return "", false
+				}
+				for _, formal := range formals {
+					if formal == name {
+						return "", false
+					}
+				}
+			}
+		}
+	}
+	resolve := c.nativeAnnotationDeclarationResolver()
+	for _, object := range scope {
+		if object == nil || !nativeProofWork(c.Work, 1) {
+			return "", false
+		}
+		queue := []*ClassObject{object}
+		seen := map[string]bool{}
+		for at := 0; at < len(queue); at++ {
+			node := queue[at]
+			if node == nil {
+				return "", false
+			}
+			owner := node.GetClassName()
+			if seen[owner] {
+				continue
+			}
+			if len(seen) >= 64 || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(int64(len(seen)+1)*512) != nil {
+				return "", false
+			}
+			seen[owner] = true
+			for _, a := range node.Attributes {
+				if !nativeProofWork(c.Work, 1) {
+					return "", false
+				}
+				if rows, ok := a.(*InnerClassesAttribute); ok {
+					if rows == nil {
+						return "", false
+					}
+					for _, row := range rows.Classes {
+						if row == nil || !nativeProofWork(c.Work, 1) {
+							return "", false
+						}
+						if row.InnerNameIndex == 0 {
+							continue
+						}
+						simple, ok := sourceBridgeUTF8(node, row.InnerNameIndex)
+						if !ok {
+							return "", false
+						}
+						if simple != name {
+							continue
+						}
+						if row.OuterClassInfoIndex == 0 {
+							return "", false
+						}
+						declaring, ok := sourceBridgeClassName(node, row.OuterClassInfoIndex)
+						if !ok {
+							return "", false
+						}
+						if declaring == owner {
+							return "", false
+						}
+					}
+				}
+			}
+			parents := []string{}
+			if parent := node.GetSupperClassName(); parent != "" {
+				parents = append(parents, parent)
+			}
+			for _, index := range node.Interfaces {
+				parent, known := sourceBridgeClassName(node, index)
+				if !known {
+					return "", false
+				}
+				parents = append(parents, parent)
+			}
+			for _, parent := range parents {
+				if seen[parent] {
+					continue
+				}
+				next := p.lexicalObjects[parent]
+				if next == nil {
+					if resolve == nil {
+						return "", false
+					}
+					var ok bool
+					next, ok = resolve(parent)
+					if !ok {
+						return "", false
+					}
+				}
+				if next == nil || next.GetClassName() != parent {
+					return "", false
+				}
+				queue = append(queue, next)
+			}
+		}
+	}
+	return text, true
 }

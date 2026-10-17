@@ -1509,9 +1509,12 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			// preparation. A failed query is absence of evidence, not a failed
 			// committed projection. Reopen the same physical path without rendering
 			// an operand or mutating the family's transaction state.
+			// Forest participation does not replace the declaration's own
+			// named/local THIS certificate. Only reads outside this reader's
+			// original scope belong to the forest's foreign-capture protocol.
 			priorType := ctx.SourceLexicalCapturedFieldType
 			ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
-				if f := c.nativeAnonymousForest; f != nil && f.members == p && f.objects[c.obj.GetClassName()] == c.obj && f.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != nil {
+				if f := c.nativeAnonymousForest; f != nil && f.members == p && f.objects[c.obj.GetClassName()] == c.obj && f.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != nil && reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc] == nil {
 					return priorType != nil && priorType(value, pc, name)
 				}
 				read := reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc]
@@ -1522,7 +1525,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			}
 			priorCapture := ctx.SourceLexicalCapturedField
 			ctx.SourceLexicalCapturedField = func(value any, pc int, name string) (string, bool) {
-				if f := c.nativeAnonymousForest; f != nil && f.members == p && f.objects[c.obj.GetClassName()] == c.obj && f.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != nil {
+				if f := c.nativeAnonymousForest; f != nil && f.members == p && f.objects[c.obj.GetClassName()] == c.obj && f.reads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != nil && reads[ctx.FunctionName+ctx.CurrentMethodDesc][pc] == nil {
 					if priorCapture == nil {
 						p.failed = true
 						return "", false

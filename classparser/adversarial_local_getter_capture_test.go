@@ -116,6 +116,9 @@ func localGetterCompileJavac8(t *testing.T, sources map[string]string, debug str
 	paths := []string{}
 	for name, source := range sources {
 		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(p, []byte(source), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -126,19 +129,28 @@ func localGetterCompileJavac8(t *testing.T, sources map[string]string, debug str
 	if output, err := exec.Command(os.Getenv("JAVA8_JAVAC"), args...).CombinedOutput(); err != nil {
 		t.Fatalf("original javac8: %v %s", err, output)
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+
+	result := map[string][]byte{}
+	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".class") {
+			return nil
+		}
+		relative, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		result[filepath.ToSlash(relative)] = raw
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	result := map[string][]byte{}
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".class") {
-			raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			result[entry.Name()] = raw
-		}
-	}
+
 	return result
 }

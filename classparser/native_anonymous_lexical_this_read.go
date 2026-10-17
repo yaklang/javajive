@@ -46,15 +46,25 @@ func (c *ClassObjectDumper) nativeAnonymousLexicalThisRead(read *nativeMemberLex
 		if p == nil {
 			return false
 		}
-		named := p.children[read.owner]
-		if named == nil || named.object != object || named.static || named.field != name {
-			return false
+		if local := p.methodLocals[read.owner]; local != nil {
+			if forest.locals[read.owner] != local || local.object != object || local.constructor == nil || local.constructor.enclosingField != name {
+				return false
+			}
+			if _, known := nativeMemberJointMethodLocalOwner(p, object, c.Work); !known {
+				return false
+			}
+			owner = local.owner.owner
+		} else {
+			named := p.children[read.owner]
+			if named == nil || named.object != object || named.static || named.field != name {
+				return false
+			}
+			original, n, flags, known := originalMemberOwner(object)
+			if !known || original != named.owner || n != named.name || flags != named.flags || flags&8 != 0 {
+				return false
+			}
+			owner = original
 		}
-		original, n, flags, known := originalMemberOwner(object)
-		if !known || original != named.owner || n != named.name || flags != named.flags || flags&8 != 0 {
-			return false
-		}
-		owner = original
 	}
 	if read.descriptor != "L"+owner+";" || forest.objects[owner] == nil || p != nil && p.lexicalObjects[owner] != forest.objects[owner] || !nativeProofWork(c.Work, int64(len(owner)+len(name)+len(read.descriptor))) {
 		return false

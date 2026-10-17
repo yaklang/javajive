@@ -291,6 +291,20 @@ func nativeAnonymousConstructorRolesWithLambdas(obj *ClassObject, owner, method,
 			outerField = "this$" + strconv.Itoa(depth+1)
 		}
 	}
+	if members != nil && members.methodLocals[owner] != nil {
+		local := members.methodLocals[owner]
+		if _, known := nativeMemberJointMethodLocalOwner(members, local.object, work); !known {
+			return nil
+		}
+		if local.constructor.enclosingField != "" {
+			suffix, known := strings.CutPrefix(local.constructor.enclosingField, "this$")
+			depth, bad := strconv.Atoi(suffix)
+			if !known || bad != nil || depth < 0 || depth >= 64 {
+				return nil
+			}
+			outerField = "this$" + strconv.Itoa(depth+1)
+		}
+	}
 	if forest != nil && forest.units[owner] != nil {
 		parent := forest.units[owner]
 		depth := 0
