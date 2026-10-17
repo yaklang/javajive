@@ -15,7 +15,11 @@ import (
 // expressions and constructor bodies remain original source; this certificate
 // grants no permission to replace an expression or move a receiver effect.
 func nativeEnumConstructorHiddenGraph(obj *ClassObject, order []*MemberInfo, constructors map[string]*MemberInfo, work *workbudget.Budget) bool {
-	if obj == nil || len(order) == 0 || len(order) > 64 || len(order) != len(constructors) || !nativeProofWork(work, int64(len(order))) || work != nil && work.CheckAlloc(int64(len(order))*192) != nil {
+	return nativeEnumConstructorHiddenGraphWithOps(obj, order, constructors, work, nativeEnumMethodOps)
+}
+
+func nativeEnumConstructorHiddenGraphWithOps(obj *ClassObject, order []*MemberInfo, constructors map[string]*MemberInfo, work *workbudget.Budget, originalOps func(*ClassObject, *MemberInfo, *workbudget.Budget) ([]*core.OpCode, bool)) bool {
+	if obj == nil || originalOps == nil || len(order) == 0 || len(order) > 64 || len(order) != len(constructors) || !nativeProofWork(work, int64(len(order))) || work != nil && work.CheckAlloc(int64(len(order))*192) != nil {
 		return false
 	}
 	edges := make(map[string]string, len(order))
@@ -35,7 +39,7 @@ func nativeEnumConstructorHiddenGraph(obj *ClassObject, order []*MemberInfo, con
 		if _, duplicate := edges[desc]; duplicate {
 			return false
 		}
-		ops, valid := nativeEnumMethodOps(obj, method, work)
+		ops, valid := originalOps(obj, method, work)
 		if !valid || len(ops) < 5 || !constructorMotionLoad(ops[0], "L"+obj.GetClassName()+";") || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[1], "Ljava/lang/String;") || core.GetRetrieveIdx(ops[1]) != 1 || !constructorMotionLoad(ops[2], "I") || core.GetRetrieveIdx(ops[2]) != 2 {
 			return false
 		}

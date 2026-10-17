@@ -1,6 +1,10 @@
 package javaclassparser
 
 import (
+	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/frametransfer"
+	"github.com/yaklang/javajive/classparser/decompiler/core/methodir"
+	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
@@ -131,10 +135,8 @@ func (c *ClassObjectDumper) nativeMethodLocalSourceErasure(t types.JavaType, loc
 		if !ok {
 			return "", false
 		}
-		if signature == "" {
-			signature = local.owner.descriptor
-		}
-		if !nativeMethodLocalBindingBudget(classes, signature, c.Work) {
+		signature, ok = nativeMethodLocalBindingSignature(c.obj, local.owner, classes, signature, c.nativeMemberRoot, c.Work)
+		if !ok || !nativeMethodLocalBindingBudget(classes, signature, c.Work) {
 			return "", false
 		}
 		d, descriptor, ok := types.LexicalOwnerTypeVariableErasure(classes, signature, name)
@@ -324,7 +326,11 @@ func (c *ClassObjectDumper) nativeMethodLocalGenericDelegationParameters(parent 
 	for _, signature := range classes {
 		scopes = append(scopes, types.LexicalTypeScope{Signature: signature})
 	}
-	scopes = append(scopes, types.LexicalTypeScope{Signature: methodSignature, Method: true, Descriptor: local.owner.descriptor}, types.LexicalTypeScope{Signature: localSignature})
+	boundMethod, known := nativeMethodLocalBindingSignature(owner, local.owner, classes, methodSignature, c.nativeMemberRoot, c.Work)
+	if !known {
+		return nil, false
+	}
+	scopes = append(scopes, types.LexicalTypeScope{Signature: boundMethod, Method: true, Descriptor: local.owner.descriptor}, types.LexicalTypeScope{Signature: localSignature})
 	_, references, known := types.SignatureTypeVariableReferences(localSignature)
 	if !known {
 		return nil, false
@@ -378,4 +384,313 @@ func nativeMethodLocalGenericParameterErasure(t types.JavaType, bounds map[strin
 	}
 	name, known := types.RawClassFQN(t)
 	return "L" + strings.ReplaceAll(name, ".", "/") + ";", known
+}
+
+// Signature describes source parameters; EnclosingMethod retains the physical
+// constructor descriptor. Lift only independently certified implicit ports for
+// binding/erasure checks. Rendering continues to use the original Signature.
+// Equal arity or equal type spelling alone never identifies an implicit port.
+func nativeMethodLocalBindingSignature(enclosing *ClassObject, owner *nativeMethodLocalOwner, classes []string, signature string, family *nativeMemberFamily, work *workbudget.Budget) (string, bool) {
+	if enclosing == nil || owner == nil || owner.declaration == nil || owner.owner != enclosing.GetClassName() || !nativeProofWork(work, 1) {
+		return "", false
+	}
+	if signature == "" {
+		signature = owner.descriptor
+	}
+	if !nativeMethodLocalBindingBudget(classes, signature, work) {
+		return "", false
+	}
+	erased, _, known := types.EraseLexicalOwnerMethodSignatureWithThrows(classes, signature)
+	if !known {
+		return "", false
+	}
+	if erased == owner.descriptor {
+		return signature, true
+	}
+	if owner.method != "<init>" {
+		return "", false
+	}
+	prefix, known := nativeMethodLocalConstructorBindingPrefix(enclosing, owner, family, work)
+	if !known || len(prefix) == 0 {
+		return "", false
+	}
+	// The original payload erasures must match every remaining physical port.
+	physical, result, err := callbinding.Descriptor(owner.descriptor)
+	if err != nil || result != "V" || len(physical) < len(prefix) || "("+strings.Join(physical[len(prefix):], "")+")V" != erased {
+		return "", false
+	}
+	for i, p := range prefix {
+		if physical[i] != p {
+			return "", false
+		}
+	}
+	start := strings.IndexByte(signature, '(')
+	if start < 0 || work != nil && work.CheckAlloc(int64(len(signature)+len(strings.Join(prefix, "")))) != nil {
+		return "", false
+	}
+	lifted := signature[:start+1] + strings.Join(prefix, "") + signature[start+1:]
+	actual, _, known := types.EraseLexicalOwnerMethodSignatureWithThrows(classes, lifted)
+	return lifted, known && actual == owner.descriptor
+}
+
+func nativeMethodLocalConstructorBindingPrefix(enclosing *ClassObject, owner *nativeMethodLocalOwner, family *nativeMemberFamily, work *workbudget.Budget) ([]string, bool) {
+	if enclosing == nil || owner == nil || owner.method != "<init>" || owner.declaration == nil || owner.owner != enclosing.GetClassName() {
+		return nil, false
+	}
+	if enclosing.AccessFlags&0x4000 != 0 && enclosing.GetSupperClassName() == "java/lang/Enum" {
+		constructors := map[string]*MemberInfo{}
+		var order []*MemberInfo
+		for _, m := range enclosing.Methods {
+			if m == nil || !nativeProofWork(work, 1) {
+				return nil, false
+			}
+			name, nk := sourceBridgeUTF8(enclosing, m.NameIndex)
+			desc, dk := sourceBridgeUTF8(enclosing, m.DescriptorIndex)
+			if !nk || !dk {
+				return nil, false
+			}
+			if name != "<init>" {
+				continue
+			}
+			if len(order) >= 64 || constructors[desc] != nil || m.AccessFlags != 2 && m.AccessFlags != 0x82 {
+				return nil, false
+			}
+			constructors[desc] = m
+			order = append(order, m)
+		}
+		if constructors[owner.descriptor] != owner.declaration || !nativeEnumConstructorHiddenGraphWithOps(enclosing, order, constructors, work, nativeEnumConstructorBindingOps) {
+			return nil, false
+		}
+		return []string{"Ljava/lang/String;", "I"}, true
+	}
+	if family == nil || family.lexicalObjects[owner.owner] != enclosing {
+		return nil, false
+	}
+	child := family.children[owner.owner]
+	actual, name, flags, known := originalMemberOwner(enclosing)
+	if !known || child == nil || child.object != enclosing || child.static || flags&8 != 0 || child.owner != actual || child.name != name || child.flags != flags {
+		return nil, false
+	}
+	reader := NewClassObjectDumper(enclosing)
+	reader.Work = work
+	reader.nativeMemberRoot = family
+	reader.nativeMemberCurrent = child
+	if !reader.nativeMemberConstructorHasEnclosingParameter(owner.descriptor) {
+		return nil, false
+	}
+
+	packet := child.constructors[owner.descriptor]
+	if !nativeMethodLocalMemberBindingSnapshot(reader, owner, child, packet, work) {
+		return nil, false
+	}
+
+	return []string{"L" + actual + ";"}, true
+}
+
+// Initialization roles depend on the actual Code, not on whether the source
+// metadata can be regenerated. This reader grants binding only; ordinary enum
+// synthesis still uses its stricter metadata reader and source emission must
+// separately retain the original parameter finality.
+func nativeEnumConstructorBindingOps(obj *ClassObject, method *MemberInfo, work *workbudget.Budget) ([]*core.OpCode, bool) {
+	if obj == nil || method == nil {
+		return nil, false
+	}
+	var code *CodeAttribute
+	for _, a := range method.Attributes {
+		if !nativeProofWork(work, 1) {
+			return nil, false
+		}
+		if body, ok := a.(*CodeAttribute); ok {
+			if body == nil || code != nil {
+				return nil, false
+			}
+			code = body
+		}
+	}
+	if code == nil || len(code.ExceptionTable) != 0 || !nativeProofWork(work, int64(len(code.Code))) {
+		return nil, false
+	}
+	d := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(obj.ConstantPool, i) })
+	d.Work = work
+	if d.ParseOpcode() != nil {
+		return nil, false
+	}
+	return constructorMotionOps(d), true
+}
+
+// Binding a hidden enclosing port needs its original storage/initialization
+// identity, not permission to render every argument expression. In particular,
+// a legal subtype AASTORE cannot depend on an unrelated source metadata query.
+func nativeMethodLocalMemberBindingSnapshot(reader *ClassObjectDumper, owner *nativeMethodLocalOwner, child *nativeMemberClass, packet *nativeMemberConstructor, work *workbudget.Budget) bool {
+	if reader == nil || reader.obj == nil || owner == nil || child == nil || packet == nil {
+		return false
+	}
+	// A THIS edge inherits the target's enclosing storage identity. Recheck the
+	// entire finite chain against current Code rather than trusting cached
+	// target packets; no argument-rendering capability is inferred here.
+	seen := map[string]bool{}
+	for depth := 0; depth < 64; depth++ {
+		if packet == nil || seen[packet.descriptor] || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(int64(depth+1)*128) != nil {
+			return false
+		}
+		seen[packet.descriptor] = true
+		if !reader.nativeMemberConstructorHasEnclosingParameter(packet.descriptor) || !nativeMethodLocalMemberBindingSnapshotOne(reader, owner, child, packet, work) {
+			return false
+		}
+		if packet.delegateOwner != reader.obj.GetClassName() {
+			return true
+		}
+		target := child.constructors[packet.delegateDescriptor]
+		if target == nil {
+			return false
+		}
+		var declaration *MemberInfo
+		for _, m := range reader.obj.Methods {
+			if m == nil || !nativeProofWork(work, 1) {
+				return false
+			}
+			name, nk := sourceBridgeUTF8(reader.obj, m.NameIndex)
+			desc, dk := sourceBridgeUTF8(reader.obj, m.DescriptorIndex)
+			if !nk || !dk {
+				return false
+			}
+			if name == "<init>" && desc == target.descriptor {
+				if declaration != nil {
+					return false
+				}
+				declaration = m
+			}
+		}
+		if declaration == nil {
+			return false
+		}
+		owner = &nativeMethodLocalOwner{owner: reader.obj.GetClassName(), method: "<init>", descriptor: target.descriptor, declaration: declaration}
+		packet = target
+	}
+	return false
+}
+
+func nativeMethodLocalMemberBindingSnapshotOne(reader *ClassObjectDumper, owner *nativeMethodLocalOwner, child *nativeMemberClass, packet *nativeMemberConstructor, work *workbudget.Budget) bool {
+	if reader == nil || reader.obj == nil || owner == nil || owner.declaration == nil || child == nil || child.object != reader.obj || packet == nil {
+		return false
+	}
+	object := reader.obj
+	matches := 0
+	for _, m := range object.Methods {
+		if m == nil || !nativeProofWork(work, 1) {
+			return false
+		}
+		name, nk := sourceBridgeUTF8(object, m.NameIndex)
+		desc, dk := sourceBridgeUTF8(object, m.DescriptorIndex)
+		if !nk || !dk {
+			return false
+		}
+		if name == owner.method && desc == owner.descriptor {
+			if m != owner.declaration {
+				return false
+			}
+			matches++
+		}
+	}
+	if matches != 1 || owner.method != "<init>" || packet.descriptor != owner.descriptor || owner.declaration.AccessFlags&(0x0008|0x0100|0x0400) != 0 {
+		return false
+	}
+	var code *CodeAttribute
+	for _, a := range owner.declaration.Attributes {
+		if !nativeProofWork(work, 1) {
+			return false
+		}
+		if body, ok := a.(*CodeAttribute); ok {
+			if body == nil || code != nil {
+				return false
+			}
+			code = body
+		}
+	}
+	if code == nil || !nativeProofWork(work, int64(len(code.Code))) {
+		return false
+	}
+	ir, frames, known := reader.nativeOriginalMethodSnapshot(owner.declaration, code)
+	if !known {
+		return false
+	}
+	decoder := core.NewDecompiler(code.Code, nil)
+	decoder.Work = work
+	if decoder.ParseOpcode() != nil {
+		return false
+	}
+	ops := map[int]*core.OpCode{}
+	for _, op := range constructorMotionOps(decoder) {
+		if !nativeProofWork(work, 1) {
+			return false
+		}
+		pc := int(op.CurrentOffset)
+		if ops[pc] != nil {
+			return false
+		}
+		// Even a verifier-valid write after SUPER can replace the original
+		// captured enclosing object. The cached packet is stale in that case.
+		if op.Instr == nil {
+			return false
+		}
+		if op.Instr.OpCode == core.OP_PUTFIELD {
+			field := constructorMotionMember(object, op, core.OP_PUTFIELD)
+			if field == nil || field.Name == object.GetClassName() && field.Member == child.field && (field.Description != "L"+child.owner+";" || pc != packet.capturePC) {
+				return false
+			}
+		}
+		ops[pc] = op
+	}
+	if work != nil && work.CheckAlloc(int64(len(ops))*96) != nil {
+		return false
+	}
+	captureSeen := packet.capturePC < 0
+	delegates := 0
+	origin := func(slot int) ssabuild.Origin { return ssabuild.Origin{Kind: ssabuild.OriginParam, Slot: slot} }
+	for _, record := range frames.Instructions {
+		if !nativeProofWork(work, 1) {
+			return false
+		}
+		ins, found := ir.InstrByID(methodir.InstrID(record.PC))
+		if !found {
+			return false
+		}
+		pc := int(record.PC)
+		if packet.capturePC >= 0 && pc == packet.capturePC {
+			field := constructorMotionMember(object, ops[pc], core.OP_PUTFIELD)
+			if packet.capturePC >= packet.delegatePC || ins.Opcode != core.OP_PUTFIELD || field == nil || field.Name != object.GetClassName() || field.Member != child.field || field.Description != "L"+child.owner+";" || !constructorMotionField(object, field, true, work) || !record.Before.ThisUninitialized || len(record.Before.Stack) != 2 || record.Before.Stack[0].Kind != frametransfer.UninitThis || len(record.Uses) != 2 || record.Uses[0] != origin(0) || record.Uses[1] != origin(1) {
+				return false
+			}
+			captureSeen = true
+		}
+		if ins.Opcode != core.OP_INVOKESPECIAL || ins.Member != "<init>" {
+			continue
+		}
+		params, result, err := callbinding.Descriptor(ins.Desc)
+		index := len(record.Before.Stack) - nativeMemberParameterWidth(params) - 1
+		if err != nil || result != "V" || index < 0 {
+			return false
+		}
+		if record.Before.Stack[index].Kind != frametransfer.UninitThis {
+			continue
+		}
+		invoke := constructorMotionMember(object, ops[pc], core.OP_INVOKESPECIAL)
+		if delegates != 0 || pc != packet.delegatePC || invoke == nil || invoke.Name != packet.delegateOwner || invoke.Description != packet.delegateDescriptor || index != 0 || !record.Before.ThisUninitialized || len(record.Uses) != len(params)+1 || record.Uses[0] != origin(0) {
+			return false
+		}
+		after, _, err := frametransfer.Transfer(record.Before, frametransfer.FromIR(ins))
+		if err != nil || after.ThisUninitialized {
+			return false
+		}
+		if packet.capturePC < 0 {
+			target := child.constructors[invoke.Description]
+			if invoke.Name != object.GetClassName() || target == nil || target.descriptor != invoke.Description || len(params) == 0 || params[0] != "L"+child.owner+";" || record.Uses[1] != origin(1) {
+				return false
+			}
+		} else if invoke.Name != object.GetSupperClassName() && invoke.Name != object.GetClassName() {
+			return false
+		}
+		delegates++
+	}
+	return captureSeen && delegates == 1
 }

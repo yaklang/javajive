@@ -4215,6 +4215,16 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if lambdaMethodLocalNamespace && c.nativeCaptureFailed {
 				return nil, fmt.Errorf("unproved lambda/local declaration namespace")
 			}
+			if !isLambda {
+				priorArguments := funcCtx.Arguments
+				defer func() { funcCtx.Arguments = priorArguments }()
+				var storageKnown bool
+				samParams, statementList, storageKnown = c.prepareFinalParameterStorage(method, descriptor, codeAttr, samParams, statementList, len(methodLocalDeclarations) != 0)
+				if !storageKnown {
+					return nil, fmt.Errorf("unproved final parameter definition/storage separation")
+				}
+				c.nativeMemberBody = statementList
+			}
 			c.nativeSourceNamesReady = !c.nativeCaptureFailed
 			paramsNewStrList := []string{}
 			// A lambda arrow parameter whose type is a GENERIC class rendered RAW is best emitted WITHOUT
@@ -4298,6 +4308,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			if !isLambda {
 				paramsNewStrList = c.applyParameterAnnotations(method, name, descriptor, paramsNewStrList)
 				paramsNewStrList = c.applyParamTypeAnnotations(method, name, descriptor, methodType.FunctionType().ParamTypes, paramsNewStrList)
+				var known bool
+				paramsNewStrList, known = c.applyOriginalSourceParameterFinality(method, descriptor, paramsNewStrList)
+				if !known {
+					return nil, fmt.Errorf("unproved original parameter metadata")
+				}
 			}
 			paramsNewStr = strings.Join(paramsNewStrList, ", ")
 
@@ -4880,6 +4895,11 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		}
 		paramList = c.applyParameterAnnotations(method, name, descriptor, paramList)
 		paramList = c.applyParamTypeAnnotations(method, name, descriptor, paramTypes, paramList)
+		var known bool
+		paramList, known = c.applyOriginalSourceParameterFinality(method, descriptor, paramList)
+		if !known {
+			return nil, fmt.Errorf("unproved original abstract parameter metadata")
+		}
 		paramsNewStr = strings.Join(paramList, ", ")
 	}
 	if isLambda {

@@ -947,11 +947,8 @@ func nativeMethodLocalScopeSignature(local, enclosing *ClassObject, owner *nativ
 	if !known {
 		return "", false
 	}
-	signature := methodSig
-	if signature == "" {
-		signature = owner.descriptor
-	}
-	if !nativeMethodLocalBindingBudget(classes, signature, work) {
+	signature, known := nativeMethodLocalBindingSignature(enclosing, owner, classes, methodSig, family, work)
+	if !known || !nativeMethodLocalBindingBudget(classes, signature, work) {
 		return "", false
 	}
 	erased, _, known := types.EraseLexicalOwnerMethodSignatureWithThrows(classes, signature)
