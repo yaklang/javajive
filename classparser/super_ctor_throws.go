@@ -3,6 +3,8 @@ package javaclassparser
 import (
 	"fmt"
 	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 )
 
 // superCtorCheckedThrows returns the checked exceptions declared by the
@@ -69,7 +71,7 @@ func (c *ClassObjectDumper) superCtorCheckedThrows(plans ...*constructorSourceBo
 		if err != nil || md != desc {
 			continue
 		}
-		return c.checkedThrowsFromMethod(sObj, m), nil
+		return c.checkedThrowsFromMethod(sObj, m)
 	}
 	return "", nil
 }
@@ -107,41 +109,61 @@ func (c *ClassObjectDumper) superInitDescriptor(superInternal string) string {
 	return desc
 }
 
-func (c *ClassObjectDumper) checkedThrowsFromMethod(obj *ClassObject, m *MemberInfo) string {
+func (c *ClassObjectDumper) checkedThrowsFromMethod(obj *ClassObject, m *MemberInfo) (string, error) {
 	if obj == nil || m == nil || c.FuncCtx == nil {
-		return ""
+		return "", nil
+	}
+	if !nativeProofWork(c.Work, int64(len(m.Attributes))+1) {
+		return "", fmt.Errorf("superclass constructor exception proof budget exceeded")
+	}
+	for _, attribute := range m.Attributes {
+		if exceptions, ok := attribute.(*ExceptionsAttribute); ok && (exceptions == nil || len(exceptions.ExceptionIndexTable) > 128) {
+			return "", fmt.Errorf("unknown superclass constructor Exceptions metadata")
+		}
+	}
+	exceptions, known := originalMethodExceptions(obj, m)
+	if !known {
+		return "", fmt.Errorf("unknown superclass constructor Exceptions metadata")
+	}
+	provider := c.FuncCtx.InvocationMetadata
+	exhausted := false
+	query := func(name string) (callbinding.Class, bool) {
+		if !nativeProofWork(c.Work, 1) {
+			exhausted = true
+			return callbinding.Class{}, false
+		}
+		if provider == nil {
+			return callbinding.Class{}, false
+		}
+		return provider(name)
 	}
 	var names []string
-	for _, attribute := range m.Attributes {
-		ea, ok := attribute.(*ExceptionsAttribute)
-		if !ok {
+	for _, name := range exceptions {
+		// Exception spelling supplies no subtype evidence. The same original
+		// hierarchy used by checked-escape analysis proves unchecked subclasses,
+		// including user-defined names, without changing the caller's declaration.
+		unchecked := originalExceptionUnchecked(name, query)
+		if exhausted || !nativeProofWork(c.Work, 1) {
+			return "", fmt.Errorf("superclass constructor exception proof budget exceeded")
+		}
+		if unchecked {
 			continue
 		}
-		for _, u := range ea.ExceptionIndexTable {
-			info, err := obj.getConstantInfo(u)
-			if err != nil {
-				continue
-			}
-			classInfo, ok := info.(*ConstantClassInfo)
-			if !ok {
-				continue
-			}
-			name, err := obj.getUtf8(classInfo.NameIndex)
-			if err != nil || name == "" {
-				continue
-			}
-			dot := strings.ReplaceAll(name, "/", ".")
-			if isUncheckedThrowable(dot) {
-				continue
-			}
-			c.FuncCtx.Import(dot)
-			short := c.FuncCtx.ShortTypeName(dot)
-			if short != "" {
-				names = append(names, short)
-			}
+		throwable := originalExceptionCovered(name, "java/lang/Throwable", query)
+		if exhausted || !nativeProofWork(c.Work, 1) {
+			return "", fmt.Errorf("superclass constructor exception proof budget exceeded")
+		}
+		if !throwable {
+			return "", fmt.Errorf("unknown superclass constructor exception hierarchy")
+		}
+		dot := strings.ReplaceAll(name, "/", ".")
+		c.FuncCtx.Import(dot)
+		short := c.FuncCtx.ShortTypeName(dot)
+		if short != "" {
+			names = append(names, short)
 		}
 	}
-	return strings.Join(names, ", ")
+	return strings.Join(names, ", "), nil
 }
 
 func jdkSuperCtorThrows(super, desc string) string {
@@ -154,19 +176,4 @@ func jdkSuperCtorThrows(super, desc string) string {
 		return "IOException"
 	}
 	return ""
-}
-
-func isUncheckedThrowable(dot string) bool {
-	switch dot {
-	case "java.lang.RuntimeException", "java.lang.Error":
-		return true
-	}
-	if strings.HasPrefix(dot, "java.lang.") {
-		switch {
-		case strings.HasSuffix(dot, "Error"),
-			strings.HasSuffix(dot, "RuntimeException"):
-			return true
-		}
-	}
-	return false
 }
