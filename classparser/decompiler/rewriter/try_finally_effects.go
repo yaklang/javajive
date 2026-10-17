@@ -175,8 +175,14 @@ func finallyCoveredAssignment(x *statements.AssignStatement, covered func(int) b
 		return known && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam && ref.CustomValue == nil && ref.StackVar == nil && ref.Type() != nil &&
 			!x.IsFirst && x.JavaValue == nil && x.ArrayMember == nil
 	}
-	if x == nil || x.ArrayMember != nil || !x.HasOriginPC || !covered(x.OriginPC) || !finallyCoveredValue(x.JavaValue, covered) {
+	if x == nil || !x.HasOriginPC || !covered(x.OriginPC) || !finallyCoveredValue(x.JavaValue, covered) {
 		return false
+	}
+	// The store itself can throw for null, bounds and reference compatibility.
+	// Keep its decoded PC and all array/index/RHS evaluations inside the same
+	// handler domain; no computation or check is moved across cleanup.
+	if x.ArrayMember != nil {
+		return (x.LeftValue == nil || x.LeftValue == x.ArrayMember) && finallyCoveredValue(x.ArrayMember.Object, covered) && finallyCoveredValue(x.ArrayMember.Index, covered)
 	}
 	switch target := plainTryValue(x.LeftValue).(type) {
 	case *values.JavaRef:

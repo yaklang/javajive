@@ -28,6 +28,9 @@ type FinallyRegion struct {
 // incorrectly. Both changes must be proved together, before any tree changes.
 // Unknown control flow, opaque effects and region gaps fail closed.
 func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, bool) {
+	if resource, ok := recoverTypedResourceFinally(tr); ok {
+		return resource, true
+	}
 	if resource, ok := recoverPrimaryResourceFinally(tr); ok {
 		return resource, true
 	}

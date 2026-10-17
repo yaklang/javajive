@@ -328,11 +328,15 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 	markEncodedJumps(tryNode, bodyNodes)
 	tryCatchSt.EntryInitializers = resourceEntryInitializers(tryNode)
-	declaration, tail := factorUnprotectedTryTail(node, tryCatchSt)
+	declaration := prepareTypedResourceFinally(tryCatchSt)
+	var tail []statements.Statement
+	if declaration == nil {
+		declaration, tail = factorUnprotectedTryTail(node, tryCatchSt)
+	}
 	if declaration == nil && len(tail) == 0 {
 		declaration, tail = factorResourceNormalTail(node, tryCatchSt)
 	}
-	if len(tail) > 0 {
+	if declaration != nil || len(tail) > 0 {
 		// Preserve the result's method-local identity across the protected
 		// prefixes and the unprotected tail, without replaying slot names.
 		if declaration != nil {

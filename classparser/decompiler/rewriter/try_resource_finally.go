@@ -154,6 +154,11 @@ func resourceWritesLocal(input []statements.Statement, ref *values.JavaRef) bool
 		seen[st] = true
 		switch x := st.(type) {
 		case *statements.AssignStatement:
+			// A bare source binder has no initializer and performs no JVM write.
+			// Nested return factoring may introduce it before a resource body.
+			if x.IsDeclare && x.JavaValue == nil && finallyCoveredAssignment(x, func(int) bool { return false }) && !sameTryLocal(x.LeftValue, ref) {
+				continue
+			}
 			if sameTryLocal(x.LeftValue, ref) || resourceWritesValue(x.JavaValue, ref) {
 				return true
 			}
