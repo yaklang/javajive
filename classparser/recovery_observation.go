@@ -141,8 +141,15 @@ func (c *ClassObjectDumper) constructorExitObservationProved(initialized bool, o
 	if !initialized || c.constructorReceiverFinalizerSilent {
 		return true
 	}
+	return c.refuseConstructorMotion("motion.exceptional_exit_finalizer_coverage", obj, code, descriptor, pc)
+}
+
+// Record only an existing guard refusing this candidate. The first observed
+// refusal is a trace dependency, not a minimal ALL/ANY frontier or a runtime
+// counterexample. No new effect permission follows from an absent record.
+func (c *ClassObjectDumper) refuseConstructorMotion(obligation string, obj *ClassObject, code *CodeAttribute, descriptor string, pc int) bool {
 	if c.constructorMotionRefusal != nil && *c.constructorMotionRefusal == nil && obj != nil && code != nil {
-		r := &RecoveryMotionRefusal{Obligation: "motion.exceptional_exit_finalizer_coverage", Owner: obj.GetClassName(), Descriptor: descriptor, PC: pc, CodeHash: recoveryObservationCodeHash(code), RuntimeProfile: c.options.TargetSourceVersion}
+		r := &RecoveryMotionRefusal{Obligation: obligation, Owner: obj.GetClassName(), Descriptor: descriptor, PC: pc, CodeHash: recoveryObservationCodeHash(code), RuntimeProfile: c.options.TargetSourceVersion}
 		// Read the original member/code identity. A descriptor by itself must
 		// never choose among different method declarations.
 		matches, remaining := 0, 1024

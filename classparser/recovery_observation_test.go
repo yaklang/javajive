@@ -19,20 +19,27 @@ func TestAdversarialConstructorRecoveryEvidencePreservesTheExistingDecision(t *t
 			for _, debug := range []string{"none", "source,lines,vars"} {
 				t.Run(debug, func(t *testing.T) {
 					fixture := strings.ReplaceAll(captureMotionFixture, "public class ", "class ")
-					fixture = strings.Replace(fixture, "class CaptureMotionOwner {", "class CaptureMotionAllocating {final Object local=new Object(); Object capture(){return null;}}\nclass CaptureMotionOwner {", 1)
-					fixture = strings.Replace(fixture, "CaptureMotionSilent plain(final Object token){", "CaptureMotionAllocating allocating(final Object token){return new CaptureMotionAllocating(){Object capture(){return token;}};}\n CaptureMotionSilent plain(final Object token){", 1)
+					fixture = strings.Replace(fixture, "class CaptureMotionOwner {", "class CaptureMotionPassing {CaptureMotionPassing(){accept(this);}static void accept(Object value){}Object capture(){return null;}}\nclass CaptureMotionAllocating {final Object local=new Object(); Object capture(){return null;}}\nclass CaptureMotionOwner {", 1)
+					fixture = strings.Replace(fixture, "CaptureMotionSilent plain(final Object token){", "CaptureMotionPassing passing(final Object token){return new CaptureMotionPassing(){Object capture(){return token;}};}\n CaptureMotionAllocating allocating(final Object token){return new CaptureMotionAllocating(){Object capture(){return token;}};}\n CaptureMotionSilent plain(final Object token){", 1)
 					files := nativeCompileDebugClasses(t, strings.ReplaceAll(fixture, "CaptureMotion", namespace), debug)
-					for _, kind := range []string{"silent", "observing", "no-argument", "missing parent", "allocating"} {
+					for _, kind := range []string{"silent", "observing", "no-argument", "missing parent", "allocating", "passing"} {
 						t.Run(kind, func(t *testing.T) {
-							name := namespace + "Owner$1.class"
-							if kind == "observing" {
-								name = namespace + "Owner$2.class"
-							}
-							if kind == "no-argument" {
-								name = namespace + "Owner$4.class"
-							}
-							if kind == "allocating" {
-								name = namespace + "Owner$3.class"
+							parentName := namespace + map[string]string{"silent": "Base", "observing": "Observer", "no-argument": "Silent", "missing parent": "Base", "allocating": "Allocating", "passing": "Passing"}[kind]
+							name := ""
+							for candidate, data := range files {
+								if !strings.HasPrefix(candidate, namespace+"Owner$") {
+									continue
+								}
+								obj, err := Parse(data)
+								if err != nil {
+									t.Fatal(err)
+								}
+								if obj.GetSupperClassName() == parentName {
+									if name != "" {
+										t.Fatal("ambiguous authored constructor owner")
+									}
+									name = candidate
+								}
 							}
 							raw := files[name]
 							if len(raw) == 0 {
@@ -75,11 +82,21 @@ func TestAdversarialConstructorRecoveryEvidencePreservesTheExistingDecision(t *t
 							observation := on.RecoveryEvidence[0]
 							want := RecoveryRuleProved
 							gate := "motion.capture_store_motion"
-							if kind == "observing" || kind == "missing parent" || kind == "allocating" {
+							if kind == "observing" || kind == "missing parent" || kind == "allocating" || kind == "passing" {
 								want, gate = RecoveryRuleUnproved, "motion.constructor_chain_observation"
 							}
 							if observation.State != want || observation.Obligation != gate || observation.InputHash != fmt.Sprintf("%x", sha256.Sum256(raw)) || observation.Owner != strings.TrimSuffix(name, ".class") || observation.Method != "<init>" || len(observation.CodeHash) != 64 || observation.DelegationPC < 0 || observation.TargetSource != 8 || observation.SourceCompiler != ModernJavac {
 								t.Fatalf("wrong original identity or sufficient-rule result: %+v", observation)
+							}
+							if kind == "passing" || kind == "observing" {
+								r := observation.BlockedBy
+								expected := "motion.receiver_argument_confinement"
+								if kind == "observing" {
+									expected = "motion.initialized_receiver_dispatch_coverage"
+								}
+								if r == nil || r.Obligation != expected || r.Owner != parentName || r.Method != "<init>" || r.Descriptor != "()V" || r.PC < 0 || r.ClassHash != fmt.Sprintf("%x", sha256.Sum256(files[parentName+".class"])) {
+									t.Fatalf("lost receiver observation boundary: %+v", r)
+								}
 							}
 							if kind == "allocating" {
 								r := observation.BlockedBy

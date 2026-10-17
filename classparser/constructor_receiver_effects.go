@@ -997,12 +997,12 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					taintedArgs = taintedArgs || v.reachesReceiver()
 				}
 				if receiver.retainsReceiver || taintedArgs && (!initialized || receiver.allocation == 0 || opcode != core.OP_INVOKESPECIAL || member.Member != "<init>") {
-					return false
+					return c.refuseConstructorMotion("motion.receiver_argument_confinement", obj, code, descriptor, int(op.CurrentOffset))
 				}
 
 				if receiver.receiver && member.Member != "<init>" {
 					if !initialized || !c.constructorReceiverFinalizerSilent {
-						return false
+						return c.refuseConstructorMotion("motion.initialized_receiver_dispatch_coverage", obj, code, descriptor, int(op.CurrentOffset))
 					}
 					value, known := c.constructorReceiverMethodWithStorage(obj, member, opcode, writes, active, remaining, depth+1, aliases, actuals...)
 					if !known {
