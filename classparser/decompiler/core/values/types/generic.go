@@ -35,8 +35,13 @@ func (j *JavaParameterizedType) String(funcCtx *class_context.ClassContext) stri
 		if source, known := funcCtx.DeclarationSourceName(j.RawClassName); known {
 			parts := make([]string, 0, len(j.OwnerSegments))
 			valid := true
+			explicitOwner := false
+			rootSpelling := ""
 			for i, segment := range j.OwnerSegments {
 				name := funcCtx.ShortTypeName(segment.BinaryName)
+				if i == 0 {
+					rootSpelling = name
+				}
 				if i > 0 {
 					parent := j.OwnerSegments[i-1].BinaryName
 					inner, ok := strings.CutPrefix(segment.BinaryName, parent+"$")
@@ -57,23 +62,31 @@ func (j *JavaParameterizedType) String(funcCtx *class_context.ClassContext) stri
 			}
 			if valid {
 				expected := j.OwnerSegments[0].BinaryName
+				rootBound := false
 				if original, known := funcCtx.DeclarationSourceName(expected); known {
 					expected = original
+					rootBound = original != "" && original == rootSpelling
 				}
 				for i := 1; i < len(j.OwnerSegments); i++ {
 					inner, _ := strings.CutPrefix(j.OwnerSegments[i].BinaryName, j.OwnerSegments[i-1].BinaryName+"$")
 					expected += "." + inner
 				}
+				// A registered lexical name may omit an enclosing prefix. Keep
+				// each original owner's arguments on that owner, rather than
+				// treating the short child name as a flat generic declaration.
+				// Only complete path components and a stable registered root
+				// justify this spelling; flat dollar names retain the old view.
 				if source != expected {
-					valid = false
+					valid = rootBound && source != "" && strings.HasSuffix(expected, "."+source)
+					explicitOwner = valid
 				}
 			}
 			if valid {
 				last := j.OwnerSegments[len(j.OwnerSegments)-1]
 				parent := j.OwnerSegments[len(j.OwnerSegments)-2]
 				inner, _ := strings.CutPrefix(last.BinaryName, parent.BinaryName+"$")
-				if strings.HasSuffix(source, "."+inner) {
-					if funcCtx.LexicalClassName == inner && funcCtx.ClassName == j.RawClassName {
+				if source == inner || strings.HasSuffix(source, "."+inner) {
+					if !explicitOwner && funcCtx.LexicalClassName == inner && funcCtx.ClassName == j.RawClassName {
 						return parts[len(parts)-1]
 					}
 					return strings.Join(parts, ".")

@@ -9,8 +9,8 @@ import (
 // Walk authoritative named-member edges, never dollar-delimited binary names.
 // A static declaration starts a new instance/type-variable scope. The bound
 // and cycle check apply equally to malformed archives and ordinary input.
-func nativeMemberLexicalAncestors(enclosing *ClassObject, objects map[string]*ClassObject, work *workbudget.Budget) ([]*ClassObject, bool) {
-	if enclosing == nil {
+func nativeMemberLexicalAncestors(enclosing *ClassObject, objects map[string]*ClassObject, work *workbudget.Budget, families ...*nativeMemberFamily) ([]*ClassObject, bool) {
+	if enclosing == nil || len(families) > 1 {
 		return nil, false
 	}
 	var out []*ClassObject
@@ -24,6 +24,20 @@ func nativeMemberLexicalAncestors(enclosing *ClassObject, objects map[string]*Cl
 		out = append(out, node)
 		owner, _, flags, member := originalMemberOwner(node)
 		if !member {
+			if len(families) == 1 && families[0] != nil && families[0].methodLocals[name] != nil {
+				// A named method-local class has a lexical method edge, not a
+				// named-member edge. Only the joint original declaration and
+				// constructor packet license crossing it in this type query.
+				owner, known := nativeMemberJointMethodLocalOwner(families[0], node, work)
+				if !known || owner.declaration == nil || objects[owner.owner] != families[0].lexicalObjects[owner.owner] {
+					return nil, false
+				}
+				if owner.declaration.AccessFlags&8 != 0 {
+					return out, true
+				}
+				node = objects[owner.owner]
+				continue
+			}
 			if parent, method, anonymous := originalAnonymousOwner(node); anonymous {
 				original := objects[parent]
 				static, known := nativeAnonymousOriginalContext(original, node, method, work)

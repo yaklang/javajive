@@ -56,3 +56,89 @@ func TestNativeMemberConstructorLexicalArgumentsNativeRoundTrip(t *testing.T) {
 		return nativePrivateEnumCompile(t, nativeMemberLexicalArgumentFixture, "LexicalEntryOwner", debug)
 	}, NativeJavac8, javac, []string{"LexicalEntryOwner"}, "LexicalEntryDriver", "32:lexical:arguments:nullable:callback\n", nil, nativeLexicalExactSignatures)
 }
+
+func nativeMemberLexicalLocalArgumentFixture() string {
+	original := "java.util.concurrent.Callable<Entry> make(final Object key,final Object value){return new java.util.concurrent.Callable<Entry>(){public Entry call(){return new Entry((Alpha)key,(Beta)value);}};}"
+	local := "java.util.concurrent.Callable<Entry> make(final Object key,final Object value){class Local implements java.util.concurrent.Callable<Entry>{public Entry call(){return new Entry((Alpha)key,(Beta)value);}}return new Local();}"
+	return strings.Replace(strings.Replace(nativeMemberLexicalArgumentFixture, original, local, 1), "!call.getClass().isAnonymousClass()", "!call.getClass().isLocalClass()", 1)
+}
+func TestAdversarialMethodLocalMemberConstructorRetainsLexicalFormalPorts(t *testing.T) {
+	for _, rename := range []string{"original", "renamed"} {
+		t.Run(rename, func(t *testing.T) {
+			source := nativeMemberLexicalLocalArgumentFixture()
+			owner := "LexicalEntryOwner"
+			if rename == "renamed" {
+				source = strings.NewReplacer("LexicalEntryOwner", "OtherArgumentRoot", "Alpha", "Left", "Beta", "Right").Replace(source)
+				owner = "OtherArgumentRoot"
+			}
+			testNativeIndependentFamilyFixture(t, source, []string{owner}, "LexicalEntryDriver", "32:lexical:arguments:nullable:callback\n", nativeLexicalExactSignatures)
+		})
+	}
+}
+
+func nativeMemberLexicalErasedLocalArgumentFixture() string {
+	original := "java.util.concurrent.Callable<Entry> make(final Object key,final Object value){return new java.util.concurrent.Callable<Entry>(){public Entry call(){return new Entry((Alpha)key,(Beta)value);}};}"
+	local := "java.util.concurrent.Callable<Object> make(final Object key,final Object value){class Local implements java.util.concurrent.Callable<Object>{public Object call(){return new Entry((Alpha)key,(Beta)value);}}return new Local();}"
+	source := strings.Replace(nativeMemberLexicalArgumentFixture, original, local, 1)
+	source = strings.Replace(source, "java.util.concurrent.Callable<LexicalEntryOwner<Object,Object>.Entry>", "java.util.concurrent.Callable<Object>", 1)
+	source = strings.Replace(source, ".Entry entry=call.call()", ".Entry entry=(LexicalEntryOwner<Object,Object>.Entry)call.call()", 1)
+	return strings.Replace(source, "!call.getClass().isAnonymousClass()", "!call.getClass().isLocalClass()", 1)
+}
+func TestAdversarialMethodLocalErasedMemberConstructorKeepsFormalPorts(t *testing.T) {
+	for _, rename := range []string{"original", "renamed"} {
+		t.Run(rename, func(t *testing.T) {
+			source := nativeMemberLexicalErasedLocalArgumentFixture()
+			owner := "LexicalEntryOwner"
+			if rename == "renamed" {
+				source = strings.NewReplacer("LexicalEntryOwner", "OtherArgumentRoot", "Alpha", "Left", "Beta", "Right").Replace(source)
+				owner = "OtherArgumentRoot"
+			}
+			testNativeIndependentFamilyFixture(t, source, []string{owner}, "LexicalEntryDriver", "32:lexical:arguments:nullable:callback\n", nativeLexicalExactSignatures)
+		})
+	}
+}
+
+func nativeMemberLexicalBoundedLocalArgumentFixture() string {
+	return strings.NewReplacer(
+		"LexicalEntryOwner<Alpha,Beta>", "LexicalEntryOwner<Alpha extends Number,Beta extends CharSequence>",
+		"make(final Object key,final Object value)", "make(final Number key,final CharSequence value)",
+		"LexicalEntryOwner<Object,Object>", "LexicalEntryOwner<Number,CharSequence>",
+		"for(Object key:values)for(Object value:values)", "for(Number key:new Number[]{null,Integer.MIN_VALUE,Integer.MAX_VALUE,new java.math.BigDecimal(\"0.125\")})for(CharSequence value:new CharSequence[]{null,\"\",\"text\",new StringBuilder(\"live\")})",
+	).Replace(nativeMemberLexicalLocalArgumentFixture())
+}
+
+func TestAdversarialMethodLocalMemberConstructorKeepsBoundedErasure(t *testing.T) {
+	for _, rename := range []string{"original", "renamed"} {
+		t.Run(rename, func(t *testing.T) {
+			source, owner := nativeMemberLexicalBoundedLocalArgumentFixture(), "LexicalEntryOwner"
+			if rename == "renamed" {
+				source = strings.NewReplacer("LexicalEntryOwner", "OtherBoundedScope", "Alpha", "Left", "Beta", "Right").Replace(source)
+				owner = "OtherBoundedScope"
+			}
+			testNativeIndependentFamilyFixture(t, source, []string{owner}, "LexicalEntryDriver", "32:lexical:arguments:nullable:callback\n", nativeLexicalExactSignatures)
+		})
+	}
+}
+
+func TestAdversarialMethodLocalMemberConstructorKeepsUnrelatedFactoryFormal(t *testing.T) {
+	source := strings.Replace(nativeMemberLexicalLocalArgumentFixture(), "java.util.concurrent.Callable<Entry> make(", "<FactoryValue extends Number> java.util.concurrent.Callable<Entry> make(", 1)
+	testNativeIndependentFamilyFixture(t, source, []string{"LexicalEntryOwner"}, "LexicalEntryDriver", "32:lexical:arguments:nullable:callback\n", nativeLexicalExactSignatures)
+}
+
+func TestAdversarialMethodLocalMemberConstructorOriginalJavac8(t *testing.T) {
+	javac := os.Getenv("JAVA8_JAVAC")
+	if javac == "" {
+		t.Fatal("JAVA8_JAVAC required for the original compiler and independent ABI oracle")
+	}
+	for _, fixture := range []struct{ name, source string }{
+		{"typed", nativeMemberLexicalLocalArgumentFixture()},
+		{"erased", nativeMemberLexicalErasedLocalArgumentFixture()},
+		{"bounded", nativeMemberLexicalBoundedLocalArgumentFixture()},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			testNativeIndependentCompilerFamilyFixture(t, func(debug string) map[string][]byte {
+				return nativePrivateEnumCompile(t, fixture.source, "LexicalEntryOwner", debug)
+			}, NativeJavac8, javac, []string{"LexicalEntryOwner"}, "LexicalEntryDriver", "32:lexical:arguments:nullable:callback\n", nil, nativeLexicalExactSignatures)
+		})
+	}
+}

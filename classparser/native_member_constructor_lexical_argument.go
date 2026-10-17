@@ -12,8 +12,8 @@ import (
 // nearest original declaration through the certified lexical edges, including
 // method formals at an anonymous class's EnclosingMethod edge. Static cuts are
 // owned by nativeMemberLexicalAncestors, not inferred from binary-name prefixes.
-func nativeMemberLexicalFormalDeclaration(object *ClassObject, objects map[string]*ClassObject, variable string, work *workbudget.Budget) (*ClassObject, *MemberInfo, bool) {
-	ancestors, known := nativeMemberLexicalAncestors(object, objects, work)
+func nativeMemberLexicalFormalDeclaration(object *ClassObject, objects map[string]*ClassObject, variable string, work *workbudget.Budget, families ...*nativeMemberFamily) (*ClassObject, *MemberInfo, bool) {
+	ancestors, known := nativeMemberLexicalAncestors(object, objects, work, families...)
 	if !known {
 		return nil, nil, false
 	}
@@ -50,7 +50,15 @@ func nativeMemberLexicalFormalDeclaration(object *ClassObject, objects map[strin
 		if !valid || found {
 			return node, nil, valid
 		}
-		if owner, enclosing, anonymous := originalAnonymousOwner(node); anonymous && enclosing != "" {
+		owner, enclosing, anonymous := originalAnonymousOwner(node)
+		if len(families) == 1 && families[0] != nil && families[0].methodLocals[node.GetClassName()] != nil {
+			local, known := nativeMemberJointMethodLocalOwner(families[0], node, work)
+			if !known {
+				return nil, nil, false
+			}
+			owner, enclosing, anonymous = local.owner, local.method+local.descriptor, true
+		}
+		if anonymous && enclosing != "" {
 			parent := objects[owner]
 			if parent == nil || parent.GetClassName() != owner {
 				return nil, nil, false
@@ -197,27 +205,27 @@ func nativeMemberLexicalConstructorArguments(p *nativeMemberFamily, child *nativ
 		if formal == nil {
 			return args
 		}
-		variable, bare := formal.RawType().(*types.JavaClass)
-		if !bare || variable == nil || !ctx.IsTypeParam(variable.Name) {
+		variable, bare := types.TypeVariableName(formal)
+		if !bare || !ctx.IsTypeParam(variable) {
 			continue
 		}
 		referenced := false
 		for _, name := range references {
-			referenced = referenced || name == variable.Name
+			referenced = referenced || name == variable
 		}
 		if !referenced {
 			continue
 		}
 		// The currently rendered method is nearer than its class declaration.
-		shadowed := currentOwn[variable.Name]
+		shadowed := currentOwn[variable]
 		for _, name := range types.MethodFormalTypeParamNames(ctx.CurrentMethodSig) {
-			shadowed = shadowed || name == variable.Name
+			shadowed = shadowed || name == variable
 		}
 		if shadowed {
 			continue
 		}
-		targetOwner, targetMethod, targetKnown := nativeMemberLexicalFormalDeclaration(child.object, p.lexicalObjects, variable.Name, work)
-		callerOwner, callerMethod, callerKnown := nativeMemberLexicalFormalDeclaration(p.lexicalObjects[caller], p.lexicalObjects, variable.Name, work)
+		targetOwner, targetMethod, targetKnown := nativeMemberLexicalFormalDeclaration(child.object, p.lexicalObjects, variable, work, p)
+		callerOwner, callerMethod, callerKnown := nativeMemberLexicalFormalDeclaration(p.lexicalObjects[caller], p.lexicalObjects, variable, work, p)
 		if !targetKnown || !callerKnown || targetOwner == nil || targetOwner != callerOwner || targetMethod != callerMethod || args[i] == nil {
 			continue
 		}

@@ -141,3 +141,104 @@ func TestNativeMemberConstructorLexicalArgumentsRequireOriginalBinderAndErasure(
 		})
 	}
 }
+
+func TestNativeMethodLocalConstructorArgumentsRequireJointFormalEdge(t *testing.T) {
+	files := nativeCompileClasses(t, nativeMemberLexicalErasedLocalArgumentFixture())
+	for _, variant := range []string{"original", "missing local role", "foreign local object", "overlapping member role", "changed enclosing field", "changed capture port", "changed factory method", "foreign factory declaration", "missing original root", "foreign family root", "failed family", "static factory contradiction", "factory formal shadow", "current method shadow", "budget", "memory", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			z := nativeArchive(t, files)
+			defer z.Close()
+			root, err := Parse(bytes.Clone(files["LexicalEntryOwner.class"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := z.nativeMemberReader(root)
+			p := d.planNativeMemberFamily()
+			if p == nil {
+				t.Fatal("original named/local family")
+			}
+			child := p.children["LexicalEntryOwner$Entry"]
+			local := p.methodLocals["LexicalEntryOwner$1Local"]
+			if child == nil || local == nil || local.constructor == nil {
+				t.Fatal("original lexical declarations")
+			}
+			caller := local.object
+			descriptor := ""
+			for desc := range child.constructors {
+				descriptor = desc
+			}
+			if len(child.constructors) != 1 {
+				t.Fatal("original unique constructor")
+			}
+			rootSignature, known := nativeMethodLocalOriginalSignature(root, root.Attributes, nil)
+			if !known {
+				t.Fatal("original class signature")
+			}
+			ctx := &class_context.ClassContext{ClassName: caller.GetClassName(), FunctionName: "call", CurrentMethodDesc: "()Ljava/lang/Object;", TypeParams: []string{"Alpha", "Beta"}, LexicalTypeParamSignatures: []string{rootSignature}}
+			args := []values.JavaValue{values.NewJavaRef(utils.NewRootVariableId(), values.JavaNull, types.NewJavaClass("java.lang.Object")), values.NewJavaRef(utils.NewRootVariableId(), values.JavaNull, types.NewJavaClass("java.lang.Object"))}
+			want := [2]bool{}
+			var work *workbudget.Budget
+			switch variant {
+			case "original":
+				want = [2]bool{true, true}
+			case "missing local role":
+				delete(p.methodLocals, caller.GetClassName())
+			case "foreign local object":
+				copy, err := Parse(bytes.Clone(files["LexicalEntryOwner$1Local.class"]))
+				if err != nil {
+					t.Fatal(err)
+				}
+				local.object = copy
+			case "overlapping member role":
+				p.children[caller.GetClassName()] = &nativeMemberClass{object: caller}
+			case "changed enclosing field":
+				local.constructor.enclosingField = "this$7"
+			case "changed capture port":
+				local.constructor.captures[local.constructor.enclosingField] = len(local.constructor.captures) + 1
+			case "changed factory method":
+				local.owner.method = "other"
+			case "foreign factory declaration":
+				local.owner.declaration = caller.Methods[0]
+			case "missing original root":
+				delete(p.lexicalObjects, p.owner)
+			case "foreign family root":
+				p.owner = "DifferentRoot"
+			case "failed family":
+				p.failed = true
+			case "static factory contradiction":
+				local.owner.declaration.AccessFlags |= 8
+			case "factory formal shadow":
+				attrs := []AttributeInfo{}
+				for _, a := range local.owner.declaration.Attributes {
+					if _, ok := a.(*SignatureAttribute); !ok {
+						attrs = append(attrs, a)
+					}
+				}
+				raw := "<Alpha:Ljava/lang/Object;>(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/concurrent/Callable<Ljava/lang/Object;>;"
+				local.owner.declaration.Attributes = append(attrs, &SignatureAttribute{Type: "Signature", AttrLen: 2, SignatureIndex: uint16(root.ConstantPoolManager.AddUtf8Info(raw))})
+				want = [2]bool{false, true}
+			case "current method shadow":
+				ctx.CurrentMethodSig = "<Alpha:Ljava/lang/Object;>()Ljava/lang/Object;"
+				want = [2]bool{false, true}
+			case "budget":
+				work = workbudget.New(nil, workbudget.Limits{MaxRequestWork: 1})
+			case "memory":
+				work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				context, cancel := context.WithCancel(context.Background())
+				cancel()
+				work = workbudget.New(context, workbudget.Limits{})
+			}
+			got := nativeMemberLexicalConstructorArguments(p, child, descriptor, caller.GetClassName(), args, ctx, work)
+			if len(got) != len(args) {
+				t.Fatal("argument count changed")
+			}
+			for i, arg := range got {
+				cast, ok := arg.(*values.CastExpression)
+				if ok != want[i] || ok && (!cast.Binding || cast.Value != args[i]) {
+					t.Fatalf("original formal edge parameter%d cast=%v want=%v", i, ok, want[i])
+				}
+			}
+		})
+	}
+}
