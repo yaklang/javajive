@@ -757,7 +757,12 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		sub.nativeMemberRoot = p
 		sub.nativeMethodLocalCurrent = local
 		sub.nativeAnonymousRoot = p.memberAnonymous[local.object.GetClassName()]
-		sub.nativeAnonymousForest = p.anonymousForest
+		// Only an owned anonymous source group needs the forest renderer. An
+		// unrelated group must not replace this local body's captured-field
+		// and private-accessor source permissions.
+		if sub.nativeAnonymousRoot != nil {
+			sub.nativeAnonymousForest = p.anonymousForest
+		}
 		sub.nativeCaptureFields = local.bindings
 		sub.nativeCaptureTypes = map[string]types.JavaType{}
 		lexical := *ctx
