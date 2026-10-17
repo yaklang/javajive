@@ -659,6 +659,15 @@ func (j *TernaryExpression) Type() (typ types.JavaType) {
 	if j.computingType {
 		return nil
 	}
+	// Only numeric conditional domains need the fresh promotion query below.
+	// Preserve cached Boolean/reference inference, including its constant-time
+	// behavior on large shared predicate graphs.
+	if j.cachedType != nil {
+		p, primitive := j.cachedType.RawType().(*types.JavaPrimer)
+		if !primitive || p == nil || conditionalPrimitiveKind(p.Name) == "" {
+			return j.cachedType
+		}
+	}
 	j.computingType = true
 	defer func() {
 		j.computingType = false

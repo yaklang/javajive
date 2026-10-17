@@ -77,3 +77,22 @@ func TestNumericConditionalRejectsOtherDomainsAndRefreshesNumericCache(t *testin
 		t.Fatal("conditional type polluted char producer")
 	}
 }
+
+// Cached predicate/reference domains are outside numeric promotion. Querying
+// either may not re-walk a large expression graph or invoke its type callbacks.
+func TestNumericConditionalDoesNotReopenCachedOtherDomains(t *testing.T) {
+	for _, typ := range []types.JavaType{types.NewJavaPrimer(types.JavaBoolean), types.NewJavaClass("java.lang.Object")} {
+		calls := 0
+		value := &CustomValue{TypeFunc: func() types.JavaType { calls++; return types.NewJavaPrimer(types.JavaInteger) }}
+		root := &TernaryExpression{TrueValue: value, FalseValue: value}
+		root.SetCachedType(typ)
+		for i := 0; i < 256; i++ {
+			if root.Type() != typ {
+				t.Fatal("cached nonnumeric domain changed")
+			}
+		}
+		if calls != 0 {
+			t.Fatal("unrelated type graph reopened", calls)
+		}
+	}
+}
