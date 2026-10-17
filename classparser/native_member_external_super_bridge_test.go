@@ -1,9 +1,11 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"context"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/internal/workbudget"
+	"os"
 	"strings"
 	"testing"
 )
@@ -169,6 +171,241 @@ func TestNativeForeignSuperOwnBridgeRequiresExactOriginalPacket(t *testing.T) {
 			got := d.nativeMemberForeignOriginalSuper(p, method, "BindingBase$Member", desc, pc)
 			if got != (variant == "original" || variant == "ordinary THIS delegate") {
 				t.Fatalf("original SUPER closure=%v", got)
+			}
+		})
+	}
+}
+
+const nativeForeignNamedInAnonymousFixture = `
+class ForeignSlotRoot {
+ class Entry {
+  final int value;final Object observed;
+  Entry(int value){this.value=value;observed=scope();}
+  Object scope(){return ForeignSlotRoot.this;}
+  Object enclosing(){return ForeignSlotRoot.this;}
+ }
+ Entry make(int n){return new Entry(n);}
+}
+class ForeignSlotCaller extends ForeignSlotRoot {
+ ForeignSlotRoot wrap(){return new ForeignSlotCaller(){
+  class Decorated extends Entry {
+   Decorated(int n){super(n);}
+   Object scope(){return ForeignSlotCaller.this;}
+  }
+  Entry make(int n){return new Decorated(n);}
+ };}
+}
+class ForeignSlotDriver {
+ public static void main(String[]args)throws Exception{
+  int rows=0;
+  for(int n:new int[]{Integer.MIN_VALUE,-1,0,1,Integer.MAX_VALUE}){
+   ForeignSlotRoot plain=new ForeignSlotRoot();ForeignSlotRoot.Entry direct=plain.make(n);
+   if(direct.value!=n||direct.observed!=plain||direct.enclosing()!=plain)throw new AssertionError("direct scope");
+   for(boolean cleared:new boolean[]{false,true}){
+    ForeignSlotCaller caller=new ForeignSlotCaller();ForeignSlotRoot wrapped=caller.wrap();
+    if(cleared){int fields=0;for(java.lang.reflect.Field f:wrapped.getClass().getDeclaredFields())if(f.getType()==ForeignSlotCaller.class){f.setAccessible(true);f.set(wrapped,null);fields++;}if(fields!=1)throw new AssertionError("hidden caller port");}
+    ForeignSlotRoot.Entry entry=wrapped.make(n);Object expected=cleared?null:caller;
+    if(entry.value!=n||entry.observed!=expected||entry.scope()!=expected||entry.enclosing()!=wrapped)throw new AssertionError("capture, callback and distinct enclosing roles");
+    if(entry.getClass().getDeclaringClass()!=wrapped.getClass()||!wrapped.getClass().isAnonymousClass())throw new AssertionError("original foreign lexical metadata");
+    rows++;
+   }
+  }
+  System.out.println(rows+":foreign:named:anonymous:capture:callback");
+ }
+}`
+
+func TestAdversarialForeignNamedInAnonymousSuperKeepsPhysicalParentBinding(t *testing.T) {
+	// Only the parent family is replaced. The foreign anonymous owner, its
+	// named child and the driver remain the original class files, so accepting
+	// their physical SUPER packet must not borrow their source ownership.
+	testNativeIndependentFamilyFixture(t, nativeForeignNamedInAnonymousFixture, []string{"ForeignSlotRoot"}, "ForeignSlotDriver", "10:foreign:named:anonymous:capture:callback\n", nativeLexicalExactSignatures)
+}
+
+func nativeForeignNamedStaticContextFixture() string {
+	return strings.NewReplacer("ForeignSlotRoot wrap()", "static ForeignSlotRoot wrap(final ForeignSlotCaller captured)", "return ForeignSlotCaller.this;", "return captured;", "caller.wrap()", "ForeignSlotCaller.wrap(caller)").Replace(nativeForeignNamedInAnonymousFixture)
+}
+
+func TestAdversarialForeignNamedAnonymousSuperKeepsStaticFactoryContext(t *testing.T) {
+	testNativeIndependentFamilyFixture(t, nativeForeignNamedStaticContextFixture(), []string{"ForeignSlotRoot"}, "ForeignSlotDriver", "10:foreign:named:anonymous:capture:callback\n", nativeLexicalExactSignatures)
+}
+
+func TestAdversarialForeignNamedAnonymousSuperRenamedContext(t *testing.T) {
+	source := strings.NewReplacer("ForeignSlotRoot", "ExternalEntryBase", "ForeignSlotCaller", "HiddenScopeCaller", "Decorated", "DifferentInner").Replace(nativeForeignNamedInAnonymousFixture)
+	testNativeIndependentFamilyFixture(t, source, []string{"ExternalEntryBase"}, "ForeignSlotDriver", "10:foreign:named:anonymous:capture:callback\n", nativeLexicalExactSignatures)
+}
+
+func TestAdversarialForeignNamedSuperKeepsNestedMemberContext(t *testing.T) {
+	source := strings.NewReplacer(
+		"ForeignSlotRoot wrap(){return new ForeignSlotCaller(){", "ForeignSlotRoot wrap(){return new Box();}class Box extends ForeignSlotCaller{",
+		" };}", " }",
+		"!wrapped.getClass().isAnonymousClass()", "!wrapped.getClass().isMemberClass()",
+	).Replace(nativeForeignNamedInAnonymousFixture)
+	testNativeIndependentFamilyFixture(t, source, []string{"ForeignSlotRoot"}, "ForeignSlotDriver", "10:foreign:named:anonymous:capture:callback\n", nativeLexicalExactSignatures)
+}
+
+func TestAdversarialForeignNamedAnonymousSuperOriginalJavac8(t *testing.T) {
+	javac := os.Getenv("JAVA8_JAVAC")
+	if javac == "" {
+		t.Fatal("JAVA8_JAVAC required")
+	}
+	for _, row := range []struct{ name, source string }{{"instance", nativeForeignNamedInAnonymousFixture}, {"static", nativeForeignNamedStaticContextFixture()}} {
+		t.Run(row.name, func(t *testing.T) {
+			testNativeIndependentCompilerFamilyFixture(t, func(debug string) map[string][]byte {
+				return nativePrivateEnumCompile(t, row.source, "ForeignSlotRoot", debug)
+			}, NativeJavac8, javac, []string{"ForeignSlotRoot"}, "ForeignSlotDriver", "10:foreign:named:anonymous:capture:callback\n", nil, nativeLexicalExactSignatures)
+		})
+	}
+}
+
+func TestNativeForeignNamedAnonymousSuperRequiresOriginalPhysicalContext(t *testing.T) {
+	files := nativeCompileClasses(t, nativeForeignNamedInAnonymousFixture)
+	for _, variant := range []string{"original", "caller changes while resolving owner", "stale parent definition", "copied method", "duplicate method", "missing lexical owner", "wrong lexical owner", "missing enclosing method", "wrong reciprocal row", "duplicate reciprocal row", "static context contradiction", "wrong own enclosing slot", "wrong capture flag", "wrong capture name", "wrong call PC", "wrong call descriptor", "parent absent", "parent private", "budget", "memory", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			objects := map[string]*ClassObject{}
+			for _, raw := range files {
+				o, err := Parse(bytes.Clone(raw))
+				if err != nil {
+					t.Fatal(err)
+				}
+				objects[o.GetClassName()] = o
+			}
+			z := nativeArchive(t, files)
+			defer z.Close()
+			p := z.nativeMemberReader(objects["ForeignSlotRoot"]).planNativeMemberFamily()
+			if p == nil {
+				t.Fatal("parent packet")
+			}
+			child := objects["ForeignSlotCaller$1$Decorated"]
+			owner := objects["ForeignSlotCaller$1"]
+			factory := objects["ForeignSlotCaller"]
+			reader := z.nativeMemberReader(child)
+			reader.foldSiblingResolver = func(name string) ([]byte, bool) {
+				o := objects[name]
+				if o == nil {
+					return nil, false
+				}
+				return o.Bytes(), true
+			}
+			var method *MemberInfo
+			var code *CodeAttribute
+			pc := -1
+			desc := ""
+			for _, m := range child.Methods {
+				n, _ := sourceBridgeUTF8(child, m.NameIndex)
+				if n == "<init>" {
+					method = m
+					for _, a := range m.Attributes {
+						if body, ok := a.(*CodeAttribute); ok {
+							code = body
+						}
+					}
+				}
+			}
+			if method == nil || code == nil {
+				t.Fatal("child constructor")
+			}
+			decoder := core.NewDecompiler(code.Code, nil)
+			if decoder.ParseOpcode() != nil {
+				t.Fatal("original body")
+			}
+			for _, op := range decoder.Opcodes() {
+				call := constructorMotionMember(child, op, core.OP_INVOKESPECIAL)
+				if call != nil && call.Name == "ForeignSlotRoot$Entry" {
+					pc = int(op.CurrentOffset)
+					desc = call.Description
+				}
+			}
+			if pc < 0 {
+				t.Fatal("parent call")
+			}
+			switch variant {
+			case "caller changes while resolving owner":
+				rawResolver := reader.foldSiblingResolver
+				changed := false
+				reader.foldSiblingResolver = func(name string) ([]byte, bool) {
+					if name == "ForeignSlotCaller$1" && !changed {
+						changed = true
+						child.ConstantPoolManager.AddUtf8Info("changed-original-caller")
+					}
+					return rawResolver(name)
+				}
+			case "stale parent definition":
+				p.children["ForeignSlotRoot$Entry"].object.ConstantPoolManager.AddUtf8Info("stale-parent-definition")
+			case "copied method":
+				copy := *method
+				method = &copy
+			case "duplicate method":
+				child.Methods = append(child.Methods, method)
+			case "missing lexical owner":
+				delete(objects, "ForeignSlotCaller")
+			case "wrong lexical owner":
+				objects["ForeignSlotCaller"] = objects["ForeignSlotRoot"]
+			case "missing enclosing method":
+				for _, m := range factory.Methods {
+					n, _ := sourceBridgeUTF8(factory, m.NameIndex)
+					if n == "wrap" {
+						m.NameIndex = factory.ThisClass
+					}
+				}
+			case "wrong reciprocal row", "duplicate reciprocal row":
+				for _, a := range factory.Attributes {
+					if table, ok := a.(*InnerClassesAttribute); ok {
+						for _, row := range table.Classes {
+							name, _ := sourceBridgeClassName(factory, row.InnerClassInfoIndex)
+							if name == owner.GetClassName() {
+								if variant == "wrong reciprocal row" {
+									row.InnerClassAccessFlags |= 8
+								} else {
+									table.Classes = append(table.Classes, row)
+								}
+								break
+							}
+						}
+					}
+				}
+			case "static context contradiction":
+				for _, m := range factory.Methods {
+					n, _ := sourceBridgeUTF8(factory, m.NameIndex)
+					if n == "wrap" {
+						m.AccessFlags |= 8
+					}
+				}
+			case "wrong own enclosing slot":
+				code.Code[1] = byte(core.OP_ALOAD_2)
+			case "wrong capture flag", "wrong capture name":
+				for _, f := range child.Fields {
+					if f.AccessFlags&0x1000 != 0 {
+						if variant == "wrong capture flag" {
+							f.AccessFlags &^= 0x10
+						} else {
+							f.NameIndex = uint16(child.ConstantPoolManager.AddUtf8Info("this$0"))
+						}
+					}
+				}
+			case "wrong call PC":
+				pc++
+			case "wrong call descriptor":
+				desc = "(LForeignSlotRoot;J)V"
+			case "parent absent":
+				delete(p.children, "ForeignSlotRoot$Entry")
+			case "parent private":
+				for _, m := range p.children["ForeignSlotRoot$Entry"].object.Methods {
+					n, _ := sourceBridgeUTF8(p.children["ForeignSlotRoot$Entry"].object, m.NameIndex)
+					if n == "<init>" {
+						m.AccessFlags |= 2
+					}
+				}
+			case "budget":
+				reader.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "memory":
+				reader.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				reader.Work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			if got := reader.nativeMemberForeignOriginalSuper(p, method, "ForeignSlotRoot$Entry", desc, pc); got != (variant == "original") {
+				t.Fatalf("physical context=%v", got)
 			}
 		})
 	}
