@@ -9,9 +9,10 @@ import (
 )
 
 // The original joint compilation has synthetic access$000 in both subclasses.
-// A constructor-local declaration makes only the intermediate family refuse
-// lexical reconstruction. Its independently flat source retains that method
-// as ordinary Java. Regenerating the leaf's synthetic method then conflicts
+// An owned named producer is absent only from the family resolver, making
+// the intermediate family refuse lexical reconstruction. The complete original
+// class set remains on the driver classpath. Its independently flat source
+// retains that method as ordinary Java. Regenerating the leaf's synthetic method then conflicts
 // with the ordinary inherited method, despite both original packets being valid.
 // The driver and all producers stay original; both source families are rebuilt
 // together, so a binary parent cannot hide the source-only conflict.
@@ -23,7 +24,7 @@ func TestAdversarialInheritedAccessorKeepsJointSourceAndInitialization(t *testin
 				ss := map[string]string{
 					"p/Effects.java": `package p;public class Effects{public static String trace="";public static final RuntimeException failure=new RuntimeException("original");public static boolean fail;}`,
 					"p/Base.java":    `package p;public class Base{protected static Object value=init();static Object init(){Effects.trace+="B";return new Object();}public static void set(Object v){value=v;}}`,
-					"q/Parent.java":  `package q;public class Parent extends p.Base{static{p.Effects.trace+="P";}public Parent(){class Local{};new Local();}public static class BuilderBase{public Object read(){return Parent.value;}}}`,
+					"q/Parent.java":  `package q;public class Parent extends p.Base{static{p.Effects.trace+="P";}public Parent(){class Local{};new Local();}public static class SourcePeer{}public static class BuilderBase{public Object read(){return Parent.value;}}}`,
 					"q/Root.java":    `package q;public class Root extends Parent{static{p.Effects.trace+="R";if(p.Effects.fail)throw p.Effects.failure;}public static class Builder extends Parent.BuilderBase{public Object read(){return Root.value;}}}`,
 					"q/Driver.java":  `package q;public class Driver{public static void main(String[]args)throws Exception{p.Effects.trace="";Root.Builder reader=new Root.Builder();if(args.length>0){p.Effects.fail=true;try{reader.read();throw new AssertionError("missing init failure");}catch(ExceptionInInitializerError e){if(e.getCause()!=p.Effects.failure||!p.Effects.trace.equals("BPR"))throw new AssertionError("cause/order",e);}p.Effects.trace="";try{reader.read();throw new AssertionError("missing erroneous class state");}catch(NoClassDefFoundError e){if(!p.Effects.trace.equals(""))throw new AssertionError("retried initialization");}System.out.println("original:init:failure:identity");return;}Object token=reader.read();if(token==null||!p.Effects.trace.equals("BPR")||new Parent.BuilderBase().read()!=token)throw new AssertionError("declaring initialization/identity:"+p.Effects.trace);if(Root.class.getDeclaredMethod("access$000").getDeclaringClass()!=Root.class)throw new AssertionError("changed accessor declaring class");for(Object v:new Object[]{null,new Object()}){p.Base.set(v);if(reader.read()!=v||new Parent.BuilderBase().read()!=v)throw new AssertionError("shared original field");}System.out.println("original:init:order:mutable:identity");}}`,
 				}
@@ -72,7 +73,20 @@ func TestAdversarialInheritedAccessorKeepsJointSourceAndInitialization(t *testin
 						if policy == "no-core-cleanups" {
 							t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
 						}
-						z := nativeArchive(t, files)
+						// A partial archive is a stable local-plan refusal premise even
+						// when constructor-local reconstruction gains support. The missing
+						// producer remains original in both independent JVM driver runs.
+						familyFiles := make(map[string][]byte, len(files)-1)
+						missingProducer := "q/" + names[0] + "$SourcePeer.class"
+						if len(files[missingProducer]) == 0 {
+							t.Fatalf("missing original owned producer %s", missingProducer)
+						}
+						for n, raw := range files {
+							if n != missingProducer {
+								familyFiles[n] = raw
+							}
+						}
+						z := nativeArchive(t, familyFiles)
 						defer z.Close()
 						parent, _ := Parse(files["q/"+names[0]+".class"])
 						entry := z.nativeMemberEntry(parent)
@@ -82,9 +96,10 @@ func TestAdversarialInheritedAccessorKeepsJointSourceAndInitialization(t *testin
 						out := t.TempDir()
 						var paths []string
 						for n, raw := range files {
-							// The unsupported constructor-local producer stays original.
+							// The unavailable owned producer and constructor-local
+							// producer stay original.
 							// Every named class participating in the source collision is rebuilt.
-							if !strings.HasPrefix(n, "q/"+names[0]) && !strings.HasPrefix(n, "q/"+names[1]) || strings.HasSuffix(n, "$1Local.class") {
+							if !strings.HasPrefix(n, "q/"+names[0]) && !strings.HasPrefix(n, "q/"+names[1]) || strings.HasSuffix(n, "$1Local.class") || n == missingProducer {
 								write(out, n, raw)
 								continue
 							}
