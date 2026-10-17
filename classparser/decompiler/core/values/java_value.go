@@ -656,9 +656,6 @@ func (j *TernaryExpression) Type() (typ types.JavaType) {
 	if j == nil || j.TrueValue == nil || j.FalseValue == nil {
 		return nil
 	}
-	if j.cachedType != nil {
-		return j.cachedType
-	}
 	if j.computingType {
 		return nil
 	}
@@ -672,6 +669,14 @@ func (j *TernaryExpression) Type() (typ types.JavaType) {
 			j.cachedType = typ
 		}
 	}()
+	// Numeric conditional typing is symmetric and depends on both resolved arms.
+	// A cached first-arm type from phi assembly is not a numeric type proof.
+	if numeric, ok := NumericConditionalType(j.TrueValue, j.FalseValue); ok {
+		return numeric
+	}
+	if j.cachedType != nil {
+		return j.cachedType
+	}
 	typ = types.MergeTypes(TernaryArmRValueType(j.TrueValue), TernaryArmRValueType(j.FalseValue))
 	return typ
 }

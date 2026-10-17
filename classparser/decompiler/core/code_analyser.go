@@ -6477,6 +6477,7 @@ func (d *Decompiler) ParseStatement() error {
 	d.refreshReferenceOperandSnapshotTypes()
 	d.partitionSharedDynamicCaptureWebs()
 	d.unifyNumericExitWebs()
+	d.restoreNumericConditionalWebs()
 	d.restoreNormalizedBooleanWebs()
 	d.restoreExceptionDeclarationSeeds()
 	d.restoreOptionalSupplierDefinitionViews()
