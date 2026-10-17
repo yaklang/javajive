@@ -40,6 +40,7 @@ func TestAdversarialFlatStaticAncestorKeepsOriginalAccessorsAndEffects(t *testin
 						sources[rename(n)] = rename(s)
 					}
 					files := nativeCompileSourceReleaseClasses(t, sources, debug, "8")
+					nativeTestForeignSourceProtocolUnproved(t, files, "q/Holder")
 					write := func(dir, name string, raw []byte) {
 						t.Helper()
 						path := filepath.Join(dir, name)

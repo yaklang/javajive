@@ -4663,6 +4663,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				statementCodes = append(statementCodes, declaration+"\n")
 			}
 			supperInvokeStr := ""
+			enumThisHeader := false
 			delegationPC := -1
 			if needsCheckedEscape && name == "<init>" {
 				delegationPC = constructorDelegationPC(statementList)
@@ -4707,7 +4708,20 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					}
 				}
 				if v, ok := statement.(*statements.ExpressionStatement); ok {
-					if call, ok := v.Expression.(*values.FunctionCallExpression); ok && constructorPlan != nil && constructorPlan.delegate == call && constructorPlan.carrier != "" {
+					// Enum THIS delegates have two implicit physical parameters.
+					// Preserve their original identity-based projection when moving
+					// the header ahead of source-only local declarations.
+					if isEnumCtor && len(params) >= 2 {
+						if source, known := enumThisDelegateSource(v, params[:2], funcCtx); known {
+							supperInvokeStr = c.GetTabString() + source + ";\n"
+							enumThisHeader = true
+							continue
+						}
+					}
+					// Ordinary THIS and SUPER are source constructor headers. Local
+					// declarations have no runtime effect, but Java still forbids
+					// placing them before the original initialization delegate.
+					if call, ok := values.UnpackSoltValue(v.Expression).(*values.FunctionCallExpression); ok && constructorPlan != nil && constructorPlan.delegate == call {
 						supperInvokeStr = c.GetTabString() + constructorPlan.renderDelegation(funcCtx) + ";\n"
 						continue
 					}
@@ -4769,9 +4783,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				statementCodes = append(statementCodes, fmt.Sprintf("%s\n", statementStr))
 			}
 
-			if isEnumCtor {
-				// The only super() call in an enum constructor is the synthetic
-				// super(name, ordinal); enum constructors cannot call super explicitly.
+			if isEnumCtor && !enumThisHeader {
+				// Java supplies Enum's synthetic SUPER(name, ordinal), while an
+				// original THIS delegate remains an explicit source header.
 				supperInvokeStr = ""
 			}
 			if name != "<init>" && name != "<clinit>" &&

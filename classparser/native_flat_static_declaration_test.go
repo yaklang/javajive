@@ -387,6 +387,7 @@ func nativeTerminalFlatCycleRoundTrip(t *testing.T, prefix string, native8 bool)
 					t.Fatal(err)
 				}
 			}
+			nativeTestForeignSourceProtocolUnproved(t, files, prefix+"OtherFlagScope")
 			original := t.TempDir()
 			for n, raw := range files {
 				write(original, n, raw)
@@ -479,6 +480,7 @@ func nativeTerminalFlatCycleRoundTrip(t *testing.T, prefix string, native8 bool)
 
 func TestNativeAccessorAncestorFlagsNeedOnlyActualSymbolDependencies(t *testing.T) {
 	files := nativeCompileClasses(t, nativeTerminalFlatDependencyFixture)
+	nativeTestForeignSourceProtocolUnproved(t, files, "OtherFlagScope")
 	z := nativeArchive(t, files)
 	defer z.Close()
 	root, err := Parse(files["FlagViewRoot.class"])
@@ -517,6 +519,9 @@ func TestNativeTerminalFlatDeclarationRequiresNegativeAdmissionWithoutSourceReen
 				source = strings.Replace(source, "Marker(){class ConstructorOnly{};new ConstructorOnly();}", "Marker(){}", 1)
 			}
 			files := nativeCompileClasses(t, source)
+			if variant != "successful local plan" {
+				nativeTestForeignSourceProtocolUnproved(t, files, "OtherFlagScope")
+			}
 			z := nativeArchive(t, files)
 			defer z.Close()
 			root, err := Parse(files["FlagViewRoot.class"])
@@ -585,6 +590,7 @@ func TestNativeTerminalFlatDeclarationRequiresNegativeAdmissionWithoutSourceReen
 
 func TestNativeTerminalFlatDeclarationConcurrentColdAdmission(t *testing.T) {
 	files := nativeCompileClasses(t, nativeTerminalFlatDependencyFixture)
+	nativeTestForeignSourceProtocolUnproved(t, files, "OtherFlagScope")
 	z := nativeArchive(t, files)
 	defer z.Close()
 	root, err := Parse(files["FlagViewRoot.class"])
@@ -629,4 +635,41 @@ func nativeTerminalFlatCycleArchive(t *testing.T, files map[string][]byte, nativ
 		t.Fatal(err)
 	}
 	return z
+}
+
+// These tests require a foreign family whose source protocol is unproved.
+// A post-SUPER constructor local is now supported and cannot serve as that
+// negative precondition. Keep an actual post-Java-8 declaration protocol while
+// retaining every instruction, signature and lexical row. Constructor-local
+// producer binaries stay at their original version, so javac8 can consume
+// those unchanged inputs. Each end-to-end case executes the original first.
+func nativeTestForeignSourceProtocolUnproved(t *testing.T, files map[string][]byte, owner string) {
+	t.Helper()
+	changed := 0
+	for name, raw := range files {
+		if name != owner+".class" && !strings.HasPrefix(name, owner+"$") {
+			continue
+		}
+		object, err := Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, named := originalMemberOwner(object)
+		if name != owner+".class" && !named {
+			continue
+		}
+		if len(raw) < 8 {
+			t.Fatal("original class header")
+		}
+		updated := bytes.Clone(raw)
+		updated[6], updated[7] = 0, 55
+		if _, err := Parse(updated); err != nil {
+			t.Fatal("original version protocol", err)
+		}
+		files[name] = updated
+		changed++
+	}
+	if changed < 2 {
+		t.Fatal("foreign root and named declaration required", owner, changed)
+	}
 }

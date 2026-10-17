@@ -22,6 +22,7 @@ func TestNativeAccessorAncestorSourceChoicesStaySeparate(t *testing.T) {
 			}
 			ss["q/Root.java"] = root
 			files := nativeCompileSourceReleaseClasses(t, ss, "none", "8")
+			nativeTestForeignSourceProtocolUnproved(t, files, "q/Holder")
 			z := nativeArchive(t, files)
 			defer z.Close()
 			originalRoot, e := Parse(files["q/Root.class"])

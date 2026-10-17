@@ -2,6 +2,9 @@ package javaclassparser
 
 import (
 	"fmt"
+	"github.com/yaklang/javajive/classparser/decompiler/core/frametransfer"
+	"github.com/yaklang/javajive/classparser/decompiler/core/methodir"
+	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 	"sort"
 	"strings"
 
@@ -142,7 +145,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 			if !known {
 				continue
 			}
-			if owner.method == "<init>" || !nativeMemberVersionMetadata(local, c.Work) || !nativeDeclarationNamesCompatible(local, c.Work) || local.AccessFlags&0x10 != owner.flags&0x10 || owner.flags & ^uint16(0x10) != 0 || len(p.methodLocals) >= 64 || p.methodLocals[binary] != nil {
+			if !nativeMemberVersionMetadata(local, c.Work) || !nativeDeclarationNamesCompatible(local, c.Work) || local.AccessFlags&0x10 != owner.flags&0x10 || owner.flags & ^uint16(0x10) != 0 || len(p.methodLocals) >= 64 || p.methodLocals[binary] != nil {
 				return false
 			}
 			key := owner.method + owner.descriptor + "\x00" + owner.name
@@ -186,6 +189,9 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 				if !known {
 					return false
 				}
+			}
+			if owner.method == "<init>" && !c.nativeMethodLocalConstructorScopeReady(local, owner, sites, consumers) {
+				return false
 			}
 			if constructor.enclosingField != "" {
 				expected, known := nativeMethodLocalEnclosingField(p, owner.owner, c.Work)
@@ -1144,4 +1150,83 @@ func nativeMethodLocalAnonymousDescendant(p *nativeMemberFamily, local *nativeMe
 		current = owner
 	}
 	return false
+}
+
+// A Java constructor has a source declaration region only after delegation.
+// Require every certified local allocation/use to see the original initialized
+// THIS in slot zero. Merely knowing a method's <init> name or a later successful
+// local constructor call does not justify moving its declaration before SUPER.
+func (c *ClassObjectDumper) nativeMethodLocalConstructorScopeReady(local *ClassObject, owner *nativeMethodLocalOwner, sites map[int]nativeMethodLocalAllocation, consumers map[int]string) bool {
+	if c == nil || c.obj == nil || owner == nil || owner.owner != c.obj.GetClassName() || owner.method != "<init>" || owner.declaration == nil || owner.declaration.AccessFlags&0x0528 != 0 || len(sites) == 0 {
+		return false
+	}
+	actual, known := originalMethodLocalOwner(local, c.obj, c.Work)
+	if !known || *actual != *owner {
+		return false
+	}
+	packet, known := originalMethodLocalSourceConstructor(local, c.obj, c.Work)
+	if !known {
+		return false
+	}
+	var code *CodeAttribute
+	for _, a := range owner.declaration.Attributes {
+		if !nativeProofWork(c.Work, 1) {
+			return false
+		}
+		if body, ok := a.(*CodeAttribute); ok {
+			if code != nil || body == nil {
+				return false
+			}
+			code = body
+		}
+	}
+	if code == nil {
+		return false
+	}
+	ir, frames, known := c.nativeOriginalMethodSnapshot(owner.declaration, code)
+	if !known {
+		return false
+	}
+	wanted := map[int]bool{}
+	for pc, site := range sites {
+		if !nativeProofWork(c.Work, 1) || pc != site.newPC || pc < 0 || site.invokePC <= pc {
+			return false
+		}
+		allocation, ak := ir.InstrByID(methodir.InstrID(pc))
+		invoke, ik := ir.InstrByID(methodir.InstrID(site.invokePC))
+		if !ak || !ik || allocation.Opcode != core.OP_NEW || allocation.Class != local.GetClassName() || invoke.Opcode != core.OP_INVOKESPECIAL || invoke.Class != local.GetClassName() || invoke.Member != "<init>" || invoke.Desc != packet.descriptor {
+			return false
+		}
+		wanted[pc] = true
+		wanted[site.invokePC] = true
+	}
+	for pc := range consumers {
+		wanted[pc] = true
+	}
+	if c.Work != nil && c.Work.CheckAlloc(int64(len(wanted))*128) != nil {
+		return false
+	}
+	for _, record := range frames.Instructions {
+		if !nativeProofWork(c.Work, 1) {
+			return false
+		}
+		pc := int(record.PC)
+		ins, known := ir.InstrByID(methodir.InstrID(record.PC))
+		if !known {
+			return false
+		}
+		if ins.Opcode == core.OP_NEW && ins.Class == local.GetClassName() {
+			if _, known := sites[pc]; !known {
+				return false
+			}
+		}
+		if !wanted[pc] {
+			continue
+		}
+		if record.Before.ThisUninitialized || len(record.Before.Locals) == 0 || len(record.BeforeOrigins) != len(record.Before.Locals)+len(record.Before.Stack) || record.Before.Locals[0].Kind != frametransfer.Ref || record.Before.Locals[0].Class != owner.owner || record.BeforeOrigins[0] != (ssabuild.Origin{Kind: ssabuild.OriginParam, Slot: 0}) {
+			return false
+		}
+		delete(wanted, pc)
+	}
+	return len(wanted) == 0
 }
