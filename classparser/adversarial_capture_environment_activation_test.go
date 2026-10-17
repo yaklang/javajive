@@ -90,3 +90,31 @@ func TestAdversarialCaptureEnvironmentOracleKillsInvalidProjections(t *testing.T
 		})
 	}
 }
+
+// Native javac8 can assign EnclosingMethod to the physical lambda body. The
+// implementation parameter transports a captured value; the original factory's
+// retained operand declaration must receive the compiler capture field spelling.
+// An unchanged binary caller and exact ABI checks distinguish value transport
+// from merely making the generated Java compile.
+func TestAdversarialLambdaMethodLocalCaptureKeepsOriginalFactoryBinder(t *testing.T) {
+	javac := os.Getenv("JAVA8_JAVAC")
+	if javac == "" {
+		t.Skip("JAVA8_JAVAC required")
+	}
+	for _, binding := range []string{"alias", "channel"} {
+		t.Run(binding, func(t *testing.T) {
+			for _, shape := range []struct{ name, body string }{
+				{"parameter", `static java.util.function.Function<Object,CaptureInput.View> bind(java.util.function.Supplier<Object> alias){return input->{class Local implements CaptureInput.View {public Object retained(){return alias.get();}}return new Local();};}`},
+				{"copied-parameter", `static java.util.function.Function<Object,CaptureInput.View> bind(java.util.function.Supplier<Object> supplier){final java.util.function.Supplier<Object> alias=supplier;return input->{class Local implements CaptureInput.View {public Object retained(){return alias.get();}}return new Local();};}`},
+				{"wide-leading-parameter", `static java.util.function.Function<Object,CaptureInput.View> bind(java.util.function.Supplier<Object> alias){return make(17L,alias);}static java.util.function.Function<Object,CaptureInput.View> make(long amount,java.util.function.Supplier<Object> alias){return input->{class Local implements CaptureInput.View {public Object retained(){if(amount!=17L)throw new AssertionError("wide capture");return alias.get();}}return new Local();};}`},
+			} {
+				t.Run(shape.name, func(t *testing.T) {
+					fixture := captureActivationInput + "class CaptureTransport{" + strings.ReplaceAll(shape.body, "alias", binding) + "}\n" + captureActivationDriver
+					testNativeIndependentCompilerFamilyFixture(t, func(debug string) map[string][]byte {
+						return nativePrivateEnumCompile(t, fixture, "CaptureTransport", debug)
+					}, NativeJavac8, javac, []string{"CaptureTransport"}, "CaptureDriver", "16:nested:capture:timing:activation:failure:identity\n", nil, nativeLexicalExactSignatures)
+				})
+			}
+		})
+	}
+}

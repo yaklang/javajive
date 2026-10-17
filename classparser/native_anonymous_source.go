@@ -1738,12 +1738,33 @@ func nativeCaptureDeclaration(body []statements.Statement, ref *values.JavaRef, 
 }
 func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.Statement, params []values.JavaValue) {
 	p := c.nativeAnonymousRoot
-	if p == nil {
+	// Named local classes inside a lambda can constrain the factory's binder
+	// without an anonymous family. Apply only the existing identity/name proof;
+	// absence of that family grants no allocation or ownership permission.
+	if p == nil && len(c.nativeLambdaCaptureParameterNames[c.CurrentMethod]) == 0 {
 		return
 	}
+	var captureChildren map[string]*nativeAnonymousClass
+	if p != nil {
+		captureChildren = p.children
+	}
+	fail := func() {
+		if p != nil {
+			p.failed = true
+			return
+		}
+		c.nativeCaptureFailed = true
+		if c.nativeMemberRoot != nil {
+			c.nativeMemberRoot.failed = true
+		}
+	}
 	ctx := c.FuncCtx
+	if ctx == nil {
+		fail()
+		return
+	}
 	relevant := false
-	for _, child := range p.children {
+	for _, child := range captureChildren {
 		// Dominance/stability is a body proof, independent of the archive
 		// ownership proof performed before source promotion. Only a physical
 		// implementation crossing a lexical scope needs the extra certificate.
@@ -1777,36 +1798,36 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	value = func(v values.JavaValue, visible map[*coreutils.VariableId]bool) {
 		if c.Work != nil {
 			if c.Work.Enter(workbudget.CounterASTDepth) != nil {
-				p.failed = true
+				fail()
 				return
 			}
 			defer c.Work.Leave(workbudget.CounterASTDepth)
 		}
 		remaining--
 		if remaining < 0 || !nativeProofWork(c.Work, 1) || sourceProofNil(v) || activeValue[v] {
-			p.failed = true
+			fail()
 			return
 		}
 		activeValue[v] = true
 		defer delete(activeValue, v)
 		if !c.bindNativeLambdaCaptureParameterNames(v, body, parameterIDs, visible, names) {
-			p.failed = true
+			fail()
 			return
 		}
 		if alloc, ok := v.(*values.NewExpression); ok && alloc.ConstructorCall != nil {
 			call := alloc.ConstructorCall
-			child := p.children[strings.ReplaceAll(call.ClassName, ".", "/")]
+			child := captureChildren[strings.ReplaceAll(call.ClassName, ".", "/")]
 			if child != nil {
 				site := map[*coreutils.VariableId]bool{}
 				allowed[call.OriginPC] = site
 				for field, index := range child.fields {
 					if index >= len(call.Arguments) {
-						p.failed = true
+						fail()
 						continue
 					}
 					ref, ok := values.UnpackSoltValue(call.Arguments[index]).(*values.JavaRef)
 					if !ok || ref == nil || ref.Id == nil {
-						p.failed = true
+						fail()
 						continue
 					}
 					if ref.IsThis {
@@ -1818,7 +1839,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 					}
 					captureParams, _, err := callbinding.Descriptor(child.descriptor)
 					if err != nil || index >= len(captureParams) {
-						p.failed = true
+						fail()
 						continue
 					}
 					declaredType := ref.Type()
@@ -1835,16 +1856,16 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 						erasure, known = values.SourceTypeErasure(declaredType, ctx)
 					}
 					if !known || erasure != captureParams[index] {
-						p.failed = true
+						fail()
 						continue
 					}
 					if !visible[ref.Id] || !stable {
-						p.failed = true
+						fail()
 						continue
 					}
 					name, ok := strings.CutPrefix(field, "val$")
 					if !ok || name == "" || !class_context.PreservesJava8Identifier(name) {
-						p.failed = true
+						fail()
 						continue
 					}
 					// A rewritten body ref may share the declaration ID but no
@@ -1852,7 +1873,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 					// not a mutable use-site copy, witnesses its captured word.
 					if captureName, known := c.nativeLambdaParameterCaptureName(parameterDeclarations[ref.Id]); known {
 						if !c.recordNativeLambdaCaptureParameterName(parameterDeclarations[ref.Id], name) {
-							p.failed = true
+							fail()
 							continue
 						}
 						name = captureName
@@ -1862,11 +1883,11 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 							site[ref.Id] = true
 							continue
 						}
-						p.failed = true
+						fail()
 						continue
 					}
 					if !names.bind(name, ref.Id, visible, c.Work) {
-						p.failed = true
+						fail()
 						continue
 					}
 					ctx.LocalNames[ref.Id] = name
@@ -1887,7 +1908,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		}
 		children, known := values.Children(v)
 		if !known {
-			p.failed = true
+			fail()
 			return
 		}
 		for _, v := range children {
@@ -1898,7 +1919,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	walk = func(ss []statements.Statement, visible map[*coreutils.VariableId]bool) {
 		if c.Work != nil {
 			if c.Work.Enter(workbudget.CounterASTDepth) != nil {
-				p.failed = true
+				fail()
 				return
 			}
 			defer c.Work.Leave(workbudget.CounterASTDepth)
@@ -1906,13 +1927,13 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		for _, st := range ss {
 			remaining--
 			if remaining < 0 || !nativeProofWork(c.Work, 1) || sourceProofNil(st) || activeStatement[st] {
-				p.failed = true
+				fail()
 				return
 			}
 			activeStatement[st] = true
 			roots, children, known := nativeSourceNameChildren(st)
 			if !known {
-				p.failed = true
+				fail()
 				delete(activeStatement, st)
 				continue
 			}
@@ -1950,7 +1971,9 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		}
 	}
 	c.prepareNativeSourceNames(body, params, reserved, protected)
-	ctx.SourceCaptureStable = func(pc int, id *coreutils.VariableId) bool { return allowed[pc][id] }
+	if p != nil {
+		ctx.SourceCaptureStable = func(pc int, id *coreutils.VariableId) bool { return allowed[pc][id] }
+	}
 }
 
 func descriptorPrimitiveName(descriptor string) string {

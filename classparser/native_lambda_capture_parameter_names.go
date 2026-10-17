@@ -14,13 +14,14 @@ type nativeLambdaCaptureNameDemand struct {
 	value values.JavaValue
 }
 
-// An anonymous class nested in a lambda can capture a parameter of the lambda
+// A local or anonymous class nested in a lambda can capture a parameter of the lambda
 // implementation which is itself a captured parameter of the original factory.
 // Its field spelling constrains that outer source binder. Keep the LCAP value
 // transport unchanged; never substitute another value or invent an alias.
-// This initial domain admits only one proved original factory and its unchanged
-// descriptor parameter LOAD. Local/field operands and shared factories retain
-// their existing handling until they have a corresponding name-constraint proof.
+// This domain admits one proved original factory with an unchanged parameter
+// LOAD or a typed local LOAD with one original STORE. Local operands must reopen
+// their source seed and dynamic snapshot below. Field operands and shared
+// factories retain their existing handling.
 func (c *ClassObjectDumper) recordNativeLambdaCaptureParameterName(ref *values.JavaRef, name string) bool {
 	if c == nil || c.FuncCtx == nil || c.CurrentMethod == nil || !class_context.PreservesJava8Identifier(name) {
 		return true
@@ -59,11 +60,15 @@ func (c *ClassObjectDumper) recordNativeLambdaCaptureParameterName(ref *values.J
 		return true
 	}
 	operand := site.operands[index]
-	if operand == nil || operand.local != nil || operand.owner != "" || operand.member != "" || operand.storage != nil || len(operand.operands) != 0 || operand.slot < 0 {
+	if operand == nil || operand.owner != "" || operand.member != "" || operand.storage != nil || len(operand.operands) != 0 || operand.slot < 0 {
 		return true
 	}
-	// Factory-site planning already proves the descriptor LOAD, unchanged parameter
-	// words, exact bootstrap/implementation and exclusive use. Do not derive any
+	if operand.local != nil && (operand.local.storePC < 0 || len(operand.local.storePCs) != 0) {
+		return true
+	}
+	// Factory-site planning already proves the typed LOAD/reaching STORE or
+	// unchanged parameter words, exact bootstrap/implementation and exclusive use.
+	// Do not derive any
 	// of those identities from a source name or a matching value type here.
 	if !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(256) != nil {
 		return false
@@ -99,6 +104,11 @@ func (c *ClassObjectDumper) bindNativeLambdaCaptureParameterNames(v values.JavaV
 			continue
 		}
 		if lambda.IsMethodRef || !lambda.CapturesKnown || demand.index < 0 || demand.index >= len(demand.site.operands) || demand.index >= len(lambda.Captures) || lambda.Captures[demand.index] != demand.value {
+			return false
+		}
+		// Reopen the original typed local LOAD/STORE and source seed when the
+		// factory operand is a local rather than an unchanged parameter LOAD.
+		if operand := demand.site.operands[demand.index]; operand != nil && operand.local != nil && (operand.local.storePC < 0 || len(operand.local.storePCs) != 0 || !nativeLambdaLocalCaptureValue(operand, demand.value, demand.site.pc, demand.index, c.FuncCtx, c.Work)) {
 			return false
 		}
 		value, known := nativeMemberEnclosingUnpack(demand.value, c.Work)

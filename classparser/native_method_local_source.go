@@ -706,6 +706,14 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 			if !known || assigned[name] != nil && assigned[name] != ref.Id {
 				return fail("capture source name collision")
 			}
+			// Retain value transport through the implementation parameter, but
+			// constrain the original factory's actual source binder separately.
+			if captureName, known := c.nativeLambdaParameterCaptureName(ref); known {
+				if !c.recordNativeLambdaCaptureParameterName(ref, name) {
+					return fail("factory declaration name constraint failed")
+				}
+				name = captureName
+			}
 			if old, known := ctx.LocalNames[ref.Id]; known && old != name {
 				return fail("previous lexical name differs")
 			}
