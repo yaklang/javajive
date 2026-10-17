@@ -6,6 +6,31 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 )
 
+// A flat cleanup can also precede an unprotected, original throw. The throw's
+// operand remains after finally, so allocation, class initialization and failure
+// precedence are unchanged. Prove the complete suffix before projecting it;
+// the caller still checks every other normal completion for that same exit.
+func finallyFlatThrowContinuation(body, cleanup []statements.Statement, rows []core.HandlerRange, excluded []*values.JavaRef) ([]statements.Statement, *statements.CustomStatement) {
+	if len(cleanup) == 0 || len(body) <= len(cleanup) {
+		return body, nil
+	}
+	end := len(body) - 1
+	tail, ok := body[end].(*statements.CustomStatement)
+	if !ok || tail == nil || !tail.HasOriginPC || tail.OriginPC < 0 {
+		return body, nil
+	}
+	operand, sealed := tail.SourceThrowOperand()
+	if !sealed || operand != tail.ThrownValue || !sameFinallyCleanup(rows, tail, tail, excluded, 0) || !finallyContinuationBindingsVisible(operand) {
+		return body, nil
+	}
+	for i, witness := range cleanup {
+		if !sameFinallyCleanup(rows, body[end-len(cleanup)+i], witness, excluded, 0) {
+			return body, nil
+		}
+	}
+	return body[:end], tail
+}
+
 // A normal completion can continue with an original throw after finally. Its
 // allocation/call/operand effects must stay after cleanup: evaluating it in the
 // protected catch would change cleanup precedence and initialization effects.

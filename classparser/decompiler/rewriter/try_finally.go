@@ -188,14 +188,21 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 	}
 
 	if p.allowContinuation && end > 0 && ret == nil && len(p.cleanup) > 0 {
-		if normalized, after := finallyConditionalThrowContinuation(body[end-1], p.cleanup[len(p.cleanup)-1], p.rows, p.excluded); after != nil {
+		normalized, after := finallyFlatThrowContinuation(body, p.cleanup, p.rows, p.excluded)
+		if after == nil {
+			if last, continuation := finallyConditionalThrowContinuation(body[end-1], p.cleanup[len(p.cleanup)-1], p.rows, p.excluded); continuation != nil {
+				normalized = append([]statements.Statement{}, body...)
+				normalized[end-1], after = last, continuation
+			}
+		}
+		if after != nil {
 			if p.continuation != nil && (p.continuation.OriginPC != after.OriginPC || p.continuation.ThrownValue != after.ThrownValue) {
 				return nil, false, false
 			}
 			p.continuation = after
 			liftedContinuation = true
-			body = append([]statements.Statement{}, body...)
-			body[end-1] = normalized
+			body = normalized
+			end = len(body)
 		}
 	}
 	if end > 0 {
