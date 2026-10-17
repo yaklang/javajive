@@ -3,6 +3,8 @@ package javaclassparser
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"fmt"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/internal/workbudget"
 	"os"
@@ -407,6 +409,534 @@ func TestNativeForeignNamedAnonymousSuperRequiresOriginalPhysicalContext(t *test
 			if got := reader.nativeMemberForeignOriginalSuper(p, method, "ForeignSlotRoot$Entry", desc, pc); got != (variant == "original") {
 				t.Fatalf("physical context=%v", got)
 			}
+		})
+	}
+}
+
+func nativeForeignNestedAnonymousBinaryFixture(t *testing.T) string {
+	old := `class Decorated extends Entry {
+   Decorated(int n){super(n);}
+   Object scope(){return ForeignSlotCaller.this;}
+  }
+  Entry make(int n){return new Decorated(n);}`
+	replacement := `Entry make(int n){return new Entry(n){Object scope(){return ForeignSlotCaller.this;}};}`
+	source := strings.Replace(nativeForeignNamedInAnonymousFixture, old, replacement, 1)
+	if strings.Contains(source, "class Decorated") {
+		t.Fatal("authored nested-anonymous fixture did not replace its named child")
+	}
+	source = strings.Replace(source, "class ForeignSlotCaller extends ForeignSlotRoot {", "class ForeignSlotCaller extends ForeignSlotRoot {static class Marker{static Object cache;}", 1)
+	source = strings.Replace(source, "entry.getClass().getDeclaringClass()!=wrapped.getClass()", "entry.getClass().getEnclosingClass()!=wrapped.getClass()||!entry.getClass().isAnonymousClass()", 1)
+	source = strings.Replace(source, "int rows=0;", "int rows=0;if(Class.forName(\"ForeignSlotCaller$Marker\").getDeclaredField(\"cache\").getType()!=Object.class)throw new AssertionError(\"unchanged foreign marker declaration\");", 1)
+	return source
+}
+
+func TestAdversarialForeignNestedAnonymousSuperOnlyBorrowsPhysicalBinding(t *testing.T) {
+	source := nativeForeignNestedAnonymousBinaryFixture(t)
+	for _, variant := range []string{"ordinary foreign source", "unrepresentable unrelated foreign field", "unrelated foreign field and independent NEW", "unrelated foreign field and independent NEW null owner", "unrelated foreign field and independent NEW after SUPER"} {
+		t.Run(variant, func(t *testing.T) {
+			mutate := func(t *testing.T, files map[string][]byte) {
+				if variant == "ordinary foreign source" {
+					return
+				}
+				const name = "ForeignSlotCaller$Marker.class"
+				object, err := Parse(files[name])
+				if err != nil {
+					t.Fatal(err)
+				}
+				changed := 0
+				for _, field := range object.Fields {
+					n, _ := sourceBridgeUTF8(object, field.NameIndex)
+					if n == "cache" {
+						field.AccessFlags |= 0x1000
+						changed++
+					}
+				}
+				if changed != 1 {
+					t.Fatal("one original marker field required")
+				}
+				files[name] = object.Bytes()
+				if strings.Contains(variant, "independent NEW") {
+					const caller = "ForeignSlotCaller$1$1.class"
+					object, err := Parse(files[caller])
+					if err != nil {
+						t.Fatal(err)
+					}
+					var options []string
+					if strings.Contains(variant, "null owner") {
+						options = append(options, "null owner")
+					}
+					if strings.Contains(variant, "after SUPER") {
+						options = append(options, "after SUPER")
+					}
+					nativeForeignAnonymousInsertIndependentNew(t, object, options...)
+					files[caller] = object.Bytes()
+				}
+			}
+			// Foreign callers, their metadata and every foreign body are kept
+			// as original class files. A binary SUPER consumer cannot grant the
+			// parent family ownership of their otherwise unrepresentable source.
+			testNativeIndependentMutatedFamilyFixture(t, source, []string{"ForeignSlotRoot"}, "ForeignSlotDriver", "10:foreign:named:anonymous:capture:callback\n", mutate, nativeLexicalExactSignatures)
+		})
+	}
+}
+
+type nativeForeignAnonymousPhysicalTestState struct {
+	reader     *ClassObjectDumper
+	family     *nativeMemberFamily
+	objects    map[string]*ClassObject
+	method     *MemberInfo
+	code       *CodeAttribute
+	pc         int
+	descriptor string
+}
+
+func nativeForeignAnonymousPhysicalSetup(t *testing.T, files map[string][]byte) *nativeForeignAnonymousPhysicalTestState {
+	t.Helper()
+	objects := map[string]*ClassObject{}
+	for _, raw := range files {
+		o, err := Parse(bytes.Clone(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		objects[o.GetClassName()] = o
+	}
+	z := nativeArchive(t, files)
+	t.Cleanup(func() { z.Close() })
+	p := z.nativeMemberReader(objects["ForeignSlotRoot"]).planNativeMemberFamily()
+	if p == nil {
+		t.Fatal("parent declaration")
+	}
+	child := objects["ForeignSlotCaller$1$1"]
+	d := z.nativeMemberReader(child)
+	d.foldSiblingResolver = func(name string) ([]byte, bool) {
+		o := objects[name]
+		if o == nil {
+			return nil, false
+		}
+		return o.Bytes(), true
+	}
+	s := &nativeForeignAnonymousPhysicalTestState{reader: d, family: p, objects: objects, pc: -1}
+	for _, m := range child.Methods {
+		n, _ := sourceBridgeUTF8(child, m.NameIndex)
+		if n == "<init>" {
+			s.method = m
+			for _, a := range m.Attributes {
+				if code, ok := a.(*CodeAttribute); ok {
+					s.code = code
+				}
+			}
+		}
+	}
+	if s.method == nil || s.code == nil {
+		t.Fatal("constructor input")
+	}
+	decoder := core.NewDecompiler(s.code.Code, nil)
+	if decoder.ParseOpcode() != nil {
+		t.Fatal("constructor bytes")
+	}
+	for _, op := range decoder.Opcodes() {
+		call := constructorMotionMember(child, op, core.OP_INVOKESPECIAL)
+		if call != nil && call.Name == child.GetSupperClassName() {
+			s.pc = int(op.CurrentOffset)
+			s.descriptor = call.Description
+		}
+	}
+	if s.pc < 0 {
+		t.Fatal("original SUPER")
+	}
+	return s
+}
+
+func nativeForeignAnonymousInsertIndependentNew(t *testing.T, object *ClassObject, options ...string) (int, int) {
+	t.Helper()
+	var code *CodeAttribute
+	for _, method := range object.Methods {
+		name, _ := sourceBridgeUTF8(object, method.NameIndex)
+		if name == "<init>" {
+			for _, a := range method.Attributes {
+				if c, ok := a.(*CodeAttribute); ok {
+					code = c
+				}
+			}
+		}
+	}
+	if code == nil || len(code.ExceptionTable) != 0 {
+		t.Fatal("straight-line authored constructor required")
+	}
+	decoder := core.NewDecompiler(code.Code, nil)
+	if decoder.ParseOpcode() != nil {
+		t.Fatal("original constructor")
+	}
+	ops := constructorMotionOps(decoder)
+	if len(ops) < 4 {
+		t.Fatal("capture prefix")
+	}
+	insert := int(ops[3].CurrentOffset)
+	callPC := -1
+	var reference []byte
+	for _, op := range ops {
+		call := constructorMotionMember(object, op, core.OP_INVOKESPECIAL)
+		if call != nil && call.Name == object.GetSupperClassName() {
+			if callPC >= 0 {
+				t.Fatal("one initial parent call")
+			}
+			callPC = int(op.CurrentOffset)
+			reference = bytes.Clone(op.Data)
+		}
+	}
+	if callPC < 0 || len(reference) != 2 {
+		t.Fatal("parent Methodref")
+	}
+	packet := []byte{byte(core.OP_NEW), byte(object.SuperClass >> 8), byte(object.SuperClass), byte(core.OP_DUP), byte(core.OP_ALOAD_1), byte(core.OP_ICONST_0), byte(core.OP_INVOKESPECIAL), reference[0], reference[1], byte(core.OP_POP)}
+	after := false
+	for _, option := range options {
+		switch option {
+		case "null owner":
+			packet[4] = byte(core.OP_ACONST_NULL)
+		case "after SUPER":
+			after = true
+		default:
+			t.Fatal("unknown authored insertion", option)
+		}
+	}
+	if after {
+		insert = callPC + 3
+	}
+	nativeForeignAnonymousShiftDebugRanges(t, code, insert, len(packet))
+	code.Code = append(append(append([]byte(nil), code.Code[:insert]...), packet...), code.Code[insert:]...)
+	code.AttrLen += uint32(len(packet))
+	if code.MaxStack < 4 {
+		code.MaxStack = 4
+	}
+	if _, err := Parse(object.Bytes()); err != nil {
+		t.Fatal("patched classfile", err)
+	}
+	if callPC >= insert {
+		callPC += len(packet)
+	}
+	return callPC, insert + 6
+}
+
+// Insertion changes instruction addresses, not the original parameter/debug
+// identities. Preserve both boundaries of every live range; dropping debug
+// attributes would conceal the source variant the regression must exercise.
+func nativeForeignAnonymousShiftDebugRanges(t *testing.T, code *CodeAttribute, at, delta int) {
+	t.Helper()
+	for _, attribute := range code.Attributes {
+		switch a := attribute.(type) {
+		case *LineNumberTableAttribute:
+			for _, row := range a.LineNumberTable {
+				if int(row.StartPc) >= at {
+					row.StartPc += uint16(delta)
+				}
+			}
+		case *UnparsedAttribute:
+			if a.Name != "LocalVariableTable" && a.Name != "LocalVariableTypeTable" {
+				t.Fatalf("unhandled authored instruction-bearing debug attribute %s", a.Name)
+			}
+			if len(a.Info) < 2 {
+				t.Fatal("truncated debug table")
+			}
+			count := int(binary.BigEndian.Uint16(a.Info[:2]))
+			if len(a.Info) != 2+10*count {
+				t.Fatal("debug table shape")
+			}
+			for i := 0; i < count; i++ {
+				row := a.Info[2+10*i : 2+10*(i+1)]
+				start := int(binary.BigEndian.Uint16(row[:2]))
+				end := start + int(binary.BigEndian.Uint16(row[2:4]))
+				if start >= at {
+					start += delta
+					end += delta
+				} else if end > at {
+					end += delta
+				}
+				binary.BigEndian.PutUint16(row[:2], uint16(start))
+				binary.BigEndian.PutUint16(row[2:4], uint16(end-start))
+			}
+		default:
+			t.Fatalf("unhandled authored constructor attribute %T", attribute)
+		}
+	}
+}
+
+func TestNativeForeignAnonymousPhysicalSuperKeepsOriginalIdentityAndPermissions(t *testing.T) {
+	files := nativeCompileClasses(t, nativeForeignNestedAnonymousBinaryFixture(t))
+	for _, variant := range []string{"original", "failed family", "owned root", "owned named", "owned local", "owned anonymous", "owned enum", "parent absent", "parent static", "parent private", "parent bridge", "stale parent", "copied method", "duplicate method", "duplicate body", "missing body", "wrong PC", "wrong descriptor", "wrong superclass", "wrong capture receiver", "wrong capture value", "wrong capture owner", "wrong capture flags", "wrong capture name", "wrong capture descriptor", "duplicate capture", "missing context", "foreign context", "missing ancestor", "cyclic ancestor", "wrong anonymous role", "duplicate enclosing method", "caller changes during resolution", "parent changes during resolution", "independent NEW before real SUPER", "NEW is not SUPER", "budget", "memory", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			s := nativeForeignAnonymousPhysicalSetup(t, files)
+			child := s.reader.obj
+			parent := s.family.children["ForeignSlotRoot$Entry"]
+			switch variant {
+			case "failed family":
+				s.family.failed = true
+			case "owned root":
+				s.family.owner = child.GetClassName()
+			case "owned named":
+				s.family.children[child.GetClassName()] = &nativeMemberClass{object: child}
+			case "owned local":
+				s.family.methodLocals = map[string]*nativeMethodLocalClass{child.GetClassName(): {object: child}}
+			case "owned anonymous":
+				s.family.anonymousUnits = map[string]*nativeAnonymousFamily{child.GetClassName(): {}}
+			case "owned enum":
+				s.family.enumConstants = map[string]*nativeEnumConstantBody{child.GetClassName(): {}}
+			case "parent absent":
+				delete(s.family.children, "ForeignSlotRoot$Entry")
+			case "parent static":
+				parent.static = true
+			case "parent private":
+				for _, m := range parent.object.Methods {
+					n, _ := sourceBridgeUTF8(parent.object, m.NameIndex)
+					if n == "<init>" {
+						m.AccessFlags |= 2
+					}
+				}
+			case "parent bridge":
+				parent.accessBridges = map[string]*nativeConstructorAccessBridge{s.descriptor: {}}
+			case "stale parent":
+				parent.object.ConstantPoolManager.AddUtf8Info("changed-parent")
+			case "copied method":
+				copy := *s.method
+				s.method = &copy
+			case "duplicate method":
+				child.Methods = append(child.Methods, s.method)
+			case "duplicate body":
+				s.method.Attributes = append(s.method.Attributes, s.code)
+			case "missing body":
+				var attrs []AttributeInfo
+				for _, a := range s.method.Attributes {
+					if _, ok := a.(*CodeAttribute); !ok {
+						attrs = append(attrs, a)
+					}
+				}
+				s.method.Attributes = attrs
+			case "wrong PC":
+				s.pc++
+			case "wrong descriptor":
+				s.descriptor = "(LForeignSlotRoot;J)V"
+			case "wrong superclass":
+				child.SuperClass = child.ThisClass
+			case "wrong capture receiver":
+				s.code.Code[0] = byte(core.OP_ALOAD_1)
+			case "wrong capture value":
+				s.code.Code[1] = byte(core.OP_ALOAD_2)
+			case "wrong capture owner":
+				index := core.Convert2bytesToInt(s.code.Code[3:5])
+				child.ConstantPool[index-1].(*ConstantFieldrefInfo).ClassIndex = child.SuperClass
+			case "wrong capture flags", "wrong capture name", "wrong capture descriptor", "duplicate capture":
+				for _, f := range child.Fields {
+					if f.AccessFlags&0x1000 != 0 {
+						switch variant {
+						case "wrong capture flags":
+							f.AccessFlags &^= 0x10
+						case "wrong capture name":
+							f.NameIndex = uint16(child.ConstantPoolManager.AddUtf8Info("this$0"))
+						case "wrong capture descriptor":
+							f.DescriptorIndex = uint16(child.ConstantPoolManager.AddUtf8Info("Ljava/lang/Object;"))
+						case "duplicate capture":
+							child.Fields = append(child.Fields, f)
+						}
+						break
+					}
+				}
+			case "missing context":
+				delete(s.objects, "ForeignSlotCaller$1")
+			case "foreign context":
+				s.objects["ForeignSlotCaller$1"] = s.objects["ForeignSlotRoot"]
+			case "missing ancestor":
+				delete(s.objects, "ForeignSlotCaller")
+			case "cyclic ancestor":
+				o := s.objects["ForeignSlotCaller$1"]
+				o.SuperClass = o.ThisClass
+			case "wrong anonymous role":
+				for _, a := range child.Attributes {
+					if table, ok := a.(*InnerClassesAttribute); ok {
+						for _, row := range table.Classes {
+							n, _ := sourceBridgeClassName(child, row.InnerClassInfoIndex)
+							if n == child.GetClassName() {
+								row.InnerNameIndex = uint16(child.ConstantPoolManager.AddUtf8Info("Named"))
+							}
+						}
+					}
+				}
+			case "duplicate enclosing method":
+				for _, a := range child.Attributes {
+					if e, ok := a.(*UnparsedAttribute); ok && e.Name == "EnclosingMethod" {
+						child.Attributes = append(child.Attributes, e)
+						break
+					}
+				}
+			case "caller changes during resolution", "parent changes during resolution":
+				original := s.reader.foldSiblingResolver
+				changed := false
+				s.reader.foldSiblingResolver = func(name string) ([]byte, bool) {
+					if name == "ForeignSlotCaller$1" && !changed {
+						changed = true
+						if variant == "caller changes during resolution" {
+							child.ConstantPoolManager.AddUtf8Info("changed-caller")
+						} else {
+							parent.object.ConstantPoolManager.AddUtf8Info("changed-parent-after-read")
+						}
+					}
+					return original(name)
+				}
+			case "independent NEW before real SUPER", "NEW is not SUPER":
+				actual, newPC := nativeForeignAnonymousInsertIndependentNew(t, child)
+				s.pc = actual
+				if variant == "NEW is not SUPER" {
+					s.pc = newPC
+				}
+			case "budget":
+				s.reader.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "memory":
+				s.reader.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				s.reader.Work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			before := *parent.constructors["(LForeignSlotRoot;I)V"]
+			children, dependencies, getters := len(s.family.children), len(s.family.allocationDependencies), len(s.family.getters)
+			got := s.reader.nativeMemberForeignAnonymousPhysicalSuper(s.family, s.method, "ForeignSlotRoot$Entry", s.descriptor, s.pc)
+			want := variant == "original" || variant == "independent NEW before real SUPER"
+			if got != want {
+				t.Fatalf("physical SUPER=%v want=%v", got, want)
+			}
+			if *parent.constructors["(LForeignSlotRoot;I)V"] != before || len(s.family.children) != children || len(s.family.allocationDependencies) != dependencies || len(s.family.getters) != getters {
+				t.Fatal("physical identity acquired source or constructor permissions")
+			}
+		})
+	}
+}
+
+func TestNativeForeignAnonymousPhysicalSuperPreservesNarrowWordDomain(t *testing.T) {
+	for _, domain := range []struct {
+		name, source string
+		low, high    int32
+	}{{"boolean", "n>0", 0, 1}, {"byte", "(byte)n", -128, 127}, {"char", "(char)n", 0, 65535}, {"short", "(short)n", -32768, 32767}} {
+		t.Run(domain.name, func(t *testing.T) {
+			source := strings.NewReplacer("Entry(int value)", "Entry(long wide,"+domain.name+" narrow,int value)", "new Entry(n)", "new Entry(7L,"+domain.source+",n)").Replace(nativeForeignNestedAnonymousBinaryFixture(t))
+			files := nativeCompileClasses(t, source)
+			for _, value := range []int32{-2147483648, -32769, -32768, -129, -128, -1, 0, 1, 2, 127, 128, 32767, 32768, 65535, 65536, 2147483647} {
+				t.Run(fmt.Sprint(value), func(t *testing.T) {
+					s := nativeForeignAnonymousPhysicalSetup(t, files)
+					object := s.reader.obj
+					decoder := core.NewDecompiler(s.code.Code, nil)
+					if decoder.ParseOpcode() != nil {
+						t.Fatal("original")
+					}
+					ops := constructorMotionOps(decoder)
+					loadPC, oldWidth := -1, 0
+					for i, op := range ops {
+						if int(op.CurrentOffset) < s.pc && core.GetRetrieveIdx(op) == 4 && op.Instr.OpCode == core.OP_ILOAD {
+							loadPC = int(op.CurrentOffset)
+							oldWidth = int(ops[i+1].CurrentOffset) - loadPC
+						}
+					}
+					if loadPC < 0 {
+						t.Fatal("original narrow argument after category-2 port")
+					}
+					object.ConstantPool = append(object.ConstantPool, &ConstantIntegerInfo{Value: value})
+					index := len(object.ConstantPool)
+					literal := []byte{byte(core.OP_LDC_W), byte(index >> 8), byte(index)}
+					s.code.Code = append(append(append([]byte(nil), s.code.Code[:loadPC]...), literal...), s.code.Code[loadPC+oldWidth:]...)
+					delta := len(literal) - oldWidth
+					s.code.AttrLen += uint32(delta)
+					s.pc += delta
+					got := s.reader.nativeMemberForeignAnonymousPhysicalSuper(s.family, s.method, "ForeignSlotRoot$Entry", s.descriptor, s.pc)
+					want := value >= domain.low && value <= domain.high
+					if got != want {
+						t.Fatalf("%s input %d proof=%v want=%v", domain.name, value, got, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func nativeForeignAnonymousOpaqueMutation(t *testing.T, files map[string][]byte, prefix, variant string) {
+	t.Helper()
+	marker := prefix + "ForeignSlotCaller$Marker.class"
+	object, err := Parse(files[marker])
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := 0
+	for _, f := range object.Fields {
+		name, _ := sourceBridgeUTF8(object, f.NameIndex)
+		if name == "cache" {
+			f.AccessFlags |= 0x1000
+			changed++
+		}
+	}
+	if changed != 1 {
+		t.Fatal("one foreign marker field")
+	}
+	files[marker] = object.Bytes()
+	if variant != "plain" {
+		name := prefix + "ForeignSlotCaller$1$1.class"
+		object, err := Parse(files[name])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var options []string
+		if variant == "null owner" {
+			options = append(options, "null owner")
+		}
+		nativeForeignAnonymousInsertIndependentNew(t, object, options...)
+		files[name] = object.Bytes()
+	}
+}
+
+func TestAdversarialForeignPhysicalConstructorsRetainPackagedInputs(t *testing.T) {
+	source := "package ports.scope;\n" + nativeForeignNestedAnonymousBinaryFixture(t)
+	source = strings.Replace(source, `Class.forName("ForeignSlotCaller$Marker")`, `Class.forName("ports.scope.ForeignSlotCaller$Marker")`, 1)
+	testNativeIndependentMutatedFamilyFixture(t, source, []string{"ports/scope/ForeignSlotRoot"}, "ports.scope.ForeignSlotDriver", "10:foreign:named:anonymous:capture:callback\n", func(t *testing.T, files map[string][]byte) {
+		nativeForeignAnonymousOpaqueMutation(t, files, "ports/scope/", "null owner")
+	}, nativeLexicalExactSignatures)
+}
+
+func TestAdversarialForeignPhysicalConstructorsRetainRenamedInputs(t *testing.T) {
+	source := strings.NewReplacer("ForeignSlotRoot", "DifferentValueRoot", "ForeignSlotCaller", "DifferentBinaryCaller").Replace(nativeForeignNestedAnonymousBinaryFixture(t))
+	testNativeIndependentMutatedFamilyFixture(t, source, []string{"DifferentValueRoot"}, "ForeignSlotDriver", "10:foreign:named:anonymous:capture:callback\n", func(t *testing.T, files map[string][]byte) {
+		marker, err := Parse(files["DifferentBinaryCaller$Marker.class"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := 0
+		for _, f := range marker.Fields {
+			name, _ := sourceBridgeUTF8(marker, f.NameIndex)
+			if name == "cache" {
+				f.AccessFlags |= 0x1000
+				changed++
+			}
+		}
+		if changed != 1 {
+			t.Fatal("marker")
+		}
+		files["DifferentBinaryCaller$Marker.class"] = marker.Bytes()
+		object, err := Parse(files["DifferentBinaryCaller$1$1.class"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		nativeForeignAnonymousInsertIndependentNew(t, object)
+		files["DifferentBinaryCaller$1$1.class"] = object.Bytes()
+	}, nativeLexicalExactSignatures)
+}
+
+func TestAdversarialForeignPhysicalConstructorsOriginalJavac8(t *testing.T) {
+	javac := os.Getenv("JAVA8_JAVAC")
+	if javac == "" {
+		t.Fatal("JAVA8_JAVAC required")
+	}
+	source := nativeForeignNestedAnonymousBinaryFixture(t)
+	for _, variant := range []string{"plain", "independent NEW", "null owner"} {
+		t.Run(variant, func(t *testing.T) {
+			testNativeIndependentCompilerFamilyFixture(t, func(debug string) map[string][]byte {
+				return nativePrivateEnumCompile(t, source, "ForeignSlotRoot", debug)
+			}, NativeJavac8, javac, []string{"ForeignSlotRoot"}, "ForeignSlotDriver", "10:foreign:named:anonymous:capture:callback\n", func(t *testing.T, files map[string][]byte) {
+				nativeForeignAnonymousOpaqueMutation(t, files, "", variant)
+			}, nativeLexicalExactSignatures)
 		})
 	}
 }

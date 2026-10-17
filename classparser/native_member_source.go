@@ -997,6 +997,7 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				return nil, false
 			}
 			ops := constructorMotionOps(d)
+			foreignBindings := c.nativeMemberForeignAnonymousPhysicalBindings(p, m)
 			var allocationInvocations map[int]nativeMemberAllocationInvocation
 			allocationInvocationsChecked := false
 			for i, op := range ops {
@@ -1005,6 +1006,12 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				}
 				owner, known := sourceBridgeClassName(c.obj, core.Convert2bytesToInt(op.Data))
 				child := p.allocationClass(owner)
+				if foreignBindings != nil && foreignBindings.allocations[int(op.CurrentOffset)] {
+					if !foreignBindings.scope.unchanged() {
+						return nil, false
+					}
+					continue
+				}
 				if known && owner == p.owner && len(p.rootAccessBridges) > 0 {
 					plan, ok := nativeRootBridgeAllocation(c.obj, ops, i, p.lexicalObjects[p.owner], p.rootAccessBridges, c.Work)
 					if !ok {
@@ -1254,6 +1261,14 @@ func (c *ClassObjectDumper) nativeMemberAllocations(p *nativeMemberFamily) (map[
 				call := constructorMotionMember(c.obj, op, core.OP_INVOKESPECIAL)
 				if call != nil && call.Member == "<init>" && !nativeMemberOriginalConstructorAccess(p, c.obj, call.Name, call.Description, c.Work) {
 					return nil, false
+				}
+				if call != nil && foreignBindings != nil {
+					if binding, known := foreignBindings.invocations[int(op.CurrentOffset)]; known {
+						if binding.owner != call.Name || binding.descriptor != call.Description || !foreignBindings.scope.unchanged() {
+							return nil, false
+						}
+						continue
+					}
 				}
 				if call == nil || call.Member != "<init>" || p.allocationClass(call.Name) == nil || p.allocationClass(call.Name).static && p.allocationClass(call.Name).accessBridges[call.Description] == nil {
 					continue
