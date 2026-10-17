@@ -111,6 +111,7 @@ type ClassObjectDumper struct {
 	nativeLambdaFactorySources        map[*nativeLambdaLocalCaptureSite]*nativeLambdaLocalCaptureSource
 	nativeLambdaBodySite              *nativeLambdaLocalCaptureSite
 	nativeLambdaCaptureParameterNames map[*MemberInfo][]nativeLambdaCaptureNameDemand
+	nativeLambdaFactoryParameterNames map[*MemberInfo]map[string]bool
 	nativeLambdaBodyCapturedValues    []values.JavaValue
 	// lambdaLocalSeq hands each inlined lambda body a unique id so its own locals can be renamed
 	// into a private `lv<seq>_<n>` namespace. A lambda arrow body is spliced INLINE into the
@@ -3983,6 +3984,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	funcCtx.FunctionType = c.MethodType
 	var paramsNewStr string
 	var lambdaParamNames []string
+	var lambdaMethodLocalNamespace bool
 	var lambdaAdapterPrologue string
 	var exceptions string
 	for _, attribute := range method.Attributes {
@@ -4199,6 +4201,20 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				return nil, localErr
 			}
 			c.prepareNativeLocalShadowing(statementList, params)
+			// Capture planning can constrain a SAM binder after its initial name.
+			// Refresh the header from those same declaration IDs after all binding decisions.
+			if isLambda {
+				lambdaMethodLocalNamespace = c.prepareNativeLambdaMethodLocalNamespace(statementList, params)
+				lambdaParamNames = nil
+				for _, v := range samParams {
+					if ref, ok := v.(*values.JavaRef); ok && ref != nil && ref.Id != nil && !ref.IsThis {
+						lambdaParamNames = append(lambdaParamNames, ref.String(funcCtx))
+					}
+				}
+			}
+			if lambdaMethodLocalNamespace && c.nativeCaptureFailed {
+				return nil, fmt.Errorf("unproved lambda/local declaration namespace")
+			}
 			c.nativeSourceNamesReady = !c.nativeCaptureFailed
 			paramsNewStrList := []string{}
 			// A lambda arrow parameter whose type is a GENERIC class rendered RAW is best emitted WITHOUT
@@ -4859,8 +4875,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		// variable (Java: "variable varN is already defined in method"). Nested lambda bodies were
 		// dumped earlier and already carry their own `lv<innerseq>` names, so this outer rewrite (which
 		// only matches `varN`) leaves them untouched.
-		c.lambdaLocalSeq++
-		code = renameLambdaBodyLocals(code, c.lambdaLocalSeq)
+		if !lambdaMethodLocalNamespace {
+			c.lambdaLocalSeq++
+			code = renameLambdaBodyLocals(code, c.lambdaLocalSeq)
+		}
 		// When EVERY lambda parameter is unused in the body, render them WITHOUT explicit types
 		// (implicit `(l0, l1) -> ...`). An explicit parameter type recovered from the impl-method
 		// descriptor clashes with a RAW functional-interface target (fastjson2
@@ -4871,7 +4889,7 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 		// ALL-UNUSED case so a body that references a parameter as a specific type keeps its explicit
 		// declaration (no behavioral change, no overload-disambiguation risk).
 		// Kill-switch: JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF=1.
-		if adapter == nil && len(lambdaParamNames) > 0 && c.getenv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF") == "" && !lambdaParamsUsed(code, lambdaParamNames) {
+		if adapter == nil && !lambdaMethodLocalNamespace && len(lambdaParamNames) > 0 && c.getenv("JDEC_LAMBDA_IMPLICIT_UNUSED_PARAM_OFF") == "" && !lambdaParamsUsed(code, lambdaParamNames) {
 			paramsNewStr = strings.Join(lambdaParamNames, ", ")
 		}
 		res := fmt.Sprintf("(%s) -> {%s", paramsNewStr, code)

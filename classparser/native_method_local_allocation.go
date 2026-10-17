@@ -55,6 +55,10 @@ func (c *ClassObjectDumper) nativeMethodLocalAllocationFacts(local *ClassObject,
 	if !known || physical.method != owner.method || physical.descriptor != owner.descriptor || physical.name != owner.name || physical.ordinal != owner.ordinal || physical.declaration != owner.declaration {
 		return nil, false
 	}
+	owner, known = c.nativeMethodLocalExecutionOwner(local, owner)
+	if !known {
+		return nil, false
+	}
 	actual, known := originalMethodLocalSourceConstructor(local, c.obj, c.Work)
 	if !known || !sameOriginalMethodLocalConstructor(actual, constructor, c.Work) {
 		return nil, false

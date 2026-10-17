@@ -1,6 +1,8 @@
 package javaclassparser
 
 import (
+	"slices"
+
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
@@ -146,5 +148,46 @@ func (c *ClassObjectDumper) bindNativeLambdaCaptureParameterNames(v values.JavaV
 		}
 		c.FuncCtx.LocalNames[ref.Id] = demand.name
 	}
+	return true
+}
+
+// A SAM parameter captured by a local class must keep its source spelling.
+// Reserve it in its proved original factory so the enclosing namespace cannot
+// declare the same name. These exclusions grant no capture or allocation role.
+func (c *ClassObjectDumper) recordNativeLambdaFactoryParameterName(ref *values.JavaRef, name string) bool {
+	if c == nil || c.FuncCtx == nil || c.CurrentMethod == nil || !slices.Contains(c.lambdaMethods[c.FuncCtx.FunctionName], c.FuncCtx.CurrentMethodDesc) {
+		return true
+	}
+	if ref == nil || ref.Id == nil || !class_context.PreservesJava8Identifier(name) {
+		return false
+	}
+	if _, known := ref.OriginalParameterSlot(); !known {
+		return false
+	}
+	key := c.FuncCtx.FunctionName + c.FuncCtx.CurrentMethodDesc
+	var sites []*nativeLambdaLocalCaptureSite
+	if view := c.nativeLambdaSourceView(); view != nil {
+		sites = view.lambdaContext.factorySites[key]
+	}
+	if len(sites) == 0 {
+		context := nativeLambdaImplementationContext{resolve: c.nativeAnnotationDeclarationResolver(), metadata: c.FuncCtx.InvocationMetadata, localCaptures: map[string]*nativeLambdaLocalCaptureSite{}, factorySites: map[string][]*nativeLambdaLocalCaptureSite{}}
+		if !nativeLambdaImplementationScope(c.obj, c.FuncCtx.FunctionName, c.FuncCtx.CurrentMethodDesc, "", false, c.Work, context) {
+			return false
+		}
+		sites = context.factorySites[key]
+	}
+	if len(sites) != 1 || sites[0] == nil || sites[0].method == nil || sites[0].method == c.CurrentMethod || sites[0].code == nil {
+		return false
+	}
+	if len(c.nativeLambdaFactoryParameterNames) > 4096 || len(c.nativeLambdaFactoryParameterNames[sites[0].method]) >= 64 || !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(256) != nil {
+		return false
+	}
+	if c.nativeLambdaFactoryParameterNames == nil {
+		c.nativeLambdaFactoryParameterNames = map[*MemberInfo]map[string]bool{}
+	}
+	if c.nativeLambdaFactoryParameterNames[sites[0].method] == nil {
+		c.nativeLambdaFactoryParameterNames[sites[0].method] = map[string]bool{}
+	}
+	c.nativeLambdaFactoryParameterNames[sites[0].method][name] = true
 	return true
 }

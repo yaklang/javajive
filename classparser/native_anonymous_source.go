@@ -1475,6 +1475,9 @@ func (p *nativeAnonymousFamily) completeOwnSource(source string) bool {
 }
 func (c *ClassObjectDumper) nativeLexicalCaptures() map[string]bool {
 	result := map[string]bool{}
+	for name := range c.nativeLambdaFactoryParameterNames[c.CurrentMethod] {
+		result[name] = true
+	}
 	if f := c.nativeAnonymousForest; f != nil {
 		for _, method := range f.consumers[c.obj.GetClassName()] {
 			for _, consumer := range method {
@@ -1540,6 +1543,10 @@ func (c *ClassObjectDumper) prepareNativeLocalShadowing(body []statements.Statem
 	c.prepareNativeSourceNames(body, params, reserved, protected)
 }
 func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool) {
+	c.prepareNativeSourceNamesInNamespace(body, params, reserved, protected, "")
+}
+
+func (c *ClassObjectDumper) prepareNativeSourceNamesInNamespace(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool, namespace string) {
 	ctx := c.FuncCtx
 	if ctx.LocalNames == nil {
 		ctx.LocalNames = map[*coreutils.VariableId]string{}
@@ -1645,8 +1652,12 @@ func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement
 	}
 	for _, ref := range refs {
 		current := ref.String(ctx)
-		if reserved[current] && !protected[ref.Id] {
+		generated := namespace != "" && lambdaLocalRe.FindString(current) == current && current != ""
+		if (reserved[current] || generated) && !protected[ref.Id] {
 			candidate := "jdec$local$" + current
+			if generated {
+				candidate = namespace + current
+			}
 			for occupied[candidate] {
 				candidate += "$"
 			}
@@ -1742,7 +1753,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	// Named local classes inside a lambda can constrain the factory's binder
 	// without an anonymous family. Apply only the existing identity/name proof;
 	// absence of that family grants no allocation or ownership permission.
-	if p == nil && len(c.nativeLambdaCaptureParameterNames[c.CurrentMethod]) == 0 {
+	if p == nil && len(c.nativeLambdaCaptureParameterNames[c.CurrentMethod]) == 0 && len(c.nativeLambdaFactoryParameterNames[c.CurrentMethod]) == 0 {
 		return
 	}
 	var captureChildren map[string]*nativeAnonymousClass
@@ -1776,7 +1787,7 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	// Native javac8 can record an anonymous class's physical lambda method
 	// as EnclosingMethod. Its factory still owns the captured source snapshot,
 	// even when that factory contains no direct anonymous NEW instruction.
-	if !relevant && len(c.nativeLambdaCaptureParameterNames[c.CurrentMethod]) == 0 {
+	if !relevant && len(c.nativeLambdaCaptureParameterNames[c.CurrentMethod]) == 0 && len(c.nativeLambdaFactoryParameterNames[c.CurrentMethod]) == 0 {
 		return
 	}
 	if ctx.LocalNames == nil {
@@ -1964,6 +1975,9 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 	}
 	walk(body, visible)
 	reserved := map[string]bool{}
+	for name := range c.nativeLambdaFactoryParameterNames[c.CurrentMethod] {
+		reserved[name] = true
+	}
 	protected := map[*coreutils.VariableId]bool{}
 	for name, bindings := range names.bindings {
 		reserved[name] = true

@@ -16,6 +16,9 @@ import (
 )
 
 type nativeMethodLocalClass struct {
+	// Allocation bodies may be lambda implementations; owner retains original
+	// EnclosingMethod metadata and lexical signatures. Neither role substitutes for the other.
+	allocationOwner           *nativeMethodLocalOwner
 	declaredAnonymous         map[string]bool
 	anonymousCaptureReads     map[string]map[string]map[int]*nativeMemberLexicalRead
 	anonymousCaptureSeals     map[string]nativeMethodLocalAnonymousSeal
@@ -172,6 +175,10 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 					legacyMetadata = true
 				}
 			}
+			allocationOwner, known := c.nativeMethodLocalExecutionOwner(local, owner)
+			if !known {
+				return false
+			}
 			sites, known := c.nativeMethodLocalAllocationFacts(local, owner, constructor, true)
 			var consumers map[int]string
 			if !known {
@@ -248,7 +255,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 			if c.Work != nil && c.Work.CheckAlloc(int64(len(p.methodLocals)+1)*1024) != nil {
 				return false
 			}
-			p.methodLocals[binary] = &nativeMethodLocalClass{declaredAnonymous: declaredAnonymous, object: local, owner: owner, constructor: constructor, allocations: sites, typeConsumers: consumers, calls: map[int]bool{}, legacyConstructorMetadata: legacyMetadata, sourceCompiler: c.options.SourceCompiler, targetSourceVersion: c.options.TargetSourceVersion}
+			p.methodLocals[binary] = &nativeMethodLocalClass{allocationOwner: allocationOwner, declaredAnonymous: declaredAnonymous, object: local, owner: owner, constructor: constructor, allocations: sites, typeConsumers: consumers, calls: map[int]bool{}, legacyConstructorMetadata: legacyMetadata, sourceCompiler: c.options.SourceCompiler, targetSourceVersion: c.options.TargetSourceVersion}
 			if !nativeMethodLocalCaptureMetadata(c.obj, p.methodLocals[binary], c.Work, p) {
 				return false
 			}
@@ -447,7 +454,7 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 						}
 						if localType(target) {
 							local := p.methodLocals[target]
-							if local == nil || op.Instr.OpCode != core.OP_NEW || root.GetClassName() != local.owner.owner || name != local.owner.method || desc != local.owner.descriptor {
+							if local == nil || op.Instr.OpCode != core.OP_NEW || root.GetClassName() != local.owner.owner || name != local.executionOwner().method || desc != local.executionOwner().descriptor {
 								return false
 							}
 							if _, known := local.allocations[int(op.CurrentOffset)]; !known {
@@ -474,7 +481,7 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 							}
 							if localType(target) {
 								local := p.methodLocals[target]
-								if local == nil || root.GetClassName() != local.owner.owner || name != local.owner.method || desc != local.owner.descriptor || local.typeConsumers[int(op.CurrentOffset)] != target {
+								if local == nil || root.GetClassName() != local.owner.owner || name != local.executionOwner().method || desc != local.executionOwner().descriptor || local.typeConsumers[int(op.CurrentOffset)] != target {
 									return false
 								}
 							}
@@ -490,7 +497,7 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 							return false
 						}
 						if local := p.methodLocals[member.Name]; local != nil {
-							if root.GetClassName() != local.owner.owner || name != local.owner.method || desc != local.owner.descriptor {
+							if root.GetClassName() != local.owner.owner || name != local.executionOwner().method || desc != local.executionOwner().descriptor {
 								return false
 							}
 							if member.Member == "<init>" {
@@ -538,7 +545,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 	prior := ctx.DeclarationSourceName
 	ctx.DeclarationSourceName = func(binary string) (string, bool) {
 		local := p.methodLocals[strings.ReplaceAll(binary, ".", "/")]
-		if local != nil && (c.nativeMethodLocalCurrent == local || c.obj.GetClassName() == local.owner.owner && ctx.FunctionName == local.owner.method && ctx.CurrentMethodDesc == local.owner.descriptor) {
+		if local != nil && (c.nativeMethodLocalCurrent == local || c.obj.GetClassName() == local.owner.owner && ctx.FunctionName == local.executionOwner().method && ctx.CurrentMethodDesc == local.executionOwner().descriptor) {
 			return local.owner.name, true
 		}
 		if prior != nil {
@@ -548,7 +555,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 	}
 	ctx.SourceMethodLocalCandidate = func(binary string) bool {
 		local := p.methodLocals[strings.ReplaceAll(binary, ".", "/")]
-		return c.nativeSourceNamesReady && local != nil && c.obj.GetClassName() == local.owner.owner && local.source != "" && ctx.FunctionName == local.owner.method && ctx.CurrentMethodDesc == local.owner.descriptor
+		return c.nativeSourceNamesReady && local != nil && c.obj.GetClassName() == local.owner.owner && local.source != "" && ctx.FunctionName == local.executionOwner().method && ctx.CurrentMethodDesc == local.executionOwner().descriptor
 	}
 	ctx.SourceMethodLocalAllocation = func(binary, descriptor string, newPC, invokePC int, args []class_context.SourceCaptureOperand) (string, bool) {
 		local := p.methodLocals[strings.ReplaceAll(binary, ".", "/")]
@@ -556,7 +563,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalSource() {
 			return "", false
 		}
 		fail := func() (string, bool) { p.failed = true; return "", false }
-		if !c.nativeSourceNamesReady || local.owner == nil || local.constructor == nil || local.source == "" || c.obj.GetClassName() != local.owner.owner || ctx.FunctionName != local.owner.method || ctx.CurrentMethodDesc != local.owner.descriptor {
+		if !c.nativeSourceNamesReady || local.owner == nil || local.constructor == nil || local.source == "" || c.obj.GetClassName() != local.owner.owner || ctx.FunctionName != local.executionOwner().method || ctx.CurrentMethodDesc != local.executionOwner().descriptor {
 			return fail()
 		}
 		site, known := local.allocations[newPC]
@@ -615,7 +622,7 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 	}
 	locals := []*nativeMethodLocalClass{}
 	for _, local := range p.methodLocals {
-		if local.owner.owner == c.obj.GetClassName() && local.owner.method == ctx.FunctionName && local.owner.descriptor == ctx.CurrentMethodDesc {
+		if local.owner.owner == c.obj.GetClassName() && local.executionOwner().method == ctx.FunctionName && local.executionOwner().descriptor == ctx.CurrentMethodDesc {
 			locals = append(locals, local)
 		}
 	}
@@ -664,6 +671,9 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		return nil, fmt.Errorf("unproved method-local declaration/capture placement: %s", reason)
 	}
 	for _, local := range locals {
+		if !c.nativeMethodLocalExecutionValid(local) || local.allocationOwner != nil && local.allocationOwner != local.owner && c.CurrentMethod != local.allocationOwner.declaration {
+			return fail("original allocation scope changed")
+		}
 		local.sourceEmitted = false
 		local.bindings = map[string]string{}
 		local.captureIDs = map[string]*coreutils.VariableId{}
@@ -719,6 +729,8 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 					return fail("factory declaration name constraint failed")
 				}
 				name = captureName
+			} else if !c.recordNativeLambdaFactoryParameterName(ref, name) {
+				return fail("lambda parameter lexical namespace failed")
 			}
 			if old, known := ctx.LocalNames[ref.Id]; known && old != name {
 				return fail("previous lexical name differs")
@@ -873,10 +885,10 @@ func (c *ClassObjectDumper) nativeMethodLocalMethodSourceComplete(name, descript
 		if local == nil || local.owner == nil {
 			return false
 		}
-		if local.owner.owner != c.obj.GetClassName() || local.owner.method != name || local.owner.descriptor != descriptor {
+		if local.owner.owner != c.obj.GetClassName() || local.executionOwner().method != name || local.executionOwner().descriptor != descriptor {
 			continue
 		}
-		if local.source == "" || !nativeProofWork(c.Work, int64(len(body))) || strings.Count(body, local.source) != 1 {
+		if !c.nativeMethodLocalExecutionValid(local) || local.allocationOwner != nil && local.allocationOwner != local.owner && c.CurrentMethod != local.allocationOwner.declaration || local.source == "" || !nativeProofWork(c.Work, int64(len(body))) || strings.Count(body, local.source) != 1 {
 			return false
 		}
 		local.sourceEmitted = true

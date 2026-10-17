@@ -302,7 +302,7 @@ func (c *ClassObjectDumper) nativeMethodLocalOriginalProducerValue(local *native
 // receiver; matching a name or type cannot authorize a replacement receiver.
 // Runtime reads stay in the original expression and are never lifted/repeated.
 func (c *ClassObjectDumper) nativeMethodLocalProducerOperand(local *nativeMethodLocalClass, site nativeMethodLocalAllocation, origin ssabuild.Origin, operand values.JavaValue, params map[int]*values.JavaRef, expected string, depth int) bool {
-	if depth >= 32 || local == nil || local.owner == nil || local.owner.declaration == nil || !nativeProofWork(c.Work, 1) {
+	if depth >= 32 || local == nil || local.owner == nil || local.executionOwner().declaration == nil || !nativeProofWork(c.Work, 1) {
 		return false
 	}
 	for i := 0; i < 32; i++ {
@@ -326,13 +326,13 @@ func (c *ClassObjectDumper) nativeMethodLocalProducerOperand(local *nativeMethod
 	if origin.Kind != ssabuild.OriginParam {
 		return false
 	}
-	descriptors, _, err := callbinding.Descriptor(local.owner.descriptor)
+	descriptors, _, err := callbinding.Descriptor(local.executionOwner().descriptor)
 	if err != nil {
 		return false
 	}
 	descriptor := ""
 	slot := 0
-	if local.owner.declaration.AccessFlags&8 == 0 {
+	if local.executionOwner().declaration.AccessFlags&8 == 0 {
 		if origin.Slot == 0 {
 			descriptor = "L" + local.owner.owner + ";"
 		}
@@ -348,7 +348,7 @@ func (c *ClassObjectDumper) nativeMethodLocalProducerOperand(local *nativeMethod
 		}
 	}
 	ref, known := operand.(*values.JavaRef)
-	if known && ref != nil && origin.Slot == 0 && local.owner.declaration.AccessFlags&8 == 0 {
+	if known && ref != nil && origin.Slot == 0 && local.executionOwner().declaration.AccessFlags&8 == 0 {
 		actual, seeded := ref.OriginalReceiverSlot()
 		if !seeded || actual != 0 {
 			return false

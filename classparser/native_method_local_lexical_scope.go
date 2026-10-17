@@ -102,7 +102,7 @@ func nativeMethodLocalOriginalSignature(obj *ClassObject, attrs []AttributeInfo,
 // Only the physically closed method owner can supply erasures for source
 // captures. Existing renderer-only erasure remains conservative elsewhere.
 func (c *ClassObjectDumper) nativeMethodLocalSourceErasure(t types.JavaType, local *nativeMethodLocalClass) (string, bool) {
-	if c == nil || c.FuncCtx == nil || c.obj == nil || local == nil || local.owner == nil || c.obj.GetClassName() != local.owner.owner || c.FuncCtx.FunctionName != local.owner.method || c.FuncCtx.CurrentMethodDesc != local.owner.descriptor {
+	if c == nil || c.FuncCtx == nil || c.obj == nil || local == nil || local.owner == nil || c.obj.GetClassName() != local.owner.owner || c.FuncCtx.FunctionName != local.executionOwner().method || c.FuncCtx.CurrentMethodDesc != local.executionOwner().descriptor {
 		return "", false
 	}
 	prefix := ""

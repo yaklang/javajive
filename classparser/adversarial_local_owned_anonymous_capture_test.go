@@ -157,3 +157,60 @@ func TestAdversarialLocalOwnedAnonymousHiddenConstructorKeepsPorts(t *testing.T)
 		})
 	}
 }
+
+// The original binary caller independently checks lambda invocation arguments,
+// separate retained environments, lexical reflection and actual hidden ports.
+// Invoking the hidden constructor directly prevents paired factory/constructor
+// changes from concealing a permutation of equal-erasure captures.
+func TestAdversarialModernLambdaLocalActivationAndConstructorPorts(t *testing.T) {
+	const source = `
+ interface SlotView {Object[] get();}
+ class CaptureTransport {static java.util.function.Function<Object,SlotView> bind(long weight,java.util.function.Supplier<Object> alias,java.util.function.Supplier<Object> other){return input->{class Local implements SlotView {public Object[] get(){return new Object[]{alias.get(),other,input,Long.valueOf(weight),"var0:var1"};}}return new Local();};}}
+ class CaptureDriver {public static void main(String[]args)throws Exception{
+  final int[] calls={0,0};final Object left=new Object(),right=new Object(),inputA=new Object(),inputB=new Object();final RuntimeException failure=new IllegalStateException("identity");
+  java.util.function.Supplier<Object> a=()->{calls[0]++;if(calls[0]==1)throw failure;return left;},b=()->{calls[1]++;return right;};
+  java.util.function.Function<Object,SlotView> first=CaptureTransport.bind(17L,a,b),second=CaptureTransport.bind(29L,b,a);
+  SlotView x=first.apply(inputA),y=first.apply(inputB),z=second.apply(null);if(calls[0]!=0||calls[1]!=0)throw new AssertionError("premature evaluation");
+  try{x.get();throw new AssertionError("missing failure");}catch(RuntimeException e){if(e!=failure)throw new AssertionError("failure identity",e);}
+  Object[][] rows={y.get(),x.get(),z.get()};for(Object[] row:rows)if(row.length!=5||!"var0:var1".equals(row[4]))throw new AssertionError("literal rewritten as local");
+  if(rows[0][0]!=left||rows[0][1]!=b||rows[0][2]!=inputB||!rows[0][3].equals(Long.valueOf(17L))||rows[1][0]!=left||rows[1][1]!=b||rows[1][2]!=inputA||!rows[1][3].equals(Long.valueOf(17L))||rows[2][0]!=right||rows[2][1]!=a||rows[2][2]!=null||!rows[2][3].equals(Long.valueOf(29L))||calls[0]!=3||calls[1]!=1)throw new AssertionError("activation or capture identity");
+  SlotView nil=CaptureTransport.bind(1L,null,b).apply(null);try{nil.get();throw new AssertionError("missing null boundary");}catch(NullPointerException expected){}
+  Class<?> local=x.getClass();if(!local.isLocalClass()||local.getEnclosingMethod().getDeclaringClass()!=CaptureTransport.class||!local.getEnclosingMethod().getName().equals("bind"))throw new AssertionError("original lexical owner");
+  java.lang.reflect.Constructor<?>[] constructors=local.getDeclaredConstructors();if(constructors.length!=1)throw new AssertionError("one hidden constructor");java.lang.reflect.Constructor<?> ctor=constructors[0];Class<?>[] types=ctor.getParameterTypes();if(types.length!=4)throw new AssertionError("four hidden ports");Object[] values=new Object[types.length];int suppliers=0,objects=0,wide=0;for(int i=0;i<types.length;i++){if(types[i]==java.util.function.Supplier.class){final Object marker=new Object();values[i]=(java.util.function.Supplier<Object>)()->marker;suppliers++;}else if(types[i]==Object.class){values[i]=new Object();objects++;}else if(types[i]==long.class){values[i]=Long.valueOf(41L);wide++;}else throw new AssertionError("unexpected port");}if(suppliers!=2||objects!=1||wide!=1)throw new AssertionError("original port types");ctor.setAccessible(true);Object receiver=ctor.newInstance(values);
+  java.util.TreeMap<String,String> ports=new java.util.TreeMap<>();for(java.lang.reflect.Field field:local.getDeclaredFields()){if(!field.isSynthetic()||!java.lang.reflect.Modifier.isFinal(field.getModifiers()))throw new AssertionError("original capture field");field.setAccessible(true);Object value=field.get(receiver);String port=null;if(field.getType()==long.class){if(!Long.valueOf(41L).equals(value))throw new AssertionError("wide word");port="wide:41";}else{for(int i=0;i<values.length;i++)if(value==values[i]){if(port!=null)throw new AssertionError("ambiguous port");port="arg:"+i;}}if(port==null)throw new AssertionError("lost port");ports.put(field.getName(),port);}if(ports.size()!=4)throw new AssertionError("four capture fields");System.out.println("activation:lexical:ports:"+ports);
+ }}
+ `
+	javac, java := t04Tools(t)
+	for _, binding := range []string{"alias", "channel", "input=var1", "input=capturé"} {
+		t.Run(binding, func(t *testing.T) {
+			fixture := source
+			if inputName, ok := strings.CutPrefix(binding, "input="); ok {
+				fixture = strings.ReplaceAll(fixture, "input", inputName)
+			} else {
+				fixture = strings.ReplaceAll(fixture, "alias", binding)
+			}
+			compile := func(debug string) map[string][]byte {
+				return nativeCompileSourceReleaseClasses(t, map[string]string{"CaptureTransport.java": fixture}, debug, "8")
+			}
+			original := compile("none")
+			dir := t.TempDir()
+			for name, raw := range original {
+				path := filepath.Join(dir, filepath.FromSlash(name))
+				if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
+					t.Fatal(e)
+				}
+				if e := os.WriteFile(path, raw, 0600); e != nil {
+					t.Fatal(e)
+				}
+			}
+			want := t04RunJava(t, java, dir, "CaptureDriver")
+			cached := func(debug string) map[string][]byte {
+				if debug == "none" {
+					return original
+				}
+				return compile(debug)
+			}
+			testNativeIndependentCompilerFamilyFixture(t, cached, ModernJavac, javac, []string{"CaptureTransport"}, "CaptureDriver", want, nil, nativeLexicalExactSignatures)
+		})
+	}
+}
