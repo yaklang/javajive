@@ -195,6 +195,8 @@ func (z *JarFS) nativeMemberOutermostNamedOwner(owner string, work *workbudget.B
 				// This is discovery only. Suppression still requires the same
 				// completed mixed-family source transaction at the top-level root.
 				next = enclosing
+			} else if localParent, localKnown := z.nativeMemberOriginalLocalParent(obj, work); localKnown {
+				next = localParent
 			} else {
 				return owner, nativeMemberTopLevelEvidence(obj, work)
 			}
@@ -234,4 +236,35 @@ func nativeMemberTopLevelEvidence(obj *ClassObject, work *workbudget.Budget) boo
 		}
 	}
 	return true
+}
+
+func (z *JarFS) nativeMemberOriginalLocalParent(obj *ClassObject, work *workbudget.Budget) (string, bool) {
+	if obj == nil {
+		return "", false
+	}
+	for _, a := range obj.Attributes {
+		if !nativeProofWork(work, 1) {
+			return "", false
+		}
+		if e, ok := a.(*UnparsedAttribute); ok && e != nil && e.Name == "EnclosingMethod" && len(e.Info) == 4 {
+			owner, ok := sourceBridgeClassName(obj, uint16(e.Info[0])<<8|uint16(e.Info[1]))
+			if !ok {
+				return "", false
+			}
+			raw, ok := z.enumSiblingResolver()(owner)
+			if !ok {
+				return "", false
+			}
+			parent, err := z.nativeMemberReader(obj).parseResolved(raw)
+			if err != nil || parent.GetClassName() != owner {
+				return "", false
+			}
+			local, ok := originalMethodLocalOwner(obj, parent, work)
+			if !ok || local.owner != owner {
+				return "", false
+			}
+			return owner, true
+		}
+	}
+	return "", false
 }

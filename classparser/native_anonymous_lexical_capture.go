@@ -157,6 +157,18 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 	if len(providers) != 0 {
 		metadata = providers[0]
 	}
+	localRoles := map[string]*nativeMethodLocalClass{}
+	if forest.members != nil {
+		for owner, local := range forest.members.methodLocals {
+			if local == nil || local.object == nil || forest.objects[owner] != local.object {
+				return false
+			}
+			if _, valid := nativeMemberJointMethodLocalOwner(forest.members, local.object, work); !valid {
+				return false
+			}
+			localRoles[owner] = local
+		}
+	}
 	for owner, object := range forest.objects {
 		forest.memberEnclosing[owner] = map[string]map[int]*nativeAnonymousMemberEnclosing{}
 		forest.reads[owner] = map[string]map[int]*nativeMemberLexicalRead{}
@@ -239,10 +251,25 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 								}
 								next = parent
 								if !child.parentAnonymous {
-									lexicalOwner, lexical = parent, parent == forest.root && forest.objects[parent] != nil || forest.members != nil && forest.members.children[parent] != nil
+									lexicalOwner, lexical = parent, parent == forest.root && forest.objects[parent] != nil || forest.members != nil && forest.members.children[parent] != nil || localRoles[parent] != nil
 								}
 							} else if prior != nil && !strings.HasPrefix(field.Member, "val$") {
 								return false
+							}
+						} else if local := localRoles[current]; local != nil {
+							parameter, captured := local.constructor.captures[field.Member]
+							ps, _, bad := callbinding.Descriptor(local.constructor.descriptor)
+							if !captured {
+								break
+							}
+							if bad != nil || parameter < 0 || parameter >= len(ps) || field.Description != ps[parameter] {
+								return false
+							}
+							if field.Member == local.constructor.enclosingField {
+								next = local.owner.owner
+								lexicalOwner, lexical = next, forest.objects[next] != nil
+							} else if prior == nil {
+								break
 							}
 						} else if forest.members != nil {
 							child := forest.members.children[current]
@@ -376,6 +403,43 @@ func nativeAnonymousForestCaptureReads(forest *nativeAnonymousForest, work *work
 									}
 									forest.captureReferences[owner][index] = read
 								}
+							}
+						}
+						if local := localRoles[field.Name]; local != nil {
+							parameter, captured := local.constructor.captures[field.Member]
+							if captured {
+								ps, _, bad := callbinding.Descriptor(local.constructor.descriptor)
+								if bad != nil || parameter < 0 || parameter >= len(ps) || field.Description != ps[parameter] {
+									return false
+								}
+								pc := int(op.CurrentOffset)
+								switch kind {
+								case core.OP_PUTFIELD:
+									if owner != field.Name || name != "<init>" || desc != local.constructor.descriptor || local.constructor.capturePCs[field.Member] != pc {
+										return false
+									}
+								case core.OP_GETFIELD:
+									if !stable {
+										return false
+									}
+									if approved[pc] {
+										if len(op.Data) != 2 || paths[pc] == nil {
+											return false
+										}
+										index := int(binary.BigEndian.Uint16(op.Data))
+										read := paths[pc]
+										prior := forest.captureReferences[owner][index]
+										if prior != nil && (prior.owner != read.owner || prior.field != read.field || prior.descriptor != read.descriptor) {
+											return false
+										}
+										forest.captureReferences[owner][index] = read
+									} else if owner != field.Name {
+										return false
+									}
+								default:
+									return false
+								}
+								continue
 							}
 						}
 						child := forest.units[field.Name]
@@ -520,6 +584,12 @@ func (c *ClassObjectDumper) nativeAnonymousLexicalCaptureReadSource(read *native
 		return "", false
 	}
 
+	if local := forest.locals[read.owner]; local != nil {
+		if forest.members == nil || forest.members.methodLocals[read.owner] != local || c.nativeMemberRoot != forest.members {
+			return "", false
+		}
+		return c.nativeMethodLocalAnonymousCaptureSource(local, value, pc, name, ctx)
+	}
 	text, known := c.nativeAnonymousBindings[nativeMemberCaptureIndexKey(read.owner, read.field)]
 	validText := known && class_context.PreservesJava8Identifier(text)
 	if forest.lexicalThis[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] {

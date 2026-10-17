@@ -15,60 +15,14 @@ import (
 // only a complete original anonymous THIS/enclosing-field/local-capture chain.
 // It retains every original code/PC edge and refuses all writes/foreign bases.
 func (c *ClassObjectDumper) nativeMethodLocalAnonymousCaptureUser(p *nativeMemberFamily, local *nativeMethodLocalClass, user, field string, work *workbudget.Budget) bool {
-	if c == nil || local == nil || local.object == nil || local.constructor == nil || field == local.constructor.enclosingField || !local.declaredAnonymous[user] {
+	if c == nil || p == nil || local == nil || local.object == nil || local.constructor == nil || field == local.constructor.enclosingField {
 		return false
 	}
-	if _, ok := nativeMemberJointMethodLocalOwner(p, local.object, work); !ok {
+	links, actualLocal, known := c.nativeMethodLocalAnonymousOriginalPath(p, user, work)
+	if !known || actualLocal != local || len(links) == 0 {
 		return false
 	}
-	group := p.anonymousUnits[user]
-	if group == nil || group.failed || group.owner != local.object.GetClassName() || p.memberAnonymous[group.owner] != group {
-		return false
-	}
-	child := group.children[user]
-	if child == nil || child.object == nil || child.object.GetClassName() != user || child.enclosingField == "" {
-		return false
-	}
-	index, exists := child.fields[child.enclosingField]
-	if !exists || index != 0 {
-		return false
-	}
-	ps, _, e := callbinding.Descriptor(child.descriptor)
-	if e != nil || len(ps) == 0 || ps[0] != "L"+group.owner+";" {
-		return false
-	}
-	owner, method, anon := originalAnonymousOwner(child.object)
-	if !anon || owner != group.owner || method != child.method {
-		return false
-	}
-	// Reopen the reciprocal parent row as well as the child's self row.
-	// A cached declaration list cannot replace either original ownership edge.
-	rows := 0
-	for _, attribute := range local.object.Attributes {
-		if table, ok := attribute.(*InnerClassesAttribute); ok {
-			if table == nil {
-				return false
-			}
-			for _, row := range table.Classes {
-				if row == nil || !nativeProofWork(work, 1) {
-					return false
-				}
-				name, known := sourceBridgeClassName(local.object, row.InnerClassInfoIndex)
-				if !known {
-					return false
-				}
-				if name == user {
-					rows++
-					if row.InnerNameIndex != 0 || row.OuterClassInfoIndex != 0 || !nativeAnonymousSelfAccessFlags(child.object, row.InnerClassAccessFlags, work) {
-						return false
-					}
-				}
-			}
-		}
-	}
-	if rows != 1 {
-		return false
-	}
+	child := links[0]
 	captureIndex, ok := local.constructor.captures[field]
 	if !ok {
 		return false
@@ -78,28 +32,6 @@ func (c *ClassObjectDumper) nativeMethodLocalAnonymousCaptureUser(p *nativeMembe
 		return false
 	}
 	descriptor := caps[captureIndex]
-	// Reopen the current physical packet with the selected compiler profile;
-	// a retained map entry does not certify a changed constructor or field role.
-	reader := NewClassObjectDumper(local.object)
-	reader.Work = work
-	reader.options = c.options
-	reader.foldSiblingResolver = c.foldSiblingResolver
-	reader.declarationResolver = c.declarationResolver
-	actual := reader.nativeAnonymousConstructorForCompiler(child.object, owner, method, "", p, nil, reader.buildInvocationMetadata(), reader.originalNativeConstructorAccessBridges())
-	if actual == nil || actual.descriptor != child.descriptor || actual.enclosingField != child.enclosingField || actual.superDescriptor != child.superDescriptor || actual.superPC != child.superPC || actual.sourceSuperDescriptor != child.sourceSuperDescriptor || actual.sharedParameterRoles != child.sharedParameterRoles || actual.unusedEnclosing != child.unusedEnclosing || actual.parentAnonymous != child.parentAnonymous || len(actual.superParams) != len(child.superParams) || len(actual.fields) != len(child.fields) || len(actual.capturePCs) != len(child.capturePCs) {
-		return false
-	}
-	for i, param := range actual.superParams {
-		if !nativeProofWork(work, 1) || param != child.superParams[i] {
-			return false
-		}
-	}
-	for f, i := range actual.fields {
-		j, known := child.fields[f]
-		if !known || j != i || actual.capturePCs[f] != child.capturePCs[f] {
-			return false
-		}
-	}
 	if len(child.object.Methods) > 1024 {
 		return false
 	}
@@ -156,27 +88,35 @@ func (c *ClassObjectDumper) nativeMethodLocalAnonymousCaptureUser(p *nativeMembe
 				}
 				for _, opcode := range []int{core.OP_GETFIELD, core.OP_PUTFIELD, core.OP_GETSTATIC, core.OP_PUTSTATIC} {
 					f := constructorMotionMember(child.object, op, opcode)
-					if f == nil || f.Name != group.owner || f.Member != field {
+					if f == nil || f.Name != local.object.GetClassName() || f.Member != field {
 						continue
 					}
-					if opcode != core.OP_GETFIELD || f.Description != descriptor || m.AccessFlags&8 != 0 || !stable || i < 2 {
+					if opcode != core.OP_GETFIELD || f.Description != descriptor || m.AccessFlags&8 != 0 || !stable || i < len(links)+1 {
 						return false
 					}
-					first := constructorMotionMember(child.object, ops[i-1], core.OP_GETFIELD)
-					if core.GetRetrieveIdx(ops[i-2]) != 0 || !constructorMotionLoad(ops[i-2], "Ljava/lang/Object;") || first == nil || first.Name != user || first.Member != child.enclosingField || first.Description != "L"+group.owner+";" {
+					start := i - len(links) - 1
+					if core.GetRetrieveIdx(ops[start]) != 0 || !constructorMotionLoad(ops[start], "Ljava/lang/Object;") {
 						return false
 					}
-					base, pc := int(ops[i-2].CurrentOffset), int(op.CurrentOffset)
+					base, pc := int(ops[start].CurrentOffset), int(op.CurrentOffset)
+					var prior *nativeMemberLexicalRead
+					for offset, link := range links {
+						path := constructorMotionMember(child.object, ops[start+1+offset], core.OP_GETFIELD)
+						parent, _, ok := originalAnonymousOwner(link.object)
+						if !ok || path == nil || path.Name != link.object.GetClassName() || path.Member != link.enclosingField || path.Description != "L"+parent+";" {
+							return false
+						}
+						prior = &nativeMemberLexicalRead{owner: path.Name, field: path.Member, descriptor: path.Description, pc: int(ops[start+1+offset].CurrentOffset), basePC: base, prior: prior}
+					}
 					for _, entry := range entries {
 						if entry > base && entry <= pc {
 							return false
 						}
 					}
-					prior := &nativeMemberLexicalRead{owner: user, field: child.enclosingField, descriptor: first.Description, pc: int(ops[i-1].CurrentOffset), basePC: base}
 					if seen >= 8192 || work != nil && work.CheckAlloc(int64(seen+1)*256) != nil {
 						return false
 					}
-					reads[pc] = &nativeMemberLexicalRead{owner: group.owner, field: field, descriptor: descriptor, pc: pc, basePC: base, prior: prior}
+					reads[pc] = &nativeMemberLexicalRead{owner: local.object.GetClassName(), field: field, descriptor: descriptor, pc: pc, basePC: base, prior: prior}
 					seen++
 				}
 			}
@@ -190,10 +130,47 @@ func (c *ClassObjectDumper) nativeMethodLocalAnonymousCaptureUser(p *nativeMembe
 	if len(localBytes) > 1<<20 || len(anonymousBytes) > 1<<20 || !nativeProofWork(work, int64(len(localBytes)+len(anonymousBytes))) || work != nil && work.CheckAlloc(int64(len(localBytes)+len(anonymousBytes))) != nil {
 		return false
 	}
+	pathSeals := map[*ClassObject][32]byte{}
+	for _, link := range links {
+		b := link.object.Bytes()
+		if len(b) > 1<<20 || !nativeProofWork(work, int64(len(b))) || work != nil && work.CheckAlloc(int64(len(b))) != nil {
+			return false
+		}
+		pathSeals[link.object] = sha256.Sum256(b)
+	}
+	for current, depth := local.owner.owner, 0; ; depth++ {
+		if depth >= 64 || !nativeProofWork(work, 1) {
+			return false
+		}
+		object := p.lexicalObjects[current]
+		if object == nil {
+			return false
+		}
+		b := object.Bytes()
+		if len(b) > 1<<20 || !nativeProofWork(work, int64(len(b))) {
+			return false
+		}
+		pathSeals[object] = sha256.Sum256(b)
+		if current == p.owner {
+			break
+		}
+		node := p.children[current]
+		if node == nil {
+			return false
+		}
+		current = node.owner
+	}
+	var total int64
+	for object := range pathSeals {
+		total += int64(len(object.Bytes()))
+		if work != nil && work.CheckAlloc(total) != nil {
+			return false
+		}
+	}
 	if local.anonymousCaptureSeals == nil {
 		local.anonymousCaptureSeals = map[string]nativeMethodLocalAnonymousSeal{}
 	}
-	local.anonymousCaptureSeals[user] = nativeMethodLocalAnonymousSeal{sha256.Sum256(localBytes), sha256.Sum256(anonymousBytes)}
+	local.anonymousCaptureSeals[user] = nativeMethodLocalAnonymousSeal{local: sha256.Sum256(localBytes), anonymous: sha256.Sum256(anonymousBytes), path: pathSeals}
 	if local.anonymousCaptureReads == nil {
 		local.anonymousCaptureReads = map[string]map[string]map[int]*nativeMemberLexicalRead{}
 	}
@@ -211,15 +188,56 @@ func (c *ClassObjectDumper) nativeMethodLocalAnonymousCaptureUser(p *nativeMembe
 	return true
 }
 func nativeMethodLocalAnonymousOwner(p *nativeMemberFamily, group *nativeAnonymousFamily, work *workbudget.Budget) bool {
-	if p == nil || group == nil || group.failed || p.memberAnonymous[group.owner] != group {
+	if p == nil || group == nil || group.failed {
 		return false
 	}
-	local := p.methodLocals[group.owner]
-	if local == nil || local.object == nil {
+	if local := p.methodLocals[group.owner]; local != nil {
+		_, ok := nativeMemberJointMethodLocalOwner(p, local.object, work)
+		return ok && p.memberAnonymous[group.owner] == group
+	}
+	if group.forest == nil || group.forest != p.anonymousForest || group.forest.members != p || group.forest.groups[group.owner] != group {
 		return false
 	}
-	_, known := nativeMemberJointMethodLocalOwner(p, local.object, work)
-	return known
+	local, known := nativeMethodLocalAnonymousLocal(p, group.owner, work)
+	return known && local != nil
+}
+func nativeMethodLocalAnonymousLocal(p *nativeMemberFamily, user string, work *workbudget.Budget) (*nativeMethodLocalClass, bool) {
+	if p == nil {
+		return nil, false
+	}
+	seen := map[string]bool{}
+	for current := user; len(seen) < 64; {
+		if seen[current] || !nativeProofWork(work, 1) {
+			return nil, false
+		}
+		seen[current] = true
+		if local := p.methodLocals[current]; local != nil {
+			if _, ok := nativeMemberJointMethodLocalOwner(p, local.object, work); ok {
+				return local, true
+			}
+			return nil, false
+		}
+		if current == p.owner || p.children[current] != nil {
+			return nil, true
+		}
+		group := p.anonymousUnits[current]
+		if group == nil || group.failed {
+			return nil, false
+		}
+		child := group.children[current]
+		if child == nil || child.object == nil || (group.forest != nil && p.lexicalObjects[current] != child.object) {
+			return nil, false
+		}
+		parent, method, ok := originalAnonymousOwner(child.object)
+		if !ok || parent != group.owner || method != child.method {
+			return nil, false
+		}
+		if group.forest != nil && (group.forest != p.anonymousForest || group.forest.members != p || group.forest.groups[parent] != group || group.forest.units[current] != child) {
+			return nil, false
+		}
+		current = parent
+	}
+	return nil, false
 }
 func (c *ClassObjectDumper) wireNativeMethodLocalAnonymousCaptures() {
 	p, ctx := c.nativeMemberRoot, c.FuncCtx
@@ -227,10 +245,21 @@ func (c *ClassObjectDumper) wireNativeMethodLocalAnonymousCaptures() {
 		return
 	}
 	group := p.anonymousUnits[c.obj.GetClassName()]
-	if !nativeMethodLocalAnonymousOwner(p, group, c.Work) {
+	if group == nil {
 		return
 	}
-	local := p.methodLocals[group.owner]
+	local, knownLocal := nativeMethodLocalAnonymousLocal(p, c.obj.GetClassName(), c.Work)
+	if !knownLocal {
+		c.nativeCaptureFailed = true
+		return
+	}
+	if local == nil {
+		return
+	}
+	if !nativeMethodLocalAnonymousOwner(p, group, c.Work) {
+		c.nativeCaptureFailed = true
+		return
+	}
 	child := group.children[c.obj.GetClassName()]
 	if child == nil || child.object != c.obj {
 		return
@@ -280,7 +309,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalAnonymousCaptures() {
 			c.nativeCaptureFailed = true
 			return
 		}
-		key := nativeMemberCaptureIndexKey(group.owner, field)
+		key := nativeMemberCaptureIndexKey(local.object.GetClassName(), field)
 		if prior, ok := c.nativeAnonymousBindings[key]; ok && prior != text {
 			c.nativeCaptureFailed = true
 			return
@@ -317,32 +346,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalAnonymousCaptures() {
 	}
 	priorType, priorSource := ctx.SourceLexicalCapturedFieldType, ctx.SourceLexicalCapturedField
 	readSource := func(value any, pc int, name string) (string, bool) {
-		read := local.anonymousCaptureReads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
-		if read == nil || read.field != name || !nativeMethodLocalAnonymousOriginalOperand(value, read, c.Work) || !nativeMemberLexicalReadOperand(value, read, c.Work, ctx) {
-			return "", false
-		}
-		text, ok := local.bindings[name]
-		ref := local.sourceRefs[name]
-		originalName, compilerName := strings.CutPrefix(name, "val$")
-		if !ok || text == "" || !compilerName || text != originalName || ref == nil || ref.Id == nil || local.captureIDs[name] != ref.Id {
-			return "", false
-		}
-		current := false
-		for _, method := range c.obj.Methods {
-			if !nativeProofWork(c.Work, 1) {
-				return "", false
-			}
-			if method == c.CurrentMethod {
-				n, nk := sourceBridgeUTF8(c.obj, method.NameIndex)
-				d, dk := sourceBridgeUTF8(c.obj, method.DescriptorIndex)
-				current = nk && dk && n == ctx.FunctionName && d == ctx.CurrentMethodDesc
-				break
-			}
-		}
-		if !current {
-			return "", false
-		}
-		return "(/*jdec-owned-local-capture:" + group.owner + ":" + name + "*/" + text + ")", true
+		return c.nativeMethodLocalAnonymousCaptureSource(local, value, pc, name, ctx)
 	}
 	ctx.SourceLexicalCapturedFieldType = func(value any, pc int, name string) bool {
 		if local.anonymousCaptureReads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc] != nil {
@@ -361,7 +365,7 @@ func (c *ClassObjectDumper) wireNativeMethodLocalAnonymousCaptures() {
 		}
 		if field, ok := value.(*values.RefMember); ok && field != nil && !sourceProofNil(field.Object) {
 			erasure, known := values.SourceTypeErasure(field.Object.Type(), ctx)
-			if known && erasure == "L"+group.owner+";" {
+			if known && erasure == "L"+local.object.GetClassName()+";" {
 				if _, captured := local.constructor.captures[name]; captured {
 					c.nativeCaptureFailed = true
 					return "", false
@@ -375,7 +379,10 @@ func (c *ClassObjectDumper) wireNativeMethodLocalAnonymousCaptures() {
 	}
 }
 
-type nativeMethodLocalAnonymousSeal struct{ local, anonymous [32]byte }
+type nativeMethodLocalAnonymousSeal struct {
+	local, anonymous [32]byte
+	path             map[*ClassObject][32]byte
+}
 
 func nativeMethodLocalAnonymousOriginalOperand(value any, read *nativeMemberLexicalRead, work *workbudget.Budget) bool {
 	v, ok := value.(values.JavaValue)
@@ -423,18 +430,198 @@ func (c *ClassObjectDumper) nativeMethodLocalAnonymousInputsUnchanged() bool {
 	if group == nil {
 		return true
 	}
-	local := p.methodLocals[group.owner]
+	local, knownLocal := nativeMethodLocalAnonymousLocal(p, c.obj.GetClassName(), c.Work)
+	if !knownLocal {
+		return false
+	}
 	if local == nil {
 		return true
 	}
 	child := group.children[user]
-	if p.failed || group.failed || p.memberAnonymous[group.owner] != group || child == nil || child.object != c.obj {
+	if p.failed || group.failed || (group.forest == nil && p.memberAnonymous[group.owner] != group || group.forest != nil && (group.forest != p.anonymousForest || group.forest.groups[group.owner] != group)) || child == nil || child.object != c.obj {
 		return false
 	}
 	seal, known := local.anonymousCaptureSeals[user]
 	if !known {
 		return len(local.anonymousCaptureReads[user]) == 0
 	}
+	if reader := NewClassObjectDumper(c.obj); reader != nil {
+		reader.options = c.options
+		reader.Work = c.Work
+		reader.foldSiblingResolver = c.foldSiblingResolver
+		reader.declarationResolver = c.declarationResolver
+		_, actual, ok := reader.nativeMethodLocalAnonymousOriginalPath(p, user, c.Work)
+		if !ok || actual != local {
+			return false
+		}
+	}
+	var total int64
+	for object, want := range seal.path {
+		if object == nil || !nativeMethodLocalAnonymousSealedObject(p, object) {
+			return false
+		}
+		b := object.Bytes()
+		total += int64(len(b))
+		if len(b) > 1<<20 || !nativeProofWork(c.Work, int64(len(b))) || c.Work != nil && c.Work.CheckAlloc(total) != nil || sha256.Sum256(b) != want {
+			return false
+		}
+	}
 	original, parent := c.obj.Bytes(), local.object.Bytes()
 	return len(original) <= 1<<20 && len(parent) <= 1<<20 && nativeProofWork(c.Work, int64(len(original)+len(parent))) && (c.Work == nil || c.Work.CheckAlloc(int64(len(original)+len(parent))) == nil) && sha256.Sum256(original) == seal.anonymous && sha256.Sum256(parent) == seal.local
+}
+
+// Reopen each original lexical edge and physical constructor packet. The
+// result orders the real THIS/enclosing fields from the caller to its local
+// ancestor; discovering this path alone grants no source name or access.
+func (c *ClassObjectDumper) nativeMethodLocalAnonymousOriginalPath(p *nativeMemberFamily, user string, work *workbudget.Budget) ([]*nativeAnonymousClass, *nativeMethodLocalClass, bool) {
+	if c == nil || p == nil || p.failed || work != nil && work.CheckAlloc(64*512) != nil {
+		return nil, nil, false
+	}
+	links := []*nativeAnonymousClass{}
+	seen := map[string]bool{}
+	for current := user; len(seen) < 64; {
+		if seen[current] || !nativeProofWork(work, 1) {
+			return nil, nil, false
+		}
+		seen[current] = true
+		if local := p.methodLocals[current]; local != nil {
+			if _, ok := nativeMemberJointMethodLocalOwner(p, local.object, work); !ok || len(links) == 0 {
+				return nil, nil, false
+			}
+			return links, local, true
+		}
+		group := p.anonymousUnits[current]
+		if group == nil || group.failed {
+			return nil, nil, false
+		}
+		child := group.children[current]
+		if child == nil || child.object == nil || child.object.GetClassName() != current || (group.forest != nil && p.lexicalObjects[current] != child.object) || child.enclosingField == "" {
+			return nil, nil, false
+		}
+		owner, method, ok := originalAnonymousOwner(child.object)
+		if !ok || owner != group.owner || method != child.method {
+			return nil, nil, false
+		}
+		if group.forest != nil {
+			f := group.forest
+			if f != p.anonymousForest || f.members != p || f.groups[owner] != group || f.units[current] != child || f.objects[current] != child.object {
+				return nil, nil, false
+			}
+		} else if p.memberAnonymous[owner] != group || p.methodLocals[owner] == nil || !p.methodLocals[owner].declaredAnonymous[current] {
+			return nil, nil, false
+		}
+		parent := p.lexicalObjects[owner]
+		if parent == nil || parent.GetClassName() != owner {
+			return nil, nil, false
+		}
+		rows := 0
+		for _, a := range parent.Attributes {
+			if !nativeProofWork(work, 1) {
+				return nil, nil, false
+			}
+			if table, ok := a.(*InnerClassesAttribute); ok {
+				if table == nil {
+					return nil, nil, false
+				}
+				for _, row := range table.Classes {
+					if row == nil || !nativeProofWork(work, 1) {
+						return nil, nil, false
+					}
+					name, ok := sourceBridgeClassName(parent, row.InnerClassInfoIndex)
+					if !ok {
+						return nil, nil, false
+					}
+					if name == current {
+						rows++
+						if row.InnerNameIndex != 0 || row.OuterClassInfoIndex != 0 || !nativeAnonymousSelfAccessFlags(child.object, row.InnerClassAccessFlags, work) {
+							return nil, nil, false
+						}
+					}
+				}
+			}
+		}
+		if rows != 1 {
+			return nil, nil, false
+		}
+		parameter, ok := child.fields[child.enclosingField]
+		ps, _, bad := callbinding.Descriptor(child.descriptor)
+		if !ok || parameter != 0 || bad != nil || len(ps) == 0 || ps[0] != "L"+owner+";" {
+			return nil, nil, false
+		}
+		reader := NewClassObjectDumper(parent)
+		reader.Work = work
+		reader.options = c.options
+		reader.foldSiblingResolver = c.foldSiblingResolver
+		reader.declarationResolver = c.declarationResolver
+		actual := reader.nativeAnonymousConstructorForCompiler(child.object, owner, method, "", p, group.forest, reader.buildInvocationMetadata(), reader.originalNativeConstructorAccessBridges())
+		if actual == nil || actual.descriptor != child.descriptor || actual.enclosingField != child.enclosingField || actual.superDescriptor != child.superDescriptor || actual.superPC != child.superPC || actual.sourceSuperDescriptor != child.sourceSuperDescriptor || actual.sharedParameterRoles != child.sharedParameterRoles || actual.unusedEnclosing != child.unusedEnclosing || actual.parentAnonymous != child.parentAnonymous || len(actual.superParams) != len(child.superParams) || len(actual.fields) != len(child.fields) || len(actual.capturePCs) != len(child.capturePCs) {
+			return nil, nil, false
+		}
+		for i, x := range actual.superParams {
+			if !nativeProofWork(work, 1) || x != child.superParams[i] {
+				return nil, nil, false
+			}
+		}
+		for field, x := range actual.fields {
+			if !nativeProofWork(work, 1) {
+				return nil, nil, false
+			}
+			y, ok := child.fields[field]
+			if !ok || x != y || actual.capturePCs[field] != child.capturePCs[field] {
+				return nil, nil, false
+			}
+		}
+		links = append(links, child)
+		current = owner
+	}
+	return nil, nil, false
+}
+
+func nativeMethodLocalAnonymousSealedObject(p *nativeMemberFamily, object *ClassObject) bool {
+	if p == nil || object == nil {
+		return false
+	}
+	if p.lexicalObjects[object.GetClassName()] == object {
+		return true
+	}
+	group := p.anonymousUnits[object.GetClassName()]
+	if group == nil || group.failed || group.forest != nil || p.memberAnonymous[group.owner] != group || p.methodLocals[group.owner] == nil {
+		return false
+	}
+	child := group.children[object.GetClassName()]
+	return child != nil && child.object == object
+}
+
+// Source permission comes from the original read and declaration identities,
+// including when the generic forest renderer reaches this local capture.
+func (c *ClassObjectDumper) nativeMethodLocalAnonymousCaptureSource(local *nativeMethodLocalClass, value any, pc int, name string, ctx *class_context.ClassContext) (string, bool) {
+	if c == nil || c.obj == nil || ctx == nil || c.nativeCaptureFailed || local == nil || local.object == nil || c.nativeMemberRoot == nil || c.nativeMemberRoot.failed || c.nativeMemberRoot.methodLocals[local.object.GetClassName()] != local {
+		return "", false
+	}
+	read := local.anonymousCaptureReads[c.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][pc]
+	if read == nil || read.field != name || !nativeMethodLocalAnonymousOriginalOperand(value, read, c.Work) || !nativeMemberLexicalReadOperand(value, read, c.Work, ctx) {
+		return "", false
+	}
+	text, ok := local.bindings[name]
+	ref := local.sourceRefs[name]
+	originalName, compilerName := strings.CutPrefix(name, "val$")
+	if !ok || text == "" || !compilerName || text != originalName || ref == nil || ref.Id == nil || local.captureIDs[name] != ref.Id || c.nativeAnonymousBindings[nativeMemberCaptureIndexKey(local.object.GetClassName(), name)] != text {
+		return "", false
+	}
+	current := false
+	for _, method := range c.obj.Methods {
+		if !nativeProofWork(c.Work, 1) {
+			return "", false
+		}
+		if method == c.CurrentMethod {
+			n, nk := sourceBridgeUTF8(c.obj, method.NameIndex)
+			d, dk := sourceBridgeUTF8(c.obj, method.DescriptorIndex)
+			current = nk && dk && n == ctx.FunctionName && d == ctx.CurrentMethodDesc
+			break
+		}
+	}
+	if !current {
+		return "", false
+	}
+	return "(/*jdec-owned-local-capture:" + local.object.GetClassName() + ":" + name + "*/" + text + ")", true
 }

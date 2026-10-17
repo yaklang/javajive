@@ -317,7 +317,7 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 			return false
 		}
 		for user := range index.typeUsers[binary] {
-			if !nativeProofWork(work, 1) || user != p.owner && p.children[user] == nil && user != binary && !nativeMethodLocalAnonymousSubtype(local, p, user, work) && !(p.anonymousUnits[user] != nil && p.anonymousUnits[user].owner == binary && p.anonymousUnits[user].children[user] != nil && local.declaredAnonymous[user]) {
+			if !nativeProofWork(work, 1) || user != p.owner && p.children[user] == nil && user != binary && !nativeMethodLocalAnonymousSubtype(local, p, user, work) && !nativeMethodLocalAnonymousDescendant(p, local, user, work) {
 				return false
 			}
 		}
@@ -757,6 +757,7 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		sub.nativeMemberRoot = p
 		sub.nativeMethodLocalCurrent = local
 		sub.nativeAnonymousRoot = p.memberAnonymous[local.object.GetClassName()]
+		sub.nativeAnonymousForest = p.anonymousForest
 		sub.nativeCaptureFields = local.bindings
 		sub.nativeCaptureTypes = map[string]types.JavaType{}
 		lexical := *ctx
@@ -1067,4 +1068,75 @@ func nativeMethodLocalCaptureMetadata(enclosing *ClassObject, local *nativeMetho
 		}
 	}
 	return true
+}
+
+// Corroborated source ancestry is separate from physical read and binding permission.
+func nativeMethodLocalAnonymousDescendant(p *nativeMemberFamily, local *nativeMethodLocalClass, user string, work *workbudget.Budget) bool {
+	if p == nil || local == nil || local.object == nil {
+		return false
+	}
+	if _, ok := nativeMemberJointMethodLocalOwner(p, local.object, work); !ok {
+		return false
+	}
+	seen := map[string]bool{}
+	for current := user; len(seen) < 64; {
+		if current == local.object.GetClassName() {
+			return len(seen) > 0
+		}
+		if seen[current] || !nativeProofWork(work, 1) {
+			return false
+		}
+		seen[current] = true
+		g := p.anonymousUnits[current]
+		if g == nil || g.failed {
+			return false
+		}
+		child := g.children[current]
+		if child == nil || child.object == nil || g.forest != nil && p.lexicalObjects[current] != child.object {
+			return false
+		}
+		owner, method, ok := originalAnonymousOwner(child.object)
+		if !ok || owner != g.owner || method != child.method {
+			return false
+		}
+		if g.forest != nil {
+			if g.forest != p.anonymousForest || g.forest.members != p || g.forest.groups[owner] != g || g.forest.units[current] != child || g.forest.objects[current] != child.object {
+				return false
+			}
+		} else if owner != local.object.GetClassName() || !local.declaredAnonymous[current] || p.memberAnonymous[owner] != g {
+			return false
+		}
+		parent := p.lexicalObjects[owner]
+		if parent == nil {
+			return false
+		}
+		rows := 0
+		for _, a := range parent.Attributes {
+			if table, ok := a.(*InnerClassesAttribute); ok {
+				if table == nil {
+					return false
+				}
+				for _, row := range table.Classes {
+					if row == nil || !nativeProofWork(work, 1) {
+						return false
+					}
+					name, ok := sourceBridgeClassName(parent, row.InnerClassInfoIndex)
+					if !ok {
+						return false
+					}
+					if name == current {
+						rows++
+						if row.InnerNameIndex != 0 || row.OuterClassInfoIndex != 0 || !nativeAnonymousSelfAccessFlags(child.object, row.InnerClassAccessFlags, work) {
+							return false
+						}
+					}
+				}
+			}
+		}
+		if rows != 1 {
+			return false
+		}
+		current = owner
+	}
+	return false
 }

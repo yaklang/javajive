@@ -54,7 +54,8 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		reader.declarationResolver = c.declarationResolver
 		group := reader.planNativeAnonymousFamilyWithinMembers(p)
 		if group == nil || !nativeJointAnonymousAllocationsClosed(local.object, group, c.Work, p) || !add(group) {
-			return false
+			direct = false
+			continue
 		}
 		for child := range local.declaredAnonymous {
 			if group.children[child] == nil {
@@ -74,7 +75,10 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		return true
 	}
 	for _, local := range p.methodLocals {
-		if len(local.declaredAnonymous) != 0 {
+		if local == nil || local.object == nil {
+			return false
+		}
+		if _, valid := nativeMemberJointMethodLocalOwner(p, local.object, c.Work); !valid {
 			return false
 		}
 	}
@@ -86,6 +90,9 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 	p.anonymousForest = forest
 	p.anonymous = forest.groups[p.owner]
 	for name := range p.children {
+		p.memberAnonymous[name] = forest.groups[name]
+	}
+	for name := range p.methodLocals {
 		p.memberAnonymous[name] = forest.groups[name]
 	}
 	for _, group := range forest.groups {
@@ -173,6 +180,10 @@ func nativeMemberJointAnonymousForestOwner(p *nativeMemberFamily, group *nativeA
 			return false
 		}
 		seen[owner] = true
+		if local := p.methodLocals[owner]; local != nil {
+			_, valid := nativeMemberJointMethodLocalOwner(p, local.object, work)
+			return valid
+		}
 		if owner == p.owner || p.children[owner] != nil {
 			return true
 		}
