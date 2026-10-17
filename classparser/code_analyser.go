@@ -252,6 +252,9 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 				dumper.CurrentMethod = savedCurrentMethod
 			}()
 		}
+		previousCaptured := dumper.nativeLambdaBodyCapturedValues
+		dumper.nativeLambdaBodyCapturedValues = captured
+		defer func() { dumper.nativeLambdaBodyCapturedValues = previousCaptured }()
 		previousSite := dumper.nativeLambdaBodySite
 		dumper.nativeLambdaBodySite = site
 		defer func() { dumper.nativeLambdaBodySite = previousSite }()

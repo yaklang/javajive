@@ -1751,7 +1751,10 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 			relevant = true
 		}
 	}
-	if !relevant {
+	// Native javac8 can record an anonymous class's physical lambda method
+	// as EnclosingMethod. Its factory still owns the captured source snapshot,
+	// even when that factory contains no direct anonymous NEW instruction.
+	if !relevant && len(c.nativeLambdaCaptureParameterNames[c.CurrentMethod]) == 0 {
 		return
 	}
 	if ctx.LocalNames == nil {
@@ -1786,6 +1789,10 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 		}
 		activeValue[v] = true
 		defer delete(activeValue, v)
+		if !c.bindNativeLambdaCaptureParameterNames(v, body, parameterIDs, visible, names) {
+			p.failed = true
+			return
+		}
 		if alloc, ok := v.(*values.NewExpression); ok && alloc.ConstructorCall != nil {
 			call := alloc.ConstructorCall
 			child := p.children[strings.ReplaceAll(call.ClassName, ".", "/")]
@@ -1844,6 +1851,10 @@ func (c *ClassObjectDumper) prepareNativeCaptureBindings(body []statements.State
 					// longer carry parameter flags. The original declaration,
 					// not a mutable use-site copy, witnesses its captured word.
 					if captureName, known := c.nativeLambdaParameterCaptureName(parameterDeclarations[ref.Id]); known {
+						if !c.recordNativeLambdaCaptureParameterName(parameterDeclarations[ref.Id], name) {
+							p.failed = true
+							continue
+						}
 						name = captureName
 					}
 					if old, known := ctx.LocalNames[ref.Id]; known && old != name {
