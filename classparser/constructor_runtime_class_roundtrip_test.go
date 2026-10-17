@@ -22,9 +22,9 @@ func TestAdversarialConstructorRuntimeClassCaptureOriginalJavac8(t *testing.T) {
 	testConstructorRuntimeClassCapture(t, true)
 }
 
-func testConstructorRuntimeClassCapture(t *testing.T, native bool) {
+func testConstructorRuntimeClassCapture(t *testing.T, native bool, borrowed ...string) {
 	t.Helper()
-	const fixture = `
+	fixture := `
 class MirrorState {static String trace="";static Class<?> observed;}
 class MirrorBase {
  final Class<?> kind;final long value;
@@ -69,6 +69,17 @@ class MirrorDriver {
   System.out.println(rows+":mirror:capture:arithmetic:abrupt");
  }
 }`
+	if len(borrowed) > 0 {
+		query, body := "MirrorBorrow.query(this)", "static Class<?> query(Object value){return value.getClass();}"
+		switch borrowed[0] {
+		case "wide-and-duplicate":
+			query = "MirrorBorrow.query(1234567890123L,this,7,this)"
+			body = "static Class<?> query(long wide,Object value,int n,Object duplicate){if(wide!=1234567890123L||n!=7||value!=duplicate)throw new AssertionError(\"static parameter ports\");return value.getClass();}"
+		case "transitive":
+			body = "static Class<?> query(Object value){return next(13L,value);}private static Class<?> next(long wide,Object value){return value.getClass();}"
+		}
+		fixture = strings.Replace(fixture, "kind=getClass()", "kind="+query, 1) + "\nclass MirrorBorrow {" + body + "}"
+	}
 	javac, java := t04Tools(t)
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
@@ -138,5 +149,16 @@ class MirrorDriver {
 				})
 			}
 		})
+	}
+}
+
+func TestAdversarialConstructorStaticBorrowKeepsRuntimeClassAndCapture(t *testing.T) {
+	for _, shape := range []string{"plain", "wide-and-duplicate", "transitive"} {
+		t.Run(shape, func(t *testing.T) { testConstructorRuntimeClassCapture(t, false, shape) })
+	}
+}
+func TestAdversarialConstructorStaticBorrowOriginalJavac8(t *testing.T) {
+	for _, shape := range []string{"plain", "wide-and-duplicate", "transitive"} {
+		t.Run(shape, func(t *testing.T) { testConstructorRuntimeClassCapture(t, true, shape) })
 	}
 }

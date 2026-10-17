@@ -40,7 +40,8 @@ type constructorSelfStorageProof struct {
 	confinedCapture bool
 	// Only a complete capture-motion constructor proof owns the fresh receiver.
 	// A selected method query supplies no allocation/nonpublication evidence.
-	freshReceiver bool
+	freshReceiver    bool
+	borrowedReceiver bool // An exact static callee transported this same fresh value.
 }
 
 // Shared across the complete receiver chain and all runtime profiles. Charge
@@ -77,6 +78,10 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		return rootKnown && known && c.obj == root && nativeProofWork(c.Work, int64(len(rootBefore))+int64(len(current))) &&
 			(c.Work == nil || c.Work.CheckAlloc(int64(len(rootBefore))+int64(len(current))) == nil) && bytes.Equal(rootBefore, current)
 	}
+	// Caller-supplied definitions are one original input, shared by every
+	// supported runtime observation. Only the pinned platform catalog varies
+	// by release; a resolver cannot exchange an original class between them.
+	originalInputs := map[string][32]byte{}
 	var previous *constructorProfileEvidence
 	prove := func(release int) (bool, bool) {
 		d := *c
@@ -84,7 +89,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		if !nativeProofWork(c.Work, 1) || c.Work != nil && c.Work.CheckAlloc(256) != nil {
 			return false, false
 		}
-		evidence := &constructorProfileEvidence{originals: map[string][32]byte{}, eligible: true, rootName: c.obj.GetClassName(), rootSuper: c.obj.GetSupperClassName(), rootFlags: c.obj.AccessFlags}
+		evidence := &constructorProfileEvidence{originals: originalInputs, eligible: true, rootName: c.obj.GetClassName(), rootSuper: c.obj.GetSupperClassName(), rootFlags: c.obj.AccessFlags}
 		d.constructorProfileEvidence = evidence
 		platformUsed := false
 		d.foldSiblingResolver = func(name string) ([]byte, bool) {
@@ -124,7 +129,7 @@ func (c *ClassObjectDumper) constructorCaptureChainDoesNotObserve(owner, descrip
 		evidence.transcript = nil
 		evidence.inBody = true
 		safe := d.constructorChainEffectsWithArguments(owner, descriptor, writes, map[string]bool{}, &remaining, 0, aliases, arguments) && aliases.closed() && !evidence.inconsistent
-		usedConfined = usedConfined || aliases.confinedCapture
+		usedConfined = usedConfined || aliases.confinedCapture || aliases.borrowedReceiver
 		evidence.inBody = false
 		if safe {
 			previous = evidence
@@ -361,20 +366,33 @@ func (c *ClassObjectDumper) constructorReceiverEffectsWithStorage(obj *ClassObje
 // scalar constants back to the caller. This prevents branch pruning from
 // concealing effects on another return path or at a narrow JVM return boundary.
 func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *ClassObject, code *CodeAttribute, ops []*core.OpCode, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, initializedAtEntry bool, arguments ...constructorEffectValue) bool {
+	return c.constructorReceiverBodyEffectsWithEntry(obj, code, ops, descriptor, writes, active, remaining, depth, aliases, initializedAtEntry, false, arguments...)
+}
+
+// A static body has no implicit local0 receiver. Only actuals already sealed as
+// the fresh initialized receiver carry that provenance. It borrows no field or
+// instance-dispatch permissions from the static declaring class.
+func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithEntry(obj *ClassObject, code *CodeAttribute, ops []*core.OpCode, descriptor string, writes, active map[string]bool, remaining *int, depth int, aliases *constructorSelfStorageProof, initializedAtEntry, staticEntry bool, arguments ...constructorEffectValue) bool {
+	if staticEntry && (!initializedAtEntry || aliases == nil || !aliases.freshReceiver || !c.constructorReceiverFinalizerSilent) {
+		return false
+	}
 	params, ret, err := callbinding.Descriptor(descriptor)
 	if err != nil || !initializedAtEntry && ret != "V" || code.MaxLocals == 0 {
 		return false
 	}
 	locals := make([]constructorEffectValue, int(code.MaxLocals))
-	locals[0] = constructorEffectValue{kind: 'L', receiver: true}
-	slot := 1
+	slot := 0
+	if !staticEntry {
+		locals[0] = constructorEffectValue{kind: 'L', receiver: true}
+		slot = 1
+	}
 	if len(arguments) != 0 && len(arguments) != len(params) {
 		return false
 	}
 	for i, param := range params {
 		value := constructorEffectType(param)
 		if len(arguments) > 0 {
-			if !constructorValidNullFact(arguments[i]) || arguments[i].kind != value.kind || arguments[i].reachesReceiver() || arguments[i].allocation != 0 {
+			if !constructorValidNullFact(arguments[i]) || arguments[i].kind != value.kind || arguments[i].allocation != 0 || arguments[i].reachesReceiver() && (!staticEntry || !arguments[i].receiver || arguments[i].retainsReceiver || value.kind != 'L' || arguments[i].knownInt || arguments[i].knownNull) {
 				return false
 			}
 			value = arguments[i]
@@ -948,6 +966,11 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 					}
 					continue
 				}
+				if staticEntry {
+					// Field ownership belongs to the actual receiver hierarchy, not
+					// this helper. A borrowed field needs its own binding proof.
+					return false
+				}
 				aliases.selfStored = aliases.selfStored || stored.reachesReceiver()
 				field, known := c.constructorEffectField(obj, member, opcode == core.OP_PUTFIELD, remaining, aliases)
 				if !known || writes[field] {
@@ -996,6 +1019,19 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				for _, v := range actuals {
 					taintedArgs = taintedArgs || v.reachesReceiver()
 				}
+				if taintedArgs && initialized && !receiver.retainsReceiver && opcode == core.OP_INVOKESTATIC {
+					if !originalBody() {
+						return false
+					}
+					value, known := c.constructorReceiverBorrowedStaticMethod(member, opcode, writes, active, remaining, depth+1, aliases, actuals...)
+					if !known {
+						return c.refuseConstructorMotion("motion.receiver_argument_confinement", obj, code, descriptor, int(op.CurrentOffset))
+					}
+					if result != "V" {
+						stack = append(stack, value)
+					}
+					continue
+				}
 				if receiver.retainsReceiver || taintedArgs && (!initialized || receiver.allocation == 0 || opcode != core.OP_INVOKESPECIAL || member.Member != "<init>") {
 					return c.refuseConstructorMotion("motion.receiver_argument_confinement", obj, code, descriptor, int(op.CurrentOffset))
 				}
@@ -1003,6 +1039,16 @@ func (c *ClassObjectDumper) constructorReceiverBodyEffectsWithStorage(obj *Class
 				if receiver.receiver && member.Member != "<init>" {
 					if !initialized || !c.constructorReceiverFinalizerSilent {
 						return c.refuseConstructorMotion("motion.initialized_receiver_dispatch_coverage", obj, code, descriptor, int(op.CurrentOffset))
+					}
+					if staticEntry {
+						// The input identity is the original fresh root. The helper
+						// is not its declaring/dispatch type. Only the independently
+						// bound final VM class query currently consumes this view.
+						if len(actuals) != 0 || !originalBody() || !c.constructorReceiverRuntimeClass(c.obj, member, opcode, remaining, aliases) {
+							return false
+						}
+						stack = append(stack, constructorEffectValue{kind: 'L'})
+						continue
 					}
 					value, known := c.constructorReceiverMethodWithStorage(obj, member, opcode, writes, active, remaining, depth+1, aliases, actuals...)
 					if !known {

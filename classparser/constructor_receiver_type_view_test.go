@@ -19,8 +19,10 @@ func TestNativeConstructorReceiverTypeViewsPreserveCaptureObservation(t *testing
  final class ViewWriteChild extends ViewWriteBase implements ViewMarker {ViewWriteChild(int n){super(n);}}
  class ViewPublishBase {static Object saved;ViewPublishBase(int n){saved=(ViewMarker)this;}}
  final class ViewPublishChild extends ViewPublishBase implements ViewMarker {Object capture;ViewPublishChild(int n){super(n);}}
- class ViewCallBase {static void save(Object x){}ViewCallBase(int n){save((ViewMarker)this);}}
+ class ViewCallBase {static Object saved;static void save(Object x){saved=x;}ViewCallBase(int n){save((ViewMarker)this);}}
  final class ViewCallChild extends ViewCallBase implements ViewMarker {Object capture;ViewCallChild(int n){super(n);}}
+ class ViewEmptyCallBase {static void discard(Object x){}ViewEmptyCallBase(int n){discard((ViewMarker)this);}}
+ final class ViewEmptyCallChild extends ViewEmptyCallBase implements ViewMarker {Object capture;ViewEmptyCallChild(int n){super(n);}}
  class ViewHeapBase {Object self,seen;ViewHeapBase(int n){self=(ViewMarker)this;seen=self;}}
  final class ViewHeapChild extends ViewHeapBase implements ViewMarker {Object capture;ViewHeapChild(int n){super(n);}}
  class ViewOpenChild extends ViewCastBase implements ViewMarker {Object capture;ViewOpenChild(int n){super(n);}}
@@ -38,7 +40,10 @@ func TestNativeConstructorReceiverTypeViewsPreserveCaptureObservation(t *testing
 		{"ViewReadChild", "ViewReadBase", "ViewReadBase", false},
 		{"ViewWriteChild", "ViewWriteBase", "ViewWriteBase", false},
 		{"ViewPublishChild", "ViewPublishBase", "ViewPublishChild", false},
+		// The negative call must actually publish. A completely analyzed empty
+		// static body has no receiver observation and is now a positive boundary.
 		{"ViewCallChild", "ViewCallBase", "ViewCallChild", false},
+		{"ViewEmptyCallChild", "ViewEmptyCallBase", "ViewEmptyCallChild", true},
 		{"ViewHeapChild", "ViewHeapBase", "ViewHeapChild", false},
 		{"ViewOpenChild", "ViewCastBase", "ViewOpenChild", false},
 	} {
