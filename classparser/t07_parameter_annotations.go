@@ -278,7 +278,10 @@ func (c *ClassObjectDumper) applyOriginalSourceParameterFinality(method *MemberI
 // by typed declaration identity; source text is never scanned or replaced.
 //
 // The bounded domain is ordinary methods with complete original frames and
-// same-category full-slot writes. Partial category-2 overlap, constructor
+// same-category full-slot primitive writes. Copying a reference entry would
+// keep its old referent live after the original JVM slot is overwritten. That
+// needs a separate lifetime proof, including weak/finalizer observations.
+// Partial category-2 overlap, constructor
 // headers, dynamic bodies and lexical captures need separate definition webs.
 func (c *ClassObjectDumper) prepareFinalParameterStorage(method *MemberInfo, descriptor string, code *CodeAttribute, header []values.JavaValue, body []statements.Statement, lexicalDeclarations bool) ([]values.JavaValue, []statements.Statement, bool) {
 	final, known := c.originalSourceParameterFinality(method, descriptor)
@@ -351,6 +354,11 @@ func (c *ClassObjectDumper) prepareFinalParameterStorage(method *MemberInfo, des
 	}
 	if len(written) == 0 {
 		return header, body, true
+	}
+	for i := range written {
+		if !nativeProofWork(c.Work, 1) || callbinding.Reference(physical[i]) {
+			return nil, nil, false
+		}
 	}
 	name, named := sourceBridgeUTF8(c.obj, method.NameIndex)
 	if !named || name == "<init>" || name == "<clinit>" || c.FuncCtx == nil || len(header) != len(physical) || lexicalDeclarations || dynamic || c.nativeAnonymousRoot != nil && len(c.nativeAnonymousRoot.children) != 0 {

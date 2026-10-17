@@ -240,3 +240,25 @@ class OverlapFinalDriver{public static void main(String[]args){if(OverlapFinalOw
 		code.Code = []byte{0x10, 7, 0x3c, 0x1b, 0xac}
 	}, true)
 }
+
+// Entry copying a reference would add a strong root after the physical JVM
+// parameter slot is overwritten. The current projection proves primitive
+// storage only; even an ordinary reference/array assignment needs a separate
+// lifetime certificate. The original methods remain valid JVM programs.
+func TestAdversarialFinalParameterReferenceStorageRequiresLifetimeProof(t *testing.T) {
+	for _, array := range []bool{false, true} {
+		name := "object"
+		typ := "Object"
+		values := "new Object[]{null,new Object()}"
+		if array {
+			name = "array"
+			typ = "Object[]"
+			values = "new Object[][]{null,new Object[0],new Object[]{new Object()}}"
+		}
+		t.Run(name, func(t *testing.T) {
+			source := `class ReferenceFinalOwner{static class Anchor{}static ` + typ + ` read(` + typ + ` input,` + typ + ` replacement){input=replacement;return input;}}
+   class ReferenceFinalDriver{public static void main(String[]args){for(` + typ + ` input:` + values + `)for(` + typ + ` replacement:` + values + `)if(ReferenceFinalOwner.read(input,replacement)!=replacement)throw new AssertionError("original reference slot value");System.out.println("reference:original:slot:identity");}}`
+			testFinalParameterDefinition(t, source, "ReferenceFinalOwner", "ReferenceFinalDriver", "reference:original:slot:identity\n", func(t *testing.T, obj *ClassObject) { finalParameterMarkReadFinal(t, obj, 0) }, true)
+		})
+	}
+}
