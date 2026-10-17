@@ -72,8 +72,9 @@ func TestNativeSourceTransactionRequiresOriginalLocalAdmissionBeforeDiscovery(t 
 
 // Every local declaration is valid and representable; the complete reachable
 // graph contains a 65-family cycle, exceeding the unchanged SCC transaction
-// bound while fitting the separate reachable-graph bound. This is a negative discovery
-// result, not a failed local plan. Repeated queries must pay constant lookup
+// bound while fitting the separate reachable-graph bound. Query that cycle's
+// owner: its admission is negative, rather than its graph or local plan.
+// Repeated queries must pay constant lookup
 // work rather than parse and decompress all the same families again.
 func TestNativeSourceTransactionMemoizesBoundedNegativeDependencyDiscovery(t *testing.T) {
 	var source strings.Builder
@@ -105,14 +106,14 @@ func TestNativeSourceTransactionMemoizesBoundedNegativeDependencyDiscovery(t *te
 			defer z.Close()
 			work := workbudget.New(context.Background(), workbudget.Limits{})
 			z.archive = &archiveFSState{ctx: context.Background(), budget: filesys.WrapWorkBudget(work, filesys.ArchiveLimits{})}
-			root, err := Parse(files["AdmissionRoot.class"])
+			root, err := Parse(files["Family0.class"])
 			if err != nil {
 				t.Fatal(err)
 			}
 			if z.nativeMemberTransactionEntry(root) != nil {
 				t.Fatal("unbounded dependency component admitted")
 			}
-			if _, _, known := z.nativeMemberDependencyAdmission("AdmissionRoot", work, snapshotJDECEnv()); known {
+			if _, _, known := z.nativeMemberDependencyAdmission("Family0", work, snapshotJDECEnv()); known {
 				t.Fatal("fixture must exercise a cached negative SCC admission")
 			}
 			before := work.Used(workbudget.CounterGraphScans)
