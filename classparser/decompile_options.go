@@ -278,9 +278,33 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 	// Inline anonymous members have already completed recovery under their
 	// original method context. Neither caller nor class recovery may borrow a
 	// different method's declarations to reinterpret that lexical scope.
-	if (phase == "method_source" || phase == "class_source") && c.nativeAnonymousRoot != nil {
-		if nativeProofWork(c.Work, int64(len(source))) {
-			changed = nativeRewriteEnclosingScope(source, rule)
+	lexicalPhase := phase == "method_source" || phase == "class_source"
+	declarations := []string{}
+	retained := int64(0)
+	if lexicalPhase && c.nativeMemberRoot != nil {
+		for _, local := range c.nativeMemberRoot.methodLocals {
+			if local == nil || local.owner == nil || !nativeProofWork(c.Work, 1) {
+				return source
+			}
+			if local.source == "" || local.object == c.obj {
+				continue
+			}
+			if phase == "method_source" && (c.obj == nil || c.FuncCtx == nil || local.owner.owner != c.obj.GetClassName() || local.executionOwner().method != c.FuncCtx.FunctionName || local.executionOwner().descriptor != c.FuncCtx.CurrentMethodDesc) {
+				continue
+			}
+			retained += int64(len(local.source))
+			if retained > 1<<20 || len(declarations) >= nativeMemberLayoutNodeLimit {
+				return source
+			}
+			declarations = append(declarations, local.source)
+		}
+	}
+	if lexicalPhase && (c.nativeAnonymousRoot != nil || c.nativeAnonymousForest != nil || len(declarations) > 0) {
+		// Bound both the lexical scan and its comparisons to owned fragments
+		// before allocating/formatting. Protection never licenses a rewrite.
+		scanWork, err := workbudget.CheckedProduct(int64(len(source)), int64(len(declarations)+1))
+		if err == nil && nativeProofWork(c.Work, scanWork+retained+1) && (c.Work == nil || c.Work.CheckAlloc(int64(len(source))*4+retained+int64(len(declarations))*128) == nil) {
+			changed = nativeRewriteEnclosingScope(source, rule, declarations...)
 		}
 	} else {
 		changed = rule(source)

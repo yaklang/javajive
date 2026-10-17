@@ -608,3 +608,109 @@ func TestAdversarialMethodLocalDelegationCastPacketRetainsOriginalTarget(t *test
 		})
 	}
 }
+
+func TestAdversarialLocalMethodVariablesCannotEscapeThroughSiblingParameterNames(t *testing.T) {
+	const source = `
+class ScopeOwner {
+ java.util.function.Supplier<Object> make(final java.util.Iterator<java.util.Map.Entry<Object,Object>> input){
+  class Local implements java.util.function.Supplier<Object> {
+   public Object get(){do{if(input.hasNext()){java.util.Map.Entry<Object,Object> entry=input.next();Object key=entry.getKey();if(key!=null)return entry.getValue();}else break;}while(true);return null;}
+   boolean independent(java.util.Collection<?> other){return other.isEmpty();}
+  }
+  return new Local();
+ }
+}
+class ScopeDriver {
+ public static void main(String[]args)throws Exception {int rows=0;
+  for(int selected:new int[]{-1,0,1,2})for(final boolean fail:new boolean[]{false,true}){
+   final Object expected=new Object();final RuntimeException failure=new IllegalStateException("same");final int[] calls={0,0};final java.util.List<java.util.Map.Entry<Object,Object>> data=new java.util.ArrayList<java.util.Map.Entry<Object,Object>>();
+   for(int i=0;i<3;i++)data.add(new java.util.AbstractMap.SimpleImmutableEntry<Object,Object>(i==selected?new Object():null,expected));
+   java.util.Iterator<java.util.Map.Entry<Object,Object>> cursor=new java.util.Iterator<java.util.Map.Entry<Object,Object>>(){int at;public boolean hasNext(){calls[0]++;return at<data.size();}public java.util.Map.Entry<Object,Object> next(){calls[1]++;if(fail)throw failure;return data.get(at++);}public void remove(){throw new UnsupportedOperationException();}};
+   java.util.function.Supplier<Object> result=new ScopeOwner().make(cursor);if(calls[0]!=0||calls[1]!=0)throw new AssertionError("eager iteration");Object value=null;
+   try{value=result.get();if(fail)throw new AssertionError("lost original failure");}catch(RuntimeException actual){if(!fail||actual!=failure)throw new AssertionError("exception identity",actual);}
+   int consumed=fail?1:selected<0?3:selected+1;int queried=fail?1:selected<0?4:selected+1;
+   if(!fail&&value!=(selected<0?null:expected)||calls[0]!=queried||calls[1]!=consumed)throw new AssertionError("iterator order, count and value");
+   Class<?> local=result.getClass();if(!local.isLocalClass()||local.getEnclosingClass()!=ScopeOwner.class||local.getEnclosingMethod()==null||!local.getEnclosingMethod().getName().equals("make"))throw new AssertionError("actual local declaration");java.lang.reflect.Method independent=local.getDeclaredMethod("independent",java.util.Collection.class);independent.setAccessible(true);if(!Boolean.TRUE.equals(independent.invoke(result,java.util.Collections.emptyList()))||calls[0]!=queried||calls[1]!=consumed)throw new AssertionError("independent method frame");rows++;
+  }System.out.println(rows+":local:independent-method-slots:iteration:identity:failure");
+ }
+}`
+	testResourceCompletionFamily(t, source, "ScopeOwner", "ScopeDriver", "8:local:independent-method-slots:iteration:identity:failure\n")
+}
+
+func TestNativeLocalDeclarationScopeKeepsNestedFramesOpaque(t *testing.T) {
+	const declaration = "class Local<T> {\n Object get(){while(true){Object var1=capture;return var1;}}\n boolean sibling(java.util.Collection<?> var1){return var1.isEmpty();}\n}"
+	for _, row := range []struct {
+		name, body, want string
+		owned            []string
+	}{
+		{"ordinary", "Object outer=capture;\n" + declaration + "\nreturn new Local();", "Object outer=changed;\n" + declaration + "\nreturn new Local();", []string{declaration}},
+		{"same declaration in comment", "/*" + declaration + "*/\n" + declaration, "/*" + strings.ReplaceAll(declaration, "capture", "changed") + "*/\n" + declaration, []string{declaration}},
+		{"same declaration in string", "String text=\"" + strings.ReplaceAll(declaration, "\n", "\\n") + "\";\n" + declaration, "String text=\"" + strings.ReplaceAll(strings.ReplaceAll(declaration, "capture", "changed"), "\n", "\\n") + "\";\n" + declaration, []string{declaration}},
+		{"nested declarations", "class Outer {" + declaration + "}", "class Outer {" + declaration + "}", []string{declaration, "class Outer {" + declaration + "}"}},
+		{"sibling declarations", declaration + "\n" + strings.ReplaceAll(declaration, "Local", "Other"), declaration + "\n" + strings.ReplaceAll(declaration, "Local", "Other"), []string{strings.ReplaceAll(declaration, "Local", "Other"), declaration}},
+		{"unregistered text", declaration, strings.ReplaceAll(declaration, "capture", "changed"), nil},
+		{"incomplete registered declaration", declaration, declaration, []string{strings.TrimSuffix(declaration, "}")}},
+		{"foreign registered grammar", declaration, declaration, []string{"new Local(){}"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got := nativeRewriteEnclosingScope(row.body, func(s string) string { return strings.ReplaceAll(s, "capture", "changed") }, row.owned...)
+			if got != row.want {
+				t.Fatalf("scope rewrite:\n%s\nwant:\n%s", got, row.want)
+			}
+		})
+	}
+	for _, kind := range []string{"lost", "duplicated", "collision"} {
+		t.Run(kind, func(t *testing.T) {
+			source := declaration
+			if kind == "collision" {
+				source += "\n/*jdec lexical declaration 0*/"
+			}
+			got := nativeRewriteEnclosingScope(source, func(s string) string {
+				if kind == "duplicated" {
+					return s + s
+				}
+				return strings.ReplaceAll(s, "/*jdec lexical declaration 0*/", "")
+			}, declaration)
+			if got != source {
+				t.Fatal("accepted missing, duplicated or ambiguous declaration receipt")
+			}
+		})
+	}
+}
+
+func TestNativeLocalDeclarationProtectionKeepsOuterRepairAndResourceBoundary(t *testing.T) {
+	const declaration = "class Local {\n Object get(){while(true){Object var1=capture;return var1;}}\n boolean sibling(java.util.Collection<?> var1){return var1.isEmpty();}\n}"
+	const outer = "\tif(flag){\n\t\tObject var2 = make();\n\t}\n\treturn var2;\n"
+	got := nativeRewriteEnclosingScope(outer+declaration, hoistSameTypeEscapedLocals, declaration)
+	if !strings.Contains(got, "Object var2 = null;") || !strings.Contains(got, "var2 = make();") || strings.Count(got, declaration) != 1 || strings.Contains(got, "Object var1 = null;") {
+		t.Fatalf("outer/current and nested frames were merged:\n%s", got)
+	}
+	for _, kind := range []string{"ordinary", "work", "memory", "canceled", "precision"} {
+		t.Run(kind, func(t *testing.T) {
+			d := NewClassObjectDumper(&ClassObject{})
+			d.nativeMemberRoot = &nativeMemberFamily{methodLocals: map[string]*nativeMethodLocalClass{"Local": {object: &ClassObject{}, owner: &nativeMethodLocalOwner{}, source: declaration}}}
+			switch kind {
+			case "work":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxRequestWork: 1})
+			case "memory":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				d.Work = workbudget.New(ctx, workbudget.Limits{})
+			case "precision":
+				d.options.Mode = Precision
+			}
+			calls := 0
+			source := "Object outer=capture;\n" + declaration
+			got := d.sourceRewrite("test-owned-frame", "class_source", source, func(s string) string { calls++; return strings.ReplaceAll(s, "capture", "changed") })
+			want := source
+			if kind == "ordinary" {
+				want = "Object outer=changed;\n" + declaration
+			}
+			if got != want || calls != map[bool]int{true: 1, false: 0}[kind == "ordinary"] {
+				t.Fatalf("resource/ownership boundary kind=%s calls=%d\n%s", kind, calls, got)
+			}
+		})
+	}
+}

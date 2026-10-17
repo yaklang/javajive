@@ -10,7 +10,26 @@ import (
 // using a caller's or sibling method's bindings. Retain each member fragment as
 // an opaque comment for that recovery, then restore it byte-for-byte. Allocation
 // arguments remain visible, since they do belong to the caller's scope.
-func nativeRewriteEnclosingScope(source string, rule func(string) string) string {
+func nativeRewriteEnclosingScope(source string, rule func(string) string, declarations ...string) string {
+	// Local declarations arrive as exact, already-rendered typed fragments.
+	// Validate their complete lexical extent before treating them as opaque;
+	// matching arbitrary class-like text grants no declaration permission.
+	owned := make([]string, 0, len(declarations))
+	seen := map[string]bool{}
+	for _, declaration := range declarations {
+		if declaration == "" || seen[declaration] {
+			continue
+		}
+		if !strings.HasPrefix(declaration, "class ") && !strings.HasPrefix(declaration, "final class ") {
+			return source
+		}
+		open := javaIndexTopBrace(declaration)
+		if open < 0 || javaMatchBrace(declaration, open) != len(declaration)-1 {
+			return source
+		}
+		seen[declaration] = true
+		owned = append(owned, declaration)
+	}
 	const prefix = "/*jdec-owned-anonymous-ordinal:"
 	type fragment struct{ token, body string }
 	fragments := []fragment{}
@@ -18,6 +37,31 @@ func nativeRewriteEnclosingScope(source string, rule func(string) string) string
 	from := 0
 	state, ignored := scanNormal, 0
 	for i := 0; i < len(source); i++ {
+		if state == scanNormal {
+			declaration := ""
+			// Generated local declarations begin a block item. A same-spelled
+			// suffix of an identifier, string or comment is not that item.
+			boundary := i == 0 || strings.ContainsRune(" \t\r\n\f{};:", rune(source[i-1])) || i >= 2 && source[i-2:i] == "*/"
+			if boundary {
+				for _, candidate := range owned {
+					if len(candidate) > len(declaration) && strings.HasPrefix(source[i:], candidate) {
+						declaration = candidate
+					}
+				}
+			}
+			if declaration != "" {
+				token := fmt.Sprintf("/*jdec lexical declaration %d*/", len(fragments))
+				if strings.Contains(source, token) {
+					return source
+				}
+				masked.WriteString(source[from:i])
+				masked.WriteString(token)
+				fragments = append(fragments, fragment{token, declaration})
+				from = i + len(declaration)
+				i = from - 1
+				continue
+			}
+		}
 		if state == scanNormal && strings.HasPrefix(source[i:], prefix) {
 			end := strings.Index(source[i:], "*/")
 			if end < 0 {
