@@ -301,6 +301,13 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 		if prepared != nil {
 			f := prepared.family
 			if len(f.children) == 0 && len(f.methodLocals) == 0 && len(f.enumConstants) == 0 && len(f.enumSwitchTables) == 0 && len(f.anonymousUnits) == 0 && f.anonymous == nil && f.anonymousForest == nil {
+				// Activating another independent source boundary requires the
+				// whole original boundary graph. A stable declaration spelling
+				// alone cannot authorize recursive independent publication.
+				_, cyclic, known := z.nativeMemberDependencyAdmission(root.GetClassName(), reader.Work, snap)
+				if !known || cyclic {
+					return
+				}
 				lookup = z.nativeMemberLookup
 			}
 		}
