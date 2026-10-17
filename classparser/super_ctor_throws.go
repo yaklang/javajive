@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -11,20 +12,30 @@ import (
 // `super(...)` throws a checked exception, so the decompiled ctor fails
 // "unreported exception InitializationError". Kill-switch:
 // JDEC_SUPER_CTOR_THROWS_OFF=1.
-func (c *ClassObjectDumper) superCtorCheckedThrows() string {
+func (c *ClassObjectDumper) superCtorCheckedThrows(plans ...*constructorSourceBoundary) (string, error) {
 	if c.getenv("JDEC_SUPER_CTOR_THROWS_OFF") == "1" {
-		return ""
+		return "", nil
 	}
 	if c == nil || c.obj == nil {
-		return ""
+		return "", nil
 	}
 	super := c.obj.GetSupperClassName()
 	if super == "" || super == "java/lang/Object" {
-		return ""
+		return "", nil
 	}
 	desc := c.superInitDescriptor(super)
 	if desc == "" {
-		return ""
+		return "", nil
+	}
+	if len(plans) == 1 && plans[0] != nil && plans[0].throwsReceipt != nil {
+		r := plans[0].throwsReceipt
+		if !r.consumed(c.FuncCtx) {
+			return "", fmt.Errorf("stale constructor invocation throws source binding")
+		}
+		if !r.allUnchecked {
+			return "", fmt.Errorf("checked constructor delegation requires original declared throws")
+		}
+		return "", nil
 	}
 	if extra := jdkSuperCtorThrows(super, desc); extra != "" {
 		if c.FuncCtx != nil {
@@ -36,18 +47,18 @@ func (c *ClassObjectDumper) superCtorCheckedThrows() string {
 				}
 			}
 		}
-		return extra
+		return extra, nil
 	}
 	if c.foldSiblingResolver == nil {
-		return ""
+		return "", nil
 	}
 	data, ok := c.foldSiblingResolver(super)
 	if !ok || len(data) == 0 {
-		return ""
+		return "", nil
 	}
 	sObj, err := c.parseResolved(data)
 	if err != nil || sObj == nil {
-		return ""
+		return "", nil
 	}
 	for _, m := range sObj.Methods {
 		mn, err := sObj.getUtf8(m.NameIndex)
@@ -58,9 +69,9 @@ func (c *ClassObjectDumper) superCtorCheckedThrows() string {
 		if err != nil || md != desc {
 			continue
 		}
-		return c.checkedThrowsFromMethod(sObj, m)
+		return c.checkedThrowsFromMethod(sObj, m), nil
 	}
-	return ""
+	return "", nil
 }
 
 func (c *ClassObjectDumper) superInitDescriptor(superInternal string) string {

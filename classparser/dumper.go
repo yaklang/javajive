@@ -3987,6 +3987,8 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 	var lambdaMethodLocalNamespace bool
 	var lambdaAdapterPrologue string
 	var exceptions string
+	var renderedConstructorPlan *constructorSourceBoundary
+	var renderedConstructorReceipt *constructorInvocationThrowsReceipt
 	for _, attribute := range method.Attributes {
 		if exceptionAttr, ok := attribute.(*ExceptionsAttribute); ok {
 			exceptions = " throws "
@@ -4092,6 +4094,10 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			needsCheckedEscape, escapeErr := c.methodNeedsCheckedEscape(codeAttr, statementList, method, constructorPlan)
 			if escapeErr != nil {
 				return nil, escapeErr
+			}
+			renderedConstructorPlan = constructorPlan
+			if constructorPlan != nil {
+				renderedConstructorReceipt = constructorPlan.throwsReceipt
 			}
 			dumped.checkedEscape = needsCheckedEscape
 			thisRemoved := false
@@ -4313,6 +4319,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				if !known {
 					return nil, fmt.Errorf("unproved original parameter metadata")
 				}
+			}
+			if renderedConstructorReceipt != nil && !renderedConstructorReceipt.bindSourceParameters(constructorPlan, samParams, funcCtx) {
+				return nil, fmt.Errorf("unproved constructor invocation parameter source binding")
 			}
 			paramsNewStr = strings.Join(paramsNewStrList, ", ")
 
@@ -4737,13 +4746,27 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 					// declarations have no runtime effect, but Java still forbids
 					// placing them before the original initialization delegate.
 					if call, ok := values.UnpackSoltValue(v.Expression).(*values.FunctionCallExpression); ok && constructorPlan != nil && constructorPlan.delegate == call {
-						supperInvokeStr = c.GetTabString() + constructorPlan.renderDelegation(funcCtx) + ";\n"
+						delegationSource, err := constructorPlan.renderDelegation(funcCtx)
+						if err != nil {
+							return nil, err
+						}
+						if renderedConstructorReceipt != nil && !renderedConstructorReceipt.claimHeader(constructorPlan, call, call.OriginPC, delegationSource, funcCtx) {
+							return nil, fmt.Errorf("unconsumed constructor invocation throws source binding")
+						}
+						supperInvokeStr = c.GetTabString() + delegationSource + ";\n"
 						continue
 					}
 					if v1, ok := v.Expression.(*values.FunctionCallExpression); ok && v1.IsSupperConstructorInvoke(funcCtx) {
 						supperInvokeStr = fmt.Sprintf("%s\n", statementToString(statement))
 						if constructorPlan != nil && constructorPlan.delegate == v1 {
-							supperInvokeStr = c.GetTabString() + constructorPlan.renderDelegation(funcCtx) + ";\n"
+							delegationSource, err := constructorPlan.renderDelegation(funcCtx)
+							if err != nil {
+								return nil, err
+							}
+							if renderedConstructorReceipt != nil && !renderedConstructorReceipt.claimHeader(constructorPlan, v1, v1.OriginPC, delegationSource, funcCtx) {
+								return nil, fmt.Errorf("unconsumed constructor invocation throws source binding")
+							}
+							supperInvokeStr = c.GetTabString() + delegationSource + ";\n"
 						}
 						continue
 					}
@@ -4863,6 +4886,9 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 				c.nativeMemberRoot.failed = true
 				return nil, fmt.Errorf("unproved final method-local source emission")
 			}
+			if renderedConstructorReceipt != nil && !renderedConstructorReceipt.confirmEmission(constructorPlan, funcCtx, sourceCode, c.GetTabString()) {
+				return nil, fmt.Errorf("unproved final constructor invocation throws source emission")
+			}
 			code = sourceCode
 		}
 	}
@@ -4958,12 +4984,21 @@ func (c *ClassObjectDumper) dumpMethodWithInitialId(methodName, desc string, id 
 			methodSourceBuffer.Write([]byte(class_context.SafeIdentifier(name)))
 		}
 	}
-	writeArguments := func(buffer io.Writer) {
-		if name == "<init>" && exceptions == "" {
-			if extra := c.superCtorCheckedThrows(); extra != "" {
+	if name == "<init>" {
+		if renderedConstructorReceipt != nil && (renderedConstructorPlan == nil || renderedConstructorPlan.throwsReceipt != renderedConstructorReceipt || !renderedConstructorReceipt.consumed(funcCtx)) {
+			return nil, fmt.Errorf("stale constructor invocation throws source binding")
+		}
+		if exceptions == "" {
+			extra, err := c.superCtorCheckedThrows(renderedConstructorPlan)
+			if err != nil {
+				return nil, err
+			}
+			if extra != "" {
 				exceptions = " throws " + extra
 			}
 		}
+	}
+	writeArguments := func(buffer io.Writer) {
 		methodSourceBuffer.Write([]byte(fmt.Sprintf("(%s)%s", paramsNewStr, exceptions)))
 	}
 	// A synthetic access-bridge constructor `C(C$N marker)` whose body decompiled to empty bridges the

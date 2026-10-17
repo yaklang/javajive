@@ -361,6 +361,7 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 			continue
 		}
 		var exceptions []string
+		invocationAllowed := declared
 		if op.Instr.OpCode == core.OP_ATHROW {
 			// An invocation is not required for a checked object to escape.
 			// Pair the typed operand with the actual decoded ATHROW PC.
@@ -387,13 +388,28 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 			if !known {
 				continue
 			}
+			if sourcePlan != nil && sourcePlan.delegate != nil && int(op.CurrentOffset) == sourcePlan.pc {
+				receipt, admission := c.constructorInvocationThrowsAdmission(code, method, member, int(op.CurrentOffset), sourcePlan)
+				switch admission {
+				case constructorThrowsRefused:
+					return false, fmt.Errorf("generic constructor invocation lacks original source throws binding")
+				case constructorThrowsProved:
+					sourcePlan.throwsReceipt = receipt
+					exceptions = receipt.exceptions
+				}
+				concrete, sourceKnown := c.constructorThrowsOriginalSourceProjection(method, declared)
+				if !sourceKnown {
+					return false, fmt.Errorf("constructor delegation requires original source throws metadata")
+				}
+				invocationAllowed = concrete
+			}
 		}
 		for _, exception := range exceptions {
 			if originalExceptionUnchecked(exception, provider) {
 				continue
 			}
 			covered := false
-			for _, allowed := range declared {
+			for _, allowed := range invocationAllowed {
 				covered = covered || originalExceptionCovered(exception, allowed, provider)
 			}
 			if covered {
