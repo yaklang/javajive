@@ -1051,6 +1051,7 @@ func (c *ClassObjectDumper) validateNativeAnonymousGroup(p *nativeAnonymousFamil
 }
 
 func (c *ClassObjectDumper) wireNativeAnonymousSource() {
+	defer c.wireNativeMethodLocalAnonymousCaptures()
 	ctx := c.FuncCtx
 	if forest := c.nativeAnonymousForest; forest != nil {
 		prior := ctx.SourceClassDenotable
@@ -1298,7 +1299,7 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 		if child.expressionInitializer != nil {
 			initialization, known = sub.nativeAnonymousExpressionInitializerSource(child, bindings)
 		}
-		if !known || sub.nativeCaptureFailed {
+		if !known || sub.nativeCaptureFailed || !sub.nativeMethodLocalAnonymousInputsUnchanged() {
 			return fail()
 		}
 		body = initialization + body

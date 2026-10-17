@@ -16,6 +16,9 @@ import (
 )
 
 type nativeMethodLocalClass struct {
+	declaredAnonymous         map[string]bool
+	anonymousCaptureReads     map[string]map[string]map[int]*nativeMemberLexicalRead
+	anonymousCaptureSeals     map[string]nativeMethodLocalAnonymousSeal
 	object                    *ClassObject
 	owner                     *nativeMethodLocalOwner
 	constructor               *nativeMethodLocalConstructor
@@ -192,6 +195,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 					return false
 				}
 			}
+			declaredAnonymous := map[string]bool{}
 			// Methods and fields may not invent child scopes, static initializer
 			// protocols or declaration annotations unsupported by this local profile.
 			for _, m := range local.Methods {
@@ -227,7 +231,10 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 									return false
 								}
 								if enclosing, _, anon := originalAnonymousOwner(child); anon && enclosing == binary {
-									return false
+									if len(declaredAnonymous) >= 64 {
+										return false
+									}
+									declaredAnonymous[childName] = true
 								}
 							}
 						}
@@ -241,7 +248,7 @@ func (c *ClassObjectDumper) planNativeMethodLocalsForOwner(p *nativeMemberFamily
 			if c.Work != nil && c.Work.CheckAlloc(int64(len(p.methodLocals)+1)*1024) != nil {
 				return false
 			}
-			p.methodLocals[binary] = &nativeMethodLocalClass{object: local, owner: owner, constructor: constructor, allocations: sites, typeConsumers: consumers, calls: map[int]bool{}, legacyConstructorMetadata: legacyMetadata, sourceCompiler: c.options.SourceCompiler, targetSourceVersion: c.options.TargetSourceVersion}
+			p.methodLocals[binary] = &nativeMethodLocalClass{declaredAnonymous: declaredAnonymous, object: local, owner: owner, constructor: constructor, allocations: sites, typeConsumers: consumers, calls: map[int]bool{}, legacyConstructorMetadata: legacyMetadata, sourceCompiler: c.options.SourceCompiler, targetSourceVersion: c.options.TargetSourceVersion}
 			if !nativeMethodLocalCaptureMetadata(c.obj, p.methodLocals[binary], c.Work, p) {
 				return false
 			}
@@ -303,7 +310,7 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 			return false
 		}
 		for user := range index.typeUsers[binary] {
-			if !nativeProofWork(work, 1) || user != p.owner && p.children[user] == nil && user != binary && !nativeMethodLocalAnonymousSubtype(local, p, user, work) {
+			if !nativeProofWork(work, 1) || user != p.owner && p.children[user] == nil && user != binary && !nativeMethodLocalAnonymousSubtype(local, p, user, work) && !(p.anonymousUnits[user] != nil && p.anonymousUnits[user].owner == binary && p.anonymousUnits[user].children[user] != nil && local.declaredAnonymous[user]) {
 				return false
 			}
 		}
@@ -314,7 +321,7 @@ func (z *JarFS) nativeMethodLocalArchiveClosed(p *nativeMemberFamily, index *nat
 		}
 		for field := range local.constructor.captures {
 			for user := range index.captureUsers[nativeMemberCaptureIndexKey(binary, field)] {
-				if !nativeProofWork(work, 1) || user != binary {
+				if !nativeProofWork(work, 1) || user != binary && !z.nativeMemberReader(root).nativeMethodLocalAnonymousCaptureUser(p, local, user, field, work) {
 					return false
 				}
 			}
@@ -706,8 +713,7 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 			if !known || assigned[name] != nil && assigned[name] != ref.Id {
 				return fail("capture source name collision")
 			}
-			// Retain value transport through the implementation parameter, but
-			// constrain the original factory's actual source binder separately.
+			// Retain the descriptor-seeded lambda transport and constrain its factory binder.
 			if captureName, known := c.nativeLambdaParameterCaptureName(ref); known {
 				if !c.recordNativeLambdaCaptureParameterName(ref, name) {
 					return fail("factory declaration name constraint failed")
@@ -738,6 +744,7 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		sub.nativeMemberLookup = c.nativeMemberLookup
 		sub.nativeMemberRoot = p
 		sub.nativeMethodLocalCurrent = local
+		sub.nativeAnonymousRoot = p.memberAnonymous[local.object.GetClassName()]
 		sub.nativeCaptureFields = local.bindings
 		sub.nativeCaptureTypes = map[string]types.JavaType{}
 		lexical := *ctx
@@ -807,6 +814,9 @@ func (c *ClassObjectDumper) prepareNativeMethodLocalDeclarations(body []statemen
 		header := nativeMethodLocalDeclarationHeader(local, source)
 		if header == "" {
 			return fail("local header unavailable")
+		}
+		if group := p.memberAnonymous[local.object.GetClassName()]; group != nil && !group.completeOwnSource(source) {
+			return fail("local anonymous source closure missing")
 		}
 		if !nativeMethodLocalCaptureSourceComplete(local, source, c.Work) {
 			return fail("a captured field has no emitted original lexical use")

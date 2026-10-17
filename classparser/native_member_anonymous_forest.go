@@ -43,6 +43,26 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 		}
 		p.memberAnonymous[name] = group
 	}
+	for name, local := range p.methodLocals {
+		if len(local.declaredAnonymous) == 0 {
+			continue
+		}
+		reader := NewClassObjectDumper(local.object)
+		reader.Work = c.Work
+		reader.options = c.options
+		reader.foldSiblingResolver = c.foldSiblingResolver
+		reader.declarationResolver = c.declarationResolver
+		group := reader.planNativeAnonymousFamilyWithinMembers(p)
+		if group == nil || !nativeJointAnonymousAllocationsClosed(local.object, group, c.Work, p) || !add(group) {
+			return false
+		}
+		for child := range local.declaredAnonymous {
+			if group.children[child] == nil {
+				return false
+			}
+		}
+		p.memberAnonymous[name] = group
+	}
 	allocationForest, allocationKnown := c.nativeMemberAnonymousAllocationsRequireLexicalForest(p)
 	if !allocationKnown {
 		return false
@@ -52,6 +72,11 @@ func (c *ClassObjectDumper) planNativeMemberAnonymousScopes(p *nativeMemberFamil
 	if direct && !allocationForest && (p.independentRoot == nil || len(p.anonymousUnits) == 0) && nativeMemberDirectAnonymousCapturesClosed(p, c.Work) &&
 		(len(p.getters) == 0 || len(p.anonymousUnits) == 0) {
 		return true
+	}
+	for _, local := range p.methodLocals {
+		if len(local.declaredAnonymous) != 0 {
+			return false
+		}
 	}
 	reset()
 	forest := c.planNativeAnonymousLexicalForest(p)

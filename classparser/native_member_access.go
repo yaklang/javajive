@@ -182,7 +182,7 @@ func nativeMemberJointAnonymousAccess(p *nativeMemberFamily, user string, work *
 	if group == nil {
 		group = p.anonymous
 	}
-	if group == nil || group.failed || group.owner != p.owner && p.children[group.owner] == nil && !nativeMemberJointAnonymousForestOwner(p, group, work) {
+	if group == nil || group.failed || group.owner != p.owner && p.children[group.owner] == nil && !nativeMemberJointAnonymousForestOwner(p, group, work) && !nativeMethodLocalAnonymousOwner(p, group, work) {
 		return false
 	}
 	if group.forest != nil && (group.forest != p.anonymousForest || group.forest.members != p || group.forest.groups[group.owner] != group) {
