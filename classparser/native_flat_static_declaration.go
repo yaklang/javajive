@@ -1,6 +1,7 @@
 package javaclassparser
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/yaklang/javajive/internal/jdecenv"
@@ -11,7 +12,19 @@ import (
 // to remain nameable in a different source unit. No foreign body, constructor,
 // private access, capture or registration becomes owned by the receiving plan.
 func (z *JarFS) completedFlatStaticDeclaration(prepared *nativeMemberPrepared, other *ClassObject, peers ...map[string]*nativeMemberPrepared) string {
-	if z == nil || prepared == nil || prepared.reader == nil || prepared.root == nil || prepared.family == nil || prepared.family.failed || prepared.snapshot == nil || other == nil {
+	return z.nativeMemberFlatStaticDeclaration(prepared, other, false, peers...)
+}
+
+// A failed pure local admission is final for this immutable archive/policy.
+// Consult that fact without entering a possibly active source completion: a
+// type dependency cycle need not become a source publication transaction when
+// the foreign family can never participate in one.
+func (z *JarFS) terminalFlatStaticDeclaration(prepared *nativeMemberPrepared, other *ClassObject, peers ...map[string]*nativeMemberPrepared) string {
+	return z.nativeMemberFlatStaticDeclaration(prepared, other, true, peers...)
+}
+
+func (z *JarFS) nativeMemberFlatStaticDeclaration(prepared *nativeMemberPrepared, other *ClassObject, terminalOnly bool, peers ...map[string]*nativeMemberPrepared) string {
+	if z == nil || prepared == nil || prepared.reader == nil || prepared.root == nil || prepared.family == nil || prepared.family.failed || prepared.snapshot == nil || prepared.snapshot["JDEC_NATIVE_MEMBER_OFF"] != "" || other == nil {
 		return ""
 	}
 	d := prepared.reader
@@ -64,7 +77,22 @@ func (z *JarFS) completedFlatStaticDeclaration(prepared *nativeMemberPrepared, o
 	}
 	var entry *nativeMemberCacheEntry
 	jdecenv.Run(prepared.snapshot, func() error {
-		entry = z.nativeMemberEntry(outer)
+		if terminalOnly {
+			policy, err := json.Marshal(prepared.snapshot)
+			if err != nil {
+				return nil
+			}
+			candidate := z.nativeMemberPolicyEntry(owner + "\x00" + string(policy))
+			if candidate == nil {
+				return nil
+			}
+			z.admitNativeMemberLocal(candidate, outer, owner, prepared.snapshot)
+			if !candidate.planKnown && candidate.originalPlanRefusal {
+				entry = candidate
+			}
+		} else {
+			entry = z.nativeMemberEntry(outer)
+		}
 		return nil
 	})
 	// A local-plan refusal is terminal. A completed ordinary finish refusal

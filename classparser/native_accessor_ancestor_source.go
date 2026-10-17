@@ -161,10 +161,6 @@ func (z *JarFS) nativeMemberAccessorAncestorFlagsClosed(prepared *nativeMemberPr
 		if len(peers) != 0 {
 			return false
 		}
-		_, cyclic, known := z.nativeMemberDependencyAdmission(p.owner, d.Work, prepared.snapshot)
-		if !known || cyclic {
-			return false
-		}
 	}
 	for _, component := range peers {
 		for _, peer := range component {
@@ -179,6 +175,7 @@ func (z *JarFS) nativeMemberAccessorAncestorFlagsClosed(prepared *nativeMemberPr
 			}
 		}
 	}
+	dependencyChecked := dependencyGraphClosed
 	checked := map[string]bool{}
 	resolve := d.nativeAnnotationDeclarationResolver()
 	familyFlag := func(f *nativeMemberFamily, name, method, desc string) (bool, bool) {
@@ -256,6 +253,15 @@ func (z *JarFS) nativeMemberAccessorAncestorFlagsClosed(prepared *nativeMemberPr
 				if component[sourceOwner] != nil {
 					return false
 				}
+			}
+			// Only an actual foreign source-cache query introduces a recursive
+			// dependency. A complete original absence proof needs no such query.
+			if !dependencyChecked {
+				_, cyclic, known := z.nativeMemberDependencyAdmission(p.owner, d.Work, prepared.snapshot)
+				if !known || cyclic {
+					return false
+				}
+				dependencyChecked = true
 			}
 			var entry *nativeMemberCacheEntry
 			jdecenv.Run(prepared.snapshot, func() error {

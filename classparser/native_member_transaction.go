@@ -57,7 +57,7 @@ func (z *JarFS) nativeMemberTransactionEntry(obj *ClassObject) *nativeMemberCach
 	if standalone == nil {
 		return nil
 	}
-	standalone.planOnce.Do(func() { standalone.planKnown = z.nativeMemberLocalPlan(obj, owner, snap) != nil })
+	z.admitNativeMemberLocal(standalone, obj, owner, snap)
 	if !standalone.planKnown {
 		return nil
 	}
@@ -149,11 +149,7 @@ func (z *JarFS) buildNativeMemberTransaction(participants []string, snap map[str
 		if entry == nil {
 			return nil
 		}
-		var plan *nativeMemberPrepared
-		entry.planOnce.Do(func() {
-			plan = z.prepareNativeMemberFamilyUnpublished(root, snap)
-			entry.planKnown = plan != nil
-		})
+		plan := z.admitNativeMemberLocal(entry, root, name, snap)
 		if !entry.planKnown {
 			return nil
 		}

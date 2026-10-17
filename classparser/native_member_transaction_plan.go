@@ -265,6 +265,18 @@ func (z *JarFS) finishNativeMemberFamily(prepared *nativeMemberPrepared, lookup 
 				if !static && !nativeMemberLexicalAncestorDeclarationDependency(prepared, object, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeMemberIndependentDeclarationDependency(root, other, d.nativeAnnotationDeclarationResolver(), d.Work) && !nativeAnonymousForeignSuperDeclarationUse(p, other, d.Work) {
 					return nil
 				}
+				// A terminal local refusal owns no source completion to wait on.
+				// Its separately proved static declaration can keep the physical
+				// spelling even if unrelated original type edges form a cycle.
+				if static {
+					if source := z.terminalFlatStaticDeclaration(prepared, other, peers...); source != "" {
+						if p.sourceDependencies == nil {
+							p.sourceDependencies = map[string]string{}
+						}
+						p.sourceDependencies[n] = source
+						continue
+					}
+				}
 				if !staticDependenciesChecked {
 					if !dependencyGraphClosed {
 						_, cyclic, known := z.nativeMemberDependencyAdmission(owner, d.Work, snap)

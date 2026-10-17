@@ -38,6 +38,7 @@ type nativeMemberCacheEntry struct {
 	planOnce               sync.Once
 	transaction            *nativeMemberTransaction // guarded by nativeMembersMu
 	flatSourceCommitted    bool                     // guarded by nativeMembersMu; declaration layout is monotone within policy
+	originalPlanRefusal    bool                     // planOnce: actual bounded local refusal, never a bare cached false
 	planKnown              bool                     // published by planOnce; independent of source completion
 	dependenciesOnce       sync.Once
 	dependenciesKnown      bool
@@ -303,11 +304,7 @@ func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {
 		return nil
 	}
 	entry.once.Do(func() {
-		var prepared *nativeMemberPrepared
-		entry.planOnce.Do(func() {
-			prepared = z.nativeMemberLocalPlan(obj, owner, snap)
-			entry.planKnown = prepared != nil
-		})
+		prepared := z.admitNativeMemberLocal(entry, obj, owner, snap)
 		if !entry.planKnown {
 			return
 		}
@@ -385,6 +382,24 @@ func (z *JarFS) nativeMemberPolicyEntry(key string) *nativeMemberCacheEntry {
 // Admission is a pure planning phase: it neither follows source cache entries
 // nor reserves/publishes source. Rendering always uses its own fresh mutable
 // plan after another caller has consumed the original admission attempt.
+// A bare failed cache decision is not affirmative evidence of a physical
+// declaration layout. Record an actual original local-plan refusal separately,
+// with resource failures remaining unproved. The same once synchronizes this
+// fact across ordinary reads, transactions and declaration-only queries.
+func (z *JarFS) admitNativeMemberLocal(entry *nativeMemberCacheEntry, obj *ClassObject, owner string, snap map[string]string) *nativeMemberPrepared {
+	if z == nil || entry == nil {
+		return nil
+	}
+	var plan *nativeMemberPrepared
+	entry.planOnce.Do(func() {
+		plan = z.nativeMemberLocalPlan(obj, owner, snap)
+		entry.planKnown = plan != nil
+		work := z.nativeMemberReader(obj).Work
+		entry.originalPlanRefusal = plan == nil && (work == nil || work.Check() == nil)
+	})
+	return plan
+}
+
 func (z *JarFS) nativeMemberLocalPlan(obj *ClassObject, owner string, snap map[string]string) *nativeMemberPrepared {
 	root := obj
 	if root == nil || root.GetClassName() != owner {

@@ -1,7 +1,13 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -315,4 +321,312 @@ func TestNativeFlatStaticDeclarationRejectsContradictoryOriginalKind(t *testing.
 	if got := archive.completedFlatStaticDeclaration(prepared, member); got != "" {
 		t.Fatalf("reciprocal rows disagreed with the physical declaration kind: %s", got)
 	}
+}
+
+const nativeTerminalFlatDependencyFixture = `
+class FlagViewRoot {
+ private int value;FlagViewRoot(int n){value=n;}
+ class Entry {int read(){return value;}}
+ Entry entry(){return new Entry();}
+ OtherFlagScope.Marker pass(OtherFlagScope.Marker marker){return marker;}
+}
+class OtherFlagScope {public static class Marker{FlagViewRoot.Entry owner;Marker(){class ConstructorOnly{};new ConstructorOnly();}}}
+class FlagViewDriver {public static void main(String[]args)throws Exception{
+ int rows=0;
+
+ for(int n:new int[]{Integer.MIN_VALUE,-1,0,1,Integer.MAX_VALUE}){
+  FlagViewRoot root=new FlagViewRoot(n);FlagViewRoot.Entry entry=root.entry();OtherFlagScope.Marker marker=new OtherFlagScope.Marker();marker.owner=entry;
+  if(entry.read()!=n||root.pass(marker)!=marker||root.pass(null)!=null)throw new AssertionError("value or foreign declaration binding");
+  java.lang.reflect.Field field=FlagViewRoot.class.getDeclaredField("value");field.setAccessible(true);field.setInt(root,n+17);
+  if(entry.read()!=n+17||marker.owner!=entry)throw new AssertionError("live private access or owner identity");rows++;
+ }
+ System.out.println(rows+":private:accessor:terminal:foreign:identity");
+}}
+`
+
+func TestAdversarialTerminalFlatDependencyDoesNotBorrowSourceOwnership(t *testing.T) {
+	nativeTerminalFlatCycleRoundTrip(t, "", false)
+}
+func TestAdversarialTerminalFlatCycleRenamedDeclarations(t *testing.T) {
+	nativeTerminalFlatCycleRoundTrip(t, "Different", false)
+}
+func TestAdversarialTerminalFlatCycleOriginalJavac8(t *testing.T) {
+	nativeTerminalFlatCycleRoundTrip(t, "", true)
+}
+
+// Both source families are rebuilt, while the driver and constructor-local
+// producer remain original. Only FlagViewRoot's strict ABI is certified here;
+// a flat foreign declaration is not claimed to preserve its lexical metadata.
+func nativeTerminalFlatCycleRoundTrip(t *testing.T, prefix string, native8 bool) {
+	t.Helper()
+	rename := strings.NewReplacer("FlagViewRoot", prefix+"FlagViewRoot", "OtherFlagScope", prefix+"OtherFlagScope", "FlagViewDriver", prefix+"FlagViewDriver")
+	source := rename.Replace(nativeTerminalFlatDependencyFixture)
+	root, driver := prefix+"FlagViewRoot", prefix+"FlagViewDriver"
+	javac, java := t04Tools(t)
+	if native8 {
+		javac = os.Getenv("JAVA8_JAVAC")
+		if javac == "" {
+			t.Fatal("JAVA8_JAVAC required")
+		}
+	}
+	for _, debug := range []string{"none", "source,lines,vars"} {
+		t.Run(debug, func(t *testing.T) {
+			var files map[string][]byte
+			if native8 {
+				files = nativePrivateEnumCompile(t, source, root, debug)
+			} else {
+				files = nativeCompileDebugClasses(t, source, debug)
+			}
+			write := func(root, name string, raw []byte) {
+				t.Helper()
+				path := filepath.Join(root, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			original := t.TempDir()
+			for n, raw := range files {
+				write(original, n, raw)
+			}
+			const want = "5:private:accessor:terminal:foreign:identity\n"
+			if got := t04RunJava(t, java, original, driver); got != want {
+				t.Fatal("original", got)
+			}
+			for _, policy := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+				t.Run(policy, func(t *testing.T) {
+					if policy == "no-source-rewrites" {
+						t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")
+					}
+					if policy == "no-core-cleanups" {
+						t.Setenv("JDEC_NO_CORE_CLEANUPS", "1")
+					}
+					for _, order := range []string{"forward", "reverse", "failed transaction first"} {
+						t.Run(order, func(t *testing.T) {
+							z := nativeTerminalFlatCycleArchive(t, files, native8)
+							if order == "failed transaction first" {
+								o, err := Parse(files[root+".class"])
+								if err != nil {
+									t.Fatal(err)
+								}
+								entry := z.nativeMemberTransactionEntry(o)
+								if entry != nil && entry.family != nil {
+									t.Fatal("terminally refused participant entered transaction")
+								}
+							}
+							defer z.Close()
+							out := t.TempDir()
+							var paths, names []string
+							for n := range files {
+								names = append(names, n)
+							}
+							sort.Strings(names)
+							if order == "reverse" {
+								sort.Sort(sort.Reverse(sort.StringSlice(names)))
+							}
+							for _, n := range names {
+								raw := files[n]
+								if n == driver+".class" || strings.Contains(n, "$1ConstructorOnly.class") {
+									write(out, n, raw)
+									continue
+								}
+								source, err := z.ReadFile(n)
+								if err != nil || strings.Contains(string(source), DecompileStubMarker) {
+									t.Fatalf("source %s:%v\n%s", n, err, source)
+								}
+								name := strings.TrimSuffix(n, ".class") + ".java"
+								write(out, name, source)
+								paths = append(paths, filepath.Join(out, name))
+							}
+							args := []string{"-proc:none", "--release", "8"}
+							if native8 {
+								args = []string{"-proc:none", "-source", "8", "-target", "8"}
+							}
+							if log, err := exec.Command(javac, append(append(args, "-cp", out, "-d", out), paths...)...).CombinedOutput(); err != nil {
+								t.Fatalf("joint source:%v\n%s", err, log)
+							}
+							if got := t04RunJava(t, java, out, driver); got != want {
+								t.Fatal("rebuilt", got)
+							}
+							for n, raw := range files {
+								if n == driver+".class" || strings.Contains(n, "$1ConstructorOnly.class") {
+									got, err := os.ReadFile(filepath.Join(out, n))
+									if err != nil || !bytes.Equal(raw, got) {
+										t.Fatal("original producer/driver changed", n, err)
+									}
+								}
+								if !strings.HasPrefix(n, root) {
+									continue
+								}
+								got, err := os.ReadFile(filepath.Join(out, n))
+								if err != nil {
+									t.Fatal(err)
+								}
+								if a, b := nativeBinaryShape(t, raw), nativeBinaryShape(t, got); a != b {
+									t.Fatalf("owned ABI %s\n%s\n%s", n, a, b)
+								}
+								nativeLexicalExactSignatures(t, n, raw, got)
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNativeAccessorAncestorFlagsNeedOnlyActualSymbolDependencies(t *testing.T) {
+	files := nativeCompileClasses(t, nativeTerminalFlatDependencyFixture)
+	z := nativeArchive(t, files)
+	defer z.Close()
+	root, err := Parse(files["FlagViewRoot.class"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := z.prepareNativeMemberFamilyUnpublished(root, snapshotJDECEnv())
+	if prepared == nil || len(prepared.family.getters) == 0 {
+		t.Fatal("original private getter plan")
+	}
+	participants, cyclic, known := z.nativeMemberDependencyAdmission("FlagViewRoot", prepared.reader.Work, prepared.snapshot)
+	if !known || !cyclic || len(participants) != 2 {
+		t.Fatal("real original source cycle", participants, cyclic, known)
+	}
+	outer, err := Parse(files["OtherFlagScope.class"])
+	if err != nil || z.prepareNativeMemberFamilyUnpublished(outer, prepared.snapshot) != nil {
+		t.Fatal("foreign local plan must be terminally refused", err)
+	}
+	resolve := prepared.reader.nativeAnnotationDeclarationResolver()
+	for _, getter := range prepared.family.getters {
+		matches, known := nativeMemberOriginalAccessorAncestors(prepared.family.lexicalObjects[getter.owner], resolve, prepared.reader.Work)
+		if !known || len(matches) != 0 {
+			t.Fatal("original ancestor symbol absence", known, len(matches))
+		}
+	}
+	if !z.nativeMemberAccessorAncestorFlagsClosed(prepared, false) {
+		t.Fatal("unrelated source dependency cycle changed a closed accessor-flag proof")
+	}
+}
+
+func TestNativeTerminalFlatDeclarationRequiresNegativeAdmissionWithoutSourceReentry(t *testing.T) {
+	for _, variant := range []string{"cold negative", "inside unfinished source completion", "successful local plan", "completed finish refusal", "bare prior refusal", "unpublished peer", "disabled policy", "ambient policy differs", "cache capacity", "budget", "memory", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			source := nativeTerminalFlatDependencyFixture
+			if variant == "successful local plan" {
+				source = strings.Replace(source, "Marker(){class ConstructorOnly{};new ConstructorOnly();}", "Marker(){}", 1)
+			}
+			files := nativeCompileClasses(t, source)
+			z := nativeArchive(t, files)
+			defer z.Close()
+			root, err := Parse(files["FlagViewRoot.class"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared := z.prepareNativeMemberFamilyUnpublished(root, snapshotJDECEnv())
+			if prepared == nil {
+				t.Fatal("own original plan")
+			}
+			member, err := Parse(files["OtherFlagScope$Marker.class"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, _ := json.Marshal(prepared.snapshot)
+			entry := z.nativeMemberPolicyEntry("OtherFlagScope\x00" + string(policy))
+			if entry == nil {
+				t.Fatal("cache entry")
+			}
+			var peers []map[string]*nativeMemberPrepared
+			switch variant {
+			case "completed finish refusal":
+				entry.planOnce.Do(func() { entry.planKnown = true })
+			case "bare prior refusal":
+				entry.planOnce.Do(func() { entry.planKnown = false })
+			case "unpublished peer":
+				peers = []map[string]*nativeMemberPrepared{{"OtherFlagScope": {}}}
+			case "disabled policy":
+				prepared.snapshot["JDEC_NATIVE_MEMBER_OFF"] = "1"
+			case "ambient policy differs":
+				t.Setenv("JDEC_NATIVE_MEMBER_OFF", "1")
+			case "cache capacity":
+				z.nativeMembersCache = map[string]*nativeMemberCacheEntry{}
+				for i := 0; i < 512; i++ {
+					z.nativeMembersCache[strings.Repeat("x", i+1)] = &nativeMemberCacheEntry{}
+				}
+			case "budget":
+				prepared.reader.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "memory":
+				prepared.reader.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				prepared.reader.Work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			got := ""
+			query := func() { got = z.terminalFlatStaticDeclaration(prepared, member, peers...) }
+			if variant == "inside unfinished source completion" {
+				entry.once.Do(query)
+			} else {
+				query()
+			}
+			want := ""
+			if variant == "cold negative" || variant == "inside unfinished source completion" || variant == "ambient policy differs" {
+				want = "OtherFlagScope$Marker"
+			}
+			if got != want {
+				t.Fatalf("terminal declaration=%q want=%q", got, want)
+			}
+			if z.nativeMembersBytes != 0 || z.sourceOwnership.bytes != 0 || len(prepared.family.sourceDependencies) != 0 || len(prepared.family.allocationDependencies) != 0 || len(prepared.family.children) != 1 {
+				t.Fatal("declaration query imported foreign source or ownership")
+			}
+		})
+	}
+}
+
+func TestNativeTerminalFlatDeclarationConcurrentColdAdmission(t *testing.T) {
+	files := nativeCompileClasses(t, nativeTerminalFlatDependencyFixture)
+	z := nativeArchive(t, files)
+	defer z.Close()
+	root, err := Parse(files["FlagViewRoot.class"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := z.prepareNativeMemberFamilyUnpublished(root, snapshotJDECEnv())
+	member, err := Parse(files["OtherFlagScope$Marker.class"])
+	if err != nil || p == nil {
+		t.Fatal("original declarations", err)
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make([]string, 8)
+	for i := range results {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); <-start; results[i] = z.terminalFlatStaticDeclaration(p, member) }(i)
+	}
+	close(start)
+	wg.Wait()
+	for _, got := range results {
+		if got != "OtherFlagScope$Marker" {
+			t.Fatal("incomplete concurrent declaration", got)
+		}
+	}
+	if z.nativeMembersBytes != 0 || z.sourceOwnership.bytes != 0 || p.family.children["OtherFlagScope$Marker"] != nil || p.family.lexicalObjects["OtherFlagScope$Marker"] != nil {
+		t.Fatal("foreign ownership leaked")
+	}
+}
+
+func nativeTerminalFlatCycleArchive(t *testing.T, files map[string][]byte, native8 bool) *JarFS {
+	t.Helper()
+	if !native8 {
+		return nativeArchive(t, files)
+	}
+	jar := filepath.Join(t.TempDir(), "original-native8.jar")
+	if err := os.WriteFile(jar, t23Zip(t, files), 0600); err != nil {
+		t.Fatal(err)
+	}
+	z, err := NewJarFSFromLocalWithCompilerProfile(jar, 8, NativeJavac8, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return z
 }
