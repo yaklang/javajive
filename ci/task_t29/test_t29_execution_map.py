@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import re
 import unittest
 from pathlib import Path
 
@@ -19,7 +20,13 @@ from tools.ci_scheduler.execution_map import (  # noqa: E402
     mention_is_not_coverage,
     parse_execution_events,
 )
-from tools.ci_scheduler.workflow_inventory import BASELINE_CI_JOBS, required_coverage_snapshot  # noqa: E402
+from tools.ci_scheduler.workflow_inventory import (  # noqa: E402
+    BASELINE_CI_JOBS,
+    FAST_REBUILT_JAR_COMMAND,
+    FAST_REBUILT_JAR_TESTS,
+    required_coverage_snapshot,
+    validate_fast_cross_scope,
+)
 
 
 class TestExecutionEventMapping(unittest.TestCase):
@@ -81,7 +88,33 @@ class TestExecutionEventMapping(unittest.TestCase):
         self.assertIn("name: Algorithm regression", workflow)
         self.assertRegex(workflow, r"(?m)^\s+timeout-minutes:\s+(?:[1-9]|1[0-5])\s*$")
         self.assertNotIn("go test ./...", workflow)
-        self.assertNotIn("./test/cross", workflow)
+        validate_fast_cross_scope(workflow)
+
+    def test_required_cross_scope_cannot_expand_to_foreign_inputs(self) -> None:
+        validate_fast_cross_scope(FAST_REBUILT_JAR_COMMAND)
+        for command in (
+            "go test ./test/cross",
+            "go test ./test/cross -run .",
+            FAST_REBUILT_JAR_COMMAND.replace("-run '^(", "-run '.*|("),
+            FAST_REBUILT_JAR_COMMAND.replace("-timeout=2m", "-timeout=30m"),
+            FAST_REBUILT_JAR_COMMAND.replace("-count=1", "-count=0"),
+            FAST_REBUILT_JAR_COMMAND.replace(FAST_REBUILT_JAR_TESTS[0], "TestHistoricalJarAudit"),
+            FAST_REBUILT_JAR_COMMAND + "\ngo test ./test/cross",
+            FAST_REBUILT_JAR_COMMAND + "\n" + FAST_REBUILT_JAR_COMMAND,
+            FAST_REBUILT_JAR_COMMAND.replace("-json ./test/cross", "-json ./test/cross ./..."),
+            FAST_REBUILT_JAR_COMMAND + " && go test ./...",
+            "",
+        ):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                validate_fast_cross_scope(command)
+
+    def test_reviewed_cross_suite_names_still_exist_exactly_once(self) -> None:
+        # The literal selector must not become an empty successful Go run.
+        names = []
+        for path in (ROOT / "test" / "cross").glob("*_test.go"):
+            names.extend(re.findall(r"(?m)^func (Test\w+)\(t \*testing\.T\)", path.read_text(encoding="utf-8")))
+        for name in FAST_REBUILT_JAR_TESTS:
+            self.assertEqual(names.count(name), 1, msg=name)
 
     def test_ci_summary_requires_every_source_shard(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

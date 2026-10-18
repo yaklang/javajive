@@ -258,7 +258,7 @@ jobs:
       - name: Rebuilt JAR runtime selection regression
         run: |
           set -o pipefail
-          go test -json ./test/cross -run '^TestRebuiltJar' -count=1 -timeout=2m | tee artifacts/rebuilt-jar-runtime-tests.jsonl
+          go test -json ./test/cross -run '^(TestRebuiltJarRuntimeSelectionPreservesOriginalAuthority|TestRebuiltJarRejectsUnknownMetadataAndKeepsPlainPacking)$' -count=1 -timeout=2m | tee artifacts/rebuilt-jar-runtime-tests.jsonl
       - name: Trusted original and rebuilt algorithm round trips
         run: |
           evidence="$RUNNER_TEMP/algorithm-regression-evidence"
