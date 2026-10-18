@@ -114,6 +114,17 @@ func (n *NewExpression) Type() types.JavaType {
 }
 
 func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
+	if n == nil || n.IsArray() || funcCtx == nil || funcCtx.SourceAllocationRender == nil {
+		return n.sourceString(funcCtx)
+	}
+	observe := funcCtx.SourceAllocationRender
+	observe(class_context.AllocationRenderView{Value: n})
+	source := n.sourceString(funcCtx)
+	prefix, suffix := observe(class_context.AllocationRenderView{Value: n, End: true, Source: source})
+	return prefix + source + suffix
+}
+
+func (n *NewExpression) sourceString(funcCtx *class_context.ClassContext) string {
 	if n != nil && !n.IsArray() && n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceMethodLocalCandidate != nil && funcCtx.SourceMethodLocalAllocation != nil && funcCtx.SourceMethodLocalCandidate(n.ConstructorCall.ClassName) && n.HasOriginPC && n.ConstructorCall.HasOriginPC && n.ConstructorCall.Object == n && n.ConstructorCall.Kind == InvokeSpecial && n.ConstructorCall.IsSpecialInvoke && n.ConstructorCall.FunctionName == "<init>" {
 		call := n.ConstructorCall
 		if owner, known := types.RawClassFQN(n.Type()); !known || strings.ReplaceAll(owner, ".", "/") != strings.ReplaceAll(call.ClassName, ".", "/") {
@@ -205,10 +216,17 @@ func (n *NewExpression) String(funcCtx *class_context.ClassContext) string {
 		args = n.ArgumentsGetter()
 	}
 	name := n.JavaType.String(funcCtx)
+	diamond := ""
 	if !strings.Contains(name, "<") {
-		name += n.genericCtorDiamond(funcCtx)
+		diamond = n.genericCtorDiamond(funcCtx)
+		name += diamond
 	}
-	return fmt.Sprintf("new %s(%s)", name, args)
+	source := fmt.Sprintf("new %s(%s)", name, args)
+	if n.ConstructorCall != nil && funcCtx != nil && funcCtx.SourceConstructedInvocation != nil {
+		_, parameterized := types.AsParameterizedType(n.JavaType)
+		funcCtx.SourceConstructedInvocation(class_context.ConstructedInvocationView{Allocation: n, Invocation: n.ConstructorCall, Context: funcCtx, Owner: n.ConstructorCall.ClassName, PhysicalDescriptor: n.ConstructorCall.Descriptor, NewPC: n.OriginPC, InitPC: n.ConstructorCall.OriginPC, Parameterized: parameterized || diamond != ""})
+	}
+	return source
 }
 
 // SourceConstructorDiamond restores a parameterized SAM target for a lambda or

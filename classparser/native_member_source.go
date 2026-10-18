@@ -1812,7 +1812,16 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 			source += nativeMemberConstructorRegistration(p, plan.child.object.GetClassName(), desc)
 		}
 		if diamond {
-			return nativeMemberErasedAllocation(p, plan.child, source)
+			var known bool
+			source, known = nativeMemberErasedAllocation(p, plan.child, source)
+			if !known {
+				return "", false
+			}
+		}
+		if observe := ctx.SourceConstructedInvocation; observe != nil {
+			// Observe the existing writer after binding, hidden-port and erased
+			// allocation gates succeed. The observation grants no such permission.
+			observe(class_context.ConstructedInvocationView{Invocation: invoke, Context: &allocationBinding, SourcePlan: plan, Owner: owner, PhysicalDescriptor: desc, NewPC: newPC, InitPC: pc, Parameterized: diamond})
 		}
 		return source, true
 	}

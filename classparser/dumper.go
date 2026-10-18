@@ -137,12 +137,15 @@ type ClassObjectDumper struct {
 	// DISJOINT scopes (safe to share names). Top-level lambdas (depth 1) keep `l<i>`, so the common
 	// case is byte-for-byte unchanged. See DumpMethodWithInitialId. Kill-switch:
 	// JDEC_LAMBDA_PARAM_SCOPE_OFF=1 restores the flat `l<i>` naming.
-	lambdaDepth                 int
-	fieldDefaultValue           map[string]string
-	interfaceInitializerHelpers []*dumpedMethods
-	constructorBoundaryHelpers  []*dumpedMethods
-	privateNestOwnPlan          *privateNestPlan
-	dumpedMethodsSet            map[string]*dumpedMethods
+	lambdaDepth                    int
+	fieldDefaultValue              map[string]string
+	interfaceInitializerHelpers    []*dumpedMethods
+	constructorBoundaryHelpers     []*dumpedMethods
+	privateNestOwnPlan             *privateNestPlan
+	dumpedMethodsSet               map[string]*dumpedMethods
+	ordinaryConstructorClassSource *ordinaryConstructorClassSourceReceipt
+	// Performance hint only; the actual publication spans still prove ownership.
+	ordinaryConstructorEmissionSeen bool
 	// aggressive marks that the CURRENT method dump is a second attempt for a method whose
 	// conservative decompilation already failed. While set, the decompiler enables higher-risk
 	// reconstruction paths (relaxed structuring, node-duplication, synthetic rebuilds). It is
@@ -1511,7 +1514,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 	// assemble renders the full compilation unit from the current methods/fields. It is a
 	// closure so the syntax safety net can re-render after degrading malformed members.
+	var ordinaryMethodSpans []ordinaryConstructorMethodSourceSpan
 	assemble := func() string {
+		ordinaryMethodSpans = ordinaryMethodSpans[:0]
 		// strings.Builder instead of `attrs += ...`: a class with many methods otherwise
 		// triggers O(n^2) string concatenation (each += re-copies the whole accumulated
 		// body), which profiling flagged as a top dumper allocator. The builder produces
@@ -1562,6 +1567,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			attrsB.WriteString("\n")
 			for _, method := range methods {
 				attrsB.WriteString("\t")
+				if c.ordinaryConstructorEmissionSeen {
+					ordinaryMethodSpans = append(ordinaryMethodSpans, ordinaryConstructorMethodSourceSpan{method: method, start: attrsB.Len()})
+				}
 				attrsB.WriteString(method.code)
 				attrsB.WriteString("\n")
 			}
@@ -1602,6 +1610,12 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			// assembler knows the exact unit preamble; no class-keyword search
 			// through annotation values is necessary to extract the declaration.
 			c.nativeMemberUnitPrefix = packageSource + importsStr
+		}
+		// Offsets come from the actual writers and concatenation, not a Java
+		// source search. Annotation/import preambles belong to the frozen frame.
+		methodOffset := len(packageSource) + len(importsStr) + len(result) - len(attrs) - 1
+		for i := range ordinaryMethodSpans {
+			ordinaryMethodSpans[i].start += methodOffset
 		}
 		return packageSource + importsStr + result
 	}
@@ -1645,6 +1659,13 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		}
 	}
 	c.recordMembers(methods, fields)
+	ordinaryClassSource, ordinaryClassErr := c.newOrdinaryConstructorClassSource(full, methods, ordinaryMethodSpans)
+	if ordinaryClassErr != nil {
+		return "", ordinaryClassErr
+	}
+	priorOrdinaryClassSource := c.ordinaryConstructorClassSource
+	c.ordinaryConstructorClassSource = ordinaryClassSource
+	defer func() { c.ordinaryConstructorClassSource = priorOrdinaryClassSource }()
 	// Enum-switch projection belongs to the certified original statement
 	// protocol. Unproved mapping arrays and integer dispatch remain intact:
 	// source spelling cannot establish initializer effects, artifact ownership
@@ -2014,6 +2035,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	if !hardjarShapeOff() {
 		full = c.sourceRewrite("fixIdentAsTypeDecl", "class_source", full, fixIdentAsTypeDecl)
 		full = c.sourceRewrite("fixObjectInitCastType", "class_source", full, fixObjectInitCastType)
+	}
+	if ordinaryClassSource != nil && !ordinaryClassSource.finish(full) {
+		return "", fmt.Errorf("ordinary constructor class-source boundary is not closed")
 	}
 	if len(members) != 0 {
 		// Assemble completed lexical declarations only after the enclosing
@@ -4158,7 +4182,15 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			if constructorErr != nil {
 				return nil, constructorErr
 			}
-			needsCheckedEscape, escapeErr := c.methodNeedsCheckedEscape(codeAttr, statementList, method, constructorPlan)
+			var needsCheckedEscape bool
+			var ordinaryThrowsScope *ordinaryConstructorThrowsScope
+			var escapeErr error
+			if request.role == methodSourceDeclaration && !isLambda && adapter == nil {
+				needsCheckedEscape, ordinaryThrowsScope, escapeErr = c.methodNeedsCheckedEscapeWithOrdinaryConstructors(codeAttr, statementList, method, constructorPlan)
+			} else {
+				// A physical declaration's throws boundary is not a SAM body's.
+				needsCheckedEscape, escapeErr = c.methodNeedsCheckedEscape(codeAttr, statementList, method, constructorPlan)
+			}
 			if escapeErr != nil {
 				return nil, escapeErr
 			}
@@ -4418,6 +4450,11 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			if !c.ordinaryMethodParameterNamesClosed(parameterNameBinding, samParams) {
 				return nil, fmt.Errorf("original parameter declaration names are not closed")
 			}
+			restoreOrdinaryThrows, ordinaryErr := ordinaryThrowsScope.begin(funcCtx, samParams)
+			if ordinaryErr != nil {
+				return nil, ordinaryErr
+			}
+			defer restoreOrdinaryThrows()
 
 			// Per-constructor/<clinit> count of field assignments. A final field is only safe to
 			// lift into a field initializer when assigned exactly once in this body; a blank final
@@ -4878,7 +4915,12 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 					staticHoistAllowedHere = !staticHoistBarrierHit
 				}
 				hoistBefore := hoistEventCount
-				statementStr := statementToString(statement)
+				statementStr, ordinaryErr := ordinaryThrowsScope.renderStatement(statement, func() string {
+					return statementToString(statement)
+				})
+				if ordinaryErr != nil {
+					return nil, ordinaryErr
+				}
 				if clinitHoistBarrierOn && !staticHoistBarrierHit {
 					switch statement.(type) {
 					case *statements.MiddleStatement, *statements.StackAssignStatement:
@@ -4979,6 +5021,11 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			if renderedConstructorReceipt != nil && !renderedConstructorReceipt.confirmEmission(constructorPlan, funcCtx, sourceCode, c.GetTabString()) {
 				return nil, fmt.Errorf("unproved final constructor invocation throws source emission")
 			}
+			sourceCode, ordinaryErr = ordinaryThrowsScope.finish(funcCtx, sourceCode)
+			if ordinaryErr != nil {
+				return nil, ordinaryErr
+			}
+			dumped.ordinaryConstructorSource = ordinaryThrowsScope
 			code = sourceCode
 		}
 	}
@@ -5119,10 +5166,17 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			methodSourceBuffer.Write([]byte(fmt.Sprintf(" {\n%sthis();\n%s}",
 				strings.Repeat("\t", c.TabNumber()+1), strings.Repeat("\t", c.TabNumber()))))
 		} else if code == "" {
+			dumped.sourceBodyStart = methodSourceBuffer.Len() + 2
+			dumped.sourceBodyEnd = dumped.sourceBodyStart
+			dumped.hasSourceBodyRange = true
 			methodSourceBuffer.Write([]byte(" {}"))
 		} else {
-			body := fmt.Sprintf(" {%s%s}", code, strings.Repeat("\t", c.TabNumber()))
-			methodSourceBuffer.WriteString(body)
+			methodSourceBuffer.WriteString(" {")
+			dumped.sourceBodyStart = methodSourceBuffer.Len()
+			methodSourceBuffer.WriteString(code)
+			dumped.sourceBodyEnd = methodSourceBuffer.Len()
+			dumped.hasSourceBodyRange = true
+			methodSourceBuffer.WriteString(strings.Repeat("\t", c.TabNumber()) + "}")
 		}
 	}
 	writeReturnType := func(buffer io.Writer) {
@@ -5179,35 +5233,48 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	methodSource = methodSourceBuffer.String()
 	if len(annoStrs) == 0 {
 		dumped.code = methodSource
-		dumped.methodName = name
-		dumped.bodyCode = code
-		return dumped, nil
 	} else {
 		c.Tab()
 		annoStr := strings.Join(annoStrs, c.GetTabString()+"\n")
 		c.UnTab()
 		originCode := annoStr + "\n" + c.GetTabString() + methodSource
 		dumped.code = originCode
-		dumped.methodName = name
-		dumped.bodyCode = code
-		return dumped, nil
+		if dumped.hasSourceBodyRange {
+			prefix := len(annoStr) + 1 + len(c.GetTabString())
+			dumped.sourceBodyStart += prefix
+			dumped.sourceBodyEnd += prefix
+		}
 	}
+	dumped.methodName = name
+	dumped.bodyCode = code
+	if scope := dumped.ordinaryConstructorSource; scope != nil {
+		scope.publishedCode = dumped.code
+		c.ordinaryConstructorEmissionSeen = true
+	}
+	return dumped, nil
 }
 
 type dumpedMethods struct {
-	parameterNameStamp *methodParameterNameCacheStamp
-	sourceRequest      methodSourceRequest
-	sourceDumper       *ClassObjectDumper
-	sourceObject       *ClassObject
-	sourceCacheKey     string
-	incompleteValue    bool
-	malformedTry       bool
-	isStub             bool
-	initializerCode    string
-	checkedEscape      bool
-	methodName         string
-	code               string
-	bodyCode           string
+	// Only the concrete declaration writer sets these offsets. Class recovery
+	// may edit an unsealed body without parsing or reinterpreting its header.
+	sourceBodyStart, sourceBodyEnd int
+	hasSourceBodyRange             bool
+	parameterNameStamp             *methodParameterNameCacheStamp
+	sourceRequest                  methodSourceRequest
+	sourceDumper                   *ClassObjectDumper
+	sourceObject                   *ClassObject
+	sourceCacheKey                 string
+	incompleteValue                bool
+	malformedTry                   bool
+	isStub                         bool
+	initializerCode                string
+	checkedEscape                  bool
+	// A typed ordinary-NEW throws receipt was consumed by this method's final
+	// publisher. Class recovery must preserve the complete bound declaration.
+	ordinaryConstructorSource *ordinaryConstructorThrowsScope
+	methodName                string
+	code                      string
+	bodyCode                  string
 	// member/descriptor are retained so the post-decompile syntax safety net can rebuild a
 	// stub for a method whose generated body turns out to be un-parseable.
 	member     *MemberInfo

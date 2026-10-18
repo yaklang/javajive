@@ -279,6 +279,10 @@ func typedAbsorbingHandlers(body []statements.Statement, permittedThrows map[int
 // Unknown exception ancestry is conservatively treated as potentially checked;
 // the resulting bridge propagates the same Throwable without wrapping it.
 func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body []statements.Statement, method *MemberInfo, plans ...*constructorSourceBoundary) (bool, error) {
+	return c.methodNeedsCheckedEscapeProof(code, body, method, nil, plans...)
+}
+
+func (c *ClassObjectDumper) methodNeedsCheckedEscapeProof(code *CodeAttribute, body []statements.Statement, method *MemberInfo, ordinary *ordinaryConstructorThrowsScope, plans ...*constructorSourceBoundary) (bool, error) {
 	if code == nil || c.FuncCtx == nil {
 		return false, nil
 	}
@@ -389,6 +393,11 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 			if !known {
 				continue
 			}
+			if member.Member == "<init>" {
+				// A source throws formal never grants its erased upper bound as
+				// concrete coverage, including when finite NEW inference is unknown.
+				needsDelegateSourceThrows = true
+			}
 			if sourcePlan != nil && sourcePlan.delegate != nil && int(op.CurrentOffset) == sourcePlan.pc {
 				receipt, admission := c.constructorInvocationThrowsAdmission(code, method, member, int(op.CurrentOffset), sourcePlan)
 				switch admission {
@@ -399,6 +408,14 @@ func (c *ClassObjectDumper) methodNeedsCheckedEscape(code *CodeAttribute, body [
 					exceptions = receipt.exceptions
 				}
 				needsDelegateSourceThrows = true
+			} else if ordinary != nil && member.Member == "<init>" {
+				receipt, admission := ordinary.admit(member, int(op.CurrentOffset))
+				switch admission {
+				case constructorThrowsRefused:
+					return false, fmt.Errorf("ordinary constructor invocation lacks original source throws binding")
+				case constructorThrowsProved:
+					exceptions = receipt.exceptions
+				}
 			}
 		}
 		for _, exception := range exceptions {

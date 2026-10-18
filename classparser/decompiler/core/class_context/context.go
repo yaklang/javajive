@@ -26,7 +26,12 @@ type SourceCaptureOperand struct {
 	Receiver bool
 }
 type ClassContext struct {
-	SourceRendering *SourceRenderState
+	// These read-only observations are installed only while a proved ordinary
+	// constructor throws scope renders its final method body. They confer no
+	// allocation, access, argument-cast, capture or initialization permission.
+	SourceAllocationRender      func(AllocationRenderView) (prefix, suffix string)
+	SourceConstructedInvocation func(ConstructedInvocationView)
+	SourceRendering             *SourceRenderState
 	// RetainImplicitConstructorCalls keeps the original no-arg superclass
 	// invocation and its PC in proof-only decoding. Normal source rendering
 	// may omit this call because javac inserts it, but effect-boundary proofs

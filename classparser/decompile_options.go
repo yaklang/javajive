@@ -299,23 +299,31 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 			declarations = append(declarations, local.source)
 		}
 	}
-	if lexicalPhase && (c.nativeAnonymousRoot != nil || c.nativeAnonymousForest != nil || len(declarations) > 0) {
-		// Bound both the lexical scan and its comparisons to owned fragments
-		// before allocating/formatting. Protection never licenses a rewrite.
-		scanWork, err := workbudget.CheckedProduct(int64(len(source)), int64(len(declarations)+1))
-		if err == nil && nativeProofWork(c.Work, scanWork+retained+1) && (c.Work == nil || c.Work.CheckAlloc(int64(len(source))*4+retained+int64(len(declarations))*128) == nil) {
-			changed = nativeRewriteEnclosingScope(source, rule, declarations...)
+	recoverScope := func(input string) string {
+		if lexicalPhase && (c.nativeAnonymousRoot != nil || c.nativeAnonymousForest != nil || len(declarations) > 0) {
+			// Bound the scan before formatting. Protection never licenses a rewrite.
+			scanWork, err := workbudget.CheckedProduct(int64(len(input)), int64(len(declarations)+1))
+			if err == nil && nativeProofWork(c.Work, scanWork+retained+1) && (c.Work == nil || c.Work.CheckAlloc(int64(len(input))*4+retained+int64(len(declarations))*128) == nil) {
+				return nativeRewriteEnclosingScope(input, rule, declarations...)
+			}
+			return input
 		}
+		return rule(input)
+	}
+	var ordinaryDraft *ordinaryConstructorClassSourceDraft
+	if phase == "class_source" && c.ordinaryConstructorClassSource != nil {
+		changed, ordinaryDraft = c.ordinaryConstructorClassSource.rewrite(source, recoverScope)
 	} else {
-		changed = rule(source)
+		changed = recoverScope(source)
 	}
 	if c.Work != nil {
 		if err := c.Work.CheckAlloc(int64(len(changed))); err != nil {
 			return source
 		}
 	}
+	var before, after string
 	if changed != source && c.report != nil {
-		before, after := fmt.Sprintf("%x", sha256.Sum256([]byte(source))), fmt.Sprintf("%x", sha256.Sum256([]byte(changed)))
+		before, after = fmt.Sprintf("%x", sha256.Sum256([]byte(source))), fmt.Sprintf("%x", sha256.Sum256([]byte(changed)))
 		// The class phase is one bounded sequence. Reject oscillation between
 		// rules; method phases have separate contexts and are not compared.
 		if phase == "class_source" {
@@ -329,7 +337,12 @@ func (c *ClassObjectDumper) sourceRewrite(id, phase, source string, rule func(st
 			}
 			c.rewriteSeen[after] = true
 		}
-		c.report.RulesApplied = append(c.report.RulesApplied, RewriteRecord{Rule: id, Phase: phase, BeforeHash: fmt.Sprintf("%x", sha256.Sum256([]byte(source))), AfterHash: fmt.Sprintf("%x", sha256.Sum256([]byte(changed)))})
+	}
+	if ordinaryDraft != nil && !c.ordinaryConstructorClassSource.commit(ordinaryDraft) {
+		return source
+	}
+	if changed != source && c.report != nil {
+		c.report.RulesApplied = append(c.report.RulesApplied, RewriteRecord{Rule: id, Phase: phase, BeforeHash: before, AfterHash: after})
 		c.appendDiagnostic(DecompileDiagnostic{Code: "compatibility_rewrite", Rule: id, Message: "Legacy source recovery changed output without bytecode-level proof; validate behavior separately."})
 	}
 	return changed
