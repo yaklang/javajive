@@ -43,8 +43,7 @@ func (c *ClassObjectDumper) prepareOrdinaryMethodParameterNamespace(binding *ord
 		reserved[name] = true
 		protected[binding.identities[i]] = true
 	}
-	c.prepareNativeSourceNames(body, params, reserved, protected)
-	return !c.nativeCaptureFailed && c.ordinaryMethodParameterNamesClosed(binding, params)
+	return c.prepareNativeSourceNames(body, params, reserved, protected) && c.ordinaryMethodParameterNamesClosed(binding, params)
 }
 
 // Arrow parameters and local declarations cannot shadow a source formal in
@@ -67,6 +66,5 @@ func (c *ClassObjectDumper) prepareLambdaEnclosingParameterNamespace(body []stat
 	for _, name := range names {
 		reserved[name] = true
 	}
-	c.prepareNativeSourceNames(body, params, reserved, nil)
-	return !c.nativeCaptureFailed
+	return c.prepareNativeSourceNames(body, params, reserved, nil)
 }

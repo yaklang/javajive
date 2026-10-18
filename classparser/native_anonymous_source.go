@@ -1561,11 +1561,14 @@ func (c *ClassObjectDumper) prepareNativeLocalShadowing(body []statements.Statem
 	}
 	c.prepareNativeSourceNames(body, params, reserved, protected)
 }
-func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool) {
-	c.prepareNativeSourceNamesInNamespace(body, params, reserved, protected, "")
+func (c *ClassObjectDumper) prepareNativeSourceNames(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool) bool {
+	return c.prepareNativeSourceNamesInNamespace(body, params, reserved, protected, "")
 }
 
-func (c *ClassObjectDumper) prepareNativeSourceNamesInNamespace(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool, namespace string) {
+// The result certifies only this namespace walk. The dumper/family failure
+// latches remain sticky for publication; they may already describe a different
+// method and cannot serve as the result of this method's local proof.
+func (c *ClassObjectDumper) prepareNativeSourceNamesInNamespace(body []statements.Statement, params []values.JavaValue, reserved map[string]bool, protected map[*coreutils.VariableId]bool, namespace string) bool {
 	ctx := c.FuncCtx
 	if ctx.LocalNames == nil {
 		ctx.LocalNames = map[*coreutils.VariableId]string{}
@@ -1667,7 +1670,7 @@ func (c *ClassObjectDumper) prepareNativeSourceNamesInNamespace(body []statement
 		if c.nativeAnonymousRoot != nil {
 			c.nativeAnonymousRoot.failed = true
 		}
-		return
+		return false
 	}
 	for _, ref := range refs {
 		current := ref.String(ctx)
@@ -1684,6 +1687,7 @@ func (c *ClassObjectDumper) prepareNativeSourceNamesInNamespace(body []statement
 			occupied[candidate] = true
 		}
 	}
+	return true
 }
 func nativeAnonymousParentType(object *ClassObject, ctx *class_context.ClassContext) string {
 	raw := object.GetSupperClassName()
