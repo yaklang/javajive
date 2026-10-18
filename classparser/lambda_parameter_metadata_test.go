@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
@@ -439,6 +440,64 @@ func TestAdversarialUncapturedLambdaParameterCompilerFlagRequiresWholeClass(t *t
 			}
 			if !bytes.Equal(before, d.obj.Bytes()) {
 				t.Fatal("class-wide metadata consistency query changed original input")
+			}
+		})
+	}
+}
+
+func TestAdversarialUncapturedLambdaParameterCompilerFlagKeepsUnmarkedImplementations(t *testing.T) {
+	compiler, _ := t04Tools(t)
+	source := strings.Replace(uncapturedLambdaParameterFixture, "public static IntUnaryOperator unary", "public static java.util.function.Supplier<String> zero(int otherNamed){return()->\"zero\";}public static IntUnaryOperator unary", 1)
+	files := compileLambdaParameterMetadataFixture(t, compiler, ModernJavac, source, "UncapturedLambdaNames", "none")
+	for _, variant := range []string{"matched modern", "native named headers", "native all unnamed", "zero-argument", "zero-argument mixed headers", "budget", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			object, err := Parse(bytes.Clone(files["UncapturedLambdaNames.class"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := NewClassObjectDumper(object)
+			d.options = DecompileOptions{SourceCompiler: NativeJavac8, TargetSourceVersion: 8}
+			if variant == "matched modern" {
+				d.options.SourceCompiler = ModernJavac
+			}
+			descriptor := "(II)I"
+			if strings.HasPrefix(variant, "zero-argument") {
+				descriptor = "()Ljava/lang/String;"
+			}
+			var implementation *MemberInfo
+			for _, method := range object.Methods {
+				actual, _ := sourceBridgeUTF8(object, method.DescriptorIndex)
+				if method.AccessFlags == 0x100a && actual == descriptor {
+					implementation = method
+				}
+			}
+			if implementation == nil {
+				t.Fatal("original modern implementation")
+			}
+			switch variant {
+			case "native all unnamed":
+				for _, method := range object.Methods {
+					for i := len(method.Attributes) - 1; i >= 0; i-- {
+						if table, ok := method.Attributes[i].(*UnparsedAttribute); ok && table.Name == "MethodParameters" {
+							method.Attributes = append(method.Attributes[:i], method.Attributes[i+1:]...)
+						}
+					}
+				}
+			case "zero-argument mixed headers":
+				method, table := lambdaParameterUnrelatedOrdinaryTable(t, object)
+				removeLambdaParameterTestTable(method, table)
+			case "budget":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxRequestWork: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				d.Work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			before := object.Bytes()
+			projection, known := d.originalLambdaParameterMetadata(implementation, d.Work)
+			want := variant == "matched modern" || variant == "native all unnamed" || variant == "zero-argument"
+			if known != want || projection != nil || !bytes.Equal(before, object.Bytes()) {
+				t.Fatalf("unmarked metadata query=%v projection=%v want=%v for %s", known, projection != nil, want, variant)
 			}
 		})
 	}

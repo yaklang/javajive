@@ -272,7 +272,7 @@ func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string,
 	}
 }
 
-func compileLambdaParameterMetadataFixture(t *testing.T, compiler string, profile SourceCompilerProfile, source, owner, debug string) map[string][]byte {
+func compileLambdaParameterMetadataFixture(t *testing.T, compiler string, profile SourceCompilerProfile, source, owner, debug string, named ...bool) map[string][]byte {
 	t.Helper()
 	dir := t.TempDir()
 	file := filepath.Join(dir, owner+".java")
@@ -282,6 +282,9 @@ func compileLambdaParameterMetadataFixture(t *testing.T, compiler string, profil
 	args := []string{"-proc:none", "-parameters", "--release", "8"}
 	if profile == NativeJavac8 {
 		args = []string{"-proc:none", "-parameters", "-source", "8", "-target", "8"}
+	}
+	if len(named) == 1 && !named[0] {
+		args = append(args[:1], args[2:]...)
 	}
 	args = append(args, "-g:"+debug, "-d", dir, file)
 	if log, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
@@ -302,6 +305,104 @@ func compileLambdaParameterMetadataFixture(t *testing.T, compiler string, profil
 		}
 	}
 	return files
+}
+
+func TestAdversarialUncapturedLambdaParameterCompilerProfilePreservesAbsence(t *testing.T) {
+	modern, java := t04Tools(t)
+	native := os.Getenv("JAVA8_JAVAC")
+	if native == "" {
+		t.Skip("JAVA8_JAVAC required for independent compiler parameter-table oracle")
+	}
+	for _, originalProfile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
+		t.Run(string(originalProfile), func(t *testing.T) {
+			compiler, named := modern, true
+			profiles := []SourceCompilerProfile{ModernJavac, NativeJavac8}
+			if originalProfile == NativeJavac8 {
+				compiler, named = native, false
+				profiles = []SourceCompilerProfile{NativeJavac8}
+			}
+			for _, owner := range []string{"UncapturedLambdaNames", "AlternateLambdaParameters"} {
+				t.Run(owner, func(t *testing.T) {
+					for _, debug := range []string{"none", "source,lines,vars"} {
+						t.Run(debug, func(t *testing.T) {
+							files := compileLambdaParameterMetadataFixture(t, compiler, originalProfile, strings.ReplaceAll(uncapturedLambdaParameterFixture, "UncapturedLambdaNames", owner), owner, debug, named)
+							if strings.Contains(lambdaParameterMetadataTables(t, files[owner+".class"]), "lambda$") {
+								t.Fatal("original implementation parameter tables must be absent")
+							}
+							write := func(dir, name string, data []byte) {
+								t.Helper()
+								if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+									t.Fatal(err)
+								}
+							}
+							original := t.TempDir()
+							for name, data := range files {
+								write(original, name, data)
+							}
+							want := t04RunJava(t, java, original, "LambdaParameterDriver")
+							if !strings.HasPrefix(want, "140:uncaptured:lambda:parameters:") {
+								t.Fatal("independent original metadata-absence oracle", want)
+							}
+							t.Log("independent original absent lambda metadata JVM:", strings.TrimSpace(want))
+							for _, profile := range profiles {
+								t.Run(string(profile), func(t *testing.T) {
+									for _, mode := range []DecompileMode{Precision, Compatibility} {
+										t.Run(string(mode), func(t *testing.T) {
+											result, err := DecompileWithOptions(bytes.Clone(files[owner+".class"]), DecompileOptions{Mode: mode, SourceCompiler: profile, TargetSourceVersion: 8, EnvSnapshot: map[string]string{}, Resolve: func(name string) ([]byte, bool) {
+												data, found := files[name+".class"]
+												return bytes.Clone(data), found
+											}})
+											if err != nil {
+												t.Fatal(err)
+											}
+											if originalProfile == ModernJavac && profile == NativeJavac8 {
+												if result.Status == "complete" {
+													t.Fatal("selected compiler would invent absent implementation parameter tables")
+												}
+												return
+											}
+											if result.Status != "complete" || strings.Contains(result.Source, DecompileStubMarker) {
+												t.Fatalf("compatible absent-table profile refused: status=%s diagnostics=%+v", result.Status, result.Diagnostics)
+											}
+											out := t.TempDir()
+											for name, data := range files {
+												if name != owner+".class" {
+													write(out, name, data)
+												}
+											}
+											write(out, owner+".java", []byte(result.Source))
+											args := []string{"-proc:none", "--release", "8"}
+											if profile == NativeJavac8 {
+												args = []string{"-proc:none", "-source", "8", "-target", "8"}
+											}
+											if named {
+												args = append(args, "-parameters")
+											}
+											args = append(args, "-g:"+debug, "-cp", out, "-d", out, filepath.Join(out, owner+".java"))
+											if log, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
+												t.Fatal("rebuilt compatible profile", err, string(log), result.Source)
+											}
+											if got := t04RunJava(t, java, out, "LambdaParameterDriver"); got != want {
+												t.Fatalf("absent parameter metadata changed: got %q want %q", got, want)
+											}
+											data, err := os.ReadFile(filepath.Join(out, owner+".class"))
+											if err != nil {
+												t.Fatal(err)
+											}
+											if a, b := lambdaParameterMetadataTables(t, files[owner+".class"]), lambdaParameterMetadataTables(t, data); a != b {
+												t.Fatalf("original table presence changed:\n%s\n%s", a, b)
+											}
+											t.Log("fully rebuilt absent lambda metadata JVM:", strings.TrimSpace(want))
+										})
+									}
+								})
+							}
+						})
+					}
+				})
+			}
+		})
+	}
 }
 
 func lambdaParameterMetadataTables(t *testing.T, raw []byte) string {

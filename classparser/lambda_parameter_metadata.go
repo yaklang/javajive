@@ -123,8 +123,14 @@ func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, 
 		return nil, false
 	}
 	projection, known := readLambdaParameterMetadata(c.obj, method, work)
-	if !known || projection == nil {
+	if !known {
 		return projection, known
+	}
+	if projection == nil {
+		if c.options.SourceCompiler == NativeJavac8 && (c.options.TargetSourceVersion != 8 || !native8UnmarkedLambdaParametersClosed(c.obj, method, work)) {
+			return nil, false
+		}
+		return nil, true
 	}
 	if c.options.SourceCompiler != NativeJavac8 || c.options.TargetSourceVersion != 8 || !native8LambdaParameterCompilerFlagClosed(c.obj, work) || !nativeLambdaBodyOriginalUseClosed(c.obj, method, work, projection) || projection.factory == nil {
 		return nil, false
@@ -156,6 +162,46 @@ func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, 
 	}
 	projection.parentNames = parentNames
 	return projection, true
+}
+
+// Absence constrains regeneration too. Any nonempty original parameter table
+// requires native javac8's class-wide -parameters flag. Under that flag an
+// emitted lambda implementation with physical parameters receives a table,
+// even when the input implementation had none. Zero-parameter implementations
+// remain table-free, but other ordinary headers must still agree on the flag.
+func native8UnmarkedLambdaParametersClosed(object *ClassObject, method *MemberInfo, work *workbudget.Budget) bool {
+	if object == nil || method == nil || len(object.Methods) > 4096 || !nativeProofWork(work, int64(len(object.Methods))+1) {
+		return false
+	}
+	descriptor, typed := sourceBridgeUTF8(object, method.DescriptorIndex)
+	if !typed || len(descriptor) > 65535 || !nativeProofWork(work, int64(len(descriptor))+1) || work != nil && work.CheckAlloc(int64(len(descriptor))*32+256) != nil {
+		return false
+	}
+	parameters, _, err := callbinding.Descriptor(descriptor)
+	if err != nil || len(parameters) > 255 {
+		return false
+	}
+	requiresNames := false
+	for _, original := range object.Methods {
+		if original == nil || len(original.Attributes) > 65535 || !nativeProofWork(work, int64(len(original.Attributes))+1) {
+			return false
+		}
+		for _, attribute := range original.Attributes {
+			if table, ok := attribute.(*UnparsedAttribute); ok {
+				if table == nil {
+					return false
+				}
+				if table.Name != "MethodParameters" {
+					continue
+				}
+				if len(table.Info) == 0 || table.Length != uint32(len(table.Info)) || len(table.Info) != 1+4*int(table.Info[0]) || !nativeProofWork(work, int64(len(table.Info))) {
+					return false
+				}
+				requiresNames = requiresNames || table.Info[0] != 0
+			}
+		}
+	}
+	return !requiresNames || len(parameters) == 0 && native8LambdaParameterCompilerFlagClosed(object, work)
 }
 
 // javac8's -parameters option applies to every source method declaration.
