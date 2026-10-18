@@ -27,10 +27,12 @@ class ArrayResultState{
  static void produce(String step){trace+=step;if(++builds!=1)throw new AssertionError("producer repeated");if(fail)throw fault;}
 }
 public class ArrayResultOwner extends ArrayResultBase<ArrayResultOwner>{
- public final List<String> stored;
- public ArrayResultOwner(){stored=null;}
- public ArrayResultOwner(String... input){this(Arrays.asList(genericFactory(input)));}
- private ArrayResultOwner(List<String> values){stored=values;}
+ public final List<String> stored;public final boolean enabled;
+ public ArrayResultOwner(){stored=null;enabled=false;}
+ public ArrayResultOwner(String... input){this(true,Arrays.asList(genericFactory(input)));}
+ public ArrayResultOwner(boolean enabled,String... input){this(enabled,Arrays.asList(genericFactory(input)));}
+ private ArrayResultOwner(List<String> values){stored=values;enabled=false;}
+ private ArrayResultOwner(boolean enabled,List<String> values){stored=values;this.enabled=enabled;}
  public ArrayResultOwner accept(String... input){return accept(convertToValues(input));}
  private static Object[] convertToValues(String[] input){ArrayResultState.produce("P");return ArrayResultState.packet;}
  public static String checked(String... input){return choose((String[])convertToValues(input));}
@@ -58,10 +60,13 @@ class ArrayResultDriver{
    boolean compatible=packet==null||packet instanceof String[];
    if(fail?actual!=ArrayResultState.fault:compatible?actual!=null||!"string".equals(selected):!(actual instanceof ClassCastException))throw new AssertionError("original CHECKCAST and selected String[] overload",actual);
    if(ArrayResultState.builds!=1||!ArrayResultState.trace.equals(!fail&&compatible?"PS":"P"))throw new AssertionError("checked conversion priority");rows++;
-   for(boolean constructor:new boolean[]{false,true}){
+   for(int constructor=0;constructor<4;constructor++){
     ArrayResultState.begin();List<?> result=null;actual=null;
-    try{result=constructor?new ArrayResultOwner("input").stored:ArrayResultOwner.inferred(new String[]{"input"});}catch(Throwable e){actual=e;}
-    boolean narrow=constructor?ArrayResultOriginalChecks.CONSTRUCTOR_NARROW:ArrayResultOriginalChecks.RETURN_NARROW;
+    try{if(constructor==0)result=ArrayResultOwner.inferred(new String[]{"input"});else{
+     ArrayResultOwner value=constructor==1?new ArrayResultOwner("input"):new ArrayResultOwner(constructor==2,"input");
+     if(value.enabled!=(constructor!=3))throw new AssertionError("descriptor-selected boolean prefix");result=value.stored;
+    }}catch(Throwable e){actual=e;}
+    boolean narrow=constructor==0?ArrayResultOriginalChecks.RETURN_NARROW:constructor==1?ArrayResultOriginalChecks.CONSTRUCTOR_NARROW:ArrayResultOriginalChecks.PREFIX_NARROW;
     boolean rejected=packet!=null&&narrow&&!(packet instanceof String[]);
     if(fail?actual!=ArrayResultState.fault:packet==null?!(actual instanceof NullPointerException):rejected?!(actual instanceof ClassCastException):actual!=null)throw new AssertionError("generic signature is not result identity",actual);
     if(ArrayResultState.builds!=1||!ArrayResultState.trace.equals("G"))throw new AssertionError("generic producer evaluated more than once");
@@ -128,7 +133,7 @@ func TestAdversarialArrayProducerResultCannotBorrowInputArrayType(t *testing.T) 
 							// javac8 uses Object[] at these edges; modern javac may use
 							// String[]. Reading the rebuilt class as its own oracle would
 							// conceal exactly the premature narrowing this test forbids.
-							checks := "class ArrayResultOriginalChecks{static final boolean RETURN_NARROW=" + strconv.FormatBool(arrayProducerOriginalNarrowing(t, originalTarget, "inferred")) + ";static final boolean CONSTRUCTOR_NARROW=" + strconv.FormatBool(arrayProducerOriginalNarrowing(t, originalTarget, "<init>")) + ";}"
+							checks := "class ArrayResultOriginalChecks{static final boolean RETURN_NARROW=" + strconv.FormatBool(arrayProducerOriginalNarrowing(t, originalTarget, "inferred", "([Ljava/lang/String;)")) + ";static final boolean CONSTRUCTOR_NARROW=" + strconv.FormatBool(arrayProducerOriginalNarrowing(t, originalTarget, "<init>", "([Ljava/lang/String;)")) + ";static final boolean PREFIX_NARROW=" + strconv.FormatBool(arrayProducerOriginalNarrowing(t, originalTarget, "<init>", "(Z[Ljava/lang/String;)")) + ";}"
 							driverPath := filepath.Join(original, "ArrayResultDriver.java")
 							if err := os.WriteFile(driverPath, []byte("import java.util.*;"+checks+"class ArrayResultDriver{"+driver), 0600); err != nil {
 								t.Fatal(err)
@@ -155,7 +160,7 @@ func TestAdversarialArrayProducerResultCannotBorrowInputArrayType(t *testing.T) 
 									files[entry.Name()] = raw
 								}
 							}
-							const want = "41:array-result:overload:check:identity:pollution\n"
+							const want = "57:array-result:overload:check:identity:pollution\n"
 							if got := t04RunJava(t, java, original, "ArrayResultDriver"); got != want {
 								t.Fatalf("independent original JVM: %q want %q", got, want)
 							}
@@ -275,7 +280,7 @@ func arrayProducerCheckedInvocations(t *testing.T, raw []byte) string {
 	return strings.Join(rows, "\n")
 }
 
-func arrayProducerOriginalNarrowing(t *testing.T, raw []byte, name string) bool {
+func arrayProducerOriginalNarrowing(t *testing.T, raw []byte, name, parameters string) bool {
 	t.Helper()
 	object, err := Parse(bytes.Clone(raw))
 	if err != nil {
@@ -284,7 +289,7 @@ func arrayProducerOriginalNarrowing(t *testing.T, raw []byte, name string) bool 
 	for _, method := range object.Methods {
 		n, _ := sourceBridgeUTF8(object, method.NameIndex)
 		d, _ := sourceBridgeUTF8(object, method.DescriptorIndex)
-		if n != name || !strings.HasPrefix(d, "([Ljava/lang/String;)") {
+		if n != name || !strings.HasPrefix(d, parameters) {
 			continue
 		}
 		decoder := core.NewDecompiler(methodCodeBytes(method), func(i int) values.JavaValue { return GetValueFromCP(object.ConstantPool, i) })

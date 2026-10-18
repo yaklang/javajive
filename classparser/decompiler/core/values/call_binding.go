@@ -99,6 +99,11 @@ func (f *FunctionCallExpression) planCallBinding(ctx *class_context.ClassContext
 	}
 	plan := callbinding.Build(callbinding.Witness{Owner: owner, Name: f.FunctionName, Desc: f.Descriptor, Kind: kind, PC: f.OriginPC}, recv, args, ctx.InvocationMetadata)
 	if !plan.Supported {
+		if metadata, proved := f.originalReferenceBindingMetadata(ctx, recv, args, ps); proved {
+			plan = callbinding.Build(callbinding.Witness{Owner: owner, Name: f.FunctionName, Desc: f.Descriptor, Kind: kind, PC: f.OriginPC}, recv, args, metadata)
+		}
+	}
+	if !plan.Supported {
 		// Existing generic target-typing paths own these calls. They must not be
 		// replaced with erased Object casts by this bounded non-generic planner.
 		if strings.Contains(plan.Reason, "generic/access/varargs/bridge") {

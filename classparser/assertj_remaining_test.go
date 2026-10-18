@@ -55,9 +55,37 @@ func TestObjectArrayAssertKeepsElementActualIsLoadBearing(t *testing.T) {
 }
 
 func TestNaturalOrderComparatorUsesCompareToIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/NaturalOrderComparator.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"return var1.compareTo(var2)",
-		"return Comparator.naturalOrder().compare(var1,var2)")
+	// Retain the historical inventory entry, but use the actual original
+	// invocation graph. The generic receiver proof now restores this factory
+	// through its original erasure, rather than replacing it by source spelling.
+	// The independent authored factory-spelling fixture checks effects and
+	// unchanged binary callers; the generic-factory fixture additionally checks
+	// both compiler profiles, complete declarations and all lowering instructions.
+	raw, err := os.ReadFile("testdata/regression/NaturalOrderComparator.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := arrayProducerCheckedInvocations(t, raw)
+	if !strings.Contains(original, "b8:java/util/Comparator.naturalOrder()Ljava/util/Comparator;") ||
+		!strings.Contains(original, "b9:java/util/Comparator.compare(Ljava/lang/Object;Ljava/lang/Object;)I") {
+		t.Fatal("saved original no longer supplies the factory and interface dispatch", original)
+	}
+	for _, mode := range []DecompileMode{Precision, Compatibility} {
+		before := ""
+		for _, off := range []string{"", "1"} {
+			result, err := DecompileWithOptions(bytes.Clone(raw), DecompileOptions{Mode: mode, TargetSourceVersion: 8, EnvSnapshot: map[string]string{"JDEC_ASSERTJ_REMAINING_OFF": off}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result.Source, ".naturalOrder()") || !strings.Contains(result.Source, ".compare(") || strings.Contains(result.Source, ".compareTo(") {
+				t.Fatalf("%s/%q lost the original factory or selected operation:\n%s", mode, off, result.Source)
+			}
+			if before != "" && result.Source != before {
+				t.Fatal("class text still changed the original factory binding")
+			}
+			before = result.Source
+		}
+	}
 }
 
 func TestJoinStreamCtorCastIsLoadBearing(t *testing.T) {

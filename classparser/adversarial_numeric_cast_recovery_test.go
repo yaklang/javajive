@@ -53,6 +53,15 @@ class NumericDriver{
 }`
 
 func TestAdversarialNumericCastViewsSurviveSourceRecovery(t *testing.T) {
+	runCheckedTypeViewsRoundTrip(t, numericCastRecoveryFixture, []string{"NumericViews", "AlternateNumeric"}, "NumericDriver", "18:numeric:cast:binding:literal\n", "numeric")
+}
+
+// Compile declarations and an independent binary caller once per profile.
+// Rebuild only the target; every original helper/caller byte remains unchanged.
+// Type-view repairs must preserve declarations, runtime checks and call tuples,
+// as well as values, exception priority, effects and application data.
+func runCheckedTypeViewsRoundTrip(t *testing.T, source string, owners []string, driver, want, label string) {
+	t.Helper()
 	modern, java := t04Tools(t)
 	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
 		t.Run(string(profile), func(t *testing.T) {
@@ -66,9 +75,9 @@ func TestAdversarialNumericCastViewsSurviveSourceRecovery(t *testing.T) {
 					t.Fatalf("native8 needs actual javac8: %v / %s", err, version)
 				}
 			}
-			for _, owner := range []string{"NumericViews", "AlternateNumeric"} {
+			for _, owner := range owners {
 				t.Run(owner, func(t *testing.T) {
-					fixture := strings.ReplaceAll(numericCastRecoveryFixture, "NumericViews", owner)
+					fixture := strings.ReplaceAll(source, owners[0], owner)
 					for _, debug := range []string{"none", "source,lines,vars"} {
 						t.Run(debug, func(t *testing.T) {
 							var files map[string][]byte
@@ -87,11 +96,10 @@ func TestAdversarialNumericCastViewsSurviveSourceRecovery(t *testing.T) {
 							for name, raw := range files {
 								write(original, name, raw)
 							}
-							const want = "18:numeric:cast:binding:literal\n"
-							if got := t04RunJava(t, java, original, "NumericDriver"); got != want {
+							if got := t04RunJava(t, java, original, driver); got != want {
 								t.Fatalf("independent original: %q want %q", got, want)
 							}
-							t.Log("independent original numeric JVM: " + strings.TrimSpace(want))
+							t.Log("independent original " + label + " JVM: " + strings.TrimSpace(want))
 							for _, mode := range []DecompileMode{Precision, Compatibility} {
 								t.Run(string(mode), func(t *testing.T) {
 									result, err := DecompileWithOptions(bytes.Clone(files[owner+".class"]), DecompileOptions{Mode: mode, SourceCompiler: profile, TargetSourceVersion: 8, EnvSnapshot: map[string]string{}, Resolve: func(name string) ([]byte, bool) { data, known := files[name+".class"]; return bytes.Clone(data), known }})
@@ -113,7 +121,7 @@ func TestAdversarialNumericCastViewsSurviveSourceRecovery(t *testing.T) {
 									if log, err := exec.Command(javac, args...).CombinedOutput(); err != nil {
 										t.Fatalf("rebuild without original target: %v\n%s\n%s", err, log, result.Source)
 									}
-									if got := t04RunJava(t, java, out, "NumericDriver"); got != want {
+									if got := t04RunJava(t, java, out, driver); got != want {
 										t.Fatalf("unchanged binary caller: %q want %q\n%s", got, want, result.Source)
 									}
 									rebuilt, err := os.ReadFile(filepath.Join(out, owner+".class"))
@@ -123,7 +131,10 @@ func TestAdversarialNumericCastViewsSurviveSourceRecovery(t *testing.T) {
 									if a, b := constructorInvocationThrowsDeclarations(t, files[owner+".class"]), constructorInvocationThrowsDeclarations(t, rebuilt); a != b {
 										t.Fatalf("declaration inventory changed:\n%s\n%s", a, b)
 									}
-									t.Log("fully rebuilt numeric JVM: " + strings.TrimSpace(want))
+									if a, b := arrayProducerCheckedInvocations(t, files[owner+".class"]), arrayProducerCheckedInvocations(t, rebuilt); a != b {
+										t.Fatalf("original runtime checks or invocation tuples changed:\n%s\n%s", a, b)
+									}
+									t.Log("fully rebuilt " + label + " JVM: " + strings.TrimSpace(want))
 								})
 							}
 						})

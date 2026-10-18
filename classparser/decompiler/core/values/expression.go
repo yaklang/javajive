@@ -3971,6 +3971,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 			return fmt.Sprintf("(%s)(%s)", cast, arg.String(funcCtx))
 		}
 	}
+	if cast := f.delegationFactoryResultCast(i, arg, funcCtx); cast != "" {
+		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
+	}
 	if cast := f.thisCtorOverloadArgCast(i, funcCtx); cast != "" {
 		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}

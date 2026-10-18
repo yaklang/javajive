@@ -43,10 +43,8 @@ func fixAssertjRemainingReconstructs(body string) string {
 	// A producer's argument type or name does not prove its result array type.
 	// Keep original CHECKCAST and selected-descriptor views in the typed IR.
 
-	if strings.Contains(body, "isCloseTo") {
-		body = unwrapJavaCast(body, "Temporal")
-		body = unwrapJavaCast(body, "TemporalOffset")
-	}
+	// Interface receivers and wider overload views retain their original
+	// CHECKCAST/descriptor evidence. Unrelated method words cannot erase them.
 
 	for _, m := range []string{"assertAre", "assertAreNot", "assertHave", "assertDoNotHave"} {
 		body = strings.ReplaceAll(body,
@@ -81,9 +79,9 @@ func fixAssertjRemainingReconstructs(body string) string {
 	body = strings.ReplaceAll(body,
 		"this(Arrays.stream(((Condition[])(checkNotNullConditions(var1)))))",
 		"this((Stream)(Arrays.stream(((Condition[])(checkNotNullConditions(var1))))))")
-	body = strings.ReplaceAll(body,
-		"return Comparator.naturalOrder().compare(var1,var2)",
-		"return var1.compareTo(var2)")
+	// Factory invocations and receiver dispatch belong to original declaration
+	// evidence. A short source name cannot authorize replacing either call with
+	// a different operation, or changing application data containing that text.
 
 	body = strings.ReplaceAll(body,
 		"public static List<DeepDifference$Difference> determineDifferences(Object var0, Object var1, TreeMap var2, TypeComparators var3)",
@@ -147,28 +145,6 @@ func fixAssertjRemainingReconstructs(body string) string {
 		"((String[])(java.util.Arrays.stream(var0).map((l0) -> new StringBuilder().append(l0).append(\"ForProxy\").toString()).toArray()))")
 
 	return body
-}
-
-func unwrapJavaCast(body, typ string) string {
-	needle := "(" + typ + ")("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		start := from + rel
-		inner := start + len(needle) - 1
-		n := skipBalanced(body[inner:], '(', ')')
-		if n < 2 {
-			from = start + 1
-			continue
-		}
-		end := inner + n
-		expr := body[inner+1 : end-1]
-		body = body[:start] + expr + body[end:]
-		from = start + len(expr)
-	}
 }
 
 func replaceAssertjOptionalStreamFlatMap(body string) string {
