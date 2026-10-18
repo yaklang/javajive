@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"crypto/sha256"
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/frametransfer"
 	"github.com/yaklang/javajive/classparser/decompiler/core/ssabuild"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -11,7 +12,8 @@ import (
 )
 
 // A consumer-specific certificate. An anonymous lexical THIS is still not a
-// Java expression: only this exact no-argument member allocation can omit it.
+// Java expression: only this exact member allocation can omit it. Ordinary
+// arguments keep their original producers and the selected constructor binding.
 type nativeAnonymousMemberEnclosing struct {
 	caller                     *ClassObject
 	method                     *MemberInfo
@@ -240,12 +242,14 @@ func nativeAnonymousMemberEnclosingProof(f *nativeAnonymousForest, caller *Class
 	return after
 }
 
-// Prove the complete adjacent NEW/DUP/THIS/enclosing-GETFIELD/<init> packet.
+// Prove NEW/DUP/THIS/enclosing-GETFIELD, its exclusive constructor use and the
+// remaining argument evaluation. The latter can contain effectful producers;
+// none may consume or duplicate the unnameable enclosing receiver.
 // The original verifier frame must contain initialized THIS and this exact NEW;
 // no branch or handler can enter its operands. The source name is resolved in
 // the original lexical hierarchy, separately from the JVM descriptor.
 func nativeAnonymousMemberEnclosingPacket(f *nativeAnonymousForest, caller *ClassObject, method *MemberInfo, code *CodeAttribute, ops []*core.OpCode, read *nativeMemberLexicalRead, target string, work *workbudget.Budget) *nativeAnonymousMemberEnclosing {
-	if f == nil || f.members == nil || caller == nil || method == nil || code == nil || read == nil || read.prior != nil || read.parameterOwner != "" || read.parameterDescriptor != "" || len(code.Code) > 512 || len(code.ExceptionTable) != 0 || method.AccessFlags&8 != 0 || !nativeProofWork(work, 1) {
+	if f == nil || f.members == nil || caller == nil || method == nil || code == nil || read == nil || read.prior != nil || read.parameterOwner != "" || read.parameterDescriptor != "" || len(code.Code) == 0 || len(code.Code) > 65535 || len(ops) > len(code.Code) || len(code.ExceptionTable) != 0 || method.AccessFlags&8 != 0 || !nativeProofWork(work, 1) {
 		return nil
 	}
 	unit := f.units[caller.GetClassName()]
@@ -323,29 +327,71 @@ func nativeAnonymousMemberEnclosingPacket(f *nativeAnonymousForest, caller *Clas
 	if at < 3 || at+1 >= len(ops) || ops[at-3].Instr.OpCode != core.OP_NEW || ops[at-2].Instr.OpCode != core.OP_DUP || !constructorMotionLoad(ops[at-1], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[at-1]) != 0 {
 		return nil
 	}
-	if len(ops[at].Data) != 2 || len(ops[at+1].Data) != 2 {
+	if len(ops[at].Data) != 2 || len(ops[at-3].Data) != 2 {
 		return nil
 	}
 	fieldIndex := int(core.Convert2bytesToInt(ops[at].Data))
-	methodIndex := int(core.Convert2bytesToInt(ops[at+1].Data))
-	if fieldIndex <= 0 || fieldIndex > len(caller.ConstantPool) || methodIndex <= 0 || methodIndex > len(caller.ConstantPool) {
+	if fieldIndex <= 0 || fieldIndex > len(caller.ConstantPool) {
 		return nil
 	}
 	fieldRef, fieldKind := caller.ConstantPool[fieldIndex-1].(*ConstantFieldrefInfo)
-	methodRef, methodKind := caller.ConstantPool[methodIndex-1].(*ConstantMethodrefInfo)
-	if !fieldKind || fieldRef == nil || !methodKind || methodRef == nil {
+	if !fieldKind || fieldRef == nil {
 		return nil
 	}
 	field := constructorMotionMember(caller, ops[at], core.OP_GETFIELD)
-	invoke := constructorMotionMember(caller, ops[at+1], core.OP_INVOKESPECIAL)
-	if field == nil || field.Name != read.owner || field.Member != read.field || field.Description != read.descriptor || invoke == nil || invoke.Member != "<init>" || invoke.Description != "(L"+target+";)V" {
-		return nil
-	}
-	if len(ops[at-3].Data) != 2 {
+	if field == nil || field.Name != read.owner || field.Member != read.field || field.Description != read.descriptor {
 		return nil
 	}
 	allocated, valid := sourceBridgeClassName(caller, uint16(core.Convert2bytesToInt(ops[at-3].Data)))
-	if !valid || allocated != invoke.Name {
+	if !valid {
+		return nil
+	}
+	reader := NewClassObjectDumper(caller)
+	reader.Work = work
+	// Use the shared frame-allocation and analysis-update bounds. An unrelated
+	// 512-byte packet cutoff rejected a small constructor expression merely
+	// because its containing method had more ordinary argument/body work.
+	_, fn, known := reader.nativeOriginalMethodSnapshot(method, code)
+	if !known {
+		return nil
+	}
+	records, known := nativeAnonymousArgumentRecords(fn, work)
+	if !known {
+		return nil
+	}
+	newPC := int(ops[at-3].CurrentOffset)
+	invokeAt := -1
+	newOrigin := ssabuild.Origin{Kind: ssabuild.OriginInstr, PC: uint16(newPC)}
+	for i := at + 1; i < len(ops); i++ {
+		if !nativeProofWork(work, 1) {
+			return nil
+		}
+		call := constructorMotionMember(caller, ops[i], core.OP_INVOKESPECIAL)
+		record := records[int(ops[i].CurrentOffset)]
+		if call == nil || call.Member != "<init>" || record == nil || len(record.Uses) == 0 || record.Uses[0] != newOrigin {
+			continue
+		}
+		// Same-owner nested allocations are different NEW identities. One
+		// allocation with alternative initializers has no single source call.
+		if invokeAt >= 0 || call.Name != allocated {
+			return nil
+		}
+		invokeAt = i
+	}
+	if invokeAt < 0 || len(ops[invokeAt].Data) != 2 {
+		return nil
+	}
+	methodIndex := int(core.Convert2bytesToInt(ops[invokeAt].Data))
+	if methodIndex <= 0 || methodIndex > len(caller.ConstantPool) {
+		return nil
+	}
+	methodRef, methodKind := caller.ConstantPool[methodIndex-1].(*ConstantMethodrefInfo)
+	invoke := constructorMotionMember(caller, ops[invokeAt], core.OP_INVOKESPECIAL)
+	if !methodKind || methodRef == nil || invoke == nil {
+		return nil
+	}
+	parameters, result, err := callbinding.Descriptor(invoke.Description)
+	if err != nil || result != "V" || len(parameters) == 0 || parameters[0] != "L"+target+";" {
 		return nil
 	}
 	child := f.members.children[allocated]
@@ -353,8 +399,17 @@ func nativeAnonymousMemberEnclosingPacket(f *nativeAnonymousForest, caller *Clas
 		return nil
 	}
 	ctor := nativeMemberConstructorForAllocation(child, invoke.Description)
-	if ctor == nil || ctor.sourceDescriptor != "()V" {
+	if ctor == nil {
 		return nil
+	}
+	sourceParameters, sourceResult, err := callbinding.Descriptor(ctor.sourceDescriptor)
+	if err != nil || sourceResult != "V" || len(sourceParameters) != len(parameters)-1 {
+		return nil
+	}
+	for i, parameter := range sourceParameters {
+		if parameter != parameters[i+1] || !nativeProofWork(work, 1) {
+			return nil
+		}
 	}
 	originalOwner, originalName, flags, known := originalMemberOwner(child.object)
 	if !known || originalOwner != target || originalName != child.name || flags != child.flags {
@@ -380,18 +435,18 @@ func nativeAnonymousMemberEnclosingPacket(f *nativeAnonymousForest, caller *Clas
 	if !ctorFound {
 		return nil
 	}
-	reader := NewClassObjectDumper(caller)
-	reader.Work = work
-	_, fn, known := reader.nativeOriginalMethodSnapshot(method, code)
-	if !known {
+	get, call := records[read.pc], records[int(ops[invokeAt].CurrentOffset)]
+	if get == nil || call == nil || len(get.Uses) != 1 || get.Uses[0] != (ssabuild.Origin{Kind: ssabuild.OriginParam, Slot: 0}) || len(get.Before.Stack) == 0 || get.Before.Stack[len(get.Before.Stack)-1].Kind != frametransfer.Ref || get.Before.Stack[len(get.Before.Stack)-1].Class != caller.GetClassName() || len(call.Uses) != len(parameters)+1 || call.Uses[0] != newOrigin || call.Uses[1] != (ssabuild.Origin{Kind: ssabuild.OriginInstr, PC: uint16(read.pc)}) {
 		return nil
 	}
-	records, known := nativeAnonymousArgumentRecords(fn, work)
-	if !known {
+	receiverIndex := len(call.Before.Stack) - nativeMemberParameterWidth(parameters) - 1
+	if receiverIndex < 0 || call.Before.Stack[receiverIndex].Kind != frametransfer.UninitNew || call.Before.Stack[receiverIndex].NewPC != uint16(newPC) || call.Before.Stack[receiverIndex].Class != allocated {
 		return nil
 	}
-	get, call := records[read.pc], records[int(ops[at+1].CurrentOffset)]
-	if get == nil || call == nil || len(get.Uses) != 1 || get.Uses[0] != (ssabuild.Origin{Kind: ssabuild.OriginParam, Slot: 0}) || len(get.Before.Stack) == 0 || get.Before.Stack[len(get.Before.Stack)-1].Kind != frametransfer.Ref || get.Before.Stack[len(get.Before.Stack)-1].Class != caller.GetClassName() || len(call.Uses) != 2 || call.Uses[0] != (ssabuild.Origin{Kind: ssabuild.OriginInstr, PC: uint16(ops[at-3].CurrentOffset)}) || call.Uses[1] != (ssabuild.Origin{Kind: ssabuild.OriginInstr, PC: uint16(read.pc)}) {
+	// Grant an omission only for the one hidden argument. A DUP, local store,
+	// ordinary argument, field publication or other consumer of this GETFIELD
+	// needs its own source expression and cannot borrow this certificate.
+	if !nativeAnonymousMemberEnclosingExclusiveUse(fn, read.pc, int(ops[invokeAt].CurrentOffset), work) {
 		return nil
 	}
 	decoder := core.NewDecompiler(code.Code, func(i int) values.JavaValue { return GetValueFromCP(caller.ConstantPool, i) })
@@ -404,11 +459,40 @@ func nativeAnonymousMemberEnclosingPacket(f *nativeAnonymousForest, caller *Clas
 		return nil
 	}
 	for _, pc := range entries {
-		if pc > int(ops[at-3].CurrentOffset) && pc <= int(ops[at+1].CurrentOffset) {
+		if pc > newPC && pc <= int(ops[invokeAt].CurrentOffset) {
 			return nil
 		}
 	}
-	return &nativeAnonymousMemberEnclosing{caller: caller, method: method, code: code, read: read, child: child, methodKey: name + desc, descriptor: invoke.Description, newPC: int(ops[at-3].CurrentOffset), invokePC: int(ops[at+1].CurrentOffset), codeHash: sha256.Sum256(code.Code), sourceName: child.name, enclosingOwner: child.owner}
+	return &nativeAnonymousMemberEnclosing{caller: caller, method: method, code: code, read: read, child: child, methodKey: name + desc, descriptor: invoke.Description, newPC: newPC, invokePC: int(ops[invokeAt].CurrentOffset), codeHash: sha256.Sum256(code.Code), sourceName: child.name, enclosingOwner: child.owner}
+}
+
+func nativeAnonymousMemberEnclosingExclusiveUse(fn *ssabuild.Function, readPC, invokePC int, work *workbudget.Budget) bool {
+	if fn == nil || readPC < 0 || readPC > 65535 || invokePC <= readPC || invokePC > 65535 {
+		return false
+	}
+	origin := ssabuild.Origin{Kind: ssabuild.OriginInstr, PC: uint16(readPC)}
+	for _, phi := range fn.Phis {
+		for _, operand := range phi.Operands {
+			if !nativeProofWork(work, 1) || operand.Origin == origin {
+				return false
+			}
+		}
+	}
+	uses := 0
+	for _, record := range fn.Instructions {
+		for i, used := range record.Uses {
+			if !nativeProofWork(work, 1) {
+				return false
+			}
+			if used == origin {
+				if int(record.PC) != invokePC || i != 1 {
+					return false
+				}
+				uses++
+			}
+		}
+	}
+	return uses == 1
 }
 
 func nativeAnonymousMemberEnclosingReceipt(p *nativeMemberFamily, caller *ClassObject, method string, newPC int, child *nativeMemberClass, work *workbudget.Budget) *nativeAnonymousMemberEnclosing {
