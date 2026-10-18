@@ -121,6 +121,9 @@ func (f *FunctionCallExpression) planIncompleteErasedOwner(ctx *class_context.Cl
 // poly arguments. Those require separate target/inference/effect evidence. An
 // unchanged descriptor result cannot introduce a use-site narrowing check.
 func (f *FunctionCallExpression) planErasedInvocation(ctx *class_context.ClassContext) (*FunctionCallExpression, bool) {
+	if planned, known := f.planErasedFactoryReceiver(ctx); known {
+		return planned, true
+	}
 	return f.planErasedInvocationProof(ctx, false)
 }
 func (f *FunctionCallExpression) planErasedInvocationProof(ctx *class_context.ClassContext, erasedResultUse bool) (*FunctionCallExpression, bool) {
