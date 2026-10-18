@@ -49,9 +49,70 @@ func TestInstantAssertDropsStringParseCastIsLoadBearing(t *testing.T) {
 }
 
 func TestObjectArrayAssertKeepsElementActualIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/AbstractObjectArrayAssert.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"this.arrays.assertAre((AssertionInfo)(this.info),this.actual,var1)",
-		"this.arrays.assertAre((AssertionInfo)(this.info),((Object[])(this.actual)),var1)")
+	// Retain the inventory entry, but derive the contract from the saved class:
+	// all eleven helpers consume Object[] after an actual field CHECKCAST.
+	// A missing declaration family cannot authorize choosing a narrower rival.
+	// The authored original-first fixture checks the complete family, binary
+	// callers, exceptions, array effects and literal data in both modes/profiles.
+	raw, err := os.ReadFile("testdata/regression/AbstractObjectArrayAssert.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := arrayProducerCheckedInvocations(t, raw)
+	for _, op := range arrayFieldViewOperations() {
+		tail := "Lorg/assertj/core/api/Condition;)V"
+		if op.count == "count" {
+			tail = "I" + tail
+		}
+		if strings.Contains(op.parameters, "Comparator") {
+			tail = "Ljava/util/Comparator;)V"
+		}
+		invocation := "b6:org/assertj/core/internal/ObjectArrays." + op.name + "(Lorg/assertj/core/api/AssertionInfo;[Ljava/lang/Object;" + tail
+		found := false
+		for _, row := range strings.Split(original, "\n") {
+			if at := strings.Index(row, invocation); at >= 0 {
+				if !strings.Contains(row[:at], "checkcast:[Ljava/lang/Object;") {
+					t.Fatal("original helper lost its physical array check", row)
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("saved original helper/descriptor missing", invocation)
+		}
+	}
+	for _, mode := range []DecompileMode{Precision, Compatibility} {
+		var before []string
+		for _, off := range []string{"", "1"} {
+			// This full historical class contains over a hundred method bodies.
+			// Give their shared proof budget room; resource-limit tests retain
+			// the production defaults. Do not trim unrelated original methods.
+			result, err := DecompileWithOptions(bytes.Clone(raw), DecompileOptions{Mode: mode, TargetSourceVersion: 8, Limits: Limits{MaxGraphScans: 100_000_000}, EnvSnapshot: map[string]string{"JDEC_ASSERTJ_REMAINING_OFF": off}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls []string
+			for _, op := range arrayFieldViewOperations() {
+				var found string
+				for _, line := range strings.Split(result.Source, "\n") {
+					if strings.Contains(line, "this.arrays."+op.name+"(") {
+						if found != "" {
+							t.Fatal("ambiguous historical helper source", op.name)
+						}
+						found = strings.TrimSpace(line)
+					}
+				}
+				if found == "" || !strings.Contains(found, "(Object[])") || !strings.Contains(found, "this.actual") {
+					t.Fatalf("%s/%q lost original checked array view: %s", mode, off, found)
+				}
+				calls = append(calls, found)
+			}
+			if before != nil && strings.Join(before, "\n") != strings.Join(calls, "\n") {
+				t.Fatal("source words still changed original array helper bindings")
+			}
+			before = calls
+		}
+	}
 }
 
 func TestNaturalOrderComparatorUsesCompareToIsLoadBearing(t *testing.T) {

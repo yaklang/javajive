@@ -228,6 +228,15 @@ func arrayProducerCheckedInvocations(t *testing.T, raw []byte) string {
 	for _, method := range object.Methods {
 		name, _ := sourceBridgeUTF8(object, method.NameIndex)
 		descriptor, _ := sourceBridgeUTF8(object, method.DescriptorIndex)
+		if method.AccessFlags&(0x0400|0x0100) != 0 {
+			for _, attribute := range method.Attributes {
+				if _, present := attribute.(*CodeAttribute); present {
+					t.Fatal("abstract/native declaration has Code", name, descriptor)
+				}
+			}
+			rows = append(rows, name+descriptor)
+			continue
+		}
 		decoder := core.NewDecompiler(methodCodeBytes(method), func(i int) values.JavaValue { return GetValueFromCP(object.ConstantPool, i) })
 		if err := decoder.ParseOpcode(); err != nil {
 			t.Fatal(err)

@@ -46,22 +46,9 @@ func fixAssertjRemainingReconstructs(body string) string {
 	// Interface receivers and wider overload views retain their original
 	// CHECKCAST/descriptor evidence. Unrelated method words cannot erase them.
 
-	for _, m := range []string{"assertAre", "assertAreNot", "assertHave", "assertDoNotHave"} {
-		body = strings.ReplaceAll(body,
-			"this.arrays."+m+"((AssertionInfo)(this.info),((Object[])(this.actual)),var1)",
-			"this.arrays."+m+"((AssertionInfo)(this.info),this.actual,var1)")
-	}
-	for _, m := range []string{
-		"assertAreAtLeast", "assertAreAtMost", "assertAreExactly",
-		"assertHaveAtLeast", "assertHaveAtMost", "assertHaveExactly",
-	} {
-		body = strings.ReplaceAll(body,
-			"this.arrays."+m+"((AssertionInfo)(this.info),((Object[])(this.actual)),var1,var2)",
-			"this.arrays."+m+"((AssertionInfo)(this.info),this.actual,var1,var2)")
-	}
-	body = strings.ReplaceAll(body,
-		"this.arrays.assertIsSortedAccordingToComparator((AssertionInfo)(this.info),((Object[])(this.actual)),var1)",
-		"this.arrays.assertIsSortedAccordingToComparator((AssertionInfo)(this.info),this.actual,var1)")
+	// An array field can require both a physical CHECKCAST and an Object[]
+	// view of the selected overload. Typed binding owns these operations;
+	// method words cannot remove them or change application string data.
 
 	body = strings.ReplaceAll(body,
 		".flatMap(Collection::stream)",

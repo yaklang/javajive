@@ -60,8 +60,11 @@ func TestAdversarialNumericCastViewsSurviveSourceRecovery(t *testing.T) {
 // Rebuild only the target; every original helper/caller byte remains unchanged.
 // Type-view repairs must preserve declarations, runtime checks and call tuples,
 // as well as values, exception priority, effects and application data.
-func runCheckedTypeViewsRoundTrip(t *testing.T, source string, owners []string, driver, want, label string) {
+func runCheckedTypeViewsRoundTrip(t *testing.T, source string, owners []string, driver, want, label string, additional ...map[string]string) {
 	t.Helper()
+	if len(additional) > 1 {
+		t.Fatal("one independent declaration set is required")
+	}
 	modern, java := t04Tools(t)
 	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
 		t.Run(string(profile), func(t *testing.T) {
@@ -81,7 +84,17 @@ func runCheckedTypeViewsRoundTrip(t *testing.T, source string, owners []string, 
 					for _, debug := range []string{"none", "source,lines,vars"} {
 						t.Run(debug, func(t *testing.T) {
 							var files map[string][]byte
-							if profile == NativeJavac8 {
+							if len(additional) == 1 {
+								sources := map[string]string{owner + ".java": fixture}
+								for path, declaration := range additional[0] {
+									sources[strings.ReplaceAll(path, owners[0], owner)] = strings.ReplaceAll(declaration, owners[0], owner)
+								}
+								if profile == NativeJavac8 {
+									files = fieldOwnerCompileJava8Sources(t, sources, debug)
+								} else {
+									files = nativeCompileSourceReleaseClasses(t, sources, debug, "8")
+								}
+							} else if profile == NativeJavac8 {
 								files = nativePrivateEnumCompile(t, fixture, owner, debug)
 							} else {
 								files = nativeCompileSourceReleaseClasses(t, map[string]string{owner + ".java": fixture}, debug, "8")
