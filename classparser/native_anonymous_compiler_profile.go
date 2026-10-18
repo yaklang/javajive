@@ -97,6 +97,13 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 	if !known {
 		return nil
 	}
+	preinitLambda := c.nativeAnonymousPreinitLambdaContext(obj, method, metadata)
+	if preinitLambda {
+		// The physical static helper was generated from an instance constructor.
+		// Its exclusive original factory precedes THIS initialization, so the
+		// anonymous source has instance lexical flags but no enclosing THIS.
+		static = false
+	}
 	expected, selfFlags := uint16(0x0020), uint16(0)
 	if static {
 		expected, selfFlags = 0x0030, 0x0008
@@ -129,7 +136,7 @@ func (c *ClassObjectDumper) nativeAnonymousConstructorForCompiler(obj *ClassObje
 	if static != (packet.enclosingField == "") {
 		// Class modifiers follow the owning method. Availability of its THIS is
 		// separate: explicit constructor-invocation arguments precede initialization.
-		if static || packet.enclosingField != "" || !c.nativeAnonymousConstructorArgument(obj, method) {
+		if static || packet.enclosingField != "" || !preinitLambda && !c.nativeAnonymousConstructorArgument(obj, method) {
 			return nil
 		}
 	}
