@@ -1,15 +1,43 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
 )
 
 func TestIntegerAssertDropsNumberCastIsLoadBearing(t *testing.T) {
-	assertKillSwitchDecompile(t, "testdata/regression/AbstractIntegerAssert.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"this.integers.assertIsZero((AssertionInfo)(this.info),((Integer)(this.actual)))",
-		"this.integers.assertIsZero((AssertionInfo)(this.info),(Number)(((Integer)(this.actual)))")
+	// Keep the historical inventory entry, but retire its unsafe contract:
+	// source text cannot license erasing the physical descriptor's Number
+	// view. This single-class input lacks the receiver's declaration table.
+	// The original-first numeric fixture independently checks actual overload
+	// binding, receiver checks and full ABI with complete declarations.
+	raw, err := os.ReadFile("testdata/regression/AbstractIntegerAssert.class")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before string
+	for _, flag := range []string{"", "1"} {
+		// The budget is shared by every method in this large historical class.
+		// This source-binding regression needs the full class, rather than the
+		// smaller default graph budget used by resource-limit tests.
+		result, err := DecompileWithOptions(bytes.Clone(raw), DecompileOptions{
+			Mode:        Compatibility,
+			Limits:      Limits{MaxGraphScans: 10_000_000},
+			EnvSnapshot: map[string]string{"JDEC_ASSERTJ_REMAINING_OFF": flag},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Source, "this.integers.assertIsZero((AssertionInfo)(this.info),(Number)(((Integer)(this.actual)))") {
+			t.Fatalf("unresolved class binding lost its descriptor view:\n%s", result.Source)
+		}
+		if before != "" && result.Source != before {
+			t.Fatal("class keyword recovery still changed a numeric binding")
+		}
+		before = result.Source
+	}
 }
 
 func TestBigDecimalAssertDropsStringCastIsLoadBearing(t *testing.T) {

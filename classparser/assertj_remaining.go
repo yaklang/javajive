@@ -14,7 +14,9 @@ func fixAssertjRemainingReconstructs(body string) string {
 	if !strings.Contains(body, "assertj") {
 		return body
 	}
-	body = unwrapJavaCast(body, "Number")
+	// A Number view can own an original receiver CHECKCAST or a selected
+	// overload. Core binding retains that evidence; a class-source keyword
+	// cannot authorize removing it (including from application string data).
 	if strings.Contains(body, "ELEMENT[][]") || strings.Contains(body, "ELEMENT extends") {
 		body = strings.ReplaceAll(body, "((Object[][])(", "((ELEMENT[][])(")
 		body = strings.ReplaceAll(body, "(Object[][])(", "(ELEMENT[][])(")
@@ -88,9 +90,6 @@ func fixAssertjRemainingReconstructs(body string) string {
 	body = strings.ReplaceAll(body,
 		"ArrayList var7 = ((var6) != (0)) ? (new ArrayList()) : (var2);",
 		"List var7 = ((var6) != (0)) ? ((List)(new ArrayList())) : (var2);")
-	body = strings.ReplaceAll(body,
-		"Math.round((var0).doubleValue())",
-		"Math.round(((Number)(var0)).doubleValue())")
 	body = strings.ReplaceAll(body,
 		"DiffNode var17 = new DiffNode(var14,var16,var15);",
 		"PathNode var17 = new DiffNode(var14,var16,var15);")
