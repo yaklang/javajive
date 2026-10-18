@@ -115,20 +115,6 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 		}
 		return object.ConstantPool[index-1]
 	}
-	member := func(index uint16) (string, string, string, bool) {
-		ref, ok := constant(index).(*ConstantMethodrefInfo)
-		if !ok || ref == nil {
-			return "", "", "", false
-		}
-		owner, ok := sourceBridgeClassName(object, ref.ClassIndex)
-		nt, valid := constant(ref.NameAndTypeIndex).(*ConstantNameAndTypeInfo)
-		if !ok || !valid || nt == nil {
-			return "", "", "", false
-		}
-		n, nk := sourceBridgeUTF8(object, nt.NameIndex)
-		d, dk := sourceBridgeUTF8(object, nt.DescriptorIndex)
-		return owner, n, d, nk && dk
-	}
 	handles := map[uint16]bool{}
 	for i, cp := range object.ConstantPool {
 		if !nativeProofWork(work, 1) {
@@ -141,9 +127,9 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 		if h == nil {
 			return false
 		}
-		owner, n, d, valid := member(h.ReferenceIndex)
-		if valid && owner == object.GetClassName() && n == name && d == desc {
-			if impl.AccessFlags&StaticFlag != 0 && h.ReferenceKind != 6 || impl.AccessFlags&StaticFlag == 0 && h.ReferenceKind != 5 && h.ReferenceKind != 7 {
+		target, valid := nativeLambdaOriginalHandleTarget(object, h)
+		if valid && target.owner == object.GetClassName() && target.name == name && target.descriptor == desc {
+			if !nativeLambdaImplementationHandle(object, impl, h, target) {
 				return false
 			}
 			handles[uint16(i+1)] = true
@@ -180,8 +166,8 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 		if !ok || h == nil || h.ReferenceKind != 6 {
 			return false
 		}
-		o, n, d, ok := member(h.ReferenceIndex)
-		if !ok || o != "java/lang/invoke/LambdaMetafactory" || n != "metafactory" || d != "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;" {
+		target, ok := nativeLambdaOriginalHandleTarget(object, h)
+		if !ok || target.interfaceRef || target.owner != "java/lang/invoke/LambdaMetafactory" || target.name != "metafactory" || target.descriptor != "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;" {
 			return false
 		}
 		sam, ok := constant(site.BootstrapArguments[0]).(*ConstantMethodTypeInfo)

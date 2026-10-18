@@ -74,20 +74,6 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 		}
 		return object.ConstantPool[index-1]
 	}
-	member := func(index uint16) (string, string, string, bool) {
-		ref, ok := constant(index).(*ConstantMethodrefInfo)
-		if !ok || ref == nil {
-			return "", "", "", false
-		}
-		owner, ok := sourceBridgeClassName(object, ref.ClassIndex)
-		nt, valid := constant(ref.NameAndTypeIndex).(*ConstantNameAndTypeInfo)
-		if !ok || !valid || nt == nil {
-			return "", "", "", false
-		}
-		n, nk := sourceBridgeUTF8(object, nt.NameIndex)
-		d, dk := sourceBridgeUTF8(object, nt.DescriptorIndex)
-		return owner, n, d, nk && dk
-	}
 	handles := map[uint16]bool{}
 	textBytes := 0
 	for index, item := range object.ConstantPool {
@@ -110,9 +96,9 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 		if handle == nil {
 			return false
 		}
-		o, n, d, valid := member(handle.ReferenceIndex)
-		if valid && o == object.GetClassName() && n == name && d == descriptor {
-			if implementation.AccessFlags&8 != 0 && handle.ReferenceKind != 6 || implementation.AccessFlags&8 == 0 && handle.ReferenceKind != 5 && handle.ReferenceKind != 7 {
+		target, valid := nativeLambdaOriginalHandleTarget(object, handle)
+		if valid && target.owner == object.GetClassName() && target.name == name && target.descriptor == descriptor {
+			if !nativeLambdaImplementationHandle(object, implementation, handle, target) {
 				return false
 			}
 			handles[uint16(index+1)] = true
@@ -159,10 +145,11 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 		if !ok || handle == nil || handle.ReferenceKind != 6 {
 			return false
 		}
-		o, n, d, valid := member(handle.ReferenceIndex)
-		if !valid || o != "java/lang/invoke/LambdaMetafactory" {
+		target, valid := nativeLambdaOriginalHandleTarget(object, handle)
+		if !valid || target.interfaceRef || target.owner != "java/lang/invoke/LambdaMetafactory" {
 			return false
 		}
+		n, d := target.name, target.descriptor
 		if n == "metafactory" {
 			if len(row.BootstrapArguments) != 3 || d != "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;" {
 				return false
