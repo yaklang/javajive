@@ -3973,6 +3973,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 			return booleanStackWord(condition).String(funcCtx)
 		}
 	}
+	if view := f.erasedClassArgumentResultView(funcCtx); view != nil {
+		return view.String(funcCtx)
+	}
 	if cast := f.parameterizedOverloadArgCast(i, funcCtx); cast != "" {
 		// The value model records the JVM erasure. A poly producer such as
 		// emptyList() may instead infer List<Object> in a Java cast context,

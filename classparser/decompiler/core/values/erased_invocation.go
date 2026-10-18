@@ -482,6 +482,9 @@ func (f *FunctionCallExpression) PlanErasedClassResultUse(ctx *class_context.Cla
 	if ctx != nil && ctx.Getenv("JDEC_ERASED_CLASS_RESULT_USE_OFF") != "" {
 		return nil, false
 	}
+	if planned, known := f.planErasedZeroArgumentResult(ctx); known {
+		return planned, true
+	}
 	return f.planErasedInvocationProof(ctx, true)
 }
 
