@@ -142,6 +142,15 @@ func TestAdversarialNativeLambdaParameterIdentityUsesFinalSourceOrder(t *testing
 }
 
 func TestAdversarialNativeLambdaParameterIdentitySchedulesWholeFactoryBlocks(t *testing.T) {
+	testNativeLambdaParameterIdentityFactoryBlocks(t, false)
+}
+
+func TestAdversarialNativeLambdaParameterIdentityKeepsRepeatedFormalNames(t *testing.T) {
+	testNativeLambdaParameterIdentityFactoryBlocks(t, true)
+}
+
+func testNativeLambdaParameterIdentityFactoryBlocks(t *testing.T, repeated bool) {
+	t.Helper()
 	compiler := os.Getenv("JAVA8_JAVAC")
 	if compiler == "" {
 		t.Skip("JAVA8_JAVAC required for independent factory block oracle")
@@ -168,11 +177,17 @@ class FactoryBlocksDriver {
   System.out.println(rows+":lambda:factory:blocks:array");
  }
 }`
+	source := fixture
+	if repeated {
+		// Equal SAM names and modifiers are legal in disjoint lambda scopes.
+		// They do not make the two original arithmetic bodies interchangeable.
+		source = strings.NewReplacer("final int first", "final int item", "int second", "final int item", "first+1", "item+1", "second-2", "item-2", `"first","second","other"`, `"item","item","other"`, "i==0?0x1010:0x1000", "i<2?0x1010:0x1000").Replace(source)
+	}
 	for _, owner := range []string{"FactoryBlocks", "AlternateFactoryBlocks"} {
 		t.Run(owner, func(t *testing.T) {
 			for _, debug := range []string{"none", "source,lines,vars"} {
 				t.Run(debug, func(t *testing.T) {
-					files := compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, strings.ReplaceAll(fixture, "FactoryBlocks", owner), owner, debug)
+					files := compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, strings.ReplaceAll(source, "FactoryBlocks", owner), owner, debug)
 					object, err := Parse(bytes.Clone(files[owner+".class"]))
 					if err != nil {
 						t.Fatal(err)

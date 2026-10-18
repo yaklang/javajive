@@ -120,23 +120,12 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		if parent == nil || parent.sourceDumper != c || parent.sourceObject != c.obj || parent.sourceRequest.role != methodSourceDeclaration || parent.sourceCacheKey == "" || c.dumpedMethodsSet[parent.sourceCacheKey] != parent || parent.sourceReconstructionFailed() || !c.methodParameterNameCacheClosed(parent.parameterNameStamp) || parent.code == "" || receipt.body.code == "" || !charge(int64(len(text))+int64(len(parent.code))+int64(len(receipt.body.code))) {
 			return nil, false
 		}
-		local, known := nativeLambdaSourceArrows(receipt.body.code, c.Work)
-		// Nested inline scopes need their own registration proof. Counting an
-		// unowned arrow as this body's event could certify the wrong identity.
-		if !known || len(local) != 1 {
-			return nil, false
-		}
-		// The consuming method may adapt a return expression to its own formal
-		// binder without changing the arrow's fixed parameter declaration. This
-		// receipt owns registration identity; it does not authorize those body
-		// adaptations. Locate its sealed header in the actual factory packet.
-		header := receipt.body.code[:local[0]+2]
 		start := strings.Index(text, parent.code)
-		body := strings.Index(parent.code, header)
-		if start < 0 || body < 0 || strings.Index(text[start+len(parent.code):], parent.code) >= 0 || strings.Index(parent.code[body+len(header):], header) >= 0 {
+		position, known := nativeLambdaSourcePacketArrow(parent.code, receipt.body.code, c.Work, charge)
+		if start < 0 || !known || strings.Index(text[start+len(parent.code):], parent.code) >= 0 {
 			return nil, false
 		}
-		position := start + body + local[0]
+		position += start
 		if _, duplicate := byArrow[position]; duplicate {
 			return nil, false
 		}
@@ -161,6 +150,54 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		ordered = append(ordered, event)
 	}
 	return ordered, true
+}
+
+// Locate an already closed body packet only at actual lexical arrows. A formal
+// name can legitimately recur in several lambdas, so its header is not a unique
+// locator. Prefer the complete sealed packet when it identifies one occurrence.
+// A consumer may independently adapt the return expression to its own binder;
+// in that case only a unique sealed header can locate the event. Neither text
+// comparison grants body, factory or binding permission to its caller.
+func nativeLambdaSourcePacketArrow(source, packet string, work *workbudget.Budget, charge func(int64) bool) (int, bool) {
+	local, known := nativeLambdaSourceArrows(packet, work)
+	// Nested inline scopes require their own registration evidence.
+	if !known || len(local) != 1 || charge == nil {
+		return 0, false
+	}
+	arrows, known := nativeLambdaSourceArrows(source, work)
+	if !known {
+		return 0, false
+	}
+	header := packet[:local[0]+2]
+	headers, packets, headerPosition, packetPosition := 0, 0, 0, 0
+	for _, arrow := range arrows {
+		start := arrow + 2 - len(header)
+		if start < 0 {
+			continue
+		}
+		if !charge(int64(len(header))) {
+			return 0, false
+		}
+		if source[start:arrow+2] != header {
+			continue
+		}
+		headers++
+		headerPosition = arrow
+		if len(packet) > len(source)-start {
+			continue
+		}
+		if !charge(int64(len(packet))) {
+			return 0, false
+		}
+		if source[start:start+len(packet)] == packet {
+			packets++
+			packetPosition = arrow
+		}
+	}
+	if packets == 1 {
+		return packetPosition, true
+	}
+	return headerPosition, packets == 0 && headers == 1
 }
 
 // Source spelling only locates already certified body packets. It never

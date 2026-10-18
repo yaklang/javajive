@@ -33,6 +33,42 @@ func TestAdversarialNativeLambdaIdentityScannerRequiresActualArrows(t *testing.T
 	}
 }
 
+func TestAdversarialNativeLambdaPacketLocatorKeepsActualOccurrences(t *testing.T) {
+	const packet = `(int value)->{return value+1;}`
+	for _, fixture := range []struct {
+		name, source, body string
+		at                 int
+		known, stopSearch  bool
+		canceled           bool
+	}{
+		{"single", packet, packet, 11, true, false, false},
+		{"same formal distinct bodies", `(int value)->{return value-2;};` + packet, packet, 42, true, false, false},
+		{"quoted packet", `"` + packet + `";` + packet, packet, 44, true, false, false},
+		{"commented packet", `/*` + packet + `*/` + packet, packet, 45, true, false, false},
+		{"independently adapted body", `(int value)->{return (T)value;}`, packet, 11, true, false, false},
+		{"ambiguous adapted bodies", `(int value)->{return (T)value;};(int value)->{return (T)value;}`, packet, 0, false, false, false},
+		{"identical packets", packet + ";" + packet, packet, 0, false, false, false},
+		{"missing packet", `class Plain {}`, packet, 0, false, false, false},
+		{"nested packet", `(int value)->{return next -> next;}`, `(int value)->{return next -> next;}`, 0, false, false, false},
+		{"unclosed quote", `"` + packet, packet, 0, false, false, false},
+		{"search exhausted", packet, packet, 0, false, true, false},
+		{"canceled", packet, packet, 0, false, false, true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			var work *workbudget.Budget
+			if fixture.canceled {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			at, known := nativeLambdaSourcePacketArrow(fixture.source, fixture.body, work, func(int64) bool { return !fixture.stopSearch })
+			if known != fixture.known || known && at != fixture.at {
+				t.Fatalf("actual source arrow=%d/%v, want %d/%v", at, known, fixture.at, fixture.known)
+			}
+		})
+	}
+}
+
 func TestAdversarialNativeLambdaIdentityReopensFinalPackets(t *testing.T) {
 	raw := lambdaParameterTestOriginal(t)
 	for _, variant := range []string{"original", "literal comments", "completed member counter", "ambiguous member packet", "missing member packet", "empty member packet", "final source order", "implementation renamed", "body changed", "unowned arrow", "missing tail implementation", "missing parent", "detached parent", "missing factory", "source size", "search bound", "work", "memory", "canceled"} {
