@@ -417,6 +417,99 @@ func (z *ZipFS) ReleaseView(release int) *ZipFS {
 	return &view
 }
 
+// ReadPhysicalEntry reads one original central-directory entry. The caller
+// must supply both its original ordinal and exact raw name: neither release
+// selection nor path normalization can substitute another ZIP entry. A
+// positive hardEntryLimit narrows the existing stream limit without changing
+// the parent, shared request budget, context, or reader ownership.
+func (z *ZipFS) ReadPhysicalEntry(index int, name string, hardEntryLimit int64, policies ...ArchiveOptions) ([]byte, error) {
+	if hardEntryLimit < 0 {
+		return nil, &ArchiveError{Kind: KindInvalid, Err: errors.New("negative physical entry limit")}
+	}
+	if z == nil || z.r == nil || index < 0 || index >= len(z.r.File) {
+		return nil, os.ErrNotExist
+	}
+	f := z.r.File[index]
+	if f == nil || f.Name != name {
+		return nil, pathRejectedError("physical entry identity", name)
+	}
+	view := *z
+	var extraContext context.Context
+	if len(policies) > 1 {
+		return nil, &ArchiveError{Kind: KindInvalid, Err: errors.New("multiple physical read policies")}
+	}
+	if len(policies) == 1 {
+		policy := policies[0]
+		if err := policy.Limits.Validate(); err != nil {
+			return nil, err
+		}
+		candidate := policy.Budget
+		if policy.Work != nil {
+			candidate = WrapWorkBudget(policy.Work, policy.Limits)
+		}
+		if candidate != nil {
+			if view.budget != nil && view.budget.Work() != candidate.Work() {
+				return nil, &ArchiveError{Kind: KindInvalid, Err: errors.New("physical read cannot replace archive Work")}
+			}
+			view.budget = candidate
+		}
+		narrower := func(old, limit int64) int64 {
+			if limit > 0 && (old == 0 || limit < old) {
+				return limit
+			}
+			return old
+		}
+		view.limits.MaxArchiveEntryBytes = narrower(view.limits.MaxArchiveEntryBytes, policy.Limits.MaxArchiveEntryBytes)
+		view.limits.MaxArchiveTotalBytes = narrower(view.limits.MaxArchiveTotalBytes, policy.Limits.MaxArchiveTotalBytes)
+		extraContext = policy.Context
+	}
+	// An aggregate bound must be enforced by the original shared counter.
+	// ArchiveBudget.Limits is adapter metadata and can claim a smaller bound
+	// than the immutable Work actually enforces. A local read limit cannot
+	// certify that claim or replace the shared counter with a fresh one.
+	if total := view.limits.MaxArchiveTotalBytes; total > 0 {
+		actual := int64(0)
+		if view.budget != nil {
+			actual = view.budget.Work().Limit(workbudget.CounterArchiveTotalBytes)
+		}
+		if actual == 0 || actual > total {
+			return nil, &ArchiveError{Kind: KindInvalid, Err: errors.New("unknown narrower physical aggregate policy")}
+		}
+	}
+	if hardEntryLimit > 0 && (view.limits.MaxArchiveEntryBytes == 0 || hardEntryLimit < view.limits.MaxArchiveEntryBytes) {
+		view.limits.MaxArchiveEntryBytes = hardEntryLimit
+	}
+	if view.budget != nil && view.budget.Work() != nil {
+		if err := view.budget.Work().CheckContext(extraContext); err != nil {
+			return nil, err
+		}
+	} else if extraContext != nil {
+		if err := extraContext.Err(); err != nil {
+			return nil, canceledError(err)
+		}
+	}
+	raw, err := view.readArchiveFileBounded(f, extraContext)
+	if view.budget != nil && view.budget.Work() != nil {
+		if ctxErr := view.budget.Work().CheckContext(extraContext); ctxErr != nil {
+			return nil, ctxErr
+		}
+	} else if extraContext != nil {
+		if ctxErr := extraContext.Err(); ctxErr != nil {
+			return nil, canceledError(ctxErr)
+		}
+	}
+	return raw, err
+}
+
+// EntryCount permits bounded catalog consumers to reject before EntryNames
+// allocates its copy. It does not read or select any archive entry.
+func (z *ZipFS) EntryCount() int {
+	if z == nil || z.r == nil {
+		return 0
+	}
+	return len(z.r.File)
+}
+
 func (z *ZipFS) EntryNames() []string {
 	if z == nil || z.r == nil {
 		return nil
@@ -730,8 +823,12 @@ func (z *ZipFS) readFileBounded(name string) ([]byte, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
+	return z.readArchiveFileBounded(f)
+}
+
+func (z *ZipFS) readArchiveFileBounded(f *zip.File, extraContext ...context.Context) ([]byte, error) {
 	if f.FileInfo().IsDir() {
-		return nil, utils.Wrapf(os.ErrNotExist, "%v is dir", name)
+		return nil, utils.Wrapf(os.ErrNotExist, "%v is dir", f.Name)
 	}
 	if f.IsEncrypted() {
 		if z.password == "" {
@@ -749,7 +846,11 @@ func (z *ZipFS) readFileBounded(name string) ([]byte, error) {
 	if ctx == nil && z.budget != nil {
 		ctx = z.budget.Context()
 	}
-	return ReadArchiveStream(ctx, rc, f.UncompressedSize64, z.budget, z.limits)
+	var stream io.Reader = rc
+	if len(extraContext) > 0 && extraContext[0] != nil {
+		stream = &ctxReader{ctx: extraContext[0], r: stream}
+	}
+	return ReadArchiveStream(ctx, stream, f.UncompressedSize64, z.budget, z.limits)
 }
 
 // ReadArchiveStream reads decompressed bytes from r.

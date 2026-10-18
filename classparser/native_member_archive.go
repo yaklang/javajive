@@ -8,7 +8,6 @@ import (
 	"github.com/yaklang/javajive/internal/jdecenv"
 	"github.com/yaklang/javajive/internal/mutf8"
 	"github.com/yaklang/javajive/internal/workbudget"
-	"io/fs"
 	"strings"
 	"sync"
 )
@@ -65,6 +64,10 @@ func (z *JarFS) nativeMemberReader(obj *ClassObject) *ClassObjectDumper {
 	return d
 }
 func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
+	policy, policyErr := z.boundJarReleaseSelection()
+	if policyErr != nil || policy.work(1) != nil {
+		return &nativeMemberIndex{}
+	}
 	idx := &z.nativeMembersIndex
 	idx.once.Do(func() {
 		idx.constructors = map[string]map[string]bool{}
@@ -76,14 +79,19 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 		idx.accessorDeclarations = map[string]map[string]bool{}
 		idx.getterHandles = map[string]bool{}
 		idx.getterInvalidReferences = map[string]bool{}
+		effectiveRelease, releaseErr := z.effectiveJarRelease()
+		if releaseErr != nil {
+			return
+		}
 		total, classes, edges := int64(0), 0, 0
 		memberKeyBytes := int64(0)
 		seenClasses := map[string]bool{}
-		e := fs.WalkDir(z.ZipFS, ".", func(path string, entry fs.DirEntry, e error) error {
-			if e != nil {
-				return e
-			}
-			if entry.IsDir() {
+		entries, catalogErr := policy.catalog()
+		if catalogErr != nil {
+			return
+		}
+		visit := func(path string) error {
+			if !jarCanonicalEntry(path) {
 				return nil
 			}
 			if !strings.HasSuffix(path, ".class") {
@@ -92,7 +100,7 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 			logical := path
 			if strings.HasPrefix(path, "META-INF/") {
 				release, candidate, known := physicalClassNamespace(path)
-				if !known || release > z.ZipFS.TargetRelease() {
+				if !known || release > effectiveRelease {
 					return nil
 				}
 				logical = candidate
@@ -105,7 +113,7 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 			if classes > 16384 {
 				return fmt.Errorf("member index class limit")
 			}
-			raw, e := z.ZipFS.ReadFile(logical)
+			raw, e := z.readJarEntry(logical)
 			if e != nil {
 				return e
 			}
@@ -280,9 +288,17 @@ func (z *JarFS) originalMemberIndex() *nativeMemberIndex {
 				idx.getterHandles[nativeMemberGetterKey(owner, name, desc)] = true
 			}
 			return nil
-		})
-		idx.valid = e == nil
+		}
+		for _, entry := range entries {
+			if policy.work(1) != nil || visit(entry) != nil {
+				return
+			}
+		}
+		idx.valid = true
 	})
+	if policy.work(1) != nil {
+		return &nativeMemberIndex{}
+	}
 	return idx
 }
 func (z *JarFS) nativeMemberEntry(obj *ClassObject) *nativeMemberCacheEntry {

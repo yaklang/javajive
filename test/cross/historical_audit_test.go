@@ -186,7 +186,7 @@ func TestHistoricalJarAudit(t *testing.T) {
 				t.Fatal(err)
 			}
 			repackaged := filepath.Join(dir, "rebuilt.jar")
-			zipClassesToJar(t, clsRoot, repackaged)
+			zipRecompiledClassesToJar(t, clsRoot, repackaged, input.Path)
 			zr, err := zip.OpenReader(repackaged)
 			if err != nil {
 				t.Fatal(err)

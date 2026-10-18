@@ -254,7 +254,11 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p artifacts
-          go test -json ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv -race -count=1 -timeout=3m | tee artifacts/core-algorithm-tests.jsonl
+          go test -json ./classparser/decompiler/core/... ./classparser/decompiler/rewriter/... ./internal/workbudget ./internal/jdecenv ./internal/filesys -race -count=1 -timeout=3m | tee artifacts/core-algorithm-tests.jsonl
+      - name: Rebuilt JAR runtime selection regression
+        run: |
+          set -o pipefail
+          go test -json ./test/cross -run '^TestRebuiltJar' -count=1 -timeout=2m | tee artifacts/rebuilt-jar-runtime-tests.jsonl
       - name: Trusted original and rebuilt algorithm round trips
         run: |
           evidence="$RUNNER_TEMP/algorithm-regression-evidence"

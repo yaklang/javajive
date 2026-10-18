@@ -235,7 +235,7 @@ func TestBenchmarkSelfRecompile(t *testing.T) {
 
 		// Repackage whatever recompiled and load+verify every class in the resulting jar.
 		repackaged := filepath.Join(t.TempDir(), j.key+"-recompiled.jar")
-		zipClassesToJar(t, clsRoot, repackaged)
+		zipRecompiledClassesToJar(t, clsRoot, repackaged, jarPath)
 		vok, vfail, _ := verifyJarLoads(t, verifierDir, repackaged, classpath)
 
 		s := selfScore{

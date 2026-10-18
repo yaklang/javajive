@@ -194,18 +194,19 @@ func (e *ExpandedZipFS) nestedZipFSOptions() []filesys.ZipFSOption {
 	return nil
 }
 
-func (e *ExpandedZipFS) applyMultiRelease(name string) string {
-	if e == nil || e.archive == nil || e.archive.targetRelease == 0 {
-		return name
+func (e *ExpandedZipFS) applyMultiRelease(name string) (string, error) {
+	if e == nil || e.zipFS == nil {
+		return name, nil
 	}
-	var entries []string
-	if e.zipFS != nil {
-		entries = e.zipFS.EntryNames()
+	policy, err := e.boundJarReleaseSelection()
+	if err != nil {
+		return "", err
 	}
-	if chosen, ok := filesys.SelectMultiReleasePath(entries, name, e.archive.targetRelease); ok {
-		return chosen
+	target := e.zipFS.TargetRelease()
+	if e.archive != nil {
+		target = e.archive.targetRelease
 	}
-	return name
+	return policy.selectPath(name, target, jarReleaseRuntime)
 }
 
 func (z *JarFS) archiveCacheKey(path string) string {
