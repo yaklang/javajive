@@ -22,6 +22,40 @@ func retargetProtectedIfBoundary(regions []*core.Node, original, replacement *co
 	retargetProtectedSourceBoundary(regions, original, replacement)
 }
 
+// A detached exclusive-end jump is not a normal predecessor, so Node.Replace
+// cannot update its semantic target. Retain that exact reference when its
+// original try entry becomes a complete structured continuation.
+func retargetProtectedTryBoundary(regions []*core.Node, original, replacement *core.Node) {
+	if original == nil || replacement == nil || !original.HasProtectedRange || original.ProtectedStartPC < 0 || original.ProtectedStartPC >= original.ProtectedEndPC {
+		return
+	}
+	entry, ok := original.Statement.(*statements.MiddleStatement)
+	if !ok || entry == nil || entry.Flag != statements.MiddleTryStart {
+		return
+	}
+	if _, ok := replacement.Statement.(*statements.TryCatchStatement); !ok {
+		return
+	}
+	retargetProtectedSourceBoundary(regions, original, replacement)
+}
+
+func outsideHandlerDomainProof(ranges [][2]int) handlerLayerProof {
+	return handlerLayerProof{remaining: 512, active: map[statements.Statement]bool{}, strictRanges: func(rows [][2]int) bool {
+		inner, valid := canonicalHandlerRanges(rows)
+		if !valid {
+			return false
+		}
+		for _, row := range inner {
+			for _, outer := range ranges {
+				if row[0] < outer[1] && outer[0] < row[1] {
+					return false
+				}
+			}
+		}
+		return true
+	}}
+}
+
 func retargetProtectedSourceBoundary(regions []*core.Node, original, replacement *core.Node) {
 	for _, region := range regions {
 		if region == nil || !region.HasProtectedRange {
@@ -64,7 +98,7 @@ func retargetProtectedSourceBoundary(regions []*core.Node, original, replacement
 		if !valid {
 			continue
 		}
-		proof := handlerLayerProof{remaining: 512, active: map[statements.Statement]bool{}}
+		proof := outsideHandlerDomainProof(ranges)
 		if proof.block([]statements.Statement{replacement.Statement}, func(pc int) bool {
 			return pc >= 0 && !finallyContains(ranges, pc)
 		}, 0) {

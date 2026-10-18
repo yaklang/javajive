@@ -1697,10 +1697,8 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// Catch types are recovered from the exception table. A call's spelling
 	// does not prove its declaring owner, throws signature, or handler coverage;
 	// guessing here adds exceptions to unrelated catches (e.g. getMethod()).
-	// dedupNestedCatchException removes exception types from an outer catch that are already caught
-	// by a nested try/catch in the try body (javac: "exception X is never thrown in body of
-	// corresponding try statement"). Kill-switch: JDEC_DEDUP_NESTED_CATCH_OFF=1.
-	full = c.sourceRewrite("dedupNestedCatchException", "class_source", full, dedupNestedCatchException)
+	// Original handler membership owns catch alternatives, including exceptions
+	// thrown before an inner try or by one of its catch bodies.
 	// wrapUncaughtThrowingCall wraps `UNSAFE.allocateInstance()` in try/catch. Kill-switch:
 	// JDEC_WRAP_ALLOCATE_OFF=1.
 	full = c.sourceRewrite("wrapUncaughtThrowingCall", "class_source", full, wrapUncaughtThrowingCall)
@@ -7818,198 +7816,6 @@ func addMissingCatchException(body string) string {
 	return strings.Join(lines, "\n")
 }
 
-// dedupNestedCatchException removes exception types from an outer catch clause when a nested
-// try/catch within the try body already catches that exact type. This repairs javac's "exception X
-// is never thrown in body of corresponding try statement" — when an inner catch handles the
-// exception, it never propagates to the outer catch, so listing it there is an error.
-//
-// Detection: for each try/catch block, scan the try body for nested try/catch blocks whose catch
-// lists an exception type T that also appears in the outer catch. Remove T from the outer catch
-// (only if the outer catch has ≥2 types, so it still catches something). Kill-switch:
-// JDEC_DEDUP_NESTED_CATCH_OFF=1.
-func dedupNestedCatchException(body string) string {
-	if jdecenv.Get("JDEC_DEDUP_NESTED_CATCH_OFF") == "1" {
-		return body
-	}
-	lines := strings.Split(body, "\n")
-	catchRe := regexp.MustCompile(`\}catch\(([^)]*)\)\{`)
-	tryRe := regexp.MustCompile(`^(\t+)try\{\s*$`)
-	// Collect all try blocks with their catch info (reuse the model from addMissingCatchException).
-	type tryBlock struct {
-		tryStart    int
-		tryBodyEnd  int
-		catchLine   int
-		caughtTypes string
-	}
-	var tryBlocks []tryBlock
-	for i := 0; i < len(lines); i++ {
-		ln := strings.TrimRight(lines[i], "\r")
-		if !tryRe.MatchString(ln) {
-			continue
-		}
-		depth := 0
-		tryBodyEnd := -1
-		catchLine := -1
-		var caughtTypes string
-		for j := i; j < len(lines); j++ {
-			jl := strings.TrimRight(lines[j], "\r")
-			for b := 0; b < len(jl); b++ {
-				switch jl[b] {
-				case '{':
-					depth++
-				case '}':
-					depth--
-					if depth == 0 && j > i && tryBodyEnd < 0 {
-						tryBodyEnd = j
-						rest := strings.TrimSpace(jl[b+1:])
-						if strings.HasPrefix(rest, "catch(") {
-							catchLine = j
-							cm := catchRe.FindStringSubmatch(jl)
-							if cm != nil {
-								caughtTypes = cm[1]
-							}
-						}
-					}
-				}
-			}
-		}
-		if tryBodyEnd < 0 {
-			continue
-		}
-		if catchLine < 0 {
-			for k := tryBodyEnd + 1; k < len(lines) && k < tryBodyEnd+3; k++ {
-				cl := strings.TrimRight(lines[k], "\r")
-				if strings.TrimSpace(cl) == "" {
-					continue
-				}
-				cm := catchRe.FindStringSubmatch(cl)
-				if cm != nil {
-					catchLine = k
-					caughtTypes = cm[1]
-				}
-				break
-			}
-		}
-		tryBlocks = append(tryBlocks, tryBlock{tryStart: i, tryBodyEnd: tryBodyEnd, catchLine: catchLine, caughtTypes: caughtTypes})
-	}
-	// For each outer try with a catch, find nested try/catch blocks within its body and collect
-	// exception types caught by inner catches. Remove those from the outer catch.
-	type edit struct {
-		catchLine  int
-		removeType string
-	}
-	var edits []edit
-	for _, outer := range tryBlocks {
-		if outer.catchLine < 0 {
-			continue
-		}
-		// Parse outer catch types (word list, excluding the catch variable).
-		outerFields := strings.Fields(outer.caughtTypes)
-		if len(outerFields) < 2 {
-			continue // need ≥2 types to remove one (the last field is the variable)
-		}
-		outerVarName := outerFields[len(outerFields)-1]
-		outerTypes := outerFields[:len(outerFields)-1] // type tokens (may include `|`)
-		// Collect actual type names (strip `|`).
-		outerTypeNames := map[string]bool{}
-		for _, tf := range outerTypes {
-			if tf != "|" {
-				outerTypeNames[tf] = true
-			}
-		}
-		if len(outerTypeNames) < 2 {
-			continue // need ≥2 actual types to remove one
-		}
-		// Find nested try/catch blocks whose try is within [outer.tryStart+1, outer.tryBodyEnd).
-		for _, inner := range tryBlocks {
-			if inner.tryStart <= outer.tryStart || inner.tryStart >= outer.tryBodyEnd {
-				continue
-			}
-			if inner.catchLine < 0 {
-				continue
-			}
-			if jdecenv.Get("JDEC_DEDUP_DBG") == "1" {
-				fmt.Fprintf(os.Stderr, "[DEDUP-NESTED] outer try L%d (catch L%d types=%q) → inner try L%d (catch L%d types=%q)\n",
-					outer.tryStart+1, outer.catchLine+1, outer.caughtTypes, inner.tryStart+1, inner.catchLine+1, inner.caughtTypes)
-			}
-			innerFields := strings.Fields(inner.caughtTypes)
-			if len(innerFields) == 0 {
-				continue
-			}
-			for _, tf := range innerFields {
-				if tf == "|" {
-					continue
-				}
-				// Skip if it's the catch variable (last field). Heuristic: a type name starts with
-				// uppercase; a variable starts with lowercase. This is imperfect but covers the common
-				// case (InstantiationException vs var4).
-				if len(tf) > 0 && tf[0] >= 'a' && tf[0] <= 'z' {
-					continue // likely a variable name
-				}
-				if outerTypeNames[tf] {
-					// This type is caught by both inner and outer — remove from outer.
-					edits = append(edits, edit{catchLine: outer.catchLine, removeType: tf})
-					_ = outerVarName
-				}
-			}
-		}
-	}
-	if len(edits) == 0 {
-		return body
-	}
-	// Apply: for each edit, remove the type from the catch clause. Handle multiple removals per
-	// catch line by deduping and applying once.
-	byLine := map[int]map[string]bool{}
-	for _, e := range edits {
-		if byLine[e.catchLine] == nil {
-			byLine[e.catchLine] = map[string]bool{}
-		}
-		byLine[e.catchLine][e.removeType] = true
-	}
-	catchLines := []int{}
-	for cl := range byLine {
-		catchLines = append(catchLines, cl)
-	}
-	sort.Ints(catchLines)
-	for k := len(catchLines) - 1; k >= 0; k-- {
-		cl := catchLines[k]
-		removeTypes := byLine[cl]
-		catchLn := strings.TrimRight(lines[cl], "\r")
-		cm := catchRe.FindStringSubmatch(catchLn)
-		if cm == nil {
-			continue
-		}
-		types := cm[1]
-		fields := strings.Fields(types)
-		if len(fields) < 2 {
-			continue
-		}
-		varName := fields[len(fields)-1]
-		// Rebuild the type list, excluding removed types.
-		var kept []string
-		for _, tf := range fields[:len(fields)-1] {
-			if tf == "|" {
-				continue
-			}
-			if removeTypes[tf] {
-				continue
-			}
-			kept = append(kept, tf)
-		}
-		if len(kept) == 0 {
-			// All caught types are handled by inner catches — the outer catch is dead code for
-			// those specific types. Replace with `Exception` (a valid catch-all supertype) to keep
-			// the catch clause structurally valid without claiming a specific type that's never
-			// thrown. This avoids "exception X is never thrown" for ALL listed types.
-			kept = []string{"Exception"}
-		}
-		newTypes := strings.Join(kept, " | ") + " " + varName
-		newLine := strings.Replace(catchLn, "("+types+")", "("+newTypes+")", 1)
-		lines[cl] = newLine
-	}
-	return strings.Join(lines, "\n")
-}
-
 // wrapUncaughtThrowingCall wraps a `UNSAFE.allocateInstance(...)` call (which throws
 // InstantiationException) in a try/catch when it appears in a switch case body WITHOUT any
 // enclosing try/catch. The catch converts the checked InstantiationException into a
@@ -10153,13 +9959,6 @@ func fixLog4jRemainingReconstructs(body string) string {
 		body = strings.ReplaceAll(body,
 			"}catch(ClassNotFoundException | NoSuchMethodException var1){\n\t\t\t\tLOGGER.error(\"No Base64 Converter is available\");\n\t\t\t}catch(NoSuchMethodException var1){\n\n\t\t\t}",
 			"}catch(ClassNotFoundException | NoSuchMethodException var1){\n\t\t\t\tLOGGER.error(\"No Base64 Converter is available\");\n\t\t\t}")
-	}
-	// JmsManager.send: reconnector.reconnect() throws JMSException outside the
-	// inner JMSException catch.
-	if strings.Contains(body, "class JmsManager") {
-		body = strings.ReplaceAll(body,
-			"this.closeJndiManager();\n\t\t\t\t\t\tthis.reconnector.reconnect();\n\t\t\t\t\t\ttry{\n\t\t\t\t\t\t\tthis.createMessageAndSend(var1,var2);\n\t\t\t\t\t\t}catch(JMSException var5){",
-			"this.closeJndiManager();\n\t\t\t\t\t\ttry{\n\t\t\t\t\t\t\tthis.reconnector.reconnect();\n\t\t\t\t\t\t\tthis.createMessageAndSend(var1,var2);\n\t\t\t\t\t\t}catch(JMSException var5){")
 	}
 	// PatternLayout$SerializerBuilder: two PatternSerializer subclasses in a ternary.
 	if strings.Contains(body, "class PatternLayout$SerializerBuilder") {

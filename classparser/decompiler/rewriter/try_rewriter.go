@@ -357,5 +357,8 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 			last.AddNext(next)
 		}
 	}
+	if declaration == nil && len(tail) == 0 {
+		retargetProtectedTryBoundary(manager.TryNodes, node, tryNode)
+	}
 	return nil
 }

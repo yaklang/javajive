@@ -58,6 +58,10 @@ func typedTryNormalBoundary(region, start *core.Node, successors []*core.Node, d
 	// the complete operand effect-domain proof below remains necessary.
 	switch candidate.Statement.(type) {
 	case *statements.AssignStatement, *statements.ExpressionStatement:
+	case *statements.TryCatchStatement:
+		// An adjacent protected region can already have been structured. Its
+		// whole body, handlers and original ranges must remain outside this
+		// region; source nesting is not exception-table ownership.
 	case *statements.ReturnStatement:
 		ret := candidate.Statement.(*statements.ReturnStatement)
 		if ret == nil || !ret.HasOriginPC || !candidate.HasOriginPC || ret.OriginPC != candidate.OriginPC ||
@@ -76,7 +80,7 @@ func typedTryNormalBoundary(region, start *core.Node, successors []*core.Node, d
 		return nil
 	}
 	outside := func(pc int) bool { return pc >= 0 && !finallyContains(ranges, pc) }
-	proof := handlerLayerProof{remaining: 512, active: map[statements.Statement]bool{}}
+	proof := outsideHandlerDomainProof(ranges)
 	if !proof.block([]statements.Statement{candidate.Statement}, outside, 0) {
 		return nil
 	}
