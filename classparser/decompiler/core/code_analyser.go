@@ -110,6 +110,7 @@ type Decompiler struct {
 	// The PC is supplied by the original invokedynamic request, never inferred
 	// from captured value names, types, or the implementation descriptor.
 	DumpClassLambdaMethodAtOrigin func(name, desc string, id *utils2.VariableId, captured []values.JavaValue, adapter *LambdaReferenceAdapter, pc int) (string, error)
+	DumpClassLambdaSourceAtOrigin func(name, desc string, id *utils2.VariableId, captured []values.JavaValue, adapter *LambdaReferenceAdapter, pc int) (LambdaBodySource, error)
 	// Scoped only while dispatching an actual original lambda call site. A
 	// direct legacy bootstrap invocation has no physical factory certificate.
 	lambdaFactoryOrigin *int

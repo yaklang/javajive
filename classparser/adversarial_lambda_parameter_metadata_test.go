@@ -1,0 +1,247 @@
+package javaclassparser
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// Parameter metadata on an implementation method remains observable through
+// reflection. A source arrow must regenerate the original names and flags,
+// including an unused final formal and wide descriptor parameters. Captured
+// operands need a separate source-binder proof; this fixture has none.
+const uncapturedLambdaParameterFixture = `
+import java.util.function.*;
+public class UncapturedLambdaNames{
+ public static IntUnaryOperator unary(int l0){return(int value)->value+1;}
+ public static IntUnaryOperator pinned(){return(final int item)->item+7;}
+ public static IntUnaryOperator unused(){return(final int ignored)->5;}
+ public static IntBinaryOperator binary(){return(int first,int second)->first^second;}
+ public static LongBinaryOperator wide(){return(final long first,long second)->{long result=first^second;return result;};}
+ public static DoubleBinaryOperator fractional(){return(double left,final double right)->left/right;}
+ public static Function<Object,Object> identity(){return(Object μ)->μ;}
+}
+class LambdaParameterDriver{
+ public static void main(String[]args)throws Exception{
+  int rows=0;int[] ints={Integer.MIN_VALUE,-1,0,1,Integer.MAX_VALUE};
+  for(int a:ints){
+   if(UncapturedLambdaNames.unary(17).applyAsInt(a)!=a+1||UncapturedLambdaNames.pinned().applyAsInt(a)!=a+7||UncapturedLambdaNames.unused().applyAsInt(a)!=5)throw new AssertionError("unary/final/unused formal");rows++;
+   for(int b:ints){if(UncapturedLambdaNames.binary().applyAsInt(a,b)!=(a^b))throw new AssertionError("binary parameter identities");rows++;}
+  }
+  long[] longs={Long.MIN_VALUE,-1L,0L,1L,Long.MAX_VALUE};
+  for(long a:longs)for(long b:longs){if(UncapturedLambdaNames.wide().applyAsLong(a,b)!=(a^b))throw new AssertionError("wide parameter words");rows++;}
+  double[] doubles={Double.NEGATIVE_INFINITY,-Double.MAX_VALUE,-1.0,-0.0,0.0,1.0,Double.MAX_VALUE,Double.POSITIVE_INFINITY,Double.NaN};
+  for(double a:doubles)for(double b:doubles){if(Double.doubleToLongBits(UncapturedLambdaNames.fractional().applyAsDouble(a,b))!=Double.doubleToLongBits(a/b))throw new AssertionError("floating parameter identities");rows++;}
+  for(Object value:new Object[]{null,new Object(),"same",Integer.valueOf(7)}){if(UncapturedLambdaNames.identity().apply(value)!=value)throw new AssertionError("reference parameter identity");rows++;}
+  java.util.List<String> declarations=new java.util.ArrayList<String>();
+  for(java.lang.reflect.Method method:UncapturedLambdaNames.class.getDeclaredMethods()){
+   StringBuilder row=new StringBuilder(method.getName()).append(':').append(method.getReturnType().getName()).append(':').append(method.getModifiers());
+   for(java.lang.reflect.Parameter parameter:method.getParameters())row.append('/').append(parameter.getType().getName()).append(':').append(parameter.getName()).append(':').append(parameter.getModifiers()).append(':').append(parameter.isNamePresent());
+   declarations.add(row.toString());
+  }
+  java.util.Collections.sort(declarations);java.security.MessageDigest hash=java.security.MessageDigest.getInstance("SHA-256");
+  for(String declaration:declarations)hash.update((declaration+"\n").getBytes("UTF-8"));
+  System.out.println(rows+":uncaptured:lambda:parameters:"+java.util.Base64.getEncoder().encodeToString(hash.digest()));
+ }
+}`
+
+func TestAdversarialUncapturedLambdaParameterMetadataRoundTrip(t *testing.T) {
+	testUncapturedLambdaParameterMetadataRoundTrip(t, uncapturedLambdaParameterFixture, 7, "140")
+}
+
+func TestAdversarialUncapturedLambdaInterfaceParameterMetadataRoundTrip(t *testing.T) {
+	source := strings.Replace(uncapturedLambdaParameterFixture, "public class UncapturedLambdaNames", "public interface UncapturedLambdaNames", 1)
+	testUncapturedLambdaParameterMetadataRoundTrip(t, source, 7, "140")
+}
+
+func TestAdversarialUncapturedLambdaGenericParameterMetadataRoundTrip(t *testing.T) {
+	const source = `import java.util.function.*;import java.util.Comparator;
+public class UncapturedLambdaNames<T>{
+ public <T> Function<T,T> identity(){return(final T item)->item;}
+ public <T extends Number> Function<T,T> bounded(){return(T item)->item;}
+ public <T extends Number> Function<T,T> finalBounded(){return(final T item)->item;}
+ public <T> Comparator<T> comparator(){return(final T first,final T second)->first==second?0:first==null?-1:second==null?1:Integer.compare(System.identityHashCode(first),System.identityHashCode(second));}
+}
+class LambdaParameterDriver{
+ public static void main(String[]args)throws Exception{
+  int rows=0;UncapturedLambdaNames<String> target=new UncapturedLambdaNames<String>();
+  Object[] values={null,new Object(),"same",Integer.valueOf(7),Long.valueOf(11)};
+  for(Object value:values){if(target.<Object>identity().apply(value)!=value)throw new AssertionError("method binder borrowed class String binder");rows++;}
+  for(Number value:new Number[]{null,Integer.valueOf(7),Long.valueOf(11),Double.valueOf(-0.0),new java.math.BigDecimal("1.25")}){
+   if(target.<Number>bounded().apply(value)!=value||target.<Number>finalBounded().apply(value)!=value)throw new AssertionError("bounded method identity/finality");rows++;
+  }
+  Comparator<Object> order=target.<Object>comparator();
+  for(Object a:values)for(Object b:values){int expected=a==b?0:a==null?-1:b==null?1:Integer.compare(System.identityHashCode(a),System.identityHashCode(b));if(order.compare(a,b)!=expected)throw new AssertionError("generic comparator binding/null priority");rows++;}
+  java.util.List<String> declarations=new java.util.ArrayList<String>();
+  for(java.lang.reflect.Method method:UncapturedLambdaNames.class.getDeclaredMethods()){
+   StringBuilder row=new StringBuilder(method.getName()).append(':').append(method.getReturnType().getName()).append(':').append(method.getModifiers());
+   for(java.lang.reflect.Parameter parameter:method.getParameters())row.append('/').append(parameter.getType().getName()).append(':').append(parameter.getName()).append(':').append(parameter.getModifiers()).append(':').append(parameter.isNamePresent());
+   declarations.add(row.toString());
+  }
+  java.util.Collections.sort(declarations);java.security.MessageDigest hash=java.security.MessageDigest.getInstance("SHA-256");for(String declaration:declarations)hash.update((declaration+"\n").getBytes("UTF-8"));
+  System.out.println(rows+":uncaptured:lambda:parameters:"+java.util.Base64.getEncoder().encodeToString(hash.digest()));
+ }
+}`
+	testUncapturedLambdaParameterMetadataRoundTrip(t, source, 4, "35")
+}
+
+func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string, implementations int, states string) {
+	t.Helper()
+	modern, java := t04Tools(t)
+	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
+		t.Run(string(profile), func(t *testing.T) {
+			compiler := modern
+			if profile == NativeJavac8 {
+				compiler = os.Getenv("JAVA8_JAVAC")
+				if compiler == "" {
+					t.Skip("JAVA8_JAVAC required for independent native8 metadata oracle")
+				}
+			}
+			for _, owner := range []string{"UncapturedLambdaNames", "AlternateLambdaParameters"} {
+				t.Run(owner, func(t *testing.T) {
+					for _, debug := range []string{"none", "source,lines,vars"} {
+						t.Run(debug, func(t *testing.T) {
+							fixture := strings.ReplaceAll(source, "UncapturedLambdaNames", owner)
+							if owner == "AlternateLambdaParameters" {
+								fixture = strings.NewReplacer("int value", "int var0", "value+1", "var0+1", "int item", "int var1", "item+7", "var1+7", "int ignored", "int l0").Replace(fixture)
+							}
+							files := compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, owner, debug)
+							if profile == NativeJavac8 {
+								if count := strings.Count(lambdaParameterMetadataTables(t, files[owner+".class"]), "lambda$"); count != implementations {
+									t.Fatalf("original native8 parameter-bearing implementation declarations: %d want %d", count, implementations)
+								}
+							}
+							write := func(dir, name string, raw []byte) {
+								t.Helper()
+								if err := os.WriteFile(filepath.Join(dir, name), raw, 0600); err != nil {
+									t.Fatal(err)
+								}
+							}
+							original := t.TempDir()
+							for name, raw := range files {
+								write(original, name, raw)
+							}
+							want := t04RunJava(t, java, original, "LambdaParameterDriver")
+							if !strings.HasPrefix(want, states+":uncaptured:lambda:parameters:") {
+								t.Fatal("independent original runtime/metadata oracle", want)
+							}
+							t.Log("independent original lambda-parameters JVM:", strings.TrimSpace(want))
+							for _, mode := range []DecompileMode{Precision, Compatibility} {
+								t.Run(string(mode), func(t *testing.T) {
+									result, err := DecompileWithOptions(bytes.Clone(files[owner+".class"]), DecompileOptions{Mode: mode, SourceCompiler: profile, TargetSourceVersion: 8, EnvSnapshot: map[string]string{}, Resolve: func(name string) ([]byte, bool) { data, found := files[name+".class"]; return bytes.Clone(data), found }})
+									if err != nil || result.Status != "complete" || strings.Contains(result.Source, DecompileStubMarker) {
+										t.Fatalf("status=%s err=%v diagnostics=%+v\n%s", result.Status, err, result.Diagnostics, result.Source)
+									}
+									out := t.TempDir()
+									for name, raw := range files {
+										if name != owner+".class" {
+											write(out, name, raw)
+										}
+									}
+									write(out, owner+".java", []byte(result.Source))
+									args := []string{"-proc:none", "-parameters", "--release", "8"}
+									if profile == NativeJavac8 {
+										args = []string{"-proc:none", "-parameters", "-source", "8", "-target", "8"}
+									}
+									args = append(args, "-g:"+debug, "-cp", out, "-d", out, filepath.Join(out, owner+".java"))
+									if log, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
+										t.Fatalf("compile without original target: %v\n%s\n%s", err, log, result.Source)
+									}
+									if got := t04RunJava(t, java, out, "LambdaParameterDriver"); got != want {
+										t.Fatalf("unchanged caller/reflection: %q want %q\n%s", got, want, result.Source)
+									}
+									rebuilt, err := os.ReadFile(filepath.Join(out, owner+".class"))
+									if err != nil {
+										t.Fatal(err)
+									}
+									if a, b := lambdaParameterMetadataTables(t, files[owner+".class"]), lambdaParameterMetadataTables(t, rebuilt); a != b {
+										t.Fatalf("physical parameter metadata changed:\n%s\n%s", a, b)
+									}
+									if a, b := constructorInvocationThrowsDeclarations(t, files[owner+".class"]), constructorInvocationThrowsDeclarations(t, rebuilt); a != b {
+										t.Fatalf("original declaration inventory changed:\n%s\n%s", a, b)
+									}
+									if a, b := arrayProducerCheckedInvocations(t, files[owner+".class"]), arrayProducerCheckedInvocations(t, rebuilt); a != b {
+										t.Fatalf("original checks/invocations changed:\n%s\n%s", a, b)
+									}
+									t.Log("fully rebuilt lambda-parameters JVM:", strings.TrimSpace(want))
+								})
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func compileLambdaParameterMetadataFixture(t *testing.T, compiler string, profile SourceCompilerProfile, source, owner, debug string) map[string][]byte {
+	t.Helper()
+	dir := t.TempDir()
+	file := filepath.Join(dir, owner+".java")
+	if err := os.WriteFile(file, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-proc:none", "-parameters", "--release", "8"}
+	if profile == NativeJavac8 {
+		args = []string{"-proc:none", "-parameters", "-source", "8", "-target", "8"}
+	}
+	args = append(args, "-g:"+debug, "-d", dir, file)
+	if log, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
+		t.Fatal("independent original compiler", err, string(log))
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".class") {
+			raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			files[entry.Name()] = raw
+		}
+	}
+	return files
+}
+
+func lambdaParameterMetadataTables(t *testing.T, raw []byte) string {
+	t.Helper()
+	object, err := Parse(bytes.Clone(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []string
+	for _, method := range object.Methods {
+		name, _ := sourceBridgeUTF8(object, method.NameIndex)
+		descriptor, _ := sourceBridgeUTF8(object, method.DescriptorIndex)
+		for _, attribute := range method.Attributes {
+			table, ok := attribute.(*UnparsedAttribute)
+			if !ok || table.Name != "MethodParameters" {
+				continue
+			}
+			if len(table.Info) < 1 || len(table.Info) != 1+4*int(table.Info[0]) {
+				t.Fatal("invalid original/rebuilt parameter table", name)
+			}
+			row := name + descriptor
+			for index := 0; index < int(table.Info[0]); index++ {
+				entry := table.Info[1+4*index : 5+4*index]
+				text, found := sourceBridgeUTF8(object, binary.BigEndian.Uint16(entry[:2]))
+				if !found {
+					t.Fatal("unknown original/rebuilt parameter name", name)
+				}
+				row += fmt.Sprintf(" %s:%04x", text, binary.BigEndian.Uint16(entry[2:]))
+			}
+			rows = append(rows, row)
+		}
+	}
+	sort.Strings(rows)
+	return strings.Join(rows, "\n")
+}

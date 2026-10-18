@@ -25,7 +25,11 @@ func (c *ClassObjectDumper) lambdaBodyOriginalUseClosed(method *MemberInfo, work
 			return false
 		}
 	}
-	return nativeLambdaBodyOriginalUseClosed(c.obj, method, work)
+	parameters, known := c.originalLambdaParameterMetadata(method, work)
+	if !known {
+		return false
+	}
+	return parameters != nil || nativeLambdaBodyOriginalUseClosed(c.obj, method, work)
 }
 
 // A private implementation is visible to its entire original modern nest.

@@ -185,10 +185,11 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				if d.lambdaFactoryOrigin != nil {
 					factoryOrigin = []int{*d.lambdaFactoryOrigin}
 				}
-				methodStr, err := dumpLambdaWithReferenceAdapter(d, classMember, captured, typ, args1, factoryOrigin...)
+				source, err := dumpLambdaSourceWithReferenceAdapter(d, classMember, captured, typ, args1, factoryOrigin...)
 				if err != nil {
 					return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", classMember.Name, member, err)
 				}
+				methodStr := source.Code
 				// A lambda body that returns a generic-erased Object while its functional-interface SAM
 				// returns a method type variable lost the source's unchecked `return (T) expr;` cast. The
 				// erased lambda impl method returns Object (its instantiatedMethodType return is Object),
@@ -240,7 +241,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				}
 				cv.CapturesKnown = true
 				cv.Captures = captured
-				return cv, nil
+				return retainOriginalLambdaParameterTarget(d, cv, source, typ, classMember, args1, len(captured))
 			}
 
 			// Method reference: constructor / static / (bound|unbound) instance method.

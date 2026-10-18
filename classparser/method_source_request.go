@@ -23,14 +23,15 @@ type methodSourceRequest struct {
 	role         methodSourceRole
 	captureCount int
 	serial       uint64
+	factory      *lambdaSourceFactory
 }
 
 func (r methodSourceRequest) valid() bool {
 	switch r.role {
 	case methodSourceDeclaration:
-		return r.captureCount == 0 && r.serial == 0
+		return r.captureCount == 0 && r.serial == 0 && r.factory == nil
 	case methodSourceLambdaBody:
-		return r.captureCount >= 0 && r.captureCount <= 255 && r.serial != 0
+		return r.captureCount >= 0 && r.captureCount <= 255 && r.serial != 0 && (r.factory == nil || r.factory.closed())
 	default:
 		return false
 	}
@@ -62,7 +63,7 @@ type lambdaMethodSourceReceipt struct {
 // The render cache also contains ordinary declarations. Source consumption
 // requires a completed body from this dumper's actual lambda request instead.
 func (c *ClassObjectDumper) lambdaMethodSourcePacketClosed(method *MemberInfo, body *dumpedMethods, work *workbudget.Budget) bool {
-	if c == nil || c.obj == nil || len(c.obj.Methods) > 4096 || len(c.obj.ConstantPool) > 65535 || method == nil || !isSyntheticMethod(method.AccessFlags) || method.AccessFlags&(0x0020|0x0040|0x0100|0x0400) != 0 || body == nil || body.member != method || body.sourceDumper != c || body.sourceObject != c.obj || body.sourceRequest.role != methodSourceLambdaBody || !body.sourceRequest.valid() || body.sourceRequest.serial > c.methodSourceRequestSerial || body.sourceCacheKey == "" || c.dumpedMethodsSet[body.sourceCacheKey] != body || body.sourceReconstructionFailed() {
+	if c == nil || c.obj == nil || len(c.obj.Methods) > 4096 || len(c.obj.ConstantPool) > 65535 || method == nil || !isSyntheticMethod(method.AccessFlags) || method.AccessFlags&(0x0020|0x0040|0x0100|0x0400) != 0 || body == nil || body.member != method || body.sourceDumper != c || body.sourceObject != c.obj || body.sourceRequest.role != methodSourceLambdaBody || !body.sourceRequest.valid() || body.sourceRequest.serial > c.methodSourceRequestSerial || body.sourceCacheKey == "" || c.dumpedMethodsSet[body.sourceCacheKey] != body || body.sourceReconstructionFailed() || !c.lambdaParameterSourcePacketClosed(body) {
 		return false
 	}
 	owned := 0

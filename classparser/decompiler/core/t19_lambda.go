@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -109,12 +110,18 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 			}
 			val, err := f(static...)(d, sim, resultType, req.DynamicArgs...)
 			if err != nil {
+				if errors.Is(err, errFixedLambdaParameterTarget) {
+					return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, err.Error(), resultType)
+				}
 				return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 			}
 			return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
 		}
 		val, err := t19InlineLambda(req, d, static, impl, capturedEval, resultType)
 		if err != nil {
+			if errors.Is(err, errFixedLambdaParameterTarget) {
+				return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, err.Error(), resultType)
+			}
 			return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 		}
 		return okDispatch(req, FamilyLambda, t19PreserveMarkers(req, val, resultType), values.EffectCall|values.EffectAllocate)
@@ -262,10 +269,11 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 			}
 		}
 	}
-	methodStr, err := dumpLambdaWithReferenceAdapter(d, impl, captured, resultType, static, req.OriginPC)
+	source, err := dumpLambdaSourceWithReferenceAdapter(d, impl, captured, resultType, static, req.OriginPC)
 	if err != nil {
 		return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", impl.Name, impl.Member, err)
 	}
+	methodStr := source.Code
 	var retTypevarCast string
 	if d.getenv("JDEC_LAMBDA_RETURN_TYPEVAR_CAST_OFF") == "" {
 		var instantiatedMT values.JavaValue
@@ -299,7 +307,7 @@ func t19InlineLambda(req CallSiteRequest, d *Decompiler, static []values.JavaVal
 	}
 	cv.CapturesKnown = true
 	cv.Captures = captured
-	return cv, nil
+	return retainOriginalLambdaParameterTarget(d, cv, source, resultType, impl, static, len(captured))
 }
 
 func t19LambdaReturnCastStrings(funcCtx *class_context.ClassContext, lambda *values.CustomValue, fallback string) (target, rawBridge string) {

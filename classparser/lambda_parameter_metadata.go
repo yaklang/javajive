@@ -1,0 +1,159 @@
+package javaclassparser
+
+import (
+	"bytes"
+	"encoding/binary"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/internal/workbudget"
+)
+
+// A physical implementation is not the source SAM declaration. This narrow
+// projection covers an original static, uncaptured javac8 body with one actual
+// factory. Its parameter words must remain unwritten. Captured operands, shared
+// factories, other metadata and other compiler profiles need separate proofs.
+type lambdaParameterMetadata struct {
+	object      *ClassObject
+	method      *MemberInfo
+	table       *UnparsedAttribute
+	info        []byte
+	name        string
+	descriptor  string
+	names       []string
+	flags       []uint16
+	parameters  []string
+	parentNames []string
+	words       int
+	factory     *lambdaSourceFactory
+}
+
+// The actual callback supplies this origin. A matching descriptor or capture
+// count cannot substitute a different method, Code packet or instruction PC.
+type lambdaSourceFactory struct {
+	object                            *ClassObject
+	method                            *MemberInfo
+	code                              *CodeAttribute
+	pc                                int
+	sealed                            bool
+	flags, nameIndex, descriptorIndex uint16
+	codeBytes                         []byte
+}
+
+func (f *lambdaSourceFactory) same(other *lambdaSourceFactory) bool {
+	return f.closed() && other.closed() && f.object == other.object && f.method == other.method && f.code == other.code && f.pc == other.pc
+}
+
+func (f *lambdaSourceFactory) closed() bool {
+	if f == nil || f.object == nil || f.method == nil || f.code == nil || f.pc < 0 || f.pc >= len(f.code.Code) {
+		return false
+	}
+	return !f.sealed || f.method.AccessFlags == f.flags && f.method.NameIndex == f.nameIndex && f.method.DescriptorIndex == f.descriptorIndex && bytes.Equal(f.codeBytes, f.code.Code)
+}
+
+func readLambdaParameterMetadata(object *ClassObject, method *MemberInfo, work *workbudget.Budget) (*lambdaParameterMetadata, bool) {
+	if object == nil || method == nil || len(object.Methods) > 4096 || len(object.ConstantPool) > 65535 || len(method.Attributes) > 65535 || !nativeProofWork(work, int64(len(method.Attributes))+1) {
+		return nil, false
+	}
+	var table *UnparsedAttribute
+	for _, attribute := range method.Attributes {
+		if raw, ok := attribute.(*UnparsedAttribute); ok {
+			if raw == nil {
+				return nil, false
+			}
+			if raw.Name == "MethodParameters" {
+				if table != nil {
+					return nil, false
+				}
+				table = raw
+			}
+		}
+	}
+	if table == nil {
+		return nil, true
+	}
+	// ClassWriter adds ACC_SYNTHETIC to each implementation parameter. The
+	// source formal controls only its name and FINAL bit (OpenJDK javac8).
+	if object.MajorVersion != 52 || method.AccessFlags != 0x100a {
+		return nil, false
+	}
+	name, named := sourceBridgeUTF8(object, method.NameIndex)
+	descriptor, typed := sourceBridgeUTF8(object, method.DescriptorIndex)
+	parameters, _, err := callbinding.Descriptor(descriptor)
+	if !named || !typed || name == "<init>" || name == "<clinit>" || err != nil || len(parameters) == 0 || len(parameters) > 255 || table.Length != uint32(len(table.Info)) || len(table.Info) != 1+4*len(parameters) || int(table.Info[0]) != len(parameters) || !nativeProofWork(work, int64(len(table.Info))) || work != nil && work.CheckAlloc(int64(len(parameters))*192+int64(len(table.Info))) != nil {
+		return nil, false
+	}
+	projection := &lambdaParameterMetadata{object: object, method: method, table: table, info: bytes.Clone(table.Info), name: name, descriptor: descriptor, parameters: parameters}
+	seen := map[string]bool{}
+	nameBytes := 0
+	for i, parameter := range parameters {
+		entry := table.Info[1+4*i : 5+4*i]
+		text, known := sourceBridgeUTF8(object, binary.BigEndian.Uint16(entry[:2]))
+		flags := binary.BigEndian.Uint16(entry[2:])
+		nameBytes += len(text)
+		if !known || text == "_" || !class_context.PreservesJava8Identifier(text) || seen[text] || flags&^uint16(0x1010) != 0 || flags&0x1000 == 0 || nameBytes > methodParameterNamePoolPayloadLimit || !nativeProofWork(work, int64(len(text))+1) {
+			return nil, false
+		}
+		projection.names = append(projection.names, text)
+		projection.flags = append(projection.flags, flags)
+		seen[text] = true
+		projection.words++
+		if parameter == "J" || parameter == "D" {
+			projection.words++
+		}
+	}
+	return projection, projection.words <= 255
+}
+
+func (p *lambdaParameterMetadata) schemaMatches(object *ClassObject, method *MemberInfo, work *workbudget.Budget) bool {
+	if p == nil || p.object != object || p.method != method || p.factory != nil {
+		return false
+	}
+	fresh, known := readLambdaParameterMetadata(object, method, work)
+	return known && fresh != nil && fresh.table == p.table && bytes.Equal(fresh.info, p.info) && fresh.name == p.name && fresh.descriptor == p.descriptor && fresh.words == p.words && slices.Equal(fresh.names, p.names) && slices.Equal(fresh.flags, p.flags) && slices.Equal(fresh.parameters, p.parameters)
+}
+
+// Metadata is admitted only as a regeneration requirement on the actual body
+// request. It grants no capture, access, lexical membership or publication role.
+func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, work *workbudget.Budget) (*lambdaParameterMetadata, bool) {
+	if c == nil {
+		return nil, false
+	}
+	projection, known := readLambdaParameterMetadata(c.obj, method, work)
+	if !known || projection == nil {
+		return projection, known
+	}
+	if c.options.SourceCompiler != NativeJavac8 || c.options.TargetSourceVersion != 8 || !nativeLambdaBodyOriginalUseClosed(c.obj, method, work, projection) || projection.factory == nil {
+		return nil, false
+	}
+	factoryName, named := sourceBridgeUTF8(c.obj, projection.factory.method.NameIndex)
+	// This is a compiler-name regeneration constraint after the actual factory
+	// proof. A name prefix alone never identifies a lambda implementation.
+	prefix := "lambda$" + factoryName + "$"
+	if !named || !class_context.PreservesJava8Identifier(factoryName) || !strings.HasPrefix(projection.name, prefix) {
+		return nil, false
+	}
+	ordinal := strings.TrimPrefix(projection.name, prefix)
+	index, err := strconv.ParseUint(ordinal, 10, 32)
+	if err != nil || ordinal != strconv.FormatUint(index, 10) || index >= uint64(len(c.obj.Methods)) {
+		return nil, false
+	}
+	parentDescriptor, typed := sourceBridgeUTF8(c.obj, projection.factory.method.DescriptorIndex)
+	// Reuse the ordinary declaration reader without borrowing another proof
+	// caller's budget. This query mutates neither the dumper nor its input.
+	reader := ClassObjectDumper{obj: c.obj, Work: work}
+	parentNames, known := reader.originalOrdinaryMethodParameterNames(projection.factory.method, parentDescriptor)
+	if !typed || !known {
+		return nil, false
+	}
+	for _, name := range projection.names {
+		if slices.Contains(parentNames, name) {
+			return nil, false
+		}
+	}
+	projection.parentNames = parentNames
+	return projection, true
+}

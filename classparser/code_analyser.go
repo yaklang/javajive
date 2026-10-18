@@ -207,13 +207,13 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
 	parser.OriginalLambdaDeclaration = dumper.originalLambdaDeclaration
-	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int, hasPC bool) (string, error) {
+	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int, hasPC bool) (core.LambdaBodySource, error) {
 		if dumper.originalLambdaDeclaration(dumper.obj.GetClassName(), name, desc) != core.LambdaDeclarationSyntheticBody {
-			return "", fmt.Errorf("lambda source body is not an eligible original synthetic declaration")
+			return core.LambdaBodySource{}, fmt.Errorf("lambda source body is not an eligible original synthetic declaration")
 		}
 		site, closed := dumper.recordNativeLambdaFactorySource(name, desc, codeAttr, captured, pc, hasPC)
 		if !closed {
-			return "", fmt.Errorf("original lambda local capture source is not closed")
+			return core.LambdaBodySource{}, fmt.Errorf("original lambda local capture source is not closed")
 		}
 		dumper.lambdaMethods[name] = append(dumper.lambdaMethods[name], desc)
 		dumper.lambdaCaptureCount[name+desc] = len(captured)
@@ -264,27 +264,36 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 		defer func() { dumper.nativeLambdaBodySite = previousSite }()
 		request, known := dumper.newLambdaMethodSourceRequest(len(captured))
 		if !known {
-			return "", fmt.Errorf("lambda source request exceeds budget")
+			return core.LambdaBodySource{}, fmt.Errorf("lambda source request exceeds budget")
+		}
+		if hasPC {
+			request.factory = &lambdaSourceFactory{object: dumper.obj, method: dumper.CurrentMethod, code: codeAttr, pc: pc}
 		}
 		dumped, err := dumper.dumpMethodWithSourceRequest(name, desc, id, adapter, request)
 		if err != nil {
-			return "", err
+			return core.LambdaBodySource{}, err
 		}
 		if !dumper.recordLambdaMethodSourceBody(name, desc, request, dumped) {
-			return "", fmt.Errorf("successful lambda source body receipt is not closed")
+			return core.LambdaBodySource{}, fmt.Errorf("successful lambda source body receipt is not closed")
 		}
 		if site != nil {
 			dumper.nativeLambdaFactorySources[site].implementationBody = dumped
 		}
-		return dumped.code, nil
+		return core.LambdaBodySource{Code: dumped.code, FixedParameterTypes: dumped.lambdaParameterBinding != nil}, nil
 	}
 	parser.DumpClassLambdaMethod = func(name, desc string, id *utils.VariableId, captured []values.JavaValue) (string, error) {
-		return dumpLambda(name, desc, id, captured, nil, 0, false)
+		source, err := dumpLambda(name, desc, id, captured, nil, 0, false)
+		return source.Code, err
 	}
 	parser.DumpClassLambdaMethodWithAdapter = func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter) (string, error) {
-		return dumpLambda(name, desc, id, captured, adapter, 0, false)
+		source, err := dumpLambda(name, desc, id, captured, adapter, 0, false)
+		return source.Code, err
 	}
 	parser.DumpClassLambdaMethodAtOrigin = func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int) (string, error) {
+		source, err := dumpLambda(name, desc, id, captured, adapter, pc, true)
+		return source.Code, err
+	}
+	parser.DumpClassLambdaSourceAtOrigin = func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int) (core.LambdaBodySource, error) {
 		return dumpLambda(name, desc, id, captured, adapter, pc, true)
 	}
 	parser.BaseVarId = id

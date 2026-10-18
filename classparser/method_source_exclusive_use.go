@@ -2,6 +2,7 @@ package javaclassparser
 
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
+	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
@@ -11,7 +12,17 @@ import (
 // source-publication permission. Native scopes retain their separate producer
 // and ownership proofs. In particular, a request role or ACC_SYNTHETIC alone
 // cannot authorize dropping an observable original declaration.
-func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *MemberInfo, work *workbudget.Budget) bool {
+func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *MemberInfo, work *workbudget.Budget, metadata ...*lambdaParameterMetadata) bool {
+	if len(metadata) > 1 {
+		return false
+	}
+	var parameters *lambdaParameterMetadata
+	if len(metadata) == 1 {
+		parameters = metadata[0]
+		if parameters == nil || !parameters.schemaMatches(object, implementation, work) {
+			return false
+		}
+	}
 	if object == nil || implementation == nil || len(object.Methods) > 4096 || len(object.ConstantPool) > 65535 || implementation.AccessFlags&^uint16(0x100a) != 0 || implementation.AccessFlags&0x1002 != 0x1002 || !nativeProofWork(work, int64(len(object.Methods)+len(object.ConstantPool))) {
 		return false
 	}
@@ -23,9 +34,13 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 	for _, attribute := range implementation.Attributes {
 		switch attribute.(type) {
 		case *CodeAttribute, *ExceptionsAttribute:
+		case *UnparsedAttribute:
+			if parameters == nil || attribute != parameters.table {
+				return false
+			}
 		default:
-			// The existing body emitter has no declaration receipt for MP,
-			// generic signatures, annotations or unknown implementation metadata.
+			// Generic signatures, annotations and unknown implementation metadata
+			// have no regeneration receipt in this body-source domain.
 			return false
 		}
 	}
@@ -182,6 +197,7 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 	}
 	sites := 0
 	usedRows := map[int]bool{}
+	var factory *lambdaSourceFactory
 	for _, method := range object.Methods {
 		for _, attribute := range method.Attributes {
 			code, ok := attribute.(*CodeAttribute)
@@ -200,6 +216,13 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 				if !nativeProofWork(work, 1) || !nativeLambdaExclusiveOpcodeUse(object, object.GetClassName(), name, descriptor, handles, op) {
 					return false
 				}
+				if method == implementation && parameters != nil && core.LocalAccessOf(op.Instr.OpCode).Write {
+					// A fixed SAM binder is not later local-slot storage. Keep this
+					// first domain to unchanged entry words, including both wide words.
+					if slot := core.GetStoreIdx(op); slot < 0 || slot < parameters.words {
+						return false
+					}
+				}
 				if op.Instr.OpCode != core.OP_INVOKEDYNAMIC {
 					continue
 				}
@@ -217,12 +240,35 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 				if sites >= 64 {
 					return false
 				}
+				if parameters != nil {
+					factoryName, named := sourceBridgeUTF8(object, method.NameIndex)
+					nt, typed := constant(dynamic.NameAndTypeIndex).(*ConstantNameAndTypeInfo)
+					if factory != nil || !named || factoryName == "<init>" || factoryName == "<clinit>" || method.AccessFlags&(0x1000|0x0040|0x0100|0x0400) != 0 || !typed || nt == nil {
+						return false
+					}
+					factoryDescriptor, known := sourceBridgeUTF8(object, nt.DescriptorIndex)
+					captures, result, err := callbinding.Descriptor(factoryDescriptor)
+					if !known || err != nil || len(captures) != 0 || len(result) < 3 || result[0] != 'L' || result[len(result)-1] != ';' {
+						return false
+					}
+					factory = &lambdaSourceFactory{object: object, method: method, code: code, pc: int(op.CurrentOffset)}
+				}
 				usedRows[row] = true
 				sites++
 			}
 		}
 	}
-	return sites != 0 && len(usedRows) == len(allowed)
+	closed := sites != 0 && len(usedRows) == len(allowed)
+	if closed && parameters != nil {
+		if factory == nil || len(factory.code.Code) > 65535 || work != nil && work.CheckAlloc(int64(len(factory.code.Code))) != nil {
+			return false
+		}
+		factory.sealed = true
+		factory.flags, factory.nameIndex, factory.descriptorIndex = factory.method.AccessFlags, factory.method.NameIndex, factory.method.DescriptorIndex
+		factory.codeBytes = append([]byte(nil), factory.code.Code...)
+		parameters.factory = factory
+	}
+	return closed
 }
 
 // altMetafactory's existing marker-only source domain. Serializable lambdas and

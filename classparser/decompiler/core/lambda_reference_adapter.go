@@ -17,9 +17,22 @@ type LambdaReferenceAdapter struct {
 	InstantiatedDescriptor string
 }
 
+// FixedParameterTypes is a constraint from a completed original body-source
+// receipt. It grants no factory, invocation, adaptation or ownership role.
+// A later generic consumer must not retarget explicit source SAM formals.
+type LambdaBodySource struct {
+	Code                string
+	FixedParameterTypes bool
+}
+
 func dumpLambdaWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember, captured []values.JavaValue, raw types.JavaType, static []values.JavaValue, origin ...int) (string, error) {
+	source, err := dumpLambdaSourceWithReferenceAdapter(d, impl, captured, raw, static, origin...)
+	return source.Code, err
+}
+
+func dumpLambdaSourceWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember, captured []values.JavaValue, raw types.JavaType, static []values.JavaValue, origin ...int) (LambdaBodySource, error) {
 	if d.originalLambdaDeclaration(impl) != LambdaDeclarationSyntheticBody {
-		return "", fmt.Errorf("lambda source body requires original synthetic declaration metadata")
+		return LambdaBodySource{}, fmt.Errorf("lambda source body requires original synthetic declaration metadata")
 	}
 	var adapter *LambdaReferenceAdapter
 	if len(static) >= 3 && !d.blockPartialFunctionalTarget {
@@ -29,13 +42,19 @@ func dumpLambdaWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember,
 			adapter = &LambdaReferenceAdapter{ErasedDescriptor: erased, InstantiatedDescriptor: actual}
 		}
 	}
+	if len(origin) == 1 && d.DumpClassLambdaSourceAtOrigin != nil {
+		return d.DumpClassLambdaSourceAtOrigin(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter, origin[0])
+	}
 	if len(origin) == 1 && d.DumpClassLambdaMethodAtOrigin != nil {
-		return d.DumpClassLambdaMethodAtOrigin(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter, origin[0])
+		code, err := d.DumpClassLambdaMethodAtOrigin(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter, origin[0])
+		return LambdaBodySource{Code: code}, err
 	}
 	if adapter != nil && d.DumpClassLambdaMethodWithAdapter != nil {
-		return d.DumpClassLambdaMethodWithAdapter(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter)
+		code, err := d.DumpClassLambdaMethodWithAdapter(impl.Member, impl.Description, utils.NewRootVariableId(), captured, adapter)
+		return LambdaBodySource{Code: code}, err
 	}
-	return d.DumpClassLambdaMethod(impl.Member, impl.Description, utils.NewRootVariableId(), captured)
+	code, err := d.DumpClassLambdaMethod(impl.Member, impl.Description, utils.NewRootVariableId(), captured)
+	return LambdaBodySource{Code: code}, err
 }
 
 // Exact wrapper-to-primitive input adaptation belongs at SAM entry, before

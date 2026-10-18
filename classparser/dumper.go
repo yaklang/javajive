@@ -3834,6 +3834,30 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	dumped.member = method
 
 	isLambda := request.role == methodSourceLambdaBody
+	var lambdaMetadata *lambdaParameterMetadata
+	var lambdaParameterSource *lambdaParameterBinding
+	if isLambda {
+		var known bool
+		lambdaMetadata, known = c.originalLambdaParameterMetadata(method, c.Work)
+		if !known {
+			return nil, fmt.Errorf("unproved lambda parameter metadata regeneration")
+		}
+		if lambdaMetadata != nil {
+			if request.captureCount != 0 || !lambdaMetadata.factory.same(request.factory) || adapter != nil && (adapter.ErasedDescriptor != lambdaMetadata.descriptor || adapter.InstantiatedDescriptor != lambdaMetadata.descriptor) {
+				return nil, fmt.Errorf("lambda parameter metadata needs its original uncaptured factory")
+			}
+			dumped.parameterNameStamp, known = c.newMethodParameterNameCacheStamp(method, descriptor, lambdaMetadata.names)
+			if !known || dumped.parameterNameStamp == nil {
+				return nil, fmt.Errorf("lambda parameter metadata cannot be stamped")
+			}
+			dumped.parameterNameStamp.lambdaParameters = true
+			dumped.parameterNameStamp.lambdaFactory = lambdaMetadata.factory
+			if c.Work != nil && c.Work.CheckAlloc(int64(len(lambdaMetadata.parentNames))*16) != nil {
+				return nil, fmt.Errorf("lambda enclosing parameter stamp exceeds budget")
+			}
+			dumped.parameterNameStamp.lambdaParentNames = slices.Clone(lambdaMetadata.parentNames)
+		}
+	}
 	// Track lexical lambda nesting so nested-lambda parameters get collision-free names (see
 	// c.lambdaDepth). The increment must bracket ParseBytesCode below, because an inner lambda's arrow
 	// is materialised eagerly during the outer lambda's bytecode parse.
@@ -4245,6 +4269,13 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				samParams = samParams[2:]
 			}
 			var parameterNameBinding *ordinaryMethodParameterNameBinding
+			if lambdaMetadata != nil {
+				var known bool
+				lambdaParameterSource, known = c.bindLambdaParameterMetadata(lambdaMetadata, request, samParams)
+				if !known {
+					return nil, fmt.Errorf("unproved lambda parameter entry identities")
+				}
+			}
 			if !isLambda {
 				var namesBound bool
 				parameterNameBinding, namesBound = c.bindOrdinaryMethodParameterNames(method, descriptor, originalParameterNames, samParams)
@@ -4259,7 +4290,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			// params/locals (var1, var2, ...). Rename each SAM param to an `l<N>` name that the
 			// slot-based scheme never generates, eliminating the collision while keeping the body
 			// consistent (every body reference shares the same JavaRef/Id).
-			if isLambda {
+			if isLambda && lambdaMetadata == nil {
 				// A nested lambda (depth>=2) namespaces its parameters by nesting depth so they cannot
 				// shadow an enclosing lambda parameter; a top-level lambda keeps the flat `l<i>` name so
 				// the overwhelmingly common single-lambda case stays byte-for-byte unchanged.
@@ -4313,16 +4344,23 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			if localErr != nil {
 				return nil, localErr
 			}
-			if !c.prepareOrdinaryMethodParameterNamespace(parameterNameBinding, statementList, params) {
+			if lambdaParameterSource == nil && !c.prepareOrdinaryMethodParameterNamespace(parameterNameBinding, statementList, params) {
 				return nil, fmt.Errorf("unproved original parameter namespace")
 			}
-			if isLambda && !c.prepareLambdaEnclosingParameterNamespace(statementList, samParams) {
+			if isLambda && lambdaParameterSource == nil && !c.prepareLambdaEnclosingParameterNamespace(statementList, samParams) {
 				return nil, fmt.Errorf("unproved enclosing parameter/lambda namespace")
 			}
 			// Capture planning can constrain a SAM binder after its initial name.
 			// Refresh the header from those same declaration IDs after all binding decisions.
 			if isLambda {
-				lambdaMethodLocalNamespace = c.prepareNativeLambdaMethodLocalNamespace(statementList, params)
+				if lambdaParameterSource != nil {
+					lambdaMethodLocalNamespace = c.prepareLambdaParameterMetadataNamespace(lambdaParameterSource, statementList, samParams)
+					if !lambdaMethodLocalNamespace {
+						return nil, fmt.Errorf("unproved fixed lambda parameter namespace")
+					}
+				} else {
+					lambdaMethodLocalNamespace = c.prepareNativeLambdaMethodLocalNamespace(statementList, params)
+				}
 				lambdaParamNames = nil
 				for _, v := range samParams {
 					if ref, ok := v.(*values.JavaRef); ok && ref != nil && ref.Id != nil && !ref.IsThis {
@@ -4423,6 +4461,21 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 						// declaration is Object → "Object cannot be converted to V"; $1.output).
 						retypeForceErasedParam(val, typ, typName, c.FuncCtx)
 					}
+				}
+			}
+			if lambdaParameterSource != nil {
+				if !lambdaParameterSource.parametersClosed(funcCtx, c.Work) {
+					return nil, fmt.Errorf("original lambda parameter binders changed")
+				}
+				// Explicit formals regenerate FINAL, including unused parameters.
+				// Their erasures were checked against the original entry descriptor.
+				paramsNewStrList = nil
+				for i, ref := range lambdaParameterSource.refs {
+					declaration := renderMethodParamType(ref.Type(), funcCtx) + " " + ref.String(funcCtx)
+					if lambdaMetadata.flags[i]&0x10 != 0 {
+						declaration = "final " + declaration
+					}
+					paramsNewStrList = append(paramsNewStrList, declaration)
 				}
 			}
 			c.MethodType = methodType.FunctionType()
@@ -5095,6 +5148,19 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		}
 		res := fmt.Sprintf("(%s) -> {%s", paramsNewStr, code)
 		res += strings.Repeat("\t", c.TabNumber()) + "}"
+		if lambdaParameterSource != nil {
+			if !lambdaParameterSource.parametersClosed(c.FuncCtx, c.Work) {
+				return nil, fmt.Errorf("rendered lambda parameter binders changed")
+			}
+			context := *c.FuncCtx
+			context.LocalNames = map[*utils2.VariableId]string{}
+			for i, ref := range lambdaParameterSource.refs {
+				context.LocalNames[ref.Id] = lambdaMetadata.names[i]
+			}
+			lambdaParameterSource.context = &context
+			lambdaParameterSource.arrow = res
+			dumped.lambdaParameterBinding = lambdaParameterSource
+		}
 		dumped.methodName = name
 		dumped.code = res
 		dumped.bodyCode = code
@@ -5260,6 +5326,7 @@ type dumpedMethods struct {
 	sourceBodyStart, sourceBodyEnd int
 	hasSourceBodyRange             bool
 	parameterNameStamp             *methodParameterNameCacheStamp
+	lambdaParameterBinding         *lambdaParameterBinding
 	sourceRequest                  methodSourceRequest
 	sourceDumper                   *ClassObjectDumper
 	sourceObject                   *ClassObject

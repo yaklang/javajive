@@ -8,6 +8,9 @@ import (
 // This stamp only protects packets that consumed ordinary MethodParameters
 // names. It is not a general cache authority or an input-immutability claim.
 type methodParameterNameCacheStamp struct {
+	lambdaParameters                         bool
+	lambdaFactory                            *lambdaSourceFactory
+	lambdaParentNames                        []string
 	object                                   *ClassObject
 	method                                   *MemberInfo
 	major, flags, nameIndex, descriptorIndex uint16
@@ -131,7 +134,17 @@ func (c *ClassObjectDumper) methodParameterNameCacheClosed(s *methodParameterNam
 	if !named || name != s.name {
 		return false
 	}
-	names, known := c.originalOrdinaryMethodParameterNames(s.method, s.descriptor)
+	var names []string
+	var known bool
+	if s.lambdaParameters {
+		projection, closed := c.originalLambdaParameterMetadata(s.method, c.Work)
+		if !closed || projection == nil || !s.lambdaFactory.same(projection.factory) || !slices.Equal(s.lambdaParentNames, projection.parentNames) {
+			return false
+		}
+		names, known = projection.names, true
+	} else {
+		names, known = c.originalOrdinaryMethodParameterNames(s.method, s.descriptor)
+	}
 	if !known || len(names) != len(s.names) {
 		return false
 	}
