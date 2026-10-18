@@ -313,8 +313,11 @@ func ErasedFactoryReturn(ctx *class_context.ClassContext, v JavaValue, result st
 	}
 	owner := strings.ReplaceAll(f.ClassName, ".", "/")
 	family, e := callbinding.FamilyOf(callbinding.Witness{Owner: owner, Name: f.FunctionName, Desc: f.Descriptor}, ctx.InvocationMetadata)
-	if e != nil || !family.Complete || family.Proof != callbinding.Unique || family.Target == nil || family.Target.Varargs || family.Target.Bridge {
+	if e != nil || !family.Complete || family.Proof != callbinding.Unique || family.Target == nil || family.Target.Bridge {
 		return false
+	}
+	if family.Target.Varargs {
+		return erasedOriginalArrayFactoryResult(ctx, f, result)
 	}
 	_, cs, sig := erasedInvocationDeclaration(ctx, owner, f.FunctionName, f.Descriptor)
 	if (!f.IsStatic && len(types.ClassFormalTypeParamNames(cs)) != 0) || strings.Contains(sig, "^") {

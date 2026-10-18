@@ -40,7 +40,8 @@ func fixAssertjRemainingReconstructs(body string) string {
 	// wrapped in (String)/(String[]).
 	body = strings.ReplaceAll(body, "(String)(this.parse(var1))", "this.parse(var1)")
 	body = strings.ReplaceAll(body, "(String)(new BigDecimal(var1))", "new BigDecimal(var1)")
-	body = unwrapJavaCastIfInnerPrefix(body, "String[]", "convertTo")
+	// A producer's argument type or name does not prove its result array type.
+	// Keep original CHECKCAST and selected-descriptor views in the typed IR.
 
 	if strings.Contains(body, "isCloseTo") {
 		body = unwrapJavaCast(body, "Temporal")
@@ -165,32 +166,6 @@ func unwrapJavaCast(body, typ string) string {
 		}
 		end := inner + n
 		expr := body[inner+1 : end-1]
-		body = body[:start] + expr + body[end:]
-		from = start + len(expr)
-	}
-}
-
-func unwrapJavaCastIfInnerPrefix(body, typ, prefix string) string {
-	needle := "(" + typ + ")("
-	from := 0
-	for {
-		rel := strings.Index(body[from:], needle)
-		if rel < 0 {
-			return body
-		}
-		start := from + rel
-		inner := start + len(needle) - 1
-		n := skipBalanced(body[inner:], '(', ')')
-		if n < 2 {
-			from = start + 1
-			continue
-		}
-		end := inner + n
-		expr := body[inner+1 : end-1]
-		if !strings.HasPrefix(strings.TrimSpace(expr), prefix) {
-			from = start + 1
-			continue
-		}
 		body = body[:start] + expr + body[end:]
 		from = start + len(expr)
 	}

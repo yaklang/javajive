@@ -9364,22 +9364,9 @@ func fixNettyRemainingReconstructs(body string) string {
 	if jdecenv.Get("JDEC_NETTY_REMAINING_OFF") == "1" {
 		return body
 	}
-	// IpSubnetFilter varargs ctors: Arrays.asList((Object[])checkNotNull(rules))
-	// infers List<Object>, which does not bind IpSubnetFilter(boolean, List<IpSubnetFilterRule>).
-	if strings.Contains(body, "class IpSubnetFilter") && !strings.Contains(body, "class IpSubnetFilterRule") {
-		body = strings.ReplaceAll(body,
-			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull(var1,\"rules\"))))",
-			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var1,\"rules\")))")
-		body = strings.ReplaceAll(body,
-			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull((Object)(var1),\"rules\"))))",
-			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var1,\"rules\")))")
-		body = strings.ReplaceAll(body,
-			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull(var2,\"rules\"))))",
-			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var2,\"rules\")))")
-		body = strings.ReplaceAll(body,
-			"Arrays.asList(((Object[])(ObjectUtil.checkNotNull((Object)(var2),\"rules\"))))",
-			"Arrays.asList((IpSubnetFilterRule[])(ObjectUtil.checkNotNull(var2,\"rules\")))")
-	}
+	// Constructor result views are handled at their typed consumer. A generic
+	// producer's input array does not prove its runtime result component type;
+	// source text must not narrow the original CHECKCAST to make a List bind.
 	// AbstractSniHandler.lookup(ByteBuf) must call the String overload, not
 	// recast hostname to ByteBuf (recursive/self bind).
 	if strings.Contains(body, "class AbstractSniHandler") {

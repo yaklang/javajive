@@ -2612,49 +2612,6 @@ func (f *FunctionCallExpression) typeVarArrayArgCast(ok1, resolvedGeneric bool, 
 // (a null or a checkcast), so the `(byte[])` cast is behaviour-preserving. Tightly gated: array parameter
 // + non-array reference argument whose erasure is Object (a concrete-class argument to an array parameter
 // would be a genuine type error we must not paper over). Kill-switch: JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF=1.
-// identityArrayThroughCallCast returns the array type to wrap an argument in when a generic
-// identity call (`<T> T checkNotNull(T)`) erased to Object is passed to a varargs / Object[]
-// formal. Casting to Object[] makes Arrays.asList infer List<Object> and reject the
-// List<IpSubnetFilterRule> this(...) overload (netty IpSubnetFilter). The operand's own
-// array type (`IpSubnetFilterRule[]`) keeps inference. Kill-switch
-// JDEC_IDENTITY_ARRAY_CALL_CAST_OFF.
-func identityArrayThroughCallCast(argType types.JavaType, arg JavaValue, funcCtx *class_context.ClassContext) string {
-	if funcCtx.Getenv("JDEC_IDENTITY_ARRAY_CALL_CAST_OFF") != "" {
-		return ""
-	}
-	if argType == nil || arg == nil || !argType.IsArray() {
-		return ""
-	}
-	erased := argType.String(funcCtx)
-	if erased != "Object[]" && erased != "java.lang.Object[]" {
-		return ""
-	}
-	call, ok := UnpackSoltValue(arg).(*FunctionCallExpression)
-	if !ok || call == nil || len(call.Arguments) == 0 || call.Arguments[0] == nil {
-		return ""
-	}
-	a0t := call.Arguments[0].Type()
-	s := ""
-	if a0t != nil && a0t.IsArray() {
-		s = a0t.String(funcCtx)
-	} else if funcCtx != nil && funcCtx.IsVarArgs {
-		// A varargs formal `T... var1` may type the slot as T (the element) even
-		// though the JVM slot is T[]. Use the enclosing method's last parameter.
-		if ft, ok := funcCtx.FunctionType.(*types.JavaFuncType); ok && ft != nil && len(ft.ParamTypes) > 0 {
-			last := ft.ParamTypes[len(ft.ParamTypes)-1]
-			if last != nil && last.IsArray() {
-				if _, isRef := UnpackSoltValue(call.Arguments[0]).(*JavaRef); isRef {
-					s = last.String(funcCtx)
-				}
-			}
-		}
-	}
-	if s == "" || s == erased {
-		return ""
-	}
-	return s
-}
-
 func arrayParamRefArgCast(argType types.JavaType, arg JavaValue, funcCtx *class_context.ClassContext) bool {
 	if funcCtx.Getenv("JDEC_ARRAY_PARAM_REF_ARG_CAST_OFF") != "" {
 		return false
@@ -4193,17 +4150,6 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		argTypeStr := argType.String(funcCtx)
 		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
 			return fmt.Sprintf("(%s)(%s)", argTypeStr, argStr)
-		}, func() types.JavaType {
-			return argType
-		})
-	} else if cast := identityArrayThroughCallCast(argType, arg, funcCtx); cast != "" {
-		// `<T> T id(T)` returning Object (erased) into a varargs `Object[]` formal:
-		// wrapping as `(Object[])` makes Arrays.asList infer List<Object> (netty
-		// IpSubnetFilter `this(true, Arrays.asList(checkNotNull(rules)))`). Cast to
-		// the operand's array type instead. Kill-switch JDEC_IDENTITY_ARRAY_CALL_CAST_OFF.
-		argStr := arg.String(funcCtx)
-		arg = NewCustomValue(func(funcCtx *class_context.ClassContext) string {
-			return fmt.Sprintf("(%s)(%s)", cast, argStr)
 		}, func() types.JavaType {
 			return argType
 		})
