@@ -4098,6 +4098,9 @@ func (f *FunctionCallExpression) renderArgAt(i int, funcCtx *class_context.Class
 		// the descriptor pin below, including String.valueOf(Object).
 		return arg.String(funcCtx)
 	}
+	if cast := f.declaredArrayArgumentCast(i, funcCtx); cast != "" {
+		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
+	}
 	if cast := f.witnessDescriptorArgCast(i, arg, funcCtx); cast != "" {
 		return f.renderProvenArgumentCast(i, cast, arg, funcCtx)
 	}

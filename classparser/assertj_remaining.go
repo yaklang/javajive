@@ -21,12 +21,6 @@ func fixAssertjRemainingReconstructs(body string) string {
 	}
 	if strings.Contains(body, "ELEMENT extends") {
 		body = strings.ReplaceAll(body,
-			"IterableUtil.toArray((Iterable)(var1))",
-			"(ELEMENT[])(IterableUtil.toArray((Iterable)(var1)))")
-		body = strings.ReplaceAll(body,
-			"(ELEMENT[])((ELEMENT[])(IterableUtil.toArray((Iterable)(var1))))",
-			"(ELEMENT[])(IterableUtil.toArray((Iterable)(var1)))")
-		body = strings.ReplaceAll(body,
 			"this.newObjectArrayAssert(Filters.filter(((Object[])(this.actual))).with(var1,var2).get())",
 			"this.newObjectArrayAssert((List)(Filters.filter(((Object[])(this.actual))).with(var1,var2).get()))")
 		body = strings.ReplaceAll(body,
@@ -87,12 +81,6 @@ func fixAssertjRemainingReconstructs(body string) string {
 	body = strings.ReplaceAll(body,
 		"return Comparator.naturalOrder().compare(var1,var2)",
 		"return var1.compareTo(var2)")
-	body = strings.ReplaceAll(body,
-		"this.compareElementsOf(((Object[])(var1)),((Object[])(var2)))",
-		"this.compareElementsOf((T[])((Object[])(var1)),(T[])((Object[])(var2)))")
-	body = strings.ReplaceAll(body,
-		"this.compareElementsOf(((AtomicReferenceArray)(var1)),((Object[])(var2)))",
-		"this.compareElementsOf(((AtomicReferenceArray)(var1)),(T[])((Object[])(var2)))")
 
 	body = strings.ReplaceAll(body,
 		"public static List<DeepDifference$Difference> determineDifferences(Object var0, Object var1, TreeMap var2, TypeComparators var3)",
