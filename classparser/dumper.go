@@ -2083,6 +2083,15 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	if c.Work != nil && c.Work.Err() != nil {
 		return "", c.Work.Err()
 	}
+	if reordered, closed := c.native8LambdaSourceIdentityLayout(full, members, methods); closed {
+		full = reordered
+	} else {
+		if c.Work != nil && c.Work.Err() != nil {
+			return "", c.Work.Err()
+		}
+		c.appendDiagnostic(DecompileDiagnostic{Code: "bootstrap_unknown", Message: "native javac8 lambda implementation identities cannot be regenerated from the final source order"})
+		return "", fmt.Errorf("native javac8 lambda implementation source identities are unproved")
+	}
 	if packet := c.nativeAssertionProtocol(); packet != nil && c.nativeStandaloneAssertion == nil && !packet.pureInitializer && c.nativeAssertionInitProjection != packet {
 		return "", fmt.Errorf("assertion initializer source projection incomplete")
 	}
