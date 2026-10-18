@@ -126,7 +126,7 @@ func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, 
 	if !known || projection == nil {
 		return projection, known
 	}
-	if c.options.SourceCompiler != NativeJavac8 || c.options.TargetSourceVersion != 8 || !nativeLambdaBodyOriginalUseClosed(c.obj, method, work, projection) || projection.factory == nil {
+	if c.options.SourceCompiler != NativeJavac8 || c.options.TargetSourceVersion != 8 || !native8LambdaParameterCompilerFlagClosed(c.obj, work) || !nativeLambdaBodyOriginalUseClosed(c.obj, method, work, projection) || projection.factory == nil {
 		return nil, false
 	}
 	factoryName, named := sourceBridgeUTF8(c.obj, projection.factory.method.NameIndex)
@@ -156,4 +156,58 @@ func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, 
 	}
 	projection.parentNames = parentNames
 	return projection, true
+}
+
+// javac8's -parameters option applies to every source method declaration.
+// Regenerating an implementation table must not also invent observable names
+// on another original ordinary header that had no table or unnamed entries.
+// This necessary class-wide condition grants no binding or declaration role;
+// compiler-owned headers retain their separate regeneration proofs.
+func native8LambdaParameterCompilerFlagClosed(object *ClassObject, work *workbudget.Budget) bool {
+	if object == nil || len(object.Methods) > 4096 || !nativeProofWork(work, int64(len(object.Methods))+1) {
+		return false
+	}
+	for _, method := range object.Methods {
+		if method == nil || len(method.Attributes) > 65535 || !nativeProofWork(work, 1) {
+			return false
+		}
+		if method.AccessFlags&(0x1000|0x0040) != 0 {
+			continue
+		}
+		descriptor, typed := sourceBridgeUTF8(object, method.DescriptorIndex)
+		if !typed || len(descriptor) > 65535 || !nativeProofWork(work, int64(len(descriptor)+len(method.Attributes))+1) || work != nil && work.CheckAlloc(int64(len(descriptor))*32+256) != nil {
+			return false
+		}
+		parameters, _, err := callbinding.Descriptor(descriptor)
+		if err != nil || len(parameters) > 255 {
+			return false
+		}
+		if len(parameters) == 0 {
+			continue
+		}
+		var table *UnparsedAttribute
+		for _, attribute := range method.Attributes {
+			if raw, ok := attribute.(*UnparsedAttribute); ok {
+				if raw == nil {
+					return false
+				}
+				if raw.Name == "MethodParameters" {
+					if table != nil {
+						return false
+					}
+					table = raw
+				}
+			}
+		}
+		if table == nil || table.Length != uint32(len(table.Info)) || len(table.Info) != 1+4*len(parameters) || int(table.Info[0]) != len(parameters) || !nativeProofWork(work, int64(len(table.Info))) {
+			return false
+		}
+		for i := range parameters {
+			name, known := sourceBridgeUTF8(object, binary.BigEndian.Uint16(table.Info[1+4*i:3+4*i]))
+			if !known || name == "" || !nativeProofWork(work, int64(len(name))+1) {
+				return false
+			}
+		}
+	}
+	return true
 }

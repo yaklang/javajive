@@ -91,6 +91,98 @@ class LambdaParameterDriver{
 	testUncapturedLambdaParameterMetadataRoundTrip(t, source, 4, "35")
 }
 
+// A valid classfile may carry MethodParameters on selected methods only.
+// Native javac8 cannot regenerate that choice with its class-wide compiler
+// flag. In particular, preserving the synthetic tables must not invent a
+// parameter name on an unrelated ordinary declaration.
+func TestAdversarialUncapturedLambdaParameterCompilerFlagCannotInventNames(t *testing.T) {
+	compiler := os.Getenv("JAVA8_JAVAC")
+	if compiler == "" {
+		t.Skip("JAVA8_JAVAC required for independent metadata-presence oracle")
+	}
+	_, java := t04Tools(t)
+	for _, owner := range []string{"UncapturedLambdaNames", "AlternateLambdaParameters"} {
+		t.Run(owner, func(t *testing.T) {
+			for _, debug := range []string{"none", "source,lines,vars"} {
+				t.Run(debug, func(t *testing.T) {
+					files := compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, strings.ReplaceAll(uncapturedLambdaParameterFixture, "UncapturedLambdaNames", owner), owner, debug)
+					writeWorld := func() string {
+						t.Helper()
+						dir := t.TempDir()
+						for name, data := range files {
+							if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+								t.Fatal(err)
+							}
+						}
+						return dir
+					}
+					unmodified := t04RunJava(t, java, writeWorld(), "LambdaParameterDriver")
+					t.Log("independent all-named original lambda JVM:", strings.TrimSpace(unmodified))
+					object, err := Parse(bytes.Clone(files[owner+".class"]))
+					if err != nil {
+						t.Fatal(err)
+					}
+					ordinary, table := lambdaParameterUnrelatedOrdinaryTable(t, object)
+					removeLambdaParameterTestTable(ordinary, table)
+					files[owner+".class"] = object.Bytes()
+					original := t04RunJava(t, java, writeWorld(), "LambdaParameterDriver")
+					if original == unmodified || !strings.HasPrefix(original, "140:uncaptured:lambda:parameters:") {
+						t.Fatal("original metadata absence was not independently observed", original, unmodified)
+					}
+					t.Log("independent selectively named original lambda JVM:", strings.TrimSpace(original))
+					before := bytes.Clone(files[owner+".class"])
+					for _, mode := range []DecompileMode{Precision, Compatibility} {
+						t.Run(string(mode), func(t *testing.T) {
+							result, err := DecompileWithOptions(bytes.Clone(before), DecompileOptions{Mode: mode, SourceCompiler: NativeJavac8, TargetSourceVersion: 8, EnvSnapshot: map[string]string{}, Resolve: func(name string) ([]byte, bool) {
+								data, found := files[name+".class"]
+								return bytes.Clone(data), found
+							}})
+							if err != nil || result.Status == "complete" {
+								t.Fatalf("unrepresentable parameter presence claimed complete: status=%s err=%v diagnostics=%+v", result.Status, err, result.Diagnostics)
+							}
+							unsupported := false
+							for _, diagnostic := range result.Diagnostics {
+								unsupported = unsupported || diagnostic.Code == "bootstrap_unknown"
+								if diagnostic.Code == "bootstrap_arg_mismatch" {
+									t.Fatal("valid original metadata misclassified as malformed bootstrap", diagnostic)
+								}
+							}
+							if !unsupported || !bytes.Equal(files[owner+".class"], before) {
+								t.Fatal("missing source limitation or changed original input", result.Diagnostics)
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func lambdaParameterUnrelatedOrdinaryTable(t *testing.T, object *ClassObject) (*MemberInfo, *UnparsedAttribute) {
+	t.Helper()
+	for _, method := range object.Methods {
+		name, _ := sourceBridgeUTF8(object, method.NameIndex)
+		if name == "unary" {
+			for _, attribute := range method.Attributes {
+				if table, ok := attribute.(*UnparsedAttribute); ok && table.Name == "MethodParameters" {
+					return method, table
+				}
+			}
+		}
+	}
+	t.Fatal("original ordinary fixture declaration must have its parameter table")
+	return nil, nil
+}
+
+func removeLambdaParameterTestTable(method *MemberInfo, table *UnparsedAttribute) {
+	for i, attribute := range method.Attributes {
+		if attribute == table {
+			method.Attributes = append(method.Attributes[:i], method.Attributes[i+1:]...)
+			return
+		}
+	}
+}
+
 func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string, implementations int, states string) {
 	t.Helper()
 	modern, java := t04Tools(t)

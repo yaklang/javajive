@@ -301,7 +301,7 @@ func TestAdversarialUncapturedLambdaParameterBindingRequiresEntryAndCallbackIden
 
 func TestAdversarialUncapturedLambdaParameterCacheReopensMetadataCodeAndFactory(t *testing.T) {
 	raw := lambdaParameterTestOriginal(t)
-	for _, variant := range []string{"original", "MP name", "MP final", "MP pointer", "remove MP", "target Code", "target limits", "target handlers", "target Code pointer", "class pointer", "major", "method flags", "getter pool", "factory Code", "factory Code pointer", "factory member pointer", "factory method flags", "parent name", "modern profile", "source release", "budget", "canceled"} {
+	for _, variant := range []string{"original", "MP name", "MP final", "MP pointer", "remove MP", "unrelated parameter table", "target Code", "target limits", "target handlers", "target Code pointer", "class pointer", "major", "method flags", "getter pool", "factory Code", "factory Code pointer", "factory member pointer", "factory method flags", "parent name", "modern profile", "source release", "budget", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			selected := "(II)I"
 			if variant == "parent name" {
@@ -343,6 +343,9 @@ func TestAdversarialUncapturedLambdaParameterCacheReopensMetadataCodeAndFactory(
 						break
 					}
 				}
+			case "unrelated parameter table":
+				ordinary, metadata := lambdaParameterUnrelatedOrdinaryTable(t, d.obj)
+				removeLambdaParameterTestTable(ordinary, metadata)
 			case "target Code":
 				code.Code[0] = 0x03
 			case "target limits":
@@ -397,6 +400,45 @@ func TestAdversarialUncapturedLambdaParameterCacheReopensMetadataCodeAndFactory(
 			}
 			if got := d.methodParameterNameCacheClosed(stamp); got != (variant == "original") {
 				t.Fatalf("cached metadata source accepted=%v for %s", got, variant)
+			}
+		})
+	}
+}
+
+func TestAdversarialUncapturedLambdaParameterCompilerFlagRequiresWholeClass(t *testing.T) {
+	raw := lambdaParameterTestOriginal(t)
+	for _, variant := range []string{"original", "missing table", "duplicate table", "length", "count", "unnamed", "unknown name CP", "budget", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			d, implementation, _, _ := lambdaParameterTestDumper(t, raw)
+			ordinary, table := lambdaParameterUnrelatedOrdinaryTable(t, d.obj)
+			switch variant {
+			case "missing table":
+				removeLambdaParameterTestTable(ordinary, table)
+			case "duplicate table":
+				ordinary.Attributes = append(ordinary.Attributes, table)
+			case "length":
+				table.Length++
+			case "count":
+				table.Info[0]++
+			case "unnamed":
+				binary.BigEndian.PutUint16(table.Info[1:3], 0)
+			case "unknown name CP":
+				index := binary.BigEndian.Uint16(table.Info[1:3])
+				d.obj.ConstantPool[index-1] = &ConstantIntegerInfo{Value: 1}
+			case "budget":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxRequestWork: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				d.Work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			before := d.obj.Bytes()
+			projection, known := d.originalLambdaParameterMetadata(implementation, d.Work)
+			if (known && projection != nil) != (variant == "original") {
+				t.Fatalf("class-wide compiler flag accepted=%v for %s", known, variant)
+			}
+			if !bytes.Equal(before, d.obj.Bytes()) {
+				t.Fatal("class-wide metadata consistency query changed original input")
 			}
 		})
 	}
