@@ -12,8 +12,9 @@ import (
 )
 
 // Ordinary method formals have a one-to-one relation to descriptor parameters.
-// Constructors and compiler-owned methods retain their existing projection:
-// neither descriptor arity nor a source spelling proves a hidden-argument role.
+// A constructor participates only after its original declaration proves that
+// it has no compiler-owned enclosing-instance, enum or local capture formals.
+// Neither descriptor arity nor a source spelling proves a hidden-argument role.
 // A present table must be completely expressible by the source compiler. A
 // missing name or duplicate spelling cannot be repaired while retaining the
 // original Parameter.getName()/isNamePresent() result.
@@ -27,7 +28,10 @@ func (c *ClassObjectDumper) originalOrdinaryMethodParameterNames(method *MemberI
 	if !named || !typed || actual != descriptor || err != nil || len(physical) > 255 {
 		return nil, false
 	}
-	if name == "<init>" || name == "<clinit>" || method.AccessFlags&(0x1000|0x0040|0x0100) != 0 {
+	if name == "<clinit>" || method.AccessFlags&(0x1000|0x0040|0x0100) != 0 {
+		return nil, true
+	}
+	if name == "<init>" && !c.constructorHasOnlySourceParameters(method, descriptor) {
 		return nil, true
 	}
 	var table *UnparsedAttribute

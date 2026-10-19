@@ -145,7 +145,7 @@ func (c *ClassObjectDumper) methodParameterNameCacheClosed(s *methodParameterNam
 	} else {
 		names, known = c.originalOrdinaryMethodParameterNames(s.method, s.descriptor)
 	}
-	if !known || len(names) != len(s.names) {
+	if !known || names == nil || len(names) != len(s.names) {
 		return false
 	}
 	for i, name := range names {

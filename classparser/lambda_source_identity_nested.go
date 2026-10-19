@@ -86,7 +86,7 @@ func (c *ClassObjectDumper) native8NestedLambdaSourceIdentityEvents(source strin
 	events := make([]nativeLambdaSourceIdentityEvent, 0, len(arrows))
 	var walk func(*dumpedMethods, *dumpedMethods, string, int, int) bool
 	walk = func(parent, root *dumpedMethods, content string, offset, depth int) bool {
-		if depth >= methodSourceLambdaDepthLimit || parent == nil || !nativeProofWork(c.Work, 1) {
+		if depth > methodSourceLambdaDepthLimit || parent == nil || !nativeProofWork(c.Work, 1) {
 			return false
 		}
 		frame := parent.lambdaEmission
