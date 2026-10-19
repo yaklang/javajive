@@ -6,9 +6,9 @@ import (
 )
 
 // Ordinary method declarations have no class-initialization execution step.
-// Their complete packets can be scheduled in existing method slots to satisfy
-// the compiler's lambda numbering constraints. Fields, initializers, statement
-// order and constructor packets stay in place. Other synthesis protocols need
+// Their complete packets can be scheduled around anchored initializers to
+// satisfy the compiler's lambda numbering constraints. Fields, initializers,
+// statements and constructors retain their relative order. Other protocols need
 // a joint registration proof; this layout does not borrow their permissions.
 func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, members []string, methods []*dumpedMethods) (string, bool) {
 	events, known := c.native8LambdaSourceIdentityEvents(source, members, methods)
@@ -51,6 +51,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 		first       int
 		count       int
 		node        int
+		anchored    bool
 	}
 	groups := map[*dumpedMethods]*group{}
 	seen := make([]bool, len(events))
@@ -60,7 +61,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 		}
 		seen[event.ordinal] = true
 		name, named := sourceBridgeUTF8(c.obj, event.parent.member.NameIndex)
-		if !named || name == "<init>" || name == "<clinit>" || isSyntheticMethod(event.parent.member.AccessFlags) {
+		if !named || name == "<init>" || isSyntheticMethod(event.parent.member.AccessFlags) || name == "<clinit>" && event.parent.member.AccessFlags != 8 {
 			return source, false
 		}
 		current := groups[event.parent]
@@ -69,7 +70,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 			if !known {
 				return source, false
 			}
-			current = &group{parent: event.parent, declaration: declaration, first: event.ordinal, node: -1}
+			current = &group{parent: event.parent, declaration: declaration, first: event.ordinal, node: -1, anchored: name == "<clinit>"}
 			groups[event.parent] = current
 		}
 		// Scheduling whole declarations cannot change the order of expressions
@@ -117,8 +118,75 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 	sort.Ints(slots)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].first < ordered[j].first })
 	reordered := append([]string(nil), nodes...)
-	for i, slot := range slots {
-		reordered[slot] = nodes[ordered[i].node]
+	anchored := false
+	for _, current := range ordered {
+		anchored = anchored || current.anchored
+	}
+	if !anchored {
+		for i, slot := range slots {
+			reordered[slot] = nodes[ordered[i].node]
+		}
+	} else {
+		// Stable merge: only event-bearing ordinary declarations move.
+		// Every other node is copied in its original order, byte for byte.
+		// A merged initializer whose ordinals straddle an ordinary method
+		// cannot pass the contiguous-interval proof above; do not reorder its
+		// statements or pretend its original field phases were one interval.
+		byNode := map[int]*group{}
+		var movable []*group
+		for _, current := range ordered {
+			byNode[current.node] = current
+			if !current.anchored {
+				movable = append(movable, current)
+			}
+		}
+		reordered = nil
+		cursor, ordinal := 0, 0
+		emit := func(current *group) bool {
+			if current.first != ordinal {
+				return false
+			}
+			packet := current.declaration
+			if current.anchored {
+				packet = nodes[current.node]
+			}
+			reordered = append(reordered, packet)
+			ordinal += current.count
+			return true
+		}
+		for i, node := range nodes {
+			current := byNode[i]
+			if current != nil && !current.anchored {
+				// Move only the completed packet. Preserve the node's outer
+				// whitespace at its original boundary as part of the fixed
+				// sequence. The trimmed equality above excludes detached
+				// documentation or any other semantic text in this margin.
+				at := strings.Index(node, current.declaration)
+				if at < 0 || strings.Index(node[at+len(current.declaration):], current.declaration) >= 0 {
+					return source, false
+				}
+				reordered = append(reordered, node[:at]+node[at+len(current.declaration):])
+				continue
+			}
+			if current == nil {
+				reordered = append(reordered, node)
+				continue
+			}
+			for cursor < len(movable) && movable[cursor].first < current.first {
+				if !emit(movable[cursor]) {
+					return source, false
+				}
+				cursor++
+			}
+			if !emit(current) {
+				return source, false
+			}
+		}
+		for ; cursor < len(movable); cursor++ {
+			if !emit(movable[cursor]) {
+				return source, false
+			}
+		}
 	}
 	result := source[:open+1] + strings.Join(reordered, "") + source[close:]
 	// Reopen every original factory/cache packet against the actual new text.

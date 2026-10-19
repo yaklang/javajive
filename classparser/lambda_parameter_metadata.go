@@ -46,6 +46,7 @@ type lambdaSourceFactory struct {
 	sealed                            bool
 	flags, nameIndex, descriptorIndex uint16
 	codeBytes                         []byte
+	sealedPC                          int
 }
 
 func (f *lambdaSourceFactory) same(other *lambdaSourceFactory) bool {
@@ -56,7 +57,17 @@ func (f *lambdaSourceFactory) closed() bool {
 	if f == nil || f.object == nil || f.method == nil || f.code == nil || f.pc < 0 || f.pc >= len(f.code.Code) {
 		return false
 	}
-	return !f.sealed || f.method.AccessFlags == f.flags && f.method.NameIndex == f.nameIndex && f.method.DescriptorIndex == f.descriptorIndex && bytes.Equal(f.codeBytes, f.code.Code)
+	return !f.sealed || f.pc == f.sealedPC && f.method.AccessFlags == f.flags && f.method.NameIndex == f.nameIndex && f.method.DescriptorIndex == f.descriptorIndex && bytes.Equal(f.codeBytes, f.code.Code)
+}
+
+func (f *lambdaSourceFactory) seal(work *workbudget.Budget) bool {
+	if !f.closed() || len(f.code.Code) > 65535 || !nativeProofWork(work, int64(len(f.code.Code))+1) || work != nil && work.CheckAlloc(int64(len(f.code.Code))+128) != nil {
+		return false
+	}
+	f.flags, f.nameIndex, f.descriptorIndex, f.sealedPC = f.method.AccessFlags, f.method.NameIndex, f.method.DescriptorIndex, f.pc
+	f.codeBytes = bytes.Clone(f.code.Code)
+	f.sealed = true
+	return true
 }
 
 func readLambdaParameterMetadata(object *ClassObject, method *MemberInfo, work *workbudget.Budget) (*lambdaParameterMetadata, bool) {
@@ -152,14 +163,11 @@ func (c *ClassObjectDumper) lambdaParameterMetadataInScope(method *MemberInfo, w
 	if c.options.SourceCompiler != NativeJavac8 || c.options.TargetSourceVersion != 8 || !native8LambdaParameterCompilerFlagClosed(c.obj, work) || !nativeLambdaBodyOriginalUseClosed(c.obj, method, work, projection) || projection.factory == nil {
 		return nil, false
 	}
-	factoryName, named := sourceBridgeUTF8(c.obj, projection.factory.method.NameIndex)
+	factoryName, named := lambdaFactoryNameComponent(projection.factory)
 	// This is a compiler-name regeneration constraint after the actual factory
 	// proof. A name prefix alone never identifies a lambda implementation.
 	prefix := "lambda$" + factoryName + "$"
-	if projection.factory.method.AccessFlags == 0x100a {
-		prefix = "lambda$null$"
-	}
-	if !named || !class_context.PreservesJava8Identifier(factoryName) || !strings.HasPrefix(projection.name, prefix) {
+	if !named || !strings.HasPrefix(projection.name, prefix) {
 		return nil, false
 	}
 	ordinal := strings.TrimPrefix(projection.name, prefix)

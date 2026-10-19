@@ -3,6 +3,8 @@ package javaclassparser
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -20,22 +22,28 @@ import (
 func testReviewedJoinConstructorContract(t *testing.T) {
 	t.Helper()
 	const owner = "org/assertj/core/condition/Join"
-	const relative = "org/assertj/assertj-core/3.24.2/assertj-core-3.24.2.jar"
 	raw, err := os.ReadFile("testdata/regression/Join.class")
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertReviewedTypeVarInvoke(t, "testdata/regression/Join.class", "<init>", "([Lorg/assertj/core/api/Condition;)V", 11, core.OP_INVOKESPECIAL, owner, "<init>", "(Ljava/util/stream/Stream;)V")
-	home, err := os.UserHomeDir()
+	// Eight unchanged original declarations from assertj-core 3.24.2,
+	// original JAR SHA-256 df3d0b348f1fe806bdddcb10fa4ae63c6679e9888d4bc7055f09848517976aa3.
+	// The 20KB fixture includes producer metadata and the Apache 2 license;
+	// it is never executed. CI must not borrow a developer's Maven cache or
+	// fetch mutable declarations before checking the original binding.
+	archive := "testdata/regression/Join-declarations.jar"
+	archiveBytes, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal("required bundled original declaration-only fixture", err)
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(archiveBytes)) != "da884b1ee1f4f0885046b2f91eabc795e1975f668450d2fa0b7ea0519a02924d" {
+		t.Fatal("original declaration fixture differs from its locked bytes")
+	}
+	original, err := zip.NewReader(bytes.NewReader(archiveBytes), int64(len(archiveBytes)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	archive := filepath.Join(home, ".m2/repository", relative)
-	original, err := zip.OpenReader(archive)
-	if err != nil {
-		t.Fatal("required original declaration-only dependency archive", err)
-	}
-	defer original.Close()
 	entries := map[string]*zip.File{}
 	for _, f := range original.File {
 		if strings.HasSuffix(f.Name, ".class") && !strings.HasPrefix(f.Name, "META-INF/") {

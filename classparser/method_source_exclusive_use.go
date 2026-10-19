@@ -242,12 +242,13 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 					return false
 				}
 				if parameters != nil {
-					factoryName, named := sourceBridgeUTF8(object, method.NameIndex)
+					origin := &lambdaSourceFactory{object: object, method: method, code: code, pc: int(op.CurrentOffset)}
+					_, named := lambdaFactoryNameComponent(origin)
 					nt, typed := constant(dynamic.NameAndTypeIndex).(*ConstantNameAndTypeInfo)
 					// A nested factory may reside in a static synthetic body.
 					// This use query grants no lexical permission: its caller must
 					// close that body's own factory chain and source registration.
-					if factory != nil || !named || factoryName == "<init>" || factoryName == "<clinit>" || method.AccessFlags&(0x0040|0x0100|0x0400) != 0 || method.AccessFlags&0x1000 != 0 && method.AccessFlags != 0x100a || !typed || nt == nil {
+					if factory != nil || !named || method.AccessFlags&(0x0040|0x0100|0x0400) != 0 || method.AccessFlags&0x1000 != 0 && method.AccessFlags != 0x100a || !typed || nt == nil {
 						return false
 					}
 					factoryDescriptor, known := sourceBridgeUTF8(object, nt.DescriptorIndex)
@@ -256,7 +257,7 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 						return false
 					}
 					parameters.captureTypes = captures
-					factory = &lambdaSourceFactory{object: object, method: method, code: code, pc: int(op.CurrentOffset)}
+					factory = origin
 				}
 				usedRows[row] = true
 				sites++
@@ -268,9 +269,9 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 		if factory == nil || len(factory.code.Code) > 65535 || work != nil && work.CheckAlloc(int64(len(factory.code.Code))) != nil {
 			return false
 		}
-		factory.sealed = true
-		factory.flags, factory.nameIndex, factory.descriptorIndex = factory.method.AccessFlags, factory.method.NameIndex, factory.method.DescriptorIndex
-		factory.codeBytes = append([]byte(nil), factory.code.Code...)
+		if !factory.seal(work) {
+			return false
+		}
 		parameters.factory = factory
 	}
 	return closed

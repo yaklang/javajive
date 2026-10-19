@@ -35,13 +35,21 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 	if c == nil {
 		return nil, false
 	}
-	if c.options.SourceCompiler != NativeJavac8 {
-		return nil, true
-	}
-	required := false
+	// A failed/mutated receipt must not erase the requirement it carried.
+	// This latch records only an attempted original initializer factory; every
+	// positive body, ordinal and source-occurrence proof is still reopened.
+	required := c.lambdaInitializerFactorySeen && (c.options.SourceCompiler == NativeJavac8 || c.options.SourceCompiler == ModernJavac)
 	for _, receipt := range c.lambdaMethodSourceBodies {
-		if receipt != nil && receipt.body != nil && receipt.body.lambdaParameterBinding != nil {
+		if receipt != nil && receipt.body != nil && c.options.SourceCompiler == NativeJavac8 && receipt.body.lambdaParameterBinding != nil {
 			required = true
+		}
+		// Modern javac does not emit the native implementation parameter
+		// tables, but its initializer factories still share the class-wide
+		// implementation ordinal. Observe the actual factory, never a name
+		// prefix in a synthetic declaration which may have been dropped.
+		if receipt != nil && receipt.request.factory.closed() && c.options.SourceCompiler == ModernJavac {
+			name, known := sourceBridgeUTF8(c.obj, receipt.request.factory.method.NameIndex)
+			required = required || known && name == "<clinit>"
 		}
 	}
 	if !required {
@@ -107,7 +115,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 			return nil, false
 		}
 		factory := receipt.request.factory
-		if !factory.closed() || factory.object != c.obj {
+		if !factory.closed() || !factory.sealed || factory.object != c.obj {
 			return nil, false
 		}
 		packet := receipt.body.code
@@ -150,6 +158,10 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		if !owned {
 			return nil, false
 		}
+		component, named := lambdaFactoryNameComponent(factory)
+		if !named || (component == "static" || c.options.SourceCompiler == ModernJavac) && parent.lambdaEmission == nil {
+			return nil, false
+		}
 		position, known := 0, false
 		if parent.lambdaEmission != nil {
 			position, known = c.lambdaEmissionPosition(parent, receipt.body, declaration, charge)
@@ -163,9 +175,8 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		if _, duplicate := byArrow[position]; duplicate {
 			return nil, false
 		}
-		factoryName, named := sourceBridgeUTF8(c.obj, factory.method.NameIndex)
 		implementation, known := sourceBridgeUTF8(c.obj, receipt.method.NameIndex)
-		suffix, prefixed := strings.CutPrefix(implementation, "lambda$"+factoryName+"$")
+		suffix, prefixed := strings.CutPrefix(implementation, "lambda$"+component+"$")
 		ordinal, err := strconv.Atoi(suffix)
 		if !named || !known || !prefixed || err != nil || ordinal < 0 || suffix != strconv.Itoa(ordinal) {
 			return nil, false

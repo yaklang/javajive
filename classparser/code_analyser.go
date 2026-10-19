@@ -268,6 +268,12 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 		}
 		if hasPC {
 			request.factory = &lambdaSourceFactory{object: dumper.obj, method: dumper.CurrentMethod, code: codeAttr, pc: pc}
+			if !request.factory.seal(dumper.Work) {
+				return core.LambdaBodySource{}, fmt.Errorf("original lambda factory origin cannot be retained")
+			}
+			if name, known := sourceBridgeUTF8(dumper.obj, dumper.CurrentMethod.NameIndex); known && name == "<clinit>" {
+				dumper.lambdaInitializerFactorySeen = true
+			}
 		}
 		dumped, err := dumper.dumpMethodWithSourceRequest(name, desc, id, adapter, request)
 		if err != nil {
@@ -281,7 +287,7 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 		}
 		source := core.LambdaBodySource{Code: dumped.code, FixedParameterTypes: dumped.lambdaParameterBinding != nil}
 		recordPacket := dumped.lambdaParameterBinding != nil && len(dumped.lambdaParameterBinding.captured) != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0
-		if dumper.options.SourceCompiler == NativeJavac8 || recordPacket {
+		if dumper.options.SourceCompiler == NativeJavac8 || dumper.options.SourceCompiler == ModernJavac || recordPacket {
 			template := dumped.code
 			source.RecordRendered = func(rendered string) {
 				if recordPacket {

@@ -148,6 +148,7 @@ type ClassObjectDumper struct {
 	ordinaryConstructorClassSource *ordinaryConstructorClassSourceReceipt
 	// Performance hint only; the actual publication spans still prove ownership.
 	ordinaryConstructorEmissionSeen bool
+	lambdaInitializerFactorySeen    bool // requirement latch; never a source permission
 	// aggressive marks that the CURRENT method dump is a second attempt for a method whose
 	// conservative decompilation already failed. While set, the decompiler enables higher-risk
 	// reconstruction paths (relaxed structuring, node-duplication, synthetic rebuilds). It is
@@ -2095,8 +2096,8 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		if c.Work != nil && c.Work.Err() != nil {
 			return "", c.Work.Err()
 		}
-		c.appendDiagnostic(DecompileDiagnostic{Code: "bootstrap_unknown", Message: "native javac8 lambda implementation identities cannot be regenerated from the final source order"})
-		return "", fmt.Errorf("native javac8 lambda implementation source identities are unproved")
+		c.appendDiagnostic(DecompileDiagnostic{Code: "bootstrap_unknown", Message: "lambda implementation identities cannot be regenerated from the final source order"})
+		return "", fmt.Errorf("lambda implementation source identities are unproved")
 	}
 	if packet := c.nativeAssertionProtocol(); packet != nil && c.nativeStandaloneAssertion == nil && !packet.pureInitializer && c.nativeAssertionInitProjection != packet {
 		return "", fmt.Errorf("assertion initializer source projection incomplete")

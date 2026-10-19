@@ -125,11 +125,8 @@ func (c *ClassObjectDumper) native8NestedLambdaSourceIdentityEvents(source strin
 			if !walk(child, root, content[scope.open+1:scope.end], offset+scope.open+1, depth+1) {
 				return false
 			}
-			factoryName, named := sourceBridgeUTF8(c.obj, factory.method.NameIndex)
+			factoryName, named := lambdaFactoryNameComponent(factory)
 			implementation, known := sourceBridgeUTF8(c.obj, receipt.method.NameIndex)
-			if parent.sourceRequest.role == methodSourceLambdaBody {
-				factoryName = "null"
-			}
 			prefix := "lambda$" + factoryName + "$"
 			if !named || !known || len(implementation) <= len(prefix) || implementation[:len(prefix)] != prefix {
 				return false

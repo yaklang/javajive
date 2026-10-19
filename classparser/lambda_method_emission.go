@@ -33,7 +33,7 @@ type lambdaMethodOccurrence struct {
 }
 
 func (c *ClassObjectDumper) beginLambdaMethodEmission(body *dumpedMethods) *lambdaMethodEmission {
-	if c.options.SourceCompiler != NativeJavac8 || body == nil {
+	if body == nil || c.options.SourceCompiler != NativeJavac8 && c.options.SourceCompiler != ModernJavac {
 		return nil
 	}
 	frame := &lambdaMethodEmission{body: body, request: body.sourceRequest, previous: c.lambdaMethodRendering}
