@@ -194,10 +194,20 @@ func (p *lambdaParameterMetadata) samSlot() int {
 // expression happens to commute. Check the sealed capture placeholders before
 // substitution; this grants no operand effects or renderer equivalence.
 func lambdaParameterCaptureOrder(code string, count int, work *workbudget.Budget) bool {
-	if count < 0 || count > 64 || len(code) > 1<<20 || !nativeProofWork(work, int64(len(code))+1) || work != nil && work.CheckAlloc(64) != nil {
+	if count > 64 || work != nil && work.CheckAlloc(64) != nil {
 		return false
 	}
-	seen, next := [64]bool{}, 0
+	return lambdaSourceCaptureOrder(code, count, work)
+}
+
+// The static-body contract also applies when implementation parameter tables
+// are absent. Its physical arity is already bounded by the JVM descriptor;
+// this does not expand the narrower native metadata/capture proof domain.
+func lambdaSourceCaptureOrder(code string, count int, work *workbudget.Budget) bool {
+	if count < 0 || count > 255 || len(code) > 1<<20 || !nativeProofWork(work, int64(len(code))+1) || work != nil && work.CheckAlloc(int64(count)) != nil {
+		return false
+	}
+	seen, next := make([]bool, count), 0
 	for cursor := 0; cursor < len(code); {
 		start := strings.IndexByte(code[cursor:], 0)
 		if start < 0 {

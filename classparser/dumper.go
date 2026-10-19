@@ -4212,7 +4212,11 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			priorStable := funcCtx.SourceCaptureStable
 			funcCtx.SourceCaptureStable = nil
 			defer func() { funcCtx.SourceCaptureStable = priorStable }()
-			params, statementList, err := ParseBytesCode(c, codeAttr, id)
+			captureOrder, captureOrderKnown := c.staticLambdaCaptureOrder(method, descriptor, request)
+			if !captureOrderKnown {
+				return nil, fmt.Errorf("unproved original static lambda capture order")
+			}
+			params, statementList, err := parseBytesCodeWithLambdaCaptureOrder(c, codeAttr, id, captureOrder)
 			methodLocalParams := params
 			if err != nil {
 				return dumped, utils.Wrap(err, "ParseBytesCode failed")
@@ -5206,10 +5210,16 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			}
 			lambdaParameterSource.context = &context
 			lambdaParameterSource.arrow = res
-			if !lambdaParameterCaptureOrder(res, len(lambdaMetadata.captures), c.Work) {
-				return nil, fmt.Errorf("lambda source changed original capture registration order")
-			}
 			dumped.lambdaParameterBinding = lambdaParameterSource
+		}
+		captureOrderClosed := true
+		if lambdaMetadata != nil {
+			captureOrderClosed = lambdaParameterCaptureOrder(res, len(lambdaMetadata.captures), c.Work)
+		} else if captures, known := c.staticLambdaCaptureOrder(method, descriptor, request); !known || len(captures) != 0 && !lambdaSourceCaptureOrder(res, len(captures), c.Work) {
+			captureOrderClosed = false
+		}
+		if !captureOrderClosed {
+			return nil, fmt.Errorf("lambda source changed original capture registration order")
 		}
 		dumped.methodName = name
 		dumped.code = res

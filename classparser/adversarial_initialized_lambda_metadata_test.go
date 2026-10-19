@@ -28,6 +28,7 @@ class LambdaParameterDriver {
   for(int mode=0;mode<3;mode++)try(java.net.URLClassLoader loader=new java.net.URLClassLoader(new java.net.URL[]{root},null)){
    Class<?> probe=Class.forName("StaticLambdaProbe",true,loader);field(probe,"failAt").setInt(null,mode);Throwable fault=(Throwable)field(probe,"fault").get(null);
    Class<?> target=Class.forName("UncapturedLambdaNames",false,loader);
+   for(java.lang.reflect.Field declared:target.getDeclaredFields())declarations.add("mode="+mode+"/field:"+declared.getName()+":"+declared.getType().getName()+":"+declared.getModifiers()+":"+declared.isSynthetic());
    for(java.lang.reflect.Method method:target.getDeclaredMethods()){
     StringBuilder row=new StringBuilder("mode=").append(mode).append('/').append(method.getName()).append(':').append(method.getReturnType().getName()).append(':').append(method.getModifiers());for(java.lang.reflect.Parameter parameter:method.getParameters())row.append('/').append(parameter.getType().getName()).append(':').append(parameter.getName()).append(':').append(parameter.getModifiers()).append(':').append(parameter.isNamePresent());declarations.add(row.toString());
    }
@@ -53,4 +54,15 @@ func TestAdversarialInitializedLambdaMetadataPreservesEarlierOrdinaryRegistratio
 	source := strings.Replace(initializedLambdaMetadataFixture, method, "", 1)
 	source = strings.Replace(source, "public class UncapturedLambdaNames {", "public class UncapturedLambdaNames {\n"+method, 1)
 	testUncapturedLambdaParameterMetadataRoundTrip(t, source, 3, "10")
+}
+
+func TestAdversarialInitializedFinalLambdaMetadataKeepsOriginalFieldPhase(t *testing.T) {
+	source := initializedDirectFinalLambdaFixture()
+	testUncapturedLambdaParameterMetadataRoundTrip(t, source, 3, "10")
+}
+
+func initializedDirectFinalLambdaFixture() string {
+	source := strings.Replace(initializedLambdaMetadataFixture, `static Predicate<Object> first=StaticLambdaProbe.record(1,(Object item)->{StaticLambdaProbe.trace+="P";return item==null;});`, `static final Predicate<Object> first=(Object item)->{StaticLambdaProbe.trace+="P";return item==null;};`, 1)
+	source = strings.Replace(source, `static Predicate<Object> second;`, `static final Predicate<Object> second;`, 1)
+	return strings.Replace(source, `static {second=StaticLambdaProbe.record(2,(Object item)->{StaticLambdaProbe.trace+="Q";return item instanceof String;});}`, `static {StaticLambdaProbe.record(1,first);second=(Object item)->{StaticLambdaProbe.trace+="Q";return item instanceof String;};StaticLambdaProbe.record(2,second);}`, 1)
 }

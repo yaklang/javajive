@@ -36,12 +36,15 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
-	independentRoot     *nativeMemberIndependentRoot
-	modernNestObjects   map[string]*ClassObject
-	methodLocals        map[string]*nativeMethodLocalClass
-	enumConstants       map[string]*nativeEnumConstantBody
-	enumSwitchTables    map[string]*nativeEnumSwitchTable
-	registrationLayouts map[string]*nativeMemberRegistrationScope
+	// wireNativeMemberSource may create a declaration lookup view without
+	// enrolling any source members or compiler registration events.
+	declarationLookupOnly bool
+	independentRoot       *nativeMemberIndependentRoot
+	modernNestObjects     map[string]*ClassObject
+	methodLocals          map[string]*nativeMethodLocalClass
+	enumConstants         map[string]*nativeEnumConstantBody
+	enumSwitchTables      map[string]*nativeEnumSwitchTable
+	registrationLayouts   map[string]*nativeMemberRegistrationScope
 	// Completed ordinary root method packets eligible for declaration-only
 	// scheduling. Initializers and compiler-owned lexical counters stay fixed.
 	registrationMethods    map[string]bool
@@ -1459,7 +1462,7 @@ func (c *ClassObjectDumper) wireNativeMemberSource() {
 	p := c.nativeMemberRoot
 	looked := map[string]bool{}
 	if p == nil && c.nativeMemberLookup != nil {
-		p = &nativeMemberFamily{children: map[string]*nativeMemberClass{}}
+		p = &nativeMemberFamily{declarationLookupOnly: true, children: map[string]*nativeMemberClass{}}
 		for _, constant := range c.obj.ConstantPool {
 			if cls, ok := constant.(*ConstantClassInfo); ok && cls != nil {
 				name, known := sourceBridgeUTF8(c.obj, cls.NameIndex)

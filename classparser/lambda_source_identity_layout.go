@@ -3,6 +3,8 @@ package javaclassparser
 import (
 	"sort"
 	"strings"
+
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 )
 
 // Ordinary method declarations have no class-initialization execution step.
@@ -18,7 +20,8 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 	if nativeLambdaSourceIdentityOrderClosed(events) {
 		return source, true
 	}
-	if len(members) != 0 || c.nativeMemberRoot != nil || c.nativeAnonymousRoot != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeCaptureFields != nil || c.ordinaryConstructorEmissionSeen || len(c.constructorBoundaryHelpers) != 0 || !nativeProofWork(c.Work, int64(len(source))+int64(len(c.obj.Methods))) {
+	lookupOnly := c.lambdaRegistrationDeclarationLookupOnly()
+	if len(members) != 0 || c.nativeMemberRoot != nil && !lookupOnly || c.nativeAnonymousRoot != nil || c.nativeMethodLocalCurrent != nil || c.nativeEnumConstantCurrent != nil || c.nativeCaptureFields != nil || c.ordinaryConstructorEmissionSeen || len(c.constructorBoundaryHelpers) != 0 || !nativeProofWork(c.Work, int64(len(source))+int64(len(c.obj.Methods))) {
 		return source, false
 	}
 	for _, method := range c.obj.Methods {
@@ -39,8 +42,19 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 					return source, false
 				}
 				owner, known := sourceBridgeClassName(c.obj, row.OuterClassInfoIndex)
-				if !known || owner == c.obj.GetClassName() {
+				if !known {
 					return source, false
+				}
+				if owner == c.obj.GetClassName() {
+					// A declaration-only lookup can reference named static
+					// members without emitting their declarations here. These
+					// references allocate no enclosing lambda ordinal. This
+					// query grants no member-source ownership/publication role.
+					member, memberKnown := sourceBridgeClassName(c.obj, row.InnerClassInfoIndex)
+					name, nameKnown := sourceBridgeUTF8(c.obj, row.InnerNameIndex)
+					if !lookupOnly || !memberKnown || !nameKnown || !class_context.PreservesJava8Identifier(name) || member != owner+"$"+name || row.InnerClassAccessFlags&8 == 0 || row.InnerClassAccessFlags & ^uint16(0x061f) != 0 {
+						return source, false
+					}
 				}
 			}
 		}
@@ -195,4 +209,12 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 		return source, false
 	}
 	return result, true
+}
+
+// The presence of a member-type lookup is not a source registration event.
+// An enrolled family, private accessors, constructors, anonymous/local scopes
+// and retained helper protocols still need their joint registration proof.
+func (c *ClassObjectDumper) lambdaRegistrationDeclarationLookupOnly() bool {
+	p := c.nativeMemberRoot
+	return p != nil && p.declarationLookupOnly && !p.failed && p.owner == "" && p.independentRoot == nil && p.rootHandleSource == nil && p.anonymous == nil && p.anonymousForest == nil && len(p.getters) == 0 && len(p.retainedAccessors) == 0 && len(p.rootAccessBridges) == 0 && len(p.rootBridgeDelegations) == 0 && len(p.methodLocals) == 0 && len(p.enumConstants) == 0 && len(p.enumSwitchTables) == 0 && len(p.registrationLayouts) == 0 && len(p.anonymousUnits) == 0 && len(p.memberAnonymous) == 0 && len(p.emptyMarkers) == 0
 }

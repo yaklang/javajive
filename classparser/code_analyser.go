@@ -202,10 +202,22 @@ type VarMap struct {
 }
 
 func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *utils.VariableId) ([]values.JavaValue, []statements.Statement, error) {
+	return parseBytesCodeWithLambdaCaptureOrder(dumper, codeAttr, id, nil)
+}
+
+func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *utils.VariableId, captures []string) ([]values.JavaValue, []statements.Statement, error) {
 	pool := dumper.ConstantPool
 	parser := core.NewDecompiler(codeAttr.Code, func(id int) values.JavaValue {
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
+	word := 0
+	for _, descriptor := range captures {
+		parser.LambdaCaptureOrderSlots = append(parser.LambdaCaptureOrderSlots, word)
+		word++
+		if descriptor == "J" || descriptor == "D" {
+			word++
+		}
+	}
 	parser.OriginalLambdaDeclaration = dumper.originalLambdaDeclaration
 	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int, hasPC bool) (core.LambdaBodySource, error) {
 		if dumper.originalLambdaDeclaration(dumper.obj.GetClassName(), name, desc) != core.LambdaDeclarationSyntheticBody {
