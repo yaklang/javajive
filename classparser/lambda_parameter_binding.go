@@ -12,15 +12,17 @@ import (
 )
 
 type lambdaParameterBinding struct {
-	metadata *lambdaParameterMetadata
-	request  methodSourceRequest
-	refs     []*values.JavaRef
-	context  *class_context.ClassContext
-	arrow    string
+	metadata       *lambdaParameterMetadata
+	request        methodSourceRequest
+	refs           []*values.JavaRef
+	context        *class_context.ClassContext
+	arrow          string
+	captureContext *class_context.ClassContext
+	captured       []values.JavaValue
 }
 
 func (c *ClassObjectDumper) bindLambdaParameterMetadata(p *lambdaParameterMetadata, request methodSourceRequest, parameters []values.JavaValue) (*lambdaParameterBinding, bool) {
-	if c == nil || p == nil || c.FuncCtx == nil || c.CurrentMethod != p.method || c.obj != p.object || request.role != methodSourceLambdaBody || !request.valid() || request.captureCount != 0 || !p.factory.same(request.factory) || c.FuncCtx.FunctionName != p.name || c.FuncCtx.CurrentMethodDesc != p.descriptor || !c.FuncCtx.IsStatic || len(parameters) != len(p.names) || c.Work != nil && c.Work.CheckAlloc(int64(len(parameters))*256) != nil {
+	if c == nil || p == nil || c.FuncCtx == nil || c.CurrentMethod != p.method || c.obj != p.object || request.role != methodSourceLambdaBody || !request.valid() || request.captureCount != len(p.captures) || !p.factory.same(request.factory) || c.FuncCtx.FunctionName != p.name || c.FuncCtx.CurrentMethodDesc != p.descriptor || !c.FuncCtx.IsStatic || len(parameters)+len(p.captures) != len(p.names) || c.Work != nil && c.Work.CheckAlloc(int64(len(parameters))*256) != nil {
 		return nil, false
 	}
 	parentDescriptor, typed := sourceBridgeUTF8(c.obj, p.factory.method.DescriptorIndex)
@@ -30,25 +32,27 @@ func (c *ClassObjectDumper) bindLambdaParameterMetadata(p *lambdaParameterMetada
 	}
 	binding := &lambdaParameterBinding{metadata: p, request: request}
 	protected := map[*coreutils.VariableId]bool{}
-	slot := 0
+	offset := len(p.captures)
+	slot := p.samSlot()
 	for i, parameter := range parameters {
+		physical := offset + i
 		ref, ok := parameter.(*values.JavaRef)
-		if !ok || ref == nil || ref.Id == nil || !ref.IsParam || ref.IsThis || protected[ref.Id] || slices.Contains(parentNames, p.names[i]) || !nativeMethodLocalParameterOperand(ref, slot, p.parameters[i], c.FuncCtx, c.Work) {
+		if !ok || ref == nil || ref.Id == nil || !ref.IsParam || ref.IsThis || protected[ref.Id] || slices.Contains(parentNames, p.names[physical]) || !nativeMethodLocalParameterOperand(ref, slot, p.parameters[physical], c.FuncCtx, c.Work) {
 			return nil, false
 		}
-		if prior, exists := c.FuncCtx.LocalNames[ref.Id]; exists && prior != p.names[i] {
+		if prior, exists := c.FuncCtx.LocalNames[ref.Id]; exists && prior != p.names[physical] {
 			return nil, false
 		}
 		binding.refs = append(binding.refs, ref)
 		protected[ref.Id] = true
 		slot++
-		if p.parameters[i] == "J" || p.parameters[i] == "D" {
+		if p.parameters[physical] == "J" || p.parameters[physical] == "D" {
 			slot++
 		}
 	}
 	prior := c.nativeLambdaFactoryParameterNames[p.factory.method]
 	names := len(prior)
-	for _, name := range p.names {
+	for _, name := range p.names[offset:] {
 		if !prior[name] {
 			names++
 		}
@@ -68,9 +72,9 @@ func (c *ClassObjectDumper) bindLambdaParameterMetadata(p *lambdaParameterMetada
 		c.nativeLambdaFactoryParameterNames[p.factory.method] = map[string]bool{}
 	}
 	for i, ref := range binding.refs {
-		ref.Id.SetName(p.names[i])
-		c.FuncCtx.LocalNames[ref.Id] = p.names[i]
-		c.nativeLambdaFactoryParameterNames[p.factory.method][p.names[i]] = true
+		ref.Id.SetName(p.names[offset+i])
+		c.FuncCtx.LocalNames[ref.Id] = p.names[offset+i]
+		c.nativeLambdaFactoryParameterNames[p.factory.method][p.names[offset+i]] = true
 	}
 	return binding, true
 }
@@ -85,7 +89,7 @@ func (c *ClassObjectDumper) prepareLambdaParameterMetadataNamespace(binding *lam
 		reserved[name] = true
 	}
 	for i, ref := range binding.refs {
-		reserved[binding.metadata.names[i]] = true
+		reserved[binding.metadata.names[len(binding.metadata.captures)+i]] = true
 		protected[ref.Id] = true
 	}
 	// Allocate over declaration identities before rendering. Text matching varN
@@ -95,16 +99,18 @@ func (c *ClassObjectDumper) prepareLambdaParameterMetadataNamespace(binding *lam
 }
 
 func (b *lambdaParameterBinding) parametersClosed(ctx *class_context.ClassContext, work *workbudget.Budget) bool {
-	if b == nil || b.metadata == nil || ctx == nil || len(b.refs) != len(b.metadata.parameters) {
+	if b == nil || b.metadata == nil || ctx == nil || len(b.refs)+len(b.metadata.captures) != len(b.metadata.parameters) {
 		return false
 	}
-	slot := 0
+	offset := len(b.metadata.captures)
+	slot := b.metadata.samSlot()
 	for i, ref := range b.refs {
-		if ref == nil || !ref.IsParam || ref.IsThis || ref.String(ctx) != b.metadata.names[i] || !nativeMethodLocalParameterOperand(ref, slot, b.metadata.parameters[i], ctx, work) {
+		physical := offset + i
+		if ref == nil || !ref.IsParam || ref.IsThis || ref.String(ctx) != b.metadata.names[physical] || !nativeMethodLocalParameterOperand(ref, slot, b.metadata.parameters[physical], ctx, work) {
 			return false
 		}
 		slot++
-		if b.metadata.parameters[i] == "J" || b.metadata.parameters[i] == "D" {
+		if b.metadata.parameters[physical] == "J" || b.metadata.parameters[physical] == "D" {
 			slot++
 		}
 	}
@@ -123,5 +129,5 @@ func (c *ClassObjectDumper) lambdaParameterSourcePacketClosed(body *dumpedMethod
 	if fresh == nil {
 		return b == nil
 	}
-	return b != nil && b.metadata != nil && b.metadata.object == c.obj && b.metadata.method == body.member && b.request == body.sourceRequest && b.request.captureCount == 0 && b.metadata.factory.same(fresh.factory) && b.metadata.factory.same(b.request.factory) && slices.Equal(b.metadata.names, fresh.names) && slices.Equal(b.metadata.flags, fresh.flags) && slices.Equal(b.metadata.parentNames, fresh.parentNames) && body.parameterNameStamp != nil && body.parameterNameStamp.lambdaParameters && c.methodParameterNameCacheClosed(body.parameterNameStamp) && b.parametersClosed(b.context, c.Work) && b.arrow != "" && b.arrow == body.code
+	return b != nil && b.metadata != nil && b.metadata.object == c.obj && b.metadata.method == body.member && b.request == body.sourceRequest && b.request.captureCount == len(fresh.captures) && b.metadata.factory.same(fresh.factory) && b.metadata.factory.same(b.request.factory) && slices.Equal(b.metadata.captureTypes, fresh.captureTypes) && b.metadata.samDescriptor == fresh.samDescriptor && slices.Equal(b.metadata.names, fresh.names) && slices.Equal(b.metadata.flags, fresh.flags) && slices.Equal(b.metadata.parentNames, fresh.parentNames) && body.parameterNameStamp != nil && body.parameterNameStamp.lambdaParameters && c.methodParameterNameCacheClosed(body.parameterNameStamp) && b.parametersClosed(b.context, c.Work) && b.arrow != "" && b.arrow == body.code
 }

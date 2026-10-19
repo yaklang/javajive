@@ -284,14 +284,18 @@ func TestAdversarialMethodParameterNamePoolSealCoversTypedPayload(t *testing.T) 
 }
 
 func TestAdversarialMethodParameterNamePoolSealAlwaysBounded(t *testing.T) {
-	for _, variant := range []string{"nil work aggregate payload", "entry count", "work", "memory", "unknown kind", "typed nil", "reserved hole"} {
+	for _, variant := range []string{"nil work aggregate payload", "aliased pair aggregate payload", "entry count", "work", "memory", "unknown kind", "typed nil", "reserved hole"} {
 		t.Run(variant, func(t *testing.T) {
 			pool := []ConstantInfo{&ConstantIntegerInfo{Value: 1}}
 			d := &ClassObjectDumper{obj: &ClassObject{ConstantPool: pool}, ConstantPool: pool}
 			switch variant {
-			case "nil work aggregate payload":
+			case "nil work aggregate payload", "aliased pair aggregate payload":
 				pool = nil
-				for i := 0; i < 300; i++ {
+				count := 300
+				if variant == "aliased pair aggregate payload" {
+					count = 130 // One view fits; the original two-view bound does not.
+				}
+				for i := 0; i < count; i++ {
 					pool = append(pool, &ConstantUtf8Info{Value: strings.Repeat("x", 32768)})
 				}
 				d.obj.ConstantPool = pool
@@ -313,6 +317,36 @@ func TestAdversarialMethodParameterNamePoolSealAlwaysBounded(t *testing.T) {
 				t.Fatal("unbounded or unexpressible payload minted a named source seal")
 			}
 		})
+	}
+}
+
+func TestNativeParameterPoolAliasingReusesOnlyOneLiveTypedScan(t *testing.T) {
+	pool := []ConstantInfo{NewUtf8FromString("original"), &ConstantIntegerInfo{Value: 7}}
+	measure := func(bytecode []ConstantInfo) ([32]byte, int64) {
+		t.Helper()
+		work := workbudget.New(nil, workbudget.Limits{})
+		d := &ClassObjectDumper{obj: &ClassObject{ConstantPool: pool}, ConstantPool: bytecode, Work: work}
+		stamp, known := d.methodParameterNamePoolStamp()
+		if !known {
+			t.Fatal("complete typed views")
+		}
+		return stamp, work.Used(workbudget.CounterGraphScans)
+	}
+	alias, aliasWork := measure(pool)
+	detached := append([]ConstantInfo(nil), pool...)
+	copy, copyWork := measure(detached)
+	if alias != copy || aliasWork >= copyWork {
+		t.Fatal("same ordered values changed identity or aliased input was scanned twice")
+	}
+	detached[1] = &ConstantIntegerInfo{Value: 8}
+	changed, _ := measure(detached)
+	if changed == alias {
+		t.Fatal("detached bytecode view borrowed the declaration fingerprint")
+	}
+	pool[1].(*ConstantIntegerInfo).Value++
+	changed, _ = measure(pool)
+	if changed == alias {
+		t.Fatal("a later call reused an earlier live pool fingerprint")
 	}
 }
 

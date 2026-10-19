@@ -49,6 +49,16 @@ func (r *JavaRef) OriginalDynamicOperandWitness(seed JavaValue) (pc, index int, 
 	return r.originalDynamicOperand.pc, r.originalDynamicOperand.index, true
 }
 
+// Pending evaluation identity exists before a source declaration or inline
+// projection is selected. Completed projections cannot borrow this phase. This query grants neither source binding nor motion permission;
+// consumers still need an independent original producer and final projection.
+func (r *JavaRef) OriginalPendingDynamicOperand(seed JavaValue) (pc, index int, known bool) {
+	if r == nil || r.originalDynamicOperand == nil || r.originalDynamicOperand.declared || r.originalDynamicOperand.inlined || r.StackVar != nil || r.Id == nil || r.VarUid != r.originalDynamicOperand.uid || r.IsThis || r.IsParam || r.CustomValue != nil || !sameOriginalValueIdentity(seed, r.originalDynamicOperand.seed) || !sameOriginalValueIdentity(r.Val, seed) {
+		return 0, 0, false
+	}
+	return r.originalDynamicOperand.pc, r.originalDynamicOperand.index, true
+}
+
 // Statement construction copies the logical snapshot ref. Require the same
 // private original operand witness and current source binding, rather than
 // pointer equality with the earlier stack-simulation copy or name equality.

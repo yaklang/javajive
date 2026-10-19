@@ -20,8 +20,16 @@ func retainOriginalLambdaParameterTarget(d *Decompiler, value *values.CustomValu
 	if !source.FixedParameterTypes {
 		return value, nil
 	}
-	if d == nil || d.FunctionContext == nil || value == nil || impl == nil || impl.RefKind != RefInvokeStatic || captures != 0 || len(static) < 3 || t19MethodTypeDesc(static[2]) != impl.Description || d.blockPartialFunctionalTarget {
-		return nil, fmt.Errorf("%w: fixed formals require the original uncaptured instantiated target", errFixedLambdaParameterTarget)
+	if d == nil || d.FunctionContext == nil || value == nil || impl == nil || impl.RefKind != RefInvokeStatic || captures < 0 || captures > 64 || len(static) < 3 || d.blockPartialFunctionalTarget {
+		return nil, fmt.Errorf("%w: fixed formals require the original instantiated target", errFixedLambdaParameterTarget)
+	}
+	physical, known := directSamTokens(impl.Description, false)
+	if !known || len(physical) < captures+1 {
+		return nil, fmt.Errorf("%w: missing original implementation parameter words", errFixedLambdaParameterTarget)
+	}
+	sam := "(" + strings.Join(physical[captures:len(physical)-1], "") + ")" + physical[len(physical)-1]
+	if t19MethodTypeDesc(static[2]) != sam {
+		return nil, fmt.Errorf("%w: instantiated target changes original SAM parameter words", errFixedLambdaParameterTarget)
 	}
 	name, known := types.RawClassFQN(raw)
 	if !known {
@@ -30,7 +38,7 @@ func retainOriginalLambdaParameterTarget(d *Decompiler, value *values.CustomValu
 	erasure := types.NewJavaClass(name)
 	target := inferDeclaredLambdaTarget(d, erasure, static[0], static[2])
 	if target == nil {
-		if !fixedRawLambdaParameterTarget(d, name, impl.Description, t19MethodTypeDesc(static[0])) {
+		if !fixedRawLambdaParameterTarget(d, name, sam, t19MethodTypeDesc(static[0])) {
 			return nil, fmt.Errorf("%w: fixed formals have an unresolved functional declaration", errFixedLambdaParameterTarget)
 		}
 		target = erasure
@@ -39,7 +47,9 @@ func retainOriginalLambdaParameterTarget(d *Decompiler, value *values.CustomValu
 	if !typed || strings.ReplaceAll(selected, ".", "/") != strings.ReplaceAll(name, ".", "/") {
 		return nil, fmt.Errorf("%w: fixed target changes the original interface erasure", errFixedLambdaParameterTarget)
 	}
-	return retainErasedFunctionalValue(value, erasure, target), nil
+	constrained := retainErasedFunctionalValue(value, erasure, target)
+	constrained.RequireLambdaParameterNames()
+	return constrained, nil
 }
 
 // A raw target needs no invented type arguments when its declared SAM erasure

@@ -248,9 +248,10 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 					}
 					factoryDescriptor, known := sourceBridgeUTF8(object, nt.DescriptorIndex)
 					captures, result, err := callbinding.Descriptor(factoryDescriptor)
-					if !known || err != nil || len(captures) != 0 || len(result) < 3 || result[0] != 'L' || result[len(result)-1] != ';' {
+					if !known || err != nil || len(captures) > 64 || len(result) < 3 || result[0] != 'L' || result[len(result)-1] != ';' {
 						return false
 					}
+					parameters.captureTypes = captures
 					factory = &lambdaSourceFactory{object: object, method: method, code: code, pc: int(op.CurrentOffset)}
 				}
 				usedRows[row] = true

@@ -105,6 +105,27 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		if !factory.closed() || factory.object != c.obj {
 			return nil, false
 		}
+		packet := receipt.body.code
+		if binding := receipt.body.lambdaParameterBinding; binding != nil && len(binding.captured) != 0 {
+			if !binding.capturedNamesClosed(c.Work) || receipt.renderedUnknown || receipt.renderedTemplate != packet {
+				return nil, false
+			}
+			packet = ""
+			for _, rendered := range receipt.renderedPackets {
+				if !charge(int64(len(source))) {
+					return nil, false
+				}
+				if strings.Contains(text, rendered) {
+					if packet != "" {
+						return nil, false
+					}
+					packet = rendered
+				}
+			}
+			if packet == "" {
+				return nil, false
+			}
+		}
 		var parent *dumpedMethods
 		for _, candidate := range methods {
 			if !nativeProofWork(c.Work, 1) {
@@ -121,7 +142,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 			return nil, false
 		}
 		start := strings.Index(text, parent.code)
-		position, known := nativeLambdaSourcePacketArrow(parent.code, receipt.body.code, c.Work, charge)
+		position, known := nativeLambdaSourcePacketArrow(parent.code, packet, c.Work, charge)
 		if start < 0 || !known || strings.Index(text[start+len(parent.code):], parent.code) >= 0 {
 			return nil, false
 		}

@@ -280,7 +280,7 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 			dumper.nativeLambdaFactorySources[site].implementationBody = dumped
 		}
 		source := core.LambdaBodySource{Code: dumped.code, FixedParameterTypes: dumped.lambdaParameterBinding != nil}
-		if dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0 {
+		if dumped.lambdaParameterBinding != nil && len(dumped.lambdaParameterBinding.captured) != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0 {
 			template := dumped.code
 			source.RecordRendered = func(rendered string) { dumper.recordNativeLambdaRenderedPacket(dumped, template, rendered) }
 		}

@@ -19,6 +19,9 @@ func (c *ClassObjectDumper) methodParameterNamePoolStamp() ([32]byte, bool) {
 		return empty, false
 	}
 	h := sha256.New()
+	aggregate := sha256.New()
+	var first [32]byte
+	var firstPayload int64
 	remaining := int64(methodParameterNamePoolPayloadLimit)
 	var word [8]byte
 	var chunk [1024]byte
@@ -33,7 +36,22 @@ func (c *ClassObjectDumper) methodParameterNamePoolStamp() ([32]byte, bool) {
 	if c.Work != nil && c.Work.CheckAlloc(2048) != nil {
 		return empty, false
 	}
-	for _, pool := range [][]ConstantInfo{c.obj.ConstantPool, c.ConstantPool} {
+	for ordinal, pool := range [][]ConstantInfo{c.obj.ConstantPool, c.ConstantPool} {
+		// The declaration and bytecode views normally share the exact same
+		// slice. No external callback runs in this typed payload scan. Hash it
+		// once, retaining both ordered view digests and the original aggregate
+		// payload bound. A detached view still gets its own complete scan;
+		// neither equality of names nor an earlier request is a reuse proof.
+		if ordinal == 1 && len(pool) != 0 && len(pool) == len(c.obj.ConstantPool) && &pool[0] == &c.obj.ConstantPool[0] {
+			if firstPayload > remaining || !nativeProofWork(c.Work, 1) {
+				return empty, false
+			}
+			remaining -= firstPayload
+			aggregate.Write(first[:])
+			continue
+		}
+		h.Reset()
+		before := remaining
 		if len(pool) == 0 || len(pool) > 65534 || !charge(int64(len(pool))*8) {
 			return empty, false
 		}
@@ -190,8 +208,14 @@ func (c *ClassObjectDumper) methodParameterNamePoolStamp() ([32]byte, bool) {
 				return empty, false
 			}
 		}
+		var digest [32]byte
+		copy(digest[:], h.Sum(nil))
+		aggregate.Write(digest[:])
+		if ordinal == 0 {
+			first, firstPayload = digest, before-remaining
+		}
 	}
 	var result [32]byte
-	copy(result[:], h.Sum(nil))
+	copy(result[:], aggregate.Sum(nil))
 	return result, true
 }

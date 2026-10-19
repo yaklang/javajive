@@ -93,6 +93,7 @@ func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
 }
 
 func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, value values.JavaValue) values.JavaValue {
+	d.inlineUnchangedLambdaParameterOperands(op, value)
 	if d.canInlineImmediateMethodRef(op, value) {
 		// An explicit target preserves the bootstrap's existing SAM adaptation
 		// even when the consuming declaration is outside this compilation unit.
@@ -197,24 +198,36 @@ func (d *Decompiler) canInlineImmediateMethodRef(op *OpCode, value values.JavaVa
 // retains the closure after this call. A parameter with no writes anywhere in
 // the complete opcode stream is stable; arbitrary locals remain snapshots.
 func (d *Decompiler) immutableCaptureParameter(ref *values.JavaRef) bool {
-	if ref.IsThis {
+	if ref != nil && ref.IsThis {
 		return true
 	}
-	if !ref.IsParam || len(d.opCodes) == 0 {
-		return false
+	_, stable := d.unchangedCaptureParameterSlot(ref)
+	return stable
+}
+
+// Read a complete physical parameter layout and every overlapping store. The
+// general metadata-driven elision also compares this slot with its private
+// entry witness; the existing adjacent-consumer domain keeps its own protocol.
+func (d *Decompiler) unchangedCaptureParameterSlot(ref *values.JavaRef) (int, bool) {
+	if d == nil || ref == nil || !ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || len(d.opCodes) == 0 {
+		return -1, false
 	}
 	slot := -1
+	width := 1
 	index := 0
 	for _, value := range d.Params {
-		param, ok := values.UnpackSoltValue(value).(*values.JavaRef)
+		param, ok := dynamicCaptureSeed(value).(*values.JavaRef)
 		if !ok || param == nil || param.Type() == nil {
-			return false
+			return -1, false
 		}
 		if values.SameLocal(ref, param) {
 			if slot >= 0 {
-				return false
+				return -1, false
 			}
 			slot = index
+			if primitive, ok := param.Type().RawType().(*types.JavaPrimer); ok && (primitive.Name == types.JavaLong || primitive.Name == types.JavaDouble) {
+				width = 2
+			}
 		}
 		index++
 		if primitive, ok := param.Type().RawType().(*types.JavaPrimer); ok && (primitive.Name == types.JavaLong || primitive.Name == types.JavaDouble) {
@@ -222,17 +235,21 @@ func (d *Decompiler) immutableCaptureParameter(ref *values.JavaRef) bool {
 		}
 	}
 	if slot < 0 {
-		return false
+		return -1, false
 	}
 	for _, op := range d.opCodes {
 		if op == nil || op.Instr == nil {
-			return false
+			return -1, false
 		}
-		if LocalAccessOf(op.Instr.OpCode).Write && GetStoreIdx(op) == slot {
-			return false
+		access := LocalAccessOf(op.Instr.OpCode)
+		if access.Write {
+			written := GetStoreIdx(op)
+			if written < 0 || written < slot+width && slot < written+access.Width {
+				return -1, false
+			}
 		}
 	}
-	return true
+	return slot, true
 }
 
 func normalizeJavaClassName(name string) string {

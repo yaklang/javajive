@@ -11,6 +11,19 @@ type originalLambdaFactory struct {
 	instantiated       string
 }
 
+// RequireLambdaParameterNames carries a completed body-source constraint.
+// It grants no factory, operand, ownership, or effect permission. Source paths
+// without this constraint retain their existing capture-snapshot protocol.
+func (v *CustomValue) RequireLambdaParameterNames() {
+	if v != nil {
+		v.lambdaParameterNamesRequired = true
+	}
+}
+
+func (v *CustomValue) LambdaParameterNamesRequired() bool {
+	return v != nil && v.lambdaParameterNamesRequired
+}
+
 // MarkOriginalLambdaFactory is called by the validated lambda adapter after
 // source construction. Retain exact eager operand identities and order; an
 // unknown callback or a later changed capture cannot borrow this evidence.

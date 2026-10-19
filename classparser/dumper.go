@@ -3849,6 +3849,8 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	isLambda := request.role == methodSourceLambdaBody
 	var lambdaMetadata *lambdaParameterMetadata
 	var lambdaParameterSource *lambdaParameterBinding
+	var lambdaCaptureContext *class_context.ClassContext
+	var lambdaCapturedParameters []values.JavaValue
 	if isLambda {
 		var known bool
 		lambdaMetadata, known = c.originalLambdaParameterMetadata(method, c.Work)
@@ -3856,8 +3858,12 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			return nil, fmt.Errorf("unproved lambda parameter metadata regeneration")
 		}
 		if lambdaMetadata != nil {
-			if request.captureCount != 0 || !lambdaMetadata.factory.same(request.factory) || adapter != nil && (adapter.ErasedDescriptor != lambdaMetadata.descriptor || adapter.InstantiatedDescriptor != lambdaMetadata.descriptor) {
-				return nil, fmt.Errorf("lambda parameter metadata needs its original uncaptured factory")
+			if request.captureCount != len(lambdaMetadata.captures) || !lambdaMetadata.factory.same(request.factory) || adapter != nil && (adapter.ErasedDescriptor != lambdaMetadata.samDescriptor || adapter.InstantiatedDescriptor != lambdaMetadata.samDescriptor) {
+				return nil, fmt.Errorf("lambda parameter metadata needs its original factory and SAM projection")
+			}
+			lambdaCaptureContext, lambdaCapturedParameters, known = c.lambdaParameterCaptureContext(lambdaMetadata, request)
+			if !known {
+				return nil, fmt.Errorf("lambda parameter metadata lacks its original captured parameter identities")
 			}
 			dumped.parameterNameStamp, known = c.newMethodParameterNameCacheStamp(method, descriptor, lambdaMetadata.names)
 			if !known || dumped.parameterNameStamp == nil {
@@ -4288,6 +4294,8 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				if !known {
 					return nil, fmt.Errorf("unproved lambda parameter entry identities")
 				}
+				lambdaParameterSource.captureContext = lambdaCaptureContext
+				lambdaParameterSource.captured = lambdaCapturedParameters
 			}
 			if !isLambda {
 				var namesBound bool
@@ -4485,7 +4493,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				paramsNewStrList = nil
 				for i, ref := range lambdaParameterSource.refs {
 					declaration := renderMethodParamType(ref.Type(), funcCtx) + " " + ref.String(funcCtx)
-					if lambdaMetadata.flags[i]&0x10 != 0 {
+					if lambdaMetadata.flags[len(lambdaMetadata.captures)+i]&0x10 != 0 {
 						declaration = "final " + declaration
 					}
 					paramsNewStrList = append(paramsNewStrList, declaration)
@@ -5185,10 +5193,13 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			context := *c.FuncCtx
 			context.LocalNames = map[*utils2.VariableId]string{}
 			for i, ref := range lambdaParameterSource.refs {
-				context.LocalNames[ref.Id] = lambdaMetadata.names[i]
+				context.LocalNames[ref.Id] = lambdaMetadata.names[len(lambdaMetadata.captures)+i]
 			}
 			lambdaParameterSource.context = &context
 			lambdaParameterSource.arrow = res
+			if !lambdaParameterCaptureOrder(res, len(lambdaMetadata.captures), c.Work) {
+				return nil, fmt.Errorf("lambda source changed original capture registration order")
+			}
 			dumped.lambdaParameterBinding = lambdaParameterSource
 		}
 		dumped.methodName = name

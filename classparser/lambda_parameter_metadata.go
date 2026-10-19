@@ -17,18 +17,21 @@ import (
 // factory. Its parameter words must remain unwritten. Captured operands, shared
 // factories, other metadata and other compiler profiles need separate proofs.
 type lambdaParameterMetadata struct {
-	object      *ClassObject
-	method      *MemberInfo
-	table       *UnparsedAttribute
-	info        []byte
-	name        string
-	descriptor  string
-	names       []string
-	flags       []uint16
-	parameters  []string
-	parentNames []string
-	words       int
-	factory     *lambdaSourceFactory
+	object        *ClassObject
+	method        *MemberInfo
+	table         *UnparsedAttribute
+	info          []byte
+	name          string
+	descriptor    string
+	names         []string
+	flags         []uint16
+	parameters    []string
+	parentNames   []string
+	words         int
+	captureTypes  []string
+	captures      []*nativeEnumSelectorProducer
+	samDescriptor string
+	factory       *lambdaSourceFactory
 }
 
 // The actual callback supplies this origin. A matching descriptor or capture
@@ -155,7 +158,10 @@ func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, 
 	if !typed || !known {
 		return nil, false
 	}
-	for _, name := range projection.names {
+	if !c.native8LambdaParameterCaptures(projection, parentDescriptor, parentNames, work) {
+		return nil, false
+	}
+	for _, name := range projection.names[len(projection.captures):] {
 		if slices.Contains(parentNames, name) {
 			return nil, false
 		}
