@@ -8,11 +8,44 @@ import (
 
 func writeObservedLambdaSource(ctx *class_context.ClassContext, out *workbudget.Writer, source LambdaBodySource, template string, captured []values.JavaValue, target, bridge string) error {
 	start := out.Len()
-	if err := t19WriteLambdaBodyWithBridge(ctx, out, template, captured, target, bridge); err != nil {
+	var projection []LambdaCaptureRender
+	complete := len(captured) <= 255
+	var observe func(int, string)
+	if source.RecordRenderedWithCaptures != nil {
+		// The physical descriptor bounds distinct capture ports. Repeated reads
+		// retain their real writer behavior; inconsistent bytes grant no receipt.
+		seen := map[int]int{}
+		observe = func(index int, text string) {
+			if !complete {
+				return
+			}
+			if index < 0 || index >= len(captured) || len(text) > 1<<20 {
+				complete = false
+				return
+			}
+			if ctx != nil && ctx.Work != nil && (ctx.Work.Charge(workbudget.CounterGraphScans, int64(len(text))+1) != nil || ctx.Work.CheckAlloc(int64(len(text))+int64(len(projection)+1)*32) != nil) {
+				complete = false
+				return
+			}
+			if prior, known := seen[index]; known {
+				complete = projection[prior].Text == text
+				return
+			}
+			seen[index] = len(projection)
+			projection = append(projection, LambdaCaptureRender{Index: index, Text: text})
+		}
+	}
+	if err := t19WriteLambdaBodyWithCaptureObserver(ctx, out, template, captured, target, bridge, observe); err != nil {
 		return err
+	}
+	if ctx != nil && ctx.Work != nil && ctx.Work.Err() != nil {
+		return ctx.Work.Err()
 	}
 	if source.RecordRendered != nil {
 		source.RecordRendered(out.String()[start:])
+	}
+	if source.RecordRenderedWithCaptures != nil {
+		source.RecordRenderedWithCaptures(LambdaSourceRender{Packet: out.String()[start:], Captures: projection, Complete: complete})
 	}
 	return nil
 }

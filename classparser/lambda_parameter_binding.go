@@ -23,6 +23,11 @@ type lambdaParameterBinding struct {
 	captureEmission       *lambdaMethodEmission
 	captureDeclarationIDs []*coreutils.VariableId
 	captureSourceIDs      []*coreutils.VariableId
+	captureBody           *nativeLambdaLocalCaptureSource
+	captureEntries        []*values.JavaRef
+	captureEntryIDs       []*coreutils.VariableId
+	forwardParent         *lambdaParameterBinding
+	forwardEmission       *lambdaMethodEmission
 }
 
 func (c *ClassObjectDumper) bindLambdaParameterMetadata(p *lambdaParameterMetadata, request methodSourceRequest, parameters []values.JavaValue) (*lambdaParameterBinding, bool) {

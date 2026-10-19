@@ -1773,11 +1773,10 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// against Function<? super MergedAnnotation<A>, T>.
 	// Kill-switch: JDEC_ASMAP_FUNCTION_CAST_OFF=1.
 	full = c.sourceRewrite("fixAsMapFunctionRawCast", "class_source", full, fixAsMapFunctionRawCast)
-	// fixNeverThrownIOException inserts `if(false)throw new TYPE();` as the first
-	// statement of the try that catch(TYPE) pairs with via matching braces. TYPE is
-	// IOException or FileAlreadyExistsException. Kill-switch:
-	// JDEC_IOEXCEPTION_NEVER_THROWN_OFF=1.
-	full = c.sourceRewrite("fixNeverThrownIOException", "class_source", full, fixNeverThrownIOException)
+	// Checked catches are recovered from original instructions, declarations
+	// and exception regions. Injecting an unreachable throw invents source
+	// effects and invalidates already completed lambda-body observations.
+	// Compatibility must retain the same proved handler, without dead code.
 	// fixThrowClassCastDropsThrowable unwraps `throw ((Throwable)(cls.cast(x)))` to
 	// `throw cls.cast(x)` so a method `throws X` (X a type variable) actually throws X
 	// rather than undeclared Throwable. Real hit: guava Throwables.throwIfInstanceOf.
@@ -4328,6 +4327,13 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				}
 				lambdaParameterSource.captureContext = lambdaCaptureContext
 				lambdaParameterSource.captured = lambdaCapturedParameters
+				if !lambdaParameterSource.bindCaptureEntries(params, funcCtx, c.Work) {
+					return nil, fmt.Errorf("unproved physical lambda capture entries")
+				}
+				// A pending binding is not a publication receipt. Its actual
+				// capture entries identify forwarded words while this body emits
+				// child factories; final arrow/context closure remains mandatory.
+				dumped.lambdaParameterBinding = lambdaParameterSource
 			}
 			if !isLambda {
 				var namesBound bool

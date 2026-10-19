@@ -55,11 +55,12 @@ func (a *AssignStatement) OriginalLocalStore() (pc, slot int, known bool) {
 	w := a.originalLocalStore
 	ref, ok := a.LeftValue.(*values.JavaRef)
 	seed := originalStoreSeed(a.JavaValue)
-	// Declaration placement can replace Id or explicitly clone the decoded
-	// declaration. Only its sealed alias cohort can retain that target; a
-	// shallow copy or equal public ID/UID confers no STORE witness. Every STORE
-	// still retains its own exact RHS rather than the declaration's first seed.
-	if !ok || ref != w.ref && !ref.SameOriginalLocalDeclaration(w.ref) || ref.Id == nil || ref.VarUid != w.uid || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || a.OriginPC != w.pc || seed == nil || seed != w.seed {
+	// A solved definition web can contain several simulator refs without a
+	// common historical initializer. Its sealed member relation preserves the
+	// target independently of the RHS. Declaration aliases retain their older
+	// seed check; public IDs, UIDs and shallow copies grant neither relation.
+	// Every STORE still reopens its own exact RHS and original instruction.
+	if !ok || ref != w.ref && !ref.SameOriginalLocalDeclaration(w.ref) && !ref.SameOriginalLocalWeb(w.ref) && !ref.SharesSourceDeclaration(w.ref) || ref.Id == nil || ref.VarUid != w.uid || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || a.OriginPC != w.pc || seed == nil || seed != w.seed {
 		return 0, 0, false
 	}
 	return w.pc, w.slot, true

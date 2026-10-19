@@ -2,6 +2,17 @@ package class_context
 
 import "strings"
 
+// A static method reference requires a TypeName. Neither a null primary nor
+// a static import is a legal substitute before ::. Reopen the lexical name
+// at the actual writer, after locals and type parameters have been bound.
+func (f *ClassContext) StaticMethodReferenceOwner(owner, member, descriptor string) (string, bool) {
+	bound, known := f.staticTypeOwner(owner)
+	if !known {
+		f.failStaticOwner(owner, member, descriptor, "static method reference requires an unobscured original type name")
+	}
+	return bound, known
+}
+
 // A field select reclassifies its leading name in the same way as a static
 // method select. When a value obscures the type, an exact null primary keeps
 // the type namespace without evaluating a receiver or adding a null check

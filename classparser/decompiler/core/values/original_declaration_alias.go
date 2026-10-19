@@ -12,6 +12,7 @@ func (ref *JavaRef) CloneForSourceDeclaration() *JavaRef {
 		return nil
 	}
 	copy := *ref
+	ref.enrollSourceDeclarationClone(&copy)
 	if _, _, known := ref.OriginalLocalDeclaration(ref.Val); known && ref.originalDeclarationAliases != nil && len(ref.originalDeclarationAliases.members) < 64 {
 		if uid, member := ref.originalDeclarationAliases.members[ref]; member && uid == ref.VarUid {
 			ref.originalDeclarationAliases.members[&copy] = copy.VarUid

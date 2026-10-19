@@ -110,8 +110,16 @@ func (c *ClassObjectDumper) bindNativeLambdaCaptureParameterNames(v values.JavaV
 		}
 		// Reopen the original typed local LOAD/STORE and source seed when the
 		// factory operand is a local rather than an unchanged parameter LOAD.
-		if operand := demand.site.operands[demand.index]; operand != nil && operand.local != nil && (operand.local.storePC < 0 || len(operand.local.storePCs) != 0 || !nativeLambdaLocalCaptureValue(operand, demand.value, demand.site.pc, demand.index, c.FuncCtx, c.Work)) {
-			return false
+		if operand := demand.site.operands[demand.index]; operand != nil && operand.local != nil {
+			if operand.local.storePC < 0 || len(operand.local.storePCs) != 0 {
+				return false
+			}
+			if !nativeLambdaLocalCaptureValue(operand, demand.value, demand.site.pc, demand.index, c.FuncCtx, c.Work) {
+				source := c.lambdaRetainedCaptureSource(demand.site, lambda.Captures, body)
+				if source == nil || !nativeLambdaReusedLocalSource(operand, source, demand.index, c.Work) {
+					return false
+				}
+			}
 		}
 		value, known := nativeMemberEnclosingUnpack(demand.value, c.Work)
 		ref, knownRef := value.(*values.JavaRef)

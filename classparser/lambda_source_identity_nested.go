@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	"sort"
 	"strconv"
+	"strings"
 )
 
 type nativeLambdaBlockScope struct {
@@ -107,7 +108,7 @@ func (c *ClassObjectDumper) native8NestedLambdaSourceIdentityEvents(source strin
 				return false
 			}
 			factory := receipt.request.factory
-			if !factory.closed() || factory.object != c.obj || factory.method != parent.member || !c.native8LambdaRenderedIdentityPacketClosed(receipt, source, charge, parent) {
+			if !factory.closed() || factory.object != c.obj || factory.method != parent.member {
 				return false
 			}
 			local, known := c.nativeLambdaDirectBlockScopes(occurrence.packet, charge)
@@ -119,6 +120,13 @@ func (c *ClassObjectDumper) native8NestedLambdaSourceIdentityEvents(source strin
 			start := scope.arrow + 2 - len(header)
 			position := offset + scope.arrow
 			if start < 0 || positions[position] || !charge(int64(len(header))) || content[start:scope.arrow+2] != header {
+				return false
+			}
+			if strings.IndexByte(occurrence.packet, 0) >= 0 {
+				if !c.composedLambdaOccurrenceClosed(receipt, parent, content, content[start:scope.end+1], charge) {
+					return false
+				}
+			} else if !c.native8LambdaRenderedIdentityPacketClosed(receipt, source, charge, parent) {
 				return false
 			}
 			used[child.member], positions[position] = true, true

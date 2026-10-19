@@ -466,6 +466,10 @@ func t19WriteLambdaBody(funcCtx *class_context.ClassContext, out *workbudget.Wri
 // for an invariant parameterized result it is the raw erasure inserted between
 // the expression and the full target (`(Future<V>) (Future) expr`).
 func t19WriteLambdaBodyWithBridge(funcCtx *class_context.ClassContext, out *workbudget.Writer, methodBody string, captured []values.JavaValue, returnTarget, rawBridge string) error {
+	return t19WriteLambdaBodyWithCaptureObserver(funcCtx, out, methodBody, captured, returnTarget, rawBridge, nil)
+}
+
+func t19WriteLambdaBodyWithCaptureObserver(funcCtx *class_context.ClassContext, out *workbudget.Writer, methodBody string, captured []values.JavaValue, returnTarget, rawBridge string, observed func(int, string)) error {
 	body := methodBody
 	if returnTarget != "" {
 		if projected, ok := lambdaReturnCastOutputLenWithBridge(body, returnTarget, rawBridge); ok {
@@ -508,8 +512,12 @@ func t19WriteLambdaBodyWithBridge(funcCtx *class_context.ClassContext, out *work
 			continue
 		}
 		if captured[captureIndex] != nil {
-			if err := out.WriteString(captured[captureIndex].String(funcCtx)); err != nil {
+			text := captured[captureIndex].String(funcCtx)
+			if err := out.WriteString(text); err != nil {
 				return err
+			}
+			if observed != nil {
+				observed(captureIndex, text)
 			}
 			if funcCtx != nil && funcCtx.Work != nil && funcCtx.Work.Err() != nil {
 				return funcCtx.Work.Err()

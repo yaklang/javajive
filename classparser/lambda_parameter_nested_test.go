@@ -127,7 +127,34 @@ func TestAdversarialNestedLambdaParametersDoNotBorrowPhysicalCapturePrefix(t *te
 	raw := nestedLambdaMetadataOriginal(t, source)
 	d, method, _, _ := lambdaParameterTestDumper(t, raw, "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z")
 	before := d.obj.Bytes()
-	if p, known := d.originalLambdaParameterMetadata(method, nil); known || p != nil || !bytes.Equal(before, d.obj.Bytes()) {
-		t.Fatal("forwarded physical capture prefix needs its own substitution proof")
+	p, known := d.originalLambdaParameterMetadata(method, nil)
+	if !known || p == nil || p.parent == nil || len(p.captures) != 2 {
+		t.Fatal("original physical capture graph")
+	}
+	// The old blanket refusal is replaced by a strictly separated obligation:
+	// metadata locates the physical port but creates no source binder, parent
+	// emission or substitution observation. Actual original-first fixtures
+	// separately prove complete source publication and runtime identities.
+	if index, known := lambdaForwardedCaptureIndex(p, 0); !known || index != 0 {
+		t.Fatal("original outer word lost its parent capture port")
+	}
+	if _, known := lambdaForwardedCaptureIndex(p, 1); known {
+		t.Fatal("same-typed enclosing SAM formal impersonated a capture prefix")
+	}
+	if (&lambdaParameterBinding{metadata: p}).capturedNamesClosed(nil) {
+		t.Fatal("physical metadata borrowed a completed source substitution")
+	}
+	for _, slot := range []int{p.parent.samSlot(), p.parent.samSlot() + 1} {
+		copy := *p
+		copy.captures = slices.Clone(p.captures)
+		operand := *p.captures[0]
+		operand.slot = slot
+		copy.captures[0] = &operand
+		if _, known := lambdaForwardedCaptureIndex(&copy, 0); known {
+			t.Fatal("different physical word borrowed the original capture name")
+		}
+	}
+	if !bytes.Equal(before, d.obj.Bytes()) {
+		t.Fatal("capture-port query modified original class bytes")
 	}
 }

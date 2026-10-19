@@ -27,6 +27,21 @@ type LambdaBodySource struct {
 	// capture substitution and target adaptation. It grants no body/factory
 	// permission and must not render captured operands a second time.
 	RecordRendered func(string)
+	// Observes the same completed writer, including the exact bytes used for
+	// each physical capture. A consumer can compose nested substitutions
+	// without evaluating a captured operand or replaying its renderer.
+	RecordRenderedWithCaptures func(LambdaSourceRender)
+}
+
+type LambdaCaptureRender struct {
+	Index int
+	Text  string
+}
+
+type LambdaSourceRender struct {
+	Packet   string
+	Captures []LambdaCaptureRender
+	Complete bool
 }
 
 func dumpLambdaWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember, captured []values.JavaValue, raw types.JavaType, static []values.JavaValue, origin ...int) (string, error) {

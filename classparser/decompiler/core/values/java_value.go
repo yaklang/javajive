@@ -20,6 +20,7 @@ type JavaRef struct {
 	originalLocalPC, originalLocalSlot int
 	originalLocalSeed                  JavaValue
 	originalDeclarationAliases         *originalDeclarationAliases
+	sourceDeclarationAliases           *sourceDeclarationAliases
 	originalParameter                  bool
 	originalReceiver                   bool
 	originalParameterSlot              int

@@ -305,11 +305,17 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 		recordPacket := dumped.lambdaParameterBinding != nil && dumped.lambdaParameterBinding.metadata != nil && dumped.lambdaParameterBinding.metadata.factoryCaptureCount() != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0
 		if dumper.options.SourceCompiler == NativeJavac8 || dumper.options.SourceCompiler == ModernJavac || recordPacket {
 			template := dumped.code
-			source.RecordRendered = func(rendered string) {
-				if recordPacket {
-					dumper.recordNativeLambdaRenderedPacket(dumped, template, rendered)
+			if dumper.options.SourceCompiler == NativeJavac8 && dumper.lambdaCaptureCompositionRequired(dumped) {
+				source.RecordRenderedWithCaptures = func(observation core.LambdaSourceRender) {
+					dumper.recordLambdaCaptureProjection(dumped, template, observation, recordPacket)
 				}
-				dumper.recordLambdaMethodEmission(dumped, template, rendered)
+			} else {
+				source.RecordRendered = func(rendered string) {
+					if recordPacket {
+						dumper.recordNativeLambdaRenderedPacket(dumped, template, rendered)
+					}
+					dumper.recordLambdaMethodEmission(dumped, template, rendered)
+				}
 			}
 		}
 		return source, nil

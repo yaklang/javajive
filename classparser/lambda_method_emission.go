@@ -108,7 +108,7 @@ func (c *ClassObjectDumper) recordLambdaMethodEmission(body *dumpedMethods, temp
 		return true
 	}
 	r := c.lambdaMethodSourceBodies[body.member]
-	if frame.ended || frame.invalid || frame.body == nil || frame.request != frame.body.sourceRequest || body.sourceDumper != c || body.sourceObject != c.obj || template != body.code || r == nil || r.body != body || r.request != body.sourceRequest || r.key != body.sourceCacheKey || c.dumpedMethodsSet[r.key] != body || !r.request.factory.closed() || packet == "" || strings.IndexByte(packet, 0) >= 0 || len(packet) > 1<<20 || len(frame.children) >= methodSourceLambdaRequestLimit || int64(len(packet)) > (4<<20)-frame.bytes || !nativeProofWork(c.Work, int64(len(packet))+1) || c.Work != nil && c.Work.CheckAlloc(frame.bytes+int64(len(packet))+int64(len(frame.children)+1)*96) != nil {
+	if frame.ended || frame.invalid || frame.body == nil || frame.request != frame.body.sourceRequest || body.sourceDumper != c || body.sourceObject != c.obj || template != body.code || r == nil || r.body != body || r.request != body.sourceRequest || r.key != body.sourceCacheKey || c.dumpedMethodsSet[r.key] != body || !r.request.factory.closed() || packet == "" || len(packet) > 1<<20 || len(frame.children) >= methodSourceLambdaRequestLimit || int64(len(packet)) > (4<<20)-frame.bytes || !nativeProofWork(c.Work, int64(len(packet))+1) || c.Work != nil && c.Work.CheckAlloc(frame.bytes+int64(len(packet))+int64(len(frame.children)+1)*96) != nil {
 		frame.invalid = true
 		return false
 	}
@@ -119,6 +119,10 @@ func (c *ClassObjectDumper) recordLambdaMethodEmission(body *dumpedMethods, temp
 		}
 	}
 	if !c.bindLambdaLocalCaptureEmission(body, frame) {
+		frame.invalid = true
+		return false
+	}
+	if strings.IndexByte(packet, 0) >= 0 && !lambdaSymbolicCapturePacketClosed(body, frame, packet, c.Work) {
 		frame.invalid = true
 		return false
 	}

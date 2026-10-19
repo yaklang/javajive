@@ -21,7 +21,8 @@ func (c *ClassObjectDumper) bindLambdaLocalCaptureEmission(body *dumpedMethods, 
 	for _, operand := range b.metadata.captures {
 		local = local || operand != nil && operand.local != nil
 	}
-	if !local {
+	forwarded := b.hasForwardedCaptures()
+	if !local && !forwarded {
 		return true
 	}
 	factory := b.metadata.factory
@@ -33,7 +34,27 @@ func (c *ClassObjectDumper) bindLambdaLocalCaptureEmission(body *dumpedMethods, 
 	if !named || !typed || c.FuncCtx.FunctionName != name || c.FuncCtx.CurrentMethodDesc != descriptor {
 		return false
 	}
+	if forwarded {
+		parent := frame.body.lambdaParameterBinding
+		if parent == nil || b.forwardParent != nil || b.forwardEmission != nil || !b.forwardingParentMatches(parent, frame) {
+			return false
+		}
+		b.forwardParent, b.forwardEmission = parent, frame
+	}
 	context, known := c.FuncCtx.SnapshotForSourceProof(c.Work)
+	if local {
+		captured := append([]values.JavaValue(nil), b.captured...)
+		if b.metadata.receiverWords != 0 {
+			captured = append([]values.JavaValue{b.receiver}, captured...)
+		}
+		b.captureBody = c.lambdaRetainedCaptureSource(&nativeLambdaLocalCaptureSite{method: factory.method, code: factory.code, pc: factory.pc}, captured, c.nativeMemberBody)
+		if b.captureBody == nil {
+			return false
+		}
+	}
+	// This is still the active, incomplete parent frame. Final publication
+	// requires its completed seal in capturedNamesClosed.
+	b.captureEmission = frame
 	if !known || !b.capturedNamesInContextClosed(context, c.Work) || c.Work != nil && c.Work.CheckAlloc(int64(len(b.captured))*16) != nil {
 		return false
 	}

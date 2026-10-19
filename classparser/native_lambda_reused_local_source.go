@@ -93,7 +93,7 @@ func nativeLambdaReusedLocalSource(operand *nativeEnumSelectorProducer, source *
 						return false
 					}
 					left, isRef := a.LeftValue.(*values.JavaRef)
-					if !isRef || left == nil || left.Id == nil || left.Id != ref.Id || left != ref && !left.SameOriginalLocalDeclaration(ref) && !ref.SameOriginalLocalWeb(left) {
+					if !isRef || left == nil || left.Id == nil || left.Id != ref.Id || left != ref && !left.SameOriginalLocalDeclaration(ref) && !ref.SameOriginalLocalWeb(left) && !left.SharesSourceDeclaration(ref) {
 						return false
 					}
 					seed, known := nativeMemberEnclosingUnpack(a.JavaValue, work)

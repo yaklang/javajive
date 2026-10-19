@@ -73,6 +73,7 @@ func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMet
 		return false
 	}
 	var localReads map[int]*nativeEnumLocalRead
+	var localFlow *nativeEnumParameterFlow
 	localDomain := nativeLocalReferenceDomain{descriptors: map[int]string{}}
 	used, parameterWords := map[int]bool{}, map[int]bool{}
 	if p.receiverWords != 0 {
@@ -110,21 +111,21 @@ func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMet
 				return false
 			}
 			if localReads == nil {
-				flow := nativeEnumParameterOriginalFlow(decoder, p.factory.code, work)
-				if flow == nil {
+				localFlow = nativeEnumParameterOriginalFlow(decoder, p.factory.code, work)
+				if localFlow == nil {
 					return false
 				}
 				reader := *c
 				reader.Work = work
 				localDomain.metadata = reader.buildInvocationMetadata()
 				var known bool
-				localReads, known = reader.nativeTypedLocalReads(p.factory.method, p.factory.code, flow, typesBySlot, true, localDomain)
+				localReads, known = reader.nativeTypedLocalReads(p.factory.method, p.factory.code, localFlow, typesBySlot, true, localDomain)
 				if !known {
 					return false
 				}
 			}
 			read := localReads[int(op.CurrentOffset)]
-			if read == nil || read.slot != readSlot || read.descriptor != descriptor || !nativeLambdaLocalSingleStore(ops, read, work) {
+			if read == nil || read.slot != readSlot || read.descriptor != descriptor || !nativeLambdaLocalCaptureAtFactory(ops, localFlow, read, p.factory.pc, work) {
 				return false
 			}
 			operand.local = read
@@ -134,11 +135,13 @@ func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMet
 			used[readSlot+1] = true
 		}
 		p.captures = append(p.captures, operand)
-		// An enclosing SAM formal has a real source binder in this scope.
-		// Forwarded physical capture-prefix words still need a separate
-		// substitution/provenance proof; equal names do not supply that proof.
+		// An enclosing SAM formal has a real source binder. A physical
+		// capture-prefix word instead needs its exact parent capture port;
+		// its actual source binding is reopened at completed emission below.
 		if p.parent != nil && readSlot < p.parent.samSlot() {
-			return false
+			if _, known := lambdaForwardedCaptureIndex(p, i); !known {
+				return false
+			}
 		}
 	}
 	entry := sort.SearchInts(entries, int(ops[start].CurrentOffset)+1)
@@ -269,11 +272,24 @@ func lambdaSourceCaptureOrderFrom(code string, count, offset int, work *workbudg
 // The final enclosing source must use the original named parameter identities.
 // A body receipt may exist earlier, but cannot publish source on its own.
 func (b *lambdaParameterBinding) capturedNamesClosed(work *workbudget.Budget) bool {
+	return b.capturedNamesClosedInScope(work, map[*lambdaParameterBinding]bool{})
+}
+
+func (b *lambdaParameterBinding) capturedNamesClosedInScope(work *workbudget.Budget, active map[*lambdaParameterBinding]bool) bool {
 	if b == nil || b.metadata == nil {
 		return false
 	}
-	for _, operand := range b.metadata.captures {
-		if operand != nil && operand.local != nil {
+	if active[b] || len(active) >= methodSourceLambdaDepthLimit || !nativeProofWork(work, 1) {
+		return false
+	}
+	active[b] = true
+	defer delete(active, b)
+	if b.hasForwardedCaptures() && (!b.forwardingEmissionClosed(work) || !b.forwardParent.capturedNamesClosedInScope(work, active)) {
+		return false
+	}
+	for i, operand := range b.metadata.captures {
+		_, forwarded := lambdaForwardedCaptureIndex(b.metadata, i)
+		if operand != nil && operand.local != nil || forwarded {
 			if b.metadata.factory == nil || !b.captureEmission.closed() || b.captureEmission.body == nil || b.captureEmission.body.member != b.metadata.factory.method || len(b.captureDeclarationIDs) != len(b.captured) || len(b.captureSourceIDs) != len(b.captured) {
 				return false
 			}
@@ -317,7 +333,19 @@ func (b *lambdaParameterBinding) capturedNamesInContextClosed(context *class_con
 		if !original && b.metadata.captures[i].local != nil {
 			pc, index, original = ref.OriginalDynamicOperandWitness(ref.Val)
 		}
-		if !original || pc != b.metadata.factory.pc || index != i+b.metadata.receiverWords || !nativeLambdaLocalCaptureValue(b.metadata.captures[i], value, pc, i+b.metadata.receiverWords, context, work) || ref.String(context) != b.metadata.names[i] {
+		if !original || pc != b.metadata.factory.pc || index != i+b.metadata.receiverWords {
+			return false
+		}
+		if !nativeLambdaLocalCaptureValue(b.metadata.captures[i], value, pc, index, context, work) {
+			if b.metadata.captures[i].local == nil || !b.retainedCaptureSourceClosed(work) || !nativeLambdaReusedLocalSource(b.metadata.captures[i], b.captureBody, index, work) {
+				return false
+			}
+		}
+		if _, forwarded := lambdaForwardedCaptureIndex(b.metadata, i); forwarded {
+			if !b.forwardedCaptureEntryClosed(i, ref, context, work) {
+				return false
+			}
+		} else if ref.String(context) != b.metadata.names[i] {
 			return false
 		}
 		if b.metadata.captures[i].local != nil {

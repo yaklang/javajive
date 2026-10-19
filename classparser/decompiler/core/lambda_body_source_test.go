@@ -41,6 +41,51 @@ func TestLambdaRenderedObservationUsesCompletedWriterWithoutReplayingCaptures(t 
 	}
 }
 
+func TestLambdaCaptureRenderObservationKeepsActualBytesAndNeverReplaysOperands(t *testing.T) {
+	for _, change := range []string{"original", "symbolic parent", "changing renderer", "writer failure", "observation work"} {
+		t.Run(change, func(t *testing.T) {
+			var work *workbudget.Budget
+			if change == "writer failure" {
+				work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 8})
+			}
+			if change == "observation work" {
+				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			}
+			reads, records := 0, 0
+			text := "chosen"
+			if change == "symbolic parent" {
+				text = "\x00LCAP17\x00"
+			}
+			capture := values.NewCustomValue(func(*class_context.ClassContext) string {
+				reads++
+				if change == "changing renderer" && reads == 2 {
+					return "changed"
+				}
+				return text
+			}, func() types.JavaType { return types.NewJavaPrimer(types.JavaInteger) })
+			var observed LambdaSourceRender
+			source := LambdaBodySource{Code: "(int x)->{return x+\x00LCAP0\x00+\x00LCAP0\x00;}", RecordRenderedWithCaptures: func(actual LambdaSourceRender) {
+				records++
+				observed = actual
+			}}
+			out := workbudget.NewWriter(work)
+			err := writeObservedLambdaSource(&class_context.ClassContext{Work: work}, out, source, source.Code, []values.JavaValue{capture}, "", "")
+			if change == "writer failure" || change == "observation work" {
+				if err == nil || records != 0 {
+					t.Fatal("failed writer/budget acquired an observation")
+				}
+				return
+			}
+			if err != nil || reads != 2 || records != 1 || observed.Packet != out.String() || len(observed.Captures) != 1 || observed.Captures[0].Index != 0 || observed.Captures[0].Text != text {
+				t.Fatalf("writer was replayed or observation detached: reads=%d records=%d data=%+v err=%v", reads, records, observed, err)
+			}
+			if observed.Complete != (change != "changing renderer") {
+				t.Fatal("inconsistent operand source bytes were certified")
+			}
+		})
+	}
+}
+
 func TestAdversarialLambdaBodySourceRequiresOriginalDeclaration(t *testing.T) {
 	for _, mode := range []string{"nil", "unknown", "ordinary"} {
 		t.Run(mode, func(t *testing.T) {
