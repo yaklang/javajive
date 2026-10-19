@@ -750,7 +750,7 @@ func (d *Decompiler) branchOperandPrecedesArray(value values.JavaValue, allocati
 		}
 		for _, produced := range producer.stackProduced {
 			if values.UnpackSoltValue(produced) == values.UnpackSoltValue(value) &&
-				singleLinearOpcodePathInHandlers(d, producer, allocation, d.handlersAt(allocation)) {
+				branchArraySinglePath(d, producer, allocation) {
 				matches++
 			}
 		}
@@ -923,6 +923,7 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 			!branchArrayKeepsArgumentView(array, ref, call.FuncType.ParamTypes[candidate.argIndex]) {
 			continue
 		}
+		allocation, invocation := d.opcodeAtOffset(array.OriginPC), d.opcodeAtOffset(call.OriginPC)
 		// The whole private allocation-to-call path preserves initializer
 		// order. Closed field/call operands can remain inside that expression;
 		// opaque captures cannot establish the complete evaluation tree.
@@ -937,15 +938,17 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 				}
 			}
 		}
-		if !call.IsStatic && call.Object != nil {
-			if effect, _ := values.InspectValue(call.Object); effect != 0 {
-				literal = false
-			}
+		// An earlier operand need not be pure: a class literal, for example,
+		// can fail resolution. Its unique original producer must precede the
+		// array on the same private handler path. Java evaluates that receiver
+		// and those arguments before the inlined array, preserving the order
+		// of failures without reclassifying a throwing operand as inert.
+		if !call.IsStatic && call.Object != nil && !d.branchArrayReceiverPrecedes(call, allocation) {
+			literal = false
 		}
 
 		for _, earlier := range call.Arguments[:candidate.argIndex] {
-			effect, _ := values.InspectValue(earlier)
-			if effect != 0 {
+			if !d.branchOperandPrecedesArray(earlier, allocation) {
 				literal = false
 				break
 			}
@@ -953,7 +956,6 @@ func (d *Decompiler) InlineDroppedBranchArrayCalls(body []statements.Statement) 
 		if !literal {
 			continue
 		}
-		allocation, invocation := d.opcodeAtOffset(array.OriginPC), d.opcodeAtOffset(call.OriginPC)
 		if allocation == nil || invocation == nil || allocation.Instr == nil || invocation.Instr == nil ||
 			allocation.Instr.OpCode != OP_ANEWARRAY ||
 			!branchArraySinglePath(d, allocation, invocation) {
