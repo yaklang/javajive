@@ -21,6 +21,7 @@ func TestCheckedMethodReferenceRequiresOriginalCreationTargetAndSelectedOverload
 		"missing owner", "wrong owner identity", "unknown methods", "unknown parents", "unknown ancestor", "cycle", "duplicate parent",
 		"missing input", "unknown input parents", "input identity", "foreign private member", "missing target signature", "different target signature",
 		"class target", "missing selected sam", "wrong sam descriptor", "wrong implementation", "result adaptation", "captured receiver", "marker",
+		"prebound owner shadow",
 		"work", "memory", "canceled",
 	} {
 		t.Run(change, func(t *testing.T) {
@@ -133,6 +134,8 @@ func TestCheckedMethodReferenceRequiresOriginalCreationTargetAndSelectedOverload
 				req.DynamicArgs = []values.JavaValue{values.NewJavaLiteral(nil, types.NewJavaClass("java.lang.Object"))}
 			case "marker":
 				d.blockPartialFunctionalTarget = true
+			case "prebound owner shadow":
+				ctx.SourceValueNameShadow = func(name string) bool { return name == "Factory" || name == "proof" }
 			case "work":
 				ctx.Work = workbudget.New(context.Background(), workbudget.Limits{MaxGraphScans: 1})
 			case "memory":

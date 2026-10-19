@@ -42,6 +42,13 @@ func methodRefCheckedPolyTarget(d *Decompiler, req CallSiteRequest, static []val
 		return nil
 	}
 	implementationOwner := strings.ReplaceAll(impl.Name, "/", ".")
+	if _, known := ctx.StaticMethodReferenceTypeName(implementationOwner); !known {
+		// A static reference cannot use the null-primary form available to an
+		// ordinary static call. Leave the independent checked-entry adapter
+		// available instead of choosing an unrenderable reference and failing
+		// the whole method at its eventual writer.
+		return nil
+	}
 	erasedView := types.NewJavaClass(name)
 	value := values.NewStreamingCustomValue(func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
 		bound, known := ctx.StaticMethodReferenceOwner(implementationOwner, impl.Member, impl.Description)

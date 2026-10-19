@@ -236,7 +236,7 @@ func nativeMemberProofWithDeclarations(obj, enclosing *ClassObject, work *workbu
 	return nativeMemberProofWithMetadata(obj, enclosing, work, bridges, lexical, resolve, provider, provider)
 }
 
-func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, resolve func(string) (*ClassObject, bool), provider, operands callbinding.Provider) *nativeMemberClass {
+func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget.Budget, bridges map[string]*nativeConstructorAccessBridge, lexical map[string]*ClassObject, resolve func(string) (*ClassObject, bool), provider, operands callbinding.Provider, compilers ...nativeEnumParameterCompiler) *nativeMemberClass {
 	expectedCapture := "this$0"
 	if lexical != nil {
 		var known bool
@@ -248,7 +248,8 @@ func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget
 	owner, name, flags, known := originalMemberOwner(obj)
 	var enumSynthesis *nativeMemberEnumSynthesis
 	if flags&0x4000 != 0 {
-		enumSynthesis = nativeMemberEnumSynthesisWithDeclarations(obj, flags, resolve, work)
+		named := len(compilers) == 1 && nativeEnumGeneratedParameterNames(obj, compilers[0], work)
+		enumSynthesis = nativeMemberEnumSynthesisWithParameterNames(obj, flags, resolve, work, named)
 	}
 	kind := false
 	if flags&0x2000 != 0 {
@@ -761,6 +762,11 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 	}
 	if independent != nil && !independent.familyClosed(p, c.Work) {
 		return nil
+	}
+	for _, child := range p.children {
+		if child.enumSynthesis != nil && child.enumSynthesis.requiresParameterNames && !nativeMemberEnumParameterUnitClosed(p, c.obj, c.Work) {
+			return nil
+		}
 	}
 	return p
 }

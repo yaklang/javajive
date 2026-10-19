@@ -6,11 +6,18 @@ import "strings"
 // a static import is a legal substitute before ::. Reopen the lexical name
 // at the actual writer, after locals and type parameters have been bound.
 func (f *ClassContext) StaticMethodReferenceOwner(owner, member, descriptor string) (string, bool) {
-	bound, known := f.staticTypeOwner(owner)
+	bound, known := f.StaticMethodReferenceTypeName(owner)
 	if !known {
 		f.failStaticOwner(owner, member, descriptor, "static method reference requires an unobscured original type name")
 	}
 	return bound, known
+}
+
+// Representation selection may need a checked adapter when no TypeName can
+// denote the owner before ::. Query that namespace without latching a writer
+// failure; the actual method-reference writer still reopens it after binding.
+func (f *ClassContext) StaticMethodReferenceTypeName(owner string) (string, bool) {
+	return f.staticTypeOwner(owner)
 }
 
 // A field select reclassifies its leading name in the same way as a static
