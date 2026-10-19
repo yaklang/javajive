@@ -24,7 +24,7 @@ func lambdaFactoryNameComponent(factory *lambdaSourceFactory) (string, bool) {
 		_, result, err := callbinding.Descriptor(descriptor)
 		return "new", err == nil && result == "V" && factory.method.AccessFlags&(8|0x1000) == 0
 	}
-	if factory.method.AccessFlags == 0x100a {
+	if factory.method.AccessFlags == 0x100a || factory.method.AccessFlags == 0x1002 {
 		return "null", true
 	}
 	return name, class_context.PreservesJava8Identifier(name)

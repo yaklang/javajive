@@ -57,7 +57,14 @@ func (c *ClassObjectDumper) recordLambdaLocalParameterNameDemands(p *lambdaParam
 	if c == nil || p == nil || p.factory == nil || !p.factory.closed() || len(captures) != len(p.captures) || len(captures) > 64 || len(p.names) < len(captures) || len(c.nativeLambdaCaptureParameterNames) > 4096 || !nativeProofWork(c.Work, int64(len(captures))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(captures))*256+256) != nil {
 		return false
 	}
-	site := &nativeLambdaLocalCaptureSite{method: p.factory.method, code: p.factory.code, pc: p.factory.pc, operands: p.captures}
+	operands := p.captures
+	if p.receiverWords != 0 {
+		if p.receiver == nil {
+			return false
+		}
+		operands = append([]*nativeEnumSelectorProducer{p.receiver}, p.captures...)
+	}
+	site := &nativeLambdaLocalCaptureSite{method: p.factory.method, code: p.factory.code, pc: p.factory.pc, operands: operands}
 	var pending []nativeLambdaCaptureNameDemand
 	for i, operand := range p.captures {
 		if operand == nil || !nativeProofWork(c.Work, 1) {
@@ -71,7 +78,7 @@ func (c *ClassObjectDumper) recordLambdaLocalParameterNameDemands(p *lambdaParam
 			if !nativeProofWork(c.Work, 1) || prior.site == nil {
 				return false
 			}
-			if prior.site.method == site.method && prior.site.code == site.code && prior.site.pc == site.pc && prior.index == i {
+			if prior.site.method == site.method && prior.site.code == site.code && prior.site.pc == site.pc && prior.index == i+p.receiverWords {
 				if prior.name != p.names[i] || prior.value != captures[i] {
 					return false
 				}
@@ -79,7 +86,7 @@ func (c *ClassObjectDumper) recordLambdaLocalParameterNameDemands(p *lambdaParam
 			}
 		}
 		if !found {
-			pending = append(pending, nativeLambdaCaptureNameDemand{site: site, index: i, name: p.names[i], value: captures[i]})
+			pending = append(pending, nativeLambdaCaptureNameDemand{site: site, index: i + p.receiverWords, name: p.names[i], value: captures[i]})
 		}
 	}
 	if len(pending) == 0 {

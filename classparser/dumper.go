@@ -3861,7 +3861,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			return nil, fmt.Errorf("unproved lambda parameter metadata regeneration")
 		}
 		if lambdaMetadata != nil {
-			if request.captureCount != len(lambdaMetadata.captures) || !lambdaMetadata.factory.same(request.factory) || adapter != nil && (adapter.ErasedDescriptor != lambdaMetadata.samDescriptor || adapter.InstantiatedDescriptor != lambdaMetadata.samDescriptor) {
+			if request.captureCount != lambdaMetadata.factoryCaptureCount() || !lambdaMetadata.factory.same(request.factory) || adapter != nil && (adapter.ErasedDescriptor != lambdaMetadata.samDescriptor || adapter.InstantiatedDescriptor != lambdaMetadata.samDescriptor) {
 				return nil, fmt.Errorf("lambda parameter metadata needs its original factory and SAM projection")
 			}
 			lambdaCaptureContext, lambdaCapturedParameters, known = c.lambdaParameterCaptureContext(lambdaMetadata, request)
@@ -4212,9 +4212,9 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			priorStable := funcCtx.SourceCaptureStable
 			funcCtx.SourceCaptureStable = nil
 			defer func() { funcCtx.SourceCaptureStable = priorStable }()
-			captureOrder, captureOrderKnown := c.staticLambdaCaptureOrder(method, descriptor, request)
+			captureOrder, captureOrderKnown := c.physicalLambdaCaptureOrder(method, descriptor, request)
 			if !captureOrderKnown {
-				return nil, fmt.Errorf("unproved original static lambda capture order")
+				return nil, fmt.Errorf("unproved original physical lambda capture order")
 			}
 			params, statementList, err := parseBytesCodeWithLambdaCaptureOrder(c, codeAttr, id, captureOrder)
 			methodLocalParams := params
@@ -5214,9 +5214,14 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		}
 		captureOrderClosed := true
 		if lambdaMetadata != nil {
-			captureOrderClosed = lambdaParameterCaptureOrder(res, len(lambdaMetadata.captures), c.Work)
-		} else if captures, known := c.staticLambdaCaptureOrder(method, descriptor, request); !known || len(captures) != 0 && !lambdaSourceCaptureOrder(res, len(captures), c.Work) {
-			captureOrderClosed = false
+			captureOrderClosed = lambdaMetadata.captureOrderClosed(res, c.Work)
+		} else {
+			captures, known := c.physicalLambdaCaptureOrder(method, descriptor, request)
+			offset := 0
+			if method.AccessFlags&8 == 0 {
+				offset = 1
+			}
+			captureOrderClosed = known && (len(captures) == 0 || lambdaSourceCaptureOrderFrom(res, len(captures), offset, c.Work))
 		}
 		if !captureOrderClosed {
 			return nil, fmt.Errorf("lambda source changed original capture registration order")

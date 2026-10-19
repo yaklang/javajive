@@ -38,6 +38,37 @@ func TestOriginalLambdaParameterTargetSeparatesCapturedPrefixFromSAM(t *testing.
 	}
 }
 
+func TestOriginalInstanceLambdaParameterTargetExcludesImplicitReceiver(t *testing.T) {
+	for _, kind := range []uint8{RefInvokeVirtual, RefInvokeSpecial, RefInvokeInterface} {
+		for _, captures := range []int{1, 2, 64} {
+			t.Run(fmt.Sprintf("kind%d/captures%d", kind, captures), func(t *testing.T) {
+				ctx := &class_context.ClassContext{ClassName: "fixture.Owner"}
+				d := &Decompiler{FunctionContext: ctx, InvokeDynamicName: "apply"}
+				raw := types.NewJavaClass("java.util.function.Function")
+				sam := "(Ljava/lang/Object;)Ljava/lang/Object;"
+				physical := "(" + strings.Repeat("J", captures-1) + "Ljava/lang/Object;)Ljava/lang/Object;"
+				methodType := func(descriptor string) values.JavaValue {
+					return values.NewCustomValue(func(*class_context.ClassContext) string { return descriptor }, func() types.JavaType { return types.NewJavaClass("java.lang.invoke.MethodType") })
+				}
+				impl := t19Impl("fixture/Owner", "lambda$factory$0", physical, kind)
+				static := []values.JavaValue{methodType(sam), impl, methodType(sam)}
+				value := values.NewCustomValue(func(*class_context.ClassContext) string { return "(Object item) -> {return item;}" }, func() types.JavaType { return raw })
+				source := LambdaBodySource{Code: value.String(ctx), FixedParameterTypes: true}
+				if result, err := retainOriginalLambdaParameterTarget(d, value, source, raw, impl, static, captures); err != nil || result == nil {
+					t.Fatalf("receiver counted as physical descriptor row: %v", err)
+				}
+				if _, err := retainOriginalLambdaParameterTarget(d, value, source, raw, impl, static, captures-1); !errors.Is(err, errFixedLambdaParameterTarget) {
+					t.Fatal("missing receiver/prefix accepted", err)
+				}
+				impl.Name = "fixture.Other"
+				if _, err := retainOriginalLambdaParameterTarget(d, value, source, raw, impl, static, captures); !errors.Is(err, errFixedLambdaParameterTarget) {
+					t.Fatal("foreign receiver owner accepted", err)
+				}
+			})
+		}
+	}
+}
+
 func TestOriginalLambdaParameterTargetKeepsPhysicalFormals(t *testing.T) {
 	for _, variant := range []string{"original", "ordinary source", "captures", "wrong handle kind", "changed inputs", "changed result", "marker target", "unknown interface", "missing context", "missing bootstrap", "primitive interface"} {
 		t.Run(variant, func(t *testing.T) {

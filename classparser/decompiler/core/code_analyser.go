@@ -54,7 +54,7 @@ type Decompiler struct {
 	evaluationSnapshots    map[*OpCode][]EvaluationSnapshot
 	constructorInitialized bool
 	FunctionType           *types.JavaFuncType
-	// Physical static-lambda capture parameters, in their original descriptor
+	// Physical lambda capture parameters, in their original descriptor
 	// order. This restricts source motion; it grants no factory/binding role.
 	LambdaCaptureOrderSlots []int
 	opcodeToSimulateStack   map[*OpCode]*StackSimulationImpl
@@ -4113,6 +4113,7 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 			funcCallValue.Arguments = append(funcCallValue.Arguments, runtimeStackSimulation.Pop().(values.JavaValue))
 		}
 		funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+		d.retainLambdaStaticQualifier(opcode, funcCallValue)
 		funcCallValue.RetainFunctionalReturnSignature(funcCtx)
 		d.invokeFuncCall[opcode] = funcCallValue
 		if funcCallValue.FuncType.ReturnType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
@@ -6524,6 +6525,7 @@ func (d *Decompiler) ParseStatement() error {
 					n++
 				}
 				funcCallValue.Arguments = funk.Reverse(funcCallValue.Arguments).([]values.JavaValue)
+				d.retainLambdaStaticQualifier(opcode, funcCallValue)
 				appendNode(statements.NewExpressionStatement(funcCallValue))
 			}
 		case OP_INVOKESPECIAL:

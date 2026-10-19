@@ -211,6 +211,9 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
 	word := 0
+	if dumper.FuncCtx != nil && !dumper.FuncCtx.IsStatic {
+		word = 1
+	}
 	for _, descriptor := range captures {
 		parser.LambdaCaptureOrderSlots = append(parser.LambdaCaptureOrderSlots, word)
 		word++

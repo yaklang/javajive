@@ -13,7 +13,7 @@ import (
 )
 
 // A physical implementation is not the source SAM declaration. This narrow
-// projection covers a static javac8 body with one actual factory. Physical
+// projection covers a javac8 body with one actual factory. Physical
 // captures and source SAM formals retain separate roles in each original
 // lexical scope. Their entry words must remain unwritten. Shared factories,
 // other metadata and other compiler profiles need separate proofs.
@@ -32,6 +32,8 @@ type lambdaParameterMetadata struct {
 	words         int
 	captureTypes  []string
 	captures      []*nativeEnumSelectorProducer
+	receiver      *nativeEnumSelectorProducer
+	receiverWords int
 	samDescriptor string
 	factory       *lambdaSourceFactory
 }
@@ -93,7 +95,7 @@ func readLambdaParameterMetadata(object *ClassObject, method *MemberInfo, work *
 	}
 	// ClassWriter adds ACC_SYNTHETIC to each implementation parameter. The
 	// source formal controls only its name and FINAL bit (OpenJDK javac8).
-	if object.MajorVersion != 52 || method.AccessFlags != 0x100a {
+	if object.MajorVersion != 52 || method.AccessFlags != 0x100a && method.AccessFlags != 0x1002 {
 		return nil, false
 	}
 	name, named := sourceBridgeUTF8(object, method.NameIndex)
@@ -103,6 +105,11 @@ func readLambdaParameterMetadata(object *ClassObject, method *MemberInfo, work *
 		return nil, false
 	}
 	projection := &lambdaParameterMetadata{object: object, method: method, table: table, info: bytes.Clone(table.Info), name: name, descriptor: descriptor, parameters: parameters}
+	if method.AccessFlags&8 == 0 {
+		// The implicit receiver consumes a local word, never a descriptor or
+		// MethodParameters row. Its actual factory operand is proved later.
+		projection.receiverWords, projection.words = 1, 1
+	}
 	seen := map[string]bool{}
 	nameBytes := 0
 	for i, parameter := range parameters {
@@ -129,7 +136,7 @@ func (p *lambdaParameterMetadata) schemaMatches(object *ClassObject, method *Mem
 		return false
 	}
 	fresh, known := readLambdaParameterMetadata(object, method, work)
-	return known && fresh != nil && fresh.table == p.table && bytes.Equal(fresh.info, p.info) && fresh.name == p.name && fresh.descriptor == p.descriptor && fresh.words == p.words && slices.Equal(fresh.names, p.names) && slices.Equal(fresh.flags, p.flags) && slices.Equal(fresh.parameters, p.parameters)
+	return known && fresh != nil && fresh.table == p.table && bytes.Equal(fresh.info, p.info) && fresh.name == p.name && fresh.descriptor == p.descriptor && fresh.words == p.words && fresh.receiverWords == p.receiverWords && slices.Equal(fresh.names, p.names) && slices.Equal(fresh.flags, p.flags) && slices.Equal(fresh.parameters, p.parameters)
 }
 
 // Metadata is admitted only as a regeneration requirement on the actual body
@@ -179,7 +186,7 @@ func (c *ClassObjectDumper) lambdaParameterMetadataInScope(method *MemberInfo, w
 	// Reuse the ordinary declaration reader without borrowing another proof
 	// caller's budget. This query mutates neither the dumper nor its input.
 	var parentNames []string
-	if projection.factory.method.AccessFlags == 0x100a {
+	if projection.factory.method.AccessFlags == 0x100a || projection.factory.method.AccessFlags == 0x1002 {
 		projection.parent, known = c.lambdaParameterMetadataInScope(projection.factory.method, work, active)
 		if !known || projection.parent == nil {
 			return nil, false

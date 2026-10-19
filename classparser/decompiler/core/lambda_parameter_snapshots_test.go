@@ -95,3 +95,68 @@ func TestLambdaParameterCopyElisionKeepsFactoryAndRejectsMutableWords(t *testing
 		})
 	}
 }
+
+func TestLambdaReceiverCopyElisionRequiresInitializedOriginalEntry(t *testing.T) {
+	for _, variant := range []string{"original", "initialized constructor", "uninitialized constructor", "static context", "forged receiver", "wrong owner", "wrong ordinal", "duplicate receiver", "receiver store", "wrong expected type", "missing factory", "wrong factory", "declared snapshot", "work", "memory", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			typ := types.NewJavaClass("fixture.Receiver")
+			receiver := values.NewJavaRef(utils.NewRootVariableId(), values.JavaNull, typ)
+			receiver.IsParam, receiver.IsThis = true, true
+			receiver.MarkOriginalParameter(0)
+			if variant != "forged receiver" {
+				receiver.MarkOriginalReceiver()
+			}
+			snapshot := values.NewJavaRef(utils.NewRootVariableId(), receiver, typ.Copy())
+			ordinal := 0
+			if variant == "wrong ordinal" {
+				ordinal = 1
+			}
+			snapshot.MarkOriginalDynamicOperand(10, ordinal, receiver)
+			lambda := values.NewStreamingCustomValue(func(*class_context.ClassContext, *workbudget.Writer) error { panic("proof rendered lambda") }, func() types.JavaType { panic("proof queried lambda type") })
+			lambda.Flag, lambda.OriginPC, lambda.HasOriginPC, lambda.CapturesKnown = "lambda", 10, true, true
+			lambda.Captures = []values.JavaValue{snapshot}
+			if ordinal == 1 {
+				lambda.Captures = []values.JavaValue{receiver, snapshot}
+			}
+			lambda.RequireLambdaParameterNames()
+			if variant != "missing factory" {
+				lambda.MarkOriginalLambdaFactory(10)
+			}
+			op := &OpCode{CurrentOffset: 10, Instr: &Instruction{OpCode: OP_INVOKEDYNAMIC}}
+			d := &Decompiler{FunctionContext: &class_context.ClassContext{ClassName: "fixture.Receiver", FunctionName: "factory"}, Params: []values.JavaValue{receiver}, opCodes: []*OpCode{{Instr: &Instruction{OpCode: OP_NOP}}}, evaluationSnapshots: map[*OpCode][]EvaluationSnapshot{op: {{Ref: snapshot, Value: receiver, Operand: true, ExpectedType: typ}}}}
+			switch variant {
+			case "initialized constructor", "uninitialized constructor":
+				d.FunctionContext.FunctionName = "<init>"
+				d.constructorInitialized = variant == "initialized constructor"
+			case "static context":
+				d.FunctionContext.IsStatic = true
+			case "wrong owner":
+				d.FunctionContext.ClassName = "fixture.Other"
+			case "duplicate receiver":
+				d.Params = append(d.Params, receiver)
+			case "receiver store":
+				d.opCodes = append(d.opCodes, &OpCode{Instr: &Instruction{OpCode: OP_ASTORE_0}})
+			case "wrong expected type":
+				d.evaluationSnapshots[op][0].ExpectedType = types.NewJavaClass("fixture.Other")
+			case "wrong factory":
+				op.CurrentOffset++
+			case "declared snapshot":
+				snapshot.MarkOriginalDynamicOperandDeclaration(10, receiver)
+			case "work":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "memory":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				d.Work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			d.inlineUnchangedLambdaParameterOperands(op, lambda)
+			pc, index, inlined := snapshot.OriginalInlinedDynamicOperandWitness(receiver)
+			want := variant == "original" || variant == "initialized constructor"
+			if inlined != want || want && (pc != 10 || index != 0 || len(d.evaluationSnapshots[op]) != 0) || !want && (snapshot.StackVar != nil || len(d.evaluationSnapshots[op]) != 1) {
+				t.Fatalf("implicit receiver inlined=%v retained=%d", inlined, len(d.evaluationSnapshots[op]))
+			}
+		})
+	}
+}

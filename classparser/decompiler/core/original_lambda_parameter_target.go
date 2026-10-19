@@ -20,14 +20,28 @@ func retainOriginalLambdaParameterTarget(d *Decompiler, value *values.CustomValu
 	if !source.FixedParameterTypes {
 		return value, nil
 	}
-	if d == nil || d.FunctionContext == nil || value == nil || impl == nil || impl.RefKind != RefInvokeStatic || captures < 0 || captures > 64 || len(static) < 3 || d.blockPartialFunctionalTarget {
+	if d == nil || d.FunctionContext == nil || value == nil || impl == nil || captures < 0 || captures > 64 || len(static) < 3 || d.blockPartialFunctionalTarget {
 		return nil, fmt.Errorf("%w: fixed formals require the original instantiated target", errFixedLambdaParameterTarget)
 	}
+	prefix := captures
+	switch impl.RefKind {
+	case RefInvokeStatic:
+	case RefInvokeVirtual, RefInvokeSpecial, RefInvokeInterface:
+		// The body callback already owns the original declaration/factory
+		// proof. Its bound receiver is an invocation operand, never a row in
+		// the implementation descriptor or MethodParameters table.
+		if captures == 0 || strings.ReplaceAll(impl.Name, ".", "/") != strings.ReplaceAll(d.FunctionContext.ClassName, ".", "/") {
+			return nil, fmt.Errorf("%w: missing original bound implementation receiver", errFixedLambdaParameterTarget)
+		}
+		prefix--
+	default:
+		return nil, fmt.Errorf("%w: unsupported implementation invocation kind", errFixedLambdaParameterTarget)
+	}
 	physical, known := directSamTokens(impl.Description, false)
-	if !known || len(physical) < captures+1 {
+	if !known || len(physical) < prefix+1 {
 		return nil, fmt.Errorf("%w: missing original implementation parameter words", errFixedLambdaParameterTarget)
 	}
-	sam := "(" + strings.Join(physical[captures:len(physical)-1], "") + ")" + physical[len(physical)-1]
+	sam := "(" + strings.Join(physical[prefix:len(physical)-1], "") + ")" + physical[len(physical)-1]
 	if t19MethodTypeDesc(static[2]) != sam {
 		return nil, fmt.Errorf("%w: instantiated target changes original SAM parameter words", errFixedLambdaParameterTarget)
 	}

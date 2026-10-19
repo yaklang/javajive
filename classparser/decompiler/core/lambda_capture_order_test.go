@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
@@ -17,7 +18,7 @@ func captureMotionProgram(words []int, producer, crossed, prefix []int) (*Decomp
 	refs := make([]*values.JavaRef, 4)
 	for i := range refs {
 		typ := types.JavaType(object)
-		if len(words) == 3 && words[1] == 2 {
+		if len(words) == 3 && words[1]-words[0] == 2 {
 			if i == 0 {
 				typ = types.NewJavaPrimer(types.JavaLong)
 			} else if i == 1 {
@@ -26,7 +27,7 @@ func captureMotionProgram(words []int, producer, crossed, prefix []int) (*Decomp
 		}
 		refs[i] = values.NewJavaRef(utils.NewRootVariableId(), nil, typ)
 		refs[i].IsParam = true
-		word := 6 // a SAM formal, outside the physical capture prefix
+		word := words[2] + 2 // a SAM formal, outside the physical capture prefix
 		if i < 3 {
 			word = words[i]
 		}
@@ -54,7 +55,11 @@ func captureMotionProgram(words []int, producer, crossed, prefix []int) (*Decomp
 		source.AddNext(middle)
 		middle.AddNext(target)
 	}
-	return &Decompiler{LambdaCaptureOrderSlots: append([]int(nil), words...)}, value, source, target, local
+	d := &Decompiler{LambdaCaptureOrderSlots: append([]int(nil), words...)}
+	if words[0] == 1 {
+		d.FunctionContext = &class_context.ClassContext{IsStatic: false}
+	}
+	return d, value, source, target, local
 }
 
 func TestLambdaCaptureMotionPreservesIndependentLexicalReadTrace(t *testing.T) {
@@ -83,7 +88,7 @@ func TestLambdaCaptureMotionPreservesIndependentLexicalReadTrace(t *testing.T) {
 		return result
 	}
 	accepted, inverted, considered := 0, 0, 0
-	for _, words := range [][]int{{0, 1, 2}, {0, 2, 4}} {
+	for _, words := range [][]int{{0, 1, 2}, {0, 2, 4}, {1, 2, 3}, {1, 3, 5}} {
 		for _, producer := range vectors {
 			for _, middle := range vectors {
 				for _, prefix := range vectors {

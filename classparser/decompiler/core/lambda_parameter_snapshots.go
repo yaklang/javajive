@@ -5,7 +5,8 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-// Elide only a pure copy of an unchanged original parameter. The factory/result
+// Elide only a pure copy of an unchanged original parameter or initialized
+// implicit receiver. The factory/result
 // snapshot remains at the invokedynamic PC: allocation, linkage, other operand
 // evaluations, and their exceptions do not move. A captured object's contents
 // may change; this proof concerns the parameter's reference/primitive words.
@@ -32,6 +33,11 @@ func (d *Decompiler) inlineUnchangedLambdaParameterOperands(op *OpCode, value va
 		source, parameter := dynamicCaptureSeed(snapshot.Value).(*values.JavaRef)
 		slot, stable := d.unchangedCaptureParameterSlot(source)
 		originalSlot, sealed := source.OriginalParameterSlot()
+		if parameter && source != nil && source.IsThis {
+			slot, stable = d.unchangedCaptureReceiverSlot(source)
+			originalSlot, sealed = source.OriginalReceiverSlot()
+			proved = proved && position == 0
+		}
 		if !proved || !parameter || !stable || !sealed || slot != originalSlot || snapshot.ExpectedType == nil {
 			keep = append(keep, snapshot)
 			continue

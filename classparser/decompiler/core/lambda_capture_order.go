@@ -18,8 +18,12 @@ func (d *Decompiler) lambdaCaptureInliningOrderClosed(value values.JavaValue, so
 		return false
 	}
 	ranks := make(map[int]int, len(d.LambdaCaptureOrderSlots))
+	startWord := 0
+	if d.FunctionContext != nil && !d.FunctionContext.IsStatic {
+		startWord = 1
+	}
 	for rank, slot := range d.LambdaCaptureOrderSlots {
-		if slot < 0 || slot > 254 || rank == 0 && slot != 0 || rank > 0 && slot <= d.LambdaCaptureOrderSlots[rank-1] {
+		if slot < 0 || slot > 254 || rank == 0 && slot != startWord || rank > 0 && slot <= d.LambdaCaptureOrderSlots[rank-1] {
 			return false
 		}
 		ranks[slot] = rank

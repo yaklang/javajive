@@ -245,16 +245,22 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 					origin := &lambdaSourceFactory{object: object, method: method, code: code, pc: int(op.CurrentOffset)}
 					_, named := lambdaFactoryNameComponent(origin)
 					nt, typed := constant(dynamic.NameAndTypeIndex).(*ConstantNameAndTypeInfo)
-					// A nested factory may reside in a static synthetic body.
+					// A nested factory may reside in an actual synthetic body.
 					// This use query grants no lexical permission: its caller must
 					// close that body's own factory chain and source registration.
-					if factory != nil || !named || method.AccessFlags&(0x0040|0x0100|0x0400) != 0 || method.AccessFlags&0x1000 != 0 && method.AccessFlags != 0x100a || !typed || nt == nil {
+					if factory != nil || !named || method.AccessFlags&(0x0040|0x0100|0x0400) != 0 || method.AccessFlags&0x1000 != 0 && method.AccessFlags != 0x100a && method.AccessFlags != 0x1002 || !typed || nt == nil {
 						return false
 					}
 					factoryDescriptor, known := sourceBridgeUTF8(object, nt.DescriptorIndex)
 					captures, result, err := callbinding.Descriptor(factoryDescriptor)
 					if !known || err != nil || len(captures) > 64 || len(result) < 3 || result[0] != 'L' || result[len(result)-1] != ';' {
 						return false
+					}
+					if parameters.receiverWords != 0 {
+						if len(captures) == 0 || captures[0] != "L"+object.GetClassName()+";" || method.AccessFlags&8 != 0 {
+							return false
+						}
+						captures = captures[1:]
 					}
 					parameters.captureTypes = captures
 					factory = origin

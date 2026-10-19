@@ -217,6 +217,28 @@ func (d *Decompiler) unchangedCaptureParameterSlot(ref *values.JavaRef) (int, bo
 	if d == nil || ref == nil || !ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || len(d.opCodes) == 0 {
 		return -1, false
 	}
+	return d.unchangedCaptureEntrySlot(ref)
+}
+
+func (d *Decompiler) unchangedCaptureReceiverSlot(ref *values.JavaRef) (int, bool) {
+	if d == nil || d.FunctionContext == nil || d.FunctionContext.IsStatic || d.FunctionContext.FunctionName == "<init>" && !d.constructorInitialized {
+		return -1, false
+	}
+	slot, known := ref.OriginalReceiverSlot()
+	if !known || slot != 0 {
+		return -1, false
+	}
+	typ, typed := values.SourceTypeErasure(ref.Type(), d.FunctionContext)
+	if !typed || typ != "L"+normalizeJavaClassName(d.FunctionContext.ClassName)+";" {
+		return -1, false
+	}
+	return d.unchangedCaptureEntrySlot(ref)
+}
+
+func (d *Decompiler) unchangedCaptureEntrySlot(ref *values.JavaRef) (int, bool) {
+	if d == nil || ref == nil || len(d.opCodes) == 0 {
+		return -1, false
+	}
 	slot := -1
 	width := 1
 	index := 0

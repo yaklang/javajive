@@ -63,9 +63,9 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 			return nil, false
 		}
 		// A dropped trailing implementation would leave every remaining
-		// ordinal apparently correct. Private static synthetic declarations
+		// ordinal apparently correct. Private synthetic declarations
 		// still need actual consumed body receipts, not just a matching prefix.
-		if method.AccessFlags == 0x100a && c.lambdaMethodSourceBodies[method] == nil {
+		if (method.AccessFlags == 0x100a || method.AccessFlags == 0x1002) && c.lambdaMethodSourceBodies[method] == nil {
 			return nil, false
 		}
 	}
@@ -105,7 +105,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		return nil, false
 	}
 	for _, receipt := range c.lambdaMethodSourceBodies {
-		if receipt != nil && receipt.request.factory != nil && receipt.request.factory.method != nil && receipt.request.factory.method.AccessFlags == 0x100a {
+		if receipt != nil && receipt.request.factory != nil && receipt.request.factory.method != nil && (receipt.request.factory.method.AccessFlags == 0x100a || receipt.request.factory.method.AccessFlags == 0x1002) {
 			return c.native8NestedLambdaSourceIdentityEvents(text, arrows, methods, charge)
 		}
 	}
@@ -119,7 +119,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 			return nil, false
 		}
 		packet := receipt.body.code
-		if binding := receipt.body.lambdaParameterBinding; binding != nil && len(binding.captured) != 0 {
+		if binding := receipt.body.lambdaParameterBinding; binding != nil && binding.metadata != nil && binding.metadata.factoryCaptureCount() != 0 {
 			if !binding.capturedNamesClosed(c.Work) || receipt.renderedUnknown || receipt.renderedTemplate != packet {
 				return nil, false
 			}
@@ -205,7 +205,7 @@ func (c *ClassObjectDumper) native8LambdaRenderedIdentityPacketClosed(receipt *l
 		return false
 	}
 	binding := receipt.body.lambdaParameterBinding
-	if binding == nil || len(binding.captured) == 0 {
+	if binding == nil || binding.metadata == nil || binding.metadata.factoryCaptureCount() == 0 {
 		return true
 	}
 	if !binding.capturedNamesClosed(c.Work) || receipt.renderedUnknown || receipt.renderedTemplate != receipt.body.code {
