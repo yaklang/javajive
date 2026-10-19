@@ -24,16 +24,31 @@ func TestFinallyUnaryNumericNegationHasNoInventedEffectPC(t *testing.T) {
 }
 
 func TestFinallyUnaryNegationRefusesSourceUnboxingAndWrongDomains(t *testing.T) {
-	for _, variant := range []string{"covered operand call", "uncovered operand call", "missing call pc", "boxed operand", "boolean operand", "string operand", "boxed source view", "wrong result", "missing result", "wrong arity", "opaque operand"} {
+	for _, variant := range []string{"covered operand call", "uncovered operand call", "missing call pc", "missing call type", "missing call return", "reference call descriptor", "wide call descriptor", "invalid call descriptor", "boxed operand", "boolean operand", "string operand", "boxed source view", "wrong result", "missing result", "wrong arity", "opaque operand"} {
 		t.Run(variant, func(t *testing.T) {
 			operand := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
 			expr := &values.JavaExpression{Op: values.SUB, Values: []values.JavaValue{operand}, Typ: types.NewJavaPrimer(types.JavaInteger)}
 			switch variant {
-			case "covered operand call", "uncovered operand call", "missing call pc":
+			case "covered operand call", "uncovered operand call", "missing call pc", "missing call type", "missing call return", "reference call descriptor", "wide call descriptor", "invalid call descriptor":
 				call := numericConversionCall(15)
 				expr.Values[0] = call
 				if variant == "missing call pc" {
 					call.HasOriginPC = false
+				}
+				if variant == "missing call type" {
+					call.FuncType = nil
+				}
+				if variant == "missing call return" {
+					call.FuncType.ReturnType = nil
+				}
+				if variant == "reference call descriptor" {
+					call.Descriptor = "()Ljava/lang/Integer;"
+				}
+				if variant == "wide call descriptor" {
+					call.Descriptor = "()J"
+				}
+				if variant == "invalid call descriptor" {
+					call.Descriptor = "broken"
 				}
 			case "boxed operand":
 				operand.ResetVarType(types.NewJavaClass("java.lang.Integer"))

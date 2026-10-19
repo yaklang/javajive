@@ -43,7 +43,7 @@ func TestNativeAnonymousPrimitivePredicateMatchesIndependentSignedModel(t *testi
 }
 
 func TestNativeAnonymousPrimitivePredicateRefusesChangedSourceCategory(t *testing.T) {
-	for _, variant := range []string{"unknown producer", "missing producer pc", "different producer pc", "nonzero", "long zero", "boxed zero", "boxed operand", "long operand", "boolean operand", "reference branch", "two-word branch", "unrelated operator", "missing operand", "opaque condition"} {
+	for _, variant := range []string{"unknown producer", "missing producer pc", "missing call type", "missing call return", "reference call descriptor", "wide call descriptor", "invalid call descriptor", "different producer pc", "nonzero", "long zero", "boxed zero", "boxed operand", "long operand", "boolean operand", "reference branch", "two-word branch", "unrelated operator", "missing operand", "opaque condition"} {
 		t.Run(variant, func(t *testing.T) {
 			plan, condition := primitivePredicateSourceFixture(core.OP_IFNE, values.EQ)
 			call := condition.Values[0].(*values.FunctionCallExpression)
@@ -53,6 +53,16 @@ func TestNativeAnonymousPrimitivePredicateRefusesChangedSourceCategory(t *testin
 				delete(plan.branches, 8)
 			case "missing producer pc":
 				call.HasOriginPC = false
+			case "missing call type":
+				call.FuncType = nil
+			case "missing call return":
+				call.FuncType.ReturnType = nil
+			case "reference call descriptor":
+				call.Descriptor = "()Ljava/lang/Integer;"
+			case "wide call descriptor":
+				call.Descriptor = "()J"
+			case "invalid call descriptor":
+				call.Descriptor = "broken"
 			case "different producer pc":
 				call.OriginPC++
 			case "nonzero":

@@ -7,6 +7,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
+	"reflect"
 )
 
 // A flat event list cannot certify chosen-arm evaluation. These delimiters
@@ -222,13 +223,25 @@ func nativeAnonymousInitializerSourceBranch(plan *nativeAnonymousExpressionIniti
 		return nil, false
 	}
 	pc, valid := 0, false
+	var operandType types.JavaType
 	switch x := values.UnpackSoltValue(expression.Values[0]).(type) {
 	case *values.RefMember:
-		pc, valid = x.OriginPC, x.HasOriginPC
+		pc, valid, operandType = x.OriginPC, x.HasOriginPC, x.JavaType
 	case *values.JavaClassMember:
-		pc, valid = x.OriginPC, x.HasOriginPC
+		pc, valid, operandType = x.OriginPC, x.HasOriginPC, x.JavaType
 	case *values.FunctionCallExpression:
 		pc, valid = x.OriginPC, x.HasOriginPC
+		// The predicate's primitive result is explicit in the original call
+		// type; receiver generic inference cannot confer this evidence.
+		if x.FuncType != nil && x.FuncType.ReturnType != nil {
+			declared, err := types.ParseMethodDescriptor(x.Descriptor)
+			if err == nil && declared != nil {
+				abi, known := declared.RawType().(*types.JavaFuncType)
+				if known && abi != nil && abi.ReturnType != nil && reflect.DeepEqual(abi.ReturnType.RawType(), x.FuncType.ReturnType.RawType()) {
+					operandType = x.FuncType.ReturnType
+				}
+			}
+		}
 	}
 	branch := plan.branches[pc]
 	if !valid || branch == nil || branch.Instr == nil {
@@ -249,11 +262,10 @@ func nativeAnonymousInitializerSourceBranch(plan *nativeAnonymousExpressionIniti
 	}
 	n, integer := zero.Data.(int)
 	z, primitive := zero.Type().RawType().(*types.JavaPrimer)
-	operand := values.UnpackSoltValue(expression.Values[0])
-	if !integer || n != 0 || !primitive || z == nil || z.Name != types.JavaInteger || operand == nil || operand.Type() == nil {
+	if !integer || n != 0 || !primitive || z == nil || z.Name != types.JavaInteger || operandType == nil {
 		return nil, false
 	}
-	typ, numeric := operand.Type().RawType().(*types.JavaPrimer)
+	typ, numeric := operandType.RawType().(*types.JavaPrimer)
 	if !numeric || typ == nil || typ.Name != types.JavaInteger && typ.Name != types.JavaByte && typ.Name != types.JavaShort && typ.Name != types.JavaChar {
 		return nil, false
 	}

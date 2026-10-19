@@ -742,10 +742,35 @@ func finallyUnaryNumericNegationTypes(x *values.JavaExpression) bool {
 		return false
 	}
 	operand := plainTryValue(x.Values[0])
-	if operand == nil || operand.Type() == nil {
+	if operand == nil {
 		return false
 	}
-	p, ok := operand.Type().RawType().(*types.JavaPrimer)
+	var operandType types.JavaType
+	switch source := operand.(type) {
+	case *values.FunctionCallExpression:
+		// A primitive return uses its declared call type. Do not ask a
+		// generic receiver callback to infer it, or dereference missing
+		// metadata in an incomplete source packet.
+		if source.FuncType != nil && source.FuncType.ReturnType != nil {
+			declared, err := types.ParseMethodDescriptor(source.Descriptor)
+			if err == nil && declared != nil {
+				abi, known := declared.RawType().(*types.JavaFuncType)
+				if known && abi != nil && abi.ReturnType != nil && reflect.DeepEqual(abi.ReturnType.RawType(), source.FuncType.ReturnType.RawType()) {
+					operandType = source.FuncType.ReturnType
+				}
+			}
+		}
+	case *values.CustomValue:
+		if _, target, _, original := source.SourcePrimitiveConversion(); original {
+			operandType = types.NewJavaPrimer(target)
+		}
+	default:
+		operandType = operand.Type()
+	}
+	if operandType == nil {
+		return false
+	}
+	p, ok := operandType.RawType().(*types.JavaPrimer)
 	result, resultOK := x.Typ.RawType().(*types.JavaPrimer)
 	if !ok || p == nil || !resultOK || result == nil {
 		return false
