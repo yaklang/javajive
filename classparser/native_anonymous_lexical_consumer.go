@@ -539,7 +539,10 @@ func (d *ClassObjectDumper) wireNativeAnonymousLexicalConsumers(ctx *class_conte
 		if ok && call != nil && call.HasOriginPC {
 			c := f.consumers[d.obj.GetClassName()][ctx.FunctionName+ctx.CurrentMethodDesc][call.OriginPC]
 			if c != nil && c.getter == nil && c.declaredField == nil {
-				if !nativeAnonymousLexicalConsumerSourceClosed(d, c, ctx, d.Work) || call.ClassName != c.owner || call.FunctionName != c.name || call.Descriptor != c.descriptor || call.Kind != values.InvokeVirtual || len(call.Arguments) != 0 || !nativeAnonymousLexicalConsumerOperand(call.Object, c, ctx, d.Work) {
+				// CP certificates use internal names; GetValueFromCP gives the
+				// expression IR a dotted owner. Compare the original binary
+				// identity, preserving every '$' and the complete lexical proof.
+				if !nativeAnonymousLexicalConsumerSourceClosed(d, c, ctx, d.Work) || strings.ReplaceAll(call.ClassName, ".", "/") != c.owner || call.FunctionName != c.name || call.Descriptor != c.descriptor || call.Kind != values.InvokeVirtual || len(call.Arguments) != 0 || !nativeAnonymousLexicalConsumerOperand(call.Object, c, ctx, d.Work) {
 					d.nativeCaptureFailed = true
 					return "", false
 				}
