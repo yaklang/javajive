@@ -15,7 +15,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func TestInstanceLambdaMetadataSeparatesReceiverWordsAndPhysicalRows(t *testing.T) {
+func TestAdversarialInstanceLambdaMetadataSeparatesReceiverWordsAndPhysicalRows(t *testing.T) {
 	compiler := os.Getenv("JAVA8_JAVAC")
 	if compiler == "" {
 		t.Skip("JAVA8_JAVAC required for original instance metadata")
@@ -91,7 +91,7 @@ func TestInstanceLambdaMetadataSeparatesReceiverWordsAndPhysicalRows(t *testing.
 	}
 }
 
-func TestInstanceLambdaReceiverRequiresActualPendingAndCompletedSource(t *testing.T) {
+func TestAdversarialInstanceLambdaReceiverRequiresActualPendingAndCompletedSource(t *testing.T) {
 	for _, variant := range []string{"original", "renamed", "foreign seed", "forged THIS", "wrong factory", "wrong ordinal", "changed seed", "foreign type", "materialized alias", "opaque source", "static context", "budget"} {
 		t.Run(variant, func(t *testing.T) {
 			typ := types.NewJavaClass("fixture.Receiver")
@@ -152,7 +152,7 @@ func TestInstanceLambdaReceiverRequiresActualPendingAndCompletedSource(t *testin
 	}
 }
 
-func TestConstructorLambdaReceiverRequiresOriginalInitializedFrames(t *testing.T) {
+func TestAdversarialConstructorLambdaReceiverRequiresOriginalInitializedFrames(t *testing.T) {
 	compiler := os.Getenv("JAVA8_JAVAC")
 	if compiler == "" {
 		t.Skip("JAVA8_JAVAC required for original constructor factory")
