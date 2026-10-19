@@ -213,7 +213,7 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				var cv *values.CustomValue
 				cv = values.NewStreamingCustomValue(func(funcCtx *class_context.ClassContext, out *workbudget.Writer) error {
 					target, rawBridge := t19LambdaReturnCastStrings(funcCtx, cv, retTypevarCast)
-					return t19WriteLambdaBodyWithBridge(funcCtx, out, methodStr, captured, target, rawBridge)
+					return writeObservedLambdaSource(funcCtx, out, source, methodStr, captured, target, rawBridge)
 				}, func() types.JavaType {
 					return typ
 				}, lambdaReplace)

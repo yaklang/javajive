@@ -787,6 +787,10 @@ func (c *ClassObjectDumper) checkedEscapeHelperName() string {
 }
 
 func (c *ClassObjectDumper) checkedEscapeCatchName() string {
+	return c.freshSourceLocalName("jdec$escape$")
+}
+
+func (c *ClassObjectDumper) freshSourceLocalName(prefix string) string {
 	reserved := map[string]bool{}
 	// Every original parameter/debug local name is a UTF8 constant even when
 	// its attribute is opaque to this reader. Reserve the source spellings as
@@ -805,8 +809,11 @@ func (c *ClassObjectDumper) checkedEscapeCatchName() string {
 			reserved[class_context.SafeIdentifier(name)] = true
 		}
 	}
+	for name := range c.nativeLexicalCaptures() {
+		reserved[name] = true
+	}
 	for i := 0; ; i++ {
-		name := fmt.Sprintf("jdec$escape$%d", i)
+		name := fmt.Sprintf("%s%d", prefix, i)
 		if !reserved[name] {
 			return name
 		}

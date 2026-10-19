@@ -118,14 +118,18 @@ func nativeMemberRegistrationLayout(p *nativeMemberFamily, source string, member
 		return nativeMemberLayoutNode{text, events}, ok
 	}
 	fixed := make([]nativeMemberLayoutNode, 0, len(declarations))
+	var movable []nativeMemberLayoutNode
 	for _, s := range declarations {
 		n, ok := node(s)
 		if !ok {
 			return "", false
 		}
-		fixed = append(fixed, n)
+		if len(n.events) != 0 && p.registrationMethods[strings.TrimSpace(s)] {
+			movable = append(movable, n)
+		} else {
+			fixed = append(fixed, n)
+		}
 	}
-	var movable []nativeMemberLayoutNode
 	var empty []string
 	for _, s := range members {
 		n, ok := node(s)

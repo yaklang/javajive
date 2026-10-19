@@ -36,12 +36,15 @@ type nativeMemberClass struct {
 	accessBridges                 map[string]*nativeConstructorAccessBridge
 }
 type nativeMemberFamily struct {
-	independentRoot        *nativeMemberIndependentRoot
-	modernNestObjects      map[string]*ClassObject
-	methodLocals           map[string]*nativeMethodLocalClass
-	enumConstants          map[string]*nativeEnumConstantBody
-	enumSwitchTables       map[string]*nativeEnumSwitchTable
-	registrationLayouts    map[string]*nativeMemberRegistrationScope
+	independentRoot     *nativeMemberIndependentRoot
+	modernNestObjects   map[string]*ClassObject
+	methodLocals        map[string]*nativeMethodLocalClass
+	enumConstants       map[string]*nativeEnumConstantBody
+	enumSwitchTables    map[string]*nativeEnumSwitchTable
+	registrationLayouts map[string]*nativeMemberRegistrationScope
+	// Completed ordinary root method packets eligible for declaration-only
+	// scheduling. Initializers and compiler-owned lexical counters stay fixed.
+	registrationMethods    map[string]bool
 	sourceDependencies     map[string]string
 	allocationDependencies map[string]*nativeMemberClass
 	// Original constructor packets used while anonymous scopes are planned.

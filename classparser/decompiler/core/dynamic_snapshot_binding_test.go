@@ -22,8 +22,9 @@ func TestImmediateDynamicSnapshotExposesItsOriginalSourceBinding(t *testing.T) {
 	op.Target = []*OpCode{next}
 	source := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("java.lang.Object"))
 	source.Id.SetName("input")
-	snapshot := values.NewJavaRef(utils.NewRootVariableId(), nil, source.Type().Copy())
+	snapshot := values.NewJavaRef(utils.NewRootVariableId(), source, source.Type().Copy())
 	snapshot.Id.SetName("snapshot")
+	snapshot.MarkOriginalDynamicOperand(10, 0, source)
 	value := values.NewCustomValue(func(ctx *class_context.ClassContext) string { return snapshot.String(ctx) + "::toString" }, func() types.JavaType { return types.NewJavaClass("java.util.function.Function") })
 	value.Flag = "lambda"
 	value.IsMethodRef = true
@@ -34,6 +35,12 @@ func TestImmediateDynamicSnapshotExposesItsOriginalSourceBinding(t *testing.T) {
 		t.Fatal("original direct pure capture refused")
 	}
 	got := d.snapshotDynamicResult(op, nil, value)
+	if pc, index, known := snapshot.OriginalInlinedDynamicOperandWitness(source); !known || pc != 10 || index != 0 {
+		t.Fatal("adjacent source capture lost its independent inline certificate")
+	}
+	if _, _, declared := snapshot.OriginalDynamicOperandWitness(source); declared {
+		t.Fatal("adjacent source capture borrowed a declaration certificate")
+	}
 	children, known := values.Children(snapshot)
 	if !known || len(children) != 1 || children[0] != source {
 		t.Fatalf("capture source hidden behind an opaque forwarding closure: %v %v", children, known)

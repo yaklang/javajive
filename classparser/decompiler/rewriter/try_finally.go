@@ -12,10 +12,14 @@ import (
 // FinallyRegion is a rendering view. The original tree remains intact for
 // variable rebinding, declaration placement and all existing child visitors.
 type FinallyRegion struct {
-	TryBody     []statements.Statement
-	Exceptions  []*values.JavaRef
-	CatchBodies [][]statements.Statement
-	Cleanup     []statements.Statement
+	// SourcePrologue belongs only to RecoverCatchAllFinallyForSource. It
+	// initializes the private pending-Throwable state of a proved resource
+	// protocol after enclosing finally views have exposed its normal exits.
+	SourcePrologue []statements.Statement
+	TryBody        []statements.Statement
+	Exceptions     []*values.JavaRef
+	CatchBodies    [][]statements.Statement
+	Cleanup        []statements.Statement
 	// Continuation is evaluated only after cleanup completes normally.
 	Continuation *statements.CustomStatement
 }
@@ -70,6 +74,8 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 	for _, b := range tr.CatchBodies[:last] {
 		queue = append(queue, b...)
 	}
+	scope := append([]statements.Statement(nil), queue...)
+	scope = append(scope, tr.CatchBodies[last]...)
 	seen := map[statements.Statement]bool{}
 	for len(queue) > 0 && len(seen) < 256 {
 		st := queue[len(queue)-1]
@@ -102,12 +108,10 @@ func RecoverCatchAllFinally(tr *statements.TryCatchStatement) (*FinallyRegion, b
 	if len(queue) != 0 {
 		return nil, false
 	}
-	for _, st := range cleanup {
-		if !sameFinallyCleanup(rows, st, st, excluded, 0) {
-			return nil, false
-		}
+	if !sameFinallyCleanupBlock(rows, cleanup, cleanup, excluded, scope) {
+		return nil, false
 	}
-	p := finallyProof{cleanup: cleanup, rows: rows, excluded: excluded, remaining: 256, allowContinuation: true}
+	p := finallyProof{cleanup: cleanup, rows: rows, excluded: excluded, scope: scope, remaining: 256, allowContinuation: true}
 	// The try arm is protected by every typed catch, whereas catch bodies are
 	// protected only by the raw catch-all. Preserve that distinction for folded
 	// calls and casts, not just the PC of their enclosing statement.
@@ -164,6 +168,7 @@ type finallyProof struct {
 	cleanup      []statements.Statement
 	rows         []core.HandlerRange
 	excluded     []*values.JavaRef
+	scope        []statements.Statement
 	remaining    int
 	loopDepth    int
 	loopLabels   []string
@@ -219,22 +224,25 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 		}
 	}
 	if len(p.cleanup) > 0 && end >= len(p.cleanup) {
-		matched := true
-		for i, st := range p.cleanup {
-			candidate := body[end-len(p.cleanup)+i]
-			match := sameFinallyCleanup(p.rows, candidate, st, p.excluded, 0)
-			if p.cleanupMatch != nil {
-				match = p.cleanupMatch(candidate, st)
-			}
-			if !match {
-				matched = false
-				break
+		candidates := body[end-len(p.cleanup) : end]
+		matched := sameFinallyCleanupBlock(p.rows, candidates, p.cleanup, p.excluded, p.scope)
+		if p.cleanupMatch != nil {
+			matched = true
+			for i, st := range p.cleanup {
+				if !p.cleanupMatch(candidates[i], st) {
+					matched = false
+					break
+				}
 			}
 		}
 		if matched {
-			if !mustExit {
+			if !mustExit && ret == nil {
 				return nil, false, false // cleanup cannot precede a continuation
 			}
+			// A return exits this region even when nested in a loop whose
+			// other paths keep executing inside it. Its inert operand and
+			// original cleanup copy were proved above. A loop break/back edge
+			// alone cannot acquire this permission.
 			prefix, exits, ok := p.block(body[:end-len(p.cleanup)], false, covered)
 			if !ok || exits {
 				return nil, false, false
@@ -278,6 +286,11 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 				return nil, false, false
 			}
 		case *statements.CustomStatement:
+			if kind, label, proved := x.SourceTransferProtocol(); proved && p.loopDepth > 0 && (kind == "break" || kind == "continue") && (label == "" || slices.Contains(p.loopLabels, label)) {
+				out = append(out, st)
+				exits = true
+				continue
+			}
 			if x != nil && p.loopDepth > 0 && ((x.Name == "break" || x.Name == "continue") || ((x.LoopTransferKind == "break" || x.LoopTransferKind == "continue") && x.LoopTargetLabel != "" && slices.Contains(p.loopLabels, x.LoopTargetLabel))) && x.ThrownValue == nil {
 				out = append(out, st)
 				exits = true
@@ -328,6 +341,18 @@ func (p *finallyProof) block(input []statements.Statement, mustExit bool, covere
 			if !p.internalSwitchCovered(x, covered) {
 				return nil, false, false
 			}
+		case *statements.SynchronizedStatement:
+			pc, known := x.OriginalMonitorEnterPC()
+			if !known || !covered(pc) || !finallyCoveredValue(x.Argument, covered) {
+				return nil, false, false
+			}
+			clone := *x
+			var valid bool
+			clone.Body, exits, valid = p.block(x.Body, false, covered)
+			if !valid {
+				return nil, false, false
+			}
+			st = &clone
 		case *statements.TryCatchStatement:
 			if x == nil || len(x.Exception) == 0 || len(x.Exception) != len(x.CatchBodies) || len(x.Handlers) != len(x.Exception) {
 				return nil, false, false

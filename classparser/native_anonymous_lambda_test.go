@@ -7,6 +7,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
+	"strings"
 	"testing"
 )
 
@@ -110,7 +111,7 @@ func TestNativeAnonymousLambdaHandlesReproveOriginalTargetAndArchiveScope(t *tes
 
 func TestNativeAnonymousLambdaCapturedSourceCannotSubstituteSameTypedProducer(t *testing.T) {
 	files := nativeCompileClasses(t, nativeAnonymousLambdaProofFixture)
-	for _, variant := range []string{"original", "wrong read pc", "wrong field", "wrong receiver", "wrong receiver slot", "no receiver witness", "missing source", "foreign code", "foreign method", "wrong dynamic pc", "missing factory witness", "static parameter slot zero", "original snapshot", "snapshot wrong pc", "snapshot wrong position", "snapshot replaced seed", "missing consumption", "stub", "checked escape"} {
+	for _, variant := range []string{"original", "wrong read pc", "wrong field", "wrong receiver", "wrong receiver slot", "no receiver witness", "missing source", "foreign code", "foreign method", "wrong dynamic pc", "missing factory witness", "static parameter slot zero", "original snapshot", "inline snapshot", "inline snapshot wrong pc", "inline replaced source", "snapshot wrong pc", "snapshot wrong position", "snapshot replaced seed", "missing consumption", "stub", "checked escape"} {
 		t.Run(variant, func(t *testing.T) {
 			_, p := nativeAnonymousLambdaTestPacket(t, files)
 			view := p.lambdaImplementation
@@ -171,18 +172,26 @@ func TestNativeAnonymousLambdaCapturedSourceCannotSubstituteSameTypedProducer(t 
 				parameter.IsParam = true
 				parameter.MarkOriginalParameter(0)
 				field.Object = parameter
-			case "original snapshot", "snapshot wrong pc", "snapshot wrong position", "snapshot replaced seed":
+			case "original snapshot", "inline snapshot", "inline snapshot wrong pc", "inline replaced source", "snapshot wrong pc", "snapshot wrong position", "snapshot replaced seed":
 				seed := values.NewSlotValue(field, typ)
 				snapshot := values.NewJavaRef(utils.NewRootVariableId(), seed, typ)
 				pc, index := site.pc, 0
-				if variant == "snapshot wrong pc" {
+				if variant == "snapshot wrong pc" || variant == "inline snapshot wrong pc" {
 					pc++
 				}
 				if variant == "snapshot wrong position" {
 					index++
 				}
 				snapshot.MarkOriginalDynamicOperand(pc, index, seed)
-				snapshot.MarkOriginalDynamicOperandDeclaration(pc, seed)
+				if strings.HasPrefix(variant, "inline") {
+					snapshot.StackVar = seed
+					snapshot.MarkOriginalDynamicOperandInline(pc, seed)
+				} else {
+					snapshot.MarkOriginalDynamicOperandDeclaration(pc, seed)
+				}
+				if variant == "inline replaced source" {
+					snapshot.StackVar = values.NewSlotValue(field, typ)
+				}
 				if variant == "snapshot replaced seed" {
 					snapshot.Val = values.NewSlotValue(field, typ)
 				}
@@ -194,7 +203,7 @@ func TestNativeAnonymousLambdaCapturedSourceCannotSubstituteSameTypedProducer(t 
 			case "checked escape":
 				body.checkedEscape = true
 			}
-			if got := nativeMemberLambdaSourceClosed(view, dumper, nil); got != (variant == "original" || variant == "original snapshot") {
+			if got := nativeMemberLambdaSourceClosed(view, dumper, nil); got != (variant == "original" || variant == "original snapshot" || variant == "inline snapshot") {
 				t.Fatalf("source closed=%v", got)
 			}
 		})

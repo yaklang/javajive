@@ -65,6 +65,7 @@ func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 	currentNode := tryNode
 	var bodySts, otherBody []statements.Statement
+	var sourcePrefix []statements.Statement
 	foundTop := false
 	certified := false
 	if _, owner, known := entry.OriginalMonitor(); known && originalMonitorHandlerClosed(trySt, owner) {
@@ -73,6 +74,9 @@ func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
 		if valid {
 			foundTop = true
 			certified = true
+		} else if prefix, held, tail, closed := originalMonitorContinuations(trySt, owner); closed {
+			sourcePrefix, bodySts, otherBody = prefix, held, tail
+			foundTop, certified = true, true
 		}
 	}
 	for i := 0; !foundTop && i < len(trySt.TryBody); i++ {
@@ -126,6 +130,12 @@ func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
 		synchronizedSource = statements.NewSynchronizedStatementFromMonitor(entry, bodySts)
 	}
 	synNode := manager.NewNode(synchronizedSource)
+	headNode := synNode
+	for i := len(sourcePrefix) - 1; i >= 0; i-- {
+		declaration := manager.NewNode(sourcePrefix[i])
+		declaration.AddNext(headNode)
+		headNode = declaration
+	}
 	currentN := synNode
 	for _, statement := range otherBody {
 		n := manager.NewNode(statement)
@@ -140,7 +150,7 @@ func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
 		n.AddSource(nextNode)
 	}
 	for _, n := range source {
-		n.ReplaceNext(node, synNode)
+		n.ReplaceNext(node, headNode)
 	}
 	return nil
 }

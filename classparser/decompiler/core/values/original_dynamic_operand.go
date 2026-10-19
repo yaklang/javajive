@@ -8,6 +8,7 @@ type originalDynamicOperand struct {
 	uid       string
 	seed      JavaValue
 	declared  bool
+	inlined   bool
 }
 
 func (r *JavaRef) MarkOriginalDynamicOperand(pc, index int, seed JavaValue) {
@@ -18,9 +19,27 @@ func (r *JavaRef) MarkOriginalDynamicOperand(pc, index int, seed JavaValue) {
 }
 
 func (r *JavaRef) MarkOriginalDynamicOperandDeclaration(pc int, seed JavaValue) {
-	if r != nil && r.originalDynamicOperand != nil && r.VarUid == r.originalDynamicOperand.uid && pc == r.originalDynamicOperand.pc && sameOriginalValueIdentity(seed, r.originalDynamicOperand.seed) && sameOriginalValueIdentity(r.Val, seed) {
+	if r != nil && r.originalDynamicOperand != nil && !r.originalDynamicOperand.inlined && r.VarUid == r.originalDynamicOperand.uid && pc == r.originalDynamicOperand.pc && sameOriginalValueIdentity(seed, r.originalDynamicOperand.seed) && sameOriginalValueIdentity(r.Val, seed) {
 		r.originalDynamicOperand.declared = true
 	}
+}
+
+// The adjacent-consumer proof can retain a capture as an explicit StackVar
+// instead of emitting its snapshot declaration. Record that source projection
+// separately: it is neither a declaration nor permission to follow arbitrary
+// ref.Val histories or same-spelled forwarding closures.
+func (r *JavaRef) MarkOriginalDynamicOperandInline(pc int, seed JavaValue) {
+	if r == nil || r.originalDynamicOperand == nil || r.originalDynamicOperand.declared || r.originalDynamicOperand.inlined || r.Id == nil || r.VarUid != r.originalDynamicOperand.uid || r.IsThis || r.IsParam || r.CustomValue != nil || pc != r.originalDynamicOperand.pc || !sameOriginalValueIdentity(seed, r.originalDynamicOperand.seed) || !sameOriginalValueIdentity(r.Val, seed) || !sameOriginalValueIdentity(r.StackVar, seed) {
+		return
+	}
+	r.originalDynamicOperand.inlined = true
+}
+
+func (r *JavaRef) OriginalInlinedDynamicOperandWitness(seed JavaValue) (pc, index int, known bool) {
+	if r == nil || r.originalDynamicOperand == nil || !r.originalDynamicOperand.inlined || r.originalDynamicOperand.declared || r.Id == nil || r.VarUid != r.originalDynamicOperand.uid || r.IsThis || r.IsParam || r.CustomValue != nil || !sameOriginalValueIdentity(seed, r.originalDynamicOperand.seed) || !sameOriginalValueIdentity(r.Val, seed) || !sameOriginalValueIdentity(r.StackVar, seed) {
+		return 0, 0, false
+	}
+	return r.originalDynamicOperand.pc, r.originalDynamicOperand.index, true
 }
 
 func (r *JavaRef) OriginalDynamicOperandWitness(seed JavaValue) (pc, index int, known bool) {

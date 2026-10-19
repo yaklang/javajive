@@ -168,13 +168,23 @@ func sourceProofNil(node any) bool {
 	return node == nil || reflect.ValueOf(node).Kind() == reflect.Ptr && reflect.ValueOf(node).IsNil()
 }
 
-// A source anchor has no Java local operand and cannot write a catch binding.
-// This permission belongs only to precise rethrow/name stability. The original
-// owning JVM instruction can have effects (for example an implicit super call),
-// so effect/control consumers keep using the stricter catchSourceChildren.
+// An omitted source leaf cannot write a Java catch binding. This permission
+// belongs only to precise rethrow/name stability. Its original JVM instruction
+// can have effects, so effect/control consumers keep using catchSourceChildren.
 func preciseCatchBindingChildren(st statements.Statement) ([]values.JavaValue, [][]statements.Statement, bool) {
 	if anchor, ok := st.(*statements.SourceAnchorStatement); ok {
 		return nil, nil, anchor != nil
+	}
+	if middle, ok := st.(*statements.MiddleStatement); ok && middle != nil && middle.Flag == "monitor_exit" {
+		// Synchronized recovery retains releases whose receiver/held state is
+		// sealed by the original CFG proof. They render no catch-local operand;
+		// they do not invalidate Java's effectively-final catch parameter. A
+		// bare flag, changed payload or monitor acquisition is not that witness.
+		_, _, known := middle.OriginalMonitor()
+		return nil, nil, known
+	}
+	if transfer, ok := st.(*statements.CustomStatement); ok && transfer != nil && transfer.HasSourceTransfer() {
+		return nil, nil, transfer.SourceTransferOnly()
 	}
 	return catchSourceChildren(st)
 }

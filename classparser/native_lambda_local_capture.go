@@ -197,6 +197,13 @@ func nativeLambdaOriginalReceiverSource(value values.JavaValue, pc, index int, w
 		if slot, sealed := ref.OriginalReceiverSlot(); sealed {
 			return slot == 0
 		}
+		if position, ordinal, sealed := ref.OriginalInlinedDynamicOperandWitness(ref.Val); sealed {
+			if position != pc || ordinal != index {
+				return false
+			}
+			value = ref.StackVar
+			continue
+		}
 		position, ordinal, sealed := ref.OriginalDynamicOperandWitness(ref.Val)
 		if !sealed || position != pc || ordinal != index {
 			return false
@@ -217,6 +224,9 @@ func nativeLambdaLocalCaptureValue(operand *nativeEnumSelectorProducer, value va
 	}
 	location, position, known := ref.OriginalDynamicOperandWitness(ref.Val)
 	erasure, typed := values.SourceTypeErasure(ref.Type(), ctx)
+	if location, position, inlined := ref.OriginalInlinedDynamicOperandWitness(ref.Val); inlined && location == pc && position == index && typed && erasure == operand.result {
+		return nativeEnumSelectorSource(operand, ref.StackVar, ctx, work, 0)
+	}
 	if known && location == pc && position == index && typed && erasure == operand.result && nativeEnumSelectorSource(operand, ref.Val, ctx, work, 0) {
 		return true
 	}

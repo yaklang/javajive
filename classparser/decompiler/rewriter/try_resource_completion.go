@@ -9,6 +9,30 @@ import (
 	"strings"
 )
 
+// Enclosing finally views remove their own cleanup copies before rendering a
+// nested resource region. Only at that point may its close be the exact normal
+// suffix. Reattempt the existing complete resource proof on a private clone;
+// neither the original handler tree nor any earlier analysis is changed.
+func RecoverCatchAllFinallyForSource(tr *statements.TryCatchStatement) (*FinallyRegion, bool) {
+	if region, known := RecoverCatchAllFinally(tr); known {
+		return region, true
+	}
+	if tr == nil {
+		return nil, false
+	}
+	clone := *tr
+	declaration := prepareTypedResourceFinally(&clone)
+	if declaration == nil {
+		return nil, false
+	}
+	region, known := recoverTypedResourceFinally(&clone)
+	if !known {
+		return nil, false
+	}
+	region.SourcePrologue = []statements.Statement{declaration}
+	return region, true
+}
+
 // A single typed Throwable handler can encode resource cleanup without a raw catch-all.
 // Preserve pending returns rather than factoring them across nested cleanup.
 // This private state is a source-level completion carrier, never a new throw.

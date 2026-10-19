@@ -107,6 +107,7 @@ func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, valu
 			// dependency. A forwarding text closure hides its scoped local
 			// binding from namespace and effect visitors.
 			ref.StackVar = source
+			ref.MarkOriginalDynamicOperandInline(int(op.CurrentOffset), source)
 		}
 		delete(d.evaluationSnapshots, op)
 		typed := &values.CastExpression{Value: value, TargetType: value.Type().Copy(), Binding: true, OriginPC: int(op.CurrentOffset)}

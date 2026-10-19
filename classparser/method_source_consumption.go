@@ -23,6 +23,7 @@ func (c *ClassObjectDumper) snapshotLambdaSourceConsumption() (*lambdaSourceCons
 	for key, receipt := range s.bodies {
 		if receipt != nil {
 			copy := *receipt
+			copy.renderedPackets = append([]string(nil), receipt.renderedPackets...)
 			s.bodies[key] = &copy
 		}
 	}

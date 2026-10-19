@@ -18,6 +18,13 @@ func testNativeIndependentCompilerFamilyFixture(t *testing.T, compile func(strin
 // fixtures retain their entire original archive when the factory is nil.
 func testNativeIndependentCompilerFamilyWithArchive(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), archive func(*testing.T, map[string][]byte) *JarFS, verify ...func(*testing.T, string, []byte, []byte)) {
 	t.Helper()
+	testNativeIndependentCompilerFamilyWithPolicies(t, compile, profile, javac, owners, driver, want, mutate, archive, []string{"normal", "no-source-rewrites", "no-core-cleanups"}, verify...)
+}
+
+// New regressions can select actual active policies without repeating legacy
+// alias labels. Existing fixture contracts retain their exact invocation set.
+func testNativeIndependentCompilerFamilyWithPolicies(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), archive func(*testing.T, map[string][]byte) *JarFS, policies []string, verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
 	_, java := t04Tools(t)
 	owned := func(name string) bool {
 		for _, owner := range owners {
@@ -51,7 +58,7 @@ func testNativeIndependentCompilerFamilyWithArchive(t *testing.T, compile func(s
 			if oracle != want {
 				t.Fatalf("original oracle=%q", oracle)
 			}
-			for _, policy := range []string{"normal", "no-source-rewrites", "no-core-cleanups"} {
+			for _, policy := range policies {
 				t.Run(policy, func(t *testing.T) {
 					if policy == "no-source-rewrites" {
 						t.Setenv("JDEC_NO_SOURCE_REWRITES", "1")

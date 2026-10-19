@@ -6,6 +6,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
+	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 )
@@ -20,6 +21,10 @@ func sameFinallyEffectValue(rows []core.HandlerRange, a, b values.JavaValue, exc
 }
 
 func sameFinallyEffectTree(rows []core.HandlerRange, a, b values.JavaValue, excluded []*values.JavaRef, depth int, remaining *int) bool {
+	return sameFinallyEffectTreeBound(rows, a, b, excluded, depth, remaining, nil, nil)
+}
+
+func sameFinallyEffectTreeBound(rows []core.HandlerRange, a, b values.JavaValue, excluded []*values.JavaRef, depth int, remaining *int, left, right map[*utils.VariableId]int) bool {
 	*remaining--
 	if depth > 32 || *remaining < 0 {
 		return false
@@ -32,7 +37,9 @@ func sameFinallyEffectTree(rows []core.HandlerRange, a, b values.JavaValue, excl
 		return a == values.JavaNull && b == values.JavaNull
 	}
 	for _, local := range excluded {
-		if sameTryLocal(a, local) || sameTryLocal(b, local) {
+		ar, aRef := a.(*values.JavaRef)
+		br, bRef := b.(*values.JavaRef)
+		if sameTryLocal(a, local) && !(aRef && left[ar.Id] != 0) || sameTryLocal(b, local) && !(bRef && right[br.Id] != 0) {
 			return false
 		}
 	}
@@ -51,10 +58,22 @@ func sameFinallyEffectTree(rows []core.HandlerRange, a, b values.JavaValue, excl
 		return x != nil && y != nil && reflect.DeepEqual(x.RawType(), y.RawType())
 	}
 	same := func(x, y values.JavaValue) bool {
-		return sameFinallyEffectTree(rows, x, y, excluded, depth+1, remaining)
+		return sameFinallyEffectTreeBound(rows, x, y, excluded, depth+1, remaining, left, right)
 	}
 	switch x := a.(type) {
 	case *values.JavaRef:
+		if x != nil {
+			y, ref := b.(*values.JavaRef)
+			xid, xbound := left[x.Id]
+			if ref && y != nil {
+				yid, ybound := right[y.Id]
+				if xbound || ybound {
+					return xbound && ybound && xid == yid && finallyPureLocal(x) && finallyPureLocal(y) && typeSame(x.Type(), y.Type())
+				}
+			} else if xbound {
+				return false
+			}
+		}
 		return x != nil && finallyPureLocal(x) && sameTryLocal(b, x)
 	case *values.JavaLiteral:
 		y, ok := b.(*values.JavaLiteral)
@@ -93,8 +112,24 @@ func sameFinallyEffectTree(rows []core.HandlerRange, a, b values.JavaValue, excl
 		return true
 	case *values.NewExpression:
 		y, ok := b.(*values.NewExpression)
-		if !ok || x == nil || y == nil || x.IsArray() || y.IsArray() || !typeSame(x.JavaType, y.JavaType) || !outside(x.OriginPC, x.HasOriginPC) || !outside(y.OriginPC, y.HasOriginPC) {
+		if !ok || x == nil || y == nil || !typeSame(x.JavaType, y.JavaType) || !outside(x.OriginPC, x.HasOriginPC) || !outside(y.OriginPC, y.HasOriginPC) {
 			return false
+		}
+		if x.IsArray() || y.IsArray() {
+			if !finallyArrayEvaluationOutside(rows, x) || !finallyArrayEvaluationOutside(rows, y) || len(x.Length) != len(y.Length) || len(x.Initializer) != len(y.Initializer) {
+				return false
+			}
+			for i, operand := range x.Length {
+				if !same(operand, y.Length[i]) {
+					return false
+				}
+			}
+			for i, operand := range x.Initializer {
+				if !same(operand, y.Initializer[i]) {
+					return false
+				}
+			}
+			return true
 		}
 		cx, cy := x.ConstructorCall, y.ConstructorCall
 		if cx == nil || cy == nil || cx.Kind != values.InvokeSpecial || cy.Kind != values.InvokeSpecial || cx.FunctionName != "<init>" || cy.FunctionName != "<init>" {
@@ -174,6 +209,24 @@ func finallyCoveredAssignment(x *statements.AssignStatement, covered func(int) b
 		ref, known := x.LeftValue.(*values.JavaRef)
 		return known && ref != nil && ref.Id != nil && !ref.IsThis && !ref.IsParam && ref.CustomValue == nil && ref.StackVar == nil && ref.Type() != nil &&
 			!x.IsFirst && x.JavaValue == nil && x.ArrayMember == nil
+	}
+	if x != nil && x.ArrayMember == nil {
+		// A source local copy/literal store cannot throw. Some materialized
+		// stack copies have no separate JVM store PC; do not invent one merely
+		// to keep the surrounding exception region. Exact declared types rule
+		// out hidden boxing, unboxing, narrowing casts and erased source views.
+		ref, local := x.LeftValue.(*values.JavaRef)
+		if local && ref != nil && !ref.IsThis && finallyPureLocal(ref) && ref.Type() != nil && (x.JavaValue == values.JavaNull || values.IsNullLiteral(x.JavaValue)) && (ref.WebDeclType == nil || reflect.DeepEqual(ref.WebDeclType.RawType(), ref.Type().RawType())) {
+			_, reference := types.RawClassFQN(ref.Type())
+			if reference || ref.Type().IsArray() {
+				return true // null-to-reference has no unboxing or checkcast effect
+			}
+		}
+		if local && ref != nil && !ref.IsThis && finallyPureLocal(ref) && finallyPureLocal(x.JavaValue) && ref.Type() != nil && x.JavaValue.Type() != nil && reflect.DeepEqual(ref.Type().RawType(), x.JavaValue.Type().RawType()) && (ref.WebDeclType == nil || reflect.DeepEqual(ref.WebDeclType.RawType(), ref.Type().RawType())) {
+			if operand, local := plainTryValue(x.JavaValue).(*values.JavaRef); !local || operand.WebDeclType == nil || reflect.DeepEqual(operand.WebDeclType.RawType(), operand.Type().RawType()) {
+				return true
+			}
+		}
 	}
 	if x == nil || !x.HasOriginPC || !covered(x.OriginPC) || !finallyCoveredValue(x.JavaValue, covered) {
 		return false

@@ -135,7 +135,10 @@ func RewriteVar(sts *[]statements.Statement, startVarId int, params []*values.Ja
 				}
 			}
 			if firstIsOk && firstDeep != -1 {
-				assignSts[firstDeep].IsFirst = true
+				// A bare source declaration introduces an identity, not a value
+				// definition. Naming must not turn it into a first store merely
+				// because later stores in its child scopes reuse that identity.
+				assignSts[firstDeep].IsFirst = !assignSts[firstDeep].IsDeclare
 				for _, statement := range assignSts[firstDeep+1:] {
 					statement.IsFirst = false
 				}

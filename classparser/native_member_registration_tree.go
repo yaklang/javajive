@@ -73,7 +73,11 @@ func nativeMemberRegistrationTreeLayout(p *nativeMemberFamily, source string, me
 			if !ok {
 				return nil, false
 			}
-			tree.fixed = append(tree.fixed, n)
+			if scope.owner == p.owner && len(n.events) != 0 && p.registrationMethods[strings.TrimSpace(text)] {
+				tree.members = append(tree.members, n)
+			} else {
+				tree.fixed = append(tree.fixed, n)
+			}
 		}
 		seen := map[string]bool{}
 		for i, text := range scope.members {

@@ -2061,6 +2061,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			return "", fmt.Errorf("member source assembly budget")
 		}
 		if p := c.nativeMemberRoot; p != nil && c.obj.GetClassName() == p.owner {
+			p.registrationMethods = c.nativeMemberRegistrationMethods(methods)
 			var known bool
 			full, known = nativeMemberRegistrationLayout(p, full, members, c.Work, c.nativeRenderedMemberNames)
 			if !known {
@@ -4695,7 +4696,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 						ret = layer
 					}
 					tryBody, catchExc, catchBodies := ret.TryBody, ret.Exception, ret.CatchBodies
-					finally, haveFinally := rewriter.RecoverCatchAllFinally(ret)
+					finally, haveFinally := rewriter.RecoverCatchAllFinallyForSource(ret)
 					if haveFinally && finally.Continuation != nil && statementHasContinuation[statement] {
 						// A method-local terminal projection cannot consume an
 						// independently owned enclosing continuation or loop edge.
@@ -4704,9 +4705,26 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 					if haveFinally {
 						tryBody, catchExc, catchBodies = finally.TryBody, finally.Exceptions, finally.CatchBodies
 					}
+					var resourcePrologue string
+					if haveFinally {
+						for _, declaration := range finally.SourcePrologue {
+							// The complete resource proof creates this new pending
+							// Throwable identity. Allocate its spelling only in the
+							// final enclosing source namespace, after all IR naming.
+							store := declaration.(*statements.AssignStatement)
+							ref := store.LeftValue.(*values.JavaRef)
+							name := c.freshSourceLocalName("jdec$primary$")
+							if funcCtx.LocalNames == nil {
+								funcCtx.LocalNames = map[*utils2.VariableId]string{}
+							}
+							funcCtx.LocalNames[ref.Id] = name
+							resourcePrologue += c.GetTabString() + declaration.String(funcCtx) + ";\n"
+						}
+					}
 					statementStr = fmt.Sprintf(c.GetTabString()+"try{\n"+
 						"%s\n"+
 						c.GetTabString()+"}", statementListToString(tryBody))
+					statementStr = resourcePrologue + statementStr
 					// Two catch handlers of the SAME type are illegal Java (a try may not declare two
 					// handlers of the same exception type), but they are exactly what bytecode emits for
 					// try-with-resources / try-catch-finally: a Throwable primaryExc-capture handler whose

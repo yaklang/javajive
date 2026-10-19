@@ -58,6 +58,12 @@ type lambdaMethodSourceReceipt struct {
 	request methodSourceRequest
 	key     string
 	body    *dumpedMethods
+	// Optional completed render observations for private-access lowering.
+	// A cached template containing capture placeholders is not final source.
+	renderedTemplate string
+	renderedPackets  []string
+	renderedBytes    int
+	renderedUnknown  bool
 }
 
 // The render cache also contains ordinary declarations. Source consumption

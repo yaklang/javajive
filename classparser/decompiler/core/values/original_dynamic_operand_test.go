@@ -73,6 +73,73 @@ func TestOriginalDynamicOperandWitnessRequiresOriginalSnapshotAndDeclaration(t *
 	}
 }
 
+func TestOriginalInlinedDynamicOperandNeedsExactPrivateProjection(t *testing.T) {
+	for _, variant := range []string{"original", "logical clone", "renamed", "missing snapshot", "unmarked inline", "wrong inline pc", "wrong inline seed", "declared snapshot", "changed seed", "changed source", "cleared source", "foreign uid", "parameter", "receiver", "custom source", "missing identity", "different query", "equal public fields", "no declaration promotion"} {
+		t.Run(variant, func(t *testing.T) {
+			typ := types.NewJavaClass("p.Owner$1")
+			seed := NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			ref := NewJavaRef(utils.NewRootVariableId(), seed, typ.Copy())
+			if variant != "missing snapshot" {
+				ref.MarkOriginalDynamicOperand(12, 2, seed)
+			}
+			if variant == "declared snapshot" {
+				ref.MarkOriginalDynamicOperandDeclaration(12, seed)
+			}
+			ref.StackVar = seed
+			pc, inlineSeed := 12, JavaValue(seed)
+			if variant == "wrong inline pc" {
+				pc++
+			}
+			if variant == "wrong inline seed" {
+				inlineSeed = NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			}
+			if variant != "unmarked inline" {
+				ref.MarkOriginalDynamicOperandInline(pc, inlineSeed)
+			}
+			query := JavaValue(seed)
+			switch variant {
+			case "logical clone":
+				clone := *ref
+				ref = &clone
+			case "renamed":
+				ref.Id = utils.NewRootVariableId()
+			case "changed seed":
+				ref.Val = NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			case "changed source":
+				ref.StackVar = NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			case "cleared source":
+				ref.StackVar = nil
+			case "foreign uid":
+				ref.VarUid += "other"
+			case "parameter":
+				ref.IsParam = true
+			case "receiver":
+				ref.IsThis = true
+			case "custom source":
+				ref.CustomValue = &CustomValue{}
+			case "missing identity":
+				ref.Id = nil
+			case "different query":
+				query = NewJavaRef(utils.NewRootVariableId(), nil, typ)
+			case "equal public fields":
+				other := NewJavaRef(ref.Id, seed, typ)
+				other.VarUid, other.StackVar = ref.VarUid, seed
+				ref = other
+			case "no declaration promotion":
+				ref.MarkOriginalDynamicOperandDeclaration(12, seed)
+			}
+			location, position, known := ref.OriginalInlinedDynamicOperandWitness(query)
+			want := variant == "original" || variant == "logical clone" || variant == "renamed" || variant == "no declaration promotion"
+			if known != want || known && (location != 12 || position != 2) {
+				t.Fatalf("inline witness=%d/%d/%v expected=%v", location, position, known, want)
+			}
+			if _, _, declared := ref.OriginalDynamicOperandWitness(query); declared {
+				t.Fatal("inline projection granted a declaration certificate")
+			}
+		})
+	}
+}
+
 func TestOriginalDynamicOperandDeclarationRequiresTheSamePrivateWitness(t *testing.T) {
 	for _, variant := range []string{"original", "logical clone", "renamed", "equal public fields", "foreign same factory", "split ID", "changed seed", "changed UID", "unwitnessed", "nil"} {
 		t.Run(variant, func(t *testing.T) {

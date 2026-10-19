@@ -1,6 +1,21 @@
 package core
 
-import "github.com/yaklang/javajive/classparser/decompiler/core/values"
+import (
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/internal/workbudget"
+)
+
+func writeObservedLambdaSource(ctx *class_context.ClassContext, out *workbudget.Writer, source LambdaBodySource, template string, captured []values.JavaValue, target, bridge string) error {
+	start := out.Len()
+	if err := t19WriteLambdaBodyWithBridge(ctx, out, template, captured, target, bridge); err != nil {
+		return err
+	}
+	if source.RecordRendered != nil {
+		source.RecordRendered(out.String()[start:])
+	}
+	return nil
+}
 
 // LambdaOriginalDeclaration describes original member identity, separately
 // from the requested source representation and its capture namespace.

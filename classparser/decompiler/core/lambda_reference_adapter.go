@@ -23,6 +23,10 @@ type LambdaReferenceAdapter struct {
 type LambdaBodySource struct {
 	Code                string
 	FixedParameterTypes bool
+	// RecordRendered observes this actual writer's completed packet after
+	// capture substitution and target adaptation. It grants no body/factory
+	// permission and must not render captured operands a second time.
+	RecordRendered func(string)
 }
 
 func dumpLambdaWithReferenceAdapter(d *Decompiler, impl *values.JavaClassMember, captured []values.JavaValue, raw types.JavaType, static []values.JavaValue, origin ...int) (string, error) {

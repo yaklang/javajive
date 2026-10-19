@@ -1302,6 +1302,14 @@ func (c *ClassObjectDumper) wireNativeAnonymousSource() {
 				return fail()
 			}
 		}
+		if projected, registrationsKnown := nativeAnonymousLambdaRegistrationSource(child.lambdaImplementation, sub, src); registrationsKnown {
+			src = projected
+		} else if c.Work != nil && c.Work.Err() != nil {
+			return fail()
+		}
+		// An optional phase proof never replaces the existing complete
+		// registration certificate. Unsupported packets keep their original
+		// source, which still has to satisfy that enclosing certificate.
 		if group := sub.nativeAnonymousRoot; group != nil && !group.completeOwnSource(src) {
 			return fail()
 		}

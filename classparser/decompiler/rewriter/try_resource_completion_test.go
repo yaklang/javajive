@@ -65,6 +65,20 @@ func TestTypedResourceFinallyRetainsPendingCompletions(t *testing.T) {
 				}
 			}
 			old := tr.CatchBodies[0][0]
+			originalCatchSize := len(tr.CatchBodies[0])
+			late, lateKnown := RecoverCatchAllFinallyForSource(tr)
+			if lateKnown != (v == "original") || len(tr.CatchBodies[0]) != originalCatchSize || len(tr.EntryInitializers) != 0 || tr.CatchBodies[0][0] != old {
+				t.Fatal("late source completion lost its proof or changed the original region")
+			}
+			if lateKnown {
+				if len(late.SourcePrologue) != 1 {
+					t.Fatal("pending Throwable definition missing from its source owner")
+				}
+				declaration := late.SourcePrologue[0].(*statements.AssignStatement)
+				if !declaration.IsFirst || declaration.IsDeclare || declaration.HasOriginPC || !values.IsNullLiteral(declaration.JavaValue) {
+					t.Fatal("source completion invented original JVM store evidence")
+				}
+			}
 			decl := prepareTypedResourceFinally(tr)
 			if (decl != nil) != (v == "original") {
 				t.Fatalf("prepared=%v", decl != nil)

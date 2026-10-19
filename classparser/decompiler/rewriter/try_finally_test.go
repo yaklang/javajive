@@ -110,6 +110,48 @@ func TestCatchAllFinallyUsesCoverageAndInvokeIdentity(t *testing.T) {
 	}
 }
 
+func TestFinallyLoopMethodReturnDischargesCleanupButBackEdgeDoesNot(t *testing.T) {
+	for _, variant := range []string{"method return", "return value", "missing cleanup", "protected cleanup", "effectful return", "missing return origin", "back edge", "loop break", "unprotected body"} {
+		t.Run(variant, func(t *testing.T) {
+			tr := finallyFixture()
+			original := append([]statements.Statement(nil), tr.TryBody...)
+			arm := append([]statements.Statement(nil), original...)
+			ret := arm[2].(*statements.ReturnStatement)
+			switch variant {
+			case "return value":
+				ret.JavaValue = values.NewJavaLiteral(7, types.NewJavaPrimer(types.JavaInteger))
+			case "missing cleanup":
+				arm = []statements.Statement{arm[0], ret}
+			case "protected cleanup":
+				arm[1].(*statements.ExpressionStatement).Expression.(*values.FunctionCallExpression).OriginPC = 11
+			case "effectful return":
+				ret.JavaValue = arm[0].(*statements.ExpressionStatement).Expression
+			case "missing return origin":
+				ret.HasOriginPC = false
+			case "back edge":
+				arm = arm[:2]
+			case "loop break":
+				arm[2] = statements.NewSourceTransferStatement("break", "")
+			case "unprotected body":
+				arm[0].(*statements.ExpressionStatement).Expression.(*values.FunctionCallExpression).OriginPC = 13
+			}
+			loop := statements.NewDoWhileStatement(values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), []statements.Statement{statements.NewIfStatement(values.NewJavaLiteral(false, types.NewJavaPrimer(types.JavaBoolean)), arm, []statements.Statement{statements.NewSourceTransferStatement("break", "")})})
+			tr.TryBody = []statements.Statement{loop, original[1], original[2]}
+			view, got := RecoverCatchAllFinally(tr)
+			want := variant == "method return" || variant == "return value"
+			if got != want {
+				t.Fatalf("loop exit cleanup recovered=%v want=%v", got, want)
+			}
+			if got {
+				branch := view.TryBody[0].(*statements.DoWhileStatement).Body[0].(*statements.IfStatement)
+				if len(branch.IfBody) != 2 || branch.IfBody[0] != arm[0] || branch.IfBody[1] != ret || len(loop.Body[0].(*statements.IfStatement).IfBody) != 3 || len(view.Cleanup) != 1 {
+					t.Fatal("must preserve original loop/return identity and remove each cleanup copy only in the view")
+				}
+			}
+		})
+	}
+}
+
 func TestFinallyGuardMayReadUpdatedOuterLocalButNotTryDeclaration(t *testing.T) {
 	for _, declared := range []bool{false, true} {
 		tr := finallyFixture()

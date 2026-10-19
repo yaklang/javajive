@@ -69,3 +69,26 @@ func TestDeclarationFlagsAreLocalToSharedStatementOccurrence(t *testing.T) {
 		t.Fatal("demoting one occurrence changed a sibling declaration")
 	}
 }
+
+func TestVariableNamingKeepsPureDeclarationSeparateFromDefinitions(t *testing.T) {
+	for _, monitor := range []bool{false, true} {
+		ref := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
+		condition := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaBoolean))
+		condition.IsParam = true
+		declaration := statements.NewDeclareStatement(ref)
+		first, second := values.NewJavaLiteral(5, ref.Type()), values.NewJavaLiteral(7, ref.Type())
+		branch := statements.NewIfStatement(condition, []statements.Statement{statements.NewAssignStatement(ref, first, false)}, []statements.Statement{statements.NewAssignStatement(ref, second, false)})
+		var decision statements.Statement = branch
+		if monitor {
+			decision = statements.NewSynchronizedStatement(values.JavaNull, []statements.Statement{branch})
+		}
+		root := []statements.Statement{declaration, decision, statements.NewReturnStatement(ref)}
+		RewriteVar(&root, 0, []*values.JavaRef{condition})
+		if !declaration.IsDeclare || declaration.IsFirst || declaration.JavaValue != nil || declaration.HasOriginPC {
+			t.Fatalf("monitor=%v: naming invented a value definition for a bare declaration", monitor)
+		}
+		if branch.IfBody[0].(*statements.AssignStatement).JavaValue != first || branch.ElseBody[0].(*statements.AssignStatement).JavaValue != second {
+			t.Fatal("naming changed the real branch definitions")
+		}
+	}
+}
