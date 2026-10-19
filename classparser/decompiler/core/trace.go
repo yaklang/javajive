@@ -8,6 +8,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/log"
 )
 
@@ -131,11 +132,25 @@ func traceRef(ref *values.JavaRef, ctx *class_context.ClassContext) string {
 	if ref.Id != nil {
 		name = ref.Id.String()
 	}
-	typ := "<nil-type>"
-	if t := ref.Type(); t != nil {
-		typ = t.String(ctx)
+	return fmt.Sprintf("%s/%s/%s", name, ref.VarUid, traceType(ref.Type()))
+}
+
+// Trace arguments are evaluated even when tracef's gate is closed. A diagnostic
+// must never render source or query a deferred lexical/constructor capability.
+func traceType(t types.JavaType) string {
+	if t == nil {
+		return "<nil-type>"
 	}
-	return fmt.Sprintf("%s/%s/%s", name, ref.VarUid, typ)
+	switch raw := t.RawType().(type) {
+	case *types.JavaClass:
+		return raw.Name
+	case *types.JavaPrimer:
+		return raw.Name
+	case *types.JavaFuncType:
+		return raw.Desc
+	default:
+		return fmt.Sprintf("%T", t.RawType())
+	}
 }
 
 func traceValue(v values.JavaValue, ctx *class_context.ClassContext) string {
@@ -145,11 +160,14 @@ func traceValue(v values.JavaValue, ctx *class_context.ClassContext) string {
 	if ref, ok := v.(*values.JavaRef); ok {
 		return traceRef(ref, ctx)
 	}
-	typ := "<nil-type>"
-	if t := v.Type(); t != nil {
-		typ = t.String(ctx)
+	typ := traceType(v.Type())
+	switch x := v.(type) {
+	case *values.NewExpression:
+		return fmt.Sprintf("%T/%s/newPC=%d/original=%v", v, typ, x.OriginPC, x.HasOriginPC)
+	case *values.FunctionCallExpression:
+		return fmt.Sprintf("%T/%s/%s.%s%s/pc=%d/original=%v", v, typ, x.ClassName, x.FunctionName, x.Descriptor, x.OriginPC, x.HasOriginPC)
 	}
-	return fmt.Sprintf("%T/%s/%s", v, typ, v.String(ctx))
+	return fmt.Sprintf("%T/%s", v, typ)
 }
 
 func traceVarTable(varTable map[int]*values.JavaRef, ctx *class_context.ClassContext) string {

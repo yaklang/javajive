@@ -720,96 +720,10 @@ func (d *Decompiler) tryFoldPostIncDec(stack StackSimulation, storedValue values
 	return values.NewBinaryExpression(target, expr.Values[1], op, target.Type()), true
 }
 
-// collectAssignedLocalsInText scans rendered Java text for plain assignments to a generated local
-// (`varN = ` / `varN_M = `, excluding `==`, `<=`, `>=`, `!=`, `+=`, ... compound forms) and returns
-// the set of assigned local names. Used to detect a side effect baked into a folded value (the
-// embedded assignment is rendered through an opaque CustomValue, so only its text is inspectable).
-func collectAssignedLocalsInText(s string) map[string]struct{} {
-	out := map[string]struct{}{}
-	n := len(s)
-	for i := 0; i+3 < n; i++ {
-		if s[i] != 'v' || s[i+1] != 'a' || s[i+2] != 'r' {
-			continue
-		}
-		// must start a token
-		if i > 0 && isIdentByte(s[i-1]) {
-			continue
-		}
-		j := i + 3
-		start := j
-		for j < n && s[j] >= '0' && s[j] <= '9' {
-			j++
-		}
-		if j == start {
-			continue
-		}
-		// optional _<digits> collision suffix
-		if j < n && s[j] == '_' {
-			k := j + 1
-			for k < n && s[k] >= '0' && s[k] <= '9' {
-				k++
-			}
-			if k > j+1 {
-				j = k
-			}
-		}
-		name := s[i:j]
-		// skip spaces
-		p := j
-		for p < n && (s[p] == ' ' || s[p] == '\t') {
-			p++
-		}
-		if p >= n || s[p] != '=' {
-			continue
-		}
-		// exclude operators ending in '=' (==, <=, >=, !=, +=, -=, *=, /=, %=, &=, |=, ^=) and the
-		// arrow-ish ">=" already covered: require the char before '=' (after the name) to be space or
-		// the name itself (handled), and the char after '=' must NOT be '='.
-		if p+1 < n && s[p+1] == '=' {
-			continue
-		}
-		out[name] = struct{}{}
-	}
-	return out
-}
-
-func isIdentByte(b byte) bool {
-	return b == '_' || b == '$' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
-}
-
-// textReferencesLocal reports whether rendered Java text references the given generated local name as
-// a whole token (so var2 does not match var20 or var2_1).
-func textReferencesLocal(s, name string) bool {
-	from := 0
-	for {
-		idx := indexFrom(s, name, from)
-		if idx < 0 {
-			return false
-		}
-		before := idx == 0 || !isIdentByte(s[idx-1])
-		afterPos := idx + len(name)
-		after := afterPos >= len(s) || !isIdentByte(s[afterPos])
-		if before && after {
-			return true
-		}
-		from = idx + 1
-	}
-}
-
-func indexFrom(s, sub string, from int) int {
-	if from >= len(s) {
-		return -1
-	}
-	idx := strings.Index(s[from:], sub)
-	if idx < 0 {
-		return -1
-	}
-	return from + idx
-}
-
-// foldReordersSideEffect reports whether single-use-folding val into the use site at node would
-// reorder an embedded local-assignment side effect relative to a read of that same local already
-// present in the use statement. See the call site (Bug T) for the canonical reorder it prevents.
+// foldReordersSideEffect checks local interference before single-use folding.
+// This is an IR analysis, not a source consumer: rendering here could execute
+// deferred lexical/constructor callbacks before their source scope is wired.
+// Unknown dependencies retain the temporary instead of guessing from Java text.
 // Kill-switch: JDEC_SIDEEFFECT_FOLD_OFF=1.
 func (d *Decompiler) foldReordersSideEffect(val values.JavaValue, node *Node, foldedRef *values.JavaRef) bool {
 	if d.getenv("JDEC_SIDEEFFECT_FOLD_OFF") == "1" {
@@ -818,22 +732,26 @@ func (d *Decompiler) foldReordersSideEffect(val values.JavaValue, node *Node, fo
 	if val == nil || node == nil || node.Statement == nil {
 		return false
 	}
-	assigned := collectAssignedLocalsInText(val.String(d.FunctionContext))
-	if len(assigned) == 0 {
+	operation := values.InspectAccess(val)
+	if operation.Effects&values.EffectOpaque != 0 {
+		return true
+	}
+	if len(operation.Writes) == 0 {
 		return false
 	}
-	// The folded variable's own name is being replaced by val, so a reference to it is not a hazard.
-	foldedName := ""
-	if foldedRef != nil {
-		foldedName = foldedRef.String(d.FunctionContext)
+	use := statementAccess(node.Statement)
+	if use.Effects&values.EffectOpaque != 0 {
+		return true
 	}
-	stmtText := node.Statement.String(d.FunctionContext)
-	for name := range assigned {
-		if name == foldedName {
+	for written := range operation.Writes {
+		// The folded reference is replaced by the producer at this site.
+		if values.SameLocal(written, foldedRef) {
 			continue
 		}
-		if textReferencesLocal(stmtText, name) {
-			return true
+		for read := range use.Reads {
+			if values.SameLocal(written, read) {
+				return true
+			}
 		}
 	}
 	return false
@@ -7430,13 +7348,13 @@ func (d *Decompiler) ParseStatement() error {
 			}
 			// Bug T (side-effect reorder): val may carry an embedded assignment to a local, e.g. a
 			// ternary whose arms store to a slot (`(cond) ? (x = a) : (x = b)`), baked into a
-			// CustomValue by the dup-collapse above. Folding such a value into a use site that ALSO
+			// typed assignment expression. Folding such a value into a use site that ALSO
 			// references the assigned local reorders the store relative to that read: the canonical
 			// `int y = (cond)?(x=a):(x=b); return x + y;` becomes `return x + ((cond)?(x=a):(x=b))`,
 			// which evaluates the left `x` BEFORE the store and yields the pre-store value. Keep y as
 			// an explicit local in that case so the store still happens first. Conservative (may keep
 			// a temp where the read is actually after the use, which is harmless) and rare (only fires
-			// when a folded value embeds a local assignment). Kill-switch: JDEC_SIDEEFFECT_FOLD_OFF=1.
+			// when a folded value embeds a local update, or its dependencies are opaque).
 			if node != nil && d.foldReordersSideEffect(val, node, ref) {
 				d.tracef("var-fold", "skip single-use-fold (side-effect reorder) ref=%s val=%s",
 					traceRef(ref, d.FunctionContext), traceValue(val, d.FunctionContext))
