@@ -13,14 +13,21 @@ func inferDeclaredLambdaTarget(d *Decompiler, raw types.JavaType, erased, instan
 	if known := inferLambdaTypeFromInstantiated(raw, instantiated); known != nil {
 		return known
 	}
-	if d == nil || d.blockPartialFunctionalTarget || d.FunctionContext == nil || d.FunctionContext.SiblingClassSig == nil || raw == nil || raw.IsArray() {
+	if d == nil || d.blockPartialFunctionalTarget || d.FunctionContext == nil || raw == nil || raw.IsArray() {
+		return nil
+	}
+	declarations := d.FunctionContext.LambdaTargetClassSig
+	if declarations == nil {
+		declarations = d.FunctionContext.SiblingClassSig
+	}
+	if declarations == nil {
 		return nil
 	}
 	jc, ok := raw.RawType().(*types.JavaClass)
 	if !ok || jc == nil {
 		return nil
 	}
-	classSig, methods, ok := d.FunctionContext.SiblingClassSig(strings.ReplaceAll(jc.Name, ".", "/"))
+	classSig, methods, ok := declarations(strings.ReplaceAll(jc.Name, ".", "/"))
 	if !ok {
 		return nil
 	}

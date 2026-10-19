@@ -1434,6 +1434,7 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 		// cases. Only wired on the jar / DecompileWithResolver path (foldSiblingResolver != nil).
 		c.FuncCtx.ClassSig = classSigStr
 		c.FuncCtx.SiblingClassSig = c.buildSiblingClassSig()
+		c.FuncCtx.LambdaTargetClassSig = c.buildLambdaTargetClassSig()
 		c.FuncCtx.SiblingSourceClassFormals = c.buildSiblingSourceClassFormals()
 		c.FuncCtx.SourceBridgeTarget = c.buildSourceBridgeTargets()
 		c.FuncCtx.SiblingSuperTypes = c.buildSiblingSuperTypes()
@@ -2710,8 +2711,23 @@ func (c *ClassObjectDumper) collectInheritedThisMethodSignatures(classSigStr str
 // disables the resolver walk (callers fall back to the JDK table / same-class paths). Caching keeps the
 // per-class-dump cost bounded and the result deterministic (a nil cache entry records a confirmed miss).
 func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (string, map[string]string, bool) {
-	if c.foldSiblingResolver == nil && c.archiveDeclarationResolver == nil && c.declarationResolver == nil {
+	return c.buildGenericDeclarationSignatures(false)
+}
+
+func (c *ClassObjectDumper) buildLambdaTargetClassSig() func(internalName string) (string, map[string]string, bool) {
+	return c.buildGenericDeclarationSignatures(true)
+}
+
+// Platform bytes are an additional declaration source for lambda target
+// equations only. They do not enroll dependency classes, execute methods or
+// change the existing ordinary-call signature provider's proof domain.
+func (c *ClassObjectDumper) buildGenericDeclarationSignatures(platform bool) func(internalName string) (string, map[string]string, bool) {
+	if c == nil || !platform && c.foldSiblingResolver == nil && c.archiveDeclarationResolver == nil && c.declarationResolver == nil {
 		return nil
+	}
+	target := c.options.TargetSourceVersion
+	if target == 0 && c.obj != nil {
+		target = core.ClassMajorToSourceVersion(c.obj.MajorVersion)
 	}
 	type entry struct {
 		classSig   string
@@ -2727,7 +2743,10 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 		cache[internal] = e
 		var data []byte
 		var ok bool
-		if c.foldSiblingResolver != nil {
+		if platform && c.obj != nil && c.obj.GetClassName() == internal {
+			data, ok = c.obj.Bytes(), true
+		}
+		if !ok && c.foldSiblingResolver != nil {
 			data, ok = c.foldSiblingResolver(internal)
 		}
 		// Dependencies supply declarations for source binding, never ownership
@@ -2738,6 +2757,9 @@ func (c *ClassObjectDumper) buildSiblingClassSig() func(internalName string) (st
 		}
 		if !ok && c.declarationResolver != nil {
 			data, ok = c.declarationResolver(internal)
+		}
+		if !ok && len(data) == 0 && platform {
+			data, ok = jdkConstructorClassBytes(internal, target)
 		}
 		if !ok || len(data) == 0 {
 			return "", nil, false

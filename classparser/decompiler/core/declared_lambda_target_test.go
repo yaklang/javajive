@@ -186,6 +186,72 @@ func TestDeclaredSamBoundRequiresKnownHierarchy(t *testing.T) {
 	}
 }
 
+// A lookup miss in the target-specific proof domain must not borrow a stale
+// ordinary-call declaration. Only an absent target provider uses the legacy
+// resolver; the exact SAM name and descriptor still constrain the equation.
+func TestDeclaredSamTargetLookupSeparatesDeclarationProofDomains(t *testing.T) {
+	const classSig = "<T:Ljava/lang/Object;>Ljava/lang/Object;"
+	const erased = "()Ljava/lang/Object;"
+	constant := func(desc string) values.JavaValue {
+		return values.NewCustomValue(func(*class_context.ClassContext) string { return desc }, func() types.JavaType {
+			t.Fatal("target lookup inspected a mutable operand type")
+			return nil
+		})
+	}
+	for _, change := range []string{"exact target", "legacy only", "target missing", "wrong name", "wrong descriptor", "arity only", "conflicting erasure", "partial target", "array target", "missing context"} {
+		t.Run(change, func(t *testing.T) {
+			legacyCalls, targetCalls := 0, 0
+			ctx := &class_context.ClassContext{SiblingClassSig: func(string) (string, map[string]string, bool) {
+				legacyCalls++
+				return classSig, map[string]string{class_context.MethodDescKey("produce", erased): "()TT;"}, true
+			}}
+			ctx.LambdaTargetClassSig = func(owner string) (string, map[string]string, bool) {
+				targetCalls++
+				if owner != "example/DeclaredResult" {
+					t.Fatalf("borrowed another target owner %q", owner)
+				}
+				key, signature := class_context.MethodDescKey("produce", erased), "()TT;"
+				switch change {
+				case "wrong name":
+					key = class_context.MethodDescKey("other", erased)
+				case "wrong descriptor":
+					key = class_context.MethodDescKey("produce", "()Ljava/lang/String;")
+				case "arity only":
+					key = class_context.MethodSigKey("produce", 0)
+				case "conflicting erasure":
+					signature = "()I"
+				}
+				return classSig, map[string]string{key: signature}, change != "target missing"
+			}
+			d := &Decompiler{FunctionContext: ctx, InvokeDynamicName: "produce", blockPartialFunctionalTarget: change == "partial target"}
+			var raw types.JavaType = types.NewJavaClass("example.DeclaredResult")
+			switch change {
+			case "legacy only":
+				ctx.LambdaTargetClassSig = nil
+			case "array target":
+				raw = types.NewJavaArrayType(types.NewJavaClass("example.DeclaredResult"))
+			case "missing context":
+				d.FunctionContext = nil
+			}
+			got := inferDeclaredLambdaTarget(d, raw, constant(erased), constant("()Ljava/lang/String;"))
+			want := change == "exact target" || change == "legacy only"
+			if (got != nil) != want {
+				t.Fatalf("target=%v want=%v", got, want)
+			}
+			wantLegacy, wantTarget := 0, 1
+			if change == "legacy only" {
+				wantLegacy, wantTarget = 1, 0
+			}
+			if change == "partial target" || change == "array target" || change == "missing context" {
+				wantTarget = 0
+			}
+			if legacyCalls != wantLegacy || targetCalls != wantTarget {
+				t.Fatalf("proof domains mixed: ordinary=%d target=%d", legacyCalls, targetCalls)
+			}
+		})
+	}
+}
+
 func TestInstantiatedSAMSeparatesNestedErasureFromEntryChecks(t *testing.T) {
 	ctx := &class_context.ClassContext{InvocationMetadata: func(name string) (callbinding.Class, bool) {
 		if name == "fixture/Box" {

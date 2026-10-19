@@ -307,6 +307,10 @@ type ClassContext struct {
 	// without class_context importing types. Nil when no cross-class resolver is available (single-class
 	// decompile); set only on the jar / DecompileWithResolver path.
 	SiblingClassSig func(internalName string) (classSig string, methodSigs map[string]string, ok bool)
+	// Lambda target equations can also use exact platform declaration bytes.
+	// This data-only lookup grants no source ownership, constructor effect or
+	// ordinary overload permission. Explicit declarations retain precedence.
+	LambdaTargetClassSig func(internalName string) (classSig string, methodSigs map[string]string, ok bool)
 	// Flattened source declarations can reintroduce verified enclosing formals.
 	// This projection does not alter the original class Signature. It is absent
 	// for native nested source and dependency-only declarations.
