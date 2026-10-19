@@ -9,6 +9,9 @@ func (c *ClassObjectDumper) physicalLambdaCaptureOrder(method *MemberInfo, descr
 	if c == nil || c.obj == nil || method == nil {
 		return nil, false
 	}
+	if request.role == methodSourceLambdaBody && method.AccessFlags&8 == 0 && request.captureCount == 0 {
+		return nil, false
+	}
 	if request.role != methodSourceLambdaBody || request.captureCount == 0 || request.factory == nil {
 		return nil, true
 	}

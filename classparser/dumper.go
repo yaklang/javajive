@@ -4216,7 +4216,8 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			if !captureOrderKnown {
 				return nil, fmt.Errorf("unproved original physical lambda capture order")
 			}
-			params, statementList, err := parseBytesCodeWithLambdaCaptureOrder(c, codeAttr, id, captureOrder)
+			receiverCapture := request.role == methodSourceLambdaBody && method.AccessFlags&8 == 0 && request.factory.closed() && request.factory.sealed && request.captureCount > 0
+			params, statementList, err := parseBytesCodeWithLambdaCaptureOrder(c, codeAttr, id, captureOrder, receiverCapture)
 			methodLocalParams := params
 			if err != nil {
 				return dumped, utils.Wrap(err, "ParseBytesCode failed")

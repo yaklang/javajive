@@ -16,7 +16,7 @@ import (
 // read or silently dropping a capture. This narrow domain moves no effects:
 // the qualifier and intervening arguments are original adjacent local LOADs.
 func (d *Decompiler) retainLambdaStaticQualifier(op *OpCode, call *values.FunctionCallExpression) {
-	if d == nil || len(d.LambdaCaptureOrderSlots) == 0 || d.FunctionContext == nil || d.FunctionContext.InvocationMetadata == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_INVOKESTATIC || call == nil || !call.IsStatic || call.Kind != values.InvokeStatic || !call.HasOriginPC || call.OriginPC != int(op.CurrentOffset) {
+	if d == nil || len(d.LambdaCaptureOrderSlots) == 0 && !d.LambdaReceiverCapture || d.FunctionContext == nil || d.FunctionContext.InvocationMetadata == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_INVOKESTATIC || call == nil || !call.IsStatic || call.Kind != values.InvokeStatic || !call.HasOriginPC || call.OriginPC != int(op.CurrentOffset) {
 		return
 	}
 	if len(call.Descriptor) > 65535 || d.Work != nil && (d.Work.Charge(workbudget.CounterGraphScans, int64(len(call.Descriptor))+1) != nil || d.Work.CheckAlloc(int64(len(call.Descriptor))*32+256) != nil) {
@@ -69,9 +69,14 @@ func (d *Decompiler) retainLambdaStaticQualifier(op *OpCode, call *values.Functi
 		return
 	}
 	slot, original := ref.OriginalParameterSlot()
+	captured := slices.Contains(d.LambdaCaptureOrderSlots, slot)
+	if ref.IsThis {
+		slot, original = ref.OriginalReceiverSlot()
+		captured = d.LambdaReceiverCapture && slot == 0 && !d.FunctionContext.IsStatic
+	}
 	owner := strings.ReplaceAll(call.ClassName, ".", "/")
 	erasure, typed := values.SourceTypeErasure(ref.Type(), d.FunctionContext)
-	if !original || slot != GetRetrieveIdx(load) || !slices.Contains(d.LambdaCaptureOrderSlots, slot) || !typed || erasure != "L"+owner+";" {
+	if !original || slot != GetRetrieveIdx(load) || !captured || !typed || erasure != "L"+owner+";" {
 		return
 	}
 	metadata, known := d.FunctionContext.InvocationMetadata(owner)

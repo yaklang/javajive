@@ -151,3 +151,80 @@ func TestInstanceLambdaReceiverRequiresActualPendingAndCompletedSource(t *testin
 		})
 	}
 }
+
+func TestConstructorLambdaReceiverRequiresOriginalInitializedFrames(t *testing.T) {
+	compiler := os.Getenv("JAVA8_JAVAC")
+	if compiler == "" {
+		t.Skip("JAVA8_JAVAC required for original constructor factory")
+	}
+	raw := compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, constructorInstanceLambdaFixture, "UncapturedLambdaNames", "none")["UncapturedLambdaNames.class"]
+	for _, variant := range []string{"original", "unsealed factory", "wrong receiver slot", "wrong receiver type", "wrong load PC", "missing delegation", "path bypasses delegation", "fake static constructor", "work", "memory", "canceled"} {
+		t.Run(variant, func(t *testing.T) {
+			object, err := Parse(bytes.Clone(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := NewClassObjectDumper(object)
+			d.options = DecompileOptions{SourceCompiler: NativeJavac8, TargetSourceVersion: 8}
+			var implementation *MemberInfo
+			for _, method := range object.Methods {
+				if method.AccessFlags == 0x1002 {
+					implementation = method
+				}
+			}
+			p, known := d.originalLambdaParameterMetadata(implementation, nil)
+			if !known || p == nil || p.receiver == nil || !lambdaParameterReceiverInitialized(p, nil) {
+				t.Fatal("original initialized receiver must have complete immutable frames")
+			}
+			var work *workbudget.Budget
+			switch variant {
+			case "unsealed factory":
+				p.factory.sealed = false
+			case "wrong receiver slot":
+				p.receiver.slot = 1
+			case "wrong receiver type":
+				p.receiver.result = "Ljava/lang/Object;"
+			case "wrong load PC":
+				p.receiver.pc = 0 // slot zero here is still uninitialized THIS
+			case "missing delegation", "path bypasses delegation":
+				code := p.factory.code
+				if len(code.Code) < 4 || code.Code[0] != core.OP_ALOAD_0 || code.Code[1] != core.OP_INVOKESPECIAL {
+					t.Fatal("independent compiler delegation packet")
+				}
+				if variant == "missing delegation" {
+					code.Code = append([]byte(nil), code.Code[4:]...)
+					p.receiver.pc -= 4
+					p.factory.pc -= 4
+				} else {
+					// One path reaches the factory after SUPER; the other skips
+					// that exact call. A prefix-only scan would accept it.
+					code.Code = append([]byte{core.OP_ICONST_0, core.OP_IFEQ, 0, 7}, code.Code...)
+					p.receiver.pc += 4
+					p.factory.pc += 4
+				}
+				p.factory.sealed = false
+				if !p.factory.seal(nil) {
+					t.Fatal("mutation factory packet must remain well framed")
+				}
+			case "fake static constructor":
+				p.factory.method.AccessFlags |= 8
+				p.factory.sealed = false
+				if !p.factory.seal(nil) {
+					t.Fatal("mutation factory sealing")
+				}
+			case "work":
+				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			case "memory":
+				work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				work = workbudget.New(ctx, workbudget.Limits{})
+			}
+			before := object.Bytes()
+			if got := lambdaParameterReceiverInitialized(p, work); got != (variant == "original") || !bytes.Equal(before, object.Bytes()) {
+				t.Fatalf("constructor receiver proof=%v", got)
+			}
+		})
+	}
+}

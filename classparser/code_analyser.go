@@ -202,14 +202,15 @@ type VarMap struct {
 }
 
 func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *utils.VariableId) ([]values.JavaValue, []statements.Statement, error) {
-	return parseBytesCodeWithLambdaCaptureOrder(dumper, codeAttr, id, nil)
+	return parseBytesCodeWithLambdaCaptureOrder(dumper, codeAttr, id, nil, false)
 }
 
-func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *utils.VariableId, captures []string) ([]values.JavaValue, []statements.Statement, error) {
+func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *utils.VariableId, captures []string, receiver bool) ([]values.JavaValue, []statements.Statement, error) {
 	pool := dumper.ConstantPool
 	parser := core.NewDecompiler(codeAttr.Code, func(id int) values.JavaValue {
 		return GetValueFromCP(dumper.ConstantPool, id)
 	})
+	parser.LambdaReceiverCapture = receiver
 	word := 0
 	if dumper.FuncCtx != nil && !dumper.FuncCtx.IsStatic {
 		word = 1
@@ -301,7 +302,7 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 			dumper.nativeLambdaFactorySources[site].implementationBody = dumped
 		}
 		source := core.LambdaBodySource{Code: dumped.code, FixedParameterTypes: dumped.lambdaParameterBinding != nil}
-		recordPacket := dumped.lambdaParameterBinding != nil && len(dumped.lambdaParameterBinding.captured) != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0
+		recordPacket := dumped.lambdaParameterBinding != nil && dumped.lambdaParameterBinding.metadata != nil && dumped.lambdaParameterBinding.metadata.factoryCaptureCount() != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0
 		if dumper.options.SourceCompiler == NativeJavac8 || dumper.options.SourceCompiler == ModernJavac || recordPacket {
 			template := dumped.code
 			source.RecordRendered = func(rendered string) {

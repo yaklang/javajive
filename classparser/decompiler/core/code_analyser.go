@@ -57,13 +57,16 @@ type Decompiler struct {
 	// Physical lambda capture parameters, in their original descriptor
 	// order. This restricts source motion; it grants no factory/binding role.
 	LambdaCaptureOrderSlots []int
-	opcodeToSimulateStack   map[*OpCode]*StackSimulationImpl
-	FunctionContext         *class_context.ClassContext
-	varTable                map[int]*values.JavaRef
-	opcodeIdToRef           map[*OpCode][][2]any
-	branchArrayCalls        []branchArrayCall
-	branchArrayLeaves       []branchArrayLeaf
-	valueTernaryMerges      map[*values.TernaryExpression]*OpCode
+	// A bound implementation receiver is outside the physical capture prefix.
+	// This constrains source preservation, without granting a factory role.
+	LambdaReceiverCapture bool
+	opcodeToSimulateStack map[*OpCode]*StackSimulationImpl
+	FunctionContext       *class_context.ClassContext
+	varTable              map[int]*values.JavaRef
+	opcodeIdToRef         map[*OpCode][][2]any
+	branchArrayCalls      []branchArrayCall
+	branchArrayLeaves     []branchArrayLeaf
+	valueTernaryMerges    map[*values.TernaryExpression]*OpCode
 	// refToCreatingStore records, per *JavaRef pointer, the FIRST local-store opcode whose simulation
 	// created that ref (isFirst=true). It lets the boolean-copy merge deterministically recover the
 	// store that defined a slot's current ref without scanning opcodeIdToRef (a map whose iteration

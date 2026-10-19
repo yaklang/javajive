@@ -76,14 +76,14 @@ func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMet
 	localDomain := nativeLocalReferenceDomain{descriptors: map[int]string{}}
 	used, parameterWords := map[int]bool{}, map[int]bool{}
 	if p.receiverWords != 0 {
-		name, known := sourceBridgeUTF8(c.obj, p.factory.method.NameIndex)
 		op := ops[start]
-		// Ordinary instance entry guarantees initialized THIS. Constructor
-		// factories need an additional verifier-frame proof before admission.
-		if p.receiverWords != 1 || !known || name == "<init>" || p.factory.method.AccessFlags&8 != 0 || !constructorMotionLoad(op, "L"+c.obj.GetClassName()+";") || core.GetRetrieveIdx(op) != 0 {
+		if p.receiverWords != 1 || p.factory.method.AccessFlags&8 != 0 || !constructorMotionLoad(op, "L"+c.obj.GetClassName()+";") || core.GetRetrieveIdx(op) != 0 {
 			return false
 		}
 		p.receiver = &nativeEnumSelectorProducer{opcode: op.Instr.OpCode, pc: int(op.CurrentOffset), slot: 0, result: "L" + c.obj.GetClassName() + ";"}
+		if !lambdaParameterReceiverInitialized(p, work) {
+			return false
+		}
 		used[0], parameterWords[0] = true, true
 	}
 	for i, descriptor := range p.captureTypes {

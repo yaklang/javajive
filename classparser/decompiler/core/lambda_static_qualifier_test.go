@@ -12,7 +12,7 @@ import (
 )
 
 func TestLambdaStaticQualifierRequiresOriginalAdjacentCaptureAndClassTarget(t *testing.T) {
-	for _, variant := range []string{"original", "wide argument", "ordinary method", "not captured", "unproved parameter", "wrong slot", "foreign erasure", "discard pair", "effectful qualifier", "argument store", "wrong argument width", "join", "fork", "gap", "wide encoding", "handler entry", "instance call", "missing witness", "wrong PC", "interface", "incomplete members", "incomplete parents", "missing target", "instance target", "duplicate target", "work", "memory"} {
+	for _, variant := range []string{"original", "wide argument", "bound THIS", "unbound THIS", "forged THIS", "static THIS context", "ordinary method", "not captured", "unproved parameter", "wrong slot", "foreign erasure", "discard pair", "effectful qualifier", "argument store", "wrong argument width", "join", "fork", "gap", "wide encoding", "handler entry", "instance call", "missing witness", "wrong PC", "interface", "incomplete members", "incomplete parents", "missing target", "instance target", "duplicate target", "work", "memory"} {
 		t.Run(variant, func(t *testing.T) {
 			ref := values.NewJavaRef(utils.NewRootVariableId(), values.JavaNull, types.NewJavaClass("fixture.Engine"))
 			ref.IsParam = true
@@ -37,6 +37,15 @@ func TestLambdaStaticQualifierRequiresOriginalAdjacentCaptureAndClassTarget(t *t
 			d := &Decompiler{LambdaCaptureOrderSlots: []int{0}, FunctionContext: &class_context.ClassContext{IsStatic: true}}
 			d.FunctionContext.InvocationMetadata = func(name string) (callbinding.Class, bool) { return metadata, name == metadata.Name }
 			switch variant {
+			case "bound THIS", "unbound THIS", "forged THIS", "static THIS context":
+				ref.IsThis = true
+				if variant != "forged THIS" {
+					ref.MarkOriginalReceiver()
+				}
+				d.LambdaCaptureOrderSlots = nil
+				d.LambdaReceiverCapture = variant != "unbound THIS"
+				d.FunctionContext.IsStatic = variant == "static THIS context"
+				d.FunctionContext.ClassName = "fixture.Engine"
 			case "wide argument":
 				arg.Instr.OpCode = OP_LLOAD_1
 				call.Descriptor, metadata.Methods[0].Desc = "(J)I", "(J)I"
@@ -88,7 +97,7 @@ func TestLambdaStaticQualifierRequiresOriginalAdjacentCaptureAndClassTarget(t *t
 				d.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
 			}
 			d.retainLambdaStaticQualifier(invoke, call)
-			want := variant == "original" || variant == "wide argument"
+			want := variant == "original" || variant == "wide argument" || variant == "bound THIS"
 			if got := call.Object == ref; got != want {
 				t.Fatalf("retained qualifier=%v want=%v", got, want)
 			}
