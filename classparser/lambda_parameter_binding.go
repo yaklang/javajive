@@ -12,13 +12,15 @@ import (
 )
 
 type lambdaParameterBinding struct {
-	metadata       *lambdaParameterMetadata
-	request        methodSourceRequest
-	refs           []*values.JavaRef
-	context        *class_context.ClassContext
-	arrow          string
-	captureContext *class_context.ClassContext
-	captured       []values.JavaValue
+	metadata              *lambdaParameterMetadata
+	request               methodSourceRequest
+	refs                  []*values.JavaRef
+	context               *class_context.ClassContext
+	arrow                 string
+	captureContext        *class_context.ClassContext
+	captured              []values.JavaValue
+	captureEmission       *lambdaMethodEmission
+	captureDeclarationIDs []*coreutils.VariableId
 }
 
 func (c *ClassObjectDumper) bindLambdaParameterMetadata(p *lambdaParameterMetadata, request methodSourceRequest, parameters []values.JavaValue) (*lambdaParameterBinding, bool) {

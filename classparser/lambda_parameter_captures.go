@@ -16,9 +16,10 @@ import (
 // LambdaToMethod prefixes a static implementation's SAM parameters with its
 // captured source variables. Descriptor words and source binders are separate
 // domains: category-2 captures consume two slots, but one MethodParameters row.
-// Admit unchanged original outer formals, not a same-named local, field read,
-// expression, implicit receiver, or guessed alias. The source callback and the
-// completed enclosing render must separately consume these exact identities.
+// Admit unchanged outer formals or typed effectively-final local definitions.
+// A local's original reaching STORE and final source binder are separate proof
+// obligations. Field reads, expressions, implicit receivers and guessed aliases
+// are not such binders. The callback and final render must consume these IDs.
 func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMetadata, parentDescriptor string, parentNames []string, work *workbudget.Budget) bool {
 	if c == nil || c.obj == nil || p == nil || p.object != c.obj || p.factory == nil || !p.factory.closed() || len(p.names) != len(p.parameters) || len(p.flags) != len(p.parameters) || len(p.captureTypes) > 64 || len(p.captureTypes) > len(p.parameters) || !slices.Equal(p.captureTypes, p.parameters[:len(p.captureTypes)]) {
 		return false
@@ -38,6 +39,7 @@ func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMet
 	typesBySlot, namesBySlot := map[int]string{}, map[int]string{}
 	slot := 0
 	if p.factory.method.AccessFlags&8 == 0 {
+		typesBySlot[0] = "L" + c.obj.GetClassName() + ";"
 		slot = 1 // THIS is not an ordinary captured source formal.
 	}
 	for i, descriptor := range parentTypes {
@@ -70,27 +72,66 @@ func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMet
 	if start < 0 || end < 0 || ops[end].Instr.OpCode != core.OP_INVOKEDYNAMIC {
 		return false
 	}
-	used := map[int]bool{}
+	var localReads map[int]*nativeEnumLocalRead
+	localDomain := nativeLocalReferenceDomain{descriptors: map[int]string{}}
+	for i, descriptor := range p.captureTypes {
+		if callbinding.Reference(descriptor) {
+			localDomain.descriptors[int(ops[start+i].CurrentOffset)] = descriptor
+		}
+	}
+	used, parameterWords := map[int]bool{}, map[int]bool{}
 	for i, descriptor := range p.captureTypes {
 		op := ops[start+i]
-		slot := core.GetRetrieveIdx(op)
-		if !nativeProofWork(work, 1) || !constructorMotionLoad(op, descriptor) || typesBySlot[slot] != descriptor || namesBySlot[slot] != p.names[i] || p.flags[i] != 0x1010 || used[slot] {
+		readSlot := core.GetRetrieveIdx(op)
+		if !nativeProofWork(work, 1) || !constructorMotionLoad(op, descriptor) || p.flags[i] != 0x1010 || used[readSlot] || (descriptor == "J" || descriptor == "D") && used[readSlot+1] {
 			return false
 		}
-		used[slot] = true
-		if descriptor == "J" || descriptor == "D" {
-			used[slot+1] = true
+		operand := &nativeEnumSelectorProducer{opcode: op.Instr.OpCode, pc: int(op.CurrentOffset), slot: readSlot, result: descriptor}
+		if typesBySlot[readSlot] == descriptor && namesBySlot[readSlot] == p.names[i] {
+			parameterWords[readSlot] = true
+			if descriptor == "J" || descriptor == "D" {
+				parameterWords[readSlot+1] = true
+			}
+		} else {
+			// An entry word (including a category-2 tail) cannot impersonate
+			// a local. This domain also excludes lexical name collisions.
+			if readSlot < slot || slices.Contains(parentNames, p.names[i]) {
+				return false
+			}
+			if localReads == nil {
+				flow := nativeEnumParameterOriginalFlow(decoder, p.factory.code, work)
+				if flow == nil {
+					return false
+				}
+				reader := *c
+				reader.Work = work
+				localDomain.metadata = reader.buildInvocationMetadata()
+				var known bool
+				localReads, known = reader.nativeTypedLocalReads(p.factory.method, p.factory.code, flow, typesBySlot, true, localDomain)
+				if !known {
+					return false
+				}
+			}
+			read := localReads[int(op.CurrentOffset)]
+			if read == nil || read.slot != readSlot || read.descriptor != descriptor || !nativeLambdaLocalSingleStore(ops, read, work) {
+				return false
+			}
+			operand.local = read
 		}
-		p.captures = append(p.captures, &nativeEnumSelectorProducer{opcode: op.Instr.OpCode, pc: int(op.CurrentOffset), slot: slot, result: descriptor})
+		used[readSlot] = true
+		if descriptor == "J" || descriptor == "D" {
+			used[readSlot+1] = true
+		}
+		p.captures = append(p.captures, operand)
 		// An enclosing SAM formal has a real source binder in this scope.
 		// Forwarded physical capture-prefix words still need a separate
 		// substitution/provenance proof; equal names do not supply that proof.
-		if p.parent != nil && slot < p.parent.samSlot() {
+		if p.parent != nil && readSlot < p.parent.samSlot() {
 			return false
 		}
 	}
 	entry := sort.SearchInts(entries, int(ops[start].CurrentOffset)+1)
-	return (entry == len(entries) || entries[entry] > p.factory.pc) && nativeEnumSelectorParametersUnchanged(ops, used)
+	return (entry == len(entries) || entries[entry] > p.factory.pc) && nativeEnumSelectorParametersUnchanged(ops, parameterWords)
 }
 
 // Called while the real factory's context is still current. Capture values are
@@ -122,10 +163,17 @@ func (c *ClassObjectDumper) lambdaParameterCaptureContext(p *lambdaParameterMeta
 		if !original || pc != p.factory.pc || index != i || !known || !typed || parameter == nil {
 			return nil, nil, false
 		}
-		slot, original := parameter.OriginalParameterSlot()
-		if !original || slot != p.captures[i].slot {
+		if p.captures[i].local == nil {
+			slot, original := parameter.OriginalParameterSlot()
+			if !original || slot != p.captures[i].slot {
+				return nil, nil, false
+			}
+		} else if parameter.Id == nil || parameter.IsParam || parameter.IsThis || parameter.CustomValue != nil || parameter.StackVar != nil {
 			return nil, nil, false
 		}
+	}
+	if !c.recordLambdaLocalParameterNameDemands(p, captures) {
+		return nil, nil, false
 	}
 	return &context, captures, true
 }
@@ -180,13 +228,35 @@ func lambdaParameterCaptureOrder(code string, count int, work *workbudget.Budget
 // The final enclosing source must use the original named parameter identities.
 // A body receipt may exist earlier, but cannot publish source on its own.
 func (b *lambdaParameterBinding) capturedNamesClosed(work *workbudget.Budget) bool {
+	if b == nil || b.metadata == nil {
+		return false
+	}
+	for _, operand := range b.metadata.captures {
+		if operand != nil && operand.local != nil {
+			if b.metadata.factory == nil || !b.captureEmission.closed() || b.captureEmission.body == nil || b.captureEmission.body.member != b.metadata.factory.method || len(b.captureDeclarationIDs) != len(b.captured) {
+				return false
+			}
+			for i, capture := range b.captured {
+				v, known := nativeMemberEnclosingUnpack(capture, work)
+				ref, typed := v.(*values.JavaRef)
+				if !known || !typed || ref == nil || ref.Id == nil || ref.Id != b.captureDeclarationIDs[i] {
+					return false
+				}
+			}
+			break
+		}
+	}
+	return b.capturedNamesInContextClosed(b.captureContext, work)
+}
+
+func (b *lambdaParameterBinding) capturedNamesInContextClosed(context *class_context.ClassContext, work *workbudget.Budget) bool {
 	if b == nil || b.metadata == nil || len(b.captured) != len(b.metadata.captures) || !lambdaParameterCaptureOrder(b.arrow, len(b.captured), work) {
 		return false
 	}
 	if len(b.captured) == 0 {
 		return true
 	}
-	if b.captureContext == nil {
+	if context == nil {
 		return false
 	}
 	for i, value := range b.captured {
@@ -196,7 +266,10 @@ func (b *lambdaParameterBinding) capturedNamesClosed(work *workbudget.Budget) bo
 			return false
 		}
 		pc, index, original := ref.OriginalInlinedDynamicOperandWitness(ref.Val)
-		if !original || pc != b.metadata.factory.pc || index != i || !nativeLambdaLocalCaptureValue(b.metadata.captures[i], value, pc, i, b.captureContext, work) || ref.String(b.captureContext) != b.metadata.names[i] {
+		if !original && b.metadata.captures[i].local != nil {
+			pc, index, original = ref.OriginalDynamicOperandWitness(ref.Val)
+		}
+		if !original || pc != b.metadata.factory.pc || index != i || !nativeLambdaLocalCaptureValue(b.metadata.captures[i], value, pc, i, context, work) || ref.String(context) != b.metadata.names[i] {
 			return false
 		}
 	}

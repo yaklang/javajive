@@ -2719,6 +2719,9 @@ type AssignStatement struct {
 	JavaValue   values.JavaValue
 	IsDeclare   bool
 	IsFirst     bool
+	// Final describes an already proved immutable source declaration; it
+	// grants no store, capture, or source-identity permission.
+	Final       bool
 	OriginPC    int
 	HasOriginPC bool
 	// ReferenceArrayStore is a decoded AASTORE witness, never an inferred cast.
@@ -2987,6 +2990,9 @@ func localDeclType(t types.JavaType) types.JavaType {
 
 func (a *AssignStatement) String(funcCtx *class_context.ClassContext) (source string) {
 	defer func() {
+		if ref, local := a.LeftValue.(*values.JavaRef); a.Final && (a.IsDeclare || a.IsFirst) && a.ArrayMember == nil && local && ref != nil && !ref.IsParam && !ref.IsThis && source != "" {
+			source = "final " + source
+		}
 		if source != "" && funcCtx != nil && funcCtx.SourceParameterStore != nil {
 			if marker, known := funcCtx.SourceParameterStore(a); known {
 				source += marker

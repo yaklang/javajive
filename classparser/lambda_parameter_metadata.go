@@ -198,6 +198,14 @@ func (c *ClassObjectDumper) lambdaParameterMetadataInScope(method *MemberInfo, w
 			}
 		}
 	}
+	for i, operand := range projection.captures {
+		if operand.local != nil {
+			if slices.Contains(projection.parentNames, projection.names[i]) || !nativeProofWork(work, 1) {
+				return nil, false
+			}
+			projection.parentNames = append(projection.parentNames, projection.names[i])
+		}
+	}
 	for _, name := range projection.names[len(projection.captures):] {
 		if slices.Contains(projection.parentNames, name) {
 			return nil, false

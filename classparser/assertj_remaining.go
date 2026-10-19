@@ -63,9 +63,8 @@ func fixAssertjRemainingReconstructs(body string) string {
 
 	body = wrapReturnCallWithCast(body, "CACHE.findOrInsert", "Class")
 
-	body = strings.ReplaceAll(body,
-		"this(Arrays.stream(((Condition[])(checkNotNullConditions(var1)))))",
-		"this((Stream)(Arrays.stream(((Condition[])(checkNotNullConditions(var1))))))")
+	// Constructor overload selection is proved against original declaration
+	// tables. A program/method/parameter spelling cannot select a Stream view.
 	// Factory invocations and receiver dispatch belong to original declaration
 	// evidence. A short source name cannot authorize replacing either call with
 	// a different operation, or changing application data containing that text.

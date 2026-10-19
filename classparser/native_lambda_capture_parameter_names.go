@@ -143,10 +143,25 @@ func (c *ClassObjectDumper) bindNativeLambdaCaptureParameterNames(v values.JavaV
 		if prior, known := c.FuncCtx.LocalNames[ref.Id]; known && prior != demand.name {
 			return false
 		}
+		final := false
+		if operand := demand.site.operands[demand.index]; operand != nil && operand.local != nil && declaration != nil {
+			// This is the retained, single-assignment dynamic operand copy.
+			// Its RHS remains a distinct original local binder, so final does
+			// not turn a primitive/String literal into a new constant capture.
+			seed, known := nativeMemberEnclosingUnpack(declaration.JavaValue, c.Work)
+			local, typed := seed.(*values.JavaRef)
+			if !known || !typed || local == nil || local.Id == nil || local.Id == ref.Id {
+				return false
+			}
+			final = true
+		}
 		if !names.bind(demand.name, ref.Id, visible, c.Work) {
 			return false
 		}
 		c.FuncCtx.LocalNames[ref.Id] = demand.name
+		if final {
+			declaration.Final = true
+		}
 	}
 	return true
 }

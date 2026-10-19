@@ -9,6 +9,7 @@ type lambdaCaptureDeclaration struct {
 	name, typ string
 	line      int
 	scope     *lambdaCaptureScope
+	final     bool
 }
 
 type lambdaCaptureScope struct {
@@ -125,9 +126,10 @@ func lambdaCaptureBindings(lines []string) []*lambdaCaptureBinding {
 			name := ln[start:i]
 			if match != nil && start == match[6] {
 				typ := strings.TrimSpace(ln[match[4]:match[5]])
+				final := strings.HasPrefix(typ, "final ")
 				typ = strings.TrimPrefix(typ, "final ")
 				if !prevTokenIsControlKeyword(typ) {
-					scope.declarations[name] = &lambdaCaptureDeclaration{name: name, typ: typ, line: line, scope: scope}
+					scope.declarations[name] = &lambdaCaptureDeclaration{name: name, typ: typ, line: line, scope: scope, final: final}
 					continue
 				}
 				// `return varN;` / `throw varN;` also match the declaration
@@ -142,7 +144,7 @@ func lambdaCaptureBindings(lines []string) []*lambdaCaptureBinding {
 					break
 				}
 			}
-			if declaration == nil {
+			if declaration == nil || declaration.final {
 				continue
 			}
 			// The first lambda that crosses this declaration's scope owns the

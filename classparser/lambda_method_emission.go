@@ -82,6 +82,10 @@ func (c *ClassObjectDumper) recordLambdaMethodEmission(body *dumpedMethods, temp
 			return false
 		}
 	}
+	if !c.bindLambdaLocalCaptureEmission(body, frame) {
+		frame.invalid = true
+		return false
+	}
 	frame.children = append(frame.children, lambdaMethodOccurrence{body: body, request: body.sourceRequest, packet: strings.Clone(packet)})
 	frame.bytes += int64(len(packet))
 	return true

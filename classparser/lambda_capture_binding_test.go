@@ -30,6 +30,15 @@ func TestAdversarialLambdaCaptureUsesLexicalDeclaration(t *testing.T) {
 	}
 }
 
+func TestAdversarialLambdaCaptureDoesNotRecopyFinalDeclarations(t *testing.T) {
+	for _, typ := range []string{"long", "Object", "String", "List<Object>"} {
+		input := "class C {\n\tvoid run() {\n\t\tfinal " + typ + " var1 = source();\n\t\tRunnable var2 = () -> {\n\t\t\tread(var1);\n\t\t};\n\t}\n}\n"
+		if got := fixLambdaLoopCapture(input); got != input {
+			t.Fatalf("a final capture binder acquired a different alias/type/name:\n%s", got)
+		}
+	}
+}
+
 func TestAdversarialLambdaCaptureRejectsInvisibleDeclarations(t *testing.T) {
 	for _, declaration := range []string{
 		"\t\tPayload var1 = later();\n",

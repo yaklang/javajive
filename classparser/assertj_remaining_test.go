@@ -150,12 +150,10 @@ func TestNaturalOrderComparatorUsesCompareToIsLoadBearing(t *testing.T) {
 }
 
 func TestJoinStreamCtorCastIsLoadBearing(t *testing.T) {
-	// This test owns the legacy class-source rewrite. The typed constructor-binding
-	// pass now handles the same bytecode path under its own kill switch.
-	t.Setenv("JDEC_THIS_CTOR_OVERLOAD_CAST_OFF", "1")
-	assertKillSwitchDecompile(t, "testdata/regression/Join.class", "JDEC_ASSERTJ_REMAINING_OFF",
-		"this((Stream)(Arrays.stream(((Condition[])(checkNotNullConditions(var1))))))",
-		"this(Arrays.stream(((Condition[])(checkNotNullConditions(var1)))))")
+	// Verify the original selected constructor after real recompilation. The
+	// former counterfactual disabled typed binding and assumed every original
+	// parameter was named var1; neither assumption is a constructor contract.
+	testReviewedJoinConstructorContract(t)
 }
 
 func TestSoftProxiesCacheFindOrInsertCastIsLoadBearing(t *testing.T) {

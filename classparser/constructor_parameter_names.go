@@ -5,8 +5,10 @@ import "github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 // This proves a naming domain, not lexical ownership or permission to remove
 // hidden arguments. Only top-level declarations and named static members have
 // source formals in the same positions as every physical constructor formal.
-// Local/anonymous/enum and nonstatic member constructors keep their separately
-// proved projection. A dollar in an identifier conveys no declaration role.
+// Local/anonymous/enum, record, and nonstatic member constructors keep their
+// separate projection. Record canonical formals belong to the component
+// header and can carry compiler-owned mandated flags. A dollar in an
+// identifier conveys no declaration role.
 func (c *ClassObjectDumper) constructorHasOnlySourceParameters(method *MemberInfo, descriptor string) bool {
 	if c == nil || c.obj == nil || method == nil || c.obj.AccessFlags & ^uint16(0x0431) != 0 || method.AccessFlags & ^uint16(0x0887) != 0 || len(descriptor) < 3 || descriptor[len(descriptor)-1] != 'V' {
 		return false
@@ -22,7 +24,7 @@ func (c *ClassObjectDumper) constructorHasOnlySourceParameters(method *MemberInf
 		}
 		switch a := attribute.(type) {
 		case *UnparsedAttribute:
-			if a == nil || a.Name == "EnclosingMethod" || a.Name == "InnerClasses" {
+			if a == nil || a.Name == "EnclosingMethod" || a.Name == "InnerClasses" || a.Name == "Record" {
 				return false
 			}
 		case *InnerClassesAttribute:

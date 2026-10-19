@@ -16,8 +16,9 @@ type EvaluationSnapshot struct {
 	Value    values.JavaValue
 	OriginPC int
 	Operand  bool
-	// Call-site descriptor type, used only for a proved constant-null copy.
-	ExpectedType types.JavaType
+	// Original call-site descriptor type, separate from a solved source web.
+	ExpectedType  types.JavaType
+	lambdaCapture bool
 }
 
 func (d *Decompiler) snapshotDynamicOperands(op *OpCode, sim StackSimulation, args []values.JavaValue, parameters []types.JavaType) ([]values.JavaValue, error) {
@@ -83,6 +84,9 @@ func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
 			if _, primitive := typ.RawType().(*types.JavaPrimer); primitive {
 				continue
 			}
+			if target, proved := d.lambdaCaptureSnapshotType(snapshot, typ); proved {
+				typ = target
+			}
 			if !reflect.DeepEqual(snapshot.Ref.Type().RawType(), typ.RawType()) {
 				snapshot.Ref.ResetVarType(typ.Copy())
 				changed = true
@@ -93,6 +97,7 @@ func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
 }
 
 func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, value values.JavaValue) values.JavaValue {
+	d.markLambdaCaptureDescriptorSnapshots(op, value)
 	d.inlineUnchangedLambdaParameterOperands(op, value)
 	if d.canInlineImmediateMethodRef(op, value) {
 		// An explicit target preserves the bootstrap's existing SAM adaptation
