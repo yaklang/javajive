@@ -25,7 +25,7 @@ func originalMonitorContinuations(tr *statements.TryCatchStatement, owner int) (
 	p.tag = values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaPrimer(types.JavaInteger))
 	p.tag.Id.SetName(fmt.Sprintf("jdec$monitor$exit$%d", owner))
 	body, open, valid := p.partition(tr.TryBody, 0)
-	if !valid || open || len(p.tails) < 2 || len(p.tails) > 32 || !monitorContinuationLocalsClosed(body, p.tails, func(pc int) bool { return !finallyContains(p.rows, pc) }) {
+	if !valid || open || len(p.tails) < 2 || len(p.tails) > 32 || !monitorContinuationLocalsClosed(body, p.tails, func(pc int) bool { return !finallyContains(p.rows, pc) }, owner) {
 		return nil, nil, nil, false
 	}
 	continuation := p.tails[len(p.tails)-1]
@@ -132,8 +132,13 @@ func (p *monitorContinuationProof) partition(input []statements.Statement, depth
 // A tail must not acquire a use of a local declared inside synchronized. This
 // partition deliberately refuses such a cross-scope value; it does not invent
 // initialization values or use a simulator ref.Val history as a declaration.
-func monitorContinuationLocalsClosed(held []statements.Statement, tails [][]statements.Statement, released func(int) bool) bool {
+func monitorContinuationLocalsClosed(held []statements.Statement, tails [][]statements.Statement, released func(int) bool, owner int) bool {
+	return monitorContinuationScope(held, tails, released, owner, nil)
+}
+
+func monitorContinuationScope(held []statements.Statement, tails [][]statements.Statement, released func(int) bool, owner int, escape func(*values.JavaRef) bool) bool {
 	declared := map[*utils.VariableId]bool{}
+	caught := map[*utils.VariableId]bool{}
 	remaining := 4096
 	active := map[statements.Statement]bool{}
 	var value func(values.JavaValue, map[values.JavaValue]bool) bool
@@ -145,7 +150,7 @@ func monitorContinuationLocalsClosed(held []statements.Statement, tails [][]stat
 		seen[v] = true
 		defer delete(seen, v)
 		if ref, ok := v.(*values.JavaRef); ok && declared[ref.Id] {
-			return false
+			return !caught[ref.Id] && escape != nil && escape(ref)
 		}
 		children, known := values.Children(v)
 		if call, ok := v.(*values.FunctionCallExpression); ok {
@@ -204,7 +209,24 @@ func monitorContinuationLocalsClosed(held []statements.Statement, tails [][]stat
 			case *statements.IfStatement:
 				roots, blocks = []values.JavaValue{x.Condition}, [][]statements.Statement{x.IfBody, x.ElseBody}
 			case *statements.TryCatchStatement:
+				if collect {
+					for _, exception := range x.Exception {
+						if exception == nil || exception.Id == nil {
+							return false
+						}
+						declared[exception.Id] = true
+						caught[exception.Id] = true
+					}
+				}
 				blocks = append([][]statements.Statement{x.TryBody}, x.CatchBodies...)
+			case *statements.SynchronizedStatement:
+				pc, proved := x.OriginalMonitorEnterPC()
+				if !proved || !collect && !released(pc) {
+					return false
+				}
+				roots, blocks = []values.JavaValue{x.Argument}, [][]statements.Statement{x.Body}
+			case *statements.DoWhileStatement:
+				roots, blocks = []values.JavaValue{x.ConditionValue}, [][]statements.Statement{x.Body}
 			case *statements.ReturnStatement:
 				if !collect && (!x.HasOriginPC || !released(x.OriginPC)) {
 					return false
@@ -230,7 +252,15 @@ func monitorContinuationLocalsClosed(held []statements.Statement, tails [][]stat
 					blocks = append(blocks, arm.Body)
 				}
 			case *statements.MiddleStatement:
-				if x == nil || x.Data != nil || x.Flag != "start" && x.Flag != "end" {
+				if x == nil {
+					return false
+				}
+				if x.Flag == "monitor_exit" && !collect {
+					pc, paired, proved := x.OriginalMonitor()
+					if !proved || paired == owner || !released(pc) {
+						return false
+					}
+				} else if x.Data != nil || x.Flag != "start" && x.Flag != "end" {
 					return false
 				}
 			default:

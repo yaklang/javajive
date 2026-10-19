@@ -74,6 +74,9 @@ func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
 		if valid {
 			foundTop = true
 			certified = true
+		} else if prefix, held, tail, closed := originalMonitorSingleContinuation(trySt, owner); closed {
+			sourcePrefix, bodySts, otherBody = prefix, held, tail
+			foundTop, certified = true, true
 		} else if prefix, held, tail, closed := originalMonitorContinuations(trySt, owner); closed {
 			sourcePrefix, bodySts, otherBody = prefix, held, tail
 			foundTop, certified = true, true
@@ -125,6 +128,9 @@ func SynchronizeRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 	next := slices.Clone(currentNode.Next)
 	source := slices.Clone(node.Source)
+	if _, owner, known := entry.OriginalMonitor(); certified && known {
+		bodySts = normalizeOriginalMonitorHandlers(bodySts, owner, trySt.Handlers[0].ProtectedRanges)
+	}
 	synchronizedSource := statements.NewSynchronizedStatement(val, bodySts)
 	if certified {
 		synchronizedSource = statements.NewSynchronizedStatementFromMonitor(entry, bodySts)
