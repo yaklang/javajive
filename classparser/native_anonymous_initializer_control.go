@@ -3,7 +3,9 @@ package javaclassparser
 import (
 	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -17,7 +19,7 @@ func nativeAnonymousInitializerEvent(kind int) bool {
 	return nativeAnonymousInitializerIntegerTrap(kind) || kind == core.OP_PUTFIELD || kind == core.OP_GETFIELD || kind == core.OP_GETSTATIC || kind == core.OP_NEW || kind == core.OP_NEWARRAY || kind == core.OP_ANEWARRAY || kind == core.OP_MULTIANEWARRAY || kind == core.OP_ARRAYLENGTH || kind == core.OP_CHECKCAST || kind >= core.OP_IALOAD && kind <= core.OP_SALOAD || kind >= core.OP_INVOKEVIRTUAL && kind <= core.OP_INVOKEINTERFACE
 }
 
-// Admit only forward, successive null-test expression diamonds. Each
+// Admit only forward, successive one-word test expression diamonds. Each
 // fallthrough arm ends in its own original GOTO to the common join. A loop,
 // cross-region jump, early exit, disconnected instruction or arbitrary GOTO
 // has no certificate. Nested decisions need a separate result-phi certificate
@@ -59,6 +61,13 @@ func nativeAnonymousInitializerControlEvents(obj *ClassObject, ops []*core.OpCod
 		if kind == core.OP_ACONST_NULL && len(op.Data) == 0 {
 			return int(op.CurrentOffset), true
 		}
+		if kind == core.OP_CHECKCAST && len(op.Data) == 2 {
+			// The chosen result is the checked reference, not its input. The
+			// source event visitor still requires the exact original cast
+			// witness, target, operand and abrupt-completion position.
+			_, known := sourceBridgeClassName(obj, core.Convert2bytesToInt(op.Data))
+			return int(op.CurrentOffset), known
+		}
 		member := constructorMotionMember(obj, op, kind)
 		if member == nil {
 			return 0, false
@@ -83,7 +92,7 @@ func nativeAnonymousInitializerControlEvents(obj *ClassObject, ops []*core.OpCod
 			}
 			op := ops[i]
 			kind, pc := op.Instr.OpCode, int(op.CurrentOffset)
-			if kind == core.OP_IFNULL || kind == core.OP_IFNONNULL {
+			if kind == core.OP_IFNULL || kind == core.OP_IFNONNULL || kind >= core.OP_IFEQ && kind <= core.OP_IFLE {
 				other, known := target(op)
 				if !known || other <= i+1 || other >= end || ops[other-1].Instr.OpCode != core.OP_GOTO || i == start {
 					return false
@@ -118,7 +127,16 @@ func nativeAnonymousInitializerControlEvents(obj *ClassObject, ops []*core.OpCod
 					return false
 				}
 				producerPC := int(producer.CurrentOffset)
-				if !callbinding.Reference(desc) || branches[producerPC] != nil {
+				if branches[producerPC] != nil {
+					return false
+				}
+				if kind == core.OP_IFNULL || kind == core.OP_IFNONNULL {
+					if !callbinding.Reference(desc) {
+						return false
+					}
+				} else if desc != "I" && desc != "B" && desc != "C" && desc != "S" {
+					// JVM int-category zero tests are distinct from reference
+					// null tests, boolean source views and LCMP/FCMP packets.
 					return false
 				}
 				branches[producerPC] = op
@@ -180,19 +198,27 @@ func nativeAnonymousInitializerArmSourceValue(plan *nativeAnonymousExpressionIni
 		original, known := literal.OriginalNullPC()
 		return known && original == pc
 	}
+	if op.Instr.OpCode == core.OP_CHECKCAST {
+		cast, known := values.UnpackSoltValue(value).(*values.CastExpression)
+		if !known || cast == nil || len(op.Data) != 2 {
+			return false
+		}
+		origin, _, original := cast.OriginalCheckCastWitness(&class_context.ClassContext{})
+		return original && origin == pc
+	}
 	return nativeAnonymousInitializerArmValue(value, pc)
 }
 
 // Identify the original consumed reference by its producer PC, never by a
-// rendered condition or a field name. Only an exact null equality/inequality
-// is expressible here. The ordinary event visitor independently checks that
+// rendered condition or a field name. Null equality and primitive integer
+// comparisons against the JVM's implicit zero have distinct source typing. The ordinary event visitor independently checks that
 // producer's receiver, owner, descriptor, arguments and evaluation position.
 func nativeAnonymousInitializerSourceBranch(plan *nativeAnonymousExpressionInitializer, condition values.JavaValue) (*core.OpCode, bool) {
 	if plan == nil {
 		return nil, false
 	}
 	expression, known := values.UnpackSoltValue(condition).(*values.JavaExpression)
-	if !known || expression == nil || len(expression.Values) != 2 || expression.Values[1] != values.JavaNull || expression.Op != values.EQ && expression.Op != values.NEQ {
+	if !known || expression == nil || len(expression.Values) != 2 {
 		return nil, false
 	}
 	pc, valid := 0, false
@@ -208,7 +234,41 @@ func nativeAnonymousInitializerSourceBranch(plan *nativeAnonymousExpressionIniti
 	if !valid || branch == nil || branch.Instr == nil {
 		return nil, false
 	}
-	return branch, (branch.Instr.OpCode == core.OP_IFNONNULL) == (expression.Op == values.EQ)
+	kind := branch.Instr.OpCode
+	if kind == core.OP_IFNULL || kind == core.OP_IFNONNULL {
+		if expression.Values[1] != values.JavaNull || expression.Op != values.EQ && expression.Op != values.NEQ {
+			return nil, false
+		}
+		return branch, (kind == core.OP_IFNONNULL) == (expression.Op == values.EQ)
+	}
+	// A branch consumes an int-category word. Source must preserve a numeric
+	// primitive operand and the implicit integer zero, with no boxed view.
+	zero, literal := values.UnpackSoltValue(expression.Values[1]).(*values.JavaLiteral)
+	if !literal || zero == nil || zero.Type() == nil {
+		return nil, false
+	}
+	n, integer := zero.Data.(int)
+	z, primitive := zero.Type().RawType().(*types.JavaPrimer)
+	operand := values.UnpackSoltValue(expression.Values[0])
+	if !integer || n != 0 || !primitive || z == nil || z.Name != types.JavaInteger || operand == nil || operand.Type() == nil {
+		return nil, false
+	}
+	typ, numeric := operand.Type().RawType().(*types.JavaPrimer)
+	if !numeric || typ == nil || typ.Name != types.JavaInteger && typ.Name != types.JavaByte && typ.Name != types.JavaShort && typ.Name != types.JavaChar {
+		return nil, false
+	}
+	// These are exactly the complements of the six JVM taken-edge tests.
+	fallthroughOperator := map[int]string{core.OP_IFEQ: values.NEQ, core.OP_IFNE: values.EQ, core.OP_IFLT: values.GTE, core.OP_IFGE: values.LT, core.OP_IFGT: values.LTE, core.OP_IFLE: values.GT}[kind]
+	if fallthroughOperator == "" {
+		return nil, false
+	}
+	if expression.Op == fallthroughOperator {
+		return branch, true
+	}
+	if expression.Op == core.GetReverseOp(fallthroughOperator) {
+		return branch, false
+	}
+	return nil, false
 }
 
 // Integer zero-divisor traps occur after both operand evaluations and before

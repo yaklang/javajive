@@ -24,7 +24,7 @@ type nativeAnonymousExpressionInitializer struct {
 	stores    map[int]string
 	signature string
 	byPC      map[int]*core.OpCode
-	branches  map[int]*core.OpCode // exact reference producer PC -> null branch
+	branches  map[int]*core.OpCode // exact one-word producer PC -> tested branch
 	armValues map[int][2]int       // original fallthrough / target result producer
 	events    []int                // structured original event stream
 }
@@ -120,7 +120,7 @@ func nativeAnonymousExpressionInitializerProof(obj *ClassObject, code *CodeAttri
 		case core.OP_ISTORE, core.OP_ISTORE_0, core.OP_ISTORE_1, core.OP_ISTORE_2, core.OP_ISTORE_3, core.OP_LSTORE, core.OP_LSTORE_0, core.OP_LSTORE_1, core.OP_LSTORE_2, core.OP_LSTORE_3, core.OP_FSTORE, core.OP_FSTORE_0, core.OP_FSTORE_1, core.OP_FSTORE_2, core.OP_FSTORE_3, core.OP_DSTORE, core.OP_DSTORE_0, core.OP_DSTORE_1, core.OP_DSTORE_2, core.OP_DSTORE_3, core.OP_ASTORE, core.OP_ASTORE_0, core.OP_ASTORE_1, core.OP_ASTORE_2, core.OP_ASTORE_3, core.OP_IINC, core.OP_WIDE, core.OP_GOTO_W, core.OP_JSR, core.OP_JSR_W, core.OP_RET, core.OP_TABLESWITCH, core.OP_LOOKUPSWITCH, core.OP_ATHROW, core.OP_MONITORENTER, core.OP_MONITOREXIT, core.OP_PUTSTATIC, core.OP_INVOKEDYNAMIC, core.OP_IASTORE, core.OP_LASTORE, core.OP_FASTORE, core.OP_DASTORE, core.OP_AASTORE, core.OP_BASTORE, core.OP_CASTORE, core.OP_SASTORE:
 			return nil
 		}
-		if kind >= core.OP_IFEQ && kind <= core.OP_IF_ACMPNE || kind >= core.OP_IRETURN && kind <= core.OP_ARETURN {
+		if kind >= core.OP_IF_ICMPEQ && kind <= core.OP_IF_ACMPNE || kind >= core.OP_IRETURN && kind <= core.OP_ARETURN {
 			return nil
 		}
 		if kind == core.OP_LDC || kind == core.OP_LDC_W || kind == core.OP_LDC2_W {
