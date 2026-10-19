@@ -119,13 +119,25 @@ func TestNativeCaptureSnapshotRequiresAssignedWordAndOriginalAllocation(t *testi
 			}
 			before := append([]values.JavaValue(nil), call.Arguments...)
 			projected, closed := c.prepareNativeCaptureIdentitySnapshots(body, nil)
-			if closed != good {
+			if good && !closed {
 				t.Fatalf("closed=%v want=%v", closed, good)
 			}
 			if !good {
+				if (mode == "not direct return" || mode == "allocation in loop" || mode == "parameter storage") && !closed {
+					t.Fatal("an inapplicable optional projection poisoned the ordinary method")
+				}
 				for i := range before {
 					if call.Arguments[i] != before[i] {
 						t.Fatal("refused snapshot changed an original operand")
+					}
+				}
+				if closed {
+					if len(projected) != len(body) {
+						t.Fatal("refused optional projection introduced a statement")
+					}
+					c.prepareNativeCaptureBindings(projected, nil)
+					if !family.failed && c.FuncCtx.SourceCaptureStable != nil && c.FuncCtx.SourceCaptureStable(call.OriginPC, ref.Id) {
+						t.Fatal("unproved original storage was authorized by a refused projection")
 					}
 				}
 				return

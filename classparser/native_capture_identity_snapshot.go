@@ -176,7 +176,15 @@ func (c *ClassObjectDumper) prepareNativeCaptureIdentitySnapshots(body []stateme
 			if !ok || ref == nil {
 				continue
 			}
-			if len(identityNames[ref.Id]) < 2 {
+			required := len(identityNames[ref.Id]) >= 2
+			if !required {
+				// A single capture name already has the ordinary binding
+				// protocol as its authority. Only consider an optional copy
+				// at a supported source contour; a refused optimization must
+				// not turn an otherwise dumpable method into an error.
+				if s.statement == nil || parameterIDs[ref.Id] || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil {
+					continue
+				}
 				_, stable := nativeCaptureDeclaration(body, ref, parameterIDs[ref.Id], c.Work)
 				if !stable && !parameterIDs[ref.Id] {
 					_, stable = nativeCaptureJoinedDeclaration(body, ref, allocation, c.Work)
@@ -185,26 +193,35 @@ func (c *ClassObjectDumper) prepareNativeCaptureIdentitySnapshots(body []stateme
 					continue
 				}
 			}
-			if s.statement == nil || parameterIDs[ref.Id] || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || ref.Type() == nil || !allocation.HasOriginPC || !call.HasOriginPC || call.Object != allocation || call.Kind != values.InvokeSpecial || !call.IsSpecialInvoke || call.FunctionName != "<init>" || call.Descriptor != child.descriptor || allocation.OriginPC != child.newPC || call.OriginPC != child.invokePC {
-				return body, false
-			}
-			allocated, known := types.RawClassFQN(allocation.Type())
-			if !known || strings.ReplaceAll(allocated, ".", "/") != strings.ReplaceAll(call.ClassName, ".", "/") {
-				return body, false
-			}
-			name, named := strings.CutPrefix(field, "val$")
-			if !named || name == "" || !class_context.PreservesJava8Identifier(name) || indices[index] != "" {
-				return body, false
-			}
-			parameters, _, err := callbinding.Descriptor(call.Descriptor)
-			erasure, known := values.SourceTypeErasure(ref.Type(), c.FuncCtx)
-			if err != nil || len(parameters) != len(call.Arguments) || index >= len(parameters) || !known || erasure != parameters[index] {
-				return body, false
-			}
-			if _, stable := nativeCaptureJoinedDeclaration(body, ref, allocation, c.Work); !stable {
-				if _, assigned := nativeCaptureSnapshotDeclaration(body, ref, allocation, c.Work); !assigned {
+			name, proved := func() (string, bool) {
+				if s.statement == nil || parameterIDs[ref.Id] || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || ref.Type() == nil || !allocation.HasOriginPC || !call.HasOriginPC || call.Object != allocation || call.Kind != values.InvokeSpecial || !call.IsSpecialInvoke || call.FunctionName != "<init>" || call.Descriptor != child.descriptor || allocation.OriginPC != child.newPC || call.OriginPC != child.invokePC {
+					return "", false
+				}
+				allocated, known := types.RawClassFQN(allocation.Type())
+				if !known || strings.ReplaceAll(allocated, ".", "/") != strings.ReplaceAll(call.ClassName, ".", "/") {
+					return "", false
+				}
+				name, named := strings.CutPrefix(field, "val$")
+				if !named || name == "" || !class_context.PreservesJava8Identifier(name) || indices[index] != "" {
+					return "", false
+				}
+				parameters, _, err := callbinding.Descriptor(call.Descriptor)
+				erasure, known := values.SourceTypeErasure(ref.Type(), c.FuncCtx)
+				if err != nil || len(parameters) != len(call.Arguments) || index >= len(parameters) || !known || erasure != parameters[index] {
+					return "", false
+				}
+				if _, stable := nativeCaptureJoinedDeclaration(body, ref, allocation, c.Work); !stable {
+					if _, assigned := nativeCaptureSnapshotDeclaration(body, ref, allocation, c.Work); !assigned {
+						return "", false
+					}
+				}
+				return name, true
+			}()
+			if !proved {
+				if required || c.Work != nil && c.Work.Err() != nil {
 					return body, false
 				}
+				continue
 			}
 			indices[index] = name
 			sources[index] = ref
