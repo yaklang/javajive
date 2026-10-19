@@ -99,6 +99,17 @@ func nativeMemberDeclarationKindRepresentable(obj *ClassObject, flags uint16, wo
 			if obj.MajorVersion < 52 || !nativeAccessorVersion(obj, work) || codeCount != 1 {
 				return false
 			}
+		case 0x1002, 0x100a:
+			// Java 8 source interfaces do not declare private methods, but
+			// javac emits private synthetic lambda implementations. Only an
+			// actual original factory-owned body may be consumed this way;
+			// its completed source/capture/metadata receipts remain separate.
+			if obj.MajorVersion < 52 || !nativeAccessorVersion(obj, work) || codeCount != 1 {
+				return false
+			}
+			if _, known := nativeLambdaBodyDeclarationSchema(obj, method, work); !known {
+				return false
+			}
 		default:
 			return false
 		}

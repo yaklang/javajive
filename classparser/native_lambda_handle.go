@@ -67,14 +67,24 @@ func nativeLambdaOriginalHandleTarget(object *ClassObject, handle *ConstantMetho
 // declaration. The caller must still prove private synthetic ownership, exact
 // metafactory use, and absence of direct calls or method-handle data uses.
 func nativeLambdaImplementationHandle(object *ClassObject, method *MemberInfo, handle *ConstantMethodHandleInfo, target nativeLambdaHandleTarget) bool {
-	if object == nil || method == nil || handle == nil || target.interfaceRef != (object.AccessFlags&0x0200 != 0) {
+	if handle == nil {
+		return false
+	}
+	return nativeLambdaImplementationKind(object, method, handle.ReferenceKind, target.interfaceRef)
+}
+
+// The original constant-pool reader and the archive's typed handle inventory
+// must agree on class/interface reference tags. A factory-owned private body
+// is validated before ordinary public interface-method rules are considered.
+func nativeLambdaImplementationKind(object *ClassObject, method *MemberInfo, kind uint8, interfaceRef bool) bool {
+	if object == nil || method == nil || interfaceRef != (object.AccessFlags&0x0200 != 0) {
 		return false
 	}
 	if method.AccessFlags&StaticFlag != 0 {
-		return handle.ReferenceKind == 6
+		return kind == 6
 	}
-	if target.interfaceRef {
-		return handle.ReferenceKind == 7 || handle.ReferenceKind == 9
+	if interfaceRef {
+		return kind == 7 || kind == 9
 	}
-	return handle.ReferenceKind == 5 || handle.ReferenceKind == 7
+	return kind == 5 || kind == 7
 }

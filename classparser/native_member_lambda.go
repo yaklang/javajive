@@ -25,12 +25,20 @@ func nativeMemberLambdaImplementation(child *nativeMemberClass, method *MemberIn
 	if found != 1 {
 		return false
 	}
+	parameters, known := nativeLambdaBodyDeclarationSchema(child.object, method, work)
+	if !known {
+		return false
+	}
 	for _, attr := range method.Attributes {
 		if !nativeProofWork(work, 1) {
 			return false
 		}
 		switch attr.(type) {
 		case *CodeAttribute, *ExceptionsAttribute:
+		case *UnparsedAttribute:
+			if parameters == nil || attr != parameters.table {
+				return false
+			}
 		default:
 			return false
 		}

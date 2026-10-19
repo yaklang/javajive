@@ -25,6 +25,14 @@ func testNativeIndependentCompilerFamilyWithArchive(t *testing.T, compile func(s
 // alias labels. Existing fixture contracts retain their exact invocation set.
 func testNativeIndependentCompilerFamilyWithPolicies(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), archive func(*testing.T, map[string][]byte) *JarFS, policies []string, verify ...func(*testing.T, string, []byte, []byte)) {
 	t.Helper()
+	testNativeIndependentCompilerFamilyWithParameterFlag(t, compile, profile, javac, owners, driver, want, mutate, archive, policies, false, verify...)
+}
+
+// Parameter-table presence is a compiler input of the entire original family.
+// The rebuild must use the same flag; an original binary overlay cannot stand
+// in for an owned member whose source packet failed to regenerate.
+func testNativeIndependentCompilerFamilyWithParameterFlag(t *testing.T, compile func(string) map[string][]byte, profile SourceCompilerProfile, javac string, owners []string, driver, want string, mutate func(*testing.T, map[string][]byte), archive func(*testing.T, map[string][]byte) *JarFS, policies []string, parameters bool, verify ...func(*testing.T, string, []byte, []byte)) {
+	t.Helper()
 	_, java := t04Tools(t)
 	owned := func(name string) bool {
 		for _, owner := range owners {
@@ -101,6 +109,9 @@ func testNativeIndependentCompilerFamilyWithPolicies(t *testing.T, compile func(
 					args := []string{"-proc:none", "--release", "8"}
 					if profile == NativeJavac8 {
 						args = []string{"-proc:none", "-source", "8", "-target", "8"}
+					}
+					if parameters {
+						args = append(args, "-parameters")
 					}
 					args = append(args, "-cp", out, "-d", out)
 					if raw, err := exec.Command(javac, append(args, paths...)...).CombinedOutput(); err != nil {

@@ -60,6 +60,13 @@ func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberInde
 			continue
 		}
 		m := methods[declarationKey{target.name, target.descriptor}]
+		if len(sourceMembers) == 1 && target.referencer == owner && sourceMembers[0] != nil && sourceMembers[0].object == obj && nativeMemberLambdaImplementation(sourceMembers[0], m, work) {
+			if !nativeLambdaImplementationKind(obj, m, target.kind, !target.methodRef) {
+				return false
+			}
+			closedTargets[target] = true
+			continue
+		}
 		if target.kind == 9 {
 			if target.methodRef || len(sourceMembers) != 1 || !nativeMemberInterfaceHandleSourceClosed(obj, sourceMembers[0], m, target, work) {
 				return false
@@ -68,13 +75,6 @@ func nativeMemberOrdinaryHandlesClosed(obj *ClassObject, index *nativeMemberInde
 			continue
 		}
 		if !target.methodRef {
-			return false
-		}
-		if len(sourceMembers) == 1 && target.referencer == owner && sourceMembers[0] != nil && sourceMembers[0].object == obj && nativeMemberLambdaImplementation(sourceMembers[0], m, work) {
-			if (m.AccessFlags&8 != 0 && target.kind == 6) || (m.AccessFlags&8 == 0 && (target.kind == 5 || target.kind == 7)) {
-				closedTargets[target] = true
-				continue
-			}
 			return false
 		}
 		constructor := target.kind == 8 && target.name == "<init>"

@@ -283,6 +283,21 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 	return closed
 }
 
+// A declaration-kind/planning query can recognize an original factory-owned
+// body without claiming that a chosen source compiler can regenerate it. A
+// present parameter table must be its exact bounded original schema; the body
+// emitter still owns capture binding, lexical registration and publication.
+func nativeLambdaBodyDeclarationSchema(object *ClassObject, method *MemberInfo, work *workbudget.Budget) (*lambdaParameterMetadata, bool) {
+	parameters, known := readLambdaParameterMetadata(object, method, work)
+	if !known {
+		return nil, false
+	}
+	if parameters != nil {
+		return parameters, nativeLambdaBodyOriginalUseClosed(object, method, work, parameters)
+	}
+	return nil, nativeLambdaBodyOriginalUseClosed(object, method, work)
+}
+
 // altMetafactory's existing marker-only source domain. Serializable lambdas and
 // explicit bridges retain the core's refusal; this is no new lambda capability.
 func nativeLambdaBodyMarkerArguments(args []uint16, constant func(uint16) ConstantInfo) bool {
