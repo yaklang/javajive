@@ -493,6 +493,12 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 			if x == nil {
 				return false
 			}
+			if x.Op == values.SUB && len(x.Values) == 1 {
+				// JVM numeric negation is total, including MIN_VALUE, signed
+				// zero and NaN. Its operand may still throw at its original PC.
+				// Do not import this fact into boxed/unboxing source views.
+				return visit(x.Values[0]) && finallyUnaryNumericNegationTypes(x)
+			}
 			if (x.Op == values.Not && len(x.Values) != 1) || (x.Op != values.Not && len(x.Values) != 2) {
 				return false
 			}
@@ -544,6 +550,13 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		case *values.JavaClassMember:
 			return x != nil && x.HasOriginPC && covered(x.OriginPC) && x.Name != "" && x.Member != "" && x.Description != ""
 		case *values.CustomValue:
+			if pc, captures, original := x.OriginalLambdaFactoryEvaluation(); original {
+				if !covered(pc) {
+					return false
+				}
+				children = captures
+				break
+			}
 			if operand, _, _, original := x.SourcePrimitiveConversion(); original {
 				if !totalPrimitiveConversionOperand(operand) {
 					return false
@@ -719,4 +732,34 @@ func sameFinallyBooleanNotShape(x, y *values.JavaExpression) bool {
 		return ok && p != nil && p.Name == types.JavaBoolean
 	}
 	return boolean(x) && boolean(y) && boolean(x.Values[0]) && boolean(y.Values[0])
+}
+
+// JLS unary numeric promotion must match the emitted source type. The JVM's
+// total NEG instruction cannot justify an implicit reference unboxing, nor can
+// a source-only local type projection borrow the underlying word's proof.
+func finallyUnaryNumericNegationTypes(x *values.JavaExpression) bool {
+	if x == nil || x.Op != values.SUB || len(x.Values) != 1 || x.Values[0] == nil || x.Typ == nil {
+		return false
+	}
+	operand := plainTryValue(x.Values[0])
+	if operand == nil || operand.Type() == nil {
+		return false
+	}
+	p, ok := operand.Type().RawType().(*types.JavaPrimer)
+	result, resultOK := x.Typ.RawType().(*types.JavaPrimer)
+	if !ok || p == nil || !resultOK || result == nil {
+		return false
+	}
+	if ref, local := operand.(*values.JavaRef); local && ref.WebDeclType != nil && !reflect.DeepEqual(ref.WebDeclType.RawType(), p) {
+		return false
+	}
+	promoted := p.Name
+	switch promoted {
+	case types.JavaByte, types.JavaShort, types.JavaChar:
+		promoted = types.JavaInteger
+	case types.JavaInteger, types.JavaLong, types.JavaFloat, types.JavaDouble:
+	default:
+		return false
+	}
+	return result.Name == promoted
 }

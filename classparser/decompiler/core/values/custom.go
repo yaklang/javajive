@@ -9,10 +9,11 @@ import (
 )
 
 type CustomValue struct {
-	sourcePrimitive   *sourcePrimitiveConversion
-	sourceCaught      bool
-	sourceCaughtPC    int
-	sourceCaughtTyped bool
+	originalLambdaFactory *originalLambdaFactory
+	sourcePrimitive       *sourcePrimitiveConversion
+	sourceCaught          bool
+	sourceCaughtPC        int
+	sourceCaughtTyped     bool
 	// Known captures describe lambda creation, without executing or inspecting
 	// the deferred lambda body. Other custom expressions remain opaque.
 	CapturesKnown  bool
