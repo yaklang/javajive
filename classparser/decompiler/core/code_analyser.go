@@ -40,6 +40,9 @@ type branchArrayCall struct {
 	argIndex int
 	ref      *values.JavaRef
 	array    *values.NewExpression
+	// Ordinary call discovery cannot inherit constructor/ternary source
+	// permissions. Reopen its own fixed declaration and complete packet at use.
+	requiresStaticSourceView bool
 }
 
 type Decompiler struct {
@@ -5749,7 +5752,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 						}
 						array, isArray := GetRealValue(ref).(*values.NewExpression)
 						if isArray && array != nil && array.HasOriginPC && array.OriginPC > firstIfPC {
-							d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call, i, ref, array})
+							d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call: call, argIndex: i, ref: ref, array: array})
 						}
 					}
 				}
@@ -5774,7 +5777,7 @@ func (d *Decompiler) CalcOpcodeStackInfo() error {
 							}
 							array, isArray := GetRealValue(ref).(*values.NewExpression)
 							if isArray && array != nil && array.HasOriginPC && array.OriginPC > firstIfPC {
-								d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call, i, ref, array})
+								d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call: call, argIndex: i, ref: ref, array: array})
 							}
 						}
 					}

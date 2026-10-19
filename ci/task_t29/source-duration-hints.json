@@ -4,8 +4,8 @@
   "latest_measured_ci_head": "6f81cb93a0ed5d4c4a84106fc905ff6111682a89",
   "latest_measured_ci_run": 39293806774,
   "latest_measured_completed_parents": 2579,
-  "local_followup_revision": "6eb00df50e6b1f197efb17cc38db08951dce7f30",
-  "local_followup_roots": 5,
+  "local_followup_revision": "3dd0b9412d34f4d9be3d3405a67c381b28e52b0a+qualified-ordinary-array",
+  "local_followup_roots": 7,
   "measured_checkout_heads": [
     "8f3a843a53c2716671919ddecb0dfff51121aec7",
     "9c94287899bfb2f7cff6eeb713212ab570e46649",
@@ -787,6 +787,7 @@
     "TestAdversarialLambdaCaptureLiftedDeclarationRuntime": 3.22,
     "TestAdversarialLambdaCaptureRejectsInvisibleDeclarations": 0,
     "TestAdversarialLambdaCaptureUsesLexicalDeclaration": 0,
+    "TestAdversarialLambdaEarlyReturnsKeepPhysicalCaptureDiscovery": 21.5,
     "TestAdversarialLambdaEnclosingNamespaceKeepsLocalResultAndPublicationLatch": 0,
     "TestAdversarialLambdaInterfaceHandleOriginalUseProof": 1.29,
     "TestAdversarialLambdaInterfaceHandleRoundTrip": 40.72,
@@ -797,6 +798,7 @@
     "TestAdversarialLambdaMethodEmissionReopensActualFactoryOccurrences": 1.1,
     "TestAdversarialLambdaMethodLocalCaptureKeepsOriginalFactoryBinder": 32.02,
     "TestAdversarialLambdaOriginalUseInventoryChargesVisitsAndKeepsPayloadCap": 0.72,
+    "TestAdversarialLambdaReceiverBeforeArrayKeepsPhysicalCaptureDiscovery": 47.81,
     "TestAdversarialLambdaRegistrationDepthMatchesOriginalSourceRequestBoundary": 6.24,
     "TestAdversarialLambdaRegistrationDistinguishesIdenticalFactoryOccurrences": 17.86,
     "TestAdversarialLateInstanceConstantStoreRoundTrip": 5.3,
@@ -2643,5 +2645,6 @@
     38757308797,
     38879736024,
     39293806774
-  ]
+  ],
+  "local_followup_go_manifest_sha256": "c9688e2c4d4f0e083971bb4f72f04977d04079a7bb463e682dd449a2fdcbcd5a"
 }

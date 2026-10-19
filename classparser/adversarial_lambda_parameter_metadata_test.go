@@ -183,8 +183,15 @@ func removeLambdaParameterTestTable(method *MemberInfo, table *UnparsedAttribute
 	}
 }
 
-func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string, implementations int, states string) {
+func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string, implementations int, states string, parameterFlags ...bool) {
 	t.Helper()
+	parameters := true
+	if len(parameterFlags) > 1 {
+		t.Fatal("at most one original parameter-table flag")
+	}
+	if len(parameterFlags) == 1 {
+		parameters = parameterFlags[0]
+	}
 	modern, java := t04Tools(t)
 	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
 		t.Run(string(profile), func(t *testing.T) {
@@ -203,8 +210,8 @@ func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string,
 							if owner == "AlternateLambdaParameters" {
 								fixture = strings.NewReplacer("int value", "int var0", "value+1", "var0+1", "int item", "int var1", "item+7", "var1+7", "int ignored", "int l0").Replace(fixture)
 							}
-							files := compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, owner, debug)
-							if profile == NativeJavac8 {
+							files := compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, owner, debug, parameters)
+							if profile == NativeJavac8 && parameters {
 								if count := strings.Count(lambdaParameterMetadataTables(t, files[owner+".class"]), "lambda$"); count != implementations {
 									t.Fatalf("original native8 parameter-bearing implementation declarations: %d want %d", count, implementations)
 								}
@@ -237,9 +244,12 @@ func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string,
 										}
 									}
 									write(out, owner+".java", []byte(result.Source))
-									args := []string{"-proc:none", "-parameters", "--release", "8"}
+									args := []string{"-proc:none", "--release", "8"}
 									if profile == NativeJavac8 {
-										args = []string{"-proc:none", "-parameters", "-source", "8", "-target", "8"}
+										args = []string{"-proc:none", "-source", "8", "-target", "8"}
+									}
+									if parameters {
+										args = append(args, "-parameters")
 									}
 									args = append(args, "-g:"+debug, "-cp", out, "-d", out, filepath.Join(out, owner+".java"))
 									if log, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {

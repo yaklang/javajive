@@ -119,6 +119,10 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 					call = n.ConstructorCall
 				}
 				pending = append(pending, discovery{call, true})
+			} else if call != nil && d.ordinaryStaticArraySourceView(call, op) {
+				// Each ordinary call proves its own fixed source formals. This
+				// seed does not grant those formals to a nested invocation.
+				pending = append(pending, discovery{call, true})
 			}
 		}
 	}
@@ -166,7 +170,7 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 		if n, ok := v.(*values.NewExpression); ok && n != nil && n.ConstructorCall != nil {
 			pending = append(pending, discovery{n.ConstructorCall, item.constructorOnly})
 		}
-		if call, ok := v.(*values.FunctionCallExpression); ok && call != nil && !seenCalls[call] && (!item.constructorOnly || call.IsSpecialInvoke && call.FunctionName == "<init>") {
+		if call, ok := v.(*values.FunctionCallExpression); ok && call != nil && !seenCalls[call] && (!item.constructorOnly || call.IsSpecialInvoke && call.FunctionName == "<init>" || d.ordinaryStaticArraySourceView(call, d.opcodeAtOffset(call.OriginPC))) {
 			seenCalls[call] = true
 			original := d.opcodeAtOffset(call.OriginPC)
 			if original == nil || !sameBranchArrayInvocation(d.invokeFuncCall[original], call) {
@@ -182,7 +186,10 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 				}
 				array := d.branchArrayReferenceOrigin(ref)
 				if array != nil {
-					d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{call, i, ref, array})
+					d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{
+						call: call, argIndex: i, ref: ref, array: array,
+						requiresStaticSourceView: item.constructorOnly && !(call.IsSpecialInvoke && call.FunctionName == "<init>"),
+					})
 				}
 			}
 		}
@@ -390,6 +397,9 @@ func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
 		if !valid || allocation == nil || invocation == nil || !branchArraySinglePath(d, allocation, invocation) {
 			continue
 		}
+		if candidate.requiresStaticSourceView && !d.ordinaryStaticArrayPacket(call, ref, array) {
+			continue
+		}
 		valid = d.branchArrayReceiverPrecedes(call, allocation)
 		for _, earlier := range call.Arguments[:candidate.argIndex] {
 			valid = valid && d.branchOperandPrecedesArray(earlier, allocation)
@@ -454,6 +464,12 @@ func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
 		}
 		for _, source := range slices.Clone(definition.Source) {
 			source.ReplaceNextSliceKeepOrder(definition, slices.Clone(definition.Next))
+			if source.JmpNode == definition {
+				source.JmpNode = definition.Next[0]
+			}
+		}
+		if definition == d.RootNode {
+			d.RootNode = definition.Next[0]
 		}
 		definition.RemoveAllNext()
 		definition.RemoveAllSource()
