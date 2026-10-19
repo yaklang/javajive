@@ -118,27 +118,6 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		if !factory.closed() || !factory.sealed || factory.object != c.obj {
 			return nil, false
 		}
-		packet := receipt.body.code
-		if binding := receipt.body.lambdaParameterBinding; binding != nil && binding.metadata != nil && binding.metadata.factoryCaptureCount() != 0 {
-			if !binding.capturedNamesClosed(c.Work) || receipt.renderedUnknown || receipt.renderedTemplate != packet {
-				return nil, false
-			}
-			packet = ""
-			for _, rendered := range receipt.renderedPackets {
-				if !charge(int64(len(source))) {
-					return nil, false
-				}
-				if strings.Contains(text, rendered) {
-					if packet != "" {
-						return nil, false
-					}
-					packet = rendered
-				}
-			}
-			if packet == "" {
-				return nil, false
-			}
-		}
 		var parent *dumpedMethods
 		for _, candidate := range methods {
 			if !nativeProofWork(c.Work, 1) {
@@ -153,6 +132,35 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		}
 		if parent == nil || parent.sourceDumper != c || parent.sourceObject != c.obj || parent.sourceRequest.role != methodSourceDeclaration || parent.sourceCacheKey == "" || c.dumpedMethodsSet[parent.sourceCacheKey] != parent || parent.sourceReconstructionFailed() || !c.methodParameterNameCacheClosed(parent.parameterNameStamp) || parent.code == "" || receipt.body.code == "" || !charge(int64(len(text))+int64(len(parent.code))+int64(len(receipt.body.code))) {
 			return nil, false
+		}
+		packet := receipt.body.code
+		if binding := receipt.body.lambdaParameterBinding; binding != nil && binding.metadata != nil && binding.metadata.factoryCaptureCount() != 0 {
+			if !binding.capturedNamesClosed(c.Work) || receipt.renderedUnknown || receipt.renderedTemplate != packet {
+				return nil, false
+			}
+			if parent.lambdaEmission != nil {
+				var closed bool
+				packet, closed = c.lambdaCompletedCapturePacket(parent, receipt, charge)
+				if !closed {
+					return nil, false
+				}
+			} else {
+				packet = ""
+				for _, rendered := range receipt.renderedPackets {
+					if !charge(int64(len(source))) {
+						return nil, false
+					}
+					if strings.Contains(text, rendered) {
+						if packet != "" {
+							return nil, false
+						}
+						packet = rendered
+					}
+				}
+				if packet == "" {
+					return nil, false
+				}
+			}
 		}
 		declaration, start, owned := c.lambdaParentDeclaration(text, parent)
 		if !owned {
@@ -200,7 +208,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 // Capture substitution is observed by the existing completed writer. Reopen
 // that receipt before the occurrence graph uses its source position. A cached
 // template with capture markers is never a final emitted packet.
-func (c *ClassObjectDumper) native8LambdaRenderedIdentityPacketClosed(receipt *lambdaMethodSourceReceipt, source string, charge func(int64) bool) bool {
+func (c *ClassObjectDumper) native8LambdaRenderedIdentityPacketClosed(receipt *lambdaMethodSourceReceipt, source string, charge func(int64) bool, parent ...*dumpedMethods) bool {
 	if receipt == nil || receipt.body == nil || charge == nil {
 		return false
 	}
@@ -209,6 +217,13 @@ func (c *ClassObjectDumper) native8LambdaRenderedIdentityPacketClosed(receipt *l
 		return true
 	}
 	if !binding.capturedNamesClosed(c.Work) || receipt.renderedUnknown || receipt.renderedTemplate != receipt.body.code {
+		return false
+	}
+	if len(parent) == 1 {
+		_, closed := c.lambdaCompletedCapturePacket(parent[0], receipt, charge)
+		return closed
+	}
+	if len(parent) != 0 {
 		return false
 	}
 	matches := 0

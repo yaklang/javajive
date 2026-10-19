@@ -3,6 +3,7 @@ package javaclassparser
 import (
 	coreutils "github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // The callback's early context precedes final identity/name allocation. Freeze
@@ -33,10 +34,11 @@ func (c *ClassObjectDumper) bindLambdaLocalCaptureEmission(body *dumpedMethods, 
 		return false
 	}
 	context, known := c.FuncCtx.SnapshotForSourceProof(c.Work)
-	if !known || !b.capturedNamesInContextClosed(context, c.Work) || c.Work != nil && c.Work.CheckAlloc(int64(len(b.captured))*8) != nil {
+	if !known || !b.capturedNamesInContextClosed(context, c.Work) || c.Work != nil && c.Work.CheckAlloc(int64(len(b.captured))*16) != nil {
 		return false
 	}
 	identities := make([]*coreutils.VariableId, len(b.captured))
+	sources := make([]*coreutils.VariableId, len(b.captured))
 	for i, capture := range b.captured {
 		v, known := nativeMemberEnclosingUnpack(capture, c.Work)
 		ref, typed := v.(*values.JavaRef)
@@ -44,9 +46,34 @@ func (c *ClassObjectDumper) bindLambdaLocalCaptureEmission(body *dumpedMethods, 
 			return false
 		}
 		identities[i] = ref.Id
+		source, known := lambdaCaptureSourceReference(ref, factory.pc, i+b.metadata.receiverWords, c.Work)
+		if !known {
+			return false
+		}
+		sources[i] = source.Id
 	}
 	b.captureContext, b.captureEmission, b.captureDeclarationIDs = context, frame, identities
+	b.captureSourceIDs = sources
 	return true
+}
+
+// Retain eager operand identity and final source declaration identity separately.
+// A sealed inline copy does not have its own source declaration, and arbitrary
+// StackVar/ref.Val histories cannot replace the actual binder.
+func lambdaCaptureSourceReference(ref *values.JavaRef, pc, index int, work *workbudget.Budget) (*values.JavaRef, bool) {
+	if ref == nil || ref.Id == nil {
+		return nil, false
+	}
+	if ref.StackVar == nil {
+		return ref, true
+	}
+	location, ordinal, sealed := ref.OriginalInlinedDynamicOperandWitness(ref.Val)
+	if !sealed || location != pc || ordinal != index {
+		return nil, false
+	}
+	v, known := nativeMemberEnclosingUnpack(ref.StackVar, work)
+	source, typed := v.(*values.JavaRef)
+	return source, known && typed && source != nil && source.Id != nil && source.StackVar == nil && source.CustomValue == nil
 }
 
 // Metadata constrains the existing factory snapshot's source spelling. The

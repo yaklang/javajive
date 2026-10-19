@@ -107,7 +107,7 @@ func (c *ClassObjectDumper) native8NestedLambdaSourceIdentityEvents(source strin
 				return false
 			}
 			factory := receipt.request.factory
-			if !factory.closed() || factory.object != c.obj || factory.method != parent.member || !c.native8LambdaRenderedIdentityPacketClosed(receipt, source, charge) {
+			if !factory.closed() || factory.object != c.obj || factory.method != parent.member || !c.native8LambdaRenderedIdentityPacketClosed(receipt, source, charge, parent) {
 				return false
 			}
 			local, known := c.nativeLambdaDirectBlockScopes(occurrence.packet, charge)

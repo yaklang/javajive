@@ -1681,7 +1681,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	// read inside the lambda, so initProximateSplitSlotDecl (next) can safely default-initialize it
 	// (the lambda-capture skip won't fire for a var whose reads were already rewritten to the copy).
 	// Kill-switch: JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
-	full = c.sourceRewrite("fixLambdaLoopCapture", "class_source", full, fixLambdaLoopCapture)
+	full = c.sourceRewrite("fixLambdaLoopCapture", "class_source", full, func(source string) string {
+		return fixLambdaLoopCaptureWithStableBindings(source, c.completedLambdaStableSourceBindings(source, methods))
+	})
 	// Run the split-slot definite-assignment init on the FULL class text (all methods merged).
 	// This overcomes the chunked-sourceCode limitation where the per-method init couldn't see
 	// assignments in other method blocks. Kill-switch: JDEC_INIT_PROX_SPLIT_OFF=1.
@@ -6499,6 +6501,10 @@ func assignTargetIs(ln, name string) bool {
 // Such lambdas are skipped (only non-chained `receiver(args, x -> {...})` forms are handled).
 // Kill-switch: JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF=1.
 func fixLambdaLoopCapture(body string) string {
+	return fixLambdaLoopCaptureWithStableBindings(body, nil)
+}
+
+func fixLambdaLoopCaptureWithStableBindings(body string, stable map[int]map[string]bool) string {
 	if jdecenv.Get("JDEC_LAMBDA_LOOP_CAPTURE_COPY_OFF") == "1" {
 		return body
 	}
@@ -6556,6 +6562,9 @@ func fixLambdaLoopCapture(body string) string {
 		}
 		for _, binding := range lambdaCaptureBindings(mlines) {
 			decl, lambda := binding.declaration, binding.lambda
+			if stable[mr.start+lambda.open][decl.name] {
+				continue
+			}
 			if lambda.end == 0 {
 				continue // An incomplete block cannot prove a bounded capture.
 			}

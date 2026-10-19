@@ -274,13 +274,17 @@ func (b *lambdaParameterBinding) capturedNamesClosed(work *workbudget.Budget) bo
 	}
 	for _, operand := range b.metadata.captures {
 		if operand != nil && operand.local != nil {
-			if b.metadata.factory == nil || !b.captureEmission.closed() || b.captureEmission.body == nil || b.captureEmission.body.member != b.metadata.factory.method || len(b.captureDeclarationIDs) != len(b.captured) {
+			if b.metadata.factory == nil || !b.captureEmission.closed() || b.captureEmission.body == nil || b.captureEmission.body.member != b.metadata.factory.method || len(b.captureDeclarationIDs) != len(b.captured) || len(b.captureSourceIDs) != len(b.captured) {
 				return false
 			}
 			for i, capture := range b.captured {
 				v, known := nativeMemberEnclosingUnpack(capture, work)
 				ref, typed := v.(*values.JavaRef)
 				if !known || !typed || ref == nil || ref.Id == nil || ref.Id != b.captureDeclarationIDs[i] {
+					return false
+				}
+				source, known := lambdaCaptureSourceReference(ref, b.metadata.factory.pc, i+b.metadata.receiverWords, work)
+				if !known || source.Id != b.captureSourceIDs[i] {
 					return false
 				}
 			}
@@ -315,6 +319,12 @@ func (b *lambdaParameterBinding) capturedNamesInContextClosed(context *class_con
 		}
 		if !original || pc != b.metadata.factory.pc || index != i+b.metadata.receiverWords || !nativeLambdaLocalCaptureValue(b.metadata.captures[i], value, pc, i+b.metadata.receiverWords, context, work) || ref.String(context) != b.metadata.names[i] {
 			return false
+		}
+		if b.metadata.captures[i].local != nil {
+			source, known := lambdaCaptureSourceReference(ref, pc, index, work)
+			if !known || context.LocalNames[source.Id] != b.metadata.names[i] {
+				return false
+			}
 		}
 	}
 	return true

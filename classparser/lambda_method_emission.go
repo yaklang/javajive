@@ -57,6 +57,42 @@ func (frame *lambdaMethodEmission) closed() bool {
 	return frame != nil && frame.complete && frame.ended && !frame.invalid && frame.seal != nil && frame.body == frame.seal.body && frame.request == frame.seal.request && frame.bytes == frame.seal.bytes && slices.Equal(frame.children, frame.seal.children)
 }
 
+// Preview renders can use names which later belong to another declaration.
+// Only the completed parent's original factory occurrence selects this body's
+// actual capture packet. Text elsewhere in the class cannot identify it.
+func (c *ClassObjectDumper) lambdaCompletedCapturePacket(parent *dumpedMethods, receipt *lambdaMethodSourceReceipt, charge func(int64) bool) (string, bool) {
+	if c == nil || parent == nil || receipt == nil || receipt.body == nil || charge == nil || receipt.object != c.obj || receipt.method != receipt.body.member || receipt.request != receipt.body.sourceRequest || receipt.key != receipt.body.sourceCacheKey || c.lambdaMethodSourceBodies[receipt.method] != receipt || c.dumpedMethodsSet[receipt.key] != receipt.body || receipt.renderedUnknown || receipt.renderedTemplate != receipt.body.code || len(receipt.renderedPackets) > 32 {
+		return "", false
+	}
+	frame := parent.lambdaEmission
+	if !frame.closed() || frame.body != parent || frame.request != parent.sourceRequest || len(frame.children) > methodSourceLambdaRequestLimit || receipt.request.factory == nil || !receipt.request.factory.closed() || receipt.request.factory.object != c.obj || receipt.request.factory.method != parent.member || !nativeProofWork(c.Work, int64(len(frame.children))+1) {
+		return "", false
+	}
+	packet := ""
+	for _, event := range frame.children {
+		if event.body != receipt.body {
+			continue
+		}
+		if packet != "" || event.request != receipt.request || event.packet == "" || len(event.packet) > 1<<20 || !charge(int64(len(event.packet))) {
+			return "", false
+		}
+		packet = event.packet
+	}
+	if packet == "" {
+		return "", false
+	}
+	matches := 0
+	for _, observed := range receipt.renderedPackets {
+		if len(observed) > 1<<20 || !charge(int64(len(observed))) {
+			return "", false
+		}
+		if observed == packet {
+			matches++
+		}
+	}
+	return packet, matches == 1
+}
+
 func (c *ClassObjectDumper) recordLambdaMethodEmission(body *dumpedMethods, template, packet string) bool {
 	frame := c.lambdaMethodRendering
 	if frame == nil {

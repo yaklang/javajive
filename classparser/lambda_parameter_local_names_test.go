@@ -90,7 +90,7 @@ func TestAdversarialLocalLambdaFinalNamesRequireCompletedOriginalEmission(t *tes
 		t.Skip("JAVA8_JAVAC required for original local-capture metadata")
 	}
 	files := compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, localLambdaParameterFixture, "UncapturedLambdaNames", "none")
-	for _, variant := range []string{"original", "analysis context", "uncompleted frame", "changed event", "foreign owner", "lost name", "same spelling new identity", "changed seed", "missing witness", "wrong original store", "lost context name", "work", "canceled"} {
+	for _, variant := range []string{"original", "analysis context", "uncompleted frame", "changed event", "foreign owner", "lost name", "same spelling new identity", "lost source identity", "changed source identity", "same spelling new source identity", "changed seed", "missing witness", "wrong original store", "lost context name", "work", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			object, err := Parse(bytes.Clone(files["UncapturedLambdaNames.class"]))
 			if err != nil {
@@ -114,6 +114,10 @@ func TestAdversarialLocalLambdaFinalNamesRequireCompletedOriginalEmission(t *tes
 			if !ok || capture == nil || capture.Id == nil || binding.captureEmission == nil {
 				t.Fatal("original captured source declaration")
 			}
+			source, known := lambdaCaptureSourceReference(capture, binding.metadata.factory.pc, binding.metadata.receiverWords, nil)
+			if !known {
+				t.Fatal("actual retained or inlined source capture binder")
+			}
 			var work *workbudget.Budget
 			switch variant {
 			case "analysis context":
@@ -127,11 +131,19 @@ func TestAdversarialLocalLambdaFinalNamesRequireCompletedOriginalEmission(t *tes
 				copy.member = &MemberInfo{}
 				binding.captureEmission.body = &copy
 			case "lost name":
-				binding.captureContext.LocalNames[capture.Id] = "another"
+				binding.captureContext.LocalNames[source.Id] = "another"
 			case "same spelling new identity":
 				capture.Id = coreutils.NewRootVariableId()
 				capture.Id.SetName(binding.metadata.names[0])
 				binding.captureContext.LocalNames[capture.Id] = binding.metadata.names[0]
+			case "lost source identity":
+				binding.captureSourceIDs = nil
+			case "changed source identity":
+				binding.captureSourceIDs[0] = coreutils.NewRootVariableId()
+			case "same spelling new source identity":
+				source.Id = coreutils.NewRootVariableId()
+				source.Id.SetName(binding.metadata.names[0])
+				binding.captureContext.LocalNames[source.Id] = binding.metadata.names[0]
 			case "changed seed":
 				capture.Val = values.NewJavaLiteral(nil, capture.Type())
 			case "missing witness":
@@ -139,7 +151,7 @@ func TestAdversarialLocalLambdaFinalNamesRequireCompletedOriginalEmission(t *tes
 			case "wrong original store":
 				binding.metadata.captures[0].local.storePC++
 			case "lost context name":
-				delete(binding.captureContext.LocalNames, capture.Id)
+				delete(binding.captureContext.LocalNames, source.Id)
 			case "work":
 				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
 			case "canceled":

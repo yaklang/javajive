@@ -115,6 +115,17 @@ func (c *ClassObjectDumper) bindNativeLambdaCaptureParameterNames(v values.JavaV
 		}
 		value, known := nativeMemberEnclosingUnpack(demand.value, c.Work)
 		ref, knownRef := value.(*values.JavaRef)
+		inlinedLocal := false
+		if known && knownRef && ref != nil && demand.site.operands[demand.index] != nil && demand.site.operands[demand.index].local != nil {
+			if pc, index, sealed := ref.OriginalInlinedDynamicOperandWitness(ref.Val); sealed {
+				if pc != demand.site.pc || index != demand.index {
+					return false
+				}
+				value, known = nativeMemberEnclosingUnpack(ref.StackVar, c.Work)
+				ref, knownRef = value.(*values.JavaRef)
+				inlinedLocal = true
+			}
+		}
 		if !known || !knownRef || ref == nil || ref.Id == nil || ref.IsThis || !visible[ref.Id] {
 			return false
 		}
@@ -122,7 +133,17 @@ func (c *ClassObjectDumper) bindNativeLambdaCaptureParameterNames(v values.JavaV
 		if !stable {
 			return false
 		}
-		if !params[ref.Id] {
+		if inlinedLocal {
+			operand := demand.site.operands[demand.index]
+			if declaration == nil || params[ref.Id] {
+				return false
+			}
+			owner, ok := declaration.LeftValue.(*values.JavaRef)
+			pc, slot, sealed := declaration.OriginalLocalStore()
+			if !ok || !owner.SameOriginalLocalDeclaration(ref) || !sealed || pc != operand.local.storePC || slot != operand.local.slot {
+				return false
+			}
+		} else if !params[ref.Id] {
 			if declaration == nil {
 				return false
 			}
@@ -144,7 +165,7 @@ func (c *ClassObjectDumper) bindNativeLambdaCaptureParameterNames(v values.JavaV
 			return false
 		}
 		final := false
-		if operand := demand.site.operands[demand.index]; operand != nil && operand.local != nil && declaration != nil {
+		if operand := demand.site.operands[demand.index]; !inlinedLocal && operand != nil && operand.local != nil && declaration != nil {
 			// This is the retained, single-assignment dynamic operand copy.
 			// Its RHS remains a distinct original local binder, so final does
 			// not turn a primitive/String literal into a new constant capture.

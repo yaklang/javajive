@@ -6449,6 +6449,11 @@ func (d *Decompiler) ParseStatement() error {
 			defer func() { appendNode(assign) }()
 		}
 		for _, snap := range d.evaluationSnapshots[opcode] {
+			if !snap.Operand {
+				d.inlineUnchangedLambdaLocalOperands(opcode, snap.Value)
+			}
+		}
+		for _, snap := range d.evaluationSnapshots[opcode] {
 			appendNode(statements.NewAssignStatement(snap.Ref, snap.Value, true))
 		}
 		switch opcode.Instr.OpCode {
