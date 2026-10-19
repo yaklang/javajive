@@ -439,6 +439,11 @@ func finallyCoveredValue(root values.JavaValue, covered func(int) bool) bool {
 		switch x := v.(type) {
 		case *values.JavaRef, *values.JavaLiteral:
 			return finallyPureLocal(v)
+		case *values.JavaClassValue:
+			// An actual ldc Class can fail during resolution. A symbolic owner
+			// used only for invocation/type metadata has no evaluation PC and
+			// cannot serve as evidence for moving an evaluated class literal.
+			return x != nil && x.JavaType != nil && x.HasOriginPC && x.OriginPC >= 0 && covered(x.OriginPC)
 		case *values.SlotValue:
 			if x == nil {
 				return false

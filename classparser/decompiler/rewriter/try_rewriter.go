@@ -328,9 +328,9 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 	}
 	markEncodedJumps(tryNode, bodyNodes)
 	tryCatchSt.EntryInitializers = resourceEntryInitializers(tryNode)
+	tail := factorFinallyFallthroughTail(tryCatchSt)
 	declaration := prepareTypedResourceFinally(tryCatchSt)
-	var tail []statements.Statement
-	if declaration == nil {
+	if declaration == nil && len(tail) == 0 {
 		declaration, tail = factorUnprotectedTryTail(node, tryCatchSt)
 	}
 	if declaration == nil && len(tail) == 0 {
@@ -350,6 +350,7 @@ func TryRewriter(manager *RewriteManager, node *core.Node) error {
 		last := tryNode
 		for _, statement := range tail {
 			next := manager.NewNode(statement)
+			retargetFactoredStatementBoundary(manager.TryNodes, bodyNodes, next)
 			last.AddNext(next)
 			last = next
 		}

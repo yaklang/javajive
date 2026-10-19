@@ -628,6 +628,15 @@ func circleElementSet(circleNode *core.Node, loopStart *core.Node, domTree map[*
 	// exception table's exclusive end; otherwise the first protected store is
 	// mistaken for the loop exit and moved outside the handler.
 	for _, tr := range finalSet.List() {
+		if closed := protectedRetryClosedRegion(tr, circleNode, finalSet); closed != nil {
+			for _, node := range closed.path {
+				finalSet.Add(node)
+			}
+			if closed.continuation != nil {
+				tr.ProtectedEnd = closed.continuation
+			}
+			continue
+		}
 
 		end := tr.ProtectedEnd
 		if end == nil {
@@ -885,6 +894,10 @@ func hasPrivateRetryHandler(tr *core.Node, body *utils2.Set[*core.Node]) bool {
 func protectedRetryContinuations(body *utils2.Set[*core.Node], header *core.Node) map[*core.Node]bool {
 	exits := map[*core.Node]bool{}
 	for _, tr := range body.List() {
+		if closed := protectedRetryClosedRegion(tr, header, body); closed != nil && closed.continuation != nil && !body.Has(closed.continuation) {
+			exits[closed.continuation] = true
+			continue
+		}
 		if !hasPrivateRetryHandler(tr, body) {
 			continue
 		}

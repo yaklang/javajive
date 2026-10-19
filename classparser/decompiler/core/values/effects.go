@@ -192,6 +192,13 @@ func InspectValue(value JavaValue) (effect Effects, refs map[*JavaRef]bool) {
 			// Static field access is getstatic/putstatic: it may run <clinit>
 			// and cannot be moved across class-init boundaries.
 			effect |= EffectReadMemory | EffectThrow | EffectClassInit
+		case *JavaClassValue:
+			// A decoded ldc Class resolves at its original PC and may throw a
+			// linkage error. It does not initialize the referenced class.
+			// Symbolic invocation owners carry no evaluation PC.
+			if v != nil && v.HasOriginPC {
+				effect |= EffectThrow
+			}
 		case *FunctionCallExpression:
 			effect |= EffectCall | EffectReadMemory | EffectWriteMemory | EffectThrow
 			if v != nil && (v.FunctionName == "<clinit>" || v.FunctionName == "<init>") {
