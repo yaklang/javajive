@@ -5,6 +5,7 @@ import (
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
+	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -14,6 +15,18 @@ import (
 // proves source declaration stability only; original allocation, descriptor,
 // capture field and lexical ownership are still checked independently.
 func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.JavaRef, allocation *values.NewExpression, work *workbudget.Budget) (*statements.AssignStatement, bool) {
+	return nativeCaptureLocalDeclaration(body, ref, allocation, work, false)
+}
+
+// A snapshot needs a definitely assigned source word, not an effectively final
+// source storage location. The caller copies that word into a fresh binder at
+// the original allocation contour. Actual capture binding still uses the
+// stricter effective-final proof on that fresh binder.
+func nativeCaptureSnapshotDeclaration(body []statements.Statement, ref *values.JavaRef, allocation *values.NewExpression, work *workbudget.Budget) (*statements.AssignStatement, bool) {
+	return nativeCaptureLocalDeclaration(body, ref, allocation, work, true)
+}
+
+func nativeCaptureLocalDeclaration(body []statements.Statement, ref *values.JavaRef, allocation *values.NewExpression, work *workbudget.Budget, snapshot bool) (*statements.AssignStatement, bool) {
 	if ref == nil || ref.Id == nil || ref.IsThis || allocation == nil || allocation.ConstructorCall == nil || !allocation.HasOriginPC || !allocation.ConstructorCall.HasOriginPC || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(4096*128) != nil {
 		return nil, false
 	}
@@ -32,13 +45,17 @@ func nativeCaptureJoinedDeclaration(body []statements.Statement, ref *values.Jav
 	if !captured {
 		return nil, false
 	}
-	return nativeCaptureJoinedSource(body, ref, work, func(v values.JavaValue) bool { return v == allocation }, nil, nil)
+	return nativeCaptureSourceFlow(body, ref, work, func(v values.JavaValue) bool { return v == allocation }, nil, nil, snapshot)
 }
 
 // The same definite-assignment transfer proves a blank local at either an
 // original constructor capture or an original dynamic operand declaration.
 // A lambda additionally checks each physical STORE's retained source witness.
 func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef, work *workbudget.Budget, captureValue func(values.JavaValue) bool, captureStatement func(statements.Statement) bool, store func(*statements.AssignStatement) bool) (*statements.AssignStatement, bool) {
+	return nativeCaptureSourceFlow(body, ref, work, captureValue, captureStatement, store, false)
+}
+
+func nativeCaptureSourceFlow(body []statements.Statement, ref *values.JavaRef, work *workbudget.Budget, captureValue func(values.JavaValue) bool, captureStatement func(statements.Statement) bool, store func(*statements.AssignStatement) bool, snapshot bool) (*statements.AssignStatement, bool) {
 	if ref == nil || ref.Id == nil || ref.IsThis || !nativeProofWork(work, 1) || work != nil && work.CheckAlloc(4096*128) != nil {
 		return nil, false
 	}
@@ -140,7 +157,11 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 			return false
 		}
 		if state == initialized {
-			return (after == initialized || after == 0) && writes == beforeWrites && declaration == beforeDeclaration
+			// An already initialized local remains assigned on both zero-trip
+			// and iterative paths. Reassignments prevent direct capture, but
+			// not a later pure snapshot of its current word. A declaration
+			// introduced inside the loop never supplies an outer binder.
+			return (after == initialized || after == 0) && (snapshot || writes == beforeWrites) && declaration == beforeDeclaration
 		}
 		return beforeDeclaration == nil && (after == absent || after == initialized || after == 0)
 	}
@@ -158,6 +179,65 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 				return 0, false
 			}
 			activeStatements[st] = true
+			// A standalone local update completes before a later snapshot.
+			// Preserve it verbatim and retain definite assignment. Updates
+			// nested in operands still go through value(), which refuses them:
+			// copying before NEW must not move a capture ahead of an update
+			// performed while evaluating that allocation's arguments.
+			if snapshot {
+				var update *values.JavaExpression
+				switch x := st.(type) {
+				case *values.JavaExpression:
+					update = x
+				case *statements.ExpressionStatement:
+					update, _ = x.Expression.(*values.JavaExpression)
+				}
+				if update != nil && (update.Op == values.INC || update.Op == values.DEC) && (len(update.Values) == 1 || len(update.Values) == 2) {
+					if len(update.Values) == 2 {
+						// The core's standalone IINC uses a binary postfix node
+						// with an int-one marker. No hidden/effectful operand may
+						// borrow that representation's otherwise pure local update.
+						marker, ok := update.Values[1].(*values.JavaLiteral)
+						if !ok || marker == nil || marker.Units != nil || marker.Type() == nil {
+							return 0, false
+						}
+						word, integer := marker.Data.(int)
+						primitive, ok := marker.Type().RawType().(*types.JavaPrimer)
+						if !integer || word != 1 || !ok || primitive == nil || primitive.Name != types.JavaInteger {
+							return 0, false
+						}
+					}
+					matched, known := same(update.Values[0])
+					if !known {
+						return 0, false
+					}
+					if matched {
+						if state != initialized || !value(update.Values[0], state) || ref.Type() == nil {
+							return 0, false
+						}
+						primitive, numeric := ref.Type().RawType().(*types.JavaPrimer)
+						if !numeric || primitive == nil {
+							return 0, false
+						}
+						operand, bounded := nativeMemberEnclosingUnpack(update.Values[0], work)
+						if !bounded || sourceProofNil(operand) || operand.Type() == nil {
+							return 0, false
+						}
+						updatedType, numeric := operand.Type().RawType().(*types.JavaPrimer)
+						if !numeric || updatedType == nil || updatedType.Name != primitive.Name {
+							return 0, false // A reused physical slot is not a cross-category source binder.
+						}
+						switch primitive.Name {
+						case types.JavaByte, types.JavaShort, types.JavaChar, types.JavaInteger, types.JavaLong, types.JavaFloat, types.JavaDouble:
+						default:
+							return 0, false // Boolean/reference storage has no primitive ++/-- operation.
+						}
+						writes++
+						delete(activeStatements, st)
+						continue
+					}
+				}
+			}
 			if assign, ok := st.(*statements.AssignStatement); ok && assign.ArrayMember == nil {
 				matched, known := same(assign.LeftValue)
 				if !known {
@@ -180,7 +260,7 @@ func nativeCaptureJoinedSource(body []statements.Statement, ref *values.JavaRef,
 						declaration, state = assign, initialized
 						writes++
 					} else {
-						if assign.IsDeclare || assign.IsFirst || declaration == nil || state != blank || sourceProofNil(assign.JavaValue) || !value(assign.JavaValue, state) {
+						if assign.IsDeclare || assign.IsFirst || declaration == nil || state != blank && !(snapshot && state == initialized) || sourceProofNil(assign.JavaValue) || !value(assign.JavaValue, state) {
 							return 0, false
 						}
 						if store != nil && !store(assign) {

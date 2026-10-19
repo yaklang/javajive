@@ -16,8 +16,9 @@ import (
 // Register allocation capture names independently from the IR's merged local
 // web. Distinct source locals may reuse a bytecode slot on exclusive edges. A
 // single web name then cannot reproduce both original synthetic field names.
-// At a direct return, a pure, definitely assigned local can instead be copied
-// into a fresh source binder before NEW. This changes no producer evaluation,
+// Coalescing may also merge a mutable loop accumulator with its later final
+// capture copy. At a direct return, a pure, definitely assigned local can be
+// copied into a fresh source binder before NEW. This changes no producer evaluation,
 // conversion, captured word, allocation position or superclass argument.
 func (c *ClassObjectDumper) prepareNativeCaptureIdentitySnapshots(body []statements.Statement, params []values.JavaValue) ([]statements.Statement, bool) {
 	if c == nil || c.FuncCtx == nil || c.nativeAnonymousRoot == nil {
@@ -172,8 +173,17 @@ func (c *ClassObjectDumper) prepareNativeCaptureIdentitySnapshots(body []stateme
 				return body, false
 			}
 			ref, ok := operand.(*values.JavaRef)
-			if !ok || ref == nil || len(identityNames[ref.Id]) < 2 {
+			if !ok || ref == nil {
 				continue
+			}
+			if len(identityNames[ref.Id]) < 2 {
+				_, stable := nativeCaptureDeclaration(body, ref, parameterIDs[ref.Id], c.Work)
+				if !stable && !parameterIDs[ref.Id] {
+					_, stable = nativeCaptureJoinedDeclaration(body, ref, allocation, c.Work)
+				}
+				if stable {
+					continue
+				}
 			}
 			if s.statement == nil || parameterIDs[ref.Id] || ref.IsParam || ref.IsThis || ref.CustomValue != nil || ref.StackVar != nil || ref.Type() == nil || !allocation.HasOriginPC || !call.HasOriginPC || call.Object != allocation || call.Kind != values.InvokeSpecial || !call.IsSpecialInvoke || call.FunctionName != "<init>" || call.Descriptor != child.descriptor || allocation.OriginPC != child.newPC || call.OriginPC != child.invokePC {
 				return body, false
@@ -192,7 +202,9 @@ func (c *ClassObjectDumper) prepareNativeCaptureIdentitySnapshots(body []stateme
 				return body, false
 			}
 			if _, stable := nativeCaptureJoinedDeclaration(body, ref, allocation, c.Work); !stable {
-				return body, false
+				if _, assigned := nativeCaptureSnapshotDeclaration(body, ref, allocation, c.Work); !assigned {
+					return body, false
+				}
 			}
 			indices[index] = name
 			sources[index] = ref

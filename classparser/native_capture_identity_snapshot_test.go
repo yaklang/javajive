@@ -37,7 +37,7 @@ func TestNativeCaptureIdentitySnapshotsRequireOriginalSiteAndStableWord(t *testi
 			branch := &statements.IfStatement{Condition: values.NewJavaLiteral(true, types.NewJavaPrimer(types.JavaBoolean)), IfBody: []statements.Statement{write(), retA}, ElseBody: []statements.Statement{write(), retB}}
 			body := []statements.Statement{declaration, branch}
 			var params []values.JavaValue
-			good := mode == "exclusive writes" || mode == "wrapped local" || mode == "initialized local" || mode == "single name" || mode == "unrelated method"
+			good := mode == "exclusive writes" || mode == "wrapped local" || mode == "initialized local" || mode == "single name" || mode == "unrelated method" || mode == "same path twice"
 			switch mode {
 			case "wrapped local":
 				a.ConstructorCall.Arguments[0] = values.NewSlotValue(ref, typ)
@@ -138,6 +138,7 @@ func TestNativeCaptureIdentitySnapshotsRequireOriginalSiteAndStableWord(t *testi
 				c.Work = workbudget.New(ctx, workbudget.Limits{})
 			}
 			beforeA, beforeB := a.ConstructorCall.Arguments[0], b.ConstructorCall.Arguments[0]
+			beforeBranchSize := len(branch.IfBody)
 			projected, closed := c.prepareNativeCaptureIdentitySnapshots(body, params)
 			if closed != good {
 				t.Fatalf("closed=%v want=%v", closed, good)
@@ -149,7 +150,7 @@ func TestNativeCaptureIdentitySnapshotsRequireOriginalSiteAndStableWord(t *testi
 				return
 			}
 			x, y := a.ConstructorCall.Arguments[0].(*values.JavaRef), b.ConstructorCall.Arguments[0].(*values.JavaRef)
-			if x.Id == y.Id || x.Id == ref.Id || y.Id == ref.Id || body[1] != branch || len(branch.IfBody) != 2 && mode != "initialized local" {
+			if x.Id == y.Id || x.Id == ref.Id || y.Id == ref.Id || body[1] != branch || len(branch.IfBody) != beforeBranchSize {
 				t.Fatal("source identities or original containers were changed")
 			}
 			c.prepareNativeCaptureBindings(projected, params)
