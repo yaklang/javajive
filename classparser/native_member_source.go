@@ -256,7 +256,7 @@ func nativeMemberProofWithMetadata(obj, enclosing *ClassObject, work *workbudget
 	if !known || !nativeMemberVersionMetadata(obj, work) || !nativeDeclarationNamesCompatible(obj, work) || !(kind || enumSynthesis != nil) {
 		return nil
 	}
-	if !nativeMemberDeprecatedMarkerRepresentable(obj, work) {
+	if !nativeMemberDeprecatedDeclarationRepresentable(obj, work) {
 		return nil
 	}
 	formalCount, outerFormalCount := 0, 0

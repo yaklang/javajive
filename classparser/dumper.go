@@ -1447,6 +1447,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 
 	annoStrs := []string{}
+	if nativeMemberDocumentationDeprecated(c.obj, c.Work) {
+		annoStrs = append(annoStrs, "/** @deprecated */")
+	}
 	for _, info := range lo.Filter(c.obj.Attributes, func(item AttributeInfo, index int) bool {
 		_, ok := item.(*RuntimeVisibleAnnotationsAttribute)
 		return ok

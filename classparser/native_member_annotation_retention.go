@@ -9,7 +9,7 @@ import (
 // type's original Retention/Target, not according to the use site's table name.
 // A syntactically printable value graph alone is therefore insufficient.
 func (c *ClassObjectDumper) nativeMemberAnnotationTablesRepresentable() bool {
-	if !nativeMemberDeprecatedMarkerRepresentable(c.obj, c.Work) {
+	if !nativeMemberDeprecatedDeclarationRepresentable(c.obj, c.Work) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -125,41 +125,58 @@ func nativeAnnotationDeclarationPolicy(definition *ClassObject, c *ClassObjectDu
 	return retention, target, true
 }
 
-// javac regenerates the JVM Deprecated marker from the declaration annotation.
-// An unpaired legacy documentation marker has no equivalent source annotation:
-// introducing one would add runtime metadata. Preserve only the exact paired
-// original encoding; never silently drop, duplicate or invent either member.
+// An annotation projection needs the exact paired encoding. This deliberately
+// remains distinct from the documentation projection below: adding @Deprecated
+// for an unpaired marker would invent observable runtime annotation metadata.
 func nativeMemberDeprecatedMarkerRepresentable(obj *ClassObject, work *workbudget.Budget) bool {
+	markers, annotations, known := nativeMemberDeprecatedEncoding(obj, work)
+	return known && markers <= 1 && annotations == markers
+}
+
+// A declaration's Javadoc @deprecated tag regenerates only the JVM marker.
+// This is a second exact source encoding, not permission to drop the marker or
+// borrow the runtime annotation's policy. Both root and nested declarations
+// use the same original-attribute proof and retain their lexical source scope.
+func nativeMemberDocumentationDeprecated(obj *ClassObject, work *workbudget.Budget) bool {
+	markers, annotations, known := nativeMemberDeprecatedEncoding(obj, work)
+	return known && markers == 1 && annotations == 0
+}
+
+func nativeMemberDeprecatedDeclarationRepresentable(obj *ClassObject, work *workbudget.Budget) bool {
+	markers, annotations, known := nativeMemberDeprecatedEncoding(obj, work)
+	return known && markers <= 1 && annotations <= markers
+}
+
+func nativeMemberDeprecatedEncoding(obj *ClassObject, work *workbudget.Budget) (markers, annotations int, known bool) {
 	if obj == nil {
-		return false
+		return 0, 0, false
 	}
-	markers, annotations := 0, 0
 	for _, attribute := range obj.Attributes {
 		if !nativeProofWork(work, 1) {
-			return false
+			return 0, 0, false
 		}
 		switch a := attribute.(type) {
 		case *DeprecatedAttribute:
 			if a == nil || a.AttrLen != 0 {
-				return false
+				return 0, 0, false
 			}
 			markers++
 		case *RuntimeVisibleAnnotationsAttribute:
 			if a == nil {
-				return false
+				return 0, 0, false
 			}
 			for _, annotation := range a.Annotations {
 				if annotation == nil || !nativeProofWork(work, 1) {
-					return false
+					return 0, 0, false
 				}
 				if annotation.TypeName == "Ljava/lang/Deprecated;" {
 					if a.IsInvisible {
-						return false
+						return 0, 0, false
 					}
 					annotations++
 				}
 			}
 		}
 	}
-	return markers <= 1 && annotations == markers
+	return markers, annotations, true
 }
