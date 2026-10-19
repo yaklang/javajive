@@ -198,7 +198,7 @@ func TestDeclaredSamTargetLookupSeparatesDeclarationProofDomains(t *testing.T) {
 			return nil
 		})
 	}
-	for _, change := range []string{"exact target", "legacy only", "target missing", "wrong name", "wrong descriptor", "arity only", "conflicting erasure", "partial target", "array target", "missing context"} {
+	for _, change := range []string{"exact target", "legacy only", "pre-inferred target", "conflicting caller arguments", "variable target", "target missing", "wrong name", "wrong descriptor", "arity only", "conflicting erasure", "partial target", "array target", "missing context"} {
 		t.Run(change, func(t *testing.T) {
 			legacyCalls, targetCalls := 0, 0
 			ctx := &class_context.ClassContext{SiblingClassSig: func(string) (string, map[string]string, bool) {
@@ -228,13 +228,19 @@ func TestDeclaredSamTargetLookupSeparatesDeclarationProofDomains(t *testing.T) {
 			switch change {
 			case "legacy only":
 				ctx.LambdaTargetClassSig = nil
+			case "pre-inferred target":
+				raw = types.NewParameterizedType("example.DeclaredResult", []types.JavaType{types.NewJavaClass("java.lang.String")})
+			case "conflicting caller arguments":
+				raw = types.NewParameterizedType("example.DeclaredResult", []types.JavaType{types.NewJavaClass("java.lang.Integer")})
+			case "variable target":
+				raw = types.NewJavaTypeVariable("example.DeclaredResult")
 			case "array target":
 				raw = types.NewJavaArrayType(types.NewJavaClass("example.DeclaredResult"))
 			case "missing context":
 				d.FunctionContext = nil
 			}
 			got := inferDeclaredLambdaTarget(d, raw, constant(erased), constant("()Ljava/lang/String;"))
-			want := change == "exact target" || change == "legacy only"
+			want := change == "exact target" || change == "legacy only" || change == "pre-inferred target" || change == "conflicting caller arguments"
 			if (got != nil) != want {
 				t.Fatalf("target=%v want=%v", got, want)
 			}
@@ -242,8 +248,18 @@ func TestDeclaredSamTargetLookupSeparatesDeclarationProofDomains(t *testing.T) {
 			if change == "legacy only" {
 				wantLegacy, wantTarget = 1, 0
 			}
-			if change == "partial target" || change == "array target" || change == "missing context" {
+			if change == "partial target" || change == "array target" || change == "missing context" || change == "variable target" {
 				wantTarget = 0
+			}
+			if want {
+				p, known := types.AsParameterizedType(got)
+				if !known || len(p.TypeArgs) != 1 {
+					t.Fatal("missing original target equation")
+				}
+				name, known := types.RawClassFQN(p.TypeArgs[0])
+				if !known || name != "java.lang.String" {
+					t.Fatal("borrowed stale caller type arguments", name)
+				}
 			}
 			if legacyCalls != wantLegacy || targetCalls != wantTarget {
 				t.Fatalf("proof domains mixed: ordinary=%d target=%d", legacyCalls, targetCalls)

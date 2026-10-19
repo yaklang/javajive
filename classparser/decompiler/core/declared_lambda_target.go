@@ -23,17 +23,27 @@ func inferDeclaredLambdaTarget(d *Decompiler, raw types.JavaType, erased, instan
 	if declarations == nil {
 		return nil
 	}
-	jc, ok := raw.RawType().(*types.JavaClass)
-	if !ok || jc == nil {
+	name, known := types.RawClassFQN(raw)
+	_, variable := types.TypeVariableName(raw)
+	if !known || name == "" || variable {
 		return nil
 	}
-	classSig, methods, ok := declarations(strings.ReplaceAll(jc.Name, ".", "/"))
+	if parameterized, known := types.AsParameterizedType(raw); known && (len(parameterized.OwnerSegments) > 1 || len(parameterized.TypeArgs) > 255) {
+		return nil
+	}
+	// Earlier call inference may already carry a parameterized view. Its
+	// arguments are not the SAM proof: recover only its physical owner here,
+	// then solve again from the original declaration and bootstrap descriptors.
+	classSig, methods, ok := declarations(strings.ReplaceAll(name, ".", "/"))
 	if !ok {
 		return nil
 	}
 	erasedDesc, actualDesc := t19MethodTypeDesc(erased), t19MethodTypeDesc(instantiated)
-	sig := methods[class_context.MethodDescKey(d.InvokeDynamicName, erasedDesc)]
-	return inferDeclaredSamInstantiation(jc.Name, classSig, sig, erasedDesc, actualDesc, d.FunctionContext.InvocationMetadata)
+	sig, declared := methods[class_context.MethodDescKey(d.InvokeDynamicName, erasedDesc)]
+	if !declared {
+		sig = inheritedDeclaredSamSignature(d.FunctionContext, declarations, strings.ReplaceAll(name, ".", "/"), d.InvokeDynamicName, erasedDesc)
+	}
+	return inferDeclaredSamInstantiation(name, classSig, sig, erasedDesc, actualDesc, d.FunctionContext.InvocationMetadata)
 }
 
 // Bind declaration variables by their Signature identity, not SAM parameter order.
