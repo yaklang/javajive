@@ -13,9 +13,10 @@ import (
 )
 
 // A physical implementation is not the source SAM declaration. This narrow
-// projection covers an original static, uncaptured javac8 body with one actual
-// factory. Its parameter words must remain unwritten. Captured operands, shared
-// factories, other metadata and other compiler profiles need separate proofs.
+// projection covers a static javac8 body with one actual factory. Physical
+// captures and source SAM formals retain separate roles in each original
+// lexical scope. Their entry words must remain unwritten. Shared factories,
+// other metadata and other compiler profiles need separate proofs.
 type lambdaParameterMetadata struct {
 	object        *ClassObject
 	method        *MemberInfo
@@ -27,6 +28,7 @@ type lambdaParameterMetadata struct {
 	flags         []uint16
 	parameters    []string
 	parentNames   []string
+	parent        *lambdaParameterMetadata
 	words         int
 	captureTypes  []string
 	captures      []*nativeEnumSelectorProducer
@@ -122,9 +124,21 @@ func (p *lambdaParameterMetadata) schemaMatches(object *ClassObject, method *Mem
 // Metadata is admitted only as a regeneration requirement on the actual body
 // request. It grants no capture, access, lexical membership or publication role.
 func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, work *workbudget.Budget) (*lambdaParameterMetadata, bool) {
+	return c.lambdaParameterMetadataInScope(method, work, map[*MemberInfo]bool{})
+}
+
+// The original factory edges, rather than implementation name prefixes, define
+// nested lexical scopes. Follow each unique edge to an ordinary source method;
+// cycles, shared factories and an exhausted depth/work budget remain unknown.
+func (c *ClassObjectDumper) lambdaParameterMetadataInScope(method *MemberInfo, work *workbudget.Budget, active map[*MemberInfo]bool) (*lambdaParameterMetadata, bool) {
 	if c == nil {
 		return nil, false
 	}
+	if len(active) >= methodSourceLambdaDepthLimit || active[method] || !nativeProofWork(work, 1) {
+		return nil, false
+	}
+	active[method] = true
+	defer delete(active, method)
 	projection, known := readLambdaParameterMetadata(c.obj, method, work)
 	if !known {
 		return projection, known
@@ -142,6 +156,9 @@ func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, 
 	// This is a compiler-name regeneration constraint after the actual factory
 	// proof. A name prefix alone never identifies a lambda implementation.
 	prefix := "lambda$" + factoryName + "$"
+	if projection.factory.method.AccessFlags == 0x100a {
+		prefix = "lambda$null$"
+	}
 	if !named || !class_context.PreservesJava8Identifier(factoryName) || !strings.HasPrefix(projection.name, prefix) {
 		return nil, false
 	}
@@ -153,20 +170,39 @@ func (c *ClassObjectDumper) originalLambdaParameterMetadata(method *MemberInfo, 
 	parentDescriptor, typed := sourceBridgeUTF8(c.obj, projection.factory.method.DescriptorIndex)
 	// Reuse the ordinary declaration reader without borrowing another proof
 	// caller's budget. This query mutates neither the dumper nor its input.
-	reader := ClassObjectDumper{obj: c.obj, Work: work}
-	parentNames, known := reader.originalOrdinaryMethodParameterNames(projection.factory.method, parentDescriptor)
+	var parentNames []string
+	if projection.factory.method.AccessFlags == 0x100a {
+		projection.parent, known = c.lambdaParameterMetadataInScope(projection.factory.method, work, active)
+		if !known || projection.parent == nil {
+			return nil, false
+		}
+		parentNames = projection.parent.names
+	} else {
+		reader := ClassObjectDumper{obj: c.obj, Work: work}
+		parentNames, known = reader.originalOrdinaryMethodParameterNames(projection.factory.method, parentDescriptor)
+	}
 	if !typed || !known {
 		return nil, false
 	}
 	if !c.native8LambdaParameterCaptures(projection, parentDescriptor, parentNames, work) {
 		return nil, false
 	}
+	projection.parentNames = slices.Clone(parentNames)
+	if projection.parent != nil {
+		if !nativeProofWork(work, int64(len(projection.parent.parentNames))+1) || work != nil && work.CheckAlloc(int64(len(parentNames)+len(projection.parent.parentNames))*32) != nil {
+			return nil, false
+		}
+		for _, name := range projection.parent.parentNames {
+			if !slices.Contains(projection.parentNames, name) {
+				projection.parentNames = append(projection.parentNames, name)
+			}
+		}
+	}
 	for _, name := range projection.names[len(projection.captures):] {
-		if slices.Contains(parentNames, name) {
+		if slices.Contains(projection.parentNames, name) {
 			return nil, false
 		}
 	}
-	projection.parentNames = parentNames
 	return projection, true
 }
 

@@ -96,6 +96,11 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 	if !known || len(arrows) == 0 {
 		return nil, false
 	}
+	for _, receipt := range c.lambdaMethodSourceBodies {
+		if receipt != nil && receipt.request.factory != nil && receipt.request.factory.method != nil && receipt.request.factory.method.AccessFlags == 0x100a {
+			return c.native8NestedLambdaSourceIdentityEvents(text, arrows, methods, charge)
+		}
+	}
 	byArrow := map[int]nativeLambdaSourceIdentityEvent{}
 	for method, receipt := range c.lambdaMethodSourceBodies {
 		if receipt == nil || receipt.object != c.obj || receipt.method != method || receipt.body == nil || !c.lambdaMethodSourcePacketClosed(method, receipt.body, c.Work) {
@@ -141,9 +146,17 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		if parent == nil || parent.sourceDumper != c || parent.sourceObject != c.obj || parent.sourceRequest.role != methodSourceDeclaration || parent.sourceCacheKey == "" || c.dumpedMethodsSet[parent.sourceCacheKey] != parent || parent.sourceReconstructionFailed() || !c.methodParameterNameCacheClosed(parent.parameterNameStamp) || parent.code == "" || receipt.body.code == "" || !charge(int64(len(text))+int64(len(parent.code))+int64(len(receipt.body.code))) {
 			return nil, false
 		}
-		start := strings.Index(text, parent.code)
-		position, known := nativeLambdaSourcePacketArrow(parent.code, packet, c.Work, charge)
-		if start < 0 || !known || strings.Index(text[start+len(parent.code):], parent.code) >= 0 {
+		declaration, start, owned := c.lambdaParentDeclaration(text, parent)
+		if !owned {
+			return nil, false
+		}
+		position, known := 0, false
+		if parent.lambdaEmission != nil {
+			position, known = c.lambdaEmissionPosition(parent, receipt.body, declaration, charge)
+		} else {
+			position, known = nativeLambdaSourcePacketArrow(declaration, packet, c.Work, charge)
+		}
+		if !known {
 			return nil, false
 		}
 		position += start
@@ -171,6 +184,32 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		ordered = append(ordered, event)
 	}
 	return ordered, true
+}
+
+// Capture substitution is observed by the existing completed writer. Reopen
+// that receipt before the occurrence graph uses its source position. A cached
+// template with capture markers is never a final emitted packet.
+func (c *ClassObjectDumper) native8LambdaRenderedIdentityPacketClosed(receipt *lambdaMethodSourceReceipt, source string, charge func(int64) bool) bool {
+	if receipt == nil || receipt.body == nil || charge == nil {
+		return false
+	}
+	binding := receipt.body.lambdaParameterBinding
+	if binding == nil || len(binding.captured) == 0 {
+		return true
+	}
+	if !binding.capturedNamesClosed(c.Work) || receipt.renderedUnknown || receipt.renderedTemplate != receipt.body.code {
+		return false
+	}
+	matches := 0
+	for _, packet := range receipt.renderedPackets {
+		if !charge(int64(len(source))) {
+			return false
+		}
+		if strings.Contains(source, packet) {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 // Locate an already closed body packet only at actual lexical arrows. A formal

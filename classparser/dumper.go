@@ -115,7 +115,8 @@ type ClassObjectDumper struct {
 	nativeLambdaCaptureParameterNames map[*MemberInfo][]nativeLambdaCaptureNameDemand
 	nativeLambdaFactoryParameterNames map[*MemberInfo]map[string]bool
 	nativeLambdaBodyCapturedValues    []values.JavaValue
-	// lambdaLocalSeq hands each inlined lambda body a unique id so its own locals can be renamed
+	lambdaMethodRendering             *lambdaMethodEmission
+	// lambdaLocalSeq hands each original lambda implementation a unique id so its locals can be renamed
 	// into a private `lv<seq>_<n>` namespace. A lambda arrow body is spliced INLINE into the
 	// enclosing method, and Java forbids a local declared in the lambda body from shadowing a
 	// local/parameter of the enclosing scope (or a captured variable, which resolves to an
@@ -124,7 +125,8 @@ type ClassObjectDumper struct {
 	// Renaming them per-lambda eliminates the collision; nested lambdas are dumped first and already
 	// carry their own `lv<innerseq>` names, so the outer rename (matching only `varN`) never touches
 	// them. See renameLambdaBodyLocals.
-	lambdaLocalSeq int
+	lambdaLocalSeq        int
+	lambdaLocalNamespaces map[*MemberInfo]int
 	// lambdaDepth is the current lexical nesting depth of lambda bodies being dumped. A nested lambda
 	// body is rendered EAGERLY while its enclosing lambda's bytecode is still being parsed (the
 	// invokedynamic that materialises the inner arrow runs inside the outer's ParseBytesCode), so the
@@ -4928,6 +4930,8 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				c.interfaceInitializerHelpers = helpers
 				statementList = nil
 			}
+			lambdaEmission := c.beginLambdaMethodEmission(dumped)
+			defer c.endLambdaMethodEmission(lambdaEmission, false)
 			for i, statement := range statementList {
 				if c.nativeMemberSkipCheck(statement) {
 					continue
@@ -5044,6 +5048,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				statementCodes = append(statementCodes, fmt.Sprintf("%s\n", statementStr))
 			}
 
+			c.endLambdaMethodEmission(lambdaEmission, true)
 			if isEnumCtor && !enumThisHeader {
 				// Java supplies Enum's synthetic SUPER(name, ordinal), while an
 				// original THIS delegate remains an explicit source header.
@@ -5168,8 +5173,11 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 		// dumped earlier and already carry their own `lv<innerseq>` names, so this outer rewrite (which
 		// only matches `varN`) leaves them untouched.
 		if !lambdaMethodLocalNamespace {
-			c.lambdaLocalSeq++
-			code = renameLambdaBodyLocals(code, c.lambdaLocalSeq)
+			sequence, known := c.lambdaLocalNamespaceID(method)
+			if !known {
+				return nil, fmt.Errorf("lambda body lacks its original local namespace")
+			}
+			code = renameLambdaBodyLocals(code, sequence)
 		}
 		// When EVERY lambda parameter is unused in the body, render them WITHOUT explicit types
 		// (implicit `(l0, l1) -> ...`). An explicit parameter type recovered from the impl-method
@@ -5362,6 +5370,7 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 }
 
 type dumpedMethods struct {
+	lambdaEmission *lambdaMethodEmission
 	// Only the concrete declaration writer sets these offsets. Class recovery
 	// may edit an unsealed body without parsing or reinterpreting its header.
 	sourceBodyStart, sourceBodyEnd int
@@ -6512,6 +6521,22 @@ func fixLambdaLoopCapture(body string) string {
 		var reads []readEdit
 		var inserts []insertion
 		sequence := 0
+		scopeSequences := map[*lambdaCaptureScope]int{}
+		scopeAliases := map[*lambdaCaptureScope]map[string]bool{}
+		reserved := map[string]bool{}
+		for _, line := range lambdaCaptureCodeLines(mlines) {
+			for at := 0; at < len(line); {
+				if !isWordByteDump(line[at]) {
+					at++
+					continue
+				}
+				start := at
+				for at < len(line) && isWordByteDump(line[at]) {
+					at++
+				}
+				reserved[line[start:at]] = true
+			}
+		}
 		for _, binding := range lambdaCaptureBindings(mlines) {
 			decl, lambda := binding.declaration, binding.lambda
 			if lambda.end == 0 {
@@ -6538,7 +6563,26 @@ func fixLambdaLoopCapture(body string) string {
 				continue // Never read a declaration before its initialization.
 			}
 			sequence++
-			name := fmt.Sprintf("%s_f%d", decl.name, sequence)
+			// Sibling lexical declarations may reuse a name. Number their
+			// aliases in their own source scope, so two renders of the same
+			// original lambda body remain structurally equal to javac. Alias
+			// names must still avoid original identifiers and ancestor aliases.
+			name := ""
+			for {
+				scopeSequences[decl.scope]++
+				name = fmt.Sprintf("%s_f%d", decl.name, scopeSequences[decl.scope])
+				collision := reserved[name]
+				for visible := decl.scope; visible != nil && !collision; visible = visible.parent {
+					collision = scopeAliases[visible][name]
+				}
+				if !collision {
+					break
+				}
+			}
+			if scopeAliases[decl.scope] == nil {
+				scopeAliases[decl.scope] = map[string]bool{}
+			}
+			scopeAliases[decl.scope][name] = true
 			inserts = append(inserts, insertion{line: insertAt, sequence: sequence,
 				text: leadingTabs(mlines[insertAt]) + "final " + decl.typ + " " + name + " = " + decl.name + ";"})
 			for _, read := range binding.reads {

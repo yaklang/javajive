@@ -82,6 +82,12 @@ func (c *ClassObjectDumper) native8LambdaParameterCaptures(p *lambdaParameterMet
 			used[slot+1] = true
 		}
 		p.captures = append(p.captures, &nativeEnumSelectorProducer{opcode: op.Instr.OpCode, pc: int(op.CurrentOffset), slot: slot, result: descriptor})
+		// An enclosing SAM formal has a real source binder in this scope.
+		// Forwarded physical capture-prefix words still need a separate
+		// substitution/provenance proof; equal names do not supply that proof.
+		if p.parent != nil && slot < p.parent.samSlot() {
+			return false
+		}
 	}
 	entry := sort.SearchInts(entries, int(ops[start].CurrentOffset)+1)
 	return (entry == len(entries) || entries[entry] > p.factory.pc) && nativeEnumSelectorParametersUnchanged(ops, used)

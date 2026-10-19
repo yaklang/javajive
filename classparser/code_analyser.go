@@ -280,9 +280,15 @@ func ParseBytesCode(dumper *ClassObjectDumper, codeAttr *CodeAttribute, id *util
 			dumper.nativeLambdaFactorySources[site].implementationBody = dumped
 		}
 		source := core.LambdaBodySource{Code: dumped.code, FixedParameterTypes: dumped.lambdaParameterBinding != nil}
-		if dumped.lambdaParameterBinding != nil && len(dumped.lambdaParameterBinding.captured) != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0 {
+		recordPacket := dumped.lambdaParameterBinding != nil && len(dumped.lambdaParameterBinding.captured) != 0 || dumper.nativeAnonymousLambdaCurrent != nil && dumper.nativeMemberRoot != nil && len(dumper.nativeMemberRoot.getters) != 0
+		if dumper.options.SourceCompiler == NativeJavac8 || recordPacket {
 			template := dumped.code
-			source.RecordRendered = func(rendered string) { dumper.recordNativeLambdaRenderedPacket(dumped, template, rendered) }
+			source.RecordRendered = func(rendered string) {
+				if recordPacket {
+					dumper.recordNativeLambdaRenderedPacket(dumped, template, rendered)
+				}
+				dumper.recordLambdaMethodEmission(dumped, template, rendered)
+			}
 		}
 		return source, nil
 	}

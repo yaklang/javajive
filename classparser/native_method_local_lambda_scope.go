@@ -156,7 +156,11 @@ func (c *ClassObjectDumper) prepareNativeLambdaMethodLocalNamespace(body []state
 	if !found {
 		return false
 	}
-	c.lambdaLocalSeq++
-	c.prepareNativeSourceNamesInNamespace(body, params, c.nativeLexicalCaptures(), protected, fmt.Sprintf("lv%d_", c.lambdaLocalSeq))
+	sequence, known := c.lambdaLocalNamespaceID(c.CurrentMethod)
+	if !known {
+		c.nativeCaptureFailed = true
+		return true
+	}
+	c.prepareNativeSourceNamesInNamespace(body, params, c.nativeLexicalCaptures(), protected, fmt.Sprintf("lv%d_", sequence))
 	return true
 }

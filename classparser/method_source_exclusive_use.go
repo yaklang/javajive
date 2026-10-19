@@ -100,9 +100,10 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 				return false
 			}
 			textBytes += len(text.Value)
-			if !nativeProofWork(work, int64(len(text.Value))) {
-				return false
-			}
+			// This inventory reads the constant's kind and O(1) string
+			// length; it never scans the unused UTF8 payload. Keep the
+			// aggregate payload cap, and charge the actual CP-entry visit
+			// above. Named packets separately hash every consumed CP byte.
 		}
 		handle, ok := item.(*ConstantMethodHandleInfo)
 		if !ok {
@@ -243,7 +244,10 @@ func nativeLambdaBodyOriginalUseClosed(object *ClassObject, implementation *Memb
 				if parameters != nil {
 					factoryName, named := sourceBridgeUTF8(object, method.NameIndex)
 					nt, typed := constant(dynamic.NameAndTypeIndex).(*ConstantNameAndTypeInfo)
-					if factory != nil || !named || factoryName == "<init>" || factoryName == "<clinit>" || method.AccessFlags&(0x1000|0x0040|0x0100|0x0400) != 0 || !typed || nt == nil {
+					// A nested factory may reside in a static synthetic body.
+					// This use query grants no lexical permission: its caller must
+					// close that body's own factory chain and source registration.
+					if factory != nil || !named || factoryName == "<init>" || factoryName == "<clinit>" || method.AccessFlags&(0x0040|0x0100|0x0400) != 0 || method.AccessFlags&0x1000 != 0 && method.AccessFlags != 0x100a || !typed || nt == nil {
 						return false
 					}
 					factoryDescriptor, known := sourceBridgeUTF8(object, nt.DescriptorIndex)

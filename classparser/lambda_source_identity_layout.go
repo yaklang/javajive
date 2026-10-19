@@ -46,10 +46,11 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 		}
 	}
 	type group struct {
-		parent *dumpedMethods
-		first  int
-		count  int
-		node   int
+		parent      *dumpedMethods
+		declaration string
+		first       int
+		count       int
+		node        int
 	}
 	groups := map[*dumpedMethods]*group{}
 	seen := make([]bool, len(events))
@@ -64,7 +65,11 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 		}
 		current := groups[event.parent]
 		if current == nil {
-			current = &group{parent: event.parent, first: event.ordinal, node: -1}
+			declaration, _, known := c.lambdaParentDeclaration(source, event.parent)
+			if !known {
+				return source, false
+			}
+			current = &group{parent: event.parent, declaration: declaration, first: event.ordinal, node: -1}
 			groups[event.parent] = current
 		}
 		// Scheduling whole declarations cannot change the order of expressions
@@ -96,7 +101,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityLayout(source string, mem
 				return source, false
 			}
 			searched += cost
-			if strings.TrimSpace(node) == strings.TrimSpace(current.parent.code) {
+			if strings.TrimSpace(node) == strings.TrimSpace(current.declaration) {
 				if current.node >= 0 {
 					return source, false
 				}

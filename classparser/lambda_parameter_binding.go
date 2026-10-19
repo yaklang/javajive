@@ -25,11 +25,11 @@ func (c *ClassObjectDumper) bindLambdaParameterMetadata(p *lambdaParameterMetada
 	if c == nil || p == nil || c.FuncCtx == nil || c.CurrentMethod != p.method || c.obj != p.object || request.role != methodSourceLambdaBody || !request.valid() || request.captureCount != len(p.captures) || !p.factory.same(request.factory) || c.FuncCtx.FunctionName != p.name || c.FuncCtx.CurrentMethodDesc != p.descriptor || !c.FuncCtx.IsStatic || len(parameters)+len(p.captures) != len(p.names) || c.Work != nil && c.Work.CheckAlloc(int64(len(parameters))*256) != nil {
 		return nil, false
 	}
-	parentDescriptor, typed := sourceBridgeUTF8(c.obj, p.factory.method.DescriptorIndex)
-	parentNames, known := c.originalOrdinaryMethodParameterNames(p.factory.method, parentDescriptor)
-	if !typed || !known || !slices.Equal(parentNames, p.parentNames) {
+	fresh, known := c.originalLambdaParameterMetadata(p.method, c.Work)
+	if !known || fresh == nil || !fresh.factory.same(p.factory) || !slices.Equal(fresh.parentNames, p.parentNames) || !slices.Equal(fresh.names, p.names) {
 		return nil, false
 	}
+	parentNames := fresh.parentNames
 	binding := &lambdaParameterBinding{metadata: p, request: request}
 	protected := map[*coreutils.VariableId]bool{}
 	offset := len(p.captures)
