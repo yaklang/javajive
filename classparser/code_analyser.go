@@ -407,7 +407,30 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 		}
 		parser.InlineEnumLambdaArgumentTemps(&st, constants)
 	}
-	dumper.bootstrapReports = append(dumper.bootstrapReports, parser.BootstrapReports...)
+	// One bounded original context per method; report count must not multiply
+	// copies of a long method name/descriptor. Failed parser reports still need
+	// the original method identity, never a generated source spelling.
+	methodIdentity := ""
+	if len(parser.BootstrapReports) != 0 && dumper.CurrentMethod != nil {
+		name, named := sourceBridgeUTF8(dumper.obj, dumper.CurrentMethod.NameIndex)
+		descriptor, typed := sourceBridgeUTF8(dumper.obj, dumper.CurrentMethod.DescriptorIndex)
+		if named && typed {
+			size := int64(len(name)) + int64(len(descriptor))
+			if dumper.Work != nil {
+				if failure := dumper.Work.CheckAlloc(size); failure != nil {
+					return parser.Params, st, failure
+				}
+				if !nativeProofWork(dumper.Work, size+1) {
+					return parser.Params, st, dumper.Work.Err()
+				}
+			}
+			methodIdentity = name + descriptor
+		}
+	}
+	for _, report := range parser.BootstrapReports {
+		report.Method = methodIdentity
+		dumper.bootstrapReports = append(dumper.bootstrapReports, report)
+	}
 	if dumper.options.EnableShadowIR && dumper.report != nil {
 		observation := parser.ShadowObservation
 		if observation.Status == "" {

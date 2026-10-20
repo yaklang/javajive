@@ -118,16 +118,15 @@ func TestTaskT17C01UnknownBootstrapBytecode(t *testing.T) {
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatal("T17-C01 bootstrap execution wrote marker file")
 	}
-	if res.Status != "unsupported" {
-		t.Fatalf("T17-C01 expected unsupported, got %s err=%v\nsource:\n%s\ndiag=%+v", res.Status, err, res.Source, res.Diagnostics)
-	}
+	t17RequireUnavailableMethodBodies(t, res)
+
 	found := false
 	for _, d := range res.Diagnostics {
 		if strings.Contains(d.Message, "evil.lang.invoke.StringConcatFactory") || strings.Contains(d.Message, "evil/lang/invoke/StringConcatFactory") || d.Code == core.DiagBootstrapUnknown {
 			found = true
 		}
 	}
-	if !found && !strings.Contains(res.Source, "unsupported bootstrap") {
+	if !found {
 		t.Fatalf("T17-C01 identity not traceable:\nstatus=%s\nsource=%s\ndiag=%+v", res.Status, res.Source, res.Diagnostics)
 	}
 }
@@ -237,9 +236,8 @@ func TestTaskT17C05VersionCapabilityIntegration(t *testing.T) {
 	if r8.Status == "complete" {
 		t.Fatalf("T17-C05 record target 8 must not be complete (lossy isRecord). status=%s source:\n%s", r8.Status, r8.Source)
 	}
-	if r8.Status != "unsupported" {
-		t.Fatalf("T17-C05 record target 8 expected unsupported, got %s diag=%+v", r8.Status, r8.Diagnostics)
-	}
+	t17RequireUnavailableMethodBodies(t, r8, "toString()Ljava/lang/String;", "hashCode()I", "equals(Ljava/lang/Object;)Z")
+
 	r17, _ := DecompileWithOptions(rec, DecompileOptions{Mode: Precision, TargetSourceVersion: 17})
 	if r17.Status == "complete" && !strings.Contains(r17.Source, "record ") {
 		t.Fatalf("T17-C05 record target 17 claimed complete without record reconstruction:\n%s", r17.Source)
@@ -452,4 +450,34 @@ func t17RunRebuilt(t *testing.T, dir, main, src, wantStdout string) error {
 		return fmt.Errorf("rebuild stdout mismatch for %s\n got %q\nwant %q\nsource:\n%s", main, out, wantStdout, src)
 	}
 	return nil
+}
+
+// These legal, unavailable bootstrap bodies are now explicitly stubbed rather
+// than emitted as diagnostic null values. The public member ledger therefore
+// reports partial; the original capability/identity diagnostics remain required.
+func t17RequireUnavailableMethodBodies(t *testing.T, result DecompileResult, required ...string) {
+	t.Helper()
+	if result.Status != "partial" || len(result.StubMethods) == 0 || !strings.Contains(result.Source, DecompileStubMarker) || strings.Contains(result.Source, "/* unsupported bootstrap") || strings.Contains(result.Source, "/* unsupported condy") {
+		t.Fatalf("unavailable source must be an honest partial method boundary: status=%s stubs=%v\n%s", result.Status, result.StubMethods, result.Source)
+	}
+	stubs := map[string]bool{}
+	diagnosed := map[string]bool{}
+	for _, method := range result.StubMethods {
+		stubs[method] = true
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Code == "method_stub" {
+			diagnosed[diagnostic.Method] = true
+		}
+	}
+	for method := range stubs {
+		if !diagnosed[method] {
+			t.Fatal("stub lost its original method diagnostic", method)
+		}
+	}
+	for _, method := range required {
+		if !stubs[method] {
+			t.Fatal("unavailable original method was not retained as a stub", method, result.StubMethods)
+		}
+	}
 }

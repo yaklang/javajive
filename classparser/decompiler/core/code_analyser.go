@@ -280,6 +280,9 @@ func (d *Decompiler) observeCondyLoad(v values.JavaValue) error {
 			ExecutedBootstrap: false,
 			Value:             v,
 		})
+		// A typed diagnostic constant is not a reconstructed source value.
+		// Refuse before LDC can replace lazy linkage with a fabricated value.
+		return fmt.Errorf("unsupported_source: legal ConstantDynamic not reconstructed")
 	}
 	return nil
 }
@@ -4214,10 +4217,12 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		rep := DispatchInvokeDynamic(req, d, runtimeStackSimulation, resultType)
 		d.BootstrapReports = append(d.BootstrapReports, rep)
-		// Unsupported metadata can describe a valid bootstrap while the
-		// qualified callback supplies no usable source value. Keep the
-		// report and stop this body; never manufacture an expression.
-		if rep.Status == "unsupported" && rep.Value == nil {
+		// Source capability is decided by status, not by the presence of a
+		// diagnostic value. Unknown/unsupported adapters may retain a typed
+		// opaque value for analysis; emitting it would invent a return value
+		// or discard a void call's linkage and effects. Keep the report and
+		// refuse this body before consuming any such value.
+		if rep.Status == "unsupported" {
 			return fmt.Errorf("unsupported_source: %s", rep.Reason)
 		}
 		if rep.Status == "invalid_input" {
@@ -4577,6 +4582,9 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		runtimeStackSimulation.Push(v)
 	case OP_LDC2_W:
 		v := d.ConstantPoolLiteralGetter(int(Convert2bytesToInt(opcode.Data)))
+		if err := d.observeCondyLoad(v); err != nil {
+			return err
+		}
 		runtimeStackSimulation.Push(v)
 	case OP_MONITORENTER:
 		runtimeStackSimulation.Pop()

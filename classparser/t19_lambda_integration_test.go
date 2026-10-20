@@ -250,9 +250,8 @@ func TestTaskT19C04Integration(t *testing.T) {
 	serSrc := t19ReadSeed(t, "SerializableLambda.java")
 	serClasses, _ := t19Compile(t, "8", true, map[string]string{"SerializableLambda.java": serSrc})
 	serRes, _ := DecompileWithOptions(serClasses["SerializableLambda"], DecompileOptions{Mode: Precision, TargetSourceVersion: 8})
-	if serRes.Status != "unsupported" {
-		t.Fatalf("T19-C04 SERIALIZABLE status=%s diag=%+v\n%s", serRes.Status, serRes.Diagnostics, serRes.Source)
-	}
+	t17RequireUnavailableMethodBodies(t, serRes, "main([Ljava/lang/String;)V", "$deserializeLambda$(Ljava/lang/invoke/SerializedLambda;)Ljava/lang/Object;")
+
 	found := false
 	for _, d := range serRes.Diagnostics {
 		if strings.Contains(strings.ToLower(d.Message), "serializable") || d.Code == core.DiagBootstrapUnknown {

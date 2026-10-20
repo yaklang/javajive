@@ -230,9 +230,8 @@ func TestTaskT20C06LowTarget(t *testing.T) {
 	if res.Status == "complete" {
 		t.Fatalf("T20-C06 target 8 must not be complete:\n%s", res.Source)
 	}
-	if res.Status != "unsupported" {
-		t.Fatalf("T20-C06 expected unsupported, got %s diag=%+v", res.Status, res.Diagnostics)
-	}
+	t17RequireUnavailableMethodBodies(t, res, "toString()Ljava/lang/String;", "hashCode()I", "equals(Ljava/lang/Object;)Z")
+
 	found := false
 	for _, d := range res.Diagnostics {
 		if d.Code == core.DiagBootstrapVersion || strings.Contains(d.Message, "cannot be lossless") {

@@ -93,6 +93,8 @@ type CallSiteRequest struct {
 
 // DispatchResult is the frozen adapter output. ExecutedBootstrap must stay false.
 type DispatchResult struct {
+	// Method is original diagnostic context attached by the class dumper.
+	Method            string `json:"method,omitempty"`
 	Status            string
 	Family            FeatureFamily
 	Identity          BootstrapIdentity

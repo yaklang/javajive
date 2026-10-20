@@ -190,6 +190,7 @@ func applyBootstrapCapabilities(result *DecompileResult, d *ClassObjectDumper) {
 		}
 		result.Diagnostics = append(result.Diagnostics, DecompileDiagnostic{
 			Code:    code,
+			Method:  rep.Method,
 			Message: rep.Reason + " identity=" + rep.Identity.Format(),
 		})
 		switch rep.Status {
