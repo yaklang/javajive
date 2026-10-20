@@ -6,7 +6,7 @@ import (
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
-func (c *ClassObjectDumper) lambdaBodyOriginalUseClosed(method *MemberInfo, work *workbudget.Budget) bool {
+func (c *ClassObjectDumper) lambdaOriginalNestUsesClosed(method *MemberInfo, work *workbudget.Budget) bool {
 	if c == nil || c.obj == nil {
 		return false
 	}
@@ -24,6 +24,24 @@ func (c *ClassObjectDumper) lambdaBodyOriginalUseClosed(method *MemberInfo, work
 		if !nativeLambdaBodyNestUsesClosed(c.obj, method, objects, work) {
 			return false
 		}
+	}
+	return true
+}
+
+// Declaration ownership is independent of an arrow or compiler-reference
+// source representation. Each renderer must still close its own port, compiler
+// metadata and final source consumption obligations.
+func (c *ClassObjectDumper) lambdaOriginalDeclarationUsesClosed(method *MemberInfo, work *workbudget.Budget) bool {
+	if !c.lambdaOriginalNestUsesClosed(method, work) {
+		return false
+	}
+	_, known := nativeLambdaBodyDeclarationSchema(c.obj, method, work)
+	return known
+}
+
+func (c *ClassObjectDumper) lambdaBodyOriginalUseClosed(method *MemberInfo, work *workbudget.Budget) bool {
+	if !c.lambdaOriginalNestUsesClosed(method, work) {
+		return false
 	}
 	parameters, known := c.originalLambdaParameterMetadata(method, work)
 	if !known {

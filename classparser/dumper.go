@@ -30,6 +30,7 @@ import (
 )
 
 type ClassObjectDumper struct {
+	compilerReferenceFactorySeen   bool
 	methodSourceRequestSerial      uint64
 	lambdaMethodSourceBodies       map[*MemberInfo]*lambdaMethodSourceReceipt
 	sourceDeclarationAccess        uint16
@@ -5433,7 +5434,8 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 }
 
 type dumpedMethods struct {
-	lambdaEmission *lambdaMethodEmission
+	compilerReference *lambdaCompilerReference
+	lambdaEmission    *lambdaMethodEmission
 	// Only the concrete declaration writer sets these offsets. Class recovery
 	// may edit an unsealed body without parsing or reinterpreting its header.
 	sourceBodyStart, sourceBodyEnd int

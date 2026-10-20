@@ -189,6 +189,22 @@ var buildinBootstrapMethods = map[string]func(args ...values.JavaValue) BuildinB
 				if err != nil {
 					return nil, fmt.Errorf("dump lambda method `%s.%s` error: %w", classMember.Name, member, err)
 				}
+				if source.ReferenceTarget != nil {
+					// A typed reference keeps eager receiver evaluation. It does not
+					// enter arrow return/cast or parameter-namespace adaptation.
+					target := source.ReferenceTarget
+					cv := values.NewStreamingCustomValue(func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
+						template := "(" + target.String(ctx) + ") (" + source.Code + ")"
+						return writeObservedLambdaSource(ctx, out, source, template, captured, "", "")
+					}, func() types.JavaType { return target }, lambdaReplace)
+					cv.Flag, cv.IsMethodRef, cv.CapturesKnown = "lambda", true, true
+					cv.NoOuterCapture, cv.Captures = false, captured
+					cv.RequireOriginalReferenceCapture()
+					if len(args1) >= 3 {
+						cv.InstantiatedMtdDesc = t19MethodTypeDesc(args1[2])
+					}
+					return cv, nil
+				}
 				methodStr := source.Code
 				// A lambda body that returns a generic-erased Object while its functional-interface SAM
 				// returns a method type variable lost the source's unchecked `return (T) expr;` cast. The

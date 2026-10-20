@@ -334,6 +334,9 @@ func nativeLambdaImplementationScope(object *ClassObject, name, desc, lexical st
 				// without guessing from equal descriptors or variable spelling.
 				loads := make([]int, len(captures))
 				start := i
+				if load, known := nativeBoundAdapterCaptureLoad(object, m, impl, code, ops, i, captures, work); known {
+					start = load + 1
+				}
 				for j := len(captures) - 1; j >= 0; j-- {
 					if start == 0 {
 						return false

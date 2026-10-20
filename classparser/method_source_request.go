@@ -11,6 +11,7 @@ type methodSourceRole uint8
 const (
 	methodSourceDeclaration methodSourceRole = iota
 	methodSourceLambdaBody
+	methodSourceCompilerReference
 	methodSourceLambdaDepthLimit   = 64
 	methodSourceLambdaRequestLimit = 4096
 )
@@ -30,6 +31,8 @@ func (r methodSourceRequest) valid() bool {
 	switch r.role {
 	case methodSourceDeclaration:
 		return r.captureCount == 0 && r.serial == 0 && r.factory == nil
+	case methodSourceCompilerReference:
+		return r.captureCount == 1 && r.serial != 0 && r.factory.closed() && r.factory.sealed
 	case methodSourceLambdaBody:
 		return r.captureCount >= 0 && r.captureCount <= 255 && r.serial != 0 && (r.factory == nil || r.factory.closed())
 	default:
@@ -72,7 +75,14 @@ type lambdaMethodSourceReceipt struct {
 // The render cache also contains ordinary declarations. Source consumption
 // requires a completed body from this dumper's actual lambda request instead.
 func (c *ClassObjectDumper) lambdaMethodSourcePacketClosed(method *MemberInfo, body *dumpedMethods, work *workbudget.Budget) bool {
-	if c == nil || c.obj == nil || len(c.obj.Methods) > 4096 || len(c.obj.ConstantPool) > 65535 || method == nil || !isSyntheticMethod(method.AccessFlags) || method.AccessFlags&(0x0020|0x0040|0x0100|0x0400) != 0 || body == nil || body.member != method || body.sourceDumper != c || body.sourceObject != c.obj || body.sourceRequest.role != methodSourceLambdaBody || !body.sourceRequest.valid() || body.sourceRequest.serial > c.methodSourceRequestSerial || body.sourceCacheKey == "" || c.dumpedMethodsSet[body.sourceCacheKey] != body || body.sourceReconstructionFailed() || !c.lambdaParameterSourcePacketClosed(body) {
+	if c == nil || c.obj == nil || len(c.obj.Methods) > 4096 || len(c.obj.ConstantPool) > 65535 || method == nil || !isSyntheticMethod(method.AccessFlags) || method.AccessFlags&(0x0020|0x0040|0x0100|0x0400) != 0 || body == nil || body.member != method || body.sourceDumper != c || body.sourceObject != c.obj || body.sourceRequest.role != methodSourceLambdaBody && body.sourceRequest.role != methodSourceCompilerReference || !body.sourceRequest.valid() || body.sourceRequest.serial > c.methodSourceRequestSerial || body.sourceCacheKey == "" || c.dumpedMethodsSet[body.sourceCacheKey] != body || body.sourceReconstructionFailed() {
+		return false
+	}
+	if body.sourceRequest.role == methodSourceCompilerReference {
+		if !c.compilerReferenceSourcePacketClosed(body) {
+			return false
+		}
+	} else if body.compilerReference != nil || !c.lambdaParameterSourcePacketClosed(body) {
 		return false
 	}
 	owned := 0
@@ -96,6 +106,9 @@ func (c *ClassObjectDumper) lambdaMethodSourcePacketClosed(method *MemberInfo, b
 			}
 			owned++
 		}
+	}
+	if body.sourceRequest.role == methodSourceCompilerReference {
+		return owned == 1 && c.lambdaOriginalDeclarationUsesClosed(method, work)
 	}
 	return owned == 1 && c.lambdaBodyOriginalUseClosed(method, work)
 }
@@ -170,7 +183,7 @@ func (c *ClassObjectDumper) originalLambdaDeclaration(owner, name, descriptor st
 			codes++
 		}
 	}
-	if codes != 1 || !c.lambdaBodyOriginalUseClosed(original, c.Work) {
+	if codes != 1 || !c.lambdaOriginalDeclarationUsesClosed(original, c.Work) {
 		return core.LambdaDeclarationUnknown
 	}
 	return core.LambdaDeclarationSyntheticBody

@@ -14,7 +14,28 @@ import (
 // prove the declaration's identity, source member binding, eager operands and
 // complete bootstrap protocol. It never evaluates a JavaValue/source callback.
 func ProjectOriginalSamTarget(owner, classSignature, samSignature, erased, instantiated string, provider callbinding.Provider) types.JavaType {
-	return inferDeclaredSamInstantiation(strings.ReplaceAll(owner, "/", "."), classSignature, samSignature, erased, instantiated, provider)
+	name := strings.ReplaceAll(owner, "/", ".")
+	// A monomorphic declaration has an empty substitution environment. Its
+	// projection is identity, not a failed generic inference. Do not apply this
+	// rule to a nonempty class Signature whose inherited variables are unknown.
+	if classSignature == "" {
+		declared := erased
+		if samSignature != "" {
+			body, variables, known := directSamThrows(samSignature)
+			if !known || len(variables) != 0 {
+				return nil
+			}
+			declared = body
+		}
+		if name == "" || declared != erased || erased != instantiated {
+			return nil
+		}
+		if _, known := directSamTokens(declared, false); !known {
+			return nil
+		}
+		return types.NewJavaClass(name)
+	}
+	return inferDeclaredSamInstantiation(name, classSignature, samSignature, erased, instantiated, provider)
 }
 
 func inferDeclaredLambdaTarget(d *Decompiler, raw types.JavaType, erased, instantiated values.JavaValue) types.JavaType {

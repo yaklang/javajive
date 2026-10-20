@@ -291,6 +291,9 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 				dumper.lambdaInitializerFactorySeen = true
 			}
 		}
+		if source, closed := dumper.dumpCompilerVarargsReference(name, desc, captured, request); closed {
+			return source, nil
+		}
 		dumped, err := dumper.dumpMethodWithSourceRequest(name, desc, id, adapter, request)
 		if err != nil {
 			return core.LambdaBodySource{}, err

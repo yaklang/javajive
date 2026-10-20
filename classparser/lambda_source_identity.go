@@ -39,8 +39,12 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 	// A failed/mutated receipt must not erase the requirement it carried.
 	// This latch records only an attempted original initializer factory; every
 	// positive body, ordinal and source-occurrence proof is still reopened.
-	required := c.lambdaInitializerFactorySeen && (c.options.SourceCompiler == NativeJavac8 || c.options.SourceCompiler == ModernJavac)
+	required := c.compilerReferenceFactorySeen || c.lambdaInitializerFactorySeen && (c.options.SourceCompiler == NativeJavac8 || c.options.SourceCompiler == ModernJavac)
+	hasReference := c.compilerReferenceFactorySeen
 	for _, receipt := range c.lambdaMethodSourceBodies {
+		if receipt != nil && receipt.body != nil && receipt.body.compilerReference != nil {
+			required, hasReference = true, true
+		}
 		if receipt != nil && receipt.body != nil && c.options.SourceCompiler == NativeJavac8 && receipt.body.lambdaParameterBinding != nil {
 			required = true
 		}
@@ -104,12 +108,15 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		}
 	}
 	text := string(own)
-	arrows, known := nativeLambdaSourceArrows(text, c.Work)
+	arrows, known := nativeLambdaSourceImplementationTokens(text, c.Work, hasReference)
 	if !known || len(arrows) == 0 {
 		return nil, false
 	}
 	for _, receipt := range c.lambdaMethodSourceBodies {
 		if receipt != nil && receipt.request.factory != nil && receipt.request.factory.method != nil && (receipt.request.factory.method.AccessFlags == 0x100a || receipt.request.factory.method.AccessFlags == 0x1002) {
+			if hasReference {
+				return nil, false
+			}
 			return c.native8NestedLambdaSourceIdentityEvents(text, arrows, methods, charge)
 		}
 	}
@@ -135,6 +142,9 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 			}
 		}
 		if parent == nil || parent.sourceDumper != c || parent.sourceObject != c.obj || parent.sourceRequest.role != methodSourceDeclaration || parent.sourceCacheKey == "" || c.dumpedMethodsSet[parent.sourceCacheKey] != parent || parent.sourceReconstructionFailed() || !c.methodParameterNameCacheClosed(parent.parameterNameStamp) || parent.code == "" && !c.interfaceLambdaInitializerClosed(parent) || receipt.body.code == "" || !charge(int64(len(text))+int64(len(parent.code))+int64(len(receipt.body.code))) {
+			return nil, false
+		}
+		if receipt.body.compilerReference != nil && !c.compilerReferenceFinalCaptureClosed(receipt.body, parent) {
 			return nil, false
 		}
 		packet := receipt.body.code

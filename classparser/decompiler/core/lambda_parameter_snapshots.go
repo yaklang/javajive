@@ -25,7 +25,7 @@ func (d *Decompiler) inlineUnchangedLambdaLocalOperands(op *OpCode, value values
 
 func (d *Decompiler) inlineUnchangedLambdaOperandCopies(op *OpCode, value values.JavaValue, locals bool) {
 	lambda, ok := value.(*values.CustomValue)
-	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_INVOKEDYNAMIC || !ok || lambda == nil || !lambda.LambdaParameterNamesRequired() || d.FunctionContext == nil {
+	if d == nil || op == nil || op.Instr == nil || op.Instr.OpCode != OP_INVOKEDYNAMIC || !ok || lambda == nil || (!lambda.LambdaParameterNamesRequired() && !lambda.OriginalReferenceCaptureRequired()) || d.FunctionContext == nil {
 		return
 	}
 	pc, captures, known := lambda.OriginalLambdaFactoryEvaluation()

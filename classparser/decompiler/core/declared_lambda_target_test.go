@@ -288,3 +288,40 @@ func TestInstantiatedSAMSeparatesNestedErasureFromEntryChecks(t *testing.T) {
 		}
 	}
 }
+
+// Zero free variables requires no substitution. Missing or adapted signatures
+// cannot borrow this identity case, and the generic inference API retains its
+// separate nil-means-no-parameterization contract.
+func TestOriginalSamProjectionClosesEmptyTypeEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name, class, sig, erased, actual string
+		want                             bool
+	}{
+		{"void", "", "", "()V", "()V", true},
+		{"primitive", "", "", "(I)J", "(I)J", true},
+		{"wide", "", "", "(JD)D", "(JD)D", true},
+		{"arrays", "", "", "([[Ljava/lang/Object;)[I", "([[Ljava/lang/Object;)[I", true},
+		{"concrete throws", "", "(I)V^Ljava/io/IOException;", "(I)V", "(I)V", true},
+		{"reference", "", "", "(Ljava/lang/String;)Ljava/lang/String;", "(Ljava/lang/String;)Ljava/lang/String;", true},
+		{"unproved input adaptation", "", "", "(Ljava/lang/Object;)V", "(Ljava/lang/String;)V", false},
+		{"unproved result adaptation", "", "", "()Ljava/lang/Object;", "()Ljava/lang/String;", false},
+		{"foreign variable", "", "(TT;)V", "(Ljava/lang/Object;)V", "(Ljava/lang/Object;)V", false},
+		{"method variable", "", "<T:Ljava/lang/Object;>(TT;)V", "(Ljava/lang/Object;)V", "(Ljava/lang/Object;)V", false},
+		{"throws variable", "", "()V^TE;", "()V", "()V", false},
+		{"unproved inherited environment", "Ljava/lang/Object;Lother/Parent<Ljava/lang/String;>;", "", "()V", "()V", false},
+		{"bad void input", "", "", "(V)V", "(V)V", false},
+		{"bad trailing descriptor", "", "", "()Vjunk", "()Vjunk", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ProjectOriginalSamTarget("fixture/Monomorphic", tc.class, tc.sig, tc.erased, tc.actual, nil)
+			if (got != nil) != tc.want {
+				t.Fatalf("original monomorphic target=%v want=%v", got, tc.want)
+			}
+			if got != nil {
+				if name, known := types.RawClassFQN(got); !known || name != "fixture.Monomorphic" {
+					t.Fatal("wrong original target identity", name, known)
+				}
+			}
+		})
+	}
+}

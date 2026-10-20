@@ -112,13 +112,28 @@ func (c *ClassObjectDumper) constructorBoundReferenceSource(code *CodeAttribute,
 		return body
 	}
 	target, member, instantiated, proved := c.constructorBoundReferenceTarget(code, ops[5], owner, delegate.Descriptor, physical[parameterIndex])
+	var compilerBody *dumpedMethods
+	if !proved {
+		target, member, instantiated, compilerBody, proved = c.constructorBoundCompilerReferenceTarget(code, pc, owner, delegate.Descriptor, receiver)
+	}
 	if !proved {
 		return body
 	}
 	// Build the source from original declarations and the checked receiver. The
 	// old CustomValue supplies eager identity only; its renderer never runs here.
 	value := values.NewStreamingCustomValue(func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
-		return out.WriteString("(" + target.String(ctx) + ") (" + receiver.String(ctx) + "::" + class_context.SafeIdentifier(member) + ")")
+		start := out.Len()
+		receiverText := receiver.String(ctx)
+		if err := out.WriteString("(" + target.String(ctx) + ") (" + receiverText + "::" + class_context.SafeIdentifier(member) + ")"); err != nil {
+			return err
+		}
+		if compilerBody != nil {
+			packet := out.String()[start:]
+			c.recordCompilerReferenceCapture(compilerBody, core.LambdaSourceRender{Packet: packet, Captures: []core.LambdaCaptureRender{{Index: 0, Text: receiverText}}, Complete: true})
+			c.recordNativeLambdaRenderedPacket(compilerBody, compilerBody.code, packet)
+			c.recordLambdaMethodEmission(compilerBody, compilerBody.code, packet)
+		}
+		return nil
 	}, func() types.JavaType { return target })
 	value.Flag, value.IsMethodRef, value.NoOuterCapture, value.CapturesKnown = "lambda", true, true, true
 	value.OriginPC, value.HasOriginPC, value.InstantiatedMtdDesc = pc, true, instantiated

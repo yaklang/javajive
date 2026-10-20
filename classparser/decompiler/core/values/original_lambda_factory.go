@@ -57,3 +57,15 @@ func (v *CustomValue) OriginalLambdaFactoryEvaluation() (pc int, captures []Java
 	}
 	return w.pc, append([]JavaValue(nil), w.captures...), true
 }
+
+// A completed compiler-reference source packet constrains its receiver's
+// source binding, independently of arrow/SAM parameter names. This requests
+// only the existing original unchanged-copy proof, never factory permission.
+func (v *CustomValue) RequireOriginalReferenceCapture() {
+	if v != nil && v.IsMethodRef {
+		v.originalReferenceCaptureRequired = true
+	}
+}
+func (v *CustomValue) OriginalReferenceCaptureRequired() bool {
+	return v != nil && v.IsMethodRef && v.originalReferenceCaptureRequired
+}

@@ -190,7 +190,11 @@ func (c *ClassObjectDumper) lambdaEmissionPosition(parent, child *dumpedMethods,
 	if !frame.closed() || frame.body != parent || frame.request != parent.sourceRequest || len(frame.children) > methodSourceLambdaRequestLimit || !nativeProofWork(c.Work, int64(len(frame.children))+1) {
 		return 0, false
 	}
-	arrows, known := nativeLambdaSourceArrows(declaration, c.Work)
+	hasReference := false
+	for _, event := range frame.children {
+		hasReference = hasReference || event.body != nil && event.body.compilerReference != nil
+	}
+	arrows, known := nativeLambdaSourceImplementationTokens(declaration, c.Work, hasReference)
 	if !known || len(arrows) != len(frame.children) {
 		return 0, false
 	}
@@ -203,8 +207,8 @@ func (c *ClassObjectDumper) lambdaEmissionPosition(parent, child *dumpedMethods,
 		if r == nil || r.body != event.body || r.request != event.request || r.request != event.body.sourceRequest || r.request.factory == nil || r.request.factory.method != parent.member || !r.request.factory.closed() || c.dumpedMethodsSet[r.key] != event.body || !charge(int64(len(event.packet))) {
 			return 0, false
 		}
-		local, closed := nativeLambdaSourceArrows(event.packet, c.Work)
-		if !closed || len(local) != 1 {
+		local, closed := nativeLambdaSourceImplementationTokens(event.packet, c.Work, hasReference)
+		if !closed || len(local) != 1 || (event.packet[local[0]:local[0]+2] == "::") != (event.body.compilerReference != nil) {
 			return 0, false
 		}
 		header := event.packet[:local[0]+2]
