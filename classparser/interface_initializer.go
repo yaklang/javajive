@@ -375,6 +375,13 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 	if err != nil {
 		return nil, err
 	}
+	if directExpressions {
+		for i, plan := range plans {
+			if value, proved := c.interfaceInitializerLambdaExpression(plan, code); proved {
+				plans[i].prefix, plans[i].value = nil, value
+			}
+		}
+	}
 	names := c.initializerHelperNames(len(plans))
 	helpers := make([]*dumpedMethods, 0, len(plans))
 	initializers := map[string]string{}
@@ -419,6 +426,17 @@ func (c *ClassObjectDumper) renderInterfaceInitializers(body []statements.Statem
 	}
 	for name, value := range initializers {
 		c.fieldDefaultValue[name] = value
+	}
+	c.interfaceLambdaInitializer = nil
+	if frame := c.lambdaMethodRendering; len(helpers) == 0 && frame != nil && len(frame.children) != 0 && frame.body != nil && frame.body.member == c.CurrentMethod {
+		bytes := int64(len(code.Code)) + int64(len(order))*128
+		for _, expression := range initializers {
+			bytes += int64(len(expression))
+		}
+		if bytes > 8<<20 || !nativeProofWork(c.Work, bytes+1) || c.Work != nil && c.Work.CheckAlloc(bytes) != nil {
+			return nil, fmt.Errorf("interface initializer source receipt exceeds budget")
+		}
+		c.interfaceLambdaInitializer = newInterfaceLambdaInitializerReceipt(frame.body, code, order, initializers)
 	}
 	return helpers, nil
 }

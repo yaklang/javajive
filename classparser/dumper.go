@@ -142,6 +142,7 @@ type ClassObjectDumper struct {
 	lambdaDepth                    int
 	fieldDefaultValue              map[string]string
 	interfaceInitializerHelpers    []*dumpedMethods
+	interfaceLambdaInitializer     *interfaceLambdaInitializerReceipt
 	constructorBoundaryHelpers     []*dumpedMethods
 	privateNestOwnPlan             *privateNestPlan
 	dumpedMethodsSet               map[string]*dumpedMethods
@@ -1498,6 +1499,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	fields, err := c.DumpFields()
 	if err != nil {
 		return "", utils.Wrap(err, "DumpFields failed")
+	}
+	if c.interfaceLambdaInitializer != nil && !c.bindInterfaceLambdaInitializerFields(fields) {
+		return "", fmt.Errorf("interface initializer field source packet is unproved")
 	}
 	if AfterMembersDumped != nil {
 		AfterMembersDumped(c)
@@ -4955,6 +4959,8 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			if needsCheckedEscape && name == "<clinit>" {
 				staticHoistBarrierHit = true
 			}
+			lambdaEmission := c.beginLambdaMethodEmission(dumped)
+			defer c.endLambdaMethodEmission(lambdaEmission, false)
 			if name == "<clinit>" && classStaticInitializersMustHoist {
 				renderInitializer := statementListToString
 				if needsCheckedEscape {
@@ -4967,8 +4973,6 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				c.interfaceInitializerHelpers = helpers
 				statementList = nil
 			}
-			lambdaEmission := c.beginLambdaMethodEmission(dumped)
-			defer c.endLambdaMethodEmission(lambdaEmission, false)
 			for i, statement := range statementList {
 				if c.nativeMemberSkipCheck(statement) {
 					continue
@@ -13534,6 +13538,10 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		if name == "<clinit>" && c.isInterfaceLike() {
 			if err != nil {
 				c.interfaceInitializerHelpers = c.interfaceInitializerStubs(err)
+			} else if c.interfaceLambdaInitializer != nil && c.interfaceLambdaInitializer.parent == res {
+				// Keep the original initializer as an internal occurrence owner.
+				// It has no source static block; its actual fields own the text.
+				result = append(result, res)
 			}
 			continue
 		}

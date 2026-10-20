@@ -136,8 +136,11 @@ func (c *ClassObjectDumper) recordLambdaMethodEmission(body *dumpedMethods, temp
 // that declaration or a lambda factory. No header comparison grants body,
 // invocation, capture or source-ownership permission.
 func (c *ClassObjectDumper) lambdaParentDeclaration(source string, parent *dumpedMethods) (string, int, bool) {
-	if c == nil || parent == nil || parent.code == "" || len(source) > 16<<20 || !nativeProofWork(c.Work, int64(len(source))+int64(len(parent.code))+1) {
+	if c == nil || parent == nil || len(source) > 16<<20 || !nativeProofWork(c.Work, int64(len(source))+int64(len(parent.code))+1) {
 		return "", 0, false
+	}
+	if parent.code == "" {
+		return c.interfaceLambdaInitializerSourceSpan(source, parent)
 	}
 	start := strings.Index(source, parent.code)
 	if start >= 0 && strings.Index(source[start+len(parent.code):], parent.code) < 0 {
