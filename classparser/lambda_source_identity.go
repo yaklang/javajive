@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yaklang/javajive/classparser/decompiler/core"
 	"github.com/yaklang/javajive/internal/workbudget"
 )
 
@@ -55,7 +56,10 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 	if !required {
 		return nil, true
 	}
-	if c.obj == nil || len(c.obj.Methods) > 4096 || c.options.TargetSourceVersion != 8 || len(source) > 16<<20 || len(members) > 4096 || len(methods) > 4096 || len(c.lambdaMethodSourceBodies) > 4096 || !nativeProofWork(c.Work, int64(len(source))+int64(len(members))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(source))*2+4096*128) != nil {
+	// A zero language level means class-major inference throughout the source
+	// pipeline. Reopen that same policy here; zero is not a compiler capability
+	// refusal, and it must not silently disable an original identity obligation.
+	if c.obj == nil || len(c.obj.Methods) > 4096 || c.options.TargetSourceVersion < 0 || core.EffectiveTargetSource(c.options.TargetSourceVersion, c.obj.MajorVersion) != 8 || len(source) > 16<<20 || len(members) > 4096 || len(methods) > 4096 || len(c.lambdaMethodSourceBodies) > 4096 || !nativeProofWork(c.Work, int64(len(source))+int64(len(members))+1) || c.Work != nil && c.Work.CheckAlloc(int64(len(source))*2+4096*128) != nil {
 		return nil, false
 	}
 	for _, method := range c.obj.Methods {
