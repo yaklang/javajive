@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/classparser/decompiler/core/callbinding"
+	"github.com/yaklang/javajive/classparser/decompiler/core/class_context"
 	"github.com/yaklang/javajive/classparser/decompiler/core/statements"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
@@ -13,9 +14,9 @@ import (
 // generic parent, already emitted at the same lexical allocation site, can
 // instead declare a captured local. This changes a source view only: the NEW,
 // constructor operands, original callback order and runtime class stay intact.
-// Closed type arguments and ordinary class/interface intersection bounds are
-// proved here. Method variables, wildcards and parameterized bounds require a
-// generic hierarchy/binder proof and are deliberately not erased to pass.
+// Original generic inheritance supplies the captured declaration view. Free
+// variables require their physical lexical declarations, including static cuts
+// and shadowing. Wildcards and parameterized bounds remain separate domains.
 func (c *ClassObjectDumper) nativeCapturedAnonymousParentType(declaration *statements.AssignStatement, actual, expected string, target callbinding.Class, definition *ClassObject, provider callbinding.Provider) (types.JavaType, bool) {
 	if c == nil || c.obj == nil || c.FuncCtx == nil || declaration == nil || sourceProofNil(declaration.JavaValue) || provider == nil || definition == nil {
 		return nil, false
@@ -44,8 +45,15 @@ func (c *ClassObjectDumper) nativeCapturedAnonymousParentType(declaration *state
 	}
 	signature, known := nativeOriginalClassSignature(producer.object, c.Work)
 	own, references, valid := types.SignatureTypeVariableReferences(signature)
-	if !known || !valid || len(own) != 0 || len(references) != 0 {
+	if !known || !valid || len(own) != 0 {
 		return nil, false
+	}
+	binding := c.FuncCtx
+	if len(references) != 0 {
+		binding, known = c.nativeCapturedAnonymousLexicalContext(producer, signature, references)
+		if !known {
+			return nil, false
+		}
 	}
 	parent, interfaces := types.ParseClassSignatureSupers(signature)
 	if len(producer.object.Interfaces) == 1 && producer.object.GetSupperClassName() == "java/lang/Object" {
@@ -56,11 +64,27 @@ func (c *ClassObjectDumper) nativeCapturedAnonymousParentType(declaration *state
 	} else if len(producer.object.Interfaces) != 0 || len(interfaces) != 0 {
 		return nil, false
 	}
+	// The original anonymous Signature describes its immediate parent. The
+	// captured declaration may name any proved generic supertype of that
+	// parent: compose substitutions along the original hierarchy rather than
+	// requiring both declarations to have the same raw name.
+	physicalParent := producer.object.GetSupperClassName()
+	if len(producer.object.Interfaces) == 1 {
+		physicalParent, known = sourceBridgeClassName(producer.object, producer.object.Interfaces[0])
+	}
+	rawParent, rawKnown := types.RawClassFQN(parent)
+	if !known || !rawKnown || strings.ReplaceAll(rawParent, ".", "/") != physicalParent {
+		return nil, false
+	}
+	parent, known = types.ProjectInstantiatedSupertype(binding, parent, target.Name, provider)
+	if !known {
+		return nil, false
+	}
 	instantiation, parameterized := types.AsParameterizedType(parent)
 	if !parameterized || strings.ReplaceAll(instantiation.RawClassName, ".", "/") != target.Name {
 		return nil, false
 	}
-	erasure, typed := values.SourceTypeErasure(parent, c.FuncCtx)
+	erasure, typed := values.SourceTypeErasure(parent, binding)
 	if !typed || erasure != expected {
 		return nil, false
 	}
@@ -110,6 +134,7 @@ func (c *ClassObjectDumper) nativeCapturedAnonymousParentType(declaration *state
 	if !boundGrammar || len(bounds) != len(formals) {
 		return nil, false
 	}
+	nominalBinding := &class_context.ClassContext{Work: c.Work}
 	for i, formal := range formals {
 		argument := instantiation.TypeArgs[i]
 		if argument == nil {
@@ -118,7 +143,19 @@ func (c *ClassObjectDumper) nativeCapturedAnonymousParentType(declaration *state
 		if _, wildcard := argument.RawType().(*types.JavaWildcardType); wildcard {
 			return nil, false
 		}
-		actualArgument, known := values.SourceTypeErasure(argument, c.FuncCtx)
+		argumentBinding := nominalBinding
+		base := argument
+		for base.IsArray() {
+			base = base.ElementType()
+		}
+		if _, variable := types.TypeVariableName(base); variable {
+			argumentBinding = binding
+		} else if name, nominal := types.RawClassFQN(base); nominal && c.FuncCtx.IsTypeParam(name) {
+			// A nominal class is not the caller's same-spelled variable. This
+			// unqualified spelling cannot establish a source declaration view.
+			return nil, false
+		}
+		actualArgument, known := values.SourceTypeErasure(argument, argumentBinding)
 		if !known || !callbinding.Reference(actualArgument) {
 			return nil, false
 		}
@@ -126,7 +163,10 @@ func (c *ClassObjectDumper) nativeCapturedAnonymousParentType(declaration *state
 			if _, parameterized := types.AsParameterizedType(bound); parameterized {
 				return nil, false
 			}
-			boundDescriptor, known := values.SourceTypeErasure(bound, c.FuncCtx)
+			// This parser admits concrete class/interface bounds only. Those
+			// names belong to the target declaration, so a same-name caller
+			// formal must not replace the nominal bound with its own erasure.
+			boundDescriptor, known := values.SourceTypeErasure(bound, nominalBinding)
 			if !known || !callbinding.Reference(boundDescriptor) || !callbinding.Assignable(actualArgument, boundDescriptor, provider) {
 				return nil, false
 			}

@@ -4,9 +4,9 @@
   "latest_measured_ci_head": "d30f48189b47ba9afe57b6971437434fccce82b9",
   "latest_measured_ci_run": 39441005032,
   "latest_measured_completed_parents": 2663,
-  "local_followup_go_manifest_sha256": "2a74ebcdb620b6ea0679f307da7c2dadbb13e054d953c52359d5dbf367fff496",
+  "local_followup_go_manifest_sha256": "32f74be1321fd66814a5583749e5ce7a73e8f21fb32764cb771c4a8c90fc3381",
   "local_followup_revision": null,
-  "local_followup_roots": 2,
+  "local_followup_roots": 6,
   "measured_checkout_heads": [
     "8f3a843a53c2716671919ddecb0dfff51121aec7",
     "9c94287899bfb2f7cff6eeb713212ab570e46649",
@@ -2783,7 +2783,13 @@
     "TestNativeSerializableRepeatedFactoriesCannotCrossOriginalReturnRoutes": 0.4,
     "TestNativeSerializableSourcePacketsRequireActualOwnedJavaCode": 0.001,
     "TestAdversarialSerializableCapturingClassCannotChangeBinaryIdentity": 1.12,
-    "TestNativeSerializableSnapshotsPreserveExistingAuthorityLimits": 0.03
+    "TestNativeSerializableSnapshotsPreserveExistingAuthorityLimits": 0.03,
+    "TestAdversarialAnonymousCaptureKeepsNominalBoundNamespace": 10.22,
+    "TestAdversarialCapturedAnonymousSupertypeKeepsGenericDeclarationAndABI": 66.53,
+    "TestNativeCapturedAnonymousBoundsCannotBorrowCallerFormals": 3.11,
+    "TestNativeCapturedAnonymousLexicalContextRequiresPhysicalBindings": 0.89,
+    "TestNativeCapturedAnonymousLexicalMethodShadowRetainsOriginalBound": 0.75,
+    "TestNativeCapturedAnonymousOuterBoundKeepsItsDeclarationEnvironment": 0.36
   },
   "source_runs": [
     37850493191,
@@ -2797,5 +2803,5 @@
     39434553509,
     39441005032
   ],
-  "local_followup_base_revision": "0fc3c1494b46e60eaf1f414e78409f583fd28493"
+  "local_followup_base_revision": "137a6a059a09297c508360979a1b33c42191d8f1"
 }
