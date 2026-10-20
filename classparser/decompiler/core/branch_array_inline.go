@@ -66,12 +66,12 @@ func (d *Decompiler) privateArrayFillUnobservable(first, last *Node, firstOp, la
 // visible. Registration alone permits no motion; both inlining passes still
 // require a private allocation/store/invocation path and complete use evidence.
 func (d *Decompiler) RegisterNestedBranchArrayCalls() {
-	if d == nil || d.Work != nil && (d.Work.CheckAlloc(int64(len(d.opcodeIdToRef)+len(d.opCodes)+len(d.branchArrayCalls)+len(d.valueTernaryMerges)+1)*128) != nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opcodeIdToRef)+len(d.opCodes)+len(d.branchArrayCalls))) != nil) {
+	if d == nil || d.Work != nil && d.Work.Check() != nil || len(d.opcodeIdToRef) == 0 {
 		return
 	}
 	dupRefs := map[string]bool{}
 	for op, infos := range d.opcodeIdToRef {
-		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(infos))) != nil {
+		if d.Work != nil && d.Work.Charge(workbudget.CounterGraphScans, int64(len(infos))+1) != nil {
 			return
 		}
 		if op == nil || op.Instr == nil {
@@ -81,10 +81,22 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 		case OP_DUP, OP_DUP_X1, OP_DUP_X2, OP_DUP2, OP_DUP2_X1, OP_DUP2_X2:
 			for _, info := range infos {
 				if ref, ok := info[0].(*values.JavaRef); ok && ref != nil {
+					if !dupRefs[ref.VarUid] && d.Work != nil && d.Work.CheckAlloc(int64(len(dupRefs)+1)*128) != nil {
+						return
+					}
 					dupRefs[ref.VarUid] = true
 				}
 			}
 		}
+	}
+	// Every registered argument below must have a duplicated reference.
+	// Without one, no constructor or source-DAG discovery can add a call.
+	// Avoid allocating/traversing those structures for an inapplicable pass.
+	if len(dupRefs) == 0 {
+		return
+	}
+	if d.Work != nil && (d.Work.CheckAlloc(int64(len(d.opcodeIdToRef)+len(d.opCodes)+len(d.branchArrayCalls)+len(d.valueTernaryMerges)+1)*128) != nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opCodes)+len(d.branchArrayCalls))) != nil) {
+		return
 	}
 	seenCalls := map[*values.FunctionCallExpression]bool{}
 	for _, candidate := range d.branchArrayCalls {
@@ -206,7 +218,7 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 // a constructor's source type/target context. Unknown/cyclic/excess work yields
 // no discovery rather than a partially inspected tree.
 func (d *Decompiler) branchArraySourceConstructors(root values.JavaValue) []values.JavaValue {
-	if d == nil || d.Work != nil && d.Work.CheckAlloc(512*128) != nil {
+	if d == nil || root == nil || d.Work != nil && d.Work.CheckAlloc(512*128) != nil {
 		return nil
 	}
 	remaining := 512

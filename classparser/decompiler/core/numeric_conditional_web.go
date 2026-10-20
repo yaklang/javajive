@@ -4,6 +4,7 @@ import (
 	"github.com/yaklang/javajive/classparser/decompiler/core/utils"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values"
 	"github.com/yaklang/javajive/classparser/decompiler/core/values/types"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // ISTORE retains the whole computational int word. A narrow source arm in a
@@ -11,7 +12,7 @@ import (
 // result. A complete single-definition web owns its declaration and its loads;
 // do not widen a simulator ref shared with an earlier narrow lifetime.
 func (d *Decompiler) restoreNumericConditionalWebs() {
-	if len(d.ExceptionTable) != 0 || len(d.opCodes) > 8192 {
+	if d == nil || len(d.ExceptionTable) != 0 || len(d.opCodes) > 8192 || d.getenv("JDEC_LIVEINTERVAL_OFF") != "" || !d.hasNumericConditionalStore() {
 		return
 	}
 	webs := d.localUpdateSourceWebs()
@@ -103,4 +104,23 @@ func (d *Decompiler) restoreNumericConditionalWebs() {
 		}
 		d.bindProvedPrimitiveWeb(webs, web, stores[web], types.JavaInteger)
 	}
+}
+
+// An original int store consuming a conditional is necessary for every
+// rewrite above. Prove applicability before constructing source-update webs.
+// This inventory grants no rebinding permission; the complete web, lifetime,
+// descriptor and numeric-domain proofs remain mandatory in the main pass.
+func (d *Decompiler) hasNumericConditionalStore() bool {
+	if d.Work != nil && (d.Work.Check() != nil || d.Work.Charge(workbudget.CounterGraphScans, int64(len(d.opcodeIdToRef))) != nil) {
+		return false
+	}
+	for op := range d.opcodeIdToRef {
+		if op == nil || op.Instr == nil || !dynamicPrimitiveStore(op.Instr.OpCode, types.JavaInteger) || len(op.stackConsumed) != 1 {
+			continue
+		}
+		if conditional, ok := dynamicCaptureSeed(op.stackConsumed[0]).(*values.TernaryExpression); ok && conditional != nil {
+			return true
+		}
+	}
+	return false
 }

@@ -303,7 +303,7 @@ func nativeLambdaSourcePacketArrow(source, packet string, work *workbudget.Budge
 // Source spelling only locates already certified body packets. It never
 // identifies an original method or grants permission to reconstruct a body.
 func nativeLambdaSourceArrows(source string, work *workbudget.Budget) ([]int, bool) {
-	if len(source) > 16<<20 || !nativeProofWork(work, int64(len(source))+1) || work != nil && work.CheckAlloc(4096*8) != nil {
+	if len(source) > 16<<20 || !nativeProofWork(work, int64(len(source))+1) {
 		return nil, false
 	}
 	var positions []int
@@ -316,6 +316,15 @@ func nativeLambdaSourceArrows(source string, work *workbudget.Budget) ([]int, bo
 		if source[i] == '-' && i+1 < len(source) && source[i+1] == '>' {
 			if len(positions) == 4096 {
 				return nil, false
+			}
+			if len(positions) == cap(positions) {
+				capacity := max(1, 2*cap(positions))
+				if work != nil && work.CheckAlloc(int64(capacity)*8) != nil {
+					return nil, false
+				}
+				grown := make([]int, len(positions), capacity)
+				copy(grown, positions)
+				positions = grown
 			}
 			positions = append(positions, i)
 			i++

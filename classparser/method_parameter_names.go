@@ -31,9 +31,6 @@ func (c *ClassObjectDumper) originalOrdinaryMethodParameterNames(method *MemberI
 	if name == "<clinit>" || method.AccessFlags&(0x1000|0x0040|0x0100) != 0 {
 		return nil, true
 	}
-	if name == "<init>" && !c.constructorHasOnlySourceParameters(method, descriptor) {
-		return nil, true
-	}
 	var table *UnparsedAttribute
 	for _, a := range method.Attributes {
 		if !nativeProofWork(c.Work, 1) {
@@ -52,6 +49,12 @@ func (c *ClassObjectDumper) originalOrdinaryMethodParameterNames(method *MemberI
 		}
 	}
 	if table == nil {
+		return nil, true
+	}
+	// There is no constructor naming projection to prove when the original
+	// has no MethodParameters attribute. Inspect the physical owner only for
+	// a present table; unrelated InnerClasses rows must not consume that work.
+	if name == "<init>" && !c.constructorHasOnlySourceParameters(method, descriptor) {
 		return nil, true
 	}
 	if c.obj.MajorVersion < 45 || table.Length != uint32(len(table.Info)) || len(table.Info) != 1+4*len(physical) || int(table.Info[0]) != len(physical) || !nativeProofWork(c.Work, int64(len(table.Info))) || c.Work != nil && c.Work.CheckAlloc(int64(len(physical))*192) != nil {
