@@ -30,7 +30,7 @@ func TestAdversarialConstructorBoundReferenceRequiresOriginalEvaluationAndBindin
 				}
 			}
 			files := compileLambdaParameterMetadataFixture(t, compiler, profile, constructorBoundReferenceFamilyFixture, "BoundConstructorOwner", "none", false)
-			for _, variant := range []string{"original", "unknown old renderer", "unsealed factory", "changed capture", "copied parameter", "changed source receiver type", "wrong check receiver", "missing factory PC", "wrong check PC", "wrong delegation owner", "nonconstructor", "different compiler protocol", "extra prefix", "protected prefix", "missing declarations", "wrong declaration owner", "incomplete member family", "member overload", "varargs member", "static member", "method generic member", "noninterface target", "missing SAM signature", "changed SAM signature", "changed constructor signature", "duplicate original constructor signature", "missing bootstrap", "duplicate bootstrap", "different bootstrap", "static implementation handle", "special implementation handle", "extra bootstrap operand", "different receiver descriptor", "budget", "canceled"} {
+			for _, variant := range []string{"original", "factory consumed before delegation", "detached constructor declaration", "unknown old renderer", "unsealed factory", "changed capture", "copied parameter", "changed source receiver type", "wrong check receiver", "missing factory PC", "wrong check PC", "wrong delegation owner", "nonconstructor", "different compiler protocol", "extra prefix", "protected prefix", "missing declarations", "wrong declaration owner", "incomplete member family", "member overload", "varargs member", "static member", "method generic member", "noninterface target", "missing SAM signature", "changed SAM signature", "changed constructor signature", "duplicate original constructor signature", "missing bootstrap", "duplicate bootstrap", "different bootstrap", "static implementation handle", "special implementation handle", "extra bootstrap operand", "different receiver descriptor", "budget", "canceled"} {
 				t.Run(variant, func(t *testing.T) {
 					obj, err := Parse(bytes.Clone(files["BoundConstructorOwner$Parts.class"]))
 					if err != nil {
@@ -144,6 +144,16 @@ func TestAdversarialConstructorBoundReferenceRequiresOriginalEvaluationAndBindin
 					}
 					b := boot.BootstrapMethods[0]
 					switch variant {
+					case "factory consumed before delegation":
+						originalArgumentIndex := append([]byte(nil), code.Code[14:16]...)
+						originalDelegateIndex := append([]byte(nil), code.Code[17:19]...)
+						tail := []byte{core.OP_POP, core.OP_ACONST_NULL, core.OP_ILOAD_2, core.OP_INVOKESTATIC, originalArgumentIndex[0], originalArgumentIndex[1], core.OP_INVOKESPECIAL, originalDelegateIndex[0], originalDelegateIndex[1], core.OP_RETURN}
+						code.Code = append(append([]byte(nil), code.Code[:12]...), tail...)
+						delegate.OriginPC, argument.OriginPC = 18, 15
+						beforeCode = bytes.Clone(code.Code)
+					case "detached constructor declaration":
+						copy := *method
+						method = &copy
 					case "changed capture":
 						copy := *receiver
 						factory.Captures[0] = &copy

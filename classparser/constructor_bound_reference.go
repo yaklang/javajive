@@ -91,6 +91,9 @@ func (c *ClassObjectDumper) constructorBoundReferenceSource(code *CodeAttribute,
 	if decoder.ParseOpcode() != nil || !constructorPreludeOutsideHandlers(code, delegate.OriginPC, decoder, c.Work) || !constructorOriginalInvoke(decoder, delegate, func(index int) values.JavaValue { return GetValueFromCP(c.ConstantPool, index) }) || !constructorOriginalInvoke(decoder, check, func(index int) values.JavaValue { return GetValueFromCP(c.ConstantPool, index) }) {
 		return body
 	}
+	if !c.constructorReferenceFactoryPort(method, code, pc, delegate, slot) {
+		return body
+	}
 	ops := constructorMotionOps(decoder)
 	if len(ops) < 7 || core.GetRetrieveIdx(ops[0]) != 0 || !constructorMotionLoad(ops[0], "Ljava/lang/Object;") || core.GetRetrieveIdx(ops[1]) != slot || !constructorMotionLoad(ops[1], physical[parameterIndex]) || ops[2].Instr.OpCode != core.OP_DUP || !nativeMemberNullCheck(c.obj, ops[3]) || ops[4].Instr.OpCode != core.OP_POP || ops[5].Instr.OpCode != core.OP_INVOKEDYNAMIC || int(ops[3].CurrentOffset) != check.OriginPC || int(ops[5].CurrentOffset) != pc || pc >= delegate.OriginPC {
 		return body
