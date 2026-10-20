@@ -2770,7 +2770,20 @@
     "TestAdversarialSourceLayoutSubsetKeepsOriginalPeerBodyAndEarlyCapture": 9.448,
     "TestAdversarialSourceLayoutSubsetPreservesIndependentGenericBinders": 4.931,
     "TestAdversarialUnknownBootstrapSourceCannotPublishValuesOrLoseVoidEffects": 3.64,
-    "TestAdversarialUnsupportedConstantsCannotPublishValuesOrSkipResolution": 1.84
+    "TestAdversarialUnsupportedConstantsCannotPublishValuesOrSkipResolution": 1.84,
+    "TestAdversarialInheritedSerializableTargetsCannotInventSerializationProtocol": 7.78,
+    "TestAdversarialSerializableConstructorPreservesNullFallbackAndTransientField": 13.59,
+    "TestAdversarialSerializableStaticReferencesRetainOriginalDeserializerProtocol": 13.16,
+    "TestNativeSerializableEmissionRollbackKeepsFactoryButNotFailedRender": 0.001,
+    "TestNativeSerializableFingerprintsRequireActualCodeAndBoundedObservation": 0.001,
+    "TestNativeSerializableHelperRequiresAllActualFactoryTargetAncestries": 0.51,
+    "TestNativeSerializableStaticTargetRequiresActualExternalDeclaringScope": 0.42,
+    "TestNativeSerializableReferenceProtocolRequiresOriginalDecisionAutomaton": 2.28,
+    "TestNativeSerializableReferencePublicationCannotBorrowDifferentDeclarations": 1.03,
+    "TestNativeSerializableRepeatedFactoriesCannotCrossOriginalReturnRoutes": 0.4,
+    "TestNativeSerializableSourcePacketsRequireActualOwnedJavaCode": 0.001,
+    "TestAdversarialSerializableCapturingClassCannotChangeBinaryIdentity": 1.12,
+    "TestNativeSerializableSnapshotsPreserveExistingAuthorityLimits": 0.03
   },
   "source_runs": [
     37850493191,

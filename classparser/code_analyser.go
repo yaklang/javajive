@@ -223,6 +223,10 @@ func parseBytesCodeWithLambdaCaptureOrder(dumper *ClassObjectDumper, codeAttr *C
 		}
 	}
 	parser.OriginalLambdaDeclaration = dumper.originalLambdaDeclaration
+	originalMethod := dumper.CurrentMethod
+	parser.SerializableLambdaSource = func(request core.CallSiteRequest) (core.SerializableReferenceSource, bool) {
+		return dumper.serializableReferenceFactorySource(originalMethod, codeAttr, request)
+	}
 	dumpLambda := func(name, desc string, id *utils.VariableId, captured []values.JavaValue, adapter *core.LambdaReferenceAdapter, pc int, hasPC bool) (core.LambdaBodySource, error) {
 		if dumper.originalLambdaDeclaration(dumper.obj.GetClassName(), name, desc) != core.LambdaDeclarationSyntheticBody {
 			return core.LambdaBodySource{}, fmt.Errorf("lambda source body is not an eligible original synthetic declaration")

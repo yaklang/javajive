@@ -266,7 +266,7 @@ func directSamTokens(desc string, variables bool) ([]string, bool) {
 // expression at that proven SAM without claiming those erased arguments are a
 // complete invariant local type. A raw local retains legal unchecked conversion
 // to a later, declaration-proved Foo<Collection<String>> consumer.
-func retainErasedFunctionalValue(v *values.CustomValue, raw, target types.JavaType) *values.CustomValue {
+func retainErasedFunctionalValue(v *values.CustomValue, raw, target types.JavaType, markers ...types.JavaType) *values.CustomValue {
 	if v == nil || target == nil {
 		return v
 	}
@@ -274,7 +274,11 @@ func retainErasedFunctionalValue(v *values.CustomValue, raw, target types.JavaTy
 	copy.TypeFunc = func() types.JavaType { return raw }
 	if write := v.WriteFunc; write != nil {
 		copy.WriteFunc = func(ctx *class_context.ClassContext, out *workbudget.Writer) error {
-			if err := out.WriteString("(" + raw.String(ctx) + ") ((" + target.String(ctx) + ") ("); err != nil {
+			creation := target.String(ctx)
+			for _, marker := range markers {
+				creation += " & " + marker.String(ctx)
+			}
+			if err := out.WriteString("(" + raw.String(ctx) + ") ((" + creation + ") ("); err != nil {
 				return err
 			}
 			if err := write(ctx, out); err != nil {

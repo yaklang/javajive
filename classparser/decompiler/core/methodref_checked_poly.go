@@ -14,7 +14,7 @@ import (
 // Infer that target from original generic declarations and both SAM descriptors,
 // then separately prove which ordinary member source overload resolution picks.
 // A consumer's inferred type arguments are not evidence for either decision.
-func methodRefCheckedPolyTarget(d *Decompiler, req CallSiteRequest, static []values.JavaValue, impl *values.JavaClassMember, raw types.JavaType) values.JavaValue {
+func methodRefCheckedPolyTarget(d *Decompiler, req CallSiteRequest, static []values.JavaValue, impl *values.JavaClassMember, raw types.JavaType, markers ...types.JavaType) values.JavaValue {
 	if d == nil || d.FunctionContext == nil || impl == nil || impl.RefKind != RefInvokeStatic || len(req.DynamicArgs) != 0 || len(static) != 3 || d.blockPartialFunctionalTarget || class_context.SafeIdentifier(impl.Member) != impl.Member {
 		return nil
 	}
@@ -61,7 +61,7 @@ func methodRefCheckedPolyTarget(d *Decompiler, req CallSiteRequest, static []val
 	value.InstantiatedMtdDesc = actual
 	// Freeze only the creation target. Later invariant consumers may see its
 	// original erasure, but cannot widen the generated SAM's input check.
-	return retainErasedFunctionalValue(value, erasedView, target)
+	return retainErasedFunctionalValue(value, erasedView, target, markers...)
 }
 
 // Fixed-arity, non-generic static references use the instantiated SAM inputs

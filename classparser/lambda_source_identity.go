@@ -73,7 +73,7 @@ func (c *ClassObjectDumper) native8LambdaSourceIdentityEvents(source string, mem
 		// A dropped trailing implementation would leave every remaining
 		// ordinal apparently correct. Private synthetic declarations
 		// still need actual consumed body receipts, not just a matching prefix.
-		if (method.AccessFlags == 0x100a || method.AccessFlags == 0x1002) && c.lambdaMethodSourceBodies[method] == nil {
+		if (method.AccessFlags == 0x100a || method.AccessFlags == 0x1002) && c.lambdaMethodSourceBodies[method] == nil && !(c.serializableReferenceSourceClosed && c.serializableReferencePlan != nil && c.serializableReferencePlan.helper == method) {
 			return nil, false
 		}
 	}

@@ -30,42 +30,48 @@ import (
 )
 
 type ClassObjectDumper struct {
-	compilerReferenceFactorySeen   bool
-	methodSourceRequestSerial      uint64
-	lambdaMethodSourceBodies       map[*MemberInfo]*lambdaMethodSourceReceipt
-	sourceDeclarationAccess        uint16
-	sourceDeclarationAccessKnown   bool
-	nativeSourceAssertions         *nativeMemberAssertion
-	nativeAssertionInitProjection  *nativeMemberAssertion
-	nativeStandaloneAssertion      *nativeStandaloneAssertion
-	nativeStandaloneAssertionOff   bool
-	originalInitializerStatus      map[string]bool
-	originalInitializerStatusReady bool
-	nativeMemberLookup             func(string) *nativeMemberClass
-	nativeFreshCaller              *nativeFreshCallerIdentity
-	nativeMemberCalls              map[string]map[int]*nativeMemberAllocation
-	nativeMemberBody               []statements.Statement
-	nativeConstructorEnclosing     *values.JavaRef
-	nativeSourceNamesReady         bool
-	nativeMemberChecks             map[string]map[int]bool
-	nativeEnumConstantCurrent      *nativeEnumConstantBody
-	nativeMemberRoot               *nativeMemberFamily
-	nativeMethodLocalCurrent       *nativeMethodLocalClass
-	nativeMethodLocalPlacements    map[statements.Statement][]string
-	nativeMemberCurrent            *nativeMemberClass
-	nativeAnonymousLambdaCurrent   *nativeMemberClass
-	nativeRegistrationScope        *nativeMemberRegistrationScope
-	nativeRenderedMemberNames      []string
-	nativeMemberUnitPrefix         string
-	nativeAnonymousForest          *nativeAnonymousForest
-	nativeAnonymousBindings        map[string]string
-	nativeAnonymousRoot            *nativeAnonymousFamily
-	nativeCaptureFields            map[string]string
-	nativeCapturedReads            map[string]map[int]string
-	nativeTypeParams               []string
-	nativeCaptureFailed            bool
-	nativeCaptureTypes             map[string]types.JavaType
-	nativeOuterContext             *class_context.ClassContext
+	serializableReferenceReady            bool
+	serializableReferencePlan             *serializableReferenceProtocol
+	serializableReferencePackets          map[int]*serializableReferencePacket
+	serializableReferenceEmissions        map[*serializableReferencePacket]*serializableReferenceEmission
+	serializableReferenceFingerprintCount int
+	serializableReferenceSourceClosed     bool
+	compilerReferenceFactorySeen          bool
+	methodSourceRequestSerial             uint64
+	lambdaMethodSourceBodies              map[*MemberInfo]*lambdaMethodSourceReceipt
+	sourceDeclarationAccess               uint16
+	sourceDeclarationAccessKnown          bool
+	nativeSourceAssertions                *nativeMemberAssertion
+	nativeAssertionInitProjection         *nativeMemberAssertion
+	nativeStandaloneAssertion             *nativeStandaloneAssertion
+	nativeStandaloneAssertionOff          bool
+	originalInitializerStatus             map[string]bool
+	originalInitializerStatusReady        bool
+	nativeMemberLookup                    func(string) *nativeMemberClass
+	nativeFreshCaller                     *nativeFreshCallerIdentity
+	nativeMemberCalls                     map[string]map[int]*nativeMemberAllocation
+	nativeMemberBody                      []statements.Statement
+	nativeConstructorEnclosing            *values.JavaRef
+	nativeSourceNamesReady                bool
+	nativeMemberChecks                    map[string]map[int]bool
+	nativeEnumConstantCurrent             *nativeEnumConstantBody
+	nativeMemberRoot                      *nativeMemberFamily
+	nativeMethodLocalCurrent              *nativeMethodLocalClass
+	nativeMethodLocalPlacements           map[statements.Statement][]string
+	nativeMemberCurrent                   *nativeMemberClass
+	nativeAnonymousLambdaCurrent          *nativeMemberClass
+	nativeRegistrationScope               *nativeMemberRegistrationScope
+	nativeRenderedMemberNames             []string
+	nativeMemberUnitPrefix                string
+	nativeAnonymousForest                 *nativeAnonymousForest
+	nativeAnonymousBindings               map[string]string
+	nativeAnonymousRoot                   *nativeAnonymousFamily
+	nativeCaptureFields                   map[string]string
+	nativeCapturedReads                   map[string]map[int]string
+	nativeTypeParams                      []string
+	nativeCaptureFailed                   bool
+	nativeCaptureTypes                    map[string]types.JavaType
+	nativeOuterContext                    *class_context.ClassContext
 
 	options       DecompileOptions
 	report        *DecompileResult
@@ -2108,6 +2114,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	if c.Work != nil && c.Work.Err() != nil {
 		return "", c.Work.Err()
 	}
+	if !c.closeSerializableReferenceSource(full, methods) {
+		return "", fmt.Errorf("serializable reference/deserializer source packet is not closed")
+	}
 	if reordered, closed := c.native8LambdaSourceIdentityLayout(full, members, methods); closed {
 		full = reordered
 	} else {
@@ -2125,6 +2134,9 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 			return "", c.Work.Err()
 		}
 		return c.retryWithoutStandaloneAssertion()
+	}
+	if c.serializableReferencePlan != nil && !c.closeSerializableReferenceSource(full, methods) {
+		return "", fmt.Errorf("final serializable reference source changed after compiler layout")
 	}
 	return full, nil
 }
@@ -5209,6 +5221,9 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				return nil, ordinaryErr
 			}
 			dumped.ordinaryConstructorSource = ordinaryThrowsScope
+			if !c.recordSerializableReferenceGraph(dumped, method, codeAttr, statementList, sourceCode) {
+				return nil, fmt.Errorf("serializable reference method graph is not closed")
+			}
 			code = sourceCode
 		}
 	}
@@ -5460,6 +5475,18 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 	}
 	dumped.methodName = name
 	dumped.bodyCode = code
+	if graph := dumped.serializableReferences; graph != nil {
+		if graph.renderedBody != dumped.bodyCode {
+			return nil, fmt.Errorf("serializable reference body changed after its graph was sealed")
+		}
+		if graph.publishedCode != "" && graph.publishedCode != dumped.code {
+			return nil, fmt.Errorf("serializable reference declaration was already published differently")
+		}
+		// Only this concrete declaration writer seals the method header and
+		// body. A later cached-text edit cannot move its factory to a new
+		// declaration while retaining the original member/source receipt.
+		graph.publishedCode = dumped.code
+	}
 	if scope := dumped.ordinaryConstructorSource; scope != nil {
 		scope.publishedCode = dumped.code
 		c.ordinaryConstructorEmissionSeen = true
@@ -5468,8 +5495,9 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 }
 
 type dumpedMethods struct {
-	compilerReference *lambdaCompilerReference
-	lambdaEmission    *lambdaMethodEmission
+	serializableReferences *serializableReferenceMethodGraph
+	compilerReference      *lambdaCompilerReference
+	lambdaEmission         *lambdaMethodEmission
 	// Only the concrete declaration writer sets these offsets. Class recovery
 	// may edit an unsealed body without parsing or reinterpreting its header.
 	sourceBodyStart, sourceBodyEnd int
@@ -13462,6 +13490,14 @@ func (c *ClassObjectDumper) DumpMethods() ([]*dumpedMethods, error) {
 		descriptor, err := c.obj.getUtf8(method.DescriptorIndex)
 		if err != nil {
 			return nil, utils.Wrapf(err, "getUtf8(%v) failed", method.DescriptorIndex)
+		}
+		if name == "$deserializeLambda$" {
+			c.prepareSerializableReferenceProtocol()
+			if c.serializableReferencePlan != nil && c.serializableReferencePlan.helper == method {
+				// Final publication still requires every original factory's
+				// retained graph and emitted source before regeneration is accepted.
+				continue
+			}
 		}
 		if name == "<init>" && c.nativeEnumConstantCurrent != nil && nativeEnumConstantConstructorOwned(c.nativeMemberRoot, c.obj, descriptor) {
 			continue

@@ -114,6 +114,7 @@ type Decompiler struct {
 	// Original declaration metadata qualifies source-body rendering. A source
 	// request or a method-name convention cannot provide that permission.
 	OriginalLambdaDeclaration        func(owner, name, descriptor string) LambdaOriginalDeclaration
+	SerializableLambdaSource         func(CallSiteRequest) (SerializableReferenceSource, bool)
 	DumpClassLambdaMethod            func(name, desc string, id *utils2.VariableId, captured []values.JavaValue) (string, error)
 	DumpClassLambdaMethodWithAdapter func(name, desc string, id *utils2.VariableId, captured []values.JavaValue, adapter *LambdaReferenceAdapter) (string, error)
 	// The PC is supplied by the original invokedynamic request, never inferred

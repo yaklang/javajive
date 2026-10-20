@@ -24,12 +24,20 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 		return invalidDispatch(req, FamilyLambda, DiagBootstrapArgMismatch, err.Error(), resultType)
 	}
 	static := req.StaticArgs
+	var serializedSource SerializableReferenceSource
+	serializable := false
 	if req.Identity.Name == "altMetafactory" {
-		res, handled := inspectAltMetafactoryFlags(req, resultType)
+		flags, typed := intFromLiteral(static[3])
+		serializable = typed && flags&lambdaFlagSerializable != 0
+		qualified := false
+		if serializable && d != nil && d.SerializableLambdaSource != nil {
+			serializedSource, qualified = d.SerializableLambdaSource(req)
+		}
+		res, handled := inspectAltMetafactoryFlagsWithSerializableSource(req, resultType, qualified)
 		if handled {
 			return res
 		}
-		flags, _ := intFromLiteral(static[3])
+		flags, _ = intFromLiteral(static[3])
 		next := 4
 		if flags&lambdaFlagMarkers != 0 {
 			n, _ := intFromLiteral(static[next])
@@ -69,6 +77,29 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 
 	if d == nil || d.FunctionContext == nil {
 		return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, "lambda reconstruction requires decompiler context", resultType)
+	}
+	if serializable {
+		return t19SerializableReference(req, d, static, impl, resultType, serializedSource)
+	}
+	// A typed Serializable ancestor does not set the original bootstrap's
+	// serialization flag. Source lambda syntax cannot preserve that distinction.
+	if name, known := types.RawClassFQN(resultType); known {
+		if inherited, _ := LambdaInterfaceSerializable(d.FunctionContext.InvocationMetadata, name, d.Work); inherited {
+			return unsupportedLambdaSource(req, "original factory disables serialization on a Serializable target")
+		}
+	}
+	if req.Identity.Name == "altMetafactory" {
+		flags, _ := intFromLiteral(req.StaticArgs[3])
+		if flags&lambdaFlagMarkers != 0 {
+			count, _ := intFromLiteral(req.StaticArgs[4])
+			for _, marker := range req.StaticArgs[5 : 5+count] {
+				if name, known := types.RawClassFQN(marker.Type()); known {
+					if inherited, _ := LambdaInterfaceSerializable(d.FunctionContext.InvocationMetadata, name, d.Work); inherited {
+						return unsupportedLambdaSource(req, "original factory disables serialization on a Serializable marker")
+					}
+				}
+			}
+		}
 	}
 	previousOrigin := d.lambdaFactoryOrigin
 	d.lambdaFactoryOrigin = &req.OriginPC
