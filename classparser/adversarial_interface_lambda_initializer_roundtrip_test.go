@@ -1,7 +1,10 @@
 package javaclassparser
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -45,6 +48,80 @@ public class InitPacketDriver{public static void main(String[]args){Throwable fi
  if(!(second instanceof NoClassDefFoundError)||!InitPacketEffects.trace.equals("F"))throw new AssertionError("initialization retried or cause category changed",second);
  System.out.println("interface:initializer:first-failure:identity:no-retry");}}`
 	testInterfaceLambdaInitializerFamily(t, source, "interface:initializer:first-failure:identity:no-retry\n")
+}
+
+// The archive oracle above exercises lexical ownership and cleanup policies.
+// Reopen the public raw-class API separately: it has explicit decompile modes,
+// and the compiler must never see the original target class as a fallback.
+func TestAdversarialInterfaceLambdaInitializerRawModesKeepOriginalBinaryCaller(t *testing.T) {
+	modern, java := t04Tools(t)
+	for _, profile := range []SourceCompilerProfile{ModernJavac, NativeJavac8} {
+		t.Run(string(profile), func(t *testing.T) {
+			compiler := modern
+			if profile == NativeJavac8 {
+				compiler = os.Getenv("JAVA8_JAVAC")
+				if compiler == "" {
+					t.Skip("JAVA8_JAVAC required")
+				}
+			}
+			for _, debug := range []string{"none", "source,lines,vars"} {
+				t.Run(debug, func(t *testing.T) {
+					files := compileLambdaParameterMetadataFixture(t, compiler, profile, interfaceLambdaInitializerFixture, "InitPacketDriver", debug, true)
+					write := func(dir, name string, raw []byte) {
+						t.Helper()
+						if err := os.WriteFile(filepath.Join(dir, name), raw, 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					original := t.TempDir()
+					for name, raw := range files {
+						write(original, name, raw)
+					}
+					want := t04RunJava(t, java, original, "InitPacketDriver")
+					if want != "5:interface:initializer:factory:order:identity\n" {
+						t.Fatal("independent original initializer behavior", want)
+					}
+					for _, mode := range []DecompileMode{Precision, Compatibility} {
+						t.Run(string(mode), func(t *testing.T) {
+							input := bytes.Clone(files["InitPacketContract.class"])
+							result, err := DecompileWithOptions(input, DecompileOptions{Mode: mode, SourceCompiler: profile, TargetSourceVersion: 8, EnvSnapshot: map[string]string{}, Resolve: func(name string) ([]byte, bool) {
+								raw, found := files[name+".class"]
+								return bytes.Clone(raw), found
+							}})
+							if !bytes.Equal(input, files["InitPacketContract.class"]) || err != nil || result.Status != "complete" || strings.Contains(result.Source, DecompileStubMarker) {
+								t.Fatalf("mode=%s status=%s error=%v diagnostics=%+v\n%s", mode, result.Status, err, result.Diagnostics, result.Source)
+							}
+							out := t.TempDir()
+							for name, raw := range files {
+								if name != "InitPacketContract.class" {
+									write(out, name, raw)
+								}
+							}
+							write(out, "InitPacketContract.java", []byte(result.Source))
+							args := []string{"-proc:none", "--release", "8"}
+							if profile == NativeJavac8 {
+								args = []string{"-proc:none", "-source", "8", "-target", "8"}
+							}
+							args = append(args, "-parameters", "-g:"+debug, "-cp", out, "-sourcepath", out, "-d", out, filepath.Join(out, "InitPacketContract.java"))
+							if log, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
+								t.Fatalf("compile with original target removed: %v\n%s\n%s", err, log, result.Source)
+							}
+							if got := t04RunJava(t, java, out, "InitPacketDriver"); got != want {
+								t.Fatalf("unchanged binary caller %q want %q", got, want)
+							}
+							candidate, err := os.ReadFile(filepath.Join(out, "InitPacketContract.class"))
+							if err != nil {
+								t.Fatal(err)
+							}
+							if constructorInvocationThrowsDeclarations(t, input) != constructorInvocationThrowsDeclarations(t, candidate) || lambdaParameterMetadataTables(t, input) != lambdaParameterMetadataTables(t, candidate) {
+								t.Fatal("original full declaration/parameter family changed")
+							}
+						})
+					}
+				})
+			}
+		})
+	}
 }
 
 func testInterfaceLambdaInitializerFamily(t *testing.T, fixture, want string) {

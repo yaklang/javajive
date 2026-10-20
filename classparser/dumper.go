@@ -1632,6 +1632,17 @@ func (c *ClassObjectDumper) DumpClass() (string, error) {
 	}
 
 	full := assemble()
+	if proposed, known := c.proposeLexicalLambdaMethodOrder(full, members, methods); known {
+		previous := methods
+		methods = proposed
+		candidate := assemble()
+		if c.native8LambdaSourceIdentitiesClosed(candidate, nil, methods) {
+			full = candidate
+		} else {
+			methods = previous
+			full = assemble()
+		}
+	}
 	if err := funcCtx.StaticMethodImports.Error(); err != nil {
 		if c.Work != nil && c.Work.Err() != nil {
 			return "", c.Work.Err()
