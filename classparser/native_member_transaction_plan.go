@@ -49,6 +49,9 @@ func (z *JarFS) prepareNativeMemberFamilyFromRoot(root *ClassObject, snap map[st
 	if !d.planNativeMemberAnonymousScopes(p) {
 		return nil
 	}
+	if !nativeMemberCompilerMetadataEligible(root, p, d.options.SourceCompiler, d.options.TargetSourceVersion, d.Work) {
+		return nil
+	}
 	// Ordinal completeness is a post-forest invariant. It grants no source
 	// access by itself; the following archive and permission proofs still run.
 	if !nativeMemberAccessorRegistrationsClosed(p, d.Work) {

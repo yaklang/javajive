@@ -23,7 +23,7 @@ func TestAdversarialIndependentStaticScopesKeepMutualDeclarationBinding(t *testi
 	}
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
-			files := compileLambdaParameterMetadataFixture(t, native, NativeJavac8, source, "CyclicA", debug, true)
+			files := compileIndependentOpaqueParentFixture(t, native, source, debug)
 			original := t.TempDir()
 			for name, data := range files {
 				if e := os.WriteFile(filepath.Join(original, name), data, 0600); e != nil {

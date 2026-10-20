@@ -17,13 +17,15 @@ func TestAdversarialIndependentSourceTransactionRejectsLatePeerFailure(t *testin
 	}
 	source := strings.Replace(independentSourceCycleFixture,
 		"int sum(){return Capsule.this.value+peer.get();}}Worker make(CyclicA.Capsule peer)",
-		"int sum(){return Capsule.this.value+peer.get();}IntUnaryOperator unproved(final String text){return value->value+text.length();}}Worker make(CyclicA.Capsule peer)", 1)
+		"int sum(){return Capsule.this.value+peer.get();}String unproved(){return \"opaque-body\";}}Worker make(CyclicA.Capsule peer)", 1)
 	if source == independentSourceCycleFixture {
 		t.Fatal("late peer fixture did not change")
 	}
+	source = strings.Replace(source, "rows++;", `if(!"opaque-body".equals(y.unproved()))throw new AssertionError("original custom bootstrap result");rows++;`, 1)
 	for _, debug := range []string{"none", "source,lines,vars"} {
 		t.Run(debug, func(t *testing.T) {
-			files := compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, source, "CyclicA", debug, true)
+			files := compileIndependentOpaqueParentFixture(t, compiler, source, debug)
+			files = installIndependentOpaqueLiteralBody(t, files, "CyclicB$Capsule$Worker", "unproved")
 			original := t.TempDir()
 			for name, raw := range files {
 				if err := os.WriteFile(filepath.Join(original, name), raw, 0600); err != nil {

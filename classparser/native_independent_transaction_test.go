@@ -15,7 +15,7 @@ func independentTransactionFixture(t *testing.T) map[string][]byte {
 	if compiler == "" {
 		t.Skip("original native8 compiler")
 	}
-	return compileLambdaParameterMetadataFixture(t, compiler, NativeJavac8, independentSourceCycleFixture, "CyclicA", "none", true)
+	return compileIndependentOpaqueParentFixture(t, compiler, independentSourceCycleFixture, "none")
 }
 func TestAdversarialIndependentSourceTransactionKeepsAtomicSourceAndPrivateScopes(t *testing.T) {
 	files := independentTransactionFixture(t)

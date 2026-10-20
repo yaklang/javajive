@@ -52,6 +52,18 @@ func (z *JarFS) nativeIndependentTransactionEntry(root *ClassObject, participant
 	key := "independent-static-scc\x00" + string(identity) + "\x00" + string(policy)
 	z.nativeMembersMu.Lock()
 	cached := z.nativeMemberTransactions[key]
+	// Conflicts must be rejected before eligibility can finish an independently
+	// valid standalone source. Recheck after the original-role/priority phase to
+	// cover concurrent namespace commitments while those proofs ran.
+	for _, name := range names {
+		for _, prefix := range []string{"", "independent-static\x00"} {
+			entry := z.nativeMembersCache[prefix+name+"\x00"+string(policy)]
+			if entry != nil && (entry.flatSourceCommitted || entry.transaction != nil && entry.transaction != cached) {
+				z.nativeMembersMu.Unlock()
+				return nil
+			}
+		}
+	}
 	z.nativeMembersMu.Unlock()
 	// A boundary graph can also contain ordinary top-level families. Reject
 	// those roles before claiming any participant's cache entry; otherwise a
@@ -112,7 +124,41 @@ func (z *JarFS) nativeIndependentTransactionEntry(root *ClassObject, participant
 	return z.loadNativeMemberTransaction(transaction, root.GetClassName())
 }
 
+func (z *JarFS) nativeIndependentParticipantRolesClosed(names []string, snap map[string]string, work *workbudget.Budget) bool {
+	var size int64
+	for _, name := range names {
+		raw, known := z.enumSiblingResolver()(name)
+		if !known || len(raw) > 2<<20 || int64(len(raw)) > (128<<20)-size || !nativeProofWork(work, int64(len(name)+len(raw))+1) {
+			return false
+		}
+		size += int64(len(raw))
+		if work != nil && work.CheckAlloc(size) != nil {
+			return false
+		}
+		reader := z.nativeMemberReader(nil)
+		reader.Work = work
+		object, err := reader.parseResolved(raw)
+		if err != nil || object.GetClassName() != name {
+			return false
+		}
+		reader = z.nativeMemberReader(object)
+		reader.Work = work
+		reader.options.EnvSnapshot = snap
+		certificate := reader.originalNativeMemberIndependentRoot()
+		if certificate == nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (z *JarFS) nativeIndependentParticipantsClosed(names []string, snap map[string]string, work *workbudget.Budget) bool {
+	// Complete every original role query before any smaller source publication.
+	// A mixed component must not publish a healthy first participant as a side
+	// effect of rejecting a later ordinary/foreign participant.
+	if !z.nativeIndependentParticipantRolesClosed(names, snap, work) {
+		return false
+	}
 	var size int64
 	for _, name := range names {
 		raw, known := z.enumSiblingResolver()(name)
