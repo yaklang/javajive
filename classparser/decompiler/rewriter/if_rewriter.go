@@ -217,8 +217,8 @@ func ifHasNormalFallthrough(ends, body []*core.Node) bool {
 	return false
 }
 
-// A shared expression followed by the opposite successor is a conditional
-// edge block, not that condition's unconditional continuation. Its other
+// A shared expression with the same continuation as the opposite arm is a
+// conditional edge block. That arm may be a larger bypassing region. Its other
 // incoming edge prevents dominance-based body collection from owning it.
 // Split only this edge, retaining one execution on each original path. No
 // allocation, invocation or exception is moved across the condition.
@@ -231,7 +231,7 @@ func splitSharedFallthroughExpression(manager *RewriteManager, condition *core.N
 		target, continuation := pair[0], pair[1]
 		st, ok := target.Statement.(*statements.ExpressionStatement)
 		if !ok || st.Expression == nil || len(target.Source) < 2 || len(target.Next) != 1 ||
-			target.Next[0] != continuation || target.HideNext != nil || target.IsTryCatch ||
+			!sharedExpressionOtherArmBypassesTarget(continuation, target, target.Next[0]) || target.HideNext != nil || target.IsTryCatch ||
 			target.IsCatchStart || target.IsCircle || target.IsInCircle || target.LoopBreak ||
 			len(target.EncodedJumps) != 0 || encodedJumpTo(condition, target) ||
 			utils2.IsDominate(manager.DominatorMap, condition, target) ||
@@ -241,11 +241,46 @@ func splitSharedFallthroughExpression(manager *RewriteManager, condition *core.N
 		copy := *st
 		edge := manager.NewNode(&copy)
 		edge.OriginPC, edge.HasOriginPC = target.OriginPC, target.HasOriginPC
-		edge.AddNext(continuation)
+		edge.AddNext(target.Next[0])
 		replaceNextInPlace(condition, target, edge)
 		manager.DominatorMap = GenerateDominatorTree(manager.RootNode)
 		return
 	}
+}
+
+// A shared one-statement edge block may precede a larger opposite arm.
+// Split only when every normal path through that arm reaches the same
+// continuation without entering the original shared block. This is edge
+// duplication, not hoisting: each original path still executes its effect once.
+func sharedExpressionOtherArmBypassesTarget(start, target, continuation *core.Node) bool {
+	if start == nil || target == nil || continuation == nil || start == target || continuation == target {
+		return false
+	}
+	states := map[*core.Node]uint8{}
+	var visit func(*core.Node, int) bool
+	visit = func(node *core.Node, depth int) bool {
+		if node == continuation {
+			return true
+		}
+		if node == nil || node == target || depth > 256 || len(states) >= 4096 {
+			return false
+		}
+		if state := states[node]; state != 0 {
+			return state == 2
+		}
+		if len(node.Next) == 0 || node.HideNext != nil || node.IsTryCatch || node.IsCatchStart || node.IsCircle || node.IsInCircle || len(node.EncodedJumps) != 0 || isMethodExitTerminator(node) {
+			return false
+		}
+		states[node] = 1
+		for _, next := range node.Next {
+			if !visit(next, depth+1) {
+				return false
+			}
+		}
+		states[node] = 2
+		return true
+	}
+	return visit(start, 0)
 }
 
 func sameProtectedMembership(root, a, b *core.Node) bool {

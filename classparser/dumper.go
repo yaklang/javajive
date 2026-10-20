@@ -4608,6 +4608,28 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 			// field, so the hoist guards below additionally require the class-wide store count <= 1.
 			fieldStoreTotal := c.constructorFieldStoreTotals()
 
+			// Branch layout contributes to the compiler's physical capture
+			// discovery. This changes only whole source arms, not IR effects.
+			priorBranchSwap := funcCtx.SourceBranchSwap
+			if isLambda && len(captureOrder) > 1 {
+				offset := 0
+				if method.AccessFlags&8 == 0 {
+					offset = 1
+				}
+				funcCtx.SourceBranchSwap = func(left, right string) bool {
+					if priorBranchSwap != nil {
+						if priorBranchSwap(left, right) {
+							return true
+						}
+						if priorBranchSwap(right, left) {
+							return false
+						}
+					}
+					return lambdaCaptureBranchSwap(left, right, len(captureOrder), offset, c.Work)
+				}
+				defer func() { funcCtx.SourceBranchSwap = priorBranchSwap }()
+			}
+
 			sourceCode := "\n"
 			hoistableStaticInitLocals := map[string]string{}
 			// Contiguous-prefix hoist barrier for <clinit>. The dumper emits every lifted field

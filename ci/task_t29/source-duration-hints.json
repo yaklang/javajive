@@ -2722,7 +2722,14 @@
     "TestNativeModernNestInputRequiresEntireOriginalInputAndPrivateBuffer": 0.38,
     "TestNativeModernNestInputChargesCopyHashAndCancellation": 0.39,
     "TestNativeModernMemberLambdaDeclarationUsesSameOriginalClassView": 0.5,
-    "TestAdversarialModernMemberLambdaRetainsCaptureCanonicalNameAndNest": 8.85
+    "TestAdversarialModernMemberLambdaRetainsCaptureCanonicalNameAndNest": 8.85,
+    "TestNativeLambdaCaptureDiscoveryTransferMatchesIndependentPrefixOracle": 0.98,
+    "TestAdversarialLambdaBranchLayoutKeepsSinglePredicateEvaluationAndFailure": 24.84,
+    "TestAdversarialNestedLambdaKeepsEarlierInvocationCaptureDiscovery": 28.42,
+    "TestAdversarialLambdaSynchronizedBranchesKeepPhysicalCaptureDiscovery": 24.72,
+    "TestNativeLambdaCaptureBranchLayoutRejectsUnknownOrUnbudgetedTokens": 0.01,
+    "TestAdversarialInstanceNestedLambdaKeepsPhysicalCaptureEntry": 60.22,
+    "TestAdversarialSharedRetryTailKeepsShortCircuitAndLocalBoolean": 2.42
   },
   "source_runs": [
     37850493191,

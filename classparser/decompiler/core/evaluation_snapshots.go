@@ -120,6 +120,7 @@ func (d *Decompiler) snapshotDynamicResult(op *OpCode, sim StackSimulation, valu
 		name, _ := types.RawClassFQN(value.Type())
 		return &values.CastExpression{Value: typed, TargetType: types.NewJavaClass(name), Binding: true, OriginPC: int(op.CurrentOffset)}
 	}
+	d.preserveEarlierLambdaCaptureOperands(op, sim, value)
 	ref := sim.NewVar(value)
 	ref.ResetVarType(ref.Type().Copy())
 	d.disFoldRef = append(d.disFoldRef, ref)

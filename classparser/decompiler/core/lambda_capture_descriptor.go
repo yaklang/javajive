@@ -62,6 +62,16 @@ func lambdaCaptureDescriptorViews(impl *values.JavaClassMember, captured []value
 		if name, ok := types.RawClassFQN(v.Type()); !ok || name != "java.lang.Object" {
 			continue
 		}
+		if snapshot, owned := v.(*values.JavaRef); owned && snapshot != nil {
+			if _, ordinal, pending := snapshot.OriginalPendingDynamicOperand(snapshot.Val); pending && ordinal == i {
+				// This is the factory's own fresh operand copy, not the
+				// enclosing source declaration. Retain its original capture
+				// descriptor on that copy so metadata/binder consumers see
+				// the same original identity, without a separate cast view.
+				snapshot.ResetVarType(target.Copy())
+				continue
+			}
+		}
 		out[i] = &values.CastExpression{Value: v, TargetType: target, Binding: true}
 	}
 	return out

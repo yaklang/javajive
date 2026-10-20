@@ -10,7 +10,7 @@ import (
 )
 
 func TestSharedExpressionEdgeSplitPreservesPathsAndExceptionDomain(t *testing.T) {
-	for _, kind := range []string{"split", "reverse", "same protected range", "different protected range", "shared range gap", "missing range", "missing pc", "assignment", "different continuation", "hidden", "encoded", "loop", "owned"} {
+	for _, kind := range []string{"split", "reverse", "opposite chain", "opposite diamond", "opposite touches target", "opposite cycle", "opposite terminates", "same protected range", "different protected range", "shared range gap", "missing range", "missing pc", "assignment", "different continuation", "hidden", "encoded", "loop", "owned"} {
 		t.Run(kind, func(t *testing.T) {
 			root, external, continuation := jumpTestNode("root"), jumpTestNode("external"), jumpTestNode("continuation")
 			condition := core.NewNode(&statements.ConditionStatement{})
@@ -27,6 +27,29 @@ func TestSharedExpressionEdgeSplitPreservesPathsAndExceptionDomain(t *testing.T)
 			external.AddNext(target)
 			target.AddNext(continuation)
 			switch kind {
+			case "opposite chain", "opposite diamond", "opposite touches target", "opposite cycle", "opposite terminates":
+				arm := jumpTestNode("arm")
+				condition.ReplaceNextSliceKeepOrder(continuation, []*core.Node{arm})
+				arm.AddNext(continuation)
+				switch kind {
+				case "opposite chain":
+					middle := jumpTestNode("middle")
+					arm.ReplaceNextSliceKeepOrder(continuation, []*core.Node{middle})
+					middle.AddNext(continuation)
+				case "opposite diamond":
+					a, b := jumpTestNode("a"), jumpTestNode("b")
+					arm.RemoveAllNext()
+					arm.AddNext(a)
+					arm.AddNext(b)
+					a.AddNext(continuation)
+					b.AddNext(continuation)
+				case "opposite touches target":
+					arm.AddNext(target)
+				case "opposite cycle":
+					arm.AddNext(arm)
+				case "opposite terminates":
+					arm.RemoveAllNext()
+				}
 			case "reverse":
 				condition.TrueNode, condition.FalseNode = condition.FalseNode, condition.TrueNode
 			case "same protected range", "different protected range", "shared range gap", "missing range":
@@ -59,7 +82,7 @@ func TestSharedExpressionEdgeSplitPreservesPathsAndExceptionDomain(t *testing.T)
 			manager := NewRootStatementManager(root)
 			manager.DominatorMap = GenerateDominatorTree(root)
 			splitSharedFallthroughExpression(manager, condition)
-			shouldSplit := kind == "split" || kind == "reverse" || kind == "same protected range"
+			shouldSplit := kind == "split" || kind == "reverse" || kind == "same protected range" || kind == "opposite chain" || kind == "opposite diamond"
 			if !shouldSplit {
 				if condition.Next[0] != target || external.Next[0] != target {
 					t.Fatal("unproved shared edge was changed")
@@ -71,7 +94,7 @@ func TestSharedExpressionEdgeSplitPreservesPathsAndExceptionDomain(t *testing.T)
 			if clone == target || !ok || st == target.Statement || st.Expression != value ||
 				clone.OriginPC != target.OriginPC || !clone.HasOriginPC ||
 				len(clone.Next) != 1 || clone.Next[0] != continuation || external.Next[0] != target ||
-				condition.Next[1] != continuation || len(target.Source) != 1 || target.Source[0] != external {
+				(kind != "opposite chain" && kind != "opposite diamond" && condition.Next[1] != continuation) || len(target.Source) != 1 || target.Source[0] != external {
 				t.Fatal("edge split lost expression, PC, successor order or original entrance")
 			}
 		})
