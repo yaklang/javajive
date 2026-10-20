@@ -136,7 +136,8 @@ func fixHardjarCodeShapes(body string) string {
 	// Returns come from the bytecode CFG. A builder seen earlier in a method
 	// does not authorize inventing a return after another, nested loop.
 	body = fillEmptySynchronizedBlock(body)
-	body = wrapReflectiveCatchBody(body)
+	// Handler exception domains and payload identity come from the original
+	// typed CFG. Reflection text cannot authorize a new wrapping catch.
 	body = rewriteSelfInitDeclToPrevSameType(body)
 	body = dropEmptyNSMEStaticBlock(body)
 	if mockitoPackageRE.MatchString(body) {

@@ -1113,6 +1113,8 @@
     "TestAdversarialNestedReceiverErasedInputsKeepChecksAndBinding": 6.44,
     "TestAdversarialNestedReferenceDispatchRoundTrip": 5.55,
     "TestAdversarialNestedReflectionHandlersRoundTrip": 8.33,
+    "TestAdversarialNestedReflectiveFallbackKeepsPayloadUnderBroadOuterCatch": 12.56,
+    "TestAdversarialNestedReflectiveFallbackPreservesOriginalExceptionObject": 17.44,
     "TestAdversarialNestedResourcePendingCompletionKeepsCloseOrder": 14.96,
     "TestAdversarialNestedScannerTerminalBranchesRoundTrip": 5.67,
     "TestAdversarialNestedSearchReturnsAndContinuesRoundTrip": 2.76,
