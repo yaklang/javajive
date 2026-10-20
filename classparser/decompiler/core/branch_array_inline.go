@@ -119,7 +119,7 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 					call = n.ConstructorCall
 				}
 				pending = append(pending, discovery{call, true})
-			} else if call != nil && d.ordinaryStaticArraySourceView(call, op) {
+			} else if call != nil && d.ordinaryInvocationArraySourceView(call, op) {
 				// Each ordinary call proves its own fixed source formals. This
 				// seed does not grant those formals to a nested invocation.
 				pending = append(pending, discovery{call, true})
@@ -170,7 +170,7 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 		if n, ok := v.(*values.NewExpression); ok && n != nil && n.ConstructorCall != nil {
 			pending = append(pending, discovery{n.ConstructorCall, item.constructorOnly})
 		}
-		if call, ok := v.(*values.FunctionCallExpression); ok && call != nil && !seenCalls[call] && (!item.constructorOnly || call.IsSpecialInvoke && call.FunctionName == "<init>" || d.ordinaryStaticArraySourceView(call, d.opcodeAtOffset(call.OriginPC))) {
+		if call, ok := v.(*values.FunctionCallExpression); ok && call != nil && !seenCalls[call] && (!item.constructorOnly || call.IsSpecialInvoke && call.FunctionName == "<init>" || d.ordinaryInvocationArraySourceView(call, d.opcodeAtOffset(call.OriginPC))) {
 			seenCalls[call] = true
 			original := d.opcodeAtOffset(call.OriginPC)
 			if original == nil || !sameBranchArrayInvocation(d.invokeFuncCall[original], call) {
@@ -188,7 +188,7 @@ func (d *Decompiler) RegisterNestedBranchArrayCalls() {
 				if array != nil {
 					d.branchArrayCalls = append(d.branchArrayCalls, branchArrayCall{
 						call: call, argIndex: i, ref: ref, array: array,
-						requiresStaticSourceView: item.constructorOnly && !(call.IsSpecialInvoke && call.FunctionName == "<init>"),
+						requiresInvocationSourceView: item.constructorOnly && !(call.IsSpecialInvoke && call.FunctionName == "<init>"),
 					})
 				}
 			}
@@ -397,7 +397,7 @@ func (d *Decompiler) InlinePrivateBranchArrayDefinitions() int {
 		if !valid || allocation == nil || invocation == nil || !branchArraySinglePath(d, allocation, invocation) {
 			continue
 		}
-		if candidate.requiresStaticSourceView && !d.ordinaryStaticArrayPacket(call, ref, array) {
+		if candidate.requiresInvocationSourceView && !d.ordinaryInvocationArrayPacket(call, ref, array) {
 			continue
 		}
 		valid = d.branchArrayReceiverPrecedes(call, allocation)

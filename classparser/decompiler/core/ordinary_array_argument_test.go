@@ -116,7 +116,7 @@ func TestOrdinaryStaticArraySourceViewRequiresOriginalFixedDeclaration(t *testin
 			case "work":
 				d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
 			}
-			if got := d.ordinaryStaticArraySourceView(call, all[9]); got != (scenario == "original") {
+			if got := d.ordinaryInvocationArraySourceView(call, all[9]); got != (scenario == "original") {
 				t.Fatalf("source view=%v", got)
 			}
 			if d.Work != nil && d.Work.Err() == nil {
@@ -131,7 +131,7 @@ func TestOrdinaryStaticArrayTransferReopensWholeOriginalPacket(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			d, call, ref, array, all, definition, metadata := ordinaryArrayPacketFixture()
 			d.RegisterNestedBranchArrayCalls()
-			if len(d.branchArrayCalls) != 1 || !d.branchArrayCalls[0].requiresStaticSourceView {
+			if len(d.branchArrayCalls) != 1 || !d.branchArrayCalls[0].requiresInvocationSourceView {
 				t.Fatal("original ordinary source call was not independently discovered")
 			}
 			switch scenario {
@@ -212,6 +212,93 @@ func TestOrdinaryStaticArrayTransferReopensWholeOriginalPacket(t *testing.T) {
 			}
 			if d.Work != nil && d.Work.Err() == nil {
 				t.Fatal("lost resource classification")
+			}
+		})
+	}
+}
+
+// Public fixed instance declarations keep their own exact receiver view. A
+// constructor, generic producer or changed raw stack operand cannot donate it.
+func TestOrdinaryInstanceArraySourceViewRequiresOwnedReceiverAndFixedDeclaration(t *testing.T) {
+	for _, kind := range []string{"virtual", "interface", "packet", "nonpublic owner", "nonpublic method", "wrong interface flag", "static member", "generic member", "signature member", "bridge member", "duplicate member", "missing member", "incomplete members", "missing receiver", "typed nil receiver", "erased receiver", "foreign receiver", "opaque receiver", "forwarding receiver", "producer receiver", "wrong stack receiver", "wrong invoke opcode", "changed result", "canceled", "memory", "work"} {
+		t.Run(kind, func(t *testing.T) {
+			d, call, ref, array, all, _, metadata := ordinaryArrayPacketFixture()
+			receiver := values.NewJavaRef(utils.NewRootVariableId(), nil, types.NewJavaClass("sample.ArraySink"))
+			call.Object = receiver
+			call.IsStatic = false
+			call.Kind = values.InvokeVirtual
+			all[9].Instr.OpCode = OP_INVOKEVIRTUAL
+			all[9].stackConsumed = []values.JavaValue{ref, receiver}
+			metadata.Public = true
+			metadata.Methods[0].Public = true
+			metadata.Methods[0].Static = false
+			switch kind {
+			case "interface":
+				call.Kind = values.InvokeInterface
+				all[9].Instr.OpCode = OP_INVOKEINTERFACE
+				metadata.IsInterface = true
+			case "nonpublic owner":
+				metadata.Public = false
+			case "nonpublic method":
+				metadata.Methods[0].Public = false
+			case "wrong interface flag":
+				metadata.IsInterface = true
+			case "static member":
+				metadata.Methods[0].Static = true
+			case "generic member":
+				metadata.Methods[0].Generic = true
+			case "signature member":
+				metadata.Methods[0].Signature = "([TT;)TT;"
+			case "bridge member":
+				metadata.Methods[0].Bridge = true
+			case "duplicate member":
+				metadata.Methods = append(metadata.Methods, metadata.Methods[0])
+			case "missing member":
+				metadata.Methods = nil
+			case "incomplete members":
+				metadata.MembersComplete = false
+			case "missing receiver":
+				call.Object = nil
+				all[9].stackConsumed[1] = nil
+			case "typed nil receiver":
+				var missing *values.JavaRef
+				call.Object = missing
+				all[9].stackConsumed[1] = missing
+			case "erased receiver":
+				receiver.ResetVarType(types.NewJavaClass("java.lang.Object"))
+			case "foreign receiver":
+				receiver.ResetVarType(types.NewJavaClass("sample.Other"))
+			case "opaque receiver":
+				receiver.CustomValue = values.NewCustomValue(func(*class_context.ClassContext) string { return "unowned" }, func() types.JavaType { return types.NewJavaClass("sample.ArraySink") })
+			case "forwarding receiver":
+				receiver.StackVar = values.JavaNull
+			case "producer receiver":
+				call.Object = values.NewJavaClassValue(types.NewJavaClass("sample.ArraySink"))
+				all[9].stackConsumed[1] = call.Object
+			case "wrong stack receiver":
+				all[9].stackConsumed[1] = values.JavaNull
+			case "wrong invoke opcode":
+				all[9].Instr.OpCode = OP_INVOKESTATIC
+			case "changed result":
+				call.FuncType.ReturnType = types.NewJavaClass("java.lang.String")
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				d.Work = workbudget.New(ctx, workbudget.Limits{})
+			case "memory":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxOutputBytes: 1})
+			case "work":
+				d.Work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
+			}
+			want := kind == "virtual" || kind == "interface" || kind == "packet"
+			if got := d.ordinaryInvocationArraySourceView(call, all[9]); got != want {
+				t.Fatalf("source view=%v want%v", got, want)
+			}
+			if kind == "packet" && !d.ordinaryInvocationArrayPacket(call, ref, array) {
+				t.Fatal("complete original instance packet refused")
+			}
+			if call.Arguments[0] != ref || len(array.Initializer) != 2 {
+				t.Fatal("source query mutated the allocation or use")
 			}
 		})
 	}

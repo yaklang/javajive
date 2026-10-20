@@ -42,7 +42,7 @@ type branchArrayCall struct {
 	array    *values.NewExpression
 	// Ordinary call discovery cannot inherit constructor/ternary source
 	// permissions. Reopen its own fixed declaration and complete packet at use.
-	requiresStaticSourceView bool
+	requiresInvocationSourceView bool
 }
 
 type Decompiler struct {
