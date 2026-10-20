@@ -4553,8 +4553,13 @@ func (c *ClassObjectDumper) dumpMethodWithSourceRequest(methodName, desc string,
 				// Explicit formals regenerate FINAL, including unused parameters.
 				// Their erasures were checked against the original entry descriptor.
 				paramsNewStrList = nil
+				sourceFormals, projected := c.originalLambdaSourceFormals(lambdaParameterSource)
 				for i, ref := range lambdaParameterSource.refs {
-					declaration := renderMethodParamType(ref.Type(), funcCtx) + " " + ref.String(funcCtx)
+					formal := ref.Type()
+					if projected {
+						formal = sourceFormals[i]
+					}
+					declaration := renderMethodParamType(formal, funcCtx) + " " + ref.String(funcCtx)
 					if lambdaMetadata.flags[len(lambdaMetadata.captures)+i]&0x10 != 0 {
 						declaration = "final " + declaration
 					}

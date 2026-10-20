@@ -2137,5 +2137,21 @@ func nativeSourceNameChildren(st statements.Statement) ([]values.JavaValue, [][]
 	if leaf, ok := st.(*statements.CustomStatement); ok && leaf.HasSourceTransfer() {
 		return nil, nil, leaf.SourceTransferOnly()
 	}
+	if handler, ok := st.(*statements.TryCatchStatement); ok && handler != nil {
+		// Catch headers introduce lexical binders even when their bodies never
+		// read them. Include those identities in alpha-renaming; the shared
+		// value/write visitor must not mistake declarations for body writes.
+		if len(handler.Exception) > 4096 {
+			return nil, nil, false
+		}
+		roots := make([]values.JavaValue, 0, len(handler.Exception))
+		for _, ref := range handler.Exception {
+			if ref == nil || ref.Id == nil || ref.IsThis || ref.IsParam || ref.CustomValue != nil || ref.StackVar != nil {
+				return nil, nil, false
+			}
+			roots = append(roots, ref)
+		}
+		return roots, append([][]statements.Statement{handler.TryBody}, handler.CatchBodies...), true
+	}
 	return catchSourceChildren(st)
 }

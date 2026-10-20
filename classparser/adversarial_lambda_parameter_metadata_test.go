@@ -185,6 +185,11 @@ func removeLambdaParameterTestTable(method *MemberInfo, table *UnparsedAttribute
 
 func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string, implementations int, states string, parameterFlags ...bool) {
 	t.Helper()
+	testUncapturedLambdaParameterMetadataRoundTripWithSources(t, source, nil, implementations, states, parameterFlags...)
+}
+
+func testUncapturedLambdaParameterMetadataRoundTripWithSources(t *testing.T, source string, sources map[string]string, implementations int, states string, parameterFlags ...bool) {
+	t.Helper()
 	parameters := true
 	if len(parameterFlags) > 1 {
 		t.Fatal("at most one original parameter-table flag")
@@ -210,7 +215,7 @@ func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string,
 							if owner == "AlternateLambdaParameters" {
 								fixture = strings.NewReplacer("int value", "int var0", "value+1", "var0+1", "int item", "int var1", "item+7", "var1+7", "int ignored", "int l0").Replace(fixture)
 							}
-							files := compileLambdaParameterMetadataFixture(t, compiler, profile, fixture, owner, debug, parameters)
+							files := compileLambdaParameterMetadataFixtureWithSources(t, compiler, profile, fixture, owner, debug, sources, parameters)
 							if profile == NativeJavac8 && parameters {
 								if count := strings.Count(lambdaParameterMetadataTables(t, files[owner+".class"]), "lambda$"); count != implementations {
 									t.Fatalf("original native8 parameter-bearing implementation declarations: %d want %d", count, implementations)
@@ -284,6 +289,11 @@ func testUncapturedLambdaParameterMetadataRoundTrip(t *testing.T, source string,
 
 func compileLambdaParameterMetadataFixture(t *testing.T, compiler string, profile SourceCompilerProfile, source, owner, debug string, named ...bool) map[string][]byte {
 	t.Helper()
+	return compileLambdaParameterMetadataFixtureWithSources(t, compiler, profile, source, owner, debug, nil, named...)
+}
+
+func compileLambdaParameterMetadataFixtureWithSources(t *testing.T, compiler string, profile SourceCompilerProfile, source, owner, debug string, sources map[string]string, named ...bool) map[string][]byte {
+	t.Helper()
 	dir := t.TempDir()
 	file := filepath.Join(dir, owner+".java")
 	if err := os.WriteFile(file, []byte(source), 0600); err != nil {
@@ -297,6 +307,21 @@ func compileLambdaParameterMetadataFixture(t *testing.T, compiler string, profil
 		args = append(args[:1], args[2:]...)
 	}
 	args = append(args, "-g:"+debug, "-d", dir, file)
+	var names []string
+	for name := range sources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if filepath.Base(name) != name || !strings.HasSuffix(name, ".java") || name == owner+".java" {
+			t.Fatal("invalid fixture unit", name)
+		}
+		unit := filepath.Join(dir, name)
+		if err := os.WriteFile(unit, []byte(sources[name]), 0600); err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, unit)
+	}
 	if log, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
 		t.Fatal("independent original compiler", err, string(log))
 	}

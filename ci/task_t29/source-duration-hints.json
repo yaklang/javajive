@@ -2734,7 +2734,12 @@
     "TestAdversarialLateNullLambdaCaptureKeepsDescriptorOverloads": 3.83,
     "TestAdversarialNullSingletonCaptureKeepsPhysicalDescriptor": 25.16,
     "TestAdversarialNullableCaptureKeepsAllReferenceValues": 19.55,
-    "TestAdversarialNullReferenceCaptureKeepsDescriptorKinds": 55.55
+    "TestAdversarialNullReferenceCaptureKeepsDescriptorKinds": 55.55,
+    "TestAdversarialLambdaCatchDeclarationKeepsLexicalScope": 22.43,
+    "TestAdversarialNamedSAMFormalKeepsDeclaredGenericContract": 19.36,
+    "TestAdversarialSAMSourceFormalsPreserveNestedVarianceAndArrays": 20.98,
+    "TestAdversarialCatchHeadersParticipateInLexicalAlphaRenaming": 0.01,
+    "TestAdversarialLambdaSourceFormalProjectionNeedsOriginalDeclaration": 0.26
   },
   "source_runs": [
     37850493191,
