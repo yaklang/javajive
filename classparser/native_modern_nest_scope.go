@@ -65,7 +65,14 @@ func nativeModernNestAttributes(object *ClassObject, work *workbudget.Budget) bo
 // Read actual input bytes; version edits, dollar spelling, or a one-way host
 // assertion do not grant private access. Named, method-local and anonymous
 // declarations each need their own original bounded lexical ownership proof.
-func (c *ClassObjectDumper) nativeModernNestOriginalScope() (map[string]*ClassObject, bool) {
+func (c *ClassObjectDumper) nativeModernNestOriginalScope(receipts ...map[string]nativeModernNestInput) (map[string]*ClassObject, bool) {
+	if len(receipts) > 1 || len(receipts) == 1 && (receipts[0] == nil || len(receipts[0]) != 0) {
+		return nil, false
+	}
+	var inputs map[string]nativeModernNestInput
+	if len(receipts) == 1 {
+		inputs = receipts[0]
+	}
 	if c.obj == nil {
 		return nil, false
 	}
@@ -96,6 +103,14 @@ func (c *ClassObjectDumper) nativeModernNestOriginalScope() (map[string]*ClassOb
 		if !known {
 			return nil, false
 		}
+		var input nativeModernNestInput
+		if inputs != nil {
+			var sealed bool
+			raw, input, sealed = sealNativeModernNestInput(raw, c.Work)
+			if !sealed {
+				return nil, false
+			}
+		}
 		object, err := c.parseResolved(raw)
 		if err != nil || object.GetClassName() != name || !nativeModernSourceNestVersion(object, c.Work) || hasOriginalNestAttribute(object, "NestMembers") {
 			return nil, false
@@ -103,6 +118,10 @@ func (c *ClassObjectDumper) nativeModernNestOriginalScope() (map[string]*ClassOb
 		enclosing, known := originalNestAttribute(object, "NestHost")
 		if !known || len(enclosing) != 1 || enclosing[0] != host {
 			return nil, false
+		}
+		if inputs != nil {
+			input.object = object
+			inputs[name] = input
 		}
 		objects[name] = object
 	}

@@ -2717,7 +2717,12 @@
     "TestAdversarialVarargsResultsPreserveBehaviorThroughBothPublicModes": 18.4,
     "TestNativeVarargsResultConversionRequiresOriginalExecutableTail": 0.52,
     "TestAdversarialVarargsReferenceResultsPreserveOriginalReturnConversions": 23.92,
-    "TestAdversarialVarargsPrimitiveResultMatrixMatchesBothOriginalCompilers": 22.69
+    "TestAdversarialVarargsPrimitiveResultMatrixMatchesBothOriginalCompilers": 22.69,
+    "TestNativeModernMemberFamilyRequiresStableResolverOriginalNamespace": 0.4,
+    "TestNativeModernNestInputRequiresEntireOriginalInputAndPrivateBuffer": 0.38,
+    "TestNativeModernNestInputChargesCopyHashAndCancellation": 0.39,
+    "TestNativeModernMemberLambdaDeclarationUsesSameOriginalClassView": 0.5,
+    "TestAdversarialModernMemberLambdaRetainsCaptureCanonicalNameAndNest": 8.85
   },
   "source_runs": [
     37850493191,

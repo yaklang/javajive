@@ -620,7 +620,8 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 	if independent == nil && !nativeMemberTopLevelEvidence(c.obj, c.Work) {
 		return nil
 	}
-	modernNest, nestKnown := c.nativeModernNestOriginalScope()
+	modernInputs := map[string]nativeModernNestInput{}
+	modernNest, nestKnown := c.nativeModernNestOriginalScope(modernInputs)
 	if !nestKnown {
 		return nil
 	}
@@ -653,9 +654,19 @@ func (c *ClassObjectDumper) planNativeMemberFamilyFromRoot(independent *nativeMe
 				if !found {
 					return nil
 				}
-				obj, e := c.parseResolved(raw)
-				if e != nil || obj.GetClassName() != name {
-					return nil
+				var obj *ClassObject
+				if input, modern := modernInputs[name]; modern {
+					var same bool
+					obj, same = input.bind(name, raw, c.Work)
+					if !same {
+						return nil
+					}
+				} else {
+					var err error
+					obj, err = c.parseResolved(raw)
+					if err != nil || obj.GetClassName() != name {
+						return nil
+					}
 				}
 				reader := NewClassObjectDumper(obj)
 				reader.options = c.options
