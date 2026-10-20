@@ -41,7 +41,7 @@ func TestAdversarialFlatCompletedComponentRequiresOriginalCompleteRefusal(t *tes
 			case "empty owners":
 				tx.owners = nil
 			case "oversize owners":
-				for len(tx.owners) <= 64 {
+				for len(tx.owners) <= nativeMemberDependencyComponentLimit {
 					tx.owners = append(tx.owners, "C")
 				}
 			case "missing owner":

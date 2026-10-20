@@ -13,7 +13,7 @@ import (
 // transaction. Provisional peers grant spelling/constructor views only; each
 // family's private, capture, accessor and registration proofs remain separate.
 func (z *JarFS) nativeIndependentTransactionEntry(root *ClassObject, participants []string, snap map[string]string) *nativeMemberCacheEntry {
-	if z == nil || root == nil || snap == nil || snap["JDEC_NATIVE_MEMBER_OFF"] != "" || len(participants) < 2 || len(participants) > 64 {
+	if z == nil || root == nil || snap == nil || snap["JDEC_NATIVE_MEMBER_OFF"] != "" || len(participants) < 2 || len(participants) > nativeMemberDependencyComponentLimit {
 		return nil
 	}
 	names := append([]string(nil), participants...)
@@ -43,6 +43,9 @@ func (z *JarFS) nativeIndependentTransactionEntry(root *ClassObject, participant
 	}
 	policy, err := json.Marshal(snap)
 	if err != nil {
+		return nil
+	}
+	if work != nil && work.CheckAlloc(nativeMemberDependencyRetainedBytes(names)*8+int64(len(policy))*2+1024) != nil {
 		return nil
 	}
 	identity, _ := json.Marshal(names)
@@ -79,7 +82,7 @@ func (z *JarFS) nativeIndependentTransactionEntry(root *ClassObject, participant
 				}
 			}
 		}
-		if len(z.nativeMemberTransactions)+len(z.nativeMembersCache)+missing+1 > 512 {
+		if len(z.nativeMemberTransactions)+len(z.nativeMembersCache)+missing+1 > nativeMemberCacheLimit {
 			z.nativeMembersMu.Unlock()
 			return nil
 		}
@@ -129,7 +132,18 @@ func (z *JarFS) nativeIndependentParticipantsClosed(names []string, snap map[str
 		reader = z.nativeMemberReader(object)
 		reader.Work = work
 		reader.options.EnvSnapshot = snap
-		if reader.originalNativeMemberIndependentRoot() == nil {
+		certificate := reader.originalNativeMemberIndependentRoot()
+		if certificate == nil {
+			return false
+		}
+		policy, err := json.Marshal(snap)
+		if err != nil {
+			return false
+		}
+		entry := z.nativeMemberPolicyEntry("independent-static\x00" + name + "\x00" + string(policy))
+		if entry == nil || z.nativeIndependentStandaloneEntry(entry, object, snap, certificate) != nil {
+			// Finish/wait for the smaller existing source path before claiming
+			// either role key. Do not steal a completed standalone partition.
 			return false
 		}
 	}
@@ -139,6 +153,7 @@ func (z *JarFS) nativeIndependentParticipantsClosed(names []string, snap map[str
 func (z *JarFS) buildNativeIndependentTransaction(participants []string, snap map[string]string) map[string]*nativeMemberCacheEntry {
 	work := z.nativeMemberReader(nil).Work
 	prepared := map[string]*nativeMemberPrepared{}
+	retained := nativeMemberTransactionInputs{}
 	owned := map[string]string{}
 	var inputBytes int64
 	for _, name := range participants {
@@ -168,6 +183,9 @@ func (z *JarFS) buildNativeIndependentTransaction(participants []string, snap ma
 		}
 		plan := z.prepareNativeMemberFamilyFromRoot(root, snap, certificate)
 		if plan == nil || plan.family == nil || !certificate.familyClosed(plan.family, work) {
+			return nil
+		}
+		if !retained.add(z, plan, work) {
 			return nil
 		}
 		for symbol := range plan.family.lexicalObjects {

@@ -159,7 +159,7 @@ func nativeMemberCompletedComponentRefusal(entry *nativeMemberCacheEntry, owner 
 		return false
 	}
 	tx := entry.transaction
-	if tx == nil || tx.snapshot == nil || tx.independent || !tx.completed || tx.entries != nil || len(tx.owners) == 0 || len(tx.owners) > 64 || len(tx.owners) != len(entry.dependencyParticipants) || len(tx.snapshot) != len(snapshot) {
+	if tx == nil || tx.snapshot == nil || tx.independent || !tx.completed || tx.entries != nil || len(tx.owners) == 0 || len(tx.owners) > nativeMemberDependencyComponentLimit || len(tx.owners) != len(entry.dependencyParticipants) || len(tx.snapshot) != len(snapshot) {
 		return false
 	}
 	found := false

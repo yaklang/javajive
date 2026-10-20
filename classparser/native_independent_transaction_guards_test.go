@@ -43,7 +43,7 @@ func TestAdversarialIndependentSourceTransactionRequiresExactOriginalProtocol(t 
 			case "foreign participant":
 				names[0] = "CyclicB"
 			case "too many":
-				for len(names) <= 64 {
+				for len(names) <= nativeMemberDependencyComponentLimit {
 					names = append(names, "Extra"+strconv.Itoa(len(names)))
 				}
 			case "normal conflict", "independent conflict", "independent flat":

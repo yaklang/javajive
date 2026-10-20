@@ -68,7 +68,10 @@ func (z *JarFS) nativeMemberTransactionEntry(obj *ClassObject) *nativeMemberCach
 	if !known || !cyclic {
 		return nil
 	}
-	if len(participants) == 0 || len(participants) > 64 {
+	if len(participants) == 0 || len(participants) > nativeMemberDependencyComponentLimit {
+		return nil
+	}
+	if work != nil && work.CheckAlloc(nativeMemberDependencyRetainedBytes(participants)*8+int64(len(policy))*2+1024) != nil {
 		return nil
 	}
 	identity, _ := json.Marshal(participants)
@@ -88,7 +91,7 @@ func (z *JarFS) nativeMemberTransactionEntry(obj *ClassObject) *nativeMemberCach
 				missing++
 			}
 		}
-		if len(z.nativeMemberTransactions)+len(z.nativeMembersCache)+missing+1 > 512 {
+		if len(z.nativeMemberTransactions)+len(z.nativeMembersCache)+missing+1 > nativeMemberCacheLimit {
 			z.nativeMembersMu.Unlock()
 			return nil
 		}
@@ -134,6 +137,7 @@ func (z *JarFS) buildNativeMemberTransaction(participants []string, snap map[str
 	}
 
 	prepared := map[string]*nativeMemberPrepared{}
+	retained := nativeMemberTransactionInputs{}
 	var inputBytes int64
 	for _, name := range participants {
 		if !nativeProofWork(work, 1) {
@@ -168,6 +172,9 @@ func (z *JarFS) buildNativeMemberTransaction(participants []string, snap map[str
 			plan = z.prepareNativeMemberFamilyUnpublished(root, snap)
 		}
 		if plan == nil {
+			return nil
+		}
+		if !retained.add(z, plan, work) {
 			return nil
 		}
 		prepared[name] = plan

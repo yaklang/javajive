@@ -12,6 +12,10 @@ import (
 	"sync"
 )
 
+// All source protocols share this bounded cache. A participant can need both
+// an ordinary and an independent key, plus one shared component entry.
+const nativeMemberCacheLimit = 512
+
 type nativeMemberHandleTarget struct {
 	kind             uint8
 	methodRef        bool
@@ -34,6 +38,8 @@ type nativeMemberIndex struct {
 }
 type nativeMemberCacheEntry struct {
 	once                   sync.Once
+	standaloneOnce         sync.Once
+	standalone             *nativeMemberCacheEntry // published by standaloneOnce; independent nonleaf completion only
 	planOnce               sync.Once
 	transaction            *nativeMemberTransaction // guarded by nativeMembersMu
 	flatSourceCommitted    bool                     // guarded by nativeMembersMu; declaration layout is monotone within policy
@@ -383,7 +389,7 @@ func (z *JarFS) nativeMemberPolicyEntry(key string) *nativeMemberCacheEntry {
 	defer z.nativeMembersMu.Unlock()
 	entry := z.nativeMembersCache[key]
 	if entry == nil {
-		if len(z.nativeMembersCache)+len(z.nativeMemberTransactions) >= 512 {
+		if len(z.nativeMembersCache)+len(z.nativeMemberTransactions) >= nativeMemberCacheLimit {
 			return nil
 		}
 		if z.nativeMembersCache == nil {

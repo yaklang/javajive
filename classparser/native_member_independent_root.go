@@ -288,17 +288,23 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 	if certificate == nil {
 		return nil
 	}
+	policy, err := json.Marshal(snap)
+	if err != nil {
+		return nil
+	}
+	entry := z.nativeMemberPolicyEntry("independent-static\x00" + root.GetClassName() + "\x00" + string(policy))
+	if entry == nil {
+		return nil
+	}
+	if result := z.nativeIndependentStandaloneEntry(entry, root, snap, certificate); result != nil {
+		return result
+	}
 	participants, cyclic, known := z.nativeMemberDependencyAdmission(root.GetClassName(), reader.Work, snap)
 	if !known {
 		return nil
 	}
 	if cyclic {
 		return z.nativeIndependentTransactionEntry(root, participants, snap)
-	}
-	policy, _ := json.Marshal(snap)
-	entry := z.nativeMemberPolicyEntry("independent-static\x00" + root.GetClassName() + "\x00" + string(policy))
-	if entry == nil {
-		return nil
 	}
 	entry.once.Do(func() {
 		prepared := z.prepareNativeMemberFamilyFromRoot(root, snap, certificate)
@@ -327,6 +333,50 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 		entry.source = src
 	})
 	return entry
+}
+
+// A nonleaf boundary may already close without activating an independent peer:
+// terminal physical declarations and ordinary completed families suffice. Keep
+// that original completion path before asking for a larger dependency domain.
+// The separate once publishes only its own result, never an in-progress SCC
+// entry. A successful source partition is pinned before any SCC may claim it.
+func (z *JarFS) nativeIndependentStandaloneEntry(entry *nativeMemberCacheEntry, root *ClassObject, snap map[string]string, certificate *nativeMemberIndependentRoot) *nativeMemberCacheEntry {
+	if z == nil || entry == nil || root == nil || snap == nil || certificate == nil {
+		return nil
+	}
+	entry.standaloneOnce.Do(func() {
+		prepared := z.prepareNativeMemberFamilyFromRoot(root, snap, certificate)
+		if prepared == nil || prepared.family == nil {
+			return
+		}
+		f := prepared.family
+		if len(f.children) == 0 && len(f.methodLocals) == 0 && len(f.enumConstants) == 0 && len(f.enumSwitchTables) == 0 && len(f.anonymousUnits) == 0 && f.anonymous == nil && f.anonymousForest == nil {
+			// Leaves retain the dependency protocol, including atomic peer cycles.
+			return
+		}
+		result := z.finishNativeMemberFamily(prepared, z.nativeMemberStandardLookup, false)
+		if result == nil {
+			return
+		}
+		size := int64(len(result.source))
+		if prepared.reader.Work != nil && prepared.reader.Work.CheckAlloc(size) != nil {
+			return
+		}
+		policy, err := json.Marshal(snap)
+		if err != nil {
+			return
+		}
+		z.nativeMembersMu.Lock()
+		defer z.nativeMembersMu.Unlock()
+		ordinary := z.nativeMembersCache[root.GetClassName()+"\x00"+string(policy)]
+		if entry.transaction != nil || entry.flatSourceCommitted || ordinary != nil && (ordinary.transaction != nil || ordinary.flatSourceCommitted) || size > (16<<20)-z.nativeMembersBytes || !z.reserveOwnershipSource(size) {
+			return
+		}
+		z.nativeMembersBytes += size
+		entry.flatSourceCommitted = true
+		entry.standalone = result
+	})
+	return entry.standalone
 }
 
 // A proved independent static boundary retains its original ClassFile

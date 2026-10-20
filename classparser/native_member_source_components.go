@@ -7,12 +7,14 @@ import (
 )
 
 // Graph discovery and one source transaction have different resource domains.
+// Component capacity reserves two cache roles per owner and one transaction.
+// Retained original model bytes, shared work and source bytes remain bounded.
 // A wide acyclic dependency graph contains many independent commits; it must
 // not inherit the small bound for families committed atomically in one SCC.
 const (
 	nativeMemberDependencyNodeLimit      = nativeMemberLayoutNodeLimit
 	nativeMemberDependencyEdgeLimit      = 8192
-	nativeMemberDependencyComponentLimit = 64
+	nativeMemberDependencyComponentLimit = (nativeMemberCacheLimit - 1) / 2
 )
 
 // Original declaration dependency cycles are transactions, not permission to
