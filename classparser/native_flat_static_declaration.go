@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/yaklang/javajive/internal/jdecenv"
+	"github.com/yaklang/javajive/internal/workbudget"
 )
 
 // completedFlatStaticDeclaration supplies a declaration spelling only. A
@@ -106,15 +107,24 @@ func (z *JarFS) nativeMemberFlatStaticDeclaration(prepared *nativeMemberPrepared
 	}
 	pinFinishedRefusal := entry.planKnown
 	if pinFinishedRefusal {
-		// A completed ordinary finish is terminal for a top-level owner only
-		// when no dependency transaction can subsequently choose lexical source.
+		// A completed ordinary finish is terminal when the original graph is
+		// acyclic, or its exact source component has also completed unsuccessfully.
+		// An active/unattempted SCC still owns a possible lexical source layout.
 		var cyclic, known bool
 		jdecenv.Run(prepared.snapshot, func() error {
 			_, cyclic, known = z.nativeMemberDependencyAdmission(owner, d.Work, prepared.snapshot)
 			return nil
 		})
-		if !known || cyclic {
+		if !known {
 			return ""
+		}
+		if cyclic {
+			z.nativeMembersMu.Lock()
+			refused := nativeMemberCompletedComponentRefusal(entry, owner, prepared.snapshot, d.Work)
+			z.nativeMembersMu.Unlock()
+			if !refused {
+				return ""
+			}
 		}
 	}
 	// No foreign family completed, so its indexed constructor-access proof
@@ -130,7 +140,7 @@ func (z *JarFS) nativeMemberFlatStaticDeclaration(prepared *nativeMemberPrepared
 	}
 	if pinFinishedRefusal {
 		z.nativeMembersMu.Lock()
-		if entry.transaction != nil {
+		if entry.transaction != nil && !nativeMemberCompletedComponentRefusal(entry, owner, prepared.snapshot, d.Work) {
 			z.nativeMembersMu.Unlock()
 			return ""
 		}
@@ -138,4 +148,34 @@ func (z *JarFS) nativeMemberFlatStaticDeclaration(prepared *nativeMemberPrepared
 		z.nativeMembersMu.Unlock()
 	}
 	return strings.ReplaceAll(original.GetClassName(), "/", ".")
+}
+
+// Caller holds nativeMembersMu. Only the original whole-owner protocol may
+// make a top-level owner's failed finish terminal. A provisional, successful,
+// partial, foreign-policy or different-component transaction grants no name.
+// No source/private ownership is borrowed from this completed failure.
+func nativeMemberCompletedComponentRefusal(entry *nativeMemberCacheEntry, owner string, snapshot map[string]string, work *workbudget.Budget) bool {
+	if entry == nil || !entry.dependenciesKnown || !entry.dependenciesCyclic || snapshot == nil || !nativeProofWork(work, 1) {
+		return false
+	}
+	tx := entry.transaction
+	if tx == nil || tx.snapshot == nil || tx.independent || !tx.completed || tx.entries != nil || len(tx.owners) == 0 || len(tx.owners) > 64 || len(tx.owners) != len(entry.dependencyParticipants) || len(tx.snapshot) != len(snapshot) {
+		return false
+	}
+	found := false
+	for i, name := range tx.owners {
+		if name != entry.dependencyParticipants[i] || !nativeProofWork(work, int64(len(name))+1) {
+			return false
+		}
+		found = found || name == owner
+	}
+	for name, value := range snapshot {
+		if !nativeProofWork(work, int64(len(name)+len(value))+1) {
+			return false
+		}
+		if original, present := tx.snapshot[name]; !present || original != value {
+			return false
+		}
+	}
+	return found
 }

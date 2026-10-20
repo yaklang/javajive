@@ -39,12 +39,13 @@ func (c *ClassObjectDumper) originalNativeMemberIndependentRoot() *nativeMemberI
 	if !valid || packet != nil || !nativeMemberIndependentAssertionReferencesClosed(obj, c.Work) {
 		return nil
 	}
-	for _, fields := range [][]*MemberInfo{obj.Fields, obj.Methods} {
-		for _, field := range fields {
-			if field == nil || !nativeProofWork(c.Work, 1) || field.AccessFlags&2 != 0 {
-				return nil
-			}
+	for _, method := range obj.Methods {
+		if method == nil || !nativeProofWork(c.Work, 1) || method.AccessFlags&2 != 0 {
+			return nil
 		}
+	}
+	if !c.nativeIndependentPrivateFieldsClosed(obj) {
+		return nil
 	}
 	raw, found := c.foldSiblingResolver(owner)
 	if !found {
@@ -287,6 +288,13 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 	if certificate == nil {
 		return nil
 	}
+	participants, cyclic, known := z.nativeMemberDependencyAdmission(root.GetClassName(), reader.Work, snap)
+	if !known {
+		return nil
+	}
+	if cyclic {
+		return z.nativeIndependentTransactionEntry(root, participants, snap)
+	}
 	policy, _ := json.Marshal(snap)
 	entry := z.nativeMemberPolicyEntry("independent-static\x00" + root.GetClassName() + "\x00" + string(policy))
 	if entry == nil {
@@ -294,23 +302,9 @@ func (z *JarFS) nativeMemberIndependentEntry(obj *ClassObject) *nativeMemberCach
 	}
 	entry.once.Do(func() {
 		prepared := z.prepareNativeMemberFamilyFromRoot(root, snap, certificate)
-		// Closed leaf layouts may compose completed declaration views only after
-		// the original source-boundary graph proves acyclicity. Other layouts
-		// retain their standard lookup and cannot claim another independent scope.
-		lookup := z.nativeMemberStandardLookup
-		if prepared != nil {
-			f := prepared.family
-			if len(f.children) == 0 && len(f.methodLocals) == 0 && len(f.enumConstants) == 0 && len(f.enumSwitchTables) == 0 && len(f.anonymousUnits) == 0 && f.anonymous == nil && f.anonymousForest == nil {
-				// Activating another independent source boundary requires the
-				// whole original boundary graph. A stable declaration spelling
-				// alone cannot authorize recursive independent publication.
-				_, cyclic, known := z.nativeMemberDependencyAdmission(root.GetClassName(), reader.Work, snap)
-				if !known || cyclic {
-					return
-				}
-				lookup = z.nativeMemberLookup
-			}
-		}
+		// The independently keyed original graph proved this component acyclic.
+		// Every other source dependency therefore follows the condensation DAG.
+		lookup := z.nativeMemberLookup
 		result := z.finishNativeMemberFamily(prepared, lookup, false)
 		if result == nil {
 			return

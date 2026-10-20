@@ -2739,7 +2739,20 @@
     "TestAdversarialNamedSAMFormalKeepsDeclaredGenericContract": 19.36,
     "TestAdversarialSAMSourceFormalsPreserveNestedVarianceAndArrays": 20.98,
     "TestAdversarialCatchHeadersParticipateInLexicalAlphaRenaming": 0.01,
-    "TestAdversarialLambdaSourceFormalProjectionNeedsOriginalDeclaration": 0.26
+    "TestAdversarialLambdaSourceFormalProjectionNeedsOriginalDeclaration": 0.26,
+    "TestAdversarialFlatCompletedComponentRequiresOriginalCompleteRefusal": 0.01,
+    "TestAdversarialIndependentAnnotationBoundaryKeepsOriginalDefaultsAndCallers": 14.38,
+    "TestAdversarialIndependentMixedComponentCannotClaimOrdinaryProtocol": 0.86,
+    "TestAdversarialIndependentPrivateFieldScopeRequiresOwnedImmutableInputs": 0.67,
+    "TestAdversarialIndependentPrivateFieldsRetainWideStaticAndAccessorSemantics": 57.28,
+    "TestAdversarialIndependentPrivateScopeRetainsNamedCaptureComponent": 14.27,
+    "TestAdversarialIndependentSourceGraphShapesKeepOriginalCallers": 52.94,
+    "TestAdversarialIndependentSourceTransactionConcurrentReadOrders": 0.77,
+    "TestAdversarialIndependentSourceTransactionKeepsAtomicSourceAndPrivateScopes": 1.93,
+    "TestAdversarialIndependentSourceTransactionRejectsLatePeerFailure": 2.9,
+    "TestAdversarialIndependentSourceTransactionRequiresExactOriginalProtocol": 2.02,
+    "TestAdversarialIndependentSourceTransactionRetainsPolicyAndOneReservation": 0.76,
+    "TestAdversarialIndependentStaticScopesKeepMutualDeclarationBinding": 6.98
   },
   "source_runs": [
     37850493191,

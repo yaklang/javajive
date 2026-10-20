@@ -78,18 +78,19 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 		return nil, false
 	}
 
-	// Only an independently certified leaf query selects declaration boundaries.
-	// Ordinary whole-family graphs retain their physical source ownership.
-	leafProof := map[string]uint8{}
-	independentLeaf := func(o *ClassObject) bool {
+	// An independently certified static source boundary selects its own graph
+	// node. Its original children remain in that one lexical family. Ordinary
+	// whole-family queries retain their original physical source ownership.
+	boundaryProof := map[string]uint8{}
+	independentBoundary := func(o *ClassObject) bool {
 		if o == nil || !nativeProofWork(work, 1) {
 			return false
 		}
 		name := o.GetClassName()
-		if state := leafProof[name]; state != 0 {
+		if state := boundaryProof[name]; state != 0 {
 			return state == 2
 		}
-		leafProof[name] = 1
+		boundaryProof[name] = 1
 		parent, _, _, member := originalMemberOwner(o)
 		if !member {
 			return false
@@ -131,39 +132,21 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 			}
 		}
 
-		for _, a := range o.Attributes {
-			table, ok := a.(*InnerClassesAttribute)
-			if !ok {
-				continue
-			}
-			if table == nil {
-				return false
-			}
-			for _, row := range table.Classes {
-				if row == nil || !nativeProofWork(work, 1) || row.InnerNameIndex == 0 || row.OuterClassInfoIndex == 0 {
-					return false
-				}
-				owner, known := sourceBridgeClassName(o, row.OuterClassInfoIndex)
-				if !known || owner == name {
-					return false
-				}
-			}
-		}
-		leafProof[name] = 2
+		boundaryProof[name] = 2
 		return true
 	}
 	rootObject, rootKnown := load(root)
 	if !rootKnown {
 		return nil, false
 	}
-	leafMode := independentLeaf(rootObject)
+	independentMode := independentBoundary(rootObject)
 	// Missing external classes are external edges; missing an owned declaration
 	// after original InnerClasses/EnclosingMethod establishes ownership is not.
 	outermost := func(o *ClassObject) (string, bool) {
 		seen := map[string]bool{}
 		for len(seen) < 64 {
 			name := o.GetClassName()
-			if leafMode && independentLeaf(o) {
+			if independentMode && independentBoundary(o) {
 				return name, true
 			}
 			if seen[name] || !nativeProofWork(work, 1) {
@@ -207,7 +190,7 @@ func (z *JarFS) nativeMemberOriginalDependencyGraph(root string, work *workbudge
 		}
 		states[owner] = 1
 		object, known := load(owner)
-		if !known || !nativeMemberTopLevelEvidence(object, work) && !(leafMode && independentLeaf(object)) {
+		if !known || !nativeMemberTopLevelEvidence(object, work) && !(independentMode && independentBoundary(object)) {
 			return false
 		}
 		queue := []*ClassObject{object}

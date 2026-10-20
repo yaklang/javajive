@@ -8,10 +8,12 @@ import (
 )
 
 type nativeMemberTransaction struct {
-	once     sync.Once
-	owners   []string
-	snapshot map[string]string
-	entries  map[string]*nativeMemberCacheEntry
+	independent bool // only independently certified source boundaries
+	completed   bool // guarded by nativeMembersMu; entries immutable after completion
+	once        sync.Once
+	owners      []string
+	snapshot    map[string]string
+	entries     map[string]*nativeMemberCacheEntry
 }
 
 // Original self rows select the physical outermost source owner. Declaration
@@ -111,7 +113,16 @@ func (z *JarFS) nativeMemberTransactionEntry(obj *ClassObject) *nativeMemberCach
 }
 
 func (z *JarFS) loadNativeMemberTransaction(transaction *nativeMemberTransaction, owner string) *nativeMemberCacheEntry {
-	transaction.once.Do(func() { transaction.entries = z.buildNativeMemberTransaction(transaction.owners, transaction.snapshot) })
+	transaction.once.Do(func() {
+		if transaction.independent {
+			transaction.entries = z.buildNativeIndependentTransaction(transaction.owners, transaction.snapshot)
+		} else {
+			transaction.entries = z.buildNativeMemberTransaction(transaction.owners, transaction.snapshot)
+		}
+		z.nativeMembersMu.Lock()
+		transaction.completed = true
+		z.nativeMembersMu.Unlock()
+	})
 	return transaction.entries[owner]
 }
 
