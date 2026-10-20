@@ -2752,7 +2752,9 @@
     "TestAdversarialIndependentSourceTransactionRejectsLatePeerFailure": 2.9,
     "TestAdversarialIndependentSourceTransactionRequiresExactOriginalProtocol": 2.02,
     "TestAdversarialIndependentSourceTransactionRetainsPolicyAndOneReservation": 0.76,
-    "TestAdversarialIndependentStaticScopesKeepMutualDeclarationBinding": 6.98
+    "TestAdversarialIndependentStaticScopesKeepMutualDeclarationBinding": 6.98,
+    "TestAdversarialIndependentLeafCycleReadOrderAndConcurrency": 1.06,
+    "TestAdversarialIndependentLeafCycleRetainsOriginalCallbacksAndTypedPeers": 14.65
   },
   "source_runs": [
     37850493191,

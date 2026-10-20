@@ -3,8 +3,8 @@ package javaclassparser
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"github.com/yaklang/javajive/internal/workbudget"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -12,7 +12,7 @@ import (
 func TestNativeIndependentLeafGraphKeepsSourceBoundaries(t *testing.T) {
 	base := nativeCompileClasses(t, nativeIndependentLeafChainFixture)
 	nativeIndependentLeafChainInput(t, base)
-	for _, variant := range []string{"original", "ordinary graph", "missing root", "missing dependency", "missing dependency outer", "private root constructor", "farther static boundary", "wrong reciprocal flags", "cycle", "budget", "allocation", "canceled"} {
+	for _, variant := range []string{"original", "ordinary graph", "missing root", "missing dependency", "missing dependency outer", "private root constructor", "farther static boundary", "wrong reciprocal flags", "cycle", "cycle missing dependency", "cycle wrong reciprocal", "budget", "allocation", "canceled"} {
 		t.Run(variant, func(t *testing.T) {
 			files := map[string][]byte{}
 			for n, raw := range base {
@@ -54,11 +54,25 @@ func TestNativeIndependentLeafGraphKeepsSourceBoundaries(t *testing.T) {
 					}
 				}
 				files["LeafSupport.class"] = o.Bytes()
-			case "cycle":
-				fixture := strings.Replace(nativeIndependentLeafChainFixture, "class Leaf<T> extends LeafSupport.Base<T>{", "class Leaf<T> extends LeafSupport.Base<T>{LeafSupport.Base<T> peer;", 1)
-				fixture = strings.Replace(fixture, "class Base<T> extends LeafBase<T>{", "class Base<T> extends LeafBase<T>{LeafNamespace.Leaf<T> peer;", 1)
-				files = nativeCompileClasses(t, fixture)
+			case "cycle", "cycle missing dependency", "cycle wrong reciprocal":
+				files = nativeCompileClasses(t, independentLeafCycleFixture())
 				nativeIndependentLeafChainInput(t, files)
+				if variant == "cycle missing dependency" {
+					delete(files, "LeafSupport$Base.class")
+				}
+				if variant == "cycle wrong reciprocal" {
+					outer, _ := Parse(files["LeafSupport.class"])
+					for _, attr := range outer.Attributes {
+						if table, ok := attr.(*InnerClassesAttribute); ok {
+							for _, row := range table.Classes {
+								if name, _ := sourceBridgeClassName(outer, row.InnerClassInfoIndex); name == "LeafSupport$Base" {
+									row.InnerClassAccessFlags &^= 8
+								}
+							}
+						}
+					}
+					files["LeafSupport.class"] = outer.Bytes()
+				}
 			case "budget":
 				work = workbudget.New(nil, workbudget.Limits{MaxGraphScans: 1})
 			case "allocation":
@@ -71,6 +85,9 @@ func TestNativeIndependentLeafGraphKeepsSourceBoundaries(t *testing.T) {
 			z := nativeArchive(t, files)
 			defer z.Close()
 			graph, known := z.nativeMemberOriginalDependencyGraph(root, work)
+			if z.sourceOwnership.bytes != 0 {
+				t.Fatal("graph query published source")
+			}
 			if variant == "original" || variant == "cycle" {
 				if !known || len(graph) != 2 || graph["LeafNamespace$Leaf"] == nil || graph["LeafSupport$Base"] == nil || graph["LeafNamespace"] != nil || graph["LeafSupport"] != nil {
 					t.Fatalf("leaf dependency source identities: %v %v", graph, known)
@@ -81,8 +98,24 @@ func TestNativeIndependentLeafGraphKeepsSourceBoundaries(t *testing.T) {
 				if variant == "cycle" {
 					obj, _ := Parse(files[root+".class"])
 					entry := z.nativeMemberIndependentEntry(obj)
-					if entry != nil && entry.family != nil {
-						t.Fatal("cyclic leaf publication")
+					if entry == nil || entry.family == nil {
+						t.Fatal("complete cyclic leaf transaction was not recovered")
+					}
+					policy, _ := json.Marshal(snapshotJDECEnv())
+					a := z.nativeMembersCache["independent-static\x00LeafNamespace$Leaf\x00"+string(policy)]
+					b := z.nativeMembersCache["independent-static\x00LeafSupport$Base\x00"+string(policy)]
+					if a == nil || b == nil || a.transaction == nil || a.transaction != b.transaction || !a.transaction.completed || len(a.transaction.entries) != 2 {
+						t.Fatal("cycle published without a completed common transaction")
+					}
+					var size int64
+					for _, result := range a.transaction.entries {
+						if result.family == nil || result.family.independentRoot == nil || result.family.lexicalObjects["LeafNamespace"] != nil || result.family.lexicalObjects["LeafSupport"] != nil {
+							t.Fatal("peer declaration borrowed an original outer/private scope")
+						}
+						size += int64(len(result.source))
+					}
+					if size != z.nativeMembersBytes || size != z.sourceOwnership.bytes {
+						t.Fatal("completed component was not reserved once")
 					}
 				}
 			} else if variant == "ordinary graph" {
@@ -92,14 +125,22 @@ func TestNativeIndependentLeafGraphKeepsSourceBoundaries(t *testing.T) {
 			} else if known {
 				t.Fatal("incomplete/foreign/resource graph admitted")
 			}
-			if variant != "original" && variant != "ordinary graph" && z.sourceOwnership.bytes != 0 {
-				t.Fatal("graph query published source")
+			if variant == "cycle missing dependency" || variant == "cycle wrong reciprocal" {
+				obj, _ := Parse(files[root+".class"])
+				if result := z.nativeMemberIndependentEntry(obj); result != nil || z.sourceOwnership.bytes != 0 {
+					t.Fatal("unclosed cycle published source")
+				}
 			}
 		})
 	}
 }
 func TestNativeIndependentLeafSourceReadOrderAndConcurrency(t *testing.T) {
-	files := nativeCompileClasses(t, nativeIndependentLeafChainFixture)
+	testIndependentLeafReadOrderAndConcurrency(t, nativeIndependentLeafChainFixture)
+}
+
+func testIndependentLeafReadOrderAndConcurrency(t *testing.T, fixture string) {
+	t.Helper()
+	files := nativeCompileClasses(t, fixture)
 	nativeIndependentLeafChainInput(t, files)
 	var expected map[string][]byte
 	for _, order := range [][]string{{"LeafNamespace$Leaf", "LeafSupport$Base"}, {"LeafSupport$Base", "LeafNamespace$Leaf"}} {
