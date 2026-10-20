@@ -119,8 +119,8 @@ class TestExecutionEventMapping(unittest.TestCase):
     def test_ci_summary_requires_every_source_shard(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         source, summary = workflow.split("  regression:\n", 1)
-        self.assertRegex(source, r"shard:\s*\[0,\s*1,\s*2,\s*3,\s*4,\s*5,\s*6,\s*7,\s*8,\s*9\]")
-        self.assertIn('SOURCE_SHARDS: "10"', source)
+        self.assertRegex(source, r"shard:\s*\[0,\s*1,\s*2,\s*3,\s*4,\s*5,\s*6,\s*7,\s*8,\s*9,\s*10,\s*11\]")
+        self.assertIn('SOURCE_SHARDS: "12"', source)
         self.assertIn("fail-fast: false", source)
         self.assertIn("needs: [source]", summary)
         self.assertIn("if: always()", summary)
