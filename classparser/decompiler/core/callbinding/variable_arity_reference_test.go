@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"slices"
 	"testing"
 
 	"github.com/yaklang/javajive/internal/workbudget"
@@ -191,5 +192,30 @@ func TestVariableArityReferenceMatchesIndependentHierarchyDepthModel(t *testing.
 				t.Fatalf("world=%d depth=%d argument=%d original=%s want=%s plan=%+v", world, depth, arg, candidate.Desc, want, plan)
 			}
 		}
+	}
+}
+
+// Expected physical ports come from an independent closed-form invocation
+// model, while the real compiler family tests check actual adapter descriptors.
+func TestVariableArityReferenceReturnsProvedExpandedInputPorts(t *testing.T) {
+	for _, tc := range []struct {
+		name, target, sam string
+		ports             []string
+	}{
+		{"reference widening", "([Lx/A;)V", "(Lx/B;)V", []string{"Lx/A;"}},
+		{"primitive widening", "([D)V", "(I)V", []string{"D"}},
+		{"boxing", "([Ljava/lang/Object;)V", "(I)V", []string{"Ljava/lang/Object;"}},
+		{"unboxing", "([I)V", "(Ljava/lang/Integer;)V", []string{"I"}},
+		{"unboxing widening", "([J)V", "(Ljava/lang/Byte;)V", []string{"J"}},
+		{"fixed and two component ports", "(J[Ljava/lang/Object;)V", "(JLjava/lang/String;I)V", []string{"J", "Ljava/lang/Object;", "Ljava/lang/Object;"}},
+		{"empty tail", "(J[I)V", "(J)V", []string{"J"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider, _ := variableArityTestProvider([]Method{variableArityTestMethod(tc.target, true)})
+			plan := SelectVariableArityReference(Witness{Owner: "x/Owner", Name: "write", Desc: tc.target, Kind: Virtual}, tc.sam, provider, nil)
+			if !plan.Supported || !slices.Equal(plan.ExpandedParameters, tc.ports) {
+				t.Fatalf("proved ports=%+v want %v", plan, tc.ports)
+			}
+		})
 	}
 }

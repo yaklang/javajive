@@ -14,10 +14,15 @@ import (
 // compiler-metadata permission. Those independent obligations remain at the
 // original factory. In particular, an array-pack body is not an overload proof.
 type VariableArityReferencePlan struct {
-	DeclaringOwner string
-	Supported      bool
-	Reason         string
-	Selected       Method
+	// ExpandedParameters are the chosen non-generic declaration's physical
+	// fixed and component ports, after each notional SAM input has passed
+	// the variable-arity phase's invocation conversion. They grant no
+	// result adaptation or original compiler/factory permission.
+	ExpandedParameters []string
+	DeclaringOwner     string
+	Supported          bool
+	Reason             string
+	Selected           Method
 }
 
 type variableArityCandidate struct {
@@ -60,7 +65,7 @@ func SelectVariableArityReference(w Witness, sam string, provider Provider, work
 		return reject("bound instance reference required")
 	}
 	arguments, _, err := Descriptor(sam)
-	if err != nil {
+	if err != nil || len(arguments) > 255 {
 		return reject("invalid instantiated SAM descriptor")
 	}
 	if _, _, err := Descriptor(w.Desc); err != nil {
@@ -198,6 +203,15 @@ func SelectVariableArityReference(w Witness, sam string, provider Provider, work
 	if !q.charge(1) {
 		return reject("source binding budget exhausted")
 	}
+	selected := applicable[winner]
+	if !q.charge(int64(len(arguments))+1) || !q.allocate(int64(len(arguments))*32+64) {
+		return reject("expanded input port budget exhausted")
+	}
+	ports := make([]string, len(arguments))
+	for i := range ports {
+		ports[i] = selected.variableParameter(i)
+	}
+	out.ExpandedParameters = ports
 	out.Supported, out.Selected, out.DeclaringOwner = true, applicable[winner].method, applicable[winner].owner
 	return out
 }

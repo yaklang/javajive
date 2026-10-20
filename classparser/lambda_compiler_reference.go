@@ -395,7 +395,7 @@ func (c *ClassObjectDumper) proveCompilerVarargsReference(name, descriptor strin
 		return nil
 	}
 	actualParameters, actualResult, err := callbinding.Descriptor(site.actual)
-	if err != nil || !slices.Equal(actualParameters, shape.parameters[1:]) || actualResult != shape.result {
+	if err != nil || len(actualParameters) != len(shape.parameters)-1 || actualResult != shape.result {
 		return nil
 	}
 	receiver, ok := values.UnpackSoltValue(captured[0]).(*values.JavaRef)
@@ -407,7 +407,13 @@ func (c *ClassObjectDumper) proveCompilerVarargsReference(name, descriptor strin
 		kind = callbinding.Interface
 	}
 	plan := callbinding.SelectVariableArityReference(callbinding.Witness{Owner: shape.member.Name, Name: shape.member.Member, Desc: shape.member.Description, Kind: kind}, site.actual, c.compilerReferenceAccessProvider(ctx.InvocationMetadata), c.Work)
-	if !plan.Supported || !c.compilerReferenceOriginalAccess(shape, plan) || !plan.Selected.ExceptionsKnown || len(plan.Selected.Exceptions) != 0 || !class_context.PreservesJava8Identifier(shape.member.Member) {
+	// Javac's reference adapter takes the selected declaration's erased fixed
+	// and expanded component ports, not necessarily the instantiated SAM types.
+	// The binding certificate proves each invocation conversion; the independently
+	// verified original pack must consume exactly those physical ports. Writing
+	// :: leaves those conversions in the metafactory's invocation phase, so a
+	// nullable boxed input is not evaluated/unboxed at factory creation.
+	if !plan.Supported || !slices.Equal(plan.ExpandedParameters, shape.parameters[1:]) || !c.compilerReferenceOriginalAccess(shape, plan) || !plan.Selected.ExceptionsKnown || len(plan.Selected.Exceptions) != 0 || !class_context.PreservesJava8Identifier(shape.member.Member) {
 		return nil
 	}
 	target := c.compilerReferenceFunctionalTarget(site, ctx)

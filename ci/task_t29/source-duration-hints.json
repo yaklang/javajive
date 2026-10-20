@@ -2708,7 +2708,11 @@
     "TestWrapUncaughtGetConstructorSkipsReturn": 0.05,
     "TestWrapUncaughtGetConstructorSkipsThisCall": 0.05,
     "TestZxingEnumArraySpillFoldRejectsReorderedOrEffectfulShapes": 0,
-    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.71
+    "TestZxingEnumMultipleSpilledArrayArgumentsRoundTrip": 2.71,
+    "TestAdversarialVarargsReferenceEntryConversionsPreserveInvocationBoundary": 35.47,
+    "TestAdversarialPlatformBoxingCarriersHaveCompleteOriginalDeclarations": 0.05,
+    "TestAdversarialVarargsEntryConversionBankPreservesNullAndRawInvocationBoundaries": 27.5,
+    "TestAdversarialUnrepresentableLambdaSourceCannotPublishPlaceholder": 0.94
   },
   "source_runs": [
     37850493191,

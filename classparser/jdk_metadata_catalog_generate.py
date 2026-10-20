@@ -194,6 +194,14 @@ def functional_roots(source, prefix):
     return sorted(roots)
 
 
+def primitive_wrapper_roots():
+    # All language boxing carriers need real source-denotability and member
+    # declarations. Selection is by the Java primitive family, never an input
+    # application name; profile() reads each exact original platform classfile.
+    return ['java/lang/' + name for name in
+            ('Boolean', 'Byte', 'Short', 'Character', 'Integer', 'Long', 'Float', 'Double', 'Void')]
+
+
 def profile(release, archive, prefix, jdk_version, modules=()):
     with PlatformArchives([archive, *modules]) as source:
         classes, provenance = {}, {}
@@ -228,7 +236,7 @@ def profile(release, archive, prefix, jdk_version, modules=()):
                  'org/xml/sax/ext/LexicalHandler', 'org/xml/sax/XMLReader']
         if release >= 16:
             roots.append('java/lang/Record')
-        roots = sorted(set(roots + functional_roots(source, prefix)))
+        roots = sorted(set(roots + primitive_wrapper_roots() + functional_roots(source, prefix)))
         pending = list(roots)
         while pending:
             name = pending.pop(0)

@@ -110,6 +110,9 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 			}
 			val, err := f(static...)(d, sim, resultType, req.DynamicArgs...)
 			if err != nil {
+				if errors.Is(err, ErrLambdaSourceUnsupported) {
+					return unsupportedLambdaSource(req, err.Error())
+				}
 				if errors.Is(err, errFixedLambdaParameterTarget) {
 					return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, err.Error(), resultType)
 				}
@@ -119,6 +122,9 @@ func t19LambdaAdapter(req CallSiteRequest, d *Decompiler, sim StackSimulation, r
 		}
 		val, err := t19InlineLambda(req, d, static, impl, capturedEval, resultType)
 		if err != nil {
+			if errors.Is(err, ErrLambdaSourceUnsupported) {
+				return unsupportedLambdaSource(req, err.Error())
+			}
 			if errors.Is(err, errFixedLambdaParameterTarget) {
 				return unsupportedDispatch(req, FamilyLambda, DiagBootstrapUnknown, err.Error(), resultType)
 			}

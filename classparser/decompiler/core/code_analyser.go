@@ -4214,6 +4214,12 @@ func (d *Decompiler) calcOpcodeStackInfo(runtimeStackSimulation StackSimulation,
 		}
 		rep := DispatchInvokeDynamic(req, d, runtimeStackSimulation, resultType)
 		d.BootstrapReports = append(d.BootstrapReports, rep)
+		// Unsupported metadata can describe a valid bootstrap while the
+		// qualified callback supplies no usable source value. Keep the
+		// report and stop this body; never manufacture an expression.
+		if rep.Status == "unsupported" && rep.Value == nil {
+			return fmt.Errorf("unsupported_source: %s", rep.Reason)
+		}
 		if rep.Status == "invalid_input" {
 			if resultType.String(funcCtx) != types.NewJavaPrimer(types.JavaVoid).String(funcCtx) {
 				runtimeStackSimulation.Push(rep.Value)
