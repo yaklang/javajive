@@ -2712,7 +2712,12 @@
     "TestAdversarialVarargsReferenceEntryConversionsPreserveInvocationBoundary": 35.47,
     "TestAdversarialPlatformBoxingCarriersHaveCompleteOriginalDeclarations": 0.05,
     "TestAdversarialVarargsEntryConversionBankPreservesNullAndRawInvocationBoundaries": 27.5,
-    "TestAdversarialUnrepresentableLambdaSourceCannotPublishPlaceholder": 0.94
+    "TestAdversarialUnrepresentableLambdaSourceCannotPublishPlaceholder": 0.94,
+    "TestAdversarialVarargsResultConversionBankPreservesTypedInvocationFrontier": 52.28,
+    "TestAdversarialVarargsResultsPreserveBehaviorThroughBothPublicModes": 18.4,
+    "TestNativeVarargsResultConversionRequiresOriginalExecutableTail": 0.52,
+    "TestAdversarialVarargsReferenceResultsPreserveOriginalReturnConversions": 23.92,
+    "TestAdversarialVarargsPrimitiveResultMatrixMatchesBothOriginalCompilers": 22.69
   },
   "source_runs": [
     37850493191,

@@ -185,16 +185,9 @@ func (c *ClassObjectDumper) originalVarargsAdapterShape(method *MemberInfo) (*la
 		return nil, false
 	}
 	index++
-	if result == "V" && returned != "V" {
-		pop := core.OP_POP
-		if returned == "J" || returned == "D" {
-			pop = core.OP_POP2
-		}
-		if index >= len(ops) || ops[index].Instr.OpCode != pop || len(ops[index].Data) != 0 {
-			return nil, false
-		}
-		index++
-	} else if result != returned {
+	var resultClosed bool
+	index, resultClosed = c.originalVarargsResultConversion(code, ops, index, returned, result)
+	if !resultClosed {
 		return nil, false
 	}
 	ret := core.OP_RETURN
