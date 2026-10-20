@@ -2731,7 +2731,10 @@
     "TestAdversarialInstanceNestedLambdaKeepsPhysicalCaptureEntry": 60.22,
     "TestAdversarialSharedRetryTailKeepsShortCircuitAndLocalBoolean": 2.42,
     "TestAdversarialReflectiveLambdaArrayKeepsCaptureAndFailureFrontiers": 26.89,
-    "TestAdversarialLateNullLambdaCaptureKeepsDescriptorOverloads": 3.83
+    "TestAdversarialLateNullLambdaCaptureKeepsDescriptorOverloads": 3.83,
+    "TestAdversarialNullSingletonCaptureKeepsPhysicalDescriptor": 25.16,
+    "TestAdversarialNullableCaptureKeepsAllReferenceValues": 19.55,
+    "TestAdversarialNullReferenceCaptureKeepsDescriptorKinds": 55.55
   },
   "source_runs": [
     37850493191,

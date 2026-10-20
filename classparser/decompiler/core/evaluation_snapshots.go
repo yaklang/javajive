@@ -62,6 +62,13 @@ func (d *Decompiler) refreshReferenceOperandSnapshotTypes() bool {
 			if !snapshot.Operand || snapshot.Ref == nil {
 				continue
 			}
+			if _, target, known := snapshot.Ref.OriginalDynamicOperandSourceView(snapshot.Value); known {
+				if !reflect.DeepEqual(snapshot.Ref.Type().RawType(), target.RawType()) {
+					snapshot.Ref.ResetVarType(target.Copy())
+					changed = true
+				}
+				continue
+			}
 			// Constant propagation has proved this operand to be null; the
 			// snapshot may adopt its call-site reference descriptor without a
 			// CHECKCAST. Preserve that capture type in the inlined lambda body

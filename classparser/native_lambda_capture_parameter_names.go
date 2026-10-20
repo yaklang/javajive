@@ -177,7 +177,13 @@ func (c *ClassObjectDumper) bindNativeLambdaCaptureParameterNames(v values.JavaV
 			// This is the retained, single-assignment dynamic operand copy.
 			// Its RHS remains a distinct original local binder, so final does
 			// not turn a primitive/String literal into a new constant capture.
-			seed, known := nativeMemberEnclosingUnpack(declaration.JavaValue, c.Work)
+			original := declaration.JavaValue
+			if owner, ok := declaration.LeftValue.(*values.JavaRef); ok {
+				if view, _, known := owner.OriginalDynamicOperandSourceView(owner.Val); known && original == view {
+					original = owner.Val
+				}
+			}
+			seed, known := nativeMemberEnclosingUnpack(original, c.Work)
 			local, typed := seed.(*values.JavaRef)
 			if !known || !typed || local == nil || local.Id == nil || local.Id == ref.Id {
 				return false

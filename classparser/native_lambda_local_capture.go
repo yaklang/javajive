@@ -259,7 +259,12 @@ func nativeLambdaReferenceSingleStoreSource(operand *nativeEnumSelectorProducer,
 	}
 	localType, localKnown := values.SourceTypeErasure(ref.Type(), ctx)
 	snapshotType, snapshotKnown := values.SourceTypeErasure(snapshot.Type(), ctx)
-	if !localKnown || !snapshotKnown || !assignable(localType, snapshotType) || !assignable(snapshotType, operand.result) {
+	nullView := false
+	if view, target, known := snapshot.OriginalDynamicOperandSourceView(snapshot.Val); known {
+		viewed, typed := values.SourceTypeErasure(target, ctx)
+		nullView = typed && viewed == snapshotType && values.IsNullLiteral(view)
+	}
+	if !localKnown || !snapshotKnown || !(nullView && callbinding.Reference(localType) || assignable(localType, snapshotType)) || !assignable(snapshotType, operand.result) {
 		return false
 	}
 	seed, known := nativeMemberEnclosingUnpack(ref.Val, work)
